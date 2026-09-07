@@ -49,6 +49,7 @@ pub fn enumerate_candidates<'a>(
     // accession merely starting with the bare prefix is NOT a decoy); the suffix
     // form recognizes externally-built decoys (e.g. quantms "<orig>_rev").
     let suffix = idx.decoy_suffix.clone();
+    let require_sequon = params.require_nxst_sequon;
     idx.db
         .proteins
         .iter()
@@ -58,6 +59,17 @@ pub fn enumerate_candidates<'a>(
                 is_decoy_accession_affix(&protein.accession, decoy_prefix, suffix.as_deref());
             enumerate_protein(protein, p_idx, is_decoy, params).into_iter()
         })
+        .filter(move |c| !require_sequon || candidate_has_nxst_sequon(c))
+}
+
+/// The glyco path's sequon membership test (`glyco_search::GlycoCtxOwned::build`):
+/// an internal N-X-S/T, or one completed by the residue after the peptide.
+/// Kept in one place so `SearchParams::require_nxst_sequon` can never admit a
+/// different candidate set than the scorer would use.
+pub fn candidate_has_nxst_sequon(c: &Candidate) -> bool {
+    use andes_glyco::sequon::{boundary_nxst_site, has_nxst_sequon};
+    let res: Vec<u8> = c.peptide.residues.iter().map(|aa| aa.residue).collect();
+    has_nxst_sequon(&res) || boundary_nxst_site(&res, c.peptide.post).is_some()
 }
 
 fn enumerate_protein(

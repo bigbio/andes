@@ -8,13 +8,14 @@ use std::thread;
 
 use crate::cli::{
     CandidateIndexFlag, Cli, EnzymeSpecificity, EthcdActivationFlag, Fragmentation,
-    GlycoIsotopeFlag, Protocol, ScoreFlag,
+    GlycoIsotopeFlag, PrecursorMonoFlag, Protocol, ScoreFlag,
 };
 use crate::glyco_run::run_glyco;
 use crate::model_select::{
     cli_fragment_tol_override, default_aa_set_with_tag, load_param_from_store, parse_enzymes,
     resolve_metadataless_selection, warn_if_universal_protease_combo,
 };
+use crate::mono::{correct_chunk, MonoDump, MonoStats};
 use crate::rescore;
 use crate::spectra::{
     detect_dominant_activation, detect_instrument_type_for_path, detect_isobaric_sampled,
@@ -31,6 +32,7 @@ use model::{
 };
 use scoring_crate::RankScorer;
 use search::candidate_index::index_cache_path;
+use search::precursor_mono::{MonoCorrection, MonoParams};
 use search::{
     apply_shift_for_mode, apply_tightened_precursor_tolerance, PrecursorCalMode, PreparedSearch,
     SearchIndex, SearchParams, TopNQueue,
@@ -449,6 +451,59 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     params.chimeric = chimeric_active;
+    // `--glyco-index-sequon-only`: glyco-only index shrink (see the flag's doc).
+    if cli.glyco_index_sequon_only && !cli.glyco {
+        return Err(
+            "--glyco-index-sequon-only requires --glyco (the standard peptide \
+                    search scores every candidate)"
+                .into(),
+        );
+    }
+    params.require_nxst_sequon = cli.glyco && cli.glyco_index_sequon_only;
+    if params.require_nxst_sequon {
+        eprintln!(
+            "candidate index: N-X-S/T sequon-bearing peptides only (--glyco-index-sequon-only)"
+        );
+    }
+    // `--precursor-mono auto`: MS1 isotope-envelope precursor correction. Glyco
+    // only (the standard path's -1..2 sweep and PIN are untouched), and it needs
+    // MS1, so mzML or Thermo `.raw`; anywhere else it is inert and says so. When
+    // active the input is streamed with its MS1 link exactly like `--chimeric`
+    // and each chunk's precursors are corrected BEFORE they reach the search.
+    let mono_active =
+        cli.precursor_mono == PrecursorMonoFlag::Auto && cli.glyco && (is_mzml || is_raw);
+    if cli.precursor_mono == PrecursorMonoFlag::Auto && !mono_active {
+        eprintln!(
+            "WARN: --precursor-mono auto needs --glyco and an input with MS1 (mzML or Thermo \
+             .raw); the input is {} — precursors are left as recorded.",
+            if !cli.glyco {
+                "searched without --glyco".to_string()
+            } else {
+                spectrum_path.display().to_string()
+            }
+        );
+    }
+    let mono_params = MonoParams {
+        max_shift: cli.precursor_mono_max_shift,
+        tol_ppm: cli.precursor_mono_tol_ppm,
+        min_fit: cli.precursor_mono_min_fit,
+        min_gain: cli.precursor_mono_min_gain,
+        min_snr: cli.precursor_mono_min_snr,
+        backoff: cli.precursor_mono_backoff,
+        ..MonoParams::default()
+    };
+    if mono_active {
+        eprintln!(
+            "precursor-mono: auto (max shift {}, min fit {:.2}, min gain {:.2}, min SNR {:.1}, \
+             {} ppm, back-off {})",
+            mono_params.max_shift,
+            mono_params.min_fit,
+            mono_params.min_gain,
+            mono_params.min_snr,
+            mono_params.tol_ppm,
+            mono_params.backoff
+        );
+    }
     // Fallback isolation half-width (Da) used only when the file omits per-scan
     // isolation offsets; a fixed sensible default (was the --isolation-halfwidth flag).
     params.chimeric_isolation_halfwidth_da = 1.5;
@@ -985,8 +1040,26 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // bounded to ~CHUNK_SIZE spectra (NOT the whole file). The parser runs on a
     // dedicated thread so chunk N+1 parses while chunk N scores. The streaming
     // pipeline in the `else` branch handles the (default) non-chimeric path.
-    let chimeric_input = chimeric_active;
+    let ms1_input = chimeric_active || mono_active;
     let mut parse_stats = ParseStats::default();
+    // `--precursor-mono`: one entry per accumulated spectrum (aligned with
+    // `all_spectra`); stays empty when the flag is off.
+    let mut mono_table: Vec<Option<MonoCorrection>> = Vec::new();
+    let mut mono_stats = MonoStats::default();
+    let mut mono_dump: Option<MonoDump> = match (&cli.precursor_mono_dump, mono_active) {
+        (Some(p), true) => Some(
+            MonoDump::create(p, mono_params.max_shift)
+                .map_err(|e| format!("create --precursor-mono-dump {}: {e}", p.display()))?,
+        ),
+        (Some(p), false) => {
+            eprintln!(
+                "WARN: --precursor-mono-dump {} ignored: the correction is not active.",
+                p.display()
+            );
+            None
+        }
+        (None, _) => None,
+    };
 
     for (file_idx, input_path) in spectrum_paths.iter().enumerate() {
         if bench_mode && all_spectra.len() >= bench_cap {
@@ -1014,15 +1087,20 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        if chimeric_input && !(file_is_mzml || file_is_raw) {
+        if ms1_input && !(file_is_mzml || file_is_raw) {
             return Err(format!(
-                "--chimeric only supports mzML/.raw inputs, got {}",
+                "{} only supports mzML/.raw inputs, got {}",
+                if chimeric_active {
+                    "--chimeric"
+                } else {
+                    "--precursor-mono"
+                },
                 input_path.display()
             )
             .into());
         }
 
-        let file_stats = if chimeric_input {
+        let file_stats = if ms1_input {
             let (tx, rx) = sync_channel::<(Vec<Spectrum>, Ms1Link)>(2);
             let spectrum_path = input_path.clone();
             let cap = remaining_cap;
@@ -1069,19 +1147,40 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(prefix) = &title_prefix {
                     prefix_spectrum_titles(&mut chunk_spectra, prefix);
                 }
+                // `--precursor-mono`: correct precursors from the linked MS1
+                // BEFORE anything scores the chunk, so every consumer (the glyco
+                // driver, the PIN's ExpMass) sees the corrected m/z.
+                if mono_active {
+                    correct_chunk(
+                        &mut chunk_spectra,
+                        &chunk_link,
+                        &mono_params,
+                        &mut mono_table,
+                        &mut mono_stats,
+                        mono_dump.as_mut(),
+                    )
+                    .map_err(|e| format!("write --precursor-mono-dump: {e}"))?;
+                }
                 let offset = all_spectra.len();
-                let mut queues = prepared.run_chunk(&chunk_spectra, offset);
-                search::match_engine::run_pass2_coisolation(
-                    &prepared,
-                    &chunk_spectra,
-                    &mut queues,
-                    &params,
-                    &chunk_link,
-                    offset,
-                );
+                if chimeric_active {
+                    let mut queues = prepared.run_chunk(&chunk_spectra, offset);
+                    search::match_engine::run_pass2_coisolation(
+                        &prepared,
+                        &chunk_spectra,
+                        &mut queues,
+                        &params,
+                        &chunk_link,
+                        offset,
+                    );
+                    all_queues.extend(queues);
+                } else if !cli.glyco {
+                    // Unreachable today (`mono_active` implies `--glyco`), kept so
+                    // an MS1-linked stream never silently skips the peptide search.
+                    let queues = prepared.run_chunk(&chunk_spectra, offset);
+                    all_queues.extend(queues);
+                }
                 file_offset += chunk_spectra.len();
                 ms1_linked += chunk_link.ms1_peaks.len();
-                all_queues.extend(queues);
                 for mut spec in chunk_spectra.into_iter() {
                     // Peaks are normally dropped post-scoring to bound memory
                     // (only the metadata is needed downstream). Under `--refine`
@@ -1098,14 +1197,19 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
             let (err_count, first_errors) = parser_handle
                 .join()
-                .map_err(|_| "chimeric parser thread panicked".to_string())??;
+                .map_err(|_| "MS1-linked parser thread panicked".to_string())??;
             eprintln!(
-                "chimeric mode: streamed {} MS2 spectra ({} MS1 scans linked) from {}",
+                "{}: streamed {} MS2 spectra ({} MS1 scans linked) from {}",
+                if chimeric_active {
+                    "chimeric mode"
+                } else {
+                    "precursor-mono"
+                },
                 file_offset,
                 ms1_linked,
                 input_path.display()
             );
-            log_rss("after_chimeric_stream_search");
+            log_rss("after_ms1_linked_stream_search");
             ParseStats {
                 error_count: err_count,
                 first_errors,
@@ -1252,6 +1356,53 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // in the default `Ram` mode, where candidates already live there).
     prepared.sync_materialized_candidates();
 
+    // No MS1 reached the correction (an MS2-only mzML, or no charges): nothing was
+    // fitted, so the PIN keeps its flag-off schema — "byte-identical when no MS1 is
+    // available" (bigbio/andes#64) holds for the file, not just the format.
+    let mono_active = mono_active && {
+        if mono_stats.fitted == 0 {
+            eprintln!(
+                "WARN: --precursor-mono auto: no MS2 could be fitted ({} MS2 seen, none with \
+                 a linked MS1 and a known charge); precursors are left as recorded and the \
+                 glyco PIN carries no Mono columns.",
+                mono_stats.seen
+            );
+            if let Some(d) = mono_dump.take() {
+                d.finish()
+                    .map_err(|e| format!("flush --precursor-mono-dump: {e}"))?;
+            }
+            mono_table.clear();
+        }
+        mono_stats.fitted > 0
+    };
+    if mono_active {
+        let hist: Vec<String> = mono_stats
+            .by_shift
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter(|(_, &n)| n > 0)
+            .map(|(k, n)| format!("{k}:{n}"))
+            .collect();
+        eprintln!(
+            "precursor-mono: {} of {} MS2 fitted (linked MS1 + known charge), {} shifted \
+             down [shift:count {}]",
+            mono_stats.fitted,
+            mono_stats.seen,
+            mono_stats.shifted(),
+            if hist.is_empty() {
+                "-".to_string()
+            } else {
+                hist.join(" ")
+            }
+        );
+        if let Some(d) = mono_dump.take() {
+            d.finish()
+                .map_err(|e| format!("flush --precursor-mono-dump: {e}"))?;
+        }
+        debug_assert_eq!(mono_table.len(), all_spectra.len());
+    }
+
     // Downstream code uses these names.
     let spectra = all_spectra;
     let mut queues = all_queues;
@@ -1287,6 +1438,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             spectrum_paths,
             &target_db,
             detected_activation_instrument,
+            if mono_active {
+                Some(mono_table.as_slice())
+            } else {
+                None
+            },
             t_total,
         )?;
         return Ok(());

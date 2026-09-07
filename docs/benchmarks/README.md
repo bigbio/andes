@@ -256,6 +256,96 @@ regenerated 2026-09-06 (on the previous list the corrected figure is 95.2%). Bac
 columns — confirmed, coverage, same-scan backbone — were never affected. andes accepts 7,122
 spectra of which roughly 3,800–4,500 are in neither reference at a measured 1.13% FDP.
 
+### Precursor mono-correction A/B (`--precursor-mono`, issue #64)
+
+The firmware records a class of wide, high-mass glycopeptide envelopes on an M+3..M+6
+isotopologue instead of the monoisotope. On this fraction 153 of 3,824 mass-resolvable
+pGlyco2 reference scans sit above the default `0..2` window (88 of them at exactly +4),
+and widening the window is not a fix: every extra offset is mass-degenerate with a glycan
+composition change, so arms C and D of #64 piled hundreds of arbitrary compositions onto
+the largest allowed offset. `--precursor-mono auto` instead reads the preceding MS1,
+fits the observed envelope at the reported charge against a glycopeptide isotope model
+under "the recorded precursor is M+k" (k = 0..6), and moves the precursor down by
+k−1 isotopes when a k > 0 clearly wins (the sweep's +1 takes the last step, so an
+overshoot cannot lose the true mass); the window stays `0..2`.
+
+**Measured 2026-09-07, one session, one binary, one database, one Percolator seed** (this
+commit; 4-thread, 16 GB sandbox VM; native `.raw`; Percolator 3.7.1 `--seed 42 -Y`;
+the gated NeuGc default, 852 compositions). The 16 GB host cannot hold the full
+candidate index (~27 GB, killed at the cgroup limit twice), so **both arms ran with
+`--glyco-index-sequon-only`** (3.2 M sequon-bearing candidates, 3.4 GB; peak RSS
+11.5 GB). The glyco scorer never reads a non-sequon candidate, and arm B reproduces the
+full-index quick-tier row above to within Percolator seed noise (42,108 glyco rows in
+both; 7,109 vs 7,122 glycoPSMs; 3,361 vs 3,362 pGlyco2 confirmed; 2,669 vs 2,669
+MSFragger confirmed; 96.3% vs 96.3% peptidoform agreement; 37 vs 38 entrapment hits),
+so the two arms are comparable with each other and, within seed noise, with the table
+above. Measured directly on a 1,500-protein subset (8,000 spectra, same binary): the
+sequon-only index writes the same 7,113 rows with the same peptides and labels as the
+full index; 16 rows (0.2%) differ in `RawScore`/`CandidateRankEntropy` only, and the
+flag-off binary is byte-identical to `main`.
+
+| | B: `--precursor-mono off` | **E: `--precursor-mono auto`** | #64 acceptance |
+|---|---:|---:|---|
+| search wall (4 threads) | 9,561 s | 9,730 s (+1.8%; envelope fit itself is ~20 s) | — |
+| MS2 shifted before search | 0 | **447 of 45,905** (shift 1:106 2:37 3:202 4:74 5:28) | — |
+| glycoPSMs @1% | 7,109 | **7,225** (+116) | — |
+| **true FDP** (1:1 database) | 1.10% (37 hits; CI 0.78–1.52%) | **0.91%** (31 hits; CI 0.62–1.29%) | inside B's CI ✔ |
+| pGlyco2 confirmed (3,877) | 3,361 (86.7%) | **3,444 (88.8%)** | ≥ 3,386 ✔ |
+| reference spectra gained / lost vs B | — | **+89 / −6** (all 6 lost are FDR-rejected, right answer emitted) | fewer than arm D's 64 flips ✔ |
+| MSFragger confirmed (3,040) | 2,669 (87.8%) | **2,746 (90.3%)** | — |
+| same-scan peptidoform agreement vs pGlyco2 / MSFragger | 96.3% / 95.7% | **96.8% / 95.9%** | ≥ 96.3% ✔ |
+| the 84 target spectra | 0 confirmed (46 wrong target, 38 decoy) | **69 confirmed**, 5 FDR-rejected, 6 wrong target, 4 decoy | — |
+| the 62 targets at +4 | 0 | **55 confirmed** + 4 FDR-rejected (59 emitted right) | ≥ 58 confirmed: **55**, short by 3 |
+| accepted PSMs by effective offset (shift + `isotope_error`) | +0 5,332 · +1 1,347 · +2 430 | +0 5,325 · +1 1,337 · +2 402 · **+3 16 · +4 80 · +5 50 · +6 15** | no pile-up at the largest offset ✔ |
+| HexNAc3 share at +0 / at the corrected tiers | 5.4% / — | 5.5% / **1.2% at +4, 0% at +5 and +6** (arm D: 79% at +4) | matches the offset-0 population ✔ |
+| reference coverage of the corrected tiers | — | +4: 71 of 80 in pGlyco2 (89%); +5: 15 of 50; +6: 4 of 15; **0 entrapment hits** in all of +3..+6 | — |
+
+**What the +4 tier is.** 80 accepted PSMs, 71 of them pGlyco2 reference spectra and 47
+MSFragger's, no entrapment hit, 1.2% HexNAc3 — the real firmware-failure population, not
+the offset-0 population shifted. The +5 and +6 tiers are small (50 and 15) and clean
+(0 entrapment, 0% HexNAc3). There is no pile-up: the largest allowed shift carries 15
+PSMs, against 613 and 735 for arms C and D.
+
+**Where it falls short.** The strict "≥ 58 of 62 at +4 confirmed" criterion lands at 55:
+four more have the right peptidoform emitted but q slightly above 1% (they are searched at
+`isotope_error = 1` because of the back-off, and a corrected scan's mass-error columns are
+computed one isotope from the searched mono), and three lose the collapse. Arms C and D
+reached 58 by widening the window, at the cost of the degenerate tiers above. The
+offline envelope fit alone reaches 85 of the 88 reference scans at +4 (below).
+
+**Offline validation of the corrector** (`--precursor-mono-dump`, 23 s for the file, no
+search). For every pGlyco2 reference scan the true offset is the integer k that makes
+recorded − (peptide + Cam-C + Ox-M + glycan) an isotope multiple. Best-fitting
+hypothesis vs true offset, 3,824 resolvable scans:
+
+| true offset | n | fit picks 0 | picks 1 | picks 2 | picks 3 | picks 4 | picks 5 | picks 6 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| −1 | 30 | 25 | 3 | 2 | 0 | 0 | 0 | 0 |
+| 0 | 3,488 | 3,459 | 26 | 1 | 0 | 1 | 0 | 1 |
+| 1 | 158 | 9 | 137 | 11 | 0 | 1 | 0 | 0 |
+| 2 | 25 | 0 | 1 | 22 | 1 | 1 | 0 | 0 |
+| 3 | 10 | 2 | 0 | 0 | 7 | 1 | 0 | 0 |
+| 4 | 88 | 1 | 0 | 0 | 1 | 86 | 0 | 0 |
+| 5 | 17 | 2 | 0 | 0 | 0 | 1 | 14 | 0 |
+| 6 | 8 | 0 | 1 | 0 | 0 | 0 | 1 | 6 |
+
+With the shipped rule (fit ≥ 0.90, gain ≥ 0.15 over the recorded hypothesis, mono SNR
+≥ 3, back-off 1) the scans the `0..2` sweep can reach go from 3,671 to 3,783 (+112) with
+**one** wrong shift (a true −1 scan). Sweeping the thresholds moved this by ±4; back-off 0
+(apply the best fit verbatim) reaches 3,777 with 8 wrong shifts, which is why the default
+backs off. The 30 true −1 scans (recorded one isotope *below* the monoisotope) are
+unreachable in every arm and are not touched.
+
+**Step 1 of #64, settled.** The Thermo reader's precursor m/z equals both the isolation
+window target and the trailer `Monoisotopic M/Z` on all 45,905 MS2 of this file (probe
+over `thermorawfilereader` 0.7.0), so the trailer holds nothing the reader is not already
+using; the +4 scans are firmware picks.
+
+Reproduce: the quick-tier recipe with `--precursor-mono auto` (add
+`--glyco-index-sequon-only` on a < 32 GB host); score with `score_vs_truth.py --run
+MouseLiver-Z-T-1 --buckets ...` and read the `MonoShift` / `isotope_error` PIN columns for
+the per-offset table.
+
 This number needs no cluster, which is the point, but two hours is a pre-merge check,
 not an inner loop. One fraction clears Percolator's q floor here because a liver fraction
 carries thousands of confident targets; see the floor rule below before assuming that of

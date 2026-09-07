@@ -448,6 +448,18 @@ pub(crate) struct SearchArgs {
     #[arg(long = "glyco-scans")]
     pub(crate) glyco_scans: Option<PathBuf>,
 
+    /// Memory: enumerate only N-X-S/T-bearing peptides into the `--glyco` candidate
+    /// index. Glyco scoring never reads any other candidate (the peptide-first
+    /// fragment index and the backbone→candidate loop both gate on the same sequon
+    /// test), so this shrinks the in-RAM index roughly 10x. Measured on a
+    /// 1,500-protein mouse subset: identical rows, peptides and labels; 16 of 7,113
+    /// rows (0.2%) differ in `RawScore`/`CandidateRankEntropy` only (per-spectrum
+    /// candidate-distribution terms). Use on hosts where the full index does not fit
+    /// (the mouse entrapment recipe needs ~27 GB without it, 3.4 GB with it).
+    /// Hidden; requires `--glyco`.
+    #[arg(long = "glyco-index-sequon-only", hide = true, default_value_t = false)]
+    pub(crate) glyco_index_sequon_only: bool,
+
     /// Diagnostic: log resident set size at each phase boundary.
     #[arg(long = "rss-probe", default_value_t = false)]
     pub(crate) rss_probe: bool,
@@ -524,6 +536,63 @@ pub(crate) struct SearchArgs {
     /// -1..=2; `wide` extends the upper bound to 5 for heavily-labelled precursors.
     #[arg(long = "glyco-isotope-error", value_enum, default_value_t = GlycoIsotopeFlag::Default)]
     pub(crate) glyco_isotope_error: GlycoIsotopeFlag,
+
+    /// Correct each precursor to its monoisotopic peak from the preceding MS1
+    /// isotope envelope BEFORE searching (`--glyco`; needs MS1, so mzML or Thermo
+    /// `.raw`). `auto` fits the observed envelope at the reported charge against a
+    /// glycopeptide isotope model under the hypotheses "the recorded precursor is
+    /// the M+k peak", k = 0..6, and moves the precursor down when a k > 0 clearly
+    /// wins; the search then keeps its DEFAULT narrow `--isotope-error` window.
+    /// `off` (default) leaves every precursor as recorded. Motivation: on pGlyco2
+    /// mouse liver the firmware records 3-6 Da above the monoisotope on a class of
+    /// wide, high-mass glycopeptide envelopes, and widening the isotope window to
+    /// reach them is mass-degenerate with a glycan composition change
+    /// (bigbio/andes#64). Byte-identical output with `off`, or without MS1.
+    #[arg(long = "precursor-mono", value_enum, default_value_t = PrecursorMonoFlag::Off)]
+    pub(crate) precursor_mono: PrecursorMonoFlag,
+
+    /// Diagnostic: write one TSV row per MS2 with the recorded/corrected precursor,
+    /// the applied shift, and the envelope fit under every hypothesis. Hidden.
+    #[arg(long = "precursor-mono-dump", hide = true)]
+    pub(crate) precursor_mono_dump: Option<PathBuf>,
+
+    /// `--precursor-mono` tuning: largest shift (isotopes) considered. Hidden.
+    #[arg(long = "precursor-mono-max-shift", hide = true, default_value_t = 6u8,
+          value_parser = clap::value_parser!(u8).range(1..=12))]
+    pub(crate) precursor_mono_max_shift: u8,
+
+    /// `--precursor-mono` tuning: minimum cosine fit of the winning shifted
+    /// hypothesis. Hidden.
+    #[arg(
+        long = "precursor-mono-min-fit",
+        hide = true,
+        default_value_t = 0.90f32
+    )]
+    pub(crate) precursor_mono_min_fit: f32,
+
+    /// `--precursor-mono` tuning: minimum fit improvement over the recorded
+    /// precursor. Hidden.
+    #[arg(
+        long = "precursor-mono-min-gain",
+        hide = true,
+        default_value_t = 0.15f32
+    )]
+    pub(crate) precursor_mono_min_gain: f32,
+
+    /// `--precursor-mono` tuning: minimum monoisotope intensity of the winning
+    /// hypothesis, in units of the MS1 median non-zero intensity. Hidden.
+    #[arg(long = "precursor-mono-min-snr", hide = true, default_value_t = 3.0f32)]
+    pub(crate) precursor_mono_min_snr: f32,
+
+    /// `--precursor-mono` tuning: MS1 peak-matching tolerance in ppm. Hidden.
+    #[arg(long = "precursor-mono-tol-ppm", hide = true, default_value_t = 10.0f64, value_parser = parse_positive_tol)]
+    pub(crate) precursor_mono_tol_ppm: f64,
+
+    /// `--precursor-mono` tuning: isotopes held back from the best-fitting shift
+    /// when applying it (the `--isotope-error` sweep takes the last step). Hidden.
+    #[arg(long = "precursor-mono-backoff", hide = true, default_value_t = 1u8,
+          value_parser = clap::value_parser!(u8).range(0..=2))]
+    pub(crate) precursor_mono_backoff: u8,
 
     /// Fragment tolerance (ppm) for the glyco-specific matching: oxonium ions,
     /// the core-Y ladder, backbone mass search, and c/z. Default 20 ppm, which
@@ -889,6 +958,15 @@ pub(crate) enum GlycoIsotopeFlag {
     Negative,
     /// 0..=5 — reaches candidates far above the monoisotopic peak.
     Wide,
+}
+
+/// `--precursor-mono`: MS1 isotope-envelope precursor correction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum PrecursorMonoFlag {
+    /// Leave every precursor m/z as recorded (default).
+    Off,
+    /// Move a precursor down to the monoisotope its MS1 envelope supports.
+    Auto,
 }
 
 /// Parse `--fragmentation` value. Accepts named values (case-insensitive: auto,

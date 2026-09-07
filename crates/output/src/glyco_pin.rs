@@ -31,6 +31,16 @@ use crate::percolator_enz::{count_internal_enzymatic, is_enzymatic_boundary};
 use crate::pin::{psm_feature_values, FeatureFmt};
 use crate::row_context::RowContext;
 use search::glyco_search::{FullGlycoPsm, GlycoSpectrumResult};
+use search::precursor_mono::MonoCorrection;
+
+/// `--precursor-mono` columns, appended after `IsobaricRTMargin` and only when
+/// the run carried MS1 envelope corrections (the flag off keeps the schema).
+/// `MonoShift`: isotopes subtracted from the recorded precursor before the
+/// search (0 = as recorded); `MonoFit`: cosine of the observed MS1 envelope
+/// against the glycopeptide isotope model at the SEARCHED precursor;
+/// `MonoFitGain`: `MonoFit` minus the fit at the recorded precursor (0 when
+/// unshifted); `MonoSNR`: searched monoisotope intensity over the MS1 median.
+pub const GLYCO_PIN_MONO_COLS: [&str; 4] = ["MonoShift", "MonoFit", "MonoFitGain", "MonoSNR"];
 
 // ── header ────────────────────────────────────────────────────────────────────
 
@@ -39,6 +49,7 @@ fn write_glyco_header<W: Write>(
     min_charge: u8,
     max_charge: u8,
     curated: bool,
+    mono: bool,
 ) -> io::Result<()> {
     let mut cols: Vec<String> = vec![
         "SpecId".to_string(),
@@ -152,6 +163,14 @@ fn write_glyco_header<W: Write>(
     // Apply the column policy LAST, so header and row writer share one source
     // of truth (`glyco_col_kept`) and cannot drift positionally.
     cols.retain(|c| glyco_col_kept(c, curated));
+    if mono {
+        // Present only under `--precursor-mono`, in both policies (they are
+        // never structurally dead there: MonoFit varies on every row).
+        let at = cols.len() - 2; // before Peptide/Proteins
+        for (i, c) in GLYCO_PIN_MONO_COLS.iter().enumerate() {
+            cols.insert(at + i, c.to_string());
+        }
+    }
     writeln!(writer, "{}", cols.join("\t"))
 }
 
@@ -172,6 +191,9 @@ fn write_glyco_psm_row<W: Write>(
     params: &SearchParams,
     // All of THIS scan's candidate hits (for the within-scan DeltaRTRank).
     scan_hits: &[FullGlycoPsm],
+    // `Some(..)` when the run carried `--precursor-mono` (outer), and the
+    // scan's own correction when it had a linked MS1 (inner).
+    mono: Option<Option<&MonoCorrection>>,
 ) -> io::Result<()> {
     let psm = &hit.psm;
     let key = &hit.glycan_key;
@@ -334,6 +356,25 @@ fn write_glyco_psm_row<W: Write>(
     // row shares its paired target's psm, so it inherits the same value.
     write_double_tab(writer, psm.features.isobaric_rt_margin as f64)?;
 
+    // `--precursor-mono` columns (see `GLYCO_PIN_MONO_COLS`). A scan without a
+    // linked MS1 writes the neutral row (0, 0, 0, 0).
+    if let Some(m) = mono {
+        match m {
+            Some(c) => {
+                write!(writer, "\t{}", c.shift)?;
+                write_double_tab(writer, c.fit_searched() as f64)?;
+                let gain = if c.applied() {
+                    c.fit_best - c.fit_recorded
+                } else {
+                    0.0
+                };
+                write_double_tab(writer, gain as f64)?;
+                write_double_tab(writer, c.snr as f64)?;
+            }
+            None => write!(writer, "\t0\t0\t0\t0")?,
+        }
+    }
+
     // Peptide column: backbone sequence + optional glycan tag.
     //
     // The tag carries the glycosite as `@N<pos>` (1-based position of the sequon
@@ -495,7 +536,7 @@ pub fn write_glyco_header_for_test<W: Write>(
     max_charge: u8,
     curated: bool,
 ) -> io::Result<()> {
-    write_glyco_header(writer, min_charge, max_charge, curated)
+    write_glyco_header(writer, min_charge, max_charge, curated, false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -508,6 +549,7 @@ pub fn write_glyco_pin(
     params: &SearchParams,
     search_index: &SearchIndex,
     debug: bool,
+    mono: Option<&[Option<MonoCorrection>]>,
 ) -> io::Result<()> {
     let file = std::fs::File::create(path)?;
     let mut writer = BufWriter::new(file);
@@ -520,6 +562,7 @@ pub fn write_glyco_pin(
         params,
         search_index,
         debug,
+        mono,
     )
 }
 
@@ -652,11 +695,13 @@ pub fn write_glyco_pin_to<W: Write>(
     params: &SearchParams,
     search_index: &SearchIndex,
     debug: bool,
+    // `--precursor-mono` corrections aligned with `spectra`; `None` = flag off.
+    mono: Option<&[Option<MonoCorrection>]>,
 ) -> io::Result<()> {
     let min_charge = *params.charge_range.start();
     let max_charge = *params.charge_range.end();
 
-    write_glyco_header(writer, min_charge, max_charge, curated)?;
+    write_glyco_header(writer, min_charge, max_charge, curated, mono.is_some())?;
 
     // Top-1-per-scan collapse + enumerated-only is the honest default (see
     // `select_emitted_hits`). `--debug-glyco` restores the full multi-row / de-novo
@@ -692,6 +737,7 @@ pub fn write_glyco_pin_to<W: Write>(
                 search_index,
                 params,
                 &result.hits,
+                mono.map(|m| m.get(spec_idx).and_then(|c| c.as_ref())),
             )?;
             row_count += 1;
         }
@@ -867,12 +913,32 @@ mod tests {
     }
 
     #[test]
+    fn mono_columns_appear_only_when_requested_and_sit_before_peptide() {
+        for curated in [false, true] {
+            let mut off = Vec::new();
+            write_glyco_header(&mut off, 2, 4, curated, false).unwrap();
+            let off = String::from_utf8(off).unwrap();
+            assert!(
+                GLYCO_PIN_MONO_COLS.iter().all(|c| !off.contains(c)),
+                "no Mono columns without --precursor-mono (curated={curated}): {off}"
+            );
+            let mut on = Vec::new();
+            write_glyco_header(&mut on, 2, 4, curated, true).unwrap();
+            let on = String::from_utf8(on).unwrap();
+            let cols: Vec<&str> = on.trim_end().split('\t').collect();
+            let pep = cols.iter().position(|c| *c == "Peptide").unwrap();
+            assert_eq!(&cols[pep - 4..pep], &GLYCO_PIN_MONO_COLS[..]);
+            assert_eq!(cols.len(), off.trim_end().split('\t').count() + 4);
+        }
+    }
+
+    #[test]
     fn glyco_pin_header_contains_glyco_columns() {
         // Build a tiny result and write to a Vec<u8>.
         // We can't call write_glyco_pin_to without real candidates + index,
         // so we test the header directly.
         let mut buf = Vec::new();
-        write_glyco_header(&mut buf, 2, 4, false).unwrap();
+        write_glyco_header(&mut buf, 2, 4, false, false).unwrap();
         let header = String::from_utf8(buf).unwrap();
         assert!(
             header.contains("OxoniumScore"),
@@ -896,7 +962,7 @@ mod tests {
     #[test]
     fn glyco_pin_header_deltartrank_is_last_before_peptide() {
         let mut buf = Vec::new();
-        write_glyco_header(&mut buf, 2, 4, false).unwrap();
+        write_glyco_header(&mut buf, 2, 4, false, false).unwrap();
         let header = String::from_utf8(buf).unwrap();
         let cols: Vec<&str> = header.trim().split('\t').collect();
         let pos = |c: &str| cols.iter().position(|&h| h == c).unwrap();
@@ -925,7 +991,7 @@ mod tests {
     #[test]
     fn glyco_pin_header_glyco_columns_before_peptide() {
         let mut buf = Vec::new();
-        write_glyco_header(&mut buf, 2, 3, false).unwrap();
+        write_glyco_header(&mut buf, 2, 3, false, false).unwrap();
         let header = String::from_utf8(buf).unwrap();
         let cols: Vec<&str> = header.trim().split('\t').collect();
         let glycan_pos = cols.iter().position(|&c| c == "GlycanMass").unwrap();
@@ -1038,6 +1104,7 @@ mod tests {
             score_mode: search::ScoreMode::Rank,
             refine_select_psm_fdr: 0.01,
             candidate_index: search::CandidateIndexMode::Ram,
+            require_nxst_sequon: false,
         }
     }
 
@@ -1107,6 +1174,7 @@ mod tests {
             &params,
             &search_index,
             false,
+            None,
         )
         .expect("write_glyco_pin_to must succeed");
         let text = String::from_utf8(buf).unwrap();
@@ -1334,6 +1402,7 @@ mod tests {
                 &params,
                 &search_index,
                 false,
+                None,
             )
             .expect("write must succeed");
             let text = String::from_utf8(buf).unwrap();

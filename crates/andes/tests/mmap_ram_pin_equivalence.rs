@@ -11,8 +11,11 @@
 //! So the gate drives the real CLI over the in-repo `test.mgf.gz` +
 //! `ecoli.fasta` fixtures.
 //!
-//! `--precursor-cal off` is REQUIRED: with calibration reuse active the mmap
-//! backing is silently downgraded to in-RAM, and the test would pass vacuously.
+//! Three cases run with `--precursor-cal off` (before issue #70 was fixed the
+//! calibration pre-pass silently downgraded mmap to in-RAM, which would have
+//! made them vacuous); the fourth runs with calibration ON and is the gate for
+//! #70: the pre-pass must run on the out-of-core index and the two backings
+//! must still agree.
 //!
 //! Marked `#[ignore]` — it runs two full E. coli searches (~40 s release,
 //! several minutes debug). Run it with:
@@ -39,7 +42,12 @@ fn workspace_root() -> PathBuf {
 /// defects this gate covers change row CONTENT (the retrieved multiset, and
 /// the order-dependent `RawScoreCal` accumulator), so sorted comparison is
 /// sufficient — and it was verified to FAIL on the unfixed code.
-fn run_search(backing: &str, mods: Option<&str>, out: &PathBuf) -> (String, Vec<String>) {
+fn run_search(
+    backing: &str,
+    mods: Option<&str>,
+    precursor_cal: &str,
+    out: &PathBuf,
+) -> (String, Vec<String>) {
     let root = workspace_root();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_andes"));
     cmd.current_dir(&root)
@@ -54,7 +62,7 @@ fn run_search(backing: &str, mods: Option<&str>, out: &PathBuf) -> (String, Vec<
         .arg("--threads")
         .arg("1")
         .arg("--precursor-cal")
-        .arg("off")
+        .arg(precursor_cal)
         .arg("--candidate-index")
         .arg(backing)
         .arg("--output-pin")
@@ -62,8 +70,23 @@ fn run_search(backing: &str, mods: Option<&str>, out: &PathBuf) -> (String, Vec<
     if let Some(m) = mods {
         cmd.arg("--mods").arg(m);
     }
-    let status = cmd.status().expect("spawn andes");
-    assert!(status.success(), "andes --candidate-index {backing} failed");
+    let output = cmd.output().expect("spawn andes");
+    assert!(
+        output.status.success(),
+        "andes --candidate-index {backing} failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if backing == "mmap" {
+        assert!(
+            stderr.contains("out-of-core candidate-index: mmap"),
+            "mmap run did not report the out-of-core backing (issue #70 downgrade?):\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("running in-RAM for this search"),
+            "mmap was downgraded to in-RAM:\n{stderr}"
+        );
+    }
 
     let text = std::fs::read_to_string(out).expect("read pin");
     let mut lines = text.lines();
@@ -73,13 +96,13 @@ fn run_search(backing: &str, mods: Option<&str>, out: &PathBuf) -> (String, Vec<
     (header, rows)
 }
 
-fn assert_backings_agree(label: &str, mods: Option<&str>) {
+fn assert_backings_agree(label: &str, mods: Option<&str>, precursor_cal: &str) {
     let dir = tempfile::tempdir().expect("tempdir");
     let ram_pin = dir.path().join("ram.pin");
     let mmap_pin = dir.path().join("mmap.pin");
 
-    let (ram_header, ram_rows) = run_search("ram", mods, &ram_pin);
-    let (mmap_header, mmap_rows) = run_search("mmap", mods, &mmap_pin);
+    let (ram_header, ram_rows) = run_search("ram", mods, precursor_cal, &ram_pin);
+    let (mmap_header, mmap_rows) = run_search("mmap", mods, precursor_cal, &mmap_pin);
 
     assert_eq!(ram_header, mmap_header, "[{label}] PIN header differs");
     assert!(
@@ -112,7 +135,7 @@ fn assert_backings_agree(label: &str, mods: Option<&str>) {
 #[test]
 #[ignore = "runs two full E. coli searches (~40 s release)"]
 fn mmap_matches_ram_pin_with_default_mods() {
-    assert_backings_agree("default mods", None);
+    assert_backings_agree("default mods", None, "off");
 }
 
 #[test]
@@ -123,7 +146,7 @@ fn mmap_matches_ram_pin_with_fixed_mods_only() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mods = dir.path().join("mods_fixed.txt");
     std::fs::write(&mods, "NumMods=0\n57.021464,C,fix,any,Carbamidomethyl\n").expect("write mods");
-    assert_backings_agree("fixed mods only", Some(mods.to_str().unwrap()));
+    assert_backings_agree("fixed mods only", Some(mods.to_str().unwrap()), "off");
 }
 
 #[test]
@@ -136,5 +159,14 @@ fn mmap_matches_ram_pin_with_one_variable_mod() {
         "NumMods=1\n57.021464,C,fix,any,Carbamidomethyl\n15.994915,M,opt,any,Oxidation\n",
     )
     .expect("write mods");
-    assert_backings_agree("one variable mod", Some(mods.to_str().unwrap()));
+    assert_backings_agree("one variable mod", Some(mods.to_str().unwrap()), "off");
+}
+
+#[test]
+#[ignore = "runs two full E. coli searches (~40 s release)"]
+fn mmap_matches_ram_pin_with_precursor_calibration_on() {
+    // Issue #70: with calibration on, the pre-pass used to build the in-RAM
+    // index regardless of the backing (and OOM-killed searches whose index did
+    // not fit). Now it runs on the chosen backing; both must still agree.
+    assert_backings_agree("precursor-cal auto", None, "auto");
 }

@@ -105,7 +105,7 @@ fn threshold_skip_returns_empty_stats() {
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let scorer = tiny_scorer();
-    let prepared = PreparedSearch::prepare(&idx, &params, &scorer, 0.5, "XXX");
+    let mut prepared = PreparedSearch::prepare(&idx, &params, &scorer, 0.5, "XXX");
 
     let too_few_keys: Vec<SpecKey> = (0..(cal_constants::MIN_SPECKEYS_FOR_PREPASS - 1))
         .map(|i| SpecKey {
@@ -114,7 +114,7 @@ fn threshold_skip_returns_empty_stats() {
         })
         .collect();
 
-    let stats = learn_calibration_stats(&too_few_keys, &HashMap::new(), &prepared, &params);
+    let stats = learn_calibration_stats(&too_few_keys, &HashMap::new(), &mut prepared, &params);
     assert!(!stats.has_reliable_stats());
     assert_eq!(stats.shift_ppm, 0.0);
     assert_eq!(stats.confident_psm_count, 0);

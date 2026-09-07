@@ -143,7 +143,7 @@ pub fn apply_shift_for_mode(mode: PrecursorCalMode, stats: CalibrationStats) -> 
 pub fn learn_calibration_stats(
     spec_keys: &[SpecKey],
     originals: &HashMap<usize, Spectrum>,
-    prepared: &PreparedSearch<'_>,
+    prepared: &mut PreparedSearch<'_>,
     main_params: &SearchParams,
 ) -> CalibrationStats {
     if spec_keys.len() < main_params.cal_min_spec_keys {
@@ -174,6 +174,9 @@ pub fn learn_calibration_stats(
     }
 
     let queues = prepared.run_chunk_with_params(&prepass_spectra, 0, &prepass_params);
+    // Out-of-core backing materializes candidates lazily during the scan; pull
+    // them into `candidates` so the queue indices resolve. No-op in RAM mode.
+    prepared.sync_materialized_candidates();
     let (residuals, filter) = extract_residuals(
         &sampled,
         &queues,

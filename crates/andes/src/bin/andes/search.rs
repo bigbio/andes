@@ -904,23 +904,60 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         params.precursor_cal_mode = PrecursorCalMode::Off;
     }
 
-    // Calibration pre-pass. Candidate enumeration is precursor-tolerance
-    // independent, so keep the cal pass's `PreparedParts` and reuse them for the
-    // main pass instead of re-enumerating all 16.8M candidates (~15s saved on
-    // Astral). `into_parts()` runs BEFORE tightening so the owned parts outlive
-    // the `params` borrow the cal `PreparedSearch` held.
+    // Calibration pre-pass, on the SAME candidate backing the memory budget
+    // chose above. In RAM mode candidate enumeration is precursor-tolerance
+    // independent, so the pre-pass's `PreparedParts` are kept and reused for the
+    // main pass instead of re-enumerating (~15 s saved on Astral); `into_parts()`
+    // runs BEFORE tightening so the owned parts outlive the `params` borrow. In
+    // Mmap mode the pre-pass uses the out-of-core index (issue #70: building the
+    // in-RAM index here bypassed the budget and was OOM-killed); nothing is
+    // reused because the on-disk index is content-addressed and the main pass
+    // opens the same file from the cache.
+    let mmap_cache_path = match params.candidate_index {
+        search::CandidateIndexMode::Mmap => Some(index_cache_path(&idx, &params)),
+        search::CandidateIndexMode::Ram => None,
+    };
     let reuse_parts = if params.precursor_cal_mode != PrecursorCalMode::Off {
-        let cal_prepared =
-            PreparedSearch::prepare(&idx, &params, &scorer, fragment_tol_da, &cli.decoy_prefix);
-        let cal_stats = run_precursor_calibration(
-            &spectrum_path,
-            is_mzml,
-            ms_level_u32,
-            bench_cap,
-            &params,
-            &cal_prepared,
-        )?;
-        let parts = cal_prepared.into_parts();
+        let (cal_stats, parts) = match &mmap_cache_path {
+            None => {
+                let mut cal_prepared = PreparedSearch::prepare(
+                    &idx,
+                    &params,
+                    &scorer,
+                    fragment_tol_da,
+                    &cli.decoy_prefix,
+                );
+                let cal_stats = run_precursor_calibration(
+                    &spectrum_path,
+                    is_mzml,
+                    ms_level_u32,
+                    bench_cap,
+                    &params,
+                    &mut cal_prepared,
+                )?;
+                (cal_stats, Some(cal_prepared.into_parts()))
+            }
+            Some(path) => {
+                let mut cal_prepared = PreparedSearch::prepare_mmap(
+                    &idx,
+                    &params,
+                    &scorer,
+                    fragment_tol_da,
+                    &cli.decoy_prefix,
+                    path,
+                )
+                .map_err(|e| format!("build out-of-core candidate index: {e}"))?;
+                let cal_stats = run_precursor_calibration(
+                    &spectrum_path,
+                    is_mzml,
+                    ms_level_u32,
+                    bench_cap,
+                    &params,
+                    &mut cal_prepared,
+                )?;
+                (cal_stats, None)
+            }
+        };
         params.precursor_mass_shift_ppm =
             apply_shift_for_mode(params.precursor_cal_mode, cal_stats);
         let tol_before = params.precursor_tolerance;
@@ -943,7 +980,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
-        Some(parts)
+        parts
     } else {
         None
     };
@@ -959,33 +996,24 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         })
         .transpose()?;
 
-    let mut prepared = match (reuse_parts, params.candidate_index) {
-        // Calibration reuse always takes the in-RAM parts (calibration is RAM-only).
-        // Warn if the user explicitly requested mmap so they know it was not applied.
+    let mut prepared = match (reuse_parts, &mmap_cache_path) {
+        // RAM mode with calibration: reuse the pre-pass enumeration.
         (Some(parts), _) => {
-            if cli.candidate_index == CandidateIndexFlag::Mmap {
-                eprintln!(
-                    "WARN: --candidate-index mmap is ignored when precursor calibration \
-                     reuse is active; running in-RAM for this search."
-                );
-            }
             PreparedSearch::from_parts(&idx, &params, &scorer, fragment_tol_da, parts)
         }
-        (None, search::CandidateIndexMode::Mmap) => {
-            // Use a content-addressed cache path so repeated searches over the
-            // same FASTA + params reuse the index without rebuilding.
-            let path = index_cache_path(&idx, &params);
-            PreparedSearch::prepare_mmap(
-                &idx,
-                &params,
-                &scorer,
-                fragment_tol_da,
-                &cli.decoy_prefix,
-                &path,
-            )
-            .map_err(|e| format!("build out-of-core candidate index: {e}"))?
-        }
-        (None, search::CandidateIndexMode::Ram) => {
+        // Content-addressed cache path, so repeated searches over the same
+        // FASTA + params (and the calibration pre-pass just above) share one
+        // on-disk index without rebuilding.
+        (None, Some(path)) => PreparedSearch::prepare_mmap(
+            &idx,
+            &params,
+            &scorer,
+            fragment_tol_da,
+            &cli.decoy_prefix,
+            path,
+        )
+        .map_err(|e| format!("build out-of-core candidate index: {e}"))?,
+        (None, None) => {
             PreparedSearch::prepare(&idx, &params, &scorer, fragment_tol_da, &cli.decoy_prefix)
         }
     }

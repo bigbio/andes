@@ -703,10 +703,39 @@ impl<'a> PreparedSearch<'a> {
                         // of the index: query it at the candidate's EXACT base mass
                         // (peptide mass minus its mod deltas) and count records sharing
                         // the same (protein, start, length, flags) key.
+                        //
+                        // The copies are NOT adjacent in the RAM enumeration:
+                        // `enumerate_protein` walks the WHOLE protein at
+                        // `seq_offset = 0`, then walks it AGAIN at `seq_offset = 1`
+                        // (N-terminal-Met cleavage). So RAM's global order inside one
+                        // protein is `[every pass-0 span, offset ASC] ++ [every pass-1
+                        // span, offset ASC]`. Pushing a candidate's copies back to back
+                        // and sorting only on `(protein, start_offset)` interleaves them
+                        // differently, which perturbs the order-dependent per-spectrum
+                        // float accumulators (`strong_null_stats` → the PIN
+                        // `RawScoreCal`) even when the multiset is identical.
+                        //
+                        // Tag each copy with its PASS index and sort on it, so the two
+                        // walks land in RAM's block order:
+                        //  - copy `k` of a span reachable from both walks is pass `k`;
+                        //  - a span at `start_offset == 1` carrying `is_protein_n_term`
+                        //    is reachable ONLY from the Met-cleaved walk (the flag is
+                        //    set iff the span starts at `seq_offset`), so it is pass 1
+                        //    even though it has a single copy.
+                        let mut tagged: Vec<(u32, u32, u32, u16, Candidate)> = Vec::new();
                         for cand in deduped {
                             let mult = base_record_multiplicity(mi, &cand);
-                            for _ in 0..mult {
-                                mmap_cands.push(cand.clone());
+                            let met_clipped_only =
+                                cand.is_protein_n_term && cand.start_offset_in_protein == 1;
+                            for k in 0..mult {
+                                let pass = if met_clipped_only { 1 } else { k };
+                                tagged.push((
+                                    cand.protein_index as u32,
+                                    pass,
+                                    cand.start_offset_in_protein as u32,
+                                    cand.peptide.residues.len() as u16,
+                                    cand.clone(),
+                                ));
                             }
                         }
                         // Collision-decoy relabeling against the GLOBAL target
@@ -721,9 +750,10 @@ impl<'a> PreparedSearch<'a> {
                             .mmap_target_bare_seqs
                             .as_ref()
                             .expect("Mmap backing requires the global target bare-seq set");
-                        relabel_collision_decoys_with(&mut mmap_cands, target_bare_seqs);
-                        // Canonical enumeration order: protein_index ASC, then start
-                        // offset ASC.  Within each (protein, offset) group, candidates
+                        // Canonical enumeration order: protein_index ASC, then PASS
+                        // (see above), then start offset ASC, then span length ASC —
+                        // exactly the order `enumerate_protein` emits spans in.
+                        // Within each such group, candidates
                         // retain the order produced by `lazy_candidates_for_nominal_window`
                         // → `expand_mod_combinations`, which is the SAME order
                         // `enumerate_candidates` uses.  `sort_by` is stable, so the
@@ -734,11 +764,11 @@ impl<'a> PreparedSearch<'a> {
                         // DO NOT add residues/mod_units tie-breaking here: lexicographic
                         // residue order diverges from `expand_mod_combinations` recursive
                         // output order and causes tie-breaking differences vs RAM.
-                        mmap_cands.sort_by(|a, b| {
-                            a.protein_index
-                                .cmp(&b.protein_index)
-                                .then(a.start_offset_in_protein.cmp(&b.start_offset_in_protein))
-                        });
+                        //
+                        // Relabeling is order-independent, so it runs after the sort.
+                        tagged.sort_by(|a, b| (a.0, a.1, a.2, a.3).cmp(&(b.0, b.1, b.2, b.3)));
+                        mmap_cands.extend(tagged.into_iter().map(|t| t.4));
+                        relabel_collision_decoys_with(&mut mmap_cands, target_bare_seqs);
                         window_cand_indices = (0..mmap_cands.len()).collect();
                     }
                 }
@@ -2798,11 +2828,22 @@ pub(crate) fn peptidoform_key(peptide: &model::Peptide) -> u64 {
 /// that exact `mass_milli`.
 fn base_record_multiplicity(mi: &MmapCandidateIndex, cand: &Candidate) -> u32 {
     use crate::candidate_index::flags as rec_flags;
-    // Base mass = peptide neutral mass with every mod delta removed.
+    // Base mass = the mass the on-disk index stores for this span. The index is
+    // built by `base_peptide_records`, which zeroes ONLY
+    // `max_variable_mods_per_peptide`; FIXED mods (e.g. carbamidomethyl-C, a TMT
+    // tag) stay folded into every residue's mass. So the base mass is the
+    // peptide mass with the VARIABLE mod deltas removed and the fixed ones kept.
+    // Subtracting fixed deltas as well shifts the lookup off the stored mass by
+    // the fixed-mod total (57.02 Da for a single Cys), the window returns no
+    // matching record, and the multiplicity collapses to the `max(1)` floor —
+    // silently dropping the duplicate copies the RAM backing keeps for every
+    // fixed-mod-bearing peptide.
     let mut base_mass = cand.peptide.mass();
     for aa in &cand.peptide.residues {
         if let Some(m) = aa.mod_.as_ref() {
-            base_mass -= m.mass_delta;
+            if !m.fixed {
+                base_mass -= m.mass_delta;
+            }
         }
     }
     let mass_milli = (base_mass * 1000.0).round() as u64;

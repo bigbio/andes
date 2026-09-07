@@ -42,12 +42,27 @@ fn workspace_root() -> PathBuf {
 /// defects this gate covers change row CONTENT (the retrieved multiset, and
 /// the order-dependent `RawScoreCal` accumulator), so sorted comparison is
 /// sufficient — and it was verified to FAIL on the unfixed code.
+/// The pre-pass's outcome line with its timing stripped, or `None` if the
+/// pre-pass never scored (threshold skip / calibration off). Both a learned
+/// shift and an "insufficient confident PSMs" report carry the PSM counts the
+/// pre-pass resolved through the candidate backing, so equality of this line
+/// across backings is the calibration half of the gate.
+fn calibration_outcome(stderr: &str) -> Option<String> {
+    stderr
+        .lines()
+        .find(|l| {
+            l.starts_with("Precursor mass shift learned")
+                || l.starts_with("Precursor mass calibration skipped (insufficient")
+        })
+        .map(|l| l.split("; elapsed").next().unwrap_or(l).to_string())
+}
+
 fn run_search(
     backing: &str,
     mods: Option<&str>,
     precursor_cal: &str,
     out: &PathBuf,
-) -> (String, Vec<String>) {
+) -> (String, Vec<String>, Option<String>) {
     let root = workspace_root();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_andes"));
     cmd.current_dir(&root)
@@ -82,9 +97,12 @@ fn run_search(
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     if precursor_cal != "off" {
+        // The pre-pass must have SCORED (either it learned a shift, or it
+        // reports how many sampled spectra had PSMs). A threshold skip
+        // ("SpecKeys < ...") means it never ran and the gate would be vacuous.
         assert!(
-            stderr.contains("Precursor mass shift learned"),
-            "[{backing}] the calibration pre-pass did not run, so the calibration-on \
+            calibration_outcome(&stderr).is_some(),
+            "[{backing}] the calibration pre-pass did not score, so the calibration-on \
              gate would be vacuous:\n{stderr}"
         );
     }
@@ -104,7 +122,7 @@ fn run_search(
     let header = lines.next().expect("pin header").to_string();
     let mut rows: Vec<String> = lines.map(str::to_string).collect();
     rows.sort();
-    (header, rows)
+    (header, rows, calibration_outcome(&stderr))
 }
 
 fn assert_backings_agree(label: &str, mods: Option<&str>, precursor_cal: &str) {
@@ -112,10 +130,14 @@ fn assert_backings_agree(label: &str, mods: Option<&str>, precursor_cal: &str) {
     let ram_pin = dir.path().join("ram.pin");
     let mmap_pin = dir.path().join("mmap.pin");
 
-    let (ram_header, ram_rows) = run_search("ram", mods, precursor_cal, &ram_pin);
-    let (mmap_header, mmap_rows) = run_search("mmap", mods, precursor_cal, &mmap_pin);
+    let (ram_header, ram_rows, ram_cal) = run_search("ram", mods, precursor_cal, &ram_pin);
+    let (mmap_header, mmap_rows, mmap_cal) = run_search("mmap", mods, precursor_cal, &mmap_pin);
 
     assert_eq!(ram_header, mmap_header, "[{label}] PIN header differs");
+    assert_eq!(
+        ram_cal, mmap_cal,
+        "[{label}] the calibration pre-pass resolved different PSMs on the two backings (issue #70)"
+    );
     assert!(
         ram_rows.len() > 10_000,
         "[{label}] fixture produced only {} rows — the search did not run at \

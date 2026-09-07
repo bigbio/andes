@@ -327,7 +327,7 @@ configuration, and a guard test enforces both halves of that): `YTreeLLR`,
   also missing `--glyco-taxon human`, which the test passes; following the recipe
   produced 25 wrong rows. Both the recipe and a warning are now in the test's header.
 
-### MEASURED (2026-09-02, Codon, five Percolator seeds, pooled fractions, sequon-corrected entrapment)
+### MEASURED (2026-09-02, cluster, five Percolator seeds, pooled fractions, sequon-corrected entrapment)
 
 Mouse PXD011533 rep1 Frac1-6 against the 5088-PSM deposited truth set. `def0` = default
 policy + RawScore floor; arms add one flag set each. v1 = the binary before the second

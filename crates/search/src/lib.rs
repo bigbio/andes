@@ -16,6 +16,7 @@ pub mod mass_calibrator;
 pub mod match_engine;
 pub mod precursor_cal;
 pub mod precursor_matching;
+pub mod precursor_mono;
 pub mod psm;
 pub mod refine_config;
 pub mod refinement;

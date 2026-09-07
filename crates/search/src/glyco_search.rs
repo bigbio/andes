@@ -190,7 +190,7 @@ use andes_glyco::hybrid::{
     hybrid_candidates_presolved, solve_backbones_for_charge, BackboneHit, Source,
 };
 use andes_glyco::oxonium::{oxonium_gate, sialic_consistency, OXONIUM_GATE_MIN_FRAC};
-use andes_glyco::sequon::{boundary_nxst_site, has_nxst_sequon};
+use andes_glyco::sequon::has_nxst_sequon;
 
 use crate::glyco_fragment_index::FragmentIndex;
 
@@ -804,9 +804,12 @@ impl GlycoCtxOwned {
         let sequon_membership: Vec<bool> = candidates
             .iter()
             .map(|c| {
-                let res: Vec<u8> = c.peptide.residues.iter().map(|aa| aa.residue).collect();
-                has_nxst_sequon(&res)
-                    || (sequon_boundary_on && boundary_nxst_site(&res, c.peptide.post).is_some())
+                if sequon_boundary_on {
+                    crate::candidate_gen::candidate_has_nxst_sequon(c)
+                } else {
+                    let res: Vec<u8> = c.peptide.residues.iter().map(|aa| aa.residue).collect();
+                    has_nxst_sequon(&res)
+                }
             })
             .collect();
         // CHARGE-AWARE peptide-first index (--glyco-pf-charge): index b/y at charges

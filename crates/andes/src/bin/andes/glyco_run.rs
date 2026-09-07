@@ -21,6 +21,10 @@ pub(crate) fn run_glyco(
     spectrum_paths: &[PathBuf],
     target_db: &ProteinDb,
     detected_activation_instrument: Option<(ActivationMethod, Option<InstrumentType>)>,
+    // `--precursor-mono`: per-spectrum MS1 envelope corrections, aligned with
+    // `spectra` (`Some` only when the flag is active; the PIN then carries the
+    // Mono* columns). `None` keeps the PIN byte-identical.
+    mono: Option<&[Option<search::precursor_mono::MonoCorrection>]>,
     t_total: std::time::Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let t_glyco = std::time::Instant::now();
@@ -326,6 +330,7 @@ pub(crate) fn run_glyco(
         params,
         idx,
         cli.debug_glyco,
+        mono,
     )?;
     eprintln!(
         "Wrote glyco PIN: {} ({} PSM rows) [PHASE TOTAL: {:.2}s]",

@@ -465,6 +465,7 @@ mod tests {
             score_mode: crate::search_params::ScoreMode::Rank,
             refine_select_psm_fdr: 0.01,
             candidate_index: crate::search_params::CandidateIndexMode::Ram,
+            require_nxst_sequon: false,
         }
     }
 

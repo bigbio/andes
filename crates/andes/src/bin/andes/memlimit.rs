@@ -210,7 +210,9 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect();
-        move |p: &Path| map.get(p.to_str()?).cloned()
+        // `Path::join` uses the platform separator, so normalise to `/`
+        // before the lookup; the keys above are written Linux-style.
+        move |p: &Path| map.get(&p.to_str()?.replace('\\', "/")).cloned()
     }
 
     #[test]

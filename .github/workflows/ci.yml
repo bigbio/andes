@@ -72,6 +72,12 @@ jobs:
             --skip tryp_pig_bov_revcat_full_set_loads \
             --skip match_spectra_output_invariant_across_thread_counts
 
+      - name: Out-of-core equivalence gates (issues #65, #70)
+        # `#[ignore]`d because each runs two full E. coli searches (~80 s
+        # release); run explicitly here, on one lane, so they stay required.
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test -p andes --release --test mmap_ram_pin_equivalence -- --ignored
+
   lint:
     name: Lint (clippy + rustfmt)
     runs-on: ubuntu-latest

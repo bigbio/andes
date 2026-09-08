@@ -1354,14 +1354,18 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     s.precursor_mz * z
                 };
                 pending.sort_by(|a, b| neutral(a).partial_cmp(&neutral(b)).unwrap());
+                // Smaller chunks than the streaming path: a chunk's index holds
+                // every peptidoform in its mass window, and on a PTM-rich
+                // search that is tens of millions of forms per 5,000 spectra.
+                const INDEX_CHUNK_SIZE: usize = 1000;
                 eprintln!(
                     "fragment-index: {} spectra sorted by precursor mass, {} per chunk",
                     pending.len(),
-                    CHUNK_SIZE
+                    INDEX_CHUNK_SIZE
                 );
                 let mut rest = pending;
                 while !rest.is_empty() {
-                    let take = rest.len().min(CHUNK_SIZE);
+                    let take = rest.len().min(INDEX_CHUNK_SIZE);
                     let chunk: Vec<Spectrum> = rest.drain(..take).collect();
                     let offset = all_spectra.len();
                     let queues = prepared.run_chunk(&chunk, offset);

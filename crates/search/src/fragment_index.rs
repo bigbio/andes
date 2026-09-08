@@ -27,15 +27,6 @@ use model::mass::{H2O, ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
 use model::tolerance::Tolerance;
 
-/// One indexed peptidoform: which base record it came from, its position in
-/// that record's `expand_mod_combinations` order, and its neutral mass.
-struct FormIons {
-    record: u32,
-    k: u16,
-    mass: f64,
-    ions: Vec<f32>,
-}
-
 pub struct ChunkFragmentIndex {
     /// The chunk's distinct base records, in `enumerate_candidates` order.
     records: Vec<IndexRecord>,
@@ -85,6 +76,10 @@ impl ChunkFragmentIndex {
     /// of the chunk's precursor windows) are indexed: a record reachable
     /// through one modification offset carries dozens of forms at other
     /// masses, and indexing them all made one chunk's index exceed 2^32 ions.
+    ///
+    /// Two passes over the expansion so nothing per form is held beyond its
+    /// packed entries: pass 1 counts forms per record and ions per bin, pass 2
+    /// re-expands and writes entries straight into the packed table.
     pub fn build(
         records: Vec<IndexRecord>,
         db: &SearchIndex,
@@ -93,64 +88,140 @@ impl ChunkFragmentIndex {
         mass_lo: f64,
         mass_hi: f64,
     ) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
         let bin_width = fragment_tol.as_da(2500.0).max(0.001);
-        let per_record: Vec<Vec<FormIons>> = records
-            .par_iter()
-            .enumerate()
-            .map(|(r, rec)| {
-                expand_base_record(db, params, rec)
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, cand)| {
-                        let m = cand.peptide.mass();
-                        m >= mass_lo && m <= mass_hi
-                    })
-                    .map(|(k, cand)| FormIons {
-                        record: r as u32,
-                        k: k as u16,
-                        mass: cand.peptide.mass(),
-                        ions: by_ions(cand),
-                    })
-                    .collect()
+        let in_window = |c: &Candidate| {
+            let m = c.peptide.mass();
+            m >= mass_lo && m <= mass_hi
+        };
+        // Pass 1: forms per record, ions per bin.
+        let (forms_per_record, counts): (Vec<u32>, Vec<u64>) = {
+            let per: Vec<(u32, Vec<(u32, u32)>)> = records
+                .par_iter()
+                .map(|rec| {
+                    let mut n = 0u32;
+                    let mut bins: Vec<(u32, u32)> = Vec::new();
+                    for cand in expand_base_record(db, params, rec)
+                        .iter()
+                        .filter(|c| in_window(c))
+                    {
+                        n += 1;
+                        for mz in by_ions(cand) {
+                            bins.push(((mz as f64 / bin_width) as u32, 1));
+                        }
+                    }
+                    bins.sort_unstable();
+                    bins.dedup_by(|a, b| {
+                        if a.0 == b.0 {
+                            b.1 += a.1;
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                    (n, bins)
+                })
+                .collect();
+            let max_bin = per
+                .iter()
+                .flat_map(|(_, b)| b.iter().map(|x| x.0 as usize))
+                .max()
+                .unwrap_or(0);
+            let mut counts = vec![0u64; max_bin + 3];
+            for (_, bins) in &per {
+                for &(b, c) in bins {
+                    counts[b as usize + 1] += c as u64;
+                }
+            }
+            (per.into_iter().map(|(n, _)| n).collect(), counts)
+        };
+        let n_bins = counts.len() - 1;
+        let mut bin_start = counts;
+        for b in 0..n_bins {
+            bin_start[b + 1] += bin_start[b];
+        }
+        let n_entries = bin_start[n_bins] as usize;
+        let n_forms: usize = forms_per_record.iter().map(|&n| n as usize).sum();
+        let mut form_base: Vec<u32> = Vec::with_capacity(records.len());
+        let mut acc = 0u32;
+        for &n in &forms_per_record {
+            form_base.push(acc);
+            acc += n;
+        }
+        eprintln!(
+            "fragment-index: chunk window {:.1}-{:.1} Da, {} records, {} forms, {} ion entries, {} bins",
+            mass_lo,
+            mass_hi,
+            records.len(),
+            n_forms,
+            n_entries,
+            n_bins
+        );
+        // Pass 2: fill the packed tables; per-bin write cursors are atomics so
+        // records fill in parallel. Bins are sorted by form mass afterwards, so
+        // the result does not depend on scheduling.
+        let form_record: Vec<AtomicU64> = (0..n_forms).map(|_| AtomicU64::new(0)).collect();
+        let fill: Vec<AtomicU64> = bin_start.iter().map(|&s| AtomicU64::new(s)).collect();
+        let entries: Vec<(std::sync::atomic::AtomicU32, std::sync::atomic::AtomicU32)> = (0
+            ..n_entries)
+            .map(|_| {
+                (
+                    std::sync::atomic::AtomicU32::new(0),
+                    std::sync::atomic::AtomicU32::new(0),
+                )
             })
             .collect();
-        let n_forms: usize = per_record.iter().map(|v| v.len()).sum();
-        let mut form_record = Vec::with_capacity(n_forms);
-        let mut form_k = Vec::with_capacity(n_forms);
-        let mut form_mass = Vec::with_capacity(n_forms);
-        let mut max_bin = 0usize;
-        let mut n_entries = 0usize;
-        for f in per_record.iter().flatten() {
-            form_record.push(f.record);
-            form_k.push(f.k);
-            form_mass.push(f.mass);
-            n_entries += f.ions.len();
-            for &mz in &f.ions {
-                max_bin = max_bin.max((mz as f64 / bin_width) as usize);
+        records.par_iter().enumerate().for_each(|(r, rec)| {
+            let mut form_id = form_base[r];
+            for (k, cand) in expand_base_record(db, params, rec)
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| in_window(c))
+            {
+                // record (u32) | k (u16) | mass bits packed later; store record+k
+                // now and the mass separately.
+                form_record[form_id as usize]
+                    .store(((r as u64) << 16) | (k as u64 & 0xffff), Ordering::Relaxed);
+                for mz in by_ions(cand) {
+                    let b = (mz as f64 / bin_width) as usize;
+                    let pos = fill[b].fetch_add(1, Ordering::Relaxed) as usize;
+                    entries[pos].0.store(form_id, Ordering::Relaxed);
+                    entries[pos].1.store(mz.to_bits(), Ordering::Relaxed);
+                }
+                form_id += 1;
+            }
+        });
+        let form_record_k: Vec<u64> = form_record.into_iter().map(|a| a.into_inner()).collect();
+        let form_record: Vec<u32> = form_record_k.iter().map(|v| (v >> 16) as u32).collect();
+        let form_k: Vec<u16> = form_record_k.iter().map(|v| (v & 0xffff) as u16).collect();
+        // Masses: recompute from (record, k) in parallel without re-expanding
+        // every record twice more — expand once per record and pick the forms.
+        let mut form_mass: Vec<f64> = vec![0.0; n_forms];
+        {
+            let masses: Vec<(u32, Vec<f64>)> = records
+                .par_iter()
+                .enumerate()
+                .map(|(r, rec)| {
+                    (
+                        form_base[r],
+                        expand_base_record(db, params, rec)
+                            .iter()
+                            .filter(|c| in_window(c))
+                            .map(|c| c.peptide.mass())
+                            .collect(),
+                    )
+                })
+                .collect();
+            for (base, ms) in masses {
+                for (i, m) in ms.into_iter().enumerate() {
+                    form_mass[base as usize + i] = m;
+                }
             }
         }
-        let n_bins = max_bin + 2;
-        // Counting sort of (bin, form, ion) into CSR, then sort each bin by
-        // form mass so a query binary-searches its precursor window.
-        let mut counts = vec![0u64; n_bins + 1];
-        for f in per_record.iter().flatten() {
-            for &mz in &f.ions {
-                counts[(mz as f64 / bin_width) as usize + 1] += 1;
-            }
-        }
-        for b in 0..n_bins {
-            counts[b + 1] += counts[b];
-        }
-        let bin_start = counts.clone();
-        let mut fill = counts;
-        let mut entries = vec![(0u32, 0f32); n_entries];
-        for (form_id, f) in per_record.iter().flatten().enumerate() {
-            for &mz in &f.ions {
-                let b = (mz as f64 / bin_width) as usize;
-                entries[fill[b] as usize] = (form_id as u32, mz);
-                fill[b] += 1;
-            }
-        }
+        let mut entries: Vec<(u32, f32)> = entries
+            .into_iter()
+            .map(|(a, b)| (a.into_inner(), f32::from_bits(b.into_inner())))
+            .collect();
         for b in 0..n_bins {
             let (lo, hi) = (bin_start[b] as usize, bin_start[b + 1] as usize);
             entries[lo..hi].sort_unstable_by(|x, y| {

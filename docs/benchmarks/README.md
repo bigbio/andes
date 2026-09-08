@@ -80,14 +80,14 @@ re-measured 2026-09-06 at the commit introducing the gated NeuGc bound, native `
 | | TMT, UPS1 | — | skipped | high-res only, by design | | |
 | **Glyco, deep tier** | pGlyco2 mouse liver PXD005553, 5 fractions, TRFP 1.4.3, `main` `14818d3e` | glycoPSMs @1% | **31,666 ± 9** | pGlyco2 **78.9% confirmed** · MSFragger **88.0% confirmed**, 95.8% peptidoform agreement | **1.11% ± 0.03 true FDP** (1:1 database) | 23–29 min / fraction, 16 cores |
 | **Glyco, quick tier** | one pGlyco2 liver fraction (`MouseLiver-Z-T-1`), native `.raw`, gated NeuGc bound (2026-09-06) | glycoPSMs @1% | **7,122** (6,532 with the previous NeuGc ≤ 1 list, same binary) | pGlyco2 **86.7% confirmed** (was 77.9%) · MSFragger 87.8% confirmed, 96.3% / 95.6% peptidoform agreement | **1.13% true FDP** (CI 0.80–1.55; 1.10% before) | 8,145 s, 8 threads (WSL2 host) |
+| **Phospho-enriched** (first PTM benchmark) | PXD007653 mouse liver EasyPhos, one file (`control2`), Q Exactive HCD, mzML via TRFP 1.4.3, binary `d606d962` | PSMs @ q≤0.01 (5 Percolator seeds) | default model **36,817–36,922** · `--protocol phospho` 36,780–36,884; **26,629 / 26,767 phospho-bearing** | MaxQuant (PEP≤0.01, 23,563 scans): **82.1% covered**, 98.3% bare-peptide agreement; 17,467 andes-only scans | **1.22–1.32%** / **1.10–1.14%** true FDP (1:1 database) | 99 / 101 min, 32 threads |
 
 † Java MS-GF+ v20240326 was not re-run in the 2026-09 session; its counts are historical
 (same protocol, earlier session) and it remains ~10-40x slower than andes.
 
-**Not benchmarked yet, and therefore not claimed:** a phospho-enriched (or any
-PTM-enriched) dataset, iTRAQ, timsTOF `.d`, MSFragger on the standard sets, and Comet's
-fragment-index mode. The four bundled phosphorylation models have never been scored against
-a reference. See §5.
+**Not benchmarked yet, and therefore not claimed:** iTRAQ, timsTOF `.d`, MSFragger on the
+standard sets, Comet's fragment-index mode, and phospho *site localisation* (the phospho
+benchmark below scores peptides, not sites). See §5.
 
 ### Standard search, in detail
 
@@ -420,6 +420,52 @@ oxonium gate as an explanation for unemitted spectra (it fires for 33 of the 34)
 
 ---
 
+## 2b. Phospho-enriched (the first PTM benchmark)
+
+**Dataset.** PXD007653 (Krahmer et al., mouse liver EasyPhos, Q Exactive HCD), one raw
+file, `20151014_QEp6_NaKr_SA_totalliver_control2_phospho.raw` (3.72 GB, 102,820 MS2),
+converted with ThermoRawFileParser 1.4.3. It is not in any bundled model's training
+ledger (checked before selection). Reference: the depositors' MaxQuant `msms.txt`,
+filtered to this file, `Reverse` blank, PEP ≤ 0.01 → 23,563 scans
+(`glyco/truth/maxquant_mouse_liver_phospho.tsv.gz`, built by `make_truth.py maxquant`).
+
+**Search.** The 1:1 shuffled mouse entrapment database from the glyco tiers
+(sha256 `5ee15d8d…`), `configs/mods-phospho.txt` (Cam-C fixed; Ox-M, protein-N-term
+acetyl, Phospho S/T/Y variable; NumMods=4, sha `bdc523fe…`), production defaults (the
+calibration pre-pass ran and was skipped as insufficient), 32 threads. Binary
+`d606d962` = `main` + #71 + #73 + #74, the out-of-core fixes this dataset forced (before
+them the index did not fit RAM, the pre-pass bypassed the memory budget, and the search
+ran at 0.7 spectra/s). Percolator 3.7.1, `-Y`, seeds 1–5, no pooling (one file, so the
+q floor is far below 1%).
+
+| arm | model | PSMs @ q≤0.01 (seeds 1–5) | entrapment @1% | true FDP | phospho-bearing PSMs (seed 1) | wall |
+|---|---|---:|---:|---:|---:|---:|
+| default | `hcd_qexactive_tryp` | 36,817 · 36,872 · 36,922 · 36,862 · 36,865 | 225–244 | 1.22–1.32% | 26,629 | 5,954 s |
+| `--protocol phospho` | `hcd_qexactive_tryp_phosphorylation` | 36,835 · 36,819 · 36,826 · 36,780 · 36,884 | 202–210 | 1.10–1.14% | 26,767 | 6,031 s |
+
+**Reading it.** The phospho-specific model is identification-neutral against the general
+high-res model (the difference is inside the ~±50 seed band) at about 0.1 percentage
+points lower measured error. Against MaxQuant, andes at 1% covers 82.1% of the reference
+scans with 98.3% bare-peptide agreement on the covered ones, and reports 17,467 scans the
+reference does not; whether those are right is exactly what the entrapment column
+measures (1.1–1.3%). Site localisation is **not** scored: the reference table stores bare
+sequences, and andes emits no localisation probability. That is the next thing to add.
+
+**Reproduce.** `reproduce/fetch_spectra.sh phospho`, build the mouse entrapment database
+as for the glyco deep tier, then per arm:
+
+```text
+andes --spectrum <file>.mzML --database mouse_entrap.fasta \
+      --mods docs/benchmarks/configs/mods-phospho.txt --threads 32 \
+      [--protocol phospho] --output-pin <arm>.pin
+percolator --seed <1..5> -Y --only-psms=false --results-psms <arm>_s<seed>.psms <arm>.pin
+```
+
+Count `q-value ≤ 0.01` rows, entrapment hits by the `ENTRAP_` protein prefix
+(FDP = 2 × hits / PSMs for a 1:1 database), and phospho-bearing PSMs by the `79.96`
+delta in the peptide string. Expect ~100 min per arm on 32 cores with the out-of-core
+index; an 8-core machine takes ~10 h per arm.
+
 ## 3. How to reproduce
 
 ```bash
@@ -598,10 +644,9 @@ so no entrapment FDP is computable from it and its counts are rescored `q ≤ 0.
   Comet's newer fragment-index mode nor MSFragger has been benchmarked here at all.
 - **Two of three databases cannot support an entrapment claim.** Astral has no entrapment
   component; UPS1's is not 1:1. Rebuilding both near 1:1 is the fix.
-- **No PTM-enriched benchmark exists.** `--refine` is measured only on Astral, and the four
-  bundled phosphorylation models have never been scored against a reference dataset. A
-  public phospho-enrichment set with a deposited identification list is the next dataset
-  to add, following the same rules as the glyco tiers (pool, measure T/E, native `.raw`).
+- **The phospho benchmark is one file and peptide-level only.** Two more files of the same
+  regime are listed in `fetch_spectra.sh` for a pooled tier; site localisation is not
+  scored on either side. `--refine` is still measured only on Astral.
 - **Glyco selection is the open problem**, and whether those 37% are recoverable by scoring
   at all is unknown — it needs a candidate-pool dump taken at retention time under
   production settings, which does not exist yet.

@@ -592,6 +592,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(n) = cli.mmap_window_cache_candidates {
         params.mmap_window_cache_max_candidates = n;
     }
+    if let Some(k) = cli.fragment_index_top_k {
+        params.fragment_index_top_k = k;
+    }
+    if let Some(m) = cli.fragment_index_min_matched {
+        params.fragment_index_min_matched = m;
+    }
     params.precursor_mass_shift_ppm = 0.0;
     params.refine_select_psm_fdr = cli.refine_select_psm_fdr;
     params.score_mode = match cli.score {

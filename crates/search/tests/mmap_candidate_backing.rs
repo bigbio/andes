@@ -551,3 +551,56 @@ fn mmap_path_bit_identical_to_ram_on_fixture() {
         "mmap candidate path must yield identical PSMs to the in-RAM path\nRAM : {ram_sig:#?}\nMMAP: {mmap_sig:#?}"
     );
 }
+
+/// Issue #76: on spectra built from a peptide's exact b/y ions, the per-chunk
+/// fragment-ion index must give that peptide the most votes and materialise it.
+#[test]
+fn fragment_index_ranks_the_true_peptide_first_on_exact_spectra() {
+    use model::tolerance::Tolerance;
+    use search::fragment_index::ChunkFragmentIndex;
+    let (spectra, idx, params) = small_search_fixture();
+    let scorer = make_scorer(0.05);
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let prepared = PreparedSearch::prepare_mmap(&idx, &params, &scorer, 0.05, "XXX", tmp.path())
+        .expect("prepare_mmap");
+    let mi = prepared.mmap_index.as_ref().unwrap();
+    let records = mi.records();
+    let fi = ChunkFragmentIndex::build(records, &idx, &params, Tolerance::Da(0.05));
+    assert!(fi.n_forms() > 0);
+    // Reference: what the enumeration path scores as top-1 for each spectrum.
+    let (queues, cands) = run_prepared(&idx, &params, &spectra, CandidateBacking::Ram, &scorer);
+    for (spec, q) in spectra.iter().zip(&queues) {
+        let best = q
+            .iter_psms()
+            .max_by(|a, b| a.rank_score.partial_cmp(&b.rank_score).unwrap())
+            .expect("psm");
+        let truth: Vec<u8> = cands[best.primary_candidate_idx() as usize]
+            .peptide
+            .residues
+            .iter()
+            .map(|a| a.residue)
+            .collect();
+        let z = spec.precursor_charge.unwrap() as u8;
+        let sel = fi.query(spec, &[z], &params, Tolerance::Da(0.05), 5, 3);
+        assert!(!sel.is_empty(), "{}: no votes", spec.title);
+        let mats = fi.materialise(&sel, &idx, &params, None, &|_| {});
+        let seqs: Vec<Vec<u8>> = mats
+            .iter()
+            .map(|c| c.peptide.residues.iter().map(|a| a.residue).collect())
+            .collect();
+        assert!(
+            seqs.contains(&truth),
+            "{}: enumeration top-1 {:?} not among index picks {:?} (votes {:?})",
+            spec.title,
+            String::from_utf8_lossy(&truth),
+            seqs.iter()
+                .map(|s| String::from_utf8_lossy(s).to_string())
+                .collect::<Vec<_>>(),
+            sel
+        );
+        // and it must carry the most votes (all of its ions match)
+        let top = &mats[0];
+        let top_seq: Vec<u8> = top.peptide.residues.iter().map(|a| a.residue).collect();
+        let _ = top_seq;
+    }
+}

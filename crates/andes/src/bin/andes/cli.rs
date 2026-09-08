@@ -175,6 +175,18 @@ pub(crate) struct SearchArgs {
     #[arg(long = "mmap-window-cache-candidates", hide = true)]
     pub(crate) mmap_window_cache_candidates: Option<usize>,
 
+    /// Out-of-core mode only: score each spectrum against at most K peptidoforms
+    /// chosen by a per-chunk fragment-ion index (issue #76) instead of every
+    /// peptidoform in its precursor windows. 0 (default) = off. Changes the
+    /// candidate set, so judged on identifications, not byte-identity.
+    #[arg(long = "fragment-index-top-k", hide = true)]
+    pub(crate) fragment_index_top_k: Option<u32>,
+
+    /// Fragment-index mode: minimum matched b/y ions for a peptidoform to be
+    /// scored. Default 3.
+    #[arg(long = "fragment-index-min-matched", hide = true)]
+    pub(crate) fragment_index_min_matched: Option<u16>,
+
     /// Precursor mass tolerance as `VALUE+unit`. Accepts ppm (e.g. `20ppm`,
     /// high-res) or Da (e.g. `0.02da`/`0.02Da`, low-res precursor selection).
     /// Default `20ppm`.

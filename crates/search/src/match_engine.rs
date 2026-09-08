@@ -13,6 +13,7 @@ use crate::candidate_gen::{
     BaseRecordKey, Candidate,
 };
 use crate::candidate_index::MmapCandidateIndex;
+use crate::fragment_index::ChunkFragmentIndex;
 use crate::precursor_cal::adjusted_observed_neutral_mass;
 use crate::precursor_matching::{matches_precursor, MassError};
 use crate::psm::{PsmFeatures, PsmMatch, TopNQueue};
@@ -673,45 +674,63 @@ impl<'a> PreparedSearch<'a> {
         // admitted after the budget is spent are dropped and expanded on
         // demand, and which ones land in the cache under parallel contention
         // is not deterministic.
-        let record_cache: Option<MmapRecordCache> = if self.backing_mode == CandidateBacking::Mmap {
-            let mi = self
-                .mmap_index
-                .as_ref()
-                .expect("Mmap backing requires an mmap index");
-            let mut windows: Vec<(i32, i32)> = spectra
-                .iter()
-                .filter(|s| s.peaks.len() >= params.min_peaks as usize)
-                .flat_map(|s| mmap_window_key(s, params))
-                .collect();
-            windows.sort_unstable();
-            windows.dedup();
-            let records: FxHashMap<BaseRecordKey, crate::candidate_index::IndexRecord> = windows
-                .par_iter()
-                .fold(FxHashMap::default, |mut m, &(lo, hi)| {
-                    for (rec, _) in base_records_for_nominal_window(mi, params, lo, hi) {
-                        m.entry(base_record_key(&rec)).or_insert(rec);
-                    }
-                    m
-                })
-                .reduce(FxHashMap::default, |mut a, b| {
-                    a.extend(b);
-                    a
-                });
-            let budget = params.mmap_window_cache_max_candidates;
-            let cached_total = AtomicUsize::new(0);
-            Some(
-                records
+        let (record_cache, frag_index): (Option<MmapRecordCache>, Option<ChunkFragmentIndex>) =
+            if self.backing_mode == CandidateBacking::Mmap {
+                let mi = self
+                    .mmap_index
+                    .as_ref()
+                    .expect("Mmap backing requires an mmap index");
+                let mut windows: Vec<(i32, i32)> = spectra
+                    .iter()
+                    .filter(|s| s.peaks.len() >= params.min_peaks as usize)
+                    .flat_map(|s| mmap_window_key(s, params))
+                    .collect();
+                windows.sort_unstable();
+                windows.dedup();
+                let records: FxHashMap<BaseRecordKey, crate::candidate_index::IndexRecord> =
+                    windows
+                        .par_iter()
+                        .fold(FxHashMap::default, |mut m, &(lo, hi)| {
+                            for (rec, _) in base_records_for_nominal_window(mi, params, lo, hi) {
+                                m.entry(base_record_key(&rec)).or_insert(rec);
+                            }
+                            m
+                        })
+                        .reduce(FxHashMap::default, |mut a, b| {
+                            a.extend(b);
+                            a
+                        });
+                // Fragment-ion index over the chunk's records (issue #76): the
+                // forms are enumerated once here, and each spectrum then scores
+                // only the forms its peaks vote for, instead of every form in its
+                // precursor windows.
+                let frag_index = if params.fragment_index_top_k > 0 {
+                    let mut recs: Vec<crate::candidate_index::IndexRecord> =
+                        records.values().cloned().collect();
+                    recs.sort_unstable_by_key(base_record_key);
+                    Some(ChunkFragmentIndex::build(
+                        recs,
+                        self.idx,
+                        params,
+                        self.scorer.feature_match_tolerance(),
+                    ))
+                } else {
+                    None
+                };
+                let budget = params.mmap_window_cache_max_candidates;
+                let cached_total = AtomicUsize::new(0);
+                let cache: MmapRecordCache = records
                     .into_par_iter()
                     .filter_map(|(key, rec)| {
                         let v = expand_base_record(self.idx, params, &rec);
                         let before = cached_total.fetch_add(v.len(), Ordering::Relaxed);
                         (before + v.len() <= budget).then_some((key, v))
                     })
-                    .collect(),
-            )
-        } else {
-            None
-        };
+                    .collect();
+                (Some(cache), frag_index)
+            } else {
+                (None, None)
+            };
 
         // Yield-accounting counters.
         // Aggregated across all worker threads via Relaxed atomics — exact counts
@@ -853,9 +872,37 @@ impl<'a> PreparedSearch<'a> {
                         window_cand_indices.dedup();
                     }
                     CandidateBacking::Mmap => {
-                        let key = mmap_window_key(spec, params);
-                        mmap_cands_owned =
-                            self.expand_mmap_window_candidates(params, &key, record_cache.as_ref());
+                        if let Some(fi) = &frag_index {
+                            let sel = fi.query(
+                                spec,
+                                &charges_to_try,
+                                params,
+                                scorer.feature_match_tolerance(),
+                                params.fragment_index_top_k as usize,
+                                params.fragment_index_min_matched,
+                            );
+                            let target_bare_seqs = self
+                                .mmap_target_bare_seqs
+                                .as_ref()
+                                .expect("Mmap backing requires the global target bare-seq set");
+                            let relabel = |v: &mut [Candidate]| {
+                                relabel_collision_decoys_with(v, target_bare_seqs)
+                            };
+                            mmap_cands_owned = fi.materialise(
+                                &sel,
+                                self.idx,
+                                params,
+                                record_cache.as_ref(),
+                                &relabel,
+                            );
+                        } else {
+                            let key = mmap_window_key(spec, params);
+                            mmap_cands_owned = self.expand_mmap_window_candidates(
+                                params,
+                                &key,
+                                record_cache.as_ref(),
+                            );
+                        }
                         window_cand_indices = (0..mmap_cands_owned.len()).collect();
                     }
                 }

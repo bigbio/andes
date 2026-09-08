@@ -18,7 +18,9 @@
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
-use crate::candidate_gen::{base_record_key, expand_base_record, BaseRecordKey, Candidate};
+use crate::candidate_gen::{
+    base_record_key, expand_base_record, for_each_record_form_masses, BaseRecordKey, Candidate,
+};
 use crate::candidate_index::IndexRecord;
 use crate::precursor_cal::adjusted_observed_neutral_mass;
 use crate::search_index::SearchIndex;
@@ -41,19 +43,13 @@ pub struct ChunkFragmentIndex {
     entries: Vec<(u32, f32)>,
 }
 
-/// Singly-charged b (prefix) and y (suffix) ion m/z of one peptidoform, from
-/// its residue masses with the modification deltas folded in.
-fn by_ions(cand: &Candidate) -> Vec<f32> {
-    let res = &cand.peptide.residues;
-    let n = res.len();
+/// Singly-charged b (prefix) and y (suffix) ion m/z of one peptidoform from its
+/// per-residue masses (modification deltas folded in), appended to `out`.
+fn by_ions_from_masses(masses: &[f64], out: &mut Vec<f32>) {
+    let n = masses.len();
     if n < 2 {
-        return Vec::new();
+        return;
     }
-    let masses: Vec<f64> = res
-        .iter()
-        .map(|aa| aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta))
-        .collect();
-    let mut out = Vec::with_capacity(2 * (n - 1));
     let mut prefix = 0.0;
     for m in &masses[..n - 1] {
         prefix += m;
@@ -64,7 +60,11 @@ fn by_ions(cand: &Candidate) -> Vec<f32> {
         suffix += m;
         out.push((suffix + H2O + PROTON) as f32);
     }
-    out
+}
+
+#[inline]
+fn neutral_mass(masses: &[f64]) -> f64 {
+    masses.iter().sum::<f64>() + H2O
 }
 
 impl ChunkFragmentIndex {
@@ -88,28 +88,29 @@ impl ChunkFragmentIndex {
         mass_lo: f64,
         mass_hi: f64,
     ) -> Self {
-        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
         let bin_width = fragment_tol.as_da(2500.0).max(0.001);
-        let in_window = |c: &Candidate| {
-            let m = c.peptide.mass();
-            m >= mass_lo && m <= mass_hi
-        };
-        // Pass 1: forms per record, ions per bin.
+        // Pass 1: forms per record, ions per bin. The lean expansion visits
+        // forms as residue-mass slices; nothing per form is allocated.
         let (forms_per_record, counts): (Vec<u32>, Vec<u64>) = {
             let per: Vec<(u32, Vec<(u32, u32)>)> = records
                 .par_iter()
                 .map(|rec| {
                     let mut n = 0u32;
                     let mut bins: Vec<(u32, u32)> = Vec::new();
-                    for cand in expand_base_record(db, params, rec)
-                        .iter()
-                        .filter(|c| in_window(c))
-                    {
+                    let mut ions: Vec<f32> = Vec::new();
+                    for_each_record_form_masses(db, params, rec, |_, masses| {
+                        let m = neutral_mass(masses);
+                        if m < mass_lo || m > mass_hi {
+                            return;
+                        }
                         n += 1;
-                        for mz in by_ions(cand) {
+                        ions.clear();
+                        by_ions_from_masses(masses, &mut ions);
+                        for &mz in &ions {
                             bins.push(((mz as f64 / bin_width) as u32, 1));
                         }
-                    }
+                    });
                     bins.sort_unstable();
                     bins.dedup_by(|a, b| {
                         if a.0 == b.0 {
@@ -161,63 +162,40 @@ impl ChunkFragmentIndex {
         // records fill in parallel. Bins are sorted by form mass afterwards, so
         // the result does not depend on scheduling.
         let form_record: Vec<AtomicU64> = (0..n_forms).map(|_| AtomicU64::new(0)).collect();
+        let form_mass_atomic: Vec<AtomicU64> = (0..n_forms).map(|_| AtomicU64::new(0)).collect();
         let fill: Vec<AtomicU64> = bin_start.iter().map(|&s| AtomicU64::new(s)).collect();
-        let entries: Vec<(std::sync::atomic::AtomicU32, std::sync::atomic::AtomicU32)> = (0
-            ..n_entries)
-            .map(|_| {
-                (
-                    std::sync::atomic::AtomicU32::new(0),
-                    std::sync::atomic::AtomicU32::new(0),
-                )
-            })
+        let entries: Vec<(AtomicU32, AtomicU32)> = (0..n_entries)
+            .map(|_| (AtomicU32::new(0), AtomicU32::new(0)))
             .collect();
         records.par_iter().enumerate().for_each(|(r, rec)| {
             let mut form_id = form_base[r];
-            for (k, cand) in expand_base_record(db, params, rec)
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| in_window(c))
-            {
-                // record (u32) | k (u16) | mass bits packed later; store record+k
-                // now and the mass separately.
+            let mut ions: Vec<f32> = Vec::new();
+            for_each_record_form_masses(db, params, rec, |k, masses| {
+                let m = neutral_mass(masses);
+                if m < mass_lo || m > mass_hi {
+                    return;
+                }
                 form_record[form_id as usize]
                     .store(((r as u64) << 16) | (k as u64 & 0xffff), Ordering::Relaxed);
-                for mz in by_ions(cand) {
+                form_mass_atomic[form_id as usize].store(m.to_bits(), Ordering::Relaxed);
+                ions.clear();
+                by_ions_from_masses(masses, &mut ions);
+                for &mz in &ions {
                     let b = (mz as f64 / bin_width) as usize;
                     let pos = fill[b].fetch_add(1, Ordering::Relaxed) as usize;
                     entries[pos].0.store(form_id, Ordering::Relaxed);
                     entries[pos].1.store(mz.to_bits(), Ordering::Relaxed);
                 }
                 form_id += 1;
-            }
+            });
         });
         let form_record_k: Vec<u64> = form_record.into_iter().map(|a| a.into_inner()).collect();
         let form_record: Vec<u32> = form_record_k.iter().map(|v| (v >> 16) as u32).collect();
         let form_k: Vec<u16> = form_record_k.iter().map(|v| (v & 0xffff) as u16).collect();
-        // Masses: recompute from (record, k) in parallel without re-expanding
-        // every record twice more — expand once per record and pick the forms.
-        let mut form_mass: Vec<f64> = vec![0.0; n_forms];
-        {
-            let masses: Vec<(u32, Vec<f64>)> = records
-                .par_iter()
-                .enumerate()
-                .map(|(r, rec)| {
-                    (
-                        form_base[r],
-                        expand_base_record(db, params, rec)
-                            .iter()
-                            .filter(|c| in_window(c))
-                            .map(|c| c.peptide.mass())
-                            .collect(),
-                    )
-                })
-                .collect();
-            for (base, ms) in masses {
-                for (i, m) in ms.into_iter().enumerate() {
-                    form_mass[base as usize + i] = m;
-                }
-            }
-        }
+        let form_mass: Vec<f64> = form_mass_atomic
+            .into_iter()
+            .map(|a| f64::from_bits(a.into_inner()))
+            .collect();
         let mut entries: Vec<(u32, f32)> = entries
             .into_iter()
             .map(|(a, b)| (a.into_inner(), f32::from_bits(b.into_inner())))

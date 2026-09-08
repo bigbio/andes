@@ -389,6 +389,108 @@ pub(crate) fn expand_mod_combinations(
     out
 }
 
+/// Visit every peptidoform of `span` as its per-residue masses (residue mass
+/// plus the modification delta), in EXACTLY the order and with the same index
+/// `k` as [`expand_mod_combinations`] produces them, without allocating a
+/// residue vector per form. Used by the fragment-ion index build, where the
+/// per-form `Peptide`/`Candidate` was ~70% of the run.
+pub(crate) fn for_each_form_masses(
+    span: &[u8],
+    params: &SearchParams,
+    is_protein_n_term: bool,
+    is_protein_c_term: bool,
+    mut f: impl FnMut(usize, &[f64]),
+) {
+    let n = span.len();
+    if n == 0 {
+        return;
+    }
+    let pos0_owned: Vec<AminoAcid> =
+        build_terminal_variants(params, span[0], 0, n, is_protein_n_term, is_protein_c_term);
+    let pos_last_owned: Option<Vec<AminoAcid>> = (n > 1).then(|| {
+        build_terminal_variants(
+            params,
+            span[n - 1],
+            n - 1,
+            n,
+            is_protein_n_term,
+            is_protein_c_term,
+        )
+    });
+    let position_variants: Vec<&[AminoAcid]> = span
+        .iter()
+        .enumerate()
+        .map(|(i, &r)| {
+            if i == 0 {
+                pos0_owned.as_slice()
+            } else if i == n - 1 {
+                pos_last_owned.as_ref().unwrap().as_slice()
+            } else {
+                params.aa_set.variants_for(r, ModLocation::Anywhere)
+            }
+        })
+        .collect();
+    let mut masses: Vec<f64> = Vec::with_capacity(n);
+    let mut k = 0usize;
+    fn rec(
+        pv: &[&[AminoAcid]],
+        pos: usize,
+        masses: &mut Vec<f64>,
+        mods_used: u32,
+        max_mods: u32,
+        k: &mut usize,
+        f: &mut impl FnMut(usize, &[f64]),
+    ) {
+        if pos == pv.len() {
+            f(*k, masses);
+            *k += 1;
+            return;
+        }
+        for variant in pv[pos] {
+            let consumes_slot = variant.mod_.as_ref().map(|m| !m.fixed).unwrap_or(false);
+            let new_mods = mods_used + if consumes_slot { 1 } else { 0 };
+            if new_mods > max_mods {
+                continue;
+            }
+            masses.push(variant.mass + variant.mod_.as_ref().map_or(0.0, |m| m.mass_delta));
+            rec(pv, pos + 1, masses, new_mods, max_mods, k, f);
+            masses.pop();
+        }
+    }
+    rec(
+        &position_variants,
+        0,
+        &mut masses,
+        0,
+        params.max_variable_mods_per_peptide,
+        &mut k,
+        &mut f,
+    );
+}
+
+/// [`for_each_form_masses`] for one index record: reconstructs the span and
+/// terminal flags exactly as [`expand_base_record`] does. Does nothing for a
+/// record that does not fit its protein.
+pub fn for_each_record_form_masses(
+    db: &SearchIndex,
+    params: &SearchParams,
+    rec: &crate::candidate_index::IndexRecord,
+    f: impl FnMut(usize, &[f64]),
+) {
+    use crate::candidate_index::flags;
+    let protein = &db.db.proteins[rec.protein_index as usize];
+    let seq = &protein.sequence;
+    let abs_start = rec.start_offset as usize;
+    let abs_end = abs_start + rec.length as usize;
+    if abs_end > seq.len() {
+        return;
+    }
+    let span = &seq[abs_start..abs_end];
+    let is_protein_n_term = rec.flags & flags::IS_PROTEIN_N_TERM != 0;
+    let is_protein_c_term = rec.flags & flags::IS_PROTEIN_C_TERM != 0;
+    for_each_form_masses(span, params, is_protein_n_term, is_protein_c_term, f);
+}
+
 /// Build the merged variant list for a terminal position (pos 0 or pos n-1).
 ///
 /// Only called for the 1-2 terminal positions per span.

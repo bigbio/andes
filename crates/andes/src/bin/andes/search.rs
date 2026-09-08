@@ -1358,8 +1358,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 // window, so chunks are bounded by MASS SPAN, not only by
                 // spectrum count: 1,000 high-mass phospho spectra spanned 450 Da
                 // and their window held 39.7M forms / 3.3G ion entries.
-                const INDEX_CHUNK_SIZE: usize = 1000;
-                const INDEX_CHUNK_SPAN_DA: f64 = 15.0;
+                // With the allocation-free index build a 150 Da slice at
+                // ~120k phospho forms per Da is ~18M forms / ~5 GB, and each
+                // record is expanded once per slice instead of once per 15 Da.
+                const INDEX_CHUNK_SIZE: usize = 20_000;
+                const INDEX_CHUNK_SPAN_DA: f64 = 150.0;
                 eprintln!(
                     "fragment-index: {} spectra sorted by precursor mass, chunks of <= {} spectra and <= {} Da",
                     pending.len(),

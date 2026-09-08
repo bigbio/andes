@@ -1354,18 +1354,28 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     s.precursor_mz * z
                 };
                 pending.sort_by(|a, b| neutral(a).partial_cmp(&neutral(b)).unwrap());
-                // Smaller chunks than the streaming path: a chunk's index holds
-                // every peptidoform in its mass window, and on a PTM-rich
-                // search that is tens of millions of forms per 5,000 spectra.
+                // A chunk's index holds every peptidoform in its precursor mass
+                // window, so chunks are bounded by MASS SPAN, not only by
+                // spectrum count: 1,000 high-mass phospho spectra spanned 450 Da
+                // and their window held 39.7M forms / 3.3G ion entries.
                 const INDEX_CHUNK_SIZE: usize = 1000;
+                const INDEX_CHUNK_SPAN_DA: f64 = 15.0;
                 eprintln!(
-                    "fragment-index: {} spectra sorted by precursor mass, {} per chunk",
+                    "fragment-index: {} spectra sorted by precursor mass, chunks of <= {} spectra and <= {} Da",
                     pending.len(),
-                    INDEX_CHUNK_SIZE
+                    INDEX_CHUNK_SIZE,
+                    INDEX_CHUNK_SPAN_DA
                 );
                 let mut rest = pending;
                 while !rest.is_empty() {
-                    let take = rest.len().min(INDEX_CHUNK_SIZE);
+                    let first = neutral(&rest[0]);
+                    let mut take = 1;
+                    while take < rest.len()
+                        && take < INDEX_CHUNK_SIZE
+                        && neutral(&rest[take]) - first <= INDEX_CHUNK_SPAN_DA
+                    {
+                        take += 1;
+                    }
                     let chunk: Vec<Spectrum> = rest.drain(..take).collect();
                     let offset = all_spectra.len();
                     let queues = prepared.run_chunk(&chunk, offset);

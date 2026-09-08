@@ -1306,12 +1306,24 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
             log_rss("after_parser_thread_spawn");
 
+            // Fragment-index mode (issue #76) scores MASS-ORDERED chunks: the
+            // per-chunk index covers the peptidoforms of the chunk's precursor
+            // windows, and a chunk in file order spans the whole mass range
+            // (its index is the whole database; 100 GB on phospho). Collect the
+            // stream, sort by precursor mass, then chunk. Peaks for every
+            // spectrum are held until scored (~1 GB for 100k high-res MS2).
+            let mass_ordered = params.fragment_index_top_k > 0 && !cli.glyco && !cli.refine;
+            let mut pending: Vec<Spectrum> = Vec::new();
             for mut chunk in rx {
                 if chunk.is_empty() {
                     continue;
                 }
                 if let Some(prefix) = &title_prefix {
                     prefix_spectrum_titles(&mut chunk, prefix);
+                }
+                if mass_ordered {
+                    pending.extend(chunk);
+                    continue;
                 }
                 // SPEED (--glyco): the per-spectrum PEPTIDE search is pure waste in
                 // glyco mode — glyco_search_run re-derives its own candidates from
@@ -1335,6 +1347,32 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 report_search_progress(all_spectra.len(), t_search_start);
                 log_rss(&format!("after_chunk_{:06}_specs", all_spectra.len()));
+            }
+            if mass_ordered {
+                let neutral = |s: &Spectrum| {
+                    let z = s.precursor_charge.filter(|z| *z > 0).unwrap_or(2) as f64;
+                    s.precursor_mz * z
+                };
+                pending.sort_by(|a, b| neutral(a).partial_cmp(&neutral(b)).unwrap());
+                eprintln!(
+                    "fragment-index: {} spectra sorted by precursor mass, {} per chunk",
+                    pending.len(),
+                    CHUNK_SIZE
+                );
+                let mut rest = pending;
+                while !rest.is_empty() {
+                    let take = rest.len().min(CHUNK_SIZE);
+                    let chunk: Vec<Spectrum> = rest.drain(..take).collect();
+                    let offset = all_spectra.len();
+                    let queues = prepared.run_chunk(&chunk, offset);
+                    all_queues.extend(queues);
+                    for mut spec in chunk.into_iter() {
+                        spec.peaks = Vec::new();
+                        all_spectra.push(spec);
+                    }
+                    report_search_progress(all_spectra.len(), t_search_start);
+                    log_rss(&format!("after_chunk_{:06}_specs", all_spectra.len()));
+                }
             }
 
             match parser_handle.join() {

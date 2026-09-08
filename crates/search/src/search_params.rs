@@ -82,9 +82,9 @@ pub struct SearchParams {
     /// calibrating with fewer spectra.
     pub cal_min_spec_keys: usize,
     /// Out-of-core (`mmap`) mode only: upper bound on the TOTAL number of
-    /// candidates held in the per-chunk window cache. The cache is a pure memo
-    /// (output is identical with or without it); windows past the bound expand
-    /// per spectrum instead. Without this bound a PTM-rich search (phospho on
+    /// candidates held in the per-chunk base-record expansion cache. The cache
+    /// is a pure memo (output is identical with or without it); records past
+    /// the bound are expanded per spectrum instead. Without this bound a PTM-rich search (phospho on
     /// S/T/Y, four variable mods) cached tens of thousands of peptidoforms per
     /// window for thousands of windows and was OOM-killed at 64 GiB before the
     /// first chunk finished. Default 4,000,000 (~1 GiB).

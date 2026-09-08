@@ -226,6 +226,86 @@ The new FragPipe match-between-glycans work shows that learned RT/IM shifts betw
 
 This can increase glycopeptide coverage, but it must not be used to claim more searched PSMs than MSFragger.
 
+## Workstream C: PTM-rich search at Comet speed (added 2026-09-08)
+
+**Measured on PXD007653 phospho, one file (102,820 MS2), mouse 1:1 entrapment database,
+Phospho S/T/Y + Ox-M + protein-N-term acetyl, NumMods=4, same 32-core node, same mzML:**
+
+| engine | wall | PSMs @1% (5 seeds) | true FDP | phospho PSMs | MaxQuant scans covered |
+|---|---:|---:|---:|---:|---:|
+| Comet 2025.01 | 226 s | 33,888–34,025 | 1.73–1.78% | 23,888 | 77.9% |
+| andes, `main` + #71 + #73 + #74 | 5,954 s | 36,817–36,922 | 1.22–1.32% | 26,629 | 82.1% |
+| andes, `main` before those | ~40 h (0.7 spectra/s) | – | – | – | – |
+
+andes already exceeds Comet on identifications (+8.5% PSMs, +11.5% phospho PSMs, lower
+measured error). The standing goal set on 2026-09-08 is **Comet parity on time at equal or
+better identifications** on PTM-rich data. That is a 26x gap, and the profile of the fixed
+build says where it cannot come from:
+
+| share of CPU (fixed build, 300-spectrum slice) | what |
+|---:|---|
+| 29% | the full scorer, once per peptidoform |
+| ~35% | generating peptidoforms and allocating a `Peptide` per form (`expand_recursive`, terminal variants, malloc/free) |
+| 15% | the per-spectrum index range scans and their hashing (`base_records_for_nominal_window`) |
+| ~10% | sorts, dedup, assembly |
+| ~11% | everything else |
+
+Removing the scorer and the generation entirely (a first-stage filter plus scoring from a
+modification mask) leaves the per-spectrum scan and assembly, i.e. about 4x slower than
+Comet at best. Two further byte-identical micro-optimisations after #74 measured flat or
+worse and were dropped (recorded in memory with numbers). Comet enumerates every
+peptidoform too; it is fast because its per-candidate work is a binned lookup sum with no
+allocation and no per-spectrum candidate materialisation. **Parity therefore needs the
+architecture where candidates are not enumerated per spectrum at all: the fragment-ion
+index.** This is the stage-2 project approved with the out-of-core design; the phospho
+measurement makes it the next thing to build.
+
+### C0. Design (MSFragger-style, sliced for the memory budget)
+
+- **Index unit:** a peptidoform (base peptide × variable-mod placement). Enumerated ONCE
+  for the database with the existing `expand_mod_combinations`, never per spectrum.
+- **Index content:** for every peptidoform, its singly-charged b and y ions (doubly-charged
+  added for z ≥ 3 candidates) binned at the fragment tolerance (0.02 Da at high resolution;
+  the low-resolution bin follows `--fragment-tol`). Storage: per fragment bin, the list of
+  (peptidoform id, precursor mass) sorted by precursor mass, so a query is one binary search
+  per matched peak.
+- **Slicing:** the phospho index is ~380M peptidoforms × ~30 ions; it does not fit RAM.
+  Partition by precursor mass into slices that fit the memory budget (`min(MemAvailable,
+  cgroup)` from #68), build one slice at a time, and search all spectra whose precursor
+  windows intersect it. Spectra are already read in chunks; sort each chunk by precursor
+  mass so a slice is visited once per chunk. This replaces `--candidate-index mmap` for
+  variable-mod searches; the in-RAM enumeration path stays for small searches.
+- **First-stage score:** matched-fragment count (optionally intensity-rank weighted) from
+  the votes; candidates with fewer than `min_matched_fragments` (MSFragger uses 4) are never
+  materialised. The top K by first-stage score per (spectrum, charge) are materialised as
+  `Peptide`s and go through the UNCHANGED full andes scoring, features, and Percolator
+  path, so everything downstream (rank score, strong score, GBDT features, PIN) is
+  byte-identical in kind; only the candidate set entering it changes.
+- **Flag:** `--fragment-index` (auto later), default off; `--fragment-index-top-k` and
+  `--fragment-index-min-matched`. With the flag off every path is byte-identical to today.
+
+### C1. Gates (the merge gate applies: more IDs or measurably faster at equal IDs)
+
+1. Byte-identity with the flag off on the fixture and the three standard sets.
+2. Phospho: wall ≤ Comet × 2 as the first milestone, then ≤ Comet; PSMs @1% and phospho
+   PSMs within seed noise of the enumeration path (36.8k / 26.6k) at ≤ the same entrapment
+   FDP. Report the top-K / min-matched sweep as a table, never a single point.
+3. Standard sets (Astral, TMT, UPS1): identifications within noise of today's numbers;
+   time must not regress. If the index is slower than in-RAM enumeration for no-mod
+   searches, `auto` keeps enumeration there.
+4. Glyco is out of scope for the index (its own retrieval is the open problem).
+
+### C2. Milestones
+
+1. Index build for one mass slice from the existing enumeration; unit tests that every
+   b/y ion of every peptidoform lands in the right bin; memory accounting against the
+   budget.
+2. Vote query + first-stage score + top-K materialisation feeding the existing
+   `run_chunk` scoring; the fixture and the phospho slice run end to end; measure.
+3. Slicing across the full phospho database with chunk sorting; measure the whole file
+   against Comet's 226 s; sweep K and min-matched; entrapment FDP at every point.
+4. `auto` selection, docs, the phospho benchmark row updated with the index path.
+
 ## Ordered 30-day execution plan
 
 | Order | Deliverable | Expected leverage | Promotion gate |

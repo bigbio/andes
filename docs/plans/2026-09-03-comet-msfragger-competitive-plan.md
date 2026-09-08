@@ -297,6 +297,18 @@ measurement makes it the next thing to build.
 
 ### C2. Milestones
 
+**Status 2026-09-08 (PR #77):** milestones 1–3 built and measured on the full phospho file:
+index K=100 → 1,167 s, 37,136–37,213 PSMs @1%, FDP 1.01–1.09%, 26,858 phospho PSMs, 82.5%
+MaxQuant coverage, peak RSS 11 GB (enumeration 5,954 s / 36.8k / 1.22–1.32%; Comet 226 s).
+Measured design facts: ~88k peptidoforms per Da on this search space, so index chunks are
+bounded to ≤ 1,000 spectra AND ≤ 15 Da (1,000 high-mass spectra spanned 450 Da = 39.7M forms
+/ 3.3G ion entries); only in-window forms are indexed; the calibration pre-pass never uses
+the index; the prepared search's `fragment_tol_da` is a hardcoded 0.5 Da and must not be
+used for matching. Remaining time is the high-mass tail (367 small chunks, records
+re-expanded three times each): milestone 4 below is a global index built once in mass
+slices.
+
+
 1. Index build for one mass slice from the existing enumeration; unit tests that every
    b/y ion of every peptidoform lands in the right bin; memory accounting against the
    budget.

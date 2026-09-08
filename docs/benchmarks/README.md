@@ -454,7 +454,15 @@ variable mods with `max_variable_mods_in_peptide = 4`, `decoy_search = 1`, Perco
 | andes, default | 5,954 s | **36,817–36,922** | **1.22–1.32%** | **26,629** | **82.1%** (98.3% agree) |
 
 andes identifies 8.5% more PSMs and 11.5% more phospho PSMs at lower measured error, and
-is **26x slower**. The time gap is the open problem for PTM-rich searches: Comet also
+is **26x slower** on the enumeration path. With the per-chunk fragment-ion index (issue #76,
+`--fragment-index-top-k 100`, same file, same node, production defaults, Percolator seeds 1–3):
+
+| andes path | wall (32 threads) | PSMs @ q≤0.01 | true FDP | phospho-bearing PSMs | MaxQuant scans covered |
+|---|---:|---:|---:|---:|---:|
+| enumeration | 5,954 s | 36,817–36,922 | 1.22–1.32% | 26,629 | 82.1% |
+| fragment index, K=100 | **1,167 s** | **37,136–37,213** | **1.01–1.09%** | **26,858** | **82.5%** |
+
+5.1x faster than enumeration with more identifications at lower error; 5x from Comet. The time gap is the open problem for PTM-rich searches: Comet also
 enumerates every peptidoform, but scores each with a binned correlation that costs
 microseconds, while andes materialises a peptide object per form and runs its full scorer
 on it. Closing it needs a cheap first-stage filter before full scoring and scoring from the
@@ -664,9 +672,11 @@ so no entrapment FDP is computable from it and its counts are rescored `q ≤ 0.
 - **The phospho benchmark is one file and peptide-level only.** Two more files of the same
   regime are listed in `fetch_spectra.sh` for a pooled tier; site localisation is not
   scored on either side. `--refine` is still measured only on Astral.
-- **andes is 26x slower than Comet on the phospho file** (5,954 s vs 226 s, same node and
-  settings) while identifying more. The standing goal is Comet parity on time at equal or
-  better identifications; see the phospho section for what that needs.
+- **andes is 5x slower than Comet on the phospho file with the fragment-ion index**
+  (1,167 s vs 226 s, same node and settings; 26x on the enumeration path) while identifying
+  more. The standing goal is Comet parity on time at equal or better identifications; see
+  the phospho section and `docs/plans/2026-09-03-comet-msfragger-competitive-plan.md`
+  workstream C.
 - **Glyco selection is the open problem**, and whether those 37% are recoverable by scoring
   at all is unknown — it needs a candidate-pool dump taken at retention time under
   production settings, which does not exist yet.

@@ -578,7 +578,7 @@ mod tests {
         let m_ox = AminoAcid {
             residue: b'M',
             mass: m_unmod.mass,
-            mod_: Some(std::sync::Arc::new(ox_mod)),
+            mod_: Some(model::modification::leak_mod(ox_mod)),
         };
         let a = AminoAcid::standard(b'A').unwrap();
         // Peptide: K.AM(ox)A.S
@@ -757,7 +757,7 @@ mod tests {
         let mod_aa = AminoAcid {
             residue: b'A',
             mass: plain_aa.mass,
-            mod_: Some(std::sync::Arc::new(make_mod(Some("UNIMOD:393")))),
+            mod_: Some(model::modification::leak_mod(make_mod(Some("UNIMOD:393")))),
         };
         // 6 residues; mod at 0-based 5 → 1-based 6
         let residues = vec![
@@ -817,7 +817,7 @@ mod tests {
         let noaccession_aa = AminoAcid {
             residue: b'A',
             mass: plain_aa.mass,
-            mod_: Some(std::sync::Arc::new(make_mod(None))),
+            mod_: Some(model::modification::leak_mod(make_mod(None))),
         };
         let residues = vec![plain_aa.clone(), noaccession_aa, plain_aa];
         let peptide = Peptide::new(residues, b'K', b'S');
@@ -869,12 +869,12 @@ mod tests {
         let mod1 = AminoAcid {
             residue: b'A',
             mass: plain_aa.mass,
-            mod_: Some(std::sync::Arc::new(make_mod(Some("UNIMOD:4")))),
+            mod_: Some(model::modification::leak_mod(make_mod(Some("UNIMOD:4")))),
         };
         let mod2 = AminoAcid {
             residue: b'A',
             mass: plain_aa.mass,
-            mod_: Some(std::sync::Arc::new(make_mod(Some("UNIMOD:393")))),
+            mod_: Some(model::modification::leak_mod(make_mod(Some("UNIMOD:393")))),
         };
         let residues = vec![
             plain_aa.clone(),

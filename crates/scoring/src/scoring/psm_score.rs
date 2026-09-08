@@ -877,7 +877,6 @@ mod tests {
     /// to be a positive m/z (a single-residue T prefix would go negative).
     fn loss_peptide_twoheavy() -> Peptide {
         use model::modification::{ModLocation, Modification, ResidueSpec};
-        use std::sync::Arc;
         let m = Modification {
             name: "L".into(),
             mass_delta: 0.0,
@@ -888,7 +887,7 @@ mod tests {
             neutral_losses: vec![162.0528],
             loss_class: 1,
         };
-        let t = AminoAcid::standard(b'T').unwrap().with_mod(Arc::new(m));
+        let t = AminoAcid::standard(b'T').unwrap().with_mod(m);
         let w1 = AminoAcid::standard(b'W').unwrap();
         let w2 = AminoAcid::standard(b'W').unwrap();
         Peptide::new(vec![t, w1, w2], b'_', b'-')

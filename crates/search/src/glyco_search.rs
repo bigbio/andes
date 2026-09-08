@@ -451,16 +451,18 @@ fn glyco_aware_peptide(
     let mut residues = pep.residues.clone();
     if let Some(res) = residues.get_mut(gsite) {
         let base = res.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
-        res.mod_ = Some(std::sync::Arc::new(model::modification::Modification {
-            name: "Glycan".to_string(),
-            mass_delta: base + gmass,
-            residue: model::modification::ResidueSpec::Specific(res.residue),
-            location: model::modification::ModLocation::Anywhere,
-            fixed: false,
-            accession: None,
-            neutral_losses: Vec::new(),
-            loss_class: 1,
-        }));
+        res.mod_ = Some(model::modification::leak_mod(
+            model::modification::Modification {
+                name: "Glycan".to_string(),
+                mass_delta: base + gmass,
+                residue: model::modification::ResidueSpec::Specific(res.residue),
+                location: model::modification::ModLocation::Anywhere,
+                fixed: false,
+                accession: None,
+                neutral_losses: Vec::new(),
+                loss_class: 1,
+            },
+        ));
     }
     model::peptide::Peptide::new(residues, pep.pre, pep.post)
 }

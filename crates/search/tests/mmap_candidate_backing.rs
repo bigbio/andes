@@ -176,7 +176,7 @@ fn small_search_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
     let ox_residues = {
         let mut r = residues(b"PEPTMIDEK");
         // place Ox on the M (index 4)
-        r[4].mod_ = Some(std::sync::Arc::new(ox_m));
+        r[4].mod_ = Some(model::modification::leak_mod(ox_m));
         r
     };
     let ox_pep = Peptide::new(ox_residues, b'K', b'W');
@@ -371,8 +371,6 @@ fn mmap_result_identical_semitryptic() {
 /// Asserts the order-independent accepted-PSM set is identical RAM vs Mmap.
 #[test]
 fn mmap_result_identical_asymmetric_tol_cam_only() {
-    use std::sync::Arc;
-
     // One protein with several tryptic peptides whose neutral masses are close
     // together, so the asymmetric window's two sides admit different sets.
     let target = ProteinDb {
@@ -438,7 +436,7 @@ fn mmap_result_identical_asymmetric_tol_cam_only() {
         };
         for aa in r.iter_mut() {
             if aa.residue == b'C' {
-                aa.mod_ = Some(Arc::new(cam_mod.clone()));
+                aa.mod_ = Some(model::modification::leak_mod(cam_mod.clone()));
             }
         }
         Peptide::new(r, pre, post)

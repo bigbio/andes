@@ -3,32 +3,33 @@
 //! bit-equal to the canonical composition-based mass. Pinned by
 //! `tests/standard_aa_masses.rs`.
 //!
-//! The `mod_` field stores an `Option<Arc<Modification>>` rather than an
+//! The `mod_` field stores an `Option<&'static Modification>` rather than an
 //! inline `Option<Modification>`. Candidate enumeration clones an
 //! `AminoAcid` for every position × variant during the
 //! `expand_recursive` walk; with the inline layout each clone also
 //! cloned the `Modification`'s `String` `name` (and optional accession),
 //! producing one heap allocation per modified residue per candidate. At
-//! Astral scale that drives `PreparedSearch::prepare` to ~27 GB RSS on a
-//! 31 GB VM (verified by the `ANDES_RSS_PROBE=1` probe in
-//! `andes.rs`). Wrapping `Modification` in `Arc` makes clones a
-//! refcount bump and shrinks `AminoAcid` from ~96 B to 24 B.
-
-use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+//! Astral scale that drove `PreparedSearch::prepare` to ~27 GB RSS on a
+//! 31 GB VM. A shared handle makes clones cheap and shrinks `AminoAcid`
+//! to 24 B. It was an `Arc` first; the atomic refcount bump per clone then
+//! became the contended hot spot on PTM-rich out-of-core searches (every
+//! worker thread bumping the one Phospho refcount), so the handle is now a
+//! leaked `'static` reference: cloning it is a pointer copy. The per-search
+//! modification table is a few dozen records, so the leak is negligible.
 
 use crate::mass::{nominal_from, C, H, N, O, S};
 use crate::modification::Modification;
+use std::hash::{Hash, Hasher};
 
 #[derive(Debug, Clone)]
 pub struct AminoAcid {
     pub residue: u8,
     pub mass: f64,
     /// `None` for unmodified residues; otherwise a shared handle to one of
-    /// the per-search `Modification` records owned by `AminoAcidSet`. The
-    /// `Arc` makes per-candidate `AminoAcid` clones a refcount bump — see
-    /// the module-level note for why this matters at Astral scale.
-    pub mod_: Option<Arc<Modification>>,
+    /// the per-search `Modification` records (leaked, `'static`). Copying
+    /// the handle is a pointer copy — see the module-level note for why the
+    /// representation matters.
+    pub mod_: Option<&'static Modification>,
 }
 
 impl AminoAcid {
@@ -59,11 +60,10 @@ impl AminoAcid {
     /// field is unchanged; consumers compute total mass as `aa.mass +
     /// mod_.mass_delta` separately (see `Peptide::mass`).
     ///
-    /// Accepts either an owned `Modification` (test code)
-    /// or an `Arc<Modification>` (the hot path inside the candidate
-    /// enumerator). `Into<Arc<Modification>>` is implemented for both
-    /// shapes by `std`, so callers don't need to wrap manually.
-    pub fn with_mod<M: Into<Arc<Modification>>>(mut self, m: M) -> Self {
+    /// Accepts either an owned `Modification` (test code; it is leaked to
+    /// `'static`) or a `&'static Modification` (the hot path inside the
+    /// candidate enumerator).
+    pub fn with_mod<M: Into<&'static Modification>>(mut self, m: M) -> Self {
         self.mod_ = Some(m.into());
         self
     }
@@ -106,14 +106,14 @@ impl Hash for AminoAcid {
     }
 }
 
-fn mods_eq(a: &Option<Arc<Modification>>, b: &Option<Arc<Modification>>) -> bool {
+fn mods_eq(a: &Option<&'static Modification>, b: &Option<&'static Modification>) -> bool {
     match (a, b) {
         (None, None) => true,
         (Some(x), Some(y)) => {
-            // Fast path: same Arc allocation ⇒ trivially equal. This is the
-            // common case after the AminoAcidSet hot path started handing out
-            // shared `Arc<Modification>` handles to every variant.
-            if Arc::ptr_eq(x, y) {
+            // Fast path: same record ⇒ trivially equal. This is the common
+            // case: the AminoAcidSet hands out one shared handle per
+            // registered mod to every variant.
+            if std::ptr::eq(*x, *y) {
                 return true;
             }
             x.name == y.name && x.mass_delta.to_bits() == y.mass_delta.to_bits()

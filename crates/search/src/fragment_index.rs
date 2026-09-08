@@ -45,7 +45,7 @@ pub struct ChunkFragmentIndex {
     bin_width: f64,
     /// CSR over fragment bins: entries of bin `b` are
     /// `entries[bin_start[b]..bin_start[b + 1]]`, sorted by the form's mass.
-    bin_start: Vec<u32>,
+    bin_start: Vec<u64>,
     /// (form id, ion m/z).
     entries: Vec<(u32, f32)>,
 }
@@ -81,11 +81,17 @@ impl ChunkFragmentIndex {
     /// width is the fragment tolerance at the top of the fragment m/z range
     /// (2,500), so a peak checking its own bin and both neighbours finds every
     /// ion within tolerance whatever its m/z.
+    /// Only forms whose neutral mass lies in `[mass_lo, mass_hi]` (the union
+    /// of the chunk's precursor windows) are indexed: a record reachable
+    /// through one modification offset carries dozens of forms at other
+    /// masses, and indexing them all made one chunk's index exceed 2^32 ions.
     pub fn build(
         records: Vec<IndexRecord>,
         db: &SearchIndex,
         params: &SearchParams,
         fragment_tol: Tolerance,
+        mass_lo: f64,
+        mass_hi: f64,
     ) -> Self {
         let bin_width = fragment_tol.as_da(2500.0).max(0.001);
         let per_record: Vec<Vec<FormIons>> = records
@@ -95,6 +101,10 @@ impl ChunkFragmentIndex {
                 expand_base_record(db, params, rec)
                     .iter()
                     .enumerate()
+                    .filter(|(_, cand)| {
+                        let m = cand.peptide.mass();
+                        m >= mass_lo && m <= mass_hi
+                    })
                     .map(|(k, cand)| FormIons {
                         record: r as u32,
                         k: k as u16,
@@ -122,7 +132,7 @@ impl ChunkFragmentIndex {
         let n_bins = max_bin + 2;
         // Counting sort of (bin, form, ion) into CSR, then sort each bin by
         // form mass so a query binary-searches its precursor window.
-        let mut counts = vec![0u32; n_bins + 1];
+        let mut counts = vec![0u64; n_bins + 1];
         for f in per_record.iter().flatten() {
             for &mz in &f.ions {
                 counts[(mz as f64 / bin_width) as usize + 1] += 1;

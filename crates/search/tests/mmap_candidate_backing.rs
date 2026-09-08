@@ -565,7 +565,7 @@ fn fragment_index_ranks_the_true_peptide_first_on_exact_spectra() {
         .expect("prepare_mmap");
     let mi = prepared.mmap_index.as_ref().unwrap();
     let records = mi.records();
-    let fi = ChunkFragmentIndex::build(records, &idx, &params, Tolerance::Da(0.05));
+    let fi = ChunkFragmentIndex::build(records, &idx, &params, Tolerance::Da(0.05), 0.0, f64::MAX);
     assert!(fi.n_forms() > 0);
     // Reference: what the enumeration path scores as top-1 for each spectrum.
     let (queues, cands) = run_prepared(&idx, &params, &spectra, CandidateBacking::Ram, &scorer);

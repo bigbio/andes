@@ -708,11 +708,34 @@ impl<'a> PreparedSearch<'a> {
                     let mut recs: Vec<crate::candidate_index::IndexRecord> =
                         records.values().cloned().collect();
                     recs.sort_unstable_by_key(base_record_key);
+                    // The chunk's precursor mass interval over every spectrum,
+                    // charge and isotope offset; only forms inside it are indexed.
+                    let shift_ppm = params.precursor_mass_shift_ppm;
+                    let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+                    for s in spectra
+                        .iter()
+                        .filter(|s| s.peaks.len() >= params.min_peaks as usize)
+                    {
+                        for z in charges_to_try(s, params) {
+                            let zf = z as f64;
+                            let obs = adjusted_observed_neutral_mass(
+                                s.precursor_mz * zf - zf * PROTON,
+                                shift_ppm,
+                            );
+                            for o in params.isotope_error_range.clone() {
+                                let c = obs - (o as f64) * model::mass::ISOTOPE;
+                                lo = lo.min(c - params.precursor_tolerance.left.as_da(c));
+                                hi = hi.max(c + params.precursor_tolerance.right.as_da(c));
+                            }
+                        }
+                    }
                     Some(ChunkFragmentIndex::build(
                         recs,
                         self.idx,
                         params,
                         self.scorer.feature_match_tolerance(),
+                        lo,
+                        hi,
                     ))
                 } else {
                     None

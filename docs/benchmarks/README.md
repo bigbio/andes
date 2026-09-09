@@ -386,11 +386,17 @@ scans" are pGlyco2 reference scans whose recorded precursor sits an integer 3–
 above peptide + Cam-C + Ox-M + glycan (the true-offset cross-tab used for the T-1 table).
 "pGlyco2 coverage of +2..+6" counts accepted PSMs in those tiers that are reference scans.*
 
-**Five fractions summed, by true offset of the pGlyco2 reference scan** (17,855 scans, 17,562
-mass-resolvable; "confirmed" is the backbone, "peptidoform-correct" adds the composition):
+**Five fractions summed, by true offset of the pGlyco2 reference scan.** 17,855 reference
+scans; 17,562 of them are mass-resolvable (recorded precursor minus peptide + Cam-C + Ox-M +
+glycan is within 20 ppm of an integer number of isotopes between −2 and +8) and every one of
+those is in a row below; the other 293 have no integer offset and are not counted anywhere.
+"Confirmed" is the backbone, "peptidoform-correct" adds the composition; percentages are of
+the row's reference scans.
 
 | true offset | reference scans | corrector shifted | confirmed | peptidoform-correct |
 |---|---:|---:|---:|---:|
+| −2 | 10 | 0 | 0 | 0 |
+| −1 | 117 | 0 | 37 (31.6%) | 0 |
 | 0 | 16,057 | 0 | 14,840 (92.4%) | 14,574 |
 | +1 | 787 | 3 | 689 (87.5%) | 634 |
 | **+2** | **76** | **25** | **40 (52.6%)** | **18** |
@@ -399,6 +405,7 @@ mass-resolvable; "confirmed" is the backbone, "peptidoform-correct" adds the com
 | +5 | 79 | 69 | 66 | 58 |
 | +6 | 12 | 9 | 7 | 7 |
 | **+3..+6** | **515** | **487** | **464 (90.1%)** | **429** |
+| all resolvable | 17,562 | 490 | 16,103 (91.7%) | 15,662 |
 
 The +4 tier is confirmed at the same rate as the untouched offset-0 population (93.2% vs
 92.4%) and is peptidoform-correct in 94% of the confirmed cases; the 515 firmware scans are

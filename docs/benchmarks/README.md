@@ -405,7 +405,7 @@ the row's reference scans.
 | +5 | 79 | 69 | 66 | 58 |
 | +6 | 12 | 9 | 7 | 7 |
 | **+3..+6** | **515** | **487** | **464 (90.1%)** | **429** |
-| all resolvable | 17,562 | 490 | 16,103 (91.7%) | 15,662 |
+| all resolvable | 17,562 | 515 | 16,070 (91.5%) | 15,655 |
 
 The +4 tier is confirmed at the same rate as the untouched offset-0 population (93.2% vs
 92.4%) and is peptidoform-correct in 94% of the confirmed cases; the 515 firmware scans are

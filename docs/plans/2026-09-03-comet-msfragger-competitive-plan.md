@@ -297,7 +297,19 @@ measurement makes it the next thing to build.
 
 ### C2. Milestones
 
-**Status 2026-09-08 (PR #77):** milestones 1–3 built and measured on the full phospho file:
+**Status 2026-09-09 (PR #77, commit `e57a21f8`): COMET PARITY REACHED.** Full phospho file,
+32 threads, production defaults: index K=100 → **169 s** wall (search phase 123 s, ~830
+spectra/s), 37,258–37,280 PSMs @1%, FDP 1.15–1.16%, 26,883 phospho PSMs, 82.5% MaxQuant
+coverage, RSS 25 GB; Comet 226 s / 33,888–34,025 / 1.75% / 23,888 / 77.9%. What closed the
+last 5x: a mass-bounded form walk (variable mods only add mass, so a branch's running sum
+plus the min/max of the remaining positions bounds its final mass — the previous build
+enumerated every form of every reachable record and discarded ~97% afterwards) and
+mass-ordered form ids (per-bin sort becomes an integer sort; the precursor window becomes an
+id range). Profile now: bounded walk 28%, GBDT 12%, scoring 9%, record scan 9%, sorts 12%.
+Open: `auto` selection (index on whenever the candidate index is out-of-core), slice width
+adaptive to the #68 memory budget, standard-set confirmation.
+
+**Status 2026-09-08 (first build):** milestones 1–3 built and measured on the full phospho file:
 index K=100 → 1,167 s, 37,136–37,213 PSMs @1%, FDP 1.01–1.09%, 26,858 phospho PSMs, 82.5%
 MaxQuant coverage, peak RSS 11 GB (enumeration 5,954 s / 36.8k / 1.22–1.32%; Comet 226 s).
 Measured design facts: ~88k peptidoforms per Da on this search space, so index chunks are

@@ -80,7 +80,7 @@ re-measured 2026-09-06 at the commit introducing the gated NeuGc bound, native `
 | | TMT, UPS1 | — | skipped | high-res only, by design | | |
 | **Glyco, deep tier** | pGlyco2 mouse liver PXD005553, 5 fractions, TRFP 1.4.3, `main` `14818d3e` | glycoPSMs @1% | **31,666 ± 9** | pGlyco2 **78.9% confirmed** · MSFragger **88.0% confirmed**, 95.8% peptidoform agreement | **1.11% ± 0.03 true FDP** (1:1 database) | 23–29 min / fraction, 16 cores |
 | **Glyco, quick tier** | one pGlyco2 liver fraction (`MouseLiver-Z-T-1`), native `.raw`, gated NeuGc bound (2026-09-06) | glycoPSMs @1% | **7,122** (6,532 with the previous NeuGc ≤ 1 list, same binary) | pGlyco2 **86.7% confirmed** (was 77.9%) · MSFragger 87.8% confirmed, 96.3% / 95.6% peptidoform agreement | **1.13% true FDP** (CI 0.80–1.55; 1.10% before) | 8,145 s, 8 threads (WSL2 host) |
-| **Phospho-enriched** (first PTM benchmark) | PXD007653 mouse liver EasyPhos, one file (`control2`), Q Exactive HCD, mzML via TRFP 1.4.3, binary `d606d962` | PSMs @ q≤0.01 (5 Percolator seeds) | default model **36,817–36,922** · `--protocol phospho` 36,780–36,884; **26,629 / 26,767 phospho-bearing** | **Comet 2025.01, same settings: 33,888–34,025 (+8.5% for andes), 23,888 phospho-bearing, 1.73–1.78% FDP, 77.9% of MaxQuant covered, 226 s** · MaxQuant (PEP≤0.01, 23,563 scans): **82.1% covered**, 98.3% bare-peptide agreement | **1.22–1.32%** / **1.10–1.14%** true FDP (1:1 database) | 99 / 101 min, 32 threads — **26x slower than Comet** |
+| **Phospho-enriched** (first PTM benchmark) | PXD007653 mouse liver EasyPhos, one file (`control2`), Q Exactive HCD, mzML via TRFP 1.4.3 | PSMs @ q≤0.01 (Percolator seeds) | enumeration path (`d606d962`): **36,817–36,922** · `--protocol phospho` 36,780–36,884 · **fragment-ion index (`e57a21f8`, K=100): 37,258–37,280, 26,883 phospho-bearing** | **Comet 2025.01, same settings: 33,888–34,025 (+9.6% for andes), 23,888 phospho-bearing, 1.73–1.78% FDP, 77.9% of MaxQuant covered, 226 s** · MaxQuant (PEP≤0.01, 23,563 scans): **82.5% covered**, 98.3% bare-peptide agreement | **1.15–1.16%** true FDP with the index (1.22–1.32% enumeration; 1:1 database) | **169 s** with the index (enumeration 99 min), 32 threads — **25% faster than Comet** |
 
 † Java MS-GF+ v20240326 was not re-run in the 2026-09 session; its counts are historical
 (same protocol, earlier session) and it remains ~10-40x slower than andes.
@@ -460,9 +460,13 @@ is **26x slower** on the enumeration path. With the per-chunk fragment-ion index
 | andes path | wall (32 threads) | PSMs @ q≤0.01 | true FDP | phospho-bearing PSMs | MaxQuant scans covered |
 |---|---:|---:|---:|---:|---:|
 | enumeration | 5,954 s | 36,817–36,922 | 1.22–1.32% | 26,629 | 82.1% |
-| fragment index, K=100 | **1,167 s** | **37,136–37,213** | **1.01–1.09%** | **26,858** | **82.5%** |
+| fragment index, first build (K=100) | 1,167 s | 37,136–37,213 | 1.01–1.09% | 26,858 | 82.5% |
+| **fragment index, pruned mass-ordered build (K=100)** | **169 s** | **37,258–37,280** | **1.15–1.16%** | **26,883** | **82.5%** |
 
-5.1x faster than enumeration with more identifications at lower error; 5x from Comet. The time gap is the open problem for PTM-rich searches: Comet also
+**Comet parity on time is reached and exceeded:** 169 s against Comet's 226 s on the same
+node, including andes's 24 s calibration pre-pass and I/O (the search phase alone is 123 s,
+~830 spectra/s), with +9.6% PSMs and +12.4% phospho PSMs at a third less measured error.
+Peak RSS is 25 GB (150 Da index slices); the enumeration path needs 11 GB. The time gap is the open problem for PTM-rich searches: Comet also
 enumerates every peptidoform, but scores each with a binned correlation that costs
 microseconds, while andes materialises a peptide object per form and runs its full scorer
 on it. Closing it needs a cheap first-stage filter before full scoring and scoring from the
@@ -672,10 +676,10 @@ so no entrapment FDP is computable from it and its counts are rescored `q ≤ 0.
 - **The phospho benchmark is one file and peptide-level only.** Two more files of the same
   regime are listed in `fetch_spectra.sh` for a pooled tier; site localisation is not
   scored on either side. `--refine` is still measured only on Astral.
-- **andes is 5x slower than Comet on the phospho file with the fragment-ion index**
-  (1,167 s vs 226 s, same node and settings; 26x on the enumeration path) while identifying
-  more. The standing goal is Comet parity on time at equal or better identifications; see
-  the phospho section and `docs/plans/2026-09-03-comet-msfragger-competitive-plan.md`
+- **The phospho index path is measured on one file and one node.** 169 s vs Comet's 226 s
+  (enumeration: 5,954 s). Not yet measured: the index on the standard sets (they run
+  in RAM, where it is not used), memory-adaptive slice widths (25 GB peak now), and a
+  second phospho file. See `docs/plans/2026-09-03-comet-msfragger-competitive-plan.md`
   workstream C.
 - **Glyco selection is the open problem**, and whether those 37% are recoverable by scoring
   at all is unknown — it needs a candidate-pool dump taken at retention time under

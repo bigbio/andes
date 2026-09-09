@@ -1095,6 +1095,7 @@ mod tests {
             min_peaks: 10,
             precursor_cal_mode: search::PrecursorCalMode::Off,
             cal_min_spec_keys: search::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS,
+            mmap_window_cache_max_candidates: 4_000_000,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,

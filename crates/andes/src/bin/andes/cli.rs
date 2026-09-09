@@ -161,6 +161,20 @@ pub(crate) struct SearchArgs {
     #[arg(long = "precursor-cal", default_value = "auto", value_parser = parse_precursor_cal)]
     pub(crate) precursor_cal: PrecursorCalMode,
 
+    /// Minimum number of (spectrum, charge) keys before the calibration pre-pass
+    /// runs; below it calibration is skipped as unreliable. Default 10000. Hidden:
+    /// exists so the out-of-core equivalence gate can force the pre-pass on the
+    /// small in-repo fixture; production runs should leave it alone.
+    #[arg(long = "cal-min-spec-keys", hide = true)]
+    pub(crate) cal_min_spec_keys: Option<usize>,
+
+    /// Out-of-core (`--candidate-index mmap`) only: cap on the total candidates
+    /// held in the per-chunk window cache (a pure memo; output is unchanged).
+    /// Lower it if a PTM-rich search runs out of memory, raise it for speed when
+    /// memory allows. Default 4000000 (~1 GiB).
+    #[arg(long = "mmap-window-cache-candidates", hide = true)]
+    pub(crate) mmap_window_cache_candidates: Option<usize>,
+
     /// Precursor mass tolerance as `VALUE+unit`. Accepts ppm (e.g. `20ppm`,
     /// high-res) or Da (e.g. `0.02da`/`0.02Da`, low-res precursor selection).
     /// Default `20ppm`.

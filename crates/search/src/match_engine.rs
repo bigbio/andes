@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::{smallvec, SmallVec};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::candidate_gen::{enumerate_candidates, lazy_candidates_for_nominal_window, Candidate};
 use crate::candidate_index::MmapCandidateIndex;
@@ -688,11 +689,20 @@ impl<'a> PreparedSearch<'a> {
             keys.sort_unstable();
             keys.dedup();
             keys.truncate(MMAP_WINDOW_CACHE_MAX);
+            // Bound the cache by TOTAL candidates, not only by window count: a
+            // PTM-rich search can put tens of thousands of peptidoforms in one
+            // window. Windows admitted after the budget is spent are dropped
+            // and their spectra expand directly below; which windows land in
+            // the cache under parallel contention is not deterministic, but
+            // the cache is a pure memo so the scored output never changes.
+            let budget = params.mmap_window_cache_max_candidates;
+            let cached_total = AtomicUsize::new(0);
             Some(
                 keys.into_par_iter()
-                    .map(|k| {
+                    .filter_map(|k| {
                         let v = self.expand_mmap_window_candidates(params, &k);
-                        (k, v)
+                        let before = cached_total.fetch_add(v.len(), Ordering::Relaxed);
+                        (before + v.len() <= budget).then_some((k, v))
                     })
                     .collect(),
             )

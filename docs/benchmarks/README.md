@@ -468,10 +468,13 @@ leaves the first unchanged and improves the second. The disagreement is one mech
 andes assigns one NeuGc where pGlyco2 assigns Hex + Fuc, a 1.02 Da difference absorbed
 at `isotope_error = 1` — 229 of 436 disagreements on heart, 375 of 599 on lung, at
 offsets 0 and 1 that every window searches — plus the exactly isobaric Hex + NeuAc ↔
-Fuc + NeuGc pair. Liver shows the same two patterns at a quarter of the rate; heart and
-lung carry more NeuGc (12.9%, 21.8% and 22% of reference scans with NeuGc ≥ 1 on liver,
-heart and lung). This is the scorer preferring NeuGc on NeuGc-rich tissue and belongs in
-its own issue; it is not the corrector's or the window's doing.
+Fuc + NeuGc pair. Liver shows the same two patterns at a quarter of the rate, and the
+reference tables say why: NeuGc prevalence is the same on all three tissues (21–23% of
+reference scans carry NeuGc ≥ 1), but **fucosylation is five times higher** on heart and
+lung (23% and 26% of reference scans with Fuc ≥ 1, against 5% on liver). The swap replaces
+Hex + Fuc with NeuGc, so it scales with the fucosylated population. This is the scorer
+under-calling fucose in favour of NeuGc and belongs in its own issue; it is not the
+corrector's or the window's doing.
 
 **Offline validation of the corrector** (`--precursor-mono-dump`, 23 s for the file, no
 search). For every pGlyco2 reference scan the true offset is the integer k that makes

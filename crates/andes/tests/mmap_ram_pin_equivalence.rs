@@ -84,6 +84,10 @@ fn run_search(
         .arg("1000")
         .arg("--candidate-index")
         .arg(backing)
+        // This gate is about the ENUMERATION paths agreeing; the fragment-ion
+        // index (`auto` on the mmap arm) changes the candidate set by design.
+        .arg("--fragment-index")
+        .arg("off")
         .arg("--output-pin")
         .arg(out);
     if let Some(m) = mods {

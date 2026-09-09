@@ -62,6 +62,19 @@ pub(crate) enum ScoreFlag {
     Strong,
 }
 
+/// Fragment-ion index for out-of-core searches (issue #76).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub(crate) enum FragmentIndexFlag {
+    /// On whenever the candidate index is out-of-core (default).
+    #[default]
+    Auto,
+    /// On in out-of-core mode; a warning (and enumeration) when the candidate
+    /// index is in RAM.
+    On,
+    /// Per-spectrum enumeration even out-of-core.
+    Off,
+}
+
 /// Candidate-resolution backing: in-RAM (`ram`, default) or out-of-core mmap
 /// base-peptide index with lazy mod enumeration (`mmap`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -175,10 +188,19 @@ pub(crate) struct SearchArgs {
     #[arg(long = "mmap-window-cache-candidates", hide = true)]
     pub(crate) mmap_window_cache_candidates: Option<usize>,
 
-    /// Out-of-core mode only: score each spectrum against at most K peptidoforms
-    /// chosen by a per-chunk fragment-ion index (issue #76) instead of every
-    /// peptidoform in its precursor windows. 0 (default) = off. Changes the
-    /// candidate set, so judged on identifications, not byte-identity.
+    /// Fragment-ion index for out-of-core searches: `auto` (default) uses it
+    /// whenever the candidate index does not fit in RAM (`--candidate-index`
+    /// resolves to `mmap`), `on` forces it in out-of-core mode, `off` keeps
+    /// per-spectrum enumeration. Spectra are scored in precursor-mass order
+    /// against the peptidoforms their fragment peaks vote for. On a phospho
+    /// search this was 169 s instead of 5,954 s at +1% PSMs; searches that
+    /// fit in RAM are untouched.
+    #[arg(long = "fragment-index", default_value = "auto")]
+    pub(crate) fragment_index: FragmentIndexFlag,
+
+    /// Fragment-index mode: score each spectrum against at most K peptidoforms
+    /// (best fragment votes first). Default 100; measured 50–1000 within seed
+    /// noise on phospho.
     #[arg(long = "fragment-index-top-k", hide = true)]
     pub(crate) fragment_index_top_k: Option<u32>,
 

@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::cli::{
-    CandidateIndexFlag, Cli, EnzymeSpecificity, EthcdActivationFlag, Fragmentation,
-    GlycoIsotopeFlag, PrecursorMonoFlag, Protocol, ScoreFlag,
+    CandidateIndexFlag, Cli, EnzymeSpecificity, EthcdActivationFlag, FragmentIndexFlag,
+    Fragmentation, GlycoIsotopeFlag, PrecursorMonoFlag, Protocol, ScoreFlag,
 };
 use crate::glyco_run::run_glyco;
 use crate::memlimit::available_memory_budget;
@@ -592,9 +592,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(n) = cli.mmap_window_cache_candidates {
         params.mmap_window_cache_max_candidates = n;
     }
-    if let Some(k) = cli.fragment_index_top_k {
-        params.fragment_index_top_k = k;
-    }
     if let Some(m) = cli.fragment_index_min_matched {
         params.fragment_index_min_matched = m;
     }
@@ -664,6 +661,33 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `bucket_index` DURING scanning, so they are not supported together with
     // `--candidate-index mmap` in this phase (fail loud rather than silently
     // produce wrong results).
+    // Fragment-ion index (issue #76): on the out-of-core path unless told
+    // otherwise. Chimeric, refine and glyco keep enumeration (they read the
+    // full candidate lists).
+    let index_eligible = params.candidate_index == search::CandidateIndexMode::Mmap
+        && !cli.glyco
+        && !cli.refine
+        && !chimeric_active;
+    params.fragment_index_top_k = match cli.fragment_index {
+        FragmentIndexFlag::Off => 0,
+        FragmentIndexFlag::Auto | FragmentIndexFlag::On if index_eligible => {
+            cli.fragment_index_top_k.unwrap_or(100)
+        }
+        FragmentIndexFlag::On => {
+            eprintln!(
+                "WARN: --fragment-index on has no effect here (the candidate index is in RAM, \
+                 or --chimeric/--refine/--glyco is active); using enumeration."
+            );
+            0
+        }
+        FragmentIndexFlag::Auto => 0,
+    };
+    if params.fragment_index_top_k > 0 {
+        eprintln!(
+            "fragment-index: on (top-k {}, min matched ions {})",
+            params.fragment_index_top_k, params.fragment_index_min_matched
+        );
+    }
     if params.candidate_index == search::CandidateIndexMode::Mmap {
         if params.chimeric {
             return Err(

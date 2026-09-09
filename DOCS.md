@@ -92,6 +92,7 @@ Native `.raw`/`.d` search **MS2 (identification) scans only** — MS1 and MS3+ s
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
 | `--precursor-cal` | enum | `auto` | Precursor-mass calibration: `off`, `auto`, or `on`. `auto`/`on` run a pre-pass that learns a systematic ppm shift from confident PSMs, then tighten the precursor tolerance for the main search; `auto` (the default) skips the correction when the sample is too small to be reliable, so it is safe to leave on. No effect on native `.raw` or `.d` input — calibration is not yet supported for those formats, so it is skipped (with a warning) and the search proceeds uncalibrated. | Java `-precursorCal auto\|on\|off` |
+| `--fragment-index` | enum | `auto` | Fragment-ion index for out-of-core searches: `auto` (default) uses it whenever the candidate index does not fit in RAM (`--candidate-index` resolves to `mmap`), `on` forces it in out-of-core mode, `off` keeps per-spectrum enumeration. Spectra are scored in precursor-mass order against the peptidoforms their fragment peaks vote for (top 100 by matched b/y ions, at least 3). Measured on a phospho file: 169 s instead of 5,954 s at +1% PSMs and lower entrapment FDP; searches that fit in RAM are untouched. Not used with `--chimeric`, `--refine`, or `--glyco`. | *(no Java equivalent)* |
 
 ### Runtime
 

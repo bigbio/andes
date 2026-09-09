@@ -2671,7 +2671,6 @@ mod tests {
         use model::amino_acid::AminoAcid;
         use model::modification::{ModLocation, Modification, ResidueSpec};
         use model::peptide::Peptide;
-        use std::sync::Arc;
 
         let p = tiny_param_with_ions(); // HCD + high-res; one intact prefix ion
         let scorer = RankScorer::new(&p);
@@ -2687,7 +2686,7 @@ mod tests {
             neutral_losses: vec![162.0528],
             loss_class: 1,
         };
-        let t = AminoAcid::standard(b'T').unwrap().with_mod(Arc::new(m));
+        let t = AminoAcid::standard(b'T').unwrap().with_mod(m);
         let w1 = AminoAcid::standard(b'W').unwrap();
         let w2 = AminoAcid::standard(b'W').unwrap();
         let pep = Peptide::new(vec![t, w1, w2], b'_', b'-');

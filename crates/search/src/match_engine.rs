@@ -3062,7 +3062,6 @@ mod dedup_tests {
     use model::modification::{ModLocation, Modification};
     use model::peptide::Peptide;
     use model::ResidueSpec;
-    use std::sync::Arc;
 
     fn seq_peptide(bytes: &[u8]) -> Peptide {
         let residues: Vec<AminoAcid> = bytes
@@ -3132,7 +3131,7 @@ mod dedup_tests {
     #[test]
     fn dedup_distinguishes_mod_state() {
         let mut ox = seq_peptide(b"PEPMK");
-        ox.residues[3].mod_ = Some(Arc::new(Modification {
+        ox.residues[3].mod_ = Some(model::modification::leak_mod(Modification {
             name: "Ox".into(),
             mass_delta: 15.99491,
             residue: ResidueSpec::Specific(b'M'),

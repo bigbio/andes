@@ -1403,6 +1403,33 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         debug_assert_eq!(mono_table.len(), all_spectra.len());
     }
+    // Corrected precursors search a 0..=1 window: the `+2` step only carries the
+    // Hex+Fuc/NeuGc composition degeneracy once the monoisotope is right
+    // (bigbio/andes#64 arm F; rationale on `coupled_isotope_window`). Explicit
+    // window flags win, and nothing changes unless an MS2 was actually fitted.
+    // The glyco scorer reads its window from the prepared index's params, which
+    // are borrowed for the rest of the run, so the narrowed window travels as a
+    // `GlycoConfig` override instead of a mutation.
+    let (window, narrowed) = crate::mono::coupled_isotope_window(
+        mono_active,
+        cli.isotope_error,
+        cli.glyco_isotope_error == GlycoIsotopeFlag::Default,
+        params.isotope_error_range.clone(),
+    );
+    let glyco_isotope_override = if narrowed {
+        eprintln!(
+            "precursor-mono: isotope-error window {}..={} -> {}..={} (corrected precursors \
+             need no +2 step; it only admits the Hex+Fuc/NeuGc composition degeneracy — \
+             pass --isotope-error to override)",
+            params.isotope_error_range.start(),
+            params.isotope_error_range.end(),
+            window.start(),
+            window.end()
+        );
+        Some(window)
+    } else {
+        None
+    };
 
     // Downstream code uses these names.
     let spectra = all_spectra;
@@ -1444,6 +1471,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 None
             },
+            glyco_isotope_override,
             t_total,
         )?;
         return Ok(());

@@ -88,6 +88,12 @@ pub struct GlycoConfig {
     /// Diagnostic: restrict scoring to the scan numbers listed in this file, one per
     /// line. `None` scores every spectrum.
     pub scan_filter_path: Option<std::path::PathBuf>,
+    /// Search this isotope-error window instead of `SearchParams::isotope_error_range`.
+    /// Set by the driver once `--precursor-mono auto` has corrected precursors: the
+    /// `+2` step of the sweep then only carries the (k, X) ≡ (k−1, X + Hex + Fuc −
+    /// NeuGc) composition degeneracy, so corrected runs search `0..=1`
+    /// (bigbio/andes#64 arm F). `None` keeps the params' window.
+    pub isotope_error_override: Option<std::ops::RangeInclusive<i8>>,
     /// Cap on the number of peaks the GENERATION stage sees (the most intense N),
     /// as a guard against pathological scans. 0 = no cap. Scoring always reads the
     /// full spectrum, so a generated candidate is never scored on truncated evidence.
@@ -171,6 +177,7 @@ impl Default for GlycoConfig {
             max_gen_peaks: 0,
             cz_multisite: false,
             scan_filter_path: None,
+            isotope_error_override: None,
             pf_charge: 2,
             retrieval_tol_ppm: None,
             retrieval_tol_da: None,
@@ -643,6 +650,9 @@ pub struct GlycoScoreCtx<'a> {
     pub features_collapse: bool,
     pub features_enumerated: bool,
     pub scan_filter: Option<&'a std::collections::HashSet<i32>>,
+    /// The isotope-error window this run searches: the driver's override when
+    /// `--precursor-mono auto` corrected precursors, else `params.isotope_error_range`.
+    pub isotope_error_range: std::ops::RangeInclusive<i8>,
     /// Per-candidate N-X-S/T sequon membership (indexed by candidate slot),
     /// precomputed once so the scoring hot loop is an O(1) lookup.
     pub sequon_membership: &'a [bool],
@@ -662,6 +672,8 @@ pub struct GlycoCtxOwned {
     frag_index: FragmentIndex,
     glycan_sorted: Vec<(f64, usize)>,
     scan_filter: Option<std::collections::HashSet<i32>>,
+    /// `GlycoConfig::isotope_error_override`, resolved per run.
+    isotope_error_override: Option<std::ops::RangeInclusive<i8>>,
     effective_top_k: usize,
     max_peptide_first: usize,
     peptide_first_on: bool,
@@ -889,6 +901,7 @@ impl GlycoCtxOwned {
             frag_index,
             glycan_sorted,
             scan_filter,
+            isotope_error_override: cfg.isotope_error_override.clone(),
             effective_top_k,
             max_peptide_first,
             peptide_first_on,
@@ -963,6 +976,10 @@ impl GlycoCtxOwned {
             features_collapse: self.features_collapse,
             features_enumerated: self.features_enumerated,
             scan_filter: self.scan_filter.as_ref(),
+            isotope_error_range: self
+                .isotope_error_override
+                .clone()
+                .unwrap_or_else(|| prepared.params.isotope_error_range.clone()),
             sequon_membership: &self.sequon_membership,
             all_spectra,
             hcd_partner,
@@ -1275,8 +1292,8 @@ fn score_spectrum_glyco(
     // trying only the monoisotopic offset silently loses the true
     // backbone. Each resulting `BackboneHit` records the (charge,
     // isotope_offset) pair that produced it (see hybrid.rs).
-    let iso_min = *params.isotope_error_range.start();
-    let iso_max = *params.isotope_error_range.end();
+    let iso_min = *ctx.isotope_error_range.start();
+    let iso_max = *ctx.isotope_error_range.end();
     let mut all_backbone: Vec<BackboneHit> = Vec::new();
     for &z in &charges_to_try {
         let charge_f = z as f64;

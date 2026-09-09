@@ -542,7 +542,10 @@ pub(crate) struct SearchArgs {
     /// `.raw`). `auto` fits the observed envelope at the reported charge against a
     /// glycopeptide isotope model under the hypotheses "the recorded precursor is
     /// the M+k peak", k = 0..6, and moves the precursor down when a k > 0 clearly
-    /// wins; the search then keeps its DEFAULT narrow `--isotope-error` window.
+    /// wins; the search then runs a `0..1` isotope window instead of the glyco
+    /// default `0..2` (the `+2` step only carries the Hex+Fuc/NeuGc composition
+    /// degeneracy once precursors are corrected; bigbio/andes#64 arm F). An explicit
+    /// `--isotope-error`, or `--glyco-isotope-error negative|wide`, is honoured.
     /// `off` (default) leaves every precursor as recorded. Motivation: on pGlyco2
     /// mouse liver the firmware records 3-6 Da above the monoisotope on a class of
     /// wide, high-mass glycopeptide envelopes, and widening the isotope window to

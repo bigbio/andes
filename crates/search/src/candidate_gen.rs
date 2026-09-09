@@ -389,18 +389,26 @@ pub(crate) fn expand_mod_combinations(
     out
 }
 
-/// Visit every peptidoform of `span` as its per-residue masses (residue mass
-/// plus the modification delta), in EXACTLY the order and with the same index
-/// `k` as [`expand_mod_combinations`] produces them, without allocating a
-/// residue vector per form. Used by the fragment-ion index build, where the
-/// per-form `Peptide`/`Candidate` was ~70% of the run.
-pub(crate) fn for_each_form_masses(
+/// Shared bounded walk over the peptidoforms of `span`: the same recursion
+/// and iteration order as [`expand_mod_combinations`], but subtrees whose
+/// neutral mass cannot land in `[mass_lo, mass_hi]` are pruned. Variable
+/// modifications only add mass here, so a branch's running sum plus the
+/// minimum (or maximum) of the remaining positions bounds its final mass; the
+/// maximum ignores the per-peptide mod cap, which can only keep a branch, never
+/// drop a feasible one. `visit` sees the pruned index `k` (dense over the
+/// forms that survive), the chosen variants, and their masses. Both the
+/// fragment-ion index build and its materialisation use this walk, so `k`
+/// means the same thing on both sides.
+fn walk_forms_bounded(
     span: &[u8],
     params: &SearchParams,
     is_protein_n_term: bool,
     is_protein_c_term: bool,
-    mut f: impl FnMut(usize, &[f64]),
+    mass_lo: f64,
+    mass_hi: f64,
+    mut visit: impl FnMut(usize, &[&AminoAcid], &[f64]),
 ) {
+    use model::mass::H2O;
     let n = span.len();
     if n == 0 {
         return;
@@ -430,19 +438,47 @@ pub(crate) fn for_each_form_masses(
             }
         })
         .collect();
+    let mass_of = |aa: &AminoAcid| aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
+    // Suffix sums of the per-position minimum and maximum variant mass.
+    let mut min_rest = vec![0.0f64; n + 1];
+    let mut max_rest = vec![0.0f64; n + 1];
+    for i in (0..n).rev() {
+        let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+        for v in position_variants[i] {
+            let m = mass_of(v);
+            lo = lo.min(m);
+            hi = hi.max(m);
+        }
+        if position_variants[i].is_empty() {
+            return;
+        }
+        min_rest[i] = min_rest[i + 1] + lo;
+        max_rest[i] = max_rest[i + 1] + hi;
+    }
+    if min_rest[0] + H2O > mass_hi || max_rest[0] + H2O < mass_lo {
+        return;
+    }
     let mut masses: Vec<f64> = Vec::with_capacity(n);
+    let mut chosen: Vec<&AminoAcid> = Vec::with_capacity(n);
     let mut k = 0usize;
-    fn rec(
-        pv: &[&[AminoAcid]],
+    #[allow(clippy::too_many_arguments)]
+    fn rec<'a>(
+        pv: &[&'a [AminoAcid]],
         pos: usize,
+        sum: f64,
         masses: &mut Vec<f64>,
+        chosen: &mut Vec<&'a AminoAcid>,
         mods_used: u32,
         max_mods: u32,
+        min_rest: &[f64],
+        max_rest: &[f64],
+        lo: f64,
+        hi: f64,
         k: &mut usize,
-        f: &mut impl FnMut(usize, &[f64]),
+        visit: &mut impl FnMut(usize, &[&AminoAcid], &[f64]),
     ) {
         if pos == pv.len() {
-            f(*k, masses);
+            visit(*k, chosen, masses);
             *k += 1;
             return;
         }
@@ -452,43 +488,145 @@ pub(crate) fn for_each_form_masses(
             if new_mods > max_mods {
                 continue;
             }
-            masses.push(variant.mass + variant.mod_.as_ref().map_or(0.0, |m| m.mass_delta));
-            rec(pv, pos + 1, masses, new_mods, max_mods, k, f);
+            let m = variant.mass + variant.mod_.as_ref().map_or(0.0, |md| md.mass_delta);
+            let next = sum + m;
+            // Bounds for everything under this choice.
+            if next + min_rest[pos + 1] + H2O > hi || next + max_rest[pos + 1] + H2O < lo {
+                continue;
+            }
+            masses.push(m);
+            chosen.push(variant);
+            rec(
+                pv,
+                pos + 1,
+                next,
+                masses,
+                chosen,
+                new_mods,
+                max_mods,
+                min_rest,
+                max_rest,
+                lo,
+                hi,
+                k,
+                visit,
+            );
+            chosen.pop();
             masses.pop();
         }
     }
     rec(
         &position_variants,
         0,
+        0.0,
         &mut masses,
+        &mut chosen,
         0,
         params.max_variable_mods_per_peptide,
+        &min_rest,
+        &max_rest,
+        mass_lo,
+        mass_hi,
         &mut k,
-        &mut f,
+        &mut visit,
     );
 }
 
-/// [`for_each_form_masses`] for one index record: reconstructs the span and
-/// terminal flags exactly as [`expand_base_record`] does. Does nothing for a
-/// record that does not fit its protein.
-pub fn for_each_record_form_masses(
-    db: &SearchIndex,
-    params: &SearchParams,
+/// Span, terminal flags, and flanks of an index record; `None` when the
+/// record does not fit its protein.
+fn record_span<'a>(
+    db: &'a SearchIndex,
     rec: &crate::candidate_index::IndexRecord,
-    f: impl FnMut(usize, &[f64]),
-) {
+) -> Option<(&'a [u8], bool, bool, u8, u8)> {
     use crate::candidate_index::flags;
     let protein = &db.db.proteins[rec.protein_index as usize];
     let seq = &protein.sequence;
     let abs_start = rec.start_offset as usize;
     let abs_end = abs_start + rec.length as usize;
     if abs_end > seq.len() {
-        return;
+        return None;
     }
-    let span = &seq[abs_start..abs_end];
-    let is_protein_n_term = rec.flags & flags::IS_PROTEIN_N_TERM != 0;
-    let is_protein_c_term = rec.flags & flags::IS_PROTEIN_C_TERM != 0;
-    for_each_form_masses(span, params, is_protein_n_term, is_protein_c_term, f);
+    let pre = if abs_start == 0 {
+        b'_'
+    } else {
+        seq[abs_start - 1]
+    };
+    let post = if abs_end == seq.len() {
+        b'-'
+    } else {
+        seq[abs_end]
+    };
+    Some((
+        &seq[abs_start..abs_end],
+        rec.flags & flags::IS_PROTEIN_N_TERM != 0,
+        rec.flags & flags::IS_PROTEIN_C_TERM != 0,
+        pre,
+        post,
+    ))
+}
+
+/// Visit the peptidoforms of one index record whose neutral mass lies in
+/// `[mass_lo, mass_hi]`, as per-residue masses, with the pruned index `k`.
+/// Nothing per form is allocated.
+pub fn for_each_record_form_masses_bounded(
+    db: &SearchIndex,
+    params: &SearchParams,
+    rec: &crate::candidate_index::IndexRecord,
+    mass_lo: f64,
+    mass_hi: f64,
+    mut f: impl FnMut(usize, &[f64]),
+) {
+    let Some((span, n_term, c_term, _, _)) = record_span(db, rec) else {
+        return;
+    };
+    walk_forms_bounded(
+        span,
+        params,
+        n_term,
+        c_term,
+        mass_lo,
+        mass_hi,
+        |k, _, masses| f(k, masses),
+    );
+}
+
+/// The peptidoforms of one index record whose neutral mass lies in
+/// `[mass_lo, mass_hi]`, materialised as candidates, in the SAME pruned order
+/// as [`for_each_record_form_masses_bounded`] visits them (so index `k` on one
+/// side selects the same form on the other).
+pub fn expand_base_record_bounded(
+    db: &SearchIndex,
+    params: &SearchParams,
+    rec: &crate::candidate_index::IndexRecord,
+    mass_lo: f64,
+    mass_hi: f64,
+) -> Vec<Candidate> {
+    use crate::candidate_index::flags;
+    let Some((span, n_term, c_term, pre, post)) = record_span(db, rec) else {
+        return Vec::new();
+    };
+    let is_decoy = rec.flags & flags::IS_DECOY != 0;
+    let mut out = Vec::new();
+    walk_forms_bounded(
+        span,
+        params,
+        n_term,
+        c_term,
+        mass_lo,
+        mass_hi,
+        |_, chosen, _| {
+            let residues: Vec<AminoAcid> = chosen.iter().map(|aa| (*aa).clone()).collect();
+            out.push(Candidate {
+                peptide: Peptide::new(residues, pre, post),
+                protein_index: rec.protein_index as usize,
+                start_offset_in_protein: rec.start_offset as usize,
+                is_decoy,
+                is_protein_n_term: n_term,
+                is_protein_c_term: c_term,
+            });
+        },
+    );
+    out
 }
 
 /// Build the merged variant list for a terminal position (pos 0 or pos n-1).

@@ -565,7 +565,7 @@ fn fragment_index_ranks_the_true_peptide_first_on_exact_spectra() {
         .expect("prepare_mmap");
     let mi = prepared.mmap_index.as_ref().unwrap();
     let records = mi.records();
-    let fi = ChunkFragmentIndex::build(records, &idx, &params, Tolerance::Da(0.05), 0.0, f64::MAX);
+    let fi = ChunkFragmentIndex::build(records, &idx, &params, Tolerance::Da(0.05), 0.0, 5000.0);
     assert!(fi.n_forms() > 0);
     // Reference: what the enumeration path scores as top-1 for each spectrum.
     let (queues, cands) = run_prepared(&idx, &params, &spectra, CandidateBacking::Ram, &scorer);
@@ -602,5 +602,58 @@ fn fragment_index_ranks_the_true_peptide_first_on_exact_spectra() {
         let top = &mats[0];
         let top_seq: Vec<u8> = top.peptide.residues.iter().map(|a| a.residue).collect();
         let _ = top_seq;
+    }
+}
+
+/// Same as above with a tight mass window, so the bounded walk actually prunes
+/// and the pruned index `k` must still select the same form on both sides.
+#[test]
+fn fragment_index_prunes_to_the_window_and_still_finds_the_true_peptide() {
+    use model::tolerance::Tolerance;
+    use search::fragment_index::ChunkFragmentIndex;
+    let (spectra, idx, params) = small_search_fixture();
+    let scorer = make_scorer(0.05);
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let prepared = PreparedSearch::prepare_mmap(&idx, &params, &scorer, 0.05, "XXX", tmp.path())
+        .expect("prepare_mmap");
+    let mi = prepared.mmap_index.as_ref().unwrap();
+    let (queues, cands) = run_prepared(&idx, &params, &spectra, CandidateBacking::Ram, &scorer);
+    for (spec, q) in spectra.iter().zip(&queues) {
+        let best = q
+            .iter_psms()
+            .max_by(|a, b| a.rank_score.partial_cmp(&b.rank_score).unwrap())
+            .expect("psm");
+        let truth = &cands[best.primary_candidate_idx() as usize].peptide;
+        let truth_seq: Vec<u8> = truth.residues.iter().map(|a| a.residue).collect();
+        let m = truth.mass();
+        let fi = ChunkFragmentIndex::build(
+            mi.records(),
+            &idx,
+            &params,
+            Tolerance::Da(0.05),
+            m - 1.0,
+            m + 1.0,
+        );
+        let z = spec.precursor_charge.unwrap() as u8;
+        let sel = fi.query(spec, &[z], &params, Tolerance::Da(0.05), 5, 3);
+        assert!(!sel.is_empty(), "{}: no votes", spec.title);
+        let mats = fi.materialise(&sel, &idx, &params, None, &|_| {});
+        let seqs: Vec<Vec<u8>> = mats
+            .iter()
+            .map(|c| c.peptide.residues.iter().map(|a| a.residue).collect())
+            .collect();
+        assert!(
+            seqs.contains(&truth_seq),
+            "{}: truth {:?} not among picks {:?}",
+            spec.title,
+            String::from_utf8_lossy(&truth_seq),
+            seqs.len()
+        );
+        for c in &mats {
+            assert!(
+                (c.peptide.mass() - m).abs() <= 1.0 + 1e-6,
+                "materialised form outside the window"
+            );
+        }
     }
 }

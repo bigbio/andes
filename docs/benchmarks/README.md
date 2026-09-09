@@ -429,6 +429,50 @@ Not a controlled comparison — the glycan list changed in between (the quick ti
 the gate alone at +9% PSMs on T-1) — but the deep-tier row is now re-measured at the current
 defaults plus the corrector, and every column moved the right way at a lower measured error.
 
+**Arm F on two other tissues, measured 2026-09-08/09** — pGlyco2 mouse heart (PXD005413,
+`MouseHeart-Z-T-1.raw`, 48,257 MS2, 1,691 reference scans) and lung (PXD005555,
+`MouseLung-Z-T-1.raw`, 70,533 MS2, 3,016 reference scans), same binary and database as the
+liver rows. Same instrument, different tissue and glycan repertoire. Heart also got the
+baseline (corrector off, `0..2`) so its numbers can be attributed. Neither file fits the
+16 GB VM whole (the cgroup kills at ~13.9 GB anon RSS; liver fractions peak at 13.4–13.9),
+so each was searched as scan quarters with `--glyco-scans` (heart at 3 threads, lung at 2)
+and the quarter PINs concatenated before one Percolator run; the only run-level quantity
+that sees the split is the adaptive emission floor, a quantile of thousands of decoy
+winners per quarter, so its effect is noise. Per-quarter peak RSS 11.5–13.2 GB.
+
+| | heart: baseline off, `0..2` | **heart: auto, `0..1`** | **lung: auto, `0..1`** |
+|---|---:|---:|---:|
+| glycoPSMs @1% | 4,058 | **4,035** | **7,238** |
+| **true FDP** (sequon-corrected) | 2.46% (47; CI 1.81–3.27%) | **1.84%** (35; CI 1.28–2.56%) | 1.67% (57; CI 1.27–2.17%) |
+| pGlyco2 confirmed | 1,451 (85.8%) | **1,506 (89.1%)** | **2,764 (91.6%)** |
+| decoy won / wrong target / FDR-rejected | 6.7% / 6.6% / 0.9% | 4.4% / 5.3% / 1.2% | 4.3% / 3.6% / 0.4% |
+| reference scans truly at +3..+6 → confirmed | 65 → **11** | 65 → **59** | 58 → **49** |
+| the +4 tier: confirmed / composition-correct | 37 → 10 / — | 37 → 35 / 27 | 43 → 38 / 36 |
+| accepted PSMs by effective offset | +0 2,487 · +1 1,178 · **+2 393** | +0 2,489 · +1 1,408 · +2 12 · +3 11 · +4 50 · +5 59 · +6 6 | +0 4,498 · +1 2,615 · +2 25 · +3 11 · +4 50 · +5 29 · +6 10 |
+| reference coverage of the largest tier | +2: 32 of 393 (8%) | +4: 35 of 50 | +4: 37 of 50 |
+| entrapment hits in +2..+6 | 5 | 3 | 2 |
+| same-scan peptidoform agreement | 70.2% | 70.7% | 78.1% |
+| composition disagreements: NeuGc for Hex+Fuc / isobaric Hex+NeuAc ↔ Fuc+NeuGc | 235 / 126 | 229 / 143 | 375 / 161 |
+
+**The corrector transfers.** On both tissues the firmware population is the same
+phenomenon (285 and 377 MS2 shifted, 65 and 58 reference scans truly 3–6 isotopes high)
+and is confirmed at 84–91%, against 17% for the heart baseline, whose 10 confirmed +4
+scans are the degenerate composition reaching through the +2 step. The baseline shows the
+pile-up the issue predicted — 393 PSMs at +2 with 8% reference coverage — and arm F
+replaces it with 12. Confirmed goes up 3.3 points on heart at a lower measured error.
+
+**Two things do not transfer, and both are properties of the tissue, not of this change.**
+Peptidoform agreement is 70–78% against 96–97% on liver, and the entrapment FDP sits
+above nominal (1.7–1.8%). The heart baseline has both (70.2%, 2.46%), so the branch
+leaves the first unchanged and improves the second. The disagreement is one mechanism:
+andes assigns one NeuGc where pGlyco2 assigns Hex + Fuc, a 1.02 Da difference absorbed
+at `isotope_error = 1` — 229 of 436 disagreements on heart, 375 of 599 on lung, at
+offsets 0 and 1 that every window searches — plus the exactly isobaric Hex + NeuAc ↔
+Fuc + NeuGc pair. Liver shows the same two patterns at a quarter of the rate; heart and
+lung carry more NeuGc (12.9%, 21.8% and 22% of reference scans with NeuGc ≥ 1 on liver,
+heart and lung). This is the scorer preferring NeuGc on NeuGc-rich tissue and belongs in
+its own issue; it is not the corrector's or the window's doing.
+
 **Offline validation of the corrector** (`--precursor-mono-dump`, 23 s for the file, no
 search). For every pGlyco2 reference scan the true offset is the integer k that makes
 recorded − (peptide + Cam-C + Ox-M + glycan) an isotope multiple. Best-fitting

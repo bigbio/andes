@@ -5,6 +5,7 @@
 
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
+use std::ops::RangeInclusive;
 use std::path::Path;
 
 use input::Ms1Link;
@@ -12,6 +13,36 @@ use model::Spectrum;
 use search::precursor_mono::{
     correct_precursor, median_nonzero_intensity, MonoCorrection, MonoParams,
 };
+
+/// The isotope-error window to search once `--precursor-mono auto` has corrected
+/// precursors. With corrected precursors the `+2` step of the sweep only carries
+/// the (k, X) ≡ (k−1, X + Hex + Fuc − NeuGc) composition degeneracy: on pGlyco2
+/// liver T-1 the `0..1` window confirmed 59 of the 62 firmware-mispicked +4
+/// reference scans against 55 with `0..2`, at 96.9% vs 96.8% peptidoform
+/// agreement and 0.98% vs 0.91% entrapment FDP, and the `+2` tier went from 402
+/// accepted PSMs to 21; the same held on all five liver fractions, heart and
+/// lung (bigbio/andes#64, arm F). So `auto` narrows the window to `0..=1` —
+/// but only when the correction actually fitted something (`mono_fitted`), so
+/// MGF and MS1-less mzML stay byte-identical to `off`, and never over an
+/// explicit `--isotope-error` or a non-default `--glyco-isotope-error`.
+///
+/// The window is applied per spectrum by the glyco driver: only spectra whose
+/// envelope was fitted (a `Some` in the correction table) take it, the rest keep
+/// the configured window (`search::glyco_search::isotope_window_for`).
+///
+/// Returns the window to search and whether it was narrowed.
+pub(crate) fn coupled_isotope_window(
+    mono_fitted: bool,
+    explicit: Option<(i8, i8)>,
+    glyco_flag_is_default: bool,
+    current: RangeInclusive<i8>,
+) -> (RangeInclusive<i8>, bool) {
+    if mono_fitted && explicit.is_none() && glyco_flag_is_default && current != (0..=1) {
+        (0..=1, true)
+    } else {
+        (current, false)
+    }
+}
 
 /// Running tally of what the correction did, for the end-of-stream log line.
 #[derive(Debug, Default)]
@@ -137,6 +168,43 @@ pub(crate) fn correct_chunk(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coupled_window_narrows_only_when_fitted_and_unset() {
+        // Fitted, nothing explicit: the glyco default 0..=2 becomes 0..=1.
+        assert_eq!(
+            coupled_isotope_window(true, None, true, 0..=2),
+            (0..=1, true)
+        );
+        // Nothing fitted (MGF, MS1-less mzML): untouched, byte-identical to `off`.
+        assert_eq!(
+            coupled_isotope_window(false, None, true, 0..=2),
+            (0..=2, false)
+        );
+        // An explicit --isotope-error is honoured verbatim, whatever it is.
+        assert_eq!(
+            coupled_isotope_window(true, Some((0, 2)), true, 0..=2),
+            (0..=2, false)
+        );
+        assert_eq!(
+            coupled_isotope_window(true, Some((-1, 3)), true, -1..=3),
+            (-1..=3, false)
+        );
+        // --glyco-isotope-error negative / wide are explicit choices too.
+        assert_eq!(
+            coupled_isotope_window(true, None, false, -1..=2),
+            (-1..=2, false)
+        );
+        assert_eq!(
+            coupled_isotope_window(true, None, false, 0..=5),
+            (0..=5, false)
+        );
+        // Already 0..=1: nothing to report.
+        assert_eq!(
+            coupled_isotope_window(true, None, true, 0..=1),
+            (0..=1, false)
+        );
+    }
     use model::isotope::glycopeptide_isotope_envelope;
     use model::mass::{ISOTOPE, PROTON};
 

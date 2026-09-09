@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::cli::{
-    CandidateIndexFlag, Cli, EnzymeSpecificity, EthcdActivationFlag, Fragmentation,
-    GlycoIsotopeFlag, PrecursorMonoFlag, Protocol, ScoreFlag,
+    CandidateIndexFlag, Cli, EnzymeSpecificity, EthcdActivationFlag, FragmentIndexFlag,
+    Fragmentation, GlycoIsotopeFlag, PrecursorMonoFlag, Protocol, ScoreFlag,
 };
 use crate::glyco_run::run_glyco;
 use crate::memlimit::available_memory_budget;
@@ -592,6 +592,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(n) = cli.mmap_window_cache_candidates {
         params.mmap_window_cache_max_candidates = n;
     }
+    if let Some(m) = cli.fragment_index_min_matched {
+        params.fragment_index_min_matched = m;
+    }
     params.precursor_mass_shift_ppm = 0.0;
     params.refine_select_psm_fdr = cli.refine_select_psm_fdr;
     params.score_mode = match cli.score {
@@ -658,6 +661,33 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `bucket_index` DURING scanning, so they are not supported together with
     // `--candidate-index mmap` in this phase (fail loud rather than silently
     // produce wrong results).
+    // Fragment-ion index (issue #76): on the out-of-core path unless told
+    // otherwise. Chimeric, refine and glyco keep enumeration (they read the
+    // full candidate lists).
+    let index_eligible = params.candidate_index == search::CandidateIndexMode::Mmap
+        && !cli.glyco
+        && !cli.refine
+        && !chimeric_active;
+    params.fragment_index_top_k = match cli.fragment_index {
+        FragmentIndexFlag::Off => 0,
+        FragmentIndexFlag::Auto | FragmentIndexFlag::On if index_eligible => {
+            cli.fragment_index_top_k.unwrap_or(100)
+        }
+        FragmentIndexFlag::On => {
+            eprintln!(
+                "WARN: --fragment-index on has no effect here (the candidate index is in RAM, \
+                 or --chimeric/--refine/--glyco is active); using enumeration."
+            );
+            0
+        }
+        FragmentIndexFlag::Auto => 0,
+    };
+    if params.fragment_index_top_k > 0 {
+        eprintln!(
+            "fragment-index: on (top-k {}, min matched ions {})",
+            params.fragment_index_top_k, params.fragment_index_min_matched
+        );
+    }
     if params.candidate_index == search::CandidateIndexMode::Mmap {
         if params.chimeric {
             return Err(
@@ -1300,12 +1330,24 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
             log_rss("after_parser_thread_spawn");
 
+            // Fragment-index mode (issue #76) scores MASS-ORDERED chunks: the
+            // per-chunk index covers the peptidoforms of the chunk's precursor
+            // windows, and a chunk in file order spans the whole mass range
+            // (its index is the whole database; 100 GB on phospho). Collect the
+            // stream, sort by precursor mass, then chunk. Peaks for every
+            // spectrum are held until scored (~1 GB for 100k high-res MS2).
+            let mass_ordered = params.fragment_index_top_k > 0 && !cli.glyco && !cli.refine;
+            let mut pending: Vec<Spectrum> = Vec::new();
             for mut chunk in rx {
                 if chunk.is_empty() {
                     continue;
                 }
                 if let Some(prefix) = &title_prefix {
                     prefix_spectrum_titles(&mut chunk, prefix);
+                }
+                if mass_ordered {
+                    pending.extend(chunk);
+                    continue;
                 }
                 // SPEED (--glyco): the per-spectrum PEPTIDE search is pure waste in
                 // glyco mode — glyco_search_run re-derives its own candidates from
@@ -1329,6 +1371,62 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 report_search_progress(all_spectra.len(), t_search_start);
                 log_rss(&format!("after_chunk_{:06}_specs", all_spectra.len()));
+            }
+            if mass_ordered {
+                let neutral = |s: &Spectrum| {
+                    let z = s.precursor_charge.filter(|z| *z > 0).unwrap_or(2) as f64;
+                    s.precursor_mz * z
+                };
+                pending.sort_by(|a, b| neutral(a).total_cmp(&neutral(b)));
+                // A chunk's index holds every peptidoform in its precursor mass
+                // window, so chunks are bounded by MASS SPAN, not only by
+                // spectrum count: 1,000 high-mass phospho spectra spanned 450 Da
+                // and their window held 39.7M forms / 3.3G ion entries.
+                // With the allocation-free index build a 150 Da slice at
+                // ~120k phospho forms per Da is ~18M forms / ~5 GB, and each
+                // record is expanded once per slice instead of once per 15 Da.
+                // The slice width follows the memory budget: measured on the
+                // phospho space, a 150 Da slice peaks at ~25 GB RSS, about
+                // 0.13 GB per Da over a ~5 GB base, so a 31 GB machine gets
+                // ~60 Da and a 96 GB allowance the full 150 Da.
+                const INDEX_CHUNK_SIZE: usize = 20_000;
+                const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+                let index_chunk_span_da: f64 = match cli.fragment_index_slice_da {
+                    Some(d) => d.max(1.0),
+                    None => {
+                        let budget = available_memory_budget()
+                            .map(|b| b.bytes as f64)
+                            .unwrap_or(32.0 * GIB);
+                        ((budget * 0.6 - 4.0 * GIB) / (0.13 * GIB)).clamp(10.0, 150.0)
+                    }
+                };
+                eprintln!(
+                    "fragment-index: {} spectra sorted by precursor mass, chunks of <= {} spectra and <= {:.0} Da",
+                    pending.len(),
+                    INDEX_CHUNK_SIZE,
+                    index_chunk_span_da
+                );
+                let mut rest = pending;
+                while !rest.is_empty() {
+                    let first = neutral(&rest[0]);
+                    let mut take = 1;
+                    while take < rest.len()
+                        && take < INDEX_CHUNK_SIZE
+                        && neutral(&rest[take]) - first <= index_chunk_span_da
+                    {
+                        take += 1;
+                    }
+                    let chunk: Vec<Spectrum> = rest.drain(..take).collect();
+                    let offset = all_spectra.len();
+                    let queues = prepared.run_chunk(&chunk, offset);
+                    all_queues.extend(queues);
+                    for mut spec in chunk.into_iter() {
+                        spec.peaks = Vec::new();
+                        all_spectra.push(spec);
+                    }
+                    report_search_progress(all_spectra.len(), t_search_start);
+                    log_rss(&format!("after_chunk_{:06}_specs", all_spectra.len()));
+                }
             }
 
             match parser_handle.join() {

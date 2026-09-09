@@ -121,6 +121,11 @@ pub fn prepass_search_params(main: &SearchParams) -> SearchParams {
     // before the strong-score model is relevant, and using Strong here would
     // make the precursor-mass calibration depend on the experimental score path.
     p.score_mode = crate::search_params::ScoreMode::Rank;
+    // The pre-pass samples spectra across the whole file, so its one chunk
+    // spans every precursor mass; a per-chunk fragment-ion index over that is
+    // the entire database (issue #76). Calibration stays on the enumeration
+    // path.
+    p.fragment_index_top_k = 0;
     p
 }
 
@@ -460,6 +465,8 @@ mod tests {
             precursor_cal_mode: PrecursorCalMode::Auto,
             cal_min_spec_keys: constants::MIN_SPECKEYS_FOR_PREPASS,
             mmap_window_cache_max_candidates: 4_000_000,
+            fragment_index_top_k: 0,
+            fragment_index_min_matched: 3,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,

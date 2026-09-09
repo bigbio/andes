@@ -539,7 +539,7 @@ fn record_span<'a>(
     rec: &crate::candidate_index::IndexRecord,
 ) -> Option<(&'a [u8], bool, bool, u8, u8)> {
     use crate::candidate_index::flags;
-    let protein = &db.db.proteins[rec.protein_index as usize];
+    let protein = db.db.proteins.get(rec.protein_index as usize)?;
     let seq = &protein.sequence;
     let abs_start = rec.start_offset as usize;
     let abs_end = abs_start + rec.length as usize;
@@ -1141,7 +1141,9 @@ pub fn expand_base_record(
 ) -> Vec<Candidate> {
     use crate::candidate_index::flags;
 
-    let protein = &db.db.proteins[rec.protein_index as usize];
+    let Some(protein) = db.db.proteins.get(rec.protein_index as usize) else {
+        return Vec::new();
+    };
     let seq = &protein.sequence;
     let abs_start = rec.start_offset as usize;
     let abs_end = abs_start + rec.length as usize;

@@ -740,16 +740,22 @@ impl<'a> PreparedSearch<'a> {
                 } else {
                     None
                 };
-                let budget = params.mmap_window_cache_max_candidates;
-                let cached_total = AtomicUsize::new(0);
-                let cache: MmapRecordCache = records
-                    .into_par_iter()
-                    .filter_map(|(key, rec)| {
-                        let v = expand_base_record(self.idx, params, &rec);
-                        let before = cached_total.fetch_add(v.len(), Ordering::Relaxed);
-                        (before + v.len() <= budget).then_some((key, v))
-                    })
-                    .collect();
+                // The record cache serves the enumeration path only; index
+                // mode materialises through the bounded walk and never reads it.
+                let cache: MmapRecordCache = if frag_index.is_some() {
+                    MmapRecordCache::default()
+                } else {
+                    let budget = params.mmap_window_cache_max_candidates;
+                    let cached_total = AtomicUsize::new(0);
+                    records
+                        .into_par_iter()
+                        .filter_map(|(key, rec)| {
+                            let v = expand_base_record(self.idx, params, &rec);
+                            let before = cached_total.fetch_add(v.len(), Ordering::Relaxed);
+                            (before + v.len() <= budget).then_some((key, v))
+                        })
+                        .collect()
+                };
                 (Some(cache), frag_index)
             } else {
                 (None, None)

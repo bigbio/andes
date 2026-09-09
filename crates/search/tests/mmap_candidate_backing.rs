@@ -574,34 +574,30 @@ fn fragment_index_ranks_the_true_peptide_first_on_exact_spectra() {
             .iter_psms()
             .max_by(|a, b| a.rank_score.partial_cmp(&b.rank_score).unwrap())
             .expect("psm");
-        let truth: Vec<u8> = cands[best.primary_candidate_idx() as usize]
-            .peptide
-            .residues
-            .iter()
-            .map(|a| a.residue)
-            .collect();
+        // Modification-aware signature (residue, mod delta): the oxidised
+        // PEPTMIDEK form must be distinguished from the unmodified one.
+        let sig = |c: &Candidate| -> Vec<(u8, i64)> {
+            c.peptide
+                .residues
+                .iter()
+                .map(|a| {
+                    let d = a.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
+                    (a.residue, (d * 1e4).round() as i64)
+                })
+                .collect()
+        };
+        let truth = sig(&cands[best.primary_candidate_idx() as usize]);
         let z = spec.precursor_charge.unwrap() as u8;
         let sel = fi.query(spec, &[z], &params, Tolerance::Da(0.05), 5, 3);
         assert!(!sel.is_empty(), "{}: no votes", spec.title);
         let mats = fi.materialise(&sel, &idx, &params, None, &|_| {});
-        let seqs: Vec<Vec<u8>> = mats
-            .iter()
-            .map(|c| c.peptide.residues.iter().map(|a| a.residue).collect())
-            .collect();
+        let picks: Vec<Vec<(u8, i64)>> = mats.iter().map(sig).collect();
         assert!(
-            seqs.contains(&truth),
-            "{}: enumeration top-1 {:?} not among index picks {:?} (votes {:?})",
+            picks.contains(&truth),
+            "{}: enumeration top-1 peptidoform not among index picks (votes {:?})",
             spec.title,
-            String::from_utf8_lossy(&truth),
-            seqs.iter()
-                .map(|s| String::from_utf8_lossy(s).to_string())
-                .collect::<Vec<_>>(),
             sel
         );
-        // and it must carry the most votes (all of its ions match)
-        let top = &mats[0];
-        let top_seq: Vec<u8> = top.peptide.residues.iter().map(|a| a.residue).collect();
-        let _ = top_seq;
     }
 }
 

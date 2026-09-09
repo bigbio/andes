@@ -1377,7 +1377,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     let z = s.precursor_charge.filter(|z| *z > 0).unwrap_or(2) as f64;
                     s.precursor_mz * z
                 };
-                pending.sort_by(|a, b| neutral(a).partial_cmp(&neutral(b)).unwrap());
+                pending.sort_by(|a, b| neutral(a).total_cmp(&neutral(b)));
                 // A chunk's index holds every peptidoform in its precursor mass
                 // window, so chunks are bounded by MASS SPAN, not only by
                 // spectrum count: 1,000 high-mass phospho spectra spanned 450 Da

@@ -37,7 +37,7 @@ use model::tolerance::Tolerance;
 
 /// Pass-1 output per record: (mass, pruned k) per in-window form, and the
 /// record's (bin, count) pairs.
-type RecordPass1 = (Vec<(f64, u16)>, Vec<(u32, u32)>);
+type RecordPass1 = (Vec<(f64, u32)>, Vec<(u32, u32)>);
 
 pub struct ChunkFragmentIndex {
     /// The chunk's distinct base records, in `enumerate_candidates` order.
@@ -49,7 +49,7 @@ pub struct ChunkFragmentIndex {
     /// Per form id (ids are in ascending mass order): its record and its
     /// pruned index within that record's bounded enumeration.
     form_record: Vec<u32>,
-    form_k: Vec<u16>,
+    form_k: Vec<u32>,
     form_mass: Vec<f64>,
     bin_width: f64,
     /// CSR over fragment bins: entries of bin `b` are
@@ -105,7 +105,7 @@ impl ChunkFragmentIndex {
         let per: Vec<RecordPass1> = records
             .par_iter()
             .map(|rec| {
-                let mut forms: Vec<(f64, u16)> = Vec::new();
+                let mut forms: Vec<(f64, u32)> = Vec::new();
                 let mut bins: Vec<(u32, u32)> = Vec::new();
                 let mut ions: Vec<f32> = Vec::new();
                 for_each_record_form_masses_bounded(
@@ -115,7 +115,7 @@ impl ChunkFragmentIndex {
                     mass_lo,
                     mass_hi,
                     |k, masses| {
-                        forms.push((neutral_mass(masses), k as u16));
+                        forms.push((neutral_mass(masses), k as u32));
                         ions.clear();
                         by_ions_from_masses(masses, &mut ions);
                         for &mz in &ions {
@@ -154,7 +154,7 @@ impl ChunkFragmentIndex {
 
         // Form ids in ascending mass order, so a bin sorted by id is sorted by
         // mass and the per-bin sort is a plain integer sort.
-        let mut all: Vec<(f64, u32, u16)> = Vec::new();
+        let mut all: Vec<(f64, u32, u32)> = Vec::new();
         for (r, (forms, _)) in per.iter().enumerate() {
             all.extend(forms.iter().map(|&(m, k)| (m, r as u32, k)));
         }
@@ -325,7 +325,7 @@ impl ChunkFragmentIndex {
         _cache: Option<&FxHashMap<BaseRecordKey, Vec<Candidate>>>,
         relabel: &dyn Fn(&mut [Candidate]),
     ) -> Vec<Candidate> {
-        let mut by_record: Vec<(u32, u16)> = selected
+        let mut by_record: Vec<(u32, u32)> = selected
             .iter()
             .map(|&(f, _)| (self.form_record[f as usize], self.form_k[f as usize]))
             .collect();

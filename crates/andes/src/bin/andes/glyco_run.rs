@@ -226,6 +226,10 @@ pub(crate) fn run_glyco(
         cz_multisite: cli.glyco_cz_multisite,
         sialic_oxonium_min_frac: cli.glyco_sialic_oxonium_min_frac,
         scan_filter_path: cli.glyco_scans.clone(),
+        isotope_error_override_mask: isotope_error_override
+            .as_ref()
+            .and(mono)
+            .map(|table| table.iter().map(Option::is_some).collect()),
         isotope_error_override,
         pf_charge: cli.glyco_pf_charge,
         // Peptide-first RETRIEVAL window. High-resolution MS2 defaults to the

@@ -1418,13 +1418,18 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
     let glyco_isotope_override = if narrowed {
         eprintln!(
-            "precursor-mono: isotope-error window {}..={} -> {}..={} (corrected precursors \
-             need no +2 step; it only admits the Hex+Fuc/NeuGc composition degeneracy — \
-             pass --isotope-error to override)",
+            "precursor-mono: isotope-error window {}..={} -> {}..={} for the {} of {} MS2 \
+             with a fitted envelope (the others keep {}..={}; a verified monoisotope needs \
+             no +2 step, which only admits the Hex+Fuc/NeuGc composition degeneracy — pass \
+             --isotope-error to override)",
             params.isotope_error_range.start(),
             params.isotope_error_range.end(),
             window.start(),
-            window.end()
+            window.end(),
+            mono_stats.fitted,
+            mono_stats.seen,
+            params.isotope_error_range.start(),
+            params.isotope_error_range.end()
         );
         Some(window)
     } else {

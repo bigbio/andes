@@ -1385,13 +1385,26 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 // With the allocation-free index build a 150 Da slice at
                 // ~120k phospho forms per Da is ~18M forms / ~5 GB, and each
                 // record is expanded once per slice instead of once per 15 Da.
+                // The slice width follows the memory budget: measured on the
+                // phospho space, a 150 Da slice peaks at ~25 GB RSS, about
+                // 0.13 GB per Da over a ~5 GB base, so a 31 GB machine gets
+                // ~60 Da and a 96 GB allowance the full 150 Da.
                 const INDEX_CHUNK_SIZE: usize = 20_000;
-                const INDEX_CHUNK_SPAN_DA: f64 = 150.0;
+                const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+                let index_chunk_span_da: f64 = match cli.fragment_index_slice_da {
+                    Some(d) => d.max(1.0),
+                    None => {
+                        let budget = available_memory_budget()
+                            .map(|b| b.bytes as f64)
+                            .unwrap_or(32.0 * GIB);
+                        ((budget * 0.6 - 4.0 * GIB) / (0.13 * GIB)).clamp(10.0, 150.0)
+                    }
+                };
                 eprintln!(
-                    "fragment-index: {} spectra sorted by precursor mass, chunks of <= {} spectra and <= {} Da",
+                    "fragment-index: {} spectra sorted by precursor mass, chunks of <= {} spectra and <= {:.0} Da",
                     pending.len(),
                     INDEX_CHUNK_SIZE,
-                    INDEX_CHUNK_SPAN_DA
+                    index_chunk_span_da
                 );
                 let mut rest = pending;
                 while !rest.is_empty() {
@@ -1399,7 +1412,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     let mut take = 1;
                     while take < rest.len()
                         && take < INDEX_CHUNK_SIZE
-                        && neutral(&rest[take]) - first <= INDEX_CHUNK_SPAN_DA
+                        && neutral(&rest[take]) - first <= index_chunk_span_da
                     {
                         take += 1;
                     }

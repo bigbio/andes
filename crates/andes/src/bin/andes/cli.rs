@@ -209,6 +209,12 @@ pub(crate) struct SearchArgs {
     #[arg(long = "fragment-index-min-matched", hide = true)]
     pub(crate) fragment_index_min_matched: Option<u16>,
 
+    /// Fragment-index mode: precursor-mass width of one index slice in Da.
+    /// Default: derived from the memory budget (10–150 Da; ~0.13 GB per Da on
+    /// a phospho search).
+    #[arg(long = "fragment-index-slice-da", hide = true)]
+    pub(crate) fragment_index_slice_da: Option<f64>,
+
     /// Precursor mass tolerance as `VALUE+unit`. Accepts ppm (e.g. `20ppm`,
     /// high-res) or Da (e.g. `0.02da`/`0.02Da`, low-res precursor selection).
     /// Default `20ppm`.

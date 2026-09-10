@@ -681,6 +681,34 @@ fragment-ion index turns itself on because this search does not fit in RAM. Add
 `--fragment-index off` to reproduce the enumeration rows instead, which take ~100 min and
 ~12.5 h respectively.
 
+### Which glyco defaults were changed, and which were not (2026-09-10)
+
+Three flags looked like they should be defaults. Measured on the quick tier
+(`MouseLiver-Z-T-1`, whole file, 32 threads, Percolator seeds 1–3, 3,877 reference
+spectra), only one of them was:
+
+| arm | glycoPSMs @1% | true FDP | pGlyco2 confirmed | wrong target won |
+|---|---|---|---|---|
+| defaults | 7,219–7,285 | 1.25–1.51% | 3,375 (87.1%) | 250 (6.4%) |
+| **`--precursor-mono auto`** | 7,249–7,262 | 1.32–1.57% | **3,471 (89.5%)** | **192 (5.0%)** |
+| `--glyco-min-core-y 2` | 6,623–6,776 | 1.15–1.45% | 3,364 (86.8%) | 220 (5.7%) |
+| `--glyco-pin-curated` | 7,201–7,257 | 1.36–1.41% | 3,380 (87.2%) | 250 (6.4%) |
+
+**`--precursor-mono auto` is now the default.** Yield is flat, but 96 more scans are
+confirmed against the reference and 58 fewer are wrong-target wins — the correction turns
+mistakes into identifications rather than adding volume. It is inert without a linked MS1,
+so MGF and MS1-less mzML are byte-identical to `off` (the goldens are unchanged).
+
+**`--glyco-min-core-y 2` is not made the default.** Requiring two trimannosyl-core Y ions
+costs about 500 glycoPSMs here for no gain in confirmation, and drops 44% of the emitted
+rows. Its documented +87 on pooled human plasma does not transfer to this tissue, which is
+the same lesson the glyco levers have taught before: the defaults win on the benchmark.
+
+**`--glyco-pin-curated` is not made the default.** It is identification-neutral here, inside
+seed noise on every column. Its +50% on plasma was a small-sample effect — that run had
+about 385 glycoPSMs, where pruning columns helps a data-starved SVM; with 7,250 the SVM has
+enough data and the pruning buys nothing.
+
 ### Choosing the retrieval strategy (measured, not configurable)
 
 An out-of-core search can score each spectrum either by enumerating every peptidoform in

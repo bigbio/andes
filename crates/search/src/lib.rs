@@ -10,6 +10,7 @@ pub mod candidate_index;
 mod chimeric_features;
 pub(crate) mod coisolation;
 pub mod decoy;
+pub mod fragment_index;
 pub mod glyco_fragment_index;
 pub mod glyco_search;
 pub mod mass_calibrator;

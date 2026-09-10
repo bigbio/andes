@@ -81,6 +81,22 @@ pub struct SearchParams {
     /// exposed via `--cal-min-spec-keys` so targeted runs can opt in to
     /// calibrating with fewer spectra.
     pub cal_min_spec_keys: usize,
+    /// Out-of-core (`mmap`) mode only: upper bound on the TOTAL number of
+    /// candidates held in the per-chunk base-record expansion cache. The cache
+    /// is a pure memo (output is identical with or without it); records past
+    /// the bound are expanded per spectrum instead. Without this bound a PTM-rich search (phospho on
+    /// S/T/Y, four variable mods) cached tens of thousands of peptidoforms per
+    /// window for thousands of windows and was OOM-killed at 64 GiB before the
+    /// first chunk finished. Default 4,000,000 (~1 GiB).
+    pub mmap_window_cache_max_candidates: usize,
+    /// Out-of-core (`mmap`) mode only: when > 0, score each spectrum against at
+    /// most this many peptidoforms chosen by a per-chunk fragment-ion index
+    /// (issue #76) instead of every peptidoform in its precursor windows.
+    /// 0 (default) = off, byte-identical enumeration path.
+    pub fragment_index_top_k: u32,
+    /// Fragment-index mode: minimum singly-charged b/y ions a peptidoform must
+    /// match to be scored at all. Default 3.
+    pub fragment_index_min_matched: u16,
     /// Learned file-wide ppm shift applied to observed neutral masses in the
     /// main pass. Stays 0.0 until the pre-pass calibrator runs.
     pub precursor_mass_shift_ppm: f64,
@@ -171,6 +187,9 @@ impl SearchParams {
             min_peaks: 10,
             precursor_cal_mode: PrecursorCalMode::Off,
             cal_min_spec_keys: crate::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS,
+            mmap_window_cache_max_candidates: 4_000_000,
+            fragment_index_top_k: 0,
+            fragment_index_min_matched: 3,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,

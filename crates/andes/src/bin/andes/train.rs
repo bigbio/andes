@@ -565,16 +565,18 @@ pub(crate) fn load_labels_from_tsv(
         if let Some((site, gmass)) = glyco {
             if let Some(res) = peptide.residues.get_mut(site) {
                 let base = res.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
-                res.mod_ = Some(std::sync::Arc::new(model::modification::Modification {
-                    name: "Glycan".to_string(),
-                    mass_delta: base + gmass,
-                    residue: model::modification::ResidueSpec::Specific(res.residue),
-                    location: model::modification::ModLocation::Anywhere,
-                    fixed: false,
-                    accession: None,
-                    neutral_losses: Vec::new(),
-                    loss_class: 1,
-                }));
+                res.mod_ = Some(model::modification::leak_mod(
+                    model::modification::Modification {
+                        name: "Glycan".to_string(),
+                        mass_delta: base + gmass,
+                        residue: model::modification::ResidueSpec::Specific(res.residue),
+                        location: model::modification::ModLocation::Anywhere,
+                        fixed: false,
+                        accession: None,
+                        neutral_losses: Vec::new(),
+                        loss_class: 1,
+                    },
+                ));
             }
         }
         if !seen_scans.insert(scan) {
@@ -859,8 +861,6 @@ pub(crate) fn build_msnet_peptide(
     nterm_delta: f64,
     cterm_delta: f64,
 ) -> Result<model::peptide::Peptide, Box<dyn std::error::Error>> {
-    use std::sync::Arc;
-
     if res_mod_pos.len() != res_mod_delta.len() {
         return Err(format!(
             "res_mod_pos ({}) and res_mod_delta ({}) length mismatch",
@@ -913,7 +913,7 @@ pub(crate) fn build_msnet_peptide(
                 neutral_losses: Vec::new(),
                 loss_class: 0,
             };
-            residues.push(aa.with_mod(Arc::new(m)));
+            residues.push(aa.with_mod(m));
         } else {
             residues.push(aa);
         }

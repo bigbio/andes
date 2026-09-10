@@ -401,6 +401,9 @@ mod tests {
             min_peaks: 10,
             precursor_cal_mode: search::PrecursorCalMode::Auto,
             cal_min_spec_keys: search::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS,
+            mmap_window_cache_max_candidates: 4_000_000,
+            fragment_index_top_k: 0,
+            fragment_index_min_matched: 3,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,
@@ -577,7 +580,7 @@ mod tests {
         let m_ox = AminoAcid {
             residue: b'M',
             mass: m_unmod.mass,
-            mod_: Some(std::sync::Arc::new(ox_mod)),
+            mod_: Some(model::modification::leak_mod(ox_mod)),
         };
         let a = AminoAcid::standard(b'A').unwrap();
         // Peptide: K.AM(ox)A.S
@@ -756,7 +759,7 @@ mod tests {
         let mod_aa = AminoAcid {
             residue: b'A',
             mass: plain_aa.mass,
-            mod_: Some(std::sync::Arc::new(make_mod(Some("UNIMOD:393")))),
+            mod_: Some(model::modification::leak_mod(make_mod(Some("UNIMOD:393")))),
         };
         // 6 residues; mod at 0-based 5 → 1-based 6
         let residues = vec![
@@ -816,7 +819,7 @@ mod tests {
         let noaccession_aa = AminoAcid {
             residue: b'A',
             mass: plain_aa.mass,
-            mod_: Some(std::sync::Arc::new(make_mod(None))),
+            mod_: Some(model::modification::leak_mod(make_mod(None))),
         };
         let residues = vec![plain_aa.clone(), noaccession_aa, plain_aa];
         let peptide = Peptide::new(residues, b'K', b'S');
@@ -868,12 +871,12 @@ mod tests {
         let mod1 = AminoAcid {
             residue: b'A',
             mass: plain_aa.mass,
-            mod_: Some(std::sync::Arc::new(make_mod(Some("UNIMOD:4")))),
+            mod_: Some(model::modification::leak_mod(make_mod(Some("UNIMOD:4")))),
         };
         let mod2 = AminoAcid {
             residue: b'A',
             mass: plain_aa.mass,
-            mod_: Some(std::sync::Arc::new(make_mod(Some("UNIMOD:393")))),
+            mod_: Some(model::modification::leak_mod(make_mod(Some("UNIMOD:393")))),
         };
         let residues = vec![
             plain_aa.clone(),

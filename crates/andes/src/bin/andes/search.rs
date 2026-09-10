@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::cli::{
-    CandidateIndexFlag, Cli, EnzymeSpecificity, EthcdActivationFlag, Fragmentation,
-    GlycoIsotopeFlag, PrecursorMonoFlag, Protocol, ScoreFlag,
+    CandidateIndexFlag, Cli, EnzymeSpecificity, EthcdActivationFlag, FragmentIndexFlag,
+    Fragmentation, GlycoIsotopeFlag, PrecursorMonoFlag, Protocol, ScoreFlag,
 };
 use crate::glyco_run::run_glyco;
 use crate::memlimit::available_memory_budget;
@@ -586,8 +586,15 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         params.max_variable_mods_per_peptide = n; // NumMods= in --mods overrides --max-mods
     }
     params.precursor_cal_mode = cli.precursor_cal;
-    // params.cal_min_spec_keys keeps its SearchParams default
-    // (MIN_SPECKEYS_FOR_PREPASS); it is an internal threshold, no longer a flag.
+    if let Some(n) = cli.cal_min_spec_keys {
+        params.cal_min_spec_keys = n;
+    }
+    if let Some(n) = cli.mmap_window_cache_candidates {
+        params.mmap_window_cache_max_candidates = n;
+    }
+    if let Some(m) = cli.fragment_index_min_matched {
+        params.fragment_index_min_matched = m;
+    }
     params.precursor_mass_shift_ppm = 0.0;
     params.refine_select_psm_fdr = cli.refine_select_psm_fdr;
     params.score_mode = match cli.score {
@@ -654,6 +661,33 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `bucket_index` DURING scanning, so they are not supported together with
     // `--candidate-index mmap` in this phase (fail loud rather than silently
     // produce wrong results).
+    // Fragment-ion index (issue #76): on the out-of-core path unless told
+    // otherwise. Chimeric, refine and glyco keep enumeration (they read the
+    // full candidate lists).
+    let index_eligible = params.candidate_index == search::CandidateIndexMode::Mmap
+        && !cli.glyco
+        && !cli.refine
+        && !chimeric_active;
+    params.fragment_index_top_k = match cli.fragment_index {
+        FragmentIndexFlag::Off => 0,
+        FragmentIndexFlag::Auto | FragmentIndexFlag::On if index_eligible => {
+            cli.fragment_index_top_k.unwrap_or(100)
+        }
+        FragmentIndexFlag::On => {
+            eprintln!(
+                "WARN: --fragment-index on has no effect here (the candidate index is in RAM, \
+                 or --chimeric/--refine/--glyco is active); using enumeration."
+            );
+            0
+        }
+        FragmentIndexFlag::Auto => 0,
+    };
+    if params.fragment_index_top_k > 0 {
+        eprintln!(
+            "fragment-index: on (top-k {}, min matched ions {})",
+            params.fragment_index_top_k, params.fragment_index_min_matched
+        );
+    }
     if params.candidate_index == search::CandidateIndexMode::Mmap {
         if params.chimeric {
             return Err(
@@ -904,23 +938,60 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         params.precursor_cal_mode = PrecursorCalMode::Off;
     }
 
-    // Calibration pre-pass. Candidate enumeration is precursor-tolerance
-    // independent, so keep the cal pass's `PreparedParts` and reuse them for the
-    // main pass instead of re-enumerating all 16.8M candidates (~15s saved on
-    // Astral). `into_parts()` runs BEFORE tightening so the owned parts outlive
-    // the `params` borrow the cal `PreparedSearch` held.
+    // Calibration pre-pass, on the SAME candidate backing the memory budget
+    // chose above. In RAM mode candidate enumeration is precursor-tolerance
+    // independent, so the pre-pass's `PreparedParts` are kept and reused for the
+    // main pass instead of re-enumerating (~15 s saved on Astral); `into_parts()`
+    // runs BEFORE tightening so the owned parts outlive the `params` borrow. In
+    // Mmap mode the pre-pass uses the out-of-core index (issue #70: building the
+    // in-RAM index here bypassed the budget and was OOM-killed); nothing is
+    // reused because the on-disk index is content-addressed and the main pass
+    // opens the same file from the cache.
+    let mmap_cache_path = match params.candidate_index {
+        search::CandidateIndexMode::Mmap => Some(index_cache_path(&idx, &params)),
+        search::CandidateIndexMode::Ram => None,
+    };
     let reuse_parts = if params.precursor_cal_mode != PrecursorCalMode::Off {
-        let cal_prepared =
-            PreparedSearch::prepare(&idx, &params, &scorer, fragment_tol_da, &cli.decoy_prefix);
-        let cal_stats = run_precursor_calibration(
-            &spectrum_path,
-            is_mzml,
-            ms_level_u32,
-            bench_cap,
-            &params,
-            &cal_prepared,
-        )?;
-        let parts = cal_prepared.into_parts();
+        let (cal_stats, parts) = match &mmap_cache_path {
+            None => {
+                let mut cal_prepared = PreparedSearch::prepare(
+                    &idx,
+                    &params,
+                    &scorer,
+                    fragment_tol_da,
+                    &cli.decoy_prefix,
+                );
+                let cal_stats = run_precursor_calibration(
+                    &spectrum_path,
+                    is_mzml,
+                    ms_level_u32,
+                    bench_cap,
+                    &params,
+                    &mut cal_prepared,
+                )?;
+                (cal_stats, Some(cal_prepared.into_parts()))
+            }
+            Some(path) => {
+                let mut cal_prepared = PreparedSearch::prepare_mmap(
+                    &idx,
+                    &params,
+                    &scorer,
+                    fragment_tol_da,
+                    &cli.decoy_prefix,
+                    path,
+                )
+                .map_err(|e| format!("build out-of-core candidate index: {e}"))?;
+                let cal_stats = run_precursor_calibration(
+                    &spectrum_path,
+                    is_mzml,
+                    ms_level_u32,
+                    bench_cap,
+                    &params,
+                    &mut cal_prepared,
+                )?;
+                (cal_stats, None)
+            }
+        };
         params.precursor_mass_shift_ppm =
             apply_shift_for_mode(params.precursor_cal_mode, cal_stats);
         let tol_before = params.precursor_tolerance;
@@ -943,7 +1014,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
-        Some(parts)
+        parts
     } else {
         None
     };
@@ -959,33 +1030,24 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         })
         .transpose()?;
 
-    let mut prepared = match (reuse_parts, params.candidate_index) {
-        // Calibration reuse always takes the in-RAM parts (calibration is RAM-only).
-        // Warn if the user explicitly requested mmap so they know it was not applied.
+    let mut prepared = match (reuse_parts, &mmap_cache_path) {
+        // RAM mode with calibration: reuse the pre-pass enumeration.
         (Some(parts), _) => {
-            if cli.candidate_index == CandidateIndexFlag::Mmap {
-                eprintln!(
-                    "WARN: --candidate-index mmap is ignored when precursor calibration \
-                     reuse is active; running in-RAM for this search."
-                );
-            }
             PreparedSearch::from_parts(&idx, &params, &scorer, fragment_tol_da, parts)
         }
-        (None, search::CandidateIndexMode::Mmap) => {
-            // Use a content-addressed cache path so repeated searches over the
-            // same FASTA + params reuse the index without rebuilding.
-            let path = index_cache_path(&idx, &params);
-            PreparedSearch::prepare_mmap(
-                &idx,
-                &params,
-                &scorer,
-                fragment_tol_da,
-                &cli.decoy_prefix,
-                &path,
-            )
-            .map_err(|e| format!("build out-of-core candidate index: {e}"))?
-        }
-        (None, search::CandidateIndexMode::Ram) => {
+        // Content-addressed cache path, so repeated searches over the same
+        // FASTA + params (and the calibration pre-pass just above) share one
+        // on-disk index without rebuilding.
+        (None, Some(path)) => PreparedSearch::prepare_mmap(
+            &idx,
+            &params,
+            &scorer,
+            fragment_tol_da,
+            &cli.decoy_prefix,
+            path,
+        )
+        .map_err(|e| format!("build out-of-core candidate index: {e}"))?,
+        (None, None) => {
             PreparedSearch::prepare(&idx, &params, &scorer, fragment_tol_da, &cli.decoy_prefix)
         }
     }
@@ -1268,12 +1330,24 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
             log_rss("after_parser_thread_spawn");
 
+            // Fragment-index mode (issue #76) scores MASS-ORDERED chunks: the
+            // per-chunk index covers the peptidoforms of the chunk's precursor
+            // windows, and a chunk in file order spans the whole mass range
+            // (its index is the whole database; 100 GB on phospho). Collect the
+            // stream, sort by precursor mass, then chunk. Peaks for every
+            // spectrum are held until scored (~1 GB for 100k high-res MS2).
+            let mass_ordered = params.fragment_index_top_k > 0 && !cli.glyco && !cli.refine;
+            let mut pending: Vec<Spectrum> = Vec::new();
             for mut chunk in rx {
                 if chunk.is_empty() {
                     continue;
                 }
                 if let Some(prefix) = &title_prefix {
                     prefix_spectrum_titles(&mut chunk, prefix);
+                }
+                if mass_ordered {
+                    pending.extend(chunk);
+                    continue;
                 }
                 // SPEED (--glyco): the per-spectrum PEPTIDE search is pure waste in
                 // glyco mode — glyco_search_run re-derives its own candidates from
@@ -1297,6 +1371,62 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 report_search_progress(all_spectra.len(), t_search_start);
                 log_rss(&format!("after_chunk_{:06}_specs", all_spectra.len()));
+            }
+            if mass_ordered {
+                let neutral = |s: &Spectrum| {
+                    let z = s.precursor_charge.filter(|z| *z > 0).unwrap_or(2) as f64;
+                    s.precursor_mz * z
+                };
+                pending.sort_by(|a, b| neutral(a).total_cmp(&neutral(b)));
+                // A chunk's index holds every peptidoform in its precursor mass
+                // window, so chunks are bounded by MASS SPAN, not only by
+                // spectrum count: 1,000 high-mass phospho spectra spanned 450 Da
+                // and their window held 39.7M forms / 3.3G ion entries.
+                // With the allocation-free index build a 150 Da slice at
+                // ~120k phospho forms per Da is ~18M forms / ~5 GB, and each
+                // record is expanded once per slice instead of once per 15 Da.
+                // The slice width follows the memory budget: measured on the
+                // phospho space, a 150 Da slice peaks at ~25 GB RSS, about
+                // 0.13 GB per Da over a ~5 GB base, so a 31 GB machine gets
+                // ~60 Da and a 96 GB allowance the full 150 Da.
+                const INDEX_CHUNK_SIZE: usize = 20_000;
+                const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+                let index_chunk_span_da: f64 = match cli.fragment_index_slice_da {
+                    Some(d) => d.max(1.0),
+                    None => {
+                        let budget = available_memory_budget()
+                            .map(|b| b.bytes as f64)
+                            .unwrap_or(32.0 * GIB);
+                        ((budget * 0.6 - 4.0 * GIB) / (0.13 * GIB)).clamp(10.0, 150.0)
+                    }
+                };
+                eprintln!(
+                    "fragment-index: {} spectra sorted by precursor mass, chunks of <= {} spectra and <= {:.0} Da",
+                    pending.len(),
+                    INDEX_CHUNK_SIZE,
+                    index_chunk_span_da
+                );
+                let mut rest = pending;
+                while !rest.is_empty() {
+                    let first = neutral(&rest[0]);
+                    let mut take = 1;
+                    while take < rest.len()
+                        && take < INDEX_CHUNK_SIZE
+                        && neutral(&rest[take]) - first <= index_chunk_span_da
+                    {
+                        take += 1;
+                    }
+                    let chunk: Vec<Spectrum> = rest.drain(..take).collect();
+                    let offset = all_spectra.len();
+                    let queues = prepared.run_chunk(&chunk, offset);
+                    all_queues.extend(queues);
+                    for mut spec in chunk.into_iter() {
+                        spec.peaks = Vec::new();
+                        all_spectra.push(spec);
+                    }
+                    report_search_progress(all_spectra.len(), t_search_start);
+                    log_rss(&format!("after_chunk_{:06}_specs", all_spectra.len()));
+                }
             }
 
             match parser_handle.join() {
@@ -1403,6 +1533,38 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         debug_assert_eq!(mono_table.len(), all_spectra.len());
     }
+    // Corrected precursors search a 0..=1 window: the `+2` step only carries the
+    // Hex+Fuc/NeuGc composition degeneracy once the monoisotope is right
+    // (bigbio/andes#64 arm F; rationale on `coupled_isotope_window`). Explicit
+    // window flags win, and nothing changes unless an MS2 was actually fitted.
+    // The glyco scorer reads its window from the prepared index's params, which
+    // are borrowed for the rest of the run, so the narrowed window travels as a
+    // `GlycoConfig` override instead of a mutation.
+    let (window, narrowed) = crate::mono::coupled_isotope_window(
+        mono_active,
+        cli.isotope_error,
+        cli.glyco_isotope_error == GlycoIsotopeFlag::Default,
+        params.isotope_error_range.clone(),
+    );
+    let glyco_isotope_override = if narrowed {
+        eprintln!(
+            "precursor-mono: isotope-error window {}..={} -> {}..={} for the {} of {} MS2 \
+             with a fitted envelope (the others keep {}..={}; a verified monoisotope needs \
+             no +2 step, which only admits the Hex+Fuc/NeuGc composition degeneracy — pass \
+             --isotope-error to override)",
+            params.isotope_error_range.start(),
+            params.isotope_error_range.end(),
+            window.start(),
+            window.end(),
+            mono_stats.fitted,
+            mono_stats.seen,
+            params.isotope_error_range.start(),
+            params.isotope_error_range.end()
+        );
+        Some(window)
+    } else {
+        None
+    };
 
     // Downstream code uses these names.
     let spectra = all_spectra;
@@ -1443,6 +1605,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 None
             },
+            glyco_isotope_override,
             t_total,
         )?;
         return Ok(());

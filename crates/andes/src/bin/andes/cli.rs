@@ -62,6 +62,19 @@ pub(crate) enum ScoreFlag {
     Strong,
 }
 
+/// Fragment-ion index for out-of-core searches (issue #76).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub(crate) enum FragmentIndexFlag {
+    /// On whenever the candidate index is out-of-core (default).
+    #[default]
+    Auto,
+    /// On in out-of-core mode; a warning (and enumeration) when the candidate
+    /// index is in RAM.
+    On,
+    /// Per-spectrum enumeration even out-of-core.
+    Off,
+}
+
 /// Candidate-resolution backing: in-RAM (`ram`, default) or out-of-core mmap
 /// base-peptide index with lazy mod enumeration (`mmap`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -160,6 +173,47 @@ pub(crate) struct SearchArgs {
     /// the sample is too small to be reliable.
     #[arg(long = "precursor-cal", default_value = "auto", value_parser = parse_precursor_cal)]
     pub(crate) precursor_cal: PrecursorCalMode,
+
+    /// Minimum number of (spectrum, charge) keys before the calibration pre-pass
+    /// runs; below it calibration is skipped as unreliable. Default 10000. Hidden:
+    /// exists so the out-of-core equivalence gate can force the pre-pass on the
+    /// small in-repo fixture; production runs should leave it alone.
+    #[arg(long = "cal-min-spec-keys", hide = true)]
+    pub(crate) cal_min_spec_keys: Option<usize>,
+
+    /// Out-of-core (`--candidate-index mmap`) only: cap on the total candidates
+    /// held in the per-chunk window cache (a pure memo; output is unchanged).
+    /// Lower it if a PTM-rich search runs out of memory, raise it for speed when
+    /// memory allows. Default 4000000 (~1 GiB).
+    #[arg(long = "mmap-window-cache-candidates", hide = true)]
+    pub(crate) mmap_window_cache_candidates: Option<usize>,
+
+    /// Fragment-ion index for out-of-core searches: `auto` (default) uses it
+    /// whenever the candidate index does not fit in RAM (`--candidate-index`
+    /// resolves to `mmap`), `on` forces it in out-of-core mode, `off` keeps
+    /// per-spectrum enumeration. Spectra are scored in precursor-mass order
+    /// against the peptidoforms their fragment peaks vote for. On a phospho
+    /// search this was 169 s instead of 5,954 s at +1% PSMs; searches that
+    /// fit in RAM are untouched.
+    #[arg(long = "fragment-index", default_value = "auto")]
+    pub(crate) fragment_index: FragmentIndexFlag,
+
+    /// Fragment-index mode: score each spectrum against at most K peptidoforms
+    /// (best fragment votes first). Default 100; measured 50–1000 within seed
+    /// noise on phospho.
+    #[arg(long = "fragment-index-top-k", hide = true)]
+    pub(crate) fragment_index_top_k: Option<u32>,
+
+    /// Fragment-index mode: minimum matched b/y ions for a peptidoform to be
+    /// scored. Default 3.
+    #[arg(long = "fragment-index-min-matched", hide = true)]
+    pub(crate) fragment_index_min_matched: Option<u16>,
+
+    /// Fragment-index mode: precursor-mass width of one index slice in Da.
+    /// Default: derived from the memory budget (10–150 Da; ~0.13 GB per Da on
+    /// a phospho search).
+    #[arg(long = "fragment-index-slice-da", hide = true)]
+    pub(crate) fragment_index_slice_da: Option<f64>,
 
     /// Precursor mass tolerance as `VALUE+unit`. Accepts ppm (e.g. `20ppm`,
     /// high-res) or Da (e.g. `0.02da`/`0.02Da`, low-res precursor selection).
@@ -484,7 +538,12 @@ pub(crate) struct SearchArgs {
     /// `.raw`). `auto` fits the observed envelope at the reported charge against a
     /// glycopeptide isotope model under the hypotheses "the recorded precursor is
     /// the M+k peak", k = 0..6, and moves the precursor down when a k > 0 clearly
-    /// wins; the search then keeps its DEFAULT narrow `--isotope-error` window.
+    /// wins; every spectrum whose envelope was fitted is then searched with a
+    /// `0..1` isotope window instead of the glyco default `0..2` (the `+2` step
+    /// only carries the Hex+Fuc/NeuGc composition degeneracy once the monoisotope
+    /// is verified; bigbio/andes#64 arm F), while spectra with no linked MS1 or
+    /// charge keep the default window. An explicit `--isotope-error`, or
+    /// `--glyco-isotope-error negative|wide`, is honoured.
     /// `off` (default) leaves every precursor as recorded. Motivation: on pGlyco2
     /// mouse liver the firmware records 3-6 Da above the monoisotope on a class of
     /// wide, high-mass glycopeptide envelopes, and widening the isotope window to

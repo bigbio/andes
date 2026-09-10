@@ -1,0 +1,15 @@
+# Phospho-enriched search (PXD007653, mouse liver EasyPhos).
+# Format: <mass>,<residue>,<fix|opt>,<location>,<name>
+#
+# Matches the depositors' MaxQuant search, which is the reference this benchmark scores
+# against: Carbamidomethyl fixed on C, Oxidation on M and protein-N-term Acetyl variable,
+# plus Phospho on S/T/Y, one line per residue (the parser takes a single residue or `*`).
+# NumMods=4 covers 99.9% of the reference peptides, which carry up to four variable mods
+# (a triply-phosphorylated peptide plus an oxidised methionine or an acetylated N-term).
+NumMods=4
+57.02146,C,fix,any,Carbamidomethyl
+15.99491,M,opt,any,Oxidation
+42.01057,*,opt,Prot-N-term,Acetyl
+79.96633,S,opt,any,Phospho
+79.96633,T,opt,any,Phospho
+79.96633,Y,opt,any,Phospho

@@ -332,6 +332,22 @@ impl Modification {
     }
 }
 
+/// Hand a `Modification` out as a `'static` reference by leaking it. The
+/// per-search modification table is a few dozen small records built once, so
+/// the leak is negligible; in exchange every `AminoAcid` clone during candidate
+/// enumeration copies a pointer instead of bumping a shared atomic refcount
+/// (which all worker threads contended on: 16 threads burned 4.7x the CPU of
+/// one thread for identical output on a phospho search).
+pub fn leak_mod(m: Modification) -> &'static Modification {
+    Box::leak(Box::new(m))
+}
+
+impl From<Modification> for &'static Modification {
+    fn from(m: Modification) -> Self {
+        leak_mod(m)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

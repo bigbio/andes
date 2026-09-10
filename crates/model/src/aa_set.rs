@@ -3,7 +3,6 @@
 
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
@@ -102,10 +101,10 @@ impl AminoAcidSet {
     }
 
     /// All DISTINCT modifications carried by this set — FIXED and VARIABLE — as
-    /// the original `Arc<Modification>` records (location, `ResidueSpec`, and the
+    /// the original `&'static Modification` records (location, `ResidueSpec`, and the
     /// `fixed` flag preserved).
     ///
-    /// The builder shares ONE `Arc<Modification>` per registered mod across every
+    /// The builder shares ONE `&'static Modification` per registered mod across every
     /// `(residue, location)` variant it folds into (a wildcard or anywhere mod is
     /// referenced from many slots), so de-duplicating by `Arc` identity returns
     /// each registered mod exactly once. Order is unspecified (table iteration).
@@ -122,17 +121,17 @@ impl AminoAcidSet {
     /// each enumerated separately), so re-adding it to a fresh builder would
     /// inject a spurious summed-mass variable mod. The `+` in the name is the
     /// builder's own stacking marker (also relied on elsewhere); we filter on it.
-    pub fn distinct_mods(&self) -> Vec<Arc<Modification>> {
+    pub fn distinct_mods(&self) -> Vec<&'static Modification> {
         let mut seen: std::collections::HashSet<*const Modification> =
             std::collections::HashSet::new();
-        let mut out: Vec<Arc<Modification>> = Vec::new();
+        let mut out: Vec<&'static Modification> = Vec::new();
         for aa in self.iter_variants() {
             if let Some(m) = aa.mod_.as_ref() {
                 if m.name.contains('+') {
                     continue; // synthesized fixed+variable stacked variant
                 }
-                if seen.insert(Arc::as_ptr(m)) {
-                    out.push(Arc::clone(m));
+                if seen.insert(std::ptr::from_ref::<Modification>(m)) {
+                    out.push(*m);
                 }
             }
         }
@@ -430,7 +429,7 @@ impl AminoAcidSetBuilder {
         // 3. Build the table.
         //
         // Wrap every distinct `Modification` declaration in a single shared
-        // `Arc<Modification>` up front. All `AminoAcid` variants that carry
+        // `&'static Modification` up front. All `AminoAcid` variants that carry
         // a given mod will reference the same allocation. At Astral scale
         // this is the difference between cloning a 24-byte struct (Arc
         // refcount bump) and cloning a 96-byte struct plus the
@@ -439,10 +438,18 @@ impl AminoAcidSetBuilder {
         // RSS. The intermediate fixed/variable match `Vec<Modification>`
         // copies below are gone; we hand out `Arc::clone(...)` calls
         // instead.
-        let fixed_mods_arc: Vec<Arc<Modification>> =
-            self.fixed_mods.iter().cloned().map(Arc::new).collect();
-        let variable_mods_arc: Vec<Arc<Modification>> =
-            self.variable_mods.iter().cloned().map(Arc::new).collect();
+        let fixed_mods_arc: Vec<&'static Modification> = self
+            .fixed_mods
+            .iter()
+            .cloned()
+            .map(crate::modification::leak_mod)
+            .collect();
+        let variable_mods_arc: Vec<&'static Modification> = self
+            .variable_mods
+            .iter()
+            .cloned()
+            .map(crate::modification::leak_mod)
+            .collect();
 
         let mut table: FxHashMap<(u8, ModLocation), Vec<AminoAcid>> = FxHashMap::default();
         let locations = [
@@ -457,10 +464,10 @@ impl AminoAcidSetBuilder {
             let std_aa = AminoAcid::standard(r).expect("STANDARD_RESIDUES has only valid residues");
 
             for &loc in &locations {
-                let fixed_match: Option<&Arc<Modification>> =
+                let fixed_match: Option<&&'static Modification> =
                     fixed_mods_arc.iter().find(|m| m.applies_to(r, loc));
 
-                let variable_matches: Vec<&Arc<Modification>> = variable_mods_arc
+                let variable_matches: Vec<&&'static Modification> = variable_mods_arc
                     .iter()
                     .filter(|m| m.applies_to(r, loc))
                     .collect();
@@ -468,17 +475,17 @@ impl AminoAcidSetBuilder {
                 let mut variants = Vec::new();
                 if loc == ModLocation::Anywhere {
                     if let Some(fm) = fixed_match {
-                        variants.push(std_aa.clone().with_mod(Arc::clone(fm)));
+                        variants.push(std_aa.clone().with_mod(*fm));
                     } else {
                         variants.push(std_aa.clone());
                     }
                     for vm in &variable_matches {
-                        variants.push(std_aa.clone().with_mod(Arc::clone(vm)));
+                        variants.push(std_aa.clone().with_mod(**vm));
                     }
                 } else {
                     if let Some(fm) = fixed_match {
                         if fm.location == loc {
-                            variants.push(std_aa.clone().with_mod(Arc::clone(fm)));
+                            variants.push(std_aa.clone().with_mod(*fm));
                         }
                     }
                     // A residue carrying a fixed ANYWHERE mod (e.g. Carbamidomethyl-C)
@@ -490,7 +497,7 @@ impl AminoAcidSetBuilder {
                     // fixed-anywhere mass into a combined mod so the stacked form is
                     // enumerated. (The fixed-anywhere-only form is already present via the
                     // Anywhere list propagated into this terminal cache.)
-                    let fixed_anywhere: Option<&Arc<Modification>> =
+                    let fixed_anywhere: Option<&&'static Modification> =
                         fixed_mods_arc.iter().find(|m| {
                             m.location == ModLocation::Anywhere
                                 && m.applies_to(r, ModLocation::Anywhere)
@@ -509,9 +516,9 @@ impl AminoAcidSetBuilder {
                                         neutral_losses: vm.neutral_losses.clone(),
                                         loss_class: vm.loss_class,
                                     };
-                                    std_aa.clone().with_mod(Arc::new(combined))
+                                    std_aa.clone().with_mod(combined)
                                 }
-                                None => std_aa.clone().with_mod(Arc::clone(vm)),
+                                None => std_aa.clone().with_mod(**vm),
                             };
                             variants.push(aa);
                         }

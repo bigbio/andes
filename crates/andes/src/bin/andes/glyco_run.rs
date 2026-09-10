@@ -23,6 +23,10 @@ pub(crate) fn run_glyco(
     // `spectra` (`Some` only when the flag is active; the PIN then carries the
     // Mono* columns). `None` keeps the PIN byte-identical.
     mono: Option<&[Option<search::precursor_mono::MonoCorrection>]>,
+    // The isotope-error window to search instead of `params.isotope_error_range`
+    // (`Some(0..=1)` once `--precursor-mono auto` corrected precursors; see
+    // `mono::coupled_isotope_window`). `None` keeps the params' window.
+    isotope_error_override: Option<std::ops::RangeInclusive<i8>>,
     t_total: std::time::Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let t_glyco = std::time::Instant::now();
@@ -109,6 +113,11 @@ pub(crate) fn run_glyco(
         cz_multisite: cli.glyco_cz_multisite,
         sialic_oxonium_min_frac: cli.glyco_sialic_oxonium_min_frac,
         scan_filter_path: cli.glyco_scans.clone(),
+        isotope_error_override_mask: isotope_error_override
+            .as_ref()
+            .and(mono)
+            .map(|table| table.iter().map(Option::is_some).collect()),
+        isotope_error_override,
         pf_charge: cli.glyco_pf_charge,
         // Peptide-first RETRIEVAL window. High-resolution MS2 defaults to the
         // glyco ppm tolerance; low-resolution keeps the rank model's 0.5 Da.

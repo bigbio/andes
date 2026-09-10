@@ -121,6 +121,11 @@ pub fn prepass_search_params(main: &SearchParams) -> SearchParams {
     // before the strong-score model is relevant, and using Strong here would
     // make the precursor-mass calibration depend on the experimental score path.
     p.score_mode = crate::search_params::ScoreMode::Rank;
+    // The pre-pass samples spectra across the whole file, so its one chunk
+    // spans every precursor mass; a per-chunk fragment-ion index over that is
+    // the entire database (issue #76). Calibration stays on the enumeration
+    // path.
+    p.fragment_index_top_k = 0;
     p
 }
 
@@ -143,7 +148,7 @@ pub fn apply_shift_for_mode(mode: PrecursorCalMode, stats: CalibrationStats) -> 
 pub fn learn_calibration_stats(
     spec_keys: &[SpecKey],
     originals: &HashMap<usize, Spectrum>,
-    prepared: &PreparedSearch<'_>,
+    prepared: &mut PreparedSearch<'_>,
     main_params: &SearchParams,
 ) -> CalibrationStats {
     if spec_keys.len() < main_params.cal_min_spec_keys {
@@ -174,6 +179,9 @@ pub fn learn_calibration_stats(
     }
 
     let queues = prepared.run_chunk_with_params(&prepass_spectra, 0, &prepass_params);
+    // Out-of-core backing materializes candidates lazily during the scan; pull
+    // them into `candidates` so the queue indices resolve. No-op in RAM mode.
+    prepared.sync_materialized_candidates();
     let (residuals, filter) = extract_residuals(
         &sampled,
         &queues,
@@ -456,6 +464,9 @@ mod tests {
             min_peaks: 10,
             precursor_cal_mode: PrecursorCalMode::Auto,
             cal_min_spec_keys: constants::MIN_SPECKEYS_FOR_PREPASS,
+            mmap_window_cache_max_candidates: 4_000_000,
+            fragment_index_top_k: 0,
+            fragment_index_min_matched: 3,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,

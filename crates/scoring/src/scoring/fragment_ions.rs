@@ -203,8 +203,11 @@ pub fn predict_by_ions_with_losses(
             .enumerate()
             .filter_map(|(i, aa)| {
                 aa.mod_.as_ref().and_then(|m| {
-                    (!m.neutral_losses.is_empty())
-                        .then(|| (i, m.loss_class, m.neutral_losses.as_slice()))
+                    (!m.neutral_losses.is_empty()).then_some((
+                        i,
+                        m.loss_class,
+                        m.neutral_losses.as_slice(),
+                    ))
                 })
             })
             .collect()
@@ -454,7 +457,6 @@ fn residue_mass_with_mod(aa: &AminoAcid) -> f64 {
 mod tests {
     use super::*;
     use model::modification::{ModLocation, Modification, ResidueSpec};
-    use std::sync::Arc;
 
     fn pep(seq: &[u8]) -> Peptide {
         let residues: Vec<AminoAcid> = seq
@@ -565,13 +567,13 @@ mod tests {
             neutral_losses: losses,
             loss_class,
         };
-        let arc = Arc::new(m);
+        let arc = model::modification::leak_mod(m);
         let residues: Vec<AminoAcid> = b"PEPTIDE"
             .iter()
             .map(|&r| {
                 let aa = AminoAcid::standard(r).unwrap();
                 if r == b'T' {
-                    aa.with_mod(arc.clone())
+                    aa.with_mod(arc)
                 } else {
                     aa
                 }

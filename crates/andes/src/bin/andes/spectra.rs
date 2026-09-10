@@ -299,7 +299,7 @@ pub(crate) fn run_precursor_calibration(
     ms_level: u32,
     bench_cap: usize,
     params: &SearchParams,
-    prepared: &PreparedSearch<'_>,
+    prepared: &mut PreparedSearch<'_>,
 ) -> Result<CalibrationStats, Box<dyn std::error::Error>> {
     if params.precursor_cal_mode == PrecursorCalMode::Off {
         return Ok(CalibrationStats::default());

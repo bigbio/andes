@@ -176,7 +176,7 @@ fn small_search_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
     let ox_residues = {
         let mut r = residues(b"PEPTMIDEK");
         // place Ox on the M (index 4)
-        r[4].mod_ = Some(std::sync::Arc::new(ox_m));
+        r[4].mod_ = Some(model::modification::leak_mod(ox_m));
         r
     };
     let ox_pep = Peptide::new(ox_residues, b'K', b'W');
@@ -371,8 +371,6 @@ fn mmap_result_identical_semitryptic() {
 /// Asserts the order-independent accepted-PSM set is identical RAM vs Mmap.
 #[test]
 fn mmap_result_identical_asymmetric_tol_cam_only() {
-    use std::sync::Arc;
-
     // One protein with several tryptic peptides whose neutral masses are close
     // together, so the asymmetric window's two sides admit different sets.
     let target = ProteinDb {
@@ -438,7 +436,7 @@ fn mmap_result_identical_asymmetric_tol_cam_only() {
         };
         for aa in r.iter_mut() {
             if aa.residue == b'C' {
-                aa.mod_ = Some(Arc::new(cam_mod.clone()));
+                aa.mod_ = Some(model::modification::leak_mod(cam_mod.clone()));
             }
         }
         Peptide::new(r, pre, post)
@@ -552,4 +550,106 @@ fn mmap_path_bit_identical_to_ram_on_fixture() {
         ram_sig, mmap_sig,
         "mmap candidate path must yield identical PSMs to the in-RAM path\nRAM : {ram_sig:#?}\nMMAP: {mmap_sig:#?}"
     );
+}
+
+/// Issue #76: on spectra built from a peptide's exact b/y ions, the per-chunk
+/// fragment-ion index must give that peptide the most votes and materialise it.
+#[test]
+fn fragment_index_ranks_the_true_peptide_first_on_exact_spectra() {
+    use model::tolerance::Tolerance;
+    use search::fragment_index::ChunkFragmentIndex;
+    let (spectra, idx, params) = small_search_fixture();
+    let scorer = make_scorer(0.05);
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let prepared = PreparedSearch::prepare_mmap(&idx, &params, &scorer, 0.05, "XXX", tmp.path())
+        .expect("prepare_mmap");
+    let mi = prepared.mmap_index.as_ref().unwrap();
+    let records = mi.records();
+    let fi = ChunkFragmentIndex::build(records, &idx, &params, Tolerance::Da(0.05), 0.0, 5000.0);
+    assert!(fi.n_forms() > 0);
+    // Reference: what the enumeration path scores as top-1 for each spectrum.
+    let (queues, cands) = run_prepared(&idx, &params, &spectra, CandidateBacking::Ram, &scorer);
+    for (spec, q) in spectra.iter().zip(&queues) {
+        let best = q
+            .iter_psms()
+            .max_by(|a, b| a.rank_score.partial_cmp(&b.rank_score).unwrap())
+            .expect("psm");
+        // Modification-aware signature (residue, mod delta): the oxidised
+        // PEPTMIDEK form must be distinguished from the unmodified one.
+        let sig = |c: &Candidate| -> Vec<(u8, i64)> {
+            c.peptide
+                .residues
+                .iter()
+                .map(|a| {
+                    let d = a.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
+                    (a.residue, (d * 1e4).round() as i64)
+                })
+                .collect()
+        };
+        let truth = sig(&cands[best.primary_candidate_idx() as usize]);
+        let z = spec.precursor_charge.unwrap() as u8;
+        let sel = fi.query(spec, &[z], &params, Tolerance::Da(0.05), 5, 3);
+        assert!(!sel.is_empty(), "{}: no votes", spec.title);
+        let mats = fi.materialise(&sel, &idx, &params, None, &|_| {});
+        let picks: Vec<Vec<(u8, i64)>> = mats.iter().map(sig).collect();
+        assert!(
+            picks.contains(&truth),
+            "{}: enumeration top-1 peptidoform not among index picks (votes {:?})",
+            spec.title,
+            sel
+        );
+    }
+}
+
+/// Same as above with a tight mass window, so the bounded walk actually prunes
+/// and the pruned index `k` must still select the same form on both sides.
+#[test]
+fn fragment_index_prunes_to_the_window_and_still_finds_the_true_peptide() {
+    use model::tolerance::Tolerance;
+    use search::fragment_index::ChunkFragmentIndex;
+    let (spectra, idx, params) = small_search_fixture();
+    let scorer = make_scorer(0.05);
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let prepared = PreparedSearch::prepare_mmap(&idx, &params, &scorer, 0.05, "XXX", tmp.path())
+        .expect("prepare_mmap");
+    let mi = prepared.mmap_index.as_ref().unwrap();
+    let (queues, cands) = run_prepared(&idx, &params, &spectra, CandidateBacking::Ram, &scorer);
+    for (spec, q) in spectra.iter().zip(&queues) {
+        let best = q
+            .iter_psms()
+            .max_by(|a, b| a.rank_score.partial_cmp(&b.rank_score).unwrap())
+            .expect("psm");
+        let truth = &cands[best.primary_candidate_idx() as usize].peptide;
+        let truth_seq: Vec<u8> = truth.residues.iter().map(|a| a.residue).collect();
+        let m = truth.mass();
+        let fi = ChunkFragmentIndex::build(
+            mi.records(),
+            &idx,
+            &params,
+            Tolerance::Da(0.05),
+            m - 1.0,
+            m + 1.0,
+        );
+        let z = spec.precursor_charge.unwrap() as u8;
+        let sel = fi.query(spec, &[z], &params, Tolerance::Da(0.05), 5, 3);
+        assert!(!sel.is_empty(), "{}: no votes", spec.title);
+        let mats = fi.materialise(&sel, &idx, &params, None, &|_| {});
+        let seqs: Vec<Vec<u8>> = mats
+            .iter()
+            .map(|c| c.peptide.residues.iter().map(|a| a.residue).collect())
+            .collect();
+        assert!(
+            seqs.contains(&truth_seq),
+            "{}: truth {:?} not among picks {:?}",
+            spec.title,
+            String::from_utf8_lossy(&truth_seq),
+            seqs.len()
+        );
+        for c in &mats {
+            assert!(
+                (c.peptide.mass() - m).abs() <= 1.0 + 1e-6,
+                "materialised form outside the window"
+            );
+        }
+    }
 }

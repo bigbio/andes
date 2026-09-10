@@ -389,6 +389,246 @@ pub(crate) fn expand_mod_combinations(
     out
 }
 
+/// Shared bounded walk over the peptidoforms of `span`: the same recursion
+/// and iteration order as [`expand_mod_combinations`], but subtrees whose
+/// neutral mass cannot land in `[mass_lo, mass_hi]` are pruned. Variable
+/// modifications only add mass here, so a branch's running sum plus the
+/// minimum (or maximum) of the remaining positions bounds its final mass; the
+/// maximum ignores the per-peptide mod cap, which can only keep a branch, never
+/// drop a feasible one. `visit` sees the pruned index `k` (dense over the
+/// forms that survive), the chosen variants, and their masses. Both the
+/// fragment-ion index build and its materialisation use this walk, so `k`
+/// means the same thing on both sides.
+fn walk_forms_bounded(
+    span: &[u8],
+    params: &SearchParams,
+    is_protein_n_term: bool,
+    is_protein_c_term: bool,
+    mass_lo: f64,
+    mass_hi: f64,
+    mut visit: impl FnMut(usize, &[&AminoAcid], &[f64]),
+) {
+    use model::mass::H2O;
+    let n = span.len();
+    if n == 0 {
+        return;
+    }
+    let pos0_owned: Vec<AminoAcid> =
+        build_terminal_variants(params, span[0], 0, n, is_protein_n_term, is_protein_c_term);
+    let pos_last_owned: Option<Vec<AminoAcid>> = (n > 1).then(|| {
+        build_terminal_variants(
+            params,
+            span[n - 1],
+            n - 1,
+            n,
+            is_protein_n_term,
+            is_protein_c_term,
+        )
+    });
+    let position_variants: Vec<&[AminoAcid]> = span
+        .iter()
+        .enumerate()
+        .map(|(i, &r)| {
+            if i == 0 {
+                pos0_owned.as_slice()
+            } else if i == n - 1 {
+                pos_last_owned.as_ref().unwrap().as_slice()
+            } else {
+                params.aa_set.variants_for(r, ModLocation::Anywhere)
+            }
+        })
+        .collect();
+    let mass_of = |aa: &AminoAcid| aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
+    // Suffix sums of the per-position minimum and maximum variant mass.
+    let mut min_rest = vec![0.0f64; n + 1];
+    let mut max_rest = vec![0.0f64; n + 1];
+    for i in (0..n).rev() {
+        let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+        for v in position_variants[i] {
+            let m = mass_of(v);
+            lo = lo.min(m);
+            hi = hi.max(m);
+        }
+        if position_variants[i].is_empty() {
+            return;
+        }
+        min_rest[i] = min_rest[i + 1] + lo;
+        max_rest[i] = max_rest[i + 1] + hi;
+    }
+    if min_rest[0] + H2O > mass_hi || max_rest[0] + H2O < mass_lo {
+        return;
+    }
+    let mut masses: Vec<f64> = Vec::with_capacity(n);
+    let mut chosen: Vec<&AminoAcid> = Vec::with_capacity(n);
+    let mut k = 0usize;
+    #[allow(clippy::too_many_arguments)]
+    fn rec<'a>(
+        pv: &[&'a [AminoAcid]],
+        pos: usize,
+        sum: f64,
+        masses: &mut Vec<f64>,
+        chosen: &mut Vec<&'a AminoAcid>,
+        mods_used: u32,
+        max_mods: u32,
+        min_rest: &[f64],
+        max_rest: &[f64],
+        lo: f64,
+        hi: f64,
+        k: &mut usize,
+        visit: &mut impl FnMut(usize, &[&AminoAcid], &[f64]),
+    ) {
+        if pos == pv.len() {
+            visit(*k, chosen, masses);
+            *k += 1;
+            return;
+        }
+        for variant in pv[pos] {
+            let consumes_slot = variant.mod_.as_ref().map(|m| !m.fixed).unwrap_or(false);
+            let new_mods = mods_used + if consumes_slot { 1 } else { 0 };
+            if new_mods > max_mods {
+                continue;
+            }
+            let m = variant.mass + variant.mod_.as_ref().map_or(0.0, |md| md.mass_delta);
+            let next = sum + m;
+            // Bounds for everything under this choice.
+            if next + min_rest[pos + 1] + H2O > hi || next + max_rest[pos + 1] + H2O < lo {
+                continue;
+            }
+            masses.push(m);
+            chosen.push(variant);
+            rec(
+                pv,
+                pos + 1,
+                next,
+                masses,
+                chosen,
+                new_mods,
+                max_mods,
+                min_rest,
+                max_rest,
+                lo,
+                hi,
+                k,
+                visit,
+            );
+            chosen.pop();
+            masses.pop();
+        }
+    }
+    rec(
+        &position_variants,
+        0,
+        0.0,
+        &mut masses,
+        &mut chosen,
+        0,
+        params.max_variable_mods_per_peptide,
+        &min_rest,
+        &max_rest,
+        mass_lo,
+        mass_hi,
+        &mut k,
+        &mut visit,
+    );
+}
+
+/// Span, terminal flags, and flanks of an index record; `None` when the
+/// record does not fit its protein.
+fn record_span<'a>(
+    db: &'a SearchIndex,
+    rec: &crate::candidate_index::IndexRecord,
+) -> Option<(&'a [u8], bool, bool, u8, u8)> {
+    use crate::candidate_index::flags;
+    let protein = db.db.proteins.get(rec.protein_index as usize)?;
+    let seq = &protein.sequence;
+    let abs_start = rec.start_offset as usize;
+    let abs_end = abs_start + rec.length as usize;
+    if abs_end > seq.len() {
+        return None;
+    }
+    let pre = if abs_start == 0 {
+        b'_'
+    } else {
+        seq[abs_start - 1]
+    };
+    let post = if abs_end == seq.len() {
+        b'-'
+    } else {
+        seq[abs_end]
+    };
+    Some((
+        &seq[abs_start..abs_end],
+        rec.flags & flags::IS_PROTEIN_N_TERM != 0,
+        rec.flags & flags::IS_PROTEIN_C_TERM != 0,
+        pre,
+        post,
+    ))
+}
+
+/// Visit the peptidoforms of one index record whose neutral mass lies in
+/// `[mass_lo, mass_hi]`, as per-residue masses, with the pruned index `k`.
+/// Nothing per form is allocated.
+pub fn for_each_record_form_masses_bounded(
+    db: &SearchIndex,
+    params: &SearchParams,
+    rec: &crate::candidate_index::IndexRecord,
+    mass_lo: f64,
+    mass_hi: f64,
+    mut f: impl FnMut(usize, &[f64]),
+) {
+    let Some((span, n_term, c_term, _, _)) = record_span(db, rec) else {
+        return;
+    };
+    walk_forms_bounded(
+        span,
+        params,
+        n_term,
+        c_term,
+        mass_lo,
+        mass_hi,
+        |k, _, masses| f(k, masses),
+    );
+}
+
+/// The peptidoforms of one index record whose neutral mass lies in
+/// `[mass_lo, mass_hi]`, materialised as candidates, in the SAME pruned order
+/// as [`for_each_record_form_masses_bounded`] visits them (so index `k` on one
+/// side selects the same form on the other).
+pub fn expand_base_record_bounded(
+    db: &SearchIndex,
+    params: &SearchParams,
+    rec: &crate::candidate_index::IndexRecord,
+    mass_lo: f64,
+    mass_hi: f64,
+) -> Vec<Candidate> {
+    use crate::candidate_index::flags;
+    let Some((span, n_term, c_term, pre, post)) = record_span(db, rec) else {
+        return Vec::new();
+    };
+    let is_decoy = rec.flags & flags::IS_DECOY != 0;
+    let mut out = Vec::new();
+    walk_forms_bounded(
+        span,
+        params,
+        n_term,
+        c_term,
+        mass_lo,
+        mass_hi,
+        |_, chosen, _| {
+            let residues: Vec<AminoAcid> = chosen.iter().map(|aa| (*aa).clone()).collect();
+            out.push(Candidate {
+                peptide: Peptide::new(residues, pre, post),
+                protein_index: rec.protein_index as usize,
+                start_offset_in_protein: rec.start_offset as usize,
+                is_decoy,
+                is_protein_n_term: n_term,
+                is_protein_c_term: c_term,
+            });
+        },
+    );
+    out
+}
+
 /// Build the merged variant list for a terminal position (pos 0 or pos n-1).
 ///
 /// Only called for the 1-2 terminal positions per span.
@@ -811,14 +1051,29 @@ pub fn lazy_candidates_for_precursor(
 ///
 /// The lazy per-Δ enumeration is retained for bounded-RSS (O(window), not full
 /// materialization); only the per-candidate ACCEPTANCE predicate changes.
-pub fn lazy_candidates_for_nominal_window(
+/// Identity of one base record in the on-disk index:
+/// `(protein_index, start_offset, length, flags)`. Identical copies of a span
+/// (the N-terminal-Met re-enumeration) share a key; their count is the RAM
+/// enumeration multiplicity.
+pub type BaseRecordKey = (u32, u32, u16, u16);
+
+/// The [`BaseRecordKey`] of an index record.
+pub fn base_record_key(rec: &crate::candidate_index::IndexRecord) -> BaseRecordKey {
+    (rec.protein_index, rec.start_offset, rec.length, rec.flags)
+}
+
+/// Base records whose peptidoforms MAY land in the nominal-bucket window
+/// `[min_nominal, max_nominal]`, over-fetched across every distinct variable-mod
+/// mass offset, each with the number of identical copies the index holds for it.
+/// Sorted by key, which is `enumerate_candidates` order (protein ASC, start
+/// ASC, length ASC, flags ASC). Cheap: index range scans only, no expansion.
+pub fn base_records_for_nominal_window(
     mi: &crate::candidate_index::MmapCandidateIndex,
-    db: &SearchIndex,
     params: &SearchParams,
     min_nominal: i32,
     max_nominal: i32,
-) -> Vec<Candidate> {
-    use crate::candidate_index::{flags, IndexRecord};
+) -> Vec<(crate::candidate_index::IndexRecord, u32)> {
+    use crate::candidate_index::IndexRecord;
     use model::mass::{H2O, INTEGER_MASS_SCALER};
 
     if min_nominal > max_nominal {
@@ -835,19 +1090,21 @@ pub fn lazy_candidates_for_nominal_window(
     //     extra bucket-width on each side to be safe against float rounding, then
     //     add H2O to move from residue-mass space to full-peptide mass space.
     let scaler = INTEGER_MASS_SCALER as f64;
-    // One nominal unit spans ~1/SCALER Da of real mass; pad generously.
     let bucket_da = 1.0 / scaler;
     let residue_lo = (min_nominal as f64 - 0.5) / scaler - bucket_da;
     let residue_hi = (max_nominal as f64 + 0.5) / scaler + bucket_da;
     let full_lo = residue_lo + H2O;
     let full_hi = residue_hi + H2O;
 
-    // (3) Union of base records across all Δ windows, de-duplicated. Base mass =
+    // (3) Union of base records across all Δ windows. Base mass =
     //     full_peptide_mass − Δ, so the base-mass fetch window is
-    //     `[full_lo − Δ, full_hi − Δ]`.
-    let mut seen_records: std::collections::HashSet<(u32, u32, u16, u16)> =
-        std::collections::HashSet::new();
-    let mut base_records: Vec<IndexRecord> = Vec::new();
+    //     `[full_lo − Δ, full_hi − Δ]`. Copies of one span sit at ONE mass, so
+    //     every Δ window that reaches the span returns all of its copies; the
+    //     copy count is therefore the same in every window that has the key.
+    let mut records: rustc_hash::FxHashMap<BaseRecordKey, (IndexRecord, u32)> =
+        rustc_hash::FxHashMap::default();
+    let mut counts_this_window: rustc_hash::FxHashMap<BaseRecordKey, u32> =
+        rustc_hash::FxHashMap::default();
     for (_, delta) in &offsets {
         let lo = ((full_lo - delta) * 1000.0).floor() as i64;
         let hi = ((full_hi - delta) * 1000.0).ceil() as i64;
@@ -856,70 +1113,94 @@ pub fn lazy_candidates_for_nominal_window(
         }
         let lo_milli = lo.max(0) as u64;
         let hi_milli = hi as u64;
+        counts_this_window.clear();
         for rec in mi.mass_window(lo_milli, hi_milli) {
-            let key = (rec.protein_index, rec.start_offset, rec.length, rec.flags);
-            if seen_records.insert(key) {
-                base_records.push(rec);
-            }
+            let key = base_record_key(&rec);
+            *counts_this_window.entry(key).or_insert(0) += 1;
+            records.entry(key).or_insert((rec, 0));
+        }
+        for (key, n) in counts_this_window.drain() {
+            let slot = records.get_mut(&key).expect("inserted above");
+            slot.1 = slot.1.max(n);
         }
     }
 
-    // Sort base_records to match enumerate_candidates order (protein_index ASC,
-    // start_offset ASC, flags ASC) before expanding mod combinations. This is
-    // required for the MMAP path to visit candidates in the same order as the
-    // RAM path (which iterates candidates in enumerate_candidates order via
-    // ascending global indices). A HashSet was used for dedup in step (3), so
-    // the vec order is non-deterministic without this sort.
-    base_records.sort_unstable_by_key(|r| (r.protein_index, r.start_offset, r.length, r.flags));
-
-    // (4) Reconstruct + place mods exactly as the precursor-window path, but gate
-    //     acceptance on the RAM nominal-bucket predicate.
-    let mut out: Vec<Candidate> = Vec::new();
-    for rec in &base_records {
-        let protein = &db.db.proteins[rec.protein_index as usize];
-        let seq = &protein.sequence;
-        let abs_start = rec.start_offset as usize;
-        let abs_end = abs_start + rec.length as usize;
-        if abs_end > seq.len() {
-            continue;
-        }
-        let span = &seq[abs_start..abs_end];
-
-        let is_protein_n_term = rec.flags & flags::IS_PROTEIN_N_TERM != 0;
-        let is_protein_c_term = rec.flags & flags::IS_PROTEIN_C_TERM != 0;
-        let is_decoy = rec.flags & flags::IS_DECOY != 0;
-
-        let pre = if abs_start == 0 {
-            b'_'
-        } else {
-            seq[abs_start - 1]
-        };
-        let post = if abs_end == seq.len() {
-            b'-'
-        } else {
-            seq[abs_end]
-        };
-
-        let mod_combinations =
-            expand_mod_combinations(span, params, is_protein_n_term, is_protein_c_term);
-        for residues in mod_combinations {
-            let peptide = Peptide::new(residues, pre, post);
-            // RAM membership: nominal_from(peptide.mass() − H2O) in bounds.
-            // `Peptide::nominal_residue_mass()` caches exactly this value.
-            let key = peptide.nominal_residue_mass();
-            if key >= min_nominal && key <= max_nominal {
-                out.push(Candidate {
-                    peptide,
-                    protein_index: rec.protein_index as usize,
-                    start_offset_in_protein: abs_start,
-                    is_decoy,
-                    is_protein_n_term,
-                    is_protein_c_term,
-                });
-            }
-        }
-    }
+    let mut out: Vec<(IndexRecord, u32)> = records.into_values().collect();
+    out.sort_unstable_by_key(|(r, _)| base_record_key(r));
     out
+}
+
+/// Every peptidoform of one base record — the span reconstructed from the
+/// protein, variable mods placed exactly as the precursor-window path places
+/// them — with NO window filter. Empty when the record does not fit its
+/// protein (a corrupt index).
+pub fn expand_base_record(
+    db: &SearchIndex,
+    params: &SearchParams,
+    rec: &crate::candidate_index::IndexRecord,
+) -> Vec<Candidate> {
+    use crate::candidate_index::flags;
+
+    let Some(protein) = db.db.proteins.get(rec.protein_index as usize) else {
+        return Vec::new();
+    };
+    let seq = &protein.sequence;
+    let abs_start = rec.start_offset as usize;
+    let abs_end = abs_start + rec.length as usize;
+    if abs_end > seq.len() {
+        return Vec::new();
+    }
+    let span = &seq[abs_start..abs_end];
+
+    let is_protein_n_term = rec.flags & flags::IS_PROTEIN_N_TERM != 0;
+    let is_protein_c_term = rec.flags & flags::IS_PROTEIN_C_TERM != 0;
+    let is_decoy = rec.flags & flags::IS_DECOY != 0;
+
+    let pre = if abs_start == 0 {
+        b'_'
+    } else {
+        seq[abs_start - 1]
+    };
+    let post = if abs_end == seq.len() {
+        b'-'
+    } else {
+        seq[abs_end]
+    };
+
+    expand_mod_combinations(span, params, is_protein_n_term, is_protein_c_term)
+        .into_iter()
+        .map(|residues| Candidate {
+            peptide: Peptide::new(residues, pre, post),
+            protein_index: rec.protein_index as usize,
+            start_offset_in_protein: abs_start,
+            is_decoy,
+            is_protein_n_term,
+            is_protein_c_term,
+        })
+        .collect()
+}
+
+/// Peptidoforms in the nominal-bucket window `[min_nominal, max_nominal]`, in
+/// the order the in-RAM enumeration would visit them: base records in
+/// `enumerate_candidates` order, each expanded in `expand_mod_combinations`
+/// order, and gated on the RAM membership predicate
+/// `nominal_from(peptide.mass() − H2O) ∈ [min, max]` (cached as
+/// `Peptide::nominal_residue_mass()`).
+pub fn lazy_candidates_for_nominal_window(
+    mi: &crate::candidate_index::MmapCandidateIndex,
+    db: &SearchIndex,
+    params: &SearchParams,
+    min_nominal: i32,
+    max_nominal: i32,
+) -> Vec<Candidate> {
+    base_records_for_nominal_window(mi, params, min_nominal, max_nominal)
+        .into_iter()
+        .flat_map(|(rec, _)| expand_base_record(db, params, &rec))
+        .filter(|c| {
+            let key = c.peptide.nominal_residue_mass();
+            key >= min_nominal && key <= max_nominal
+        })
+        .collect()
 }
 
 /// Count enzymatic cleavage sites strictly inside `(start, end)` — the missed

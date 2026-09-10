@@ -4,6 +4,22 @@ This is the full reference for the `andes` binary and its outputs. For a quick s
 
 Run `andes --help` for auto-generated help derived from the same `Cli` struct documented below.
 
+**`--help` is a curated surface; this file is the complete one.** `--help` lists the flags a
+normal run needs — inputs and outputs, the enzyme and modifications, the mode switches, and
+the few genuine scientific choices. Everything else is *advanced*: still supported, still
+documented here, still settable, but hidden from `--help`, because the engine derives it and
+reports what it chose. Reach for an advanced flag to reproduce a measurement or to override a
+derivation you have a reason to distrust, not to tune a normal search.
+
+Advanced (hidden) flags include: `--candidate-index`, `--fragment-index`, `--gbdt-max-trees`,
+`--peak-filter`, `--density-on-active-list`, `--precursor-offset-clamp`, `--ethcd-activation`,
+`--isotope-error`, `--rss-probe`, `--chimeric-allow-overlap`, and the glyco tuning group
+(`--glyco-tol-ppm`, `--glyco-retrieval-tol-ppm`, `--glyco-retrieval-tol-da`,
+`--glyco-min-matched-ions`, `--glyco-min-raw-score`, `--glyco-min-raw-score-quantile`,
+`--glyco-sialic-oxonium-min-frac`, `--glyco-max-peaks`, `--glyco-isotope-error`,
+`--glyco-cz-multisite`, `--glyco-etd-rank-glycan`, `--glyco-y-max-charge`,
+`--glyco-cz-max-charge`, `--glyco-diag-splits`, `--glyco-scans`).
+
 ---
 
 ## Contents

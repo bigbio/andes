@@ -745,17 +745,28 @@ removed 2026-09-05). The measurements are in
 
 By default FDR is computed **externally**: andes writes the glyco `.pin` and you run Percolator on it. The only exception is the opt-in in-process rescoring flags (`--rescore` → Percolator, or `--rescore-native` → the non-production built-in GBDT rescorer); see the Rescoring group in §1a. Glycopeptide runs use the external Percolator path.
 
-### Internal environment variables
+**Recommended Percolator setting for a glyco PIN: `--trainFDR 0.05`.** Percolator's default
+trains its classifier on PSMs below a 1% q-value. A glycopeptide run accepts far fewer PSMs than a
+standard search, so at 1% the training set is small enough that the cross-validated fit becomes
+unstable. Measured on a pooled human-plasma glyco PIN, one variable, same rows, five Percolator
+seeds each:
 
-A few remaining `ANDES_*` environment variables are **internal / advanced** and are
-NOT part of the supported search interface. Most do not change default search output — the training-only, instrumentation and test-harness variables listed below are inert for a normal search.
+| `--trainFDR` | PSMs @1% | agreeing with the reference identifications |
+|---|---:|---:|
+| 0.01 (Percolator's default) | 210.6 ± 50.9 | 171.0 ± 37.6 |
+| **0.05** | **384.6 ± 19.9** | **301.4 ± 11.1** |
+| 0.10 | 348.8 ± 9.6 | 283.2 ± 6.1 |
 
-**However, a number of `ANDES_GLYCO_*` variables (and the engine-wide `ANDES_PRECOFF_NOCLAMP`, `ANDES_DENSITY_RAW`, `ANDES_ETHCD_AS_ETD`) are escape hatches that REVERT a shipped default and therefore DO change results.** They exist for A/B testing and rollback. Setting any of them means your run is no longer the configuration this release was validated against, and the engine-wide ones affect non-glyco searches too. They are not covered by semantic versioning and may be removed without notice; do not use them in production pipelines.
+The default is both worse and erratic — one seed returned 112 PSMs and another 256 from identical
+input. `0.10` is stable but gives back some yield, so 0.05 is the operating point.
 
-- **Model training** (only read by the hidden `train*` subcommands): `ANDES_GEO_SEGMENTS`, `ANDES_GEO_MAX_RANK`, `ANDES_GEO_OCCUPANCY`, `ANDES_GEO_MAX_TIERS`, `ANDES_GEO_MAX_FRAG_CHARGE` (partition-geometry derivation), `ANDES_SEED_GEOMETRY` (reuse seed geometry), `ANDES_DENSE_NOISE` (noise sampler), `ANDES_V1_STORE` / `ANDES_V1_OUT`, `ANDES_TRAIN_BENCH`.
-- **Advanced scoring**: `ANDES_PEAK_WINDOW` / `ANDES_PEAK_PER_WINDOW` (windowed peak filtering; unset = model-tolerance default).
-- **Read-only developer instrumentation** (no effect on output): `ANDES_RSS_PROBE` (memory logging), `ANDES_CHIMERIC_OVERLAP` (fragment-overlap diagnostic), `Andes_TRACE_IONS` / `Andes_TRACE_PEP` (ion/peptide trace logging).
-- **Test harness only**: `ANDES_TEST_D`, `ANDES_TEST_RAW`, `ANDES_TEST_PERCOLATOR_BIN`.
+This is a recommendation about how to run Percolator, not an andes setting: andes does not compute
+FDR (see above), and a pipeline that owns its own rescoring, such as quantms, owns this choice.
+
+Do **not** respond to an unstable glyco fit by filtering rows out of the PIN first. The
+low-scoring rows are roughly half decoys, and Percolator needs that population to place a
+threshold, so removing them starves the fit rather than cleaning it — measured, see
+`docs/benchmarks/README.md`.
 
 ---
 

@@ -1894,8 +1894,7 @@ fn score_spectrum_glyco(
     // the Y-ladder / re-collapse experiments (Codex: collapse-after-
     // truncation). The cheap glycan Y-ladder (far cheaper than
     // compute_psm_features) breaks the rank tie; gl_key breaks a full tie.
-    // Enumerated-only: a de-novo winner drops the scan (ANDES_GLYCO_DENOVO=1
-    // keeps it); ANDES_GLYCO_ALL_HITS=1 keeps the full multi-row dump.
+    // Enumerated-only: a de-novo winner drops the scan.
     let ladder_raw = |bb_hit_idx: usize| -> f32 {
         let bb = &deduped_backbone[bb_hit_idx];
         let bbn = bb.backbone_mass + H2O;
@@ -2562,13 +2561,12 @@ fn score_spectrum_glyco(
     } else {
         // DETERMINISM: `best_hits` is a HashMap, so `into_values()` yields
         // hash-iteration order. Downstream consumers depend on this order —
-        // RT calibration anchors on `hits.first()` (crates/output/src/glyco_rt.rs),
-        // ANDES_GLYCO_ALL_HITS emits hits in slice order, and DeltaRTRank
-        // tie-breaks on hit index — so an unordered vector makes those
+        // RT calibration anchors on `hits.first()` (crates/output/src/glyco_rt.rs)
+        // and DeltaRTRank tie-breaks on hit index — so an unordered vector makes those
         // outputs vary with the process hash seed (Codex review; this repo
         // had a 40% FDR swing from exactly this class of non-determinism).
-        // Impose the same total order as the ALL_HITS diagnostic dump above:
-        // rank DESC, then the unique glycan key ASC. The top-1-per-scan
+        // Impose a deterministic total order: rank DESC, then the unique
+        // glycan key ASC. The top-1-per-scan
         // collapse (`select_emitted_hits`) picks its winner by `collapse_cmp`
         // independent of this order, so the 253/97 baseline is unchanged.
         let mut hits: Vec<(GlycanWinnerKey, FullGlycoPsm)> = best_hits.into_iter().collect();

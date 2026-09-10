@@ -226,6 +226,56 @@ The new FragPipe match-between-glycans work shows that learned RT/IM shifts betw
 
 This can increase glycopeptide coverage, but it must not be used to claim more searched PSMs than MSFragger.
 
+## Workstream C: PTM-rich search at Comet speed — DONE (2026-09-10)
+
+**Goal, set 2026-09-08:** Comet parity on wall time at equal or better identifications on
+PTM-rich data. **Reached and exceeded**, shipped in #77 as the default for any search whose
+candidate index goes out-of-core.
+
+**PXD007653 phospho, one file (102,820 MS2), mouse 1:1 entrapment database, Phospho S/T/Y +
+Ox-M + protein-N-term acetyl, NumMods=4, same 32-core node, production defaults:**
+
+| engine / path | wall | PSMs @1% | true FDP | phospho PSMs | MaxQuant covered |
+|---|---:|---:|---:|---:|---:|
+| Comet 2025.01 | 226 s | 33,888–34,025 | 1.73–1.78% | 23,888 | 77.9% |
+| **andes, fragment index (default)** | **164 s** | **37,258–37,280** | **1.15–1.16%** | **26,883** | **82.5%** |
+| andes, enumeration path | 5,954 s | 36,817–36,922 | 1.22–1.32% | 26,629 | 82.1% |
+| andes, `main` before this work | ~40 h (0.7 spectra/s) | – | – | – | – |
+
+**What each step bought** (same file, same node, measured one at a time):
+
+| step | phospho wall | what it fixed |
+|---|---:|---|
+| `main` before #71 | OOM-killed | the pre-pass bypassed the memory budget; the #67 window cache was unbounded |
+| #71 | ~40 h | both memory defects; search now completes |
+| #73 | ~19 h equivalent | expansion cached per base record instead of per window |
+| #74 | 5,954 s | the modification handle was an `Arc`; every worker bumped one refcount (16 threads burned 4.7x the CPU of one) |
+| #77, first index | 1,167 s | per-chunk fragment-ion index, top-K by matched b/y ions |
+| #77, pruned index | **164 s** | mass-bounded form walk (only in-window forms are enumerated) and mass-ordered form ids (integer per-bin sort, precursor window becomes an id range) |
+
+**Design facts worth keeping, all measured on this search space:**
+
+- ~88k–120k peptidoforms per Da, so index slices are bounded by **mass span**, not spectrum
+  count: 1,000 high-mass spectra spanned 450 Da, and that window held 39.7M forms and 3.3G
+  ion entries. The slice width follows the #68 memory budget (10–150 Da).
+- Only forms inside the slice's precursor window may be indexed; a base record reachable
+  through one modification offset carries dozens of forms at other masses.
+- The calibration pre-pass must never use the index: its sample spans every precursor mass,
+  so a per-chunk index over it is the whole database.
+- The prepared search carries a hardcoded 0.5 Da fragment tolerance; matching must use the
+  scorer's effective tolerance, or every form matches dozens of peaks by chance.
+- The in-repo fixture is human spectra against E. coli with about nine true PSMs. It
+  exercises code paths and cannot gate identifications.
+
+**Two follow-ups measured and dropped** (recorded so they are not retried): memoising each
+window's base-record list (100 GB on a phospho chunk), and borrowing rather than cloning the
+per-spectrum candidates (chunk 446 s vs 409 s, RSS 39 GB vs 13.5 GB — the scorer reads a
+contiguous list far better than it chases pointers).
+
+**Still open:** the index does not reproduce the enumeration path's multiplicity copies in
+the PIN `Proteins` column; it is unmeasured on the standard sets (they fit in RAM, so it is
+never selected there); `--chimeric` and `--refine` keep enumeration.
+
 ## Ordered 30-day execution plan
 
 | Order | Deliverable | Expected leverage | Promotion gate |

@@ -193,7 +193,7 @@ pub(crate) struct SearchArgs {
     /// resolves to `mmap`), `on` forces it in out-of-core mode, `off` keeps
     /// per-spectrum enumeration. Spectra are scored in precursor-mass order
     /// against the peptidoforms their fragment peaks vote for. On a phospho
-    /// search this was 169 s instead of 5,954 s at +1% PSMs; searches that
+    /// search this was 164 s instead of 5,954 s at +1% PSMs; searches that
     /// fit in RAM are untouched.
     #[arg(long = "fragment-index", default_value = "auto")]
     pub(crate) fragment_index: FragmentIndexFlag,

@@ -512,13 +512,27 @@ pub fn hybrid_candidates_presolved(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::glycan_db::n_glycan_list;
+    use crate::glycan_db::load_glycan_gdb;
     use crate::glycan_mass::{HEX, HEXNAC, PROTON};
+
+    /// A small N-glycan list (trimannosyl core + a few antennae) for the DB-branch
+    /// tests. The composition enumerator is gone, so tests build their list from a
+    /// tiny inline `.gdb` — which also exercises the real loader.
+    fn test_glycans() -> Vec<GlycanComp> {
+        load_glycan_gdb(
+            "H,N,A,G,F\n\
+             (N(N(H(H)(H))))\n\
+             (N(F)(N(H(H)(H))))\n\
+             (N(N(H(H)(H(H)))))\n\
+             (N(N(H(H)(H(N)))))\n",
+        )
+        .unwrap()
+    }
 
     /// DB branch must return the correct backbone when precursor = backbone + known glycan.
     #[test]
     fn db_branch_recovers_backbone_for_known_glycan() {
-        let glycans = n_glycan_list();
+        let glycans = test_glycans();
         // Use HexNAc2Hex3 (trimannosyl core) mass as the glycan.
         let glycan_mass = 2.0 * HEXNAC + 3.0 * HEX; // ~892.317 Da
         let true_backbone = 1500.0_f64;
@@ -541,7 +555,7 @@ mod tests {
     /// DB branch must filter out backbones below min_backbone.
     #[test]
     fn db_branch_filters_below_min() {
-        let glycans = n_glycan_list();
+        let glycans = test_glycans();
         // Very small precursor so backbone would be < 500 Da.
         let precursor = 600.0; // glycan of ~100 Da not in list; backbone ~100 Da
         let hits = db_branch(precursor, &glycans, 500.0, 2, 0, None);
@@ -557,7 +571,7 @@ mod tests {
     /// DB branch is sorted by backbone_mass ascending.
     #[test]
     fn db_branch_is_sorted() {
-        let glycans = n_glycan_list();
+        let glycans = test_glycans();
         let precursor = 4000.0;
         let hits = db_branch(precursor, &glycans, 500.0, 2, 0, None);
         for w in hits.windows(2) {
@@ -582,7 +596,7 @@ mod tests {
     /// de-novo/DB H2O-convention fix).
     #[test]
     fn hybrid_union_contains_both_sources() {
-        let glycans = n_glycan_list();
+        let glycans = test_glycans();
         let proton = PROTON;
         let steps = crate::glycan_mass::CORE_Y_STEPS;
 
@@ -622,7 +636,7 @@ mod tests {
     /// ceiling without a phase-1 blowup.
     #[test]
     fn db_union_stays_bounded_and_keeps_true_backbone() {
-        let glycans = n_glycan_list(); // full list (~4034)
+        let glycans = test_glycans();
         let proton = PROTON;
         let steps = crate::glycan_mass::CORE_Y_STEPS;
         let glycan_mass = 2.0 * HEXNAC + 3.0 * HEX; // HexNAc2Hex3
@@ -665,7 +679,7 @@ mod tests {
     #[test]
     fn presolved_once_matches_per_isotope_union() {
         const ISOTOPE: f64 = 1.00335; // C13-C12; any consistent value works here
-        let glycans = n_glycan_list();
+        let glycans = test_glycans();
         let proton = PROTON;
         let steps = crate::glycan_mass::CORE_Y_STEPS;
         let glycan_mass = 2.0 * HEXNAC + 3.0 * HEX; // HexNAc2Hex3
@@ -764,7 +778,7 @@ mod tests {
     /// glycan mass matches a known composition.
     #[test]
     fn hybrid_dedup_keeps_db_over_denovo() {
-        let glycans = n_glycan_list();
+        let glycans = test_glycans();
         let proton = PROTON;
         let steps = crate::glycan_mass::CORE_Y_STEPS;
 
@@ -899,7 +913,7 @@ mod tests {
     /// (DB-branch ceiling 85.9% vs cascade 80.1%).
     #[test]
     fn zero_core_y_known_glycan_is_recovered_by_db_fallback() {
-        let glycans = n_glycan_list();
+        let glycans = test_glycans();
         let glycan_mass = 2.0 * HEXNAC + 3.0 * HEX; // HexNAc2Hex3, in list
         let true_backbone_residue = 1500.0_f64;
         let precursor = true_backbone_residue + glycan_mass;
@@ -991,7 +1005,7 @@ mod tests {
     /// dropped / isotope offsets ignored).
     #[test]
     fn db_branch_records_charge_and_isotope_offset() {
-        let glycans = n_glycan_list();
+        let glycans = test_glycans();
         let glycan_mass = 2.0 * HEXNAC + 3.0 * HEX;
         let true_backbone = 1500.0_f64;
         let precursor = true_backbone + glycan_mass;
@@ -1020,7 +1034,7 @@ mod tests {
     /// blind precursor−glycan brute force is O(glycans)-slow and precision-poor.)
     #[test]
     fn weak_ladder_spectrum_is_rescued_by_quorum1_cascade() {
-        let glycans = n_glycan_list();
+        let glycans = test_glycans();
         // HexNAc2Hex3 (trimannosyl core) — present in the list.
         let glycan_mass = 2.0 * HEXNAC + 3.0 * HEX;
         let true_backbone_residue = 1500.0_f64;
@@ -1062,7 +1076,7 @@ mod tests {
     /// onto both DB and DeNovo hits (BUG 1: isotope offsets ignored).
     #[test]
     fn hybrid_candidates_with_isotope_threads_offset_onto_all_hits() {
-        let glycans = n_glycan_list();
+        let glycans = test_glycans();
         let proton = PROTON;
         let steps = crate::glycan_mass::CORE_Y_STEPS;
 

@@ -22,17 +22,17 @@
 //!   --spectrum test-fixtures/glyco_fixture.mgf.gz \
 //!   --database test-fixtures/glyco_fixture.fasta \
 //!   --glyco --glyco-tol-ppm 20 --fragmentation HCD \
-//!   --glyco-taxon human \
+//!   --glyco-glycan-gdb test-fixtures/glyco_fixture.gdb \
 //!   --output-pin /tmp/g.pin
 //! cp /tmp/g.glyco.pin test-fixtures/parity/goldens/glyco.pin
 //! ```
 //!
-//! `--glyco-taxon human` is NOT optional: the recipe omitted it while the test below
-//! passes it, so a regeneration followed the recipe, kept NeuGc, and produced 25 rows
-//! that differ from what the test asks for. Diff the regenerated file against the old
-//! golden column by column before copying it — a positional drift between the header
-//! list and the row writer shows up as several UNRELATED columns changing on every row,
-//! which is what caught exactly that mistake here.
+//! `--glyco-glycan-gdb` is NOT optional: `--glyco` requires it now that the built-in
+//! composition enumerator is gone. The fixture `.gdb` is NeuGc-free (header `H,N,A,F`),
+//! which preserves the human behaviour the recipe used to get from `--glyco-taxon human`.
+//! Diff the regenerated file against the old golden column by column before copying it —
+//! a positional drift between the header list and the row writer shows up as several
+//! UNRELATED columns changing on every row, which is what caught exactly that mistake here.
 //!
 //! Regenerating is a deliberate act: diff the columns first and know which ones moved.
 
@@ -133,8 +133,9 @@ fn glyco_pin_matches_golden_after_sort() {
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_andes"));
     let spectra = root.join("test-fixtures/glyco_fixture.mgf.gz");
     let fasta = root.join("test-fixtures/glyco_fixture.fasta");
+    let gdb = root.join("test-fixtures/glyco_fixture.gdb");
     let golden = root.join("test-fixtures/parity/goldens/glyco.pin");
-    for f in [&spectra, &fasta, &golden] {
+    for f in [&spectra, &fasta, &gdb, &golden] {
         assert!(f.exists(), "fixture missing: {}", f.display());
     }
 
@@ -158,13 +159,12 @@ fn glyco_pin_matches_golden_after_sort() {
         // experiment, not assumed.
         .arg("--fragmentation")
         .arg("HCD")
-        // Pin the taxon EXPLICITLY. The fixture FASTA carries an E. coli background (to
-        // create candidate competition), and those headers carry OX= tags, so
-        // `--glyco-taxon auto` resolves the FASTA to CmahCompetent and KEEPS NeuGc --
-        // the opposite of the validated human config. Without this the golden would pin
-        // whatever the padding happens to imply rather than the intended behaviour.
-        .arg("--glyco-taxon")
-        .arg("human")
+        // The glycan source is a committed, NeuGc-free fixture .gdb (header `H,N,A,F`).
+        // `--glyco` no longer has a built-in enumerator or a `--glyco-taxon` species knob,
+        // so the human behaviour is pinned by the .gdb's own NeuGc-free content rather
+        // than by a flag.
+        .arg("--glyco-glycan-gdb")
+        .arg(&gdb)
         .arg("--output-pin")
         .arg(&out_pin)
         .status()
@@ -205,6 +205,7 @@ fn glyco_elect_top_k_one_is_identical_to_off() {
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_andes"));
     let spectra = root.join("test-fixtures/glyco_fixture.mgf.gz");
     let fasta = root.join("test-fixtures/glyco_fixture.fasta");
+    let gdb = root.join("test-fixtures/glyco_fixture.gdb");
     let outdir = tempfile::tempdir().expect("tempdir");
     let run = |name: &str, extra: &[&str]| -> String {
         let out_pin = outdir.path().join(format!("{name}.pin"));
@@ -214,7 +215,8 @@ fn glyco_elect_top_k_one_is_identical_to_off() {
             .arg("--database")
             .arg(&fasta)
             .args(["--glyco", "--glyco-tol-ppm", "20", "--fragmentation", "HCD"])
-            .args(["--glyco-taxon", "human"])
+            .arg("--glyco-glycan-gdb")
+            .arg(&gdb)
             .args(extra)
             .arg("--output-pin")
             .arg(&out_pin);
@@ -241,6 +243,7 @@ fn glyco_precursor_mono_on_mgf_is_identical_to_off() {
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_andes"));
     let spectra = root.join("test-fixtures/glyco_fixture.mgf.gz");
     let fasta = root.join("test-fixtures/glyco_fixture.fasta");
+    let gdb = root.join("test-fixtures/glyco_fixture.gdb");
     let outdir = tempfile::tempdir().expect("tempdir");
     let run = |name: &str, extra: &[&str]| -> (String, String) {
         let out_pin = outdir.path().join(format!("{name}.pin"));
@@ -250,7 +253,8 @@ fn glyco_precursor_mono_on_mgf_is_identical_to_off() {
             .arg("--database")
             .arg(&fasta)
             .args(["--glyco", "--glyco-tol-ppm", "20", "--fragmentation", "HCD"])
-            .args(["--glyco-taxon", "human"])
+            .arg("--glyco-glycan-gdb")
+            .arg(&gdb)
             .args(extra)
             .arg("--output-pin")
             .arg(&out_pin);

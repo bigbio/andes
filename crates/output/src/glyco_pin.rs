@@ -864,6 +864,7 @@ mod tests {
                 fuc: 1,
                 neuac: 2,
                 neugc: 0,
+                core_fuc: 0,
                 mass: glycan_mass,
             })
         } else {
@@ -898,6 +899,7 @@ mod tests {
             fuc: 0,
             neuac: 0,
             neugc: 0,
+            core_fuc: 0,
             mass: 0.0,
         };
         // exactly one N-X-S/T: the site is a fact about the sequence.
@@ -1140,6 +1142,7 @@ mod tests {
                 fuc: 0,
                 neuac: 0,
                 neugc: 0,
+                core_fuc: 0,
                 mass: glycan_mass,
             }),
             glycan_source: Source::Db,
@@ -1372,6 +1375,7 @@ mod tests {
             fuc: 0,
             neuac: 0,
             neugc: 0,
+            core_fuc: 0,
             mass: glycan_mass,
         });
         // Distinctive values on columns near the redesign block, so a header/writer

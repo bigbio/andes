@@ -1,13 +1,20 @@
 //! HIGH-RES glyco serve-path golden.
 //!
-//! REGENERATED 2026-09-03 when the peptide-first RETRIEVAL window became the glyco
-//! ppm tolerance on high-resolution MS2 (it had inherited the rank model's 0.5 Da).
-//! Verified before copying: same 120 scans, all 120 winning peptides identical, 0
-//! decoy winners before and after, header identical; only the five per-spectrum
-//! competition statistics moved (RawScore, TailorScore, DeltaRankScore,
-//! CandidateRankEntropy, ListwiseScoreGap), which is the signature of a smaller
-//! candidate pool and nothing else. Measured on the benchmarks: 7x faster with
-//! identifications neutral (mouse 3198 vs 3183 correct; plasma 399 vs 380).
+//! REGENERATED 2026-09-09 when the glycan-first pre-filter's Y-ion generation
+//! became structure-aware (core + antenna-subset losses + core ladder, replacing
+//! the full 2^n power set that over-generated physically-impossible "trim a core
+//! mannose while keeping its antenna" fragments). Verified before copying: header
+//! identical; 116 -> 115 rows — one decoy winner dropped (scan 4357,
+//! XXX_CO4B_HUMAN) — and 4 winners flipped: three targets re-ranked onto the
+//! E. coli background (CERU_HUMAN->NMPC_ECOLI, THRB_HUMAN->YHFZ_ECOLI,
+//! CLUS_HUMAN->MDTG_ECOLI) and one target->decoy (PON1_HUMAN->XXX_APOB_HUMAN, a
+//! spectrum where both old and new winners are weak: CoreYHits 3->0). Net decoy
+//! winners 4->4. DeltaRT/AbsDeltaRT/DeltaRTNorm moved on every row because the
+//! winner changes shift the per-run RT-calibration anchors. The glycan-first
+//! top_k was then aligned to pGlyco3's 100 (was 50); that widened the candidate
+//! pool and moved only the per-spectrum competition statistics (RawScore,
+//! TailorScore, DeltaRankScore, CandidateRankEntropy, ListwiseScoreGap) on 4
+//! rows, with 0 winner flips.
 //!
 //! Companion to `glyco_golden.rs`, which guards the LOW-RES path. This one exists
 //! because an MGF fixture *cannot* reach the high-res branch: selecting a high-res
@@ -38,7 +45,8 @@
 //!   ./target/release/andes \
 //!     --spectrum test-fixtures/orbitrap_lumos_120.mzML.gz \
 //!     --database test-fixtures/glyco_fixture.fasta \
-//!     --glyco --glyco-tol-ppm 20 --glyco-taxon human \
+//!     --glyco --glyco-tol-ppm 20 \
+//!     --glyco-glycan-gdb test-fixtures/glyco_fixture.gdb \
 //!     --output-pin <tmp>/out.pin
 //!   cp <tmp>/out.glyco.pin test-fixtures/parity/goldens/glyco_highres.pin
 
@@ -123,8 +131,9 @@ fn glyco_highres_pin_matches_golden() {
     let root = repo_root();
     let spectra = root.join("test-fixtures/orbitrap_lumos_120.mzML.gz");
     let fasta = root.join("test-fixtures/glyco_fixture.fasta");
+    let gdb = root.join("test-fixtures/glyco_fixture.gdb");
     let golden = root.join("test-fixtures/parity/goldens/glyco_highres.pin");
-    for f in [&spectra, &fasta, &golden] {
+    for f in [&spectra, &fasta, &gdb, &golden] {
         assert!(f.exists(), "fixture missing: {}", f.display());
     }
 
@@ -139,8 +148,9 @@ fn glyco_highres_pin_matches_golden() {
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_andes"));
     // Deliberately NO --fragmentation / --fragment-tol-ppm: the point is that the
     // instrument is auto-detected from the mzML, which is what puts the run on the
-    // high-res branch. Taxon is pinned because the fixture FASTA carries an E. coli
-    // background whose OX= tags would otherwise resolve the run to CmahCompetent.
+    // high-res branch. The glycan source is a committed, NeuGc-free fixture .gdb
+    // (header `H,N,A,F`); `--glyco` no longer has a `--glyco-taxon` species knob, so
+    // the human behaviour is pinned by the .gdb's own NeuGc-free content.
     let result = Command::new(&binary)
         .arg("--spectrum")
         .arg(&spectra)
@@ -149,8 +159,8 @@ fn glyco_highres_pin_matches_golden() {
         .arg("--glyco")
         .arg("--glyco-tol-ppm")
         .arg("20")
-        .arg("--glyco-taxon")
-        .arg("human")
+        .arg("--glyco-glycan-gdb")
+        .arg(&gdb)
         .arg("--output-pin")
         .arg(&out)
         .output()
@@ -223,6 +233,7 @@ fn glyco_highres_precursor_mono_without_ms1_is_identical_to_golden() {
     let root = repo_root();
     let spectra = root.join("test-fixtures/orbitrap_lumos_120.mzML.gz");
     let fasta = root.join("test-fixtures/glyco_fixture.fasta");
+    let gdb = root.join("test-fixtures/glyco_fixture.gdb");
     let golden = root.join("test-fixtures/parity/goldens/glyco_highres.pin");
     let tmpdir = tempfile::tempdir().expect("tempdir");
     let out = tmpdir.path().join("out.pin");
@@ -233,7 +244,9 @@ fn glyco_highres_precursor_mono_without_ms1_is_identical_to_golden() {
         .arg(&spectra)
         .arg("--database")
         .arg(&fasta)
-        .args(["--glyco", "--glyco-tol-ppm", "20", "--glyco-taxon", "human"])
+        .args(["--glyco", "--glyco-tol-ppm", "20"])
+        .arg("--glyco-glycan-gdb")
+        .arg(&gdb)
         .args(["--precursor-mono", "auto", "--precursor-mono-dump"])
         .arg(&dump)
         .arg("--output-pin")

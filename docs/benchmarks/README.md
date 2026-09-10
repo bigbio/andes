@@ -681,6 +681,42 @@ fragment-ion index turns itself on because this search does not fit in RAM. Add
 `--fragment-index off` to reproduce the enumeration rows instead, which take ~100 min and
 ~12.5 h respectively.
 
+### Choosing the retrieval strategy (measured, not configurable)
+
+An out-of-core search can score each spectrum either by enumerating every peptidoform in
+its precursor windows or by taking a shortlist from a fragment-ion index. andes chooses,
+prints which one it chose, and offers no flag for it. The rule is two conditions, both of
+them measured:
+
+1. **The candidate index must be out-of-core.** In RAM the enumeration is built once and
+   every spectrum looks its window up; that path was never the slow one, and the index
+   would only add its own per-slice build cost.
+2. **Fragment matching must be high-resolution.** The index bins ions at the fragment
+   tolerance and ranks candidates by how many peaks vote for them. At the low-resolution
+   0.5 Da tolerance those bins are so wide that the vote does not discriminate.
+
+Condition 2 is there because of this measurement — the three standard sets, same binary,
+8 threads, Percolator seed 42, forcing the index on by also forcing the candidate index
+out-of-core:
+
+| dataset | in-RAM enumeration (the default) | out-of-core enumeration | out-of-core + index |
+|---|---|---|---|
+| Astral, high-res | 267 s, **38,394** PSMs @1% | 4,154 s, **38,394** | 222 s, 46,774 |
+| TMT a05058, low-res | 94 s, **12,281** | 773 s, **12,247** | 118 s, **3,613** |
+| UPS1, low-res | 52 s, **15,838** | 254 s, **15,838** | 65 s, **10,312** |
+
+The middle column is the control, and it is what makes the reading unambiguous: **the
+out-of-core path itself preserves the identifications** — identical counts on Astral and
+UPS1, within 0.3% on TMT — and is simply slower. Everything the third column does,
+good or bad, belongs to the index. On both low-resolution sets it loses most of the
+identifications *and* runs slower than the in-RAM default, so it is never selected there. The Astral row is **not** a 22% win and must not be quoted
+as one: a candidate filter cannot create identifications, and the top-1-per-scan
+competition shows what happened — decoy wins fall 9.4% while target wins fall 1.8%, so
+decoys leave the competition preferentially and the decoy-based q-values become optimistic.
+Astral has no entrapment component, so that dataset cannot detect it. Where the index *is*
+selected, the phospho benchmark measures the honest error with a 1:1 entrapment database
+and it goes **down**, 1.22–1.32% to 1.15–1.16%, which is why that result stands.
+
 ## 3. How to reproduce
 
 ```bash
@@ -859,11 +895,10 @@ so no entrapment FDP is computable from it and its counts are rescored `q ≤ 0.
   Comet's newer fragment-index mode nor MSFragger has been benchmarked here at all.
 - **Two of three databases cannot support an entrapment claim.** Astral has no entrapment
   component; UPS1's is not 1:1. Rebuilding both near 1:1 is the fix.
-- **The fragment-ion index is measured on one dataset.** It is the default whenever a
-  search goes out-of-core, which on these benchmarks means the phospho file only — the
-  three standard sets fit in RAM and are untouched by it. Its effect if a user forces
-  `--candidate-index mmap` on a small search is not measured, and it does not reproduce the
-  enumeration path's multiplicity copies in the PIN `Proteins` column.
+- **The fragment-ion index does not reproduce the enumeration path's multiplicity copies**
+  in the PIN `Proteins` column (one entry per enumeration copy of a peptide). Everything
+  else about where it may be used is now measured — see *Choosing the retrieval strategy*
+  above — and it is selected automatically rather than by a flag.
 - **The phospho benchmark is one file and peptide-level only.** Two more files of the same
   regime are listed in `fetch_spectra.sh` for a pooled tier; site localisation is not
   scored on either side. `--refine` is still measured only on Astral.

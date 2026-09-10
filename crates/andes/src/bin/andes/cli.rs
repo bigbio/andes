@@ -188,14 +188,16 @@ pub(crate) struct SearchArgs {
     #[arg(long = "mmap-window-cache-candidates", hide = true)]
     pub(crate) mmap_window_cache_candidates: Option<usize>,
 
-    /// Fragment-ion index for out-of-core searches: `auto` (default) uses it
-    /// whenever the candidate index does not fit in RAM (`--candidate-index`
-    /// resolves to `mmap`), `on` forces it in out-of-core mode, `off` keeps
-    /// per-spectrum enumeration. Spectra are scored in precursor-mass order
-    /// against the peptidoforms their fragment peaks vote for. On a phospho
-    /// search this was 164 s instead of 5,954 s at +1% PSMs; searches that
-    /// fit in RAM are untouched.
-    #[arg(long = "fragment-index", default_value = "auto")]
+    /// Candidate retrieval for out-of-core searches. `auto` (the default, and
+    /// what every normal run uses) selects the fragment-ion index only where it
+    /// was measured to win: the candidate index is out-of-core AND fragment
+    /// matching is high-resolution. `off` forces per-spectrum enumeration, `on`
+    /// forces the index wherever it is legal at all — both are escape hatches
+    /// for reproducing a measurement, not tuning knobs. Hidden on purpose: the
+    /// engine reports which strategy it chose, and choosing wrongly is
+    /// expensive (on low-resolution data the index loses 30-70% of the
+    /// identifications).
+    #[arg(long = "fragment-index", hide = true, default_value = "auto")]
     pub(crate) fragment_index: FragmentIndexFlag,
 
     /// Fragment-index mode: score each spectrum against at most K peptidoforms

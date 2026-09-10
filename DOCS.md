@@ -92,7 +92,16 @@ Native `.raw`/`.d` search **MS2 (identification) scans only** — MS1 and MS3+ s
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
 | `--precursor-cal` | enum | `auto` | Precursor-mass calibration: `off`, `auto`, or `on`. `auto`/`on` run a pre-pass that learns a systematic ppm shift from confident PSMs, then tighten the precursor tolerance for the main search; `auto` (the default) skips the correction when the sample is too small to be reliable, so it is safe to leave on. No effect on native `.raw` or `.d` input — calibration is not yet supported for those formats, so it is skipped (with a warning) and the search proceeds uncalibrated. | Java `-precursorCal auto\|on\|off` |
-| `--fragment-index` | enum | `auto` | Fragment-ion index for out-of-core searches: `auto` (default) uses it whenever the candidate index does not fit in RAM (`--candidate-index` resolves to `mmap`), `on` forces it in out-of-core mode, `off` keeps per-spectrum enumeration. Spectra are scored in precursor-mass order against the peptidoforms their fragment peaks vote for (top 100 by matched b/y ions, at least 3). Measured on a phospho file: 164 s instead of 5,954 s at +1% PSMs and lower entrapment FDP (Comet 2025.01 on the same node and settings: 226 s, 9.6% fewer PSMs); searches that fit in RAM are untouched. Not used with `--chimeric`, `--refine`, or `--glyco`. | *(no Java equivalent)* |
+
+> **Candidate retrieval is chosen automatically.** When a search does not fit in RAM the
+> engine picks between per-spectrum enumeration and a fragment-ion index, and prints which
+> one it chose. The index is selected only for out-of-core searches with high-resolution
+> fragment matching, where it was measured at 164 s against 5,954 s for enumeration on a
+> phospho file (Comet 2025.01: 226 s), with more identifications at lower entrapment error.
+> It is never selected for low-resolution data, where forcing it on took TMT from 12,281 to
+> 3,613 PSMs at 1% and UPS1 from 15,838 to 10,312 while running slower, nor with
+> `--chimeric`, `--refine` or `--glyco`. There is no flag to set.
+
 
 ### Runtime
 

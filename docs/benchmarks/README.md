@@ -699,14 +699,17 @@ Condition 2 is there because of this measurement — the three standard sets, sa
 8 threads, Percolator seed 42, forcing the index on by also forcing the candidate index
 out-of-core:
 
-| dataset | in-RAM enumeration (the default) | index forced on |
-|---|---|---|
-| Astral, high-res | 267 s, **38,394** PSMs @1% | 222 s, 46,774 |
-| TMT a05058, low-res | 94 s, **12,281** | 118 s, **3,613** |
-| UPS1, low-res | 52 s, **15,838** | 65 s, **10,312** |
+| dataset | in-RAM enumeration (the default) | out-of-core enumeration | out-of-core + index |
+|---|---|---|---|
+| Astral, high-res | 267 s, **38,394** PSMs @1% | 4,154 s, **38,394** | 222 s, 46,774 |
+| TMT a05058, low-res | 94 s, **12,281** | 773 s, **12,247** | 118 s, **3,613** |
+| UPS1, low-res | 52 s, **15,838** | 254 s, **15,838** | 65 s, **10,312** |
 
-On both low-resolution sets the index loses most of the identifications *and* runs slower,
-so it is never selected there. The Astral row is **not** a 22% win and must not be quoted
+The middle column is the control, and it is what makes the reading unambiguous: **the
+out-of-core path itself preserves the identifications** — identical counts on Astral and
+UPS1, within 0.3% on TMT — and is simply slower. Everything the third column does,
+good or bad, belongs to the index. On both low-resolution sets it loses most of the
+identifications *and* runs slower than the in-RAM default, so it is never selected there. The Astral row is **not** a 22% win and must not be quoted
 as one: a candidate filter cannot create identifications, and the top-1-per-scan
 competition shows what happened — decoy wins fall 9.4% while target wins fall 1.8%, so
 decoys leave the competition preferentially and the decoy-based q-values become optimistic.

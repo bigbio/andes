@@ -604,12 +604,12 @@ pub(crate) struct SearchArgs {
     /// is verified; bigbio/andes#64 arm F), while spectra with no linked MS1 or
     /// charge keep the default window. An explicit `--isotope-error`, or
     /// `--glyco-isotope-error negative|wide`, is honoured.
-    /// `off` (default) leaves every precursor as recorded. Motivation: on pGlyco2
+    /// `auto` is the default; `off` leaves every precursor as recorded. Motivation: on pGlyco2
     /// mouse liver the firmware records 3-6 Da above the monoisotope on a class of
     /// wide, high-mass glycopeptide envelopes, and widening the isotope window to
     /// reach them is mass-degenerate with a glycan composition change
     /// (bigbio/andes#64). Byte-identical output with `off`, or without MS1.
-    #[arg(long = "precursor-mono", value_enum, default_value_t = PrecursorMonoFlag::Off)]
+    #[arg(long = "precursor-mono", value_enum, default_value_t = PrecursorMonoFlag::Auto)]
     pub(crate) precursor_mono: PrecursorMonoFlag,
 
     /// Diagnostic: write one TSV row per MS2 with the recorded/corrected precursor,

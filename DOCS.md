@@ -4,6 +4,22 @@ This is the full reference for the `andes` binary and its outputs. For a quick s
 
 Run `andes --help` for auto-generated help derived from the same `Cli` struct documented below.
 
+**`--help` is a curated surface; this file is the complete one.** `--help` lists the flags a
+normal run needs — inputs and outputs, the enzyme and modifications, the mode switches, and
+the few genuine scientific choices. Everything else is *advanced*: still supported, still
+documented here, still settable, but hidden from `--help`, because the engine derives it and
+reports what it chose. Reach for an advanced flag to reproduce a measurement or to override a
+derivation you have a reason to distrust, not to tune a normal search.
+
+Advanced (hidden) flags include: `--candidate-index`, `--fragment-index`, `--gbdt-max-trees`,
+`--peak-filter`, `--density-on-active-list`, `--precursor-offset-clamp`, `--ethcd-activation`,
+`--isotope-error`, `--rss-probe`, `--chimeric-allow-overlap`, and the glyco tuning group
+(`--glyco-tol-ppm`, `--glyco-retrieval-tol-ppm`, `--glyco-retrieval-tol-da`,
+`--glyco-min-matched-ions`, `--glyco-min-raw-score`, `--glyco-min-raw-score-quantile`,
+`--glyco-sialic-oxonium-min-frac`, `--glyco-max-peaks`, `--glyco-isotope-error`,
+`--glyco-cz-multisite`, `--glyco-etd-rank-glycan`, `--glyco-y-max-charge`,
+`--glyco-cz-max-charge`, `--glyco-diag-splits`, `--glyco-scans`).
+
 ---
 
 ## Contents
@@ -92,7 +108,16 @@ Native `.raw`/`.d` search **MS2 (identification) scans only** — MS1 and MS3+ s
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
 | `--precursor-cal` | enum | `auto` | Precursor-mass calibration: `off`, `auto`, or `on`. `auto`/`on` run a pre-pass that learns a systematic ppm shift from confident PSMs, then tighten the precursor tolerance for the main search; `auto` (the default) skips the correction when the sample is too small to be reliable, so it is safe to leave on. No effect on native `.raw` or `.d` input — calibration is not yet supported for those formats, so it is skipped (with a warning) and the search proceeds uncalibrated. | Java `-precursorCal auto\|on\|off` |
-| `--fragment-index` | enum | `auto` | Fragment-ion index for out-of-core searches: `auto` (default) uses it whenever the candidate index does not fit in RAM (`--candidate-index` resolves to `mmap`), `on` forces it in out-of-core mode, `off` keeps per-spectrum enumeration. Spectra are scored in precursor-mass order against the peptidoforms their fragment peaks vote for (top 100 by matched b/y ions, at least 3). Measured on a phospho file: 169 s instead of 5,954 s at +1% PSMs and lower entrapment FDP; searches that fit in RAM are untouched. Not used with `--chimeric`, `--refine`, or `--glyco`. | *(no Java equivalent)* |
+
+> **Candidate retrieval is chosen automatically.** When a search does not fit in RAM the
+> engine picks between per-spectrum enumeration and a fragment-ion index, and prints which
+> one it chose. The index is selected only for out-of-core searches with high-resolution
+> fragment matching, where it was measured at 164 s against 5,954 s for enumeration on a
+> phospho file (Comet 2025.01: 226 s), with more identifications at lower entrapment error.
+> It is never selected for low-resolution data, where forcing it on took TMT from 12,281 to
+> 3,613 PSMs at 1% and UPS1 from 15,838 to 10,312 while running slower, nor with
+> `--chimeric`, `--refine` or `--glyco`. There is no flag to set.
+
 
 ### Runtime
 
@@ -678,7 +703,7 @@ CLI flags** (advanced; the shipped defaults are validated and rarely need changi
 | `--glyco-taxon` | `auto` | Glycan biology: `auto` surveys the NeuGc/NeuAc oxonium ratio across the run and uses the FASTA `OX=` taxa as a veto; `human` / `mouse` force it. |
 | `--glyco-no-neugc` | off | Drop NeuGc compositions. Humans cannot synthesise NeuGc, and every NeuGc composition has an exact Hex+Fuc isobar, so on human samples this removes shadows; on mouse it removes real glycans. `--glyco-taxon auto` normally makes this decision for you. |
 | `--glyco-isotope-error` | `default` | Precursor isotope-error range: `default` is 0..=2 (dropping −1 measured +81 backbone-correct @1%), `negative` restores −1..=2. |
-| `--precursor-mono` | `off` | `auto`: correct each precursor to the monoisotope its MS1 isotope envelope supports **before** searching, then keep the default narrow window (needs MS1: mzML or Thermo `.raw`). Fits the observed envelope at the reported charge against a glycopeptide isotope model under "the recorded precursor is M+k", k = 0..6, and moves the precursor down by k−1 isotopes when a k > 0 clearly wins (the sweep's +1 takes the last step, so an overshoot can never lose the true mass). Written for a firmware failure mode measured on pGlyco2 mouse liver: 88 of 3,824 reference scans recorded exactly +4 isotopes above the monoisotope, unreachable by the window and mass-degenerate with a glycan composition change if the window is widened (issue #64). Adds `MonoShift`/`MonoFit`/`MonoFitGain`/`MonoSNR` to the glyco PIN; byte-identical output with `off` or without MS1. Every spectrum whose envelope was fitted is then searched with a `0..1` isotope window instead of the glyco default `0..2` (spectra with no linked MS1 or charge keep `0..2`): once the monoisotope is verified the `+2` step only admits the Hex+Fuc ↔ NeuGc composition degeneracy (issue #64 arm F: 59 of 62 firmware-mispicked +4 scans confirmed against 55 with `0..2`, peptidoform agreement 96.9% vs 96.8%, the +2 tier 402 → 21 PSMs; held on all five liver fractions, heart and lung). An explicit `--isotope-error`, or `--glyco-isotope-error negative`/`wide`, is honoured verbatim; MGF and MS1-less mzML stay byte-identical to `off`. |
+| `--precursor-mono` | `auto` | `auto`: correct each precursor to the monoisotope its MS1 isotope envelope supports **before** searching, then keep the default narrow window (needs MS1: mzML or Thermo `.raw`). Fits the observed envelope at the reported charge against a glycopeptide isotope model under "the recorded precursor is M+k", k = 0..6, and moves the precursor down by k−1 isotopes when a k > 0 clearly wins (the sweep's +1 takes the last step, so an overshoot can never lose the true mass). Written for a firmware failure mode measured on pGlyco2 mouse liver: 88 of 3,824 reference scans recorded exactly +4 isotopes above the monoisotope, unreachable by the window and mass-degenerate with a glycan composition change if the window is widened (issue #64). Adds `MonoShift`/`MonoFit`/`MonoFitGain`/`MonoSNR` to the glyco PIN; byte-identical output with `off` or without MS1. Every spectrum whose envelope was fitted is then searched with a `0..1` isotope window instead of the glyco default `0..2` (spectra with no linked MS1 or charge keep `0..2`): once the monoisotope is verified the `+2` step only admits the Hex+Fuc ↔ NeuGc composition degeneracy (issue #64 arm F: 59 of 62 firmware-mispicked +4 scans confirmed against 55 with `0..2`, peptidoform agreement 96.9% vs 96.8%, the +2 tier 402 → 21 PSMs; held on all five liver fractions, heart and lung). An explicit `--isotope-error`, or `--glyco-isotope-error negative`/`wide`, is honoured verbatim; MGF and MS1-less mzML stay byte-identical to `off`. |
 | `--glyco-max-peaks` | 0 (no cap) | Cap the peaks the **generation** stage considers to the N most intense; scoring always sees the full spectrum. 300–500 rescues profile-mode or very dense scans that otherwise take seconds each. |
 | `--glyco-retrieval-tol-ppm` / `--glyco-retrieval-tol-da` | tol-ppm on high-res, 0.5 Da on low-res | Peptide-first candidate **retrieval** window (retrieval only; scoring is unchanged). 20 ppm retrieval on high-res data measured 6.9x faster at no identification cost. |
 | `--glyco-y-max-charge` | 3 | Maximum glycan-Y fragment charge. Raising it reaches 4+/5+ Y ions on highly charged precursors at the cost of chance matches. |

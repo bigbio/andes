@@ -188,14 +188,16 @@ pub(crate) struct SearchArgs {
     #[arg(long = "mmap-window-cache-candidates", hide = true)]
     pub(crate) mmap_window_cache_candidates: Option<usize>,
 
-    /// Fragment-ion index for out-of-core searches: `auto` (default) uses it
-    /// whenever the candidate index does not fit in RAM (`--candidate-index`
-    /// resolves to `mmap`), `on` forces it in out-of-core mode, `off` keeps
-    /// per-spectrum enumeration. Spectra are scored in precursor-mass order
-    /// against the peptidoforms their fragment peaks vote for. On a phospho
-    /// search this was 169 s instead of 5,954 s at +1% PSMs; searches that
-    /// fit in RAM are untouched.
-    #[arg(long = "fragment-index", default_value = "auto")]
+    /// Candidate retrieval for out-of-core searches. `auto` (the default, and
+    /// what every normal run uses) selects the fragment-ion index only where it
+    /// was measured to win: the candidate index is out-of-core AND fragment
+    /// matching is high-resolution. `off` forces per-spectrum enumeration, `on`
+    /// forces the index wherever it is legal at all — both are escape hatches
+    /// for reproducing a measurement, not tuning knobs. Hidden on purpose: the
+    /// engine reports which strategy it chose, and choosing wrongly is
+    /// expensive (on low-resolution data the index loses 30-70% of the
+    /// identifications).
+    #[arg(long = "fragment-index", hide = true, default_value = "auto")]
     pub(crate) fragment_index: FragmentIndexFlag,
 
     /// Fragment-index mode: score each spectrum against at most K peptidoforms
@@ -404,7 +406,7 @@ pub(crate) struct SearchArgs {
     ///
     /// This CHANGES predicted intensities and therefore the emitted PIN feature
     /// values; `--gbdt-max-trees 0` restores the full ensembles.
-    #[arg(long = "gbdt-max-trees", default_value_t = 100usize)]
+    #[arg(long = "gbdt-max-trees", hide = true, default_value_t = 100usize)]
     pub(crate) gbdt_max_trees: usize,
 
     /// Path to a trained intensity model parquet (`andes train-intensity` output).
@@ -447,59 +449,59 @@ pub(crate) struct SearchArgs {
     /// Scoring always reads the full spectrum, so a generated candidate is never
     /// scored on truncated evidence. Default 0 = no cap; 300-500 is a reasonable
     /// value if you hit this. Changing it changes results.
-    #[arg(long = "glyco-max-peaks", default_value_t = 0usize)]
+    #[arg(long = "glyco-max-peaks", hide = true, default_value_t = 0usize)]
     pub(crate) glyco_max_peaks: usize,
 
     /// Maximum c/z fragment charge to probe in `--glyco` ETD scoring. Unset derives it
     /// from whether the spectrum was deconvoluted, which is correct in almost all cases:
     /// after deconvolution multiply-charged fragments have already been moved to 1+.
     /// Set this only for data known to carry unresolved high-charge c/z ions.
-    #[arg(long = "glyco-cz-max-charge")]
+    #[arg(long = "glyco-cz-max-charge", hide = true)]
     pub(crate) glyco_cz_max_charge: Option<u8>,
 
     /// Maximum glycan-Y fragment charge. Default 3; raising it reaches 4+/5+ Y ions on
     /// highly-charged precursors at the cost of more chance matches.
-    #[arg(long = "glyco-y-max-charge", default_value_t = 3u8)]
+    #[arg(long = "glyco-y-max-charge", hide = true, default_value_t = 3u8)]
     pub(crate) glyco_y_max_charge: u8,
 
     /// Choose the glycosite by c/z evidence when a peptide carries more than one
     /// N-X-S/T sequon (~8% of tryptic N-glycopeptides). Off by default: the default
     /// positional convention is decoy-symmetric, and enabling this is gated on a
     /// decoy-controlled A/B that would surface any sequon-count asymmetry.
-    #[arg(long = "glyco-cz-multisite", default_value_t = false)]
+    #[arg(long = "glyco-cz-multisite", hide = true, default_value_t = false)]
     pub(crate) glyco_cz_multisite: bool,
 
     /// Windowed peak filtering as `WINDOW_DA:PEAKS` (e.g. `100:20`). Unset uses the
     /// protocol default — on for isobaric-labelled data, off otherwise. A window of 0
     /// forces it off.
-    #[arg(long = "peak-filter")]
+    #[arg(long = "peak-filter", hide = true)]
     pub(crate) peak_filter: Option<String>,
 
     /// Clamp the precursor-offset lookup to the nearest available charge when the exact
     /// charge is missing from the model, rather than dropping the correction.
-    #[arg(long = "precursor-offset-clamp", default_value_t = true, action = clap::ArgAction::Set)]
+    #[arg(long = "precursor-offset-clamp", hide = true, default_value_t = true, action = clap::ArgAction::Set)]
     pub(crate) precursor_offset_clamp: bool,
 
     /// Measure local peak density on the active (deconvoluted) peak list rather than the
     /// raw list.
-    #[arg(long = "density-on-active-list", default_value_t = true, action = clap::ArgAction::Set)]
+    #[arg(long = "density-on-active-list", hide = true, default_value_t = true, action = clap::ArgAction::Set)]
     pub(crate) density_on_active_list: bool,
 
     /// Allow a Pass-2 co-isolated candidate to overlap the primary's matched peaks.
     /// Off by default: the residual spectrum has the primary's peaks removed, and
     /// permitting overlap lets the same evidence support two PSMs.
-    #[arg(long = "chimeric-allow-overlap", default_value_t = false)]
+    #[arg(long = "chimeric-allow-overlap", hide = true, default_value_t = false)]
     pub(crate) chimeric_allow_overlap: bool,
 
     /// How to label EThcD/ETciD spectra (electron transfer with a supplemental
     /// collisional term). `hcd` is the default and is what model routing expects, since
     /// no EThcD model exists; `etd` labels them ETD so the c/z scoring path engages.
-    #[arg(long = "ethcd-activation", value_enum, default_value_t = EthcdActivationFlag::Hcd)]
+    #[arg(long = "ethcd-activation", hide = true, value_enum, default_value_t = EthcdActivationFlag::Hcd)]
     pub(crate) ethcd_activation: EthcdActivationFlag,
 
     /// Diagnostic: restrict `--glyco` scoring to the scan numbers in this file, one per
     /// line. Makes a `--debug-glyco` dump of a chosen set of scans affordable.
-    #[arg(long = "glyco-scans")]
+    #[arg(long = "glyco-scans", hide = true)]
     pub(crate) glyco_scans: Option<PathBuf>,
 
     /// Memory: enumerate only N-X-S/T-bearing peptides into the `--glyco` candidate
@@ -515,7 +517,7 @@ pub(crate) struct SearchArgs {
     pub(crate) glyco_index_sequon_only: bool,
 
     /// Diagnostic: log resident set size at each phase boundary.
-    #[arg(long = "rss-probe", default_value_t = false)]
+    #[arg(long = "rss-probe", hide = true, default_value_t = false)]
     pub(crate) rss_probe: bool,
 
     /// Load an external pGlyco-style `.gdb` glycan database: the glycan-first search
@@ -530,7 +532,7 @@ pub(crate) struct SearchArgs {
     /// 0.29% of correct answers at a ~53:47 target:decoy ratio (pure FDR dilution),
     /// and dropping it measured +81 backbone-correct @1%. `negative` restores
     /// -1..=2; `wide` extends the upper bound to 5 for heavily-labelled precursors.
-    #[arg(long = "glyco-isotope-error", value_enum, default_value_t = GlycoIsotopeFlag::Default)]
+    #[arg(long = "glyco-isotope-error", hide = true, value_enum, default_value_t = GlycoIsotopeFlag::Default)]
     pub(crate) glyco_isotope_error: GlycoIsotopeFlag,
 
     /// Correct each precursor to its monoisotopic peak from the preceding MS1
@@ -544,12 +546,12 @@ pub(crate) struct SearchArgs {
     /// is verified; bigbio/andes#64 arm F), while spectra with no linked MS1 or
     /// charge keep the default window. An explicit `--isotope-error`, or
     /// `--glyco-isotope-error negative|wide`, is honoured.
-    /// `off` (default) leaves every precursor as recorded. Motivation: on pGlyco2
+    /// `auto` is the default; `off` leaves every precursor as recorded. Motivation: on pGlyco2
     /// mouse liver the firmware records 3-6 Da above the monoisotope on a class of
     /// wide, high-mass glycopeptide envelopes, and widening the isotope window to
     /// reach them is mass-degenerate with a glycan composition change
     /// (bigbio/andes#64). Byte-identical output with `off`, or without MS1.
-    #[arg(long = "precursor-mono", value_enum, default_value_t = PrecursorMonoFlag::Off)]
+    #[arg(long = "precursor-mono", value_enum, default_value_t = PrecursorMonoFlag::Auto)]
     pub(crate) precursor_mono: PrecursorMonoFlag,
 
     /// Diagnostic: write one TSV row per MS2 with the recorded/corrected precursor,
@@ -601,7 +603,7 @@ pub(crate) struct SearchArgs {
     /// at 20 ppm a 0.3-0.5 Da ion-trap peak never matches, so the oxonium gate
     /// never fires and glyco IDs collapse to near zero. This is separate from
     /// `--fragment-tol-ppm`, which the scoring model owns.
-    #[arg(long = "glyco-tol-ppm", default_value_t = 20.0f64, value_parser = parse_positive_tol)]
+    #[arg(long = "glyco-tol-ppm", hide = true, default_value_t = 20.0f64, value_parser = parse_positive_tol)]
     pub(crate) glyco_tol_ppm: f64,
 
     /// `gp` fused-selector ladder weight K (`rank + K·ladder + J·core_y + H·hyper`).
@@ -649,7 +651,7 @@ pub(crate) struct SearchArgs {
     ///
     /// Gates SIALIC only, never fucose -- PTM-Shepherd's published hit/miss ratios weight
     /// absence of a fucose oxonium 10x weaker than absence of a sialic one
-    #[arg(long = "glyco-sialic-oxonium-min-frac", default_value_t = 0.0f32,
+    #[arg(long = "glyco-sialic-oxonium-min-frac", hide = true, default_value_t = 0.0f32,
           value_parser = parse_unit_fraction_f32)]
     pub(crate) glyco_sialic_oxonium_min_frac: f32,
 
@@ -678,7 +680,7 @@ pub(crate) struct SearchArgs {
     /// that stratum is what Percolator trains on. At 3, it removes 83% of those
     /// rows while keeping every measured agreement with an external engine.
     /// Label-blind: reads only the winner's spectral match quality.
-    #[arg(long = "glyco-min-raw-score")]
+    #[arg(long = "glyco-min-raw-score", hide = true)]
     pub(crate) glyco_min_raw_score: Option<f32>,
 
     /// Run-ADAPTIVE emission floor: drop scans whose winner scores below this
@@ -689,6 +691,7 @@ pub(crate) struct SearchArgs {
     /// decoy scans. Mutually exclusive with --glyco-min-raw-score.
     #[arg(
         long = "glyco-min-raw-score-quantile",
+        hide = true,
         conflicts_with = "glyco_min_raw_score"
     )]
     pub(crate) glyco_min_raw_score_quantile: Option<f64>,
@@ -704,12 +707,12 @@ pub(crate) struct SearchArgs {
     /// Diagnostic TSV of per-candidate split evidence with sampled shifted-ladder
     /// nulls (the LLR-calibration probe). Requires --debug-glyco; never affects
     /// the PIN.
-    #[arg(long = "glyco-diag-splits", requires = "debug_glyco")]
+    #[arg(long = "glyco-diag-splits", hide = true, requires = "debug_glyco")]
     pub(crate) glyco_diag_splits: Option<std::path::PathBuf>,
 
     /// Minimum matched b/y sequence ions required before `--glyco` reports a PSM.
     /// MSFragger's equivalents are 4 matched fragments with at least 2 non-Y. 0 disables.
-    #[arg(long = "glyco-min-matched-ions", default_value_t = 0u32)]
+    #[arg(long = "glyco-min-matched-ions", hide = true, default_value_t = 0u32)]
     pub(crate) glyco_min_matched_ions: u32,
 
     /// c/z truncation gate: keep the top-k backbones by glycosite-spanning c/z
@@ -749,13 +752,13 @@ pub(crate) struct SearchArgs {
     /// on high-resolution MS2, the rank model's 0.5 Da window on low-resolution.
     /// Retrieval only; the rank scorer and its tolerance are unchanged. Measured
     /// 7x faster than 0.5 Da on high-res data with identifications neutral.
-    #[arg(long = "glyco-retrieval-tol-ppm", value_parser = parse_positive_tol, conflicts_with = "glyco_retrieval_tol_da")]
+    #[arg(long = "glyco-retrieval-tol-ppm", hide = true, value_parser = parse_positive_tol, conflicts_with = "glyco_retrieval_tol_da")]
     pub(crate) glyco_retrieval_tol_ppm: Option<f64>,
 
     /// Fixed-Da peptide-first candidate RETRIEVAL window, e.g. 0.5 to reproduce the
     /// pre-2026-09 behaviour on high-resolution data for an A/B. Mutually exclusive
     /// with --glyco-retrieval-tol-ppm; retrieval only, scoring unchanged.
-    #[arg(long = "glyco-retrieval-tol-da", value_parser = parse_positive_tol, conflicts_with = "glyco_retrieval_tol_ppm")]
+    #[arg(long = "glyco-retrieval-tol-da", hide = true, value_parser = parse_positive_tol, conflicts_with = "glyco_retrieval_tol_ppm")]
     pub(crate) glyco_retrieval_tol_da: Option<f64>,
 
     /// Charge states indexed by the peptide-first fragment index (b/y at 1..=N,
@@ -787,7 +790,7 @@ pub(crate) struct SearchArgs {
     /// bare backbone, so glycosite-spanning c/z fragments are computed at the real
     /// (glycan-carrying) mass. DEFAULT ON (round-6: validated +33 backbone-correct @1%,
     /// decoy-safe); inert on HCD/CID. Disable with `--glyco-etd-rank-glycan false`.
-    #[arg(long = "glyco-etd-rank-glycan", default_value_t = true, action = clap::ArgAction::Set)]
+    #[arg(long = "glyco-etd-rank-glycan", hide = true, default_value_t = true, action = clap::ArgAction::Set)]
     pub(crate) glyco_etd_rank_glycan: bool,
 
     /// Enable the PTM-refinement cascade (Pass-2 over confident proteins). Default off.

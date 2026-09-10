@@ -36,6 +36,88 @@ use search::{
     SearchIndex, SearchParams, TopNQueue,
 };
 
+/// What [`retrieval_choice`] decided, and what to tell the user about it.
+pub(crate) struct RetrievalChoice {
+    /// Score each spectrum against a fragment-ion-index shortlist rather than
+    /// every peptidoform in its precursor windows.
+    pub use_index: bool,
+    /// One human-readable clause naming the reason, or `None` when there is
+    /// nothing to report (the search fits in RAM, or a mode that needs the full
+    /// candidate list is active).
+    pub report: Option<String>,
+    /// Set when the user forced the index somewhere it cannot be used.
+    pub refused_because: Option<&'static str>,
+}
+
+/// Pick the out-of-core candidate-retrieval strategy. The fragment-ion index is
+/// selected only where it was MEASURED to win, and the two conditions are not
+/// negotiable by a flag:
+///
+///  1. **The candidate index is out-of-core.** In RAM the enumeration is built
+///     once and every spectrum looks its window up; that path was never slow,
+///     and the index would only add its own per-slice build cost.
+///  2. **Fragment matching is high-resolution.** The index bins ions at the
+///     fragment tolerance and ranks candidates by how many peaks vote for them.
+///     At the low-resolution 0.5 Da tolerance those bins are so wide that the
+///     vote does not discriminate: forcing the index on the low-res standard
+///     sets (2026-09-10, 8 threads) took TMT from 12,281 to 3,613 PSMs @1% and
+///     UPS1 from 15,838 to 10,312, while running slower in both cases.
+///
+/// `--chimeric`, `--refine` and `--glyco` keep enumeration because they read the
+/// full candidate list rather than a per-spectrum shortlist.
+pub(crate) fn retrieval_choice(
+    out_of_core: bool,
+    fragment_tol: model::tolerance::Tolerance,
+    excluded_mode: bool,
+    flag: FragmentIndexFlag,
+) -> RetrievalChoice {
+    use model::tolerance::Tolerance;
+    let high_res = match fragment_tol {
+        Tolerance::Ppm(_) => true,
+        Tolerance::Da(d) => d <= 0.05,
+    };
+    let tol_text = match fragment_tol {
+        Tolerance::Ppm(v) => format!("{v} ppm"),
+        Tolerance::Da(v) => format!("{v} Da"),
+    };
+    if !out_of_core || excluded_mode {
+        return RetrievalChoice {
+            use_index: false,
+            report: None,
+            refused_because: (flag == FragmentIndexFlag::On).then_some(if !out_of_core {
+                "the candidate index fits in RAM"
+            } else {
+                "--chimeric/--refine/--glyco reads the full candidate list"
+            }),
+        };
+    }
+    if !high_res {
+        return RetrievalChoice {
+            use_index: false,
+            report: Some(format!(
+                "out-of-core index, but low-resolution fragment matching — the fragment-ion \
+                 index is not selective at a {tol_text} tolerance"
+            )),
+            refused_because: (flag == FragmentIndexFlag::On)
+                .then_some("low-resolution fragment matching"),
+        };
+    }
+    match flag {
+        FragmentIndexFlag::Off => RetrievalChoice {
+            use_index: false,
+            report: Some("out-of-core index; the fragment-ion index was switched off".to_string()),
+            refused_because: None,
+        },
+        FragmentIndexFlag::Auto | FragmentIndexFlag::On => RetrievalChoice {
+            use_index: true,
+            report: Some(format!(
+                "out-of-core index, high-resolution fragments at {tol_text}"
+            )),
+            refused_because: None,
+        },
+    }
+}
+
 pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // These three were validated as Some(..) by main() before calling run().
     if cli.spectrum.is_empty() {
@@ -661,33 +743,36 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `bucket_index` DURING scanning, so they are not supported together with
     // `--candidate-index mmap` in this phase (fail loud rather than silently
     // produce wrong results).
-    // Fragment-ion index (issue #76): on the out-of-core path unless told
-    // otherwise. Chimeric, refine and glyco keep enumeration (they read the
-    // full candidate lists).
-    let index_eligible = params.candidate_index == search::CandidateIndexMode::Mmap
-        && !cli.glyco
-        && !cli.refine
-        && !chimeric_active;
-    params.fragment_index_top_k = match cli.fragment_index {
-        FragmentIndexFlag::Off => 0,
-        FragmentIndexFlag::Auto | FragmentIndexFlag::On if index_eligible => {
-            cli.fragment_index_top_k.unwrap_or(100)
-        }
-        FragmentIndexFlag::On => {
-            eprintln!(
-                "WARN: --fragment-index on has no effect here (the candidate index is in RAM, \
-                 or --chimeric/--refine/--glyco is active); using enumeration."
-            );
-            0
-        }
-        FragmentIndexFlag::Auto => 0,
+    // Retrieval strategy for the out-of-core path (issue #76): chosen by
+    // `retrieval_choice` and reported once. There is no user-facing switch.
+    let choice = retrieval_choice(
+        params.candidate_index == search::CandidateIndexMode::Mmap,
+        scorer.feature_match_tolerance(),
+        cli.glyco || cli.refine || chimeric_active,
+        cli.fragment_index,
+    );
+    params.fragment_index_top_k = if choice.use_index {
+        cli.fragment_index_top_k.unwrap_or(100)
+    } else {
+        0
     };
-    if params.fragment_index_top_k > 0 {
+    if let Some(refusal) = choice.refused_because {
         eprintln!(
-            "fragment-index: on (top-k {}, min matched ions {})",
-            params.fragment_index_top_k, params.fragment_index_min_matched
+            "WARN: the fragment-ion index cannot be used here ({refusal}); using enumeration."
         );
     }
+    if let Some(reason) = &choice.report {
+        if choice.use_index {
+            eprintln!(
+                "candidate retrieval: fragment-ion index ({reason}; {} candidates per spectrum, \
+                 >= {} matched b/y ions)",
+                params.fragment_index_top_k, params.fragment_index_min_matched
+            );
+        } else {
+            eprintln!("candidate retrieval: per-spectrum enumeration ({reason})");
+        }
+    }
+
     if params.candidate_index == search::CandidateIndexMode::Mmap {
         if params.chimeric {
             return Err(
@@ -1957,3 +2042,84 @@ pub(crate) fn write_filtered_tsv(
 }
 
 // ── Training pipeline ─────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod retrieval_choice_tests {
+    use super::{retrieval_choice, FragmentIndexFlag};
+    use model::tolerance::Tolerance;
+
+    const HI: Tolerance = Tolerance::Ppm(20.0);
+    const LO: Tolerance = Tolerance::Da(0.5);
+
+    #[test]
+    fn in_ram_never_uses_the_index_and_says_nothing() {
+        let c = retrieval_choice(false, HI, false, FragmentIndexFlag::Auto);
+        assert!(!c.use_index);
+        assert!(
+            c.report.is_none(),
+            "an in-RAM search has no strategy to report"
+        );
+        assert!(c.refused_because.is_none());
+    }
+
+    #[test]
+    fn out_of_core_high_res_uses_the_index() {
+        let c = retrieval_choice(true, HI, false, FragmentIndexFlag::Auto);
+        assert!(c.use_index);
+        assert!(c.report.unwrap().contains("high-resolution"));
+    }
+
+    /// The measured reason this guard exists: forcing the index on the low-res
+    /// standard sets took TMT from 12,281 to 3,613 PSMs @1% and UPS1 from
+    /// 15,838 to 10,312, while running slower.
+    #[test]
+    fn out_of_core_low_res_keeps_enumeration() {
+        let c = retrieval_choice(true, LO, false, FragmentIndexFlag::Auto);
+        assert!(
+            !c.use_index,
+            "the index must never be selected at a 0.5 Da tolerance"
+        );
+        assert!(c.report.unwrap().contains("low-resolution"));
+    }
+
+    #[test]
+    fn forcing_it_on_low_res_is_refused_not_obeyed() {
+        let c = retrieval_choice(true, LO, false, FragmentIndexFlag::On);
+        assert!(!c.use_index);
+        assert_eq!(c.refused_because, Some("low-resolution fragment matching"));
+    }
+
+    #[test]
+    fn forcing_it_in_ram_is_refused() {
+        let c = retrieval_choice(false, HI, false, FragmentIndexFlag::On);
+        assert!(!c.use_index);
+        assert_eq!(c.refused_because, Some("the candidate index fits in RAM"));
+    }
+
+    #[test]
+    fn modes_that_read_the_full_candidate_list_keep_enumeration() {
+        for flag in [FragmentIndexFlag::Auto, FragmentIndexFlag::On] {
+            let c = retrieval_choice(true, HI, true, flag);
+            assert!(!c.use_index, "glyco/refine/chimeric must keep enumeration");
+        }
+    }
+
+    #[test]
+    fn off_is_honoured_where_the_index_would_otherwise_run() {
+        let c = retrieval_choice(true, HI, false, FragmentIndexFlag::Off);
+        assert!(!c.use_index);
+        assert!(c.report.unwrap().contains("switched off"));
+    }
+
+    /// A tolerance tight enough to bin usefully still counts as high-resolution
+    /// even when it is expressed in Da.
+    #[test]
+    fn a_tight_dalton_tolerance_counts_as_high_resolution() {
+        assert!(
+            retrieval_choice(true, Tolerance::Da(0.02), false, FragmentIndexFlag::Auto).use_index
+        );
+        assert!(
+            !retrieval_choice(true, Tolerance::Da(0.2), false, FragmentIndexFlag::Auto).use_index
+        );
+    }
+}

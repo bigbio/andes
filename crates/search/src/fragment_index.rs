@@ -98,6 +98,12 @@ impl ChunkFragmentIndex {
         mass_hi: f64,
     ) -> Self {
         use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+        // NOTE: `fragment_tol` here is `RankScorer::feature_match_tolerance()`, a
+        // CONSTANT 20 ppm on high-resolution data — not the model's `mme`, which
+        // scoring matches at and which is 0.5 Da in every bundled model. Retrieval
+        // is therefore far tighter than scoring, in both directions, and the effect
+        // on identifications has never been measured. See "Known gaps" in
+        // docs/benchmarks/README.md before changing this.
         let bin_width = fragment_tol.as_da(2500.0).max(0.001);
 
         // Pass 1: every in-window form's (mass, record, k) plus per-record bin

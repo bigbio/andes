@@ -268,6 +268,12 @@ struct CalCandidate {
     residual: f64,
     rank_score: f32,
     is_decoy: bool,
+    /// Tie-break key. `rank_score` is integer-valued, so the confident set is
+    /// full of exact ties and the cut at `keep_top_n` lands inside one. Without
+    /// a deterministic tie-break, which candidates survive depends on the order
+    /// they were collected in, and the calibration shift moves between runs of
+    /// the same input.
+    spectrum_idx: usize,
 }
 
 fn extract_residuals(
@@ -282,7 +288,10 @@ fn extract_residuals(
 
     // Keep the best (highest `rank_score`) PSM per spectrum index across all
     // sampled SpecKeys (e.g. charge variants).
-    let mut best_by_spec: HashMap<usize, crate::PsmMatch> = HashMap::new();
+    // BTreeMap, not HashMap: this map is ITERATED below to build the candidate
+    // list, and a randomised traversal order makes the run irreproducible.
+    let mut best_by_spec: std::collections::BTreeMap<usize, crate::PsmMatch> =
+        std::collections::BTreeMap::new();
     for (key, queue) in sampled.iter().zip(queues.iter()) {
         let Some(psm) = queue.iter_psms().max_by(|a, b| {
             a.rank_score
@@ -339,6 +348,7 @@ fn extract_residuals(
             residual,
             rank_score: psm.rank_score,
             is_decoy: cand.is_decoy,
+            spectrum_idx,
         });
     }
 
@@ -381,7 +391,11 @@ fn high_confidence_residuals(cands: &mut [CalCandidate], keep_top_n: usize) -> V
         } else {
             b.rank_score
         };
-        bv.partial_cmp(&av).unwrap_or(std::cmp::Ordering::Equal)
+        // `total_cmp`, not `partial_cmp(..).unwrap_or(Equal)` — see the note on
+        // `PsmMatch`'s comparator. The `spectrum_idx` tie-break makes the cut at
+        // `keep_top_n` a function of the DATA, not of the order it arrived in.
+        bv.total_cmp(&av)
+            .then_with(|| a.spectrum_idx.cmp(&b.spectrum_idx))
     });
 
     // Running TDC q-value.
@@ -546,11 +560,53 @@ mod tests {
     }
 
     fn cand(residual: f64, rank_score: f32, is_decoy: bool) -> CalCandidate {
+        cand_from(residual, rank_score, is_decoy, 0)
+    }
+
+    fn cand_from(
+        residual: f64,
+        rank_score: f32,
+        is_decoy: bool,
+        spectrum_idx: usize,
+    ) -> CalCandidate {
         CalCandidate {
             residual,
             rank_score,
             is_decoy,
+            spectrum_idx,
         }
+    }
+
+    /// The confident set is full of exact `rank_score` ties (the score is an
+    /// integer sum), and `keep_top_n` cuts inside one. Selection must therefore
+    /// depend on the data alone — if it depends on the order the candidates were
+    /// collected in, the calibration shift, the tightened precursor tolerance and
+    /// hence the whole PSM set move between runs of identical input.
+    #[test]
+    fn residual_selection_is_independent_of_input_order() {
+        // 40 targets on one tied score, distinguishable only by residual, and a
+        // cap that cuts the tie in half.
+        let build = |order: &[usize]| -> Vec<f64> {
+            let mut cands: Vec<CalCandidate> = order
+                .iter()
+                .map(|&i| cand_from(i as f64 * 0.1, 20.0, false, i))
+                .collect();
+            // A few decoys well below so the q-gate admits the targets.
+            for i in 0..5 {
+                cands.push(cand_from(9.0, 1.0, true, 1000 + i));
+            }
+            high_confidence_residuals(&mut cands, 20)
+        };
+        let forward: Vec<usize> = (0..40).collect();
+        let reversed: Vec<usize> = (0..40).rev().collect();
+        let shuffled: Vec<usize> = (0..40).map(|i| (i * 17) % 40).collect();
+
+        let a = build(&forward);
+        let b = build(&reversed);
+        let c = build(&shuffled);
+        assert_eq!(a.len(), 20, "the cap should bite inside the tie");
+        assert_eq!(a, b, "reversing the input changed which residuals survived");
+        assert_eq!(a, c, "permuting the input changed which residuals survived");
     }
 
     #[test]

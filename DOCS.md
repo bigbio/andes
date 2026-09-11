@@ -135,7 +135,7 @@ Native `.raw`/`.d` search **MS2 (identification) scans only** — MS1 and MS3+ s
 | `--output-tsv` | path | *(off)* | Optional tab-separated PSM report (§3b). Skipped in bench mode (`--max-spectra > 0`). | Java `-outputFormat 1` with output path |
 | `--output-parquet` | dir | *(off)* | Optional OpenMS-compatible QPX `.idparquet/` bundle (`psms`/`proteins`/`search_params`); see §3e. | *(no Java equivalent)* |
 
-The shipped binary reads **no environment variables**; everything is a flag. The test-harness variables are listed in [`docs/ENV_VARS.md`](docs/ENV_VARS.md).
+**No environment variable changes a search result**; everything that does is a flag. Two read-only trace switches (`ANDES_TRACE_IONS`, `ANDES_TRACE_PEP`) enable diagnostic logging and nothing else. They and the test-harness variables are listed in [`docs/ENV_VARS.md`](docs/ENV_VARS.md).
 
 ---
 

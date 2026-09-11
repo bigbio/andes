@@ -814,7 +814,8 @@ GLYCO=1 ./reproduce/build_databases.sh "$DATA"     # writes databases/mouse_entr
 #    plain reversal maps an N-X-S/T sequon to S/T-X-N, so reversed decoys sail through the
 #    glyco sequon gate and q-values come out anti-conservative.
 for f in MouseLiver-Z-T-1 MouseLiver-Z-T-2 MouseLiver-Z-T-3 MouseLiver-Z-T-4 MouseLiver-Z-T-5; do
-  andes --spectrum $f.raw --database "$DATA/databases/mouse_entrap.fasta" --glyco \
+  andes --spectrum $f.raw --database "$DATA/databases/mouse_entrap.fasta" \
+        --glyco --glyco-species mouse \
         --decoy-strategy sequon-reverse \
         --threads 8 --output-pin $f.pin            # writes $f.glyco.pin
 done
@@ -935,6 +936,18 @@ so no entrapment FDP is computable from it and its counts are rescored `q ≤ 0.
 ---
 
 ## 5. Known gaps
+
+- **The fragment-ion index retrieves at a much tighter window than the scorer matches at,
+  and the consequence is unmeasured.** `RankScorer::feature_match_tolerance()` returns a
+  constant 20 ppm on high-resolution data and that is what drives index retrieval, while
+  ion matching during scoring uses the model's own `mme`, which is 0.5 Da in every bundled
+  model (the wide serve window is load-bearing — re-serving high-res models at the training
+  window cost 21% of Astral identifications, which is why `--tight-highres-scoring` exists
+  only to keep that experiment repeatable). So a candidate can be credited by the scorer at
+  0.3 Da and be invisible to an index admitting 0.01 Da at m/z 500. This is a second
+  mechanism alongside the min-matched-ions decoy bias documented above, it cuts in both
+  directions, and no arm has measured it. Anyone changing the retrieval window must A/B it
+  against the enumeration path on identifications, not just on speed.
 
 - **The Astral database is ProteoBench's own file and is no longer served.** The spectra
   fetch (an earlier version of this document said they did not; that was a pagination bug

@@ -102,6 +102,12 @@ pub(crate) enum CandidateIndexFlag {
 /// `train`) is given.  When no subcommand is present, `run()` validates them
 /// manually and returns an early error if they are missing.
 #[derive(Args, Debug)]
+#[command(group(
+    clap::ArgGroup::new("glycan_db")
+        .args(["glyco_glycan_gdb", "glyco_species"])
+        .multiple(false)
+        .required(false),
+))]
 pub(crate) struct SearchArgs {
     /// YAML run-configuration file. Any parameter can be set here (grouped by
     /// experiment: io/search/scoring/decoys/chimeric/refine/rescoring/glyco; see
@@ -429,10 +435,15 @@ pub(crate) struct SearchArgs {
     #[arg(long = "candidate-index", hide = true, default_value = "auto")]
     pub(crate) candidate_index: CandidateIndexFlag,
 
-    /// Glycopeptide search mode: enumerate hybrid backbone candidates (DB + de-novo
-    /// Y-ladder), filter by N-X-S/T sequon, score bare backbones, and write a
+    /// Glycopeptide search mode: retrieve glycans from the loaded database, solve
+    /// the backbone as `precursor − glycan`, filter by N-X-S/T sequon, and write a
     /// `.glyco.pin` file instead of the standard PIN. Default off.
-    #[arg(long = "glyco", default_value_t = false)]
+    ///
+    /// Requires a glycan database: `--glyco-species` for a bundled one, or
+    /// `--glyco-glycan-gdb` for your own file. The requirement is enforced at
+    /// argument-parsing time, so a missing database fails immediately rather than
+    /// after the digest, index build and spectrum load.
+    #[arg(long = "glyco", default_value_t = false, requires = "glycan_db")]
     pub(crate) glyco: bool,
 
     /// Maximum backbone candidates per spectrum in glyco mode (DB + de-novo
@@ -839,18 +850,22 @@ pub(crate) struct SearchArgs {
     pub(crate) rescore_native: bool,
 
     /// FDR (q-value) threshold for the filtered `<stem>.q<fdr>.tsv` output
-    /// (target PSMs at q ≤ this). Setting it EXPLICITLY without `--rescore` /
-    /// `--rescore-native` TRIGGERS rescoring and auto-picks the backend:
-    /// Percolator if one is available, otherwise the built-in native rescorer.
-    /// When rescoring runs, the threshold defaults to 0.01 if unset.
+    /// (target PSMs at q ≤ this).
+    ///
+    /// This is a THRESHOLD, not a switch: it does nothing on its own. andes does
+    /// not compute FDR unless you ask it to, because doing so would silently
+    /// launch Percolator or the non-production native rescorer. Pair it with
+    /// `--rescore` (Percolator) or `--rescore-native`. Setting it alone warns and
+    /// writes no filtered output. Defaults to 0.01 when rescoring does run.
     #[arg(long = "fdr", value_parser = parse_unit_fraction)]
     pub(crate) fdr: Option<f64>,
 
     /// Optional per-PSM PEP (posterior error probability / local FDR) cap,
     /// applied IN ADDITION to `--fdr` (a PSM must pass both q ≤ `--fdr` AND
     /// PEP ≤ `--pep`). The q-value stays the primary set-level FDR control;
-    /// `--pep` is a supplementary per-PSM gate. Like `--fdr`, setting it
-    /// explicitly triggers rescoring. Default: no PEP cap.
+    /// `--pep` is a supplementary per-PSM gate. Like `--fdr` it is a threshold
+    /// only: it does nothing without `--rescore` / `--rescore-native`.
+    /// Default: no PEP cap.
     #[arg(long = "pep", hide = true, value_parser = parse_unit_fraction)]
     pub(crate) pep: Option<f64>,
 

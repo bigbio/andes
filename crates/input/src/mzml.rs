@@ -174,7 +174,7 @@ pub(crate) fn log_ethcd_once() {
     {
         if ethcd_as_etd() {
             eprintln!(
-                "INFO: EThcD/ETciD detected; ANDES_ETHCD_AS_ETD is set, so these spectra \
+                "INFO: EThcD/ETciD detected; --ethcd-activation etd is set, so these spectra \
                  stay classified as ETD (c/z stack active)."
             );
         } else {
@@ -183,9 +183,10 @@ pub(crate) fn log_ethcd_once() {
                  activation) — no EThcD model exists, so these spectra are routed to the \
                  HCD (b/y) model. IN --glyco THIS DISABLES THE WHOLE c/z STACK: c/z \
                  generation and scoring, the c/z truncation gate, the ETD DB fallback, and \
-                 --glyco-hcd-pair all become inert. Set ANDES_ETHCD_AS_ETD=1 to keep these \
-                 spectra classified as ETD (this is the reliable override; --fragmentation \
-                 selects the scoring model but does NOT restore per-spectrum ETD routing)."
+                 --glyco-hcd-pair all become inert. Pass --ethcd-activation etd to keep \
+                 these spectra classified as ETD (this is the reliable override; \
+                 --fragmentation selects the scoring model but does NOT restore \
+                 per-spectrum ETD routing)."
             );
         }
     }
@@ -877,7 +878,7 @@ impl<R: BufRead> MzMLReader<R> {
                             // No EThcD model exists, so route to HCD (b/y) rather than the
                             // pure-ETD c/z model; the instrument fallback then picks the
                             // resolution tier. Logged once.
-                            // ANDES_ETHCD_AS_ETD=1 keeps EThcD/ETciD classified as ETD.
+                            // --ethcd-activation etd keeps EThcD/ETciD classified as ETD.
                             // The HCD relabel silently disables the ENTIRE electron-
                             // transfer stack for such files — glyco c/z generation and
                             // scoring, the c/z truncation gate, the ETD DB fallback, and
@@ -1185,8 +1186,20 @@ impl<R: BufRead> Iterator for MzMLReader<R> {
 /// see docs. `--ethcd-activation etd` flips it.
 static ETHCD_AS_ETD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
-/// Install the EThcD labelling policy. Call once, before reading spectra.
+/// Tripped the first time the policy is consulted. Installing after that point
+/// means something already read the default, which is how the activation
+/// pre-pass once relabelled every EThcD spectrum as HCD regardless of the flag.
+static ETHCD_POLICY_READ: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Install the EThcD labelling policy. Call once, BEFORE reading any spectrum —
+/// the mzML reader consults it per spectrum, and a late install silently leaves
+/// every spectrum read so far labelled under the default.
 pub fn init_ethcd_as_etd(as_etd: bool) {
+    debug_assert!(
+        !ETHCD_POLICY_READ.load(std::sync::atomic::Ordering::Relaxed) || !as_etd,
+        "init_ethcd_as_etd(true) called after the policy was already read: every \
+         spectrum read before this point was labelled under the default (EThcD -> HCD)"
+    );
     let _ = ETHCD_AS_ETD.set(as_etd);
 }
 
@@ -1198,6 +1211,7 @@ pub fn ethcd_as_etd_policy() -> bool {
 
 #[inline]
 fn ethcd_as_etd() -> bool {
+    ETHCD_POLICY_READ.store(true, std::sync::atomic::Ordering::Relaxed);
     *ETHCD_AS_ETD.get().unwrap_or(&false)
 }
 

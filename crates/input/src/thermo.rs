@@ -301,7 +301,7 @@ fn map_dissociation(d: DissociationMethod) -> Option<ActivationMethod> {
         // resonant collision in one step → route to HCD (b/y), not pure ETD.
         //
         // This mirrors the mzML reader, INCLUDING its warning and its
-        // ANDES_ETHCD_AS_ETD escape hatch. Previously the `.raw` path did the
+        // --ethcd-activation escape hatch. Previously the `.raw` path did the
         // relabel silently and could not be overridden at all, so an EThcD
         // glyco run on native Thermo input lost the entire c/z stack with no
         // diagnostic — and `.raw` is the path most users take.

@@ -268,7 +268,7 @@ fn generate_y_ions(glycan: &Glycan, core: GlycanCore) -> Vec<GlycanIon> {
 
     let ant_hn = c.hexnac.saturating_sub(core_hn);
     let ant_h = c.hex.saturating_sub(core_h);
-    let ant_f = c.fuc - core_fuc;
+    let ant_f = c.fuc.saturating_sub(core_fuc);
     let ant_a = c.neuac;
     let ant_g = c.neugc;
 

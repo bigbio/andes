@@ -29,6 +29,8 @@ pub struct GlycanComp {
 pub enum GdbLoadError {
     /// The file has no header line.
     Empty,
+    /// The file had a valid header line but no glycan trees (e.g. header-only).
+    NoGlycans,
     /// A glycan line contained a monosaccharide symbol outside the N-glycan set.
     UnknownSymbol { line: usize, symbol: String },
     /// A glycan line was not a well-formed parenthesized tree.
@@ -41,6 +43,9 @@ impl std::fmt::Display for GdbLoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             GdbLoadError::Empty => write!(f, "glycan .gdb is empty (missing header line)"),
+            GdbLoadError::NoGlycans => {
+                write!(f, "glycan .gdb contains no glycan trees (header-only?)")
+            }
             GdbLoadError::UnknownSymbol { line, symbol } => {
                 write!(f, "glycan .gdb line {line}: unknown monosaccharide symbol {symbol:?}")
             }
@@ -75,8 +80,24 @@ fn symbol_index(sym: u8) -> Option<usize> {
     }
 }
 
+/// Maximum nesting depth of a glycan tree. Real N-glycans nest a handful of
+/// levels; a corrupted or malicious `.gdb` with thousands of open parens would
+/// otherwise overflow the recursive-descent parser's call stack.
+const MAX_GLYCAN_DEPTH: usize = 64;
+
 /// Recursive-descent parse of one parenthesized node `( sym child* )`.
-fn parse_node(bytes: &[u8], pos: &mut usize, line: usize) -> Result<Node, GdbLoadError> {
+fn parse_node(
+    bytes: &[u8],
+    pos: &mut usize,
+    line: usize,
+    depth: usize,
+) -> Result<Node, GdbLoadError> {
+    if depth > MAX_GLYCAN_DEPTH {
+        return Err(GdbLoadError::MalformedTree {
+            line,
+            reason: "glycan tree exceeds maximum depth",
+        });
+    }
     if *pos >= bytes.len() || bytes[*pos] != b'(' {
         return Err(GdbLoadError::MalformedTree {
             line,
@@ -107,7 +128,7 @@ fn parse_node(bytes: &[u8], pos: &mut usize, line: usize) -> Result<Node, GdbLoa
             });
         }
         match bytes[*pos] {
-            b'(' => children.push(parse_node(bytes, pos, line)?),
+            b'(' => children.push(parse_node(bytes, pos, line, depth + 1)?),
             b')' => {
                 *pos += 1;
                 return Ok(Node { sym, children });
@@ -141,7 +162,7 @@ fn parse_glycan_at(
     pos: &mut usize,
     line_no: usize,
 ) -> Result<GlycanComp, GdbLoadError> {
-    let root = parse_node(bytes, pos, line_no)?;
+    let root = parse_node(bytes, pos, line_no, 0)?;
     let mut counts = [0u8; 5];
     tally(&root, &mut counts);
     let hex = counts[0];
@@ -230,6 +251,9 @@ pub fn load_glycan_gdb(content: &str) -> Result<Vec<GlycanComp>, GdbLoadError> {
             .then(a.neugc.cmp(&b.neugc))
             .then(a.core_fuc.cmp(&b.core_fuc))
     });
+    if out.is_empty() {
+        return Err(GdbLoadError::NoGlycans);
+    }
     Ok(out)
 }
 
@@ -335,6 +359,22 @@ mod tests {
     }
 
     #[test]
+    fn deeply_nested_tree_is_rejected() {
+        // A pathological tree nested far past any real glycan; must not overflow
+        // the parser's call stack.
+        let mut s = String::from("H,N,A,G,F\n");
+        for _ in 0..200 {
+            s.push_str("(N");
+        }
+        for _ in 0..200 {
+            s.push(')');
+        }
+        s.push('\n');
+        let err = load_glycan_gdb(&s).unwrap_err();
+        assert!(matches!(err, GdbLoadError::MalformedTree { .. }));
+    }
+
+    #[test]
     fn unknown_symbol_is_rejected() {
         let err = load_glycan_gdb("H,N,A,G,F\n(X)\n").unwrap_err();
         assert!(matches!(err, GdbLoadError::UnknownSymbol { symbol, .. } if symbol == "X"));
@@ -343,6 +383,12 @@ mod tests {
     #[test]
     fn empty_file_is_rejected() {
         assert_eq!(load_glycan_gdb("").unwrap_err(), GdbLoadError::Empty);
+    }
+
+    #[test]
+    fn header_only_file_is_rejected() {
+        let err = load_glycan_gdb("H,N,A,G,F\n").unwrap_err();
+        assert!(matches!(err, GdbLoadError::NoGlycans));
     }
 
     #[test]

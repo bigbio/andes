@@ -745,6 +745,7 @@ impl GlycoCtxOwned {
         fragment_tolerance_da: f64,
         backbone_top_k: usize,
         cfg: GlycoConfig,
+        tol_ppm: f64,
     ) -> Self {
         // Peptide-first fragment-index candidate generation is always on under the
         // shipped gp selector (it is the high-charge-glycopeptide recall path).
@@ -932,10 +933,13 @@ impl GlycoCtxOwned {
                 .enumerate()
                 .map(|(i, g)| Glycan { id: i as u32, composition: g.clone() })
                 .collect();
-            GlycanIonIndex::build(&glycans, 0.02, Some(20.0), GlycanCore::NGlycan)
+            // 0.02 Da is the fixed bucket granularity (index resolution), not a
+            // tolerance; the acceptance window is `tol_ppm` at query time, derived
+            // from `--glyco-tol-ppm` rather than hardcoded.
+            GlycanIonIndex::build(&glycans, 0.02, Some(tol_ppm), GlycanCore::NGlycan)
         };
         let glycan_first_cfg = GlycanConfig {
-            tol_ppm: 20.0,
+            tol_ppm,
             min_diagnostic_ions: 2,
             min_core_ions: 1, // permissive: this is a pre-filter, not a gate
             top_k: 100, // pGlyco3: top 100 candidate glycan compositions for peptide search
@@ -1379,47 +1383,12 @@ fn score_spectrum_glyco(
     // trying only the monoisotopic offset silently loses the true
     // backbone. Each resulting `BackboneHit` records the (charge,
     // isotope_offset) pair that produced it (see hybrid.rs).
-    // Glycan-first pre-filter: narrow the DB-branch from the full glycan list to
-    // the top candidate glycans retrieved by the ion index (Y-complementary +
-    // diagnostic ion evidence). Glycan ids are indices into `glycan_list`.
-    let reported_charge = spec.precursor_charge.filter(|&z| z > 0).unwrap_or(2) as u8;
-    let reported_neutral = (spec.precursor_mz - PROTON) * reported_charge as f64 - H2O;
-    // Glycan-first DB-branch source. Default: narrow the full glycan list to the
-    // top candidate glycans retrieved by the ion index (Y-complementary +
-    // diagnostic ion evidence), then recover weak-core-Y spectra via the
-    // peptide-first fragment index. `--glyco-full-glycan-db` instead enumerates
-    // the FULL glycan list mass-driven (backbone = precursor − glycan → peptide
-    // by mass in phase-1), which is the glycan-first recovery path and makes the
-    // peptide-first b/y fallback redundant; the core-Y==0 prefilter still gates
-    // spurious backbones.
-    let restricted_glycans: Vec<GlycanComp> = if full_glycan_db {
-        // Skip the ion-index pre-filter entirely — the full list is the source.
-        Vec::new()
-    } else if ox_ev.fired {
-        // `search_glycans` takes the NEUTRAL precursor mass M = peptide_neutral +
-        // Σ(glycan residues) — i.e. `reported_neutral + H2O`, NOT the residue
-        // convention. Passing `reported_neutral` alone would shift every
-        // complementary query by −H2O and empty the index (see glycan_first.rs).
-        let res = search_glycans(
-            ctx.glycan_ion_index,
-            ctx.glycan_first_cfg,
-            glycan_list,
-            reported_neutral + H2O,
-            reported_charge,
-            gen_peaks,
-        );
-        res.candidates
-            .iter()
-            .filter_map(|c| glycan_list.get(c.glycan_id as usize).cloned())
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let effective_glycans: &[GlycanComp] = if full_glycan_db && ox_ev.fired {
-        glycan_list
-    } else {
-        &restricted_glycans
-    };
+    // Glycan-first DB-branch source is chosen per (charge, isotope) hypothesis
+    // inside the sweep below: default narrows the full glycan list to the top
+    // candidate glycans retrieved by the ion index (Y-complementary + diagnostic
+    // ion evidence); `--glyco-full-glycan-db` instead enumerates the FULL glycan
+    // list mass-driven (backbone = precursor − glycan → peptide by mass in
+    // phase-1), making the peptide-first b/y fallback redundant.
 
     // Glycan-first: the glycan is identified by its fragment ions (ion index),
     // then the peptide is searched as `backbone = precursor − glycan` for each
@@ -1448,6 +1417,41 @@ fn score_spectrum_glyco(
             if precursor_neutral <= 0.0 {
                 continue;
             }
+            // A1 (isotope sweep): narrow the glycan set at THIS (charge, isotope)
+            // hypothesis, not once at the reported charge / offset 0.
+            // `search_glycans` maps a Y ion to a glycan via `q = precursor_mass −
+            // y_ion_neutral`; a ±1 isotope shift moves `q` into a different mass
+            // bucket, so a set narrowed at offset 0 omits the glycan that only
+            // matches at offset ±1 and silently defeats the sweep. The
+            // `--glyco-full-glycan-db` path is unaffected: it enumerates the full
+            // list, so `db_branch` sees every glycan at every offset.
+            let restricted_glycans: Vec<GlycanComp> = if full_glycan_db || !ox_ev.fired {
+                Vec::new()
+            } else {
+                // `search_glycans` takes the NEUTRAL precursor mass M = peptide +
+                // Σ(glycan residues), i.e. `precursor_neutral + H2O`, NOT the
+                // residue convention (passing `precursor_neutral` alone shifts
+                // every query by −H2O and empties the index). `z` is the charge
+                // hypothesis and sets the Y-ion `zmax` consistently with the
+                // precursor being enumerated.
+                let res = search_glycans(
+                    ctx.glycan_ion_index,
+                    ctx.glycan_first_cfg,
+                    glycan_list,
+                    precursor_neutral + H2O,
+                    z,
+                    gen_peaks,
+                );
+                res.candidates
+                    .iter()
+                    .filter_map(|c| glycan_list.get(c.glycan_id as usize).cloned())
+                    .collect()
+            };
+            let effective_glycans: &[GlycanComp] = if full_glycan_db && ox_ev.fired {
+                glycan_list
+            } else {
+                &restricted_glycans
+            };
             for h in db_branch(precursor_neutral, effective_glycans, 500.0, z, iso, sialic_gate) {
                 all_backbone.push(h);
             }
@@ -2771,6 +2775,7 @@ pub fn glyco_search_run(
         fragment_tolerance_da,
         backbone_top_k,
         cfg.clone(),
+        tol_ppm,
     );
     let ctx = owned.as_ctx(prepared, glycan_list, tol_ppm, spectra, &hcd_partner);
 

@@ -54,20 +54,25 @@ Glyco-Decipher's 2301 (79%) and 1911 of Byonic's 2509 (76%). pGlyco 2.0 (2017)
 is the outlier at the low end on every row (0.27–0.38), consistent with its
 smaller glycan database and older scoring, not an andes-specific divergence.
 
-## Timing (`--glyco-full-glycan-db`, full run)
+## Timing — full-scale A/B
 
-`MouseLiver-Z-T-1.raw`, 45905 MS2 spectra, 32 threads, `sequon-reverse` decoy:
+`MouseLiver-Z-T-1.raw`, 45905 MS2 spectra, 32 threads, `sequon-reverse` decoy,
+`pGlyco-N-Mouse.gdb`:
 
-| phase | time |
-|---|---|
-| stream_search (load + score standard candidates) | 51.4 s |
-| glyco scoring → 43302 glyco-PSM rows | **107.5 s** |
-| total | **163.7 s** |
+| metric | baseline (peptide-first) | `--glyco-full-glycan-db` | Δ |
+|---|---|---|---|
+| glyco phase | 12474.9 s (3.46 h) | 106.2 s | **117× faster** |
+| total wall-clock | 12610.3 s (3.50 h) | 163.2 s | **77× faster** |
+| glyco PSM rows | 38800 | 43302 | +11.6% |
+| targets @ 1% FDR (2× rule) | 5319 | 5262 | −57 (−1.1%) |
+| RawScore AUC (target > decoy) | 0.661 | 0.643 | −0.018 |
 
-A/B on a 3000-spectrum cap (same input): the default peptide-first path builds
-the ~1.5 GB b/y postings index and takes 120.7 s in the glyco phase; the
-`--glyco-full-glycan-db` branch skips that index and takes 4.6 s — a ~26× glyco
-phase speedup (44.1 s total vs 159.6 s).
+The default peptide-first path spends ~3.5 h building the ~1.5 GB b/y postings
+index and scoring against it. `--glyco-full-glycan-db` is mass-driven: it skips
+that index and matches the backbone to peptides by mass in the phase-1 bucket
+index, cutting the glyco phase to ~106 s with negligible sensitivity/scoring loss
+(−1.1% targets, −0.018 AUC). Full-glycan-db phase breakdown: stream_search 51.4 s,
+glyco scoring → 43302 rows 106.2 s, total 163.2 s.
 
 ## Notes and caveats
 

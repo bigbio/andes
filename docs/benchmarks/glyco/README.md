@@ -14,6 +14,7 @@ does that. They prepare its input and interpret its output.
 | `pool_pins.py` | Concatenates per-fraction `.glyco.pin` files into one pooled PIN (single header, fraction-tagged `SpecId`). **Pooling is mandatory**, see below. Errors out if the headers differ rather than silently misaligning columns. |
 | `eval_honest.py` | Scores a pooled Percolator result against a reference identification set. Compares the peptide **sequence**, not just the precursor mass, and reports the A/B/C/D decomposition. |
 | `eval_yield.py` | Absolute yield: glycoPSMs, distinct glycopeptides, compositions and glycosites at 1% q-value, with no reference set. Use for datasets that have no truth. |
+| `compare_preperc.py` | Pre-Percolator A/B: RawScore target/decoy AUC, and the decoy-counting "2× rule" (`FDR = 2D/(D+T)` on RawScore, factor 2 because the `sequon-reverse` decoy is 1:1). This is the exact script behind the "targets @ 1% FDR (2× rule)" and "RawScore AUC" columns. |
 | `build_entrap.py` | Appends an unrelated proteome (yeast / E. coli) to the search FASTA as **targets**. Any glyco ID landing there is false by construction. Writes targets only — run andes with `--decoy-strategy sequon-reverse` so the decoys are built correctly for the whole database. |
 | `eval_entrap.py` | Counts the entrapment hits that survive the q-value cut and reports the false-discovery proportion, with a conservative/optimistic verdict against the nominal threshold. |
 

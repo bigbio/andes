@@ -54,25 +54,53 @@ Glyco-Decipher's 2301 (79%) and 1911 of Byonic's 2509 (76%). pGlyco 2.0 (2017)
 is the outlier at the low end on every row (0.27–0.38), consistent with its
 smaller glycan database and older scoring, not an andes-specific divergence.
 
-## Timing — full-scale A/B
+## Timing — A/B against `main`
 
-`MouseLiver-Z-T-1.raw`, 45905 MS2 spectra, 32 threads, `sequon-reverse` decoy,
-`pGlyco-N-Mouse.gdb`:
+`MouseLiver-Z-T-1` (45,905 MS2 spectra; the `.mgf` and native `.raw` read the same
+45,905 scans), 112 threads, `sequon-reverse` decoy, `mouse_entrap.fasta` (1:1
+shuffled-self entrapment). Three arms, all on the same host and thread count, so
+the comparison is apples-to-apples:
 
-| metric | baseline (peptide-first) | `--glyco-full-glycan-db` | Δ |
-|---|---|---|---|
-| glyco phase | 12474.9 s (3.46 h) | 106.2 s | **117× faster** |
-| total wall-clock | 12610.3 s (3.50 h) | 163.2 s | **77× faster** |
-| glyco PSM rows | 38800 | 43302 | +11.6% |
-| targets @ 1% FDR (2× rule) | 5319 | 5262 | −57 (−1.1%) |
-| RawScore AUC (target > decoy) | 0.661 | 0.643 | −0.018 |
+1. **`main`** — the pre-PR code (`bb1ccdf`), built-in composition enumerator,
+   default peptide-first path.
+2. **branch default** — this branch's default peptide-first path
+   (`--glyco-glycan-gdb pGlyco-N-Mouse.gdb`, no `--glyco-full-glycan-db`).
+3. **`--glyco-full-glycan-db`** — the mass-driven path (skips the b/y postings
+   index).
 
-The default peptide-first path spends ~3.5 h building the ~1.5 GB b/y postings
-index and scoring against it. `--glyco-full-glycan-db` is mass-driven: it skips
-that index and matches the backbone to peptides by mass in the phase-1 bucket
-index, cutting the glyco phase to ~106 s with negligible sensitivity/scoring loss
-(−1.1% targets, −0.018 AUC). Full-glycan-db phase breakdown: stream_search 51.4 s,
-glyco scoring → 43302 rows 106.2 s, total 163.2 s.
+| metric | `main` (bb1ccdf) | branch default | `--glyco-full-glycan-db` |
+|---|---:|---:|---:|
+| total wall-clock | 3,388 s | 3,471 s | **135 s** |
+| glyco PSM rows | 42,106 | 38,992 | 43,452 |
+| targets @ 1% FDR (2× rule) | 4,997 | 5,485 | 5,325 |
+| RawScore AUC (target > decoy) | 0.6533 | 0.6629 | 0.6465 |
+
+**The honest speed baseline is `main`, not the branch default.** `main` finishes
+the file in 3,388 s; `--glyco-full-glycan-db` finishes it in 135 s — **~25×
+faster**. The previous table quoted "117×/77×" against the branch's own default
+path, which is the wrong baseline: on this host the two peptide-first paths are
+within ~2% of each other (3,388 s vs 3,471 s), so the "slower while using four
+times the cores" gap the review cited was a cross-machine, cross-thread artifact,
+not a property of the branch.
+
+**Rows are not identifications.** `--glyco-full-glycan-db` emits 43,452 candidate
+rows — +3.2% over `main`'s 42,106, +11.4% over the branch default's 38,992 — yet
+identifies 5,325 targets at 1% FDR, which is *above* `main`'s 4,997 (+6.6%), not
+below it. The extra rows are candidate emissions, not accepted PSMs; RawScore
+separation moves 0.6533 → 0.6465. The old table's "−1.1% targets" compared
+against the branch default (5,485), not against `main`.
+
+**"targets @ 1% FDR (2× rule)"** is decoy counting, not entrapment: sort PSMs by
+RawScore descending, `FDR = 2D/(D+T)` on the `sequon-reverse` `XXX_` decoys. The
+factor 2 is exact because target:decoy is 1:1 by construction (see
+`reproduce/README.md`); it is not an assumed entrapment scaling factor. Computed
+by `compare_preperc.py`, which is committed alongside the other benchmark scripts.
+
+**Single-fraction Percolator caveat.** Percolator's 3-fold cross-validation does
+not converge on one fraction of the full-glycan-db output (43 k rows; one fold has
+no separable training direction), so the single-fraction metric above is the
+decoy-counting 2× rule. The pooled 5-fraction Percolator run is the comparable
+q-value measurement (`eval_yield.py`), per the "pool before Percolator" rule.
 
 ## Notes and caveats
 

@@ -37,7 +37,8 @@ use andes_glyco::backbone::{
 use andes_glyco::glycan_db::GlycanComp;
 use andes_glyco::glycan_first::{search_glycans, Glycan, GlycanConfig, GlycanCore, GlycanIonIndex};
 use andes_glyco::glyco_psm::{
-    glyco_gp_fused_score, GlycoPsmKey, GLYCO_GP_CZ_DEFAULT, GLYCO_GP_H_DEFAULT, GLYCO_GP_J_DEFAULT,
+    glyco_gp_fused_score_iso, GlycoPsmKey, GLYCO_GP_CZ_DEFAULT, GLYCO_GP_H_DEFAULT,
+    GLYCO_GP_ISO_DEFAULT, GLYCO_GP_J_DEFAULT,
     GLYCO_GP_K_DEFAULT,
 };
 
@@ -55,6 +56,9 @@ pub struct GlycoConfig {
     /// `gp` selector hyperscore weight (H).
     pub gp_h: f32,
     pub gp_cz: f32,
+    /// Isotope-offset penalty in the collapse (`--glyco-gp-iso`); see
+    /// `GLYCO_GP_ISO_DEFAULT` for the measurement behind it.
+    pub gp_iso: f32,
     /// Minimum trimannosyl-core Y ions required to emit a glyco PSM. 0 = no requirement
     /// (previous behaviour). The field standard is 2 (pGlyco3, O-Pair).
     pub min_core_y: u32,
@@ -186,6 +190,7 @@ impl Default for GlycoConfig {
             gp_j: GLYCO_GP_J_DEFAULT,
             gp_h: GLYCO_GP_H_DEFAULT,
             gp_cz: GLYCO_GP_CZ_DEFAULT,
+            gp_iso: GLYCO_GP_ISO_DEFAULT,
             min_core_y: 0,
             min_raw_score: None,
             diag_splits: None,
@@ -643,6 +648,8 @@ pub struct GlycoScoreCtx<'a> {
     pub gp_j: f32,
     pub gp_h: f32,
     pub gp_cz: f32,
+    /// See `GlycoConfig::gp_iso`.
+    pub gp_iso: f32,
     /// See `GlycoConfig::pair_y_on_gen`.
     pub pair_y_on_gen: bool,
     /// See `GlycoConfig::enum_fallback`.
@@ -716,6 +723,7 @@ pub struct GlycoCtxOwned {
     gp_j: f32,
     gp_h: f32,
     gp_cz: f32,
+    gp_iso: f32,
     pair_y_on_gen: bool,
     enum_fallback: bool,
     etd_require_oxonium: bool,
@@ -805,6 +813,7 @@ impl GlycoCtxOwned {
         let gp_j = cfg.gp_j;
         let gp_h = cfg.gp_h;
         let gp_cz = cfg.gp_cz;
+        let gp_iso = cfg.gp_iso;
         let pair_y_on_gen_cfg = cfg.pair_y_on_gen;
         let enum_fallback_cfg = cfg.enum_fallback;
         let etd_require_oxonium_cfg = cfg.etd_require_oxonium;
@@ -977,6 +986,7 @@ impl GlycoCtxOwned {
             gp_j,
             gp_h,
             gp_cz,
+            gp_iso,
             pair_y_on_gen: pair_y_on_gen_cfg,
             enum_fallback: enum_fallback_cfg,
             etd_require_oxonium: etd_require_oxonium_cfg,
@@ -1030,6 +1040,7 @@ impl GlycoCtxOwned {
             gp_j: self.gp_j,
             gp_h: self.gp_h,
             gp_cz: self.gp_cz,
+            gp_iso: self.gp_iso,
             pair_y_on_gen: self.pair_y_on_gen,
             enum_fallback: self.enum_fallback,
             etd_require_oxonium: self.etd_require_oxonium,
@@ -1199,6 +1210,7 @@ fn score_spectrum_glyco(
     let gp_j = ctx.gp_j;
     let gp_h = ctx.gp_h;
     let gp_cz = ctx.gp_cz;
+    let gp_iso = ctx.gp_iso;
     let min_core_y = ctx.min_core_y;
     let min_raw_score = ctx.min_raw_score;
     let pair_y_on_gen = ctx.pair_y_on_gen;
@@ -2263,7 +2275,7 @@ fn score_spectrum_glyco(
         // exactly (the shared collapse source of truth).
         let fused_of = |e: &(GlycanWinnerKey, CheapWinner)| {
             let cy = core_y_counts[e.1.bb_hit_idx] as f32;
-            glyco_gp_fused_score(
+            glyco_gp_fused_score_iso(
                 rank_sel(&e.1),
                 ladder(&e.1),
                 cy,
@@ -2271,6 +2283,8 @@ fn score_spectrum_glyco(
                 gp_k,
                 gp_j,
                 gp_h,
+                e.1.isotope_offset,
+                gp_iso,
             ) + gp_cz * cz(&e.1)
         };
         let best = if elect_top_k == 0 {
@@ -2325,7 +2339,7 @@ fn score_spectrum_glyco(
                             .filter(|e| deduped_backbone[e.1.bb_hit_idx].glycan.is_some())
                             .map(|e| {
                                 let cy = core_y_counts[e.1.bb_hit_idx] as f32;
-                                let s = glyco_gp_fused_score(
+                                let s = glyco_gp_fused_score_iso(
                                     rank_sel(&e.1),
                                     ladder(&e.1),
                                     cy,
@@ -2333,6 +2347,8 @@ fn score_spectrum_glyco(
                                     gp_k,
                                     gp_j,
                                     gp_h,
+                                    e.1.isotope_offset,
+                                    gp_iso,
                                 ) + gp_cz * cz(&e.1);
                                 (e, s)
                             })
@@ -2391,7 +2407,7 @@ fn score_spectrum_glyco(
             .into_iter()
             .map(|e| {
                 let cy = core_y_counts[e.1.bb_hit_idx] as f32;
-                let s = glyco_gp_fused_score(
+                let s = glyco_gp_fused_score_iso(
                     rank_sel(&e.1),
                     ladder(&e.1),
                     cy,
@@ -2399,6 +2415,8 @@ fn score_spectrum_glyco(
                     gp_k,
                     gp_j,
                     gp_h,
+                    e.1.isotope_offset,
+                    gp_iso,
                 ) + gp_cz * cz(&e.1);
                 (s, e)
             })

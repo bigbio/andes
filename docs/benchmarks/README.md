@@ -604,6 +604,42 @@ depositors' own reference identifications:
 The default is worse *and* erratic: identical input gave 112 PSMs on one seed and 256 on another.
 The recommendation is in `DOCS.md` §9. Rescoring itself is the pipeline's job, not andes's.
 
+### The isotope-aware collapse (issue #79, 2026-09-11)
+
+andes called NeuGc where the pGlyco2 reference called Hex+Fuc on fucose-rich tissue.
+The two differ by 1.020401 Da against a neutron's 1.003355 — 17 mDa, or 4.8 ppm at the
+median 3,581 Da precursor, so both hypotheses fit inside a 20 ppm window and both enter
+the candidate set. The collapse comparator read no mass-error or isotope term, so it
+decided them on a Y-ladder difference of 0.04–0.20 out of 120–170, about 0.1%.
+
+Measured: of 237 such scans, 235 sat on isotope offset 1, and the reference composition
+was present in the candidate pool at offset 0 on 163 of 163 recoverable scans with a
+seven-fold better precursor residual. The fix penalises the isotope offset in the
+collapse (`--glyco-gp-iso`, default 1.0): an M+1 assignment costs an extra assumption,
+so with equal fragment evidence the candidate needing no correction wins.
+
+One binary, one variable, `--glyco-species mouse` (1,833 compositions), 32 threads:
+
+| | heart, `iso 0` | heart, **`iso 1`** | liver, `iso 0` | liver, **`iso 1`** |
+|---|---:|---:|---:|---:|
+| backbone agreement | 95.9% | 95.9% | 95.8% | 95.7% |
+| **composition agreement** | 76.2% | **80.8%** | 72.2% | **72.2%** |
+| −Hex −Fuc +NeuGc scans | 124 | **5** | 0 | 0 |
+| winners at isotope offset 1 | 275 | 88 | 263 | 214 |
+
+**Heart: the swap class falls 124 → 5 and composition agreement rises 4.6 points, +75
+scans. Liver, the control, is unchanged to the scan.** Backbone agreement does not move
+on either tissue, which is the point — the change decides between compositions at one
+backbone and must not touch peptide selection. `--glyco-gp-iso 0` reproduces the
+pre-fix ordering exactly and is the A/B baseline.
+
+Caveat on the absolute counts: the original decomposition found 237 swap scans against
+the built-in enumerator (~852 compositions), which #82 removed. This A/B runs on the
+bundled 1,833-composition mouse database, so the class is smaller in both arms. Both
+arms share the space, so the comparison holds.
+
+---
+
 ### Refuted — do not re-try without new evidence
 
 Each was measured, not argued: the matched-ion selector term `--glyco-gp-m` (every weight

@@ -132,6 +132,7 @@ pub(crate) fn run_glyco(
         gp_j: cli.glyco_gp_j,
         gp_h: cli.glyco_gp_h,
         gp_cz: cli.glyco_gp_cz,
+        gp_iso: cli.glyco_gp_iso,
         min_core_y: cli.glyco_min_core_y,
         min_raw_score: cli.glyco_min_raw_score,
         diag_splits: cli.glyco_diag_splits.clone(),

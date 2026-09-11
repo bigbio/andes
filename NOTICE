@@ -21,3 +21,10 @@ whose work has informed the field and ours:
   - a comparison engine     (Eng, Jahan & Hoopmann, Proteomics 2013)
   - a comparison search engine      (Lazear, J. Proteome Res. 2023)
   - the classic hyperscore engine  (Craig & Beavis, Bioinformatics 2004)
+
+The bundled N-glycan structure databases under `crates/andes-glyco/glycan-db/`
+are redistributed from pGlyco3 (https://github.com/pFindStudio/pGlyco3), licensed
+under the Apache License, Version 2.0. Their origin is acknowledged here to
+satisfy Apache-2.0 §4's notice requirement:
+
+  - pGlyco  (Liu et al., Nat. Commun. 2017;8:15473)

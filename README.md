@@ -60,7 +60,7 @@ flowchart TD
     SPEC["Spectra<br/>mzML · MGF · Thermo .raw · Bruker .d"] --> SEARCH
     FASTA["FASTA, targets only<br/>decoys generated for you"] --> SEARCH
     SEARCH["Search<br/>one model chosen per file<br/>candidates scored per spectrum"]
-    SEARCH --> PIN["PIN<br/>~50 features per PSM"]
+    SEARCH --> PIN["PIN<br/>one row per PSM"]
     SEARCH -->|"--glyco"| GPIN["Glyco PIN<br/>one glycoPSM per scan"]
     PIN --> PERC["Percolator<br/>owns the FDR"]
     GPIN --> PERC
@@ -70,36 +70,35 @@ flowchart TD
 Optional second passes (`--chimeric`, `--refine`) add PSMs to the same PIN; they are off by
 default. The steps below say what each box does.
 
-1. **Resolve the run.** For mzML, `.raw` and `.d`, andes reads the activation method, analyser
-   resolution and any isobaric label from the file itself and picks the nearest of the 17 bundled
-   models by `(activation, instrument, enzyme, protocol)`; the model carries its own fragment
-   tolerance. `--precursor-cal auto` then learns a systematic precursor shift from a quick
-   pre-pass and tightens the precursor window. MGF carries no metadata, so there you say it.
-2. **Candidate generation.** The FASTA is digested (one or several enzymes, missed cleavages,
-   variable mods) and decoys are generated per `--decoy-strategy`. The candidate index stays in
-   RAM or goes out-of-core (`mmap`) when it would not fit (`--candidate-index auto|ram|mmap`);
-   `auto` budgets against `min(node MemAvailable, cgroup limit)`, so a SLURM or container
-   allowance below the host's free memory is respected.
-3. **Pass 1.** Every spectrum is scored against its candidates. Low-resolution data ranks by the
-   generating-function **rank score**; high-resolution data by the fused **strong score**
-   (`--score auto`). Two GBDT ensembles add fragment-intensity and rich-ion features; 100
-   trees per ensemble is the default, measured identification-neutral against the full
-   ensembles and 33–41% faster. The result is a top-N queue per spectrum with ~50 features.
-4. **Optional second passes**, off by default and leaving the default engine unchanged:
-   **`--chimeric`** finds co-isolated precursors in the MS1 isolation window and searches the
-   residual spectrum for the second peptide; **`--refine`** (high-resolution only) opens a
-   PTM-discovery search anchored on confident proteins.
-5. **`--glyco`** is a separate pipeline: an oxonium gate, a glycan database (`--glyco-species`
-   for a bundled pGlyco one, or `--glyco-glycan-gdb` for your own), sequon-bearing backbone
-   candidates, and a per-scan collapse to one glycoPSM, written to its own
-   `results.glyco.pin`. Fractions must be pooled before Percolator, because a single file rarely
-   has enough confident targets to reach 1% at all.
-6. **Rescoring.** Pass 1 and any second-pass PSMs go into **one Percolator PIN** (plus optional
-   TSV and OpenMS-compatible QPX parquet). Percolator, run by you or by `--rescore`, does the
-   semi-supervised rescoring and the FDR; `--rescore-native` is a built-in cross-validated
-   GBDT fallback for machines without Percolator, not the production path. The benchmarks in
-   [`docs/benchmarks/`](docs/benchmarks/README.md) check the reported 1% against entrapment
-   databases where one exists; that is a benchmark measurement, not something the engine does.
+1. **Pick the model.** From mzML, `.raw` or `.d`, andes reads the activation method, analyser
+   resolution and any isobaric label out of the file and selects one of the 17 bundled models,
+   which carries its own fragment tolerance. MGF has no metadata, so there you say it.
+   `--precursor-cal auto` then learns the run's systematic precursor shift and tightens the
+   precursor window.
+2. **Build the candidates.** The FASTA is digested — one or several enzymes, missed cleavages,
+   variable mods — and decoys are generated for you. The candidate index stays in RAM, or goes
+   out-of-core when it would not fit, budgeted against the container or scheduler memory limit
+   rather than the host's free memory.
+3. **Score every spectrum.** Low-resolution data ranks by the generating-function rank score,
+   high-resolution by the fused strong score, and two GBDT ensembles add fragment-intensity
+   features. When a search is both out-of-core and high-resolution, candidates are retrieved
+   through a fragment-ion index rather than enumerated per spectrum; the engine makes that
+   choice from the data and prints it. On the phospho benchmark it is the difference between
+   164 seconds and 99 minutes.
+4. **Optional second passes**, both off by default: `--chimeric` searches the residual spectrum
+   for a co-isolated second peptide, and `--refine` opens a PTM-discovery pass anchored on
+   confident proteins.
+5. **`--glyco` is a separate pipeline**: an oxonium gate, a glycan database (`--glyco-species`
+   for a bundled pGlyco one, or `--glyco-glycan-gdb` for your own), sequon-bearing backbones,
+   and one glycoPSM per scan in its own PIN. Pool fractions before Percolator — a single file
+   rarely has enough confident targets to reach 1% at all.
+6. **Rescore.** Everything lands in one Percolator PIN, plus optional TSV and QPX parquet.
+   Percolator does the semi-supervised rescoring and the FDR, run by you or by `--rescore`.
+   `--rescore-native` is a built-in fallback for machines without Percolator, not the
+   production path.
+
+Full parameter reference: [`DOCS.md`](DOCS.md). Measurements behind every number above:
+[`docs/benchmarks/`](docs/benchmarks/README.md).
 
 ## Install
 

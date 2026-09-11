@@ -421,9 +421,13 @@ attached glycan composition together, from the same MS2 scan, without deglycosyl
 andes --spectrum sample.mzML \
       --database proteins.fasta \
       --decoy-strategy sequon-reverse \
-      --glyco \
+      --glyco --glyco-species human \
       --output-pin results.pin
 ```
+
+`--glyco` needs a glycan database. `--glyco-species` picks a bundled pGlyco one
+(`human`, `human-multi`, `mouse`, `mouse-large`, `high-mannose`); `--glyco-glycan-gdb`
+takes your own `.gdb` file instead.
 
 `--glyco` writes **only** `results.glyco.pin`. It is a standalone pipeline: the standard
 PIN, TSV, Parquet, rescore and refine outputs are all skipped, and passing

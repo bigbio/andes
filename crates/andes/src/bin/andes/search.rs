@@ -253,6 +253,15 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // binary/directory and never gzipped. Anything else is treated as MGF.
     let (is_mzml, is_raw, is_d, is_mgf) = input_format_flags(&spectrum_path);
 
+    // MUST precede every spectrum read. The EThcD labelling policy is consulted
+    // by the mzML reader itself, and the activation pre-pass below reads 64
+    // spectra: installed any later, that pre-pass sees the default (`false`),
+    // relabels EThcD as HCD, and the dominant activation that drives model
+    // selection is wrong no matter what `--ethcd-activation` said. The one-shot
+    // warning would also fire there under the wrong policy and suppress the
+    // correct message for the rest of the run.
+    input::mzml::init_ethcd_as_etd(cli.ethcd_activation == EthcdActivationFlag::Etd);
+
     // Detect (activation, instrument) from the input for auto-routing.
     // mzML peeks the file; Thermo `.raw` reads vendor metadata; Bruker `.d`
     // is always CID/TimsTOF (DDA-PASEF). Detection runs for every metadata-
@@ -636,7 +645,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         precursor_offset_clamp: cli.precursor_offset_clamp,
         density_on_active_list: cli.density_on_active_list,
     });
-    input::mzml::init_ethcd_as_etd(cli.ethcd_activation == EthcdActivationFlag::Etd);
     params.chimeric_allow_overlap = cli.chimeric_allow_overlap;
 
     params.max_missed_cleavages = if cli.glyco {

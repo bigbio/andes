@@ -102,6 +102,12 @@ pub(crate) enum CandidateIndexFlag {
 /// `train`) is given.  When no subcommand is present, `run()` validates them
 /// manually and returns an early error if they are missing.
 #[derive(Args, Debug)]
+#[command(group(
+    clap::ArgGroup::new("glycan_db")
+        .args(["glyco_glycan_gdb", "glyco_species"])
+        .multiple(false)
+        .required(false),
+))]
 pub(crate) struct SearchArgs {
     /// YAML run-configuration file. Any parameter can be set here (grouped by
     /// experiment: io/search/scoring/decoys/chimeric/refine/rescoring/glyco; see
@@ -429,10 +435,15 @@ pub(crate) struct SearchArgs {
     #[arg(long = "candidate-index", hide = true, default_value = "auto")]
     pub(crate) candidate_index: CandidateIndexFlag,
 
-    /// Glycopeptide search mode: enumerate hybrid backbone candidates (DB + de-novo
-    /// Y-ladder), filter by N-X-S/T sequon, score bare backbones, and write a
+    /// Glycopeptide search mode: retrieve glycans from the loaded database, solve
+    /// the backbone as `precursor − glycan`, filter by N-X-S/T sequon, and write a
     /// `.glyco.pin` file instead of the standard PIN. Default off.
-    #[arg(long = "glyco", default_value_t = false)]
+    ///
+    /// Requires a glycan database: `--glyco-species` for a bundled one, or
+    /// `--glyco-glycan-gdb` for your own file. The requirement is enforced at
+    /// argument-parsing time, so a missing database fails immediately rather than
+    /// after the digest, index build and spectrum load.
+    #[arg(long = "glyco", default_value_t = false, requires = "glycan_db")]
     pub(crate) glyco: bool,
 
     /// Maximum backbone candidates per spectrum in glyco mode (DB + de-novo

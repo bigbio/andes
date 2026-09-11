@@ -814,7 +814,8 @@ GLYCO=1 ./reproduce/build_databases.sh "$DATA"     # writes databases/mouse_entr
 #    plain reversal maps an N-X-S/T sequon to S/T-X-N, so reversed decoys sail through the
 #    glyco sequon gate and q-values come out anti-conservative.
 for f in MouseLiver-Z-T-1 MouseLiver-Z-T-2 MouseLiver-Z-T-3 MouseLiver-Z-T-4 MouseLiver-Z-T-5; do
-  andes --spectrum $f.raw --database "$DATA/databases/mouse_entrap.fasta" --glyco \
+  andes --spectrum $f.raw --database "$DATA/databases/mouse_entrap.fasta" \
+        --glyco --glyco-species mouse \
         --decoy-strategy sequon-reverse \
         --threads 8 --output-pin $f.pin            # writes $f.glyco.pin
 done

@@ -563,7 +563,12 @@ mod tests {
         cand_from(residual, rank_score, is_decoy, 0)
     }
 
-    fn cand_from(residual: f64, rank_score: f32, is_decoy: bool, spectrum_idx: usize) -> CalCandidate {
+    fn cand_from(
+        residual: f64,
+        rank_score: f32,
+        is_decoy: bool,
+        spectrum_idx: usize,
+    ) -> CalCandidate {
         CalCandidate {
             residual,
             rank_score,

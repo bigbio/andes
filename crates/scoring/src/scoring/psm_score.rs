@@ -23,7 +23,7 @@ use crate::scoring::strong_score::DENSITY_HW;
 use model::mass::nominal_from;
 use model::peptide::Peptide;
 
-/// Diagnostic peptide-trace filter, read once from the `Andes_TRACE_PEP`
+/// Diagnostic peptide-trace filter, read once from the `ANDES_TRACE_PEP`
 /// environment variable and memoized.
 ///
 /// Reading the variable on every `score_psm` call would acquire the global
@@ -36,7 +36,7 @@ use model::peptide::Peptide;
 /// unchanged.
 fn trace_pep_filter() -> Option<&'static String> {
     static CELL: OnceLock<Option<String>> = OnceLock::new();
-    CELL.get_or_init(|| match std::env::var("Andes_TRACE_PEP") {
+    CELL.get_or_init(|| match std::env::var("ANDES_TRACE_PEP") {
         Ok(s) if !s.is_empty() => Some(s),
         _ => None,
     })
@@ -262,7 +262,7 @@ pub fn score_psm(
     let peptide_nominal = peptide.nominal_residue_mass();
 
     // ── Optional per-split score tracing ───────────────────────────────────
-    // When `Andes_TRACE_PEP` is set and the peptide's bare residue sequence
+    // When `ANDES_TRACE_PEP` is set and the peptide's bare residue sequence
     // contains the filter substring, dump one trace line per cleavage site to
     // stderr (prefix/suffix masses, the cached node scores, the running sum).
     // The filter is read once and memoized; when unset this block is inert

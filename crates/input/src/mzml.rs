@@ -1189,8 +1189,7 @@ static ETHCD_AS_ETD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 /// Tripped the first time the policy is consulted. Installing after that point
 /// means something already read the default, which is how the activation
 /// pre-pass once relabelled every EThcD spectrum as HCD regardless of the flag.
-static ETHCD_POLICY_READ: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static ETHCD_POLICY_READ: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Install the EThcD labelling policy. Call once, BEFORE reading any spectrum —
 /// the mzML reader consults it per spectrum, and a late install silently leaves

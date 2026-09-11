@@ -54,16 +54,27 @@ fn collect(dir: &std::path::Path, out: &mut BTreeSet<String>) {
             if p.file_name().is_some_and(|n| n == "env_registry.rs") {
                 continue;
             }
-            for (i, _) in text.match_indices("\"ANDES_") {
-                let rest = &text[i + 1..];
-                if let Some(end) = rest.find('"') {
-                    let name = &rest[..end];
-                    if name
-                        .chars()
-                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-                        && name.len() > "ANDES_".len()
-                    {
-                        out.insert(name.to_string());
+            // Scan READ SITES, not name literals. The previous scan looked for
+            // an uppercase `"ANDES_` string, so a variable spelled any other way
+            // was invisible to the guard — which is how two live reads
+            // (`Andes_TRACE_IONS`, `Andes_TRACE_PEP`) sat undocumented while the
+            // docs claimed the engine reads none. Matching on `env::var(` /
+            // `env::var_os(` is what the guard is actually about, and it is
+            // immune to how the name is capitalised.
+            for pat in ["env::var(", "env::var_os("] {
+                for (i, _) in text.match_indices(pat) {
+                    let rest = &text[i + pat.len()..];
+                    let Some(open) = rest.find('"') else { continue };
+                    // Only a literal argument; a computed name is out of scope.
+                    if rest[..open].trim() != "" {
+                        continue;
+                    }
+                    let after = &rest[open + 1..];
+                    if let Some(end) = after.find('"') {
+                        let name = &after[..end];
+                        if name.to_ascii_uppercase().starts_with("ANDES_") {
+                            out.insert(name.to_string());
+                        }
                     }
                 }
             }

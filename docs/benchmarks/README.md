@@ -937,6 +937,18 @@ so no entrapment FDP is computable from it and its counts are rescored `q ≤ 0.
 
 ## 5. Known gaps
 
+- **The fragment-ion index retrieves at a much tighter window than the scorer matches at,
+  and the consequence is unmeasured.** `RankScorer::feature_match_tolerance()` returns a
+  constant 20 ppm on high-resolution data and that is what drives index retrieval, while
+  ion matching during scoring uses the model's own `mme`, which is 0.5 Da in every bundled
+  model (the wide serve window is load-bearing — re-serving high-res models at the training
+  window cost 21% of Astral identifications, which is why `--tight-highres-scoring` exists
+  only to keep that experiment repeatable). So a candidate can be credited by the scorer at
+  0.3 Da and be invisible to an index admitting 0.01 Da at m/z 500. This is a second
+  mechanism alongside the min-matched-ions decoy bias documented above, it cuts in both
+  directions, and no arm has measured it. Anyone changing the retrieval window must A/B it
+  against the enumeration path on identifications, not just on speed.
+
 - **The Astral database is ProteoBench's own file and is no longer served.** The spectra
   fetch (an earlier version of this document said they did not; that was a pagination bug
   in our script, fixed 2026-09-05), but `ProteoBenchFASTA_MixedSpecies_HYE.fasta` returns

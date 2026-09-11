@@ -136,21 +136,30 @@ fn known_peptide_appears_in_top_n() {
 #[test]
 fn top_n_capacity_respected() {
     // NoCleavage gives exactly 1 candidate per protein. Top-N cap at 1.
+    // Two anagram proteins: with NoCleavage each yields one peptide, and the two
+    // peptides have identical mass, so both are candidates for the same
+    // precursor. Without competing candidates a cap test cannot fail.
     let target = ProteinDb {
-        proteins: vec![Protein {
-            accession: "P1".into(),
-            description: "".into(),
-            sequence: b"AAAAAAAAAA".to_vec(),
-        }],
+        proteins: vec![
+            Protein {
+                accession: "P1".into(),
+                description: "".into(),
+                sequence: b"AAAAAAAAAG".to_vec(),
+            },
+            Protein {
+                accession: "P2".into(),
+                description: "".into(),
+                sequence: b"GAAAAAAAAA".to_vec(),
+            },
+        ],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
     let mut params = SearchParams::default_tryptic(aa_set);
     params.enzyme = model::Enzyme::NoCleavage;
-    params.top_n_psms_per_spectrum = 1;
     params.max_variable_mods_per_peptide = 0;
 
-    let target_residues: Vec<AminoAcid> = b"AAAAAAAAAA"
+    let target_residues: Vec<AminoAcid> = b"AAAAAAAAAG"
         .iter()
         .map(|&r| AminoAcid::standard(r).unwrap())
         .collect();
@@ -159,9 +168,41 @@ fn top_n_capacity_respected() {
     let charge = 2u8;
     let mz = (mass + charge as f64 * PROTON) / charge as f64;
 
-    let spec = make_spectrum(mz, Some(charge as i32));
-    let (queues, _candidates) = match_spectra(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
-    assert!(queues[0].len() <= 1);
+    // Peakless smoke spectra: without this the default `min_peaks = 10` skips the
+    // spectrum entirely and the assertion below runs against an empty queue,
+    // which is what made this test pass with no cap in place at all.
+    params.min_peaks = 0;
+
+    let run = |top_n: u32| {
+        let mut p = params.clone();
+        p.top_n_psms_per_spectrum = top_n;
+        let spec = make_spectrum(mz, Some(charge as i32));
+        let (queues, _candidates) = match_spectra(&[spec], &idx, &p, &tiny_scorer(), 0.05, "XXX");
+        queues.into_iter().next().unwrap().into_sorted_vec()
+    };
+
+    // Both anagrams are scored, so there is a real competition to cap.
+    let uncapped = run(5);
+    assert!(
+        uncapped.len() > 1,
+        "fixture must produce competing candidates for the cap to mean anything, got {}",
+        uncapped.len()
+    );
+
+    // At capacity the queue deliberately RETAINS rank_score ties (Kim et al.,
+    // Nat Commun 5:5277 — see the merge comment in match_engine.rs), so the
+    // guarantee is not "exactly one row" but "nothing below the best score
+    // survives". A peakless fixture scores every candidate identically, which is
+    // why this is the invariant available here; a cap that stopped working would
+    // let a strictly worse PSM through.
+    let capped = run(1);
+    assert!(!capped.is_empty(), "top_n = 1 must keep at least one PSM");
+    let best = capped[0].rank_score;
+    assert!(
+        capped.iter().all(|p| p.rank_score == best),
+        "top_n = 1 retained a PSM below the best score: {:?}",
+        capped.iter().map(|p| p.rank_score).collect::<Vec<_>>()
+    );
 }
 
 #[test]

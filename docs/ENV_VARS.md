@@ -5,9 +5,10 @@ the build, and an entry the code no longer reads fails it too.
 
 ## Policy
 
-**The engine reads no environment variables.** Everything that affects a search — or a
+**No environment variable changes a search result.** Everything that affects a search — or a
 model-training run — is a CLI flag with a documented default, so a result can be
-reproduced from the command line that produced it.
+reproduced from the command line that produced it. Two read-only trace switches remain in
+the engine; they write diagnostic output and change nothing else.
 
 Environment variables were removed because they are invisible in `--help`, untyped,
 unvalidated, and easy to tune around and then forget. This codebase re-tuned selector
@@ -20,11 +21,14 @@ reach hot inner functions are installed once at startup from validated CLI input
 (`ScoringSettings`, `CzSettings`, `init_y_max_charge`, `init_ethcd_as_etd`,
 `init_dense_noise`) rather than read from the environment on each call.
 
-What remains below is limited to **test-harness variables**, which select optional
-fixtures at `cargo test` time and are never read by the shipped binary.
+What remains below is the complete set: two **engine trace** switches, which only enable
+diagnostic logging, and **test-harness variables**, which select optional fixtures at
+`cargo test` time and are never read by the shipped binary.
 
 | Variable | Kind | Defined at |
 | --- | --- | --- |
+| `ANDES_TRACE_IONS` | engine trace (logging only) | `crates/scoring/src/scoring/scored_spectrum.rs:60` |
+| `ANDES_TRACE_PEP` | engine trace (logging only) | `crates/scoring/src/scoring/psm_score.rs:39` |
 | `ANDES_GBDT_DIR` | test-harness | `crates/scoring/tests/gbdt_bench.rs:17` |
 | `ANDES_GLYCO_GDB` | test-harness | `crates/andes-glyco/src/glycan_first.rs:714` |
 | `ANDES_GLYCO_MGF` | test-harness | `crates/andes-glyco/tests/glycan_first_mouse.rs:77` |

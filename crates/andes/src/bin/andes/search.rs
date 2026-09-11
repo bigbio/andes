@@ -1836,6 +1836,21 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     } else if cli.rescore_native {
         (false, true)
     } else {
+        // Say so. A threshold that silently does nothing is the same defect shape
+        // as a flag that is parsed and never read.
+        if cli.fdr.is_some() || cli.pep.is_some() {
+            let which = match (cli.fdr.is_some(), cli.pep.is_some()) {
+                (true, true) => "--fdr and --pep",
+                (true, false) => "--fdr",
+                _ => "--pep",
+            };
+            eprintln!(
+                "WARN: {which} set without --rescore or --rescore-native, so no rescoring \
+                 runs and no filtered .tsv is written. andes does not compute FDR on its \
+                 own; the PIN is written for Percolator. Add --rescore to run Percolator \
+                 in-process."
+            );
+        }
         (false, false)
     };
     let rescore_map: Option<std::collections::HashMap<String, output::PercolatorPsm>> =

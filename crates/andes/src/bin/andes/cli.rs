@@ -839,18 +839,22 @@ pub(crate) struct SearchArgs {
     pub(crate) rescore_native: bool,
 
     /// FDR (q-value) threshold for the filtered `<stem>.q<fdr>.tsv` output
-    /// (target PSMs at q ≤ this). Setting it EXPLICITLY without `--rescore` /
-    /// `--rescore-native` TRIGGERS rescoring and auto-picks the backend:
-    /// Percolator if one is available, otherwise the built-in native rescorer.
-    /// When rescoring runs, the threshold defaults to 0.01 if unset.
+    /// (target PSMs at q ≤ this).
+    ///
+    /// This is a THRESHOLD, not a switch: it does nothing on its own. andes does
+    /// not compute FDR unless you ask it to, because doing so would silently
+    /// launch Percolator or the non-production native rescorer. Pair it with
+    /// `--rescore` (Percolator) or `--rescore-native`. Setting it alone warns and
+    /// writes no filtered output. Defaults to 0.01 when rescoring does run.
     #[arg(long = "fdr", value_parser = parse_unit_fraction)]
     pub(crate) fdr: Option<f64>,
 
     /// Optional per-PSM PEP (posterior error probability / local FDR) cap,
     /// applied IN ADDITION to `--fdr` (a PSM must pass both q ≤ `--fdr` AND
     /// PEP ≤ `--pep`). The q-value stays the primary set-level FDR control;
-    /// `--pep` is a supplementary per-PSM gate. Like `--fdr`, setting it
-    /// explicitly triggers rescoring. Default: no PEP cap.
+    /// `--pep` is a supplementary per-PSM gate. Like `--fdr` it is a threshold
+    /// only: it does nothing without `--rescore` / `--rescore-native`.
+    /// Default: no PEP cap.
     #[arg(long = "pep", hide = true, value_parser = parse_unit_fraction)]
     pub(crate) pep: Option<f64>,
 

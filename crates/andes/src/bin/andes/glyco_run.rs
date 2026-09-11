@@ -130,6 +130,7 @@ pub(crate) fn run_glyco(
         retrieval_tol_ppm: retrieval_ppm,
         retrieval_tol_da: cli.glyco_retrieval_tol_da,
         max_pf: cli.glyco_max_pf,
+        full_glycan_db: cli.glyco_full_glycan_db,
         debug: cli.debug_glyco,
         // Single-file only: cross-file pairing is unsound (see guard above).
         hcd_pair: cli.glyco_hcd_pair && spectrum_paths.len() == 1,

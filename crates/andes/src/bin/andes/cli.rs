@@ -770,6 +770,12 @@ pub(crate) struct SearchArgs {
     #[arg(long = "glyco-max-pf", hide = true, default_value_t = 1024usize)]
     pub(crate) glyco_max_pf: usize,
 
+    /// Replace the peptide-first b/y fragment-index fallback with a mass-driven
+    /// full-glycan-list DB branch (glycan-first recovery for weak-core-Y spectra).
+    /// A/B flag; default OFF keeps the shipped peptide-first path.
+    #[arg(long = "glyco-full-glycan-db", hide = true, default_value_t = false)]
+    pub(crate) glyco_full_glycan_db: bool,
+
     /// Diagnostic glyco mode: emit ALL candidate rows per scan (including de-novo
     /// mass-residual hits). The resulting PIN is for inspection ONLY and must never
     /// be fed to an FDR tool. Hidden dev flag.

@@ -123,6 +123,14 @@ pub struct GlycoConfig {
     pub retrieval_tol_da: Option<f64>,
     /// Max peptide-first candidates kept per spectrum.
     pub max_pf: usize,
+    /// Replace the peptide-first b/y fragment-index fallback with a mass-driven
+    /// full-glycan-list DB branch (`--glyco-full-glycan-db`, default OFF). When
+    /// on, every glycan in the list is enumerated as `backbone = precursor −
+    /// glycan` and matched to peptides by mass (phase-1 bucket index) instead of
+    /// enumerating peptides by b/y ions. This is the glycan-first recovery path
+    /// for weak-core-Y spectra; the core-Y==0 prefilter still gates spurious
+    /// backbones. A/B flag — default keeps the shipped peptide-first path.
+    pub full_glycan_db: bool,
     /// Diagnostic mode (`--debug-glyco`): emit ALL candidate rows per scan
     /// (including de-novo mass-residual hits) instead of the honest top-1 collapse.
     /// A debug PIN must NEVER be fed to an FDR tool.
@@ -191,6 +199,7 @@ impl Default for GlycoConfig {
             retrieval_tol_ppm: None,
             retrieval_tol_da: None,
             max_pf: 1024,
+            full_glycan_db: false,
             hcd_pair: false,
             etd_rank_glycan: false,
             cz_gate: true,
@@ -623,6 +632,8 @@ pub struct GlycoScoreCtx<'a> {
     pub effective_top_k: usize,
     pub max_peptide_first: usize,
     pub peptide_first_on: bool,
+    /// See `GlycoConfig::full_glycan_db`.
+    pub full_glycan_db: bool,
     /// See `GlycoConfig::sialic_oxonium_min_frac`.
     pub sialic_oxonium_min_frac: f32,
     /// `gp` fused-selector weights (`rank + K·ladder + J·core_y + H·hyper`).
@@ -699,6 +710,7 @@ pub struct GlycoCtxOwned {
     effective_top_k: usize,
     max_peptide_first: usize,
     peptide_first_on: bool,
+    full_glycan_db: bool,
     sialic_oxonium_min_frac: f32,
     gp_k: f32,
     gp_j: f32,
@@ -737,6 +749,7 @@ impl GlycoCtxOwned {
         // Peptide-first fragment-index candidate generation is always on under the
         // shipped gp selector (it is the high-charge-glycopeptide recall path).
         let peptide_first_on = true;
+        let full_glycan_db = cfg.full_glycan_db;
         let hcd_pair_on = cfg.hcd_pair;
         let etd_rank_glycan = cfg.etd_rank_glycan;
         let cz_gate = cfg.cz_gate;
@@ -851,7 +864,10 @@ impl GlycoCtxOwned {
         // glycopeptides (z4/z5+, whose b/y land at +2/+3) can select their peptide.
         // Default 2 (+1/+2); 1 = legacy +1-only. Clamped 1..=3 in the index.
         let pf_charge: u8 = cfg.pf_charge;
-        let frag_index = if !peptide_first_on {
+        // `--glyco-full-glycan-db` never calls `frag_index.query` (the
+        // peptide-first path is skipped), so skip building the ~1.5 GB
+        // b/y postings index entirely — it is the dominant `idx_build` cost.
+        let frag_index = if !peptide_first_on || full_glycan_db {
             FragmentIndex::build(
                 std::iter::empty::<(u32, &model::peptide::Peptide)>(),
                 fragment_tolerance_da.max(0.01),
@@ -951,6 +967,7 @@ impl GlycoCtxOwned {
             effective_top_k,
             max_peptide_first,
             peptide_first_on,
+            full_glycan_db,
             sialic_oxonium_min_frac,
             gp_k,
             gp_j,
@@ -1003,6 +1020,7 @@ impl GlycoCtxOwned {
             effective_top_k: self.effective_top_k,
             max_peptide_first: self.max_peptide_first,
             peptide_first_on: self.peptide_first_on,
+            full_glycan_db: self.full_glycan_db,
             sialic_oxonium_min_frac: self.sialic_oxonium_min_frac,
             gp_k: self.gp_k,
             gp_j: self.gp_j,
@@ -1132,6 +1150,7 @@ fn score_spectrum_glyco(
     let effective_top_k = ctx.effective_top_k;
     let max_peptide_first = ctx.max_peptide_first;
     let peptide_first_on = ctx.peptide_first_on;
+    let full_glycan_db = ctx.full_glycan_db;
     // `gp` fused-selector weights, hoisted into the ctx (built once). `gp_k` scales
     // the ladder term against the b/y rank in `glyco_gp_fused_score`.
     let gp_k = ctx.gp_k;
@@ -1365,7 +1384,18 @@ fn score_spectrum_glyco(
     // diagnostic ion evidence). Glycan ids are indices into `glycan_list`.
     let reported_charge = spec.precursor_charge.filter(|&z| z > 0).unwrap_or(2) as u8;
     let reported_neutral = (spec.precursor_mz - PROTON) * reported_charge as f64 - H2O;
-    let restricted_glycans: Vec<GlycanComp> = if ox_ev.fired {
+    // Glycan-first DB-branch source. Default: narrow the full glycan list to the
+    // top candidate glycans retrieved by the ion index (Y-complementary +
+    // diagnostic ion evidence), then recover weak-core-Y spectra via the
+    // peptide-first fragment index. `--glyco-full-glycan-db` instead enumerates
+    // the FULL glycan list mass-driven (backbone = precursor − glycan → peptide
+    // by mass in phase-1), which is the glycan-first recovery path and makes the
+    // peptide-first b/y fallback redundant; the core-Y==0 prefilter still gates
+    // spurious backbones.
+    let restricted_glycans: Vec<GlycanComp> = if full_glycan_db {
+        // Skip the ion-index pre-filter entirely — the full list is the source.
+        Vec::new()
+    } else if ox_ev.fired {
         // `search_glycans` takes the NEUTRAL precursor mass M = peptide_neutral +
         // Σ(glycan residues) — i.e. `reported_neutral + H2O`, NOT the residue
         // convention. Passing `reported_neutral` alone would shift every
@@ -1385,10 +1415,11 @@ fn score_spectrum_glyco(
     } else {
         Vec::new()
     };
-    // No fallback to the full list: the glycan-first ion index is the sole glycan
-    // source (the peptide-first fragment index recovers weak-glycan-fragment
-    // spectra via peptide b/y instead). This is the "backbone-first removed" path.
-    let effective_glycans: &[GlycanComp] = &restricted_glycans;
+    let effective_glycans: &[GlycanComp] = if full_glycan_db && ox_ev.fired {
+        glycan_list
+    } else {
+        &restricted_glycans
+    };
 
     // Glycan-first: the glycan is identified by its fragment ions (ion index),
     // then the peptide is searched as `backbone = precursor − glycan` for each
@@ -1422,14 +1453,13 @@ fn score_spectrum_glyco(
             }
         }
     }
-
     // PEPTIDE-FIRST union: for oxonium-positive spectra, ask the fragment
     // index which sequon peptides actually have b/y support, then keep the
     // ones whose glycan-by-subtraction hits a known glycan across the same
     // charge/isotope grid. These backbones are selected by PEPTIDE evidence
     // (works when core-Y is weak/absent), and the glycan filter keeps the
     // count small — a handful of high-quality candidates per spectrum.
-    if peptide_first_on && ox_ev.fired {
+    if peptide_first_on && ox_ev.fired && !full_glycan_db {
         // Process strongest-b/y-support peptides first, but cap on VALID
         // (peptide, charge, isotope, glycan) hypotheses — NOT raw b/y
         // count — so high-count peptides that cannot form a known glycan
@@ -2744,11 +2774,12 @@ pub fn glyco_search_run(
     );
     let ctx = owned.as_ctx(prepared, glycan_list, tol_ppm, spectra, &hcd_partner);
 
-    spectra
+    let out: Vec<GlycoSpectrumResult> = spectra
         .par_iter()
         .enumerate()
         .filter_map(|(spec_idx, spec)| score_spectrum_glyco(spec_idx, spec, &ctx))
-        .collect()
+        .collect();
+    out
 }
 
 #[cfg(test)]

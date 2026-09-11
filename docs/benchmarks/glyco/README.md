@@ -17,6 +17,7 @@ does that. They prepare its input and interpret its output.
 | `compare_preperc.py` | Pre-Percolator A/B: RawScore target/decoy AUC, and the decoy-counting "2× rule" (`FDR = 2D/(D+T)` on RawScore, factor 2 because the `sequon-reverse` decoy is 1:1). This is the exact script behind the "targets @ 1% FDR (2× rule)" and "RawScore AUC" columns. |
 | `build_entrap.py` | Appends an unrelated proteome (yeast / E. coli) to the search FASTA as **targets**. Any glyco ID landing there is false by construction. Writes targets only — run andes with `--decoy-strategy sequon-reverse` so the decoys are built correctly for the whole database. |
 | `eval_entrap.py` | Counts the entrapment hits that survive the q-value cut and reports the false-discovery proportion, with a conservative/optimistic verdict against the nominal threshold. |
+| `compare_engines.py` | Cross-engine set comparison on `MouseLiver-Z-T-1` (PXD031032): normalises Glyco-Decipher / StrucGP / Byonic / pGlyco 2.0 / MSFragger-Glyco / andes to a canonical `(HexNAc,Hex,Fuc,NeuAc,NeuGc)` composition + bare peptide, then reports per-engine counts and pairwise Jaccard overlap. Produces `cross_engine_pxd031032.md`. |
 
 ## Two rules these scripts encode
 

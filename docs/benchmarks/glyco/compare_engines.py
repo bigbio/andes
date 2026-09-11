@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Cross-engine glycopeptide set comparison (PXD031032 / PXD005553, MouseLiver-Z-T-1).
 
-Normalises five engines to a canonical glycan composition `(HexNAc, Hex, Fuc,
+Normalises six engines to a canonical glycan composition `(HexNAc, Hex, Fuc,
 NeuAc, NeuGc)` and a bare peptide sequence (flanking residues, modification
 masses and the glycan tag stripped), then reports (a) the distinct
 (peptide, composition) count per engine and (b) the pairwise overlap / Jaccard.
@@ -12,6 +12,8 @@ produced by andes except the andes PIN + native-rescore PSMs:
   * StrucGP         *_result_StrucGP.xlsx        (all rows)
   * Byonic          *.raw_*_Byonic.xlsx          (Score >= 300)
   * pGlyco 2.0      *-FDR.txt                    (TotalFDR <= 0.01, target only)
+  * MSFragger-Glyco Mouse_MSFragger-Glyco_*_psm.tsv (Expectation <= 0.01, Delta
+                       Mass -> gdb composition within 0.02 Da)
   * andes           <stem>.glyco.pin + native-rescore .psms (q <= 0.01)
 """
 import csv, re, json, collections
@@ -24,6 +26,8 @@ CONFIG = {
     'StrucGP':        '/tmp/pxd031032_ref/MouseLiver-Z-T-1_result_StrucGP.xlsx',
     'Byonic':         '/tmp/pxd031032_ref/MouseLiver-Z-T-1.raw_20210216_Byonic.xlsx',
     'pGlyco2':        '/tmp/pxd031032_ref/MouseLiver-Z-T-1-FDR.txt',
+    'MSFragger':      '/tmp/pxd031032_ref/Mouse_MSFragger-Glyco_GlyTouCan_psm.tsv',
+    'gdb':            '/home/daichengxin/benchmark/pro/pGlyco-N-Mouse.gdb',
     'andes_pin':      '/tmp/andes_mouse/z1_full_gdb.glyco.pin',
     'andes_psms':     '/tmp/andes_mouse/z1_full_gdb.psms',
     'out':            '/tmp/final_comparison.json',
@@ -58,8 +62,9 @@ def parse_comp_pglyco(s):
     return (hn,hex_,f,a,g)
 
 def acc(prot):
-    m=re.search(r'\|([A-Za-z0-9_]+)\|', prot)
-    return m.group(1) if m else prot
+    m=re.search(r'\|([^|]+)\|', prot)
+    a=m.group(1) if m else prot
+    return re.sub(r'-\d+$', '', a)  # UniProt isoform -> canonical accession
 
 def acc_strucgp(prot): return prot  # already accession
 
@@ -177,7 +182,55 @@ def load_andes(pin_path, psms_path, qmax=0.01):
             andes.append((pseq, gc, a))
     return andes, n_entrap
 
+# 5. MSFragger-Glyco: the export carries the glycan ONLY as a "Delta Mass"
+#    (residue-sum mass, no water subtracted), so we map it back to a canonical
+#    composition via the pGlyco-N-Mouse.gdb composition space. Expectation is
+#    the FDR proxy (the file has no glycan q-value / no decoys).
+def _gdb_comp_masses(gdb):
+    M={'H':162.052824,'N':203.079373,'F':146.057909,'A':291.095417,'G':307.090607}
+    comps=set()
+    with open(gdb) as f:
+        f.readline()
+        for line in f:
+            c=collections.Counter(ch for ch in line.strip() if ch in 'HNFAG')
+            if c: comps.add((c['N'],c['H'],c['F'],c['A'],c['G']))
+    items=sorted((round(M['N']*t[0]+M['H']*t[1]+M['F']*t[2]+M['A']*t[3]+M['G']*t[4],5),t) for t in comps)
+    return [m for m,_ in items], items
+
+def load_msfragger(tsv, gdb, tissue='MouseLiver-Z-T-1', emax=1e-2, tol=0.02):
+    import bisect
+    masses, items = _gdb_comp_masses(gdb)
+    C13=1.003355  # one ^13C: MSFragger reports M+1/M+2 precursors as their own rows
+    def lookup(dm):
+        lo=bisect.bisect_left(masses, dm-tol); hi=bisect.bisect_right(masses, dm+tol)
+        cand=items[lo:hi]
+        if not cand: return None
+        cand.sort(key=lambda x: abs(x[0]-dm))
+        return cand[0][1]
+    rows=[]; prots=set()
+    with open(tsv, encoding='utf-8', errors='replace') as f:
+        r=csv.reader(f, delimiter='\t'); hdr=next(r)
+        ci={h:i for i,h in enumerate(hdr)}
+        si=ci['Spectrum']; pi=ci['Peptide']; di=ci['Delta Mass']; ei=ci['Expectation']; pri=ci['Protein']
+        for row in r:
+            if len(row)<=max(si,pi,di,ei,pri): continue
+            if not row[si].startswith(tissue): continue
+            try:
+                if float(row[ei])>emax: continue
+                dm=float(row[di])
+            except (ValueError,TypeError): continue
+            if abs(dm)<400: continue          # non-glycosylated peptide
+            comp=None
+            for shift in (0.0,-C13,-2*C13,C13):
+                comp=lookup(dm+shift)
+                if comp is not None: break
+            if comp is None: continue
+            rows.append((row[pi].strip(), comp, acc(row[pri]))); prots.add(acc(row[pri]))
+    return rows, prots
+
 andes_rows, n_entrap = load_andes(CONFIG['andes_pin'],CONFIG['andes_psms'],0.01)
+ms_rows, ms_prots = load_msfragger(CONFIG['MSFragger'], CONFIG['gdb'])
+ref['MSFragger']={'gps':set((p,g) for p,g,_ in ms_rows),'prots':ms_prots,'n':len(ms_rows)}
 andes_gps=set((p,g) for p,g,_ in andes_rows)
 andes_prots=set(a for _,_,a in andes_rows)
 andes_prots_noentrap=set(a for _,_,a in andes_rows if not a.startswith('ENTRAP_'))
@@ -185,15 +238,15 @@ andes_prots_noentrap=set(a for _,_,a in andes_rows if not a.startswith('ENTRAP_'
 print("="*72)
 print("MouseLiver-Z-T-1  |  unique intact glycopeptides (peptide + glycan composition)")
 print("="*72)
-allnames=['Glyco-Decipher','StrucGP','Byonic','pGlyco2','andes']
-for nm in ['Glyco-Decipher','StrucGP','Byonic','pGlyco2']:
+allnames=['Glyco-Decipher','StrucGP','Byonic','pGlyco2','MSFragger','andes']
+for nm in ['Glyco-Decipher','StrucGP','Byonic','pGlyco2','MSFragger']:
     print(f"  {nm:16s}  {len(ref[nm]['gps']):5d}  glycopeptides   (PSM rows: {ref[nm]['n']})   proteins: {len(ref[nm]['prots'])}")
 print(f"  {'andes (1% FDR)':16s}  {len(andes_gps):5d}  glycopeptides   (PSM rows: {len(andes_rows)})   proteins: {len(andes_prots)} (excl ENTRAP: {len(andes_prots_noentrap)})")
 print(f"\n  [andes entrapment-mapped rows at 1% FDR: {n_entrap}]")
 
 # overlap (peptide,glycan)
 print("\n=== pairwise overlap on (peptide, glycan comp) ===")
-sets={'Glyco-Decipher':ref['Glyco-Decipher']['gps'],'StrucGP':ref['StrucGP']['gps'],'Byonic':ref['Byonic']['gps'],'pGlyco2':ref['pGlyco2']['gps'],'andes':andes_gps}
+sets={'Glyco-Decipher':ref['Glyco-Decipher']['gps'],'StrucGP':ref['StrucGP']['gps'],'Byonic':ref['Byonic']['gps'],'pGlyco2':ref['pGlyco2']['gps'],'MSFragger':ref['MSFragger']['gps'],'andes':andes_gps}
 for i in range(len(allnames)):
     for j in range(i+1,len(allnames)):
         a=allnames[i]; b=allnames[j]
@@ -202,7 +255,7 @@ for i in range(len(allnames)):
 
 # protein overlap
 print("\n=== protein overlap ===")
-psets={'Glyco-Decipher':ref['Glyco-Decipher']['prots'],'StrucGP':ref['StrucGP']['prots'],'Byonic':ref['Byonic']['prots'],'pGlyco2':ref['pGlyco2']['prots'],'andes':andes_prots_noentrap}
+psets={'Glyco-Decipher':ref['Glyco-Decipher']['prots'],'StrucGP':ref['StrucGP']['prots'],'Byonic':ref['Byonic']['prots'],'pGlyco2':ref['pGlyco2']['prots'],'MSFragger':ref['MSFragger']['prots'],'andes':andes_prots_noentrap}
 for i in range(len(allnames)):
     for j in range(i+1,len(allnames)):
         a=allnames[i]; b=allnames[j]

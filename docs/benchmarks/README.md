@@ -588,13 +588,37 @@ model and the feature distributions differ between fragmentation chemistries.
 
 
 
+### How to run Percolator on a glyco PIN (2026-09-10)
+
+A glycopeptide run accepts far fewer PSMs than a standard search, so Percolator's default
+training threshold leaves too few positives to fit on. Measured on a pooled human-plasma glyco
+PIN — one variable, identical rows, five Percolator seeds per arm, agreement counted against the
+depositors' own reference identifications:
+
+| `--trainFDR` | PSMs @1% | agreeing with the reference |
+|---|---:|---:|
+| 0.01 (default) | 210.6 ± 50.9 | 171.0 ± 37.6 |
+| **0.05** | **384.6 ± 19.9** | **301.4 ± 11.1** |
+| 0.10 | 348.8 ± 9.6 | 283.2 ± 6.1 |
+
+The default is worse *and* erratic: identical input gave 112 PSMs on one seed and 256 on another.
+The recommendation is in `DOCS.md` §9. Rescoring itself is the pipeline's job, not andes's.
+
 ### Refuted — do not re-try without new evidence
 
 Each was measured, not argued: the matched-ion selector term `--glyco-gp-m` (every weight
 worse, and the selection buckets do not move); the two-stage split election
 (fewer correct identifications at higher error); generation-side expansion in general —
 wider glycan box, two-axis Y retention, isobar resolution all moved yield **down**; and the
-oxonium gate as an explanation for unemitted spectra (it fires for 33 of the 34).
+oxonium gate as an explanation for unemitted spectra (it fires for 33 of the 34). Added 2026-09-10: **filtering low-information rows out of
+the glyco PIN before Percolator.** The gate tested was the best available on paper — keep only
+scans with at least 40 peaks, which retains 97.1% of reference-bearing rows while dropping 69% of
+all rows, strictly dominating a RawScore floor on both axes. Same PIN, same Percolator settings,
+five seeds: ungated 384.6 ± 19.9 PSMs and 301.4 ± 11.1 agreeing, gated 270.6 ± 139.2 and
+222.8 ± 113.2, with one seed returning zero. The low-scoring rows are close to an even
+target/decoy mix and Percolator needs them to place a threshold, so removing them starves the fit.
+This also retires the emission-floor line of work for this data: the instability it was invented
+to cure is cured better by the training threshold above.
 
 ---
 

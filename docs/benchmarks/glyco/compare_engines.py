@@ -143,6 +143,12 @@ with open(CONFIG['pGlyco2']) as f:
 ref['pGlyco2']={'gps':set((p,g) for p,g,_ in pg),'prots':set(x[2] for x in pg),'n':len(pg)}
 
 # 4. andes: read pin + psms q-values
+def is_entrapment(accession):
+    """Entrapment proteins cannot be present in the sample, so anything mapping to one
+    is known-false. One predicate, used for both the count and the exclusions."""
+    return accession.startswith('ENTRAP_') or 'ENTRAP' in accession
+
+
 def load_andes(pin_path, psms_path, qmax=0.01):
     # q-values by SpecId
     q={}
@@ -177,7 +183,7 @@ def load_andes(pin_path, psms_path, qmax=0.01):
             if not gm: continue
             gc=parse_comp_andes(gm.group(1))
             a=acc(prot)
-            is_entrap = a.startswith('ENTRAP_') or 'ENTRAP' in a
+            is_entrap = is_entrapment(a)
             if is_entrap: n_entrap+=1
             andes.append((pseq, gc, a))
     return andes, n_entrap
@@ -231,9 +237,12 @@ def load_msfragger(tsv, gdb, tissue='MouseLiver-Z-T-1', emax=1e-2, tol=0.02):
 andes_rows, n_entrap = load_andes(CONFIG['andes_pin'],CONFIG['andes_psms'],0.01)
 ms_rows, ms_prots = load_msfragger(CONFIG['MSFragger'], CONFIG['gdb'])
 ref['MSFragger']={'gps':set((p,g) for p,g,_ in ms_rows),'prots':ms_prots,'n':len(ms_rows)}
-andes_gps=set((p,g) for p,g,_ in andes_rows)
+# Entrapment hits are known-false by construction and no other engine searched an
+# entrapment database, so they must not inflate the headline count.
+andes_gps=set((p,g) for p,g,a in andes_rows if not is_entrapment(a))
+andes_gps_with_entrap=set((p,g) for p,g,_ in andes_rows)
 andes_prots=set(a for _,_,a in andes_rows)
-andes_prots_noentrap=set(a for _,_,a in andes_rows if not a.startswith('ENTRAP_'))
+andes_prots_noentrap=set(a for _,_,a in andes_rows if not is_entrapment(a))
 
 print("="*72)
 print("MouseLiver-Z-T-1  |  unique intact glycopeptides (peptide + glycan composition)")
@@ -241,7 +250,8 @@ print("="*72)
 allnames=['Glyco-Decipher','StrucGP','Byonic','pGlyco2','MSFragger','andes']
 for nm in ['Glyco-Decipher','StrucGP','Byonic','pGlyco2','MSFragger']:
     print(f"  {nm:16s}  {len(ref[nm]['gps']):5d}  glycopeptides   (PSM rows: {ref[nm]['n']})   proteins: {len(ref[nm]['prots'])}")
-print(f"  {'andes (1% FDR)':16s}  {len(andes_gps):5d}  glycopeptides   (PSM rows: {len(andes_rows)})   proteins: {len(andes_prots)} (excl ENTRAP: {len(andes_prots_noentrap)})")
+print(f"  {'andes (1% FDR)':16s}  {len(andes_gps):5d}  glycopeptides   (PSM rows: {len(andes_rows)-n_entrap})   proteins: {len(andes_prots_noentrap)}")
+print(f"  {'':16s}  {len(andes_gps_with_entrap):5d}  including entrapment   (PSM rows: {len(andes_rows)})   proteins: {len(andes_prots)})")
 print(f"\n  [andes entrapment-mapped rows at 1% FDR: {n_entrap}]")
 
 # overlap (peptide,glycan)

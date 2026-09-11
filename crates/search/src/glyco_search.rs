@@ -1137,6 +1137,44 @@ pub fn isotope_window_for(
     }
 }
 
+/// Which glycan set the DB branch sees for one (charge, isotope) hypothesis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlycanSource {
+    /// Every glycan in the loaded database, matched by mass.
+    FullList,
+    /// The subset the Y-complementary ion index retrieves for this spectrum.
+    IonIndex,
+    /// No glycan candidates: the spectrum carries no evidence of being a glycopeptide.
+    None,
+}
+
+/// Decide the glycan source. Pure, so the ETD rule below is testable.
+///
+/// HCD/CID strips the glycan and produces oxonium ions, so their absence there is
+/// real evidence that a scan is not a glycopeptide. ETD/EThcD cleaves the peptide
+/// backbone instead and can identify a glycopeptide with no oxonium at all, so the
+/// same absence means nothing — withholding candidates from those scans removes
+/// every answer they could have had. `--glyco-etd-require-oxonium` restores the
+/// strict behaviour for runs that want it.
+pub fn glycan_source(
+    full_glycan_db: bool,
+    oxonium_fired: bool,
+    is_etd: bool,
+    etd_require_oxonium: bool,
+) -> GlycanSource {
+    if is_etd && !oxonium_fired && !etd_require_oxonium {
+        return GlycanSource::FullList;
+    }
+    if !oxonium_fired {
+        return GlycanSource::None;
+    }
+    if full_glycan_db {
+        GlycanSource::FullList
+    } else {
+        GlycanSource::IonIndex
+    }
+}
+
 fn score_spectrum_glyco(
     spec_idx: usize,
     spec: &Spectrum,
@@ -1425,7 +1463,21 @@ fn score_spectrum_glyco(
             // matches at offset ±1 and silently defeats the sweep. The
             // `--glyco-full-glycan-db` path is unaffected: it enumerates the full
             // list, so `db_branch` sees every glycan at every offset.
-            let restricted_glycans: Vec<GlycanComp> = if full_glycan_db || !ox_ev.fired {
+            // ETD/EThcD fragments the peptide backbone, not the glycan, so a
+            // scan can carry a glycopeptide and show no oxonium ions at all. The
+            // oxonium gate is therefore not evidence of absence on this
+            // activation, and withholding the DB branch from such a scan removes
+            // every glycan candidate it could ever have. Fall back to the full
+            // list, mass-driven, unless `--glyco-etd-require-oxonium` says the
+            // run wants the stricter behaviour. HCD/CID is unaffected: there the
+            // absence of oxonium is real evidence.
+            let source = glycan_source(
+                full_glycan_db,
+                ox_ev.fired,
+                gen_is_etd,
+                ctx.etd_require_oxonium,
+            );
+            let restricted_glycans: Vec<GlycanComp> = if source != GlycanSource::IonIndex {
                 Vec::new()
             } else {
                 // `search_glycans` takes the NEUTRAL precursor mass M = peptide +
@@ -1447,10 +1499,9 @@ fn score_spectrum_glyco(
                     .filter_map(|c| glycan_list.get(c.glycan_id as usize).cloned())
                     .collect()
             };
-            let effective_glycans: &[GlycanComp] = if full_glycan_db && ox_ev.fired {
-                glycan_list
-            } else {
-                &restricted_glycans
+            let effective_glycans: &[GlycanComp] = match source {
+                GlycanSource::FullList => glycan_list,
+                GlycanSource::IonIndex | GlycanSource::None => &restricted_glycans,
             };
             for h in db_branch(precursor_neutral, effective_glycans, 500.0, z, iso, sialic_gate) {
                 all_backbone.push(h);
@@ -2785,6 +2836,50 @@ pub fn glyco_search_run(
         .filter_map(|(spec_idx, spec)| score_spectrum_glyco(spec_idx, spec, &ctx))
         .collect();
     out
+}
+
+#[cfg(test)]
+mod glycan_source_tests {
+    use super::{glycan_source, GlycanSource};
+
+    // HCD/CID: the oxonium gate is real evidence, both directions.
+    #[test]
+    fn hcd_with_oxonium_uses_the_ion_index() {
+        assert_eq!(glycan_source(false, true, false, false), GlycanSource::IonIndex);
+    }
+
+    #[test]
+    fn hcd_without_oxonium_gets_nothing() {
+        assert_eq!(glycan_source(false, false, false, false), GlycanSource::None);
+    }
+
+    // ETD: absence of oxonium is not evidence of absence, so candidates survive.
+    #[test]
+    fn etd_without_oxonium_falls_back_to_the_full_list() {
+        assert_eq!(glycan_source(false, false, true, false), GlycanSource::FullList);
+    }
+
+    #[test]
+    fn etd_require_oxonium_restores_the_strict_behaviour() {
+        assert_eq!(glycan_source(false, false, true, true), GlycanSource::None);
+    }
+
+    #[test]
+    fn etd_with_oxonium_behaves_like_any_other_scan() {
+        assert_eq!(glycan_source(false, true, true, false), GlycanSource::IonIndex);
+        assert_eq!(glycan_source(true, true, true, false), GlycanSource::FullList);
+    }
+
+    // `--glyco-full-glycan-db` still needs the oxonium evidence on HCD.
+    #[test]
+    fn full_glycan_db_uses_the_whole_list_when_oxonium_fired() {
+        assert_eq!(glycan_source(true, true, false, false), GlycanSource::FullList);
+    }
+
+    #[test]
+    fn full_glycan_db_without_oxonium_on_hcd_still_gets_nothing() {
+        assert_eq!(glycan_source(true, false, false, false), GlycanSource::None);
+    }
 }
 
 #[cfg(test)]

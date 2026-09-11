@@ -620,7 +620,10 @@ pub fn search_glycans(
     candidates.truncate(config.top_k);
 
     GlycanSearchResult {
-        is_glycopeptide: !candidates.is_empty(),
+        // The diagnostic panel passed above, which is what makes this a
+        // glycopeptide spectrum. Whether retrieval then found candidates is
+        // reported by `candidates`, and the two are not the same question.
+        is_glycopeptide: true,
         candidates,
     }
 }

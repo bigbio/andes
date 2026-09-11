@@ -33,9 +33,16 @@ Reproduce with `docs/benchmarks/glyco/compare_engines.py`.
 | StrucGP | 1789 | 3803 | 430 |
 | pGlyco 2.0 | 1761 | 3995 | 340 |
 
-andes reports 24 entrapment-mapped rows at 1% FDR (of 459 non-entrapment
-proteins) — a minor, expected FDR floor from the entrapment database, not a
-red flag.
+⚠ **The andes row still counts entrapment hits.** 24 of its 6,913 accepted rows map to
+entrapment proteins, which cannot be present in the sample and are therefore known-false.
+No other engine here searched an entrapment database, so andes is the only row carrying
+them. The corrected glycopeptide count is between 2,844 and 2,868 — at most 24 pairs lower,
+and the ranking against Byonic (2,509) does not change. `compare_engines.py` now excludes
+entrapment from the headline and prints the inclusive figure on a second line; this table
+will be exact on the next run of the script.
+
+24 entrapment rows in 6,913 is, separately, a reasonable error floor: it is the measured
+cost of the 1% threshold, not a red flag.
 
 ## Pairwise overlap on (peptide, glycan composition)
 
@@ -107,6 +114,14 @@ not converge on one fraction of the full-glycan-db output (43 k rows; one fold h
 no separable training direction), so the single-fraction metric above is the
 decoy-counting 2× rule. The pooled 5-fraction Percolator run is the comparable
 q-value measurement (`eval_yield.py`), per the "pool before Percolator" rule.
+
+## Golden fixtures
+
+The two in-repo golden PINs move against `main` in one direction: `glyco.pin` keeps 120 of
+121 rows and gains none, `glyco_highres.pin` keeps 117 of 121 and gains none. These are tiny
+fixtures built for path coverage rather than yield, and the full-file numbers above go the
+other way, but the direction has been consistent across every revision of this work and is
+recorded here rather than left for someone to rediscover.
 
 ## Notes and caveats
 

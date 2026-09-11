@@ -47,7 +47,8 @@ pub(crate) fn run_glyco(
         cli.glyco_species.as_ref(),
     ) {
         (Some(path), _) => {
-            let content = std::fs::read_to_string(path)?;
+            let content = std::fs::read_to_string(path)
+                .map_err(|e| format!("--glyco-glycan-gdb {}: {e}", path.display()))?;
             let list = andes_glyco::glycan_db::load_glycan_gdb(&content)?;
             (list, format!("{} (file)", path.display()))
         }
@@ -64,6 +65,15 @@ pub(crate) fn run_glyco(
             );
         }
     };
+    // A database that parses to nothing leaves the search with no glycan space at
+    // all, and every spectrum then fails to match for a reason no log line
+    // explains. Say so instead.
+    if glycan_list.is_empty() {
+        return Err(format!(
+            "glycan database {source_desc} contains no glycans: `--glyco` has no search space"
+        )
+        .into());
+    }
     eprintln!(
         "glycan list: {} compositions loaded from {} (structure preserved; NeuGc content used as-is)",
         glycan_list.len(),

@@ -1684,7 +1684,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &idx,
             &output_pin_path,
             spectrum_paths,
-            &target_db,
             detected_activation_instrument,
             if mono_active {
                 Some(mono_table.as_slice())

@@ -1110,6 +1110,7 @@ mod tests {
             fuc: 0,
             neuac: 0,
             neugc: 0,
+            core_fuc: 0,
             mass: 2.0 * HEXNAC + 3.0 * HEX,
         };
         // Build the spectrum from the TRUE composition's Y-ladder.
@@ -1133,6 +1134,7 @@ mod tests {
             fuc: 0,
             neuac: 0,
             neugc: 0,
+            core_fuc: 0,
             mass: 1.0 * HEXNAC + 4.0 * HEX,
         };
 
@@ -1198,6 +1200,7 @@ mod tests {
             fuc: 0,
             neuac: 0,
             neugc: 0,
+            core_fuc: 0,
             mass: 2.0 * HEXNAC + 3.0 * HEX,
         };
         // Spectrum built from the TRUE composition's full Y-ladder.
@@ -1243,6 +1246,7 @@ mod tests {
             fuc: 0,
             neuac: 0,
             neugc: 0,
+            core_fuc: 0,
             mass: 2.0 * HEXNAC + 3.0 * HEX,
         };
         // Build the ladder as DOUBLY-charged ions only: m/z = (neutral + 2·PROTON)/2.
@@ -1295,6 +1299,7 @@ mod tests {
             fuc: 0,
             neuac: 0,
             neugc: 0,
+            core_fuc: 0,
             mass: 2.0 * HEXNAC + 3.0 * HEX,
         };
         let full = 2.0 * HEXNAC + 3.0 * HEX; // total glycan mass = last cumulative add
@@ -1371,6 +1376,7 @@ mod tests {
             fuc: 0,
             neuac: 0,
             neugc: 0,
+            core_fuc: 0,
             mass: 2.0 * HEXNAC + 3.0 * HEX,
         };
         // Full ladder present (Y0 + all 5 cumulative adds).

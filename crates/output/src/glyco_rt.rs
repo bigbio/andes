@@ -315,6 +315,7 @@ mod tests {
             fuc,
             neuac,
             neugc,
+            core_fuc: 0,
             mass: 0.0,
         }
     }

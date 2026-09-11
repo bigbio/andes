@@ -520,71 +520,20 @@ pub(crate) struct SearchArgs {
     #[arg(long = "rss-probe", hide = true, default_value_t = false)]
     pub(crate) rss_probe: bool,
 
-    /// Glycan composition list for `--glyco`.
-    ///
-    /// `common` (~600, default) is the MEASURED-BEST list and what the benchmarks were
-    /// run with. `reference-human` (~2,300) reaches high-antennary glycans `common`
-    /// cannot name -- 100% of a curated 160-composition human reference vs `common`'s
-    /// 68% -- but measured WORSE overall on human plasma with an entrapment database
-    /// (228 glycoPSMs at 0.00% entrapment FDP, vs 365 at 0.55%). `full` (~4,034) is
-    /// wider still and was measured to raise entrapment error 5.4x on a benchmark where
-    /// it looked like a gain on yield alone.
-    ///
-    /// Bigger is not better here: a larger candidate space gives decoys more places to
-    /// fit, which tightens Percolator's threshold and leaves real identifications
-    /// behind. Prefer `common` unless you have measured otherwise on your own data.
-    #[arg(long = "glyco-glycan-list", value_enum, default_value_t = GlycanListFlag::Common)]
-    pub(crate) glyco_glycan_list: GlycanListFlag,
+    /// Load an external pGlyco-style `.gdb` glycan database: the glycan-first search
+    /// space. Each canonical string is parsed with its tree structure preserved
+    /// (core- vs antenna-fucose), and the file's NeuGc content is used as-is (no
+    /// species filtering). Use a real pGlyco `.gdb` (e.g. `pGlyco-N-Human.gdb`) for a
+    /// like-for-like comparison against pGlyco. Takes precedence over `--glyco-species`.
+    #[arg(long = "glyco-glycan-gdb")]
+    pub(crate) glyco_glycan_gdb: Option<PathBuf>,
 
-    /// Exclude NeuGc (N-glycolylneuraminic acid) glycans from the search list.
-    ///
-    /// Humans do not synthesise NeuGc — CMAH is inactivated in the human lineage, so
-    /// NeuGc in a human sample is trace dietary only. Most other mammals (mouse
-    /// included) DO make it, which is why the mouse-developed glyco benchmarks never
-    /// surfaced this.
-    ///
-    /// NeuGc is also the ENTIRE source of isobaric ambiguity in the default list:
-    /// `NeuGc - NeuAc = 15.994914` and `Hex - Fuc = 15.994915`, so a NeuGc composition
-    /// is mass-degenerate with a NeuAc one. Measured on the default list: 600
-    /// compositions over only 460 distinct masses, 140 masses (30%) carrying more than
-    /// one composition, and 100% of those collisions involve NeuGc. Excluding it gives
-    /// 360 compositions over 360 masses — zero collisions, by construction — and a 40%
-    /// smaller list to search.
-    ///
-    /// Use for human samples. Leave off for mouse and other CMAH-competent species.
-    #[arg(long = "glyco-no-neugc", default_value_t = false)]
-    pub(crate) glyco_no_neugc: bool,
-
-    /// Upper bound on NeuGc per composition in the default (`common`) glycan list.
-    ///
-    /// Unset resolves automatically: 4 (NeuAc's own bound) when NeuGc is kept ON
-    /// EVIDENCE -- `--glyco-taxon mammal`, or `auto` with a conclusive oxonium survey
-    /// that finds NeuGc -- and the human-validated 1 otherwise. A run that excludes NeuGc
-    /// is unaffected either way, so human results are byte-identical. Pass `1` to
-    /// reproduce the pre-2026-09 behaviour on a CMAH-competent sample (the A/B baseline).
-    /// Applies to the `common` list only; `full` and `reference-human` keep their own
-    /// bounds.
-    ///
-    /// WHY: the shipped list is human-tuned, and a composition it cannot name falls to
-    /// the de-novo branch, which is excluded from the FDR PIN by design. On pGlyco2 mouse
-    /// liver T-1, 501 of 3,877 reference spectra carry NeuGc >= 2; andes computed the
-    /// right precursor residual for every one of them and could not name it.
-    #[arg(long = "glyco-max-neugc", hide = true,
-          value_parser = clap::value_parser!(u8).range(1..=4))]
-    pub(crate) glyco_max_neugc: Option<u8>,
-
-    /// Glycan biology to assume for the search space.
-    ///
-    /// `auto` (default) surveys the NeuGc/NeuAc oxonium ratio across the run, and treats
-    /// the FASTA's `OX=` taxon ids as a VETO rather than a second vote: it narrows the
-    /// list when the spectra show no NeuGc, unless the database is a CMAH-competent
-    /// organism. A database with no `OX=` headers, or a mixed one, does not block
-    /// narrowing. It prints both signals and the decision. `human` forces NeuGc out,
-    /// `mammal` forces it in.
-    ///
-    /// `--glyco-no-neugc` is the explicit override and wins over this.
-    #[arg(long = "glyco-taxon", value_enum, default_value_t = GlycoTaxonFlag::Auto)]
-    pub(crate) glyco_taxon: GlycoTaxonFlag,
+    /// Select a bundled species-specific N-glycan database instead of an external
+    /// `--glyco-glycan-gdb` file. `--glyco` requires one of the two; an explicit
+    /// `--glyco-glycan-gdb` wins. Databases are pGlyco's (see
+    /// `crates/andes-glyco/glycan-db/`).
+    #[arg(long = "glyco-species", value_enum)]
+    pub(crate) glyco_species: Option<GlycoSpeciesFlag>,
 
     /// Isotope-error range for `--glyco`. `default` uses 0..=2 — the -1 offset costs
     /// 0.29% of correct answers at a ~53:47 target:decoy ratio (pure FDR dilution),
@@ -692,8 +641,8 @@ pub(crate) struct SearchArgs {
     /// Hex/Fuc -- Hex1NeuAc1 and Fuc1NeuGc1 are the SAME elemental formula -- but they
     /// are distinguishable in oxonium ions: NeuAc gives m/z 274.092/292.103, NeuGc gives
     /// 290.087/308.098. Gating on those is how pGlyco3 breaks the degeneracy, and it is
-    /// the evidence-based alternative to excluding NeuGc by species
-    /// (`--glyco-taxon` / `--glyco-no-neugc`), so it also works where NeuGc is real.
+    /// the evidence-based alternative to excluding NeuGc by database content
+    /// (a NeuGc-free `.gdb`), so it also works where NeuGc is real.
     ///
     /// Deliberately a threshold, not a presence test: Chalkley & Baker (MCP 2025) found
     /// ~70% of spectra carrying a NeuGc oxonium contained no NeuGc, from co-isolation, so
@@ -704,7 +653,7 @@ pub(crate) struct SearchArgs {
     /// 241 @0.00%, against an ungated 268 @1.87% -- so it flips the verdict from
     /// OPTIMISTIC to CONSERVATIVE at no yield cost, but buys no identifications, and an
     /// FDP pinned at 0.00% means the threshold has tightened past the useful point.
-    /// Species exclusion (`--glyco-no-neugc`) still wins on yield there: 365 @0.55%.
+    /// A NeuGc-free glycan database still wins on yield there: 365 @0.55%.
     /// If you tune this, go LOOSER (0.005-0.01), not stricter.
     ///
     /// Gates SIALIC only, never fucose -- PTM-Shepherd's published hit/miss ratios weight
@@ -827,6 +776,12 @@ pub(crate) struct SearchArgs {
     /// Max peptide-first candidates per spectrum. Hidden knob; default 1024.
     #[arg(long = "glyco-max-pf", hide = true, default_value_t = 1024usize)]
     pub(crate) glyco_max_pf: usize,
+
+    /// Replace the peptide-first b/y fragment-index fallback with a mass-driven
+    /// full-glycan-list DB branch (glycan-first recovery for weak-core-Y spectra).
+    /// A/B flag; default OFF keeps the shipped peptide-first path.
+    #[arg(long = "glyco-full-glycan-db", hide = true, default_value_t = false)]
+    pub(crate) glyco_full_glycan_db: bool,
 
     /// Diagnostic glyco mode: emit ALL candidate rows per scan (including de-novo
     /// mass-residual hits). The resulting PIN is for inspection ONLY and must never
@@ -986,32 +941,6 @@ pub(crate) enum EthcdActivationFlag {
     Etd,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug, clap::ValueEnum)]
-pub(crate) enum GlycoTaxonFlag {
-    /// Decide from the data: the NeuGc/NeuAc oxonium ratio across the run, cross-checked
-    /// against `OX=` taxon ids in the FASTA. Conservative — only narrows the list when
-    /// the evidence supports it, and always says what it decided.
-    Auto,
-    /// CMAH-inactivated (human and the great apes): exclude NeuGc.
-    Human,
-    /// CMAH-competent (mouse, rat, pig, bovine, CHO...): keep NeuGc.
-    Mammal,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub(crate) enum GlycanListFlag {
-    /// Reference-fitted human list (HexNAc up to 11, high-antennary reachable). Covers
-    /// 100% of a curated 160-composition human reference vs `common`'s 68% -- but MEASURED
-    /// WORSE overall on human plasma (228 glycoPSMs @0.00% entrapment FDP vs `common`'s
-    /// 365 @0.55%), because the larger space tightens Percolator's threshold. Use only
-    /// when the sample genuinely carries high-antennary glycans, and measure.
-    ReferenceHuman,
-    /// ~600 compositions. The measured-best default; what the benchmarks used.
-    Common,
-    /// The full ~4,034-composition list. Widest coverage, worst error control.
-    Full,
-}
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum GlycoIsotopeFlag {
     /// 0..=2 — drops the -1 offset, which is pure FDR dilution for glyco.
@@ -1020,6 +949,34 @@ pub(crate) enum GlycoIsotopeFlag {
     Negative,
     /// 0..=5 — reaches candidates far above the monoisotopic peak.
     Wide,
+}
+
+/// Bundled species-specific N-glycan databases for `--glyco-species`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum GlycoSpeciesFlag {
+    /// Human N-glycans.
+    Human,
+    /// Human, multi-antennary.
+    HumanMulti,
+    /// Mouse N-glycans.
+    Mouse,
+    /// Mouse, extended.
+    MouseLarge,
+    /// High-mannose N-glycans (species-independent).
+    HighMannose,
+}
+
+impl GlycoSpeciesFlag {
+    /// The kebab-case key `load_species_glycan_db` expects.
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            GlycoSpeciesFlag::Human => "human",
+            GlycoSpeciesFlag::HumanMulti => "human-multi",
+            GlycoSpeciesFlag::Mouse => "mouse",
+            GlycoSpeciesFlag::MouseLarge => "mouse-large",
+            GlycoSpeciesFlag::HighMannose => "high-mannose",
+        }
+    }
 }
 
 /// `--precursor-mono`: MS1 isotope-envelope precursor correction.

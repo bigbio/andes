@@ -330,6 +330,7 @@ mod tests {
             fuc: 0,
             neuac: 0,
             neugc: 0,
+            core_fuc: 0,
             mass: 2.0 * HEXNAC + 3.0 * HEX,
         };
         let expected_mass = glycan.mass;

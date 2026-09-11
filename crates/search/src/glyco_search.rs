@@ -15,8 +15,8 @@
 //
 //   The prior approach (Y-ladder pre-filter → core_y_hits-ranked cap) discarded
 //   backbones whose spectra lacked strong core-Y ions before any b/y scoring,
-//   capping find-rate at ~11 %.  The fix: use the curated `n_glycan_list_common()`
-//   (~600 glycans instead of 2510), score ALL resulting backbone candidates in
+//   capping find-rate at ~11 %.  The fix: use a curated glycan database (a few
+//   hundred compositions via `--glyco-glycan-gdb`), score ALL resulting backbone candidates in
 //   phase-1 b/y scoring, aggregate the best b/y rank score per backbone, and
 //   only then apply the backbone_top_k cap.  Y-ladder hit count is retained as
 //   a tiebreaker so spectra with strong Y-ladder evidence still benefit from it.
@@ -35,6 +35,7 @@ use andes_glyco::backbone::{
     partial_glycan_by_intensity, y0y1_anchor_intensity, SpectrumStats,
 };
 use andes_glyco::glycan_db::GlycanComp;
+use andes_glyco::glycan_first::{search_glycans, Glycan, GlycanConfig, GlycanCore, GlycanIonIndex};
 use andes_glyco::glyco_psm::{
     glyco_gp_fused_score, GlycoPsmKey, GLYCO_GP_CZ_DEFAULT, GLYCO_GP_H_DEFAULT, GLYCO_GP_J_DEFAULT,
     GLYCO_GP_K_DEFAULT,
@@ -122,6 +123,14 @@ pub struct GlycoConfig {
     pub retrieval_tol_da: Option<f64>,
     /// Max peptide-first candidates kept per spectrum.
     pub max_pf: usize,
+    /// Replace the peptide-first b/y fragment-index fallback with a mass-driven
+    /// full-glycan-list DB branch (`--glyco-full-glycan-db`, default OFF). When
+    /// on, every glycan in the list is enumerated as `backbone = precursor −
+    /// glycan` and matched to peptides by mass (phase-1 bucket index) instead of
+    /// enumerating peptides by b/y ions. This is the glycan-first recovery path
+    /// for weak-core-Y spectra; the core-Y==0 prefilter still gates spurious
+    /// backbones. A/B flag — default keeps the shipped peptide-first path.
+    pub full_glycan_db: bool,
     /// Diagnostic mode (`--debug-glyco`): emit ALL candidate rows per scan
     /// (including de-novo mass-residual hits) instead of the honest top-1 collapse.
     /// A debug PIN must NEVER be fed to an FDR tool.
@@ -190,6 +199,7 @@ impl Default for GlycoConfig {
             retrieval_tol_ppm: None,
             retrieval_tol_da: None,
             max_pf: 1024,
+            full_glycan_db: false,
             hcd_pair: false,
             etd_rank_glycan: false,
             cz_gate: true,
@@ -201,9 +211,7 @@ impl Default for GlycoConfig {
         }
     }
 }
-use andes_glyco::hybrid::{
-    hybrid_candidates_presolved, solve_backbones_for_charge, BackboneHit, Source,
-};
+use andes_glyco::hybrid::{db_branch, BackboneHit, Source};
 use andes_glyco::oxonium::{oxonium_gate, sialic_consistency, OXONIUM_GATE_MIN_FRAC};
 use andes_glyco::sequon::has_nxst_sequon;
 
@@ -618,10 +626,14 @@ pub struct GlycoScoreCtx<'a> {
     pub frag_index: &'a FragmentIndex,
     pub glycan_sorted: &'a [(f64, usize)],
     pub glycan_list: &'a [GlycanComp],
+    pub glycan_ion_index: &'a GlycanIonIndex,
+    pub glycan_first_cfg: &'a GlycanConfig,
     pub tol_ppm: f64,
     pub effective_top_k: usize,
     pub max_peptide_first: usize,
     pub peptide_first_on: bool,
+    /// See `GlycoConfig::full_glycan_db`.
+    pub full_glycan_db: bool,
     /// See `GlycoConfig::sialic_oxonium_min_frac`.
     pub sialic_oxonium_min_frac: f32,
     /// `gp` fused-selector weights (`rank + K·ladder + J·core_y + H·hyper`).
@@ -684,6 +696,12 @@ pub struct GlycoScoreCtx<'a> {
 pub struct GlycoCtxOwned {
     frag_index: FragmentIndex,
     glycan_sorted: Vec<(f64, usize)>,
+    /// Glycan-first ion index (diagnostic + complementary fragment ions), built
+    /// once from the glycan list and used per-spectrum to narrow the DB-branch
+    /// from the full list to the top candidate glycans.
+    glycan_ion_index: GlycanIonIndex,
+    /// Retrieval parameters for the glycan-first pre-filter.
+    glycan_first_cfg: GlycanConfig,
     scan_filter: Option<std::collections::HashSet<i32>>,
     /// `GlycoConfig::isotope_error_override`, resolved per run.
     isotope_error_override: Option<std::ops::RangeInclusive<i8>>,
@@ -692,6 +710,7 @@ pub struct GlycoCtxOwned {
     effective_top_k: usize,
     max_peptide_first: usize,
     peptide_first_on: bool,
+    full_glycan_db: bool,
     sialic_oxonium_min_frac: f32,
     gp_k: f32,
     gp_j: f32,
@@ -726,10 +745,12 @@ impl GlycoCtxOwned {
         fragment_tolerance_da: f64,
         backbone_top_k: usize,
         cfg: GlycoConfig,
+        tol_ppm: f64,
     ) -> Self {
         // Peptide-first fragment-index candidate generation is always on under the
         // shipped gp selector (it is the high-charge-glycopeptide recall path).
         let peptide_first_on = true;
+        let full_glycan_db = cfg.full_glycan_db;
         let hcd_pair_on = cfg.hcd_pair;
         let etd_rank_glycan = cfg.etd_rank_glycan;
         let cz_gate = cfg.cz_gate;
@@ -844,7 +865,10 @@ impl GlycoCtxOwned {
         // glycopeptides (z4/z5+, whose b/y land at +2/+3) can select their peptide.
         // Default 2 (+1/+2); 1 = legacy +1-only. Clamped 1..=3 in the index.
         let pf_charge: u8 = cfg.pf_charge;
-        let frag_index = if !peptide_first_on {
+        // `--glyco-full-glycan-db` never calls `frag_index.query` (the
+        // peptide-first path is skipped), so skip building the ~1.5 GB
+        // b/y postings index entirely — it is the dominant `idx_build` cost.
+        let frag_index = if !peptide_first_on || full_glycan_db {
             FragmentIndex::build(
                 std::iter::empty::<(u32, &model::peptide::Peptide)>(),
                 fragment_tolerance_da.max(0.01),
@@ -899,6 +923,30 @@ impl GlycoCtxOwned {
             v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
             v
         };
+        // Glycan-first ion index: indexes each glycan's diagnostic (oxonium) and
+        // complementary (antenna) fragment ions once, so a spectrum's peaks can
+        // retrieve the top candidate glycans without enumerating the whole list
+        // in the DB branch. Built from the same glycan list the DB branch uses.
+        let glycan_ion_index = {
+            let glycans: Vec<Glycan> = glycan_list
+                .iter()
+                .enumerate()
+                .map(|(i, g)| Glycan { id: i as u32, composition: g.clone() })
+                .collect();
+            // 0.02 Da is the fixed bucket granularity (index resolution), not a
+            // tolerance; the acceptance window is `tol_ppm` at query time, derived
+            // from `--glyco-tol-ppm` rather than hardcoded.
+            GlycanIonIndex::build(&glycans, 0.02, Some(tol_ppm), GlycanCore::NGlycan)
+        };
+        let glycan_first_cfg = GlycanConfig {
+            tol_ppm,
+            min_diagnostic_ions: 2,
+            min_core_ions: 1, // permissive: this is a pre-filter, not a gate
+            top_k: 100, // pGlyco3: top 100 candidate glycan compositions for peptide search
+            diagnostic_ions: andes_glyco::glycan_first::default_diagnostic_ions(),
+            diagnostic_filter: true,
+            score_weights: (1.0, 1.0, 0.5),
+        };
         // Minimum b/y peaks a peptide must match to be a peptide-first candidate.
         // 6 (was 4) sharply cuts the coincidental-match Poisson tail — most of the
         // per-spectrum query cost — with negligible loss of real glycopeptides
@@ -915,12 +963,15 @@ impl GlycoCtxOwned {
         GlycoCtxOwned {
             frag_index,
             glycan_sorted,
+            glycan_ion_index,
+            glycan_first_cfg,
             scan_filter,
             isotope_error_override: cfg.isotope_error_override.clone(),
             isotope_error_override_mask: cfg.isotope_error_override_mask.clone(),
             effective_top_k,
             max_peptide_first,
             peptide_first_on,
+            full_glycan_db,
             sialic_oxonium_min_frac,
             gp_k,
             gp_j,
@@ -967,10 +1018,13 @@ impl GlycoCtxOwned {
             frag_index: &self.frag_index,
             glycan_sorted: &self.glycan_sorted,
             glycan_list,
+            glycan_ion_index: &self.glycan_ion_index,
+            glycan_first_cfg: &self.glycan_first_cfg,
             tol_ppm,
             effective_top_k: self.effective_top_k,
             max_peptide_first: self.max_peptide_first,
             peptide_first_on: self.peptide_first_on,
+            full_glycan_db: self.full_glycan_db,
             sialic_oxonium_min_frac: self.sialic_oxonium_min_frac,
             gp_k: self.gp_k,
             gp_j: self.gp_j,
@@ -1100,6 +1154,7 @@ fn score_spectrum_glyco(
     let effective_top_k = ctx.effective_top_k;
     let max_peptide_first = ctx.max_peptide_first;
     let peptide_first_on = ctx.peptide_first_on;
+    let full_glycan_db = ctx.full_glycan_db;
     // `gp` fused-selector weights, hoisted into the ctx (built once). `gp_k` scales
     // the ladder term against the b/y rank in `glyco_gp_fused_score`.
     let gp_k = ctx.gp_k;
@@ -1138,7 +1193,9 @@ fn score_spectrum_glyco(
     // enumeration conditional on the same gate the HCD path already obeys; the
     // gate value itself is computed below, so the decision is deferred to the
     // call site that has `ox_ev`.
-    let etd_db_fallback = is_etd;
+    // NOTE (glycan-first): the old ETD full-DB fallback is gone with the
+    // backbone-first path; ETD/AI-ETD glycan retrieval (oxonium-free) is a TODO
+    // for a c/z-based glycan search, not re-enumerating the full list here.
     // EXPERIMENT (ANDES_GLYCO_CHARGE_PM1): also enumerate backbones at charge z-1
     // and z+1 around the reported precursor charge — instrument charge mis-calls
     // (concentrated at z4-z6) otherwise put the true backbone mass off the grid so
@@ -1326,6 +1383,24 @@ fn score_spectrum_glyco(
     // trying only the monoisotopic offset silently loses the true
     // backbone. Each resulting `BackboneHit` records the (charge,
     // isotope_offset) pair that produced it (see hybrid.rs).
+    // Glycan-first DB-branch source is chosen per (charge, isotope) hypothesis
+    // inside the sweep below: default narrows the full glycan list to the top
+    // candidate glycans retrieved by the ion index (Y-complementary + diagnostic
+    // ion evidence); `--glyco-full-glycan-db` instead enumerates the FULL glycan
+    // list mass-driven (backbone = precursor − glycan → peptide by mass in
+    // phase-1), making the peptide-first b/y fallback redundant.
+
+    // Glycan-first: the glycan is identified by its fragment ions (ion index),
+    // then the peptide is searched as `backbone = precursor − glycan` for each
+    // retrieved candidate glycan. The Y-ion solver (backbone-first) is gone.
+    let sialic_gate = if ctx.sialic_oxonium_min_frac > 0.0 {
+        Some((
+            andes_glyco::oxonium::sialic_evidence(gen_peaks, tol_ppm),
+            ctx.sialic_oxonium_min_frac,
+        ))
+    } else {
+        None
+    };
     let isotope_window = isotope_window_for(
         spec_idx,
         &ctx.isotope_error_default,
@@ -1336,62 +1411,59 @@ fn score_spectrum_glyco(
     let iso_max = *isotope_window.end();
     let mut all_backbone: Vec<BackboneHit> = Vec::new();
     for &z in &charges_to_try {
-        let charge_f = z as f64;
-        let observed_neutral = (spec.precursor_mz - PROTON) * charge_f - H2O;
-        // SPEED: the Y-ladder bin voting is isotope-INDEPENDENT (only the
-        // precursor mass gates differ), so solve it ONCE per charge at the
-        // WIDEST precursor the sweep will use (iso_min → largest neutral
-        // mass → loosest gates → a superset of every isotope's candidates),
-        // then annotate per isotope. This replaces the previous
-        // per-(charge×isotope) `solve_backbone` call (~4× redundant work;
-        // the dominant glyco-phase cost). `hybrid_candidates_presolved`
-        // re-applies each isotope's precursor gates so the result is the
-        // same candidate set the per-isotope solve produced.
-        let widest_precursor = observed_neutral - (iso_min as f64) * ISOTOPE;
-        let presolved = if widest_precursor > 0.0 {
-            // `effective_top_k` is huge in exhaustive mode (no truncation),
-            // so the widest-precursor superset is exact; a small
-            // `--glyco-backbone-top-k` only perturbs near-precursor
-            // (fully-glycosylated, gated-out) candidates. Honors the cap
-            // (Codex finding #2 — was hardcoded to 50).
-            solve_backbones_for_charge(gen_peaks, widest_precursor, z, tol_ppm, effective_top_k)
-        } else {
-            None
-        };
+        let observed_neutral = (spec.precursor_mz - PROTON) * z as f64 - H2O;
         for iso in iso_min..=iso_max {
-            let precursor_neutral = observed_neutral - (iso as f64) * ISOTOPE;
+            let precursor_neutral = observed_neutral - iso as f64 * ISOTOPE;
             if precursor_neutral <= 0.0 {
                 continue;
             }
-            let hits = hybrid_candidates_presolved(
-                presolved.as_deref(),
-                gen_peaks,
-                precursor_neutral,
-                z,
-                iso,
-                glycan_list,
-                tol_ppm,
-                effective_top_k,
-                // `--glyco-etd-require-oxonium`: withhold the unconditional
-                // full-lattice enumeration from ETD scans that show no
-                // oxonium evidence at all. `ox_ev` is the same gate the HCD
-                // generation path already obeys.
-                etd_db_fallback && (ox_ev.fired || !ctx.etd_require_oxonium),
-                ctx.sialic_oxonium_min_frac,
-            );
-            for h in hits {
+            // A1 (isotope sweep): narrow the glycan set at THIS (charge, isotope)
+            // hypothesis, not once at the reported charge / offset 0.
+            // `search_glycans` maps a Y ion to a glycan via `q = precursor_mass −
+            // y_ion_neutral`; a ±1 isotope shift moves `q` into a different mass
+            // bucket, so a set narrowed at offset 0 omits the glycan that only
+            // matches at offset ±1 and silently defeats the sweep. The
+            // `--glyco-full-glycan-db` path is unaffected: it enumerates the full
+            // list, so `db_branch` sees every glycan at every offset.
+            let restricted_glycans: Vec<GlycanComp> = if full_glycan_db || !ox_ev.fired {
+                Vec::new()
+            } else {
+                // `search_glycans` takes the NEUTRAL precursor mass M = peptide +
+                // Σ(glycan residues), i.e. `precursor_neutral + H2O`, NOT the
+                // residue convention (passing `precursor_neutral` alone shifts
+                // every query by −H2O and empties the index). `z` is the charge
+                // hypothesis and sets the Y-ion `zmax` consistently with the
+                // precursor being enumerated.
+                let res = search_glycans(
+                    ctx.glycan_ion_index,
+                    ctx.glycan_first_cfg,
+                    glycan_list,
+                    precursor_neutral + H2O,
+                    z,
+                    gen_peaks,
+                );
+                res.candidates
+                    .iter()
+                    .filter_map(|c| glycan_list.get(c.glycan_id as usize).cloned())
+                    .collect()
+            };
+            let effective_glycans: &[GlycanComp] = if full_glycan_db && ox_ev.fired {
+                glycan_list
+            } else {
+                &restricted_glycans
+            };
+            for h in db_branch(precursor_neutral, effective_glycans, 500.0, z, iso, sialic_gate) {
                 all_backbone.push(h);
             }
         }
     }
-
     // PEPTIDE-FIRST union: for oxonium-positive spectra, ask the fragment
     // index which sequon peptides actually have b/y support, then keep the
     // ones whose glycan-by-subtraction hits a known glycan across the same
     // charge/isotope grid. These backbones are selected by PEPTIDE evidence
     // (works when core-Y is weak/absent), and the glycan filter keeps the
     // count small — a handful of high-quality candidates per spectrum.
-    if peptide_first_on && ox_ev.fired {
+    if peptide_first_on && ox_ev.fired && !full_glycan_db {
         // Process strongest-b/y-support peptides first, but cap on VALID
         // (peptide, charge, isotope, glycan) hypotheses — NOT raw b/y
         // count — so high-count peptides that cannot form a known glycan
@@ -1481,8 +1553,9 @@ fn score_spectrum_glyco(
     //
     // New approach: skip the Y-ladder pre-filter entirely.  Instead, run
     // phase-1 b/y scoring (score_psm) for EVERY backbone candidate.  Because
-    // we use n_glycan_list_common() (~600 glycans) by default, the total
-    // number of (backbone, candidate) pairs per spectrum is tractable.
+    // the glycan database is curated (a few hundred compositions via
+    // --glyco-glycan-gdb), the total number of (backbone, candidate) pairs per
+    // spectrum is tractable.
     //
     // After phase-1 we know the best b/y score achieved for each backbone.
     // We THEN rank backbones by that best b/y score, using core_y_hits as a
@@ -2702,14 +2775,16 @@ pub fn glyco_search_run(
         fragment_tolerance_da,
         backbone_top_k,
         cfg.clone(),
+        tol_ppm,
     );
     let ctx = owned.as_ctx(prepared, glycan_list, tol_ppm, spectra, &hcd_partner);
 
-    spectra
+    let out: Vec<GlycoSpectrumResult> = spectra
         .par_iter()
         .enumerate()
         .filter_map(|(spec_idx, spec)| score_spectrum_glyco(spec_idx, spec, &ctx))
-        .collect()
+        .collect();
+    out
 }
 
 #[cfg(test)]
@@ -2876,6 +2951,7 @@ mod tests {
             fuc: 0,
             neuac: 0,
             neugc: 0,
+            core_fuc: 0,
             mass: 2.0 * andes_glyco::glycan_mass::HEXNAC + 3.0 * andes_glyco::glycan_mass::HEX,
         };
         let true_precursor_neutral = true_backbone_residue + glycan.mass;

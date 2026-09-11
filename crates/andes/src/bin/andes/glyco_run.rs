@@ -2,8 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::cli::{Cli, GlycanListFlag, GlycoTaxonFlag};
-use input::ProteinDb;
+use crate::cli::Cli;
 use model::{activation::ActivationMethod, InstrumentType, Spectrum};
 use search::{PreparedSearch, SearchIndex, SearchParams};
 
@@ -19,7 +18,6 @@ pub(crate) fn run_glyco(
     idx: &SearchIndex,
     output_pin_path: &Path,
     spectrum_paths: &[PathBuf],
-    target_db: &ProteinDb,
     detected_activation_instrument: Option<(ActivationMethod, Option<InstrumentType>)>,
     // `--precursor-mono`: per-spectrum MS1 envelope corrections, aligned with
     // `spectra` (`Some` only when the flag is active; the PIN then carries the
@@ -32,13 +30,6 @@ pub(crate) fn run_glyco(
     t_total: std::time::Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let t_glyco = std::time::Instant::now();
-    // Use the curated common list (~600 glycans) so that ALL backbone candidates
-    // can be b/y-scored in phase-1 (avoids the Y-ladder pre-filter ceiling). The
-    // full ~4034-entry list (n_glycan_list()) was A/B-refuted at 1% FDR when
-    // the cz collapse scoring was buggy (long/decoy candidates won). The bug
-    // hunt (2026-07-16) showed the default ~612 list MISSES the mouse-brain
-    // glycome at high charge (z5 69%/z6 38% coverage) — a generation ceiling.
-    // ANDES_GLYCO_FULL_GLYCANS re-tests the full list now that cz is fixable.
     // Install scoring settings that reach hot inner functions. Done once here, from
     // validated CLI values, so no scoring code has to read the environment.
     scoring_crate::scoring::init_cz_settings(scoring_crate::scoring::CzSettings {
@@ -46,125 +37,38 @@ pub(crate) fn run_glyco(
     });
     andes_glyco::backbone::init_y_max_charge(cli.glyco_y_max_charge);
 
-    // Decide whether NeuGc belongs in the search space -- and, if it does, how many per
-    // composition the default list may carry. NeuGc is the sole source of isobaric mass
-    // degeneracy in this list (Fuc+NeuGc and Hex+NeuAc are the SAME elemental formula),
-    // so getting this right is worth more than any downstream scoring fix -- you cannot
-    // resolve from fragments what should not be enumerated.
-    //
-    // The pair is (drop_neugc, neugc_positive). `neugc_positive` is true only when NeuGc
-    // is kept ON EVIDENCE -- explicit `mammal`, or an `auto` survey that is conclusive
-    // and finds NeuGc -- and false when it is merely kept for lack of signal, or by the
-    // FASTA veto alone. It gates the NeuGc bound below, so that widening the search
-    // space happens only where the spectra say the compositions are there.
-    let (drop_neugc, neugc_positive) =
-        if cli.glyco_no_neugc {
-            eprintln!("--glyco-no-neugc: NeuGc excluded (explicit).");
-            (true, false)
-        } else {
-            match cli.glyco_taxon {
-                GlycoTaxonFlag::Human => {
-                    eprintln!("--glyco-taxon human: NeuGc excluded (CMAH-inactivated lineage).");
-                    (true, false)
-                }
-                GlycoTaxonFlag::Mammal => {
-                    eprintln!("--glyco-taxon mammal: NeuGc kept (CMAH-competent lineage).");
-                    (false, true)
-                }
-                GlycoTaxonFlag::Auto => {
-                    // Signal 1: the spectra themselves. Stronger than the FASTA, because it
-                    // measures what is in the tube rather than what was searched.
-                    let survey = andes_glyco::oxonium::survey_sialic_oxonium(
-                        spectra.iter().map(|s| s.peaks.as_slice()),
-                        cli.glyco_tol_ppm,
-                        0.10,
-                    );
-                    // Signal 2: OX= taxon ids in the database.
-                    let (taxon, n_hu, n_nh, n_ox) = andes_glyco::glycan_db::taxon_from_headers(
-                        target_db.proteins.iter().map(|p| p.description.as_str()),
-                    );
-                    eprintln!(
-                    "--glyco-taxon auto: sialylated spectra {} ({} with NeuGc oxonium >=10% of \
-                     NeuAc = {:.2}%, {}), FASTA OX= {:?} ({} CMAH-null / {} competent of {})",
-                    survey.neuac_spectra,
-                    survey.neugc_spectra,
-                    100.0 * survey.neugc_fraction,
-                    if survey.conclusive { "conclusive" } else { "INCONCLUSIVE" },
-                    taxon,
-                    n_hu,
-                    n_nh,
-                    n_ox
-                );
-                    // Narrow only when BOTH signals agree, and never on an inconclusive
-                    // survey. A CMAH-competent FASTA vetoes: mouse genuinely has NeuGc, and
-                    // recombinant human protein from a murine/CHO host does too.
-                    let spectra_say_no = survey.conclusive && survey.neugc_fraction < 0.01;
-                    let fasta_objects = taxon == andes_glyco::glycan_db::Taxon::CmahCompetent;
-                    let decide = spectra_say_no && !fasta_objects;
-                    eprintln!(
-                        "--glyco-taxon auto: {} (override with --glyco-taxon human|mammal or \
-                     --glyco-no-neugc)",
-                        if decide {
-                            "NeuGc EXCLUDED - no NeuGc oxonium evidence in this run"
-                        } else if !survey.conclusive {
-                            "NeuGc kept - too little sialic signal to judge"
-                        } else if fasta_objects {
-                            "NeuGc kept - FASTA is a CMAH-competent organism"
-                        } else {
-                            "NeuGc kept - NeuGc oxonium evidence present"
-                        }
-                    );
-                    // Positive evidence uses the same 1% boundary that decides exclusion:
-                    // conclusive survey, NeuGc present. A keep that only the FASTA veto
-                    // produced, or an inconclusive keep, is not evidence.
-                    (decide, survey.conclusive && !spectra_say_no)
-                }
-            }
-        };
-    // NeuGc bound for the default list. The shipped list is human-tuned (NeuGc <= 1); a
-    // CMAH-competent sample routinely carries 2-3 NeuGc per composition, and a
-    // composition that cannot be enumerated falls to the de-novo branch, which never
-    // reaches the FDR PIN. Measured on pGlyco2 mouse liver T-1 (3,877 reference
-    // spectra): 501 carry NeuGc >= 2 (12.9%), and 442 of the run's 838 selection losses
-    // (52.7%) were exactly those -- backbone retained, glycan unnameable. Raised to
-    // NeuAc's bound (4) only on positive evidence, so human runs are byte-identical: the
-    // NeuGc-free subset of the list is the same at every bound.
-    let max_neugc: u8 = match cli.glyco_max_neugc {
-        Some(n) => n,
-        None if !drop_neugc && neugc_positive => 4,
-        None => 1,
-    };
-    let mut glycan_list = match cli.glyco_glycan_list {
-        GlycanListFlag::Full => andes_glyco::glycan_db::n_glycan_list(),
-        GlycanListFlag::ReferenceHuman => andes_glyco::glycan_db::n_glycan_list_reference_human(),
-        GlycanListFlag::Common => {
-            andes_glyco::glycan_db::n_glycan_list_common_with_neugc(max_neugc)
+    // The glycan-first search space comes from one of two sources: an explicit
+    // pGlyco `.gdb` file (`--glyco-glycan-gdb`, takes precedence) or a bundled
+    // species-specific database (`--glyco-species`). Trees are parsed with
+    // structure preserved (core- vs antenna-fucose) and NeuGc content is used
+    // as-is. The composition enumerator and its NeuGc/taxon tuning are gone.
+    let (glycan_list, source_desc) = match (
+        cli.glyco_glycan_gdb.as_ref(),
+        cli.glyco_species.as_ref(),
+    ) {
+        (Some(path), _) => {
+            let content = std::fs::read_to_string(path)?;
+            let list = andes_glyco::glycan_db::load_glycan_gdb(&content)?;
+            (list, format!("{} (file)", path.display()))
+        }
+        (None, Some(species)) => {
+            let list = andes_glyco::glycan_db::load_species_glycan_db(species.key())?;
+            (list, format!("--glyco-species {}", species.key()))
+        }
+        (None, None) => {
+            return Err(
+                "--glyco requires --glyco-glycan-gdb or --glyco-species: the built-in \
+                 composition enumerator was removed; supply a pGlyco `.gdb` or a bundled \
+                 species"
+                    .into(),
+            );
         }
     };
-    if !drop_neugc && matches!(cli.glyco_glycan_list, GlycanListFlag::Common) {
-        let why = match (cli.glyco_max_neugc, max_neugc) {
-            (Some(_), _) => "explicit --glyco-max-neugc",
-            (None, 1) => "human-validated default; NeuGc kept without positive evidence",
-            (None, _) => "raised to NeuAc's bound: NeuGc kept on positive evidence",
-        };
-        eprintln!(
-            "glycan list: NeuGc <= {} per composition ({}); {} compositions",
-            max_neugc,
-            why,
-            glycan_list.len()
-        );
-    }
-    if drop_neugc {
-        let before = glycan_list.len();
-        glycan_list.retain(|g| g.neugc == 0);
-        eprintln!(
-            "glycan list: {} -> {} compositions (NeuGc removed; it is the only source of \
-             isobaric mass degeneracy here)",
-            before,
-            glycan_list.len()
-        );
-    }
-    let glycan_list = glycan_list;
+    eprintln!(
+        "glycan list: {} compositions loaded from {} (structure preserved; NeuGc content used as-is)",
+        glycan_list.len(),
+        source_desc
+    );
     let glyco_tol_ppm = cli.glyco_tol_ppm;
     // Finite and > 0 is enforced by clap (`parse_positive_tol`), so NaN and
     // non-positive values never reach here.
@@ -243,6 +147,7 @@ pub(crate) fn run_glyco(
         retrieval_tol_ppm: retrieval_ppm,
         retrieval_tol_da: cli.glyco_retrieval_tol_da,
         max_pf: cli.glyco_max_pf,
+        full_glycan_db: cli.glyco_full_glycan_db,
         debug: cli.debug_glyco,
         // Single-file only: cross-file pairing is unsound (see guard above).
         hcd_pair: cli.glyco_hcd_pair && spectrum_paths.len() == 1,

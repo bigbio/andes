@@ -521,12 +521,19 @@ pub(crate) struct SearchArgs {
     pub(crate) rss_probe: bool,
 
     /// Load an external pGlyco-style `.gdb` glycan database: the glycan-first search
-    /// space. Required in `--glyco` mode. Each canonical string is parsed with its tree
-    /// structure preserved (core- vs antenna-fucose), and the file's NeuGc content is
-    /// used as-is (no species filtering). Use a real pGlyco `.gdb` (e.g.
-    /// `pGlyco-N-Human.gdb`) for a like-for-like comparison against pGlyco.
+    /// space. Each canonical string is parsed with its tree structure preserved
+    /// (core- vs antenna-fucose), and the file's NeuGc content is used as-is (no
+    /// species filtering). Use a real pGlyco `.gdb` (e.g. `pGlyco-N-Human.gdb`) for a
+    /// like-for-like comparison against pGlyco. Takes precedence over `--glyco-species`.
     #[arg(long = "glyco-glycan-gdb")]
     pub(crate) glyco_glycan_gdb: Option<PathBuf>,
+
+    /// Select a bundled species-specific N-glycan database instead of an external
+    /// `--glyco-glycan-gdb` file. `--glyco` requires one of the two; an explicit
+    /// `--glyco-glycan-gdb` wins. Databases are pGlyco's (see
+    /// `crates/andes-glyco/glycan-db/`).
+    #[arg(long = "glyco-species", value_enum)]
+    pub(crate) glyco_species: Option<GlycoSpeciesFlag>,
 
     /// Isotope-error range for `--glyco`. `default` uses 0..=2 — the -1 offset costs
     /// 0.29% of correct answers at a ~53:47 target:decoy ratio (pure FDR dilution),
@@ -942,6 +949,34 @@ pub(crate) enum GlycoIsotopeFlag {
     Negative,
     /// 0..=5 — reaches candidates far above the monoisotopic peak.
     Wide,
+}
+
+/// Bundled species-specific N-glycan databases for `--glyco-species`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum GlycoSpeciesFlag {
+    /// Human N-glycans.
+    Human,
+    /// Human, multi-antennary.
+    HumanMulti,
+    /// Mouse N-glycans.
+    Mouse,
+    /// Mouse, extended.
+    MouseLarge,
+    /// High-mannose N-glycans (species-independent).
+    HighMannose,
+}
+
+impl GlycoSpeciesFlag {
+    /// The kebab-case key `load_species_glycan_db` expects.
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            GlycoSpeciesFlag::Human => "human",
+            GlycoSpeciesFlag::HumanMulti => "human-multi",
+            GlycoSpeciesFlag::Mouse => "mouse",
+            GlycoSpeciesFlag::MouseLarge => "mouse-large",
+            GlycoSpeciesFlag::HighMannose => "high-mannose",
+        }
+    }
 }
 
 /// `--precursor-mono`: MS1 isotope-envelope precursor correction.

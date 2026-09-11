@@ -37,20 +37,37 @@ pub(crate) fn run_glyco(
     });
     andes_glyco::backbone::init_y_max_charge(cli.glyco_y_max_charge);
 
-    // The glycan-first search space is an external pGlyco `.gdb` database, loaded
-    // as-is: trees are parsed with structure preserved (core- vs antenna-fucose),
-    // and NeuGc content is used without species filtering. The composition
-    // enumerator and its NeuGc/taxon tuning are gone — the .gdb is authoritative.
-    let gdb_path = cli.glyco_glycan_gdb.as_ref().ok_or(
-        "--glyco now requires --glyco-glycan-gdb: the built-in composition enumerator \
-         was removed; supply a pGlyco `.gdb`",
-    )?;
-    let content = std::fs::read_to_string(gdb_path)?;
-    let glycan_list = andes_glyco::glycan_db::load_glycan_gdb(&content)?;
+    // The glycan-first search space comes from one of two sources: an explicit
+    // pGlyco `.gdb` file (`--glyco-glycan-gdb`, takes precedence) or a bundled
+    // species-specific database (`--glyco-species`). Trees are parsed with
+    // structure preserved (core- vs antenna-fucose) and NeuGc content is used
+    // as-is. The composition enumerator and its NeuGc/taxon tuning are gone.
+    let (glycan_list, source_desc) = match (
+        cli.glyco_glycan_gdb.as_ref(),
+        cli.glyco_species.as_ref(),
+    ) {
+        (Some(path), _) => {
+            let content = std::fs::read_to_string(path)?;
+            let list = andes_glyco::glycan_db::load_glycan_gdb(&content)?;
+            (list, format!("{} (file)", path.display()))
+        }
+        (None, Some(species)) => {
+            let list = andes_glyco::glycan_db::load_species_glycan_db(species.key())?;
+            (list, format!("--glyco-species {}", species.key()))
+        }
+        (None, None) => {
+            return Err(
+                "--glyco requires --glyco-glycan-gdb or --glyco-species: the built-in \
+                 composition enumerator was removed; supply a pGlyco `.gdb` or a bundled \
+                 species"
+                    .into(),
+            );
+        }
+    };
     eprintln!(
         "glycan list: {} compositions loaded from {} (structure preserved; NeuGc content used as-is)",
         glycan_list.len(),
-        gdb_path.display()
+        source_desc
     );
     let glyco_tol_ppm = cli.glyco_tol_ppm;
     // Finite and > 0 is enforced by clap (`parse_positive_tol`), so NaN and

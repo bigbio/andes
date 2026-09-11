@@ -24,7 +24,9 @@ use search::candidate_gen::Candidate;
 use search::search_index::SearchIndex;
 use search::search_params::SearchParams;
 
-use andes_glyco::glyco_psm::{glyco_gp_fused_score, GLYCO_GP_J_DEFAULT, GLYCO_GP_K_DEFAULT};
+use andes_glyco::glyco_psm::{
+    glyco_gp_fused_score_iso, GLYCO_GP_ISO_DEFAULT, GLYCO_GP_J_DEFAULT, GLYCO_GP_K_DEFAULT,
+};
 use andes_glyco::hybrid::Source;
 
 use crate::percolator_enz::{count_internal_enzymatic, is_enzymatic_boundary};
@@ -617,7 +619,7 @@ pub(crate) fn select_emitted_hits(
     // stored fields, so the rest of the ordering stays consistent with the driver.)
     let winner = (0..hits.len())
         .max_by(|&a, &b| {
-            let sa = glyco_gp_fused_score(
+            let sa = glyco_gp_fused_score_iso(
                 hits[a].psm.rank_score,
                 hits[a].glycan_key.y_ladder_intensity_score,
                 hits[a].glycan_key.core_y_hits as f32,
@@ -625,8 +627,10 @@ pub(crate) fn select_emitted_hits(
                 gp_k,
                 gp_j,
                 0.0,
+                hits[a].psm.isotope_offset,
+                GLYCO_GP_ISO_DEFAULT,
             );
-            let sb = glyco_gp_fused_score(
+            let sb = glyco_gp_fused_score_iso(
                 hits[b].psm.rank_score,
                 hits[b].glycan_key.y_ladder_intensity_score,
                 hits[b].glycan_key.core_y_hits as f32,
@@ -634,6 +638,8 @@ pub(crate) fn select_emitted_hits(
                 gp_k,
                 gp_j,
                 0.0,
+                hits[b].psm.isotope_offset,
+                GLYCO_GP_ISO_DEFAULT,
             );
             sa.total_cmp(&sb).then(b.cmp(&a))
         })
@@ -658,7 +664,7 @@ pub(crate) fn select_emitted_hits(
         return (0..hits.len())
             .filter(|&i| hits[i].glycan_key.glycan.is_some())
             .max_by(|&a, &b| {
-                let sa = glyco_gp_fused_score(
+                let sa = glyco_gp_fused_score_iso(
                     hits[a].psm.rank_score,
                     hits[a].glycan_key.y_ladder_intensity_score,
                     hits[a].glycan_key.core_y_hits as f32,
@@ -666,8 +672,10 @@ pub(crate) fn select_emitted_hits(
                     gp_k,
                     gp_j,
                     0.0,
+                    hits[a].psm.isotope_offset,
+                    GLYCO_GP_ISO_DEFAULT,
                 );
-                let sb = glyco_gp_fused_score(
+                let sb = glyco_gp_fused_score_iso(
                     hits[b].psm.rank_score,
                     hits[b].glycan_key.y_ladder_intensity_score,
                     hits[b].glycan_key.core_y_hits as f32,
@@ -675,6 +683,8 @@ pub(crate) fn select_emitted_hits(
                     gp_k,
                     gp_j,
                     0.0,
+                    hits[b].psm.isotope_offset,
+                    GLYCO_GP_ISO_DEFAULT,
                 );
                 sa.total_cmp(&sb).then(b.cmp(&a))
             })

@@ -645,6 +645,14 @@ pub(crate) struct SearchArgs {
     #[arg(long = "glyco-gp-cz", hide = true, default_value_t = andes_glyco::glyco_psm::GLYCO_GP_CZ_DEFAULT)]
     pub(crate) glyco_gp_cz: f32,
 
+    /// `gp` selector penalty per unit of precursor isotope offset. An M+1 assignment
+    /// costs an extra assumption — that the instrument picked a non-monoisotopic
+    /// peak — so with equal fragment evidence the candidate needing no correction
+    /// wins. Only ever decisive when candidates at DIFFERENT offsets compete for one
+    /// scan. `0` reproduces the pre-fix behaviour (the A/B baseline for issue #79).
+    #[arg(long = "glyco-gp-iso", hide = true, default_value_t = andes_glyco::glyco_psm::GLYCO_GP_ISO_DEFAULT)]
+    pub(crate) glyco_gp_iso: f32,
+
     /// Require a matching sialic OXONIUM ion before a glycan composition may claim
     /// NeuAc or NeuGc, as a fraction of base-peak intensity. 0 disables the gate.
     ///

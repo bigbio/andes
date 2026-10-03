@@ -311,11 +311,72 @@ pub fn build_peptide_anchored_index(
             })
             .collect(),
     };
-    let combined = build_search_db(&minidb, decoy_prefix, decoy_strategy, seed);
+    let combined = anchored_target_plus_decoy(&minidb, decoy_prefix, decoy_strategy, seed);
     SearchIndex {
         db: combined,
         decoy_prefix: crate::decoy::normalize_decoy_prefix(decoy_prefix),
         decoy_suffix: None,
+    }
+}
+
+/// Target + decoy DB for the peptide-anchored Pass-2 index, with each decoy keeping
+/// its target's FIRST and LAST residue in place and reversing (or shuffling) only the
+/// interior.
+///
+/// Every mini-protein here is a single peptide, so a whole-sequence decoy breaks the
+/// target/decoy pairing that competition relies on. Reversing `PEPKTIDEK` gives
+/// `KEDITKPEP`: the cleavage residue moves to the front, the full-length decoy needs one
+/// more missed cleavage than its target, and under the default limit of one it is never
+/// generated. Reversal also moves an N-terminal Q/E to the C-terminus, so pyro-Glu
+/// candidates exist only on the target side. Fixing both termini keeps the decoy's
+/// cleavage pattern and N-terminal modification eligibility equal to its target's.
+fn anchored_target_plus_decoy(
+    minidb: &ProteinDb,
+    decoy_prefix: &str,
+    decoy_strategy: DecoyStrategy,
+    seed: u64,
+) -> ProteinDb {
+    let interiors = ProteinDb {
+        proteins: minidb
+            .proteins
+            .iter()
+            .map(|p| model::protein::Protein {
+                accession: p.accession.clone(),
+                description: p.description.clone(),
+                sequence: interior(&p.sequence).to_vec(),
+            })
+            .collect(),
+    };
+    let built = build_search_db(&interiors, decoy_prefix, decoy_strategy, seed);
+    let n = minidb.proteins.len();
+    let mut proteins = minidb.proteins.clone();
+    proteins.extend(
+        built
+            .proteins
+            .into_iter()
+            .skip(n)
+            .zip(minidb.proteins.iter().cycle())
+            .map(|(mut d, t)| {
+                let seq = &t.sequence;
+                if seq.len() >= 2 {
+                    let mut full = Vec::with_capacity(seq.len());
+                    full.push(seq[0]);
+                    full.extend_from_slice(&d.sequence);
+                    full.push(seq[seq.len() - 1]);
+                    d.sequence = full;
+                }
+                d
+            }),
+    );
+    ProteinDb { proteins }
+}
+
+/// The residues between the first and last; empty for sequences shorter than 3.
+fn interior(seq: &[u8]) -> &[u8] {
+    if seq.len() >= 2 {
+        &seq[1..seq.len() - 1]
+    } else {
+        seq
     }
 }
 
@@ -721,6 +782,7 @@ pub fn run_refinement(
     // are ~45 MB by comparison). Output is unchanged: each PSM still resolves to
     // the same peptide/candidate, only the internal index numbering differs.
     let pass2_total = refine_candidates.len();
+    let pass2_decoys = refine_candidates.iter().filter(|c| c.is_decoy).count();
     let mut compact: Vec<Candidate> = Vec::new();
     let mut remap: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
     let mut out_queues: Vec<TopNQueue> = Vec::with_capacity(unident.len());
@@ -769,11 +831,13 @@ pub fn run_refinement(
     // pruned winners-only count so a user/operator sees both the search cost and
     // what survives into the merged PIN.
     eprintln!(
-        "[REFINE] anchors={} unident={}/{} pass2_candidates={} (pruned to {} winners)",
+        "[REFINE] anchors={} unident={}/{} pass2_candidates={} (targets={} decoys={}) (pruned to {} winners)",
         base_seqs.len(),
         unident.len(),
         all_spectra.len(),
         pass2_total,
+        pass2_total - pass2_decoys,
+        pass2_decoys,
         compact.len(),
     );
 
@@ -1247,6 +1311,56 @@ mod tests {
         assert!(idx.db.proteins[2].accession.starts_with(&needle));
         assert!(idx.db.proteins[3].accession.starts_with(&needle));
         assert_eq!(idx.decoy_prefix, "XXX");
+    }
+
+    #[test]
+    fn anchored_decoys_keep_termini_and_pair_full_length_with_targets() {
+        // A missed cleavage (PEPKTIDEK), N-terminal Q/E for pyro-Glu (QPEPTIDEK,
+        // EAMPLENR), and an internal K far from the C-terminus (ACDKNQMR): every case
+        // where reversing the whole peptide used to leave a target without a decoy.
+        let anchors: Vec<&[u8]> = vec![
+            b"PEPTIDEK",
+            b"PEPKTIDEK",
+            b"QPEPTIDEK",
+            b"EAMPLENR",
+            b"SAMNPLEQR",
+            b"ACDKNQMR",
+        ];
+        let base_seqs: Vec<Vec<u8>> = anchors.iter().map(|a| a.to_vec()).collect();
+        let idx = build_peptide_anchored_index(&base_seqs, &[], "XXX", DecoyStrategy::Reverse, 42);
+        let n = anchors.len();
+        assert_eq!(idx.db.proteins[n].sequence, b"PEDITPEK".to_vec());
+        assert_eq!(idx.db.proteins[n + 1].sequence, b"PEDITKPEK".to_vec());
+
+        let base = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
+            .build()
+            .unwrap();
+        let set = refinement_aa_set(&base, &RefineConfig::default_tier(), true).unwrap();
+        let mut params = SearchParams::default_tryptic(set);
+        params.min_length = 6;
+        params.max_variable_mods_per_peptide = 2;
+        let cands: Vec<Candidate> =
+            crate::candidate_gen::enumerate_candidates(&idx, &params, "XXX").collect();
+        for (i, a) in anchors.iter().enumerate() {
+            let full = |prot: usize| {
+                cands
+                    .iter()
+                    .filter(|c| c.protein_index == prot && c.peptide.length() == a.len())
+                    .count()
+            };
+            let (t, d) = (full(i), full(i + n));
+            assert!(
+                t > 0,
+                "{}: no full-length target",
+                String::from_utf8_lossy(a)
+            );
+            assert_eq!(
+                t,
+                d,
+                "{}: full-length target forms {t} vs decoy forms {d}",
+                String::from_utf8_lossy(a)
+            );
+        }
     }
 
     // ── (d) refinement_aa_set ──────────────────────────────────────────────

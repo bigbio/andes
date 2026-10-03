@@ -48,6 +48,14 @@ pub struct SearchParams {
     pub precursor_tolerance: PrecursorTolerance,
     /// Charges to try for spectra without explicit charge (default 2..=3).
     pub charge_range: RangeInclusive<u8>,
+    /// Widen the searched charge set for spectra that REPORT a high charge, by one
+    /// below and this many above. 0 (default) trusts the reported charge as the only
+    /// charge, which is the historical behaviour. See `charges_to_try`.
+    pub charge_expand: u8,
+    /// Reported charge at or above which `charge_expand` applies. Below it the
+    /// reported charge is trusted, so the extra candidate work is confined to the
+    /// high-charge population where mis-calls are measured.
+    pub charge_expand_min_z: u8,
     /// Isotope offsets to try when matching the precursor mass (default
     /// -1..=2). Each offset is a unit of `ISOTOPE` (~1.00335 Da) subtracted
     /// from the spectrum's observed neutral mass before comparison.
@@ -181,6 +189,8 @@ impl SearchParams {
             max_variable_mods_per_peptide: 3,
             precursor_tolerance: PrecursorTolerance::symmetric(Tolerance::Ppm(20.0)),
             charge_range: 2..=3,
+            charge_expand: 0,
+            charge_expand_min_z: 4,
             isotope_error_range: -1..=2,
             top_n_psms_per_spectrum: 10,
             num_tolerable_termini: 2,

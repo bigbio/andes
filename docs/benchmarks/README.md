@@ -640,6 +640,50 @@ arms share the space, so the comparison holds.
 
 ---
 
+### Charge-neighbour search is REFUTED as a standalone change — and the reason is diagnosable (2026-10-03)
+
+The engine trusts a reported precursor charge as the ONLY charge searched
+(`charges_to_try`), so a mis-called charge puts the true peptide mass off the grid and
+loses the scan with no error. Mis-calls concentrate at charge 4-6, which is also where
+this engine is weakest, and the glyco path's own comment names the standard search as
+having this blind spot. `--charge-expand N` (default 0, off) widens the set by one below
+and N above for reported charges at or above `--charge-expand-min-z` (default 4).
+
+Measured, one variable, same binary. UPS1 with entrapment, 5 Percolator seeds:
+
+| arm | PSMs @1% | entrapment | FDP |
+|---|---:|---:|---:|
+| baseline | 16,120–16,175 | 117–127 | 2.48–2.69% |
+| `--charge-expand 1` | 15,988–16,102 | 101–118 | 2.16–2.51% |
+
+Astral, 3 seeds: baseline 41,323–41,437, `--charge-expand 1` 41,239.
+
+**The global count is the wrong metric, and the stratified one refutes the idea
+outright.** Only **1.83%** of Astral scans and **5.72%** of UPS1 scans report charge >= 4,
+so the affected population cannot move a headline. Counting accepted PSMs inside that
+stratum on UPS1:
+
+| stratum | baseline | `--charge-expand 1` |
+|---|---:|---:|
+| reported z >= 4 | 197–210 | **84–91** |
+| reported z < 4 | 15,914–15,972 | 15,841–16,011 |
+
+Identifications in the only population the knob touches **more than halve**. The
+mechanism is the one this repo keeps meeting: a wider candidate space with no feature
+that separates it. Three charge hypotheses per scan are offered, a wrong-charge
+hypothesis can out-score the right one, and nothing in the feature set tells Percolator
+which charge the MS1 envelope actually supports.
+
+**The prerequisite already exists by name and is dead.** `PrecursorIsotopeKL` is
+documented as the KL divergence of the precursor isotope envelope against averagine —
+exactly that missing evidence. It was a per-PSM feature of the old single-pass chimeric
+mode, dropped because it cost ~2:40 of wall on Astral, and is now hardcoded 0.0 in every
+mode. ⇒ **Restore a bounded-cost precursor-envelope charge-support feature FIRST, then
+retest charge expansion.** `--charge-expand` stays in the tree, default off, as the
+reproducible A/B baseline for that retest.
+
+---
+
 ### Refuted — do not re-try without new evidence
 
 Each was measured, not argued: the matched-ion selector term `--glyco-gp-m` (every weight

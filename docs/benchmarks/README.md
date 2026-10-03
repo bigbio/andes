@@ -684,6 +684,42 @@ reproducible A/B baseline for that retest.
 
 ---
 
+### The fragment-index top-K tie-break (2026-10-03)
+
+The index shortlists 100 candidates per spectrum by matched b/y vote count. Votes are
+small integers over a candidate set that runs to thousands, so the cut lands inside a
+large tie — and the historical secondary key was the **form id, which is mass order and
+carries no evidence at all**. At the boundary the survivors were decided by where a
+candidate happened to sit in the index.
+
+`--fragment-index-intensity-tiebreak` (default off) breaks that tie by the summed
+intensity of the matched peaks instead, keeping the form id as the final key so the order
+stays total and reproducible.
+
+**It bites, and it is free.** Astral forced out-of-core (`--candidate-index mmap`, so the
+index is the retrieval path in both arms and any index-specific bias cancels), same
+binary, one variable: of 1,093,088 rows present in both arms, **501,494 — 46% — change
+their assigned peptide**. Wall time is 254 s against 255 s.
+
+| | PSMs @1% (3 seeds) | distinct peptides |
+|---|---|---|
+| tie-break off | 51,798 · 51,906 · 51,953 | 30,053 · 30,094 · 30,133 |
+| **tie-break on** | 51,966 · 51,911 · 51,963 | **30,186 · 30,168 · 30,199** |
+
+PSMs are flat (+0.12%, inside the seed range). **Distinct peptides rise ~0.30% and the two
+ranges do not overlap** — every on-arm seed exceeds every off-arm seed.
+
+**Checked for the attrition artifact that inflated the earlier Astral index comparison:**
+the decoy share of the PIN is **46.05% off against 46.06% on**, so the tie-break is not
+preferentially removing decoys and the gain is not the bias this document warns about.
+
+⚠ Astral carries no entrapment component, so this arm cannot measure error. The default
+stays **off** until the phospho benchmark — the one dataset where the index is selected in
+production AND a 1:1 entrapment database exists — reports FDP for both arms. That is the
+arm that should decide the default.
+
+---
+
 ### Refuted — do not re-try without new evidence
 
 Each was measured, not argued: the matched-ion selector term `--glyco-gp-m` (every weight

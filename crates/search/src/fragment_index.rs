@@ -259,6 +259,7 @@ impl ChunkFragmentIndex {
     /// restricted to the spectrum's precursor windows over every charge in
     /// `charges` and every isotope offset in `params`. At most `top_k`, best
     /// votes first.
+    #[allow(clippy::too_many_arguments)]
     pub fn query(
         &self,
         spec: &Spectrum,
@@ -267,6 +268,7 @@ impl ChunkFragmentIndex {
         fragment_tol: Tolerance,
         top_k: usize,
         min_matched: u16,
+        intensity_tiebreak: bool,
     ) -> Vec<(u32, u16)> {
         // One over-inclusive precursor mass interval; the scoring loop applies
         // the exact per-offset test afterwards.
@@ -292,9 +294,12 @@ impl ChunkFragmentIndex {
         if id_lo >= id_hi {
             return Vec::new();
         }
-        let mut votes: FxHashMap<u32, u16> = FxHashMap::default();
+        // Vote count, plus the summed intensity of the peaks that produced it.
+        // The count stays the primary key — it is what `min_matched` means — and the
+        // intensity is only ever used to break ties among equal counts.
+        let mut votes: FxHashMap<u32, (u16, f32)> = FxHashMap::default();
         let n_bins = self.bin_start.len() - 1;
-        for &(mz, _) in &spec.peaks {
+        for &(mz, intensity) in &spec.peaks {
             let tol_da = fragment_tol.as_da(mz);
             let b = (mz / self.bin_width) as usize;
             for bb in b.saturating_sub(1)..=(b + 1).min(n_bins - 1) {
@@ -306,18 +311,20 @@ impl ChunkFragmentIndex {
                         break;
                     }
                     if ((e.1 as f64) - mz).abs() <= tol_da {
-                        *votes.entry(e.0).or_insert(0) += 1;
+                        let slot = votes.entry(e.0).or_insert((0, 0.0));
+                        slot.0 += 1;
+                        slot.1 += intensity;
                     }
                 }
             }
         }
-        let mut sel: Vec<(u32, u16)> = votes
+        let mut sel: Vec<(u32, u16, f32)> = votes
             .into_iter()
-            .filter(|&(_, v)| v >= min_matched)
+            .filter(|&(_, (v, _))| v >= min_matched)
+            .map(|(id, (v, inten))| (id, v, inten))
             .collect();
-        sel.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-        sel.truncate(top_k);
-        sel
+        select_top_k(&mut sel, top_k, intensity_tiebreak);
+        sel.into_iter().map(|(id, v, _)| (id, v)).collect()
     }
 
     /// Materialise selected forms as candidates, in (record, k) order, by
@@ -355,5 +362,82 @@ impl ChunkFragmentIndex {
             i = j;
         }
         out
+    }
+}
+
+
+/// Order `(form_id, votes, matched_intensity)` and keep the best `top_k`.
+///
+/// Vote counts are small integers over a candidate set that can run to thousands,
+/// so the cut at `top_k` lands inside a large tie. The historical secondary key was
+/// the form id, which is MASS order and carries no evidence at all: at the boundary
+/// the survivors were chosen by where they happened to sit in the index.
+/// `intensity_tiebreak` orders that tie by the summed intensity of the matched peaks
+/// instead. The form id stays the FINAL key either way, because the order must be
+/// total and reproducible — this repo has had an FDR swing from a non-deterministic
+/// sort in the candidate path.
+pub(crate) fn select_top_k(sel: &mut Vec<(u32, u16, f32)>, top_k: usize, intensity_tiebreak: bool) {
+    if intensity_tiebreak {
+        sel.sort_unstable_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| b.2.total_cmp(&a.2))
+                .then_with(|| a.0.cmp(&b.0))
+        });
+    } else {
+        sel.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    }
+    sel.truncate(top_k);
+}
+
+#[cfg(test)]
+mod select_top_k_tests {
+    use super::select_top_k;
+
+    /// The case the change exists for: equal vote counts, so the historical key
+    /// (form id = mass order) decides, and it decides on nothing.
+    #[test]
+    fn a_tie_is_broken_by_evidence_not_by_position_in_the_index() {
+        // Form 7 carries the stronger evidence; form 3 sits earlier in the index.
+        // The two keys therefore disagree, which is what makes the assertion mean something.
+        let rows = || vec![(7u32, 5u16, 900.0f32), (3u32, 5u16, 10.0f32)];
+
+        let mut mass_order = rows();
+        select_top_k(&mut mass_order, 1, false);
+        assert_eq!(mass_order[0].0, 3, "historical key keeps the lower form id");
+
+        let mut by_evidence = rows();
+        select_top_k(&mut by_evidence, 1, true);
+        assert_eq!(
+            by_evidence[0].0, 7,
+            "with the intensity tie-break the better-supported form survives"
+        );
+    }
+
+    /// A real vote difference must still win: intensity is a TIE-break only.
+    #[test]
+    fn a_higher_vote_count_still_wins_outright() {
+        let mut sel = vec![(1u32, 9u16, 1.0f32), (2u32, 4u16, 5000.0f32)];
+        select_top_k(&mut sel, 1, true);
+        assert_eq!(sel[0].0, 1, "9 votes must beat 4 regardless of intensity");
+    }
+
+    /// Both orders must be total, so a rerun selects the same set.
+    #[test]
+    fn ordering_is_deterministic_under_a_full_tie() {
+        for flag in [false, true] {
+            let mut a = vec![
+                (5u32, 3u16, 1.0f32),
+                (2u32, 3u16, 1.0f32),
+                (9u32, 3u16, 1.0f32),
+            ];
+            let mut b = vec![
+                (9u32, 3u16, 1.0f32),
+                (5u32, 3u16, 1.0f32),
+                (2u32, 3u16, 1.0f32),
+            ];
+            select_top_k(&mut a, 2, flag);
+            select_top_k(&mut b, 2, flag);
+            assert_eq!(a, b, "input order must not survive into the selection");
+        }
     }
 }

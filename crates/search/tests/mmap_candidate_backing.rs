@@ -588,7 +588,7 @@ fn fragment_index_ranks_the_true_peptide_first_on_exact_spectra() {
         };
         let truth = sig(&cands[best.primary_candidate_idx() as usize]);
         let z = spec.precursor_charge.unwrap() as u8;
-        let sel = fi.query(spec, &[z], &params, Tolerance::Da(0.05), 5, 3);
+        let sel = fi.query(spec, &[z], &params, Tolerance::Da(0.05), 5, 3, false);
         assert!(!sel.is_empty(), "{}: no votes", spec.title);
         let mats = fi.materialise(&sel, &idx, &params, None, &|_| {});
         let picks: Vec<Vec<(u8, i64)>> = mats.iter().map(sig).collect();
@@ -631,7 +631,7 @@ fn fragment_index_prunes_to_the_window_and_still_finds_the_true_peptide() {
             m + 1.0,
         );
         let z = spec.precursor_charge.unwrap() as u8;
-        let sel = fi.query(spec, &[z], &params, Tolerance::Da(0.05), 5, 3);
+        let sel = fi.query(spec, &[z], &params, Tolerance::Da(0.05), 5, 3, false);
         assert!(!sel.is_empty(), "{}: no votes", spec.title);
         let mats = fi.materialise(&sel, &idx, &params, None, &|_| {});
         let seqs: Vec<Vec<u8>> = mats

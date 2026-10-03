@@ -105,6 +105,10 @@ pub struct SearchParams {
     /// Fragment-index mode: minimum singly-charged b/y ions a peptidoform must
     /// match to be scored at all. Default 3.
     pub fragment_index_min_matched: u16,
+    /// Break ties among equal fragment-index vote counts by the summed intensity of
+    /// the matched peaks, instead of by form id (which is mass order and carries no
+    /// evidence). `false` is the historical behaviour. See `ChunkFragmentIndex::query`.
+    pub fragment_index_intensity_tiebreak: bool,
     /// Learned file-wide ppm shift applied to observed neutral masses in the
     /// main pass. Stays 0.0 until the pre-pass calibrator runs.
     pub precursor_mass_shift_ppm: f64,
@@ -200,6 +204,7 @@ impl SearchParams {
             mmap_window_cache_max_candidates: 4_000_000,
             fragment_index_top_k: 0,
             fragment_index_min_matched: 3,
+            fragment_index_intensity_tiebreak: false,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,

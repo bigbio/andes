@@ -217,6 +217,17 @@ pub(crate) struct SearchArgs {
     #[arg(long = "fragment-index-min-matched", hide = true)]
     pub(crate) fragment_index_min_matched: Option<u16>,
 
+    /// Fragment-index mode: break ties among equal vote counts by the summed
+    /// intensity of the matched peaks, instead of by form id.
+    ///
+    /// Vote counts are small integers over thousands of candidates, so the cut at
+    /// the top-K shortlist lands inside a large tie, and the historical secondary
+    /// key is the form id — which is MASS order and carries no evidence. At the
+    /// boundary the survivors are decided by where a candidate happens to sit in
+    /// the index. Default off pending a measured arm against the enumeration path.
+    #[arg(long = "fragment-index-intensity-tiebreak", hide = true, default_value_t = false)]
+    pub(crate) fragment_index_intensity_tiebreak: bool,
+
     /// Fragment-index mode: precursor-mass width of one index slice in Da.
     /// Default: derived from the memory budget (10–150 Da; ~0.13 GB per Da on
     /// a phospho search).

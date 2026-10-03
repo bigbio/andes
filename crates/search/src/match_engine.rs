@@ -929,6 +929,7 @@ impl<'a> PreparedSearch<'a> {
                                 scorer.feature_match_tolerance(),
                                 params.fragment_index_top_k as usize,
                                 params.fragment_index_min_matched,
+                                params.fragment_index_intensity_tiebreak,
                             );
                             let target_bare_seqs = self
                                 .mmap_target_bare_seqs

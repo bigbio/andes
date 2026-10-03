@@ -229,6 +229,28 @@ pub(crate) struct SearchArgs {
     #[arg(long = "precursor-tol", default_value = "20ppm", value_parser = parse_precursor_tol)]
     pub(crate) precursor_tol: Tolerance,
 
+    /// Widen the searched charge set for spectra that REPORT a high charge: one
+    /// charge below and this many above. `0` (default) trusts the reported charge as
+    /// the only charge, which is the historical behaviour.
+    ///
+    /// WHY: a mis-called precursor charge puts the true peptide mass off the searched
+    /// grid entirely, so the scan is lost with no error. Mis-calls concentrate at
+    /// charge 4-6, which is also where this engine's identification rate is weakest.
+    /// The glyco path already carries the equivalent knob and documents the standard
+    /// search as having the same blind spot.
+    ///
+    /// COST: this multiplies the candidate loop for every affected spectrum, which is
+    /// why it is gated by `--charge-expand-min-z` and defaults off pending a measured
+    /// identification-versus-wall-time arm.
+    #[arg(long = "charge-expand", hide = true, default_value_t = 0)]
+    pub(crate) charge_expand: u8,
+
+    /// Reported charge at or above which `--charge-expand` applies. Below it the
+    /// reported charge is trusted, confining the extra work to the high-charge
+    /// population where mis-calls are measured.
+    #[arg(long = "charge-expand-min-z", hide = true, default_value_t = 4)]
+    pub(crate) charge_expand_min_z: u8,
+
     /// Precursor charge range to try when not specified in the spectrum, as
     /// `MIN..MAX` (also accepts `MIN-MAX`). Default `2..5`.
     #[arg(long = "charge", hide = true, default_value = "2..5", value_parser = parse_charge_range)]

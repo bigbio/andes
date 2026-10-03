@@ -265,11 +265,31 @@ pub(crate) fn candidate_nominal_bounds(
     (min_nominal, max_nominal)
 }
 
-/// The charge states a spectrum is searched at: the explicit precursor charge
-/// when present, otherwise the configured charge range.
+/// The charge states a spectrum is searched at.
+///
+/// With `charge_expand == 0` (the default) this is the historical behaviour: the
+/// reported precursor charge is trusted as the ONLY charge, else the configured
+/// range. That trust is the standard-search half of the charge blind spot the
+/// glyco path documents (`glyco_charges_to_try`): instrument charge mis-calls
+/// concentrate at z4-z6, and a mis-called charge puts the true peptide mass off
+/// the searched grid entirely, so the scan is lost with no error.
+///
+/// With `charge_expand == N >= 1` the set widens for reported charges at or above
+/// `charge_expand_min_z`: one charge BELOW (over-call) and `N` above (under-call),
+/// clamped to >= 1. Low reported charges are left alone, because that is where the
+/// acquisition is reliable and where the cost of tripling the candidate loop would
+/// be paid on every spectrum for nothing.
 fn charges_to_try(spec: &Spectrum, params: &SearchParams) -> SmallVec<[u8; 4]> {
     match spec.precursor_charge {
-        Some(z) if z > 0 => smallvec![z as u8],
+        Some(z) if z > 0 => {
+            let z = z as u8;
+            if params.charge_expand == 0 || z < params.charge_expand_min_z {
+                return smallvec![z];
+            }
+            let lo = z.saturating_sub(1).max(1);
+            let hi = z.saturating_add(params.charge_expand);
+            (lo..=hi).collect()
+        }
         _ => params.charge_range.clone().collect(),
     }
 }
@@ -2193,6 +2213,74 @@ fn reject_unsupported_mmap_combo(params: &SearchParams) -> std::io::Result<()> {
 }
 
 // ── Unit tests for feature columns ───────────────────────────────────────────
+
+#[cfg(test)]
+mod charges_to_try_tests {
+    use super::charges_to_try;
+    use crate::search_params::SearchParams;
+    use model::aa_set::AminoAcidSetBuilder;
+    use model::Spectrum;
+
+    fn params() -> SearchParams {
+        let aa = AminoAcidSetBuilder::new_standard().build().unwrap();
+        SearchParams::default_tryptic(aa)
+    }
+
+    fn spec(charge: Option<i32>) -> Spectrum {
+        Spectrum {
+            precursor_charge: charge,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn default_trusts_the_reported_charge_alone() {
+        let p = params();
+        assert_eq!(p.charge_expand, 0, "expansion must ship off");
+        assert_eq!(charges_to_try(&spec(Some(5)), &p).as_slice(), &[5]);
+    }
+
+    #[test]
+    fn missing_charge_still_falls_back_to_the_range() {
+        let p = params();
+        assert_eq!(charges_to_try(&spec(None), &p).as_slice(), &[2, 3]);
+    }
+
+    /// The point of the knob: a mis-called high charge puts the true peptide mass
+    /// off the searched grid, so one below and `expand` above are tried.
+    #[test]
+    fn expansion_covers_one_below_and_n_above() {
+        let mut p = params();
+        p.charge_expand = 2;
+        assert_eq!(charges_to_try(&spec(Some(5)), &p).as_slice(), &[4, 5, 6, 7]);
+    }
+
+    /// Low reported charges are left alone, confining the extra candidate work to
+    /// the population where mis-calls are measured.
+    #[test]
+    fn low_charges_are_untouched_by_expansion() {
+        let mut p = params();
+        p.charge_expand = 2;
+        assert_eq!(p.charge_expand_min_z, 4);
+        assert_eq!(charges_to_try(&spec(Some(2)), &p).as_slice(), &[2]);
+        assert_eq!(charges_to_try(&spec(Some(3)), &p).as_slice(), &[3]);
+        // z=4 is at the threshold: one below, two above.
+        assert_eq!(charges_to_try(&spec(Some(4)), &p).as_slice(), &[3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn charge_one_never_becomes_zero() {
+        let mut p = params();
+        p.charge_expand = 1;
+        p.charge_expand_min_z = 1;
+        let got = charges_to_try(&spec(Some(1)), &p);
+        assert!(
+            got.iter().all(|&z| z >= 1),
+            "charge 0 is not a charge: {got:?}"
+        );
+        assert_eq!(got.as_slice(), &[1, 2]);
+    }
+}
 
 #[cfg(test)]
 mod mmap_combo_tests {

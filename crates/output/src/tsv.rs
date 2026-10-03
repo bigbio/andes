@@ -395,6 +395,8 @@ mod tests {
             max_variable_mods_per_peptide: 3,
             precursor_tolerance: PrecursorTolerance::symmetric(Tolerance::Ppm(20.0)),
             charge_range: 2..=3,
+            charge_expand: 0,
+            charge_expand_min_z: 4,
             isotope_error_range: -1..=2,
             top_n_psms_per_spectrum: 10,
             num_tolerable_termini: 2,

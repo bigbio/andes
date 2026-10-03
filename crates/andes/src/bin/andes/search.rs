@@ -492,6 +492,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Ranges are validated (min <= max) by the clap value parsers.
     let (charge_min, charge_max) = cli.charge;
     params.charge_range = charge_min..=charge_max;
+    params.charge_expand = cli.charge_expand;
+    params.charge_expand_min_z = cli.charge_expand_min_z;
     // Round-8: resolve the default by MODE, not by sniffing the value. An explicit
     // `--isotope-error` (any range, including -1..2) is always honoured verbatim.
     // Unset under --glyco defaults to 0..=2: an MS1 envelope audit found the firmware

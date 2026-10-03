@@ -165,9 +165,17 @@ Opt-in two-pass search for co-isolated (co-fragmented) peptides. Requires an MS1
 | `--chimeric-max-kl` | f64 | `0.3` | *(advanced)* Max isotope-envelope KL divergence to accept a co-isolated precursor. |
 | `--chimeric-allow-overlap` | flag | *(off)* | *(advanced)* Let a pass-2 candidate overlap the primary's matched peaks. Off because the residual spectrum has those peaks removed; allowing overlap lets one piece of evidence support two PSMs. |
 
-### Refine — PTM discovery cascade
+### Refine — secondary chemistry cascade
 
-Opt-in second pass over confident proteins that opens the modification search space to discover PTMs.
+Opt-in second pass over confident proteins that searches a **fixed secondary modification
+tier** on the spectra pass 1 did not identify.
+
+It does **not** discover modifications. The tier is five named chemistries — oxidation on
+M/P/K, deamidation on N/Q, the two pyro-Glu N-terminal losses, and protein N-terminal
+acetyl — at most two per peptide, and the precursor tolerance is unchanged from pass 1.
+Every mass it can find was declared in advance, by this tier or by your own
+`--refine-config`. andes has no open or mass-offset search: a modification it was not told
+about cannot be found, and an unassigned mass cannot be localised.
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
@@ -305,7 +313,7 @@ There are **two score columns**, easy to confuse:
 
 Most of the columns after `matchedIonRatio` are **additive** features: extra evidence Percolator can learn weights for without perturbing the core score distribution. Several are **0.0 unless a flag/model is active** — see the note after the table.
 
-`--chimeric` does **not** change the column set. It populates `PrecursorIsotopeKL` / `PrecursorSNR` (`0.0` otherwise) from a linked MS1, and — because a scan can then emit several rows — appends a per-row index to multi-row `SpecId`s (see below). Multi-row scans also occur without `--chimeric` whenever rank-1 candidates tie.
+`--chimeric` does **not** change the column set. It does **not** populate `PrecursorIsotopeKL` / `PrecursorSNR` either — those are always `0.0` today (see the table) — and — because a scan can then emit several rows — appends a per-row index to multi-row `SpecId`s (see below). Multi-row scans also occur without `--chimeric` whenever rank-1 candidates tie.
 
 | # | Column | Type | Range | Description |
 |---|---|---|---|---|
@@ -339,7 +347,7 @@ Most of the columns after `matchedIonRatio` are **additive** features: extra evi
 | 31 | `StdevRelErrorTop7` | float | ≥0 | Population stdev of signed ppm errors (top-7). |
 | 32 | `matchedIonRatio` | float | [0, 1] | `NumMatchedMainIons / peplen`. |
 | 33 | `EdgeScore` | int | unbounded | Per-bond edge-score sum (ion-existence + error); additive. |
-| 34 | `PrecursorIsotopeKL` | float | ≥0 | KL divergence of precursor isotope envelope vs averagine. **0.0 unless `--chimeric`.** |
+| 34 | `PrecursorIsotopeKL` | float | ≥0 | KL divergence of precursor isotope envelope vs averagine. **Currently always 0.0**, including under `--chimeric`: it belonged to the old single-pass chimeric mode and the two-pass cascade does not compute it. Kept in the schema because consumers index columns positionally. |
 | 35 | `PrecursorSNR` | float | ≥0 | Precursor SNR from the MS1 envelope. **0.0 unless `--chimeric`.** |
 | 36 | `DeltaRankScore` | float | ≥0 | `RankScore(best) − RankScore(2nd-best distinct peptide)`; rank-1 row only, else 0.0. |
 | 37 | `TailorScore` | float | ≥0 | `RankScore ÷` spectrum's top-1% quantile; cross-spectrum comparability. |

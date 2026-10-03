@@ -441,7 +441,12 @@ fn write_header<W: Write>(writer: &mut W, min_charge: u8, max_charge: u8) -> io:
         "EdgeScore".to_string(),
         // ADDITIVE chimeric MS1 precursor-envelope features: emitted
         // adjacent to EdgeScore so they sit just before Peptide/Proteins.
-        // Both are 0.0 unless `--chimeric` populates them from a linked MS1.
+        // Both are CURRENTLY ALWAYS 0.0, including under `--chimeric`: the two-pass
+        // cascade computes its own co-isolation features and does not consume these
+        // (see the note in match_engine.rs where they are left at their defaults).
+        // They are kept in the schema because downstream consumers index PIN columns
+        // positionally; `crates/andes/tests/pin_constant_columns.rs` pins the set so it cannot
+        // grow silently.
         "PrecursorIsotopeKL".to_string(),
         "PrecursorSNR".to_string(),
         // ADDITIVE top-1 dominance feature: RawScore(best) − RawScore(2nd-best
@@ -962,6 +967,8 @@ mod tests {
             max_variable_mods_per_peptide: 3,
             precursor_tolerance: PrecursorTolerance::symmetric(Tolerance::Ppm(20.0)),
             charge_range,
+            charge_expand: 0,
+            charge_expand_min_z: 4,
             isotope_error_range: -1..=2,
             top_n_psms_per_spectrum: 10,
             num_tolerable_termini: 2,

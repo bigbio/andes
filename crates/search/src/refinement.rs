@@ -577,6 +577,49 @@ pub fn mod_count_and_class(peptide: &Peptide, cfg: &RefineConfig) -> (u32, u32) 
     (num_mods, class_id)
 }
 
+/// Daltons between successive precursor isotope peaks (13C minus 12C).
+const ISOTOPE_STEP_DA: f64 = 1.003_355;
+/// A variable mod within this many daltons of one or two isotope steps can be
+/// mimicked by a precursor picked on the wrong isotope peak.
+const ISOTOPE_MIMIC_TOL_DA: f64 = 0.05;
+
+/// Total mass the peptide's isotope-like variable mods differ from whole isotope
+/// steps: `Σ (k·step − delta)` over mods with `delta ≈ k·step`, `1 ≤ |k| ≤ 2`.
+/// Deamidation (+0.984016) contributes +0.019339 per site.
+fn isotope_mimic_shift_da(peptide: &Peptide) -> f64 {
+    peptide
+        .residues
+        .iter()
+        .filter_map(|aa| aa.mod_.as_ref())
+        .filter(|m| !m.fixed)
+        .filter_map(|m| {
+            let k = (m.mass_delta / ISOTOPE_STEP_DA).round();
+            let gap = k * ISOTOPE_STEP_DA - m.mass_delta;
+            (k != 0.0 && k.abs() <= 2.0 && gap.abs() < ISOTOPE_MIMIC_TOL_DA).then_some(gap)
+        })
+        .sum()
+}
+
+/// Whether the precursor mass is better explained by the same peptide WITHOUT its
+/// isotope-like mods, observed on a precursor picked that many isotope peaks high.
+///
+/// Deamidation (+0.984) sits 19 mDa from one isotope step (+1.003). When an unmodified
+/// peptide's precursor is picked on its M+1 peak, the deamidated candidate fits the
+/// precursor within tolerance and pairs with spectra Pass 1 already scored. Decoys
+/// cannot model this, so on Astral 61% of accepted deamidations sat at the
+/// mis-pick position. `mass_error_ppm` is `peptide − spectrum`; replacing the mods
+/// with whole isotope steps moves the error by `isotope_mimic_shift_da`, and the PSM
+/// is a mimic when that alternative error is the smaller one. The rule reads only
+/// the precursor mass, so it applies to targets and decoys alike.
+fn isotope_mimic_fits_better(peptide: &Peptide, mass_error_ppm: f64) -> bool {
+    let shift = isotope_mimic_shift_da(peptide);
+    if shift == 0.0 {
+        return false;
+    }
+    let err_da = mass_error_ppm * 1e-6 * peptide.mass();
+    (err_da + shift).abs() < err_da.abs()
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // (f) run_refinement
 // ─────────────────────────────────────────────────────────────────────────────
@@ -783,6 +826,7 @@ pub fn run_refinement(
     // the same peptide/candidate, only the internal index numbering differs.
     let pass2_total = refine_candidates.len();
     let pass2_decoys = refine_candidates.iter().filter(|c| c.is_decoy).count();
+    let mut isotope_mimics = 0usize;
     let mut compact: Vec<Candidate> = Vec::new();
     let mut remap: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
     let mut out_queues: Vec<TopNQueue> = Vec::with_capacity(unident.len());
@@ -801,6 +845,13 @@ pub fn run_refinement(
             // spectrum) and must not be emitted as refinement rows (`is_refinement=1`)
             // or they inflate the modified count and double-count per scan.
             if num_mods == 0 {
+                continue;
+            }
+            if isotope_mimic_fits_better(
+                &refine_candidates[psm.primary_candidate_idx() as usize].peptide,
+                psm.mass_error_ppm,
+            ) {
+                isotope_mimics += 1;
                 continue;
             }
             psm.features.is_refinement = 1;
@@ -831,7 +882,7 @@ pub fn run_refinement(
     // pruned winners-only count so a user/operator sees both the search cost and
     // what survives into the merged PIN.
     eprintln!(
-        "[REFINE] anchors={} unident={}/{} pass2_candidates={} (targets={} decoys={}) (pruned to {} winners)",
+        "[REFINE] anchors={} unident={}/{} pass2_candidates={} (targets={} decoys={}) (pruned to {} winners; {} dropped as isotope mimics)",
         base_seqs.len(),
         unident.len(),
         all_spectra.len(),
@@ -839,6 +890,7 @@ pub fn run_refinement(
         pass2_total - pass2_decoys,
         pass2_decoys,
         compact.len(),
+        isotope_mimics,
     );
 
     Some(RefinementOutput {
@@ -1571,6 +1623,39 @@ mod tests {
         };
         let aa = AminoAcid::standard(residue).unwrap().with_mod(m);
         Peptide::new(vec![aa, AminoAcid::standard(b'G').unwrap()], b'_', b'-')
+    }
+
+    #[test]
+    fn isotope_mimic_shift_counts_only_isotope_like_mods() {
+        let deam = isotope_mimic_shift_da(&modded_pep(b'N', 0.984016));
+        assert!((deam - 0.019339).abs() < 1e-5, "deamidation gap {deam}");
+        // Oxidation, acetyl and pyro-Glu are not within 50 mDa of ±1–2 isotope steps.
+        for d in [15.994915, 42.010565, -17.026549, -18.010565] {
+            assert_eq!(
+                isotope_mimic_shift_da(&modded_pep(b'Q', d)),
+                0.0,
+                "delta {d}"
+            );
+        }
+        assert_eq!(isotope_mimic_shift_da(&unmod_peptide(b"PEPTIDE")), 0.0);
+    }
+
+    #[test]
+    fn isotope_mimic_drops_deamidation_at_the_mis_pick_position_only() {
+        let pep = modded_pep(b'N', 0.984016);
+        let ppm = |err_da: f64| err_da / pep.mass() * 1e6;
+        // Peptide 19 mDa lighter than the precursor: an M+1 pick of the unmodified form.
+        assert!(isotope_mimic_fits_better(&pep, ppm(-0.0193)));
+        assert!(isotope_mimic_fits_better(&pep, ppm(-0.012)));
+        // A real deamidation sits near zero error.
+        assert!(!isotope_mimic_fits_better(&pep, ppm(0.0)));
+        assert!(!isotope_mimic_fits_better(&pep, ppm(-0.008)));
+        assert!(!isotope_mimic_fits_better(&pep, ppm(0.01)));
+        // No isotope-like mod: never a mimic.
+        assert!(!isotope_mimic_fits_better(
+            &modded_pep(b'M', 15.994915),
+            ppm(-0.0193)
+        ));
     }
 
     #[test]

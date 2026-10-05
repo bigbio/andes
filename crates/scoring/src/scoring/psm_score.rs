@@ -43,6 +43,12 @@ fn trace_pep_filter() -> Option<&'static String> {
     .as_ref()
 }
 
+/// Whether `scorer` can give an edge a non-zero score: it needs a mass-error
+/// distribution and an ion-existence table (low-res models carry neither).
+pub fn edge_scoring_enabled(scorer: &RankScorer) -> bool {
+    scorer.param().error_scaling_factor != 0 && !scorer.param().ion_existence_table.is_empty()
+}
+
 /// Sum the per-cleavage *edge* (bond) scores for a PSM.
 ///
 /// Where [`score_psm`] scores the prefix/suffix *nodes* at each cleavage site,
@@ -68,6 +74,11 @@ pub fn psm_edge_score(
     }
     let n = peptide.length();
     if n < 2 {
+        return 0;
+    }
+    // Every edge scores 0 without an error model or existence table (see
+    // `ScoredSpectrum::edge_score`); skip building the prefix arrays.
+    if !edge_scoring_enabled(scorer) {
         return 0;
     }
 

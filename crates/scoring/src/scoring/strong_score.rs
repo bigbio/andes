@@ -58,9 +58,7 @@ pub fn predict_frag_intensities(
             )
         })
         .collect();
-    let rows: Vec<&[f32]> = feats.iter().map(|f| f.as_slice()).collect();
-    let mut raw = vec![0.0f32; rows.len()];
-    frag_model.predict_value_batch(&rows, &mut raw);
+    let raw = predict_frag_values_memo(frag_model, &feats);
     raw.iter()
         .map(|&log_rel| {
             let v = f64::from(log_rel);
@@ -70,6 +68,66 @@ pub fn predict_frag_intensities(
             v.clamp(-LOG_INTENSITY_CLAMP, LOG_INTENSITY_CLAMP).exp()
         })
         .collect()
+}
+
+/// Feature row bits, the memo key for [`predict_frag_values_memo`].
+type FragRowKey = [u32; crate::frag_features::N_FRAG_FEATURES];
+
+/// Per-thread cap on memoised fragment rows; the memo is cleared when it fills.
+const FRAG_MEMO_CAP: usize = 1 << 17;
+
+thread_local! {
+    /// (model identity, row bits) -> raw GBDT value.
+    static FRAG_MEMO: std::cell::RefCell<(usize, rustc_hash::FxHashMap<FragRowKey, f32>)> =
+        std::cell::RefCell::new((0, rustc_hash::FxHashMap::default()));
+}
+
+/// Raw fragment-model values for `feats`, memoised per thread.
+///
+/// The 19 fragment features describe the ion and the peptide, never the spectrum,
+/// so identical rows recur across candidates and spectra (about 2x on small runs,
+/// more on large ones). Hits return the stored value; misses go through
+/// `predict_value_batch` together. The value of a row does not depend on the other
+/// rows in the batch, so the output is bit-identical to an unmemoised call.
+///
+/// The memo is keyed to the model by the address of its tree storage and cleared
+/// when another model is seen, so one model's values are never served for another
+/// while it is alive.
+fn predict_frag_values_memo(
+    frag_model: &GbdtPeakModel,
+    feats: &[[f32; crate::frag_features::N_FRAG_FEATURES]],
+) -> Vec<f32> {
+    let model_id = frag_model.trees.as_ptr() as usize ^ frag_model.trees.len().rotate_left(48);
+    let key =
+        |f: &[f32; crate::frag_features::N_FRAG_FEATURES]| -> FragRowKey { f.map(f32::to_bits) };
+    FRAG_MEMO.with(|cell| {
+        let mut memo = cell.borrow_mut();
+        if memo.0 != model_id {
+            memo.0 = model_id;
+            memo.1.clear();
+        }
+        let mut out = vec![0.0f32; feats.len()];
+        let mut miss_idx: Vec<usize> = Vec::new();
+        for (i, f) in feats.iter().enumerate() {
+            match memo.1.get(&key(f)) {
+                Some(&v) => out[i] = v,
+                None => miss_idx.push(i),
+            }
+        }
+        if !miss_idx.is_empty() {
+            let rows: Vec<&[f32]> = miss_idx.iter().map(|&i| feats[i].as_slice()).collect();
+            let mut raw = vec![0.0f32; rows.len()];
+            frag_model.predict_value_batch(&rows, &mut raw);
+            if memo.1.len() + miss_idx.len() > FRAG_MEMO_CAP {
+                memo.1.clear();
+            }
+            for (&i, &v) in miss_idx.iter().zip(&raw) {
+                out[i] = v;
+                memo.1.insert(key(&feats[i]), v);
+            }
+        }
+        out
+    })
 }
 
 #[inline]

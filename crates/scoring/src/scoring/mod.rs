@@ -8,9 +8,9 @@ pub mod strong_score;
 
 pub use fragment_ions::{predict_by_ions, predict_cz_ions, PredictedIon};
 pub use psm_score::{
-    cz_hyperscore_psm, cz_matched_intensity_frac, cz_structure_features, hyperscore_psm,
-    hyperscore_psm_with_matches, init_cz_settings, psm_edge_existence_facts, psm_edge_score,
-    score_psm, score_psm_float, CzSettings,
+    cz_hyperscore_psm, cz_matched_intensity_frac, cz_structure_features, edge_scoring_enabled,
+    hyperscore_psm, hyperscore_psm_with_matches, init_cz_settings, psm_edge_existence_facts,
+    psm_edge_score, score_psm, score_psm_float, CzSettings,
 };
 pub use rank_scorer::RankScorer;
 pub use scored_spectrum::{

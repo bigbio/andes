@@ -115,6 +115,10 @@ pub struct PreparedSearch<'a> {
     /// `nominal(peptide.mass() - H2O)` → indices into `candidates`. Empty in
     /// `Mmap` mode (candidate resolution goes through `mmap_index` instead).
     pub bucket_index: BTreeMap<i32, Vec<usize>>,
+    /// Indices into `candidates` sorted by exact neutral mass (ties by index).
+    /// The `Ram` path binary-searches it per (charge, isotope offset) instead of
+    /// walking whole nominal buckets. Empty in `Mmap` mode.
+    mass_order: Vec<u32>,
     /// Candidate-resolution mode. `Ram` (default) leaves every code path
     /// byte-identical to before this field existed.
     pub backing_mode: CandidateBacking,
@@ -226,7 +230,55 @@ impl MmapAccumulator {
 pub struct PreparedParts {
     candidates: Vec<Candidate>,
     bucket_index: BTreeMap<i32, Vec<usize>>,
+    mass_order: Vec<u32>,
     aa_set_for_scoring: AminoAcidSet,
+}
+
+/// Candidate indices sorted by exact neutral mass, ties by index.
+fn build_mass_order(candidates: &[Candidate]) -> Vec<u32> {
+    let mut order: Vec<u32> = (0..candidates.len() as u32).collect();
+    order.par_sort_unstable_by(|&a, &b| {
+        candidates[a as usize]
+            .peptide
+            .mass()
+            .total_cmp(&candidates[b as usize].peptide.mass())
+            .then(a.cmp(&b))
+    });
+    order
+}
+
+/// Widening of the exact-mass lookup window, in Da. The lookup only decides which
+/// candidates are visited; `matches_precursor` still makes the decision, so the
+/// window must never be narrower than its acceptance band.
+const MASS_LOOKUP_SLACK_DA: f64 = 1e-6;
+
+/// Append the indices of every candidate whose mass can pass `matches_precursor`
+/// at (`charge`, `isotope_offset`). Mirrors its arithmetic: the observed neutral
+/// mass after the calibration shift and isotope correction, `tolerance.left` below
+/// it and `tolerance.right` above it.
+#[allow(clippy::too_many_arguments)]
+fn extend_with_precursor_matches(
+    out: &mut Vec<usize>,
+    mass_order: &[u32],
+    candidates: &[Candidate],
+    spec: &Spectrum,
+    charge: u8,
+    isotope_offset: i8,
+    tolerance: &model::tolerance::PrecursorTolerance,
+    shift_ppm: f64,
+) {
+    if charge == 0 {
+        return;
+    }
+    let z = charge as f64;
+    let observed = adjusted_observed_neutral_mass(spec.precursor_mz * z - z * PROTON, shift_ppm)
+        - (isotope_offset as f64) * model::mass::ISOTOPE;
+    let lo = observed - tolerance.left.as_da(observed) - MASS_LOOKUP_SLACK_DA;
+    let hi = observed + tolerance.right.as_da(observed) + MASS_LOOKUP_SLACK_DA;
+    let mass = |i: &u32| candidates[*i as usize].peptide.mass();
+    let start = mass_order.partition_point(|i| mass(i) < lo);
+    let end = start + mass_order[start..].partition_point(|i| mass(i) <= hi);
+    out.extend(mass_order[start..end].iter().map(|&i| i as usize));
 }
 
 /// Derive the inclusive `[min_nominal, max_nominal]` nominal-mass bucket bounds
@@ -352,6 +404,7 @@ impl<'a> PreparedSearch<'a> {
             let nominal = cand.peptide.nominal_residue_mass();
             bucket_index.entry(nominal).or_default().push(cand_idx);
         }
+        let mass_order = build_mass_order(&candidates);
 
         // Build an aa_set clone with enzyme registered (for cleavage scoring).
         // Defaults: peptide_eff = 0.95, neighboring_eff = 0.95.
@@ -369,6 +422,7 @@ impl<'a> PreparedSearch<'a> {
             fragment_tolerance_da,
             candidates,
             bucket_index,
+            mass_order,
             backing_mode: CandidateBacking::Ram,
             mmap_index: None,
             mmap_accum: None,
@@ -448,6 +502,7 @@ impl<'a> PreparedSearch<'a> {
             fragment_tolerance_da,
             candidates: Vec::new(),
             bucket_index: BTreeMap::new(),
+            mass_order: Vec::new(),
             backing_mode: CandidateBacking::Mmap,
             mmap_index: Some(mmap_index),
             mmap_accum: Some(Mutex::new(MmapAccumulator::default())),
@@ -476,6 +531,7 @@ impl<'a> PreparedSearch<'a> {
         PreparedParts {
             candidates: self.candidates,
             bucket_index: self.bucket_index,
+            mass_order: self.mass_order,
             aa_set_for_scoring: self.aa_set_for_scoring,
         }
     }
@@ -498,6 +554,7 @@ impl<'a> PreparedSearch<'a> {
             fragment_tolerance_da,
             candidates: parts.candidates,
             bucket_index: parts.bucket_index,
+            mass_order: parts.mass_order,
             backing_mode: CandidateBacking::Ram,
             mmap_index: None,
             mmap_accum: None,
@@ -676,7 +733,6 @@ impl<'a> PreparedSearch<'a> {
         let scorer = self.scorer;
         let fragment_tolerance_da = self.fragment_tolerance_da;
         let candidates = &self.candidates;
-        let bucket_index = &self.bucket_index;
         let aa_set_for_scoring = &self.aa_set_for_scoring;
         // Out-of-core (`Mmap`) backing handles, `None` on the default `Ram` path.
         let mmap_accum = self.mmap_accum.as_ref();
@@ -909,12 +965,19 @@ impl<'a> PreparedSearch<'a> {
                 let mut mmap_cands_owned: Vec<Candidate> = Vec::new();
                 match self.backing_mode {
                     CandidateBacking::Ram => {
-                        window_cand_indices.reserve(2048);
+                        window_cand_indices.reserve(512);
                         for &z in &charges_to_try {
-                            let (min_nominal, max_nominal) =
-                                candidate_nominal_bounds(spec, z, params, shift_ppm);
-                            for (_nm, idxs) in bucket_index.range(min_nominal..=max_nominal) {
-                                window_cand_indices.extend_from_slice(idxs);
+                            for offset in params.isotope_error_range.clone() {
+                                extend_with_precursor_matches(
+                                    &mut window_cand_indices,
+                                    &self.mass_order,
+                                    candidates,
+                                    spec,
+                                    z,
+                                    offset,
+                                    &params.precursor_tolerance,
+                                    shift_ppm,
+                                );
                             }
                         }
                         window_cand_indices.sort_unstable();
@@ -2418,6 +2481,77 @@ mod feature_tests {
             activation_method: None,
             isolation_lower_offset: None,
             isolation_upper_offset: None,
+        }
+    }
+
+    /// The exact-mass lookup must visit every candidate `matches_precursor` would
+    /// accept, at every charge and isotope offset, for ppm and Da tolerances.
+    #[test]
+    fn mass_order_lookup_covers_every_precursor_match() {
+        use model::tolerance::{PrecursorTolerance, Tolerance};
+        // Deterministic pseudo-random peptides, 6-45 residues, incl. heavy C/M-rich ones.
+        let alphabet = b"ACDEFGHIKLMNPQRSTVWY";
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut candidates = Vec::new();
+        for _ in 0..4000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let len = 6 + (state % 40) as usize;
+            let residues = (0..len)
+                .map(|k| {
+                    let c = alphabet[((state >> (k % 50)) as usize + k * 7) % alphabet.len()];
+                    AminoAcid::standard(c).unwrap()
+                })
+                .collect();
+            candidates.push(Candidate {
+                peptide: Peptide::new(residues, b'K', b'A'),
+                protein_index: 0,
+                start_offset_in_protein: 0,
+                is_decoy: false,
+                is_protein_n_term: false,
+                is_protein_c_term: false,
+            });
+        }
+        let order = build_mass_order(&candidates);
+        for tol in [
+            PrecursorTolerance::symmetric(Tolerance::Ppm(20.0)),
+            PrecursorTolerance::symmetric(Tolerance::Da(0.5)),
+        ] {
+            for (i, cand) in candidates.iter().enumerate().step_by(7) {
+                for z in 2u8..=4 {
+                    for offset in -1i8..=2 {
+                        // A precursor that this candidate matches at (z, offset), nudged
+                        // off-centre so window edges are exercised too.
+                        let nudge = ((i % 5) as f64 - 2.0) * 0.004;
+                        let neutral =
+                            cand.peptide.mass() + offset as f64 * model::mass::ISOTOPE + nudge;
+                        let mut spec = make_spectrum(vec![]);
+                        spec.precursor_mz = neutral / z as f64 + PROTON;
+                        let mut got = Vec::new();
+                        extend_with_precursor_matches(
+                            &mut got,
+                            &order,
+                            &candidates,
+                            &spec,
+                            z,
+                            offset,
+                            &tol,
+                            0.0,
+                        );
+                        let got: std::collections::HashSet<usize> = got.into_iter().collect();
+                        for (j, c) in candidates.iter().enumerate() {
+                            if matches_precursor(&spec, &c.peptide, z, offset, &tol, 0.0).is_some()
+                            {
+                                assert!(
+                                    got.contains(&j),
+                                    "lookup missed candidate {j} at z={z} offset={offset}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

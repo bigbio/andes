@@ -371,6 +371,61 @@ fn anchored_target_plus_decoy(
     ProteinDb { proteins }
 }
 
+/// Accession prefix of the entrapment anchors `--refine-entrapment` adds.
+pub const ENTRAPMENT_PREFIX: &str = "ENT_";
+
+/// One entrapment anchor per Pass-2 anchor: the anchor with its interior shuffled
+/// and both termini kept, so it has the same mass, composition, cleavage pattern and
+/// modifiable residues but is not a real peptide. Anchors whose shuffle reproduces
+/// any anchor sequence (short or repetitive interiors) are skipped. Accessions are
+/// `ENT_<anchor accession>`.
+///
+/// Pass-2 anchors are confident real peptides, so the run-level entrapment database
+/// never reaches Pass 2. With one entrapment anchor per real anchor, the Pass-2
+/// false-discovery proportion at a threshold is about 2 × ENT hits / accepted
+/// Pass-2 PSMs.
+fn entrapment_anchors(
+    base_seqs: &[Vec<u8>],
+    base_accs: &[Option<String>],
+    seed: u64,
+) -> (Vec<Vec<u8>>, Vec<Option<String>>) {
+    let real: std::collections::HashSet<&[u8]> = base_seqs.iter().map(|s| s.as_slice()).collect();
+    let mut seqs = Vec::new();
+    let mut accs = Vec::new();
+    for (i, seq) in base_seqs.iter().enumerate() {
+        if seq.len() < 4 {
+            continue;
+        }
+        let mut inner = interior(seq).to_vec();
+        // Seeded xorshift64 per anchor (never zero), Fisher–Yates from the back.
+        let mut state =
+            (seed ^ 0xE47A_9C1D_5B3F_2E61) ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        if state == 0 {
+            state = 0xD1B5_4A32_D192_ED03;
+        }
+        for j in (1..inner.len()).rev() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            inner.swap(j, (state % (j as u64 + 1)) as usize);
+        }
+        let mut ent = Vec::with_capacity(seq.len());
+        ent.push(seq[0]);
+        ent.extend_from_slice(&inner);
+        ent.push(seq[seq.len() - 1]);
+        if real.contains(ent.as_slice()) {
+            continue;
+        }
+        let acc = base_accs
+            .get(i)
+            .and_then(|a| a.as_ref())
+            .map_or_else(|| format!("BASEPEP_{i}"), |a| a.clone());
+        seqs.push(ent);
+        accs.push(Some(format!("{ENTRAPMENT_PREFIX}{acc}")));
+    }
+    (seqs, accs)
+}
+
 /// The residues between the first and last; empty for sequences shorter than 3.
 fn interior(seq: &[u8]) -> &[u8] {
     if seq.len() >= 2 {
@@ -706,12 +761,25 @@ pub fn run_refinement(
         pass1_candidates,
         base_params.refine_select_psm_fdr,
     );
-    let base_seqs: Vec<Vec<u8>> = base_with_src.iter().map(|(seq, _)| seq.clone()).collect();
-    // Real Pass-1 protein index per anchored backbone, so Pass-2 winners can be
-    // attributed to a protein instead of a synthetic BASEPEP_ accession.
-    let base_src: Vec<usize> = base_with_src.iter().map(|(_, pi)| *pi).collect();
+    let mut base_seqs: Vec<Vec<u8>> = base_with_src.iter().map(|(seq, _)| seq.clone()).collect();
     if base_seqs.is_empty() {
         return None;
+    }
+    // Real Pass-1 protein accession per anchored backbone, so Pass-2 winners can be
+    // attributed to a protein instead of a synthetic BASEPEP_ accession.
+    let mut base_accs: Vec<Option<String>> = base_with_src
+        .iter()
+        .map(|&(_, pi)| full_target_db.proteins.get(pi).map(|p| p.accession.clone()))
+        .collect();
+    if cfg.entrapment {
+        let (ent_seqs, ent_accs) = entrapment_anchors(&base_seqs, &base_accs, seed);
+        eprintln!(
+            "[refine]   entrapment: {} shuffled anchors added ({} anchors had no distinct shuffle)",
+            ent_seqs.len(),
+            base_seqs.len() - ent_seqs.len()
+        );
+        base_seqs.extend(ent_seqs);
+        base_accs.extend(ent_accs);
     }
 
     // 2. Spectra Pass-1 did not confidently identify at the report FDR
@@ -756,14 +824,8 @@ pub fn run_refinement(
     //    peptide + a 1:1 decoy each. Built as an owned local so it can be MOVED
     //    into the returned `RefinementOutput` once the `PreparedSearch` borrow of
     //    it ends (see below).
-    let refine_idx = {
-        // Map each anchored backbone to its Pass-1 protein's real accession.
-        let base_accs: Vec<Option<String>> = base_src
-            .iter()
-            .map(|&pi| full_target_db.proteins.get(pi).map(|p| p.accession.clone()))
-            .collect();
-        build_peptide_anchored_index(&base_seqs, &base_accs, decoy_prefix, decoy_strategy, seed)
-    };
+    let refine_idx =
+        build_peptide_anchored_index(&base_seqs, &base_accs, decoy_prefix, decoy_strategy, seed);
 
     // 4. Pass-2 params: refinement variable-mod tier + the tier's mod cap.
     //    Bound the per-peptide mod cap: the candidate count grows combinatorially
@@ -1623,6 +1685,31 @@ mod tests {
         };
         let aa = AminoAcid::standard(residue).unwrap().with_mod(m);
         Peptide::new(vec![aa, AminoAcid::standard(b'G').unwrap()], b'_', b'-')
+    }
+
+    #[test]
+    fn entrapment_anchors_keep_termini_and_composition_and_are_not_real() {
+        let base: Vec<Vec<u8>> = vec![
+            b"PEPTIDEK".to_vec(),
+            b"SAMNPLEQR".to_vec(),
+            b"AAAAK".to_vec(), // interior shuffle can only reproduce itself
+        ];
+        let accs = vec![Some("P1".to_string()), None, Some("P3".to_string())];
+        let (seqs, ent_accs) = entrapment_anchors(&base, &accs, 1);
+        assert_eq!(seqs.len(), 2, "the all-A interior has no distinct shuffle");
+        assert_eq!(ent_accs[0].as_deref(), Some("ENT_P1"));
+        assert_eq!(ent_accs[1].as_deref(), Some("ENT_BASEPEP_1"));
+        for (ent, orig) in seqs.iter().zip(&base) {
+            assert_ne!(ent, orig);
+            assert_eq!(ent.first(), orig.first());
+            assert_eq!(ent.last(), orig.last());
+            let (mut a, mut b) = (ent.clone(), orig.clone());
+            a.sort_unstable();
+            b.sort_unstable();
+            assert_eq!(a, b, "same composition, so same precursor mass");
+        }
+        // Deterministic for a given seed.
+        assert_eq!(entrapment_anchors(&base, &accs, 1).0, seqs);
     }
 
     #[test]

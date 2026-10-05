@@ -699,9 +699,9 @@ fn write_psm_row<W: Write>(
         format_spec_id(&ctx.spec_id, ctx.scan, rank, row_idx, multi_row)
     )?;
     write!(writer, "\t{}\t{}\t", label, ctx.scan)?;
-    write_double(writer, exp_mass)?;
+    write_mass(writer, exp_mass)?;
     writer.write_all(b"\t")?;
-    write_double(writer, calc_mass)?;
+    write_mass(writer, calc_mass)?;
     writer.write_all(b"\t")?;
     write_double(writer, mass)?;
     // RawScore is the sole score column (GF-derived DeNovoScore / lnSpecEValue /
@@ -771,6 +771,24 @@ fn write_psm_row<W: Write>(
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+/// Write a neutral mass with six decimal places (trailing zeros trimmed).
+///
+/// `ExpMass` and `CalcMass` are not Percolator features, but downstream tools read them
+/// to recompute precursor error. Six significant figures would round a 1,000–9,999 Da
+/// mass to 0.01 Da (5–10 ppm), quantizing every error computed from these columns.
+fn write_mass<W: Write>(writer: &mut W, v: f64) -> io::Result<()> {
+    if !v.is_finite() || v == 0.0 {
+        return writer.write_all(b"0");
+    }
+    let mut buf = [0u8; 32];
+    let len = {
+        let mut cursor = &mut buf[..];
+        write!(cursor, "{:.6}", v)?;
+        32 - cursor.len()
+    };
+    write_trim_fixed(writer, &buf[..len])
+}
 
 /// Write a `f64` in `%.6g` style (6 significant figures) directly into
 /// `writer`.
@@ -879,6 +897,22 @@ mod tests {
     use model::tolerance::Tolerance;
     use search::candidate_gen::Candidate;
     use search::search_index::SearchIndex;
+
+    #[test]
+    fn write_mass_keeps_micro_dalton_precision() {
+        let fmt = |v: f64| {
+            let mut out = Vec::new();
+            write_mass(&mut out, v).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        // Six significant figures would print 1674.79 and 1674.8 for these two.
+        assert_eq!(fmt(1674.791234), "1674.791234");
+        assert_eq!(fmt(1674.801234), "1674.801234");
+        assert_eq!(fmt(790.3345), "790.3345");
+        assert_eq!(fmt(1500.0), "1500");
+        assert_eq!(fmt(0.0), "0");
+        assert_eq!(fmt(f64::NAN), "0");
+    }
 
     // ── fixture helpers ─────────────────────────────────────────────────────
 

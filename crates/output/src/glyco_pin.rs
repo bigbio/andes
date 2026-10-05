@@ -231,9 +231,9 @@ fn write_glyco_psm_row<W: Write>(
 
     // SpecId, Label, ScanNr, ExpMass, CalcMass, mass
     write!(writer, "{}\t{}\t{}\t", spec_id, label, scan)?;
-    write_double(writer, exp_mass)?;
+    write_mass(writer, exp_mass)?;
     writer.write_all(b"\t")?;
-    write_double(writer, calc_mass)?;
+    write_mass(writer, calc_mass)?;
     if glyco_col_kept("mass", curated) {
         writer.write_all(b"\t")?;
         write_double(writer, mass)?;
@@ -773,6 +773,24 @@ pub fn write_glyco_pin_to<W: Write>(
 fn write_double_tab<W: Write>(writer: &mut W, v: f64) -> io::Result<()> {
     writer.write_all(b"\t")?;
     write_double(writer, v)
+}
+
+/// Write a neutral mass with six decimal places (trailing zeros trimmed).
+///
+/// `ExpMass` and `CalcMass` are not Percolator features, but downstream tools read them
+/// to recompute precursor error. Six significant figures would round a 1,000–9,999 Da
+/// mass to 0.01 Da (5–10 ppm), quantizing every error computed from these columns.
+fn write_mass<W: Write>(writer: &mut W, v: f64) -> io::Result<()> {
+    if !v.is_finite() || v == 0.0 {
+        return writer.write_all(b"0");
+    }
+    let mut buf = [0u8; 32];
+    let len = {
+        let mut cursor = &mut buf[..];
+        write!(cursor, "{:.6}", v)?;
+        32 - cursor.len()
+    };
+    write_trim_fixed(writer, &buf[..len])
 }
 
 /// Minimal %.6g double formatter (mirrors pin.rs write_double).

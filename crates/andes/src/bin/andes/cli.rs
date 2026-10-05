@@ -225,7 +225,11 @@ pub(crate) struct SearchArgs {
     /// key is the form id — which is MASS order and carries no evidence. At the
     /// boundary the survivors are decided by where a candidate happens to sit in
     /// the index. Default off pending a measured arm against the enumeration path.
-    #[arg(long = "fragment-index-intensity-tiebreak", hide = true, default_value_t = false)]
+    #[arg(
+        long = "fragment-index-intensity-tiebreak",
+        hide = true,
+        default_value_t = false
+    )]
     pub(crate) fragment_index_intensity_tiebreak: bool,
 
     /// Fragment-index mode: precursor-mass width of one index slice in Da.
@@ -873,6 +877,12 @@ pub(crate) struct SearchArgs {
     /// leave at the default unless you have a measured reason to widen it.
     #[arg(long = "refine-select-psm-fdr", default_value_t = 0.01, hide = true, value_parser = parse_unit_fraction)]
     pub(crate) refine_select_psm_fdr: f64,
+
+    /// Diagnostic: add one shuffled entrapment peptide (accession `ENT_…`) per
+    /// Pass-2 anchor so Pass-2 false discoveries can be counted. Changes the Pass-2
+    /// search space; do not use for production results.
+    #[arg(long = "refine-entrapment", default_value_t = false, hide = true)]
+    pub(crate) refine_entrapment: bool,
 
     /// Run Percolator on the PIN after the search and join its PEP/q-value back
     /// into the outputs (QPX `posterior_error_probability` + a `q-value` score,

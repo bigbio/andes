@@ -1728,6 +1728,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // (set it in the `--refine-config` YAML; the former CLI override was removed).
         let cfg = search::RefineConfig {
             max_mods: base_cfg.max_mods,
+            entrapment: base_cfg.entrapment || cli.refine_entrapment,
             ..base_cfg
         };
 

@@ -33,10 +33,10 @@ use scoring_crate::scoring::fragment_ions::{
     predict_by_ions, predict_by_ions_with_losses, IonKind,
 };
 use scoring_crate::scoring::{
-    frag_llr_battery, fuse_strong_score, intensity_signal, mass_competition_evidence,
-    predict_frag_intensities, psm_edge_score, rich_ion_llr, score_psm, score_psm_float,
-    scored_for_charge, strong_score_calibrated, OnlineStats, RankScorer, ScoredSpectrum,
-    StrongScoreInputs, DENSITY_HW,
+    edge_scoring_enabled, frag_llr_battery, fuse_strong_score, intensity_signal,
+    mass_competition_evidence, predict_frag_intensities, psm_edge_score, rich_ion_llr, score_psm,
+    score_psm_float, scored_for_charge, strong_score_calibrated, OnlineStats, RankScorer,
+    ScoredSpectrum, StrongScoreInputs, DENSITY_HW,
 };
 
 // One-time-built state shared across every chunk of a streamed search.
@@ -1053,6 +1053,7 @@ impl<'a> PreparedSearch<'a> {
                 let enz_is_c_term = params.enzyme.is_c_term();
                 let enz_is_n_term = params.enzyme.is_n_term();
                 let enz = params.enzyme;
+                let edge_enabled = edge_scoring_enabled(scorer);
 
                 // Per-charge queue keyed by charge state. Retains top-N PSMs
                 // independently per precursor charge (Kim et al., Nat Commun 5:5277, 2014).
@@ -1161,9 +1162,18 @@ impl<'a> PreparedSearch<'a> {
                         // Gate against the queue's current worst rank_score
                         // before invoking edge_score.
                         let could_win = match per_charge_queues.get(&z) {
-                            Some(q) if q.len() >= q.capacity() as usize => q
-                                .worst_rank_score()
-                                .is_none_or(|worst| pin_score + max_edge_bonus > worst),
+                            // With edges disabled the bound is 0, so the gate must admit
+                            // a candidate tied with the worst retained one: the queue keeps
+                            // ties.
+                            Some(q) if q.len() >= q.capacity() as usize => {
+                                q.worst_rank_score().is_none_or(|worst| {
+                                    if edge_enabled {
+                                        pin_score + max_edge_bonus > worst
+                                    } else {
+                                        pin_score >= worst
+                                    }
+                                })
+                            }
                             // Queue below capacity (or doesn't exist yet): accept
                             // everything until it fills up.
                             _ => true,

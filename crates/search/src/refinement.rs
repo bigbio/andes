@@ -371,6 +371,49 @@ fn anchored_target_plus_decoy(
     ProteinDb { proteins }
 }
 
+/// For each anchor, whether its sequence starts a target protein, at position 0
+/// or right after an initiator Met.
+fn anchors_at_protein_nterm(base_seqs: &[Vec<u8>], db: &ProteinDb) -> Vec<bool> {
+    let starts: std::collections::HashSet<&[u8]> = db
+        .proteins
+        .iter()
+        .flat_map(|p| {
+            let s = p.sequence.as_slice();
+            let met_cleaved = (s.first() == Some(&b'M') && s.len() > 1).then(|| &s[1..]);
+            std::iter::once(s).chain(met_cleaved)
+        })
+        .collect();
+    // Any protein start that begins with the anchor makes it N-terminal. Compare on
+    // the anchor's length: group protein starts by prefix of each needed length.
+    let lens: std::collections::BTreeSet<usize> = base_seqs.iter().map(|s| s.len()).collect();
+    let prefixes: std::collections::HashSet<&[u8]> = lens
+        .iter()
+        .flat_map(|&l| {
+            starts
+                .iter()
+                .filter(move |s| s.len() >= l)
+                .map(move |s| &s[..l])
+        })
+        .collect();
+    base_seqs
+        .iter()
+        .map(|a| prefixes.contains(a.as_slice()))
+        .collect()
+}
+
+/// Whether a Pass-2 candidate exists only because its mini-protein starts at
+/// position 0: it carries a protein-N-terminal modification, or it is the
+/// Met-cleaved variant (offset 1 of a mini-protein starting with M; the decoy keeps
+/// its anchor's first residue, so targets and decoys are treated alike).
+fn uses_protein_nterm(c: &Candidate, starts_with_met: bool) -> bool {
+    (starts_with_met && c.start_offset_in_protein == 1)
+        || c.peptide.residues.iter().any(|aa| {
+            aa.mod_
+                .as_ref()
+                .is_some_and(|m| m.location == ModLocation::ProtNTerm)
+        })
+}
+
 /// Accession prefix of the entrapment anchors `--refine-entrapment` adds.
 pub const ENTRAPMENT_PREFIX: &str = "ENT_";
 
@@ -388,10 +431,11 @@ fn entrapment_anchors(
     base_seqs: &[Vec<u8>],
     base_accs: &[Option<String>],
     seed: u64,
-) -> (Vec<Vec<u8>>, Vec<Option<String>>) {
+) -> (Vec<Vec<u8>>, Vec<Option<String>>, Vec<usize>) {
     let real: std::collections::HashSet<&[u8]> = base_seqs.iter().map(|s| s.as_slice()).collect();
     let mut seqs = Vec::new();
     let mut accs = Vec::new();
+    let mut sources = Vec::new();
     for (i, seq) in base_seqs.iter().enumerate() {
         if seq.len() < 4 {
             continue;
@@ -422,8 +466,9 @@ fn entrapment_anchors(
             .map_or_else(|| format!("BASEPEP_{i}"), |a| a.clone());
         seqs.push(ent);
         accs.push(Some(format!("{ENTRAPMENT_PREFIX}{acc}")));
+        sources.push(i);
     }
-    (seqs, accs)
+    (seqs, accs, sources)
 }
 
 /// The residues between the first and last; empty for sequences shorter than 3.
@@ -771,8 +816,13 @@ pub fn run_refinement(
         .iter()
         .map(|&(_, pi)| full_target_db.proteins.get(pi).map(|p| p.accession.clone()))
         .collect();
+    // Protein N-terminal status per anchor, decided from the target database (the
+    // anchor's own mini-protein always starts at 0, so enumeration cannot tell).
+    let mut anchor_nterm = anchors_at_protein_nterm(&base_seqs, full_target_db);
     if cfg.entrapment {
-        let (ent_seqs, ent_accs) = entrapment_anchors(&base_seqs, &base_accs, seed);
+        let (ent_seqs, ent_accs, ent_sources) = entrapment_anchors(&base_seqs, &base_accs, seed);
+        let ent_nterm: Vec<bool> = ent_sources.iter().map(|&i| anchor_nterm[i]).collect();
+        anchor_nterm.extend(ent_nterm);
         eprintln!(
             "[refine]   entrapment: {} shuffled anchors added ({} anchors had no distinct shuffle)",
             ent_seqs.len(),
@@ -862,12 +912,21 @@ pub fn run_refinement(
     //    DROP `refine_prepared` (ending the borrow) before moving `refine_idx`
     //    into the output below.
     let (pass2_queues, refine_candidates) = {
-        let refine_prepared = PreparedSearch::prepare(
+        // Mini-protein k is anchor k mod n (targets, then their decoys). Each
+        // mini-protein starts at position 0, so enumeration offers protein-N-terminal
+        // modifications and the Met-cleaved variant on every anchor; keep them only
+        // for anchors that really start a protein.
+        let n_anchors = base_seqs.len();
+        let refine_prepared = PreparedSearch::prepare_filtered(
             &refine_idx,
             &refine_params,
             scorer,
             fragment_tol_da,
             decoy_prefix,
+            |c| {
+                let a = c.protein_index % n_anchors;
+                anchor_nterm[a] || !uses_protein_nterm(c, base_seqs[a].first() == Some(&b'M'))
+            },
         );
         let subset: Vec<model::spectrum::Spectrum> =
             unident.iter().map(|&i| all_spectra[i].clone()).collect();
@@ -1688,6 +1747,74 @@ mod tests {
     }
 
     #[test]
+    fn anchors_at_protein_nterm_sees_position_zero_and_initiator_met() {
+        let db = ProteinDb {
+            proteins: vec![
+                Protein {
+                    accession: "P1".into(),
+                    description: String::new(),
+                    sequence: b"MSAMPLERPEPTIDEK".to_vec(),
+                },
+                Protein {
+                    accession: "P2".into(),
+                    description: String::new(),
+                    sequence: b"QWERTYKLMNPQR".to_vec(),
+                },
+            ],
+        };
+        let anchors: Vec<Vec<u8>> = vec![
+            b"MSAMPLER".to_vec(), // starts P1
+            b"SAMPLER".to_vec(),  // starts P1 after the initiator Met
+            b"PEPTIDEK".to_vec(), // internal
+            b"QWERTYK".to_vec(),  // starts P2
+            b"WERTYK".to_vec(),   // P2 does not start with M
+        ];
+        assert_eq!(
+            anchors_at_protein_nterm(&anchors, &db),
+            vec![true, true, false, true, false]
+        );
+    }
+
+    #[test]
+    fn uses_protein_nterm_flags_prot_nterm_mods_and_met_cleavage_only() {
+        let cand = |pep: Peptide, offset: usize| Candidate {
+            peptide: pep,
+            protein_index: 0,
+            start_offset_in_protein: offset,
+            is_decoy: false,
+            is_protein_n_term: true,
+            is_protein_c_term: true,
+        };
+        let acetyl = Modification {
+            name: "Acetyl".into(),
+            mass_delta: 42.010565,
+            residue: ResidueSpec::Wildcard,
+            location: ModLocation::ProtNTerm,
+            fixed: false,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+        };
+        let mut res = unmod_peptide(b"SAMPLER").residues;
+        res[0] = res[0].clone().with_mod(acetyl);
+        let acetylated = Peptide::new(res, b'_', b'-');
+        assert!(uses_protein_nterm(&cand(acetylated, 0), false));
+        assert!(!uses_protein_nterm(
+            &cand(unmod_peptide(b"SAMPLER"), 0),
+            false
+        ));
+        // Offset 1 is the Met-cleaved variant only when the mini-protein starts with M.
+        assert!(uses_protein_nterm(
+            &cand(unmod_peptide(b"SAMPLER"), 1),
+            true
+        ));
+        assert!(!uses_protein_nterm(
+            &cand(unmod_peptide(b"SAMPLER"), 1),
+            false
+        ));
+    }
+
+    #[test]
     fn entrapment_anchors_keep_termini_and_composition_and_are_not_real() {
         let base: Vec<Vec<u8>> = vec![
             b"PEPTIDEK".to_vec(),
@@ -1695,7 +1822,8 @@ mod tests {
             b"AAAAK".to_vec(), // interior shuffle can only reproduce itself
         ];
         let accs = vec![Some("P1".to_string()), None, Some("P3".to_string())];
-        let (seqs, ent_accs) = entrapment_anchors(&base, &accs, 1);
+        let (seqs, ent_accs, sources) = entrapment_anchors(&base, &accs, 1);
+        assert_eq!(sources, vec![0, 1]);
         assert_eq!(seqs.len(), 2, "the all-A interior has no distinct shuffle");
         assert_eq!(ent_accs[0].as_deref(), Some("ENT_P1"));
         assert_eq!(ent_accs[1].as_deref(), Some("ENT_BASEPEP_1"));

@@ -381,9 +381,32 @@ impl<'a> PreparedSearch<'a> {
         fragment_tolerance_da: f64,
         decoy_prefix: &str,
     ) -> Self {
+        Self::prepare_filtered(
+            idx,
+            params,
+            scorer,
+            fragment_tolerance_da,
+            decoy_prefix,
+            |_| true,
+        )
+    }
+
+    /// As [`Self::prepare`], keeping only the enumerated candidates `keep` accepts.
+    /// The filter runs before collision relabelling and index building, so the
+    /// result is what `prepare` would give for a database without the dropped
+    /// candidates.
+    pub fn prepare_filtered(
+        idx: &'a SearchIndex,
+        params: &'a SearchParams,
+        scorer: &'a RankScorer,
+        fragment_tolerance_da: f64,
+        decoy_prefix: &str,
+        keep: impl Fn(&Candidate) -> bool,
+    ) -> Self {
         // Collect the production candidate list.
         let mut candidates: Vec<Candidate> =
             crate::candidate_gen::enumerate_candidates_par(idx, params, decoy_prefix);
+        candidates.retain(|c| keep(c));
 
         // Decoy↔target peptide-collision removal: a decoy peptide whose bare
         // sequence coincides with a real target peptide (palindromes, reversal-

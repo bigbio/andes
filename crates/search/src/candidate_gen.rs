@@ -62,6 +62,29 @@ pub fn enumerate_candidates<'a>(
         .filter(move |c| !require_sequon || candidate_has_nxst_sequon(c))
 }
 
+/// [`enumerate_candidates`] across threads, one protein per task. Rayon's ordered
+/// `collect` keeps the sequential `(protein_index, start_offset, mod combination)`
+/// order, so the result is identical to `enumerate_candidates(..).collect()`.
+pub fn enumerate_candidates_par(
+    idx: &SearchIndex,
+    params: &SearchParams,
+    decoy_prefix: &str,
+) -> Vec<Candidate> {
+    use rayon::prelude::*;
+    let suffix = idx.decoy_suffix.as_deref();
+    let require_sequon = params.require_nxst_sequon;
+    idx.db
+        .proteins
+        .par_iter()
+        .enumerate()
+        .flat_map_iter(|(p_idx, protein)| {
+            let is_decoy = is_decoy_accession_affix(&protein.accession, decoy_prefix, suffix);
+            enumerate_protein(protein, p_idx, is_decoy, params).into_iter()
+        })
+        .filter(|c| !require_sequon || candidate_has_nxst_sequon(c))
+        .collect()
+}
+
 /// The glyco path's sequon membership test (`glyco_search::GlycoCtxOwned::build`):
 /// an internal N-X-S/T, or one completed by the residue after the peptide.
 /// Kept in one place so `SearchParams::require_nxst_sequon` can never admit a

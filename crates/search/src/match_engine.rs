@@ -9,8 +9,7 @@ use smallvec::{smallvec, SmallVec};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::candidate_gen::{
-    base_record_key, base_records_for_nominal_window, enumerate_candidates, expand_base_record,
-    BaseRecordKey, Candidate,
+    base_record_key, base_records_for_nominal_window, expand_base_record, BaseRecordKey, Candidate,
 };
 use crate::candidate_index::MmapCandidateIndex;
 use crate::fragment_index::ChunkFragmentIndex;
@@ -384,7 +383,7 @@ impl<'a> PreparedSearch<'a> {
     ) -> Self {
         // Collect the production candidate list.
         let mut candidates: Vec<Candidate> =
-            enumerate_candidates(idx, params, decoy_prefix).collect();
+            crate::candidate_gen::enumerate_candidates_par(idx, params, decoy_prefix);
 
         // Decoy↔target peptide-collision removal: a decoy peptide whose bare
         // sequence coincides with a real target peptide (palindromes, reversal-
@@ -3217,13 +3216,55 @@ fn bare_residues(cand: &Candidate) -> Box<[u8]> {
 ///
 /// Cost: one HashSet of target peptide sequences, built once at index setup.
 fn relabel_collision_decoys(candidates: &mut [Candidate]) {
-    use std::collections::HashSet;
-    let target_seqs: HashSet<Box<[u8]>> = candidates
+    // Exact, without boxing every target sequence: hash each bare sequence once,
+    // keep exact copies only of targets whose hash some decoy shares, then confirm
+    // each candidate decoy against those copies. Every decision depends only on the
+    // sets, so the parallel passes give the same labels as the sequential version.
+    let bare_hash = |c: &Candidate| -> u64 {
+        use std::hash::Hasher;
+        let mut h = rustc_hash::FxHasher::default();
+        for aa in &c.peptide.residues {
+            h.write_u8(aa.residue);
+        }
+        h.write_usize(c.peptide.residues.len());
+        h.finish()
+    };
+    let hashes: Vec<u64> = candidates.par_iter().map(bare_hash).collect();
+    let decoy_hashes: FxHashSet<u64> = candidates
         .iter()
-        .filter(|c| !c.is_decoy)
-        .map(bare_residues)
+        .zip(&hashes)
+        .filter(|(c, _)| c.is_decoy)
+        .map(|(_, &h)| h)
         .collect();
-    relabel_collision_decoys_with(candidates, &target_seqs);
+    if decoy_hashes.is_empty() {
+        return;
+    }
+    let shared_targets: FxHashSet<Box<[u8]>> = candidates
+        .par_iter()
+        .zip(hashes.par_iter())
+        .filter(|(c, h)| !c.is_decoy && decoy_hashes.contains(*h))
+        .map(|(c, _)| bare_residues(c))
+        .collect();
+    if shared_targets.is_empty() {
+        return;
+    }
+    let shared_hashes: FxHashSet<u64> = candidates
+        .iter()
+        .zip(&hashes)
+        .filter(|(c, h)| !c.is_decoy && decoy_hashes.contains(*h))
+        .map(|(_, &h)| h)
+        .collect();
+    candidates
+        .par_iter_mut()
+        .zip(hashes.par_iter())
+        .filter(|(c, h)| c.is_decoy && shared_hashes.contains(*h))
+        .for_each(|(cand, _)| {
+            let bare: SmallVec<[u8; 64]> =
+                cand.peptide.residues.iter().map(|aa| aa.residue).collect();
+            if shared_targets.contains(bare.as_slice()) {
+                cand.is_decoy = false;
+            }
+        });
 }
 
 /// Relabel collision decoys against a PRE-COMPUTED target bare-sequence set.

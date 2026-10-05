@@ -1714,9 +1714,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `&queues`/`&spectra` immutably). The Pass-2 winners ARE merged into
     // `queues` (force_pushed per scan by `merge_into_pass1`) and written to a
     // SINGLE unified PIN, so a scan's unmodified Pass-1 and modified Pass-2 PSMs
-    // compete in one report. Collapse best-per-scan downstream; optionally split
-    // by mokapot --group-column on IsRefinement/RefinementModClass.
-    // `--refine-debug-split-pin` instead emits Pass-2 to a separate PIN.
+    // compete in one report. Pass-2 rows carry `IsRefinement = 1`: one threshold
+    // over the whole PIN lets that small group run at about twice the nominal FDR
+    // (Astral entrapment: ~2% at a merged 1%), so for a 1% FDR on modified PSMs,
+    // threshold the `IsRefinement = 1` rows on their own downstream.
     let refine_output = if cli.refine {
         // Refinement config: explicit YAML or the built-in 5-mod default tier.
         let base_cfg = match &cli.refine_config {

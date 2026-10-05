@@ -185,6 +185,8 @@ about cannot be found, and an unassigned mass cannot be localised.
 
 (Max variable mods and the high-res-only gate for refinement are set inside the `--refine-config` YAML tier, not as separate flags.)
 
+**FDR for refined PSMs.** Pass-2 PSMs are written to the same PIN with `IsRefinement = 1`. A single Percolator threshold over the whole PIN lets that smaller group run at roughly twice the nominal FDR. On Astral, entrapment measured ~2% for Pass 2 at a merged 1%, while Pass 1 was at 0.9%. For a 1% FDR on the modified PSMs, threshold the `IsRefinement = 1` rows separately, for example by running Percolator on the two row groups of the PIN. Thresholded on its own, Pass 2 measured 0.8–1.1% entrapment FDP and added about 5% identified scans.
+
 ### Rescoring & FDR filtering
 
 andes writes a Percolator-ready `.pin` and, by design, **does not compute FDR itself** — feed the PIN to Percolator. These flags run rescoring in-process instead. In a pipeline that owns its own rescoring (e.g. quantms), leave them off. Rescoring runs **only** when you pass `--rescore` (or `--rescore-native`); `--fdr`/`--pep` are just the thresholds applied *by* such a run and are ignored (with a warning) if set on their own.

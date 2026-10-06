@@ -583,6 +583,27 @@ impl TopNQueue {
     /// (it would let callers break the heap invariant). Since features do
     /// not participate in ordering, the re-push is logically a no-op for
     /// retention.
+    /// Apply `f` to every retained PSM without changing the heap layout, so
+    /// PSMs tied on every sort key keep their relative order in the output.
+    /// `f` must not change `rank_score` (the heap's ordering key). The elements
+    /// are pushed back in the order of the heap's own array; each one is then
+    /// no greater than its parent, so no push moves anything and the layout is
+    /// rebuilt exactly. (`BinaryHeap::from` does not preserve the layout of ties.)
+    pub fn update_in_place<F: FnMut(&mut PsmMatch)>(&mut self, mut f: F) {
+        let v = std::mem::take(&mut self.heap).into_vec();
+        self.heap.reserve(v.len());
+        for Reverse(mut m) in v {
+            let key = m.rank_score.to_bits();
+            f(&mut m);
+            debug_assert_eq!(
+                key,
+                m.rank_score.to_bits(),
+                "update_in_place changed rank_score"
+            );
+            self.heap.push(Reverse(m));
+        }
+    }
+
     pub fn fill_post_topn<F: FnMut(&mut PsmMatch)>(&mut self, mut f: F) {
         let mut psms: Vec<PsmMatch> = self.heap.drain().map(|Reverse(m)| m).collect();
         for psm in &mut psms {
@@ -740,6 +761,29 @@ mod tests {
     }
 
     /// Build a fixture PSM whose `rank_score` is set independently of `score`.
+    #[test]
+    fn update_in_place_keeps_the_output_order_of_ties() {
+        // Many PSMs tied on rank_score and score: their output order comes from the
+        // heap layout alone, so an in-place update must not move anything.
+        let mut q = TopNQueue::new(32);
+        for i in 0..20usize {
+            let mut m = make_match(i, (i % 3) as f32);
+            m.candidate_idxs = vec![i as u32];
+            q.force_push(m);
+        }
+        let order = |q: &TopNQueue| -> Vec<u32> {
+            q.clone()
+                .into_rank_sorted_vec()
+                .iter()
+                .map(|m| m.candidate_idxs[0])
+                .collect()
+        };
+        let before = order(&q);
+        q.update_in_place(|m| m.features.strong_score += 1.0);
+        assert_eq!(order(&q), before);
+        assert!(q.iter_psms().all(|m| m.features.strong_score == 1.0));
+    }
+
     fn make_match_with_rank(spectrum_idx: usize, score: f32, rank_score: f32) -> PsmMatch {
         let mut m = make_match(spectrum_idx, score);
         m.rank_score = rank_score;

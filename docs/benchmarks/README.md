@@ -86,7 +86,7 @@ Xeon Gold 6238), Percolator 3.7.1 `--seed 42 -Y`, `q ≤ 0.01`:
 | **Chimeric** (`--chimeric`) | Astral | PSMs @ q≤0.01 | **65,028** (+69%; 55,616 distinct scans) | baseline 38,394 | not measurable | 337 s ¶ |
 | | TMT a05058 | PSMs @ q≤0.01 | 12,540 (+2.1%) | baseline 12,281 | not measurable | 73 s ¶ |
 | | UPS1 | PSMs @ q≤0.01 | **17,112** (+8.0%) | baseline 15,838 | 167 entrapment hits — flat against 166 | 50 s ¶ |
-| **PTM discovery** (`--refine`) | Astral | PSMs @ q≤0.01 | **40,283** (+4.9%) | baseline 38,394 | Pass 2 (2,594 modified PSMs): **~3.3% FDP** under the merged 1% threshold, by matched entrapment anchors (`--refine-entrapment`: 35 hits on 2,127) | 360 s ¶ |
+| **PTM discovery** (`--refine`) | Astral | PSMs @ q≤0.01 | **40,028** (+4.3%) at `main` with #106; 40,283 at `7d1e4565` | baseline 38,394 | Pass 2 (2,388 modified PSMs): **~2.8% FDP** under the merged 1% threshold, by matched entrapment anchors (`--refine-entrapment`: 27 hits on 1,935; 3.3% before #106) | 363 s ¶ |
 | | TMT, UPS1 | — | skipped | high-res only, by design | | |
 | **Glyco, deep tier** | pGlyco2 mouse liver PXD005553, 5 fractions, TRFP 1.4.3, `main` `14818d3e` | glycoPSMs @1% | **31,666 ± 9** | pGlyco2 **78.9% confirmed** · MSFragger **88.0% confirmed**, 95.8% peptidoform agreement | **1.11% ± 0.03 true FDP** (1:1 database) | 23–29 min / fraction, 16 cores |
 | **Glyco, quick tier** | one pGlyco2 liver fraction (`MouseLiver-Z-T-1`), native `.raw`, bundled pGlyco mouse glycan database (`--glyco-species mouse`, 1,833 compositions) | glycoPSMs @1% | **7,162** (seed 42; seeds 1–5: 7,094–7,137) | pGlyco2 **90.1% confirmed** · MSFragger **90.7% confirmed**, 97.8% / 95.7% peptidoform agreement | **0.89–1.24% true FDP** over 6 seeds (seed 42: 1.24%, CI 0.90–1.68; 1:1 database) | 4,888 s, 8 threads |
@@ -154,6 +154,31 @@ andes is now faster than Comet on all three datasets while finding 7.5–22.1% m
 which were a single run each.
 
 The matched-output-depth comparison below (`--top-n 5`) has not been re-run since #105.
+
+### Time, CPU and memory against Comet — 2026-10-06
+
+Same VM (8-thread Xeon Gold 6238), 8 threads, same inputs and parameter files as above. One
+run per engine, under `/usr/bin/time -v`. andes is `a0e85cda` (#105, the speed code on
+current `main`). PSM counts are from the 2026-10-05 refresh; phospho is Percolator seed 42.
+
+| dataset | engine | PSMs @ q≤0.01 | wall | CPU time | peak memory |
+|---|---|---:|---:|---:|---:|
+| Astral | **andes** | **38,394** | 213 s | **1,238 s** | 7.7 GB |
+| | Comet | 31,435 | 217 s | 1,594 s | 8.1 GB |
+| TMT a05058 | **andes** | **12,281** | 77 s | **323 s** | 5.9 GB |
+| | Comet | 10,504 | 77 s | 568 s | 2.9 GB |
+| UPS1 | **andes** | **15,838** | 49 s | **219 s** | 2.5 GB |
+| | Comet | 14,734 | 42 s | 309 s | 2.9 GB |
+| Phospho (PXD007653) | **andes** | **37,179** (1.11% FDP) | **901 s** | **5,729 s** | 13.7 GB |
+| | Comet | 33,984 (1.77% FDP) | 1,096 s | 8,399 s | 6.0 GB |
+
+- **CPU time:** andes uses 22–43% less than Comet on every dataset. This is the steadier
+  speed comparison, because it varies little between sessions.
+- **Wall time:** level on Astral and TMT, 7 s slower on UPS1, 18% faster on phospho. These
+  andes times are 5–15% slower than the alternating A/B above (TMT 77 vs 65–67 s). The first
+  runs of this session overlapped a large file deletion on the same disk.
+- **Memory:** andes is the heavier engine. It peaks at 2x Comet on TMT (5.9 vs 2.9 GB) and on
+  phospho (13.7 vs 6.0 GB); Astral and UPS1 are similar.
 
 ### Against Comet — measured head-to-head, 2026-09-04
 
@@ -240,6 +265,11 @@ above the cutoff, against about 70 false targets estimated from entrapment), but
 over the merged PIN lets the smaller Pass-2 group run above 1%. Thresholded on their own, the
 Pass-2 rows measured 0.8–1.1% entrapment FDP in an earlier run with Percolator's default
 settings (see `--refine` in DOCS).
+
+#106 then stopped offering protein-N-terminal Acetyl on internal peptides. Each anchor is
+its own one-peptide mini-protein, so every anchor had looked like a protein N-terminus.
+Accepted acetylations fell from 512 to 125, total PSMs from 40,283 to **40,028 (+4.3%)**,
+and Pass-2 entrapment FDP from 3.3% to **2.8%** (27 hits on 1,935).
 
 ## 2. Glyco
 

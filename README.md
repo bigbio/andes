@@ -32,7 +32,22 @@ Benchmarked at 1% FDR across three reference datasets — **read the metric note
 
 <sub>**Metric.** PSMs at Percolator `q ≤ 0.01` under one methodology for every row (plain FASTA + andes `XXX_` decoys + Percolator 3.7.1 `--seed 42 -Y`). Re-measured on **2026-10-05** on the same 8-thread host: the andes and Comet counts reproduce the 2026-09-04 values exactly at `main` `7d1e4565`, and #105 (`5e7e6bf1`, current `main`) leaves all three counts unchanged. andes wall times are #105's (two runs each); Comet's are from the same host the same day, in an earlier session where `main` measured within 5% of the follow-up session's `main` arm. andes finds **7.5–22.1% more PSMs** in **0.86–0.95x** Comet's wall time. **†** Java MS-GF+ was not re-run that day; its counts are from the same protocol in an earlier session, and it remains ~10–40x slower than andes. These counts are **not** entrapment-validated: the Astral and TMT databases carry no entrapment component, and on UPS1 the measured true FDP at a nominal 1% is **~3.6%**. N=1 per dataset. Every number, its provenance, the opt-in modes and the glyco tiers: [`docs/benchmarks/`](docs/benchmarks/README.md).</sub>
 
-**On FDR honesty.** Target-decoy q-values are self-consistent by construction, so andes is checked against entrapment databases where one exists — a target PSM matching only a foreign `ENTRAP_` protein is false by construction, which makes the true FDP measurable rather than assumed. That check is real and has repeatedly changed conclusions here. It is also **not uniformly available**: as of the 2026-09-04 audit the Astral benchmark database carries no entrapment component, and the UPS1 one is not 1:1, so the honest summary is that UPS1 sits at ~3.6% true FDP at a nominal 1% and Astral is unvalidated in this configuration. (Opt-in `--refine` runs on top. The run-level entrapment database cannot reach its peptide-anchored second pass, so it was checked with matched entrapment anchors. On Astral, under this benchmark's protocol, its modified PSMs sit at ~3% FDP within a merged 1% threshold and ~1% when thresholded on their own. That is one dataset, so it is a capability, not a headline number.)
+**Time, CPU and memory** (2026-10-06, same VM, 8 threads, one run per engine, `/usr/bin/time`): andes uses **22–43% less CPU time** than Comet on every dataset. Wall time is level on Astral and TMT, 7 s slower on UPS1 and 18% faster on phospho. andes needs more memory: 2x Comet's peak on TMT and phospho, similar on Astral and UPS1.
+
+| dataset | engine | PSMs @ q≤0.01 | wall | CPU time | peak memory |
+|---|---|---:|---:|---:|---:|
+| Astral | **andes** | **38,394** | 213 s | **1,238 s** | 7.7 GB |
+| | Comet | 31,435 | 217 s | 1,594 s | 8.1 GB |
+| TMT a05058 | **andes** | **12,281** | 77 s | **323 s** | 5.9 GB |
+| | Comet | 10,504 | 77 s | 568 s | 2.9 GB |
+| UPS1 | **andes** | **15,838** | 49 s | **219 s** | 2.5 GB |
+| | Comet | 14,734 | 42 s | 309 s | 2.9 GB |
+| Phospho (PXD007653) | **andes** | **37,179** (1.11% FDP) | **901 s** | **5,729 s** | 13.7 GB |
+| | Comet | 33,984 (1.77% FDP) | 1,096 s | 8,399 s | 6.0 GB |
+
+<sub>PSM counts are from the 2026-10-05 refresh, where phospho is Percolator seed 42; time and memory are from this session. Wall times vary 5–15% between sessions on this host (compare the A/B times in the table above); CPU time is the steadier comparison.</sub>
+
+**On FDR honesty.** Target-decoy q-values are self-consistent by construction, so andes is checked against entrapment databases where one exists — a target PSM matching only a foreign `ENTRAP_` protein is false by construction, which makes the true FDP measurable rather than assumed. That check is real and has repeatedly changed conclusions here. It is also **not uniformly available**: as of the 2026-09-04 audit the Astral benchmark database carries no entrapment component, and the UPS1 one is not 1:1, so the honest summary is that UPS1 sits at ~3.6% true FDP at a nominal 1% and Astral is unvalidated in this configuration. (Opt-in `--refine` runs on top. The run-level entrapment database cannot reach its peptide-anchored second pass, so it was checked with matched entrapment anchors. On Astral, under this benchmark's protocol, its modified PSMs sit at ~2.8% FDP within a merged 1% threshold and ~1% when thresholded on their own. That is one dataset, so it is a capability, not a headline number.)
 
 <details>
 <summary>Bench methodology</summary>

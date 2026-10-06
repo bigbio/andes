@@ -1310,17 +1310,23 @@ impl<'a> PreparedSearch<'a> {
                 let candidate_rank_entropy =
                     scoring_crate::scoring::candidate_rank_entropy(&retained_scores);
 
-                queue.fill_post_topn(|psm| {
+                // Strong mode retains a wider pool, ranks it by the strong score and
+                // trims it to the user's top-N. The strong score needs only the cheap
+                // features, so the pool gets a light pass and only the survivors get
+                // the full one (rich-ion and fragment-LLR models, site features).
+                let strong_mode = params.score_mode == ScoreMode::Strong;
+                let make_features = |psm: &PsmMatch, full: bool| -> PsmFeatures {
                     let ss = scored_spec_for_charge(psm.charge_used);
                     let cand = &cand_slice[psm.primary_candidate_idx() as usize];
-                    let mut features = compute_psm_features(
+                    let mut features = compute_psm_features_with_edge(
                         ss,
                         &cand.peptide,
                         scorer,
                         psm.charge_used,
                         self.intensity_model.as_deref(),
+                        Some(psm.edge_score),
+                        full,
                     );
-                    features.edge_score = psm.edge_score; // reuse per-candidate value
 
                     // The PIN `precursor_isotope_kl` / `precursor_snr` columns are
                     // left at their 0.0 defaults here. They were a per-PSM MS1
@@ -1368,7 +1374,14 @@ impl<'a> PreparedSearch<'a> {
                         candidate_rank_entropy: features.candidate_rank_entropy,
                         listwise_score_gap: features.listwise_score_gap,
                     });
-                    psm.features = features;
+                    features
+                };
+                // With `deep_features_top` set, rank mode also takes the light pass
+                // first and gives the full one only to the best rows.
+                let deep_k = params.deep_features_top as usize;
+                let light_first = strong_mode || deep_k > 0;
+                queue.fill_post_topn(|psm| {
+                    psm.features = make_features(psm, !light_first);
                 });
 
                 let retained_strong: Vec<f32> =
@@ -1381,10 +1394,42 @@ impl<'a> PreparedSearch<'a> {
                     );
                 });
 
-                if params.score_mode == ScoreMode::Strong {
+                if strong_mode {
                     queue.reorder_by_strong_score();
                     // Emit only user top-N rows (gate uses top_n=1); retention pool was wider.
                     queue.trim_to_capacity(params.top_n_psms_per_spectrum);
+                }
+                if light_first {
+                    // Full features for the emitted rows, or only the best `deep_k` of
+                    // them (ties at the cutoff included). The strong score depends only
+                    // on features both passes compute identically; the calibrated score
+                    // was taken over the whole pool, so keep it.
+                    let cutoff = if deep_k > 0 {
+                        let mut ranks: Vec<f32> = queue
+                            .iter_psms()
+                            .map(|p| {
+                                if p.rank_score.is_nan() {
+                                    f32::NEG_INFINITY
+                                } else {
+                                    p.rank_score
+                                }
+                            })
+                            .collect();
+                        ranks.sort_by(|a, b| b.total_cmp(a));
+                        ranks.get(deep_k - 1).copied().unwrap_or(f32::NEG_INFINITY)
+                    } else {
+                        f32::NEG_INFINITY
+                    };
+                    queue.update_in_place(|psm| {
+                        if deep_k > 0 && (psm.rank_score.is_nan() || psm.rank_score < cutoff) {
+                            return;
+                        }
+                        let strong = psm.features.strong_score;
+                        let strong_cal = psm.features.strong_score_cal;
+                        psm.features = make_features(psm, true);
+                        debug_assert_eq!(psm.features.strong_score.to_bits(), strong.to_bits());
+                        psm.features.strong_score_cal = strong_cal;
+                    });
                 }
 
                 // Chimeric fragment-overlap diagnostic (env-gated). For scans that
@@ -1748,6 +1793,29 @@ pub(crate) fn compute_psm_features(
     charge: u8,
     intensity_model: Option<&IntensityModel>,
 ) -> PsmFeatures {
+    compute_psm_features_with_edge(
+        scored_spec,
+        peptide,
+        scorer,
+        charge,
+        intensity_model,
+        None,
+        true,
+    )
+}
+
+/// As [`compute_psm_features`], reusing an `edge_score` the caller already has
+/// (`PsmMatch::edge_score`, computed in the candidate loop for the same spectrum,
+/// peptide and charge) instead of recomputing it.
+pub(crate) fn compute_psm_features_with_edge(
+    scored_spec: &ScoredSpectrum<'_>,
+    peptide: &Peptide,
+    scorer: &RankScorer,
+    charge: u8,
+    intensity_model: Option<&IntensityModel>,
+    known_edge_score: Option<i32>,
+    full: bool,
+) -> PsmFeatures {
     let n = peptide.length();
     if n < 2 {
         return PsmFeatures::default();
@@ -1756,7 +1824,8 @@ pub(crate) fn compute_psm_features(
     // ADDITIVE edge-score feature (new PIN column). Computed
     // here so it shares the per-PSM ScoredSpectrum + scorer references that
     // the existing feature-extraction code already has on hand.
-    let edge_score = psm_edge_score(scored_spec, peptide, scorer, charge);
+    let edge_score =
+        known_edge_score.unwrap_or_else(|| psm_edge_score(scored_spec, peptide, scorer, charge));
 
     // Predict charge-1 b/y ions; one bool per fragment position.
     //
@@ -2202,32 +2271,39 @@ pub(crate) fn compute_psm_features(
         frag_pred_slice,
     );
 
-    // Tier-2 frag-intensity LLR battery (additive PIN features; 0.0 when no
-    // frag model). Discriminative alternative to the cosine intensity_signal.
-    let (frag_pred_explained, frag_pred_chance_llr, frag_topk_observed) = frag_llr_battery(
-        frag_intensity_model,
-        scored_spec,
-        peptide,
-        charge,
-        feature_tol,
-        feature_tol_is_ppm,
-        frag_pred_slice,
-    );
-
-    // Decoy-aware rich-ion LLR (additive PIN feature; 0.0 when no rich-ion model).
-    let rich_ion_llr_val = rich_ion_llr(
-        scorer.param().rich_ion_model.as_deref(),
-        scored_spec,
-        peptide,
-        charge,
-        feature_tol,
-        feature_tol_is_ppm,
-    );
-
-    // Mod-localization site-determining-ion features (additive PIN columns; all
-    // 0.0 for an unmodified peptide). Uses the SAME feature tolerance as the
-    // RichIonLLR / ion-feature path above (train/serve parity).
-    let mod_site = mod_site_features(peptide, scored_spec, feature_tol, feature_tol_is_ppm);
+    // The remaining features feed only the PIN, never the strong score, so a
+    // light pass (`full == false`, used to rank strong-mode candidates before the
+    // trim) leaves them at 0.0 and the survivors get a full pass.
+    let (frag_pred_explained, frag_pred_chance_llr, frag_topk_observed, rich_ion_llr_val, mod_site) =
+        if full {
+            // Tier-2 frag-intensity LLR battery (additive PIN features; 0.0 when no
+            // frag model). Discriminative alternative to the cosine intensity_signal.
+            let (e, c, t) = frag_llr_battery(
+                frag_intensity_model,
+                scored_spec,
+                peptide,
+                charge,
+                feature_tol,
+                feature_tol_is_ppm,
+                frag_pred_slice,
+            );
+            // Decoy-aware rich-ion LLR (additive PIN feature; 0.0 when no rich-ion model).
+            let r = rich_ion_llr(
+                scorer.param().rich_ion_model.as_deref(),
+                scored_spec,
+                peptide,
+                charge,
+                feature_tol,
+                feature_tol_is_ppm,
+            );
+            // Mod-localization site-determining-ion features (additive PIN columns; all
+            // 0.0 for an unmodified peptide). Uses the SAME feature tolerance as the
+            // RichIonLLR / ion-feature path above (train/serve parity).
+            let m = mod_site_features(peptide, scored_spec, feature_tol, feature_tol_is_ppm);
+            (e, c, t, r, m)
+        } else {
+            (0.0, 0.0, 0.0, 0.0, Default::default())
+        };
 
     PsmFeatures {
         num_matched_main_ions: num_matched,

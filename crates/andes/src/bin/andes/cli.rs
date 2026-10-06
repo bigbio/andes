@@ -235,6 +235,11 @@ pub(crate) struct SearchArgs {
     )]
     pub(crate) fragment_index_intensity_tiebreak: bool,
 
+    /// Experimental: compute the model-based PIN features only for each spectrum's
+    /// best K rows (0 = all). Lower rows keep those columns at 0.
+    #[arg(long = "deep-features-top", default_value_t = 0, hide = true)]
+    pub(crate) deep_features_top: u32,
+
     /// Fragment-index mode: precursor-mass width of one index slice in Da.
     /// Default: derived from the memory budget (10–150 Da; ~0.13 GB per Da on
     /// a phospho search).

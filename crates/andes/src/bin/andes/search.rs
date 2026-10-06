@@ -688,6 +688,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         params.fragment_index_min_matched = m;
     }
     params.fragment_index_intensity_tiebreak = cli.fragment_index_intensity_tiebreak;
+    params.deep_features_top = cli.deep_features_top;
     params.precursor_mass_shift_ppm = 0.0;
     params.refine_select_psm_fdr = cli.refine_select_psm_fdr;
     params.score_mode = match cli.score {

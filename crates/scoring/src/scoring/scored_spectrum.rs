@@ -3415,6 +3415,7 @@ mod tests {
         // and no isotonic calibration (empty iso_x/iso_y → identity).
         // apply_sigmoid=true: sigmoid(4) ≈ 0.982 → logit ≈ 4.0 → bump ≈ +4.0.
         let gbdt = GbdtPeakModel {
+            packed: Default::default(),
             n_features: 1,
             apply_sigmoid: true,
             trees: vec![Tree {

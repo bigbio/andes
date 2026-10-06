@@ -283,6 +283,7 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
     // Previously these returned a deployable-looking empty model. Now they fail
     // loudly so a no-signal training set is never silently shipped.
     let empty_classifier = || GbdtPeakModel {
+        packed: Default::default(),
         n_features: nf as u32,
         apply_sigmoid: true,
         trees: vec![],
@@ -624,6 +625,7 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
             p.allow_degenerate,
             format!("classifier: held-out AUC {val_auc:.4} < minimum {MIN_VAL_AUC}"),
             move || GbdtPeakModel {
+                packed: Default::default(),
                 n_features: nf as u32,
                 apply_sigmoid: true,
                 trees: trees_for_fallback,
@@ -647,6 +649,7 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
 
     // --- Return ---------------------------------------------------------------
     Ok(GbdtPeakModel {
+        packed: Default::default(),
         n_features: nf as u32,
         apply_sigmoid: true,
         trees,
@@ -747,6 +750,7 @@ pub fn train_gbdt_regression(
     let nf = ds.n_features;
 
     let empty_regressor = || GbdtPeakModel {
+        packed: Default::default(),
         n_features: nf as u32,
         apply_sigmoid: false,
         trees: vec![],
@@ -937,6 +941,7 @@ pub fn train_gbdt_regression(
                  R2 = {r2:.4} (min {MIN_VAL_R2})"
             ),
             move || GbdtPeakModel {
+                packed: Default::default(),
                 n_features: nf as u32,
                 apply_sigmoid: false,
                 trees: trees_for_fallback,
@@ -948,6 +953,7 @@ pub fn train_gbdt_regression(
 
     // --- Return (no sigmoid, no isotonic) ------------------------------------
     Ok(GbdtPeakModel {
+        packed: Default::default(),
         n_features: nf as u32,
         apply_sigmoid: false,
         trees,

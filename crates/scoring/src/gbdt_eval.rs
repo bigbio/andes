@@ -132,13 +132,101 @@ impl Tree {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct GbdtPeakModel {
     pub n_features: u32,
     pub apply_sigmoid: bool,
     pub trees: Vec<Tree>,
     pub iso_x: Vec<f32>,
     pub iso_y: Vec<f32>,
+    /// `trees` repacked for evaluation, built on first use. Derived from `trees`;
+    /// construct with `Default::default()`.
+    pub packed: std::sync::OnceLock<PackedTrees>,
+}
+
+/// Equality is over the model itself, not whether its evaluation cache is built.
+impl PartialEq for GbdtPeakModel {
+    fn eq(&self, other: &Self) -> bool {
+        self.n_features == other.n_features
+            && self.apply_sigmoid == other.apply_sigmoid
+            && self.trees == other.trees
+            && self.iso_x == other.iso_x
+            && self.iso_y == other.iso_y
+    }
+}
+
+/// High bit of [`PackedNode::right`]: a NaN feature value descends left.
+const DEFAULT_LEFT_BIT: u32 = 1 << 31;
+
+/// One tree node in 16 bytes, so a node visit touches one cache line instead of
+/// the five arrays of [`Tree`]. `value` is the threshold of an internal node and
+/// the output of a leaf (`feature < 0`).
+#[derive(Debug, Clone, Copy)]
+struct PackedNode {
+    feature: i32,
+    value: f32,
+    left: u32,
+    right: u32,
+}
+
+/// Every tree of a model as packed nodes; see [`GbdtPeakModel::packed`].
+#[derive(Debug, Clone, Default)]
+pub struct PackedTrees(Vec<Box<[PackedNode]>>);
+
+impl PackedTrees {
+    fn from_trees(trees: &[Tree]) -> Self {
+        PackedTrees(
+            trees
+                .iter()
+                .map(|t| {
+                    (0..t.feature.len())
+                        .map(|i| {
+                            let leaf = t.feature[i] < 0;
+                            PackedNode {
+                                feature: t.feature[i],
+                                value: if leaf { t.value[i] } else { t.threshold[i] },
+                                left: if leaf { 0 } else { t.left[i] as u32 },
+                                right: if leaf {
+                                    0
+                                } else {
+                                    t.right[i] as u32
+                                        | if t.default_left[i] == 1 {
+                                            DEFAULT_LEFT_BIT
+                                        } else {
+                                            0
+                                        }
+                                },
+                            }
+                        })
+                        .collect()
+                })
+                .collect(),
+        )
+    }
+}
+
+/// [`Tree::eval`] on packed nodes: the same comparisons in the same order, so the
+/// result is bit-identical.
+#[inline]
+fn eval_packed(nodes: &[PackedNode], x: &[f32]) -> f32 {
+    let mut i = 0usize;
+    loop {
+        let n = &nodes[i];
+        if n.feature < 0 {
+            return n.value;
+        }
+        let v = x.get(n.feature as usize).copied().unwrap_or(f32::NAN);
+        let go_left = if v.is_nan() {
+            n.right & DEFAULT_LEFT_BIT != 0
+        } else {
+            v <= n.value
+        };
+        i = if go_left {
+            n.left
+        } else {
+            n.right & !DEFAULT_LEFT_BIT
+        } as usize;
+    }
 }
 
 impl GbdtPeakModel {
@@ -183,6 +271,7 @@ impl GbdtPeakModel {
         let iso_x = read_f32_vec(&mut c, n_iso)?;
         let iso_y = read_f32_vec(&mut c, n_iso)?;
         Ok(Self {
+            packed: Default::default(),
             n_features,
             apply_sigmoid,
             trees,
@@ -249,8 +338,13 @@ impl GbdtPeakModel {
     /// fragment intensity prediction) and the caller wants the uncalibrated
     /// score directly. For the classifier path (signal/noise scoring) use
     /// [`predict_logit`] or [`predict_proba`] instead.
+    fn packed(&self) -> &PackedTrees {
+        self.packed
+            .get_or_init(|| PackedTrees::from_trees(&self.trees))
+    }
+
     pub fn predict_value(&self, x: &[f32]) -> f32 {
-        self.trees.iter().map(|t| t.eval(x)).sum()
+        self.packed().0.iter().map(|t| eval_packed(t, x)).sum()
     }
 
     /// Batched `predict_value`: trees OUTER, rows INNER.
@@ -272,9 +366,9 @@ impl GbdtPeakModel {
             "predict_value_batch: rows/out length mismatch"
         );
         out.fill(0.0);
-        for t in &self.trees {
+        for t in &self.packed().0 {
             for (o, x) in out.iter_mut().zip(rows.iter()) {
-                *o += t.eval(x);
+                *o += eval_packed(t, x);
             }
         }
     }
@@ -378,6 +472,7 @@ mod tests {
     /// flags: sigmoid ON. isotonic: identity over [0,1] (two breakpoints).
     fn toy_model() -> GbdtPeakModel {
         GbdtPeakModel {
+            packed: Default::default(),
             n_features: 1,
             apply_sigmoid: true,
             trees: vec![Tree {
@@ -391,6 +486,62 @@ mod tests {
             iso_x: vec![0.0, 1.0],
             iso_y: vec![0.0, 1.0],
         }
+    }
+
+    #[test]
+    fn packed_evaluation_is_bit_identical_to_tree_eval() {
+        // Two-level trees over 3 features with both NaN directions, plus a leaf-only
+        // tree; inputs cover each branch, NaN and a short row (missing feature).
+        let mk = |f0: i32, t0: f32, f1: i32, t1: f32, dl: u8| Tree {
+            feature: vec![f0, f1, -1, -1, -1],
+            threshold: vec![t0, t1, 0.0, 0.0, 0.0],
+            left: vec![1, 3, -1, -1, -1],
+            right: vec![2, 4, -1, -1, -1],
+            value: vec![0.0, 0.0, 0.37, -1.25, 2.5e-3],
+            default_left: vec![dl, 1 - dl, 0, 0, 0],
+        };
+        let leaf_only = Tree {
+            feature: vec![-1],
+            threshold: vec![0.0],
+            left: vec![-1],
+            right: vec![-1],
+            value: vec![0.125],
+            default_left: vec![0],
+        };
+        let m = GbdtPeakModel {
+            packed: Default::default(),
+            n_features: 3,
+            apply_sigmoid: false,
+            trees: vec![mk(0, 0.5, 1, -2.0, 1), mk(2, 1e-3, 0, 0.5, 0), leaf_only],
+            iso_x: vec![],
+            iso_y: vec![],
+        };
+        let rows: Vec<Vec<f32>> = vec![
+            vec![0.1, -3.0, 0.0],
+            vec![0.9, 4.0, 2.0],
+            vec![f32::NAN, f32::NAN, f32::NAN],
+            vec![0.5, -2.0, 1e-3],
+            vec![0.7],
+        ];
+        for x in &rows {
+            let reference: f32 = m.trees.iter().map(|t| t.eval(x)).sum();
+            assert_eq!(
+                m.predict_value(x).to_bits(),
+                reference.to_bits(),
+                "row {x:?}"
+            );
+        }
+        let refs: Vec<&[f32]> = rows.iter().map(|r| r.as_slice()).collect();
+        let mut out = vec![0.0f32; refs.len()];
+        m.predict_value_batch(&refs, &mut out);
+        for (x, o) in rows.iter().zip(&out) {
+            let reference: f32 = m.trees.iter().map(|t| t.eval(x)).sum();
+            assert_eq!(o.to_bits(), reference.to_bits(), "batch row {x:?}");
+        }
+        // An evaluated model still equals an unevaluated copy.
+        let mut fresh = m.clone();
+        fresh.packed = Default::default();
+        assert_eq!(m, fresh);
     }
 
     #[test]
@@ -488,6 +639,7 @@ mod tests {
     fn malformed_child_index_is_rejected() {
         // An internal node (feature 0) whose left child points out of range.
         let bad = GbdtPeakModel {
+            packed: Default::default(),
             n_features: 1,
             apply_sigmoid: true,
             trees: vec![Tree {

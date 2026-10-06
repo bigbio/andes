@@ -539,6 +539,12 @@ impl<'a> PreparedSearch<'a> {
     /// consumers (PIN/TSV writers, chimeric Pass 2) resolve `candidate_idxs`
     /// against the final materialized candidate slice. No-op in `Ram` mode (the
     /// candidates already live in `self.candidates`). Idempotent.
+    /// Candidate indices sorted by exact neutral mass (ties by index); empty in
+    /// `Mmap` mode.
+    pub fn mass_order(&self) -> &[u32] {
+        &self.mass_order
+    }
+
     pub fn sync_materialized_candidates(&mut self) {
         if let Some(accum) = self.mmap_accum.as_ref() {
             let materialized = std::mem::take(&mut accum.lock().unwrap().candidates);

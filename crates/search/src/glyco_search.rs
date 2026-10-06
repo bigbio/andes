@@ -26,7 +26,7 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use model::mass::{nominal_from, H2O, ISOTOPE, PROTON};
+use model::mass::{H2O, ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
 use rayon::prelude::*;
 
@@ -38,8 +38,7 @@ use andes_glyco::glycan_db::GlycanComp;
 use andes_glyco::glycan_first::{search_glycans, Glycan, GlycanConfig, GlycanCore, GlycanIonIndex};
 use andes_glyco::glyco_psm::{
     glyco_gp_fused_score_iso, GlycoPsmKey, GLYCO_GP_CZ_DEFAULT, GLYCO_GP_H_DEFAULT,
-    GLYCO_GP_ISO_DEFAULT, GLYCO_GP_J_DEFAULT,
-    GLYCO_GP_K_DEFAULT,
+    GLYCO_GP_ISO_DEFAULT, GLYCO_GP_J_DEFAULT, GLYCO_GP_K_DEFAULT,
 };
 
 /// Glyco tuning knobs, threaded from the CLI (see the `--glyco-gp-*` /
@@ -626,6 +625,8 @@ pub struct GlycoScoreCtx<'a> {
     pub scorer: &'a scoring_crate::scoring::RankScorer,
     pub candidates: &'a [crate::candidate_gen::Candidate],
     pub bucket_index: &'a std::collections::BTreeMap<i32, Vec<usize>>,
+    /// `PreparedSearch::mass_order`: candidate indices by exact mass.
+    pub mass_order: &'a [u32],
     pub fragment_tolerance_da: f64,
     pub intensity_model: Option<&'a scoring_crate::intensity_model::IntensityModel>,
     pub frag_index: &'a FragmentIndex,
@@ -940,7 +941,10 @@ impl GlycoCtxOwned {
             let glycans: Vec<Glycan> = glycan_list
                 .iter()
                 .enumerate()
-                .map(|(i, g)| Glycan { id: i as u32, composition: g.clone() })
+                .map(|(i, g)| Glycan {
+                    id: i as u32,
+                    composition: g.clone(),
+                })
                 .collect();
             // 0.02 Da is the fixed bucket granularity (index resolution), not a
             // tolerance; the acceptance window is `tol_ppm` at query time, derived
@@ -951,7 +955,7 @@ impl GlycoCtxOwned {
             tol_ppm,
             min_diagnostic_ions: 2,
             min_core_ions: 1, // permissive: this is a pre-filter, not a gate
-            top_k: 100, // pGlyco3: top 100 candidate glycan compositions for peptide search
+            top_k: 100,       // pGlyco3: top 100 candidate glycan compositions for peptide search
             diagnostic_ions: andes_glyco::glycan_first::default_diagnostic_ions(),
             diagnostic_filter: true,
             score_weights: (1.0, 1.0, 0.5),
@@ -1023,6 +1027,7 @@ impl GlycoCtxOwned {
             scorer: prepared.scorer,
             candidates: &prepared.candidates,
             bucket_index: &prepared.bucket_index,
+            mass_order: prepared.mass_order(),
             fragment_tolerance_da: prepared.fragment_tolerance_da,
             intensity_model: prepared.intensity_model.as_deref(),
             frag_index: &self.frag_index,
@@ -1186,6 +1191,25 @@ pub fn glycan_source(
     }
 }
 
+/// Indices of the candidates whose residue mass is within `tol_da` of
+/// `bb_residue` (plus a 1e-6 Da slack; the caller re-checks exactly), ordered by
+/// (nominal residue mass, index), which is the nominal-bucket walk's order.
+fn backbone_candidates(
+    mass_order: &[u32],
+    candidates: &[crate::candidate_gen::Candidate],
+    bb_residue: f64,
+    tol_da: f64,
+) -> Vec<usize> {
+    let lo = bb_residue + H2O - tol_da - 1e-6;
+    let hi = bb_residue + H2O + tol_da + 1e-6;
+    let mass = |i: &u32| candidates[*i as usize].peptide.mass();
+    let start = mass_order.partition_point(|i| mass(i) < lo);
+    let end = start + mass_order[start..].partition_point(|i| mass(i) <= hi);
+    let mut slots: Vec<usize> = mass_order[start..end].iter().map(|&i| i as usize).collect();
+    slots.sort_unstable_by_key(|&i| (candidates[i].peptide.nominal_residue_mass(), i));
+    slots
+}
+
 fn score_spectrum_glyco(
     spec_idx: usize,
     spec: &Spectrum,
@@ -1194,7 +1218,7 @@ fn score_spectrum_glyco(
     let params = ctx.params;
     let scorer = ctx.scorer;
     let candidates = ctx.candidates;
-    let bucket_index = ctx.bucket_index;
+    let mass_order = ctx.mass_order;
     let fragment_tolerance_da = ctx.fragment_tolerance_da;
     let frag_index = ctx.frag_index;
     let glycan_sorted = ctx.glycan_sorted;
@@ -1515,7 +1539,14 @@ fn score_spectrum_glyco(
                 GlycanSource::FullList => glycan_list,
                 GlycanSource::IonIndex | GlycanSource::None => &restricted_glycans,
             };
-            for h in db_branch(precursor_neutral, effective_glycans, 500.0, z, iso, sialic_gate) {
+            for h in db_branch(
+                precursor_neutral,
+                effective_glycans,
+                500.0,
+                z,
+                iso,
+                sialic_gate,
+            ) {
                 all_backbone.push(h);
             }
         }
@@ -1767,10 +1798,7 @@ fn score_spectrum_glyco(
         // charge silently dropped).
         let z = bb_hit.charge;
 
-        // Tight nominal bounds.
-        let nb = nominal_from(bb_residue);
         let tol_da = (bb_residue * tol_ppm * 1e-6_f64).max(0.01);
-        let widen = (tol_da - 0.4999_f64).max(0.0_f64).round() as i32;
 
         // Phase-1 gating/selection ranks on the generation spectrum (HCD
         // partner when paired; ETD scan otherwise — see `phase1_scored`).
@@ -1783,11 +1811,13 @@ fn score_spectrum_glyco(
             None => continue,
         };
 
-        // Candidate slots in bucket order, walked straight off the index
-        // (no per-backbone Vec).
-        let candidate_slots = bucket_index
-            .range((nb - widen)..=(nb + widen))
-            .flat_map(|(_, v)| v.iter().copied());
+        // Every candidate within `tol_da` of the backbone, by exact mass, in the
+        // order the nominal-bucket walk used (nominal key, then index). The bucket
+        // walk searched only `nominal_from(bb_residue)` plus a slack that is 0 at
+        // ppm tolerances, so a peptide whose own key rounded to the neighbouring
+        // integer was never scored, including the very peptide a peptide-first
+        // hypothesis came from.
+        let candidate_slots = backbone_candidates(mass_order, candidates, bb_residue, tol_da);
 
         for cand_slot in candidate_slots {
             let cand = &candidates[cand_slot];
@@ -2861,18 +2891,27 @@ mod glycan_source_tests {
     // HCD/CID: the oxonium gate is real evidence, both directions.
     #[test]
     fn hcd_with_oxonium_uses_the_ion_index() {
-        assert_eq!(glycan_source(false, true, false, false), GlycanSource::IonIndex);
+        assert_eq!(
+            glycan_source(false, true, false, false),
+            GlycanSource::IonIndex
+        );
     }
 
     #[test]
     fn hcd_without_oxonium_gets_nothing() {
-        assert_eq!(glycan_source(false, false, false, false), GlycanSource::None);
+        assert_eq!(
+            glycan_source(false, false, false, false),
+            GlycanSource::None
+        );
     }
 
     // ETD: absence of oxonium is not evidence of absence, so candidates survive.
     #[test]
     fn etd_without_oxonium_falls_back_to_the_full_list() {
-        assert_eq!(glycan_source(false, false, true, false), GlycanSource::FullList);
+        assert_eq!(
+            glycan_source(false, false, true, false),
+            GlycanSource::FullList
+        );
     }
 
     #[test]
@@ -2882,14 +2921,23 @@ mod glycan_source_tests {
 
     #[test]
     fn etd_with_oxonium_behaves_like_any_other_scan() {
-        assert_eq!(glycan_source(false, true, true, false), GlycanSource::IonIndex);
-        assert_eq!(glycan_source(true, true, true, false), GlycanSource::FullList);
+        assert_eq!(
+            glycan_source(false, true, true, false),
+            GlycanSource::IonIndex
+        );
+        assert_eq!(
+            glycan_source(true, true, true, false),
+            GlycanSource::FullList
+        );
     }
 
     // `--glyco-full-glycan-db` still needs the oxonium evidence on HCD.
     #[test]
     fn full_glycan_db_uses_the_whole_list_when_oxonium_fired() {
-        assert_eq!(glycan_source(true, true, false, false), GlycanSource::FullList);
+        assert_eq!(
+            glycan_source(true, true, false, false),
+            GlycanSource::FullList
+        );
     }
 
     #[test]

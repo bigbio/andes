@@ -71,7 +71,7 @@ flowchart TD
 ```
 
 1. **Pick the model** from the file's activation, resolution and isobaric label (one of 17
-   bundled models). `--precursor-cal auto` learns the run's precursor shift.
+   bundled models).
 2. **Build candidates**: digest the FASTA and generate decoys. The index goes out-of-core when
    it would not fit the container or scheduler memory limit.
 3. **Score**: low-res by the generating-function rank score, high-res by the fused strong

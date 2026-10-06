@@ -861,6 +861,7 @@ mod tests {
         use crate::gbdt_eval::{GbdtPeakModel, Tree};
         use std::sync::Arc;
         let model = Arc::new(GbdtPeakModel {
+            packed: Default::default(),
             n_features: 1,
             apply_sigmoid: false,
             trees: vec![Tree {

@@ -253,6 +253,7 @@ fn gbdt_blob_roundtrips_through_store() {
     // apply_sigmoid=true, isotonic=identity ([0,1]→[0,1]).
     // predict_logit([1.0]) → sigmoid(2.0) ≈ 0.8808 → logit ≈ 2.0
     let model = GbdtPeakModel {
+        packed: Default::default(),
         // Must match the peak-feature contract (finding 3.1) to load.
         n_features: scoring_crate::peak_features::N_FEATURES as u32,
         apply_sigmoid: true,
@@ -354,6 +355,7 @@ fn multi_model_write_preserves_blobs_and_sources() {
 
     // Build a minimal GbdtPeakModel and serialise it to bytes (same as A2.4 test).
     let model = GbdtPeakModel {
+        packed: Default::default(),
         // Must match the peak-feature contract (finding 3.1) to load.
         n_features: scoring_crate::peak_features::N_FEATURES as u32,
         apply_sigmoid: true,
@@ -450,6 +452,7 @@ fn frag_intensity_model_roundtrips_through_store() {
 
     // Minimal model: single leaf → constant 3.5.
     let model = GbdtPeakModel {
+        packed: Default::default(),
         // Must match the frag-intensity feature contract (finding 3.1) to load.
         n_features: scoring_crate::frag_features::N_FRAG_FEATURES as u32,
         apply_sigmoid: false,
@@ -511,6 +514,7 @@ fn rich_ion_model_round_trips_through_store() {
 
     // Minimal model: single leaf → constant 2.71.
     let model = GbdtPeakModel {
+        packed: Default::default(),
         // Must match the rich-ion feature contract (finding 3.1) to load.
         n_features: scoring_crate::ion_features::N_ION_FEATURES as u32,
         apply_sigmoid: false,

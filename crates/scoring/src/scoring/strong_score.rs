@@ -941,6 +941,7 @@ mod tests {
     fn const_leaf_gbdt(leaf_value: f32) -> crate::gbdt_eval::GbdtPeakModel {
         use crate::gbdt_eval::{GbdtPeakModel, Tree};
         let m = GbdtPeakModel {
+            packed: Default::default(),
             n_features: crate::frag_features::N_FRAG_FEATURES as u32,
             apply_sigmoid: false,
             trees: vec![Tree {

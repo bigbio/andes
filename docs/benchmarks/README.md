@@ -62,28 +62,41 @@ re-measured, this document says so rather than carrying the old value forward si
 
 ### Everything measured, in one table
 
-Every row names what produced it. Standard and opt-in rows: commit `1b8520f8`, benchmark
-VM (8-thread Xeon Gold 6238), Percolator 3.7.1 `--seed 42 -Y`, `q ≤ 0.01`, **2026-09-04,
-one session**. Glyco rows: 5 Percolator seeds; deep tier at `main` commit `14818d3e`, TRFP
-1.4.3 mzML (byte-identical to native reading on these files), NeuGc ≤ 1 glycan list; quick tier
-re-measured 2026-09-06 at the commit introducing the gated NeuGc bound, native `.raw`.
+Every row names what produced it. **Refreshed 2026-10-05** on the benchmark VM (8-thread
+Xeon Gold 6238), Percolator 3.7.1 `--seed 42 -Y`, `q ≤ 0.01`:
+
+- **Counts** for the standard, opt-in, quick-glyco and phospho rows are from `main`
+  `7d1e4565`, one session.
+  - The standard and `--chimeric` counts and the Comet counts reproduce the 2026-09-04
+    values (`1b8520f8`) exactly.
+  - #105 (`5e7e6bf1`, current `main`) leaves all three standard counts unchanged. Its PINs
+    are byte-identical on Astral and UPS1; TMT gains 9 of 409k rows.
+- **Wall times** for the standard rows are #105's: two runs each, measured in a follow-up
+  session the same day against `main` with the two binaries alternated.
+- **Comet** was re-run in the first session. `main` measured within 5% in both sessions,
+  so the host was stable.
+- **Glyco deep tier** was not re-run: it is still `14818d3e`, with TRFP 1.4.3 mzML and the
+  NeuGc ≤ 1 glycan list.
 
 | benchmark | dataset | what is measured | andes | reference | measured error | wall (andes) |
 |---|---|---|---:|---:|---|---:|
-| **Standard, high-res** | Astral, PXD070049, HCD LFQ | PSMs @ q≤0.01 | **38,394** | Comet 31,435 (+22.1%) · Java MS-GF+ 26,542 † | not measurable (no entrapment component) | 244 s |
-| **Standard + TMT labels** | a05058, PXD007683, ion-trap CID | PSMs @ q≤0.01 | **12,281** | Comet 10,504 (+16.9%) · Java 10,651 | not measurable | 97 s |
-| **Standard, low-res LFQ** | UPS1, PXD001819, ion-trap CID | PSMs @ q≤0.01 | 15,838 | Comet 14,734 (+7.5%) · **Java 15,904** | 166 entrapment hits ⇒ **3.6% true FDP** at nominal 1% | 50 s |
-| **Chimeric** (`--chimeric`) | Astral | PSMs @ q≤0.01 | **65,028** (+69%) | baseline 38,394 | not measurable | 322 s |
-| | TMT a05058 | PSMs @ q≤0.01 | 12,540 (+2.1%) | baseline 12,281 | not measurable | 72 s |
-| | UPS1 | PSMs @ q≤0.01 | **17,112** (+8.0%) | baseline 15,838 | 167 entrapment hits — flat against 166 | 48 s |
-| **PTM discovery** (`--refine`) | Astral | PSMs @ q≤0.01 | **43,929** (+14.4%) | baseline 38,394 | not measurable by entrapment (pass 2 is protein-anchored) | 345 s |
+| **Standard, high-res** | Astral, PXD070049, HCD LFQ | PSMs @ q≤0.01 | **38,394** | Comet 31,435 (+22.1%), 215 s · Java MS-GF+ 26,542 † | not measurable (no entrapment component) | **198–205 s** |
+| **Standard + TMT labels** | a05058, PXD007683, ion-trap CID | PSMs @ q≤0.01 | **12,281** | Comet 10,504 (+16.9%), 76 s · Java 10,651 | not measurable | **65–67 s** |
+| **Standard, low-res LFQ** | UPS1, PXD001819, ion-trap CID | PSMs @ q≤0.01 | 15,838 | Comet 14,734 (+7.5%), 46 s · **Java 15,904** | 166 entrapment hits ⇒ **3.6% true FDP** at nominal 1%; Comet: 154 hits on 14,734, the same rate | **41–42 s** |
+| **Chimeric** (`--chimeric`) | Astral | PSMs @ q≤0.01 | **65,028** (+69%; 55,616 distinct scans) | baseline 38,394 | not measurable | 337 s ¶ |
+| | TMT a05058 | PSMs @ q≤0.01 | 12,540 (+2.1%) | baseline 12,281 | not measurable | 73 s ¶ |
+| | UPS1 | PSMs @ q≤0.01 | **17,112** (+8.0%) | baseline 15,838 | 167 entrapment hits — flat against 166 | 50 s ¶ |
+| **PTM discovery** (`--refine`) | Astral | PSMs @ q≤0.01 | **40,028** (+4.3%) at `main` with #106; 40,283 at `7d1e4565` | baseline 38,394 | Pass 2 (2,388 modified PSMs): **~2.8% FDP** under the merged 1% threshold, by matched entrapment anchors (`--refine-entrapment`: 27 hits on 1,935; 3.3% before #106) | 363 s ¶ |
 | | TMT, UPS1 | — | skipped | high-res only, by design | | |
 | **Glyco, deep tier** | pGlyco2 mouse liver PXD005553, 5 fractions, TRFP 1.4.3, `main` `14818d3e` | glycoPSMs @1% | **31,666 ± 9** | pGlyco2 **78.9% confirmed** · MSFragger **88.0% confirmed**, 95.8% peptidoform agreement | **1.11% ± 0.03 true FDP** (1:1 database) | 23–29 min / fraction, 16 cores |
-| **Glyco, quick tier** | one pGlyco2 liver fraction (`MouseLiver-Z-T-1`), native `.raw`, gated NeuGc bound (2026-09-06) | glycoPSMs @1% | **7,122** (6,532 with the previous NeuGc ≤ 1 list, same binary) | pGlyco2 **86.7% confirmed** (was 77.9%) · MSFragger 87.8% confirmed, 96.3% / 95.6% peptidoform agreement | **1.13% true FDP** (CI 0.80–1.55; 1.10% before) | 8,145 s, 8 threads (WSL2 host) |
-| **Phospho-enriched** (first PTM benchmark) | PXD007653 mouse liver EasyPhos, one file (`control2`), Q Exactive HCD, mzML via TRFP 1.4.3 | PSMs @ q≤0.01 (Percolator seeds) | **37,258–37,280** with the fragment-ion index (enumeration path: 36,817–36,922; `--protocol phospho` 36,780–36,884) · **26,883 phospho-bearing** | **Comet 2025.01, same node and settings: 33,888–34,025 (+9.6% for andes), 23,888 phospho-bearing, 1.73–1.78% FDP, 226 s** · MaxQuant (PEP≤0.01, 23,563 scans): **82.5% covered**, 98.3% bare-peptide agreement | **1.15–1.16%** true FDP with the index (1.22–1.32% enumeration; 1:1 database) | **164 s**, 32 threads (enumeration path 99 min) |
+| **Glyco, quick tier** | one pGlyco2 liver fraction (`MouseLiver-Z-T-1`), native `.raw`, bundled pGlyco mouse glycan database (`--glyco-species mouse`, 1,833 compositions) | glycoPSMs @1% | **7,162** (seed 42; seeds 1–5: 7,094–7,137) | pGlyco2 **90.1% confirmed** · MSFragger **90.7% confirmed**, 97.8% / 95.7% peptidoform agreement | **0.89–1.24% true FDP** over 6 seeds (seed 42: 1.24%, CI 0.90–1.68; 1:1 database) | 4,888 s, 8 threads |
+| **Phospho-enriched** (first PTM benchmark) | PXD007653 mouse liver EasyPhos, one file (`control2`), Q Exactive HCD, mzML via TRFP 1.4.3 (sha256 `03cdb585…`) | PSMs @ q≤0.01 (Percolator seeds 42, 1–3) | **37,179–37,280** with the fragment-ion index · **26,806–26,883 phospho-bearing** | **Comet 2025.01, same VM, file and settings: 33,928–34,025 (+9.6% for andes), 23,874–23,942 phospho-bearing, 1.74–1.78% FDP, 1,166 s** · MaxQuant (PEP≤0.01, 23,563 scans): **82.4% covered** (19,420 scans), 95.3% same-scan backbone agreement | **1.11–1.16%** true FDP (1:1 database) | **949 s**, 8 threads (2026-09 cluster run: 164 s at 32 threads) |
 
-† Java MS-GF+ v20240326 was not re-run in the 2026-09 session; its counts are historical
+† Java MS-GF+ v20240326 was not re-run in 2026-09 or 2026-10; its counts are historical
 (same protocol, earlier session) and it remains ~10-40x slower than andes.
+
+¶ The opt-in rows, like the quick-glyco and phospho rows, are timed at `7d1e4565`, before
+#105's speed-up. #105 also applies to those paths; they were not re-timed after it.
 
 **Not benchmarked yet, and therefore not claimed:** iTRAQ, timsTOF `.d`, MSFragger on the
 standard sets, Comet's fragment-index mode, and phospho *site localisation* (the phospho
@@ -122,6 +135,50 @@ Identification-neutral on both. The gap between 1.64x and 1.14x is expected: Ast
 `strong` score mode where the ensembles both rank candidates and build features, while
 low-res TMT runs in `rank` mode where they only build features. A repeat Astral run the
 same day gave 262 s, so treat wall times as ±8%, not single-second figures.
+
+### Against Comet — re-measured 2026-10-05, after #105
+
+Same host, same 8 threads, same Comet 2025.01 rev 1 (`4181df6`) and parameter files, same
+Percolator protocol. Counts reproduce 2026-09-04 exactly for both engines. #105
+(exact-mass candidate lookup, memoised fragment predictions, parallel setup, skipped edge
+scoring on low-res models) changed the speed comparison:
+
+| dataset | andes `main` before #105 | andes after #105 | Comet 2025.01 | PSM gain | andes speed vs Comet |
+|---|---:|---:|---:|---:|---:|
+| Astral | 274–297 s | **198–205 s** | 215 s | **+22.1%** | **0.92–0.95x** |
+| TMT a05058 | 93–102 s | **65–67 s** | 76 s | **+16.9%** | **0.86–0.88x** |
+| UPS1 | 51–57 s | **41–42 s** | 46 s | **+7.5%** | **0.89–0.91x** |
+
+andes is now faster than Comet on all three datasets while finding 7.5–22.1% more PSMs. The
+"before" range spans both sessions and is wider than the September figures (244 / 97 / 50 s),
+which were a single run each.
+
+The matched-output-depth comparison below (`--top-n 5`) has not been re-run since #105.
+
+### Time, CPU and memory against Comet — 2026-10-06
+
+Same VM (8-thread Xeon Gold 6238), 8 threads, same inputs and parameter files as above. One
+run per engine, under `/usr/bin/time -v`. andes is `a0e85cda` (#105, the speed code on
+current `main`). PSM counts are from the 2026-10-05 refresh; phospho is Percolator seed 42.
+
+| dataset | engine | PSMs @ q≤0.01 | wall | CPU time | peak memory |
+|---|---|---:|---:|---:|---:|
+| Astral | **andes** | **38,394** | 213 s | **1,238 s** | 7.7 GB |
+| | Comet | 31,435 | 217 s | 1,594 s | 8.1 GB |
+| TMT a05058 | **andes** | **12,281** | 77 s | **323 s** | 5.9 GB |
+| | Comet | 10,504 | 77 s | 568 s | 2.9 GB |
+| UPS1 | **andes** | **15,838** | 49 s | **219 s** | 2.5 GB |
+| | Comet | 14,734 | 42 s | 309 s | 2.9 GB |
+| Phospho (PXD007653) | **andes** | **37,179** (1.11% FDP) | **901 s** | **5,729 s** | 13.7 GB |
+| | Comet | 33,984 (1.77% FDP) | 1,096 s | 8,399 s | 6.0 GB |
+
+- **CPU time:** andes uses 22–43% less than Comet on every dataset. This is the steadier
+  speed comparison, because it varies little between sessions.
+- **Wall time:** level on Astral and TMT, 7 s slower on UPS1, 18% faster on phospho. These
+  andes times are 5–15% slower than the alternating A/B above (TMT 77 vs 65–67 s). The first
+  runs of this session overlapped a large file deletion on the same disk.
+- **Memory:** andes is the heavier engine. It peaks at 2x Comet on TMT (5.9 vs 2.9 GB) and on
+  phospho (13.7 vs 6.0 GB); Astral and UPS1 are similar.
 
 ### Against Comet — measured head-to-head, 2026-09-04
 
@@ -170,7 +227,9 @@ approximate.
 
 ### Opt-in modes
 
-All nine arms in one session, 2026-09-04:
+All nine arms in one session, 2026-09-04. Re-run on 2026-10-05 at `7d1e4565`: the three
+`--chimeric` counts and their entrapment hits reproduce exactly (65,028 / 12,540 / 17,112;
+167). The `--refine` count changed after three fixes; see below.
 
 | dataset | baseline | `--chimeric` | `--refine` |
 |---|---|---|---|
@@ -189,9 +248,28 @@ faster on the smaller sets.
 **`--refine` is gated to high-resolution data** and skips on both low-res sets by design,
 logging `refine is high-res-only and the data is low-res; skipping refinement`. At low
 resolution a deamidation (+0.984) is not separable from a C13 isotope error, so identical
-counts there are correct behaviour, not a silent no-op. Its Astral gain is **not**
-entrapment-validatable: pass 2 is anchored to already-accepted proteins, so it cannot land
-on an entrapment sequence by the mechanism the metric relies on.
+counts there are correct behaviour, not a silent no-op.
+
+**`--refine` re-measured 2026-10-05.** The 43,929 above predates three fixes:
+- #100 paired each Pass-2 decoy with its anchor peptide. Decoys were whole-peptide
+  reversals, which left Pass-2 targets outnumbering decoys 2.6 : 1.
+- #102 drops deamidations that a precursor picked one isotope high explains better.
+- #103 added `--refine-entrapment`, which puts one shuffled entrapment anchor next to every
+  real anchor so Pass 2's false discoveries can be counted. The run-level entrapment
+  database never reaches Pass 2.
+
+At `7d1e4565` with this section's protocol, Astral gives **40,283 PSMs (+4.9%)**. Of the
+2,594 accepted modified PSMs, about **3.3% are false** by matched entrapment (35 entrapment
+hits on 2,127 in the diagnostic arm). The paired decoys track that rate (53 Pass-2 decoys
+above the cutoff, against about 70 false targets estimated from entrapment), but one threshold
+over the merged PIN lets the smaller Pass-2 group run above 1%. Thresholded on their own, the
+Pass-2 rows measured 0.8–1.1% entrapment FDP in an earlier run with Percolator's default
+settings (see `--refine` in DOCS).
+
+#106 then stopped offering protein-N-terminal Acetyl on internal peptides. Each anchor is
+its own one-peptide mini-protein, so every anchor had looked like a protein N-terminus.
+Accepted acetylations fell from 512 to 125, total PSMs from 40,283 to **40,028 (+4.3%)**,
+and Pass-2 entrapment FDP from 3.3% to **2.8%** (27 hits on 1,935).
 
 ## 2. Glyco
 
@@ -203,6 +281,29 @@ fractions on a cluster. The earlier human-plasma set was retired: its reference 
 proprietary Byonic `.byrslt` export, which cannot be rebuilt from public artifacts.
 
 ### Quick tier — one pGlyco2 liver fraction, VM-local, ~2 h
+
+**Re-measured 2026-10-05** at `main` `7d1e4565` on the benchmark VM (8 threads), same raw
+file and database (sha256 `2f0142b7…` / `5ee15d8d…`).
+
+The glycan source differs from the 2026-09-06 run below. `--glyco` now requires a glycan
+database, and this run uses the bundled pGlyco mouse list (`--glyco-species mouse`, 1,833
+compositions). The 2026-09-06 run used the former built-in list with the gated NeuGc bound
+(852 compositions). Read the two columns as two configurations, not as a code A/B.
+
+| | 2026-09-06 (built-in list, gated NeuGc) | **2026-10-05 (bundled mouse list)** |
+|---|---:|---:|
+| glycoPSMs @1%, seed 42 | 7,122 | **7,162** (3,008 glycopeptides, 896 compositions) |
+| seeds 1–5 | 7,078 – 7,122 | 7,094 – 7,137 |
+| true FDP (1:1 database) | 1.13% | 0.89 – 1.24% over 6 seeds |
+| pGlyco2 confirmed | 86.7% | **90.1%** |
+| MSFragger confirmed | 87.8% | **90.7%** |
+| same-scan peptidoform agreement, pGlyco2 / MSFragger | 96.3% / 95.6% | **97.8% / 95.7%** |
+| search wall, 8 threads | 8,145 s (WSL2 host) | 4,888 s (benchmark VM) |
+
+Selection losses against pGlyco2 fell from 12.9% (wrong target 5.6% + decoy won 7.3%) to
+9.4% (4.0% + 5.3%). #95, which makes the collapse prefer the monoisotopic hypothesis, landed
+between the two runs and targets exactly this loss. With the glycan list also different,
+this table cannot apportion the gain between the two.
 
 `MouseLiver-Z-T-1.raw` (PXD005553, 2.70 GB, sha256 `2f0142b7…`) read natively, against
 `mouse_entrap.fasta` (34,554 sequences = 17,277 UniProt reviewed mouse + shuffled twins,

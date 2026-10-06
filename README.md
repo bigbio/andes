@@ -18,7 +18,7 @@ andes is also notable for *how* it was built: its engine, models, and benchmarks
 
 ## Why andes?
 
-Against the canonical open-source engines — **Java MS-GF+ and Comet** — andes leads the field on high-res Astral and low-res TMT, **beats Comet on all three** reference datasets, reads vendor formats natively, and runs in minutes where Java takes hours. The one place andes is edged out is **low-resolution LFQ (UPS1) — Java MS-GF+'s strongest regime** — where andes still beats Comet but trails Java; we report that honestly below. Every engine is re-scored through one uniform Percolator (3.7.1, `--seed 42 -Y`) on the same 8-thread VM, and andes ships a fully own-trained bundle with **own-derived partition geometry** (no MS-GF+ code, constants, or geometry).
+Against the canonical open-source engines — **Java MS-GF+ and Comet** — andes leads the field on high-res Astral and low-res TMT, **beats Comet on all three** reference datasets in both identifications and wall time, reads vendor formats natively, and runs in minutes where Java takes hours. The one place andes is edged out is **low-resolution LFQ (UPS1) — Java MS-GF+'s strongest regime** — where andes still beats Comet but trails Java; we report that honestly below. Every engine is re-scored through one uniform Percolator (3.7.1, `--seed 42 -Y`) on the same 8-thread VM, and andes ships a fully own-trained bundle with **own-derived partition geometry** (no MS-GF+ code, constants, or geometry).
 
 Benchmarked at 1% FDR across three reference datasets — **read the metric note under the table before quoting these numbers**:
 
@@ -27,12 +27,27 @@ Benchmarked at 1% FDR across three reference datasets — **read the metric note
 | **andes** | **38,394** | **12,281** | 15,838 |
 | Comet 2025.01 | 31,435 | 10,504 | 14,734 |
 | Java MS-GF+ v20240326 † | 26,542 | 10,651 | **15,904** |
-| *andes wall time* | *244 s* | *97 s* | *50 s* |
-| *Comet wall time* | *209 s* | *77 s* | *48 s* |
+| *andes wall time* | *198–205 s* | *65–67 s* | *41–42 s* |
+| *Comet wall time* | *215 s* | *76 s* | *46 s* |
 
-<sub>**Metric.** PSMs at Percolator `q ≤ 0.01` under one methodology for every row (plain FASTA + andes `XXX_` decoys + Percolator 3.7.1 `--seed 42 -Y`). andes and Comet were measured head-to-head on **2026-09-04**, same host, 8 threads, one session, commit `1b8520f8`; andes finds **7.5–22.1% more PSMs** for **1.04–1.26x** Comet's wall time. **†** Java MS-GF+ was not re-run that day; its counts are from the same protocol in an earlier session, and it remains ~10–40x slower than andes. These counts are **not** entrapment-validated: the Astral and TMT databases carry no entrapment component, and on UPS1 the measured true FDP at a nominal 1% is **~3.6%**. N=1 per dataset. Every number, its provenance, the opt-in modes and the glyco tiers: [`docs/benchmarks/`](docs/benchmarks/README.md).</sub>
+<sub>**Metric.** PSMs at Percolator `q ≤ 0.01` under one methodology for every row (plain FASTA + andes `XXX_` decoys + Percolator 3.7.1 `--seed 42 -Y`). Re-measured on **2026-10-05** on the same 8-thread host: the andes and Comet counts reproduce the 2026-09-04 values exactly at `main` `7d1e4565`, and #105 (`5e7e6bf1`, current `main`) leaves all three counts unchanged. andes wall times are #105's (two runs each); Comet's are from the same host the same day, in an earlier session where `main` measured within 5% of the follow-up session's `main` arm. andes finds **7.5–22.1% more PSMs** in **0.86–0.95x** Comet's wall time. **†** Java MS-GF+ was not re-run that day; its counts are from the same protocol in an earlier session, and it remains ~10–40x slower than andes. These counts are **not** entrapment-validated: the Astral and TMT databases carry no entrapment component, and on UPS1 the measured true FDP at a nominal 1% is **~3.6%**. N=1 per dataset. Every number, its provenance, the opt-in modes and the glyco tiers: [`docs/benchmarks/`](docs/benchmarks/README.md).</sub>
 
-**On FDR honesty.** Target-decoy q-values are self-consistent by construction, so andes is checked against entrapment databases where one exists — a target PSM matching only a foreign `ENTRAP_` protein is false by construction, which makes the true FDP measurable rather than assumed. That check is real and has repeatedly changed conclusions here. It is also **not uniformly available**: as of the 2026-09-04 audit the Astral benchmark database carries no entrapment component, and the UPS1 one is not 1:1, so the honest summary is that UPS1 sits at ~3.6% true FDP at a nominal 1% and Astral is unvalidated in this configuration. (Opt-in `--refine` runs on top. The run-level entrapment database cannot reach its peptide-anchored second pass, so it was checked with matched entrapment anchors. On Astral, its PSMs sit at ~2% FDP under a merged 1% threshold and ~1% when thresholded on their own. That is one dataset, so it is a capability, not a headline number.)
+**Time, CPU and memory** (2026-10-06, same VM, 8 threads, one run per engine, `/usr/bin/time`): andes uses **22–43% less CPU time** than Comet on every dataset. Wall time is level on Astral and TMT, 7 s slower on UPS1 and 18% faster on phospho. andes needs more memory: 2x Comet's peak on TMT and phospho, similar on Astral and UPS1.
+
+| dataset | engine | PSMs @ q≤0.01 | wall | CPU time | peak memory |
+|---|---|---:|---:|---:|---:|
+| Astral | **andes** | **38,394** | 213 s | **1,238 s** | 7.7 GB |
+| | Comet | 31,435 | 217 s | 1,594 s | 8.1 GB |
+| TMT a05058 | **andes** | **12,281** | 77 s | **323 s** | 5.9 GB |
+| | Comet | 10,504 | 77 s | 568 s | 2.9 GB |
+| UPS1 | **andes** | **15,838** | 49 s | **219 s** | 2.5 GB |
+| | Comet | 14,734 | 42 s | 309 s | 2.9 GB |
+| Phospho (PXD007653) | **andes** | **37,179** (1.11% FDP) | **901 s** | **5,729 s** | 13.7 GB |
+| | Comet | 33,984 (1.77% FDP) | 1,096 s | 8,399 s | 6.0 GB |
+
+<sub>PSM counts are from the 2026-10-05 refresh, where phospho is Percolator seed 42; time and memory are from this session. Wall times vary 5–15% between sessions on this host (compare the A/B times in the table above); CPU time is the steadier comparison.</sub>
+
+**On FDR honesty.** Target-decoy q-values are self-consistent by construction, so andes is checked against entrapment databases where one exists — a target PSM matching only a foreign `ENTRAP_` protein is false by construction, which makes the true FDP measurable rather than assumed. That check is real and has repeatedly changed conclusions here. It is also **not uniformly available**: as of the 2026-09-04 audit the Astral benchmark database carries no entrapment component, and the UPS1 one is not 1:1, so the honest summary is that UPS1 sits at ~3.6% true FDP at a nominal 1% and Astral is unvalidated in this configuration. (Opt-in `--refine` runs on top. The run-level entrapment database cannot reach its peptide-anchored second pass, so it was checked with matched entrapment anchors. On Astral, under this benchmark's protocol, its modified PSMs sit at ~2.8% FDP within a merged 1% threshold and ~1% when thresholded on their own. That is one dataset, so it is a capability, not a headline number.)
 
 <details>
 <summary>Bench methodology</summary>
@@ -350,7 +365,7 @@ and prints a warning. These parameters have no effect on mzML/`.raw`/`.d`.
 
 DDA scans frequently co-isolate more than one precursor, and the second peptide is normally lost. With `--chimeric` (mzML or Thermo `.raw`), andes runs a **two-pass cascade**: Pass 1 is the normal top-1 search; Pass 2 then detects co-isolated precursors in each scan's MS1 isolation window (averagine envelope match) and runs a targeted search for the second peptide on the *residual* spectrum (the primary's matched peaks removed), emitting it as an extra PSM. This recovers co-isolated identifications without the FDR inflation of a blind wide-window search — gains are entrapment-FDP validated. It is **opt-in and off by default**; the default engine is unchanged.
 
-**Measured 2026-09-04** (same session as the headline table). On UPS1, the one dataset
+**Measured 2026-09-04 and reproduced exactly on 2026-10-05.** On UPS1, the one dataset
 with an entrapment database, `--chimeric` raised PSMs at q ≤ 0.01 from 15,838 to 17,112
 (+8.0%) while entrapment hits stayed flat (166 → 167) — the extra identifications are real,
 not an artifact of the different candidate population the chimeric PIN presents (it forces

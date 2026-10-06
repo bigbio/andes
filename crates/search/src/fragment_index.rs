@@ -39,6 +39,15 @@ use model::tolerance::Tolerance;
 /// record's (bin, count) pairs.
 type RecordPass1 = (Vec<(f64, u32)>, Vec<(u32, u32)>);
 
+/// `query`'s reusable vote buffers: per-id (count, summed intensity) over the
+/// current window, zeroed again after each query, and the ids touched.
+type VoteBuffers = (Vec<(u16, f32)>, Vec<u32>);
+
+thread_local! {
+    static VOTE_BUF: std::cell::RefCell<VoteBuffers> =
+        const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+}
+
 pub struct ChunkFragmentIndex {
     /// The chunk's distinct base records, in `enumerate_candidates` order.
     records: Vec<IndexRecord>,
@@ -297,32 +306,51 @@ impl ChunkFragmentIndex {
         // Vote count, plus the summed intensity of the peaks that produced it.
         // The count stays the primary key — it is what `min_matched` means — and the
         // intensity is only ever used to break ties among equal counts.
-        let mut votes: FxHashMap<u32, (u16, f32)> = FxHashMap::default();
+        // Votes go into a dense per-thread array over the window's id range, plus
+        // the list of ids touched, instead of a hash map grown per spectrum. Each
+        // id's sums accumulate in peak order as before, and `select_top_k` fully
+        // orders the result, so the selection is identical.
         let n_bins = self.bin_start.len() - 1;
-        for &(mz, intensity) in &spec.peaks {
-            let tol_da = fragment_tol.as_da(mz);
-            let b = (mz / self.bin_width) as usize;
-            for bb in b.saturating_sub(1)..=(b + 1).min(n_bins - 1) {
-                let seg =
-                    &self.entries[self.bin_start[bb] as usize..self.bin_start[bb + 1] as usize];
-                let start = seg.partition_point(|e| e.0 < id_lo);
-                for e in &seg[start..] {
-                    if e.0 >= id_hi {
-                        break;
-                    }
-                    if ((e.1 as f64) - mz).abs() <= tol_da {
-                        let slot = votes.entry(e.0).or_insert((0, 0.0));
-                        slot.0 += 1;
-                        slot.1 += intensity;
+        let width = (id_hi - id_lo) as usize;
+        let mut sel: Vec<(u32, u16, f32)> = VOTE_BUF.with(|cell| {
+            let mut buf = cell.borrow_mut();
+            let (counts, touched) = &mut *buf;
+            if counts.len() < width {
+                counts.resize(width, (0, 0.0));
+            }
+            touched.clear();
+            for &(mz, intensity) in &spec.peaks {
+                let tol_da = fragment_tol.as_da(mz);
+                let b = (mz / self.bin_width) as usize;
+                for bb in b.saturating_sub(1)..=(b + 1).min(n_bins - 1) {
+                    let seg =
+                        &self.entries[self.bin_start[bb] as usize..self.bin_start[bb + 1] as usize];
+                    let start = seg.partition_point(|e| e.0 < id_lo);
+                    for e in &seg[start..] {
+                        if e.0 >= id_hi {
+                            break;
+                        }
+                        if ((e.1 as f64) - mz).abs() <= tol_da {
+                            let slot = &mut counts[(e.0 - id_lo) as usize];
+                            if slot.0 == 0 {
+                                touched.push(e.0);
+                            }
+                            slot.0 += 1;
+                            slot.1 += intensity;
+                        }
                     }
                 }
             }
-        }
-        let mut sel: Vec<(u32, u16, f32)> = votes
-            .into_iter()
-            .filter(|&(_, (v, _))| v >= min_matched)
-            .map(|(id, (v, inten))| (id, v, inten))
-            .collect();
+            let mut sel = Vec::new();
+            for &id in touched.iter() {
+                let slot = &mut counts[(id - id_lo) as usize];
+                if slot.0 >= min_matched {
+                    sel.push((id, slot.0, slot.1));
+                }
+                *slot = (0, 0.0);
+            }
+            sel
+        });
         select_top_k(&mut sel, top_k, intensity_tiebreak);
         sel.into_iter().map(|(id, v, _)| (id, v)).collect()
     }
@@ -364,7 +392,6 @@ impl ChunkFragmentIndex {
         out
     }
 }
-
 
 /// Order `(form_id, votes, matched_intensity)` and keep the best `top_k`.
 ///

@@ -23,12 +23,14 @@
 //! field that is merely assigned a wrong-but-nonzero value. This catches the specific
 //! failure that actually happened, cheaply and without fixtures.
 
-/// Fields the standard path assigns inside a `fill_post_topn` closure.
+/// Fields the standard path assigns inside a `fill_post_topn` closure, or inside the
+/// `make_features` closure those passes call (strong mode builds features in two
+/// passes, so the per-PSM assignments live in one shared closure).
 fn standard_post_topn_fields(src: &str) -> Vec<String> {
     let mut out = Vec::new();
     let lines: Vec<&str> = src.lines().collect();
     for (i, line) in lines.iter().enumerate() {
-        if !line.contains("fill_post_topn(|psm|") {
+        if !line.contains("fill_post_topn(|psm|") && !line.contains("let make_features = |") {
             continue;
         }
         // Walk the closure body by brace depth from the call site.
@@ -74,6 +76,17 @@ fn assigned_features(line: &str) -> Vec<String> {
     out
 }
 
+// Known, deliberate exceptions. Each needs a REASON, not just a name: an entry here
+// is a decision to ship a constant column, and it should be re-argued when touched.
+const EXCEPTIONS: &[(&str, &str)] = &[(
+    "strong_score_cal",
+    "the calibrated strong score needs a per-spectrum population of strong \
+         scores to z-score against. The glyco driver computes a strong score only \
+         for the single collapse winner, so no such population exists. Filling it \
+         requires scoring the accepted set, which is a real design change and not a \
+         transcription fix — tracked separately.",
+)];
+
 #[test]
 fn glyco_path_fills_every_feature_the_standard_path_fills() {
     let standard = include_str!("../src/match_engine.rs");
@@ -90,30 +103,11 @@ fn glyco_path_fills_every_feature_the_standard_path_fills() {
         expected.len()
     );
 
-    // Known, deliberate exceptions. Each needs a REASON, not just a name: an entry here
-    // is a decision to ship a constant column, and it should be re-argued when touched.
-    let exceptions: &[(&str, &str)] = &[
-        (
-            "edge_score",
-            "glyco computes the edge score during phase 1 and moves it in through the \
-             PsmMatch struct literal (`edge: w.edge`) rather than a `features.` \
-             assignment, so it is populated by a different mechanism, not missing.",
-        ),
-        (
-            "strong_score_cal",
-            "the calibrated strong score needs a per-spectrum population of strong \
-             scores to z-score against. The glyco driver computes a strong score only \
-             for the single collapse winner, so no such population exists. Filling it \
-             requires scoring the accepted set, which is a real design change and not a \
-             transcription fix — tracked separately.",
-        ),
-    ];
-
     let mut missing: Vec<String> = Vec::new();
     for field in &expected {
         let filled = glyco_driver.contains(&format!("features.{field} ="))
             || glyco_rt.contains(&format!("features.{field} ="));
-        let excepted = exceptions.iter().any(|(n, _)| n == field);
+        let excepted = EXCEPTIONS.iter().any(|(n, _)| n == field);
         if !filled && !excepted {
             missing.push(field.clone());
         }
@@ -136,7 +130,7 @@ fn every_documented_exception_is_still_a_real_gap() {
     // exception is stale and must be removed, or the next real gap hides behind it.
     let standard = include_str!("../src/match_engine.rs");
     let expected = standard_post_topn_fields(standard);
-    for name in ["edge_score", "strong_score_cal"] {
+    for (name, _) in EXCEPTIONS {
         assert!(
             expected.iter().any(|f| f == name),
             "`{name}` is listed as an exception but the standard path no longer fills \

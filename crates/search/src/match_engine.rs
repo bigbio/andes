@@ -1376,8 +1376,12 @@ impl<'a> PreparedSearch<'a> {
                     });
                     features
                 };
+                // With `deep_features_top` set, rank mode also takes the light pass
+                // first and gives the full one only to the best rows.
+                let deep_k = params.deep_features_top as usize;
+                let light_first = strong_mode || deep_k > 0;
                 queue.fill_post_topn(|psm| {
-                    psm.features = make_features(psm, !strong_mode);
+                    psm.features = make_features(psm, !light_first);
                 });
 
                 let retained_strong: Vec<f32> =
@@ -1394,10 +1398,32 @@ impl<'a> PreparedSearch<'a> {
                     queue.reorder_by_strong_score();
                     // Emit only user top-N rows (gate uses top_n=1); retention pool was wider.
                     queue.trim_to_capacity(params.top_n_psms_per_spectrum);
-                    // Full features for the survivors. The strong score depends only on
-                    // features both passes compute identically; the calibrated score was
-                    // taken over the whole pool, so keep it.
+                }
+                if light_first {
+                    // Full features for the emitted rows, or only the best `deep_k` of
+                    // them (ties at the cutoff included). The strong score depends only
+                    // on features both passes compute identically; the calibrated score
+                    // was taken over the whole pool, so keep it.
+                    let cutoff = if deep_k > 0 {
+                        let mut ranks: Vec<f32> = queue
+                            .iter_psms()
+                            .map(|p| {
+                                if p.rank_score.is_nan() {
+                                    f32::NEG_INFINITY
+                                } else {
+                                    p.rank_score
+                                }
+                            })
+                            .collect();
+                        ranks.sort_by(|a, b| b.total_cmp(a));
+                        ranks.get(deep_k - 1).copied().unwrap_or(f32::NEG_INFINITY)
+                    } else {
+                        f32::NEG_INFINITY
+                    };
                     queue.update_in_place(|psm| {
+                        if deep_k > 0 && (psm.rank_score.is_nan() || psm.rank_score < cutoff) {
+                            return;
+                        }
                         let strong = psm.features.strong_score;
                         let strong_cal = psm.features.strong_score_cal;
                         psm.features = make_features(psm, true);

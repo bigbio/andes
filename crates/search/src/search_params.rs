@@ -109,6 +109,10 @@ pub struct SearchParams {
     /// the matched peaks, instead of by form id (which is mass order and carries no
     /// evidence). `false` is the historical behaviour. See `ChunkFragmentIndex::query`.
     pub fragment_index_intensity_tiebreak: bool,
+    /// Compute the model-based PIN features (rich-ion LLR, fragment-LLR battery,
+    /// site features) only for each spectrum's best `deep_features_top` rows; lower
+    /// rows keep them at 0.0. `0` means every row (the default).
+    pub deep_features_top: u32,
     /// Learned file-wide ppm shift applied to observed neutral masses in the
     /// main pass. Stays 0.0 until the pre-pass calibrator runs.
     pub precursor_mass_shift_ppm: f64,
@@ -205,6 +209,7 @@ impl SearchParams {
             fragment_index_top_k: 0,
             fragment_index_min_matched: 3,
             fragment_index_intensity_tiebreak: false,
+            deep_features_top: 0,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,

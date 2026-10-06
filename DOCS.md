@@ -85,7 +85,7 @@ the file; use `--model-store` plus `--model` for an unbundled model.
 
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
-| `--precursor-cal` | enum | `auto` | `off`, `auto`, `on`. A pre-pass learns a ppm shift from confident PSMs and tightens the precursor tolerance; `auto` skips it on small samples. Skipped (with a warning) on `.raw` and `.d`. | Java `-precursorCal auto\|on\|off` |
+| `--precursor-cal` | enum | `off` | `off`, `auto`, `on`. A pre-pass learns a ppm shift from confident PSMs and tightens the precursor tolerance; `auto` skips it on small samples. Off by default: on the benchmark sets the pre-pass took 9–17% of the run and never fired, and where it fired (UPS1, larger sample) the tightened window lost 7.6% of PSMs. Skipped (with a warning) on `.raw` and `.d`. | Java `-precursorCal auto\|on\|off` |
 
 **Candidate retrieval is automatic.** Out-of-core searches with high-res fragment matching use
 a fragment-ion index (phospho: 164 s against 5,954 s for enumeration; Comet 2025.01: 226 s).

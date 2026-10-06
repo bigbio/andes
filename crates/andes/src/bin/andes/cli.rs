@@ -173,11 +173,14 @@ pub(crate) struct SearchArgs {
     #[arg(long = "isotope-error", hide = true, value_parser = parse_isotope_error_range)]
     pub(crate) isotope_error: Option<(i8, i8)>,
 
-    /// Precursor-mass calibration: `off`, `auto`, or `on`. `auto`/`on` learn a
-    /// systematic ppm shift from confident PSMs in a pre-pass and tighten the
-    /// precursor tolerance for the main search; `auto` skips the correction when
-    /// the sample is too small to be reliable.
-    #[arg(long = "precursor-cal", default_value = "auto", value_parser = parse_precursor_cal)]
+    /// Precursor-mass calibration: `off` (default), `auto`, or `on`. `auto`/`on`
+    /// learn a systematic ppm shift from confident PSMs in a pre-pass and tighten
+    /// the precursor tolerance for the main search; `auto` skips the correction
+    /// when the sample is too small to be reliable. Off by default: on the
+    /// benchmark sets the pre-pass cost 9-17% of the run and fired on none of
+    /// Astral, TMT, UPS1 or phospho; where a larger sample made it fire (UPS1),
+    /// the tightened window lost 7.6% of PSMs.
+    #[arg(long = "precursor-cal", default_value = "off", value_parser = parse_precursor_cal)]
     pub(crate) precursor_cal: PrecursorCalMode,
 
     /// Minimum number of (spectrum, charge) keys before the calibration pre-pass

@@ -34,7 +34,7 @@ search:
 # ── Scoring / model / runtime ───────────────────────────────────────────────
 scoring:
   score: auto                    # auto | strong | rank
-  precursor_cal: auto            # off | auto | on
+  precursor_cal: off             # off | auto | on
   threads: 8
   # fragmentation: auto          # MGF only (no metadata): auto | CID | ETD | HCD | UVPD
   # protocol: auto               # auto | TMT | iTRAQ | phospho | ...

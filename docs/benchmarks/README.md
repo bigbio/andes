@@ -1,6 +1,8 @@
 # andes benchmarks
 
-## Start here (contributors)
+Current results, how to reproduce them, the methodology, the known gaps and a short history.
+Every figure names the commit, host, thread count and date that produced it; anything not
+re-measured is marked as such.
 
 ```bash
 DATA=~/andes-bench                                  # ~200 GB free for the standard sets
@@ -11,50 +13,8 @@ GLYCO=1 ./reproduce/build_databases.sh "$DATA"      # ...plus the mouse glyco da
 ./reproduce/run.sh             "$DATA"              # search + Percolator + results table
 ```
 
-**Four rules that are not optional.** Each exists because breaking it produced a wrong
-published number in this project, and each is explained where it applies below.
-
-1. **Read `.raw` natively** (`--features thermo`), do not convert. A converter version
-   silently cost 30% of identifications on one file; native reading is the reference and
-   costs nothing. If you must convert, use ThermoRawFileParser **1.4.3**.
-2. **Measure the entrapment ratio; never assume 1:1.** `FDP = hits/total x (1 + T/E)`,
-   and `T/E` is a property of the database you built.
-3. **Check Percolator's q floor before trusting a single glyco file.** The smallest
-   attainable q is `1/T_top`; a file with too few confident targets returns zero at 1%
-   regardless of quality, and must be pooled with others from ONE acquisition regime. A
-   rich fraction (the liver quick tier) clears the floor on its own; the plasma files did not.
-4. **Report the metric you computed.** `q <= 0.01` is a claim; an entrapment FDP is a
-   measurement. On these datasets they differ by 2-3x.
-
-Reference identifications for scoring ship in [`glyco/truth/`](glyco/truth/) — no
-re-download, no proprietary parser.
-
-
-Below: current results, how to reproduce them, the methodology, and the known gaps.
-This folder was consolidated from eight documents in September 2026; the superseded ones
-are in git history.
-
-**One variable per comparison — the rule every inconsistency here violated.** Over one
-week of benchmarking, five results had to be withdrawn or corrected. Every single one came
-from comparing runs that differed in more than one respect, where each difference looked
-harmless on its own:
-
-| what looked like | what it actually was |
-|---|---|
-| a 30% engine regression | two different raw-converter versions |
-| `--chimeric` running *faster* than baseline | it forces `top_n=1`, baseline uses 10 |
-| andes 2.07x slower than Comet | a stale figure predating a default change |
-| a glyco dataset finding nothing | Percolator's q floor on a single file |
-| 21% more PSMs in an outside reproduction | a differently-built entrapment database |
-
-So: run every arm you intend to compare in **one session, on one host, with one binary**,
-and record binary commit, converter (or native), database build, thread count and date
-beside the number. A result measured otherwise is not comparable to these and should not
-be published next to them.
-
-**Provenance rule.** Every figure below names the commit, host, thread count and date that
-produced it. A number without that is not a result. Where something has *not* been
-re-measured, this document says so rather than carrying the old value forward silently.
+Reference identifications for scoring ship in [`glyco/truth/`](glyco/truth/). Read
+[§3](#3-methodology-and-the-traps) before comparing your numbers with these.
 
 ---
 
@@ -62,19 +22,16 @@ re-measured, this document says so rather than carrying the old value forward si
 
 ### Everything measured, in one table
 
-Every row names what produced it. **Refreshed 2026-10-05** on the benchmark VM (8-thread
-Xeon Gold 6238), Percolator 3.7.1 `--seed 42 -Y`, `q ≤ 0.01`:
+**Refreshed 2026-10-05** on the benchmark VM (8-thread Xeon Gold 6238), Percolator 3.7.1
+`--seed 42 -Y`, `q ≤ 0.01`.
 
-- **Counts** for the standard, opt-in, quick-glyco and phospho rows are from `main`
-  `7d1e4565`, one session.
-  - The standard and `--chimeric` counts and the Comet counts reproduce the 2026-09-04
-    values (`1b8520f8`) exactly.
-  - #105 (`5e7e6bf1`, current `main`) leaves all three standard counts unchanged. Its PINs
-    are byte-identical on Astral and UPS1; TMT gains 9 of 409k rows.
-- **Wall times** for the standard rows are #105's: two runs each, measured in a follow-up
-  session the same day against `main` with the two binaries alternated.
-- **Comet** was re-run in the first session. `main` measured within 5% in both sessions,
-  so the host was stable.
+- **Counts** (standard, opt-in, quick-glyco, phospho) are from `main` `7d1e4565`, one session.
+  The standard, `--chimeric` and Comet counts reproduce the 2026-09-04 values (`1b8520f8`)
+  exactly. #105 (`5e7e6bf1`, current `main`) leaves the three standard counts unchanged; its
+  PINs are byte-identical on Astral and UPS1, and TMT gains 9 of 409k rows.
+- **Wall times** for the standard rows are #105's: two runs each, alternated with `main` in a
+  follow-up session the same day. Comet was re-run in the first session; `main` measured
+  within 5% in both sessions.
 - **Glyco deep tier** was not re-run: it is still `14818d3e`, with TRFP 1.4.3 mzML and the
   NeuGc ≤ 1 glycan list.
 
@@ -98,68 +55,23 @@ Xeon Gold 6238), Percolator 3.7.1 `--seed 42 -Y`, `q ≤ 0.01`:
 ¶ The opt-in rows, like the quick-glyco and phospho rows, are timed at `7d1e4565`, before
 #105's speed-up. #105 also applies to those paths; they were not re-timed after it.
 
-**Not benchmarked yet, and therefore not claimed:** iTRAQ, timsTOF `.d`, MSFragger on the
-standard sets, Comet's fragment-index mode, and phospho *site localisation* (the phospho
-benchmark below scores peptides, not sites). See §5.
+**How to read it.**
 
-### Standard search, in detail
-
-
-Percolator image `quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2`; the three datasets
-were measured in one session so they are mutually comparable.
-
-| dataset | regime | wall | PSMs @ q≤0.01 |
-|---|---|---:|---:|
-| Astral (PXD070049) | high-res HCD LFQ | **244 s** | **38,394** |
-| TMT a05058 (PXD007683) | low-res ion-trap CID, TMT | **97 s** | **12,281** |
-| UPS1 (PXD001819) | low-res CID LFQ | **50 s** | **15,838** |
-
-**Re-verified on 2026-09-10** after the out-of-core and fragment-index work (#71, #73, #74,
-#77) landed: all three PSM counts reproduce **exactly** — 38,394, 12,281 and 15,838 — on a
-build of merged `main`. These searches fit in RAM, so none of that work is on their path.
-Wall times are machine-specific and are not comparable across sessions; on the 8-core VM
-used for the re-verification the same three runs take 251 s, 109–112 s and 57–64 s, and an
-interleaved A/B against the commit before the stack gives the same times to within noise
-with byte-identical PINs. Quote counts across machines, never seconds.
-
-### Effect of the tree-count default (`--gbdt-max-trees`, now 100)
-
-Same binary, same host, same session; the default is the only variable:
-
-| dataset | all trees (previous) | 100 trees (current) | speedup | ΔPSMs |
-|---|---:|---:|---:|---:|
-| Astral | 400 s / 38,402 | 244 s / 38,394 | **1.64x** | −8 (−0.02%) |
-| TMT | 111 s / 12,278 | 97 s / 12,281 | **1.14x** | +3 (+0.02%) |
-
-Identification-neutral on both. The gap between 1.64x and 1.14x is expected: Astral runs in
-`strong` score mode where the ensembles both rank candidates and build features, while
-low-res TMT runs in `rank` mode where they only build features. A repeat Astral run the
-same day gave 262 s, so treat wall times as ±8%, not single-second figures.
-
-### Against Comet — re-measured 2026-10-05, after #105
-
-Same host, same 8 threads, same Comet 2025.01 rev 1 (`4181df6`) and parameter files, same
-Percolator protocol. Counts reproduce 2026-09-04 exactly for both engines. #105
-(exact-mass candidate lookup, memoised fragment predictions, parallel setup, skipped edge
-scoring on low-res models) changed the speed comparison:
-
-| dataset | andes `main` before #105 | andes after #105 | Comet 2025.01 | PSM gain | andes speed vs Comet |
-|---|---:|---:|---:|---:|---:|
-| Astral | 274–297 s | **198–205 s** | 215 s | **+22.1%** | **0.92–0.95x** |
-| TMT a05058 | 93–102 s | **65–67 s** | 76 s | **+16.9%** | **0.86–0.88x** |
-| UPS1 | 51–57 s | **41–42 s** | 46 s | **+7.5%** | **0.89–0.91x** |
-
-andes is now faster than Comet on all three datasets while finding 7.5–22.1% more PSMs. The
-"before" range spans both sessions and is wider than the September figures (244 / 97 / 50 s),
-which were a single run each.
-
-The matched-output-depth comparison below (`--top-n 5`) has not been re-run since #105.
+- **Only UPS1 measures error among the standard sets.** Its nominal 1% is **~3.6% true FDP**
+  (166 entrapment hits on 15,838 PSMs, factor 3.42), and Comet sits at the same rate (154 hits
+  on 14,734). The Astral and TMT databases have no entrapment component, so those counts are
+  rescored `q ≤ 0.01` only.
+- **Speed against Comet.** #105 (exact-mass candidate lookup, memoised fragment predictions,
+  parallel setup, no edge scoring on low-res models) took andes from 274–297 s, 93–102 s and
+  51–57 s to 198–205 s, 65–67 s and 41–42 s on Astral, TMT and UPS1: 0.92–0.95x, 0.86–0.88x
+  and 0.89–0.91x Comet's wall time.
+- **Not benchmarked, therefore not claimed:** iTRAQ, timsTOF `.d`, MSFragger on the standard
+  sets, Comet's fragment-index mode, and phospho *site localisation*.
 
 ### Time, CPU and memory against Comet — 2026-10-06
 
-Same VM (8-thread Xeon Gold 6238), 8 threads, same inputs and parameter files as above. One
-run per engine, under `/usr/bin/time -v`. andes is `a0e85cda` (#105, the speed code on
-current `main`). PSM counts are from the 2026-10-05 refresh; phospho is Percolator seed 42.
+Same VM and inputs, 8 threads, one run per engine under `/usr/bin/time -v`. andes is
+`a0e85cda` (#105). PSM counts are from the 2026-10-05 refresh; phospho is Percolator seed 42.
 
 | dataset | engine | PSMs @ q≤0.01 | wall | CPU time | peak memory |
 |---|---|---:|---:|---:|---:|
@@ -173,122 +85,77 @@ current `main`). PSM counts are from the 2026-10-05 refresh; phospho is Percolat
 | | Comet | 33,984 (1.77% FDP) | 1,096 s | 8,399 s | 6.0 GB |
 
 - **CPU time:** andes uses 22–43% less than Comet on every dataset. This is the steadier
-  speed comparison, because it varies little between sessions.
+  comparison.
 - **Wall time:** level on Astral and TMT, 7 s slower on UPS1, 18% faster on phospho. These
-  andes times are 5–15% slower than the alternating A/B above (TMT 77 vs 65–67 s). The first
-  runs of this session overlapped a large file deletion on the same disk.
-- **Memory:** andes is the heavier engine. It peaks at 2x Comet on TMT (5.9 vs 2.9 GB) and on
-  phospho (13.7 vs 6.0 GB); Astral and UPS1 are similar.
-
-### Against Comet — measured head-to-head, 2026-09-04
-
-Comet 2025.01 rev 1 (`4181df6`) was reinstalled and re-run on the same host, same 8 threads,
-same Percolator protocol, the same day as the andes numbers above. So this is a real
-head-to-head rather than two figures from different sessions:
-
-| dataset | andes | Comet 2025.01 | PSM gain | andes speed |
-|---|---|---|---|---|
-| Astral | 38,394 / 244 s | 31,435 / 209 s | **+22.1%** | 1.17x slower |
-| TMT a05058 | 12,281 / 97 s | 10,504 / 77 s | **+16.9%** | 1.26x slower |
-| UPS1 | 15,838 / 50 s | 14,734 / 48 s | **+7.5%** | 1.04x slower |
-
-**andes finds 7.5–22.1% more PSMs for 1.04–1.26x the wall time.** Note how much smaller
-that speed gap is than the previously published "2.07x slower on Astral" — that figure
-predates the tree-count default, and the gap on UPS1 is now within run-to-run noise.
-
-Validation that the re-run reproduces the original: Comet's Astral count of 31,435 matches
-the stored artifact from the earlier benchmark exactly, and its 209 s is close to the 217 s
-published on 2026-08-28.
-
-### Matched output depth — the fair speed comparison
-
-The comparison above is **not** like-for-like on I/O: andes `--top-n` defaults to 10 while
-Comet's params set `num_output_lines = 5`, so andes was writing roughly twice the PIN rows.
-Re-run with `--top-n 5` (measured 2026-09-04, same session):
-
-| dataset | andes `--top-n 5` | Comet 2025.01 | PSM gain | andes speed |
-|---|---|---|---|---|
-| Astral | 38,607 / 259 s (4.9 rows/spec) | 31,435 / 209 s (4.9) | **+22.8%** | 1.24x slower |
-| TMT a05058 | 12,402 / 80 s (6.0) | 10,504 / 77 s (4.9) | **+18.1%** | 1.04x slower |
-| UPS1 | 15,723 / 40 s (5.3) | 14,734 / 48 s (4.9) | **+6.7%** | **0.83x — faster** |
-
-At matched depth andes ranges from 1.24x slower to **1.2x faster** than Comet depending on
-regime, while finding 6.7-22.8% more PSMs. Output depth barely moves Astral (PIN write is
-~4 s of ~250 s) but is worth ~20% on the two smaller, low-res sets.
-
-Two honest caveats. Astral and TMT reuse the original Comet parameter files verbatim, with
-only `database_name` repointed; **UPS1 had no stored Comet parameters**, so they were
-derived here from the TMT low-res CID parameters with the TMT-specific fixed modifications
-removed — a defensible derivation, but ours rather than the original benchmark's. And these
-are single runs on a host with ~8% measured run-to-run variance, so read the times as
-approximate.
-
----
+  andes times are 5–15% slower than the alternating A/B above (TMT 77 vs 65–67 s); the first
+  runs overlapped a large file deletion on the same disk.
+- **Memory:** andes peaks at 2x Comet on TMT (5.9 vs 2.9 GB) and phospho (13.7 vs 6.0 GB);
+  Astral and UPS1 are similar.
 
 ### Opt-in modes
 
-All nine arms in one session, 2026-09-04. Re-run on 2026-10-05 at `7d1e4565`: the three
-`--chimeric` counts and their entrapment hits reproduce exactly (65,028 / 12,540 / 17,112;
-167). The `--refine` count changed after three fixes; see below.
+- **`--chimeric` forces `top_n = 1`** in pass 1 (baseline: 10), so its wall time is not
+  comparable to baseline. On UPS1, +1,274 PSMs came with entrapment hits flat (166 → 167).
+- **`--refine` is high-res only** and skips both low-res sets by design: at low resolution a
+  deamidation (+0.984) cannot be told from a C13 isotope error.
+- **`--refine` on Astral.** Three fixes landed before the refresh: #100 pairs each Pass-2 decoy
+  with its anchor peptide, #102 drops deamidations better explained by a precursor one isotope
+  high, and #103 adds `--refine-entrapment` (one shuffled entrapment anchor per real anchor, so
+  Pass-2 false discoveries can be counted; the run-level entrapment database never reaches Pass
+  2). At `7d1e4565`: 40,283 PSMs (+4.9%), Pass-2 FDP 3.3% (35 entrapment hits on 2,127). #106
+  then stopped offering protein-N-terminal Acetyl on internal peptides: acetylations fell from
+  512 to 125, PSMs to **40,028 (+4.3%)**, and Pass-2 FDP to **2.8%** (27 hits on 1,935). That is
+  under one threshold over the merged PIN; thresholded on their own, Pass-2 rows measured
+  0.8–1.1% entrapment FDP in an earlier run.
 
-| dataset | baseline | `--chimeric` | `--refine` |
-|---|---|---|---|
-| Astral | 38,394 / 269 s | **65,028** / 322 s | 43,929 / 345 s |
-| TMT | 12,281 / 90 s | 12,540 / 72 s | — *(skipped: high-res only)* |
-| UPS1 | 15,838 / 52 s, 166 entrap | **17,112** / 48 s, 167 entrap | — *(skipped)* |
+### Phospho-enriched (PXD007653)
 
-**`--chimeric` gains are real and conservatively stated.** On UPS1, the one dataset here
-with a measurable error rate, +1,274 PSMs came with entrapment hits flat (166 -> 167). And
-the mode **forces `top_n = 1`** (against a baseline default of 10) to avoid blind
-multi-emission inflating FDR — so it wins while retaining a tenth of the pass-1 candidates.
-That also makes its *wall time* non-comparable to baseline: it is not "baseline plus a
-second pass", it is a shallower pass 1 plus a second pass, which is why it can finish
-faster on the smaller sets.
+Krahmer et al., mouse liver EasyPhos, Q Exactive HCD, one file
+(`20151014_QEp6_NaKr_SA_totalliver_control2_phospho.raw`, 102,820 MS2, TRFP 1.4.3), not in any
+model's training ledger. Reference: the depositors' MaxQuant PEP ≤ 0.01 scans (23,563;
+`glyco/truth/maxquant_mouse_liver_phospho.tsv.gz`). Search: the 1:1 mouse entrapment database,
+`configs/mods-phospho.txt` (sha `bdc523fe…`), defaults, 32 threads. The fragment-ion index
+(#76) is the default here because the search goes out-of-core.
 
-**`--refine` is gated to high-resolution data** and skips on both low-res sets by design,
-logging `refine is high-res-only and the data is low-res; skipping refinement`. At low
-resolution a deamidation (+0.984) is not separable from a C13 isotope error, so identical
-counts there are correct behaviour, not a silent no-op.
+| arm | model | PSMs @ q≤0.01 (seeds 1–5) | entrapment @1% | true FDP | phospho-bearing PSMs (seed 1) | wall |
+|---|---|---:|---:|---:|---:|---:|
+| default, **fragment index** (today's default) | `hcd_qexactive_tryp` | 37,280 · 37,271 · 37,258 | 214–216 | **1.15–1.16%** | **26,883** | **164 s** |
+| default, enumeration path | `hcd_qexactive_tryp` | 36,817 · 36,872 · 36,922 · 36,862 · 36,865 | 225–244 | 1.22–1.32% | 26,629 | 5,954 s |
+| `--protocol phospho`, enumeration path | `hcd_qexactive_tryp_phosphorylation` | 36,835 · 36,819 · 36,826 · 36,780 · 36,884 | 202–210 | 1.10–1.14% | 26,767 | 6,031 s |
 
-**`--refine` re-measured 2026-10-05.** The 43,929 above predates three fixes:
-- #100 paired each Pass-2 decoy with its anchor peptide. Decoys were whole-peptide
-  reversals, which left Pass-2 targets outnumbering decoys 2.6 : 1.
-- #102 drops deamidations that a precursor picked one isotope high explains better.
-- #103 added `--refine-entrapment`, which puts one shuffled entrapment anchor next to every
-  real anchor so Pass 2's false discoveries can be counted. The run-level entrapment
-  database never reaches Pass 2.
+**Against Comet** on the same node (Comet 2025.01, OpenMS container, trypsin ≤1 missed
+cleavage, 20 ppm precursor, 0.02 Da fragment bins, the same mods, `decoy_search = 1`): 226 s,
+33,888–34,025 PSMs, 1.73–1.78% FDP, 23,888 phospho-bearing, 77.9% of MaxQuant scans covered
+(andes with the index: 82.5%). andes finds 9.6% more PSMs and 12.5% more phospho-bearing PSMs at a third less measured error,
+27% faster (peak RSS 25 GB). The phospho model is identification-neutral against the general
+model. Sites are **not** scored.
 
-At `7d1e4565` with this section's protocol, Astral gives **40,283 PSMs (+4.9%)**. Of the
-2,594 accepted modified PSMs, about **3.3% are false** by matched entrapment (35 entrapment
-hits on 2,127 in the diagnostic arm). The paired decoys track that rate (53 Pass-2 decoys
-above the cutoff, against about 70 false targets estimated from entrapment), but one threshold
-over the merged PIN lets the smaller Pass-2 group run above 1%. Thresholded on their own, the
-Pass-2 rows measured 0.8–1.1% entrapment FDP in an earlier run with Percolator's default
-settings (see `--refine` in DOCS).
+**Reproduce.** `reproduce/fetch_spectra.sh phospho`, build the mouse entrapment database as for
+the glyco tiers, then per arm:
 
-#106 then stopped offering protein-N-terminal Acetyl on internal peptides. Each anchor is
-its own one-peptide mini-protein, so every anchor had looked like a protein N-terminus.
-Accepted acetylations fell from 512 to 125, total PSMs from 40,283 to **40,028 (+4.3%)**,
-and Pass-2 entrapment FDP from 3.3% to **2.8%** (27 hits on 1,935).
+```text
+andes --spectrum <file>.mzML --database mouse_entrap.fasta \
+      --mods docs/benchmarks/configs/mods-phospho.txt --threads 32 \
+      [--protocol phospho] --output-pin <arm>.pin
+percolator --seed <1..5> -Y --only-psms=false --results-psms <arm>_s<seed>.psms <arm>.pin
+```
 
-## 2. Glyco
+Count `q-value ≤ 0.01` rows, `ENTRAP_` hits (FDP = 2 × hits / PSMs) and `79.96`-bearing
+peptides. Expect ~3 min on 32 cores, ~17 min on 8.
 
-Two tiers of one dataset, pGlyco2 mouse liver (PXD005553). Two independent references for
-the same spectra ship in `glyco/truth/`: the depositors' pGlyco2 identifications (17,855)
-and MSFragger-Glyco's, from the Philosopher-filtered table deposited in PXD031032
-(14,626). The recipe below scores against both; the quick tier is measured against both. Quick is one fraction on a VM; Deep is all five
-fractions on a cluster. The earlier human-plasma set was retired: its reference was a
-proprietary Byonic `.byrslt` export, which cannot be rebuilt from public artifacts.
+### Glyco
 
-### Quick tier — one pGlyco2 liver fraction, VM-local, ~2 h
+One dataset, pGlyco2 mouse liver (PXD005553), in two tiers. Two references for the same
+spectra ship in `glyco/truth/`: the depositors' pGlyco2 identifications (17,855) and
+MSFragger-Glyco's Philosopher-filtered table from PXD031032 (14,626).
 
-**Re-measured 2026-10-05** at `main` `7d1e4565` on the benchmark VM (8 threads), same raw
-file and database (sha256 `2f0142b7…` / `5ee15d8d…`).
-
-The glycan source differs from the 2026-09-06 run below. `--glyco` now requires a glycan
-database, and this run uses the bundled pGlyco mouse list (`--glyco-species mouse`, 1,833
-compositions). The 2026-09-06 run used the former built-in list with the gated NeuGc bound
-(852 compositions). Read the two columns as two configurations, not as a code A/B.
+**Quick tier** — `MouseLiver-Z-T-1.raw` (2.70 GB, sha256 `2f0142b7…`) read natively, against
+`mouse_entrap.fasta` (34,554 sequences = 17,277 UniProt reviewed mouse + shuffled twins, sha256
+`5ee15d8d…`), `--glyco --decoy-strategy sequon-reverse`, 8 threads, Percolator `--seed 42 -Y`.
+Re-measured 2026-10-05 at `7d1e4565`. The glycan source changed in between: `--glyco` now
+requires a glycan database and this run uses `--glyco-species mouse` (1,833 compositions),
+where 2026-09-06 used the former built-in list with the gated NeuGc bound (852 compositions).
+**Read the columns as two configurations, not a code A/B.**
 
 | | 2026-09-06 (built-in list, gated NeuGc) | **2026-10-05 (bundled mouse list)** |
 |---|---:|---:|
@@ -300,673 +167,51 @@ compositions). The 2026-09-06 run used the former built-in list with the gated N
 | same-scan peptidoform agreement, pGlyco2 / MSFragger | 96.3% / 95.6% | **97.8% / 95.7%** |
 | search wall, 8 threads | 8,145 s (WSL2 host) | 4,888 s (benchmark VM) |
 
-Selection losses against pGlyco2 fell from 12.9% (wrong target 5.6% + decoy won 7.3%) to
-9.4% (4.0% + 5.3%). #95, which makes the collapse prefer the monoisotopic hypothesis, landed
-between the two runs and targets exactly this loss. With the glycan list also different,
-this table cannot apportion the gain between the two.
-
-`MouseLiver-Z-T-1.raw` (PXD005553, 2.70 GB, sha256 `2f0142b7…`) read natively, against
-`mouse_entrap.fasta` (34,554 sequences = 17,277 UniProt reviewed mouse + shuffled twins,
-sha256 `5ee15d8d…`), `--glyco --decoy-strategy sequon-reverse`, 8 threads, Percolator
-`--seed 42 -Y`. **Measured 2026-09-06 at the commit that introduced the gated NeuGc bound**
-(`--glyco-max-neugc`, parent `fdf1f689`) on an 8-thread WSL2 host with 47 GB. The gate
-raised the default glycan list from 612 to 852 compositions on the run's own evidence (log
-line `glycan list: NeuGc <= 4 per composition`). The same binary with `--glyco-max-neugc 1`
-reproduces the previous default byte-for-byte — 6,532 glycoPSMs, 34 entrapment hits, the
-numbers measured 2026-09-05 at `d085c0fb` on the benchmark VM — so the two columns below are
-a controlled A/B: one binary, one database, one fraction, one Percolator container.
-
-| | NeuGc ≤ 1 (previous default) | **gated bound (current default)** |
-|---|---:|---:|
-| glycan compositions searched | 612 | **852** |
-| search wall (WSL2, 8 threads) | 8,717 s ‡ | **8,145 s** |
-| glyco rows | 41,929 | 42,108 |
-| glycoPSMs @1%, seed 42 | 6,532 (2,843 glycopeptides, 902 compositions) | **7,122** (3,047 glycopeptides, 932 compositions) |
-| 5 seeds | 6,475 – 6,565 | **7,078 – 7,122** |
-| **true FDP** | 1.10% (95% CI 0.76–1.54%, 34 entrapment hits) | **1.13%** (95% CI 0.80–1.55%, 38 hits, 1:1 database) |
-| pGlyco2 confirmed (3,877 spectra) | 77.9% | **86.7%** |
-| pGlyco2 spectra carrying NeuGc ≥ 2 confirmed (of 501) | 58 | **393** |
-| accepted PSMs whose glycan carries NeuGc ≥ 2 | 0 | 770 |
-| MSFragger confirmed (3,040 spectra) | 87.8% | 87.8% |
-
-‡ Run at the memory ceiling of a 24 GB guest (peak RSS 23.3 GB); the gated run peaked at
-27.0 GB with headroom. Not a runtime comparison. The benchmark VM measured 6,329 s for the
-NeuGc ≤ 1 list.
-
-**Why the bound matters here.** The default glycan list is human-tuned and allowed at most
-one NeuGc per composition. Mouse is CMAH-competent, and 501 of the 3,877 pGlyco2 reference
-spectra on this fraction (12.9%) carry two or more NeuGc; under the old list not one
-accepted identification did. A spectrum whose true composition cannot be enumerated is not
-left unidentified — it is scored anyway and the best available wrong answer wins — which is
-why the loss surfaced as `wrong target` and `decoy won`, not as `never emitted`. Raising the
-bound moved 335 of those 501 spectra to `confirmed` and the entrapment FDP did not move
-(1.10% → 1.13%, inside one CI); this is the same check that caught the 4,034-composition
-list inflating error 5.4×. Against the MSFragger reference, which carries no NeuGc ≥ 2
-calls, the two lists are identical (2,669 confirmed either way). `--glyco-taxon human` or
-`--glyco-no-neugc` keep the previous behaviour, and on human samples the gate never fires:
-the PIN is byte-identical.
-
-Scored against both deposited references for this fraction (gated default, seed 42):
-
-| reference (fraction 1) | spectra | confirmed | wrong target | decoy won | never emitted | peptide coverage | same-scan backbone | same-scan **peptidoform** |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| pGlyco2 (depositors) | 3,877 | **86.7%** | 5.6% | 7.3% | 0.1% | 95.1% | 99.4% | **96.3%** |
-| MSFragger-Glyco (PXD031032) | 3,040 | **87.8%** | 5.3% | 6.8% | 0.1% | 94.1% | 99.7% | **95.6%** |
-
-Where both engines identify a scan, andes agrees on the full peptidoform 96.3% of the time
-with pGlyco2 and 95.6% with MSFragger; the residual disagreements are the isobaric
-compositions (Hex + NeuAc ≡ Fuc + NeuGc exactly; Hex + Fuc vs NeuGc within 1.02 Da). An
-earlier version of this table reported 83.3% against pGlyco2. That was an artefact:
-`make_truth.py` read pGlyco2's five-column glycan vector in the wrong monosaccharide order,
-rotating the Fuc/NeuAc/NeuGc labels, and the committed `pglyco2_mouse_*.tsv.gz` tables
-carried the rotation. The reader now checks the order against pGlyco2's own `GlyMass`
-column on every row of every file and refuses a file that does not fit; the tables were
-regenerated 2026-09-06 (on the previous list the corrected figure is 95.2%). Backbone-based
-columns — confirmed, coverage, same-scan backbone — were never affected. andes accepts 7,122
-spectra of which roughly 3,800–4,500 are in neither reference at a measured 1.13% FDP.
-
-### Precursor mono-correction A/B (`--precursor-mono`, issue #64)
-
-The firmware records a class of wide, high-mass glycopeptide envelopes on an M+3..M+6
-isotopologue instead of the monoisotope. On this fraction 153 of 3,824 mass-resolvable
-pGlyco2 reference scans sit above the default `0..2` window (88 of them at exactly +4),
-and widening the window is not a fix: every extra offset is mass-degenerate with a glycan
-composition change, so arms C and D of #64 piled hundreds of arbitrary compositions onto
-the largest allowed offset. `--precursor-mono auto` instead reads the preceding MS1,
-fits the observed envelope at the reported charge against a glycopeptide isotope model
-under "the recorded precursor is M+k" (k = 0..6), and moves the precursor down by
-k−1 isotopes when a k > 0 clearly wins (the sweep's +1 takes the last step, so an
-overshoot cannot lose the true mass); the window stays `0..2`.
-
-**Measured 2026-09-07, one session, one binary, one database, one Percolator seed** (this
-commit; 4-thread, 16 GB sandbox VM; native `.raw`; Percolator 3.7.1 `--seed 42 -Y`;
-the gated NeuGc default, 852 compositions). The 16 GB host cannot hold the full
-candidate index (~27 GB, killed at the cgroup limit twice), so **both arms ran with
-`--glyco-index-sequon-only`** (3.2 M sequon-bearing candidates, 3.4 GB; peak RSS
-11.5 GB). The glyco scorer never reads a non-sequon candidate, and arm B reproduces the
-full-index quick-tier row above to within Percolator seed noise (42,108 glyco rows in
-both; 7,109 vs 7,122 glycoPSMs; 3,361 vs 3,362 pGlyco2 confirmed; 2,669 vs 2,669
-MSFragger confirmed; 96.3% vs 96.3% peptidoform agreement; 37 vs 38 entrapment hits),
-so the two arms are comparable with each other and, within seed noise, with the table
-above. Measured directly on a 1,500-protein subset (8,000 spectra, same binary): the
-sequon-only index writes the same 7,113 rows with the same peptides and labels as the
-full index; 16 rows (0.2%) differ in `RawScore`/`CandidateRankEntropy` only, and the
-flag-off binary is byte-identical to `main`.
-
-| | B: `--precursor-mono off` | **E: `--precursor-mono auto`** | #64 acceptance |
-|---|---:|---:|---|
-| search wall (4 threads) | 9,561 s | 9,730 s (+1.8%; envelope fit itself is ~20 s) | — |
-| MS2 shifted before search | 0 | **447 of 45,905** (shift 1:106 2:37 3:202 4:74 5:28) | — |
-| glycoPSMs @1% | 7,109 | **7,225** (+116) | — |
-| **true FDP** (1:1 database) | 1.10% (37 hits; CI 0.78–1.52%) | **0.91%** (31 hits; CI 0.62–1.29%) | inside B's CI ✔ |
-| pGlyco2 confirmed (3,877) | 3,361 (86.7%) | **3,444 (88.8%)** | ≥ 3,386 ✔ |
-| reference spectra gained / lost vs B | — | **+89 / −6** (all 6 lost are FDR-rejected, right answer emitted) | fewer than arm D's 64 flips ✔ |
-| MSFragger confirmed (3,040) | 2,669 (87.8%) | **2,746 (90.3%)** | — |
-| same-scan peptidoform agreement vs pGlyco2 / MSFragger | 96.3% / 95.7% | **96.8% / 95.9%** | ≥ 96.3% ✔ |
-| the 84 target spectra | 0 confirmed (46 wrong target, 38 decoy) | **69 confirmed**, 5 FDR-rejected, 6 wrong target, 4 decoy | — |
-| the 62 targets at +4 | 0 | **55 confirmed** + 4 FDR-rejected (59 emitted right) | ≥ 58 confirmed: **55**, short by 3 |
-| accepted PSMs by effective offset (shift + `isotope_error`) | +0 5,332 · +1 1,347 · +2 430 | +0 5,325 · +1 1,337 · +2 402 · **+3 16 · +4 80 · +5 50 · +6 15** | no pile-up at the largest offset ✔ |
-| HexNAc3 share at +0 / at the corrected tiers | 5.4% / — | 5.5% / **1.2% at +4, 0% at +5 and +6** (arm D: 79% at +4) | matches the offset-0 population ✔ |
-| reference coverage of the corrected tiers | — | +4: 71 of 80 in pGlyco2 (89%); +5: 15 of 50; +6: 4 of 15; **0 entrapment hits** in all of +3..+6 | — |
-
-**What the +4 tier is.** 80 accepted PSMs, 71 of them pGlyco2 reference spectra and 47
-MSFragger's, no entrapment hit, 1.2% HexNAc3 — the real firmware-failure population, not
-the offset-0 population shifted. The +5 and +6 tiers are small (50 and 15) and clean
-(0 entrapment, 0% HexNAc3). There is no pile-up: the largest allowed shift carries 15
-PSMs, against 613 and 735 for arms C and D.
-
-**Where it falls short.** The strict "≥ 58 of 62 at +4 confirmed" criterion lands at 55:
-four more have the right peptidoform emitted but q slightly above 1% (they are searched at
-`isotope_error = 1` because of the back-off, and a corrected scan's mass-error columns are
-computed one isotope from the searched mono), and three lose the collapse. Arms C and D
-reached 58 by widening the window, at the cost of the degenerate tiers above. The
-offline envelope fit alone reaches 85 of the 88 reference scans at +4 (below).
-
-**Arm F: the `0..1` window, measured 2026-09-07** (same commit and database, a second
-4-thread 16 GB VM, native `.raw`, Percolator 3.7.1 `--seed 42 -Y`, `--glyco-index-sequon-only`).
-Once the corrector is on, the `+2` step of the sweep is the one that carries the
-(k, X) ≡ (k−1, X + Hex + Fuc − NeuGc) degeneracy, so this arm runs
-`--precursor-mono auto --isotope-error 0..1`. The MS1 pass is bit-identical to arm E
-(447 of 45,905 MS2 shifted, 1:106 2:37 3:202 4:74 5:28). Search wall 11,740 s and peak
-RSS 13.4 GB on this host; not a runtime comparison with the rows above (different VM,
-arm B not re-run here, so the per-scan gained/lost column is not available).
-
-| | B: off, `0..2` | E: auto, `0..2` | **F: auto, `0..1`** | #64 acceptance |
-|---|---:|---:|---:|---|
-| glycoPSMs @1% (seed 42) | 7,109 | 7,225 | **7,149** (seeds 1–5: 7,117–7,158) | — |
-| **true FDP** (sequon-corrected, 1:1 database) | 1.10% (37; CI 0.78–1.52%) | 0.91% (31; CI 0.62–1.29%) | **0.98%** (33; CI 0.67–1.38%) | inside B's CI ✔ |
-| pGlyco2 confirmed (3,877) | 3,361 (86.7%) | 3,444 (88.8%) | **3,466 (89.4%)** | ≥ 3,386 ✔ |
-| pGlyco2 wrong target / decoy / FDR-rejected / not emitted | — | — | 162 / 226 / **21** / 2 | — |
-| MSFragger confirmed (3,040) | 2,669 (87.8%) | 2,746 (90.3%) | **2,749 (90.4%)** | — |
-| same-scan peptidoform agreement vs pGlyco2 / MSFragger | 96.3% / 95.7% | 96.8% / 95.9% | **96.9% / 96.0%** | ≥ 96.3% ✔ |
-| the 84 target spectra | 0 confirmed | 69 confirmed, 5 FDR-rejected, 6 wrong target, 4 decoy | **71 confirmed**, 0 FDR-rejected, 9 wrong target, 4 decoy | — |
-| the 62 targets at +4 | 0 | 55 confirmed + 4 FDR-rejected | **59 confirmed** | ≥ 58 ✔ |
-| accepted PSMs by effective offset | +0 5,332 · +1 1,347 · +2 430 | +0 5,325 · +1 1,337 · +2 402 · +3 16 · +4 80 · +5 50 · +6 15 | +0 5,419 · **+1 1,552 · +2 21** · +3 14 · +4 87 · +5 48 · +6 8 | decreasing beyond +1 ✔ |
-| HexNAc3 share at +0 / +1 / +2..+6 | 5.4% / — / — | 5.5% / — / 1.2% at +4 | 5.5% / 4.1% / **0%** | matches offset-0 ✔ |
-| entrapment hits at +0 / +1 / +2..+6 | — | 0 in +3..+6 | 26 / 7 / **0** | — |
-| reference coverage of +4 / +5 / +6 | — | 71 of 80 / 15 of 50 / 4 of 15 | **78 of 87** / 13 of 48 / 3 of 8 | — |
-
-**What the `+2` tier was.** Arm B accepted 430 PSMs at `isotope_error = 2` and arm E 402;
-with the window closed to `0..1` only 21 survive (all through a corrector shift), yet the
-total goes up against B (+40 PSMs, +105 pGlyco2 confirmed, +80 MSFragger confirmed) and
-the `+1` tier grows by about 200. Those are the same scans re-accepted one isotope lower
-with the other composition of the degenerate pair, and the peptidoform agreement rising
-from 96.3% to 96.9% against pGlyco2 says the lower one is the right one more often. Against
-E the arm gives up 76 PSMs at 1% (the collapsed `+2` tier) and gains 22 pGlyco2 and 3
-MSFragger confirmations; the four `+4` targets E emitted correctly but lost at q are
-confirmed here, because their competitors at `isotope_error = 2` no longer exist.
-
-**The three `+4` targets still missed** (of 62): scans 13348 (+3.920 Da) and 30044
-(+3.963 Da) sit 40–80 mDa off an isotope multiple, so they are not clean firmware picks
-and no envelope correction can place them; scan 15490 (HexNAc4Hex7Fuc1 on YHHYSSNFSIPK,
-+4.011 Da) is corrected but a different sequon peptide wins the collapse. The other ten
-misses among the 84 are the +5/+6 and non-integer cases (19835 at +5.852, 26334 at +5.105,
-27562 at +2.876, 35708 at +6.147), unchanged from arms B–E.
-
-**Arm F on all five fractions, measured 2026-09-08** (same binary, database and VM as the
-arm F row above; each fraction searched alone with `--precursor-mono auto --isotope-error 0..1
---glyco-index-sequon-only`, 4 threads; Percolator `--seed 42 -Y` per fraction for the table,
-and once over the pooled five PINs below). The question was whether the T-1 result was a
-property of that file; it is not. Every fraction carries the same firmware population
-(360–432 MS2 shifted, 84–118 reference scans truly at +3..+6), the corrector confirms
-89–94% of it on each, and no fraction shows a pile-up, an entrapment excess or a HexNAc3
-excess in the corrected tiers.
-
-| | T-1 | T-2 | T-3 | T-4 | T-5 |
-|---|---:|---:|---:|---:|---:|
-| search wall (s) | 11740 | 9217 | 11429 | 10019 | 11373 |
-| peak RSS (GB) | 13.44 | 13.60 | 13.62 | 13.85 | 13.77 |
-| glycoPSMs @1% | 7149 | 6616 | 6960 | 6511 | 6919 |
-| entrapment FDP | 0.98% (33; CI 0.67% - 1.38%) | 1.15% (36; CI 0.81% - 1.60%) | 0.98% (32; CI 0.67% - 1.38%) | 0.75% (23; CI 0.48% - 1.12%) | 0.86% (28; CI 0.57% - 1.24%) |
-| pGlyco2 confirmed | 3466 of 3877 (89.4%) | 3063 of 3362 (91.1%) | 3270 of 3638 (89.9%) | 3068 of 3364 (91.2%) | 3251 of 3614 (90.0%) |
-| pGlyco2 FDR-rejected | 21 | 17 | 11 | 7 | 7 |
-| MSFragger confirmed | 2749 of 3040 (90.4%) | 2696 of 2975 (90.6%) | 2588 of 2873 (90.1%) | 2579 of 2818 (91.5%) | 2672 of 2920 (91.5%) |
-| peptidoform agreement pGlyco2 / MSFragger | 96.9% / 96.0% | 97.3% / 95.8% | 96.1% / 95.9% | 97.7% / 97.2% | 96.6% / 95.7% |
-| MS2 shifted | 432 | 360 | 407 | 376 | 372 |
-| accepted by effective offset | +0 5,419 · +1 1,552 · +2 21 · +3 14 · +4 87 · +5 48 · +6 8 | +0 4,989 · +1 1,476 · +2 23 · +3 12 · +4 78 · +5 34 · +6 4 | +0 5,105 · +1 1,670 · +2 17 · +3 17 · +4 87 · +5 56 · +6 8 | +0 4,942 · +1 1,411 · +2 9 · +3 12 · +4 87 · +5 42 · +6 8 | +0 5,104 · +1 1,640 · +2 21 · +3 9 · +4 83 · +5 53 · +6 9 |
-| firmware scans (true +3..+6) confirmed | 102 of 118 | 79 of 84 | 98 of 106 | 92 of 103 | 93 of 104 |
-| true +2 scans confirmed | 10 of 25 (9 corrected) | 6 of 9 (5 corrected) | 13 of 21 (4 corrected) | 4 of 8 (4 corrected) | 7 of 13 (3 corrected) |
-| entrapment hits in +2..+6 | 0 | 2 | 0 | 0 | 2 |
-| HexNAc3 share in +2..+6 | 0.0% | 1.3% | 1.6% | 2.5% | 0.6% |
-| pGlyco2 coverage of +2..+6 | 108 of 178 | 84 of 151 | 104 of 185 | 96 of 158 | 96 of 175 |
-
-*Search wall is this VM's; peak RSS 13.4–13.9 GB with the sequon-only index. "Firmware
-scans" are pGlyco2 reference scans whose recorded precursor sits an integer 3–6 isotopes
-above peptide + Cam-C + Ox-M + glycan (the true-offset cross-tab used for the T-1 table).
-"pGlyco2 coverage of +2..+6" counts accepted PSMs in those tiers that are reference scans.*
-
-**Five fractions summed, by true offset of the pGlyco2 reference scan.** 17,855 reference
-scans; 17,562 of them are mass-resolvable (recorded precursor minus peptide + Cam-C + Ox-M +
-glycan is within 20 ppm of an integer number of isotopes between −2 and +8) and every one of
-those is in a row below; the other 293 have no integer offset and are not counted anywhere.
-"Confirmed" is the backbone, "peptidoform-correct" adds the composition; percentages are of
-the row's reference scans.
-
-| true offset | reference scans | corrector shifted | confirmed | peptidoform-correct |
-|---|---:|---:|---:|---:|
-| −2 | 10 | 0 | 0 | 0 |
-| −1 | 117 | 0 | 37 (31.6%) | 0 |
-| 0 | 16,057 | 0 | 14,840 (92.4%) | 14,574 |
-| +1 | 787 | 3 | 689 (87.5%) | 634 |
-| **+2** | **76** | **25** | **40 (52.6%)** | **18** |
-| +3 | 29 | 23 | 23 | 19 |
-| **+4** | **395** | **386** | **368 (93.2%)** | **345** |
-| +5 | 79 | 69 | 66 | 58 |
-| +6 | 12 | 9 | 7 | 7 |
-| **+3..+6** | **515** | **487** | **464 (90.1%)** | **429** |
-| all resolvable | 17,562 | 515 | 16,070 (91.5%) | 15,655 |
-
-The +4 tier is confirmed at the same rate as the untouched offset-0 population (93.2% vs
-92.4%) and is peptidoform-correct in 94% of the confirmed cases; the 515 firmware scans are
-2.9% of the reference and were unreachable in every arm before the corrector.
-
-**The cost of the `0..1` window is the true +2 population**, and it is now measured: 76
-reference scans over five fractions, of which the corrector shifts only 25 (the k = 2
-hypothesis rarely clears the 0.15 fit-gain threshold), 40 are confirmed on the backbone
-and only 18 with the right composition. The other 22 "confirmed" are the degeneracy in
-reverse: accepted at `isotope_error = 1` with Hex + Fuc in place of NeuGc. Under `0..2` these
-76 scans are reachable directly. So the choice is 76 scans mostly-wrong-composition against
-the ~400 PSMs per fraction that the `+2` step accepts with an arbitrary composition; the
-agreement figures above say the window wins. A cheaper fix than re-widening is to let the
-corrector take the k = 2 hypothesis at a lower gain threshold, which would move those scans
-into the corrected tiers; not measured.
-
-**Pooled, deep-tier style** (five `.glyco.pin` pooled with `pool_pins.py`, one Percolator run):
-
-| | deep tier, 2026-09-05 (NeuGc ≤ 1 list, full index, mzML, 16 threads) | **arm F, 2026-09-08** (gated NeuGc list, sequon-only index, native `.raw`, 4 threads) |
-|---|---:|---:|
-| glycoPSMs @1% | 31,666 ± 9 (5 seeds) | **34,410** (seeds 1–5 and 42: 34,373–34,451) |
-| **true FDP** (1:1 database) | 1.11% ± 0.03 | **0.98%** (159 hits; CI 0.83–1.15%) |
-| pGlyco2 confirmed (17,855) | 78.9% | **90.1%** (16,086; wrong target 4.0%, decoy 5.2%, FDR-rejected 0.5%, never emitted 0.1%) |
-| MSFragger confirmed (14,626) | 88.0% | **90.5%** (13,231) |
-| same-scan peptidoform vs pGlyco2 / MSFragger | n/a / 95.8% | **96.9% / 96.1%** |
-
-Not a controlled comparison — the glycan list changed in between (the quick tier measured
-the gate alone at +9% PSMs on T-1) — but the deep-tier row is now re-measured at the current
-defaults plus the corrector, and every column moved the right way at a lower measured error.
-
-**Arm F on two other tissues, measured 2026-09-08/09** — pGlyco2 mouse heart (PXD005413,
-`MouseHeart-Z-T-1.raw`, 48,257 MS2, 1,691 reference scans) and lung (PXD005555,
-`MouseLung-Z-T-1.raw`, 70,533 MS2, 3,016 reference scans), same binary and database as the
-liver rows. Same instrument, different tissue and glycan repertoire. Heart also got the
-baseline (corrector off, `0..2`) so its numbers can be attributed. Neither file fits the
-16 GB VM whole (the cgroup kills at ~13.9 GB anon RSS; liver fractions peak at 13.4–13.9),
-so each was searched as scan quarters with `--glyco-scans` (heart at 3 threads, lung at 2)
-and the quarter PINs concatenated before one Percolator run; the only run-level quantity
-that sees the split is the adaptive emission floor, a quantile of thousands of decoy
-winners per quarter, so its effect is noise. Per-quarter peak RSS 11.5–13.2 GB.
-
-| | heart: baseline off, `0..2` | **heart: auto, `0..1`** | **lung: auto, `0..1`** |
-|---|---:|---:|---:|
-| glycoPSMs @1% | 4,058 | **4,035** | **7,238** |
-| **true FDP** (sequon-corrected) | 2.46% (47; CI 1.81–3.27%) | **1.84%** (35; CI 1.28–2.56%) | 1.67% (57; CI 1.27–2.17%) |
-| pGlyco2 confirmed | 1,451 (85.8%) | **1,506 (89.1%)** | **2,764 (91.6%)** |
-| decoy won / wrong target / FDR-rejected | 6.7% / 6.6% / 0.9% | 4.4% / 5.3% / 1.2% | 4.3% / 3.6% / 0.4% |
-| reference scans truly at +3..+6 → confirmed | 65 → **11** | 65 → **59** | 58 → **49** |
-| the +4 tier: confirmed / composition-correct | 37 → 10 / — | 37 → 35 / 27 | 43 → 38 / 36 |
-| accepted PSMs by effective offset | +0 2,487 · +1 1,178 · **+2 393** | +0 2,489 · +1 1,408 · +2 12 · +3 11 · +4 50 · +5 59 · +6 6 | +0 4,498 · +1 2,615 · +2 25 · +3 11 · +4 50 · +5 29 · +6 10 |
-| reference coverage of the largest tier | +2: 32 of 393 (8%) | +4: 35 of 50 | +4: 37 of 50 |
-| entrapment hits in +2..+6 | 5 | 3 | 2 |
-| same-scan peptidoform agreement | 70.2% | 70.7% | 78.1% |
-| composition disagreements: NeuGc for Hex+Fuc / isobaric Hex+NeuAc ↔ Fuc+NeuGc | 235 / 126 | 229 / 143 | 375 / 161 |
-
-**The corrector transfers.** On both tissues the firmware population is the same
-phenomenon (285 and 377 MS2 shifted, 65 and 58 reference scans truly 3–6 isotopes high)
-and is confirmed at 84–91%, against 17% for the heart baseline, whose 10 confirmed +4
-scans are the degenerate composition reaching through the +2 step. The baseline shows the
-pile-up the issue predicted — 393 PSMs at +2 with 8% reference coverage — and arm F
-replaces it with 12. Confirmed goes up 3.3 points on heart at a lower measured error.
-
-**Two things do not transfer, and both are properties of the tissue, not of this change.**
-Peptidoform agreement is 70–78% against 96–97% on liver, and the entrapment FDP sits
-above nominal (1.7–1.8%). The heart baseline has both (70.2%, 2.46%), so the branch
-leaves the first unchanged and improves the second. The disagreement is one mechanism:
-andes assigns one NeuGc where pGlyco2 assigns Hex + Fuc, a 1.02 Da difference absorbed
-at `isotope_error = 1` — 229 of 436 disagreements on heart, 375 of 599 on lung, at
-offsets 0 and 1 that every window searches — plus the exactly isobaric Hex + NeuAc ↔
-Fuc + NeuGc pair. Liver shows the same two patterns at a quarter of the rate, and the
-reference tables say why: NeuGc prevalence is the same on all three tissues (21–23% of
-reference scans carry NeuGc ≥ 1), but **fucosylation is five times higher** on heart and
-lung (23% and 26% of reference scans with Fuc ≥ 1, against 5% on liver). The swap replaces
-Hex + Fuc with NeuGc, so it scales with the fucosylated population. This is the scorer
-under-calling fucose in favour of NeuGc and belongs in its own issue; it is not the
-corrector's or the window's doing.
-
-**Offline validation of the corrector** (`--precursor-mono-dump`, 23 s for the file, no
-search). For every pGlyco2 reference scan the true offset is the integer k that makes
-recorded − (peptide + Cam-C + Ox-M + glycan) an isotope multiple. Best-fitting
-hypothesis vs true offset, 3,824 resolvable scans:
-
-| true offset | n | fit picks 0 | picks 1 | picks 2 | picks 3 | picks 4 | picks 5 | picks 6 |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| −1 | 30 | 25 | 3 | 2 | 0 | 0 | 0 | 0 |
-| 0 | 3,488 | 3,459 | 26 | 1 | 0 | 1 | 0 | 1 |
-| 1 | 158 | 9 | 137 | 11 | 0 | 1 | 0 | 0 |
-| 2 | 25 | 0 | 1 | 22 | 1 | 1 | 0 | 0 |
-| 3 | 10 | 2 | 0 | 0 | 7 | 1 | 0 | 0 |
-| 4 | 88 | 1 | 0 | 0 | 1 | 86 | 0 | 0 |
-| 5 | 17 | 2 | 0 | 0 | 0 | 1 | 14 | 0 |
-| 6 | 8 | 0 | 1 | 0 | 0 | 0 | 1 | 6 |
-
-With the shipped rule (fit ≥ 0.90, gain ≥ 0.15 over the recorded hypothesis, mono SNR
-≥ 3, back-off 1) the scans the `0..2` sweep can reach go from 3,671 to 3,783 (+112) with
-**one** wrong shift (a true −1 scan). Sweeping the thresholds moved this by ±4; back-off 0
-(apply the best fit verbatim) reaches 3,777 with 8 wrong shifts, which is why the default
-backs off. The 30 true −1 scans (recorded one isotope *below* the monoisotope) are
-unreachable in every arm and are not touched.
-
-**Step 1 of #64, settled.** The Thermo reader's precursor m/z equals both the isolation
-window target and the trailer `Monoisotopic M/Z` on all 45,905 MS2 of this file (probe
-over `thermorawfilereader` 0.7.0), so the trailer holds nothing the reader is not already
-using; the +4 scans are firmware picks.
-
-Reproduce: the quick-tier recipe with `--precursor-mono auto --isotope-error 0..1` (add
-`--glyco-index-sequon-only` on a < 32 GB host); score with `score_vs_truth.py --run
-MouseLiver-Z-T-1 --buckets ...` and read the `MonoShift` / `isotope_error` PIN columns for
-the per-offset table.
-
-This number needs no cluster, which is the point, but two hours is a pre-merge check,
-not an inner loop. One fraction clears Percolator's q floor here because a liver fraction
-carries thousands of confident targets; see the floor rule below before assuming that of
-any other single file.
-
-### Deep tier — pGlyco2 mouse liver, 5 fractions, cluster-scale
-
-PXD005553 `MouseLiver-Z-T-{1..5}.raw` (12.6 GB) as **ThermoRawFileParser 1.4.3** mzML
-(byte-identical to native reading on these files), against `mouse_entrap.fasta` (34,554
-sequences, sha256 `5ee15d8d…`, 1:1 shuffled, factor exactly 2.0), `--glyco
---decoy-strategy sequon-reverse`, 16 threads per fraction on a SLURM cluster,
-pooled before Percolator 3.7.1, 5 seeds. **Measured 2026-09-05 at `main` commit `14818d3e`**
-(binary sha256 `6de3c8db…`, rustc 1.85); the earlier off-`main` figure of 31,658 ± 34
-reproduces within seed noise. **These numbers pre-date the gated NeuGc bound** (NeuGc ≤ 1
-list, 612 compositions). The single-fraction A/B in the quick tier shows +9% glycoPSMs at flat
-FDP from the bound alone, so the deep tier is expected to move; it has not been re-measured.
-
-| | measured |
-|---|---|
-| search wall | 1,350–1,731 s per fraction (16 cores); fraction 1 = 45,905 MS2, 41,929 glyco rows |
-| glycoPSMs @1% | **31,666 ± 9** (5 seeds: 31,653 / 31,674 / 31,659 / 31,673 / 31,669) |
-| **true FDP** | **1.11% ± 0.03** (1.08–1.15%; 1:1 database) |
-
-Scored against both deposited references (seed 1):
-
-| reference | spectra | confirmed | wrong target | decoy won | FDR-rejected | never emitted | peptide coverage | same-scan backbone | same-scan **peptidoform** |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| pGlyco2 (depositors) | 17,855 | **78.9%** | 9.5% | 11.0% | 0.5% | 0.1% | 92.3% | 99.1% | n/a § |
-| MSFragger-Glyco (PXD031032) | 14,626 | **88.0%** | 5.3% | 6.2% | 0.5% | 0.1% | 96.4% | 99.9% | **95.8%** |
-
-§ The 83.8% previously in this cell was computed against the mislabelled pGlyco2 tables (see
-the quick tier) and the deep-tier Percolator outputs were not retained, so it cannot be
-re-scored without re-running the tier. Every other column of this row is backbone-based
-and unaffected.
-
-**The FDR is right where it claims to be**, and **generation is not the bottleneck**: 0.1%
-of reference spectra produce no row. **Selection is**: 20.5% of pGlyco2's spectra (11.5%
-of MSFragger's) are generated and scored but lose the per-scan collapse, and decoys win
-about half of those. andes accepts 31,653 spectra of which ~17.5k are in neither
-reference at 1.11% measured FDP; the two searches used different databases (UniProt
-reviewed + shuffled twin here; each engine's own there), so read that as "accepts
-substantially more at comparable measured error", not as a clean gain.
-
-### ⚠ Why a single glyco file cannot be benchmarked
-
-Percolator's smallest attainable q is `1/T_top`, so a run with too few confident targets
-cannot reach `q = 0.01` **at all** — the answer is 0 regardless of data quality. Measured
-(2026-09, on a human-plasma set since retired from this benchmark; the mechanism is general):
-
-| configuration | PIN rows | glycoPSMs @1% |
-|---|---:|---:|
-| sceHCD, 1 file | 7,257 | **0** |
-| EThcD, 1 file | 14,349 | **0** |
-| sceHCD-EThcD, 1 file | 12,701 | 112 |
-| three different regimes pooled | 34,307 | 143 |
-| **three sceHCD replicates pooled** | 22,590 | **385** |
-
-Two rules follow. **Pool at least three files** — one is not a benchmark, it is a zero. And
-**pool replicates of ONE acquisition regime, not different regimes**: mixing sceHCD with
-EThcD gave 143 against 385 for the same number of files, because Percolator fits a single
-model and the feature distributions differ between fragmentation chemistries.
-
-
-
-### How to run Percolator on a glyco PIN (2026-09-10)
-
-A glycopeptide run accepts far fewer PSMs than a standard search, so Percolator's default
-training threshold leaves too few positives to fit on. Measured on a pooled human-plasma glyco
-PIN — one variable, identical rows, five Percolator seeds per arm, agreement counted against the
-depositors' own reference identifications:
-
-| `--trainFDR` | PSMs @1% | agreeing with the reference |
-|---|---:|---:|
-| 0.01 (default) | 210.6 ± 50.9 | 171.0 ± 37.6 |
-| **0.05** | **384.6 ± 19.9** | **301.4 ± 11.1** |
-| 0.10 | 348.8 ± 9.6 | 283.2 ± 6.1 |
-
-The default is worse *and* erratic: identical input gave 112 PSMs on one seed and 256 on another.
-The recommendation is in `DOCS.md` §9. Rescoring itself is the pipeline's job, not andes's.
-
-### The isotope-aware collapse (issue #79, 2026-09-11)
-
-andes called NeuGc where the pGlyco2 reference called Hex+Fuc on fucose-rich tissue.
-The two differ by 1.020401 Da against a neutron's 1.003355 — 17 mDa, or 4.8 ppm at the
-median 3,581 Da precursor, so both hypotheses fit inside a 20 ppm window and both enter
-the candidate set. The collapse comparator read no mass-error or isotope term, so it
-decided them on a Y-ladder difference of 0.04–0.20 out of 120–170, about 0.1%.
-
-Measured: of 237 such scans, 235 sat on isotope offset 1, and the reference composition
-was present in the candidate pool at offset 0 on 163 of 163 recoverable scans with a
-seven-fold better precursor residual. The fix penalises the isotope offset in the
-collapse (`--glyco-gp-iso`, default 1.0): an M+1 assignment costs an extra assumption,
-so with equal fragment evidence the candidate needing no correction wins.
-
-One binary, one variable, `--glyco-species mouse` (1,833 compositions), 32 threads:
-
-| | heart, `iso 0` | heart, **`iso 1`** | liver, `iso 0` | liver, **`iso 1`** |
-|---|---:|---:|---:|---:|
-| backbone agreement | 95.9% | 95.9% | 95.8% | 95.7% |
-| **composition agreement** | 76.2% | **80.8%** | 72.2% | **72.2%** |
-| −Hex −Fuc +NeuGc scans | 124 | **5** | 0 | 0 |
-| winners at isotope offset 1 | 275 | 88 | 263 | 214 |
-
-**Heart: the swap class falls 124 → 5 and composition agreement rises 4.6 points, +75
-scans. Liver, the control, is unchanged to the scan.** Backbone agreement does not move
-on either tissue, which is the point — the change decides between compositions at one
-backbone and must not touch peptide selection. `--glyco-gp-iso 0` reproduces the
-pre-fix ordering exactly and is the A/B baseline.
-
-Caveat on the absolute counts: the original decomposition found 237 swap scans against
-the built-in enumerator (~852 compositions), which #82 removed. This A/B runs on the
-bundled 1,833-composition mouse database, so the class is smaller in both arms. Both
-arms share the space, so the comparison holds.
-
----
-
-### Charge-neighbour search is REFUTED as a standalone change — and the reason is diagnosable (2026-10-03)
-
-The engine trusts a reported precursor charge as the ONLY charge searched
-(`charges_to_try`), so a mis-called charge puts the true peptide mass off the grid and
-loses the scan with no error. Mis-calls concentrate at charge 4-6, which is also where
-this engine is weakest, and the glyco path's own comment names the standard search as
-having this blind spot. `--charge-expand N` (default 0, off) widens the set by one below
-and N above for reported charges at or above `--charge-expand-min-z` (default 4).
-
-Measured, one variable, same binary. UPS1 with entrapment, 5 Percolator seeds:
-
-| arm | PSMs @1% | entrapment | FDP |
-|---|---:|---:|---:|
-| baseline | 16,120–16,175 | 117–127 | 2.48–2.69% |
-| `--charge-expand 1` | 15,988–16,102 | 101–118 | 2.16–2.51% |
-
-Astral, 3 seeds: baseline 41,323–41,437, `--charge-expand 1` 41,239.
-
-**The global count is the wrong metric, and the stratified one refutes the idea
-outright.** Only **1.83%** of Astral scans and **5.72%** of UPS1 scans report charge >= 4,
-so the affected population cannot move a headline. Counting accepted PSMs inside that
-stratum on UPS1:
-
-| stratum | baseline | `--charge-expand 1` |
-|---|---:|---:|
-| reported z >= 4 | 197–210 | **84–91** |
-| reported z < 4 | 15,914–15,972 | 15,841–16,011 |
-
-Identifications in the only population the knob touches **more than halve**. The
-mechanism is the one this repo keeps meeting: a wider candidate space with no feature
-that separates it. Three charge hypotheses per scan are offered, a wrong-charge
-hypothesis can out-score the right one, and nothing in the feature set tells Percolator
-which charge the MS1 envelope actually supports.
-
-**The prerequisite already exists by name and is dead.** `PrecursorIsotopeKL` is
-documented as the KL divergence of the precursor isotope envelope against averagine —
-exactly that missing evidence. It was a per-PSM feature of the old single-pass chimeric
-mode, dropped because it cost ~2:40 of wall on Astral, and is now hardcoded 0.0 in every
-mode. ⇒ **Restore a bounded-cost precursor-envelope charge-support feature FIRST, then
-retest charge expansion.** `--charge-expand` stays in the tree, default off, as the
-reproducible A/B baseline for that retest.
-
----
-
-### The fragment-index top-K tie-break (2026-10-03)
-
-The index shortlists 100 candidates per spectrum by matched b/y vote count. Votes are
-small integers over a candidate set that runs to thousands, so the cut lands inside a
-large tie — and the historical secondary key was the **form id, which is mass order and
-carries no evidence at all**. At the boundary the survivors were decided by where a
-candidate happened to sit in the index.
-
-`--fragment-index-intensity-tiebreak` (default off) breaks that tie by the summed
-intensity of the matched peaks instead, keeping the form id as the final key so the order
-stays total and reproducible.
-
-**It bites, and it is free.** Astral forced out-of-core (`--candidate-index mmap`, so the
-index is the retrieval path in both arms and any index-specific bias cancels), same
-binary, one variable: of 1,093,088 rows present in both arms, **501,494 — 46% — change
-their assigned peptide**. Wall time is 254 s against 255 s.
-
-| | PSMs @1% (3 seeds) | distinct peptides |
-|---|---|---|
-| tie-break off | 51,798 · 51,906 · 51,953 | 30,053 · 30,094 · 30,133 |
-| **tie-break on** | 51,966 · 51,911 · 51,963 | **30,186 · 30,168 · 30,199** |
-
-PSMs are flat (+0.12%, inside the seed range). **Distinct peptides rise ~0.30% and the two
-ranges do not overlap** — every on-arm seed exceeds every off-arm seed.
-
-**Checked for the attrition artifact that inflated the earlier Astral index comparison:**
-the decoy share of the PIN is **46.05% off against 46.06% on**, so the tie-break is not
-preferentially removing decoys and the gain is not the bias this document warns about.
-
-⚠ Astral carries no entrapment component, so this arm cannot measure error. The default
-stays **off** until the phospho benchmark — the one dataset where the index is selected in
-production AND a 1:1 entrapment database exists — reports FDP for both arms. That is the
-arm that should decide the default.
-
----
-
-### Refuted — do not re-try without new evidence
-
-Each was measured, not argued: the matched-ion selector term `--glyco-gp-m` (every weight
-worse, and the selection buckets do not move); the two-stage split election
-(fewer correct identifications at higher error); generation-side expansion in general —
-wider glycan box, two-axis Y retention, isobar resolution all moved yield **down**; and the
-oxonium gate as an explanation for unemitted spectra (it fires for 33 of the 34). Added 2026-09-10: **filtering low-information rows out of
-the glyco PIN before Percolator.** The gate tested was the best available on paper — keep only
-scans with at least 40 peaks, which retains 97.1% of reference-bearing rows while dropping 69% of
-all rows, strictly dominating a RawScore floor on both axes. Same PIN, same Percolator settings,
-five seeds: ungated 384.6 ± 19.9 PSMs and 301.4 ± 11.1 agreeing, gated 270.6 ± 139.2 and
-222.8 ± 113.2, with one seed returning zero. The low-scoring rows are close to an even
-target/decoy mix and Percolator needs them to place a threshold, so removing them starves the fit.
-This also retires the emission-floor line of work for this data: the instability it was invented
-to cure is cured better by the training threshold above.
-
----
-
-## 2b. Phospho-enriched (the first PTM benchmark)
-
-**Dataset.** PXD007653 (Krahmer et al., mouse liver EasyPhos, Q Exactive HCD), one raw
-file, `20151014_QEp6_NaKr_SA_totalliver_control2_phospho.raw` (3.72 GB, 102,820 MS2),
-converted with ThermoRawFileParser 1.4.3. It is not in any bundled model's training
-ledger (checked before selection). Reference: the depositors' MaxQuant `msms.txt`,
-filtered to this file, `Reverse` blank, PEP ≤ 0.01 → 23,563 scans
-(`glyco/truth/maxquant_mouse_liver_phospho.tsv.gz`, built by `make_truth.py maxquant`).
-
-**Search.** The 1:1 shuffled mouse entrapment database from the glyco tiers
-(sha256 `5ee15d8d…`), `configs/mods-phospho.txt` (Cam-C fixed; Ox-M, protein-N-term
-acetyl, Phospho S/T/Y variable; NumMods=4, sha `bdc523fe…`), production defaults (the
-calibration pre-pass ran and was skipped as insufficient), 32 threads. Percolator 3.7.1,
-`-Y`, no pooling (one file, so the q floor is far below 1%).
-
-Two andes paths are measured below. The **enumeration path** (`--fragment-index off`) is
-what this dataset was first run on, after the out-of-core fixes it forced: before them the
-candidate index did not fit RAM, the calibration pre-pass bypassed the memory budget
-(#70), and the search ran at 0.7 spectra/s (#72). The **fragment-ion index** (#76) is the
-default on `main` for any search whose candidate index goes out-of-core, and is what a
-user gets today by running the command below with no extra flags.
-
-| arm | model | PSMs @ q≤0.01 (seeds 1–5) | entrapment @1% | true FDP | phospho-bearing PSMs (seed 1) | wall |
-|---|---|---:|---:|---:|---:|---:|
-| default, **fragment index** (today's default) | `hcd_qexactive_tryp` | 37,280 · 37,271 · 37,258 | 214–216 | **1.15–1.16%** | **26,883** | **164 s** |
-| default, enumeration path | `hcd_qexactive_tryp` | 36,817 · 36,872 · 36,922 · 36,862 · 36,865 | 225–244 | 1.22–1.32% | 26,629 | 5,954 s |
-| `--protocol phospho`, enumeration path | `hcd_qexactive_tryp_phosphorylation` | 36,835 · 36,819 · 36,826 · 36,780 · 36,884 | 202–210 | 1.10–1.14% | 26,767 | 6,031 s |
-
-**Against Comet, same file, same settings, same node.** Comet 2025.01 (OpenMS
-third-party container), trypsin with ≤1 missed cleavage, 20 ppm precursor, 0.02 Da fragment
-bins, the same three variable mods with `max_variable_mods_in_peptide = 4`,
-`decoy_search = 1`, Percolator on its own PIN:
-
-| engine | wall (32 threads) | PSMs @ q≤0.01 | true FDP | phospho-bearing PSMs | MaxQuant scans covered |
-|---|---:|---:|---:|---:|---:|
-| Comet 2025.01 | 226 s | 33,888–34,025 | 1.73–1.78% | 23,888 | 77.9% (98.6% agree) |
-| **andes, fragment index** | **164 s** | **37,258–37,280** | **1.15–1.16%** | **26,883** | **82.5%** (98.3% agree) |
-| andes, enumeration path | 5,954 s | 36,817–36,922 | 1.22–1.32% | 26,629 | 82.1% |
-
-andes identifies 9.6% more PSMs and 12.5% more phospho-bearing PSMs at a third less
-measured error, and is 27% faster wall-to-wall including its own calibration pre-pass and
-I/O (the search phase alone is 123 s, ~830 spectra/s). Peak RSS 25 GB against 11 GB for the
-enumeration path; the index slice width follows the memory budget, so a smaller machine
-uses narrower slices rather than more memory.
-
-**The same comparison on a small machine.** 8 threads, 31 GB, same mzML, Percolator seed 1
-— the index picked 77 Da slices there instead of 150 Da and peaked at 15.6 GB:
-
-| engine | wall | PSMs @1% | true FDP | phospho-bearing PSMs |
-|---|---:|---:|---:|---:|
-| Comet 2025.01 | 1,126 s | 33,946 | 1.74% | 23,888 |
-| **andes, mzML** | **1,046 s** | **37,280** | **1.15%** | **26,883** |
-| andes, native `.raw` (no conversion step) | 876 s | 37,234 | 1.12% | 26,849 |
-
-Reading a `.raw` directly also avoids the conversion Comet needs, which is another 577 s on
-that machine. The PIN rows are identical to the 32-core run, so the identifications are the
-same numbers.
-
-**Reading it.** The phospho-specific model is identification-neutral against the general
-high-res model (the difference is inside the ~±50 seed band) at about 0.1 percentage
-points lower measured error. Against MaxQuant, andes at 1% covers 82.1% of the reference
-scans with 98.3% bare-peptide agreement on the covered ones, and reports 17,467 scans the
-reference does not; whether those are right is exactly what the entrapment column
-measures (1.1–1.3%). Site localisation is **not** scored: the reference table stores bare
-sequences, and andes emits no localisation probability. That is the next thing to add.
-
-**Reproduce.** `reproduce/fetch_spectra.sh phospho`, build the mouse entrapment database
-as for the glyco deep tier, then per arm:
-
-```text
-andes --spectrum <file>.mzML --database mouse_entrap.fasta \
-      --mods docs/benchmarks/configs/mods-phospho.txt --threads 32 \
-      [--protocol phospho] --output-pin <arm>.pin
-percolator --seed <1..5> -Y --only-psms=false --results-psms <arm>_s<seed>.psms <arm>.pin
-```
-
-Count `q-value ≤ 0.01` rows, entrapment hits by the `ENTRAP_` protein prefix
-(FDP = 2 × hits / PSMs for a 1:1 database), and phospho-bearing PSMs by the `79.96`
-delta in the peptide string. Expect **~3 min on 32 cores and ~17 min on 8 cores**; the
-fragment-ion index turns itself on because this search does not fit in RAM. Add
-`--fragment-index off` to reproduce the enumeration rows instead, which take ~100 min and
-~12.5 h respectively.
-
-### Which glyco defaults were changed, and which were not (2026-09-10)
-
-Three flags looked like they should be defaults. Measured on the quick tier
-(`MouseLiver-Z-T-1`, whole file, 32 threads, Percolator seeds 1–3, 3,877 reference
-spectra), only one of them was:
-
-| arm | glycoPSMs @1% | true FDP | pGlyco2 confirmed | wrong target won |
-|---|---|---|---|---|
-| defaults | 7,219–7,285 | 1.25–1.51% | 3,375 (87.1%) | 250 (6.4%) |
-| **`--precursor-mono auto`** | 7,249–7,262 | 1.32–1.57% | **3,471 (89.5%)** | **192 (5.0%)** |
-| `--glyco-min-core-y 2` | 6,623–6,776 | 1.15–1.45% | 3,364 (86.8%) | 220 (5.7%) |
-| `--glyco-pin-curated` | 7,201–7,257 | 1.36–1.41% | 3,380 (87.2%) | 250 (6.4%) |
-
-**`--precursor-mono auto` is now the default.** Yield is flat, but 96 more scans are
-confirmed against the reference and 58 fewer are wrong-target wins — the correction turns
-mistakes into identifications rather than adding volume. It is inert without a linked MS1,
-so MGF and MS1-less mzML are byte-identical to `off` (the goldens are unchanged).
-
-**`--glyco-min-core-y 2` is not made the default.** Requiring two trimannosyl-core Y ions
-costs about 500 glycoPSMs here for no gain in confirmation, and drops 44% of the emitted
-rows. Its documented +87 on pooled human plasma does not transfer to this tissue, which is
-the same lesson the glyco levers have taught before: the defaults win on the benchmark.
-
-**`--glyco-pin-curated` is not made the default.** It is identification-neutral here, inside
-seed noise on every column. Its +50% on plasma was a small-sample effect — that run had
-about 385 glycoPSMs, where pruning columns helps a data-starved SVM; with 7,250 the SVM has
-enough data and the pruning buys nothing.
-
-### Choosing the retrieval strategy (measured, not configurable)
-
-An out-of-core search can score each spectrum either by enumerating every peptidoform in
-its precursor windows or by taking a shortlist from a fragment-ion index. andes chooses,
-prints which one it chose, and offers no flag for it. The rule is two conditions, both of
-them measured:
-
-1. **The candidate index must be out-of-core.** In RAM the enumeration is built once and
-   every spectrum looks its window up; that path was never the slow one, and the index
-   would only add its own per-slice build cost.
-2. **Fragment matching must be high-resolution.** The index bins ions at the fragment
-   tolerance and ranks candidates by how many peaks vote for them. At the low-resolution
-   0.5 Da tolerance those bins are so wide that the vote does not discriminate.
-
-Condition 2 is there because of this measurement — the three standard sets, same binary,
-8 threads, Percolator seed 42, forcing the index on by also forcing the candidate index
-out-of-core:
+Selection losses against pGlyco2 fell from 12.9% (wrong target 5.6% + decoy won 7.3%) to 9.4%
+(4.0% + 5.3%). #95 (the collapse prefers the monoisotopic hypothesis) landed in between; with
+the glycan list also different, the gain cannot be apportioned.
+
+**Deep tier** — all five fractions (`MouseLiver-Z-T-{1..5}.raw`, 12.6 GB) as TRFP 1.4.3 mzML,
+same database, 16 threads per fraction, pooled before Percolator, 5 seeds; measured 2026-09-05
+at `main` `14818d3e` on the NeuGc ≤ 1 list (612 compositions) and **not re-measured since**.
+Result: 31,666 ± 9 glycoPSMs at 1.11% ± 0.03 true FDP (main table). Generation is not the
+bottleneck (0.1% of reference spectra produce no row); selection is: 20.5% of pGlyco2's
+spectra (11.5% of MSFragger's) are generated but lose the per-scan collapse, and decoys win
+about half of those. Its pGlyco2 peptidoform agreement was computed against mislabelled
+reference tables and cannot be re-scored without re-running the tier.
+
+**Precursor mono-correction (`--precursor-mono`, issue #64, now the default).** On T-1, 153 of
+3,824 reference scans were recorded on an M+3..M+6 isotopologue (88 at exactly +4). Widening the
+window cannot fix this (each offset is mass-degenerate with a composition change), so the
+corrector refits the MS1 envelope. T-1, 2026-09-07, one binary, 4 threads:
+
+- arm B (off, `0..2`): 7,109 glycoPSMs, 1.10% FDP, pGlyco2 confirmed 3,361 (86.7%);
+- arm E (auto, `0..2`): 7,225, 0.91%, 3,444 (88.8%);
+- arm F (auto, `0..1`, shipped): 7,149, 0.98%, 3,466 (89.4%); 59 of the 62 firmware-mispicked
+  +4 targets confirmed (55 with `0..2`), peptidoform agreement 96.9% vs 96.8%, and the `+2`
+  tier falls from 402 to 21 PSMs.
+
+The shipped thresholds reach 112 more reference scans with one wrong shift (back-off 0: 106,
+with 8 wrong). Over five fractions, 464 of the 515 scans truly at +3..+6 (90.1%) are confirmed;
+pooled arm F gives 34,410 glycoPSMs at 0.98% FDP (2026-09-08; the glycan list also changed, so
+not a controlled comparison with the deep tier). On heart and lung the corrector transfers
+(84–91% of the firmware population confirmed, against 17% for the heart baseline).
+
+**Isotope-aware collapse (issue #79).** NeuGc and Hex+Fuc differ by 1.020401 Da, close to a
+neutron (1.003355), so both fit the window. Penalising the isotope offset (`--glyco-gp-iso`,
+default 1.0) cut the swap on heart from 124 to 5 scans (composition agreement 76.2% → 80.8%);
+liver, the control, is unchanged.
+
+**Defaults (2026-09-10).** `--precursor-mono auto` became the default (flat yield; pGlyco2
+confirmations 3,375 → 3,471). `--glyco-min-core-y 2` (about 500 fewer glycoPSMs) and
+`--glyco-pin-curated` (neutral) did not.
+
+### Choosing the retrieval strategy
+
+An out-of-core search either enumerates every peptidoform in each precursor window or takes a
+shortlist from a fragment-ion index. andes uses the index only when (1) the candidate index is
+out-of-core and (2) fragment matching is high-resolution. Forcing the index on the three
+standard sets (same binary, 8 threads, seed 42):
 
 | dataset | in-RAM enumeration (the default) | out-of-core enumeration | out-of-core + index |
 |---|---|---|---|
@@ -974,19 +219,35 @@ out-of-core:
 | TMT a05058, low-res | 94 s, **12,281** | 773 s, **12,247** | 118 s, **3,613** |
 | UPS1, low-res | 52 s, **15,838** | 254 s, **15,838** | 65 s, **10,312** |
 
-The middle column is the control, and it is what makes the reading unambiguous: **the
-out-of-core path itself preserves the identifications** — identical counts on Astral and
-UPS1, within 0.3% on TMT — and is simply slower. Everything the third column does,
-good or bad, belongs to the index. On both low-resolution sets it loses most of the
-identifications *and* runs slower than the in-RAM default, so it is never selected there. The Astral row is **not** a 22% win and must not be quoted
-as one: a candidate filter cannot create identifications, and the top-1-per-scan
-competition shows what happened — decoy wins fall 9.4% while target wins fall 1.8%, so
-decoys leave the competition preferentially and the decoy-based q-values become optimistic.
-Astral has no entrapment component, so that dataset cannot detect it. Where the index *is*
-selected, the phospho benchmark measures the honest error with a 1:1 entrapment database
-and it goes **down**, 1.22–1.32% to 1.15–1.16%, which is why that result stands.
+Out-of-core enumeration preserves the identifications, so the third column belongs to the
+index. On low-res data the 0.5 Da bins do not discriminate. The Astral row is **not** a 22% win:
+decoy wins fall 9.4% against 1.8% for targets, so q-values become optimistic, which Astral (no
+entrapment) cannot detect. On phospho, with a 1:1 entrapment database, the error goes **down**
+(1.22–1.32% to 1.15–1.16%).
 
-## 3. How to reproduce
+### Refuted — do not re-try without new evidence
+
+- **Charge-neighbour search** (`--charge-expand`, default off; 2026-10-03). On UPS1, accepted
+  PSMs at reported z ≥ 4 fell from 197–210 to 84–91, because nothing tells Percolator which
+  charge the MS1 envelope supports. Restore a precursor-envelope charge feature
+  (`PrecursorIsotopeKL` is always 0.0) before retesting.
+- **Glyco selector and generation changes:** the matched-ion term `--glyco-gp-m`, the two-stage
+  split election, and generation-side expansion (wider glycan box, two-axis Y retention, isobar
+  resolution) all lost; the oxonium gate does not explain unemitted spectra (it fires for 33 of
+  34).
+- **Filtering low-information rows out of the glyco PIN before Percolator.** Keeping scans with
+  ≥ 40 peaks gave 270.6 ± 139.2 PSMs against 384.6 ± 19.9 ungated (one seed returned zero);
+  Percolator needs the low-scoring rows to place a threshold. Use `--trainFDR 0.05` instead
+  ([`DOCS.md` §9](../../DOCS.md#9-glycopeptide-search-experimental--advanced-knobs)).
+
+Pending: `--fragment-index-intensity-tiebreak` (default off) breaks the index's top-100 vote
+ties by matched intensity. On Astral forced out-of-core it changes 46% of assigned peptides
+and raises distinct peptides ~0.30% at flat PSMs and an unchanged decoy share; it waits for
+an FDP measurement on phospho.
+
+---
+
+## 2. How to reproduce
 
 ```bash
 PIMG=quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2
@@ -1015,10 +276,8 @@ andes --spectrum UPS1_5000amol_R1.raw --database yeast_entrap.fasta \
       --threads 8 --output-pin ups1.pin
 ```
 
-andes auto-detects activation, analyser resolution and labelling from the file, so
-tolerances and the model usually need no flags. It prints the parameters it actually
-resolved and writes them to `statistics.log` — **quote those, not the ones you intended**,
-since precursor calibration can tighten a window mid-run.
+andes prints the parameters it actually resolved and writes them to `statistics.log`. **Quote
+those, not the ones you intended**, since calibration can tighten a window mid-run.
 
 ### Glyco
 
@@ -1054,23 +313,16 @@ python3 glyco/agreement.py      glyco/truth/msfragger_mouse_liver.tsv.gz pooled.
 ```
 
 **The entrapment database is 1:1 shuffled-self, and swapping it changes the answer.**
-`mouse_entrap.fasta` is 17,537 mouse targets plus a shuffled twin of each — same length,
-same amino-acid composition, scrambled order — tagged `ENTRAP_` *inside* the accession:
-`>sp|ENTRAP_Q99JY4|ENTRAP_TRABD_MOUSE`. Build it with `glyco/build_shuffled_entrap.py`, not
-`glyco/build_entrap.py`; the latter appends a *foreign* proteome, which is a different
-experiment. An independent reproduction that used mouse + E. coli measured **~21% more
-glycoPSMs**, because a foreign proteome changes three things at once: the ratio (~3.9:1, so
-the FDP factor is ~4.9 rather than 2), the sequon density of the entrapment space, and the
-total search-space size. Detect entrapment by SUBSTRING, not prefix — the tag is inside the
-accession, not at the start of the header.
+`mouse_entrap.fasta` is the mouse targets plus a shuffled twin of each, tagged `ENTRAP_` inside
+the accession (`>sp|ENTRAP_Q99JY4|ENTRAP_TRABD_MOUSE`), so detect it by substring. Build it
+with `glyco/build_shuffled_entrap.py`, not `glyco/build_entrap.py`, which appends a foreign
+proteome: an independent reproduction with mouse + E. coli measured ~21% more glycoPSMs,
+because the ratio (~3.9:1, factor ~4.9), the sequon density and the search-space size all
+change at once.
 
-`score_vs_truth.py` works on **any** dataset with a committed reference in `truth/`; it
-replaced a plasma-only script that hardcoded one dataset's paths and could not run
-elsewhere. `make_truth.py` builds those references from pGlyco2 TSV or StrucGP xlsx.
-
-**To reproduce any of this from scratch**, see [`reproduce/`](reproduce/) — three scripts that
-pull the data from PRIDE, rebuild the databases from UniProt, and run the whole thing with no
-hardcoded paths. It also documents what will *not* reproduce exactly, and why.
+`score_vs_truth.py` works on any dataset with a reference in `truth/`; `make_truth.py` builds
+those from pGlyco2 TSV or StrucGP xlsx. To run everything from scratch, see
+[`reproduce/`](reproduce/), which also lists what will not reproduce exactly.
 
 ## Layout
 
@@ -1080,119 +332,106 @@ hardcoded paths. It also documents what will *not* reproduce exactly, and why.
       glyco/         the glyco harness (pooling, yield, entrapment, gap decomposition)
       configs/       per-engine parameter files
 
-Benchmark material used to be spread across five directories in and around the repository;
-it was consolidated here on 2026-09-04. Bulk spectra and third-party engine binaries
-deliberately stay outside git; the workspace-root README says what remains and how to
-re-fetch it.
-
+Bulk spectra and third-party engine binaries stay outside git.
 
 ---
 
-## 4. Methodology, and the traps
+## 3. Methodology, and the traps
 
-**Read `.raw` natively; do not convert.** andes does this with `--features thermo`, at no
-speed cost and with output identical to a correct conversion. Conversion is where a silent
-30% error entered: on one pGlyco2 file, ThermoRawFileParser 2.0.0 wrote 33,893 MS2 where
-1.4.3 wrote 45,905, and native reading — Thermo's own RawFileReader, hence the reference —
-confirms 45,905. So 1.4.3 is right and 2.0.0 dropped 26% of the scans. It is
-FILE-DEPENDENT: on the plasma file both versions agreed exactly, so no converter can be
-assumed safe for your data. All figures here used native reading or 1.4.3.
+**Setup.** 8-thread Intel Xeon Gold 6238 VM, Linux x86_64, for every engine: andes, Java MS-GF+
+[v20240326](https://github.com/MSGFPlus/msgfplus/releases/tag/v2024.03.26) and Comet 2025.01
+(via OpenMS), with parameters matched per dataset. All are rescored by
+`quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2` (`--seed 42 -Y`) on plain FASTA with
+andes `XXX_` decoys. Java MS-GF+ PINs come from `MzIDToTsv` + `build_pins.py`, and its Astral
+count reuses a prior run. Protein counts are omitted (they need uniform parsimony grouping).
 
-**One rescorer for every engine.** Percolator 3.7.1, pinned, `--seed 42 -Y`. Comparing one
-engine's own score against another's rescored q-value is not a comparison. Percolator also
-auto-detects concatenated vs separate target-decoy *from the PIN's shape*, so two engines
-can silently end up rescored under different modes — check the mode line in each
-`.perc.log`.
+**One variable per comparison.** Five results here had to be withdrawn, each from comparing
+runs that differed in more than one respect: a "30% engine regression" was two converter
+versions; `--chimeric` "running faster" was `top_n=1` against 10; "2.07x slower than Comet"
+predated a default change; a glyco dataset "finding nothing" was Percolator's q floor; "21%
+more PSMs" elsewhere was a different entrapment database. Run every arm in **one session, on
+one host, with one binary**, and record commit, converter (or native), database build, thread
+count and date beside the number.
 
-**Pool glyco fractions before Percolator.** A single fraction yields on the order of 0–2
-glyco decoys, so a per-fraction 1% q-value is estimated from almost nothing and swings
-between runs. Differences measured that way are noise.
+**Read `.raw` natively** (`--features thermo`); output equals a correct conversion at no speed
+cost. ThermoRawFileParser 2.0.0 dropped 26% of the MS2 scans on one pGlyco2 file, and the
+effect is file-dependent. If you must convert, use 1.4.3. Details:
+[`reproduce/`](reproduce/README.md).
 
-**Percolator's q has a floor of `1/T_top`.** Identifications at 1% are therefore a *step
-function* of any threshold you sweep, and plateaus in such a sweep are artifacts. Below
-~101 targets the answer is always zero.
+**One rescorer for every engine.** Percolator auto-detects concatenated vs separate
+target-decoy from the PIN's shape, so check the mode line in each `.perc.log`.
 
-**Replicate over seeds.** Single-seed glyco differences are routinely inside seed noise;
-the 5-seed design here has a floor of about 117 PSMs, below which an effect is *not
-demonstrable* rather than refuted.
+**Percolator's q has a floor of `1/T_top`.** Identifications at 1% are a step function of any
+threshold you sweep, and a run with too few confident targets returns zero at 1% regardless of
+quality. On a since-retired human-plasma set, single files gave 0, 0 and 112 glycoPSMs; three
+different regimes pooled gave 143; three sceHCD replicates pooled gave 385. So **pool glyco
+fractions before Percolator, at least three files, from one acquisition regime.** A rich
+fraction (the liver quick tier) clears the floor alone.
+
+**Replicate over seeds.** The 5-seed glyco design has a floor of about 117 PSMs; smaller
+effects are *not demonstrable*, not refuted.
 
 ### Entrapment FDP
 
-An entrapment database adds a proteome the sample cannot contain; a target PSM matching
-only those sequences is false by construction, which makes true error measurable rather
-than assumed.
+A target PSM matching only entrapment sequences is false by construction, which makes true
+error measurable:
 
 ```
 FDP = (entrapment hits / total accepted) x (1 + T/E)
 ```
 
-`T/E` is the ratio of **searchable space** and must be measured for the database in front
-of you — never assumed to be 1:
+`T/E` is the ratio of **searchable space** and must be measured for your database, never
+assumed to be 1:
 
 | database | T : E | factor |
 |---|---|---:|
 | `yeast_entrap.fasta` (UPS1) | 734,280 : 303,537 tryptic peptides | **3.42** |
 | a genuine 1:1 database | 1 : 1 | 2.00 |
 
-Assuming 1:1 has produced wrong published numbers here **twice** — understating UPS1's true
-error by 1.7x, and a foreign-proteome glyco database's (factor ~4.9) by ~2.5x. Peptide space is the better basis: it is
-what the search samples, and entrapment proteomes usually have a different length
-distribution from the target.
-
-**Measured on UPS1** (2026-09-04): 166 entrapment hits on 15,838 PSMs ⇒ **3.58% true FDP**
-at a nominal 1% (3.42 factor), or 2.61% on the cruder protein-count basis. Either way the
-nominal 1% is not 1%.
-
-**Know the estimator's resolution.** At ~380 accepted PSMs with 1–2 entrapment hits, one
-hit moves the estimate by ~2.6 points — such a design cannot distinguish 1% from 5%, and a
-reported "FDP 0.00" means *too few hits to measure*, not *clean*.
-
-**Not every database here has an entrapment component.** The Astral HYE database has none,
-so no entrapment FDP is computable from it and its counts are rescored `q ≤ 0.01` only.
+Assuming 1:1 has understated error here twice (UPS1 by 1.7x; a foreign-proteome glyco database
+by ~2.5x). **UPS1** (2026-09-04): 166 entrapment hits on 15,838 PSMs ⇒ **3.58% true FDP** at a
+nominal 1% (2.61% on the cruder protein-count basis). At ~380 PSMs with 1–2 hits, one hit moves
+the estimate by ~2.6 points, so "FDP 0.00" means *too few hits to measure*. The Astral HYE
+database has no entrapment component.
 
 ---
 
-## 5. Known gaps
+## 4. Known gaps
 
-- **The fragment-ion index retrieves at a much tighter window than the scorer matches at,
-  and the consequence is unmeasured.** `RankScorer::feature_match_tolerance()` returns a
-  constant 20 ppm on high-resolution data and that is what drives index retrieval, while
-  ion matching during scoring uses the model's own `mme`, which is 0.5 Da in every bundled
-  model (the wide serve window is load-bearing — re-serving high-res models at the training
-  window cost 21% of Astral identifications, which is why `--tight-highres-scoring` exists
-  only to keep that experiment repeatable). So a candidate can be credited by the scorer at
-  0.3 Da and be invisible to an index admitting 0.01 Da at m/z 500. This is a second
-  mechanism alongside the min-matched-ions decoy bias documented above, it cuts in both
-  directions, and no arm has measured it. Anyone changing the retrieval window must A/B it
-  against the enumeration path on identifications, not just on speed.
+- **The fragment-ion index retrieves at a much tighter window than the scorer matches at.**
+  `RankScorer::feature_match_tolerance()` (a constant 20 ppm on high-res) drives retrieval;
+  scoring uses the model's `mme` (0.5 Da in every bundled model). Unmeasured; A/B any change
+  to the retrieval window against enumeration on identifications.
+- **The Astral database is no longer served.** `ProteoBenchFASTA_MixedSpecies_HYE.fasta`
+  returns 404 everywhere, so `build_databases.sh` reconstructs a Human/Yeast/E. coli
+  equivalent (30.9k vs 31.9k sequences); expect the Astral count to move by a few hundred PSMs.
+- **Java MS-GF+ has not been re-run** under the current defaults. Comet 2025.01 was re-run on
+  2026-10-05; Comet's fragment-index mode and MSFragger have not been benchmarked.
+- **Two of three standard databases cannot support an entrapment claim.** Astral has none;
+  UPS1's is not 1:1.
+- **The fragment-ion index does not reproduce the enumeration path's multiplicity copies** in
+  the PIN `Proteins` column.
+- **Phospho is one file, peptide-level only;** `--refine` is measured only on Astral.
+- **Glycan composition on fucose-rich tissue** (#79): on heart and lung the backbone agrees with
+  pGlyco2 94–99% of the time but the composition only 68–78% (97% on liver); the core-fucose
+  ion Y1+Fuc is not a ladder rung, which is the open lead.
+- **Glyco selection is the open problem**; testing it needs a candidate-pool dump under
+  production settings.
 
-- **The Astral database is ProteoBench's own file and is no longer served.** The spectra
-  fetch (an earlier version of this document said they did not; that was a pagination bug
-  in our script, fixed 2026-09-05), but `ProteoBenchFASTA_MixedSpecies_HYE.fasta` returns
-  404 from every URL it was ever at, so `build_databases.sh` reconstructs a Human/Yeast/
-  E. coli equivalent from UniProt (30.9k vs 31.9k sequences). Expect the Astral count to
-  move by a few hundred PSMs on the reconstruction.
-- **Java MS-GF+ has not been re-run** under the current default; every Java figure is
-  historical. Comet 2025.01 *was* re-run head-to-head on 2026-09-04 (above). Neither
-  Comet's newer fragment-index mode nor MSFragger has been benchmarked here at all.
-- **Two of three databases cannot support an entrapment claim.** Astral has no entrapment
-  component; UPS1's is not 1:1. Rebuilding both near 1:1 is the fix.
-- **The fragment-ion index does not reproduce the enumeration path's multiplicity copies**
-  in the PIN `Proteins` column (one entry per enumeration copy of a peptide). Everything
-  else about where it may be used is now measured — see *Choosing the retrieval strategy*
-  above — and it is selected automatically rather than by a flag.
-- **The phospho benchmark is one file and peptide-level only.** Two more files of the same
-  regime are listed in `fetch_spectra.sh` for a pooled tier; site localisation is not
-  scored on either side. `--refine` is still measured only on Astral.
-- **Glycan composition on fucose-rich tissue is wrong more often than the backbone**
-  (issue #79): on heart and lung the backbone agrees with pGlyco2 94–99% of the time but the
-  composition only 68–78%, against 97% on liver, and the dominant error swaps Hex+Fuc for
-  NeuGc one isotope up. Measured on heart T-1 with the full candidate dump: the reference
-  composition is generated for 69% of those scans and loses the collapse by ~0.1% of the
-  fused score on the Y-ladder term, so these are ties broken by noise; the `SialicConsistency`
-  feature would flip none of them and its sign favours the wrong candidate, because a weak
-  NeuGc oxonium is present on 95% of sialylated heart spectra. The core-fucose diagnostic
-  ion Y1+Fuc is not a rung in either ladder, which is the open lead.
-- **Glyco selection is the open problem**, and whether those 37% are recoverable by scoring
-  at all is unknown — it needs a candidate-pool dump taken at retention time under
-  production settings, which does not exist yet.
+---
+
+## 5. History
+
+- **2026-09-04:** first same-session head-to-head with Comet: +7.5–22.1% PSMs at 1.04–1.26x
+  Comet's wall time (andes 244 / 97 / 50 s). With `--top-n 5` to match Comet's output depth,
+  andes ranged from 1.24x slower (Astral) to 0.83x (UPS1).
+- **2026-09:** `--gbdt-max-trees` default set to 100: Astral 400 s → 244 s (1.64x, −8 PSMs),
+  TMT 111 s → 97 s (1.14x, +3 PSMs).
+- **2026-09-04:** `--refine` on Astral gave 43,929 PSMs, before the #100/#102/#103/#106 fixes.
+- **2026-09-06:** gating the NeuGc bound on mouse raised the quick tier from 6,532 to 7,122
+  glycoPSMs at flat FDP (1.10% → 1.13%); superseded by the bundled glycan databases.
+- **2026-09:** the human-plasma glyco set was retired: its reference was a proprietary Byonic
+  export that cannot be rebuilt from public artifacts.
+- **2026-09:** TRFP 2.0.0 was found to drop 26% of MS2 on one pGlyco2 file; all figures here use
+  native reading or 1.4.3.
+- **2026-09-04:** benchmark material from five directories was consolidated here.

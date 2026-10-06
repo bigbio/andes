@@ -1,15 +1,9 @@
 # andes documentation
 
-This is the full reference for the `andes` binary and its outputs. For a quick start and benchmark summary, see [`README.md`](README.md).
-
-Run `andes --help` for auto-generated help derived from the same `Cli` struct documented below.
-
-**`--help` is a curated surface; this file is the complete one.** `--help` lists the flags a
-normal run needs — inputs and outputs, the enzyme and modifications, the mode switches, and
-the few genuine scientific choices. Everything else is *advanced*: still supported, still
-documented here, still settable, but hidden from `--help`, because the engine derives it and
-reports what it chose. Reach for an advanced flag to reproduce a measurement or to override a
-derivation you have a reason to distrust, not to tune a normal search.
+The full reference for the `andes` binary and its outputs; install and quick start are in
+[`README.md`](README.md). `andes --help` shows the flags a normal run needs. The rest are
+**advanced**: hidden from `--help` because the engine derives them and reports what it chose.
+Use them to reproduce a measurement or override a derivation.
 
 Advanced (hidden) flags include: `--candidate-index`, `--fragment-index`, `--gbdt-max-trees`,
 `--peak-filter`, `--density-on-active-list`, `--precursor-offset-clamp`, `--ethcd-activation`,
@@ -22,205 +16,178 @@ Advanced (hidden) flags include: `--candidate-index`, `--fragment-index`, `--gbd
 
 ---
 
-## Contents
-
-1. [CLI reference](#1-cli-reference)
-   - [1a. Workflow parameters (grouped by experimental design)](#1a-workflow-parameters-grouped-by-experimental-design)
-   - [1b. Configuration file (`--config`)](#1b-configuration-file---config)
-2. [Mods.txt format](#2-modstxt-format)
-3. [Output formats](#3-output-formats)
-4. [Auto-detection](#4-auto-detection)
-5. [Building from source](#5-building-from-source)
-6. [Training new scoring models](#6-training-new-scoring-models)
-7. [Isobaric labeling](#7-isobaric-labeling)
-8. [Legacy numeric values & behavior notes](#8-legacy-numeric-values--behavior-notes)
-9. [Glycopeptide search (experimental) & advanced knobs](#9-glycopeptide-search-experimental--advanced-knobs)
-10. [License and citation](#10-license-and-citation)
-
----
-
 ## 1. CLI reference
 
-All flags use kebab-case long options (`--flag-name`). Several flags also accept legacy Java MS-GF+ numeric values (see §8). The CLI is implemented in `crates/andes/src/bin/andes/cli.rs` (flags and parsers), with the search driver in `search.rs`, glyco in `glyco_run.rs`, model selection in `model_select.rs`, spectrum loading in `spectra.rs`, and training in `train.rs` / `train_intensity.rs` alongside it.
+Flags are kebab-case long options, defined in `crates/andes/src/bin/andes/cli.rs`.
 
 ### Input formats
 
-`--spectrum` auto-detects the reader from the file extension — there is **no format flag** to set:
+`--spectrum` picks the reader from the file extension; there is no format flag.
 
 | Extension | Reader | Build requirement | Runtime requirement | Notes |
 |---|---|---|---|---|
 | `.mzML` / `.mzml` | mzML (streaming) | always built | none | Full activation + instrument auto-detection (§4). |
-| `.raw` | Thermo RawFileReader | `--features thermo` (release archives ship it) | .NET 8 runtime — **bundled in the release archives** (nothing to install); from source, install .NET 8 | Native Thermo; results are identical to searching the equivalent mzML. Supports `--chimeric`. Activation/instrument read from vendor metadata (§4). |
-| `.d` | Bruker timsTOF (`timsrust`) | `--features timstof` | none (pure Rust) | DDA-PASEF, **MS2 only**; auto-routed to the `cid_tof_tryp` model. A `.d` is a *directory*. `--chimeric` / `--precursor-cal` degrade to a normal search. |
-| any other (e.g. `.mgf`) | MGF | always built | none | No MS-level/activation metadata; treated as MS2 with flag-based model resolution. |
+| `.raw` | Thermo RawFileReader | `--features thermo` | .NET 8 (bundled in release archives) | Same results as the equivalent mzML. Supports `--chimeric`. |
+| `.d` | Bruker timsTOF (`timsrust`) | `--features timstof` | none | DDA-PASEF, MS2 only; routed to `cid_tof_tryp`. `--chimeric` / `--precursor-cal` degrade to a normal search. |
+| any other (e.g. `.mgf`) | MGF | always built | none | No metadata; MS2, model from flags. |
 
-Native `.raw`/`.d` search **MS2 (identification) scans only** — MS1 and MS3+ scans (e.g. TMT SPS-MS3 reporter-quant) are filtered at load so `--ms-level 3` cannot accidentally search reporter scans. Default builds (no extra features) read mzML/MGF only; see [`README.md`](README.md) for `.raw`/`.d` install details and container recipes.
+Native `.raw`/`.d` search MS2 only (MS3 reporter scans are filtered at load).
 
 ### Required
 
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
-| `--spectrum` | path | *(required)* | Input spectrum file. Reader auto-selected by extension — mzML, MGF, Thermo `.raw`, or Bruker timsTOF `.d` (see *Input formats* above). | Java `-s <FILE>` |
-| `--database` | path | *(required)* | Target FASTA database. Decoys are generated automatically by reversing target sequences (see `--decoy-prefix`). | Java `-d <FILE>` |
-| `--output-pin` | path | *(required)* | Output Percolator `.pin` file path. Always written unless the process exits with an error before the write phase. | Java `-o <FILE>` (when `-outputFormat pin`) |
+| `--spectrum` | path | *(required)* | Input spectrum file; reader chosen by extension (see above). | Java `-s <FILE>` |
+| `--database` | path | *(required)* | Target FASTA. Decoys are generated (see `--decoy-strategy`, `--decoy-prefix`). | Java `-d <FILE>` |
+| `--output-pin` | path | *(required)* | Output Percolator `.pin`. | Java `-o <FILE>` (when `-outputFormat pin`) |
 
 ### Search parameters
 
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
-| `--precursor-tol` | string | `20ppm` | Symmetric precursor mass tolerance, e.g. `20ppm` or `0.02da`. | Java `-t 20ppm` |
-| `--enzyme` | enum | `trypsin` | Digestion enzyme: `trypsin`, `chymotrypsin`, `lysc`, `aspn`, `gluc`, `lysn`, `argc`, `alphalp`, `nocleavage`, `nonspecific` (`elastase` is accepted as an alias of `nonspecific`). A comma-separated list (`gluc,trypsin`) digests with every listed enzyme. A wrong enzyme yields almost no PSMs rather than failing silently. | Java `-e` |
-| `--charge` | `MIN..MAX` | `2..5` | Precursor charge range to try when the spectrum record does not specify charge (inverted ranges are rejected at startup). | *(no direct Java flag; set via param file in Java)* |
-| `--enzyme-specificity` | enum | `fully` | Enzymatic cleavage enforcement at peptide termini (Number of Tolerable Termini). `fully`: both termini must be cleavage sites (Java `-ntt 2`). `semi`: at least one terminus (Java `-ntt 1`). `non-specific`: neither required (Java `-ntt 0`). | `--ntt` alias; numeric `0`/`1`/`2` |
-| `--max-missed-cleavages` | u32 | `1` | Maximum missed enzymatic cleavages allowed per candidate peptide. | Java `-maxMissedCleavages 1` |
-| `--min-length` | u32 | `6` | Minimum peptide length in residues (excluding flanking context). | Java `-minLength 6` |
-| `--max-length` | u32 | `50` | Maximum peptide length in residues. | Java `-maxLength 40` |
-| `--top-n` | u32 | `10` | Maximum PSMs retained per spectrum (ranked by `RawScore`, best-first). | Java `-n 10` |
-| `--isotope-error` | `MIN..MAX` | `-1..2` | Isotope-error offset range to evaluate during precursor matching. | Java `-ti -1,2` |
-| `--min-peaks` | u32 | `10` | Minimum number of MS2 peaks required to score a spectrum; spectra below this threshold are skipped. | Java `-minNumPeaks 10` |
+| `--precursor-tol` | string | `20ppm` | Symmetric precursor tolerance, e.g. `20ppm` or `0.02da`. | Java `-t 20ppm` |
+| `--enzyme` | enum | `trypsin` | `trypsin`, `chymotrypsin`, `lysc`, `aspn`, `gluc`, `lysn`, `argc`, `alphalp`, `nocleavage`, `nonspecific` (alias `elastase`). A comma list (`gluc,trypsin`) uses every enzyme listed. | Java `-e` |
+| `--charge` | `MIN..MAX` | `2..5` | Charges tried when the spectrum has none. | *(no direct Java flag; set via param file in Java)* |
+| `--enzyme-specificity` | enum | `fully` | Tolerable termini: `fully` (Java `-ntt 2`), `semi` (`-ntt 1`), `non-specific` (`-ntt 0`). | `--ntt` alias |
+| `--max-missed-cleavages` | u32 | `1` | Missed cleavages per peptide. | Java `-maxMissedCleavages 1` |
+| `--min-length` | u32 | `6` | Minimum peptide length. | Java `-minLength 6` |
+| `--max-length` | u32 | `50` | Maximum peptide length. | Java `-maxLength 40` |
+| `--top-n` | u32 | `10` | PSMs kept per spectrum. | Java `-n 10` |
+| `--isotope-error` | `MIN..MAX` | `-1..2` | Isotope-error offsets tried. | Java `-ti -1,2` |
+| `--min-peaks` | u32 | `10` | Spectra with fewer MS2 peaks are skipped. | Java `-minNumPeaks 10` |
 
 ### Modifications
 
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
-| `--mods` | path | *(off)* | Path to a Java-format `mods.txt` file describing fixed and variable modifications. When omitted, built-in defaults apply: Carbamidomethyl on C (fixed) and Oxidation on M (variable, max 3 per peptide). Composition strings (e.g. `C2H3N1O1`) are **not** supported — use numeric Da masses. | Java `-mod <FILE>` |
-| | | | Hidden alias: `--mod` (singular). | |
+| `--mods` | path | *(off)* | Java-format `mods.txt` (§2). Without it: Carbamidomethyl C (fixed), Oxidation M (variable, max 3 per peptide). Numeric Da masses only. | Java `-mod <FILE>` |
 
 ### Scoring
 
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
-| `--fragmentation` | enum | `auto` | Fragmentation method for model resolution: `auto`, `CID`, `ETD`, `HCD`, `UVPD`. `auto` reads the activation from mzML/`.raw`/`.d` (§4); on MGF, which carries no metadata, it falls back to CID and warns. | Java `-m`; numeric `0`=CID, `1`=ETD, `2`=HCD, `4`=UVPD |
-| `--protocol` | enum | `auto` | Search protocol: `auto`, `phospho`, `iTRAQ`, `iTRAQ-phospho`, `TMT`, `standard`. An explicit value selects the protocol-specific model (e.g. `hcd_qexactive_tryp_tmt`). `auto` does **not** change model selection; it samples the spectra for TMT/iTRAQ reporter ions *after* the model is loaded and, if found, engages the isobaric windowed peak filter and (with no `--mods`) the tag as a fixed modification. | Java `-protocol`; numeric `0`=auto, `1`=phospho, `2`=iTRAQ, `3`=iTRAQ-phospho, `4`=TMT, `5`=standard |
-| `--score` | enum | `auto` | What ranks candidates and fills the PIN `RawScore`: `rank` (generating-function rank score, the low-res path), `strong` (fused intensity + competition score, the high-res path), or `auto`, which picks by the resolved model's instrument class. | *(no Java equivalent)* |
-| `--gbdt-max-trees` | u32 | `100` | Trees evaluated per GBDT ensemble (fragment-intensity and rich-ion), `0` = all. Measured 2026-09: 100 trees is 33–41% faster than the full ensembles and identification-neutral on both regimes. `--glyco` uses all trees unless the flag is given explicitly. | *(no Java equivalent)* |
-| `--peak-filter` | `WINDOW_DA:PEAKS` | protocol default | Windowed peak filtering (keep the `PEAKS` most intense peaks per `WINDOW_DA` window). Unset = on for isobaric-labelled data (`100:20`), off otherwise; a window of `0` forces it off. | *(no Java equivalent)* |
-| `--ethcd-activation` | enum | `hcd` | How EThcD/ETciD spectra are labelled for model routing and scoring: `hcd` (the default; no EThcD model exists) or `etd` (routes them through the c/z scoring path). | *(no Java equivalent)* |
-| `--precursor-offset-clamp` | bool | `true` | When the model has no precursor-offset entry for a charge, use the nearest charge that has one instead of dropping the correction. | *(no Java equivalent)* |
-| `--density-on-active-list` | bool | `true` | Measure local peak density on the deconvoluted (active) peak list rather than the raw list. | *(no Java equivalent)* |
-| `--model-store` | path | *(bundled)* | Parquet model store to use instead of the bundled `resources/models/` (a per-protocol partitioned directory, or a single `models.parquet`). | *(no Java equivalent)* |
-| `--model` | string | *(auto-select)* | Exact model ID to load from the store, skipping automatic selection. Useful for searching with a freshly trained model. | *(no Java equivalent)* |
+| `--fragmentation` | enum | `auto` | `auto`, `CID`, `ETD`, `HCD`, `UVPD`. `auto` reads the file (§4); on MGF it falls back to CID and warns. | Java `-m` |
+| `--protocol` | enum | `auto` | `auto`, `phospho`, `iTRAQ`, `iTRAQ-phospho`, `TMT`, `standard`. An explicit value selects the protocol model. `auto` keeps the model; if it finds TMT/iTRAQ reporter ions it turns on the isobaric peak filter and (with no `--mods`) adds the tag as a fixed mod. | Java `-protocol` |
+| `--score` | enum | `auto` | What ranks candidates and fills `RawScore`: `rank` (low-res), `strong` (high-res), or `auto` (by the model's instrument class). | — |
+| `--gbdt-max-trees` | u32 | `100` | Trees per GBDT ensemble, `0` = all. 100 is 33–41% faster and identification-neutral (2026-09). `--glyco` uses all trees unless set. | — |
+| `--peak-filter` | `WINDOW_DA:PEAKS` | protocol default | Keep the `PEAKS` most intense peaks per `WINDOW_DA`. Unset = `100:20` for isobaric data, else off; window `0` forces off. | — |
+| `--ethcd-activation` | enum | `hcd` | EThcD/ETciD routing: `hcd` (no EThcD model exists) or `etd` (c/z path). | — |
+| `--precursor-offset-clamp` | bool | `true` | Use the nearest charge's precursor-offset entry when a charge has none. | — |
+| `--density-on-active-list` | bool | `true` | Measure peak density on the deconvoluted peak list. | — |
+| `--model-store` | path | *(bundled)* | Model store instead of `resources/models/` (directory or one `models.parquet`). | — |
+| `--model` | string | *(auto-select)* | Load this model id, skipping selection. | — |
 
-**Model selection.** andes builds a selection key from the resolved activation, instrument class, enzyme and protocol (§4) and picks the nearest bundled model: an exact match first, then the same key without the protocol class, then the closest instrument class. The bundle holds 17 own-trained models (see `README.md` → *Supported models*). There is no flag to force an instrument class — it is read from the file — and no external binary model file: `--model-store` plus `--model` is the way to search with any model that is not bundled.
+**Model selection** tries an exact (activation, instrument class, enzyme, protocol) match, then
+drops the protocol, then takes the closest instrument class. The instrument class comes from
+the file; use `--model-store` plus `--model` for an unbundled model.
 
 ### Calibration
 
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
-| `--precursor-cal` | enum | `auto` | Precursor-mass calibration: `off`, `auto`, or `on`. `auto`/`on` run a pre-pass that learns a systematic ppm shift from confident PSMs, then tighten the precursor tolerance for the main search; `auto` (the default) skips the correction when the sample is too small to be reliable, so it is safe to leave on. No effect on native `.raw` or `.d` input — calibration is not yet supported for those formats, so it is skipped (with a warning) and the search proceeds uncalibrated. | Java `-precursorCal auto\|on\|off` |
+| `--precursor-cal` | enum | `auto` | `off`, `auto`, `on`. A pre-pass learns a ppm shift from confident PSMs and tightens the precursor tolerance; `auto` skips it on small samples. Skipped (with a warning) on `.raw` and `.d`. | Java `-precursorCal auto\|on\|off` |
 
-> **Candidate retrieval is chosen automatically.** When a search does not fit in RAM the
-> engine picks between per-spectrum enumeration and a fragment-ion index, and prints which
-> one it chose. The index is selected only for out-of-core searches with high-resolution
-> fragment matching, where it was measured at 164 s against 5,954 s for enumeration on a
-> phospho file (Comet 2025.01: 226 s), with more identifications at lower entrapment error.
-> It is never selected for low-resolution data, where forcing it on took TMT from 12,281 to
-> 3,613 PSMs at 1% and UPS1 from 15,838 to 10,312 while running slower, nor with
-> `--chimeric`, `--refine` or `--glyco`. There is no flag to set.
-
+**Candidate retrieval is automatic.** Out-of-core searches with high-res fragment matching use
+a fragment-ion index (phospho: 164 s against 5,954 s for enumeration; Comet 2025.01: 226 s).
+It is never used on low-res data, where forcing it took TMT from 12,281 to 3,613 PSMs at 1% and
+UPS1 from 15,838 to 10,312, nor with `--chimeric`, `--refine` or `--glyco`. The engine prints
+its choice; there is no flag ([measurements](docs/benchmarks/README.md#choosing-the-retrieval-strategy)).
 
 ### Runtime
 
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
-| `--threads` | usize | logical CPU count | Rayon worker threads for the search loop. Pool is initialised once per process. | Java `-thread N` |
-| `--ms-level` | u8 | `2` | MS level to search. Defaults to MS2 (identification); MS1 and MS3+ scans (e.g. TMT SPS-MS3 reporter-quant) are filtered at load so they never enter the search loop. Applies to mzML. Native `.raw`/`.d` always search MS2 regardless of this flag (a warning is printed if overridden), as does the chimeric cascade. MGF has no MS-level metadata and is always MS2. | *(no Java equivalent)* |
-| `--max-spectra` | usize | `0` | Bench mode: process only the first N MS2 spectra. `0` = full input. When > 0, TSV output is skipped (PIN is still written). | *(no Java equivalent)* |
-| `--rss-probe` | flag | *(off)* | Log resident set size at each phase boundary (Linux). Diagnostic only. | *(no Java equivalent)* |
+| `--threads` | usize | logical CPU count | Worker threads. | Java `-thread N` |
+| `--ms-level` | u8 | `2` | MS level to search in mzML. `.raw`/`.d`, MGF and `--chimeric` always search MS2. | — |
+| `--max-spectra` | usize | `0` | Bench mode: first N MS2 spectra only (`0` = all); skips TSV output. | — |
+| `--rss-probe` | flag | *(off)* | Log resident memory per phase (Linux). | — |
 
 ### Output
 
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
-| `--output-tsv` | path | *(off)* | Optional tab-separated PSM report (§3b). Skipped in bench mode (`--max-spectra > 0`). | Java `-outputFormat 1` with output path |
-| `--output-parquet` | dir | *(off)* | Optional OpenMS-compatible QPX `.idparquet/` bundle (`psms`/`proteins`/`search_params`); see §3e. | *(no Java equivalent)* |
+| `--output-tsv` | path | *(off)* | Tab-separated PSM report (§3b). | Java `-outputFormat 1` with output path |
+| `--output-parquet` | dir | *(off)* | QPX `.idparquet/` bundle (§3e). | — |
 
-**No environment variable changes a search result**; everything that does is a flag. Two read-only trace switches (`ANDES_TRACE_IONS`, `ANDES_TRACE_PEP`) enable diagnostic logging and nothing else. They and the test-harness variables are listed in [`docs/ENV_VARS.md`](docs/ENV_VARS.md).
+No environment variable changes a search result; the trace switches (`ANDES_TRACE_IONS`,
+`ANDES_TRACE_PEP`) and test variables are listed in [`docs/ENV_VARS.md`](docs/ENV_VARS.md).
 
 ---
 
 ## 1a. Workflow parameters (grouped by experimental design)
 
-The flags above apply to every run. The groups below are **opt-in experiment modes** — each is enabled by a single parent flag, with the rest of its knobs used only when that mode is on. Unless noted, the sub-knobs are advanced (hidden in `--help`) and the defaults are validated; reach for them only when tuning that specific experiment.
+Opt-in modes, each switched on by one parent flag.
 
 ### Decoys & FDR strategy
 
-How the target/decoy competition for FDR is set up. For an externally-built target+decoy database (e.g. from a quantms/OpenMS pipeline), use `--decoy-strategy none` and point andes at the existing decoys with `--decoy-prefix`/`--decoy-suffix` so it does not add a second decoy set.
+For a pre-built target+decoy FASTA, use `--decoy-strategy none` with `--decoy-prefix` or
+`--decoy-suffix`.
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--decoy-strategy` | enum | `reverse` | Decoy generation: `reverse`, `shuffle`, `sequon-reverse`, or `none` (input FASTA already contains decoys). **Use `sequon-reverse` with `--glyco`** — plain reversal maps N-X-S/T to S/T-X-N, so reversed decoys reach the glyco sequon gate at a lower rate than targets and the resulting q-values are anti-conservative. `sequon-reverse` restores each target's sequon at its mirrored position. |
-| `--decoy-prefix` | string | `XXX_` | Accession prefix that marks a decoy protein (generated, or recognised in an external DB). |
-| `--decoy-suffix` | string | *(off)* | Accession *suffix* that marks a decoy (the OpenMS/quantms `_rev` convention), as an alternative to a prefix. |
-| `--decoy-seed` | u64 | fixed | *(advanced)* RNG seed for `shuffle` decoys; fixed so runs are reproducible. |
+| `--decoy-strategy` | enum | `reverse` | `reverse`, `shuffle`, `sequon-reverse`, or `none`. **Use `sequon-reverse` with `--glyco`**: plain reversal turns N-X-S/T into S/T-X-N and makes glyco q-values anti-conservative. |
+| `--decoy-prefix` | string | `XXX_` | Accession prefix marking a decoy. |
+| `--decoy-suffix` | string | *(off)* | Decoy accession suffix (OpenMS `_rev` convention). |
+| `--decoy-seed` | u64 | fixed | *(advanced)* RNG seed for `shuffle` decoys. |
 
 ### Chimeric cascade
 
-Opt-in two-pass search for co-isolated (co-fragmented) peptides. Requires an MS1 stream, so it runs on **mzML or Thermo `.raw`** only; on MGF/`.d` it warns and falls back to a normal search.
+Needs MS1: **mzML or Thermo `.raw`** only (MGF/`.d` warn and run a normal search).
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--chimeric` | flag | *(off)* | Enable the two-pass chimeric cascade: Pass 1 is the normal top-1 search; Pass 2 detects co-isolated precursors in each scan's MS1 isolation window (averagine envelope match) and searches the *residual* spectrum (primary's matched peaks removed) for a second peptide, emitted as an extra PSM. Forces top-1 per pass and always MS2. Entrapment-FDP validated. Experimental. |
-| `--chimeric-max-coisolated` | u32 | `4` | *(advanced)* Max co-isolated precursors considered per scan. |
+| `--chimeric` | flag | *(off)* | Pass 2 finds co-isolated precursors in the MS1 isolation window (averagine match) and searches the residual spectrum for a second peptide. Forces top-1 per pass and MS2. Experimental. |
+| `--chimeric-max-coisolated` | u32 | `4` | *(advanced)* Max co-isolated precursors per scan. |
 | `--chimeric-max-kl` | f64 | `0.3` | *(advanced)* Max isotope-envelope KL divergence to accept a co-isolated precursor. |
-| `--chimeric-allow-overlap` | flag | *(off)* | *(advanced)* Let a pass-2 candidate overlap the primary's matched peaks. Off because the residual spectrum has those peaks removed; allowing overlap lets one piece of evidence support two PSMs. |
+| `--chimeric-allow-overlap` | flag | *(off)* | *(advanced)* Let a pass-2 candidate reuse the primary's matched peaks. |
 
 ### Refine — secondary chemistry cascade
 
-Opt-in second pass over confident proteins that searches a **fixed secondary modification
-tier** on the spectra pass 1 did not identify.
-
-It does **not** discover modifications. The tier is five named chemistries — oxidation on
-M/P/K, deamidation on N/Q, the two pyro-Glu N-terminal losses, and protein N-terminal
-acetyl — at most two per peptide, and the precursor tolerance is unchanged from pass 1.
-Every mass it can find was declared in advance, by this tier or by your own
-`--refine-config`. andes has no open or mass-offset search: a modification it was not told
-about cannot be found, and an unassigned mass cannot be localised.
+A second pass over confident proteins, on the spectra pass 1 missed, with a **fixed tier**:
+oxidation on M/P/K, deamidation on N/Q, the two pyro-Glu losses and protein N-terminal acetyl,
+at most two per peptide. It does **not** discover modifications; andes has no open search.
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--refine` | flag | *(off)* | Enable the PTM-refinement cascade (Pass-2 over confident proteins). |
-| `--refine-config` | path | *(tier default)* | *(advanced)* YAML tier config; the single extension point for the refine mod set and options. |
-| `--refine-select-psm-fdr` | fraction | `0.01` | *(advanced)* PSM-FDR threshold selecting the confident set that seeds Pass-2. Leave at default unless you have a measured reason. |
+| `--refine-config` | path | *(tier default)* | *(advanced)* YAML tier config: the mod set, max variable mods and the high-res-only gate. |
+| `--refine-select-psm-fdr` | fraction | `0.01` | *(advanced)* PSM-FDR of the confident set that seeds Pass-2. |
 
-(Max variable mods and the high-res-only gate for refinement are set inside the `--refine-config` YAML tier, not as separate flags.)
-
-**FDR for refined PSMs.** Pass-2 PSMs are written to the same PIN with `IsRefinement = 1`. A single Percolator threshold over the whole PIN lets that smaller group run at roughly twice the nominal FDR. On Astral, entrapment measured ~2% for Pass 2 at a merged 1%, while Pass 1 was at 0.9%. For a 1% FDR on the modified PSMs, threshold the `IsRefinement = 1` rows separately, for example by running Percolator on the two row groups of the PIN. Thresholded on its own, Pass 2 measured 0.8–1.1% entrapment FDP and added about 5% identified scans.
+**FDR for refined PSMs.** Pass-2 rows (`IsRefinement = 1`) share the PIN. Under one merged 1%
+threshold they measured **~2.8% FDP** on Astral; thresholded on their own, 0.8–1.1%. Threshold
+them separately when you need 1% on modified PSMs.
 
 ### Rescoring & FDR filtering
 
-andes writes a Percolator-ready `.pin` and, by design, **does not compute FDR itself** — feed the PIN to Percolator. These flags run rescoring in-process instead. In a pipeline that owns its own rescoring (e.g. quantms), leave them off. Rescoring runs **only** when you pass `--rescore` (or `--rescore-native`); `--fdr`/`--pep` are just the thresholds applied *by* such a run and are ignored (with a warning) if set on their own.
+andes **does not compute FDR itself**; these flags run a rescorer in-process. Leave them off
+when a pipeline (e.g. quantms) owns rescoring. `--fdr`/`--pep` alone are ignored with a warning.
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--rescore` | flag | *(off)* | Run Percolator in-process and write rescored, FDR-controlled output. |
-| `--rescore-native` | flag | *(off)* | *(advanced)* Use the built-in GBDT rescorer instead of Percolator — non-production fallback; Percolator is the production path. |
-| `--fdr` | fraction | `0.01` | q-value threshold applied by a rescoring run (requires `--rescore`/`--rescore-native`). |
-| `--pep` | fraction | *(off)* | *(advanced)* Posterior-error-probability threshold applied by a rescoring run. |
-| `--percolator-bin` / `--percolator-docker` / `--percolator-image` / `--percolator-args` | — | auto | *(advanced)* Percolator backend selection/passthrough; auto-resolution (`$PATH` then Docker) covers the common path. |
+| `--rescore` | flag | *(off)* | Run Percolator and write rescored, filtered output. |
+| `--rescore-native` | flag | *(off)* | *(advanced)* Built-in GBDT rescorer (3-fold CV folded by spectrum); non-production fallback. |
+| `--fdr` | fraction | `0.01` | q-value threshold applied by a rescoring run. |
+| `--pep` | fraction | *(off)* | *(advanced)* PEP threshold, ANDed with `--fdr`. |
+| `--percolator-bin` / `--percolator-docker` / `--percolator-image` / `--percolator-args` | — | auto | *(advanced)* Backend: `--percolator-bin`, else `$PATH`, else Docker; `--percolator-args` passes flags through. |
 | `--keep-pin` | bool | `true` | *(advanced)* Keep the intermediate PIN after rescoring. |
 
 ### Glycopeptide search
 
-Intact N-glycopeptide search (`--glyco`). All tuning knobs are advanced (hidden). **See [§9](#9-glycopeptide-search-experimental--advanced-knobs)** for the full flag group.
+See [§9](#9-glycopeptide-search-experimental--advanced-knobs).
 
 ### Isobaric labeling (TMT / iTRAQ)
 
-Reporter-ion labeling is auto-detected; the mods are declared in the `--mods` file. **See [§7](#7-isobaric-labeling)** for worked TMT/iTRAQ examples.
+See [§7](#7-isobaric-labeling).
 
 ---
 
 ## 1b. Configuration file (`--config`)
 
-Instead of a long command line, pass a single YAML file with `andes --config run.yaml`. It can set **any** parameter, grouped into the same experiment sections as §1a (`io`, `search`, `scoring`, `decoys`, `chimeric`, `refine`, `rescoring`, `glyco`). See [`config.example.yaml`](config.example.yaml) in the repo root for a fully-commented template.
-
-**Rules:**
-
-- Every key is **optional** — omitted keys keep their built-in default.
-- **Precedence: an explicit CLI flag always overrides the config value, which overrides the default** (`CLI flag > --config > built-in default`). So the file sets a baseline and you tweak individual runs on the command line, e.g. `andes --config run.yaml --precursor-tol 30ppm`.
-- **Unknown keys are a hard error** (with a "did you mean" list), so a typo never silently no-ops.
-- Values that are non-scalar on the CLI are written as the **same strings** the CLI accepts: `precursor_tol: 20ppm`, `charge: "2..5"`, `isotope_error: "-1..2"`, `score: auto`, `enzyme: gluc,trypsin`.
-- Required inputs may live in the file too (`io.spectrum`, `io.database`, `io.output_pin`), so `andes --config run.yaml` can be a complete, reproducible run description.
+`andes --config run.yaml` sets any parameter from YAML, in sections `io`, `search`, `scoring`,
+`decoys`, `chimeric`, `refine`, `rescoring`, `glyco` (template:
+[`config.example.yaml`](config.example.yaml)). Keys are optional; **`CLI flag > --config >
+built-in default`**; unknown keys are a hard error. Values use the CLI strings
+(`precursor_tol: 20ppm`, `charge: "2..5"`, `isotope_error: "-1..2"`, `enzyme: gluc,trypsin`).
 
 ```yaml
 # run.yaml (minimal)
@@ -235,17 +202,11 @@ glyco:
   enabled: true
 ```
 
-Advanced/hidden flags (glyco tuning, chimeric/percolator sub-knobs, etc.) use the same section keys — see `config.example.yaml` for the full list.
-
 ---
 
 ## 2. Mods.txt format
 
-andes reads the same modification file format as Java MS-GF+. The parser lives in `crates/model/src/modification.rs` and `crates/model/src/aa_set.rs`.
-
-### Grammar
-
-Each non-comment line is five comma-separated fields:
+The Java MS-GF+ format (`crates/model/src/modification.rs`). Each line has five fields:
 
 ```text
 <mass>,<aa>,<fix|opt>,<location>,<name>
@@ -253,17 +214,14 @@ Each non-comment line is five comma-separated fields:
 
 | Field | Rule |
 |---|---|
-| `<mass>` | Numeric monoisotopic mass delta in Da. Composition strings (`C2H3N1O1`) are **not** supported in andes. |
-| `<aa>` | Single uppercase ASCII letter, or `*` (wildcard). Multi-residue strings like `STY` are **not** supported — declare one line per residue. |
-| `<fix\|opt>` | `fix` = fixed (static) modification; `opt` = variable modification. Case-insensitive. |
-| `<location>` | One of `any`, `N-term`, `C-term`, `Prot-N-term`, `Prot-C-term` (case-insensitive; hyphens optional). |
-| `<name>` | Human-readable modification name (used in logs; not written to mzIdentML — that format is not supported). |
+| `<mass>` | Monoisotopic mass delta in Da. Composition strings (`C2H3N1O1`) are **not** supported. |
+| `<aa>` | One uppercase letter or `*`. `STY` is **not** supported; use one line per residue. |
+| `<fix\|opt>` | `fix` = fixed, `opt` = variable. Case-insensitive. |
+| `<location>` | `any`, `N-term`, `C-term`, `Prot-N-term`, `Prot-C-term` (case-insensitive; hyphens optional). |
+| `<name>` | Name used in logs. |
 
-**Special directive:** a line `NumMods=N` sets the maximum number of variable modifications per peptide. Parsed separately and applied to `SearchParams.max_variable_mods_per_peptide`. Default when absent: `3`.
-
-**Comments:** lines whose first non-whitespace character is `#` are ignored. Inline `# ...` comments are stripped from the end of a line. Blank lines are ignored.
-
-**Conflicts:** a fixed and variable mod targeting the same `(residue, location)` slot is rejected at build time.
+`NumMods=N` sets the maximum variable mods per peptide (default `3`). `#` starts a comment. A
+fixed and a variable mod on the same `(residue, location)` is rejected.
 
 ### Example (a) — Carbamidomethyl C + Oxidation M
 
@@ -273,7 +231,7 @@ NumMods=3
 15.99491,M,opt,any,Oxidation
 ```
 
-When `--mods` is omitted, andes uses these two modifications as built-in defaults.
+These two are the built-in defaults when `--mods` is omitted.
 
 ### Example (b) — TMT 10-plex on K and peptide N-term
 
@@ -284,7 +242,7 @@ NumMods=2
 229.162932,*,fix,N-term,TMT10plex
 ```
 
-`--protocol TMT` selects the `hcd_qexactive_tryp_tmt` model; without it the default model is used and TMT reporter ions are only auto-detected for the peak filter (§4, §7).
+Add `--protocol TMT` to select `hcd_qexactive_tryp_tmt` (§7).
 
 ### Example (c) — Phosphorylation on S, T, Y
 
@@ -296,44 +254,40 @@ NumMods=3
 79.966331,Y,opt,any,Phospho
 ```
 
-Pair with `--protocol phospho` to prefer a phosphorylation-specific model (e.g. `hcd_qexactive_tryp_phosphorylation`) from the store when one is available.
+Add `--protocol phospho` to prefer a phospho model (e.g. `hcd_qexactive_tryp_phosphorylation`).
 
 ---
 
 ## 3. Output formats
 
-andes writes Percolator `.pin` (always) and optionally `.tsv`. Implementation: `crates/output/src/pin.rs`, `crates/output/src/tsv.rs`.
+Percolator `.pin` (always), plus optional `.tsv` and QPX parquet. Implementation:
+`crates/output/src/pin.rs`, `crates/output/src/tsv.rs`.
 
 ### 3a. PIN columns
 
-Tab-separated, one header row, one row per PSM. Rows are sorted best-first within each spectrum by `RankScore` (the GF-free rank-LLR score) — the generating function and all of its derived score columns have been removed. The `chargeN` one-hots track the `--charge` range: one column per charge state, so narrowing/widening the range removes/adds one `chargeN` column each (e.g. a 2–3 range yields just `charge2 charge3`). With the default 2–5 range the full column set is the 66 columns listed below in emission order.
-
-There are **two score columns**, easy to confuse:
-
-* **`RankScore`** (col 7) — the rank-LLR score; the **ranking** signal that orders candidates within a spectrum (this was historically called `RawScore`).
-* **`RawScore`** (col 62) — the fused strong-score `signal − null`; the **headline discriminative** feature Percolator weights most (historically `StrongScore`). With `--score strong` it also becomes the ranking signal.
-
-Most of the columns after `matchedIonRatio` are **additive** features: extra evidence Percolator can learn weights for without perturbing the core score distribution. Several are **0.0 unless a flag/model is active** — see the note after the table.
-
-`--chimeric` does **not** change the column set. It does **not** populate `PrecursorIsotopeKL` / `PrecursorSNR` either — those are always `0.0` today (see the table) — and — because a scan can then emit several rows — appends a per-row index to multi-row `SpecId`s (see below). Multi-row scans also occur without `--chimeric` whenever rank-1 candidates tie.
+Tab-separated, one row per PSM, best-first within each spectrum by `RankScore`. The `chargeN`
+one-hots follow `--charge`; the default 2–5 gives the 66 columns below. Do not confuse
+**`RankScore`** (col 7, orders candidates; historically `RawScore`) with **`RawScore`** (col 62,
+the fused strong score Percolator weights most; historically `StrongScore`; it also ranks under
+`--score strong`).
 
 | # | Column | Type | Range | Description |
 |---|---|---|---|---|
-| 1 | `SpecId` | string | — | `{specID}_{scan}_{rank}` PSM id; multi-row scans get a `_{rowIdx}` suffix to stay unique. |
-| 2 | `Label` | int | {−1, +1} | `+1` target, `−1` decoy (by **source protein**, TDC convention). |
+| 1 | `SpecId` | string | — | `{specID}_{scan}_{rank}`; multi-row scans add `_{rowIdx}`. |
+| 2 | `Label` | int | {−1, +1} | `+1` target, `−1` decoy (by source protein). |
 | 3 | `ScanNr` | int | ≥0 | MS2 scan number. |
-| 4 | `ExpMass` | float | >0 | Experimental neutral precursor mass (Da): `mz×z − z×proton`. |
-| 5 | `CalcMass` | float | >0 | Theoretical neutral peptide mass (Da, incl. H₂O). |
-| 6 | `mass` | float | >0 | Duplicate of `ExpMass` (PercolatorAdapter convention). |
-| 7 | `RankScore` | int | unbounded | **Rank-LLR ranking score** (orders candidates within a spectrum). |
+| 4 | `ExpMass` | float | >0 | Experimental neutral precursor mass (Da). |
+| 5 | `CalcMass` | float | >0 | Theoretical neutral peptide mass (Da). |
+| 6 | `mass` | float | >0 | Duplicate of `ExpMass`. |
+| 7 | `RankScore` | int | unbounded | **Rank-LLR ranking score**. |
 | 8 | `isotope_error` | int | [−1, 2] | Winning ¹³C isotope offset. |
-| 9 | `peplen` | int | ≥6 | Residue count **+ 2** (includes flanking pre/post). |
+| 9 | `peplen` | int | ≥6 | Residue count **+ 2** (flanks). |
 | 10 | `dm` | float | signed | Precursor mass error (Da) after isotope correction. |
 | 11 | `absdm` | float | ≥0 | `\|dm\|`. |
-| 12–15 | `charge2`…`charge5` | 0/1 | one-hot | One-hot precursor charge; one column per state in `--charge`. |
-| 16 | `enzN` | 0/1 | one-hot | N-terminal boundary consistent with the enzyme rule. |
-| 17 | `enzC` | 0/1 | one-hot | C-terminal boundary consistent with the enzyme rule. |
-| 18 | `enzInt` | int | ≥0 | Count of internal positions matching the enzyme rule. |
+| 12–15 | `charge2`…`charge5` | 0/1 | one-hot | One-hot precursor charge. |
+| 16 | `enzN` | 0/1 | one-hot | N-terminus fits the enzyme rule. |
+| 17 | `enzC` | 0/1 | one-hot | C-terminus fits the enzyme rule. |
+| 18 | `enzInt` | int | ≥0 | Internal cleavage sites. |
 | 19 | `NumMatchedMainIons` | int | [0, peplen−1] | Matched charge-1 b/y fragment positions. |
 | 20 | `longest_b` | int | [0, peplen−1] | Longest contiguous matched b-ion run. |
 | 21 | `longest_y` | int | [0, peplen−1] | Longest contiguous matched y-ion run. |
@@ -342,89 +296,80 @@ Most of the columns after `matchedIonRatio` are **additive** features: extra evi
 | 24 | `NTermIonCurrentRatio` | float | [0, 1] | Matched b-ion intensity / total MS2 ion current. |
 | 25 | `CTermIonCurrentRatio` | float | [0, 1] | Matched y-ion intensity / total MS2 ion current. |
 | 26 | `MS2IonCurrent` | float | ≥0 | Sum of all MS2 peak intensities (not log-scaled). |
-| 27 | `IsolationWindowEfficiency` | float | 0.0 | Always `0.0` (not available from parsed spectra). |
-| 28 | `MeanErrorTop7` | float | ≥0 | Mean absolute ppm error of the top-7 most-intense matched ions. |
+| 27 | `IsolationWindowEfficiency` | float | 0.0 | Always `0.0`. |
+| 28 | `MeanErrorTop7` | float | ≥0 | Mean absolute ppm error, top-7 matched ions. |
 | 29 | `StdevErrorTop7` | float | ≥0 | Population stdev of absolute ppm errors (top-7). |
 | 30 | `MeanRelErrorTop7` | float | signed | Mean signed ppm error (top-7). |
 | 31 | `StdevRelErrorTop7` | float | ≥0 | Population stdev of signed ppm errors (top-7). |
 | 32 | `matchedIonRatio` | float | [0, 1] | `NumMatchedMainIons / peplen`. |
 | 33 | `EdgeScore` | int | unbounded | Per-bond edge-score sum (ion-existence + error); additive. |
-| 34 | `PrecursorIsotopeKL` | float | ≥0 | KL divergence of precursor isotope envelope vs averagine. **Currently always 0.0**, including under `--chimeric`: it belonged to the old single-pass chimeric mode and the two-pass cascade does not compute it. Kept in the schema because consumers index columns positionally. |
+| 34 | `PrecursorIsotopeKL` | float | ≥0 | Precursor envelope KL vs averagine. **Always 0.0** (kept for positional consumers). |
 | 35 | `PrecursorSNR` | float | ≥0 | Precursor SNR from the MS1 envelope. **0.0 unless `--chimeric`.** |
 | 36 | `DeltaRankScore` | float | ≥0 | `RankScore(best) − RankScore(2nd-best distinct peptide)`; rank-1 row only, else 0.0. |
 | 37 | `TailorScore` | float | ≥0 | `RankScore ÷` spectrum's top-1% quantile; cross-spectrum comparability. |
-| 38 | `PpmGaussianScore` | float | ≥0 | `Σ exp(−½(ppm/7)²)` over matched ions — mass-accuracy evidence the rank score discards. |
+| 38 | `PpmGaussianScore` | float | ≥0 | `Σ exp(−½(ppm/7)²)` over matched ions. |
 | 39 | `NeutralLossIonCount` | int | ≥0 | Matched b/y ions with −H₂O/−NH₃ partner peaks. |
 | 40 | `LongestComplementaryLadder` | int | [0, peplen−1] | Longest run of bonds where both bᵢ and y₍ₙ₋ᵢ₎ matched. |
 | 41 | `ComplementaryIonBalance` | float | ≥0 | `Σ 1/(1+\|rankᵦ−rankᵧ\|)` over complementary bonds. |
-| 42 | `MeanMatchedIntensityRank` | float | ≥1 | Mean intensity-rank of matched ions (1 = most intense; lower is better). |
+| 42 | `MeanMatchedIntensityRank` | float | ≥1 | Mean intensity rank of matched ions (1 = most intense). |
 | 43 | `DoublyChargedMatchedIonCount` | int | ≥0 | Matched charge-2 b/y ions. |
 | 44 | `UniqueMatchFraction` | float | [0, 1] | Within-peptide peak-explanation uniqueness. |
-| 45 | `ChanceMatchSurprise` | float | ≥0 | `Σ max(0, −ln(ρ·Δ))` — how improbable the matches are by chance (null moat). |
-| 46 | `IntensitySignal` | float | [0, 1] | Cosine sim. of predicted vs observed intensities. **0.0 without an intensity model.** |
+| 45 | `ChanceMatchSurprise` | float | ≥0 | `Σ max(0, −ln(ρ·Δ))`: improbability of chance matches. |
+| 46 | `IntensitySignal` | float | [0, 1] | Predicted vs observed intensity cosine. **0.0 without an intensity model.** |
 | 47 | `FragPredExplained` | float | [0, 1] | `Σ(matched·pred)/Σpred`. **0.0 without a frag-intensity model.** |
 | 48 | `FragPredChanceLLR` | float | ≥0 | `Σ matched·pred·max(0,−ln p_chance)`. **0.0 without a frag-intensity model.** |
 | 49 | `FragTopKObserved` | float | [0, 1] | Top-K predicted-most-intense ions observed. **0.0 without a frag-intensity model.** |
 | 50 | `RichIonLLR` | float | unbounded | Decoy-aware per-annotated-ion LLR sum. **0.0 without a rich-ion model.** |
-| 51 | `IsRefinement` | 0/1 | one-hot | 1 if the PSM came from the Pass-2 refinement search. **0 without `--refine`.** |
-| 52 | `NumMods` | int | ≥0 | Variable-modification count on the matched peptide. |
+| 51 | `IsRefinement` | 0/1 | one-hot | 1 for a Pass-2 refinement PSM. **0 without `--refine`.** |
+| 52 | `NumMods` | int | ≥0 | Variable modifications on the peptide. |
 | 53 | `RefinementModClass` | int | [0, 99] | Mod-class id for subgroup-FDR grouping. **0 without `--refine`.** |
-| 54 | `ModSiteShiftedMatched` | int | ≥0 | Matched mod-bearing (mass-shifted) b/y ions. **0 for unmodified peptides.** |
+| 54 | `ModSiteShiftedMatched` | int | ≥0 | Matched mass-shifted b/y ions. **0 for unmodified peptides.** |
 | 55 | `ModSiteShiftedFrac` | float | [0, 1] | Matched shifted ÷ total shifted ions. |
 | 56 | `ModSiteIntensFrac` | float | [0, 1] | Shifted-ion intensity ÷ all matched-ion intensity. |
 | 57 | `ModSiteLocalized` | 0/1 | one-hot | 1 if a bracketing ion pair localizes the mod. |
-| 58 | `ModSiteDetCount` | int | ≥0 | Count of site-determining (bracketing) ions over all mod sites. |
-| 59 | `MassCompetitionEvidence` | float | ≥0 | `Σ 1/(1+ambiguity+ρ)` — alternative-mass competition null term. |
-| 60 | `CandidateRankEntropy` | float | ≥0 | Softmax entropy over the retained top-K candidate scores (spectrum-level). |
+| 58 | `ModSiteDetCount` | int | ≥0 | Site-determining (bracketing) ions over all sites. |
+| 59 | `MassCompetitionEvidence` | float | ≥0 | `Σ 1/(1+ambiguity+ρ)`, alternative-mass competition. |
+| 60 | `CandidateRankEntropy` | float | ≥0 | Softmax entropy of the retained top-K scores. |
 | 61 | `ListwiseScoreGap` | float | signed | Top-1 − top-2 `RankScore` in the retained queue. |
-| 62 | `RawScore` | float | unbounded | **Headline fused strong-score** `signal − null` — the primary discriminative feature. |
-| 63 | `RawScoreCal` | float | signed | Per-spectrum z-scored `RawScore` (significance calibration). |
-| 64 | `RankScoreFloat` | float | unbounded | Unrounded `RankScore` (continuous split-sum) — finer-grained ranking feature than the integer `RankScore`. |
+| 62 | `RawScore` | float | unbounded | **Fused strong score** `signal − null`; the primary feature. |
+| 63 | `RawScoreCal` | float | signed | Per-spectrum z-scored `RawScore`. |
+| 64 | `RankScoreFloat` | float | unbounded | Unrounded `RankScore` (continuous split-sum). |
 | 65 | `Peptide` | string | — | `pre.SEQUENCE.post` with `+mass` mod annotations. |
-| 66 | `Proteins` | string | — | Protein accession(s), tab-separated for shared peptides; decoys carry `--decoy-prefix`. |
+| 66 | `Proteins` | string | — | Protein accession(s), tab-separated; decoys carry `--decoy-prefix`. |
 
-**Conditional columns** (always present in the header, but `0.0`/`0` unless their condition holds):
-
-* `PrecursorIsotopeKL`, `PrecursorSNR` — need `--chimeric` + a linked MS1.
-* `IntensitySignal`, `FragPredExplained`, `FragPredChanceLLR`, `FragTopKObserved` — need a trained intensity / frag-intensity model.
-* `RichIonLLR` — needs a trained rich-ion model.
-* `IsRefinement`, `NumMods`, `RefinementModClass`, `ModSite*` — populated by `--refine` (and the `ModSite*` block only on modified peptides).
-* `DeltaRankScore` — emitted on the rank-1 row only.
+Columns marked **0.0 unless/without** stay in the header and are zero when their condition
+does not hold.
 
 ### 3b. TSV columns
 
-Tab-separated human-readable report. The `Title` column appears **only for MGF** inputs.
-
-**MGF header** (`is_mgf = true`):
+**MGF header** (decoys included):
 
 | Column | Type | Description |
 |---|---|---|
-| `#SpecFile` | string | Bare filename of the input spectrum file. |
-| `SpecID` | string | Spectrum identifier (MGF title, or `scan=N`). |
+| `#SpecFile` | string | Input file name. |
+| `SpecID` | string | MGF title or `scan=N`. |
 | `ScanNum` | int | Scan number. |
 | `Title` | string | MGF `TITLE=` field. |
-| `FragMethod` | string | Activation method name (`HCD`, `CID`, …) or `UNKNOWN`. |
+| `FragMethod` | string | Activation (`HCD`, `CID`, …) or `UNKNOWN`. |
 | `Precursor` | float | Precursor m/z (4 decimal places). |
-| `IsotopeError` | int | Winning isotope offset (same value as PIN `isotope_error`). |
-| `PrecursorError(ppm)` | float | Mass error in ppm when tolerance is ppm mode; column named `PrecursorError(Da)` in Da mode. |
+| `IsotopeError` | int | Same as PIN `isotope_error`. |
+| `PrecursorError(ppm)` | float | Mass error; `PrecursorError(Da)` in Da mode. |
 | `Charge` | int | Assigned precursor charge. |
-| `Peptide` | string | Annotated peptide sequence with modifications. |
-| `Protein` | string | Single protein accession (primary candidate). |
-| `RawScore` | int | Rounded raw score — the sole score column (the generating function and its derived score columns have been removed). |
+| `Peptide` | string | Peptide with modifications. |
+| `Protein` | string | Primary protein accession. |
+| `RawScore` | int | Rounded raw score (the only score column). |
 
-**mzML header** — same as above **without** the `Title` column (11 columns total).
-
-Decoy PSMs are included in TSV output; downstream tools label them via Percolator or manual filtering.
+**mzML header**: the same without `Title` (11 columns).
 
 ### 3c. PIN vs TSV — which to use
 
-Use **PIN** when the goal is FDR calibration or rescoring: Percolator, MS²Rescore, Mokapot, and quantms-style pipelines consume `.pin` directly and learn feature weights from the full Percolator feature set (including `EdgeScore`). Use **TSV** for spreadsheet inspection, custom reporting, or tools that expect a flat PSM table. You can emit both in one run with `--output-pin` and `--output-tsv`. For production quantms workflows, PIN is the standard path; TSV is optional diagnostics.
+**PIN** for FDR and rescoring (Percolator, MS²Rescore, Mokapot, quantms); **TSV** for inspection.
 
 ### 3d. Run summary (`statistics.log`)
 
-andes auto-resolves the scoring model and the precursor/fragment tolerances from the input metadata, so the parameters a search **ends** with are not necessarily the CLI inputs: precursor calibration tightens the window, and a high-res model carries (e.g.) a 20 ppm fragment tolerance even when the input named none. To make a run's true parameters recoverable, andes prints a summary to stderr at the end of every search **and** writes a `statistics.log` next to the PIN (in the PIN's parent directory). Implementation: `crates/output/src/stats.rs`.
-
-The summary records the **final** precursor tolerance (+ calibration mode), the **final** fragment tolerance (the resolved model's `mme`), the number of spectra with a match, the pre-FDR rank-1 target/decoy PSM split, and a **per-modification PSM tally** — for each modification (fixed like Carbamidomethyl and variable like Oxidation/Acetyl), how many rank-1 target PSMs carry it, plus an `(unmodified)` count.
+Calibration and model choice can change the tolerances mid-run, so every search ends by
+printing the **final** tolerances, the pre-FDR rank-1 target/decoy split and a
+per-modification tally to stderr and to `statistics.log` next to the PIN.
 
 ```text
 ──────── andes run summary ────────
@@ -440,15 +385,14 @@ The summary records the **final** precursor tolerance (+ calibration mode), the 
   ───────────────────────────────────
 ```
 
-Counts are **pre-FDR**, taken over each spectrum's best (rank-1) candidate; final FDR control happens downstream in Percolator. The tally is most useful with `--refine`, where it shows exactly which discovered PTMs were identified and at what volume. (`statistics.log` matches the gitignore `*.log*` pattern — it is a per-run output artifact, not a tracked file.)
-
 ### 3e. QPX `.idparquet` bundle (`--output-parquet`)
 
-`--output-parquet <DIR>` writes an **OpenMS-compatible QPX 1.0** Parquet bundle — a directory (conventionally ending in `.idparquet`) containing `psms.parquet`, `proteins.parquet`, and `search_params.parquet`. The schema (column names, Arrow types, nested `list<element: …>` structures, and the per-file metadata keys `qpx_version`/`file_type`/`uuid`/`creation_date`/`software_provider`/`creator`) matches what OpenMS's `QPXFile` writer emits byte-for-byte, so the files are interchangeable with OpenMS / [quantms](https://github.com/bigbio/quantms) tooling. Implementation: `crates/output/src/qpx.rs`. Reuses the workspace's existing `arrow`/`parquet` stack — no new heavy dependency.
-
-`psms.parquet` carries one row per PSM with `sequence`, `peptidoform`, `modifications` (name + Unimod accession + positions), `precursor_charge`, `calculated_mz`/`observed_mz`, `is_decoy`, `scan`/`rt`, `protein_accessions` (with flanks + offsets), the spectrum `mz_array`/`intensity_array`, the headline `score` (`andes:RawScore`), and an `additional_scores` list carrying the other andes features (`RankScore`, `TailorScore`, `DeltaRankScore`, `EdgeScore`, `RichIonLLR`, …). `search_params.parquet` records the resolved engine/tolerances/enzyme/modifications.
-
-Fields andes does **not** compute pre-rescoring are written null: `posterior_error_probability` and the q-value are Percolator's job (downstream), and `predicted_rt`/`ion_mobility`/per-peak `charge_array`/`ion_type_array` are not produced. `proteins.parquet` lists the distinct accessions seen in PSMs (andes does no protein inference). Emit it alongside `--output-pin`/`--output-tsv`:
+`--output-parquet <DIR>` writes an **OpenMS-compatible QPX 1.0** bundle (`psms.parquet`,
+`proteins.parquet`, `search_params.parquet`) matching OpenMS's `QPXFile` schema, for OpenMS and
+[quantms](https://github.com/bigbio/quantms). `psms.parquet` carries the peptidoform,
+modifications, charge, m/z, `is_decoy`, scan/rt, proteins, the spectrum arrays, `score`
+(`andes:RawScore`) and the other features in `additional_scores`. PEP and q-value are null
+until rescoring; andes does no protein inference.
 
 ```bash
 andes --spectrum spectra.mzML --database db.fasta \
@@ -459,24 +403,12 @@ andes --spectrum spectra.mzML --database db.fasta \
 
 ## 4. Auto-detection
 
-For **mzML** inputs when `--fragmentation auto` (the default), andes peeks the input file before loading the full dataset:
-
-1. **Activation method** — histogram of `<activation>` cvParams across the first 64 MS2 spectra; dominant method wins. Mixed methods trigger an stderr warning but the dominant method is still used file-wide.
-2. **Instrument class** — scans `<instrumentConfiguration>` / analyzer cvParams via `input::detect_instrument_type`; dominant analyzer among MS2 spectra wins. `None` → `low-res` (the low-resolution ion-trap default).
-
-Precedence: auto-detection runs whenever `--fragmentation` is `auto` (the default) on an mzML/`.raw`/`.d` input. The detected activation and instrument class then drive model selection; `--protocol` still applies on top.
-
-MGF files carry no activation or instrument metadata, so auto-detection returns nothing and andes assumes CID / low-res / 0.5 Da (`cid_lowres_tryp`) with a warning. `--fragmentation` sets the activation; `--fragment-tol-ppm` implies a high-resolution (QExactive-class) instrument and `--fragment-tol-da` a low-resolution one.
-
-A non-`auto` `--fragmentation` disables the activation peek and resolves the model from the flags alone (§1).
-
-### Native Thermo `.raw`
-
-A `.raw` file carries the activation method and analyzer in vendor metadata, so andes reads them directly (no mzML peek) and routes through the same parquet-store selection as mzML — e.g. beam-type CID (HCD) on an Orbitrap → `hcd_qexactive_tryp`. `--protocol` from the CLI still selects protocol-specific models (`tmt`, `itraq`); no fragmentation flag is required.
-
-### Native Bruker timsTOF `.d`
-
-timsTOF DDA-PASEF is beam-type CID on a TOF analyzer, so `.d` input auto-routes to the **`cid_tof_tryp`** model in the parquet store. `--protocol` still applies. Searched **MS2 only**; the ion-mobility dimension is carried as metadata but not used by scoring.
+With `--fragmentation auto`, andes takes the dominant `<activation>` cvParam over the first 64
+MS2 spectra of an mzML (mixed methods warn) and the dominant analyser (none → `low-res`).
+`.raw` carries both in vendor metadata (HCD on an Orbitrap → `hcd_qexactive_tryp`); `.d` routes
+to `cid_tof_tryp`. **MGF** has none: andes assumes CID / low-res / 0.5 Da (`cid_lowres_tryp`)
+and warns; `--fragment-tol-ppm` implies a high-res instrument, `--fragment-tol-da` a low-res
+one. `--protocol` applies on top.
 
 ### Activation CV mapping (mzML `<activation>` cvParam accession → method)
 
@@ -500,18 +432,16 @@ timsTOF DDA-PASEF is beam-type CID on a TOF analyzer, so `.d` input auto-routes 
 
 ### Bundled model store (`resources/models/`)
 
-The 17 bundled scoring models ship as a per-protocol partitioned Parquet store
-(`resources/models/protocol=<Automatic|TMT|Phosphorylation|iTRAQ>/models.parquet`; 9 / 3 / 4 / 1
-models). All are own-trained on public PRIDE data; the table in `README.md` →
-*Supported models* lists each with its regime and training accession.
-
-**When auto-detection fails** (missing activation block, unknown CV term, or running outside the source tree without bundled resources): andes falls back to the `hcd_qexactive_tryp` model for default-flag runs, or to the closest bundled regime for the flags given, and says which model it chose in the run summary.
+17 models in `resources/models/protocol=<Automatic|TMT|Phosphorylation|iTRAQ>/models.parquet`
+(9 / 3 / 4 / 1 models), listed in [`README.md`](README.md#supported-models). If detection
+fails, andes falls back to `hcd_qexactive_tryp` or the closest regime and names it in the run
+summary.
 
 ---
 
 ## 5. Building from source
 
-**Requirements:** Rust **1.85+** (workspace pins **1.87.0** in `rust-toolchain.toml` because transitive dependencies use `edition = "2024"`).
+Rust **1.85+** (`rust-toolchain.toml` pins **1.87.0**).
 
 ```bash
 git clone https://github.com/bigbio/andes
@@ -520,7 +450,7 @@ cargo build --release
 # Binary: target/release/andes   (mzML + MGF; pure Rust)
 ```
 
-**Native vendor formats** are feature-gated (the default build stays pure-Rust):
+**Native vendor formats** are feature-gated:
 
 ```bash
 # Thermo .raw — needs rustc >= 1.88 and, at run time, the .NET 8 runtime (point DOTNET_ROOT
@@ -535,27 +465,14 @@ cargo build --release -p andes --features timstof
 RUSTUP_TOOLCHAIN=stable cargo build --release -p andes --features "thermo timstof"
 ```
 
-See [`README.md`](README.md) (§Reading Thermo `.raw` / §Reading Bruker timsTOF `.d`) for the .NET 8 install, the bundled-runtime release archives, and container recipes.
-
-Run the full workspace test suite:
+Tests:
 
 ```bash
 cargo test --release --workspace
 ```
 
-**CI-skipped tests:** GitHub Actions (`.github/workflows/ci.yml`) skips seven tests that fail on a clean checkout or are tracked as follow-up work. The release binary is unaffected.
-
-| Skipped test | Reason |
-|---|---|
-| `charge_missing_spectrum_uses_per_charge_scored_spec` | `min_peaks` filter regression (pre-iter32 baseline) |
-| `spectrum_without_charge_tries_charge_range` | same category |
-| `known_peptide_appears_in_top_n` | same category |
-| `read_bsa_canno_text_format` | Maven fixture under `target/test-classes/` not generated in CI |
-| `read_tryp_pig_bov_revcat_csarr_cnlcp` | same |
-| `tryp_pig_bov_revcat_full_set_loads` | same |
-| `match_spectra_output_invariant_across_thread_counts` | Rayon tie-breaking nondeterminism when scores tie |
-
-Reproduce the CI test invocation:
+CI skips seven tests: three hit a `min_peaks` filter regression, three need Maven fixtures
+under `target/test-classes/`, and one hits Rayon tie-breaking nondeterminism:
 
 ```bash
 cargo test --release --workspace -- \
@@ -568,57 +485,25 @@ cargo test --release --workspace -- \
   --skip match_spectra_output_invariant_across_thread_counts
 ```
 
-Release archives bundle the binary, the `resources/models/` model store (17 scoring models), and `unimod.obo` under `resources/` — see [`README.md`](README.md) §Install.
-
 ---
 
 ## 6. Training new scoring models
 
-andes includes a native Rust training engine — **`andes train`** — that generates scoring models from your own data and writes them into the same Parquet model store the bundled models live in.
-
-Training is **bootstrap-supervised**: andes searches your spectra with a seed model, keeps the confident PSMs (target-decoy q ≤ `--train-fdr`), and re-estimates the per-partition rank and mass-error distributions from them. Trained models are auto-selected by instrument/protocol at search time, and the store supports incremental add / remove / reweight / decay updates with a held-out acceptance gate.
-
-```bash
-andes train \
-  --spectra mydata.mzML \
-  --database mydata.fasta \
-  --seed-model hcd_qexactive_tryp \
-  --out-store models.parquet \
-  --model-id astral_tryp \
-  --train-fdr 0.01
-```
-
-Then search with it:
-
-```bash
-andes --spectrum more.mzML --database mydata.fasta --output-pin out.pin \
-  --model-store models.parquet --model astral_tryp
-```
-
-See **[`TRAIN.md`](TRAIN.md)** for the full guide: where to get training data, the experiment-class catalog, incremental training (`--update --add` / `--remove-source` / `--reweight` / `--decay`), and how to evaluate a candidate model on held-out data before committing it.
-
-andes ships its own 17-model store in `resources/models/`; a store you train is used with `--model-store <path>` (plus `--model <id>` to pin one model).
+`andes train` searches your data with a seed model, keeps PSMs at q ≤ `--train-fdr`, and
+writes a model into a Parquet store; search with it via `--model-store <path> --model <id>`.
+Incremental updates (`--update --add` / `--remove-source` / `--reweight` / `--decay`) pass a
+held-out acceptance gate. See **[`TRAIN.md`](TRAIN.md)**.
 
 ---
 
 ## 7. Isobaric labeling
 
-TMT and iTRAQ searches require **both** protocol-aware scoring models **and** correct fixed modifications in `mods.txt`. Set `--protocol TMT` or `--protocol iTRAQ` (or legacy `--protocol 4` / `--protocol 2`) so the model selector prefers protocol-specific models such as `hcd_qexactive_tryp_tmt` or `hcd_qexactive_tryp_itraq` from the bundled store.
+Set `--protocol TMT` or `--protocol iTRAQ` (selects `hcd_qexactive_tryp_tmt` /
+`hcd_qexactive_tryp_itraq`) and declare the label as a fixed mod.
 
 ### TMT (10-plex example)
 
-**Mod masses:** TMT10plex = **229.162932 Da** on lysine and peptide N-terminus (Unimod). Carbamidomethyl on C is standard.
-
-**mods.txt:**
-
-```text
-NumMods=2
-57.02146,C,fix,any,Carbamidomethyl
-229.162932,K,fix,any,TMT10plex
-229.162932,*,fix,N-term,TMT10plex
-```
-
-**Command:**
+TMT10plex = **229.162932 Da** on K and peptide N-terminus (Unimod); mods.txt as in §2 example (b).
 
 ```bash
 andes \
@@ -631,9 +516,7 @@ andes \
 
 ### iTRAQ (8-plex example)
 
-**Mod masses:** iTRAQ8plex = **304.20536 Da** on K and peptide N-terminus.
-
-**mods.txt:**
+iTRAQ8plex = **304.20536 Da** on K and peptide N-terminus.
 
 ```text
 NumMods=2
@@ -641,8 +524,6 @@ NumMods=2
 304.20536,K,fix,any,iTRAQ8plex
 304.20536,*,fix,N-term,iTRAQ8plex
 ```
-
-**Command:**
 
 ```bash
 andes \
@@ -653,112 +534,77 @@ andes \
   --protocol iTRAQ
 ```
 
-For phospho-enriched isobaric data use `--protocol iTRAQ-phospho` (legacy `--protocol 3`) and include phospho variable mods in `mods.txt` (§2 example c).
+For phospho-enriched iTRAQ use `--protocol iTRAQ-phospho` plus phospho mods (§2 example c).
 
 ---
 
 ## 8. Legacy numeric values & behavior notes
 
-For backward compatibility, the routing flags accept legacy 0…N numeric values in
-addition to their canonical named values; clap parses named values
-case-insensitively (`--fragmentation hcd` ≡ `HCD`).
-
-| Flag | Numeric | Named |
-|---|---|---|
-| `--fragmentation` | `0` | `auto` |
-| `--fragmentation` | `1` | `CID` |
-| `--fragmentation` | `2` | `ETD` |
-| `--fragmentation` | `3` | `HCD` |
-| `--fragmentation` | `4` | `UVPD` |
-| `--protocol` | `0` | `auto` |
-| `--protocol` | `1` | `phospho` |
-| `--protocol` | `2` | `iTRAQ` |
-| `--protocol` | `3` | `iTRAQ-phospho` |
-| `--protocol` | `4` | `TMT` |
-| `--protocol` | `5` | `standard` |
-| `--enzyme-specificity` (alias `--ntt`) | `0` | `non-specific` |
-| `--enzyme-specificity` (alias `--ntt`) | `1` | `semi` |
-| `--enzyme-specificity` (alias `--ntt`) | `2` | `fully` |
+Legacy MS-GF+ numeric values (e.g. `--fragmentation 3`, `--protocol 4`, `--ntt 2`) are **no
+longer accepted**; use the names (case-insensitive, `--fragmentation hcd` ≡ `HCD`). `--ntt`
+remains an alias of `--enzyme-specificity`.
 
 ### Behavior notes
 
-- **Spectrum inputs:** mzML, MGF, native Thermo `.raw` (`thermo` feature), and native
-  Bruker timsTOF `.d` (`timstof` feature) — see §1 *Input formats*.
-- **Identification output:** Percolator PIN (always), an optional TSV, and an optional
-  OpenMS-compatible QPX `.idparquet` bundle; no mzIdentML.
-- **Decoys:** generated at search time by `--decoy-strategy` (`reverse` by default,
-  `shuffle`, `sequon-reverse` for glyco, or `none` for a pre-built target+decoy FASTA);
-  prefix configurable via `--decoy-prefix`, default `XXX_`.
-- **Enzyme:** `--enzyme` selects the digest (trypsin by default; ten enzymes and
-  multi-protease lists are supported, §1). The bundled models are trypsin-trained except
-  the three low-res LysC/ArgC/GluC models, and the nearest model is used otherwise.
-- **Modifications:** numeric Da masses only (composition strings are not parsed).
-- **Memory:** spectra are processed in chunked streaming (5000/chunk), so large mzML
-  files do not load fully into memory.
+- No mzIdentML output.
+- Bundled models are trypsin-trained except the three low-res LysC/ArgC/GluC models.
+- Spectra stream in chunks of 5000, so large mzML files are not loaded whole.
 
 ---
 
 ## 9. Glycopeptide search (experimental) & advanced knobs
 
-Enable N-glycopeptide search with `--glyco` (requires a `.glyco.pin` output; the
-backbone model is the N-X-S/T sequon). All glyco tuning is exposed as **hidden
-CLI flags** (advanced; the shipped defaults are validated and rarely need changing):
+`--glyco` searches intact N-glycopeptides (N-X-S/T sequon backbones) and writes a
+`.glyco.pin`. The defaults are validated; most knobs are hidden.
 
-**Everyday flags** (visible in `--help`):
+**Main flags:**
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--glyco-tol-ppm` | 20 | Fragment tolerance for the glyco-specific matching (oxonium ions, core-Y ladder, backbone mass search, c/z). Separate from the model's own fragment tolerance. **Raise it on ion-trap MS2** or the oxonium gate never fires. |
-| `--glyco-glycan-gdb <FILE>` | — | pGlyco-style `.gdb` glycan structure database (a header line of monosaccharide symbols, then one canonical S-expression per glycan). Structure is preserved (core- vs antenna-fucose) and the file's NeuGc content is used as-is. Takes precedence over `--glyco-species`. |
-| `--glyco-species <NAME>` | — | Bundled species-specific N-glycan database: `human`, `human-multi`, `mouse`, `mouse-large`, `high-mannose`. `--glyco` requires one of `--glyco-glycan-gdb` / `--glyco-species`; an explicit `--glyco-glycan-gdb` wins. |
-| `--glyco-isotope-error` | `default` | Precursor isotope-error range: `default` is 0..=2 (dropping −1 measured +81 backbone-correct @1%), `negative` restores −1..=2. |
-| `--precursor-mono` | `auto` | `auto`: correct each precursor to the monoisotope its MS1 isotope envelope supports **before** searching, then keep the default narrow window (needs MS1: mzML or Thermo `.raw`). Fits the observed envelope at the reported charge against a glycopeptide isotope model under "the recorded precursor is M+k", k = 0..6, and moves the precursor down by k−1 isotopes when a k > 0 clearly wins (the sweep's +1 takes the last step, so an overshoot can never lose the true mass). Written for a firmware failure mode measured on pGlyco2 mouse liver: 88 of 3,824 reference scans recorded exactly +4 isotopes above the monoisotope, unreachable by the window and mass-degenerate with a glycan composition change if the window is widened (issue #64). Adds `MonoShift`/`MonoFit`/`MonoFitGain`/`MonoSNR` to the glyco PIN; byte-identical output with `off` or without MS1. Every spectrum whose envelope was fitted is then searched with a `0..1` isotope window instead of the glyco default `0..2` (spectra with no linked MS1 or charge keep `0..2`): once the monoisotope is verified the `+2` step only admits the Hex+Fuc ↔ NeuGc composition degeneracy (issue #64 arm F: 59 of 62 firmware-mispicked +4 scans confirmed against 55 with `0..2`, peptidoform agreement 96.9% vs 96.8%, the +2 tier 402 → 21 PSMs; held on all five liver fractions, heart and lung). An explicit `--isotope-error`, or `--glyco-isotope-error negative`/`wide`, is honoured verbatim; MGF and MS1-less mzML stay byte-identical to `off`. |
-| `--glyco-max-peaks` | 0 (no cap) | Cap the peaks the **generation** stage considers to the N most intense; scoring always sees the full spectrum. 300–500 rescues profile-mode or very dense scans that otherwise take seconds each. |
-| `--glyco-retrieval-tol-ppm` / `--glyco-retrieval-tol-da` | tol-ppm on high-res, 0.5 Da on low-res | Peptide-first candidate **retrieval** window (retrieval only; scoring is unchanged). 20 ppm retrieval on high-res data measured 6.9x faster at no identification cost. |
-| `--glyco-y-max-charge` | 3 | Maximum glycan-Y fragment charge. Raising it reaches 4+/5+ Y ions on highly charged precursors at the cost of chance matches. |
-| `--glyco-cz-max-charge` | derived | Maximum c/z fragment charge probed on ETD spectra; derived from whether the spectrum was deconvoluted. |
-| `--glyco-cz-multisite` | off | Choose the glycosite by c/z evidence when a backbone carries several sequons (~8% of tryptic glycopeptides). Off pending a decoy-controlled A/B; by default such backbones report `@N?`. |
-| `--glyco-hcd-pair` | **on** | ETD only, single-file runs: generate backbones from the paired HCD scan of the same precursor, score c/z on the ETD scan (+153 backbone-correct @1%). `--glyco-hcd-pair false` disables. |
-| `--glyco-etd-rank-glycan` | **on** | ETD only: score the rank path against the glycan-carrying peptide so glycosite-spanning c/z land at their real mass (+33 backbone-correct @1%). |
-| `--glyco-min-core-y` | 0 | Require N trimannosyl-core Y ions before a scan reports a PSM. A measured trade-off (fewer, cleaner rows); 0 keeps every gated scan. |
-| `--glyco-min-matched-ions` | 0 | Require N matched b/y sequence ions before reporting (MSFragger's equivalent is 4). 0 disables. |
-| `--glyco-min-raw-score` / `--glyco-min-raw-score-quantile` | unset | Absolute or run-adaptive (quantile of the run's decoy winners) emission floor. Unset emits a best guess for every gated scan. |
-| `--glyco-sialic-oxonium-min-frac` | 0 | Require a sialic oxonium ion (as a fraction of base peak) before a composition may claim NeuAc/NeuGc. 0 disables. |
-| `--glyco-pin-curated` | off | Write the curated 52-column glyco PIN instead of the full one. On pooled plasma it measured 385 vs 257 glycoPSMs @1% (+50%) at 0.00% entrapment on every seed (that set has since been retired from the benchmark). |
-| `--glyco-scans <FILE>` / `--glyco-diag-splits <FILE>` / `--debug-glyco` | off | Diagnostics: restrict scoring to listed scans; dump per-candidate split evidence; emit all candidate rows. A `--debug-glyco` PIN must never be fed to an FDR tool. |
+| `--glyco-tol-ppm` | 20 | Fragment tolerance for glyco matching (oxonium, core-Y, backbone mass, c/z). **Raise it on ion-trap MS2** or the oxonium gate never fires. |
+| `--glyco-glycan-gdb <FILE>` | — | pGlyco-style `.gdb` glycan database; structure (core- vs antenna-fucose) is kept. Wins over `--glyco-species`. |
+| `--glyco-species <NAME>` | — | Bundled database: `human`, `human-multi`, `mouse`, `mouse-large`, `high-mannose`. One of the two is required. |
+| `--glyco-isotope-error` | `default` | `default` is 0..=2 (dropping −1 measured +81 backbone-correct @1%); `negative` restores −1..=2. |
+| `--precursor-mono` | `auto` | Correct each precursor to the monoisotope its MS1 envelope supports (mzML or `.raw`): tests "recorded = M+k", k = 0..6, and moves down k−1 isotopes when k > 0 clearly wins. On pGlyco2 mouse liver 88 of 3,824 reference scans were recorded exactly +4 high (issue #64). Fitted spectra are searched with a `0..1` isotope window instead of `0..2`. Adds `MonoShift`/`MonoFit`/`MonoFitGain`/`MonoSNR`. An explicit `--isotope-error` or `--glyco-isotope-error negative`/`wide` is honoured; without MS1 output is byte-identical to `off`. |
+| `--glyco-max-peaks` | 0 (no cap) | Peaks the **generation** stage considers; 300–500 helps very dense scans. |
+| `--glyco-retrieval-tol-ppm` / `--glyco-retrieval-tol-da` | tol-ppm on high-res, 0.5 Da on low-res | Retrieval window only; 20 ppm on high-res measured 6.9x faster at no identification cost. |
+| `--glyco-y-max-charge` | 3 | Maximum glycan-Y fragment charge. |
+| `--glyco-cz-max-charge` | derived | Maximum c/z charge on ETD. |
+| `--glyco-cz-multisite` | off | Pick the site by c/z evidence when a backbone has several sequons (~8% of tryptic glycopeptides); otherwise `@N?`. |
+| `--glyco-hcd-pair` | **on** | ETD, single-file runs: backbones from the paired HCD scan, c/z scored on the ETD scan (+153 backbone-correct @1%). Disabled with a warning for multi-file runs. |
+| `--glyco-etd-rank-glycan` | **on** | ETD: c/z at their glycan-carrying mass (+33 backbone-correct @1%). |
+| `--glyco-min-core-y` | 0 | Require N trimannosyl-core Y ions before reporting. |
+| `--glyco-min-matched-ions` | 0 | Require N matched b/y ions (MSFragger uses 4). |
+| `--glyco-min-raw-score` / `--glyco-min-raw-score-quantile` | unset | Absolute or run-adaptive (decoy-winner quantile) emission floor. |
+| `--glyco-sialic-oxonium-min-frac` | 0 | Require a sialic oxonium ion before a composition may claim NeuAc/NeuGc. |
+| `--glyco-pin-curated` | off | Curated 52-column glyco PIN; identification-neutral on mouse liver. |
+| `--glyco-scans <FILE>` / `--glyco-diag-splits <FILE>` / `--debug-glyco` | off | Diagnostics. Never feed a `--debug-glyco` PIN to an FDR tool. |
 
-**Hidden tuning knobs** (`hide = true`; the shipped values are validated and rarely need changing):
+**Tuning knobs** (`hide = true`):
 
 | Flag | Default | Purpose |
 |---|---|---|
 | `--glyco-backbone-top-k` | 150 | Max backbone candidates per spectrum after DB/de-novo union. |
-| `--glyco-index-sequon-only` | off | Enumerate only N-X-S/T-bearing peptides into the candidate index. Glyco scoring never reads any other candidate (the peptide-first fragment index and the backbone→candidate loop both gate on the same sequon test), so this only shrinks the in-RAM index (~10x; the mouse entrapment recipe needs ~27 GB without it, 3.4 GB with it). Measured on a 1,500-protein subset: same rows, peptides and labels as the full index; 16 of 7,113 rows (0.2%) differ in `RawScore`/`CandidateRankEntropy` only. |
-| `--precursor-mono-max-shift` / `-min-fit` / `-min-gain` / `-min-snr` / `-tol-ppm` / `-backoff` | 6 / 0.90 / 0.15 / 3.0 / 10 / 1 | `--precursor-mono` tuning: largest shift tested; minimum cosine fit of the winning hypothesis; minimum fit gain over the recorded precursor; minimum monoisotope intensity over the MS1 median; MS1 matching tolerance; isotopes held back from the best fit when applying it. Swept on pGlyco2 liver T-1: the defaults recover 112 of 153 reference scans the window cannot reach with 1 wrong shift; back-off 0 recovers 106 with 8 wrong. With `auto` on, `--isotope-error 0..1` measured best (the `+2` step of the sweep only carries the Hex+Fuc/NeuGc composition degeneracy once precursors are corrected): 59 of the 62 firmware-mispicked reference scans at +4 confirmed against 55 with `0..2`, peptidoform agreement 96.9% against 96.8%, FDP 0.98%; see `docs/benchmarks/README.md`. `--precursor-mono-dump <FILE>` writes one row per MS2 with every hypothesis' fit. |
-| `--glyco-full-glycan-db` | off | Replace the peptide-first b/y fragment-index fallback with a mass-driven full-glycan-list DB branch (glycan-first recovery for weak-core-Y spectra). A/B flag; default OFF keeps the shipped peptide-first path. |
-| `--glyco-gp-k` / `--glyco-gp-j` / `--glyco-gp-h` | 10 / 5 / 1 | Weights of the fused per-scan selector `rank + K·ladder + J·core_y + H·hyper` (`H = 0` disables the hyperscore term). |
-| `--glyco-gp-cz` | 15 | Weight of the ETD c/z hyperscore; added only on ETD/AI-ETD spectra. |
-| `--glyco-cz-gate` | on | ETD only: a c/z-evidence axis in the backbone-truncation gate (union-only, cannot drop a candidate). |
-| `--glyco-enum-fallback` | on | Promote the best enumerated candidate when the argmax picks a de-novo one. |
-| `--glyco-pair-y-on-gen`, `--glyco-etd-require-oxonium` | off | ETD generation variants: read the Y ladder from the HCD partner; require the oxonium gate before full glycan enumeration on ETD scans. |
-| `--glyco-pf-charge` / `--glyco-max-pf` | 2 / 1024 | Peptide-first fragment-index charge coverage and candidate cap. |
+| `--glyco-index-sequon-only` | off | Index only N-X-S/T peptides: the mouse entrapment recipe needs 3.4 GB instead of ~27 GB; 16 of 7,113 rows (0.2%) differ in `RawScore`/`CandidateRankEntropy` only. |
+| `--precursor-mono-max-shift` / `-min-fit` / `-min-gain` / `-min-snr` / `-tol-ppm` / `-backoff` | 6 / 0.90 / 0.15 / 3.0 / 10 / 1 | `--precursor-mono` tuning: largest shift, minimum fit, minimum gain, minimum mono SNR, MS1 tolerance, isotopes held back. `--precursor-mono-dump <FILE>` writes every fit. |
+| `--glyco-full-glycan-db` | off | A/B flag: mass-driven full-glycan-list branch instead of the peptide-first fallback. |
+| `--glyco-gp-k` / `--glyco-gp-j` / `--glyco-gp-h` | 10 / 5 / 1 | Selector weights in `rank + K·ladder + J·core_y + H·hyper`. |
+| `--glyco-gp-cz` | 15 | ETD c/z hyperscore weight. |
+| `--glyco-cz-gate` | on | ETD: c/z evidence can rescue a backbone from truncation. |
+| `--glyco-enum-fallback` | on | Promote the best enumerated candidate over a de-novo winner. |
+| `--glyco-pair-y-on-gen`, `--glyco-etd-require-oxonium` | off | ETD variants: Y ladder from the HCD partner; oxonium gate before full enumeration. |
+| `--glyco-pf-charge` / `--glyco-max-pf` | 2 / 1024 | Peptide-first fragment-index charge and candidate cap. |
 
-Flags that an A/B measured as losing have been **deleted** rather than left behind a
-default (`--glyco-split-election`, `--glyco-gp-g`, `--glyco-gp-m`, `--glyco-isobar-rep`,
-`--glyco-y-index`, `--glyco-decorated-features`, `--glyco-cz-intensity`,
-`--glyco-per-spectrum-model`, the engine-wide `--tight-highres-scoring`, and the four
-identification-neutral column emitters `--glyco-y-tree`, `--glyco-oxonium-llr`,
-`--glyco-rank-masked`, `--glyco-chance-llr-masked`, the net-neutral cross-spectrum transfer
-pass `--glyco-transfer` with its five knobs, and the never-validated `--glyco-decoy`, all
-removed 2026-09-05). The measurements are in
-`docs/benchmarks/README.md` → *Refuted*.
+Deleted after A/B tests (2026-09-05): `--glyco-split-election`, `--glyco-gp-g`,
+`--glyco-gp-m`, `--glyco-isobar-rep`, `--glyco-y-index`, `--glyco-decorated-features`,
+`--glyco-cz-intensity`, `--glyco-per-spectrum-model`, `--tight-highres-scoring`,
+`--glyco-y-tree`, `--glyco-oxonium-llr`, `--glyco-rank-masked`, `--glyco-chance-llr-masked`,
+`--glyco-transfer` (and its five knobs) and `--glyco-decoy`
+([*Refuted*](docs/benchmarks/README.md#refuted--do-not-re-try-without-new-evidence)).
 
-By default FDR is computed **externally**: andes writes the glyco `.pin` and you run Percolator on it. The only exception is the opt-in in-process rescoring flags (`--rescore` → Percolator, or `--rescore-native` → the non-production built-in GBDT rescorer); see the Rescoring group in §1a. Glycopeptide runs use the external Percolator path.
-
-**Recommended Percolator setting for a glyco PIN: `--trainFDR 0.05`.** Percolator's default
-trains its classifier on PSMs below a 1% q-value. A glycopeptide run accepts far fewer PSMs than a
-standard search, so at 1% the training set is small enough that the cross-validated fit becomes
-unstable. Measured on a pooled human-plasma glyco PIN, one variable, same rows, five Percolator
-seeds each:
+**Run Percolator on a glyco PIN with `--trainFDR 0.05`.** A glyco run has too few positives
+at the default 1% training threshold for a stable fit. Pooled human-plasma glyco PIN, same
+rows, five seeds each:
 
 | `--trainFDR` | PSMs @1% | agreeing with the reference identifications |
 |---|---:|---:|
@@ -766,24 +612,15 @@ seeds each:
 | **0.05** | **384.6 ± 19.9** | **301.4 ± 11.1** |
 | 0.10 | 348.8 ± 9.6 | 283.2 ± 6.1 |
 
-The default is both worse and erratic — one seed returned 112 PSMs and another 256 from identical
-input. `0.10` is stable but gives back some yield, so 0.05 is the operating point.
-
-This is a recommendation about how to run Percolator, not an andes setting: andes does not compute
-FDR (see above), and a pipeline that owns its own rescoring, such as quantms, owns this choice.
-
-Do **not** respond to an unstable glyco fit by filtering rows out of the PIN first. The
-low-scoring rows are roughly half decoys, and Percolator needs that population to place a
-threshold, so removing them starves the fit rather than cleaning it — measured, see
-`docs/benchmarks/README.md`.
+The default is worse and erratic (112 vs 256 PSMs across seeds on identical input). Do **not**
+filter low-scoring rows out of the PIN instead: they are about half decoys and Percolator
+needs them to place a threshold.
 
 ---
 
 ## 10. License and citation
 
-andes is licensed under the **Apache License 2.0**. See [`LICENSE`](LICENSE) for the full text and [`NOTICE`](NOTICE) for attribution and the project's origin in MS-GF+.
-
-The software is provided **"as is"** without warranty.
+andes is licensed under the **Apache License 2.0**. See [`LICENSE`](LICENSE) for the full text and [`NOTICE`](NOTICE) for attribution and the project's origin in MS-GF+. The software is provided **"as is"** without warranty.
 
 ### Citation
 

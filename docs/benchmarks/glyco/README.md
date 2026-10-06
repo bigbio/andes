@@ -1,35 +1,31 @@
 # Glyco benchmark harness
 
-The scripts that produced every glyco number quoted in `README.md` and `DOCS.md`. They
-live here so a reported figure can be reproduced and disputed, rather than taken on
-trust.
-
-None of them is part of the `andes` binary, and none of them computes FDR — Percolator
-does that. They prepare its input and interpret its output.
+The scripts behind every glyco number in this repository. None computes FDR; Percolator does.
 
 ## The scripts
 
 | Script | What it does |
 | --- | --- |
-| `pool_pins.py` | Concatenates per-fraction `.glyco.pin` files into one pooled PIN (single header, fraction-tagged `SpecId`). **Pooling is mandatory**, see below. Errors out if the headers differ rather than silently misaligning columns. |
-| `eval_honest.py` | Scores a pooled Percolator result against a reference identification set. Compares the peptide **sequence**, not just the precursor mass, and reports the A/B/C/D decomposition. |
-| `eval_yield.py` | Absolute yield: glycoPSMs, distinct glycopeptides, compositions and glycosites at 1% q-value, with no reference set. Use for datasets that have no truth. |
-| `compare_preperc.py` | Pre-Percolator A/B: RawScore target/decoy AUC, and the decoy-counting "2× rule" (`FDR = 2D/(D+T)` on RawScore, factor 2 because the `sequon-reverse` decoy is 1:1). This is the exact script behind the "targets @ 1% FDR (2× rule)" and "RawScore AUC" columns. |
-| `build_entrap.py` | Appends an unrelated proteome (yeast / E. coli) to the search FASTA as **targets**. Any glyco ID landing there is false by construction. Writes targets only — run andes with `--decoy-strategy sequon-reverse` so the decoys are built correctly for the whole database. |
-| `eval_entrap.py` | Counts the entrapment hits that survive the q-value cut and reports the false-discovery proportion, with a conservative/optimistic verdict against the nominal threshold. |
-| `compare_engines.py` | Cross-engine set comparison on `MouseLiver-Z-T-1` (PXD031032): normalises Glyco-Decipher / StrucGP / Byonic / pGlyco 2.0 / MSFragger-Glyco / andes to a canonical `(HexNAc,Hex,Fuc,NeuAc,NeuGc)` composition + bare peptide, then reports per-engine counts and pairwise Jaccard overlap. Produces `cross_engine_pxd031032.md`. |
+| `pool_pins.py` | Pools per-fraction `.glyco.pin` files (one header, fraction-tagged `SpecId`). |
+| `eval_honest.py` | Scores against a reference set by peptide sequence (A/B/C/D buckets below). |
+| `eval_yield.py` | Yield at 1% q with no reference. |
+| `compare_preperc.py` | Pre-Percolator RawScore AUC and the "2× rule" (`FDR = 2D/(D+T)`). |
+| `build_entrap.py` | Appends a foreign proteome as **targets**. |
+| `build_shuffled_entrap.py` | Builds the 1:1 shuffled-self entrapment database the benchmark tiers use. |
+| `eval_entrap.py` | Entrapment hits past the q-value cut, as an FDP. |
+| `score_vs_truth.py`, `agreement.py`, `make_truth.py` | Score against `truth/`, peptidoform agreement, build references. |
+| `compare_engines.py` | Cross-engine overlap on `MouseLiver-Z-T-1` (PXD031032); writes `cross_engine_pxd031032.md`. |
 
 ## Two rules these scripts encode
 
-**Pool fractions before Percolator.** A single fraction yields on the order of 0-2 glyco
-decoys, so a per-fraction 1% q-value is estimated from almost no data and swings wildly
-between runs. Differences measured that way are noise. Run each file separately, combine
-with `pool_pins.py`, then run Percolator once.
+**Pool fractions before Percolator.** One fraction yields on the order of 0-2 glyco decoys, so
+a per-fraction 1% q-value is noise. Run each file separately, combine with `pool_pins.py`,
+then run Percolator once.
 
-**Yield alone will ship a bad change.** Expanding the search space raises the number of
-IDs at a nominal 1% whether or not the new IDs are real. The full 4034-composition glycan
-list looked like +59 compositions by yield and turned out to inflate the entrapment error
-5.4x. Always pair `eval_yield.py` with `build_entrap.py` + `eval_entrap.py`.
+**Yield alone will ship a bad change.** A larger search space raises IDs at a nominal 1%
+whether or not they are real: the full 4034-composition glycan list looked like +59
+compositions by yield and inflated the entrapment error 5.4x. Always pair `eval_yield.py`
+with an entrapment database and `eval_entrap.py`.
 
 ## Typical run
 
@@ -56,18 +52,17 @@ python3 eval_yield.py  pooled.pin out.psms             # absolute yield
 python3 eval_entrap.py pooled.pin out.psms             # false-discovery proportion
 ```
 
+`--glyco` also needs `--glyco-species` or `--glyco-glycan-gdb`. The benchmark tiers use the
+shuffled-self database; see [`../README.md`](../README.md#2-how-to-reproduce).
+
 ## Reading `eval_honest.py`
 
-Truth scans are split into four buckets, which say *where* a gap lives:
+Truth scans fall into four buckets that say *where* a gap lives:
 
-- **A** — correct and won at 1%. The number quoted as recovery.
-- **B** — correct peptide emitted, but below the FDR threshold. A separability problem.
-- **C** — a *wrong* peptide was emitted for the scan. A ranking/selection problem.
-- **D** — no PIN row at all. A generation problem.
+- **A**: correct and won at 1% (the recovery figure).
+- **B**: correct peptide emitted but below the threshold (separability).
+- **C**: a *wrong* peptide emitted (ranking/selection).
+- **D**: no PIN row at all (generation).
 
-The distinction matters because the three call for different work, and conflating them
-is how a campaign spends months adding signal to a stage that was never the bottleneck.
-
-`eval_honest.py` exists because an earlier evaluator divided by the 6-fraction truth
-count while scoring a 3-fraction search, and reported 40% where the real figure was
-65.2%. It takes the denominator from the fractions actually searched.
+`eval_honest.py` takes its denominator from the fractions actually searched (an earlier
+evaluator reported 40% where the real figure was 65.2%).

@@ -103,10 +103,6 @@ pub struct SearchParams {
     /// (issue #76) instead of every peptidoform in its precursor windows.
     /// 0 (default) = off, byte-identical enumeration path.
     pub fragment_index_top_k: u32,
-    /// Break ties among equal fragment-index vote counts by the summed intensity of
-    /// the matched peaks, instead of by form id (which is mass order and carries no
-    /// evidence). `false` is the historical behaviour. See `ChunkFragmentIndex::query`.
-    pub fragment_index_intensity_tiebreak: bool,
     /// Learned file-wide ppm shift applied to observed neutral masses in the
     /// main pass. Stays 0.0 until the pre-pass calibrator runs.
     pub precursor_mass_shift_ppm: f64,
@@ -194,7 +190,6 @@ impl SearchParams {
             precursor_cal_mode: PrecursorCalMode::Off,
             cal_min_spec_keys: crate::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS,
             fragment_index_top_k: 0,
-            fragment_index_intensity_tiebreak: false,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,

@@ -276,10 +276,11 @@ scans only enumeration identifies.
   Percolator needs the low-scoring rows to place a threshold. Use `--trainFDR 0.05` instead
   ([`DOCS.md` §9](../../DOCS.md#9-glycopeptide-search-experimental--advanced-knobs)).
 
-Pending: `--fragment-index-intensity-tiebreak` (default off) breaks the index's top-100 vote
-ties by matched intensity. On Astral forced out-of-core it changes 46% of assigned peptides
-and raises distinct peptides ~0.30% at flat PSMs and an unchanged decoy share; it waits for
-an FDP measurement on phospho.
+Adopted 2026-10-07: the fragment index breaks top-100 vote ties by the summed intensity of the
+matched peaks (previously by form id, which is mass order). Entrapment databases, Percolator
+seeds 42/1/2: Astral 42,374–42,610 → 43,255–43,348 PSMs (+1.7%; distinct peptides +1.7%) at
+1.03–1.07% true FDP (was 1.06–1.08%); phospho 37,179–37,280 → 37,188–37,215 PSMs at 1.02–1.08%
+true FDP (was 1.11–1.15%).
 
 ---
 

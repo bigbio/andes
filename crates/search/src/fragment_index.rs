@@ -277,7 +277,6 @@ impl ChunkFragmentIndex {
         fragment_tol: Tolerance,
         top_k: usize,
         min_matched: u16,
-        intensity_tiebreak: bool,
     ) -> Vec<(u32, u16)> {
         // One over-inclusive precursor mass interval; the scoring loop applies
         // the exact per-offset test afterwards.
@@ -351,7 +350,7 @@ impl ChunkFragmentIndex {
             }
             sel
         });
-        select_top_k(&mut sel, top_k, intensity_tiebreak);
+        select_top_k(&mut sel, top_k);
         sel.into_iter().map(|(id, v, _)| (id, v)).collect()
     }
 
@@ -396,23 +395,16 @@ impl ChunkFragmentIndex {
 /// Order `(form_id, votes, matched_intensity)` and keep the best `top_k`.
 ///
 /// Vote counts are small integers over a candidate set that can run to thousands,
-/// so the cut at `top_k` lands inside a large tie. The historical secondary key was
-/// the form id, which is MASS order and carries no evidence at all: at the boundary
-/// the survivors were chosen by where they happened to sit in the index.
-/// `intensity_tiebreak` orders that tie by the summed intensity of the matched peaks
-/// instead. The form id stays the FINAL key either way, because the order must be
-/// total and reproducible — this repo has had an FDR swing from a non-deterministic
-/// sort in the candidate path.
-pub(crate) fn select_top_k(sel: &mut Vec<(u32, u16, f32)>, top_k: usize, intensity_tiebreak: bool) {
-    if intensity_tiebreak {
-        sel.sort_unstable_by(|a, b| {
-            b.1.cmp(&a.1)
-                .then_with(|| b.2.total_cmp(&a.2))
-                .then_with(|| a.0.cmp(&b.0))
-        });
-    } else {
-        sel.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    }
+/// so the cut at `top_k` lands inside a large tie. That tie is ordered by the summed
+/// intensity of the matched peaks, so the better-supported forms survive the cut.
+/// The form id is the FINAL key, because the order must be total and reproducible —
+/// this repo has had an FDR swing from a non-deterministic sort in the candidate path.
+pub(crate) fn select_top_k(sel: &mut Vec<(u32, u16, f32)>, top_k: usize) {
+    sel.sort_unstable_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| b.2.total_cmp(&a.2))
+            .then_with(|| a.0.cmp(&b.0))
+    });
     sel.truncate(top_k);
 }
 
@@ -420,20 +412,13 @@ pub(crate) fn select_top_k(sel: &mut Vec<(u32, u16, f32)>, top_k: usize, intensi
 mod select_top_k_tests {
     use super::select_top_k;
 
-    /// The case the change exists for: equal vote counts, so the historical key
-    /// (form id = mass order) decides, and it decides on nothing.
+    /// Equal vote counts: the matched intensity decides, not the form id (mass order).
     #[test]
     fn a_tie_is_broken_by_evidence_not_by_position_in_the_index() {
-        // Form 7 carries the stronger evidence; form 3 sits earlier in the index.
-        // The two keys therefore disagree, which is what makes the assertion mean something.
-        let rows = || vec![(7u32, 5u16, 900.0f32), (3u32, 5u16, 10.0f32)];
-
-        let mut mass_order = rows();
-        select_top_k(&mut mass_order, 1, false);
-        assert_eq!(mass_order[0].0, 3, "historical key keeps the lower form id");
-
-        let mut by_evidence = rows();
-        select_top_k(&mut by_evidence, 1, true);
+        // Form 7 carries the stronger evidence; form 3 sits earlier in the index,
+        // so the two keys disagree.
+        let mut by_evidence = vec![(7u32, 5u16, 900.0f32), (3u32, 5u16, 10.0f32)];
+        select_top_k(&mut by_evidence, 1);
         assert_eq!(
             by_evidence[0].0, 7,
             "with the intensity tie-break the better-supported form survives"
@@ -444,27 +429,25 @@ mod select_top_k_tests {
     #[test]
     fn a_higher_vote_count_still_wins_outright() {
         let mut sel = vec![(1u32, 9u16, 1.0f32), (2u32, 4u16, 5000.0f32)];
-        select_top_k(&mut sel, 1, true);
+        select_top_k(&mut sel, 1);
         assert_eq!(sel[0].0, 1, "9 votes must beat 4 regardless of intensity");
     }
 
-    /// Both orders must be total, so a rerun selects the same set.
+    /// The order is total, so a rerun selects the same set.
     #[test]
     fn ordering_is_deterministic_under_a_full_tie() {
-        for flag in [false, true] {
-            let mut a = vec![
-                (5u32, 3u16, 1.0f32),
-                (2u32, 3u16, 1.0f32),
-                (9u32, 3u16, 1.0f32),
-            ];
-            let mut b = vec![
-                (9u32, 3u16, 1.0f32),
-                (5u32, 3u16, 1.0f32),
-                (2u32, 3u16, 1.0f32),
-            ];
-            select_top_k(&mut a, 2, flag);
-            select_top_k(&mut b, 2, flag);
-            assert_eq!(a, b, "input order must not survive into the selection");
-        }
+        let mut a = vec![
+            (5u32, 3u16, 1.0f32),
+            (2u32, 3u16, 1.0f32),
+            (9u32, 3u16, 1.0f32),
+        ];
+        let mut b = vec![
+            (9u32, 3u16, 1.0f32),
+            (5u32, 3u16, 1.0f32),
+            (2u32, 3u16, 1.0f32),
+        ];
+        select_top_k(&mut a, 2);
+        select_top_k(&mut b, 2);
+        assert_eq!(a, b, "input order must not survive into the selection");
     }
 }

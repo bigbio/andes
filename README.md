@@ -225,9 +225,10 @@ finds co-isolated precursors in the MS1 isolation window and searches the residu
 a second peptide.
 
 On UPS1 (with entrapment) PSMs at q ≤ 0.01 rose from 15,838 to 17,112 (+8.0%) with entrapment
-hits flat (166 → 167). On Astral they rose 38,394 → 65,028 (+69%), which is **not**
-entrapment-validated. `--chimeric` keeps the in-RAM candidate path, so its baseline is the
-38,394 of that path, not the 46,774 of the default high-res search.
+hits flat (166 → 167). On high-res data `--chimeric` runs on the default out-of-core path with
+fragment-ion retrieval; on Astral with an entrapment database (Percolator, three seeds) it gave
+61,194 PSMs at q ≤ 0.01 (36,469 primary + 24,725 secondary) at a true FDP of 1.18%, against
+43,296 at 1.05% without `--chimeric` and 57,750 at 1.17% for `--chimeric --candidate-index ram`.
 
 ## Secondary modifications (`--refine`, experimental)
 

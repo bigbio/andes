@@ -87,8 +87,8 @@ on the benchmark databases, reused by later runs on the same database and settin
 the 100 candidates whose singly-charged b/y ions best match each spectrum (at least 3 matched).
 On Astral this gave +22.2% PSMs over full-window enumeration at an equal true FDP of 1.00%; on
 phospho, 164 s against 5,954 s. Low-res data stays on in-RAM enumeration (forcing the index took
-TMT from 12,281 to 3,613 PSMs at 1% and UPS1 from 15,838 to 10,312), as do `--chimeric`,
-`--refine` and `--glyco`. The engine prints its choice; `--candidate-index ram` or
+TMT from 12,281 to 3,613 PSMs at 1% and UPS1 from 15,838 to 10,312), as do `--refine` and
+`--glyco`; `--chimeric` runs on either path. The engine prints its choice; `--candidate-index ram` or
 `--fragment-index off` restore enumeration
 ([measurements](docs/benchmarks/README.md#choosing-the-retrieval-strategy)).
 

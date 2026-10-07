@@ -17,7 +17,8 @@
 //! #70: the pre-pass must run on the out-of-core index and the two backings
 //! must still agree.
 //!
-//! Marked `#[ignore]` — it runs two full E. coli searches (~40 s release,
+//! The `--chimeric` cases at the end run on a 150-scan MS1-bearing slice and
+//! are not ignored. The E. coli cases are marked `#[ignore]` — each runs two full E. coli searches (~40 s release,
 //! several minutes debug). Run it with:
 //!
 //! ```text
@@ -206,4 +207,117 @@ fn mmap_matches_ram_pin_with_precursor_calibration_on() {
     // index regardless of the backing (and OOM-killed searches whose index did
     // not fit). Now it runs on the chosen backing; both must still agree.
     assert_backings_agree("precursor-cal auto", None, "auto");
+}
+
+// ── --chimeric on the out-of-core backing ───────────────────────────────────
+//
+// Fixture: `test-fixtures/astral_pxd070049_slice.mzML.gz`, 150 consecutive MS2
+// scans with their two linked MS1 scans, cut unmodified from the middle of the
+// PRIDE PXD070049 run `LFQ_Astral_DDA_15min_50ng_Condition_A_REP1.raw`
+// (Orbitrap Astral DDA, human/yeast/E. coli; converted with ThermoRawFileParser).
+// The chimeric Pass 2 needs the MS1 scans, which `test.mgf.gz` lacks.
+
+const CHIMERIC_MZML: &str = "test-fixtures/astral_pxd070049_slice.mzML.gz";
+
+/// Run a `--chimeric` search; returns (header, sorted rows, stderr).
+fn run_chimeric(
+    backing: &str,
+    fragment_index: &str,
+    out: &PathBuf,
+) -> (String, Vec<String>, String) {
+    let root = workspace_root();
+    let output = Command::new(env!("CARGO_BIN_EXE_andes"))
+        .current_dir(&root)
+        .arg("--spectrum")
+        .arg(CHIMERIC_MZML)
+        .arg("--database")
+        .arg("test-fixtures/ecoli.fasta")
+        .arg("--threads")
+        .arg("2")
+        .arg("--precursor-cal")
+        .arg("off")
+        .arg("--candidate-index")
+        .arg(backing)
+        .arg("--fragment-index")
+        .arg(fragment_index)
+        .arg("--chimeric")
+        .arg("--output-pin")
+        .arg(out)
+        .output()
+        .expect("spawn andes");
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        output.status.success(),
+        "andes --candidate-index {backing} --fragment-index {fragment_index} --chimeric failed:\n{stderr}"
+    );
+    let text = std::fs::read_to_string(out).expect("read pin");
+    let mut lines = text.lines();
+    let header = lines.next().expect("pin header").to_string();
+    let mut rows: Vec<String> = lines.map(str::to_string).collect();
+    rows.sort();
+    (header, rows, stderr)
+}
+
+/// Rows beyond one per scan: the chimeric secondaries (Pass 1 keeps top-1).
+fn extra_rows(rows: &[String]) -> usize {
+    let scans: std::collections::HashSet<&str> = rows
+        .iter()
+        .map(|r| r.split('\t').nth(2).expect("ScanNr column"))
+        .collect();
+    rows.len() - scans.len()
+}
+
+#[test]
+fn chimeric_mmap_enumeration_matches_ram_pin() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ram_header, ram_rows, _) = run_chimeric("ram", "off", &dir.path().join("ram.pin"));
+    let (mmap_header, mmap_rows, mmap_err) =
+        run_chimeric("mmap", "off", &dir.path().join("mmap.pin"));
+    assert!(
+        mmap_err.contains("out-of-core candidate-index: mmap"),
+        "mmap run did not report the out-of-core backing:\n{mmap_err}"
+    );
+    assert_eq!(ram_header, mmap_header, "PIN header differs");
+    let secondaries = extra_rows(&ram_rows);
+    assert!(
+        secondaries > 50,
+        "fixture produced only {secondaries} chimeric secondary rows — the gate would be vacuous"
+    );
+    assert_eq!(
+        ram_rows.len(),
+        mmap_rows.len(),
+        "row COUNT differs: ram={} mmap={}",
+        ram_rows.len(),
+        mmap_rows.len()
+    );
+    if let Some(first) = ram_rows.iter().zip(&mmap_rows).position(|(a, b)| a != b) {
+        panic!(
+            "chimeric PIN rows differ at sorted index {first}\n  ram : {}\n  mmap: {}",
+            ram_rows[first], mmap_rows[first]
+        );
+    }
+}
+
+/// Fragment-index retrieval changes Pass 1's candidates by design, so only the
+/// shape is gated: the run completes, SpecIds stay unique, and the number of
+/// chimeric secondaries stays close to the in-RAM run.
+#[test]
+fn chimeric_mmap_fragment_index_runs_with_unique_specids() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_, ram_rows, _) = run_chimeric("ram", "off", &dir.path().join("ram.pin"));
+    let (_, idx_rows, idx_err) = run_chimeric("mmap", "auto", &dir.path().join("idx.pin"));
+    assert!(
+        idx_err.contains("candidate retrieval: fragment-ion index"),
+        "the fragment-ion index did not run:\n{idx_err}"
+    );
+    let ids: std::collections::HashSet<&str> = idx_rows
+        .iter()
+        .map(|r| r.split('\t').next().expect("SpecId column"))
+        .collect();
+    assert_eq!(ids.len(), idx_rows.len(), "duplicate SpecIds in the PIN");
+    let (ram_sec, idx_sec) = (extra_rows(&ram_rows) as f64, extra_rows(&idx_rows) as f64);
+    assert!(
+        (idx_sec - ram_sec).abs() <= 0.1 * ram_sec,
+        "chimeric secondaries: fragment index {idx_sec} vs RAM {ram_sec}"
+    );
 }

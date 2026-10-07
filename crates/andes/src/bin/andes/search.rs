@@ -8,7 +8,7 @@ use std::thread;
 
 use crate::cli::{
     CandidateIndexFlag, Cli, EnzymeSpecificity, EthcdActivationFlag, FragmentIndexFlag,
-    Fragmentation, GlycoIsotopeFlag, PrecursorMonoFlag, Protocol, ScoreFlag,
+    Fragmentation, PrecursorMonoFlag, Protocol, ScoreFlag,
 };
 use crate::glyco_run::run_glyco;
 use crate::memlimit::available_memory_budget;
@@ -23,7 +23,7 @@ use crate::spectra::{
     input_format_flags, merge_parse_stats, prefix_spectrum_titles, run_precursor_calibration,
     send_chunks, title_prefix_for, tolerance_ppm_display, warn_if_index_will_not_fit, ParseStats,
 };
-use crate::{arg_present, log_rss, report_search_progress, EXPLICIT_MISSED_CLEAVAGES, RSS_PROBE};
+use crate::{arg_present, report_search_progress, EXPLICIT_MISSED_CLEAVAGES};
 use input::{FastaReader, MgfReader, Ms1Link, MzMLReader};
 use model::{
     activation::ActivationMethod, AminoAcidSetBuilder, InstrumentType, PrecursorTolerance, Spectrum,
@@ -174,8 +174,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let _ = RSS_PROBE.set(cli.rss_probe);
-    log_rss("startup");
     let t_total = std::time::Instant::now();
     let t_phase = std::time::Instant::now();
     // ── 1. Load FASTA target database ────────────────────────────────────────
@@ -186,7 +184,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         database_path.display(),
         t_phase.elapsed().as_secs_f64()
     );
-    log_rss("after_fasta_load");
 
     // ── 2. Build SearchIndex (targets + strategy-generated decoys) ────────────
     let decoy_strategy =
@@ -208,7 +205,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "[PHASE search_index_build: {:.2}s]",
         t_phase.elapsed().as_secs_f64()
     );
-    log_rss("after_search_index_build");
 
     // ── 3. Build AminoAcidSet ────────────────────────────────────────────────
     //
@@ -492,29 +488,16 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Ranges are validated (min <= max) by the clap value parsers.
     let (charge_min, charge_max) = cli.charge;
     params.charge_range = charge_min..=charge_max;
-    params.charge_expand = cli.charge_expand;
-    params.charge_expand_min_z = cli.charge_expand_min_z;
     // Round-8: resolve the default by MODE, not by sniffing the value. An explicit
     // `--isotope-error` (any range, including -1..2) is always honoured verbatim.
     // Unset under --glyco defaults to 0..=2: an MS1 envelope audit found the firmware
     // mis-picks the monoisotopic peak only ever too HIGH (0 of 23,907 scans needed a
     // negative shift), while the iso=-1 arm emitted 28.5% of all candidate rows for
     // 0.29% of the correct answers at a ~53:47 target:decoy ratio - pure FDR dilution.
-    // Dropping it measured +81 backbone-correct @1%. ANDES_GLYCO_ISO_NEG=1 restores it.
-    let iso_default = if cli.glyco && cli.glyco_isotope_error != GlycoIsotopeFlag::Negative {
-        (0, 2)
-    } else {
-        (-1, 2)
-    };
+    // Dropping it measured +81 backbone-correct @1%.
+    let iso_default = if cli.glyco { (0, 2) } else { (-1, 2) };
     let (iso_min, iso_max) = cli.isotope_error.unwrap_or(iso_default);
     params.isotope_error_range = iso_min..=iso_max;
-    // Glyco high-mass precursors (backbone + multi-kDa glycan) frequently have the
-    // monoisotopic peak mis-picked several 13C low, so the true neutral mass falls
-    // outside the default -1..=2 sweep. Widen the upper bound for glyco so that
-    // candidate mass is reachable. A/B-gated: ANDES_GLYCO_ISO_WIDE only.
-    if cli.glyco && cli.glyco_isotope_error == GlycoIsotopeFlag::Wide {
-        params.isotope_error_range = iso_min..=iso_max.max(5);
-    }
     // Pass 2 co-isolation requires MS1 scans, captured by the mzML and Thermo
     // `.raw` readers. MGF (no MS1) and the Bruker `.d` reader (DDA MS2 only;
     // chimeric on `.d` is out of scope) make `--chimeric` inert, so keep
@@ -574,15 +557,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         );
     }
-    let mono_params = MonoParams {
-        max_shift: cli.precursor_mono_max_shift,
-        tol_ppm: cli.precursor_mono_tol_ppm,
-        min_fit: cli.precursor_mono_min_fit,
-        min_gain: cli.precursor_mono_min_gain,
-        min_snr: cli.precursor_mono_min_snr,
-        backoff: cli.precursor_mono_backoff,
-        ..MonoParams::default()
-    };
+    let mono_params = MonoParams::default();
     if mono_active {
         eprintln!(
             "precursor-mono: auto (max shift {}, min fit {:.2}, min gain {:.2}, min SNR {:.1}, \
@@ -644,10 +619,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
     scoring_crate::scoring::init_scoring_settings(scoring_crate::scoring::ScoringSettings {
         peak_filter,
-        precursor_offset_clamp: cli.precursor_offset_clamp,
-        density_on_active_list: cli.density_on_active_list,
     });
-    params.chimeric_allow_overlap = cli.chimeric_allow_overlap;
 
     params.max_missed_cleavages = if cli.glyco {
         // The floor is a default, not a mandate. Raising it to 3 grows the candidate
@@ -681,14 +653,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(n) = cli.cal_min_spec_keys {
         params.cal_min_spec_keys = n;
     }
-    if let Some(n) = cli.mmap_window_cache_candidates {
-        params.mmap_window_cache_max_candidates = n;
-    }
-    if let Some(m) = cli.fragment_index_min_matched {
-        params.fragment_index_min_matched = m;
-    }
     params.fragment_index_intensity_tiebreak = cli.fragment_index_intensity_tiebreak;
-    params.deep_features_top = cli.deep_features_top;
     params.precursor_mass_shift_ppm = 0.0;
     params.refine_select_psm_fdr = cli.refine_select_psm_fdr;
     params.score_mode = match cli.score {
@@ -780,7 +745,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         cli.fragment_index,
     );
     params.fragment_index_top_k = if choice.use_index {
-        cli.fragment_index_top_k.unwrap_or(100)
+        search::search_params::FRAGMENT_INDEX_TOP_K
     } else {
         0
     };
@@ -794,7 +759,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             eprintln!(
                 "candidate retrieval: fragment-ion index ({reason}; {} candidates per spectrum, \
                  >= {} matched b/y ions)",
-                params.fragment_index_top_k, params.fragment_index_min_matched
+                params.fragment_index_top_k,
+                search::search_params::FRAGMENT_INDEX_MIN_MATCHED
             );
         } else {
             eprintln!("candidate retrieval: per-spectrum enumeration ({reason})");
@@ -1132,17 +1098,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    let intensity_model: Option<Arc<scoring_crate::IntensityModel>> = cli
-        .intensity_model
-        .as_ref()
-        .map(|path| {
-            eprintln!("loading intensity model from {} ...", path.display());
-            scoring_crate::IntensityModel::load(path)
-                .map(Arc::new)
-                .map_err(|e| format!("intensity model {}: {e}", path.display()))
-        })
-        .transpose()?;
-
     let mut prepared = match (reuse_parts, &mmap_cache_path) {
         // RAM mode with calibration: reuse the pre-pass enumeration.
         (Some(parts), _) => {
@@ -1163,9 +1118,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         (None, None) => {
             PreparedSearch::prepare(&idx, &params, &scorer, fragment_tol_da, &cli.decoy_prefix)
         }
-    }
-    .with_intensity_model(intensity_model);
-    log_rss("after_prepared_search");
+    };
     match params.candidate_index {
         search::CandidateIndexMode::Ram => {
             eprintln!(
@@ -1385,7 +1338,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 ms1_linked,
                 input_path.display()
             );
-            log_rss("after_ms1_linked_stream_search");
             ParseStats {
                 error_count: err_count,
                 first_errors,
@@ -1441,8 +1393,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 },
             );
 
-            log_rss("after_parser_thread_spawn");
-
             // Fragment-index mode (issue #76) scores MASS-ORDERED chunks: the
             // per-chunk index covers the peptidoforms of the chunk's precursor
             // windows, and a chunk in file order spans the whole mass range
@@ -1483,7 +1433,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     all_spectra.push(spec);
                 }
                 report_search_progress(all_spectra.len(), t_search_start);
-                log_rss(&format!("after_chunk_{:06}_specs", all_spectra.len()));
             }
             if mass_ordered {
                 let neutral = |s: &Spectrum| {
@@ -1538,7 +1487,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         all_spectra.push(spec);
                     }
                     report_search_progress(all_spectra.len(), t_search_start);
-                    log_rss(&format!("after_chunk_{:06}_specs", all_spectra.len()));
                 }
             }
 
@@ -1581,7 +1529,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("no spectra parsed from {}", paths.join(", ")).into());
     }
 
-    log_rss("after_all_spectra");
     let search_elapsed = t_search_start.elapsed();
     eprintln!(
         "Loaded+scored {} spectra from {} in chunks of {} [PHASE stream_search: {:.2}s]",
@@ -1656,7 +1603,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let (window, narrowed) = crate::mono::coupled_isotope_window(
         mono_active,
         cli.isotope_error,
-        cli.glyco_isotope_error == GlycoIsotopeFlag::Default,
         params.isotope_error_range.clone(),
     );
     let glyco_isotope_override = if narrowed {
@@ -1742,13 +1688,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("parsing --refine-config {}: {e}", p.display()))?,
             None => search::RefineConfig::default_tier(),
         };
-        // Max variable mods for refinement comes from the refine config/tier
-        // (set it in the `--refine-config` YAML; the former CLI override was removed).
-        let cfg = search::RefineConfig {
-            max_mods: base_cfg.max_mods,
-            entrapment: base_cfg.entrapment || cli.refine_entrapment,
-            ..base_cfg
-        };
+        // Max variable mods and the entrapment diagnostic for refinement come from
+        // the refine config/tier (set them in the `--refine-config` YAML).
+        let cfg = base_cfg;
 
         // High-res signal: the resolved model's instrument class. High-res
         // instruments fragment-match in ppm (20 ppm vs 0.5 Da ion-trap), which is
@@ -1841,7 +1783,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         t_phase.elapsed().as_secs_f64(),
         t_total.elapsed().as_secs_f64()
     );
-    log_rss("after_pin_write");
     if cli.refine {
         if refine_merged {
             eprintln!("Refinement PSMs merged into unified PIN (Pass-1 ⊕ Pass-2).");

@@ -1,7 +1,9 @@
 # Training scoring models with andes
 
-`andes train` builds scoring models from your data into a Parquet model store
-(`--out-store`). Search flags are in [`DOCS.md`](DOCS.md).
+`andes train-from-search` builds scoring models from your data into a Parquet model store
+(`--out-store`). `andes train --in <parquet>` does the same from externally labelled PSMs
+(flat training parquets), skipping the bootstrap search. Search flags are in
+[`DOCS.md`](DOCS.md).
 
 ---
 
@@ -19,7 +21,7 @@ target-decoy q ≤ a threshold, and learns the statistics from them.
 ## 2. Quick start
 
 ```bash
-andes train \
+andes train-from-search \
   --spectra mydata.mzML \
   --database mydb.fasta \
   --out-store models.parquet \
@@ -39,7 +41,7 @@ andes --spectrum mydata.mzML --database mydb.fasta --output-pin out.pin \
   --model-store models.parquet --model astral_tryp
 ```
 
-**Key flags** (full list: `andes train --help`):
+**Key flags** (full list: `andes train-from-search --help`):
 
 | Flag | Meaning | Default |
 |---|---|---|
@@ -79,17 +81,17 @@ that must pass an **acceptance gate** (held-out yield ≥ the current model).
 
 ```bash
 # Add a new dataset to an existing model
-andes train --update astral_tryp --out-store models.parquet \
+andes train-from-search --update astral_tryp --out-store models.parquet \
   --add --spectra more.mzML --database mydb.fasta --source-id batch2 \
   --validate heldout.mzML
 
 # Remove a source
-andes train --update astral_tryp --out-store models.parquet \
+andes train-from-search --update astral_tryp --out-store models.parquet \
   --remove-source batch2 --validate heldout.mzML
 
 # Down-weight a source, or decay stale sources by age
-andes train --update astral_tryp --out-store models.parquet --reweight batch1=0.5 --validate heldout.mzML
-andes train --update astral_tryp --out-store models.parquet --decay 180 --validate heldout.mzML
+andes train-from-search --update astral_tryp --out-store models.parquet --reweight batch1=0.5 --validate heldout.mzML
+andes train-from-search --update astral_tryp --out-store models.parquet --decay 180 --validate heldout.mzML
 ```
 
 The candidate is committed only if it identifies at least as many target PSMs at 1% FDR on
@@ -107,6 +109,6 @@ generic model. `--model-store <path>` uses another store; `--model <id>` forces 
 
 - **Acceptance gate** (§5) for updates.
 - **Yield non-regression:** `cargo test -p model-train --test yield_nonregression` with
-  `MSGF_TRAIN_BENCH=<dir>` trains a model and asserts its 1% FDR yield ≥ the bundled fallback
+  `ANDES_TRAIN_BENCH=<dir>` trains a model and asserts its 1% FDR yield ≥ the bundled fallback
   on held-out spectra.
 - Judge FDR with an entrapment or held-out set, not raw counts.

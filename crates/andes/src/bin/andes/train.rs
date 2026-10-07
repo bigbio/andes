@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::{parse_unit_fraction, GeometryArgs, Protocol};
 use crate::model_select::{build_aa_set, load_param_from_store, load_seed_param, ModelEntryOwned};
-use crate::rescore;
 use crate::spectra::spectrum_ext_lower;
 use crate::train_intensity::GbdtMode;
 use clap::Args;
@@ -272,50 +271,6 @@ pub(crate) struct TrainArgs {
     /// warning and embed the degenerate model anyway. Default off.
     #[arg(long = "allow-degenerate-model", hide = true, default_value_t = false)]
     pub(crate) allow_degenerate_model: bool,
-}
-
-/// Available subcommands.
-#[derive(clap::Args, Debug)]
-pub(crate) struct RescorePinArgs {
-    /// Input PIN.
-    #[arg(long = "in")]
-    pub(crate) input: PathBuf,
-    /// Output target PSMs (Percolator `.psms` shape: PSMId, score, q-value, PEP).
-    #[arg(long = "out-psms")]
-    pub(crate) out_psms: PathBuf,
-    /// Output decoy PSMs.
-    #[arg(long = "out-dpsms")]
-    pub(crate) out_dpsms: PathBuf,
-    /// Cross-validation seed.
-    #[arg(long = "seed", default_value_t = 42u64)]
-    pub(crate) seed: u64,
-}
-
-pub(crate) fn run_rescore_pin(args: RescorePinArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let pin_text = std::fs::read_to_string(&args.input)
-        .map_err(|e| format!("reading {}: {e}", args.input.display()))?;
-    let rows = rescore::native_rescore_qvalues(&pin_text, args.seed)?;
-    let mut t = std::io::BufWriter::new(std::fs::File::create(&args.out_psms)?);
-    let mut d = std::io::BufWriter::new(std::fs::File::create(&args.out_dpsms)?);
-    use std::io::Write;
-    for w in [&mut t, &mut d] {
-        writeln!(
-            w,
-            "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds"
-        )?;
-    }
-    let (mut nt, mut nd) = (0usize, 0usize);
-    for (id, is_decoy, q, score) in &rows {
-        let w: &mut dyn Write = if *is_decoy { &mut d } else { &mut t };
-        writeln!(w, "{id}\t{score}\t{q}\t{q}\t-\t-")?;
-        if *is_decoy {
-            nd += 1
-        } else {
-            nt += 1
-        }
-    }
-    eprintln!("rescore-pin: {nt} target and {nd} decoy rows written");
-    Ok(())
 }
 
 /// Load all MS2 spectra from a path using the same format-dispatch logic as
@@ -1078,9 +1033,6 @@ pub(crate) fn read_msnet_parquet(path: &Path) -> Result<Vec<MsnetPsm>, Box<dyn s
     }
     Ok(out)
 }
-
-// train-intensity: merge partial intensity stats into a finalized model parquet
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// `andes train`: train a scoring model directly from externally-labeled PSM
 /// parquets, reusing the existing accumulate → estimate → store machinery but

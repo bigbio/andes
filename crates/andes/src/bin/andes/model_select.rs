@@ -484,7 +484,6 @@ mod param_resolver_tests {
         EnzymeSpecificity,
     };
     use crate::spectra::title_prefix_for;
-    use crate::train_intensity::finalize_intensity_stats;
     use ::search::PrecursorCalMode;
     use model::Tolerance;
 
@@ -555,21 +554,6 @@ mod param_resolver_tests {
         assert_eq!(parse_precursor_cal("OFF").unwrap(), PrecursorCalMode::Off);
         assert_eq!(parse_precursor_cal("on").unwrap(), PrecursorCalMode::On);
         assert!(parse_precursor_cal("bogus").is_err());
-    }
-
-    #[test]
-    fn finalize_intensity_stats_drops_zero_count() {
-        // A count==0 key (e.g. from a partial aggregation parquet) must not
-        // produce NaN mean/var in the finalized model — it carries no signal.
-        assert_eq!(finalize_intensity_stats(0.0, 0.0, 0), None);
-    }
-
-    #[test]
-    fn finalize_intensity_stats_computes_mean_and_clamped_var() {
-        // sum=6, sum_sq=14, count=2 -> mean=3, var=max(0, 14/2 - 9)= max(0,-2)=0.
-        let (mean, var) = finalize_intensity_stats(6.0, 14.0, 2).unwrap();
-        assert_eq!(mean, 3.0);
-        assert_eq!(var, 0.0);
     }
 
     #[test]

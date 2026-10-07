@@ -171,7 +171,6 @@ pub(crate) fn search_secondary(
     aa_set: &AminoAcidSet,
     params: &SearchParams,
     fragment_tolerance_da: f64,
-    intensity_model: Option<&scoring_crate::IntensityModel>,
 ) -> Option<(PsmMatch, std::collections::HashSet<i64>)> {
     let z = co.charge;
     if z == 0 {
@@ -322,13 +321,7 @@ pub(crate) fn search_secondary(
     // they stay consistent with its RawScore / SpecEValue. The override makes the
     // PIN writer compute ExpMass/dm/absdm from the co-isolated mass.
     let cand_peptide = &candidates[best.primary_candidate_idx() as usize].peptide;
-    let mut features = crate::match_engine::compute_psm_features(
-        &res_ss,
-        cand_peptide,
-        scorer,
-        z,
-        intensity_model,
-    );
+    let mut features = crate::match_engine::compute_psm_features(&res_ss, cand_peptide, scorer, z);
     features.edge_score = best.edge_score;
     // TailorScore / DeltaRawScore over this secondary's residual candidate
     // distribution — the same per-spectrum features run_chunk_inner fills for
@@ -602,7 +595,6 @@ mod tests {
             &prepared.aa_set_for_scoring,
             &params,
             frag_tol,
-            None,
         );
 
         let (psm, winner_claimed) =
@@ -633,7 +625,6 @@ mod tests {
             &prepared.aa_set_for_scoring,
             &params,
             frag_tol,
-            None,
         );
         let matched_after = again
             .as_ref()
@@ -723,7 +714,6 @@ mod tests {
             &prepared.aa_set_for_scoring,
             &params,
             frag_tol,
-            None,
         );
         let (psm, _claimed) =
             got.expect("secondary must be found at the calibration-adjusted mass");

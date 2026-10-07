@@ -23,26 +23,6 @@ use crate::scoring::strong_score::DENSITY_HW;
 use model::mass::nominal_from;
 use model::peptide::Peptide;
 
-/// Diagnostic peptide-trace filter, read once from the `ANDES_TRACE_PEP`
-/// environment variable and memoized.
-///
-/// Reading the variable on every `score_psm` call would acquire the global
-/// environment lock each time, and `score_psm` runs on the order of billions
-/// of times in a large search — so the value is captured once via `OnceLock`
-/// (thread-safe, first-call-wins) and reused.
-///
-/// Returns `Some(filter)` when the variable holds a non-empty string, else
-/// `None`. When `None`, tracing is fully inert and the scoring path is
-/// unchanged.
-fn trace_pep_filter() -> Option<&'static String> {
-    static CELL: OnceLock<Option<String>> = OnceLock::new();
-    CELL.get_or_init(|| match std::env::var("ANDES_TRACE_PEP") {
-        Ok(s) if !s.is_empty() => Some(s),
-        _ => None,
-    })
-    .as_ref()
-}
-
 /// Whether `scorer` can give an edge a non-zero score: it needs a mass-error
 /// distribution and an ion-existence table (low-res models carry neither).
 pub fn edge_scoring_enabled(scorer: &RankScorer) -> bool {
@@ -272,33 +252,6 @@ pub fn score_psm(
     // Used to compute suffix_nominal = peptide_nominal - prefix_nominal.
     let peptide_nominal = peptide.nominal_residue_mass();
 
-    // ── Optional per-split score tracing ───────────────────────────────────
-    // When `ANDES_TRACE_PEP` is set and the peptide's bare residue sequence
-    // contains the filter substring, dump one trace line per cleavage site to
-    // stderr (prefix/suffix masses, the cached node scores, the running sum).
-    // The filter is read once and memoized; when unset this block is inert
-    // and adds nothing to the scoring path.
-    let trace = match trace_pep_filter() {
-        Some(filter) => {
-            // Only build the per-residue String when the env var is set.
-            let pep_seq_string: String = peptide
-                .residues
-                .iter()
-                .map(|aa| aa.residue as char)
-                .collect();
-            if pep_seq_string.contains(filter.as_str()) {
-                eprintln!(
-                    "TRACE_RUST_HEADER\tpep={}\tcharge={}\tparent_mass={:.4}\tpeptide_nominal={}\tn={}\tfragment_tol_da={}",
-                    pep_seq_string, charge, spectrum_parent_mass, peptide_nominal, n, fragment_tolerance_da
-                );
-                Some(pep_seq_string)
-            } else {
-                None
-            }
-        }
-        None => None,
-    };
-
     // ── Neutral-loss contribution gate (peptide-aware, additive) ─────────────
     // Design/extension notes (glyco + sequence-based modifiers à la MaxSBM):
     //   docs/plans/2026-06-20-glyco-neutral-loss-and-maxsbm.md
@@ -361,28 +314,6 @@ pub fn score_psm(
                 &suffix_losses,
             );
         }
-
-        if let Some(pep_seq_string) = &trace {
-            let cached_pref = scored_spec.cached_prefix_score(prefix_nominal);
-            let cached_suff = scored_spec.cached_suffix_score(suffix_nominal);
-            let pref_str = cached_pref
-                .map(|v| format!("{v}"))
-                .unwrap_or_else(|| "NA".to_string());
-            let suff_str = cached_suff
-                .map(|v| format!("{v}"))
-                .unwrap_or_else(|| "NA".to_string());
-            eprintln!(
-                "TRACE_RUST\tpep={}\tsplit={}\tprefMass={}\tsuffMass={}\tprefScore={}\tsuffScore={}\tcontribution={}\tcumulative={}\tprefAccF64={:.6}",
-                pep_seq_string, s, prefix_nominal, suffix_nominal,
-                pref_str, suff_str, contribution, total, prefix_mass_acc
-            );
-        }
-    }
-    if let Some(pep_seq_string) = &trace {
-        eprintln!(
-            "TRACE_RUST_FINAL\tpep={}\trawScore={}",
-            pep_seq_string, total
-        );
     }
     total as f32
 }
@@ -460,8 +391,7 @@ pub fn hyperscore_psm_with_matches(
 /// instead of a flat 0.5 Da window (0.5 Da is 6-83x too loose on high-res AI-ETD →
 /// noise-dominated); (2) NORMALIZE the score by peptide length so a longer
 /// wrong/decoy peptide can't out-count a shorter true one in the per-scan collapse
-/// (traced: a 45-mer decoy beat a 19-mer target). `ANDES_GLYCO_CZ_FIX_OFF` restores
-/// the old buggy behavior (flat 0.5 Da, unnormalized count) for A/B/rollback.
+/// (traced: a 45-mer decoy beat a 19-mer target).
 fn cz_fix_enabled() -> bool {
     static CELL: OnceLock<bool> = OnceLock::new();
     // Always enabled. Without it a long decoy out-counts a shorter true peptide in the
@@ -498,7 +428,7 @@ fn cz_settings() -> CzSettings {
     CZ_SETTINGS.get().copied().unwrap_or_default()
 }
 
-/// Optional override for the c/z fragment-charge ceiling (`ANDES_GLYCO_CZ_ZMAX`).
+/// Optional override for the c/z fragment-charge ceiling (`--glyco-cz-max-charge`).
 ///
 /// Round-6 audit finding: the bundled models ship `apply_deconvolution = true`, and
 /// [`ScoredSpectrum::nearest_peak_full`] resolves against the DECONVOLUTED peak list —
@@ -506,8 +436,8 @@ fn cz_settings() -> CzSettings {
 /// z1 m/z. Predicting c/z at charge ≥2 therefore probes m/z that deconvolution has
 /// vacated, adding chance matches rather than evidence. The effective ceiling therefore
 /// DEFAULTS TO 1 when the spectrum was deconvoluted (see [`cz_effective_zmax_for`]),
-/// validated +12 backbone-correct @1%. `ANDES_GLYCO_CZ_ZMAX=<n>` raises it back toward
-/// the call site's own ceiling (`=3` restores the pre-round-7 behaviour).
+/// validated +12 backbone-correct @1%. `--glyco-cz-max-charge <n>` raises it back toward
+/// the call site's own ceiling.
 fn cz_zmax_override() -> Option<u8> {
     use std::sync::OnceLock;
     static CELL: OnceLock<Option<u8>> = OnceLock::new();
@@ -521,7 +451,7 @@ fn cz_zmax_override() -> Option<u8> {
 /// charge-reduced detected z2/z3 clusters to their z1 m/z. With deconvolution OFF
 /// (e.g. `etd_lowres_tryp_phosphorylation`) multiply-charged c/z remain at their
 /// true m/z and a ceiling of 1 would make them unmatchable, so the call site's own
-/// ceiling is kept. An explicit `ANDES_GLYCO_CZ_ZMAX` still wins in both cases.
+/// ceiling is kept. An explicit `--glyco-cz-max-charge` still wins in both cases.
 pub fn cz_effective_zmax_for(default_zmax: u8, apply_deconvolution: bool) -> u8 {
     match cz_zmax_override() {
         Some(z) => default_zmax.min(z),

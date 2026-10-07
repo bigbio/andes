@@ -150,8 +150,8 @@ pub struct PsmFeatures {
     pub unique_match_fraction: f32,
 
     // ── Strong-score S1: intensity-model signal numerator ───────────────────
-    /// Cosine similarity between IntensityModel-predicted and observed relative
-    /// intensities over b/y ions. 0.0 when no intensity model is loaded.
+    /// Cosine similarity between frag-intensity-model-predicted and observed
+    /// relative intensities over b/y ions. 0.0 when the model carries none.
     pub intensity_signal: f32,
 
     // ── Strong-score S1b: frag-intensity LLR battery (additive PIN columns) ──

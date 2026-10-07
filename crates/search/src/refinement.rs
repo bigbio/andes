@@ -414,7 +414,8 @@ fn uses_protein_nterm(c: &Candidate, starts_with_met: bool) -> bool {
         })
 }
 
-/// Accession prefix of the entrapment anchors `--refine-entrapment` adds.
+/// Accession prefix of the entrapment anchors the refine config's
+/// `entrapment: true` adds.
 pub const ENTRAPMENT_PREFIX: &str = "ENT_";
 
 /// One entrapment anchor per Pass-2 anchor: the anchor with its interior shuffled

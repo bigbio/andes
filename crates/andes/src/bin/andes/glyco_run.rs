@@ -144,7 +144,7 @@ pub(crate) fn run_glyco(
         // (mouse 3198 vs 3183 correct; plasma 399 vs 380). An explicit
         // --glyco-retrieval-tol-ppm overrides the auto default either way.
         retrieval_tol_ppm: retrieval_ppm,
-        full_glycan_db: cli.glyco_full_glycan_db,
+        full_glycan_db: !cli.glyco_peptide_first,
         debug: cli.debug_glyco,
         // Single-file only: cross-file pairing is unsound (see guard above).
         hcd_pair: cli.glyco_hcd_pair && spectrum_paths.len() == 1,

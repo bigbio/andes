@@ -49,7 +49,7 @@ Reference identifications for scoring ship in [`glyco/truth/`](glyco/truth/). Re
 | **PTM discovery** (`--refine`, in-RAM path) | Astral | PSMs @ q≤0.01 | **40,028** (+4.3%) at `main` with #106; 40,283 at `7d1e4565` | in-RAM baseline 38,394 | Pass 2 (2,388 modified PSMs): **~2.8% FDP** under the merged 1% threshold, by matched entrapment anchors (refine config `entrapment: true`: 27 hits on 1,935; 3.3% before #106) | 363 s ¶ |
 | | TMT, UPS1 | — | skipped | high-res only, by design | | |
 | **Glyco, deep tier** | pGlyco2 mouse liver PXD005553, 5 fractions, TRFP 1.4.3, `main` `14818d3e` | glycoPSMs @1% | **31,666 ± 9** | pGlyco2 **78.9% confirmed** · MSFragger **88.0% confirmed**, 95.8% peptidoform agreement | **1.11% ± 0.03 true FDP** (1:1 database) | 23–29 min / fraction, 16 cores |
-| **Glyco, quick tier** | one pGlyco2 liver fraction (`MouseLiver-Z-T-1`), native `.raw`, bundled pGlyco mouse glycan database (`--glyco-species mouse`, 1,833 compositions) | glycoPSMs @1% | **7,162** (seed 42; seeds 1–5: 7,094–7,137) | pGlyco2 **90.1% confirmed** · MSFragger **90.7% confirmed**, 97.8% / 95.7% peptidoform agreement | **0.89–1.24% true FDP** over 6 seeds (seed 42: 1.24%, CI 0.90–1.68; 1:1 database) | 4,888 s, 8 threads |
+| **Glyco, quick tier** | one pGlyco2 liver fraction (`MouseLiver-Z-T-1`), mzML, bundled pGlyco mouse glycan database (`--glyco-species mouse`, 1,833 compositions) | glycoPSMs @1% | **6,922–6,959** (seeds 42, 1, 2) | pGlyco2 **89.0% confirmed** · MSFragger **89.6% confirmed** | **0.85–1.36% true FDP** over 3 seeds (1:1 database) | **6 min**, 8 threads, 19.9 GB |
 | **Phospho-enriched** (first PTM benchmark) | PXD007653 mouse liver EasyPhos, one file (`control2`), Q Exactive HCD, mzML via TRFP 1.4.3 (sha256 `03cdb585…`) | PSMs @ q≤0.01 (Percolator seeds 42, 1–3) | **37,179–37,280** with the fragment-ion index · **26,806–26,883 phospho-bearing** | **Comet 2025.01, same VM, file and settings: 33,928–34,025 (+9.6% for andes), 23,874–23,942 phospho-bearing, 1.74–1.78% FDP, 1,166 s** · MaxQuant (PEP≤0.01, 23,563 scans): **82.4% covered** (19,420 scans), 95.3% same-scan backbone agreement | **1.11–1.16%** true FDP (1:1 database) | **637 s** at #112, 8 threads, 80 Da index slices (754 s at `77e972ec`, same slices; 2026-09 cluster run: 164 s at 32 threads) |
 
 † Java MS-GF+ v20240326 was not re-run in 2026-09 or 2026-10; its counts are historical
@@ -171,6 +171,21 @@ where 2026-09-06 used the former built-in list with the gated NeuGc bound (852 c
 | MSFragger confirmed | 87.8% | **90.7%** |
 | same-scan peptidoform agreement, pGlyco2 / MSFragger | 96.3% / 95.6% | **97.8% / 95.7%** |
 | search wall, 8 threads | 8,145 s (WSL2 host) | 4,888 s (benchmark VM) |
+
+**Default glycan path (2026-10-07).** The mass-driven full-glycan-list branch is now the
+default; `--glyco-peptide-first` restores the peptide-first fragment-index path. Same mzML
+(TRFP 2.0.0-dev), database and build, one job on the VM at a time, Percolator seeds 42/1/2:
+
+| | peptide-first (`--glyco-peptide-first`) | **full glycan list (default)** |
+|---|---:|---:|
+| glycoPSMs @1% | 7,084 – 7,116 | 6,922 – 6,959 (−2.3%) |
+| true FDP (1:1 database) | 1.01 – 1.13% | 0.85 – 1.36% |
+| pGlyco2 / MSFragger confirmed | 90.1% / 90.8% | 89.0% / 89.6% |
+| search wall, 8 threads | 79 min | **6 min** |
+| peak memory | 29.7 GB | **19.9 GB** |
+
+The peptide-first path's 29.7 GB peak is within reach of a 32 GB machine's limit; it was
+OOM-killed when another job shared the VM.
 
 Selection losses against pGlyco2 fell from 12.9% (wrong target 5.6% + decoy won 7.3%) to 9.4%
 (4.0% + 5.3%). #95 (the collapse prefers the monoisotopic hypothesis) landed in between; with

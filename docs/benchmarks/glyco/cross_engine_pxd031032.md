@@ -15,7 +15,7 @@ Reproduce with `docs/benchmarks/glyco/compare_engines.py`.
 
 | Engine | Result file | Filter |
 |---|---|---|
-| andes | `<stem>.glyco.pin` + native-rescore `.psms` | q ≤ 0.01, seed 42, `--glyco-full-glycan-db`, `pGlyco-N-Mouse.gdb` (1833 comps) |
+| andes | `<stem>.glyco.pin` + native-rescore `.psms` | q ≤ 0.01, seed 42, full glycan list (the `--glyco` default since 2026-10-07; `--glyco-full-glycan-db` before), `pGlyco-N-Mouse.gdb` (1833 comps) |
 | Byonic | `MouseLiver-Z-T-1.raw_20210216_Byonic.xlsx` | Score ≥ 300 |
 | Glyco-Decipher | `MouseLiver-Z-T-1_Glyco_Decipher_GPSM.txt` | PeptideFDR ≤ 0.01 |
 | StrucGP | `MouseLiver-Z-T-1_result_StrucGP.xlsx` | all rows |

@@ -563,11 +563,11 @@ pub(crate) struct SearchArgs {
     #[arg(long = "glyco-retrieval-tol-ppm", hide = true, value_parser = parse_positive_tol)]
     pub(crate) glyco_retrieval_tol_ppm: Option<f64>,
 
-    /// Replace the peptide-first b/y fragment-index fallback with a mass-driven
-    /// full-glycan-list DB branch (glycan-first recovery for weak-core-Y spectra).
-    /// A/B flag; default OFF keeps the shipped peptide-first path.
-    #[arg(long = "glyco-full-glycan-db", hide = true, default_value_t = false)]
-    pub(crate) glyco_full_glycan_db: bool,
+    /// Use the peptide-first b/y fragment-index fallback instead of the default
+    /// mass-driven full-glycan-list branch. On a mouse-liver fraction it finds ~2%
+    /// more glycoPSMs at ~13x the run time and ~1.5x the peak memory.
+    #[arg(long = "glyco-peptide-first", hide = true, default_value_t = false)]
+    pub(crate) glyco_peptide_first: bool,
 
     /// Diagnostic glyco mode: emit ALL candidate rows per scan (including de-novo
     /// mass-residual hits). The resulting PIN is for inspection ONLY and must never

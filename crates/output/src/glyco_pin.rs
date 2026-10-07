@@ -1009,7 +1009,6 @@ mod tests {
             precursor_cal_mode: search::PrecursorCalMode::Off,
             cal_min_spec_keys: search::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS,
             fragment_index_top_k: 0,
-            fragment_index_intensity_tiebreak: false,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,

@@ -986,7 +986,6 @@ impl<'a> PreparedSearch<'a> {
                                 scorer.feature_match_tolerance(),
                                 params.fragment_index_top_k as usize,
                                 crate::search_params::FRAGMENT_INDEX_MIN_MATCHED,
-                                params.fragment_index_intensity_tiebreak,
                             );
                             let target_bare_seqs = self
                                 .mmap_target_bare_seqs

@@ -22,7 +22,7 @@ MS-GF+'s strongest regime, it trails Java.
 
 | Engine | Astral (high-res HCD) | TMT a05058 (low-res CID) | UPS1 (low-res LFQ) |
 |---|---:|---:|---:|
-| **andes** | **46,774** | **12,281** | 15,838 |
+| **andes** | **47,080** | **12,281** | 15,838 |
 | Comet 2025.01 | 31,435 | 10,504 | 14,734 |
 | Java MS-GF+ v20240326 † | 26,542 | 10,651 | **15,904** |
 | *andes wall time* | *160–161 s* | *53–55 s* | *34–35 s* |
@@ -32,7 +32,8 @@ MS-GF+'s strongest regime, it trails Java.
 FASTA, andes `XXX_` decoys, Percolator 3.7.1 `--seed 42 -Y`, same 8-thread host). andes measured
 **2026-10-07** at #112 (`40774aca`); Comet on 2026-10-05, reproducing its 2026-09-04 counts.
 Since #112, high-res searches retrieve candidates with the fragment-ion index, which moved Astral
-from 38,394 to 46,774; TMT and UPS1 are unchanged. andes finds 7.5–48.8% more PSMs in 0.70–0.76x
+from 38,394 to 46,774, and breaking the index's vote ties by matched intensity took it to 47,080;
+TMT and UPS1 are unchanged. andes finds 7.5–49.8% more PSMs in 0.70–0.76x
 Comet's wall time. **†** Java MS-GF+ was not re-run; its counts are from an earlier session, and it
 remains ~10–40x slower. **Error rates:** checked against an entrapment version of the Astral
 database, the Astral gain holds at an equal true FDP (+22.2% over the previous in-RAM retrieval at
@@ -47,13 +48,13 @@ on the standard sets; Comet 2026-10-06, one run). andes uses 36–57% less CPU t
 
 | dataset | engine | PSMs @ q≤0.01 | wall | CPU time | peak memory |
 |---|---|---:|---:|---:|---:|
-| Astral | **andes** | **46,774** | **160 s** | **787 s** | **4.1 GB** |
+| Astral | **andes** | **47,080** | **160 s** | **787 s** | **4.1 GB** |
 | | Comet | 31,435 | 217 s | 1,594 s | 8.1 GB |
 | TMT a05058 | **andes** | **12,281** | **53 s** | **295 s** | 5.9 GB |
 | | Comet | 10,504 | 77 s | 568 s | 2.9 GB |
 | UPS1 | **andes** | **15,838** | **34 s** | **199 s** | **2.5 GB** |
 | | Comet | 14,734 | 42 s | 309 s | 2.9 GB |
-| Phospho (PXD007653) | **andes** | **37,179** (1.11% FDP) | **637 s** | **3,608 s** | 13.7 GB |
+| Phospho (PXD007653) | **andes** | **37,190** (1.02% FDP) | **637 s** | **3,608 s** | 13.7 GB |
 | | Comet | 33,984 (1.77% FDP) | 1,096 s | 8,399 s | 6.0 GB |
 
 <sub>PSM counts: 2026-10-05 refresh (phospho: seed 42). Wall times vary 5–15% between sessions;

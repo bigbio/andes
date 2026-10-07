@@ -40,7 +40,7 @@ Reference identifications for scoring ship in [`glyco/truth/`](glyco/truth/). Re
 
 | benchmark | dataset | what is measured | andes | reference | measured error | wall (andes) |
 |---|---|---|---:|---:|---|---:|
-| **Standard, high-res** | Astral, PXD070049, HCD LFQ | PSMs @ q≤0.01 | **46,774** | Comet 31,435 (+48.8%), 215 s · Java MS-GF+ 26,542 † | entrapment version of the database: at an equal true FDP of 1.00%, +22.2% over the previous in-RAM retrieval; the nominal 1% is **1.07% true** | **160–161 s** |
+| **Standard, high-res** | Astral, PXD070049, HCD LFQ | PSMs @ q≤0.01 | **47,080** | Comet 31,435 (+49.8%), 215 s · Java MS-GF+ 26,542 † | entrapment version of the database: at an equal true FDP of 1.00%, +22.2% over the previous in-RAM retrieval; the nominal 1% is **1.07% true** | **160–161 s** |
 | **Standard + TMT labels** | a05058, PXD007683, ion-trap CID | PSMs @ q≤0.01 | **12,281** | Comet 10,504 (+16.9%), 76 s · Java 10,651 | not measurable | **53–55 s** |
 | **Standard, low-res LFQ** | UPS1, PXD001819, ion-trap CID | PSMs @ q≤0.01 | 15,838 | Comet 14,734 (+7.5%), 46 s · **Java 15,904** | 166 entrapment hits ⇒ **3.6% true FDP** at nominal 1%; Comet: 154 hits on 14,734, the same rate | **34–35 s** |
 | **Chimeric** (`--chimeric`, in-RAM path) | Astral | PSMs @ q≤0.01 | **65,028** (+69%; 55,616 distinct scans) | in-RAM baseline 38,394 | not measurable | 337 s ¶ |
@@ -50,7 +50,7 @@ Reference identifications for scoring ship in [`glyco/truth/`](glyco/truth/). Re
 | | TMT, UPS1 | — | skipped | high-res only, by design | | |
 | **Glyco, deep tier** | pGlyco2 mouse liver PXD005553, 5 fractions, TRFP 1.4.3, `main` `14818d3e` | glycoPSMs @1% | **31,666 ± 9** | pGlyco2 **78.9% confirmed** · MSFragger **88.0% confirmed**, 95.8% peptidoform agreement | **1.11% ± 0.03 true FDP** (1:1 database) | 23–29 min / fraction, 16 cores |
 | **Glyco, quick tier** | one pGlyco2 liver fraction (`MouseLiver-Z-T-1`), mzML, bundled pGlyco mouse glycan database (`--glyco-species mouse`, 1,833 compositions) | glycoPSMs @1% | **6,922–6,959** (seeds 42, 1, 2) | pGlyco2 **89.0% confirmed** · MSFragger **89.6% confirmed** | **0.85–1.36% true FDP** over 3 seeds (1:1 database) | **6 min**, 8 threads, 19.9 GB |
-| **Phospho-enriched** (first PTM benchmark) | PXD007653 mouse liver EasyPhos, one file (`control2`), Q Exactive HCD, mzML via TRFP 1.4.3 (sha256 `03cdb585…`) | PSMs @ q≤0.01 (Percolator seeds 42, 1–3) | **37,179–37,280** with the fragment-ion index · **26,806–26,883 phospho-bearing** | **Comet 2025.01, same VM, file and settings: 33,928–34,025 (+9.6% for andes), 23,874–23,942 phospho-bearing, 1.74–1.78% FDP, 1,166 s** · MaxQuant (PEP≤0.01, 23,563 scans): **82.4% covered** (19,420 scans), 95.3% same-scan backbone agreement | **1.11–1.16%** true FDP (1:1 database) | **637 s** at #112, 8 threads, 80 Da index slices (754 s at `77e972ec`, same slices; 2026-09 cluster run: 164 s at 32 threads) |
+| **Phospho-enriched** (first PTM benchmark) | PXD007653 mouse liver EasyPhos, one file (`control2`), Q Exactive HCD, mzML via TRFP 1.4.3 (sha256 `03cdb585…`) | PSMs @ q≤0.01 (Percolator seeds 42, 1–3) | **37,188–37,215** with the fragment-ion index (seeds 42, 1, 2) · **26,806–26,883 phospho-bearing** (before the tie-break) | **Comet 2025.01, same VM, file and settings: 33,928–34,025 (+9.6% for andes), 23,874–23,942 phospho-bearing, 1.74–1.78% FDP, 1,166 s** · MaxQuant (PEP≤0.01, 23,563 scans): **82.4% covered** (19,420 scans), 95.3% same-scan backbone agreement | **1.02–1.08%** true FDP (1:1 database) | **637 s** at #112, 8 threads, 80 Da index slices (754 s at `77e972ec`, same slices; 2026-09 cluster run: 164 s at 32 threads) |
 
 † Java MS-GF+ v20240326 was not re-run in 2026-09 or 2026-10; its counts are historical
 (same protocol, earlier session) and it remains ~10-40x slower than andes.
@@ -81,13 +81,13 @@ Phospho PSMs are Percolator seed 42.
 
 | dataset | engine | PSMs @ q≤0.01 | wall | CPU time | peak memory |
 |---|---|---:|---:|---:|---:|
-| Astral | **andes** | **46,774** | **160 / 161 s** | **787 / 796 s** | **4.1 GB** |
+| Astral | **andes** | **47,080** | **160 / 161 s** | **787 / 796 s** | **4.1 GB** |
 | | Comet | 31,435 | 217 s | 1,594 s | 8.1 GB |
 | TMT a05058 | **andes** | **12,281** | **53 / 55 s** | **295 / 303 s** | 5.9 GB |
 | | Comet | 10,504 | 77 s | 568 s | 2.9 GB |
 | UPS1 | **andes** | **15,838** | **34 / 35 s** | **199 / 205 s** | **2.5 GB** |
 | | Comet | 14,734 | 42 s | 309 s | 2.9 GB |
-| Phospho (PXD007653) | **andes** | **37,179** (1.11% FDP) | **637 s** | **3,608 s** | 13.7 GB |
+| Phospho (PXD007653) | **andes** | **37,190** (1.02% FDP) | **637 s** | **3,608 s** | 13.7 GB |
 | | Comet | 33,984 (1.77% FDP) | 1,096 s | 8,399 s | 6.0 GB |
 
 - **CPU time:** andes uses 36–57% less than Comet on every dataset.

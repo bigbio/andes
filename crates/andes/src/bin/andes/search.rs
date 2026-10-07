@@ -49,13 +49,26 @@ pub(crate) struct RetrievalChoice {
     pub refused_because: Option<&'static str>,
 }
 
+/// Whether the out-of-core index cache at `path` exists or can be created: a
+/// read-only or missing temp directory would otherwise fail the search when the
+/// index is built.
+fn index_cache_writable(path: &std::path::Path) -> bool {
+    if path.exists() {
+        return true;
+    }
+    let probe = path.with_extension("probe");
+    let ok = std::fs::File::create(&probe).is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
+}
+
 /// Pick the out-of-core candidate-retrieval strategy. The fragment-ion index is
 /// selected only where it was MEASURED to win, and the two conditions are not
 /// negotiable by a flag:
 ///
-///  1. **The candidate index is out-of-core.** In RAM the enumeration is built
-///     once and every spectrum looks its window up; that path was never slow,
-///     and the index would only add its own per-slice build cost.
+///  1. **The candidate index is out-of-core.** The index is built per slice on
+///     that path; `--candidate-index auto` selects it for high-resolution
+///     fragments so the index is used there.
 ///  2. **Fragment matching is high-resolution.** The index bins ions at the
 ///     fragment tolerance and ranks candidates by how many peaks vote for them.
 ///     At the low-resolution 0.5 Da tolerance those bins are so wide that the
@@ -684,6 +697,16 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             };
             if params.chimeric || cli.refine || cli.glyco {
                 search::CandidateIndexMode::Ram
+            } else if high_res_fragments
+                && cli.fragment_index != FragmentIndexFlag::Off
+                && !index_cache_writable(&index_cache_path(&idx, &params))
+            {
+                eprintln!(
+                    "[auto] cannot write the out-of-core index cache in {} -> in-RAM \
+                     enumeration (set TMPDIR to a writable directory for fragment-ion retrieval)",
+                    std::env::temp_dir().display()
+                );
+                search::CandidateIndexMode::Ram
             } else if high_res_fragments && cli.fragment_index != FragmentIndexFlag::Off {
                 // High-resolution fragments: retrieve candidates with the fragment-ion
                 // index, which runs on the out-of-core path. The in-RAM path keeps the
@@ -737,7 +760,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `--candidate-index mmap` in this phase (fail loud rather than silently
     // produce wrong results).
     // Retrieval strategy for the out-of-core path (issue #76): chosen by
-    // `retrieval_choice` and reported once. There is no user-facing switch.
+    // `retrieval_choice` and reported once; `--fragment-index` overrides it.
     let choice = retrieval_choice(
         params.candidate_index == search::CandidateIndexMode::Mmap,
         scorer.feature_match_tolerance(),

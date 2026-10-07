@@ -666,8 +666,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(n) = cli.cal_min_spec_keys {
         params.cal_min_spec_keys = n;
     }
-    params.rank_ppm_weight = cli.rank_ppm_weight;
-    params.strong_ppm_weight = cli.strong_ppm_weight;
     params.precursor_mass_shift_ppm = 0.0;
     params.refine_select_psm_fdr = cli.refine_select_psm_fdr;
     params.score_mode = match cli.score {

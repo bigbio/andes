@@ -103,12 +103,6 @@ pub struct SearchParams {
     /// (issue #76) instead of every peptidoform in its precursor windows.
     /// 0 (default) = off, byte-identical enumeration path.
     pub fragment_index_top_k: u32,
-    /// Weight of the fragment mass-accuracy log-likelihood (`rank_ppm_llr`) added to
-    /// the rank score on high-resolution models. 0 = off.
-    pub rank_ppm_weight: f32,
-    /// Weight of the same log-likelihood added to the strong score, which selects the
-    /// reported PSM in strong mode. 0 = off.
-    pub strong_ppm_weight: f32,
     /// Learned file-wide ppm shift applied to observed neutral masses in the
     /// main pass. Stays 0.0 until the pre-pass calibrator runs.
     pub precursor_mass_shift_ppm: f64,
@@ -196,8 +190,6 @@ impl SearchParams {
             precursor_cal_mode: PrecursorCalMode::Off,
             cal_min_spec_keys: crate::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS,
             fragment_index_top_k: 0,
-            rank_ppm_weight: 0.0,
-            strong_ppm_weight: 0.0,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,

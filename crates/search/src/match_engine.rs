@@ -1049,13 +1049,9 @@ impl<'a> PreparedSearch<'a> {
                 let enz = params.enzyme;
                 let edge_enabled = edge_scoring_enabled(scorer);
                 let high_res_model = scorer.param().data_type.instrument.is_high_resolution();
-                let ppm_weight = if high_res_model {
-                    params.rank_ppm_weight
-                } else {
-                    0.0
-                };
+                let ppm_weight = if high_res_model { RANK_PPM_WEIGHT } else { 0.0 };
                 let strong_ppm_weight = if high_res_model {
-                    params.strong_ppm_weight
+                    STRONG_PPM_WEIGHT
                 } else {
                     0.0
                 };
@@ -1669,6 +1665,13 @@ pub(crate) fn cleavage_credit_for(cand: &Candidate, enz: Enzyme, aa_set: &AminoA
 ///   sorted descending by intensity, top-7 taken; absolute Da error for
 ///   mean/stdev, signed ppm for rel-mean/rel-stdev. Population stdev
 ///   formula: `sqrt(E[x²] - mean²)`.
+/// Weights of `rank_ppm_llr` in the rank score (which picks the retained
+/// candidates) and in the strong score (which selects the reported PSM), applied on
+/// high-resolution models only. With both at 1, Astral gave +1.4% PSMs at an equal
+/// 1.00% entrapment FDP; the rank term alone was within seed noise.
+const RANK_PPM_WEIGHT: f32 = 1.0;
+const STRONG_PPM_WEIGHT: f32 = 1.0;
+
 /// Gaussian width (ppm) of true fragment matches in `rank_ppm_llr`.
 const RANK_PPM_SIGMA: f64 = 7.0;
 /// Match window (ppm, each side) of `rank_ppm_llr`; chance matches are uniform over it.

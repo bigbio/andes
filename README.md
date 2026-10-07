@@ -43,7 +43,7 @@ at a nominal 1% is **~3.6%**, the same rate as Comet's. Details:
 **Time, CPU and memory** (same VM, 8 threads, `/usr/bin/time`; andes 2026-10-07 at #112, two runs
 on the standard sets; Comet 2026-10-06, one run). andes uses 36–57% less CPU time than Comet and
 17–42% less wall time. It needs less memory on Astral and UPS1, and more on TMT (2x) and phospho
-(2.7x).
+(2.3x, 80 Da index slices).
 
 | dataset | engine | PSMs @ q≤0.01 | wall | CPU time | peak memory |
 |---|---|---:|---:|---:|---:|
@@ -53,7 +53,7 @@ on the standard sets; Comet 2026-10-06, one run). andes uses 36–57% less CPU t
 | | Comet | 10,504 | 77 s | 568 s | 2.9 GB |
 | UPS1 | **andes** | **15,838** | **34 s** | **199 s** | **2.5 GB** |
 | | Comet | 14,734 | 42 s | 309 s | 2.9 GB |
-| Phospho (PXD007653) | **andes** | **37,179** (1.11% FDP) | **637 s** | **3,608 s** | 16.4 GB |
+| Phospho (PXD007653) | **andes** | **37,179** (1.11% FDP) | **637 s** | **3,608 s** | 13.7 GB |
 | | Comet | 33,984 (1.77% FDP) | 1,096 s | 8,399 s | 6.0 GB |
 
 <sub>PSM counts: 2026-10-05 refresh (phospho: seed 42). Wall times vary 5–15% between sessions;

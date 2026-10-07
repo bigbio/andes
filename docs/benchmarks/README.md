@@ -50,7 +50,7 @@ Reference identifications for scoring ship in [`glyco/truth/`](glyco/truth/). Re
 | | TMT, UPS1 | — | skipped | high-res only, by design | | |
 | **Glyco, deep tier** | pGlyco2 mouse liver PXD005553, 5 fractions, TRFP 1.4.3, `main` `14818d3e` | glycoPSMs @1% | **31,666 ± 9** | pGlyco2 **78.9% confirmed** · MSFragger **88.0% confirmed**, 95.8% peptidoform agreement | **1.11% ± 0.03 true FDP** (1:1 database) | 23–29 min / fraction, 16 cores |
 | **Glyco, quick tier** | one pGlyco2 liver fraction (`MouseLiver-Z-T-1`), native `.raw`, bundled pGlyco mouse glycan database (`--glyco-species mouse`, 1,833 compositions) | glycoPSMs @1% | **7,162** (seed 42; seeds 1–5: 7,094–7,137) | pGlyco2 **90.1% confirmed** · MSFragger **90.7% confirmed**, 97.8% / 95.7% peptidoform agreement | **0.89–1.24% true FDP** over 6 seeds (seed 42: 1.24%, CI 0.90–1.68; 1:1 database) | 4,888 s, 8 threads |
-| **Phospho-enriched** (first PTM benchmark) | PXD007653 mouse liver EasyPhos, one file (`control2`), Q Exactive HCD, mzML via TRFP 1.4.3 (sha256 `03cdb585…`) | PSMs @ q≤0.01 (Percolator seeds 42, 1–3) | **37,179–37,280** with the fragment-ion index · **26,806–26,883 phospho-bearing** | **Comet 2025.01, same VM, file and settings: 33,928–34,025 (+9.6% for andes), 23,874–23,942 phospho-bearing, 1.74–1.78% FDP, 1,166 s** · MaxQuant (PEP≤0.01, 23,563 scans): **82.4% covered** (19,420 scans), 95.3% same-scan backbone agreement | **1.11–1.16%** true FDP (1:1 database) | **637 s** at #112, 8 threads (949 s at `7d1e4565`; 2026-09 cluster run: 164 s at 32 threads) |
+| **Phospho-enriched** (first PTM benchmark) | PXD007653 mouse liver EasyPhos, one file (`control2`), Q Exactive HCD, mzML via TRFP 1.4.3 (sha256 `03cdb585…`) | PSMs @ q≤0.01 (Percolator seeds 42, 1–3) | **37,179–37,280** with the fragment-ion index · **26,806–26,883 phospho-bearing** | **Comet 2025.01, same VM, file and settings: 33,928–34,025 (+9.6% for andes), 23,874–23,942 phospho-bearing, 1.74–1.78% FDP, 1,166 s** · MaxQuant (PEP≤0.01, 23,563 scans): **82.4% covered** (19,420 scans), 95.3% same-scan backbone agreement | **1.11–1.16%** true FDP (1:1 database) | **637 s** at #112, 8 threads, 80 Da index slices (754 s at `77e972ec`, same slices; 2026-09 cluster run: 164 s at 32 threads) |
 
 † Java MS-GF+ v20240326 was not re-run in 2026-09 or 2026-10; its counts are historical
 (same protocol, earlier session) and it remains ~10-40x slower than andes.
@@ -87,14 +87,15 @@ Phospho PSMs are Percolator seed 42.
 | | Comet | 10,504 | 77 s | 568 s | 2.9 GB |
 | UPS1 | **andes** | **15,838** | **34 / 35 s** | **199 / 205 s** | **2.5 GB** |
 | | Comet | 14,734 | 42 s | 309 s | 2.9 GB |
-| Phospho (PXD007653) | **andes** | **37,179** (1.11% FDP) | **637 s** | **3,608 s** | 16.4 GB |
+| Phospho (PXD007653) | **andes** | **37,179** (1.11% FDP) | **637 s** | **3,608 s** | 13.7 GB |
 | | Comet | 33,984 (1.77% FDP) | 1,096 s | 8,399 s | 6.0 GB |
 
 - **CPU time:** andes uses 36–57% less than Comet on every dataset.
 - **Wall time:** 17–42% less than Comet on every dataset.
 - **Memory:** lower than Comet on Astral (4.1 vs 8.1 GB) and UPS1; 2x on TMT (5.9 vs 2.9 GB) and
-  2.7x on phospho (16.4 vs 6.0 GB). Phospho rose from 13.7 GB at `7d1e4565`: #112 indexes each
-  chunk's whole mass interval, which on a phospho search space holds many more forms.
+  2.3x on phospho (13.7 vs 6.0 GB). The phospho index is built in precursor-mass slices whose
+  width follows free memory, so peak memory tracks the machine: 80 Da slices peak at 13.7 GB,
+  ~100 Da at 16.4 GB. Pin the width with `--fragment-index-slice-da` to compare runs.
 
 ### Opt-in modes
 

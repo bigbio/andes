@@ -791,6 +791,15 @@ impl<'a> PreparedSearch<'a> {
                     .collect();
                 windows.sort_unstable();
                 windows.dedup();
+                // Index mode indexes every form in the chunk's whole mass interval
+                // and each spectrum queries only its own window, so one range scan
+                // over the union of the windows yields every record it can select,
+                // instead of one overlapping scan per distinct window.
+                if params.fragment_index_top_k > 0 && !windows.is_empty() {
+                    let lo = windows.iter().map(|w| w.0).min().unwrap_or(0);
+                    let hi = windows.iter().map(|w| w.1).max().unwrap_or(0);
+                    windows = vec![(lo, hi)];
+                }
                 let records: FxHashMap<BaseRecordKey, crate::candidate_index::IndexRecord> =
                     windows
                         .par_iter()

@@ -87,11 +87,16 @@ the file; use `--model-store` plus `--model` for an unbundled model.
 |---|---|---|---|---|
 | `--precursor-cal` | enum | `off` | `off`, `auto`, `on`. A pre-pass learns a ppm shift from confident PSMs and tightens the precursor tolerance; `auto` skips it on small samples. Off by default: on the benchmark sets the pre-pass took 9–17% of the run and never fired, and where it fired (UPS1, larger sample) the tightened window lost 7.6% of PSMs. Skipped (with a warning) on `.raw` and `.d`. | Java `-precursorCal auto\|on\|off` |
 
-**Candidate retrieval is automatic.** Out-of-core searches with high-res fragment matching use
-a fragment-ion index (phospho: 164 s against 5,954 s for enumeration; Comet 2025.01: 226 s).
-It is never used on low-res data, where forcing it took TMT from 12,281 to 3,613 PSMs at 1% and
-UPS1 from 15,838 to 10,312, nor with `--chimeric`, `--refine` or `--glyco`. The engine prints
-its choice; there is no flag ([measurements](docs/benchmarks/README.md#choosing-the-retrieval-strategy)).
+**Candidate retrieval is automatic.** On high-res fragment matching, andes builds the candidate
+index out-of-core (cached as `andes-candidx-<hash>.bin` in the system temp directory, ~150–250 MB
+on the benchmark databases, reused by later runs on the same database and settings) and retrieves
+the 100 candidates whose singly-charged b/y ions best match each spectrum (at least 3 matched).
+On Astral this gave +22.2% PSMs over full-window enumeration at an equal true FDP of 1.00%; on
+phospho, 164 s against 5,954 s. Low-res data stays on in-RAM enumeration (forcing the index took
+TMT from 12,281 to 3,613 PSMs at 1% and UPS1 from 15,838 to 10,312), as do `--chimeric`,
+`--refine` and `--glyco`. The engine prints its choice; `--candidate-index ram` or
+`--fragment-index off` restore enumeration
+([measurements](docs/benchmarks/README.md#choosing-the-retrieval-strategy)).
 
 ### Runtime
 

@@ -32,65 +32,70 @@ Reference identifications for scoring ship in [`glyco/truth/`](glyco/truth/). Re
 - **Wall times** for the standard rows are #105's: two runs each, alternated with `main` in a
   follow-up session the same day. Comet was re-run in the first session; `main` measured
   within 5% in both sessions.
+- **#112** (`40774aca`, 2026-10-07) makes high-res searches retrieve candidates with the
+  fragment-ion index. Astral moves to 46,774 PSMs; TMT, UPS1 and phospho counts are unchanged.
+  The standard and phospho rows are timed at #112 (standard sets: two runs each).
 - **Glyco deep tier** was not re-run: it is still `14818d3e`, with TRFP 1.4.3 mzML and the
   NeuGc ≤ 1 glycan list.
 
 | benchmark | dataset | what is measured | andes | reference | measured error | wall (andes) |
 |---|---|---|---:|---:|---|---:|
-| **Standard, high-res** | Astral, PXD070049, HCD LFQ | PSMs @ q≤0.01 | **38,394** | Comet 31,435 (+22.1%), 215 s · Java MS-GF+ 26,542 † | not measurable (no entrapment component) | **198–205 s** |
-| **Standard + TMT labels** | a05058, PXD007683, ion-trap CID | PSMs @ q≤0.01 | **12,281** | Comet 10,504 (+16.9%), 76 s · Java 10,651 | not measurable | **65–67 s** |
-| **Standard, low-res LFQ** | UPS1, PXD001819, ion-trap CID | PSMs @ q≤0.01 | 15,838 | Comet 14,734 (+7.5%), 46 s · **Java 15,904** | 166 entrapment hits ⇒ **3.6% true FDP** at nominal 1%; Comet: 154 hits on 14,734, the same rate | **41–42 s** |
-| **Chimeric** (`--chimeric`) | Astral | PSMs @ q≤0.01 | **65,028** (+69%; 55,616 distinct scans) | baseline 38,394 | not measurable | 337 s ¶ |
+| **Standard, high-res** | Astral, PXD070049, HCD LFQ | PSMs @ q≤0.01 | **46,774** | Comet 31,435 (+48.8%), 215 s · Java MS-GF+ 26,542 † | entrapment version of the database: at an equal true FDP of 1.00%, +22.2% over the previous in-RAM retrieval; the nominal 1% is **1.07% true** | **160–161 s** |
+| **Standard + TMT labels** | a05058, PXD007683, ion-trap CID | PSMs @ q≤0.01 | **12,281** | Comet 10,504 (+16.9%), 76 s · Java 10,651 | not measurable | **53–55 s** |
+| **Standard, low-res LFQ** | UPS1, PXD001819, ion-trap CID | PSMs @ q≤0.01 | 15,838 | Comet 14,734 (+7.5%), 46 s · **Java 15,904** | 166 entrapment hits ⇒ **3.6% true FDP** at nominal 1%; Comet: 154 hits on 14,734, the same rate | **34–35 s** |
+| **Chimeric** (`--chimeric`, in-RAM path) | Astral | PSMs @ q≤0.01 | **65,028** (+69%; 55,616 distinct scans) | in-RAM baseline 38,394 | not measurable | 337 s ¶ |
 | | TMT a05058 | PSMs @ q≤0.01 | 12,540 (+2.1%) | baseline 12,281 | not measurable | 73 s ¶ |
 | | UPS1 | PSMs @ q≤0.01 | **17,112** (+8.0%) | baseline 15,838 | 167 entrapment hits — flat against 166 | 50 s ¶ |
-| **PTM discovery** (`--refine`) | Astral | PSMs @ q≤0.01 | **40,028** (+4.3%) at `main` with #106; 40,283 at `7d1e4565` | baseline 38,394 | Pass 2 (2,388 modified PSMs): **~2.8% FDP** under the merged 1% threshold, by matched entrapment anchors (`--refine-entrapment`: 27 hits on 1,935; 3.3% before #106) | 363 s ¶ |
+| **PTM discovery** (`--refine`, in-RAM path) | Astral | PSMs @ q≤0.01 | **40,028** (+4.3%) at `main` with #106; 40,283 at `7d1e4565` | in-RAM baseline 38,394 | Pass 2 (2,388 modified PSMs): **~2.8% FDP** under the merged 1% threshold, by matched entrapment anchors (`--refine-entrapment`: 27 hits on 1,935; 3.3% before #106) | 363 s ¶ |
 | | TMT, UPS1 | — | skipped | high-res only, by design | | |
 | **Glyco, deep tier** | pGlyco2 mouse liver PXD005553, 5 fractions, TRFP 1.4.3, `main` `14818d3e` | glycoPSMs @1% | **31,666 ± 9** | pGlyco2 **78.9% confirmed** · MSFragger **88.0% confirmed**, 95.8% peptidoform agreement | **1.11% ± 0.03 true FDP** (1:1 database) | 23–29 min / fraction, 16 cores |
 | **Glyco, quick tier** | one pGlyco2 liver fraction (`MouseLiver-Z-T-1`), native `.raw`, bundled pGlyco mouse glycan database (`--glyco-species mouse`, 1,833 compositions) | glycoPSMs @1% | **7,162** (seed 42; seeds 1–5: 7,094–7,137) | pGlyco2 **90.1% confirmed** · MSFragger **90.7% confirmed**, 97.8% / 95.7% peptidoform agreement | **0.89–1.24% true FDP** over 6 seeds (seed 42: 1.24%, CI 0.90–1.68; 1:1 database) | 4,888 s, 8 threads |
-| **Phospho-enriched** (first PTM benchmark) | PXD007653 mouse liver EasyPhos, one file (`control2`), Q Exactive HCD, mzML via TRFP 1.4.3 (sha256 `03cdb585…`) | PSMs @ q≤0.01 (Percolator seeds 42, 1–3) | **37,179–37,280** with the fragment-ion index · **26,806–26,883 phospho-bearing** | **Comet 2025.01, same VM, file and settings: 33,928–34,025 (+9.6% for andes), 23,874–23,942 phospho-bearing, 1.74–1.78% FDP, 1,166 s** · MaxQuant (PEP≤0.01, 23,563 scans): **82.4% covered** (19,420 scans), 95.3% same-scan backbone agreement | **1.11–1.16%** true FDP (1:1 database) | **949 s**, 8 threads (2026-09 cluster run: 164 s at 32 threads) |
+| **Phospho-enriched** (first PTM benchmark) | PXD007653 mouse liver EasyPhos, one file (`control2`), Q Exactive HCD, mzML via TRFP 1.4.3 (sha256 `03cdb585…`) | PSMs @ q≤0.01 (Percolator seeds 42, 1–3) | **37,179–37,280** with the fragment-ion index · **26,806–26,883 phospho-bearing** | **Comet 2025.01, same VM, file and settings: 33,928–34,025 (+9.6% for andes), 23,874–23,942 phospho-bearing, 1.74–1.78% FDP, 1,166 s** · MaxQuant (PEP≤0.01, 23,563 scans): **82.4% covered** (19,420 scans), 95.3% same-scan backbone agreement | **1.11–1.16%** true FDP (1:1 database) | **637 s** at #112, 8 threads, 80 Da index slices (754 s at `77e972ec`, same slices; 2026-09 cluster run: 164 s at 32 threads) |
 
 † Java MS-GF+ v20240326 was not re-run in 2026-09 or 2026-10; its counts are historical
 (same protocol, earlier session) and it remains ~10-40x slower than andes.
 
-¶ The opt-in rows, like the quick-glyco and phospho rows, are timed at `7d1e4565`, before
-#105's speed-up. #105 also applies to those paths; they were not re-timed after it.
+¶ The opt-in and quick-glyco rows are timed at `7d1e4565`, before the speed changes of #105,
+#110 and #111, which also apply to those paths; they were not re-timed after them.
 
 **How to read it.**
 
 - **Only UPS1 measures error among the standard sets.** Its nominal 1% is **~3.6% true FDP**
   (166 entrapment hits on 15,838 PSMs, factor 3.42), and Comet sits at the same rate (154 hits
-  on 14,734). The Astral and TMT databases have no entrapment component, so those counts are
-  rescored `q ≤ 0.01` only.
+  on 14,734). Astral was checked separately against a 1:1 shuffled entrapment version of its
+  database (see [retrieval strategy](#choosing-the-retrieval-strategy)); TMT has no entrapment
+  component, so its counts are rescored `q ≤ 0.01` only.
 - **Speed against Comet.** #105 (exact-mass candidate lookup, memoised fragment predictions,
-  parallel setup, no edge scoring on low-res models) took andes from 274–297 s, 93–102 s and
-  51–57 s to 198–205 s, 65–67 s and 41–42 s on Astral, TMT and UPS1: 0.92–0.95x, 0.86–0.88x
-  and 0.89–0.91x Comet's wall time.
+  parallel setup, no edge scoring on low-res models), #110 (precursor-calibration pre-pass off
+  by default), #111 (strong-mode features for survivors only) and #112 (index retrieval with a
+  dense vote buffer) took andes from 274–297 s, 93–102 s and 51–57 s to 160–161 s, 53–55 s and
+  34–35 s on Astral, TMT and UPS1: 0.70–0.76x Comet's wall time.
 - **Not benchmarked, therefore not claimed:** iTRAQ, timsTOF `.d`, MSFragger on the standard
   sets, Comet's fragment-index mode, and phospho *site localisation*.
 
-### Time, CPU and memory against Comet — 2026-10-06
+### Time, CPU and memory against Comet — 2026-10-07
 
-Same VM and inputs, 8 threads, one run per engine under `/usr/bin/time -v`. andes is
-`a0e85cda` (#105). PSM counts are from the 2026-10-05 refresh; phospho is Percolator seed 42.
+Same VM and inputs, 8 threads, `/usr/bin/time -v`. andes is #112 (`40774aca`), two runs on the
+standard sets and one on phospho, 2026-10-07; Comet 2025.01 is one run per dataset, 2026-10-06.
+Phospho PSMs are Percolator seed 42.
 
 | dataset | engine | PSMs @ q≤0.01 | wall | CPU time | peak memory |
 |---|---|---:|---:|---:|---:|
-| Astral | **andes** | **38,394** | 213 s | **1,238 s** | 7.7 GB |
+| Astral | **andes** | **46,774** | **160 / 161 s** | **787 / 796 s** | **4.1 GB** |
 | | Comet | 31,435 | 217 s | 1,594 s | 8.1 GB |
-| TMT a05058 | **andes** | **12,281** | 77 s | **323 s** | 5.9 GB |
+| TMT a05058 | **andes** | **12,281** | **53 / 55 s** | **295 / 303 s** | 5.9 GB |
 | | Comet | 10,504 | 77 s | 568 s | 2.9 GB |
-| UPS1 | **andes** | **15,838** | 49 s | **219 s** | 2.5 GB |
+| UPS1 | **andes** | **15,838** | **34 / 35 s** | **199 / 205 s** | **2.5 GB** |
 | | Comet | 14,734 | 42 s | 309 s | 2.9 GB |
-| Phospho (PXD007653) | **andes** | **37,179** (1.11% FDP) | **901 s** | **5,729 s** | 13.7 GB |
+| Phospho (PXD007653) | **andes** | **37,179** (1.11% FDP) | **637 s** | **3,608 s** | 13.7 GB |
 | | Comet | 33,984 (1.77% FDP) | 1,096 s | 8,399 s | 6.0 GB |
 
-- **CPU time:** andes uses 22–43% less than Comet on every dataset. This is the steadier
-  comparison.
-- **Wall time:** level on Astral and TMT, 7 s slower on UPS1, 18% faster on phospho. These
-  andes times are 5–15% slower than the alternating A/B above (TMT 77 vs 65–67 s); the first
-  runs overlapped a large file deletion on the same disk.
-- **Memory:** andes peaks at 2x Comet on TMT (5.9 vs 2.9 GB) and phospho (13.7 vs 6.0 GB);
-  Astral and UPS1 are similar.
+- **CPU time:** andes uses 36–57% less than Comet on every dataset.
+- **Wall time:** 17–42% less than Comet on every dataset.
+- **Memory:** lower than Comet on Astral (4.1 vs 8.1 GB) and UPS1; 2x on TMT (5.9 vs 2.9 GB) and
+  2.3x on phospho (13.7 vs 6.0 GB). The phospho index is built in precursor-mass slices whose
+  width follows free memory, so peak memory tracks the machine: 80 Da slices peak at 13.7 GB,
+  ~100 Da at 16.4 GB. Pin the width with `--fragment-index-slice-da` to compare runs.
 
 ### Opt-in modes
 
@@ -208,22 +213,38 @@ confirmations 3,375 → 3,471). `--glyco-min-core-y 2` (about 500 fewer glycoPSM
 
 ### Choosing the retrieval strategy
 
-An out-of-core search either enumerates every peptidoform in each precursor window or takes a
-shortlist from a fragment-ion index. andes uses the index only when (1) the candidate index is
-out-of-core and (2) fragment matching is high-resolution. Forcing the index on the three
-standard sets (same binary, 8 threads, seed 42):
+andes either enumerates every candidate in each precursor window and scores them all, or takes
+a shortlist of the 100 candidates whose singly-charged b/y ions best match the spectrum (at
+least 3 matched) from a fragment-ion index. Since #112 the index is the default on high-res
+data; low-res data, `--chimeric`, `--refine` and `--glyco` keep enumeration.
 
-| dataset | in-RAM enumeration (the default) | out-of-core enumeration | out-of-core + index |
-|---|---|---|---|
-| Astral, high-res | 267 s, **38,394** PSMs @1% | 4,154 s, **38,394** | 222 s, 46,774 |
-| TMT a05058, low-res | 94 s, **12,281** | 773 s, **12,247** | 118 s, **3,613** |
-| UPS1, low-res | 52 s, **15,838** | 254 s, **15,838** | 65 s, **10,312** |
+**Low-res data must not use the index.** Forcing it (same binary, 8 threads, seed 42, 2026-09):
+TMT a05058 12,281 → 3,613 PSMs at 1%, UPS1 15,838 → 10,312. At 0.5 Da the bins do not
+discriminate.
 
-Out-of-core enumeration preserves the identifications, so the third column belongs to the
-index. On low-res data the 0.5 Da bins do not discriminate. The Astral row is **not** a 22% win:
-decoy wins fall 9.4% against 1.8% for targets, so q-values become optimistic, which Astral (no
-entrapment) cannot detect. On phospho, with a 1:1 entrapment database, the error goes **down**
-(1.22–1.32% to 1.15–1.16%).
+**On high-res data the index finds more, at the same true error rate.** A September run flagged
+the Astral gain (38,394 → 46,774) as possibly optimistic: decoy wins fell 9.4% against 1.8% for
+targets, and Astral had no entrapment component. Measured on 2026-10-06 against a 1:1 shuffled
+entrapment version of the Astral database (measured T/E = 0.900; FDP = entrapment hits /
+accepted × (1 + T/E)), Percolator `-Y`, seeds 42/1/2:
+
+| retrieval | PSMs @ q≤0.01 | true FDP at q≤0.01 | PSMs at a true FDP ≤ 1.00% |
+|---|---:|---:|---:|
+| enumeration, strong re-ranking of the top 25 (previous default) | 34,429–34,464 | 1.00–1.01% | 34,411–34,457 |
+| enumeration, top 50 (diagnostic) | 36,287–36,313 | 0.99–1.02% | 36,254–36,367 |
+| enumeration, top 100 (diagnostic) | 38,018–38,147 | 0.87–0.96% | 38,314–38,448 |
+| **fragment-ion index (default)** | **42,374–42,610** | 1.06–1.08% | **41,997–42,139 (+22.2%)** |
+
+The index's q-values are slightly optimistic (1.07% true at a nominal 1%), which costs about
+one point; at an equal true FDP the gain is +22.2%. Per scan (seed 42): of the 10,838 scans only
+the index identifies, **96%** had a peptide the enumeration path never emitted among its 10 rows.
+Enumeration ranks the whole window by the rank score, which on high-res data separates targets
+from decoys poorly (in a 484-PSM sample, 206 were decoys), so the true peptide often misses the
+25 candidates strong mode re-ranks; widening that pool recovers part of the gain, slowly. The
+other 4% are the same peptide, accepted because the index's smaller pool sharpens the
+competition features (median DeltaRankScore 0 → 2, rank entropy 1.21 → 0.19). Charge 3 gains
+most. A wider index pool (200 or 300 candidates, or 2 matched ions) does not recover the 2,751
+scans only enumeration identifies.
 
 ### Refuted — do not re-try without new evidence
 

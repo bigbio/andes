@@ -22,35 +22,38 @@ MS-GF+'s strongest regime, it trails Java.
 
 | Engine | Astral (high-res HCD) | TMT a05058 (low-res CID) | UPS1 (low-res LFQ) |
 |---|---:|---:|---:|
-| **andes** | **38,394** | **12,281** | 15,838 |
+| **andes** | **46,774** | **12,281** | 15,838 |
 | Comet 2025.01 | 31,435 | 10,504 | 14,734 |
 | Java MS-GF+ v20240326 † | 26,542 | 10,651 | **15,904** |
-| *andes wall time* | *198–205 s* | *65–67 s* | *41–42 s* |
+| *andes wall time* | *160–161 s* | *53–55 s* | *34–35 s* |
 | *Comet wall time* | *215 s* | *76 s* | *46 s* |
 
 <sub>**Metric and provenance.** PSMs at Percolator `q ≤ 0.01`, one method for every row (plain
-FASTA, andes `XXX_` decoys, Percolator 3.7.1 `--seed 42 -Y`, same 8-thread host). Measured
-**2026-10-05** at `main` `7d1e4565`, reproducing 2026-09-04 exactly; #105 (`5e7e6bf1`, current
-`main`) leaves the counts unchanged, and the andes wall times are #105's (two runs each). andes
-finds 7.5–22.1% more PSMs in 0.86–0.95x Comet's wall time. **†** Java MS-GF+ was not re-run; its
-counts are from an earlier session, and it remains ~10–40x slower. The counts are **not**
-entrapment-validated: Astral and TMT have no entrapment component, and on UPS1 the true FDP at a
-nominal 1% is **~3.6%**, the same rate as Comet's. N=1 per dataset. Details:
+FASTA, andes `XXX_` decoys, Percolator 3.7.1 `--seed 42 -Y`, same 8-thread host). andes measured
+**2026-10-07** at #112 (`40774aca`); Comet on 2026-10-05, reproducing its 2026-09-04 counts.
+Since #112, high-res searches retrieve candidates with the fragment-ion index, which moved Astral
+from 38,394 to 46,774; TMT and UPS1 are unchanged. andes finds 7.5–48.8% more PSMs in 0.70–0.76x
+Comet's wall time. **†** Java MS-GF+ was not re-run; its counts are from an earlier session, and it
+remains ~10–40x slower. **Error rates:** checked against an entrapment version of the Astral
+database, the Astral gain holds at an equal true FDP (+22.2% over the previous in-RAM retrieval at
+1.00%; the index's nominal 1% is 1.07% true). TMT has no entrapment component; on UPS1 the true FDP
+at a nominal 1% is **~3.6%**, the same rate as Comet's. Details:
 [`docs/benchmarks/`](docs/benchmarks/README.md).</sub>
 
-**Time, CPU and memory** (2026-10-06, same VM, 8 threads, one run per engine, `/usr/bin/time`).
-andes uses 22–43% less CPU time than Comet. Wall time is level on Astral and TMT, 7 s slower on
-UPS1 and 18% faster on phospho. andes peaks at 2x Comet's memory on TMT and phospho.
+**Time, CPU and memory** (same VM, 8 threads, `/usr/bin/time`; andes 2026-10-07 at #112, two runs
+on the standard sets; Comet 2026-10-06, one run). andes uses 36–57% less CPU time than Comet and
+17–42% less wall time. It needs less memory on Astral and UPS1, and more on TMT (2x) and phospho
+(2.3x, 80 Da index slices).
 
 | dataset | engine | PSMs @ q≤0.01 | wall | CPU time | peak memory |
 |---|---|---:|---:|---:|---:|
-| Astral | **andes** | **38,394** | 213 s | **1,238 s** | 7.7 GB |
+| Astral | **andes** | **46,774** | **160 s** | **787 s** | **4.1 GB** |
 | | Comet | 31,435 | 217 s | 1,594 s | 8.1 GB |
-| TMT a05058 | **andes** | **12,281** | 77 s | **323 s** | 5.9 GB |
+| TMT a05058 | **andes** | **12,281** | **53 s** | **295 s** | 5.9 GB |
 | | Comet | 10,504 | 77 s | 568 s | 2.9 GB |
-| UPS1 | **andes** | **15,838** | 49 s | **219 s** | 2.5 GB |
+| UPS1 | **andes** | **15,838** | **34 s** | **199 s** | **2.5 GB** |
 | | Comet | 14,734 | 42 s | 309 s | 2.9 GB |
-| Phospho (PXD007653) | **andes** | **37,179** (1.11% FDP) | **901 s** | **5,729 s** | 13.7 GB |
+| Phospho (PXD007653) | **andes** | **37,179** (1.11% FDP) | **637 s** | **3,608 s** | 13.7 GB |
 | | Comet | 33,984 (1.77% FDP) | 1,096 s | 8,399 s | 6.0 GB |
 
 <sub>PSM counts: 2026-10-05 refresh (phospho: seed 42). Wall times vary 5–15% between sessions;
@@ -72,11 +75,14 @@ flowchart TD
 
 1. **Pick the model** from the file's activation, resolution and isobaric label (one of 17
    bundled models).
-2. **Build candidates**: digest the FASTA and generate decoys. The index goes out-of-core when
-   it would not fit the container or scheduler memory limit.
+2. **Build candidates**: digest the FASTA and generate decoys. On high-res data the candidate
+   index goes out-of-core (cached in the system temp directory) so candidates can be retrieved by
+   the fragment-ion index; on low-res data it stays in RAM unless it would not fit the container
+   or scheduler memory limit.
 3. **Score**: low-res by the generating-function rank score, high-res by the fused strong
-   score, plus GBDT fragment-intensity features. Out-of-core high-res searches use a
-   fragment-ion index (phospho benchmark: 164 seconds instead of 99 minutes).
+   score, plus GBDT fragment-intensity features. High-res searches score only the 100 candidates
+   whose fragment ions best match the spectrum (Astral: +22% PSMs at an equal true FDP; phospho:
+   164 s instead of 99 minutes).
 4. **Optional passes** `--chimeric`, `--refine` and the separate `--glyco` pipeline (below).
 5. **Rescore** with Percolator, run by you or by `--rescore`. andes computes no production FDR.
 
@@ -219,7 +225,8 @@ a second peptide.
 
 On UPS1 (with entrapment) PSMs at q ≤ 0.01 rose from 15,838 to 17,112 (+8.0%) with entrapment
 hits flat (166 → 167). On Astral they rose 38,394 → 65,028 (+69%), which is **not**
-entrapment-validated (no entrapment component).
+entrapment-validated. `--chimeric` keeps the in-RAM candidate path, so its baseline is the
+38,394 of that path, not the 46,774 of the default high-res search.
 
 ## Secondary modifications (`--refine`, experimental)
 

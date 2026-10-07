@@ -1048,8 +1048,14 @@ impl<'a> PreparedSearch<'a> {
                 let enz_is_n_term = params.enzyme.is_n_term();
                 let enz = params.enzyme;
                 let edge_enabled = edge_scoring_enabled(scorer);
-                let ppm_weight = if scorer.param().data_type.instrument.is_high_resolution() {
+                let high_res_model = scorer.param().data_type.instrument.is_high_resolution();
+                let ppm_weight = if high_res_model {
                     params.rank_ppm_weight
+                } else {
+                    0.0
+                };
+                let strong_ppm_weight = if high_res_model {
+                    params.strong_ppm_weight
                 } else {
                     0.0
                 };
@@ -1352,6 +1358,10 @@ impl<'a> PreparedSearch<'a> {
                         candidate_rank_entropy: features.candidate_rank_entropy,
                         listwise_score_gap: features.listwise_score_gap,
                     });
+                    if strong_ppm_weight > 0.0 {
+                        features.strong_score +=
+                            strong_ppm_weight * rank_ppm_llr(ss, &cand.peptide);
+                    }
                     features
                 };
                 queue.fill_post_topn(|psm| {

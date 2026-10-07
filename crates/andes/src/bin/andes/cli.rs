@@ -203,11 +203,15 @@ pub(crate) struct SearchArgs {
     #[arg(long = "fragment-index", hide = true, default_value = "auto")]
     pub(crate) fragment_index: FragmentIndexFlag,
 
-
     /// High-resolution models: weight of the fragment mass-accuracy log-likelihood
     /// added to the rank score that picks each spectrum's candidates. 0 = off.
     #[arg(long = "rank-ppm-weight", hide = true, default_value_t = 0.0)]
     pub(crate) rank_ppm_weight: f32,
+
+    /// High-resolution models: weight of the same log-likelihood added to the strong
+    /// score that selects the reported PSM. 0 = off.
+    #[arg(long = "strong-ppm-weight", hide = true, default_value_t = 0.0)]
+    pub(crate) strong_ppm_weight: f32,
 
     /// Fragment-index mode: precursor-mass width of one index slice in Da.
     /// Default: derived from the memory budget (10–150 Da; ~0.13 GB per Da on

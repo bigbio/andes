@@ -65,7 +65,8 @@ pub(crate) enum ScoreFlag {
 /// Fragment-ion index for out-of-core searches (issue #76).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub(crate) enum FragmentIndexFlag {
-    /// On whenever the candidate index is out-of-core (default).
+    /// On when the candidate index is out-of-core and fragment matching is
+    /// high-resolution (default).
     #[default]
     Auto,
     /// On in out-of-core mode; a warning (and enumeration) when the candidate
@@ -75,14 +76,14 @@ pub(crate) enum FragmentIndexFlag {
     Off,
 }
 
-/// Candidate-resolution backing: in-RAM (`ram`, default) or out-of-core mmap
-/// base-peptide index with lazy mod enumeration (`mmap`).
+/// Candidate-resolution backing: in-RAM (`ram`) or out-of-core mmap base-peptide
+/// index with lazy mod enumeration (`mmap`); `auto` (default) picks one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub(crate) enum CandidateIndexFlag {
-    /// Pick automatically: estimate the in-RAM candidate index size against
-    /// available memory and use out-of-core mmap only if it would not fit
-    /// (default). Errs toward RAM (byte-identical to prior releases) and only
-    /// falls back to mmap when RAM would risk an OOM.
+    /// Pick automatically (default): out-of-core mmap with fragment-ion retrieval
+    /// for high-resolution fragments; otherwise RAM, unless the in-RAM index
+    /// would not fit available memory. `--chimeric`, `--refine` and `--glyco`
+    /// stay on RAM.
     #[default]
     Auto,
     /// Force the in-RAM candidate index (advanced; may OOM on very large mod
@@ -472,10 +473,10 @@ pub(crate) struct SearchArgs {
     #[arg(long = "score", default_value = "auto")]
     pub(crate) score: ScoreFlag,
 
-    /// Candidate-index backing: `auto` (default — automatically use out-of-core
-    /// mmap only when the in-RAM candidate index would not fit available memory;
-    /// otherwise RAM, byte-identical to prior releases), or force `ram` / `mmap`
-    /// (advanced overrides). `mmap` lowers peak RAM with lazy per-spectrum mod
+    /// Candidate-index backing: `auto` (default — out-of-core mmap with
+    /// fragment-ion retrieval for high-resolution fragments, cached in the temp
+    /// directory; otherwise RAM unless it would not fit available memory), or
+    /// force `ram` / `mmap` (advanced overrides). `mmap` lowers peak RAM with lazy per-spectrum mod
     /// enumeration (result-equivalent PSMs, not byte-identical).
     #[arg(long = "candidate-index", hide = true, default_value = "auto")]
     pub(crate) candidate_index: CandidateIndexFlag,

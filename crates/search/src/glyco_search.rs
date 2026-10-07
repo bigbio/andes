@@ -95,13 +95,12 @@ pub struct GlycoConfig {
     /// at 20 ppm with identifications neutral, mouse and plasma, five seeds).
     /// Retrieval only: the rank scorer and its tolerance are untouched.
     pub retrieval_tol_ppm: Option<f64>,
-    /// Replace the peptide-first b/y fragment-index fallback with a mass-driven
-    /// full-glycan-list DB branch (`--glyco-full-glycan-db`, default OFF). When
-    /// on, every glycan in the list is enumerated as `backbone = precursor −
-    /// glycan` and matched to peptides by mass (phase-1 bucket index) instead of
-    /// enumerating peptides by b/y ions. This is the glycan-first recovery path
-    /// for weak-core-Y spectra; the core-Y==0 prefilter still gates spurious
-    /// backbones. A/B flag — default keeps the shipped peptide-first path.
+    /// Mass-driven full-glycan-list DB branch (the CLI default; `false` with
+    /// `--glyco-peptide-first`). Every glycan in the list is enumerated as
+    /// `backbone = precursor − glycan` and matched to peptides by mass (phase-1
+    /// bucket index) instead of enumerating peptides by b/y ions through the
+    /// peptide-first fragment index. The core-Y==0 prefilter still gates spurious
+    /// backbones.
     pub full_glycan_db: bool,
     /// Diagnostic mode (`--debug-glyco`): emit ALL candidate rows per scan
     /// (including de-novo mass-residual hits) instead of the honest top-1 collapse.
@@ -556,7 +555,7 @@ impl GlycoCtxOwned {
             .collect();
         // CHARGE-AWARE peptide-first index (see `GLYCO_PF_CHARGE`).
         let pf_charge: u8 = GLYCO_PF_CHARGE;
-        // `--glyco-full-glycan-db` never calls `frag_index.query` (the
+        // the full-glycan-list branch never calls `frag_index.query` (the
         // peptide-first path is skipped), so skip building the ~1.5 GB
         // b/y postings index entirely — it is the dominant `idx_build` cost.
         let frag_index = if !peptide_first_on || full_glycan_db {
@@ -1004,7 +1003,7 @@ fn score_spectrum_glyco(
     // Glycan-first DB-branch source is chosen per (charge, isotope) hypothesis
     // inside the sweep below: default narrows the full glycan list to the top
     // candidate glycans retrieved by the ion index (Y-complementary + diagnostic
-    // ion evidence); `--glyco-full-glycan-db` instead enumerates the FULL glycan
+    // ion evidence); the full-glycan-list branch instead enumerates the FULL glycan
     // list mass-driven (backbone = precursor − glycan → peptide by mass in
     // phase-1), making the peptide-first b/y fallback redundant.
 
@@ -1033,7 +1032,7 @@ fn score_spectrum_glyco(
             // y_ion_neutral`; a ±1 isotope shift moves `q` into a different mass
             // bucket, so a set narrowed at offset 0 omits the glycan that only
             // matches at offset ±1 and silently defeats the sweep. The
-            // `--glyco-full-glycan-db` path is unaffected: it enumerates the full
+            // the full-glycan-list branch is unaffected: it enumerates the full
             // list, so `db_branch` sees every glycan at every offset.
             // ETD/EThcD fragments the peptide backbone, not the glycan, so a
             // scan can carry a glycopeptide and show no oxonium ions at all. The
@@ -2252,7 +2251,7 @@ mod glycan_source_tests {
         assert_eq!(glycan_source(true, true, true), GlycanSource::FullList);
     }
 
-    // `--glyco-full-glycan-db` still needs the oxonium evidence on HCD.
+    // the full-glycan-list branch still needs the oxonium evidence on HCD.
     #[test]
     fn full_glycan_db_uses_the_whole_list_when_oxonium_fired() {
         assert_eq!(glycan_source(true, true, false), GlycanSource::FullList);

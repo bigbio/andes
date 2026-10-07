@@ -258,9 +258,10 @@ andes --spectrum sample.mzML \
 - HCD/CID and ETD/EThcD/AI-ETD are supported; c/z fragments localize the glycosite. The site is
   reported as `@N<pos>` only for a single N-X-S/T sequon, otherwise `@N?`.
 
-On one pGlyco2 mouse-liver fraction (PXD005553) andes reports 7,162 glycoPSMs at 1% (seed 42)
-at 0.89–1.24% true FDP over 6 seeds, confirming 90.1% of pGlyco2's and 90.7% of
-MSFragger-Glyco's identifications ([`docs/benchmarks/`](docs/benchmarks/README.md)).
+On one pGlyco2 mouse-liver fraction (PXD005553) andes reports 6,922–6,959 glycoPSMs at 1% at
+0.85–1.36% true FDP over 3 seeds, confirming 89.0% of pGlyco2's and 89.6% of MSFragger-Glyco's
+identifications, in 6 minutes on 8 threads ([`docs/benchmarks/`](docs/benchmarks/README.md)).
+`--glyco-peptide-first` finds ~2% more at ~13x the run time.
 
 Memory: the glyco index stays in RAM (`--candidate-index mmap` is rejected). A whole human
 proteome (20,411 proteins) peaks at ~17.3 GB with `--glyco`, so plan for ~20 GB;

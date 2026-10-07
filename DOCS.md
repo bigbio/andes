@@ -577,7 +577,7 @@ accepted**; use the names (case-insensitive, `--fragmentation hcd` ≡ `HCD`). T
 |---|---|---|
 | `--glyco-index-sequon-only` | off | Index only N-X-S/T peptides: the mouse entrapment recipe needs 3.4 GB instead of ~27 GB; 16 of 7,113 rows (0.2%) differ in `RawScore`/`CandidateRankEntropy` only. |
 | `--precursor-mono-dump <FILE>` | off | Write every `--precursor-mono` envelope fit as TSV. |
-| `--glyco-full-glycan-db` | off | A/B flag: mass-driven full-glycan-list branch instead of the peptide-first fallback. |
+| `--glyco-peptide-first` | off | Peptide-first b/y fragment-index fallback instead of the default mass-driven full-glycan-list branch: ~2% more glycoPSMs on a mouse-liver fraction at ~13x the run time (79 vs 6 min) and 29.7 vs 19.9 GB peak memory. |
 
 **Fixed settings** (validated; no flag): selector `rank + K·ladder + J·core_y + H·hyper` with
 K/J/H = 10/5/1, ETD c/z weight 15 and isotope-offset penalty 1; 150 backbone candidates per

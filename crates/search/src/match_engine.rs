@@ -1048,6 +1048,11 @@ impl<'a> PreparedSearch<'a> {
                 let enz_is_n_term = params.enzyme.is_n_term();
                 let enz = params.enzyme;
                 let edge_enabled = edge_scoring_enabled(scorer);
+                let ppm_weight = if scorer.param().data_type.instrument.is_high_resolution() {
+                    params.rank_ppm_weight
+                } else {
+                    0.0
+                };
 
                 // Per-charge queue keyed by charge state. Retains top-N PSMs
                 // independently per precursor charge (Kim et al., Nat Commun 5:5277, 2014).
@@ -1076,6 +1081,12 @@ impl<'a> PreparedSearch<'a> {
                     let max_edge_bonus_per_edge: f32 = 10.0;
                     let n_minus_1 = cand.peptide.length().saturating_sub(1) as f32;
                     let max_edge_bonus = max_edge_bonus_per_edge * n_minus_1;
+                    // Upper bound of the mass-accuracy term: every b and y ion matched at 0 ppm.
+                    let max_ppm_bonus = if ppm_weight > 0.0 {
+                        ppm_weight * RANK_PPM_LLR_MAX * 2.0 * n_minus_1
+                    } else {
+                        0.0
+                    };
                     for &z in &charges_to_try {
                         let scored_spec = scored_spec_for_charge(z);
                         // Track (pin_score, edge, rank_score) for the
@@ -1161,8 +1172,8 @@ impl<'a> PreparedSearch<'a> {
                             // ties.
                             Some(q) if q.len() >= q.capacity() as usize => {
                                 q.worst_rank_score().is_none_or(|worst| {
-                                    if edge_enabled {
-                                        pin_score + max_edge_bonus > worst
+                                    if edge_enabled || ppm_weight > 0.0 {
+                                        pin_score + max_edge_bonus + max_ppm_bonus > worst
                                     } else {
                                         pin_score >= worst
                                     }
@@ -1178,7 +1189,10 @@ impl<'a> PreparedSearch<'a> {
 
                         // Stage 2: compute edge_score ONCE (also iso-independent).
                         let edge_i = psm_edge_score(scored_spec, &cand.peptide, scorer, z);
-                        let rank_score = pin_score + edge_i as f32;
+                        let mut rank_score = pin_score + edge_i as f32;
+                        if ppm_weight > 0.0 {
+                            rank_score += ppm_weight * rank_ppm_llr(scored_spec, &cand.peptide);
+                        }
 
                         // Pick the iso-offset with the smallest |mass_error_ppm|
                         // for the PIN row (preserves the tie-break where
@@ -1645,6 +1659,47 @@ pub(crate) fn cleavage_credit_for(cand: &Candidate, enz: Enzyme, aa_set: &AminoA
 ///   sorted descending by intensity, top-7 taken; absolute Da error for
 ///   mean/stdev, signed ppm for rel-mean/rel-stdev. Population stdev
 ///   formula: `sqrt(E[x²] - mean²)`.
+/// Gaussian width (ppm) of true fragment matches in `rank_ppm_llr`.
+const RANK_PPM_SIGMA: f64 = 7.0;
+/// Match window (ppm, each side) of `rank_ppm_llr`; chance matches are uniform over it.
+const RANK_PPM_WINDOW: f64 = 20.0;
+/// Per-ion maximum of `rank_ppm_llr` (a match at 0 ppm).
+const RANK_PPM_LLR_MAX: f32 = 0.825;
+
+/// Fragment mass-accuracy log-likelihood ratio of a candidate: for every singly
+/// charged b and y ion matched within `RANK_PPM_WINDOW` ppm (exact residue masses),
+/// ln of a Gaussian of `RANK_PPM_SIGMA` ppm over a uniform on the window. Unmatched
+/// ions add nothing. The rank scorer works on nominal masses, so this is the only
+/// place ppm accuracy reaches the rank score.
+pub(crate) fn rank_ppm_llr(scored_spec: &ScoredSpectrum<'_>, peptide: &Peptide) -> f32 {
+    let n = peptide.length();
+    if n < 2 {
+        return 0.0;
+    }
+    let ln_norm =
+        (2.0 * RANK_PPM_WINDOW / (RANK_PPM_SIGMA * (2.0 * std::f64::consts::PI).sqrt())).ln();
+    let llr = |theo_mz: f64| -> f64 {
+        match scored_spec.nearest_peak_full(theo_mz, theo_mz * RANK_PPM_WINDOW / 1e6) {
+            Some((_, _, obs)) => {
+                let ppm = (obs - theo_mz) / theo_mz * 1e6 / RANK_PPM_SIGMA;
+                ln_norm - 0.5 * ppm * ppm
+            }
+            None => 0.0,
+        }
+    };
+    let mut prefix = 0.0f64;
+    let mut suffix = 0.0f64;
+    let mut total = 0.0f64;
+    for i in 0..(n - 1) {
+        let aa_n = &peptide.residues[i];
+        let aa_c = &peptide.residues[n - 1 - i];
+        prefix += aa_n.mass + aa_n.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
+        suffix += aa_c.mass + aa_c.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
+        total += llr(prefix + PROTON) + llr(suffix + H2O + PROTON);
+    }
+    total as f32
+}
+
 pub(crate) fn compute_psm_features(
     scored_spec: &ScoredSpectrum<'_>,
     peptide: &Peptide,

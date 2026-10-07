@@ -42,13 +42,9 @@ use crate::cli::{
     SearchArgs,
 };
 use crate::search::run;
-use crate::train::{
-    run_rescore_pin, run_train, run_train_from_search, RescorePinArgs, TrainArgs,
-    TrainFromSearchArgs,
-};
+use crate::train::{run_train, run_train_from_search, TrainArgs, TrainFromSearchArgs};
 use crate::train_intensity::{
-    run_train_intensity, run_train_intensity_gbdt, run_train_rich_ion_llr, TrainIntensityArgs,
-    TrainIntensityGbdtArgs, TrainRichIonLlrArgs,
+    run_train_intensity_gbdt, run_train_rich_ion_llr, TrainIntensityGbdtArgs, TrainRichIonLlrArgs,
 };
 
 /// Emit a one-line search-progress update after each scored chunk: cumulative
@@ -67,15 +63,6 @@ fn report_search_progress(scored: usize, start: std::time::Instant) {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Rescore an existing PIN with the built-in rescorer and write Percolator-shaped
-    /// `.psms` / `.dpsms` files.
-    ///
-    /// Exists so two rescorers can be compared on IDENTICAL input: without it the only
-    /// way to try the native rescorer was to re-run the whole search, which changes the
-    /// PIN as well as the rescoring and confounds the comparison.
-    #[command(name = "rescore-pin", hide = true)]
-    RescorePin(RescorePinArgs),
-
     /// Train a scoring model directly from externally-labeled, high-confidence
     /// PSMs supplied as flat training parquet(s), bypassing the bootstrap
     /// search. This is the primary training path for the Phase-3 "own models".
@@ -90,11 +77,6 @@ enum Command {
     /// Boxed to keep the `Command` enum compact.
     #[command(name = "train-from-search", hide = true)]
     TrainFromSearch(Box<TrainFromSearchArgs>),
-
-    /// Merge MSNet intensity aggregation parquets into a finalized intensity
-    /// model for the strong-score numerator.
-    #[command(name = "train-intensity", hide = true)]
-    TrainIntensity(Box<TrainIntensityArgs>),
 
     /// Train a v3 GBDT fragment-intensity regressor from flat training
     /// parquets and embed it in a Parquet model store alongside existing
@@ -152,10 +134,8 @@ fn main() -> ExitCode {
         Some(clap::parser::ValueSource::CommandLine)
     ));
     let result = match top.command.take() {
-        Some(Command::RescorePin(args)) => run_rescore_pin(args),
         Some(Command::Train(args)) => run_train(*args),
         Some(Command::TrainFromSearch(args)) => run_train_from_search(*args),
-        Some(Command::TrainIntensity(args)) => run_train_intensity(*args),
         Some(Command::TrainIntensityGbdt(args)) => run_train_intensity_gbdt(*args),
         Some(Command::TrainRichIonLlr(args)) => run_train_rich_ion_llr(*args),
         None => {
@@ -241,42 +221,12 @@ fn configure_bundled_dotnet() {
     }
 }
 
-/// Print VmRSS for the current process when `ANDES_RSS_PROBE=1`. No-op
-/// otherwise and a no-op on non-Linux platforms regardless of the env var.
-///
-/// We gate behind an env var so production runs stay quiet; flip the var on
-/// when debugging memory regressions.
-fn log_rss(tag: &str) {
-    let probe_set = RSS_PROBE.get().copied().unwrap_or(false);
-    if !probe_set {
-        return;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
-            for line in s.lines() {
-                if line.starts_with("VmRSS:") {
-                    eprintln!("[RSS {tag}] {}", line.trim_start_matches("VmRSS:").trim());
-                    return;
-                }
-            }
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = tag;
-    }
-}
-
 /// True when `flag` appears literally in the process arguments. Used to tell a
 /// user-supplied value from a clap default, where the default itself is
 /// context-dependent (see `--gbdt-max-trees`, which is exempt under `--glyco`).
 fn arg_present(flag: &str) -> bool {
     std::env::args().any(|a| a == flag || a.starts_with(&format!("{flag}=")))
 }
-
-/// Diagnostic RSS logging, installed from `--rss-probe`.
-static RSS_PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// Set in `main` from clap's `ValueSource`: did the user type
 /// `--max-missed-cleavages` themselves? See the glyco floor below.

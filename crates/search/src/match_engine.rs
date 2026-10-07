@@ -24,7 +24,6 @@ use model::enzyme::Enzyme;
 use model::mass::{nominal_from, H2O, PROTON};
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;
-use scoring_crate::intensity_model::IntensityModel;
 use scoring_crate::mod_site_features::{
     mod_site_features, FEAT_SITE_DET_COUNT, FEAT_SITE_INTENS_FRAC, FEAT_SITE_LOCALIZED,
     FEAT_SITE_SHIFTED_FRAC, FEAT_SITE_SHIFTED_MATCHED,
@@ -139,10 +138,6 @@ pub struct PreparedSearch<'a> {
     /// precursor-envelope computation and the two new `PsmFeatures` fields
     /// stay 0.0 — keeping the off path bit-identical.
     pub ms1_link: Option<Ms1Link>,
-    /// Optional context-intensity model for the strong-score signal numerator
-    /// (`IntensitySignal` PIN column). `None` unless the binary supplied
-    /// `--intensity-model`; when absent the column is 0.0 and ranking is unchanged.
-    pub intensity_model: Option<Arc<IntensityModel>>,
     /// `Mmap`-mode ONLY: the GLOBAL set of target bare-peptide sequences (every
     /// non-decoy base record in the index), built once at `prepare_mmap`. The
     /// per-spectrum collision-decoy relabel uses THIS set so a decoy is relabeled
@@ -316,31 +311,11 @@ pub(crate) fn candidate_nominal_bounds(
     (min_nominal, max_nominal)
 }
 
-/// The charge states a spectrum is searched at.
-///
-/// With `charge_expand == 0` (the default) this is the historical behaviour: the
-/// reported precursor charge is trusted as the ONLY charge, else the configured
-/// range. That trust is the standard-search half of the charge blind spot the
-/// glyco path documents (`glyco_charges_to_try`): instrument charge mis-calls
-/// concentrate at z4-z6, and a mis-called charge puts the true peptide mass off
-/// the searched grid entirely, so the scan is lost with no error.
-///
-/// With `charge_expand == N >= 1` the set widens for reported charges at or above
-/// `charge_expand_min_z`: one charge BELOW (over-call) and `N` above (under-call),
-/// clamped to >= 1. Low reported charges are left alone, because that is where the
-/// acquisition is reliable and where the cost of tripling the candidate loop would
-/// be paid on every spectrum for nothing.
+/// The charge states a spectrum is searched at: the reported precursor charge is
+/// trusted as the ONLY charge, else the configured range.
 fn charges_to_try(spec: &Spectrum, params: &SearchParams) -> SmallVec<[u8; 4]> {
     match spec.precursor_charge {
-        Some(z) if z > 0 => {
-            let z = z as u8;
-            if params.charge_expand == 0 || z < params.charge_expand_min_z {
-                return smallvec![z];
-            }
-            let lo = z.saturating_sub(1).max(1);
-            let hi = z.saturating_add(params.charge_expand);
-            (lo..=hi).collect()
-        }
+        Some(z) if z > 0 => smallvec![z as u8],
         _ => params.charge_range.clone().collect(),
     }
 }
@@ -367,7 +342,7 @@ type MmapWindowKey = SmallVec<[(i32, i32); 4]>;
 /// × isotope offsets × charge states) while a base record's expansion is the
 /// same in every window that contains it — so one expansion serves every
 /// spectrum in the chunk that reaches the record. Bounded by total candidates
-/// (`SearchParams::mmap_window_cache_max_candidates`).
+/// ([`crate::search_params::MMAP_WINDOW_CACHE_MAX_CANDIDATES`]).
 type MmapRecordCache = FxHashMap<BaseRecordKey, Vec<Candidate>>;
 
 impl<'a> PreparedSearch<'a> {
@@ -450,7 +425,6 @@ impl<'a> PreparedSearch<'a> {
             mmap_accum: None,
             aa_set_for_scoring,
             ms1_link: None,
-            intensity_model: None,
             mmap_target_bare_seqs: None,
         }
     }
@@ -530,7 +504,6 @@ impl<'a> PreparedSearch<'a> {
             mmap_accum: Some(Mutex::new(MmapAccumulator::default())),
             aa_set_for_scoring,
             ms1_link: None,
-            intensity_model: None,
             mmap_target_bare_seqs: Some(target_bare_seqs),
         })
     }
@@ -588,15 +561,8 @@ impl<'a> PreparedSearch<'a> {
             mmap_accum: None,
             aa_set_for_scoring: parts.aa_set_for_scoring,
             ms1_link: None,
-            intensity_model: None,
             mmap_target_bare_seqs: None,
         }
-    }
-
-    /// Attach an optional [`IntensityModel`] for the S1 signal PIN column.
-    pub fn with_intensity_model(mut self, model: Option<Arc<IntensityModel>>) -> Self {
-        self.intensity_model = model;
-        self
     }
 
     /// Attach an [`Ms1Link`] for the chimeric precursor isotope features.
@@ -858,7 +824,7 @@ impl<'a> PreparedSearch<'a> {
                 let cache: MmapRecordCache = if frag_index.is_some() {
                     MmapRecordCache::default()
                 } else {
-                    let budget = params.mmap_window_cache_max_candidates;
+                    let budget = crate::search_params::MMAP_WINDOW_CACHE_MAX_CANDIDATES;
                     let cached_total = AtomicUsize::new(0);
                     records
                         .into_par_iter()
@@ -873,15 +839,6 @@ impl<'a> PreparedSearch<'a> {
             } else {
                 (None, None)
             };
-
-        // Yield-accounting counters.
-        // Aggregated across all worker threads via Relaxed atomics — exact counts
-        // don't require ordering with other memory ops.
-        // Research diagnostic (chimeric only): measure the shared-fragment
-        // overlap between the top-2 co-emitted distinct peptides per scan. Tests
-        // the "fragment theft" hypothesis behind chimeric FDR inflation. Gated by
-        // `--chimeric-allow-overlap` together with `--chimeric`; zero cost otherwise.
-        let chim_overlap = params.chimeric && params.chimeric_allow_overlap;
 
         // Parallel per-spectrum search. All inputs above are `&` immutable; the
         // closure owns its TopNQueue, scored_per_charge cache, and per-bin GF state.
@@ -1028,7 +985,7 @@ impl<'a> PreparedSearch<'a> {
                                 params,
                                 scorer.feature_match_tolerance(),
                                 params.fragment_index_top_k as usize,
-                                params.fragment_index_min_matched,
+                                crate::search_params::FRAGMENT_INDEX_MIN_MATCHED,
                                 params.fragment_index_intensity_tiebreak,
                             );
                             let target_bare_seqs = self
@@ -1332,7 +1289,6 @@ impl<'a> PreparedSearch<'a> {
                         &cand.peptide,
                         scorer,
                         psm.charge_used,
-                        self.intensity_model.as_deref(),
                         Some(psm.edge_score),
                         full,
                     );
@@ -1385,12 +1341,8 @@ impl<'a> PreparedSearch<'a> {
                     });
                     features
                 };
-                // With `deep_features_top` set, rank mode also takes the light pass
-                // first and gives the full one only to the best rows.
-                let deep_k = params.deep_features_top as usize;
-                let light_first = strong_mode || deep_k > 0;
                 queue.fill_post_topn(|psm| {
-                    psm.features = make_features(psm, !light_first);
+                    psm.features = make_features(psm, !strong_mode);
                 });
 
                 let retained_strong: Vec<f32> =
@@ -1408,92 +1360,17 @@ impl<'a> PreparedSearch<'a> {
                     // Emit only user top-N rows (gate uses top_n=1); retention pool was wider.
                     queue.trim_to_capacity(params.top_n_psms_per_spectrum);
                 }
-                if light_first {
-                    // Full features for the emitted rows, or only the best `deep_k` of
-                    // them (ties at the cutoff included). The strong score depends only
+                if strong_mode {
+                    // Full features for the emitted rows. The strong score depends only
                     // on features both passes compute identically; the calibrated score
                     // was taken over the whole pool, so keep it.
-                    let cutoff = if deep_k > 0 {
-                        let mut ranks: Vec<f32> = queue
-                            .iter_psms()
-                            .map(|p| {
-                                if p.rank_score.is_nan() {
-                                    f32::NEG_INFINITY
-                                } else {
-                                    p.rank_score
-                                }
-                            })
-                            .collect();
-                        ranks.sort_by(|a, b| b.total_cmp(a));
-                        ranks.get(deep_k - 1).copied().unwrap_or(f32::NEG_INFINITY)
-                    } else {
-                        f32::NEG_INFINITY
-                    };
                     queue.update_in_place(|psm| {
-                        if deep_k > 0 && (psm.rank_score.is_nan() || psm.rank_score < cutoff) {
-                            return;
-                        }
                         let strong = psm.features.strong_score;
                         let strong_cal = psm.features.strong_score_cal;
                         psm.features = make_features(psm, true);
                         debug_assert_eq!(psm.features.strong_score.to_bits(), strong.to_bits());
                         psm.features.strong_score_cal = strong_cal;
                     });
-                }
-
-                // Chimeric fragment-overlap diagnostic (env-gated). For scans that
-                // emit ≥2 distinct peptides, measure how many MS2 peaks the runner-up
-                // claims that the top peptide also claims (the "fragment theft" the
-                // chimeric FDR inflation is hypothesized to come from).
-                if chim_overlap {
-                    let sorted = queue.clone().into_sorted_vec(); // best-first
-                    let mut picks: Vec<&PsmMatch> = Vec::new();
-                    'outer: for psm in &sorted {
-                        let seq: Vec<u8> = cand_slice[psm.primary_candidate_idx() as usize]
-                            .peptide
-                            .residues
-                            .iter()
-                            .map(|a| a.residue)
-                            .collect();
-                        for p in &picks {
-                            let pseq: Vec<u8> = cand_slice[p.primary_candidate_idx() as usize]
-                                .peptide
-                                .residues
-                                .iter()
-                                .map(|a| a.residue)
-                                .collect();
-                            if pseq == seq {
-                                continue 'outer;
-                            }
-                        }
-                        picks.push(psm);
-                        if picks.len() == 2 {
-                            break;
-                        }
-                    }
-                    if picks.len() == 2 {
-                        let pa = &cand_slice[picks[0].primary_candidate_idx() as usize].peptide;
-                        let pb = &cand_slice[picks[1].primary_candidate_idx() as usize].peptide;
-                        let ka = matched_peak_keys(
-                            scored_spec_for_charge(picks[0].charge_used),
-                            pa,
-                            scorer,
-                        );
-                        let kb = matched_peak_keys(
-                            scored_spec_for_charge(picks[1].charge_used),
-                            pb,
-                            scorer,
-                        );
-                        let shared = ka.intersection(&kb).count();
-                        let uni = ka.union(&kb).count();
-                        let minlen = ka.len().min(kb.len());
-                        eprintln!(
-                        "CHIM_OVERLAP spec_idx={} nA={} nB={} shared={} jacc={:.3} fracmin={:.3}",
-                        spec_idx, ka.len(), kb.len(), shared,
-                        if uni > 0 { shared as f64 / uni as f64 } else { 0.0 },
-                        if minlen > 0 { shared as f64 / minlen as f64 } else { 0.0 },
-                    );
-                    }
                 }
 
                 // `Mmap` mode: the surviving PSMs carry LOCAL `candidate_idxs` into
@@ -1655,7 +1532,6 @@ pub fn run_pass2_coisolation(
                 &prepared.aa_set_for_scoring,
                 params,
                 prepared.fragment_tolerance_da,
-                prepared.intensity_model.as_deref(),
             ) {
                 // `spec_idx` is chunk-local (indexes `spectra` + `link`); the
                 // emitted spectrum_idx must be global to align with `all_spectra`.
@@ -1749,31 +1625,6 @@ pub(crate) fn cleavage_credit_for(cand: &Candidate, enz: Enzyme, aa_set: &AminoA
     )
 }
 
-/// Research diagnostic: the set of observed MS2 peaks claimed by `peptide`'s
-/// charge-1 b/y ions, as quantized m/z keys (round(mz·1000)). Mirrors the
-/// matching in `compute_psm_features`. Used only by the env-gated chimeric
-/// fragment-overlap diagnostic; not on any production path.
-pub(crate) fn matched_peak_keys(
-    scored_spec: &ScoredSpectrum<'_>,
-    peptide: &Peptide,
-    scorer: &RankScorer,
-) -> std::collections::HashSet<i64> {
-    let mut keys = std::collections::HashSet::new();
-    let n = peptide.length();
-    if n < 2 {
-        return keys;
-    }
-    let predicted = predict_by_ions(peptide, 1..=1);
-    let feat_tol = scorer.feature_match_tolerance();
-    for p in &predicted {
-        let tol_da = feat_tol.as_da(p.mz);
-        if let Some((_rank, _intensity, peak_mz)) = scored_spec.nearest_peak_full(p.mz, tol_da) {
-            keys.insert((peak_mz * 1000.0).round() as i64);
-        }
-    }
-    keys
-}
-
 /// Compute fragment-ion feature columns for a single PSM.
 ///
 /// Uses charge-1 b/y ions only (the `NumMatchedMainIons` convention).
@@ -1800,17 +1651,8 @@ pub(crate) fn compute_psm_features(
     peptide: &Peptide,
     scorer: &RankScorer,
     charge: u8,
-    intensity_model: Option<&IntensityModel>,
 ) -> PsmFeatures {
-    compute_psm_features_with_edge(
-        scored_spec,
-        peptide,
-        scorer,
-        charge,
-        intensity_model,
-        None,
-        true,
-    )
+    compute_psm_features_with_edge(scored_spec, peptide, scorer, charge, None, true)
 }
 
 /// As [`compute_psm_features`], reusing an `edge_score` the caller already has
@@ -1821,7 +1663,6 @@ pub(crate) fn compute_psm_features_with_edge(
     peptide: &Peptide,
     scorer: &RankScorer,
     charge: u8,
-    intensity_model: Option<&IntensityModel>,
     known_edge_score: Option<i32>,
     full: bool,
 ) -> PsmFeatures {
@@ -2255,9 +2096,7 @@ pub(crate) fn compute_psm_features_with_edge(
     );
 
     // ── Strong-score S1: intensity-model signal (additive PIN column) ───────
-    // NCE is not carried on Spectrum today; use "unknown" (model backs off).
-    // When a v3 frag-intensity regressor is present on the param it takes
-    // precedence; the coarse IntensityModel table is the fallback.
+    // Driven by the v3 frag-intensity regressor on the param; 0.0 without one.
     let frag_intensity_model = scorer.param().frag_intensity_model.as_deref();
     // Walk the GBDT ONCE for this candidate. `intensity_signal` and
     // `frag_llr_battery` below both need the identical per-ion predictions
@@ -2269,12 +2108,10 @@ pub(crate) fn compute_psm_features_with_edge(
         .map(|g| predict_frag_intensities(g, peptide, charge));
     let frag_pred_slice = frag_pred.as_deref();
     let intensity_signal_val = intensity_signal(
-        intensity_model,
         frag_intensity_model,
         scored_spec,
         peptide,
         charge,
-        "unknown",
         feature_tol,
         feature_tol_is_ppm,
         frag_pred_slice,
@@ -2421,9 +2258,8 @@ mod charges_to_try_tests {
     }
 
     #[test]
-    fn default_trusts_the_reported_charge_alone() {
+    fn reported_charge_is_searched_alone() {
         let p = params();
-        assert_eq!(p.charge_expand, 0, "expansion must ship off");
         assert_eq!(charges_to_try(&spec(Some(5)), &p).as_slice(), &[5]);
     }
 
@@ -2431,41 +2267,6 @@ mod charges_to_try_tests {
     fn missing_charge_still_falls_back_to_the_range() {
         let p = params();
         assert_eq!(charges_to_try(&spec(None), &p).as_slice(), &[2, 3]);
-    }
-
-    /// The point of the knob: a mis-called high charge puts the true peptide mass
-    /// off the searched grid, so one below and `expand` above are tried.
-    #[test]
-    fn expansion_covers_one_below_and_n_above() {
-        let mut p = params();
-        p.charge_expand = 2;
-        assert_eq!(charges_to_try(&spec(Some(5)), &p).as_slice(), &[4, 5, 6, 7]);
-    }
-
-    /// Low reported charges are left alone, confining the extra candidate work to
-    /// the population where mis-calls are measured.
-    #[test]
-    fn low_charges_are_untouched_by_expansion() {
-        let mut p = params();
-        p.charge_expand = 2;
-        assert_eq!(p.charge_expand_min_z, 4);
-        assert_eq!(charges_to_try(&spec(Some(2)), &p).as_slice(), &[2]);
-        assert_eq!(charges_to_try(&spec(Some(3)), &p).as_slice(), &[3]);
-        // z=4 is at the threshold: one below, two above.
-        assert_eq!(charges_to_try(&spec(Some(4)), &p).as_slice(), &[3, 4, 5, 6]);
-    }
-
-    #[test]
-    fn charge_one_never_becomes_zero() {
-        let mut p = params();
-        p.charge_expand = 1;
-        p.charge_expand_min_z = 1;
-        let got = charges_to_try(&spec(Some(1)), &p);
-        assert!(
-            got.iter().all(|&z| z >= 1),
-            "charge 0 is not a charge: {got:?}"
-        );
-        assert_eq!(got.as_slice(), &[1, 2]);
     }
 }
 
@@ -2685,7 +2486,7 @@ mod feature_tests {
         let pep = ala_peptide(4);
         let spec = make_spectrum(vec![]); // no peaks
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let f = compute_psm_features(&ss, &pep, &make_scorer(0.5), 2, None);
+        let f = compute_psm_features(&ss, &pep, &make_scorer(0.5), 2);
         assert_eq!(
             f.mean_error_top7, 0.0,
             "mean_error_top7 should be 0 with no matches"
@@ -2735,7 +2536,7 @@ mod feature_tests {
 
         let spec = make_spectrum(peaks);
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let f = compute_psm_features(&ss, &pep, &make_scorer(0.01), 2, None); // tight tolerance
+        let f = compute_psm_features(&ss, &pep, &make_scorer(0.01), 2); // tight tolerance
 
         // All ratios should be positive since all predicted ions match.
         assert!(
@@ -2795,7 +2596,6 @@ mod feature_tests {
             &pep,
             &scorer,
             2,
-            None,
         );
         // Neutral-loss offsets in the theo list can add minor ambiguity even
         // when peaks are well separated; still expect a high fraction.
@@ -2843,7 +2643,6 @@ mod feature_tests {
             &pep2,
             &scorer,
             2,
-            None,
         );
         assert!(
             f_contested.unique_match_fraction < f_unique.unique_match_fraction,
@@ -2876,7 +2675,6 @@ mod feature_tests {
             &pep,
             &make_scorer(0.01),
             3,
-            None,
         );
         assert_eq!(f_empty.doubly_charged_matched_ion_count, 0);
 
@@ -2892,7 +2690,6 @@ mod feature_tests {
             &pep,
             &make_scorer(0.01),
             3,
-            None,
         );
         assert!(
             f.doubly_charged_matched_ion_count > 0,
@@ -2926,7 +2723,6 @@ mod feature_tests {
             &pep,
             &make_scorer(0.01),
             2,
-            None,
         );
         // Only ion peaks present → ranks 1..4 → mean 2.5.
         assert!(
@@ -2950,7 +2746,6 @@ mod feature_tests {
             &pep,
             &make_scorer(0.01),
             2,
-            None,
         );
         assert!(
             f_buried.mean_matched_intensity_rank > f_top.mean_matched_intensity_rank,
@@ -2980,7 +2775,6 @@ mod feature_tests {
             &pep,
             &make_scorer(0.01),
             2,
-            None,
         );
         let expected = (n - 1) as u32;
         assert_eq!(
@@ -3003,7 +2797,6 @@ mod feature_tests {
             &pep,
             &make_scorer(0.01),
             2,
-            None,
         );
         // Bonds 1 and 2-4 split at bond 2: runs of 1 and 2 → longest = 2.
         assert_eq!(
@@ -3038,7 +2831,6 @@ mod feature_tests {
             &pep,
             &make_scorer(0.01),
             2,
-            None,
         );
         assert!(
             f_all.complementary_ion_balance > 0.0,
@@ -3059,7 +2851,6 @@ mod feature_tests {
             &pep,
             &make_scorer(0.01),
             2,
-            None,
         );
         assert_eq!(
             f_b.complementary_ion_balance, 0.0,
@@ -3087,7 +2878,6 @@ mod feature_tests {
             &pep,
             &make_scorer(0.01),
             2,
-            None,
         );
         assert_eq!(
             f.neutral_loss_ion_count, 1,
@@ -3118,7 +2908,6 @@ mod feature_tests {
             &pep,
             &make_scorer(0.01),
             2,
-            None,
         );
 
         // All 4 ions matched at 0 ppm → each Gaussian kernel == 1 → sum ≈ 4.
@@ -3148,7 +2937,6 @@ mod feature_tests {
             &pep,
             &make_scorer(0.01),
             2,
-            None,
         );
         assert!(
             f_shift.ppm_gaussian_score < f_exact.ppm_gaussian_score * 0.5,
@@ -3184,7 +2972,7 @@ mod feature_tests {
         let ss = ScoredSpectrum::new_without_filtering(&spec);
         // make_scorer still accepts a tol arg for legacy compatibility, but
         // compute_psm_features uses the instrument-based hardcoded tolerance.
-        let f = compute_psm_features(&ss, &pep, &make_scorer(0.05), 2, None);
+        let f = compute_psm_features(&ss, &pep, &make_scorer(0.05), 2);
 
         // Mean error should be nonzero when peaks are systematically offset.
         // MeanErrorTop7 is in PPM, not Da. PPM error =
@@ -3219,7 +3007,7 @@ mod feature_tests {
         let peaks = vec![(100.0, 50.0_f32), (200.0, 30.0), (300.0, 20.0)];
         let spec = make_spectrum(peaks.clone());
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let f = compute_psm_features(&ss, &pep, &make_scorer(0.5), 2, None);
+        let f = compute_psm_features(&ss, &pep, &make_scorer(0.5), 2);
 
         let expected: f32 = peaks.iter().map(|&(_, i)| i).sum();
         assert_eq!(

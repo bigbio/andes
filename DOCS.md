@@ -6,13 +6,9 @@ The full reference for the `andes` binary and its outputs; install and quick sta
 Use them to reproduce a measurement or override a derivation.
 
 Advanced (hidden) flags include: `--candidate-index`, `--fragment-index`, `--gbdt-max-trees`,
-`--peak-filter`, `--density-on-active-list`, `--precursor-offset-clamp`, `--ethcd-activation`,
-`--isotope-error`, `--rss-probe`, `--chimeric-allow-overlap`, and the glyco tuning group
-(`--glyco-tol-ppm`, `--glyco-retrieval-tol-ppm`, `--glyco-retrieval-tol-da`,
-`--glyco-min-matched-ions`, `--glyco-min-raw-score`, `--glyco-min-raw-score-quantile`,
-`--glyco-sialic-oxonium-min-frac`, `--glyco-max-peaks`, `--glyco-isotope-error`,
-`--glyco-cz-multisite`, `--glyco-etd-rank-glycan`, `--glyco-y-max-charge`,
-`--glyco-cz-max-charge`, `--glyco-diag-splits`, `--glyco-scans`).
+`--peak-filter`, `--ethcd-activation`, `--isotope-error`, and the glyco tuning group
+(`--glyco-tol-ppm`, `--glyco-retrieval-tol-ppm`, `--glyco-max-peaks`, `--glyco-y-max-charge`,
+`--glyco-cz-max-charge`, `--glyco-scans`).
 
 ---
 
@@ -48,7 +44,7 @@ Native `.raw`/`.d` search MS2 only (MS3 reporter scans are filtered at load).
 | `--precursor-tol` | string | `20ppm` | Symmetric precursor tolerance, e.g. `20ppm` or `0.02da`. | Java `-t 20ppm` |
 | `--enzyme` | enum | `trypsin` | `trypsin`, `chymotrypsin`, `lysc`, `aspn`, `gluc`, `lysn`, `argc`, `alphalp`, `nocleavage`, `nonspecific` (alias `elastase`). A comma list (`gluc,trypsin`) uses every enzyme listed. | Java `-e` |
 | `--charge` | `MIN..MAX` | `2..5` | Charges tried when the spectrum has none. | *(no direct Java flag; set via param file in Java)* |
-| `--enzyme-specificity` | enum | `fully` | Tolerable termini: `fully` (Java `-ntt 2`), `semi` (`-ntt 1`), `non-specific` (`-ntt 0`). | `--ntt` alias |
+| `--enzyme-specificity` | enum | `fully` | Tolerable termini: `fully` (Java `-ntt 2`), `semi` (`-ntt 1`), `non-specific` (`-ntt 0`). | Java `-ntt` |
 | `--max-missed-cleavages` | u32 | `1` | Missed cleavages per peptide. | Java `-maxMissedCleavages 1` |
 | `--min-length` | u32 | `6` | Minimum peptide length. | Java `-minLength 6` |
 | `--max-length` | u32 | `50` | Maximum peptide length. | Java `-maxLength 40` |
@@ -72,8 +68,6 @@ Native `.raw`/`.d` search MS2 only (MS3 reporter scans are filtered at load).
 | `--gbdt-max-trees` | u32 | `100` | Trees per GBDT ensemble, `0` = all. 100 is 33–41% faster and identification-neutral (2026-09). `--glyco` uses all trees unless set. | — |
 | `--peak-filter` | `WINDOW_DA:PEAKS` | protocol default | Keep the `PEAKS` most intense peaks per `WINDOW_DA`. Unset = `100:20` for isobaric data, else off; window `0` forces off. | — |
 | `--ethcd-activation` | enum | `hcd` | EThcD/ETciD routing: `hcd` (no EThcD model exists) or `etd` (c/z path). | — |
-| `--precursor-offset-clamp` | bool | `true` | Use the nearest charge's precursor-offset entry when a charge has none. | — |
-| `--density-on-active-list` | bool | `true` | Measure peak density on the deconvoluted peak list. | — |
 | `--model-store` | path | *(bundled)* | Model store instead of `resources/models/` (directory or one `models.parquet`). | — |
 | `--model` | string | *(auto-select)* | Load this model id, skipping selection. | — |
 
@@ -105,7 +99,6 @@ TMT from 12,281 to 3,613 PSMs at 1% and UPS1 from 15,838 to 10,312), as do `--ch
 | `--threads` | usize | logical CPU count | Worker threads. | Java `-thread N` |
 | `--ms-level` | u8 | `2` | MS level to search in mzML. `.raw`/`.d`, MGF and `--chimeric` always search MS2. | — |
 | `--max-spectra` | usize | `0` | Bench mode: first N MS2 spectra only (`0` = all); skips TSV output. | — |
-| `--rss-probe` | flag | *(off)* | Log resident memory per phase (Linux). | — |
 
 ### Output
 
@@ -114,8 +107,8 @@ TMT from 12,281 to 3,613 PSMs at 1% and UPS1 from 15,838 to 10,312), as do `--ch
 | `--output-tsv` | path | *(off)* | Tab-separated PSM report (§3b). | Java `-outputFormat 1` with output path |
 | `--output-parquet` | dir | *(off)* | QPX `.idparquet/` bundle (§3e). | — |
 
-No environment variable changes a search result; the trace switches (`ANDES_TRACE_IONS`,
-`ANDES_TRACE_PEP`) and test variables are listed in [`docs/ENV_VARS.md`](docs/ENV_VARS.md).
+No environment variable changes a search result; the binary reads none. The test-harness
+variables are listed in [`docs/ENV_VARS.md`](docs/ENV_VARS.md).
 
 ---
 
@@ -144,7 +137,6 @@ Needs MS1: **mzML or Thermo `.raw`** only (MGF/`.d` warn and run a normal search
 | `--chimeric` | flag | *(off)* | Pass 2 finds co-isolated precursors in the MS1 isolation window (averagine match) and searches the residual spectrum for a second peptide. Forces top-1 per pass and MS2. Experimental. |
 | `--chimeric-max-coisolated` | u32 | `4` | *(advanced)* Max co-isolated precursors per scan. |
 | `--chimeric-max-kl` | f64 | `0.3` | *(advanced)* Max isotope-envelope KL divergence to accept a co-isolated precursor. |
-| `--chimeric-allow-overlap` | flag | *(off)* | *(advanced)* Let a pass-2 candidate reuse the primary's matched peaks. |
 
 ### Refine — secondary chemistry cascade
 
@@ -155,7 +147,7 @@ at most two per peptide. It does **not** discover modifications; andes has no op
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--refine` | flag | *(off)* | Enable the PTM-refinement cascade (Pass-2 over confident proteins). |
-| `--refine-config` | path | *(tier default)* | *(advanced)* YAML tier config: the mod set, max variable mods and the high-res-only gate. |
+| `--refine-config` | path | *(tier default)* | *(advanced)* YAML tier config: the mod set, max variable mods, the high-res-only gate and `entrapment: true` (one shuffled entrapment anchor per Pass-2 anchor, to count Pass-2 false discoveries; diagnostic only). |
 | `--refine-select-psm-fdr` | fraction | `0.01` | *(advanced)* PSM-FDR of the confident set that seeds Pass-2. |
 
 **FDR for refined PSMs.** Pass-2 rows (`IsRefinement = 1`) share the PIN. Under one merged 1%
@@ -494,10 +486,11 @@ cargo test --release --workspace -- \
 
 ## 6. Training new scoring models
 
-`andes train` searches your data with a seed model, keeps PSMs at q ≤ `--train-fdr`, and
-writes a model into a Parquet store; search with it via `--model-store <path> --model <id>`.
-Incremental updates (`--update --add` / `--remove-source` / `--reweight` / `--decay`) pass a
-held-out acceptance gate. See **[`TRAIN.md`](TRAIN.md)**.
+`andes train-from-search` searches your data with a seed model, keeps PSMs at q ≤
+`--train-fdr`, and writes a model into a Parquet store; search with it via
+`--model-store <path> --model <id>`. Incremental updates (`--update --add` /
+`--remove-source` / `--reweight` / `--decay`) pass a held-out acceptance gate. `andes train
+--in <parquet>` trains from externally labelled PSMs instead. See **[`TRAIN.md`](TRAIN.md)**.
 
 ---
 
@@ -545,9 +538,9 @@ For phospho-enriched iTRAQ use `--protocol iTRAQ-phospho` plus phospho mods (§2
 
 ## 8. Legacy numeric values & behavior notes
 
-Legacy MS-GF+ numeric values (e.g. `--fragmentation 3`, `--protocol 4`, `--ntt 2`) are **no
-longer accepted**; use the names (case-insensitive, `--fragmentation hcd` ≡ `HCD`). `--ntt`
-remains an alias of `--enzyme-specificity`.
+Legacy MS-GF+ numeric values (e.g. `--fragmentation 3`, `--protocol 4`) are **no longer
+accepted**; use the names (case-insensitive, `--fragmentation hcd` ≡ `HCD`). The MS-GF+
+`-ntt` setting is `--enzyme-specificity fully|semi|non-specific`.
 
 ### Behavior notes
 
@@ -569,36 +562,31 @@ remains an alias of `--enzyme-specificity`.
 | `--glyco-tol-ppm` | 20 | Fragment tolerance for glyco matching (oxonium, core-Y, backbone mass, c/z). **Raise it on ion-trap MS2** or the oxonium gate never fires. |
 | `--glyco-glycan-gdb <FILE>` | — | pGlyco-style `.gdb` glycan database; structure (core- vs antenna-fucose) is kept. Wins over `--glyco-species`. |
 | `--glyco-species <NAME>` | — | Bundled database: `human`, `human-multi`, `mouse`, `mouse-large`, `high-mannose`. One of the two is required. |
-| `--glyco-isotope-error` | `default` | `default` is 0..=2 (dropping −1 measured +81 backbone-correct @1%); `negative` restores −1..=2. |
-| `--precursor-mono` | `auto` | Correct each precursor to the monoisotope its MS1 envelope supports (mzML or `.raw`): tests "recorded = M+k", k = 0..6, and moves down k−1 isotopes when k > 0 clearly wins. On pGlyco2 mouse liver 88 of 3,824 reference scans were recorded exactly +4 high (issue #64). Fitted spectra are searched with a `0..1` isotope window instead of `0..2`. Adds `MonoShift`/`MonoFit`/`MonoFitGain`/`MonoSNR`. An explicit `--isotope-error` or `--glyco-isotope-error negative`/`wide` is honoured; without MS1 output is byte-identical to `off`. |
+| `--precursor-mono` | `auto` | Correct each precursor to the monoisotope its MS1 envelope supports (mzML or `.raw`): tests "recorded = M+k", k = 0..6, and moves down k−1 isotopes when k > 0 clearly wins. On pGlyco2 mouse liver 88 of 3,824 reference scans were recorded exactly +4 high (issue #64). Fitted spectra are searched with a `0..1` isotope window instead of `0..2`. Adds `MonoShift`/`MonoFit`/`MonoFitGain`/`MonoSNR`. An explicit `--isotope-error` is honoured; without MS1 output is byte-identical to `off`. Under `--glyco` the isotope-error window defaults to 0..=2 (dropping −1 measured +81 backbone-correct @1%). |
 | `--glyco-max-peaks` | 0 (no cap) | Peaks the **generation** stage considers; 300–500 helps very dense scans. |
-| `--glyco-retrieval-tol-ppm` / `--glyco-retrieval-tol-da` | tol-ppm on high-res, 0.5 Da on low-res | Retrieval window only; 20 ppm on high-res measured 6.9x faster at no identification cost. |
+| `--glyco-retrieval-tol-ppm` | tol-ppm on high-res, the model's Da window on low-res | Retrieval window only; 20 ppm on high-res measured 6.9x faster at no identification cost. |
 | `--glyco-y-max-charge` | 3 | Maximum glycan-Y fragment charge. |
 | `--glyco-cz-max-charge` | derived | Maximum c/z charge on ETD. |
-| `--glyco-cz-multisite` | off | Pick the site by c/z evidence when a backbone has several sequons (~8% of tryptic glycopeptides); otherwise `@N?`. |
 | `--glyco-hcd-pair` | **on** | ETD, single-file runs: backbones from the paired HCD scan, c/z scored on the ETD scan (+153 backbone-correct @1%). Disabled with a warning for multi-file runs. |
-| `--glyco-etd-rank-glycan` | **on** | ETD: c/z at their glycan-carrying mass (+33 backbone-correct @1%). |
 | `--glyco-min-core-y` | 0 | Require N trimannosyl-core Y ions before reporting. |
-| `--glyco-min-matched-ions` | 0 | Require N matched b/y ions (MSFragger uses 4). |
-| `--glyco-min-raw-score` / `--glyco-min-raw-score-quantile` | unset | Absolute or run-adaptive (decoy-winner quantile) emission floor. |
-| `--glyco-sialic-oxonium-min-frac` | 0 | Require a sialic oxonium ion before a composition may claim NeuAc/NeuGc. |
-| `--glyco-pin-curated` | off | Curated 52-column glyco PIN; identification-neutral on mouse liver. |
-| `--glyco-scans <FILE>` / `--glyco-diag-splits <FILE>` / `--debug-glyco` | off | Diagnostics. Never feed a `--debug-glyco` PIN to an FDR tool. |
+| `--glyco-scans <FILE>` / `--debug-glyco` | off | Diagnostics. Never feed a `--debug-glyco` PIN to an FDR tool. |
 
 **Tuning knobs** (`hide = true`):
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--glyco-backbone-top-k` | 150 | Max backbone candidates per spectrum after DB/de-novo union. |
 | `--glyco-index-sequon-only` | off | Index only N-X-S/T peptides: the mouse entrapment recipe needs 3.4 GB instead of ~27 GB; 16 of 7,113 rows (0.2%) differ in `RawScore`/`CandidateRankEntropy` only. |
-| `--precursor-mono-max-shift` / `-min-fit` / `-min-gain` / `-min-snr` / `-tol-ppm` / `-backoff` | 6 / 0.90 / 0.15 / 3.0 / 10 / 1 | `--precursor-mono` tuning: largest shift, minimum fit, minimum gain, minimum mono SNR, MS1 tolerance, isotopes held back. `--precursor-mono-dump <FILE>` writes every fit. |
+| `--precursor-mono-dump <FILE>` | off | Write every `--precursor-mono` envelope fit as TSV. |
 | `--glyco-full-glycan-db` | off | A/B flag: mass-driven full-glycan-list branch instead of the peptide-first fallback. |
-| `--glyco-gp-k` / `--glyco-gp-j` / `--glyco-gp-h` | 10 / 5 / 1 | Selector weights in `rank + K·ladder + J·core_y + H·hyper`. |
-| `--glyco-gp-cz` | 15 | ETD c/z hyperscore weight. |
-| `--glyco-cz-gate` | on | ETD: c/z evidence can rescue a backbone from truncation. |
-| `--glyco-enum-fallback` | on | Promote the best enumerated candidate over a de-novo winner. |
-| `--glyco-pair-y-on-gen`, `--glyco-etd-require-oxonium` | off | ETD variants: Y ladder from the HCD partner; oxonium gate before full enumeration. |
-| `--glyco-pf-charge` / `--glyco-max-pf` | 2 / 1024 | Peptide-first fragment-index charge and candidate cap. |
+
+**Fixed settings** (validated; no flag): selector `rank + K·ladder + J·core_y + H·hyper` with
+K/J/H = 10/5/1, ETD c/z weight 15 and isotope-offset penalty 1; 150 backbone candidates per
+spectrum after the DB/de-novo union; ETD c/z evidence can rescue a backbone from truncation;
+on ETD the rank/edge/hyperscore path scores the backbone with its intact glycan (+33
+backbone-correct @1%); the best enumerated candidate is promoted over a de-novo winner;
+peptide-first index at fragment charges 1..=2 with at most 1,024 candidates per spectrum;
+`--precursor-mono` uses max shift 6, minimum fit 0.90, minimum gain 0.15, minimum SNR 3.0,
+10 ppm MS1 tolerance and holds back 1 isotope.
 
 Deleted after A/B tests (2026-09-05): `--glyco-split-election`, `--glyco-gp-g`,
 `--glyco-gp-m`, `--glyco-isobar-rep`, `--glyco-y-index`, `--glyco-decorated-features`,
@@ -606,6 +594,14 @@ Deleted after A/B tests (2026-09-05): `--glyco-split-election`, `--glyco-gp-g`,
 `--glyco-y-tree`, `--glyco-oxonium-llr`, `--glyco-rank-masked`, `--glyco-chance-llr-masked`,
 `--glyco-transfer` (and its five knobs) and `--glyco-decoy`
 ([*Refuted*](docs/benchmarks/README.md#refuted--do-not-re-try-without-new-evidence)).
+Removed 2026-10 (defaults fixed as above, or diagnostics/opt-ins that were never adopted):
+`--glyco-gp-k/-j/-h/-cz/-iso`, `--glyco-backbone-top-k`, `--glyco-pf-charge`,
+`--glyco-max-pf`, `--glyco-retrieval-tol-da`, `--glyco-isotope-error`,
+`--glyco-elect-top-k`, `--glyco-cz-gate`, `--glyco-cz-multisite`, `--glyco-etd-rank-glycan`,
+`--glyco-enum-fallback`, `--glyco-pair-y-on-gen`, `--glyco-etd-require-oxonium`,
+`--glyco-min-raw-score(-quantile)`, `--glyco-min-matched-ions`,
+`--glyco-sialic-oxonium-min-frac`, `--glyco-pin-curated`, `--glyco-diag-splits` and the
+`--precursor-mono-*` tuning flags.
 
 **Run Percolator on a glyco PIN with `--trainFDR 0.05`.** A glyco run has too few positives
 at the default 1% training threshold for a stable fit. Pooled human-plasma glyco PIN, same

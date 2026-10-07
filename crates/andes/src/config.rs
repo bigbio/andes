@@ -75,7 +75,6 @@ pub struct ScoringCfg {
     pub fragment_tol_da: Option<f64>,
     pub model_store: Option<PathBuf>,
     pub model: Option<String>,
-    pub intensity_model: Option<PathBuf>,
     pub candidate_index: Option<String>,
     pub ms_level: Option<u8>,
     pub max_spectra: Option<usize>,
@@ -124,16 +123,8 @@ pub struct RescoringCfg {
 #[serde(default, deny_unknown_fields)]
 pub struct GlycoCfg {
     pub enabled: Option<bool>,
-    pub backbone_top_k: Option<usize>,
-    pub elect_top_k: Option<usize>,
-    pub gp_k: Option<f32>,
-    pub gp_j: Option<f32>,
-    pub gp_h: Option<f32>,
-    pub gp_cz: Option<f32>,
     pub tol_ppm: Option<f64>,
     pub max_peaks: Option<usize>,
-    pub pf_charge: Option<u8>,
-    pub max_pf: Option<usize>,
     pub debug: Option<bool>,
     pub hcd_pair: Option<bool>,
 }
@@ -283,11 +274,6 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     );
     set_opt!("model_store", model_store, cfg.scoring.model_store);
     set_opt!("model_id_override", model_id_override, cfg.scoring.model);
-    set_opt!(
-        "intensity_model",
-        intensity_model,
-        cfg.scoring.intensity_model
-    );
     set_parsed!(
         "candidate_index",
         candidate_index,
@@ -350,24 +336,8 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
 
     // ── glyco ──
     set!("glyco", glyco, cfg.glyco.enabled);
-    set!(
-        "glyco_backbone_top_k",
-        glyco_backbone_top_k,
-        cfg.glyco.backbone_top_k
-    );
-    set!(
-        "glyco_elect_top_k",
-        glyco_elect_top_k,
-        cfg.glyco.elect_top_k
-    );
-    set!("glyco_gp_k", glyco_gp_k, cfg.glyco.gp_k);
-    set!("glyco_gp_j", glyco_gp_j, cfg.glyco.gp_j);
-    set!("glyco_gp_h", glyco_gp_h, cfg.glyco.gp_h);
-    set!("glyco_gp_cz", glyco_gp_cz, cfg.glyco.gp_cz);
     set!("glyco_tol_ppm", glyco_tol_ppm, cfg.glyco.tol_ppm);
     set!("glyco_max_peaks", glyco_max_peaks, cfg.glyco.max_peaks);
-    set!("glyco_pf_charge", glyco_pf_charge, cfg.glyco.pf_charge);
-    set!("glyco_max_pf", glyco_max_pf, cfg.glyco.max_pf);
     set!("debug_glyco", debug_glyco, cfg.glyco.debug);
     set!("glyco_hcd_pair", glyco_hcd_pair, cfg.glyco.hcd_pair);
 
@@ -449,13 +419,13 @@ search:
   charge: \"2..4\"
 glyco:
   enabled: true
-  gp_k: 42.0
+  tol_ppm: 42.0
 ";
         let c = RunConfig::from_yaml_str(y).expect("valid config");
         assert_eq!(c.search.precursor_tol.as_deref(), Some("15ppm"));
         assert_eq!(c.search.charge.as_deref(), Some("2..4"));
         assert_eq!(c.glyco.enabled, Some(true));
-        assert_eq!(c.glyco.gp_k, Some(42.0));
+        assert_eq!(c.glyco.tol_ppm, Some(42.0));
         assert_eq!(c.io.database, Some(PathBuf::from("db.fasta")));
     }
 

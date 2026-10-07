@@ -50,18 +50,6 @@ struct RankKeptCtx {
     suffix_score_cache: Vec<f32>,
 }
 
-/// Memoize the `(ANDES_TRACE_IONS && ANDES_TRACE_PEP)` env-var probe once,
-/// rather than calling `env::var_os` twice per `directional_node_score_inner`
-/// invocation. That inner loop fires for every (spectrum × split × segment)
-/// triple while building the score_psm cache.
-fn trace_ions_enabled() -> bool {
-    static CELL: OnceLock<bool> = OnceLock::new();
-    *CELL.get_or_init(|| {
-        std::env::var_os("ANDES_TRACE_IONS").is_some()
-            && std::env::var_os("ANDES_TRACE_PEP").is_some()
-    })
-}
-
 /// Pure soft-match blend: weight a matched ion's score by a Gaussian of its mass
 /// error `Δm = peak_mz − theo_mz` and blend toward the missing-ion score.
 ///
@@ -208,12 +196,12 @@ pub struct ScoredSpectrum<'a> {
     gbdt_logit_by_rank: Vec<f32>,
 }
 
-/// Parsed `ANDES_PEAK_WINDOW` / `ANDES_PEAK_PER_WINDOW` override for the windowed
-/// peak filter (see `ScoredSpectrum::new`).
+/// Resolved `--peak-filter` setting for the windowed peak filter (see
+/// `ScoredSpectrum::new`).
 enum PeakFilterEnv {
-    /// `ANDES_PEAK_WINDOW=0` (or ≤0): force the filter off regardless of protocol.
+    /// Window ≤ 0: force the filter off regardless of protocol.
     Disabled,
-    /// Both env vars set: use this window/K for every spectrum.
+    /// Explicit window/K for every spectrum.
     Override(f64, usize),
     /// Unset: fall back to protocol-based gating (isobaric → default 100 Da/20).
     Unset,
@@ -225,28 +213,12 @@ enum PeakFilterEnv {
 /// signatures, so the binary installs them once at startup. Every field has a documented
 /// default that applies when nothing installs them — library consumers and tests get the
 /// shipped behaviour without doing anything.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct ScoringSettings {
     /// Windowed peak filtering: `Some((window_da, peaks_per_window))` forces it on with
     /// those values, `Some((w, _))` with `w <= 0.0` forces it off, `None` uses the
     /// protocol-driven default (on for isobaric-labelled data, off otherwise).
     pub peak_filter: Option<(f64, usize)>,
-    /// Clamp the precursor-offset lookup to the nearest available charge key rather than
-    /// dropping the correction when the exact charge is missing. Default true.
-    pub precursor_offset_clamp: bool,
-    /// Measure local peak density on the active (deconvoluted) peak list. Default true;
-    /// false restores measuring it on the raw list.
-    pub density_on_active_list: bool,
-}
-
-impl Default for ScoringSettings {
-    fn default() -> Self {
-        Self {
-            peak_filter: None,
-            precursor_offset_clamp: true,
-            density_on_active_list: true,
-        }
-    }
 }
 
 static SCORING_SETTINGS: OnceLock<ScoringSettings> = OnceLock::new();
@@ -262,9 +234,9 @@ pub(crate) fn scoring_settings() -> ScoringSettings {
     SCORING_SETTINGS.get().copied().unwrap_or_default()
 }
 
-/// Read the env override once (it is process-wide and constant for a run) rather
-/// than on every `ScoredSpectrum::new` — `std::env::var` takes a global lock and
-/// allocates, and `new` is called once per spectrum per charge.
+/// Resolve the installed peak-filter setting once (it is process-wide and constant
+/// for a run) rather than on every `ScoredSpectrum::new`, which is called once per
+/// spectrum per charge.
 fn peak_filter_env() -> &'static PeakFilterEnv {
     static CACHE: OnceLock<PeakFilterEnv> = OnceLock::new();
     CACHE.get_or_init(|| {
@@ -296,20 +268,18 @@ impl<'a> ScoredSpectrum<'a> {
         let n = spec.peaks.len();
 
         // Collect filter m/z values from param.precursor_off_map for this charge.
-        // Round-7 (audit): this lookup had NO clamp, unlike `find_partition` which
-        // clamps out-of-range charge into [min_charge, max_charge]. The bundled models
-        // carry precursor_off_map keys {2..5} at most, so z6/z7/z8 precursors received
-        // an EMPTY filter set — i.e. zero precursor filtering on exactly the highest
-        // charges. On ETD the charge-reduced precursor is typically the base peak, so
-        // leaving it unfiltered deflates every real fragment's rank. Clamp to the
-        // nearest available charge. ANDES_PRECOFF_NOCLAMP=1 restores legacy for A/B.
+        // A charge missing from the map is clamped to the nearest available key, like
+        // `find_partition` clamps into [min_charge, max_charge]. The bundled models
+        // carry precursor_off_map keys {2..5} at most, so without the clamp z6/z7/z8
+        // precursors would get no precursor filtering at all; on ETD the
+        // charge-reduced precursor is typically the base peak, and leaving it
+        // unfiltered deflates every real fragment's rank.
         let filter_entries: &[PrecursorOffsetFrequency] = param
             .precursor_off_map
             .get(&(charge as i32))
             .map(Vec::as_slice)
             .or_else(|| {
-                let noclamp = !scoring_settings().precursor_offset_clamp;
-                if noclamp || param.precursor_off_map.is_empty() {
+                if param.precursor_off_map.is_empty() {
                     return None;
                 }
                 // Nearest available charge key (deterministic: min |Δ|, then lower key).
@@ -361,9 +331,8 @@ impl<'a> ScoredSpectrum<'a> {
         //
         // Gating: auto-ON for isobaric protocols (validated +~3.5% PSMs@1% on
         // PXD007683 TMT a05058; ~neutral on LFQ; OFF for everything else because
-        // it regresses high-res Astral ~14%). `ANDES_PEAK_WINDOW` /
-        // `ANDES_PEAK_PER_WINDOW` env vars override the window/K for tuning;
-        // `ANDES_PEAK_WINDOW=0` force-disables.
+        // it regresses high-res Astral ~14%). `--peak-filter WINDOW:K` overrides
+        // the window/K; a window of 0 force-disables.
         let window_kk: Option<(f64, usize)> = match peak_filter_env() {
             PeakFilterEnv::Disabled => None,
             PeakFilterEnv::Override(w, k) => Some((*w, *k)),
@@ -851,20 +820,12 @@ impl<'a> ScoredSpectrum<'a> {
         if hw <= 0.0 {
             return 0.0;
         }
-        // Round-7 (audit, 3 independent agents): matches are resolved against the
-        // ACTIVE (deconvoluted) list via `nearest_peak_full`, but the density was
-        // measured on the RAW list. Deconvolution moves detected z2/z3 clusters UP to
-        // their z1 m/z, so a match above the raw list's m/z ceiling sees rho = 0 →
-        // p_chance clamps to 1e-12 → surprise = 27.6 nats vs a typical ~2 — a ~13x
-        // artifact that fires preferentially on the high-m/z, glycan-bearing spanning
-        // c/z. Measuring the density on the list that produced the match removes it.
-        // ANDES_DENSITY_RAW=1 restores the legacy behaviour for A/B.
-        let use_raw = !scoring_settings().density_on_active_list;
-        let peaks = if use_raw {
-            &self.spec.peaks
-        } else {
-            self.active_peaks_and_ranks().0
-        };
+        // Density is measured on the ACTIVE (deconvoluted) list, the same list
+        // `nearest_peak_full` resolves matches against. Deconvolution moves detected
+        // z2/z3 clusters UP to their z1 m/z, so measuring on the raw list would give
+        // rho = 0 above its m/z ceiling (p_chance clamps to 1e-12, a ~13x surprise
+        // artifact on high-m/z glycan-bearing c/z).
+        let peaks = self.active_peaks_and_ranks().0;
         let lo = peaks.partition_point(|&(m, _)| m < mz - hw);
         let hi = peaks.partition_point(|&(m, _)| m <= mz + hw);
         (hi - lo) as f64 / (2.0 * hw)
@@ -1749,7 +1710,6 @@ fn visit_directional_node_ion_matches<F>(
     let mme = &param.mme;
     let num_segs = param.num_segments as usize;
     let use_cache = !segment_partition_cache.is_empty();
-    let trace_ions = trace_ions_enabled();
     #[allow(clippy::needless_range_loop)]
     for seg in 0..num_segs {
         let (partition, ion_logs_slice): (Partition, &[(IonType, Vec<f32>)]) = if use_cache {
@@ -1762,15 +1722,6 @@ fn visit_directional_node_ion_matches<F>(
             let logs = scorer.partition_ion_logs(&p);
             (p, logs)
         };
-        if trace_ions {
-            eprintln!(
-                "TRACE_RUST_IONS\tnominal={:.3}\tis_prefix={}\tseg={}\tnum_ions={}",
-                nominal_mass,
-                is_prefix,
-                seg,
-                ion_logs_slice.len()
-            );
-        }
         if !ion_logs_slice.is_empty() {
             // Trained template (all scoring + trained-model accumulation): iterate
             // the ion types that carry learned LLR tables. UNCHANGED hot path.

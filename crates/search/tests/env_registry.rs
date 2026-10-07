@@ -14,8 +14,8 @@
 //! it exists and tune around it. Requiring a registry entry makes hiding a correction
 //! cost more than deciding what its default should be.
 //!
-//! The engine now reads none. Everything that affects a search or a training run is a
-//! CLI flag with a documented default, so a result is reproducible from the command line
+//! The engine reads none. Everything that affects a search or a training run is a CLI
+//! flag with a documented default, so a result is reproducible from the command line
 //! that produced it. What remains is test-harness only — variables that select optional
 //! fixtures at `cargo test` time and are never read by the shipped binary — and this
 //! test exists to keep it that way.
@@ -54,13 +54,10 @@ fn collect(dir: &std::path::Path, out: &mut BTreeSet<String>) {
             if p.file_name().is_some_and(|n| n == "env_registry.rs") {
                 continue;
             }
-            // Scan READ SITES, not name literals. The previous scan looked for
-            // an uppercase `"ANDES_` string, so a variable spelled any other way
-            // was invisible to the guard — which is how two live reads
-            // (`Andes_TRACE_IONS`, `Andes_TRACE_PEP`) sat undocumented while the
-            // docs claimed the engine reads none. Matching on `env::var(` /
-            // `env::var_os(` is what the guard is actually about, and it is
-            // immune to how the name is capitalised.
+            // Scan READ SITES (`env::var(` / `env::var_os(` with a literal
+            // argument), not name literals, and compare the name
+            // case-insensitively: a variable spelled in any capitalisation is a
+            // read the guard must see.
             for pat in ["env::var(", "env::var_os("] {
                 for (i, _) in text.match_indices(pat) {
                     let rest = &text[i + pat.len()..];

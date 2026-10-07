@@ -46,7 +46,7 @@ Reference identifications for scoring ship in [`glyco/truth/`](glyco/truth/). Re
 | **Chimeric** (`--chimeric`, in-RAM path) | Astral | PSMs @ q≤0.01 | **65,028** (+69%; 55,616 distinct scans) | in-RAM baseline 38,394 | not measurable | 337 s ¶ |
 | | TMT a05058 | PSMs @ q≤0.01 | 12,540 (+2.1%) | baseline 12,281 | not measurable | 73 s ¶ |
 | | UPS1 | PSMs @ q≤0.01 | **17,112** (+8.0%) | baseline 15,838 | 167 entrapment hits — flat against 166 | 50 s ¶ |
-| **PTM discovery** (`--refine`, in-RAM path) | Astral | PSMs @ q≤0.01 | **40,028** (+4.3%) at `main` with #106; 40,283 at `7d1e4565` | in-RAM baseline 38,394 | Pass 2 (2,388 modified PSMs): **~2.8% FDP** under the merged 1% threshold, by matched entrapment anchors (`--refine-entrapment`: 27 hits on 1,935; 3.3% before #106) | 363 s ¶ |
+| **PTM discovery** (`--refine`, in-RAM path) | Astral | PSMs @ q≤0.01 | **40,028** (+4.3%) at `main` with #106; 40,283 at `7d1e4565` | in-RAM baseline 38,394 | Pass 2 (2,388 modified PSMs): **~2.8% FDP** under the merged 1% threshold, by matched entrapment anchors (refine config `entrapment: true`: 27 hits on 1,935; 3.3% before #106) | 363 s ¶ |
 | | TMT, UPS1 | — | skipped | high-res only, by design | | |
 | **Glyco, deep tier** | pGlyco2 mouse liver PXD005553, 5 fractions, TRFP 1.4.3, `main` `14818d3e` | glycoPSMs @1% | **31,666 ± 9** | pGlyco2 **78.9% confirmed** · MSFragger **88.0% confirmed**, 95.8% peptidoform agreement | **1.11% ± 0.03 true FDP** (1:1 database) | 23–29 min / fraction, 16 cores |
 | **Glyco, quick tier** | one pGlyco2 liver fraction (`MouseLiver-Z-T-1`), native `.raw`, bundled pGlyco mouse glycan database (`--glyco-species mouse`, 1,833 compositions) | glycoPSMs @1% | **7,162** (seed 42; seeds 1–5: 7,094–7,137) | pGlyco2 **90.1% confirmed** · MSFragger **90.7% confirmed**, 97.8% / 95.7% peptidoform agreement | **0.89–1.24% true FDP** over 6 seeds (seed 42: 1.24%, CI 0.90–1.68; 1:1 database) | 4,888 s, 8 threads |
@@ -105,7 +105,7 @@ Phospho PSMs are Percolator seed 42.
   deamidation (+0.984) cannot be told from a C13 isotope error.
 - **`--refine` on Astral.** Three fixes landed before the refresh: #100 pairs each Pass-2 decoy
   with its anchor peptide, #102 drops deamidations better explained by a precursor one isotope
-  high, and #103 adds `--refine-entrapment` (one shuffled entrapment anchor per real anchor, so
+  high, and #103 adds the refine config `entrapment: true` (one shuffled entrapment anchor per real anchor, so
   Pass-2 false discoveries can be counted; the run-level entrapment database never reaches Pass
   2). At `7d1e4565`: 40,283 PSMs (+4.9%), Pass-2 FDP 3.3% (35 entrapment hits on 2,127). #106
   then stopped offering protein-N-terminal Acetyl on internal peptides: acetylations fell from
@@ -203,13 +203,13 @@ not a controlled comparison with the deep tier). On heart and lung the corrector
 (84–91% of the firmware population confirmed, against 17% for the heart baseline).
 
 **Isotope-aware collapse (issue #79).** NeuGc and Hex+Fuc differ by 1.020401 Da, close to a
-neutron (1.003355), so both fit the window. Penalising the isotope offset (`--glyco-gp-iso`,
-default 1.0) cut the swap on heart from 124 to 5 scans (composition agreement 76.2% → 80.8%);
+neutron (1.003355), so both fit the window. Penalising the isotope offset (a fixed
+penalty of 1.0 in the collapse) cut the swap on heart from 124 to 5 scans (composition agreement 76.2% → 80.8%);
 liver, the control, is unchanged.
 
 **Defaults (2026-09-10).** `--precursor-mono auto` became the default (flat yield; pGlyco2
 confirmations 3,375 → 3,471). `--glyco-min-core-y 2` (about 500 fewer glycoPSMs) and
-`--glyco-pin-curated` (neutral) did not.
+the curated 52-column glyco PIN (neutral; its flag has since been removed) did not.
 
 ### Choosing the retrieval strategy
 
@@ -248,7 +248,7 @@ scans only enumeration identifies.
 
 ### Refuted — do not re-try without new evidence
 
-- **Charge-neighbour search** (`--charge-expand`, default off; 2026-10-03). On UPS1, accepted
+- **Charge-neighbour search** (2026-10-03; its `--charge-expand` flag has been removed). On UPS1, accepted
   PSMs at reported z ≥ 4 fell from 197–210 to 84–91, because nothing tells Percolator which
   charge the MS1 envelope supports. Restore a precursor-envelope charge feature
   (`PrecursorIsotopeKL` is always 0.0) before retesting.

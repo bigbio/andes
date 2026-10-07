@@ -5,9 +5,8 @@
 //! Only MATCHED ions contribute rows — unmatched ions are skipped so the model
 //! trains only on actual observations.
 //!
-//! The target `y` is `ln(obs_intensity / base_peak)` — the SAME log-relative-
-//! intensity space that `IntensityModel::predict_log_rel` uses, making the
-//! trained regression GBDT a drop-in for that prediction path.
+//! The target `y` is `ln(obs_intensity / base_peak)`, the log-relative-intensity
+//! space the strong-score `intensity_signal` exponentiates back to linear.
 
 use scoring_crate::frag_features::{extract_frag_features, N_FRAG_FEATURES};
 use scoring_crate::scoring::fragment_ions::predict_by_ions;

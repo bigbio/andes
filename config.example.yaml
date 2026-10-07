@@ -66,15 +66,10 @@ rescoring:
 
 glyco:
   enabled: false                 # intact N-glycopeptide search
-  # --- advanced tuning (validated defaults; see DOCS §9) ---
-  # backbone_top_k: 150
-  # gp_k: 10.0                   # glycan-Y ladder weight
-  # gp_cz: 15.0                  # ETD c/z hyperscore weight (inert on HCD/CID)
+  # --- advanced (validated defaults; see DOCS §9) ---
+  # tol_ppm: 20                  # glyco fragment tolerance (raise for ion-trap MS2)
+  # max_peaks: 0                 # cap peaks for candidate generation (0 = no cap)
   # hcd_pair: true               # DEFAULT ON: generate from the paired HCD scan, score c/z on ETD
   #
-  # The remaining glyco flags (glycan list, taxon, NeuGc, emission floors, ETD c/z
-  # knobs, retrieval tolerance, ...) are CLI-only; see DOCS.md §9 for the full table.
-  # gp_j: 5.0
-  # gp_h: 1.0
-  # pf_charge: 2
-  # max_pf: 1024
+  # The remaining glyco flags (glycan database, species, core-Y gate, retrieval
+  # tolerance, ...) are CLI-only; see DOCS.md §9 for the full table.

@@ -24,7 +24,7 @@ use search::precursor_mono::{
 /// lung (bigbio/andes#64, arm F). So `auto` narrows the window to `0..=1` —
 /// but only when the correction actually fitted something (`mono_fitted`), so
 /// MGF and MS1-less mzML stay byte-identical to `off`, and never over an
-/// explicit `--isotope-error` or a non-default `--glyco-isotope-error`.
+/// explicit `--isotope-error`.
 ///
 /// The window is applied per spectrum by the glyco driver: only spectra whose
 /// envelope was fitted (a `Some` in the correction table) take it, the rest keep
@@ -34,10 +34,9 @@ use search::precursor_mono::{
 pub(crate) fn coupled_isotope_window(
     mono_fitted: bool,
     explicit: Option<(i8, i8)>,
-    glyco_flag_is_default: bool,
     current: RangeInclusive<i8>,
 ) -> (RangeInclusive<i8>, bool) {
-    if mono_fitted && explicit.is_none() && glyco_flag_is_default && current != (0..=1) {
+    if mono_fitted && explicit.is_none() && current != (0..=1) {
         (0..=1, true)
     } else {
         (current, false)
@@ -172,38 +171,20 @@ mod tests {
     #[test]
     fn coupled_window_narrows_only_when_fitted_and_unset() {
         // Fitted, nothing explicit: the glyco default 0..=2 becomes 0..=1.
-        assert_eq!(
-            coupled_isotope_window(true, None, true, 0..=2),
-            (0..=1, true)
-        );
+        assert_eq!(coupled_isotope_window(true, None, 0..=2), (0..=1, true));
         // Nothing fitted (MGF, MS1-less mzML): untouched, byte-identical to `off`.
-        assert_eq!(
-            coupled_isotope_window(false, None, true, 0..=2),
-            (0..=2, false)
-        );
+        assert_eq!(coupled_isotope_window(false, None, 0..=2), (0..=2, false));
         // An explicit --isotope-error is honoured verbatim, whatever it is.
         assert_eq!(
-            coupled_isotope_window(true, Some((0, 2)), true, 0..=2),
+            coupled_isotope_window(true, Some((0, 2)), 0..=2),
             (0..=2, false)
         );
         assert_eq!(
-            coupled_isotope_window(true, Some((-1, 3)), true, -1..=3),
+            coupled_isotope_window(true, Some((-1, 3)), -1..=3),
             (-1..=3, false)
         );
-        // --glyco-isotope-error negative / wide are explicit choices too.
-        assert_eq!(
-            coupled_isotope_window(true, None, false, -1..=2),
-            (-1..=2, false)
-        );
-        assert_eq!(
-            coupled_isotope_window(true, None, false, 0..=5),
-            (0..=5, false)
-        );
         // Already 0..=1: nothing to report.
-        assert_eq!(
-            coupled_isotope_window(true, None, true, 0..=1),
-            (0..=1, false)
-        );
+        assert_eq!(coupled_isotope_window(true, None, 0..=1), (0..=1, false));
     }
     use model::isotope::glycopeptide_isotope_envelope;
     use model::mass::{ISOTOPE, PROTON};

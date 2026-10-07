@@ -285,7 +285,7 @@ pub const Z_DOT_OFFSET: f64 = -16.018724;
 /// peptide (then `glycosite` is irrelevant). Produces `2·(n-1)·|charge_range|`
 /// ions (c1..c_{n-1} and z1..z_{n-1} at each charge), mirroring
 /// [`predict_by_ions`]. Never emits neutral-loss ions (ETD is loss-poor).
-/// Cached `ANDES_GLYCO_CZ_REMNANT` flag (read once).
+/// Remnant c/z ion generation: off (see the body for why).
 fn cz_remnant_enabled() -> bool {
     use std::sync::OnceLock;
     static F: OnceLock<bool> = OnceLock::new();
@@ -298,10 +298,9 @@ fn cz_remnant_enabled() -> bool {
 }
 
 /// Neutral glycan-mass shifts to place on a glycosite-SPANNING c/z fragment.
-/// Default = `[glycan_mass]` (the intact glycan — historical behavior, so
-/// [`predict_cz_ions`] is byte-identical when the flag is off, and non-glyco
-/// peptides with `glycan_mass == 0.0` are untouched). With `ANDES_GLYCO_CZ_REMNANT`
-/// the glycosidic-cleavage remnant ladder is appended (bare backbone + common
+/// Without `remnant` this is `[glycan_mass]` (the intact glycan; non-glyco
+/// peptides with `glycan_mass == 0.0` are untouched). With `remnant` the
+/// glycosidic-cleavage remnant ladder is appended (bare backbone + common
 /// N-glycan core remnants): in AI-ETD the supplemental HCD strips the glycan to a
 /// PARTIAL before c/z cleavage, so spanning c/z overwhelmingly carry a remnant, not
 /// the intact glycan (#20 audit — full-glycan spanning c/z match at ~noise, worst at
@@ -348,8 +347,8 @@ pub fn predict_cz_ions(
         cumulative.push(acc);
     }
     let total_residue_mass = cumulative[n];
-    // Glycan-mass shift(s) for glycosite-spanning c/z. Default `[glycan_mass]`
-    // (byte-identical); with ANDES_GLYCO_CZ_REMNANT this is the remnant ladder.
+    // Glycan-mass shift(s) for glycosite-spanning c/z: `[glycan_mass]`, since
+    // remnant generation is off.
     let span_shifts = cz_spanning_shifts(glycan_mass, cz_remnant_enabled());
     let mut out = Vec::with_capacity(
         2 * (n - 1) * (charge_range.end() - charge_range.start() + 1) as usize * span_shifts.len(),

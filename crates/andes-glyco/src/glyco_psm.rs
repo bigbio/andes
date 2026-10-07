@@ -9,8 +9,7 @@ use crate::hybrid::Source;
 use std::cmp::Ordering;
 
 /// Default balance constant for the `gp` fused selector (leg 2). K scales the
-/// glycan core-Y ladder term against the peptide b/y rank-LLR. The `--glyco-gp-k`
-/// flag overrides it.
+/// glycan core-Y ladder term against the peptide b/y rank-LLR.
 ///
 /// LOWERED 50 → 10 (2026-07-17 round-2). A data-backed collapse audit showed the
 /// `K·ladder` term is computed PER-BACKBONE (identical for every isobaric peptide
@@ -29,17 +28,17 @@ pub const GLYCO_GP_K_DEFAULT: f32 = 10.0;
 /// matched b/y count) than the wrong winner but a LOWER intensity-weighted
 /// RankScore — i.e. andes' rank under-rewards COUNT, exactly what the reference engine's
 /// hyperscore (∝ Nb!·Ny!) rewards. Adding this count term recovers them.
-/// The `--glyco-gp-j` flag overrides it. Offline top1-by-mass: 318 -> 334 at J=5.
+/// Offline top1-by-mass: 318 -> 334 at J=5.
 pub const GLYCO_GP_J_DEFAULT: f32 = 5.0;
 
 /// Default weight for the count-rewarding hyperscore term (andes-glyco 2.0 peptide
 /// channel `P`). Scales `ln(N_matched!)` against the rank-LLR. Offline blend
-/// (rank + hyperscore + ladder + core-Y) top1-by-mass 334 → 344. The `--glyco-gp-h` flag
-/// overrides it; 0.0 disables the hyperscore term.
+/// (rank + hyperscore + ladder + core-Y) top1-by-mass 334 → 344. 0.0 would disable
+/// the hyperscore term.
 pub const GLYCO_GP_H_DEFAULT: f32 = 1.0;
 
 /// Default weight for the ETD c/z backbone hyperscore term in the gp collapse
-/// selector (`--glyco-gp-cz`). Added to the fused score ONLY on ETD/AI-ETD
+/// selector. Added to the fused score ONLY on ETD/AI-ETD
 /// spectra (the per-candidate c/z hyperscore is 0.0 on HCD/CID, so this term is
 /// inert on the closed-HCD path → byte-identical). On electron-transfer spectra
 /// the intact-glycan c/z ladder is the primary backbone evidence (the labile b/y
@@ -53,7 +52,7 @@ pub const GLYCO_GP_H_DEFAULT: f32 = 1.0;
 /// the non-discriminating `K·ladder`. Raising c/z to 15 (with K lowered to 10)
 /// lets c/z decide the winner on ETD/AI-ETD. Inert on HCD/CID (the per-candidate
 /// c/z hyperscore is 0.0 there), so this is byte-identical on the closed-HCD path.
-/// Penalty per unit of precursor isotope offset in the collapse (`--glyco-gp-iso`).
+/// Penalty per unit of precursor isotope offset in the collapse.
 ///
 /// An M+1 assignment costs an extra assumption — that the instrument selected a
 /// non-monoisotopic peak — so when two candidates explain the same precursor with
@@ -243,7 +242,7 @@ pub struct GlycoPsmKey {
     /// electron-transfer evidence that recovers the high-charge glycopeptides the
     /// labile-glycan b/y ladder misses. On ETD spectra this same c/z hyperscore
     /// ALSO contributes to the per-scan collapse selector (weighted by
-    /// `--glyco-gp-cz`); the peptide `rank_score`/`RawScore` are unchanged.
+    /// `GLYCO_GP_CZ_DEFAULT`); the peptide `rank_score`/`RawScore` are unchanged.
     pub cz_hyperscore: f32,
     /// Fraction of base-peak intensity captured by matched glycopeptide-aware c/z
     /// ions (additive PIN feature `CzIntensity`), ETD/AI-ETD only (0.0 on HCD/CID).
@@ -295,7 +294,7 @@ mod isotope_penalty_tests {
 
     /// Uncontested scans are untouched: the penalty is a comparison between
     /// candidates, so a scan whose only candidate sits at M+1 is unaffected in
-    /// rank, and `--glyco-gp-iso 0` reproduces the pre-fix ordering exactly.
+    /// rank, and a zero weight reproduces the unpenalised ordering exactly.
     #[test]
     fn zero_weight_reproduces_the_old_ordering() {
         let k = GLYCO_GP_K_DEFAULT;

@@ -19,6 +19,23 @@ use crate::precursor_cal::PrecursorCalMode;
 /// A/B after changing this; raise further if it keeps recovering PSMs.
 pub const STRONG_SCORE_RETENTION_K: u32 = 25;
 
+/// Fragment-index mode: peptidoforms scored per spectrum (best fragment votes
+/// first). Measured 50–1000 within seed noise on phospho.
+pub const FRAGMENT_INDEX_TOP_K: u32 = 100;
+
+/// Fragment-index mode: minimum singly-charged b/y ions a peptidoform must match
+/// to be scored at all.
+pub const FRAGMENT_INDEX_MIN_MATCHED: u16 = 3;
+
+/// Out-of-core (`mmap`) mode only: upper bound on the TOTAL number of candidates
+/// held in the per-chunk base-record expansion cache (~1 GiB). The cache is a pure
+/// memo (output is identical with or without it); records past the bound are
+/// expanded per spectrum instead. Without this bound a PTM-rich search (phospho on
+/// S/T/Y, four variable mods) cached tens of thousands of peptidoforms per window
+/// for thousands of windows and was OOM-killed at 64 GiB before the first chunk
+/// finished.
+pub const MMAP_WINDOW_CACHE_MAX_CANDIDATES: usize = 4_000_000;
+
 /// Primary ranking mode for candidate selection and PIN `RawScore` emission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScoreMode {
@@ -48,14 +65,6 @@ pub struct SearchParams {
     pub precursor_tolerance: PrecursorTolerance,
     /// Charges to try for spectra without explicit charge (default 2..=3).
     pub charge_range: RangeInclusive<u8>,
-    /// Widen the searched charge set for spectra that REPORT a high charge, by one
-    /// below and this many above. 0 (default) trusts the reported charge as the only
-    /// charge, which is the historical behaviour. See `charges_to_try`.
-    pub charge_expand: u8,
-    /// Reported charge at or above which `charge_expand` applies. Below it the
-    /// reported charge is trusted, so the extra candidate work is confined to the
-    /// high-charge population where mis-calls are measured.
-    pub charge_expand_min_z: u8,
     /// Isotope offsets to try when matching the precursor mass (default
     /// -1..=2). Each offset is a unit of `ISOTOPE` (~1.00335 Da) subtracted
     /// from the spectrum's observed neutral mass before comparison.
@@ -89,30 +98,15 @@ pub struct SearchParams {
     /// exposed via `--cal-min-spec-keys` so targeted runs can opt in to
     /// calibrating with fewer spectra.
     pub cal_min_spec_keys: usize,
-    /// Out-of-core (`mmap`) mode only: upper bound on the TOTAL number of
-    /// candidates held in the per-chunk base-record expansion cache. The cache
-    /// is a pure memo (output is identical with or without it); records past
-    /// the bound are expanded per spectrum instead. Without this bound a PTM-rich search (phospho on
-    /// S/T/Y, four variable mods) cached tens of thousands of peptidoforms per
-    /// window for thousands of windows and was OOM-killed at 64 GiB before the
-    /// first chunk finished. Default 4,000,000 (~1 GiB).
-    pub mmap_window_cache_max_candidates: usize,
     /// Out-of-core (`mmap`) mode only: when > 0, score each spectrum against at
     /// most this many peptidoforms chosen by a per-chunk fragment-ion index
     /// (issue #76) instead of every peptidoform in its precursor windows.
     /// 0 (default) = off, byte-identical enumeration path.
     pub fragment_index_top_k: u32,
-    /// Fragment-index mode: minimum singly-charged b/y ions a peptidoform must
-    /// match to be scored at all. Default 3.
-    pub fragment_index_min_matched: u16,
     /// Break ties among equal fragment-index vote counts by the summed intensity of
     /// the matched peaks, instead of by form id (which is mass order and carries no
     /// evidence). `false` is the historical behaviour. See `ChunkFragmentIndex::query`.
     pub fragment_index_intensity_tiebreak: bool,
-    /// Compute the model-based PIN features (rich-ion LLR, fragment-LLR battery,
-    /// site features) only for each spectrum's best `deep_features_top` rows; lower
-    /// rows keep them at 0.0. `0` means every row (the default).
-    pub deep_features_top: u32,
     /// Learned file-wide ppm shift applied to observed neutral masses in the
     /// main pass. Stays 0.0 until the pre-pass calibrator runs.
     pub precursor_mass_shift_ppm: f64,
@@ -127,10 +121,6 @@ pub struct SearchParams {
     /// residual (Astral wide windows co-isolate 3-5+). Only consulted when
     /// `chimeric` is true.
     pub chimeric_max_coisolated: usize,
-    /// Allow a Pass-2 co-isolated candidate to overlap the primary's matched peaks.
-    /// Default false: the residual spectrum normally has the primary's peaks removed,
-    /// and permitting overlap lets the same evidence support two PSMs.
-    pub chimeric_allow_overlap: bool,
     /// Averagine-envelope KL gate for accepting a co-isolated MS1 envelope as a
     /// secondary precursor — lower = stricter/cleaner → fewer spurious
     /// secondaries. Default 0.3. Only consulted when `chimeric` is true.
@@ -197,19 +187,14 @@ impl SearchParams {
             max_variable_mods_per_peptide: 3,
             precursor_tolerance: PrecursorTolerance::symmetric(Tolerance::Ppm(20.0)),
             charge_range: 2..=3,
-            charge_expand: 0,
-            charge_expand_min_z: 4,
             isotope_error_range: -1..=2,
             top_n_psms_per_spectrum: 10,
             num_tolerable_termini: 2,
             min_peaks: 10,
             precursor_cal_mode: PrecursorCalMode::Off,
             cal_min_spec_keys: crate::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS,
-            mmap_window_cache_max_candidates: 4_000_000,
             fragment_index_top_k: 0,
-            fragment_index_min_matched: 3,
             fragment_index_intensity_tiebreak: false,
-            deep_features_top: 0,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,
@@ -219,7 +204,6 @@ impl SearchParams {
             // setting; deeper co-fragments are the diminishing tail.
             chimeric_max_coisolated: 4,
             chimeric_max_kl: 0.3,
-            chimeric_allow_overlap: false,
             score_mode: ScoreMode::Rank,
             refine_select_psm_fdr: 0.01,
             candidate_index: CandidateIndexMode::Ram,

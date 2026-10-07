@@ -484,7 +484,7 @@ fn write_header<W: Write>(writer: &mut W, min_charge: u8, max_charge: u8) -> io:
         // -ln(ρ·Δ)) per matched ion — how improbable the matches are by chance.
         "ChanceMatchSurprise".to_string(),
         // IntensitySignal = strong-score S1 numerator: cosine similarity between
-        // IntensityModel predictions and observed relative intensities (0 without model).
+        // frag-intensity predictions and observed relative intensities (0 without model).
         "IntensitySignal".to_string(),
         // Tier-2 frag-intensity LLR battery (0 without a frag-intensity model).
         // FragPredExplained = Σ(matched·pred)/Σpred; FragPredChanceLLR =
@@ -1001,25 +1001,19 @@ mod tests {
             max_variable_mods_per_peptide: 3,
             precursor_tolerance: PrecursorTolerance::symmetric(Tolerance::Ppm(20.0)),
             charge_range,
-            charge_expand: 0,
-            charge_expand_min_z: 4,
             isotope_error_range: -1..=2,
             top_n_psms_per_spectrum: 10,
             num_tolerable_termini: 2,
             min_peaks: 10,
             precursor_cal_mode: search::PrecursorCalMode::Auto,
             cal_min_spec_keys: search::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS,
-            mmap_window_cache_max_candidates: 4_000_000,
             fragment_index_top_k: 0,
-            fragment_index_min_matched: 3,
             fragment_index_intensity_tiebreak: false,
-            deep_features_top: 0,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,
             chimeric_max_coisolated: 2,
             chimeric_max_kl: 0.3,
-            chimeric_allow_overlap: false,
             score_mode: search::ScoreMode::Rank,
             refine_select_psm_fdr: 0.01,
             candidate_index: search::CandidateIndexMode::Ram,

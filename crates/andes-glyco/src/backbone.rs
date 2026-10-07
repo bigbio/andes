@@ -439,15 +439,13 @@ impl SpectrumStats {
 /// charge core-Y; it lifted generation slightly but net −24 @1% from false
 /// high-charge matches — reverted. z3/z4 core-Y is ≤3+ so the cap does not bind
 /// them; the high-charge lever is paired-scan generation (B1), not this cap.)
-/// EXPERIMENT (ANDES_GLYCO_Y_HICHARGE): raise the Y-ion fragment-charge ceiling
-/// from 3 to 5 so the DOMINANT K=50 Y-ladder selection term can see the 4+/5+
-/// glycan-retaining Y-ions that high-charge (z5/z6) glycopeptides produce (~30%
-/// of true high-charge fragment evidence is only visible at charge >=2, and large
-/// Y-ions skew higher still). A naive uncap (Q1) was net -24 @1% because a bare
-/// tolerance window at high charge accepts noise; here the ADDED charges (>3)
-/// require ISOTOPE CONFIRMATION (a +1 isotope peak at the matching charge spacing)
-/// before crediting a match, which is what made the b/y deconvolution uncap safe.
-/// charges 1..=3 are unchanged, so this is inert unless the flag is set.
+/// Raising the Y-ion fragment-charge ceiling above 3 (`--glyco-y-max-charge`) lets
+/// the Y-ladder selection term see the 4+/5+ glycan-retaining Y-ions that
+/// high-charge (z5/z6) glycopeptides produce. A naive uncap (Q1) was net -24 @1%
+/// because a bare tolerance window at high charge accepts noise, so the ADDED
+/// charges (>3) require ISOTOPE CONFIRMATION (a +1 isotope peak at the matching
+/// charge spacing) before crediting a match. Charges 1..=3 are unchanged.
+///
 /// Maximum glycan-Y fragment charge to probe, installed by the caller.
 ///
 /// Default 3. Raising it reaches 4+/5+ Y ions on highly-charged precursors at the cost
@@ -656,7 +654,6 @@ pub fn glycan_y_intensity(
     // but the estimator is still biased. Dividing by the rung count makes it a mean
     // matched intensity per predicted rung, comparable across compositions — and
     // across the de-novo branch, which always has exactly 6 rungs.
-    // ANDES_GLYCO_LADDER_NORM=1 enables; anything else (including unset) = byte-identical.
     ladder_norm_scale(score, n_rungs)
 }
 
@@ -664,10 +661,7 @@ pub fn glycan_y_intensity(
 /// rung-normalised `glycan_y_intensity` on the same scale as the de-novo branch.
 const CORE_RUNGS: usize = 6;
 
-/// `ANDES_GLYCO_LADDER_NORM=1` — opt-in rung normalisation, read once.
-///
-/// Default ON; `ANDES_GLYCO_LADDER_NORM=0` disables for A/B. Reads the VALUE, not
-/// mere presence: an earlier `var_os(..).is_some()` form meant `=0` silently ENABLED it.
+/// Rung normalisation of the Y-ladder sum. Always on.
 fn ladder_norm_enabled() -> bool {
     use std::sync::OnceLock;
     static CELL: OnceLock<bool> = OnceLock::new();
@@ -678,10 +672,7 @@ fn ladder_norm_enabled() -> bool {
     // identifications at 1% FDR, and on a large-glycan human plasma set the decoy fraction
     // in the score's top 150 fell 12.7% -> 12.0%. Neither regime regressed.
     //
-    // Leaving a validated correction off by default is how the selector weights came to be
-    // tuned around a bias whose fix was already in the tree; `ANDES_GLYCO_LADDER_NORM=0`
-    // restores the biased estimator for A/B only.
-    // Kept as a named constant rather than an env switch: the A/B is settled.
+    // The A/B is settled, so this is a constant rather than a switch.
     *CELL.get_or_init(|| true)
 }
 

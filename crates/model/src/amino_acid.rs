@@ -124,8 +124,9 @@ fn mods_eq(a: &Option<&'static Modification>, b: &Option<&'static Modification>)
 
 /// 20 standard AA atomic compositions (C, H, N, O, S). Computing mass
 /// from these integer counts at runtime guarantees bit-equal parity with
-/// a canonical composition-based mass.
-fn standard_composition(residue: u8) -> Option<(u32, u32, u32, u32, u32)> {
+/// a canonical composition-based mass. Public so the quantification crate can
+/// build a peptide's elemental formula for its theoretical isotope envelope.
+pub fn standard_composition(residue: u8) -> Option<(u32, u32, u32, u32, u32)> {
     Some(match residue {
         b'G' => (2, 3, 1, 1, 0),
         b'A' => (3, 5, 1, 1, 0),

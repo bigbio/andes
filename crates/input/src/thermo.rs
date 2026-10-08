@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use thermorawfilereader::schema::{DissociationMethod, MassAnalyzer};
 use thermorawfilereader::{RawFileReader, RawSpectrum};
 
+use model::scan::{Ms1Scan, ProductScan};
 use model::{ActivationMethod, InstrumentType};
 
 use crate::{Ms1Link, Spectrum};
@@ -44,6 +45,12 @@ pub struct ThermoRawReader {
     len: usize,
     /// `Some(level)` emits only that MS level; `None` emits all levels.
     ms_level_filter: Option<u8>,
+    /// Quantification capture (see the mzML reader): every MS1 scan with its
+    /// retention time, and MS3+ scans with their master (parent) scan id.
+    capture_run_ms1: bool,
+    run_ms1: Vec<Ms1Scan>,
+    capture_product_scans: bool,
+    product_scans: Vec<ProductScan>,
 }
 
 impl ThermoRawReader {
@@ -62,7 +69,33 @@ impl ThermoRawReader {
             next: 0,
             len,
             ms_level_filter: Some(2),
+            capture_run_ms1: false,
+            run_ms1: Vec::new(),
+            capture_product_scans: false,
+            product_scans: Vec::new(),
         })
+    }
+
+    /// Keep every MS1 scan (RT + centroids) seen by the iterator for label-free
+    /// quantification; take them with [`Self::take_run_ms1`].
+    pub fn with_run_ms1_capture(mut self, capture: bool) -> Self {
+        self.capture_run_ms1 = capture;
+        self
+    }
+
+    /// Keep MS3+ scans (with the native id of their master scan) seen by the
+    /// iterator for reporter-ion quantification; they are never emitted.
+    pub fn with_product_scan_capture(mut self, capture: bool) -> Self {
+        self.capture_product_scans = capture;
+        self
+    }
+
+    pub fn take_run_ms1(&mut self) -> Vec<Ms1Scan> {
+        std::mem::take(&mut self.run_ms1)
+    }
+
+    pub fn take_product_scans(&mut self) -> Vec<ProductScan> {
+        std::mem::take(&mut self.product_scans)
     }
 
     /// Emit all MS levels (MS1 + MS2) instead of MS2-only. Needed for `--chimeric`.
@@ -409,8 +442,37 @@ impl Iterator for ThermoRawReader {
                 Some(raw) => raw,
                 None => continue,
             };
+            let level = raw.ms_level();
+            if level == 1 && self.capture_run_ms1 {
+                self.run_ms1.push(Ms1Scan {
+                    rt: raw.time() * 60.0,
+                    peaks: extract_peaks(&raw),
+                });
+            }
+            if level >= 3 && self.capture_product_scans {
+                let parent_id = raw.precursor().and_then(|p| {
+                    let idx = p.parent_index();
+                    if idx >= 0 {
+                        self.handle
+                            .get(idx as usize)
+                            .map(|parent| parent.native_id())
+                    } else {
+                        None
+                    }
+                });
+                self.product_scans.push(ProductScan {
+                    id: raw.native_id(),
+                    scan: Some(raw.index() as i32 + 1),
+                    rt_seconds: Some(raw.time() * 60.0),
+                    ms_level: level,
+                    parent_id,
+                    precursor_mz: raw.precursor().map(|p| p.mz()).unwrap_or(0.0),
+                    peaks: extract_peaks(&raw),
+                });
+                continue;
+            }
             if let Some(want) = self.ms_level_filter {
-                if raw.ms_level() != want {
+                if level != want {
                     continue;
                 }
             }

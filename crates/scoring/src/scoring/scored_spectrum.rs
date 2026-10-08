@@ -518,11 +518,19 @@ impl<'a> ScoredSpectrum<'a> {
             }
         };
 
+        // The node matcher skips peaks without a rank (filtered out above), so the
+        // cache fill scans only the ranked peaks, in the same m/z order.
+        let (fill_peaks, fill_ranks): (Vec<(f64, f32)>, Vec<u32>) = cache_peaks
+            .iter()
+            .zip(cache_ranks)
+            .filter(|&(_, &r)| r != u32::MAX)
+            .map(|(&p, &r)| (p, r))
+            .unzip();
         for nominal_mass in 1..cache_len {
             let node_nominal = nominal_mass as f64;
             prefix_score_cache[nominal_mass] = Self::directional_node_score_inner(
-                cache_peaks,
-                cache_ranks,
+                &fill_peaks,
+                &fill_ranks,
                 &segment_partition_cache,
                 scorer,
                 node_nominal,
@@ -532,8 +540,8 @@ impl<'a> ScoredSpectrum<'a> {
                 &gbdt_logit_by_rank,
             );
             suffix_score_cache[nominal_mass] = Self::directional_node_score_inner(
-                cache_peaks,
-                cache_ranks,
+                &fill_peaks,
+                &fill_ranks,
                 &segment_partition_cache,
                 scorer,
                 node_nominal,

@@ -201,15 +201,19 @@ pub fn ram_candidate_index_fits(
     // Conservative per-residue / per-candidate constants (bytes).
     const PER_RESIDUE: u64 = 32; // AminoAcid + Arc refcount slot + slack
     const PER_CANDIDATE_OVERHEAD: u64 = 120; // struct + Vec header + bucket-idx entry + alloc overhead
-    let mut acc: u64 = 0;
-    for c in enumerate_candidates(idx, params, decoy_prefix) {
-        acc = acc
-            .saturating_add(PER_CANDIDATE_OVERHEAD + c.peptide.residues.len() as u64 * PER_RESIDUE);
-        if acc > budget_bytes {
-            return false;
-        }
-    }
-    true
+
+    // Proteins are costed in parallel. Every candidate adds a positive amount, so
+    // the running total crosses the budget at some point exactly when the full
+    // total does, whatever order the proteins are added in.
+    let acc = std::sync::atomic::AtomicU64::new(0);
+    crate::candidate_gen::all_protein_candidates_par(idx, params, decoy_prefix, |cands| {
+        let bytes: u64 = cands
+            .iter()
+            .map(|c| PER_CANDIDATE_OVERHEAD + c.peptide.residues.len() as u64 * PER_RESIDUE)
+            .sum();
+        let before = acc.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+        before.saturating_add(bytes) <= budget_bytes
+    })
 }
 
 /// Canonical builder: enumerate base peptides and write a mass-sorted binary

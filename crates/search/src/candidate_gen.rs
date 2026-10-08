@@ -85,6 +85,32 @@ pub fn enumerate_candidates_par(
         .collect()
 }
 
+/// Hand each protein's candidates (the ones [`enumerate_candidates`] yields for
+/// it) to `f`, across threads, without keeping them. Returns `false` as soon as
+/// some call returns `false`, else `true`. Proteins are visited in no fixed order.
+pub fn all_protein_candidates_par(
+    idx: &SearchIndex,
+    params: &SearchParams,
+    decoy_prefix: &str,
+    f: impl Fn(&[Candidate]) -> bool + Sync,
+) -> bool {
+    use rayon::prelude::*;
+    let suffix = idx.decoy_suffix.as_deref();
+    let require_sequon = params.require_nxst_sequon;
+    idx.db
+        .proteins
+        .par_iter()
+        .enumerate()
+        .all(|(p_idx, protein)| {
+            let is_decoy = is_decoy_accession_affix(&protein.accession, decoy_prefix, suffix);
+            let mut cands = enumerate_protein(protein, p_idx, is_decoy, params);
+            if require_sequon {
+                cands.retain(candidate_has_nxst_sequon);
+            }
+            f(&cands)
+        })
+}
+
 /// The glyco path's sequon membership test (`glyco_search::GlycoCtxOwned::build`):
 /// an internal N-X-S/T, or one completed by the residue after the peptide.
 /// Kept in one place so `SearchParams::require_nxst_sequon` can never admit a

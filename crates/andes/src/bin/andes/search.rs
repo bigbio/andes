@@ -683,6 +683,17 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     };
+    // Configure the global Rayon worker pool BEFORE anything runs on it (the
+    // candidate-index memory estimate below, PreparedSearch, the chunks).
+    // `build_global()` panics if called twice; guard with `OnceLock` so repeated
+    // CLI invocations within a single test process don't blow up.
+    static POOL_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    POOL_INIT.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(cli.threads)
+            .build_global()
+            .expect("build_global");
+    });
     params.candidate_index = match cli.candidate_index {
         CandidateIndexFlag::Ram => search::CandidateIndexMode::Ram,
         CandidateIndexFlag::Mmap => search::CandidateIndexMode::Mmap,
@@ -993,17 +1004,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let t_phase = std::time::Instant::now();
 
-    // Configure the global Rayon worker pool BEFORE we build PreparedSearch
-    // or run any chunks. `build_global()` panics if called twice; guard with
-    // `OnceLock` so repeated CLI invocations within a single test process
-    // don't blow up.
-    static POOL_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    POOL_INIT.get_or_init(|| {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(cli.threads)
-            .build_global()
-            .expect("build_global");
-    });
     eprintln!("Using {} worker threads", cli.threads);
 
     // Fragment tolerance of 0.5 Da is the canonical low-res HCD default.
@@ -1989,6 +1989,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     if bench_mode {
         eprintln!("Bench mode: skipping TSV write.");
+        release_at_exit(pin_candidates);
         return Ok(());
     }
 
@@ -2023,7 +2024,15 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Wrote TSV: {}", tsv_path.display());
     }
 
+    release_at_exit(pin_candidates);
     Ok(())
+}
+
+/// The candidate pool is millions of small heap allocations and the process
+/// exits right after the run; freeing them one by one took about a second of
+/// wall time, so the pool is left for the operating system to reclaim.
+fn release_at_exit(candidates: Vec<search::candidate_gen::Candidate>) {
+    std::mem::forget(candidates);
 }
 
 /// Write the FDR-filtered rescore TSV: one row per accepted target PSM (already

@@ -1644,27 +1644,6 @@ pub(crate) fn cleavage_credit_for(cand: &Candidate, enz: Enzyme, aa_set: &AminoA
     )
 }
 
-/// Compute fragment-ion feature columns for a single PSM.
-///
-/// Uses charge-1 b/y ions only (the `NumMatchedMainIons` convention).
-/// A peptide position counts at most once per ion series;
-/// a position can contribute 1 from b AND 1 from y (so the maximum
-/// `num_matched_main_ions` is `2 * (n - 1)` for a peptide of length n).
-///
-/// Returns `PsmFeatures::default()` for peptides shorter than 2 residues
-/// (no cleavable fragment ions exist).
-///
-/// # Ion-current + error-stat features
-///
-/// The ion-current and error-stat PIN columns:
-/// - Ion-current ratios use raw peak intensities vs total MS2 ion current.
-/// - `MS2IonCurrent` is the raw sum (NOT log10); the PIN emitter emits it as-is.
-/// - `IsolationWindowEfficiency` is always 0.0 (no isolation-window data
-///   in the Spectrum object).
-/// - Top-7 error stats: errors are collected for all matched b+y ions,
-///   sorted descending by intensity, top-7 taken; absolute Da error for
-///   mean/stdev, signed ppm for rel-mean/rel-stdev. Population stdev
-///   formula: `sqrt(E[x²] - mean²)`.
 /// Weights of `rank_ppm_llr` in the rank score (which picks the retained
 /// candidates) and in the strong score (which selects the reported PSM), applied on
 /// high-resolution models only. With both at 1, Astral gave +1.4% PSMs at an equal
@@ -1713,6 +1692,27 @@ pub(crate) fn rank_ppm_llr(scored_spec: &ScoredSpectrum<'_>, peptide: &Peptide) 
     total as f32
 }
 
+/// Compute fragment-ion feature columns for a single PSM.
+///
+/// Uses charge-1 b/y ions only (the `NumMatchedMainIons` convention).
+/// A peptide position counts at most once per ion series;
+/// a position can contribute 1 from b AND 1 from y (so the maximum
+/// `num_matched_main_ions` is `2 * (n - 1)` for a peptide of length n).
+///
+/// Returns `PsmFeatures::default()` for peptides shorter than 2 residues
+/// (no cleavable fragment ions exist).
+///
+/// # Ion-current + error-stat features
+///
+/// The ion-current and error-stat PIN columns:
+/// - Ion-current ratios use raw peak intensities vs total MS2 ion current.
+/// - `MS2IonCurrent` is the raw sum (NOT log10); the PIN emitter emits it as-is.
+/// - `IsolationWindowEfficiency` is always 0.0 (no isolation-window data
+///   in the Spectrum object).
+/// - Top-7 error stats: errors are collected for all matched b+y ions,
+///   sorted descending by intensity, top-7 taken; absolute Da error for
+///   mean/stdev, signed ppm for rel-mean/rel-stdev. Population stdev
+///   formula: `sqrt(E[x²] - mean²)`.
 pub(crate) fn compute_psm_features(
     scored_spec: &ScoredSpectrum<'_>,
     peptide: &Peptide,

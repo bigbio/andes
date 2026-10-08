@@ -75,6 +75,7 @@ use crate::percolator_enz::{count_internal_enzymatic, is_enzymatic_boundary};
 use crate::row_context::{iter_ranked_by_rank_score, RowContext};
 use model::mass::{ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
+use rayon::prelude::*;
 use search::candidate_gen::Candidate;
 use search::psm::{PsmMatch, TopNQueue};
 use search::search_index::SearchIndex;
@@ -365,24 +366,39 @@ pub fn write_pin_to<W: Write>(
 
     write_header(writer, min_charge, max_charge)?;
 
-    for (spec_idx, queue) in queues.iter().enumerate() {
-        if queue.is_empty() {
-            continue;
+    // Rows are formatted in parallel, one buffer per spectrum, and written in
+    // spectrum order, so the file is the same as a sequential write. Batches
+    // bound the formatted-but-unwritten text held in memory.
+    let emitting: Vec<usize> = (0..queues.len())
+        .filter(|&i| !queues[i].is_empty())
+        .collect();
+    for batch in emitting.chunks(PIN_FORMAT_BATCH_SPECTRA) {
+        let buffers: Vec<io::Result<Vec<u8>>> = batch
+            .par_iter()
+            .map(|&spec_idx| {
+                let mut buf = Vec::with_capacity(4096);
+                write_spectrum_rows(
+                    &mut buf,
+                    &spectra[spec_idx],
+                    &queues[spec_idx],
+                    candidates,
+                    min_charge,
+                    max_charge,
+                    search_index,
+                    params,
+                )?;
+                Ok(buf)
+            })
+            .collect();
+        for buf in buffers {
+            writer.write_all(&buf?)?;
         }
-        let spec = &spectra[spec_idx];
-        write_spectrum_rows(
-            writer,
-            spec,
-            queue,
-            candidates,
-            min_charge,
-            max_charge,
-            search_index,
-            params,
-        )?;
     }
     Ok(())
 }
+
+/// Spectra whose PIN rows are formatted in parallel before being written out.
+const PIN_FORMAT_BATCH_SPECTRA: usize = 8192;
 
 // ── header ────────────────────────────────────────────────────────────────────
 

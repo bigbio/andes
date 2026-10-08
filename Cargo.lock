@@ -1795,6 +1795,7 @@ dependencies = [
  "model",
  "model-train",
  "parquet",
+ "rayon",
  "scoring",
  "search",
  "smallvec",

@@ -176,7 +176,7 @@ fn to_io<E: std::fmt::Display>(e: E) -> std::io::Error {
 /// is not in the workspace lockfile). 122 random bits + the version/variant
 /// nibbles, sourced from `RandomState`-seeded hashing of high-resolution
 /// clocks — sufficient for a per-file identifier (not a security token).
-fn uuid_v4() -> String {
+pub(crate) fn uuid_v4() -> String {
     use std::hash::{BuildHasher, Hasher};
     let mk = || {
         let mut h = std::collections::hash_map::RandomState::new().build_hasher();
@@ -581,7 +581,7 @@ fn build_psms_batch(
 // ── per-PSM field derivations ─────────────────────────────────────────────────
 
 /// Bare residue sequence (no mods, no flanks).
-fn bare_sequence(cand: &Candidate) -> String {
+pub fn bare_sequence(cand: &Candidate) -> String {
     cand.peptide
         .residues
         .iter()
@@ -592,7 +592,7 @@ fn bare_sequence(cand: &Candidate) -> String {
 /// ProForma-ish peptidoform: residues with `[UNIMOD:NN]` (or `[+delta]`) after
 /// each modified residue. Falls back to the accession when known, else the mass
 /// delta. No flanks (OpenMS peptidoform convention).
-fn peptidoform_string(cand: &Candidate) -> String {
+pub fn peptidoform_string(cand: &Candidate) -> String {
     let mut s = String::new();
     for aa in &cand.peptide.residues {
         s.push(aa.residue as char);

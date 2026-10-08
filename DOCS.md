@@ -174,14 +174,33 @@ See [§9](#9-glycopeptide-search-experimental--advanced-knobs).
 
 ### Isobaric labeling (TMT / iTRAQ)
 
-See [§7](#7-isobaric-labeling).
+See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model) and
+[§10](#10-quantification) for reporter-ion quantification (`--tmt`).
+
+### Quantification (reporter ions, label-free)
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--tmt` | enum | *(off)* | Isobaric reporter quantification of the confident PSMs: `tmt6`, `tmt10`, `tmt11`, `tmt16`, `tmt18`, `itraq4`, `itraq8`. Writes `<stem>.tmt.tsv` (§3f). |
+| `--tmt-level` | `2\|3` | `2` | Reporter scan: the identified MS2, or the SPS-MS3 whose precursor references it (mzML `<precursor spectrumRef>`, Thermo master scan). |
+| `--tmt-tol` | tolerance | `20ppm` high-res / `0.3da` ion trap | Most intense centroid within this window of each reporter m/z. |
+| `--tmt-correction` | path | *(none)* | Isotope impurity sheet of the kit lot (§10); corrected intensities by NNLS, raw kept alongside. |
+| `--tmt-min-purity` | 0..1 | `0` | Drop PSMs below this precursor isolation purity from `tmt.tsv` (they stay in the parquet). |
+| `--lfq` | flag | off | Label-free MS1 quantification of the confident precursors (§10). Writes `<stem>.lfq.tsv` and `<stem>.lfq_features.tsv`. mzML / `.raw`, high-resolution MS1. |
+| `--lfq-tol` | tolerance | `10ppm` | MS1 tolerance of the isotope chromatograms. |
+| `--lfq-rt-window` | seconds | `60` | Half-window around the identifying PSM's retention time. |
+| `--lfq-min-cosine` | 0..1 | `0.7` | Isotope-envelope cosine below which a feature is flagged. |
+| `--lfq-feature-fdr` | 0..1 | `0.05` | Feature FDR for `lfq.tsv` from the target/decoy competition of each feature against its +11 Th twin. |
+| `--quant-fdr` | 0..1 | `--fdr` | PSM q-value cut for quantification targets when `--rescore`/`--rescore-native` ran. |
+
+With `--output-parquet`, both modules add `quantms.feature.parquet` (the QPX feature view) to the bundle.
 
 ---
 
 ## 1b. Configuration file (`--config`)
 
 `andes --config run.yaml` sets any parameter from YAML, in sections `io`, `search`, `scoring`,
-`decoys`, `chimeric`, `refine`, `rescoring`, `glyco` (template:
+`decoys`, `chimeric`, `refine`, `rescoring`, `glyco`, `quant` (template:
 [`config.example.yaml`](config.example.yaml)). Keys are optional; **`CLI flag > --config >
 built-in default`**; unknown keys are a hard error. Values use the CLI strings
 (`precursor_tol: 20ppm`, `charge: "2..5"`, `isotope_error: "-1..2"`, `enzyme: gluc,trypsin`).
@@ -395,6 +414,20 @@ until rescoring; andes does no protein inference.
 andes --spectrum spectra.mzML --database db.fasta \
   --output-pin out.pin --output-parquet out.idparquet
 ```
+
+---
+
+### 3f. Quantification tables (`--tmt`, `--lfq`)
+
+Written next to the PIN (or next to `--output-tsv`/`--output-parquet` under `--rescore` without
+`--output-pin`), see §10 for the methods:
+
+| File | Rows | Columns |
+|---|---|---|
+| `<stem>.tmt.tsv` | one per quantified PSM | `filename scannr spec_id quant_scan quant_ms_level rt peptide charge proteins is_decoy psm_q_value psm_pep purity`, then one `tmt_<channel>` (or `itraq_<channel>`) per channel, then `raw_<...>` when a correction matrix was applied |
+| `<stem>.lfq.tsv` | one per (peptidoform, charge) at feature q ≤ `--lfq-feature-fdr` | `peptide charge proteins feature_q_value score cosine`, then the integrated area per input file |
+| `<stem>.lfq_features.tsv` | one per feature per run (all, with their q-value) | apex RT, boundaries, scan count, area, apex height, per-isotope areas, cosine, score, decoy score, feature q-value |
+| `<dir>/quantms.feature.parquet` | one per feature (LFQ) or quantified PSM (isobaric) | the QPX feature view (`intensities` as `[{label, intensity}]` with `LFQ` or `TMT126`-style labels; `additional_intensities` with the raw/apex/isotope values; purity, cosine, q-values in `additional_scores`; `psm_ids` pointing at `psms.parquet` rows) |
 
 ---
 
@@ -619,7 +652,81 @@ needs them to place a threshold.
 
 ---
 
-## 10. License and citation
+## 10. Quantification
+
+andes quantifies at the **feature level** inside the search run and leaves normalization across
+samples, peptide-to-protein roll-up and statistics to quantms / OpenMS (ProteinQuantifier,
+MSstats, MSstatsTMT), which know the experimental design. Both modules run after rescoring, on
+the rank-1 target PSMs at `q ≤ --quant-fdr` (default `--fdr`, 0.01); without `--rescore` /
+`--rescore-native` every rank-1 target PSM is quantified and the tables must be filtered
+downstream (a warning says so).
+
+### Isobaric reporter ions (`--tmt <plex>`)
+
+* **Extraction.** For each quantified spectrum, the most intense centroid within `--tmt-tol` of
+  each reporter m/z of the kit (OpenMS's channel tables: TMT 6/10/11/16/18-plex, iTRAQ 4/8-plex);
+  0 when absent. `--tmt-level 2` reads the identified MS2; `--tmt-level 3` reads the MS3 whose
+  `<precursor spectrumRef>` (mzML) or master scan (`.raw`) is that MS2 — the MS3 scans are kept
+  by the reader for this and are never searched.
+* **Impurity correction** (`--tmt-correction <file>`). The kit lot sheet in the OpenMS text form,
+  one line per channel in kit order, `-2/-1/+1/+2` percentages separated by `/` (eight columns
+  `-2C13/-N15-C13/-C13/-N15/+N15/+C13/+N15+C13/+2C13` for TMTpro), optional `<channel>:` prefix,
+  `#` comments, `NA`/`-1` for no spill. The observed vector is solved as `observed = M · true`
+  by non-negative least squares (the `IsobaricIsotopeCorrector` model), so corrected intensities
+  agree with IsobaricAnalyzer / IsobaricWorkflow for the same matrix. Without a sheet, no
+  correction (Sage's behavior). The raw values are always kept (`raw_` columns, parquet
+  `additional_intensities`).
+* **Precursor purity.** The share of the MS1 isolation window's ion current that belongs to the
+  precursor's isotope envelope, from the survey scan preceding the MS2 (10 ppm isotope ladder,
+  the OpenMS `PrecursorPurity` rule). Reported per PSM; `--tmt-min-purity` filters `tmt.tsv`.
+  Needs the isolation window offsets in the file.
+* **Not done here:** reference-channel ratios, channel normalization, protein aggregation.
+
+```bash
+andes --spectrum tmt_run.mzML --database human.fasta --mods tmt10_mods.txt \
+      --rescore --fdr 0.01 --tmt tmt10 --tmt-correction lot_XY.txt \
+      --output-parquet run.idparquet
+```
+
+### Label-free MS1 features (`--lfq`)
+
+* **Targets.** One per (peptidoform, charge, run) from the best confident PSM, with its retention
+  time as the anchor; the theoretical isotope envelope comes from the peptide's elemental formula
+  (standard residues exact; modification deltas as averagine atoms).
+* **Extraction.** The first four isotope chromatograms at `--lfq-tol` over ± `--lfq-rt-window`
+  around the anchor, from every MS1 scan of the run (captured by the reader; ~12 bytes per
+  centroid). The monoisotopic trace is smoothed (5-point Savitzky–Golay); the peak that contains
+  the anchor is climbed to its apex and extended to the first valley or 2 % of the apex (one
+  missing scan tolerated); every isotope is integrated (trapezoid, intensity·seconds) over the
+  same boundaries. Intensity = summed isotope areas; the apex height and per-isotope areas are
+  reported too.
+* **Envelope check.** Cosine between the per-isotope areas and the theoretical envelope
+  (`--lfq-min-cosine` flags, does not drop).
+* **Feature q-value.** Each target also gets a decoy twin extracted 11 Th above it (no peptide
+  elutes there with that envelope); the score `cosine³ · (1 − |Δrt|/window)^⅓ · √(apex/max apex)`
+  (Sage's hybrid rule) enters a picked target/decoy competition per run, and the running
+  `(decoys + 1)/targets` ratio over the winners is the feature q-value (IonQuant's ion-level
+  scheme). `lfq.tsv` keeps features at q ≤ `--lfq-feature-fdr`; `lfq_features.tsv` and the
+  parquet keep everything with the q-value.
+* **Runs.** Each `--spectrum` file is quantified on its own identifications (no transfer of
+  identifications between runs yet); `lfq.tsv` is wide over the files.
+* **Not done here:** normalization, MaxLFQ / top-N protein intensities, match between runs.
+
+```bash
+andes --spectrum run1.mzML --spectrum run2.mzML --database human.fasta \
+      --rescore --fdr 0.01 --lfq --output-parquet runs.idparquet
+```
+
+### Limits in this release
+
+`--lfq` and `--tmt-level 3` need mzML or Thermo `.raw` (MS1 / MS3 scans; MGF carries MS2 only
+and Bruker `.d` MS1 frames are not read yet) and cannot be combined with `--chimeric`;
+`--tmt <plex>` at MS2 works with every input and with `--chimeric`. Purity is unavailable
+without MS1 scans or isolation offsets. Neither module runs in `--glyco` mode.
+
+---
+
+## 11. License and citation
 
 andes is licensed under the **Apache License 2.0**. See [`LICENSE`](LICENSE) for the full text and [`NOTICE`](NOTICE) for attribution and the project's origin in MS-GF+. The software is provided **"as is"** without warranty.
 

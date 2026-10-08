@@ -73,3 +73,16 @@ glyco:
   #
   # The remaining glyco flags (glycan database, species, core-Y gate, retrieval
   # tolerance, ...) are CLI-only; see DOCS.md §9 for the full table.
+
+quant:
+  # tmt: tmt10                  # reporter-ion quantification: tmt6|tmt10|tmt11|tmt16|tmt18|itraq4|itraq8
+  # tmt_level: 2                 # 2 = identified MS2, 3 = its SPS-MS3 scan
+  # tmt_tol: 20ppm               # reporter m/z window (default 20ppm high-res, 0.3da ion trap)
+  # tmt_correction: lot.txt      # kit impurity sheet (OpenMS text form); default none
+  # tmt_min_purity: 0            # drop PSMs below this precursor purity from tmt.tsv
+  # lfq: false                   # label-free MS1 feature quantification
+  # lfq_tol: 10ppm
+  # lfq_rt_window: 60            # seconds around the identifying PSM
+  # lfq_min_cosine: 0.7
+  # lfq_feature_fdr: 0.05
+  # quant_fdr: 0.01              # PSM q-value cut for quant targets (default: rescoring fdr)

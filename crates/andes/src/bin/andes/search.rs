@@ -17,6 +17,7 @@ use crate::model_select::{
     resolve_metadataless_selection, warn_if_universal_protease_combo,
 };
 use crate::mono::{correct_chunk, MonoDump, MonoStats};
+use crate::quant_run::{QuantCollector, QuantSettings, RunScans};
 use crate::rescore;
 use crate::spectra::{
     detect_dominant_activation, detect_instrument_type_for_path, detect_isobaric_sampled,
@@ -1203,6 +1204,44 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let bench_mode = cli.max_spectra > 0;
 
+    // ── Quantification setup (`--tmt` / `--lfq`) ──────────────────────────────
+    // Reporter ions are read from each MS2 while its peaks are still in memory;
+    // MS1 scans (purity, label-free chromatograms) and MS3 scans (SPS-MS3
+    // reporters) are captured by the readers next to the MS2 stream and handed
+    // to the collector per file. Quantification itself runs after rescoring.
+    let mut quant: Option<QuantCollector> =
+        QuantSettings::from_cli(&cli, param.data_type.instrument.is_high_resolution())?
+            .map(QuantCollector::new);
+    if let Some(q) = &quant {
+        let s = &q.settings;
+        if is_mgf && (s.lfq || s.needs_ms3()) {
+            return Err(
+                "--lfq and --tmt-level 3 need MS1/MS3 scans; MGF input carries MS2 only".into(),
+            );
+        }
+        if is_d && (s.lfq || s.needs_ms3()) {
+            return Err("--lfq and --tmt-level 3 are not yet supported for Bruker .d input".into());
+        }
+        if cli.chimeric && (s.lfq || s.needs_ms3()) {
+            return Err(
+                "--lfq and --tmt-level 3 cannot be combined with --chimeric yet; \
+                        reporter quantification at MS2 (`--tmt <plex>`) works with it"
+                    .into(),
+            );
+        }
+        if cli.glyco {
+            return Err("--tmt/--lfq are not available in --glyco mode".into());
+        }
+        if !cli.rescore && !cli.rescore_native {
+            eprintln!(
+                "WARN: --tmt/--lfq without --rescore or --rescore-native: every rank-1 target \
+                 PSM is quantified; filter the tables by the q-values you compute downstream, \
+                 or add --rescore so only PSMs at q<=--fdr are quantified."
+            );
+        }
+        eprintln!("Quantification: {}", s.describe());
+    }
+
     let mut all_spectra: Vec<Spectrum> = Vec::new();
     let mut all_queues: Vec<TopNQueue> = Vec::new();
 
@@ -1296,6 +1335,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .into());
         }
 
+        let mut run_scans = RunScans::default();
         let file_stats = if ms1_input {
             let (tx, rx) = sync_channel::<(Vec<Spectrum>, Ms1Link)>(2);
             let spectrum_path = input_path.clone();
@@ -1412,6 +1452,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     // unidentified spectra; glyco_search_run needs the full
                     // peak lists for oxonium ion detection. Memory cost: full
                     // peak buffer stays resident (acceptable; both are opt-in).
+                    if let Some(q) = quant.as_mut() {
+                        q.on_spectrum(&spec);
+                    }
                     if !cli.refine && !cli.glyco {
                         spec.peaks = Vec::new();
                     }
@@ -1463,6 +1506,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 );
                 all_queues.extend(queues);
                 for mut spec in scored.into_iter() {
+                    if let Some(q) = quant.as_mut() {
+                        q.on_spectrum(&spec);
+                    }
                     spec.peaks = Vec::new();
                     all_spectra.push(spec);
                 }
@@ -1488,22 +1534,39 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             let (tx, rx) = sync_channel::<Vec<Spectrum>>(2);
             let spectrum_path = input_path.clone();
+            let capture_ms1 = quant.as_ref().is_some_and(|q| q.settings.needs_ms1());
+            let capture_ms3 = quant.as_ref().is_some_and(|q| q.settings.needs_ms3());
             let parser_handle = thread::spawn(
-                move || -> Result<ParseStats, Box<dyn std::error::Error + Send + Sync>> {
+                move || -> Result<(ParseStats, RunScans), Box<dyn std::error::Error + Send + Sync>> {
                     if file_is_mzml {
-                        let reader = MzMLReader::new(
+                        let mut reader = MzMLReader::new(
                             input::open_buf_maybe_gz(&spectrum_path)
                                 .map_err(|e| format!("open mzML: {e}"))?,
                         )
-                        .with_ms_level_range(ms_level_u32, ms_level_u32);
-                        Ok(send_chunks(reader, CHUNK_SIZE, remaining_cap, tx))
+                        .with_ms_level_range(ms_level_u32, ms_level_u32)
+                        .with_run_ms1_capture(capture_ms1)
+                        .with_product_scan_capture(capture_ms3);
+                        let stats = send_chunks(reader.by_ref(), CHUNK_SIZE, remaining_cap, tx);
+                        let scans = RunScans {
+                            ms1: reader.take_run_ms1(),
+                            ms3: reader.take_product_scans(),
+                        };
+                        Ok((stats, scans))
                     } else if file_is_raw {
                         #[cfg(feature = "thermo")]
                         {
-                            let reader = input::ThermoRawReader::open(&spectrum_path)
+                            let mut reader = input::ThermoRawReader::open(&spectrum_path)
                                 .map_err(|e| format!("open Thermo .raw: {e}"))?
-                                .with_ms_level(Some(2));
-                            Ok(send_chunks(reader, CHUNK_SIZE, remaining_cap, tx))
+                                .with_ms_level(Some(2))
+                                .with_run_ms1_capture(capture_ms1)
+                                .with_product_scan_capture(capture_ms3);
+                            let stats =
+                                send_chunks(reader.by_ref(), CHUNK_SIZE, remaining_cap, tx);
+                            let scans = RunScans {
+                                ms1: reader.take_run_ms1(),
+                                ms3: reader.take_product_scans(),
+                            };
+                            Ok((stats, scans))
                         }
                         #[cfg(not(feature = "thermo"))]
                         {
@@ -1517,7 +1580,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         {
                             let reader = input::TimsTofReader::open(&spectrum_path)
                                 .map_err(|e| format!("open Bruker .d: {e}"))?;
-                            Ok(send_chunks(reader, CHUNK_SIZE, remaining_cap, tx))
+                            Ok((
+                                send_chunks(reader, CHUNK_SIZE, remaining_cap, tx),
+                                RunScans::default(),
+                            ))
                         }
                         #[cfg(not(feature = "timstof"))]
                         {
@@ -1531,7 +1597,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             input::open_buf_maybe_gz(&spectrum_path)
                                 .map_err(|e| format!("open MGF: {e}"))?,
                         );
-                        Ok(send_chunks(reader, CHUNK_SIZE, remaining_cap, tx))
+                        Ok((
+                            send_chunks(reader, CHUNK_SIZE, remaining_cap, tx),
+                            RunScans::default(),
+                        ))
                     }
                 },
             );
@@ -1570,6 +1639,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     // See the chimeric-loop note above: normally peaks are
                     // dropped post-scoring to bound memory, but `--refine` or
                     // `--glyco` needs the full peak lists retained.
+                    if let Some(q) = quant.as_mut() {
+                        q.on_spectrum(&spec);
+                    }
                     if !cli.refine && !cli.glyco {
                         spec.peaks = Vec::new();
                     }
@@ -1594,6 +1666,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     let queues = prepared.run_chunk(&chunk, offset);
                     all_queues.extend(queues);
                     for mut spec in chunk.into_iter() {
+                        if let Some(q) = quant.as_mut() {
+                            q.on_spectrum(&spec);
+                        }
                         spec.peaks = Vec::new();
                         all_spectra.push(spec);
                     }
@@ -1602,12 +1677,23 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
 
             match parser_handle.join() {
-                Ok(Ok(stats)) => stats,
+                Ok(Ok((stats, scans))) => {
+                    run_scans = scans;
+                    stats
+                }
                 Ok(Err(e)) => return Err(format!("parser thread error: {e}").into()),
                 Err(_) => return Err("parser thread panicked".into()),
             }
         };
         merge_parse_stats(&mut parse_stats, file_stats);
+        if let Some(q) = quant.as_mut() {
+            q.finish_file(
+                input_path,
+                title_prefix.as_deref(),
+                run_scans,
+                all_spectra.len(),
+            );
+        }
     }
 
     if parse_stats.error_count > 0 {
@@ -2073,6 +2159,22 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .into());
             }
         }
+    }
+
+    // ── Quantification (`--tmt` / `--lfq`) ────────────────────────────────────
+    // After rescoring so the targets are the confident PSMs; after the QPX
+    // write so the feature parquet joins a bundle that already exists.
+    if let Some(q) = &quant {
+        crate::quant_run::run_quant(
+            q,
+            &spectra,
+            &queues,
+            &pin_candidates,
+            &pin_index,
+            rescore_map.as_ref(),
+            &report_base,
+            cli.output_parquet.as_deref(),
+        )?;
     }
 
     if bench_mode {

@@ -394,14 +394,28 @@ impl CorrectionMatrix {
         }
         let mut m = vec![0.0f64; n * n];
         for (from, row) in rows.iter().enumerate() {
-            // Strip a leading channel label ("126:" / "127N," / "127N ").
-            let body = match row.find([':', ',']) {
-                Some(p) if !row[..p].contains('/') => row[p + 1..].trim(),
+            // Labels must agree with kit order: silently discarding a swapped
+            // label would apply a different channel's correction coefficients.
+            let (label, body) = match row.find([':', ',']) {
+                Some(p) if !row[..p].contains('/') => (Some(row[..p].trim()), row[p + 1..].trim()),
                 _ => match row.split_once(char::is_whitespace) {
-                    Some((head, rest)) if !head.contains('/') => rest.trim(),
-                    _ => row,
+                    Some((head, rest))
+                        if !head.contains('/') && !rest.trim_start().starts_with('/') =>
+                    {
+                        (Some(head), rest.trim())
+                    }
+                    _ => (None, *row),
                 },
             };
+            if let Some(label) = label {
+                let expected = plex.channels()[from].name;
+                if label != expected {
+                    return Err(format!(
+                        "impurity row {} is labelled '{label}', expected '{expected}' in kit order",
+                        from + 1
+                    ));
+                }
+            }
             let values: Vec<&str> = body.split('/').map(str::trim).collect();
             if values.len() != cols {
                 return Err(format!(
@@ -435,6 +449,13 @@ impl CorrectionMatrix {
                     m[target * n + from] = pct / 100.0;
                 }
                 self_share -= pct;
+            }
+            if self_share < 0.0 {
+                return Err(format!(
+                    "impurity row {} ({}) percentages sum to more than 100",
+                    from + 1,
+                    plex.channels()[from].name
+                ));
             }
             m[from * n + from] = self_share / 100.0;
         }
@@ -616,5 +637,27 @@ mod tests {
         let na = "NA/NA/NA/NA\n".repeat(4);
         let m = CorrectionMatrix::parse(Plex::Itraq4, &na).unwrap();
         assert!(m.is_identity());
+    }
+
+    #[test]
+    fn correction_rejects_swapped_labels_and_impossible_spill() {
+        let swapped = "115:0/0/5/0\n114:0/0/1/0\n116:0/0/0/0\n117:0/0/0/0\n";
+        let error = CorrectionMatrix::parse(Plex::Itraq4, swapped).unwrap_err();
+        assert!(error.contains("expected '114'"), "{error}");
+        let impossible = "0/0/60/50\n0/0/0/0\n0/0/0/0\n0/0/0/0\n";
+        let error = CorrectionMatrix::parse(Plex::Itraq4, impossible).unwrap_err();
+        assert!(error.contains("more than 100"), "{error}");
+    }
+
+    #[test]
+    fn unlabelled_percentages_can_have_spaces_around_separators() {
+        let spaced = CorrectionMatrix::parse(Plex::Itraq4, &"0 / 0 / 5 / 0\n".repeat(4)).unwrap();
+        let compact = CorrectionMatrix::parse(Plex::Itraq4, &"0/0/5/0\n".repeat(4)).unwrap();
+        assert_eq!(spaced, compact);
+        let labelled = "114 0 / 0 / 5 / 0\n115,0/0/5/0\n116:0/0/5/0\n117:0/0/5/0\n";
+        assert_eq!(
+            CorrectionMatrix::parse(Plex::Itraq4, labelled).unwrap(),
+            compact
+        );
     }
 }

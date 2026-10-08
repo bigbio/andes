@@ -189,7 +189,7 @@ See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model)
 | `--lfq` | flag | off | Label-free MS1 quantification of the confident precursors (§10). Writes `<stem>.lfq.tsv` and `<stem>.lfq_features.tsv`. mzML / `.raw` with high-resolution MS1; the MS2 may be ion-trap. |
 | `--lfq-tol` | tolerance | `10ppm` | MS1 tolerance of the isotope chromatograms. |
 | `--lfq-rt-window` | seconds | `60` | Half-window around the identifying PSM's retention time. |
-| `--lfq-min-cosine` | 0..1 | `0.7` | Isotope-envelope cosine below which a feature is left out of `lfq.tsv` (it stays in `lfq_features.tsv` and the parquet). |
+| `--lfq-min-cosine` | 0..1 | `0.7` | Minimum isotope-envelope cosine for both target and decoy eligibility before feature competition. All target features remain in `lfq_features.tsv` and the parquet. |
 | `--lfq-feature-fdr` | 0..1 | `0.05` | Feature FDR for `lfq.tsv` from the target/decoy competition of each feature against its +11 Th twin. |
 | `--quant-fdr` | 0..1 | `--fdr` | PSM q-value cut for quantification targets when `--rescore`/`--rescore-native` ran. |
 
@@ -673,7 +673,8 @@ downstream (a warning says so).
 * **Impurity correction** (`--tmt-correction <file>`). The kit lot sheet in the OpenMS text form,
   one line per channel in kit order, `-2/-1/+1/+2` percentages separated by `/` (eight columns
   `-2C13/-N15-C13/-C13/-N15/+N15/+C13/+N15+C13/+2C13` for TMTpro), optional `<channel>:` prefix,
-  `#` comments, `NA`/`-1` for no spill. The observed vector is solved as `observed = M · true`
+  `#` comments, `NA`/`-1` for no spill. Labels must match kit order; rows whose percentages
+  sum to more than 100 are rejected. The observed vector is solved as `observed = M · true`
   by non-negative least squares (the `IsobaricIsotopeCorrector` model), so corrected intensities
   agree with IsobaricAnalyzer / IsobaricWorkflow for the same matrix. Without a sheet, no
   correction (Sage's behavior). The raw values are always kept (`raw_` columns, parquet
@@ -709,18 +710,24 @@ andes --spectrum tmt_run.mzML --database human.fasta --mods tmt10_mods.txt \
   again). Every isotope is integrated (trapezoid, intensity·seconds) over the same boundaries.
   Intensity = summed isotope areas; the apex height and per-isotope areas are reported too.
 * **Envelope check.** Cosine between the per-isotope areas and the theoretical envelope;
-  `lfq.tsv` leaves out features below `--lfq-min-cosine`. A feature whose monoisotopic area holds
+  targets and decoys below `--lfq-min-cosine` are excluded before competition. The diagnostic
+  outputs retain all target features. A feature whose monoisotopic area holds
   less than 30 % of its theoretical share is not reported at all: its M+1.. traces belong to an
   isotope-shifted species (a deamidated form, say), not to the target.
 * **Resolution check.** Each run's MS1 scans are tested once: Orbitrap/TOF survey scans give 70–95 %
   of their most intense centroids an isotope partner within 10 ppm. A run far below that is
   reported as low-resolution in a warning; label-free areas from it are not meaningful.
-* **Feature q-value.** Each target also gets a decoy twin extracted 11 Th above it (no peptide
-  elutes there with that envelope); the score `cosine³ · (1 − |Δrt|/window)^⅓ · √(apex/max apex)`
-  (Sage's hybrid rule) enters a picked target/decoy competition per run, and the running
-  `(decoys + 1)/targets` ratio over the winners is the feature q-value (IonQuant's ion-level
-  scheme). `lfq.tsv` keeps features at q ≤ `--lfq-feature-fdr`; `lfq_features.tsv` and the
-  parquet keep everything with the q-value.
+* **Feature q-value (experimental).** Each target gets a decoy twin extracted 11 Th above it;
+  unrelated real peptides can occur there. The score
+  `cosine³ · (1 − |Δrt|/window)^⅓ · √(apex/max apex)` uses the maximum apex over both targets
+  and decoys. After applying the same cosine cutoff to both, picked competition retains the
+  higher score (exact ties go to the decoy). The `(decoys + 1)/targets` estimate is evaluated
+  over complete equal-score groups and converted to monotone q-values. `lfq.tsv` keeps target
+  winners at q ≤ `--lfq-feature-fdr`; the diagnostic TSV and parquet retain all target features,
+  with no feature q-value for ineligible targets or targets that lost competition.
+  These are decoy-based estimates, not a demonstrated error-rate guarantee: the shifted-decoy
+  model still needs calibration on representative negative-control/entrapment datasets.
+  PSM identification FDR and quantitative accuracy are separate from this estimate.
 * **Runs.** Each `--spectrum` file is quantified on its own identifications (no transfer of
   identifications between runs yet); `lfq.tsv` is wide over the files.
 * **Not done here:** normalization, MaxLFQ / top-N protein intensities, match between runs.
@@ -729,6 +736,22 @@ andes --spectrum tmt_run.mzML --database human.fasta --mods tmt10_mods.txt \
 andes --spectrum run1.mzML --spectrum run2.mzML --database human.fasta \
       --rescore --fdr 0.01 --lfq --output-parquet runs.idparquet
 ```
+
+### Relation to other quantifiers
+
+* [IonQuant](https://doi.org/10.1016/j.mcpro.2021.100077) estimates **match-between-runs**
+  error using multiple scores and a semiparametric mixture model. Its shifted decoy search
+  starts at +11 × 1.0005 Th and tries smaller shifts when no peak can be traced. Andes does
+  not implement that estimator or identification transfer.
+* [Sage](https://github.com/lazear/sage/blob/master/crates/sage/src/lfq.rs) uses aligned RT
+  grids, a normalized spectral-angle score, and +11.06 Th / shifted-RT decoys. Its hybrid
+  score inspired the powers above; Andes uses cosine, a run-wide height scale and independent
+  within-run extraction, so the scores and thresholds are not interchangeable. Sage applies
+  its envelope threshold during peak selection, before estimating precursor q-values.
+* [OpenMS FeatureFinderIdentification](https://openms.org/documentation/html/TOPP_FeatureFinderIdentification.html)
+  combines identification-guided extraction with chromatographic coelution/shape and mass-error
+  scores, and supports elution-model fitting. Those checks are useful next steps for Andes;
+  matching integrated isotope areas alone does not establish coelution.
 
 ### Limits in this release
 

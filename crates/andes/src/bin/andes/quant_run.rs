@@ -19,7 +19,9 @@ use output::feature_parquet::FeatureRecord;
 use output::{LfqRow, ModRecord, PercolatorPsm, QuantId, TmtRow};
 use quant::formula::Formula;
 use quant::isobaric::{extract_reporters, CorrectionMatrix, Plex};
-use quant::lfq::{feature_score, quantify, quantify_decoy, LfqParams, LfqTarget};
+use quant::lfq::{
+    competition_score, feature_score, quantify, quantify_decoy, LfqParams, LfqTarget,
+};
 use quant::ms1_index::Ms1RunIndex;
 use quant::tdc::{picked_qvalues, Pair};
 use rayon::prelude::*;
@@ -609,6 +611,13 @@ pub(crate) fn run_quant(
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| ".".into());
+    // Resolve output rows by their unique PSM row index, not by repeatedly
+    // scanning every selected hit (quadratic, and SpecIds can be ambiguous).
+    let hits_by_psm: HashMap<i64, &Hit<'_>> = if parquet_dir.is_some() {
+        hits.iter().map(|h| (h.psm_index, h)).collect()
+    } else {
+        HashMap::new()
+    };
     let mut records: Vec<FeatureRecord> = Vec::new();
     let mut next_feature_id: i64 = 1;
 
@@ -695,16 +704,9 @@ pub(crate) fn run_quant(
                 String::new()
             }
         );
-        for r in &rows {
-            let proteins = proteins_of(
-                &hits
-                    .iter()
-                    .find(|h| h.spec_id == r.id.spec_id)
-                    .expect("row from hit")
-                    .psm,
-                candidates,
-                index,
-            );
+        for r in rows.iter().filter(|_| parquet_dir.is_some()) {
+            let hit = hits_by_psm[&r.id.psm_index];
+            let proteins = proteins_of(&hit.psm, candidates, index);
             let mut rec = base_record(&r.id, proteins, next_feature_id);
             next_feature_id += 1;
             let labels: Vec<String> = plex
@@ -765,7 +767,7 @@ pub(crate) fn run_quant(
             let Some(ms1) = run.ms1.as_ref() else {
                 continue;
             };
-            let targets: Vec<(usize, LfqTarget)> =
+            let mut targets: Vec<(usize, LfqTarget)> =
                 best.iter()
                     .filter(|((r, _, _), _)| *r == run_idx)
                     .filter_map(|(_, &hi)| {
@@ -787,6 +789,8 @@ pub(crate) fn run_quant(
                         ))
                     })
                     .collect();
+            // HashMap iteration must not determine feature row/ID order.
+            targets.sort_unstable_by_key(|(hi, _)| *hi);
             let params = &s.lfq_params;
             let quantified: Vec<(usize, Option<_>, Option<_>)> = targets
                 .par_iter()
@@ -800,17 +804,19 @@ pub(crate) fn run_quant(
                 .collect();
             let max_apex = quantified
                 .iter()
-                .filter_map(|(_, f, _)| f.as_ref().map(|f| f.apex_intensity))
+                .flat_map(|(_, f, d)| [f.as_ref(), d.as_ref()])
+                .flatten()
+                .map(|f| f.apex_intensity)
                 .fold(0.0f32, f32::max);
             let pairs: Vec<Pair> = quantified
                 .iter()
                 .map(|(_, f, d)| Pair {
                     target: f
                         .as_ref()
-                        .map(|f| feature_score(f, params.rt_window_s, max_apex)),
+                        .and_then(|f| competition_score(f, params, max_apex)),
                     decoy: d
                         .as_ref()
-                        .map(|f| feature_score(f, params.rt_window_s, max_apex)),
+                        .and_then(|f| competition_score(f, params, max_apex)),
                 })
                 .collect();
             let qvals = picked_qvalues(&pairs);
@@ -822,12 +828,13 @@ pub(crate) fn run_quant(
                 let spec = &spectra[hit.spec_idx];
                 all_rows.push(LfqRow {
                     id: quant_id(hit, run, spec, candidates, index),
-                    score: pairs[k].target.unwrap_or(0.0),
+                    score: feature_score(&feature, params.rt_window_s, max_apex),
                     feature_q_value: qvals[k],
-                    decoy_score: pairs[k].decoy,
-                    feature: feature.clone(),
+                    decoy_score: decoy
+                        .as_ref()
+                        .map(|d| feature_score(d, params.rt_window_s, max_apex)),
+                    feature,
                 });
-                let _ = decoy;
             }
             eprintln!(
                 "quant: {}: {} of {} precursors quantified, {} at feature q<={} and envelope cosine>={}",
@@ -863,11 +870,8 @@ pub(crate) fn run_quant(
             feat_path.display(),
             all_rows.len()
         );
-        for r in &all_rows {
-            let hit = hits
-                .iter()
-                .find(|h| h.spec_id == r.id.spec_id)
-                .expect("row from hit");
+        for r in all_rows.iter().filter(|_| parquet_dir.is_some()) {
+            let hit = hits_by_psm[&r.id.psm_index];
             let proteins = proteins_of(&hit.psm, candidates, index);
             let mut rec = base_record(&r.id, proteins, next_feature_id);
             next_feature_id += 1;

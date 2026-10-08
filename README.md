@@ -182,7 +182,7 @@ without one of them.
 `--tmt tmt10` reads the reporter ions of every identified MS2 (or its SPS-MS3 with
 `--tmt-level 3`), applies the kit's impurity matrix (`--tmt-correction`) and reports the
 precursor isolation purity; `--lfq` integrates the isotope chromatograms of every identified
-precursor from the MS1 scans with a decoy-controlled feature q-value. Both write Sage-style
+precursor from the MS1 scans with an experimental decoy-based feature q-value estimate. Both write Sage-style
 tables (`<stem>.tmt.tsv`, `<stem>.lfq.tsv`) and, with `--output-parquet`, the QPX
 `quantms.feature.parquet` that quantms / OpenMS consume. Normalization and protein roll-up stay
 downstream ([`DOCS.md` §10](DOCS.md#10-quantification)).

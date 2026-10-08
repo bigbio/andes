@@ -23,10 +23,11 @@ pub struct LfqParams {
     pub rt_window_s: f64,
     /// Isotopes extracted (monoisotopic + n−1).
     pub n_isotopes: usize,
-    /// Envelope cosine below which the driver leaves a feature out of `lfq.tsv`
-    /// (the feature itself is still returned and reported in `lfq_features.tsv`).
+    /// Minimum envelope cosine for target AND decoy eligibility in competition.
+    /// All target features are still returned for `lfq_features.tsv` diagnostics.
     pub min_cosine: f32,
-    /// m/z shift of the decoy twin (Th); IonQuant uses +11.0, Sage +11.06.
+    /// m/z shift of the decoy twin (Th). This fixed-shift heuristic differs
+    /// from IonQuant's adaptive +11 * 1.0005 Th and Sage's +11.06 Th + RT shift.
     pub decoy_mz_shift: f64,
     /// Scans the apex may be from the anchor scan.
     pub max_apex_climb: usize,
@@ -191,9 +192,10 @@ fn quantify_at(
 }
 
 /// Feature score for the target/decoy competition: envelope similarity
-/// cubed, proximity to the anchor, and relative height (Sage's hybrid rule).
-/// `max_apex` is the largest apex among the run's features (normalises the
-/// height term to 0..1).
+/// cubed, proximity to the anchor, and relative height. Inspired by Sage's
+/// hybrid rule, which uses spectral angle rather than cosine.
+/// `max_apex` must include BOTH targets and decoys in the run so neither side
+/// is preferentially clipped by the height term.
 pub fn feature_score(fq: &FeatureQuant, rt_window_s: f64, max_apex: f32) -> f32 {
     let cos = fq.cosine.clamp(0.0, 1.0);
     let prox = (1.0 - (fq.rt_delta_s.abs() / rt_window_s.max(1e-9)).min(1.0)) as f32;
@@ -203,6 +205,16 @@ pub fn feature_score(fq: &FeatureQuant, rt_window_s: f64, max_apex: f32) -> f32 
         0.0
     };
     cos * cos * cos * prox.powf(1.0 / 3.0) * height
+}
+
+/// Score an eligible target or decoy. The same filter must be applied to both
+/// sides before computing q-values, rather than to targets after competition.
+pub fn competition_score(fq: &FeatureQuant, params: &LfqParams, max_apex: f32) -> Option<f32> {
+    if !fq.cosine.is_finite() || fq.cosine < params.min_cosine {
+        return None;
+    }
+    let score = feature_score(fq, params.rt_window_s, max_apex);
+    score.is_finite().then_some(score)
 }
 
 #[cfg(test)]
@@ -266,6 +278,44 @@ mod tests {
         let fq = quantify(&index, &target, &params).unwrap();
         let s = feature_score(&fq, params.rt_window_s, fq.apex_intensity);
         assert!(s > 0.9, "{s}");
+    }
+
+    #[test]
+    fn envelope_filter_applies_before_target_decoy_competition() {
+        use crate::tdc::{picked_qvalues, Pair};
+        let (index, target) = synthetic_run();
+        let params = LfqParams::default();
+        let mut good = quantify(&index, &target, &params).unwrap();
+        good.cosine = 0.9;
+        let mut bad = good.clone();
+        bad.cosine = 0.6;
+        bad.apex_intensity *= 1000.0;
+        let max_apex = bad.apex_intensity;
+        assert!(
+            feature_score(&bad, params.rt_window_s, max_apex)
+                > feature_score(&good, params.rt_window_s, max_apex)
+        );
+        let eligible = competition_score(&good, &params, max_apex);
+        let ineligible = competition_score(&bad, &params, max_apex);
+        assert!(eligible.is_some());
+        assert_eq!(ineligible, None);
+        let mut pairs = vec![
+            Pair {
+                target: eligible,
+                decoy: ineligible
+            };
+            100
+        ];
+        pairs.extend(vec![
+            Pair {
+                target: ineligible,
+                decoy: eligible
+            };
+            100
+        ]);
+        let q = picked_qvalues(&pairs);
+        assert!(q[..100].iter().all(|&q| q == Some(1.0)));
+        assert!(q[100..].iter().all(Option::is_none));
     }
 
     #[test]

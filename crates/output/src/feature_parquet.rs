@@ -614,7 +614,6 @@ pub fn build_feature_batch(records: &[FeatureRecord]) -> std::io::Result<RecordB
 /// Write `records` to `path` as a QPX feature file with the schema metadata
 /// OpenMS readers key on (`file_type = feature_file`).
 pub fn write_feature_parquet(path: &Path, records: &[FeatureRecord]) -> std::io::Result<()> {
-    let batch = build_feature_batch(records)?;
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let mut meta = std::collections::HashMap::new();
     meta.insert("qpx_version".to_string(), FEATURE_QPX_VERSION.to_string());
@@ -630,20 +629,26 @@ pub fn write_feature_parquet(path: &Path, records: &[FeatureRecord]) -> std::io:
         FEATURE_IDENTITY_COMPOSITE.to_string(),
     );
     let schema = Arc::new(Schema::new_with_metadata(
-        batch.schema().fields().clone(),
+        feature_schema().fields().clone(),
         meta,
     ));
-    let batch = RecordBatch::try_new(schema.clone(), batch.columns().to_vec())
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
     let props = WriterProperties::builder()
         .set_compression(Compression::SNAPPY)
         .build();
     let file = std::fs::File::create(path)?;
-    let mut writer = ArrowWriter::try_new(file, schema, Some(props))
+    let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    writer
-        .write(&batch)
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    for chunk in records.chunks(4096) {
+        let batch = build_feature_batch(chunk)?;
+        let batch = RecordBatch::try_new(schema.clone(), batch.columns().to_vec())
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        writer
+            .write(&batch)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        writer
+            .flush()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+    }
     writer
         .close()
         .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -732,5 +737,50 @@ mod tests {
         let file = std::fs::File::open(&p).unwrap();
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
         assert_eq!(builder.schema().fields().len(), 33);
+    }
+
+    #[test]
+    fn multiple_batches_preserve_feature_ids_and_psm_links() {
+        use arrow::array::{Int64Array, ListArray};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("features.parquet");
+        let records: Vec<_> = (0..4097)
+            .map(|i| {
+                let mut r = record("LFQ");
+                r.feature_id = i;
+                r.psm_ids = vec![i + 10];
+                r
+            })
+            .collect();
+        write_feature_parquet(&path, &records).unwrap();
+        let builder =
+            ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(path).unwrap()).unwrap();
+        assert_eq!(builder.metadata().num_row_groups(), 2);
+        let mut row = 0i64;
+        for batch in builder.build().unwrap() {
+            let batch = batch.unwrap();
+            let ids = batch
+                .column_by_name("feature_id")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            let links = batch
+                .column_by_name("psm_ids")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .unwrap();
+            for i in 0..batch.num_rows() {
+                assert_eq!(ids.value(i), row);
+                let link = links.value(i);
+                assert_eq!(
+                    link.as_any().downcast_ref::<Int64Array>().unwrap().value(0),
+                    row + 10
+                );
+                row += 1;
+            }
+        }
+        assert_eq!(row, 4097);
     }
 }

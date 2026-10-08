@@ -23,12 +23,19 @@ pub struct LfqParams {
     pub rt_window_s: f64,
     /// Isotopes extracted (monoisotopic + n−1).
     pub n_isotopes: usize,
-    /// Envelope cosine below which the feature is flagged (not dropped).
+    /// Envelope cosine below which the driver leaves a feature out of `lfq.tsv`
+    /// (the feature itself is still returned and reported in `lfq_features.tsv`).
     pub min_cosine: f32,
     /// m/z shift of the decoy twin (Th); IonQuant uses +11.0, Sage +11.06.
     pub decoy_mz_shift: f64,
     /// Scans the apex may be from the anchor scan.
     pub max_apex_climb: usize,
+    /// A feature whose monoisotopic area holds less than this fraction of its
+    /// theoretical share of the envelope is not the target ion: the M+1..
+    /// traces line up with a different, isotope-shifted species (on PXD001819
+    /// a deamidated N-G peptide integrated at ~100x the true value). Median
+    /// observed/theoretical share is 1.07 there; 0.9 % of features fall below 0.3.
+    pub min_mono_share: f64,
 }
 
 impl Default for LfqParams {
@@ -40,6 +47,7 @@ impl Default for LfqParams {
             min_cosine: 0.7,
             decoy_mz_shift: 11.0,
             max_apex_climb: 12,
+            min_mono_share: 0.3,
         }
     }
 }
@@ -158,6 +166,15 @@ fn quantify_at(
     let theo: Vec<f64> = target.envelope.iter().copied().take(n_iso).collect();
     let cos = cosine(&isotope_areas, &theo) as f32;
     let area: f64 = isotope_areas.iter().sum();
+    if let Some(&theo_mono) = theo.first() {
+        let theo_total: f64 = theo.iter().sum();
+        if theo_mono > 0.0 && area > 0.0 && theo_total > 0.0 {
+            let share = (isotope_areas[0] / area) / (theo_mono / theo_total);
+            if share < params.min_mono_share {
+                return None;
+            }
+        }
+    }
 
     Some(FeatureQuant {
         apex_rt: rt[peak.apex],
@@ -249,6 +266,43 @@ mod tests {
         let fq = quantify(&index, &target, &params).unwrap();
         let s = feature_score(&fq, params.rt_window_s, fq.apex_intensity);
         assert!(s > 0.9, "{s}");
+    }
+
+    #[test]
+    fn a_missing_monoisotope_is_not_the_target() {
+        // The species that elutes sits one isotope above the target (a
+        // deamidated form, say): the target's M+1.. traces hold its envelope
+        // and the target's monoisotopic trace only a trace of noise (1 %).
+        let (real, _) = synthetic_run();
+        let target = LfqTarget {
+            mono_mz: 600.3 - ISOTOPE / 2.0,
+            charge: 2,
+            anchor_rt: 97.0,
+            envelope: vec![0.5, 0.3, 0.15, 0.05],
+        };
+        let scans: Vec<Ms1Scan> = (0..real.len())
+            .map(|i| {
+                let mut peaks = real.peaks(i).to_vec();
+                let mono = peaks
+                    .iter()
+                    .find(|p| (p.0 - 600.3).abs() < 1e-6)
+                    .map_or(0.0, |p| p.1);
+                if mono > 0.0 {
+                    peaks.push((target.mono_mz, mono * 0.01));
+                }
+                Ms1Scan {
+                    rt: real.rt(i),
+                    peaks,
+                }
+            })
+            .collect();
+        let index = Ms1RunIndex::new(scans);
+        let lenient = LfqParams {
+            min_mono_share: 0.0,
+            ..LfqParams::default()
+        };
+        assert!(quantify(&index, &target, &lenient).is_some());
+        assert!(quantify(&index, &target, &LfqParams::default()).is_none());
     }
 
     #[test]

@@ -138,7 +138,7 @@ pub struct QuantCfg {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct GlycoCfg {
     pub enabled: Option<bool>,
     pub tol_ppm: Option<f64>,

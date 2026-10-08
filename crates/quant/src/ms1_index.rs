@@ -6,6 +6,7 @@
 //! Orbitrap run is ~100 scans, and a 10 ppm slice of each touches a handful
 //! of centroids.
 
+use model::mass::ISOTOPE;
 pub use model::scan::Ms1Scan;
 
 /// All MS1 scans of one run in RT order.
@@ -97,6 +98,41 @@ impl Ms1RunIndex {
         best
     }
 
+    /// Share of the most intense centroids that have an isotope partner
+    /// (`+ISOTOPE/z`, z = 1..4) within `tol_ppm`, over an even sample of the
+    /// run's scans. Orbitrap/TOF survey scans score 0.7–0.95 at 10 ppm; ion-trap
+    /// survey scans, whose centroids are off by tenths of a Th, score far
+    /// lower. `None` for an empty run.
+    pub fn isotope_partner_fraction(&self, tol_ppm: f64) -> Option<f64> {
+        const SAMPLE_SCANS: usize = 200;
+        const TOP_PEAKS: usize = 30;
+        let step = (self.scans.len() / SAMPLE_SCANS).max(1);
+        let (mut hits, mut total) = (0usize, 0usize);
+        for scan in self.scans.iter().step_by(step) {
+            let mut order: Vec<usize> = (0..scan.peaks.len()).collect();
+            order.sort_unstable_by(|&a, &b| {
+                scan.peaks[b]
+                    .1
+                    .partial_cmp(&scan.peaks[a].1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            for &k in order.iter().take(TOP_PEAKS) {
+                let mz = scan.peaks[k].0;
+                total += 1;
+                let partnered = (1..=4).any(|z| {
+                    let target = mz + ISOTOPE / z as f64;
+                    let tol = target * tol_ppm * 1e-6;
+                    let i = scan.peaks.partition_point(|&(m, _)| m < target - tol);
+                    scan.peaks.get(i).is_some_and(|&(m, _)| m <= target + tol)
+                });
+                if partnered {
+                    hits += 1;
+                }
+            }
+        }
+        (total > 0).then(|| hits as f64 / total as f64)
+    }
+
     /// Extracted-ion chromatogram of `mz ± tol_da` over `scans`: one value per
     /// scan (the most intense centroid in the slice, 0.0 when none).
     pub fn xic(&self, mz: f64, tol_da: f64, scans: std::ops::Range<usize>) -> Vec<f32> {
@@ -122,6 +158,48 @@ mod tests {
             })
             .collect();
         Ms1RunIndex::new(scans)
+    }
+
+    #[test]
+    fn isotope_partners_separate_high_and_low_resolution_survey_scans() {
+        // High resolution: z=2 envelopes with exact isotope spacing.
+        let hi = Ms1RunIndex::new(
+            (0..20)
+                .map(|i| {
+                    let mut peaks = Vec::new();
+                    for k in 0..10 {
+                        let mono = 400.0 + 37.3 * k as f64 + i as f64 * 0.01;
+                        for n in 0..3 {
+                            peaks.push((mono + n as f64 * ISOTOPE / 2.0, 1000.0 / (n + 1) as f32));
+                        }
+                    }
+                    Ms1Scan {
+                        rt: i as f64,
+                        peaks,
+                    }
+                })
+                .collect(),
+        );
+        assert!(hi.isotope_partner_fraction(10.0).unwrap() > 0.6);
+        // Ion-trap-like: the same peaks with a tenth-of-a-Th centroid error.
+        let lo = Ms1RunIndex::new(
+            (0..20)
+                .map(|i| Ms1Scan {
+                    rt: i as f64,
+                    peaks: hi
+                        .peaks(i)
+                        .iter()
+                        .enumerate()
+                        .map(|(j, &(mz, int))| (mz + 0.03 * ((j % 7) as f64 - 3.0), int))
+                        .collect(),
+                })
+                .collect(),
+        );
+        assert!(lo.isotope_partner_fraction(10.0).unwrap() < 0.2);
+        assert_eq!(
+            Ms1RunIndex::new(Vec::new()).isotope_partner_fraction(10.0),
+            None
+        );
     }
 
     #[test]

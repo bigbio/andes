@@ -32,6 +32,14 @@ use crate::cli::Cli;
 /// Isotope-peak tolerance of the precursor-purity ladder (OpenMS default).
 const PURITY_ISOTOPE_PPM: f64 = 10.0;
 
+/// MS1 resolution check for `--lfq`: isotope partners are matched at this
+/// tolerance, and a run whose most intense MS1 centroids find one less often
+/// than [`MS1_MIN_ISOTOPE_PARTNER_FRACTION`] is reported as low-resolution.
+/// Orbitrap survey scans measured 0.70-0.93 (PXD000001, PXD001819, the OpenMS
+/// BSA example); the same scans with ion-trap-sized centroid errors 0.09-0.32.
+const MS1_RESOLUTION_CHECK_PPM: f64 = 10.0;
+const MS1_MIN_ISOTOPE_PARTNER_FRACTION: f64 = 0.5;
+
 /// Resolved quantification settings for a run.
 #[derive(Debug, Clone)]
 pub(crate) struct QuantSettings {
@@ -54,13 +62,31 @@ impl QuantSettings {
         if cli.tmt.is_none() && !cli.lfq {
             return Ok(None);
         }
-        let tmt_tol = cli.tmt_tol.unwrap_or(if high_res {
+        if !(2..=3).contains(&cli.tmt_level) {
+            return Err(format!("--tmt-level must be 2 or 3, got {}", cli.tmt_level));
+        }
+        // The default follows the scan the reporters are read from. SPS-MS3
+        // reporters are read in the Orbitrap even when the identifying MS2 is
+        // an ion-trap scan (Fusion/Lumos SPS methods), so the MS2 resolution
+        // says nothing about them.
+        let tmt_tol = cli.tmt_tol.unwrap_or(if high_res || cli.tmt_level >= 3 {
             Tolerance::Ppm(20.0)
         } else {
             Tolerance::Da(0.3)
         });
-        if !(2..=3).contains(&cli.tmt_level) {
-            return Err(format!("--tmt-level must be 2 or 3, got {}", cli.tmt_level));
+        if let Some(plex) = cli.tmt {
+            plex.check_tolerance(tmt_tol).map_err(|e| {
+                format!(
+                    "--tmt {}: {e}. {}",
+                    plex.name(),
+                    if cli.tmt_tol.is_some() {
+                        "Use a narrower --tmt-tol (e.g. 20ppm)."
+                    } else {
+                        "The MS2 is low-resolution, so its reporter ions cannot separate this \
+                         kit's channels: use --tmt-level 3 for SPS-MS3 data, or set --tmt-tol."
+                    }
+                )
+            })?;
         }
         let correction = match (&cli.tmt_correction, cli.tmt) {
             (Some(path), Some(plex)) => {
@@ -87,10 +113,14 @@ impl QuantSettings {
             min_cosine: cli.lfq_min_cosine as f32,
             ..LfqParams::default()
         };
+        // Label-free quant reads the MS1 scans, whose analyzer the MS2 model
+        // does not describe: Velos/Elite/Fusion/Lumos high-low methods pair an
+        // ion-trap MS2 with Orbitrap survey scans. Each run's MS1 is checked
+        // once it is captured (`finish_file`).
         if cli.lfq && !high_res {
-            return Err(
-                "--lfq needs high-resolution MS1 (Orbitrap/TOF); the resolved model is low-resolution"
-                    .into(),
+            eprintln!(
+                "WARN: --lfq: the MS2 scans are low-resolution; label-free quantification \
+                 assumes high-resolution (Orbitrap/TOF) MS1 scans and checks them per run"
             );
         }
         Ok(Some(Self {
@@ -179,6 +209,9 @@ pub(crate) struct QuantCollector {
     ms2_reporters: Vec<Vec<f32>>,
     runs: Vec<RunCapture>,
     next_span_start: usize,
+    /// False when the read path does not capture MS1 scans for quantification
+    /// (`--chimeric`); the missing purity was announced once at setup.
+    ms1_captured: bool,
 }
 
 impl QuantCollector {
@@ -188,7 +221,14 @@ impl QuantCollector {
             ms2_reporters: Vec::new(),
             runs: Vec::new(),
             next_span_start: 0,
+            ms1_captured: true,
         }
+    }
+
+    /// The read path does not capture MS1 scans (`--chimeric`): skip the
+    /// per-file warning about them.
+    pub(crate) fn ms1_not_captured(&mut self) {
+        self.ms1_captured = false;
     }
 
     /// Call for every spectrum right before it is pushed to the global list
@@ -233,6 +273,19 @@ impl QuantCollector {
         }
         let span = self.next_span_start..end;
         self.next_span_start = end;
+        if let (true, Some(idx)) = (self.settings.lfq, &ms1) {
+            if let Some(frac) = idx.isotope_partner_fraction(MS1_RESOLUTION_CHECK_PPM) {
+                if frac < MS1_MIN_ISOTOPE_PARTNER_FRACTION {
+                    eprintln!(
+                        "WARN: quant: {stem}: the MS1 scans do not look high-resolution \
+                         ({:.0}% of their most intense centroids have an isotope partner within \
+                         {MS1_RESOLUTION_CHECK_PPM} ppm; Orbitrap/TOF survey scans reach 70-95%). \
+                         Label-free areas from low-resolution MS1 are not meaningful.",
+                        100.0 * frac
+                    );
+                }
+            }
+        }
         if let Some(idx) = &ms1 {
             eprintln!(
                 "quant: {}: {} MS1 scans ({} centroids) indexed{}",
@@ -245,7 +298,7 @@ impl QuantCollector {
                     String::new()
                 }
             );
-        } else if self.settings.needs_ms1() {
+        } else if self.settings.needs_ms1() && self.ms1_captured {
             eprintln!(
                 "WARN: quant: {}: no MS1 scans captured ({}); {}",
                 stem,
@@ -475,7 +528,13 @@ fn base_record(id: &QuantId, proteins: Vec<ProteinPos>, feature_id: i64) -> Feat
         additional_scores,
         run_file_name: id.run.clone(),
         cv_params: Vec::new(),
-        scan: vec![id.scan],
+        // No scan number (e.g. `spectrum=N` native ids): an empty list, as
+        // OpenMS writes it, not a made-up scan 0.
+        scan: if id.scan > 0 {
+            vec![id.scan]
+        } else {
+            Vec::new()
+        },
         rt: id.rt_seconds.map(|t| t as f32),
         missed_cleavages: id.missed_cleavages,
         intensities: Vec::new(),
@@ -486,6 +545,14 @@ fn base_record(id: &QuantId, proteins: Vec<ProteinPos>, feature_id: i64) -> Feat
         rt_stop: None,
         psm_ids: vec![id.psm_index],
     }
+}
+
+/// A feature `lfq.tsv` reports: it won its decoy competition at the feature
+/// FDR and its isotope envelope matches theory (`--lfq-min-cosine`).
+/// `lfq_features.tsv` and the parquet keep every feature.
+fn is_confident(row: &LfqRow, s: &QuantSettings) -> bool {
+    row.feature_q_value.is_some_and(|q| q <= s.feature_fdr)
+        && row.feature.cosine >= s.lfq_params.min_cosine
 }
 
 /// Run name of an input path: the file name without its extension, and
@@ -763,22 +830,22 @@ pub(crate) fn run_quant(
                 let _ = decoy;
             }
             eprintln!(
-                "quant: {}: {} of {} precursors quantified, {} at feature q<={}",
+                "quant: {}: {} of {} precursors quantified, {} at feature q<={} and envelope cosine>={}",
                 run.stem,
                 n_found,
                 targets.len(),
                 all_rows
                     .iter()
-                    .filter(|r| r.id.file_idx == run_idx
-                        && r.feature_q_value.is_some_and(|q| q <= s.feature_fdr))
+                    .filter(|r| r.id.file_idx == run_idx && is_confident(r, s))
                     .count(),
-                s.feature_fdr
+                s.feature_fdr,
+                s.lfq_params.min_cosine
             );
         }
         let runs: Vec<String> = collector.runs.iter().map(|r| r.stem.clone()).collect();
         let confident: Vec<LfqRow> = all_rows
             .iter()
-            .filter(|r| r.feature_q_value.is_some_and(|q| q <= s.feature_fdr))
+            .filter(|r| is_confident(r, s))
             .cloned()
             .collect();
         let lfq_path = dir.join(format!("{stem}.lfq.tsv"));
@@ -788,10 +855,11 @@ pub(crate) fn run_quant(
         output::write_lfq_features_tsv(&feat_path, &all_rows)
             .map_err(|e| format!("write {}: {e}", feat_path.display()))?;
         eprintln!(
-            "quant: wrote {} ({} precursor-charge rows at feature q<={}) and {} ({} features)",
+            "quant: wrote {} ({} precursor-charge rows at feature q<={}, cosine>={}) and {} ({} features)",
             lfq_path.display(),
             confident.len(),
             s.feature_fdr,
+            s.lfq_params.min_cosine,
             feat_path.display(),
             all_rows.len()
         );

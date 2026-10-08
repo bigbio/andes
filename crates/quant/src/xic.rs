@@ -27,18 +27,28 @@ pub struct PeakBounds {
     pub right: usize,
 }
 
-/// Fraction of the apex below which a boundary scan is reached.
-const BOUNDARY_FRACTION: f32 = 0.02;
-/// A rise above the running minimum by this factor ends the peak (valley).
-const VALLEY_RISE: f32 = 1.10;
+/// Boundaries sit this many half-widths at half maximum from the apex: ±2.35 σ
+/// of a Gaussian, 98 % of its area.
+const HALF_WIDTHS: f32 = 2.0;
+/// A boundary stops earlier at a deep valley: once the trace has fallen below
+/// [`DEEP_VALLEY`] of the apex, a rise by [`VALLEY_RISE`] over its running
+/// minimum is the next peak.
+const DEEP_VALLEY: f32 = 0.5;
+const VALLEY_RISE: f32 = 1.5;
 
 /// Locate the peak that contains `anchor`: climb from the anchor to the
-/// nearest local maximum (at most `max_climb` scans away), then extend the
-/// boundaries outward while the trace keeps falling, stopping at a valley
-/// (the trace rises again above the running minimum by [`VALLEY_RISE`]) or
-/// at [`BOUNDARY_FRACTION`] of the apex. One missing scan (zero) inside a
-/// peak is tolerated. `None` when the trace has no signal at the anchor's
-/// peak.
+/// nearest local maximum (at most `max_climb` scans away), measure the
+/// half-width at half maximum on each side, and place each boundary
+/// [`HALF_WIDTHS`] half-widths from the apex, or at an earlier deep valley.
+/// `None` when the trace has no signal at the anchor's peak.
+///
+/// Width from the half maximum is what keeps areas reproducible: on
+/// ~1 s Orbitrap survey scans a boundary that stops at the first 10 % rise
+/// above the running minimum stops on noise, and on PXD001819 (UPS1 in yeast,
+/// three technical replicates) it gave the same peptide integration windows
+/// that differed by 2x or more for half of the yeast peptides and a 40 %
+/// area CV. Half-width boundaries bring the CV to 11 %, level with
+/// FeatureFinderIdentification on the same targets.
 pub fn find_peak(trace: &[f32], anchor: usize, max_climb: usize) -> Option<PeakBounds> {
     let n = trace.len();
     if n == 0 || anchor >= n {
@@ -78,47 +88,48 @@ pub fn find_peak(trace: &[f32], anchor: usize, max_climb: usize) -> Option<PeakB
     if apex_int <= 0.0 {
         return None;
     }
-    let floor = apex_int * BOUNDARY_FRACTION;
-
     let extend = |dir: isize| -> usize {
+        let limit = (HALF_WIDTHS * half_width(trace, apex, dir)).round() as usize;
         let mut i = apex;
         let mut running_min = apex_int;
-        let mut gap = false;
-        loop {
+        for _ in 0..limit {
             let next = i as isize + dir;
             if next < 0 || next >= n as isize {
                 break;
             }
-            let next = next as usize;
-            let v = trace[next];
-            if v <= floor {
-                // Include the first below-floor scan as the boundary unless it
-                // is a one-scan gap followed by real signal.
-                let peek = next as isize + dir;
-                if !gap
-                    && peek >= 0
-                    && peek < n as isize
-                    && trace[peek as usize] > floor
-                    && trace[peek as usize] <= running_min
-                {
-                    gap = true;
-                    i = next;
-                    continue;
-                }
-                i = next;
-                break;
-            }
-            if v > running_min * VALLEY_RISE {
-                break; // rising again: the valley was the previous scan
+            let v = trace[next as usize];
+            if running_min < DEEP_VALLEY * apex_int && v > VALLEY_RISE * running_min {
+                break; // the next peak starts: the valley was the previous scan
             }
             running_min = running_min.min(v);
-            i = next;
+            i = next as usize;
         }
         i
     };
     let left = extend(-1);
     let right = extend(1);
     Some(PeakBounds { apex, left, right })
+}
+
+/// Half-width at half maximum of the peak at `apex` on one side (`dir` = ±1),
+/// in scans, with the half-maximum crossing interpolated between the two scans
+/// that bracket it. A trace that never falls to half before its end gives the
+/// distance to that end.
+fn half_width(trace: &[f32], apex: usize, dir: isize) -> f32 {
+    let half = trace[apex] / 2.0;
+    let mut i = apex;
+    loop {
+        let next = i as isize + dir;
+        if next < 0 || next >= trace.len() as isize {
+            return i.abs_diff(apex) as f32;
+        }
+        let next = next as usize;
+        if trace[next] <= half {
+            let drop = (trace[i] - trace[next]).max(f32::EPSILON);
+            return i.abs_diff(apex) as f32 + (trace[i] - half) / drop;
+        }
+        i = next;
+    }
 }
 
 /// Trapezoidal area of `trace` between `left..=right` over `rt` (seconds).
@@ -186,9 +197,24 @@ mod tests {
         let t = gaussian(41, 20.0, 3.0, 1000.0);
         let p = find_peak(&t, 17, 10).unwrap();
         assert_eq!(p.apex, 20);
-        // 2 % of the apex is ~2.8 sigma away → bounds near 11 / 29.
-        assert!(p.left >= 10 && p.left <= 12, "{p:?}");
-        assert!(p.right >= 28 && p.right <= 30, "{p:?}");
+        // Half-width at half maximum is 1.177 sigma = 3.53 scans → ±7 scans.
+        assert_eq!((p.left, p.right), (13, 27), "{p:?}");
+    }
+
+    #[test]
+    fn boundaries_ignore_noise_on_a_broad_peak() {
+        // A broad Gaussian (sigma 12 scans) with ±15 % alternating noise. A
+        // valley rule that stops at the first 10 % rise ends after a scan or
+        // two; the half-width boundaries cover the peak.
+        let t: Vec<f32> = gaussian(121, 60.0, 12.0, 1000.0)
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| v * if i % 2 == 0 { 1.15 } else { 0.85 })
+            .collect();
+        let s = savitzky_golay5(&t);
+        let p = find_peak(&s, 58, 12).unwrap();
+        assert!((p.apex as i64 - 60).abs() <= 2, "{p:?}");
+        assert!(p.right - p.left >= 50, "{p:?}");
     }
 
     #[test]

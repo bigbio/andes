@@ -511,9 +511,6 @@ impl<'a> PreparedSearch<'a> {
         decoy_prefix: &str,
         index_path: &std::path::Path,
     ) -> std::io::Result<Self> {
-        // Out-of-core mmap mode cannot serve the chimeric Pass-2 (it needs the
-        // in-RAM candidate index); reject the combination before building anything.
-        reject_unsupported_mmap_combo(params)?;
         let (mmap_index, was_built) =
             MmapCandidateIndex::open_or_build(index_path, idx, params, decoy_prefix)?;
         if was_built {
@@ -562,7 +559,7 @@ impl<'a> PreparedSearch<'a> {
     }
 
     /// Drain the `Mmap`-mode accumulator into `self.candidates` so downstream
-    /// consumers (PIN/TSV writers, chimeric Pass 2) resolve `candidate_idxs`
+    /// consumers (PIN/TSV writers) resolve `candidate_idxs`
     /// against the final materialized candidate slice. No-op in `Ram` mode (the
     /// candidates already live in `self.candidates`). Idempotent.
     /// Candidate indices sorted by exact neutral mass (ties by index); empty in
@@ -769,6 +766,22 @@ impl<'a> PreparedSearch<'a> {
             .expect("Mmap backing requires the global target bare-seq set");
         relabel_collision_decoys_with(&mut mmap_cands, target_bare_seqs);
         mmap_cands
+    }
+
+    /// The peptide of the candidate at GLOBAL index `global_idx`: an entry of
+    /// `self.candidates` on the `Ram` backing, or of the `Mmap` accumulator
+    /// (read under its lock) before [`Self::sync_materialized_candidates`].
+    pub fn candidate_peptide(&self, global_idx: u32) -> Peptide {
+        match self.mmap_accum.as_ref() {
+            Some(accum) => {
+                let accum = accum.lock().unwrap();
+                match accum.candidates.get(global_idx as usize) {
+                    Some(c) => c.peptide.clone(),
+                    None => self.candidates[global_idx as usize].peptide.clone(),
+                }
+            }
+            None => self.candidates[global_idx as usize].peptide.clone(),
+        }
     }
 
     fn run_chunk_inner(
@@ -1489,6 +1502,47 @@ pub fn match_spectra(
     (queues, prepared.candidates)
 }
 
+/// Isolation window `[lo, hi]` (m/z) Pass 2 searches for co-isolated precursors
+/// of `spec`, and the m/z tolerance used to match their MS1 isotope peaks. Uses
+/// the per-scan isolation offsets when the parser recorded them, else the
+/// configured chimeric half-width.
+fn coisolation_window(spec: &Spectrum, params: &SearchParams) -> (f64, f64, f64) {
+    let lo = spec.precursor_mz
+        - spec
+            .isolation_lower_offset
+            .unwrap_or(params.chimeric_isolation_halfwidth_da);
+    let hi = spec.precursor_mz
+        + spec
+            .isolation_upper_offset
+            .unwrap_or(params.chimeric_isolation_halfwidth_da);
+    let tol = params
+        .precursor_tolerance
+        .left
+        .as_da(spec.precursor_mz)
+        .max(0.01);
+    (lo, hi, tol)
+}
+
+/// MS1 m/z range Pass 2 reads for `spec`: every peak co-isolation detection can
+/// consult (a monoisotopic candidate inside the isolation window and its first
+/// three isotope peaks at charge >= 1, each within the match tolerance), plus a
+/// 0.01 Da margin. Restricting a linked MS1 scan to this range leaves
+/// [`run_pass2_coisolation`]'s detections unchanged.
+pub fn coisolation_ms1_bounds(spec: &Spectrum, params: &SearchParams) -> (f64, f64) {
+    const MARGIN_DA: f64 = 0.01;
+    let (lo, hi, tol) = coisolation_window(spec, params);
+    (
+        lo - tol - MARGIN_DA,
+        hi + 3.0 * model::mass::ISOTOPE + tol + MARGIN_DA,
+    )
+}
+
+/// One scan's Pass-2 input: its primary peptide and co-isolated precursors.
+struct Pass2Scan {
+    primary: Peptide,
+    coisolated: Vec<crate::coisolation::CoIsolated>,
+}
+
 /// Pass 2 of the chimeric cascade. For each non-empty top-N queue (filled by
 /// Pass 1 with its PRIMARY peptide), detects MS1 co-isolated precursors in the
 /// isolation window, strips the primary's matched peaks, and runs a targeted
@@ -1503,6 +1557,10 @@ pub fn match_spectra(
 /// index, added to each emitted secondary's `spectrum_idx` so it aligns with the
 /// accumulated `all_spectra`. Peaks must still be present (the residual needs
 /// them) — call BEFORE peaks are dropped.
+///
+/// Both candidate backings score the same candidates in the same order:
+///  - `Ram`: each secondary scans `prepared.candidates` through `bucket_index`.
+///  - `Mmap`: see [`mmap_secondaries`].
 pub fn run_pass2_coisolation(
     prepared: &PreparedSearch,
     spectra: &[Spectrum],
@@ -1516,94 +1574,219 @@ pub fn run_pass2_coisolation(
         return;
     }
 
-    queues.par_iter_mut().enumerate().for_each(|(spec_idx, q)| {
-        if q.is_empty() {
-            return;
+    // (A) Co-isolated precursors and the primary peptide of every scan Pass 1
+    // identified.
+    let scans: Vec<Option<Pass2Scan>> = queues
+        .par_iter()
+        .enumerate()
+        .map(|(spec_idx, q)| {
+            if q.is_empty() {
+                return None;
+            }
+            let spec = spectra.get(spec_idx)?;
+            // Linked MS1 scan for this MS2 (most-recent preceding MS1).
+            let ms1_idx = (*link.ms2_to_ms1.get(spec_idx)?)?;
+            let ms1 = link.ms1_peaks.get(ms1_idx)?;
+            let (lo, hi, tol) = coisolation_window(spec, params);
+            let coisolated = crate::coisolation::detect_coisolated(
+                ms1,
+                lo,
+                hi,
+                spec.precursor_mz,
+                *params.charge_range.start()..=*params.charge_range.end(),
+                tol,
+                // max_kl + max_n: the chimeric-N lever. Raising max_coisolated
+                // searches deeper co-fragments on the residual; the KL gate keeps
+                // secondaries clean.
+                params.chimeric_max_kl,
+                params.chimeric_max_coisolated,
+            );
+            if coisolated.is_empty() {
+                return None;
+            }
+            // Primary peptide = the queue's best PSM (smallest SpecEValue).
+            let primary = prepared.candidate_peptide(q.peek_top()?.primary_candidate_idx());
+            Some(Pass2Scan {
+                primary,
+                coisolated,
+            })
+        })
+        .collect();
+
+    // (B) Secondaries per scan; `Secondary` carries the winning candidate on
+    // `Mmap`, whose `candidate_idxs` index a pass-local pool.
+    type Secondary = (PsmMatch, Option<Candidate>);
+    let found: Vec<Vec<Secondary>> = if prepared.backing_mode == CandidateBacking::Mmap {
+        mmap_secondaries(prepared, spectra, &scans, params)
+    } else {
+        scans
+            .par_iter()
+            .enumerate()
+            .map(|(spec_idx, scan)| {
+                let Some(scan) = scan else {
+                    return Vec::new();
+                };
+                // Secondaries on the SAME scan compete for residual evidence: each
+                // accepted secondary's matched peaks are added to `claimed` so the
+                // next co-isolated mass is scored against still-unexplained signal.
+                let mut claimed: std::collections::HashSet<i64> = std::collections::HashSet::new();
+                let mut out: Vec<Secondary> = Vec::new();
+                for &co in &scan.coisolated {
+                    if let Some((psm, winner_claimed)) = crate::coisolation::search_secondary(
+                        &spectra[spec_idx],
+                        &scan.primary,
+                        &claimed,
+                        co,
+                        &prepared.candidates,
+                        &prepared.bucket_index,
+                        prepared.scorer,
+                        &prepared.aa_set_for_scoring,
+                        params,
+                        prepared.fragment_tolerance_da,
+                    ) {
+                        out.push((psm, None));
+                        claimed.extend(winner_claimed);
+                    }
+                }
+                out
+            })
+            .collect()
+    };
+
+    // (C) Emit. `Mmap` winners are interned into the accumulator (scan order)
+    // and their indices rewritten to the global ones.
+    let mut accum = prepared.mmap_accum.as_ref().map(|a| a.lock().unwrap());
+    for (spec_idx, (q, secondaries)) in queues.iter_mut().zip(found).enumerate() {
+        for (mut psm, cand) in secondaries {
+            if let (Some(accum), Some(cand)) = (accum.as_mut(), cand) {
+                psm.candidate_idxs = vec![accum.intern(cand)];
+            }
+            // `spec_idx` is chunk-local (indexes `spectra` + `link`); the emitted
+            // spectrum_idx must be global to align with `all_spectra`.
+            psm.spectrum_idx = offset + spec_idx;
+            // Distinct co-isolated peptide — a legitimate EXTRA emission, not a
+            // competitor for the primary's slot. force_push skips capacity-based
+            // eviction (plain `push` at capacity 1 would evict the primary or
+            // drop the secondary).
+            q.force_push(psm);
         }
-        let Some(spec) = spectra.get(spec_idx) else {
-            return;
-        };
+    }
+}
 
-        // Linked MS1 scan for this MS2 (most-recent preceding MS1).
-        let Some(Some(ms1_idx)) = link.ms2_to_ms1.get(spec_idx) else {
-            return;
-        };
-        let Some(ms1) = link.ms1_peaks.get(*ms1_idx) else {
-            return;
-        };
+/// Widest nominal-mass span (Da) of one `Mmap` Pass-2 candidate pool. Bounds the
+/// pool's memory: a pool holds every peptidoform of its secondaries' windows.
+const PASS2_POOL_SPAN_NOMINAL: i32 = 32;
 
-        // Isolation window: prefer the per-scan offsets if the parser recorded
-        // them, else fall back to the configured chimeric half-width.
-        let lo = spec.precursor_mz
-            - spec
-                .isolation_lower_offset
-                .unwrap_or(params.chimeric_isolation_halfwidth_da);
-        let hi = spec.precursor_mz
-            + spec
-                .isolation_upper_offset
-                .unwrap_or(params.chimeric_isolation_halfwidth_da);
+/// `Mmap` Pass 2: the winning secondary of every co-isolated precursor, per scan
+/// in detection order, each with its candidate.
+///
+/// The k-th co-isolated precursors of all scans form round k (a scan's
+/// secondaries compete for residual peaks, so round k needs the peaks claimed
+/// in rounds `< k`). Within a round, secondaries are sorted by nominal window
+/// and grouped into batches spanning at most [`PASS2_POOL_SPAN_NOMINAL`]; each
+/// batch expands the union of its windows from the out-of-core index ONCE
+/// (`expand_mmap_window_candidates`: the in-RAM multiset, enumeration order and
+/// collision-decoy labels) and scans it through a pool-local bucket index. A
+/// pool's order is the in-RAM global order restricted to the pool, so
+/// `search_secondary` visits the same candidates in the same order as on `Ram`
+/// and its smallest-index tie-break picks the same winner.
+fn mmap_secondaries(
+    prepared: &PreparedSearch,
+    spectra: &[Spectrum],
+    scans: &[Option<Pass2Scan>],
+    params: &SearchParams,
+) -> Vec<Vec<(PsmMatch, Option<Candidate>)>> {
+    use crate::coisolation::{search_secondary, secondary_nominal_window, CoIsolated};
+    type Hit = (PsmMatch, Candidate, std::collections::HashSet<i64>);
+    // (scan index, co-isolated precursor, nominal window)
+    type Item = (usize, CoIsolated, (i32, i32));
 
-        let tol = params
-            .precursor_tolerance
-            .left
-            .as_da(spec.precursor_mz)
-            .max(0.01);
-
-        let cos = crate::coisolation::detect_coisolated(
-            ms1,
-            lo,
-            hi,
-            spec.precursor_mz,
-            *params.charge_range.start()..=*params.charge_range.end(),
-            tol,
-            // max_kl + max_n: the chimeric-N lever (params; default 0.3 / 2 = the
-            // proven +101%-Astral setting). Raising max_coisolated searches deeper
-            // co-fragments on the residual; the KL gate keeps secondaries clean.
-            params.chimeric_max_kl,
-            params.chimeric_max_coisolated,
-        );
-        if cos.is_empty() {
-            return;
+    let mut claimed: Vec<std::collections::HashSet<i64>> =
+        vec![std::collections::HashSet::new(); scans.len()];
+    let mut found: Vec<Vec<(PsmMatch, Option<Candidate>)>> = vec![Vec::new(); scans.len()];
+    let rounds = scans
+        .iter()
+        .flatten()
+        .map(|s| s.coisolated.len())
+        .max()
+        .unwrap_or(0);
+    for k in 0..rounds {
+        let mut items: Vec<Item> = scans
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| {
+                let co = *s.as_ref()?.coisolated.get(k)?;
+                Some((i, co, secondary_nominal_window(co, params)))
+            })
+            .collect();
+        items.sort_by_key(|&(i, _, w)| (w, i));
+        let mut batches: Vec<&[Item]> = Vec::new();
+        let mut rest = items.as_slice();
+        while let Some(&(_, _, (lo, _))) = rest.first() {
+            let n = rest
+                .iter()
+                .take_while(|&&(_, _, (_, hi))| hi - lo <= PASS2_POOL_SPAN_NOMINAL)
+                .count()
+                .max(1);
+            let (batch, tail) = rest.split_at(n);
+            batches.push(batch);
+            rest = tail;
         }
-
-        // Primary peptide = the queue's best PSM (smallest SpecEValue).
-        let primary = match q.peek_top() {
-            Some(best) => prepared.candidates[best.primary_candidate_idx() as usize]
-                .peptide
-                .clone(),
-            None => return,
-        };
-
-        // Secondaries on the SAME scan compete for residual evidence: each accepted
-        // secondary's matched peaks are added to `claimed` so the next co-isolated
-        // mass is scored against still-unexplained signal (no double-counting of
-        // shared leftover peaks across multiple co-isolated precursors).
-        let mut claimed: std::collections::HashSet<i64> = std::collections::HashSet::new();
-        for co in cos {
-            if let Some((mut psm, winner_claimed)) = crate::coisolation::search_secondary(
-                spec,
-                &primary,
-                &claimed,
-                co,
-                &prepared.candidates,
-                &prepared.bucket_index,
-                prepared.scorer,
-                &prepared.aa_set_for_scoring,
-                params,
-                prepared.fragment_tolerance_da,
-            ) {
-                // `spec_idx` is chunk-local (indexes `spectra` + `link`); the
-                // emitted spectrum_idx must be global to align with `all_spectra`.
-                psm.spectrum_idx = offset + spec_idx;
-                // Distinct co-isolated peptide — a legitimate EXTRA emission, not a
-                // competitor for the primary's slot. force_push skips capacity-based
-                // eviction (plain `push` at capacity 1 would evict the primary or
-                // drop the secondary).
-                q.force_push(psm);
-                claimed.extend(winner_claimed);
+        let claimed_ref = &claimed;
+        let hits: Vec<(usize, Option<Hit>)> = batches
+            .par_iter()
+            .flat_map_iter(|batch| {
+                // Union of the batch's windows as disjoint intervals.
+                let mut windows: Vec<(i32, i32)> = Vec::new();
+                for &(_, _, (lo, hi)) in batch.iter() {
+                    match windows.last_mut() {
+                        Some(last) if lo <= last.1 + 1 => last.1 = last.1.max(hi),
+                        _ => windows.push((lo, hi)),
+                    }
+                }
+                let pool = prepared.expand_mmap_window_candidates(prepared.params, &windows, None);
+                let mut bucket_index: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
+                for (i, c) in pool.iter().enumerate() {
+                    bucket_index
+                        .entry(c.peptide.nominal_residue_mass())
+                        .or_default()
+                        .push(i);
+                }
+                batch
+                    .iter()
+                    .map(|&(spec_idx, co, _)| {
+                        let scan = scans[spec_idx]
+                            .as_ref()
+                            .expect("only scans with co-isolated precursors are batched");
+                        let hit = search_secondary(
+                            &spectra[spec_idx],
+                            &scan.primary,
+                            &claimed_ref[spec_idx],
+                            co,
+                            &pool,
+                            &bucket_index,
+                            prepared.scorer,
+                            &prepared.aa_set_for_scoring,
+                            params,
+                            prepared.fragment_tolerance_da,
+                        )
+                        .map(|(psm, winner_claimed)| {
+                            let cand = pool[psm.primary_candidate_idx() as usize].clone();
+                            (psm, cand, winner_claimed)
+                        });
+                        (spec_idx, hit)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (spec_idx, hit) in hits {
+            if let Some((psm, cand, winner_claimed)) = hit {
+                claimed[spec_idx].extend(winner_claimed);
+                found[spec_idx].push((psm, Some(cand)));
             }
         }
-    });
+    }
+    found
 }
 
 /// Per-candidate enzymatic cleavage credit: the RawScore term for whether the
@@ -2275,26 +2458,6 @@ pub(crate) fn compute_psm_features_with_edge(
     }
 }
 
-/// Reject combinations the mmap (out-of-core) candidate backing cannot serve.
-///
-/// The chimeric two-pass cascade (`run_pass2_coisolation` → `search_secondary`)
-/// resolves co-isolated peptides against the IN-RAM `candidates`/`bucket_index`,
-/// which are empty under mmap mode (candidate resolution goes through
-/// `mmap_index` instead). Running both together silently yields no secondaries,
-/// so the combination is rejected up front in [`PreparedSearch::prepare_mmap`].
-fn reject_unsupported_mmap_combo(params: &SearchParams) -> std::io::Result<()> {
-    if params.chimeric {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "--chimeric is not supported together with --candidate-index mmap: the \
-             chimeric Pass-2 search resolves co-isolated peptides against the \
-             in-memory candidate index, which is not populated in out-of-core mmap \
-             mode. Use either --chimeric or --candidate-index mmap, not both.",
-        ));
-    }
-    Ok(())
-}
-
 // ── Unit tests for feature columns ───────────────────────────────────────────
 
 #[cfg(test)]
@@ -2326,28 +2489,6 @@ mod charges_to_try_tests {
     fn missing_charge_still_falls_back_to_the_range() {
         let p = params();
         assert_eq!(charges_to_try(&spec(None), &p).as_slice(), &[2, 3]);
-    }
-}
-
-#[cfg(test)]
-mod mmap_combo_tests {
-    use super::*;
-    use model::aa_set::AminoAcidSetBuilder;
-
-    #[test]
-    fn mmap_rejects_chimeric() {
-        let aa = AminoAcidSetBuilder::new_standard().build().unwrap();
-        let mut p = SearchParams::default_tryptic(aa);
-        p.chimeric = true;
-        let err = reject_unsupported_mmap_combo(&p).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    }
-
-    #[test]
-    fn mmap_allows_non_chimeric() {
-        let aa = AminoAcidSetBuilder::new_standard().build().unwrap();
-        let p = SearchParams::default_tryptic(aa);
-        assert!(reject_unsupported_mmap_combo(&p).is_ok());
     }
 }
 

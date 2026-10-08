@@ -146,6 +146,24 @@ fn primary_matched_peak_keys(
     keys
 }
 
+/// Calibration-adjusted neutral mass of `co` and the precursor tolerance (Da)
+/// around it that a secondary candidate must fall within.
+pub(crate) fn secondary_mass_window(co: CoIsolated, params: &SearchParams) -> (f64, f64) {
+    let co_neutral =
+        adjusted_observed_neutral_mass(co.neutral_mass, params.precursor_mass_shift_ppm);
+    let tol = params.precursor_tolerance.left.as_da(co_neutral).max(0.01);
+    (co_neutral, tol)
+}
+
+/// Inclusive `nominal(peptide.mass() - H2O)` bucket range [`search_secondary`]
+/// scans for `co`: the exact-mass window of [`secondary_mass_window`] widened by
+/// one nominal unit on each side.
+pub(crate) fn secondary_nominal_window(co: CoIsolated, params: &SearchParams) -> (i32, i32) {
+    let (co_neutral, tol) = secondary_mass_window(co, params);
+    let nominal = |m: f64| nominal_from(m - H2O);
+    (nominal(co_neutral - tol) - 1, nominal(co_neutral + tol) + 1)
+}
+
 /// Best secondary PSM for `co` on `spec`, after removing the primary peptide's
 /// matched charge-1 b/y peaks (residual spectrum). Scores ONLY candidates within
 /// `params.precursor_tolerance` of `co.neutral_mass` (the candidate-count cut that
@@ -217,12 +235,8 @@ pub(crate) fn search_secondary(
     //    shift would exclude the true secondary before GF scoring. The GF below
     //    derives its own window from `co_spec`'s raw precursor m/z and applies the
     //    shift internally, so it stays consistent.
-    let co_neutral =
-        adjusted_observed_neutral_mass(co.neutral_mass, params.precursor_mass_shift_ppm);
-    let nominal = |m: f64| nominal_from(m - H2O);
-    let tol = params.precursor_tolerance.left.as_da(co_neutral).max(0.01);
-    let lo = nominal(co_neutral - tol) - 1;
-    let hi = nominal(co_neutral + tol) + 1;
+    let (co_neutral, tol) = secondary_mass_window(co, params);
+    let (lo, hi) = secondary_nominal_window(co, params);
 
     let mut queue = TopNQueue::new(1);
     // Tailor + DeltaRawScore accumulation over this secondary's candidate score

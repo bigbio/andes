@@ -813,7 +813,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // --glyco-hcd-pair only takes effect inside the glyco driver; without --glyco
     // it is silently inert, which would mislead a user who set it on purpose (code
     // review). Warn rather than error so it stays a no-op knob outside glyco mode.
-    if cli.glyco_hcd_pair && !cli.glyco {
+    // The flag defaults on, so only a value typed on the command line warns.
+    if !cli.glyco && arg_present("--glyco-hcd-pair") {
         eprintln!(
             "WARN: --glyco-hcd-pair has no effect without --glyco (it only drives \
              paired-scan candidate generation in glyco mode); ignoring it."

@@ -556,7 +556,7 @@ pub fn rich_ion_llr(
     // ensemble once with trees on the outside. Bit-identical: the rows are gathered
     // in the same ion order the per-ion loop used, and the f64 sum below adds the
     // per-row logits in that same order.
-    let mut rows_buf: Vec<Vec<f32>> = Vec::new();
+    let mut rows_buf: Vec<[f32; crate::ion_features::N_ION_FEATURES]> = Vec::new();
     for ion in predict_by_ions(peptide, 1..=2) {
         let tol_da = if feature_tol_is_ppm {
             ion.mz * feature_tol / 1e6
@@ -564,19 +564,16 @@ pub fn rich_ion_llr(
             feature_tol
         };
         if scored_spec.nearest_peak_full(ion.mz, tol_da).is_some() {
-            rows_buf.push(
-                extract_ion_features(
-                    peptide,
-                    scored_spec,
-                    ion.kind,
-                    ion.position,
-                    precursor_charge,
-                    ion.charge,
-                    feature_tol,
-                    feature_tol_is_ppm,
-                )
-                .to_vec(),
-            );
+            rows_buf.push(extract_ion_features(
+                peptide,
+                scored_spec,
+                ion.kind,
+                ion.position,
+                precursor_charge,
+                ion.charge,
+                feature_tol,
+                feature_tol_is_ppm,
+            ));
         }
     }
     if rows_buf.is_empty() {

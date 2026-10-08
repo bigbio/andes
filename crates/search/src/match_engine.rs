@@ -241,6 +241,59 @@ fn build_mass_order(candidates: &[Candidate]) -> Vec<u32> {
     order
 }
 
+/// How many window slots ahead [`prefetch_window_candidates`] requests a
+/// candidate's struct, and how many ahead its residue array (whose address is read
+/// from the struct, so it is requested once the struct has had time to arrive).
+const PREFETCH_STRUCT_AHEAD: usize = 16;
+const PREFETCH_RESIDUES_AHEAD: usize = 8;
+/// Cache lines of a residue array requested per candidate (8 lines cover a
+/// 21-residue peptide).
+const PREFETCH_RESIDUE_LINES: usize = 8;
+
+/// Ask the CPU to start loading the candidates the window scan reaches a few
+/// iterations from now. The window visits candidates in index order, which is
+/// scattered across the whole candidate pool, so without this every candidate
+/// costs a cache miss on its struct and another on its heap residue array. A
+/// prefetch is only a hint: it never changes what the loop reads.
+#[inline(always)]
+fn prefetch_window_candidates(cands: &[Candidate], window: &[usize], pos: usize) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+        if let Some(c) = window
+            .get(pos + PREFETCH_STRUCT_AHEAD)
+            .and_then(|&slot| cands.get(slot))
+        {
+            let p = (c as *const Candidate).cast::<i8>();
+            // SAFETY: prefetch never dereferences; `p` and the struct's last byte
+            // both lie inside the borrowed `Candidate`.
+            #[allow(unused_unsafe)]
+            unsafe {
+                _mm_prefetch(p, _MM_HINT_T0);
+                _mm_prefetch(p.add(std::mem::size_of::<Candidate>() - 1), _MM_HINT_T0);
+            }
+        }
+        if let Some(c) = window
+            .get(pos + PREFETCH_RESIDUES_AHEAD)
+            .and_then(|&slot| cands.get(slot))
+        {
+            let residues = c.peptide.residues.as_slice();
+            let bytes = std::mem::size_of_val(residues);
+            let base = residues.as_ptr().cast::<i8>();
+            for line in 0..PREFETCH_RESIDUE_LINES.min(bytes.div_ceil(64)) {
+                // SAFETY: prefetch never dereferences; every address is inside
+                // the residue array (`line * 64 < bytes`).
+                #[allow(unused_unsafe)]
+                unsafe {
+                    _mm_prefetch(base.add(line * 64), _MM_HINT_T0);
+                }
+            }
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = (cands, window, pos);
+}
+
 /// Widening of the exact-mass lookup window, in Da. The lookup only decides which
 /// candidates are visited; `matches_precursor` still makes the decision, so the
 /// window must never be narrower than its acceptance band.
@@ -1055,7 +1108,8 @@ impl<'a> PreparedSearch<'a> {
 
                 // Cascade Pass 1 is a NARROW brute-force window scan: iterate every
                 // candidate whose nominal mass falls in the precursor window.
-                for &cand_slot in &window_cand_indices {
+                for (pos, &cand_slot) in window_cand_indices.iter().enumerate() {
+                    prefetch_window_candidates(cand_slice, &window_cand_indices, pos);
                     let (cand, cand_idx) = resolve_cand(cand_slot);
                     let cleavage_credit = enzyme_cleavage_credit(
                         cand,
@@ -1136,20 +1190,26 @@ impl<'a> PreparedSearch<'a> {
                             *tailor_hist.entry(s).or_insert(0) += 1;
                             tailor_total += 1;
                             strong_null_stats.push(pin_score);
-                            let mkey = peptidoform_key(&cand.peptide);
-                            if have_best && mkey == best_pep_key {
-                                // Same peptidoform (another protein / another charge):
-                                // not a competitor, so it may only raise the best.
-                                if s > best_raw {
+                            // A score at or below the runner-up changes neither
+                            // tracker (the runner-up never exceeds the best), so
+                            // the peptidoform hash is only taken above it.
+                            if s > second_raw {
+                                let mkey = peptidoform_key(&cand.peptide);
+                                if have_best && mkey == best_pep_key {
+                                    // Same peptidoform (another protein / another
+                                    // charge): not a competitor, so it may only raise
+                                    // the best.
+                                    if s > best_raw {
+                                        best_raw = s;
+                                    }
+                                } else if s > best_raw {
+                                    second_raw = second_raw.max(best_raw);
                                     best_raw = s;
+                                    best_pep_key = mkey;
+                                    have_best = true;
+                                } else {
+                                    second_raw = s;
                                 }
-                            } else if s > best_raw {
-                                second_raw = second_raw.max(best_raw);
-                                best_raw = s;
-                                best_pep_key = mkey;
-                                have_best = true;
-                            } else {
-                                second_raw = second_raw.max(s);
                             }
                         }
 

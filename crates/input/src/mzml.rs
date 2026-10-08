@@ -3043,7 +3043,11 @@ mod tests {
         let xml = wrap_spectra(&format!("{ms2}{ms3}"));
         // Default reader: the MS3 is filtered out and not captured.
         let mut plain = MzMLReader::new(Cursor::new(xml.clone()));
-        let n = plain.by_ref().map(|r| r.expect("parse")).count();
+        let n = plain
+            .by_ref()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse")
+            .len();
         assert_eq!(n, 1);
         assert!(plain.take_product_scans().is_empty());
         // Capture on: still one emitted MS2, and the MS3 is in the side table.

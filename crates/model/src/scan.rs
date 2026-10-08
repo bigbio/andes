@@ -4,7 +4,7 @@
 //! The readers capture these on request next to the MS2 stream; the
 //! quantification layer consumes them. They carry only what quantification
 //! needs, so a whole run's MS1 scans fit in memory (an Orbitrap Astral run is
-//! ~30 M centroids, ~400 MB at 12 bytes each).
+//! ~30 M centroids, ~480 MB at 16 bytes each: `(f64, f32)` pads to 16).
 
 /// One MS1 scan: retention time in seconds and its centroids, m/z ascending.
 #[derive(Debug, Clone, Default, PartialEq)]

@@ -654,7 +654,9 @@ pub(crate) struct SearchArgs {
     pub(crate) tmt_level: u8,
 
     /// Reporter-ion m/z tolerance, e.g. `20ppm` or `0.003da`. Default: 20 ppm
-    /// on high-resolution MS2, 0.3 Da on ion-trap MS2.
+    /// on high-resolution MS2 and at `--tmt-level 3` (SPS-MS3 reporters are
+    /// read in the Orbitrap), 0.3 Da on ion-trap MS2. A window that reaches
+    /// half the spacing of the kit's closest channels is refused.
     #[arg(long = "tmt-tol", value_parser = parse_precursor_tol)]
     pub(crate) tmt_tol: Option<Tolerance>,
 
@@ -689,7 +691,8 @@ pub(crate) struct SearchArgs {
     pub(crate) lfq_rt_window: f64,
 
     /// Minimum cosine similarity between the observed and theoretical isotope
-    /// envelope for a feature to be reported as confident. Default 0.7.
+    /// envelope for a feature to be reported in `lfq.tsv` (`lfq_features.tsv`
+    /// and the parquet keep it with its cosine). Default 0.7.
     #[arg(long = "lfq-min-cosine", default_value = "0.7", value_parser = parse_unit_fraction)]
     pub(crate) lfq_min_cosine: f64,
 
@@ -812,12 +815,12 @@ pub(crate) fn parse_fragmentation(s: &str) -> Result<Fragmentation, String> {
         .map_err(|_| format!("invalid fragmentation `{s}`: expected auto|CID|ETD|HCD|UVPD"))
 }
 
-/// Parse `--protocol` value. Accepts named values only.
 /// Parse `--tmt` kit names.
 pub(crate) fn parse_plex(s: &str) -> Result<quant::Plex, String> {
     quant::Plex::parse(s)
 }
 
+/// Parse `--protocol` value. Accepts named values only.
 pub(crate) fn parse_protocol(s: &str) -> Result<Protocol, String> {
     <Protocol as ValueEnum>::from_str(s, true).map_err(|_| {
         format!(

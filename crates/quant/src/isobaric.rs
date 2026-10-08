@@ -168,10 +168,11 @@ impl Plex {
     }
 
     /// The QPX / mzTab label prefix for this kit's channels: `TMT126`,
-    /// `iTRAQ114`, ...
+    /// `ITRAQ114`, ... (OpenMS's canonical spelling, which its QPX value
+    /// validation requires).
     pub fn label_prefix(&self) -> &'static str {
         match self {
-            Plex::Itraq4 | Plex::Itraq8 => "iTRAQ",
+            Plex::Itraq4 | Plex::Itraq8 => "ITRAQ",
             _ => "TMT",
         }
     }
@@ -190,6 +191,38 @@ impl Plex {
 
     pub fn n_channels(&self) -> usize {
         self.channels().len()
+    }
+
+    /// Smallest m/z distance between two reporter channels of the kit
+    /// (6.3 mDa for the TMT 10/11/16/18-plex N/C pairs, ~1 Th otherwise).
+    pub fn min_channel_spacing(&self) -> f64 {
+        self.channels()
+            .windows(2)
+            .map(|w| w[1].mz - w[0].mz)
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    /// Reject a reporter tolerance under which two channels can read the same
+    /// peak: the window must stay below half the closest channel spacing at
+    /// every reporter m/z. A 0.3 Da ion-trap window on a TMT10 scan, for
+    /// example, would report 127N and 127C as the same value.
+    pub fn check_tolerance(&self, tol: Tolerance) -> Result<(), String> {
+        let half_spacing = self.min_channel_spacing() / 2.0;
+        let widest = self
+            .channels()
+            .iter()
+            .map(|c| tol.as_da(c.mz))
+            .fold(0.0f64, f64::max);
+        if widest >= half_spacing {
+            return Err(format!(
+                "reporter tolerance {:.4} Da is not below half the {:.4} Da spacing between \
+                 the closest {} channels, so neighbouring channels would read the same peak",
+                widest,
+                2.0 * half_spacing,
+                self.name()
+            ));
+        }
+        Ok(())
     }
 
     /// The label mass added to K and the peptide N-terminus by this kit
@@ -493,6 +526,20 @@ mod tests {
         let r2 = extract_reporters(&peaks, Plex::Tmt10, Tolerance::Da(0.3));
         assert_eq!(r2[1], 300.0);
         assert_eq!(r2[0], 900.0);
+    }
+
+    #[test]
+    fn tolerance_must_separate_the_closest_channels() {
+        // N/C pairs are 6.3 mDa apart: 20 ppm (2.7 mDa at 135 Th) is fine,
+        // an ion-trap 0.3 Da window is not.
+        assert!((Plex::Tmt10.min_channel_spacing() - 0.00632).abs() < 1e-5);
+        assert!(Plex::Tmt10.check_tolerance(Tolerance::Ppm(20.0)).is_ok());
+        assert!(Plex::Tmt18.check_tolerance(Tolerance::Ppm(20.0)).is_ok());
+        assert!(Plex::Tmt10.check_tolerance(Tolerance::Da(0.3)).is_err());
+        assert!(Plex::Tmt16.check_tolerance(Tolerance::Da(0.005)).is_err());
+        // One-dalton kits tolerate an ion-trap window.
+        assert!(Plex::Tmt6.check_tolerance(Tolerance::Da(0.3)).is_ok());
+        assert!(Plex::Itraq8.check_tolerance(Tolerance::Da(0.3)).is_ok());
     }
 
     #[test]

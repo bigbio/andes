@@ -1232,6 +1232,19 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if cli.glyco {
             return Err("--tmt/--lfq are not available in --glyco mode".into());
         }
+        if chimeric_active && s.plex.is_some() {
+            // The chimeric read path streams MS1 for the co-isolation search
+            // and does not hand it to quantification.
+            if s.min_purity > 0.0 {
+                return Err("--tmt-min-purity needs the precursor purity, which is not \
+                            computed under --chimeric"
+                    .into());
+            }
+            eprintln!(
+                "WARN: --tmt with --chimeric: precursor purity is not computed (the purity \
+                 column stays empty)"
+            );
+        }
         if !cli.rescore && !cli.rescore_native {
             eprintln!(
                 "WARN: --tmt/--lfq without --rescore or --rescore-native: every rank-1 target \
@@ -1240,6 +1253,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         eprintln!("Quantification: {}", s.describe());
+    }
+    if let (true, Some(q)) = (chimeric_active, quant.as_mut()) {
+        q.ms1_not_captured();
     }
 
     let mut all_spectra: Vec<Spectrum> = Vec::new();

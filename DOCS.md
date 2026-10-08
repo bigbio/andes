@@ -182,14 +182,14 @@ See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model)
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--tmt` | enum | *(off)* | Isobaric reporter quantification of the confident PSMs: `tmt6`, `tmt10`, `tmt11`, `tmt16`, `tmt18`, `itraq4`, `itraq8`. Writes `<stem>.tmt.tsv` (§3f). |
-| `--tmt-level` | `2\|3` | `2` | Reporter scan: the identified MS2, or the SPS-MS3 whose precursor references it (mzML `<precursor spectrumRef>`, Thermo master scan). |
-| `--tmt-tol` | tolerance | `20ppm` high-res / `0.3da` ion trap | Most intense centroid within this window of each reporter m/z. |
+| `--tmt-level` | `2\|3` | `2` | Reporter scan: the identified MS2, or the SPS-MS3 whose precursor references it (mzML `<precursor spectrumRef>`, `.raw` `Master Scan Number` trailer). |
+| `--tmt-tol` | tolerance | `20ppm` for high-res MS2 and for `--tmt-level 3`; `0.3da` for ion-trap MS2 | Most intense centroid within this window of each reporter m/z. A window that reaches half the spacing of the kit's closest channels (6.3 mDa for the TMT 10/11/16/18-plex N/C pairs) is refused, so ion-trap MS2 cannot quantify those kits at `--tmt-level 2`. |
 | `--tmt-correction` | path | *(none)* | Isotope impurity sheet of the kit lot (§10); corrected intensities by NNLS, raw kept alongside. |
 | `--tmt-min-purity` | 0..1 | `0` | Drop PSMs below this precursor isolation purity from `tmt.tsv` (they stay in the parquet). |
-| `--lfq` | flag | off | Label-free MS1 quantification of the confident precursors (§10). Writes `<stem>.lfq.tsv` and `<stem>.lfq_features.tsv`. mzML / `.raw`, high-resolution MS1. |
+| `--lfq` | flag | off | Label-free MS1 quantification of the confident precursors (§10). Writes `<stem>.lfq.tsv` and `<stem>.lfq_features.tsv`. mzML / `.raw` with high-resolution MS1; the MS2 may be ion-trap. |
 | `--lfq-tol` | tolerance | `10ppm` | MS1 tolerance of the isotope chromatograms. |
 | `--lfq-rt-window` | seconds | `60` | Half-window around the identifying PSM's retention time. |
-| `--lfq-min-cosine` | 0..1 | `0.7` | Isotope-envelope cosine below which a feature is flagged. |
+| `--lfq-min-cosine` | 0..1 | `0.7` | Isotope-envelope cosine below which a feature is left out of `lfq.tsv` (it stays in `lfq_features.tsv` and the parquet). |
 | `--lfq-feature-fdr` | 0..1 | `0.05` | Feature FDR for `lfq.tsv` from the target/decoy competition of each feature against its +11 Th twin. |
 | `--quant-fdr` | 0..1 | `--fdr` | PSM q-value cut for quantification targets when `--rescore`/`--rescore-native` ran. |
 
@@ -425,7 +425,7 @@ Written next to the PIN (or next to `--output-tsv`/`--output-parquet` under `--r
 | File | Rows | Columns |
 |---|---|---|
 | `<stem>.tmt.tsv` | one per quantified PSM | `filename scannr spec_id quant_scan quant_ms_level rt peptide charge proteins is_decoy psm_q_value psm_pep purity`, then one `tmt_<channel>` (or `itraq_<channel>`) per channel, then `raw_<...>` when a correction matrix was applied |
-| `<stem>.lfq.tsv` | one per (peptidoform, charge) at feature q ≤ `--lfq-feature-fdr` | `peptide charge proteins feature_q_value score cosine`, then the integrated area per input file |
+| `<stem>.lfq.tsv` | one per (peptidoform, charge) at feature q ≤ `--lfq-feature-fdr` and cosine ≥ `--lfq-min-cosine` | `peptide charge proteins feature_q_value score cosine`, then the integrated area per input file |
 | `<stem>.lfq_features.tsv` | one per feature per run (all, with their q-value) | apex RT, boundaries, scan count, area, apex height, per-isotope areas, cosine, score, decoy score, feature q-value |
 | `<dir>/quantms.feature.parquet` | one per feature (LFQ) or quantified PSM (isobaric) | the QPX feature view (`intensities` as `[{label, intensity}]` with `LFQ` or `TMT126`-style labels; `additional_intensities` with the raw/apex/isotope values; purity, cosine, q-values in `additional_scores`; `psm_ids` pointing at `psms.parquet` rows) |
 
@@ -666,8 +666,10 @@ downstream (a warning says so).
 * **Extraction.** For each quantified spectrum, the most intense centroid within `--tmt-tol` of
   each reporter m/z of the kit (OpenMS's channel tables: TMT 6/10/11/16/18-plex, iTRAQ 4/8-plex);
   0 when absent. `--tmt-level 2` reads the identified MS2; `--tmt-level 3` reads the MS3 whose
-  `<precursor spectrumRef>` (mzML) or master scan (`.raw`) is that MS2 — the MS3 scans are kept
-  by the reader for this and are never searched.
+  `<precursor spectrumRef>` (mzML) or `Master Scan Number` trailer (`.raw`) is that MS2 — the MS3
+  scans are kept by the reader for this and are never searched. The default `--tmt-tol` follows
+  the reporter scan: SPS-MS3 reporters are read in the Orbitrap even when the MS2 is an ion-trap
+  scan, so `--tmt-level 3` defaults to 20 ppm.
 * **Impurity correction** (`--tmt-correction <file>`). The kit lot sheet in the OpenMS text form,
   one line per channel in kit order, `-2/-1/+1/+2` percentages separated by `/` (eight columns
   `-2C13/-N15-C13/-C13/-N15/+N15/+C13/+N15+C13/+2C13` for TMTpro), optional `<channel>:` prefix,
@@ -677,9 +679,14 @@ downstream (a warning says so).
   correction (Sage's behavior). The raw values are always kept (`raw_` columns, parquet
   `additional_intensities`).
 * **Precursor purity.** The share of the MS1 isolation window's ion current that belongs to the
-  precursor's isotope envelope, from the survey scan preceding the MS2 (10 ppm isotope ladder,
-  the OpenMS `PrecursorPurity` rule). Reported per PSM; `--tmt-min-purity` filters `tmt.tsv`.
-  Needs the isolation window offsets in the file.
+  precursor's isotope envelope, from the survey scan preceding the MS2: the most intense peak
+  within 10 ppm of the precursor m/z anchors a ¹³C isotope ladder (10 ppm per step, both
+  directions) inside the strict isolation window. This is the ladder of OpenMS's
+  `IsobaricChannelExtractor` without its fuzzy window border and next-scan interpolation, and
+  with ¹³C spacing and a two-sided nearest-peak match (OpenMS steps by the neutron mass and
+  misses the upper isotopes, OpenMS/OpenMS#10467). Reported per PSM; `--tmt-min-purity`
+  filters `tmt.tsv`. Needs the isolation window offsets in the file, and is not computed under
+  `--chimeric`.
 * **Not done here:** reference-channel ratios, channel normalization, protein aggregation.
 
 ```bash
@@ -694,14 +701,20 @@ andes --spectrum tmt_run.mzML --database human.fasta --mods tmt10_mods.txt \
   time as the anchor; the theoretical isotope envelope comes from the peptide's elemental formula
   (standard residues exact; modification deltas as averagine atoms).
 * **Extraction.** The first four isotope chromatograms at `--lfq-tol` over ± `--lfq-rt-window`
-  around the anchor, from every MS1 scan of the run (captured by the reader; ~12 bytes per
-  centroid). The monoisotopic trace is smoothed (5-point Savitzky–Golay); the peak that contains
-  the anchor is climbed to its apex and extended to the first valley or 2 % of the apex (one
-  missing scan tolerated); every isotope is integrated (trapezoid, intensity·seconds) over the
-  same boundaries. Intensity = summed isotope areas; the apex height and per-isotope areas are
-  reported too.
-* **Envelope check.** Cosine between the per-isotope areas and the theoretical envelope
-  (`--lfq-min-cosine` flags, does not drop).
+  around the anchor, from every MS1 scan of the run (captured by the reader; 16 bytes per
+  centroid, held for every input file until quantification). The monoisotopic trace is smoothed
+  (5-point Savitzky–Golay); the peak that contains the anchor is climbed to its apex, and each
+  boundary is placed two half-widths at half maximum from the apex (±2.35 σ of a Gaussian, 98 %
+  of its area) or at an earlier deep valley (the trace fell below half the apex and rose 1.5x
+  again). Every isotope is integrated (trapezoid, intensity·seconds) over the same boundaries.
+  Intensity = summed isotope areas; the apex height and per-isotope areas are reported too.
+* **Envelope check.** Cosine between the per-isotope areas and the theoretical envelope;
+  `lfq.tsv` leaves out features below `--lfq-min-cosine`. A feature whose monoisotopic area holds
+  less than 30 % of its theoretical share is not reported at all: its M+1.. traces belong to an
+  isotope-shifted species (a deamidated form, say), not to the target.
+* **Resolution check.** Each run's MS1 scans are tested once: Orbitrap/TOF survey scans give 70–95 %
+  of their most intense centroids an isotope partner within 10 ppm. A run far below that is
+  reported as low-resolution in a warning; label-free areas from it are not meaningful.
 * **Feature q-value.** Each target also gets a decoy twin extracted 11 Th above it (no peptide
   elutes there with that envelope); the score `cosine³ · (1 − |Δrt|/window)^⅓ · √(apex/max apex)`
   (Sage's hybrid rule) enters a picked target/decoy competition per run, and the running
@@ -721,8 +734,9 @@ andes --spectrum run1.mzML --spectrum run2.mzML --database human.fasta \
 
 `--lfq` and `--tmt-level 3` need mzML or Thermo `.raw` (MS1 / MS3 scans; MGF carries MS2 only
 and Bruker `.d` MS1 frames are not read yet) and cannot be combined with `--chimeric`;
-`--tmt <plex>` at MS2 works with every input and with `--chimeric`. Purity is unavailable
-without MS1 scans or isolation offsets. Neither module runs in `--glyco` mode.
+`--tmt <plex>` at MS2 works with every input and with `--chimeric`, without precursor purity
+there (`--tmt-min-purity` is refused). Purity is unavailable without MS1 scans or isolation
+offsets. Neither module runs in `--glyco` mode.
 
 ---
 

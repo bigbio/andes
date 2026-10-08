@@ -231,11 +231,28 @@ the curated 52-column glyco PIN (neutral; its flag has since been removed) did n
 andes either enumerates every candidate in each precursor window and scores them all, or takes
 a shortlist of the 100 candidates whose singly-charged b/y ions best match the spectrum (at
 least 3 matched) from a fragment-ion index. Since #112 the index is the default on high-res
-data; low-res data, `--chimeric`, `--refine` and `--glyco` keep enumeration.
+data. Low-res data stays in RAM while the candidate index fits; `--refine` and `--glyco` keep
+enumeration.
 
-**Low-res data must not use the index.** Forcing it (same binary, 8 threads, seed 42, 2026-09):
-TMT a05058 12,281 → 3,613 PSMs at 1%, UPS1 15,838 → 10,312. At 0.5 Da the bins do not
-discriminate.
+**On low-res data only the most intense peaks may vote.** With every peak voting, 0.5 Da bins let
+noise swamp the count: forcing the index (2026-09) took TMT a05058 from 12,281 to 3,613 PSMs at 1%
+and UPS1 from 15,838 to 10,312. Letting only the N most intense peaks vote fixes it. Out-of-core,
+8 threads, Percolator seeds 42/1/2 (2026-10-08):
+
+| Low-res retrieval | TMT PSMs at 1% | TMT peptides | TMT CPU | TMT RSS | UPS1 PSMs at true FDP ≤ 1% |
+|---|---|---|---|---|---|
+| In-RAM enumeration | 12,264–12,342 | 10,393–10,450 | 168 s | 5.9 GB | 7,998–8,281 |
+| Out-of-core enumeration | 12,208–12,282 | 10,335–10,390 | 5,404 s | 7.0 GB | 7,998–8,281 |
+| Index, every peak votes | 4,368–4,459 | 3,680–3,750 | 322 s | 1.7 GB | 6,752–7,013 |
+| Index, top 50 peaks | 12,255–12,285 | 10,384–10,408 | 269 s | 1.7 GB | 7,709–7,964 |
+| Index, top 100 peaks | 12,169–12,276 | 10,300–10,390 | 289 s | 1.7 GB | 7,801–7,874 |
+| **Index, top 150 peaks (default)** | 12,329–12,372 | 10,429–10,474 | 283 s | 1.7 GB | 7,760–8,031 |
+
+UPS1 CPU: in-RAM 116 s, out-of-core enumeration 1,792 s, capped index 152–160 s. In RAM stays
+the low-res default because it is the fastest; the capped index replaces out-of-core
+enumeration, which was ~19x slower on TMT for the same identifications. High-res spectra are not
+capped: on Astral, top-150 cost 5% of PSMs and top-50 cost 20% (real fragments in dense spectra
+reach well below the top 150), and on phospho every cap lost 0.8–4.5%.
 
 **On high-res data the index finds more, at the same true error rate.** A September run flagged
 the Astral gain (38,394 → 46,774) as possibly optimistic: decoy wins fell 9.4% against 1.8% for

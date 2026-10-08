@@ -86,9 +86,11 @@ index out-of-core (cached as `andes-candidx-<hash>.bin` in the system temp direc
 on the benchmark databases, reused by later runs on the same database and settings) and retrieves
 the 100 candidates whose singly-charged b/y ions best match each spectrum (at least 3 matched).
 On Astral this gave +22.2% PSMs over full-window enumeration at an equal true FDP of 1.00%; on
-phospho, 164 s against 5,954 s. Low-res data stays on in-RAM enumeration (forcing the index took
-TMT from 12,281 to 3,613 PSMs at 1% and UPS1 from 15,838 to 10,312), as do `--refine` and
-`--glyco`; `--chimeric` runs on either path. The engine prints its choice; `--candidate-index ram` or
+phospho, 164 s against 5,954 s. Low-res data stays on in-RAM enumeration while the candidate index
+fits, because it is faster there. When it does not fit, low-res searches also use the index, but
+only the 150 most intense peaks of each spectrum vote: with every peak voting, the 0.5 Da bins let
+noise swamp the count (TMT 12,281 -> 4,368 PSMs at 1%), while capped the index matches enumeration
+(12,347) at 289 s of CPU against 5,404 s. `--refine` and `--glyco` keep enumeration; `--chimeric` runs on either path. The engine prints its choice; `--candidate-index ram` or
 `--fragment-index off` restore enumeration
 ([measurements](docs/benchmarks/README.md#choosing-the-retrieval-strategy)).
 

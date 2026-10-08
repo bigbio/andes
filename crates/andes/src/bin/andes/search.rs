@@ -62,20 +62,20 @@ fn index_cache_writable(path: &std::path::Path) -> bool {
     ok
 }
 
-/// Pick the out-of-core candidate-retrieval strategy. The fragment-ion index is
-/// selected only where it was MEASURED to win, and the two conditions are not
-/// negotiable by a flag:
+/// Pick the out-of-core candidate-retrieval strategy: the fragment-ion index
+/// whenever the candidate index is out-of-core, because there it was MEASURED to
+/// win at both resolutions:
 ///
-///  1. **The candidate index is out-of-core.** The index is built per slice on
-///     that path; `--candidate-index auto` selects it for high-resolution
-///     fragments so the index is used there.
-///  2. **Fragment matching is high-resolution.** The index bins ions at the
-///     fragment tolerance and ranks candidates by how many peaks vote for them.
-///     At the low-resolution 0.5 Da tolerance those bins are so wide that the
-///     vote does not discriminate: forcing the index on the low-res standard
-///     sets (2026-09-10, 8 threads) took TMT from 12,281 to 3,613 PSMs @1% and
-///     UPS1 from 15,838 to 10,312, while running slower in both cases.
+///  - **High-resolution fragments**: +23% PSMs on Astral at equal entrapment FDP
+///    over per-spectrum enumeration.
+///  - **Low-resolution fragments**: only the most intense peaks vote
+///    (`fragment_index::vote_peaks_for`); with every peak voting, the wide bins
+///    let noise swamp the count (TMT 12,281 -> 4,368 PSMs @1%). Capped, the
+///    index matches enumeration on TMT and UPS1 at ~1/19 and ~1/11 of its CPU
+///    time (TMT 289 s vs 5,404 s).
 ///
+/// The index is not used in RAM: the in-RAM search keeps its own candidate
+/// pruning and is the faster path whenever the candidate index fits.
 /// `--refine` and `--glyco` keep enumeration because they read the full
 /// candidate list rather than a per-spectrum shortlist.
 pub(crate) fn retrieval_choice(
@@ -85,10 +85,6 @@ pub(crate) fn retrieval_choice(
     flag: FragmentIndexFlag,
 ) -> RetrievalChoice {
     use model::tolerance::Tolerance;
-    let high_res = match fragment_tol {
-        Tolerance::Ppm(_) => true,
-        Tolerance::Da(d) => d <= 0.05,
-    };
     let tol_text = match fragment_tol {
         Tolerance::Ppm(v) => format!("{v} ppm"),
         Tolerance::Da(v) => format!("{v} Da"),
@@ -104,30 +100,26 @@ pub(crate) fn retrieval_choice(
             }),
         };
     }
-    if !high_res {
-        return RetrievalChoice {
-            use_index: false,
-            report: Some(format!(
-                "out-of-core index, but low-resolution fragment matching — the fragment-ion \
-                 index is not selective at a {tol_text} tolerance"
-            )),
-            refused_because: (flag == FragmentIndexFlag::On)
-                .then_some("low-resolution fragment matching"),
-        };
-    }
     match flag {
         FragmentIndexFlag::Off => RetrievalChoice {
             use_index: false,
             report: Some("out-of-core index; the fragment-ion index was switched off".to_string()),
             refused_because: None,
         },
-        FragmentIndexFlag::Auto | FragmentIndexFlag::On => RetrievalChoice {
-            use_index: true,
-            report: Some(format!(
-                "out-of-core index, high-resolution fragments at {tol_text}"
-            )),
-            refused_because: None,
-        },
+        FragmentIndexFlag::Auto | FragmentIndexFlag::On => {
+            let report = match search::fragment_index::vote_peaks_for(fragment_tol) {
+                0 => format!("out-of-core index, high-resolution fragments at {tol_text}"),
+                n => format!(
+                    "out-of-core index, low-resolution fragments at {tol_text}; \
+                     the {n} most intense peaks vote"
+                ),
+            };
+            RetrievalChoice {
+                use_index: true,
+                report: Some(report),
+                refused_because: None,
+            }
+        }
     }
 }
 
@@ -752,10 +744,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // mmap is not compatible with the refine / glyco in-RAM passes
             // (handled below); those are not the OOM-prone giant-mod-space case,
             // so `auto` simply keeps them on RAM.
-            let high_res_fragments = match scorer.feature_match_tolerance() {
-                model::tolerance::Tolerance::Ppm(_) => true,
-                model::tolerance::Tolerance::Da(d) => d <= 0.05,
-            };
+            let high_res_fragments =
+                search::fragment_index::is_high_resolution(scorer.feature_match_tolerance());
             if cli.refine || cli.glyco {
                 search::CandidateIndexMode::Ram
             } else if high_res_fragments
@@ -774,7 +764,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 // best candidates by rank score, which on high-res data separates
                 // targets from decoys poorly; retrieval by shared fragments gave +23%
                 // PSMs on Astral at ~1.07% entrapment FDP (1.00% before). Low-res data
-                // stays on RAM: there the index loses identifications.
+                // stays on RAM while it fits: it is faster there than the capped index.
                 eprintln!(
                     "[auto] high-resolution fragments -> out-of-core index with fragment-ion \
                      retrieval (force the in-RAM path with --candidate-index ram)"
@@ -2175,24 +2165,20 @@ mod retrieval_choice_tests {
         assert!(c.report.unwrap().contains("high-resolution"));
     }
 
-    /// The measured reason this guard exists: forcing the index on the low-res
-    /// standard sets took TMT from 12,281 to 3,613 PSMs @1% and UPS1 from
-    /// 15,838 to 10,312, while running slower.
+    /// Low-res out-of-core searches use the index with the vote cap: enumeration
+    /// there took TMT 5,404 s of CPU against 289 s for the capped index, at the
+    /// same PSMs.
     #[test]
-    fn out_of_core_low_res_keeps_enumeration() {
+    fn out_of_core_low_res_uses_the_capped_index() {
         let c = retrieval_choice(true, LO, false, FragmentIndexFlag::Auto);
-        assert!(
-            !c.use_index,
-            "the index must never be selected at a 0.5 Da tolerance"
-        );
-        assert!(c.report.unwrap().contains("low-resolution"));
+        assert!(c.use_index);
+        assert!(c.report.unwrap().contains("most intense peaks vote"));
     }
 
     #[test]
-    fn forcing_it_on_low_res_is_refused_not_obeyed() {
-        let c = retrieval_choice(true, LO, false, FragmentIndexFlag::On);
+    fn off_is_honoured_on_low_res() {
+        let c = retrieval_choice(true, LO, false, FragmentIndexFlag::Off);
         assert!(!c.use_index);
-        assert_eq!(c.refused_because, Some("low-resolution fragment matching"));
     }
 
     #[test]
@@ -2217,15 +2203,13 @@ mod retrieval_choice_tests {
         assert!(c.report.unwrap().contains("switched off"));
     }
 
-    /// A tolerance tight enough to bin usefully still counts as high-resolution
-    /// even when it is expressed in Da.
+    /// A tolerance tight enough to bin usefully counts as high-resolution (no
+    /// vote cap) even when it is expressed in Da.
     #[test]
     fn a_tight_dalton_tolerance_counts_as_high_resolution() {
-        assert!(
-            retrieval_choice(true, Tolerance::Da(0.02), false, FragmentIndexFlag::Auto).use_index
-        );
-        assert!(
-            !retrieval_choice(true, Tolerance::Da(0.2), false, FragmentIndexFlag::Auto).use_index
-        );
+        let tight = retrieval_choice(true, Tolerance::Da(0.02), false, FragmentIndexFlag::Auto);
+        assert!(tight.report.unwrap().contains("high-resolution"));
+        let wide = retrieval_choice(true, Tolerance::Da(0.2), false, FragmentIndexFlag::Auto);
+        assert!(wide.report.unwrap().contains("low-resolution"));
     }
 }

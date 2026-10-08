@@ -267,7 +267,7 @@ impl ChunkFragmentIndex {
     /// `fragment_tol` of a peak (ppm tolerances are evaluated per peak),
     /// restricted to the spectrum's precursor windows over every charge in
     /// `charges` and every isotope offset in `params`. At most `top_k`, best
-    /// votes first.
+    /// votes first. Only the `vote_peaks` most intense peaks vote (0 = every peak).
     #[allow(clippy::too_many_arguments)]
     pub fn query(
         &self,
@@ -277,6 +277,7 @@ impl ChunkFragmentIndex {
         fragment_tol: Tolerance,
         top_k: usize,
         min_matched: u16,
+        vote_peaks: usize,
     ) -> Vec<(u32, u16)> {
         // One over-inclusive precursor mass interval; the scoring loop applies
         // the exact per-offset test afterwards.
@@ -318,7 +319,11 @@ impl ChunkFragmentIndex {
                 counts.resize(width, (0, 0.0));
             }
             touched.clear();
+            let floor = vote_intensity_floor(&spec.peaks, vote_peaks);
             for &(mz, intensity) in &spec.peaks {
+                if intensity < floor {
+                    continue;
+                }
                 let tol_da = fragment_tol.as_da(mz);
                 let b = (mz / self.bin_width) as usize;
                 for bb in b.saturating_sub(1)..=(b + 1).min(n_bins - 1) {
@@ -392,6 +397,43 @@ impl ChunkFragmentIndex {
     }
 }
 
+/// Whether a fragment tolerance is tight enough for the index to bin usefully.
+pub fn is_high_resolution(fragment_tol: Tolerance) -> bool {
+    match fragment_tol {
+        Tolerance::Ppm(_) => true,
+        Tolerance::Da(d) => d <= 0.05,
+    }
+}
+
+/// How many of a spectrum's most intense peaks vote in `query` (0 = every peak).
+///
+/// At a low-resolution tolerance a bin spans most of a Dalton, so every noise
+/// peak lands on some form's ion; with all peaks voting the noise swamps the
+/// count and the index loses most identifications. Letting only the
+/// `LOWRES_VOTE_PEAKS` most intense peaks vote restores them. High-resolution
+/// spectra are not capped: on dense Astral spectra the real fragments reach
+/// well below the top 150 peaks, and a cap there costs identifications.
+pub fn vote_peaks_for(fragment_tol: Tolerance) -> usize {
+    if is_high_resolution(fragment_tol) {
+        0
+    } else {
+        crate::search_params::FRAGMENT_INDEX_LOWRES_VOTE_PEAKS
+    }
+}
+
+/// The intensity a peak needs to be among the `vote_peaks` most intense
+/// (0.0, letting every peak vote, when `vote_peaks` is 0 or covers them all).
+/// Peaks tied at the cut all vote, so the result does not depend on peak order.
+pub(crate) fn vote_intensity_floor(peaks: &[(f64, f32)], vote_peaks: usize) -> f32 {
+    if vote_peaks == 0 || peaks.len() <= vote_peaks {
+        return 0.0;
+    }
+    let mut intensities: Vec<f32> = peaks.iter().map(|p| p.1).collect();
+    let (_, nth, _) =
+        intensities.select_nth_unstable_by(vote_peaks - 1, |a, b| b.total_cmp(a));
+    *nth
+}
+
 /// Order `(form_id, votes, matched_intensity)` and keep the best `top_k`.
 ///
 /// Vote counts are small integers over a candidate set that can run to thousands,
@@ -449,5 +491,48 @@ mod select_top_k_tests {
         select_top_k(&mut a, 2);
         select_top_k(&mut b, 2);
         assert_eq!(a, b, "input order must not survive into the selection");
+    }
+}
+
+#[cfg(test)]
+mod vote_peaks_tests {
+    use super::{vote_intensity_floor, vote_peaks_for};
+    use model::tolerance::Tolerance;
+
+    #[test]
+    fn high_resolution_is_never_capped() {
+        assert_eq!(vote_peaks_for(Tolerance::Ppm(20.0)), 0);
+        assert_eq!(vote_peaks_for(Tolerance::Da(0.02)), 0);
+    }
+
+    #[test]
+    fn low_resolution_is_capped() {
+        assert_eq!(
+            vote_peaks_for(Tolerance::Da(0.5)),
+            crate::search_params::FRAGMENT_INDEX_LOWRES_VOTE_PEAKS
+        );
+    }
+
+    #[test]
+    fn floor_admits_exactly_the_most_intense_peaks() {
+        let peaks = vec![(100.0, 5.0), (200.0, 1.0), (300.0, 9.0), (400.0, 3.0)];
+        let floor = vote_intensity_floor(&peaks, 2);
+        let voting: Vec<f64> = peaks.iter().filter(|p| p.1 >= floor).map(|p| p.0).collect();
+        assert_eq!(voting, vec![100.0, 300.0]);
+    }
+
+    #[test]
+    fn no_cap_or_a_cap_above_the_peak_count_lets_every_peak_vote() {
+        let peaks = vec![(100.0, 5.0), (200.0, 1.0)];
+        assert_eq!(vote_intensity_floor(&peaks, 0), 0.0);
+        assert_eq!(vote_intensity_floor(&peaks, 2), 0.0);
+        assert_eq!(vote_intensity_floor(&peaks, 10), 0.0);
+    }
+
+    #[test]
+    fn peaks_tied_at_the_cut_all_vote() {
+        let peaks = vec![(100.0, 4.0), (200.0, 2.0), (300.0, 2.0), (400.0, 1.0)];
+        let floor = vote_intensity_floor(&peaks, 2);
+        assert_eq!(peaks.iter().filter(|p| p.1 >= floor).count(), 3);
     }
 }

@@ -79,7 +79,8 @@ flowchart TD
 2. **Build candidates**: digest the FASTA and generate decoys. On high-res data the candidate
    index goes out-of-core (cached in the system temp directory) so candidates can be retrieved by
    the fragment-ion index; on low-res data it stays in RAM unless it would not fit the container
-   or scheduler memory limit.
+   or scheduler memory limit, in which case the index is used with only the 150 most intense
+   peaks voting.
 3. **Score**: low-res by the generating-function rank score, high-res by the fused strong
    score, plus GBDT fragment-intensity features. High-res searches score only the 100 candidates
    whose fragment ions best match the spectrum (Astral: +22% PSMs at an equal true FDP; phospho:

@@ -267,6 +267,40 @@ impl ThermoRawReader {
     }
 }
 
+/// The 1-based `Master Scan Number` trailer of the scan at `index`: the scan an
+/// MSn (n ≥ 3) scan was triggered from. `None` when the file carries no such
+/// trailer or its value is not a positive scan number.
+fn master_scan_number(handle: &RawFileReader, index: usize) -> Option<usize> {
+    let trailers = handle.get_raw_trailers_for(index)?;
+    let value = trailers
+        .iter()
+        .find_map(|t| is_master_scan_label(t.label).then(|| t.value.trim().to_string()))?;
+    value.parse::<usize>().ok().filter(|&scan| scan > 0)
+}
+
+/// Trailer labels come as `Master Scan Number` or `Master Scan Number:`
+/// depending on the instrument software.
+fn is_master_scan_label(label: &str) -> bool {
+    label
+        .trim()
+        .trim_end_matches(':')
+        .trim()
+        .eq_ignore_ascii_case("Master Scan Number")
+}
+
+/// The native id of scan `scan` in the same file as `native_id`
+/// (`controllerType=0 controllerNumber=1 scan=N` with N replaced).
+fn with_scan_number(native_id: &str, scan: usize) -> String {
+    match native_id.rfind("scan=") {
+        Some(pos) => {
+            let rest = &native_id[pos + "scan=".len()..];
+            let digits = rest.chars().take_while(char::is_ascii_digit).count();
+            format!("{}scan={scan}{}", &native_id[..pos], &rest[digits..])
+        }
+        None => format!("controllerType=0 controllerNumber=1 scan={scan}"),
+    }
+}
+
 /// Extract centroided peaks `(m/z, intensity)` from a raw spectrum, ascending
 /// by m/z. The FlatBuffers vectors yield owned scalars, so no `.copied()`.
 ///
@@ -450,16 +484,14 @@ impl Iterator for ThermoRawReader {
                 });
             }
             if level >= 3 && self.capture_product_scans {
-                let parent_id = raw.precursor().and_then(|p| {
-                    let idx = p.parent_index();
-                    if idx >= 0 {
-                        self.handle
-                            .get(idx as usize)
-                            .map(|parent| parent.native_id())
-                    } else {
-                        None
-                    }
-                });
+                // The MS2 an SPS-MS3 belongs to is the scan's `Master Scan
+                // Number` trailer. The precursor's `parent_index` is not: on a
+                // Lumos SPS-MS3 run it matched the master scan for 15% of the
+                // MS3 scans and otherwise named the MS3 itself or whichever MS2
+                // came last, which hands one peptide's reporter ions to
+                // another. Without the trailer the scan stays unlinked.
+                let parent_id = master_scan_number(&self.handle, i)
+                    .map(|scan| with_scan_number(&raw.native_id(), scan));
                 self.product_scans.push(ProductScan {
                     id: raw.native_id(),
                     scan: Some(raw.index() as i32 + 1),
@@ -489,6 +521,18 @@ impl Iterator for ThermoRawReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn master_scan_links_to_the_native_id_of_that_scan() {
+        assert_eq!(
+            with_scan_number("controllerType=0 controllerNumber=1 scan=4780", 4773),
+            "controllerType=0 controllerNumber=1 scan=4773"
+        );
+        assert_eq!(with_scan_number("scan=12", 3), "scan=3");
+        assert!(is_master_scan_label("Master Scan Number"));
+        assert!(is_master_scan_label("Master Scan Number:"));
+        assert!(!is_master_scan_label("Master Index"));
+    }
 
     #[test]
     fn sanitize_thermo_peaks_filters_and_sorts() {

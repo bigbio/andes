@@ -90,7 +90,7 @@ phospho, 164 s against 5,954 s. Low-res data stays on in-RAM enumeration while t
 fits, because it is faster there. When it does not fit, low-res searches also use the index, but
 only the 150 most intense peaks of each spectrum vote: with every peak voting, the 0.5 Da bins let
 noise swamp the count (TMT 12,281 -> 4,368 PSMs at 1%), while capped the index matches enumeration
-(12,347) at 289 s of CPU against 5,404 s. `--refine` and `--glyco` keep enumeration; `--chimeric` runs on either path. The engine prints its choice; `--candidate-index ram` or
+(12,347) at 289 s of CPU against 5,404 s. `--glyco` keeps enumeration; `--chimeric` and `--refine` run on either path. The engine prints its choice; `--candidate-index ram` or
 `--fragment-index off` restore enumeration
 ([measurements](docs/benchmarks/README.md#choosing-the-retrieval-strategy)).
 

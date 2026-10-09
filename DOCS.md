@@ -189,6 +189,7 @@ See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model)
 | `--lfq` | flag | off | Label-free MS1 quantification of the confident precursors (§10). Writes `<stem>.lfq.tsv` and `<stem>.lfq_features.tsv`. mzML / `.raw` with high-resolution MS1; the MS2 may be ion-trap. |
 | `--lfq-tol` | tolerance | `10ppm` | MS1 tolerance of the isotope chromatograms. |
 | `--lfq-rt-window` | seconds | `60` | Half-window around the identifying PSM's retention time. |
+| `--lfq-gaussian-width` | seconds | *(none)* | Experimental Gaussian smoothing width (eight sigma) for peak detection; areas use raw traces. Validate feature-q coverage for the acquisition. Default detection uses five-scan Savitzky–Golay. |
 | `--lfq-min-cosine` | 0..1 | `0.7` | Minimum isotope-envelope cosine for both target and decoy eligibility before feature competition. All target features remain in `lfq_features.tsv` and the parquet. |
 | `--lfq-feature-fdr` | 0..1 | `0.05` | Feature FDR for `lfq.tsv` from the target/decoy competition of each feature against its +11 Th twin. |
 | `--quant-fdr` | 0..1 | `--fdr` | PSM q-value cut for quantification targets when `--rescore`/`--rescore-native` ran. |
@@ -711,7 +712,15 @@ andes --spectrum tmt_run.mzML --database human.fasta --mods tmt10_mods.txt \
 * **Extraction.** The first four isotope chromatograms at `--lfq-tol` over ± `--lfq-rt-window`
   around the anchor, from every MS1 scan of the run (16 bytes per centroid in memory;
   cached to temporary storage between search and quantification). The monoisotopic trace is smoothed
-  (5-point Savitzky–Golay); the peak that contains the anchor is climbed to its apex, and each
+  (5-point Savitzky–Golay by default). `--lfq-gaussian-width <seconds>` instead uses an
+  RT-weighted Gaussian kernel (width = eight sigma, finite support ± four sigma), following
+  the OpenMS width convention. This optional setting can reduce premature boundaries in noisy
+  traces; choose it for the chromatography and validate accuracy and coverage on held-out runs.
+  It also changes the feature-score distribution: a width that improves dilution ratios on
+  one acquisition can sharply reduce acceptance at the same feature-q cutoff on another.
+  Audit both diagnostic features and accepted features; this is an experimental opt-in setting.
+  Both targets and decoys use the same smoothing; integrated intensities always come from raw
+  traces. The peak that contains the anchor is climbed to its apex, and each
   boundary is placed two half-widths at half maximum from the apex (±2.35 σ of a Gaussian, 98 %
   of its area) or at an earlier deep valley (the trace fell below half the apex and rose 1.5x
   again). Every isotope is integrated (trapezoid, intensity·seconds) over the same boundaries.
@@ -735,6 +744,8 @@ andes --spectrum tmt_run.mzML --database human.fasta --mods tmt10_mods.txt \
   These are decoy-based estimates, not a demonstrated error-rate guarantee: the shifted-decoy
   model still needs calibration on representative negative-control/entrapment datasets.
   PSM identification FDR and quantitative accuracy are separate from this estimate.
+  Feature competition does not replace PSM confidence: an incorrect peptide assignment
+  can still anchor a convincing MS1 trace and survive the feature filter.
 * **Runs.** Each `--spectrum` file is quantified on its own identifications (no transfer of
   identifications between runs yet); `lfq.tsv` is wide over the files.
 * **Not done here:** normalization, MaxLFQ / top-N protein intensities, match between runs.

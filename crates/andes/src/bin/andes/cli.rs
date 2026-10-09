@@ -690,6 +690,12 @@ pub(crate) struct SearchArgs {
     #[arg(long = "lfq-rt-window", default_value = "60", value_parser = parse_positive_tol)]
     pub(crate) lfq_rt_window: f64,
 
+    /// Experimental Gaussian width in seconds (eight sigma) for LFQ peak detection.
+    /// Areas still use raw signal. Omit for five-scan Savitzky–Golay smoothing.
+    /// Validate feature-q coverage for the acquisition before using this setting.
+    #[arg(long = "lfq-gaussian-width", value_parser = parse_positive_tol)]
+    pub(crate) lfq_gaussian_width: Option<f64>,
+
     /// Minimum cosine similarity between the observed and theoretical isotope
     /// envelope for a feature to be reported in `lfq.tsv` (`lfq_features.tsv`
     /// and the parquet keep it with its cosine). Default 0.7.

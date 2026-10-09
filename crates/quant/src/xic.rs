@@ -19,6 +19,52 @@ pub fn savitzky_golay5(x: &[f32]) -> Vec<f32> {
     out
 }
 
+/// Gaussian smoothing in retention-time units. `width_s` spans eight sigma,
+/// following OpenMS's Gaussian-width convention. Trapezoidal sample weights
+/// keep densely sampled intervals from dominating an irregularly sampled XIC.
+/// Only peak detection uses this trace; areas are integrated from raw signal.
+pub fn gaussian_smooth(rt: &[f64], x: &[f32], width_s: f64) -> Vec<f32> {
+    assert_eq!(rt.len(), x.len());
+    if x.len() < 2 || !width_s.is_finite() || width_s <= 0.0 {
+        return x.to_vec();
+    }
+    let sigma = width_s / 8.0;
+    let radius = width_s / 2.0;
+    let weights: Vec<f64> = (0..rt.len())
+        .map(|i| {
+            let left = if i == 0 { rt[i] } else { rt[i - 1] };
+            let right = if i + 1 == rt.len() { rt[i] } else { rt[i + 1] };
+            ((right - left) / 2.0).max(0.0)
+        })
+        .collect();
+    let mut left = 0;
+    let mut right = 0;
+    rt.iter()
+        .enumerate()
+        .map(|(i, &center)| {
+            while left < rt.len() && rt[left] < center - radius {
+                left += 1;
+            }
+            while right < rt.len() && rt[right] <= center + radius {
+                right += 1;
+            }
+            let mut total = 0.0;
+            let mut signal = 0.0;
+            for j in left..right {
+                let d = (rt[j] - center) / sigma;
+                let weight = (-0.5 * d * d).exp() * weights[j];
+                total += weight;
+                signal += weight * x[j] as f64;
+            }
+            if total > 0.0 {
+                (signal / total) as f32
+            } else {
+                x[i]
+            }
+        })
+        .collect()
+}
+
 /// A chromatographic peak on a trace: apex scan and inclusive boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PeakBounds {
@@ -180,6 +226,25 @@ mod tests {
                 (height as f64 * (-0.5 * d * d).exp()) as f32
             })
             .collect()
+    }
+
+    #[test]
+    fn gaussian_smoothing_weights_irregular_samples_in_time() {
+        let rt = [0.0, 0.2, 0.4, 2.0, 4.0, 7.0, 10.0];
+        let flat = gaussian_smooth(&rt, &[5.0; 7], 8.0);
+        assert!(flat.iter().all(|v| (*v - 5.0).abs() < 1e-6));
+        let spike = gaussian_smooth(&rt, &[0.0, 0.0, 0.0, 100.0, 0.0, 0.0, 0.0], 8.0);
+        assert!(spike[3] > spike[2] && spike[3] > spike[4]);
+        assert_eq!(spike[6], 0.0); // Outside the finite kernel support.
+        assert_eq!(gaussian_smooth(&[1.0], &[9.0], 8.0), vec![9.0]);
+        // Densifying only the left side of a linear ramp must not pull the
+        // smoothed center toward that side (unweighted averaging gives 4.35).
+        let rt: Vec<f64> = (0..100)
+            .map(|i| i as f64 * 0.05)
+            .chain((0..=10).map(|i| 5.0 + i as f64 * 0.5))
+            .collect();
+        let ramp: Vec<f32> = rt.iter().map(|&t| t as f32).collect();
+        assert!((gaussian_smooth(&rt, &ramp, 8.0)[100] - 5.0).abs() < 0.02);
     }
 
     #[test]

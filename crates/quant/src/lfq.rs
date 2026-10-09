@@ -12,7 +12,7 @@ use model::mass::ISOTOPE;
 use model::Tolerance;
 
 use crate::ms1_index::Ms1RunIndex;
-use crate::xic::{cosine, find_peak, integrate, savitzky_golay5};
+use crate::xic::{cosine, find_peak, gaussian_smooth, integrate, savitzky_golay5};
 
 /// Extraction settings.
 #[derive(Debug, Clone)]
@@ -21,6 +21,9 @@ pub struct LfqParams {
     pub tol: Tolerance,
     /// Half-width of the RT window around the anchor, seconds.
     pub rt_window_s: f64,
+    /// Optional Gaussian smoothing width in seconds (eight sigma). `None`
+    /// preserves five-scan Savitzky–Golay detection. Raw XICs supply areas.
+    pub gaussian_width_s: Option<f64>,
     /// Isotopes extracted (monoisotopic + n−1).
     pub n_isotopes: usize,
     /// Minimum envelope cosine for target AND decoy eligibility in competition.
@@ -44,6 +47,7 @@ impl Default for LfqParams {
         Self {
             tol: Tolerance::Ppm(10.0),
             rt_window_s: 60.0,
+            gaussian_width_s: None,
             n_isotopes: 4,
             min_cosine: 0.7,
             decoy_mz_shift: 11.0,
@@ -137,7 +141,10 @@ fn quantify_at(
         })
         .collect();
 
-    let smooth = savitzky_golay5(&traces[0]);
+    let smooth = match params.gaussian_width_s {
+        Some(width) => gaussian_smooth(&rt, &traces[0], width),
+        None => savitzky_golay5(&traces[0]),
+    };
     let peak = find_peak(&smooth, anchor, params.max_apex_climb)?;
     // The apex on the smoothed trace may sit on a zero of the raw trace (a
     // missing scan); fall back to the highest raw value inside the bounds.
@@ -278,6 +285,40 @@ mod tests {
         let fq = quantify(&index, &target, &params).unwrap();
         let s = feature_score(&fq, params.rt_window_s, fq.apex_intensity);
         assert!(s > 0.9, "{s}");
+    }
+
+    #[test]
+    fn gaussian_detection_preserves_area_and_treats_twins_identically() {
+        let (real, target) = synthetic_run();
+        let params = LfqParams {
+            gaussian_width_s: Some(60.0),
+            ..LfqParams::default()
+        };
+        let scans = (0..real.len())
+            .map(|i| {
+                let mut peaks = real.peaks(i).to_vec();
+                peaks.extend(
+                    real.peaks(i)
+                        .iter()
+                        .map(|&(mz, intensity)| (mz + params.decoy_mz_shift, intensity)),
+                );
+                Ms1Scan {
+                    rt: real.rt(i),
+                    peaks,
+                }
+            })
+            .collect();
+        let index = Ms1RunIndex::new(scans);
+        let feature = quantify(&index, &target, &params).unwrap();
+        assert_eq!(
+            Some(feature.clone()),
+            quantify_decoy(&index, &target, &params)
+        );
+        // Analytic area is unchanged by detection smoothing: raw Gaussian
+        // height 1e6, sigma 4 s, summed envelope 1.
+        let expected = 1e6 * 4.0 * (2.0 * std::f64::consts::PI).sqrt();
+        assert!((feature.area / expected - 1.0).abs() < 0.01);
+        assert_eq!(feature.apex_rt, 100.0);
     }
 
     #[test]

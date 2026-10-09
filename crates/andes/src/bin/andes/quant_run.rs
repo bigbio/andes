@@ -116,6 +116,7 @@ impl QuantSettings {
         let lfq_params = LfqParams {
             tol: cli.lfq_tol.unwrap_or(Tolerance::Ppm(10.0)),
             rt_window_s: cli.lfq_rt_window,
+            gaussian_width_s: cli.lfq_gaussian_width,
             min_cosine: cli.lfq_min_cosine as f32,
             ..LfqParams::default()
         };
@@ -174,7 +175,7 @@ impl QuantSettings {
         }
         if self.lfq {
             parts.push(format!(
-                "label-free MS1 (tol {}, rt window ±{} s, {} isotopes, min cosine {}, feature FDR {})",
+                "label-free MS1 (tol {}, rt window ±{} s, {} isotopes, min cosine {}, feature FDR {}, smoothing {})",
                 match self.lfq_params.tol {
                     Tolerance::Ppm(v) => format!("{v} ppm"),
                     Tolerance::Da(v) => format!("{v} Da"),
@@ -182,7 +183,11 @@ impl QuantSettings {
                 self.lfq_params.rt_window_s,
                 self.lfq_params.n_isotopes,
                 self.lfq_params.min_cosine,
-                self.feature_fdr
+                self.feature_fdr,
+                match self.lfq_params.gaussian_width_s {
+                    Some(width) => format!("Gaussian {width} s"),
+                    None => "Savitzky–Golay 5 scans".into(),
+                }
             ));
         }
         parts.join("; ")
@@ -882,7 +887,7 @@ pub(crate) fn run_quant(
         output::write_lfq_features_tsv(&feat_path, &all_rows)
             .map_err(|e| format!("write {}: {e}", feat_path.display()))?;
         eprintln!(
-            "quant: wrote {} ({} precursor-charge rows at feature q<={}, cosine>={}) and {} ({} features)",
+            "quant: wrote {} ({} accepted run-level features at feature q<={}, cosine>={}) and {} ({} features)",
             lfq_path.display(),
             confident.len(),
             s.feature_fdr,

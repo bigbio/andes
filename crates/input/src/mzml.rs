@@ -772,7 +772,18 @@ impl<R: BufRead> MzMLReader<R> {
                             }
                         }
                         b"binaryDataArray" if self.state == State::Spectrum => {
-                            self.binary_ctx = Some(BinaryArrayCtx::new());
+                            // The arrays of a spectrum the level filter drops are
+                            // never decoded (MS1 and MS3 scans of an MS2 search).
+                            // `ms level` precedes the binary arrays in mzML.
+                            let dropped = self
+                                .current
+                                .as_ref()
+                                .and_then(|sb| sb.ms_level)
+                                .is_some_and(|level| {
+                                    (level < self.ms_level_min || level > self.ms_level_max)
+                                        && !(self.capture_ms1 && level == 1)
+                                });
+                            self.binary_ctx = (!dropped).then(BinaryArrayCtx::new);
                             self.state = State::BinaryDataArray;
                         }
                         b"binary" if self.state == State::BinaryDataArray => {
@@ -827,7 +838,7 @@ impl<R: BufRead> MzMLReader<R> {
                     }
                 }
 
-                Event::Text(ref e) if self.state == State::Binary => {
+                Event::Text(ref e) if self.state == State::Binary && self.binary_ctx.is_some() => {
                     let chunk = e.unescape()?;
                     if let Some(ctx) = self.binary_ctx.as_mut() {
                         ctx.b64_text.push_str(chunk.as_ref());
@@ -1156,6 +1167,149 @@ impl<R: BufRead> Iterator for MzMLReader<R> {
             }
         }
     }
+}
+
+// ── Parallel whole-file read ────────────────────────────────────────────────
+
+/// Bytes per piece of [`read_spectra_parallel`]. Each worker holds one piece
+/// in memory while it parses it.
+const PARALLEL_PIECE_BYTES: u64 = 16 << 20;
+
+/// Offset of the first `<spectrum` start tag at or after `from`, or `None`
+/// when the rest of the file holds none. A `<spectrum` followed by
+/// whitespace is a start tag: `<spectrumList` is not, and `<` cannot occur
+/// unescaped inside attribute values, text or base64 data.
+fn next_spectrum_start(file: &std::fs::File, from: u64) -> std::io::Result<Option<u64>> {
+    use std::io::{Read, Seek, SeekFrom};
+    const PAT: &[u8] = b"<spectrum";
+    let mut f = file;
+    f.seek(SeekFrom::Start(from))?;
+    let mut block = vec![0u8; 1 << 20];
+    // Bytes carried over from the previous block, so a tag split across two
+    // blocks is still found.
+    let keep = PAT.len();
+    let mut carried = 0usize;
+    let mut block_start = from;
+    loop {
+        let n = f.read(&mut block[carried..])?;
+        let len = carried + n;
+        if n == 0 {
+            return Ok(None);
+        }
+        let hay = &block[..len];
+        let mut i = 0;
+        while i + PAT.len() < len {
+            if &hay[i..i + PAT.len()] == PAT && hay[i + PAT.len()].is_ascii_whitespace() {
+                return Ok(Some(block_start + i as u64));
+            }
+            i += 1;
+        }
+        let tail = keep.min(len);
+        block.copy_within(len - tail..len, 0);
+        block_start += (len - tail) as u64;
+        carried = tail;
+    }
+}
+
+/// The spectra of an uncompressed mzML file with MS level in
+/// `[ms_level_min, ms_level_max]`, parsed by `threads` workers and returned in
+/// file order, together with the errors the parse reported.
+///
+/// The file is cut into pieces at `<spectrum` start tags, so every spectrum
+/// lies whole inside one piece, and each piece is parsed by its own
+/// [`MzMLReader`]; the reader keeps no state across spectra, so the result is
+/// the list one sequential reader yields. The last piece stops at
+/// `</spectrumList`.
+pub fn read_spectra_parallel(
+    path: &std::path::Path,
+    ms_level_min: u32,
+    ms_level_max: u32,
+    threads: usize,
+) -> std::io::Result<(Vec<Spectrum>, Vec<String>)> {
+    read_spectra_in_pieces(path, ms_level_min, ms_level_max, threads, PARALLEL_PIECE_BYTES)
+}
+
+fn read_spectra_in_pieces(
+    path: &std::path::Path,
+    ms_level_min: u32,
+    ms_level_max: u32,
+    threads: usize,
+    piece_bytes: u64,
+) -> std::io::Result<(Vec<Spectrum>, Vec<String>)> {
+    use std::io::{Read, Seek, SeekFrom};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let n_cuts = len / piece_bytes;
+    let mut starts: Vec<u64> = vec![0];
+    for i in 1..=n_cuts {
+        let from = (i * piece_bytes).max(*starts.last().unwrap() + 1);
+        match next_spectrum_start(&file, from)? {
+            Some(off) if off > *starts.last().unwrap() => starts.push(off),
+            Some(_) => {}
+            None => break,
+        }
+    }
+    let n_pieces = starts.len();
+    let bounds: Vec<(u64, u64)> = (0..n_pieces)
+        .map(|i| (starts[i], starts.get(i + 1).copied().unwrap_or(len)))
+        .collect();
+
+    type PieceResult = std::io::Result<(Vec<Spectrum>, Vec<String>)>;
+    let next = AtomicUsize::new(0);
+    let parse_piece = |i: usize| -> PieceResult {
+        let (a, b) = bounds[i];
+        let mut f = std::fs::File::open(path)?;
+        f.seek(SeekFrom::Start(a))?;
+        let mut bytes = Vec::with_capacity((b - a) as usize);
+        f.take(b - a).read_to_end(&mut bytes)?;
+        if i + 1 == n_pieces {
+            const END: &[u8] = b"</spectrumList";
+            if let Some(p) = bytes.windows(END.len()).position(|w| w == END) {
+                bytes.truncate(p);
+            }
+        }
+        let reader = MzMLReader::new(bytes.as_slice()).with_ms_level_range(ms_level_min, ms_level_max);
+        let mut spectra = Vec::new();
+        let mut errors = Vec::new();
+        for r in reader {
+            match r {
+                Ok(s) => spectra.push(s),
+                Err(e) => errors.push(e.to_string()),
+            }
+        }
+        Ok((spectra, errors))
+    };
+    let mut results: Vec<(usize, PieceResult)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads.clamp(1, n_pieces))
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut out = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        if i >= n_pieces {
+                            break;
+                        }
+                        out.push((i, parse_piece(i)));
+                    }
+                    out
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|w| w.join().expect("mzML parse worker panicked"))
+            .collect()
+    });
+    results.sort_by_key(|(i, _)| *i);
+    let mut spectra = Vec::new();
+    let mut errors = Vec::new();
+    for (_, r) in results {
+        let (s, e) = r?;
+        spectra.extend(s);
+        errors.extend(e);
+    }
+    Ok((spectra, errors))
 }
 
 // ── Instrument-type detection (separate, lightweight pass) ──────────────────
@@ -3259,5 +3413,64 @@ mod tests {
             reader.skipped_count() >= 1,
             "tolerant mode records the dropped scan"
         );
+    }
+
+    /// One spectrum's fields, for comparing two reads of the same file.
+    fn spectrum_fingerprint(s: &Spectrum) -> String {
+        format!(
+            "{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            s.title,
+            s.precursor_mz.to_bits(),
+            s.precursor_charge,
+            s.rt_seconds.map(f64::to_bits),
+            s.scan,
+            s.activation_method,
+            s.isolation_lower_offset.map(f64::to_bits),
+            s.isolation_upper_offset.map(f64::to_bits),
+            s.precursor_intensity.map(f32::to_bits),
+            s.peaks
+                .iter()
+                .map(|p| (p.0.to_bits(), p.1.to_bits()))
+                .collect::<Vec<_>>()
+        )
+    }
+
+    #[test]
+    fn parallel_read_matches_the_sequential_reader() {
+        use std::io::Read;
+        let gz = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../test-fixtures/orbitrap_lumos_120.mzML.gz");
+        let mut xml = Vec::new();
+        flate2::read::GzDecoder::new(std::fs::File::open(&gz).expect("open fixture"))
+            .read_to_end(&mut xml)
+            .expect("decompress fixture");
+        let path = std::env::temp_dir().join(format!(
+            "andes-parallel-mzml-{}.mzML",
+            std::process::id()
+        ));
+        std::fs::write(&path, &xml).expect("write fixture copy");
+        for (min, max) in [(2, 2), (1, 2), (1, 1)] {
+            let sequential: Vec<String> = MzMLReader::new(xml.as_slice())
+                .with_ms_level_range(min, max)
+                .map(|r| spectrum_fingerprint(&r.expect("parse")))
+                .collect();
+            if (min, max) == (2, 2) {
+                assert!(!sequential.is_empty(), "the fixture carries MS2 spectra");
+            }
+            // Piece sizes from smaller than one spectrum up to the whole file.
+            for piece in [1_000u64, 7_919, 65_536, 1 << 30] {
+                for threads in [1, 3] {
+                    let (spectra, errors) =
+                        read_spectra_in_pieces(&path, min, max, threads, piece).expect("read");
+                    assert!(errors.is_empty(), "{errors:?}");
+                    let parallel: Vec<String> = spectra.iter().map(spectrum_fingerprint).collect();
+                    assert_eq!(
+                        parallel, sequential,
+                        "levels {min}-{max}, piece {piece}, {threads} threads"
+                    );
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&path);
     }
 }

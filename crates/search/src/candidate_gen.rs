@@ -438,6 +438,128 @@ pub(crate) fn expand_mod_combinations(
     out
 }
 
+/// Per-search variant tables for [`walk_forms_bounded`]: each residue's
+/// Anywhere variants, and the merged terminal variants
+/// ([`build_terminal_variants`]) for every (residue, first, last, protein
+/// N-term, protein C-term) combination. The walk reads these instead of
+/// building the terminal lists and looking up the interior ones per record.
+pub struct FormWalkTables {
+    anywhere: Vec<Vec<AminoAcid>>,
+    terminal: Vec<Vec<AminoAcid>>,
+}
+
+impl FormWalkTables {
+    pub fn new(params: &SearchParams) -> Self {
+        let anywhere = (0..=255u8)
+            .map(|r| params.aa_set.variants_for(r, ModLocation::Anywhere).to_vec())
+            .collect();
+        let mut terminal = Vec::with_capacity(256 * 16);
+        for r in 0..=255u8 {
+            for key in 0..16u8 {
+                let (first, last, prot_n, prot_c) =
+                    (key & 1 != 0, key & 2 != 0, key & 4 != 0, key & 8 != 0);
+                // `build_terminal_variants` reads its position only through
+                // `pos == 0` and `pos == span_len - 1`.
+                let (pos, span_len) = match (first, last) {
+                    (true, true) => (0, 1),
+                    (true, false) => (0, 2),
+                    (false, true) => (1, 2),
+                    (false, false) => {
+                        terminal.push(Vec::new());
+                        continue;
+                    }
+                };
+                terminal.push(build_terminal_variants(
+                    params, r, pos, span_len, prot_n, prot_c,
+                ));
+            }
+        }
+        Self { anywhere, terminal }
+    }
+
+    #[inline]
+    fn terminal(&self, residue: u8, first: bool, last: bool, prot_n: bool, prot_c: bool) -> &[AminoAcid] {
+        let key = first as usize | (last as usize) << 1 | (prot_n as usize) << 2 | (prot_c as usize) << 3;
+        &self.terminal[residue as usize * 16 + key]
+    }
+}
+
+/// Peptide lengths up to this many residues keep the walk's per-position
+/// buffers on the stack.
+const WALK_INLINE_LEN: usize = 64;
+
+/// Per-position variant lists of one walk.
+type WalkVariants<'t> = smallvec::SmallVec<[&'t [AminoAcid]; WALK_INLINE_LEN]>;
+/// Suffix sums of the per-position minimum or maximum variant mass.
+type WalkRest = smallvec::SmallVec<[f64; WALK_INLINE_LEN]>;
+
+/// The variant list of every position of `span`, and the suffix sums of the
+/// per-position minimum and maximum variant mass; `None` when the span is
+/// empty or a position has no variant.
+fn walk_bounds<'t>(
+    span: &[u8],
+    tables: &'t FormWalkTables,
+    is_protein_n_term: bool,
+    is_protein_c_term: bool,
+) -> Option<(WalkVariants<'t>, WalkRest, WalkRest)> {
+    let n = span.len();
+    if n == 0 {
+        return None;
+    }
+    let position_variants: WalkVariants<'t> = span
+        .iter()
+        .enumerate()
+        .map(|(i, &r)| {
+            if i == 0 {
+                tables.terminal(r, true, n == 1, is_protein_n_term, is_protein_c_term)
+            } else if i == n - 1 {
+                tables.terminal(r, false, true, is_protein_n_term, is_protein_c_term)
+            } else {
+                tables.anywhere[r as usize].as_slice()
+            }
+        })
+        .collect();
+    let mass_of = |aa: &AminoAcid| aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
+    let mut min_rest: WalkRest = smallvec::SmallVec::from_elem(0.0, n + 1);
+    let mut max_rest: WalkRest = smallvec::SmallVec::from_elem(0.0, n + 1);
+    for i in (0..n).rev() {
+        let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+        for v in position_variants[i] {
+            let m = mass_of(v);
+            lo = lo.min(m);
+            hi = hi.max(m);
+        }
+        if position_variants[i].is_empty() {
+            return None;
+        }
+        min_rest[i] = min_rest[i + 1] + lo;
+        max_rest[i] = max_rest[i + 1] + hi;
+    }
+    Some((position_variants, min_rest, max_rest))
+}
+
+/// Whether the bounded walk over `rec` with window `[mass_lo, mass_hi]` can
+/// visit any form: `false` exactly when [`for_each_record_form_masses_bounded`]
+/// would return without visiting one, decided from the same bounds.
+pub fn record_may_have_forms_in(
+    db: &SearchIndex,
+    tables: &FormWalkTables,
+    rec: &crate::candidate_index::IndexRecord,
+    mass_lo: f64,
+    mass_hi: f64,
+) -> bool {
+    use model::mass::H2O;
+    let Some((span, n_term, c_term, _, _)) = record_span(db, rec) else {
+        return false;
+    };
+    match walk_bounds(span, tables, n_term, c_term) {
+        Some((_, min_rest, max_rest)) => {
+            !(min_rest[0] + H2O > mass_hi || max_rest[0] + H2O < mass_lo)
+        }
+        None => false,
+    }
+}
+
 /// Shared bounded walk over the peptidoforms of `span`: the same recursion
 /// and iteration order as [`expand_mod_combinations`], but subtrees whose
 /// neutral mass cannot land in `[mass_lo, mass_hi]` are pruned. Variable
@@ -448,9 +570,11 @@ pub(crate) fn expand_mod_combinations(
 /// forms that survive), the chosen variants, and their masses. Both the
 /// fragment-ion index build and its materialisation use this walk, so `k`
 /// means the same thing on both sides.
+#[allow(clippy::too_many_arguments)]
 fn walk_forms_bounded(
     span: &[u8],
     params: &SearchParams,
+    tables: &FormWalkTables,
     is_protein_n_term: bool,
     is_protein_c_term: bool,
     mass_lo: f64,
@@ -458,65 +582,26 @@ fn walk_forms_bounded(
     mut visit: impl FnMut(usize, &[&AminoAcid], &[f64]),
 ) {
     use model::mass::H2O;
-    let n = span.len();
-    if n == 0 {
+    use smallvec::SmallVec;
+    let Some((position_variants, min_rest, max_rest)) =
+        walk_bounds(span, tables, is_protein_n_term, is_protein_c_term)
+    else {
         return;
-    }
-    let pos0_owned: Vec<AminoAcid> =
-        build_terminal_variants(params, span[0], 0, n, is_protein_n_term, is_protein_c_term);
-    let pos_last_owned: Option<Vec<AminoAcid>> = (n > 1).then(|| {
-        build_terminal_variants(
-            params,
-            span[n - 1],
-            n - 1,
-            n,
-            is_protein_n_term,
-            is_protein_c_term,
-        )
-    });
-    let position_variants: Vec<&[AminoAcid]> = span
-        .iter()
-        .enumerate()
-        .map(|(i, &r)| {
-            if i == 0 {
-                pos0_owned.as_slice()
-            } else if i == n - 1 {
-                pos_last_owned.as_ref().unwrap().as_slice()
-            } else {
-                params.aa_set.variants_for(r, ModLocation::Anywhere)
-            }
-        })
-        .collect();
-    let mass_of = |aa: &AminoAcid| aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
-    // Suffix sums of the per-position minimum and maximum variant mass.
-    let mut min_rest = vec![0.0f64; n + 1];
-    let mut max_rest = vec![0.0f64; n + 1];
-    for i in (0..n).rev() {
-        let (mut lo, mut hi) = (f64::MAX, f64::MIN);
-        for v in position_variants[i] {
-            let m = mass_of(v);
-            lo = lo.min(m);
-            hi = hi.max(m);
-        }
-        if position_variants[i].is_empty() {
-            return;
-        }
-        min_rest[i] = min_rest[i + 1] + lo;
-        max_rest[i] = max_rest[i + 1] + hi;
-    }
+    };
     if min_rest[0] + H2O > mass_hi || max_rest[0] + H2O < mass_lo {
         return;
     }
-    let mut masses: Vec<f64> = Vec::with_capacity(n);
-    let mut chosen: Vec<&AminoAcid> = Vec::with_capacity(n);
+    let n = span.len();
+    let mut masses: SmallVec<[f64; WALK_INLINE_LEN]> = SmallVec::with_capacity(n);
+    let mut chosen: SmallVec<[&AminoAcid; WALK_INLINE_LEN]> = SmallVec::with_capacity(n);
     let mut k = 0usize;
     #[allow(clippy::too_many_arguments)]
     fn rec<'a>(
         pv: &[&'a [AminoAcid]],
         pos: usize,
         sum: f64,
-        masses: &mut Vec<f64>,
-        chosen: &mut Vec<&'a AminoAcid>,
+        masses: &mut SmallVec<[f64; WALK_INLINE_LEN]>,
+        chosen: &mut SmallVec<[&'a AminoAcid; WALK_INLINE_LEN]>,
         mods_used: u32,
         max_mods: u32,
         min_rest: &[f64],
@@ -620,6 +705,7 @@ fn record_span<'a>(
 pub fn for_each_record_form_masses_bounded(
     db: &SearchIndex,
     params: &SearchParams,
+    tables: &FormWalkTables,
     rec: &crate::candidate_index::IndexRecord,
     mass_lo: f64,
     mass_hi: f64,
@@ -631,6 +717,7 @@ pub fn for_each_record_form_masses_bounded(
     walk_forms_bounded(
         span,
         params,
+        tables,
         n_term,
         c_term,
         mass_lo,
@@ -640,30 +727,40 @@ pub fn for_each_record_form_masses_bounded(
 }
 
 /// The peptidoforms of one index record whose neutral mass lies in
-/// `[mass_lo, mass_hi]`, materialised as candidates, in the SAME pruned order
-/// as [`for_each_record_form_masses_bounded`] visits them (so index `k` on one
-/// side selects the same form on the other).
+/// `[mass_lo, mass_hi]` and whose pruned index (the `k`
+/// [`for_each_record_form_masses_bounded`] reports) is in `ks`, materialised
+/// as candidates in ascending `k` order. `ks` must be sorted ascending;
+/// indices past the record's last in-window form are ignored.
+#[allow(clippy::too_many_arguments)]
 pub fn expand_base_record_bounded(
     db: &SearchIndex,
     params: &SearchParams,
+    tables: &FormWalkTables,
     rec: &crate::candidate_index::IndexRecord,
     mass_lo: f64,
     mass_hi: f64,
+    ks: &[u32],
 ) -> Vec<Candidate> {
     use crate::candidate_index::flags;
     let Some((span, n_term, c_term, pre, post)) = record_span(db, rec) else {
         return Vec::new();
     };
     let is_decoy = rec.flags & flags::IS_DECOY != 0;
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(ks.len());
+    let mut next = 0usize;
     walk_forms_bounded(
         span,
         params,
+        tables,
         n_term,
         c_term,
         mass_lo,
         mass_hi,
-        |_, chosen, _| {
+        |k, chosen, _| {
+            if next >= ks.len() || ks[next] as usize != k {
+                return;
+            }
+            next += 1;
             let residues: Vec<AminoAcid> = chosen.iter().map(|aa| (*aa).clone()).collect();
             out.push(Candidate {
                 peptide: Peptide::new(residues, pre, post),
@@ -1176,6 +1273,64 @@ pub fn base_records_for_nominal_window(
 
     let mut out: Vec<(IndexRecord, u32)> = records.into_values().collect();
     out.sort_unstable_by_key(|(r, _)| base_record_key(r));
+    out
+}
+
+/// The distinct base records [`base_records_for_nominal_window`] returns for
+/// `[min_nominal, max_nominal]` (one per [`BaseRecordKey`], sorted by key),
+/// without the copy counts. The union of the per-Δ mass windows is scanned
+/// in parallel slices, so one wide window does not run on a single thread.
+pub fn distinct_base_records_for_nominal_window(
+    mi: &crate::candidate_index::MmapCandidateIndex,
+    params: &SearchParams,
+    min_nominal: i32,
+    max_nominal: i32,
+) -> Vec<crate::candidate_index::IndexRecord> {
+    use model::mass::{H2O, INTEGER_MASS_SCALER};
+    use rayon::prelude::*;
+
+    if min_nominal > max_nominal {
+        return Vec::new();
+    }
+    // The same per-Δ milli-Da windows as `base_records_for_nominal_window`.
+    let scaler = INTEGER_MASS_SCALER as f64;
+    let bucket_da = 1.0 / scaler;
+    let full_lo = (min_nominal as f64 - 0.5) / scaler - bucket_da + H2O;
+    let full_hi = (max_nominal as f64 + 0.5) / scaler + bucket_da + H2O;
+    let windows: Vec<(u64, u64)> = distinct_mod_mass_offsets(params)
+        .iter()
+        .filter_map(|(_, delta)| {
+            let lo = ((full_lo - delta) * 1000.0).floor() as i64;
+            let hi = ((full_hi - delta) * 1000.0).ceil() as i64;
+            (hi >= 0).then_some((lo.max(0) as u64, hi as u64))
+        })
+        .collect();
+    let (Some(span_lo), Some(span_hi)) = (
+        windows.iter().map(|w| w.0).min(),
+        windows.iter().map(|w| w.1).max(),
+    ) else {
+        return Vec::new();
+    };
+    // Disjoint inclusive slices covering [span_lo, span_hi].
+    let n_slices = (rayon::current_num_threads() * 4) as u64;
+    let step = ((span_hi - span_lo) / n_slices).max(1);
+    let slices: Vec<(u64, u64)> = (0..)
+        .map(|i| span_lo + i * step)
+        .take_while(|&a| a <= span_hi)
+        .map(|a| (a, if a + step > span_hi { span_hi } else { a + step - 1 }))
+        .collect();
+    let mut out: Vec<crate::candidate_index::IndexRecord> = slices
+        .par_iter()
+        .flat_map_iter(|&(a, b)| {
+            mi.mass_window(a, b).into_iter().filter(|rec| {
+                windows
+                    .iter()
+                    .any(|&(lo, hi)| rec.mass_milli >= lo && rec.mass_milli <= hi)
+            })
+        })
+        .collect();
+    out.par_sort_unstable_by_key(base_record_key);
+    out.dedup_by_key(|r| base_record_key(r));
     out
 }
 

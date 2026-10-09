@@ -191,14 +191,12 @@ pub(crate) struct SearchArgs {
     pub(crate) cal_min_spec_keys: Option<usize>,
 
     /// Candidate retrieval for out-of-core searches. `auto` (the default, and
-    /// what every normal run uses) selects the fragment-ion index only where it
-    /// was measured to win: the candidate index is out-of-core AND fragment
-    /// matching is high-resolution. `off` forces per-spectrum enumeration, `on`
-    /// forces the index wherever it is legal at all — both are escape hatches
-    /// for reproducing a measurement, not tuning knobs. Hidden on purpose: the
-    /// engine reports which strategy it chose, and choosing wrongly is
-    /// expensive (on low-resolution data the index loses 30-70% of the
-    /// identifications).
+    /// what every normal run uses) selects the fragment-ion index whenever the
+    /// candidate index is out-of-core; at a low-resolution fragment tolerance
+    /// only the 150 most intense peaks vote. `off` forces per-spectrum
+    /// enumeration and `on` is the same as `auto` — both are escape hatches for
+    /// reproducing a measurement, not tuning knobs. Hidden on purpose: the
+    /// engine reports which strategy it chose.
     #[arg(long = "fragment-index", hide = true, default_value = "auto")]
     pub(crate) fragment_index: FragmentIndexFlag,
 

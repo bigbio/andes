@@ -27,6 +27,12 @@ pub const FRAGMENT_INDEX_TOP_K: u32 = 100;
 /// to be scored at all.
 pub const FRAGMENT_INDEX_MIN_MATCHED: u16 = 3;
 
+/// How many of a spectrum's most intense peaks vote in the fragment-ion index at
+/// a low-resolution fragment tolerance (high resolution: every peak). Measured on
+/// the low-res TMT set out-of-core: all peaks voting 4,368 PSMs @1%; 50, 100 and
+/// 150 peaks 12,285, 12,276 and 12,347; the in-RAM enumeration 12,281.
+pub const FRAGMENT_INDEX_LOWRES_VOTE_PEAKS: usize = 150;
+
 /// Out-of-core (`mmap`) mode only: upper bound on the TOTAL number of candidates
 /// held in the per-chunk base-record expansion cache (~1 GiB). The cache is a pure
 /// memo (output is identical with or without it); records past the bound are

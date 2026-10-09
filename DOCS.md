@@ -661,6 +661,13 @@ the rank-1 target PSMs at `q ≤ --quant-fdr` (default `--fdr`, 0.01); without `
 `--rescore-native` every rank-1 target PSM is quantified and the tables must be filtered
 downstream (a warning says so).
 
+MS1 scans are stored losslessly in private temporary files after each input run is
+searched, then loaded one run at a time for quantification and precursor purity.
+They do not remain in memory while Percolator runs. Scratch space is approximately
+12 bytes per centroid plus scan headers; files are removed when the run exits
+normally or returns an error. Set `TMPDIR` to choose the scratch directory. A
+single input run's MS1 scans still need to fit in memory while it is processed.
+
 ### Isobaric reporter ions (`--tmt <plex>`)
 
 * **Extraction.** For each quantified spectrum, the most intense centroid within `--tmt-tol` of
@@ -702,8 +709,8 @@ andes --spectrum tmt_run.mzML --database human.fasta --mods tmt10_mods.txt \
   time as the anchor; the theoretical isotope envelope comes from the peptide's elemental formula
   (standard residues exact; modification deltas as averagine atoms).
 * **Extraction.** The first four isotope chromatograms at `--lfq-tol` over ± `--lfq-rt-window`
-  around the anchor, from every MS1 scan of the run (captured by the reader; 16 bytes per
-  centroid, held for every input file until quantification). The monoisotopic trace is smoothed
+  around the anchor, from every MS1 scan of the run (16 bytes per centroid in memory;
+  cached to temporary storage between search and quantification). The monoisotopic trace is smoothed
   (5-point Savitzky–Golay); the peak that contains the anchor is climbed to its apex, and each
   boundary is placed two half-widths at half maximum from the apex (±2.35 σ of a Gaussian, 98 %
   of its area) or at an earlier deep valley (the trace fell below half the apex and rose 1.5x

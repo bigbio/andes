@@ -1708,7 +1708,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 title_prefix.as_deref(),
                 run_scans,
                 all_spectra.len(),
-            );
+            )?;
         }
     }
 
@@ -1965,12 +1965,18 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let pin_candidates;
     let pin_index;
     if let Some(out) = refine_output {
-        let merged =
-            search::refinement::merge_into_pass1(&mut queues, prepared.candidates, &idx, out);
+        let merged = search::refinement::merge_into_pass1(
+            &mut queues,
+            std::mem::take(&mut prepared.candidates),
+            &idx,
+            out,
+        );
         pin_candidates = merged.candidates;
+        drop(prepared);
         pin_index = merged.index;
     } else {
-        pin_candidates = prepared.candidates;
+        pin_candidates = std::mem::take(&mut prepared.candidates);
+        drop(prepared);
         pin_index = idx;
     }
 

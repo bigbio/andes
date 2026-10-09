@@ -31,6 +31,10 @@ use search::search_index::SearchIndex;
 
 use crate::cli::Cli;
 
+#[path = "ms1_cache.rs"]
+mod ms1_cache;
+use ms1_cache::Ms1Cache;
+
 /// Isotope-peak tolerance of the precursor-purity ladder (OpenMS default).
 const PURITY_ISOTOPE_PPM: f64 = 10.0;
 
@@ -199,7 +203,7 @@ struct RunCapture {
     title_prefix: Option<String>,
     /// Indices of this file's spectra in the global spectrum list.
     span: Range<usize>,
-    ms1: Option<Ms1RunIndex>,
+    ms1: Option<Ms1Cache>,
     /// Parent MS2 native id → (MS3 native id, raw reporter vector).
     ms3_reporters: HashMap<String, (String, Vec<f32>)>,
 }
@@ -249,7 +253,7 @@ impl QuantCollector {
         title_prefix: Option<&str>,
         scans: RunScans,
         end: usize,
-    ) {
+    ) -> Result<(), String> {
         let stem = run_stem(path);
         let ms1 = if self.settings.needs_ms1() && !scans.ms1.is_empty() {
             Some(Ms1RunIndex::new(scans.ms1))
@@ -312,6 +316,11 @@ impl QuantCollector {
                 }
             );
         }
+        let ms1 = ms1
+            .as_ref()
+            .map(Ms1Cache::store)
+            .transpose()
+            .map_err(|e| format!("cache MS1 scans for {stem}: {e}"))?;
         self.runs.push(RunCapture {
             stem,
             title_prefix: title_prefix.map(str::to_string),
@@ -319,6 +328,7 @@ impl QuantCollector {
             ms1,
             ms3_reporters,
         });
+        Ok(())
     }
 
     fn run_of(&self, spec_idx: usize) -> Option<usize> {
@@ -625,58 +635,65 @@ pub(crate) fn run_quant(
     if let Some(plex) = s.plex {
         let mut rows: Vec<TmtRow> = Vec::new();
         let (mut no_scan, mut low_purity) = (0usize, 0usize);
-        for hit in &hits {
-            let spec = &spectra[hit.spec_idx];
-            let run = &collector.runs[hit.run_idx];
-            let (quant_scan_id, raw) = if s.tmt_level >= 3 {
-                match run.ms3_reporters.get(native_id(run, &spec.title)) {
-                    Some((id, raw)) => (id.clone(), raw.clone()),
-                    None => {
-                        no_scan += 1;
-                        continue;
+        for (run_idx, run) in collector.runs.iter().enumerate() {
+            let ms1 = run
+                .ms1
+                .as_ref()
+                .map(Ms1Cache::load)
+                .transpose()
+                .map_err(|e| format!("load MS1 scans for {}: {e}", run.stem))?;
+            for hit in hits.iter().filter(|h| h.run_idx == run_idx) {
+                let spec = &spectra[hit.spec_idx];
+                let (quant_scan_id, raw) = if s.tmt_level >= 3 {
+                    match run.ms3_reporters.get(native_id(run, &spec.title)) {
+                        Some((id, raw)) => (id.clone(), raw.clone()),
+                        None => {
+                            no_scan += 1;
+                            continue;
+                        }
+                    }
+                } else {
+                    match collector.ms2_reporters.get(hit.spec_idx) {
+                        Some(raw) => (spec.title.clone(), raw.clone()),
+                        None => {
+                            no_scan += 1;
+                            continue;
+                        }
+                    }
+                };
+                let purity = ms1.as_ref().and_then(|ms1| {
+                    let rt = spec.rt_seconds?;
+                    let scan = ms1.scan_at_or_before(rt)?;
+                    let lo = spec.isolation_lower_offset?;
+                    let hi = spec.isolation_upper_offset?;
+                    let pmz = hit.psm.precursor_mz_override.unwrap_or(spec.precursor_mz);
+                    quant::precursor_purity(
+                        ms1.peaks(scan),
+                        pmz,
+                        hit.psm.charge_used,
+                        lo,
+                        hi,
+                        PURITY_ISOTOPE_PPM,
+                    )
+                });
+                if let Some(p) = purity {
+                    if p < s.min_purity {
+                        low_purity += 1;
                     }
                 }
-            } else {
-                match collector.ms2_reporters.get(hit.spec_idx) {
-                    Some(raw) => (spec.title.clone(), raw.clone()),
-                    None => {
-                        no_scan += 1;
-                        continue;
-                    }
-                }
-            };
-            let purity = run.ms1.as_ref().and_then(|ms1| {
-                let rt = spec.rt_seconds?;
-                let scan = ms1.scan_at_or_before(rt)?;
-                let lo = spec.isolation_lower_offset?;
-                let hi = spec.isolation_upper_offset?;
-                let pmz = hit.psm.precursor_mz_override.unwrap_or(spec.precursor_mz);
-                quant::precursor_purity(
-                    ms1.peaks(scan),
-                    pmz,
-                    hit.psm.charge_used,
-                    lo,
-                    hi,
-                    PURITY_ISOTOPE_PPM,
-                )
-            });
-            if let Some(p) = purity {
-                if p < s.min_purity {
-                    low_purity += 1;
-                }
+                let corrected = match &s.correction {
+                    Some(m) => m.correct(&raw),
+                    None => raw.clone(),
+                };
+                rows.push(TmtRow {
+                    id: quant_id(hit, run, spec, candidates, index),
+                    quant_scan_id,
+                    quant_ms_level: s.tmt_level,
+                    purity,
+                    raw,
+                    corrected,
+                });
             }
-            let corrected = match &s.correction {
-                Some(m) => m.correct(&raw),
-                None => raw.clone(),
-            };
-            rows.push(TmtRow {
-                id: quant_id(hit, run, spec, candidates, index),
-                quant_scan_id,
-                quant_ms_level: s.tmt_level,
-                purity,
-                raw,
-                corrected,
-            });
         }
         let tsv_rows: Vec<TmtRow> = rows
             .iter()
@@ -764,9 +781,12 @@ pub(crate) fn run_quant(
         }
         let mut all_rows: Vec<LfqRow> = Vec::new();
         for (run_idx, run) in collector.runs.iter().enumerate() {
-            let Some(ms1) = run.ms1.as_ref() else {
+            let Some(cache) = run.ms1.as_ref() else {
                 continue;
             };
+            let ms1 = cache
+                .load()
+                .map_err(|e| format!("load MS1 scans for {}: {e}", run.stem))?;
             let mut targets: Vec<(usize, LfqTarget)> =
                 best.iter()
                     .filter(|((r, _, _), _)| *r == run_idx)
@@ -797,8 +817,8 @@ pub(crate) fn run_quant(
                 .map(|(hi, t)| {
                     (
                         *hi,
-                        quantify(ms1, t, params),
-                        quantify_decoy(ms1, t, params),
+                        quantify(&ms1, t, params),
+                        quantify_decoy(&ms1, t, params),
                     )
                 })
                 .collect();

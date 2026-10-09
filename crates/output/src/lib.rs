@@ -46,3 +46,11 @@ pub(crate) mod row_context;
 
 pub mod glyco_pin;
 pub use glyco_pin::write_glyco_pin;
+
+pub mod quant_out;
+pub use quant_out::{
+    write_lfq_features_tsv, write_lfq_tsv, write_tmt_tsv, LfqRow, ModRecord, QuantId, TmtRow,
+};
+
+pub mod feature_parquet;
+pub use feature_parquet::{write_feature_parquet, FeatureRecord, ProteinPosition};

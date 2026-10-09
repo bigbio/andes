@@ -237,3 +237,87 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         "rescore-off bundle must keep PEP null (OpenMS schema parity)"
     );
 }
+
+#[test]
+fn batched_psms_preserve_global_indices_order_and_rescore_join() {
+    use arrow::array::Int32Array;
+    let (spectra, queues, candidates, idx, params) = run_bsa_search();
+    let seed = queues.iter().position(|q| !q.is_empty()).unwrap();
+    let repeated_spectra: Vec<_> = (0..1025)
+        .map(|i| {
+            let mut s = spectra[seed].clone();
+            s.scan = Some(i + 1);
+            s.title = format!("scan={}", i + 1);
+            s
+        })
+        .collect();
+    let repeated_queues = vec![queues[seed].clone(); repeated_spectra.len()];
+    let tmp = tempfile::tempdir().unwrap();
+    let pin = tmp.path().join("batch.pin");
+    output::write_pin(
+        &pin,
+        &repeated_spectra,
+        &repeated_queues,
+        &candidates,
+        &params,
+        &idx,
+    )
+    .unwrap();
+    let ids = pin_spec_ids(&pin);
+    let map = ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| {
+            (
+                id.clone(),
+                PercolatorPsm {
+                    psm_id: id.clone(),
+                    q_value: 0.01,
+                    pep: i as f64 / ids.len() as f64,
+                    peptide: "X".into(),
+                    proteins: "P".into(),
+                },
+            )
+        })
+        .collect();
+    let out = tmp.path().join("batch.idparquet");
+    output::write_qpx(
+        &out,
+        &repeated_spectra,
+        &repeated_queues,
+        &candidates,
+        &params,
+        &idx,
+        &Tolerance::Da(0.5),
+        "test",
+        &["test.mgf".into()],
+        Some(&map),
+    )
+    .unwrap();
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(File::open(out.join("psms.parquet")).unwrap())
+            .unwrap();
+    assert_eq!(builder.metadata().num_row_groups(), 2);
+    let mut row = 0usize;
+    for batch in builder.build().unwrap() {
+        let batch = batch.unwrap();
+        let indices = batch
+            .column_by_name("peptide_identification_index")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        let peps = batch
+            .column_by_name("posterior_error_probability")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            assert_eq!(indices.value(i), row as i32);
+            assert_eq!(peps.value(i), row as f64 / ids.len() as f64);
+            row += 1;
+        }
+    }
+    assert_eq!(row, ids.len());
+}

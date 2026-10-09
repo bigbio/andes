@@ -638,6 +638,80 @@ pub(crate) struct SearchArgs {
     #[arg(long = "percolator-args", hide = true, default_value = "")]
     pub(crate) percolator_args: String,
 
+    // ── Quantification ─────────────────────────────────────────────────────
+    /// Isobaric reporter-ion quantification of the confident PSMs with this
+    /// labelling kit: tmt6, tmt10, tmt11, tmt16, tmt18, itraq4 or itraq8.
+    /// Writes `<stem>.tmt.tsv` and, with `--output-parquet`, the QPX
+    /// `quantms.feature.parquet`. Combine with `--rescore` so only PSMs at
+    /// q <= --fdr are quantified.
+    #[arg(long = "tmt", value_name = "PLEX", value_parser = parse_plex)]
+    pub(crate) tmt: Option<quant::Plex>,
+
+    /// MS level the reporter ions are read from: 2 (the identified MS2) or 3
+    /// (the SPS-MS3 scan whose precursor references that MS2; mzML and Thermo
+    /// `.raw`).
+    #[arg(long = "tmt-level", default_value = "2")]
+    pub(crate) tmt_level: u8,
+
+    /// Reporter-ion m/z tolerance, e.g. `20ppm` or `0.003da`. Default: 20 ppm
+    /// on high-resolution MS2 and at `--tmt-level 3` (SPS-MS3 reporters are
+    /// read in the Orbitrap), 0.3 Da on ion-trap MS2. A window that reaches
+    /// half the spacing of the kit's closest channels is refused.
+    #[arg(long = "tmt-tol", value_parser = parse_precursor_tol)]
+    pub(crate) tmt_tol: Option<Tolerance>,
+
+    /// Isotope impurity matrix of the kit lot (OpenMS text form: one line per
+    /// channel, `-2/-1/+1/+2` percentages, eight columns for TMTpro). Corrected
+    /// intensities are solved by non-negative least squares; the raw values are
+    /// kept alongside. Default: no correction.
+    #[arg(long = "tmt-correction", value_name = "FILE")]
+    pub(crate) tmt_correction: Option<PathBuf>,
+
+    /// Drop PSMs whose precursor isolation purity (share of the MS1 isolation
+    /// window that belongs to the precursor) is below this from `tmt.tsv`.
+    /// They stay in the parquet with their purity. Default 0 (report only).
+    #[arg(long = "tmt-min-purity", default_value = "0", value_parser = parse_unit_fraction)]
+    pub(crate) tmt_min_purity: f64,
+
+    /// Label-free MS1 quantification of the confident precursors: isotope
+    /// chromatograms are extracted around each identified peptidoform's
+    /// retention time and integrated. Writes `<stem>.lfq.tsv`,
+    /// `<stem>.lfq_features.tsv` and, with `--output-parquet`, the QPX
+    /// `quantms.feature.parquet`. mzML and Thermo `.raw` input.
+    #[arg(long = "lfq", default_value_t = false)]
+    pub(crate) lfq: bool,
+
+    /// MS1 m/z tolerance of the isotope chromatograms, e.g. `10ppm`. Default 10 ppm.
+    #[arg(long = "lfq-tol", value_parser = parse_precursor_tol)]
+    pub(crate) lfq_tol: Option<Tolerance>,
+
+    /// Retention-time half-window (seconds) around the identifying PSM in
+    /// which the chromatographic peak is searched. Default 60.
+    #[arg(long = "lfq-rt-window", default_value = "60", value_parser = parse_positive_tol)]
+    pub(crate) lfq_rt_window: f64,
+
+    /// Experimental Gaussian width in seconds (eight sigma) for LFQ peak detection.
+    /// Areas still use raw signal. Omit for five-scan Savitzky–Golay smoothing.
+    /// Validate feature-q coverage for the acquisition before using this setting.
+    #[arg(long = "lfq-gaussian-width", value_parser = parse_positive_tol)]
+    pub(crate) lfq_gaussian_width: Option<f64>,
+
+    /// Minimum cosine similarity between the observed and theoretical isotope
+    /// envelope for a feature to be reported in `lfq.tsv` (`lfq_features.tsv`
+    /// and the parquet keep it with its cosine). Default 0.7.
+    #[arg(long = "lfq-min-cosine", default_value = "0.7", value_parser = parse_unit_fraction)]
+    pub(crate) lfq_min_cosine: f64,
+
+    /// Feature-level FDR for `lfq.tsv`, from a target/decoy competition of each
+    /// feature against a twin extracted 11 Th above it. Default 0.05.
+    #[arg(long = "lfq-feature-fdr", default_value = "0.05", value_parser = parse_unit_fraction)]
+    pub(crate) lfq_feature_fdr: f64,
+
+    /// PSM q-value threshold for quantification targets when rescoring runs.
+    /// Default: the `--fdr` value (0.01).
+    #[arg(long = "quant-fdr", hide = true, value_parser = parse_unit_fraction)]
+    pub(crate) quant_fdr: Option<f64>,
+
     /// Keep the PIN file after rescoring. With `--rescore` and no `--output-pin`,
     /// a temporary PIN is used and deleted unless this is true. Default true.
     #[arg(long = "keep-pin", hide = true, default_value_t = true, action = clap::ArgAction::Set)]
@@ -745,6 +819,11 @@ pub(crate) enum PrecursorMonoFlag {
 pub(crate) fn parse_fragmentation(s: &str) -> Result<Fragmentation, String> {
     <Fragmentation as ValueEnum>::from_str(s, true)
         .map_err(|_| format!("invalid fragmentation `{s}`: expected auto|CID|ETD|HCD|UVPD"))
+}
+
+/// Parse `--tmt` kit names.
+pub(crate) fn parse_plex(s: &str) -> Result<quant::Plex, String> {
+    quant::Plex::parse(s)
 }
 
 /// Parse `--protocol` value. Accepts named values only.

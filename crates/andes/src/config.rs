@@ -34,6 +34,8 @@ pub struct RunConfig {
     pub refine: RefineCfg,
     pub rescoring: RescoringCfg,
     pub glyco: GlycoCfg,
+    #[serde(default)]
+    pub quant: QuantCfg,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -117,6 +119,22 @@ pub struct RescoringCfg {
     pub percolator_image: Option<String>,
     pub percolator_args: Option<String>,
     pub keep_pin: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct QuantCfg {
+    pub tmt: Option<String>,
+    pub tmt_level: Option<u8>,
+    pub tmt_tol: Option<String>,
+    pub tmt_correction: Option<PathBuf>,
+    pub tmt_min_purity: Option<f64>,
+    pub lfq: Option<bool>,
+    pub lfq_tol: Option<String>,
+    pub lfq_rt_window: Option<f64>,
+    pub lfq_min_cosine: Option<f64>,
+    pub lfq_feature_fdr: Option<f64>,
+    pub quant_fdr: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -333,6 +351,35 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         cfg.rescoring.percolator_args
     );
     set!("keep_pin", keep_pin, cfg.rescoring.keep_pin);
+
+    // ── quant ──
+    if let Some(v) = cfg.quant.tmt {
+        if !cli_set(m, "tmt") {
+            args.tmt = Some(crate::cli::parse_plex(&v)?);
+        }
+    }
+    set!("tmt_level", tmt_level, cfg.quant.tmt_level);
+    if let Some(v) = cfg.quant.tmt_tol {
+        if !cli_set(m, "tmt_tol") {
+            args.tmt_tol = Some(crate::parse_precursor_tol(&v)?);
+        }
+    }
+    set_opt!("tmt_correction", tmt_correction, cfg.quant.tmt_correction);
+    set!("tmt_min_purity", tmt_min_purity, cfg.quant.tmt_min_purity);
+    set!("lfq", lfq, cfg.quant.lfq);
+    if let Some(v) = cfg.quant.lfq_tol {
+        if !cli_set(m, "lfq_tol") {
+            args.lfq_tol = Some(crate::parse_precursor_tol(&v)?);
+        }
+    }
+    set!("lfq_rt_window", lfq_rt_window, cfg.quant.lfq_rt_window);
+    set!("lfq_min_cosine", lfq_min_cosine, cfg.quant.lfq_min_cosine);
+    set!(
+        "lfq_feature_fdr",
+        lfq_feature_fdr,
+        cfg.quant.lfq_feature_fdr
+    );
+    set_opt!("quant_fdr", quant_fdr, cfg.quant.quant_fdr);
 
     // ── glyco ──
     set!("glyco", glyco, cfg.glyco.enabled);

@@ -348,6 +348,8 @@ pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams) -> PathBuf {
 pub struct MmapCandidateIndex {
     mmap: memmap2::Mmap,
     len: usize,
+    /// Built in anonymous memory because the cache file could not be written.
+    in_memory: bool,
 }
 
 impl MmapCandidateIndex {
@@ -360,8 +362,7 @@ impl MmapCandidateIndex {
     /// blob as a valid index.
     pub fn open(path: &Path) -> io::Result<Self> {
         let file = std::fs::File::open(path)?;
-        let meta = file.metadata()?;
-        let byte_len = meta.len() as usize;
+        let byte_len = file.metadata()?.len() as usize;
         if byte_len < INDEX_HEADER_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -372,6 +373,18 @@ impl MmapCandidateIndex {
         // the lifetime of `mmap`.  No other process is expected to modify the
         // file while the search is running.
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        Self::from_mmap(mmap, false)
+    }
+
+    /// Validate an index image (magic, format version, payload alignment).
+    fn from_mmap(mmap: memmap2::Mmap, in_memory: bool) -> io::Result<Self> {
+        let byte_len = mmap.len();
+        if byte_len < INDEX_HEADER_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("index size {byte_len} is smaller than the {INDEX_HEADER_SIZE}-byte header"),
+            ));
+        }
         if &mmap[..INDEX_MAGIC.len()] != INDEX_MAGIC {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -397,7 +410,32 @@ impl MmapCandidateIndex {
             ));
         }
         let len = data_len / INDEX_RECORD_SIZE;
-        Ok(Self { mmap, len })
+        Ok(Self {
+            mmap,
+            len,
+            in_memory,
+        })
+    }
+
+    /// Build the index in anonymous memory instead of a cache file. The image
+    /// is byte-for-byte the one `open_or_build` would write, so a search over it
+    /// is identical; it is simply not reused by later runs.
+    pub fn build_in_memory(
+        idx: &SearchIndex,
+        params: &SearchParams,
+        decoy_prefix: &str,
+    ) -> io::Result<Self> {
+        let mut image = Vec::new();
+        build_base_peptide_index(idx, params, decoy_prefix, &mut image)?;
+        let mut anon = memmap2::MmapMut::map_anon(image.len())?;
+        anon.copy_from_slice(&image);
+        drop(image);
+        Self::from_mmap(anon.make_read_only()?, true)
+    }
+
+    /// Whether the index lives in anonymous memory rather than a cache file.
+    pub fn is_in_memory(&self) -> bool {
+        self.in_memory
     }
 
     /// Open the index from `path` if it already exists, or build it and then
@@ -446,13 +484,34 @@ impl MmapCandidateIndex {
             std::process::id(),
             seq,
         ));
-        {
-            use std::io::BufWriter;
-            let file = std::fs::File::create(&tmp_path)?;
+        // A cache directory that cannot be written (read-only temp dir, full
+        // disk, permissions) does not stop the search: the same index is built
+        // in memory instead.
+        let file = match std::fs::File::create(&tmp_path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!(
+                    "candidate-index: cannot write the cache in {} ({e}); building it in memory \
+                     (set TMPDIR to a writable directory to cache it across runs)",
+                    parent.display()
+                );
+                return Ok((Self::build_in_memory(idx, params, decoy_prefix)?, true));
+            }
+        };
+        let written = {
+            use std::io::{BufWriter, Write};
             let mut bw = BufWriter::new(file);
-            build_base_peptide_index(idx, params, decoy_prefix, &mut bw)?;
+            build_base_peptide_index(idx, params, decoy_prefix, &mut bw).and_then(|_| bw.flush())
+        };
+        if let Err(e) = written.and_then(|()| std::fs::rename(&tmp_path, path)) {
+            let _ = std::fs::remove_file(&tmp_path);
+            eprintln!(
+                "candidate-index: cannot write the cache in {} ({e}); building it in memory \
+                 (set TMPDIR to a writable directory to cache it across runs)",
+                parent.display()
+            );
+            return Ok((Self::build_in_memory(idx, params, decoy_prefix)?, true));
         }
-        std::fs::rename(&tmp_path, path)?;
 
         let mmap_index = Self::open(path)?;
         Ok((mmap_index, true))
@@ -865,6 +924,31 @@ mod tests {
     /// is byte-identical to the first call's result.  The file's modification
     /// time must not change on the second call (proving the builder was not
     /// re-invoked).
+    /// A cache path that cannot be written does not fail the search: the index
+    /// is built in memory, with the same records the cache file would hold.
+    #[test]
+    fn unwritable_cache_falls_back_to_an_identical_in_memory_index() {
+        let idx = make_toy_index();
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.min_length = 3;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let on_disk = dir.path().join("cache.idx");
+        let (file_idx, _) = MmapCandidateIndex::open_or_build(&on_disk, &idx, &params, "XXX")
+            .expect("build to a writable directory");
+        assert!(!file_idx.is_in_memory());
+
+        // The parent directory does not exist, so the cache cannot be created.
+        let unwritable = dir.path().join("missing").join("cache.idx");
+        let (mem_idx, built) = MmapCandidateIndex::open_or_build(&unwritable, &idx, &params, "XXX")
+            .expect("an unwritable cache must not fail");
+        assert!(built);
+        assert!(mem_idx.is_in_memory());
+        assert!(!unwritable.exists());
+        assert_eq!(file_idx.records(), mem_idx.records());
+    }
+
     #[test]
     fn open_or_build_reuses_existing_cache_file() {
         let idx = make_toy_index();

@@ -49,19 +49,6 @@ pub(crate) struct RetrievalChoice {
     pub refused_because: Option<&'static str>,
 }
 
-/// Whether the out-of-core index cache at `path` exists or can be created: a
-/// read-only or missing temp directory would otherwise fail the search when the
-/// index is built.
-fn index_cache_writable(path: &std::path::Path) -> bool {
-    if path.exists() {
-        return true;
-    }
-    let probe = path.with_extension("probe");
-    let ok = std::fs::File::create(&probe).is_ok();
-    let _ = std::fs::remove_file(&probe);
-    ok
-}
-
 /// Pick the out-of-core candidate-retrieval strategy: the fragment-ion index
 /// whenever the candidate index is out-of-core, because there it was MEASURED to
 /// win at both resolutions:
@@ -790,16 +777,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let high_res_fragments =
                 search::fragment_index::is_high_resolution(scorer.feature_match_tolerance());
             if cli.glyco {
-                search::CandidateIndexMode::Ram
-            } else if high_res_fragments
-                && cli.fragment_index != FragmentIndexFlag::Off
-                && !index_cache_writable(&index_cache_path(&idx, &params))
-            {
-                eprintln!(
-                    "[auto] cannot write the out-of-core index cache in {} -> in-RAM \
-                     enumeration (set TMPDIR to a writable directory for fragment-ion retrieval)",
-                    std::env::temp_dir().display()
-                );
                 search::CandidateIndexMode::Ram
             } else if high_res_fragments && cli.fragment_index != FragmentIndexFlag::Off {
                 // High-resolution fragments: retrieve candidates with the fragment-ion

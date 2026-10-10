@@ -41,8 +41,8 @@ Reference identifications for scoring ship in [`glyco/truth/`](glyco/truth/). Re
 | benchmark | dataset | what is measured | andes | reference | measured error | wall (andes) |
 |---|---|---|---:|---:|---|---:|
 | **Standard, high-res** | Astral, PXD070049, HCD LFQ | PSMs @ q≤0.01 | **47,080** | Comet 31,435 (+49.8%), 215 s · Java MS-GF+ 26,542 † | entrapment version of the database: at an equal true FDP of 1.00%, +22.2% over the previous in-RAM retrieval; the nominal 1% is **1.07% true** | **160–161 s** |
-| **Standard + TMT labels** | a05058, PXD007683, ion-trap CID | PSMs @ q≤0.01 | **12,281** | Comet 10,504 (+16.9%), 76 s · Java 10,651 | not measurable | **53–55 s** |
-| **Standard, low-res LFQ** | UPS1, PXD001819, ion-trap CID | PSMs @ q≤0.01 | 15,838 | Comet 14,734 (+7.5%), 46 s · **Java 15,904** | 166 entrapment hits ⇒ **3.6% true FDP** at nominal 1%; Comet: 154 hits on 14,734, the same rate | **34–35 s** |
+| **Standard + TMT labels** | a05058, PXD007683, ion-trap CID | PSMs @ q≤0.01 | **12,347** | Comet 10,504 (+17.5%), 76 s · Java 10,651 | not measurable | **53–55 s** |
+| **Standard, low-res LFQ** | UPS1, PXD001819, ion-trap CID | PSMs @ q≤0.01 | 15,848 | Comet 14,734 (+7.6%), 46 s · **Java 15,904** | **3.5% true FDP** at nominal 1% by entrapment (in-RAM retrieval, 15,838 PSMs: 3.6%); Comet: 154 hits on 14,734, the same rate | **34–35 s** |
 | **Chimeric** (`--chimeric`, in-RAM path) | Astral | PSMs @ q≤0.01 | **65,028** (+69%; 55,616 distinct scans) | in-RAM baseline 38,394 | not measurable | 337 s ¶ |
 | | TMT a05058 | PSMs @ q≤0.01 | 12,540 (+2.1%) | baseline 12,281 | not measurable | 73 s ¶ |
 | | UPS1 | PSMs @ q≤0.01 | **17,112** (+8.0%) | baseline 15,838 | 167 entrapment hits — flat against 166 | 50 s ¶ |
@@ -230,8 +230,9 @@ the curated 52-column glyco PIN (neutral; its flag has since been removed) did n
 
 andes either enumerates every candidate in each precursor window and scores them all, or takes
 a shortlist of the 100 candidates whose singly-charged b/y ions best match the spectrum (at
-least 3 matched) from a fragment-ion index. Since #112 the index is the default on high-res
-data. Low-res data stays in RAM while the candidate index fits; `--glyco` keeps enumeration.
+least 3 matched) from a fragment-ion index. The index is the default for every search except
+`--glyco`, which keeps enumeration (high-res since #112, low-res since the index reached the
+in-RAM path's speed).
 
 **On low-res data only the most intense peaks may vote.** With every peak voting, 0.5 Da bins let
 noise swamp the count: forcing the index (2026-09) took TMT a05058 from 12,281 to 3,613 PSMs at 1%
@@ -247,9 +248,10 @@ and UPS1 from 15,838 to 10,312. Letting only the N most intense peaks vote fixes
 | Index, top 100 peaks | 12,169–12,276 | 10,300–10,390 | 289 s | 1.7 GB | 7,801–7,874 |
 | **Index, top 150 peaks (default)** | 12,329–12,372 | 10,429–10,474 | 283 s | 1.7 GB | 7,760–8,031 |
 
-UPS1 CPU: in-RAM 116 s, out-of-core enumeration 1,792 s, capped index 152–160 s. In RAM stays
-the low-res default because it is the fastest; the capped index replaces out-of-core
-enumeration, which was ~19x slower on TMT for the same identifications. High-res spectra are not
+UPS1 CPU: in-RAM 116 s, out-of-core enumeration 1,792 s, capped index 152–160 s. Those index
+timings predate the index-build speedups: on the current build (2026-10-10, 8 threads) the
+capped index takes TMT 163 s CPU / 29.1 s wall / 1.7 GB against in-RAM 173 s / 27.6 s / 5.9 GB,
+and UPS1 117 s / 18.1 s / 1.3 GB against 115 s / 17.9 s / 2.5 GB, so it is the low-res default. High-res spectra are not
 capped: on Astral, top-150 cost 5% of PSMs and top-50 cost 20% (real fragments in dense spectra
 reach well below the top 150), and on phospho every cap lost 0.8–4.5%.
 

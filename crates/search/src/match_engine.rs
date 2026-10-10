@@ -514,7 +514,12 @@ impl<'a> PreparedSearch<'a> {
     ) -> std::io::Result<Self> {
         let (mmap_index, was_built) =
             MmapCandidateIndex::open_or_build(index_path, idx, params, decoy_prefix)?;
-        if was_built {
+        if mmap_index.is_in_memory() {
+            eprintln!(
+                "candidate-index: built {} records in memory (not cached)",
+                mmap_index.len()
+            );
+        } else if was_built {
             eprintln!(
                 "candidate-index: built and cached {} records → {}",
                 mmap_index.len(),

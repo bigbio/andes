@@ -25,7 +25,8 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 use crate::candidate_gen::{
-    expand_base_record_bounded, for_each_record_form_masses_bounded, BaseRecordKey, Candidate,
+    expand_base_record_bounded, for_each_record_form_masses_bounded, record_may_have_forms_in,
+    BaseRecordKey, Candidate, FormWalkTables,
 };
 use crate::candidate_index::IndexRecord;
 use crate::precursor_cal::adjusted_observed_neutral_mass;
@@ -35,9 +36,15 @@ use model::mass::{H2O, ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
 use model::tolerance::Tolerance;
 
-/// Pass-1 output per record: (mass, pruned k) per in-window form, and the
-/// record's (bin, count) pairs.
-type RecordPass1 = (Vec<(f64, u32)>, Vec<(u32, u32)>);
+/// Pass-1 output of one group of records.
+struct GroupPass1 {
+    /// (mass, record, pruned k) of every in-window form, in record then k order.
+    forms: Vec<(f64, u32, u32)>,
+    /// In-window form count of each record in the group.
+    forms_per_record: Vec<u32>,
+    /// The group's ion count per fragment bin.
+    counts: Vec<u32>,
+}
 
 /// `query`'s reusable vote buffers: per-id (count, summed intensity) over the
 /// current window, zeroed again after each query, and the ids touched.
@@ -51,6 +58,8 @@ thread_local! {
 pub struct ChunkFragmentIndex {
     /// The chunk's distinct base records, in `enumerate_candidates` order.
     records: Vec<IndexRecord>,
+    /// Variant tables for the bounded walk, shared by build and materialisation.
+    tables: FormWalkTables,
     /// The slice's precursor mass window; forms outside it are not indexed,
     /// and materialisation walks the same bounded enumeration.
     mass_lo: f64,
@@ -106,7 +115,6 @@ impl ChunkFragmentIndex {
         mass_lo: f64,
         mass_hi: f64,
     ) -> Self {
-        use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
         // NOTE: `fragment_tol` here is `RankScorer::feature_match_tolerance()`, a
         // CONSTANT 20 ppm on high-resolution data — not the model's `mme`, which
         // scoring matches at and which is 0.5 Da in every bundled model. Retrieval
@@ -114,65 +122,101 @@ impl ChunkFragmentIndex {
         // on identifications has never been measured. See "Known gaps" in
         // docs/benchmarks/README.md before changing this.
         let bin_width = fragment_tol.as_da(2500.0).max(0.001);
+        let tables = FormWalkTables::new(params);
+        // Records whose walk cannot reach the window contribute nothing; drop
+        // them once here instead of in both passes. The order of the rest is
+        // kept, so form ids and materialisation order are unchanged.
+        let records: Vec<IndexRecord> = records
+            .into_par_iter()
+            .filter(|rec| record_may_have_forms_in(db, &tables, rec, mass_lo, mass_hi))
+            .collect();
+        // Every singly-charged b/y ion of an in-window form lies below
+        // `mass_hi + PROTON`; one Da of margin covers rounding.
+        let n_bins = if mass_hi > 0.0 {
+            ((mass_hi + PROTON + 1.0) / bin_width) as usize + 2
+        } else {
+            2
+        };
 
-        // Pass 1: every in-window form's (mass, record, k) plus per-record bin
-        // counts. The walk visits only in-window subtrees.
-        let per: Vec<RecordPass1> = records
+        // Records are split into contiguous groups; each group is walked by one
+        // task with its own dense per-bin counters, so neither pass shares a
+        // write cursor with another thread.
+        let n_groups = (rayon::current_num_threads() * 4).clamp(1, records.len().max(1));
+        let group_len = records.len().div_ceil(n_groups).max(1);
+        let groups: Vec<std::ops::Range<usize>> = (0..records.len())
+            .step_by(group_len)
+            .map(|a| a..(a + group_len).min(records.len()))
+            .collect();
+
+        // Pass 1, per group: every in-window form's (mass, record, k), each
+        // record's form count, and the group's ion count per bin. The walk
+        // visits only in-window subtrees.
+        let pass1: Vec<GroupPass1> = groups
             .par_iter()
-            .map(|rec| {
-                let mut forms: Vec<(f64, u32)> = Vec::new();
-                let mut bins: Vec<(u32, u32)> = Vec::new();
+            .map(|range| {
+                let mut forms: Vec<(f64, u32, u32)> = Vec::new();
+                let mut forms_per_record: Vec<u32> = Vec::with_capacity(range.len());
+                let mut counts = vec![0u32; n_bins];
                 let mut ions: Vec<f32> = Vec::new();
-                for_each_record_form_masses_bounded(
-                    db,
-                    params,
-                    rec,
-                    mass_lo,
-                    mass_hi,
-                    |k, masses| {
-                        forms.push((neutral_mass(masses), k as u32));
-                        ions.clear();
-                        by_ions_from_masses(masses, &mut ions);
-                        for &mz in &ions {
-                            bins.push(((mz as f64 / bin_width) as u32, 1));
-                        }
-                    },
-                );
-                bins.sort_unstable();
-                bins.dedup_by(|a, b| {
-                    if a.0 == b.0 {
-                        b.1 += a.1;
-                        true
-                    } else {
-                        false
-                    }
-                });
-                (forms, bins)
+                for r in range.clone() {
+                    let before = forms.len();
+                    for_each_record_form_masses_bounded(
+                        db,
+                        params,
+                        &tables,
+                        &records[r],
+                        mass_lo,
+                        mass_hi,
+                        |k, masses| {
+                            forms.push((neutral_mass(masses), r as u32, k as u32));
+                            ions.clear();
+                            by_ions_from_masses(masses, &mut ions);
+                            for &mz in &ions {
+                                counts[(mz as f64 / bin_width) as usize] += 1;
+                            }
+                        },
+                    );
+                    forms_per_record.push((forms.len() - before) as u32);
+                }
+                GroupPass1 {
+                    forms,
+                    forms_per_record,
+                    counts,
+                }
             })
             .collect();
-        let max_bin = per
-            .iter()
-            .flat_map(|(_, b)| b.iter().map(|x| x.0 as usize))
-            .max()
-            .unwrap_or(0);
-        let n_bins = max_bin + 2;
+
+        // CSR bin starts, and each group's first write offset within every bin
+        // (the ions of earlier groups in that bin), stored in place of its counts.
+        let mut cursors: Vec<Vec<u32>> = Vec::with_capacity(pass1.len());
         let mut bin_start = vec![0u64; n_bins + 1];
-        for (_, bins) in &per {
-            for &(b, c) in bins {
-                bin_start[b as usize + 1] += c as u64;
+        let mut running = vec![0u32; n_bins];
+        let mut forms_by_group: Vec<Vec<(f64, u32, u32)>> = Vec::with_capacity(pass1.len());
+        let mut record_form_start: Vec<u64> = Vec::with_capacity(records.len() + 1);
+        record_form_start.push(0);
+        for g in pass1 {
+            let mut c = g.counts;
+            for (slot, run) in c.iter_mut().zip(running.iter_mut()) {
+                let n = *slot;
+                *slot = *run;
+                *run += n;
             }
+            cursors.push(c);
+            for n in g.forms_per_record {
+                let last = *record_form_start.last().unwrap();
+                record_form_start.push(last + n as u64);
+            }
+            forms_by_group.push(g.forms);
         }
         for b in 0..n_bins {
-            bin_start[b + 1] += bin_start[b];
+            bin_start[b + 1] = bin_start[b] + running[b] as u64;
         }
+        drop(running);
         let n_entries = bin_start[n_bins] as usize;
 
         // Form ids in ascending mass order, so a bin sorted by id is sorted by
         // mass and the per-bin sort is a plain integer sort.
-        let mut all: Vec<(f64, u32, u32)> = Vec::new();
-        for (r, (forms, _)) in per.iter().enumerate() {
-            all.extend(forms.iter().map(|&(m, k)| (m, r as u32, k)));
-        }
+        let mut all: Vec<(f64, u32, u32)> = forms_by_group.into_iter().flatten().collect();
         all.par_sort_unstable_by(|a, b| {
             a.0.partial_cmp(&b.0)
                 .unwrap()
@@ -180,19 +224,13 @@ impl ChunkFragmentIndex {
                 .then(a.2.cmp(&b.2))
         });
         let n_forms = all.len();
-        let mut form_record = Vec::with_capacity(n_forms);
-        let mut form_k = Vec::with_capacity(n_forms);
-        let mut form_mass = Vec::with_capacity(n_forms);
-        // ids_by_record[r][k] = form id, for pass 2.
-        let mut ids_by_record: Vec<Vec<u32>> = per
-            .iter()
-            .map(|(forms, _)| vec![0u32; forms.len()])
-            .collect();
-        for (id, &(m, r, k)) in all.iter().enumerate() {
-            form_record.push(r);
-            form_k.push(k);
-            form_mass.push(m);
-            ids_by_record[r as usize][k as usize] = id as u32;
+        let form_record: Vec<u32> = all.par_iter().map(|f| f.1).collect();
+        let form_k: Vec<u32> = all.par_iter().map(|f| f.2).collect();
+        let form_mass: Vec<f64> = all.par_iter().map(|f| f.0).collect();
+        // form_ids[record_form_start[r] + k] = form id, for pass 2.
+        let mut form_ids = vec![0u32; n_forms];
+        for (id, &(_, r, k)) in all.iter().enumerate() {
+            form_ids[(record_form_start[r as usize] + k as u64) as usize] = id as u32;
         }
         drop(all);
         eprintln!(
@@ -205,31 +243,47 @@ impl ChunkFragmentIndex {
             n_bins
         );
 
-        // Pass 2: fill the packed entries; per-bin write cursors are atomics so
-        // records fill in parallel, then each bin sorts by form id.
-        let fill: Vec<AtomicU64> = bin_start.iter().map(|&s| AtomicU64::new(s)).collect();
-        let entries: Vec<(AtomicU32, AtomicU32)> = (0..n_entries)
-            .map(|_| (AtomicU32::new(0), AtomicU32::new(0)))
-            .collect();
-        records.par_iter().enumerate().for_each(|(r, rec)| {
-            let ids = &ids_by_record[r];
-            let mut ions: Vec<f32> = Vec::new();
-            for_each_record_form_masses_bounded(db, params, rec, mass_lo, mass_hi, |k, masses| {
-                let form_id = ids[k];
-                ions.clear();
-                by_ions_from_masses(masses, &mut ions);
-                for &mz in &ions {
-                    let b = (mz as f64 / bin_width) as usize;
-                    let pos = fill[b].fetch_add(1, Ordering::Relaxed) as usize;
-                    entries[pos].0.store(form_id, Ordering::Relaxed);
-                    entries[pos].1.store(mz.to_bits(), Ordering::Relaxed);
-                }
-            });
-        });
-        let mut entries: Vec<(u32, f32)> = entries
-            .into_iter()
-            .map(|(a, b)| (a.into_inner(), f32::from_bits(b.into_inner())))
-            .collect();
+        // Pass 2: each group re-walks its records and writes its ions at its
+        // own cursors, then each bin sorts by form id.
+        let mut entries: Vec<(u32, f32)> = vec![(0, 0.0); n_entries];
+        {
+            let base = entries.as_mut_ptr() as usize;
+            groups
+                .par_iter()
+                .zip(cursors.into_par_iter())
+                .for_each(|(range, mut cursor)| {
+                    let mut ions: Vec<f32> = Vec::new();
+                    for r in range.clone() {
+                        let first = record_form_start[r] as usize;
+                        for_each_record_form_masses_bounded(
+                            db,
+                            params,
+                            &tables,
+                            &records[r],
+                            mass_lo,
+                            mass_hi,
+                            |k, masses| {
+                                let form_id = form_ids[first + k];
+                                ions.clear();
+                                by_ions_from_masses(masses, &mut ions);
+                                for &mz in &ions {
+                                    let b = (mz as f64 / bin_width) as usize;
+                                    let pos = bin_start[b] as usize + cursor[b] as usize;
+                                    cursor[b] += 1;
+                                    debug_assert!(pos < bin_start[b + 1] as usize);
+                                    // SAFETY: pass 1 counted exactly these ions
+                                    // for this group, so `pos` lies in this
+                                    // group's own slots of bin `b`, which no
+                                    // other task writes.
+                                    unsafe {
+                                        (base as *mut (u32, f32)).add(pos).write((form_id, mz));
+                                    }
+                                }
+                            },
+                        );
+                    }
+                });
+        }
         {
             // Sort each bin by form id, in parallel over bins.
             let starts = &bin_start;
@@ -248,6 +302,7 @@ impl ChunkFragmentIndex {
         }
         Self {
             records,
+            tables,
             mass_lo,
             mass_hi,
             form_record,
@@ -361,7 +416,7 @@ impl ChunkFragmentIndex {
 
     /// Materialise selected forms as candidates, in (record, k) order, by
     /// re-walking each record's bounded enumeration (the same walk the build
-    /// used, so `k` selects the same form).
+    /// used, so `k` selects the same form). Only the selected forms are built.
     pub fn materialise(
         &self,
         selected: &[(u32, u16)],
@@ -376,6 +431,7 @@ impl ChunkFragmentIndex {
             .collect();
         by_record.sort_unstable();
         let mut out = Vec::with_capacity(by_record.len());
+        let mut ks: Vec<u32> = Vec::new();
         let mut i = 0;
         while i < by_record.len() {
             let r = by_record[i].0;
@@ -383,14 +439,20 @@ impl ChunkFragmentIndex {
             while j < by_record.len() && by_record[j].0 == r {
                 j += 1;
             }
+            ks.clear();
+            ks.extend(by_record[i..j].iter().map(|&(_, k)| k));
             let rec = &self.records[r as usize];
-            let mut forms = expand_base_record_bounded(db, params, rec, self.mass_lo, self.mass_hi);
+            let mut forms = expand_base_record_bounded(
+                db,
+                params,
+                &self.tables,
+                rec,
+                self.mass_lo,
+                self.mass_hi,
+                &ks,
+            );
             relabel(&mut forms);
-            for &(_, k) in &by_record[i..j] {
-                if let Some(c) = forms.get(k as usize) {
-                    out.push(c.clone());
-                }
-            }
+            out.extend(forms);
             i = j;
         }
         out
@@ -442,12 +504,22 @@ pub(crate) fn vote_intensity_floor(peaks: &[(f64, f32)], vote_peaks: usize) -> f
 /// The form id is the FINAL key, because the order must be total and reproducible —
 /// this repo has had an FDR swing from a non-deterministic sort in the candidate path.
 pub(crate) fn select_top_k(sel: &mut Vec<(u32, u16, f32)>, top_k: usize) {
-    sel.sort_unstable_by(|a, b| {
+    let order = |a: &(u32, u16, f32), b: &(u32, u16, f32)| {
         b.1.cmp(&a.1)
             .then_with(|| b.2.total_cmp(&a.2))
             .then_with(|| a.0.cmp(&b.0))
-    });
-    sel.truncate(top_k);
+    };
+    if top_k == 0 {
+        sel.clear();
+        return;
+    }
+    // The order is total, so partitioning at `top_k` and sorting only the kept
+    // prefix selects and orders exactly what a full sort would.
+    if sel.len() > top_k {
+        sel.select_nth_unstable_by(top_k - 1, order);
+        sel.truncate(top_k);
+    }
+    sel.sort_unstable_by(order);
 }
 
 #[cfg(test)]

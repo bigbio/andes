@@ -9,7 +9,8 @@ use smallvec::{smallvec, SmallVec};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::candidate_gen::{
-    base_record_key, base_records_for_nominal_window, expand_base_record, BaseRecordKey, Candidate,
+    base_record_key, base_records_for_nominal_window, distinct_base_records_for_nominal_window,
+    expand_base_record, BaseRecordKey, Candidate,
 };
 use crate::candidate_index::MmapCandidateIndex;
 use crate::fragment_index::ChunkFragmentIndex;
@@ -148,7 +149,7 @@ pub struct PreparedSearch<'a> {
     /// `is_decoy` flag and diverge the TDC label from RAM. Bare sequences only, so
     /// this is bounded (far smaller than the full candidate `Vec` we avoid in
     /// out-of-core mode). `None` in `Ram` mode.
-    mmap_target_bare_seqs: Option<std::collections::HashSet<Box<[u8]>>>,
+    mmap_target_bare_seqs: Option<FxHashSet<Box<[u8]>>>,
 }
 
 /// Global candidate identity for the `Mmap`-mode accumulator: enough to dedup a
@@ -823,85 +824,84 @@ impl<'a> PreparedSearch<'a> {
                     .collect();
                 windows.sort_unstable();
                 windows.dedup();
-                // Index mode indexes every form in the chunk's whole mass interval
-                // and each spectrum queries only its own window, so one range scan
-                // over the union of the windows yields every record it can select,
-                // instead of one overlapping scan per distinct window.
-                if params.fragment_index_top_k > 0 && !windows.is_empty() {
-                    let lo = windows.iter().map(|w| w.0).min().unwrap_or(0);
-                    let hi = windows.iter().map(|w| w.1).max().unwrap_or(0);
-                    windows = vec![(lo, hi)];
-                }
-                let records: FxHashMap<BaseRecordKey, crate::candidate_index::IndexRecord> =
-                    windows
-                        .par_iter()
-                        .fold(FxHashMap::default, |mut m, &(lo, hi)| {
-                            for (rec, _) in base_records_for_nominal_window(mi, params, lo, hi) {
-                                m.entry(base_record_key(&rec)).or_insert(rec);
-                            }
-                            m
-                        })
-                        .reduce(FxHashMap::default, |mut a, b| {
-                            a.extend(b);
-                            a
-                        });
                 // Fragment-ion index over the chunk's records (issue #76): the
                 // forms are enumerated once here, and each spectrum then scores
                 // only the forms its peaks vote for, instead of every form in its
-                // precursor windows.
-                let frag_index = if params.fragment_index_top_k > 0 {
-                    let mut recs: Vec<crate::candidate_index::IndexRecord> =
-                        records.values().cloned().collect();
-                    recs.sort_unstable_by_key(base_record_key);
-                    // The chunk's precursor mass interval over every spectrum,
-                    // charge and isotope offset; only forms inside it are indexed.
-                    let shift_ppm = params.precursor_mass_shift_ppm;
-                    let (mut lo, mut hi) = (f64::MAX, f64::MIN);
-                    for s in spectra
-                        .iter()
-                        .filter(|s| s.peaks.len() >= params.min_peaks as usize)
-                    {
-                        for z in charges_to_try(s, params) {
-                            let zf = z as f64;
-                            let obs = adjusted_observed_neutral_mass(
-                                s.precursor_mz * zf - zf * PROTON,
-                                shift_ppm,
-                            );
-                            for o in params.isotope_error_range.clone() {
-                                let c = obs - (o as f64) * model::mass::ISOTOPE;
-                                lo = lo.min(c - params.precursor_tolerance.left.as_da(c));
-                                hi = hi.max(c + params.precursor_tolerance.right.as_da(c));
+                // precursor windows. Index mode indexes every form in the chunk's
+                // whole mass interval and each spectrum queries only its own
+                // window, so one range scan over the union of the windows yields
+                // every record it can select.
+                if params.fragment_index_top_k > 0 {
+                    let frag_index = {
+                        let recs = match (
+                            windows.iter().map(|w| w.0).min(),
+                            windows.iter().map(|w| w.1).max(),
+                        ) {
+                            (Some(lo), Some(hi)) => {
+                                distinct_base_records_for_nominal_window(mi, params, lo, hi)
+                            }
+                            _ => Vec::new(),
+                        };
+                        // The chunk's precursor mass interval over every spectrum,
+                        // charge and isotope offset; only forms inside it are indexed.
+                        let shift_ppm = params.precursor_mass_shift_ppm;
+                        let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+                        for s in spectra
+                            .iter()
+                            .filter(|s| s.peaks.len() >= params.min_peaks as usize)
+                        {
+                            for z in charges_to_try(s, params) {
+                                let zf = z as f64;
+                                let obs = adjusted_observed_neutral_mass(
+                                    s.precursor_mz * zf - zf * PROTON,
+                                    shift_ppm,
+                                );
+                                for o in params.isotope_error_range.clone() {
+                                    let c = obs - (o as f64) * model::mass::ISOTOPE;
+                                    lo = lo.min(c - params.precursor_tolerance.left.as_da(c));
+                                    hi = hi.max(c + params.precursor_tolerance.right.as_da(c));
+                                }
                             }
                         }
-                    }
-                    Some(ChunkFragmentIndex::build(
-                        recs,
-                        self.idx,
-                        params,
-                        self.scorer.feature_match_tolerance(),
-                        lo,
-                        hi,
-                    ))
+                        ChunkFragmentIndex::build(
+                            recs,
+                            self.idx,
+                            params,
+                            self.scorer.feature_match_tolerance(),
+                            lo,
+                            hi,
+                        )
+                    };
+                    // The record cache serves the enumeration path only; index
+                    // mode materialises through the bounded walk and never reads it.
+                    (Some(MmapRecordCache::default()), Some(frag_index))
                 } else {
-                    None
-                };
-                // The record cache serves the enumeration path only; index
-                // mode materialises through the bounded walk and never reads it.
-                let cache: MmapRecordCache = if frag_index.is_some() {
-                    MmapRecordCache::default()
-                } else {
+                    let records: FxHashMap<BaseRecordKey, crate::candidate_index::IndexRecord> =
+                        windows
+                            .par_iter()
+                            .fold(FxHashMap::default, |mut m, &(lo, hi)| {
+                                for (rec, _) in base_records_for_nominal_window(mi, params, lo, hi)
+                                {
+                                    m.entry(base_record_key(&rec)).or_insert(rec);
+                                }
+                                m
+                            })
+                            .reduce(FxHashMap::default, |mut a, b| {
+                                a.extend(b);
+                                a
+                            });
                     let budget = crate::search_params::MMAP_WINDOW_CACHE_MAX_CANDIDATES;
                     let cached_total = AtomicUsize::new(0);
-                    records
+                    let cache: MmapRecordCache = records
                         .into_par_iter()
                         .filter_map(|(key, rec)| {
                             let v = expand_base_record(self.idx, params, &rec);
                             let before = cached_total.fetch_add(v.len(), Ordering::Relaxed);
                             (before + v.len() <= budget).then_some((key, v))
                         })
-                        .collect()
-                };
-                (Some(cache), frag_index)
+                        .collect();
+                    (Some(cache), None)
+                }
             } else {
                 (None, None)
             };
@@ -3393,7 +3393,7 @@ fn relabel_collision_decoys(candidates: &mut [Candidate]) {
 /// candidate list.)
 fn relabel_collision_decoys_with(
     candidates: &mut [Candidate],
-    target_seqs: &std::collections::HashSet<Box<[u8]>>,
+    target_seqs: &FxHashSet<Box<[u8]>>,
 ) {
     if target_seqs.is_empty() {
         return;
@@ -3415,28 +3415,24 @@ fn relabel_collision_decoys_with(
 /// Bare residues only (no mods, no flanks) → bounded memory: one `Box<[u8]>` per
 /// distinct target backbone, far smaller than the candidate `Vec` the out-of-core
 /// mode exists to avoid.
-fn build_target_bare_seqs(
-    mi: &MmapCandidateIndex,
-    db: &SearchIndex,
-) -> std::collections::HashSet<Box<[u8]>> {
+fn build_target_bare_seqs(mi: &MmapCandidateIndex, db: &SearchIndex) -> FxHashSet<Box<[u8]>> {
     use crate::candidate_index::flags as rec_flags;
-    let mut set: std::collections::HashSet<Box<[u8]>> = std::collections::HashSet::new();
-    for rec in mi.records() {
-        if rec.flags & rec_flags::IS_DECOY != 0 {
-            continue;
-        }
-        let pidx = rec.protein_index as usize;
-        if pidx >= db.db.proteins.len() {
-            continue;
-        }
-        let seq = &db.db.proteins[pidx].sequence;
-        let start = rec.start_offset as usize;
-        let end = start + rec.length as usize;
-        if end > seq.len() {
-            continue;
-        }
-        set.insert(seq[start..end].to_vec().into_boxed_slice());
-    }
+    let mut spans: Vec<&[u8]> = (0..mi.len())
+        .into_par_iter()
+        .filter_map(|i| {
+            let rec = mi.record_at(i);
+            if rec.flags & rec_flags::IS_DECOY != 0 {
+                return None;
+            }
+            let seq = &db.db.proteins.get(rec.protein_index as usize)?.sequence;
+            let start = rec.start_offset as usize;
+            seq.get(start..start + rec.length as usize)
+        })
+        .collect();
+    spans.par_sort_unstable();
+    spans.dedup();
+    let mut set = FxHashSet::with_capacity_and_hasher(spans.len(), Default::default());
+    set.extend(spans.into_iter().map(|s| s.to_vec().into_boxed_slice()));
     set
 }
 

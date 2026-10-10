@@ -174,6 +174,50 @@ fn index_chunk_len<T>(rest: &[T], mass: impl Fn(&T) -> f64, span_da: f64) -> usi
     take
 }
 
+/// Whether a spectrum path is gzip-compressed (`.gz`).
+fn is_gzip_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("gz"))
+}
+
+/// Sort one file's spectra by precursor mass and score them in fragment-index
+/// chunks, appending to `all_spectra` / `all_queues` with peaks dropped.
+fn score_mass_ordered(
+    prepared: &PreparedSearch,
+    mut pending: Vec<Spectrum>,
+    span_da: f64,
+    all_spectra: &mut Vec<Spectrum>,
+    all_queues: &mut Vec<TopNQueue>,
+    t_search_start: std::time::Instant,
+    keep_peaks: bool,
+) {
+    pending.sort_by(|a, b| index_order_mass(a).total_cmp(&index_order_mass(b)));
+    eprintln!(
+        "fragment-index: {} spectra sorted by precursor mass, chunks of <= {} spectra and <= {:.0} Da",
+        pending.len(),
+        INDEX_CHUNK_SIZE,
+        span_da
+    );
+    let mut rest = pending;
+    while !rest.is_empty() {
+        let take = index_chunk_len(&rest, index_order_mass, span_da);
+        let chunk: Vec<Spectrum> = rest.drain(..take).collect();
+        let offset = all_spectra.len();
+        let queues = prepared.run_chunk(&chunk, offset);
+        all_queues.extend(queues);
+        for mut spec in chunk.into_iter() {
+            // `--refine` re-scores unidentified spectra in its Pass 2, so their
+            // peaks stay resident.
+            if !keep_peaks {
+                spec.peaks = Vec::new();
+            }
+            all_spectra.push(spec);
+        }
+        report_search_progress(all_spectra.len(), t_search_start);
+    }
+}
+
 pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // These three were validated as Some(..) by main() before calling run().
     if cli.spectrum.is_empty() {
@@ -1468,6 +1512,33 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 error_count: err_count,
                 first_errors,
             }
+        } else if params.fragment_index_top_k > 0
+            && !cli.glyco
+            && file_is_mzml
+            && !is_gzip_path(input_path)
+        {
+            // Fragment-index mode scores mass-ordered chunks, so nothing is
+            // scored until the whole file is read; read it with every thread.
+            let (mut spectra, errors) =
+                input::read_spectra_parallel(input_path, ms_level_u32, ms_level_u32, cli.threads)
+                    .map_err(|e| format!("read mzML {}: {e}", input_path.display()))?;
+            spectra.truncate(remaining_cap);
+            if let Some(prefix) = &title_prefix {
+                prefix_spectrum_titles(&mut spectra, prefix);
+            }
+            score_mass_ordered(
+                &prepared,
+                spectra,
+                index_chunk_span_da(cli.fragment_index_slice_da),
+                &mut all_spectra,
+                &mut all_queues,
+                t_search_start,
+                cli.refine,
+            );
+            ParseStats {
+                error_count: errors.len(),
+                first_errors: errors.into_iter().take(3).collect(),
+            }
         } else {
             let (tx, rx) = sync_channel::<Vec<Spectrum>>(2);
             let spectrum_path = input_path.clone();
@@ -1561,31 +1632,15 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 report_search_progress(all_spectra.len(), t_search_start);
             }
             if mass_ordered {
-                pending.sort_by(|a, b| index_order_mass(a).total_cmp(&index_order_mass(b)));
-                let span_da = index_chunk_span_da(cli.fragment_index_slice_da);
-                eprintln!(
-                    "fragment-index: {} spectra sorted by precursor mass, chunks of <= {} spectra and <= {:.0} Da",
-                    pending.len(),
-                    INDEX_CHUNK_SIZE,
-                    span_da
+                score_mass_ordered(
+                    &prepared,
+                    pending,
+                    index_chunk_span_da(cli.fragment_index_slice_da),
+                    &mut all_spectra,
+                    &mut all_queues,
+                    t_search_start,
+                    cli.refine,
                 );
-                let mut rest = pending;
-                while !rest.is_empty() {
-                    let take = index_chunk_len(&rest, index_order_mass, span_da);
-                    let chunk: Vec<Spectrum> = rest.drain(..take).collect();
-                    let offset = all_spectra.len();
-                    let queues = prepared.run_chunk(&chunk, offset);
-                    all_queues.extend(queues);
-                    for mut spec in chunk.into_iter() {
-                        // `--refine` re-scores unidentified spectra in its Pass 2,
-                        // so their peaks stay resident.
-                        if !cli.refine {
-                            spec.peaks = Vec::new();
-                        }
-                        all_spectra.push(spec);
-                    }
-                    report_search_progress(all_spectra.len(), t_search_start);
-                }
             }
 
             match parser_handle.join() {

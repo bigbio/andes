@@ -22,10 +22,10 @@ MS-GF+'s strongest regime, it trails Java.
 
 | Engine | Astral (high-res HCD) | TMT a05058 (low-res CID) | UPS1 (low-res LFQ) |
 |---|---:|---:|---:|
-| **andes** | **47,080** | **12,281** | 15,838 |
+| **andes** | **47,080** | **12,347** | 15,848 |
 | Comet 2025.01 | 31,435 | 10,504 | 14,734 |
 | Java MS-GF+ v20240326 † | 26,542 | 10,651 | **15,904** |
-| *andes wall time* | *160–161 s* | *53–55 s* | *34–35 s* |
+| *andes wall time* | *160–161 s* | *28 s* | *18 s* |
 | *Comet wall time* | *215 s* | *76 s* | *46 s* |
 
 <sub>**Metric and provenance.** PSMs at Percolator `q ≤ 0.01`, one method for every row (plain
@@ -33,31 +33,32 @@ FASTA, andes `XXX_` decoys, Percolator 3.7.1 `--seed 42 -Y`, same 8-thread host)
 **2026-10-07** at #112 (`40774aca`); Comet on 2026-10-05, reproducing its 2026-09-04 counts.
 Since #112, high-res searches retrieve candidates with the fragment-ion index, which moved Astral
 from 38,394 to 46,774, and breaking the index's vote ties by matched intensity took it to 47,080;
-TMT and UPS1 are unchanged. andes finds 7.5–49.8% more PSMs in 0.70–0.76x
-Comet's wall time. **†** Java MS-GF+ was not re-run; its counts are from an earlier session, and it
+low-res searches use the index too since 2026-10-10 (TMT 12,281 → 12,347, UPS1 15,838 → 15,848,
+both now in less than half the memory). andes finds 7.6–49.8% more PSMs in 0.36–0.74x Comet's
+wall time. **†** Java MS-GF+ was not re-run; its counts are from an earlier session, and it
 remains ~10–40x slower. **Error rates:** checked against an entrapment version of the Astral
 database, the Astral gain holds at an equal true FDP (+22.2% over the previous in-RAM retrieval at
 1.00%; the index's nominal 1% is 1.07% true). TMT has no entrapment component; on UPS1 the true FDP
-at a nominal 1% is **~3.6%**, the same rate as Comet's. Details:
+at a nominal 1% is **~3.5%**, the same rate as Comet's. Details:
 [`docs/benchmarks/`](docs/benchmarks/README.md).</sub>
 
-**Time, CPU and memory** (same VM, 8 threads, `/usr/bin/time`; andes 2026-10-07 at #112, two runs
-on the standard sets; Comet 2026-10-06, one run). andes uses 36–57% less CPU time than Comet and
-17–42% less wall time. It needs less memory on Astral and UPS1, and more on TMT (2x) and phospho
-(2.3x, 80 Da index slices).
+**Time, CPU and memory** (same VM, 8 threads, `/usr/bin/time`; andes Astral and phospho 2026-10-07
+at #112, TMT and UPS1 2026-10-10 on the out-of-core index, two runs on the standard sets; Comet
+2026-10-06, one run). andes uses 51–70% less CPU time than Comet and 26–64% less wall time. It
+needs less memory on Astral, TMT and UPS1, and more on phospho (2.3x, 80 Da index slices).
 
 | dataset | engine | PSMs @ q≤0.01 | wall | CPU time | peak memory |
 |---|---|---:|---:|---:|---:|
 | Astral | **andes** | **47,080** | **160 s** | **787 s** | **4.1 GB** |
 | | Comet | 31,435 | 217 s | 1,594 s | 8.1 GB |
-| TMT a05058 | **andes** | **12,281** | **53 s** | **295 s** | 5.9 GB |
+| TMT a05058 | **andes** | **12,347** | **28 s** | **171 s** | **1.7 GB** |
 | | Comet | 10,504 | 77 s | 568 s | 2.9 GB |
-| UPS1 | **andes** | **15,838** | **34 s** | **199 s** | **2.5 GB** |
+| UPS1 | **andes** | **15,848** | **18 s** | **117 s** | **1.3 GB** |
 | | Comet | 14,734 | 42 s | 309 s | 2.9 GB |
 | Phospho (PXD007653) | **andes** | **37,190** (1.02% FDP) | **637 s** | **3,608 s** | 13.7 GB |
 | | Comet | 33,984 (1.77% FDP) | 1,096 s | 8,399 s | 6.0 GB |
 
-<sub>PSM counts: 2026-10-05 refresh (phospho: seed 42). Wall times vary 5–15% between sessions;
+<sub>PSM counts: 2026-10-05 refresh; TMT and UPS1 2026-10-10 (phospho: seed 42). Wall times vary 5–15% between sessions;
 CPU time is steadier.</sub>
 
 ## How it works
@@ -76,11 +77,10 @@ flowchart TD
 
 1. **Pick the model** from the file's activation, resolution and isobaric label (one of 17
    bundled models).
-2. **Build candidates**: digest the FASTA and generate decoys. On high-res data the candidate
-   index goes out-of-core (cached in the system temp directory) so candidates can be retrieved by
-   the fragment-ion index; on low-res data it stays in RAM unless it would not fit the container
-   or scheduler memory limit, in which case the index is used with only the 150 most intense
-   peaks voting.
+2. **Build candidates**: digest the FASTA and generate decoys. The candidate index goes
+   out-of-core (cached in the system temp directory) so candidates can be retrieved by the
+   fragment-ion index; on low-res data only the 150 most intense peaks of each spectrum vote.
+   `--glyco` keeps an in-RAM candidate index.
 3. **Score**: low-res by the generating-function rank score, high-res by the fused strong
    score, plus GBDT fragment-intensity features. High-res searches score only the 100 candidates
    whose fragment ions best match the spectrum (Astral: +22% PSMs at an equal true FDP; phospho:

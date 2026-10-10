@@ -81,16 +81,16 @@ the file; use `--model-store` plus `--model` for an unbundled model.
 |---|---|---|---|---|
 | `--precursor-cal` | enum | `off` | `off`, `auto`, `on`. A pre-pass learns a ppm shift from confident PSMs and tightens the precursor tolerance; `auto` skips it on small samples. Off by default: on the benchmark sets the pre-pass took 9–17% of the run and never fired, and where it fired (UPS1, larger sample) the tightened window lost 7.6% of PSMs. Skipped (with a warning) on `.raw` and `.d`. | Java `-precursorCal auto\|on\|off` |
 
-**Candidate retrieval is automatic.** On high-res fragment matching, andes builds the candidate
+**Candidate retrieval is automatic.** andes builds the candidate
 index out-of-core (cached as `andes-candidx-<hash>.bin` in the system temp directory, ~150–250 MB
 on the benchmark databases, reused by later runs on the same database and settings) and retrieves
 the 100 candidates whose singly-charged b/y ions best match each spectrum (at least 3 matched).
 On Astral this gave +22.2% PSMs over full-window enumeration at an equal true FDP of 1.00%; on
-phospho, 164 s against 5,954 s. Low-res data stays on in-RAM enumeration while the candidate index
-fits, because it is faster there. When it does not fit, low-res searches also use the index, but
+phospho, 164 s against 5,954 s. Low-res searches use the index too, but
 only the 150 most intense peaks of each spectrum vote: with every peak voting, the 0.5 Da bins let
-noise swamp the count (TMT 12,281 -> 4,368 PSMs at 1%), while capped the index matches enumeration
-(12,347) at 289 s of CPU against 5,404 s. `--glyco` keeps enumeration; `--chimeric` and `--refine` run on either path. The engine prints its choice; `--candidate-index ram` or
+noise swamp the count (TMT 12,281 -> 4,368 PSMs at 1%). Capped, the index matches the in-RAM
+enumeration (TMT 12,347 vs 12,281 PSMs at 1%, UPS1 15,848 vs 15,838) at the same CPU and wall time
+in less than half the memory (TMT 1.7 vs 5.9 GB). `--glyco` keeps enumeration; `--chimeric` and `--refine` run on either path. The engine prints its choice; `--candidate-index ram` or
 `--fragment-index off` restore enumeration
 ([measurements](docs/benchmarks/README.md#choosing-the-retrieval-strategy)).
 

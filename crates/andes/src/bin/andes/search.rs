@@ -755,16 +755,20 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 search::fragment_index::is_high_resolution(scorer.feature_match_tolerance());
             if cli.glyco {
                 search::CandidateIndexMode::Ram
-            } else if high_res_fragments && cli.fragment_index != FragmentIndexFlag::Off {
-                // High-resolution fragments: retrieve candidates with the fragment-ion
-                // index, which runs on the out-of-core path. The in-RAM path keeps the
-                // best candidates by rank score, which on high-res data separates
-                // targets from decoys poorly; retrieval by shared fragments gave +23%
-                // PSMs on Astral at ~1.07% entrapment FDP (1.00% before). Low-res data
-                // stays on RAM while it fits: it is faster there than the capped index.
+            } else if cli.fragment_index != FragmentIndexFlag::Off {
+                // Every non-glyco search retrieves candidates with the fragment-ion
+                // index on the out-of-core path. High-res: +23% PSMs on Astral at
+                // equal entrapment FDP over enumeration. Low-res (only the most
+                // intense peaks vote): the same identifications as the in-RAM
+                // path at the same CPU and wall time, in less than half the memory.
                 eprintln!(
-                    "[auto] high-resolution fragments -> out-of-core index with fragment-ion \
-                     retrieval (force the in-RAM path with --candidate-index ram)"
+                    "[auto] {} fragments -> out-of-core index with fragment-ion retrieval \
+                     (force the in-RAM path with --candidate-index ram)",
+                    if high_res_fragments {
+                        "high-resolution"
+                    } else {
+                        "low-resolution"
+                    }
                 );
                 search::CandidateIndexMode::Mmap
             } else {

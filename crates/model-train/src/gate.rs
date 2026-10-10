@@ -1,17 +1,15 @@
 //! Acceptance gate for incremental model updates.
 //!
-//! [`evaluate_candidate`] runs the same TDC FDR search used by
-//! [`crate::labeled::bootstrap_labels`] with both the *current* and the
+//! [`evaluate_candidate`] runs a TDC FDR search with both the *current* and the
 //! *candidate* model and returns a [`YieldDelta`] that the caller can use to
 //! decide whether to commit the update.
 //!
 //! # Reuse of search/FDR code
 //!
-//! Rather than re-implementing the search, we factor the inner search-and-count
-//! logic into [`count_target_psms`], which is the same algorithm as
-//! `bootstrap_labels` (Steps 1-7 from [`crate::labeled`]) but returns only
-//! the count of accepted TARGET PSMs instead of the full `LabeledMatch` list.
-//! `bootstrap_labels` itself is left unchanged.
+//! The inner search-and-count logic lives in [`count_target_psms`]: the TDC
+//! steps of `bootstrap_labels` ([`crate::labeled`]) over a search on the
+//! out-of-core path with fragment-ion retrieval, returning only the count of
+//! accepted TARGET PSMs instead of the full `LabeledMatch` list.
 
 use std::fs::File;
 use std::io::BufReader;
@@ -20,7 +18,7 @@ use std::path::Path;
 use input::FastaReader;
 use model::spectrum::Spectrum;
 use scoring_crate::scoring::rank_scorer::RankScorer;
-use search::{match_spectra, SearchIndex, SearchParams};
+use search::{match_spectra_out_of_core, SearchIndex, SearchParams};
 
 use crate::labeled::BOOTSTRAP_DECOY_PREFIX;
 use crate::TrainError;
@@ -101,8 +99,10 @@ pub fn evaluate_candidate(
 
 /// Run a single search and return the number of TARGET PSMs at `fdr`.
 ///
-/// This is the same algorithm as [`crate::labeled::bootstrap_labels`] (Steps
-/// 2-7) but returns `usize` instead of `Vec<LabeledMatch>`.
+/// Steps 3-7 are those of [`crate::labeled::bootstrap_labels`]; the search in
+/// step 2 runs on the out-of-core path with fragment-ion retrieval, which
+/// `bootstrap_labels` does not yet use. Returns `usize` instead of
+/// `Vec<LabeledMatch>`.
 pub(crate) fn count_target_psms(
     spectra: &[Spectrum],
     idx: &SearchIndex,
@@ -110,15 +110,17 @@ pub(crate) fn count_target_psms(
     scorer: &RankScorer,
     fdr: f64,
 ) -> Result<usize, TrainError> {
-    // Step 2: run the search.
-    let (queues, candidates) = match_spectra(
+    // Step 2: run the search on the out-of-core path with fragment-ion
+    // retrieval, the path `andes search` takes. Both models of a comparison go
+    // through the same retrieval.
+    let (queues, candidates) = match_spectra_out_of_core(
         spectra,
         idx,
         search_params,
         scorer,
         FRAGMENT_TOL_DA,
         BOOTSTRAP_DECOY_PREFIX,
-    );
+    )?;
 
     // Step 3: collect best PSM per spectrum.
     struct BestPsm {

@@ -35,7 +35,9 @@ pub use mass_calibrator::{
     apply_shift_for_mode, apply_tightened_precursor_tolerance, build_spec_keys,
     learn_calibration_stats, prepass_search_params, CalibrationStats, SpecKey,
 };
-pub use match_engine::{match_spectra, run_pass2_coisolation, CandidateBacking, PreparedSearch};
+pub use match_engine::{
+    match_spectra, match_spectra_out_of_core, run_pass2_coisolation, CandidateBacking, PreparedSearch,
+};
 pub use precursor_cal::{
     adjusted_observed_neutral_mass, robust_sigma_ppm, tightened_tolerance_ppm, PrecursorCalMode,
 };

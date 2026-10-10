@@ -459,6 +459,30 @@ impl ChunkFragmentIndex {
     }
 }
 
+/// Mass a spectrum is ordered by for fragment-index chunking: precursor m/z
+/// times the reported charge (2 when unknown).
+pub fn index_order_mass(s: &Spectrum) -> f64 {
+    let z = s.precursor_charge.filter(|z| *z > 0).unwrap_or(2) as f64;
+    s.precursor_mz * z
+}
+
+/// Most spectra in one fragment-index chunk.
+pub const INDEX_CHUNK_SIZE: usize = 20_000;
+
+/// Length of the next fragment-index chunk at the head of `rest` (sorted by
+/// `mass`): at most [`INDEX_CHUNK_SIZE`] items within `span_da` of the first.
+pub fn index_chunk_len<T>(rest: &[T], mass: impl Fn(&T) -> f64, span_da: f64) -> usize {
+    let Some(head) = rest.first() else {
+        return 0;
+    };
+    let first = mass(head);
+    let mut take = 1;
+    while take < rest.len() && take < INDEX_CHUNK_SIZE && mass(&rest[take]) - first <= span_da {
+        take += 1;
+    }
+    take
+}
+
 /// Whether a fragment tolerance is tight enough for the index to bin usefully.
 pub fn is_high_resolution(fragment_tol: Tolerance) -> bool {
     match fragment_tol {

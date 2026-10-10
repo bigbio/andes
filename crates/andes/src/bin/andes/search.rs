@@ -30,6 +30,7 @@ use model::{
 };
 use scoring_crate::RankScorer;
 use search::candidate_index::index_cache_path;
+use search::fragment_index::{index_chunk_len, index_order_mass, INDEX_CHUNK_SIZE};
 use search::precursor_mono::{MonoCorrection, MonoParams};
 use search::{
     apply_shift_for_mode, apply_tightened_precursor_tolerance, PrecursorCalMode, PreparedSearch,
@@ -123,18 +124,8 @@ pub(crate) fn retrieval_choice(
     }
 }
 
-/// Mass a spectrum is ordered by for fragment-index chunking: precursor m/z
-/// times the reported charge (2 when unknown).
-fn index_order_mass(s: &Spectrum) -> f64 {
-    let z = s.precursor_charge.filter(|z| *z > 0).unwrap_or(2) as f64;
-    s.precursor_mz * z
-}
-
 /// One MS1 scan's (m/z, intensity) peaks, m/z-sorted.
 type Ms1Peaks = Vec<(f64, f32)>;
-
-/// Most spectra in one fragment-index chunk.
-const INDEX_CHUNK_SIZE: usize = 20_000;
 
 /// Mass span (Da) of one fragment-index chunk.
 ///
@@ -158,20 +149,6 @@ fn index_chunk_span_da(flag: Option<f64>) -> f64 {
             ((budget * 0.6 - 4.0 * GIB) / (0.13 * GIB)).clamp(10.0, 150.0)
         }
     }
-}
-
-/// Length of the next fragment-index chunk at the head of `rest` (sorted by
-/// `mass`): at most [`INDEX_CHUNK_SIZE`] items within `span_da` of the first.
-fn index_chunk_len<T>(rest: &[T], mass: impl Fn(&T) -> f64, span_da: f64) -> usize {
-    let Some(head) = rest.first() else {
-        return 0;
-    };
-    let first = mass(head);
-    let mut take = 1;
-    while take < rest.len() && take < INDEX_CHUNK_SIZE && mass(&rest[take]) - first <= span_da {
-        take += 1;
-    }
-    take
 }
 
 /// Whether a spectrum path is gzip-compressed (`.gz`).

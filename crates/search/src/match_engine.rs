@@ -1505,6 +1505,70 @@ pub fn match_spectra(
     (queues, prepared.candidates)
 }
 
+/// Precursor-mass span (Da) of one chunk in [`match_spectra_out_of_core`].
+pub const OUT_OF_CORE_SLICE_DA: f64 = 80.0;
+
+/// Single-shot search on the out-of-core path with fragment-ion retrieval: the
+/// path `andes search` takes for high-resolution data and for low-resolution
+/// data that does not fit in RAM. Spectra are scored in precursor-mass-ordered
+/// chunks of at most [`OUT_OF_CORE_SLICE_DA`], so the per-chunk index stays
+/// bounded however many spectra are passed.
+///
+/// Returns one queue per input spectrum, in input order (`spectrum_idx` is the
+/// input position), and the candidates the queues reference. The candidate
+/// index is cached under the system temp directory and reused by later calls
+/// with the same database and parameters, or built in memory when the cache
+/// cannot be written.
+pub fn match_spectra_out_of_core(
+    spectra: &[Spectrum],
+    idx: &SearchIndex,
+    params: &SearchParams,
+    scorer: &RankScorer,
+    fragment_tolerance_da: f64,
+    decoy_prefix: &str,
+) -> std::io::Result<(Vec<TopNQueue>, Vec<Candidate>)> {
+    let mut params = params.clone();
+    params.candidate_index = crate::search_params::CandidateIndexMode::Mmap;
+    params.fragment_index_top_k = crate::search_params::FRAGMENT_INDEX_TOP_K;
+    let cache = crate::candidate_index::index_cache_path(idx, &params);
+    let mut prepared = PreparedSearch::prepare_mmap(
+        idx,
+        &params,
+        scorer,
+        fragment_tolerance_da,
+        decoy_prefix,
+        &cache,
+    )?;
+    let mut order: Vec<usize> = (0..spectra.len()).collect();
+    order.sort_by(|&a, &b| {
+        crate::fragment_index::index_order_mass(&spectra[a])
+            .total_cmp(&crate::fragment_index::index_order_mass(&spectra[b]))
+            .then(a.cmp(&b))
+    });
+    let mut queues: Vec<Option<TopNQueue>> = (0..spectra.len()).map(|_| None).collect();
+    let mut rest: &[usize] = &order;
+    while !rest.is_empty() {
+        let take = crate::fragment_index::index_chunk_len(
+            rest,
+            |&i| crate::fragment_index::index_order_mass(&spectra[i]),
+            OUT_OF_CORE_SLICE_DA,
+        );
+        let (head, tail) = rest.split_at(take);
+        let chunk: Vec<Spectrum> = head.iter().map(|&i| spectra[i].clone()).collect();
+        for (mut q, &orig) in prepared.run_chunk(&chunk, 0).into_iter().zip(head) {
+            q.update_in_place(|psm| psm.spectrum_idx = orig);
+            queues[orig] = Some(q);
+        }
+        rest = tail;
+    }
+    prepared.sync_materialized_candidates();
+    let queues = queues
+        .into_iter()
+        .map(|q| q.expect("every spectrum is in exactly one chunk"))
+        .collect();
+    Ok((queues, prepared.candidates))
+}
+
 /// Isolation window `[lo, hi]` (m/z) Pass 2 searches for co-isolated precursors
 /// of `spec`, and the m/z tolerance used to match their MS1 isotope peaks. Uses
 /// the per-scan isolation offsets when the parser recorded them, else the

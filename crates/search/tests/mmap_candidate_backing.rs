@@ -653,3 +653,47 @@ fn fragment_index_prunes_to_the_window_and_still_finds_the_true_peptide() {
         }
     }
 }
+
+/// The single-shot out-of-core search returns one queue per input spectrum in
+/// input order, each PSM's `spectrum_idx` is its input position, and its top
+/// PSM is the one the in-RAM enumeration ranks first. The spectra are passed
+/// in descending precursor mass, so the search has to reorder them.
+#[test]
+fn match_spectra_out_of_core_keeps_input_order_and_finds_the_enumeration_top_hit() {
+    let (mut spectra, idx, params) = small_search_fixture();
+    spectra.sort_by(|a, b| {
+        search::fragment_index::index_order_mass(b)
+            .total_cmp(&search::fragment_index::index_order_mass(a))
+    });
+    let scorer = make_scorer(0.05);
+    let masses: Vec<f64> = spectra
+        .iter()
+        .map(search::fragment_index::index_order_mass)
+        .collect();
+    assert!(
+        masses.windows(2).any(|w| w[0] > w[1]),
+        "the fixture must exercise the mass reordering"
+    );
+    let (queues, cands) =
+        search::match_spectra_out_of_core(&spectra, &idx, &params, &scorer, 0.05, "XXX")
+            .expect("out-of-core search");
+    let (ram_queues, ram_cands) =
+        run_prepared(&idx, &params, &spectra, CandidateBacking::Ram, &scorer);
+    assert_eq!(queues.len(), spectra.len());
+    let top = |q: &TopNQueue| {
+        q.iter_psms()
+            .max_by(|a, b| a.rank_score.partial_cmp(&b.rank_score).unwrap())
+            .cloned()
+            .expect("psm")
+    };
+    for (i, (q, rq)) in queues.iter().zip(&ram_queues).enumerate() {
+        assert!(q.iter_psms().all(|p| p.spectrum_idx == i));
+        let (a, b) = (top(q), top(rq));
+        assert_eq!(
+            cands[a.primary_candidate_idx() as usize].peptide.to_string(),
+            ram_cands[b.primary_candidate_idx() as usize].peptide.to_string(),
+            "{}: top peptide differs from the enumeration",
+            spectra[i].title
+        );
+    }
+}

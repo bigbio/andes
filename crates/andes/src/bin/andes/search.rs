@@ -76,8 +76,8 @@ fn index_cache_writable(path: &std::path::Path) -> bool {
 ///
 /// The index is not used in RAM: the in-RAM search keeps its own candidate
 /// pruning and is the faster path whenever the candidate index fits.
-/// `--refine` and `--glyco` keep enumeration because they read the full
-/// candidate list rather than a per-spectrum shortlist.
+/// `--glyco` keeps enumeration because its driver derives candidates from the
+/// full in-RAM candidate list rather than a per-spectrum shortlist.
 pub(crate) fn retrieval_choice(
     out_of_core: bool,
     fragment_tol: model::tolerance::Tolerance,
@@ -96,7 +96,7 @@ pub(crate) fn retrieval_choice(
             refused_because: (flag == FragmentIndexFlag::On).then_some(if !out_of_core {
                 "the candidate index fits in RAM"
             } else {
-                "--refine/--glyco reads the full candidate list"
+                "--glyco reads the full candidate list"
             }),
         };
     }
@@ -741,12 +741,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         CandidateIndexFlag::Ram => search::CandidateIndexMode::Ram,
         CandidateIndexFlag::Mmap => search::CandidateIndexMode::Mmap,
         CandidateIndexFlag::Auto => {
-            // mmap is not compatible with the refine / glyco in-RAM passes
-            // (handled below); those are not the OOM-prone giant-mod-space case,
-            // so `auto` simply keeps them on RAM.
+            // mmap is not compatible with the glyco driver (handled below),
+            // so `auto` keeps it on RAM.
             let high_res_fragments =
                 search::fragment_index::is_high_resolution(scorer.feature_match_tolerance());
-            if cli.refine || cli.glyco {
+            if cli.glyco {
                 search::CandidateIndexMode::Ram
             } else if high_res_fragments
                 && cli.fragment_index != FragmentIndexFlag::Off
@@ -805,17 +804,18 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     // The out-of-core (`Mmap`) candidate path materializes candidates lazily and
-    // only syncs them into `prepared.candidates` AFTER the scan. The refinement
-    // cascade and the glyco driver read `prepared.candidates` / `bucket_index`
-    // DURING scanning, so they are not supported together with
-    // `--candidate-index mmap` (fail loud rather than silently produce wrong
-    // results). The chimeric Pass 2 resolves its candidates on either backing.
+    // only syncs them into `prepared.candidates` AFTER the scan. The glyco driver
+    // reads `prepared.candidates` / `bucket_index` DURING scanning, so it is not
+    // supported together with `--candidate-index mmap` (fail loud rather than
+    // silently produce wrong results). The refinement cascade runs after the
+    // sync and reads only the candidates its Pass-1 PSMs reference, and the
+    // chimeric Pass 2 resolves its candidates on either backing.
     // Retrieval strategy for the out-of-core path (issue #76): chosen by
     // `retrieval_choice` and reported once; `--fragment-index` overrides it.
     let choice = retrieval_choice(
         params.candidate_index == search::CandidateIndexMode::Mmap,
         scorer.feature_match_tolerance(),
-        cli.glyco || cli.refine,
+        cli.glyco,
         cli.fragment_index,
     );
     params.fragment_index_top_k = if choice.use_index {
@@ -841,19 +841,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    if params.candidate_index == search::CandidateIndexMode::Mmap {
-        if cli.refine {
-            return Err(
-                "--candidate-index mmap is not yet compatible with --refine \
-                        (the refinement cascade needs the in-RAM candidate index)"
-                    .into(),
-            );
-        }
-        if cli.glyco {
-            return Err("--candidate-index mmap is not yet compatible with --glyco \
-                        (glyco_search_run needs the in-RAM candidate index/bucket_index)"
-                .into());
-        }
+    if params.candidate_index == search::CandidateIndexMode::Mmap && cli.glyco {
+        return Err("--candidate-index mmap is not yet compatible with --glyco \
+                    (glyco_search_run needs the in-RAM candidate index/bucket_index)"
+            .into());
     }
     // --glyco-hcd-pair only takes effect inside the glyco driver; without --glyco
     // it is silently inert, which would mislead a user who set it on purpose (code
@@ -1334,7 +1325,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // MS1 scan Pass 2 reads, so a mass-ordered chunk can carry its own
             // MS1 link.
             let index_ordered =
-                chimeric_active && params.fragment_index_top_k > 0 && !cli.glyco && !cli.refine;
+                chimeric_active && params.fragment_index_top_k > 0 && !cli.glyco;
             let mut pending: Vec<(Spectrum, Option<Ms1Peaks>)> = Vec::new();
             for (mut chunk_spectra, chunk_link) in rx {
                 if let Some(prefix) = &title_prefix {
@@ -1453,7 +1444,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 );
                 all_queues.extend(queues);
                 for mut spec in scored.into_iter() {
-                    spec.peaks = Vec::new();
+                    if !cli.refine {
+                        spec.peaks = Vec::new();
+                    }
                     all_spectra.push(spec);
                 }
             }
@@ -1532,7 +1525,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // (its index is the whole database; 100 GB on phospho). Collect the
             // stream, sort by precursor mass, then chunk. Peaks for every
             // spectrum are held until scored (~1 GB for 100k high-res MS2).
-            let mass_ordered = params.fragment_index_top_k > 0 && !cli.glyco && !cli.refine;
+            let mass_ordered = params.fragment_index_top_k > 0 && !cli.glyco;
             let mut pending: Vec<Spectrum> = Vec::new();
             for mut chunk in rx {
                 if chunk.is_empty() {
@@ -1584,7 +1577,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     let queues = prepared.run_chunk(&chunk, offset);
                     all_queues.extend(queues);
                     for mut spec in chunk.into_iter() {
-                        spec.peaks = Vec::new();
+                        // `--refine` re-scores unidentified spectra in its Pass 2,
+                        // so their peaks stay resident.
+                        if !cli.refine {
+                            spec.peaks = Vec::new();
+                        }
                         all_spectra.push(spec);
                     }
                     report_search_progress(all_spectra.len(), t_search_start);
@@ -2192,8 +2189,13 @@ mod retrieval_choice_tests {
     fn modes_that_read_the_full_candidate_list_keep_enumeration() {
         for flag in [FragmentIndexFlag::Auto, FragmentIndexFlag::On] {
             let c = retrieval_choice(true, HI, true, flag);
-            assert!(!c.use_index, "glyco/refine must keep enumeration");
+            assert!(!c.use_index, "glyco must keep enumeration");
         }
+        let c = retrieval_choice(true, HI, true, FragmentIndexFlag::On);
+        assert_eq!(
+            c.refused_because,
+            Some("--glyco reads the full candidate list")
+        );
     }
 
     #[test]

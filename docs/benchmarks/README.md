@@ -46,7 +46,7 @@ Reference identifications for scoring ship in [`glyco/truth/`](glyco/truth/). Re
 | **Chimeric** (`--chimeric`, in-RAM path) | Astral | PSMs @ q≤0.01 | **65,028** (+69%; 55,616 distinct scans) | in-RAM baseline 38,394 | not measurable | 337 s ¶ |
 | | TMT a05058 | PSMs @ q≤0.01 | 12,540 (+2.1%) | baseline 12,281 | not measurable | 73 s ¶ |
 | | UPS1 | PSMs @ q≤0.01 | **17,112** (+8.0%) | baseline 15,838 | 167 entrapment hits — flat against 166 | 50 s ¶ |
-| **PTM discovery** (`--refine`, in-RAM path) | Astral | PSMs @ q≤0.01 | **40,028** (+4.3%) at `main` with #106; 40,283 at `7d1e4565` | in-RAM baseline 38,394 | Pass 2 (2,388 modified PSMs): **~2.8% FDP** under the merged 1% threshold, by matched entrapment anchors (refine config `entrapment: true`: 27 hits on 1,935; 3.3% before #106) | 363 s ¶ |
+| **PTM discovery** (`--refine`) | Astral | PSMs @ q≤0.01 | **48,312** (+2.6%; seeds 1/2: 48,255, 48,464), 28,728 peptides (−0.7%) | standard search 47,080 PSMs, 28,932 peptides | Pass 2 under the merged 1% threshold: **~1.2–1.8% FDP** by matched entrapment anchors (refine config `entrapment: true`; ~1.8–2.0% on the former in-RAM path). At equal entrapment true FDP ≤ 1%: 44,705–44,842 PSMs vs 36,329–36,375 on the former in-RAM path | 156 s, 6.1 GB ¶ |
 | | TMT, UPS1 | — | skipped | high-res only, by design | | |
 | **Glyco, deep tier** | pGlyco2 mouse liver PXD005553, 5 fractions, TRFP 1.4.3, `main` `14818d3e` | glycoPSMs @1% | **31,666 ± 9** | pGlyco2 **78.9% confirmed** · MSFragger **88.0% confirmed**, 95.8% peptidoform agreement | **1.11% ± 0.03 true FDP** (1:1 database) | 23–29 min / fraction, 16 cores |
 | **Glyco, quick tier** | one pGlyco2 liver fraction (`MouseLiver-Z-T-1`), mzML, bundled pGlyco mouse glycan database (`--glyco-species mouse`, 1,833 compositions) | glycoPSMs @1% | **6,922–6,959** (seeds 42, 1, 2) | pGlyco2 **89.0% confirmed** · MSFragger **89.6% confirmed** | **0.85–1.36% true FDP** over 3 seeds (1:1 database) | **6 min**, 8 threads, 19.9 GB |
@@ -231,8 +231,7 @@ the curated 52-column glyco PIN (neutral; its flag has since been removed) did n
 andes either enumerates every candidate in each precursor window and scores them all, or takes
 a shortlist of the 100 candidates whose singly-charged b/y ions best match the spectrum (at
 least 3 matched) from a fragment-ion index. Since #112 the index is the default on high-res
-data. Low-res data stays in RAM while the candidate index fits; `--refine` and `--glyco` keep
-enumeration.
+data. Low-res data stays in RAM while the candidate index fits; `--glyco` keeps enumeration.
 
 **On low-res data only the most intense peaks may vote.** With every peak voting, 0.5 Da bins let
 noise swamp the count: forcing the index (2026-09) took TMT a05058 from 12,281 to 3,613 PSMs at 1%

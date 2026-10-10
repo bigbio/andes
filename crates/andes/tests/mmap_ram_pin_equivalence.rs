@@ -17,7 +17,7 @@
 //! #70: the pre-pass must run on the out-of-core index and the two backings
 //! must still agree.
 //!
-//! The `--chimeric` cases at the end run on a 150-scan MS1-bearing slice and
+//! The `--chimeric` and `--refine` cases at the end run on a 150-scan MS1-bearing slice and
 //! are not ignored. The E. coli cases are marked `#[ignore]` — each runs two full E. coli searches (~40 s release,
 //! several minutes debug). Run it with:
 //!
@@ -319,5 +319,139 @@ fn chimeric_mmap_fragment_index_runs_with_unique_specids() {
     assert!(
         (idx_sec - ram_sec).abs() <= 0.1 * ram_sec,
         "chimeric secondaries: fragment index {idx_sec} vs RAM {ram_sec}"
+    );
+}
+
+// ── --refine on the out-of-core backing ─────────────────────────────────────
+//
+// The refinement cascade runs after the scan, over the candidates the Pass-1
+// PSMs reference. On the out-of-core backing those are the materialized
+// candidates synced into `prepared.candidates`, so enumeration on either
+// backing must give the same unified PIN, and fragment-index retrieval must
+// give a well-formed one. The Astral slice searched against E. coli alone has
+// a single anchor at the default 1% gate; `--refine-select-psm-fdr 1.0` anchors
+// every best-target peptide so Pass 2 contributes a few hundred rows.
+
+/// Run a `--refine` search; returns (header, sorted rows, stderr).
+fn run_refine(
+    backing: &str,
+    fragment_index: &str,
+    out: &PathBuf,
+) -> (String, Vec<String>, String) {
+    let root = workspace_root();
+    let output = Command::new(env!("CARGO_BIN_EXE_andes"))
+        .current_dir(&root)
+        .arg("--spectrum")
+        .arg(CHIMERIC_MZML)
+        .arg("--database")
+        .arg("test-fixtures/ecoli.fasta")
+        .arg("--threads")
+        .arg("2")
+        .arg("--precursor-cal")
+        .arg("off")
+        .arg("--candidate-index")
+        .arg(backing)
+        .arg("--fragment-index")
+        .arg(fragment_index)
+        .arg("--refine")
+        .arg("--refine-select-psm-fdr")
+        .arg("1.0")
+        .arg("--output-pin")
+        .arg(out)
+        .output()
+        .expect("spawn andes");
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        output.status.success(),
+        "andes --candidate-index {backing} --fragment-index {fragment_index} --refine failed:\n{stderr}"
+    );
+    let text = std::fs::read_to_string(out).expect("read pin");
+    let mut lines = text.lines();
+    let header = lines.next().expect("pin header").to_string();
+    let mut rows: Vec<String> = lines.map(str::to_string).collect();
+    rows.sort();
+    (header, rows, stderr)
+}
+
+/// Number of rows with `IsRefinement = 1`.
+fn refinement_rows(header: &str, rows: &[String]) -> usize {
+    let col = header
+        .split('\t')
+        .position(|c| c == "IsRefinement")
+        .expect("IsRefinement column");
+    rows.iter()
+        .filter(|r| r.split('\t').nth(col) == Some("1"))
+        .count()
+}
+
+#[test]
+fn refine_mmap_enumeration_matches_ram_pin() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ram_header, ram_rows, ram_err) = run_refine("ram", "off", &dir.path().join("ram.pin"));
+    let (mmap_header, mmap_rows, mmap_err) =
+        run_refine("mmap", "off", &dir.path().join("mmap.pin"));
+    assert!(
+        mmap_err.contains("out-of-core candidate-index: mmap"),
+        "mmap run did not report the out-of-core backing:\n{mmap_err}"
+    );
+    assert!(
+        !ram_err.contains("out-of-core candidate-index: mmap"),
+        "ram arm ran out-of-core:\n{ram_err}"
+    );
+    assert_eq!(ram_header, mmap_header, "PIN header differs");
+    let refined = refinement_rows(&ram_header, &ram_rows);
+    assert!(
+        refined > 100,
+        "fixture produced only {refined} IsRefinement rows — the gate would be vacuous"
+    );
+    assert_eq!(
+        ram_rows.len(),
+        mmap_rows.len(),
+        "row COUNT differs: ram={} mmap={}",
+        ram_rows.len(),
+        mmap_rows.len()
+    );
+    if let Some(first) = ram_rows.iter().zip(&mmap_rows).position(|(a, b)| a != b) {
+        panic!(
+            "refine PIN rows differ at sorted index {first}\n  ram : {}\n  mmap: {}",
+            ram_rows[first], mmap_rows[first]
+        );
+    }
+}
+
+/// Fragment-index retrieval changes Pass 1's candidates by design, so only the
+/// shape is gated: the index runs under `--refine`, the cascade adds rows,
+/// SpecIds stay unique and no scan carries the same peptide twice.
+#[test]
+fn refine_on_the_fragment_index_writes_a_well_formed_pin() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (header, rows, err) = run_refine("mmap", "auto", &dir.path().join("idx.pin"));
+    assert!(
+        err.contains("candidate retrieval: fragment-ion index"),
+        "--refine did not take the fragment-ion index:\n{err}"
+    );
+    assert!(
+        refinement_rows(&header, &rows) > 100,
+        "too few IsRefinement rows on the index path:\n{err}"
+    );
+    let cols: Vec<&str> = header.split('\t').collect();
+    let scan_col = cols.iter().position(|c| *c == "ScanNr").expect("ScanNr");
+    let pep_col = cols.iter().position(|c| *c == "Peptide").expect("Peptide");
+    let ids: std::collections::HashSet<&str> = rows
+        .iter()
+        .map(|r| r.split('\t').next().expect("SpecId column"))
+        .collect();
+    assert_eq!(ids.len(), rows.len(), "duplicate SpecIds in the PIN");
+    let scan_pep: std::collections::HashSet<(&str, &str)> = rows
+        .iter()
+        .map(|r| {
+            let f: Vec<&str> = r.split('\t').collect();
+            (f[scan_col], f[pep_col])
+        })
+        .collect();
+    assert_eq!(
+        scan_pep.len(),
+        rows.len(),
+        "a scan carries the same peptide in two rows"
     );
 }

@@ -677,7 +677,10 @@ single input run's MS1 scans still need to fit in memory while it is processed.
   `<precursor spectrumRef>` (mzML) or `Master Scan Number` trailer (`.raw`) is that MS2 — the MS3
   scans are kept by the reader for this and are never searched. The default `--tmt-tol` follows
   the reporter scan: SPS-MS3 reporters are read in the Orbitrap even when the MS2 is an ion-trap
-  scan, so `--tmt-level 3` defaults to 20 ppm.
+  scan, so `--tmt-level 3` defaults to 20 ppm. A reporter scan whose recorded scan window
+  (`scan window lower/upper limit`, the `.raw` acquisition range) does not reach every reporter
+  m/z is not quantified — an automatic first mass above 126 Th never measured the low channels,
+  and their zeros are not ratios — and is counted in the log.
 * **Impurity correction** (`--tmt-correction <file>`). The kit lot sheet in the OpenMS text form,
   one line per channel in kit order, `-2/-1/+1/+2` percentages separated by `/` (eight columns
   `-2C13/-N15-C13/-C13/-N15/+N15/+C13/+N15+C13/+2C13` for TMTpro), optional `<channel>:` prefix,
@@ -688,7 +691,10 @@ single input run's MS1 scans still need to fit in memory while it is processed.
   correction (Sage's behavior). The raw values are always kept (`raw_` columns, parquet
   `additional_intensities`).
 * **Precursor purity.** The share of the MS1 isolation window's ion current that belongs to the
-  precursor's isotope envelope, from the survey scan preceding the MS2: the most intense peak
+  precursor's isotope envelope, from the MS2's survey scan — the scan its precursor references
+  (mzML `<precursor spectrumRef>`, `.raw` `Master Scan Number`), else the last MS1 before it at
+  the same FAIMS compensation voltage, else the last MS1 before it. (On FAIMS runs the last MS1 in
+  time is usually a survey scan at another voltage, which does not contain the precursor.) The most intense peak
   within 10 ppm of the precursor m/z anchors a ¹³C isotope ladder (10 ppm per step, both
   directions) inside the strict isolation window. This is the ladder of OpenMS's
   `IsobaricChannelExtractor` without its fuzzy window border and next-scan interpolation, and
@@ -746,6 +752,11 @@ andes --spectrum tmt_run.mzML --database human.fasta --mods tmt10_mods.txt \
   PSM identification FDR and quantitative accuracy are separate from this estimate.
   Feature competition does not replace PSM confidence: an incorrect peptide assignment
   can still anchor a convincing MS1 trace and survive the feature filter.
+* **FAIMS.** On runs with several FAIMS compensation voltages the survey scans of each voltage
+  form their own chromatographic series, and each precursor is extracted from the series of the
+  voltage its PSM was acquired at. (Interleaved voltages otherwise put zeros between every
+  measured scan, which truncates the peak boundaries: on a three-voltage Lumos run the mixed
+  series gave a median integration window of 4 s instead of 22 s and areas ~10x too small.)
 * **Runs.** Each `--spectrum` file is quantified on its own identifications (no transfer of
   identifications between runs yet); `lfq.tsv` is wide over the files.
 * **Not done here:** normalization, MaxLFQ / top-N protein intensities, match between runs.

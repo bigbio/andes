@@ -12,7 +12,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use model::mass::{ISOTOPE, PROTON};
-use model::scan::{Ms1Scan, ProductScan};
+use model::scan::{Ms1Scan, ProductScan, ScanContext};
 use model::spectrum::Spectrum;
 use model::Tolerance;
 use output::feature_parquet::FeatureRecord;
@@ -20,7 +20,7 @@ use output::{LfqRow, ModRecord, PercolatorPsm, QuantId, TmtRow};
 use quant::formula::Formula;
 use quant::isobaric::{extract_reporters, CorrectionMatrix, Plex};
 use quant::lfq::{
-    competition_score, feature_score, quantify, quantify_decoy, LfqParams, LfqTarget,
+    competition_score, feature_score, quantify, quantify_decoy, FeatureQuant, LfqParams, LfqTarget,
 };
 use quant::ms1_index::Ms1RunIndex;
 use quant::tdc::{picked_qvalues, Pair};
@@ -199,6 +199,8 @@ impl QuantSettings {
 pub(crate) struct RunScans {
     pub ms1: Vec<Ms1Scan>,
     pub ms3: Vec<ProductScan>,
+    /// Acquisition context of each emitted MS2 (survey scan, m/z range, FAIMS).
+    pub contexts: Vec<ScanContext>,
 }
 
 /// One input file's quantification state.
@@ -209,8 +211,17 @@ struct RunCapture {
     /// Indices of this file's spectra in the global spectrum list.
     span: Range<usize>,
     ms1: Option<Ms1Cache>,
-    /// Parent MS2 native id → (MS3 native id, raw reporter vector).
-    ms3_reporters: HashMap<String, (String, Vec<f32>)>,
+    /// Parent MS2 native id → the reporter scan read for it.
+    ms3_reporters: HashMap<String, ReporterScan>,
+    /// MS2 native id → its acquisition context.
+    contexts: HashMap<String, ScanContext>,
+}
+
+/// An MS3 reporter scan: native id, raw reporter vector, acquired m/z range.
+struct ReporterScan {
+    id: String,
+    raw: Vec<f32>,
+    scan_window: Option<(f64, f64)>,
 }
 
 /// Collects quantification inputs while the search streams the spectra.
@@ -265,7 +276,7 @@ impl QuantCollector {
         } else {
             None
         };
-        let mut ms3_reporters: HashMap<String, (String, Vec<f32>)> = HashMap::new();
+        let mut ms3_reporters: HashMap<String, ReporterScan> = HashMap::new();
         if let Some(plex) = self.settings.plex {
             if self.settings.tmt_level >= 3 {
                 for p in scans.ms3 {
@@ -274,14 +285,26 @@ impl QuantCollector {
                     // Keep the most intense MS3 if several reference the same MS2.
                     let total: f32 = raw.iter().sum();
                     match ms3_reporters.get(&parent) {
-                        Some((_, old)) if old.iter().sum::<f32>() >= total => {}
+                        Some(old) if old.raw.iter().sum::<f32>() >= total => {}
                         _ => {
-                            ms3_reporters.insert(parent, (p.id, raw));
+                            ms3_reporters.insert(
+                                parent,
+                                ReporterScan {
+                                    id: p.id,
+                                    raw,
+                                    scan_window: p.scan_window,
+                                },
+                            );
                         }
                     }
                 }
             }
         }
+        let contexts: HashMap<String, ScanContext> = scans
+            .contexts
+            .into_iter()
+            .map(|c| (c.id.clone(), c))
+            .collect();
         let span = self.next_span_start..end;
         self.next_span_start = end;
         if let (true, Some(idx)) = (self.settings.lfq, &ms1) {
@@ -332,6 +355,7 @@ impl QuantCollector {
             span,
             ms1,
             ms3_reporters,
+            contexts,
         });
         Ok(())
     }
@@ -594,6 +618,135 @@ fn native_id<'a>(run: &RunCapture, title: &'a str) -> &'a str {
     }
 }
 
+/// The survey scan an MS2 was triggered from: the scan its precursor
+/// references, else the last MS1 at or before it at the same FAIMS voltage,
+/// else the last MS1 at or before it. On FAIMS runs the last MS1 in time is
+/// usually a survey scan at another voltage, which does not hold the precursor.
+fn survey_scan(ms1: &Ms1RunIndex, context: Option<&ScanContext>, rt: f64) -> Option<usize> {
+    const MAX_BACKTRACK: usize = 64;
+    if let Some(i) = context
+        .and_then(|c| c.parent_id.as_deref())
+        .and_then(|id| ms1.position_of(id))
+    {
+        return Some(i);
+    }
+    let last = ms1.scan_at_or_before(rt)?;
+    let Some(cv) = context.and_then(|c| c.faims_cv) else {
+        return Some(last);
+    };
+    (last.saturating_sub(MAX_BACKTRACK)..=last)
+        .rev()
+        .find(|&i| ms1.scan(i).faims_cv == Some(cv))
+}
+
+/// Whether a reporter scan acquired every channel of `plex`: a scan window
+/// that starts above the lowest reporter (or ends below the highest) reads
+/// zeros for channels that were never measured.
+fn covers_reporters(scan_window: Option<(f64, f64)>, plex: Plex, tol: Tolerance) -> bool {
+    let Some((lo, hi)) = scan_window else {
+        return true;
+    };
+    let channels = plex.channels();
+    let first = channels[0].mz;
+    let last = channels[channels.len() - 1].mz;
+    lo <= first - tol.as_da(first) && hi >= last + tol.as_da(last)
+}
+
+/// A target, its feature and its decoy twin's feature.
+type Quantified = (usize, Option<FeatureQuant>, Option<FeatureQuant>);
+
+/// One chromatographic series per FAIMS compensation voltage (the whole run
+/// when it has at most one voltage).
+fn faims_groups(ms1: Ms1RunIndex) -> Vec<(Option<f32>, Ms1RunIndex)> {
+    if ms1.faims_voltages().len() > 1 {
+        ms1.split_by_faims()
+            .into_iter()
+            .map(|(cv, idx)| (Some(cv), idx))
+            .collect()
+    } else {
+        vec![(None, ms1)]
+    }
+}
+
+/// The series a PSM's precursor is extracted from: its MS2's FAIMS voltage.
+fn group_of(
+    groups: &[(Option<f32>, Ms1RunIndex)],
+    run: &RunCapture,
+    spec: &Spectrum,
+) -> Option<usize> {
+    match groups.first()?.0 {
+        None => Some(0),
+        Some(_) => {
+            let cv = run
+                .contexts
+                .get(native_id(run, &spec.title))
+                .and_then(|c| c.faims_cv)?;
+            groups.iter().position(|(g, _)| *g == Some(cv))
+        }
+    }
+}
+
+/// The label-free target of a PSM's peptidoform at `anchor_rt`.
+fn lfq_target(h: &Hit<'_>, anchor_rt: f64, n_iso: usize) -> LfqTarget {
+    let z = h.psm.charge_used.max(1);
+    let formula = Formula::peptide(
+        h.cand
+            .peptide
+            .residues
+            .iter()
+            .map(|aa| (aa.residue, aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta))),
+    );
+    LfqTarget {
+        mono_mz: h.cand.peptide.mass() / z as f64 + PROTON,
+        charge: z,
+        anchor_rt,
+        envelope: formula.envelope(n_iso),
+    }
+}
+
+fn quantify_targets(
+    groups: &[(Option<f32>, Ms1RunIndex)],
+    targets: &[(usize, usize, LfqTarget)],
+    params: &LfqParams,
+) -> Vec<Quantified> {
+    targets
+        .par_iter()
+        .map(|(hi, g, t)| {
+            let ms1 = &groups[*g].1;
+            (
+                *hi,
+                quantify(ms1, t, params),
+                quantify_decoy(ms1, t, params),
+            )
+        })
+        .collect()
+}
+
+/// The height scale of the feature score: the highest apex over targets and
+/// decoys alike.
+fn max_apex_of(quantified: &[Quantified]) -> f32 {
+    quantified
+        .iter()
+        .flat_map(|(_, f, d)| [f.as_ref(), d.as_ref()])
+        .flatten()
+        .map(|f| f.apex_intensity)
+        .fold(0.0f32, f32::max)
+}
+
+fn competition_pairs(quantified: &[Quantified], params: &LfqParams, max_apex: f32) -> Vec<Pair> {
+    quantified
+        .iter()
+        .map(|(_, f, d)| Pair {
+            target: f
+                .as_ref()
+                .and_then(|f| competition_score(f, params, max_apex)),
+            decoy: d
+                .as_ref()
+                .and_then(|f| competition_score(f, params, max_apex)),
+        })
+        .collect()
+}
+
 /// Run quantification over the search result and write the tables.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_quant(
@@ -639,7 +792,7 @@ pub(crate) fn run_quant(
     // ── Isobaric ──────────────────────────────────────────────────────────────
     if let Some(plex) = s.plex {
         let mut rows: Vec<TmtRow> = Vec::new();
-        let (mut no_scan, mut low_purity) = (0usize, 0usize);
+        let (mut no_scan, mut low_purity, mut out_of_range) = (0usize, 0usize, 0usize);
         for (run_idx, run) in collector.runs.iter().enumerate() {
             let ms1 = run
                 .ms1
@@ -649,9 +802,10 @@ pub(crate) fn run_quant(
                 .map_err(|e| format!("load MS1 scans for {}: {e}", run.stem))?;
             for hit in hits.iter().filter(|h| h.run_idx == run_idx) {
                 let spec = &spectra[hit.spec_idx];
-                let (quant_scan_id, raw) = if s.tmt_level >= 3 {
+                let context = run.contexts.get(native_id(run, &spec.title));
+                let (quant_scan_id, raw, scan_window) = if s.tmt_level >= 3 {
                     match run.ms3_reporters.get(native_id(run, &spec.title)) {
-                        Some((id, raw)) => (id.clone(), raw.clone()),
+                        Some(r) => (r.id.clone(), r.raw.clone(), r.scan_window),
                         None => {
                             no_scan += 1;
                             continue;
@@ -659,16 +813,24 @@ pub(crate) fn run_quant(
                     }
                 } else {
                     match collector.ms2_reporters.get(hit.spec_idx) {
-                        Some(raw) => (spec.title.clone(), raw.clone()),
+                        Some(raw) => (
+                            spec.title.clone(),
+                            raw.clone(),
+                            context.and_then(|c| c.scan_window),
+                        ),
                         None => {
                             no_scan += 1;
                             continue;
                         }
                     }
                 };
+                if !covers_reporters(scan_window, plex, s.tmt_tol) {
+                    out_of_range += 1;
+                    continue;
+                }
                 let purity = ms1.as_ref().and_then(|ms1| {
                     let rt = spec.rt_seconds?;
-                    let scan = ms1.scan_at_or_before(rt)?;
+                    let scan = survey_scan(ms1, context, rt)?;
                     let lo = spec.isolation_lower_offset?;
                     let hi = spec.isolation_upper_offset?;
                     let pmz = hit.psm.precursor_mz_override.unwrap_or(spec.precursor_mz);
@@ -709,11 +871,19 @@ pub(crate) fn run_quant(
         output::write_tmt_tsv(&tmt_path, plex, &tsv_rows, s.correction.is_some())
             .map_err(|e| format!("write {}: {e}", tmt_path.display()))?;
         eprintln!(
-            "quant: wrote {} ({} PSMs with reporter ions{}{})",
+            "quant: wrote {} ({} PSMs with reporter ions{}{}{})",
             tmt_path.display(),
             tsv_rows.len(),
             if no_scan > 0 {
                 format!(", {no_scan} without a quantification scan")
+            } else {
+                String::new()
+            },
+            if out_of_range > 0 {
+                format!(
+                    ", {out_of_range} whose scan range does not cover the reporter ions \
+                     (not quantified)"
+                )
             } else {
                 String::new()
             },
@@ -784,6 +954,7 @@ pub(crate) fn run_quant(
                 }
             }
         }
+        let params = &s.lfq_params;
         let mut all_rows: Vec<LfqRow> = Vec::new();
         for (run_idx, run) in collector.runs.iter().enumerate() {
             let Some(cache) = run.ms1.as_ref() else {
@@ -792,59 +963,22 @@ pub(crate) fn run_quant(
             let ms1 = cache
                 .load()
                 .map_err(|e| format!("load MS1 scans for {}: {e}", run.stem))?;
-            let mut targets: Vec<(usize, LfqTarget)> =
-                best.iter()
-                    .filter(|((r, _, _), _)| *r == run_idx)
-                    .filter_map(|(_, &hi)| {
-                        let h = &hits[hi];
-                        let spec = &spectra[h.spec_idx];
-                        let rt = spec.rt_seconds?;
-                        let z = h.psm.charge_used.max(1);
-                        let formula = Formula::peptide(h.cand.peptide.residues.iter().map(|aa| {
-                            (aa.residue, aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta))
-                        }));
-                        Some((
-                            hi,
-                            LfqTarget {
-                                mono_mz: h.cand.peptide.mass() / z as f64 + PROTON,
-                                charge: z,
-                                anchor_rt: rt,
-                                envelope: formula.envelope(n_iso),
-                            },
-                        ))
-                    })
-                    .collect();
+            let groups = faims_groups(ms1);
+            let mut targets: Vec<(usize, usize, LfqTarget)> = best
+                .iter()
+                .filter(|((r, _, _), _)| *r == run_idx)
+                .filter_map(|(_, &hi)| {
+                    let h = &hits[hi];
+                    let spec = &spectra[h.spec_idx];
+                    let group = group_of(&groups, run, spec)?;
+                    Some((hi, group, lfq_target(h, spec.rt_seconds?, n_iso)))
+                })
+                .collect();
             // HashMap iteration must not determine feature row/ID order.
-            targets.sort_unstable_by_key(|(hi, _)| *hi);
-            let params = &s.lfq_params;
-            let quantified: Vec<(usize, Option<_>, Option<_>)> = targets
-                .par_iter()
-                .map(|(hi, t)| {
-                    (
-                        *hi,
-                        quantify(&ms1, t, params),
-                        quantify_decoy(&ms1, t, params),
-                    )
-                })
-                .collect();
-            let max_apex = quantified
-                .iter()
-                .flat_map(|(_, f, d)| [f.as_ref(), d.as_ref()])
-                .flatten()
-                .map(|f| f.apex_intensity)
-                .fold(0.0f32, f32::max);
-            let pairs: Vec<Pair> = quantified
-                .iter()
-                .map(|(_, f, d)| Pair {
-                    target: f
-                        .as_ref()
-                        .and_then(|f| competition_score(f, params, max_apex)),
-                    decoy: d
-                        .as_ref()
-                        .and_then(|f| competition_score(f, params, max_apex)),
-                })
-                .collect();
-            let qvals = picked_qvalues(&pairs);
+            targets.sort_unstable_by_key(|(hi, _, _)| *hi);
+            let quantified = quantify_targets(&groups, &targets, params);
+            let max_apex = max_apex_of(&quantified);
+            let qvals = picked_qvalues(&competition_pairs(&quantified, params, max_apex));
             let mut n_found = 0usize;
             for (k, (hi, feature, decoy)) in quantified.into_iter().enumerate() {
                 let Some(feature) = feature else { continue };
@@ -947,4 +1081,61 @@ pub(crate) fn run_quant(
     }
     eprintln!("[PHASE quant: {:.2}s]", t0.elapsed().as_secs_f64());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn faims_run() -> Ms1RunIndex {
+        // Survey scans alternate between two voltages, one per second.
+        Ms1RunIndex::new(
+            (0..6)
+                .map(|i| Ms1Scan {
+                    rt: i as f64,
+                    peaks: Vec::new(),
+                    id: format!("scan={}", i + 1),
+                    faims_cv: Some(if i % 2 == 0 { -40.0 } else { -60.0 }),
+                })
+                .collect(),
+        )
+    }
+
+    fn context(parent: Option<&str>, cv: Option<f32>) -> ScanContext {
+        ScanContext {
+            id: "scan=99".into(),
+            parent_id: parent.map(str::to_string),
+            scan_window: None,
+            faims_cv: cv,
+        }
+    }
+
+    #[test]
+    fn survey_scan_follows_the_precursor_reference_then_the_voltage() {
+        let ms1 = faims_run();
+        // An MS2 at 3.5 s whose precursor references scan=3 (rt 2, -40 V).
+        let c = context(Some("scan=3"), Some(-40.0));
+        assert_eq!(survey_scan(&ms1, Some(&c), 3.5), Some(2));
+        // No reference: the last scan at the MS2's voltage, not the last in time.
+        let c = context(None, Some(-40.0));
+        assert_eq!(survey_scan(&ms1, Some(&c), 3.5), Some(2));
+        // An unknown reference falls back the same way.
+        let c = context(Some("scan=1000"), Some(-60.0));
+        assert_eq!(survey_scan(&ms1, Some(&c), 3.5), Some(3));
+        // No context at all: the last scan in time.
+        assert_eq!(survey_scan(&ms1, None, 4.5), Some(4));
+        assert_eq!(survey_scan(&ms1, None, -1.0), None);
+    }
+
+    #[test]
+    fn reporter_coverage_needs_the_whole_channel_range() {
+        let tol = Tolerance::Ppm(20.0);
+        assert!(covers_reporters(None, Plex::Tmt16, tol));
+        assert!(covers_reporters(Some((100.0, 2000.0)), Plex::Tmt16, tol));
+        assert!(covers_reporters(Some((126.0, 2000.0)), Plex::Tmt16, tol));
+        // An auto scan range that starts above 126 never measured the low channels.
+        assert!(!covers_reporters(Some((130.0, 2000.0)), Plex::Tmt16, tol));
+        assert!(!covers_reporters(Some((148.0, 1866.0)), Plex::Tmt10, tol));
+        assert!(!covers_reporters(Some((100.0, 134.0)), Plex::Tmt16, tol));
+    }
 }

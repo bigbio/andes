@@ -1552,6 +1552,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let spectrum_path = input_path.clone();
             let capture_ms1 = quant.as_ref().is_some_and(|q| q.settings.needs_ms1());
             let capture_ms3 = quant.as_ref().is_some_and(|q| q.settings.needs_ms3());
+            let capture_context = quant.is_some();
             let parser_handle = thread::spawn(
                 move || -> Result<(ParseStats, RunScans), Box<dyn std::error::Error + Send + Sync>> {
                     if file_is_mzml {
@@ -1561,11 +1562,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         )
                         .with_ms_level_range(ms_level_u32, ms_level_u32)
                         .with_run_ms1_capture(capture_ms1)
-                        .with_product_scan_capture(capture_ms3);
+                        .with_product_scan_capture(capture_ms3)
+                        .with_scan_context_capture(capture_context);
                         let stats = send_chunks(reader.by_ref(), CHUNK_SIZE, remaining_cap, tx);
                         let scans = RunScans {
                             ms1: reader.take_run_ms1(),
                             ms3: reader.take_product_scans(),
+                            contexts: reader.take_scan_contexts(),
                         };
                         Ok((stats, scans))
                     } else if file_is_raw {
@@ -1575,12 +1578,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                                 .map_err(|e| format!("open Thermo .raw: {e}"))?
                                 .with_ms_level(Some(2))
                                 .with_run_ms1_capture(capture_ms1)
-                                .with_product_scan_capture(capture_ms3);
+                                .with_product_scan_capture(capture_ms3)
+                                .with_scan_context_capture(capture_context);
                             let stats =
                                 send_chunks(reader.by_ref(), CHUNK_SIZE, remaining_cap, tx);
                             let scans = RunScans {
                                 ms1: reader.take_run_ms1(),
                                 ms3: reader.take_product_scans(),
+                                contexts: reader.take_scan_contexts(),
                             };
                             Ok((stats, scans))
                         }

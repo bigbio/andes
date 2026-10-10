@@ -75,7 +75,19 @@ pub struct ChunkFragmentIndex {
     bin_start: Vec<u64>,
     /// (form id, ion m/z).
     entries: Vec<(u32, f32)>,
+    /// Form ids are cut into `n_blocks` precursor-mass blocks of equal width;
+    /// block `k` holds ids `block_first_id[k]..block_first_id[k + 1]`.
+    n_blocks: usize,
+    block_first_id: Vec<u32>,
+    /// Per bin, `n_blocks + 1` offsets into the bin's entries: block `k`'s
+    /// entries start at `block_off[b * (n_blocks + 1) + k]`. A query reads its
+    /// window's place in a bin from here instead of searching the bin.
+    block_off: Vec<u32>,
 }
+
+/// Average entries per (bin, precursor-mass block) cell the block count aims
+/// for; the offset table then costs about 4 bytes per this many entries.
+const ENTRIES_PER_CELL: usize = 16;
 
 /// Singly-charged b (prefix) and y (suffix) ion m/z of one peptidoform from its
 /// per-residue masses (modification deltas folded in), appended to `out`.
@@ -284,21 +296,38 @@ impl ChunkFragmentIndex {
                     }
                 });
         }
+        // Cut the form ids into precursor-mass blocks, sort each bin by form
+        // id, and record where each block starts in it. Parallel over bins.
+        let n_blocks = (n_entries / (n_bins * ENTRIES_PER_CELL)).clamp(1, u16::MAX as usize);
+        let block_first_id: Vec<u32> = (0..=n_blocks)
+            .map(|k| {
+                if k == 0 {
+                    0
+                } else if k == n_blocks {
+                    n_forms as u32
+                } else {
+                    let edge = mass_lo + (mass_hi - mass_lo) * (k as f64) / (n_blocks as f64);
+                    form_mass.partition_point(|&m| m < edge) as u32
+                }
+            })
+            .collect();
+        let mut block_off = vec![0u32; n_bins * (n_blocks + 1)];
         {
-            // Sort each bin by form id, in parallel over bins.
             let starts = &bin_start;
+            let first = &block_first_id;
             let base = entries.as_mut_ptr() as usize;
-            (0..n_bins).into_par_iter().for_each(|b| {
-                let (lo, hi) = (starts[b] as usize, starts[b + 1] as usize);
-                if hi > lo + 1 {
+            block_off
+                .par_chunks_mut(n_blocks + 1)
+                .enumerate()
+                .for_each(|(b, offs)| {
+                    let (lo, hi) = (starts[b] as usize, starts[b + 1] as usize);
                     // SAFETY: bins are disjoint ranges of `entries`, and no
                     // other reference to `entries` is live during this loop.
                     let seg = unsafe {
                         std::slice::from_raw_parts_mut((base as *mut (u32, f32)).add(lo), hi - lo)
                     };
-                    seg.sort_unstable_by_key(|e| e.0);
-                }
-            });
+                    sort_bin_by_block(seg, first, offs);
+                });
         }
         Self {
             records,
@@ -311,6 +340,9 @@ impl ChunkFragmentIndex {
             bin_width,
             bin_start,
             entries,
+            n_blocks,
+            block_first_id,
+            block_off,
         }
     }
 
@@ -323,6 +355,13 @@ impl ChunkFragmentIndex {
     /// restricted to the spectrum's precursor windows over every charge in
     /// `charges` and every isotope offset in `params`. At most `top_k`, best
     /// votes first. Only the `vote_peaks` most intense peaks vote (0 = every peak).
+    ///
+    /// Votes are counted over one interval spanning every (charge, isotope
+    /// offset) window, and `top_k` is taken over that interval. Of the kept
+    /// forms, only those inside at least one exact window are returned, since
+    /// the scorer's precursor test rejects every other one; the test here is
+    /// widened by [`PRECURSOR_GATE_MARGIN_DA`] so it never drops a form the
+    /// scorer would accept.
     #[allow(clippy::too_many_arguments)]
     pub fn query(
         &self,
@@ -339,14 +378,20 @@ impl ChunkFragmentIndex {
         let shift_ppm = params.precursor_mass_shift_ppm;
         let mut lo = f64::MAX;
         let mut hi = f64::MIN;
+        let mut exact: smallvec::SmallVec<[(f64, f64); 16]> = smallvec::SmallVec::new();
         for &z in charges {
             let zf = z as f64;
             let obs =
                 adjusted_observed_neutral_mass(spec.precursor_mz * zf - zf * PROTON, shift_ppm);
             for o in params.isotope_error_range.clone() {
                 let c = obs - (o as f64) * ISOTOPE;
-                lo = lo.min(c - params.precursor_tolerance.left.as_da(c));
-                hi = hi.max(c + params.precursor_tolerance.right.as_da(c));
+                let (w_lo, w_hi) = (
+                    c - params.precursor_tolerance.left.as_da(c),
+                    c + params.precursor_tolerance.right.as_da(c),
+                );
+                lo = lo.min(w_lo);
+                hi = hi.max(w_hi);
+                exact.push((w_lo - PRECURSOR_GATE_MARGIN_DA, w_hi + PRECURSOR_GATE_MARGIN_DA));
             }
         }
         if lo > hi {
@@ -367,6 +412,11 @@ impl ChunkFragmentIndex {
         // orders the result, so the selection is identical.
         let n_bins = self.bin_start.len() - 1;
         let width = (id_hi - id_lo) as usize;
+        // The blocks holding the first and the last id of the window; in every
+        // bin the window's entries lie between their offsets.
+        let block_of = |id: u32| self.block_first_id.partition_point(|&f| f <= id) - 1;
+        let (blk_lo, blk_hi) = (block_of(id_lo), block_of(id_hi - 1));
+        let row_len = self.n_blocks + 1;
         let mut sel: Vec<(u32, u16, f32)> = VOTE_BUF.with(|cell| {
             let mut buf = cell.borrow_mut();
             let (counts, touched) = &mut *buf;
@@ -382,10 +432,14 @@ impl ChunkFragmentIndex {
                 let tol_da = fragment_tol.as_da(mz);
                 let b = (mz / self.bin_width) as usize;
                 for bb in b.saturating_sub(1)..=(b + 1).min(n_bins - 1) {
-                    let seg =
-                        &self.entries[self.bin_start[bb] as usize..self.bin_start[bb + 1] as usize];
-                    let start = seg.partition_point(|e| e.0 < id_lo);
-                    for e in &seg[start..] {
+                    let base = self.bin_start[bb] as usize;
+                    let row = &self.block_off[bb * row_len..(bb + 1) * row_len];
+                    let seg = &self.entries
+                        [base + row[blk_lo] as usize..base + row[blk_hi + 1] as usize];
+                    for e in seg {
+                        if e.0 < id_lo {
+                            continue;
+                        }
                         if e.0 >= id_hi {
                             break;
                         }
@@ -411,7 +465,13 @@ impl ChunkFragmentIndex {
             sel
         });
         select_top_k(&mut sel, top_k);
-        sel.into_iter().map(|(id, v, _)| (id, v)).collect()
+        sel.into_iter()
+            .filter(|&(id, _, _)| {
+                let m = self.form_mass[id as usize];
+                exact.iter().any(|&(a, b)| m >= a && m <= b)
+            })
+            .map(|(id, v, _)| (id, v))
+            .collect()
     }
 
     /// Materialise selected forms as candidates, in (record, k) order, by
@@ -457,6 +517,29 @@ impl ChunkFragmentIndex {
         }
         out
     }
+}
+
+/// Slack on the exact precursor windows `query` filters by. A form's indexed
+/// mass and its candidate's `Peptide::mass` are the same residue masses summed
+/// in possibly different order, so they differ by float rounding only; the
+/// scorer's precursor test stays the authority on which forms match.
+const PRECURSOR_GATE_MARGIN_DA: f64 = 1e-6;
+
+/// Sort one bin's entries by form id and write the bin's block offsets to
+/// `offs`: `offs[k]` is the first entry whose id is at or past
+/// `block_first_id[k]`, and `offs[n_blocks]` is the bin's length. Entries with
+/// equal ids are one form's ions and may land in either order.
+fn sort_bin_by_block(seg: &mut [(u32, f32)], block_first_id: &[u32], offs: &mut [u32]) {
+    seg.sort_unstable_by_key(|e| e.0);
+    let n_blocks = offs.len() - 1;
+    let mut i = 0usize;
+    for k in 0..n_blocks {
+        while i < seg.len() && seg[i].0 < block_first_id[k] {
+            i += 1;
+        }
+        offs[k] = i as u32;
+    }
+    offs[n_blocks] = seg.len() as u32;
 }
 
 /// Mass a spectrum is ordered by for fragment-index chunking: precursor m/z
@@ -587,6 +670,40 @@ mod select_top_k_tests {
         select_top_k(&mut a, 2);
         select_top_k(&mut b, 2);
         assert_eq!(a, b, "input order must not survive into the selection");
+    }
+}
+
+#[cfg(test)]
+mod sort_bin_by_block_tests {
+    use super::sort_bin_by_block;
+
+    /// The bin comes out sorted by id and each block's offset is the first
+    /// entry whose id is at or past the block's first id.
+    #[test]
+    fn sorts_by_id_and_records_block_starts() {
+        let first = vec![0u32, 10, 10, 25, 40];
+        let ids = [33u32, 2, 39, 10, 0, 24, 11, 2, 30, 9];
+        let mut seg: Vec<(u32, f32)> = ids.iter().map(|&i| (i, i as f32)).collect();
+        let mut offs = vec![0u32; first.len()];
+        sort_bin_by_block(&mut seg, &first, &mut offs);
+        let got: Vec<u32> = seg.iter().map(|e| e.0).collect();
+        let mut want = ids.to_vec();
+        want.sort_unstable();
+        assert_eq!(got, want);
+        for (k, &off) in offs.iter().enumerate().take(first.len() - 1) {
+            assert_eq!(off as usize, got.partition_point(|&id| id < first[k]), "block {k}");
+        }
+        assert_eq!(*offs.last().unwrap() as usize, ids.len());
+        assert!(seg.iter().all(|e| e.1 == e.0 as f32), "entries keep their m/z");
+    }
+
+    #[test]
+    fn a_single_block_is_a_plain_sort() {
+        let mut seg = vec![(3u32, 0.0f32), (1, 0.0), (2, 0.0)];
+        let mut offs = vec![0u32; 2];
+        sort_bin_by_block(&mut seg, &[0, 4], &mut offs);
+        assert_eq!(seg.iter().map(|e| e.0).collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(offs, vec![0, 3]);
     }
 }
 

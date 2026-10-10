@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::candidate_gen::{
     base_record_key, base_records_for_nominal_window, distinct_base_records_for_nominal_window,
-    expand_base_record, BaseRecordKey, Candidate,
+    expand_base_record, retain_records_with_forms_in, BaseRecordKey, Candidate, FormWalkTables,
 };
 use crate::candidate_index::MmapCandidateIndex;
 use crate::fragment_index::ChunkFragmentIndex;
@@ -838,15 +838,6 @@ impl<'a> PreparedSearch<'a> {
                 // every record it can select.
                 if params.fragment_index_top_k > 0 {
                     let frag_index = {
-                        let recs = match (
-                            windows.iter().map(|w| w.0).min(),
-                            windows.iter().map(|w| w.1).max(),
-                        ) {
-                            (Some(lo), Some(hi)) => {
-                                distinct_base_records_for_nominal_window(mi, params, lo, hi)
-                            }
-                            _ => Vec::new(),
-                        };
                         // The chunk's precursor mass interval over every spectrum,
                         // charge and isotope offset; only forms inside it are indexed.
                         let shift_ppm = params.precursor_mass_shift_ppm;
@@ -868,6 +859,20 @@ impl<'a> PreparedSearch<'a> {
                                 }
                             }
                         }
+                        // Records none of whose forms can reach the interval are
+                        // dropped during the fetch, before the records are sorted.
+                        let tables = FormWalkTables::new(params);
+                        let recs = match (
+                            windows.iter().map(|w| w.0).min(),
+                            windows.iter().map(|w| w.1).max(),
+                        ) {
+                            (Some(wlo), Some(whi)) => {
+                                distinct_base_records_for_nominal_window(mi, params, wlo, whi, |v| {
+                                    retain_records_with_forms_in(self.idx, &tables, v, lo, hi)
+                                })
+                            }
+                            _ => Vec::new(),
+                        };
                         ChunkFragmentIndex::build(
                             recs,
                             self.idx,

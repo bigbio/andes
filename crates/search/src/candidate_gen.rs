@@ -628,6 +628,45 @@ pub fn record_may_have_forms_in(
     }
 }
 
+/// Keep only the records of `recs` that [`record_may_have_forms_in`] accepts,
+/// in order. The records arrive in mass order, so each one's protein and span
+/// are a cache miss; they are touched for a batch of records in tight loops
+/// first, letting the misses overlap, and then tested.
+pub fn retain_records_with_forms_in(
+    db: &SearchIndex,
+    tables: &FormWalkTables,
+    recs: &mut Vec<crate::candidate_index::IndexRecord>,
+    mass_lo: f64,
+    mass_hi: f64,
+) {
+    const BATCH: usize = 32;
+    let proteins = &db.db.proteins;
+    let mut kept = 0usize;
+    let mut start = 0usize;
+    while start < recs.len() {
+        let end = (start + BATCH).min(recs.len());
+        let mut spans: [&[u8]; BATCH] = [&[]; BATCH];
+        for (slot, rec) in spans.iter_mut().zip(&recs[start..end]) {
+            if let Some(p) = proteins.get(rec.protein_index as usize) {
+                *slot = &p.sequence;
+            }
+        }
+        let mut touched = 0u8;
+        for (span, rec) in spans.iter().zip(&recs[start..end]) {
+            touched ^= span.get(rec.start_offset as usize).copied().unwrap_or(0);
+        }
+        std::hint::black_box(touched);
+        for i in start..end {
+            if record_may_have_forms_in(db, tables, &recs[i], mass_lo, mass_hi) {
+                recs.swap(kept, i);
+                kept += 1;
+            }
+        }
+        start = end;
+    }
+    recs.truncate(kept);
+}
+
 /// Shared bounded walk over the peptidoforms of `span`: the same recursion
 /// and iteration order as [`expand_mod_combinations`], but subtrees whose
 /// neutral mass cannot land in `[mass_lo, mass_hi]` are pruned. Variable
@@ -1355,16 +1394,16 @@ pub fn base_records_for_nominal_window(
 
 /// The distinct base records [`base_records_for_nominal_window`] returns for
 /// `[min_nominal, max_nominal]` (one per [`BaseRecordKey`], sorted by key),
-/// without the copy counts, restricted to those `keep` accepts. The union of
+/// without the copy counts, restricted to those `keep` retains. The union of
 /// the per-Δ mass windows is scanned in parallel slices, so one wide window
-/// does not run on a single thread, and `keep` runs inside the scan so only
-/// the kept records are sorted.
+/// does not run on a single thread; `keep` filters each slice's records in
+/// place inside the scan, so only the kept records are sorted.
 pub fn distinct_base_records_for_nominal_window(
     mi: &crate::candidate_index::MmapCandidateIndex,
     params: &SearchParams,
     min_nominal: i32,
     max_nominal: i32,
-    keep: impl Fn(&crate::candidate_index::IndexRecord) -> bool + Sync,
+    keep: impl Fn(&mut Vec<crate::candidate_index::IndexRecord>) + Sync,
 ) -> Vec<crate::candidate_index::IndexRecord> {
     use model::mass::{H2O, INTEGER_MASS_SCALER};
     use rayon::prelude::*;
@@ -1402,12 +1441,14 @@ pub fn distinct_base_records_for_nominal_window(
     let mut out: Vec<crate::candidate_index::IndexRecord> = slices
         .par_iter()
         .flat_map_iter(|&(a, b)| {
-            mi.mass_window(a, b).into_iter().filter(|rec| {
+            let mut recs = mi.mass_window(a, b);
+            recs.retain(|rec| {
                 windows
                     .iter()
                     .any(|&(lo, hi)| rec.mass_milli >= lo && rec.mass_milli <= hi)
-                    && keep(rec)
-            })
+            });
+            keep(&mut recs);
+            recs
         })
         .collect();
     out.par_sort_unstable_by_key(base_record_key);

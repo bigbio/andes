@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::candidate_gen::{
     base_record_key, base_records_for_nominal_window, distinct_base_records_for_nominal_window,
-    expand_base_record, record_may_have_forms_in, BaseRecordKey, Candidate, FormWalkTables,
+    expand_base_record, retain_records_with_forms_in, BaseRecordKey, Candidate, FormWalkTables,
 };
 use crate::candidate_index::MmapCandidateIndex;
 use crate::fragment_index::ChunkFragmentIndex;
@@ -867,8 +867,8 @@ impl<'a> PreparedSearch<'a> {
                             windows.iter().map(|w| w.1).max(),
                         ) {
                             (Some(wlo), Some(whi)) => {
-                                distinct_base_records_for_nominal_window(mi, params, wlo, whi, |rec| {
-                                    record_may_have_forms_in(self.idx, &tables, rec, lo, hi)
+                                distinct_base_records_for_nominal_window(mi, params, wlo, whi, |v| {
+                                    retain_records_with_forms_in(self.idx, &tables, v, lo, hi)
                                 })
                             }
                             _ => Vec::new(),

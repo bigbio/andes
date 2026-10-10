@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use thermorawfilereader::schema::{DissociationMethod, MassAnalyzer};
 use thermorawfilereader::{RawFileReader, RawSpectrum};
 
-use model::scan::{Ms1Scan, ProductScan};
+use model::scan::{Ms1Scan, ProductScan, ScanContext};
 use model::{ActivationMethod, InstrumentType};
 
 use crate::{Ms1Link, Spectrum};
@@ -51,6 +51,10 @@ pub struct ThermoRawReader {
     run_ms1: Vec<Ms1Scan>,
     capture_product_scans: bool,
     product_scans: Vec<ProductScan>,
+    /// The acquisition context of every emitted MS2 (master scan, acquired m/z
+    /// range, FAIMS voltage).
+    capture_scan_context: bool,
+    scan_contexts: Vec<ScanContext>,
 }
 
 impl ThermoRawReader {
@@ -73,6 +77,8 @@ impl ThermoRawReader {
             run_ms1: Vec::new(),
             capture_product_scans: false,
             product_scans: Vec::new(),
+            capture_scan_context: false,
+            scan_contexts: Vec::new(),
         })
     }
 
@@ -88,6 +94,17 @@ impl ThermoRawReader {
     pub fn with_product_scan_capture(mut self, capture: bool) -> Self {
         self.capture_product_scans = capture;
         self
+    }
+
+    /// Record the acquisition context of every emitted MS2 (see the mzML reader);
+    /// take them with [`Self::take_scan_contexts`].
+    pub fn with_scan_context_capture(mut self, capture: bool) -> Self {
+        self.capture_scan_context = capture;
+        self
+    }
+
+    pub fn take_scan_contexts(&mut self) -> Vec<ScanContext> {
+        std::mem::take(&mut self.scan_contexts)
     }
 
     pub fn take_run_ms1(&mut self) -> Vec<Ms1Scan> {
@@ -276,6 +293,20 @@ fn master_scan_number(handle: &RawFileReader, index: usize) -> Option<usize> {
         .iter()
         .find_map(|t| is_master_scan_label(t.label).then(|| t.value.trim().to_string()))?;
     value.parse::<usize>().ok().filter(|&scan| scan > 0)
+}
+
+/// Acquired m/z range of a scan, when the acquisition block records one.
+fn scan_window(raw: &RawSpectrum) -> Option<(f64, f64)> {
+    let a = raw.acquisition()?;
+    let (lo, hi) = (a.low_mz(), a.high_mz());
+    (lo.is_finite() && hi > lo).then_some((lo, hi))
+}
+
+/// FAIMS compensation voltage of a scan, when the run used FAIMS.
+fn faims_cv(raw: &RawSpectrum) -> Option<f32> {
+    raw.acquisition()?
+        .compensation_voltages()
+        .and_then(|v| v.iter().next())
 }
 
 /// Trailer labels come as `Master Scan Number` or `Master Scan Number:`
@@ -481,6 +512,8 @@ impl Iterator for ThermoRawReader {
                 self.run_ms1.push(Ms1Scan {
                     rt: raw.time() * 60.0,
                     peaks: extract_peaks(&raw),
+                    id: raw.native_id(),
+                    faims_cv: faims_cv(&raw),
                 });
             }
             if level >= 3 && self.capture_product_scans {
@@ -499,6 +532,7 @@ impl Iterator for ThermoRawReader {
                     ms_level: level,
                     parent_id,
                     precursor_mz: raw.precursor().map(|p| p.mz()).unwrap_or(0.0),
+                    scan_window: scan_window(&raw),
                     peaks: extract_peaks(&raw),
                 });
                 continue;
@@ -510,7 +544,20 @@ impl Iterator for ThermoRawReader {
             }
             match Self::convert(&raw) {
                 // Skip MS2 scans with no usable precursor (mirrors mzML).
-                Some(spec) => return Some(Ok(spec)),
+                Some(spec) => {
+                    if self.capture_scan_context {
+                        // The survey scan of an MS2 is its `Master Scan Number`
+                        // trailer, as for SPS-MS3 above.
+                        self.scan_contexts.push(ScanContext {
+                            id: spec.title.clone(),
+                            parent_id: master_scan_number(&self.handle, i)
+                                .map(|scan| with_scan_number(&spec.title, scan)),
+                            scan_window: scan_window(&raw),
+                            faims_cv: faims_cv(&raw),
+                        });
+                    }
+                    return Some(Ok(spec));
+                }
                 None => continue,
             }
         }

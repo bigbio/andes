@@ -16,7 +16,11 @@ impl Ms1Cache {
         let mut out = BufWriter::with_capacity(1024 * 1024, file.as_file());
         out.write_all(&(index.len() as u64).to_le_bytes())?;
         for i in 0..index.len() {
+            let scan = index.scan(i);
             out.write_all(&index.rt(i).to_le_bytes())?;
+            out.write_all(&(scan.id.len() as u64).to_le_bytes())?;
+            out.write_all(scan.id.as_bytes())?;
+            out.write_all(&scan.faims_cv.map_or(f32::NAN, |v| v).to_le_bytes())?;
             out.write_all(&(index.peaks(i).len() as u64).to_le_bytes())?;
             for &(mz, intensity) in index.peaks(i) {
                 out.write_all(&mz.to_le_bytes())?;
@@ -37,6 +41,15 @@ impl Ms1Cache {
         let mut scans = Vec::with_capacity(count);
         for _ in 0..count {
             let rt = f64::from_le_bytes(read::<8>(&mut input, &mut remaining)?);
+            let id_len = u64::from_le_bytes(read::<8>(&mut input, &mut remaining)?);
+            let id_len = bounded_count(id_len, remaining)?;
+            let mut id = vec![0u8; id_len];
+            input.read_exact(&mut id)?;
+            remaining -= id_len as u64;
+            let id = String::from_utf8(id)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "MS1 cache scan id"))?;
+            let faims_cv = f32::from_le_bytes(read::<4>(&mut input, &mut remaining)?);
+            let faims_cv = (!faims_cv.is_nan()).then_some(faims_cv);
             let n = u64::from_le_bytes(read::<8>(&mut input, &mut remaining)?);
             let n = bounded_count(n, remaining / 12)?;
             let mut peaks = Vec::with_capacity(n);
@@ -45,7 +58,12 @@ impl Ms1Cache {
                 let intensity = f32::from_le_bytes(read::<4>(&mut input, &mut remaining)?);
                 peaks.push((mz, intensity));
             }
-            scans.push(Ms1Scan { rt, peaks });
+            scans.push(Ms1Scan {
+                rt,
+                peaks,
+                id,
+                faims_cv,
+            });
         }
         if remaining != 0 {
             return Err(io::Error::new(
@@ -83,10 +101,13 @@ mod tests {
             Ms1Scan {
                 rt: 3.123456789,
                 peaks: vec![(600.123456789, 1234.5678), (700.0, -0.0)],
+                id: "scan=2".into(),
+                faims_cv: Some(-45.0),
             },
             Ms1Scan {
                 rt: 1.0,
                 peaks: vec![],
+                ..Ms1Scan::default()
             },
         ]);
         let cache = Ms1Cache::store(&index).unwrap();
@@ -101,6 +122,8 @@ mod tests {
                     assert_eq!(a.1.to_bits(), b.1.to_bits());
                 }
                 assert_eq!(loaded.peaks(i).len(), index.peaks(i).len());
+                assert_eq!(loaded.scan(i).id, index.scan(i).id);
+                assert_eq!(loaded.scan(i).faims_cv, index.scan(i).faims_cv);
             }
         }
         drop(cache);
@@ -114,6 +137,7 @@ mod tests {
         let index = Ms1RunIndex::new(vec![Ms1Scan {
             rt: 1.0,
             peaks: vec![(500.0, 1.0)],
+            ..Ms1Scan::default()
         }]);
         let cache = Ms1Cache::store(&index).unwrap();
         cache.file.as_file().set_len(25).unwrap();

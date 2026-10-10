@@ -247,7 +247,11 @@ mod tests {
                     }
                 }
                 peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-                Ms1Scan { rt, peaks }
+                Ms1Scan {
+                    rt,
+                    peaks,
+                    ..Ms1Scan::default()
+                }
             })
             .collect();
         let target = LfqTarget {
@@ -305,6 +309,7 @@ mod tests {
                 Ms1Scan {
                     rt: real.rt(i),
                     peaks,
+                    ..Ms1Scan::default()
                 }
             })
             .collect();
@@ -384,6 +389,7 @@ mod tests {
                 Ms1Scan {
                     rt: real.rt(i),
                     peaks,
+                    ..Ms1Scan::default()
                 }
             })
             .collect();

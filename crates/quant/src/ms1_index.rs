@@ -6,6 +6,8 @@
 //! Orbitrap run is ~100 scans, and a 10 ppm slice of each touches a handful
 //! of centroids.
 
+use std::collections::HashMap;
+
 use model::mass::ISOTOPE;
 pub use model::scan::Ms1Scan;
 
@@ -13,6 +15,8 @@ pub use model::scan::Ms1Scan;
 #[derive(Debug, Default)]
 pub struct Ms1RunIndex {
     scans: Vec<Ms1Scan>,
+    /// Native id → position, for scans that carry an id.
+    by_id: HashMap<String, usize>,
 }
 
 impl Ms1RunIndex {
@@ -25,7 +29,52 @@ impl Ms1RunIndex {
             }
         }
         scans.sort_by(|a, b| a.rt.partial_cmp(&b.rt).unwrap_or(std::cmp::Ordering::Equal));
-        Self { scans }
+        let by_id = scans
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.id.is_empty())
+            .map(|(i, s)| (s.id.clone(), i))
+            .collect();
+        Self { scans, by_id }
+    }
+
+    /// Position of the scan with native id `id`.
+    pub fn position_of(&self, id: &str) -> Option<usize> {
+        self.by_id.get(id).copied()
+    }
+
+    /// The scan at `idx`.
+    pub fn scan(&self, idx: usize) -> &Ms1Scan {
+        &self.scans[idx]
+    }
+
+    /// The distinct FAIMS compensation voltages of the run's scans, ascending
+    /// (empty for a run without FAIMS).
+    pub fn faims_voltages(&self) -> Vec<f32> {
+        let mut cvs: Vec<f32> = self.scans.iter().filter_map(|s| s.faims_cv).collect();
+        cvs.sort_by(f32::total_cmp);
+        cvs.dedup();
+        cvs
+    }
+
+    /// Split the run into one index per FAIMS compensation voltage. Survey scans
+    /// at different voltages transmit different ions, so a chromatogram must
+    /// stay within one voltage. Scans without a voltage are dropped.
+    pub fn split_by_faims(self) -> Vec<(f32, Ms1RunIndex)> {
+        let cvs = self.faims_voltages();
+        let mut groups: Vec<Vec<Ms1Scan>> = vec![Vec::new(); cvs.len()];
+        for scan in self.scans {
+            if let Some(k) = scan
+                .faims_cv
+                .and_then(|cv| cvs.iter().position(|&c| c == cv))
+            {
+                groups[k].push(scan);
+            }
+        }
+        cvs.into_iter()
+            .zip(groups)
+            .map(|(cv, g)| (cv, Ms1RunIndex::new(g)))
+            .collect()
     }
 
     pub fn len(&self) -> usize {
@@ -155,6 +204,7 @@ mod tests {
                     (500.0 + i as f64 * 0.001, (i * 10) as f32),
                     (600.0, 1.0),
                 ],
+                ..Ms1Scan::default()
             })
             .collect();
         Ms1RunIndex::new(scans)
@@ -176,6 +226,7 @@ mod tests {
                     Ms1Scan {
                         rt: i as f64,
                         peaks,
+                        ..Ms1Scan::default()
                     }
                 })
                 .collect(),
@@ -192,6 +243,7 @@ mod tests {
                         .enumerate()
                         .map(|(j, &(mz, int))| (mz + 0.03 * ((j % 7) as f64 - 3.0), int))
                         .collect(),
+                    ..Ms1Scan::default()
                 })
                 .collect(),
         );
@@ -226,15 +278,39 @@ mod tests {
     }
 
     #[test]
+    fn scans_are_found_by_id_and_split_by_faims_voltage() {
+        let scans = (0..6)
+            .map(|i| Ms1Scan {
+                rt: i as f64,
+                peaks: vec![(500.0, i as f32)],
+                id: format!("scan={}", 10 - i),
+                faims_cv: Some(if i % 2 == 0 { -40.0 } else { -60.0 }),
+            })
+            .collect();
+        let idx = Ms1RunIndex::new(scans);
+        assert_eq!(idx.position_of("scan=7"), Some(3));
+        assert_eq!(idx.position_of("scan=99"), None);
+        assert_eq!(idx.faims_voltages(), vec![-60.0, -40.0]);
+        let split = idx.split_by_faims();
+        assert_eq!(split.len(), 2);
+        assert_eq!(split[0].0, -60.0);
+        let rts: Vec<f64> = (0..split[0].1.len()).map(|i| split[0].1.rt(i)).collect();
+        assert_eq!(rts, vec![1.0, 3.0, 5.0]);
+        assert_eq!(split[1].1.position_of("scan=8"), Some(1));
+    }
+
+    #[test]
     fn unsorted_input_is_normalised() {
         let scans = vec![
             Ms1Scan {
                 rt: 5.0,
                 peaks: vec![(300.0, 1.0), (200.0, 2.0)],
+                ..Ms1Scan::default()
             },
             Ms1Scan {
                 rt: 1.0,
                 peaks: vec![],
+                ..Ms1Scan::default()
             },
         ];
         let idx = Ms1RunIndex::new(scans);

@@ -446,11 +446,33 @@ pub(crate) fn expand_mod_combinations(
 pub struct FormWalkTables {
     anywhere: Vec<Vec<AminoAcid>>,
     terminal: Vec<Vec<AminoAcid>>,
+    /// (lightest, heaviest) variant mass of each `anywhere` / `terminal` entry;
+    /// `(f64::MAX, f64::MIN)` for an entry with no variant.
+    anywhere_bounds: Vec<(f64, f64)>,
+    terminal_bounds: Vec<(f64, f64)>,
+}
+
+/// Mass of one variant: residue plus its modification delta.
+#[inline]
+fn variant_mass(aa: &AminoAcid) -> f64 {
+    aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta)
+}
+
+/// (lightest, heaviest) variant mass of `variants`, or `(f64::MAX, f64::MIN)`
+/// when there are none.
+fn variant_bounds(variants: &[AminoAcid]) -> (f64, f64) {
+    let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+    for v in variants {
+        let m = variant_mass(v);
+        lo = lo.min(m);
+        hi = hi.max(m);
+    }
+    (lo, hi)
 }
 
 impl FormWalkTables {
     pub fn new(params: &SearchParams) -> Self {
-        let anywhere = (0..=255u8)
+        let anywhere: Vec<Vec<AminoAcid>> = (0..=255u8)
             .map(|r| params.aa_set.variants_for(r, ModLocation::Anywhere).to_vec())
             .collect();
         let mut terminal = Vec::with_capacity(256 * 16);
@@ -474,13 +496,39 @@ impl FormWalkTables {
                 ));
             }
         }
-        Self { anywhere, terminal }
+        let anywhere_bounds = anywhere.iter().map(|v| variant_bounds(v)).collect();
+        let terminal_bounds = terminal.iter().map(|v| variant_bounds(v)).collect();
+        Self {
+            anywhere,
+            terminal,
+            anywhere_bounds,
+            terminal_bounds,
+        }
+    }
+
+    #[inline]
+    fn terminal_key(residue: u8, first: bool, last: bool, prot_n: bool, prot_c: bool) -> usize {
+        let key = first as usize | (last as usize) << 1 | (prot_n as usize) << 2 | (prot_c as usize) << 3;
+        residue as usize * 16 + key
     }
 
     #[inline]
     fn terminal(&self, residue: u8, first: bool, last: bool, prot_n: bool, prot_c: bool) -> &[AminoAcid] {
-        let key = first as usize | (last as usize) << 1 | (prot_n as usize) << 2 | (prot_c as usize) << 3;
-        &self.terminal[residue as usize * 16 + key]
+        &self.terminal[Self::terminal_key(residue, first, last, prot_n, prot_c)]
+    }
+
+    /// (lightest, heaviest) variant mass at position `i` of a span of length `n`.
+    #[inline]
+    fn position_bounds(&self, span: &[u8], i: usize, prot_n: bool, prot_c: bool) -> (f64, f64) {
+        let n = span.len();
+        let r = span[i];
+        if i == 0 {
+            self.terminal_bounds[Self::terminal_key(r, true, n == 1, prot_n, prot_c)]
+        } else if i == n - 1 {
+            self.terminal_bounds[Self::terminal_key(r, false, true, prot_n, prot_c)]
+        } else {
+            self.anywhere_bounds[r as usize]
+        }
     }
 }
 
@@ -493,49 +541,71 @@ type WalkVariants<'t> = smallvec::SmallVec<[&'t [AminoAcid]; WALK_INLINE_LEN]>;
 /// Suffix sums of the per-position minimum or maximum variant mass.
 type WalkRest = smallvec::SmallVec<[f64; WALK_INLINE_LEN]>;
 
-/// The variant list of every position of `span`, and the suffix sums of the
-/// per-position minimum and maximum variant mass; `None` when the span is
-/// empty or a position has no variant.
+/// Fill `position_variants` with the variant list of every position of `span`,
+/// and `min_rest` / `max_rest` with the suffix sums of the per-position minimum
+/// and maximum variant mass; `false` when the span is empty or a position has
+/// no variant. The buffers are the caller's, so nothing is returned by value.
 fn walk_bounds<'t>(
     span: &[u8],
     tables: &'t FormWalkTables,
     is_protein_n_term: bool,
     is_protein_c_term: bool,
-) -> Option<(WalkVariants<'t>, WalkRest, WalkRest)> {
+    position_variants: &mut WalkVariants<'t>,
+    min_rest: &mut WalkRest,
+    max_rest: &mut WalkRest,
+) -> bool {
+    let n = span.len();
+    if n == 0 {
+        return false;
+    }
+    position_variants.clear();
+    position_variants.extend(span.iter().enumerate().map(|(i, &r)| {
+        if i == 0 {
+            tables.terminal(r, true, n == 1, is_protein_n_term, is_protein_c_term)
+        } else if i == n - 1 {
+            tables.terminal(r, false, true, is_protein_n_term, is_protein_c_term)
+        } else {
+            tables.anywhere[r as usize].as_slice()
+        }
+    }));
+    min_rest.clear();
+    min_rest.resize(n + 1, 0.0);
+    max_rest.clear();
+    max_rest.resize(n + 1, 0.0);
+    for i in (0..n).rev() {
+        if position_variants[i].is_empty() {
+            return false;
+        }
+        let (lo, hi) = tables.position_bounds(span, i, is_protein_n_term, is_protein_c_term);
+        min_rest[i] = min_rest[i + 1] + lo;
+        max_rest[i] = max_rest[i + 1] + hi;
+    }
+    true
+}
+
+/// The lightest and heaviest neutral mass (without `H2O`) any form of `span`
+/// can take: `min_rest[0]` and `max_rest[0]` of [`walk_bounds`], summed in the
+/// same order so the values are identical; `None` exactly when it fails.
+fn span_mass_bounds(
+    span: &[u8],
+    tables: &FormWalkTables,
+    is_protein_n_term: bool,
+    is_protein_c_term: bool,
+) -> Option<(f64, f64)> {
     let n = span.len();
     if n == 0 {
         return None;
     }
-    let position_variants: WalkVariants<'t> = span
-        .iter()
-        .enumerate()
-        .map(|(i, &r)| {
-            if i == 0 {
-                tables.terminal(r, true, n == 1, is_protein_n_term, is_protein_c_term)
-            } else if i == n - 1 {
-                tables.terminal(r, false, true, is_protein_n_term, is_protein_c_term)
-            } else {
-                tables.anywhere[r as usize].as_slice()
-            }
-        })
-        .collect();
-    let mass_of = |aa: &AminoAcid| aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
-    let mut min_rest: WalkRest = smallvec::SmallVec::from_elem(0.0, n + 1);
-    let mut max_rest: WalkRest = smallvec::SmallVec::from_elem(0.0, n + 1);
+    let (mut min_rest, mut max_rest) = (0.0f64, 0.0f64);
     for i in (0..n).rev() {
-        let (mut lo, mut hi) = (f64::MAX, f64::MIN);
-        for v in position_variants[i] {
-            let m = mass_of(v);
-            lo = lo.min(m);
-            hi = hi.max(m);
-        }
-        if position_variants[i].is_empty() {
+        let (lo, hi) = tables.position_bounds(span, i, is_protein_n_term, is_protein_c_term);
+        if lo > hi {
             return None;
         }
-        min_rest[i] = min_rest[i + 1] + lo;
-        max_rest[i] = max_rest[i + 1] + hi;
+        min_rest += lo;
+        max_rest += hi;
     }
-    Some((position_variants, min_rest, max_rest))
+    Some((min_rest, max_rest))
 }
 
 /// Whether the bounded walk over `rec` with window `[mass_lo, mass_hi]` can
@@ -552,10 +622,8 @@ pub fn record_may_have_forms_in(
     let Some((span, n_term, c_term, _, _)) = record_span(db, rec) else {
         return false;
     };
-    match walk_bounds(span, tables, n_term, c_term) {
-        Some((_, min_rest, max_rest)) => {
-            !(min_rest[0] + H2O > mass_hi || max_rest[0] + H2O < mass_lo)
-        }
+    match span_mass_bounds(span, tables, n_term, c_term) {
+        Some((min_rest, max_rest)) => !(min_rest + H2O > mass_hi || max_rest + H2O < mass_lo),
         None => false,
     }
 }
@@ -583,11 +651,20 @@ fn walk_forms_bounded(
 ) {
     use model::mass::H2O;
     use smallvec::SmallVec;
-    let Some((position_variants, min_rest, max_rest)) =
-        walk_bounds(span, tables, is_protein_n_term, is_protein_c_term)
-    else {
+    let mut position_variants = WalkVariants::new();
+    let mut min_rest = WalkRest::new();
+    let mut max_rest = WalkRest::new();
+    if !walk_bounds(
+        span,
+        tables,
+        is_protein_n_term,
+        is_protein_c_term,
+        &mut position_variants,
+        &mut min_rest,
+        &mut max_rest,
+    ) {
         return;
-    };
+    }
     if min_rest[0] + H2O > mass_hi || max_rest[0] + H2O < mass_lo {
         return;
     }
@@ -1278,13 +1355,16 @@ pub fn base_records_for_nominal_window(
 
 /// The distinct base records [`base_records_for_nominal_window`] returns for
 /// `[min_nominal, max_nominal]` (one per [`BaseRecordKey`], sorted by key),
-/// without the copy counts. The union of the per-Δ mass windows is scanned
-/// in parallel slices, so one wide window does not run on a single thread.
+/// without the copy counts, restricted to those `keep` accepts. The union of
+/// the per-Δ mass windows is scanned in parallel slices, so one wide window
+/// does not run on a single thread, and `keep` runs inside the scan so only
+/// the kept records are sorted.
 pub fn distinct_base_records_for_nominal_window(
     mi: &crate::candidate_index::MmapCandidateIndex,
     params: &SearchParams,
     min_nominal: i32,
     max_nominal: i32,
+    keep: impl Fn(&crate::candidate_index::IndexRecord) -> bool + Sync,
 ) -> Vec<crate::candidate_index::IndexRecord> {
     use model::mass::{H2O, INTEGER_MASS_SCALER};
     use rayon::prelude::*;
@@ -1326,6 +1406,7 @@ pub fn distinct_base_records_for_nominal_window(
                 windows
                     .iter()
                     .any(|&(lo, hi)| rec.mass_milli >= lo && rec.mass_milli <= hi)
+                    && keep(rec)
             })
         })
         .collect();

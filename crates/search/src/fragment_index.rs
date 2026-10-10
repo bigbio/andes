@@ -323,6 +323,13 @@ impl ChunkFragmentIndex {
     /// restricted to the spectrum's precursor windows over every charge in
     /// `charges` and every isotope offset in `params`. At most `top_k`, best
     /// votes first. Only the `vote_peaks` most intense peaks vote (0 = every peak).
+    ///
+    /// Votes are counted over one interval spanning every (charge, isotope
+    /// offset) window, and `top_k` is taken over that interval. Of the kept
+    /// forms, only those inside at least one exact window are returned, since
+    /// the scorer's precursor test rejects every other one; the test here is
+    /// widened by [`PRECURSOR_GATE_MARGIN_DA`] so it never drops a form the
+    /// scorer would accept.
     #[allow(clippy::too_many_arguments)]
     pub fn query(
         &self,
@@ -339,14 +346,20 @@ impl ChunkFragmentIndex {
         let shift_ppm = params.precursor_mass_shift_ppm;
         let mut lo = f64::MAX;
         let mut hi = f64::MIN;
+        let mut exact: smallvec::SmallVec<[(f64, f64); 16]> = smallvec::SmallVec::new();
         for &z in charges {
             let zf = z as f64;
             let obs =
                 adjusted_observed_neutral_mass(spec.precursor_mz * zf - zf * PROTON, shift_ppm);
             for o in params.isotope_error_range.clone() {
                 let c = obs - (o as f64) * ISOTOPE;
-                lo = lo.min(c - params.precursor_tolerance.left.as_da(c));
-                hi = hi.max(c + params.precursor_tolerance.right.as_da(c));
+                let (w_lo, w_hi) = (
+                    c - params.precursor_tolerance.left.as_da(c),
+                    c + params.precursor_tolerance.right.as_da(c),
+                );
+                lo = lo.min(w_lo);
+                hi = hi.max(w_hi);
+                exact.push((w_lo - PRECURSOR_GATE_MARGIN_DA, w_hi + PRECURSOR_GATE_MARGIN_DA));
             }
         }
         if lo > hi {
@@ -411,7 +424,13 @@ impl ChunkFragmentIndex {
             sel
         });
         select_top_k(&mut sel, top_k);
-        sel.into_iter().map(|(id, v, _)| (id, v)).collect()
+        sel.into_iter()
+            .filter(|&(id, _, _)| {
+                let m = self.form_mass[id as usize];
+                exact.iter().any(|&(a, b)| m >= a && m <= b)
+            })
+            .map(|(id, v, _)| (id, v))
+            .collect()
     }
 
     /// Materialise selected forms as candidates, in (record, k) order, by
@@ -458,6 +477,12 @@ impl ChunkFragmentIndex {
         out
     }
 }
+
+/// Slack on the exact precursor windows `query` filters by. A form's indexed
+/// mass and its candidate's `Peptide::mass` are the same residue masses summed
+/// in possibly different order, so they differ by float rounding only; the
+/// scorer's precursor test stays the authority on which forms match.
+const PRECURSOR_GATE_MARGIN_DA: f64 = 1e-6;
 
 /// Mass a spectrum is ordered by for fragment-index chunking: precursor m/z
 /// times the reported charge (2 when unknown).

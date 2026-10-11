@@ -147,6 +147,23 @@ impl Ms1RunIndex {
         best
     }
 
+    /// The most intense centroid in `[lo, hi]` of scan `idx`, as (m/z,
+    /// intensity); the lowest m/z wins a tie. `None` when the slice is empty.
+    pub fn apex_centroid(&self, idx: usize, lo: f64, hi: f64) -> Option<(f64, f32)> {
+        let peaks = &self.scans[idx].peaks;
+        let start = peaks.partition_point(|&(mz, _)| mz < lo);
+        let mut best: Option<(f64, f32)> = None;
+        for &(mz, inten) in &peaks[start..] {
+            if mz > hi {
+                break;
+            }
+            if best.is_none_or(|(_, b)| inten > b) {
+                best = Some((mz, inten));
+            }
+        }
+        best
+    }
+
     /// Share of the most intense centroids that have an isotope partner
     /// (`+ISOTOPE/z`, z = 1..4) within `tol_ppm`, over an even sample of the
     /// run's scans. Orbitrap/TOF survey scans score 0.7–0.95 at 10 ppm; ion-trap
@@ -252,6 +269,19 @@ mod tests {
             Ms1RunIndex::new(Vec::new()).isotope_partner_fraction(10.0),
             None
         );
+    }
+
+    #[test]
+    fn apex_centroid_returns_position_and_intensity_of_the_most_intense() {
+        let idx = Ms1RunIndex::new(vec![Ms1Scan {
+            rt: 0.0,
+            peaks: vec![(499.98, 5.0), (500.0, 7.0), (500.01, 7.0), (500.03, 9.0)],
+            ..Ms1Scan::default()
+        }]);
+        assert_eq!(idx.apex_centroid(0, 499.97, 500.02), Some((500.0, 7.0)));
+        assert_eq!(idx.apex_centroid(0, 499.97, 500.03), Some((500.03, 9.0)));
+        assert_eq!(idx.apex_centroid(0, 600.0, 601.0), None);
+        assert_eq!(idx.max_in(0, 499.97, 500.02), 7.0);
     }
 
     #[test]

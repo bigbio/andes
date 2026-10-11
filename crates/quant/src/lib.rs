@@ -18,9 +18,12 @@
 //!   reference run, and the predicted RT and its uncertainty per run.
 //! * [`decoys`]: mass-defect-preserving and RT-shifted decoy hypotheses for
 //!   the match-between-runs transfer FDR.
+//! * [`evidence`]: the likelihood template fit that measures one (precursor,
+//!   run) hypothesis: amplitude, quantity and the evidence statistics.
 
 pub mod align;
 pub mod decoys;
+pub mod evidence;
 pub mod formula;
 pub mod isobaric;
 pub mod lfq;

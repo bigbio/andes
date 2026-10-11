@@ -6,15 +6,16 @@
 //! transfers and decoys all go through [`fit`], so their statistics are the
 //! same kind of number.
 //!
-//! Data. With `W = 4 s + 2 w_prior`, the MS1 scans with RT in
+//! Data. With `W = 4 s + 4 w_prior`, the MS1 scans with RT in
 //! `[t_hat - W, t_hat + W]` give, for isotope `i`, the trace `y_i[j]`: the most
 //! intense centroid within `tol_ppm` of `mu + i * 1.003355 / z` (0 when none),
-//! and one more trace `y_m1` at `mu - 1.003355 / z`.
+//! and one more trace `y_m1` at `mu - 1.003355 / z`. The `4 w_prior` term keeps
+//! a stretch of baseline on both sides of the peak even when `s` is small.
 //!
 //! Model. `y_i[j] = b_i + A * pi_i * g(t_j; t0, w) + noise`, with
 //! `g = exp(-(t - t0)^2 / (2 w^2))`, where:
 //!
-//! * `b_i` is the median of `y_i` over the window;
+//! * the background `b_i` is a nuisance parameter fitted jointly with `A`;
 //! * `sigma_i = 1.4826 * median|y_i[j+1] - y_i[j]| / sqrt(2)`, floored at
 //!   `0.5 * L`, where the detection limit `L` is the median over the
 //!   window's scans of each scan's own limit (the 5th percentile of its
@@ -24,17 +25,22 @@
 //! * `pi` is the envelope scaled to sum to 1 over its 4 entries.
 //!
 //! Fit. Over `t0` in the scan RTs inside `[t_hat - 3 s, t_hat + 3 s]` (the
-//! scan nearest `t_hat` when none) and `w` in `{0.7, 1.0, 1.4} * w_prior`, the
-//! weighted least-squares amplitude over the used isotopes is
-//! `A = max(0, num / den)`, with
-//! `num = sum_i pi_i sum_j (y_i[j] - b_i) g_j / sigma_i^2` and
-//! `den = sum_i pi_i^2 sum_j g_j^2 / sigma_i^2`, and the log-likelihood ratio
-//! against "no peak" is `LLR = A num - A^2 den / 2`. The fit maximises
+//! scan nearest `t_hat` when none) and `w` in `{0.7, 1.0, 1.4} * w_prior`, with
+//! the window means `ybar_i` and `gbar`, the weighted least-squares amplitude
+//! over the used isotopes, with each `b_i` profiled out, is
+//! `A = max(0, num / den)`, where
+//! `num = sum_i pi_i sum_j (y_i[j] - ybar_i) (g_j - gbar) / sigma_i^2` and
+//! `den = sum_i pi_i^2 sum_j (g_j - gbar)^2 / sigma_i^2`; then
+//! `b_i = ybar_i - A pi_i gbar`. The profile log-likelihood ratio against
+//! "background only" is `LLR = A num - A^2 den / 2`. The fit maximises
 //! `LLR - (t0 - t_hat)^2 / (2 s^2)`; the first maximum in (t0, w) order wins.
+//! A candidate whose `sum_j (g_j - gbar)^2` is below `1e-9` (a profile flat
+//! over the window) is skipped.
 //!
 //! Interference. At the optimum, each isotope `i` in `{1, 2, 3}` gets its own
-//! amplitude `A_i = sum_j (y_i[j] - b_i) g_j / (pi_i sum_j g_j^2)` with standard
-//! error `se_i = sigma_i / (pi_i sqrt(sum_j g_j^2))`. If the largest
+//! amplitude `A_i = sum_j (y_i[j] - ybar_i) (g_j - gbar) / (pi_i S)` with
+//! standard error `se_i = sigma_i / (pi_i sqrt(S))`, where
+//! `S = sum_j (g_j - gbar)^2`. If the largest
 //! `(A_i - A) / sqrt(se_i^2 + A_se^2)` exceeds 3, that one isotope is dropped
 //! and `A` is refitted at the same `(t0, w)`. The test is one-sided because
 //! interference only adds signal. Isotope 0 is never dropped.
@@ -59,6 +65,9 @@ const MAD_SCALE: f64 = 1.4826;
 const DEFAULT_DETECTION_LIMIT: f64 = 1.0;
 /// Noise floor as a fraction of the detection limit.
 const NOISE_FLOOR_OF_LIMIT: f64 = 0.5;
+/// Smallest `sum_j (g_j - gbar)^2` a candidate profile may have; below it the
+/// profile is flat over the window and carries no amplitude information.
+const MIN_CENTRED_SGG: f64 = 1e-9;
 /// One-sided z threshold of the interference test.
 const EXCLUSION_Z: f64 = 3.0;
 /// Floor, seconds, on `s` and `w_prior` (a zero or non-finite value would
@@ -89,33 +98,33 @@ impl Default for EvidenceParams {
 pub struct Evidence {
     /// `A`, the total amplitude of the isotope pattern at the apex.
     pub amplitude: f64,
-    /// `1 / sqrt(den)` over the used isotopes.
+    /// `1 / sqrt(den)` over the used isotopes (background profiled out).
     pub amplitude_se: f64,
-    /// `A * w * sqrt(2 pi)`: the area of the elution profile of the whole
-    /// pattern (`pi` sums to 1). The median background includes part of the
-    /// peak's tails, so this reads a few percent low (about 2-3% for a peak
-    /// covering a third of the window); the bias is a constant scale of one
-    /// estimator applied to every run alike, so it cancels in cross-run
-    /// ratios.
+    /// `A * w * sqrt(2 pi)`: the area under the fitted Gaussian profile of
+    /// the whole isotope pattern (`pi` sums to 1), above the fitted
+    /// background.
     pub quantity: f64,
     /// `amplitude_se * w * sqrt(2 pi)`.
     pub quantity_se: f64,
-    /// Log-likelihood ratio against "no peak" at the optimum (0 when `A = 0`).
+    /// Profile log-likelihood ratio against "background only" at the optimum
+    /// (0 when `A = 0`).
     pub llr: f64,
     /// `(t0 - t_hat) / s`.
     pub rt_z: f64,
     /// `w / w_prior`.
     pub width_ratio: f64,
     /// Cosine between the per-isotope heights `A_i * pi_i` (each isotope's
-    /// own projection on `g`) and `pi` over the used isotopes; 1 when the
+    /// own centred projection on `g`) and `pi` over the used isotopes; 1 when the
     /// observed ratios match the theoretical ones, 0 when either vector is
     /// zero.
     pub envelope_cos: f64,
-    /// Minimum over isotopes 0 and 1 of the Pearson correlation between the
-    /// trace and `g` over `[t0 - 2w, t0 + 2w]`; 0 with fewer than 3 scans
-    /// there, and 0 for a constant trace.
+    /// Minimum, over the first two isotopes of the final fit, of the Pearson
+    /// correlation between the trace and `g` over `[t0 - 2w, t0 + 2w]`; 0 when
+    /// the fit uses fewer than two isotopes or that range holds fewer than 3
+    /// scans, and 0 for a constant trace.
     pub coherence: f64,
-    /// The M-1 trace's amplitude projected on `g` (clamped at 0), divided by
+    /// The M-1 trace's amplitude, fitted with its own background like `A_i`
+    /// (clamped at 0), divided by
     /// `pi_0 * max(A, amplitude_se)`; near 0 when `mu` is monoisotopic. The
     /// floor at one standard error keeps it finite when `A = 0`.
     pub m1_ratio: f64,
@@ -150,9 +159,9 @@ impl Prior {
         }
     }
 
-    /// Half-width `W = 4 s + 2 w_prior` of the extraction window.
+    /// Half-width `W = 4 s + 4 w_prior` of the extraction window.
     pub fn half_window(&self) -> f64 {
-        4.0 * self.s + 2.0 * self.w_prior
+        4.0 * self.s + 4.0 * self.w_prior
     }
 }
 
@@ -318,27 +327,32 @@ pub fn fit_traces(
         DEFAULT_DETECTION_LIMIT
     };
     let floor = NOISE_FLOOR_OF_LIMIT * limit;
-    let mut b = [0.0f64; MAX_ISOTOPES];
+    let mut ybar = [0.0f64; MAX_ISOTOPES];
     let mut sigma = [1.0f64; MAX_ISOTOPES];
     let mut mask = 0u8;
     for i in 0..n_iso {
-        (b[i], sigma[i]) = background_and_noise(traces[i], floor, &mut work.sort);
+        ybar[i] = mean(traces[i]);
+        sigma[i] = noise_sigma(traces[i], floor, &mut work.sort);
         if pi[i] > 0.0 {
             mask |= 1 << i;
         }
     }
-    let (t0, w) = best_alignment(rt, traces, &pi, &b, &sigma, mask, prior, work);
+    let (t0, w) = best_alignment(rt, traces, &pi, &ybar, &sigma, mask, prior, work);
     let g = &mut work.g;
     g.clear();
     g.extend(rt.iter().map(|&t| gaussian(t, t0, w)));
-    let sgg: f64 = g.iter().map(|v| v * v).sum();
+    let gbar = g.iter().sum::<f64>() / g.len() as f64;
+    let sgg = g
+        .iter()
+        .map(|v| (v - gbar) * (v - gbar))
+        .sum::<f64>()
+        .max(MIN_CENTRED_SGG);
     let mut proj = [0.0f64; MAX_ISOTOPES];
     for i in 0..n_iso {
-        proj[i] = project(traces[i], b[i], g);
+        proj[i] = project(traces[i], ybar[i], g);
     }
     let mask = exclude_interfered(&proj, sgg, &pi, &sigma, mask);
-    let (m1_b, _) = background_and_noise(m1, floor, &mut work.sort);
-    let m1_proj = project(m1, m1_b, g);
+    let m1_proj = project(m1, mean(m1), g);
     features(
         rt, traces, mz0, mu, prior, &pi, &sigma, &proj, sgg, m1_proj, mask, t0, w, g,
     )
@@ -360,27 +374,32 @@ fn gaussian(t: f64, t0: f64, w: f64) -> f64 {
     (-0.5 * d * d).exp()
 }
 
-/// `sum_j (y_j - b) g_j`.
-fn project(y: &[f32], b: f64, g: &[f64]) -> f64 {
-    y.iter().zip(g).map(|(&v, &gj)| (v as f64 - b) * gj).sum()
+/// `sum_j (y_j - ybar) g_j`, which equals `sum_j (y_j - ybar) (g_j - gbar)`
+/// when `ybar` is the mean of `y`.
+fn project(y: &[f32], ybar: f64, g: &[f64]) -> f64 {
+    y.iter()
+        .zip(g)
+        .map(|(&v, &gj)| (v as f64 - ybar) * gj)
+        .sum()
 }
 
-/// The trace's background (median over the window) and noise
-/// (`1.4826 * median|successive difference| / sqrt(2)`, floored at `floor`).
-fn background_and_noise(y: &[f32], floor: f64, sort: &mut Vec<f32>) -> (f64, f64) {
+/// Mean of the trace (0 when empty).
+fn mean(y: &[f32]) -> f64 {
     if y.is_empty() {
-        return (0.0, floor);
+        0.0
+    } else {
+        y.iter().map(|&v| v as f64).sum::<f64>() / y.len() as f64
     }
-    sort.clear();
-    sort.extend_from_slice(y);
-    sort.sort_unstable_by(f32::total_cmp);
-    let b = median_sorted(sort);
+}
+
+/// The trace's noise, `1.4826 * median|successive difference| / sqrt(2)`,
+/// floored at `floor`.
+fn noise_sigma(y: &[f32], floor: f64, sort: &mut Vec<f32>) -> f64 {
     sort.clear();
     sort.extend(y.windows(2).map(|w| (w[1] - w[0]).abs()));
     sort.sort_unstable_by(f32::total_cmp);
     let mad = median_sorted(sort);
-    let sigma = (MAD_SCALE * mad / std::f64::consts::SQRT_2).max(floor);
-    (b, sigma)
+    (MAD_SCALE * mad / std::f64::consts::SQRT_2).max(floor)
 }
 
 /// Median of an ascending slice (mean of the middle two for an even
@@ -400,14 +419,14 @@ fn best_alignment(
     rt: &[f64],
     traces: &[&[f32]],
     pi: &[f64; MAX_ISOTOPES],
-    b: &[f64; MAX_ISOTOPES],
+    ybar: &[f64; MAX_ISOTOPES],
     sigma: &[f64; MAX_ISOTOPES],
     mask: u8,
     prior: &Prior,
     work: &mut Workspace,
 ) -> (f64, f64) {
-    // z_j = sum_i pi_i (y_i[j] - b_i) / sigma_i^2, so num = sum_j z_j g_j and
-    // den = d * sum_j g_j^2.
+    // z_j = sum_i pi_i (y_i[j] - ybar_i) / sigma_i^2 sums to 0 over j, so
+    // num = sum_j z_j g_j and den = d * (sum_j g_j^2 - (sum_j g_j)^2 / n).
     let z = &mut work.z;
     z.clear();
     z.resize(rt.len(), 0.0);
@@ -419,7 +438,7 @@ fn best_alignment(
         let c = pi[i] / (sigma[i] * sigma[i]);
         d += pi[i] * c;
         for (zj, &v) in z.iter_mut().zip(trace.iter()) {
-            *zj += c * (v as f64 - b[i]);
+            *zj += c * (v as f64 - ybar[i]);
         }
     }
     let (t_hat, s) = (prior.t_hat, prior.s);
@@ -431,19 +450,25 @@ fn best_alignment(
         let k = nearest(rt, t_hat);
         k..k + 1
     };
+    let n = rt.len() as f64;
     let mut best = (f64::NEG_INFINITY, rt[candidates.start], prior.w_prior);
     for k in candidates {
         let t0 = rt[k];
         let penalty = (t0 - t_hat) * (t0 - t_hat) / (2.0 * s * s);
         for f in WIDTH_GRID {
             let w = f * prior.w_prior;
-            let (mut num, mut sgg) = (0.0, 0.0);
+            let (mut num, mut sg, mut sgg) = (0.0, 0.0, 0.0);
             for (&t, &zj) in rt.iter().zip(z.iter()) {
                 let g = gaussian(t, t0, w);
                 num += zj * g;
+                sg += g;
                 sgg += g * g;
             }
-            let den = d * sgg;
+            let centred = sgg - sg * sg / n;
+            if centred < MIN_CENTRED_SGG {
+                continue;
+            }
+            let den = d * centred;
             let a = (num / den).max(0.0);
             let objective = a * num - 0.5 * a * a * den - penalty;
             if objective > best.0 {
@@ -466,8 +491,9 @@ fn nearest(rt: &[f64], t: f64) -> usize {
     }
 }
 
-/// `num` and `den` over the isotopes in `mask`, from the projections
-/// `proj[i] = sum_j (y_i[j] - b_i) g_j` and `sgg = sum_j g_j^2`.
+/// `num` and `den` over the isotopes in `mask`, from the centred projections
+/// `proj[i] = sum_j (y_i[j] - ybar_i) (g_j - gbar)` and
+/// `sgg = sum_j (g_j - gbar)^2`.
 fn num_den(
     proj: &[f64; MAX_ISOTOPES],
     sgg: f64,
@@ -562,14 +588,12 @@ fn features(
     let lo = rt.partition_point(|&t| t < t0 - 2.0 * w);
     let hi = rt.partition_point(|&t| t <= t0 + 2.0 * w);
     let n_points = hi - lo;
-    let coherence = if n_points < 3 {
-        0.0
-    } else {
-        traces
-            .iter()
-            .take(2)
-            .map(|y| pearson(&y[lo..hi], &g[lo..hi]))
-            .fold(f64::INFINITY, f64::min)
+    let mut first_two = (0..traces.len()).filter(|&i| mask & (1 << i) != 0 && pi[i] > 0.0);
+    let coherence = match (first_two.next(), first_two.next()) {
+        (Some(a), Some(b)) if n_points >= 3 => {
+            pearson(&traces[a][lo..hi], &g[lo..hi]).min(pearson(&traces[b][lo..hi], &g[lo..hi]))
+        }
+        _ => 0.0,
     };
 
     let m1_ratio = m1_proj.max(0.0) / sgg / (pi[0] * amplitude.max(amplitude_se));
@@ -661,11 +685,17 @@ mod tests {
         }
     }
 
+    /// Unrelated centroids per scan, spread uniformly over m/z 300-1500.
+    const DENSE_CENTROIDS: usize = 200;
+
     /// MS1 scans every `scan_dt` seconds from 0 to past the last feature.
-    /// Every feature puts a centroid at its M-1 position and at each of its 4
-    /// isotopes in every scan: a baseline of `5 * noise`, plus the Gaussian
-    /// elution profile, plus Gaussian noise of standard deviation `noise`.
-    /// Non-positive intensities are dropped, as centroiding would.
+    /// Every scan carries [`DENSE_CENTROIDS`] unrelated centroids at random
+    /// m/z with intensity `noise * (1 + Exp(1))`, a population cut off at a
+    /// centroiding threshold like real survey scans. Every feature puts a
+    /// centroid at its M-1 position and at each of its 4 isotopes in every
+    /// scan: a baseline of `5 * noise`, plus the Gaussian elution profile,
+    /// plus Gaussian noise of standard deviation `noise`. Non-positive
+    /// intensities are dropped, as centroiding would.
     fn synth_scans(features: &[Feature], noise: f32, scan_dt: f64, seed: u64) -> Vec<Ms1Scan> {
         let noise = noise as f64;
         let end = features
@@ -678,7 +708,14 @@ mod tests {
         (0..n)
             .map(|k| {
                 let t = k as f64 * scan_dt;
-                let mut peaks = Vec::with_capacity(features.len() * 5);
+                let mut peaks = Vec::with_capacity(features.len() * 5 + DENSE_CENTROIDS);
+                for _ in 0..DENSE_CENTROIDS {
+                    let mz = 300.0 + 1200.0 * rng.uniform();
+                    let inten = noise * (1.0 - rng.uniform().ln());
+                    if inten > 0.0 {
+                        peaks.push((mz, inten as f32));
+                    }
+                }
                 for &(mz, z, env, apex, width, amp) in features {
                     let g = (-(t - apex) * (t - apex) / (2.0 * width * width)).exp();
                     for iso in -1i32..4 {
@@ -769,10 +806,69 @@ mod tests {
         assert!(e.envelope_cos > 0.99 && e.coherence > 0.9);
     }
 
-    /// Upper bound on the LLR of a noise-only window: 1.5 times the largest
-    /// null LLR measured over 100 noise seeds of the absent-precursor run at
-    /// 1 s and 2 s scan spacing (1.81).
-    const NULL_LLR_BOUND: f64 = 2.7;
+    /// Upper bound on the LLR of a noise-only window of the [`synth_scans`]
+    /// fixture (noise-only feature at `NOISE`, probe `s = 6`, `w_prior = 5`):
+    /// 1.5 times the largest null LLR over 100 noise seeds at 1 s and 2 s scan
+    /// spacing (7.23).
+    const NULL_LLR_BOUND: f64 = 10.8;
+
+    #[test]
+    fn noise_estimator_scales_successive_differences() {
+        let mut sort = Vec::new();
+        // |successive difference| = 10 everywhere.
+        let y: Vec<f32> = (0..21)
+            .map(|k| if k % 2 == 0 { 100.0 } else { 110.0 })
+            .collect();
+        let expected = 1.4826 * 10.0 / std::f64::consts::SQRT_2;
+        assert!((noise_sigma(&y, 1.0, &mut sort) - expected).abs() < 1e-9);
+        assert_eq!(noise_sigma(&y, 50.0, &mut sort), 50.0);
+        // A median over differences {1, 2, 3, 4} is 2.5.
+        let y = [0.0f32, 1.0, 3.0, 6.0, 10.0];
+        let expected = 1.4826 * 2.5 / std::f64::consts::SQRT_2;
+        assert!((noise_sigma(&y, 0.0, &mut sort) - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fixture_noise_is_set_by_the_differences_not_the_floor() {
+        let run = synth_run(&[(MZ, 2, ENV, 300.0, 5.0, 0.0)], NOISE, 1.0);
+        let scans = run.scan_window(250.0, 350.0);
+        let limit = detection_limit(&run, scans.clone(), &mut Vec::new());
+        let y = run.xic(MZ, MZ * 10e-6, scans);
+        let sigma = noise_sigma(&y, 0.0, &mut Vec::new());
+        eprintln!(
+            "fixture: sigma = {sigma:.0}, 0.5 L = {:.0}, noise = {NOISE}",
+            0.5 * limit
+        );
+        assert!(sigma > 0.5 * limit);
+        assert!((sigma / NOISE as f64 - 1.0).abs() < 0.3);
+    }
+
+    #[test]
+    fn amplitude_unbiased_across_window_regimes() {
+        let w = 5.0;
+        let run = synth_run(&[(MZ, 2, ENV, 300.0, w, AMP)], NOISE, 1.0);
+        for ratio in [0.25, 0.5, 1.0, 2.0] {
+            let e = fit(&run, &probe(MZ, 300.0, ratio * w, w), 2, &ENV, &params()).unwrap();
+            eprintln!(
+                "regime s/w_prior = {ratio}: A/A_true = {:.4}, t0 = {}, w = {}",
+                e.amplitude / AMP,
+                e.t0,
+                e.w
+            );
+            assert!(
+                (e.amplitude / AMP - 1.0).abs() < 0.05,
+                "s/w_prior = {ratio}"
+            );
+        }
+    }
+
+    #[test]
+    fn mass_error_is_the_weighted_centroid_offset() {
+        let run = synth_run(&[(MZ * (1.0 + 3e-6), 2, ENV, 300.0, 5.0, AMP)], NOISE, 1.0);
+        let e = fit(&run, &probe(MZ, 300.0, 6.0, 5.0), 2, &ENV, &params()).unwrap();
+        eprintln!("mass error: {:.3} ppm (true 3)", e.mass_err_ppm);
+        assert!((e.mass_err_ppm - 3.0).abs() < 0.2);
+    }
 
     #[test]
     fn absent_precursor_has_small_llr() {
@@ -919,7 +1015,7 @@ mod tests {
                     .collect(),
             )
         };
-        // W = 4 * 0.25 + 2 * 0.25 = 1.5 s holds 4 scans at 1 s spacing.
+        // W = 4 * 0.25 + 4 * 0.25 = 2 s holds 4 scans at 1 s spacing.
         let pr = probe(MZ, 10.5, 0.25, 0.25);
         assert_eq!(fit(&scans(30, vec![]), &pr, 2, &ENV, &params()), None);
         let wide = probe(MZ, 10.0, 3.0, 2.0);

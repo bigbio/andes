@@ -192,7 +192,9 @@ impl Ms1RunIndex {
     }
 
     /// The most intense centroid in `[lo, hi]` of scan `idx`, as (m/z,
-    /// intensity); the lowest m/z wins a tie. `None` when the slice is empty.
+    /// intensity), with the semantics of [`Self::max_in`]: only positive
+    /// intensities count (a NaN never does) and the lowest m/z wins a tie.
+    /// `None` when no centroid qualifies.
     pub fn apex_centroid(&self, idx: usize, lo: f64, hi: f64) -> Option<(f64, f32)> {
         let peaks = &self.scans[idx].peaks;
         let start = peaks.partition_point(|&(mz, _)| mz < lo);
@@ -201,7 +203,7 @@ impl Ms1RunIndex {
             if mz > hi {
                 break;
             }
-            if best.is_none_or(|(_, b)| inten > b) {
+            if inten > best.map_or(0.0, |(_, b)| b) {
                 best = Some((mz, inten));
             }
         }
@@ -326,6 +328,23 @@ mod tests {
         assert_eq!(idx.apex_centroid(0, 499.97, 500.03), Some((500.03, 9.0)));
         assert_eq!(idx.apex_centroid(0, 600.0, 601.0), None);
         assert_eq!(idx.max_in(0, 499.97, 500.02), 7.0);
+    }
+
+    #[test]
+    fn apex_centroid_skips_nan_and_non_positive_intensities() {
+        let idx = Ms1RunIndex::new(vec![Ms1Scan {
+            rt: 0.0,
+            peaks: vec![
+                (499.99, f32::NAN),
+                (500.0, 0.0),
+                (500.01, 3.0),
+                (500.02, f32::NAN),
+            ],
+            ..Ms1Scan::default()
+        }]);
+        assert_eq!(idx.apex_centroid(0, 499.98, 500.03), Some((500.01, 3.0)));
+        assert_eq!(idx.max_in(0, 499.98, 500.03), 3.0);
+        assert_eq!(idx.apex_centroid(0, 499.98, 500.005), None);
     }
 
     #[test]

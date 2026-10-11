@@ -351,42 +351,6 @@ pub(crate) fn run_precursor_calibration(
     Ok(stats)
 }
 
-/// Warn BEFORE scoring when the in-RAM candidate index is unlikely to fit.
-///
-/// Without this, a large database (a whole human proteome at three missed cleavages)
-/// runs for half an hour and is then killed by the OOM killer with no message from
-/// andes at all — the user sees only a dead process and no output. Measured on a
-/// 20k-protein human FASTA: ~0.65 KB resident per candidate.
-///
-/// This warns rather than aborts: the estimate is a linear fit, machines differ, and
-/// refusing to start a run that would have succeeded is worse than a noisy warning.
-/// Only Linux exposes the memory figures cheaply; elsewhere the check is skipped.
-pub(crate) fn warn_if_index_will_not_fit(n_candidates: usize) {
-    const BYTES_PER_CANDIDATE: f64 = 665.0;
-
-    // Shared with the `--candidate-index auto` decision, so both compare against
-    // `min(node MemAvailable, cgroup limit)` rather than the node's free memory.
-    let Some(available) = crate::memlimit::available_memory_budget() else {
-        return;
-    };
-
-    let estimate = (n_candidates as f64 * BYTES_PER_CANDIDATE) as u64;
-    if estimate <= available.bytes {
-        return;
-    }
-    let gb = |b: u64| b as f64 / (1024.0 * 1024.0 * 1024.0);
-    eprintln!(
-        "WARNING: this search needs roughly {:.1} GB for the in-RAM candidate index \
-         ({} candidates) but only {:.1} GB is available (from {}). The process is likely \
-         to be killed by the operating system partway through, with no result written.",
-        gb(estimate),
-        n_candidates,
-        gb(available.bytes),
-        available.source.describe()
-    );
-    eprintln!("  Re-run with --candidate-index mmap to page the index from disk instead.");
-}
-
 /// Peek the spectrum file and return the dominant
 /// `ActivationMethod` across the first several MS2 spectra.
 ///

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::cli::{
-    CandidateIndexFlag, Cli, EnzymeSpecificity, EthcdActivationFlag, FragmentIndexFlag,
+    Cli, EnzymeSpecificity, EthcdActivationFlag, FragmentIndexFlag,
     Fragmentation, PrecursorMonoFlag, Protocol, ScoreFlag,
 };
 use crate::glyco_run::run_glyco;
@@ -21,7 +21,7 @@ use crate::rescore;
 use crate::spectra::{
     detect_dominant_activation, detect_instrument_type_for_path, detect_isobaric_sampled,
     input_format_flags, merge_parse_stats, prefix_spectrum_titles, run_precursor_calibration,
-    send_chunks, title_prefix_for, tolerance_ppm_display, warn_if_index_will_not_fit, ParseStats,
+    send_chunks, title_prefix_for, tolerance_ppm_display, ParseStats,
 };
 use crate::{arg_present, report_search_progress, EXPLICIT_MISSED_CLEAVAGES};
 use input::{FastaReader, MgfReader, Ms1Link, MzMLReader};
@@ -43,16 +43,14 @@ pub(crate) struct RetrievalChoice {
     /// every peptidoform in its precursor windows.
     pub use_index: bool,
     /// One human-readable clause naming the reason, or `None` when there is
-    /// nothing to report (the search fits in RAM, or a mode that needs the full
-    /// candidate list is active).
+    /// nothing to report (`--glyco`, which looks candidates up by backbone mass).
     pub report: Option<String>,
     /// Set when the user forced the index somewhere it cannot be used.
     pub refused_because: Option<&'static str>,
 }
 
-/// Pick the out-of-core candidate-retrieval strategy: the fragment-ion index
-/// whenever the candidate index is out-of-core, because there it was MEASURED to
-/// win at both resolutions:
+/// Pick the candidate-retrieval strategy: the fragment-ion index, because it
+/// was MEASURED to win at both resolutions:
 ///
 ///  - **High-resolution fragments**: +23% PSMs on Astral at equal entrapment FDP
 ///    over per-spectrum enumeration.
@@ -62,12 +60,9 @@ pub(crate) struct RetrievalChoice {
 ///    index matches enumeration on TMT and UPS1 at ~1/19 and ~1/11 of its CPU
 ///    time (TMT 289 s vs 5,404 s).
 ///
-/// The index is not used in RAM: the in-RAM search keeps its own candidate
-/// pruning and is the faster path whenever the candidate index fits.
 /// `--glyco` does not use it: its driver looks candidates up by backbone mass
 /// (precursor minus glycan) in its own sequon-only candidate table.
 pub(crate) fn retrieval_choice(
-    out_of_core: bool,
     fragment_tol: model::tolerance::Tolerance,
     excluded_mode: bool,
     flag: FragmentIndexFlag,
@@ -77,15 +72,12 @@ pub(crate) fn retrieval_choice(
         Tolerance::Ppm(v) => format!("{v} ppm"),
         Tolerance::Da(v) => format!("{v} Da"),
     };
-    if !out_of_core || excluded_mode {
+    if excluded_mode {
         return RetrievalChoice {
             use_index: false,
             report: None,
-            refused_because: (flag == FragmentIndexFlag::On).then_some(if !out_of_core {
-                "the candidate index fits in RAM"
-            } else {
-                "--glyco looks candidates up by backbone mass"
-            }),
+            refused_because: (flag == FragmentIndexFlag::On)
+                .then_some("--glyco looks candidates up by backbone mass"),
         };
     }
     match flag {
@@ -734,8 +726,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     };
-    // Configure the global Rayon worker pool BEFORE anything runs on it (the
-    // candidate-index memory estimate below, PreparedSearch, the chunks).
+    // Configure the global Rayon worker pool BEFORE anything runs on it
+    // (PreparedSearch, the chunks).
     // `build_global()` panics if called twice; guard with `OnceLock` so repeated
     // CLI invocations within a single test process don't blow up.
     static POOL_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
@@ -745,81 +737,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .build_global()
             .expect("build_global");
     });
-    params.candidate_index = match cli.candidate_index {
-        CandidateIndexFlag::Ram if cli.glyco => {
-            return Err("--candidate-index ram is not supported with --glyco: the glyco \
-                        driver builds its sequon-only candidate table from the out-of-core \
-                        index"
-                .into());
-        }
-        CandidateIndexFlag::Ram => search::CandidateIndexMode::Ram,
-        CandidateIndexFlag::Mmap => search::CandidateIndexMode::Mmap,
-        CandidateIndexFlag::Auto => {
-            let high_res_fragments =
-                search::fragment_index::is_high_resolution(scorer.feature_match_tolerance());
-            if cli.glyco {
-                // The glyco driver materialises only the N-X-S/T-bearing
-                // candidates, from the out-of-core index.
-                search::CandidateIndexMode::Mmap
-            } else if cli.fragment_index != FragmentIndexFlag::Off {
-                // Every non-glyco search retrieves candidates with the fragment-ion
-                // index on the out-of-core path. High-res: +23% PSMs on Astral at
-                // equal entrapment FDP over enumeration. Low-res (only the most
-                // intense peaks vote): the same identifications as the in-RAM
-                // path at the same CPU and wall time, in less than half the memory.
-                eprintln!(
-                    "[auto] {} fragments -> out-of-core index with fragment-ion retrieval \
-                     (force the in-RAM path with --candidate-index ram)",
-                    if high_res_fragments {
-                        "high-resolution"
-                    } else {
-                        "low-resolution"
-                    }
-                );
-                search::CandidateIndexMode::Mmap
-            } else {
-                // The figure is `min(node MemAvailable, cgroup limit)`: under
-                // SLURM/containers the node's free memory is not ours to spend.
-                match available_memory_budget() {
-                    Some(avail) => {
-                        // Budget 60% of available memory for the candidate index;
-                        // the rest covers spectra, the model, scoring scratch, etc.
-                        let budget = (avail.bytes as f64 * 0.60) as u64;
-                        if search::candidate_index::ram_candidate_index_fits(
-                            &idx,
-                            &params,
-                            &cli.decoy_prefix,
-                            budget,
-                        ) {
-                            search::CandidateIndexMode::Ram
-                        } else {
-                            eprintln!(
-                                "[auto] in-RAM candidate index would exceed the ~{} GiB budget \
-                                 (60% of {} GiB from {}) → using out-of-core mmap \
-                                 (force with --candidate-index ram)",
-                                budget >> 30,
-                                avail.bytes >> 30,
-                                avail.source.describe()
-                            );
-                            search::CandidateIndexMode::Mmap
-                        }
-                    }
-                    // Can't read available memory: keep the byte-identical RAM
-                    // default; the user can force --candidate-index mmap.
-                    None => search::CandidateIndexMode::Ram,
-                }
-            }
-        }
-    };
-    // The out-of-core (`Mmap`) candidate path materializes candidates lazily and
-    // only syncs them into `prepared.candidates` AFTER the scan. The refinement
-    // cascade runs after the sync and reads only the candidates its Pass-1 PSMs
-    // reference, the chimeric Pass 2 resolves its candidates on either backing,
-    // and the glyco driver materialises its own sequon-only table from the index.
-    // Retrieval strategy for the out-of-core path (issue #76): chosen by
-    // `retrieval_choice` and reported once; `--fragment-index` overrides it.
+    // Every search retrieves its candidates from the out-of-core base-peptide
+    // index; the glyco driver materialises its own sequon-only table from it.
+    // The retrieval strategy is chosen by `retrieval_choice` and reported once;
+    // `--fragment-index` overrides it.
     let choice = retrieval_choice(
-        params.candidate_index == search::CandidateIndexMode::Mmap,
         scorer.feature_match_tolerance(),
         cli.glyco,
         cli.fragment_index,
@@ -1066,60 +988,29 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         params.precursor_cal_mode = PrecursorCalMode::Off;
     }
 
-    // Calibration pre-pass, on the SAME candidate backing the memory budget
-    // chose above. In RAM mode candidate enumeration is precursor-tolerance
-    // independent, so the pre-pass's `PreparedParts` are kept and reused for the
-    // main pass instead of re-enumerating (~15 s saved on Astral); `into_parts()`
-    // runs BEFORE tightening so the owned parts outlive the `params` borrow. In
-    // Mmap mode the pre-pass uses the out-of-core index (issue #70: building the
-    // in-RAM index here bypassed the budget and was OOM-killed); nothing is
-    // reused because the on-disk index is content-addressed and the main pass
-    // opens the same file from the cache.
-    let mmap_cache_path = match params.candidate_index {
-        search::CandidateIndexMode::Mmap => Some(index_cache_path(&idx, &params)),
-        search::CandidateIndexMode::Ram => None,
-    };
-    let reuse_parts = if params.precursor_cal_mode != PrecursorCalMode::Off {
-        let (cal_stats, parts) = match &mmap_cache_path {
-            None => {
-                let mut cal_prepared = PreparedSearch::prepare(
-                    &idx,
-                    &params,
-                    &scorer,
-                    fragment_tol_da,
-                    &cli.decoy_prefix,
-                );
-                let cal_stats = run_precursor_calibration(
-                    &spectrum_path,
-                    is_mzml,
-                    ms_level_u32,
-                    bench_cap,
-                    &params,
-                    &mut cal_prepared,
-                )?;
-                (cal_stats, Some(cal_prepared.into_parts()))
-            }
-            Some(path) => {
-                let mut cal_prepared = PreparedSearch::prepare_mmap(
-                    &idx,
-                    &params,
-                    &scorer,
-                    fragment_tol_da,
-                    &cli.decoy_prefix,
-                    path,
-                )
-                .map_err(|e| format!("build out-of-core candidate index: {e}"))?;
-                let cal_stats = run_precursor_calibration(
-                    &spectrum_path,
-                    is_mzml,
-                    ms_level_u32,
-                    bench_cap,
-                    &params,
-                    &mut cal_prepared,
-                )?;
-                (cal_stats, None)
-            }
-        };
+    // Calibration pre-pass on the out-of-core index. The index is
+    // content-addressed and precursor-tolerance independent, so the main pass
+    // reopens the same cached file the pre-pass built.
+    let index_path = index_cache_path(&idx, &params);
+    if params.precursor_cal_mode != PrecursorCalMode::Off {
+        let mut cal_prepared = PreparedSearch::prepare_mmap(
+            &idx,
+            &params,
+            &scorer,
+            fragment_tol_da,
+            &cli.decoy_prefix,
+            &index_path,
+        )
+        .map_err(|e| format!("build out-of-core candidate index: {e}"))?;
+        let cal_stats = run_precursor_calibration(
+            &spectrum_path,
+            is_mzml,
+            ms_level_u32,
+            bench_cap,
+            &params,
+            &mut cal_prepared,
+        )?;
+        drop(cal_prepared);
         params.precursor_mass_shift_ppm =
             apply_shift_for_mode(params.precursor_cal_mode, cal_stats);
         let tol_before = params.precursor_tolerance;
@@ -1142,46 +1033,24 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
-        parts
-    } else {
-        None
-    };
-
-    let mut prepared = match (reuse_parts, &mmap_cache_path) {
-        // RAM mode with calibration: reuse the pre-pass enumeration.
-        (Some(parts), _) => {
-            PreparedSearch::from_parts(&idx, &params, &scorer, fragment_tol_da, parts)
-        }
-        // Content-addressed cache path, so repeated searches over the same
-        // FASTA + params (and the calibration pre-pass just above) share one
-        // on-disk index without rebuilding.
-        (None, Some(path)) => PreparedSearch::prepare_mmap(
-            &idx,
-            &params,
-            &scorer,
-            fragment_tol_da,
-            &cli.decoy_prefix,
-            path,
-        )
-        .map_err(|e| format!("build out-of-core candidate index: {e}"))?,
-        (None, None) => {
-            PreparedSearch::prepare(&idx, &params, &scorer, fragment_tol_da, &cli.decoy_prefix)
-        }
-    };
-    match params.candidate_index {
-        search::CandidateIndexMode::Ram => {
-            eprintln!(
-                "PreparedSearch: {} candidates, {} mass buckets (candidate-index: ram)",
-                prepared.candidates.len(),
-                prepared.bucket_index.len(),
-            );
-            warn_if_index_will_not_fit(prepared.candidates.len());
-        }
-        search::CandidateIndexMode::Mmap => eprintln!(
-            "PreparedSearch: out-of-core candidate-index: mmap \
-             (base peptides resolved lazily per spectrum)"
-        ),
     }
+
+    // Content-addressed cache path, so repeated searches over the same FASTA +
+    // params (and the calibration pre-pass just above) share one on-disk index
+    // without rebuilding.
+    let mut prepared = PreparedSearch::prepare_mmap(
+        &idx,
+        &params,
+        &scorer,
+        fragment_tol_da,
+        &cli.decoy_prefix,
+        &index_path,
+    )
+    .map_err(|e| format!("build out-of-core candidate index: {e}"))?;
+    eprintln!(
+        "PreparedSearch: out-of-core candidate-index: mmap \
+         (base peptides resolved lazily per spectrum)"
+    );
 
     let bench_mode = cli.max_spectra > 0;
 
@@ -1651,10 +1520,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Bench mode: capped at {} spectra", cli.max_spectra);
     }
 
-    // `Mmap` mode: drain the per-spectrum materialized candidates accumulated
-    // during the scan into `prepared.candidates` so the PIN/TSV writers resolve
-    // every PSM's `candidate_idxs` against a real candidate slice (no-op + cheap
-    // in the default `Ram` mode, where candidates already live there).
+    // Drain the per-spectrum materialized candidates accumulated during the scan
+    // into `prepared.candidates` so the PIN/TSV writers resolve every PSM's
+    // `candidate_idxs` against a real candidate slice.
     prepared.sync_materialized_candidates();
 
     // No MS1 reached the correction (an MS2-only mzML, or no charges): nothing was
@@ -2157,53 +2025,35 @@ mod retrieval_choice_tests {
     const LO: Tolerance = Tolerance::Da(0.5);
 
     #[test]
-    fn in_ram_never_uses_the_index_and_says_nothing() {
-        let c = retrieval_choice(false, HI, false, FragmentIndexFlag::Auto);
-        assert!(!c.use_index);
-        assert!(
-            c.report.is_none(),
-            "an in-RAM search has no strategy to report"
-        );
-        assert!(c.refused_because.is_none());
-    }
-
-    #[test]
-    fn out_of_core_high_res_uses_the_index() {
-        let c = retrieval_choice(true, HI, false, FragmentIndexFlag::Auto);
+    fn high_res_uses_the_index() {
+        let c = retrieval_choice(HI, false, FragmentIndexFlag::Auto);
         assert!(c.use_index);
         assert!(c.report.unwrap().contains("high-resolution"));
     }
 
-    /// Low-res out-of-core searches use the index with the vote cap: enumeration
+    /// Low-res searches use the index with the vote cap: enumeration
     /// there took TMT 5,404 s of CPU against 289 s for the capped index, at the
     /// same PSMs.
     #[test]
-    fn out_of_core_low_res_uses_the_capped_index() {
-        let c = retrieval_choice(true, LO, false, FragmentIndexFlag::Auto);
+    fn low_res_uses_the_capped_index() {
+        let c = retrieval_choice(LO, false, FragmentIndexFlag::Auto);
         assert!(c.use_index);
         assert!(c.report.unwrap().contains("most intense peaks vote"));
     }
 
     #[test]
     fn off_is_honoured_on_low_res() {
-        let c = retrieval_choice(true, LO, false, FragmentIndexFlag::Off);
+        let c = retrieval_choice(LO, false, FragmentIndexFlag::Off);
         assert!(!c.use_index);
-    }
-
-    #[test]
-    fn forcing_it_in_ram_is_refused() {
-        let c = retrieval_choice(false, HI, false, FragmentIndexFlag::On);
-        assert!(!c.use_index);
-        assert_eq!(c.refused_because, Some("the candidate index fits in RAM"));
     }
 
     #[test]
     fn glyco_never_uses_the_fragment_index() {
         for flag in [FragmentIndexFlag::Auto, FragmentIndexFlag::On] {
-            let c = retrieval_choice(true, HI, true, flag);
+            let c = retrieval_choice(HI, true, flag);
             assert!(!c.use_index, "glyco looks candidates up by backbone mass");
         }
-        let c = retrieval_choice(true, HI, true, FragmentIndexFlag::On);
+        let c = retrieval_choice(HI, true, FragmentIndexFlag::On);
         assert_eq!(
             c.refused_because,
             Some("--glyco looks candidates up by backbone mass")
@@ -2212,7 +2062,7 @@ mod retrieval_choice_tests {
 
     #[test]
     fn off_is_honoured_where_the_index_would_otherwise_run() {
-        let c = retrieval_choice(true, HI, false, FragmentIndexFlag::Off);
+        let c = retrieval_choice(HI, false, FragmentIndexFlag::Off);
         assert!(!c.use_index);
         assert!(c.report.unwrap().contains("switched off"));
     }
@@ -2221,9 +2071,9 @@ mod retrieval_choice_tests {
     /// vote cap) even when it is expressed in Da.
     #[test]
     fn a_tight_dalton_tolerance_counts_as_high_resolution() {
-        let tight = retrieval_choice(true, Tolerance::Da(0.02), false, FragmentIndexFlag::Auto);
+        let tight = retrieval_choice(Tolerance::Da(0.02), false, FragmentIndexFlag::Auto);
         assert!(tight.report.unwrap().contains("high-resolution"));
-        let wide = retrieval_choice(true, Tolerance::Da(0.2), false, FragmentIndexFlag::Auto);
+        let wide = retrieval_choice(Tolerance::Da(0.2), false, FragmentIndexFlag::Auto);
         assert!(wide.report.unwrap().contains("low-resolution"));
     }
 }

@@ -923,8 +923,7 @@ pub fn run_refinement(
         // modifications and the Met-cleaved variant on every anchor; keep them only
         // for anchors that really start a protein.
         let n_anchors = base_seqs.len();
-        let anchor_nterm = &anchor_nterm;
-        let base_seqs = &base_seqs;
+        let starts_with_met: Vec<bool> = base_seqs.iter().map(|s| s.first() == Some(&b'M')).collect();
         let mut refine_prepared = match PreparedSearch::prepare_in_memory(
             &refine_idx,
             &refine_params,
@@ -943,7 +942,7 @@ pub fn run_refinement(
         }
         .with_candidate_filter(Box::new(move |c: &Candidate| {
             let a = c.protein_index % n_anchors;
-            anchor_nterm[a] || !uses_protein_nterm(c, base_seqs[a].first() == Some(&b'M'))
+            anchor_nterm[a] || !uses_protein_nterm(c, starts_with_met[a])
         }));
         let subset: Vec<model::spectrum::Spectrum> =
             unident.iter().map(|&i| all_spectra[i].clone()).collect();

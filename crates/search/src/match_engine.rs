@@ -47,7 +47,7 @@ use scoring_crate::scoring::{
 
 /// Keeps or drops a candidate after retrieval; see
 /// [`PreparedSearch::with_candidate_filter`].
-pub type CandidateFilter<'a> = Box<dyn Fn(&Candidate) -> bool + Send + Sync + 'a>;
+pub type CandidateFilter = Box<dyn Fn(&Candidate) -> bool + Send + Sync>;
 
 pub struct PreparedSearch<'a> {
     pub idx: &'a SearchIndex,
@@ -87,7 +87,7 @@ pub struct PreparedSearch<'a> {
     target_bare_seqs: FxHashSet<Box<[u8]>>,
     /// Optional post-retrieval candidate filter (see
     /// [`Self::with_candidate_filter`]).
-    candidate_filter: Option<CandidateFilter<'a>>,
+    candidate_filter: Option<CandidateFilter>,
 }
 
 /// Global candidate identity for the scan accumulator: enough to dedup a
@@ -415,7 +415,7 @@ impl<'a> PreparedSearch<'a> {
     /// each spectrum's retrieved candidates (after the fragment-index shortlist
     /// when that retrieval is on), and on [`Self::out_of_core_candidates_where`]
     /// and the chimeric Pass-2 pools, so every scored candidate passed it.
-    pub fn with_candidate_filter(mut self, keep: CandidateFilter<'a>) -> Self {
+    pub fn with_candidate_filter(mut self, keep: CandidateFilter) -> Self {
         self.candidate_filter = Some(keep);
         self
     }

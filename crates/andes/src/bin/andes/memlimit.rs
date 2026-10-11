@@ -7,7 +7,7 @@
 //! node budgeted 384 GiB of candidate memory and was OOM-killed.
 //!
 //! The effective figure is therefore `min(MemAvailable, applicable cgroup limit)`,
-//! and callers report which of the two they used.
+//! and the budget records which of the two it came from.
 
 use std::path::Path;
 
@@ -25,16 +25,6 @@ pub(crate) enum MemorySource {
     /// A cgroup memory limit (v2 `memory.max`/`memory.high`, or v1
     /// `memory.limit_in_bytes`) that is lower than the node figure.
     CgroupLimit,
-}
-
-impl MemorySource {
-    /// Short phrase for log lines, read as "… of 240 GiB from <this>".
-    pub(crate) fn describe(self) -> &'static str {
-        match self {
-            MemorySource::NodeAvailable => "node MemAvailable",
-            MemorySource::CgroupLimit => "cgroup memory limit",
-        }
-    }
 }
 
 /// The memory this process may plan against, and where the number came from.

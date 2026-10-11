@@ -1,0 +1,33 @@
+[package]
+name = "onnx-infer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "ONNX inference substrate for proteomics — andes search, quantms-rescoring, de novo"
+readme = "README.md"
+keywords = ["onnx", "inference", "proteomics", "machine-learning"]
+categories = ["science", "algorithms"]
+
+[features]
+default = []
+# Pure-Rust ONNX Runtime (Apache-2.0). Preferred for an Apache-clean core.
+tract = ["dep:tract-onnx"]
+# Placeholder for ONNX Runtime (`ort`) — broader op coverage, native dep.
+# Not wired yet; enabling this feature currently fails at compile time with a clear message.
+ort = []
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1"
+tracing = { workspace = true }
+
+# Classic tract-onnx API (model_for_path / into_optimized / into_runnable).
+# 0.21.x pulls liquid → kstring; keep Cargo.lock on kstring ≤2.0.2 until MSRV ≥1.96.
+tract-onnx = { version = "0.21.13", optional = true }
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3.10"

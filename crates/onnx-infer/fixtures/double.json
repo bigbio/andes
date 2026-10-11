@@ -1,0 +1,28 @@
+{
+  "id": "fixture-double-v1",
+  "description": "Tiny y=2*x model for onnx-infer integration tests",
+  "onnx": "double.onnx",
+  "inputs": [
+    {
+      "name": "x",
+      "description": "batch × 4 float features",
+      "shape": [null, 4]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "y",
+      "description": "doubled features",
+      "shape": [null, 4]
+    }
+  ],
+  "task": "generic",
+  "provenance": {
+    "origin": "onnx-infer test fixture",
+    "license": "Apache-2.0",
+    "notes": "Generated with onnx helper.Mul; not for production."
+  },
+  "extras": {
+    "fixture": true
+  }
+}

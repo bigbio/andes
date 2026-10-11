@@ -1,0 +1,19 @@
+{
+  "id": "tree-leq-fixture",
+  "description": "Toy TreeEnsembleRegressor: feature0<=0.5 → 1.0 else 3.0 (from tree_leq.agbd)",
+  "onnx": "tree_leq.onnx",
+  "inputs": [{ "name": "features", "shape": [null, 1] }],
+  "outputs": [{ "name": "score", "shape": [null, 1] }],
+  "task": "tree_ensemble",
+  "provenance": {
+    "origin": "andes AGBD v1 fixture",
+    "license": "Apache-2.0",
+    "notes": "Requires ai.onnx.ml (ort); native AGBD stays the in-search hot path"
+  },
+  "extras": {
+    "n_features": 1,
+    "n_trees": 1,
+    "agbd": "tree_leq.agbd",
+    "consumer": "quantms-rescoring"
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "id": "peak-gbdt-fixture",
+  "description": "3-feature multi-tree AGBD\u2192ONNX (andes peak-GBDT shape)",
+  "onnx": "peak_gbdt.onnx",
+  "inputs": [
+    {
+      "name": "features",
+      "shape": [
+        null,
+        3
+      ]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "score",
+      "shape": [
+        null,
+        1
+      ]
+    }
+  ],
+  "task": "tree_ensemble",
+  "provenance": {
+    "origin": "onnx-infer fixture (andes AGBD layout)",
+    "license": "Apache-2.0"
+  },
+  "extras": {
+    "n_features": 3,
+    "n_trees": 3,
+    "agbd": "peak_gbdt.agbd",
+    "consumer": "quantms-rescoring"
+  }
+}

@@ -1,6 +1,6 @@
-//! The chimeric Pass 2 (`run_pass2_coisolation`) must emit the SAME secondary
-//! PSMs on the out-of-core (`Mmap`) candidate backing as on the in-RAM one:
-//! same peptidoform, protein, decoy flag, scores and features.
+//! The chimeric Pass 2 (`run_pass2_coisolation`) on the out-of-core candidate
+//! index must find each co-isolated peptide, label collision decoys globally,
+//! and emit the same secondaries whichever retrieval Pass 1 used.
 //!
 //! Each spectrum carries a primary peptide (its precursor) plus the fragment
 //! ions of a co-isolated peptide whose averagine envelope sits in a synthetic
@@ -10,9 +10,9 @@
 //!  * protein-N-term-acetylated `VDLLAGEK` — a COLLISION DECOY: it is the
 //!    N-terminal peptide of a reversed decoy protein, its bare sequence is also
 //!    an internal target peptide, and the target twin has no acetylated form, so
-//!    the twin lies 42 Da outside the secondary's window. Both backings must
-//!    relabel it as target (the global relabel), not only when the twin happens
-//!    to be among the window's candidates.
+//!    the twin lies 42 Da outside the secondary's window. Pass 2 must relabel
+//!    it as target (the global relabel), not only when the twin happens to be
+//!    among the window's candidates.
 
 use rustc_hash::FxHashMap;
 
@@ -260,7 +260,7 @@ fn rows(queues: &[TopNQueue], candidates: &[Candidate]) -> Vec<Vec<Row>> {
         .collect()
 }
 
-fn run(mmap: bool, fragment_index: bool) -> Vec<Vec<Row>> {
+fn run(fragment_index: bool) -> Vec<Vec<Row>> {
     let (idx, mut params) = fixture();
     if fragment_index {
         params.fragment_index_top_k = search::search_params::FRAGMENT_INDEX_TOP_K;
@@ -268,12 +268,9 @@ fn run(mmap: bool, fragment_index: bool) -> Vec<Vec<Row>> {
     let scorer = make_scorer(FRAG_TOL_DA);
     let (spectra, link) = spectra_and_link();
     let tmp = tempfile::NamedTempFile::new().unwrap();
-    let mut prepared = if mmap {
+    let mut prepared =
         PreparedSearch::prepare_mmap(&idx, &params, &scorer, FRAG_TOL_DA, "XXX", tmp.path())
-            .expect("prepare_mmap accepts --chimeric")
-    } else {
-        PreparedSearch::prepare(&idx, &params, &scorer, FRAG_TOL_DA, "XXX")
-    };
+            .expect("prepare_mmap accepts --chimeric");
     let mut queues = prepared.run_chunk(&spectra, 0);
     run_pass2_coisolation(&prepared, &spectra, &mut queues, &params, &link, 0);
     prepared.sync_materialized_candidates();
@@ -281,43 +278,41 @@ fn run(mmap: bool, fragment_index: bool) -> Vec<Vec<Row>> {
 }
 
 #[test]
-fn mmap_pass2_secondaries_match_ram() {
-    let ram = run(false, false);
-    let mmap = run(true, false);
+fn pass2_finds_each_secondary_and_relabels_the_collision_decoy() {
+    let rows = run(false);
 
-    // Non-vacuous: every scan has its primary AND one secondary on RAM.
-    for (scan, r) in ram.iter().enumerate() {
+    // Non-vacuous: every scan has its primary AND one secondary.
+    for (scan, r) in rows.iter().enumerate() {
         assert_eq!(
             r.iter().filter(|row| row.0).count(),
             1,
-            "scan {scan}: expected one secondary on RAM, got {r:#?}"
+            "scan {scan}: expected one secondary, got {r:#?}"
         );
         assert_eq!(r.iter().filter(|row| !row.0).count(), 1);
     }
     let sec = |rs: &Vec<Row>| rs.iter().find(|r| r.0).cloned().unwrap();
-    assert_eq!(sec(&ram[0]).1, "DAFLGSFLYEYSR");
-    let coll = sec(&ram[1]);
+    assert_eq!(sec(&rows[0]).1, "DAFLGSFLYEYSR");
+    let coll = sec(&rows[1]);
     assert_eq!(coll.1, "V[42.0106]DLLAGEK", "collision secondary: {coll:?}");
     assert!(
         !coll.3,
         "the acetylated decoy N-terminal peptide collides with a target sequence and \
          must be relabeled as target"
     );
-
-    assert_eq!(ram, mmap, "Pass-2 rows differ between RAM and mmap");
 }
 
 /// Fragment-index retrieval changes only Pass 1's candidate shortlist; Pass 2
 /// still enumerates each secondary window, so on this fixture (where Pass 1
-/// finds the same primary) its rows equal the RAM rows.
+/// finds the same primary) its rows equal those of an enumerated Pass 1.
 #[test]
-fn mmap_fragment_index_pass2_secondaries_match_ram() {
-    let ram = run(false, false);
-    let mmap_index = run(true, true);
+fn fragment_index_pass2_secondaries_match_enumeration() {
+    let enumerated = run(false);
+    let indexed = run(true);
     let secondaries = |rs: &[Vec<Row>]| -> Vec<Vec<Row>> {
         rs.iter()
             .map(|r| r.iter().filter(|row| row.0).cloned().collect())
             .collect()
     };
-    assert_eq!(secondaries(&ram), secondaries(&mmap_index));
+    assert!(secondaries(&enumerated).iter().all(|s| s.len() == 1));
+    assert_eq!(secondaries(&enumerated), secondaries(&indexed));
 }

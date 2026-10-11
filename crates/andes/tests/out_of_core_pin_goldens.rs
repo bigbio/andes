@@ -1,0 +1,387 @@
+//! Golden gates for the enumeration retrieval path (`--fragment-index off`) of
+//! the out-of-core candidate index, driven through the real CLI.
+//!
+//! Each case compares the PIN, rows sorted, against a golden digest (row count +
+//! FNV-1a 64 over the header and the sorted rows), and for calibration also the
+//! pre-pass outcome line. Rows are sorted because the rayon pipeline's row ORDER
+//! varies across runs; their content does not.
+//!
+//! The defects these gates were built for need real scale to surface — a fixed
+//! modification on a real proteome (the `base_record_multiplicity` fixed-mod
+//! mass offset), proteins with an N-terminal Met whose two enumeration passes
+//! both reach the precursor window (the candidate ORDER), a calibration pre-pass
+//! that must run on the out-of-core index — so they search the in-repo
+//! `test.mgf.gz` + `ecoli.fasta`. Those four cases are `#[ignore]`d (a full
+//! E. coli search each, ~20 s release, minutes in debug):
+//!
+//! ```text
+//! cargo test -p andes --release --test out_of_core_pin_goldens -- --ignored
+//! ```
+//!
+//! The `--chimeric` and `--refine` cases run on a 150-scan MS1-bearing slice and
+//! are not ignored.
+//!
+//! GOLDENS (recorded 2026-10-11). The E. coli and `--chimeric` digests were
+//! recorded from the in-memory candidate list (whole-database enumeration + a
+//! mass-bucket lookup), the path these searches took before the out-of-core index
+//! became the only one, and the out-of-core enumeration reproduced each of them
+//! byte for byte after sorting. REFINE_SLICE: see its comment.
+//!
+//! To regenerate after an intentional change, run the case's command line (see
+//! `run`) and digest the PIN with `pin_digest`.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("canonicalize workspace root")
+}
+
+/// Row count and FNV-1a 64 of the header and the sorted rows, each followed by
+/// a newline.
+fn pin_digest(header: &str, rows: &[String]) -> (usize, u64) {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for line in std::iter::once(header).chain(rows.iter().map(String::as_str)) {
+        for &b in line.as_bytes().iter().chain(b"\n") {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    (rows.len(), h)
+}
+
+/// A PIN's header and its rows, sorted.
+fn read_pin(path: &Path) -> (String, Vec<String>) {
+    let text = std::fs::read_to_string(path).expect("read pin");
+    let mut lines = text.lines();
+    let header = lines.next().expect("pin header").to_string();
+    let mut rows: Vec<String> = lines.map(str::to_string).collect();
+    rows.sort();
+    (header, rows)
+}
+
+/// The pre-pass's outcome line with its timing stripped, or `None` if the
+/// pre-pass never scored (threshold skip / calibration off). Both a learned
+/// shift and an "insufficient confident PSMs" report carry the PSM counts the
+/// pre-pass resolved through the candidate index, so equality of this line
+/// with the golden is the calibration half of the gate.
+fn calibration_outcome(stderr: &str) -> Option<String> {
+    stderr
+        .lines()
+        .find(|l| {
+            l.starts_with("Precursor mass shift learned")
+                || l.starts_with("Precursor mass calibration skipped (insufficient")
+        })
+        .map(|l| l.split("; elapsed").next().unwrap_or(l).to_string())
+}
+
+/// Run `andes` from the workspace root with `args` and an output PIN; returns the
+/// header, the sorted rows and stderr.
+fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_andes"))
+        .current_dir(workspace_root())
+        .args(args)
+        .arg("--output-pin")
+        .arg(out)
+        .output()
+        .expect("spawn andes");
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        output.status.success(),
+        "andes {} failed:\n{stderr}",
+        args.join(" ")
+    );
+    assert!(
+        stderr.contains("out-of-core candidate-index: mmap"),
+        "the run did not report the out-of-core index:\n{stderr}"
+    );
+    let (header, rows) = read_pin(out);
+    (header, rows, stderr)
+}
+
+/// One E. coli case: (rows, FNV-1a 64, calibration outcome line).
+type Golden = (usize, u64, Option<&'static str>);
+
+const ECOLI_DEFAULT_MODS: Golden = (0, 0, None);
+const ECOLI_FIXED_MODS_ONLY: Golden = (0, 0, None);
+const ECOLI_ONE_VARIABLE_MOD: Golden = (0, 0, None);
+const ECOLI_PRECURSOR_CAL_AUTO: Golden = (0, 0, None);
+
+fn assert_ecoli_golden(label: &str, mods: Option<&str>, precursor_cal: &str, golden: Golden) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pin = dir.path().join("out.pin");
+    let mut args = vec![
+        "--spectrum",
+        "test-fixtures/test.mgf.gz",
+        "--database",
+        "test-fixtures/ecoli.fasta",
+        "--fragmentation",
+        "HCD",
+        "--fragment-tol-ppm",
+        "20",
+        "--threads",
+        "1",
+        "--precursor-cal",
+        precursor_cal,
+        // The fixture has ~5.8k SpecKeys, below the 10k production threshold;
+        // force the pre-pass so the calibration-on case actually calibrates.
+        "--cal-min-spec-keys",
+        "1000",
+        // Enumeration: every candidate in each precursor window is scored.
+        "--fragment-index",
+        "off",
+    ];
+    if let Some(m) = mods {
+        args.extend(["--mods", m]);
+    }
+    let (header, rows, stderr) = run(&args, &pin);
+    let cal = calibration_outcome(&stderr);
+    if precursor_cal != "off" {
+        // The pre-pass must have SCORED (either it learned a shift, or it
+        // reports how many sampled spectra had PSMs). A threshold skip
+        // ("SpecKeys < ...") means it never ran and the gate would be vacuous.
+        assert!(
+            cal.is_some(),
+            "[{label}] the calibration pre-pass did not score:\n{stderr}"
+        );
+    }
+    assert!(
+        rows.len() > 10_000,
+        "[{label}] only {} rows — the search did not run at the intended scale",
+        rows.len()
+    );
+    let (n, h) = pin_digest(&header, &rows);
+    assert_eq!(
+        (n, h, cal.as_deref()),
+        golden,
+        "[{label}] PIN (rows, digest, calibration) differs from the golden"
+    );
+}
+
+#[test]
+#[ignore = "runs a full E. coli search (~20 s release)"]
+fn ecoli_pin_matches_golden_with_default_mods() {
+    assert_ecoli_golden("default mods", None, "off", ECOLI_DEFAULT_MODS);
+}
+
+#[test]
+#[ignore = "runs a full E. coli search (~20 s release)"]
+fn ecoli_pin_matches_golden_with_fixed_mods_only() {
+    // NumMods=0 with a fixed Cam-C: isolates the `base_record_multiplicity`
+    // fixed-mod defect from any variable-mod expansion.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mods = dir.path().join("mods_fixed.txt");
+    std::fs::write(&mods, "NumMods=0\n57.021464,C,fix,any,Carbamidomethyl\n").expect("write mods");
+    assert_ecoli_golden(
+        "fixed mods only",
+        Some(mods.to_str().unwrap()),
+        "off",
+        ECOLI_FIXED_MODS_ONLY,
+    );
+}
+
+#[test]
+#[ignore = "runs a full E. coli search (~20 s release)"]
+fn ecoli_pin_matches_golden_with_one_variable_mod() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mods = dir.path().join("mods_var1.txt");
+    std::fs::write(
+        &mods,
+        "NumMods=1\n57.021464,C,fix,any,Carbamidomethyl\n15.994915,M,opt,any,Oxidation\n",
+    )
+    .expect("write mods");
+    assert_ecoli_golden(
+        "one variable mod",
+        Some(mods.to_str().unwrap()),
+        "off",
+        ECOLI_ONE_VARIABLE_MOD,
+    );
+}
+
+#[test]
+#[ignore = "runs a full E. coli search (~20 s release)"]
+fn ecoli_pin_matches_golden_with_precursor_calibration_on() {
+    // The calibration pre-pass runs on the out-of-core index.
+    assert_ecoli_golden(
+        "precursor-cal auto",
+        None,
+        "auto",
+        ECOLI_PRECURSOR_CAL_AUTO,
+    );
+}
+
+// ── --chimeric ──────────────────────────────────────────────────────────────
+//
+// Fixture: `test-fixtures/astral_pxd070049_slice.mzML.gz`, 150 consecutive MS2
+// scans with their two linked MS1 scans, cut unmodified from the middle of the
+// PRIDE PXD070049 run `LFQ_Astral_DDA_15min_50ng_Condition_A_REP1.raw`
+// (Orbitrap Astral DDA, human/yeast/E. coli; converted with ThermoRawFileParser).
+// The chimeric Pass 2 needs the MS1 scans, which `test.mgf.gz` lacks.
+
+const CHIMERIC_MZML: &str = "test-fixtures/astral_pxd070049_slice.mzML.gz";
+
+/// Run a `--chimeric` search; returns (header, sorted rows, stderr).
+fn run_chimeric(fragment_index: &str, out: &Path) -> (String, Vec<String>, String) {
+    run(
+        &[
+            "--spectrum",
+            CHIMERIC_MZML,
+            "--database",
+            "test-fixtures/ecoli.fasta",
+            "--threads",
+            "2",
+            "--precursor-cal",
+            "off",
+            "--fragment-index",
+            fragment_index,
+            "--chimeric",
+        ],
+        out,
+    )
+}
+
+/// `--chimeric` with enumeration retrieval: (rows, FNV-1a 64).
+const CHIMERIC_SLICE: (usize, u64) = (0, 0);
+
+/// Rows beyond one per scan: the chimeric secondaries (Pass 1 keeps top-1).
+fn extra_rows(rows: &[String]) -> usize {
+    let scans: std::collections::HashSet<&str> = rows
+        .iter()
+        .map(|r| r.split('\t').nth(2).expect("ScanNr column"))
+        .collect();
+    rows.len() - scans.len()
+}
+
+#[test]
+fn chimeric_enumeration_pin_matches_golden() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (header, rows, _) = run_chimeric("off", &dir.path().join("enum.pin"));
+    let secondaries = extra_rows(&rows);
+    assert!(
+        secondaries > 50,
+        "fixture produced only {secondaries} chimeric secondary rows — the gate would be vacuous"
+    );
+    assert_eq!(pin_digest(&header, &rows), CHIMERIC_SLICE);
+}
+
+/// Fragment-index retrieval changes Pass 1's candidates by design, so only the
+/// shape is gated: the run completes, SpecIds stay unique, and the number of
+/// chimeric secondaries stays close to the enumeration run.
+#[test]
+fn chimeric_fragment_index_runs_with_unique_specids() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_, enum_rows, _) = run_chimeric("off", &dir.path().join("enum.pin"));
+    let (_, idx_rows, idx_err) = run_chimeric("auto", &dir.path().join("idx.pin"));
+    assert!(
+        idx_err.contains("candidate retrieval: fragment-ion index"),
+        "the fragment-ion index did not run:\n{idx_err}"
+    );
+    let ids: std::collections::HashSet<&str> = idx_rows
+        .iter()
+        .map(|r| r.split('\t').next().expect("SpecId column"))
+        .collect();
+    assert_eq!(ids.len(), idx_rows.len(), "duplicate SpecIds in the PIN");
+    let (enum_sec, idx_sec) = (extra_rows(&enum_rows) as f64, extra_rows(&idx_rows) as f64);
+    assert!(
+        (idx_sec - enum_sec).abs() <= 0.1 * enum_sec,
+        "chimeric secondaries: fragment index {idx_sec} vs enumeration {enum_sec}"
+    );
+}
+
+// ── --refine ────────────────────────────────────────────────────────────────
+//
+// The refinement cascade runs after the scan, over the candidates the Pass-1
+// PSMs reference (the materialized candidates synced into
+// `prepared.candidates`); Pass 2 searches an in-memory out-of-core index of the
+// anchored database. Enumeration must reproduce the golden unified PIN, and
+// fragment-index retrieval must give a well-formed one. The Astral slice searched against E. coli alone has
+// a single anchor at the default 1% gate; `--refine-select-psm-fdr 1.0` anchors
+// every best-target peptide so Pass 2 contributes a few hundred rows.
+
+/// Run a `--refine` search; returns (header, sorted rows, stderr).
+fn run_refine(fragment_index: &str, out: &Path) -> (String, Vec<String>, String) {
+    run(
+        &[
+            "--spectrum",
+            CHIMERIC_MZML,
+            "--database",
+            "test-fixtures/ecoli.fasta",
+            "--threads",
+            "2",
+            "--precursor-cal",
+            "off",
+            "--fragment-index",
+            fragment_index,
+            "--refine",
+            "--refine-select-psm-fdr",
+            "1.0",
+        ],
+        out,
+    )
+}
+
+/// `--refine` with enumeration retrieval: (rows, FNV-1a 64).
+const REFINE_SLICE: (usize, u64) = (0, 0);
+
+/// Number of rows with `IsRefinement = 1`.
+fn refinement_rows(header: &str, rows: &[String]) -> usize {
+    let col = header
+        .split('\t')
+        .position(|c| c == "IsRefinement")
+        .expect("IsRefinement column");
+    rows.iter()
+        .filter(|r| r.split('\t').nth(col) == Some("1"))
+        .count()
+}
+
+#[test]
+fn refine_enumeration_pin_matches_golden() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (header, rows, _) = run_refine("off", &dir.path().join("enum.pin"));
+    let refined = refinement_rows(&header, &rows);
+    assert!(
+        refined > 100,
+        "fixture produced only {refined} IsRefinement rows — the gate would be vacuous"
+    );
+    assert_eq!(pin_digest(&header, &rows), REFINE_SLICE);
+}
+
+/// Fragment-index retrieval changes Pass 1's candidates by design, so only the
+/// shape is gated: the index runs under `--refine`, the cascade adds rows,
+/// SpecIds stay unique and no scan carries the same peptide twice.
+#[test]
+fn refine_on_the_fragment_index_writes_a_well_formed_pin() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (header, rows, err) = run_refine("auto", &dir.path().join("idx.pin"));
+    assert!(
+        err.contains("candidate retrieval: fragment-ion index"),
+        "--refine did not take the fragment-ion index:\n{err}"
+    );
+    assert!(
+        refinement_rows(&header, &rows) > 100,
+        "too few IsRefinement rows on the index path:\n{err}"
+    );
+    let cols: Vec<&str> = header.split('\t').collect();
+    let scan_col = cols.iter().position(|c| *c == "ScanNr").expect("ScanNr");
+    let pep_col = cols.iter().position(|c| *c == "Peptide").expect("Peptide");
+    let ids: std::collections::HashSet<&str> = rows
+        .iter()
+        .map(|r| r.split('\t').next().expect("SpecId column"))
+        .collect();
+    assert_eq!(ids.len(), rows.len(), "duplicate SpecIds in the PIN");
+    let scan_pep: std::collections::HashSet<(&str, &str)> = rows
+        .iter()
+        .map(|r| {
+            let f: Vec<&str> = r.split('\t').collect();
+            (f[scan_col], f[pep_col])
+        })
+        .collect();
+    assert_eq!(
+        scan_pep.len(),
+        rows.len(),
+        "a scan carries the same peptide in two rows"
+    );
+}

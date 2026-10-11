@@ -1,12 +1,22 @@
-//! Task 4 decisive gate: the out-of-core (`Mmap`) candidate backing must yield
-//! PSMs byte-identical to the in-RAM (`Ram`) path for the same search.
+//! The out-of-core candidate index against independent references.
 //!
-//! Runs the SAME small search (real peaks + a small fasta + Oxidation-M variable
-//! mod, so both unmodified AND modified candidates are scored) twice through a
-//! shared `run_prepared` helper — once `Ram`, once `Mmap` — and asserts the
-//! per-scan top-N PSM lists are IDENTICAL: peptide string (residues + per-residue
-//! mod mass) + charge + score + rank_score + isotope_offset + the resolved
-//! protein accession (i.e. the PIN/TSV resolution of `candidate_idxs`).
+//! * Candidate lists: the index's full candidate list must equal
+//!   `enumerate_candidates` over the whole database with collision decoys
+//!   relabelled globally — same peptidoforms, flags and ORDER (the queue's
+//!   tie-breaks follow candidate order).
+//! * PSMs: small searches (real peaks + a small FASTA; a variable mod, a
+//!   semi-tryptic digest, an asymmetric precursor tolerance with a fixed mod,
+//!   and a palindromic collision decoy) must reproduce golden PSM lists:
+//!   peptide (residues + per-residue mod mass), charge, score, rank_score,
+//!   isotope offset, decoy flag and, for the bit-identity golden, the resolved
+//!   proteins (the PIN/TSV resolution of `candidate_idxs`).
+//!
+//! The PSM goldens were recorded on 2026-10-11 from the in-memory candidate list
+//! (whole-database enumeration + a mass-bucket lookup), the path these searches
+//! took before the out-of-core index became the only one; at that time the
+//! out-of-core path was asserted equal to it on every one of these fixtures.
+
+use std::collections::HashSet;
 
 use rustc_hash::FxHashMap;
 
@@ -18,8 +28,7 @@ use model::{
 use scoring_crate::param_model::{FragmentOffsetFrequency, IonType, Partition, SpecDataType};
 use scoring_crate::scoring::fragment_ions::predict_by_ions;
 use scoring_crate::{Param, RankScorer};
-use search::candidate_gen::Candidate;
-use search::match_engine::CandidateBacking;
+use search::candidate_gen::{enumerate_candidates, Candidate};
 use search::psm::TopNQueue;
 use search::{PreparedSearch, SearchIndex, SearchParams};
 
@@ -193,32 +202,403 @@ fn small_search_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
     (spectra, idx, params)
 }
 
-/// Run the shared search once with the requested candidate backing. Returns the
-/// per-scan queues PLUS the materialized candidates the PSM `candidate_idxs`
-/// resolve against (just like the binary holds `prepared.candidates`).
-fn run_prepared(
+/// Small search: two proteins; spectra targeting an unmodified peptide, an
+/// Oxidation-M modified peptide, and a peptide shared across both proteins.
+fn small_search_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
+    // PEPTMIDEK contains an M (Ox-M), WVTFISLLR is a clean tryptic peptide,
+    // SHAREDPEPK appears in BOTH proteins (multi-protein aggregation).
+    let target = ProteinDb {
+        proteins: vec![
+            Protein {
+                accession: "P1".into(),
+                description: "fixture one".into(),
+                sequence: b"MKPEPTMIDEKWVTFISLLRSHAREDPEPK".to_vec(),
+            },
+            Protein {
+                accession: "P2".into(),
+                description: "fixture two".into(),
+                sequence: b"AAGTLLNRSHAREDPEPKGGGR".to_vec(),
+            },
+        ],
+    };
+    let idx = SearchIndex::from_target_db(&target, "XXX");
+
+    let ox_m = Modification {
+        name: "Oxidation".to_string(),
+        mass_delta: 15.99491,
+        residue: ResidueSpec::Specific(b'M'),
+        location: ModLocation::Anywhere,
+        fixed: false,
+        accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
+    };
+    let aa_set = AminoAcidSetBuilder::new_standard()
+        .add_variable_mod(ox_m.clone())
+        .build()
+        .unwrap();
+    let mut params = SearchParams::default_tryptic(aa_set);
+    params.min_length = 3;
+    params.max_variable_mods_per_peptide = 1;
+    params.top_n_psms_per_spectrum = 5;
+    params.min_peaks = 0;
+
+    // Spectrum targeting the Ox-M modified PEPTMIDEK.
+    let ox_residues = {
+        let mut r = residues(b"PEPTMIDEK");
+        // place Ox on the M (index 4)
+        r[4].mod_ = Some(model::modification::leak_mod(ox_m));
+        r
+    };
+    let ox_pep = Peptide::new(ox_residues, b'K', b'W');
+    // Unmodified WVTFISLLR.
+    let clean_pep = Peptide::new(residues(b"WVTFISLLR"), b'K', b'S');
+    // Shared peptide (both proteins).
+    let shared_pep = Peptide::new(residues(b"SHAREDPEPK"), b'R', b'-');
+
+    let spectra = vec![
+        spectrum_for(&ox_pep, 2, "scan=ox"),
+        spectrum_for(&clean_pep, 2, "scan=clean"),
+        spectrum_for(&shared_pep, 2, "scan=shared"),
+    ];
+    (spectra, idx, params)
+}
+
+/// Asymmetric precursor tolerance (wide on the `left` = "peptide lighter than
+/// precursor" side, tight on the `right`) plus a FIXED carbamidomethyl-C and NO
+/// variable mods. Several near-isobaric tryptic peptides sit on the WIDE side of
+/// the precursor mass, where a symmetric `max(left,right)` window would admit a
+/// different candidate set than the directional `matches_precursor` gate.
+fn asymmetric_cam_only_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
+    // One protein with several tryptic peptides whose neutral masses are close
+    // together, so the asymmetric window's two sides admit different sets.
+    let target = ProteinDb {
+        proteins: vec![Protein {
+            accession: "P1".into(),
+            description: "cam-only asymmetric".into(),
+            // Tryptic peptides (cut after K/R): ELVISCLIVEK, SAMPLERPEPTIDEK,
+            // DAVIDCMENGEK, GASLYCDEFGHIK, ... several Cys-bearing peptides so the
+            // fixed CAM mass shifts each, and several near-mass neighbours.
+            sequence: b"ELVISCLIVEKSAMPLERPEPTIDEKDAVIDCMENGEKGASLYCDEFGHIKWANDACEDFGHIK".to_vec(),
+        }],
+    };
+    let idx = SearchIndex::from_target_db(&target, "XXX");
+
+    // Fixed carbamidomethyl on C (cam_only): NOT a variable mod.
+    let cam = Modification {
+        name: "Carbamidomethyl".to_string(),
+        mass_delta: 57.02146,
+        residue: ResidueSpec::Specific(b'C'),
+        location: ModLocation::Anywhere,
+        fixed: true,
+        accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
+    };
+    let aa_set = AminoAcidSetBuilder::new_standard()
+        .add_fixed_mod(cam)
+        .build()
+        .unwrap();
+    let mut params = SearchParams::default_tryptic(aa_set);
+    params.min_length = 3;
+    params.max_variable_mods_per_peptide = 0; // cam_only: no variable mods
+    params.top_n_psms_per_spectrum = 10;
+    params.min_peaks = 0;
+    // STRONGLY ASYMMETRIC precursor tolerance: wide left, tight right. Da units so
+    // the window is mass-independent and the directional asymmetry is stark. The
+    // wide left side reaches peptides up to ~0.6 Da LIGHTER than the precursor;
+    // the tight right side admits almost nothing heavier.
+    params.precursor_tolerance =
+        model::PrecursorTolerance::asymmetric(Tolerance::Da(0.6), Tolerance::Da(0.02));
+    // Multiple isotope offsets exercise the per-offset directional window.
+    params.isotope_error_range = -1..=2;
+
+    // Build spectra: for EACH tryptic Cys-bearing peptide, place a precursor a
+    // little HEAVIER than the peptide so the peptide falls on the WIDE (left)
+    // side, and nearby lighter neighbours land in/out of the asymmetric window
+    // differently than a symmetric one would.
+    let build_pep = |seq: &[u8], pre: u8, post: u8| -> Peptide {
+        let mut r = residues(seq);
+        // Apply the fixed CAM to every C so the spectrum's precursor matches the
+        // CAM-modified candidate the search will score.
+        let cam_mod = Modification {
+            name: "Carbamidomethyl".to_string(),
+            mass_delta: 57.02146,
+            residue: ResidueSpec::Specific(b'C'),
+            location: ModLocation::Anywhere,
+            fixed: true,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+        };
+        for aa in r.iter_mut() {
+            if aa.residue == b'C' {
+                aa.mod_ = Some(model::modification::leak_mod(cam_mod.clone()));
+            }
+        }
+        Peptide::new(r, pre, post)
+    };
+
+    let peps = [
+        build_pep(b"ELVISCLIVEK", b'_', b'S'),
+        build_pep(b"DAVIDCMENGEK", b'R', b'G'),
+        build_pep(b"GASLYCDEFGHIK", b'K', b'W'),
+        build_pep(b"WANDACEDFGHIK", b'K', b'-'),
+    ];
+    let mut spectra = Vec::new();
+    for (i, pep) in peps.iter().enumerate() {
+        // Nudge the precursor +0.3 Da heavier (within wide left, outside tight
+        // right) so the matching peptide sits on the asymmetric WIDE side.
+        let charge = 2u8;
+        let mz = (pep.mass() + 0.3 + charge as f64 * PROTON) / charge as f64;
+        let mut s = spectrum_for(pep, charge, &format!("scan=asym{i}"));
+        s.precursor_mz = mz;
+        spectra.push(s);
+    }
+    (spectra, idx, params)
+}
+
+/// A palindromic protein: its tryptic peptide `MAEK` reverses to ITSELF, so the
+/// reverse decoy's bare sequence equals a real target's — a collision decoy that
+/// must be relabelled as target using the GLOBAL target set.
+fn palindrome_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
+    // Protein "MAEKKEAM" is a palindrome (reverse == itself), so its tryptic
+    // peptide "MAEK" (cut after K) collides with its own reverse-decoy "MAEK".
+    let target = ProteinDb {
+        proteins: vec![Protein {
+            accession: "P1".into(),
+            description: "palindrome collision".into(),
+            sequence: b"MAEKKEAM".to_vec(),
+        }],
+    };
+    let idx = SearchIndex::from_target_db(&target, "XXX");
+
+    let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+    let mut params = SearchParams::default_tryptic(aa_set);
+    params.min_length = 3;
+    params.max_variable_mods_per_peptide = 0;
+    params.top_n_psms_per_spectrum = 10;
+    params.min_peaks = 0;
+
+    // Spectrum targeting MAEK (the collision peptide).
+    let maek = Peptide::new(residues(b"MAEK"), b'_', b'K');
+    let spectra = vec![spectrum_for(&maek, 2, "scan=collision")];
+    (spectra, idx, params)
+}
+
+/// Search `spectra` on the out-of-core path with per-spectrum enumeration
+/// (`fragment_index_top_k` is 0 in these fixtures). Returns the per-scan queues
+/// PLUS the materialized candidates the PSM `candidate_idxs` resolve against
+/// (just like the binary holds `prepared.candidates`).
+fn run_search(
     idx: &SearchIndex,
     params: &SearchParams,
     spectra: &[Spectrum],
-    backing: CandidateBacking,
     scorer: &RankScorer,
 ) -> (Vec<TopNQueue>, Vec<Candidate>) {
-    match backing {
-        CandidateBacking::Ram => {
-            let prepared = PreparedSearch::prepare(idx, params, scorer, 0.05, "XXX");
-            let queues = prepared.run_chunk(spectra, 0);
-            (queues, prepared.candidates)
-        }
-        CandidateBacking::Mmap => {
-            let tmp = tempfile::NamedTempFile::new().unwrap();
-            let mut prepared =
-                PreparedSearch::prepare_mmap(idx, params, scorer, 0.05, "XXX", tmp.path())
-                    .expect("prepare_mmap");
-            let queues = prepared.run_chunk(spectra, 0);
-            prepared.sync_materialized_candidates();
-            (queues, prepared.candidates)
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut prepared = PreparedSearch::prepare_mmap(idx, params, scorer, 0.05, "XXX", tmp.path())
+        .expect("prepare_mmap");
+    let queues = prepared.run_chunk(spectra, 0);
+    prepared.sync_materialized_candidates();
+    (queues, std::mem::take(&mut prepared.candidates))
+}
+
+fn bare(c: &Candidate) -> Vec<u8> {
+    c.peptide.residues.iter().map(|a| a.residue).collect()
+}
+
+/// The whole database's candidate list as `enumerate_candidates` yields it, with
+/// every decoy whose bare sequence is also a target's relabelled as target.
+fn enumeration_oracle(idx: &SearchIndex, params: &SearchParams) -> Vec<Candidate> {
+    let mut all: Vec<Candidate> = enumerate_candidates(idx, params, "XXX").collect();
+    let targets: HashSet<Vec<u8>> = all.iter().filter(|c| !c.is_decoy).map(bare).collect();
+    for c in all.iter_mut().filter(|c| c.is_decoy) {
+        if targets.contains(&bare(c)) {
+            c.is_decoy = false;
         }
     }
+    all
+}
+
+/// Everything a candidate carries into scoring and the PIN.
+type CandSig = (usize, usize, Vec<(u8, i64)>, u8, u8, bool, bool, bool);
+
+fn cand_sig(c: &Candidate) -> CandSig {
+    (
+        c.protein_index,
+        c.start_offset_in_protein,
+        c.peptide
+            .residues
+            .iter()
+            .map(|a| {
+                let d = a.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
+                (a.residue, (d * 1e5).round() as i64)
+            })
+            .collect(),
+        c.peptide.pre,
+        c.peptide.post,
+        c.is_decoy,
+        c.is_protein_n_term,
+        c.is_protein_c_term,
+    )
+}
+
+/// The out-of-core index lists exactly the enumeration's candidates, in its
+/// order, with the same collision-decoy labels: on a variable-mod search with a
+/// shared peptide, a semi-tryptic digest, a fixed mod, and a palindrome whose
+/// reverse decoy collides with a target.
+#[test]
+fn out_of_core_candidate_list_equals_the_enumeration() {
+    let scorer = make_scorer(0.05);
+    let (_, idx, params) = small_search_fixture();
+    let mut semi = params.clone();
+    semi.num_tolerable_termini = 1;
+    let (_, asym_idx, asym_params) = asymmetric_cam_only_fixture();
+    let (_, pal_idx, pal_params) = palindrome_fixture();
+    let mut relabelled = 0;
+    for (label, idx, params) in [
+        ("variable mod", &idx, &params),
+        ("semi-tryptic", &idx, &semi),
+        ("fixed mod", &asym_idx, &asym_params),
+        ("palindrome", &pal_idx, &pal_params),
+    ] {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let prepared =
+            PreparedSearch::prepare_mmap(idx, params, &scorer, 0.05, "XXX", tmp.path())
+                .expect("prepare_mmap");
+        let got: Vec<CandSig> = prepared
+            .out_of_core_candidates_where(|_, _| true)
+            .iter()
+            .map(cand_sig)
+            .collect();
+        let oracle = enumeration_oracle(idx, params);
+        let raw: Vec<Candidate> = enumerate_candidates(idx, params, "XXX").collect();
+        relabelled += raw
+            .iter()
+            .zip(&oracle)
+            .filter(|(r, o)| r.is_decoy != o.is_decoy)
+            .count();
+        let want: Vec<CandSig> = oracle.iter().map(cand_sig).collect();
+        assert!(!want.is_empty(), "[{label}] empty fixture");
+        assert_eq!(got, want, "[{label}] candidate list differs from the enumeration");
+    }
+    assert!(relabelled > 0, "no fixture exercises the collision relabel");
+}
+
+const FIXTURE_SIGNATURE: &[&[&str]] = &[
+    &[
+        "pep=E[0]D[0]I[0]M[1599491]T[0]P[0]E[0]P[0]K[0] z=2 score=-87.000000 rank=-87.000000 iso=0 decoy=true prots=[2]",
+        "pep=P[0]E[0]P[0]T[0]M[1599491]I[0]D[0]E[0]K[0] z=2 score=-43.000000 rank=-43.000000 iso=0 decoy=false prots=[0,0]",
+    ],
+    &[
+        "pep=W[0]V[0]T[0]F[0]I[0]S[0]L[0]L[0]R[0] z=2 score=-53.000000 rank=-53.000000 iso=0 decoy=false prots=[0,0]",
+    ],
+    &[
+        "pep=S[0]H[0]A[0]R[0]E[0]D[0]P[0]E[0]P[0]K[0] z=2 score=-43.000000 rank=-43.000000 iso=0 decoy=false prots=[0,0,1]",
+    ],
+];
+
+const SEMITRYPTIC: &[&[&str]] = &[
+    &[
+        "pep=E[0]D[0]I[0]M[1599491]T[0]P[0]E[0]P[0]K[0] z=2 score=-87.0000 rank=-87.0000 iso=0 decoy=true",
+        "pep=K[0]P[0]E[0]P[0]T[0]M[1599491]I[0]D[0]E[0] z=2 score=-97.0000 rank=-97.0000 iso=0 decoy=false",
+        "pep=P[0]E[0]P[0]T[0]M[1599491]I[0]D[0]E[0]K[0] z=2 score=-43.0000 rank=-43.0000 iso=0 decoy=false",
+    ],
+    &[
+        "pep=W[0]V[0]T[0]F[0]I[0]S[0]L[0]L[0]R[0] z=2 score=-53.0000 rank=-53.0000 iso=0 decoy=false",
+    ],
+    &[
+        "pep=S[0]H[0]A[0]R[0]E[0]D[0]P[0]E[0]P[0]K[0] z=2 score=-43.0000 rank=-43.0000 iso=0 decoy=false",
+    ],
+];
+
+const ASYMMETRIC_TOL_CAM_ONLY: &[&[&str]] = &[
+    &[
+        "pep=E[0]L[0]V[0]I[0]S[0]C[5702146]L[0]I[0]V[0]E[0]K[0] z=2 score=-61.0000 rank=-61.0000 iso=0 decoy=false",
+    ],
+    &[
+        "pep=D[0]A[0]V[0]I[0]D[0]C[5702146]M[0]E[0]N[0]G[0]E[0]K[0] z=2 score=-86.0000 rank=-86.0000 iso=0 decoy=false",
+        "pep=E[0]G[0]N[0]E[0]M[0]C[5702146]D[0]I[0]V[0]A[0]D[0]K[0] z=2 score=-115.0000 rank=-115.0000 iso=0 decoy=true",
+    ],
+    &[
+        "pep=G[0]A[0]S[0]L[0]Y[0]C[5702146]D[0]E[0]F[0]G[0]H[0]I[0]K[0] z=2 score=-94.0000 rank=-94.0000 iso=0 decoy=false",
+        "pep=I[0]H[0]G[0]F[0]E[0]D[0]C[5702146]Y[0]L[0]S[0]A[0]G[0]K[0] z=2 score=-135.0000 rank=-135.0000 iso=0 decoy=true",
+    ],
+    &[
+        "pep=I[0]H[0]G[0]F[0]D[0]E[0]C[5702146]A[0]D[0]N[0]A[0]W[0]K[0] z=2 score=-135.0000 rank=-135.0000 iso=0 decoy=true",
+        "pep=W[0]A[0]N[0]D[0]A[0]C[5702146]E[0]D[0]F[0]G[0]H[0]I[0]K[0] z=2 score=-103.0000 rank=-103.0000 iso=0 decoy=false",
+    ],
+];
+
+const COLLISION_DECOY_RELABEL: &[&[&str]] = &[
+    &[
+        "pep=K[0]E[0]A[0]M[0] z=2 score=-37.0000 rank=-37.0000 iso=0 decoy=false",
+        "pep=M[0]A[0]E[0]K[0] z=2 score=-5.0000 rank=-5.0000 iso=0 decoy=false",
+    ],
+];
+
+fn assert_golden(label: &str, got: &[Vec<String>], golden: &[&[&str]]) {
+    assert!(
+        got.iter().any(|scan| !scan.is_empty()),
+        "[{label}] the fixture produced no PSMs, so the golden would be vacuous"
+    );
+    let want: Vec<Vec<String>> = golden
+        .iter()
+        .map(|scan| scan.iter().map(|r| r.to_string()).collect())
+        .collect();
+    assert_eq!(
+        got, want,
+        "[{label}] PSMs differ from the golden\nGOT : {got:#?}\nWANT: {want:#?}"
+    );
+}
+
+/// Variable mod + a peptide shared by two proteins: full PSM rows including the
+/// resolved proteins.
+#[test]
+fn psms_match_golden_with_variable_mod_and_shared_peptide() {
+    let (spectra, idx, params) = small_search_fixture();
+    let scorer = make_scorer(0.05);
+    let (q, c) = run_search(&idx, &params, &spectra, &scorer);
+    assert_golden("variable mod", &psm_signature(&q, &c), FIXTURE_SIGNATURE);
+}
+
+/// Semi-tryptic digest (`num_tolerable_termini = 1`).
+#[test]
+fn psms_match_golden_semitryptic() {
+    let (spectra, idx, mut params) = small_search_fixture();
+    params.num_tolerable_termini = 1;
+    let scorer = make_scorer(0.05);
+    let (q, c) = run_search(&idx, &params, &spectra, &scorer);
+    assert_golden("semi-tryptic", &psm_result_set(&q, &c), SEMITRYPTIC);
+}
+
+/// Directional (asymmetric) precursor tolerance with a fixed mod: the scored
+/// set must follow `matches_precursor`'s sides.
+#[test]
+fn psms_match_golden_asymmetric_tol_cam_only() {
+    let (spectra, idx, params) = asymmetric_cam_only_fixture();
+    let scorer = make_scorer(0.05);
+    let (q, c) = run_search(&idx, &params, &spectra, &scorer);
+    assert_golden(
+        "asymmetric tolerance",
+        &psm_result_set(&q, &c),
+        ASYMMETRIC_TOL_CAM_ONLY,
+    );
+}
+
+/// The palindrome's collision decoy is labelled as target in the PSMs.
+#[test]
+fn psms_match_golden_collision_decoy_relabel() {
+    let (spectra, idx, params) = palindrome_fixture();
+    let scorer = make_scorer(0.05);
+    let (q, c) = run_search(&idx, &params, &spectra, &scorer);
+    let got = psm_result_set(&q, &c);
+    assert!(
+        got.iter().flatten().any(|r| r.starts_with("pep=M[0]A[0]E[0]K[0] ") && r.ends_with("decoy=false")),
+        "the collision MAEK must be scored as a target: {got:#?}"
+    );
+    assert_golden("collision decoy", &got, COLLISION_DECOY_RELABEL);
 }
 
 /// Canonical, resolution-aware signature of every scan's top-N PSM list.
@@ -277,9 +657,9 @@ fn psm_signature(queues: &[TopNQueue], candidates: &[Candidate]) -> Vec<Vec<Stri
 /// within the heap since `candidate_idxs` order affects the signature), this
 /// function builds a per-scan **multiset** of `(peptide-residues+mods, charge,
 /// score-rounded, rank-score-rounded, isotope_offset, is_decoy)` tuples and
-/// sorts them.  The protein column is deliberately excluded: for semi-tryptic
-/// searches the multi-protein `Proteins` order may differ between `Ram` and
-/// `Mmap` (cosmetic, FDR-neutral), and this test asserts only result-identity.
+/// sorts them. The protein column is deliberately excluded: for semi-tryptic
+/// searches the multi-protein `Proteins` order depends on candidate visitation
+/// order (cosmetic, FDR-neutral), and these tests assert result identity.
 fn psm_result_set(queues: &[TopNQueue], candidates: &[Candidate]) -> Vec<Vec<String>> {
     queues
         .iter()
@@ -319,239 +699,6 @@ fn psm_result_set(queues: &[TopNQueue], candidates: &[Candidate]) -> Vec<Vec<Str
         .collect()
 }
 
-/// Semi-tryptic result-identity test.
-///
-/// For `num_tolerable_termini = 1` the `Mmap` per-spectrum candidate order
-/// (coordinate/mod-mass sort) can differ from `Ram` (strict spans → free-C →
-/// free-N), so byte-identity of the full PIN is not guaranteed. This test asserts
-/// the weaker but essential property: the **order-independent set** of accepted
-/// PSMs (peptide residues+mods, charge, score, isotope offset, decoy flag) is
-/// identical between `Ram` and `Mmap`. Protein column order is excluded (see
-/// `psm_result_set`).
-#[test]
-fn mmap_result_identical_semitryptic() {
-    let (spectra, idx, mut params) = small_search_fixture();
-    // Switch to semi-tryptic: at least one terminus must be a cleavage site.
-    params.num_tolerable_termini = 1;
-    let scorer = make_scorer(0.05);
-
-    let (ram_q, ram_c) = run_prepared(&idx, &params, &spectra, CandidateBacking::Ram, &scorer);
-    let (mmap_q, mmap_c) = run_prepared(&idx, &params, &spectra, CandidateBacking::Mmap, &scorer);
-
-    let ram_set = psm_result_set(&ram_q, &ram_c);
-    let mmap_set = psm_result_set(&mmap_q, &mmap_c);
-
-    // Sanity: the fixture must actually produce PSMs (else the test is vacuous).
-    assert!(
-        ram_set.iter().any(|scan| !scan.is_empty()),
-        "semi-tryptic fixture produced no PSMs on the Ram path — test would be vacuous"
-    );
-
-    assert_eq!(
-        ram_set, mmap_set,
-        "mmap semi-tryptic: accepted PSM sets must be result-identical to the in-RAM path\n\
-         (order-independent: candidate SET, scores, and accepted-PSM identities must match;\n\
-         Proteins-column order and candidate_idxs[0] for shared peptides may legitimately differ)\n\
-         RAM : {ram_set:#?}\nMMAP: {mmap_set:#?}"
-    );
-}
-
-/// RC2 (directional precursor tolerance) result-identity gate.
-///
-/// Builds a search with a STRONGLY ASYMMETRIC precursor tolerance (wide on the
-/// `left` = "peptide lighter than precursor" side, tight on the `right`) plus a
-/// `cam_only` style FIXED carbamidomethyl-C mod and NO variable mods — the exact
-/// configuration that diverged in the b1931 benchmark. Several near-isobaric
-/// tryptic peptides sit on the WIDE (left) side of the precursor mass, where a
-/// symmetric `max(left,right)` lazy fetch + symmetric final filter would admit a
-/// candidate set DIFFERENT from the directional `matches_precursor` gate the RAM
-/// path uses, perturbing the per-spectrum scored set (and, when a wrongly-admitted
-/// candidate scores into the top-N, the accepted-PSM set itself).
-///
-/// Asserts the order-independent accepted-PSM set is identical RAM vs Mmap.
-#[test]
-fn mmap_result_identical_asymmetric_tol_cam_only() {
-    // One protein with several tryptic peptides whose neutral masses are close
-    // together, so the asymmetric window's two sides admit different sets.
-    let target = ProteinDb {
-        proteins: vec![Protein {
-            accession: "P1".into(),
-            description: "cam-only asymmetric".into(),
-            // Tryptic peptides (cut after K/R): ELVISCLIVEK, SAMPLERPEPTIDEK,
-            // DAVIDCMENGEK, GASLYCDEFGHIK, ... several Cys-bearing peptides so the
-            // fixed CAM mass shifts each, and several near-mass neighbours.
-            sequence: b"ELVISCLIVEKSAMPLERPEPTIDEKDAVIDCMENGEKGASLYCDEFGHIKWANDACEDFGHIK".to_vec(),
-        }],
-    };
-    let idx = SearchIndex::from_target_db(&target, "XXX");
-
-    // Fixed carbamidomethyl on C (cam_only): NOT a variable mod.
-    let cam = Modification {
-        name: "Carbamidomethyl".to_string(),
-        mass_delta: 57.02146,
-        residue: ResidueSpec::Specific(b'C'),
-        location: ModLocation::Anywhere,
-        fixed: true,
-        accession: None,
-        neutral_losses: Vec::new(),
-        loss_class: 0,
-    };
-    let aa_set = AminoAcidSetBuilder::new_standard()
-        .add_fixed_mod(cam)
-        .build()
-        .unwrap();
-    let mut params = SearchParams::default_tryptic(aa_set);
-    params.min_length = 3;
-    params.max_variable_mods_per_peptide = 0; // cam_only: no variable mods
-    params.top_n_psms_per_spectrum = 10;
-    params.min_peaks = 0;
-    // STRONGLY ASYMMETRIC precursor tolerance: wide left, tight right. Da units so
-    // the window is mass-independent and the directional asymmetry is stark. The
-    // wide left side reaches peptides up to ~0.6 Da LIGHTER than the precursor;
-    // the tight right side admits almost nothing heavier.
-    params.precursor_tolerance =
-        model::PrecursorTolerance::asymmetric(Tolerance::Da(0.6), Tolerance::Da(0.02));
-    // Multiple isotope offsets exercise the per-offset directional window.
-    params.isotope_error_range = -1..=2;
-
-    let scorer = make_scorer(0.05);
-
-    // Build spectra: for EACH tryptic Cys-bearing peptide, place a precursor a
-    // little HEAVIER than the peptide so the peptide falls on the WIDE (left)
-    // side, and nearby lighter neighbours land in/out of the asymmetric window
-    // differently than a symmetric one would.
-    let build_pep = |seq: &[u8], pre: u8, post: u8| -> Peptide {
-        let mut r = residues(seq);
-        // Apply the fixed CAM to every C so the spectrum's precursor matches the
-        // CAM-modified candidate the search will score.
-        let cam_mod = Modification {
-            name: "Carbamidomethyl".to_string(),
-            mass_delta: 57.02146,
-            residue: ResidueSpec::Specific(b'C'),
-            location: ModLocation::Anywhere,
-            fixed: true,
-            accession: None,
-            neutral_losses: Vec::new(),
-            loss_class: 0,
-        };
-        for aa in r.iter_mut() {
-            if aa.residue == b'C' {
-                aa.mod_ = Some(model::modification::leak_mod(cam_mod.clone()));
-            }
-        }
-        Peptide::new(r, pre, post)
-    };
-
-    let peps = [
-        build_pep(b"ELVISCLIVEK", b'_', b'S'),
-        build_pep(b"DAVIDCMENGEK", b'R', b'G'),
-        build_pep(b"GASLYCDEFGHIK", b'K', b'W'),
-        build_pep(b"WANDACEDFGHIK", b'K', b'-'),
-    ];
-    let mut spectra = Vec::new();
-    for (i, pep) in peps.iter().enumerate() {
-        // Nudge the precursor +0.3 Da heavier (within wide left, outside tight
-        // right) so the matching peptide sits on the asymmetric WIDE side.
-        let charge = 2u8;
-        let mz = (pep.mass() + 0.3 + charge as f64 * PROTON) / charge as f64;
-        let mut s = spectrum_for(pep, charge, &format!("scan=asym{i}"));
-        s.precursor_mz = mz;
-        spectra.push(s);
-    }
-
-    let (ram_q, ram_c) = run_prepared(&idx, &params, &spectra, CandidateBacking::Ram, &scorer);
-    let (mmap_q, mmap_c) = run_prepared(&idx, &params, &spectra, CandidateBacking::Mmap, &scorer);
-
-    let ram_set = psm_result_set(&ram_q, &ram_c);
-    let mmap_set = psm_result_set(&mmap_q, &mmap_c);
-
-    assert!(
-        ram_set.iter().any(|scan| !scan.is_empty()),
-        "asymmetric cam_only fixture produced no PSMs on the Ram path — test would be vacuous"
-    );
-    assert_eq!(
-        ram_set, mmap_set,
-        "mmap asymmetric-tolerance cam_only: accepted PSM sets must be result-identical to RAM\n\
-         (directional precursor tolerance must admit the SAME per-spectrum candidate set)\n\
-         RAM : {ram_set:#?}\nMMAP: {mmap_set:#?}"
-    );
-}
-
-/// RC1 (global collision-decoy relabel) result-identity gate.
-///
-/// A palindromic tryptic peptide reverses to ITSELF, so the reverse-decoy's bare
-/// sequence equals a real target's bare sequence — a collision decoy. The in-RAM
-/// path relabels it to target ONCE GLOBALLY at prepare; the Mmap path must reach
-/// the SAME decision using the GLOBAL target bare-sequence set built once from the
-/// full index (NOT a per-spectrum relabel from only the window candidates). This
-/// test asserts the accepted-PSM set — including the decoy flag — is identical, so
-/// a collision decoy is labeled the same way in both backings.
-#[test]
-fn mmap_result_identical_collision_decoy_relabel() {
-    // Protein "MAEKKEAM" is a palindrome (reverse == itself), so its tryptic
-    // peptide "MAEK" (cut after K) collides with its own reverse-decoy "MAEK".
-    let target = ProteinDb {
-        proteins: vec![Protein {
-            accession: "P1".into(),
-            description: "palindrome collision".into(),
-            sequence: b"MAEKKEAM".to_vec(),
-        }],
-    };
-    let idx = SearchIndex::from_target_db(&target, "XXX");
-
-    let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
-    let mut params = SearchParams::default_tryptic(aa_set);
-    params.min_length = 3;
-    params.max_variable_mods_per_peptide = 0;
-    params.top_n_psms_per_spectrum = 10;
-    params.min_peaks = 0;
-
-    // Spectrum targeting MAEK (the collision peptide).
-    let maek = Peptide::new(residues(b"MAEK"), b'_', b'K');
-    let spectra = vec![spectrum_for(&maek, 2, "scan=collision")];
-    let scorer = make_scorer(0.05);
-
-    let (ram_q, ram_c) = run_prepared(&idx, &params, &spectra, CandidateBacking::Ram, &scorer);
-    let (mmap_q, mmap_c) = run_prepared(&idx, &params, &spectra, CandidateBacking::Mmap, &scorer);
-
-    let ram_set = psm_result_set(&ram_q, &ram_c);
-    let mmap_set = psm_result_set(&mmap_q, &mmap_c);
-
-    assert!(
-        ram_set.iter().any(|scan| !scan.is_empty()),
-        "collision fixture produced no PSMs on the Ram path — test would be vacuous"
-    );
-    // The collision MAEK candidate must carry the SAME decoy flag in both paths.
-    assert_eq!(
-        ram_set, mmap_set,
-        "mmap collision-decoy relabel: accepted PSM sets (incl. decoy flag) must match RAM\n\
-         RAM : {ram_set:#?}\nMMAP: {mmap_set:#?}"
-    );
-}
-
-#[test]
-fn mmap_path_bit_identical_to_ram_on_fixture() {
-    let (spectra, idx, params) = small_search_fixture();
-    let scorer = make_scorer(0.05);
-
-    let (ram_q, ram_c) = run_prepared(&idx, &params, &spectra, CandidateBacking::Ram, &scorer);
-    let (mmap_q, mmap_c) = run_prepared(&idx, &params, &spectra, CandidateBacking::Mmap, &scorer);
-
-    let ram_sig = psm_signature(&ram_q, &ram_c);
-    let mmap_sig = psm_signature(&mmap_q, &mmap_c);
-
-    // Sanity: the fixture must actually produce PSMs (else the test is vacuous).
-    assert!(
-        ram_sig.iter().any(|scan| !scan.is_empty()),
-        "fixture produced no PSMs on the Ram path — test would be vacuous"
-    );
-
-    assert_eq!(
-        ram_sig, mmap_sig,
-        "mmap candidate path must yield identical PSMs to the in-RAM path\nRAM : {ram_sig:#?}\nMMAP: {mmap_sig:#?}"
-    );
-}
-
 /// Issue #76: on spectra built from a peptide's exact b/y ions, the per-chunk
 /// fragment-ion index must give that peptide the most votes and materialise it.
 #[test]
@@ -563,12 +710,12 @@ fn fragment_index_ranks_the_true_peptide_first_on_exact_spectra() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let prepared = PreparedSearch::prepare_mmap(&idx, &params, &scorer, 0.05, "XXX", tmp.path())
         .expect("prepare_mmap");
-    let mi = prepared.mmap_index.as_ref().unwrap();
+    let mi = &prepared.mmap_index;
     let records = mi.records();
     let fi = ChunkFragmentIndex::build(records, &idx, &params, Tolerance::Da(0.05), 0.0, 5000.0);
     assert!(fi.n_forms() > 0);
     // Reference: what the enumeration path scores as top-1 for each spectrum.
-    let (queues, cands) = run_prepared(&idx, &params, &spectra, CandidateBacking::Ram, &scorer);
+    let (queues, cands) = run_search(&idx, &params, &spectra, &scorer);
     for (spec, q) in spectra.iter().zip(&queues) {
         let best = q
             .iter_psms()
@@ -612,8 +759,8 @@ fn fragment_index_prunes_to_the_window_and_still_finds_the_true_peptide() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let prepared = PreparedSearch::prepare_mmap(&idx, &params, &scorer, 0.05, "XXX", tmp.path())
         .expect("prepare_mmap");
-    let mi = prepared.mmap_index.as_ref().unwrap();
-    let (queues, cands) = run_prepared(&idx, &params, &spectra, CandidateBacking::Ram, &scorer);
+    let mi = &prepared.mmap_index;
+    let (queues, cands) = run_search(&idx, &params, &spectra, &scorer);
     for (spec, q) in spectra.iter().zip(&queues) {
         let best = q
             .iter_psms()
@@ -656,7 +803,7 @@ fn fragment_index_prunes_to_the_window_and_still_finds_the_true_peptide() {
 
 /// The single-shot out-of-core search returns one queue per input spectrum in
 /// input order, each PSM's `spectrum_idx` is its input position, and its top
-/// PSM is the one the in-RAM enumeration ranks first. The spectra are passed
+/// PSM is the one per-spectrum enumeration ranks first. The spectra are passed
 /// in descending precursor mass, so the search has to reorder them.
 #[test]
 fn match_spectra_out_of_core_keeps_input_order_and_finds_the_enumeration_top_hit() {
@@ -677,8 +824,7 @@ fn match_spectra_out_of_core_keeps_input_order_and_finds_the_enumeration_top_hit
     let (queues, cands) =
         search::match_spectra_out_of_core(&spectra, &idx, &params, &scorer, 0.05, "XXX")
             .expect("out-of-core search");
-    let (ram_queues, ram_cands) =
-        run_prepared(&idx, &params, &spectra, CandidateBacking::Ram, &scorer);
+    let (enum_queues, enum_cands) = run_search(&idx, &params, &spectra, &scorer);
     assert_eq!(queues.len(), spectra.len());
     let top = |q: &TopNQueue| {
         q.iter_psms()
@@ -686,12 +832,12 @@ fn match_spectra_out_of_core_keeps_input_order_and_finds_the_enumeration_top_hit
             .cloned()
             .expect("psm")
     };
-    for (i, (q, rq)) in queues.iter().zip(&ram_queues).enumerate() {
+    for (i, (q, rq)) in queues.iter().zip(&enum_queues).enumerate() {
         assert!(q.iter_psms().all(|p| p.spectrum_idx == i));
         let (a, b) = (top(q), top(rq));
         assert_eq!(
             cands[a.primary_candidate_idx() as usize].peptide.to_string(),
-            ram_cands[b.primary_candidate_idx() as usize].peptide.to_string(),
+            enum_cands[b.primary_candidate_idx() as usize].peptide.to_string(),
             "{}: top peptide differs from the enumeration",
             spectra[i].title
         );
@@ -699,11 +845,11 @@ fn match_spectra_out_of_core_keeps_input_order_and_finds_the_enumeration_top_hit
 }
 
 /// The glyco candidate table built from the out-of-core index must be the
-/// in-RAM candidate list restricted to N-X-S/T-bearing candidates: the same
+/// whole database's enumeration restricted to N-X-S/T-bearing candidates: the same
 /// candidates (peptidoform, flanks, protein, offset, terminal and decoy flags),
 /// in the same relative order.
 #[test]
-fn glyco_table_from_the_index_is_the_ram_sequon_subset_in_order() {
+fn glyco_table_from_the_index_is_the_enumeration_sequon_subset_in_order() {
     use search::candidate_gen::candidate_has_nxst_sequon;
     use search::glyco_search::GlycoCandidates;
     // Internal sequons (NGS, NLT), a sequon completed by the next residue
@@ -750,9 +896,8 @@ fn glyco_table_from_the_index_is_the_ram_sequon_subset_in_order() {
     params.max_variable_mods_per_peptide = 2;
     let scorer = make_scorer(0.05);
 
-    let ram = PreparedSearch::prepare(&idx, &params, &scorer, 0.05, "XXX");
-    let expected: Vec<&Candidate> = ram
-        .candidates
+    let all = enumeration_oracle(&idx, &params);
+    let expected: Vec<&Candidate> = all
         .iter()
         .filter(|c| candidate_has_nxst_sequon(c))
         .collect();
@@ -795,6 +940,6 @@ fn glyco_table_from_the_index_is_the_ram_sequon_subset_in_order() {
     assert!(expected
         .iter()
         .any(|c| c.is_protein_n_term && c.start_offset_in_protein == 1));
-    assert!(want.len() < ram.candidates.len());
+    assert!(want.len() < all.len());
     assert_eq!(got, want);
 }

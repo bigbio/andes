@@ -65,6 +65,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 pub static EXP_CHARGE2_MIN_Z: AtomicU8 = AtomicU8::new(0);
 /// EXPERIMENT: count each theoretical ion once across its 1+ and 2+ readings.
 pub static EXP_CHARGE2_DEDUPE: AtomicBool = AtomicBool::new(true);
+/// EXPERIMENT: keep the 1+ shortlist and add this many forms from the combined order (0 = replace).
+pub static EXP_CHARGE2_UNION_K: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 /// EXPERIMENT: accumulate shortlist overlap diagnostics.
 pub static EXP_CHARGE2_DIAG: AtomicBool = AtomicBool::new(false);
 /// queries, base shortlist total, arm shortlist total, overlap, base-empty-arm-nonempty.
@@ -453,6 +455,7 @@ impl ChunkFragmentIndex {
         let charge2 = c2_min_z > 0 && charges.iter().any(|&z| z >= c2_min_z);
         let dedupe = EXP_CHARGE2_DEDUPE.load(Ordering::Relaxed);
         let diag = EXP_CHARGE2_DIAG.load(Ordering::Relaxed);
+        let union_k = EXP_CHARGE2_UNION_K.load(Ordering::Relaxed) as usize;
         let (mut sel, base_sel): (Vec<(u32, u16, f32)>, Option<Vec<(u32, u16, f32)>>) =
             VOTE_BUF.with(|cell| {
             let mut buf = cell.borrow_mut();
@@ -542,7 +545,11 @@ impl ChunkFragmentIndex {
                 }
             }
             let mut sel = Vec::new();
-            let mut base_sel = if diag && charge2 { Some(Vec::new()) } else { None };
+            let mut base_sel = if (diag || union_k > 0) && charge2 {
+                Some(Vec::new())
+            } else {
+                None
+            };
             for &id in touched.iter() {
                 let slot = &mut counts[(id - id_lo) as usize];
                 if slot.0 >= min_matched {
@@ -557,6 +564,33 @@ impl ChunkFragmentIndex {
             }
             (sel, base_sel)
         });
+        if union_k > 0 {
+            if let Some(mut bs) = base_sel.clone() {
+                // The singly-charged shortlist, plus up to `union_k` more forms
+                // from the combined (1+ and 2+) order that it does not hold.
+                select_top_k(&mut bs, top_k);
+                let have: rustc_hash::FxHashSet<u32> = bs.iter().map(|x| x.0).collect();
+                select_top_k(&mut sel, top_k + union_k);
+                let extra: Vec<(u32, u16, f32)> = sel
+                    .iter()
+                    .filter(|x| !have.contains(&x.0))
+                    .take(union_k)
+                    .copied()
+                    .collect();
+                sel = bs;
+                sel.extend(extra);
+                if !diag {
+                    return sel
+                        .into_iter()
+                        .filter(|&(id, _, _)| {
+                            let m = self.form_mass[id as usize];
+                            exact.iter().any(|&(a, b)| m >= a && m <= b)
+                        })
+                        .map(|(id, v, _)| (id, v))
+                        .collect();
+                }
+            }
+        }
         if let Some(mut bs) = base_sel {
             select_top_k(&mut bs, top_k);
             let mut arm = sel.clone();

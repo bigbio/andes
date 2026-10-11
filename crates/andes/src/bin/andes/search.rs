@@ -952,6 +952,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         search::fragment_index::EXP_CHARGE2_MIN_Z.store(cli.fi_charge2_min_z, Ordering::Relaxed);
         search::fragment_index::EXP_CHARGE2_DEDUPE
             .store(!cli.fi_charge2_nodedupe, Ordering::Relaxed);
+        search::fragment_index::EXP_CHARGE2_UNION_K.store(cli.fi_charge2_union, Ordering::Relaxed);
         search::fragment_index::EXP_CHARGE2_DIAG.store(cli.fi_charge2_diag, Ordering::Relaxed);
     }
     params.fragment_index_top_k = if choice.use_index {

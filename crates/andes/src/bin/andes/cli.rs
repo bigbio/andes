@@ -260,6 +260,10 @@ pub(crate) struct SearchArgs {
     #[arg(long = "fi-charge2-nodedupe", hide = true, default_value_t = false)]
     pub(crate) fi_charge2_nodedupe: bool,
 
+    /// EXPERIMENT: keep the 1+ shortlist and add up to N forms from the combined order.
+    #[arg(long = "fi-charge2-union", hide = true, default_value_t = 0)]
+    pub(crate) fi_charge2_union: u32,
+
     /// EXPERIMENT: print shortlist overlap diagnostics for the charge-2 arm.
     #[arg(long = "fi-charge2-diag", hide = true, default_value_t = false)]
     pub(crate) fi_charge2_diag: bool,

@@ -14,7 +14,10 @@
 //! * [`lfq`]: per-target feature quantification and the decoy-controlled
 //!   feature q-value.
 //! * [`library`]: precursor-level match-between-runs library entry gate.
+//! * [`align`]: joint retention-time alignment across runs, without a
+//!   reference run, and the predicted RT and its uncertainty per run.
 
+pub mod align;
 pub mod formula;
 pub mod isobaric;
 pub mod lfq;

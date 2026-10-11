@@ -17,6 +17,26 @@ pub struct Ms1RunIndex {
     scans: Vec<Ms1Scan>,
     /// Native id → position, for scans that carry an id.
     by_id: HashMap<String, usize>,
+    /// Per scan, the 5th percentile of its centroid intensities (1.0 when it
+    /// has none); see [`Ms1RunIndex::detection_limit`].
+    detection: Vec<f32>,
+}
+
+/// Quantile of a scan's centroid intensities taken as its detection limit.
+const DETECTION_QUANTILE: f64 = 0.05;
+/// Detection limit of a scan without centroids, intensity units.
+const EMPTY_SCAN_DETECTION_LIMIT: f32 = 1.0;
+
+/// The 5th percentile (nearest rank) of the scan's centroid intensities, or
+/// 1.0 when it has none.
+fn scan_detection_limit(peaks: &[(f64, f32)], buf: &mut Vec<f32>) -> f32 {
+    if peaks.is_empty() {
+        return EMPTY_SCAN_DETECTION_LIMIT;
+    }
+    buf.clear();
+    buf.extend(peaks.iter().map(|p| p.1));
+    let rank = (DETECTION_QUANTILE * (buf.len() - 1) as f64).round() as usize;
+    *buf.select_nth_unstable_by(rank, f32::total_cmp).1
 }
 
 impl Ms1RunIndex {
@@ -29,13 +49,29 @@ impl Ms1RunIndex {
             }
         }
         scans.sort_by(|a, b| a.rt.partial_cmp(&b.rt).unwrap_or(std::cmp::Ordering::Equal));
+        let mut buf = Vec::new();
+        let detection = scans
+            .iter()
+            .map(|s| scan_detection_limit(&s.peaks, &mut buf))
+            .collect();
+        Self::assemble(scans, detection)
+    }
+
+    /// Index over scans already in RT order with m/z-sorted peaks, and their
+    /// per-scan detection limits.
+    fn assemble(scans: Vec<Ms1Scan>, detection: Vec<f32>) -> Self {
+        debug_assert_eq!(scans.len(), detection.len());
         let by_id = scans
             .iter()
             .enumerate()
             .filter(|(_, s)| !s.id.is_empty())
             .map(|(i, s)| (s.id.clone(), i))
             .collect();
-        Self { scans, by_id }
+        Self {
+            scans,
+            by_id,
+            detection,
+        }
     }
 
     /// Position of the scan with native id `id`.
@@ -62,18 +98,19 @@ impl Ms1RunIndex {
     /// stay within one voltage. Scans without a voltage are dropped.
     pub fn split_by_faims(self) -> Vec<(f32, Ms1RunIndex)> {
         let cvs = self.faims_voltages();
-        let mut groups: Vec<Vec<Ms1Scan>> = vec![Vec::new(); cvs.len()];
-        for scan in self.scans {
+        let mut groups: Vec<(Vec<Ms1Scan>, Vec<f32>)> = vec![(Vec::new(), Vec::new()); cvs.len()];
+        for (scan, limit) in self.scans.into_iter().zip(self.detection) {
             if let Some(k) = scan
                 .faims_cv
                 .and_then(|cv| cvs.iter().position(|&c| c == cv))
             {
-                groups[k].push(scan);
+                groups[k].0.push(scan);
+                groups[k].1.push(limit);
             }
         }
         cvs.into_iter()
             .zip(groups)
-            .map(|(cv, g)| (cv, Ms1RunIndex::new(g)))
+            .map(|(cv, (scans, detection))| (cv, Ms1RunIndex::assemble(scans, detection)))
             .collect()
     }
 
@@ -95,6 +132,13 @@ impl Ms1RunIndex {
 
     pub fn peaks(&self, idx: usize) -> &[(f64, f32)] {
         &self.scans[idx].peaks
+    }
+
+    /// Detection limit of scan `idx`: the 5th percentile (nearest rank) of its
+    /// centroid intensities, 1.0 when it has none. Computed once when the
+    /// index is built.
+    pub fn detection_limit(&self, idx: usize) -> f32 {
+        self.detection[idx]
     }
 
     /// Retention-time span of the run, seconds.
@@ -282,6 +326,33 @@ mod tests {
         assert_eq!(idx.apex_centroid(0, 499.97, 500.03), Some((500.03, 9.0)));
         assert_eq!(idx.apex_centroid(0, 600.0, 601.0), None);
         assert_eq!(idx.max_in(0, 499.97, 500.02), 7.0);
+    }
+
+    #[test]
+    fn detection_limit_is_per_scan_and_survives_the_faims_split() {
+        let scans = vec![
+            Ms1Scan {
+                rt: 1.0,
+                peaks: (1..=21)
+                    .map(|k| (100.0 + k as f64, k as f32 * 10.0))
+                    .collect(),
+                faims_cv: Some(-45.0),
+                ..Ms1Scan::default()
+            },
+            Ms1Scan {
+                rt: 0.0,
+                peaks: vec![],
+                faims_cv: Some(-60.0),
+                ..Ms1Scan::default()
+            },
+        ];
+        let idx = Ms1RunIndex::new(scans);
+        // rank round(0.05 * 20) = 1: the second-smallest of 10..210.
+        assert_eq!(idx.detection_limit(1), 20.0);
+        assert_eq!(idx.detection_limit(0), 1.0);
+        let split = idx.split_by_faims();
+        assert_eq!(split[0].1.detection_limit(0), 1.0);
+        assert_eq!(split[1].1.detection_limit(0), 20.0);
     }
 
     #[test]

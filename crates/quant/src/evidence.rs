@@ -16,10 +16,11 @@
 //!
 //! * `b_i` is the median of `y_i` over the window;
 //! * `sigma_i = 1.4826 * median|y_i[j+1] - y_i[j]| / sqrt(2)`, floored at
-//!   `0.5 * L`, where the detection limit `L` is the 5th percentile of all
-//!   centroid intensities, at any m/z, in the window's scans (1.0 when there
-//!   are none). A missing centroid means "below detection", so a trace with
-//!   no centroids is uncertain to about `L`, not to 0;
+//!   `0.5 * L`, where the detection limit `L` is the median over the
+//!   window's scans of each scan's own limit (the 5th percentile of its
+//!   centroid intensities, 1.0 for an empty scan; precomputed by
+//!   [`Ms1RunIndex`]). A missing centroid means "below detection", so a trace
+//!   with no centroids is uncertain to about `L`, not to 0;
 //! * `pi` is the envelope scaled to sum to 1 over its 4 entries.
 //!
 //! Fit. Over `t0` in the scan RTs inside `[t_hat - 3 s, t_hat + 3 s]` (the
@@ -54,9 +55,7 @@ pub const MIN_SCANS: usize = 5;
 const WIDTH_GRID: [f64; 3] = [0.7, 1.0, 1.4];
 /// Consistency factor of the median absolute deviation for a Gaussian.
 const MAD_SCALE: f64 = 1.4826;
-/// Quantile of the window's centroid intensities taken as the detection limit.
-const DETECTION_QUANTILE: f64 = 0.05;
-/// Detection limit when the window has no centroids, intensity units.
+/// Detection limit used when the given one is not finite and positive.
 const DEFAULT_DETECTION_LIMIT: f64 = 1.0;
 /// Noise floor as a fraction of the detection limit.
 const NOISE_FLOOR_OF_LIMIT: f64 = 0.5;
@@ -93,7 +92,11 @@ pub struct Evidence {
     /// `1 / sqrt(den)` over the used isotopes.
     pub amplitude_se: f64,
     /// `A * w * sqrt(2 pi)`: the area of the elution profile of the whole
-    /// pattern (`pi` sums to 1).
+    /// pattern (`pi` sums to 1). The median background includes part of the
+    /// peak's tails, so this reads a few percent low (about 2-3% for a peak
+    /// covering a third of the window); the bias is a constant scale of one
+    /// estimator applied to every run alike, so it cancels in cross-run
+    /// ratios.
     pub quantity: f64,
     /// `amplitude_se * w * sqrt(2 pi)`.
     pub quantity_se: f64,
@@ -161,7 +164,7 @@ pub struct FitScratch {
     y: [Vec<f32>; MAX_ISOTOPES],
     m1: Vec<f32>,
     mz0: Vec<f64>,
-    intensities: Vec<f32>,
+    limits: Vec<f32>,
     work: Workspace,
 }
 
@@ -204,7 +207,7 @@ pub fn fit_with(
         return None;
     }
     let n_iso = p.n_isotopes.clamp(1, MAX_ISOTOPES);
-    let detection_limit = detection_limit(ms1, scans.clone(), &mut scratch.intensities);
+    let detection_limit = detection_limit(ms1, scans.clone(), &mut scratch.limits);
     traces(
         ms1,
         scans,
@@ -239,19 +242,13 @@ pub fn fit_with(
     ))
 }
 
-/// The 5th percentile (nearest rank) of every centroid intensity in `scans`,
-/// or 1.0 when they hold no centroid.
+/// The median of the per-scan detection limits over `scans` (non-empty), each
+/// the 5th percentile of that scan's centroid intensities.
 fn detection_limit(ms1: &Ms1RunIndex, scans: std::ops::Range<usize>, buf: &mut Vec<f32>) -> f64 {
     buf.clear();
-    for j in scans {
-        buf.extend(ms1.peaks(j).iter().map(|p| p.1));
-    }
-    if buf.is_empty() {
-        return DEFAULT_DETECTION_LIMIT;
-    }
-    let rank = (DETECTION_QUANTILE * (buf.len() - 1) as f64).round() as usize;
-    let (_, v, _) = buf.select_nth_unstable_by(rank, f32::total_cmp);
-    *v as f64
+    buf.extend(scans.map(|j| ms1.detection_limit(j)));
+    buf.sort_unstable_by(f32::total_cmp);
+    median_sorted(buf)
 }
 
 /// Fill the scratch traces over `scans`: RT, the isotope traces 0..`n_iso`,
@@ -774,8 +771,8 @@ mod tests {
 
     /// Upper bound on the LLR of a noise-only window: 1.5 times the largest
     /// null LLR measured over 100 noise seeds of the absent-precursor run at
-    /// 1 s and 2 s scan spacing (2.75).
-    const NULL_LLR_BOUND: f64 = 4.1;
+    /// 1 s and 2 s scan spacing (1.81).
+    const NULL_LLR_BOUND: f64 = 2.7;
 
     #[test]
     fn absent_precursor_has_small_llr() {

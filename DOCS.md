@@ -189,6 +189,7 @@ See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model)
 | `--tmt-correction` | path | *(none)* | Isotope impurity sheet of the kit lot (§10); corrected intensities by NNLS, raw kept alongside. |
 | `--tmt-min-purity` | 0..1 | `0` | Drop PSMs below this precursor isolation purity from `tmt.tsv` (they stay in the parquet). |
 | `--lfq` | flag | off | Label-free MS1 quantification of the confident precursors (§10). Writes `<stem>.lfq.tsv` and `<stem>.lfq_features.tsv`. mzML / `.raw` with high-resolution MS1; the MS2 may be ion-trap. |
+| `--quant-dir` | dir | *(none)* | Per input file writes `<stem>.cache` (the run's MS1 scans, every FAIMS voltage) and `<stem>.quant.parquet` (every rank-1 PSM, targets and decoys, no FDR filter; `spec_id` is the PIN SpecId, `search_score` the PIN `RawScore`) for the multi-run quantification stages. Implies MS1 capture; same inputs as `--lfq`. Other outputs are unchanged. |
 | `--lfq-tol` | tolerance | `10ppm` | MS1 tolerance of the isotope chromatograms. |
 | `--lfq-rt-window` | seconds | `60` | Half-window around the identifying PSM's retention time. |
 | `--lfq-gaussian-width` | seconds | *(none)* | Experimental Gaussian smoothing width (eight sigma) for peak detection; areas use raw traces. Validate feature-q coverage for the acquisition. Default detection uses five-scan Savitzky–Golay. |

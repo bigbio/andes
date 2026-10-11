@@ -16,6 +16,7 @@ use model::scan::{Ms1Scan, ProductScan, ScanContext};
 use model::spectrum::Spectrum;
 use model::Tolerance;
 use output::feature_parquet::FeatureRecord;
+use output::run_quant_table::{write_run_quant_table, RunPsmRow};
 use output::{LfqRow, ModRecord, PercolatorPsm, QuantId, TmtRow};
 use quant::formula::Formula;
 use quant::isobaric::{extract_reporters, CorrectionMatrix, Plex};
@@ -60,12 +61,14 @@ pub(crate) struct QuantSettings {
     /// PSM q-value cut for quantification targets (applied when rescoring ran).
     pub quant_fdr: f64,
     pub pep_cap: Option<f64>,
+    /// `--quant-dir`: where each run's MS1 cache and PSM table are written.
+    pub quant_dir: Option<PathBuf>,
 }
 
 impl QuantSettings {
-    /// `None` when neither `--tmt` nor `--lfq` is set.
+    /// `None` when none of `--tmt`, `--lfq` and `--quant-dir` is set.
     pub(crate) fn from_cli(cli: &Cli, high_res: bool) -> Result<Option<Self>, String> {
-        if cli.tmt.is_none() && !cli.lfq {
+        if cli.tmt.is_none() && !cli.lfq && cli.quant_dir.is_none() {
             return Ok(None);
         }
         if !(2..=3).contains(&cli.tmt_level) {
@@ -141,13 +144,20 @@ impl QuantSettings {
             feature_fdr: cli.lfq_feature_fdr,
             quant_fdr: cli.quant_fdr.or(cli.fdr).unwrap_or(0.01),
             pep_cap: cli.pep,
+            quant_dir: cli.quant_dir.clone(),
         }))
     }
 
-    /// MS1 scans are needed for label-free quant and for the precursor purity
-    /// of isobaric PSMs.
+    /// MS1 scans are needed for label-free quant, for the per-run cache of
+    /// `--quant-dir` and for the precursor purity of isobaric PSMs.
     pub(crate) fn needs_ms1(&self) -> bool {
-        self.lfq || self.plex.is_some()
+        self.lfq || self.plex.is_some() || self.quant_dir.is_some()
+    }
+
+    /// Whether the run reads MS1 scans for chromatograms rather than only for
+    /// purity (`--lfq`, `--quant-dir`): the input restrictions of `--lfq` apply.
+    pub(crate) fn needs_ms1_series(&self) -> bool {
+        self.lfq || self.quant_dir.is_some()
     }
 
     pub(crate) fn needs_ms3(&self) -> bool {
@@ -189,6 +199,9 @@ impl QuantSettings {
                     None => "Savitzky–Golay 5 scans".into(),
                 }
             ));
+        }
+        if let Some(dir) = &self.quant_dir {
+            parts.push(format!("per-run cache and PSM table in {}", dir.display()));
         }
         parts.join("; ")
     }
@@ -337,8 +350,9 @@ impl QuantCollector {
                 "WARN: quant: {}: no MS1 scans captured ({}); {}",
                 stem,
                 path.display(),
-                if self.settings.lfq {
-                    "label-free quantification is skipped for this file"
+                if self.settings.needs_ms1_series() {
+                    "label-free quantification and the --quant-dir artifacts are skipped for \
+                     this file"
                 } else {
                     "precursor purity is unavailable for this file"
                 }
@@ -404,6 +418,28 @@ fn select_hits<'a>(
     candidates: &'a [Candidate],
     rescore: Option<&HashMap<String, PercolatorPsm>>,
 ) -> Vec<Hit<'a>> {
+    select_rank1(collector, spectra, queues, candidates, rescore, false)
+}
+
+/// Every rank-1 PSM, targets and decoys, with no q-value or PEP filter: the
+/// rows of the per-run PSM table.
+fn select_rank1_all<'a>(
+    collector: &QuantCollector,
+    spectra: &[Spectrum],
+    queues: &[TopNQueue],
+    candidates: &'a [Candidate],
+) -> Vec<Hit<'a>> {
+    select_rank1(collector, spectra, queues, candidates, None, true)
+}
+
+fn select_rank1<'a>(
+    collector: &QuantCollector,
+    spectra: &[Spectrum],
+    queues: &[TopNQueue],
+    candidates: &'a [Candidate],
+    rescore: Option<&HashMap<String, PercolatorPsm>>,
+    include_decoys: bool,
+) -> Vec<Hit<'a>> {
     let s = &collector.settings;
     let mut hits = Vec::new();
     let mut psm_index: i64 = 0;
@@ -428,7 +464,7 @@ fn select_hits<'a>(
                 continue;
             }
             let cand = &candidates[psm.primary_candidate_idx() as usize];
-            if cand.is_decoy {
+            if cand.is_decoy && !include_decoys {
                 continue;
             }
             let spec_id = output::format_spec_id(&spec_id_base, scan, ranks[hit], hit, multi_row);
@@ -747,6 +783,93 @@ fn competition_pairs(quantified: &[Quantified], params: &LfqParams, max_apex: f3
         .collect()
 }
 
+/// Theoretical isotope fractions of a candidate, normalised to sum 1.
+fn envelope_of(cand: &Candidate, n_iso: usize) -> Vec<f32> {
+    let formula = Formula::peptide(
+        cand.peptide
+            .residues
+            .iter()
+            .map(|aa| (aa.residue, aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta))),
+    );
+    let env = formula.envelope(n_iso);
+    let total: f64 = env.iter().sum();
+    if total > 0.0 {
+        env.iter().map(|v| (v / total) as f32).collect()
+    } else {
+        env.iter().map(|v| *v as f32).collect()
+    }
+}
+
+/// Isotope peaks in the envelope of the per-run PSM table.
+const TABLE_ENVELOPE_ISOTOPES: usize = 4;
+
+/// `--quant-dir`: write `<dir>/<stem>.cache` (the run's captured MS1, every
+/// FAIMS voltage) and `<dir>/<stem>.quant.parquet` (every rank-1 PSM of the
+/// run, targets and decoys, unfiltered) for each run.
+fn write_run_artifacts(
+    collector: &QuantCollector,
+    spectra: &[Spectrum],
+    queues: &[TopNQueue],
+    candidates: &[Candidate],
+    index: &SearchIndex,
+    quant_dir: &Path,
+) -> Result<(), String> {
+    std::fs::create_dir_all(quant_dir)
+        .map_err(|e| format!("create --quant-dir {}: {e}", quant_dir.display()))?;
+    let hits = select_rank1_all(collector, spectra, queues, candidates);
+    for (run_idx, run) in collector.runs.iter().enumerate() {
+        let Some(cache) = run.ms1.as_ref() else {
+            continue;
+        };
+        let ms1 = cache
+            .load()
+            .map_err(|e| format!("load MS1 scans for {}: {e}", run.stem))?;
+        let cache_path = quant_dir.join(format!("{}.cache", run.stem));
+        Ms1Cache::store_at(&ms1, &cache_path)
+            .map_err(|e| format!("write {}: {e}", cache_path.display()))?;
+        let mut rows: Vec<RunPsmRow> = Vec::new();
+        for hit in hits.iter().filter(|h| h.run_idx == run_idx) {
+            let spec = &spectra[hit.spec_idx];
+            let Some(rt_s) = spec.rt_seconds else {
+                continue;
+            };
+            let z = hit.psm.charge_used.max(1);
+            let peptidoform = peptidoform_of(hit.cand);
+            rows.push(RunPsmRow {
+                spec_id: hit.spec_id.clone(),
+                rt_s,
+                precursor_key: format!("{peptidoform}/{z}"),
+                peptidoform,
+                charge: z,
+                mz: hit.cand.peptide.mass() / z as f64 + PROTON,
+                is_decoy: hit.cand.is_decoy,
+                search_score: hit.psm.features.strong_score,
+                faims_cv: run
+                    .contexts
+                    .get(native_id(run, &spec.title))
+                    .and_then(|c| c.faims_cv),
+                envelope: envelope_of(hit.cand, TABLE_ENVELOPE_ISOTOPES),
+                proteins: proteins_of(&hit.psm, candidates, index)
+                    .into_iter()
+                    .map(|(a, ..)| a)
+                    .collect::<Vec<_>>()
+                    .join(";"),
+            });
+        }
+        let table_path = quant_dir.join(format!("{}.quant.parquet", run.stem));
+        write_run_quant_table(&table_path, &run.stem, &rows)
+            .map_err(|e| format!("write {}: {e}", table_path.display()))?;
+        eprintln!(
+            "quant: {}: wrote {} and {} ({} rank-1 PSMs, targets and decoys)",
+            run.stem,
+            cache_path.display(),
+            table_path.display(),
+            rows.len()
+        );
+    }
+    Ok(())
+}
+
 /// Run quantification over the search result and write the tables.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_quant(
@@ -761,6 +884,9 @@ pub(crate) fn run_quant(
 ) -> Result<(), String> {
     let s = &collector.settings;
     let t0 = std::time::Instant::now();
+    if let Some(dir) = &s.quant_dir {
+        write_run_artifacts(collector, spectra, queues, candidates, index, dir)?;
+    }
     let hits = select_hits(collector, spectra, queues, candidates, rescore);
     eprintln!(
         "quant: {} rank-1 target PSMs selected{} ({})",

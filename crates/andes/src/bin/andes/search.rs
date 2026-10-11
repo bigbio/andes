@@ -1197,23 +1197,26 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .map(QuantCollector::new);
     if let Some(q) = &quant {
         let s = &q.settings;
-        if is_mgf && (s.lfq || s.needs_ms3()) {
+        if is_mgf && (s.needs_ms1_series() || s.needs_ms3()) {
             return Err(
-                "--lfq and --tmt-level 3 need MS1/MS3 scans; MGF input carries MS2 only".into(),
+                "--lfq, --quant-dir and --tmt-level 3 need MS1/MS3 scans; MGF input carries MS2 only".into(),
             );
         }
-        if is_d && (s.lfq || s.needs_ms3()) {
-            return Err("--lfq and --tmt-level 3 are not yet supported for Bruker .d input".into());
-        }
-        if cli.chimeric && (s.lfq || s.needs_ms3()) {
+        if is_d && (s.needs_ms1_series() || s.needs_ms3()) {
             return Err(
-                "--lfq and --tmt-level 3 cannot be combined with --chimeric yet; \
+                "--lfq, --quant-dir and --tmt-level 3 are not yet supported for Bruker .d input"
+                    .into(),
+            );
+        }
+        if cli.chimeric && (s.needs_ms1_series() || s.needs_ms3()) {
+            return Err(
+                "--lfq, --quant-dir and --tmt-level 3 cannot be combined with --chimeric yet; \
                         reporter quantification at MS2 (`--tmt <plex>`) works with it"
                     .into(),
             );
         }
         if cli.glyco {
-            return Err("--tmt/--lfq are not available in --glyco mode".into());
+            return Err("--tmt/--lfq/--quant-dir are not available in --glyco mode".into());
         }
         if chimeric_active && s.plex.is_some() {
             // The chimeric read path streams MS1 for the co-isolation search
@@ -1228,7 +1231,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                  column stays empty)"
             );
         }
-        if !cli.rescore && !cli.rescore_native {
+        if !cli.rescore && !cli.rescore_native && (s.plex.is_some() || s.lfq) {
             eprintln!(
                 "WARN: --tmt/--lfq without --rescore or --rescore-native: every rank-1 target \
                  PSM is quantified; filter the tables by the q-values you compute downstream, \

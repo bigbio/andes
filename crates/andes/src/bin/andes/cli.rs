@@ -705,6 +705,14 @@ pub(crate) struct SearchArgs {
     #[arg(long = "lfq-feature-fdr", default_value = "0.05", value_parser = parse_unit_fraction)]
     pub(crate) lfq_feature_fdr: f64,
 
+    /// Directory for the per-run artifacts of multi-run quantification: for
+    /// each input file `<stem>.cache` (its MS1 scans, all FAIMS voltages) and
+    /// `<stem>.quant.parquet` (every rank-1 PSM, targets and decoys, with no
+    /// FDR filter). Implies MS1 capture; same inputs as `--lfq` (mzML or
+    /// Thermo `.raw`; not with `--chimeric`, MGF, `.d` or `--glyco`).
+    #[arg(long = "quant-dir", value_name = "DIR")]
+    pub(crate) quant_dir: Option<PathBuf>,
+
     /// PSM q-value threshold for quantification targets when rescoring runs.
     /// Default: the `--fdr` value (0.01).
     #[arg(long = "quant-fdr", hide = true, value_parser = parse_unit_fraction)]

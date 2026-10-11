@@ -135,6 +135,7 @@ pub struct QuantCfg {
     pub lfq_min_cosine: Option<f64>,
     pub lfq_feature_fdr: Option<f64>,
     pub quant_fdr: Option<f64>,
+    pub dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -380,6 +381,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         cfg.quant.lfq_feature_fdr
     );
     set_opt!("quant_fdr", quant_fdr, cfg.quant.quant_fdr);
+    set_opt!("quant_dir", quant_dir, cfg.quant.dir);
 
     // ── glyco ──
     set!("glyco", glyco, cfg.glyco.enabled);

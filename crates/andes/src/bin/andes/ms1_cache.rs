@@ -33,7 +33,6 @@ impl Ms1Cache {
 
     /// Writes a persistent run cache: magic, major and minor version, then the
     /// zstd-compressed body. The file appears at `path` only once complete.
-    #[allow(dead_code)]
     pub(super) fn store_at(index: &Ms1RunIndex, path: &Path) -> io::Result<()> {
         let tmp = path.with_extension("cache.partial");
         {

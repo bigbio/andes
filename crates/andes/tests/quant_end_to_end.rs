@@ -308,6 +308,126 @@ fn lfq_areas_track_the_designed_intensities() {
     assert_eq!(n, rows.len());
 }
 
+/// The LFQ fixture search; `extra` is appended.
+fn run_lfq_fixture(pin: &std::path::Path, qpx: &std::path::Path, extra: &[&str]) {
+    let spectrum = fixture("test-fixtures/lfq_synthetic.mzML.gz");
+    let database = fixture("test-fixtures/BSA.fasta");
+    let mut args = vec![
+        "--spectrum",
+        spectrum.to_str().unwrap(),
+        "--database",
+        database.to_str().unwrap(),
+        "--output-pin",
+        pin.to_str().unwrap(),
+        "--output-parquet",
+        qpx.to_str().unwrap(),
+        "--lfq",
+        "--lfq-feature-fdr",
+        "0.2",
+        "--threads",
+        "2",
+    ];
+    args.extend_from_slice(extra);
+    run_andes(&args);
+}
+
+/// SpecIds of a PIN file.
+fn pin_spec_ids(pin: &std::path::Path) -> std::collections::HashSet<String> {
+    std::fs::read_to_string(pin)
+        .unwrap()
+        .lines()
+        .skip(1)
+        .filter_map(|l| l.split('\t').next().map(String::from))
+        .collect()
+}
+
+#[test]
+fn quant_dir_writes_cache_and_table() {
+    let out = tempfile::tempdir().unwrap();
+    let qdir = out.path().join("q");
+    let pin = out.path().join("lfq.pin");
+    let qpx = out.path().join("lfq.idparquet");
+    run_lfq_fixture(&pin, &qpx, &["--quant-dir", qdir.to_str().unwrap()]);
+    let stem = "lfq_synthetic";
+    assert!(qdir.join(format!("{stem}.cache")).exists());
+    let (run, rows) =
+        output::run_quant_table::read_run_quant_table(&qdir.join(format!("{stem}.quant.parquet")))
+            .unwrap();
+    assert_eq!(run, stem);
+    assert!(
+        rows.iter().filter(|r| !r.is_decoy).count() >= 6,
+        "the six designed BSA peptides"
+    );
+    let pin_ids = pin_spec_ids(&pin);
+    for r in &rows {
+        assert!(pin_ids.contains(&r.spec_id), "{} not in PIN", r.spec_id);
+        assert!((r.envelope.iter().sum::<f32>() - 1.0).abs() < 1e-3);
+        assert_eq!(r.precursor_key, format!("{}/{}", r.peptidoform, r.charge));
+        assert!(r.rt_s > 0.0);
+    }
+}
+
+/// The real-data slice has rank-1 decoys: `--quant-dir` alone (no `--lfq`)
+/// writes them, unfiltered, with PIN SpecIds.
+#[test]
+fn quant_dir_table_contains_decoys() {
+    let out = tempfile::tempdir().unwrap();
+    let qdir = out.path().join("q");
+    let pin = out.path().join("slice.pin");
+    run_andes(&[
+        "--spectrum",
+        fixture("test-fixtures/astral_pxd070049_slice.mzML.gz")
+            .to_str()
+            .unwrap(),
+        "--database",
+        fixture("test-fixtures/ecoli.fasta").to_str().unwrap(),
+        "--output-pin",
+        pin.to_str().unwrap(),
+        "--quant-dir",
+        qdir.to_str().unwrap(),
+        "--threads",
+        "2",
+    ]);
+    let stem = "astral_pxd070049_slice";
+    assert!(qdir.join(format!("{stem}.cache")).exists());
+    let (run, rows) =
+        output::run_quant_table::read_run_quant_table(&qdir.join(format!("{stem}.quant.parquet")))
+            .unwrap();
+    assert_eq!(run, stem);
+    assert!(
+        rows.iter().any(|r| r.is_decoy),
+        "decoy PSMs must be written"
+    );
+    assert!(rows.iter().any(|r| !r.is_decoy));
+    let pin_ids = pin_spec_ids(&pin);
+    for r in &rows {
+        assert!(pin_ids.contains(&r.spec_id), "{} not in PIN", r.spec_id);
+        assert!((r.envelope.iter().sum::<f32>() - 1.0).abs() < 1e-3);
+    }
+}
+
+#[test]
+fn outputs_unchanged_without_quant_dir() {
+    let plain = tempfile::tempdir().unwrap();
+    let with = tempfile::tempdir().unwrap();
+    for (dir, quant_dir) in [(&plain, false), (&with, true)] {
+        let pin = dir.path().join("lfq.pin");
+        let qpx = dir.path().join("lfq.idparquet");
+        let qd = dir.path().join("q");
+        if quant_dir {
+            run_lfq_fixture(&pin, &qpx, &["--quant-dir", qd.to_str().unwrap()]);
+        } else {
+            run_lfq_fixture(&pin, &qpx, &[]);
+        }
+    }
+    for name in ["lfq.lfq.tsv", "lfq.lfq_features.tsv", "lfq.pin"] {
+        let a = std::fs::read(plain.path().join(name)).unwrap();
+        let b = std::fs::read(with.path().join(name)).unwrap();
+        assert!(!a.is_empty(), "{name} is empty");
+        assert_eq!(a, b, "{name} differs with --quant-dir");
+    }
+}
+
 #[test]
 fn lfq_rejects_mgf_input() {
     let dir = tempfile::tempdir().unwrap();

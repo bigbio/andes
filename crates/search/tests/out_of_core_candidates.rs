@@ -421,7 +421,10 @@ fn out_of_core_candidate_list_equals_the_enumeration() {
         let mut want: Vec<CandSig> = oracle.iter().map(cand_sig).collect();
         assert!(!want.is_empty(), "[{label}] empty fixture");
         if ordered {
-            assert_eq!(got, want, "[{label}] candidate list differs from the enumeration");
+            assert_eq!(
+                got, want,
+                "[{label}] candidate list differs from the enumeration"
+            );
         }
         got.sort();
         want.sort();

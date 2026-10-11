@@ -14,9 +14,12 @@
 //! Model. `y_i[j] = b_i + A * pi_i * g(t_j; t0, w) + noise`, with
 //! `g = exp(-(t - t0)^2 / (2 w^2))`, where:
 //!
-//! * `b_i` is the 20th percentile of `y_i` over the window;
+//! * `b_i` is the median of `y_i` over the window;
 //! * `sigma_i = 1.4826 * median|y_i[j+1] - y_i[j]| / sqrt(2)`, floored at
-//!   `1e-3 * max(y_i)` and at 1.0;
+//!   `0.5 * L`, where the detection limit `L` is the 5th percentile of all
+//!   centroid intensities, at any m/z, in the window's scans (1.0 when there
+//!   are none). A missing centroid means "below detection", so a trace with
+//!   no centroids is uncertain to about `L`, not to 0;
 //! * `pi` is the envelope scaled to sum to 1 over its 4 entries.
 //!
 //! Fit. Over `t0` in the scan RTs inside `[t_hat - 3 s, t_hat + 3 s]` (the
@@ -49,14 +52,14 @@ pub const MAX_ISOTOPES: usize = 4;
 pub const MIN_SCANS: usize = 5;
 /// Width grid, as multiples of `w_prior`.
 const WIDTH_GRID: [f64; 3] = [0.7, 1.0, 1.4];
-/// Quantile of a trace taken as its background.
-const BACKGROUND_QUANTILE: f64 = 0.2;
 /// Consistency factor of the median absolute deviation for a Gaussian.
 const MAD_SCALE: f64 = 1.4826;
-/// Noise floor relative to the trace maximum.
-const NOISE_REL_FLOOR: f64 = 1e-3;
-/// Absolute noise floor, intensity units.
-const NOISE_ABS_FLOOR: f64 = 1.0;
+/// Quantile of the window's centroid intensities taken as the detection limit.
+const DETECTION_QUANTILE: f64 = 0.05;
+/// Detection limit when the window has no centroids, intensity units.
+const DEFAULT_DETECTION_LIMIT: f64 = 1.0;
+/// Noise floor as a fraction of the detection limit.
+const NOISE_FLOOR_OF_LIMIT: f64 = 0.5;
 /// One-sided z threshold of the interference test.
 const EXCLUSION_Z: f64 = 3.0;
 /// Floor, seconds, on `s` and `w_prior` (a zero or non-finite value would
@@ -158,6 +161,7 @@ pub struct FitScratch {
     y: [Vec<f32>; MAX_ISOTOPES],
     m1: Vec<f32>,
     mz0: Vec<f64>,
+    intensities: Vec<f32>,
     work: Workspace,
 }
 
@@ -200,6 +204,7 @@ pub fn fit_with(
         return None;
     }
     let n_iso = p.n_isotopes.clamp(1, MAX_ISOTOPES);
+    let detection_limit = detection_limit(ms1, scans.clone(), &mut scratch.intensities);
     traces(
         ms1,
         scans,
@@ -215,6 +220,7 @@ pub fn fit_with(
         m1,
         mz0,
         work,
+        ..
     } = scratch;
     let mut ys: [&[f32]; MAX_ISOTOPES] = [&[]; MAX_ISOTOPES];
     for (slot, trace) in ys.iter_mut().zip(y.iter()).take(n_iso) {
@@ -228,8 +234,24 @@ pub fn fit_with(
         probe.mz,
         envelope,
         &prior,
+        detection_limit,
         work,
     ))
+}
+
+/// The 5th percentile (nearest rank) of every centroid intensity in `scans`,
+/// or 1.0 when they hold no centroid.
+fn detection_limit(ms1: &Ms1RunIndex, scans: std::ops::Range<usize>, buf: &mut Vec<f32>) -> f64 {
+    buf.clear();
+    for j in scans {
+        buf.extend(ms1.peaks(j).iter().map(|p| p.1));
+    }
+    if buf.is_empty() {
+        return DEFAULT_DETECTION_LIMIT;
+    }
+    let rank = (DETECTION_QUANTILE * (buf.len() - 1) as f64).round() as usize;
+    let (_, v, _) = buf.select_nth_unstable_by(rank, f32::total_cmp);
+    *v as f64
 }
 
 /// Fill the scratch traces over `scans`: RT, the isotope traces 0..`n_iso`,
@@ -273,7 +295,8 @@ fn traces(
 /// `rt` is ascending and non-empty; `traces[i]` is isotope `i` (1 to
 /// [`MAX_ISOTOPES`] traces), `m1` the M-1 trace and `mz0` the isotope-0
 /// centroid m/z (0.0 when none), all of `rt`'s length. `mu` is the probe's
-/// monoisotopic m/z. A degenerate envelope (non-finite entries, a
+/// monoisotopic m/z; `detection_limit` is `L` (see the module docs; a
+/// non-finite or non-positive value is replaced by 1.0). A degenerate envelope (non-finite entries, a
 /// non-positive sum or `pi_0 = 0`) is treated as `[1, 0, 0, 0]`; isotopes with
 /// `pi_i = 0` are not used.
 #[allow(clippy::too_many_arguments)]
@@ -285,17 +308,24 @@ pub fn fit_traces(
     mu: f64,
     envelope: &[f32; 4],
     prior: &Prior,
+    detection_limit: f64,
     work: &mut Workspace,
 ) -> Evidence {
     debug_assert!(!rt.is_empty() && !traces.is_empty() && traces.len() <= MAX_ISOTOPES);
     let n_iso = traces.len().min(MAX_ISOTOPES);
     let traces = &traces[..n_iso];
     let pi = normalised(envelope);
+    let limit = if detection_limit.is_finite() && detection_limit > 0.0 {
+        detection_limit
+    } else {
+        DEFAULT_DETECTION_LIMIT
+    };
+    let floor = NOISE_FLOOR_OF_LIMIT * limit;
     let mut b = [0.0f64; MAX_ISOTOPES];
     let mut sigma = [1.0f64; MAX_ISOTOPES];
     let mut mask = 0u8;
     for i in 0..n_iso {
-        (b[i], sigma[i]) = background_and_noise(traces[i], &mut work.sort);
+        (b[i], sigma[i]) = background_and_noise(traces[i], floor, &mut work.sort);
         if pi[i] > 0.0 {
             mask |= 1 << i;
         }
@@ -310,7 +340,7 @@ pub fn fit_traces(
         proj[i] = project(traces[i], b[i], g);
     }
     let mask = exclude_interfered(&proj, sgg, &pi, &sigma, mask);
-    let (m1_b, _) = background_and_noise(m1, &mut work.sort);
+    let (m1_b, _) = background_and_noise(m1, floor, &mut work.sort);
     let m1_proj = project(m1, m1_b, g);
     features(
         rt, traces, mz0, mu, prior, &pi, &sigma, &proj, sgg, m1_proj, mask, t0, w, g,
@@ -338,31 +368,32 @@ fn project(y: &[f32], b: f64, g: &[f64]) -> f64 {
     y.iter().zip(g).map(|(&v, &gj)| (v as f64 - b) * gj).sum()
 }
 
-/// The trace's background (20th percentile, nearest rank) and noise
-/// (`1.4826 * median|successive difference| / sqrt(2)`, floored at
-/// `1e-3 * max` and at 1.0).
-fn background_and_noise(y: &[f32], sort: &mut Vec<f32>) -> (f64, f64) {
+/// The trace's background (median over the window) and noise
+/// (`1.4826 * median|successive difference| / sqrt(2)`, floored at `floor`).
+fn background_and_noise(y: &[f32], floor: f64, sort: &mut Vec<f32>) -> (f64, f64) {
     if y.is_empty() {
-        return (0.0, NOISE_ABS_FLOOR);
+        return (0.0, floor);
     }
     sort.clear();
     sort.extend_from_slice(y);
     sort.sort_unstable_by(f32::total_cmp);
-    let rank = (BACKGROUND_QUANTILE * (sort.len() - 1) as f64).round() as usize;
-    let b = sort[rank] as f64;
-    let max = sort[sort.len() - 1] as f64;
+    let b = median_sorted(sort);
     sort.clear();
     sort.extend(y.windows(2).map(|w| (w[1] - w[0]).abs()));
     sort.sort_unstable_by(f32::total_cmp);
-    let mad = match sort.len() {
-        0 => 0.0,
-        n if n % 2 == 1 => sort[n / 2] as f64,
-        n => 0.5 * (sort[n / 2 - 1] as f64 + sort[n / 2] as f64),
-    };
-    let sigma = (MAD_SCALE * mad / std::f64::consts::SQRT_2)
-        .max(NOISE_REL_FLOOR * max)
-        .max(NOISE_ABS_FLOOR);
+    let mad = median_sorted(sort);
+    let sigma = (MAD_SCALE * mad / std::f64::consts::SQRT_2).max(floor);
     (b, sigma)
+}
+
+/// Median of an ascending slice (mean of the middle two for an even
+/// length; 0 when empty).
+fn median_sorted(v: &[f32]) -> f64 {
+    match v.len() {
+        0 => 0.0,
+        n if n % 2 == 1 => v[n / 2] as f64,
+        n => 0.5 * (v[n / 2 - 1] as f64 + v[n / 2] as f64),
+    }
 }
 
 /// The (t0, w) maximising `LLR - (t0 - t_hat)^2 / (2 s^2)` over the grid, with
@@ -509,7 +540,11 @@ fn features(
     let (num, den) = num_den(proj, sgg, pi, sigma, mask);
     let amplitude = (num / den).max(0.0);
     let amplitude_se = 1.0 / den.sqrt();
-    let llr = amplitude * num - 0.5 * amplitude * amplitude * den;
+    let llr = if amplitude > 0.0 {
+        amplitude * num - 0.5 * amplitude * amplitude * den
+    } else {
+        0.0
+    };
     let area = w * (2.0 * std::f64::consts::PI).sqrt();
 
     let (mut dot, mut hh, mut pp) = (0.0, 0.0, 0.0);
@@ -737,12 +772,10 @@ mod tests {
         assert!(e.envelope_cos > 0.99 && e.coherence > 0.9);
     }
 
-    /// Upper bound on the LLR of a noise-only window. The 20th-percentile
-    /// background sits about 0.8 noise SD below the mean of a Gaussian noise
-    /// trace, and the fit absorbs that offset as a small positive amplitude;
-    /// over 100 noise seeds of this run the null LLR has median 26, 95th
-    /// percentile 45 and maximum 59 at 1 s scan spacing (median 15 at 2 s).
-    const NULL_LLR_BOUND: f64 = 60.0;
+    /// Upper bound on the LLR of a noise-only window: 1.5 times the largest
+    /// null LLR measured over 100 noise seeds of the absent-precursor run at
+    /// 1 s and 2 s scan spacing (2.75).
+    const NULL_LLR_BOUND: f64 = 4.1;
 
     #[test]
     fn absent_precursor_has_small_llr() {
@@ -935,6 +968,34 @@ mod tests {
         let a = fit(&run, &pr, 2, &ENV, &params());
         assert!(a.is_some());
         assert_eq!(a, fit(&run, &pr, 2, &ENV, &params()));
+    }
+
+    #[test]
+    fn missing_isotope_trace_does_not_collapse_amplitude() {
+        let scans = synth_scans(&[(MZ, 2, ENV, 300.0, 5.0, AMP)], NOISE, 1.0, 5);
+        let m3 = MZ + 3.0 * ISOTOPE / 2.0;
+        let without_m3: Vec<Ms1Scan> = scans
+            .iter()
+            .cloned()
+            .map(|mut s| {
+                s.peaks.retain(|p| (p.0 - m3).abs() > 0.01);
+                s
+            })
+            .collect();
+        let pr = probe(MZ, 300.0, 6.0, 5.0);
+        let intact = fit(&Ms1RunIndex::new(scans), &pr, 2, &ENV, &params()).unwrap();
+        let missing = fit(&Ms1RunIndex::new(without_m3), &pr, 2, &ENV, &params()).unwrap();
+        eprintln!(
+            "missing M+3: A/A_true = {:.4} (intact {:.4}), llr = {:.0} (intact {:.0}), used = {:#06b}",
+            missing.amplitude / AMP,
+            intact.amplitude / AMP,
+            missing.llr,
+            intact.llr,
+            missing.isotopes_used
+        );
+        assert_finite(&missing);
+        assert!((missing.amplitude / AMP - 1.0).abs() < 0.15);
+        assert!(missing.llr > 0.5 * intact.llr && missing.llr < 2.0 * intact.llr);
     }
 
     #[test]

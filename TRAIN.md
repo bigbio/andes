@@ -15,8 +15,9 @@ intensity-rank and mass-error statistics of fragment ions. andes ships 17 models
 **instrument** (e.g. Astral, timsTOF) or **experiment class** (TMT/iTRAQ, phospho,
 immunopeptidomics, glyco …) is not well covered.
 
-Training is **bootstrap-supervised**: andes searches with a seed model, keeps PSMs at
-target-decoy q ≤ a threshold, and learns the statistics from them.
+Training is **bootstrap-supervised**: andes searches with a seed model (the same
+fragment-ion-index retrieval as `andes search`), keeps PSMs at target-decoy q ≤ a
+threshold, and learns the statistics from them.
 
 ## 2. Quick start
 

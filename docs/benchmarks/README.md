@@ -231,8 +231,9 @@ the curated 52-column glyco PIN (neutral; its flag has since been removed) did n
 andes either enumerates every candidate in each precursor window and scores them all, or takes
 a shortlist of the 100 candidates whose singly-charged b/y ions best match the spectrum (at
 least 3 matched) from a fragment-ion index. The index is the default for every search except
-`--glyco`, which keeps enumeration (high-res since #112, low-res since the index reached the
-in-RAM path's speed).
+`--glyco` (high-res since #112, low-res since the index reached the in-RAM path's speed);
+`--glyco` runs out-of-core and looks candidates up by backbone mass rather than through the
+fragment-ion index.
 
 **On low-res data only the most intense peaks may vote.** With every peak voting, 0.5 Da bins let
 noise swamp the count: forcing the index (2026-09) took TMT a05058 from 12,281 to 3,613 PSMs at 1%

@@ -6,9 +6,10 @@ use crate::cli::Cli;
 use model::{activation::ActivationMethod, InstrumentType, Spectrum};
 use search::{PreparedSearch, SearchIndex, SearchParams};
 
-/// Glyco mode: run glyco scoring over ALL accumulated spectra (using the
-/// `PreparedSearch` from the standard search) and write a separate `.glyco.pin`.
-/// The standard PIN is skipped by the caller.
+/// Glyco mode: run glyco scoring over ALL accumulated spectra and write a
+/// separate `.glyco.pin`. Candidates come from a sequon-only table materialised
+/// from the out-of-core index of `prepared`. The standard PIN is skipped by the
+/// caller.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_glyco(
     cli: &Cli,
@@ -149,9 +150,19 @@ pub(crate) fn run_glyco(
         // Single-file only: cross-file pairing is unsound (see guard above).
         hcd_pair: cli.glyco_hcd_pair && spectrum_paths.len() == 1,
     };
+    let t_table = std::time::Instant::now();
+    let table = search::glyco_search::GlycoCandidates::from_out_of_core(prepared);
+    eprintln!(
+        "[glyco] candidate table: {} N-X-S/T-bearing candidates from the out-of-core index \
+         ({} base peptides) [{:.2}s]",
+        table.candidates().len(),
+        prepared.mmap_index.as_ref().map_or(0, |mi| mi.len()),
+        t_table.elapsed().as_secs_f64()
+    );
     let pass1 = search::glyco_search::glyco_search_run(
         spectra_for_glyco,
         prepared,
+        &table,
         &glycan_list,
         glyco_tol_ppm,
         glyco_cfg,
@@ -197,7 +208,7 @@ pub(crate) fn run_glyco(
     output::populate_glyco_rt_features(
         spectra,
         &mut glyco_results,
-        &prepared.candidates,
+        table.candidates(),
         &glycan_list,
     );
 
@@ -205,7 +216,7 @@ pub(crate) fn run_glyco(
         &glyco_pin_path,
         spectra,
         &glyco_results,
-        &prepared.candidates,
+        table.candidates(),
         params,
         idx,
         cli.debug_glyco,

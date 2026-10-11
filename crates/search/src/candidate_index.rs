@@ -272,7 +272,8 @@ pub fn build_base_peptide_index<W: Write>(
 ///    targets deterministically, so they need not be hashed separately.
 /// 2. The search parameters that affect which base peptides are produced:
 ///    `enzyme`, `extra_enzymes`, `max_missed_cleavages`, `min_length`,
-///    `max_length`, and `decoy_prefix`.
+///    `max_length`, `num_tolerable_termini`, `require_nxst_sequon` and
+///    `decoy_prefix`.
 ///
 /// The hash uses Rust's stable [`DefaultHasher`].  It is **not** a
 /// cryptographic hash — collisions are possible (though extremely unlikely in
@@ -325,6 +326,9 @@ pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams) -> PathBuf {
     params.min_length.hash(&mut h);
     params.max_length.hash(&mut h);
     params.num_tolerable_termini.hash(&mut h);
+    // `--glyco-index-sequon-only` drops every span without a sequon from the
+    // index; such an index must never be reused by a search that needs them.
+    params.require_nxst_sequon.hash(&mut h);
 
     let digest = h.finish();
     std::env::temp_dir().join(format!("andes-candidx-{digest:016x}.bin"))

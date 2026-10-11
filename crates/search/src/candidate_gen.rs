@@ -116,9 +116,16 @@ pub fn all_protein_candidates_par(
 /// Kept in one place so `SearchParams::require_nxst_sequon` can never admit a
 /// different candidate set than the scorer would use.
 pub fn candidate_has_nxst_sequon(c: &Candidate) -> bool {
-    use andes_glyco::sequon::{boundary_nxst_site, has_nxst_sequon};
     let res: Vec<u8> = c.peptide.residues.iter().map(|aa| aa.residue).collect();
-    has_nxst_sequon(&res) || boundary_nxst_site(&res, c.peptide.post).is_some()
+    span_has_nxst_sequon(&res, c.peptide.post)
+}
+
+/// [`candidate_has_nxst_sequon`] on a bare residue span and the residue after
+/// it (`b'-'` at the protein C-terminus). Variable mods never change a residue
+/// letter, so every peptidoform of a span shares the span's answer.
+pub fn span_has_nxst_sequon(residues: &[u8], post: u8) -> bool {
+    use andes_glyco::sequon::{boundary_nxst_site, has_nxst_sequon};
+    has_nxst_sequon(residues) || boundary_nxst_site(residues, post).is_some()
 }
 
 fn enumerate_protein(

@@ -229,8 +229,22 @@ pub struct PreparedParts {
     aa_set_for_scoring: AminoAcidSet,
 }
 
+/// Which of `enumerate_protein`'s walks emits copy `copy` of `cand`'s span: the
+/// whole protein (pass 0) or, for a protein starting with Met, the walk over
+/// `sequence[1..]` (pass 1). Copy `k` of a span reachable from both walks is
+/// pass `k`; a span at offset 1 carrying the protein N-terminus flag is reached
+/// only by the Met-cleaved walk (the flag is set iff the span starts at that
+/// walk's offset), so it is pass 1 even though it has a single copy.
+fn enumeration_pass(cand: &Candidate, copy: u32) -> u32 {
+    if cand.is_protein_n_term && cand.start_offset_in_protein == 1 {
+        1
+    } else {
+        copy
+    }
+}
+
 /// Candidate indices sorted by exact neutral mass, ties by index.
-fn build_mass_order(candidates: &[Candidate]) -> Vec<u32> {
+pub(crate) fn build_mass_order(candidates: &[Candidate]) -> Vec<u32> {
     let mut order: Vec<u32> = (0..candidates.len() as u32).collect();
     order.par_sort_unstable_by(|&a, &b| {
         candidates[a as usize]
@@ -717,12 +731,8 @@ impl<'a> PreparedSearch<'a> {
         // walks it AGAIN at `seq_offset = 1` (N-terminal-Met cleavage). So RAM's
         // global order inside one protein is `[every pass-0 span, offset ASC] ++
         // [every pass-1 span, offset ASC]`. Tag each copy with its PASS index
-        // and sort on it, so the two walks land in RAM's block order:
-        //  - copy `k` of a span reachable from both walks is pass `k`;
-        //  - a span at `start_offset == 1` carrying `is_protein_n_term` is
-        //    reachable ONLY from the Met-cleaved walk (the flag is set iff the
-        //    span starts at `seq_offset`), so it is pass 1 even though it has a
-        //    single copy.
+        // (`enumeration_pass`) and sort on it, so the two walks land in RAM's
+        // block order.
         let mut tagged: Vec<(u32, u32, u32, u16, Candidate)> = Vec::new();
         let mut owned: Vec<Candidate>;
         for (rec, mult) in &records {
@@ -734,9 +744,8 @@ impl<'a> PreparedSearch<'a> {
                 }
             };
             for cand in forms.iter().filter(|c| in_any_window(c)) {
-                let met_clipped_only = cand.is_protein_n_term && cand.start_offset_in_protein == 1;
                 for k in 0..*mult {
-                    let pass = if met_clipped_only { 1 } else { k };
+                    let pass = enumeration_pass(cand, k);
                     tagged.push((
                         cand.protein_index as u32,
                         pass,
@@ -772,6 +781,83 @@ impl<'a> PreparedSearch<'a> {
             .expect("Mmap backing requires the global target bare-seq set");
         relabel_collision_decoys_with(&mut mmap_cands, target_bare_seqs);
         mmap_cands
+    }
+
+    /// Every candidate of the out-of-core index whose bare span passes `keep`,
+    /// in the order the in-RAM enumeration lists them, with collision decoys
+    /// relabelled against the targets of the WHOLE database (as
+    /// [`Self::prepare`] does). `keep` sees a span's residues and the residue
+    /// after it (`b'-'` at the protein C-terminus), so it cannot depend on
+    /// variable mods; every peptidoform of a kept span is returned.
+    ///
+    /// On the result, a candidate's position is monotone in its position in the
+    /// in-RAM `candidates`: any ordering or tie-break on candidate index sorts
+    /// the two lists the same way.
+    ///
+    /// # Panics
+    /// On the in-RAM backing, which has no out-of-core index.
+    pub fn out_of_core_candidates_where(
+        &self,
+        keep: impl Fn(&[u8], u8) -> bool + Sync,
+    ) -> Vec<Candidate> {
+        let mi = self
+            .mmap_index
+            .as_ref()
+            .expect("out_of_core_candidates_where needs the out-of-core index");
+        let db = self.idx;
+        let params = self.params;
+        let mut kept: Vec<crate::candidate_index::IndexRecord> = (0..mi.len())
+            .into_par_iter()
+            .filter_map(|i| {
+                let rec = mi.record_at(i);
+                let seq = &db.db.proteins.get(rec.protein_index as usize)?.sequence;
+                let start = rec.start_offset as usize;
+                let end = start + rec.length as usize;
+                let span = seq.get(start..end)?;
+                let post = seq.get(end).copied().unwrap_or(b'-');
+                keep(span, post).then_some(rec)
+            })
+            .collect();
+        // Identical copies of a span (the N-terminal-Met re-enumeration) share a
+        // key; their count is the in-RAM enumeration multiplicity.
+        kept.par_sort_unstable_by_key(base_record_key);
+        let mut records: Vec<(crate::candidate_index::IndexRecord, u32)> = Vec::new();
+        for rec in kept {
+            match records.last_mut() {
+                Some((last, n)) if base_record_key(last) == base_record_key(&rec) => *n += 1,
+                _ => records.push((rec, 1)),
+            }
+        }
+        // Same ordering as `expand_mmap_window_candidates`: protein, enumeration
+        // pass, start, length; a span's peptidoforms keep their expansion order
+        // because the sort is stable and records arrive in key order.
+        let mut tagged: Vec<(u32, u32, u32, u16, Candidate)> = records
+            .par_iter()
+            .flat_map_iter(|(rec, mult)| {
+                let mult = *mult;
+                expand_base_record(db, params, rec)
+                    .into_iter()
+                    .flat_map(move |cand| {
+                        (0..mult).map(move |k| {
+                            (
+                                cand.protein_index as u32,
+                                enumeration_pass(&cand, k),
+                                cand.start_offset_in_protein as u32,
+                                cand.peptide.residues.len() as u16,
+                                cand.clone(),
+                            )
+                        })
+                    })
+            })
+            .collect();
+        tagged.par_sort_by(|a, b| (a.0, a.1, a.2, a.3).cmp(&(b.0, b.1, b.2, b.3)));
+        let mut cands: Vec<Candidate> = tagged.into_par_iter().map(|t| t.4).collect();
+        let target_bare_seqs = self
+            .mmap_target_bare_seqs
+            .as_ref()
+            .expect("Mmap backing requires the global target bare-seq set");
+        relabel_collision_decoys_with(&mut cands, target_bare_seqs);
+        cands
     }
 
     /// The peptide of the candidate at GLOBAL index `global_idx`: an entry of

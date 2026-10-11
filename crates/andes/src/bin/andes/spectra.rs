@@ -356,15 +356,13 @@ pub(crate) fn run_precursor_calibration(
 /// Without this, a large database (a whole human proteome at three missed cleavages)
 /// runs for half an hour and is then killed by the OOM killer with no message from
 /// andes at all — the user sees only a dead process and no output. Measured on a
-/// 20k-protein human FASTA: ~0.65 KB resident per candidate for a plain search and
-/// ~0.92 KB under `--glyco`, which holds per-spectrum glyco state on top.
+/// 20k-protein human FASTA: ~0.65 KB resident per candidate.
 ///
 /// This warns rather than aborts: the estimate is a linear fit, machines differ, and
 /// refusing to start a run that would have succeeded is worse than a noisy warning.
 /// Only Linux exposes the memory figures cheaply; elsewhere the check is skipped.
-pub(crate) fn warn_if_index_will_not_fit(n_candidates: usize, glyco: bool) {
-    const BYTES_PER_CANDIDATE_PLAIN: f64 = 665.0;
-    const BYTES_PER_CANDIDATE_GLYCO: f64 = 940.0;
+pub(crate) fn warn_if_index_will_not_fit(n_candidates: usize) {
+    const BYTES_PER_CANDIDATE: f64 = 665.0;
 
     // Shared with the `--candidate-index auto` decision, so both compare against
     // `min(node MemAvailable, cgroup limit)` rather than the node's free memory.
@@ -372,12 +370,7 @@ pub(crate) fn warn_if_index_will_not_fit(n_candidates: usize, glyco: bool) {
         return;
     };
 
-    let per = if glyco {
-        BYTES_PER_CANDIDATE_GLYCO
-    } else {
-        BYTES_PER_CANDIDATE_PLAIN
-    };
-    let estimate = (n_candidates as f64 * per) as u64;
+    let estimate = (n_candidates as f64 * BYTES_PER_CANDIDATE) as u64;
     if estimate <= available.bytes {
         return;
     }
@@ -391,17 +384,7 @@ pub(crate) fn warn_if_index_will_not_fit(n_candidates: usize, glyco: bool) {
         gb(available.bytes),
         available.source.describe()
     );
-    if glyco {
-        eprintln!(
-            "  --glyco cannot use the out-of-core index yet (--candidate-index mmap is \
-             rejected in glyco mode), so reduce the search space instead: pass \
-             --max-missed-cleavages 1 or 2 (glyco defaults to 3), restrict the FASTA to \
-             the proteins of interest, or split the database and merge the .glyco.pin \
-             files afterwards."
-        );
-    } else {
-        eprintln!("  Re-run with --candidate-index mmap to page the index from disk instead.");
-    }
+    eprintln!("  Re-run with --candidate-index mmap to page the index from disk instead.");
 }
 
 /// Peek the spectrum file and return the dominant

@@ -82,7 +82,7 @@ pub(crate) enum FragmentIndexFlag {
 pub(crate) enum CandidateIndexFlag {
     /// Pick automatically (default): out-of-core mmap with fragment-ion retrieval
     /// (`--fragment-index off`: RAM unless the in-RAM index would not fit
-    /// available memory). `--glyco` stays on RAM.
+    /// available memory). `--glyco` always runs out-of-core.
     #[default]
     Auto,
     /// Force the in-RAM candidate index (advanced; may OOM on very large mod

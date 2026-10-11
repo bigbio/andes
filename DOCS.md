@@ -90,7 +90,7 @@ phospho, 164 s against 5,954 s. Low-res searches use the index too, but
 only the 150 most intense peaks of each spectrum vote: with every peak voting, the 0.5 Da bins let
 noise swamp the count (TMT 12,281 -> 4,368 PSMs at 1%). Capped, the index matches the in-RAM
 enumeration (TMT 12,347 vs 12,281 PSMs at 1%, UPS1 15,848 vs 15,838) at the same CPU and wall time
-in less than half the memory (TMT 1.7 vs 5.9 GB). `--glyco` keeps enumeration; `--chimeric` and `--refine` run on either path. The engine prints its choice; `--candidate-index ram` or
+in less than half the memory (TMT 1.7 vs 5.9 GB). `--glyco` looks its candidates up by backbone mass in its own sequon-only table, built from the out-of-core index; `--chimeric` and `--refine` run on either path. The engine prints its choice; `--candidate-index ram` or
 `--fragment-index off` restore enumeration
 ([measurements](docs/benchmarks/README.md#choosing-the-retrieval-strategy)).
 

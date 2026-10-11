@@ -697,3 +697,104 @@ fn match_spectra_out_of_core_keeps_input_order_and_finds_the_enumeration_top_hit
         );
     }
 }
+
+/// The glyco candidate table built from the out-of-core index must be the
+/// in-RAM candidate list restricted to N-X-S/T-bearing candidates: the same
+/// candidates (peptidoform, flanks, protein, offset, terminal and decoy flags),
+/// in the same relative order.
+#[test]
+fn glyco_table_from_the_index_is_the_ram_sequon_subset_in_order() {
+    use search::candidate_gen::candidate_has_nxst_sequon;
+    use search::glyco_search::GlycoCandidates;
+    // Internal sequons (NGS, NLT), a sequon completed by the next residue
+    // (...KAEN | TK: N-X at the peptide end, S/T after it), Met-initial proteins
+    // (two enumeration walks), an oxidisable M next to a sequon, and a shared
+    // peptide in two proteins.
+    let target = ProteinDb {
+        proteins: vec![
+            Protein {
+                accession: "G1".into(),
+                description: "glyco one".into(),
+                sequence: b"MNGSPEKLLNLTMRAENTKWVNASGRPEPNKTGK".to_vec(),
+            },
+            Protein {
+                accession: "G2".into(),
+                description: "glyco two".into(),
+                sequence: b"MKNMSYKAANVTRLLNLTMRSTNGK".to_vec(),
+            },
+            Protein {
+                accession: "G3".into(),
+                description: "no sequon".into(),
+                sequence: b"AAGTLLDRSHAREDPEPKGGGR".to_vec(),
+            },
+        ],
+    };
+    let idx = SearchIndex::from_target_db(&target, "XXX");
+    let ox_m = Modification {
+        name: "Oxidation".to_string(),
+        mass_delta: 15.99491,
+        residue: ResidueSpec::Specific(b'M'),
+        location: ModLocation::Anywhere,
+        fixed: false,
+        accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
+    };
+    let aa_set = AminoAcidSetBuilder::new_standard()
+        .add_variable_mod(ox_m)
+        .build()
+        .unwrap();
+    let mut params = SearchParams::default_tryptic(aa_set);
+    params.min_length = 3;
+    params.max_missed_cleavages = 3;
+    params.max_variable_mods_per_peptide = 2;
+    let scorer = make_scorer(0.05);
+
+    let ram = PreparedSearch::prepare(&idx, &params, &scorer, 0.05, "XXX");
+    let expected: Vec<&Candidate> = ram
+        .candidates
+        .iter()
+        .filter(|c| candidate_has_nxst_sequon(c))
+        .collect();
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mmap = PreparedSearch::prepare_mmap(&idx, &params, &scorer, 0.05, "XXX", tmp.path())
+        .expect("prepare_mmap");
+    let table = GlycoCandidates::from_out_of_core(&mmap);
+
+    type Sig = (usize, usize, Vec<(u8, i64)>, u8, u8, bool, bool, bool);
+    let sig = |c: &Candidate| -> Sig {
+        (
+            c.protein_index,
+            c.start_offset_in_protein,
+            c.peptide
+                .residues
+                .iter()
+                .map(|a| {
+                    let d = a.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
+                    (a.residue, (d * 1e5).round() as i64)
+                })
+                .collect(),
+            c.peptide.pre,
+            c.peptide.post,
+            c.is_decoy,
+            c.is_protein_n_term,
+            c.is_protein_c_term,
+        )
+    };
+    let want: Vec<Sig> = expected.iter().map(|c| sig(c)).collect();
+    let got: Vec<Sig> = table.candidates().iter().map(sig).collect();
+
+    // Not vacuous: targets and decoys, a modified form, a flank-completed sequon,
+    // and the Met-cleaved walk are all represented.
+    assert!(want.iter().any(|s| s.5) && want.iter().any(|s| !s.5));
+    assert!(want.iter().any(|s| s.2.iter().any(|&(_, d)| d != 0)));
+    assert!(expected.iter().any(|c| {
+        let r: Vec<u8> = c.peptide.residues.iter().map(|a| a.residue).collect();
+        !andes_glyco::sequon::has_nxst_sequon(&r)
+    }));
+    assert!(expected
+        .iter()
+        .any(|c| c.is_protein_n_term && c.start_offset_in_protein == 1));
+    assert!(want.len() < ram.candidates.len());
+    assert_eq!(got, want);
+}

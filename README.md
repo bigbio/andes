@@ -80,7 +80,7 @@ flowchart TD
 2. **Build candidates**: digest the FASTA and generate decoys. The candidate index goes
    out-of-core (cached in the system temp directory) so candidates can be retrieved by the
    fragment-ion index; on low-res data only the 150 most intense peaks of each spectrum vote.
-   `--glyco` keeps an in-RAM candidate index.
+   `--glyco` builds its own sequon-only candidate table from the same out-of-core index.
 3. **Score**: low-res by the generating-function rank score, high-res by the fused strong
    score, plus GBDT fragment-intensity features. High-res searches score only the 100 candidates
    whose fragment ions best match the spectrum (Astral: +22% PSMs at an equal true FDP; phospho:
@@ -269,9 +269,9 @@ On one pGlyco2 mouse-liver fraction (PXD005553) andes reports 6,922–6,959 glyc
 identifications, in 6 minutes on 8 threads ([`docs/benchmarks/`](docs/benchmarks/README.md)).
 `--glyco-peptide-first` finds ~2% more at ~13x the run time.
 
-Memory: the glyco index stays in RAM (`--candidate-index mmap` is rejected). A whole human
-proteome (20,411 proteins) peaks at ~17.3 GB with `--glyco`, so plan for ~20 GB;
-`--max-missed-cleavages 1` or `2` saves ~4.4 GB. All flags:
+Memory: `--glyco` runs on the out-of-core candidate index and holds in memory only the
+candidates that carry an N-X-S/T sequon (3.2 of 28.0 million on the mouse fraction above), so
+that run peaks at 4.5 GB with output identical to the former in-RAM path (20.0 GB). All flags:
 [DOCS.md §9](DOCS.md#9-glycopeptide-search-experimental--advanced-knobs).
 
 ## Reading Thermo `.raw` files

@@ -98,7 +98,7 @@ pub struct GlycoConfig {
     /// Mass-driven full-glycan-list DB branch (the CLI default; `false` with
     /// `--glyco-peptide-first`). Every glycan in the list is enumerated as
     /// `backbone = precursor − glycan` and matched to peptides by mass (phase-1
-    /// bucket index) instead of enumerating peptides by b/y ions through the
+    /// mass lookup) instead of enumerating peptides by b/y ions through the
     /// peptide-first fragment index. The core-Y==0 prefilter still gates spurious
     /// backbones.
     pub full_glycan_db: bool,
@@ -116,7 +116,6 @@ pub struct GlycoConfig {
 
 use andes_glyco::hybrid::{db_branch, BackboneHit, Source};
 use andes_glyco::oxonium::{oxonium_gate, sialic_consistency, OXONIUM_GATE_MIN_FRAC};
-use andes_glyco::sequon::has_nxst_sequon;
 
 use crate::glyco_fragment_index::FragmentIndex;
 
@@ -390,15 +389,57 @@ fn dedup_backbone_hits(mut all_backbone: Vec<BackboneHit>, tol_ppm: f64) -> Vec<
     deduped
 }
 
+/// The glyco search's candidate universe: every candidate peptidoform whose
+/// span carries an N-X-S/T sequon, internal or completed by the residue after
+/// the peptide ([`crate::candidate_gen::span_has_nxst_sequon`]). Glyco scoring
+/// reads no other candidate, so it owns this table instead of the whole
+/// database's.
+///
+/// Candidates are listed in the in-RAM enumeration order, so a slot here sorts
+/// like the same candidate's slot in the whole-database list and every
+/// candidate-index tie-break resolves the same way. The emitted
+/// `PsmMatch::candidate_idxs` index into [`Self::candidates`].
+pub struct GlycoCandidates {
+    candidates: Vec<crate::candidate_gen::Candidate>,
+    /// Indices into `candidates` sorted by exact neutral mass, ties by index.
+    mass_order: Vec<u32>,
+}
+
+impl GlycoCandidates {
+    /// Materialise the table from the out-of-core candidate index of `prepared`.
+    pub fn from_out_of_core(prepared: &PreparedSearch<'_>) -> Self {
+        Self::from_candidates(
+            prepared.out_of_core_candidates_where(crate::candidate_gen::span_has_nxst_sequon),
+        )
+    }
+
+    /// The table over `candidates`, which must all carry a sequon.
+    pub fn from_candidates(candidates: Vec<crate::candidate_gen::Candidate>) -> Self {
+        debug_assert!(candidates
+            .iter()
+            .all(crate::candidate_gen::candidate_has_nxst_sequon));
+        let mass_order = crate::match_engine::build_mass_order(&candidates);
+        Self {
+            candidates,
+            mass_order,
+        }
+    }
+
+    /// The candidates `PsmMatch::candidate_idxs` resolve against.
+    pub fn candidates(&self) -> &[crate::candidate_gen::Candidate] {
+        &self.candidates
+    }
+}
+
 /// Per-run context needed to score any single spectrum's glyco candidates:
 /// the search parameters, scorers, indexes and settings that every spectrum
 /// shares, borrowed for the duration of the run.
 pub struct GlycoScoreCtx<'a> {
     pub params: &'a crate::search_params::SearchParams,
     pub scorer: &'a scoring_crate::scoring::RankScorer,
+    /// The run's [`GlycoCandidates`]: every candidate carries an N-X-S/T sequon.
     pub candidates: &'a [crate::candidate_gen::Candidate],
-    pub bucket_index: &'a std::collections::BTreeMap<i32, Vec<usize>>,
-    /// `PreparedSearch::mass_order`: candidate indices by exact mass.
+    /// [`GlycoCandidates::mass_order`]: candidate indices by exact mass.
     pub mass_order: &'a [u32],
     pub fragment_tolerance_da: f64,
     pub frag_index: &'a FragmentIndex,
@@ -425,9 +466,6 @@ pub struct GlycoScoreCtx<'a> {
     /// see [`isotope_window_for`].
     pub isotope_error_override: Option<std::ops::RangeInclusive<i8>>,
     pub isotope_error_override_mask: Option<&'a [bool]>,
-    /// Per-candidate N-X-S/T sequon membership (indexed by candidate slot),
-    /// precomputed once so the scoring hot loop is an O(1) lookup.
-    pub sequon_membership: &'a [bool],
     /// B1: all spectra of the run, so an ETD spectrum can read its paired HCD
     /// partner's peaks for GENERATION. Always the full run slice; pairing is
     /// gated by `hcd_pair_on` + a `Some` entry in `hcd_partner`, not by this.
@@ -461,7 +499,6 @@ pub struct GlycoCtxOwned {
     hcd_pair_on: bool,
     features_collapse: bool,
     features_enumerated: bool,
-    sequon_membership: Vec<bool>,
 }
 
 impl GlycoCtxOwned {
@@ -531,28 +568,6 @@ impl GlycoCtxOwned {
         // truncation drops — the candidate-generation ceiling — without a brute force.
         // Only build the (expensive) index when the peptide-first path is on; an
         // empty index is a no-op query otherwise (CodeRabbit: avoid the wasted build).
-        // Per-candidate N-X-S/T sequon membership, computed ONCE. Both the
-        // peptide-first fragment index (below) and the per-(spectrum,backbone,
-        // candidate) scoring loop filter on this predicate; recomputing the
-        // `residues → Vec<u8> → has_nxst_sequon` scan in the hot loop was pure
-        // waste (it depends only on the candidate). O(1) slot lookup instead.
-        // Also treat a peptide whose N-X-S/T sequon is completed by the C-terminal
-        // FLANKING residue (…N-X | S/T-…) as a glyco candidate. Always on:
-        // validated at +27 backbone-correct @1%, decoy-safe. A sequon
-        // completed by the following residue is a real glycosite; excluding it was a
-        // candidate-generation hole, not a tunable preference.
-        let sequon_boundary_on = true;
-        let sequon_membership: Vec<bool> = candidates
-            .iter()
-            .map(|c| {
-                if sequon_boundary_on {
-                    crate::candidate_gen::candidate_has_nxst_sequon(c)
-                } else {
-                    let res: Vec<u8> = c.peptide.residues.iter().map(|aa| aa.residue).collect();
-                    has_nxst_sequon(&res)
-                }
-            })
-            .collect();
         // CHARGE-AWARE peptide-first index (see `GLYCO_PF_CHARGE`).
         let pf_charge: u8 = GLYCO_PF_CHARGE;
         // the full-glycan-list branch never calls `frag_index.query` (the
@@ -568,18 +583,11 @@ impl GlycoCtxOwned {
             let seq_entries: Vec<(u32, &model::peptide::Peptide)> = candidates
                 .iter()
                 .enumerate()
-                .filter_map(|(i, c)| {
-                    if sequon_membership[i] {
-                        Some((i as u32, &c.peptide))
-                    } else {
-                        None
-                    }
-                })
+                .map(|(i, c)| (i as u32, &c.peptide))
                 .collect();
-            // Memory guard (Codex re-review #3): glyco is forced to the in-RAM
-            // candidate index, and the fragment index adds ~24 B/ion of postings.
-            // Warn on very large sequon sets so an OOM isn't silent (a smaller search
-            // space or an out-of-core index is the fix for those).
+            // Memory guard: the fragment index adds ~24 B/ion of postings on top
+            // of the candidate table. Warn on very large sequon sets so an OOM
+            // isn't silent.
             let est_mb = seq_entries.len().saturating_mul(20 * 24) / 1_000_000;
             if seq_entries.len() > 3_000_000 {
                 eprintln!(
@@ -652,17 +660,17 @@ impl GlycoCtxOwned {
             hcd_pair_on,
             features_collapse,
             features_enumerated,
-            sequon_membership,
         }
     }
 
     /// Borrow a [`GlycoScoreCtx`] referencing this owned state plus the
-    /// per-call `prepared`/`glycan_list`/`tol_ppm` — the same values
+    /// per-call `prepared`/`table`/`glycan_list`/`tol_ppm` — the same values
     /// `glyco_search_run` closes over.
     #[allow(clippy::too_many_arguments)]
     pub fn as_ctx<'a>(
         &'a self,
         prepared: &'a PreparedSearch<'_>,
+        table: &'a GlycoCandidates,
         glycan_list: &'a [GlycanComp],
         tol_ppm: f64,
         all_spectra: &'a [Spectrum],
@@ -671,9 +679,8 @@ impl GlycoCtxOwned {
         GlycoScoreCtx {
             params: prepared.params,
             scorer: prepared.scorer,
-            candidates: &prepared.candidates,
-            bucket_index: &prepared.bucket_index,
-            mass_order: prepared.mass_order(),
+            candidates: &table.candidates,
+            mass_order: &table.mass_order,
             fragment_tolerance_da: prepared.fragment_tolerance_da,
             frag_index: &self.frag_index,
             glycan_sorted: &self.glycan_sorted,
@@ -692,7 +699,6 @@ impl GlycoCtxOwned {
             isotope_error_default: prepared.params.isotope_error_range.clone(),
             isotope_error_override: self.isotope_error_override.clone(),
             isotope_error_override_mask: self.isotope_error_override_mask.as_deref(),
-            sequon_membership: &self.sequon_membership,
             all_spectra,
             hcd_partner,
         }
@@ -1324,11 +1330,6 @@ fn score_spectrum_glyco(
             let cand_residue_mass = cand.peptide.mass() - H2O;
 
             if (cand_residue_mass - bb_residue).abs() > tol_da {
-                continue;
-            }
-
-            // O(1) precomputed sequon lookup (see GlycoCtxOwned::build).
-            if !ctx.sequon_membership[cand_slot] {
                 continue;
             }
 
@@ -2193,11 +2194,12 @@ fn build_hcd_partners(spectra: &[Spectrum]) -> Vec<Option<usize>> {
 pub fn glyco_search_run(
     spectra: &[Spectrum],
     prepared: &PreparedSearch<'_>,
+    table: &GlycoCandidates,
     glycan_list: &[GlycanComp],
     tol_ppm: f64,
     cfg: GlycoConfig,
 ) -> Vec<GlycoSpectrumResult> {
-    let candidates = &prepared.candidates;
+    let candidates = &table.candidates;
     let fragment_tolerance_da = prepared.fragment_tolerance_da;
     // B1: pair each ETD spectrum to its HCD partner (same precursor) before scoring.
     let hcd_partner: Vec<Option<usize>> = if cfg.hcd_pair {
@@ -2214,7 +2216,7 @@ pub fn glyco_search_run(
         cfg.clone(),
         tol_ppm,
     );
-    let ctx = owned.as_ctx(prepared, glycan_list, tol_ppm, spectra, &hcd_partner);
+    let ctx = owned.as_ctx(prepared, table, glycan_list, tol_ppm, spectra, &hcd_partner);
 
     let out: Vec<GlycoSpectrumResult> = spectra
         .par_iter()

@@ -143,13 +143,10 @@ pub struct SearchParams {
     pub candidate_index: CandidateIndexMode,
     /// Enumerate only peptides carrying an N-X-S/T sequon (internal, or completed
     /// by the following residue) into the candidate index. `--glyco` scoring
-    /// never consults any other candidate — the peptide-first fragment index and
-    /// the backbone→candidate loop both gate on the same sequon membership — so
-    /// on the glyco path this shrinks the in-RAM index (~10x on a mouse proteome at
-    /// 3 missed cleavages) and leaves rows, peptides and labels unchanged; a few
-    /// per-spectrum candidate-distribution features (`RawScore`,
-    /// `CandidateRankEntropy`) can move on ~0.2% of rows. Off by default;
-    /// `--glyco-index-sequon-only`.
+    /// never consults any other candidate (its candidate table holds only these),
+    /// so on the glyco path this only shrinks the out-of-core index the table is
+    /// built from. Collision decoys are then relabelled against sequon-bearing
+    /// targets only. Off by default; `--glyco-index-sequon-only`.
     /// Not for the standard peptide search, whose scoring reads every candidate.
     pub require_nxst_sequon: bool,
 }

@@ -64,8 +64,8 @@ pub(crate) struct RetrievalChoice {
 ///
 /// The index is not used in RAM: the in-RAM search keeps its own candidate
 /// pruning and is the faster path whenever the candidate index fits.
-/// `--glyco` keeps enumeration because its driver derives candidates from the
-/// full in-RAM candidate list rather than a per-spectrum shortlist.
+/// `--glyco` does not use it: its driver looks candidates up by backbone mass
+/// (precursor minus glycan) in its own sequon-only candidate table.
 pub(crate) fn retrieval_choice(
     out_of_core: bool,
     fragment_tol: model::tolerance::Tolerance,
@@ -84,7 +84,7 @@ pub(crate) fn retrieval_choice(
             refused_because: (flag == FragmentIndexFlag::On).then_some(if !out_of_core {
                 "the candidate index fits in RAM"
             } else {
-                "--glyco reads the full candidate list"
+                "--glyco looks candidates up by backbone mass"
             }),
         };
     }
@@ -746,15 +746,21 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .expect("build_global");
     });
     params.candidate_index = match cli.candidate_index {
+        CandidateIndexFlag::Ram if cli.glyco => {
+            return Err("--candidate-index ram is not supported with --glyco: the glyco \
+                        driver builds its sequon-only candidate table from the out-of-core \
+                        index"
+                .into());
+        }
         CandidateIndexFlag::Ram => search::CandidateIndexMode::Ram,
         CandidateIndexFlag::Mmap => search::CandidateIndexMode::Mmap,
         CandidateIndexFlag::Auto => {
-            // mmap is not compatible with the glyco driver (handled below),
-            // so `auto` keeps it on RAM.
             let high_res_fragments =
                 search::fragment_index::is_high_resolution(scorer.feature_match_tolerance());
             if cli.glyco {
-                search::CandidateIndexMode::Ram
+                // The glyco driver materialises only the N-X-S/T-bearing
+                // candidates, from the out-of-core index.
+                search::CandidateIndexMode::Mmap
             } else if cli.fragment_index != FragmentIndexFlag::Off {
                 // Every non-glyco search retrieves candidates with the fragment-ion
                 // index on the out-of-core path. High-res: +23% PSMs on Astral at
@@ -806,12 +812,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     // The out-of-core (`Mmap`) candidate path materializes candidates lazily and
-    // only syncs them into `prepared.candidates` AFTER the scan. The glyco driver
-    // reads `prepared.candidates` / `bucket_index` DURING scanning, so it is not
-    // supported together with `--candidate-index mmap` (fail loud rather than
-    // silently produce wrong results). The refinement cascade runs after the
-    // sync and reads only the candidates its Pass-1 PSMs reference, and the
-    // chimeric Pass 2 resolves its candidates on either backing.
+    // only syncs them into `prepared.candidates` AFTER the scan. The refinement
+    // cascade runs after the sync and reads only the candidates its Pass-1 PSMs
+    // reference, the chimeric Pass 2 resolves its candidates on either backing,
+    // and the glyco driver materialises its own sequon-only table from the index.
     // Retrieval strategy for the out-of-core path (issue #76): chosen by
     // `retrieval_choice` and reported once; `--fragment-index` overrides it.
     let choice = retrieval_choice(
@@ -843,11 +847,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    if params.candidate_index == search::CandidateIndexMode::Mmap && cli.glyco {
-        return Err("--candidate-index mmap is not yet compatible with --glyco \
-                    (glyco_search_run needs the in-RAM candidate index/bucket_index)"
-            .into());
-    }
     // --glyco-hcd-pair only takes effect inside the glyco driver; without --glyco
     // it is silently inert, which would mislead a user who set it on purpose (code
     // review). Warn rather than error so it stays a no-op knob outside glyco mode.
@@ -1176,7 +1175,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 prepared.candidates.len(),
                 prepared.bucket_index.len(),
             );
-            warn_if_index_will_not_fit(prepared.candidates.len(), cli.glyco);
+            warn_if_index_will_not_fit(prepared.candidates.len());
         }
         search::CandidateIndexMode::Mmap => eprintln!(
             "PreparedSearch: out-of-core candidate-index: mmap \
@@ -1758,8 +1757,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 7a. Glyco mode: run glyco scoring and write .glyco.pin, then return ──
     // When --glyco is active, we run the glyco-PSM scoring driver over ALL
-    // accumulated spectra (using the PreparedSearch from the standard search)
-    // and write a separate `.glyco.pin` file.  The standard PIN is skipped.
+    // accumulated spectra (candidates from a sequon-only table built from the
+    // out-of-core index) and write a separate `.glyco.pin` file.  The standard PIN is skipped.
     if cli.glyco {
         run_glyco(
             &cli,
@@ -2199,15 +2198,15 @@ mod retrieval_choice_tests {
     }
 
     #[test]
-    fn modes_that_read_the_full_candidate_list_keep_enumeration() {
+    fn glyco_never_uses_the_fragment_index() {
         for flag in [FragmentIndexFlag::Auto, FragmentIndexFlag::On] {
             let c = retrieval_choice(true, HI, true, flag);
-            assert!(!c.use_index, "glyco must keep enumeration");
+            assert!(!c.use_index, "glyco looks candidates up by backbone mass");
         }
         let c = retrieval_choice(true, HI, true, FragmentIndexFlag::On);
         assert_eq!(
             c.refused_because,
-            Some("--glyco reads the full candidate list")
+            Some("--glyco looks candidates up by backbone mass")
         );
     }
 

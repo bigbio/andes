@@ -732,8 +732,7 @@ impl<'a> PreparedSearch<'a> {
                     windows
                         .par_iter()
                         .fold(FxHashMap::default, |mut m, &(lo, hi)| {
-                            for (rec, _) in base_records_for_nominal_window(mi, params, lo, hi)
-                            {
+                            for (rec, _) in base_records_for_nominal_window(mi, params, lo, hi) {
                                 m.entry(base_record_key(&rec)).or_insert(rec);
                             }
                             m
@@ -862,8 +861,9 @@ impl<'a> PreparedSearch<'a> {
                         crate::search_params::FRAGMENT_INDEX_MIN_MATCHED,
                         crate::fragment_index::vote_peaks_for(scorer.feature_match_tolerance()),
                     );
-                    let relabel =
-                        |v: &mut [Candidate]| relabel_collision_decoys_with(v, &self.target_bare_seqs);
+                    let relabel = |v: &mut [Candidate]| {
+                        relabel_collision_decoys_with(v, &self.target_bare_seqs)
+                    };
                     fi.materialise(&sel, self.idx, params, record_cache.as_ref(), &relabel)
                 } else {
                     let key = mmap_window_key(spec, params);
@@ -3023,10 +3023,7 @@ fn bare_residues(cand: &Candidate) -> Box<[u8]> {
 /// `target_seqs` must be the GLOBAL set of all DB targets (built once from the
 /// full index by [`build_target_bare_seqs`]), NOT the targets that happen to land
 /// in the current precursor window.
-fn relabel_collision_decoys_with(
-    candidates: &mut [Candidate],
-    target_seqs: &FxHashSet<Box<[u8]>>,
-) {
+fn relabel_collision_decoys_with(candidates: &mut [Candidate], target_seqs: &FxHashSet<Box<[u8]>>) {
     if target_seqs.is_empty() {
         return;
     }

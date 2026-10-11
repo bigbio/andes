@@ -205,12 +205,7 @@ fn ecoli_pin_matches_golden_with_one_variable_mod() {
 #[ignore = "runs a full E. coli search (~20 s release)"]
 fn ecoli_pin_matches_golden_with_precursor_calibration_on() {
     // The calibration pre-pass runs on the out-of-core index.
-    assert_ecoli_golden(
-        "precursor-cal auto",
-        None,
-        "auto",
-        ECOLI_PRECURSOR_CAL_AUTO,
-    );
+    assert_ecoli_golden("precursor-cal auto", None, "auto", ECOLI_PRECURSOR_CAL_AUTO);
 }
 
 // ── --chimeric ──────────────────────────────────────────────────────────────

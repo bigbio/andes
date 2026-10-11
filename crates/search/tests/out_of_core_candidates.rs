@@ -402,9 +402,8 @@ fn out_of_core_candidate_list_equals_the_enumeration() {
         ("palindrome", &pal_idx, &pal_params),
     ] {
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        let prepared =
-            PreparedSearch::prepare_mmap(idx, params, &scorer, 0.05, "XXX", tmp.path())
-                .expect("prepare_mmap");
+        let prepared = PreparedSearch::prepare_mmap(idx, params, &scorer, 0.05, "XXX", tmp.path())
+            .expect("prepare_mmap");
         let got: Vec<CandSig> = prepared
             .out_of_core_candidates_where(|_, _| true)
             .iter()
@@ -419,7 +418,10 @@ fn out_of_core_candidate_list_equals_the_enumeration() {
             .count();
         let want: Vec<CandSig> = oracle.iter().map(cand_sig).collect();
         assert!(!want.is_empty(), "[{label}] empty fixture");
-        assert_eq!(got, want, "[{label}] candidate list differs from the enumeration");
+        assert_eq!(
+            got, want,
+            "[{label}] candidate list differs from the enumeration"
+        );
     }
     assert!(relabelled > 0, "no fixture exercises the collision relabel");
 }
@@ -469,12 +471,10 @@ const ASYMMETRIC_TOL_CAM_ONLY: &[&[&str]] = &[
     ],
 ];
 
-const COLLISION_DECOY_RELABEL: &[&[&str]] = &[
-    &[
-        "pep=K[0]E[0]A[0]M[0] z=2 score=-37.0000 rank=-37.0000 iso=0 decoy=false",
-        "pep=M[0]A[0]E[0]K[0] z=2 score=-5.0000 rank=-5.0000 iso=0 decoy=false",
-    ],
-];
+const COLLISION_DECOY_RELABEL: &[&[&str]] = &[&[
+    "pep=K[0]E[0]A[0]M[0] z=2 score=-37.0000 rank=-37.0000 iso=0 decoy=false",
+    "pep=M[0]A[0]E[0]K[0] z=2 score=-5.0000 rank=-5.0000 iso=0 decoy=false",
+]];
 
 fn assert_golden(label: &str, got: &[Vec<String>], golden: &[&[&str]]) {
     assert!(
@@ -533,7 +533,9 @@ fn psms_match_golden_collision_decoy_relabel() {
     let (q, c) = run_search(&idx, &params, &spectra, &scorer);
     let got = psm_result_set(&q, &c);
     assert!(
-        got.iter().flatten().any(|r| r.starts_with("pep=M[0]A[0]E[0]K[0] ") && r.ends_with("decoy=false")),
+        got.iter()
+            .flatten()
+            .any(|r| r.starts_with("pep=M[0]A[0]E[0]K[0] ") && r.ends_with("decoy=false")),
         "the collision MAEK must be scored as a target: {got:#?}"
     );
     assert_golden("collision decoy", &got, COLLISION_DECOY_RELABEL);
@@ -774,8 +776,12 @@ fn match_spectra_out_of_core_keeps_input_order_and_finds_the_enumeration_top_hit
         assert!(q.iter_psms().all(|p| p.spectrum_idx == i));
         let (a, b) = (top(q), top(rq));
         assert_eq!(
-            cands[a.primary_candidate_idx() as usize].peptide.to_string(),
-            enum_cands[b.primary_candidate_idx() as usize].peptide.to_string(),
+            cands[a.primary_candidate_idx() as usize]
+                .peptide
+                .to_string(),
+            enum_cands[b.primary_candidate_idx() as usize]
+                .peptide
+                .to_string(),
             "{}: top peptide differs from the enumeration",
             spectra[i].title
         );

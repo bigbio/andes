@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::cli::{
-    Cli, EnzymeSpecificity, EthcdActivationFlag, FragmentIndexFlag,
-    Fragmentation, PrecursorMonoFlag, Protocol, ScoreFlag,
+    Cli, EnzymeSpecificity, EthcdActivationFlag, FragmentIndexFlag, Fragmentation,
+    PrecursorMonoFlag, Protocol, ScoreFlag,
 };
 use crate::glyco_run::run_glyco;
 use crate::memlimit::available_memory_budget;
@@ -1194,8 +1194,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // non-MS1 branch below). Each spectrum keeps the part of its linked
             // MS1 scan Pass 2 reads, so a mass-ordered chunk can carry its own
             // MS1 link.
-            let index_ordered =
-                chimeric_active && params.fragment_index_top_k > 0 && !cli.glyco;
+            let index_ordered = chimeric_active && params.fragment_index_top_k > 0 && !cli.glyco;
             let mut pending: Vec<(Spectrum, Option<Ms1Peaks>)> = Vec::new();
             for (mut chunk_spectra, chunk_link) in rx {
                 if let Some(prefix) = &title_prefix {

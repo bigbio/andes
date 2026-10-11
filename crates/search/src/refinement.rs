@@ -923,7 +923,8 @@ pub fn run_refinement(
         // modifications and the Met-cleaved variant on every anchor; keep them only
         // for anchors that really start a protein.
         let n_anchors = base_seqs.len();
-        let starts_with_met: Vec<bool> = base_seqs.iter().map(|s| s.first() == Some(&b'M')).collect();
+        let starts_with_met: Vec<bool> =
+            base_seqs.iter().map(|s| s.first() == Some(&b'M')).collect();
         let mut refine_prepared = match PreparedSearch::prepare_in_memory(
             &refine_idx,
             &refine_params,

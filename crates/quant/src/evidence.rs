@@ -40,9 +40,11 @@
 //! Interference. At the optimum, each isotope `i` in `{1, 2, 3}` gets its own
 //! amplitude `A_i = sum_j (y_i[j] - ybar_i) (g_j - gbar) / (pi_i S)` with
 //! standard error `se_i = sigma_i / (pi_i sqrt(S))`, where
-//! `S = sum_j (g_j - gbar)^2`. If the largest
-//! `(A_i - A) / sqrt(se_i^2 + A_se^2)` exceeds 3, that one isotope is dropped
-//! and `A` is refitted at the same `(t0, w)`. The test is one-sided because
+//! `S = sum_j (g_j - gbar)^2`, and is compared with `A_(-i)`, the joint
+//! amplitude fitted without it at the same `(t0, w)`, whose standard error is
+//! `se_(-i) = 1 / sqrt(den_(-i))`. If the largest
+//! `(A_i - A_(-i)) / sqrt(se_i^2 + se_(-i)^2)` exceeds 3, that one isotope is
+//! dropped and `A_(-i)` is the refitted amplitude. The test is one-sided because
 //! interference only adds signal. Isotope 0 is never dropped.
 //!
 //! The per-probe arithmetic, [`fit_traces`], takes the extracted traces as
@@ -512,8 +514,11 @@ fn num_den(
     (num, den)
 }
 
-/// Drop the one isotope of {1, 2, 3} whose own amplitude exceeds the joint
-/// amplitude by more than [`EXCLUSION_Z`] combined standard errors, if any.
+/// Drop the one isotope of {1, 2, 3} whose own amplitude most exceeds the
+/// joint amplitude fitted without it, if that excess is more than
+/// [`EXCLUSION_Z`] combined standard errors. Comparing against the
+/// leave-one-out amplitude keeps a suspect isotope from pulling the reference
+/// it is tested against.
 fn exclude_interfered(
     proj: &[f64; MAX_ISOTOPES],
     sgg: f64,
@@ -521,17 +526,17 @@ fn exclude_interfered(
     sigma: &[f64; MAX_ISOTOPES],
     mask: u8,
 ) -> u8 {
-    let (num, den) = num_den(proj, sgg, pi, sigma, mask);
-    let a = (num / den).max(0.0);
-    let a_se2 = 1.0 / den;
     let mut worst: Option<(usize, f64)> = None;
     for i in 1..MAX_ISOTOPES {
         if mask & (1 << i) == 0 {
             continue;
         }
+        let (num, den) = num_den(proj, sgg, pi, sigma, mask & !(1 << i));
+        let a_without = (num / den).max(0.0);
+        let se_without2 = 1.0 / den;
         let a_i = proj[i] / (pi[i] * sgg);
         let se_i = sigma[i] / (pi[i] * sgg.sqrt());
-        let score = (a_i - a) / (se_i * se_i + a_se2).sqrt();
+        let score = (a_i - a_without) / (se_i * se_i + se_without2).sqrt();
         if worst.is_none_or(|(_, s)| score > s) {
             worst = Some((i, score));
         }

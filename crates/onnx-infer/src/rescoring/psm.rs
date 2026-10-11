@@ -67,7 +67,7 @@ impl TopNPolicy {
     where
         F: Fn(&T) -> &str,
     {
-        let mut out = Vec::with_capacity(items.len().min(self.max_per_spectrum * 8));
+        let mut out = Vec::new();
         let mut cur_spec: Option<&str> = None;
         let mut kept = 0usize;
         for item in items {
@@ -108,8 +108,14 @@ impl RescoringBatch {
         let mut data = vec![0f32; n * f];
         for (i, row) in rows.iter().enumerate() {
             for (j, name) in feature_names.iter().enumerate() {
-                let v = row.values.get(*name).copied().unwrap_or(0.0);
-                data[i * f + j] = v as f32;
+                let v = row.values.get(*name).copied().unwrap_or(0.0) as f32;
+                if !v.is_finite() {
+                    return Err(Error::InvalidArg(format!(
+                        "feature `{name}` of row {i} is not a finite f32 ({v}); \
+                         impute or drop non-finite values before packing"
+                    )));
+                }
+                data[i * f + j] = v;
             }
         }
         let features = NamedTensor::new(tensor_name, vec![n, f], data)?;
@@ -168,5 +174,24 @@ mod tests {
         .unwrap();
         assert_eq!(batch.features.shape, vec![1, 2]);
         assert_eq!(batch.features.data, vec![0.9, 0.0]);
+    }
+
+    #[test]
+    fn non_finite_features_are_rejected() {
+        for bad in [f64::NAN, f64::INFINITY, 1e300] {
+            let rows = vec![FeatureRow {
+                key: CandidateKey {
+                    spectrum_ref: "scan=1".into(),
+                    rank: 1,
+                    charge: 2,
+                    peptide: "PEPTIDE".into(),
+                },
+                values: BTreeMap::from([("rt_diff".into(), bad)]),
+            }];
+            assert!(
+                RescoringBatch::from_rows(rows, &["rt_diff"], "features").is_err(),
+                "{bad} must be rejected"
+            );
+        }
     }
 }

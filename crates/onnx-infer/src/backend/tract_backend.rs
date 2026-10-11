@@ -56,6 +56,15 @@ impl TractSession {
         if self.input_names.len() == 1 && inputs.len() == 1 {
             return Ok(vec![&inputs[0]]);
         }
+        if let Some(unknown) = inputs
+            .iter()
+            .find(|t| !self.input_names.iter().any(|n| n == &t.name))
+        {
+            return Err(Error::UnknownInput {
+                name: unknown.name.clone(),
+                available: self.input_names.clone(),
+            });
+        }
         let mut ordered = Vec::with_capacity(self.input_names.len());
         for required in &self.input_names {
             let nt = inputs

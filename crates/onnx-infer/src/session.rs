@@ -74,8 +74,8 @@ impl OnnxSession {
 
     /// Convenience: single named input → first output tensor.
     pub fn run_one(&mut self, input: NamedTensor) -> Result<NamedTensor> {
-        let mut outs = self.run(std::slice::from_ref(&input))?;
-        outs.pop().ok_or_else(|| {
+        let outs = self.run(std::slice::from_ref(&input))?;
+        outs.into_iter().next().ok_or_else(|| {
             Error::Inference("model produced zero outputs".into())
         })
     }

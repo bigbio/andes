@@ -249,13 +249,14 @@ Still to do for #92:
 ### Sequencing vs #92
 
 ```
-#92 Step 1 (Python offline) ──► pays? ──yes──► build ONNX substrate + wire five features
-                         └──no───┬► still want de novo later? ──yes──► build minimal ONNX loader only
-                                 └► else close #92; defer crate
+#92 Step 1 (Python offline) ──► pays? ──yes──► wire the five features into andes on onnx-infer
+                         └──no───┬► still want de novo later? ──yes──► keep onnx-infer as a minimal loader
+                                 └► else close #92; leave onnx-infer unwired
 ```
 
-If Step 1 is flat but we still plan ONNX de novo within a quarter, a **minimal** loader
-(no AlphaPeptDeep productization) is still justified as #93 infrastructure — keep it tiny.
+The `onnx-infer` scaffold has already landed, so a flat Step 1 does not remove it: it stops
+the AlphaPeptDeep wiring and productization. If we still plan ONNX de novo within a quarter,
+the scaffold stays as #93 infrastructure — keep it a **minimal** loader.
 
 ---
 
@@ -264,7 +265,8 @@ If Step 1 is flat but we still plan ONNX de novo within a quarter, a **minimal**
 **Question:** should andes grow a dedicated de novo crate inspired by
 [π-PrimeNovo](https://www.nature.com/articles/s41467-024-55021-3)
 (Zhang et al., *Nat Commun* 2025 — non-autoregressive Transformer + precise mass control;
-~64% peptide recall on nine-species; up to ~89× faster than autoregressive SOTA)?
+~64% peptide recall on nine-species; up to ~89× faster in the paper's best case, PrimeNovo
+without precise mass control against Casanovo V2 with beam search)?
 
 ### Recommendation: **not as a core crate yet; yes as a staged optional arm after P0b + P1**
 

@@ -20,5 +20,5 @@ mod tensors;
 pub use encode::{AA_VOCAB_1BASED, MOD_ELEMENT_COUNT, encode_aa_sequence};
 pub use tensors::{
     INSTRUMENT_DEFAULT, NCE_DEFAULT, PeptDeepMs2Batch, PeptDeepRtBatch, pack_ms2_inputs,
-    pack_rt_inputs,
+    pack_ms2_inputs_with_mod_dim, pack_rt_inputs, pack_rt_inputs_with_mod_dim,
 };

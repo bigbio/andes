@@ -37,32 +37,36 @@ pub const AA_VOCAB_1BASED: &[(char, i64)] = &[
     ('Y', 20),
 ];
 
-fn aa_index(c: char) -> i64 {
-    for (ch, idx) in AA_VOCAB_1BASED {
-        if *ch == c {
-            return *idx;
-        }
-    }
-    0
+fn aa_index(c: char) -> Option<i64> {
+    AA_VOCAB_1BASED
+        .iter()
+        .find(|(ch, _)| *ch == c)
+        .map(|(_, idx)| *idx)
 }
 
 /// Encode a plain amino-acid sequence into 1-based indices (no flanking dots).
 ///
-/// Returns a length-`seq_len` vector, right-padded with 0 when `seq` is shorter,
-/// or truncated when longer (PeptDeep dynamic axis usually handles true length;
-/// fixed padding is for rectangular batches).
+/// Returns a length-`seq_len` vector, right-padded with 0 (the pad index) when
+/// `seq` is shorter. A residue outside [`AA_VOCAB_1BASED`] or a peptide longer
+/// than `seq_len` is an error: either would otherwise reach the model as
+/// padding or as a truncated sequence and give a silently wrong prediction.
 pub fn encode_aa_sequence(seq: &str, seq_len: usize) -> Result<Vec<i64>> {
     if seq_len == 0 {
         return Err(Error::InvalidArg("seq_len must be ≥ 1".into()));
     }
+    let len = seq.chars().count();
+    if len > seq_len {
+        return Err(Error::InvalidArg(format!(
+            "peptide {seq:?} has {len} residues, longer than seq_len {seq_len}"
+        )));
+    }
     let mut out = vec![0i64; seq_len];
-    for (i, c) in seq.chars().take(seq_len).enumerate() {
-        if !c.is_ascii_alphabetic() {
-            return Err(Error::InvalidArg(format!(
-                "non-alphabetic residue `{c}` in peptide {seq:?}"
-            )));
-        }
-        out[i] = aa_index(c.to_ascii_uppercase());
+    for (i, c) in seq.chars().enumerate() {
+        out[i] = aa_index(c.to_ascii_uppercase()).ok_or_else(|| {
+            Error::InvalidArg(format!(
+                "residue `{c}` in peptide {seq:?} is not in the PeptDeep vocabulary"
+            ))
+        })?;
     }
     Ok(out)
 }
@@ -78,5 +82,18 @@ mod tests {
         assert_eq!(v[0], 13); // P
         assert_eq!(v[6], 4); // E
         assert_eq!(v[7], 0);
+    }
+
+    #[test]
+    fn rejects_residues_outside_the_vocabulary() {
+        for seq in ["PEPXIDE", "BJOUZ", "PEP1IDE"] {
+            assert!(encode_aa_sequence(seq, 16).is_err(), "{seq} must be rejected");
+        }
+    }
+
+    #[test]
+    fn rejects_peptides_longer_than_seq_len() {
+        assert!(encode_aa_sequence("PEPTIDE", 6).is_err());
+        assert!(encode_aa_sequence("PEPTIDE", 7).is_ok());
     }
 }

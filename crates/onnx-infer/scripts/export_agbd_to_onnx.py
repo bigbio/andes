@@ -22,23 +22,30 @@ import numpy as np
 from onnx import TensorProto, checker, helper, save
 
 
+def _read_exact(c: io.BytesIO, n: int, what: str) -> bytes:
+    data = c.read(n)
+    if len(data) != n:
+        raise ValueError(f"truncated AGBD blob: {what} needs {n} bytes, got {len(data)}")
+    return data
+
+
 def parse_agbd(blob: bytes):
     c = io.BytesIO(blob)
-    magic = c.read(4)
+    magic = _read_exact(c, 4, "magic")
     if magic != b"AGBD":
         raise ValueError(f"bad magic {magic!r}")
-    ver, nfeat, flags, ntree = struct.unpack("<IIII", c.read(16))
+    ver, nfeat, flags, ntree = struct.unpack("<IIII", _read_exact(c, 16, "header"))
     if ver != 1:
         raise ValueError(f"unsupported AGBD version {ver}")
     trees = []
-    for _ in range(ntree):
-        n = struct.unpack("<I", c.read(4))[0]
-        feat = list(struct.unpack(f"<{n}i", c.read(4 * n)))
-        thr = list(struct.unpack(f"<{n}f", c.read(4 * n)))
-        left = list(struct.unpack(f"<{n}i", c.read(4 * n)))
-        right = list(struct.unpack(f"<{n}i", c.read(4 * n)))
-        val = list(struct.unpack(f"<{n}f", c.read(4 * n)))
-        dl = list(c.read(n))
+    for t in range(ntree):
+        n = struct.unpack("<I", _read_exact(c, 4, f"tree {t} node count"))[0]
+        feat = list(struct.unpack(f"<{n}i", _read_exact(c, 4 * n, f"tree {t} features")))
+        thr = list(struct.unpack(f"<{n}f", _read_exact(c, 4 * n, f"tree {t} thresholds")))
+        left = list(struct.unpack(f"<{n}i", _read_exact(c, 4 * n, f"tree {t} left children")))
+        right = list(struct.unpack(f"<{n}i", _read_exact(c, 4 * n, f"tree {t} right children")))
+        val = list(struct.unpack(f"<{n}f", _read_exact(c, 4 * n, f"tree {t} values")))
+        dl = list(_read_exact(c, n, f"tree {t} default-left flags"))
         trees.append(
             dict(
                 feature=feat,
@@ -49,6 +56,9 @@ def parse_agbd(blob: bytes):
                 default_left=dl,
             )
         )
+    trailing = len(blob) - c.tell()
+    if trailing:
+        raise ValueError(f"AGBD blob has {trailing} trailing bytes after {ntree} trees")
     return nfeat, flags, trees
 
 

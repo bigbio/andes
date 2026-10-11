@@ -16,8 +16,11 @@
 //! * [`library`]: precursor-level match-between-runs library entry gate.
 //! * [`align`]: joint retention-time alignment across runs, without a
 //!   reference run, and the predicted RT and its uncertainty per run.
+//! * [`decoys`]: mass-defect-preserving and RT-shifted decoy hypotheses for
+//!   the match-between-runs transfer FDR.
 
 pub mod align;
+pub mod decoys;
 pub mod formula;
 pub mod isobaric;
 pub mod lfq;

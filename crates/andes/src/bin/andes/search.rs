@@ -935,6 +935,18 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         retrieval_excluded,
         cli.fragment_index,
     );
+    if cli.fi_charge2_diag {
+        let mut m: std::collections::BTreeMap<i32, std::collections::BTreeSet<i32>> =
+            Default::default();
+        for (p, ions) in &scorer.param().partition_ion_types_cache {
+            for i in ions {
+                if let Some(c) = i.charge() {
+                    m.entry(p.charge).or_default().insert(c);
+                }
+            }
+        }
+        eprintln!("charge2-diag: model ion charges by precursor charge: {m:?}");
+    }
     {
         use std::sync::atomic::Ordering;
         search::fragment_index::EXP_CHARGE2_MIN_Z.store(cli.fi_charge2_min_z, Ordering::Relaxed);

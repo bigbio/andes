@@ -78,6 +78,7 @@ dependencies = [
  "serde",
  "serde_yaml",
  "tempfile",
+ "zstd",
 ]
 
 [[package]]

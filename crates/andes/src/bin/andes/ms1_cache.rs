@@ -277,7 +277,9 @@ mod tests {
         Ms1Cache::store_at(&index, &path).unwrap();
         let bytes = std::fs::read(&path).unwrap();
         std::fs::write(&path, &bytes[..bytes.len() - 6]).unwrap();
-        let e = Ms1Cache::load_from(&path).unwrap_err().to_string();
-        assert!(e.contains("run.cache"), "{e}");
+        let err = Ms1Cache::load_from(&path).unwrap_err();
+        let msg = err.to_string();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof, "{msg}");
+        assert!(msg.contains("run.cache"), "{msg}");
     }
 }

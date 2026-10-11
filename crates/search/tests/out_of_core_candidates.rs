@@ -382,10 +382,12 @@ fn cand_sig(c: &Candidate) -> CandSig {
     )
 }
 
-/// The out-of-core index lists exactly the enumeration's candidates, in its
-/// order, with the same collision-decoy labels: on a variable-mod search with a
-/// shared peptide, a semi-tryptic digest, a fixed mod, and a palindrome whose
-/// reverse decoy collides with a target.
+/// The out-of-core index lists exactly the enumeration's candidates, with the
+/// same collision-decoy labels, on a variable-mod search with a shared peptide, a
+/// semi-tryptic digest, a fixed mod, and a palindrome whose reverse decoy
+/// collides with a target. The order matches too, except semi-tryptic: the
+/// enumeration lists a protein's strict spans before its semi-specific ones,
+/// the index lists spans by start and length.
 #[test]
 fn out_of_core_candidate_list_equals_the_enumeration() {
     let scorer = make_scorer(0.05);
@@ -395,16 +397,16 @@ fn out_of_core_candidate_list_equals_the_enumeration() {
     let (_, asym_idx, asym_params) = asymmetric_cam_only_fixture();
     let (_, pal_idx, pal_params) = palindrome_fixture();
     let mut relabelled = 0;
-    for (label, idx, params) in [
-        ("variable mod", &idx, &params),
-        ("semi-tryptic", &idx, &semi),
-        ("fixed mod", &asym_idx, &asym_params),
-        ("palindrome", &pal_idx, &pal_params),
+    for (label, idx, params, ordered) in [
+        ("variable mod", &idx, &params, true),
+        ("semi-tryptic", &idx, &semi, false),
+        ("fixed mod", &asym_idx, &asym_params, true),
+        ("palindrome", &pal_idx, &pal_params, true),
     ] {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let prepared = PreparedSearch::prepare_mmap(idx, params, &scorer, 0.05, "XXX", tmp.path())
             .expect("prepare_mmap");
-        let got: Vec<CandSig> = prepared
+        let mut got: Vec<CandSig> = prepared
             .out_of_core_candidates_where(|_, _| true)
             .iter()
             .map(cand_sig)
@@ -416,8 +418,13 @@ fn out_of_core_candidate_list_equals_the_enumeration() {
             .zip(&oracle)
             .filter(|(r, o)| r.is_decoy != o.is_decoy)
             .count();
-        let want: Vec<CandSig> = oracle.iter().map(cand_sig).collect();
+        let mut want: Vec<CandSig> = oracle.iter().map(cand_sig).collect();
         assert!(!want.is_empty(), "[{label}] empty fixture");
+        if ordered {
+            assert_eq!(got, want, "[{label}] candidate list differs from the enumeration");
+        }
+        got.sort();
+        want.sort();
         assert_eq!(
             got, want,
             "[{label}] candidate list differs from the enumeration"

@@ -5,7 +5,7 @@ The full reference for the `andes` binary and its outputs; install and quick sta
 **advanced**: hidden from `--help` because the engine derives them and reports what it chose.
 Use them to reproduce a measurement or override a derivation.
 
-Advanced (hidden) flags include: `--candidate-index`, `--fragment-index`, `--gbdt-max-trees`,
+Advanced (hidden) flags include: `--fragment-index`, `--gbdt-max-trees`,
 `--peak-filter`, `--ethcd-activation`, `--isotope-error`, and the glyco tuning group
 (`--glyco-tol-ppm`, `--glyco-retrieval-tol-ppm`, `--glyco-max-peaks`, `--glyco-y-max-charge`,
 `--glyco-cz-max-charge`, `--glyco-scans`).
@@ -88,10 +88,12 @@ the 100 candidates whose singly-charged b/y ions best match each spectrum (at le
 On Astral this gave +22.2% PSMs over full-window enumeration at an equal true FDP of 1.00%; on
 phospho, 164 s against 5,954 s. Low-res searches use the index too, but
 only the 150 most intense peaks of each spectrum vote: with every peak voting, the 0.5 Da bins let
-noise swamp the count (TMT 12,281 -> 4,368 PSMs at 1%). Capped, the index matches the in-RAM
+noise swamp the count (TMT 12,281 -> 4,368 PSMs at 1%). Capped, the index matches exhaustive
 enumeration (TMT 12,347 vs 12,281 PSMs at 1%, UPS1 15,848 vs 15,838) at the same CPU and wall time
-in less than half the memory (TMT 1.7 vs 5.9 GB). `--glyco` looks its candidates up by backbone mass in its own sequon-only table, built from the out-of-core index; `--chimeric` and `--refine` run on either path. The engine prints its choice; `--candidate-index ram` or
-`--fragment-index off` restore enumeration
+in less than half the memory (TMT 1.7 vs 5.9 GB). Every search uses the out-of-core index: `--glyco`
+looks its candidates up by backbone mass in its own sequon-only table built from it, and the
+`--refine` second pass searches an in-memory index of its anchored peptides. The engine prints
+its choice; `--fragment-index off` scores every candidate in each precursor window instead
 ([measurements](docs/benchmarks/README.md#choosing-the-retrieval-strategy)).
 
 ### Runtime

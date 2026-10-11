@@ -62,55 +62,6 @@ pub fn enumerate_candidates<'a>(
         .filter(move |c| !require_sequon || candidate_has_nxst_sequon(c))
 }
 
-/// [`enumerate_candidates`] across threads, one protein per task. Rayon's ordered
-/// `collect` keeps the sequential `(protein_index, start_offset, mod combination)`
-/// order, so the result is identical to `enumerate_candidates(..).collect()`.
-pub fn enumerate_candidates_par(
-    idx: &SearchIndex,
-    params: &SearchParams,
-    decoy_prefix: &str,
-) -> Vec<Candidate> {
-    use rayon::prelude::*;
-    let suffix = idx.decoy_suffix.as_deref();
-    let require_sequon = params.require_nxst_sequon;
-    idx.db
-        .proteins
-        .par_iter()
-        .enumerate()
-        .flat_map_iter(|(p_idx, protein)| {
-            let is_decoy = is_decoy_accession_affix(&protein.accession, decoy_prefix, suffix);
-            enumerate_protein(protein, p_idx, is_decoy, params).into_iter()
-        })
-        .filter(|c| !require_sequon || candidate_has_nxst_sequon(c))
-        .collect()
-}
-
-/// Hand each protein's candidates (the ones [`enumerate_candidates`] yields for
-/// it) to `f`, across threads, without keeping them. Returns `false` as soon as
-/// some call returns `false`, else `true`. Proteins are visited in no fixed order.
-pub fn all_protein_candidates_par(
-    idx: &SearchIndex,
-    params: &SearchParams,
-    decoy_prefix: &str,
-    f: impl Fn(&[Candidate]) -> bool + Sync,
-) -> bool {
-    use rayon::prelude::*;
-    let suffix = idx.decoy_suffix.as_deref();
-    let require_sequon = params.require_nxst_sequon;
-    idx.db
-        .proteins
-        .par_iter()
-        .enumerate()
-        .all(|(p_idx, protein)| {
-            let is_decoy = is_decoy_accession_affix(&protein.accession, decoy_prefix, suffix);
-            let mut cands = enumerate_protein(protein, p_idx, is_decoy, params);
-            if require_sequon {
-                cands.retain(candidate_has_nxst_sequon);
-            }
-            f(&cands)
-        })
-}
-
 /// The glyco path's sequon membership test (`glyco_search::GlycoCtxOwned::build`):
 /// an internal N-X-S/T, or one completed by the residue after the peptide.
 /// Kept in one place so `SearchParams::require_nxst_sequon` can never admit a
@@ -1187,7 +1138,8 @@ fn milli_of(mass: f64) -> u64 {
 ///    every legal peptidoform, and keep those whose actual
 ///    `peptide.mass()` is within `tol_da` of `precursor_mass`.
 ///
-/// Step 3 is why the result is bit-identical to the in-RAM set: mod placement
+/// Step 3 is why the result is bit-identical to the mass-filtered
+/// [`enumerate_candidates`] set: mod placement
 /// and mass computation flow through the exact same code path. The per-`Δ`
 /// windows in step 2 are purely an out-of-core retrieval optimisation — they
 /// only decide which base records to *look at*, never which peptidoforms survive.
@@ -1212,8 +1164,7 @@ pub fn lazy_candidates_for_precursor(
     // window is `[center − tol_left, center + tol_right]`, NOT a symmetric `±max`.
     // Using `max(left,right)` would pre-fetch extra candidates on the wider side
     // which — even though re-gated by the final mass filter below — perturb the
-    // per-spectrum scored-candidate set (tailor histogram / null-pool) and diverge
-    // from the in-RAM path's scored set.
+    // per-spectrum scored-candidate set (tailor histogram / null-pool).
     let tol_left_milli = (tol_left_da * 1000.0).round() as u64;
     let tol_right_milli = (tol_right_da * 1000.0).round() as u64;
     let mut seen_records: std::collections::HashSet<(u32, u32, u16, u16)> =
@@ -1275,7 +1226,7 @@ pub fn lazy_candidates_for_precursor(
             let peptide = Peptide::new(residues, pre, post);
             // DIRECTIONAL final gate, mirroring `matches_precursor`: lighter →
             // tol_left, heavier → tol_right. Keeps the lazily-materialized set
-            // EXACTLY the set the in-RAM `matches_precursor` admits per spectrum.
+            // EXACTLY the set `matches_precursor` admits per spectrum.
             let err = peptide.mass() - precursor_mass;
             let allowed = if err < 0.0 { tol_left_da } else { tol_right_da };
             if err.abs() <= allowed {
@@ -1295,17 +1246,16 @@ pub fn lazy_candidates_for_precursor(
 
 /// Lazily enumerate the modified candidate set whose **nominal residue mass**
 /// falls in the inclusive integer-bucket window `[min_nominal, max_nominal]`,
-/// reproducing the in-RAM `bucket_index.range(candidate_nominal_bounds(..))`
-/// membership predicate BIT-FOR-BIT.
+/// gated on the nominal-bucket membership predicate of
+/// `candidate_nominal_bounds(..)`.
 ///
-/// The in-RAM (`Ram`) backing scores exactly the candidates whose
+/// A spectrum scores exactly the candidates whose
 /// `peptide.nominal_residue_mass()` (= `nominal_from(peptide.mass() − H2O)`)
 /// lands in the coarse integer bucket window. That window is LOSSY at bucket
 /// boundaries: the f64-milli-Da directional window used by
-/// [`lazy_candidates_for_precursor`] is a DIFFERENT set at the edges, so the two
-/// backings diverge on boundary candidates (proven on scan 33203). To keep the
-/// `Mmap` backing result-identical to `Ram`, the per-spectrum scored set must be
-/// gated on the SAME nominal-bucket predicate, NOT the f64 window.
+/// [`lazy_candidates_for_precursor`] is a DIFFERENT set at the edges, so the
+/// per-spectrum scored set must be gated on the nominal-bucket predicate, NOT the
+/// f64 window.
 ///
 /// ## Algorithm
 /// Identical to [`lazy_candidates_for_precursor`] (per-Δ base-record fetch →
@@ -1315,14 +1265,14 @@ pub fn lazy_candidates_for_precursor(
 ///   every base mass that could expand to an in-window peptidoform (over-fetch
 ///   is fine — surplus records are filtered out by the acceptance predicate).
 /// - Each expanded peptidoform is accepted iff
-///   `nominal_from(peptide.mass() − H2O) ∈ [min_nominal, max_nominal]` — the
-///   EXACT RAM membership test — replacing the directional f64 final gate.
+///   `nominal_from(peptide.mass() − H2O) ∈ [min_nominal, max_nominal]`,
+///   replacing the directional f64 final gate.
 ///
 /// The lazy per-Δ enumeration is retained for bounded-RSS (O(window), not full
 /// materialization); only the per-candidate ACCEPTANCE predicate changes.
 /// Identity of one base record in the on-disk index:
 /// `(protein_index, start_offset, length, flags)`. Identical copies of a span
-/// (the N-terminal-Met re-enumeration) share a key; their count is the RAM
+/// (the N-terminal-Met re-enumeration) share a key; their count is the
 /// enumeration multiplicity.
 pub type BaseRecordKey = (u32, u32, u16, u16);
 
@@ -1514,9 +1464,9 @@ pub fn expand_base_record(
 }
 
 /// Peptidoforms in the nominal-bucket window `[min_nominal, max_nominal]`, in
-/// the order the in-RAM enumeration would visit them: base records in
+/// the order `enumerate_candidates` visits them: base records in
 /// `enumerate_candidates` order, each expanded in `expand_mod_combinations`
-/// order, and gated on the RAM membership predicate
+/// order, and gated on the membership predicate
 /// `nominal_from(peptide.mass() − H2O) ∈ [min, max]` (cached as
 /// `Peptide::nominal_residue_mass()`).
 pub fn lazy_candidates_for_nominal_window(
@@ -1651,7 +1601,7 @@ mod tests {
     // Decisive correctness property: for a precursor window, the SET of
     // Candidates from `lazy_candidates_for_precursor` (which reads BASE peptides
     // from the out-of-core index and places mods lazily) must EXACTLY equal the
-    // mass-filtered subset of the in-RAM `enumerate_candidates`.
+    // mass-filtered subset of the full `enumerate_candidates`.
 
     use super::{
         enumerate_candidates, lazy_candidates_for_nominal_window, lazy_candidates_for_precursor,

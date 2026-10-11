@@ -1617,7 +1617,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         let non_empty = queues.iter().filter(|q| !q.is_empty()).count();
         eprintln!(
-            "Search complete: {non_empty} / {} spectra have PSMs (match_spectra wall: {:.2}s)",
+            "Search complete: {non_empty} / {} spectra have PSMs (search wall: {:.2}s)",
             spectra.len(),
             search_elapsed.as_secs_f64()
         );

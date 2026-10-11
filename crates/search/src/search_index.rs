@@ -27,7 +27,7 @@ pub struct SearchIndex {
 impl SearchIndex {
     /// Target/decoy membership for `accession` under this index's affix config
     /// (prefix needle OR optional suffix). Single entry point used by candidate
-    /// generation and the target-protein iterators so RAM and mmap paths agree.
+    /// generation and the target-protein iterators so the two always agree.
     pub fn is_decoy_accession(&self, accession: &str) -> bool {
         is_decoy_accession_affix(accession, &self.decoy_prefix, self.decoy_suffix.as_deref())
     }

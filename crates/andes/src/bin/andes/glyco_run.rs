@@ -156,7 +156,7 @@ pub(crate) fn run_glyco(
         "[glyco] candidate table: {} N-X-S/T-bearing candidates from the out-of-core index \
          ({} base peptides) [{:.2}s]",
         table.candidates().len(),
-        prepared.mmap_index.as_ref().map_or(0, |mi| mi.len()),
+        prepared.mmap_index.len(),
         t_table.elapsed().as_secs_f64()
     );
     let pass1 = search::glyco_search::glyco_search_run(

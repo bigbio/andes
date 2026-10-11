@@ -395,7 +395,7 @@ fn dedup_backbone_hits(mut all_backbone: Vec<BackboneHit>, tol_ppm: f64) -> Vec<
 /// reads no other candidate, so it owns this table instead of the whole
 /// database's.
 ///
-/// Candidates are listed in the in-RAM enumeration order, so a slot here sorts
+/// Candidates are listed in database enumeration order, so a slot here sorts
 /// like the same candidate's slot in the whole-database list and every
 /// candidate-index tie-break resolves the same way. The emitted
 /// `PsmMatch::candidate_idxs` index into [`Self::candidates`].

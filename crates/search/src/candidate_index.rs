@@ -176,46 +176,6 @@ pub fn base_peptide_records(
         .collect()
 }
 
-/// Estimate whether the in-RAM candidate index (the `Vec<Candidate>` the default
-/// `Ram` backing materializes) would fit within `budget_bytes`.
-///
-/// Used by `--candidate-index auto` to choose RAM vs out-of-core mmap WITHOUT
-/// risking an OOM: the in-RAM path `.collect()`s every modified candidate (each
-/// owning a `Peptide` residue `Vec`), which for large mod searches is the term
-/// that blows up. We accumulate a per-candidate byte estimate over
-/// [`enumerate_candidates`] and **bail early** the moment it crosses the budget,
-/// so the cost is bounded by the budget (not by the — possibly enormous — total
-/// candidate count). Returns `true` if the full set fits, `false` if it would
-/// exceed `budget_bytes`.
-///
-/// The per-candidate cost is intentionally a slight OVER-estimate (so we err
-/// toward mmap near the limit and never under-predict into an OOM): the
-/// `Candidate` struct + its heap `Peptide` residues (the dominant term; each
-/// `AminoAcid` carries an `Arc<Modification>`) + the mass-bucket index entry.
-pub fn ram_candidate_index_fits(
-    idx: &SearchIndex,
-    params: &SearchParams,
-    decoy_prefix: &str,
-    budget_bytes: u64,
-) -> bool {
-    // Conservative per-residue / per-candidate constants (bytes).
-    const PER_RESIDUE: u64 = 32; // AminoAcid + Arc refcount slot + slack
-    const PER_CANDIDATE_OVERHEAD: u64 = 120; // struct + Vec header + bucket-idx entry + alloc overhead
-
-    // Proteins are costed in parallel. Every candidate adds a positive amount, so
-    // the running total crosses the budget at some point exactly when the full
-    // total does, whatever order the proteins are added in.
-    let acc = std::sync::atomic::AtomicU64::new(0);
-    crate::candidate_gen::all_protein_candidates_par(idx, params, decoy_prefix, |cands| {
-        let bytes: u64 = cands
-            .iter()
-            .map(|c| PER_CANDIDATE_OVERHEAD + c.peptide.residues.len() as u64 * PER_RESIDUE)
-            .sum();
-        let before = acc.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
-        before.saturating_add(bytes) <= budget_bytes
-    })
-}
-
 /// Canonical builder: enumerate base peptides and write a mass-sorted binary
 /// index to `out`.
 ///
@@ -698,23 +658,6 @@ mod tests {
             }],
         };
         SearchIndex::from_target_db(&target, "XXX")
-    }
-
-    #[test]
-    fn ram_candidate_index_fits_respects_budget() {
-        let idx = make_toy_index();
-        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
-        let mut params = SearchParams::default_tryptic(aa_set);
-        params.min_length = 3;
-        // A generous budget fits the toy index; a zero budget never does.
-        assert!(
-            ram_candidate_index_fits(&idx, &params, "XXX", u64::MAX),
-            "toy index must fit an unbounded budget"
-        );
-        assert!(
-            !ram_candidate_index_fits(&idx, &params, "XXX", 0),
-            "no candidate set fits a zero budget"
-        );
     }
 
     #[test]

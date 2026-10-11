@@ -757,7 +757,9 @@ pub struct RefinementOutput {
 ///   3. `build_peptide_anchored_index` scoped to the confident base peptides.
 ///   4. A Pass-2 `SearchParams` clone whose `aa_set` is the refinement tier
 ///      ([`refinement_aa_set`]) and whose `max_variable_mods_per_peptide` is
-///      `cfg.max_mods`, prepared via `PreparedSearch::prepare`.
+///      `cfg.max_mods`, prepared via `PreparedSearch::prepare_in_memory` over the
+///      anchored index with per-spectrum enumeration of every candidate in the
+///      precursor window.
 ///   5. `run_chunk` over the (cloned) unidentified spectra; each winner is tagged
 ///      `is_refinement = 1`, has `(num_mods, refine_mod_class)` filled from its
 ///      Pass-2 peptide, and has its `spectrum_idx` fixed to the GLOBAL index.
@@ -902,6 +904,9 @@ pub fn run_refinement(
         }
     };
     refine_params.max_variable_mods_per_peptide = capped_max_mods;
+    // The anchored database is small, so Pass 2 scores every candidate in each
+    // spectrum's precursor window instead of a fragment-index shortlist.
+    refine_params.fragment_index_top_k = 0;
 
     // 5. Search ONLY the unidentified spectra. We clone them into a contiguous
     //    sub-vec (run_chunk takes a &[Spectrum]); `spectrum_idx_offset = 0` is
@@ -912,40 +917,54 @@ pub fn run_refinement(
     //    search, so we extract the Pass-2 candidate pool into an owned Vec and
     //    DROP `refine_prepared` (ending the borrow) before moving `refine_idx`
     //    into the output below.
-    let (pass2_queues, refine_candidates) = {
+    let (pass2_queues, refine_candidates, pass2_base_peptides) = {
         // Mini-protein k is anchor k mod n (targets, then their decoys). Each
         // mini-protein starts at position 0, so enumeration offers protein-N-terminal
         // modifications and the Met-cleaved variant on every anchor; keep them only
         // for anchors that really start a protein.
         let n_anchors = base_seqs.len();
-        let refine_prepared = PreparedSearch::prepare_filtered(
+        let anchor_nterm = &anchor_nterm;
+        let base_seqs = &base_seqs;
+        let mut refine_prepared = match PreparedSearch::prepare_in_memory(
             &refine_idx,
             &refine_params,
             scorer,
             fragment_tol_da,
             decoy_prefix,
-            |c| {
-                let a = c.protein_index % n_anchors;
-                anchor_nterm[a] || !uses_protein_nterm(c, base_seqs[a].first() == Some(&b'M'))
-            },
-        );
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!(
+                    "WARN: --refine could not build the Pass-2 candidate index ({e}); \
+                     skipping refinement for this run."
+                );
+                return None;
+            }
+        }
+        .with_candidate_filter(Box::new(move |c: &Candidate| {
+            let a = c.protein_index % n_anchors;
+            anchor_nterm[a] || !uses_protein_nterm(c, base_seqs[a].first() == Some(&b'M'))
+        }));
         let subset: Vec<model::spectrum::Spectrum> =
             unident.iter().map(|&i| all_spectra[i].clone()).collect();
         let queues = refine_prepared.run_chunk(&subset, 0);
-        // `PreparedSearch.candidates` is an owned `Vec<Candidate>`; move it out so
-        // the prepared search (and its `&refine_idx` borrow) can be dropped.
-        (queues, refine_prepared.candidates)
+        // Move the materialized candidates out so the prepared search (and its
+        // `&refine_idx` borrow) can be dropped.
+        refine_prepared.sync_materialized_candidates();
+        let base_peptides = refine_prepared.mmap_index.len();
+        (
+            queues,
+            std::mem::take(&mut refine_prepared.candidates),
+            base_peptides,
+        )
     };
 
     // Tag each Pass-2 winner; collect into one queue per refined spectrum, AND
-    // PRUNE the candidate pool to just the winners. The Pass-2 search visits an
-    // enormous pool (mod permutations over every anchored peptide — millions of
-    // candidates), but only the few thousand referenced by a surviving PSM are
-    // ever needed downstream: the PIN resolves peptide/accession through
-    // `candidate_idxs`. We copy those into a compact pool, remap indices, and drop
-    // the full pool — it is the dominant refine memory driver (the cloned peaks
-    // are ~45 MB by comparison). Output is unchanged: each PSM still resolves to
-    // the same peptide/candidate, only the internal index numbering differs.
+    // PRUNE the candidate pool to just the winners: the scan's pool holds every
+    // candidate a retained PSM referenced, but the PIN resolves peptide/accession
+    // only through the emitted rows' `candidate_idxs`. We copy those into a
+    // compact pool and remap indices; each PSM still resolves to the same
+    // peptide/candidate, only the internal index numbering differs.
     let pass2_total = refine_candidates.len();
     let pass2_decoys = refine_candidates.iter().filter(|c| c.is_decoy).count();
     let mut isotope_mimics = 0usize;
@@ -998,16 +1017,17 @@ pub fn run_refinement(
         }
         out_queues.push(tagged);
     }
-    drop(refine_candidates); // free the full Pass-2 pool now; `compact` replaces it
+    drop(refine_candidates); // `compact` replaces the Pass-2 pool
 
-    // Transparency + cost visibility: show the full Pass-2 pool size and the
+    // Transparency + cost visibility: show the Pass-2 index size and the
     // pruned winners-only count so a user/operator sees both the search cost and
     // what survives into the merged PIN.
     eprintln!(
-        "[REFINE] anchors={} unident={}/{} pass2_candidates={} (targets={} decoys={}) (pruned to {} winners; {} dropped as isotope mimics)",
+        "[REFINE] anchors={} unident={}/{} pass2_base_peptides={} pass2_candidates_retained={} (targets={} decoys={}) (pruned to {} winners; {} dropped as isotope mimics)",
         base_seqs.len(),
         unident.len(),
         all_spectra.len(),
+        pass2_base_peptides,
         pass2_total,
         pass2_total - pass2_decoys,
         pass2_decoys,

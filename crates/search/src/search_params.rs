@@ -30,7 +30,7 @@ pub const FRAGMENT_INDEX_MIN_MATCHED: u16 = 3;
 /// How many of a spectrum's most intense peaks vote in the fragment-ion index at
 /// a low-resolution fragment tolerance (high resolution: every peak). Measured on
 /// the low-res TMT set out-of-core: all peaks voting 4,368 PSMs @1%; 50, 100 and
-/// 150 peaks 12,285, 12,276 and 12,347; the in-RAM enumeration 12,281.
+/// 150 peaks 12,285, 12,276 and 12,347; exhaustive enumeration 12,281.
 pub const FRAGMENT_INDEX_LOWRES_VOTE_PEAKS: usize = 150;
 
 /// Out-of-core (`mmap`) mode only: upper bound on the TOTAL number of candidates
@@ -135,12 +135,6 @@ pub struct SearchParams {
     /// leaks low-confidence anchors into the entrapment-FDP. Only consulted when
     /// `--refine` is set.
     pub refine_select_psm_fdr: f64,
-    /// Candidate-resolution backing: `Ram` (default, in-RAM `Vec<Candidate>` +
-    /// bucket index — byte-identical to the historic path) or `Mmap` (out-of-core
-    /// mmap'd base-peptide index + lazy per-spectrum mod enumeration). Exposed via
-    /// `--candidate-index {ram,mmap}`. Carries the user selection into
-    /// `PreparedSearch`; `Ram` leaves every code path unchanged.
-    pub candidate_index: CandidateIndexMode,
     /// Enumerate only peptides carrying an N-X-S/T sequon (internal, or completed
     /// by the following residue) into the candidate index. `--glyco` scoring
     /// never consults any other candidate (its candidate table holds only these),
@@ -149,18 +143,6 @@ pub struct SearchParams {
     /// targets only. Off by default; `--glyco-index-sequon-only`.
     /// Not for the standard peptide search, whose scoring reads every candidate.
     pub require_nxst_sequon: bool,
-}
-
-/// Candidate-resolution backing selected by `--candidate-index`. Mirrors
-/// [`crate::match_engine::CandidateBacking`] at the params layer so the binary
-/// can carry the user choice without depending on the engine type directly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum CandidateIndexMode {
-    /// In-RAM candidate Vec + mass-bucket index. Default; byte-identical path.
-    #[default]
-    Ram,
-    /// Out-of-core mmap'd base-peptide index + lazy mod enumeration.
-    Mmap,
 }
 
 impl SearchParams {
@@ -204,7 +186,6 @@ impl SearchParams {
             chimeric_max_kl: 0.3,
             score_mode: ScoreMode::Rank,
             refine_select_psm_fdr: 0.01,
-            candidate_index: CandidateIndexMode::Ram,
             require_nxst_sequon: false,
         }
     }

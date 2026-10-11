@@ -43,9 +43,12 @@
 //! `S = sum_j (g_j - gbar)^2`, and is compared with `A_(-i)`, the joint
 //! amplitude fitted without it at the same `(t0, w)`, whose standard error is
 //! `se_(-i) = 1 / sqrt(den_(-i))`. If the largest
-//! `(A_i - A_(-i)) / sqrt(se_i^2 + se_(-i)^2)` exceeds 3, that one isotope is
-//! dropped and `A_(-i)` is the refitted amplitude. The test is one-sided because
-//! interference only adds signal. Isotope 0 is never dropped.
+//! `|A_i - A_(-i)| / sqrt(se_i^2 + se_(-i)^2)` exceeds 3, that one isotope is
+//! dropped and `A_(-i)` is the refitted amplitude. The test is two-sided: an
+//! interfered isotope deviates upwards, and a missing or below-detection one
+//! deviates downwards (with the detection-limit floor it can carry a large
+//! weight). Isotope 0 is never dropped. Target and decoy probes go through the
+//! same test.
 //!
 //! The per-probe arithmetic, [`fit_traces`], takes the extracted traces as
 //! slices, so a batch extraction can reuse it and reproduce [`fit`] exactly.
@@ -70,7 +73,7 @@ const NOISE_FLOOR_OF_LIMIT: f64 = 0.5;
 /// Smallest `sum_j (g_j - gbar)^2` a candidate profile may have; below it the
 /// profile is flat over the window and carries no amplitude information.
 const MIN_CENTRED_SGG: f64 = 1e-9;
-/// One-sided z threshold of the interference test.
+/// Two-sided z threshold of the isotope exclusion test.
 const EXCLUSION_Z: f64 = 3.0;
 /// Floor, seconds, on `s` and `w_prior` (a zero or non-finite value would
 /// divide by zero in the RT prior or the elution profile).
@@ -135,7 +138,8 @@ pub struct Evidence {
     pub mass_err_ppm: f64,
     /// Scans inside `[t0 - 2w, t0 + 2w]`.
     pub n_points: u32,
-    /// Bit `i` set when isotope `i` is in the final fit.
+    /// Bit `i` set when isotope `i` is in the final fit (at most one of
+    /// isotopes 1-3 is removed by the two-sided exclusion test).
     pub isotopes_used: u8,
     /// Fitted apex, seconds.
     pub t0: f64,
@@ -514,11 +518,11 @@ fn num_den(
     (num, den)
 }
 
-/// Drop the one isotope of {1, 2, 3} whose own amplitude most exceeds the
-/// joint amplitude fitted without it, if that excess is more than
-/// [`EXCLUSION_Z`] combined standard errors. Comparing against the
-/// leave-one-out amplitude keeps a suspect isotope from pulling the reference
-/// it is tested against.
+/// Drop the one isotope of {1, 2, 3} whose own amplitude deviates most, in
+/// either direction, from the joint amplitude fitted without it, if that
+/// deviation is more than [`EXCLUSION_Z`] combined standard errors. Comparing
+/// against the leave-one-out amplitude keeps a suspect isotope from pulling the
+/// reference it is tested against.
 fn exclude_interfered(
     proj: &[f64; MAX_ISOTOPES],
     sgg: f64,
@@ -536,7 +540,7 @@ fn exclude_interfered(
         let se_without2 = 1.0 / den;
         let a_i = proj[i] / (pi[i] * sgg);
         let se_i = sigma[i] / (pi[i] * sgg.sqrt());
-        let score = (a_i - a_without) / (se_i * se_i + se_without2).sqrt();
+        let score = (a_i - a_without).abs() / (se_i * se_i + se_without2).sqrt();
         if worst.is_none_or(|(_, s)| score > s) {
             worst = Some((i, score));
         }
@@ -1093,6 +1097,8 @@ mod tests {
         );
         assert_finite(&missing);
         assert!((missing.amplitude / AMP - 1.0).abs() < 0.15);
+        assert_eq!(missing.isotopes_used & 0b0010, 0b0010, "isotope 1 kept");
+        assert_eq!(missing.isotopes_used & 0b1000, 0, "missing M+3 dropped");
         assert!(missing.llr > 0.5 * intact.llr && missing.llr < 2.0 * intact.llr);
     }
 

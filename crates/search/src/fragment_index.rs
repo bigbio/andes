@@ -48,11 +48,43 @@ struct GroupPass1 {
 
 /// `query`'s reusable vote buffers: per-id (count, summed intensity) over the
 /// current window, zeroed again after each query, and the ids touched.
-type VoteBuffers = (Vec<(u16, f32)>, Vec<u32>);
+type VoteBuffers = (
+    Vec<(u16, f32, u16, f32)>,
+    Vec<u32>,
+    rustc_hash::FxHashSet<u64>,
+);
 
 thread_local! {
     static VOTE_BUF: std::cell::RefCell<VoteBuffers> =
-        const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+        std::cell::RefCell::new((Vec::new(), Vec::new(), rustc_hash::FxHashSet::default()));
+}
+
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+
+/// EXPERIMENT: precursor charge from which peaks also vote as charge-2 ions (0 = off).
+pub static EXP_CHARGE2_MIN_Z: AtomicU8 = AtomicU8::new(0);
+/// EXPERIMENT: count each theoretical ion once across its 1+ and 2+ readings.
+pub static EXP_CHARGE2_DEDUPE: AtomicBool = AtomicBool::new(true);
+/// EXPERIMENT: accumulate shortlist overlap diagnostics.
+pub static EXP_CHARGE2_DIAG: AtomicBool = AtomicBool::new(false);
+/// queries, base shortlist total, arm shortlist total, overlap, base-empty-arm-nonempty.
+pub static DIAG: [AtomicU64; 5] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
+
+/// EXPERIMENT: print the shortlist diagnostics.
+pub fn report_charge2_diag() {
+    let d: Vec<u64> = DIAG.iter().map(|a| a.load(Ordering::Relaxed)).collect();
+    if d[0] > 0 {
+        eprintln!(
+            "charge2-diag: queries={} base_shortlist={} arm_shortlist={} overlap={} base_empty_arm_nonempty={}",
+            d[0], d[1], d[2], d[3], d[4]
+        );
+    }
 }
 
 pub struct ChunkFragmentIndex {
@@ -417,13 +449,19 @@ impl ChunkFragmentIndex {
         let block_of = |id: u32| self.block_first_id.partition_point(|&f| f <= id) - 1;
         let (blk_lo, blk_hi) = (block_of(id_lo), block_of(id_hi - 1));
         let row_len = self.n_blocks + 1;
-        let mut sel: Vec<(u32, u16, f32)> = VOTE_BUF.with(|cell| {
+        let c2_min_z = EXP_CHARGE2_MIN_Z.load(Ordering::Relaxed);
+        let charge2 = c2_min_z > 0 && charges.iter().any(|&z| z >= c2_min_z);
+        let dedupe = EXP_CHARGE2_DEDUPE.load(Ordering::Relaxed);
+        let diag = EXP_CHARGE2_DIAG.load(Ordering::Relaxed);
+        let (mut sel, base_sel): (Vec<(u32, u16, f32)>, Option<Vec<(u32, u16, f32)>>) =
+            VOTE_BUF.with(|cell| {
             let mut buf = cell.borrow_mut();
-            let (counts, touched) = &mut *buf;
+            let (counts, touched, seen) = &mut *buf;
             if counts.len() < width {
-                counts.resize(width, (0, 0.0));
+                counts.resize(width, (0, 0.0, 0, 0.0));
             }
             touched.clear();
+            seen.clear();
             let floor = vote_intensity_floor(&spec.peaks, vote_peaks);
             for &(mz, intensity) in &spec.peaks {
                 if intensity < floor {
@@ -450,20 +488,96 @@ impl ChunkFragmentIndex {
                             }
                             slot.0 += 1;
                             slot.1 += intensity;
+                            slot.2 += 1;
+                            slot.3 += intensity;
+                            if charge2 && dedupe {
+                                seen.insert(((e.0 as u64) << 32) | e.1.to_bits() as u64);
+                            }
+                        }
+                    }
+                }
+            }
+            if charge2 {
+                // Each peak read as a doubly-charged ion of a singly-charged
+                // b/y entry: m1 = 2 mz - proton, tolerance doubled.
+                for &(mz, intensity) in &spec.peaks {
+                    if intensity < floor {
+                        continue;
+                    }
+                    let m1 = 2.0 * mz - PROTON;
+                    let tol_da = 2.0 * fragment_tol.as_da(mz);
+                    let span = (tol_da / self.bin_width).ceil() as usize;
+                    let b = (m1 / self.bin_width) as usize;
+                    let b_lo = b.saturating_sub(span);
+                    if b_lo > n_bins - 1 {
+                        continue;
+                    }
+                    for bb in b_lo..=(b + span).min(n_bins - 1) {
+                        let base = self.bin_start[bb] as usize;
+                        let row = &self.block_off[bb * row_len..(bb + 1) * row_len];
+                        let seg = &self.entries
+                            [base + row[blk_lo] as usize..base + row[blk_hi + 1] as usize];
+                        for e in seg {
+                            if e.0 < id_lo {
+                                continue;
+                            }
+                            if e.0 >= id_hi {
+                                break;
+                            }
+                            if ((e.1 as f64) - m1).abs() <= tol_da {
+                                if dedupe
+                                    && !seen.insert(((e.0 as u64) << 32) | e.1.to_bits() as u64)
+                                {
+                                    continue;
+                                }
+                                let slot = &mut counts[(e.0 - id_lo) as usize];
+                                if slot.0 == 0 {
+                                    touched.push(e.0);
+                                }
+                                slot.0 += 1;
+                                slot.1 += intensity;
+                            }
                         }
                     }
                 }
             }
             let mut sel = Vec::new();
+            let mut base_sel = if diag && charge2 { Some(Vec::new()) } else { None };
             for &id in touched.iter() {
                 let slot = &mut counts[(id - id_lo) as usize];
                 if slot.0 >= min_matched {
                     sel.push((id, slot.0, slot.1));
                 }
-                *slot = (0, 0.0);
+                if let Some(bs) = base_sel.as_mut() {
+                    if slot.2 >= min_matched {
+                        bs.push((id, slot.2, slot.3));
+                    }
+                }
+                *slot = (0, 0.0, 0, 0.0);
             }
-            sel
+            (sel, base_sel)
         });
+        if let Some(mut bs) = base_sel {
+            select_top_k(&mut bs, top_k);
+            let mut arm = sel.clone();
+            select_top_k(&mut arm, top_k);
+            let in_exact = |id: u32| {
+                let m = self.form_mass[id as usize];
+                exact.iter().any(|&(a, b)| m >= a && m <= b)
+            };
+            let b_ids: rustc_hash::FxHashSet<u32> =
+                bs.iter().map(|x| x.0).filter(|&i| in_exact(i)).collect();
+            let a_ids: rustc_hash::FxHashSet<u32> =
+                arm.iter().map(|x| x.0).filter(|&i| in_exact(i)).collect();
+            let kept = b_ids.intersection(&a_ids).count() as u64;
+            DIAG[0].fetch_add(1, Ordering::Relaxed);
+            DIAG[1].fetch_add(b_ids.len() as u64, Ordering::Relaxed);
+            DIAG[2].fetch_add(a_ids.len() as u64, Ordering::Relaxed);
+            DIAG[3].fetch_add(kept, Ordering::Relaxed);
+            if b_ids.is_empty() && !a_ids.is_empty() {
+                DIAG[4].fetch_add(1, Ordering::Relaxed);
+            }
+        }
         select_top_k(&mut sel, top_k);
         sel.into_iter()
             .filter(|&(id, _, _)| {

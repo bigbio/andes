@@ -746,6 +746,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         cli.glyco,
         cli.fragment_index,
     );
+    {
+        use std::sync::atomic::Ordering;
+        search::fragment_index::EXP_CHARGE2_MIN_Z.store(cli.fi_charge2_min_z, Ordering::Relaxed);
+        search::fragment_index::EXP_CHARGE2_DEDUPE
+            .store(!cli.fi_charge2_nodedupe, Ordering::Relaxed);
+        search::fragment_index::EXP_CHARGE2_DIAG.store(cli.fi_charge2_diag, Ordering::Relaxed);
+    }
     params.fragment_index_top_k = if choice.use_index {
         search::search_params::FRAGMENT_INDEX_TOP_K
     } else {
@@ -1941,6 +1948,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    search::fragment_index::report_charge2_diag();
     if bench_mode {
         eprintln!("Bench mode: skipping TSV write.");
         release_at_exit(pin_candidates);

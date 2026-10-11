@@ -188,6 +188,18 @@ pub(crate) struct SearchArgs {
     #[arg(long = "fragment-index-slice-da", hide = true)]
     pub(crate) fragment_index_slice_da: Option<f64>,
 
+    /// EXPERIMENT: precursor charge from which peaks also vote as charge-2 ions (0 = off).
+    #[arg(long = "fi-charge2-min-z", hide = true, default_value_t = 0)]
+    pub(crate) fi_charge2_min_z: u8,
+
+    /// EXPERIMENT: do not dedupe an ion matched both as 1+ and 2+.
+    #[arg(long = "fi-charge2-nodedupe", hide = true, default_value_t = false)]
+    pub(crate) fi_charge2_nodedupe: bool,
+
+    /// EXPERIMENT: print shortlist overlap diagnostics for the charge-2 arm.
+    #[arg(long = "fi-charge2-diag", hide = true, default_value_t = false)]
+    pub(crate) fi_charge2_diag: bool,
+
     /// Precursor mass tolerance as `VALUE+unit`. Accepts ppm (e.g. `20ppm`,
     /// high-res) or Da (e.g. `0.02da`/`0.02Da`, low-res precursor selection).
     /// Default `20ppm`.

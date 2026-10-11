@@ -12,7 +12,7 @@ use model::mass::ISOTOPE;
 pub use model::scan::Ms1Scan;
 
 /// All MS1 scans of one run in RT order.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Ms1RunIndex {
     scans: Vec<Ms1Scan>,
     /// Native id → position, for scans that carry an id.

@@ -62,8 +62,8 @@ use crate::ms1_index::Ms1RunIndex;
 pub const MAX_ISOTOPES: usize = 4;
 /// A window with fewer MS1 scans than this is not fitted.
 pub const MIN_SCANS: usize = 5;
-/// Width grid, as multiples of `w_prior`.
-const WIDTH_GRID: [f64; 3] = [0.7, 1.0, 1.4];
+/// Width grid of [`fit`], as multiples of `w_prior`.
+pub const WIDTH_GRID: [f64; 3] = [0.7, 1.0, 1.4];
 /// Consistency factor of the median absolute deviation for a Gaussian.
 const MAD_SCALE: f64 = 1.4826;
 /// Detection limit used when the given one is not finite and positive.
@@ -214,7 +214,22 @@ pub fn fit_with(
     p: &EvidenceParams,
     scratch: &mut FitScratch,
 ) -> Option<Evidence> {
+    fit_on_grid(ms1, probe, charge, envelope, p, &WIDTH_GRID, scratch)
+}
+
+/// [`fit_with`] over the width grid `widths` (multiples of `w_prior`, not
+/// empty) instead of [`WIDTH_GRID`]. The extraction window is unchanged.
+pub fn fit_on_grid(
+    ms1: &Ms1RunIndex,
+    probe: &Probe,
+    charge: u8,
+    envelope: &[f32; 4],
+    p: &EvidenceParams,
+    widths: &[f64],
+    scratch: &mut FitScratch,
+) -> Option<Evidence> {
     debug_assert!(charge > 0, "charge must be positive");
+    debug_assert!(!widths.is_empty(), "width grid must not be empty");
     let prior = Prior::of(probe);
     let half = prior.half_window();
     let scans = ms1.scan_window(prior.t_hat - half, prior.t_hat + half);
@@ -244,7 +259,7 @@ pub fn fit_with(
     for (slot, trace) in ys.iter_mut().zip(y.iter()).take(n_iso) {
         *slot = trace;
     }
-    Some(fit_traces(
+    Some(fit_traces_on_grid(
         rt,
         &ys[..n_iso],
         m1,
@@ -253,6 +268,7 @@ pub fn fit_with(
         envelope,
         &prior,
         detection_limit,
+        widths,
         work,
     ))
 }
@@ -323,6 +339,34 @@ pub fn fit_traces(
     detection_limit: f64,
     work: &mut Workspace,
 ) -> Evidence {
+    fit_traces_on_grid(
+        rt,
+        traces,
+        m1,
+        mz0,
+        mu,
+        envelope,
+        prior,
+        detection_limit,
+        &WIDTH_GRID,
+        work,
+    )
+}
+
+/// [`fit_traces`] over the width grid `widths` (multiples of `w_prior`).
+#[allow(clippy::too_many_arguments)]
+fn fit_traces_on_grid(
+    rt: &[f64],
+    traces: &[&[f32]],
+    m1: &[f32],
+    mz0: &[f64],
+    mu: f64,
+    envelope: &[f32; 4],
+    prior: &Prior,
+    detection_limit: f64,
+    widths: &[f64],
+    work: &mut Workspace,
+) -> Evidence {
     debug_assert!(!rt.is_empty() && !traces.is_empty() && traces.len() <= MAX_ISOTOPES);
     let n_iso = traces.len().min(MAX_ISOTOPES);
     let traces = &traces[..n_iso];
@@ -343,7 +387,7 @@ pub fn fit_traces(
             mask |= 1 << i;
         }
     }
-    let (t0, w) = best_alignment(rt, traces, &pi, &ybar, &sigma, mask, prior, work);
+    let (t0, w) = best_alignment(rt, traces, &pi, &ybar, &sigma, mask, prior, widths, work);
     let g = &mut work.g;
     g.clear();
     g.extend(rt.iter().map(|&t| gaussian(t, t0, w)));
@@ -418,8 +462,8 @@ fn median_sorted(v: &[f32]) -> f64 {
     }
 }
 
-/// The (t0, w) maximising `LLR - (t0 - t_hat)^2 / (2 s^2)` over the grid, with
-/// every isotope in `mask`.
+/// The (t0, w) maximising `LLR - (t0 - t_hat)^2 / (2 s^2)` over the scan RTs
+/// and `widths * w_prior`, with every isotope in `mask`.
 #[allow(clippy::too_many_arguments)]
 fn best_alignment(
     rt: &[f64],
@@ -429,6 +473,7 @@ fn best_alignment(
     sigma: &[f64; MAX_ISOTOPES],
     mask: u8,
     prior: &Prior,
+    widths: &[f64],
     work: &mut Workspace,
 ) -> (f64, f64) {
     // z_j = sum_i pi_i (y_i[j] - ybar_i) / sigma_i^2 sums to 0 over j, so
@@ -461,7 +506,7 @@ fn best_alignment(
     for k in candidates {
         let t0 = rt[k];
         let penalty = (t0 - t_hat) * (t0 - t_hat) / (2.0 * s * s);
-        for f in WIDTH_GRID {
+        for &f in widths {
             let w = f * prior.w_prior;
             let (mut num, mut sg, mut sgg) = (0.0, 0.0, 0.0);
             for (&t, &zj) in rt.iter().zip(z.iter()) {

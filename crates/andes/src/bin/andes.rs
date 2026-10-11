@@ -24,6 +24,8 @@ mod memlimit;
 mod model_select;
 #[path = "andes/mono.rs"]
 mod mono;
+#[path = "andes/quant_mbr.rs"]
+mod quant_mbr;
 #[path = "andes/quant_run.rs"]
 mod quant_run;
 #[path = "../rescore.rs"]

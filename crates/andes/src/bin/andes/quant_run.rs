@@ -33,7 +33,7 @@ use search::search_index::SearchIndex;
 use crate::cli::Cli;
 
 #[path = "ms1_cache.rs"]
-mod ms1_cache;
+pub(crate) mod ms1_cache;
 use ms1_cache::Ms1Cache;
 
 /// Isotope-peak tolerance of the precursor-purity ladder (OpenMS default).
@@ -693,7 +693,7 @@ type Quantified = (usize, Option<FeatureQuant>, Option<FeatureQuant>);
 
 /// One chromatographic series per FAIMS compensation voltage (the whole run
 /// when it has at most one voltage).
-fn faims_groups(ms1: Ms1RunIndex) -> Vec<(Option<f32>, Ms1RunIndex)> {
+pub(crate) fn faims_groups(ms1: Ms1RunIndex) -> Vec<(Option<f32>, Ms1RunIndex)> {
     if ms1.faims_voltages().len() > 1 {
         ms1.split_by_faims()
             .into_iter()

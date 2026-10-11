@@ -7,7 +7,7 @@ use model::scan::Ms1Scan;
 use quant::ms1_index::Ms1RunIndex;
 use tempfile::NamedTempFile;
 
-pub(super) struct Ms1Cache {
+pub(crate) struct Ms1Cache {
     file: NamedTempFile,
 }
 
@@ -33,7 +33,7 @@ impl Ms1Cache {
 
     /// Writes a persistent run cache: magic, major and minor version, then the
     /// zstd-compressed body. The file appears at `path` only once complete.
-    pub(super) fn store_at(index: &Ms1RunIndex, path: &Path) -> io::Result<()> {
+    pub(crate) fn store_at(index: &Ms1RunIndex, path: &Path) -> io::Result<()> {
         let tmp = path.with_extension("cache.partial");
         {
             let mut f = BufWriter::new(std::fs::File::create(&tmp)?);
@@ -48,8 +48,7 @@ impl Ms1Cache {
     }
 
     /// Reads a persistent run cache; every error names `path`.
-    #[allow(dead_code)]
-    pub(super) fn load_from(path: &Path) -> io::Result<Ms1RunIndex> {
+    pub(crate) fn load_from(path: &Path) -> io::Result<Ms1RunIndex> {
         let named = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", path.display()));
         let mut f = BufReader::new(std::fs::File::open(path).map_err(named)?);
         let mut head = [0u8; 12];

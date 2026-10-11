@@ -52,5 +52,7 @@ pub use quant_out::{
     write_lfq_features_tsv, write_lfq_tsv, write_tmt_tsv, LfqRow, ModRecord, QuantId, TmtRow,
 };
 
+pub mod run_quant_table;
+
 pub mod feature_parquet;
 pub use feature_parquet::{write_feature_parquet, FeatureRecord, ProteinPosition};

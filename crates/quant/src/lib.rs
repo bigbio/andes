@@ -13,10 +13,12 @@
 //! * [`formula`]: peptide elemental formula → theoretical isotope envelope.
 //! * [`lfq`]: per-target feature quantification and the decoy-controlled
 //!   feature q-value.
+//! * [`library`]: precursor-level match-between-runs library entry gate.
 
 pub mod formula;
 pub mod isobaric;
 pub mod lfq;
+pub mod library;
 pub mod ms1_index;
 pub mod nnls;
 pub mod purity;

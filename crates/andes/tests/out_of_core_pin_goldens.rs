@@ -1,10 +1,24 @@
 //! Golden gates for the enumeration retrieval path (`--fragment-index off`) of
 //! the out-of-core candidate index, driven through the real CLI.
 //!
-//! Each case compares the PIN, rows sorted, against a golden digest (row count +
-//! FNV-1a 64 over the header and the sorted rows), and for calibration also the
-//! pre-pass outcome line. Rows are sorted because the rayon pipeline's row ORDER
+//! Rows are sorted before comparison because the rayon pipeline's row ORDER
 //! varies across runs; their content does not.
+//!
+//! Floating-point features (RichIonLLR, RankScoreFloat, ...) go through the
+//! platform's `exp`/`log`/`pow`, whose last-ulp rounding differs between C
+//! libraries (glibc vs macOS libm), and a 1-ulp change can move the sixth
+//! printed significant digit. So no gate hashes float columns bit for bit:
+//!
+//! - the `--chimeric` and `--refine` slice cases compare against a golden PIN
+//!   (`test-fixtures/goldens/*.pin.gz`, header + sorted rows) row by row —
+//!   every non-float field exactly, every float field to one unit in its sixth
+//!   significant digit (see `fields_match`);
+//! - the E. coli cases (too large to commit as PINs) compare a digest of the
+//!   non-float columns (`identity_digest`: row count + FNV-1a 64 over the header
+//!   and the sorted rows with float fields blanked), and for calibration also
+//!   the pre-pass outcome line. The non-float columns hold every row's SpecId,
+//!   label, scan, charge, peptide, proteins and integer features, so a change in
+//!   the candidate set, its order or its multiplicity still fails the gate.
 //!
 //! The defects these gates were built for need real scale to surface — a fixed
 //! modification on a real proteome (the `base_record_multiplicity` fixed-mod
@@ -21,17 +35,19 @@
 //! The `--chimeric` and `--refine` cases run on a 150-scan MS1-bearing slice and
 //! are not ignored.
 //!
-//! GOLDENS (recorded 2026-10-11). The E. coli and `--chimeric` digests were
-//! recorded from the in-memory candidate list (whole-database enumeration + a
-//! mass-bucket lookup), the path these searches took before the out-of-core index
-//! became the only one, and the out-of-core enumeration reproduced each of them
-//! byte for byte after sorting. REFINE_SLICE was recorded the same way, with the
-//! `--refine` second pass on the in-memory candidate list; searching the anchored
-//! database through an in-memory out-of-core index reproduced it (and the Astral
-//! benchmark PIN with `--refine`) byte for byte.
+//! GOLDENS (recorded 2026-10-11 on x86-64 Linux / glibc). The E. coli and
+//! `--chimeric` goldens were recorded from the in-memory candidate list
+//! (whole-database enumeration + a mass-bucket lookup), the path these searches
+//! took before the out-of-core index became the only one, and the out-of-core
+//! enumeration reproduced each of those PINs byte for byte after sorting. The
+//! `--refine` golden was recorded the same way, with the second pass on the
+//! in-memory candidate list; searching the anchored database through an
+//! in-memory out-of-core index reproduced it (and the Astral benchmark PIN with
+//! `--refine`) byte for byte.
 //!
 //! To regenerate after an intentional change, run the case's command line (see
-//! `run`) and digest the PIN with `pin_digest`.
+//! `run`), then either digest the PIN with `identity_digest` (E. coli) or write
+//! its header and sorted rows, gzipped, over the case's golden PIN (slices).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -43,17 +59,117 @@ fn workspace_root() -> PathBuf {
         .expect("canonicalize workspace root")
 }
 
-/// Row count and FNV-1a 64 of the header and the sorted rows, each followed by
-/// a newline.
-fn pin_digest(header: &str, rows: &[String]) -> (usize, u64) {
+/// A field printed as a non-integer number (`0.3`, `1e-07`, `inf`, `NaN`).
+fn is_float_field(v: &str) -> bool {
+    v.parse::<f64>().is_ok() && v.parse::<i64>().is_err()
+}
+
+/// Columns holding a non-integer number in any row.
+fn float_columns(rows: &[String]) -> Vec<bool> {
+    let mut float = Vec::new();
+    for row in rows {
+        for (i, v) in row.split('\t').enumerate() {
+            if i >= float.len() {
+                float.resize(i + 1, false);
+            }
+            float[i] |= is_float_field(v);
+        }
+    }
+    float
+}
+
+/// Row count and FNV-1a 64 of the header and the sorted rows with every float
+/// column's fields blanked, each line followed by a newline.
+fn identity_digest(header: &str, rows: &[String]) -> (usize, u64) {
+    let float = float_columns(rows);
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for line in std::iter::once(header).chain(rows.iter().map(String::as_str)) {
-        for &b in line.as_bytes().iter().chain(b"\n") {
+    let mut feed = |bytes: &[u8]| {
+        for &b in bytes {
             h ^= u64::from(b);
             h = h.wrapping_mul(0x0000_0100_0000_01b3);
         }
+    };
+    feed(header.as_bytes());
+    feed(b"\n");
+    for row in rows {
+        for (i, v) in row.split('\t').enumerate() {
+            if i > 0 {
+                feed(b"\t");
+            }
+            if !float[i] {
+                feed(v.as_bytes());
+            }
+        }
+        feed(b"\n");
     }
     (rows.len(), h)
+}
+
+/// Two PIN fields agree: identical text, or two floats within one unit of the
+/// sixth significant digit (`%g`-style output) or of the sixth decimal
+/// (fixed-point output) — the most a last-ulp difference in the platform's
+/// math library moves a printed value.
+fn fields_match(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    if !(is_float_field(a) && is_float_field(b)) {
+        return false;
+    }
+    let (x, y): (f64, f64) = (a.parse().unwrap(), b.parse().unwrap());
+    (x - y).abs() <= 1e-5 * x.abs().max(y.abs()) + 1e-6
+}
+
+/// Compare a PIN (header + sorted rows) with a gzipped golden PIN holding the
+/// header and the sorted rows; panics listing the first differing fields.
+fn assert_matches_golden_pin(header: &str, rows: &[String], golden: &str) {
+    use std::io::Read;
+    let path = workspace_root().join(golden);
+    let mut text = String::new();
+    flate2::read::GzDecoder::new(std::fs::File::open(&path).expect("open golden PIN"))
+        .read_to_string(&mut text)
+        .expect("inflate golden PIN");
+    let mut lines = text.lines();
+    let golden_header = lines.next().expect("golden header");
+    let golden_rows: Vec<&str> = lines.collect();
+    assert_eq!(header, golden_header, "PIN header differs from {golden}");
+    assert_eq!(
+        rows.len(),
+        golden_rows.len(),
+        "PIN row count differs from {golden}"
+    );
+    let cols: Vec<&str> = header.split('\t').collect();
+    let mut diffs: Vec<String> = Vec::new();
+    for (row, want) in rows.iter().zip(&golden_rows) {
+        let got: Vec<&str> = row.split('\t').collect();
+        let exp: Vec<&str> = want.split('\t').collect();
+        if got.len() != exp.len() {
+            diffs.push(format!(
+                "{}: {} fields, golden {}",
+                got[0],
+                got.len(),
+                exp.len()
+            ));
+            continue;
+        }
+        for (i, (g, e)) in got.iter().zip(&exp).enumerate() {
+            if !fields_match(g, e) {
+                let col = cols.get(i).copied().unwrap_or("?");
+                diffs.push(format!("{} {col}: {g} (golden {e})", exp[0]));
+            }
+        }
+    }
+    assert!(
+        diffs.is_empty(),
+        "{} field(s) differ from {golden}; first ones:\n{}",
+        diffs.len(),
+        diffs
+            .iter()
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 }
 
 /// A PIN's header and its rows, sorted.
@@ -105,17 +221,17 @@ fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
     (header, rows, stderr)
 }
 
-/// One E. coli case: (rows, FNV-1a 64, calibration outcome line).
+/// One E. coli case: (rows, `identity_digest` FNV-1a 64, calibration outcome line).
 type Golden = (usize, u64, Option<&'static str>);
 
-const ECOLI_DEFAULT_MODS: Golden = (77_097, 0x6b9c_4360_20b4_6f09, None);
-const ECOLI_FIXED_MODS_ONLY: Golden = (75_750, 0x4b74_9375_f634_0a30, None);
-const ECOLI_ONE_VARIABLE_MOD: Golden = (77_110, 0x7f45_259f_c7b4_e261, None);
+const ECOLI_DEFAULT_MODS: Golden = (77_097, 0xc794_629a_1562_0457, None);
+const ECOLI_FIXED_MODS_ONLY: Golden = (75_750, 0xb351_f0e9_b195_ade3, None);
+const ECOLI_ONE_VARIABLE_MOD: Golden = (77_110, 0xb525_358c_ec34_64c2, None);
 /// The pre-pass scores but the sample is too small to calibrate, so the PIN
 /// equals the calibration-off one.
 const ECOLI_PRECURSOR_CAL_AUTO: Golden = (
     77_097,
-    0x6b9c_4360_20b4_6f09,
+    0xc794_629a_1562_0457,
     Some("Precursor mass calibration skipped (insufficient confident PSMs: 492 with PSMs, 55 below RawScore floor, 0 failed |residual|>50ppm"),
 );
 
@@ -162,7 +278,7 @@ fn assert_ecoli_golden(label: &str, mods: Option<&str>, precursor_cal: &str, gol
         "[{label}] only {} rows — the search did not run at the intended scale",
         rows.len()
     );
-    let (n, h) = pin_digest(&header, &rows);
+    let (n, h) = identity_digest(&header, &rows);
     assert_eq!(
         (n, h, cal.as_deref()),
         golden,
@@ -247,8 +363,8 @@ fn run_chimeric(fragment_index: &str, out: &Path) -> (String, Vec<String>, Strin
     )
 }
 
-/// `--chimeric` with enumeration retrieval: (rows, FNV-1a 64).
-const CHIMERIC_SLICE: (usize, u64) = (418, 0xbdc3_ecdd_1ae9_7ce0);
+/// `--chimeric` with enumeration retrieval: header + sorted rows.
+const CHIMERIC_SLICE_PIN: &str = "test-fixtures/goldens/chimeric_slice.pin.gz";
 
 /// Rows beyond one per scan: the chimeric secondaries (Pass 1 keeps top-1).
 fn extra_rows(rows: &[String]) -> usize {
@@ -268,7 +384,7 @@ fn chimeric_enumeration_pin_matches_golden() {
         secondaries > 50,
         "fixture produced only {secondaries} chimeric secondary rows — the gate would be vacuous"
     );
-    assert_eq!(pin_digest(&header, &rows), CHIMERIC_SLICE);
+    assert_matches_golden_pin(&header, &rows, CHIMERIC_SLICE_PIN);
 }
 
 /// Fragment-index retrieval changes Pass 1's candidates by design, so only the
@@ -327,8 +443,8 @@ fn run_refine(fragment_index: &str, out: &Path) -> (String, Vec<String>, String)
     )
 }
 
-/// `--refine` with enumeration retrieval: (rows, FNV-1a 64).
-const REFINE_SLICE: (usize, u64) = (1_764, 0x17b2_a8dc_6bc4_b1df);
+/// `--refine` with enumeration retrieval: header + sorted rows.
+const REFINE_SLICE_PIN: &str = "test-fixtures/goldens/refine_slice.pin.gz";
 
 /// Number of rows with `IsRefinement = 1`.
 fn refinement_rows(header: &str, rows: &[String]) -> usize {
@@ -350,7 +466,7 @@ fn refine_enumeration_pin_matches_golden() {
         refined > 100,
         "fixture produced only {refined} IsRefinement rows — the gate would be vacuous"
     );
-    assert_eq!(pin_digest(&header, &rows), REFINE_SLICE);
+    assert_matches_golden_pin(&header, &rows, REFINE_SLICE_PIN);
 }
 
 /// Fragment-index retrieval changes Pass 1's candidates by design, so only the

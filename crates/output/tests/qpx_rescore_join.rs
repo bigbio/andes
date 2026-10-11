@@ -21,7 +21,7 @@ use model::{AminoAcidSetBuilder, Enzyme, ModLocation, Modification, ResidueSpec,
 use output::PercolatorPsm;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use scoring_crate::RankScorer;
-use search::{match_spectra, SearchIndex, SearchParams};
+use search::{match_spectra_out_of_core, SearchIndex, SearchParams};
 
 fn fixture(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -87,7 +87,8 @@ fn run_bsa_search() -> (
         .filter_map(|r| r.ok())
         .collect();
 
-    let (queues, candidates) = match_spectra(&spectra, &idx, &params, &scorer, 0.5, "XXX_");
+    let (queues, candidates) =
+        match_spectra_out_of_core(&spectra, &idx, &params, &scorer, 0.5, "XXX_").expect("search");
     (spectra, queues, candidates, idx, params)
 }
 

@@ -10,7 +10,27 @@ use model::{
 };
 use scoring_crate::param_model::{IonType, Partition, SpecDataType};
 use scoring_crate::{Param, RankScorer};
-use search::{match_spectra, SearchIndex, SearchParams};
+use search::candidate_gen::Candidate;
+use search::{PreparedSearch, SearchIndex, SearchParams, TopNQueue};
+
+/// Search `spectra` on the out-of-core path with the index built in memory and
+/// `params`' retrieval (per-spectrum enumeration here: `fragment_index_top_k`
+/// is 0), so peakless spectra still reach every candidate in their window.
+fn search_enumerated(
+    spectra: &[Spectrum],
+    idx: &SearchIndex,
+    params: &SearchParams,
+    scorer: &RankScorer,
+    fragment_tolerance_da: f64,
+    decoy_prefix: &str,
+) -> (Vec<TopNQueue>, Vec<Candidate>) {
+    let mut prepared =
+        PreparedSearch::prepare_in_memory(idx, params, scorer, fragment_tolerance_da, decoy_prefix)
+            .expect("build the in-memory candidate index");
+    let queues = prepared.run_chunk(spectra, 0);
+    prepared.sync_materialized_candidates();
+    (queues, std::mem::take(&mut prepared.candidates))
+}
 
 fn make_spectrum(precursor_mz: f64, charge: Option<i32>) -> Spectrum {
     Spectrum {
@@ -117,7 +137,7 @@ fn known_peptide_appears_in_top_n() {
     let mz = (target_mass + charge as f64 * PROTON) / charge as f64;
 
     let spec = make_spectrum(mz, Some(charge as i32));
-    let (queues, candidates) = match_spectra(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
+    let (queues, candidates) = search_enumerated(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
 
     assert_eq!(queues.len(), 1);
     let top = queues.into_iter().next().unwrap().into_sorted_vec();
@@ -177,7 +197,7 @@ fn top_n_capacity_respected() {
         let mut p = params.clone();
         p.top_n_psms_per_spectrum = top_n;
         let spec = make_spectrum(mz, Some(charge as i32));
-        let (queues, _candidates) = match_spectra(&[spec], &idx, &p, &tiny_scorer(), 0.05, "XXX");
+        let (queues, _candidates) = search_enumerated(&[spec], &idx, &p, &tiny_scorer(), 0.05, "XXX");
         queues.into_iter().next().unwrap().into_sorted_vec()
     };
 
@@ -229,7 +249,7 @@ fn spectrum_without_charge_tries_charge_range() {
     let mz = (mass + charge as f64 * PROTON) / charge as f64;
 
     let spec = make_spectrum(mz, None); // no charge!
-    let (queues, _candidates) = match_spectra(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
+    let (queues, _candidates) = search_enumerated(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
     let top = queues.into_iter().next().unwrap().into_sorted_vec();
     assert!(!top.is_empty(), "expected charge_range to find a match");
     assert_eq!(top[0].charge_used, 2);
@@ -273,7 +293,7 @@ fn charge_missing_spectrum_uses_per_charge_scored_spec() {
     let mz = (mass + charge as f64 * PROTON) / charge as f64;
 
     let spec = make_spectrum(mz, None); // charge-missing
-    let (queues, _candidates) = match_spectra(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
+    let (queues, _candidates) = search_enumerated(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
     let top = queues.into_iter().next().unwrap().into_sorted_vec();
 
     // The only match must be at charge 3 (the precursor m/z is z=3-exact).

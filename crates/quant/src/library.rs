@@ -8,13 +8,17 @@
 ///
 /// `rows` holds `(precursor_id, is_decoy, psm_score)` with higher scores
 /// better. Each precursor keeps its best PSM score across all runs, then
-/// precursors are ranked by `(score desc, id asc)` and run through
+/// precursors are ranked by `(score desc, decoys before targets, id asc)` (ties
+/// are conservative: a target tied with a decoy never gets a lower q than it
+/// would with the decoy first) and run through
 /// target/decoy competition: `(D + 1) / max(T, 1)` at each rank, a running
 /// minimum from the worst rank upwards, clamped to at most 1.
 ///
 /// A NaN score is treated as the worst possible score. A precursor id is
-/// expected to be all-target or all-decoy; if it is mixed, the first row seen
-/// decides. The result is indexed by precursor id, `None` for ids without rows.
+/// expected to be all-target or all-decoy (checked by `debug_assert!`); in release
+/// builds a mixed id is decided by the first row seen. Ids are assumed dense:
+/// the result is indexed by precursor id and has length `max id + 1`, `None`
+/// for ids without rows.
 pub fn precursor_qvalues(rows: &[(u32, bool, f64)]) -> Vec<Option<f64>> {
     let Some(max_id) = rows.iter().map(|r| r.0).max() else {
         return Vec::new();
@@ -30,7 +34,11 @@ pub fn precursor_qvalues(rows: &[(u32, bool, f64)]) -> Vec<Option<f64>> {
         };
         let slot = &mut best[id as usize];
         match slot {
-            Some((_, s)) => {
+            Some((d, s)) => {
+                debug_assert_eq!(
+                    *d, is_decoy,
+                    "precursor id {id} mixes target and decoy rows"
+                );
                 if score > *s {
                     *s = score;
                 }
@@ -43,7 +51,8 @@ pub fn precursor_qvalues(rows: &[(u32, bool, f64)]) -> Vec<Option<f64>> {
         .enumerate()
         .filter_map(|(id, b)| b.map(|(d, s)| (id as u32, d, s)))
         .collect();
-    ranked.sort_by(|a, b| b.2.total_cmp(&a.2).then(a.0.cmp(&b.0)));
+    // Score desc; on ties decoys first (conservative), then id for determinism.
+    ranked.sort_by(|a, b| b.2.total_cmp(&a.2).then(b.1.cmp(&a.1)).then(a.0.cmp(&b.0)));
 
     let mut fdr = Vec::with_capacity(ranked.len());
     let (mut t, mut d) = (0u64, 0u64);
@@ -106,13 +115,34 @@ mod tests {
 
     #[test]
     fn nan_scores_rank_worst_and_do_not_panic() {
-        // The NaN target ranks below the finite decoy, so it cannot beat it.
-        let rows = [(0, false, f64::NAN), (1, true, 1.0), (2, false, 5.0)];
+        // 100 strong targets, a decoy at 1.0, and a NaN-scored target. If NaN
+        // were ranked best the NaN target would get the low q of the strong
+        // targets; ranked worst it sits below the decoy.
+        let mut rows: Vec<(u32, bool, f64)> =
+            (0..100).map(|i| (i, false, 100.0 + i as f64)).collect();
+        rows.push((100, true, 1.0));
+        rows.push((101, false, f64::NAN));
         let q = precursor_qvalues(&rows);
-        assert!(q[2].unwrap() < q[0].unwrap() + 1e-12);
-        assert_eq!(q[2], Some(1.0));
+        let (strong, decoy, nan) = (q[0].unwrap(), q[100].unwrap(), q[101].unwrap());
+        assert!(nan >= decoy, "{nan} < {decoy}");
+        assert!(nan > strong, "{nan} <= {strong}");
         // A NaN in one PSM does not hide a finite score of the same precursor.
         let q = precursor_qvalues(&[(0, false, f64::NAN), (0, false, 4.0)]);
-        assert_eq!(q[0], Some(1.0 / 1.0));
+        assert_eq!(q[0], Some(1.0));
+    }
+
+    #[test]
+    fn target_decoy_tie_is_conservative() {
+        // 9 strong targets, then a target and a decoy tied at 5.0. Decoy-first
+        // gives the tied target (D+1)/T = 2/10; target-first would give 1/10.
+        let strong: Vec<(u32, bool, f64)> = (0..9).map(|i| (i, false, 100.0 + i as f64)).collect();
+        let mut a = strong.clone();
+        a.extend([(9, false, 5.0), (10, true, 5.0)]);
+        let mut b = strong;
+        b.extend([(9, true, 5.0), (10, false, 5.0)]);
+        let ta = precursor_qvalues(&a)[9].unwrap();
+        let tb = precursor_qvalues(&b)[10].unwrap();
+        assert!((ta - 0.2).abs() < 1e-12, "{ta}");
+        assert_eq!(ta, tb);
     }
 }

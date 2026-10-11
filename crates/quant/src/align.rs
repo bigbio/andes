@@ -16,11 +16,16 @@
 //!    `t_p`, and every precursor's consensus is the median over its aligned
 //!    runs of `f_r^{-1}(rt)` under those final maps (for a precursor seen in
 //!    one run, just `f_r^{-1}(rt)`).
-//! 4. Each run's residual width `sigma_r(t)` is `1.4826 * MAD` of
-//!    `rt - f_r(t_p)` in the same bins, smoothed by a running median of 3 and
-//!    floored at [`AlignParams::min_spacing_s`]. Each precursor's extra
-//!    dispersion is
-//!    `tau_p^2 = max(0, mean_r e^2 - mean_r sigma_r^2) * n_p / (n_p + 3)`.
+//! 4. Residuals are leave-one-out: for an observation of `p` in run `r`,
+//!    `e = (rt - f_r(t_p^(-r))) / sqrt(1 + 1 / (n_p - 1))`, where `t_p^(-r)`
+//!    is the consensus without run `r`; the scale makes `e` estimate the
+//!    per-observation noise (an in-sample residual against a median over few
+//!    runs collapses towards 0). Each run's residual width `sigma_r(t)` is
+//!    `1.4826 * MAD` of the anchors' `e` in the same bins as the map, smoothed
+//!    by a running median of 3 and floored at [`AlignParams::min_spacing_s`].
+//!    Each precursor's extra dispersion is
+//!    `tau_p^2 = max(0, mean_r e^2 - mean_r sigma_r^2) * n_p / (n_p + 3)`
+//!    over the same residuals (0 when `n_p = 1`).
 //!
 //! The transfer uncertainty into run `r` is
 //! `s = sqrt(sigma_r(t_p)^2 * (1 + 1 / n_p) + tau_p^2)`.
@@ -220,7 +225,7 @@ impl Alignment {
                 .filter(move |&i| Some(self.obs_runs[i]) != exclude)
                 .map(|i| (self.obs_runs[i], self.obs_rts[i]))
         };
-        let mut inv: Vec<f64> = used()
+        let inv: Vec<f64> = used()
             .map(|(r, rt)| {
                 self.maps[r as usize]
                     .as_ref()
@@ -231,13 +236,15 @@ impl Alignment {
             return None;
         }
         let n = inv.len();
-        let t = median_in_place(&mut inv);
+        let mut sorted = inv.clone();
+        let t = median_in_place(&mut sorted);
+        if n < 2 {
+            return Some((t, n, 0.0));
+        }
+        let pairs: Vec<(u16, f64)> = used().collect();
+        let res = loo_residuals(&self.maps, &pairs, &inv);
         let (mut e2, mut s2) = (0.0, 0.0);
-        for (r, rt) in used() {
-            let Some(map) = self.maps[r as usize].as_ref() else {
-                continue;
-            };
-            let e = rt - map.apply(t);
+        for (&(r, _), &e) in pairs.iter().zip(&res) {
             let s = self.sigma_at(r, t);
             e2 += e * e;
             s2 += s * s;
@@ -358,11 +365,30 @@ pub fn align(
     }
     fit_all(&mut maps, &t);
 
+    // Leave-one-out residuals of the anchors, as (consensus t_p, e) per run.
+    let mut run_res: Vec<Vec<(f64, f64)>> = vec![Vec::new(); n_runs];
+    let mut pairs: Vec<(u16, f64)> = Vec::new();
+    for &pr in &anchor_ids {
+        pairs.clear();
+        pairs.extend(group(pr).map(|i| (obs_runs[i], obs_rts[i])));
+        let inv: Vec<f64> = pairs
+            .iter()
+            .map(|&(r, rt)| maps[r as usize].as_ref().map_or(f64::NAN, |m| m.invert(rt)))
+            .collect();
+        buf.clear();
+        buf.extend_from_slice(&inv);
+        let tc = median_in_place(&mut buf);
+        for (&(r, _), e) in pairs.iter().zip(loo_residuals(&maps, &pairs, &inv)) {
+            run_res[r as usize].push((tc, e));
+        }
+    }
     let residual_sd: Vec<Option<Vec<(f64, f64)>>> = (0..n_runs)
         .map(|r| {
-            maps[r]
-                .as_ref()
-                .map(|m| residual_width(&sorted_pairs(&run_pairs[r], &t), m, p.min_spacing_s))
+            maps[r].as_ref().map(|_| {
+                let v = &mut run_res[r];
+                v.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+                residual_width(v, p.min_spacing_s)
+            })
         })
         .collect();
 
@@ -584,9 +610,43 @@ fn mean_map(maps: &[Option<RunMap>]) -> Option<RunMap> {
     })
 }
 
-/// Residual width knots `(median t_p, 1.4826 * MAD)` in the map's bins,
-/// smoothed by a running median of 3 (ends kept) and floored at `floor`.
-fn residual_width(pairs: &[(f64, f64)], map: &RunMap, floor: f64) -> Vec<(f64, f64)> {
+/// Leave-one-out residuals of one precursor's observations `(run, rt)` (at
+/// least two), given their consensus-scale values `inv = f_r^{-1}(rt)`:
+/// `(rt - f_r(median of the other inv)) / sqrt(1 + 1 / (n - 1))`.
+fn loo_residuals(maps: &[Option<RunMap>], obs: &[(u16, f64)], inv: &[f64]) -> Vec<f64> {
+    let n = inv.len();
+    debug_assert!(n >= 2 && obs.len() == n);
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| inv[a].total_cmp(&inv[b]).then(a.cmp(&b)));
+    let mut rank = vec![0usize; n];
+    for (k, &i) in order.iter().enumerate() {
+        rank[i] = k;
+    }
+    let m = n - 1;
+    let scale = (1.0 + 1.0 / m as f64).sqrt();
+    (0..n)
+        .map(|i| {
+            let k = rank[i];
+            // j-th smallest of the others.
+            let get = |j: usize| inv[order[if j < k { j } else { j + 1 }]];
+            let t_loo = if m % 2 == 1 {
+                get(m / 2)
+            } else {
+                0.5 * (get(m / 2 - 1) + get(m / 2))
+            };
+            let (r, rt) = obs[i];
+            let fitted = maps[r as usize]
+                .as_ref()
+                .map_or(f64::NAN, |mp| mp.apply(t_loo));
+            (rt - fitted) / scale
+        })
+        .collect()
+}
+
+/// Residual width knots `(median t_p, 1.4826 * MAD of e)` over equal-count
+/// bins of `pairs = (t_p, e)` sorted by `t_p`, smoothed by a running median of
+/// 3 (ends kept) and floored at `floor`.
+fn residual_width(pairs: &[(f64, f64)], floor: f64) -> Vec<(f64, f64)> {
     let mut xs = Vec::new();
     let mut res = Vec::new();
     let mut knots: Vec<(f64, f64)> = bins(pairs.len())
@@ -595,7 +655,7 @@ fn residual_width(pairs: &[(f64, f64)], map: &RunMap, floor: f64) -> Vec<(f64, f
             xs.clear();
             res.clear();
             xs.extend(pairs[b.clone()].iter().map(|q| q.0));
-            res.extend(pairs[b].iter().map(|&(t, rt)| rt - map.apply(t)));
+            res.extend(pairs[b].iter().map(|q| q.1));
             let x = median_in_place(&mut xs);
             let med = median_in_place(&mut res);
             for e in res.iter_mut() {
@@ -978,6 +1038,29 @@ mod tests {
         );
         assert!(mean.abs() < 0.5, "{mean}");
         assert!(worst < 4.0, "{worst}");
+    }
+
+    #[test]
+    fn sigma_tracks_true_noise() {
+        let three = three_warps();
+        let six: [fn(f64) -> f64; 6] = [
+            |t| t,
+            |t| 1.1 * t + 30.0,
+            |t| t + 60.0 * (t / 3600.0).powi(2),
+            |t| 0.95 * t - 10.0,
+            |t| t + 40.0,
+            |t| 1.02 * t,
+        ];
+        for (name, warps) in [("3 runs", &three[..]), ("6 runs", &six[..])] {
+            let obs = synth(2000, warps, 5.0, 12);
+            let a = align(&obs, 2000, warps.len(), &AlignParams::default());
+            for (r, knots) in a.residual_sd.iter().enumerate() {
+                let sds: Vec<f64> = knots.as_ref().unwrap().iter().map(|k| k.1).collect();
+                let m = median(&sds);
+                eprintln!("sigma_tracks_true_noise: {name}, run {r}: median sigma_r = {m:.3}");
+                assert!((m - 5.0).abs() < 1.25, "{name} run {r}: {m}");
+            }
+        }
     }
 
     #[test]

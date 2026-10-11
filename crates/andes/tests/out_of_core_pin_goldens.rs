@@ -25,7 +25,10 @@
 //! recorded from the in-memory candidate list (whole-database enumeration + a
 //! mass-bucket lookup), the path these searches took before the out-of-core index
 //! became the only one, and the out-of-core enumeration reproduced each of them
-//! byte for byte after sorting. REFINE_SLICE: see its comment.
+//! byte for byte after sorting. REFINE_SLICE was recorded the same way, with the
+//! `--refine` second pass on the in-memory candidate list; searching the anchored
+//! database through an in-memory out-of-core index reproduced it (and the Astral
+//! benchmark PIN with `--refine`) byte for byte.
 //!
 //! To regenerate after an intentional change, run the case's command line (see
 //! `run`) and digest the PIN with `pin_digest`.
@@ -105,10 +108,16 @@ fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
 /// One E. coli case: (rows, FNV-1a 64, calibration outcome line).
 type Golden = (usize, u64, Option<&'static str>);
 
-const ECOLI_DEFAULT_MODS: Golden = (0, 0, None);
-const ECOLI_FIXED_MODS_ONLY: Golden = (0, 0, None);
-const ECOLI_ONE_VARIABLE_MOD: Golden = (0, 0, None);
-const ECOLI_PRECURSOR_CAL_AUTO: Golden = (0, 0, None);
+const ECOLI_DEFAULT_MODS: Golden = (77_097, 0x6b9c_4360_20b4_6f09, None);
+const ECOLI_FIXED_MODS_ONLY: Golden = (75_750, 0x4b74_9375_f634_0a30, None);
+const ECOLI_ONE_VARIABLE_MOD: Golden = (77_110, 0x7f45_259f_c7b4_e261, None);
+/// The pre-pass scores but the sample is too small to calibrate, so the PIN
+/// equals the calibration-off one.
+const ECOLI_PRECURSOR_CAL_AUTO: Golden = (
+    77_097,
+    0x6b9c_4360_20b4_6f09,
+    Some("Precursor mass calibration skipped (insufficient confident PSMs: 492 with PSMs, 55 below RawScore floor, 0 failed |residual|>50ppm"),
+);
 
 fn assert_ecoli_golden(label: &str, mods: Option<&str>, precursor_cal: &str, golden: Golden) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -239,7 +248,7 @@ fn run_chimeric(fragment_index: &str, out: &Path) -> (String, Vec<String>, Strin
 }
 
 /// `--chimeric` with enumeration retrieval: (rows, FNV-1a 64).
-const CHIMERIC_SLICE: (usize, u64) = (0, 0);
+const CHIMERIC_SLICE: (usize, u64) = (418, 0xbdc3_ecdd_1ae9_7ce0);
 
 /// Rows beyond one per scan: the chimeric secondaries (Pass 1 keeps top-1).
 fn extra_rows(rows: &[String]) -> usize {
@@ -319,7 +328,7 @@ fn run_refine(fragment_index: &str, out: &Path) -> (String, Vec<String>, String)
 }
 
 /// `--refine` with enumeration retrieval: (rows, FNV-1a 64).
-const REFINE_SLICE: (usize, u64) = (0, 0);
+const REFINE_SLICE: (usize, u64) = (1_764, 0x17b2_a8dc_6bc4_b1df);
 
 /// Number of rows with `IsRefinement = 1`.
 fn refinement_rows(header: &str, rows: &[String]) -> usize {

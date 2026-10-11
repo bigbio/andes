@@ -202,68 +202,6 @@ fn small_search_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
     (spectra, idx, params)
 }
 
-/// Small search: two proteins; spectra targeting an unmodified peptide, an
-/// Oxidation-M modified peptide, and a peptide shared across both proteins.
-fn small_search_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
-    // PEPTMIDEK contains an M (Ox-M), WVTFISLLR is a clean tryptic peptide,
-    // SHAREDPEPK appears in BOTH proteins (multi-protein aggregation).
-    let target = ProteinDb {
-        proteins: vec![
-            Protein {
-                accession: "P1".into(),
-                description: "fixture one".into(),
-                sequence: b"MKPEPTMIDEKWVTFISLLRSHAREDPEPK".to_vec(),
-            },
-            Protein {
-                accession: "P2".into(),
-                description: "fixture two".into(),
-                sequence: b"AAGTLLNRSHAREDPEPKGGGR".to_vec(),
-            },
-        ],
-    };
-    let idx = SearchIndex::from_target_db(&target, "XXX");
-
-    let ox_m = Modification {
-        name: "Oxidation".to_string(),
-        mass_delta: 15.99491,
-        residue: ResidueSpec::Specific(b'M'),
-        location: ModLocation::Anywhere,
-        fixed: false,
-        accession: None,
-        neutral_losses: Vec::new(),
-        loss_class: 0,
-    };
-    let aa_set = AminoAcidSetBuilder::new_standard()
-        .add_variable_mod(ox_m.clone())
-        .build()
-        .unwrap();
-    let mut params = SearchParams::default_tryptic(aa_set);
-    params.min_length = 3;
-    params.max_variable_mods_per_peptide = 1;
-    params.top_n_psms_per_spectrum = 5;
-    params.min_peaks = 0;
-
-    // Spectrum targeting the Ox-M modified PEPTMIDEK.
-    let ox_residues = {
-        let mut r = residues(b"PEPTMIDEK");
-        // place Ox on the M (index 4)
-        r[4].mod_ = Some(model::modification::leak_mod(ox_m));
-        r
-    };
-    let ox_pep = Peptide::new(ox_residues, b'K', b'W');
-    // Unmodified WVTFISLLR.
-    let clean_pep = Peptide::new(residues(b"WVTFISLLR"), b'K', b'S');
-    // Shared peptide (both proteins).
-    let shared_pep = Peptide::new(residues(b"SHAREDPEPK"), b'R', b'-');
-
-    let spectra = vec![
-        spectrum_for(&ox_pep, 2, "scan=ox"),
-        spectrum_for(&clean_pep, 2, "scan=clean"),
-        spectrum_for(&shared_pep, 2, "scan=shared"),
-    ];
-    (spectra, idx, params)
-}
-
 /// Asymmetric precursor tolerance (wide on the `left` = "peptide lighter than
 /// precursor" side, tight on the `right`) plus a FIXED carbamidomethyl-C and NO
 /// variable mods. Several near-isobaric tryptic peptides sit on the WIDE side of

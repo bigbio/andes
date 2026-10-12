@@ -2,7 +2,8 @@
 
 Encoding (mirrored by ``onnx-infer::rt_native``):
 - tokens: [N-term, residues..., C-term], PAD = 0, N-term = 1, C-term = 2,
-  residue = 3 + index in ``AA``; at most ``MAX_LEN`` residues.
+  residue = 3 + index in ``AA``; at most ``MAX_LEN`` residues. I is encoded
+  as L (isobaric; the training sequences carry no I).
 - per position a composition vector ``[C, H, N, O, S, P, other, mass/100]``
   (``mod_composition``), summed over the mods at that position and multiplied
   by ``COMP_SCALE``. N-terminal mods sit on the N-term token, C-terminal mods
@@ -99,7 +100,10 @@ def parse_andes(s: str):
 
 
 def encode(seq: str, mods):
-    """-> (tokens int64 [L+2], comp float32 [L+2, 8]) or None if unsupported."""
+    """-> (tokens int64 [L+2], comp float32 [L+2, 8]) or None if unsupported.
+
+    I is encoded as L: the training sequences (quantms reanalysis) carry no I."""
+    seq = seq.replace("I", "L")
     if not (1 <= len(seq) <= MAX_LEN) or any(c not in AA_TOK for c in seq):
         return None
     n = len(seq)

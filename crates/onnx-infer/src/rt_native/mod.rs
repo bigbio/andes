@@ -4,7 +4,7 @@
 //! this module reproduces its forward pass from an `ARTN0001` weight file.
 //!
 //! Encoding: tokens `[N-term, residues…, C-term]` (N-term = 1, C-term = 2,
-//! residue = 3 + index in [`AA`]) and, per position, the summed elemental
+//! residue = 3 + index in [`AA`]; I is encoded as L) and, per position, the summed elemental
 //! composition of its modifications (see [`mods`]) scaled by [`COMP_SCALE`].
 //! N-terminal mods sit on the N-term token, C-terminal mods on the C-term token,
 //! so an unseen PTM is described by its composition rather than by a learned id.
@@ -203,6 +203,8 @@ impl RtPeptide {
         let mut tok = Vec::with_capacity(n + 2);
         tok.push(1);
         for c in self.sequence.bytes() {
+            // I is encoded as L: the training sequences carry no I.
+            let c = if c == b'I' { b'L' } else { c };
             tok.push(3 + AA.iter().position(|&a| a == c)?);
         }
         tok.push(2);
@@ -553,5 +555,8 @@ mod tests {
         assert_eq!(tok, vec![1, 3, 3 + 8, 2]);
         assert!((comp[0][0] - 0.2).abs() < 1e-6 && (comp[0][7] - 0.42010565).abs() < 1e-6);
         assert!(comp[1].iter().all(|v| *v == 0.0));
+        let i = RtPeptide::from_proforma("PIK").unwrap().encode().unwrap().0;
+        let l = RtPeptide::from_proforma("PLK").unwrap().encode().unwrap().0;
+        assert_eq!(i, l);
     }
 }

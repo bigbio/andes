@@ -57,12 +57,15 @@ def encode_forms(forms):
 
 
 class Batcher:
-    def __init__(self, rows, toks, comps, runs_per_batch, per_run, rng):
+    def __init__(self, rows, toks, comps, runs_per_batch, per_run, rng, min_rows=16):
         self.rng = rng
         self.toks, self.comps = toks, comps
         self.runs_per_batch, self.per_run = runs_per_batch, per_run
         g = rows.groupby("run_id").indices
-        self.groups = [(r, idx) for r, idx in g.items() if len(idx) >= 16]
+        self.groups = [(r, idx) for r, idx in g.items() if len(idx) >= min_rows]
+        if not self.groups:
+            raise ValueError("no run has enough rows to sample")
+        self.runs_per_batch = min(runs_per_batch, len(self.groups))
         w = np.array([np.sqrt(len(i)) for _, i in self.groups])
         self.p = w / w.sum()
         self.form = rows.form_id.values
@@ -144,10 +147,14 @@ def main():
         col = "has_phospho" if a.fewshot_ptm == "phospho" else "has_tmt"
         pool = t[(~t.holdout) & (t.split == "train") & t[col]]
         pick = rng.choice(np.asarray(pool.peptidoform.unique()), a.fewshot_n, replace=False)
-        few = pool[pool.peptidoform.isin(set(pick))]
-        # the PTM peptides need same-run partners to rank against
-        few = t[t.run_id.isin(set(few.run_id)) & base & (t.split == "train")].pipe(
-            lambda x: x[(~x[col]) | x.peptidoform.isin(set(pick))])
+        picked = pool.peptidoform.isin(set(pick))
+        runs = set(pool[picked].run_id)
+        # the picked PTM peptidoforms plus every non-PTM train row of the same runs
+        cand = t[t.run_id.isin(runs) & (~t.holdout) & (t.split == "train")]
+        few = cand[(~cand[col]) | cand.peptidoform.isin(set(pick))]
+        few = few[few.run_id.isin(set(few[few[col]].run_id))]
+        print(f"few-shot rows: {int(few[col].sum())} PTM rows of {few[col].sum() and few[few[col]].peptidoform.nunique()} "
+              f"peptidoforms in {few.run_id.nunique()} runs", flush=True)
         print(f"few-shot {a.fewshot_ptm}: {a.fewshot_n} peptidoforms, {len(few)} rows incl. partners", flush=True)
     print(f"train rows {len(train)} val rows {len(val)}", flush=True)
 
@@ -162,7 +169,7 @@ def main():
     opt = torch.optim.AdamW(list(model.parameters()) + list(affine.parameters()), lr=a.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=a.lr, total_steps=a.steps, pct_start=0.05)
     bt = Batcher(train, toks, comps, a.runs_per_batch, a.per_run, rng)
-    bf = Batcher(few, toks, comps, max(1, min(a.runs_per_batch // 2, few.run_id.nunique())), a.per_run, rng) if few is not None else None
+    bf = Batcher(few, toks, comps, a.runs_per_batch, a.per_run, rng, min_rows=4) if few is not None else None
     bv = Batcher(val, toks, comps, a.runs_per_batch, a.per_run, np.random.default_rng(123))
     val_batches = [bv.sample() for _ in range(50)]
 

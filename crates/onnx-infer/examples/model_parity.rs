@@ -7,6 +7,11 @@
 //! ```
 //!
 //! Prints the largest absolute and relative deviation per model variant.
+//! `--model peptdeep` reads `peptdeep_reference.tsv` from
+//! `scripts/peptdeep_reference.py`.
+
+#[path = "common/models.rs"]
+mod models;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -87,8 +92,8 @@ fn ms2pip_parity(a: &Args) {
                 feat.add(*g, w);
             }
             let input = std::slice::from_ref(&batch.features);
-            let b = ms2pip::log2_predictions(&sb.run(input).unwrap()[1]).unwrap();
-            let y = ms2pip::log2_predictions(&sy.run(input).unwrap()[1]).unwrap();
+            let b = ms2pip::log2_predictions(&sb.run(input).unwrap()[0]).unwrap();
+            let y = ms2pip::log2_predictions(&sy.run(input).unwrap()[0]).unwrap();
             let (rb, ry) = (floats(x[col("b_log2")]), floats(x[col("y_log2")]));
             assert_eq!((b.len(), y.len()), (rb.len(), ry.len()), "{seq} row count");
             b.iter().zip(&rb).for_each(|(g, w)| pb.add(*g, *w));
@@ -108,10 +113,55 @@ fn ms2pip_parity(a: &Args) {
     }
 }
 
+fn peptdeep_parity(a: &Args) {
+    use models::{Form, Mod, PeptDeep, Predictor};
+    let pred = PeptDeep::new(&a.models, 30.0, "Lumos");
+    let mut s = pred.sessions();
+    let text = fs::read_to_string(&a.reference).expect("reference TSV");
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+    let col = |n: &str| header.iter().position(|h| *h == n).unwrap();
+    let (mut rt, mut ms2) = (Dev::default(), Dev::default());
+    let nft = pred.meta.ms2_frag_types.len();
+    for l in lines {
+        let x: Vec<&str> = l.split('\t').collect();
+        let seq = x[col("sequence")];
+        let names = x[col("mods")].split(';').filter(|s| !s.is_empty());
+        let sites = x[col("mod_sites")].split(';').filter(|s| !s.is_empty());
+        let mods: Vec<(usize, Mod)> = names
+            .zip(sites)
+            .map(|(n, s)| {
+                let m = match n {
+                    "Carbamidomethyl@C" => Mod::Carbamidomethyl,
+                    "Oxidation@M" => Mod::Oxidation,
+                    "Acetyl@Protein_N-term" => Mod::Acetyl,
+                    other => panic!("mod {other} not in the parity panel"),
+                };
+                (s.parse().unwrap(), m)
+            })
+            .collect();
+        let form = Form { seq: seq.to_string(), mods };
+        let z: u8 = x[col("charge")].parse().unwrap();
+        rt.add(pred.rt(&mut s, &[&form])[0], x[col("rt_peptdeep")].parse().unwrap());
+        let m = &pred.ms2(&mut s, &[(&form, z)])[0];
+        let r = floats(x[col("ms2_peptdeep")]);
+        for site in 0..seq.len() - 1 {
+            for (k, &c) in pred.cols.iter().enumerate() {
+                ms2.add(m[site * 4 + k], r[site * nft + c]);
+            }
+        }
+    }
+    println!(
+        "PARITY peptdeep: rt max|Δ| {:.3e} rel {:.3e} | ms2 max|Δ| {:.3e} ({} values)",
+        rt.abs, rt.rel, ms2.abs, ms2.n
+    );
+}
+
 fn main() {
     let a = parse_args();
     match a.model.as_str() {
         "ms2pip" => ms2pip_parity(&a),
+        "peptdeep" => peptdeep_parity(&a),
         other => panic!("unknown --model {other}"),
     }
 }

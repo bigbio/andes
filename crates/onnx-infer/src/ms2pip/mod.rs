@@ -14,8 +14,7 @@
 //!   peptide and the N-terminal ion but n for the C-terminal ion.
 //!
 //! Graph contract (`scripts/export_ms2pip_to_onnx.py`): input `features`
-//! [rows, 139] f32, output `scores` [rows, 3] whose column 0 is
-//! `log2(intensity + 0.001)`. One graph per ion series (`b`, `y`); row `i` of a
+//! [rows, 139] f32, output `log2_intensity` [rows] = `log2(intensity + 0.001)`. One graph per ion series (`b`, `y`); row `i` of a
 //! peptide is the cleavage after residue `i + 1`, i.e. b(i+1) and y(n−1−i).
 
 use crate::error::{Error, Result};
@@ -200,17 +199,16 @@ pub fn pack_batch(peptides: &[(&str, u8)]) -> Result<Ms2pipBatch> {
     })
 }
 
-/// Column 0 of a graph's `scores` output (`[rows, k]`), clipped at
+/// The graph's `log2_intensity` output (`[rows]`), clipped at
 /// [`LOG2_FLOOR`] as ms2pip does.
-pub fn log2_predictions(scores: &NamedTensor) -> Result<Vec<f32>> {
-    if scores.shape.len() != 2 || scores.shape[1] == 0 {
+pub fn log2_predictions(out: &NamedTensor) -> Result<Vec<f32>> {
+    if out.shape.len() != 1 {
         return Err(Error::InvalidArg(format!(
-            "expected [rows, k] scores, got {:?}",
-            scores.shape
+            "expected [rows] log2_intensity, got {:?}",
+            out.shape
         )));
     }
-    let k = scores.shape[1];
-    Ok(scores.data.chunks(k).map(|r| r[0].max(LOG2_FLOOR)).collect())
+    Ok(out.data.iter().map(|v| v.max(LOG2_FLOOR)).collect())
 }
 
 /// ms2pip's linear intensity from a log2 prediction: `2^x − 0.001`, ≥ 0.

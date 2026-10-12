@@ -5,18 +5,23 @@ MS²PIP (ms2pip >= 4.0) predicts each ion series with one XGBoost regressor
 over 139 per-cleavage-site features (``ms2rescore_rs.ms2pip_compute_features``).
 Each ``.xgboost`` file becomes one ONNX graph:
 
-  input  ``features`` [N, 139] f32  (one row per cleavage site)
-  output ``label``    [N]      i64  (ignored)
-  output ``scores``   [N, 3]   f32  column 0 = log2(intensity + 0.001)
+  input  ``features``       [N, 139] f32  (one row per cleavage site)
+  output ``log2_intensity`` [N]      f32  = log2(intensity + 0.001), unclipped
 
-tract (the pure-Rust backend) implements ``ai.onnx.ml.TreeEnsembleClassifier``
-but not ``TreeEnsembleRegressor``, so the regressor is written as a classifier
-with three classes whose leaves all add to class 0, ``post_transform = NONE``
-and ``base_values[0]`` = the XGBoost base score. Column 0 of ``scores`` is then
-exactly the regressor margin; columns 1 and 2 stay at zero. (Two classes would
-trigger tract's binary-classifier output layout, three do not.) Node ids are
-renumbered densely per tree: pruned XGBoost trees leave gaps, and tract
-addresses nodes by id.
+The trees are written as plain tensor ops, not ``ai.onnx.ml`` tree ensembles:
+tract has no ``TreeEnsembleRegressor``, and its ``TreeEnsembleClassifier``
+looks up a leaf's weight by walking the leaf table from its start, which costs
+O(#leaves) per tree visit (hours for the 9 M-leaf HCD2021 y model). Instead
+all trees share four flat node tables (feature, threshold, left, right) plus
+a leaf-value table, indexed by a global node id. Starting from every tree's
+root, one unrolled step per tree level does
+
+  node = Where(x[feature[node]] < threshold[node], left[node], right[node])
+
+and leaves point to themselves, so after ``max_depth`` steps every tree sits
+on its leaf; the output is the sum of leaf values plus the XGBoost base score.
+The features never contain NaN, so XGBoost's missing-value direction is not
+encoded.
 
 The rows of the y model are in cleavage-site order, like the features:
 row ``i`` is y_(n-1-i). ms2pip itself reverses the y predictions into
@@ -69,83 +74,104 @@ def booster_base_score(b: xgb.Booster) -> float:
     return float(cfg["learner"]["learner_model_param"]["base_score"])
 
 
-def tree_arrays(b: xgb.Booster):
-    """Node arrays from the per-tree JSON dump, one tree at a time (the
-    HCD2021 y model has ~19 M nodes; whole-model Python objects do not fit)."""
-    keys = ["tree", "node", "feat", "thr", "yes", "no", "miss_left", "leaf_val", "is_leaf"]
-    dtypes = [np.int32, np.int32, np.int16, np.float32, np.int32, np.int32, bool, np.float32, bool]
-    parts = {k: [] for k in keys}
-    for t, dump in enumerate(b.get_dump(dump_format="json")):
-        cols = {k: [] for k in keys}
-        stack = [json.loads(dump)]
+def tree_tables(b: xgb.Booster):
+    """Global node tables from the per-tree JSON dump, one tree at a time (the
+    HCD2021 y model has ~19 M nodes; whole-model Python objects do not fit).
+
+    Returns (roots, feature, threshold, left, right, leaf_value, max_depth)
+    where node ids are global: tree ``t``'s nodes occupy one contiguous block,
+    renumbered densely (pruned XGBoost trees leave gaps in node ids)."""
+    roots, feat, thr, left, right, val = [], [], [], [], [], []
+    offset, max_depth = 0, 0
+    for dump in b.get_dump(dump_format="json"):
+        recs = []
+        stack = [(json.loads(dump), 0)]
         while stack:
-            n = stack.pop()
-            leaf = "leaf" in n
-            cols["tree"].append(t)
-            cols["node"].append(n["nodeid"])
-            cols["is_leaf"].append(leaf)
-            cols["leaf_val"].append(n["leaf"] if leaf else 0.0)
-            cols["feat"].append(0 if leaf else int(n["split"].lstrip("f")))
-            cols["thr"].append(0.0 if leaf else n["split_condition"])
-            cols["yes"].append(0 if leaf else n["yes"])
-            cols["no"].append(0 if leaf else n["no"])
-            cols["miss_left"].append(False if leaf else n["missing"] == n["yes"])
-            if not leaf:
-                stack.extend(n["children"])
-        # Pruned XGBoost trees leave gaps in node ids; tract indexes nodes by
-        # id within a tree, so renumber them densely in id order.
-        ids = np.asarray(cols["node"])
-        dense = np.sort(ids)
-        for k in ("node", "yes", "no"):
-            v = np.asarray(cols[k])
-            cols[k] = np.where(np.asarray(cols["is_leaf"]) & (k != "node"), 0, np.searchsorted(dense, v))
-        for k, dt in zip(keys, dtypes):
-            parts[k].append(np.asarray(cols[k], dtype=dt))
-    return {k: np.concatenate(v) for k, v in parts.items()}
+            n, d = stack.pop()
+            recs.append((n, d))
+            if "leaf" not in n:
+                stack.extend((c, d + 1) for c in n["children"])
+        ids = np.sort(np.fromiter((n["nodeid"] for n, _ in recs), dtype=np.int64))
+        k = len(ids)
+        g = lambda i: offset + int(np.searchsorted(ids, i))
+        f = np.zeros(k, np.int32)
+        t = np.zeros(k, np.float32)
+        lf = np.zeros(k, np.int32)
+        rt = np.zeros(k, np.int32)
+        v = np.zeros(k, np.float32)
+        for n, d in recs:
+            j = g(n["nodeid"]) - offset
+            max_depth = max(max_depth, d)
+            if "leaf" in n:
+                lf[j] = rt[j] = offset + j
+                v[j] = n["leaf"]
+            else:
+                f[j] = int(n["split"].lstrip("f"))
+                t[j] = n["split_condition"]
+                lf[j] = g(n["yes"])
+                rt[j] = g(n["no"])
+        roots.append(g(0))
+        for lst, arr in zip((feat, thr, left, right, val), (f, t, lf, rt, v)):
+            lst.append(arr)
+        offset += k
+    cat = np.concatenate
+    return np.asarray(roots, np.int32), cat(feat), cat(thr), cat(left), cat(right), cat(val), max_depth
 
 
 def to_onnx(b: xgb.Booster, name: str) -> onnx.ModelProto:
-    a = tree_arrays(b)
-    order = np.lexsort((a["node"], a["tree"]))
-    a = {k: v[order] for k, v in a.items()}
-    leaf = a["is_leaf"]
-    modes = np.where(leaf, "LEAF", "BRANCH_LT")
-    node = helper.make_node(
-        "TreeEnsembleClassifier",
-        ["features"],
-        ["label", "scores"],
-        domain="ai.onnx.ml",
-        classlabels_int64s=[0, 1, 2],
-        base_values=[booster_base_score(b), 0.0, 0.0],
-        post_transform="NONE",
-        nodes_treeids=a["tree"].tolist(),
-        nodes_nodeids=a["node"].tolist(),
-        nodes_featureids=a["feat"].tolist(),
-        nodes_values=a["thr"].tolist(),
-        nodes_modes=modes.tolist(),
-        nodes_truenodeids=a["yes"].tolist(),
-        nodes_falsenodeids=a["no"].tolist(),
-        nodes_missing_value_tracks_true=a["miss_left"].astype(np.int64).tolist(),
-        class_treeids=a["tree"][leaf].tolist(),
-        class_nodeids=a["node"][leaf].tolist(),
-        class_ids=[0] * int(leaf.sum()),
-        class_weights=a["leaf_val"][leaf].tolist(),
-    )
+    from onnx import numpy_helper
+
+    roots, feat, thr, left, right, val, depth = tree_tables(b)
+    n_trees = len(roots)
+    inits = [
+        numpy_helper.from_array(feat, "feature"),
+        numpy_helper.from_array(thr, "threshold"),
+        numpy_helper.from_array(left, "left"),
+        numpy_helper.from_array(right, "right"),
+        numpy_helper.from_array(val, "leaf_value"),
+        numpy_helper.from_array(roots, "roots"),
+        numpy_helper.from_array(np.asarray([0], np.int64), "zero1"),
+        numpy_helper.from_array(np.asarray([1], np.int64), "one1"),
+        numpy_helper.from_array(np.asarray([n_trees], np.int64), "n_trees"),
+        numpy_helper.from_array(np.asarray([1], np.int64), "axis1"),
+        numpy_helper.from_array(np.asarray(booster_base_score(b), np.float32), "base_score"),
+    ]
+    nodes = [
+        helper.make_node("Shape", ["features"], ["shape"]),
+        helper.make_node("Slice", ["shape", "zero1", "one1"], ["n_rows"]),
+        helper.make_node("Concat", ["n_rows", "n_trees"], ["grid"], axis=0),
+        helper.make_node("Expand", ["roots", "grid"], ["node_0"]),
+    ]
+    for d in range(depth):
+        cur, nxt = f"node_{d}", f"node_{d + 1}"
+        nodes += [
+            helper.make_node("Gather", ["feature", cur], [f"f_{d}"]),
+            helper.make_node("GatherElements", ["features", f"f_{d}"], [f"x_{d}"], axis=1),
+            helper.make_node("Gather", ["threshold", cur], [f"t_{d}"]),
+            helper.make_node("Less", [f"x_{d}", f"t_{d}"], [f"go_left_{d}"]),
+            helper.make_node("Gather", ["left", cur], [f"l_{d}"]),
+            helper.make_node("Gather", ["right", cur], [f"r_{d}"]),
+            helper.make_node("Where", [f"go_left_{d}", f"l_{d}", f"r_{d}"], [nxt]),
+        ]
+    nodes += [
+        helper.make_node("Gather", ["leaf_value", f"node_{depth}"], ["leaves"]),
+        helper.make_node("ReduceSum", ["leaves", "axis1"], ["margin"], keepdims=0),
+        helper.make_node("Add", ["margin", "base_score"], ["log2_intensity"]),
+    ]
     graph = helper.make_graph(
-        [node],
+        nodes,
         name,
         [helper.make_tensor_value_info("features", TensorProto.FLOAT, ["N", N_FEATURES])],
-        [
-            helper.make_tensor_value_info("label", TensorProto.INT64, ["N"]),
-            helper.make_tensor_value_info("scores", TensorProto.FLOAT, ["N", 3]),
-        ],
+        [helper.make_tensor_value_info("log2_intensity", TensorProto.FLOAT, ["N"])],
+        initializer=inits,
     )
     model = helper.make_model(
         graph,
-        opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("ai.onnx.ml", 3)],
+        opset_imports=[helper.make_opsetid("", 17)],
         producer_name="onnx-infer export_ms2pip_to_onnx.py",
     )
     model.ir_version = 8
+    print(f"{name}: {n_trees} trees, {len(feat)} nodes, max depth {depth}")
     return model
 
 
@@ -174,16 +200,16 @@ def main():
             onnx.save(m, str(onnx_path))
             ref = b.predict(xgb.DMatrix(x))
             sess = ort.InferenceSession(str(onnx_path))
-            got = sess.run(["scores"], {"features": x})[0][:, 0]
+            got = sess.run(["log2_intensity"], {"features": x})[0]
             err = float(np.abs(ref - got).max())
             manifest = {
                 "id": stem,
-                "description": f"MS²PIP {model} {ion}-ion XGBoost model as ONNX TreeEnsembleClassifier "
-                "(scores[:, 0] = log2(intensity + 0.001), one row per cleavage site)",
+                "description": f"MS²PIP {model} {ion}-ion XGBoost model as an ONNX tree-traversal graph "
+                "(log2(intensity + 0.001), one row per cleavage site)",
                 "onnx": onnx_path.name,
                 "task": "ms2_intensity",
                 "inputs": [{"name": "features", "shape": [None, N_FEATURES]}],
-                "outputs": [{"name": "label"}, {"name": "scores", "shape": [None, 3]}],
+                "outputs": [{"name": "log2_intensity", "shape": [None]}],
                 "provenance": {
                     "origin": f"ms2pip {ms2pip.__version__} {fname}",
                     "license": "Apache-2.0",

@@ -50,7 +50,7 @@ use output::mbr_out::{
     VALIDATION_Q,
 };
 use quant::decoys::{probes, Hypothesis, Probe};
-use quant::evidence::{fit_on_grid, fit_with, Evidence, EvidenceParams, FitScratch};
+use quant::evidence::{fit_many, Evidence, EvidenceParams, FitJob, WIDTH_GRID};
 use quant::library::{Library, LibraryEntry};
 use quant::ms1_index::Ms1RunIndex;
 use rayon::prelude::*;
@@ -260,20 +260,43 @@ fn identified_rt(entry: &LibraryEntry, run: u16) -> Option<f64> {
         .map(|&(_, rt)| rt)
 }
 
+/// Fits `jobs[k].1` on `series[jobs[k].0]`, in job order; one [`fit_many`]
+/// sweep per series.
+fn fit_on_series(
+    series: &[&Ms1RunIndex],
+    jobs: &[(usize, FitJob)],
+    ep: &EvidenceParams,
+) -> Vec<Option<Evidence>> {
+    let mut out: Vec<Option<Evidence>> = vec![None; jobs.len()];
+    for (g, ms1) in series.iter().enumerate() {
+        let at: Vec<usize> = (0..jobs.len()).filter(|&k| jobs[k].0 == g).collect();
+        if at.is_empty() {
+            continue;
+        }
+        let group: Vec<FitJob> = at.iter().map(|&k| jobs[k].1).collect();
+        for (k, e) in at.into_iter().zip(fit_many(ms1, &group, ep)) {
+            out[k] = e;
+        }
+    }
+    out
+}
+
 /// The usable width-free fits `(t0, w)` of the identified pairs among the
-/// entries `ids`, each fitted on `ms1_of(id)`.
-fn width_fits<'a, F>(
+/// entries `ids`, each fitted on `series[series_of(id)]`.
+fn width_fits<F>(
     ids: &[usize],
     run: u16,
     lib: &Library,
     ep: &EvidenceParams,
-    ms1_of: F,
+    series: &[&Ms1RunIndex],
+    series_of: F,
 ) -> Vec<(f64, f64)>
 where
-    F: Fn(usize) -> &'a Ms1RunIndex + Sync,
+    F: Fn(usize) -> usize,
 {
-    ids.par_iter()
-        .map_init(FitScratch::default, |scratch, &i| {
+    let jobs: Vec<(usize, FitJob)> = ids
+        .iter()
+        .filter_map(|&i| {
             let e = &lib.entries[i];
             let rt = identified_rt(e, run).filter(|rt| rt.is_finite())?;
             let meta = &lib.meta[e.precursor as usize];
@@ -284,58 +307,79 @@ where
                 s: DEFAULT_W0_S.max(IDENTIFIED_MIN_S),
                 w_prior: DEFAULT_W0_S,
             };
-            let ev = fit_on_grid(
-                ms1_of(i),
-                &probe,
-                meta.charge.max(1),
-                &meta.envelope,
-                ep,
-                &WIDTH_PRIOR_GRID,
-                scratch,
-            )?;
-            (ev.amplitude > 0.0 && ev.llr >= WIDTH_FIT_MIN_LLR).then_some((ev.t0, ev.w))
+            let job = FitJob {
+                probe,
+                charge: meta.charge.max(1),
+                envelope: &meta.envelope,
+                widths: &WIDTH_PRIOR_GRID,
+            };
+            Some((series_of(i), job))
         })
+        .collect();
+    fit_on_series(series, &jobs, ep)
+        .into_iter()
         .flatten()
+        .filter(|ev| ev.amplitude > 0.0 && ev.llr >= WIDTH_FIT_MIN_LLR)
+        .map(|ev| (ev.t0, ev.w))
         .collect()
 }
 
 type EntryRows = (Vec<ExtractRow>, ExtractCounts);
 
 /// Fills `slots[id]` with the rows of each entry in `ids`, fitted on
-/// `ms1_of(id)`.
+/// `series[series_of(id)]`.
 #[allow(clippy::too_many_arguments)]
-fn rows_into<'a, F>(
+fn rows_into<F>(
     slots: &mut [Option<EntryRows>],
     ids: &[usize],
     run: u16,
     lib: &Library,
     wp: &WidthPrior,
     ep: &EvidenceParams,
-    ms1_of: F,
+    series: &[&Ms1RunIndex],
+    series_of: F,
 ) where
-    F: Fn(usize) -> &'a Ms1RunIndex + Sync,
+    F: Fn(usize) -> usize + Sync,
 {
-    let done: Vec<EntryRows> = ids
+    let planned: Vec<(Vec<(ExtractRow, Probe)>, ExtractCounts)> = ids
         .par_iter()
-        .map_init(FitScratch::default, |scratch, &i| {
-            entry_rows(&lib.entries[i], run, lib, ms1_of(i), wp, ep, scratch)
-        })
+        .map(|&i| entry_rows(&lib.entries[i], run, lib, series[series_of(i)], wp))
         .collect();
-    for (&i, r) in ids.iter().zip(done) {
-        slots[i] = Some(r);
+    let mut jobs = Vec::new();
+    for (&i, (rows, _)) in ids.iter().zip(&planned) {
+        let meta = &lib.meta[lib.entries[i].precursor as usize];
+        for (_, probe) in rows {
+            let job = FitJob {
+                probe: *probe,
+                charge: meta.charge.max(1),
+                envelope: &meta.envelope,
+                widths: &WIDTH_GRID,
+            };
+            jobs.push((series_of(i), job));
+        }
+    }
+    let mut evidence = fit_on_series(series, &jobs, ep).into_iter();
+    for (&i, (rows, counts)) in ids.iter().zip(planned) {
+        let rows = rows
+            .into_iter()
+            .map(|(mut row, _)| {
+                row.evidence = evidence.next().flatten();
+                row
+            })
+            .collect();
+        slots[i] = Some((rows, counts));
     }
 }
 
-/// The rows of one library entry in `run`.
+/// The rows of one library entry in `run`, each with the probe to fit on
+/// `ms1` and no evidence yet.
 fn entry_rows(
     e: &LibraryEntry,
     run: u16,
     lib: &Library,
     ms1: &Ms1RunIndex,
     wp: &WidthPrior,
-    ep: &EvidenceParams,
-    scratch: &mut FitScratch,
-) -> (Vec<ExtractRow>, ExtractCounts) {
+) -> (Vec<(ExtractRow, Probe)>, ExtractCounts) {
     let mut counts = ExtractCounts::default();
     let mut rows = Vec::new();
     let meta = &lib.meta[e.precursor as usize];
@@ -348,14 +392,17 @@ fn entry_rows(
     };
     let donors = e.donors.iter().filter(|&&r| aligned(r)).count() as u16;
     let other_donors = e.donors.iter().filter(|&&r| r != run && aligned(r)).count() as u16;
-    let mut row = |kind: Hypothesis, role: Role, probe: &Probe, n_donor_runs: u16| ExtractRow {
-        precursor: e.precursor,
-        run,
-        kind,
-        role,
-        evidence: fit_with(ms1, probe, charge, &meta.envelope, ep, scratch),
-        n_donor_runs,
-        library_q: e.q,
+    let row = |kind: Hypothesis, role: Role, probe: &Probe, n_donor_runs: u16| {
+        let row = ExtractRow {
+            precursor: e.precursor,
+            run,
+            kind,
+            role,
+            evidence: None,
+            n_donor_runs,
+            library_q: e.q,
+        };
+        (row, *probe)
     };
     let target = |t_hat: f64, s: f64, w_prior: f64| Probe {
         kind: Hypothesis::Target,
@@ -456,12 +503,12 @@ pub(crate) fn extract_run(
     let cv_ids: Vec<usize> = (0..n).filter(|&i| groups[i].is_some()).collect();
     let mut slots: Vec<Option<EntryRows>> = (0..n).map(|_| None).collect();
 
-    let mut fits = width_fits(&whole_ids, run, lib, ep, |_| &ms1);
+    let mut fits = width_fits(&whole_ids, run, lib, ep, &[&ms1], |_| 0);
     let width_fit_count;
     if cv_ids.is_empty() {
         width_fit_count = fits.len();
         let wp = WidthPrior::from_fits(fits);
-        rows_into(&mut slots, &whole_ids, run, lib, &wp, ep, |_| &ms1);
+        rows_into(&mut slots, &whole_ids, run, lib, &wp, ep, &[&ms1], |_| 0);
         drop(ms1);
         drop(held);
         return Ok(assemble(slots, width_fit_count, wp.is_default()));
@@ -470,18 +517,20 @@ pub(crate) fn extract_run(
     drop(held);
     let split = ms1.split_by_faims();
     let held = Held::new();
-    let series_of = |i: usize| &split[groups[i].expect("voltage entry")].1;
-    fits.extend(width_fits(&cv_ids, run, lib, ep, series_of));
+    let series: Vec<&Ms1RunIndex> = split.iter().map(|(_, s)| s).collect();
+    let series_of = |i: usize| groups[i].expect("voltage entry");
+    fits.extend(width_fits(&cv_ids, run, lib, ep, &series, series_of));
     width_fit_count = fits.len();
     let wp = WidthPrior::from_fits(fits);
-    rows_into(&mut slots, &cv_ids, run, lib, &wp, ep, series_of);
+    rows_into(&mut slots, &cv_ids, run, lib, &wp, ep, &series, series_of);
+    drop(series);
     drop(split);
     drop(held);
 
     if !whole_ids.is_empty() {
         let ms1 = load()?;
         let _held = Held::new();
-        rows_into(&mut slots, &whole_ids, run, lib, &wp, ep, |_| &ms1);
+        rows_into(&mut slots, &whole_ids, run, lib, &wp, ep, &[&ms1], |_| 0);
     }
     Ok(assemble(slots, width_fit_count, wp.is_default()))
 }

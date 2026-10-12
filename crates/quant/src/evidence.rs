@@ -51,7 +51,9 @@
 //! same test.
 //!
 //! The per-probe arithmetic, [`fit_traces`], takes the extracted traces as
-//! slices, so a batch extraction can reuse it and reproduce [`fit`] exactly.
+//! slices. [`fit_many`] extracts the traces of many probes in one RT sweep
+//! over the run and passes them to the same arithmetic, so it reproduces
+//! [`fit`] exactly.
 
 use model::mass::ISOTOPE;
 
@@ -293,14 +295,10 @@ fn traces(
     tol_ppm: f64,
     out: &mut FitScratch,
 ) {
-    let step = ISOTOPE / charge as f64;
-    let slice = |target: f64| {
-        let tol = target * tol_ppm * 1e-6;
-        (target - tol, target + tol)
-    };
+    let slices = target_slices(mu, charge, n_iso, tol_ppm);
     out.rt.clear();
     out.rt.extend(scans.clone().map(|j| ms1.rt(j)));
-    let (lo, hi) = slice(mu);
+    let (lo, hi) = slices[0];
     out.mz0.clear();
     out.y[0].clear();
     for j in scans.clone() {
@@ -308,14 +306,314 @@ fn traces(
         out.mz0.push(mz);
         out.y[0].push(inten);
     }
-    for i in 1..n_iso {
-        let (lo, hi) = slice(mu + i as f64 * step);
+    for (i, &(lo, hi)) in slices.iter().enumerate().take(n_iso).skip(1) {
         out.y[i].clear();
         out.y[i].extend(scans.clone().map(|j| ms1.max_in(j, lo, hi)));
     }
-    let (lo, hi) = slice(mu - step);
+    let (lo, hi) = slices[n_iso];
     out.m1.clear();
     out.m1.extend(scans.map(|j| ms1.max_in(j, lo, hi)));
+}
+
+/// Traces per probe: isotopes 0 to `n_iso - 1`, then M-1.
+const MAX_TRACES: usize = MAX_ISOTOPES + 1;
+
+/// The `[lo, hi]` m/z slices of a probe's traces: isotope `i` at index `i`
+/// for `i < n_iso`, the M-1 trace at index `n_iso`.
+fn target_slices(mu: f64, charge: u8, n_iso: usize, tol_ppm: f64) -> [(f64, f64); MAX_TRACES] {
+    let step = ISOTOPE / charge as f64;
+    let slice = |target: f64| {
+        let tol = target * tol_ppm * 1e-6;
+        (target - tol, target + tol)
+    };
+    let mut out = [(0.0, 0.0); MAX_TRACES];
+    out[0] = slice(mu);
+    for (i, o) in out.iter_mut().enumerate().take(n_iso).skip(1) {
+        *o = slice(mu + i as f64 * step);
+    }
+    out[n_iso] = slice(mu - step);
+    out
+}
+
+/// One probe of [`fit_many`]: the arguments of [`fit_on_grid`] that vary per
+/// probe.
+#[derive(Debug, Clone, Copy)]
+pub struct FitJob<'a> {
+    pub probe: Probe,
+    pub charge: u8,
+    pub envelope: &'a [f32; 4],
+    /// Width grid, multiples of `w_prior` (not empty).
+    pub widths: &'a [f64],
+}
+
+/// [`fit_on_grid`] for every job, in job order, with the same result for each
+/// job, extracted in one RT sweep over `ms1` instead of one search per scan
+/// and trace.
+///
+/// The jobs, sorted by the first scan of their extraction window, are cut
+/// into contiguous runs fitted in parallel. Each run sweeps the scans from its
+/// first window start to its last window end; a job becomes active at its
+/// first scan, and at every scan the m/z-ascending centroids are merge-joined
+/// with the active jobs' trace slices sorted by their lower bound, keeping
+/// per slice the most intense centroid as [`Ms1RunIndex::max_in`] and
+/// [`Ms1RunIndex::apex_centroid`] do. A job is fitted by [`fit_traces`] as
+/// soon as its window closes and its buffers are reused, so memory follows
+/// the active jobs. Every job is extracted and fitted by one sweep from its
+/// own traces only, so the cut does not change any result. A job whose slices
+/// are not finite is fitted by [`fit_on_grid`]; a scan whose centroids are
+/// not in ascending m/z order (a NaN m/z) is searched per slice as
+/// [`Ms1RunIndex::max_in`] does.
+pub fn fit_many(ms1: &Ms1RunIndex, jobs: &[FitJob], p: &EvidenceParams) -> Vec<Option<Evidence>> {
+    use rayon::prelude::*;
+
+    let n_iso = p.n_isotopes.clamp(1, MAX_ISOTOPES);
+    let mut planned = Vec::new();
+    let mut fallback = Vec::new();
+    for (k, job) in jobs.iter().enumerate() {
+        debug_assert!(job.charge > 0, "charge must be positive");
+        debug_assert!(!job.widths.is_empty(), "width grid must not be empty");
+        let prior = Prior::of(&job.probe);
+        let half = prior.half_window();
+        let scans = ms1.scan_window(prior.t_hat - half, prior.t_hat + half);
+        if scans.len() < MIN_SCANS {
+            continue;
+        }
+        let slices = target_slices(job.probe.mz, job.charge.max(1), n_iso, p.tol_ppm);
+        if slices[..=n_iso]
+            .iter()
+            .all(|&(lo, hi)| lo.is_finite() && hi.is_finite())
+        {
+            planned.push(Planned {
+                job: k,
+                prior,
+                scans,
+                slices,
+            });
+        } else {
+            fallback.push(k);
+        }
+    }
+    planned.sort_by_key(|w| (w.scans.start, w.job));
+    let ordered: Vec<bool> = (0..ms1.len()).map(|j| mz_ascending(ms1.peaks(j))).collect();
+    let chunk = planned
+        .len()
+        .div_ceil(SWEEP_CHUNKS_PER_THREAD * rayon::current_num_threads())
+        .max(MIN_SWEEP_CHUNK);
+    let swept: Vec<Vec<(usize, Evidence)>> = planned
+        .par_chunks(chunk)
+        .map(|c| sweep(ms1, jobs, c, n_iso, &ordered))
+        .collect();
+    let refits: Vec<(usize, Option<Evidence>)> = fallback
+        .par_iter()
+        .map_init(FitScratch::default, |scratch, &k| {
+            let job = &jobs[k];
+            let e = fit_on_grid(
+                ms1,
+                &job.probe,
+                job.charge,
+                job.envelope,
+                p,
+                job.widths,
+                scratch,
+            );
+            (k, e)
+        })
+        .collect();
+    let mut out: Vec<Option<Evidence>> = vec![None; jobs.len()];
+    for (k, e) in swept.into_iter().flatten() {
+        out[k] = Some(e);
+    }
+    for (k, e) in refits {
+        out[k] = e;
+    }
+    out
+}
+
+/// Fewest jobs per parallel sweep of [`fit_many`].
+const MIN_SWEEP_CHUNK: usize = 64;
+/// Parallel sweeps per worker thread in [`fit_many`], for load balance.
+const SWEEP_CHUNKS_PER_THREAD: usize = 4;
+
+/// A job of [`fit_many`] with its extraction window and trace slices.
+struct Planned {
+    job: usize,
+    prior: Prior,
+    scans: std::ops::Range<usize>,
+    slices: [(f64, f64); MAX_TRACES],
+}
+
+/// Whether the centroids are in ascending m/z order without a NaN, so the
+/// slice starts found by a forward merge equal [`Ms1RunIndex::max_in`]'s binary
+/// search.
+fn mz_ascending(peaks: &[(f64, f32)]) -> bool {
+    peaks.iter().all(|p| !p.0.is_nan()) && peaks.windows(2).all(|w| w[0].0 <= w[1].0)
+}
+
+/// One trace slice of an active job in a sweep.
+#[derive(Debug, Clone, Copy)]
+struct Slice {
+    lo: f64,
+    hi: f64,
+    /// The job's buffer in the sweep.
+    slot: usize,
+    /// Isotope `0..n_iso`, or `n_iso` for M-1.
+    trace: usize,
+}
+
+/// Trace buffers of one active job.
+#[derive(Debug, Default)]
+struct Buffers {
+    planned: usize,
+    y: [Vec<f32>; MAX_ISOTOPES],
+    m1: Vec<f32>,
+    mz0: Vec<f64>,
+}
+
+/// Extracts and fits the jobs of `planned` (sorted by window start) in one
+/// sweep over their scans; `ordered[j]` is [`mz_ascending`] of scan `j`.
+fn sweep(
+    ms1: &Ms1RunIndex,
+    jobs: &[FitJob],
+    planned: &[Planned],
+    n_iso: usize,
+    ordered: &[bool],
+) -> Vec<(usize, Evidence)> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    let mut out = Vec::with_capacity(planned.len());
+    let (Some(first), Some(last)) = (
+        planned.first().map(|w| w.scans.start),
+        planned.iter().map(|w| w.scans.end).max(),
+    ) else {
+        return out;
+    };
+    let mut slots: Vec<Buffers> = Vec::new();
+    let mut free: Vec<usize> = Vec::new();
+    let mut closing: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::new();
+    let mut active: Vec<Slice> = Vec::new();
+    let mut incoming: Vec<Slice> = Vec::new();
+    let mut merged: Vec<Slice> = Vec::new();
+    let mut closed: Vec<bool> = Vec::new();
+    let mut work = Workspace::default();
+    let mut limits = Vec::new();
+    let mut rt = Vec::new();
+    let mut next = 0;
+    for (j, &ascending) in ordered.iter().enumerate().take(last).skip(first) {
+        incoming.clear();
+        while next < planned.len() && planned[next].scans.start == j {
+            let slot = free.pop().unwrap_or_else(|| {
+                slots.push(Buffers::default());
+                closed.push(false);
+                slots.len() - 1
+            });
+            let b = &mut slots[slot];
+            b.planned = next;
+            for v in b.y.iter_mut() {
+                v.clear();
+            }
+            b.m1.clear();
+            b.mz0.clear();
+            closed[slot] = false;
+            let w = &planned[next];
+            for (trace, &(lo, hi)) in w.slices[..=n_iso].iter().enumerate() {
+                incoming.push(Slice {
+                    lo,
+                    hi,
+                    slot,
+                    trace,
+                });
+            }
+            closing.push(Reverse((w.scans.end, slot)));
+            next += 1;
+        }
+        if !incoming.is_empty() {
+            incoming.sort_unstable_by(|a, b| a.lo.total_cmp(&b.lo));
+            merged.clear();
+            let (mut a, mut b) = (0, 0);
+            while a < active.len() || b < incoming.len() {
+                let take_active = b == incoming.len()
+                    || (a < active.len() && active[a].lo.total_cmp(&incoming[b].lo).is_le());
+                if take_active {
+                    merged.push(active[a]);
+                    a += 1;
+                } else {
+                    merged.push(incoming[b]);
+                    b += 1;
+                }
+            }
+            std::mem::swap(&mut active, &mut merged);
+        }
+
+        let peaks = ms1.peaks(j);
+        let mut start = 0;
+        for s in &active {
+            if ascending {
+                while start < peaks.len() && peaks[start].0 < s.lo {
+                    start += 1;
+                }
+            } else {
+                start = peaks.partition_point(|&(mz, _)| mz < s.lo);
+            }
+            let (mut best_mz, mut best) = (0.0f64, 0.0f32);
+            for &(mz, inten) in &peaks[start..] {
+                if mz > s.hi {
+                    break;
+                }
+                if inten > best {
+                    best = inten;
+                    best_mz = mz;
+                }
+            }
+            let b = &mut slots[s.slot];
+            if s.trace == 0 {
+                b.mz0.push(best_mz);
+                b.y[0].push(best);
+            } else if s.trace < n_iso {
+                b.y[s.trace].push(best);
+            } else {
+                b.m1.push(best);
+            }
+        }
+
+        let mut any_closed = false;
+        while let Some(&Reverse((end, slot))) = closing.peek() {
+            if end > j + 1 {
+                break;
+            }
+            closing.pop();
+            any_closed = true;
+            closed[slot] = true;
+            let b = &slots[slot];
+            let w = &planned[b.planned];
+            let job = &jobs[w.job];
+            let detection_limit = detection_limit(ms1, w.scans.clone(), &mut limits);
+            rt.clear();
+            rt.extend(w.scans.clone().map(|j| ms1.rt(j)));
+            let mut ys: [&[f32]; MAX_ISOTOPES] = [&[]; MAX_ISOTOPES];
+            for (y, trace) in ys.iter_mut().zip(b.y.iter()).take(n_iso) {
+                *y = trace;
+            }
+            let e = fit_traces_on_grid(
+                &rt,
+                &ys[..n_iso],
+                &b.m1,
+                &b.mz0,
+                job.probe.mz,
+                job.envelope,
+                &w.prior,
+                detection_limit,
+                job.widths,
+                &mut work,
+            );
+            out.push((w.job, e));
+            free.push(slot);
+        }
+        if any_closed {
+            active.retain(|s| !closed[s.slot]);
+        }
+    }
+    out
 }
 
 /// The template fit on extracted traces.
@@ -1145,6 +1443,276 @@ mod tests {
         assert_eq!(missing.isotopes_used & 0b0010, 0b0010, "isotope 1 kept");
         assert_eq!(missing.isotopes_used & 0b1000, 0, "missing M+3 dropped");
         assert!(missing.llr > 0.5 * intact.llr && missing.llr < 2.0 * intact.llr);
+    }
+
+    /// Every job of `jobs` through [`fit_many`] and through [`fit_on_grid`]
+    /// one at a time, compared field by field; returns the fitted count.
+    fn assert_fit_many_matches(run: &Ms1RunIndex, jobs: &[FitJob], p: &EvidenceParams) -> usize {
+        let many = fit_many(run, jobs, p);
+        assert_eq!(many.len(), jobs.len());
+        let mut scratch = FitScratch::default();
+        let mut fitted = 0;
+        for (k, (job, got)) in jobs.iter().zip(&many).enumerate() {
+            let want = fit_on_grid(
+                run,
+                &job.probe,
+                job.charge,
+                job.envelope,
+                p,
+                job.widths,
+                &mut scratch,
+            );
+            // Debug prints every f64 exactly, so equal text is equal bits,
+            // NaN included (a non-finite probe m/z gives a NaN field).
+            let same =
+                |a: &Option<Evidence>, b: &Option<Evidence>| format!("{a:?}") == format!("{b:?}");
+            assert!(same(got, &want), "job {k}: {job:?}\n{got:?}\n{want:?}");
+            if job.widths == &WIDTH_GRID[..] {
+                let reference = fit(run, &job.probe, job.charge, job.envelope, p);
+                assert!(same(got, &reference), "job {k}: {job:?}");
+            }
+            fitted += usize::from(got.is_some());
+        }
+        fitted
+    }
+
+    const FIVE_POINT_GRID: [f64; 5] = [0.5, 0.7, 1.0, 1.4, 2.0];
+
+    #[test]
+    fn fit_many_equals_fit() {
+        let mut rng = Rng(11);
+        let features: Vec<Feature> = (0..120)
+            .map(|k| {
+                (
+                    400.0 + 800.0 * rng.uniform(),
+                    1 + (k % 4) as u8,
+                    ENV,
+                    30.0 + 540.0 * rng.uniform(),
+                    2.0 + 6.0 * rng.uniform(),
+                    AMP * (0.01 + rng.uniform()),
+                )
+            })
+            .collect();
+        let run = synth_run(&features, NOISE, 1.0);
+        let end = run.rt_range().unwrap().1;
+        let envelopes = [ENV, [0.7, 0.2, 0.08, 0.02], [1.0, 0.0, 0.0, 0.0]];
+        let grids: [&[f64]; 2] = [&WIDTH_GRID, &FIVE_POINT_GRID];
+        let probes: Vec<(Probe, u8)> = (0..2000)
+            .map(|k| {
+                let f = &features[k % features.len()];
+                let charge = if k % 5 == 0 {
+                    1 + (rng.next_u64() % 4) as u8
+                } else {
+                    f.1
+                };
+                let mut pr = probe(
+                    f.0,
+                    f.3 + 20.0 * (rng.uniform() - 0.5),
+                    1.0 + 10.0 * rng.uniform(),
+                    1.0 + 8.0 * rng.uniform(),
+                );
+                match k % 4 {
+                    0 => {}
+                    1 => {
+                        let n = [-11i8, -7, 7, 11][(k / 4) % 4];
+                        pr.kind = Hypothesis::MassShiftDecoy(n);
+                        pr.mz += n as f64 * PEPTIDE_MASS_SLOPE / charge as f64;
+                    }
+                    2 => {
+                        pr.kind = Hypothesis::RtShiftDecoy;
+                        pr.t_hat = end * rng.uniform();
+                    }
+                    _ => pr.mz = 300.0 + 1200.0 * rng.uniform(),
+                }
+                if k % 50 == 0 {
+                    pr.t_hat = [-5.0, 0.0, end, end + 5.0][(k / 50) % 4];
+                }
+                if k % 97 == 0 {
+                    pr.s = 0.2;
+                    pr.w_prior = 0.2;
+                }
+                (pr, charge)
+            })
+            .collect();
+        let jobs: Vec<FitJob> = probes
+            .iter()
+            .enumerate()
+            .map(|(k, &(probe, charge))| FitJob {
+                probe,
+                charge,
+                envelope: &envelopes[k % envelopes.len()],
+                widths: grids[(k / 3) % 2],
+            })
+            .collect();
+        let narrow = EvidenceParams {
+            tol_ppm: 25.0,
+            n_isotopes: 2,
+        };
+        for p in [params(), narrow] {
+            let fitted = assert_fit_many_matches(&run, &jobs, &p);
+            eprintln!("fit_many == fit: {fitted} of {} fitted", jobs.len());
+            assert!(fitted > 1900 && fitted < jobs.len());
+        }
+    }
+
+    #[test]
+    fn fit_many_equals_fit_with_overlapping_windows_at_run_edges() {
+        // 40 scans with dense background; each scan also holds two equally
+        // intense centroids inside the isotope-0 tolerance of MZ (a tie the
+        // lowest m/z wins) and the isotope pattern of MZ.
+        let mut scans = synth_scans(&[(MZ, 2, ENV, 20.0, 3.0, AMP)], NOISE, 1.0, 4);
+        scans.truncate(40);
+        for s in scans.iter_mut() {
+            s.peaks.push((MZ * (1.0 - 4e-6), 7.0e5));
+            s.peaks.push((MZ * (1.0 + 4e-6), 7.0e5));
+        }
+        // One scan with a NaN m/z, whose centroid order is undefined.
+        scans[25].peaks.push((f64::NAN, 1.0e6));
+        let run = Ms1RunIndex::new(scans);
+        let end = run.rt_range().unwrap().1;
+        let mut probes = Vec::new();
+        for &t_hat in &[
+            -30.0,
+            -3.0,
+            0.0,
+            1.5,
+            20.0,
+            20.0,
+            20.0,
+            end - 1.0,
+            end,
+            end + 3.0,
+            1e9,
+        ] {
+            for &mz in &[
+                MZ,
+                MZ,
+                MZ * (1.0 + 2e-6),
+                MZ + ISOTOPE / 2.0,
+                MZ - ISOTOPE / 2.0,
+            ] {
+                for &(s, w) in &[(6.0, 5.0), (0.5, 0.5), (0.25, 0.25), (20.0, 2.0)] {
+                    probes.push(probe(mz, t_hat, s, w));
+                }
+            }
+        }
+        probes.push(probe(f64::NAN, 20.0, 6.0, 5.0));
+        probes.push(probe(MZ, f64::NAN, 6.0, 5.0));
+        probes.push(probe(f64::INFINITY, 20.0, 6.0, 5.0));
+        let jobs: Vec<FitJob> = probes
+            .iter()
+            .enumerate()
+            .map(|(k, &probe)| FitJob {
+                probe,
+                charge: [2, 2, 1, 3][k % 4],
+                envelope: &ENV,
+                widths: if k % 2 == 0 {
+                    &WIDTH_GRID[..]
+                } else {
+                    &FIVE_POINT_GRID[..]
+                },
+            })
+            .collect();
+        for n_isotopes in 1..=MAX_ISOTOPES {
+            let p = EvidenceParams {
+                tol_ppm: 10.0,
+                n_isotopes,
+            };
+            let fitted = assert_fit_many_matches(&run, &jobs, &p);
+            assert!(fitted > 0 && fitted < jobs.len());
+        }
+        assert!(fit_many(&run, &[], &params()).is_empty());
+    }
+
+    /// Wall time of 50k probes on a 3,000-scan run: one [`fit_with`] per
+    /// probe against [`fit_many`], each on one thread and on all threads.
+    /// Run with `--ignored --nocapture`.
+    #[test]
+    #[ignore = "timing"]
+    fn timing_fit_many_50k_probes_on_3000_scan_run() {
+        use rayon::prelude::*;
+
+        let mut rng = Rng(13);
+        let features: Vec<Feature> = (0..600)
+            .map(|k| {
+                (
+                    400.0 + 800.0 * rng.uniform(),
+                    2 + (k % 2) as u8,
+                    ENV,
+                    60.0 + 2800.0 * rng.uniform(),
+                    5.0,
+                    AMP * (0.01 + rng.uniform()),
+                )
+            })
+            .collect();
+        let mut scans = synth_scans(&features, NOISE, 1.0, 3);
+        scans.truncate(3000);
+        let run = Ms1RunIndex::new(scans);
+        let jobs: Vec<FitJob> = (0..50_000)
+            .map(|k| {
+                let f = &features[k % features.len()];
+                let mz = if k % 2 == 0 {
+                    f.0
+                } else {
+                    400.0 + 800.0 * rng.uniform()
+                };
+                FitJob {
+                    probe: probe(mz, f.3 + 4.0 * (rng.uniform() - 0.5), 6.0, 5.0),
+                    charge: f.1,
+                    envelope: &ENV,
+                    widths: &WIDTH_GRID,
+                }
+            })
+            .collect();
+        let p = params();
+        let per_probe = || -> Vec<Option<Evidence>> {
+            jobs.par_iter()
+                .map_init(FitScratch::default, |scratch, j| {
+                    fit_with(&run, &j.probe, j.charge, j.envelope, &p, scratch)
+                })
+                .collect()
+        };
+        let one = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        // Process CPU seconds (user + system) on Linux, NaN elsewhere.
+        let cpu = || -> f64 {
+            std::fs::read_to_string("/proc/self/stat")
+                .ok()
+                .and_then(|stat| {
+                    let fields: Vec<&str> = stat.rsplit(')').next()?.split_whitespace().collect();
+                    let ticks = fields.get(11)?.parse::<f64>().ok()?
+                        + fields.get(12)?.parse::<f64>().ok()?;
+                    Some(ticks / 100.0)
+                })
+                .unwrap_or(f64::NAN)
+        };
+        let time = |label: &str, f: &dyn Fn() -> Vec<Option<Evidence>>| {
+            let (start, cpu0) = (std::time::Instant::now(), cpu());
+            let out = f();
+            eprintln!(
+                "timing {label}: {:.3} s wall, {:.2} s CPU for {} probes on {} scans ({} centroids)",
+                start.elapsed().as_secs_f64(),
+                cpu() - cpu0,
+                jobs.len(),
+                run.len(),
+                run.total_peaks()
+            );
+            out
+        };
+        let threads = rayon::current_num_threads();
+        let a1 = time("per-probe fit, 1 thread", &|| one.install(per_probe));
+        let b1 = time("fit_many, 1 thread", &|| {
+            one.install(|| fit_many(&run, &jobs, &p))
+        });
+        let a = time(&format!("per-probe fit, {threads} threads"), &per_probe);
+        let b = time(&format!("fit_many, {threads} threads"), &|| {
+            fit_many(&run, &jobs, &p)
+        });
+        assert_eq!(a1, b1);
+        assert_eq!(a, b);
+        assert_eq!(a, a1);
     }
 
     #[test]

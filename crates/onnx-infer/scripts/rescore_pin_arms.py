@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build A/B Percolator PINs from `rescore_pin` feature TSVs of one or more models.
 
-Each ``--features SRC=PATH`` is a TSV written by the ``rescore_pin`` example
+``--pin`` and the feature TSVs may be gzipped. Each ``--features SRC=PATH`` is a TSV written by the ``rescore_pin`` example
 (one row per PIN row, same order). Its columns ``<p>_irt`` / ``<p>_missing``
 carry the model's raw RT prediction and missing flag; the spectral-match
 features follow (NA without an MS2 model).
@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
 
 import numpy as np
 import pandas as pd
@@ -118,7 +119,7 @@ def blocks_for(src, path, ids, labels, conf, a):
 
 def main():
     a = parse_args()
-    with open(a.pin) as f:
+    with (gzip.open(a.pin, "rt") if a.pin.endswith(".gz") else open(a.pin)) as f:
         header = f.readline().rstrip("\n").split("\t")
         lines = [ln.rstrip("\n").split("\t") for ln in f]
     k = header.index("Peptide")

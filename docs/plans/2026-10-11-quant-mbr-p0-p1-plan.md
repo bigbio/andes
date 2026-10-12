@@ -1,5 +1,8 @@
 # Scalable LFQ match-between-runs (P0 + P1) Implementation Plan
 
+> Part A was revised during implementation; where it differs, the code and DOCS.md are
+> authoritative.
+
 **Goal:** Give every (precursor, run) pair in a multi-run LFQ experiment one consistent,
 FDR-controlled quantity, using per-run stages that run in parallel and global stages that
 only touch compact tables.
@@ -18,7 +21,7 @@ inputs runs the same four stages in one process.
 
 ## Global Constraints
 
-- Build, test, clippy and benchmark on the benchmark VM under `/srv/data/andes-bench/quant_mbr_<date>/` with `CARGO_TARGET_DIR` there; the local machine does edits and git only.
+- Build, test, clippy and benchmark on a dedicated build machine with its own `CARGO_TARGET_DIR`; the local machine does edits and git only.
 - CI gate: `RUSTFLAGS="-D warnings" cargo build --release`, `cargo test --release --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`.
 - No hostnames, usernames, cluster names, job ids or absolute site paths in code, commits, docs or PR text.
 - Code comments describe the code as it is; tried and rejected ideas go in the task report, not in comments.
@@ -265,7 +268,7 @@ fn cache_rejects_wrong_magic_and_version() {
 }
 ```
 
-- [ ] **Step 2: Run them on the VM and see them fail**
+- [ ] **Step 2: Run them on the build machine and see them fail**
 
 Run: `cargo test --release -p andes --bin andes ms1_cache`
 Expected: compile error, `store_at`/`load_from` not found.
@@ -823,7 +826,7 @@ fills the trace buffers. Then fit each probe from its buffer.
 
 ### Task 13: Benchmark and gates (P1)
 
-**Files:** VM scripts only, under `/srv/data/andes-bench/quant_mbr_<date>/` (scripts are kept; data and outputs are deleted afterwards). Results go into the report, not into the repo.
+**Files:** benchmark scripts only, on the build machine (scripts are kept; data and outputs are deleted afterwards). Results go into the report, not into the repo.
 
 - [ ] **Step 1: P0 gate.** On the six UPS1 runs (PXD001819), with `--quant-dir` vs without: `.lfq.tsv` byte-identical, and record the cache size per run. Repeat the cache-size measurement on the Astral HYE run. Gate: the cache is at most 50% of the raw file size; otherwise report it and propose f32 m/z.
 - [ ] **Step 2: UPS1 MBR.** All-in-one `--lfq --mbr --rescore`.
@@ -833,7 +836,7 @@ fills the trace buffers. Then fit each probe from its buffer.
     - fold-change median and MAE (true 3.32 / 0)
     - yeast CV, against the PR #119 baseline and Sage 0.14.7 run with its own MBR
   - Report quantity values both ways: identified + `transfer_ms1` only, and also including `below_threshold`.
-- [ ] **Step 3: Transfer FDR truth.** Find a DDA dataset with a species missing from some runs by design (search PRIDE for two-species LFQ benchmarks with dropout or blank samples; check the file listing across pages). Measure the true transfer FDP as transfers of the absent species, after removing peptides shared between species, divided by all accepted transfers into those runs. Also report the per-family q estimates and their agreement. Gate: true FDP ≤ 1.5 × nominal at 1%. If no such dataset fits on the VM, report the per-family agreement and the pseudo-transfer validation only, and state that the true FDP is unmeasured.
+- [ ] **Step 3: Transfer FDR truth.** Find a DDA dataset with a species missing from some runs by design (search PRIDE for two-species LFQ benchmarks with dropout or blank samples; check the file listing across pages). Measure the true transfer FDP as transfers of the absent species, after removing peptides shared between species, divided by all accepted transfers into those runs. Also report the per-family q estimates and their agreement. Gate: true FDP ≤ 1.5 × nominal at 1%. If no such dataset fits on the build machine, report the per-family agreement and the pseudo-transfer validation only, and state that the true FDP is unmeasured.
 - [ ] **Step 4: Validation numbers.** Pseudo-transfer sensitivity at q ≤ 0.01 and the wrong-peak rate.
 - [ ] **Step 5: Speed.** Wall time and peak RSS of each stage on UPS1, and the share of extract (decides Task 12).
 - [ ] **Step 6: One-variable A/Bs, each kept only if it wins.**
@@ -841,7 +844,7 @@ fills the trace buffers. Then fit each probe from its buffer.
   - the RT prior inside the objective vs a hard window
   - K = 2 vs mass-shift-only
   - the width grid (fixed `w_prior` vs 3-point)
-- [ ] **Step 7: Clean up** the VM data and outputs; keep scripts.
+- [ ] **Step 7: Clean up** the benchmark data and outputs; keep scripts.
 
 ---
 

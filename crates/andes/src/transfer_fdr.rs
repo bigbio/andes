@@ -19,6 +19,13 @@
 //! is at most the threshold. The same estimate is made with one decoy family
 //! at a time (`K` = that family's ratio).
 //!
+//! `K` is counted over the rows passed in, which are the rows that have
+//! features: a target or decoy without evidence takes no part. When decoys are
+//! missing (no RT-shift decoy near a run edge, a window too short to fit), `K`
+//! falls below the nominal number of decoys per target and each remaining
+//! decoy counts for more targets, rather than the missing decoys being counted
+//! as absent false hits; this errs on the conservative side.
+//!
 //! A row gets no score when its fold's training set is single-class or fails
 //! the trainer's quality gate, and no q-value when it has no score or its fold
 //! (restricted to the estimate's families) lacks targets or decoys.

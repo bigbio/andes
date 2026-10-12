@@ -45,7 +45,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use output::mbr_out::{write_mbr_tsv, write_mbr_validation, EvidenceType, MbrRow, MbrValidation};
+use output::mbr_out::{
+    write_mbr_tsv, write_mbr_validation, Accepted, EvidenceType, MbrRow, MbrValidation,
+    VALIDATION_Q,
+};
 use quant::decoys::{probes, Hypothesis, Probe};
 use quant::evidence::{fit_on_grid, fit_with, Evidence, EvidenceParams, FitScratch};
 use quant::library::{Library, LibraryEntry};
@@ -579,7 +582,13 @@ pub(crate) fn finalize(
         match (r.role, r.kind) {
             (Role::Identified, Hypothesis::Target) => {
                 if let Some(e) = &r.evidence {
-                    identified.insert((r.precursor, r.run), e);
+                    let previous = identified.insert((r.precursor, r.run), e);
+                    debug_assert!(
+                        previous.is_none(),
+                        "two identified rows of precursor {} in run {}",
+                        r.precursor,
+                        r.run
+                    );
                 }
             }
             (Role::Transfer, kind) => {
@@ -605,6 +614,9 @@ pub(crate) fn finalize(
     }
     let fdr = transfer_fdr(&fdr_rows, seed);
     let accepted = |q: Option<f64>| q.is_some_and(|q| q <= mbr_fdr);
+    // The validation thresholds, VALIDATION_Q then mbr_fdr, and their counts.
+    let thresholds = [VALIDATION_Q, mbr_fdr];
+    let mut at = [Accepted::default(), Accepted::default()];
 
     let mut v = MbrValidation {
         q_threshold: mbr_fdr,
@@ -622,10 +634,13 @@ pub(crate) fn finalize(
                 let q = fdr_index[i].and_then(|k| fdr.result.q[k]);
                 v.transfers += 1;
                 v.transfers_scored += usize::from(q.is_some());
-                v.accepted_pooled += usize::from(accepted(q));
-                if let Some(k) = fdr_index[i] {
-                    v.accepted_mass_only += usize::from(accepted(fdr.result.q_mass_only[k]));
-                    v.accepted_rt_only += usize::from(accepted(fdr.result.q_rt_only[k]));
+                for (a, &t) in at.iter_mut().zip(&thresholds) {
+                    let ok = |q: Option<f64>| usize::from(q.is_some_and(|q| q <= t));
+                    a.pooled += ok(q);
+                    if let Some(k) = fdr_index[i] {
+                        a.mass_only += ok(fdr.result.q_mass_only[k]);
+                        a.rt_only += ok(fdr.result.q_rt_only[k]);
+                    }
                 }
                 let t = if accepted(q) {
                     EvidenceType::TransferMs1
@@ -638,14 +653,22 @@ pub(crate) fn finalize(
                 let q = transfer_features(r).and_then(|x| fdr.pseudo_q(r.precursor, &x));
                 v.pseudo_transfers += 1;
                 v.pseudo_scored += usize::from(q.is_some());
-                v.pseudo_accepted += usize::from(accepted(q));
-                if let (Some(p), Some(id)) = (e, identified.get(&(r.precursor, r.run))) {
-                    let wrong = (p.t0 - id.t0).abs() > id.w;
+                let wrong = match (e, identified.get(&(r.precursor, r.run))) {
+                    (Some(p), Some(id)) => Some((p.t0 - id.t0).abs() > id.w),
+                    _ => None,
+                };
+                if let Some(w) = wrong {
                     v.wrong_peak_pairs += 1;
-                    v.wrong_peak += usize::from(wrong);
-                    if accepted(q) {
-                        v.accepted_pairs += 1;
-                        v.accepted_wrong_peak += usize::from(wrong);
+                    v.wrong_peak += usize::from(w);
+                }
+                for (a, &t) in at.iter_mut().zip(&thresholds) {
+                    if !q.is_some_and(|q| q <= t) {
+                        continue;
+                    }
+                    a.pseudo += 1;
+                    if let Some(w) = wrong {
+                        a.pairs += 1;
+                        a.wrong_peak += usize::from(w);
                     }
                 }
                 continue;
@@ -655,17 +678,20 @@ pub(crate) fn finalize(
             r.precursor,
             r.run,
             MbrRow {
-                precursor: &lib.meta[r.precursor as usize].key,
+                precursor_key: &lib.meta[r.precursor as usize].key,
                 run: &stems[r.run as usize],
                 evidence_type,
                 quantity: e.map(|e| e.quantity),
                 quantity_se: e.map(|e| e.quantity_se),
                 transfer_q,
-                apex_rt: e.map(|e| e.t0),
+                apex_rt_s: e.map(|e| e.t0),
                 library_q: r.library_q,
             },
         ));
     }
+    let [at_q01, at_threshold] = at;
+    v.at_q01 = at_q01;
+    v.at_threshold = at_threshold;
     out.sort_by_key(|&(p, run, _)| (p, run));
     let out: Vec<MbrRow<'_>> = out.into_iter().map(|(_, _, row)| row).collect();
     write_mbr_tsv(mbr_tsv, &out)?;
@@ -679,26 +705,34 @@ pub(crate) fn finalize(
         eprintln!("[mbr] transfer FDR fold without a model: {f}");
     }
     eprintln!(
-        "[mbr] transfers {}: {} with a q-value, {} at q <= {mbr_fdr} (mass-shift decoys only {}, RT-shift decoys only {}); {} transfer rows without features, {} unscored, {} scored without a q-value",
+        "[mbr] transfers {}: {} with a q-value; {} transfer rows without features, {} unscored, {} scored without a q-value",
         v.transfers,
         v.transfers_scored,
-        v.accepted_pooled,
-        v.accepted_mass_only,
-        v.accepted_rt_only,
         summary.no_features,
         fdr.counts.unscored,
         fdr.counts.no_q
     );
     eprintln!(
-        "[mbr] pseudo-transfers {}: {} at q <= {mbr_fdr} (sensitivity lower bound {}); wrong peak {} of {} ({} of {} accepted)",
-        v.pseudo_transfers,
-        v.pseudo_accepted,
-        v.sensitivity().map_or("NA".into(), |s| format!("{s:.4}")),
-        v.wrong_peak,
-        v.wrong_peak_pairs,
-        v.accepted_wrong_peak,
-        v.accepted_pairs
+        "[mbr] pseudo-transfers {}: wrong peak {} of {}",
+        v.pseudo_transfers, v.wrong_peak, v.wrong_peak_pairs
     );
+    let shown: &[(f64, &Accepted)] = if mbr_fdr == VALIDATION_Q {
+        &[(VALIDATION_Q, &v.at_q01)]
+    } else {
+        &[(VALIDATION_Q, &v.at_q01), (mbr_fdr, &v.at_threshold)]
+    };
+    for &(t, a) in shown {
+        eprintln!(
+            "[mbr] at q <= {t}: {} transfers (mass-shift decoys only {}, RT-shift decoys only {}); {} pseudo-transfers (sensitivity lower bound {}), {} of {} accepted at the wrong peak",
+            a.pooled,
+            a.mass_only,
+            a.rt_only,
+            a.pseudo,
+            v.sensitivity(a).map_or("NA".into(), |s| format!("{s:.4}")),
+            a.wrong_peak,
+            a.pairs
+        );
+    }
     summary.rows_written = out.len();
     summary.validation = v;
     summary.fdr = fdr.counts;
@@ -1313,16 +1347,31 @@ mod finalize_tests {
         assert_eq!(v.pseudo_transfers, N as usize);
         assert_eq!(v.wrong_peak_pairs, N as usize);
         assert_eq!(v.wrong_peak, (N / WRONG_EVERY) as usize);
-        assert!(v.sensitivity().unwrap() > 0.9, "{v:?}");
+        assert!(v.sensitivity(&v.at_q01).unwrap() > 0.9, "{v:?}");
+        assert_eq!(v.at_q01, v.at_threshold);
         assert_eq!(v.transfers, N as usize);
         assert_eq!(v.transfers_scored, N as usize - 1);
-        assert!(v.accepted_mass_only > 0 && v.accepted_rt_only > 0);
+        assert!(v.at_q01.mass_only > 0 && v.at_q01.rt_only > 0);
         let t = table(&val);
         assert_eq!(t.len(), 2);
         let get = |name: &str| &t[1][t[0].iter().position(|h| h == name).unwrap()];
         assert_eq!(get("wrong_peak_rate"), "0.1");
         assert_eq!(get("transfers"), &N.to_string());
-        assert_eq!(get("accepted_pooled"), &v.accepted_pooled.to_string());
+        assert_eq!(get("accepted_pooled_q01"), &v.at_q01.pooled.to_string());
+
+        // A looser threshold keeps the q <= 0.01 counts and adds its own.
+        let loose = finalize(&stems(), &library(), &extract(), 0.5, 7, &mbr, &val).unwrap();
+        let w = &loose.validation;
+        assert_eq!(w.q_threshold, 0.5);
+        assert_eq!(w.at_q01, v.at_q01);
+        assert!(w.at_threshold.pooled > w.at_q01.pooled, "{w:?}");
+        let t = table(&val);
+        let get = |name: &str| &t[1][t[0].iter().position(|h| h == name).unwrap()];
+        assert_eq!(get("accepted_pooled_q01"), &v.at_q01.pooled.to_string());
+        assert_eq!(
+            get("accepted_pooled_at_threshold"),
+            &w.at_threshold.pooled.to_string()
+        );
     }
 
     #[test]

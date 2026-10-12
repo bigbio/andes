@@ -807,6 +807,11 @@ mod tests {
     /// per-write uuid and date in hash-ordered metadata) hash to the value the
     /// QPX-only writer produces, and the schema and metadata keys are the
     /// QPX ones.
+    ///
+    /// The pinned hash covers the column-data bytes only and depends on the
+    /// arrow/parquet crate versions: after a version bump it may need
+    /// re-pinning, from the output of the writer as it was before the bump
+    /// (not from the code under test).
     #[test]
     fn records_without_mbr_columns_write_the_qpx_bytes() {
         let dir = tempfile::tempdir().unwrap();

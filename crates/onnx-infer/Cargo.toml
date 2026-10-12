@@ -37,3 +37,7 @@ input = { path = "../input" }
 [[example]]
 name = "rescore_pin"
 required-features = ["tract"]
+
+[[example]]
+name = "model_parity"
+required-features = ["tract"]

@@ -17,6 +17,12 @@ pub trait InferenceBackend: Send {
     /// Graph output names in model order.
     fn output_names(&self) -> &[String];
 
+    /// A second handle on the same loaded model (weights shared, not copied),
+    /// for running one model from several threads. `None` when unsupported.
+    fn share(&self) -> Option<Box<dyn InferenceBackend>> {
+        None
+    }
+
     /// Execute the model. `inputs` are matched by [`NamedTensor::name`].
     fn run(&mut self, inputs: &[NamedTensor]) -> Result<Vec<NamedTensor>>;
 }
@@ -43,6 +49,18 @@ impl OnnxSession {
         let backend = load_backend(manifest.onnx_path(), backend)?;
         Ok(Self {
             manifest: Some(manifest),
+            backend,
+        })
+    }
+
+    /// Another session on the same loaded weights (no reload, no copy), so
+    /// worker threads can share one large model.
+    pub fn share(&self) -> Result<Self> {
+        let backend = self.backend.share().ok_or_else(|| {
+            Error::Inference(format!("{:?} backend cannot share a loaded model", self.backend.kind()))
+        })?;
+        Ok(Self {
+            manifest: self.manifest.clone(),
             backend,
         })
     }

@@ -43,6 +43,7 @@ mod session;
 mod tensor;
 
 pub mod backend;
+pub mod ms2pip;
 pub mod peptdeep;
 pub mod rescoring;
 

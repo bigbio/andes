@@ -1,6 +1,7 @@
 //! [`tract`](https://github.com/sonos/tract) ONNX backend (pure Rust, Apache-2.0).
 
 use std::path::Path;
+use std::sync::Arc;
 
 use tract_onnx::prelude::*;
 
@@ -12,7 +13,7 @@ type TractRunnable = SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Bo
 
 /// Tract-backed session.
 pub struct TractSession {
-    model: TractRunnable,
+    model: Arc<TractRunnable>,
     input_names: Vec<String>,
     output_names: Vec<String>,
 }
@@ -45,7 +46,7 @@ impl TractSession {
             .map_err(|e| Error::Inference(format!("tract runnable: {e}")))?;
 
         Ok(Self {
-            model: runnable,
+            model: Arc::new(runnable),
             input_names,
             output_names,
         })
@@ -90,6 +91,14 @@ fn name_or_fallback(name: &str, kind: &str, i: usize) -> String {
 impl InferenceBackend for TractSession {
     fn kind(&self) -> BackendKind {
         BackendKind::Tract
+    }
+
+    fn share(&self) -> Option<Box<dyn InferenceBackend>> {
+        Some(Box::new(Self {
+            model: Arc::clone(&self.model),
+            input_names: self.input_names.clone(),
+            output_names: self.output_names.clone(),
+        }))
     }
 
     fn input_names(&self) -> &[String] {
@@ -138,6 +147,14 @@ impl InferenceBackend for TractSession {
                 .get(i)
                 .cloned()
                 .unwrap_or_else(|| format!("output_{i}"));
+            // Integer outputs (e.g. TreeEnsembleClassifier labels) come back as f32.
+            let t = if t.datum_type() == f32::datum_type() {
+                t.into_tensor()
+            } else {
+                t.cast_to::<f32>()
+                    .map_err(|e| Error::Inference(format!("cast output `{name}` to f32: {e}")))?
+                    .into_owned()
+            };
             let view = t
                 .to_array_view::<f32>()
                 .map_err(|e| Error::Inference(format!("output `{name}` is not f32: {e}")))?;

@@ -99,8 +99,22 @@ Phospho PSMs are Percolator seed 42.
 
 ### Opt-in modes
 
-- **`--chimeric` forces `top_n = 1`** in pass 1 (baseline: 10), so its wall time is not
-  comparable to baseline. On UPS1, +1,274 PSMs came with entrapment hits flat (166 → 167).
+- **`--chimeric` keeps the same top-N candidates per scan as the baseline** (default 10).
+  Until 2026-10 it forced `top_n = 1`; the rows in the table above that are marked as chimeric
+  were measured that way. Top-1 vs top-10, Percolator seeds 42/1/2, PSMs / peptides at entrapment
+  true FDP ≤ 1%:
+
+  | Dataset | `--top-n 1` | top-10 (default) |
+  |---|---|---|
+  | Astral | 60,403–60,435 / 26,696–26,717 | **66,377–66,424 / 29,384–29,400** |
+  | TMT (nominal 1%) | 12,360–12,471 / 10,365–10,442 | **12,614–12,651 / 10,527–10,570** |
+  | UPS1 | 7,291–8,113 / 2,167–2,429 | 7,856–8,237 / 2,295–2,392 |
+  | Phospho (PXD007653) | 39,404–39,489 / 15,046–15,084 | 39,261–39,307 / 14,896–14,922 |
+
+  Astral gains 10% PSMs and peptides; TMT gains 2%; UPS1 is within seed noise; phospho loses
+  0.4% of PSMs and 1.1% of peptides (its nominal 1% moves from 1.17–1.19% to 1.08–1.14% true
+  FDP). On UPS1, the earlier top-1 measurement found +1,274 PSMs with entrapment hits flat
+  (166 → 167).
 - **`--refine` is high-res only** and skips both low-res sets by design: at low resolution a
   deamidation (+0.984) cannot be told from a C13 isotope error.
 - **`--refine` on Astral.** Three fixes landed before the refresh: #100 pairs each Pass-2 decoy

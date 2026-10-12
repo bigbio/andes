@@ -221,9 +221,12 @@ To train your own, see [`TRAIN.md`](TRAIN.md).
 
 ## Chimeric / co-isolated peptides (`--chimeric`, experimental)
 
-With `--chimeric` (mzML or Thermo `.raw`), pass 1 is the normal search with `top_n = 1`; pass 2
+With `--chimeric` (mzML or Thermo `.raw`), pass 1 is the normal search, keeping the same top-N
+candidates per scan (`--top-n`, default 10); pass 2 takes the best one as the primary peptide,
 finds co-isolated precursors in the MS1 isolation window and searches the residual spectrum for
-a second peptide.
+a second peptide. Keeping the alternatives (rather than only the best candidate) took Astral from
+60,435 to 66,405 PSMs and 26,717 to 29,400 peptides at an equal entrapment true FDP of 1%; on
+phospho it cost about 1% of peptides (15,084 → 14,904).
 
 On UPS1 (with entrapment) PSMs at q ≤ 0.01 rose from 15,838 to 17,112 (+8.0%) with entrapment
 hits flat (166 → 167). On high-res data `--chimeric` runs on the default out-of-core path with

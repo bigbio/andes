@@ -631,10 +631,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     params.chimeric_isolation_halfwidth_da = 1.5;
     params.chimeric_max_coisolated = cli.chimeric_max_coisolated;
     params.chimeric_max_kl = cli.chimeric_max_kl;
-    // FORCE top-1 under the cascade: Pass 1 emits only the best primary per scan;
-    // secondaries come from Pass 2. The default top_n (10) would make Pass 1 emit
-    // blind multi-emission per scan = inflated FDR.
-    params.top_n_psms_per_spectrum = if chimeric_active { 1 } else { cli.top_n };
+    // `--chimeric` keeps the same top-N candidates per scan as a plain search.
+    // Pass 2 takes the best one as the primary peptide; the alternatives stay in
+    // the PIN, so a rescorer can promote a lower-ranked candidate. Measured on
+    // the Astral entrapment database, keeping them does not raise the true FDP
+    // at Percolator's nominal 1%.
+    params.top_n_psms_per_spectrum = cli.top_n;
     params.enzyme = search_enzyme;
     params.extra_enzymes = extra_enzymes.clone();
     params.num_tolerable_termini = match cli.enzyme_specificity {

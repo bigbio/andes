@@ -343,43 +343,51 @@ fn ecoli_pin_matches_golden_with_precursor_calibration_on() {
 
 const CHIMERIC_MZML: &str = "test-fixtures/astral_pxd070049_slice.mzML.gz";
 
+/// Run a search on the chimeric fixture, with or without `--chimeric`;
+/// returns (header, sorted rows, stderr).
+fn run_slice(fragment_index: &str, chimeric: bool, out: &Path) -> (String, Vec<String>, String) {
+    let mut args = vec![
+        "--spectrum",
+        CHIMERIC_MZML,
+        "--database",
+        "test-fixtures/ecoli.fasta",
+        "--threads",
+        "2",
+        "--precursor-cal",
+        "off",
+        "--fragment-index",
+        fragment_index,
+    ];
+    if chimeric {
+        args.push("--chimeric");
+    }
+    run(&args, out)
+}
+
 /// Run a `--chimeric` search; returns (header, sorted rows, stderr).
 fn run_chimeric(fragment_index: &str, out: &Path) -> (String, Vec<String>, String) {
-    run(
-        &[
-            "--spectrum",
-            CHIMERIC_MZML,
-            "--database",
-            "test-fixtures/ecoli.fasta",
-            "--threads",
-            "2",
-            "--precursor-cal",
-            "off",
-            "--fragment-index",
-            fragment_index,
-            "--chimeric",
-        ],
-        out,
-    )
+    run_slice(fragment_index, true, out)
 }
 
 /// `--chimeric` with enumeration retrieval: header + sorted rows.
 const CHIMERIC_SLICE_PIN: &str = "test-fixtures/goldens/chimeric_slice.pin.gz";
 
-/// Rows beyond one per scan: the chimeric secondaries (Pass 1 keeps top-1).
-fn extra_rows(rows: &[String]) -> usize {
-    let scans: std::collections::HashSet<&str> = rows
-        .iter()
-        .map(|r| r.split('\t').nth(2).expect("ScanNr column"))
-        .collect();
-    rows.len() - scans.len()
+/// Chimeric secondaries: the rows a `--chimeric` run adds over the same search
+/// without it. Pass 1 of the cascade is that search, so the difference is the
+/// rows Pass 2 contributed.
+fn secondary_rows(fragment_index: &str, chimeric_rows: &[String], dir: &Path) -> usize {
+    let (_, plain_rows, _) = run_slice(fragment_index, false, &dir.join(format!("plain_{fragment_index}.pin")));
+    chimeric_rows
+        .len()
+        .checked_sub(plain_rows.len())
+        .expect("a --chimeric run must not emit fewer rows than the plain search")
 }
 
 #[test]
 fn chimeric_enumeration_pin_matches_golden() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (header, rows, _) = run_chimeric("off", &dir.path().join("enum.pin"));
-    let secondaries = extra_rows(&rows);
+    let secondaries = secondary_rows("off", &rows, dir.path());
     assert!(
         secondaries > 50,
         "fixture produced only {secondaries} chimeric secondary rows — the gate would be vacuous"
@@ -404,7 +412,8 @@ fn chimeric_fragment_index_runs_with_unique_specids() {
         .map(|r| r.split('\t').next().expect("SpecId column"))
         .collect();
     assert_eq!(ids.len(), idx_rows.len(), "duplicate SpecIds in the PIN");
-    let (enum_sec, idx_sec) = (extra_rows(&enum_rows) as f64, extra_rows(&idx_rows) as f64);
+    let enum_sec = secondary_rows("off", &enum_rows, dir.path()) as f64;
+    let idx_sec = secondary_rows("auto", &idx_rows, dir.path()) as f64;
     assert!(
         (idx_sec - enum_sec).abs() <= 0.1 * enum_sec,
         "chimeric secondaries: fragment index {idx_sec} vs enumeration {enum_sec}"

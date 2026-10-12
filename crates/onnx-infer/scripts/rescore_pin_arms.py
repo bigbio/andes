@@ -55,6 +55,7 @@ def parse_args():
     p.add_argument("--arm", nargs="+", required=True, help="NAME=SRC:KIND[,SRC:KIND...]")
     p.add_argument("--calib-q", type=float, default=0.01)
     p.add_argument("--bins", type=int, default=50)
+    p.add_argument("--gzip", action="store_true", help="write <out-prefix>_<NAME>.pin.gz")
     return p.parse_args()
 
 
@@ -152,8 +153,8 @@ def main():
         df = pd.concat(frames, axis=1)
         cols = list(df.columns)
         vals = df.values
-        path = f"{a.out_prefix}_{name}.pin"
-        with open(path, "w") as out:
+        path = f"{a.out_prefix}_{name}.pin" + (".gz" if a.gzip else "")
+        with (gzip.open(path, "wt", compresslevel=3) if a.gzip else open(path, "w")) as out:
             out.write("\t".join(header[:k] + cols + header[k:]) + "\n")
             for x, row in zip(lines, vals):
                 out.write("\t".join(x[:k] + [f"{v:.6g}" for v in row] + x[k:]) + "\n")

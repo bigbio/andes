@@ -90,3 +90,19 @@ Reference scripts: [`ms2pip_reference.py`](scripts/ms2pip_reference.py),
   to import), DeepLC drops every modification with only a warning; the
   reference script must run in an environment where
   `Peptidoform("M[Oxidation]").parsed_sequence[0][1][0].composition` works.
+
+### Prosit — blocked
+
+Koina's Prosit SavedModels (MD5 as listed in Koina's `.zenodo` pointers) are
+built on the GPU-only `CudnnRNN` GRU kernel: TensorFlow on a CPU cannot
+execute them, so no local TensorFlow reference exists. tf2onnx 1.17 converts
+them to ONNX `GRU` without error, but the result disagrees with Koina's served
+predictions (`prosit_reference.py`): iRT max |Δ| ≈ 48 iRT units (Pearson 0.91
+over the 8-peptide panel), normalised intensities max |Δ| = 1.0. Setting
+`linear_before_reset = 1` does not fix it, and the GRU weights are sliced from
+the cuDNN parameter blob inside the graph, so gate-block reordering of the
+initialisers has no effect. The Rust side (`prosit` module, `Prosit`
+predictor in the examples, `model_parity --model prosit` against Koina) is in
+place; what is missing is a faithful graph — likely a re-implementation of the
+Prosit architecture (e.g. in PyTorch) from the SavedModel's canonical
+weights, or a CPU-compatible Keras export.

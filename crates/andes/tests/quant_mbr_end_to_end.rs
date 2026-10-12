@@ -243,13 +243,11 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
     }
     // Peptide 6 has no MS1 signal anywhere and is identified in run 1 only.
     for key in ["DAFLGSFLYEYSR/2", "DAFLGSFLYEYSR/3"] {
-        if let Some(r1) = row(key, "mbr_run1") {
-            assert_eq!(r1[ev], "identified");
-        }
+        let r1 = row(key, "mbr_run1").unwrap_or_else(|| panic!("{key} in run 1"));
+        assert_eq!(r1[ev], "identified");
         for run in ["mbr_run2", "mbr_run3"] {
-            if let Some(r) = row(key, run) {
-                assert_ne!(r[ev], "transfer_ms1", "{key} in {run}: {r:?}");
-            }
+            let r = row(key, run).unwrap_or_else(|| panic!("{key} in {run}"));
+            assert_ne!(r[ev], "transfer_ms1", "{key} in {run}: {r:?}");
         }
     }
     // Most untriggered precursors with signal are transferred.
@@ -361,6 +359,26 @@ fn separate_searches_join_on_run_and_spec_id() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
         err.contains("SpecId") && err.contains("mbr_run1") && err.contains("per-run"),
+        "{err}"
+    );
+
+    // Swapped per-run files join on SpecId but disagree on the peptides.
+    let mut swapped: Vec<String> = ["quant", "library", "--quant-dir", s(&q), "--psms"]
+        .map(String::from)
+        .to_vec();
+    let mut t = own("target");
+    let a = t[0].split_once('=').unwrap().1.to_string();
+    let b = t[1].split_once('=').unwrap().1.to_string();
+    t[0] = format!("mbr_run1={b}");
+    t[1] = format!("mbr_run2={a}");
+    swapped.extend(t);
+    swapped.push("--decoy-psms".into());
+    swapped.extend(own("decoy"));
+    let out = andes(&swapped.iter().map(String::as_str).collect::<Vec<_>>());
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("run mbr_run1") && err.contains("mbr_run2.percolator.target.psms.txt"),
         "{err}"
     );
 
@@ -478,6 +496,58 @@ fn library_stage_errors_name_what_is_missing() {
     ]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("library.parquet"));
+
+    // Finalize checks every extract against the library and the tolerance.
+    let library = |fdr: &str| {
+        run_andes(&[
+            "quant",
+            "library",
+            "--quant-dir",
+            s(&q),
+            "--psms",
+            s(&targets),
+            "--decoy-psms",
+            s(&decoys),
+            "--mbr-library-fdr",
+            fdr,
+        ])
+    };
+    let extract = |run: &str, tol: &str| {
+        run_andes(&[
+            "quant",
+            "extract",
+            "--quant-dir",
+            s(&q),
+            "--run",
+            run,
+            "--lfq-tol",
+            tol,
+        ])
+    };
+    let base = tmp.path().join("out");
+    let finalize = || andes(&["quant", "finalize", "--quant-dir", s(&q), "-o", s(&base)]);
+    library("0.01");
+    for r in RUNS {
+        extract(r, "10ppm");
+    }
+    extract("mbr_run2", "5ppm");
+    let out = finalize();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("mbr_run2.extract.parquet") && err.contains("--lfq-tol"),
+        "{err}"
+    );
+    extract("mbr_run2", "10ppm");
+    assert!(finalize().status.success());
+    library("0.5");
+    let out = finalize();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("mbr_run1.extract.parquet") && err.contains("stale"),
+        "{err}"
+    );
 }
 
 #[test]

@@ -19,16 +19,17 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use model::Tolerance;
-use output::extract_table::{read_extract_table, write_extract_table};
+use output::extract_table::{read_extract_table, read_extract_tags, write_extract_table_tagged};
 use output::feature_parquet::{FeatureRecord, MbrColumns};
-use output::library_table::{read_library, write_library, StoredLibrary};
+use output::library_table::{
+    library_fingerprint, read_library, write_library, StoredLibrary, FINGERPRINT_KEY,
+};
 use output::mbr_out::EvidenceType;
 use output::run_quant_table::read_run_quant_table;
 use output::{ModRecord, PercolatorPsm, ProteinPosition};
 use quant::align::AlignParams;
 use quant::evidence::EvidenceParams;
 use quant::library::{build_library, PrecursorMeta, PsmIn};
-use rayon::prelude::*;
 
 use crate::cli::{QuantCommand, QuantExtractArgs, QuantFinalizeArgs, QuantLibraryArgs};
 use crate::quant_mbr::{extract_run, finalize, mbr_paths, ExtractCounts, ExtractRow, MbrFeature};
@@ -39,6 +40,8 @@ pub(crate) const MBR_SEED: u64 = 42;
 const TABLE_SUFFIX: &str = ".quant.parquet";
 const CACHE_SUFFIX: &str = ".cache";
 const EXTRACT_SUFFIX: &str = ".extract.parquet";
+/// Extract-table metadata key of the template-fit m/z tolerance, ppm.
+const TOL_KEY: &str = "andes.extract.tol_ppm";
 /// Isotopes per precursor envelope in the run tables and the library.
 const ENVELOPE_LEN: usize = 4;
 
@@ -103,29 +106,77 @@ pub(crate) fn library_runs(dir: &Path, runs: &[String]) -> Result<Vec<String>, S
     Ok(stems)
 }
 
-/// SpecId -> rescorer score of target and decoy PSMs. Errors: a target
-/// without a score (named by `source`) or a SpecId among both.
+/// One rescored PSM as the library joins it.
+pub(crate) struct Joined {
+    pub score: f64,
+    /// From the decoy result file.
+    pub is_decoy: bool,
+    /// The rescorer's peptide string (flanks and modification tags allowed).
+    pub peptide: String,
+}
+
+/// Rescored PSMs by SpecId and the file(s) they came from.
+pub(crate) struct ScoreSet {
+    pub source: String,
+    pub psms: HashMap<String, Joined>,
+}
+
+/// The target and decoy PSMs of one rescoring result. Errors: a PSM without
+/// a score or a SpecId among both (the message names `source`).
 pub(crate) fn rescore_scores(
     targets: &HashMap<String, PercolatorPsm>,
-    decoys: impl IntoIterator<Item = (String, f64)>,
+    decoys: &HashMap<String, PercolatorPsm>,
     source: &str,
-) -> Result<HashMap<String, f64>, String> {
-    let mut out = HashMap::with_capacity(targets.len());
-    for (id, p) in targets {
-        let score = p.score.ok_or_else(|| {
-            format!(
-                "{source}: no `score` column; the library ranks precursors by the rescorer's PSM score"
-            )
-        })?;
-        out.insert(id.clone(), score);
-    }
-    for (id, score) in decoys {
-        if out.insert(id.clone(), score).is_some() {
-            return Err(format!("{source}: PSM {id:?} is both a target and a decoy"));
+) -> Result<ScoreSet, String> {
+    let mut psms = HashMap::with_capacity(targets.len() + decoys.len());
+    for (map, is_decoy) in [(targets, false), (decoys, true)] {
+        for (id, p) in map {
+            let score = p.score.ok_or_else(|| {
+                format!(
+                    "{source}: no `score` column; the library ranks precursors by the rescorer's PSM score"
+                )
+            })?;
+            let joined = Joined {
+                score,
+                is_decoy,
+                peptide: p.peptide.clone(),
+            };
+            if psms.insert(id.clone(), joined).is_some() {
+                return Err(format!("{source}: PSM {id:?} is both a target and a decoy"));
+            }
         }
     }
-    Ok(out)
+    Ok(ScoreSet {
+        source: source.to_string(),
+        psms,
+    })
 }
+
+/// Residue letters of a peptide string: Percolator-style flanks (`K.` and
+/// `.R`) removed, bracketed tags removed, then every character that is not
+/// an uppercase letter dropped (mass deltas such as `+57.02146`).
+fn residues(peptide: &str) -> String {
+    let b = peptide.as_bytes();
+    let mut p = peptide;
+    if b.len() >= 4 && b[1] == b'.' && b[b.len() - 2] == b'.' {
+        p = &peptide[2..peptide.len() - 2];
+    }
+    let mut out = String::with_capacity(p.len());
+    let mut depth = 0usize;
+    for c in p.chars() {
+        match c {
+            '[' => depth += 1,
+            ']' => depth = depth.saturating_sub(1),
+            c if depth == 0 && c.is_ascii_uppercase() => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Largest share of a run's joined PSMs that may disagree with the rescoring
+/// result on peptide or target/decoy label.
+const MAX_JOIN_MISMATCH: f64 = 0.01;
 
 /// Reads a Percolator PSM result file; the error names it.
 fn read_percolator(path: &Path) -> Result<HashMap<String, PercolatorPsm>, String> {
@@ -136,8 +187,8 @@ fn read_percolator(path: &Path) -> Result<HashMap<String, PercolatorPsm>, String
 /// Rescorer scores by SpecId: one map for every run (SpecIds must then be
 /// distinct across runs), or one map per run stem.
 pub(crate) enum PsmScores {
-    Merged(HashMap<String, f64>),
-    PerRun(HashMap<String, HashMap<String, f64>>),
+    Merged(ScoreSet),
+    PerRun(HashMap<String, ScoreSet>),
 }
 
 /// Where the Percolator results of `quant library` come from.
@@ -217,8 +268,8 @@ fn load_scores(source: &ScoreSource) -> Result<PsmScores, String> {
     })
 }
 
-/// Score map from Percolator's target and decoy PSM files.
-fn percolator_scores(targets: &Path, decoys: &Path) -> Result<HashMap<String, f64>, String> {
+/// Scores from Percolator's target and decoy PSM files.
+fn percolator_scores(targets: &Path, decoys: &Path) -> Result<ScoreSet, String> {
     let t = read_percolator(targets)?;
     let d = read_percolator(decoys)?;
     for (path, m) in [(targets, &t), (decoys, &d)] {
@@ -231,8 +282,7 @@ fn percolator_scores(targets: &Path, decoys: &Path) -> Result<HashMap<String, f6
     }
     rescore_scores(
         &t,
-        d.into_values()
-            .map(|p| (p.psm_id, p.score.unwrap_or(f64::NAN))),
+        &d,
         &format!("{} and {}", targets.display(), decoys.display()),
     )
 }
@@ -277,7 +327,7 @@ pub(crate) fn build_and_write_library(
     }
     drop(seen);
     let scores = load_scores()?;
-    let run_scores: Vec<&HashMap<String, f64>> = match &scores {
+    let run_scores: Vec<&ScoreSet> = match &scores {
         PsmScores::Merged(m) => {
             if let Some((id, a, b)) = &shared {
                 return Err(format!(
@@ -332,28 +382,44 @@ pub(crate) fn build_and_write_library(
         target_key.push(has_target);
         id_of.insert(key, i as u32);
     }
-    let (mut unscored, mut shadowed) = (0usize, 0usize);
+    let (mut unscored_t, mut unscored_d, mut shadowed, mut mismatched) = (0usize, 0, 0, 0);
     let mut psms = Vec::new();
     for (r, (_, rows)) in tables.iter().enumerate() {
+        let (mut run_joined, mut run_mismatched) = (0usize, 0usize);
         for row in rows {
             let id = id_of[row.precursor_key.as_str()];
             if row.is_decoy && target_key[id as usize] {
                 shadowed += 1;
                 continue;
             }
-            let Some(&score) = run_scores[r].get(&row.spec_id) else {
-                unscored += 1;
+            let Some(j) = run_scores[r].psms.get(&row.spec_id) else {
+                if row.is_decoy {
+                    unscored_d += 1;
+                } else {
+                    unscored_t += 1;
+                }
                 continue;
             };
+            run_joined += 1;
+            if j.is_decoy != row.is_decoy || residues(&j.peptide) != residues(&row.peptidoform) {
+                run_mismatched += 1;
+            }
             psms.push(PsmIn {
                 run: r as u16,
                 precursor: id,
                 rt: row.rt_s,
-                score,
+                score: j.score,
                 is_decoy: row.is_decoy,
                 faims_cv: row.faims_cv,
             });
         }
+        if run_mismatched as f64 > MAX_JOIN_MISMATCH * run_joined as f64 {
+            return Err(format!(
+                "run {}: {run_mismatched} of {run_joined} PSMs joined on SpecId disagree with {} on the peptide or the target/decoy label; are these the rescoring results of this run?",
+                stems[r], run_scores[r].source
+            ));
+        }
+        mismatched += run_mismatched;
     }
     let n_rows: usize = tables.iter().map(|t| t.1.len()).sum();
     if psms.is_empty() && n_rows > 0 {
@@ -367,10 +433,12 @@ pub(crate) fn build_and_write_library(
     drop(tables);
     let library = build_library(&psms, meta, stems.len(), max_q, &AlignParams::default());
     eprintln!(
-        "[mbr] library: {} runs, {} PSMs scored ({} without a rescoring score and {} decoy PSMs sharing a target's key skipped); {} precursors, {} entries at the internal entry gate q<={max_q} (precursor-level, not an identification FDR)",
+        "[mbr] library: {} runs, {} PSMs scored ({} of them disagreeing with the rescoring result on peptide or label); skipped: {} target and {} decoy PSMs without a rescoring score, {} decoy PSMs sharing a target's key; {} precursors, {} entries at the internal entry gate q<={max_q} (precursor-level, not an identification FDR)",
         stems.len(),
         psms.len(),
-        unscored,
+        mismatched,
+        unscored_t,
+        unscored_d,
         shadowed,
         library.meta.len(),
         library.entries.len()
@@ -433,6 +501,7 @@ fn log_extract(stem: &str, rows: usize, c: &ExtractCounts) {
 pub(crate) fn extract_and_write(
     dir: &Path,
     stored: &StoredLibrary,
+    fingerprint: &str,
     run: u16,
     ep: &EvidenceParams,
 ) -> Result<Vec<ExtractRow>, String> {
@@ -441,7 +510,14 @@ pub(crate) fn extract_and_write(
     let ex = extract_run(run, &cache, &stored.library, ep)?;
     log_extract(stem, ex.rows.len(), &ex.counts);
     let path = artifact(dir, stem, EXTRACT_SUFFIX);
-    write_extract_table(&path, &ex.rows)?;
+    write_extract_table_tagged(
+        &path,
+        &ex.rows,
+        &[
+            (FINGERPRINT_KEY.to_string(), fingerprint.to_string()),
+            (TOL_KEY.to_string(), ep.tol_ppm.to_string()),
+        ],
+    )?;
     Ok(ex.rows)
 }
 
@@ -513,8 +589,8 @@ fn feature_records(stored: &StoredLibrary, features: &[MbrFeature]) -> Vec<Featu
                 pep: None,
                 is_decoy: false,
                 calculated_mz: m.mz as f32,
-                observed_mz: m.mz as f32,
-                mass_error_ppm: None,
+                observed_mz: f.mass_err_ppm.map_or(m.mz, |e| m.mz * (1.0 + e * 1e-6)) as f32,
+                mass_error_ppm: f.mass_err_ppm.map(|e| e as f32),
                 additional_scores: vec![("library_q".into(), f.library_q, false)],
                 run_file_name: run.clone(),
                 cv_params: Vec::new(),
@@ -587,7 +663,7 @@ pub(crate) fn finalize_and_write(
 pub(crate) fn run_in_process(
     dir: &Path,
     stems: &[String],
-    scores: HashMap<String, f64>,
+    scores: ScoreSet,
     ep: &EvidenceParams,
     max_q: f64,
     mbr_fdr: f64,
@@ -597,9 +673,11 @@ pub(crate) fn run_in_process(
     let t0 = std::time::Instant::now();
     let stems = library_runs(dir, stems)?;
     let stored = build_and_write_library(dir, &stems, || Ok(PsmScores::Merged(scores)), max_q)?;
+    let fingerprint = library_fingerprint(&stored);
+    // One run at a time: each extraction is parallel over its precursors and
+    // holds that run's MS1.
     let runs: Vec<Vec<ExtractRow>> = (0..stems.len())
-        .into_par_iter()
-        .map(|r| extract_and_write(dir, &stored, r as u16, ep))
+        .map(|r| extract_and_write(dir, &stored, &fingerprint, r as u16, ep))
         .collect::<Result<_, _>>()?;
     finalize_and_write(&stored, &runs, mbr_fdr, base, parquet_dir)?;
     eprintln!("[PHASE mbr: {:.2}s]", t0.elapsed().as_secs_f64());
@@ -633,18 +711,39 @@ fn run_extract(a: QuantExtractArgs) -> Result<(), String> {
                 stored.runs.join(", ")
             )
         })?;
-    extract_and_write(&a.quant_dir, &stored, run as u16, &ep).map(|_| ())
+    let fingerprint = library_fingerprint(&stored);
+    extract_and_write(&a.quant_dir, &stored, &fingerprint, run as u16, &ep).map(|_| ())
 }
 
 fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
     let stored = read_library(&a.quant_dir)?;
+    let fingerprint = library_fingerprint(&stored);
     let mut runs = Vec::with_capacity(stored.runs.len());
+    let mut tol: Option<(String, PathBuf)> = None;
     for stem in &stored.runs {
-        runs.push(read_extract_table(&artifact(
-            &a.quant_dir,
-            stem,
-            EXTRACT_SUFFIX,
-        ))?);
+        let path = artifact(&a.quant_dir, stem, EXTRACT_SUFFIX);
+        let tags = read_extract_tags(&path)?;
+        let get = |k: &str| tags.iter().find(|t| t.0 == k).map(|t| t.1.clone());
+        if get(FINGERPRINT_KEY).as_deref() != Some(fingerprint.as_str()) {
+            return Err(format!(
+                "{}: extracted with another library than {} (stale extract); run `andes quant extract` again",
+                path.display(),
+                a.quant_dir.join(output::library_table::LIBRARY_FILE).display()
+            ));
+        }
+        let t = get(TOL_KEY).ok_or_else(|| format!("{}: no {TOL_KEY}", path.display()))?;
+        match &tol {
+            None => tol = Some((t, path.clone())),
+            Some((t0, p0)) if *t0 != t => {
+                return Err(format!(
+                    "{}: extracted at {t} ppm, {} at {t0} ppm; every run needs the same --lfq-tol",
+                    path.display(),
+                    p0.display()
+                ));
+            }
+            _ => {}
+        }
+        runs.push(read_extract_table(&path)?);
     }
     finalize_and_write(
         &stored,
@@ -763,12 +862,31 @@ mod tests {
                 proteins: "P".into(),
             },
         );
-        let e = rescore_scores(&t, [], "t.tsv").unwrap_err();
+        let none = HashMap::new();
+        let e = rescore_scores(&t, &none, "t.tsv").err().unwrap();
         assert!(e.contains("t.tsv") && e.contains("score"), "{e}");
         t.get_mut("s1").unwrap().score = Some(2.0);
-        let e = rescore_scores(&t, [("s1".to_string(), 1.0)], "t.tsv").unwrap_err();
+        let e = rescore_scores(&t, &t.clone(), "t.tsv").err().unwrap();
         assert!(e.contains("both"), "{e}");
-        let m = rescore_scores(&t, [("s2".to_string(), 1.0)], "t.tsv").unwrap();
-        assert_eq!(m.len(), 2);
+        let mut d = t.clone();
+        let p = d.remove("s1").unwrap();
+        d.insert(
+            "s2".into(),
+            PercolatorPsm {
+                psm_id: "s2".into(),
+                ..p
+            },
+        );
+        let m = rescore_scores(&t, &d, "t.tsv").unwrap();
+        assert_eq!(m.psms.len(), 2);
+        assert!(!m.psms["s1"].is_decoy && m.psms["s2"].is_decoy);
+    }
+
+    #[test]
+    fn residues_ignore_flanks_and_modification_notation() {
+        assert_eq!(residues("K.GAC+57.02146LLPK.I"), "GACLLPK");
+        assert_eq!(residues("GAC[UNIMOD:4]LLPK"), "GACLLPK");
+        assert_eq!(residues("-.PEPM[+15.99491]K.-"), "PEPMK");
+        assert_eq!(residues("PEPTIDEK"), "PEPTIDEK");
     }
 }

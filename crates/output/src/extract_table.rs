@@ -219,11 +219,12 @@ fn write_versioned(
     rows: &[ExtractRow],
     version: &str,
     schema: Schema,
+    tags: &[(String, String)],
 ) -> Result<(), String> {
     let mut partial = path.as_os_str().to_owned();
     partial.push(".partial");
     let partial = std::path::PathBuf::from(partial);
-    let written = write_file(&partial, rows, version, schema).and_then(|()| {
+    let written = write_file(&partial, rows, version, schema, tags).and_then(|()| {
         std::fs::rename(&partial, path).map_err(|e| format!("{}: {e}", path.display()))
     });
     if written.is_err() {
@@ -237,16 +238,21 @@ fn write_file(
     rows: &[ExtractRow],
     version: &str,
     schema: Schema,
+    tags: &[(String, String)],
 ) -> Result<(), String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let schema = Arc::new(schema);
     let props = WriterProperties::builder()
         .set_compression(Compression::ZSTD(ZstdLevel::default()))
         .set_max_row_group_size(BATCH_ROWS)
-        .set_key_value_metadata(Some(vec![KeyValue::new(
-            SCHEMA_KEY.to_string(),
-            version.to_string(),
-        )]))
+        .set_key_value_metadata(Some(
+            std::iter::once(KeyValue::new(SCHEMA_KEY.to_string(), version.to_string()))
+                .chain(
+                    tags.iter()
+                        .map(|(k, v)| KeyValue::new(k.clone(), v.clone())),
+                )
+                .collect(),
+        ))
         .build();
     let file = File::create(path).map_err(|e| err(&e))?;
     let mut writer =
@@ -261,7 +267,34 @@ fn write_file(
 
 /// Write the extraction table of one run.
 pub fn write_extract_table(path: &Path, rows: &[ExtractRow]) -> Result<(), String> {
-    write_versioned(path, rows, SCHEMA_VERSION, schema())
+    write_versioned(path, rows, SCHEMA_VERSION, schema(), &[])
+}
+
+/// Write the extraction table of one run with extra key-value metadata
+/// `tags` (read back by [`read_extract_tags`]).
+pub fn write_extract_table_tagged(
+    path: &Path,
+    rows: &[ExtractRow],
+    tags: &[(String, String)],
+) -> Result<(), String> {
+    write_versioned(path, rows, SCHEMA_VERSION, schema(), tags)
+}
+
+/// The key-value metadata of an extraction table, without reading its rows.
+/// Every error names `path`.
+pub fn read_extract_tags(path: &Path) -> Result<Vec<(String, String)>, String> {
+    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    let file = File::open(path).map_err(|e| err(&e))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| err(&e))?;
+    Ok(builder
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|kv| kv.value.map(|v| (kv.key, v)))
+        .collect())
 }
 
 #[cfg(test)]
@@ -270,7 +303,7 @@ pub(crate) fn write_with_schema_version(
     rows: &[ExtractRow],
     version: &str,
 ) -> Result<(), String> {
-    write_versioned(path, rows, version, schema())
+    write_versioned(path, rows, version, schema(), &[])
 }
 
 fn column<'a, T: 'static>(b: &'a RecordBatch, i: usize, path: &Path) -> Result<&'a T, String> {
@@ -501,7 +534,7 @@ mod tests {
             .map(|f| f.as_ref().clone())
             .collect();
         fields[4] = Field::new("rolle", DataType::UInt8, false);
-        write_versioned(&p, &rows(), SCHEMA_VERSION, Schema::new(fields)).unwrap();
+        write_versioned(&p, &rows(), SCHEMA_VERSION, Schema::new(fields), &[]).unwrap();
         let e = read_extract_table(&p).unwrap_err();
         assert!(
             e.contains("r.extract.parquet") && e.contains("rolle"),

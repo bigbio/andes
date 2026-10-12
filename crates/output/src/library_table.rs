@@ -40,6 +40,9 @@ const LIBRARY_KEY: &str = "andes.library.schema";
 const ALIGNMENT_KEY: &str = "andes.alignment.schema";
 const RUNS_KEY: &str = "andes.library.runs";
 const MAX_Q_KEY: &str = "andes.library.max_q";
+/// Key of [`library_fingerprint`] in `library.parquet`; extract tables copy it.
+pub const FINGERPRINT_KEY: &str = "andes.library.fingerprint";
+const ALIGNMENT_FINGERPRINT_KEY: &str = "andes.alignment.fingerprint";
 const SCHEMA_VERSION: &str = "1.0";
 /// Rows per Parquet row group / record batch of the precursor table.
 const BATCH_ROWS: usize = 65_536;
@@ -94,6 +97,100 @@ fn alignment_schema() -> Schema {
         Field::new("obs_precursor", list(DataType::UInt32), false),
         Field::new("obs_rt", list(DataType::Float64), false),
     ])
+}
+
+/// 64-bit FNV-1a over the bytes fed to it.
+struct Fnv(u64);
+
+impl Fnv {
+    fn new() -> Self {
+        Fnv(0xcbf2_9ce4_8422_2325)
+    }
+    fn bytes(&mut self, b: &[u8]) {
+        for &x in b {
+            self.0 ^= x as u64;
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    fn u64(&mut self, v: u64) {
+        self.bytes(&v.to_le_bytes());
+    }
+    fn f64(&mut self, v: f64) {
+        self.u64(v.to_bits());
+    }
+    fn str(&mut self, v: &str) {
+        self.u64(v.len() as u64);
+        self.bytes(v.as_bytes());
+    }
+    fn hex(&self) -> String {
+        format!("{:016x}", self.0)
+    }
+}
+
+/// A stable hash of an alignment's stored state (maps, residual widths,
+/// anchor statistics and observations of every run).
+pub fn alignment_fingerprint(a: &Alignment) -> String {
+    let mut h = Fnv::new();
+    let runs = a.runs();
+    h.u64(runs.len() as u64);
+    for r in &runs {
+        match &r.map {
+            Some(m) => {
+                let (x, y) = m.knots();
+                let (lo, hi) = m.end_slopes();
+                h.u64(x.len() as u64);
+                x.iter().chain(y).for_each(|&v| h.f64(v));
+                h.f64(lo);
+                h.f64(hi);
+            }
+            None => h.u64(u64::MAX),
+        }
+        let sd = r.residual_sd.as_deref().unwrap_or(&[]);
+        h.u64(sd.len() as u64);
+        for &(t, v) in sd {
+            h.f64(t);
+            h.f64(v);
+        }
+        h.u64(r.anchors as u64);
+        h.f64(r.coverage);
+        h.u64(r.observations.len() as u64);
+        for &(p, t) in &r.observations {
+            h.u64(p as u64);
+            h.f64(t);
+        }
+    }
+    h.hex()
+}
+
+/// A stable hash of a stored library: run stems, entry gate, precursor
+/// metadata and proteins, entries and the alignment.
+pub fn library_fingerprint(lib: &StoredLibrary) -> String {
+    let mut h = Fnv::new();
+    h.u64(lib.runs.len() as u64);
+    lib.runs.iter().for_each(|r| h.str(r));
+    h.f64(lib.max_q);
+    h.u64(lib.library.meta.len() as u64);
+    for (m, p) in lib.library.meta.iter().zip(&lib.proteins) {
+        h.str(&m.key);
+        h.f64(m.mz);
+        h.u64(m.charge as u64);
+        m.envelope.iter().for_each(|&v| h.u64(v.to_bits() as u64));
+        h.str(p);
+    }
+    h.u64(lib.library.entries.len() as u64);
+    for e in &lib.library.entries {
+        h.u64(e.precursor as u64);
+        h.f64(e.q);
+        h.u64(e.faims_cv.map_or(u64::MAX, |v| v.to_bits() as u64));
+        h.u64(e.donors.len() as u64);
+        e.donors.iter().for_each(|&d| h.u64(d as u64));
+        for &(r, t) in &e.best_rt {
+            h.u64(r as u64);
+            h.f64(t);
+        }
+    }
+    h.str(&alignment_fingerprint(&lib.library.alignment));
+    h.hex()
 }
 
 /// `<dir>/library.parquet` and `<dir>/alignment.parquet`.
@@ -335,6 +432,11 @@ fn write_versioned(dir: &Path, lib: &StoredLibrary, version: &str) -> Result<(),
             KeyValue::new(LIBRARY_KEY.to_string(), version.to_string()),
             KeyValue::new(RUNS_KEY.to_string(), lib.runs.join("\n")),
             KeyValue::new(MAX_Q_KEY.to_string(), lib.max_q.to_string()),
+            KeyValue::new(FINGERPRINT_KEY.to_string(), library_fingerprint(lib)),
+            KeyValue::new(
+                ALIGNMENT_FINGERPRINT_KEY.to_string(),
+                alignment_fingerprint(&lib.library.alignment),
+            ),
         ],
         chunks.map(|ids| library_batch(&lib_schema, lib, &entry_of, ids)),
     )
@@ -477,6 +579,8 @@ pub fn read_library(dir: &Path) -> Result<StoredLibrary, String> {
     let max_q: f64 = get(MAX_Q_KEY)?
         .parse()
         .map_err(|e| lerr(&format!("{MAX_Q_KEY}: {e}")))?;
+    let fingerprint = get(FINGERPRINT_KEY)?;
+    let alignment_fp = get(ALIGNMENT_FINGERPRINT_KEY)?;
 
     let mut meta_rows: Vec<PrecursorMeta> = Vec::new();
     let mut proteins: Vec<String> = Vec::new();
@@ -615,6 +719,12 @@ pub fn read_library(dir: &Path) -> Result<StoredLibrary, String> {
         )));
     }
     let alignment = Alignment::from_runs(run_states, n).map_err(|e| aerr(&e))?;
+    if alignment_fingerprint(&alignment) != alignment_fp {
+        return Err(aerr(&format!(
+            "does not belong to {} (alignment fingerprint differs); rebuild the library",
+            lib_path.display()
+        )));
+    }
     for e in &mut entries {
         if let Some(&(r, _)) = e.best_rt.iter().find(|&&(r, _)| r as usize >= runs.len()) {
             return Err(lerr(&format!(
@@ -635,7 +745,7 @@ pub fn read_library(dir: &Path) -> Result<StoredLibrary, String> {
             .total_cmp(&meta_rows[b.precursor as usize].mz)
             .then(a.precursor.cmp(&b.precursor))
     });
-    Ok(StoredLibrary {
+    let stored = StoredLibrary {
         runs,
         max_q,
         library: Library {
@@ -644,7 +754,13 @@ pub fn read_library(dir: &Path) -> Result<StoredLibrary, String> {
             meta: meta_rows,
         },
         proteins,
-    })
+    };
+    if library_fingerprint(&stored) != fingerprint {
+        return Err(lerr(
+            &"content does not match its fingerprint; rebuild the library",
+        ));
+    }
+    Ok(stored)
 }
 
 #[cfg(test)]
@@ -746,6 +862,36 @@ mod tests {
             "{e}"
         );
         assert!(e.contains("2.0"), "{e}");
+    }
+
+    #[test]
+    fn fingerprints_are_stable_and_detect_a_foreign_alignment() {
+        let s = stored();
+        assert_eq!(library_fingerprint(&s), library_fingerprint(&s.clone()));
+        let mut other = s.clone();
+        other.max_q = 0.05;
+        assert_ne!(library_fingerprint(&s), library_fingerprint(&other));
+
+        // An alignment.parquet from another library is rejected by name.
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        write_library(a.path(), &s).unwrap();
+        let mut moved = s.clone();
+        let mut runs = moved.library.alignment.runs();
+        runs[0].coverage += 0.01;
+        moved.library.alignment =
+            quant::align::Alignment::from_runs(runs, moved.library.meta.len()).unwrap();
+        write_library(b.path(), &moved).unwrap();
+        std::fs::copy(b.path().join(ALIGNMENT_FILE), a.path().join(ALIGNMENT_FILE)).unwrap();
+        let e = read_library(a.path()).unwrap_err();
+        assert!(
+            e.contains("alignment.parquet") && e.contains("fingerprint"),
+            "{e}"
+        );
+        assert_eq!(
+            library_fingerprint(&read_library(b.path()).unwrap()),
+            library_fingerprint(&moved)
+        );
     }
 
     #[test]

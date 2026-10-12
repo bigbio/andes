@@ -816,7 +816,9 @@ runs, because it cannot say which run a score belongs to.
 * **Library** (`quant library`). Reads every run's `<stem>.quant.parquet` (`--runs`, or every
   table in the directory; a missing table or cache is an error) and joins Percolator's
   `score` to its PSMs on (run, SpecId) (target and decoy result files; the `score` column is
-  required). Runs are indexed by sorted stem, precursors by sorted key. A precursor enters
+  required). Each joined PSM is checked against the result's residue sequence (flanks and
+  modification notation ignored) and target/decoy file; a run where more than 1 % of the
+  joined PSMs disagree fails, naming the run and the file (swapped or foreign results). Runs are indexed by sorted stem, precursors by sorted key. A precursor enters
   the library when its best-PSM target/decoy q-value over all runs is at most
   `--mbr-library-fdr`: an internal entry gate, not a reported FDR. A joint, reference-free
   retention-time alignment maps every run onto a consensus scale and gives each transfer a
@@ -824,7 +826,8 @@ runs, because it cannot say which run a score belongs to.
   with fewer than 50 anchors, or whose anchors cover
   less than 30 % of the RT range, is unaligned: it is logged and neither gives nor receives
   transfers.
-* **Extract** (`quant extract`, one run, reads only `<stem>.cache`). Every library precursor
+* **Extract** (`quant extract`, one run, reads `library.parquet`, `alignment.parquet` and the
+  run's `<stem>.cache`). Every library precursor
   is measured, at the `--lfq-tol` m/z tolerance (ppm; default 10 ppm), by a likelihood template fit of its isotope pattern and elution profile around
   the predicted apex (around the PSM's RT where it was identified), with two decoy hypotheses
   per transfer: a mass-defect-preserving m/z shift and an RT shift. Identified pairs are also
@@ -835,6 +838,17 @@ runs, because it cannot say which run a score belongs to.
   scores, also reported per decoy family. It is a quant-quality q-value, not an identification
   FDR. Pseudo-transfers give a sensitivity lower bound and the wrong-peak rate, which decoys
   cannot see.
+
+`library.parquet` records a fingerprint of the library (and of `alignment.parquet`, checked on
+read); each extract table records that fingerprint and its `--lfq-tol`. `quant finalize` fails,
+naming the file, on an extract made from another library (stale) or at another tolerance than
+the other runs.
+
+`--mbr` without `--quant-dir` writes the per-run artifacts to a temporary directory (under
+`TMPDIR`): each run's MS1 cache (about 12 bytes per centroid, zstd-compressed; hundreds of MB
+for a long high-resolution run) plus its tables. For large runs pass `--quant-dir` on a disk
+with room. In-process, the stages run after every search output is written and the search
+state is freed, one run's MS1 at a time.
 
 `--mbr` cannot be combined with `--tmt`: with `--output-parquet`, `quantms.feature.parquet`
 holds the match-between-runs rows instead of the per-run features (§3f).

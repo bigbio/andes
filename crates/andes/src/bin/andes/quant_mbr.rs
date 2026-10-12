@@ -549,6 +549,8 @@ pub(crate) struct MbrFeature {
     pub transfer_q: Option<f64>,
     pub apex_rt_s: Option<f64>,
     pub library_q: f64,
+    /// Intensity-weighted isotope-0 mass error of the fit, ppm.
+    pub mass_err_ppm: Option<f64>,
 }
 
 /// Transfer FDR, pseudo-transfer validation and the MBR outputs over the
@@ -634,7 +636,7 @@ pub(crate) fn finalize(
         q_threshold: mbr_fdr,
         ..MbrValidation::default()
     };
-    let mut out: Vec<(u32, u16, MbrRow<'_>)> = Vec::new();
+    let mut out: Vec<(u32, u16, MbrRow<'_>, Option<f64>)> = Vec::new();
     for (i, r) in rows.iter().enumerate() {
         if r.kind != Hypothesis::Target {
             continue;
@@ -699,15 +701,16 @@ pub(crate) fn finalize(
                 apex_rt_s: e.map(|e| e.t0),
                 library_q: r.library_q,
             },
+            e.map(|e| e.mass_err_ppm),
         ));
     }
     let [at_q01, at_threshold] = at;
     v.at_q01 = at_q01;
     v.at_threshold = at_threshold;
-    out.sort_by_key(|&(p, run, _)| (p, run));
+    out.sort_by_key(|&(p, run, ..)| (p, run));
     summary.features = out
         .iter()
-        .map(|(p, run, r)| MbrFeature {
+        .map(|(p, run, r, mass_err)| MbrFeature {
             precursor: *p,
             run: *run,
             evidence_type: r.evidence_type,
@@ -716,9 +719,10 @@ pub(crate) fn finalize(
             transfer_q: r.transfer_q,
             apex_rt_s: r.apex_rt_s,
             library_q: r.library_q,
+            mass_err_ppm: *mass_err,
         })
         .collect();
-    let out: Vec<MbrRow<'_>> = out.into_iter().map(|(_, _, row)| row).collect();
+    let out: Vec<MbrRow<'_>> = out.into_iter().map(|(_, _, row, _)| row).collect();
     write_mbr_tsv(mbr_tsv, &out)?;
     write_mbr_validation(validation_tsv, &v)?;
 

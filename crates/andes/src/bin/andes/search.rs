@@ -2068,8 +2068,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         (false, false)
     };
-    // `--mbr`: SpecId -> score of the decoy PSMs, which the target map leaves out.
-    let mut mbr_decoy_scores: Vec<(String, f64)> = Vec::new();
+    // `--mbr`: the decoy PSMs with their scores, which the target map leaves
+    // out, and where the rescoring result came from.
+    let mut mbr_decoys: std::collections::HashMap<String, output::PercolatorPsm> =
+        std::collections::HashMap::new();
+    let mut mbr_source = String::new();
     let rescore_map: Option<std::collections::HashMap<String, output::PercolatorPsm>> =
         if use_percolator {
             let backend = output::resolve_backend(
@@ -2096,17 +2099,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 let path = output::decoy_results_path(&output_pin_path);
                 let text = std::fs::read_to_string(&path)
                     .map_err(|e| format!("{}: {e}", path.display()))?;
-                let decoys = output::parse_psm_results(&text)
+                mbr_decoys = output::parse_psm_results(&text)
                     .map_err(|e| format!("{}: {e}", path.display()))?;
-                for (id, p) in decoys {
-                    let score = p.score.ok_or_else(|| {
-                        format!(
-                            "{}: no `score` column; --mbr ranks precursors by the rescorer's PSM score",
-                            path.display()
-                        )
-                    })?;
-                    mbr_decoy_scores.push((id, score));
-                }
+                mbr_source = format!("the Percolator results of {}", output_pin_path.display());
             }
             Some(map)
         } else if use_native {
@@ -2120,7 +2115,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let all = rescore::native_rescore_pin_all(&pin_text, 42)
                 .map_err(|e| format!("native rescore: {e}"))?;
             if cli.mbr {
-                mbr_decoy_scores.extend(all.decoy_scores);
+                mbr_decoys = all.decoys;
+                mbr_source = "the native rescoring result".to_string();
             }
             let map = all.targets;
             eprintln!(
@@ -2246,41 +2242,28 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         )?;
     }
 
-    // ── Match-between-runs (`--mbr`): library, extract, finalize ────────────
-    if cli.mbr {
-        let (Some(dir), Some(map)) = (cli.quant_dir.as_deref(), rescore_map.as_ref()) else {
+    // `--mbr` inputs; the stages run after the last search output is
+    // written and the search state is released.
+    let mbr_job = if cli.mbr {
+        let (Some(dir), Some(map)) = (cli.quant_dir.clone(), rescore_map.as_ref()) else {
             return Err("--mbr needs --quant-dir and rescoring".into());
         };
         let stems: Vec<String> = spectrum_paths
             .iter()
             .map(|p| crate::quant_run::run_stem(p))
             .collect();
-        let scores = crate::quant_cmd::rescore_scores(
-            map,
-            std::mem::take(&mut mbr_decoy_scores),
-            "rescoring result",
-        )?;
+        let scores = crate::quant_cmd::rescore_scores(map, &mbr_decoys, &mbr_source)?;
         let ep = crate::quant_cmd::evidence_params(cli.lfq_tol)?;
-        crate::quant_cmd::run_in_process(
-            dir,
-            &stems,
-            scores,
-            &ep,
-            cli.mbr_library_fdr,
-            cli.mbr_fdr,
-            &report_base.with_extension(""),
-            cli.output_parquet.as_deref(),
-        )?;
-    }
-
-    if bench_mode {
-        eprintln!("Bench mode: skipping TSV write.");
-        release_at_exit(pin_candidates);
-        return Ok(());
-    }
+        Some((dir, stems, scores, ep))
+    } else {
+        None
+    };
+    drop(mbr_decoys);
 
     // ── 9. Write TSV (optional) ───────────────────────────────────────────────
-    if let Some(ref tsv_path) = cli.output_tsv {
+    if bench_mode {
+        eprintln!("Bench mode: skipping TSV write.");
+    } else if let Some(ref tsv_path) = cli.output_tsv {
         let spec_file_name = if spectrum_paths.len() == 1 {
             spectrum_path
                 .file_name()
@@ -2310,7 +2293,30 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Wrote TSV: {}", tsv_path.display());
     }
 
-    release_at_exit(pin_candidates);
+    // ── Match-between-runs (`--mbr`): library, extract, finalize ────────────
+    // Every search output is written; the search state is freed first, so
+    // the stages hold one run's MS1 at a time next to the library.
+    let Some((dir, stems, scores, ep)) = mbr_job else {
+        release_at_exit(pin_candidates);
+        return Ok(());
+    };
+    drop(spectra);
+    drop(queues);
+    drop(pin_candidates);
+    drop(pin_index);
+    drop(quant);
+    drop(rescore_map);
+    drop(target_db);
+    crate::quant_cmd::run_in_process(
+        &dir,
+        &stems,
+        scores,
+        &ep,
+        cli.mbr_library_fdr,
+        cli.mbr_fdr,
+        &report_base.with_extension(""),
+        cli.output_parquet.as_deref(),
+    )?;
     Ok(())
 }
 

@@ -11,9 +11,10 @@
 //!
 //! Run index: the position of the run's stem in the sorted stem list.
 //! Precursor id: the position of its key in the sorted union of every run's
-//! precursor keys. Library confidence ranks precursors by the rescorer's PSM
-//! score (Percolator's `score` column, or the native rescorer's held-out
-//! score), joined to the run tables by SpecId.
+//! precursor keys. The rescorer's PSM score and PSM q-value (Percolator's
+//! `score` and `q-value` columns, or the native rescorer's held-out score and
+//! q-value) are joined to the run tables on (run, SpecId). Library confidence
+//! ranks precursors by the score; the q-value picks the donor PSMs.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -109,6 +110,8 @@ pub(crate) fn library_runs(dir: &Path, runs: &[String]) -> Result<Vec<String>, S
 /// One rescored PSM as the library joins it.
 pub(crate) struct Joined {
     pub score: f64,
+    /// The rescorer's PSM q-value.
+    pub q: f64,
     /// From the decoy result file.
     pub is_decoy: bool,
     /// The rescorer's peptide string (flanks and modification tags allowed).
@@ -122,7 +125,7 @@ pub(crate) struct ScoreSet {
 }
 
 /// The target and decoy PSMs of one rescoring result. Errors: a PSM without
-/// a score or a SpecId among both (the message names `source`).
+/// a finite score or a SpecId among both (the message names `source`).
 pub(crate) fn rescore_scores(
     targets: &HashMap<String, PercolatorPsm>,
     decoys: &HashMap<String, PercolatorPsm>,
@@ -133,11 +136,12 @@ pub(crate) fn rescore_scores(
         for (id, p) in map {
             let score = p.score.ok_or_else(|| {
                 format!(
-                    "{source}: no `score` column; the library ranks precursors by the rescorer's PSM score"
+                    "{source}: PSM {id:?} has no finite `score`; the library ranks precursors by the rescorer's PSM score"
                 )
             })?;
             let joined = Joined {
                 score,
+                q: p.q_value,
                 is_decoy,
                 peptide: p.peptide.clone(),
             };
@@ -273,10 +277,11 @@ fn percolator_scores(targets: &Path, decoys: &Path) -> Result<ScoreSet, String> 
     let t = read_percolator(targets)?;
     let d = read_percolator(decoys)?;
     for (path, m) in [(targets, &t), (decoys, &d)] {
-        if m.values().any(|p| p.score.is_none()) {
+        if let Some(p) = m.values().find(|p| p.score.is_none()) {
             return Err(format!(
-                "{}: no `score` column; the library ranks precursors by the rescorer's PSM score",
-                path.display()
+                "{}: PSM {:?} has no finite `score` (missing column or value); the library ranks precursors by the rescorer's PSM score",
+                path.display(),
+                p.psm_id
             ));
         }
     }
@@ -289,17 +294,24 @@ fn percolator_scores(targets: &Path, decoys: &Path) -> Result<ScoreSet, String> 
 
 /// Builds the library over the run tables of `stems` (sorted, as from
 /// [`library_runs`]) with the scores of `load_scores` joined on (run,
-/// SpecId), and writes it to `dir`. The scores are loaded after the tables,
-/// so that merged scores over runs with a shared SpecId fail with the runs
+/// SpecId), and writes it to `dir`. `max_q` is the entry gate, `donor_q` the
+/// PSM q-value of the donor PSMs. The scores are loaded after the tables, so
+/// that merged scores over runs with a shared SpecId fail with the runs
 /// named.
 pub(crate) fn build_and_write_library(
     dir: &Path,
     stems: &[String],
     load_scores: impl FnOnce() -> Result<PsmScores, String>,
     max_q: f64,
+    donor_q: f64,
 ) -> Result<StoredLibrary, String> {
     if !(max_q > 0.0 && max_q <= 1.0) {
         return Err(format!("library entry gate {max_q} is outside (0, 1]"));
+    }
+    if !(donor_q > 0.0 && donor_q <= 1.0) {
+        return Err(format!(
+            "donor PSM q-value threshold {donor_q} is outside (0, 1]"
+        ));
     }
     // Every run's rows, and the first SpecId shared by two runs.
     let mut tables = Vec::with_capacity(stems.len());
@@ -409,6 +421,7 @@ pub(crate) fn build_and_write_library(
                 precursor: id,
                 rt: row.rt_s,
                 score: j.score,
+                q: j.q,
                 is_decoy: row.is_decoy,
                 faims_cv: row.faims_cv,
             });
@@ -431,9 +444,20 @@ pub(crate) fn build_and_write_library(
     drop(id_of);
     drop(keys);
     drop(tables);
-    let library = build_library(&psms, meta, stems.len(), max_q, &AlignParams::default());
+    let donor_psms = psms
+        .iter()
+        .filter(|p| !p.is_decoy && p.q <= donor_q)
+        .count();
+    let library = build_library(
+        &psms,
+        meta,
+        stems.len(),
+        max_q,
+        donor_q,
+        &AlignParams::default(),
+    );
     eprintln!(
-        "[mbr] library: {} runs, {} PSMs scored ({} of them disagreeing with the rescoring result on peptide or label); skipped: {} target and {} decoy PSMs without a rescoring score, {} decoy PSMs sharing a target's key; {} precursors, {} entries at the internal entry gate q<={max_q} (precursor-level, not an identification FDR)",
+        "[mbr] library: {} runs, {} PSMs scored ({} of them disagreeing with the rescoring result on peptide or label), {donor_psms} target PSMs at PSM q<={donor_q} identify their precursor in their run; skipped: {} target and {} decoy PSMs without a rescoring score, {} decoy PSMs sharing a target's key; {} precursors, {} entries at the internal entry gate q<={max_q} (precursor-level, not an identification FDR) with a PSM at PSM q<={donor_q}",
         stems.len(),
         psms.len(),
         mismatched,
@@ -457,7 +481,7 @@ pub(crate) fn build_and_write_library(
     for (r, stem) in stems.iter().enumerate() {
         if a.maps[r].is_none() {
             eprintln!(
-                "[mbr] run {stem} is unaligned ({} anchors, {:.2} of the consensus RT range): it is neither a transfer source nor a destination",
+                "[mbr] run {stem} is unaligned ({} anchors, {:.2} of the consensus RT range): it neither gives nor receives transfers and keeps its identified quantities",
                 a.anchors[r], a.coverage[r]
             );
         }
@@ -465,6 +489,7 @@ pub(crate) fn build_and_write_library(
     let stored = StoredLibrary {
         runs: stems.to_vec(),
         max_q,
+        donor_q,
         library,
         proteins,
     };
@@ -478,12 +503,14 @@ pub(crate) fn build_and_write_library(
 }
 
 fn log_extract(stem: &str, rows: usize, c: &ExtractCounts) {
-    if c.unaligned {
-        eprintln!("[mbr] extract {stem}: unaligned run, no rows");
-        return;
-    }
     eprintln!(
-        "[mbr] extract {stem}: {rows} rows; skipped: {} identified pairs with a non-finite best PSM RT, {} identified pairs without a prediction from other runs (no pseudo-transfer), {} transfers without a prediction; width prior from {} fits{}",
+        "[mbr] extract {stem}: {rows} rows{}; skipped: {} entries at a FAIMS voltage the run lacks, {} identified pairs with a non-finite best PSM RT, {} identified pairs without a prediction from other runs (no pseudo-transfer), {} transfers without a prediction; width prior from {} fits{}",
+        if c.unaligned {
+            " (unaligned run: identified rows only)"
+        } else {
+            ""
+        },
+        c.foreign_cv,
         c.nonfinite_best_rt,
         c.no_pseudo_prediction,
         c.no_prediction,
@@ -565,10 +592,12 @@ fn parse_peptidoform(peptidoform: &str) -> (String, Vec<ModRecord>) {
     (seq, mods)
 }
 
-/// The QPX feature rows of the MBR table.
+/// The QPX feature rows of the MBR table: every row except the
+/// below-threshold transfers, which stay in `<base>.mbr.tsv` only.
 fn feature_records(stored: &StoredLibrary, features: &[MbrFeature]) -> Vec<FeatureRecord> {
     features
         .iter()
+        .filter(|f| f.evidence_type != EvidenceType::BelowThreshold)
         .enumerate()
         .map(|(i, f)| {
             let m = &stored.library.meta[f.precursor as usize];
@@ -649,7 +678,7 @@ pub(crate) fn finalize_and_write(
         output::write_feature_parquet(&path, &records)
             .map_err(|e| format!("write {}: {e}", path.display()))?;
         eprintln!(
-            "[mbr] wrote {} ({} feature rows with evidence type)",
+            "[mbr] wrote {} ({} feature rows with evidence type; below-threshold transfers are in the mbr.tsv only)",
             path.display(),
             records.len()
         );
@@ -657,7 +686,7 @@ pub(crate) fn finalize_and_write(
     Ok(())
 }
 
-/// Library, extract (runs in parallel) and finalize in this process, from
+/// Library, extract (one run at a time) and finalize in this process, from
 /// the per-run artifacts in `dir`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_in_process(
@@ -666,13 +695,20 @@ pub(crate) fn run_in_process(
     scores: ScoreSet,
     ep: &EvidenceParams,
     max_q: f64,
+    donor_q: f64,
     mbr_fdr: f64,
     base: &Path,
     parquet_dir: Option<&Path>,
 ) -> Result<(), String> {
     let t0 = std::time::Instant::now();
     let stems = library_runs(dir, stems)?;
-    let stored = build_and_write_library(dir, &stems, || Ok(PsmScores::Merged(scores)), max_q)?;
+    let stored = build_and_write_library(
+        dir,
+        &stems,
+        || Ok(PsmScores::Merged(scores)),
+        max_q,
+        donor_q,
+    )?;
     let fingerprint = library_fingerprint(&stored);
     // One run at a time: each extraction is parallel over its precursors and
     // holds that run's MS1.
@@ -692,6 +728,7 @@ fn run_library(a: QuantLibraryArgs) -> Result<(), String> {
         &stems,
         || load_scores(&source),
         a.mbr_library_fdr,
+        a.quant_fdr,
     )
     .map(|_| ())
 }
@@ -880,6 +917,60 @@ mod tests {
         let m = rescore_scores(&t, &d, "t.tsv").unwrap();
         assert_eq!(m.psms.len(), 2);
         assert!(!m.psms["s1"].is_decoy && m.psms["s2"].is_decoy);
+    }
+
+    #[test]
+    fn feature_records_leave_out_below_threshold_transfers() {
+        let meta: Vec<PrecursorMeta> = (0..2)
+            .map(|i| PrecursorMeta {
+                key: format!("PEPT{}IDEK/2", ["", "M[UNIMOD:35]"][i]),
+                mz: 500.0 + i as f64,
+                charge: 2,
+                envelope: [0.55, 0.3, 0.1, 0.05],
+            })
+            .collect();
+        let library = build_library(&[], meta, 2, 0.01, 0.01, &AlignParams::default());
+        let stored = StoredLibrary {
+            runs: vec!["a".into(), "b".into()],
+            max_q: 0.01,
+            donor_q: 0.01,
+            library,
+            proteins: vec!["P1".into(), "P2".into()],
+        };
+        let feature = |precursor: u32, run: u16, evidence_type, transfer_q| MbrFeature {
+            precursor,
+            run,
+            evidence_type,
+            quantity: Some(1e6),
+            quantity_se: Some(1e4),
+            transfer_q,
+            apex_rt_s: Some(100.0),
+            library_q: 0.001,
+            mass_err_ppm: Some(0.5),
+        };
+        let features = [
+            feature(0, 0, EvidenceType::Identified, None),
+            feature(0, 1, EvidenceType::BelowThreshold, Some(0.2)),
+            feature(1, 0, EvidenceType::TransferMs1, Some(0.004)),
+            feature(1, 1, EvidenceType::BelowThreshold, Some(0.5)),
+        ];
+        let records = feature_records(&stored, &features);
+        let got: Vec<(i64, &str, &str)> = records
+            .iter()
+            .map(|r| {
+                (
+                    r.feature_id,
+                    r.run_file_name.as_str(),
+                    r.mbr.as_ref().unwrap().evidence_type.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [(1, "a", "identified"), (2, "a", "transfer_ms1")],
+            "below-threshold transfers are not feature rows"
+        );
+        assert_eq!(records[1].peptidoform, "PEPTM[UNIMOD:35]IDEK");
     }
 
     #[test]

@@ -2258,7 +2258,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .collect();
         let scores = crate::quant_cmd::rescore_scores(map, &mbr_decoys, &mbr_source)?;
         let ep = crate::quant_cmd::evidence_params(cli.lfq_tol)?;
-        Some((dir, stems, scores, ep))
+        let donor_q = quant
+            .as_ref()
+            .map(|q| q.settings.quant_fdr)
+            .ok_or("--mbr needs --lfq")?;
+        Some((dir, stems, scores, ep, donor_q))
     } else {
         None
     };
@@ -2300,7 +2304,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // ── Match-between-runs (`--mbr`): library, extract, finalize ────────────
     // Every search output is written; the search state is freed first, so
     // the stages hold one run's MS1 at a time next to the library.
-    let Some((dir, stems, scores, ep)) = mbr_job else {
+    let Some((dir, stems, scores, ep, donor_q)) = mbr_job else {
         release_at_exit(pin_candidates);
         return Ok(());
     };
@@ -2317,6 +2321,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         scores,
         &ep,
         cli.mbr_library_fdr,
+        donor_q,
         cli.mbr_fdr,
         &report_base.with_extension(""),
         cli.output_parquet.as_deref(),

@@ -17,7 +17,7 @@
 //! downstream tool can treat it as censored rather than missing.
 //!
 //! `<base>.mbr_validation.tsv`: a header and one line with the pseudo-transfer
-//! validation (sensitivity lower bound, wrong-peak rate) and the accepted
+//! validation (acceptance rate, wrong-peak rate) and the accepted
 //! transfer counts of the pooled and per-family decoy estimates, always at
 //! q <= 0.01 (columns ending `_q01`) and at the run's transfer q-value
 //! threshold (columns ending `_at_threshold`, equal to the `_q01` ones when the
@@ -118,7 +118,7 @@ pub struct MbrValidation {
 /// `_at_threshold`.
 const ACCEPTED_COLUMNS: [&str; 8] = [
     "pseudo_accepted",
-    "sensitivity_lower_bound",
+    "pseudo_acceptance",
     "accepted_pairs",
     "accepted_wrong_peak",
     "accepted_wrong_peak_rate",
@@ -162,8 +162,10 @@ fn push_opt(line: &mut String, v: Option<f64>) {
 }
 
 impl MbrValidation {
-    /// Pseudo-transfers accepted in `a` over all pseudo-transfers.
-    pub fn sensitivity(&self, a: &Accepted) -> Option<f64> {
+    /// Pseudo-transfers accepted in `a` over all pseudo-transfers. Optimistic
+    /// as a transfer sensitivity: the alignment map of a pseudo-transfer's
+    /// run was fitted with that pair as an anchor.
+    pub fn pseudo_acceptance(&self, a: &Accepted) -> Option<f64> {
         ratio(a.pseudo, self.pseudo_transfers)
     }
 
@@ -227,7 +229,7 @@ pub fn write_mbr_validation(path: &Path, v: &MbrValidation) -> Result<(), String
     let _ = write!(line, "\t{}\t{}", v.transfers, v.transfers_scored);
     for a in [&v.at_q01, &v.at_threshold] {
         let _ = write!(line, "\t{}", a.pseudo);
-        push_opt(&mut line, v.sensitivity(a));
+        push_opt(&mut line, v.pseudo_acceptance(a));
         let _ = write!(line, "\t{}\t{}", a.pairs, a.wrong_peak);
         push_opt(&mut line, a.wrong_peak_rate());
         let _ = write!(line, "\t{}\t{}\t{}", a.pooled, a.mass_only, a.rt_only);
@@ -325,8 +327,8 @@ mod tests {
         let get = |name: &str| values[header.iter().position(|h| *h == name).unwrap()];
         assert_eq!(get("q_threshold"), "0.05");
         assert_eq!(get("wrong_peak_rate"), "0.125");
-        assert_eq!(get("sensitivity_lower_bound_q01"), "0.8");
-        assert_eq!(get("sensitivity_lower_bound_at_threshold"), "0.9");
+        assert_eq!(get("pseudo_acceptance_q01"), "0.8");
+        assert_eq!(get("pseudo_acceptance_at_threshold"), "0.9");
         assert_eq!(get("accepted_wrong_peak_rate_q01"), "NA");
         assert_eq!(get("accepted_wrong_peak_rate_at_threshold"), "0.25");
         assert_eq!(get("accepted_rt_only_q01"), "39");

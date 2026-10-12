@@ -7,18 +7,22 @@
 //!
 //! Per library entry and run:
 //!
-//! * identified in the run: an `Identified` target fit with the prior centred
-//!   on the best PSM's RT and `s = max(w_prior, 6 s)`, plus a `PseudoTransfer`
-//!   target fit with the alignment prior computed without this run's own
-//!   observation;
+//! * identified in the run (a donor run: a target PSM at PSM q-value within
+//!   the library's donor threshold): an `Identified` target fit with the
+//!   prior centred on the best donor PSM's RT and `s = max(w_prior, 6 s)`,
+//!   plus a `PseudoTransfer` target fit with the alignment prior computed
+//!   without this run's own observation;
 //! * not identified: a `Transfer` target and its decoy probes, with the
 //!   alignment prior;
-//! * an unaligned run gets no rows; pairs without a prediction, and identified
-//!   pairs whose best PSM RT is not finite, are skipped and counted.
+//! * an unaligned run gets its `Identified` rows only (no pseudo-transfers,
+//!   no transfers); pairs without a prediction, and identified pairs whose
+//!   best PSM RT is not finite, are skipped and counted.
 //!
-//! An entry is fitted on the MS1 series of its FAIMS compensation voltage;
-//! when the run has no series at that voltage, or the entry has none, on the
-//! whole run. Only one copy of the run's MS1 is held at a time: the whole run
+//! An entry is fitted on the MS1 series of its FAIMS compensation voltage.
+//! An entry without a voltage, or any entry in a run without FAIMS, is fitted
+//! on the whole run; an entry whose voltage the FAIMS run lacks gets no rows
+//! there and is counted (never fitted on another voltage's series or on the
+//! mixed series). Only one copy of the run's MS1 is held at a time: the whole run
 //! serves the width-prior fits of the whole-run entries; the scans are then
 //! moved into one series per voltage for the voltage entries' width-prior
 //! fits and rows; the split is dropped and the cache read again for the
@@ -38,9 +42,12 @@
 //! pseudo-transfer is scored by the model of its precursor's fold, which never
 //! saw it, and placed against that fold's transfer scores. `<base>.mbr.tsv`
 //! gets one row per identified or transferred (precursor, run) target, and
-//! `<base>.mbr_validation.tsv` the pseudo-transfer sensitivity lower bound,
-//! the wrong-peak rate (`|t0_pseudo - t0_identified| > w_identified`) and the
-//! accepted transfer counts of the pooled and per-family estimates.
+//! `<base>.mbr_validation.tsv` the pseudo-transfer acceptance rate, the
+//! wrong-peak rate (`|t0_pseudo - t0_identified| > w_identified`) and the
+//! accepted transfer counts of the pooled and per-family estimates. The
+//! acceptance rate is optimistic for real transfers: the alignment map was
+//! fitted with the pseudo-transfer's own run observation as an anchor, and
+//! only the consensus RT leaves it out.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -76,8 +83,10 @@ const WIDTH_FIT_MIN_LLR: f64 = 25.0;
 /// What one run's extraction skipped, for the caller to log.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct ExtractCounts {
-    /// The run is unaligned: no rows were produced for it.
+    /// The run is unaligned: only its identified rows were produced.
     pub unaligned: bool,
+    /// Entries whose FAIMS voltage the run lacks (no rows).
+    pub foreign_cv: usize,
     /// Identified pairs whose best PSM RT is not finite (no identified and
     /// no pseudo-transfer row).
     pub nonfinite_best_rt: usize,
@@ -94,6 +103,7 @@ pub(crate) struct ExtractCounts {
 
 impl ExtractCounts {
     fn add(&mut self, o: &ExtractCounts) {
+        self.foreign_cv += o.foreign_cv;
         self.nonfinite_best_rt += o.nonfinite_best_rt;
         self.no_pseudo_prediction += o.no_pseudo_prediction;
         self.no_prediction += o.no_prediction;
@@ -162,18 +172,31 @@ mod tracking {
     }
 }
 
-/// Per entry, the position of its FAIMS voltage among `voltages` (the
-/// run's split order), or `None` for the whole run. A run with at most one
-/// voltage is fitted whole.
-fn entry_groups(voltages: &[f32], entries: &[LibraryEntry]) -> Vec<Option<usize>> {
+/// Where an entry is fitted in one run.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Group {
+    /// The whole run.
+    Whole,
+    /// The series at `voltages[k]` (the run's split order).
+    Series(usize),
+    /// Not at all: the FAIMS run lacks the entry's voltage.
+    Foreign,
+}
+
+/// Per entry, where it is fitted in a run with FAIMS `voltages`. A run
+/// without FAIMS, and an entry without a voltage, use the whole run; a run
+/// with one voltage is fitted whole, and so is an entry at that voltage.
+fn entry_groups(voltages: &[f32], entries: &[LibraryEntry]) -> Vec<Group> {
     entries
         .iter()
-        .map(|e| {
-            if voltages.len() <= 1 {
-                return None;
-            }
-            e.faims_cv
-                .and_then(|cv| voltages.iter().position(|&v| v == cv))
+        .map(|e| match e.faims_cv {
+            None => Group::Whole,
+            Some(_) if voltages.is_empty() => Group::Whole,
+            Some(cv) => match voltages.iter().position(|&v| v == cv) {
+                None => Group::Foreign,
+                Some(_) if voltages.len() == 1 => Group::Whole,
+                Some(k) => Group::Series(k),
+            },
         })
         .collect()
 }
@@ -333,6 +356,7 @@ fn rows_into<F>(
     slots: &mut [Option<EntryRows>],
     ids: &[usize],
     run: u16,
+    aligned: bool,
     lib: &Library,
     wp: &WidthPrior,
     ep: &EvidenceParams,
@@ -343,7 +367,7 @@ fn rows_into<F>(
 {
     let planned: Vec<(Vec<(ExtractRow, Probe)>, ExtractCounts)> = ids
         .par_iter()
-        .map(|&i| entry_rows(&lib.entries[i], run, lib, series[series_of(i)], wp))
+        .map(|&i| entry_rows(&lib.entries[i], run, aligned, lib, series[series_of(i)], wp))
         .collect();
     let mut jobs = Vec::new();
     for (&i, (rows, _)) in ids.iter().zip(&planned) {
@@ -372,10 +396,11 @@ fn rows_into<F>(
 }
 
 /// The rows of one library entry in `run`, each with the probe to fit on
-/// `ms1` and no evidence yet.
+/// `ms1` and no evidence yet. An unaligned run gets the identified row only.
 fn entry_rows(
     e: &LibraryEntry,
     run: u16,
+    run_aligned: bool,
     lib: &Library,
     ms1: &Ms1RunIndex,
     wp: &WidthPrior,
@@ -417,6 +442,9 @@ fn entry_rows(
             let w = wp.at(rt);
             let probe = target(rt, w.max(IDENTIFIED_MIN_S), w);
             rows.push(row(Hypothesis::Target, Role::Identified, &probe, donors));
+            if !run_aligned {
+                return (rows, counts);
+            }
             match lib.alignment.predict_excluding(e.precursor, run) {
                 Some((t_hat, s)) => {
                     let probe = target(t_hat, s, wp.at(t_hat));
@@ -430,6 +458,7 @@ fn entry_rows(
                 None => counts.no_pseudo_prediction += 1,
             }
         }
+        None if !run_aligned => {}
         None => match lib.alignment.predict(e.precursor, run) {
             Some((t_hat, s)) => {
                 let run_rt = ms1.rt_range().unwrap_or((f64::NAN, f64::NAN));
@@ -454,9 +483,9 @@ fn entry_rows(
 
 /// Measures every library precursor in run `run` from its MS1 cache.
 ///
-/// An unaligned run yields no rows and `counts.unaligned` (its cache is not
-/// read). Errors: `run` outside the library's runs, an entry whose precursor
-/// has no metadata, or an unreadable cache (the message names the file).
+/// An unaligned run yields its identified rows only and `counts.unaligned`.
+/// Errors: `run` outside the library's runs, an entry whose precursor has no
+/// metadata, or an unreadable cache (the message names the file).
 pub(crate) fn extract_run(
     run: u16,
     cache: &Path,
@@ -481,15 +510,7 @@ pub(crate) fn extract_run(
             lib.meta.len()
         ));
     }
-    if map.is_none() {
-        return Ok(RunExtract {
-            rows: Vec::new(),
-            counts: ExtractCounts {
-                unaligned: true,
-                ..ExtractCounts::default()
-            },
-        });
-    }
+    let aligned = map.is_some();
     let load = || {
         #[cfg(test)]
         tracking::loaded();
@@ -499,30 +520,54 @@ pub(crate) fn extract_run(
     let ms1 = load()?;
     let held = Held::new();
     let groups = entry_groups(&ms1.faims_voltages(), &lib.entries);
-    let whole_ids: Vec<usize> = (0..n).filter(|&i| groups[i].is_none()).collect();
-    let cv_ids: Vec<usize> = (0..n).filter(|&i| groups[i].is_some()).collect();
+    let whole_ids: Vec<usize> = (0..n).filter(|&i| groups[i] == Group::Whole).collect();
+    let cv_ids: Vec<usize> = (0..n)
+        .filter(|&i| matches!(groups[i], Group::Series(_)))
+        .collect();
+    let foreign = groups.iter().filter(|&&g| g == Group::Foreign).count();
     let mut slots: Vec<Option<EntryRows>> = (0..n).map(|_| None).collect();
+    let finish = |slots, width_fits: usize, wp: &WidthPrior| {
+        let mut out = assemble(slots, width_fits, wp.is_default());
+        out.counts.unaligned = !aligned;
+        out.counts.foreign_cv = foreign;
+        out
+    };
 
     let mut fits = width_fits(&whole_ids, run, lib, ep, &[&ms1], |_| 0);
     let width_fit_count;
     if cv_ids.is_empty() {
         width_fit_count = fits.len();
         let wp = WidthPrior::from_fits(fits);
-        rows_into(&mut slots, &whole_ids, run, lib, &wp, ep, &[&ms1], |_| 0);
+        rows_into(
+            &mut slots,
+            &whole_ids,
+            run,
+            aligned,
+            lib,
+            &wp,
+            ep,
+            &[&ms1],
+            |_| 0,
+        );
         drop(ms1);
         drop(held);
-        return Ok(assemble(slots, width_fit_count, wp.is_default()));
+        return Ok(finish(slots, width_fit_count, &wp));
     }
 
     drop(held);
     let split = ms1.split_by_faims();
     let held = Held::new();
     let series: Vec<&Ms1RunIndex> = split.iter().map(|(_, s)| s).collect();
-    let series_of = |i: usize| groups[i].expect("voltage entry");
+    let series_of = |i: usize| match groups[i] {
+        Group::Series(k) => k,
+        g => unreachable!("entry {i} is fitted on {g:?}"),
+    };
     fits.extend(width_fits(&cv_ids, run, lib, ep, &series, series_of));
     width_fit_count = fits.len();
     let wp = WidthPrior::from_fits(fits);
-    rows_into(&mut slots, &cv_ids, run, lib, &wp, ep, &series, series_of);
+    rows_into(
+        &mut slots, &cv_ids, run, aligned, lib, &wp, ep, &series, series_of,
+    );
     drop(series);
     drop(split);
     drop(held);
@@ -530,9 +575,19 @@ pub(crate) fn extract_run(
     if !whole_ids.is_empty() {
         let ms1 = load()?;
         let _held = Held::new();
-        rows_into(&mut slots, &whole_ids, run, lib, &wp, ep, &[&ms1], |_| 0);
+        rows_into(
+            &mut slots,
+            &whole_ids,
+            run,
+            aligned,
+            lib,
+            &wp,
+            ep,
+            &[&ms1],
+            |_| 0,
+        );
     }
-    Ok(assemble(slots, width_fit_count, wp.is_default()))
+    Ok(finish(slots, width_fit_count, &wp))
 }
 
 /// Floor of `amplitude_se` in the amplitude signal-to-noise feature.
@@ -801,12 +856,12 @@ pub(crate) fn finalize(
     };
     for &(t, a) in shown {
         eprintln!(
-            "[mbr] at q <= {t}: {} transfers (mass-shift decoys only {}, RT-shift decoys only {}); {} pseudo-transfers (sensitivity lower bound {}), {} of {} accepted at the wrong peak",
+            "[mbr] at q <= {t}: {} transfers (mass-shift decoys only {}, RT-shift decoys only {}); {} pseudo-transfers (acceptance rate {}, optimistic for transfers: the alignment kept their runs' anchors), {} of {} accepted at the wrong peak",
             a.pooled,
             a.mass_only,
             a.rt_only,
             a.pseudo,
-            v.sensitivity(a).map_or("NA".into(), |s| format!("{s:.4}")),
+            v.pseudo_acceptance(a).map_or("NA".into(), |s| format!("{s:.4}")),
             a.wrong_peak,
             a.pairs
         );
@@ -931,12 +986,21 @@ mod tests {
     /// run 0, 31 only in run 1; run 2 identifies precursor 0 only and is
     /// unaligned. Run 1 uses FAIMS when `faims`.
     fn fixture(faims: bool) -> Fixture {
-        fixture_with(faims, &|_| false)
+        fixture_with(faims, &|_| false, &|_| false)
     }
 
+    /// The PSM q-value threshold of the donor PSMs.
+    const DONOR_Q: f64 = 0.01;
+
     /// [`fixture`] where the precursors in `silent_in_run1` give no MS1
-    /// signal in run 1 (they stay identified there).
-    fn fixture_with(faims: bool, silent_in_run1: &dyn Fn(u32) -> bool) -> Fixture {
+    /// signal in run 1 (they stay identified there), and the run-1 PSMs of
+    /// the precursors in `weak_in_run1` have a PSM q-value above
+    /// [`DONOR_Q`].
+    fn fixture_with(
+        faims: bool,
+        silent_in_run1: &dyn Fn(u32) -> bool,
+        weak_in_run1: &dyn Fn(u32) -> bool,
+    ) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let meta: Vec<PrecursorMeta> = (0..N_PREC)
             .map(|p| PrecursorMeta {
@@ -953,6 +1017,11 @@ mod tests {
                 precursor: p,
                 rt: apex(p, run) + 2.0,
                 score: 10.0,
+                q: if run == 1 && weak_in_run1(p) {
+                    0.2
+                } else {
+                    0.001
+                },
                 is_decoy: false,
                 faims_cv: (faims && run == 1).then_some(FAIMS_CVS[p as usize % 2]),
             })
@@ -968,7 +1037,7 @@ mod tests {
             min_anchors: 10,
             ..AlignParams::default()
         };
-        let lib = build_library(&psms, meta, N_RUNS, 1.0, &ap);
+        let lib = build_library(&psms, meta, N_RUNS, 1.0, DONOR_Q, &ap);
         let caches = (0..N_RUNS as u16)
             .map(|r| {
                 let path = dir.path().join(format!("run{r}.ms1cache"));
@@ -1060,13 +1129,89 @@ mod tests {
     }
 
     #[test]
-    fn unaligned_run_is_skipped_with_count() {
+    fn unaligned_run_keeps_its_identified_rows() {
         let fx = fixture(false);
         assert!(fx.lib.alignment.maps[2].is_none());
         let out = extract_run(2, &fx.caches[2], &fx.lib, &params()).unwrap();
-        assert!(out.rows.is_empty());
         assert!(out.counts.unaligned);
+        // Run 2 identifies precursor 0 only: its identified row, and no
+        // pseudo-transfer or transfer rows.
+        assert_eq!(out.rows.len(), 1, "{:?}", out.rows);
+        let r = &out.rows[0];
+        assert_eq!(
+            (r.precursor, r.run, r.role, r.kind),
+            (0, 2, Role::Identified, Hypothesis::Target)
+        );
+        let e = r.evidence.as_ref().unwrap();
+        assert!((e.t0 - apex(0, 2)).abs() <= 1.0, "{e:?}");
+        assert!((e.amplitude / AMPLITUDE - 1.0).abs() < 0.1, "{e:?}");
+        assert_eq!(
+            (out.counts.no_prediction, out.counts.no_pseudo_prediction),
+            (0, 0)
+        );
         assert!(extract_run(N_RUNS as u16, &fx.caches[2], &fx.lib, &params()).is_err());
+
+        // The identified row reaches the mbr.tsv.
+        let runs: Vec<Vec<ExtractRow>> = (0..N_RUNS)
+            .map(|r| {
+                extract_run(r as u16, &fx.caches[r], &fx.lib, &params())
+                    .unwrap()
+                    .rows
+            })
+            .collect();
+        let stems: Vec<String> = ["r0", "r1", "r2"].map(String::from).to_vec();
+        let (mbr, val) = mbr_paths(&fx._dir.path().join("x"));
+        finalize(&stems, &fx.lib, &runs, 0.01, 7, &mbr, &val).unwrap();
+        let text = std::fs::read_to_string(&mbr).unwrap();
+        let in_r2: Vec<&str> = text
+            .lines()
+            .filter(|l| l.split('\t').nth(1) == Some("r2"))
+            .collect();
+        assert_eq!(in_r2.len(), 1, "{text}");
+        assert!(
+            in_r2[0].starts_with("PEP0/2\tr2\tidentified\t"),
+            "{in_r2:?}"
+        );
+        assert!(!in_r2[0].contains("\tNA\tNA\tNA"), "{in_r2:?}");
+    }
+
+    #[test]
+    fn psms_above_the_donor_threshold_make_a_transfer() {
+        // Precursor 7's only PSM in run 1 is above the PSM q-value threshold.
+        let fx = fixture_with(false, &|_| false, &|p| p == 7);
+        let e = fx.lib.entries.iter().find(|e| e.precursor == 7).unwrap();
+        assert_eq!(e.donors, vec![0]);
+        let out = extract_run(1, &fx.caches[1], &fx.lib, &params()).unwrap();
+        let rows = rows_of(&out.rows, 7);
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert!(rows.iter().all(|r| r.role == Role::Transfer), "{rows:?}");
+        assert_eq!(rows[0].kind, Hypothesis::Target);
+        let target = rows[0].evidence.as_ref().unwrap();
+        assert!((target.t0 - apex(7, 1)).abs() <= 1.0, "{target:?}");
+        // The other precursors are still identified in run 1.
+        let rows = rows_of(&out.rows, 8);
+        assert_eq!(rows[0].role, Role::Identified);
+    }
+
+    #[test]
+    fn foreign_voltage_entries_are_skipped_and_counted() {
+        let mut fx = fixture(true);
+        // Run 1 is acquired at FAIMS_CVS only; run 0 has no FAIMS.
+        for e in fx.lib.entries.iter_mut() {
+            if e.precursor == ONLY_RUN0 || e.precursor == 3 {
+                e.faims_cv = Some(-30.0);
+            }
+        }
+        let out = extract_run(1, &fx.caches[1], &fx.lib, &params()).unwrap();
+        assert!(rows_of(&out.rows, ONLY_RUN0).is_empty());
+        assert!(rows_of(&out.rows, 3).is_empty());
+        assert_eq!(out.counts.foreign_cv, 2);
+        assert!(!rows_of(&out.rows, 4).is_empty());
+        // A run without FAIMS fits them on the whole run.
+        let out0 = extract_run(0, &fx.caches[0], &fx.lib, &params()).unwrap();
+        assert_eq!(out0.counts.foreign_cv, 0);
+        assert_eq!(rows_of(&out0.rows, ONLY_RUN0)[0].role, Role::Identified);
+        assert_eq!(rows_of(&out0.rows, 3)[0].role, Role::Identified);
     }
 
     #[test]
@@ -1175,7 +1320,7 @@ mod tests {
     fn width_prior_ignores_identified_pairs_without_signal() {
         // About 30% of run 1's identified pairs have no MS1 signal.
         let silent = |p: u32| p % 10 < 3;
-        let fx = fixture_with(false, &silent);
+        let fx = fixture_with(false, &silent, &|_| false);
         let out = extract_run(1, &fx.caches[1], &fx.lib, &params()).unwrap();
         assert!(out.counts.width_fits >= 20, "{:?}", out.counts);
         assert!(!out.counts.width_prior_fallback);
@@ -1358,7 +1503,7 @@ mod finalize_tests {
                 envelope: [0.55, 0.30, 0.11, 0.04],
             })
             .collect();
-        build_library(&[], meta, 2, 0.01, &AlignParams::default())
+        build_library(&[], meta, 2, 0.01, 0.01, &AlignParams::default())
     }
 
     fn stems() -> Vec<String> {
@@ -1425,7 +1570,7 @@ mod finalize_tests {
         assert_eq!(v.pseudo_transfers, N as usize);
         assert_eq!(v.wrong_peak_pairs, N as usize);
         assert_eq!(v.wrong_peak, (N / WRONG_EVERY) as usize);
-        assert!(v.sensitivity(&v.at_q01).unwrap() > 0.9, "{v:?}");
+        assert!(v.pseudo_acceptance(&v.at_q01).unwrap() > 0.9, "{v:?}");
         assert_eq!(v.at_q01, v.at_threshold);
         assert_eq!(v.transfers, N as usize);
         assert_eq!(v.transfers_scored, N as usize - 1);

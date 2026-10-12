@@ -10,9 +10,13 @@
 #![cfg(unix)]
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+use arrow::array::{Array, Int16Array, StringArray};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 /// Designed quantity of HLVDEPQNLIK/2 (peptide 4): mono apex 8e5 times the
 /// summed first four isotope fractions over the mono's (2.06764, pyOpenMS
@@ -126,6 +130,41 @@ fn read_mbr(path: &Path) -> (Vec<String>, MbrRows) {
     (header, rows)
 }
 
+/// The column-data bytes of a Parquet file: everything between the leading
+/// magic and the footer (the footer holds a per-write uuid and date).
+fn parquet_column_data(path: &Path) -> Vec<u8> {
+    let b = std::fs::read(path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+    let n = b.len();
+    let footer = u32::from_le_bytes(b[n - 8..n - 4].try_into().unwrap()) as usize;
+    b[4..n - 8 - footer].to_vec()
+}
+
+/// `(run_file_name, peptidoform, charge, evidence_type)` of every feature
+/// parquet row.
+fn feature_rows(path: &Path) -> Vec<(String, String, String, String)> {
+    let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(path).unwrap()).unwrap();
+    let mut out = Vec::new();
+    for b in builder.build().unwrap() {
+        let b = b.unwrap();
+        let col = |name: &str| b.column_by_name(name).unwrap_or_else(|| panic!("{name}"));
+        let text = |name: &str| -> Vec<String> {
+            let s = col(name).as_any().downcast_ref::<StringArray>().unwrap();
+            (0..s.len()).map(|i| s.value(i).to_string()).collect()
+        };
+        let z = col("charge").as_any().downcast_ref::<Int16Array>().unwrap();
+        let z: Vec<String> = (0..z.len()).map(|i| z.value(i).to_string()).collect();
+        let (run, pf, ev) = (
+            text("run_file_name"),
+            text("peptidoform"),
+            text("evidence_type"),
+        );
+        for i in 0..b.num_rows() {
+            out.push((run[i].clone(), pf[i].clone(), z[i].clone(), ev[i].clone()));
+        }
+    }
+    out
+}
+
 /// The search for the stage path: per-run artifacts and the Percolator
 /// result files next to `<dir>/s.pin`.
 fn staged_search(dir: &Path, perc: &Path) -> PathBuf {
@@ -194,11 +233,14 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
     let aio = tmp.path().join("aio");
     std::fs::create_dir_all(&aio).unwrap();
     let pin = aio.join("a.pin");
+    let aio_qpx = aio.join("bundle");
     let mut args = search_args();
     args.extend(
         [
             "--output-pin",
             s(&pin),
+            "--output-parquet",
+            s(&aio_qpx),
             "--lfq",
             "--mbr",
             "--rescore",
@@ -222,6 +264,13 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
     assert_eq!(
         std::fs::read(staged.join("out.mbr_validation.tsv")).unwrap(),
         std::fs::read(aio.join("a.mbr_validation.tsv")).unwrap()
+    );
+    // The feature parquets hold the same column data.
+    let staged_parquet = qpx.join("quantms.feature.parquet");
+    assert!(
+        parquet_column_data(&staged_parquet)
+            == parquet_column_data(&aio_qpx.join("quantms.feature.parquet")),
+        "quantms.feature.parquet differs between the stage path and the all-in-one run"
     );
 
     let (header, rows) = read_mbr(&aio.join("a.mbr.tsv"));
@@ -253,6 +302,69 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
     // Most untriggered precursors with signal are transferred.
     let transfers = rows.values().filter(|r| r[ev] == "transfer_ms1").count();
     assert!(transfers >= 50, "only {transfers} transfers");
+
+    // The feature parquet holds every mbr.tsv row except the below-threshold
+    // transfers.
+    let below: Vec<&Vec<String>> = rows
+        .values()
+        .filter(|r| r[ev] == "below_threshold")
+        .collect();
+    assert!(
+        !below.is_empty(),
+        "the fixture has below-threshold transfers"
+    );
+    let features = feature_rows(&staged_parquet);
+    assert_eq!(features.len(), rows.len() - below.len());
+    assert!(features.iter().all(|f| f.3 != "below_threshold"));
+    for r in below {
+        let (pf, z) = r[0].rsplit_once('/').unwrap();
+        assert!(
+            !features
+                .iter()
+                .any(|f| f.0 == r[1] && f.1 == pf && f.2 == z),
+            "below-threshold {r:?} is a feature row"
+        );
+    }
+}
+
+#[test]
+fn duplicate_run_stems_are_rejected_before_the_search() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = fixture("test-fixtures/mbr_run1.mzML.gz");
+    let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+    for d in [&a, &b] {
+        std::fs::create_dir_all(d).unwrap();
+        std::fs::copy(&src, d.join("mbr_run1.mzML.gz")).unwrap();
+    }
+    let (ra, rb) = (a.join("mbr_run1.mzML.gz"), b.join("mbr_run1.mzML.gz"));
+    let db = fixture("test-fixtures/BSA.fasta");
+    let out_dir = tmp.path().join("out");
+    let pin = out_dir.join("x.pin");
+    let q = out_dir.join("q");
+    let common = [
+        "--spectrum",
+        s(&ra),
+        "--spectrum",
+        s(&rb),
+        "--database",
+        s(&db),
+        "--output-pin",
+        s(&pin),
+    ];
+    for extra in [
+        &["--quant-dir", s(&q)][..],
+        &["--lfq", "--mbr", "--rescore-native"][..],
+    ] {
+        let out = andes(&[&common[..], extra].concat());
+        assert!(!out.status.success(), "{extra:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains(s(&ra)) && err.contains(s(&rb)) && err.contains("mbr_run1"),
+            "{extra:?}: {err}"
+        );
+        assert!(!err.contains("Loaded"), "searched before failing: {err}");
+        assert!(!out_dir.exists(), "{extra:?} wrote {out_dir:?}");
+    }
 }
 
 /// Splits a merged Percolator result of a multi-input search (SpecIds

@@ -718,10 +718,13 @@ pub(crate) struct SearchArgs {
     /// per-run quantification, builds the precursor library, aligns retention
     /// times across runs, measures every library precursor in every run and
     /// writes `<base>.mbr.tsv` and `<base>.mbr_validation.tsv` (with
-    /// `--output-parquet`, `quantms.feature.parquet` holds these rows). Uses
+    /// `--output-parquet`, `quantms.feature.parquet` holds these rows instead
+    /// of the per-run features, without the below-threshold transfers). Uses
     /// `--quant-dir` for the per-run artifacts, or a temporary directory that
-    /// is removed afterwards. Same result as `andes quant library`, `extract`
-    /// and `finalize` on the same files.
+    /// is removed afterwards. With `--rescore` (Percolator), same result as
+    /// `andes quant library`, `extract` and `finalize` on the same files and
+    /// Percolator results; the native rescorer's scores have no file input
+    /// to `quant library`.
     #[arg(long = "mbr", default_value_t = false)]
     pub(crate) mbr: bool,
 
@@ -802,6 +805,14 @@ pub(crate) struct QuantLibraryArgs {
     /// identification FDR. Default 0.01.
     #[arg(long = "mbr-library-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
     pub(crate) mbr_library_fdr: f64,
+
+    /// PSM q-value (the Percolator `q-value` column) at or below which a
+    /// target PSM identifies its precursor in its run: those runs are the
+    /// precursor's donors and get identified rows; the other runs get
+    /// transfers. Use the search's `--quant-fdr` (default `--fdr`) for the
+    /// same result as `--mbr`. Default 0.01.
+    #[arg(long = "quant-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
+    pub(crate) quant_fdr: f64,
 
     /// Worker threads. Default: logical CPU count.
     #[arg(long)]

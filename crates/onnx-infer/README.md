@@ -26,6 +26,9 @@ Default features are empty so Apache-core builds do not pull an engine until opt
 | `OnnxSession` / `ModelManifest` | Load + run ONNX with sidecar provenance |
 | [`rescoring`](src/rescoring/) | quantms-rescoring feature names, `CandidateKey`, `TopNPolicy`, `RescoringBatch` |
 | [`peptdeep`](src/peptdeep/) | PeptDeep ONNX tensor packing (OpenMS export contract) |
+| [`ms2pip`](src/ms2pip/) | MS²PIP 139-feature vectors per cleavage site (ms2pip 4.2 / ms2rescore-rs) |
+| [`deeplc`](src/deeplc/) | DeepLC 4.x atom-composition encoding (`global67_terminal`) |
+| [`prosit`](src/prosit/) | Prosit 2020 intensity / 2019 iRT inputs and Koina-style output decoding |
 
 ## Speed + data-model contract
 
@@ -40,6 +43,14 @@ Default features are empty so Apache-core builds do not pull an engine until opt
 |---|---|
 | [`scripts/export_agbd_to_onnx.py`](scripts/export_agbd_to_onnx.py) | andes `AGBD` v1 → ONNX `TreeEnsembleRegressor` |
 | [`scripts/export_peptdeep_to_onnx.py`](scripts/export_peptdeep_to_onnx.py) | PeptDeep `.pth` → ONNX (+ manifests), OpenMS-compatible names |
+| [`scripts/export_ms2pip_to_onnx.py`](scripts/export_ms2pip_to_onnx.py) | MS²PIP XGBoost → ONNX Gather tree traversal (tract-runnable) |
+| [`scripts/export_deeplc_to_onnx.py`](scripts/export_deeplc_to_onnx.py) | DeepLC default PyTorch model → ONNX |
+| [`scripts/export_prosit_to_onnx.py`](scripts/export_prosit_to_onnx.py) | Koina Prosit SavedModels → ONNX (tf2onnx) |
+
+Rescoring examples: `examples/rescore_pin.rs --model peptdeep|ms2pip|deeplc|prosit`
+writes per-PIN-row predicted-spectrum / RT features; `scripts/rescore_pin_arms.py`
+calibrates RT and builds A/B PINs; `examples/model_parity.rs` checks tract
+against each reference implementation (see [`MODELS.md`](MODELS.md)).
 
 Fixtures (committed):
 

@@ -18,6 +18,8 @@
 //! |---|---|---|
 //! | `peptdeep` (`pdeep`) | `peptdeep_{rt,ms2}_dynamic.json`, `peptdeep_mods.json` | RT + b/y z1–2 |
 //! | `ms2pip` (`ms2pip`) | `ms2pip_<M>_{b,y}.json`, `M` = `--ms2pip-model` | b/y z1 |
+//! | `deeplc` (`deeplc`) | `deeplc_rt.json` | RT |
+//! | `prosit` (`prosit`) | `prosit_irt.json`, `prosit_intensity_hcd.json` (`--nce`) | iRT + b/y z1–3 |
 //!
 //! Output columns: `SpecId`, `observed_retention_time`, `<prefix>_irt` (NA
 //! without an RT model), `<prefix>_missing` (1 when the model cannot encode the
@@ -34,7 +36,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use models::{Form, H2O, Ion, Mass, Ms2pip, PROTON, PeptDeep, Predictor, parse_peptide};
+use models::{DeepLc, Form, H2O, Ion, Mass, Ms2pip, PROTON, PeptDeep, Predictor, Prosit, parse_peptide};
 use onnx_infer::OnnxSession;
 
 struct Args {
@@ -242,6 +244,8 @@ fn main() {
     let pred: Box<dyn Predictor> = match args.model.as_str() {
         "peptdeep" => Box::new(PeptDeep::new(&args.models, args.nce, &args.instrument)),
         "ms2pip" => Box::new(Ms2pip { dir: args.models.clone(), model: args.ms2pip_model.clone() }),
+        "deeplc" => Box::new(DeepLc { dir: args.models.clone() }),
+        "prosit" => Box::new(Prosit { dir: args.models.clone(), nce: args.nce }),
         other => panic!("unknown --model {other}"),
     };
     let pred = pred.as_ref();

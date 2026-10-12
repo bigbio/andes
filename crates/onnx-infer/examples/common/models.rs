@@ -15,6 +15,7 @@ use std::path::Path;
 
 use onnx_infer::peptdeep::{PeptDeepPeptide, pack_ms2_batch, pack_rt_batch};
 use onnx_infer::deeplc::{self, DeepLcPeptide};
+use onnx_infer::prosit::{self, PrositPeptide, ResidueState};
 use onnx_infer::{BackendKind, OnnxSession, ms2pip};
 use serde::Deserialize;
 
@@ -474,6 +475,75 @@ impl Predictor for DeepLc {
     }
     fn ms2(&self, _: &mut [OnnxSession], _: &[(&Form, u8)]) -> Vec<Vec<f32>> {
         unreachable!("DeepLC has no MS2 model")
+    }
+}
+
+// ---------------------------------------------------------------- Prosit
+
+pub struct Prosit {
+    pub dir: std::path::PathBuf,
+    pub nce: f32,
+}
+
+const PROSIT_IONS: [Ion; 6] = [(true, 1), (true, 2), (true, 3), (false, 1), (false, 2), (false, 3)];
+
+impl Prosit {
+    /// `None` when the peptidoform carries anything but CAM-C / oxidised M.
+    pub fn peptide(f: &Form) -> Option<PrositPeptide<'_>> {
+        let mut states = vec![ResidueState::Plain; f.seq.len()];
+        for (site, m) in &f.mods {
+            states[site.checked_sub(1)?] = match m {
+                Mod::Carbamidomethyl => ResidueState::Carbamidomethyl,
+                Mod::Oxidation => ResidueState::Oxidation,
+                _ => return None,
+            };
+        }
+        let p = PrositPeptide { sequence: &f.seq, states };
+        prosit::encode_sequence(p.sequence, &p.states).ok()?;
+        Some(p)
+    }
+}
+
+impl Predictor for Prosit {
+    fn prefix(&self) -> &str {
+        "prosit"
+    }
+    fn ions(&self) -> &[Ion] {
+        &PROSIT_IONS
+    }
+    fn has_rt(&self) -> bool {
+        true
+    }
+    fn supports_rt(&self, f: &Form) -> bool {
+        Self::peptide(f).is_some()
+    }
+    fn supports_ms2(&self, f: &Form, z: u8) -> bool {
+        (1..=prosit::MAX_CHARGE).contains(&z) && f.seq.len() >= 2 && Self::peptide(f).is_some()
+    }
+    fn batch_key(&self, _: &Form) -> usize {
+        0
+    }
+    fn sessions(&self) -> Vec<OnnxSession> {
+        vec![load(&self.dir, "prosit_irt.json"), load(&self.dir, "prosit_intensity_hcd.json")]
+    }
+    fn rt(&self, s: &mut [OnnxSession], forms: &[&Form]) -> Vec<f32> {
+        let peps: Vec<PrositPeptide<'_>> = forms.iter().map(|f| Self::peptide(f).unwrap()).collect();
+        let input = prosit::pack_irt_batch(&peps).unwrap();
+        s[0].run(std::slice::from_ref(&input)).expect("prosit irt")[0].data.clone()
+    }
+    fn ms2(&self, s: &mut [OnnxSession], items: &[(&Form, u8)]) -> Vec<Vec<f32>> {
+        let peps: Vec<PrositPeptide<'_>> = items.iter().map(|(f, _)| Self::peptide(f).unwrap()).collect();
+        let charges: Vec<u8> = items.iter().map(|(_, z)| *z).collect();
+        let inputs = prosit::pack_intensity_batch(&peps, &charges, self.nce).unwrap();
+        let out = &s[1].run(&inputs).expect("prosit intensity")[0];
+        items
+            .iter()
+            .enumerate()
+            .map(|(b, (f, z))| {
+                let raw = &out.data[b * prosit::N_OUT..(b + 1) * prosit::N_OUT];
+                prosit::decode_intensity(raw, f.seq.len(), *z).unwrap()
+            })
+            .collect()
     }
 }
 

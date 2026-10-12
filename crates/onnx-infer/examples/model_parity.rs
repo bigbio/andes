@@ -193,9 +193,42 @@ fn deeplc_parity(a: &Args) {
     );
 }
 
+fn prosit_parity(a: &Args) {
+    use models::{Predictor, Prosit, parse_peptide};
+    use onnx_infer::prosit;
+    let text = fs::read_to_string(&a.reference).expect("reference TSV");
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+    let col = |n: &str| header.iter().position(|h| *h == n).unwrap();
+    let pred = Prosit { dir: a.models.clone(), nce: 30.0 };
+    let mut s = pred.sessions();
+    let (mut int, mut irt) = (Dev::default(), Dev::default());
+    let mut n = 0;
+    for l in lines {
+        let x: Vec<&str> = l.split('\t').collect();
+        let (form, _) = parse_peptide(x[col("andes")]).unwrap();
+        let p = Prosit::peptide(&form).expect("supported");
+        let z: u8 = x[col("charge")].parse().unwrap();
+        let nce: f32 = x[col("nce")].parse().unwrap();
+        let inputs = prosit::pack_intensity_batch(std::slice::from_ref(&p), &[z], nce).unwrap();
+        let raw = s[1].run(&inputs).unwrap()[0].data.clone();
+        for (g, w) in raw.iter().zip(floats(x[col("intensities_raw")])) {
+            int.add(*g, w);
+        }
+        let r = pred.rt(&mut s, &[&form])[0];
+        irt.add(r, x[col("irt")].parse().unwrap());
+        n += 1;
+    }
+    println!(
+        "PARITY prosit: {n} peptides | intensity raw max|Δ| {:.3e} ({} values) | irt max|Δ| {:.3e} rel {:.3e}",
+        int.abs, int.n, irt.abs, irt.rel
+    );
+}
+
 fn main() {
     let a = parse_args();
     match a.model.as_str() {
+        "prosit" => prosit_parity(&a),
         "deeplc" => deeplc_parity(&a),
         "ms2pip" => ms2pip_parity(&a),
         "peptdeep" => peptdeep_parity(&a),

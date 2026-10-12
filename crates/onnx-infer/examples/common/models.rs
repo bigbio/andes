@@ -14,6 +14,7 @@ use std::fs::File;
 use std::path::Path;
 
 use onnx_infer::peptdeep::{PeptDeepPeptide, pack_ms2_batch, pack_rt_batch};
+use onnx_infer::deeplc::{self, DeepLcPeptide};
 use onnx_infer::{BackendKind, OnnxSession, ms2pip};
 use serde::Deserialize;
 
@@ -426,6 +427,53 @@ impl Predictor for Ms2pip {
                     .collect()
             })
             .collect()
+    }
+}
+
+// ---------------------------------------------------------------- DeepLC
+
+pub struct DeepLc {
+    pub dir: std::path::PathBuf,
+}
+
+impl DeepLc {
+    pub fn peptide(f: &Form) -> DeepLcPeptide<'_> {
+        DeepLcPeptide {
+            sequence: &f.seq,
+            mods: f.mods.iter().map(|(s, m)| (*s, m.composition())).collect(),
+        }
+    }
+}
+
+impl Predictor for DeepLc {
+    fn prefix(&self) -> &str {
+        "deeplc"
+    }
+    fn ions(&self) -> &[Ion] {
+        &[]
+    }
+    fn has_rt(&self) -> bool {
+        true
+    }
+    fn supports_rt(&self, f: &Form) -> bool {
+        deeplc::encode(&Self::peptide(f)).is_ok()
+    }
+    fn supports_ms2(&self, _: &Form, _: u8) -> bool {
+        false
+    }
+    fn batch_key(&self, _: &Form) -> usize {
+        0
+    }
+    fn sessions(&self) -> Vec<OnnxSession> {
+        vec![load(&self.dir, "deeplc_rt.json")]
+    }
+    fn rt(&self, s: &mut [OnnxSession], forms: &[&Form]) -> Vec<f32> {
+        let peps: Vec<DeepLcPeptide<'_>> = forms.iter().map(|f| Self::peptide(f)).collect();
+        let inputs = deeplc::pack_batch(&peps).unwrap();
+        s[0].run(&inputs).expect("deeplc run")[0].data.clone()
+    }
+    fn ms2(&self, _: &mut [OnnxSession], _: &[(&Form, u8)]) -> Vec<Vec<f32>> {
+        unreachable!("DeepLC has no MS2 model")
     }
 }
 

@@ -157,9 +157,46 @@ fn peptdeep_parity(a: &Args) {
     );
 }
 
+fn deeplc_parity(a: &Args) {
+    use models::{DeepLc, Predictor, parse_peptide};
+    let pred = DeepLc { dir: a.models.clone() };
+    let mut s = pred.sessions();
+    let text = fs::read_to_string(&a.reference).expect("reference TSV");
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+    let col = |n: &str| header.iter().position(|h| *h == n).unwrap();
+    let (mut enc, mut rt) = (Dev::default(), Dev::default());
+    let mut n = 0;
+    for l in lines {
+        let x: Vec<&str> = l.split('\t').collect();
+        let (form, _) = parse_peptide(x[col("andes")]).unwrap_or_else(|| panic!("parse {}", x[col("andes")]));
+        let f = onnx_infer::deeplc::encode(&DeepLc::peptide(&form)).unwrap();
+        for (k, got) in [("x_atom", &f.x_atom), ("x_global", &f.x_global), ("x_one_hot", &f.x_one_hot)] {
+            let want = floats(x[col(k)]);
+            assert_eq!(got.len(), want.len(), "{k} length");
+            for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+                if g != w {
+                    println!("{} {k}[{i}]: rust {g} deeplc {w}", x[col("proforma")]);
+                }
+                enc.add(*g, *w);
+            }
+        }
+        let r = pred.rt(&mut s, &[&form])[0];
+        let w: f32 = x[col("rt_deeplc")].parse().unwrap();
+        rt.add(r, w);
+        println!("{:60} tract {r:12.4} deeplc {w:12.4}", x[col("proforma")]);
+        n += 1;
+    }
+    println!(
+        "PARITY deeplc: {n} peptides | encoding max|Δ| {:.3e} ({} values) | rt max|Δ| {:.3e} min, max rel {:.3e}",
+        enc.abs, enc.n, rt.abs, rt.rel
+    );
+}
+
 fn main() {
     let a = parse_args();
     match a.model.as_str() {
+        "deeplc" => deeplc_parity(&a),
         "ms2pip" => ms2pip_parity(&a),
         "peptdeep" => peptdeep_parity(&a),
         other => panic!("unknown --model {other}"),

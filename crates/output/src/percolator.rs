@@ -27,7 +27,7 @@ pub struct PercolatorPsm {
     /// `posterior_error_probability` column (PEP; lower is better).
     pub pep: f64,
     /// `score` column (higher is better); `None` when the file has no such
-    /// column.
+    /// column or the value is missing or not a finite number.
     pub score: Option<f64>,
     /// `peptide` column (Percolator's flanked peptide string).
     pub peptide: String,
@@ -444,11 +444,7 @@ pub fn parse_psm_results(text: &str) -> Result<HashMap<String, PercolatorPsm>, P
         let fields: Vec<&str> = line.split('\t').collect();
         // Fail loud on a row shorter than the highest non-protein index we read
         // (truncated/corrupt) — silently skipping it would drop a PSM and bias FDR.
-        let max_scalar = id_col
-            .max(q_col)
-            .max(pep_col)
-            .max(pep_seq_col)
-            .max(score_col.unwrap_or(0));
+        let max_scalar = id_col.max(q_col).max(pep_col).max(pep_seq_col);
         if fields.len() <= max_scalar {
             return Err(PercolatorError::MalformedRow {
                 line: line.to_string(),
@@ -459,9 +455,12 @@ pub fn parse_psm_results(text: &str) -> Result<HashMap<String, PercolatorPsm>, P
         // silent NaN — NaN compares false in every FDR threshold check.
         let q_value = parse_finite(fields[q_col], "q-value")?;
         let pep = parse_finite(fields[pep_col], "posterior_error_prob")?;
+        // The score is optional: a missing, unparseable or non-finite value is
+        // no score. Callers that rank by it reject such PSMs themselves.
         let score = score_col
-            .map(|c| parse_finite(fields[c], "score"))
-            .transpose()?;
+            .and_then(|c| fields.get(c))
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| v.is_finite());
         let peptide = fields[pep_seq_col].to_string();
         // proteinIds is the trailing column: re-join everything from prot_col on.
         let proteins = if fields.len() > prot_col {
@@ -514,13 +513,24 @@ mod tests {
     }
 
     #[test]
-    fn score_column_is_optional_but_must_be_finite() {
+    fn score_column_is_optional_and_lenient() {
         let text = "PSMId\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n\
                     a_1_1\t0.001\t0.0005\tR.PEPTIDEK.A\tsp|P1\n";
         assert_eq!(parse_psm_results(text).unwrap()["a_1_1"].score, None);
+        // A non-finite or unparseable score is no score; the row still parses.
         let text = "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n\
-                    a_1_1\tnan\t0.001\t0.0005\tR.PEPTIDEK.A\tsp|P1\n";
-        assert!(parse_psm_results(text).is_err());
+                    a_1_1\tnan\t0.001\t0.0005\tR.PEPTIDEK.A\tsp|P1\n\
+                    b_1_1\tinf\t0.002\t0.0005\tR.PEPTIDEK.A\tsp|P1\n\
+                    c_1_1\tx\t0.003\t0.0005\tR.PEPTIDEK.A\tsp|P1\n";
+        let m = parse_psm_results(text).unwrap();
+        assert_eq!(m.len(), 3);
+        assert!(m.values().all(|p| p.score.is_none()));
+        assert_eq!(m["a_1_1"].q_value, 0.001);
+        // A score column after the scalar columns does not lengthen the rows
+        // that must be present.
+        let text = "PSMId\tq-value\tposterior_error_prob\tpeptide\tproteinIds\tscore\n\
+                    a_1_1\t0.001\t0.0005\tR.PEPTIDEK.A\n";
+        assert_eq!(parse_psm_results(text).unwrap()["a_1_1"].score, None);
     }
 
     #[test]

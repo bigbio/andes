@@ -7,7 +7,7 @@
 //! NCE × [`NCE_FACTOR`].
 
 use crate::error::{Error, Result};
-use crate::peptdeep::encode::{MOD_ELEMENT_COUNT, encode_aa_sequence};
+use crate::peptdeep::encode::{encode_aa_sequence, MOD_ELEMENT_COUNT};
 use crate::tensor::NamedTensor;
 
 /// Default NCE when the search engine does not supply one (PeptDeep generic).
@@ -236,8 +236,8 @@ mod tests {
 
     #[test]
     fn packs_ms2_batch_with_peptdeep_scaling() {
-        let batch = pack_ms2_inputs(&["PEPTIDE"], &[2], 7, NCE_DEFAULT, INSTRUMENT_DEFAULT)
-            .unwrap();
+        let batch =
+            pack_ms2_inputs(&["PEPTIDE"], &[2], 7, NCE_DEFAULT, INSTRUMENT_DEFAULT).unwrap();
         assert_eq!(batch.aa_indices.shape, vec![1, 9]);
         assert!((batch.charges.data[0] - 0.2).abs() < 1e-6);
         assert!((batch.nce.data[0] - 0.3).abs() < 1e-6);

@@ -8,12 +8,12 @@ use std::fs;
 use std::path::PathBuf;
 
 use onnx_infer::peptdeep::{
-    INSTRUMENT_DEFAULT, MOD_ELEMENT_COUNT, NCE_DEFAULT, encode_aa_sequence, pack_ms2_inputs,
-    pack_rt_inputs,
+    encode_aa_sequence, pack_ms2_inputs, pack_rt_inputs, INSTRUMENT_DEFAULT, MOD_ELEMENT_COUNT,
+    NCE_DEFAULT,
 };
 use onnx_infer::rescoring::{
-    ALPHAPEPTDEEP_CORE_FEATURES, CandidateKey, DEEPLC_CORE_FEATURES, FeatureRow, RescoringBatch,
-    SPECTRUM_CORE_FEATURES, TopNPolicy,
+    CandidateKey, FeatureRow, RescoringBatch, TopNPolicy, ALPHAPEPTDEEP_CORE_FEATURES,
+    DEEPLC_CORE_FEATURES, SPECTRUM_CORE_FEATURES,
 };
 use onnx_infer::{ModelManifest, ModelTask};
 
@@ -80,10 +80,7 @@ fn rescoring_batch_column_order_matches_feature_names() {
             charge: 3,
             peptide: "PEPTIDER".into(),
         },
-        values: BTreeMap::from([
-            ("spec_pearson_norm".into(), 0.91),
-            ("rt_diff".into(), -1.5),
-        ]),
+        values: BTreeMap::from([("spec_pearson_norm".into(), 0.91), ("rt_diff".into(), -1.5)]),
     }];
     let names = ["spec_pearson_norm", "missing_col", "rt_diff"];
     let batch = RescoringBatch::from_rows(rows, &names, "features").unwrap();
@@ -100,8 +97,14 @@ fn peptdeep_packing_matches_openms_export_tensor_names() {
     assert_eq!(rt.mod_x.name, "mod_x");
     assert_eq!(rt.mod_x.shape, vec![1, 18, MOD_ELEMENT_COUNT]);
 
-    let ms2 = pack_ms2_inputs(&["PEPTIDE", "SAMPLER"], &[2, 3], 20, NCE_DEFAULT, INSTRUMENT_DEFAULT)
-        .unwrap();
+    let ms2 = pack_ms2_inputs(
+        &["PEPTIDE", "SAMPLER"],
+        &[2, 3],
+        20,
+        NCE_DEFAULT,
+        INSTRUMENT_DEFAULT,
+    )
+    .unwrap();
     assert_eq!(ms2.aa_indices.name, "aa_indices");
     assert_eq!(ms2.charges.name, "charges");
     assert_eq!(ms2.nce.name, "nce");
@@ -126,9 +129,8 @@ fn all_fixture_manifests_validate_and_resolve_onnx() {
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let man = ModelManifest::from_path(&path).unwrap_or_else(|e| {
-            panic!("manifest {} invalid: {e}", path.display())
-        });
+        let man = ModelManifest::from_path(&path)
+            .unwrap_or_else(|e| panic!("manifest {} invalid: {e}", path.display()));
         assert!(
             man.onnx_path().is_file(),
             "missing onnx for {}: {}",

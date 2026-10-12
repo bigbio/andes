@@ -59,11 +59,7 @@ impl TopNPolicy {
     /// Keep the first `max_per_spectrum` candidates per `spectrum_ref`.
     ///
     /// Input must already be sorted by spectrum then ascending rank (1,2,…).
-    pub fn filter_sorted_by_rank<'a, T, F>(
-        &self,
-        items: &'a [T],
-        spectrum_of: F,
-    ) -> Vec<&'a T>
+    pub fn filter_sorted_by_rank<'a, T, F>(&self, items: &'a [T], spectrum_of: F) -> Vec<&'a T>
     where
         F: Fn(&T) -> &str,
     {
@@ -144,13 +140,7 @@ mod tests {
     #[test]
     fn top_n_keeps_first_k_per_spectrum() {
         let policy = TopNPolicy::new(2).unwrap();
-        let items = vec![
-            ("s1", 1),
-            ("s1", 2),
-            ("s1", 3),
-            ("s2", 1),
-            ("s2", 2),
-        ];
+        let items = vec![("s1", 1), ("s1", 2), ("s1", 3), ("s2", 1), ("s2", 2)];
         let kept = policy.filter_sorted_by_rank(&items, |x| x.0);
         assert_eq!(kept, vec![&("s1", 1), &("s1", 2), &("s2", 1), &("s2", 2)]);
     }
@@ -166,12 +156,8 @@ mod tests {
             },
             values: BTreeMap::from([("spec_pearson_norm".into(), 0.9)]),
         }];
-        let batch = RescoringBatch::from_rows(
-            rows,
-            &["spec_pearson_norm", "rt_diff"],
-            "features",
-        )
-        .unwrap();
+        let batch =
+            RescoringBatch::from_rows(rows, &["spec_pearson_norm", "rt_diff"], "features").unwrap();
         assert_eq!(batch.features.shape, vec![1, 2]);
         assert_eq!(batch.features.data, vec![0.9, 0.0]);
     }

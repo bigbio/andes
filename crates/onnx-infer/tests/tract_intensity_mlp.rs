@@ -12,9 +12,8 @@ fn fixture(name: &str) -> std::path::PathBuf {
 
 #[test]
 fn intensity_mlp_relu_scores() {
-    let mut session =
-        OnnxSession::from_manifest(fixture("intensity_mlp.json"), BackendKind::Tract)
-            .expect("load intensity_mlp");
+    let mut session = OnnxSession::from_manifest(fixture("intensity_mlp.json"), BackendKind::Tract)
+        .expect("load intensity_mlp");
     // rows: [1,0,0,0] → 0.55; [0,0,1,0] → 0.80; [-1,-1,-1,-1] → 0 (ReLU)
     let input = NamedTensor::new(
         "features",

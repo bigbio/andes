@@ -16,12 +16,7 @@ fn doubles_batched_input_from_onnx_path() {
     let mut session = OnnxSession::from_onnx(&path, BackendKind::Tract).expect("load");
     assert_eq!(session.backend_kind(), BackendKind::Tract);
 
-    let input = NamedTensor::new(
-        "x",
-        vec![2, 4],
-        vec![1., 2., 3., 4., 5., 6., 7., 8.],
-    )
-    .unwrap();
+    let input = NamedTensor::new("x", vec![2, 4], vec![1., 2., 3., 4., 5., 6., 7., 8.]).unwrap();
     let outs = session.run(&[input]).expect("run");
     assert_eq!(outs.len(), 1);
     let y = &outs[0];

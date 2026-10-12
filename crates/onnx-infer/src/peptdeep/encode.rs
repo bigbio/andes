@@ -63,7 +63,10 @@ mod tests {
     #[test]
     fn rejects_non_letters() {
         for seq in ["PEP1IDE", "PEP-IDE", "M+15.995K"] {
-            assert!(encode_aa_sequence(seq, 16).is_err(), "{seq} must be rejected");
+            assert!(
+                encode_aa_sequence(seq, 16).is_err(),
+                "{seq} must be rejected"
+            );
         }
     }
 

@@ -68,12 +68,13 @@ impl TractSession {
         }
         let mut ordered = Vec::with_capacity(self.input_names.len());
         for required in &self.input_names {
-            let nt = inputs
-                .iter()
-                .find(|t| &t.name == required)
-                .ok_or_else(|| Error::MissingInput {
-                    name: required.clone(),
-                })?;
+            let nt =
+                inputs
+                    .iter()
+                    .find(|t| &t.name == required)
+                    .ok_or_else(|| Error::MissingInput {
+                        name: required.clone(),
+                    })?;
             ordered.push(nt);
         }
         Ok(ordered)

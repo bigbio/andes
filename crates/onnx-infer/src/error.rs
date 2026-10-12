@@ -30,7 +30,10 @@ pub enum Error {
     InvalidArg(String),
 
     #[error("ONNX backend {backend:?} is not enabled; rebuild with `--features {feature}`")]
-    BackendDisabled { backend: BackendKind, feature: &'static str },
+    BackendDisabled {
+        backend: BackendKind,
+        feature: &'static str,
+    },
 
     #[error("ONNX backend {0:?} is not implemented yet")]
     BackendUnimplemented(BackendKind),
@@ -39,7 +42,10 @@ pub enum Error {
     Inference(String),
 
     #[error("unknown input name `{name}` (model inputs: {available:?})")]
-    UnknownInput { name: String, available: Vec<String> },
+    UnknownInput {
+        name: String,
+        available: Vec<String>,
+    },
 
     #[error("missing required input `{name}`")]
     MissingInput { name: String },

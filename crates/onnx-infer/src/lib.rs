@@ -48,6 +48,7 @@ pub mod ms2pip;
 pub mod peptdeep;
 pub mod prosit;
 pub mod rescoring;
+pub mod rt_native;
 
 pub use error::{BackendKind, Error, Result};
 pub use manifest::{ModelManifest, ModelTask, Provenance, TensorSpec};

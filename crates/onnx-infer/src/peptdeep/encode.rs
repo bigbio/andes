@@ -1,55 +1,32 @@
-//! Minimal PeptDeep-compatible amino-acid indexing (1-based, OpenMS-aligned).
+//! PeptDeep amino-acid indexing, matching `peptdeep.model.featurize.get_batch_aa_indices`.
 //!
-//! Full modification one-hot (`mod_x`) requires `model_const["mod_elements"]`
-//! from peptdeep at export time; we only pad zeros here unless the caller
-//! supplies a dense mod tensor.
+//! PeptDeep indexes residues by ASCII code (`'A'` → 1, `'B'` → 2, …, `'Z'` → 26;
+//! 0 is padding) and pads one zero at the N-terminus and one at the C-terminus,
+//! so a peptide of `n` residues becomes `n + 2` indices. Those two pad slots are
+//! also where N- and C-terminal modification features go in `mod_x`.
 
 use crate::error::{Error, Result};
 
-/// Default mod-element channel count in PeptDeep pretrained v3 (`mod_elements` len).
+/// Mod-element channel count in PeptDeep pretrained v3 (`model_const["mod_elements"]`).
 /// Overridable via manifest `extras.mod_hidden`.
 pub const MOD_ELEMENT_COUNT: usize = 109;
 
-/// 1-based AA vocab used by OpenMS PeptDeep ONNX bindings (index 0 = pad/unknown).
-///
-/// Order matches common PeptDeep / alphabase residue indexing for the 20 AA +
-/// a few specials; unknown residues map to 0.
-pub const AA_VOCAB_1BASED: &[(char, i64)] = &[
-    ('A', 1),
-    ('C', 2),
-    ('D', 3),
-    ('E', 4),
-    ('F', 5),
-    ('G', 6),
-    ('H', 7),
-    ('I', 8),
-    ('K', 9),
-    ('L', 10),
-    ('M', 11),
-    ('N', 12),
-    ('P', 13),
-    ('Q', 14),
-    ('R', 15),
-    ('S', 16),
-    ('T', 17),
-    ('V', 18),
-    ('W', 19),
-    ('Y', 20),
-];
-
-fn aa_index(c: char) -> Option<i64> {
-    AA_VOCAB_1BASED
-        .iter()
-        .find(|(ch, _)| *ch == c)
-        .map(|(_, idx)| *idx)
+/// PeptDeep index of one residue: ASCII position in `A..=Z`, 1-based.
+pub fn aa_index(c: char) -> Option<i64> {
+    let c = c.to_ascii_uppercase();
+    c.is_ascii_uppercase().then(|| c as i64 - 'A' as i64 + 1)
 }
 
-/// Encode a plain amino-acid sequence into 1-based indices (no flanking dots).
+/// Encode a plain amino-acid sequence (no flanks, no modification text) into
+/// PeptDeep indices of length `seq_len + 2`: a zero N-terminal pad, the
+/// residues, a zero C-terminal pad, and zero right-padding up to `seq_len`.
 ///
-/// Returns a length-`seq_len` vector, right-padded with 0 (the pad index) when
-/// `seq` is shorter. A residue outside [`AA_VOCAB_1BASED`] or a peptide longer
-/// than `seq_len` is an error: either would otherwise reach the model as
-/// padding or as a truncated sequence and give a silently wrong prediction.
+/// PeptDeep predicts each batch at one peptide length and does not mask
+/// padding, so right-padding a shorter peptide (`seq_len > seq.len()`) changes
+/// its prediction. Batch peptides of equal length with `seq_len == seq.len()`
+/// to reproduce peptdeep's output.
+///
+/// A character outside `A..=Z` or a peptide longer than `seq_len` is an error.
 pub fn encode_aa_sequence(seq: &str, seq_len: usize) -> Result<Vec<i64>> {
     if seq_len == 0 {
         return Err(Error::InvalidArg("seq_len must be ≥ 1".into()));
@@ -60,9 +37,9 @@ pub fn encode_aa_sequence(seq: &str, seq_len: usize) -> Result<Vec<i64>> {
             "peptide {seq:?} has {len} residues, longer than seq_len {seq_len}"
         )));
     }
-    let mut out = vec![0i64; seq_len];
+    let mut out = vec![0i64; seq_len + 2];
     for (i, c) in seq.chars().enumerate() {
-        out[i] = aa_index(c.to_ascii_uppercase()).ok_or_else(|| {
+        out[i + 1] = aa_index(c).ok_or_else(|| {
             Error::InvalidArg(format!(
                 "residue `{c}` in peptide {seq:?} is not in the PeptDeep vocabulary"
             ))
@@ -76,17 +53,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn encodes_peptide_and_pads() {
-        let v = encode_aa_sequence("PEPTIDE", 10).unwrap();
-        assert_eq!(v.len(), 10);
-        assert_eq!(v[0], 13); // P
-        assert_eq!(v[6], 4); // E
-        assert_eq!(v[7], 0);
+    fn encodes_ascii_indices_with_terminal_pads() {
+        let v = encode_aa_sequence("PEPTIDE", 7).unwrap();
+        assert_eq!(v, vec![0, 16, 5, 16, 20, 9, 4, 5, 0]);
+        let padded = encode_aa_sequence("AC", 4).unwrap();
+        assert_eq!(padded, vec![0, 1, 3, 0, 0, 0]);
     }
 
     #[test]
-    fn rejects_residues_outside_the_vocabulary() {
-        for seq in ["PEPXIDE", "BJOUZ", "PEP1IDE"] {
+    fn rejects_non_letters() {
+        for seq in ["PEP1IDE", "PEP-IDE", "M+15.995K"] {
             assert!(encode_aa_sequence(seq, 16).is_err(), "{seq} must be rejected");
         }
     }

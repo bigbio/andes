@@ -31,3 +31,9 @@ tract-onnx = { version = "0.21.13", optional = true }
 [dev-dependencies]
 serde_json = "1"
 tempfile = "3.10"
+# mzML reading for the `rescore_pin` example only.
+input = { path = "../input" }
+
+[[example]]
+name = "rescore_pin"
+required-features = ["tract"]

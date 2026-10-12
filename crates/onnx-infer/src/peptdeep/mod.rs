@@ -6,8 +6,8 @@
 //!
 //! | Task | Inputs | Output |
 //! |---|---|---|
-//! | RT | `input_sequences` [B,L] i64, `mod_x` [B,L,M] f32 | `rt_pred` [B] |
-//! | MS2 | `aa_indices`, `mod_x`, `charges`, `nce`, `instrument_indices` | `ms2_intensities` |
+//! | RT | `input_sequences` [B,L+2] i64, `mod_x` [B,L+2,M] f32 | `rt_pred` [B] |
+//! | MS2 | `aa_indices`, `mod_x`, `charges`, `nce`, `instrument_indices` | `ms2_intensities` [B,L-1,8] |
 //! | CCS | `aa_indices`, `mod_x`, `charges` | `ccs_pred` |
 //!
 //! Encoding helpers here prepare tensors for [`crate::OnnxSession`]; they do
@@ -17,8 +17,9 @@
 mod encode;
 mod tensors;
 
-pub use encode::{AA_VOCAB_1BASED, MOD_ELEMENT_COUNT, encode_aa_sequence};
+pub use encode::{MOD_ELEMENT_COUNT, aa_index, encode_aa_sequence};
 pub use tensors::{
-    INSTRUMENT_DEFAULT, NCE_DEFAULT, PeptDeepMs2Batch, PeptDeepRtBatch, pack_ms2_inputs,
-    pack_ms2_inputs_with_mod_dim, pack_rt_inputs, pack_rt_inputs_with_mod_dim,
+    CHARGE_FACTOR, INSTRUMENT_DEFAULT, NCE_DEFAULT, NCE_FACTOR, PeptDeepMs2Batch, PeptDeepPeptide,
+    PeptDeepRtBatch, pack_ms2_batch, pack_ms2_inputs, pack_ms2_inputs_with_mod_dim,
+    pack_rt_batch, pack_rt_inputs, pack_rt_inputs_with_mod_dim,
 };

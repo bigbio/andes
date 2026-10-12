@@ -103,10 +103,26 @@ impl InferenceBackend for TractSession {
     fn run(&mut self, inputs: &[NamedTensor]) -> Result<Vec<NamedTensor>> {
         let ordered = self.resolve_inputs(inputs)?;
         let mut tensors = TVec::new();
-        for nt in ordered {
+        for (i, nt) in ordered.into_iter().enumerate() {
             let arr = tract_ndarray::ArrayD::from_shape_vec(nt.shape.clone(), nt.data.clone())
                 .map_err(|e| Error::Inference(format!("ndarray shape for `{}`: {e}", nt.name)))?;
             let tensor: Tensor = arr.into();
+            // NamedTensor carries f32; graphs with integer inputs (token / index
+            // tensors such as PeptDeep `aa_indices`) need a cast to the declared type.
+            let dt = self
+                .model
+                .model()
+                .input_fact(i)
+                .map_err(|e| Error::Inference(format!("input fact for `{}`: {e}", nt.name)))?
+                .datum_type;
+            let tensor = if dt == f32::datum_type() {
+                tensor
+            } else {
+                tensor
+                    .cast_to_dt(dt)
+                    .map_err(|e| Error::Inference(format!("cast `{}` to {dt:?}: {e}", nt.name)))?
+                    .into_owned()
+            };
             tensors.push(tensor.into());
         }
 

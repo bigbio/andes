@@ -120,18 +120,19 @@ def main():
             if int(ft.rsplit("z", 1)[1]) > r.charge:
                 o_ms2[:, j] = 0
         ref_rt = rt_df.loc[i, "rt_pred"]
-        rows.append((r.sequence, r.mods, r.mod_sites, r.charge, float(ref_rt), float(o_rt)))
         max_rt = max(max_rt, abs(float(ref_rt) - float(o_rt)))
-        fi = ms2.predict(df.iloc[[i]].copy())
+        fi = ms2.predict(df.iloc[[i]].copy())[frag_types]
+        flat = ",".join(f"{v:.7g}" for v in fi.values.reshape(-1))
+        rows.append((r.sequence, r.mods, r.mod_sites, r.charge, float(ref_rt), float(o_rt), flat))
         max_ms2 = max(max_ms2, float(np.abs(fi.values - o_ms2).max()))
     ref_tsv = a.onnx_dir / "peptdeep_reference.tsv"
     pd.DataFrame(
-        rows, columns=["sequence", "mods", "mod_sites", "charge", "rt_peptdeep", "rt_onnxruntime"]
+        rows, columns=["sequence", "mods", "mod_sites", "charge", "rt_peptdeep", "rt_onnxruntime", "ms2_peptdeep"]
     ).to_csv(ref_tsv, sep="\t", index=False)
     print(f"max |rt peptdeep - onnxruntime| = {max_rt:.3g}")
     print(f"max |ms2 peptdeep - onnxruntime| = {max_ms2:.3g}")
     for r in rows:
-        print(r)
+        print(r[:6])
 
 
 if __name__ == "__main__":

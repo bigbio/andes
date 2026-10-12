@@ -98,7 +98,7 @@ fn peptdeep_packing_matches_openms_export_tensor_names() {
     let rt = pack_rt_inputs(&["PEPTIDE"], 16).unwrap();
     assert_eq!(rt.input_sequences.name, "input_sequences");
     assert_eq!(rt.mod_x.name, "mod_x");
-    assert_eq!(rt.mod_x.shape, vec![1, 16, MOD_ELEMENT_COUNT]);
+    assert_eq!(rt.mod_x.shape, vec![1, 18, MOD_ELEMENT_COUNT]);
 
     let ms2 = pack_ms2_inputs(&["PEPTIDE", "SAMPLER"], &[2, 3], 20, NCE_DEFAULT, INSTRUMENT_DEFAULT)
         .unwrap();
@@ -106,12 +106,15 @@ fn peptdeep_packing_matches_openms_export_tensor_names() {
     assert_eq!(ms2.charges.name, "charges");
     assert_eq!(ms2.nce.name, "nce");
     assert_eq!(ms2.instrument_indices.name, "instrument_indices");
-    assert_eq!(ms2.aa_indices.shape, vec![2, 20]);
-    assert_eq!(ms2.charges.data, vec![2.0, 3.0]);
+    assert_eq!(ms2.aa_indices.shape, vec![2, 22]);
+    // peptdeep scales charge by 0.1 and NCE by 0.01 before the network.
+    assert!((ms2.charges.data[0] - 0.2).abs() < 1e-6 && (ms2.charges.data[1] - 0.3).abs() < 1e-6);
+    assert!((ms2.nce.data[0] - NCE_DEFAULT * 0.01).abs() < 1e-6);
 
+    // ASCII indices (A=1 … Z=26) with a zero pad at each terminus.
     let idx = encode_aa_sequence("ACDEFGHIKLMNPQRSTVWY", 20).unwrap();
-    assert_eq!(idx.len(), 20);
-    assert!(idx.iter().all(|&i| (1..=20).contains(&i)));
+    assert_eq!(idx.len(), 22);
+    assert_eq!((idx[0], idx[1], idx[2], idx[20], idx[21]), (0, 1, 3, 25, 0));
 }
 
 #[test]

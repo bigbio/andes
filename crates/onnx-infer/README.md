@@ -101,6 +101,36 @@ python scripts/test_fixtures.py
 
 See [`MODELS.md`](MODELS.md) for committed fixtures vs PeptDeep weights.
 
+## Measured: AlphaPeptDeep rescoring
+
+`andes` → AlphaPeptDeep RT and MS2 predictions (`examples/rescore_pin.rs`, tract backend) →
+extra PIN features (`scripts/peptdeep_pin_arms.py`) → Percolator 3.7.1 `-Y`, seeds 42/1/2.
+AlphaPeptDeep `pretrained_models_v3` generic. Counts are at entrapment true FDP ≤ 1%: an
+entrapment version of each database, FDP = entrapment hits / accepted × (1 + T/E).
+
+| Astral (high-res HCD) | PSMs | Unique peptides |
+|---|---|---|
+| andes | 43,076–43,145 | 26,723–26,746 |
+| andes + AlphaPeptDeep (MS2 + RT) | **48,565–48,629 (+12.7%)** | **29,638–29,665 (+10.9%)** |
+| andes `--chimeric` | 60,403–60,435 | 26,696–26,717 |
+| andes `--chimeric` + AlphaPeptDeep (MS2 + RT) | **63,323–63,372 (+4.9%)** | 27,849–27,876 (+4.3%) |
+
+- On chimeric searches, AlphaPeptDeep adds 4.9% PSMs, against 12.7% on the plain search.
+- Chimeric + AlphaPeptDeep gives the most PSMs, but **plain andes + AlphaPeptDeep gives the
+  most unique peptides** (29,648 vs 27,861). If peptides or proteins are the target metric,
+  plain andes + AlphaPeptDeep is the best setup.
+- With the added features, Percolator's nominal 1% sits above 1% true FDP: 1.18–1.22% on the
+  plain search and 1.28–1.35% on the chimeric one. The counts above are compared at equal true
+  FDP.
+
+On UPS1 (ion-trap CID) the gain is within seed noise. The PeptDeep MS2 model is mostly trained
+on HCD, and its RT fits poorly there: the median residual is 8.2 min for confident targets,
+against 0.28 min on Astral.
+
+The prediction step is expensive: tract runs MS2 at about 16 ms per peptide per thread, against
+onnxruntime's 3.1 ms. The plain Astral PIN (1.02M rows) took 31.6 min and 14,180 CPU-s on 8
+threads. The chimeric PIN (288k rows) took 11.7 min.
+
 ## Roadmap
 
 1. Offline #92 A/B with PeptDeep ONNX → five additive PIN columns.

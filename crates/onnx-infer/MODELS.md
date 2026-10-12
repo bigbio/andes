@@ -101,8 +101,10 @@ predictions (`prosit_reference.py`): iRT max |Δ| ≈ 48 iRT units (Pearson 0.91
 over the 8-peptide panel), normalised intensities max |Δ| = 1.0. Setting
 `linear_before_reset = 1` does not fix it, and the GRU weights are sliced from
 the cuDNN parameter blob inside the graph, so gate-block reordering of the
-initialisers has no effect. The Rust side (`prosit` module, `Prosit`
-predictor in the examples, `model_parity --model prosit` against Koina) is in
-place; what is missing is a faithful graph — likely a re-implementation of the
+initialisers has no effect. tract also cannot run the converted graphs: the
+bidirectional encoder's backward GRU is fed through `ReverseSequence`, which
+tract 0.21 does not implement (`Unimplemented(ReverseSequence)` at optimise).
+The Rust side (`prosit` module, `Prosit` predictor in the examples,
+`model_parity --model prosit` against Koina) is in place; what is missing is a faithful graph — likely a re-implementation of the
 Prosit architecture (e.g. in PyTorch) from the SavedModel's canonical
 weights, or a CPU-compatible Keras export.

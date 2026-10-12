@@ -37,11 +37,17 @@ use scoring_crate::scoring::{predict_by_ions, predict_frag_intensities};
 const PROTON: f64 = 1.007_276_466_8;
 const C13: f64 = 1.003_354_835;
 
-/// andes mass delta → (residue or None for N-term-only, mass, name).
-const MODS: &[(Option<u8>, f64, &str)] = &[
-    (Some(b'C'), 57.02146, "Carbamidomethyl"),
-    (Some(b'M'), 15.99491, "Oxidation"),
-    (None, 42.01056, "Acetyl"),
+/// andes mass delta → (residues it may sit on, empty = N-term only; mass; name).
+const MODS: &[(&[u8], f64, &str)] = &[
+    (b"C", 57.02146, "Carbamidomethyl"),
+    (b"M", 15.99491, "Oxidation"),
+    (b"", 42.01056, "Acetyl"),
+    (b"STY", 79.96633, "Phospho"),
+    (b"K", 229.16293, "TMT6plex"),
+    (b"", 229.16293, "TMT6plex"),
+    (b"NQ", 0.98402, "Deamidated"),
+    (b"", -17.02655, "Gln->pyro-Glu"),
+    (b"", -18.01056, "Glu->pyro-Glu"),
 ];
 
 /// Parse `K.PEPM+15.99491K.D` → (residue bytes, per-residue mod delta).
@@ -69,7 +75,7 @@ fn parse(s: &str) -> Option<(Vec<u8>, Vec<f64>)> {
                 return None;
             }
             let aa = seq[pos - 1];
-            MODS.iter().find(|(r, m, _)| (d - m).abs() < 2e-3 && r.map_or(pos == 1, |r| r == aa))?;
+            MODS.iter().find(|(r, m, _)| (d - m).abs() < 2e-3 && if r.is_empty() { pos == 1 } else { r.contains(&aa) })?;
             dm[pos - 1] += d;
         } else {
             return None;

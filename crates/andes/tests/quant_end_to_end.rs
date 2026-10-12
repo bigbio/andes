@@ -385,9 +385,17 @@ fn quant_dir_table_contains_decoys() {
         pin.to_str().unwrap(),
         "--quant-dir",
         qdir.to_str().unwrap(),
+        "--output-parquet",
+        out.path().join("slice.idparquet").to_str().unwrap(),
         "--threads",
         "2",
     ]);
+    // --quant-dir alone quantifies nothing: no feature parquet.
+    assert!(out.path().join("slice.idparquet").is_dir());
+    assert!(!out
+        .path()
+        .join("slice.idparquet/quantms.feature.parquet")
+        .exists());
     let stem = "astral_pxd070049_slice";
     assert!(qdir.join(format!("{stem}.cache")).exists());
     let (run, rows) =

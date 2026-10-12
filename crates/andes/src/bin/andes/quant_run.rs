@@ -284,6 +284,13 @@ impl QuantCollector {
         end: usize,
     ) -> Result<(), String> {
         let stem = run_stem(path);
+        if self.settings.quant_dir.is_some() && scans.ms1.is_empty() {
+            return Err(format!(
+                "--quant-dir: no MS1 scans captured from {}; multi-run quantification needs \
+                 every input's MS1 scans",
+                path.display()
+            ));
+        }
         let ms1 = if self.settings.needs_ms1() && !scans.ms1.is_empty() {
             Some(Ms1RunIndex::new(scans.ms1))
         } else {
@@ -351,8 +358,7 @@ impl QuantCollector {
                 stem,
                 path.display(),
                 if self.settings.needs_ms1_series() {
-                    "label-free quantification and the --quant-dir artifacts are skipped for \
-                     this file"
+                    "label-free quantification is skipped for this file"
                 } else {
                     "precursor purity is unavailable for this file"
                 }
@@ -647,6 +653,24 @@ pub(crate) fn run_stem(path: &Path) -> String {
     }
 }
 
+/// Errors when two inputs share a run stem, naming both paths: the per-run
+/// artifacts of `--quant-dir` are named by the stem.
+pub(crate) fn check_unique_stems(paths: &[PathBuf]) -> Result<(), String> {
+    let mut seen: HashMap<String, &Path> = HashMap::new();
+    for p in paths {
+        if let Some(first) = seen.insert(run_stem(p), p) {
+            return Err(format!(
+                "--quant-dir: inputs {} and {} share the run name {:?}; the per-run artifacts \
+                 are named by it, so rename one of the files",
+                first.display(),
+                p.display(),
+                run_stem(p)
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Strip the multi-file title prefix to get the native id MS3 parents use.
 fn native_id<'a>(run: &RunCapture, title: &'a str) -> &'a str {
     match &run.title_prefix {
@@ -819,9 +843,10 @@ fn write_run_artifacts(
         .map_err(|e| format!("create --quant-dir {}: {e}", quant_dir.display()))?;
     let hits = select_rank1_all(collector, spectra, queues, candidates);
     for (run_idx, run) in collector.runs.iter().enumerate() {
-        let Some(cache) = run.ms1.as_ref() else {
-            continue;
-        };
+        let cache = run
+            .ms1
+            .as_ref()
+            .ok_or_else(|| format!("--quant-dir: run {} has no MS1 scans", run.stem))?;
         let ms1 = cache
             .load()
             .map_err(|e| format!("load MS1 scans for {}: {e}", run.stem))?;
@@ -1195,7 +1220,9 @@ pub(crate) fn run_quant(
         }
     }
 
-    if let Some(pdir) = parquet_dir {
+    // `--quant-dir` alone quantifies nothing here: no feature file.
+    let quantified = s.plex.is_some() || s.lfq || !records.is_empty();
+    if let (Some(pdir), true) = (parquet_dir, quantified) {
         std::fs::create_dir_all(pdir).map_err(|e| format!("create {}: {e}", pdir.display()))?;
         let path = pdir.join("quantms.feature.parquet");
         output::write_feature_parquet(&path, &records)
@@ -1252,6 +1279,54 @@ mod tests {
         // No context at all: the last scan in time.
         assert_eq!(survey_scan(&ms1, None, 4.5), Some(4));
         assert_eq!(survey_scan(&ms1, None, -1.0), None);
+    }
+
+    fn settings(lfq: bool, quant_dir: Option<&str>) -> QuantSettings {
+        QuantSettings {
+            plex: None,
+            tmt_level: 2,
+            tmt_tol: Tolerance::Ppm(20.0),
+            correction: None,
+            min_purity: 0.0,
+            lfq,
+            lfq_params: LfqParams::default(),
+            feature_fdr: 0.05,
+            quant_fdr: 0.01,
+            pep_cap: None,
+            quant_dir: quant_dir.map(PathBuf::from),
+        }
+    }
+
+    #[test]
+    fn quant_dir_needs_ms1_scans_from_every_input() {
+        let mut c = QuantCollector::new(settings(true, Some("q")));
+        let e = c
+            .finish_file(Path::new("/in/run_a.mzML"), None, RunScans::default(), 0)
+            .unwrap_err();
+        assert!(e.contains("/in/run_a.mzML") && e.contains("MS1"), "{e}");
+        // --lfq alone skips the run's label-free quantification.
+        let mut c = QuantCollector::new(settings(true, None));
+        c.finish_file(Path::new("/in/run_a.mzML"), None, RunScans::default(), 0)
+            .unwrap();
+    }
+
+    #[test]
+    fn duplicate_run_stems_name_both_inputs() {
+        let ok = [
+            PathBuf::from("a/run1.mzML"),
+            PathBuf::from("a/run2.mzML.gz"),
+        ];
+        check_unique_stems(&ok).unwrap();
+        let dup = [
+            PathBuf::from("a/run1.mzML"),
+            PathBuf::from("b/run2.raw"),
+            PathBuf::from("b/run1.mzML.gz"),
+        ];
+        let e = check_unique_stems(&dup).unwrap_err();
+        assert!(
+            e.contains("a/run1.mzML ") && e.contains("b/run1.mzML.gz") && e.contains("\"run1\""),
+            "{e}"
+        );
     }
 
     #[test]

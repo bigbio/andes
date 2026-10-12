@@ -207,6 +207,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             _mbr_tmp = Some(dir);
         }
     }
+    // The per-run artifacts are named by the input's stem.
+    if cli.quant_dir.is_some() {
+        crate::quant_run::check_unique_stems(&cli.spectrum)?;
+    }
     // Parse the digestion enzyme(s) once. `--enzyme` accepts a comma-separated
     // list for a multi-protease digest; the FIRST entry is the primary (drives
     // model selection via build_selection_key + the cleavage-credit feature),

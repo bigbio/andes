@@ -786,14 +786,17 @@ pub(crate) struct QuantLibraryArgs {
     #[arg(long = "runs", value_name = "STEM", num_args = 1..)]
     pub(crate) runs: Vec<String>,
 
-    /// Percolator target PSM results (`--results-psms`) over the PINs of these
-    /// runs, with its `score` column.
-    #[arg(long = "psms", value_name = "TSV")]
-    pub(crate) psms: PathBuf,
+    /// Percolator target PSM results (`--results-psms`), with its `score`
+    /// column: one file over every run (SpecIds must be distinct across
+    /// runs), or `<stem>=<file>` once per run, repeated. PSMs are joined to
+    /// the run tables on (run, SpecId).
+    #[arg(long = "psms", value_name = "TSV|STEM=TSV", num_args = 1.., required = true)]
+    pub(crate) psms: Vec<String>,
 
-    /// Percolator decoy PSM results (`--decoy-results-psms`).
-    #[arg(long = "decoy-psms", value_name = "TSV")]
-    pub(crate) decoy_psms: PathBuf,
+    /// Percolator decoy PSM results (`--decoy-results-psms`), in the same
+    /// form as `--psms`.
+    #[arg(long = "decoy-psms", value_name = "TSV|STEM=TSV", num_args = 1.., required = true)]
+    pub(crate) decoy_psms: Vec<String>,
 
     /// Internal library entry gate (precursor-level), not a reported
     /// identification FDR. Default 0.01.
@@ -814,6 +817,11 @@ pub(crate) struct QuantExtractArgs {
     /// Stem of the run to measure.
     #[arg(long = "run", value_name = "STEM")]
     pub(crate) run: String,
+
+    /// MS1 m/z tolerance of the template fit, in ppm (e.g. `10ppm`). Use the
+    /// `--lfq-tol` of the search for the same result as `--mbr`. Default 10 ppm.
+    #[arg(long = "lfq-tol", value_parser = parse_precursor_tol)]
+    pub(crate) lfq_tol: Option<Tolerance>,
 
     /// Worker threads. Default: logical CPU count.
     #[arg(long)]

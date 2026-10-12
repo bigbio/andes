@@ -2260,10 +2260,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             std::mem::take(&mut mbr_decoy_scores),
             "rescoring result",
         )?;
+        let ep = crate::quant_cmd::evidence_params(cli.lfq_tol)?;
         crate::quant_cmd::run_in_process(
             dir,
             &stems,
-            &scores,
+            scores,
+            &ep,
             cli.mbr_library_fdr,
             cli.mbr_fdr,
             &report_base.with_extension(""),
@@ -2334,6 +2336,7 @@ fn check_mbr_args(cli: &Cli) -> Result<(), String> {
     if cli.tmt.is_some() {
         return Err("--mbr is label-free and cannot be combined with --tmt".into());
     }
+    crate::quant_cmd::evidence_params(cli.lfq_tol)?;
     Ok(())
 }
 

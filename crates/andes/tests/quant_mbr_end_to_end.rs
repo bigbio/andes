@@ -257,6 +257,160 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
     assert!(transfers >= 50, "only {transfers} transfers");
 }
 
+/// Splits a merged Percolator result of a multi-input search (SpecIds
+/// `<file>/<id>`) into one file per run with the run's own SpecIds `<id>`.
+fn split_by_run(merged: &Path, out_dir: &Path, kind: &str) -> Vec<String> {
+    let text = std::fs::read_to_string(merged).unwrap();
+    let mut lines = text.lines();
+    let header = lines.next().unwrap();
+    let mut per_run: HashMap<&str, String> =
+        RUNS.iter().map(|r| (*r, format!("{header}\n"))).collect();
+    for l in lines {
+        // The prefix is the input's file name without its last extension.
+        let (prefix, rest) = l
+            .split_once('/')
+            .expect("multi-input SpecId has a file prefix");
+        let stem = prefix.split('.').next().unwrap();
+        per_run
+            .get_mut(stem)
+            .unwrap_or_else(|| panic!("SpecId prefix {prefix:?}"))
+            .push_str(&format!("{rest}\n"));
+    }
+    RUNS.iter()
+        .map(|r| {
+            let path = out_dir.join(format!("{r}.{kind}.tsv"));
+            std::fs::write(&path, &per_run[r]).unwrap();
+            format!("{r}={}", path.display())
+        })
+        .collect()
+}
+
+#[test]
+fn separate_searches_join_on_run_and_spec_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let perc = fake_percolator(tmp.path());
+
+    // All-in-one over the three runs; its Percolator files give the scores.
+    let aio = tmp.path().join("aio");
+    std::fs::create_dir_all(&aio).unwrap();
+    let mut args = search_args();
+    args.extend(
+        [
+            "--output-pin",
+            s(&aio.join("a.pin")),
+            "--lfq",
+            "--lfq-tol",
+            "8ppm",
+            "--mbr",
+            "--rescore",
+            "--percolator-bin",
+            s(&perc),
+        ]
+        .map(String::from),
+    );
+    run_andes(&args.iter().map(String::as_str).collect::<Vec<_>>());
+
+    // Each run searched on its own into one quant directory, with its own
+    // Percolator result. The runs share scan titles, so SpecIds collide.
+    let sep = tmp.path().join("sep");
+    let q = sep.join("q");
+    std::fs::create_dir_all(&sep).unwrap();
+    for r in RUNS {
+        let spectrum = fixture(&format!("test-fixtures/{r}.mzML.gz"));
+        let db = fixture("test-fixtures/BSA.fasta");
+        run_andes(&[
+            "--spectrum",
+            s(&spectrum),
+            "--database",
+            s(&db),
+            "--threads",
+            "2",
+            "--output-pin",
+            s(&sep.join(format!("{r}.pin"))),
+            "--quant-dir",
+            s(&q),
+            "--rescore",
+            "--percolator-bin",
+            s(&perc),
+        ]);
+    }
+    let own = |kind: &str| -> Vec<String> {
+        RUNS.iter()
+            .map(|r| {
+                format!(
+                    "{r}={}",
+                    sep.join(format!("{r}.percolator.{kind}.psms.txt"))
+                        .display()
+                )
+            })
+            .collect()
+    };
+
+    // One merged pair cannot be joined: the shared SpecId and runs are named.
+    let out = andes(&[
+        "quant",
+        "library",
+        "--quant-dir",
+        s(&q),
+        "--psms",
+        s(&sep.join("mbr_run1.percolator.target.psms.txt")),
+        "--decoy-psms",
+        s(&sep.join("mbr_run1.percolator.decoy.psms.txt")),
+    ]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("SpecId") && err.contains("mbr_run1") && err.contains("per-run"),
+        "{err}"
+    );
+
+    // Per-run results from the separate Percolator runs build a library.
+    let mut lib_args: Vec<String> = ["quant", "library", "--quant-dir", s(&q), "--psms"]
+        .map(String::from)
+        .to_vec();
+    lib_args.extend(own("target"));
+    lib_args.push("--decoy-psms".into());
+    lib_args.extend(own("decoy"));
+    run_andes(&lib_args.iter().map(String::as_str).collect::<Vec<_>>());
+    assert!(q.join("library.parquet").is_file());
+
+    // The same per-PSM scores as the all-in-one run give its mbr.tsv exactly.
+    let mut lib_args: Vec<String> = ["quant", "library", "--quant-dir", s(&q), "--psms"]
+        .map(String::from)
+        .to_vec();
+    lib_args.extend(split_by_run(
+        &aio.join("a.percolator.target.psms.txt"),
+        &sep,
+        "target",
+    ));
+    lib_args.push("--decoy-psms".into());
+    lib_args.extend(split_by_run(
+        &aio.join("a.percolator.decoy.psms.txt"),
+        &sep,
+        "decoy",
+    ));
+    run_andes(&lib_args.iter().map(String::as_str).collect::<Vec<_>>());
+    for r in RUNS {
+        run_andes(&[
+            "quant",
+            "extract",
+            "--quant-dir",
+            s(&q),
+            "--run",
+            r,
+            "--lfq-tol",
+            "8ppm",
+        ]);
+    }
+    let base = sep.join("out");
+    run_andes(&["quant", "finalize", "--quant-dir", s(&q), "-o", s(&base)]);
+    assert!(
+        std::fs::read(sep.join("out.mbr.tsv")).unwrap()
+            == std::fs::read(aio.join("a.mbr.tsv")).unwrap(),
+        "mbr.tsv of the separate searches differs from the all-in-one run"
+    );
+}
+
 #[test]
 fn library_stage_errors_name_what_is_missing() {
     let tmp = tempfile::tempdir().unwrap();

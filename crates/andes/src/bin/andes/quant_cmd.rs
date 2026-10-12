@@ -18,6 +18,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
+use model::Tolerance;
 use output::extract_table::{read_extract_table, write_extract_table};
 use output::feature_parquet::{FeatureRecord, MbrColumns};
 use output::library_table::{read_library, write_library, StoredLibrary};
@@ -132,6 +133,90 @@ fn read_percolator(path: &Path) -> Result<HashMap<String, PercolatorPsm>, String
     output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// Rescorer scores by SpecId: one map for every run (SpecIds must then be
+/// distinct across runs), or one map per run stem.
+pub(crate) enum PsmScores {
+    Merged(HashMap<String, f64>),
+    PerRun(HashMap<String, HashMap<String, f64>>),
+}
+
+/// Where the Percolator results of `quant library` come from.
+#[derive(Debug, PartialEq)]
+enum ScoreSource {
+    /// One target and one decoy file over every run.
+    Merged(PathBuf, PathBuf),
+    /// Per run stem, its target and decoy file.
+    PerRun(BTreeMap<String, (PathBuf, PathBuf)>),
+}
+
+/// Reads `--psms` / `--decoy-psms`: either one plain path each, or
+/// `<stem>=<path>` once per run of `stems` in each.
+fn score_source(
+    psms: &[String],
+    decoys: &[String],
+    stems: &[String],
+) -> Result<ScoreSource, String> {
+    let split = |v: &str| -> Option<(String, PathBuf)> {
+        let (stem, path) = v.split_once('=')?;
+        stems
+            .iter()
+            .any(|s| s == stem)
+            .then(|| (stem.to_string(), PathBuf::from(path)))
+    };
+    let per_run = |flag: &str, values: &[String]| -> Result<BTreeMap<String, PathBuf>, String> {
+        let mut m = BTreeMap::new();
+        for v in values {
+            let (stem, path) = split(v).ok_or_else(|| {
+                format!("{flag} {v:?}: per-run files are <stem>=<file> with a stem of the library's runs; plain paths and per-run files cannot be mixed")
+            })?;
+            if m.insert(stem.clone(), path).is_some() {
+                return Err(format!("{flag}: run {stem:?} is given twice"));
+            }
+        }
+        let missing: Vec<&str> = stems
+            .iter()
+            .filter(|s| !m.contains_key(*s))
+            .map(String::as_str)
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!("{flag}: no file for runs {}", missing.join(", ")));
+        }
+        Ok(m)
+    };
+    let any_per_run = psms.iter().chain(decoys).any(|v| split(v).is_some());
+    if !any_per_run {
+        return match (psms, decoys) {
+            ([t], [d]) => Ok(ScoreSource::Merged(t.into(), d.into())),
+            _ => Err(format!(
+                "give one merged --psms and --decoy-psms file, or <stem>=<file> for every run (got {} and {})",
+                psms.len(),
+                decoys.len()
+            )),
+        };
+    }
+    let t = per_run("--psms", psms)?;
+    let mut d = per_run("--decoy-psms", decoys)?;
+    Ok(ScoreSource::PerRun(
+        t.into_iter()
+            .map(|(stem, tp)| {
+                let dp = d.remove(&stem).expect("every run has a decoy file");
+                (stem, (tp, dp))
+            })
+            .collect(),
+    ))
+}
+
+fn load_scores(source: &ScoreSource) -> Result<PsmScores, String> {
+    Ok(match source {
+        ScoreSource::Merged(t, d) => PsmScores::Merged(percolator_scores(t, d)?),
+        ScoreSource::PerRun(m) => PsmScores::PerRun(
+            m.iter()
+                .map(|(stem, (t, d))| Ok((stem.clone(), percolator_scores(t, d)?)))
+                .collect::<Result<_, String>>()?,
+        ),
+    })
+}
+
 /// Score map from Percolator's target and decoy PSM files.
 fn percolator_scores(targets: &Path, decoys: &Path) -> Result<HashMap<String, f64>, String> {
     let t = read_percolator(targets)?;
@@ -153,19 +238,23 @@ fn percolator_scores(targets: &Path, decoys: &Path) -> Result<HashMap<String, f6
 }
 
 /// Builds the library over the run tables of `stems` (sorted, as from
-/// [`library_runs`]) with `scores` joined by SpecId, and writes it to `dir`.
+/// [`library_runs`]) with the scores of `load_scores` joined on (run,
+/// SpecId), and writes it to `dir`. The scores are loaded after the tables,
+/// so that merged scores over runs with a shared SpecId fail with the runs
+/// named.
 pub(crate) fn build_and_write_library(
     dir: &Path,
     stems: &[String],
-    scores: &HashMap<String, f64>,
+    load_scores: impl FnOnce() -> Result<PsmScores, String>,
     max_q: f64,
 ) -> Result<StoredLibrary, String> {
     if !(max_q > 0.0 && max_q <= 1.0) {
         return Err(format!("library entry gate {max_q} is outside (0, 1]"));
     }
-    // Every run's rows, with the table each SpecId came from.
+    // Every run's rows, and the first SpecId shared by two runs.
     let mut tables = Vec::with_capacity(stems.len());
     let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut shared: Option<(String, usize, usize)> = None;
     for (r, stem) in stems.iter().enumerate() {
         let path = artifact(dir, stem, TABLE_SUFFIX);
         let (run, rows) = read_run_quant_table(&path)?;
@@ -177,19 +266,35 @@ pub(crate) fn build_and_write_library(
         }
         for row in &rows {
             if let Some(&other) = seen.get(&row.spec_id) {
-                return Err(format!(
-                    "SpecId {:?} is in both {} and {}; the PSM join needs unique SpecIds",
-                    row.spec_id,
-                    artifact(dir, &stems[other], TABLE_SUFFIX).display(),
-                    path.display()
-                ));
+                if shared.is_none() && other != r {
+                    shared = Some((row.spec_id.clone(), other, r));
+                }
+                continue;
             }
             seen.insert(row.spec_id.clone(), r);
         }
         tables.push((path, rows));
     }
     drop(seen);
-
+    let scores = load_scores()?;
+    let run_scores: Vec<&HashMap<String, f64>> = match &scores {
+        PsmScores::Merged(m) => {
+            if let Some((id, a, b)) = &shared {
+                return Err(format!(
+                    "SpecId {id:?} is in runs {} and {}, so one merged Percolator result cannot be joined; pass per-run results: --psms <stem>=<target.tsv> --decoy-psms <stem>=<decoy.tsv> for every run",
+                    stems[*a], stems[*b]
+                ));
+            }
+            vec![m; stems.len()]
+        }
+        PsmScores::PerRun(m) => stems
+            .iter()
+            .map(|s| {
+                m.get(s)
+                    .ok_or_else(|| format!("no rescoring scores for run {s:?}"))
+            })
+            .collect::<Result<_, _>>()?,
+    };
     // Dense precursor ids over the sorted union of keys; the first target row
     // of a key (else its first row) gives its metadata. A decoy row whose key
     // is also a target's is dropped: a precursor is all-target or all-decoy.
@@ -236,7 +341,7 @@ pub(crate) fn build_and_write_library(
                 shadowed += 1;
                 continue;
             }
-            let Some(&score) = scores.get(&row.spec_id) else {
+            let Some(&score) = run_scores[r].get(&row.spec_id) else {
                 unscored += 1;
                 continue;
             };
@@ -329,14 +434,30 @@ pub(crate) fn extract_and_write(
     dir: &Path,
     stored: &StoredLibrary,
     run: u16,
+    ep: &EvidenceParams,
 ) -> Result<Vec<ExtractRow>, String> {
     let stem = &stored.runs[run as usize];
     let cache = artifact(dir, stem, CACHE_SUFFIX);
-    let ex = extract_run(run, &cache, &stored.library, &EvidenceParams::default())?;
+    let ex = extract_run(run, &cache, &stored.library, ep)?;
     log_extract(stem, ex.rows.len(), &ex.counts);
     let path = artifact(dir, stem, EXTRACT_SUFFIX);
     write_extract_table(&path, &ex.rows)?;
     Ok(ex.rows)
+}
+
+/// Template-fit settings for an MS1 tolerance (`--lfq-tol`, ppm only;
+/// default 10 ppm).
+pub(crate) fn evidence_params(tol: Option<Tolerance>) -> Result<EvidenceParams, String> {
+    match tol {
+        None => Ok(EvidenceParams::default()),
+        Some(Tolerance::Ppm(v)) => Ok(EvidenceParams {
+            tol_ppm: v,
+            ..EvidenceParams::default()
+        }),
+        Some(Tolerance::Da(v)) => Err(format!(
+            "match-between-runs extraction needs a ppm --lfq-tol, got {v} Da"
+        )),
+    }
 }
 
 /// Peptidoform and charge of a `"<peptidoform>/<charge>"` key.
@@ -462,10 +583,12 @@ pub(crate) fn finalize_and_write(
 
 /// Library, extract (runs in parallel) and finalize in this process, from
 /// the per-run artifacts in `dir`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_in_process(
     dir: &Path,
     stems: &[String],
-    scores: &HashMap<String, f64>,
+    scores: HashMap<String, f64>,
+    ep: &EvidenceParams,
     max_q: f64,
     mbr_fdr: f64,
     base: &Path,
@@ -473,10 +596,10 @@ pub(crate) fn run_in_process(
 ) -> Result<(), String> {
     let t0 = std::time::Instant::now();
     let stems = library_runs(dir, stems)?;
-    let stored = build_and_write_library(dir, &stems, scores, max_q)?;
+    let stored = build_and_write_library(dir, &stems, || Ok(PsmScores::Merged(scores)), max_q)?;
     let runs: Vec<Vec<ExtractRow>> = (0..stems.len())
         .into_par_iter()
-        .map(|r| extract_and_write(dir, &stored, r as u16))
+        .map(|r| extract_and_write(dir, &stored, r as u16, ep))
         .collect::<Result<_, _>>()?;
     finalize_and_write(&stored, &runs, mbr_fdr, base, parquet_dir)?;
     eprintln!("[PHASE mbr: {:.2}s]", t0.elapsed().as_secs_f64());
@@ -485,11 +608,18 @@ pub(crate) fn run_in_process(
 
 fn run_library(a: QuantLibraryArgs) -> Result<(), String> {
     let stems = library_runs(&a.quant_dir, &a.runs)?;
-    let scores = percolator_scores(&a.psms, &a.decoy_psms)?;
-    build_and_write_library(&a.quant_dir, &stems, &scores, a.mbr_library_fdr).map(|_| ())
+    let source = score_source(&a.psms, &a.decoy_psms, &stems)?;
+    build_and_write_library(
+        &a.quant_dir,
+        &stems,
+        || load_scores(&source),
+        a.mbr_library_fdr,
+    )
+    .map(|_| ())
 }
 
 fn run_extract(a: QuantExtractArgs) -> Result<(), String> {
+    let ep = evidence_params(a.lfq_tol)?;
     let stored = read_library(&a.quant_dir)?;
     let run = stored
         .runs
@@ -503,7 +633,7 @@ fn run_extract(a: QuantExtractArgs) -> Result<(), String> {
                 stored.runs.join(", ")
             )
         })?;
-    extract_and_write(&a.quant_dir, &stored, run as u16).map(|_| ())
+    extract_and_write(&a.quant_dir, &stored, run as u16, &ep).map(|_| ())
 }
 
 fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
@@ -584,6 +714,39 @@ mod tests {
             e.contains("c.quant.parquet") && e.contains("c.cache"),
             "{e}"
         );
+    }
+
+    #[test]
+    fn score_files_are_merged_or_one_pair_per_run() {
+        let stems: Vec<String> = vec!["a".into(), "b".into()];
+        let v = |x: &[&str]| x.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            score_source(&v(&["t.tsv"]), &v(&["d.tsv"]), &stems).unwrap(),
+            ScoreSource::Merged("t.tsv".into(), "d.tsv".into())
+        );
+        let s = score_source(&v(&["b=tb", "a=ta"]), &v(&["a=da", "b=db"]), &stems).unwrap();
+        let ScoreSource::PerRun(m) = s else {
+            panic!("{s:?}")
+        };
+        assert_eq!(m["a"], ("ta".into(), "da".into()));
+        assert_eq!(m["b"], ("tb".into(), "db".into()));
+        let e = score_source(&v(&["a=ta"]), &v(&["a=da"]), &stems).unwrap_err();
+        assert!(e.contains("no file for runs b"), "{e}");
+        let e = score_source(&v(&["a=ta", "b.tsv"]), &v(&["a=da", "b=db"]), &stems).unwrap_err();
+        assert!(e.contains("cannot be mixed"), "{e}");
+        let e = score_source(&v(&["a=ta", "a=tb"]), &v(&["a=da", "b=db"]), &stems).unwrap_err();
+        assert!(e.contains("twice"), "{e}");
+        assert!(score_source(&v(&["t1", "t2"]), &v(&["d"]), &stems).is_err());
+    }
+
+    #[test]
+    fn extraction_tolerance_is_ppm() {
+        assert_eq!(evidence_params(None).unwrap().tol_ppm, 10.0);
+        assert_eq!(
+            evidence_params(Some(Tolerance::Ppm(5.0))).unwrap().tol_ppm,
+            5.0
+        );
+        assert!(evidence_params(Some(Tolerance::Da(0.01))).is_err());
     }
 
     #[test]

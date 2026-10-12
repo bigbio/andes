@@ -190,7 +190,7 @@ See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model)
 | `--tmt-min-purity` | 0..1 | `0` | Drop PSMs below this precursor isolation purity from `tmt.tsv` (they stay in the parquet). |
 | `--lfq` | flag | off | Label-free MS1 quantification of the confident precursors (§10). Writes `<stem>.lfq.tsv` and `<stem>.lfq_features.tsv`. mzML / `.raw` with high-resolution MS1; the MS2 may be ion-trap. |
 | `--quant-dir` | dir | *(none)* | Per input file writes `<stem>.cache` (the run's MS1 scans, every FAIMS voltage) and `<stem>.quant.parquet` (every rank-1 PSM, targets and decoys, no FDR filter; `spec_id` is the PIN SpecId, `search_score` the PIN `RawScore`) for the multi-run quantification stages. Implies MS1 capture; same inputs as `--lfq`. Other outputs are unchanged. |
-| `--lfq-tol` | tolerance | `10ppm` | MS1 tolerance of the isotope chromatograms. |
+| `--lfq-tol` | tolerance | `10ppm` | MS1 tolerance of the isotope chromatograms, and of the `--mbr` template fit (ppm only there). |
 | `--lfq-rt-window` | seconds | `60` | Half-window around the identifying PSM's retention time. |
 | `--lfq-gaussian-width` | seconds | *(none)* | Experimental Gaussian smoothing width (eight sigma) for peak detection; areas use raw traces. Validate feature-q coverage for the acquisition. Default detection uses five-scan Savitzky–Golay. |
 | `--lfq-min-cosine` | 0..1 | `0.7` | Minimum isotope-envelope cosine for both target and decoy eligibility before feature competition. All target features remain in `lfq_features.tsv` and the parquet. |
@@ -792,33 +792,40 @@ each (precursor, run) gets one consistent quantity. Four stages, run in one proc
 directory (for a pipeline that scatters runs over machines):
 
 ```bash
-# search: MS1 caches + PSM tables into the quant directory, and the PIN
-andes --spectrum a.mzML --spectrum b.mzML --database db.fasta --output-pin ab.pin --quant-dir q/
-# Percolator over the PIN, then the library (once)
-andes quant library  --quant-dir q/ --psms ab.target.psms --decoy-psms ab.decoy.psms
-# per run (any machine that sees q/)
-andes quant extract  --quant-dir q/ --run a
-andes quant extract  --quant-dir q/ --run b
+# per run (any machine): MS1 cache + PSM table into the shared directory, PIN, Percolator
+andes --spectrum a.mzML --database db.fasta --output-pin a.pin --quant-dir q/
+andes --spectrum b.mzML --database db.fasta --output-pin b.pin --quant-dir q/
+# once: the library, from each run's Percolator results
+andes quant library  --quant-dir q/ \
+      --psms a=a.target.psms --psms b=b.target.psms \
+      --decoy-psms a=a.decoy.psms --decoy-psms b=b.decoy.psms
+# per run (any machine that sees q/); --lfq-tol as in the search, default 10ppm
+andes quant extract  --quant-dir q/ --run a [--lfq-tol 10ppm]
+andes quant extract  --quant-dir q/ --run b [--lfq-tol 10ppm]
 # once
 andes quant finalize --quant-dir q/ -o experiment [--mbr-fdr 0.01] [--output-parquet dir]
 ```
 
-The PSM join needs SpecIds that are distinct across runs. A multi-input search prefixes them
-with the file stem; separate single-input searches of runs with the same scan titles give
-equal SpecIds, which the library stage rejects (naming both tables).
+PSMs are joined to the run tables on (run, SpecId). Percolator results come either per run
+(`--psms <stem>=<file>` and `--decoy-psms <stem>=<file>` for every run) or as one merged pair
+of files (`--psms <file> --decoy-psms <file>`, e.g. Percolator over the PIN of one
+multi-input search, whose SpecIds carry the file name). Separately searched runs usually share
+SpecIds (the scan titles); a merged pair over such runs is rejected, naming the SpecId and the
+runs, because it cannot say which run a score belongs to.
 
 * **Library** (`quant library`). Reads every run's `<stem>.quant.parquet` (`--runs`, or every
   table in the directory; a missing table or cache is an error) and joins Percolator's
-  `score` to its PSMs by SpecId (target and decoy result files; the `score` column is
+  `score` to its PSMs on (run, SpecId) (target and decoy result files; the `score` column is
   required). Runs are indexed by sorted stem, precursors by sorted key. A precursor enters
   the library when its best-PSM target/decoy q-value over all runs is at most
   `--mbr-library-fdr`: an internal entry gate, not a reported FDR. A joint, reference-free
   retention-time alignment maps every run onto a consensus scale and gives each transfer a
-  predicted apex and its uncertainty. A run with fewer than 50 anchors, or whose anchors cover
+  predicted apex and its uncertainty. The per-run residual width is floored at 0.5 s. A run
+  with fewer than 50 anchors, or whose anchors cover
   less than 30 % of the RT range, is unaligned: it is logged and neither gives nor receives
   transfers.
 * **Extract** (`quant extract`, one run, reads only `<stem>.cache`). Every library precursor
-  is measured by a likelihood template fit of its isotope pattern and elution profile around
+  is measured, at the `--lfq-tol` m/z tolerance (ppm; default 10 ppm), by a likelihood template fit of its isotope pattern and elution profile around
   the predicted apex (around the PSM's RT where it was identified), with two decoy hypotheses
   per transfer: a mass-defect-preserving m/z shift and an RT shift. Identified pairs are also
   measured as if they were transfers (pseudo-transfers). FAIMS runs are fitted on the series of
@@ -829,8 +836,11 @@ equal SpecIds, which the library stage rejects (naming both tables).
   FDR. Pseudo-transfers give a sensitivity lower bound and the wrong-peak rate, which decoys
   cannot see.
 
+`--mbr` cannot be combined with `--tmt`: with `--output-parquet`, `quantms.feature.parquet`
+holds the match-between-runs rows instead of the per-run features (§3f).
+
 The stage path and the in-process run use the same code on the same files and give a
-byte-identical `<stem>.mbr.tsv`. In-process, the scores are the rescoring run's (Percolator's
+byte-identical `<stem>.mbr.tsv` for the same PSM scores and `--lfq-tol`. In-process, the scores are the rescoring run's (Percolator's
 target and decoy results, or the native rescorer's held-out scores).
 
 ### Relation to other quantifiers

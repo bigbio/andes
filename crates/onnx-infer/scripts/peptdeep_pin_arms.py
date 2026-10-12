@@ -2,7 +2,8 @@
 """Append PeptDeep features (from the `rescore_pin` example) to a PIN.
 
 RT: predicted PeptDeep RT is calibrated to observed RT on confident target PSMs
-(q <= --calib-q in a baseline Percolator run) with a binned-median curve, then
+(q <= --calib-q in a baseline Percolator run) with isotonic regression
+(``rt_calibration.fit_isotonic``; a straight line below 20 anchors), then
 ``rt_diff = |observed - calibrated|`` is computed identically for every row.
 
 Rows without predictions keep their row: each feature is imputed with its
@@ -19,9 +20,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
+import sys
 
 import numpy as np
 import pandas as pd
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from rt_calibration import fit_isotonic  # noqa: E402
 
 MS2 = [
     "spec_pearson_norm",
@@ -43,21 +49,8 @@ def parse_args():
     p.add_argument("--baseline-psms", required=True)
     p.add_argument("--out-prefix", required=True)
     p.add_argument("--calib-q", type=float, default=0.01)
-    p.add_argument("--bins", type=int, default=50)
+    p.add_argument("--arms", nargs="+", default=["ms2", "rt", "both"], choices=["ms2", "rt", "both"])
     return p.parse_args()
-
-
-def calibrate(pred, obs, bins):
-    """Binned-median map predicted -> observed RT, linear between bin centres."""
-    qs = np.quantile(pred, np.linspace(0, 1, bins + 1))
-    xs, ys = [], []
-    for lo, hi in zip(qs[:-1], qs[1:]):
-        m = (pred >= lo) & (pred <= hi)
-        if m.sum() >= 5:
-            xs.append(np.median(pred[m]))
-            ys.append(np.median(obs[m]))
-    xs, ys = np.array(xs), np.maximum.accumulate(np.array(ys))
-    return lambda x: np.interp(x, xs, ys)
 
 
 def main():
@@ -82,7 +75,7 @@ def main():
     is_conf = feat.SpecId.isin(conf).values
     ok = (feat.pdeep_missing.values == 0) & np.isfinite(feat.observed_retention_time.values)
     cm = is_conf & ok & (labels == 1)
-    cal = calibrate(feat.pdeep_irt.values[cm], feat.observed_retention_time.values[cm], a.bins)
+    cal = fit_isotonic(feat.pdeep_irt.values[cm], feat.observed_retention_time.values[cm])
     pred_rt = cal(feat.pdeep_irt.values)
     feat["predicted_retention_time"] = pred_rt
     feat["rt_diff"] = np.abs(feat.observed_retention_time.values - pred_rt)
@@ -107,7 +100,7 @@ def main():
               f"all targets {np.median(v[(labels == 1) & ok]):.3f} | decoys {np.median(v[dec & ok]):.3f}")
 
     arms = {"ms2": MS2, "rt": RT, "both": MS2 + RT}
-    for arm, cols in arms.items():
+    for arm, cols in ((k, v) for k, v in arms.items() if k in a.arms):
         cols = cols + ["pdeep_missing"]
         vals = feat[cols].values
         with open(f"{a.out_prefix}_{arm}.pin", "w") as out:

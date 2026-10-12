@@ -167,7 +167,7 @@ fn main() {
     let h: Vec<String> = lines.next().unwrap().unwrap().split('\t').map(String::from).collect();
     let (ci, cp) = (h.iter().position(|x| x == "SpecId").unwrap(), h.iter().position(|x| x == "peptide").unwrap());
     let mut w = BufWriter::new(File::create(&out).unwrap());
-    write!(w, "SpecId\tcharge\tobs_rt_min\tn_ions\tgbdt_sa\tgbdt_cos\tgbdt_pearson\tflat_sa\tflat_cos\tflat_pearson\trt_seed_index\trt_features\n").unwrap();
+    writeln!(w, "SpecId\tcharge\tobs_rt_min\tn_ions\tgbdt_sa\tgbdt_cos\tgbdt_pearson\tflat_sa\tflat_cos\tflat_pearson\trt_seed_index\trt_features").unwrap();
     let mut cache = HashMap::new();
     let (mut n_ok, mut n_skip) = (0usize, 0usize);
     for line in lines {

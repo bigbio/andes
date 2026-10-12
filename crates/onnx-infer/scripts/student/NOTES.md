@@ -134,3 +134,82 @@ Setup:
 
 - **Astral:** unchanged within seed noise. Its binned curve had no outlier bin.
 - **UPS1:** the old curve was the problem. "Both" now beats base (7,998–8,281) by about 8%; before it was within noise.
+
+## Step B — andes-rt v1, a native RT model trained on our own RTs (2026-10-13)
+
+**Data** (`rt_extract.py`):
+- Source: quantms reanalysis PSM tables, 33 datasets, latest run each. Targets with PEP ≤ 0.01.
+- Reduced to the exact median RT per (run, peptidoform): 58.8M rows, 1.28M peptidoforms, 6,754 runs.
+- No benchmark accessions are present.
+- Splits: train / val / test by an md5 hash of the stripped sequence (90 / 5 / 5). Held-out datasets never trained on: PXD019263 (label-free), PXD005235 (TMT) and PXD012255 (phospho).
+- Unmapped mods dropped: 13.8k rows, all `UNIMOD:99913` (OpenMS phospho-decoy placeholder on Ala).
+- **The quantms sequences carry no isoleucine (I is written as L).** The encoder now maps I→L. Before that fix the I embedding was untrained, and benchmark MAE was 4× worse (Astral 1.72 vs 0.43 min) while the qpx test looked excellent.
+
+**Model** (`rt_model.py`, 77,794 parameters):
+- Per position: AA embedding(32) concatenated with the mod composition [C,H,N,O,S,P,other,mass/100] from a built-in Unimod table (`mod_composition.py`, 35 entries, masses checked).
+- N-/C-term tokens carry the terminal mods.
+- 1x1 conv to 64 channels, then 4 residual dilated k3 convs (1/2/4/8), then attention + mean pooling, then an MLP to a scalar index.
+
+**Training** (`rt_train.py`):
+- Loss: pairwise logistic ranking within a run plus a per-run affine MSE head; batches of 16 runs × 64 peptidoforms.
+- Hardware: one A100, 30k steps in about 6 min (CUDA 12.8 driver, torch 2.8 cu128). Validation per-run Pearson 0.984; 150k steps gives no gain (0.9839).
+
+**Calibration:** per-run isotonic on confident PSMs (`rt_calibration.py`).
+
+**Native inference:**
+- `onnx-infer::rt_native` (plain Rust), `ARTN0001` weight file; weights are not in git.
+- Parity with PyTorch: max |Δ| 9.5e-6 over 4,850 peptidoforms in both ProForma and andes PIN notation, including phospho / TMT / pyro-Glu / deamidation / acetyl.
+- Speed: 114 µs per peptide on one thread (8 threads: 65k peptides/s). In `rt_pin` on 16 threads, Astral's 801,552 forms take 7.7 s (153 µs per form per thread).
+- For comparison on tract: DeepLC 399 s on 8 threads (4.0 ms per form per thread); PeptDeep RT about 1.9 ms per form per thread. andes-rt is about 12× faster than PeptDeep RT and 26× faster than DeepLC.
+
+### Accuracy: qpx held-out sequences
+291 runs (≤ 12 per dataset), 187,533 rows. Calibration uses that run's non-test rows; error is on test-split sequences.
+
+| MAE, min (R²) | PeptDeep | andes-rt full | no-phospho | no-TMT |
+|---|---|---|---|---|
+| all | 5.91 (0.921) | 3.29 (0.980) | 3.21 | 3.69 |
+| unmodified/CAM | 3.98 | 3.14 | 3.05 | 3.15 |
+| held-out datasets | 11.0 | 3.38 | 3.35 | 4.66 |
+| TMT rows | 19.9 (0.41) | 2.89 (0.983) | 2.82 | 6.49 zero-shot |
+| phospho rows (n = 607, mostly PXD012255, where every model has R² ≈ 0.3) | 7.12 | 7.04 | 8.33 zero-shot | 6.73 |
+
+Few-shot fine-tuning (3k steps, lr 5e-4, half PTM batches):
+- TMT: 100 peptides give 6.47 (no gain), 500 give 4.67. The full model reaches 2.89.
+- Phospho: 100 give 7.99 and 500 give 7.67. The phospho slice is too noisy to separate the models.
+
+### Accuracy: benchmark confident PSMs
+Calibration on half the peptides, error on the other half. MAE in min; phospho peptides only in brackets.
+
+| | andes-rt | no-phospho | no-TMT | PeptDeep | DeepLC | andes RT index (shipped / in-run refit) |
+|---|---|---|---|---|---|---|
+| Astral (span 18.7) | **0.43** | 0.42 | 0.41 | 0.43 | 0.44 | 2.75 / 0.89 |
+| UPS1 (span 123) | **6.40** | 6.25 | 6.29 | 7.16 | 6.90 | 20.6 / 10.1 |
+| TMT a05058 (span 159) | **4.90** | 4.75 | 10.1 zero-shot | 27.6 | 4.75 | 32.4 / 8.73 |
+| Phospho PXD007653 (span 249) | **8.67** (8.73) | 9.98 (10.2 zero-shot) | 8.22 (8.32) | 11.2 (11.5) | 9.32 (9.47) | 52.5 / 16.3 |
+
+Zero-shot through composition:
+- **Phospho:** the no-phospho model scores 10.2 min on phospho peptides. That beats PeptDeep generic (11.5), but DeepLC is better (9.5) and the full model better still (8.7).
+- **TMT:** the no-TMT model scores 10.1 min. That beats PeptDeep (27.6, which has no TMT), but trails DeepLC (4.75) and the full model (4.9).
+- **Composition alone gets roughly half-way;** a few hundred labelled peptides are needed to close the gap.
+
+### Rescoring, RT feature only
+Features: `rt_diff`, calibrated RT and a missing flag, with isotonic calibration on base confident targets for every predictor. Percolator 3.7.1 `-Y`, seeds 42 / 1 / 2. Counts are PSMs at true FDP ≤ 1%, with peptides in brackets.
+
+| | base | +andes-rt | +PeptDeep RT | +DeepLC |
+|---|---|---|---|---|
+| Astral (T/E 0.9) | 43,076 / 43,145 / 43,132 | **47,389 / 47,429 / 47,369** (≈ 28,980) | 47,024 / 46,906 / 46,934 (≈ 28,820) | 47,175 / 46,997 / 46,856 (≈ 28,780) |
+| Phospho (T/E 1.0) | 37,110 / 37,046 / 37,038 (≈ 14,535) | 37,839 / 37,871 / 37,836 (≈ 14,720) | **37,908 / 37,874 / 37,876** (≈ 14,755) | 37,731 / 37,763 / 37,658 |
+| UPS1 (T/E 2.311) | 7,998 / 8,281 / 8,181 | 7,855 / 8,008 / 7,863 | 8,331 / 8,198 / 8,045 | **8,635 / 9,019 / 8,500** |
+
+- **Astral:** andes-rt is about 400 PSMs ahead of PeptDeep, and its nominal 1% sits at 0.95–0.97% true FDP. The no-phospho and no-TMT models give the same counts.
+- **Phospho:** andes-rt and PeptDeep are tied. The no-TMT model gives 37,963–38,009.
+- **UPS1:** despite the best UPS1 MAE, andes-rt raises the nominal count while true FDP rises to 3.6–3.8%, so there is no gain at true FDP. The cause is not understood (ion-trap CID; T/E-noisy dataset). DeepLC helps there.
+
+### Defects found on the way
+- **I→L:** the training sequences carry no isoleucine; fixed by encoding I as L.
+- **Peptide parsing:** `K+42.01` at residue 1 has to be read as N-terminal acetyl.
+- **Few-shot pool:** the first version filtered out the very PTM peptides it picked.
+- **Extraction memory:** Arrow `approximate_median` builds one t-digest per group (125 GB); replaced by an exact sort-based median.
+- **Environment:** the CUDA 13 torch wheel cannot use the CUDA 12.8 GPU driver.
+
+Glycopeptides are out of scope for v1. The composition table has no glycans, and none are in the training data.

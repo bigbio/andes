@@ -31,11 +31,13 @@ from rt_model import RtCnn, encode, export_weights, parse_proforma  # noqa: E402
 
 
 def load_table(path, holdout):
-    t = pq.read_table(path).to_pandas()
-    t = t.groupby(["dataset", "run", "peptidoform"], as_index=False).agg(
-        sequence=("sequence", "first"), rt_min=("rt_min", "median"), n_psm=("n_psm", "sum"),
-        split=("split", "first"), has_phospho=("has_phospho", "first"), has_tmt=("has_tmt", "first"))
-    t["run_key"] = t.dataset + "/" + t.run
+    """Rows as categoricals; ``run_id`` numbers (dataset, run) pairs, ``form_id`` peptidoforms."""
+    cats = ["dataset", "run", "peptidoform", "split"]
+    t = pq.read_table(path, columns=cats + ["rt_min", "has_phospho", "has_tmt"], read_dictionary=cats).to_pandas()
+    for c in cats:
+        t[c] = t[c].astype("category")
+    t["run_id"] = t.groupby(["dataset", "run"], observed=True, sort=True).ngroup()
+    t["form_id"] = t.peptidoform.cat.codes.astype(np.int64)
     t["holdout"] = t.dataset.isin(holdout)
     return t
 
@@ -120,14 +122,11 @@ def main():
         torch.set_num_threads(int(os.environ.get("SLURM_CPUS_PER_TASK", "8")))
     t0 = time.time()
     t = load_table(a.table, set(a.holdout_datasets))
-    forms = t.peptidoform.unique()
-    fid = {f: i for i, f in enumerate(forms)}
-    toks, comps, ok = encode_forms(forms)
-    t["form_id"] = t.peptidoform.map(fid)
+    forms = t.peptidoform.cat.categories
+    toks, comps, ok = encode_forms(list(forms))
     t = t[ok[t.form_id.values]].copy()
-    t["run_id"] = t.run_key.astype("category").cat.codes
-    lo = t.groupby("run_id").rt_min.transform(lambda v: np.quantile(v, 0.01))
-    hi = t.groupby("run_id").rt_min.transform(lambda v: np.quantile(v, 0.99))
+    lo = t.groupby("run_id").rt_min.transform(lambda v: v.quantile(0.01))
+    hi = t.groupby("run_id").rt_min.transform(lambda v: v.quantile(0.99))
     t["rt_norm"] = ((t.rt_min - lo) / (hi - lo).clip(lower=1e-3)).clip(-0.2, 1.2)
     n_runs = int(t.run_id.max()) + 1
     print(f"table {len(t)} rows, {len(forms)} forms ({(~ok).sum()} unsupported), {n_runs} runs, "
@@ -144,7 +143,7 @@ def main():
     if a.fewshot_ptm:
         col = "has_phospho" if a.fewshot_ptm == "phospho" else "has_tmt"
         pool = t[(~t.holdout) & (t.split == "train") & t[col]]
-        pick = rng.choice(pool.peptidoform.unique(), a.fewshot_n, replace=False)
+        pick = rng.choice(np.asarray(pool.peptidoform.unique()), a.fewshot_n, replace=False)
         few = pool[pool.peptidoform.isin(set(pick))]
         # the PTM peptides need same-run partners to rank against
         few = t[t.run_id.isin(set(few.run_id)) & base & (t.split == "train")].pipe(

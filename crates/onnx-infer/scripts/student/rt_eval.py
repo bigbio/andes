@@ -102,15 +102,17 @@ def main():
     p.add_argument("--out", required=True)
     a = p.parse_args()
     rng = np.random.default_rng(11)
-    t = pq.read_table(a.table).to_pandas()
-    t = t.groupby(["dataset", "run", "peptidoform"], as_index=False).agg(
-        rt_min=("rt_min", "median"), split=("split", "first"))
-    t["run_key"] = t.dataset + "/" + t.run
+    cats = ["dataset", "run", "peptidoform", "split"]
+    t = pq.read_table(a.table, columns=cats + ["rt_min"], read_dictionary=cats).to_pandas()
+    t["run_id"] = t.groupby(["dataset", "run"], observed=True, sort=True).ngroup()
     pick = []
-    for ds, g in t.groupby("dataset"):
-        runs = g.run_key.unique()
+    for ds, g in t.groupby("dataset", observed=True):
+        runs = np.sort(g.run_id.unique())
         pick += list(rng.choice(runs, min(a.runs_per_dataset, len(runs)), replace=False))
-    t = t[t.run_key.isin(set(pick))]
+    t = t[t.run_id.isin(set(pick))].copy()
+    for c in cats:
+        t[c] = t[c].astype(str)
+    t["run_key"] = t.dataset + "/" + t.run
     parts = []
     for rk, g in t.groupby("run_key"):
         anc = g[g.split != "test"]

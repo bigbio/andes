@@ -109,3 +109,28 @@ robust to a single outlier bin.
 
 No teacher set-up, teacher predictions, student training, Rust inference or
 rescoring arms.
+
+## Step A — RT calibration fix (2026-10-12)
+
+`peptdeep_pin_arms.py` now calibrates RT with isotonic regression (PAV).
+- The fit uses confident targets and is applied unchanged to every row.
+- Below 20 anchors it falls back to a straight line.
+- The code is in `rt_calibration.py`.
+
+Setup:
+- Same andes build (fa715f98) and the same PeptDeep features as the VM run.
+- The PINs reproduce the VM ones: UPS1 base 7,998 / 2,328 and Astral base 43,076 / 26,723 at seed 42.
+- Percolator 3.7.1, seeds 42 / 1 / 2.
+- Counts are PSMs / peptides at true FDP ≤ 1%. Entrapment T/E is 2.311 for UPS1 and 0.900 for Astral.
+
+| Arm | old (binned median + cumulative max) | new (isotonic) |
+|---|---|---|
+| UPS1 rt, s42 / s1 / s2 | 7,781 / 8,283 / 7,790 | 8,337 / 8,082 / 7,830 |
+| UPS1 both | 8,541 / 7,805 / 7,865 | **9,017 / 9,238 / 8,485** |
+| UPS1 confident-target residual, median / p90 | 8.24 / 34.3 min | **4.69 / 13.8 min** |
+| Astral rt | 47,157 / 46,843 / 47,035 | 47,048 / 46,892 / 46,942 |
+| Astral both | 48,612 / 48,565 / 48,629 | 48,798 / 48,677 / 48,808 |
+| Astral confident-target residual, median / p90 | 0.29 / 0.85 min | 0.29 / 0.86 min |
+
+- **Astral:** unchanged within seed noise. Its binned curve had no outlier bin.
+- **UPS1:** the old curve was the problem. "Both" now beats base (7,998–8,281) by about 8%; before it was within noise.

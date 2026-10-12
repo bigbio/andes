@@ -38,6 +38,8 @@ mod spectra;
 mod train;
 #[path = "andes/train_intensity.rs"]
 mod train_intensity;
+#[path = "../transfer_fdr.rs"]
+mod transfer_fdr;
 
 // Re-imported so `config.rs` can keep its `crate::…` paths unchanged.
 use crate::cli::{

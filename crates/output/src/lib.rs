@@ -57,4 +57,5 @@ pub mod run_quant_table;
 pub mod extract_table;
 
 pub mod feature_parquet;
+pub mod mbr_out;
 pub use feature_parquet::{write_feature_parquet, FeatureRecord, ProteinPosition};

@@ -6,6 +6,12 @@
 //! carries a single `{label: "LFQ", intensity}`; an isobaric PSM carries one
 //! entry per channel (`TMT126`, `TMT127N`, ...). Normalized or protein-level
 //! values are never written here; they belong to the quantms / OpenMS layer.
+//!
+//! When any record carries match-between-runs columns ([`MbrColumns`]), three
+//! nullable columns follow the QPX ones: `evidence_type` (`identified`,
+//! `transfer_ms1` or `below_threshold`), `transfer_q` (the internal transfer
+//! quant-quality q-value, not an identification FDR) and `quantity_se`.
+//! Otherwise the file has exactly the QPX columns.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -72,6 +78,27 @@ pub struct FeatureRecord {
     pub rt_stop: Option<f32>,
     /// Row indices into `psms.parquet`.
     pub psm_ids: Vec<i64>,
+    /// Match-between-runs columns; `None` outside match-between-runs.
+    pub mbr: Option<MbrColumns>,
+}
+
+/// The optional match-between-runs columns of one feature.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MbrColumns {
+    pub evidence_type: String,
+    /// Internal transfer quant-quality q-value; `None` for identified rows.
+    pub transfer_q: Option<f64>,
+    pub quantity_se: Option<f64>,
+}
+
+const MBR_FIELDS: [(&str, DataType); 3] = [
+    ("evidence_type", DataType::Utf8),
+    ("transfer_q", DataType::Float64),
+    ("quantity_se", DataType::Float64),
+];
+
+fn has_mbr(records: &[FeatureRecord]) -> bool {
+    records.iter().any(|r| r.mbr.is_some())
 }
 
 // ── nested types (QPXPSMSchema / QPXFeatureSchema) ────────────────────────────
@@ -160,7 +187,22 @@ fn pg_position_fields() -> Fields {
 
 /// The feature schema, in `QPXFeatureSchema::schema()` order.
 pub fn feature_schema() -> Schema {
-    Schema::new(vec![
+    Schema::new(qpx_fields())
+}
+
+/// [`feature_schema`] followed by the match-between-runs columns.
+pub fn feature_schema_mbr() -> Schema {
+    let mut fields = qpx_fields();
+    fields.extend(
+        MBR_FIELDS
+            .iter()
+            .map(|(name, ty)| Field::new(*name, ty.clone(), true)),
+    );
+    Schema::new(fields)
+}
+
+fn qpx_fields() -> Vec<Field> {
+    vec![
         Field::new("feature_id", DataType::Int64, false),
         Field::new("sequence", DataType::Utf8, false),
         Field::new("peptidoform", DataType::Utf8, false),
@@ -218,7 +260,7 @@ pub fn feature_schema() -> Schema {
         Field::new("rt_start", DataType::Float32, true),
         Field::new("rt_stop", DataType::Float32, true),
         Field::new("psm_ids", list_type(DataType::Int64), true),
-    ])
+    ]
 }
 
 // ── builders ──────────────────────────────────────────────────────────────────
@@ -333,9 +375,21 @@ fn prim_list<T: ArrayBuilder>(values: T, inner: DataType) -> ListBuilder<T> {
     ListBuilder::new(values).with_field(Arc::new(Field::new("element", inner, true)))
 }
 
-/// Build the Arrow batch for `records` (the whole table in one batch).
+/// Build the Arrow batch for `records` (the whole table in one batch), with
+/// the match-between-runs columns when any record carries them.
 pub fn build_feature_batch(records: &[FeatureRecord]) -> std::io::Result<RecordBatch> {
-    let schema = Arc::new(feature_schema());
+    build_batch(records, has_mbr(records))
+}
+
+fn build_batch(records: &[FeatureRecord], mbr: bool) -> std::io::Result<RecordBatch> {
+    let schema = Arc::new(if mbr {
+        feature_schema_mbr()
+    } else {
+        feature_schema()
+    });
+    let mut evidence_type = StringBuilder::new();
+    let mut transfer_q = Float64Builder::new();
+    let mut quantity_se = Float64Builder::new();
 
     let mut feature_id = Int64Builder::new();
     let mut sequence = StringBuilder::new();
@@ -571,9 +625,13 @@ pub fn build_feature_batch(records: &[FeatureRecord]) -> std::io::Result<RecordB
             }
             psm_ids.append(true);
         }
+        let m = r.mbr.as_ref();
+        evidence_type.append_option(m.map(|m| m.evidence_type.as_str()));
+        transfer_q.append_option(m.and_then(|m| m.transfer_q));
+        quantity_se.append_option(m.and_then(|m| m.quantity_se));
     }
 
-    let columns: Vec<ArrayRef> = vec![
+    let mut columns: Vec<ArrayRef> = vec![
         Arc::new(feature_id.finish()),
         Arc::new(sequence.finish()),
         Arc::new(peptidoform.finish()),
@@ -608,6 +666,11 @@ pub fn build_feature_batch(records: &[FeatureRecord]) -> std::io::Result<RecordB
         Arc::new(rt_stop.finish()),
         Arc::new(psm_ids.finish()),
     ];
+    if mbr {
+        columns.push(Arc::new(evidence_type.finish()));
+        columns.push(Arc::new(transfer_q.finish()));
+        columns.push(Arc::new(quantity_se.finish()));
+    }
     RecordBatch::try_new(schema, columns).map_err(|e| std::io::Error::other(e.to_string()))
 }
 
@@ -628,10 +691,13 @@ pub fn write_feature_parquet(path: &Path, records: &[FeatureRecord]) -> std::io:
         "identity_composite".to_string(),
         FEATURE_IDENTITY_COMPOSITE.to_string(),
     );
-    let schema = Arc::new(Schema::new_with_metadata(
-        feature_schema().fields().clone(),
-        meta,
-    ));
+    let mbr = has_mbr(records);
+    let fields = if mbr {
+        feature_schema_mbr()
+    } else {
+        feature_schema()
+    };
+    let schema = Arc::new(Schema::new_with_metadata(fields.fields().clone(), meta));
     let props = WriterProperties::builder()
         .set_compression(Compression::SNAPPY)
         .build();
@@ -639,7 +705,7 @@ pub fn write_feature_parquet(path: &Path, records: &[FeatureRecord]) -> std::io:
     let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     for chunk in records.chunks(4096) {
-        let batch = build_feature_batch(chunk)?;
+        let batch = build_batch(chunk, mbr)?;
         let batch = RecordBatch::try_new(schema.clone(), batch.columns().to_vec())
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         writer
@@ -696,6 +762,7 @@ mod tests {
             rt_start: None,
             rt_stop: None,
             psm_ids: vec![42],
+            mbr: None,
         }
     }
 
@@ -727,6 +794,106 @@ mod tests {
             rows += b.unwrap().num_rows();
         }
         assert_eq!(rows, 2);
+    }
+
+    fn fnv1a(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
+            (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+        })
+    }
+
+    /// Records without match-between-runs columns: the column data bytes
+    /// (everything between the leading magic and the footer, which holds the
+    /// per-write uuid and date in hash-ordered metadata) hash to the value the
+    /// QPX-only writer produces, and the schema and metadata keys are the
+    /// QPX ones.
+    #[test]
+    fn records_without_mbr_columns_write_the_qpx_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("f.parquet");
+        let records: Vec<_> = (0..5)
+            .map(|i| {
+                let mut r = record("LFQ");
+                r.feature_id = i;
+                r
+            })
+            .collect();
+        write_feature_parquet(&p, &records).unwrap();
+        let b = std::fs::read(&p).unwrap();
+        let n = b.len();
+        let footer = u32::from_le_bytes(b[n - 8..n - 4].try_into().unwrap()) as usize;
+        let data = &b[4..n - 8 - footer];
+        assert_eq!(data.len(), 5460);
+        let h = fnv1a(data);
+        assert_eq!(h, 0xade2_cf2b_3c40_c827, "hash {h:#018x}");
+
+        let builder =
+            ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(&p).unwrap()).unwrap();
+        assert_eq!(builder.schema().fields(), feature_schema().fields());
+        let mut keys: Vec<&str> = builder
+            .schema()
+            .metadata()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "compression_format",
+                "creation_date",
+                "creator",
+                "file_type",
+                "identity_composite",
+                "primary_key",
+                "qpx_version",
+                "software_provider",
+                "uuid"
+            ]
+        );
+    }
+
+    #[test]
+    fn mbr_columns_follow_the_qpx_columns_when_used() {
+        use arrow::array::{Array, Float64Array, StringArray};
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("f.parquet");
+        let mut transferred = record("LFQ");
+        transferred.mbr = Some(MbrColumns {
+            evidence_type: "transfer_ms1".into(),
+            transfer_q: Some(0.004),
+            quantity_se: Some(1.5e3),
+        });
+        let plain = record("LFQ");
+        write_feature_parquet(&p, &[transferred, plain]).unwrap();
+        let builder =
+            ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(&p).unwrap()).unwrap();
+        let names: Vec<String> = builder
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
+        assert_eq!(names.len(), 36);
+        assert_eq!(names[32], "psm_ids");
+        assert_eq!(&names[33..], ["evidence_type", "transfer_q", "quantity_se"]);
+        let batch = builder.build().unwrap().next().unwrap().unwrap();
+        let et = batch
+            .column_by_name("evidence_type")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(et.value(0), "transfer_ms1");
+        assert!(et.is_null(1));
+        let q = batch
+            .column_by_name("transfer_q")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(q.value(0), 0.004);
+        assert!(q.is_null(1));
     }
 
     #[test]

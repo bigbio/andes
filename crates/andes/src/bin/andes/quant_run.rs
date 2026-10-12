@@ -621,6 +621,7 @@ fn base_record(id: &QuantId, proteins: Vec<ProteinPos>, feature_id: i64) -> Feat
         rt_start: None,
         rt_stop: None,
         psm_ids: vec![id.psm_index],
+        mbr: None,
     }
 }
 

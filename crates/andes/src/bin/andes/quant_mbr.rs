@@ -30,16 +30,30 @@
 //! then a running median of 3 over the bins), interpolated linearly between
 //! the bin medians and held constant beyond them. With fewer than 20 usable
 //! fits, `w_prior = w0` everywhere.
+//!
+//! Finalize: the transfer targets and decoys of every run go to the
+//! cross-validated transfer FDR of [`crate::transfer_fdr`] (features
+//! [`TRANSFER_FEATURES`], built by [`transfer_features`]); rows without
+//! evidence or with a non-finite feature take no part and get no q-value. Each
+//! pseudo-transfer is scored by the model of its precursor's fold, which never
+//! saw it, and placed against that fold's transfer scores. `<base>.mbr.tsv`
+//! gets one row per identified or transferred (precursor, run) target, and
+//! `<base>.mbr_validation.tsv` the pseudo-transfer sensitivity lower bound,
+//! the wrong-peak rate (`|t0_pseudo - t0_identified| > w_identified`) and the
+//! accepted transfer counts of the pooled and per-family estimates.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
+use output::mbr_out::{write_mbr_tsv, write_mbr_validation, EvidenceType, MbrRow, MbrValidation};
 use quant::decoys::{probes, Hypothesis, Probe};
-use quant::evidence::{fit_on_grid, fit_with, EvidenceParams, FitScratch};
+use quant::evidence::{fit_on_grid, fit_with, Evidence, EvidenceParams, FitScratch};
 use quant::library::{Library, LibraryEntry};
 use quant::ms1_index::Ms1RunIndex;
 use rayon::prelude::*;
 
 use crate::quant_run::ms1_cache::Ms1Cache;
+use crate::transfer_fdr::{transfer_fdr, FdrCounts, FdrRow, TRANSFER_FEATURES};
 
 pub(crate) use output::extract_table::{ExtractRole as Role, ExtractRow};
 
@@ -470,6 +484,227 @@ pub(crate) fn extract_run(
     Ok(assemble(slots, width_fit_count, wp.is_default()))
 }
 
+/// Floor of `amplitude_se` in the amplitude signal-to-noise feature.
+const MIN_AMPLITUDE_SE: f64 = 1e-12;
+
+/// The transfer FDR features of a row, in [`TRANSFER_FEATURES`] order;
+/// `None` without evidence or with a non-finite value.
+pub(crate) fn transfer_features(row: &ExtractRow) -> Option<Vec<f32>> {
+    let e = row.evidence.as_ref()?;
+    let snr = e.amplitude / e.amplitude_se.max(MIN_AMPLITUDE_SE);
+    let x = [
+        e.llr,
+        e.rt_z,
+        e.rt_z.abs(),
+        e.width_ratio,
+        e.envelope_cos,
+        e.coherence,
+        e.m1_ratio,
+        e.mass_err_ppm.abs(),
+        e.n_points as f64,
+        e.isotopes_used.count_ones() as f64,
+        (snr + 1.0).log10(),
+        row.n_donor_runs as f64,
+        row.library_q,
+    ];
+    debug_assert_eq!(x.len(), TRANSFER_FEATURES.len());
+    let x: Vec<f32> = x.iter().map(|&v| v as f32).collect();
+    x.iter().all(|v| v.is_finite()).then_some(x)
+}
+
+/// `<base>.mbr.tsv` and `<base>.mbr_validation.tsv`.
+#[allow(dead_code)]
+pub(crate) fn mbr_paths(base: &Path) -> (PathBuf, PathBuf) {
+    let with = |suffix: &str| {
+        let mut s = base.as_os_str().to_owned();
+        s.push(suffix);
+        PathBuf::from(s)
+    };
+    (with(".mbr.tsv"), with(".mbr_validation.tsv"))
+}
+
+/// What one finalize did, for the caller to log.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FinalizeSummary {
+    pub validation: MbrValidation,
+    /// Rows of `<base>.mbr.tsv`.
+    pub rows_written: usize,
+    /// Transfer targets and decoys without evidence or with a non-finite
+    /// feature (no q-value).
+    pub no_features: usize,
+    pub fdr: FdrCounts,
+}
+
+/// Transfer FDR, pseudo-transfer validation and the MBR outputs over the
+/// extract rows of every run (`runs[i]` holds rows of any runs; a row's `run`
+/// indexes `stems`, its `precursor` indexes `lib.meta`).
+///
+/// Errors: `mbr_fdr` outside `(0, 1]`, a row whose run or precursor is out of
+/// range, or an unwritable output (the message names the file).
+#[allow(dead_code)]
+pub(crate) fn finalize(
+    stems: &[String],
+    lib: &Library,
+    runs: &[Vec<ExtractRow>],
+    mbr_fdr: f64,
+    seed: u64,
+    mbr_tsv: &Path,
+    validation_tsv: &Path,
+) -> Result<FinalizeSummary, String> {
+    if !(mbr_fdr > 0.0 && mbr_fdr <= 1.0) {
+        return Err(format!(
+            "transfer q-value threshold {mbr_fdr} is outside (0, 1]"
+        ));
+    }
+    let rows: Vec<&ExtractRow> = runs.iter().flatten().collect();
+    if let Some(r) = rows
+        .iter()
+        .find(|r| r.run as usize >= stems.len() || r.precursor as usize >= lib.meta.len())
+    {
+        return Err(format!(
+            "extract row of precursor {} in run {} is outside the {} precursors and {} runs",
+            r.precursor,
+            r.run,
+            lib.meta.len(),
+            stems.len()
+        ));
+    }
+
+    let mut summary = FinalizeSummary::default();
+    let mut fdr_rows = Vec::new();
+    // Per row: the index of its FdrRow, for transfer targets and decoys.
+    let mut fdr_index: Vec<Option<usize>> = vec![None; rows.len()];
+    let mut identified: HashMap<(u32, u16), &Evidence> = HashMap::new();
+    for (i, r) in rows.iter().enumerate() {
+        match (r.role, r.kind) {
+            (Role::Identified, Hypothesis::Target) => {
+                if let Some(e) = &r.evidence {
+                    identified.insert((r.precursor, r.run), e);
+                }
+            }
+            (Role::Transfer, kind) => {
+                let Some(x) = transfer_features(r) else {
+                    summary.no_features += 1;
+                    continue;
+                };
+                let family = match kind {
+                    Hypothesis::Target => 0,
+                    Hypothesis::MassShiftDecoy(_) => 1,
+                    Hypothesis::RtShiftDecoy => 2,
+                };
+                fdr_index[i] = Some(fdr_rows.len());
+                fdr_rows.push(FdrRow {
+                    precursor: r.precursor,
+                    is_decoy: family != 0,
+                    family,
+                    x,
+                });
+            }
+            _ => {}
+        }
+    }
+    let fdr = transfer_fdr(&fdr_rows, seed);
+    let accepted = |q: Option<f64>| q.is_some_and(|q| q <= mbr_fdr);
+
+    let mut v = MbrValidation {
+        q_threshold: mbr_fdr,
+        ..MbrValidation::default()
+    };
+    let mut out: Vec<(u32, u16, MbrRow<'_>)> = Vec::new();
+    for (i, r) in rows.iter().enumerate() {
+        if r.kind != Hypothesis::Target {
+            continue;
+        }
+        let e = r.evidence.as_ref();
+        let (evidence_type, transfer_q) = match r.role {
+            Role::Identified => (EvidenceType::Identified, None),
+            Role::Transfer => {
+                let q = fdr_index[i].and_then(|k| fdr.result.q[k]);
+                v.transfers += 1;
+                v.transfers_scored += usize::from(q.is_some());
+                v.accepted_pooled += usize::from(accepted(q));
+                if let Some(k) = fdr_index[i] {
+                    v.accepted_mass_only += usize::from(accepted(fdr.result.q_mass_only[k]));
+                    v.accepted_rt_only += usize::from(accepted(fdr.result.q_rt_only[k]));
+                }
+                let t = if accepted(q) {
+                    EvidenceType::TransferMs1
+                } else {
+                    EvidenceType::BelowThreshold
+                };
+                (t, q)
+            }
+            Role::PseudoTransfer => {
+                let q = transfer_features(r).and_then(|x| fdr.pseudo_q(r.precursor, &x));
+                v.pseudo_transfers += 1;
+                v.pseudo_scored += usize::from(q.is_some());
+                v.pseudo_accepted += usize::from(accepted(q));
+                if let (Some(p), Some(id)) = (e, identified.get(&(r.precursor, r.run))) {
+                    let wrong = (p.t0 - id.t0).abs() > id.w;
+                    v.wrong_peak_pairs += 1;
+                    v.wrong_peak += usize::from(wrong);
+                    if accepted(q) {
+                        v.accepted_pairs += 1;
+                        v.accepted_wrong_peak += usize::from(wrong);
+                    }
+                }
+                continue;
+            }
+        };
+        out.push((
+            r.precursor,
+            r.run,
+            MbrRow {
+                precursor: &lib.meta[r.precursor as usize].key,
+                run: &stems[r.run as usize],
+                evidence_type,
+                quantity: e.map(|e| e.quantity),
+                quantity_se: e.map(|e| e.quantity_se),
+                transfer_q,
+                apex_rt: e.map(|e| e.t0),
+                library_q: r.library_q,
+            },
+        ));
+    }
+    out.sort_by_key(|&(p, run, _)| (p, run));
+    let out: Vec<MbrRow<'_>> = out.into_iter().map(|(_, _, row)| row).collect();
+    write_mbr_tsv(mbr_tsv, &out)?;
+    write_mbr_validation(validation_tsv, &v)?;
+
+    eprintln!(
+        "[mbr] transfer FDR (internal quant-quality score) features: {}",
+        TRANSFER_FEATURES.join(",")
+    );
+    for f in &fdr.counts.failed_folds {
+        eprintln!("[mbr] transfer FDR fold without a model: {f}");
+    }
+    eprintln!(
+        "[mbr] transfers {}: {} with a q-value, {} at q <= {mbr_fdr} (mass-shift decoys only {}, RT-shift decoys only {}); {} transfer rows without features, {} unscored, {} scored without a q-value",
+        v.transfers,
+        v.transfers_scored,
+        v.accepted_pooled,
+        v.accepted_mass_only,
+        v.accepted_rt_only,
+        summary.no_features,
+        fdr.counts.unscored,
+        fdr.counts.no_q
+    );
+    eprintln!(
+        "[mbr] pseudo-transfers {}: {} at q <= {mbr_fdr} (sensitivity lower bound {}); wrong peak {} of {} ({} of {} accepted)",
+        v.pseudo_transfers,
+        v.pseudo_accepted,
+        v.sensitivity().map_or("NA".into(), |s| format!("{s:.4}")),
+        v.wrong_peak,
+        v.wrong_peak_pairs,
+        v.accepted_wrong_peak,
+        v.accepted_pairs
+    );
+    summary.rows_written = out.len();
+    summary.validation = v;
+    summary.fdr = fdr.counts;
+    Ok(summary)
+}
+
 /// Concatenates the per-entry rows in library order and sums the counts.
 fn assemble(slots: Vec<Option<EntryRows>>, width_fits: usize, fallback: bool) -> RunExtract {
     let mut counts = ExtractCounts {
@@ -873,5 +1108,280 @@ mod tests {
                 r.kind
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod finalize_tests {
+    use quant::align::AlignParams;
+    use quant::library::{build_library, PrecursorMeta};
+
+    use super::*;
+
+    const N: u32 = 900;
+    /// Every `WRONG_EVERY`-th pseudo-transfer sits 60 s from its identified apex.
+    const WRONG_EVERY: u32 = 10;
+
+    struct Rng(u64);
+    impl Rng {
+        fn unit(&mut self) -> f64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((self.0 >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+        }
+        fn normal(&mut self) -> f64 {
+            let (u1, u2) = (self.unit(), self.unit());
+            (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+        }
+    }
+
+    /// Evidence of a real co-eluting pattern at `t0` (`present`) or of noise.
+    fn evidence(g: &mut Rng, present: bool, t0: f64) -> Evidence {
+        let (llr, cos, coh) = if present {
+            (60.0 + 10.0 * g.normal(), 0.97 + 0.01 * g.normal(), 0.9)
+        } else {
+            (
+                3.0 * g.normal().abs(),
+                0.6 + 0.2 * g.normal(),
+                0.2 * g.normal(),
+            )
+        };
+        let amplitude = if present { 1e6 } else { 2e3 * g.unit() };
+        Evidence {
+            amplitude,
+            amplitude_se: 1e4,
+            quantity: amplitude * 10.0,
+            quantity_se: 1e5,
+            llr,
+            rt_z: if present {
+                0.3 * g.normal()
+            } else {
+                2.0 * g.normal()
+            },
+            width_ratio: 1.0 + 0.1 * g.normal(),
+            envelope_cos: cos,
+            coherence: coh,
+            m1_ratio: 0.05 * g.unit(),
+            mass_err_ppm: if present {
+                g.normal()
+            } else {
+                5.0 * g.normal()
+            },
+            n_points: 12,
+            isotopes_used: 0b1111,
+            t0,
+            w: 4.0,
+        }
+    }
+
+    fn row(p: u32, run: u16, kind: Hypothesis, role: Role, e: Option<Evidence>) -> ExtractRow {
+        ExtractRow {
+            precursor: p,
+            run,
+            kind,
+            role,
+            evidence: e,
+            n_donor_runs: 1,
+            library_q: 0.001,
+        }
+    }
+
+    /// Run 0 identifies every precursor (with a pseudo-transfer, every
+    /// `WRONG_EVERY`-th at the wrong peak); in run 1 even precursors are
+    /// present and odd ones absent, each with a mass-shift and an RT-shift
+    /// decoy. Precursor 1 has no evidence in run 1.
+    fn extract() -> Vec<Vec<ExtractRow>> {
+        let mut g = Rng(5);
+        let mut run0 = Vec::new();
+        let mut run1 = Vec::new();
+        for p in 0..N {
+            let apex = 100.0 + p as f64;
+            run0.push(row(
+                p,
+                0,
+                Hypothesis::Target,
+                Role::Identified,
+                Some(evidence(&mut g, true, apex)),
+            ));
+            let pseudo_t0 = if p % WRONG_EVERY == 0 {
+                apex + 60.0
+            } else {
+                apex + 0.5
+            };
+            run0.push(row(
+                p,
+                0,
+                Hypothesis::Target,
+                Role::PseudoTransfer,
+                Some(evidence(&mut g, true, pseudo_t0)),
+            ));
+            let target = (p != 1).then(|| evidence(&mut g, p % 2 == 0, apex));
+            run1.push(row(p, 1, Hypothesis::Target, Role::Transfer, target));
+            run1.push(row(
+                p,
+                1,
+                Hypothesis::MassShiftDecoy(7),
+                Role::Transfer,
+                Some(evidence(&mut g, false, apex)),
+            ));
+            run1.push(row(
+                p,
+                1,
+                Hypothesis::RtShiftDecoy,
+                Role::Transfer,
+                Some(evidence(&mut g, false, apex + 300.0)),
+            ));
+        }
+        vec![run0, run1]
+    }
+
+    fn library() -> Library {
+        let meta = (0..N)
+            .map(|p| PrecursorMeta {
+                key: format!("PEP{p}/2"),
+                mz: 500.0 + p as f64,
+                charge: 2,
+                envelope: [0.55, 0.30, 0.11, 0.04],
+            })
+            .collect();
+        build_library(&[], meta, 2, 0.01, &AlignParams::default())
+    }
+
+    fn stems() -> Vec<String> {
+        vec!["a".into(), "b".into()]
+    }
+
+    fn table(path: &Path) -> Vec<Vec<String>> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|l| l.split('\t').map(String::from).collect())
+            .collect()
+    }
+
+    #[test]
+    fn finalize_writes_one_row_per_target_pair_with_evidence_types() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mbr, val) = mbr_paths(&dir.path().join("x"));
+        let s = finalize(&stems(), &library(), &extract(), 0.01, 7, &mbr, &val).unwrap();
+        let t = table(&mbr);
+        assert_eq!(t[0][2], "evidence_type");
+        let body = &t[1..];
+        assert_eq!(body.len(), 2 * N as usize);
+        assert_eq!(s.rows_written, 2 * N as usize);
+        let (mut true_acc, mut false_acc) = (0, 0);
+        for (k, r) in body.iter().enumerate() {
+            let p = (k / 2) as u32;
+            assert_eq!(r[0], format!("PEP{p}/2"));
+            if r[1] == "a" {
+                assert_eq!((r[2].as_str(), r[5].as_str()), ("identified", "NA"));
+                continue;
+            }
+            assert_eq!(r[1], "b");
+            assert!(r[2] == "transfer_ms1" || r[2] == "below_threshold", "{r:?}");
+            if p == 1 {
+                assert_eq!(&r[2..7], ["below_threshold", "NA", "NA", "NA", "NA"]);
+            } else {
+                assert_ne!(r[3], "NA", "a below-threshold row keeps its quantity");
+            }
+            if r[2] == "transfer_ms1" {
+                if p % 2 == 0 {
+                    true_acc += 1;
+                } else {
+                    false_acc += 1;
+                }
+            }
+        }
+        eprintln!("finalize: {true_acc} present and {false_acc} absent transfers accepted");
+        assert!(
+            true_acc >= 400,
+            "{true_acc} of 450 present transfers accepted"
+        );
+        assert!(false_acc <= 5, "{false_acc} absent transfers accepted");
+        assert_eq!(s.no_features, 1);
+    }
+
+    #[test]
+    fn finalize_reports_pseudo_transfer_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mbr, val) = mbr_paths(&dir.path().join("x"));
+        let s = finalize(&stems(), &library(), &extract(), 0.01, 7, &mbr, &val).unwrap();
+        let v = &s.validation;
+        eprintln!("validation: {v:?}");
+        assert_eq!(v.pseudo_transfers, N as usize);
+        assert_eq!(v.wrong_peak_pairs, N as usize);
+        assert_eq!(v.wrong_peak, (N / WRONG_EVERY) as usize);
+        assert!(v.sensitivity().unwrap() > 0.9, "{v:?}");
+        assert_eq!(v.transfers, N as usize);
+        assert_eq!(v.transfers_scored, N as usize - 1);
+        assert!(v.accepted_mass_only > 0 && v.accepted_rt_only > 0);
+        let t = table(&val);
+        assert_eq!(t.len(), 2);
+        let get = |name: &str| &t[1][t[0].iter().position(|h| h == name).unwrap()];
+        assert_eq!(get("wrong_peak_rate"), "0.1");
+        assert_eq!(get("transfers"), &N.to_string());
+        assert_eq!(get("accepted_pooled"), &v.accepted_pooled.to_string());
+    }
+
+    #[test]
+    fn finalize_is_deterministic_for_a_seed() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs = extract();
+        let (m1, v1) = mbr_paths(&dir.path().join("one"));
+        let (m2, v2) = mbr_paths(&dir.path().join("two"));
+        finalize(&stems(), &library(), &runs, 0.01, 3, &m1, &v1).unwrap();
+        finalize(&stems(), &library(), &runs, 0.01, 3, &m2, &v2).unwrap();
+        assert_eq!(std::fs::read(&m1).unwrap(), std::fs::read(&m2).unwrap());
+        assert_eq!(std::fs::read(&v1).unwrap(), std::fs::read(&v2).unwrap());
+    }
+
+    #[test]
+    fn finalize_rejects_out_of_range_rows_and_thresholds() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mbr, val) = mbr_paths(&dir.path().join("x"));
+        let mut runs = extract();
+        runs[1].push(row(0, 2, Hypothesis::Target, Role::Transfer, None));
+        let e = finalize(&stems(), &library(), &runs, 0.01, 1, &mbr, &val).unwrap_err();
+        assert!(e.contains("run 2"), "{e}");
+        runs[1].pop();
+        runs[1].push(row(N, 1, Hypothesis::Target, Role::Transfer, None));
+        let e = finalize(&stems(), &library(), &runs, 0.01, 1, &mbr, &val).unwrap_err();
+        assert!(e.contains(&format!("precursor {N}")), "{e}");
+        for bad in [0.0, -0.1, 1.5, f64::NAN] {
+            assert!(finalize(&stems(), &library(), &extract(), bad, 1, &mbr, &val).is_err());
+        }
+        assert!(!mbr.exists());
+    }
+
+    #[test]
+    fn transfer_features_follow_the_feature_names() {
+        let mut g = Rng(1);
+        let mut r = row(
+            0,
+            1,
+            Hypothesis::Target,
+            Role::Transfer,
+            Some(evidence(&mut g, true, 50.0)),
+        );
+        r.n_donor_runs = 3;
+        let e = r.evidence.clone().unwrap();
+        let x = transfer_features(&r).unwrap();
+        assert_eq!(x.len(), TRANSFER_FEATURES.len());
+        let at = |name: &str| x[TRANSFER_FEATURES.iter().position(|n| *n == name).unwrap()];
+        assert_eq!(at("abs_rt_z"), e.rt_z.abs() as f32);
+        assert_eq!(at("n_isotopes_used"), 4.0);
+        assert_eq!(at("n_donor_runs"), 3.0);
+        assert_eq!(
+            at("log10_amplitude_snr"),
+            (1e6f64 / 1e4 + 1.0).log10() as f32
+        );
+        r.evidence.as_mut().unwrap().amplitude_se = 0.0;
+        assert!(transfer_features(&r).unwrap().iter().all(|v| v.is_finite()));
+        r.evidence.as_mut().unwrap().llr = f64::NAN;
+        assert!(transfer_features(&r).is_none());
+        r.evidence = None;
+        assert!(transfer_features(&r).is_none());
     }
 }

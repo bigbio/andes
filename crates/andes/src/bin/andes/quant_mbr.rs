@@ -18,7 +18,11 @@
 //!
 //! An entry is fitted on the MS1 series of its FAIMS compensation voltage;
 //! when the run has no series at that voltage, or the entry has none, on the
-//! whole run.
+//! whole run. Only one copy of the run's MS1 is held at a time: the whole run
+//! serves the width-prior fits of the whole-run entries; the scans are then
+//! moved into one series per voltage for the voltage entries' width-prior
+//! fits and rows; the split is dropped and the cache read again for the
+//! whole-run entries' rows. A run with at most one voltage is never split.
 //!
 //! Width prior: the identified pairs are first fitted with the width free on
 //! `{0.5, 0.7, 1, 1.4, 2} * w0` (`w0 = 6 s`, `s = 6 s`); `w_prior(t)` is the
@@ -35,7 +39,6 @@ use quant::library::{Library, LibraryEntry};
 use quant::ms1_index::Ms1RunIndex;
 use rayon::prelude::*;
 
-use crate::quant_run::faims_groups;
 use crate::quant_run::ms1_cache::Ms1Cache;
 
 pub(crate) use output::extract_table::{ExtractRole as Role, ExtractRow};
@@ -49,10 +52,9 @@ const IDENTIFIED_MIN_S: f64 = 6.0;
 const WIDTH_PRIOR_GRID: [f64; 5] = [0.5, 0.7, 1.0, 1.4, 2.0];
 /// Equal-count RT bins of the width prior; also the fewest usable fits.
 const WIDTH_PRIOR_BINS: usize = 20;
-/// Smallest log-likelihood ratio of a fit that sets the width prior (a
-/// 4-standard-error amplitude); weaker fits return the grid's first width
-/// whatever the data.
-const WIDTH_FIT_MIN_LLR: f64 = 8.0;
+/// Smallest log-likelihood ratio of an identified fit that enters the width
+/// prior; fits below it are not used.
+const WIDTH_FIT_MIN_LLR: f64 = 25.0;
 
 /// What one run's extraction skipped, for the caller to log.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -88,41 +90,75 @@ pub(crate) struct RunExtract {
     pub counts: ExtractCounts,
 }
 
-/// The run's MS1 series: one per FAIMS voltage (or the whole run), and the
-/// whole run beside them when some entry needs it.
-struct Series {
-    groups: Vec<(Option<f32>, Ms1RunIndex)>,
-    merged: Option<Ms1RunIndex>,
+/// One in-memory copy of the run's MS1 (the whole run or its split). In tests
+/// it counts the live copies of the calling thread.
+struct Held;
+
+impl Held {
+    fn new() -> Self {
+        #[cfg(test)]
+        tracking::acquire();
+        Held
+    }
 }
 
-impl Series {
-    fn new(ms1: Ms1RunIndex, entries: &[LibraryEntry]) -> Self {
-        let voltages = ms1.faims_voltages();
-        if voltages.len() <= 1 {
-            return Self {
-                groups: faims_groups(ms1),
-                merged: None,
-            };
-        }
-        let needs_merged = entries
-            .iter()
-            .any(|e| e.faims_cv.is_none_or(|cv| !voltages.contains(&cv)));
-        let merged = needs_merged.then(|| ms1.clone());
-        Self {
-            groups: faims_groups(ms1),
-            merged,
-        }
+impl Drop for Held {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        tracking::release();
+    }
+}
+
+/// Per-thread counters of MS1 copies and cache reads, for tests.
+#[cfg(test)]
+mod tracking {
+    use std::cell::Cell;
+
+    thread_local! {
+        static LIVE: Cell<usize> = const { Cell::new(0) };
+        static PEAK: Cell<usize> = const { Cell::new(0) };
+        static LOADS: Cell<usize> = const { Cell::new(0) };
     }
 
-    /// The series at voltage `cv`, else the whole run.
-    fn for_cv(&self, cv: Option<f32>) -> &Ms1RunIndex {
-        if let Some(cv) = cv {
-            if let Some((_, idx)) = self.groups.iter().find(|(g, _)| *g == Some(cv)) {
-                return idx;
-            }
-        }
-        self.merged.as_ref().unwrap_or(&self.groups[0].1)
+    pub(super) fn acquire() {
+        let live = LIVE.get() + 1;
+        LIVE.set(live);
+        PEAK.set(PEAK.get().max(live));
     }
+
+    pub(super) fn release() {
+        LIVE.set(LIVE.get() - 1);
+    }
+
+    pub(super) fn loaded() {
+        LOADS.set(LOADS.get() + 1);
+    }
+
+    pub(super) fn reset() {
+        PEAK.set(LIVE.get());
+        LOADS.set(0);
+    }
+
+    /// `(peak live copies, cache reads)` since the last reset.
+    pub(super) fn stats() -> (usize, usize) {
+        (PEAK.get(), LOADS.get())
+    }
+}
+
+/// Per entry, the position of its FAIMS voltage among `voltages` (the
+/// run's split order), or `None` for the whole run. A run with at most one
+/// voltage is fitted whole.
+fn entry_groups(voltages: &[f32], entries: &[LibraryEntry]) -> Vec<Option<usize>> {
+    entries
+        .iter()
+        .map(|e| {
+            if voltages.len() <= 1 {
+                return None;
+            }
+            e.faims_cv
+                .and_then(|cv| voltages.iter().position(|&v| v == cv))
+        })
+        .collect()
 }
 
 /// `w_prior(t)` as `(RT, width)` knots; empty means [`DEFAULT_W0_S`].
@@ -207,18 +243,21 @@ fn identified_rt(entry: &LibraryEntry, run: u16) -> Option<f64> {
         .map(|&(_, rt)| rt)
 }
 
-/// Fits the identified pairs with the width free and builds `w_prior(t)`.
-/// Returns the prior and the number of usable fits.
-fn estimate_width_prior(
+/// The usable width-free fits `(t0, w)` of the identified pairs among the
+/// entries `ids`, each fitted on `ms1_of(id)`.
+fn width_fits<'a, F>(
+    ids: &[usize],
     run: u16,
     lib: &Library,
-    series: &Series,
     ep: &EvidenceParams,
-) -> (WidthPrior, usize) {
-    let fits: Vec<(f64, f64)> = lib
-        .entries
-        .par_iter()
-        .map_init(FitScratch::default, |scratch, e| {
+    ms1_of: F,
+) -> Vec<(f64, f64)>
+where
+    F: Fn(usize) -> &'a Ms1RunIndex + Sync,
+{
+    ids.par_iter()
+        .map_init(FitScratch::default, |scratch, &i| {
+            let e = &lib.entries[i];
             let rt = identified_rt(e, run).filter(|rt| rt.is_finite())?;
             let meta = &lib.meta[e.precursor as usize];
             let probe = Probe {
@@ -229,7 +268,7 @@ fn estimate_width_prior(
                 w_prior: DEFAULT_W0_S,
             };
             let ev = fit_on_grid(
-                series.for_cv(e.faims_cv),
+                ms1_of(i),
                 &probe,
                 meta.charge.max(1),
                 &meta.envelope,
@@ -240,9 +279,34 @@ fn estimate_width_prior(
             (ev.amplitude > 0.0 && ev.llr >= WIDTH_FIT_MIN_LLR).then_some((ev.t0, ev.w))
         })
         .flatten()
+        .collect()
+}
+
+type EntryRows = (Vec<ExtractRow>, ExtractCounts);
+
+/// Fills `slots[id]` with the rows of each entry in `ids`, fitted on
+/// `ms1_of(id)`.
+#[allow(clippy::too_many_arguments)]
+fn rows_into<'a, F>(
+    slots: &mut [Option<EntryRows>],
+    ids: &[usize],
+    run: u16,
+    lib: &Library,
+    wp: &WidthPrior,
+    ep: &EvidenceParams,
+    ms1_of: F,
+) where
+    F: Fn(usize) -> &'a Ms1RunIndex + Sync,
+{
+    let done: Vec<EntryRows> = ids
+        .par_iter()
+        .map_init(FitScratch::default, |scratch, &i| {
+            entry_rows(&lib.entries[i], run, lib, ms1_of(i), wp, ep, scratch)
+        })
         .collect();
-    let n = fits.len();
-    (WidthPrior::from_fits(fits), n)
+    for (&i, r) in ids.iter().zip(done) {
+        slots[i] = Some(r);
+    }
 }
 
 /// The rows of one library entry in `run`.
@@ -250,7 +314,7 @@ fn entry_rows(
     e: &LibraryEntry,
     run: u16,
     lib: &Library,
-    series: &Series,
+    ms1: &Ms1RunIndex,
     wp: &WidthPrior,
     ep: &EvidenceParams,
     scratch: &mut FitScratch,
@@ -259,8 +323,14 @@ fn entry_rows(
     let mut rows = Vec::new();
     let meta = &lib.meta[e.precursor as usize];
     let charge = meta.charge.max(1);
-    let ms1 = series.for_cv(e.faims_cv);
-    let donors = e.donors.len() as u16;
+    let aligned = |r: u16| {
+        lib.alignment
+            .maps
+            .get(r as usize)
+            .is_some_and(|m| m.is_some())
+    };
+    let donors = e.donors.iter().filter(|&&r| aligned(r)).count() as u16;
+    let other_donors = e.donors.iter().filter(|&&r| r != run && aligned(r)).count() as u16;
     let mut row = |kind: Hypothesis, role: Role, probe: &Probe, n_donor_runs: u16| ExtractRow {
         precursor: e.precursor,
         run,
@@ -290,7 +360,7 @@ fn entry_rows(
                         Hypothesis::Target,
                         Role::PseudoTransfer,
                         &probe,
-                        donors.saturating_sub(1),
+                        other_donors,
                     ));
                 }
                 None => counts.no_pseudo_prediction += 1,
@@ -309,7 +379,7 @@ fn entry_rows(
                     wp.at(t_hat),
                     run_rt,
                 ) {
-                    rows.push(row(probe.kind, Role::Transfer, &probe, donors));
+                    rows.push(row(probe.kind, Role::Transfer, &probe, other_donors));
                 }
             }
             None => counts.no_prediction += 1,
@@ -357,28 +427,62 @@ pub(crate) fn extract_run(
             },
         });
     }
-    let ms1 = Ms1Cache::load_from(cache).map_err(|e| e.to_string())?;
-    let series = Series::new(ms1, &lib.entries);
-    let (wp, width_fits) = estimate_width_prior(run, lib, &series, ep);
+    let load = || {
+        #[cfg(test)]
+        tracking::loaded();
+        Ms1Cache::load_from(cache).map_err(|e| e.to_string())
+    };
+    let n = lib.entries.len();
+    let ms1 = load()?;
+    let held = Held::new();
+    let groups = entry_groups(&ms1.faims_voltages(), &lib.entries);
+    let whole_ids: Vec<usize> = (0..n).filter(|&i| groups[i].is_none()).collect();
+    let cv_ids: Vec<usize> = (0..n).filter(|&i| groups[i].is_some()).collect();
+    let mut slots: Vec<Option<EntryRows>> = (0..n).map(|_| None).collect();
 
-    let per_entry: Vec<(Vec<ExtractRow>, ExtractCounts)> = lib
-        .entries
-        .par_iter()
-        .map_init(FitScratch::default, |scratch, e| {
-            entry_rows(e, run, lib, &series, &wp, ep, scratch)
-        })
-        .collect();
+    let mut fits = width_fits(&whole_ids, run, lib, ep, |_| &ms1);
+    let width_fit_count;
+    if cv_ids.is_empty() {
+        width_fit_count = fits.len();
+        let wp = WidthPrior::from_fits(fits);
+        rows_into(&mut slots, &whole_ids, run, lib, &wp, ep, |_| &ms1);
+        drop(ms1);
+        drop(held);
+        return Ok(assemble(slots, width_fit_count, wp.is_default()));
+    }
+
+    drop(held);
+    let split = ms1.split_by_faims();
+    let held = Held::new();
+    let series_of = |i: usize| &split[groups[i].expect("voltage entry")].1;
+    fits.extend(width_fits(&cv_ids, run, lib, ep, series_of));
+    width_fit_count = fits.len();
+    let wp = WidthPrior::from_fits(fits);
+    rows_into(&mut slots, &cv_ids, run, lib, &wp, ep, series_of);
+    drop(split);
+    drop(held);
+
+    if !whole_ids.is_empty() {
+        let ms1 = load()?;
+        let _held = Held::new();
+        rows_into(&mut slots, &whole_ids, run, lib, &wp, ep, |_| &ms1);
+    }
+    Ok(assemble(slots, width_fit_count, wp.is_default()))
+}
+
+/// Concatenates the per-entry rows in library order and sums the counts.
+fn assemble(slots: Vec<Option<EntryRows>>, width_fits: usize, fallback: bool) -> RunExtract {
     let mut counts = ExtractCounts {
         width_fits,
-        width_prior_fallback: wp.is_default(),
+        width_prior_fallback: fallback,
         ..ExtractCounts::default()
     };
-    let mut rows = Vec::with_capacity(per_entry.iter().map(|(r, _)| r.len()).sum());
-    for (r, c) in per_entry {
+    let mut rows = Vec::new();
+    for (r, c) in slots.into_iter().flatten() {
         rows.extend(r);
         counts.add(&c);
     }
-    Ok(RunExtract { rows, counts })
+    RunExtract { rows, counts }
 }
 
 #[cfg(test)]
@@ -433,7 +537,8 @@ mod tests {
     /// precursor's isotope pattern at its apex in `run`. With `faims`, scans
     /// alternate between two voltages and precursor `p` elutes only in the
     /// scans at `FAIMS_CVS[p % 2]`.
-    fn run_scans(run: u16, faims: bool) -> Vec<Ms1Scan> {
+    /// Precursors in `silent` give no signal in `run`.
+    fn run_scans(run: u16, faims: bool, silent: &dyn Fn(u32) -> bool) -> Vec<Ms1Scan> {
         let mut rng = Lcg(17 + run as u64);
         (0..1300)
             .map(|k| {
@@ -447,7 +552,7 @@ mod tests {
                     ));
                 }
                 for p in 0..N_PREC {
-                    let elutes = cv.is_none_or(|cv| cv == FAIMS_CVS[p as usize % 2]);
+                    let elutes = !silent(p) && cv.is_none_or(|cv| cv == FAIMS_CVS[p as usize % 2]);
                     let g = (-(t - apex(p, run)).powi(2) / (2.0 * WIDTH * WIDTH)).exp();
                     for (i, &e) in ENVELOPE.iter().enumerate() {
                         let signal = if elutes {
@@ -479,6 +584,12 @@ mod tests {
     /// run 0, 31 only in run 1; run 2 identifies precursor 0 only and is
     /// unaligned. Run 1 uses FAIMS when `faims`.
     fn fixture(faims: bool) -> Fixture {
+        fixture_with(faims, &|_| false)
+    }
+
+    /// [`fixture`] where the precursors in `silent_in_run1` give no MS1
+    /// signal in run 1 (they stay identified there).
+    fn fixture_with(faims: bool, silent_in_run1: &dyn Fn(u32) -> bool) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let meta: Vec<PrecursorMeta> = (0..N_PREC)
             .map(|p| PrecursorMeta {
@@ -514,7 +625,8 @@ mod tests {
         let caches = (0..N_RUNS as u16)
             .map(|r| {
                 let path = dir.path().join(format!("run{r}.ms1cache"));
-                let index = Ms1RunIndex::new(run_scans(r, faims && r == 1));
+                let silent = |p: u32| r == 1 && silent_in_run1(p);
+                let index = Ms1RunIndex::new(run_scans(r, faims && r == 1, &silent));
                 Ms1Cache::store_at(&index, &path).unwrap();
                 path
             })
@@ -548,9 +660,8 @@ mod tests {
                 (pseudo.role, pseudo.kind),
                 (Role::PseudoTransfer, Hypothesis::Target)
             );
-            // Precursor 0 is also identified in the unaligned run 2.
-            let donors = if p == 0 { 3 } else { 2 };
-            assert_eq!((id.n_donor_runs, pseudo.n_donor_runs), (donors, donors - 1));
+            // Precursor 0's donor run 2 is unaligned and not counted.
+            assert_eq!((id.n_donor_runs, pseudo.n_donor_runs), (2, 1));
             assert_eq!((id.run, pseudo.run), (1, 1));
             for r in [id, pseudo] {
                 let e = r.evidence.as_ref().unwrap();
@@ -682,5 +793,85 @@ mod tests {
         let path = fx._dir.path().join("run1.extract.parquet");
         write_extract_table(&path, &out.rows).unwrap();
         assert_eq!(read_extract_table(&path).unwrap(), out.rows);
+    }
+
+    #[test]
+    fn faims_run_with_whole_run_entry_holds_one_ms1_copy() {
+        let fx = fixture(true);
+        let whole = fx
+            .lib
+            .entries
+            .iter()
+            .find(|e| e.precursor == ONLY_RUN0)
+            .unwrap();
+        assert_eq!(whole.faims_cv, None);
+        tracking::reset();
+        let out = extract_run(1, &fx.caches[1], &fx.lib, &params()).unwrap();
+        let (peak, loads) = tracking::stats();
+        assert_eq!(peak, 1, "at most one MS1 copy is live");
+        assert_eq!(loads, 2, "the whole run is read again for its entries");
+        // The whole-run entry is still measured, in library order.
+        assert_eq!(rows_of(&out.rows, ONLY_RUN0).len(), 3);
+        let mut seen: Vec<u32> = out.rows.iter().map(|r| r.precursor).collect();
+        seen.dedup();
+        let order: Vec<u32> = fx.lib.entries.iter().map(|e| e.precursor).collect();
+        assert_eq!(seen, order);
+
+        // Without FAIMS the cache is read once.
+        let fx = fixture(false);
+        tracking::reset();
+        extract_run(1, &fx.caches[1], &fx.lib, &params()).unwrap();
+        assert_eq!(tracking::stats(), (1, 1));
+    }
+
+    #[test]
+    fn width_prior_ignores_identified_pairs_without_signal() {
+        // About 30% of run 1's identified pairs have no MS1 signal.
+        let silent = |p: u32| p % 10 < 3;
+        let fx = fixture_with(false, &silent);
+        let out = extract_run(1, &fx.caches[1], &fx.lib, &params()).unwrap();
+        assert!(out.counts.width_fits >= 20, "{:?}", out.counts);
+        assert!(!out.counts.width_prior_fallback);
+        for r in out.rows.iter().filter(|r| r.role == Role::Identified) {
+            let e = r.evidence.as_ref().unwrap();
+            let w_prior = e.w / e.width_ratio;
+            assert!(
+                (w_prior / WIDTH - 1.0).abs() < 0.1,
+                "precursor {}: w_prior {w_prior}",
+                r.precursor
+            );
+        }
+    }
+
+    #[test]
+    fn faims_transfer_decoys_use_the_target_voltage_series() {
+        let mut fx = fixture(true);
+        // Precursor ONLY_RUN0 elutes at FAIMS_CVS[0] in run 1, where it is a
+        // transfer.
+        let e = fx
+            .lib
+            .entries
+            .iter_mut()
+            .find(|e| e.precursor == ONLY_RUN0)
+            .unwrap();
+        e.faims_cv = Some(FAIMS_CVS[ONLY_RUN0 as usize % 2]);
+        let out = extract_run(1, &fx.caches[1], &fx.lib, &params()).unwrap();
+        let rows = rows_of(&out.rows, ONLY_RUN0);
+        assert_eq!(rows.len(), 3);
+        let target = rows[0].evidence.as_ref().unwrap();
+        assert!(
+            (target.amplitude / AMPLITUDE - 1.0).abs() < 0.1,
+            "{target:?}"
+        );
+        // The voltage series has one scan every 2 s; the whole run one every
+        // second, which would put about 4w + 1 scans in [t0 - 2w, t0 + 2w].
+        for r in &rows {
+            let e = r.evidence.as_ref().unwrap();
+            assert!(
+                (e.n_points as f64) <= 2.0 * e.w + 1.5,
+                "{:?}: {e:?}",
+                r.kind
+            );
+        }
     }
 }

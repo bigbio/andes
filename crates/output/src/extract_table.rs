@@ -7,7 +7,11 @@
 //! shift in `mass_shift`) and 2 for an RT-shift decoy; `mass_shift` is 0 for
 //! the other kinds. `role` is 0 identified, 1 transfer, 2 pseudo-transfer.
 //! The evidence columns are null when the fit was not possible.
-//! `library_q` is the internal library entry gate, not an identification FDR.
+//! `n_donor_runs` counts the aligned runs with a PSM of the precursor, this
+//! run included for an identified row and excluded otherwise: the runs that
+//! informed the prediction. `library_q` is the internal library entry gate,
+//! not an identification FDR. The file is written to `<path>.partial` and
+//! renamed into place once complete.
 
 use std::fs::File;
 use std::path::Path;
@@ -56,8 +60,8 @@ pub struct ExtractRow {
     pub role: ExtractRole,
     /// `None` when the extraction window held too few scans.
     pub evidence: Option<Evidence>,
-    /// Runs other than this one with a PSM of the precursor (all of them for
-    /// an identified row).
+    /// Aligned runs with a PSM of the precursor, excluding this run except
+    /// for an identified row.
     pub n_donor_runs: u16,
     /// Library confidence (internal quant gate, not an identification FDR).
     pub library_q: f64,
@@ -129,11 +133,14 @@ fn encode_kind(k: Hypothesis) -> (u8, i8) {
     }
 }
 
+/// The hypothesis of a `(kind, mass_shift)` pair; `None` for an unknown kind
+/// or a shift inconsistent with it (non-zero for a target or an RT-shift
+/// decoy, zero for a mass-shift decoy).
 fn decode_kind(code: u8, shift: i8) -> Option<Hypothesis> {
-    match code {
-        0 => Some(Hypothesis::Target),
-        1 => Some(Hypothesis::MassShiftDecoy(shift)),
-        2 => Some(Hypothesis::RtShiftDecoy),
+    match (code, shift) {
+        (0, 0) => Some(Hypothesis::Target),
+        (1, n) if n != 0 => Some(Hypothesis::MassShiftDecoy(n)),
+        (2, 0) => Some(Hypothesis::RtShiftDecoy),
         _ => None,
     }
 }
@@ -207,9 +214,32 @@ fn batch(schema: &Arc<Schema>, rows: &[ExtractRow]) -> Result<RecordBatch, Strin
     RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
 }
 
-fn write_versioned(path: &Path, rows: &[ExtractRow], version: &str) -> Result<(), String> {
+fn write_versioned(
+    path: &Path,
+    rows: &[ExtractRow],
+    version: &str,
+    schema: Schema,
+) -> Result<(), String> {
+    let mut partial = path.as_os_str().to_owned();
+    partial.push(".partial");
+    let partial = std::path::PathBuf::from(partial);
+    let written = write_file(&partial, rows, version, schema).and_then(|()| {
+        std::fs::rename(&partial, path).map_err(|e| format!("{}: {e}", path.display()))
+    });
+    if written.is_err() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    written
+}
+
+fn write_file(
+    path: &Path,
+    rows: &[ExtractRow],
+    version: &str,
+    schema: Schema,
+) -> Result<(), String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
-    let schema = Arc::new(schema());
+    let schema = Arc::new(schema);
     let props = WriterProperties::builder()
         .set_compression(Compression::ZSTD(ZstdLevel::default()))
         .set_max_row_group_size(BATCH_ROWS)
@@ -231,7 +261,7 @@ fn write_versioned(path: &Path, rows: &[ExtractRow], version: &str) -> Result<()
 
 /// Write the extraction table of one run.
 pub fn write_extract_table(path: &Path, rows: &[ExtractRow]) -> Result<(), String> {
-    write_versioned(path, rows, SCHEMA_VERSION)
+    write_versioned(path, rows, SCHEMA_VERSION, schema())
 }
 
 #[cfg(test)]
@@ -240,7 +270,7 @@ pub(crate) fn write_with_schema_version(
     rows: &[ExtractRow],
     version: &str,
 ) -> Result<(), String> {
-    write_versioned(path, rows, version)
+    write_versioned(path, rows, version, schema())
 }
 
 fn column<'a, T: 'static>(b: &'a RecordBatch, i: usize, path: &Path) -> Result<&'a T, String> {
@@ -291,6 +321,16 @@ pub fn read_extract_table(path: &Path) -> Result<Vec<ExtractRow>, String> {
                 b.num_columns()
             )));
         }
+        let expected = schema();
+        for (got, want) in b.schema().fields().iter().zip(expected.fields()) {
+            if got.name() != want.name() {
+                return Err(err(&format!(
+                    "column {:?} where {:?} was expected",
+                    got.name(),
+                    want.name()
+                )));
+            }
+        }
         let precursor = column::<UInt32Array>(&b, 0, path)?;
         let run = column::<UInt16Array>(&b, 1, path)?;
         let kind = column::<UInt8Array>(&b, 2, path)?;
@@ -304,8 +344,13 @@ pub fn read_extract_table(path: &Path) -> Result<Vec<ExtractRow>, String> {
         let n_points = column::<UInt32Array>(&b, N_COLUMNS - 2, path)?;
         let isotopes = column::<UInt8Array>(&b, N_COLUMNS - 1, path)?;
         for i in 0..b.num_rows() {
-            let kind = decode_kind(kind.value(i), shift.value(i))
-                .ok_or_else(|| err(&format!("unknown kind code {}", kind.value(i))))?;
+            let kind = decode_kind(kind.value(i), shift.value(i)).ok_or_else(|| {
+                err(&format!(
+                    "corrupt row: kind {} with mass_shift {}",
+                    kind.value(i),
+                    shift.value(i)
+                ))
+            })?;
             let role = decode_role(role.value(i))
                 .ok_or_else(|| err(&format!("unknown role code {}", role.value(i))))?;
             let evidence = if ev[0].is_null(i) {
@@ -430,5 +475,51 @@ mod tests {
         std::fs::write(&junk, b"not parquet").unwrap();
         let e = read_extract_table(&junk).unwrap_err();
         assert!(e.contains("junk.extract.parquet"), "{e}");
+    }
+
+    #[test]
+    fn write_is_atomic_and_leaves_no_partial_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("c.extract.parquet");
+        write_extract_table(&p, &rows()).unwrap();
+        assert!(p.exists());
+        assert!(!dir.path().join("c.extract.parquet.partial").exists());
+        // A failed write leaves neither file.
+        let bad = dir.path().join("missing-dir").join("d.extract.parquet");
+        let e = write_extract_table(&bad, &rows()).unwrap_err();
+        assert!(e.contains("d.extract.parquet"), "{e}");
+        assert!(!bad.exists());
+    }
+
+    #[test]
+    fn renamed_column_is_rejected_naming_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("r.extract.parquet");
+        let mut fields: Vec<Field> = schema()
+            .fields()
+            .iter()
+            .map(|f| f.as_ref().clone())
+            .collect();
+        fields[4] = Field::new("rolle", DataType::UInt8, false);
+        write_versioned(&p, &rows(), SCHEMA_VERSION, Schema::new(fields)).unwrap();
+        let e = read_extract_table(&p).unwrap_err();
+        assert!(
+            e.contains("r.extract.parquet") && e.contains("rolle"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn inconsistent_kind_and_mass_shift_is_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("k.extract.parquet");
+        let mut bad = rows();
+        bad[1].kind = Hypothesis::MassShiftDecoy(0);
+        write_extract_table(&p, &bad).unwrap();
+        let e = read_extract_table(&p).unwrap_err();
+        assert!(
+            e.contains("k.extract.parquet") && e.contains("corrupt"),
+            "{e}"
+        );
     }
 }

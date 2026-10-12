@@ -693,7 +693,7 @@ type Quantified = (usize, Option<FeatureQuant>, Option<FeatureQuant>);
 
 /// One chromatographic series per FAIMS compensation voltage (the whole run
 /// when it has at most one voltage).
-pub(crate) fn faims_groups(ms1: Ms1RunIndex) -> Vec<(Option<f32>, Ms1RunIndex)> {
+fn faims_groups(ms1: Ms1RunIndex) -> Vec<(Option<f32>, Ms1RunIndex)> {
     if ms1.faims_voltages().len() > 1 {
         ms1.split_by_faims()
             .into_iter()

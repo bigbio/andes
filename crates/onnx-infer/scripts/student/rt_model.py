@@ -70,7 +70,8 @@ def parse_andes(s: str):
     """andes PIN peptide ``K.M+15.99491PEPS+79.96633K.D`` -> (sequence, [(pos, unimod id)]).
 
     N-terminal deltas follow the first residue; the first N-term-capable delta
-    there goes to the N-term token. Returns None for an unmatched delta."""
+    there goes to the N-term token (``K+42.01`` is read as N-terminal acetyl,
+    the common case). Returns None for an unmatched delta."""
     b = s
     if len(b) > 4 and b[1] == "." and b[-2] == ".":
         b = b[2:-2]
@@ -87,8 +88,7 @@ def parse_andes(s: str):
         aa = seq[-1]
         res_id = match_mass(d, aa, False)
         nt_id = match_mass(d, None, True) if pos == 1 and not nterm_used else None
-        res_taken = any(p == pos for p, _ in mods)
-        if nt_id is not None and (res_id is None or res_taken):
+        if nt_id is not None:
             mods.append((0, nt_id))
             nterm_used = True
         elif res_id is not None:
@@ -193,6 +193,7 @@ if __name__ == "__main__":
     assert parse_andes("K.M+42.01056+15.99491PEPS+79.96633K.D") == ("MPEPSK", [(0, 1), (1, 35), (5, 21)])
     assert parse_andes("K.K+229.16293+229.16293PEPK+229.16293.D") == ("KPEPK", [(0, 737), (1, 737), (5, 737)])
     assert parse_andes("K.Q-17.02655PEPK.D") == ("QPEPK", [(0, 28)])
+    assert parse_andes("-.K+42.01056PEPK.-") == ("KPEPK", [(0, 1)])
     assert parse_andes("K.PEPXK.D") is None
     m = RtCnn()
     print("params", sum(p.numel() for p in m.parameters()))

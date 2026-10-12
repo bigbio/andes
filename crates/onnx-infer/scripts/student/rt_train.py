@@ -202,6 +202,9 @@ def main():
                 best = r
                 torch.save(model.state_dict(), os.path.join(a.out, "model.pt"))
                 torch.save(affine.state_dict(), os.path.join(a.out, "affine.pt"))
+                export_weights(model, os.path.join(a.out, "andes_rt.artn"))
+                json.dump({"args": vars(a), "best_val_pearson": best, "best_step": step, "history": hist},
+                          open(os.path.join(a.out, "train.json"), "w"), indent=1)
     model.load_state_dict(torch.load(os.path.join(a.out, "model.pt"), map_location=dev))
     export_weights(model.cpu(), os.path.join(a.out, "andes_rt.artn"))
     json.dump({"args": vars(a), "best_val_pearson": best, "history": hist,

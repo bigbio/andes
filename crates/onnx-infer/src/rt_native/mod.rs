@@ -112,8 +112,8 @@ impl RtPeptide {
     ///
     /// Mass deltas follow their residue; N-terminal deltas follow the first
     /// residue, and the first one that is N-term-capable goes to the N-terminus
-    /// unless the residue itself takes it and is still free. `None` when a delta
-    /// matches no Unimod entry within 2 mDa.
+    /// (`K+42.01` reads as N-terminal acetyl, the common case). `None` when a
+    /// delta matches no Unimod entry within 2 mDa.
     pub fn from_andes(s: &str) -> Option<Self> {
         let b = s.as_bytes();
         let core = if b.len() > 4 && b[1] == b'.' && b[b.len() - 2] == b'.' {
@@ -152,14 +152,13 @@ impl RtPeptide {
             } else {
                 None
             };
-            let res_taken = mods.iter().any(|(p, _)| *p == pos);
             match (nt_id, res_id) {
-                (Some(nt), r) if r.is_none() || res_taken => {
+                (Some(nt), _) => {
                     mods.push((0, nt));
                     nterm_used = true;
                 }
-                (_, Some(r)) => mods.push((pos, r)),
-                _ => return None,
+                (None, Some(r)) => mods.push((pos, r)),
+                (None, None) => return None,
             }
         }
         mods.sort_unstable();
@@ -536,6 +535,8 @@ mod tests {
         );
         let p = RtPeptide::from_andes("K.K+229.16293+229.16293PEPK+229.16293.D").unwrap();
         assert_eq!(p.mods, vec![(0, 737), (1, 737), (5, 737)]);
+        let p = RtPeptide::from_andes("-.K+42.01056PEPK.-").unwrap();
+        assert_eq!(p.mods, vec![(0, 1)]);
         let p = RtPeptide::from_andes("K.Q-17.02655PEPK.D").unwrap();
         assert_eq!(p.mods, vec![(0, 28)]);
         assert!(RtPeptide::from_andes("K.PEPXK.D")

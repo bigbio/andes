@@ -192,6 +192,21 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.spectrum.is_empty() {
         return Err("no --spectrum inputs".into());
     }
+    let mut cli = cli;
+    // `--mbr`: the per-run artifacts go to `--quant-dir`, or to a temporary
+    // directory that lives until the end of the run.
+    let mut _mbr_tmp: Option<tempfile::TempDir> = None;
+    if cli.mbr {
+        check_mbr_args(&cli)?;
+        if cli.quant_dir.is_none() {
+            let dir = tempfile::Builder::new()
+                .prefix("andes-quant-")
+                .tempdir()
+                .map_err(|e| format!("creating temp dir for --mbr: {e}"))?;
+            cli.quant_dir = Some(dir.path().to_path_buf());
+            _mbr_tmp = Some(dir);
+        }
+    }
     // Parse the digestion enzyme(s) once. `--enzyme` accepts a comma-separated
     // list for a multi-protease digest; the FIRST entry is the primary (drives
     // model selection via build_selection_key + the cleavage-credit feature),
@@ -2053,6 +2068,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         (false, false)
     };
+    // `--mbr`: SpecId -> score of the decoy PSMs, which the target map leaves out.
+    let mut mbr_decoy_scores: Vec<(String, f64)> = Vec::new();
     let rescore_map: Option<std::collections::HashMap<String, output::PercolatorPsm>> =
         if use_percolator {
             let backend = output::resolve_backend(
@@ -2075,6 +2092,22 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 map.len(),
                 t_resc.elapsed().as_secs_f64()
             );
+            if cli.mbr {
+                let path = output::decoy_results_path(&output_pin_path);
+                let text = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                let decoys = output::parse_psm_results(&text)
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                for (id, p) in decoys {
+                    let score = p.score.ok_or_else(|| {
+                        format!(
+                            "{}: no `score` column; --mbr ranks precursors by the rescorer's PSM score",
+                            path.display()
+                        )
+                    })?;
+                    mbr_decoy_scores.push((id, score));
+                }
+            }
             Some(map)
         } else if use_native {
             eprintln!(
@@ -2084,8 +2117,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let t_resc = std::time::Instant::now();
             let pin_text = std::fs::read_to_string(&output_pin_path)
                 .map_err(|e| format!("reading PIN for native rescore: {e}"))?;
-            let map = rescore::native_rescore_pin(&pin_text, 42)
+            let all = rescore::native_rescore_pin_all(&pin_text, 42)
                 .map_err(|e| format!("native rescore: {e}"))?;
+            if cli.mbr {
+                mbr_decoy_scores.extend(all.decoy_scores);
+            }
+            let map = all.targets;
             eprintln!(
                 "Rescore: native produced {} PSMs (q-value+PEP) [{:.2}s]",
                 map.len(),
@@ -2209,6 +2246,31 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         )?;
     }
 
+    // ── Match-between-runs (`--mbr`): library, extract, finalize ────────────
+    if cli.mbr {
+        let (Some(dir), Some(map)) = (cli.quant_dir.as_deref(), rescore_map.as_ref()) else {
+            return Err("--mbr needs --quant-dir and rescoring".into());
+        };
+        let stems: Vec<String> = spectrum_paths
+            .iter()
+            .map(|p| crate::quant_run::run_stem(p))
+            .collect();
+        let scores = crate::quant_cmd::rescore_scores(
+            map,
+            std::mem::take(&mut mbr_decoy_scores),
+            "rescoring result",
+        )?;
+        crate::quant_cmd::run_in_process(
+            dir,
+            &stems,
+            &scores,
+            cli.mbr_library_fdr,
+            cli.mbr_fdr,
+            &report_base.with_extension(""),
+            cli.output_parquet.as_deref(),
+        )?;
+    }
+
     if bench_mode {
         eprintln!("Bench mode: skipping TSV write.");
         release_at_exit(pin_candidates);
@@ -2247,6 +2309,31 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     release_at_exit(pin_candidates);
+    Ok(())
+}
+
+/// `--mbr` needs two or more inputs, `--lfq` and a rescoring run (the
+/// library ranks precursors by the rescored PSM scores), and is label-free
+/// only.
+fn check_mbr_args(cli: &Cli) -> Result<(), String> {
+    if cli.spectrum.len() < 2 {
+        return Err(format!(
+            "--mbr transfers identifications between runs and needs two or more --spectrum inputs (got {})",
+            cli.spectrum.len()
+        ));
+    }
+    if !cli.lfq {
+        return Err("--mbr needs --lfq".into());
+    }
+    if !cli.rescore && !cli.rescore_native {
+        return Err(
+            "--mbr needs --rescore (or --rescore-native): the library ranks precursors by the rescored PSM scores"
+                .into(),
+        );
+    }
+    if cli.tmt.is_some() {
+        return Err("--mbr is label-free and cannot be combined with --tmt".into());
+    }
     Ok(())
 }
 

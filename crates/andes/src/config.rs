@@ -136,6 +136,9 @@ pub struct QuantCfg {
     pub lfq_feature_fdr: Option<f64>,
     pub quant_fdr: Option<f64>,
     pub dir: Option<PathBuf>,
+    pub mbr: Option<bool>,
+    pub mbr_library_fdr: Option<f64>,
+    pub mbr_fdr: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -382,6 +385,13 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     );
     set_opt!("quant_fdr", quant_fdr, cfg.quant.quant_fdr);
     set_opt!("quant_dir", quant_dir, cfg.quant.dir);
+    set!("mbr", mbr, cfg.quant.mbr);
+    set!(
+        "mbr_library_fdr",
+        mbr_library_fdr,
+        cfg.quant.mbr_library_fdr
+    );
+    set!("mbr_fdr", mbr_fdr, cfg.quant.mbr_fdr);
 
     // ── glyco ──
     set!("glyco", glyco, cfg.glyco.enabled);
@@ -401,6 +411,8 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         check_unit_fraction("pep", v)?;
     }
     check_unit_fraction("refine_select_psm_fdr", args.refine_select_psm_fdr)?;
+    check_unit_fraction("mbr_library_fdr", args.mbr_library_fdr)?;
+    check_unit_fraction("mbr_fdr", args.mbr_fdr)?;
     if let Some(v) = args.fragment_tol_ppm {
         check_positive("fragment_tol_ppm", v)?;
     }

@@ -410,7 +410,6 @@ fn entry_rows(
 /// An unaligned run yields no rows and `counts.unaligned` (its cache is not
 /// read). Errors: `run` outside the library's runs, an entry whose precursor
 /// has no metadata, or an unreadable cache (the message names the file).
-#[allow(dead_code)]
 pub(crate) fn extract_run(
     run: u16,
     cache: &Path,
@@ -516,7 +515,6 @@ pub(crate) fn transfer_features(row: &ExtractRow) -> Option<Vec<f32>> {
 }
 
 /// `<base>.mbr.tsv` and `<base>.mbr_validation.tsv`.
-#[allow(dead_code)]
 pub(crate) fn mbr_paths(base: &Path) -> (PathBuf, PathBuf) {
     let with = |suffix: &str| {
         let mut s = base.as_os_str().to_owned();
@@ -536,6 +534,21 @@ pub(crate) struct FinalizeSummary {
     /// feature (no q-value).
     pub no_features: usize,
     pub fdr: FdrCounts,
+    /// The rows of `<base>.mbr.tsv`, in file order.
+    pub features: Vec<MbrFeature>,
+}
+
+/// One row of `<base>.mbr.tsv` by precursor id and run index.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MbrFeature {
+    pub precursor: u32,
+    pub run: u16,
+    pub evidence_type: EvidenceType,
+    pub quantity: Option<f64>,
+    pub quantity_se: Option<f64>,
+    pub transfer_q: Option<f64>,
+    pub apex_rt_s: Option<f64>,
+    pub library_q: f64,
 }
 
 /// Transfer FDR, pseudo-transfer validation and the MBR outputs over the
@@ -544,7 +557,6 @@ pub(crate) struct FinalizeSummary {
 ///
 /// Errors: `mbr_fdr` outside `(0, 1]`, a row whose run or precursor is out of
 /// range, or an unwritable output (the message names the file).
-#[allow(dead_code)]
 pub(crate) fn finalize(
     stems: &[String],
     lib: &Library,
@@ -693,6 +705,19 @@ pub(crate) fn finalize(
     v.at_q01 = at_q01;
     v.at_threshold = at_threshold;
     out.sort_by_key(|&(p, run, _)| (p, run));
+    summary.features = out
+        .iter()
+        .map(|(p, run, r)| MbrFeature {
+            precursor: *p,
+            run: *run,
+            evidence_type: r.evidence_type,
+            quantity: r.quantity,
+            quantity_se: r.quantity_se,
+            transfer_q: r.transfer_q,
+            apex_rt_s: r.apex_rt_s,
+            library_q: r.library_q,
+        })
+        .collect();
     let out: Vec<MbrRow<'_>> = out.into_iter().map(|(_, _, row)| row).collect();
     write_mbr_tsv(mbr_tsv, &out)?;
     write_mbr_validation(validation_tsv, &v)?;

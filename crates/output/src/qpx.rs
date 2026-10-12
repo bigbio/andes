@@ -1050,6 +1050,7 @@ mod rescore_join_tests {
             psm_id: id.to_string(),
             q_value: 0.0,
             pep: 0.0,
+            score: None,
             peptide: "PEPTIDE".to_string(),
             proteins: String::new(),
         }

@@ -37,8 +37,8 @@ pub use glyco_rt::populate_glyco_rt_features;
 
 pub mod percolator;
 pub use percolator::{
-    parse_psm_results, resolve_backend, run_percolator, PercolatorBackend, PercolatorError,
-    PercolatorPsm, DEFAULT_PERCOLATOR_IMAGE,
+    decoy_results_path, parse_psm_results, resolve_backend, run_percolator, PercolatorBackend,
+    PercolatorError, PercolatorPsm, DEFAULT_PERCOLATOR_IMAGE,
 };
 
 pub(crate) mod percolator_enz;
@@ -55,6 +55,7 @@ pub use quant_out::{
 pub mod run_quant_table;
 
 pub mod extract_table;
+pub mod library_table;
 
 pub mod feature_parquet;
 pub mod mbr_out;

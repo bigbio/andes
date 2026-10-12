@@ -713,6 +713,30 @@ pub(crate) struct SearchArgs {
     #[arg(long = "quant-dir", value_name = "DIR")]
     pub(crate) quant_dir: Option<PathBuf>,
 
+    /// Match-between-runs label-free quantification across the inputs (two or
+    /// more; needs `--lfq` and `--rescore` or `--rescore-native`). After the
+    /// per-run quantification, builds the precursor library, aligns retention
+    /// times across runs, measures every library precursor in every run and
+    /// writes `<base>.mbr.tsv` and `<base>.mbr_validation.tsv` (with
+    /// `--output-parquet`, `quantms.feature.parquet` holds these rows). Uses
+    /// `--quant-dir` for the per-run artifacts, or a temporary directory that
+    /// is removed afterwards. Same result as `andes quant library`, `extract`
+    /// and `finalize` on the same files.
+    #[arg(long = "mbr", default_value_t = false)]
+    pub(crate) mbr: bool,
+
+    /// Internal library entry gate (precursor-level), not a reported
+    /// identification FDR: precursors whose best-PSM target/decoy q-value is
+    /// at most this enter the match-between-runs library. Default 0.01.
+    #[arg(long = "mbr-library-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
+    pub(crate) mbr_library_fdr: f64,
+
+    /// Transfer quality q-value: transfers at or below it are reported as
+    /// `transfer_ms1` in `<base>.mbr.tsv`. An internal quant-quality
+    /// q-value, not an identification FDR. Default 0.01.
+    #[arg(long = "mbr-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
+    pub(crate) mbr_fdr: f64,
+
     /// PSM q-value threshold for quantification targets when rescoring runs.
     /// Default: the `--fdr` value (0.01).
     #[arg(long = "quant-fdr", hide = true, value_parser = parse_unit_fraction)]
@@ -722,6 +746,103 @@ pub(crate) struct SearchArgs {
     /// a temporary PIN is used and deleted unless this is true. Default true.
     #[arg(long = "keep-pin", hide = true, default_value_t = true, action = clap::ArgAction::Set)]
     pub(crate) keep_pin: bool,
+}
+
+/// `andes quant`: the match-between-runs stages over a quant directory
+/// written by `andes search --quant-dir`.
+#[derive(clap::Subcommand, Debug)]
+pub(crate) enum QuantCommand {
+    /// Build the precursor library and the joint retention-time alignment
+    /// from every run's PSM table and the Percolator results of those PSMs.
+    /// Writes `library.parquet` and `alignment.parquet` into the quant
+    /// directory.
+    Library(QuantLibraryArgs),
+    /// Measure every library precursor in one run from its MS1 cache. Writes
+    /// `<stem>.extract.parquet`.
+    Extract(QuantExtractArgs),
+    /// Transfer q-values and the match-between-runs tables from every run's
+    /// extract table. Writes `<base>.mbr.tsv` and `<base>.mbr_validation.tsv`.
+    Finalize(QuantFinalizeArgs),
+}
+
+impl QuantCommand {
+    pub(crate) fn threads(&self) -> Option<usize> {
+        match self {
+            QuantCommand::Library(a) => a.threads,
+            QuantCommand::Extract(a) => a.threads,
+            QuantCommand::Finalize(a) => a.threads,
+        }
+    }
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct QuantLibraryArgs {
+    /// Directory with each run's `<stem>.quant.parquet` and `<stem>.cache`.
+    #[arg(long = "quant-dir", value_name = "DIR")]
+    pub(crate) quant_dir: PathBuf,
+
+    /// Run stems to include. Default: every `<stem>.quant.parquet` in the
+    /// directory. A run whose table or cache is missing is an error.
+    #[arg(long = "runs", value_name = "STEM", num_args = 1..)]
+    pub(crate) runs: Vec<String>,
+
+    /// Percolator target PSM results (`--results-psms`) over the PINs of these
+    /// runs, with its `score` column.
+    #[arg(long = "psms", value_name = "TSV")]
+    pub(crate) psms: PathBuf,
+
+    /// Percolator decoy PSM results (`--decoy-results-psms`).
+    #[arg(long = "decoy-psms", value_name = "TSV")]
+    pub(crate) decoy_psms: PathBuf,
+
+    /// Internal library entry gate (precursor-level), not a reported
+    /// identification FDR. Default 0.01.
+    #[arg(long = "mbr-library-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
+    pub(crate) mbr_library_fdr: f64,
+
+    /// Worker threads. Default: logical CPU count.
+    #[arg(long)]
+    pub(crate) threads: Option<usize>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct QuantExtractArgs {
+    /// Directory with the library and the run's `<stem>.cache`.
+    #[arg(long = "quant-dir", value_name = "DIR")]
+    pub(crate) quant_dir: PathBuf,
+
+    /// Stem of the run to measure.
+    #[arg(long = "run", value_name = "STEM")]
+    pub(crate) run: String,
+
+    /// Worker threads. Default: logical CPU count.
+    #[arg(long)]
+    pub(crate) threads: Option<usize>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct QuantFinalizeArgs {
+    /// Directory with the library and every run's `<stem>.extract.parquet`.
+    #[arg(long = "quant-dir", value_name = "DIR")]
+    pub(crate) quant_dir: PathBuf,
+
+    /// Output base: writes `<base>.mbr.tsv` and `<base>.mbr_validation.tsv`.
+    #[arg(short = 'o', long = "output", value_name = "BASE")]
+    pub(crate) output: PathBuf,
+
+    /// Transfer quality q-value: transfers at or below it are reported as
+    /// `transfer_ms1`. An internal quant-quality q-value, not an
+    /// identification FDR. Default 0.01.
+    #[arg(long = "mbr-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
+    pub(crate) mbr_fdr: f64,
+
+    /// Also write the rows as `quantms.feature.parquet` into this directory.
+    #[arg(long = "output-parquet", value_name = "DIR")]
+    pub(crate) output_parquet: Option<PathBuf>,
+
+    /// Worker threads. Default: logical CPU count.
+    #[arg(long)]
+    pub(crate) threads: Option<usize>,
 }
 
 // Alias used internally for the search-args type.

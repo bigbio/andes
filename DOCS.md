@@ -196,6 +196,9 @@ See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model)
 | `--lfq-min-cosine` | 0..1 | `0.7` | Minimum isotope-envelope cosine for both target and decoy eligibility before feature competition. All target features remain in `lfq_features.tsv` and the parquet. |
 | `--lfq-feature-fdr` | 0..1 | `0.05` | Feature FDR for `lfq.tsv` from the target/decoy competition of each feature against its +11 Th twin. |
 | `--quant-fdr` | 0..1 | `--fdr` | PSM q-value cut for quantification targets when `--rescore`/`--rescore-native` ran. |
+| `--mbr` | flag | off | Match-between-runs label-free quantification across two or more inputs (§10). Needs `--lfq` and `--rescore` (or `--rescore-native`); not with `--tmt`. Writes `<stem>.mbr.tsv` and `<stem>.mbr_validation.tsv`; with `--output-parquet`, `quantms.feature.parquet` holds these rows. Uses `--quant-dir`, or a temporary directory removed at exit. Same result as `andes quant library`, `extract` and `finalize`. |
+| `--mbr-library-fdr` | 0..1 | `0.01` | Internal library entry gate (precursor-level), not a reported identification FDR: best-PSM-per-precursor target/decoy q-value over the rescored PSM scores of all runs. |
+| `--mbr-fdr` | 0..1 | `0.01` | Transfer quality q-value: transfers at or below it are `transfer_ms1`. An internal quant-quality q-value, not an identification FDR. |
 
 With `--output-parquet`, both modules add `quantms.feature.parquet` (the QPX feature view) to the bundle.
 
@@ -431,7 +434,19 @@ Written next to the PIN (or next to `--output-tsv`/`--output-parquet` under `--r
 | `<stem>.tmt.tsv` | one per quantified PSM | `filename scannr spec_id quant_scan quant_ms_level rt peptide charge proteins is_decoy psm_q_value psm_pep purity`, then one `tmt_<channel>` (or `itraq_<channel>`) per channel, then `raw_<...>` when a correction matrix was applied |
 | `<stem>.lfq.tsv` | one per (peptidoform, charge) at feature q ≤ `--lfq-feature-fdr` and cosine ≥ `--lfq-min-cosine` | `peptide charge proteins feature_q_value score cosine`, then the integrated area per input file |
 | `<stem>.lfq_features.tsv` | one per feature per run (all, with their q-value) | apex RT, boundaries, scan count, area, apex height, per-isotope areas, cosine, score, decoy score, feature q-value |
+| `<stem>.mbr.tsv` (`--mbr`, `andes quant finalize -o <stem>`) | one per (precursor, run) identified in or transferred into the run | `precursor_key run evidence_type quantity quantity_se transfer_q apex_rt_s library_q`; `evidence_type` is `identified`, `transfer_ms1` (transfer q ≤ `--mbr-fdr`) or `below_threshold` (quantity kept, as censored); `transfer_q` and `library_q` are internal quant-quality values, not identification FDR; `NA` for missing values |
+| `<stem>.mbr_validation.tsv` | one | pseudo-transfer validation (identified pairs re-measured as transfers: sensitivity lower bound, wrong-peak rate) and accepted transfer counts for the pooled and per-decoy-family estimates, at q ≤ 0.01 (`_q01`) and at `--mbr-fdr` (`_at_threshold`) |
 | `<dir>/quantms.feature.parquet` | one per feature (LFQ) or quantified PSM (isobaric) | the QPX feature view (`intensities` as `[{label, intensity}]` with `LFQ` or `TMT126`-style labels; `additional_intensities` with the raw/apex/isotope values; purity, cosine, q-values in `additional_scores`; `psm_ids` pointing at `psms.parquet` rows) |
+
+With `--mbr` (or `andes quant finalize --output-parquet <dir>`), `quantms.feature.parquet` holds
+one row per `<stem>.mbr.tsv` row instead, with three extra columns: `evidence_type`,
+`transfer_q` and `quantity_se`. Modifications come from the peptidoform's tags (the
+accession is the name), proteins carry no positions, and `psm_ids` is empty.
+
+Files in the quant directory (`--quant-dir`): per run `<stem>.cache` and `<stem>.quant.parquet`
+(search), `<stem>.extract.parquet` (extract); once `library.parquet` and `alignment.parquet`
+(library). Each Parquet file carries a schema version (`andes.<table>.schema`); a reader rejects
+another major version and names the file.
 
 ---
 
@@ -760,21 +775,71 @@ andes --spectrum tmt_run.mzML --database human.fasta --mods tmt10_mods.txt \
   voltage its PSM was acquired at. (Interleaved voltages otherwise put zeros between every
   measured scan, which truncates the peak boundaries: on a three-voltage Lumos run the mixed
   series gave a median integration window of 4 s instead of 22 s and areas ~10x too small.)
-* **Runs.** Each `--spectrum` file is quantified on its own identifications (no transfer of
-  identifications between runs yet); `lfq.tsv` is wide over the files.
-* **Not done here:** normalization, MaxLFQ / top-N protein intensities, match between runs.
+* **Runs.** Each `--spectrum` file is quantified on its own identifications; `lfq.tsv` is wide
+  over the files. Transfers between runs are `--mbr` (below).
+* **Not done here:** normalization, MaxLFQ / top-N protein intensities.
 
 ```bash
 andes --spectrum run1.mzML --spectrum run2.mzML --database human.fasta \
       --rescore --fdr 0.01 --lfq --output-parquet runs.idparquet
 ```
 
+### Match between runs (`--mbr`, `andes quant`)
+
+A precursor (peptidoform and charge) identified in some runs is measured in every run, so
+each (precursor, run) gets one consistent quantity. Four stages, run in one process by
+`andes search --lfq --mbr --rescore` on two or more inputs, or one at a time over a quant
+directory (for a pipeline that scatters runs over machines):
+
+```bash
+# search: MS1 caches + PSM tables into the quant directory, and the PIN
+andes --spectrum a.mzML --spectrum b.mzML --database db.fasta --output-pin ab.pin --quant-dir q/
+# Percolator over the PIN, then the library (once)
+andes quant library  --quant-dir q/ --psms ab.target.psms --decoy-psms ab.decoy.psms
+# per run (any machine that sees q/)
+andes quant extract  --quant-dir q/ --run a
+andes quant extract  --quant-dir q/ --run b
+# once
+andes quant finalize --quant-dir q/ -o experiment [--mbr-fdr 0.01] [--output-parquet dir]
+```
+
+The PSM join needs SpecIds that are distinct across runs. A multi-input search prefixes them
+with the file stem; separate single-input searches of runs with the same scan titles give
+equal SpecIds, which the library stage rejects (naming both tables).
+
+* **Library** (`quant library`). Reads every run's `<stem>.quant.parquet` (`--runs`, or every
+  table in the directory; a missing table or cache is an error) and joins Percolator's
+  `score` to its PSMs by SpecId (target and decoy result files; the `score` column is
+  required). Runs are indexed by sorted stem, precursors by sorted key. A precursor enters
+  the library when its best-PSM target/decoy q-value over all runs is at most
+  `--mbr-library-fdr`: an internal entry gate, not a reported FDR. A joint, reference-free
+  retention-time alignment maps every run onto a consensus scale and gives each transfer a
+  predicted apex and its uncertainty. A run with fewer than 50 anchors, or whose anchors cover
+  less than 30 % of the RT range, is unaligned: it is logged and neither gives nor receives
+  transfers.
+* **Extract** (`quant extract`, one run, reads only `<stem>.cache`). Every library precursor
+  is measured by a likelihood template fit of its isotope pattern and elution profile around
+  the predicted apex (around the PSM's RT where it was identified), with two decoy hypotheses
+  per transfer: a mass-defect-preserving m/z shift and an RT shift. Identified pairs are also
+  measured as if they were transfers (pseudo-transfers). FAIMS runs are fitted on the series of
+  the precursor's compensation voltage.
+* **Finalize** (`quant finalize`). A cross-validated GBDT (3 folds by precursor) separates
+  transfer targets from their decoys; the transfer q-value is the K-decoy estimate over held-out
+  scores, also reported per decoy family. It is a quant-quality q-value, not an identification
+  FDR. Pseudo-transfers give a sensitivity lower bound and the wrong-peak rate, which decoys
+  cannot see.
+
+The stage path and the in-process run use the same code on the same files and give a
+byte-identical `<stem>.mbr.tsv`. In-process, the scores are the rescoring run's (Percolator's
+target and decoy results, or the native rescorer's held-out scores).
+
 ### Relation to other quantifiers
 
 * [IonQuant](https://doi.org/10.1016/j.mcpro.2021.100077) estimates **match-between-runs**
   error using multiple scores and a semiparametric mixture model. Its shifted decoy search
-  starts at +11 × 1.0005 Th and tries smaller shifts when no peak can be traced. Andes does
-  not implement that estimator or identification transfer.
+  starts at +11 × 1.0005 Th and tries smaller shifts when no peak can be traced. Andes
+  `--mbr` uses its own estimator (above): a classifier over template-fit features with
+  mass-shift and RT-shift decoys.
 * [Sage](https://github.com/lazear/sage/blob/master/crates/sage/src/lfq.rs) uses aligned RT
   grids, a normalized spectral-angle score, and +11.06 Th / shifted-RT decoys. Its hybrid
   score inspired the powers above; Andes uses cosine, a run-wide height scale and independent

@@ -112,6 +112,65 @@ impl RunMap {
             rt,
         )
     }
+
+    /// Knot x (consensus RT) and y (run RT).
+    pub fn knots(&self) -> (&[f64], &[f64]) {
+        (&self.knots_x, &self.knots_y)
+    }
+
+    /// Slopes below the first and above the last knot.
+    pub fn end_slopes(&self) -> (f64, f64) {
+        (self.slope_lo, self.slope_hi)
+    }
+
+    /// A map from stored knots and end slopes, as returned by
+    /// [`RunMap::knots`] and [`RunMap::end_slopes`].
+    ///
+    /// Errors: no knots, knot vectors of different lengths, a non-finite knot,
+    /// or an end slope that is not finite and positive.
+    pub fn from_parts(
+        knots_x: Vec<f64>,
+        knots_y: Vec<f64>,
+        slope_lo: f64,
+        slope_hi: f64,
+    ) -> Result<RunMap, String> {
+        if knots_x.is_empty() || knots_x.len() != knots_y.len() {
+            return Err(format!(
+                "run map needs equal, non-zero numbers of knots (x {}, y {})",
+                knots_x.len(),
+                knots_y.len()
+            ));
+        }
+        if knots_x.iter().chain(&knots_y).any(|v| !v.is_finite()) {
+            return Err("run map has a non-finite knot".into());
+        }
+        if !(slope_lo.is_finite() && slope_lo > 0.0 && slope_hi.is_finite() && slope_hi > 0.0) {
+            return Err(format!(
+                "run map end slopes {slope_lo} and {slope_hi} must be finite and positive"
+            ));
+        }
+        Ok(RunMap {
+            knots_x,
+            knots_y,
+            slope_lo,
+            slope_hi,
+        })
+    }
+}
+
+/// The stored state of one run in an [`Alignment`]: everything
+/// [`Alignment::from_runs`] needs to rebuild it exactly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunAlignment {
+    /// `None` for an unaligned run.
+    pub map: Option<RunMap>,
+    /// Residual width knots `(consensus t, sd)`; `None` for an unaligned run.
+    pub residual_sd: Option<Vec<(f64, f64)>>,
+    pub anchors: usize,
+    pub coverage: f64,
+    /// The run's observations `(precursor, rt)`, ascending by precursor;
+    /// empty for an unaligned run.
+    pub observations: Vec<(u32, f64)>,
 }
 
 /// Linear interpolation through `(xs, ys)` (xs strictly increasing, not
@@ -186,6 +245,114 @@ impl Alignment {
         }
         let (t, n, tau) = self.estimate(p as usize, Some(run))?;
         Some(self.transfer(map, run, t, n, tau))
+    }
+
+    /// The per-run state, in run order, from which [`Alignment::from_runs`]
+    /// rebuilds this alignment.
+    pub fn runs(&self) -> Vec<RunAlignment> {
+        let n_runs = self.maps.len();
+        let mut observations: Vec<Vec<(u32, f64)>> = vec![Vec::new(); n_runs];
+        for p in 0..self.consensus.len() {
+            for i in self.obs_offsets[p]..self.obs_offsets[p + 1] {
+                observations[self.obs_runs[i] as usize].push((p as u32, self.obs_rts[i]));
+            }
+        }
+        (0..n_runs)
+            .zip(observations)
+            .map(|(r, observations)| RunAlignment {
+                map: self.maps[r].clone(),
+                residual_sd: self.residual_sd[r].clone(),
+                anchors: self.anchors[r],
+                coverage: self.coverage[r],
+                observations,
+            })
+            .collect()
+    }
+
+    /// Rebuilds an alignment of `n_precursors` precursors from the per-run
+    /// state of [`Alignment::runs`]. The consensus RT, `tau_p` and `n_p` are
+    /// recomputed from the observations by the same code [`align`] uses, so
+    /// every prediction equals the original's bit for bit.
+    ///
+    /// Errors: a map without residual widths or the reverse, an observation in
+    /// an unaligned run, a precursor outside `0..n_precursors`, a non-finite
+    /// RT, or two observations of one precursor in one run.
+    pub fn from_runs(runs: Vec<RunAlignment>, n_precursors: usize) -> Result<Alignment, String> {
+        let n_runs = runs.len();
+        if n_runs > u16::MAX as usize + 1 {
+            return Err(format!("{n_runs} runs exceed the run id range"));
+        }
+        let mut all: Vec<(u32, u16, f64)> = Vec::new();
+        for (r, run) in runs.iter().enumerate() {
+            if run.map.is_some() != run.residual_sd.is_some() {
+                return Err(format!(
+                    "run {r}: a run map needs residual widths and the reverse"
+                ));
+            }
+            if run.map.is_none() && !run.observations.is_empty() {
+                return Err(format!("run {r} is unaligned but has observations"));
+            }
+            for &(p, rt) in &run.observations {
+                if p as usize >= n_precursors {
+                    return Err(format!(
+                        "run {r}: observation of precursor {p} outside the {n_precursors} precursors"
+                    ));
+                }
+                if !rt.is_finite() {
+                    return Err(format!("run {r}: precursor {p} has a non-finite RT"));
+                }
+                all.push((p, r as u16, rt));
+            }
+        }
+        all.sort_by_key(|o| (o.0, o.1));
+        if let Some(w) = all
+            .windows(2)
+            .find(|w| w[0].0 == w[1].0 && w[0].1 == w[1].1)
+        {
+            return Err(format!(
+                "run {}: precursor {} is observed twice",
+                w[0].1, w[0].0
+            ));
+        }
+        let mut obs_offsets = vec![0usize; n_precursors + 1];
+        for &(p, ..) in &all {
+            obs_offsets[p as usize + 1] += 1;
+        }
+        for i in 0..n_precursors {
+            obs_offsets[i + 1] += obs_offsets[i];
+        }
+        let n_runs_seen: Vec<u16> = (0..n_precursors)
+            .map(|p| (obs_offsets[p + 1] - obs_offsets[p]).min(u16::MAX as usize) as u16)
+            .collect();
+        let mut maps = Vec::with_capacity(n_runs);
+        let mut residual_sd = Vec::with_capacity(n_runs);
+        let mut anchors = Vec::with_capacity(n_runs);
+        let mut coverage = Vec::with_capacity(n_runs);
+        for run in runs {
+            maps.push(run.map);
+            residual_sd.push(run.residual_sd);
+            anchors.push(run.anchors);
+            coverage.push(run.coverage);
+        }
+        let mut out = Alignment {
+            consensus: vec![f64::NAN; n_precursors],
+            maps,
+            residual_sd,
+            tau: vec![0.0; n_precursors],
+            n_runs_seen,
+            anchors,
+            coverage,
+            obs_offsets,
+            obs_runs: all.iter().map(|o| o.1).collect(),
+            obs_rts: all.iter().map(|o| o.2).collect(),
+        };
+        for p in 0..n_precursors {
+            if let Some((tc, _, tau)) = out.estimate(p, None) {
+                out.consensus[p] = tc;
+                out.tau[p] = tau;
+            }
+        }
+        Ok(out)
     }
 
     fn transfer(&self, map: &RunMap, run: u16, t: f64, n: usize, tau: f64) -> (f64, f64) {
@@ -852,6 +1019,67 @@ mod tests {
             }
         }
         assert_eq!(n_aligned, 3);
+    }
+
+    fn bits(v: Option<(f64, f64)>) -> Option<(u64, u64)> {
+        v.map(|(a, b)| (a.to_bits(), b.to_bits()))
+    }
+
+    #[test]
+    fn rebuilt_alignment_predicts_bit_for_bit() {
+        let warps = three_warps();
+        let mut obs = synth(600, &warps, 5.0, 8);
+        // An unaligned fourth run and precursors seen in one run only.
+        obs.extend((0..10u32).map(|p| Observation {
+            precursor: p,
+            run: 3,
+            rt: 50.0 + p as f64,
+        }));
+        obs.retain(|o| !(o.precursor >= 590 && o.run > 0));
+        let a = align(&obs, 610, 4, &AlignParams::default());
+        assert!(a.maps[3].is_none());
+        let runs = a.runs();
+        assert!(runs[3].observations.is_empty());
+        let b = Alignment::from_runs(runs.clone(), 610).unwrap();
+        assert_eq!(b.runs(), runs);
+        assert_eq!(a.n_runs_seen, b.n_runs_seen);
+        assert_eq!(a.anchors, b.anchors);
+        for p in 0..610u32 {
+            let i = p as usize;
+            assert_eq!(a.consensus[i].to_bits(), b.consensus[i].to_bits(), "{p}");
+            assert_eq!(a.tau[i].to_bits(), b.tau[i].to_bits(), "{p}");
+            for r in 0..4u16 {
+                assert_eq!(bits(a.predict(p, r)), bits(b.predict(p, r)), "{p} {r}");
+                assert_eq!(
+                    bits(a.predict_excluding(p, r)),
+                    bits(b.predict_excluding(p, r)),
+                    "{p} {r}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn from_runs_rejects_inconsistent_state() {
+        let a = align(
+            &synth(300, &three_warps(), 5.0, 2),
+            300,
+            3,
+            &AlignParams::default(),
+        );
+        let mut runs = a.runs();
+        let first = runs[0].observations[0];
+        runs[0].observations.push(first);
+        let e = Alignment::from_runs(runs, 300).unwrap_err();
+        assert!(e.contains("observed twice"), "{e}");
+        let e = Alignment::from_runs(a.runs(), 10).unwrap_err();
+        assert!(e.contains("outside"), "{e}");
+        let mut runs = a.runs();
+        runs[1].map = None;
+        assert!(Alignment::from_runs(runs, 300).is_err());
+        assert!(RunMap::from_parts(vec![], vec![], 1.0, 1.0).is_err());
+        assert!(RunMap::from_parts(vec![1.0], vec![2.0], 0.0, 1.0).is_err());
+        assert!(RunMap::from_parts(vec![1.0], vec![f64::NAN], 1.0, 1.0).is_err());
     }
 
     #[test]

@@ -186,12 +186,17 @@ precursor isolation purity; `--lfq` integrates the isotope chromatograms of ever
 precursor from the MS1 scans with an experimental decoy-based feature q-value estimate. Both write Sage-style
 tables (`<stem>.tmt.tsv`, `<stem>.lfq.tsv`) and, with `--output-parquet`, the QPX
 `quantms.feature.parquet` that quantms / OpenMS consume. Normalization and protein roll-up stay
-downstream ([`DOCS.md` §10](DOCS.md#10-quantification)).
+downstream ([`DOCS.md` §10](DOCS.md#10-quantification)). `--lfq --mbr` adds match between runs
+over two or more inputs: every confident precursor is measured in every run, and transfers carry
+an internal quant-quality q-value (`<stem>.mbr.tsv`). The same stages run one at a time with
+`andes quant library|extract|finalize` over a `--quant-dir`, for pipelines that spread runs
+over machines.
 
 ```bash
 andes --spectrum tmt_run.mzML --database human.fasta --mods tmt10_mods.txt \
       --rescore --tmt tmt10 --tmt-correction lot.txt --output-parquet run.idparquet
 andes --spectrum run1.mzML --spectrum run2.mzML --database human.fasta --rescore --lfq
+andes --spectrum run1.mzML --spectrum run2.mzML --database human.fasta --rescore --lfq --mbr
 ```
 
 **[quantms](https://github.com/bigbio/quantms).** Point the search step at `andes`. Use named

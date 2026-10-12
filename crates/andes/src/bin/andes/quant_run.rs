@@ -635,7 +635,7 @@ fn is_confident(row: &LfqRow, s: &QuantSettings) -> bool {
 
 /// Run name of an input path: the file name without its extension, and
 /// without a `.gz` before it (`run1.mzML.gz` → `run1`).
-fn run_stem(path: &Path) -> String {
+pub(crate) fn run_stem(path: &Path) -> String {
     let name = path
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())

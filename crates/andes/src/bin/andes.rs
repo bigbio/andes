@@ -24,6 +24,8 @@ mod memlimit;
 mod model_select;
 #[path = "andes/mono.rs"]
 mod mono;
+#[path = "andes/quant_cmd.rs"]
+mod quant_cmd;
 #[path = "andes/quant_mbr.rs"]
 mod quant_mbr;
 #[path = "andes/quant_run.rs"]
@@ -99,6 +101,12 @@ enum Command {
     /// Boxed to keep the `Command` enum compact.
     #[command(name = "train-rich-ion-llr", hide = true)]
     TrainRichIonLlr(Box<TrainRichIonLlrArgs>),
+
+    /// Match-between-runs quantification stages over a `--quant-dir`:
+    /// `library` (global), `extract` (per run), `finalize` (global). The same
+    /// result as `andes search --lfq --mbr` on the same inputs.
+    #[command(subcommand)]
+    Quant(cli::QuantCommand),
 }
 
 /// Top-level CLI.  When no subcommand is given, the flattened `SearchArgs`
@@ -144,6 +152,7 @@ fn main() -> ExitCode {
         Some(Command::TrainFromSearch(args)) => run_train_from_search(*args),
         Some(Command::TrainIntensityGbdt(args)) => run_train_intensity_gbdt(*args),
         Some(Command::TrainRichIonLlr(args)) => run_train_rich_ion_llr(*args),
+        Some(Command::Quant(cmd)) => quant_cmd::run_quant_command(cmd),
         None => {
             // --config: fill any parameter the user did not type on the CLI.
             if let Some(cfg_path) = top.search.config.clone() {

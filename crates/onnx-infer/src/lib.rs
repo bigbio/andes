@@ -46,6 +46,7 @@ pub mod backend;
 pub mod deeplc;
 pub mod ms2pip;
 pub mod peptdeep;
+pub mod prosit;
 pub mod rescoring;
 
 pub use error::{BackendKind, Error, Result};

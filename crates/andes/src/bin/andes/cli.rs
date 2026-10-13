@@ -814,6 +814,13 @@ pub(crate) struct QuantLibraryArgs {
     #[arg(long = "quant-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
     pub(crate) quant_fdr: f64,
 
+    /// PEP cap (the Percolator `posterior_error_prob` column) of the donor
+    /// PSMs, applied in addition to `--quant-fdr`: a target PSM identifies its
+    /// precursor only when it passes both. Use the search's `--pep` for the
+    /// same result as `--mbr`. Default: no PEP cap.
+    #[arg(long = "pep", value_parser = parse_unit_fraction)]
+    pub(crate) pep: Option<f64>,
+
     /// Worker threads. Default: logical CPU count.
     #[arg(long)]
     pub(crate) threads: Option<usize>,

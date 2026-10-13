@@ -78,8 +78,15 @@ fn run_andes(args: &[&str]) {
 }
 
 fn fake_percolator(dir: &Path) -> PathBuf {
-    let path = dir.join("percolator");
-    std::fs::write(&path, FAKE_PERCOLATOR).unwrap();
+    fake_percolator_with_pep(dir, "0.001")
+}
+
+/// [`FAKE_PERCOLATOR`] writing `pep` as every PSM's PEP.
+fn fake_percolator_with_pep(dir: &Path, pep: &str) -> PathBuf {
+    let path = dir.join(format!("percolator_pep{pep}"));
+    let script = FAKE_PERCOLATOR.replace("\\t0.001\\t0.001\\t", &format!("\\t0.001\\t{pep}\\t"));
+    assert!(script.contains(&format!("\\t0.001\\t{pep}\\t")));
+    std::fs::write(&path, script).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     path
 }
@@ -673,6 +680,74 @@ fn library_stage_errors_name_what_is_missing() {
         err.contains("mbr_run1.extract.parquet") && err.contains("stale"),
         "{err}"
     );
+}
+
+/// `mbr.tsv` rows whose evidence type is `identified`.
+fn identified_rows(path: &Path) -> usize {
+    let (header, rows) = read_mbr(path);
+    let ev = header.iter().position(|h| h == "evidence_type").unwrap();
+    rows.values().filter(|r| r[ev] == "identified").count()
+}
+
+#[test]
+fn mbr_donors_honour_the_pep_cap() {
+    // Every PSM at q = 0.001 with PEP = 0.5: `--pep 0.01` leaves no donor.
+    let tmp = tempfile::tempdir().unwrap();
+    let perc = fake_percolator_with_pep(tmp.path(), "0.5");
+
+    // All-in-one.
+    let aio = tmp.path().join("aio");
+    std::fs::create_dir_all(&aio).unwrap();
+    let mut args = search_args();
+    args.extend(
+        [
+            "--output-pin",
+            s(&aio.join("a.pin")),
+            "--lfq",
+            "--mbr",
+            "--rescore",
+            "--percolator-bin",
+            s(&perc),
+            "--pep",
+            "0.01",
+        ]
+        .map(String::from),
+    );
+    let out = andes(&args.iter().map(String::as_str).collect::<Vec<_>>());
+    let log = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "all-in-one failed:\n{log}");
+    let n = identified_rows(&aio.join("a.mbr.tsv"));
+    eprintln!("all-in-one --pep 0.01: {n} identified rows");
+    assert_eq!(n, 0, "identified rows from PSMs above the PEP cap");
+
+    // Stages: `quant library --pep`.
+    let staged = tmp.path().join("staged");
+    let q = staged_search(&staged, &perc);
+    let library = |pep: Option<&str>| {
+        let mut a = vec!["quant", "library", "--quant-dir", s(&q)];
+        let (t, d) = (
+            staged.join("s.percolator.target.psms.txt"),
+            staged.join("s.percolator.decoy.psms.txt"),
+        );
+        let (t, d) = (t.display().to_string(), d.display().to_string());
+        let mut owned = vec!["--psms".to_string(), t, "--decoy-psms".to_string(), d];
+        if let Some(p) = pep {
+            owned.extend(["--pep".to_string(), p.to_string()]);
+        }
+        a.extend(owned.iter().map(String::as_str));
+        run_andes(&a);
+        for r in RUNS {
+            run_andes(&["quant", "extract", "--quant-dir", s(&q), "--run", r]);
+        }
+        let base = staged.join("out");
+        run_andes(&["quant", "finalize", "--quant-dir", s(&q), "-o", s(&base)]);
+        identified_rows(&staged.join("out.mbr.tsv"))
+    };
+    let uncapped = library(None);
+    let capped = library(Some("0.01"));
+    eprintln!("stages: {uncapped} identified rows without --pep, {capped} with --pep 0.01");
+    assert!(uncapped > 0);
+    assert_eq!(capped, 0, "identified rows from PSMs above the PEP cap");
 }
 
 #[test]

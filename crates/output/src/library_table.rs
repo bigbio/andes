@@ -41,6 +41,8 @@ const ALIGNMENT_KEY: &str = "andes.alignment.schema";
 const RUNS_KEY: &str = "andes.library.runs";
 const MAX_Q_KEY: &str = "andes.library.max_q";
 const DONOR_Q_KEY: &str = "andes.library.donor_q";
+/// The donor PSM PEP cap; an empty value when there is none.
+const DONOR_PEP_KEY: &str = "andes.library.donor_pep";
 /// Key of [`library_fingerprint`] in `library.parquet`; extract tables copy it.
 pub const FINGERPRINT_KEY: &str = "andes.library.fingerprint";
 const ALIGNMENT_FINGERPRINT_KEY: &str = "andes.alignment.fingerprint";
@@ -50,7 +52,7 @@ const BATCH_ROWS: usize = 65_536;
 const ENVELOPE_LEN: usize = 4;
 
 /// A library with what the stages around it need: the run stems in
-/// run-index order, the entry gate and donor PSM threshold it was built with,
+/// run-index order, the entry gate and donor PSM thresholds it was built with,
 /// and the `;`-joined protein accessions per precursor id.
 #[derive(Debug, Clone)]
 pub struct StoredLibrary {
@@ -60,6 +62,8 @@ pub struct StoredLibrary {
     pub max_q: f64,
     /// PSM q-value threshold of the donor PSMs (`--quant-fdr`).
     pub donor_q: f64,
+    /// PSM PEP cap of the donor PSMs (`--pep`), when given.
+    pub donor_pep: Option<f64>,
     pub library: Library,
     /// Per precursor id; same length as `library.meta`.
     pub proteins: Vec<String>,
@@ -166,13 +170,20 @@ pub fn alignment_fingerprint(a: &Alignment) -> String {
 }
 
 /// A stable hash of a stored library: run stems, entry gate, donor PSM
-/// threshold, precursor metadata and proteins, entries and the alignment.
+/// thresholds, precursor metadata and proteins, entries and the alignment.
 pub fn library_fingerprint(lib: &StoredLibrary) -> String {
     let mut h = Fnv::new();
     h.u64(lib.runs.len() as u64);
     lib.runs.iter().for_each(|r| h.str(r));
     h.f64(lib.max_q);
     h.f64(lib.donor_q);
+    match lib.donor_pep {
+        Some(c) => {
+            h.u64(1);
+            h.f64(c);
+        }
+        None => h.u64(0),
+    }
     h.u64(lib.library.meta.len() as u64);
     for (m, p) in lib.library.meta.iter().zip(&lib.proteins) {
         h.str(&m.key);
@@ -437,6 +448,10 @@ fn write_versioned(dir: &Path, lib: &StoredLibrary, version: &str) -> Result<(),
             KeyValue::new(RUNS_KEY.to_string(), lib.runs.join("\n")),
             KeyValue::new(MAX_Q_KEY.to_string(), lib.max_q.to_string()),
             KeyValue::new(DONOR_Q_KEY.to_string(), lib.donor_q.to_string()),
+            KeyValue::new(
+                DONOR_PEP_KEY.to_string(),
+                lib.donor_pep.map_or(String::new(), |c| c.to_string()),
+            ),
             KeyValue::new(FINGERPRINT_KEY.to_string(), library_fingerprint(lib)),
             KeyValue::new(
                 ALIGNMENT_FINGERPRINT_KEY.to_string(),
@@ -587,6 +602,13 @@ pub fn read_library(dir: &Path) -> Result<StoredLibrary, String> {
     let donor_q: f64 = get(DONOR_Q_KEY)?
         .parse()
         .map_err(|e| lerr(&format!("{DONOR_Q_KEY}: {e}")))?;
+    let donor_pep: Option<f64> = match get(DONOR_PEP_KEY)?.as_str() {
+        "" => None,
+        v => Some(
+            v.parse()
+                .map_err(|e| lerr(&format!("{DONOR_PEP_KEY}: {e}")))?,
+        ),
+    };
     let fingerprint = get(FINGERPRINT_KEY)?;
     let alignment_fp = get(ALIGNMENT_FINGERPRINT_KEY)?;
 
@@ -757,6 +779,7 @@ pub fn read_library(dir: &Path) -> Result<StoredLibrary, String> {
         runs,
         max_q,
         donor_q,
+        donor_pep,
         library: Library {
             entries,
             alignment,
@@ -809,16 +832,18 @@ mod tests {
                     rt,
                     score: if decoy { 1.0 } else { 100.0 + p as f64 },
                     q: 0.0,
+                    pep: 0.0,
                     is_decoy: decoy,
                     faims_cv: (p % 3 == 0).then_some(-45.0),
                 });
             }
         }
-        let library = build_library(&psms, meta, 3, 0.01, 0.01, &AlignParams::default());
+        let library = build_library(&psms, meta, 3, 0.01, 0.01, None, &AlignParams::default());
         StoredLibrary {
             runs: vec!["a".into(), "b".into(), "c".into()],
             max_q: 0.01,
             donor_q: 0.01,
+            donor_pep: Some(0.05),
             library,
             proteins: (0..n).map(|i| format!("P{i};Q{i}")).collect(),
         }
@@ -838,6 +863,7 @@ mod tests {
         assert_eq!(back.runs, s.runs);
         assert_eq!(back.max_q, s.max_q);
         assert_eq!(back.donor_q, s.donor_q);
+        assert_eq!(back.donor_pep, s.donor_pep);
         assert_eq!(back.proteins, s.proteins);
         assert_eq!(back.library.meta, s.library.meta);
         assert_eq!(back.library.entries.len(), s.library.entries.len());
@@ -885,6 +911,9 @@ mod tests {
         assert_ne!(library_fingerprint(&s), library_fingerprint(&other));
         let mut other = s.clone();
         other.donor_q = 0.05;
+        assert_ne!(library_fingerprint(&s), library_fingerprint(&other));
+        let mut other = s.clone();
+        other.donor_pep = None;
         assert_ne!(library_fingerprint(&s), library_fingerprint(&other));
 
         // An alignment.parquet from another library is rejected by name.

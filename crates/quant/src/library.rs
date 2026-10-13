@@ -86,6 +86,8 @@ pub struct PsmIn {
     pub score: f64,
     /// The rescorer's PSM q-value.
     pub q: f64,
+    /// The rescorer's PSM posterior error probability.
+    pub pep: f64,
     pub is_decoy: bool,
     pub faims_cv: Option<f32>,
 }
@@ -136,7 +138,7 @@ pub struct Library {
 /// Precursors are independent: confidence is [`precursor_qvalues`] over the
 /// best score per precursor id (every PSM, whatever its PSM q-value), with no
 /// per-scan competition. Donor PSMs are the target PSMs with PSM `q <=
-/// donor_q`. Entries are target precursors with `q <= max_q` and at least one
+/// donor_q` and, when `donor_pep` is given, PSM `pep <= donor_pep`. Entries are target precursors with `q <= max_q` and at least one
 /// donor PSM, sorted by `(mz, id)`. The alignment is fitted on one
 /// observation per `(entry, donor run)`, the RT of the best donor PSM there;
 /// decoys never enter it. PSMs with an id outside `0..meta.len()` or a run
@@ -147,6 +149,7 @@ pub fn build_library(
     n_runs: usize,
     max_q: f64,
     donor_q: f64,
+    donor_pep: Option<f64>,
     ap: &AlignParams,
 ) -> Library {
     let n_prec = meta.len();
@@ -167,6 +170,7 @@ pub fn build_library(
         .filter(|p| {
             !p.is_decoy
                 && p.q <= donor_q
+                && donor_pep.is_none_or(|c| p.pep <= c)
                 && qs
                     .get(p.precursor as usize)
                     .copied()
@@ -301,6 +305,7 @@ mod tests {
             rt,
             score,
             q: 0.0,
+            pep: 0.0,
             is_decoy,
             faims_cv: None,
         }
@@ -323,7 +328,7 @@ mod tests {
         // Decoy 200 outscores every target; it must still not be an entry or
         // an alignment observation.
         let psms = base(vec![psm(0, 200, 5.0, 1000.0, true)]);
-        let lib = build_library(&psms, meta(201), 2, 1.0, 1.0, &AlignParams::default());
+        let lib = build_library(&psms, meta(201), 2, 1.0, 1.0, None, &AlignParams::default());
         assert!(lib.entries.iter().all(|e| e.precursor != 200));
         assert_eq!(lib.entries.len(), 200);
         assert!(lib.alignment.consensus[200].is_nan());
@@ -336,7 +341,15 @@ mod tests {
         for (i, x) in m.iter_mut().enumerate() {
             x.mz = 900.0 - i as f64;
         }
-        let lib = build_library(&base(vec![]), m, 2, 0.01, 1.0, &AlignParams::default());
+        let lib = build_library(
+            &base(vec![]),
+            m,
+            2,
+            0.01,
+            1.0,
+            None,
+            &AlignParams::default(),
+        );
         assert_eq!(lib.entries.len(), 200);
         let mzs: Vec<f64> = lib
             .entries
@@ -363,13 +376,21 @@ mod tests {
             cv(1, 11.0, Some(-65.0)),
             cv(0, 12.0, None),
         ]);
-        let lib = build_library(&psms, meta(200), 2, 1.0, 1.0, &AlignParams::default());
+        let lib = build_library(&psms, meta(200), 2, 1.0, 1.0, None, &AlignParams::default());
         let e0 = lib.entries.iter().find(|e| e.precursor == 0).unwrap();
         assert_eq!(e0.faims_cv, Some(-65.0));
         // A tie goes to the smallest value; no CV gives None.
         let mut psms2: Vec<PsmIn> = psms.iter().copied().filter(|p| p.precursor != 0).collect();
         psms2.extend([cv(0, 10.0, Some(-50.0)), cv(1, 10.0, Some(-65.0))]);
-        let lib = build_library(&psms2, meta(200), 2, 1.0, 1.0, &AlignParams::default());
+        let lib = build_library(
+            &psms2,
+            meta(200),
+            2,
+            1.0,
+            1.0,
+            None,
+            &AlignParams::default(),
+        );
         let e0 = lib.entries.iter().find(|e| e.precursor == 0).unwrap();
         assert_eq!(e0.faims_cv, Some(-65.0));
         let e1 = lib.entries.iter().find(|e| e.precursor == 1).unwrap();
@@ -388,7 +409,7 @@ mod tests {
             psm(2, 0, 30.0, 60.0, false),
             psm(2, 0, 20.0, 60.0, false),
         ]);
-        let lib = build_library(&psms, meta(200), 3, 1.0, 1.0, &AlignParams::default());
+        let lib = build_library(&psms, meta(200), 3, 1.0, 1.0, None, &AlignParams::default());
         let e0 = lib.entries.iter().find(|e| e.precursor == 0).unwrap();
         assert_eq!(e0.donors, vec![0, 2]);
         // Later PSM scores higher in run 0; equal scores take the earliest RT.
@@ -410,12 +431,28 @@ mod tests {
         psms.extend([psm(0, 0, 10.0, 90.0, false), weak(1, 0, 55.0, 500.0)]);
         // Precursor 1: only PSMs above the PSM threshold.
         psms.extend([weak(0, 1, 11.0, 400.0), weak(1, 1, 11.0, 400.0)]);
-        let lib = build_library(&psms, meta(200), 2, 0.01, 0.01, &AlignParams::default());
+        let lib = build_library(
+            &psms,
+            meta(200),
+            2,
+            0.01,
+            0.01,
+            None,
+            &AlignParams::default(),
+        );
         let e0 = lib.entries.iter().find(|e| e.precursor == 0).unwrap();
         assert_eq!(e0.donors, vec![0]);
         assert_eq!(e0.best_rt, vec![(0, 10.0)]);
         // The entry gate still ranks by the best score of every PSM.
-        let all = build_library(&psms, meta(200), 2, 0.01, 1.0, &AlignParams::default());
+        let all = build_library(
+            &psms,
+            meta(200),
+            2,
+            0.01,
+            1.0,
+            None,
+            &AlignParams::default(),
+        );
         let a0 = all.entries.iter().find(|e| e.precursor == 0).unwrap();
         assert_eq!(e0.q, a0.q);
         assert_eq!(a0.donors, vec![0, 1]);
@@ -423,6 +460,35 @@ mod tests {
         // No donor PSM: no entry.
         assert!(lib.entries.iter().all(|e| e.precursor != 1));
         assert!(all.entries.iter().any(|e| e.precursor == 1));
+    }
+
+    #[test]
+    fn donors_need_the_pep_cap_when_given() {
+        // Precursor 0: PEP 0.5 in run 0, PEP 0.001 in run 1; precursor 1:
+        // PEP 0.5 in both runs. Every PSM is at q = 0.
+        let with_pep = |run, precursor, rt, pep| PsmIn {
+            pep,
+            ..psm(run, precursor, rt, 300.0, false)
+        };
+        let mut psms: Vec<PsmIn> = base(vec![])
+            .into_iter()
+            .filter(|p| p.precursor > 1)
+            .collect();
+        psms.extend([
+            with_pep(0, 0, 10.0, 0.5),
+            with_pep(1, 0, 12.0, 0.001),
+            with_pep(0, 1, 20.0, 0.5),
+            with_pep(1, 1, 22.0, 0.5),
+        ]);
+        let ap = AlignParams::default();
+        let capped = build_library(&psms, meta(200), 2, 0.01, 0.01, Some(0.01), &ap);
+        let e0 = capped.entries.iter().find(|e| e.precursor == 0).unwrap();
+        assert_eq!(e0.donors, vec![1]);
+        assert!(capped.entries.iter().all(|e| e.precursor != 1));
+        let open = build_library(&psms, meta(200), 2, 0.01, 0.01, None, &ap);
+        let o0 = open.entries.iter().find(|e| e.precursor == 0).unwrap();
+        assert_eq!(o0.donors, vec![0, 1]);
+        assert!(open.entries.iter().any(|e| e.precursor == 1));
     }
 
     #[test]

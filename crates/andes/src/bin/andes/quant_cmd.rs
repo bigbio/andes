@@ -11,10 +11,12 @@
 //!
 //! Run index: the position of the run's stem in the sorted stem list.
 //! Precursor id: the position of its key in the sorted union of every run's
-//! precursor keys. The rescorer's PSM score and PSM q-value (Percolator's
-//! `score` and `q-value` columns, or the native rescorer's held-out score and
-//! q-value) are joined to the run tables on (run, SpecId). Library confidence
-//! ranks precursors by the score; the q-value picks the donor PSMs.
+//! precursor keys. The rescorer's PSM score, PSM q-value and PEP
+//! (Percolator's `score`, `q-value` and `posterior_error_prob` columns, or the
+//! native rescorer's) are joined to the run tables on (run, SpecId). Library
+//! confidence ranks precursors by the score; the q-value, and the PEP when
+//! `--pep` is given, pick the donor PSMs, as they pick the PSMs of the per-run
+//! quantification.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -112,6 +114,8 @@ pub(crate) struct Joined {
     pub score: f64,
     /// The rescorer's PSM q-value.
     pub q: f64,
+    /// The rescorer's PSM posterior error probability.
+    pub pep: f64,
     /// From the decoy result file.
     pub is_decoy: bool,
     /// The rescorer's peptide string (flanks and modification tags allowed).
@@ -142,6 +146,7 @@ pub(crate) fn rescore_scores(
             let joined = Joined {
                 score,
                 q: p.q_value,
+                pep: p.pep,
                 is_decoy,
                 peptide: p.peptide.clone(),
             };
@@ -295,15 +300,16 @@ fn percolator_scores(targets: &Path, decoys: &Path) -> Result<ScoreSet, String> 
 /// Builds the library over the run tables of `stems` (sorted, as from
 /// [`library_runs`]) with the scores of `load_scores` joined on (run,
 /// SpecId), and writes it to `dir`. `max_q` is the entry gate, `donor_q` the
-/// PSM q-value of the donor PSMs. The scores are loaded after the tables, so
-/// that merged scores over runs with a shared SpecId fail with the runs
-/// named.
+/// PSM q-value and `donor_pep` the optional PSM PEP cap of the donor PSMs.
+/// The scores are loaded after the tables, so that merged scores over runs
+/// with a shared SpecId fail with the runs named.
 pub(crate) fn build_and_write_library(
     dir: &Path,
     stems: &[String],
     load_scores: impl FnOnce() -> Result<PsmScores, String>,
     max_q: f64,
     donor_q: f64,
+    donor_pep: Option<f64>,
 ) -> Result<StoredLibrary, String> {
     if !(max_q > 0.0 && max_q <= 1.0) {
         return Err(format!("library entry gate {max_q} is outside (0, 1]"));
@@ -312,6 +318,9 @@ pub(crate) fn build_and_write_library(
         return Err(format!(
             "donor PSM q-value threshold {donor_q} is outside (0, 1]"
         ));
+    }
+    if let Some(c) = donor_pep.filter(|c| !(0.0..=1.0).contains(c)) {
+        return Err(format!("donor PSM PEP cap {c} is outside [0, 1]"));
     }
     // Every run's rows, and the first SpecId shared by two runs.
     let mut tables = Vec::with_capacity(stems.len());
@@ -422,6 +431,7 @@ pub(crate) fn build_and_write_library(
                 rt: row.rt_s,
                 score: j.score,
                 q: j.q,
+                pep: j.pep,
                 is_decoy: row.is_decoy,
                 faims_cv: row.faims_cv,
             });
@@ -446,18 +456,23 @@ pub(crate) fn build_and_write_library(
     drop(tables);
     let donor_psms = psms
         .iter()
-        .filter(|p| !p.is_decoy && p.q <= donor_q)
+        .filter(|p| !p.is_decoy && p.q <= donor_q && donor_pep.is_none_or(|c| p.pep <= c))
         .count();
+    let donor_gate = match donor_pep {
+        Some(c) => format!("PSM q<={donor_q} and PEP<={c}"),
+        None => format!("PSM q<={donor_q}"),
+    };
     let library = build_library(
         &psms,
         meta,
         stems.len(),
         max_q,
         donor_q,
+        donor_pep,
         &AlignParams::default(),
     );
     eprintln!(
-        "[mbr] library: {} runs, {} PSMs scored ({} of them disagreeing with the rescoring result on peptide or label), {donor_psms} target PSMs at PSM q<={donor_q} identify their precursor in their run; skipped: {} target and {} decoy PSMs without a rescoring score, {} decoy PSMs sharing a target's key; {} precursors, {} entries at the internal entry gate q<={max_q} (precursor-level, not an identification FDR) with a PSM at PSM q<={donor_q}",
+        "[mbr] library: {} runs, {} PSMs scored ({} of them disagreeing with the rescoring result on peptide or label), {donor_psms} target PSMs at {donor_gate} identify their precursor in their run; skipped: {} target and {} decoy PSMs without a rescoring score, {} decoy PSMs sharing a target's key; {} precursors, {} entries at the internal entry gate q<={max_q} (precursor-level, not an identification FDR) with a PSM at {donor_gate}",
         stems.len(),
         psms.len(),
         mismatched,
@@ -490,6 +505,7 @@ pub(crate) fn build_and_write_library(
         runs: stems.to_vec(),
         max_q,
         donor_q,
+        donor_pep,
         library,
         proteins,
     };
@@ -696,6 +712,7 @@ pub(crate) fn run_in_process(
     ep: &EvidenceParams,
     max_q: f64,
     donor_q: f64,
+    donor_pep: Option<f64>,
     mbr_fdr: f64,
     base: &Path,
     parquet_dir: Option<&Path>,
@@ -708,6 +725,7 @@ pub(crate) fn run_in_process(
         || Ok(PsmScores::Merged(scores)),
         max_q,
         donor_q,
+        donor_pep,
     )?;
     let fingerprint = library_fingerprint(&stored);
     // One run at a time: each extraction is parallel over its precursors and
@@ -729,6 +747,7 @@ fn run_library(a: QuantLibraryArgs) -> Result<(), String> {
         || load_scores(&source),
         a.mbr_library_fdr,
         a.quant_fdr,
+        a.pep,
     )
     .map(|_| ())
 }
@@ -929,11 +948,12 @@ mod tests {
                 envelope: [0.55, 0.3, 0.1, 0.05],
             })
             .collect();
-        let library = build_library(&[], meta, 2, 0.01, 0.01, &AlignParams::default());
+        let library = build_library(&[], meta, 2, 0.01, 0.01, None, &AlignParams::default());
         let stored = StoredLibrary {
             runs: vec!["a".into(), "b".into()],
             max_q: 0.01,
             donor_q: 0.01,
+            donor_pep: None,
             library,
             proteins: vec!["P1".into(), "P2".into()],
         };
@@ -971,6 +991,90 @@ mod tests {
             "below-threshold transfers are not feature rows"
         );
         assert_eq!(records[1].peptidoform, "PEPTM[UNIMOD:35]IDEK");
+    }
+
+    /// 200 target PSMs of distinct peptides in run `a`, scored by a rescoring
+    /// result at q = 0.001 and PEP = `pep`; the result names `wrong` (a
+    /// SpecId) with another peptide.
+    fn one_run_library(
+        dir: &Path,
+        pep: f64,
+        wrong: Option<&str>,
+    ) -> (Vec<String>, HashMap<String, PercolatorPsm>) {
+        use output::run_quant_table::{write_run_quant_table, RunPsmRow};
+        let peptide = |i: usize| -> String {
+            let aa = b"ACDEFGHIKLMNPQRSTVWY";
+            let tail: String = [aa[i % 20], aa[(i / 20) % 20]]
+                .iter()
+                .map(|&c| c as char)
+                .collect();
+            format!("PEPTIDE{tail}K")
+        };
+        let rows: Vec<RunPsmRow> = (0..200)
+            .map(|i| RunPsmRow {
+                spec_id: format!("s{i}"),
+                rt_s: 100.0 + i as f64,
+                precursor_key: format!("{}/2", peptide(i)),
+                peptidoform: peptide(i),
+                charge: 2,
+                mz: 500.0 + i as f64,
+                is_decoy: false,
+                search_score: 10.0,
+                faims_cv: None,
+                envelope: vec![0.55, 0.3, 0.1, 0.05],
+                proteins: "P1".into(),
+            })
+            .collect();
+        write_run_quant_table(&artifact(dir, "a", TABLE_SUFFIX), "a", &rows).unwrap();
+        let scores = rows
+            .iter()
+            .map(|r| {
+                let peptide = if wrong == Some(r.spec_id.as_str()) {
+                    "K.WRONGPEPTIDEK.A".to_string()
+                } else {
+                    format!("K.{}.A", r.peptidoform)
+                };
+                let psm = PercolatorPsm {
+                    psm_id: r.spec_id.clone(),
+                    q_value: 0.001,
+                    pep,
+                    score: Some(100.0 + r.rt_s),
+                    peptide,
+                    proteins: "P1".into(),
+                };
+                (r.spec_id.clone(), psm)
+            })
+            .collect();
+        (vec!["a".to_string()], scores)
+    }
+
+    #[test]
+    fn donors_honour_the_pep_cap() {
+        // q = 0.001 and PEP = 0.5 for every PSM.
+        let dir = tempfile::tempdir().unwrap();
+        let (stems, t) = one_run_library(dir.path(), 0.5, None);
+        let build = |pep: Option<f64>| {
+            let set = rescore_scores(&t, &HashMap::new(), "t.tsv").unwrap();
+            build_and_write_library(
+                dir.path(),
+                &stems,
+                || Ok(PsmScores::Merged(set)),
+                0.01,
+                0.01,
+                pep,
+            )
+            .unwrap()
+        };
+        let open = build(None);
+        assert_eq!(open.library.entries.len(), 200);
+        let capped = build(Some(0.01));
+        assert!(
+            capped.library.entries.is_empty(),
+            "donors above the PEP cap"
+        );
+        assert_eq!(capped.donor_pep, Some(0.01));
+        assert_eq!(read_library(dir.path()).unwrap().donor_pep, Some(0.01));
+        assert_ne!(library_fingerprint(&open), library_fingerprint(&capped));
     }
 
     #[test]

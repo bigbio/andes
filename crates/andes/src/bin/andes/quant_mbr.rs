@@ -1022,6 +1022,7 @@ mod tests {
                 } else {
                     0.001
                 },
+                pep: 0.0,
                 is_decoy: false,
                 faims_cv: (faims && run == 1).then_some(FAIMS_CVS[p as usize % 2]),
             })
@@ -1037,7 +1038,7 @@ mod tests {
             min_anchors: 10,
             ..AlignParams::default()
         };
-        let lib = build_library(&psms, meta, N_RUNS, 1.0, DONOR_Q, &ap);
+        let lib = build_library(&psms, meta, N_RUNS, 1.0, DONOR_Q, None, &ap);
         let caches = (0..N_RUNS as u16)
             .map(|r| {
                 let path = dir.path().join(format!("run{r}.ms1cache"));
@@ -1503,7 +1504,7 @@ mod finalize_tests {
                 envelope: [0.55, 0.30, 0.11, 0.04],
             })
             .collect();
-        build_library(&[], meta, 2, 0.01, 0.01, &AlignParams::default())
+        build_library(&[], meta, 2, 0.01, 0.01, None, &AlignParams::default())
     }
 
     fn stems() -> Vec<String> {

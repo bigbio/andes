@@ -166,7 +166,7 @@ when a pipeline (e.g. quantms) owns rescoring. `--fdr`/`--pep` alone are ignored
 | `--rescore` | flag | *(off)* | Run Percolator and write rescored, filtered output. |
 | `--rescore-native` | flag | *(off)* | *(advanced)* Built-in GBDT rescorer (3-fold CV folded by spectrum); non-production fallback. |
 | `--fdr` | fraction | `0.01` | q-value threshold applied by a rescoring run. |
-| `--pep` | fraction | *(off)* | *(advanced)* PEP threshold, ANDed with `--fdr`. |
+| `--pep` | fraction | *(off)* | *(advanced)* PEP threshold, ANDed with `--fdr` (and with `--quant-fdr` for quantification targets and `--mbr` donors). |
 | `--percolator-bin` / `--percolator-docker` / `--percolator-image` / `--percolator-args` | — | auto | *(advanced)* Backend: `--percolator-bin`, else `$PATH`, else Docker; `--percolator-args` passes flags through. |
 | `--keep-pin` | bool | `true` | *(advanced)* Keep the intermediate PIN after rescoring. |
 
@@ -434,7 +434,7 @@ Written next to the PIN (or next to `--output-tsv`/`--output-parquet` under `--r
 | `<stem>.tmt.tsv` | one per quantified PSM | `filename scannr spec_id quant_scan quant_ms_level rt peptide charge proteins is_decoy psm_q_value psm_pep purity`, then one `tmt_<channel>` (or `itraq_<channel>`) per channel, then `raw_<...>` when a correction matrix was applied |
 | `<stem>.lfq.tsv` | one per (peptidoform, charge) at feature q ≤ `--lfq-feature-fdr` and cosine ≥ `--lfq-min-cosine` | `peptide charge proteins feature_q_value score cosine`, then the integrated area per input file |
 | `<stem>.lfq_features.tsv` | one per feature per run (all, with their q-value) | apex RT, boundaries, scan count, area, apex height, per-isotope areas, cosine, score, decoy score, feature q-value |
-| `<stem>.mbr.tsv` (`--mbr`, `andes quant finalize -o <stem>`) | one per (precursor, run) identified in or transferred into the run | `precursor_key run evidence_type quantity quantity_se transfer_q apex_rt_s library_q`; `evidence_type` is `identified` (the run has a target PSM of the precursor at PSM q ≤ `--quant-fdr`), `transfer_ms1` (transfer q ≤ `--mbr-fdr`) or `below_threshold` (quantity kept, as censored; in this table only); `transfer_q` and `library_q` are internal quant-quality values, not identification FDR; `NA` for missing values. Precursors that fail the library entry gate have no rows |
+| `<stem>.mbr.tsv` (`--mbr`, `andes quant finalize -o <stem>`) | one per (precursor, run) identified in or transferred into the run | `precursor_key run evidence_type quantity quantity_se transfer_q apex_rt_s library_q`; `evidence_type` is `identified` (the run has a target PSM of the precursor at PSM q ≤ `--quant-fdr` and, with `--pep`, PEP ≤ `--pep`), `transfer_ms1` (transfer q ≤ `--mbr-fdr`) or `below_threshold` (quantity kept, as censored; in this table only); `transfer_q` and `library_q` are internal quant-quality values, not identification FDR; `NA` for missing values. Precursors that fail the library entry gate have no rows |
 | `<stem>.mbr_validation.tsv` | one | pseudo-transfer validation (identified pairs re-measured as transfers: acceptance rate `pseudo_acceptance_*`, wrong-peak rate) and accepted transfer counts for the pooled and per-decoy-family estimates, at q ≤ 0.01 (`_q01`) and at `--mbr-fdr` (`_at_threshold`) |
 | `<dir>/quantms.feature.parquet` | one per feature (LFQ) or quantified PSM (isobaric) | the QPX feature view (`intensities` as `[{label, intensity}]` with `LFQ` or `TMT126`-style labels; `additional_intensities` with the raw/apex/isotope values; purity, cosine, q-values in `additional_scores`; `psm_ids` pointing at `psms.parquet` rows) |
 
@@ -804,7 +804,7 @@ directory (for a pipeline that scatters runs over machines):
 andes --spectrum a.mzML --database db.fasta --output-pin a.pin --quant-dir q/
 andes --spectrum b.mzML --database db.fasta --output-pin b.pin --quant-dir q/
 # once: the library, from each run's Percolator results
-andes quant library  --quant-dir q/ [--quant-fdr 0.01] \
+andes quant library  --quant-dir q/ [--quant-fdr 0.01] [--pep 0.05] \
       --psms a=a.target.psms --psms b=b.target.psms \
       --decoy-psms a=a.decoy.psms --decoy-psms b=b.decoy.psms
 # per run (any machine that sees q/); --lfq-tol as in the search, default 10ppm
@@ -826,18 +826,19 @@ scores from separately trained Percolator models are not on one scale.
 
 * **Library** (`quant library`). Reads every run's `<stem>.quant.parquet` (`--runs`, or every
   table in the directory; a missing table or cache is an error) and joins Percolator's
-  `score` and `q-value` to its PSMs on (run, SpecId) (target and decoy result files; every
+  `score`, `q-value` and PEP to its PSMs on (run, SpecId) (target and decoy result files; every
   PSM needs a finite `score`). Each joined PSM is checked against the result's residue sequence (flanks and
   modification notation ignored) and target/decoy file; a run where more than 1 % of the
   joined PSMs disagree fails, naming the run and the file (swapped or foreign results). Runs are indexed by sorted stem, precursors by sorted key. A precursor enters
   the library when its best-PSM target/decoy q-value over all runs is at most
   `--mbr-library-fdr` (an internal entry gate over every PSM's score, not a reported FDR) and
-  it has a target PSM at PSM q-value ≤ `--quant-fdr`. A run identifies the precursor (is a
-  donor) when it has such a PSM there: only those PSMs give the identified RT, the alignment
+  it has a target PSM at PSM q-value ≤ `--quant-fdr` (and PEP ≤ `--pep` when given, as for
+  the per-run quantification). A run identifies the precursor (is a donor) when it has such a
+  PSM there: only those PSMs give the identified RT, the alignment
   anchors and the `identified` rows. A run where the precursor has only PSMs above
-  `--quant-fdr` gets a transfer, with a transfer q-value, like a run without any PSM. In
-  process, `--quant-fdr` is the search's (default `--fdr`); `quant library --quant-fdr`
-  defaults to 0.01. A joint, reference-free
+  `--quant-fdr` (or above `--pep`) gets a transfer, with a transfer q-value, like a run without
+  any PSM. In process, `--quant-fdr` and `--pep` are the search's (default `--fdr`, no PEP
+  cap); `quant library --quant-fdr` defaults to 0.01 and `quant library --pep` to no cap. A joint, reference-free
   retention-time alignment maps every run onto a consensus scale and gives each transfer a
   predicted apex and its uncertainty. The per-run residual width is floored at 0.5 s. A run
   with fewer than 50 anchors, or whose anchors cover
@@ -883,7 +884,7 @@ entry gate are not in it (§3f).
 
 The stage path and the in-process run use the same code on the same files. With `--rescore`
 (Percolator) they give a byte-identical `<stem>.mbr.tsv` for the same Percolator results,
-`--quant-fdr` and `--lfq-tol`: pass the search's `<pin>.percolator.target.psms.txt` and
+`--quant-fdr`, `--pep` and `--lfq-tol`: pass the search's `<pin>.percolator.target.psms.txt` and
 `<pin>.percolator.decoy.psms.txt` to `quant library`. With `--rescore-native` the scores
 (held-out scores and q-values of the native rescorer) are only available in process;
 `quant library` has no input for them.

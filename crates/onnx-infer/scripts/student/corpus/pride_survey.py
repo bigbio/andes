@@ -70,7 +70,7 @@ def cmd_fetch(a):
         with open(a.out) as fh:
             for line in fh:
                 seen.add(json.loads(line)["accession"])
-        page = len(seen) // 100  # resume roughly; duplicates are skipped below
+        page = a.start_page if a.start_page is not None else len(seen) // 100  # duplicates are skipped
     with open(a.out, "a") as out:
         while True:
             rows, _ = get(f"{API}/projects?pageSize=100&page={page}")
@@ -121,9 +121,9 @@ TEXT_FLAGS = {
     "lab_silac": r"\bsilac\b|stable isotope labell?ing (by|with) amino",
     "lab_dimethyl": r"dimethyl labell?ing|reductive dimethyl",
     # enrichment / PTM focus
-    "enr_phospho": r"phospho|tio2|imac|fe-nta|ti-imac",
-    "enr_glyco": r"glyco|n-glycan|o-glycan|hilic enrich|lectin",
-    "enr_ubiquitin": r"ubiquitin|diglycine|di-glycine|k-[eε]-gg|\bgg[- ]remnant|ubiscan",
+    "enr_phospho": r"phosphoproteom|phosphopeptide|phospho-?enrich|\btio2\b|\bimac\b|fe-nta|ti-imac|ti4\+|phosphosite|phospho-?tyrosine (enrich|immuno)|py(100|1000)",
+    "enr_glyco": r"glycoproteom|glycopeptide|glyco-?site|n-glyco(syl|pep|form)|o-glyco(syl|pep|form)|intact glyco|glycoform|sialoglyco|\bhilic\b.{0,40}enrich|lectin.{0,40}enrich",
+    "enr_ubiquitin": r"ubiquitinom|ubiquitylom|ubiquitin remnant|diglycine|di-glycine|k-?[eε]-?gg|\bgg[- ]?remnant|ubiscan|ptmscan ubiquitin",
     "enr_acetyl": r"acetyl[- ]?(ome|lysine|ation enrich)|acetyl-lysine|lysine acetylation",
     "enr_methyl": r"methyl[- ]?(ome|arginine|lysine)|arginine methylation",
     "enr_succinyl_acyl": r"succinyl|crotonyl|malonyl|lactyl|glutaryl|hydroxybutyryl|propionyl",
@@ -213,7 +213,9 @@ def classify_one(r: dict) -> dict:
                         ("methyl", "enr_methyl", None), ("acyl", "enr_succinyl_acyl", None),
                         ("citrullination", "enr_citrullin", None), ("crosslink", "enr_crosslink", None),
                         ("ADP-ribosyl", "enr_adpr", None), ("histone", "enr_histone", None)):
-        if flags[f] or (cv and cv in ptm_names):
+        # a CV PTM alone is enough only for phospho / GG (they are rarely searched without enrichment)
+        if flags[f] or (cv and cv in ptm_names and name in ("phospho", "ubiquitin") and flags.get("enr_" + name, True)) \
+                or (cv and cv in ptm_names and name == "glyco"):
             enr.append(name)
     hla = []
     if flags["immunopeptidome"] or flags["hla_class1"] or flags["hla_class2"]:
@@ -391,11 +393,86 @@ def cmd_files(a):
     print(f"files summary -> {a.out}")
 
 
+# ----------------------------------------------------------------------------- rank
+# Gap value relative to the corpus we already hold (qpx: human, tryptic, Orbitrap HCD/CID,
+# LFQ + TMT10, 4 phospho sets; MsNet flats: PXD009875 HeLa FTMS-HCD + ITMS). See CORPUS.md.
+GAP_WEIGHTS = {
+    "hla": 6.0, "hla2_extra": 1.0, "nontryptic": 3.0, "etd_family": 3.0, "timsTOF": 4.0, "Astral": 4.0,
+    "TOF": 2.0, "IonTrap": 2.0, "ms2_IT": 2.0, "iTRAQ": 2.0, "TMTpro": 2.0, "TMT": 0.5, "SILAC": 0.5,
+    "ptm_rare": 3.0, "histone": 2.0, "glyco": 1.0, "phospho": 1.0, "synthetic": 3.0, "nonhuman": 0.5,
+    "many_ptms": 1.0, "complete": 3.0, "parseable_engine": 1.0, "open_licence": 0.5, "recent": 0.5,
+    "dia": -6.0, "crosslink": -3.0, "metaproteomics": -1.0,
+}
+PARSEABLE = {"MaxQuant", "MSFragger", "Sage", "Comet", "MS-GF+", "Mascot", "PEAKS", "ProteomeDiscoverer", "pFind",
+             "MetaMorpheus", "Byonic", "X!Tandem", "quantms", "OpenMS"}
+
+
+def gap_score(r: dict) -> tuple[float, list]:
+    g, why = 0.0, []
+
+    def add(k, cond=True):
+        nonlocal g
+        if cond:
+            g += GAP_WEIGHTS[k]
+            why.append(k)
+    enr = r["enrichment"].split("|")
+    add("hla", bool(r["hla"]))
+    add("hla2_extra", "HLA-II" in r["hla"])
+    enz = set(r["enzymes_text"].split("|")) - {""}
+    add("nontryptic", bool(enz - {"trypsin", "LysC"}) or bool(r["hla"]))
+    add("etd_family", bool(set(r["fragmentation_text"].split("|")) & {"ETD", "EThcD", "ECD", "UVPD"}))
+    fam = r["instrument_family"].split("|")
+    add("timsTOF", "timsTOF" in fam)
+    add("Astral", "Astral" in fam)
+    add("TOF", "QTOF" in fam)
+    add("IonTrap", "IonTrap" in fam)
+    add("ms2_IT", "IT" in r["ms2_analyser_text"])
+    add("iTRAQ", "iTRAQ" in r["labelling"])
+    add("TMTpro", "TMTpro" in r["ptms_cv"] or "UNIMOD:2016" in r["ptms_cv"])
+    add("TMT", "TMT" in r["labelling"])
+    add("SILAC", "SILAC" in r["labelling"])
+    add("ptm_rare", bool(set(enr) & {"ubiquitin", "acetyl", "methyl", "acyl", "citrullination", "ADP-ribosyl"}))
+    add("histone", "histone" in enr)
+    add("glyco", "glyco" in enr)
+    add("phospho", "phospho" in enr)
+    add("synthetic", r["synthetic"] == "1")
+    add("nonhuman", r["human"] == "0")
+    add("many_ptms", int(r["n_ptms_cv"] or 0) >= 6)
+    add("complete", r["submission_type"] == "COMPLETE")
+    add("parseable_engine", r["submission_type"] != "COMPLETE" and bool(set(r["software"].split("|")) & PARSEABLE))
+    add("open_licence", "Creative Commons" in r["licence"])
+    add("recent", (r["year"] or "0") >= "2018")
+    add("dia", r["dia"] == "1")
+    add("crosslink", "crosslink" in enr)
+    add("metaproteomics", r["metaproteomics"] == "1")
+    return g, why
+
+
+def cmd_rank(a):
+    rows = list(csv.DictReader(open(a.classified), delimiter="\t"))
+    excluded = {"PXD070049", "PXD001819", "PXD007683", "PXD007653", "PXD005553", "PXD002047"} | set(a.exclude)
+    out = []
+    for r in rows:
+        if r["accession"] in excluded:
+            continue
+        g, why = gap_score(r)
+        out.append((g, r["accession"], ",".join(why)))
+    out.sort(reverse=True)
+    with open(a.out, "w") as fh:
+        fh.write("accession\tgap_score\treasons\n")
+        for g, acc, why in out[: a.top]:
+            fh.write(f"{acc}\t{g:.1f}\t{why}\n")
+    print(f"top {a.top} of {len(out)} -> {a.out}")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     f = sub.add_parser("fetch")
     f.add_argument("--out", required=True)
+    f.add_argument("--start-page", type=int, default=None,
+                   help="page to start from (0 = full re-scan that only appends missing projects; "
+                        "the listing order is not stable across a long scan, so a second pass is normal)")
     c = sub.add_parser("classify")
     c.add_argument("--projects", required=True)
     c.add_argument("--out-dir", required=True)
@@ -403,8 +480,13 @@ def main():
     fl.add_argument("--accessions", required=True, help="one accession per line")
     fl.add_argument("--out", required=True)
     fl.add_argument("--sleep", type=float, default=0.2)
+    rk = sub.add_parser("rank")
+    rk.add_argument("--classified", required=True)
+    rk.add_argument("--out", required=True)
+    rk.add_argument("--top", type=int, default=800)
+    rk.add_argument("--exclude", nargs="*", default=[])
     a = p.parse_args()
-    {"fetch": cmd_fetch, "classify": cmd_classify, "files": cmd_files}[a.cmd](a)
+    {"fetch": cmd_fetch, "classify": cmd_classify, "files": cmd_files, "rank": cmd_rank}[a.cmd](a)
 
 
 if __name__ == "__main__":

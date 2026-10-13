@@ -35,6 +35,7 @@
 mod models;
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
@@ -310,10 +311,21 @@ fn main() {
     }
     let mut forms: Vec<(Form, Mass)> = Vec::new();
     let mut form_ix: HashMap<Form, usize> = HashMap::new();
+    // Columns a row needs; shorter rows, blank lines and rows whose ScanNr is not
+    // an integer (a `DefaultDirection` line, a truncated file) are skipped.
+    let n_cols = charge_cols.iter().map(|(i, _)| *i).chain([c_id, c_scan, c_pep]).max().unwrap() + 1;
     let mut rows = Vec::new();
+    let mut skipped_rows = 0usize;
     for line in lines {
         let line = line.unwrap();
         let x: Vec<&str> = line.split('\t').collect();
+        let scan = match x.get(c_scan).map(|v| v.trim().parse::<i32>()) {
+            Some(Ok(scan)) if x.len() >= n_cols => scan,
+            _ => {
+                skipped_rows += 1;
+                continue;
+            }
+        };
         let charge = charge_cols.iter().find(|(i, _)| x[*i] == "1").map_or(0, |(_, z)| *z);
         let form = parse_peptide(x[c_pep]).map(|(f, m)| {
             *form_ix.entry(f.clone()).or_insert_with(|| {
@@ -321,7 +333,10 @@ fn main() {
                 forms.len() - 1
             })
         });
-        rows.push(Row { id: x[c_id].to_string(), scan: x[c_scan].parse().unwrap(), charge, form });
+        rows.push(Row { id: x[c_id].to_string(), scan, charge, form });
+    }
+    if skipped_rows > 0 {
+        eprintln!("warning: skipped {skipped_rows} PIN lines (blank, short or non-numeric ScanNr)");
     }
     let unparsed = rows.iter().filter(|r| r.form.is_none() || r.charge == 0).count();
     eprintln!(
@@ -338,10 +353,25 @@ fn main() {
     let t = Instant::now();
     let (spectra, errs) = input::read_spectra_parallel(&args.mzml, 2, 2, args.threads).unwrap();
     assert!(errs.is_empty(), "mzML errors: {:?}", &errs[..errs.len().min(3)]);
+    // Spectra without a scan number cannot be joined to a PIN row; of duplicate
+    // scan numbers the first spectrum is kept. Both are counted, not fatal.
     let mut by_scan: HashMap<i32, usize> = HashMap::new();
+    let (mut no_scan, mut dup_scan) = (0usize, 0usize);
     for (i, s) in spectra.iter().enumerate() {
-        let scan = s.scan.expect("spectrum without scan number");
-        assert!(by_scan.insert(scan, i).is_none(), "duplicate scan {scan}");
+        match s.scan {
+            None => no_scan += 1,
+            Some(scan) => match by_scan.entry(scan) {
+                Entry::Occupied(_) => dup_scan += 1,
+                Entry::Vacant(e) => {
+                    e.insert(i);
+                }
+            },
+        }
+    }
+    if no_scan + dup_scan > 0 {
+        eprintln!(
+            "warning: skipped {no_scan} spectra without a scan number and {dup_scan} with a duplicate scan number"
+        );
     }
     eprintln!("mzML {} MS2 spectra ({:.1}s)", spectra.len(), t.elapsed().as_secs_f64());
 
@@ -418,7 +448,9 @@ fn main() {
     for r in &rows {
         let spec = by_scan.get(&r.scan).map(|&i| &spectra[i]);
         let obs_rt = spec.and_then(|s| s.rt_seconds).map_or(f64::NAN, |s| s / 60.0);
+        // A non-finite prediction (overflow in a model) is missing, not a value.
         let irt = r.form.map_or(f32::NAN, |f| rt_pred[f]);
+        let irt = if irt.is_finite() { irt } else { f32::NAN };
         let ms2 = match (r.form, spec) {
             (Some(f), Some(s)) => fz_ix.get(&(f, r.charge)).map(|&k| {
                 ms2_features(&ms2_pred[k], pred.ions(), &forms[f].1, r.charge, &s.peaks, args.frag_tol, args.frag_ppm)

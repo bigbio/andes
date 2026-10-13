@@ -8,7 +8,7 @@ features follow (NA without an MS2 model).
 
 Per source:
 
-* RT: the raw prediction is calibrated to observed RT on confident target
+* RT (only for a source some --arm uses as ``SRC:rt``): the raw prediction is calibrated to observed RT on confident target
   PSMs (q <= --calib-q in the baseline Percolator run) with a binned-median
   curve; ``<src>_rt_diff = |observed - calibrated|`` and
   ``<src>_predicted_rt`` are written for every row.
@@ -78,8 +78,9 @@ def col_with_suffix(df, suffix):
     return cols[0]
 
 
-def blocks_for(src, path, ids, labels, conf, a):
-    """Return {"ms2": DataFrame, "rt": DataFrame} of imputed, prefixed features."""
+def blocks_for(src, path, ids, labels, conf, a, want_rt):
+    """Return {"ms2": DataFrame, "rt": DataFrame} of imputed, prefixed features;
+    "rt" (and its calibration) only when ``want_rt``."""
     feat = pd.read_csv(path, sep="\t", na_values="NA", quoting=csv.QUOTE_NONE)
     assert len(feat) == len(ids) and (feat.SpecId.values == ids).all(), f"{src}: row order"
     miss = feat[col_with_suffix(feat, "_missing")].values.astype(int)
@@ -95,7 +96,7 @@ def blocks_for(src, path, ids, labels, conf, a):
         v[bad] = np.median(v[~bad])
         return v
 
-    if np.isfinite(irt).any():
+    if want_rt and np.isfinite(irt).any():
         ok = (miss == 0) & np.isfinite(irt) & np.isfinite(obs)
         cm = is_conf & ok & (labels == 1)
         cal = calibrate(irt[cm], obs[cm], a.bins)
@@ -136,16 +137,20 @@ def main():
             if float(x[qi]) <= a.calib_q:
                 conf.add(x[0])
 
+    rt_srcs = {part.split(":")[0] for arm in a.arm for part in arm.split("=", 1)[1].split(",")
+               if part.split(":")[1] == "rt"}
     blocks = {}
     for spec in a.features:
         src, path = spec.split("=", 1)
-        blocks[src] = blocks_for(src, path, ids, labels, conf, a)
+        blocks[src] = blocks_for(src, path, ids, labels, conf, a, src in rt_srcs)
 
     for arm in a.arm:
         name, parts = arm.split("=", 1)
         frames, srcs = [], []
         for part in parts.split(","):
             src, kind = part.split(":")
+            if kind not in blocks[src]:
+                raise SystemExit(f"--arm {name}: {src} has no {kind} predictions")
             frames.append(blocks[src][kind])
             if src not in srcs:
                 srcs.append(src)

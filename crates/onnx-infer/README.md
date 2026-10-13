@@ -118,7 +118,9 @@ use onnx_infer::{BackendKind, OnnxSession};
 
 let policy = TopNPolicy::new(5)?;
 let _ = ALPHAPEPTDEEP_CORE_FEATURES;
-let batch = pack_rt_inputs(&["PEPTIDE", "SAMPLER"], 30)?;
+// PeptDeep does not mask padding: batch peptides of one length and pass that
+// length as seq_len (right-padding a shorter peptide changes its prediction).
+let batch = pack_rt_inputs(&["PEPTIDE", "SAMPLER"], 7)?;
 // let mut session = OnnxSession::from_manifest("models/peptdeep_rt_dynamic.json", BackendKind::Ort)?;
 // session.run(&batch.as_inputs())?;
 let _ = (policy, batch, NCE_DEFAULT, BackendKind::Tract);

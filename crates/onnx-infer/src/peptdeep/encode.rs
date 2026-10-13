@@ -8,10 +8,13 @@
 use crate::error::{Error, Result};
 
 /// Mod-element channel count in PeptDeep pretrained v3 (`model_const["mod_elements"]`).
-/// Overridable via manifest `extras.mod_hidden`.
+/// `export_peptdeep_to_onnx.py` records the exported graph's count in manifest
+/// `extras.mod_hidden`; nothing here reads it. For another count use the packers
+/// that take `mod_dim` (`pack_rt_batch`, `pack_ms2_batch`, `pack_rt_inputs_with_mod_dim`).
 pub const MOD_ELEMENT_COUNT: usize = 109;
 
-/// PeptDeep index of one residue: ASCII position in `A..=Z`, 1-based.
+/// PeptDeep index of one residue: ASCII position in `A..=Z`, 1-based; a lowercase
+/// letter is read as its uppercase. `None` for anything that is not an ASCII letter.
 pub fn aa_index(c: char) -> Option<i64> {
     let c = c.to_ascii_uppercase();
     c.is_ascii_uppercase().then(|| c as i64 - 'A' as i64 + 1)
@@ -26,7 +29,8 @@ pub fn aa_index(c: char) -> Option<i64> {
 /// its prediction. Batch peptides of equal length with `seq_len == seq.len()`
 /// to reproduce peptdeep's output.
 ///
-/// A character outside `A..=Z` or a peptide longer than `seq_len` is an error.
+/// A character that is not an ASCII letter, or a peptide longer than `seq_len`,
+/// is an error; lowercase letters are read as uppercase.
 pub fn encode_aa_sequence(seq: &str, seq_len: usize) -> Result<Vec<i64>> {
     if seq_len == 0 {
         return Err(Error::InvalidArg("seq_len must be ≥ 1".into()));

@@ -11,7 +11,9 @@ Rows of --holdout-datasets and the "test" split never train. Ablations:
 --exclude-phospho drops every phospho peptidoform; --exclude-tmt drops every
 TMT-labelled one. Few-shot: --init a checkpoint, --fewshot-ptm phospho|tmt and
 --fewshot-n N add N train-split peptidoforms of that PTM (all their runs) and
-fine-tune on half PTM / half general batches.
+fine-tune on half PTM / half general batches. Every other peptidoform of that
+PTM is dropped from train and val (as with --exclude-<ptm>), so the N picked
+ones are the only PTM rows the model sees.
 """
 from __future__ import annotations
 
@@ -136,9 +138,9 @@ def main():
           f"device {dev}, load {time.time() - t0:.0f}s", flush=True)
 
     base = (~t.holdout) & (t.split != "test")
-    if a.exclude_phospho:
+    if a.exclude_phospho or a.fewshot_ptm == "phospho":
         base &= ~t.has_phospho
-    if a.exclude_tmt:
+    if a.exclude_tmt or a.fewshot_ptm == "tmt":
         base &= ~t.has_tmt
     train = t[base & (t.split == "train")]
     val = t[base & (t.split == "val")]

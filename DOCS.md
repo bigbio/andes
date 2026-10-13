@@ -48,7 +48,7 @@ Native `.raw`/`.d` search MS2 only (MS3 reporter scans are filtered at load).
 | `--max-missed-cleavages` | u32 | `1` | Missed cleavages per peptide. | Java `-maxMissedCleavages 1` |
 | `--min-length` | u32 | `6` | Minimum peptide length. | Java `-minLength 6` |
 | `--max-length` | u32 | `50` | Maximum peptide length. | Java `-maxLength 40` |
-| `--top-n` | u32 | `10` | PSMs kept per spectrum. | Java `-n 10` |
+| `--top-n` | u32 | `10` | PSMs kept per spectrum (before positional isomers are collapsed in the output, see §3a). | Java `-n 10` |
 | `--isotope-error` | `MIN..MAX` | `-1..2` | Isotope-error offsets tried. | Java `-ti -1,2` |
 | `--min-peaks` | u32 | `10` | Spectra with fewer MS2 peaks are skipped. | Java `-minNumPeaks 10` |
 
@@ -266,7 +266,11 @@ Percolator `.pin` (always), plus optional `.tsv` and QPX parquet. Implementation
 
 ### 3a. PIN columns
 
-Tab-separated, one row per PSM, best-first within each spectrum by `RankScore`. The `chargeN`
+Tab-separated, one row per PSM, best-first within each spectrum by `RankScore`. Positional
+isomers are collapsed: of the PSMs a spectrum keeps at one precursor and charge that share their
+residues and their multiset of modification masses (the same peptide with a modification on
+another site), only the best-ranked row is written. The TSV and QPX outputs carry the same rows.
+Rank is assigned after the collapse. The `chargeN`
 one-hots follow `--charge`; the default 2–5 gives the 66 columns below. Do not confuse
 **`RankScore`** (col 7, orders candidates; historically `RawScore`) with **`RawScore`** (col 62,
 the fused strong score Percolator weights most; historically `StrongScore`; it also ranks under

@@ -1,0 +1,45 @@
+stratum	all	COMPLETE	COMPLETE_DDA
+total	41465	6949	6713
+human	19874	2978	2865
+DIA (text)	5487	236	0
+instr: Q Exactive family	15799	2464	2421
+instr: Exploris	2947	402	378
+instr: Tribrid (Fusion/Lumos/Eclipse/Ascend)	9862	1658	1630
+instr: LTQ-Orbitrap hybrid (Velos/Elite/XL)	7037	1624	1616
+instr: Astral	435	12	6
+instr: timsTOF	2467	174	165
+instr: other Q-TOF (SCIEX/Waters/Agilent/Bruker)	3720	642	520
+instr: ion trap only	569	147	147
+instr: FT-ICR	210	41	41
+MS2 in ion trap (text)	2719	570	565
+frag: HCD (text)	11423	1782	1750
+frag: CID (text)	4699	941	925
+frag: ETD (text)	529	87	86
+frag: EThcD (text)	338	42	42
+frag: ECD/UVPD (text)	43	4	4
+lab: TMT (any)	5888	863	846
+lab: TMTpro	1418	256	253
+lab: iTRAQ	1327	180	176
+lab: SILAC	2151	159	154
+enr: phospho	3435	555	544
+enr: glyco	1056	169	165
+enr: ubiquitin/GG	374	37	37
+enr: acetyl	478	69	65
+enr: methyl	163	19	18
+enr: acyl (succ/cro/mal/lac/...)	486	46	43
+enr: citrullination	88	14	12
+enr: ADP-ribosyl	132	21	21
+enr: histone	1347	194	187
+enr: crosslink	2237	339	338
+HLA / immunopeptidome	509	137	131
+HLA-I	402	112	110
+HLA-II	139	36	33
+enz: GluC	414	73	69
+enz: AspN	200	39	38
+enz: chymotrypsin	562	129	122
+enz: ArgC	208	43	43
+enz: LysN	28	0	0
+enz: nonspecific (text)	1847	327	318
+synthetic peptides	497	92	91
+plasma/serum	5897	1058	1001
+licence CC0	34347	5370	5172

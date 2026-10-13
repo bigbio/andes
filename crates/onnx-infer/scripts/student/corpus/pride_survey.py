@@ -87,7 +87,7 @@ def cmd_fetch(a):
             if len(rows) < 100:
                 break
     print(f"{len(seen)} unique projects fetched; API count {total}")
-    if len(seen) < total:
+    if len(seen) < total and not a.allow_short:
         sys.exit(f"SHORT LISTING: {total - len(seen)} projects missing; rerun (resumes) before using")
 
 
@@ -117,13 +117,15 @@ TEXT_FLAGS = {
     "ms2_orbitrap": r"(ms2|ms/ms|fragment).{0,80}orbitrap|orbitrap.{0,40}(ms2|ms/ms)|resolution of 1[57],?[05]00|17,?500|15,?000 (resolution|at m/z)",
     # labelling
     "lab_tmt": r"\btmt|tandem mass tag|tmtpro|tmt10|tmt11|tmt16|tmt18",
+    "lab_tmtpro": r"tmt ?pro|16-?plex tmt|tmt ?16|tmt ?18|18-?plex",
     "lab_itraq": r"\bitraq",
     "lab_silac": r"\bsilac\b|stable isotope labell?ing (by|with) amino",
     "lab_dimethyl": r"dimethyl labell?ing|reductive dimethyl",
     # enrichment / PTM focus
     "enr_phospho": r"phosphoproteom|phosphopeptide|phospho-?enrich|\btio2\b|\bimac\b|fe-nta|ti-imac|ti4\+|phosphosite|phospho-?tyrosine (enrich|immuno)|py(100|1000)",
     "enr_glyco": r"glycoproteom|glycopeptide|glyco-?site|n-glyco(syl|pep|form)|o-glyco(syl|pep|form)|intact glyco|glycoform|sialoglyco|\bhilic\b.{0,40}enrich|lectin.{0,40}enrich",
-    "enr_ubiquitin": r"ubiquitinom|ubiquitylom|ubiquitin remnant|diglycine|di-glycine|k-?[eε]-?gg|\bgg[- ]?remnant|ubiscan|ptmscan ubiquitin",
+    # note: no bare "kegg"-like pattern - "k-?e-?gg" matched every KEGG pathway analysis
+    "enr_ubiquitin": r"ubiquitinom|ubiquitylom|ubiquitin remnant|diglycine|di-glycine|gly-gly|k-[eε]-gg|\bgg[- ]remnant|ubiscan|ptmscan ubiquitin|ubiquitin.{0,30}enrich",
     "enr_acetyl": r"acetyl[- ]?(ome|lysine|ation enrich)|acetyl-lysine|lysine acetylation",
     "enr_methyl": r"methyl[- ]?(ome|arginine|lysine)|arginine methylation",
     "enr_succinyl_acyl": r"succinyl|crotonyl|malonyl|lactyl|glutaryl|hydroxybutyryl|propionyl",
@@ -135,11 +137,12 @@ TEXT_FLAGS = {
     "enr_histone": r"histone",
     "hla_class1": r"hla[- ]?(class[- ]?)?(i\b|a\b|b\b|c\b|-a|-b|-c)|mhc[- ]?(class[- ]?)?i\b|w6/32|hla class i\b|class i hla",
     "hla_class2": r"hla[- ]?(class[- ]?)?ii\b|hla-dr|hla-dq|hla-dp|mhc[- ]?(class[- ]?)?ii\b|l243|class ii",
-    "immunopeptidome": r"immunopeptid|hla[- ]?peptid|mhc[- ]?peptid|hla ligand|mhc ligand|ligandome|hla-bound|mhc-bound|neoantigen|antigen presentation",
+    # strong evidence only: "neoantigen" / "antigen presentation" alone flagged proteogenomics papers
+    "immunopeptidome": r"immunopeptidom|hla[- ]?(class[- ]?i{1,2}[- ])?peptidom|mhc[- ]?(class[- ]?i{1,2}[- ])?peptidom|hla ligand|mhc ligand|ligandom|hla-bound|mhc-bound|hla-associated peptid|mhc-associated peptid|eluted (hla|mhc)|(hla|mhc).{0,40}(immunoprecipitat|immunoaffinity|elut)",
     # enzyme
     "enz_trypsin": r"tryps",
     "enz_lysc": r"lys-?c\b|lysc",
-    "enz_gluc": r"glu-?c\b|gluc|v8 protease",
+    "enz_gluc": r"\bglu-?c\b|endoproteinase glu|v8 protease",
     "enz_aspn": r"asp-?n\b|aspn",
     "enz_chymo": r"chymotryp",
     "enz_argc": r"arg-?c\b|argc",
@@ -177,6 +180,8 @@ def classify_one(r: dict) -> dict:
         "title", "projectDescription", "sampleProcessingProtocol", "dataProcessingProtocol"))
     text += " " + " ".join(r.get("keywords") or []) + " " + " ".join(r.get("projectTags") or [])
     t = text.lower()
+    # instrument names ("Orbitrap Fusion ETD", "Orbitrap Elite ETD") are not evidence of ETD spectra
+    t = re.sub(r"(fusion|lumos|tribrid|elite|velos|orbitrap|ltq)\s*(lumos\s*)?(tribrid\s*)?etd", " ", t)
     flags = {k: bool(rx.search(t)) for k, rx in _TEXT_RE.items()}
 
     analysers, families = set(), set()
@@ -204,9 +209,13 @@ def classify_one(r: dict) -> dict:
     if "silac" in quant or "label:13c(6)" in ptm_names:
         lab.append("SILAC")
     lab_src = "cv" if lab else "text"
+    if "TMT" in lab and (flags["lab_tmtpro"] or "unimod:2016" in ptm_names):
+        lab.append("TMTpro")
     if not lab:
         lab = [n for n, f in (("TMT", "lab_tmt"), ("iTRAQ", "lab_itraq"), ("SILAC", "lab_silac"),
                               ("dimethyl", "lab_dimethyl")) if flags[f]]
+        if "TMT" in lab and flags["lab_tmtpro"]:
+            lab.append("TMTpro")
     enr = []
     for name, f, cv in (("phospho", "enr_phospho", "unimod:21:"), ("glyco", "enr_glyco", "hexnac"),
                         ("ubiquitin", "enr_ubiquitin", "unimod:121:"), ("acetyl", "enr_acetyl", None),
@@ -218,13 +227,12 @@ def classify_one(r: dict) -> dict:
                 or (cv and cv in ptm_names and name == "glyco"):
             enr.append(name)
     hla = []
-    if flags["immunopeptidome"] or flags["hla_class1"] or flags["hla_class2"]:
-        if flags["immunopeptidome"] or (flags["hla_class1"] and "peptid" in t) or (flags["hla_class2"] and "peptid" in t):
-            hla.append("HLA")
-            if flags["hla_class1"]:
-                hla.append("HLA-I")
-            if flags["hla_class2"]:
-                hla.append("HLA-II")
+    if flags["immunopeptidome"]:
+        hla.append("HLA")
+        if flags["hla_class1"]:
+            hla.append("HLA-I")
+        if flags["hla_class2"]:
+            hla.append("HLA-II")
     frag = [n for n, f in (("ETD", "frag_etd"), ("EThcD", "frag_ethcd"), ("ECD", "frag_ecd"), ("UVPD", "frag_uvpd"),
                            ("CID", "frag_cid"), ("HCD", "frag_hcd")) if flags[f]]
     ms2 = []
@@ -313,9 +321,11 @@ def cmd_classify(a):
 
 # ----------------------------------------------------------------------------- files
 FORMAT_RULES = [
-    ("mzIdentML", r"\.mzid(\.gz|\.zip)?$"),
+    ("mzIdentML", r"\.mzid(\.gz|\.zip)?$|mzidentml[^/]*\.xml(\.gz)?$"),
     ("mzTab", r"\.mztab(\.gz|\.zip)?$"),
-    ("PRIDE_XML", r"\.(pride\.)?xml(\.gz)?$"),
+    # PRIDE XML files are PRIDE_Exp_*.xml; a bare ".xml" is usually mqpar.xml or a Mascot export
+    ("PRIDE_XML", r"pride_exp[^/]*\.xml(\.gz)?$|\.pride\.xml(\.gz)?$"),
+    ("Mascot_xml_dat", r"mascot[^/]*\.xml$|\.dat$|f\d{6}\.xml$"),
     ("pepXML", r"\.pep\.xml(\.gz)?$|\.pepxml(\.gz)?$"),
     ("MaxQuant", r"msms\.txt|evidence\.txt|txt\.zip$|combined.*\.zip$|maxquant|_txt\.zip$|/txt/"),
     ("FragPipe", r"psm\.tsv$|fragpipe|\.pin$"),
@@ -369,10 +379,13 @@ def cmd_files(a):
             except Exception as e:  # noqa: BLE001 - keep going; record the failure
                 fh.write(f"{acc}\t-1\t-1\t0\tERROR {e}\t\t0\t0\t0\t0\t0\tunknown\t\n")
                 continue
+            with open(a.out + ".listing.jsonl", "a") as lf:
+                lf.write(json.dumps({"accession": acc, "files": [
+                    [f.get("fileName"), (f.get("fileCategory") or {}).get("value"), f.get("fileSizeBytes")] for f in files]}) + "\n")
             cats = collections.Counter((f.get("fileCategory") or {}).get("value", "?") for f in files)
             fmts = collections.Counter(k for f in files for k in file_formats(f.get("fileName", "")))
             raw = [f for f in files if (f.get("fileCategory") or {}).get("value") == "RAW"]
-            ident = {"mzIdentML", "mzTab", "PRIDE_XML", "pepXML", "MaxQuant", "FragPipe", "Sage", "PD_msf"}
+            ident = {"mzIdentML", "mzTab", "PRIDE_XML", "pepXML", "MaxQuant", "FragPipe", "Sage", "PD_msf", "Mascot_xml_dat"}
             peaks = fmts["mzML"] + fmts["MGF"] + fmts["MS2/apl"]
             has_id = sorted(k for k in ident if fmts[k])
             if fmts["mzIdentML"] or fmts["mzTab"] or fmts["PRIDE_XML"]:
@@ -428,7 +441,7 @@ def gap_score(r: dict) -> tuple[float, list]:
     add("IonTrap", "IonTrap" in fam)
     add("ms2_IT", "IT" in r["ms2_analyser_text"])
     add("iTRAQ", "iTRAQ" in r["labelling"])
-    add("TMTpro", "TMTpro" in r["ptms_cv"] or "UNIMOD:2016" in r["ptms_cv"])
+    add("TMTpro", "TMTpro" in r["labelling"])
     add("TMT", "TMT" in r["labelling"])
     add("SILAC", "SILAC" in r["labelling"])
     add("ptm_rare", bool(set(enr) & {"ubiquitin", "acetyl", "methyl", "acyl", "citrullination", "ADP-ribosyl"}))
@@ -465,6 +478,56 @@ def cmd_rank(a):
     print(f"top {a.top} of {len(out)} -> {a.out}")
 
 
+# ----------------------------------------------------------------------------- summary
+def cmd_summary(a):
+    """Headline stratum counts (projects) for all / COMPLETE / COMPLETE-and-not-DIA submissions."""
+    import pandas as pd
+
+    d = pd.read_csv(a.classified, sep="\t", dtype=str).fillna("")
+
+    def has(col, v):
+        return lambda x: x[col].str.split("|").apply(lambda l: v in l)
+
+    def con(col, pat):
+        return lambda x: x[col].str.contains(pat, regex=True)
+    strata = {
+        "total": lambda x: pd.Series(True, index=x.index), "human": lambda x: x.human == "1",
+        "DIA (text)": lambda x: x.dia == "1",
+        "instr: Q Exactive family": has("instrument_family", "QExactive"),
+        "instr: Exploris": has("instrument_family", "Exploris"),
+        "instr: Tribrid (Fusion/Lumos/Eclipse/Ascend)": has("instrument_family", "Tribrid"),
+        "instr: LTQ-Orbitrap hybrid (Velos/Elite/XL)": has("instrument_family", "LTQ-Orbitrap"),
+        "instr: Astral": has("instrument_family", "Astral"), "instr: timsTOF": has("instrument_family", "timsTOF"),
+        "instr: other Q-TOF (SCIEX/Waters/Agilent/Bruker)": has("instrument_family", "QTOF"),
+        "instr: ion trap only": has("instrument_family", "IonTrap"), "instr: FT-ICR": has("instrument_family", "FT-ICR"),
+        "MS2 in ion trap (text)": con("ms2_analyser_text", "IT"),
+        "frag: HCD (text)": has("fragmentation_text", "HCD"), "frag: CID (text)": has("fragmentation_text", "CID"),
+        "frag: ETD (text)": has("fragmentation_text", "ETD"), "frag: EThcD (text)": has("fragmentation_text", "EThcD"),
+        "frag: ECD/UVPD (text)": con("fragmentation_text", "ECD|UVPD"),
+        "lab: TMT (any)": has("labelling", "TMT"), "lab: TMTpro": has("labelling", "TMTpro"),
+        "lab: iTRAQ": has("labelling", "iTRAQ"), "lab: SILAC": has("labelling", "SILAC"),
+        "enr: phospho": has("enrichment", "phospho"), "enr: glyco": has("enrichment", "glyco"),
+        "enr: ubiquitin/GG": has("enrichment", "ubiquitin"), "enr: acetyl": has("enrichment", "acetyl"),
+        "enr: methyl": has("enrichment", "methyl"), "enr: acyl (succ/cro/mal/lac/...)": has("enrichment", "acyl"),
+        "enr: citrullination": has("enrichment", "citrullination"), "enr: ADP-ribosyl": has("enrichment", "ADP-ribosyl"),
+        "enr: histone": has("enrichment", "histone"), "enr: crosslink": has("enrichment", "crosslink"),
+        "HLA / immunopeptidome": lambda x: x.hla != "", "HLA-I": con("hla", r"HLA-I(?:\||$)"),
+        "HLA-II": con("hla", "HLA-II"),
+        "enz: GluC": has("enzymes_text", "GluC"), "enz: AspN": has("enzymes_text", "AspN"),
+        "enz: chymotrypsin": has("enzymes_text", "chymotrypsin"), "enz: ArgC": has("enzymes_text", "ArgC"),
+        "enz: LysN": has("enzymes_text", "LysN"), "enz: nonspecific (text)": has("enzymes_text", "nonspecific"),
+        "synthetic peptides": lambda x: x.synthetic == "1", "plasma/serum": lambda x: x.plasma == "1",
+        "licence CC0": con("licence", "CC0"),
+    }
+    sub = {"all": d, "COMPLETE": d[d.submission_type == "COMPLETE"],
+           "COMPLETE_DDA": d[(d.submission_type == "COMPLETE") & (d.dia != "1")]}
+    rows = [[k] + [int(f(v).sum()) for v in sub.values()] for k, f in strata.items()]
+    t = pd.DataFrame(rows, columns=["stratum"] + list(sub))
+    t.to_csv(a.out, sep="\t", index=False)
+    print(t.to_string(index=False))
+    print(pd.crosstab(d.year, d.submission_type).to_string())
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -473,6 +536,9 @@ def main():
     f.add_argument("--start-page", type=int, default=None,
                    help="page to start from (0 = full re-scan that only appends missing projects; "
                         "the listing order is not stable across a long scan, so a second pass is normal)")
+    f.add_argument("--allow-short", action="store_true",
+                   help="accept a listing shorter than /projects/count after a full re-scan found nothing new "
+                        "(2026-10-13: two passes gave 41,465 of 42,027; sampled unlisted PXDs return 404)")
     c = sub.add_parser("classify")
     c.add_argument("--projects", required=True)
     c.add_argument("--out-dir", required=True)
@@ -485,8 +551,12 @@ def main():
     rk.add_argument("--out", required=True)
     rk.add_argument("--top", type=int, default=800)
     rk.add_argument("--exclude", nargs="*", default=[])
+    sm = sub.add_parser("summary")
+    sm.add_argument("--classified", required=True)
+    sm.add_argument("--out", required=True)
     a = p.parse_args()
-    {"fetch": cmd_fetch, "classify": cmd_classify, "files": cmd_files, "rank": cmd_rank}[a.cmd](a)
+    {"fetch": cmd_fetch, "classify": cmd_classify, "files": cmd_files, "rank": cmd_rank,
+     "summary": cmd_summary}[a.cmd](a)
 
 
 if __name__ == "__main__":

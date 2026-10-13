@@ -18,7 +18,7 @@
 
 use std::io::{self, BufWriter, Write};
 
-use crate::row_context::{iter_ranked_by_rank_score, RowContext};
+use crate::row_context::{emitted_rows, RowContext};
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;
 use model::tolerance::Tolerance;
@@ -210,7 +210,7 @@ fn write_spectrum_rows<W: Write>(
         ppm_mode: matches!(params.precursor_tolerance.left, Tolerance::Ppm(_)),
     };
 
-    let ranked: Vec<(u32, &PsmMatch)> = iter_ranked_by_rank_score(&psms).collect();
+    let ranked: Vec<(u32, &PsmMatch)> = emitted_rows(spec, &psms, candidates);
     for (_rank, psm) in ranked {
         let cand = &candidates[psm.primary_candidate_idx() as usize];
         let ctx = RowContext::new(spec, cand, search_index);

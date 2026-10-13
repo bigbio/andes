@@ -56,16 +56,19 @@ pub(crate) fn resolve_accession(cand: &Candidate, search_index: &SearchIndex) ->
     }
 }
 
-/// Iterate a slice of PSMs (pre-sorted best-first by `rank_score` descending)
-/// yielding `(rank, psm)`. Rank is 1-based and increments when `rank_score`
-/// changes — ties share the same rank. `rank_score` (RawScore) is the sole
-/// ranking signal now that the generating function is removed.
-pub(crate) fn iter_ranked_by_rank_score(
-    queue_sorted: &[PsmMatch],
-) -> impl Iterator<Item = (u32, &PsmMatch)> {
+/// Iterate PSMs (pre-sorted best-first by `rank_score` descending) yielding
+/// `(rank, psm)`. Rank is 1-based and increments when `rank_score` changes —
+/// ties share the same rank. `rank_score` (RawScore) is the sole ranking
+/// signal now that the generating function is removed.
+pub(crate) fn iter_ranked_by_rank_score<'a, I>(
+    queue_sorted: I,
+) -> impl Iterator<Item = (u32, &'a PsmMatch)>
+where
+    I: IntoIterator<Item = &'a PsmMatch>,
+{
     let mut rank = 0u32;
     let mut prev_rs: Option<f32> = None;
-    queue_sorted.iter().map(move |psm| {
+    queue_sorted.into_iter().map(move |psm| {
         // Two NaN scores tie (NaNs collapse into one worst-score bucket in the
         // training/gate paths), so a run of NaN-scored PSMs must share one rank
         // rather than each starting a new one as `!= f32::NAN` would do.
@@ -78,4 +81,77 @@ pub(crate) fn iter_ranked_by_rank_score(
         }
         (rank, psm)
     })
+}
+
+/// Identity of a PSM up to the placement of its modifications: the precursor it
+/// was matched at, its charge, its residues, and the sorted multiset of its
+/// modification mass deltas (terminal mods included, since they are carried on
+/// the terminal residue). Two PSMs with equal keys are positional isomers — the
+/// same peptide with the same modifications on different sites.
+#[derive(PartialEq, Eq)]
+struct IsomerKey {
+    precursor_mz_bits: u64,
+    charge: u8,
+    residues: Vec<u8>,
+    /// Mod deltas at the 5-decimal precision of the PIN `Peptide` column.
+    mod_deltas: Vec<i64>,
+}
+
+impl IsomerKey {
+    fn new(spectrum_precursor_mz: f64, psm: &PsmMatch, cand: &Candidate) -> Self {
+        let residues = cand.peptide.residues.iter().map(|aa| aa.residue).collect();
+        let mut mod_deltas: Vec<i64> = cand
+            .peptide
+            .residues
+            .iter()
+            .filter_map(|aa| aa.mod_.map(|m| (m.mass_delta * 1e5).round() as i64))
+            .collect();
+        mod_deltas.sort_unstable();
+        Self {
+            precursor_mz_bits: psm
+                .precursor_mz_override
+                .unwrap_or(spectrum_precursor_mz)
+                .to_bits(),
+            charge: psm.charge_used,
+            residues,
+            mod_deltas,
+        }
+    }
+}
+
+/// The rows one spectrum emits, as `(rank, psm)` in emission order.
+///
+/// `psms_sorted` is the spectrum's queue sorted best-first
+/// (`TopNQueue::into_rank_sorted_vec`). Positional isomers are
+/// collapsed: of the PSMs sharing an [`IsomerKey`] (same precursor, charge,
+/// residues and modification-mass multiset), only the first in rank order is
+/// emitted. Site alternatives of one peptide score almost identically and would
+/// otherwise crowd the per-spectrum competition downstream (Percolator keeps the
+/// best PSM of each spectrum), so one row carries the peptide. Chimeric
+/// secondaries are matched at their own precursor and never collapse into the
+/// primary. Ranks are assigned over the emitted rows (dense, 1-based, ties
+/// shared), so they stay contiguous after the collapse.
+///
+/// Every writer that emits per-PSM rows (PIN, TSV, QPX) goes through this, so
+/// the same rows — and the same `SpecId`s — appear in each.
+pub(crate) fn emitted_rows<'a>(
+    spec: &Spectrum,
+    psms_sorted: &'a [PsmMatch],
+    candidates: &[Candidate],
+) -> Vec<(u32, &'a PsmMatch)> {
+    let mut kept: Vec<&PsmMatch> = Vec::with_capacity(psms_sorted.len());
+    if psms_sorted.len() <= 1 {
+        kept.extend(psms_sorted);
+    } else {
+        let mut keys: Vec<IsomerKey> = Vec::with_capacity(psms_sorted.len());
+        for psm in psms_sorted {
+            let cand = &candidates[psm.primary_candidate_idx() as usize];
+            let key = IsomerKey::new(spec.precursor_mz, psm, cand);
+            if !keys.contains(&key) {
+                keys.push(key);
+                kept.push(psm);
+            }
+        }
+    }
+    iter_ranked_by_rank_score(kept).collect()
 }

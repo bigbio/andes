@@ -247,9 +247,7 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
 /// Percolator `-Y` result for a PIN: per (ScanNr, ExpMass) group only the
 /// highest-scoring row survives, in the target file (a target) or the decoy file
 /// (a decoy). Returns (target map, decoy SpecIds, number of target rows removed).
-fn competition_result(
-    pin_path: &Path,
-) -> (HashMap<String, PercolatorPsm>, HashSet<String>, usize) {
+fn competition_result(pin_path: &Path) -> (HashMap<String, PercolatorPsm>, HashSet<String>, usize) {
     let text = std::fs::read_to_string(pin_path).unwrap();
     let mut lines = text.lines();
     let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
@@ -321,7 +319,10 @@ fn qpx_join_accepts_targets_removed_by_target_decoy_competition() {
     output::write_pin(&pin_path, &spectra, &queues, &candidates, &params, &idx).unwrap();
     let (targets, decoys, removed) = competition_result(&pin_path);
     let pin_rows = pin_spec_ids(&pin_path).len();
-    assert!(removed > 0, "the fixture must have groups with several rows");
+    assert!(
+        removed > 0,
+        "the fixture must have groups with several rows"
+    );
 
     let write = |dir: &Path, decoys: Option<&HashSet<String>>| {
         output::write_qpx(

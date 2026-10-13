@@ -1170,7 +1170,10 @@ mod rescore_join_tests {
         assert!(audit_rescore_join(&emitted, &map, None).is_err());
 
         // A group with no result at all is a genuinely missing join.
-        let lost = vec![row("s3_1_0", false, 3, "800"), row("s3_2_1", false, 3, "800")];
+        let lost = vec![
+            row("s3_1_0", false, 3, "800"),
+            row("s3_2_1", false, 3, "800"),
+        ];
         assert!(audit_rescore_join(&lost, &map, Some(&decoys)).is_err());
 
         // Two results in one group: no competition there, so a missing target

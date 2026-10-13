@@ -37,8 +37,8 @@ pub use glyco_rt::populate_glyco_rt_features;
 
 pub mod percolator;
 pub use percolator::{
-    parse_psm_results, resolve_backend, run_percolator, run_percolator_with_decoys, PercolatorBackend, PercolatorError,
-    PercolatorPsm, DEFAULT_PERCOLATOR_IMAGE,
+    parse_psm_results, resolve_backend, run_percolator, run_percolator_with_decoys,
+    PercolatorBackend, PercolatorError, PercolatorPsm, DEFAULT_PERCOLATOR_IMAGE,
 };
 
 pub(crate) mod percolator_enz;

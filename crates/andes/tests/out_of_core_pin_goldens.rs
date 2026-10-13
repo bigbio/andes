@@ -376,7 +376,11 @@ const CHIMERIC_SLICE_PIN: &str = "test-fixtures/goldens/chimeric_slice.pin.gz";
 /// without it. Pass 1 of the cascade is that search, so the difference is the
 /// rows Pass 2 contributed.
 fn secondary_rows(fragment_index: &str, chimeric_rows: &[String], dir: &Path) -> usize {
-    let (_, plain_rows, _) = run_slice(fragment_index, false, &dir.join(format!("plain_{fragment_index}.pin")));
+    let (_, plain_rows, _) = run_slice(
+        fragment_index,
+        false,
+        &dir.join(format!("plain_{fragment_index}.pin")),
+    );
     chimeric_rows
         .len()
         .checked_sub(plain_rows.len())

@@ -9,6 +9,7 @@ use crate::precursor_cal::adjusted_observed_neutral_mass;
 use crate::psm::{PsmFeatures, PsmMatch, TopNQueue};
 use crate::search_params::SearchParams;
 use model::aa_set::AminoAcidSet;
+use rustc_hash::FxHashMap;
 use model::mass::{nominal_from, H2O, ISOTOPE, PROTON};
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;
@@ -250,6 +251,10 @@ pub(crate) fn search_secondary(
     let mut have_best = false;
     let mut second_raw: i32 = i32::MIN;
     let mut secondary_scores: Vec<f32> = Vec::new();
+    // Best RawScore per positional-isomer class and target/decoy side: the
+    // listwise terms' pool, so the winner's gap is never taken against its own
+    // site alternative or its copy in another protein.
+    let mut class_best: FxHashMap<(u64, bool), f32> = FxHashMap::default();
     for (_nm, idxs) in bucket_index.range(lo..=hi) {
         for &ci in idxs {
             let cand = &candidates[ci];
@@ -276,7 +281,9 @@ pub(crate) fn search_secondary(
             let s = raw_score.round() as i32;
             *tailor_hist.entry(s).or_insert(0) += 1;
             tailor_total += 1;
-            // Keyed on PEPTIDOFORM identity, not nominal mass. On this path the
+            // Keyed on the positional-isomer class (residues + mod-delta multiset),
+            // so the runner-up is never the winner's own site alternative or its
+            // copy in another protein; not on nominal mass. On this path the
             // nominal key was not merely coarse but inert: the exact-mass gate above
             // admits only candidates within `tol` of `co_neutral`, so EVERY surviving
             // candidate shares one nominal mass, every one took the
@@ -284,7 +291,11 @@ pub(crate) fn search_secondary(
             // `delta_raw_score` below was identically 0.0 on every chimeric secondary
             // row — the exact "zeros give Percolator inconsistent rows" outcome this
             // block's own comment says it exists to prevent.
-            let mkey = crate::match_engine::peptidoform_key(&cand.peptide);
+            let mkey = crate::isomer::isomer_class_hash(&cand.peptide);
+            class_best
+                .entry((mkey, cand.is_decoy))
+                .and_modify(|b| *b = b.max(raw_score))
+                .or_insert(raw_score);
             if have_best && mkey == best_pep_key {
                 if s > best_raw {
                     best_raw = s;
@@ -348,7 +359,7 @@ pub(crate) fn search_secondary(
     } else {
         0.0
     };
-    let mut sorted_secondary = secondary_scores.clone();
+    let mut sorted_secondary: Vec<f32> = class_best.into_values().collect();
     sorted_secondary.sort_by(|a, b| b.total_cmp(a)); // total order; release-safe
     features.listwise_score_gap = scoring_crate::scoring::listwise_score_gap(&sorted_secondary);
     features.candidate_rank_entropy =

@@ -171,4 +171,51 @@ mod tests {
         assert_ne!(isomer_class_hash(&a), isomer_class_hash(&other));
         assert_ne!(isomer_class_hash(&a), isomer_class_hash(&ox));
     }
+
+    fn cand(peptide: Peptide, protein_index: usize, is_decoy: bool) -> Candidate {
+        Candidate {
+            peptide,
+            protein_index,
+            start_offset_in_protein: 0,
+            is_decoy,
+            is_protein_n_term: false,
+            is_protein_c_term: false,
+        }
+    }
+
+    fn psm(idx: u32, charge: u8) -> PsmMatch {
+        PsmMatch {
+            spectrum_idx: 0,
+            candidate_idxs: vec![idx],
+            charge_used: charge,
+            mass_error_ppm: 0.0,
+            score: 0.0,
+            rank_score: 0.0,
+            edge_score: 0,
+            activation_method: None,
+            features: Default::default(),
+            isotope_offset: 0,
+            precursor_mz_override: None,
+        }
+    }
+
+    #[test]
+    fn collapse_keeps_the_first_of_each_class() {
+        let phospho = 79.96633;
+        let s1 = || pep(vec![modded(b'S', phospho), aa(b'T'), aa(b'K')]);
+        let s2 = || pep(vec![aa(b'S'), modded(b'T', phospho), aa(b'K')]);
+        let cands = vec![
+            cand(s1(), 0, false),
+            cand(s2(), 0, false), // isomer of 0
+            cand(s2(), 1, true),  // decoy: its own class
+            cand(s2(), 2, false), // isomer of 0 in another protein
+            cand(pep(vec![aa(b'S'), aa(b'T'), aa(b'K')]), 0, false),
+        ];
+        let psms = vec![psm(0, 2), psm(1, 2), psm(2, 2), psm(3, 2), psm(4, 2), psm(1, 3)];
+        let kept = collapse_isomers(500.0, &psms, &cands);
+        assert_eq!(
+            kept,
+            vec![(0, vec![1, 3]), (2, vec![]), (4, vec![]), (5, vec![])]
+        );
+    }
 }

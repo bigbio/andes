@@ -781,25 +781,17 @@ impl<'a> PreparedSearch<'a> {
                 // TopNQueue, so it survives `top_n = 1` (where the runner-up is
                 // evicted) AND never feeds the GF `min_score` (so no emitted PSM's
                 // SpecEValue is perturbed). Distinctness is keyed on the
-                // PEPTIDOFORM (residues + per-residue mod deltas), NOT on nominal mass.
-                //
-                // It was previously keyed on `nominal_residue_mass()`, on the stated
-                // assumption that isobaric different-sequence peptides at the same
-                // nominal mass are "rare". That is inverted: the candidate window IS a
-                // nominal-mass window (`candidate_nominal_bounds` —
-                // four buckets at the default 20 ppm / -1..=2), so EVERY genuine sequence
-                // competitor shares the winner's nominal mass. They all took the
-                // `mkey == best_mass_key` branch, which only ever raises `best_raw` and
-                // never writes `second_raw` — so the emitted delta was the lead over a
-                // candidate one or two Da away (a different isotope hypothesis), not over
-                // the runner-up peptide. DeltaRankScore is one of Percolator's strongest
-                // classical features and it reported maximum confidence on genuine ties.
-                //
-                // The peptidoform key still collapses the same peptide matched in multiple
-                // proteins or at multiple charges, which is what the mass key was reaching
-                // for. A 64-bit hash collision would merge two unrelated peptides, leaving
-                // the delta unchanged or slightly overstated; the probability against the
-                // single stored `best_pep_key` is negligible.
+                // positional-isomer class (`isomer::isomer_class_hash`: residues +
+                // the multiset of mod deltas), NOT on nominal mass: the candidate
+                // window IS a nominal-mass window, so every genuine sequence
+                // competitor shares the winner's nominal mass. The class key
+                // collapses the same peptide matched in multiple proteins, at
+                // multiple charges, or with its modifications on other sites — the
+                // site alternatives the writers drop from the emitted rows — so the
+                // runner-up is always a different peptide or modification state.
+                // A 64-bit hash collision would merge two unrelated peptides, leaving
+                // the delta unchanged or slightly overstated; the probability against
+                // the single stored `best_pep_key` is negligible.
                 let mut best_raw = i32::MIN;
                 let mut best_pep_key: u64 = 0;
                 let mut have_best = false;
@@ -985,13 +977,13 @@ impl<'a> PreparedSearch<'a> {
                             strong_null_stats.push(pin_score);
                             // A score at or below the runner-up changes neither
                             // tracker (the runner-up never exceeds the best), so
-                            // the peptidoform hash is only taken above it.
+                            // the isomer-class hash is only taken above it.
                             if s > second_raw {
-                                let mkey = peptidoform_key(&cand.peptide);
+                                let mkey = crate::isomer::isomer_class_hash(&cand.peptide);
                                 if have_best && mkey == best_pep_key {
-                                    // Same peptidoform (another protein / another
-                                    // charge): not a competitor, so it may only raise
-                                    // the best.
+                                    // Same peptide and mod multiset (another protein,
+                                    // charge or site): not a competitor, so it may
+                                    // only raise the best.
                                     if s > best_raw {
                                         best_raw = s;
                                     }
@@ -1118,8 +1110,20 @@ impl<'a> PreparedSearch<'a> {
                 let tailor_denom =
                     crate::psm::tailor_denominator(&tailor_hist, tailor_total) as f32;
 
-                // S2 listwise terms over the retained top-K queue (not the full scored pool).
-                let mut retained_scores: Vec<f32> = queue.iter_psms().map(|p| p.score).collect();
+                // S2 listwise terms over the retained top-K queue (not the full scored
+                // pool), one score per positional-isomer class: the rows the writers
+                // emit (`isomer::collapse_isomers` on the rank-sorted queue), so a
+                // kept row's gap is never taken against its own dropped site
+                // alternative.
+                let rank_sorted = queue.rank_sorted_refs();
+                let mut retained_scores: Vec<f32> = crate::isomer::collapse_isomers(
+                    spec.precursor_mz,
+                    rank_sorted.iter().copied(),
+                    cand_slice,
+                )
+                .into_iter()
+                .map(|(i, _)| rank_sorted[i].score)
+                .collect();
                 // total_cmp (total order), not partial_cmp+unwrap_or — the latter can
                 // sort incorrectly under release optimisation on the pinned toolchain.
                 retained_scores.sort_by(|a, b| b.total_cmp(a));
@@ -2984,27 +2988,6 @@ pub(crate) fn dedup_pepseq_score(psms: Vec<PsmMatch>, candidates: &[Candidate]) 
     let mut out = Vec::with_capacity(groups.len());
     out.extend(groups.into_values());
     out
-}
-
-/// Allocation-free peptidoform identity for the per-spectrum DeltaRankScore tracker:
-/// residues plus per-residue modification deltas, quantised to 1e-5 Da exactly as
-/// [`PepDedupKey`] quantises them, so the two agree on what "the same peptidoform"
-/// means. `PepDedupKey` allocates two `Vec`s and runs once per RETAINED PSM; this
-/// runs once per SCORED CANDIDATE, so it must not allocate.
-#[inline]
-pub(crate) fn peptidoform_key(peptide: &model::Peptide) -> u64 {
-    use std::hash::Hasher;
-    let mut h = rustc_hash::FxHasher::default();
-    for aa in &peptide.residues {
-        h.write_u8(aa.residue);
-        let units = aa
-            .mod_
-            .as_ref()
-            .map(|m| (m.mass_delta * 100_000.0).round() as i64)
-            .unwrap_or(0);
-        h.write_i64(units);
-    }
-    h.finish()
 }
 
 /// Bare residue sequence (no mods, no flanks) of a candidate's peptide.

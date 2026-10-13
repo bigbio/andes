@@ -38,8 +38,10 @@ both now in less than half the memory). andes finds 7.6–49.8% more PSMs in 0.3
 wall time. **†** Java MS-GF+ was not re-run; its counts are from an earlier session, and it
 remains ~10–40x slower. **Error rates:** checked against an entrapment version of the Astral
 database, the Astral gain holds at an equal true FDP (+22.2% over the previous in-RAM retrieval at
-1.00%; the index's nominal 1% is 1.07% true). TMT has no entrapment component; on UPS1 the true FDP
-at a nominal 1% is **~3.5%**, the same rate as Comet's. Details:
+1.00%). Counting a PSM as entrapment only when all its proteins are entrapment sequences, andes's
+nominal 1% is 0.95–1.03% true FDP on Astral, 0.97–1.08% on phospho and 2.6% on UPS1 (2026-10-13;
+earlier figures counted shared peptides as entrapment and overstated UPS1 at ~3.5%). TMT has no
+entrapment component. Details:
 [`docs/benchmarks/`](docs/benchmarks/README.md).</sub>
 
 **Time, CPU and memory** (same VM, 8 threads, `/usr/bin/time`; andes Astral and phospho 2026-10-07

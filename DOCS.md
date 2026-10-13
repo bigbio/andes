@@ -828,8 +828,8 @@ scores from separately trained Percolator models are not on one scale.
   table in the directory; a missing table or cache is an error) and joins Percolator's
   `score`, `q-value` and PEP to its PSMs on (run, SpecId) (target and decoy result files; every
   PSM needs a finite `score`). Each joined PSM is checked against the result's residue sequence (flanks and
-  modification notation ignored) and target/decoy file; a run where more than 1 % of the
-  joined PSMs disagree fails, naming the run and the file (swapped or foreign results). Runs are indexed by sorted stem, precursors by sorted key. A precursor enters
+  modification notation ignored) and target/decoy file. A PSM that disagrees is skipped
+  (counted in the log), and a run where more than 1 % of the joined PSMs disagree fails, naming the run and the file (swapped or foreign results). Runs are indexed by sorted stem, precursors by sorted key. A precursor enters
   the library when its best-PSM target/decoy q-value over all runs is at most
   `--mbr-library-fdr` (an internal entry gate over every PSM's score, not a reported FDR) and
   it has a target PSM at PSM q-value ≤ `--quant-fdr` (and PEP ≤ `--pep` when given, as for

@@ -300,9 +300,10 @@ fn percolator_scores(targets: &Path, decoys: &Path) -> Result<ScoreSet, String> 
 /// Builds the library over the run tables of `stems` (sorted, as from
 /// [`library_runs`]) with the scores of `load_scores` joined on (run,
 /// SpecId), and writes it to `dir`. `max_q` is the entry gate, `donor_q` the
-/// PSM q-value and `donor_pep` the optional PSM PEP cap of the donor PSMs.
-/// The scores are loaded after the tables, so that merged scores over runs
-/// with a shared SpecId fail with the runs named.
+/// PSM q-value and `donor_pep` the optional PSM PEP cap of the donor PSMs. A
+/// PSM whose rescoring result names another peptide or target/decoy label is
+/// skipped. The scores are loaded after the tables, so that merged scores over
+/// runs with a shared SpecId fail with the runs named.
 pub(crate) fn build_and_write_library(
     dir: &Path,
     stems: &[String],
@@ -424,6 +425,7 @@ pub(crate) fn build_and_write_library(
             run_joined += 1;
             if j.is_decoy != row.is_decoy || residues(&j.peptide) != residues(&row.peptidoform) {
                 run_mismatched += 1;
+                continue;
             }
             psms.push(PsmIn {
                 run: r as u16,
@@ -472,7 +474,7 @@ pub(crate) fn build_and_write_library(
         &AlignParams::default(),
     );
     eprintln!(
-        "[mbr] library: {} runs, {} PSMs scored ({} of them disagreeing with the rescoring result on peptide or label), {donor_psms} target PSMs at {donor_gate} identify their precursor in their run; skipped: {} target and {} decoy PSMs without a rescoring score, {} decoy PSMs sharing a target's key; {} precursors, {} entries at the internal entry gate q<={max_q} (precursor-level, not an identification FDR) with a PSM at {donor_gate}",
+        "[mbr] library: {} runs, {} PSMs scored, {donor_psms} target PSMs at {donor_gate} identify their precursor in their run; skipped: {} PSMs whose SpecId joins a rescoring PSM of another peptide or target/decoy label, {} target and {} decoy PSMs without a rescoring score, {} decoy PSMs sharing a target's key; {} precursors, {} entries at the internal entry gate q<={max_q} (precursor-level, not an identification FDR) with a PSM at {donor_gate}",
         stems.len(),
         psms.len(),
         mismatched,
@@ -1075,6 +1077,35 @@ mod tests {
         assert_eq!(capped.donor_pep, Some(0.01));
         assert_eq!(read_library(dir.path()).unwrap().donor_pep, Some(0.01));
         assert_ne!(library_fingerprint(&open), library_fingerprint(&capped));
+    }
+
+    #[test]
+    fn mismatched_joins_are_not_donors() {
+        let dir = tempfile::tempdir().unwrap();
+        let (stems, t) = one_run_library(dir.path(), 0.001, Some("s7"));
+        let set = rescore_scores(&t, &HashMap::new(), "t.tsv").unwrap();
+        let stored = build_and_write_library(
+            dir.path(),
+            &stems,
+            || Ok(PsmScores::Merged(set)),
+            0.01,
+            0.01,
+            None,
+        )
+        .unwrap();
+        let key_of = |e: &quant::library::LibraryEntry| {
+            stored.library.meta[e.precursor as usize].key.clone()
+        };
+        let keys: Vec<String> = stored.library.entries.iter().map(key_of).collect();
+        assert_eq!(
+            keys.len(),
+            199,
+            "one of 200 PSMs disagrees with the rescoring result"
+        );
+        assert!(
+            !keys.iter().any(|k| k == "PEPTIDEIAK/2"),
+            "the mismatched PSM is a donor"
+        );
     }
 
     #[test]

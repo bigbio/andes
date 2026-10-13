@@ -26,6 +26,9 @@ pub struct PercolatorPsm {
     pub q_value: f64,
     /// `posterior_error_probability` column (PEP; lower is better).
     pub pep: f64,
+    /// `score` column (higher is better); `None` when the file has no such
+    /// column or the value is missing or not a finite number.
+    pub score: Option<f64>,
     /// `peptide` column (Percolator's flanked peptide string).
     pub peptide: String,
     /// `proteinIds` column joined with `\t` collapsed to a single string (the
@@ -337,11 +340,7 @@ pub fn run_percolator_with_decoys(
     extra_args: &[String],
 ) -> Result<(HashMap<String, PercolatorPsm>, HashSet<String>), PercolatorError> {
     let out_dir = pin.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
-    let stem = pin
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "andes".to_string());
-    let out = ResultPaths::new(&out_dir, &stem);
+    let out = result_paths(pin);
     // Remove any stale outputs from a previous run BEFORE launching, so the
     // `out.target.exists()` success check below can only pass on a file this
     // run actually wrote (guards against reading a previous run's results).
@@ -379,6 +378,22 @@ pub fn run_percolator_with_decoys(
         Err(e) => return Err(e.into()),
     };
     Ok((targets, decoys))
+}
+
+/// The result files `run_percolator` writes for `pin`, next to it.
+fn result_paths(pin: &Path) -> ResultPaths {
+    let out_dir = pin.parent().unwrap_or_else(|| Path::new("."));
+    let stem = pin
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "andes".to_string());
+    ResultPaths::new(out_dir, &stem)
+}
+
+/// The decoy-PSM result file a [`run_percolator`] call on `pin` writes; parse
+/// it with [`parse_psm_results`].
+pub fn decoy_results_path(pin: &Path) -> PathBuf {
+    result_paths(pin).decoy
 }
 
 /// Keep the last `n` lines of `s`.
@@ -437,6 +452,7 @@ pub fn parse_psm_results(text: &str) -> Result<HashMap<String, PercolatorPsm>, P
     let pep_col = find_prefix("posterior_error_prob")?;
     let pep_seq_col = find("peptide")?;
     let prot_col = find("proteinIds")?;
+    let score_col = cols.iter().position(|c| *c == "score");
 
     let mut map = HashMap::new();
     for line in lines {
@@ -457,6 +473,12 @@ pub fn parse_psm_results(text: &str) -> Result<HashMap<String, PercolatorPsm>, P
         // silent NaN — NaN compares false in every FDR threshold check.
         let q_value = parse_finite(fields[q_col], "q-value")?;
         let pep = parse_finite(fields[pep_col], "posterior_error_prob")?;
+        // The score is optional: a missing, unparseable or non-finite value is
+        // no score. Callers that rank by it reject such PSMs themselves.
+        let score = score_col
+            .and_then(|c| fields.get(c))
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| v.is_finite());
         let peptide = fields[pep_seq_col].to_string();
         // proteinIds is the trailing column: re-join everything from prot_col on.
         let proteins = if fields.len() > prot_col {
@@ -471,6 +493,7 @@ pub fn parse_psm_results(text: &str) -> Result<HashMap<String, PercolatorPsm>, P
                     psm_id: psm_id.clone(),
                     q_value,
                     pep,
+                    score,
                     peptide,
                     proteins,
                 },
@@ -503,6 +526,37 @@ mod tests {
         // Two trailing protein columns re-joined with ';'.
         assert_eq!(a.proteins, "sp|P1;sp|P2");
         assert_eq!(m["title_101_1"].proteins, "sp|P3");
+        assert_eq!(a.score, Some(2.5));
+        assert_eq!(m["title_101_1"].score, Some(1.0));
+    }
+
+    #[test]
+    fn score_column_is_optional_and_lenient() {
+        let text = "PSMId\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n\
+                    a_1_1\t0.001\t0.0005\tR.PEPTIDEK.A\tsp|P1\n";
+        assert_eq!(parse_psm_results(text).unwrap()["a_1_1"].score, None);
+        // A non-finite or unparseable score is no score; the row still parses.
+        let text = "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n\
+                    a_1_1\tnan\t0.001\t0.0005\tR.PEPTIDEK.A\tsp|P1\n\
+                    b_1_1\tinf\t0.002\t0.0005\tR.PEPTIDEK.A\tsp|P1\n\
+                    c_1_1\tx\t0.003\t0.0005\tR.PEPTIDEK.A\tsp|P1\n";
+        let m = parse_psm_results(text).unwrap();
+        assert_eq!(m.len(), 3);
+        assert!(m.values().all(|p| p.score.is_none()));
+        assert_eq!(m["a_1_1"].q_value, 0.001);
+        // A score column after the scalar columns does not lengthen the rows
+        // that must be present.
+        let text = "PSMId\tq-value\tposterior_error_prob\tpeptide\tproteinIds\tscore\n\
+                    a_1_1\t0.001\t0.0005\tR.PEPTIDEK.A\n";
+        assert_eq!(parse_psm_results(text).unwrap()["a_1_1"].score, None);
+    }
+
+    #[test]
+    fn decoy_results_sit_next_to_the_pin() {
+        assert_eq!(
+            decoy_results_path(Path::new("/x/run.pin")),
+            Path::new("/x/run.percolator.decoy.psms.txt")
+        );
     }
 
     #[test]

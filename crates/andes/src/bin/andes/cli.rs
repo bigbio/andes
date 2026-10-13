@@ -610,10 +610,239 @@ pub(crate) struct SearchArgs {
     #[arg(long = "percolator-args", hide = true, default_value = "")]
     pub(crate) percolator_args: String,
 
+    // ── Quantification ─────────────────────────────────────────────────────
+    /// Isobaric reporter-ion quantification of the confident PSMs with this
+    /// labelling kit: tmt6, tmt10, tmt11, tmt16, tmt18, itraq4 or itraq8.
+    /// Writes `<stem>.tmt.tsv` and, with `--output-parquet`, the QPX
+    /// `quantms.feature.parquet`. Combine with `--rescore` so only PSMs at
+    /// q <= --fdr are quantified.
+    #[arg(long = "tmt", value_name = "PLEX", value_parser = parse_plex)]
+    pub(crate) tmt: Option<quant::Plex>,
+
+    /// MS level the reporter ions are read from: 2 (the identified MS2) or 3
+    /// (the SPS-MS3 scan whose precursor references that MS2; mzML and Thermo
+    /// `.raw`).
+    #[arg(long = "tmt-level", default_value = "2")]
+    pub(crate) tmt_level: u8,
+
+    /// Reporter-ion m/z tolerance, e.g. `20ppm` or `0.003da`. Default: 20 ppm
+    /// on high-resolution MS2 and at `--tmt-level 3` (SPS-MS3 reporters are
+    /// read in the Orbitrap), 0.3 Da on ion-trap MS2. A window that reaches
+    /// half the spacing of the kit's closest channels is refused.
+    #[arg(long = "tmt-tol", value_parser = parse_precursor_tol)]
+    pub(crate) tmt_tol: Option<Tolerance>,
+
+    /// Isotope impurity matrix of the kit lot (OpenMS text form: one line per
+    /// channel, `-2/-1/+1/+2` percentages, eight columns for TMTpro). Corrected
+    /// intensities are solved by non-negative least squares; the raw values are
+    /// kept alongside. Default: no correction.
+    #[arg(long = "tmt-correction", value_name = "FILE")]
+    pub(crate) tmt_correction: Option<PathBuf>,
+
+    /// Drop PSMs whose precursor isolation purity (share of the MS1 isolation
+    /// window that belongs to the precursor) is below this from `tmt.tsv`.
+    /// They stay in the parquet with their purity. Default 0 (report only).
+    #[arg(long = "tmt-min-purity", default_value = "0", value_parser = parse_unit_fraction)]
+    pub(crate) tmt_min_purity: f64,
+
+    /// Label-free MS1 quantification of the confident precursors: isotope
+    /// chromatograms are extracted around each identified peptidoform's
+    /// retention time and integrated. Writes `<stem>.lfq.tsv`,
+    /// `<stem>.lfq_features.tsv` and, with `--output-parquet`, the QPX
+    /// `quantms.feature.parquet`. mzML and Thermo `.raw` input.
+    #[arg(long = "lfq", default_value_t = false)]
+    pub(crate) lfq: bool,
+
+    /// MS1 m/z tolerance of the isotope chromatograms, e.g. `10ppm`. Default 10 ppm.
+    #[arg(long = "lfq-tol", value_parser = parse_precursor_tol)]
+    pub(crate) lfq_tol: Option<Tolerance>,
+
+    /// Retention-time half-window (seconds) around the identifying PSM in
+    /// which the chromatographic peak is searched. Default 60.
+    #[arg(long = "lfq-rt-window", default_value = "60", value_parser = parse_positive_tol)]
+    pub(crate) lfq_rt_window: f64,
+
+    /// Experimental Gaussian width in seconds (eight sigma) for LFQ peak detection.
+    /// Areas still use raw signal. Omit for five-scan Savitzky–Golay smoothing.
+    /// Validate feature-q coverage for the acquisition before using this setting.
+    #[arg(long = "lfq-gaussian-width", value_parser = parse_positive_tol)]
+    pub(crate) lfq_gaussian_width: Option<f64>,
+
+    /// Minimum cosine similarity between the observed and theoretical isotope
+    /// envelope for a feature to be reported in `lfq.tsv` (`lfq_features.tsv`
+    /// and the parquet keep it with its cosine). Default 0.7.
+    #[arg(long = "lfq-min-cosine", default_value = "0.7", value_parser = parse_unit_fraction)]
+    pub(crate) lfq_min_cosine: f64,
+
+    /// Feature-level FDR for `lfq.tsv`, from a target/decoy competition of each
+    /// feature against a twin extracted 11 Th above it. Default 0.05.
+    #[arg(long = "lfq-feature-fdr", default_value = "0.05", value_parser = parse_unit_fraction)]
+    pub(crate) lfq_feature_fdr: f64,
+
+    /// Directory for the per-run artifacts of multi-run quantification: for
+    /// each input file `<stem>.ms1.parquet` (its MS1 scans, all FAIMS voltages) and
+    /// `<stem>.quant.parquet` (every rank-1 PSM, targets and decoys, with no
+    /// FDR filter). Implies MS1 capture; same inputs as `--lfq` (mzML or
+    /// Thermo `.raw`; not with `--chimeric`, MGF, `.d` or `--glyco`).
+    #[arg(long = "quant-dir", value_name = "DIR")]
+    pub(crate) quant_dir: Option<PathBuf>,
+
+    /// Match-between-runs label-free quantification across the inputs (two or
+    /// more; needs `--lfq` and `--rescore` or `--rescore-native`). After the
+    /// per-run quantification, builds the precursor library, aligns retention
+    /// times across runs, measures every library precursor in every run and
+    /// writes `<base>.mbr.tsv` and `<base>.mbr_validation.tsv` (with
+    /// `--output-parquet`, `quantms.feature.parquet` holds these rows instead
+    /// of the per-run features, without the below-threshold transfers). Uses
+    /// `--quant-dir` for the per-run artifacts, or a temporary directory that
+    /// is removed afterwards. With `--rescore` (Percolator), same result as
+    /// `andes quant library`, `extract` and `finalize` on the same files and
+    /// Percolator results; the native rescorer's scores have no file input
+    /// to `quant library`.
+    #[arg(long = "mbr", default_value_t = false)]
+    pub(crate) mbr: bool,
+
+    /// Internal library entry gate (precursor-level), not a reported
+    /// identification FDR: precursors whose best-PSM target/decoy q-value is
+    /// at most this enter the match-between-runs library. Default 0.01.
+    #[arg(long = "mbr-library-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
+    pub(crate) mbr_library_fdr: f64,
+
+    /// Transfer quality q-value: transfers at or below it are reported as
+    /// `transfer_ms1` in `<base>.mbr.tsv`. An internal quant-quality
+    /// q-value, not an identification FDR. Default 0.01.
+    #[arg(long = "mbr-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
+    pub(crate) mbr_fdr: f64,
+
+    /// PSM q-value threshold for quantification targets when rescoring runs.
+    /// Default: the `--fdr` value (0.01).
+    #[arg(long = "quant-fdr", hide = true, value_parser = parse_unit_fraction)]
+    pub(crate) quant_fdr: Option<f64>,
+
     /// Keep the PIN file after rescoring. With `--rescore` and no `--output-pin`,
     /// a temporary PIN is used and deleted unless this is true. Default true.
     #[arg(long = "keep-pin", hide = true, default_value_t = true, action = clap::ArgAction::Set)]
     pub(crate) keep_pin: bool,
+}
+
+/// `andes quant`: the match-between-runs stages over a quant directory
+/// written by `andes search --quant-dir`.
+#[derive(clap::Subcommand, Debug)]
+pub(crate) enum QuantCommand {
+    /// Build the precursor library and the joint retention-time alignment
+    /// from every run's PSM table and the Percolator results of those PSMs.
+    /// Writes `library.parquet` and `alignment.parquet` into the quant
+    /// directory.
+    Library(QuantLibraryArgs),
+    /// Measure every library precursor in one run from its MS1 table. Writes
+    /// `<stem>.extract.parquet`.
+    Extract(QuantExtractArgs),
+    /// Transfer q-values and the match-between-runs tables from every run's
+    /// extract table. Writes `<base>.mbr.tsv` and `<base>.mbr_validation.tsv`.
+    Finalize(QuantFinalizeArgs),
+}
+
+impl QuantCommand {
+    pub(crate) fn threads(&self) -> Option<usize> {
+        match self {
+            QuantCommand::Library(a) => a.threads,
+            QuantCommand::Extract(a) => a.threads,
+            QuantCommand::Finalize(a) => a.threads,
+        }
+    }
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct QuantLibraryArgs {
+    /// Directory with each run's `<stem>.quant.parquet` and `<stem>.ms1.parquet`.
+    #[arg(long = "quant-dir", value_name = "DIR")]
+    pub(crate) quant_dir: PathBuf,
+
+    /// Run stems to include. Default: every `<stem>.quant.parquet` in the
+    /// directory. A run whose PSM or MS1 table is missing is an error.
+    #[arg(long = "runs", value_name = "STEM", num_args = 1..)]
+    pub(crate) runs: Vec<String>,
+
+    /// Percolator target PSM results (`--results-psms`), with its `score`
+    /// column: one file over every run (SpecIds must be distinct across
+    /// runs), or `<stem>=<file>` once per run, repeated. PSMs are joined to
+    /// the run tables on (run, SpecId).
+    #[arg(long = "psms", value_name = "TSV|STEM=TSV", num_args = 1.., required = true)]
+    pub(crate) psms: Vec<String>,
+
+    /// Percolator decoy PSM results (`--decoy-results-psms`), in the same
+    /// form as `--psms`.
+    #[arg(long = "decoy-psms", value_name = "TSV|STEM=TSV", num_args = 1.., required = true)]
+    pub(crate) decoy_psms: Vec<String>,
+
+    /// Internal library entry gate (precursor-level), not a reported
+    /// identification FDR. Default 0.01.
+    #[arg(long = "mbr-library-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
+    pub(crate) mbr_library_fdr: f64,
+
+    /// PSM q-value (the Percolator `q-value` column) at or below which a
+    /// target PSM identifies its precursor in its run: those runs are the
+    /// precursor's donors and get identified rows; the other runs get
+    /// transfers. Use the search's `--quant-fdr` (default `--fdr`) for the
+    /// same result as `--mbr`. Default 0.01.
+    #[arg(long = "quant-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
+    pub(crate) quant_fdr: f64,
+
+    /// PEP cap (the Percolator `posterior_error_prob` column) of the donor
+    /// PSMs, applied in addition to `--quant-fdr`: a target PSM identifies its
+    /// precursor only when it passes both. Use the search's `--pep` for the
+    /// same result as `--mbr`. Default: no PEP cap.
+    #[arg(long = "pep", value_parser = parse_unit_fraction)]
+    pub(crate) pep: Option<f64>,
+
+    /// Worker threads. Default: logical CPU count.
+    #[arg(long)]
+    pub(crate) threads: Option<usize>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct QuantExtractArgs {
+    /// Directory with the library and the run's `<stem>.ms1.parquet`.
+    #[arg(long = "quant-dir", value_name = "DIR")]
+    pub(crate) quant_dir: PathBuf,
+
+    /// Stem of the run to measure.
+    #[arg(long = "run", value_name = "STEM")]
+    pub(crate) run: String,
+
+    /// MS1 m/z tolerance of the template fit, in ppm (e.g. `10ppm`). Use the
+    /// `--lfq-tol` of the search for the same result as `--mbr`. Default 10 ppm.
+    #[arg(long = "lfq-tol", value_parser = parse_precursor_tol)]
+    pub(crate) lfq_tol: Option<Tolerance>,
+
+    /// Worker threads. Default: logical CPU count.
+    #[arg(long)]
+    pub(crate) threads: Option<usize>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct QuantFinalizeArgs {
+    /// Directory with the library and every run's `<stem>.extract.parquet`.
+    #[arg(long = "quant-dir", value_name = "DIR")]
+    pub(crate) quant_dir: PathBuf,
+
+    /// Output base: writes `<base>.mbr.tsv` and `<base>.mbr_validation.tsv`.
+    #[arg(short = 'o', long = "output", value_name = "BASE")]
+    pub(crate) output: PathBuf,
+
+    /// Transfer quality q-value: transfers at or below it are reported as
+    /// `transfer_ms1`. An internal quant-quality q-value, not an
+    /// identification FDR. Default 0.01.
+    #[arg(long = "mbr-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
+    pub(crate) mbr_fdr: f64,
+
+    /// Also write the rows as `quantms.feature.parquet` into this directory.
+    #[arg(long = "output-parquet", value_name = "DIR")]
+    pub(crate) output_parquet: Option<PathBuf>,
+
+    /// Worker threads. Default: logical CPU count.
+    #[arg(long)]
+    pub(crate) threads: Option<usize>,
 }
 
 // Alias used internally for the search-args type.
@@ -717,6 +946,11 @@ pub(crate) enum PrecursorMonoFlag {
 pub(crate) fn parse_fragmentation(s: &str) -> Result<Fragmentation, String> {
     <Fragmentation as ValueEnum>::from_str(s, true)
         .map_err(|_| format!("invalid fragmentation `{s}`: expected auto|CID|ETD|HCD|UVPD"))
+}
+
+/// Parse `--tmt` kit names.
+pub(crate) fn parse_plex(s: &str) -> Result<quant::Plex, String> {
+    quant::Plex::parse(s)
 }
 
 /// Parse `--protocol` value. Accepts named values only.

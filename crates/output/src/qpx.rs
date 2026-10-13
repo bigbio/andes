@@ -99,17 +99,48 @@ pub fn write_qpx(
 
     let reference_file = primary_ms_run_paths.first().cloned().unwrap_or_default();
 
-    let psm_batch = build_psms_batch(
-        spectra,
-        queues,
-        candidates,
-        search_index,
-        run_id,
-        &reference_file,
-        rescore,
-        rescore_decoys,
+    // When rescoring is on, audit the Percolator join over the whole run before
+    // writing any row (fail loud on target rows with no result rather than emit
+    // null q-values), and leave out the target rows target-decoy competition
+    // removed: they are not in Percolator's FDR-controlled output. Empty when
+    // rescore is off, keeping that path identical.
+    let competed_away = match rescore {
+        Some(m) => audit_rescore_join(
+            &rescore_rows(spectra, queues, candidates),
+            m,
+            rescore_decoys,
+        )?,
+        None => HashSet::new(),
+    };
+
+    // Bound Arrow's Utf8/List buffers before they reach their 32-bit offset
+    // limit. Slicing an already-built batch is too late. Preserve the global
+    // PSM row order and identification indices across batches.
+    let mut row_offset = 0usize;
+    let batches = spectra
+        .chunks(1024)
+        .zip(queues.chunks(1024))
+        .map(|(spectra, queues)| {
+            let batch = build_psms_batch(
+                spectra,
+                queues,
+                candidates,
+                search_index,
+                run_id,
+                &reference_file,
+                rescore,
+                &competed_away,
+                row_offset,
+            )?;
+            row_offset += batch.num_rows();
+            Ok(batch)
+        });
+    write_parquet_batches(
+        &out_dir.join("psms.parquet"),
+        "psms",
+        psms_schema(),
+        batches,
     )?;
-    write_parquet(&out_dir.join("psms.parquet"), "psms", psm_batch)?;
 
     let prot_batch = build_proteins_batch(queues, candidates, search_index, run_id)?;
     write_parquet(&out_dir.join("proteins.parquet"), "proteins", prot_batch)?;
@@ -135,26 +166,36 @@ pub fn write_qpx(
     Ok(())
 }
 
-// ── parquet file writer (metadata + single batch) ─────────────────────────────
+// ── parquet file writer (metadata + bounded batches) ─────────────────────────────
 
 /// Write one RecordBatch to `path`, stamping the QPX schema metadata
 /// (`file_type` = `file_type`) onto the schema before writing.
 fn write_parquet(path: &Path, file_type: &str, batch: RecordBatch) -> std::io::Result<()> {
-    // Re-key the batch's schema with the QPX metadata so the written file
-    // carries it (OpenMS readers key on these). UUID is per-file.
-    let meta = qpx_metadata(file_type);
-    let schema_with_meta = Arc::new(Schema::new_with_metadata(
-        batch.schema().fields().clone(),
-        meta,
-    ));
-    // Rebuild the batch against the metadata-bearing schema (same columns).
-    let batch =
-        RecordBatch::try_new(schema_with_meta.clone(), batch.columns().to_vec()).map_err(to_io)?;
+    write_parquet_batches(path, file_type, batch.schema(), std::iter::once(Ok(batch)))
+}
 
+fn write_parquet_batches(
+    path: &Path,
+    file_type: &str,
+    schema: Arc<Schema>,
+    batches: impl IntoIterator<Item = std::io::Result<RecordBatch>>,
+) -> std::io::Result<()> {
+    let schema_with_meta = Arc::new(Schema::new_with_metadata(
+        schema.fields().clone(),
+        qpx_metadata(file_type),
+    ));
     let props = WriterProperties::builder().build();
     let file = std::fs::File::create(path)?;
-    let mut writer = ArrowWriter::try_new(file, schema_with_meta, Some(props)).map_err(to_io)?;
-    writer.write(&batch).map_err(to_io)?;
+    let mut writer =
+        ArrowWriter::try_new(file, schema_with_meta.clone(), Some(props)).map_err(to_io)?;
+    for batch in batches {
+        let batch = batch?;
+        let batch = RecordBatch::try_new(schema_with_meta.clone(), batch.columns().to_vec())
+            .map_err(to_io)?;
+        writer.write(&batch).map_err(to_io)?;
+        // Also bound the writer's buffered row group, not only Arrow arrays.
+        writer.flush().map_err(to_io)?;
+    }
     writer.close().map_err(to_io)?;
     Ok(())
 }
@@ -180,7 +221,7 @@ fn to_io<E: std::fmt::Display>(e: E) -> std::io::Error {
 /// is not in the workspace lockfile). 122 random bits + the version/variant
 /// nibbles, sourced from `RandomState`-seeded hashing of high-resolution
 /// clocks — sufficient for a per-file identifier (not a security token).
-fn uuid_v4() -> String {
+pub(crate) fn uuid_v4() -> String {
     use std::hash::{BuildHasher, Hasher};
     let mk = || {
         let mut h = std::collections::hash_map::RandomState::new().build_hasher();
@@ -447,7 +488,8 @@ fn build_psms_batch(
     run_id: &str,
     reference_file: &str,
     rescore: Option<&HashMap<String, PercolatorPsm>>,
-    rescore_decoys: Option<&HashSet<String>>,
+    competed_away: &HashSet<String>,
+    row_offset: usize,
 ) -> std::io::Result<RecordBatch> {
     let schema = psms_schema();
 
@@ -485,23 +527,7 @@ fn build_psms_batch(
 
     // Per-spectrum identification index (matches OpenMS, which gives each
     // spectrum's hit-list a stable index). Incremented once per emitted PSM.
-    let mut pep_id_index: i32 = 0;
-
-    // When rescoring is on, audit the Percolator join before writing any row
-    // (fail loud on target rows with no result rather than emit null q-values),
-    // and leave out the target rows target-decoy competition removed: they are
-    // not in Percolator's FDR-controlled output. Empty when rescore is off,
-    // keeping that path identical.
-    let rows = if rescore.is_some() {
-        rescore_rows(spectra, queues, candidates)
-    } else {
-        Vec::new()
-    };
-    let competed_away = match rescore {
-        Some(m) => audit_rescore_join(&rows, m, rescore_decoys)?,
-        None => HashSet::new(),
-    };
-    let mut row_iter = rows.into_iter();
+    let mut pep_id_index = row_offset;
 
     for (spec_idx, queue) in queues.iter().enumerate() {
         if queue.is_empty() {
@@ -533,15 +559,11 @@ fn build_psms_batch(
             // off, or when a row had no matching Percolator output (e.g. a decoy,
             // which Percolator writes to the decoy file we do not load here).
             let matched = if let Some(m) = rescore {
-                let row = row_iter.next().expect("one rescore row per emitted PSM");
-                debug_assert_eq!(
-                    row.spec_id,
-                    format_spec_id(&spec_id_str, scan_num, ranks[hit], hit, multi_row)
-                );
-                if competed_away.contains(&row.spec_id) {
+                let spec_id = format_spec_id(&spec_id_str, scan_num, ranks[hit], hit, multi_row);
+                if competed_away.contains(&spec_id) {
                     continue;
                 }
-                m.get(&row.spec_id)
+                m.get(&spec_id)
             } else {
                 None
             };
@@ -583,7 +605,7 @@ fn build_psms_batch(
             score_type.append_value("andes:RawScore");
             higher_score_better.append_value(true);
             hit_index.append_value(hit as i32);
-            peptide_identification_index.append_value(pep_id_index);
+            peptide_identification_index.append_value(i32::try_from(pep_id_index).map_err(to_io)?);
             // Per-PSM discriminative features (the column OpenMS'
             // PercolatorAdapter reads). Sourced from the SHARED pin.rs feature
             // vector so the idparquet carries the SAME features as the PIN.
@@ -661,7 +683,7 @@ fn build_psms_batch(
 // ── per-PSM field derivations ─────────────────────────────────────────────────
 
 /// Bare residue sequence (no mods, no flanks).
-fn bare_sequence(cand: &Candidate) -> String {
+pub fn bare_sequence(cand: &Candidate) -> String {
     cand.peptide
         .residues
         .iter()
@@ -672,7 +694,7 @@ fn bare_sequence(cand: &Candidate) -> String {
 /// ProForma-ish peptidoform: residues with `[UNIMOD:NN]` (or `[+delta]`) after
 /// each modified residue. Falls back to the accession when known, else the mass
 /// delta. No flanks (OpenMS peptidoform convention).
-fn peptidoform_string(cand: &Candidate) -> String {
+pub fn peptidoform_string(cand: &Candidate) -> String {
     let mut s = String::new();
     for aa in &cand.peptide.residues {
         s.push(aa.residue as char);
@@ -1102,6 +1124,7 @@ mod rescore_join_tests {
             psm_id: id.to_string(),
             q_value: 0.0,
             pep: 0.0,
+            score: None,
             peptide: "PEPTIDE".to_string(),
             proteins: String::new(),
         }

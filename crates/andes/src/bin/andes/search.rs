@@ -17,6 +17,7 @@ use crate::model_select::{
     resolve_metadataless_selection, warn_if_universal_protease_combo,
 };
 use crate::mono::{correct_chunk, MonoDump, MonoStats};
+use crate::quant_run::{QuantCollector, QuantSettings, RunScans};
 use crate::rescore;
 use crate::spectra::{
     detect_dominant_activation, detect_instrument_type_for_path, detect_isobaric_sampled,
@@ -140,6 +141,7 @@ fn is_gzip_path(path: &Path) -> bool {
 
 /// Sort one file's spectra by precursor mass and score them in fragment-index
 /// chunks, appending to `all_spectra` / `all_queues` with peaks dropped.
+#[allow(clippy::too_many_arguments)]
 fn score_mass_ordered(
     prepared: &PreparedSearch,
     mut pending: Vec<Spectrum>,
@@ -148,6 +150,7 @@ fn score_mass_ordered(
     all_queues: &mut Vec<TopNQueue>,
     t_search_start: std::time::Instant,
     keep_peaks: bool,
+    mut quant: Option<&mut QuantCollector>,
 ) {
     pending.sort_by(|a, b| index_order_mass(a).total_cmp(&index_order_mass(b)));
     eprintln!(
@@ -164,6 +167,9 @@ fn score_mass_ordered(
         let queues = prepared.run_chunk(&chunk, offset);
         all_queues.extend(queues);
         for mut spec in chunk.into_iter() {
+            if let Some(q) = quant.as_deref_mut() {
+                q.on_spectrum(&spec);
+            }
             // `--refine` re-scores unidentified spectra in its Pass 2, so their
             // peaks stay resident.
             if !keep_peaks {
@@ -179,6 +185,25 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // These three were validated as Some(..) by main() before calling run().
     if cli.spectrum.is_empty() {
         return Err("no --spectrum inputs".into());
+    }
+    let mut cli = cli;
+    // `--mbr`: the per-run artifacts go to `--quant-dir`, or to a temporary
+    // directory that lives until the end of the run.
+    let mut _mbr_tmp: Option<tempfile::TempDir> = None;
+    if cli.mbr {
+        check_mbr_args(&cli)?;
+        if cli.quant_dir.is_none() {
+            let dir = tempfile::Builder::new()
+                .prefix("andes-quant-")
+                .tempdir()
+                .map_err(|e| format!("creating temp dir for --mbr: {e}"))?;
+            cli.quant_dir = Some(dir.path().to_path_buf());
+            _mbr_tmp = Some(dir);
+        }
+    }
+    // The per-run artifacts are named by the input's stem.
+    if cli.quant_dir.is_some() {
+        crate::quant_run::check_unique_stems(&cli.spectrum)?;
     }
     // Parse the digestion enzyme(s) once. `--enzyme` accepts a comma-separated
     // list for a multi-protease digest; the FIRST entry is the primary (drives
@@ -1075,6 +1100,63 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let bench_mode = cli.max_spectra > 0;
 
+    // ── Quantification setup (`--tmt` / `--lfq`) ──────────────────────────────
+    // Reporter ions are read from each MS2 while its peaks are still in memory;
+    // MS1 scans (purity, label-free chromatograms) and MS3 scans (SPS-MS3
+    // reporters) are captured by the readers next to the MS2 stream and handed
+    // to the collector per file. Quantification itself runs after rescoring.
+    let mut quant: Option<QuantCollector> =
+        QuantSettings::from_cli(&cli, param.data_type.instrument.is_high_resolution())?
+            .map(QuantCollector::new);
+    if let Some(q) = &quant {
+        let s = &q.settings;
+        if is_mgf && (s.needs_ms1_series() || s.needs_ms3()) {
+            return Err(
+                "--lfq, --quant-dir and --tmt-level 3 need MS1/MS3 scans; MGF input carries MS2 only".into(),
+            );
+        }
+        if is_d && (s.needs_ms1_series() || s.needs_ms3()) {
+            return Err(
+                "--lfq, --quant-dir and --tmt-level 3 are not yet supported for Bruker .d input"
+                    .into(),
+            );
+        }
+        if cli.chimeric && (s.needs_ms1_series() || s.needs_ms3()) {
+            return Err(
+                "--lfq, --quant-dir and --tmt-level 3 cannot be combined with --chimeric yet; \
+                        reporter quantification at MS2 (`--tmt <plex>`) works with it"
+                    .into(),
+            );
+        }
+        if cli.glyco {
+            return Err("--tmt/--lfq/--quant-dir are not available in --glyco mode".into());
+        }
+        if chimeric_active && s.plex.is_some() {
+            // The chimeric read path streams MS1 for the co-isolation search
+            // and does not hand it to quantification.
+            if s.min_purity > 0.0 {
+                return Err("--tmt-min-purity needs the precursor purity, which is not \
+                            computed under --chimeric"
+                    .into());
+            }
+            eprintln!(
+                "WARN: --tmt with --chimeric: precursor purity is not computed (the purity \
+                 column stays empty)"
+            );
+        }
+        if !cli.rescore && !cli.rescore_native && (s.plex.is_some() || s.lfq) {
+            eprintln!(
+                "WARN: --tmt/--lfq without --rescore or --rescore-native: every rank-1 target \
+                 PSM is quantified; filter the tables by the q-values you compute downstream, \
+                 or add --rescore so only PSMs at q<=--fdr are quantified."
+            );
+        }
+        eprintln!("Quantification: {}", s.describe());
+    }
+    if let (true, Some(q)) = (chimeric_active, quant.as_mut()) {
+        q.ms1_not_captured();
+    }
+
     let mut all_spectra: Vec<Spectrum> = Vec::new();
     let mut all_queues: Vec<TopNQueue> = Vec::new();
 
@@ -1168,6 +1250,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .into());
         }
 
+        let mut run_scans = RunScans::default();
         let file_stats = if ms1_input {
             let (tx, rx) = sync_channel::<(Vec<Spectrum>, Ms1Link)>(2);
             let spectrum_path = input_path.clone();
@@ -1283,6 +1366,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     // unidentified spectra; glyco_search_run needs the full
                     // peak lists for oxonium ion detection. Memory cost: full
                     // peak buffer stays resident (acceptable; both are opt-in).
+                    if let Some(q) = quant.as_mut() {
+                        q.on_spectrum(&spec);
+                    }
                     if !cli.refine && !cli.glyco {
                         spec.peaks = Vec::new();
                     }
@@ -1334,6 +1420,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 );
                 all_queues.extend(queues);
                 for mut spec in scored.into_iter() {
+                    if let Some(q) = quant.as_mut() {
+                        q.on_spectrum(&spec);
+                    }
                     if !cli.refine {
                         spec.peaks = Vec::new();
                     }
@@ -1362,6 +1451,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             && !cli.glyco
             && file_is_mzml
             && !is_gzip_path(input_path)
+            && !quant
+                .as_ref()
+                .is_some_and(|q| q.settings.needs_ms1() || q.settings.needs_ms3())
         {
             // Fragment-index mode scores mass-ordered chunks, so nothing is
             // scored until the whole file is read; read it with every thread.
@@ -1380,6 +1472,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 &mut all_queues,
                 t_search_start,
                 cli.refine,
+                quant.as_mut(),
             );
             ParseStats {
                 error_count: errors.len(),
@@ -1388,22 +1481,44 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             let (tx, rx) = sync_channel::<Vec<Spectrum>>(2);
             let spectrum_path = input_path.clone();
+            let capture_ms1 = quant.as_ref().is_some_and(|q| q.settings.needs_ms1());
+            let capture_ms3 = quant.as_ref().is_some_and(|q| q.settings.needs_ms3());
+            let capture_context = quant.is_some();
             let parser_handle = thread::spawn(
-                move || -> Result<ParseStats, Box<dyn std::error::Error + Send + Sync>> {
+                move || -> Result<(ParseStats, RunScans), Box<dyn std::error::Error + Send + Sync>> {
                     if file_is_mzml {
-                        let reader = MzMLReader::new(
+                        let mut reader = MzMLReader::new(
                             input::open_buf_maybe_gz(&spectrum_path)
                                 .map_err(|e| format!("open mzML: {e}"))?,
                         )
-                        .with_ms_level_range(ms_level_u32, ms_level_u32);
-                        Ok(send_chunks(reader, CHUNK_SIZE, remaining_cap, tx))
+                        .with_ms_level_range(ms_level_u32, ms_level_u32)
+                        .with_run_ms1_capture(capture_ms1)
+                        .with_product_scan_capture(capture_ms3)
+                        .with_scan_context_capture(capture_context);
+                        let stats = send_chunks(reader.by_ref(), CHUNK_SIZE, remaining_cap, tx);
+                        let scans = RunScans {
+                            ms1: reader.take_run_ms1(),
+                            ms3: reader.take_product_scans(),
+                            contexts: reader.take_scan_contexts(),
+                        };
+                        Ok((stats, scans))
                     } else if file_is_raw {
                         #[cfg(feature = "thermo")]
                         {
-                            let reader = input::ThermoRawReader::open(&spectrum_path)
+                            let mut reader = input::ThermoRawReader::open(&spectrum_path)
                                 .map_err(|e| format!("open Thermo .raw: {e}"))?
-                                .with_ms_level(Some(2));
-                            Ok(send_chunks(reader, CHUNK_SIZE, remaining_cap, tx))
+                                .with_ms_level(Some(2))
+                                .with_run_ms1_capture(capture_ms1)
+                                .with_product_scan_capture(capture_ms3)
+                                .with_scan_context_capture(capture_context);
+                            let stats =
+                                send_chunks(reader.by_ref(), CHUNK_SIZE, remaining_cap, tx);
+                            let scans = RunScans {
+                                ms1: reader.take_run_ms1(),
+                                ms3: reader.take_product_scans(),
+                                contexts: reader.take_scan_contexts(),
+                            };
+                            Ok((stats, scans))
                         }
                         #[cfg(not(feature = "thermo"))]
                         {
@@ -1417,7 +1532,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         {
                             let reader = input::TimsTofReader::open(&spectrum_path)
                                 .map_err(|e| format!("open Bruker .d: {e}"))?;
-                            Ok(send_chunks(reader, CHUNK_SIZE, remaining_cap, tx))
+                            Ok((
+                                send_chunks(reader, CHUNK_SIZE, remaining_cap, tx),
+                                RunScans::default(),
+                            ))
                         }
                         #[cfg(not(feature = "timstof"))]
                         {
@@ -1431,7 +1549,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             input::open_buf_maybe_gz(&spectrum_path)
                                 .map_err(|e| format!("open MGF: {e}"))?,
                         );
-                        Ok(send_chunks(reader, CHUNK_SIZE, remaining_cap, tx))
+                        Ok((
+                            send_chunks(reader, CHUNK_SIZE, remaining_cap, tx),
+                            RunScans::default(),
+                        ))
                     }
                 },
             );
@@ -1470,6 +1591,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     // See the chimeric-loop note above: normally peaks are
                     // dropped post-scoring to bound memory, but `--refine` or
                     // `--glyco` needs the full peak lists retained.
+                    if let Some(q) = quant.as_mut() {
+                        q.on_spectrum(&spec);
+                    }
                     if !cli.refine && !cli.glyco {
                         spec.peaks = Vec::new();
                     }
@@ -1486,16 +1610,28 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     &mut all_queues,
                     t_search_start,
                     cli.refine,
+                    quant.as_mut(),
                 );
             }
 
             match parser_handle.join() {
-                Ok(Ok(stats)) => stats,
+                Ok(Ok((stats, scans))) => {
+                    run_scans = scans;
+                    stats
+                }
                 Ok(Err(e)) => return Err(format!("parser thread error: {e}").into()),
                 Err(_) => return Err("parser thread panicked".into()),
             }
         };
         merge_parse_stats(&mut parse_stats, file_stats);
+        if let Some(q) = quant.as_mut() {
+            q.finish_file(
+                input_path,
+                title_prefix.as_deref(),
+                run_scans,
+                all_spectra.len(),
+            )?;
+        }
     }
 
     if parse_stats.error_count > 0 {
@@ -1750,12 +1886,18 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let pin_candidates;
     let pin_index;
     if let Some(out) = refine_output {
-        let merged =
-            search::refinement::merge_into_pass1(&mut queues, prepared.candidates, &idx, out);
+        let merged = search::refinement::merge_into_pass1(
+            &mut queues,
+            std::mem::take(&mut prepared.candidates),
+            &idx,
+            out,
+        );
         pin_candidates = merged.candidates;
+        drop(prepared);
         pin_index = merged.index;
     } else {
-        pin_candidates = prepared.candidates;
+        pin_candidates = std::mem::take(&mut prepared.candidates);
+        drop(prepared);
         pin_index = idx;
     }
 
@@ -1822,6 +1964,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         (false, false)
     };
+    // `--mbr`: the decoy PSMs with their scores, which the target map leaves
+    // out, and where the rescoring result came from.
+    let mut mbr_decoys: std::collections::HashMap<String, output::PercolatorPsm> =
+        std::collections::HashMap::new();
+    let mut mbr_source = String::new();
     // Percolator's decoy-result ids: with target-decoy competition (`-Y`) they
     // let the QPX join tell a target that lost its scan/ExpMass group from one
     // whose join drifted. `None` for the native rescorer.
@@ -1850,6 +1997,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 map.len(),
                 t_resc.elapsed().as_secs_f64()
             );
+            if cli.mbr {
+                let path = output::decoy_results_path(&output_pin_path);
+                let text = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                mbr_decoys = output::parse_psm_results(&text)
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                mbr_source = format!("the Percolator results of {}", output_pin_path.display());
+            }
             Some(map)
         } else if use_native {
             eprintln!(
@@ -1859,8 +2014,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let t_resc = std::time::Instant::now();
             let pin_text = std::fs::read_to_string(&output_pin_path)
                 .map_err(|e| format!("reading PIN for native rescore: {e}"))?;
-            let map = rescore::native_rescore_pin(&pin_text, 42)
+            let all = rescore::native_rescore_pin_all(&pin_text, 42)
                 .map_err(|e| format!("native rescore: {e}"))?;
+            if cli.mbr {
+                mbr_decoys = all.decoys;
+                mbr_source = "the native rescoring result".to_string();
+            }
+            let map = all.targets;
             eprintln!(
                 "Rescore: native produced {} PSMs (q-value+PEP) [{:.2}s]",
                 map.len(),
@@ -1969,14 +2129,48 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    if bench_mode {
-        eprintln!("Bench mode: skipping TSV write.");
-        release_at_exit(pin_candidates);
-        return Ok(());
+    // ── Quantification (`--tmt` / `--lfq`) ────────────────────────────────────
+    // After rescoring so the targets are the confident PSMs; after the QPX
+    // write so the feature parquet joins a bundle that already exists.
+    if let Some(q) = &quant {
+        crate::quant_run::run_quant(
+            q,
+            &spectra,
+            &queues,
+            &pin_candidates,
+            &pin_index,
+            rescore_map.as_ref(),
+            &report_base,
+            cli.output_parquet.as_deref(),
+        )?;
     }
 
+    // `--mbr` inputs; the stages run after the last search output is
+    // written and the search state is released.
+    let mbr_job = if cli.mbr {
+        let (Some(dir), Some(map)) = (cli.quant_dir.clone(), rescore_map.as_ref()) else {
+            return Err("--mbr needs --quant-dir and rescoring".into());
+        };
+        let stems: Vec<String> = spectrum_paths
+            .iter()
+            .map(|p| crate::quant_run::run_stem(p))
+            .collect();
+        let scores = crate::quant_cmd::rescore_scores(map, &mbr_decoys, &mbr_source)?;
+        let ep = crate::quant_cmd::evidence_params(cli.lfq_tol)?;
+        let (donor_q, donor_pep) = quant
+            .as_ref()
+            .map(|q| (q.settings.quant_fdr, q.settings.pep_cap))
+            .ok_or("--mbr needs --lfq")?;
+        Some((dir, stems, scores, ep, donor_q, donor_pep))
+    } else {
+        None
+    };
+    drop(mbr_decoys);
+
     // ── 9. Write TSV (optional) ───────────────────────────────────────────────
-    if let Some(ref tsv_path) = cli.output_tsv {
+    if bench_mode {
+        eprintln!("Bench mode: skipping TSV write.");
+    } else if let Some(ref tsv_path) = cli.output_tsv {
         let spec_file_name = if spectrum_paths.len() == 1 {
             spectrum_path
                 .file_name()
@@ -2006,7 +2200,58 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Wrote TSV: {}", tsv_path.display());
     }
 
-    release_at_exit(pin_candidates);
+    // ── Match-between-runs (`--mbr`): library, extract, finalize ────────────
+    // Every search output is written; the search state is freed first, so
+    // the stages hold one run's MS1 at a time next to the library.
+    let Some((dir, stems, scores, ep, donor_q, donor_pep)) = mbr_job else {
+        release_at_exit(pin_candidates);
+        return Ok(());
+    };
+    drop(spectra);
+    drop(queues);
+    drop(pin_candidates);
+    drop(pin_index);
+    drop(quant);
+    drop(rescore_map);
+    drop(target_db);
+    crate::quant_cmd::run_in_process(
+        &dir,
+        &stems,
+        scores,
+        &ep,
+        cli.mbr_library_fdr,
+        donor_q,
+        donor_pep,
+        cli.mbr_fdr,
+        &report_base.with_extension(""),
+        cli.output_parquet.as_deref(),
+    )?;
+    Ok(())
+}
+
+/// `--mbr` needs two or more inputs, `--lfq` and a rescoring run (the
+/// library ranks precursors by the rescored PSM scores), and is label-free
+/// only.
+fn check_mbr_args(cli: &Cli) -> Result<(), String> {
+    if cli.spectrum.len() < 2 {
+        return Err(format!(
+            "--mbr transfers identifications between runs and needs two or more --spectrum inputs (got {})",
+            cli.spectrum.len()
+        ));
+    }
+    if !cli.lfq {
+        return Err("--mbr needs --lfq".into());
+    }
+    if !cli.rescore && !cli.rescore_native {
+        return Err(
+            "--mbr needs --rescore (or --rescore-native): the library ranks precursors by the rescored PSM scores"
+                .into(),
+        );
+    }
+    if cli.tmt.is_some() {
+        return Err("--mbr is label-free and cannot be combined with --tmt".into());
+    }
+    crate::quant_cmd::evidence_params(cli.lfq_tol)?;
     Ok(())
 }
 

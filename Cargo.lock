@@ -71,6 +71,7 @@ dependencies = [
  "num_cpus",
  "output",
  "parquet",
+ "quant",
  "rayon",
  "rustc-hash",
  "scoring",
@@ -2064,6 +2065,7 @@ dependencies = [
  "model",
  "model-train",
  "parquet",
+ "quant",
  "rayon",
  "scoring",
  "search",
@@ -2308,6 +2310,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "200b9ff220857e53e184257720a14553b2f4aa02577d2ed9842d45d4b9654810"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "quant"
+version = "0.3.0"
+dependencies = [
+ "model",
+ "rayon",
+ "rustc-hash",
 ]
 
 [[package]]

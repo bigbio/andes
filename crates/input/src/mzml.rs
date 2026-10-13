@@ -13,6 +13,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use flate2::read::ZlibDecoder;
 use quick_xml::{events::Event, Reader};
 
+use model::scan::{Ms1Scan, ProductScan, ScanContext};
 use model::{ActivationMethod, InstrumentType, Spectrum};
 
 // ── CV accessions we care about ─────────────────────────────────────────────
@@ -57,8 +58,15 @@ const CV_PROFILE: &str = "MS:1000128";
 const CV_SELECTED_ION_MZ: &str = "MS:1000744";
 /// Isolation-window lower offset in Da (selected m/z − lower = window start).
 const CV_ISOLATION_LOWER_OFFSET: &str = "MS:1000828";
+/// Isolation-window target m/z: the centre the offsets are measured from.
+const CV_ISOLATION_TARGET_MZ: &str = "MS:1000827";
 /// Isolation-window upper offset in Da (selected m/z + upper = window end).
 const CV_ISOLATION_UPPER_OFFSET: &str = "MS:1000829";
+/// `scan window lower limit` / `scan window upper limit` (under `<scanWindow>`).
+const CV_SCAN_WINDOW_LOWER: &str = "MS:1000501";
+const CV_SCAN_WINDOW_UPPER: &str = "MS:1000500";
+/// `FAIMS compensation voltage`.
+const CV_FAIMS_CV: &str = "MS:1001581";
 /// Older mzML files sometimes use plain m/z accession in selectedIon.
 const CV_MZ_PLAIN: &str = "MS:1000040";
 const CV_CHARGE_STATE: &str = "MS:1000041";
@@ -298,6 +306,16 @@ struct SpectrumBuilder {
     /// Isolation-window upper offset in Da, from `<isolationWindow>`
     /// `MS:1000829`. `None` when the mzML omits the isolation window.
     isolation_upper_offset: Option<f64>,
+    /// Isolation-window target m/z, from `<isolationWindow>` `MS:1000827`.
+    isolation_target_mz: Option<f64>,
+    /// `<precursor spectrumRef="...">`: the native id of the scan this one was
+    /// produced from. Links an MS3 reporter scan to its MS2 for quantification.
+    parent_ref: Option<String>,
+    /// First `<scanWindow>` lower / upper limit: the acquired m/z range.
+    scan_window_lower: Option<f64>,
+    scan_window_upper: Option<f64>,
+    /// `FAIMS compensation voltage`, when recorded.
+    faims_cv: Option<f32>,
     mz_array: Option<Vec<f64>>,
     intensity_array: Option<Vec<f64>>,
 }
@@ -370,6 +388,20 @@ pub struct MzMLReader<R: BufRead> {
     /// `None` if no MS1 has been seen yet. Read when emitting each MS2 to
     /// build `Ms1Link::ms2_to_ms1`.
     latest_ms1_idx: Option<usize>,
+    /// Quantification capture: keep EVERY MS1 scan of the run (RT + centroids)
+    /// in `run_ms1`, whichever read path is used. Off by default; the label-free
+    /// quantification builds its run index from this.
+    capture_run_ms1: bool,
+    run_ms1: Vec<Ms1Scan>,
+    /// Quantification capture: keep MS3+ scans (SPS-MS3 reporter scans) in
+    /// `product_scans` with their parent reference instead of dropping them.
+    /// They are never emitted as searchable spectra.
+    capture_product_scans: bool,
+    product_scans: Vec<ProductScan>,
+    /// Quantification capture: the [`ScanContext`] (survey-scan reference,
+    /// acquired m/z range, FAIMS voltage) of every emitted MS2.
+    capture_scan_context: bool,
+    scan_contexts: Vec<ScanContext>,
     /// Strict mode (finding 4.1). When `true`, the default [`Iterator`] yields
     /// the parse `Err` for a malformed spectrum (then stops) instead of
     /// silently resyncing past it. Default `false` (tolerant resync) preserves
@@ -397,6 +429,12 @@ impl<R: BufRead> MzMLReader<R> {
             capture_ms1: false,
             captured_ms1: Vec::new(),
             latest_ms1_idx: None,
+            capture_run_ms1: false,
+            run_ms1: Vec::new(),
+            capture_product_scans: false,
+            product_scans: Vec::new(),
+            capture_scan_context: false,
+            scan_contexts: Vec::new(),
             strict: false,
             skipped: 0,
         }
@@ -433,6 +471,45 @@ impl<R: BufRead> MzMLReader<R> {
     pub fn with_ms1_capture(mut self, capture: bool) -> Self {
         self.capture_ms1 = capture;
         self
+    }
+
+    /// Keep every MS1 scan of the run (retention time + centroids) for
+    /// label-free quantification, on any read path. Take them with
+    /// [`Self::take_run_ms1`] after the stream is exhausted. Off by default.
+    pub fn with_run_ms1_capture(mut self, capture: bool) -> Self {
+        self.capture_run_ms1 = capture;
+        self
+    }
+
+    /// Keep MS3 and higher scans (with their `<precursor spectrumRef>`) for
+    /// reporter-ion quantification instead of dropping them. They are not
+    /// emitted as spectra. Take them with [`Self::take_product_scans`].
+    pub fn with_product_scan_capture(mut self, capture: bool) -> Self {
+        self.capture_product_scans = capture;
+        self
+    }
+
+    /// Record the acquisition context of every emitted spectrum (its survey
+    /// scan reference, acquired m/z range and FAIMS voltage) for
+    /// quantification. Take them with [`Self::take_scan_contexts`].
+    pub fn with_scan_context_capture(mut self, capture: bool) -> Self {
+        self.capture_scan_context = capture;
+        self
+    }
+
+    /// The scan contexts recorded so far (see [`Self::with_scan_context_capture`]).
+    pub fn take_scan_contexts(&mut self) -> Vec<ScanContext> {
+        std::mem::take(&mut self.scan_contexts)
+    }
+
+    /// The MS1 scans captured so far (see [`Self::with_run_ms1_capture`]).
+    pub fn take_run_ms1(&mut self) -> Vec<Ms1Scan> {
+        std::mem::take(&mut self.run_ms1)
+    }
+
+    /// The MS3+ scans captured so far (see [`Self::with_product_scan_capture`]).
+    pub fn take_product_scans(&mut self) -> Vec<ProductScan> {
+        std::mem::take(&mut self.product_scans)
     }
 
     // ── Build a Spectrum from a completed SpectrumBuilder ────────────────────
@@ -489,6 +566,7 @@ impl<R: BufRead> MzMLReader<R> {
             activation_method: sb.activation_method,
             isolation_lower_offset: sb.isolation_lower_offset,
             isolation_upper_offset: sb.isolation_upper_offset,
+            isolation_target_mz: sb.isolation_target_mz,
         }))
     }
 
@@ -620,6 +698,30 @@ impl<R: BufRead> MzMLReader<R> {
                     }
                 }
             }
+            CV_ISOLATION_TARGET_MZ if self.state == State::IsolationWindow => {
+                if let Ok(mz) = cv.value.parse::<f64>() {
+                    if let Some(sb) = self.current.as_mut() {
+                        sb.isolation_target_mz = (mz.is_finite() && mz > 0.0).then_some(mz);
+                    }
+                }
+            }
+
+            // Acquired m/z range: the first `<scanWindow>` of the scan.
+            CV_SCAN_WINDOW_LOWER if self.state == State::Scan => {
+                if let (Ok(v), Some(sb)) = (cv.value.parse::<f64>(), self.current.as_mut()) {
+                    sb.scan_window_lower.get_or_insert(v);
+                }
+            }
+            CV_SCAN_WINDOW_UPPER if self.state == State::Scan => {
+                if let (Ok(v), Some(sb)) = (cv.value.parse::<f64>(), self.current.as_mut()) {
+                    sb.scan_window_upper.get_or_insert(v);
+                }
+            }
+            CV_FAIMS_CV if matches!(self.state, State::Scan | State::Spectrum) => {
+                if let (Ok(v), Some(sb)) = (cv.value.parse::<f32>(), self.current.as_mut()) {
+                    sb.faims_cv.get_or_insert(v);
+                }
+            }
 
             // Activation-method cvParams under <precursor><activation>.
             // PSI-MS accessions map to the five canonical variants. ECD
@@ -744,6 +846,17 @@ impl<R: BufRead> MzMLReader<R> {
                         b"selectedIon" if self.state == State::Spectrum => {
                             self.state = State::SelectedIon;
                         }
+                        b"precursor" if self.state == State::Spectrum => {
+                            // `<precursor spectrumRef="...">` names the scan this
+                            // one was produced from (MS3 → its MS2). First wins:
+                            // an SPS-MS3 lists one <precursor> per notch, all
+                            // pointing at the same MS2.
+                            if let Some(sb) = self.current.as_mut() {
+                                if sb.parent_ref.is_none() {
+                                    sb.parent_ref = attr_str(e, b"spectrumRef");
+                                }
+                            }
+                        }
                         b"isolationWindow" if self.state == State::Spectrum => {
                             // `<isolationWindow>` is a sibling of
                             // `<selectedIon>` / `<activation>` under
@@ -772,16 +885,19 @@ impl<R: BufRead> MzMLReader<R> {
                             }
                         }
                         b"binaryDataArray" if self.state == State::Spectrum => {
-                            // The arrays of a spectrum the level filter drops are
-                            // never decoded (MS1 and MS3 scans of an MS2 search).
-                            // `ms level` precedes the binary arrays in mzML.
+                            // The arrays of a spectrum the level filter drops and
+                            // no capture keeps are never decoded (MS1 and MS3 scans
+                            // of an MS2 search without quantification). `ms level`
+                            // precedes the binary arrays in mzML.
                             let dropped = self
                                 .current
                                 .as_ref()
                                 .and_then(|sb| sb.ms_level)
                                 .is_some_and(|level| {
                                     (level < self.ms_level_min || level > self.ms_level_max)
-                                        && !(self.capture_ms1 && level == 1)
+                                        && !((self.capture_ms1 || self.capture_run_ms1)
+                                            && level == 1)
+                                        && !(self.capture_product_scans && level >= 3)
                                 });
                             self.binary_ctx = (!dropped).then(BinaryArrayCtx::new);
                             self.state = State::BinaryDataArray;
@@ -851,7 +967,60 @@ impl<R: BufRead> MzMLReader<R> {
                         b"spectrum" => {
                             let sb = self.current.take();
                             self.state = State::Outside;
-                            if let Some(sb) = sb {
+                            if let Some(mut sb) = sb {
+                                // Quantification captures (inert by default).
+                                // MS1: keep the whole scan for the run index. The
+                                // arrays are cloned only when the level filter
+                                // would also emit the MS1 (`--ms-level 1`), so
+                                // the common path moves them.
+                                if self.capture_run_ms1 && sb.ms_level == Some(1) {
+                                    let emits_ms1 = self.ms_level_min <= 1 && !self.capture_ms1;
+                                    let (mz, inten) = if emits_ms1 {
+                                        (sb.mz_array.clone(), sb.intensity_array.clone())
+                                    } else {
+                                        (sb.mz_array.take(), sb.intensity_array.take())
+                                    };
+                                    let peaks = Self::build_peaks(mz, inten, sb.is_profile)?;
+                                    self.run_ms1.push(Ms1Scan {
+                                        rt: sb.rt_seconds.unwrap_or(0.0),
+                                        peaks,
+                                        id: sb.id.clone(),
+                                        faims_cv: sb.faims_cv,
+                                    });
+                                    if !emits_ms1 && !self.capture_ms1 {
+                                        continue;
+                                    }
+                                    if self.capture_ms1 {
+                                        // The chimeric link needs its own copy.
+                                        let last = self.run_ms1.last().expect("just pushed");
+                                        self.captured_ms1.push(last.peaks.clone());
+                                        self.latest_ms1_idx = Some(self.captured_ms1.len() - 1);
+                                        continue;
+                                    }
+                                }
+                                // MS3+: keep for reporter quantification, never emit.
+                                if self.capture_product_scans && sb.ms_level.unwrap_or(0) >= 3 {
+                                    let level = sb.ms_level.unwrap_or(3) as u8;
+                                    let peaks = Self::build_peaks(
+                                        sb.mz_array.take(),
+                                        sb.intensity_array.take(),
+                                        sb.is_profile,
+                                    )?;
+                                    self.product_scans.push(ProductScan {
+                                        scan: extract_scan_from_id(&sb.id),
+                                        id: sb.id,
+                                        rt_seconds: sb.rt_seconds,
+                                        ms_level: level,
+                                        parent_id: sb.parent_ref,
+                                        precursor_mz: sb
+                                            .monoisotopic_mz_override
+                                            .or(sb.precursor_mz)
+                                            .unwrap_or(0.0),
+                                        scan_window: sb.scan_window_lower.zip(sb.scan_window_upper),
+                                        peaks,
+                                    });
+                                    continue;
+                                }
                                 // Capture path: intercept MS1 scans before they
                                 // reach the level filter. MS1 peaks are stored
                                 // once in `captured_ms1` and never emitted as a
@@ -869,7 +1038,16 @@ impl<R: BufRead> MzMLReader<R> {
                                     self.latest_ms1_idx = Some(self.captured_ms1.len() - 1);
                                     continue;
                                 }
+                                let context = self.capture_scan_context.then(|| ScanContext {
+                                    id: sb.id.clone(),
+                                    parent_id: sb.parent_ref.clone(),
+                                    scan_window: sb.scan_window_lower.zip(sb.scan_window_upper),
+                                    faims_cv: sb.faims_cv,
+                                });
                                 if let Some(s) = self.finish_spectrum(sb)? {
+                                    if let Some(c) = context {
+                                        self.scan_contexts.push(c);
+                                    }
                                     return Ok(Some(s));
                                 }
                             }
@@ -2728,6 +2906,7 @@ mod tests {
         assert_eq!(spectra.len(), 1);
         assert_eq!(spectra[0].isolation_lower_offset, Some(1.5));
         assert_eq!(spectra[0].isolation_upper_offset, Some(1.5));
+        assert_eq!(spectra[0].isolation_target_mz, Some(500.5));
         // The isolation-window target (MS:1000827) must NOT clobber the
         // selectedIon precursor m/z.
         assert!((spectra[0].precursor_mz - 500.5).abs() < 1e-6);
@@ -2749,6 +2928,7 @@ mod tests {
         assert_eq!(spectra.len(), 1);
         assert_eq!(spectra[0].isolation_lower_offset, None);
         assert_eq!(spectra[0].isolation_upper_offset, None);
+        assert_eq!(spectra[0].isolation_target_mz, None);
     }
 
     // ── Instrument-type detection ────────────────────────────────────────────
@@ -3013,6 +3193,170 @@ mod tests {
 
         // Both MS2 link to MS1 index 0.
         assert_eq!(link.ms2_to_ms1, vec![Some(0), Some(0)]);
+    }
+
+    #[test]
+    fn run_ms1_capture_keeps_rt_and_peaks_without_emitting_ms1() {
+        let ms1 = |id: &str, rt_min: f64, mz: f64| {
+            format!(
+                r#"<spectrum index="0" id="{id}" defaultArrayLength="1">
+              <cvParam accession="MS:1000511" name="ms level" value="1"/>
+              <scanList count="1"><scan>
+                <cvParam accession="MS:1000016" name="scan start time" value="{rt_min}"
+                         unitAccession="UO:0000031" unitName="minute"/>
+              </scan></scanList>
+              <binaryDataArrayList count="2">{mzb}{intb}</binaryDataArrayList>
+            </spectrum>"#,
+                mzb = bda_plain("MS:1000514", &encode_f64_b64(&[mz])),
+                intb = bda_plain("MS:1000515", &encode_f64_b64(&[7.0])),
+            )
+        };
+        let ms2 = ms2_spectrum_xml(
+            "scan=2",
+            &bda_plain("MS:1000514", &encode_f64_b64(&[300.0])),
+            &bda_plain("MS:1000515", &encode_f64_b64(&[1.0])),
+            350.0,
+            Some(2),
+        );
+        let xml = wrap_spectra(&format!(
+            "{}{}{}",
+            ms1("scan=1", 1.0, 400.0),
+            ms2,
+            ms1("scan=3", 1.5, 401.0)
+        ));
+        let mut reader = MzMLReader::new(Cursor::new(xml)).with_run_ms1_capture(true);
+        let spectra: Vec<Spectrum> = reader.by_ref().map(|r| r.expect("parse")).collect();
+        assert_eq!(spectra.len(), 1, "only the MS2 is emitted");
+        let ms1s = reader.take_run_ms1();
+        assert_eq!(ms1s.len(), 2);
+        assert_eq!(ms1s[0].rt, 60.0);
+        assert_eq!(ms1s[1].rt, 90.0);
+        assert_eq!(ms1s[1].peaks, vec![(401.0, 7.0)]);
+        assert!(reader.take_run_ms1().is_empty(), "take drains");
+    }
+
+    #[test]
+    fn scan_context_records_survey_reference_scan_window_and_faims_voltage() {
+        let spectrum = |id: &str, level: u32, extra: &str| {
+            format!(
+                r#"<spectrum index="0" id="{id}" defaultArrayLength="1">
+              <cvParam accession="MS:1000511" name="ms level" value="{level}"/>
+              <scanList count="1"><scan>
+                <cvParam accession="MS:1000016" name="scan start time" value="1.0"
+                         unitAccession="UO:0000031" unitName="minute"/>
+                <cvParam accession="MS:1001581" name="FAIMS compensation voltage" value="-45"/>
+                <scanWindowList count="1"><scanWindow>
+                  <cvParam accession="MS:1000501" name="scan window lower limit" value="148.0"/>
+                  <cvParam accession="MS:1000500" name="scan window upper limit" value="1866.0"/>
+                </scanWindow></scanWindowList>
+              </scan></scanList>
+              {extra}
+              <binaryDataArrayList count="2">{mzb}{intb}</binaryDataArrayList>
+            </spectrum>"#,
+                mzb = bda_plain("MS:1000514", &encode_f64_b64(&[400.0])),
+                intb = bda_plain("MS:1000515", &encode_f64_b64(&[7.0])),
+            )
+        };
+        let precursor = r#"<precursorList count="1"><precursor spectrumRef="scan=1">
+                  <selectedIonList count="1"><selectedIon>
+                    <cvParam accession="MS:1000744" name="selected ion m/z" value="500.5"/>
+                    <cvParam accession="MS:1000041" name="charge state" value="2"/>
+                  </selectedIon></selectedIonList>
+                </precursor></precursorList>"#;
+        let xml = wrap_spectra(&format!(
+            "{}{}",
+            spectrum("scan=1", 1, ""),
+            spectrum("scan=2", 2, precursor)
+        ));
+        let mut reader = MzMLReader::new(Cursor::new(xml.clone()))
+            .with_run_ms1_capture(true)
+            .with_scan_context_capture(true);
+        let spectra: Vec<Spectrum> = reader.by_ref().map(|r| r.expect("parse")).collect();
+        assert_eq!(spectra.len(), 1);
+        let ms1 = reader.take_run_ms1();
+        assert_eq!(ms1[0].id, "scan=1");
+        assert_eq!(ms1[0].faims_cv, Some(-45.0));
+        let contexts = reader.take_scan_contexts();
+        assert_eq!(
+            contexts,
+            vec![ScanContext {
+                id: "scan=2".into(),
+                parent_id: Some("scan=1".into()),
+                scan_window: Some((148.0, 1866.0)),
+                faims_cv: Some(-45.0),
+            }]
+        );
+        // Off by default.
+        let mut plain = MzMLReader::new(Cursor::new(xml));
+        assert_eq!(plain.by_ref().count(), 1);
+        assert!(plain.take_scan_contexts().is_empty());
+    }
+
+    #[test]
+    fn product_scan_capture_links_ms3_to_its_ms2_and_hides_it() {
+        let ms2 = ms2_spectrum_xml(
+            "controllerType=0 controllerNumber=1 scan=10",
+            &bda_plain("MS:1000514", &encode_f64_b64(&[300.0])),
+            &bda_plain("MS:1000515", &encode_f64_b64(&[1.0])),
+            350.0,
+            Some(2),
+        );
+        let ms3 = format!(
+            r#"<spectrum index="1" id="controllerType=0 controllerNumber=1 scan=11" defaultArrayLength="2">
+              <cvParam accession="MS:1000511" name="ms level" value="3"/>
+              <scanList count="1"><scan>
+                <cvParam accession="MS:1000016" name="scan start time" value="2.0"
+                         unitAccession="UO:0000031" unitName="minute"/>
+              </scan></scanList>
+              <precursorList count="2">
+                <precursor spectrumRef="controllerType=0 controllerNumber=1 scan=10">
+                  <selectedIonList count="1"><selectedIon>
+                    <cvParam accession="MS:1000744" name="selected ion m/z" value="500.5"/>
+                  </selectedIon></selectedIonList>
+                  <activation><cvParam accession="MS:1000422" name="HCD" value=""/></activation>
+                </precursor>
+                <precursor spectrumRef="controllerType=0 controllerNumber=1 scan=10">
+                  <selectedIonList count="1"><selectedIon>
+                    <cvParam accession="MS:1000744" name="selected ion m/z" value="612.2"/>
+                  </selectedIon></selectedIonList>
+                </precursor>
+              </precursorList>
+              <binaryDataArrayList count="2">{mzb}{intb}</binaryDataArrayList>
+            </spectrum>"#,
+            mzb = bda_plain("MS:1000514", &encode_f64_b64(&[126.1277, 127.1248])),
+            intb = bda_plain("MS:1000515", &encode_f64_b64(&[1000.0, 2000.0])),
+        );
+        let xml = wrap_spectra(&format!("{ms2}{ms3}"));
+        // Default reader: the MS3 is filtered out and not captured.
+        let mut plain = MzMLReader::new(Cursor::new(xml.clone()));
+        let n = plain
+            .by_ref()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse")
+            .len();
+        assert_eq!(n, 1);
+        assert!(plain.take_product_scans().is_empty());
+        // Capture on: still one emitted MS2, and the MS3 is in the side table.
+        let mut reader = MzMLReader::new(Cursor::new(xml)).with_product_scan_capture(true);
+        let spectra: Vec<Spectrum> = reader.by_ref().map(|r| r.expect("parse")).collect();
+        assert_eq!(spectra.len(), 1);
+        assert_eq!(spectra[0].scan, Some(10));
+        let ms3s = reader.take_product_scans();
+        assert_eq!(ms3s.len(), 1);
+        let p = &ms3s[0];
+        assert_eq!(p.scan, Some(11));
+        assert_eq!(p.ms_level, 3);
+        assert_eq!(
+            p.parent_id.as_deref(),
+            Some("controllerType=0 controllerNumber=1 scan=10")
+        );
+        assert_eq!(p.rt_seconds, Some(120.0));
+        assert_eq!(
+            p.precursor_mz, 612.2,
+            "selected ion m/z is last-wins across SPS notches"
+        );
+        assert_eq!(p.peaks.len(), 2);
+        assert_eq!(p.peaks[1], (127.1248, 2000.0));
     }
 
     #[test]
@@ -3418,7 +3762,7 @@ mod tests {
     /// One spectrum's fields, for comparing two reads of the same file.
     fn spectrum_fingerprint(s: &Spectrum) -> String {
         format!(
-            "{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            "{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
             s.title,
             s.precursor_mz.to_bits(),
             s.precursor_charge,
@@ -3427,6 +3771,7 @@ mod tests {
             s.activation_method,
             s.isolation_lower_offset.map(f64::to_bits),
             s.isolation_upper_offset.map(f64::to_bits),
+            s.isolation_target_mz.map(f64::to_bits),
             s.precursor_intensity.map(f32::to_bits),
             s.peaks
                 .iter()

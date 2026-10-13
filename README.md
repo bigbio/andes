@@ -87,6 +87,7 @@ flowchart TD
    164 s instead of 99 minutes).
 4. **Optional passes** `--chimeric`, `--refine` and the separate `--glyco` pipeline (below).
 5. **Rescore** with Percolator, run by you or by `--rescore`. andes computes no production FDR.
+6. **Quantify** the confident PSMs on request: reporter ions (`--tmt`) or MS1 features (`--lfq`).
 
 Full parameter reference: [`DOCS.md`](DOCS.md).
 
@@ -177,6 +178,26 @@ andes --spectrum spectra.mzML --database db.fasta \
 fallback. Both add a q-value and PEP to the outputs and write `<stem>.q<fdr>.tsv` (targets at
 q ≤ `--fdr`, default 0.01, e.g. `--rescore --fdr 0.01`). `--fdr` and `--pep` do nothing
 without one of them.
+
+**Quantification (`--tmt`, `--lfq`).** andes quantifies the confident PSMs in the same run:
+`--tmt tmt10` reads the reporter ions of every identified MS2 (or its SPS-MS3 with
+`--tmt-level 3`), applies the kit's impurity matrix (`--tmt-correction`) and reports the
+precursor isolation purity; `--lfq` integrates the isotope chromatograms of every identified
+precursor from the MS1 scans with an experimental decoy-based feature q-value estimate. Both write Sage-style
+tables (`<stem>.tmt.tsv`, `<stem>.lfq.tsv`) and, with `--output-parquet`, the QPX
+`quantms.feature.parquet` that quantms / OpenMS consume. Normalization and protein roll-up stay
+downstream ([`DOCS.md` §10](DOCS.md#10-quantification)). `--lfq --mbr` adds match between runs
+over two or more inputs: every confident precursor is measured in every run, and transfers carry
+an internal quant-quality q-value (`<stem>.mbr.tsv`). The same stages run one at a time with
+`andes quant library|extract|finalize` over a `--quant-dir`, for pipelines that spread runs
+over machines.
+
+```bash
+andes --spectrum tmt_run.mzML --database human.fasta --mods tmt10_mods.txt \
+      --rescore --tmt tmt10 --tmt-correction lot.txt --output-parquet run.idparquet
+andes --spectrum run1.mzML --spectrum run2.mzML --database human.fasta --rescore --lfq
+andes --spectrum run1.mzML --spectrum run2.mzML --database human.fasta --rescore --lfq --mbr
+```
 
 **[quantms](https://github.com/bigbio/quantms).** Point the search step at `andes`. Use named
 flag values; legacy numeric values are rejected ([`DOCS.md` §8](DOCS.md#8-legacy-numeric-values--behavior-notes)).

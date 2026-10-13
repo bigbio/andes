@@ -78,7 +78,7 @@ fn fmt_f32(v: f32) -> String {
     if v == 0.0 {
         "0".to_string()
     } else {
-        format!("{v:.6e}").replace("e0", "e")
+        format!("{v:.6e}")
     }
 }
 
@@ -200,7 +200,7 @@ pub fn write_lfq_tsv(path: &Path, runs: &[String], rows: &[LfqRow]) -> io::Resul
         let mut cols = vec![pep, z.to_string(), proteins.join(";"), q, score, cos];
         for slot in per_run {
             cols.push(match slot {
-                Some(r) => format!("{:.6e}", r.feature.area).replace("e0", "e"),
+                Some(r) => format!("{:.6e}", r.feature.area),
                 None => String::new(),
             });
         }
@@ -314,8 +314,70 @@ mod tests {
         let row: Vec<&str> = lines.next().unwrap().split('\t').collect();
         assert_eq!(row[6], "PEPTIDEK");
         assert_eq!(row[12], "0.9000");
-        assert_eq!(row[13], "1.100000e0".replace("e0", "e"));
-        assert_eq!(row[17], "1.000000e0".replace("e0", "e"));
+        assert_eq!(row[13], "1.100000e0");
+        assert_eq!(row[17], "1.000000e0");
+    }
+
+    /// Assert every non-empty cell outside `text_cols` parses as `f64`
+    /// (`;`-joined lists cell by cell).
+    fn assert_numeric_cells_parse(path: &Path, text_cols: &[&str]) {
+        let text = std::fs::read_to_string(path).unwrap();
+        let mut lines = text.lines();
+        let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+        let mut n = 0;
+        for line in lines {
+            for (name, cell) in header.iter().zip(line.split('\t')) {
+                if text_cols.contains(name) || cell.is_empty() {
+                    continue;
+                }
+                for v in cell.split(';') {
+                    assert!(
+                        v.parse::<f64>().is_ok(),
+                        "{}: column {name} holds {v:?}",
+                        path.display()
+                    );
+                    n += 1;
+                }
+            }
+        }
+        assert!(n > 0, "no numeric cells in {}", path.display());
+    }
+
+    /// Values in [1, 10) have exponent 0; every numeric cell of every quant
+    /// table must still be a valid float.
+    #[test]
+    fn every_numeric_cell_parses_as_a_float() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmt = dir.path().join("tmt.tsv");
+        let tmt_rows = vec![TmtRow {
+            id: id("run1", 0, "PEPTIDEK", 2),
+            quant_scan_id: "scan=5".into(),
+            quant_ms_level: 2,
+            purity: Some(0.9),
+            raw: vec![3.4, 0.0, 12.5, 4.2e6],
+            corrected: vec![3.3, 0.0, 9.99, 4.1e6],
+        }];
+        write_tmt_tsv(&tmt, Plex::Itraq4, &tmt_rows, true).unwrap();
+        assert_numeric_cells_parse(
+            &tmt,
+            &["filename", "spec_id", "quant_scan", "peptide", "proteins"],
+        );
+
+        let mut f = feature(3.4);
+        f.apex_intensity = 5.5;
+        let lfq_rows = vec![LfqRow {
+            id: id("a", 0, "PEPTIDEK", 2),
+            feature: f,
+            score: 0.9,
+            feature_q_value: Some(0.001),
+            decoy_score: Some(0.1),
+        }];
+        let lfq = dir.path().join("lfq.tsv");
+        write_lfq_tsv(&lfq, &["a".into()], &lfq_rows).unwrap();
+        assert_numeric_cells_parse(&lfq, &["peptide", "proteins"]);
+        let features = dir.path().join("lfq_features.tsv");
+        write_lfq_features_tsv(&features, &lfq_rows).unwrap();
+        assert_numeric_cells_parse(&features, &["filename", "peptide", "proteins", "spec_id"]);
     }
 
     #[test]

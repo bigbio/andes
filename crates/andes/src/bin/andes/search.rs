@@ -148,6 +148,7 @@ fn is_gzip_path(path: &Path) -> bool {
 
 /// Sort one file's spectra by precursor mass and score them in fragment-index
 /// chunks, appending to `all_spectra` / `all_queues` with peaks dropped.
+#[allow(clippy::too_many_arguments)]
 fn score_mass_ordered(
     prepared: &PreparedSearch,
     mut pending: Vec<Spectrum>,

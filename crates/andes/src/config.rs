@@ -365,7 +365,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set!("tmt_level", tmt_level, cfg.quant.tmt_level);
     if let Some(v) = cfg.quant.tmt_tol {
         if !cli_set(m, "tmt_tol") {
-            args.tmt_tol = Some(crate::parse_precursor_tol(&v)?);
+            args.tmt_tol = Some(parse_tol("tmt_tol", &v)?);
         }
     }
     set_opt!("tmt_correction", tmt_correction, cfg.quant.tmt_correction);
@@ -373,7 +373,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set!("lfq", lfq, cfg.quant.lfq);
     if let Some(v) = cfg.quant.lfq_tol {
         if !cli_set(m, "lfq_tol") {
-            args.lfq_tol = Some(crate::parse_precursor_tol(&v)?);
+            args.lfq_tol = Some(parse_tol("lfq_tol", &v)?);
         }
     }
     set!("lfq_rt_window", lfq_rt_window, cfg.quant.lfq_rt_window);
@@ -413,6 +413,13 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     check_unit_fraction("refine_select_psm_fdr", args.refine_select_psm_fdr)?;
     check_unit_fraction("mbr_library_fdr", args.mbr_library_fdr)?;
     check_unit_fraction("mbr_fdr", args.mbr_fdr)?;
+    check_unit_fraction("tmt_min_purity", args.tmt_min_purity)?;
+    check_unit_fraction("lfq_min_cosine", args.lfq_min_cosine)?;
+    check_unit_fraction("lfq_feature_fdr", args.lfq_feature_fdr)?;
+    if let Some(v) = args.quant_fdr {
+        check_unit_fraction("quant_fdr", v)?;
+    }
+    check_positive("lfq_rt_window", args.lfq_rt_window)?;
     if let Some(v) = args.fragment_tol_ppm {
         check_positive("fragment_tol_ppm", v)?;
     }
@@ -445,6 +452,12 @@ fn check_unit_fraction(field: &str, v: f64) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// A tolerance string through the CLI's parser (finite and > 0), with the
+/// error naming the config key.
+fn parse_tol(field: &str, v: &str) -> Result<model::Tolerance, String> {
+    crate::parse_precursor_tol(v).map_err(|e| format!("config: `{field}`: {e}"))
 }
 
 /// Same bound the CLI's `parse_positive_tol` enforces: finite and > 0.
@@ -551,6 +564,63 @@ glyco:
         let ok =
             RunConfig::from_yaml_str("rescoring:\n  fdr: 0.01\nscoring:\n  fragment_tol_ppm: 20\n")
                 .unwrap();
+        assert!(apply(ok, &mut a, &matches).is_ok());
+    }
+
+    /// Out-of-range quant values from YAML fail with an error naming the key,
+    /// as the CLI's value parsers would.
+    #[test]
+    fn apply_rejects_out_of_range_quant_keys() {
+        use clap::{CommandFactory, FromArgMatches};
+        let matches = crate::TopCli::command()
+            .try_get_matches_from([
+                "andes",
+                "--spectrum",
+                "x",
+                "--database",
+                "y",
+                "--output-pin",
+                "o",
+            ])
+            .expect("parse baseline args");
+        for (key, value) in [
+            ("tmt_min_purity", "1.5"),
+            ("tmt_min_purity", "-0.1"),
+            ("lfq_min_cosine", "2.0"),
+            ("lfq_feature_fdr", "-0.5"),
+            ("quant_fdr", "5.0"),
+            ("quant_fdr", ".nan"),
+            ("lfq_rt_window", "0"),
+            ("lfq_rt_window", "-30"),
+            ("lfq_rt_window", ".inf"),
+            ("lfq_tol", "0ppm"),
+            ("lfq_tol", "-5ppm"),
+            ("tmt_tol", "0da"),
+            ("tmt_tol", "-20ppm"),
+        ] {
+            let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
+            let yaml = if key.ends_with("_tol") {
+                format!("quant:\n  {key}: \"{value}\"\n")
+            } else {
+                format!("quant:\n  {key}: {value}\n")
+            };
+            let cfg = RunConfig::from_yaml_str(&yaml).unwrap();
+            let Err(e) = apply(cfg, &mut a, &matches) else {
+                panic!("{key}: {value} must be rejected");
+            };
+            assert!(
+                e.contains(key),
+                "{key}: {value}: error does not name the key: {e}"
+            );
+        }
+
+        // In-range values still apply.
+        let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
+        let ok = RunConfig::from_yaml_str(
+            "quant:\n  tmt_min_purity: 0.5\n  lfq_min_cosine: 0.8\n  lfq_feature_fdr: 0.05\n  \
+             quant_fdr: 0.01\n  lfq_rt_window: 45\n  lfq_tol: 10ppm\n  tmt_tol: 0.003da\n",
+        )
+        .unwrap();
         assert!(apply(ok, &mut a, &matches).is_ok());
     }
 

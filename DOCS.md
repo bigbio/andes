@@ -269,8 +269,11 @@ Percolator `.pin` (always), plus optional `.tsv` and QPX parquet. Implementation
 Tab-separated, one row per PSM, best-first within each spectrum by `RankScore`. Positional
 isomers are collapsed: of the PSMs a spectrum keeps at one precursor and charge that share their
 residues and their multiset of modification masses (the same peptide with a modification on
-another site), only the best-ranked row is written. The TSV and QPX outputs carry the same rows.
-Rank is assigned after the collapse. The `chargeN`
+another site), only the best-ranked row is written; a decoy never collapses into a target, and the
+kept row's `Proteins` lists the proteins of the rows collapsed into it. The TSV and QPX outputs
+carry the same rows. Rank is assigned after the collapse, and the per-spectrum competition
+features (`DeltaRankScore`, `CandidateRankEntropy`, `ListwiseScoreGap`) treat site alternatives
+as one peptide, so a row's runner-up is never its own collapsed isomer. The `chargeN`
 one-hots follow `--charge`; the default 2–5 gives the 66 columns below. Do not confuse
 **`RankScore`** (col 7, orders candidates; historically `RawScore`) with **`RawScore`** (col 62,
 the fused strong score Percolator weights most; historically `StrongScore`; it also ranks under
@@ -310,7 +313,7 @@ the fused strong score Percolator weights most; historically `StrongScore`; it a
 | 33 | `EdgeScore` | int | unbounded | Per-bond edge-score sum (ion-existence + error); additive. |
 | 34 | `PrecursorIsotopeKL` | float | ≥0 | Precursor envelope KL vs averagine. **Always 0.0** (kept for positional consumers). |
 | 35 | `PrecursorSNR` | float | ≥0 | Precursor SNR from the MS1 envelope. **0.0 unless `--chimeric`.** |
-| 36 | `DeltaRankScore` | float | ≥0 | `RankScore(best) − RankScore(2nd-best distinct peptide)`; rank-1 row only, else 0.0. |
+| 36 | `DeltaRankScore` | float | ≥0 | `RankScore(best) − RankScore(2nd-best distinct peptide or modification multiset)`; rank-1 row only, else 0.0. |
 | 37 | `TailorScore` | float | ≥0 | `RankScore ÷` spectrum's top-1% quantile; cross-spectrum comparability. |
 | 38 | `PpmGaussianScore` | float | ≥0 | `Σ exp(−½(ppm/7)²)` over matched ions. |
 | 39 | `NeutralLossIonCount` | int | ≥0 | Matched b/y ions with −H₂O/−NH₃ partner peaks. |
@@ -334,8 +337,8 @@ the fused strong score Percolator weights most; historically `StrongScore`; it a
 | 57 | `ModSiteLocalized` | 0/1 | one-hot | 1 if a bracketing ion pair localizes the mod. |
 | 58 | `ModSiteDetCount` | int | ≥0 | Site-determining (bracketing) ions over all sites. |
 | 59 | `MassCompetitionEvidence` | float | ≥0 | `Σ 1/(1+ambiguity+ρ)`, alternative-mass competition. |
-| 60 | `CandidateRankEntropy` | float | ≥0 | Softmax entropy of the retained top-K scores. |
-| 61 | `ListwiseScoreGap` | float | signed | Top-1 − top-2 `RankScore` in the retained queue. |
+| 60 | `CandidateRankEntropy` | float | ≥0 | Softmax entropy of the retained top-K scores, one per emitted row. |
+| 61 | `ListwiseScoreGap` | float | signed | Top-1 − top-2 `RankScore` among the retained queue's emitted rows. |
 | 62 | `RawScore` | float | unbounded | **Fused strong score** `signal − null`; the primary feature. |
 | 63 | `RawScoreCal` | float | signed | Per-spectrum z-scored `RawScore`. |
 | 64 | `RankScoreFloat` | float | unbounded | Unrounded `RankScore` (continuous split-sum). |

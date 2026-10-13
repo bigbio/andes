@@ -527,15 +527,26 @@ mod tests {
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
         let mut queue = TopNQueue::new(10);
-        // Push 3 PSMs with descending rank_score (best = largest)
-        queue.push(make_psm(0, 10.0, 10.0)); // best (rank 1)
-        queue.push(make_psm(0, 8.0, 8.0)); // middle (rank 2)
-        queue.push(make_psm(0, 6.0, 6.0)); // worst (rank 3)
+        // Push 3 PSMs on 3 distinct peptides with descending rank_score (best =
+        // largest). Distinct peptides: a positional isomer of an emitted row
+        // would be collapsed into it.
+        for (cidx, score) in [(0u32, 10.0f32), (1, 8.0), (2, 6.0)] {
+            let mut psm = make_psm(0, score, score);
+            psm.candidate_idxs = vec![cidx];
+            queue.push(psm);
+        }
         let queues = vec![queue];
         let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        let cands = vec![make_candidate(0, false)];
+        let cands: Vec<Candidate> = [b'A', b'G', b'S']
+            .iter()
+            .map(|&r| {
+                let mut c = make_candidate(0, false);
+                c.peptide = Peptide::new(vec![AminoAcid::standard(r).unwrap()], b'K', b'S');
+                c
+            })
+            .collect();
         write_tsv_to(
             &mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true,
         )

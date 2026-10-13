@@ -60,11 +60,13 @@ pub(crate) struct RetrievalChoice {
 ///    index matches enumeration on TMT and UPS1 at ~1/19 and ~1/11 of its CPU
 ///    time (TMT 289 s vs 5,404 s).
 ///
-/// `--glyco` does not use it: its driver looks candidates up by backbone mass
-/// (precursor minus glycan) in its own sequon-only candidate table.
+/// `excluded_because` names a search the index cannot serve, which keeps
+/// enumeration: `--glyco` looks candidates up by backbone mass (precursor minus
+/// glycan) in its own sequon-only candidate table, and ETD/UVPD spectra fragment
+/// into ion series the b/y-only index does not hold.
 pub(crate) fn retrieval_choice(
     fragment_tol: model::tolerance::Tolerance,
-    excluded_mode: bool,
+    excluded_because: Option<&'static str>,
     flag: FragmentIndexFlag,
 ) -> RetrievalChoice {
     use model::tolerance::Tolerance;
@@ -72,12 +74,11 @@ pub(crate) fn retrieval_choice(
         Tolerance::Ppm(v) => format!("{v} ppm"),
         Tolerance::Da(v) => format!("{v} Da"),
     };
-    if excluded_mode {
+    if let Some(reason) = excluded_because {
         return RetrievalChoice {
             use_index: false,
             report: None,
-            refused_because: (flag == FragmentIndexFlag::On)
-                .then_some("--glyco looks candidates up by backbone mass"),
+            refused_because: (flag == FragmentIndexFlag::On).then_some(reason),
         };
     }
     match flag {
@@ -742,10 +743,28 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Every search retrieves its candidates from the out-of-core base-peptide
     // index; the glyco driver materialises its own sequon-only table from it.
     // The retrieval strategy is chosen by `retrieval_choice` and reported once;
-    // `--fragment-index` overrides it.
+    // `--fragment-index` overrides it. Searches the fragment-ion index cannot
+    // serve keep per-spectrum enumeration.
+    let retrieval_excluded: Option<&'static str> = if cli.glyco {
+        Some("--glyco looks candidates up by backbone mass")
+    } else if !search::fragment_index::covers_activation(param.data_type.activation) {
+        Some(
+            "it holds only b/y ions, and this activation method fragments into \
+             c/z or a/x ions",
+        )
+    } else {
+        None
+    };
+    if let (false, Some(reason)) = (cli.glyco, retrieval_excluded) {
+        eprintln!(
+            "[auto] {} fragmentation -> per-spectrum candidate enumeration (the fragment-ion \
+             index is not used: {reason})",
+            param.data_type.activation.name()
+        );
+    }
     let choice = retrieval_choice(
         scorer.feature_match_tolerance(),
-        cli.glyco,
+        retrieval_excluded,
         cli.fragment_index,
     );
     params.fragment_index_top_k = if choice.use_index {
@@ -2027,7 +2046,7 @@ mod retrieval_choice_tests {
 
     #[test]
     fn high_res_uses_the_index() {
-        let c = retrieval_choice(HI, false, FragmentIndexFlag::Auto);
+        let c = retrieval_choice(HI, None, FragmentIndexFlag::Auto);
         assert!(c.use_index);
         assert!(c.report.unwrap().contains("high-resolution"));
     }
@@ -2037,24 +2056,25 @@ mod retrieval_choice_tests {
     /// same PSMs.
     #[test]
     fn low_res_uses_the_capped_index() {
-        let c = retrieval_choice(LO, false, FragmentIndexFlag::Auto);
+        let c = retrieval_choice(LO, None, FragmentIndexFlag::Auto);
         assert!(c.use_index);
         assert!(c.report.unwrap().contains("most intense peaks vote"));
     }
 
     #[test]
     fn off_is_honoured_on_low_res() {
-        let c = retrieval_choice(LO, false, FragmentIndexFlag::Off);
+        let c = retrieval_choice(LO, None, FragmentIndexFlag::Off);
         assert!(!c.use_index);
     }
 
     #[test]
     fn glyco_never_uses_the_fragment_index() {
+        const GLYCO: Option<&str> = Some("--glyco looks candidates up by backbone mass");
         for flag in [FragmentIndexFlag::Auto, FragmentIndexFlag::On] {
-            let c = retrieval_choice(HI, true, flag);
+            let c = retrieval_choice(HI, GLYCO, flag);
             assert!(!c.use_index, "glyco looks candidates up by backbone mass");
         }
-        let c = retrieval_choice(HI, true, FragmentIndexFlag::On);
+        let c = retrieval_choice(HI, GLYCO, FragmentIndexFlag::On);
         assert_eq!(
             c.refused_because,
             Some("--glyco looks candidates up by backbone mass")
@@ -2063,18 +2083,42 @@ mod retrieval_choice_tests {
 
     #[test]
     fn off_is_honoured_where_the_index_would_otherwise_run() {
-        let c = retrieval_choice(HI, false, FragmentIndexFlag::Off);
+        let c = retrieval_choice(HI, None, FragmentIndexFlag::Off);
         assert!(!c.use_index);
         assert!(c.report.unwrap().contains("switched off"));
+    }
+
+    /// The index holds b/y ions only: ETD and UVPD keep enumeration at either
+    /// resolution, and forcing the index there is refused with the reason.
+    #[test]
+    fn activations_outside_the_indexed_ion_series_keep_enumeration() {
+        use model::activation::ActivationMethod;
+        for a in [
+            ActivationMethod::CID,
+            ActivationMethod::HCD,
+            ActivationMethod::PQD,
+        ] {
+            assert!(search::fragment_index::covers_activation(a), "{a:?}");
+        }
+        for a in [ActivationMethod::ETD, ActivationMethod::UVPD] {
+            assert!(!search::fragment_index::covers_activation(a), "{a:?}");
+        }
+        const ETD: Option<&str> = Some("b/y only");
+        for tol in [HI, LO] {
+            assert!(!retrieval_choice(tol, ETD, FragmentIndexFlag::Auto).use_index);
+            let forced = retrieval_choice(tol, ETD, FragmentIndexFlag::On);
+            assert!(!forced.use_index);
+            assert_eq!(forced.refused_because, ETD);
+        }
     }
 
     /// A tolerance tight enough to bin usefully counts as high-resolution (no
     /// vote cap) even when it is expressed in Da.
     #[test]
     fn a_tight_dalton_tolerance_counts_as_high_resolution() {
-        let tight = retrieval_choice(Tolerance::Da(0.02), false, FragmentIndexFlag::Auto);
+        let tight = retrieval_choice(Tolerance::Da(0.02), None, FragmentIndexFlag::Auto);
         assert!(tight.report.unwrap().contains("high-resolution"));
-        let wide = retrieval_choice(Tolerance::Da(0.2), false, FragmentIndexFlag::Auto);
+        let wide = retrieval_choice(Tolerance::Da(0.2), None, FragmentIndexFlag::Auto);
         assert!(wide.report.unwrap().contains("low-resolution"));
     }
 }

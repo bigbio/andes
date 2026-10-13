@@ -57,9 +57,15 @@ def enrichment_class(row) -> str:
     return "none"
 
 
+ANALYSER_NORM = {"Orbitrap": "FTMS", "FTMS": "FTMS", "Astral": "ASTMS", "ASTMS": "ASTMS", "TOF(timsTOF)": "timsTOF",
+                 "TOF": "TOF", "IonTrap": "ITMS", "ITMS": "ITMS", "FT-ICR/IT": "FTMS|ITMS?",
+                 "Orbitrap/IT (tribrid)": "FTMS|ITMS?", "Orbitrap/IT (hybrid)": "FTMS|ITMS?"}
+
+
 def stratum(row) -> str:
     frag = str(row.get("fragmentation") or "unknown").split("|")[0].split(" ")[0]
     an = str(row.get("analyser") or "unknown").split("|")[0]
+    an = ANALYSER_NORM.get(an, an)
     lab = str(row.get("labelling") or "LFQ").split("|")[0].replace("LFQ?", "LFQ")
     return f"{frag}/{an}/{lab}/{enrichment_class(row)}"
 
@@ -67,6 +73,7 @@ def stratum(row) -> str:
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--catalog", required=True)
+    p.add_argument("--runs", help="merged runs.parquet: split mixed-analyser datasets into per-analyser units")
     p.add_argument("--out", required=True)
     p.add_argument("--alpha", type=float, default=0.5)
     p.add_argument("--max-dataset-share", type=float, default=0.25)
@@ -79,11 +86,30 @@ def main():
 
     D = pd.read_parquet(a.catalog)
     D = D[~D.accession.str.split("-").str[0].isin(EXCLUDED)].copy()
+    if a.runs:
+        # a dataset whose runs differ in analyser (e.g. PXD009875: FTMS and ITMS runs) becomes one
+        # sampling unit per analyser, so its ion-trap PSMs land in the ion-trap stratum
+        R = pd.read_parquet(a.runs)
+        R = R[R.analyser.notna()]
+        units = []
+        for acc, g in R.groupby("accession"):
+            if g.analyser.nunique() < 2 or acc not in set(D.accession):
+                continue
+            base = D[D.accession == acc].iloc[0]
+            for an, h in g.groupby("analyser"):
+                u = base.copy()
+                u["analyser"], u["n_psms"] = an, h.n_psms.sum()
+                u["fragmentation"] = "CID?" if an == "ITMS" and not base.get("fragmentation") else base.get("fragmentation")
+                u["accession"] = f"{acc}:{an}"
+                units.append(u)
+            D = D[D.accession != acc]
+        if units:
+            D = pd.concat([D, pd.DataFrame(units)], ignore_index=True)
     D["n_psms"] = D.n_psms.fillna(0).astype(float)
     D = D[D.n_psms > 0]
     D["stratum"] = D.apply(stratum, axis=1)
     D["eclass"] = D.apply(enrichment_class, axis=1)
-    D["split"] = np.where(D.accession.isin(a.holdout_datasets), "test", "train")
+    D["split"] = np.where(D.accession.str.split(":").str[0].isin(a.holdout_datasets), "test", "train")
     for s, g in D[D.split == "train"].groupby("stratum"):
         if len(g) >= 3 and a.holdout_per_stratum:
             pick = g.sort_values("n_psms").iloc[1:1 + a.holdout_per_stratum].index

@@ -287,7 +287,9 @@ pub fn by_id(id: u32) -> Option<&'static UnimodEntry> {
 
 /// Unimod id for a mass delta at `residue` (or the N-terminus when `nterm`).
 ///
-/// Candidates within `tol` Da must allow the site; ties go to the lowest id.
+/// Among the entries within `tol` Da that allow the site, the closest mass wins
+/// (TMTpro +304.207145 over iTRAQ8plex +304.205359); entries with the same mass
+/// (to 1e-6 Da) go to the lowest id.
 pub fn match_mass(delta: f64, residue: Option<u8>, nterm: bool, tol: f64) -> Option<u32> {
     UNIMOD
         .iter()
@@ -296,8 +298,8 @@ pub fn match_mass(delta: f64, residue: Option<u8>, nterm: bool, tol: f64) -> Opt
             (nterm && e.sites.contains('^'))
                 || residue.is_some_and(|r| e.sites.as_bytes().contains(&r))
         })
+        .min_by_key(|e| (((e.mono - delta).abs() * 1e6).round() as u64, e.id))
         .map(|e| e.id)
-        .min()
 }
 
 /// Feature vector of one entry (unscaled).
@@ -318,6 +320,14 @@ mod tests {
         assert!((by_id(21).unwrap().mono - 79.966331).abs() < 1e-5);
         assert!((by_id(737).unwrap().mono - 229.162932).abs() < 1e-5);
         assert_eq!(match_mass(79.96633, Some(b'S'), false, 2e-3), Some(21));
+        // TMTpro and iTRAQ8plex are 1.8 mDa apart: the closer mass wins.
+        assert_eq!(match_mass(304.20715, Some(b'K'), false, 2e-3), Some(2016));
+        assert_eq!(match_mass(304.20715, None, true, 2e-3), Some(2016));
+        assert_eq!(match_mass(304.20536, Some(b'K'), false, 2e-3), Some(730));
+        // Only iTRAQ8plex is allowed on Y.
+        assert_eq!(match_mass(304.20715, Some(b'Y'), false, 2e-3), Some(730));
+        // Equal masses: lowest id (Gln->pyro-Glu 28 over Ammonia-loss 385).
+        assert_eq!(match_mass(-17.02655, None, true, 2e-3), Some(28));
         assert_eq!(match_mass(42.01057, Some(b'M'), true, 2e-3), Some(1));
         assert_eq!(match_mass(42.01057, Some(b'M'), false, 2e-3), None);
         assert_eq!(match_mass(-17.02655, Some(b'Q'), true, 2e-3), Some(28));

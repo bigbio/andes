@@ -160,6 +160,7 @@ fn build_synthetic_spectrum(
         activation_method: None,
         isolation_lower_offset: None,
         isolation_upper_offset: None,
+        isolation_target_mz: None,
     };
 
     (spectrum, expected_partition, expected_ion)
@@ -287,6 +288,7 @@ fn accumulator_records_ion_existence_both_absent_on_empty_spectrum() {
         activation_method: None,
         isolation_lower_offset: None,
         isolation_upper_offset: None,
+        isolation_target_mz: None,
     };
 
     let accumulator = StatsAccumulator::new(&scorer);
@@ -334,6 +336,7 @@ fn accumulator_records_missing_ions_on_empty_spectrum() {
         activation_method: None,
         isolation_lower_offset: None,
         isolation_upper_offset: None,
+        isolation_target_mz: None,
     };
 
     let accumulator = StatsAccumulator::new(&scorer);

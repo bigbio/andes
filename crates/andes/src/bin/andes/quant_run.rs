@@ -989,6 +989,7 @@ pub(crate) fn run_quant(
                     quant::precursor_purity(
                         ms1.peaks(scan),
                         pmz,
+                        spec.isolation_target_mz,
                         hit.psm.charge_used,
                         lo,
                         hi,

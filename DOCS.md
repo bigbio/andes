@@ -717,7 +717,12 @@ single input run's MS1 scans still need to fit in memory while it is processed.
   the same FAIMS compensation voltage, else the last MS1 before it. (On FAIMS runs the last MS1 in
   time is usually a survey scan at another voltage, which does not contain the precursor.) The most intense peak
   within 10 ppm of the precursor m/z anchors a ¹³C isotope ladder (10 ppm per step, both
-  directions) inside the strict isolation window. This is the ladder of OpenMS's
+  directions); the isotopes that fall inside the strict isolation window count as envelope. The
+  window is centred on the isolation target m/z (mzML `isolation window target m/z`), not on the
+  precursor m/z: when the instrument isolated a heavier isotope than the monoisotopic m/z it
+  assigned, the window covers what was actually isolated. Without a recorded target the window
+  is centred on the precursor m/z. The native `.raw` reader reports the window around the
+  monoisotopic m/z, so on `.raw` input the window stays centred there. This is the ladder of OpenMS's
   `IsobaricChannelExtractor` without its fuzzy window border and next-scan interpolation, and
   with ¹³C spacing and a two-sided nearest-peak match (OpenMS steps by the neutron mass and
   misses the upper isotopes, OpenMS/OpenMS#10467). Reported per PSM; `--tmt-min-purity`

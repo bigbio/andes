@@ -58,6 +58,8 @@ const CV_PROFILE: &str = "MS:1000128";
 const CV_SELECTED_ION_MZ: &str = "MS:1000744";
 /// Isolation-window lower offset in Da (selected m/z − lower = window start).
 const CV_ISOLATION_LOWER_OFFSET: &str = "MS:1000828";
+/// Isolation-window target m/z: the centre the offsets are measured from.
+const CV_ISOLATION_TARGET_MZ: &str = "MS:1000827";
 /// Isolation-window upper offset in Da (selected m/z + upper = window end).
 const CV_ISOLATION_UPPER_OFFSET: &str = "MS:1000829";
 /// `scan window lower limit` / `scan window upper limit` (under `<scanWindow>`).
@@ -304,6 +306,8 @@ struct SpectrumBuilder {
     /// Isolation-window upper offset in Da, from `<isolationWindow>`
     /// `MS:1000829`. `None` when the mzML omits the isolation window.
     isolation_upper_offset: Option<f64>,
+    /// Isolation-window target m/z, from `<isolationWindow>` `MS:1000827`.
+    isolation_target_mz: Option<f64>,
     /// `<precursor spectrumRef="...">`: the native id of the scan this one was
     /// produced from. Links an MS3 reporter scan to its MS2 for quantification.
     parent_ref: Option<String>,
@@ -562,6 +566,7 @@ impl<R: BufRead> MzMLReader<R> {
             activation_method: sb.activation_method,
             isolation_lower_offset: sb.isolation_lower_offset,
             isolation_upper_offset: sb.isolation_upper_offset,
+            isolation_target_mz: sb.isolation_target_mz,
         }))
     }
 
@@ -690,6 +695,13 @@ impl<R: BufRead> MzMLReader<R> {
                 if let Ok(off) = cv.value.parse::<f64>() {
                     if let Some(sb) = self.current.as_mut() {
                         sb.isolation_upper_offset = Some(off);
+                    }
+                }
+            }
+            CV_ISOLATION_TARGET_MZ if self.state == State::IsolationWindow => {
+                if let Ok(mz) = cv.value.parse::<f64>() {
+                    if let Some(sb) = self.current.as_mut() {
+                        sb.isolation_target_mz = (mz.is_finite() && mz > 0.0).then_some(mz);
                     }
                 }
             }
@@ -2891,6 +2903,7 @@ mod tests {
         assert_eq!(spectra.len(), 1);
         assert_eq!(spectra[0].isolation_lower_offset, Some(1.5));
         assert_eq!(spectra[0].isolation_upper_offset, Some(1.5));
+        assert_eq!(spectra[0].isolation_target_mz, Some(500.5));
         // The isolation-window target (MS:1000827) must NOT clobber the
         // selectedIon precursor m/z.
         assert!((spectra[0].precursor_mz - 500.5).abs() < 1e-6);
@@ -2912,6 +2925,7 @@ mod tests {
         assert_eq!(spectra.len(), 1);
         assert_eq!(spectra[0].isolation_lower_offset, None);
         assert_eq!(spectra[0].isolation_upper_offset, None);
+        assert_eq!(spectra[0].isolation_target_mz, None);
     }
 
     // ── Instrument-type detection ────────────────────────────────────────────
@@ -3745,7 +3759,7 @@ mod tests {
     /// One spectrum's fields, for comparing two reads of the same file.
     fn spectrum_fingerprint(s: &Spectrum) -> String {
         format!(
-            "{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            "{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
             s.title,
             s.precursor_mz.to_bits(),
             s.precursor_charge,
@@ -3754,6 +3768,7 @@ mod tests {
             s.activation_method,
             s.isolation_lower_offset.map(f64::to_bits),
             s.isolation_upper_offset.map(f64::to_bits),
+            s.isolation_target_mz.map(f64::to_bits),
             s.precursor_intensity.map(f32::to_bits),
             s.peaks
                 .iter()

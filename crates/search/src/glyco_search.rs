@@ -2321,6 +2321,7 @@ mod tests {
             activation_method: Some(am),
             isolation_lower_offset: None,
             isolation_upper_offset: None,
+            isolation_target_mz: None,
         };
         use ActivationMethod::{ETD, HCD};
         // 0:HCD@500  1:ETD@500  2:HCD@600  3:ETD@600.005 (within tol)  4:ETD@999 (no partner)

@@ -158,16 +158,17 @@ impl ThermoRawReader {
         let precursor_intensity = if inten > 0.0 { Some(inten) } else { None };
 
         // Isolation window: RawFileReader gives absolute m/z bounds
-        // (lower, target, upper); the model stores offsets from the target,
-        // matching mzML's `isolation window lower/upper offset`. Skip a
-        // degenerate/absent window (the cascade is its only consumer).
+        // (lower, target, upper); the model stores the target and the offsets
+        // from it, matching mzML's `isolation window target m/z` and
+        // `lower/upper offset`. Skip a degenerate/absent window.
         let w = p.isolation_window();
         let (lo, tg, up) = (w.lower(), w.target(), w.upper());
-        let (isolation_lower_offset, isolation_upper_offset) = if tg > 0.0 && up > lo {
-            (Some((tg - lo).abs()), Some((up - tg).abs()))
-        } else {
-            (None, None)
-        };
+        let (isolation_lower_offset, isolation_upper_offset, isolation_target_mz) =
+            if tg > 0.0 && up > lo {
+                (Some((tg - lo).abs()), Some((up - tg).abs()), Some(tg))
+            } else {
+                (None, None, None)
+            };
 
         Some(Spectrum {
             // The Thermo controller native id (e.g.
@@ -187,6 +188,7 @@ impl ThermoRawReader {
             activation_method: map_dissociation(p.activation().dissociation_method()),
             isolation_lower_offset,
             isolation_upper_offset,
+            isolation_target_mz,
         })
     }
 

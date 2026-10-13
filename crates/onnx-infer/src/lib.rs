@@ -44,6 +44,7 @@ mod tensor;
 
 pub mod backend;
 pub mod deeplc;
+pub mod ms2_native;
 pub mod ms2pip;
 pub mod peptdeep;
 pub mod prosit;

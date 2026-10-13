@@ -20,6 +20,7 @@
 //! | `ms2pip` (`ms2pip`) | `ms2pip_<M>_{b,y}.json`, `M` = `--ms2pip-model` | b/y z1 |
 //! | `deeplc` (`deeplc`) | `deeplc_rt.json` | RT |
 //! | `prosit` (`prosit`) | `prosit_irt.json`, `prosit_intensity_hcd.json` (`--nce`) | iRT + b/y z1–3 |
+//! | `andes-ms2` (`ams2`) | `andes_ms2.ams2` (or `--models FILE`); `--nce` (`NA` = unknown), `--activation`, `--instrument` | b/y z1–2 |
 //!
 //! Output columns: `SpecId`, `observed_retention_time`, `<prefix>_irt` (NA
 //! without an RT model), `<prefix>_missing` (1 when the model cannot encode the
@@ -36,7 +37,9 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use models::{DeepLc, Form, H2O, Ion, Mass, Ms2pip, PROTON, PeptDeep, Predictor, Prosit, parse_peptide};
+use models::{
+    AndesMs2, DeepLc, Form, H2O, Ion, Mass, Ms2pip, PROTON, PeptDeep, Predictor, Prosit, parse_peptide,
+};
 use onnx_infer::OnnxSession;
 
 struct Args {
@@ -51,6 +54,7 @@ struct Args {
     batch: usize,
     nce: f32,
     instrument: String,
+    activation: String,
     ms2pip_model: String,
 }
 
@@ -67,6 +71,7 @@ fn parse_args() -> Args {
         batch: 256,
         nce: 30.0,
         instrument: "Lumos".into(),
+        activation: "HCD-FTMS".into(),
         ms2pip_model: "HCD2021".into(),
     };
     let v: Vec<String> = std::env::args().skip(1).collect();
@@ -83,8 +88,9 @@ fn parse_args() -> Args {
             "--frag-unit" => a.frag_ppm = val == "ppm",
             "--threads" => a.threads = val.parse().expect("--threads"),
             "--batch" => a.batch = val.parse().expect("--batch"),
-            "--nce" => a.nce = val.parse().expect("--nce"),
+            "--nce" => a.nce = if val == "NA" { f32::NAN } else { val.parse().expect("--nce") },
             "--instrument" => a.instrument = val,
+            "--activation" => a.activation = val,
             "--ms2pip-model" => a.ms2pip_model = val,
             other => panic!("unknown argument {other}"),
         }
@@ -246,6 +252,12 @@ fn main() {
         "ms2pip" => Box::new(Ms2pip { dir: args.models.clone(), model: args.ms2pip_model.clone() }),
         "deeplc" => Box::new(DeepLc { dir: args.models.clone() }),
         "prosit" => Box::new(Prosit { dir: args.models.clone(), nce: args.nce }),
+        "andes-ms2" => Box::new(AndesMs2::new(
+            &args.models,
+            Some(args.nce).filter(|v| v.is_finite()),
+            &args.activation,
+            &args.instrument,
+        )),
         other => panic!("unknown --model {other}"),
     };
     let pred = pred.as_ref();

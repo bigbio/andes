@@ -229,17 +229,17 @@ impl RtPeptide {
 
 /// Conv layer with weights stored `[k][in][out]` so the inner loop runs over
 /// contiguous output channels.
-struct Conv {
-    k: usize,
-    cin: usize,
-    cout: usize,
+pub(crate) struct Conv {
+    pub(crate) k: usize,
+    pub(crate) cin: usize,
+    pub(crate) cout: usize,
     dil: usize,
-    w: Vec<f32>,
-    b: Vec<f32>,
+    pub(crate) w: Vec<f32>,
+    pub(crate) b: Vec<f32>,
 }
 
 impl Conv {
-    fn from_torch(w: &Tensor, b: &Tensor, dil: usize) -> Result<Self, RtError> {
+    pub(crate) fn from_torch(w: &Tensor, b: &Tensor, dil: usize) -> Result<Self, RtError> {
         let [cout, cin, k] = w.dims[..] else {
             return Err(RtError::Format("conv weight must be 3-D".into()));
         };
@@ -265,7 +265,7 @@ impl Conv {
     }
 
     /// `y[p] = b + Σ_k Σ_i w[k][i] · x[p + (k - k/2)·dil]` with zero padding.
-    fn apply(&self, x: &[f32], n: usize, y: &mut [f32]) {
+    pub(crate) fn apply(&self, x: &[f32], n: usize, y: &mut [f32]) {
         let (cin, cout) = (self.cin, self.cout);
         for p in 0..n {
             let yp = &mut y[p * cout..(p + 1) * cout];
@@ -288,13 +288,62 @@ impl Conv {
     }
 }
 
-struct Tensor {
-    dims: Vec<usize>,
-    data: Vec<f32>,
+pub(crate) struct Tensor {
+    pub(crate) dims: Vec<usize>,
+    pub(crate) data: Vec<f32>,
+}
+
+/// Parse a tensor file: 8-byte `magic`, u32 tensor count, then per tensor u32
+/// name length, UTF-8 name, u32 ndim, u32 dims and little-endian f32 data.
+pub(crate) fn read_tensors(buf: &[u8], magic: &[u8; 8]) -> Result<HashMap<String, Tensor>, RtError> {
+    let bad = |m: &str| RtError::Format(m.to_string());
+    if buf.len() < 12 || &buf[..8] != magic {
+        return Err(RtError::Format(format!(
+            "missing {} magic",
+            String::from_utf8_lossy(magic)
+        )));
+    }
+    let mut off = 8;
+    let u32_at = |off: &mut usize| -> Result<usize, RtError> {
+        let v = buf.get(*off..*off + 4).ok_or_else(|| bad("truncated"))?;
+        *off += 4;
+        Ok(u32::from_le_bytes(v.try_into().unwrap()) as usize)
+    };
+    let n = u32_at(&mut off)?;
+    let mut t: HashMap<String, Tensor> = HashMap::new();
+    for _ in 0..n {
+        let len = u32_at(&mut off)?;
+        let name = std::str::from_utf8(
+            buf.get(off..off + len)
+                .ok_or_else(|| bad("truncated name"))?,
+        )
+        .map_err(|_| bad("name not UTF-8"))?
+        .to_string();
+        off += len;
+        let nd = u32_at(&mut off)?;
+        let mut dims = Vec::with_capacity(nd);
+        for _ in 0..nd {
+            dims.push(u32_at(&mut off)?);
+        }
+        let count: usize = dims.iter().product();
+        let raw = buf
+            .get(off..off + 4 * count)
+            .ok_or_else(|| bad("truncated data"))?;
+        off += 4 * count;
+        let data = raw
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        t.insert(name, Tensor { dims, data });
+    }
+    if off != buf.len() {
+        return Err(bad("trailing bytes"));
+    }
+    Ok(t)
 }
 
 #[inline]
-fn silu(v: f32) -> f32 {
+pub(crate) fn silu(v: f32) -> f32 {
     v / (1.0 + (-v).exp())
 }
 
@@ -333,45 +382,7 @@ impl RtModel {
     /// Parse an `ARTN0001` blob.
     pub fn from_bytes(buf: &[u8]) -> Result<Self, RtError> {
         let bad = |m: &str| RtError::Format(m.to_string());
-        if buf.len() < 12 || &buf[..8] != b"ARTN0001" {
-            return Err(bad("missing ARTN0001 magic"));
-        }
-        let mut off = 8;
-        let u32_at = |off: &mut usize| -> Result<usize, RtError> {
-            let v = buf.get(*off..*off + 4).ok_or_else(|| bad("truncated"))?;
-            *off += 4;
-            Ok(u32::from_le_bytes(v.try_into().unwrap()) as usize)
-        };
-        let n = u32_at(&mut off)?;
-        let mut t: HashMap<String, Tensor> = HashMap::new();
-        for _ in 0..n {
-            let len = u32_at(&mut off)?;
-            let name = std::str::from_utf8(
-                buf.get(off..off + len)
-                    .ok_or_else(|| bad("truncated name"))?,
-            )
-            .map_err(|_| bad("name not UTF-8"))?
-            .to_string();
-            off += len;
-            let nd = u32_at(&mut off)?;
-            let mut dims = Vec::with_capacity(nd);
-            for _ in 0..nd {
-                dims.push(u32_at(&mut off)?);
-            }
-            let count: usize = dims.iter().product();
-            let raw = buf
-                .get(off..off + 4 * count)
-                .ok_or_else(|| bad("truncated data"))?;
-            off += 4 * count;
-            let data = raw
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
-                .collect();
-            t.insert(name, Tensor { dims, data });
-        }
-        if off != buf.len() {
-            return Err(bad("trailing bytes"));
-        }
+        let t = read_tensors(buf, b"ARTN0001")?;
         let get = |k: &str| {
             t.get(k)
                 .ok_or_else(|| RtError::Format(format!("missing tensor {k}")))

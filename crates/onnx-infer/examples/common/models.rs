@@ -15,6 +15,8 @@ use std::path::Path;
 
 use onnx_infer::peptdeep::{PeptDeepPeptide, pack_ms2_batch, pack_rt_batch};
 use onnx_infer::deeplc::{self, DeepLcPeptide};
+use onnx_infer::ms2_native::{Ms2Conditions, Ms2Model, Ms2Scratch, N_BASE_ION, N_ION};
+use onnx_infer::rt_native::RtPeptide;
 use onnx_infer::prosit::{self, PrositPeptide, ResidueState};
 use onnx_infer::{BackendKind, OnnxSession, ms2pip};
 use serde::Deserialize;
@@ -98,6 +100,20 @@ impl Mod {
             Mod::Deamidated => format!("Deamidated@{aa}"),
             Mod::GlnPyroGlu => "Gln->pyro-Glu@Q^Any_N-term".into(),
             Mod::GluPyroGlu => "Glu->pyro-Glu@E^Any_N-term".into(),
+        }
+    }
+
+    /// Unimod accession.
+    pub fn unimod(self) -> u32 {
+        match self {
+            Mod::Carbamidomethyl => 4,
+            Mod::Oxidation => 35,
+            Mod::Acetyl => 1,
+            Mod::Tmt6plex => 737,
+            Mod::Phospho => 21,
+            Mod::Deamidated => 7,
+            Mod::GlnPyroGlu => 28,
+            Mod::GluPyroGlu => 27,
         }
     }
 
@@ -475,6 +491,75 @@ impl Predictor for DeepLc {
     }
     fn ms2(&self, _: &mut [OnnxSession], _: &[(&Form, u8)]) -> Vec<Vec<f32>> {
         unreachable!("DeepLC has no MS2 model")
+    }
+}
+
+// ---------------------------------------------------------------- andes-ms2
+
+/// The native andes-ms2 model (`onnx_infer::ms2_native`); no ONNX graphs.
+pub struct AndesMs2 {
+    pub model: Ms2Model,
+    pub nce: Option<f32>,
+    pub activation: String,
+    pub instrument: String,
+}
+
+impl AndesMs2 {
+    /// `path` is the `AMS20001` weight file, or a directory holding `andes_ms2.ams2`.
+    pub fn new(path: &Path, nce: Option<f32>, activation: &str, instrument: &str) -> Self {
+        let file = if path.is_dir() { path.join("andes_ms2.ams2") } else { path.to_path_buf() };
+        let model = Ms2Model::load(&file).unwrap_or_else(|e| panic!("load {}: {e}", file.display()));
+        Self { model, nce, activation: activation.into(), instrument: instrument.into() }
+    }
+
+    pub fn peptide(f: &Form) -> RtPeptide {
+        let mut mods: Vec<(usize, u32)> = f.mods.iter().map(|(s, m)| (*s, m.unimod())).collect();
+        mods.sort_unstable();
+        RtPeptide { sequence: f.seq.clone(), mods }
+    }
+
+    fn conditions(&self, z: u8) -> Ms2Conditions {
+        Ms2Conditions::new(z, self.nce, &self.activation, &self.instrument)
+    }
+}
+
+impl Predictor for AndesMs2 {
+    fn prefix(&self) -> &str {
+        "ams2"
+    }
+    fn ions(&self) -> &[Ion] {
+        &PDEEP_IONS
+    }
+    fn has_rt(&self) -> bool {
+        false
+    }
+    fn supports_rt(&self, _: &Form) -> bool {
+        false
+    }
+    fn supports_ms2(&self, f: &Form, z: u8) -> bool {
+        z > 0 && f.seq.len() >= 2 && Self::peptide(f).encode().is_some()
+    }
+    fn batch_key(&self, _: &Form) -> usize {
+        0
+    }
+    fn sessions(&self) -> Vec<OnnxSession> {
+        Vec::new()
+    }
+    fn rt(&self, _: &mut [OnnxSession], _: &[&Form]) -> Vec<f32> {
+        unreachable!("andes-ms2 has no RT model")
+    }
+    fn ms2(&self, _: &mut [OnnxSession], items: &[(&Form, u8)]) -> Vec<Vec<f32>> {
+        let mut scratch = Ms2Scratch::default();
+        items
+            .iter()
+            .map(|(f, z)| {
+                let full = self
+                    .model
+                    .predict_with(&Self::peptide(f), &self.conditions(*z), &mut scratch)
+                    .expect("supports_ms2 checked the encoding");
+                full.chunks_exact(N_ION).flat_map(|site| site[..N_BASE_ION].to_vec()).collect()
+            })
+            .collect()
     }
 }
 

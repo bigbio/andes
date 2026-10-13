@@ -115,6 +115,21 @@ Phospho PSMs are Percolator seed 42.
   0.4% of PSMs and 1.1% of peptides (its nominal 1% moves from 1.17–1.19% to 1.08–1.14% true
   FDP). On UPS1, the earlier top-1 measurement found +1,274 PSMs with entrapment hits flat
   (166 → 167).
+- **Positional isomers are collapsed in the PIN** (2026-10-13): of a spectrum's candidates at one
+  precursor and charge with the same residues and modification masses, only the best-ranked row
+  is written. The phospho loss above came from these site alternatives (363,181 of 932,015
+  phospho rows); the table was measured before the collapse. Same protocol, before → after:
+
+  | Dataset | Rows dropped | Before | After |
+  |---|---|---|---|
+  | Phospho, `--chimeric` | 363,181 (39%) | 39,261–39,307 / 14,896–14,922 | **39,470–39,592 / 15,107–15,156** |
+  | Phospho | 363,181 (40%) | 37,038–37,110 / 14,522–14,561 | **37,220–37,356 / 14,726–14,771** |
+  | Astral | 5,850 (0.6%) | 43,076–43,145 / 26,723–26,746 | 43,170–43,210 / 26,756–26,779 |
+  | TMT (nominal 1%) | 3,753 (1.1%) | 12,329–12,372 / 10,429–10,474 | 12,359–12,385 / 10,469–10,490 |
+  | UPS1 | 4,560 (1.3%) | 7,760–8,031 / 2,240–2,347 | 7,973–8,016 / 2,296–2,315 |
+
+  Phospho with `--chimeric` now beats top-1 on both PSMs and peptides. The other datasets carry
+  only oxidation and deamidation site alternatives and move within or just above seed noise.
 - **`--refine` is high-res only** and skips both low-res sets by design: at low resolution a
   deamidation (+0.984) cannot be told from a C13 isotope error.
 - **`--refine` on Astral.** Three fixes landed before the refresh: #100 pairs each Pass-2 decoy

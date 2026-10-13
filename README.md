@@ -225,8 +225,11 @@ With `--chimeric` (mzML or Thermo `.raw`), pass 1 is the normal search, keeping 
 candidates per scan (`--top-n`, default 10); pass 2 takes the best one as the primary peptide,
 finds co-isolated precursors in the MS1 isolation window and searches the residual spectrum for
 a second peptide. Keeping the alternatives (rather than only the best candidate) took Astral from
-60,435 to 66,405 PSMs and 26,717 to 29,400 peptides at an equal entrapment true FDP of 1%; on
-phospho it cost about 1% of peptides (15,084 → 14,904).
+60,435 to 66,405 PSMs and 26,717 to 29,400 peptides at an equal entrapment true FDP of 1%. On
+phospho the alternatives first cost about 1% of peptides (15,084 → 14,904): most of them were the
+same phosphopeptide with the phosphate on another site. The PIN now keeps one row per peptide and
+modification multiset per precursor (see [DOCS.md](DOCS.md) §3a), and phospho with `--chimeric`
+reaches 39,470–39,592 PSMs and 15,107–15,156 peptides, above top-1 (39,404–39,489 / 15,046–15,084).
 
 On UPS1 (with entrapment) PSMs at q ≤ 0.01 rose from 15,838 to 17,112 (+8.0%) with entrapment
 hits flat (166 → 167). On high-res data `--chimeric` runs on the default out-of-core path with

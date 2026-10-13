@@ -42,6 +42,7 @@ mod manifest;
 mod session;
 mod tensor;
 
+pub mod andes_peptide;
 pub mod backend;
 pub mod peptdeep;
 pub mod rescoring;

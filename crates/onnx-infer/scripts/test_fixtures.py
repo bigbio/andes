@@ -2,7 +2,9 @@
 """Parity tests for committed onnx-infer fixtures (no torch required).
 
 Checks:
-  1. AGBD decode → native tree walk matches ONNX Runtime TreeEnsemble
+  1. AGBD decode → tree walk matches ONNX Runtime TreeEnsemble, and both match
+     the expected scores in fixtures/parity/agbd.json, which the native Rust
+     decoder is checked against (tests/agbd_native.rs)
   2. intensity_mlp MatMul+ReLU matches numpy reference
   3. export_agbd_to_onnx round-trip still loads
 
@@ -10,6 +12,7 @@ Exit 0 on success. Requires: numpy, onnx, onnxruntime
 """
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -43,7 +46,7 @@ def eval_agbd_trees(trees, x: np.ndarray) -> float:
     return total
 
 
-def test_tree_fixture(agbd_name: str, onnx_name: str, rows: np.ndarray):
+def check_tree_fixture(agbd_name: str, onnx_name: str, rows: np.ndarray, expected: np.ndarray):
     nfeat, flags, trees = parse_agbd((FIX / agbd_name).read_bytes())
     assert rows.shape[1] == nfeat, (rows.shape, nfeat)
     sess = ort.InferenceSession(str(FIX / onnx_name), providers=["CPUExecutionProvider"])
@@ -51,6 +54,8 @@ def test_tree_fixture(agbd_name: str, onnx_name: str, rows: np.ndarray):
     y_nat = np.array([eval_agbd_trees(trees, r) for r in rows], dtype=np.float32)
     if not np.allclose(y_ort, y_nat, atol=1e-5):
         raise AssertionError(f"{onnx_name}: ort={y_ort} native={y_nat} flags={flags}")
+    if not np.allclose(y_ort, expected, atol=1e-5):
+        raise AssertionError(f"{onnx_name}: ort={y_ort} expected (native Rust)={expected}")
     # round-trip export
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "rt.onnx"
@@ -77,25 +82,24 @@ def test_intensity_mlp():
     print(f"OK intensity_mlp: {got}")
 
 
+def load_parity():
+    entries = json.loads((FIX / "parity" / "agbd.json").read_text())
+    out = []
+    for e in entries:
+        rows = np.array(
+            [[np.nan if v is None else v for v in r] for r in e["rows"]], dtype=np.float32
+        )
+        out.append((e["agbd"], e["onnx"], rows, np.array(e["expected"], dtype=np.float32)))
+    return out
+
+
+def test_tree_fixtures():
+    for agbd_name, onnx_name, rows, expected in load_parity():
+        check_tree_fixture(agbd_name, onnx_name, rows, expected)
+
+
 def main():
-    test_tree_fixture(
-        "tree_leq.agbd",
-        "tree_leq.onnx",
-        np.array([[0.0], [0.5], [0.6], [np.nan]], dtype=np.float32),
-    )
-    test_tree_fixture(
-        "peak_gbdt.agbd",
-        "peak_gbdt.onnx",
-        np.array(
-            [
-                [0.1, -3.0, 0.0],
-                [0.9, 4.0, 2.0],
-                [np.nan, np.nan, np.nan],
-                [0.5, -2.0, 1e-3],
-            ],
-            dtype=np.float32,
-        ),
-    )
+    test_tree_fixtures()
     test_intensity_mlp()
     print("all fixture tests passed")
 

@@ -138,7 +138,7 @@ Needs MS1: **mzML or Thermo `.raw`** only (MGF/`.d` warn and run a normal search
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--chimeric` | flag | *(off)* | Pass 2 finds co-isolated precursors in the MS1 isolation window (averagine match) and searches the residual spectrum for a second peptide. Forces top-1 per pass and MS2. Experimental. |
+| `--chimeric` | flag | *(off)* | Pass 2 finds co-isolated precursors in the MS1 isolation window (averagine match) and searches the residual spectrum for a second peptide. Pass 1 keeps the same `--top-n` candidates per scan as a plain search; Pass 2 takes the best one as the primary peptide. Forces MS2. Experimental. |
 | `--chimeric-max-coisolated` | u32 | `4` | *(advanced)* Max co-isolated precursors per scan. |
 | `--chimeric-max-kl` | f64 | `0.3` | *(advanced)* Max isotope-envelope KL divergence to accept a co-isolated precursor. |
 

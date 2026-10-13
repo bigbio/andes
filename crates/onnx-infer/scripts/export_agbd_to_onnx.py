@@ -29,6 +29,8 @@ def _read_exact(c: io.BytesIO, n: int, what: str) -> bytes:
     return data
 
 
+FLAG_SIGMOID = 1
+
 # Same bound as `scoring::gbdt_eval` applies to the calibration count.
 MAX_ISO = 10_000_000
 
@@ -175,7 +177,7 @@ def main():
     args = ap.parse_args()
 
     blob = args.agbd.read_bytes()
-    nfeat, flags, trees, iso_x, _ = parse_agbd_full(blob)
+    nfeat, flags, trees, iso_x, iso_y = parse_agbd_full(blob)
     model = trees_to_onnx(nfeat, trees)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     save(model, args.out)
@@ -203,6 +205,11 @@ def main():
             "n_trees": len(trees),
             "agbd_flags": flags,
             "agbd_n_iso": len(iso_x),
+            # What `predict_proba` applies on top of the raw sum: sigmoid when
+            # the flag is set, then the isotonic map (identity when empty).
+            "apply_sigmoid": bool(flags & FLAG_SIGMOID),
+            "iso_x": iso_x,
+            "iso_y": iso_y,
         },
     }
     man_path.write_text(json.dumps(man, indent=2) + "\n")

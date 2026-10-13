@@ -15,9 +15,35 @@ names and PeptDeep I/O with OpenMS. Developed in the andes workspace today
 |---|---|---|
 | *(none)* | — | Manifest / tensor / rescoring / peptdeep API (always on) |
 | `tract` | [tract](https://github.com/sonos/tract) | Pure Rust, Apache-2.0 — preferred for Apache-clean builds |
-| `ort` | reserved | Broader ops (`ai.onnx.ml` TreeEnsemble, many Transformers) |
+| `ort` | [ONNX Runtime](https://onnxruntime.ai) via [`ort`](https://ort.pyke.io) | MIT; runtime library loaded at run time; `ai.onnx.ml` TreeEnsemble; several times faster on the predictor graphs |
 
 Default features are empty so Apache-core builds do not pull an engine until opted in.
+Both engines can be compiled in together; the caller picks one per model with
+`BackendKind`.
+
+## ONNX Runtime backend
+
+`--features ort` builds against `ort` 2.0.0-rc.10 with `load-dynamic`: nothing is
+downloaded or linked at build time, and the ONNX Runtime shared library (1.22 or newer)
+is opened the first time a model is loaded. The library is found from, in order:
+
+1. `onnx_infer::backend::ort_backend::init_runtime(path)`, if the caller calls it first;
+2. the `ORT_DYLIB_PATH` environment variable (read by `ort`);
+3. `libonnxruntime.so` / `libonnxruntime.dylib` / `onnxruntime.dll` on the loader path.
+
+Any official ONNX Runtime CPU release works: the
+[GitHub release tarball](https://github.com/microsoft/onnxruntime/releases)
+(`lib/libonnxruntime.so.1.x`) or the library inside the `onnxruntime` Python wheel
+(`site-packages/onnxruntime/capi/libonnxruntime.so.1.x`). No root access is needed. If
+the library cannot be loaded, model loading returns an error naming `ORT_DYLIB_PATH`.
+
+The backend keeps tract's contract: inputs arrive as f32 and are cast to the dtype the
+graph declares (int64 token indices, int32, f64, bool); every tensor output comes back
+as f32; non-tensor outputs (ZipMap) are not requested. `OnnxSession::share` hands out
+handles on one loaded session, and each handle calls ONNX Runtime's `Run` directly,
+which is safe to call concurrently on one session. `BackendOptions::intra_threads`
+(default 1) sets the operator pool of a session; inter-op threads are fixed at 1 and
+thread spinning is off, so CPU time is not burned waiting.
 
 ## Modules
 
@@ -43,14 +69,15 @@ Default features are empty so Apache-core builds do not pull an engine until opt
 |---|---|
 | [`scripts/export_agbd_to_onnx.py`](scripts/export_agbd_to_onnx.py) | andes `AGBD` v1 → ONNX `TreeEnsembleRegressor` |
 | [`scripts/export_peptdeep_to_onnx.py`](scripts/export_peptdeep_to_onnx.py) | PeptDeep `.pth` → ONNX (+ manifests), OpenMS-compatible names |
-| [`scripts/export_ms2pip_to_onnx.py`](scripts/export_ms2pip_to_onnx.py) | MS²PIP XGBoost → ONNX Gather tree traversal (tract-runnable) |
+| [`scripts/export_ms2pip_to_onnx.py`](scripts/export_ms2pip_to_onnx.py) | MS²PIP XGBoost → ONNX Gather tree traversal (tract and ort), or `--format ensemble` → `TreeEnsembleRegressor` (ort only, faster) |
 | [`scripts/export_deeplc_to_onnx.py`](scripts/export_deeplc_to_onnx.py) | DeepLC default PyTorch model → ONNX |
 | [`scripts/export_prosit_to_onnx.py`](scripts/export_prosit_to_onnx.py) | Koina Prosit SavedModels → ONNX (tf2onnx) |
 
 Rescoring examples: `examples/rescore_pin.rs --model peptdeep|ms2pip|deeplc|prosit`
 writes per-PIN-row predicted-spectrum / RT features; `scripts/rescore_pin_arms.py`
-calibrates RT and builds A/B PINs; `examples/model_parity.rs` checks tract
-against each reference implementation (see [`MODELS.md`](MODELS.md)).
+calibrates RT and builds A/B PINs; `examples/model_parity.rs` checks either
+engine (`--backend tract|ort`) against each reference implementation (see
+[`MODELS.md`](MODELS.md)).
 
 Fixtures (committed):
 
@@ -58,8 +85,8 @@ Fixtures (committed):
 |---|---|---|
 | `double.onnx` | `y=2x` | tract CI |
 | `intensity_mlp.onnx` | MatMul+ReLU rescoring smoke | tract CI |
-| `tree_leq.agbd` / `.onnx` | 1-feature TreeEnsemble | ort (`ai.onnx.ml`) |
-| `peak_gbdt.agbd` / `.onnx` | 3-feature multi-tree (andes peak shape) | ort |
+| `tree_leq.agbd` / `.onnx` | 1-feature TreeEnsemble | ort (`ai.onnx.ml`), `tests/ort_backend.rs` |
+| `peak_gbdt.agbd` / `.onnx` | 3-feature multi-tree (andes peak shape) | ort, `tests/ort_backend.rs` |
 
 ```bash
 # Rebuild local fixtures (no torch)
@@ -91,7 +118,9 @@ use onnx_infer::{BackendKind, OnnxSession};
 
 let policy = TopNPolicy::new(5)?;
 let _ = ALPHAPEPTDEEP_CORE_FEATURES;
-let batch = pack_rt_inputs(&["PEPTIDE", "SAMPLER"], 30)?;
+// PeptDeep does not mask padding: batch peptides of one length and pass that
+// length as seq_len (right-padding a shorter peptide changes its prediction).
+let batch = pack_rt_inputs(&["PEPTIDE", "SAMPLER"], 7)?;
 // let mut session = OnnxSession::from_manifest("models/peptdeep_rt_dynamic.json", BackendKind::Ort)?;
 // session.run(&batch.as_inputs())?;
 let _ = (policy, batch, NCE_DEFAULT, BackendKind::Tract);
@@ -105,6 +134,10 @@ cargo test -p onnx-infer --test contracts
 
 # Tract + committed fixture models (also run in CI)
 cargo test -p onnx-infer --features tract
+
+# ONNX Runtime on the same fixtures plus the TreeEnsemble ones, and ort-vs-tract
+# agreement; needs the runtime library (not run in CI)
+ORT_DYLIB_PATH=/path/to/libonnxruntime.so cargo test -p onnx-infer --features "tract ort"
 
 # AGBD ↔ ONNX Runtime parity + MLP reference (local; needs onnxruntime)
 python scripts/test_fixtures.py
@@ -138,13 +171,31 @@ On UPS1 (ion-trap CID) the gain is within seed noise. The PeptDeep MS2 model is 
 on HCD, and its RT fits poorly there: the median residual is 8.2 min for confident targets,
 against 0.28 min on Astral.
 
-The prediction step is expensive: tract runs MS2 at about 16 ms per peptide per thread, against
-onnxruntime's 3.1 ms. The plain Astral PIN (1.02M rows) took 31.6 min and 14,180 CPU-s on 8
-threads. The chimeric PIN (288k rows) took 11.7 min.
+The prediction step is expensive on tract: about 16 ms per peptide per thread for MS2. The
+plain Astral PIN (1.02M rows) took 31.6 min and 14,180 CPU-s on 8 threads with tract. The
+chimeric PIN (288k rows) took 11.7 min.
+
+## Measured: tract vs ONNX Runtime
+
+`examples/rescore_pin.rs` on the UPS1 PIN (382,703 rows; 180,440 peptidoforms; 194,054
+(peptidoform, charge) pairs), 4 worker threads, ONNX Runtime 1.31.0 CPU with one intra-op
+thread per session. CPU time per item is the prediction stage's process CPU divided by the
+item count. The host carried other load (load average 9–12 on 8 cores) during both arms.
+
+| Model | tract µs CPU / item | ort µs CPU / item | Speed-up | Whole run CPU-s (tract → ort) |
+|---|---|---|---|---|
+| AlphaPeptDeep MS2 | 15,239 | 3,148 | 4.8× | 3,295 → 707 (incl. RT) |
+| AlphaPeptDeep RT | 1,810 | 478 | 3.8× | |
+| DeepLC RT | 16,691 | 3,900 | 4.3× | 3,019 → 711 |
+| MS²PIP CID (traversal graph) | 3,694 | 502 | 7.4× | 731 → 112 |
+| MS²PIP CID (`--format ensemble`) | — (tract cannot load it) | 127 | 29× vs tract traversal | 39 |
+
+Per-row features from the two engines agree to the 6 decimals the TSV is written with (max
+|Δ| ≤ 1.2e-5 over every feature column, no missing-value differences), and both engines
+match the reference Python packages to the same tolerance (`model_parity`).
 
 ## Roadmap
 
 1. Offline #92 A/B with PeptDeep ONNX → five additive PIN columns.
-2. Wire `ort` for TreeEnsemble + PeptDeep graphs tract cannot run.
-3. Port quantms-rescoring feature generators onto this crate incrementally.
-4. Optional de novo Transformer export (decode may stay outside ONNX).
+2. Port quantms-rescoring feature generators onto this crate incrementally.
+3. Optional de novo Transformer export (decode may stay outside ONNX).

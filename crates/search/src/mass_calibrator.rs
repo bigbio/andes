@@ -179,8 +179,8 @@ pub fn learn_calibration_stats(
     }
 
     let queues = prepared.run_chunk_with_params(&prepass_spectra, 0, &prepass_params);
-    // Out-of-core backing materializes candidates lazily during the scan; pull
-    // them into `candidates` so the queue indices resolve. No-op in RAM mode.
+    // The scan materializes candidates lazily; pull them into `candidates` so
+    // the queue indices resolve.
     prepared.sync_materialized_candidates();
     let (residuals, filter) = extract_residuals(
         &sampled,
@@ -486,7 +486,6 @@ mod tests {
             chimeric_max_kl: 0.3,
             score_mode: crate::search_params::ScoreMode::Rank,
             refine_select_psm_fdr: 0.01,
-            candidate_index: crate::search_params::CandidateIndexMode::Ram,
             require_nxst_sequon: false,
         }
     }

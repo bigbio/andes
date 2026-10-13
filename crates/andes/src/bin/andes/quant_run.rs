@@ -474,26 +474,30 @@ fn select_rank1<'a>(
             spec.title.clone()
         };
         for (hit, psm) in psms.into_iter().enumerate() {
+            let cand = &candidates[psm.primary_candidate_idx() as usize];
+            let spec_id = output::format_spec_id(&spec_id_base, scan, ranks[hit], hit, multi_row);
+            let rescored = rescore.map(|m| m.get(&spec_id));
+            // A rescored bundle leaves out the target rows target-decoy
+            // competition removed (no target result), so they take no row.
+            if !cand.is_decoy && matches!(rescored, Some(None)) {
+                continue;
+            }
             let this_index = psm_index;
             psm_index += 1;
             if ranks[hit] != 1 {
                 continue;
             }
-            let cand = &candidates[psm.primary_candidate_idx() as usize];
             if cand.is_decoy && !include_decoys {
                 continue;
             }
-            let spec_id = output::format_spec_id(&spec_id_base, scan, ranks[hit], hit, multi_row);
-            let (q_value, pep) = match rescore {
-                Some(m) => match m.get(&spec_id) {
-                    Some(r) => {
-                        if r.q_value > s.quant_fdr || s.pep_cap.is_some_and(|c| r.pep > c) {
-                            continue;
-                        }
-                        (Some(r.q_value), Some(r.pep))
+            let (q_value, pep) = match rescored {
+                Some(Some(r)) => {
+                    if r.q_value > s.quant_fdr || s.pep_cap.is_some_and(|c| r.pep > c) {
+                        continue;
                     }
-                    None => continue,
-                },
+                    (Some(r.q_value), Some(r.pep))
+                }
+                Some(None) => continue,
                 None => (None, None),
             };
             let Some(run_idx) = collector.run_of(spec_idx) else {

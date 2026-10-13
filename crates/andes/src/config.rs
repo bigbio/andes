@@ -77,7 +77,6 @@ pub struct ScoringCfg {
     pub fragment_tol_da: Option<f64>,
     pub model_store: Option<PathBuf>,
     pub model: Option<String>,
-    pub candidate_index: Option<String>,
     pub ms_level: Option<u8>,
     pub max_spectra: Option<usize>,
 }
@@ -296,12 +295,6 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     );
     set_opt!("model_store", model_store, cfg.scoring.model_store);
     set_opt!("model_id_override", model_id_override, cfg.scoring.model);
-    set_parsed!(
-        "candidate_index",
-        candidate_index,
-        cfg.scoring.candidate_index,
-        parse_value_enum::<crate::CandidateIndexFlag>
-    );
     set!("ms_level", ms_level, cfg.scoring.ms_level);
     set!("max_spectra", max_spectra, cfg.scoring.max_spectra);
 

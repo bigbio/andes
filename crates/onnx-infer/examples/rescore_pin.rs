@@ -1,4 +1,5 @@
-//! Predicted-spectrum and RT features for every row of a Percolator PIN, with tract.
+//! Predicted-spectrum and RT features for every row of a Percolator PIN, with
+//! tract or ONNX Runtime (`--backend tract|ort`).
 //!
 //! Reads an andes PIN and the mzML it was searched from, predicts fragment
 //! intensities and/or retention time for each distinct peptidoform with one
@@ -12,6 +13,10 @@
 //!   --frag-tol 0.5 --frag-unit da --threads 8
 //! ```
 //!
+//! `--backend ort` (build with `--features ort`) runs the graphs on ONNX
+//! Runtime; `--intra-threads N` gives each ONNX Runtime session an N-thread
+//! operator pool (default 1: parallelism comes from `--threads` workers).
+//!
 //! `--model` selects the family (feature-column prefix in brackets):
 //!
 //! | `--model` | Graphs in `DIR` | Outputs |
@@ -20,6 +25,7 @@
 //! | `ms2pip` (`ms2pip`) | `ms2pip_<M>_{b,y}.json`, `M` = `--ms2pip-model` | b/y z1 |
 //! | `deeplc` (`deeplc`) | `deeplc_rt.json` | RT |
 //! | `prosit` (`prosit`) | `prosit_irt.json`, `prosit_intensity_hcd.json` (`--nce`) | iRT + b/y z1–3 |
+//! | `andes-ms2` (`ams2`) | `andes_ms2.ams2` (or `--models FILE`); `--nce` (`NA` = unknown), `--activation`, `--instrument` | b/y z1–2 |
 //!
 //! Output columns: `SpecId`, `observed_retention_time`, `<prefix>_irt` (NA
 //! without an RT model), `<prefix>_missing` (1 when the model cannot encode the
@@ -29,6 +35,7 @@
 mod models;
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
@@ -36,8 +43,10 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use models::{DeepLc, Form, H2O, Ion, Mass, Ms2pip, PROTON, PeptDeep, Predictor, Prosit, parse_peptide};
-use onnx_infer::OnnxSession;
+use models::{
+    AndesMs2, DeepLc, Form, H2O, Ion, Mass, Ms2pip, PROTON, PeptDeep, Predictor, Prosit, parse_peptide,
+};
+use onnx_infer::{BackendKind, BackendOptions, OnnxSession};
 
 struct Args {
     model: String,
@@ -51,7 +60,10 @@ struct Args {
     batch: usize,
     nce: f32,
     instrument: String,
+    activation: String,
     ms2pip_model: String,
+    backend: BackendKind,
+    intra_threads: usize,
 }
 
 fn parse_args() -> Args {
@@ -67,7 +79,10 @@ fn parse_args() -> Args {
         batch: 256,
         nce: 30.0,
         instrument: "Lumos".into(),
+        activation: "HCD-FTMS".into(),
         ms2pip_model: "HCD2021".into(),
+        backend: BackendKind::Tract,
+        intra_threads: 1,
     };
     let v: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -83,9 +98,12 @@ fn parse_args() -> Args {
             "--frag-unit" => a.frag_ppm = val == "ppm",
             "--threads" => a.threads = val.parse().expect("--threads"),
             "--batch" => a.batch = val.parse().expect("--batch"),
-            "--nce" => a.nce = val.parse().expect("--nce"),
+            "--nce" => a.nce = if val == "NA" { f32::NAN } else { val.parse().expect("--nce") },
             "--instrument" => a.instrument = val,
+            "--activation" => a.activation = val,
             "--ms2pip-model" => a.ms2pip_model = val,
+            "--backend" => a.backend = models::parse_backend(&val),
+            "--intra-threads" => a.intra_threads = val.parse().expect("--intra-threads"),
             other => panic!("unknown argument {other}"),
         }
         i += 2;
@@ -187,6 +205,20 @@ fn ms2_features(
     ]
 }
 
+/// Process CPU time (user + system) in seconds; 0 where `/proc` is absent.
+fn cpu_s() -> f64 {
+    std::fs::read_to_string("/proc/self/stat")
+        .ok()
+        .and_then(|s| {
+            // Fields after the parenthesised command name; utime, stime are 14, 15.
+            let rest = s.rsplit_once(')')?.1;
+            let f: Vec<&str> = rest.split_whitespace().collect();
+            let t = f.get(11)?.parse::<f64>().ok()? + f.get(12)?.parse::<f64>().ok()?;
+            Some(t / 100.0)
+        })
+        .unwrap_or(0.0)
+}
+
 fn rss_mb() -> f64 {
     std::fs::read_to_string("/proc/self/status")
         .ok()
@@ -198,13 +230,15 @@ fn rss_mb() -> f64 {
         .map_or(0.0, |kb| kb / 1024.0)
 }
 
-/// Run `jobs` across worker threads, each with shared handles on `master`.
-fn run_parallel<J: Sync, F>(master: &[OnnxSession], threads: usize, jobs: &[J], work: F) -> f64
+/// Run `jobs` across worker threads, each with shared handles on `master`;
+/// returns (wall, process CPU) seconds.
+fn run_parallel<J: Sync, F>(master: &[OnnxSession], threads: usize, jobs: &[J], work: F) -> (f64, f64)
 where
     F: Fn(&mut [OnnxSession], &J) + Sync,
 {
     let next = AtomicUsize::new(0);
     let t0 = Instant::now();
+    let c0 = cpu_s();
     let handles: Vec<Vec<OnnxSession>> = (0..threads)
         .map(|_| master.iter().map(|s| s.share().expect("share session")).collect())
         .collect();
@@ -222,7 +256,7 @@ where
             });
         }
     });
-    t0.elapsed().as_secs_f64()
+    (t0.elapsed().as_secs_f64(), cpu_s() - c0)
 }
 
 /// Group item indices by `key` and chunk each group into batches.
@@ -241,11 +275,18 @@ fn batches(keys: impl Iterator<Item = usize>, batch: usize) -> Vec<Vec<usize>> {
 
 fn main() {
     let args = parse_args();
+    models::set_backend(args.backend, BackendOptions { intra_threads: args.intra_threads });
     let pred: Box<dyn Predictor> = match args.model.as_str() {
         "peptdeep" => Box::new(PeptDeep::new(&args.models, args.nce, &args.instrument)),
         "ms2pip" => Box::new(Ms2pip { dir: args.models.clone(), model: args.ms2pip_model.clone() }),
         "deeplc" => Box::new(DeepLc { dir: args.models.clone() }),
         "prosit" => Box::new(Prosit { dir: args.models.clone(), nce: args.nce }),
+        "andes-ms2" => Box::new(AndesMs2::new(
+            &args.models,
+            Some(args.nce).filter(|v| v.is_finite()),
+            &args.activation,
+            &args.instrument,
+        )),
         other => panic!("unknown --model {other}"),
     };
     let pred = pred.as_ref();
@@ -270,10 +311,21 @@ fn main() {
     }
     let mut forms: Vec<(Form, Mass)> = Vec::new();
     let mut form_ix: HashMap<Form, usize> = HashMap::new();
+    // Columns a row needs; shorter rows, blank lines and rows whose ScanNr is not
+    // an integer (a `DefaultDirection` line, a truncated file) are skipped.
+    let n_cols = charge_cols.iter().map(|(i, _)| *i).chain([c_id, c_scan, c_pep]).max().unwrap() + 1;
     let mut rows = Vec::new();
+    let mut skipped_rows = 0usize;
     for line in lines {
         let line = line.unwrap();
         let x: Vec<&str> = line.split('\t').collect();
+        let scan = match x.get(c_scan).map(|v| v.trim().parse::<i32>()) {
+            Some(Ok(scan)) if x.len() >= n_cols => scan,
+            _ => {
+                skipped_rows += 1;
+                continue;
+            }
+        };
         let charge = charge_cols.iter().find(|(i, _)| x[*i] == "1").map_or(0, |(_, z)| *z);
         let form = parse_peptide(x[c_pep]).map(|(f, m)| {
             *form_ix.entry(f.clone()).or_insert_with(|| {
@@ -281,12 +333,16 @@ fn main() {
                 forms.len() - 1
             })
         });
-        rows.push(Row { id: x[c_id].to_string(), scan: x[c_scan].parse().unwrap(), charge, form });
+        rows.push(Row { id: x[c_id].to_string(), scan, charge, form });
+    }
+    if skipped_rows > 0 {
+        eprintln!("warning: skipped {skipped_rows} PIN lines (blank, short or non-numeric ScanNr)");
     }
     let unparsed = rows.iter().filter(|r| r.form.is_none() || r.charge == 0).count();
     eprintln!(
-        "model {} | PIN rows {} distinct peptidoforms {} unparsed rows {} ({:.1}s)",
+        "model {} backend {:?} | PIN rows {} distinct peptidoforms {} unparsed rows {} ({:.1}s)",
         args.model,
+        args.backend,
         rows.len(),
         forms.len(),
         unparsed,
@@ -297,10 +353,25 @@ fn main() {
     let t = Instant::now();
     let (spectra, errs) = input::read_spectra_parallel(&args.mzml, 2, 2, args.threads).unwrap();
     assert!(errs.is_empty(), "mzML errors: {:?}", &errs[..errs.len().min(3)]);
+    // Spectra without a scan number cannot be joined to a PIN row; of duplicate
+    // scan numbers the first spectrum is kept. Both are counted, not fatal.
     let mut by_scan: HashMap<i32, usize> = HashMap::new();
+    let (mut no_scan, mut dup_scan) = (0usize, 0usize);
     for (i, s) in spectra.iter().enumerate() {
-        let scan = s.scan.expect("spectrum without scan number");
-        assert!(by_scan.insert(scan, i).is_none(), "duplicate scan {scan}");
+        match s.scan {
+            None => no_scan += 1,
+            Some(scan) => match by_scan.entry(scan) {
+                Entry::Occupied(_) => dup_scan += 1,
+                Entry::Vacant(e) => {
+                    e.insert(i);
+                }
+            },
+        }
+    }
+    if no_scan + dup_scan > 0 {
+        eprintln!(
+            "warning: skipped {no_scan} spectra without a scan number and {dup_scan} with a duplicate scan number"
+        );
     }
     eprintln!("mzML {} MS2 spectra ({:.1}s)", spectra.len(), t.elapsed().as_secs_f64());
 
@@ -314,7 +385,7 @@ fn main() {
         let rt_forms: Vec<usize> = (0..forms.len()).filter(|&i| pred.supports_rt(&forms[i].0)).collect();
         let jobs = batches(rt_forms.iter().map(|&i| pred.batch_key(&forms[i].0)), args.batch);
         let out = Mutex::new(&mut rt_pred);
-        let wall = run_parallel(&master, args.threads, &jobs, |s, job| {
+        let (wall, cpu) = run_parallel(&master, args.threads, &jobs, |s, job| {
             let fs: Vec<&Form> = job.iter().map(|&j| &forms[rt_forms[j]].0).collect();
             let v = pred.rt(s, &fs);
             let mut g = out.lock().unwrap();
@@ -322,7 +393,12 @@ fn main() {
                 g[rt_forms[j]] = x;
             }
         });
-        eprintln!("RT: {} forms in {} batches, wall {wall:.1}s", rt_forms.len(), jobs.len());
+        eprintln!(
+            "RT: {} forms in {} batches, wall {wall:.1}s cpu {cpu:.1}s ({:.0} us/form cpu)",
+            rt_forms.len(),
+            jobs.len(),
+            cpu * 1e6 / rt_forms.len().max(1) as f64
+        );
     }
 
     // MS2 over distinct supported (form, charge).
@@ -344,7 +420,7 @@ fn main() {
     if !fz.is_empty() {
         let jobs = batches(fz.iter().map(|(f, _)| pred.batch_key(&forms[*f].0)), args.batch);
         let out = Mutex::new(&mut ms2_pred);
-        let wall = run_parallel(&master, args.threads, &jobs, |s, job| {
+        let (wall, cpu) = run_parallel(&master, args.threads, &jobs, |s, job| {
             let items: Vec<(&Form, u8)> = job.iter().map(|&i| (&forms[fz[i].0].0, fz[i].1)).collect();
             let v = pred.ms2(s, &items);
             let mut g = out.lock().unwrap();
@@ -352,7 +428,12 @@ fn main() {
                 g[i] = x;
             }
         });
-        eprintln!("MS2: {} (form, charge) in {} batches, wall {wall:.1}s", fz.len(), jobs.len());
+        eprintln!(
+            "MS2: {} (form, charge) in {} batches, wall {wall:.1}s cpu {cpu:.1}s ({:.0} us/item cpu)",
+            fz.len(),
+            jobs.len(),
+            cpu * 1e6 / fz.len() as f64
+        );
     }
 
     // Features per PIN row.
@@ -367,7 +448,9 @@ fn main() {
     for r in &rows {
         let spec = by_scan.get(&r.scan).map(|&i| &spectra[i]);
         let obs_rt = spec.and_then(|s| s.rt_seconds).map_or(f64::NAN, |s| s / 60.0);
+        // A non-finite prediction (overflow in a model) is missing, not a value.
         let irt = r.form.map_or(f32::NAN, |f| rt_pred[f]);
+        let irt = if irt.is_finite() { irt } else { f32::NAN };
         let ms2 = match (r.form, spec) {
             (Some(f), Some(s)) => fz_ix.get(&(f, r.charge)).map(|&k| {
                 ms2_features(&ms2_pred[k], pred.ions(), &forms[f].1, r.charge, &s.peaks, args.frag_tol, args.frag_ppm)

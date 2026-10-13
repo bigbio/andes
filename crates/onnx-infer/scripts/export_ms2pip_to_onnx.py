@@ -23,6 +23,10 @@ on its leaf; the output is the sum of leaf values plus the XGBoost base score.
 The features never contain NaN, so XGBoost's missing-value direction is not
 encoded.
 
+``--format ensemble`` writes the same trees as one ``ai.onnx.ml``
+``TreeEnsembleRegressor`` node instead (same input, output and manifest). Only
+ONNX Runtime (``--features ort``) runs it; tract cannot load it.
+
 The rows of the y model are in cleavage-site order, like the features:
 row ``i`` is y_(n-1-i). ms2pip itself reverses the y predictions into
 y1..y(n-1) order after prediction.
@@ -30,7 +34,7 @@ y1..y(n-1) order after prediction.
 Usage::
 
   python export_ms2pip_to_onnx.py --model-dir ~/.ms2pip --out-dir models/ms2pip \\
-      --models HCD2021 CID TMT
+      --models HCD2021 CID TMT [--format ensemble]
 
 Writes ``ms2pip_<MODEL>_<ion>.onnx`` + ``.json`` manifest per ion type, then
 checks every graph against ``xgboost.Booster.predict`` on the features of a
@@ -66,6 +70,13 @@ def parse_args():
     p.add_argument("--model-dir", type=Path, required=True, help="directory with .xgboost files")
     p.add_argument("--out-dir", type=Path, required=True)
     p.add_argument("--models", nargs="+", default=["HCD2021", "CID", "TMT"])
+    p.add_argument(
+        "--format",
+        choices=["traversal", "ensemble"],
+        default="traversal",
+        help="traversal: plain tensor ops (tract and ONNX Runtime); "
+        "ensemble: ai.onnx.ml TreeEnsembleRegressor (ONNX Runtime only)",
+    )
     return p.parse_args()
 
 
@@ -175,6 +186,59 @@ def to_onnx(b: xgb.Booster, name: str) -> onnx.ModelProto:
     return model
 
 
+def to_onnx_ensemble(b: xgb.Booster, name: str) -> onnx.ModelProto:
+    """The trees as one ``ai.onnx.ml`` TreeEnsembleRegressor (x < threshold
+    goes to the XGBoost "yes" child), squeezed to [N] like the traversal graph."""
+    from onnx import numpy_helper
+
+    roots, feat, thr, left, right, val, depth = tree_tables(b)
+    n_nodes, n_trees = len(feat), len(roots)
+    sizes = np.diff(np.append(roots, n_nodes))
+    tree = np.repeat(np.arange(n_trees, dtype=np.int64), sizes)
+    base = roots.astype(np.int64)[tree]
+    gid = np.arange(n_nodes, dtype=np.int64)
+    leaf = left == gid
+    local = gid - base
+    ens = helper.make_node(
+        "TreeEnsembleRegressor",
+        ["features"],
+        ["margin2d"],
+        domain="ai.onnx.ml",
+        n_targets=1,
+        aggregate_function="SUM",
+        post_transform="NONE",
+        base_values=[booster_base_score(b)],
+        nodes_treeids=tree.tolist(),
+        nodes_nodeids=local.tolist(),
+        nodes_featureids=np.where(leaf, 0, feat).astype(np.int64).tolist(),
+        nodes_values=np.where(leaf, 0.0, thr).astype(np.float32).tolist(),
+        nodes_modes=np.where(leaf, "LEAF", "BRANCH_LT").tolist(),
+        nodes_truenodeids=np.where(leaf, 0, left - base).astype(np.int64).tolist(),
+        nodes_falsenodeids=np.where(leaf, 0, right - base).astype(np.int64).tolist(),
+        nodes_missing_value_tracks_true=[0] * n_nodes,
+        target_treeids=tree[leaf].tolist(),
+        target_nodeids=local[leaf].tolist(),
+        target_ids=[0] * int(leaf.sum()),
+        target_weights=val[leaf].astype(np.float32).tolist(),
+    )
+    squeeze = helper.make_node("Squeeze", ["margin2d", "axis1"], ["log2_intensity"])
+    graph = helper.make_graph(
+        [ens, squeeze],
+        name,
+        [helper.make_tensor_value_info("features", TensorProto.FLOAT, ["N", N_FEATURES])],
+        [helper.make_tensor_value_info("log2_intensity", TensorProto.FLOAT, ["N"])],
+        initializer=[numpy_helper.from_array(np.asarray([1], np.int64), "axis1")],
+    )
+    model = helper.make_model(
+        graph,
+        opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("ai.onnx.ml", 3)],
+        producer_name="onnx-infer export_ms2pip_to_onnx.py",
+    )
+    model.ir_version = 8
+    print(f"{name}: {n_trees} trees, {n_nodes} nodes, max depth {depth} (TreeEnsembleRegressor)")
+    return model
+
+
 def panel_features():
     from ms2rescore_rs import ms2pip_compute_features
 
@@ -196,7 +260,7 @@ def main():
             b.load_model(str(a.model_dir / fname))
             stem = f"ms2pip_{model}_{ion}"
             onnx_path = a.out_dir / f"{stem}.onnx"
-            m = to_onnx(b, stem)
+            m = to_onnx_ensemble(b, stem) if a.format == "ensemble" else to_onnx(b, stem)
             onnx.save(m, str(onnx_path))
             ref = b.predict(xgb.DMatrix(x))
             sess = ort.InferenceSession(str(onnx_path))
@@ -204,8 +268,9 @@ def main():
             err = float(np.abs(ref - got).max())
             manifest = {
                 "id": stem,
-                "description": f"MS²PIP {model} {ion}-ion XGBoost model as an ONNX tree-traversal graph "
-                "(log2(intensity + 0.001), one row per cleavage site)",
+                "description": f"MS²PIP {model} {ion}-ion XGBoost model as an ONNX "
+                + ("ai.onnx.ml TreeEnsembleRegressor" if a.format == "ensemble" else "tree-traversal graph")
+                + " (log2(intensity + 0.001), one row per cleavage site)",
                 "onnx": onnx_path.name,
                 "task": "ms2_intensity",
                 "inputs": [{"name": "features", "shape": [None, N_FEATURES]}],
@@ -216,7 +281,7 @@ def main():
                     "notice": "https://github.com/compomics/ms2pip",
                     "notes": f"sha1 {MODELS[model]['model_hash'][fname]}",
                 },
-                "extras": {"ion": ion, "model": model, "max_abs_err_vs_xgboost": err},
+                "extras": {"ion": ion, "model": model, "format": a.format, "max_abs_err_vs_xgboost": err},
             }
             (a.out_dir / f"{stem}.json").write_text(json.dumps(manifest, indent=1) + "\n")
             print(f"{stem}: {b.num_boosted_rounds()} trees, {onnx_path.stat().st_size / 1e6:.1f} MB, "

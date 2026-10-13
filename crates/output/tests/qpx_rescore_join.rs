@@ -7,7 +7,10 @@
 //! the QPX writer with a mock rescore map keyed by those SpecIds and asserts:
 //!   1. every PIN SpecId is reproduced by the QPX writer (PEP populated for them);
 //!   2. the join works for single- AND multi-row scans (chimeric/tie cases);
-//!   3. with `rescore = None`, every QPX row's PEP stays null (schema parity).
+//!   3. with `rescore = None`, every QPX row's PEP stays null (schema parity);
+//!   4. a result in which Percolator's target-decoy competition (`-Y`) kept one
+//!      PSM per scan/ExpMass group joins, and the competed-away targets are left
+//!      out of the bundle.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -21,7 +24,7 @@ use model::{AminoAcidSetBuilder, Enzyme, ModLocation, Modification, ResidueSpec,
 use output::PercolatorPsm;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use scoring_crate::RankScorer;
-use search::{match_spectra, SearchIndex, SearchParams};
+use search::{match_spectra_out_of_core, SearchIndex, SearchParams};
 
 fn fixture(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -87,7 +90,8 @@ fn run_bsa_search() -> (
         .filter_map(|r| r.ok())
         .collect();
 
-    let (queues, candidates) = match_spectra(&spectra, &idx, &params, &scorer, 0.5, "XXX_");
+    let (queues, candidates) =
+        match_spectra_out_of_core(&spectra, &idx, &params, &scorer, 0.5, "XXX_").expect("search");
     (spectra, queues, candidates, idx, params)
 }
 
@@ -189,6 +193,7 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         "test_run",
         &["test.mgf".to_string()],
         Some(&map),
+        None,
     )
     .unwrap();
 
@@ -229,6 +234,7 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         &Tolerance::Da(0.5),
         "test_run",
         &["test.mgf".to_string()],
+        None,
         None,
     )
     .unwrap();
@@ -294,6 +300,7 @@ fn batched_psms_preserve_global_indices_order_and_rescore_join() {
         "test",
         &["test.mgf".into()],
         Some(&map),
+        None,
     )
     .unwrap();
     let builder =
@@ -322,4 +329,112 @@ fn batched_psms_preserve_global_indices_order_and_rescore_join() {
         }
     }
     assert_eq!(row, ids.len());
+}
+
+/// Percolator `-Y` result for a PIN: per (ScanNr, ExpMass) group only the
+/// highest-scoring row survives, in the target file (a target) or the decoy file
+/// (a decoy). Returns (target map, decoy SpecIds, number of target rows removed).
+fn competition_result(pin_path: &Path) -> (HashMap<String, PercolatorPsm>, HashSet<String>, usize) {
+    let text = std::fs::read_to_string(pin_path).unwrap();
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+    let col = |n: &str| header.iter().position(|c| *c == n).unwrap();
+    let (id, label, scan, exp, score) = (
+        col("SpecId"),
+        col("Label"),
+        col("ScanNr"),
+        col("ExpMass"),
+        col("RankScore"),
+    );
+    let mut best: HashMap<(String, String), (f64, String, bool)> = HashMap::new();
+    let mut total_targets = 0usize;
+    for line in lines.filter(|l| !l.is_empty()) {
+        let f: Vec<&str> = line.split('\t').collect();
+        total_targets += usize::from(f[label] != "-1");
+        let s: f64 = f[score].parse().unwrap();
+        let entry = (s, f[id].to_string(), f[label] == "-1");
+        best.entry((f[scan].to_string(), f[exp].to_string()))
+            .and_modify(|b| {
+                if s > b.0 {
+                    *b = entry.clone();
+                }
+            })
+            .or_insert(entry);
+    }
+    let mut targets = HashMap::new();
+    let mut decoys = HashSet::new();
+    for (_, sid, is_decoy) in best.values() {
+        if *is_decoy {
+            decoys.insert(sid.clone());
+        } else {
+            targets.insert(
+                sid.clone(),
+                PercolatorPsm {
+                    psm_id: sid.clone(),
+                    q_value: 0.01,
+                    pep: 0.01,
+                    score: None,
+                    peptide: "X".into(),
+                    proteins: "P".into(),
+                },
+            );
+        }
+    }
+    let removed = total_targets - targets.len();
+    (targets, decoys, removed)
+}
+
+/// With top-N candidates per scan, Percolator's target-decoy competition (`-Y`)
+/// removes every target but the winner of its scan/ExpMass group. The join must
+/// accept those rows as competed away when the decoy results are given (and
+/// leave them out of the bundle), and must keep failing without them.
+#[test]
+fn qpx_join_accepts_targets_removed_by_target_decoy_competition() {
+    let (spectra, mut queues, candidates, idx, params) = run_bsa_search();
+    // Give every scan a lower-ranked second candidate at the same charge and
+    // precursor, as the top-N chimeric search does: one competition group with
+    // two rows.
+    for q in queues.iter_mut() {
+        if let Some(top) = q.peek_top().cloned() {
+            let mut alt = top;
+            alt.score -= 1.0;
+            alt.rank_score -= 1.0;
+            q.force_push(alt);
+        }
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let pin_path = tmp.path().join("bsa.pin");
+    output::write_pin(&pin_path, &spectra, &queues, &candidates, &params, &idx).unwrap();
+    let (targets, decoys, removed) = competition_result(&pin_path);
+    let pin_rows = pin_spec_ids(&pin_path).len();
+    assert!(
+        removed > 0,
+        "the fixture must have groups with several rows"
+    );
+
+    let write = |dir: &Path, decoys: Option<&HashSet<String>>| {
+        output::write_qpx(
+            dir,
+            &spectra,
+            &queues,
+            &candidates,
+            &params,
+            &idx,
+            &Tolerance::Da(0.5),
+            "test_run",
+            &["test.mgf".to_string()],
+            Some(&targets),
+            decoys,
+        )
+    };
+    let err = write(&tmp.path().join("strict.idparquet"), None).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+
+    let qdir = tmp.path().join("competed.idparquet");
+    write(&qdir, Some(&decoys)).unwrap();
+    let peps = read_pep_column(&qdir.join("psms.parquet"));
+    // The competed-away targets are left out; every target row left is a
+    // winner with its PEP, and decoy rows keep a null PEP as before.
+    assert_eq!(peps.len(), pin_rows - removed);
+    assert_eq!(peps.iter().filter(|p| p.is_some()).count(), targets.len());
 }

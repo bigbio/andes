@@ -170,8 +170,8 @@ pub(crate) fn secondary_nominal_window(co: CoIsolated, params: &SearchParams) ->
 /// makes the chimeric cascade cheap), then runs ONE targeted GF SpecEValue DP on
 /// the residual. Returns `None` if no candidate clears scoring.
 ///
-/// `bucket_index` maps `nominal(peptide.mass() - H2O) -> candidate ids`, identical
-/// to `PreparedSearch.bucket_index` (built from `Peptide::nominal_residue_mass`).
+/// `bucket_index` maps `nominal(peptide.mass() - H2O) -> candidate ids` (the
+/// key of `Peptide::nominal_residue_mass`) over `candidates`, a Pass-2 pool.
 /// Returns the winning secondary PSM AND the set of raw-peak keys it claimed (its
 /// matched charge-1 b/y peaks). When a scan has multiple co-isolated precursors,
 /// the caller threads these keys into `prior_claimed` for the NEXT call so the
@@ -227,7 +227,7 @@ pub(crate) fn search_secondary(
     let res_ss = ScoredSpectrum::new(&co_spec, scorer, z);
 
     // 2. Candidates within precursor tol of the co-isolated neutral mass. Nominal
-    //    bucket key matches PreparedSearch: `nominal_from(mass - H2O)`.
+    //    bucket key: `nominal_from(mass - H2O)`.
     //
     //    Apply the learned precursor calibration shift to the co-isolated neutral
     //    mass FIRST, so the candidate prefilter and reported mass error use the same
@@ -532,6 +532,20 @@ mod tests {
         RankScorer::new(&param)
     }
 
+    /// Every candidate of the prepared out-of-core index and its nominal-mass
+    /// bucket index: the shape of one Pass-2 pool covering the whole database.
+    fn whole_db_pool(prepared: &PreparedSearch<'_>) -> (Vec<Candidate>, BTreeMap<i32, Vec<usize>>) {
+        let pool = prepared.out_of_core_candidates_where(|_, _| true);
+        let mut bucket_index: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
+        for (i, c) in pool.iter().enumerate() {
+            bucket_index
+                .entry(c.peptide.nominal_residue_mass())
+                .or_default()
+                .push(i);
+        }
+        (pool, bucket_index)
+    }
+
     fn peptide(residues: &[u8], pre: u8, post: u8) -> Peptide {
         let aas: Vec<AminoAcid> = residues
             .iter()
@@ -561,7 +575,9 @@ mod tests {
         let scorer = tiny_scorer();
         let frag_tol = 0.02_f64;
 
-        let prepared = PreparedSearch::prepare(&idx, &params, &scorer, frag_tol, "XXX");
+        let prepared =
+            PreparedSearch::prepare_in_memory(&idx, &params, &scorer, frag_tol, "XXX").unwrap();
+        let (candidates, bucket_index) = whole_db_pool(&prepared);
 
         // Planted secondary peptide and its co-isolated precursor.
         let planted = peptide(b"DAFLGSFLYEYSR", b'K', b'K');
@@ -605,8 +621,8 @@ mod tests {
             &primary,
             &std::collections::HashSet::new(),
             co,
-            &prepared.candidates,
-            &prepared.bucket_index,
+            &candidates,
+            &bucket_index,
             &scorer,
             &prepared.aa_set_for_scoring,
             &params,
@@ -615,7 +631,7 @@ mod tests {
 
         let (psm, winner_claimed) =
             got.expect("secondary search should return a PSM at the co-isolated mass");
-        let found = &prepared.candidates[psm.primary_candidate_idx() as usize].peptide;
+        let found = &candidates[psm.primary_candidate_idx() as usize].peptide;
         assert_eq!(
             found.residues, planted.residues,
             "secondary PSM should resolve to the planted peptide DAFLGSFLYEYSR"
@@ -635,8 +651,8 @@ mod tests {
             &primary,
             &winner_claimed,
             co,
-            &prepared.candidates,
-            &prepared.bucket_index,
+            &candidates,
+            &bucket_index,
             &scorer,
             &prepared.aa_set_for_scoring,
             &params,
@@ -685,7 +701,9 @@ mod tests {
         params.precursor_mass_shift_ppm = shift_ppm;
         let scorer = tiny_scorer();
         let frag_tol = 0.02_f64;
-        let prepared = PreparedSearch::prepare(&idx, &params, &scorer, frag_tol, "XXX");
+        let prepared =
+            PreparedSearch::prepare_in_memory(&idx, &params, &scorer, frag_tol, "XXX").unwrap();
+        let (candidates, bucket_index) = whole_db_pool(&prepared);
 
         let planted = peptide(b"DAFLGSFLYEYSR", b'K', b'K');
         let z = 2u8;
@@ -725,8 +743,8 @@ mod tests {
             &primary,
             &std::collections::HashSet::new(),
             co,
-            &prepared.candidates,
-            &prepared.bucket_index,
+            &candidates,
+            &bucket_index,
             &scorer,
             &prepared.aa_set_for_scoring,
             &params,
@@ -734,7 +752,7 @@ mod tests {
         );
         let (psm, _claimed) =
             got.expect("secondary must be found at the calibration-adjusted mass");
-        let found = &prepared.candidates[psm.primary_candidate_idx() as usize].peptide;
+        let found = &candidates[psm.primary_candidate_idx() as usize].peptide;
         assert_eq!(
             found.residues, planted.residues,
             "should resolve to the planted peptide"

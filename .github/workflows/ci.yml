@@ -72,11 +72,11 @@ jobs:
             --skip tryp_pig_bov_revcat_full_set_loads \
             --skip match_spectra_output_invariant_across_thread_counts
 
-      - name: Out-of-core equivalence gates (issues #65, #70)
-        # `#[ignore]`d because each runs two full E. coli searches (~80 s
-        # release); run explicitly here, on one lane, so they stay required.
+      - name: Out-of-core PIN goldens (issues #65, #70)
+        # `#[ignore]`d because each runs a full E. coli search (~20 s release);
+        # run explicitly here, on one lane, so they stay required.
         if: matrix.os == 'ubuntu-latest'
-        run: cargo test -p andes --release --test mmap_ram_pin_equivalence -- --ignored
+        run: cargo test -p andes --release --test out_of_core_pin_goldens -- --ignored
 
       - name: onnx-infer (tract + fixture models)
         # Default workspace test builds onnx-infer without engines. Tract is

@@ -10,6 +10,7 @@ Produces under fixtures/:
                                        fixtures; checked against the native Rust
                                        decoder and against ONNX Runtime)
   - intensity_mlp.onnx                (tiny MatMul+ReLU; tract-runnable)
+  - identity.onnx                     (no nodes; input x is also the output)
   - identity_named.onnx               (Identity node `copy_node`: x -> y; output-name check)
 
 Usage:
@@ -205,10 +206,13 @@ def make_intensity_mlp():
     b = np.array([0.05], dtype=np.float32)
     w_init = numpy_helper.from_array(W, name="W")
     b_init = numpy_helper.from_array(b, name="B")
+    # Node names differ from their output tensor names (as in torch exports, where
+    # the output `rt_pred` is produced by a node `/Squeeze`), so backends are
+    # tested to report tensor names.
     nodes = [
-        helper.make_node("MatMul", ["features", "W"], ["xw"]),
-        helper.make_node("Add", ["xw", "B"], ["pre"]),
-        helper.make_node("Relu", ["pre"], ["score"]),
+        helper.make_node("MatMul", ["features", "W"], ["xw"], name="/MatMul"),
+        helper.make_node("Add", ["xw", "B"], ["pre"], name="/Add"),
+        helper.make_node("Relu", ["pre"], ["score"], name="/Relu"),
     ]
     graph = helper.make_graph(
         nodes,
@@ -244,6 +248,22 @@ def make_intensity_mlp():
     print("wrote", out, "smoke", y.reshape(-1))
 
 
+def make_identity():
+    """A graph without nodes whose input `x` is also its output."""
+    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, ["n"])
+    graph = helper.make_graph([], "identity", [x], [x])
+    model = helper.make_model(
+        graph,
+        producer_name="onnx-infer/make_local_fixtures",
+        opset_imports=[helper.make_opsetid("", 17)],
+        ir_version=8,
+    )
+    checker.check_model(model)
+    out = FIX / "identity.onnx"
+    save(model, out)
+    print("wrote", out)
+
+
 def make_identity_named():
     """`Identity(x) -> y` in a node named `copy_node`.
 
@@ -275,6 +295,7 @@ def main():
     make_peak_gbdt_calibrated()
     make_agbd_parity()
     make_intensity_mlp()
+    make_identity()
     make_identity_named()
 
 

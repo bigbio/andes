@@ -96,8 +96,8 @@ VECTORS = {k: comp_vector(parse_composition(c)) for k, (_, c, _) in UNIMOD.items
 MASSES = {k: mass_of(parse_composition(c)) for k, (_, c, _) in UNIMOD.items()}
 
 
-def match_mass(delta: float, residue: str | None, nterm: bool, tol: float = 2e-3):
-    """Unimod id for a mass delta at a residue (or the N-terminus), else None.
+def match_mass(delta: float, residue: str | None, nterm: bool, tol: float = 2e-3, cterm: bool = False):
+    """Unimod id for a mass delta at a residue (or the N- or C-terminus), else None.
 
     Among site-compatible entries within ``tol``, the smallest mass error wins
     and the lowest id breaks exact ties (e.g. Oxidation over other O-adding
@@ -105,7 +105,8 @@ def match_mass(delta: float, residue: str | None, nterm: bool, tol: float = 2e-3
     id, has to separate them. Mirrors ``rt_native::mods::match_mass``."""
     ok = [k for k, m in MASSES.items()
           if abs(m - delta) <= tol
-          and ((nterm and "^" in UNIMOD[k][2]) or (residue and residue in UNIMOD[k][2]))]
+          and ((nterm and "^" in UNIMOD[k][2]) or (cterm and "$" in UNIMOD[k][2])
+               or (residue and residue in UNIMOD[k][2]))]
     return min(ok, key=lambda k: (abs(MASSES[k] - delta), k)) if ok else None
 
 
@@ -133,6 +134,8 @@ if __name__ == "__main__":
     assert match_mass(79.96633, "S", False) == 21
     assert match_mass(229.1629, "K", False) == 737 and match_mass(229.1629, "P", True) == 737
     assert match_mass(42.01057, "M", True) == 1
+    assert match_mass(-0.98402, None, False, cterm=True) == 2 and match_mass(-0.98402, None, False) is None
     assert match_mass(304.20715, "K", False) == 2016 and match_mass(304.20715, None, True) == 2016
-    assert match_mass(304.20536, "K", False) == 730
+    assert match_mass(304.20536, "K", False) == 730 and match_mass(304.20715, "Y", False) == 730
+    assert match_mass(-17.02655, None, True) == 28 and match_mass(15.99491, "M", False) == 35
     print("composition table ok:", len(UNIMOD), "entries")

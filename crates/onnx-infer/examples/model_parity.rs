@@ -1,9 +1,10 @@
-//! Parity of onnx-infer (tract) predictions with a model's reference Python
-//! implementation, from the TSV its `scripts/<model>_reference.py` writes.
+//! Parity of onnx-infer predictions (tract or ONNX Runtime, `--backend`) with a
+//! model's reference Python implementation, from the TSV its
+//! `scripts/<model>_reference.py` writes.
 //!
 //! ```text
 //! cargo run --release -p onnx-infer --features tract --example model_parity -- \
-//!   --model ms2pip --reference ms2pip_reference.tsv --models DIR
+//!   --model ms2pip --reference ms2pip_reference.tsv --models DIR [--backend ort]
 //! ```
 //!
 //! Prints the largest absolute and relative deviation per model variant.
@@ -18,7 +19,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use onnx_infer::{BackendKind, OnnxSession, ms2pip};
+use onnx_infer::{BackendOptions, OnnxSession, ms2pip};
 
 struct Args {
     model: String,
@@ -28,13 +29,11 @@ struct Args {
 
 fn parse_args() -> Args {
     let v: Vec<String> = std::env::args().skip(1).collect();
-    let get = |k: &str| {
-        v.iter()
-            .position(|a| a == k)
-            .and_then(|i| v.get(i + 1))
-            .unwrap_or_else(|| panic!("missing {k}"))
-            .clone()
-    };
+    let opt = |k: &str| v.iter().position(|a| a == k).and_then(|i| v.get(i + 1)).cloned();
+    let get = |k: &str| opt(k).unwrap_or_else(|| panic!("missing {k}"));
+    let backend = models::parse_backend(opt("--backend").as_deref().unwrap_or("tract"));
+    models::set_backend(backend, BackendOptions::default());
+    println!("backend {backend:?}");
     Args {
         model: get("--model"),
         reference: get("--reference").into(),
@@ -64,8 +63,7 @@ impl Dev {
 
 fn load(dir: &Path, stem: &str) -> OnnxSession {
     let t = Instant::now();
-    let s = OnnxSession::from_manifest(dir.join(format!("{stem}.json")), BackendKind::Tract)
-        .unwrap_or_else(|e| panic!("load {stem}: {e}"));
+    let s = models::load(dir, &format!("{stem}.json"));
     println!("load {stem}: {:.2}s", t.elapsed().as_secs_f64());
     s
 }
@@ -81,6 +79,10 @@ fn ms2pip_parity(a: &Args) {
         by_model.entry(x[col("model")].to_string()).or_default().push(x);
     }
     for (model, rows) in by_model {
+        if !a.models.join(format!("ms2pip_{model}_b.json")).is_file() {
+            println!("SKIP ms2pip {model}: no ms2pip_{model}_b.json in {}", a.models.display());
+            continue;
+        }
         let mut sb = load(&a.models, &format!("ms2pip_{model}_b"));
         let mut sy = load(&a.models, &format!("ms2pip_{model}_y"));
         let (mut feat, mut pb, mut py) = (Dev::default(), Dev::default(), Dev::default());
@@ -114,7 +116,7 @@ fn ms2pip_parity(a: &Args) {
 }
 
 fn peptdeep_parity(a: &Args) {
-    use models::{Form, Mod, PeptDeep, Predictor};
+    use models::{PeptDeep, Predictor, parse_peptide};
     let pred = PeptDeep::new(&a.models, 30.0, "Lumos");
     let mut s = pred.sessions();
     let text = fs::read_to_string(&a.reference).expect("reference TSV");
@@ -126,21 +128,22 @@ fn peptdeep_parity(a: &Args) {
     for l in lines {
         let x: Vec<&str> = l.split('\t').collect();
         let seq = x[col("sequence")];
+        // The andes spelling must parse to peptdeep's own mod names and sites.
+        let andes = x[col("andes")];
+        let (form, _) = parse_peptide(andes).unwrap_or_else(|| panic!("parse {andes}"));
+        let got: Vec<(String, String)> = form
+            .mods
+            .iter()
+            .map(|(site, m)| (m.alphabase(*site, form.residue(*site)), site.to_string()))
+            .collect();
         let names = x[col("mods")].split(';').filter(|s| !s.is_empty());
         let sites = x[col("mod_sites")].split(';').filter(|s| !s.is_empty());
-        let mods: Vec<(usize, Mod)> = names
-            .zip(sites)
-            .map(|(n, s)| {
-                let m = match n {
-                    "Carbamidomethyl@C" => Mod::Carbamidomethyl,
-                    "Oxidation@M" => Mod::Oxidation,
-                    "Acetyl@Protein_N-term" => Mod::Acetyl,
-                    other => panic!("mod {other} not in the parity panel"),
-                };
-                (s.parse().unwrap(), m)
-            })
-            .collect();
-        let form = Form { seq: seq.to_string(), mods };
+        let mut want: Vec<(String, String)> = names.zip(sites).map(|(n, s)| (n.into(), s.into())).collect();
+        let mut got_sorted = got.clone();
+        got_sorted.sort();
+        want.sort();
+        assert_eq!(form.seq, seq, "{andes}");
+        assert_eq!(got_sorted, want, "{andes}: parsed mods differ from peptdeep's");
         let z: u8 = x[col("charge")].parse().unwrap();
         rt.add(pred.rt(&mut s, &[&form])[0], x[col("rt_peptdeep")].parse().unwrap());
         let m = &pred.ms2(&mut s, &[(&form, z)])[0];
@@ -184,7 +187,7 @@ fn deeplc_parity(a: &Args) {
         let r = pred.rt(&mut s, &[&form])[0];
         let w: f32 = x[col("rt_deeplc")].parse().unwrap();
         rt.add(r, w);
-        println!("{:60} tract {r:12.4} deeplc {w:12.4}", x[col("proforma")]);
+        println!("{:60} onnx-infer {r:12.4} deeplc {w:12.4}", x[col("proforma")]);
         n += 1;
     }
     println!(

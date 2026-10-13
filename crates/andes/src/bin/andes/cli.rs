@@ -62,35 +62,17 @@ pub(crate) enum ScoreFlag {
     Strong,
 }
 
-/// Fragment-ion index for out-of-core searches (issue #76).
+/// Candidate retrieval from the out-of-core index.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub(crate) enum FragmentIndexFlag {
-    /// On when the candidate index is out-of-core and fragment matching is
-    /// high-resolution (default).
+    /// The fragment-ion index (default; `--glyco` looks candidates up by
+    /// backbone mass instead).
     #[default]
     Auto,
-    /// On in out-of-core mode; a warning (and enumeration) when the candidate
-    /// index is in RAM.
+    /// Same as `auto`; a warning (and enumeration) under `--glyco`.
     On,
-    /// Per-spectrum enumeration even out-of-core.
+    /// Per-spectrum enumeration of every candidate in the precursor window.
     Off,
-}
-
-/// Candidate-resolution backing: in-RAM (`ram`) or out-of-core mmap base-peptide
-/// index with lazy mod enumeration (`mmap`); `auto` (default) picks one.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
-pub(crate) enum CandidateIndexFlag {
-    /// Pick automatically (default): out-of-core mmap with fragment-ion retrieval
-    /// for high-resolution fragments; otherwise RAM, unless the in-RAM index
-    /// would not fit available memory. `--glyco` stays on RAM.
-    #[default]
-    Auto,
-    /// Force the in-RAM candidate index (advanced; may OOM on very large mod
-    /// searches — that is what `auto` protects against).
-    Ram,
-    /// Force the out-of-core mmap'd base-peptide index (advanced; lower peak RAM,
-    /// result-equivalent but not byte-identical to `ram`).
-    Mmap,
 }
 
 /// Search arguments (shared by the default search path and exposed as a
@@ -190,9 +172,9 @@ pub(crate) struct SearchArgs {
     #[arg(long = "cal-min-spec-keys", hide = true)]
     pub(crate) cal_min_spec_keys: Option<usize>,
 
-    /// Candidate retrieval for out-of-core searches. `auto` (the default, and
-    /// what every normal run uses) selects the fragment-ion index whenever the
-    /// candidate index is out-of-core; at a low-resolution fragment tolerance
+    /// Candidate retrieval from the out-of-core index. `auto` (the default, and
+    /// what every normal run uses) selects the fragment-ion index for every
+    /// non-glyco search; at a low-resolution fragment tolerance
     /// only the 150 most intense peaks vote. `off` forces per-spectrum
     /// enumeration and `on` is the same as `auto` — both are escape hatches for
     /// reproducing a measurement, not tuning knobs. Hidden on purpose: the
@@ -404,14 +386,6 @@ pub(crate) struct SearchArgs {
     #[arg(long = "score", default_value = "auto")]
     pub(crate) score: ScoreFlag,
 
-    /// Candidate-index backing: `auto` (default — out-of-core mmap with
-    /// fragment-ion retrieval for high-resolution fragments, cached in the temp
-    /// directory; otherwise RAM unless it would not fit available memory), or
-    /// force `ram` / `mmap` (advanced overrides). `mmap` lowers peak RAM with lazy per-spectrum mod
-    /// enumeration (result-equivalent PSMs, not byte-identical).
-    #[arg(long = "candidate-index", hide = true, default_value = "auto")]
-    pub(crate) candidate_index: CandidateIndexFlag,
-
     /// Glycopeptide search mode: retrieve glycans from the loaded database, solve
     /// the backbone as `precursor − glycan`, filter by N-X-S/T sequon, and write a
     /// `.glyco.pin` file instead of the standard PIN. Default off.
@@ -465,7 +439,7 @@ pub(crate) struct SearchArgs {
     /// Memory: enumerate only N-X-S/T-bearing peptides into the `--glyco` candidate
     /// index. Glyco scoring never reads any other candidate (the peptide-first
     /// fragment index and the backbone→candidate loop both gate on the same sequon
-    /// test), so this shrinks the in-RAM index roughly 10x. Measured on a
+    /// test), so this shrinks the index roughly 10x. Measured on a
     /// 1,500-protein mouse subset: identical rows, peptides and labels; 16 of 7,113
     /// rows (0.2%) differ in `RawScore`/`CandidateRankEntropy` only (per-spectrum
     /// candidate-distribution terms). Use on hosts where the full index does not fit

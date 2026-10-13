@@ -41,12 +41,19 @@ In-search peak GBDT stays native `AGBD` (`scoring::gbdt_eval`). Convert for quan
 python scripts/export_agbd_to_onnx.py --agbd path/to/model.agbd --out model.onnx
 ```
 
+The graph outputs the raw tree sum (`GbdtPeakModel::predict_value`). The blob's
+sigmoid flag and isotonic calibration footer are copied into the manifest
+`extras` (`apply_sigmoid`, `iso_x`, `iso_y`) and are not applied in the graph;
+`predict_proba` is `isotonic(sigmoid(raw))` (sigmoid only when the flag is set).
+
 ## Third-party predictors exported to ONNX (not in git)
 
 Weights stay outside git (`models/`, gitignored); the export scripts below
-rebuild them. Every graph runs under tract (the `tract` feature); parity
-with the reference Python package is checked by
-`cargo run --release -p onnx-infer --features tract --example model_parity -- --model <m> --reference <tsv> --models DIR`.
+rebuild them. Every graph runs under tract (the `tract` feature) and ONNX
+Runtime (the `ort` feature); parity with the reference Python package is
+checked by
+`cargo run --release -p onnx-infer --features tract --example model_parity -- --model <m> --reference <tsv> --models DIR [--backend ort]`
+(build with `--features "tract ort"` for `--backend ort`).
 
 | Model | Version / source | Licence (code / weights) | Export | Inputs (Rust module) |
 |---|---|---|---|---|
@@ -68,6 +75,11 @@ Reference scripts: [`ms2pip_reference.py`](scripts/ms2pip_reference.py),
   step per tree level). `HCD2021` y: 400 trees, 18.9 M nodes, depth 18, 379 MB
   ONNX, 0.5 s tract load. Exporting it needs the 888 MB `.xgboost` file and
   ~7.5 GB RAM.
+- `--format ensemble` writes the same trees as one `ai.onnx.ml`
+  `TreeEnsembleRegressor` node (same input, output and manifest names), which
+  only ONNX Runtime runs (`--features ort`, `--backend ort`). On ONNX Runtime it
+  is about 4x faster than the traversal graph (MS²PIP CID on UPS1: 127 vs
+  502 µs CPU per (peptidoform, charge)); parity with ms2pip is unchanged.
 - The features ignore modifications (a modified residue encodes as its base
   residue, I = L), as ms2pip does; modifications only enter fragment m/z.
   ms2pip predicts 4..=100 residues; other lengths are rejected.

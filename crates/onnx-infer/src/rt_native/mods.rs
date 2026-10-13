@@ -356,6 +356,10 @@ mod tests {
         assert_eq!(match_mass(304.20715, Some(b'K'), false, 2e-3), Some(2016));
         assert_eq!(match_mass(304.20715, None, true, 2e-3), Some(2016));
         assert_eq!(match_mass(304.20536, Some(b'K'), false, 2e-3), Some(730));
+        // Only iTRAQ8plex is allowed on Y.
+        assert_eq!(match_mass(304.20715, Some(b'Y'), false, 2e-3), Some(730));
+        // Equal masses: lowest id (Gln->pyro-Glu 28 over Ammonia-loss 385).
+        assert_eq!(match_mass(-17.02655, None, true, 2e-3), Some(28));
         // Glu->pyro-Glu (27) and Dehydrated (23) share a composition: lowest id.
         assert_eq!(match_mass(-18.01056, Some(b'S'), true, 2e-3), Some(23));
     }

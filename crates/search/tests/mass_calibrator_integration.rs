@@ -105,7 +105,8 @@ fn threshold_skip_returns_empty_stats() {
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let scorer = tiny_scorer();
-    let mut prepared = PreparedSearch::prepare(&idx, &params, &scorer, 0.5, "XXX");
+    let mut prepared = PreparedSearch::prepare_in_memory(&idx, &params, &scorer, 0.5, "XXX")
+        .expect("build the in-memory candidate index");
 
     let too_few_keys: Vec<SpecKey> = (0..(cal_constants::MIN_SPECKEYS_FOR_PREPASS - 1))
         .map(|i| SpecKey {

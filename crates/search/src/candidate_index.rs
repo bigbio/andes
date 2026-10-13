@@ -176,46 +176,6 @@ pub fn base_peptide_records(
         .collect()
 }
 
-/// Estimate whether the in-RAM candidate index (the `Vec<Candidate>` the default
-/// `Ram` backing materializes) would fit within `budget_bytes`.
-///
-/// Used by `--candidate-index auto` to choose RAM vs out-of-core mmap WITHOUT
-/// risking an OOM: the in-RAM path `.collect()`s every modified candidate (each
-/// owning a `Peptide` residue `Vec`), which for large mod searches is the term
-/// that blows up. We accumulate a per-candidate byte estimate over
-/// [`enumerate_candidates`] and **bail early** the moment it crosses the budget,
-/// so the cost is bounded by the budget (not by the — possibly enormous — total
-/// candidate count). Returns `true` if the full set fits, `false` if it would
-/// exceed `budget_bytes`.
-///
-/// The per-candidate cost is intentionally a slight OVER-estimate (so we err
-/// toward mmap near the limit and never under-predict into an OOM): the
-/// `Candidate` struct + its heap `Peptide` residues (the dominant term; each
-/// `AminoAcid` carries an `Arc<Modification>`) + the mass-bucket index entry.
-pub fn ram_candidate_index_fits(
-    idx: &SearchIndex,
-    params: &SearchParams,
-    decoy_prefix: &str,
-    budget_bytes: u64,
-) -> bool {
-    // Conservative per-residue / per-candidate constants (bytes).
-    const PER_RESIDUE: u64 = 32; // AminoAcid + Arc refcount slot + slack
-    const PER_CANDIDATE_OVERHEAD: u64 = 120; // struct + Vec header + bucket-idx entry + alloc overhead
-
-    // Proteins are costed in parallel. Every candidate adds a positive amount, so
-    // the running total crosses the budget at some point exactly when the full
-    // total does, whatever order the proteins are added in.
-    let acc = std::sync::atomic::AtomicU64::new(0);
-    crate::candidate_gen::all_protein_candidates_par(idx, params, decoy_prefix, |cands| {
-        let bytes: u64 = cands
-            .iter()
-            .map(|c| PER_CANDIDATE_OVERHEAD + c.peptide.residues.len() as u64 * PER_RESIDUE)
-            .sum();
-        let before = acc.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
-        before.saturating_add(bytes) <= budget_bytes
-    })
-}
-
 /// Canonical builder: enumerate base peptides and write a mass-sorted binary
 /// index to `out`.
 ///
@@ -272,7 +232,8 @@ pub fn build_base_peptide_index<W: Write>(
 ///    targets deterministically, so they need not be hashed separately.
 /// 2. The search parameters that affect which base peptides are produced:
 ///    `enzyme`, `extra_enzymes`, `max_missed_cleavages`, `min_length`,
-///    `max_length`, and `decoy_prefix`.
+///    `max_length`, `num_tolerable_termini`, `require_nxst_sequon` and
+///    `decoy_prefix`.
 ///
 /// The hash uses Rust's stable [`DefaultHasher`].  It is **not** a
 /// cryptographic hash — collisions are possible (though extremely unlikely in
@@ -297,7 +258,17 @@ pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams) -> PathBuf {
         protein.accession.hash(&mut h);
         protein.sequence.hash(&mut h);
     }
+    // The affix test decides each record's IS_DECOY flag (`SearchIndex::
+    // is_decoy_accession`): an accession is a decoy if it carries the prefix
+    // needle OR ends with the decoy suffix. Both are part of the key, so adding
+    // `--decoy-suffix` to an external target/decoy FASTA rebuilds the index
+    // rather than reusing one whose suffixed decoys are flagged as targets. An
+    // empty suffix matches nothing and keys like no suffix.
     idx.decoy_prefix.hash(&mut h);
+    idx.decoy_suffix
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .hash(&mut h);
 
     // Hash the FIXED modifications. Base-peptide masses fold fixed mods in (e.g.
     // Carbamidomethyl-C), so two runs with the same FASTA/enzyme/lengths but a
@@ -325,6 +296,9 @@ pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams) -> PathBuf {
     params.min_length.hash(&mut h);
     params.max_length.hash(&mut h);
     params.num_tolerable_termini.hash(&mut h);
+    // `--glyco-index-sequon-only` drops every span without a sequon from the
+    // index; such an index must never be reused by a search that needs them.
+    params.require_nxst_sequon.hash(&mut h);
 
     let digest = h.finish();
     std::env::temp_dir().join(format!("andes-candidx-{digest:016x}.bin"))
@@ -697,23 +671,6 @@ mod tests {
     }
 
     #[test]
-    fn ram_candidate_index_fits_respects_budget() {
-        let idx = make_toy_index();
-        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
-        let mut params = SearchParams::default_tryptic(aa_set);
-        params.min_length = 3;
-        // A generous budget fits the toy index; a zero budget never does.
-        assert!(
-            ram_candidate_index_fits(&idx, &params, "XXX", u64::MAX),
-            "toy index must fit an unbounded budget"
-        );
-        assert!(
-            !ram_candidate_index_fits(&idx, &params, "XXX", 0),
-            "no candidate set fits a zero budget"
-        );
-    }
-
-    #[test]
     fn builder_writes_mass_sorted_base_peptides() {
         let idx = make_toy_index();
         let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
@@ -1080,6 +1037,57 @@ mod tests {
             index_cache_path(&idx, &p_nomod),
             index_cache_path(&idx, &p_cam),
             "cache key must differ when the fixed-mod set differs"
+        );
+    }
+
+    /// The decoy suffix decides which proteins are decoys, so an index built
+    /// without it must not be reused once it is given: for an external
+    /// target/decoy FASTA (`--decoy-strategy none`), adding `--decoy-suffix _rev`
+    /// has to turn `P1_rev` into a decoy rather than reuse the cached index in
+    /// which every record is a target.
+    #[test]
+    fn index_cache_path_keys_on_the_decoy_suffix() {
+        let db = ProteinDb {
+            proteins: vec![
+                Protein {
+                    accession: "P1".into(),
+                    description: String::new(),
+                    sequence: b"MNGSK".to_vec(),
+                },
+                Protein {
+                    accession: "P1_rev".into(),
+                    description: String::new(),
+                    sequence: b"ASNVTR".to_vec(),
+                },
+            ],
+        };
+        let strategy = crate::decoy::DecoyStrategy::None;
+        let seed = crate::decoy::DEFAULT_DECOY_SEED;
+        let plain = SearchIndex::from_target_db_with_strategy(&db, "XXX", None, strategy, seed);
+        let suffixed =
+            SearchIndex::from_target_db_with_strategy(&db, "XXX", Some("_rev"), strategy, seed);
+        let mut params =
+            SearchParams::default_tryptic(AminoAcidSetBuilder::new_standard().build().unwrap());
+        params.min_length = 3;
+        params.require_nxst_sequon = true;
+
+        let plain_path = index_cache_path(&plain, &params);
+        let suffixed_path = index_cache_path(&suffixed, &params);
+        let _ = std::fs::remove_file(&plain_path);
+        let _ = std::fs::remove_file(&suffixed_path);
+        let (first, _) = MmapCandidateIndex::open_or_build(&plain_path, &plain, &params, "XXX")
+            .expect("build the suffix-less index");
+        assert!(first.records().iter().all(|r| !r.is_decoy()));
+        let (second, _) =
+            MmapCandidateIndex::open_or_build(&suffixed_path, &suffixed, &params, "XXX")
+                .expect("open the suffixed index");
+        let decoys = second.records().iter().filter(|r| r.is_decoy()).count();
+        let _ = std::fs::remove_file(&plain_path);
+        let _ = std::fs::remove_file(&suffixed_path);
+        assert_eq!(decoys, 1, "ASNVTR from P1_rev is the one sequon decoy");
+        assert_ne!(
+            plain_path, suffixed_path,
+            "the decoy suffix must key the cache"
         );
     }
 

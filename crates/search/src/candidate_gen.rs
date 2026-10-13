@@ -62,63 +62,21 @@ pub fn enumerate_candidates<'a>(
         .filter(move |c| !require_sequon || candidate_has_nxst_sequon(c))
 }
 
-/// [`enumerate_candidates`] across threads, one protein per task. Rayon's ordered
-/// `collect` keeps the sequential `(protein_index, start_offset, mod combination)`
-/// order, so the result is identical to `enumerate_candidates(..).collect()`.
-pub fn enumerate_candidates_par(
-    idx: &SearchIndex,
-    params: &SearchParams,
-    decoy_prefix: &str,
-) -> Vec<Candidate> {
-    use rayon::prelude::*;
-    let suffix = idx.decoy_suffix.as_deref();
-    let require_sequon = params.require_nxst_sequon;
-    idx.db
-        .proteins
-        .par_iter()
-        .enumerate()
-        .flat_map_iter(|(p_idx, protein)| {
-            let is_decoy = is_decoy_accession_affix(&protein.accession, decoy_prefix, suffix);
-            enumerate_protein(protein, p_idx, is_decoy, params).into_iter()
-        })
-        .filter(|c| !require_sequon || candidate_has_nxst_sequon(c))
-        .collect()
-}
-
-/// Hand each protein's candidates (the ones [`enumerate_candidates`] yields for
-/// it) to `f`, across threads, without keeping them. Returns `false` as soon as
-/// some call returns `false`, else `true`. Proteins are visited in no fixed order.
-pub fn all_protein_candidates_par(
-    idx: &SearchIndex,
-    params: &SearchParams,
-    decoy_prefix: &str,
-    f: impl Fn(&[Candidate]) -> bool + Sync,
-) -> bool {
-    use rayon::prelude::*;
-    let suffix = idx.decoy_suffix.as_deref();
-    let require_sequon = params.require_nxst_sequon;
-    idx.db
-        .proteins
-        .par_iter()
-        .enumerate()
-        .all(|(p_idx, protein)| {
-            let is_decoy = is_decoy_accession_affix(&protein.accession, decoy_prefix, suffix);
-            let mut cands = enumerate_protein(protein, p_idx, is_decoy, params);
-            if require_sequon {
-                cands.retain(candidate_has_nxst_sequon);
-            }
-            f(&cands)
-        })
-}
-
 /// The glyco path's sequon membership test (`glyco_search::GlycoCtxOwned::build`):
 /// an internal N-X-S/T, or one completed by the residue after the peptide.
 /// Kept in one place so `SearchParams::require_nxst_sequon` can never admit a
 /// different candidate set than the scorer would use.
 pub fn candidate_has_nxst_sequon(c: &Candidate) -> bool {
-    use andes_glyco::sequon::{boundary_nxst_site, has_nxst_sequon};
     let res: Vec<u8> = c.peptide.residues.iter().map(|aa| aa.residue).collect();
-    has_nxst_sequon(&res) || boundary_nxst_site(&res, c.peptide.post).is_some()
+    span_has_nxst_sequon(&res, c.peptide.post)
+}
+
+/// [`candidate_has_nxst_sequon`] on a bare residue span and the residue after
+/// it (`b'-'` at the protein C-terminus). Variable mods never change a residue
+/// letter, so every peptidoform of a span shares the span's answer.
+pub fn span_has_nxst_sequon(residues: &[u8], post: u8) -> bool {
+    use andes_glyco::sequon::{boundary_nxst_site, has_nxst_sequon};
+    has_nxst_sequon(residues) || boundary_nxst_site(residues, post).is_some()
 }
 
 fn enumerate_protein(
@@ -446,11 +404,33 @@ pub(crate) fn expand_mod_combinations(
 pub struct FormWalkTables {
     anywhere: Vec<Vec<AminoAcid>>,
     terminal: Vec<Vec<AminoAcid>>,
+    /// (lightest, heaviest) variant mass of each `anywhere` / `terminal` entry;
+    /// `(f64::MAX, f64::MIN)` for an entry with no variant.
+    anywhere_bounds: Vec<(f64, f64)>,
+    terminal_bounds: Vec<(f64, f64)>,
+}
+
+/// Mass of one variant: residue plus its modification delta.
+#[inline]
+fn variant_mass(aa: &AminoAcid) -> f64 {
+    aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta)
+}
+
+/// (lightest, heaviest) variant mass of `variants`, or `(f64::MAX, f64::MIN)`
+/// when there are none.
+fn variant_bounds(variants: &[AminoAcid]) -> (f64, f64) {
+    let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+    for v in variants {
+        let m = variant_mass(v);
+        lo = lo.min(m);
+        hi = hi.max(m);
+    }
+    (lo, hi)
 }
 
 impl FormWalkTables {
     pub fn new(params: &SearchParams) -> Self {
-        let anywhere = (0..=255u8)
+        let anywhere: Vec<Vec<AminoAcid>> = (0..=255u8)
             .map(|r| params.aa_set.variants_for(r, ModLocation::Anywhere).to_vec())
             .collect();
         let mut terminal = Vec::with_capacity(256 * 16);
@@ -474,13 +454,39 @@ impl FormWalkTables {
                 ));
             }
         }
-        Self { anywhere, terminal }
+        let anywhere_bounds = anywhere.iter().map(|v| variant_bounds(v)).collect();
+        let terminal_bounds = terminal.iter().map(|v| variant_bounds(v)).collect();
+        Self {
+            anywhere,
+            terminal,
+            anywhere_bounds,
+            terminal_bounds,
+        }
+    }
+
+    #[inline]
+    fn terminal_key(residue: u8, first: bool, last: bool, prot_n: bool, prot_c: bool) -> usize {
+        let key = first as usize | (last as usize) << 1 | (prot_n as usize) << 2 | (prot_c as usize) << 3;
+        residue as usize * 16 + key
     }
 
     #[inline]
     fn terminal(&self, residue: u8, first: bool, last: bool, prot_n: bool, prot_c: bool) -> &[AminoAcid] {
-        let key = first as usize | (last as usize) << 1 | (prot_n as usize) << 2 | (prot_c as usize) << 3;
-        &self.terminal[residue as usize * 16 + key]
+        &self.terminal[Self::terminal_key(residue, first, last, prot_n, prot_c)]
+    }
+
+    /// (lightest, heaviest) variant mass at position `i` of a span of length `n`.
+    #[inline]
+    fn position_bounds(&self, span: &[u8], i: usize, prot_n: bool, prot_c: bool) -> (f64, f64) {
+        let n = span.len();
+        let r = span[i];
+        if i == 0 {
+            self.terminal_bounds[Self::terminal_key(r, true, n == 1, prot_n, prot_c)]
+        } else if i == n - 1 {
+            self.terminal_bounds[Self::terminal_key(r, false, true, prot_n, prot_c)]
+        } else {
+            self.anywhere_bounds[r as usize]
+        }
     }
 }
 
@@ -493,49 +499,71 @@ type WalkVariants<'t> = smallvec::SmallVec<[&'t [AminoAcid]; WALK_INLINE_LEN]>;
 /// Suffix sums of the per-position minimum or maximum variant mass.
 type WalkRest = smallvec::SmallVec<[f64; WALK_INLINE_LEN]>;
 
-/// The variant list of every position of `span`, and the suffix sums of the
-/// per-position minimum and maximum variant mass; `None` when the span is
-/// empty or a position has no variant.
+/// Fill `position_variants` with the variant list of every position of `span`,
+/// and `min_rest` / `max_rest` with the suffix sums of the per-position minimum
+/// and maximum variant mass; `false` when the span is empty or a position has
+/// no variant. The buffers are the caller's, so nothing is returned by value.
 fn walk_bounds<'t>(
     span: &[u8],
     tables: &'t FormWalkTables,
     is_protein_n_term: bool,
     is_protein_c_term: bool,
-) -> Option<(WalkVariants<'t>, WalkRest, WalkRest)> {
+    position_variants: &mut WalkVariants<'t>,
+    min_rest: &mut WalkRest,
+    max_rest: &mut WalkRest,
+) -> bool {
+    let n = span.len();
+    if n == 0 {
+        return false;
+    }
+    position_variants.clear();
+    position_variants.extend(span.iter().enumerate().map(|(i, &r)| {
+        if i == 0 {
+            tables.terminal(r, true, n == 1, is_protein_n_term, is_protein_c_term)
+        } else if i == n - 1 {
+            tables.terminal(r, false, true, is_protein_n_term, is_protein_c_term)
+        } else {
+            tables.anywhere[r as usize].as_slice()
+        }
+    }));
+    min_rest.clear();
+    min_rest.resize(n + 1, 0.0);
+    max_rest.clear();
+    max_rest.resize(n + 1, 0.0);
+    for i in (0..n).rev() {
+        if position_variants[i].is_empty() {
+            return false;
+        }
+        let (lo, hi) = tables.position_bounds(span, i, is_protein_n_term, is_protein_c_term);
+        min_rest[i] = min_rest[i + 1] + lo;
+        max_rest[i] = max_rest[i + 1] + hi;
+    }
+    true
+}
+
+/// The lightest and heaviest neutral mass (without `H2O`) any form of `span`
+/// can take: `min_rest[0]` and `max_rest[0]` of [`walk_bounds`], summed in the
+/// same order so the values are identical; `None` exactly when it fails.
+fn span_mass_bounds(
+    span: &[u8],
+    tables: &FormWalkTables,
+    is_protein_n_term: bool,
+    is_protein_c_term: bool,
+) -> Option<(f64, f64)> {
     let n = span.len();
     if n == 0 {
         return None;
     }
-    let position_variants: WalkVariants<'t> = span
-        .iter()
-        .enumerate()
-        .map(|(i, &r)| {
-            if i == 0 {
-                tables.terminal(r, true, n == 1, is_protein_n_term, is_protein_c_term)
-            } else if i == n - 1 {
-                tables.terminal(r, false, true, is_protein_n_term, is_protein_c_term)
-            } else {
-                tables.anywhere[r as usize].as_slice()
-            }
-        })
-        .collect();
-    let mass_of = |aa: &AminoAcid| aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
-    let mut min_rest: WalkRest = smallvec::SmallVec::from_elem(0.0, n + 1);
-    let mut max_rest: WalkRest = smallvec::SmallVec::from_elem(0.0, n + 1);
+    let (mut min_rest, mut max_rest) = (0.0f64, 0.0f64);
     for i in (0..n).rev() {
-        let (mut lo, mut hi) = (f64::MAX, f64::MIN);
-        for v in position_variants[i] {
-            let m = mass_of(v);
-            lo = lo.min(m);
-            hi = hi.max(m);
-        }
-        if position_variants[i].is_empty() {
+        let (lo, hi) = tables.position_bounds(span, i, is_protein_n_term, is_protein_c_term);
+        if lo > hi {
             return None;
         }
-        min_rest[i] = min_rest[i + 1] + lo;
-        max_rest[i] = max_rest[i + 1] + hi;
+        min_rest += lo;
+        max_rest += hi;
     }
-    Some((position_variants, min_rest, max_rest))
+    Some((min_rest, max_rest))
 }
 
 /// Whether the bounded walk over `rec` with window `[mass_lo, mass_hi]` can
@@ -552,12 +580,49 @@ pub fn record_may_have_forms_in(
     let Some((span, n_term, c_term, _, _)) = record_span(db, rec) else {
         return false;
     };
-    match walk_bounds(span, tables, n_term, c_term) {
-        Some((_, min_rest, max_rest)) => {
-            !(min_rest[0] + H2O > mass_hi || max_rest[0] + H2O < mass_lo)
-        }
+    match span_mass_bounds(span, tables, n_term, c_term) {
+        Some((min_rest, max_rest)) => !(min_rest + H2O > mass_hi || max_rest + H2O < mass_lo),
         None => false,
     }
+}
+
+/// Keep only the records of `recs` that [`record_may_have_forms_in`] accepts,
+/// in order. The records arrive in mass order, so each one's protein and span
+/// are a cache miss; they are touched for a batch of records in tight loops
+/// first, letting the misses overlap, and then tested.
+pub fn retain_records_with_forms_in(
+    db: &SearchIndex,
+    tables: &FormWalkTables,
+    recs: &mut Vec<crate::candidate_index::IndexRecord>,
+    mass_lo: f64,
+    mass_hi: f64,
+) {
+    const BATCH: usize = 32;
+    let proteins = &db.db.proteins;
+    let mut kept = 0usize;
+    let mut start = 0usize;
+    while start < recs.len() {
+        let end = (start + BATCH).min(recs.len());
+        let mut spans: [&[u8]; BATCH] = [&[]; BATCH];
+        for (slot, rec) in spans.iter_mut().zip(&recs[start..end]) {
+            if let Some(p) = proteins.get(rec.protein_index as usize) {
+                *slot = &p.sequence;
+            }
+        }
+        let mut touched = 0u8;
+        for (span, rec) in spans.iter().zip(&recs[start..end]) {
+            touched ^= span.get(rec.start_offset as usize).copied().unwrap_or(0);
+        }
+        std::hint::black_box(touched);
+        for i in start..end {
+            if record_may_have_forms_in(db, tables, &recs[i], mass_lo, mass_hi) {
+                recs.swap(kept, i);
+                kept += 1;
+            }
+        }
+        start = end;
+    }
+    recs.truncate(kept);
 }
 
 /// Shared bounded walk over the peptidoforms of `span`: the same recursion
@@ -583,11 +648,20 @@ fn walk_forms_bounded(
 ) {
     use model::mass::H2O;
     use smallvec::SmallVec;
-    let Some((position_variants, min_rest, max_rest)) =
-        walk_bounds(span, tables, is_protein_n_term, is_protein_c_term)
-    else {
+    let mut position_variants = WalkVariants::new();
+    let mut min_rest = WalkRest::new();
+    let mut max_rest = WalkRest::new();
+    if !walk_bounds(
+        span,
+        tables,
+        is_protein_n_term,
+        is_protein_c_term,
+        &mut position_variants,
+        &mut min_rest,
+        &mut max_rest,
+    ) {
         return;
-    };
+    }
     if min_rest[0] + H2O > mass_hi || max_rest[0] + H2O < mass_lo {
         return;
     }
@@ -1064,7 +1138,8 @@ fn milli_of(mass: f64) -> u64 {
 ///    every legal peptidoform, and keep those whose actual
 ///    `peptide.mass()` is within `tol_da` of `precursor_mass`.
 ///
-/// Step 3 is why the result is bit-identical to the in-RAM set: mod placement
+/// Step 3 is why the result is bit-identical to the mass-filtered
+/// [`enumerate_candidates`] set: mod placement
 /// and mass computation flow through the exact same code path. The per-`Δ`
 /// windows in step 2 are purely an out-of-core retrieval optimisation — they
 /// only decide which base records to *look at*, never which peptidoforms survive.
@@ -1089,8 +1164,7 @@ pub fn lazy_candidates_for_precursor(
     // window is `[center − tol_left, center + tol_right]`, NOT a symmetric `±max`.
     // Using `max(left,right)` would pre-fetch extra candidates on the wider side
     // which — even though re-gated by the final mass filter below — perturb the
-    // per-spectrum scored-candidate set (tailor histogram / null-pool) and diverge
-    // from the in-RAM path's scored set.
+    // per-spectrum scored-candidate set (tailor histogram / null-pool).
     let tol_left_milli = (tol_left_da * 1000.0).round() as u64;
     let tol_right_milli = (tol_right_da * 1000.0).round() as u64;
     let mut seen_records: std::collections::HashSet<(u32, u32, u16, u16)> =
@@ -1152,7 +1226,7 @@ pub fn lazy_candidates_for_precursor(
             let peptide = Peptide::new(residues, pre, post);
             // DIRECTIONAL final gate, mirroring `matches_precursor`: lighter →
             // tol_left, heavier → tol_right. Keeps the lazily-materialized set
-            // EXACTLY the set the in-RAM `matches_precursor` admits per spectrum.
+            // EXACTLY the set `matches_precursor` admits per spectrum.
             let err = peptide.mass() - precursor_mass;
             let allowed = if err < 0.0 { tol_left_da } else { tol_right_da };
             if err.abs() <= allowed {
@@ -1172,17 +1246,16 @@ pub fn lazy_candidates_for_precursor(
 
 /// Lazily enumerate the modified candidate set whose **nominal residue mass**
 /// falls in the inclusive integer-bucket window `[min_nominal, max_nominal]`,
-/// reproducing the in-RAM `bucket_index.range(candidate_nominal_bounds(..))`
-/// membership predicate BIT-FOR-BIT.
+/// gated on the nominal-bucket membership predicate of
+/// `candidate_nominal_bounds(..)`.
 ///
-/// The in-RAM (`Ram`) backing scores exactly the candidates whose
+/// A spectrum scores exactly the candidates whose
 /// `peptide.nominal_residue_mass()` (= `nominal_from(peptide.mass() − H2O)`)
 /// lands in the coarse integer bucket window. That window is LOSSY at bucket
 /// boundaries: the f64-milli-Da directional window used by
-/// [`lazy_candidates_for_precursor`] is a DIFFERENT set at the edges, so the two
-/// backings diverge on boundary candidates (proven on scan 33203). To keep the
-/// `Mmap` backing result-identical to `Ram`, the per-spectrum scored set must be
-/// gated on the SAME nominal-bucket predicate, NOT the f64 window.
+/// [`lazy_candidates_for_precursor`] is a DIFFERENT set at the edges, so the
+/// per-spectrum scored set must be gated on the nominal-bucket predicate, NOT the
+/// f64 window.
 ///
 /// ## Algorithm
 /// Identical to [`lazy_candidates_for_precursor`] (per-Δ base-record fetch →
@@ -1192,14 +1265,14 @@ pub fn lazy_candidates_for_precursor(
 ///   every base mass that could expand to an in-window peptidoform (over-fetch
 ///   is fine — surplus records are filtered out by the acceptance predicate).
 /// - Each expanded peptidoform is accepted iff
-///   `nominal_from(peptide.mass() − H2O) ∈ [min_nominal, max_nominal]` — the
-///   EXACT RAM membership test — replacing the directional f64 final gate.
+///   `nominal_from(peptide.mass() − H2O) ∈ [min_nominal, max_nominal]`,
+///   replacing the directional f64 final gate.
 ///
 /// The lazy per-Δ enumeration is retained for bounded-RSS (O(window), not full
 /// materialization); only the per-candidate ACCEPTANCE predicate changes.
 /// Identity of one base record in the on-disk index:
 /// `(protein_index, start_offset, length, flags)`. Identical copies of a span
-/// (the N-terminal-Met re-enumeration) share a key; their count is the RAM
+/// (the N-terminal-Met re-enumeration) share a key; their count is the
 /// enumeration multiplicity.
 pub type BaseRecordKey = (u32, u32, u16, u16);
 
@@ -1278,13 +1351,16 @@ pub fn base_records_for_nominal_window(
 
 /// The distinct base records [`base_records_for_nominal_window`] returns for
 /// `[min_nominal, max_nominal]` (one per [`BaseRecordKey`], sorted by key),
-/// without the copy counts. The union of the per-Δ mass windows is scanned
-/// in parallel slices, so one wide window does not run on a single thread.
+/// without the copy counts, restricted to those `keep` retains. The union of
+/// the per-Δ mass windows is scanned in parallel slices, so one wide window
+/// does not run on a single thread; `keep` filters each slice's records in
+/// place inside the scan, so only the kept records are sorted.
 pub fn distinct_base_records_for_nominal_window(
     mi: &crate::candidate_index::MmapCandidateIndex,
     params: &SearchParams,
     min_nominal: i32,
     max_nominal: i32,
+    keep: impl Fn(&mut Vec<crate::candidate_index::IndexRecord>) + Sync,
 ) -> Vec<crate::candidate_index::IndexRecord> {
     use model::mass::{H2O, INTEGER_MASS_SCALER};
     use rayon::prelude::*;
@@ -1322,11 +1398,14 @@ pub fn distinct_base_records_for_nominal_window(
     let mut out: Vec<crate::candidate_index::IndexRecord> = slices
         .par_iter()
         .flat_map_iter(|&(a, b)| {
-            mi.mass_window(a, b).into_iter().filter(|rec| {
+            let mut recs = mi.mass_window(a, b);
+            recs.retain(|rec| {
                 windows
                     .iter()
                     .any(|&(lo, hi)| rec.mass_milli >= lo && rec.mass_milli <= hi)
-            })
+            });
+            keep(&mut recs);
+            recs
         })
         .collect();
     out.par_sort_unstable_by_key(base_record_key);
@@ -1385,9 +1464,9 @@ pub fn expand_base_record(
 }
 
 /// Peptidoforms in the nominal-bucket window `[min_nominal, max_nominal]`, in
-/// the order the in-RAM enumeration would visit them: base records in
+/// the order `enumerate_candidates` visits them: base records in
 /// `enumerate_candidates` order, each expanded in `expand_mod_combinations`
-/// order, and gated on the RAM membership predicate
+/// order, and gated on the membership predicate
 /// `nominal_from(peptide.mass() − H2O) ∈ [min, max]` (cached as
 /// `Peptide::nominal_residue_mass()`).
 pub fn lazy_candidates_for_nominal_window(
@@ -1522,7 +1601,7 @@ mod tests {
     // Decisive correctness property: for a precursor window, the SET of
     // Candidates from `lazy_candidates_for_precursor` (which reads BASE peptides
     // from the out-of-core index and places mods lazily) must EXACTLY equal the
-    // mass-filtered subset of the in-RAM `enumerate_candidates`.
+    // mass-filtered subset of the full `enumerate_candidates`.
 
     use super::{
         enumerate_candidates, lazy_candidates_for_nominal_window, lazy_candidates_for_precursor,

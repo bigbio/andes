@@ -32,6 +32,20 @@ fn intensity_mlp_relu_scores() {
     assert!(out.data[2].abs() < 1e-6, "got {}", out.data[2]);
 }
 
+/// Names are the ONNX tensor names, not the names of the nodes that produce them
+/// (the fixture's output `score` is produced by a node named `/Relu`).
+#[test]
+fn reports_onnx_tensor_names() {
+    let mut session = OnnxSession::from_manifest(fixture("intensity_mlp.json"), BackendKind::Tract)
+        .expect("load intensity_mlp");
+    assert_eq!(session.input_names(), ["features"]);
+    assert_eq!(session.output_names(), ["score"]);
+    let out = session
+        .run_one(NamedTensor::new("features", vec![1, 4], vec![0.0; 4]).unwrap())
+        .unwrap();
+    assert_eq!(out.name, "score");
+}
+
 #[test]
 fn rescoring_batch_feeds_mlp() {
     use onnx_infer::rescoring::{CandidateKey, FeatureRow, RescoringBatch};

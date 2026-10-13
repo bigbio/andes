@@ -2,7 +2,8 @@
 //! parsing and one predictor per supported model family.
 //!
 //! A predictor turns peptidoforms into retention-time and/or fragment
-//! intensity predictions with tract. Peptidoforms a model cannot encode are
+//! intensity predictions with the engine chosen by [`set_backend`] (tract or
+//! ONNX Runtime). Peptidoforms a model cannot encode are
 //! rejected by [`Predictor::supports_rt`] / [`Predictor::supports_ms2`] and
 //! become missing features downstream, never a silently wrong tensor.
 
@@ -12,12 +13,14 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
+use std::sync::OnceLock;
 
-use onnx_infer::andes_peptide::split_nterm_residue_delta;
 use onnx_infer::peptdeep::{PeptDeepPeptide, pack_ms2_batch, pack_rt_batch};
 use onnx_infer::deeplc::{self, DeepLcPeptide};
+use onnx_infer::ms2_native::{Ms2Conditions, Ms2Model, Ms2Scratch, N_BASE_ION, N_ION};
+use onnx_infer::rt_native::{self, RtPeptide};
 use onnx_infer::prosit::{self, PrositPeptide, ResidueState};
-use onnx_infer::{BackendKind, OnnxSession, ms2pip};
+use onnx_infer::{BackendKind, BackendOptions, OnnxSession, ms2pip};
 use serde::Deserialize;
 
 pub const PROTON: f64 = 1.007_276_466_8;
@@ -70,20 +73,21 @@ enum Placement {
     NTerm,
     /// On one of the listed residues, or the peptide N-terminus.
     ResidueOrNTerm,
-    /// On the first residue only, which must be one of the listed residues.
-    FirstResidue,
+    /// Peptide N-terminus (site 0) of a peptide whose first residue is one of the
+    /// listed residues (alphabase `X^Any_N-term`).
+    NTermOf,
 }
 
-/// (mod, monoisotopic delta, residues, placement)
-const MODS: &[(Mod, f64, &str, Placement)] = &[
-    (Mod::Carbamidomethyl, 57.021_464, "C", Placement::Residue),
-    (Mod::Oxidation, 15.994_915, "M", Placement::Residue),
-    (Mod::Acetyl, 42.010_565, "", Placement::NTerm),
-    (Mod::Tmt6plex, 229.162_932, "K", Placement::ResidueOrNTerm),
-    (Mod::Phospho, 79.966_331, "STY", Placement::Residue),
-    (Mod::Deamidated, 0.984_016, "NQ", Placement::Residue),
-    (Mod::GlnPyroGlu, -17.026_549, "Q", Placement::FirstResidue),
-    (Mod::GluPyroGlu, -18.010_565, "E", Placement::FirstResidue),
+/// (mod, Unimod accession, residues, placement)
+const MODS: &[(Mod, u32, &str, Placement)] = &[
+    (Mod::Carbamidomethyl, 4, "C", Placement::Residue),
+    (Mod::Oxidation, 35, "M", Placement::Residue),
+    (Mod::Acetyl, 1, "", Placement::NTerm),
+    (Mod::Tmt6plex, 737, "K", Placement::ResidueOrNTerm),
+    (Mod::Phospho, 21, "STY", Placement::Residue),
+    (Mod::Deamidated, 7, "NQ", Placement::Residue),
+    (Mod::GlnPyroGlu, 28, "Q", Placement::NTermOf),
+    (Mod::GluPyroGlu, 27, "E", Placement::NTermOf),
 ];
 
 impl Mod {
@@ -100,6 +104,25 @@ impl Mod {
             Mod::GlnPyroGlu => "Gln->pyro-Glu@Q^Any_N-term".into(),
             Mod::GluPyroGlu => "Glu->pyro-Glu@E^Any_N-term".into(),
         }
+    }
+
+    /// Unimod accession.
+    pub fn unimod(self) -> u32 {
+        MODS.iter().find(|m| m.0 == self).expect("every Mod is in MODS").1
+    }
+
+    /// The mod with Unimod accession `id`, if it sits at `site` of `seq` (0 =
+    /// N-terminus, 1..=n residue) by its [`Placement`].
+    fn at(id: u32, site: usize, seq: &[u8]) -> Option<Self> {
+        let &(m, _, residues, placement) = MODS.iter().find(|m| m.1 == id)?;
+        let on_residue = site >= 1 && site <= seq.len() && residues.as_bytes().contains(&seq[site - 1]);
+        let ok = match placement {
+            Placement::Residue => on_residue,
+            Placement::NTerm => site == 0,
+            Placement::ResidueOrNTerm => site == 0 || on_residue,
+            Placement::NTermOf => site == 0 && residues.as_bytes().contains(seq.first()?),
+        };
+        ok.then_some(m)
     }
 
     /// Elemental composition delta (C, H, N, O, S, P), unimod; heavy
@@ -140,110 +163,34 @@ pub struct Mass {
     pub nterm: f64,
 }
 
-/// Parse `K.PEPM+15.99491K.D` into a peptidoform; `None` for anything outside
-/// the residue alphabet or [`MODS`]. andes prints N-terminal deltas after the
-/// first residue, so a delta there is placed on the N-terminus or the residue
-/// by [`Placement`].
+/// Parse an andes PIN peptide (`K.PEPM+15.99491K.D`) with
+/// [`RtPeptide::from_andes`], the parser andes-rt and andes-ms2 are trained
+/// and run with, so every predictor sees the same sites: a delta printed after
+/// the first residue goes to the N-terminus (site 0) when an N-terminal Unimod
+/// entry matches it (acetyl, TMT, pyro-Glu), as in alphabase, where
+/// `Gln->pyro-Glu@Q^Any_N-term` sits at site 0. A summed N-terminal + residue
+/// delta on residue 1 (`C+99.03203`, acetyl + carbamidomethyl) is split by
+/// `from_andes` into both mods. `None` when `from_andes`
+/// rejects the string or a modification is outside [`MODS`] at its site.
+/// Masses are the Unimod monoisotopic deltas.
 pub fn parse_peptide(s: &str) -> Option<(Form, Mass)> {
-    let b = s.as_bytes();
-    let core = if b.len() > 4 && b[1] == b'.' && b[b.len() - 2] == b'.' {
-        &s[2..s.len() - 2]
-    } else {
-        s
-    };
-    let mut seq = String::new();
-    let mut res = Vec::new();
-    let mut mods: Vec<(usize, Mod)> = Vec::new();
+    let p = RtPeptide::from_andes(s)?;
+    let seq = p.sequence.as_bytes();
+    let mut res = seq.iter().map(|&c| residue_mass(c as char)).collect::<Option<Vec<f64>>>()?;
     let mut nterm = 0.0;
-    let chars: Vec<char> = core.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        if c.is_ascii_uppercase() {
-            seq.push(c);
-            res.push(residue_mass(c)?);
-            i += 1;
-        } else if c == '+' || c == '-' {
-            let start = i;
-            i += 1;
-            while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
-                i += 1;
-            }
-            let delta: f64 = chars[start..i].iter().collect::<String>().parse().ok()?;
-            let pos = seq.len();
-            if pos == 0 {
-                return None;
-            }
-            let aa = seq.as_bytes()[pos - 1] as char;
-            let free = |site: usize, mods: &[(usize, Mod)]| mods.iter().all(|(s, _)| *s != site);
-            let cands: Vec<(Mod, &str, Placement)> = MODS
-                .iter()
-                .filter(|m| (delta - m.1).abs() < 2e-3)
-                .map(|m| (m.0, m.2, m.3))
-                .collect();
-            let on_res = |p: Placement| matches!(p, Placement::Residue | Placement::ResidueOrNTerm);
-            let pick = cands
-                .iter()
-                .find(|(_, _, p)| pos == 1 && *p == Placement::NTerm && free(0, &mods))
-                .map(|(m, _, _)| (0, *m))
-                .or_else(|| {
-                    cands
-                        .iter()
-                        .find(|(_, r, p)| {
-                            pos == 1 && *p == Placement::FirstResidue && r.contains(aa) && free(1, &mods)
-                        })
-                        .map(|(m, _, _)| (1, *m))
-                })
-                .or_else(|| {
-                    cands
-                        .iter()
-                        .find(|(_, r, p)| on_res(*p) && r.contains(aa) && free(pos, &mods))
-                        .map(|(m, _, _)| (pos, *m))
-                })
-                .or_else(|| {
-                    cands
-                        .iter()
-                        .find(|(_, _, p)| pos == 1 && *p == Placement::ResidueOrNTerm && free(0, &mods))
-                        .map(|(m, _, _)| (0, *m))
-                });
-            let Some(pick) = pick else {
-                // An N-terminal and a residue mod on residue 1 print as one summed delta.
-                if pos != 1 || !mods.is_empty() {
-                    return None;
-                }
-                let nterm_cands: Vec<(Mod, f64)> = MODS
-                    .iter()
-                    .filter(|m| matches!(m.3, Placement::NTerm | Placement::ResidueOrNTerm))
-                    .map(|m| (m.0, m.1))
-                    .collect();
-                let residue_cands: Vec<(Mod, f64)> = MODS
-                    .iter()
-                    .filter(|m| m.3 != Placement::NTerm && m.2.contains(aa))
-                    .map(|m| (m.0, m.1))
-                    .collect();
-                let (n, r) = split_nterm_residue_delta(delta, 2e-3, &nterm_cands, &residue_cands)?;
-                let n_mass = nterm_cands.iter().find(|m| m.0 == n).map(|m| m.1)?;
-                mods.push((0, n));
-                mods.push((1, r));
-                nterm += n_mass;
-                res[0] += delta - n_mass;
-                continue;
-            };
-            if pick.0 == 0 {
-                nterm += delta;
-            } else {
-                res[pos - 1] += delta;
-            }
-            mods.push(pick);
+    let mut mods = Vec::with_capacity(p.mods.len());
+    for &(site, id) in &p.mods {
+        let m = Mod::at(id, site, seq)?;
+        let delta = rt_native::mods::by_id(id)?.mono;
+        if site == 0 {
+            nterm += delta;
         } else {
-            return None;
+            res[site - 1] += delta;
         }
-    }
-    if seq.is_empty() {
-        return None;
+        mods.push((site, m));
     }
     mods.sort();
-    Some((Form { seq, mods }, Mass { res, nterm }))
+    Some((Form { seq: p.sequence, mods }, Mass { res, nterm }))
 }
 
 /// One fragment ion type in a predictor's per-site output: (is b ion, charge).
@@ -268,8 +215,30 @@ pub trait Predictor: Sync {
     fn ms2(&self, s: &mut [OnnxSession], items: &[(&Form, u8)]) -> Vec<Vec<f32>>;
 }
 
+static BACKEND: OnceLock<(BackendKind, BackendOptions)> = OnceLock::new();
+
+/// Parse a `--backend` value.
+pub fn parse_backend(s: &str) -> BackendKind {
+    match s {
+        "tract" => BackendKind::Tract,
+        "ort" | "onnxruntime" => BackendKind::Ort,
+        other => panic!("unknown --backend {other} (tract | ort)"),
+    }
+}
+
+/// Engine for every graph [`load`]ed afterwards; call once, before loading.
+pub fn set_backend(kind: BackendKind, opts: BackendOptions) {
+    BACKEND.set((kind, opts)).expect("set_backend called twice");
+}
+
+/// The engine set by [`set_backend`]; tract with default options otherwise.
+pub fn backend() -> &'static (BackendKind, BackendOptions) {
+    BACKEND.get_or_init(|| (BackendKind::Tract, BackendOptions::default()))
+}
+
 pub fn load(models: &Path, manifest: &str) -> OnnxSession {
-    OnnxSession::from_manifest(models.join(manifest), BackendKind::Tract)
+    let (kind, opts) = backend();
+    OnnxSession::from_manifest_with(models.join(manifest), *kind, opts)
         .unwrap_or_else(|e| panic!("load {manifest}: {e}"))
 }
 
@@ -462,10 +431,16 @@ pub struct DeepLc {
 }
 
 impl DeepLc {
+    /// pyro-Glu goes on the first residue (site 1), as `Q[Gln->pyro-Glu]` in
+    /// the ProForma of `scripts/deeplc_reference.py`; every other mod keeps its site.
     pub fn peptide(f: &Form) -> DeepLcPeptide<'_> {
+        let site = |s: usize, m: Mod| match m {
+            Mod::GlnPyroGlu | Mod::GluPyroGlu => 1,
+            _ => s,
+        };
         DeepLcPeptide {
             sequence: &f.seq,
-            mods: f.mods.iter().map(|(s, m)| (*s, m.composition())).collect(),
+            mods: f.mods.iter().map(|&(s, m)| (site(s, m), m.composition())).collect(),
         }
     }
 }
@@ -499,6 +474,76 @@ impl Predictor for DeepLc {
     }
     fn ms2(&self, _: &mut [OnnxSession], _: &[(&Form, u8)]) -> Vec<Vec<f32>> {
         unreachable!("DeepLC has no MS2 model")
+    }
+}
+
+// ---------------------------------------------------------------- andes-ms2
+
+/// The native andes-ms2 model (`onnx_infer::ms2_native`); no ONNX graphs.
+pub struct AndesMs2 {
+    pub model: Ms2Model,
+    pub nce: Option<f32>,
+    pub activation: String,
+    pub instrument: String,
+}
+
+impl AndesMs2 {
+    /// `path` is the `AMS20001` weight file, or a directory holding `andes_ms2.ams2`.
+    pub fn new(path: &Path, nce: Option<f32>, activation: &str, instrument: &str) -> Self {
+        let file = if path.is_dir() { path.join("andes_ms2.ams2") } else { path.to_path_buf() };
+        let model = Ms2Model::load(&file).unwrap_or_else(|e| panic!("load {}: {e}", file.display()));
+        Self { model, nce, activation: activation.into(), instrument: instrument.into() }
+    }
+
+    /// The [`RtPeptide`] the form was parsed from (see [`parse_peptide`]).
+    pub fn peptide(f: &Form) -> RtPeptide {
+        let mut mods: Vec<(usize, u32)> = f.mods.iter().map(|(s, m)| (*s, m.unimod())).collect();
+        mods.sort_unstable();
+        RtPeptide { sequence: f.seq.clone(), mods }
+    }
+
+    fn conditions(&self, z: u8) -> Ms2Conditions {
+        Ms2Conditions::new(z, self.nce, &self.activation, &self.instrument)
+    }
+}
+
+impl Predictor for AndesMs2 {
+    fn prefix(&self) -> &str {
+        "ams2"
+    }
+    fn ions(&self) -> &[Ion] {
+        &PDEEP_IONS
+    }
+    fn has_rt(&self) -> bool {
+        false
+    }
+    fn supports_rt(&self, _: &Form) -> bool {
+        false
+    }
+    fn supports_ms2(&self, f: &Form, z: u8) -> bool {
+        z > 0 && f.seq.len() >= 2 && Self::peptide(f).encode().is_some()
+    }
+    fn batch_key(&self, _: &Form) -> usize {
+        0
+    }
+    fn sessions(&self) -> Vec<OnnxSession> {
+        Vec::new()
+    }
+    fn rt(&self, _: &mut [OnnxSession], _: &[&Form]) -> Vec<f32> {
+        unreachable!("andes-ms2 has no RT model")
+    }
+    fn ms2(&self, _: &mut [OnnxSession], items: &[(&Form, u8)]) -> Vec<Vec<f32>> {
+        let mut scratch = Ms2Scratch::default();
+        items
+            .iter()
+            .map(|(f, z)| {
+                let full = self
+                    .model
+                    .predict_with(&Self::peptide(f), &self.conditions(*z), &mut scratch)
+                    .expect("supports_ms2 checked the encoding");
+                full.chunks_exact(N_ION).flat_map(|site| site[..N_BASE_ION].to_vec()).collect()
+            })
+            .collect()
     }
 }
 
@@ -580,11 +625,11 @@ mod tests {
         let (f, m) = parse_peptide("K.M+15.99491EEHILR.P").unwrap();
         assert_eq!(f.seq, "MEEHILR");
         assert_eq!(f.mods, vec![(1, Mod::Oxidation)]);
-        assert!((m.res[0] - (131.0404846 + 15.99491)).abs() < 1e-6);
+        assert!((m.res[0] - (131.0404846 + 15.994915)).abs() < 1e-6);
         let (f, m) = parse_peptide("M.R+42.01056AC+57.02146INNQQIR.H").unwrap();
         assert_eq!(f.seq, "RACINNQQIR");
         assert_eq!(f.mods, vec![(0, Mod::Acetyl), (3, Mod::Carbamidomethyl)]);
-        assert!((m.nterm - 42.01056).abs() < 1e-9);
+        assert!((m.nterm - 42.010565).abs() < 1e-9);
         let (f, _) = parse_peptide("_.M+42.01056+15.99491LRK.A").unwrap();
         assert_eq!(f.mods, vec![(0, Mod::Acetyl), (1, Mod::Oxidation)]);
         assert!(parse_peptide("K.PEPXIDE.K").is_none());
@@ -595,12 +640,44 @@ mod tests {
     fn places_tmt_and_phospho() {
         let (f, m) = parse_peptide("K.K+229.16293+229.16293PEPTK+229.16293.D").unwrap();
         assert_eq!(f.mods, vec![(0, Mod::Tmt6plex), (1, Mod::Tmt6plex), (6, Mod::Tmt6plex)]);
-        assert!((m.nterm - 229.16293).abs() < 1e-9);
+        assert!((m.nterm - 229.162932).abs() < 1e-9);
         let (f, _) = parse_peptide("K.A+229.16293PES+79.96633K+229.16293.D").unwrap();
         assert_eq!(f.mods, vec![(0, Mod::Tmt6plex), (4, Mod::Phospho), (5, Mod::Tmt6plex)]);
-        let (f, _) = parse_peptide("K.Q-17.02655PEPTIDEK.D").unwrap();
-        assert_eq!(f.mods, vec![(1, Mod::GlnPyroGlu)]);
+    }
+
+    /// N-terminal mods sit at site 0, as in alphabase and in andes-rt / andes-ms2
+    /// training: pyro-Glu, and a lone TMT delta printed after a leading K.
+    #[test]
+    fn places_n_terminal_mods_at_site_zero() {
+        let (f, m) = parse_peptide("K.Q-17.02655PEPTIDEK.D").unwrap();
+        assert_eq!(f.mods, vec![(0, Mod::GlnPyroGlu)]);
+        assert_eq!(f.mods[0].1.alphabase(0, f.residue(0)), "Gln->pyro-Glu@Q^Any_N-term");
+        assert!((m.nterm + 17.026549).abs() < 1e-9);
+        let (f, _) = parse_peptide("K.E-18.01056AGHY+79.96633LLR.A").unwrap();
+        assert_eq!(f.mods, vec![(0, Mod::GluPyroGlu), (5, Mod::Phospho)]);
         assert!(parse_peptide("K.AQ-17.02655PEPTIDEK.D").is_none());
+        assert!(parse_peptide("K.E-17.02655PEPTIDEK.D").is_none());
+        let (f, _) = parse_peptide("K.K+229.16293PEPTIDE.D").unwrap();
+        assert_eq!(f.mods, vec![(0, Mod::Tmt6plex)]);
+        assert_eq!(f.mods[0].1.alphabase(0, 'K'), "TMT6plex@Any_N-term");
+        // Acetyl on an internal K is not an N-terminal acetyl.
+        assert!(parse_peptide("K.PEPK+42.01056TIDE.D").is_none());
+    }
+
+    /// The form and andes-rt / andes-ms2 read a PIN peptide identically.
+    #[test]
+    fn matches_from_andes() {
+        for s in [
+            "K.Q-17.02655PEPTIDEK.D",
+            "K.K+229.16293PEPTIDE.D",
+            "K.K+229.16293+229.16293PEPTK+229.16293.D",
+            "_.M+42.01056+15.99491LRK.A",
+            "K.A+229.16293PES+79.96633K+229.16293.D",
+            "K.YCC+57.02146QWN+0.98402K.R",
+        ] {
+            let (f, _) = parse_peptide(s).unwrap();
+            assert_eq!(AndesMs2::peptide(&f), RtPeptide::from_andes(s).unwrap(), "{s}");
+        }
     }
 
     /// The PIN string andes writes for a protein N-terminal Cys under fixed
@@ -640,14 +717,15 @@ mod tests {
         let (f, m) = parse_peptide(&s).expect("summed CAM + acetyl delta");
         assert_eq!(f.seq, "CPEPTIDEK");
         assert_eq!(f.mods, vec![(0, Mod::Acetyl), (1, Mod::Carbamidomethyl)]);
-        assert!((m.nterm - 42.010565).abs() < 1e-4);
-        assert!((m.res[0] - (103.009_184_5 + 57.021464)).abs() < 1e-4);
-        assert!((m.nterm + m.res[0] - (103.009_184_5 + 99.03203)).abs() < 1e-9);
+        assert!((m.nterm - 42.010565).abs() < 1e-9);
+        assert!((m.res[0] - (103.009_184_5 + 57.021464)).abs() < 1e-6);
         // fixed TMT6plex on K under variable N-terminal acetyl: K+271.17350
-        let (f, _) = parse_peptide("_.K+271.17350PEPTIDEK+229.16293.R").unwrap();
+        let tmt = "_.K+271.17350PEPTIDEK+229.16293.R";
+        let (f, _) = parse_peptide(tmt).unwrap();
         assert_eq!(
             f.mods,
             vec![(0, Mod::Acetyl), (1, Mod::Tmt6plex), (9, Mod::Tmt6plex)]
         );
+        assert_eq!(AndesMs2::peptide(&f), RtPeptide::from_andes(tmt).unwrap());
     }
 }

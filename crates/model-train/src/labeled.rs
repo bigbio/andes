@@ -5,8 +5,10 @@
 //!
 //! 1. Load the FASTA target database and build a [`SearchIndex`] (targets +
 //!    reversed decoys), reusing the same construction as the production binary.
-//! 2. Run the full search with the seed `RankScorer` via [`match_spectra`] —
-//!    no search or scoring logic is re-implemented here.
+//! 2. Run the full search with the seed `RankScorer` via
+//!    [`match_spectra_out_of_core`] — the out-of-core path with fragment-ion
+//!    retrieval that `andes search` takes. No search or scoring logic is
+//!    re-implemented here.
 //! 3. For each spectrum take the **best PSM** (highest `rank_score`) from the
 //!    queue.
 //! 4. Sort best-per-spectrum PSMs by `rank_score` descending (best first).
@@ -18,9 +20,9 @@
 //!
 //! # Determinism
 //!
-//! The search engine (`match_spectra`) is deterministic for fixed inputs and a
-//! fixed Rayon thread count. The Rayon thread pool is shared across the
-//! process; the first caller establishes the pool size. For bit-identical
+//! The search engine (`match_spectra_out_of_core`) is deterministic for fixed
+//! inputs and a fixed Rayon thread count. The Rayon thread pool is shared
+//! across the process; the first caller establishes the pool size. For bit-identical
 //! results across runs, the caller should ensure a fixed number of threads
 //! (e.g. via `RAYON_NUM_THREADS`). The FDR computation and the returned Vec
 //! are fully deterministic after the search.
@@ -40,7 +42,7 @@ use input::FastaReader;
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;
 use scoring_crate::scoring::rank_scorer::RankScorer;
-use search::{match_spectra, SearchIndex, SearchParams};
+use search::{match_spectra_out_of_core, SearchIndex, SearchParams};
 
 use crate::TrainError;
 
@@ -106,8 +108,9 @@ pub struct LabeledMatch {
 ///
 /// # Errors
 ///
-/// Returns [`TrainError::Io`] if the FASTA cannot be opened or read, or
-/// [`TrainError::Other`] for downstream parsing failures.
+/// Returns [`TrainError::Io`] if the FASTA cannot be opened or read or the
+/// search's candidate index cannot be built, or [`TrainError::Other`] for
+/// downstream parsing failures.
 pub fn bootstrap_labels(
     spectra: &[Spectrum],
     database: &Path,
@@ -122,16 +125,17 @@ pub fn bootstrap_labels(
     let idx = SearchIndex::from_target_db(&target_db, BOOTSTRAP_DECOY_PREFIX);
 
     // ── 2. Run the seed search ────────────────────────────────────────────────
-    // Reuse the production `match_spectra` entry point — no search logic
+    // Reuse the production out-of-core entry point (fragment-ion retrieval,
+    // mass-ordered chunks, queues returned in input order) — no search logic
     // is duplicated here.
-    let (queues, candidates) = match_spectra(
+    let (queues, candidates) = match_spectra_out_of_core(
         spectra,
         &idx,
         search_params,
         seed,
         FRAGMENT_TOL_DA,
         BOOTSTRAP_DECOY_PREFIX,
-    );
+    )?;
 
     // ── 3. Collect best PSM per spectrum ──────────────────────────────────────
     // Each TopNQueue is already sorted best-first by `rank_score`. We take

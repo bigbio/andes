@@ -188,6 +188,11 @@ fn staged_search(dir: &Path, perc: &Path) -> PathBuf {
     q
 }
 
+/// `--mbr-fdr` of the transfer test. The fixture's transfer folds hold about
+/// 30 targets each, so with the K-decoy estimate's `+1` correction no transfer
+/// q-value can fall below about `1 / (2 * 30)`.
+const FIXTURE_MBR_FDR: &str = "0.05";
+
 #[test]
 fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
     let tmp = tempfile::tempdir().unwrap();
@@ -226,6 +231,8 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
         s(&base),
         "--output-parquet",
         s(&qpx),
+        "--mbr-fdr",
+        FIXTURE_MBR_FDR,
     ]);
     assert!(qpx.join("quantms.feature.parquet").is_file());
 
@@ -246,6 +253,8 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
             "--rescore",
             "--percolator-bin",
             s(&perc),
+            "--mbr-fdr",
+            FIXTURE_MBR_FDR,
         ]
         .map(String::from),
     );
@@ -301,6 +310,10 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
     }
     // Most untriggered precursors with signal are transferred.
     let transfers = rows.values().filter(|r| r[ev] == "transfer_ms1").count();
+    eprintln!(
+        "transfers at --mbr-fdr {FIXTURE_MBR_FDR}: {transfers} of {} rows",
+        rows.len()
+    );
     assert!(transfers >= 50, "only {transfers} transfers");
 
     // The feature parquet holds every mbr.tsv row except the below-threshold

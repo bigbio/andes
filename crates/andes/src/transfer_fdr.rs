@@ -12,9 +12,12 @@
 //! Scores are the raw boosted margins and are compared within a fold only.
 //!
 //! q-values, per fold: rank the fold's scored rows by score; at threshold `c`,
-//! `FDR(c) = (D(c) / K) / max(T(c), 1)` with `D`/`T` the decoys/targets at or
-//! above `c` and `K` the fold's decoy-to-target row ratio; q is the running
-//! minimum of `FDR` from the lowest score up, capped at 1. The accepted set at
+//! `FDR(c) = (D(c) + 1) / (K * max(T(c), 1))`, capped at 1, with `D`/`T` the
+//! decoys/targets at or above `c` and `K` the fold's decoy-to-target row
+//! ratio; q is the running minimum of `FDR` from the lowest score up. The `+1`
+//! is the finite-sample correction: a target above every decoy is not given
+//! q = 0, and no target reaches q <= 0.01 unless at least `1 / (0.01 K)`
+//! targets score above every decoy. The accepted set at
 //! any threshold is the union of the folds' accepted sets, so its estimated FDR
 //! is at most the threshold. The same estimate is made with one decoy family
 //! at a time (`K` = that family's ratio).
@@ -246,7 +249,7 @@ impl TransferFdr {
 }
 
 /// K-decoy q-values of `(row, score, is_decoy)` into `q[row]`, with `K` the
-/// decoy-to-target ratio of `items`. Leaves `q` untouched when `items` has no
+/// decoy-to-target ratio of `items` and `FDR = (D + 1) / (K * max(T, 1))`. Leaves `q` untouched when `items` has no
 /// targets or no decoys.
 fn kdecoy_q(items: &[(usize, f32, bool)], q: &mut [Option<f64>]) {
     let targets = items.iter().filter(|it| !it.2).count();
@@ -271,7 +274,7 @@ fn kdecoy_q(items: &[(usize, f32, bool)], q: &mut [Option<f64>]) {
             }
             end += 1;
         }
-        let v = ((d as f64 / k) / t.max(1) as f64).min(1.0);
+        let v = ((d + 1) as f64 / (k * t.max(1) as f64)).min(1.0);
         fdr[start..end].fill(v);
         start = end;
     }
@@ -363,6 +366,34 @@ mod tests {
             eprintln!("null seed {seed}: {n} targets at q <= 0.01");
             assert!(n <= 5, "seed {seed}: {n} null targets at q <= 0.01");
         }
+    }
+
+    #[test]
+    fn null_experiments_rarely_accept_a_target() {
+        // 10,000 experiments of 20 targets and 40 decoys, every score drawn
+        // from one distribution: any accepted target is a false discovery,
+        // so the share of experiments that accept one is their mean FDP.
+        let mut g = Normal(77);
+        let n_exp = 10_000;
+        let mut with_false = 0usize;
+        let mut q = vec![None; 60];
+        for _ in 0..n_exp {
+            let items: Vec<(usize, f32, bool)> = (0..60).map(|i| (i, g.draw(), i >= 20)).collect();
+            q.fill(None);
+            kdecoy_q(&items, &mut q);
+            if q[..20].iter().any(|q| q.is_some_and(|q| q <= 0.01)) {
+                with_false += 1;
+            }
+        }
+        let frac = with_false as f64 / n_exp as f64;
+        eprintln!(
+            "null experiments: {with_false} of {n_exp} ({frac:.4}) accept a target at q <= 0.01"
+        );
+        // 0.01 plus about five binomial standard errors at n = 10,000.
+        assert!(
+            frac <= 0.015,
+            "{frac} of the null experiments accept a target"
+        );
     }
 
     #[test]

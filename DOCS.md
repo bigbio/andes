@@ -855,7 +855,9 @@ scores from separately trained Percolator models are not on one scale.
   and every precursor in a run without FAIMS, are fitted on the whole run.
 * **Finalize** (`quant finalize`). A cross-validated GBDT (3 folds by precursor) separates
   transfer targets from their decoys; the transfer q-value is the K-decoy estimate over held-out
-  scores, also reported per decoy family. It is a quant-quality q-value, not an identification
+  scores, `(D + 1) / (K · max(T, 1))` at each score threshold (capped at 1, then the running
+  minimum), with `K` the decoy-to-target ratio; it is also reported per decoy family. The `+1`
+  keeps a small fold from giving q = 0 to targets that merely outscore a few decoys. It is a quant-quality q-value, not an identification
   FDR. Pseudo-transfers give an acceptance rate and the wrong-peak rate, which decoys cannot
   see. The acceptance rate is optimistic as a transfer sensitivity: a pseudo-transfer's
   predicted apex leaves the run's own observation out of the consensus RT, but the run's

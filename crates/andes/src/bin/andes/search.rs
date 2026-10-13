@@ -2091,7 +2091,11 @@ mod retrieval_choice_tests {
     #[test]
     fn activations_outside_the_indexed_ion_series_keep_enumeration() {
         use model::activation::ActivationMethod;
-        for a in [ActivationMethod::CID, ActivationMethod::HCD, ActivationMethod::PQD] {
+        for a in [
+            ActivationMethod::CID,
+            ActivationMethod::HCD,
+            ActivationMethod::PQD,
+        ] {
             assert!(search::fragment_index::covers_activation(a), "{a:?}");
         }
         for a in [ActivationMethod::ETD, ActivationMethod::UVPD] {

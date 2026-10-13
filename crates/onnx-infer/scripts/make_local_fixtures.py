@@ -4,6 +4,8 @@
 Produces under fixtures/:
   - tree_leq.agbd                     (1-feature split; tree_leq.onnx is committed)
   - peak_gbdt.agbd / peak_gbdt.onnx   (3-feature multi-tree, andes peak-like)
+  - peak_gbdt_calibrated.agbd         (peak_gbdt trees with a 3-point
+                                       calibration footer; parser test input)
   - parity/agbd.json                  (rows + expected raw scores for both AGBD
                                        fixtures; checked against the native Rust
                                        decoder and against ONNX Runtime)
@@ -160,6 +162,17 @@ def make_peak_gbdt():
     print("wrote", agbd, onnx_path)
 
 
+PEAK_GBDT_ISO_X = [0.0, 0.5, 1.0]
+PEAK_GBDT_ISO_Y = [0.1, 0.4, 0.9]
+
+
+def make_peak_gbdt_calibrated():
+    """peak_gbdt trees with a non-empty calibration footer (n_iso = 3)."""
+    agbd = FIX / "peak_gbdt_calibrated.agbd"
+    write_agbd(agbd, 3, 0, PEAK_GBDT_TREES, PEAK_GBDT_ISO_X, PEAK_GBDT_ISO_Y)
+    print("wrote", agbd)
+
+
 def make_agbd_parity():
     """Rows and expected raw scores shared by the Rust and Python parity tests.
 
@@ -259,6 +272,7 @@ def main():
     FIX.mkdir(exist_ok=True)
     make_tree_leq()
     make_peak_gbdt()
+    make_peak_gbdt_calibrated()
     make_agbd_parity()
     make_intensity_mlp()
     make_identity_named()

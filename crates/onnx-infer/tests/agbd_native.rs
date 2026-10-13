@@ -69,3 +69,16 @@ fn agbd_fixtures_score_parity_rows_natively() {
         }
     }
 }
+
+/// `peak_gbdt_calibrated.agbd` is exactly what the native serializer writes
+/// for the peak_gbdt trees with a 3-point calibration map, so the Python
+/// parser tests on it exercise a natively serialized calibrated model.
+#[test]
+fn calibrated_fixture_is_the_native_serialization() {
+    let (_, mut model) = load_native("peak_gbdt.agbd");
+    model.iso_x = vec![0.0, 0.5, 1.0];
+    model.iso_y = vec![0.1, 0.4, 0.9];
+    let (bytes, decoded) = load_native("peak_gbdt_calibrated.agbd");
+    assert_eq!(model.to_bytes(), bytes);
+    assert_eq!(decoded, model);
+}

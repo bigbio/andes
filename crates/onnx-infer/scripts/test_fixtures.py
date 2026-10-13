@@ -24,7 +24,7 @@ from onnx import save
 ROOT = Path(__file__).resolve().parents[1]
 FIX = ROOT / "fixtures"
 sys.path.insert(0, str(ROOT / "scripts"))
-from export_agbd_to_onnx import parse_agbd, trees_to_onnx  # noqa: E402
+from export_agbd_to_onnx import parse_agbd, parse_agbd_full, trees_to_onnx  # noqa: E402
 
 
 def eval_agbd_trees(trees, x: np.ndarray) -> float:
@@ -98,7 +98,39 @@ def test_tree_fixtures():
         check_tree_fixture(agbd_name, onnx_name, rows, expected)
 
 
+def test_parser_accepts_native_blobs():
+    """Every AGBD fixture is byte-identical to `GbdtPeakModel::to_bytes`
+    (tests/agbd_native.rs), so these are natively serialized models."""
+    for name in ("tree_leq.agbd", "peak_gbdt.agbd"):
+        _, _, trees, iso_x, iso_y = parse_agbd_full((FIX / name).read_bytes())
+        assert trees and iso_x == [] and iso_y == [], name
+    nfeat, _, trees, iso_x, iso_y = parse_agbd_full((FIX / "peak_gbdt_calibrated.agbd").read_bytes())
+    assert (nfeat, len(trees)) == (3, 3)
+    assert np.allclose(iso_x, [0.0, 0.5, 1.0]) and np.allclose(iso_y, [0.1, 0.4, 0.9])
+    assert parse_agbd((FIX / "peak_gbdt_calibrated.agbd").read_bytes())[2] == trees
+    print("OK parser accepts native uncalibrated and calibrated AGBD blobs")
+
+
+def _expect_error(blob: bytes, needle: str):
+    try:
+        parse_agbd(blob)
+    except ValueError as e:
+        assert needle in str(e), (needle, str(e))
+        return
+    raise AssertionError(f"parse_agbd accepted a malformed blob (expected {needle!r})")
+
+
+def test_parser_rejects_malformed_footer():
+    blob = (FIX / "peak_gbdt_calibrated.agbd").read_bytes()
+    _expect_error(blob + b"\0", "1 trailing bytes")
+    _expect_error(blob[:-4], "truncated AGBD blob")
+    _expect_error((FIX / "tree_leq.agbd").read_bytes()[:-4], "calibration count")
+    print("OK parser rejects trailing and truncated footers")
+
+
 def main():
+    test_parser_accepts_native_blobs()
+    test_parser_rejects_malformed_footer()
     test_tree_fixtures()
     test_intensity_mlp()
     print("all fixture tests passed")

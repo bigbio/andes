@@ -168,7 +168,9 @@ pub struct Mass {
 /// and run with, so every predictor sees the same sites: a delta printed after
 /// the first residue goes to the N-terminus (site 0) when an N-terminal Unimod
 /// entry matches it (acetyl, TMT, pyro-Glu), as in alphabase, where
-/// `Gln->pyro-Glu@Q^Any_N-term` sits at site 0. `None` when `from_andes`
+/// `Gln->pyro-Glu@Q^Any_N-term` sits at site 0. A summed N-terminal + residue
+/// delta on residue 1 (`C+99.03203`, acetyl + carbamidomethyl) is split by
+/// `from_andes` into both mods. `None` when `from_andes`
 /// rejects the string or a modification is outside [`MODS`] at its site.
 /// Masses are the Unimod monoisotopic deltas.
 pub fn parse_peptide(s: &str) -> Option<(Form, Mass)> {
@@ -676,5 +678,54 @@ mod tests {
             let (f, _) = parse_peptide(s).unwrap();
             assert_eq!(AndesMs2::peptide(&f), RtPeptide::from_andes(s).unwrap(), "{s}");
         }
+    }
+
+    /// The PIN string andes writes for a protein N-terminal Cys under fixed
+    /// carbamidomethyl-C and variable protein N-terminal acetyl.
+    fn andes_cam_acetyl_nterm_cys() -> String {
+        use model::{AminoAcidSetBuilder, ModLocation, Modification, Peptide};
+        let aa_set = AminoAcidSetBuilder::new_standard()
+            .add_fixed_mod(
+                Modification::from_mods_txt_line("57.021464,C,fix,any,Carbamidomethyl").unwrap(),
+            )
+            .add_variable_mod(
+                Modification::from_mods_txt_line("42.010565,*,opt,Prot-N-term,Acetyl").unwrap(),
+            )
+            .build()
+            .unwrap();
+        let first = aa_set
+            .variants_for(b'C', ModLocation::ProtNTerm)
+            .iter()
+            .find(|aa| {
+                aa.mod_
+                    .as_ref()
+                    .is_some_and(|m| (m.mass_delta - 99.032029).abs() < 1e-3)
+            })
+            .expect("stacked CAM + acetyl variant")
+            .clone();
+        let mut residues = vec![first];
+        for r in b"PEPTIDEK" {
+            residues.push(aa_set.standard(*r).unwrap().clone());
+        }
+        Peptide::new(residues, b'M', b'R').to_string()
+    }
+
+    #[test]
+    fn parses_summed_nterm_and_residue_delta_from_the_andes_writer() {
+        let s = andes_cam_acetyl_nterm_cys();
+        assert_eq!(s, "M.C+99.03203PEPTIDEK.R");
+        let (f, m) = parse_peptide(&s).expect("summed CAM + acetyl delta");
+        assert_eq!(f.seq, "CPEPTIDEK");
+        assert_eq!(f.mods, vec![(0, Mod::Acetyl), (1, Mod::Carbamidomethyl)]);
+        assert!((m.nterm - 42.010565).abs() < 1e-9);
+        assert!((m.res[0] - (103.009_184_5 + 57.021464)).abs() < 1e-6);
+        // fixed TMT6plex on K under variable N-terminal acetyl: K+271.17350
+        let tmt = "_.K+271.17350PEPTIDEK+229.16293.R";
+        let (f, _) = parse_peptide(tmt).unwrap();
+        assert_eq!(
+            f.mods,
+            vec![(0, Mod::Acetyl), (1, Mod::Tmt6plex), (9, Mod::Tmt6plex)]
+        );
+        assert_eq!(AndesMs2::peptide(&f), RtPeptide::from_andes(tmt).unwrap());
     }
 }

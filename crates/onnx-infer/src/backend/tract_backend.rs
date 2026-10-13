@@ -25,29 +25,23 @@ impl TractSession {
             .model_for_path(path)
             .map_err(|e| Error::Inference(format!("tract load {}: {e}", path.display())))?;
 
-        // Capture ONNX-facing names before optimization rewrites the graph. The
-        // ONNX tensor name is the outlet label tract-onnx sets on every node output
-        // and graph output; the producing node's name is a different thing (an
-        // output `score` produced by a node `Relu_3`), so it is only the fallback.
-        let tensor_name = |i: usize, outlet: &OutletId, kind: &str| {
-            let label = inferred.outlet_label(*outlet).unwrap_or("");
-            if label.is_empty() {
-                name_or_fallback(&inferred.nodes[outlet.node].name, kind, i)
-            } else {
-                label.to_string()
-            }
-        };
+        // Capture ONNX-facing names before optimization rewrites the graph.
+        // An input is a source node named after its tensor. An output is an
+        // outlet of an arbitrary node: its ONNX tensor name is the outlet
+        // label, while the node name is the producing operator's name.
         let input_names: Vec<String> = inferred
             .inputs
             .iter()
             .enumerate()
-            .map(|(i, outlet)| tensor_name(i, outlet, "input"))
+            .map(|(i, outlet)| name_or_fallback(&inferred.nodes[outlet.node].name, "input", i))
             .collect();
         let output_names: Vec<String> = inferred
             .outputs
             .iter()
             .enumerate()
-            .map(|(i, outlet)| tensor_name(i, outlet, "output"))
+            .map(|(i, outlet)| {
+                name_or_fallback(inferred.outlet_label(*outlet).unwrap_or(""), "output", i)
+            })
             .collect();
 
         let runnable = inferred

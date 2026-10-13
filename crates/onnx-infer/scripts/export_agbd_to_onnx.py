@@ -5,15 +5,6 @@ The native AGBD evaluator in `scoring::gbdt_eval` remains the in-search hot path
 This export is for interoperability with quantms-rescoring / OpenMS / ort, and
 for offline parity checks against the Rust evaluator.
 
-The ONNX graph computes the raw ensemble output (the sum of the tree leaf values),
-which is `GbdtPeakModel::predict_value`. It does not apply the sigmoid flag or the
-isotonic calibration footer that `predict_proba` / `predict_logit` apply on top of
-that sum; both are written to the manifest `extras` (`apply_sigmoid`, `iso_x`,
-`iso_y`) so a consumer that needs the calibrated probability can apply them:
-  p = sigmoid(raw) if apply_sigmoid else raw
-  s = piecewise-linear interpolation of (iso_x, iso_y) at p, clamped to the end
-      points (identity when iso_x is empty)
-
 Usage:
   python export_agbd_to_onnx.py --agbd path/to/model.agbd --out model.onnx
 
@@ -31,9 +22,6 @@ import numpy as np
 from onnx import TensorProto, checker, helper, save
 
 
-FLAG_SIGMOID = 1
-
-
 def _read_exact(c: io.BytesIO, n: int, what: str) -> bytes:
     data = c.read(n)
     if len(data) != n:
@@ -41,12 +29,25 @@ def _read_exact(c: io.BytesIO, n: int, what: str) -> bytes:
     return data
 
 
-def parse_agbd(blob: bytes):
-    """Decode an AGBD v1 blob as written by `GbdtPeakModel::to_bytes`.
+FLAG_SIGMOID = 1
 
-    Returns `(n_features, flags, trees, calibration)` where `calibration` is
-    `{"iso_x": [...], "iso_y": [...]}` from the footer that follows the trees
-    (`n_iso` u32, then `iso_x` f32 x n_iso, then `iso_y` f32 x n_iso).
+# Same bound as `scoring::gbdt_eval` applies to the calibration count.
+MAX_ISO = 10_000_000
+
+
+def parse_agbd(blob: bytes):
+    """(n_features, flags, trees) of an AGBD v1 blob; see `parse_agbd_full`."""
+    nfeat, flags, trees, _, _ = parse_agbd_full(blob)
+    return nfeat, flags, trees
+
+
+def parse_agbd_full(blob: bytes):
+    """(n_features, flags, trees, iso_x, iso_y) of an AGBD v1 blob.
+
+    The layout is the one `GbdtPeakModel::to_bytes` writes: header, trees, then
+    the calibration footer (`u32 n_iso`, `n_iso` f32 `iso_x`, `n_iso` f32
+    `iso_y`; `n_iso = 0` when uncalibrated). Anything after the footer is an
+    error.
     """
     c = io.BytesIO(blob)
     magic = _read_exact(c, 4, "magic")
@@ -74,16 +75,17 @@ def parse_agbd(blob: bytes):
                 default_left=dl,
             )
         )
-    n_iso = struct.unpack("<I", _read_exact(c, 4, "calibration point count"))[0]
+    n_iso = struct.unpack("<I", _read_exact(c, 4, "calibration count"))[0]
+    if n_iso > MAX_ISO:
+        raise ValueError(f"AGBD calibration count {n_iso} exceeds {MAX_ISO}")
     iso_x = list(struct.unpack(f"<{n_iso}f", _read_exact(c, 4 * n_iso, "calibration iso_x")))
     iso_y = list(struct.unpack(f"<{n_iso}f", _read_exact(c, 4 * n_iso, "calibration iso_y")))
     trailing = len(blob) - c.tell()
     if trailing:
         raise ValueError(
-            f"AGBD blob has {trailing} trailing bytes after {ntree} trees and "
-            f"{n_iso} calibration points"
+            f"AGBD blob has {trailing} trailing bytes after {ntree} trees and {n_iso} calibration points"
         )
-    return nfeat, flags, trees, dict(iso_x=iso_x, iso_y=iso_y)
+    return nfeat, flags, trees, iso_x, iso_y
 
 
 def trees_to_onnx(nfeat: int, trees: list, input_name: str = "features", output_name: str = "score"):
@@ -175,18 +177,14 @@ def main():
     args = ap.parse_args()
 
     blob = args.agbd.read_bytes()
-    nfeat, flags, trees, calib = parse_agbd(blob)
-    apply_sigmoid = bool(flags & FLAG_SIGMOID)
+    nfeat, flags, trees, iso_x, iso_y = parse_agbd_full(blob)
     model = trees_to_onnx(nfeat, trees)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     save(model, args.out)
-    print(f"Wrote {args.out} ({len(trees)} trees, {nfeat} features, flags={flags})")
-    if apply_sigmoid or calib["iso_x"]:
-        print(
-            f"note: the graph outputs the raw tree sum; sigmoid={apply_sigmoid} and "
-            f"{len(calib['iso_x'])} isotonic points are recorded in the manifest extras, "
-            "not applied in the graph"
-        )
+    print(
+        f"Wrote {args.out} ({len(trees)} trees, {nfeat} features, flags={flags}, "
+        f"{len(iso_x)} calibration points; the ONNX output is the raw tree sum)"
+    )
 
     man_path = args.manifest or args.out.with_suffix(".json")
     man = {
@@ -199,16 +197,19 @@ def main():
         "provenance": {
             "origin": "andes AGBD v1",
             "license": "Apache-2.0",
-            "notes": f"flags={flags}; output is the raw tree sum; prefer native AGBD in-search",
+            "notes": f"flags={flags}; output is the raw tree sum (no sigmoid or "
+            f"calibration); prefer native AGBD in-search",
         },
         "extras": {
             "n_features": nfeat,
             "n_trees": len(trees),
             "agbd_flags": flags,
-            "output": "raw_tree_sum",
-            "apply_sigmoid": apply_sigmoid,
-            "iso_x": calib["iso_x"],
-            "iso_y": calib["iso_y"],
+            "agbd_n_iso": len(iso_x),
+            # What `predict_proba` applies on top of the raw sum: sigmoid when
+            # the flag is set, then the isotonic map (identity when empty).
+            "apply_sigmoid": bool(flags & FLAG_SIGMOID),
+            "iso_x": iso_x,
+            "iso_y": iso_y,
         },
     }
     man_path.write_text(json.dumps(man, indent=2) + "\n")

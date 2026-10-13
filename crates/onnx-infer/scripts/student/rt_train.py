@@ -11,9 +11,8 @@ Rows of --holdout-datasets and the "test" split never train. Ablations:
 --exclude-phospho drops every phospho peptidoform; --exclude-tmt drops every
 TMT-labelled one. Few-shot: --init a checkpoint, --fewshot-ptm phospho|tmt and
 --fewshot-n N add N train-split peptidoforms of that PTM (all their runs) and
-fine-tune on half PTM / half general batches. Every other peptidoform of that
-PTM is dropped from train and val (as with --exclude-<ptm>), so the N picked
-ones are the only PTM rows the model sees.
+fine-tune on half PTM / half general batches; --fewshot-ptm implies the
+matching --exclude-* flag, so no other peptidoform of that PTM is trained on.
 """
 from __future__ import annotations
 
@@ -102,6 +101,37 @@ def rank_loss(s, y, rid):
     return F.softplus(-torch.sign(dy) * ds)[valid].mean()
 
 
+def select_rows(t, a, rng):
+    """(train, val, few) row sets of the RT table for the parsed arguments ``a``.
+
+    ``few`` is None unless ``a.fewshot_ptm`` is set. A few-shot PTM implies its
+    exclusion flag: every peptidoform carrying it is dropped from ``train`` and
+    ``val``, so the ``a.fewshot_n`` forms in ``few`` are the only rows of that
+    PTM the run sees (the checkpoint arguments are not restored from --init)."""
+    base = (~t.holdout) & (t.split != "test")
+    if a.exclude_phospho or a.fewshot_ptm == "phospho":
+        base &= ~t.has_phospho
+    if a.exclude_tmt or a.fewshot_ptm == "tmt":
+        base &= ~t.has_tmt
+    train = t[base & (t.split == "train")]
+    val = t[base & (t.split == "val")]
+    few = None
+    if a.fewshot_ptm:
+        col = "has_phospho" if a.fewshot_ptm == "phospho" else "has_tmt"
+        pool = t[(~t.holdout) & (t.split == "train") & t[col]]
+        pick = rng.choice(np.asarray(pool.peptidoform.unique()), a.fewshot_n, replace=False)
+        picked = pool.peptidoform.isin(set(pick))
+        runs = set(pool[picked].run_id)
+        # the picked PTM peptidoforms plus every non-PTM train row of the same runs
+        cand = t[t.run_id.isin(runs) & (~t.holdout) & (t.split == "train")]
+        few = cand[(~cand[col]) | cand.peptidoform.isin(set(pick))]
+        few = few[few.run_id.isin(set(few[few[col]].run_id))]
+        print(f"few-shot rows: {int(few[col].sum())} PTM rows of {few[col].sum() and few[few[col]].peptidoform.nunique()} "
+              f"peptidoforms in {few.run_id.nunique()} runs", flush=True)
+        print(f"few-shot {a.fewshot_ptm}: {a.fewshot_n} peptidoforms, {len(few)} rows incl. partners", flush=True)
+    return train, val, few
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--table", required=True)
@@ -137,27 +167,7 @@ def main():
     print(f"table {len(t)} rows, {len(forms)} forms ({(~ok).sum()} unsupported), {n_runs} runs, "
           f"device {dev}, load {time.time() - t0:.0f}s", flush=True)
 
-    base = (~t.holdout) & (t.split != "test")
-    if a.exclude_phospho or a.fewshot_ptm == "phospho":
-        base &= ~t.has_phospho
-    if a.exclude_tmt or a.fewshot_ptm == "tmt":
-        base &= ~t.has_tmt
-    train = t[base & (t.split == "train")]
-    val = t[base & (t.split == "val")]
-    few = None
-    if a.fewshot_ptm:
-        col = "has_phospho" if a.fewshot_ptm == "phospho" else "has_tmt"
-        pool = t[(~t.holdout) & (t.split == "train") & t[col]]
-        pick = rng.choice(np.asarray(pool.peptidoform.unique()), a.fewshot_n, replace=False)
-        picked = pool.peptidoform.isin(set(pick))
-        runs = set(pool[picked].run_id)
-        # the picked PTM peptidoforms plus every non-PTM train row of the same runs
-        cand = t[t.run_id.isin(runs) & (~t.holdout) & (t.split == "train")]
-        few = cand[(~cand[col]) | cand.peptidoform.isin(set(pick))]
-        few = few[few.run_id.isin(set(few[few[col]].run_id))]
-        print(f"few-shot rows: {int(few[col].sum())} PTM rows of {few[col].sum() and few[few[col]].peptidoform.nunique()} "
-              f"peptidoforms in {few.run_id.nunique()} runs", flush=True)
-        print(f"few-shot {a.fewshot_ptm}: {a.fewshot_n} peptidoforms, {len(few)} rows incl. partners", flush=True)
+    train, val, few = select_rows(t, a, rng)
     print(f"train rows {len(train)} val rows {len(val)}", flush=True)
 
     model = RtCnn().to(dev)

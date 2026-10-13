@@ -29,18 +29,6 @@
     "n_features": 3,
     "n_trees": 3,
     "agbd": "peak_gbdt.agbd",
-    "output": "raw_tree_sum",
-    "apply_sigmoid": true,
-    "iso_x": [
-      0.0,
-      0.5,
-      1.0
-    ],
-    "iso_y": [
-      0.05,
-      0.4,
-      0.95
-    ],
     "consumer": "quantms-rescoring"
   }
 }

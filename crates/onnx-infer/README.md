@@ -69,7 +69,7 @@ thread spinning is off, so CPU time is not burned waiting.
 |---|---|
 | [`scripts/export_agbd_to_onnx.py`](scripts/export_agbd_to_onnx.py) | andes `AGBD` v1 → ONNX `TreeEnsembleRegressor` |
 | [`scripts/export_peptdeep_to_onnx.py`](scripts/export_peptdeep_to_onnx.py) | PeptDeep `.pth` → ONNX (+ manifests), OpenMS-compatible names |
-| [`scripts/export_ms2pip_to_onnx.py`](scripts/export_ms2pip_to_onnx.py) | MS²PIP XGBoost → ONNX Gather tree traversal (tract-runnable) |
+| [`scripts/export_ms2pip_to_onnx.py`](scripts/export_ms2pip_to_onnx.py) | MS²PIP XGBoost → ONNX Gather tree traversal (tract and ort), or `--format ensemble` → `TreeEnsembleRegressor` (ort only, faster) |
 | [`scripts/export_deeplc_to_onnx.py`](scripts/export_deeplc_to_onnx.py) | DeepLC default PyTorch model → ONNX |
 | [`scripts/export_prosit_to_onnx.py`](scripts/export_prosit_to_onnx.py) | Koina Prosit SavedModels → ONNX (tf2onnx) |
 
@@ -169,9 +169,28 @@ On UPS1 (ion-trap CID) the gain is within seed noise. The PeptDeep MS2 model is 
 on HCD, and its RT fits poorly there: the median residual is 8.2 min for confident targets,
 against 0.28 min on Astral.
 
-The prediction step is expensive: tract runs MS2 at about 16 ms per peptide per thread, against
-onnxruntime's 3.1 ms. The plain Astral PIN (1.02M rows) took 31.6 min and 14,180 CPU-s on 8
-threads. The chimeric PIN (288k rows) took 11.7 min.
+The prediction step is expensive on tract: about 16 ms per peptide per thread for MS2. The
+plain Astral PIN (1.02M rows) took 31.6 min and 14,180 CPU-s on 8 threads with tract. The
+chimeric PIN (288k rows) took 11.7 min.
+
+## Measured: tract vs ONNX Runtime
+
+`examples/rescore_pin.rs` on the UPS1 PIN (382,703 rows; 180,440 peptidoforms; 194,054
+(peptidoform, charge) pairs), 4 worker threads, ONNX Runtime 1.31.0 CPU with one intra-op
+thread per session. CPU time per item is the prediction stage's process CPU divided by the
+item count. The host carried other load (load average 9–12 on 8 cores) during both arms.
+
+| Model | tract µs CPU / item | ort µs CPU / item | Speed-up | Whole run CPU-s (tract → ort) |
+|---|---|---|---|---|
+| AlphaPeptDeep MS2 | 15,239 | 3,148 | 4.8× | 3,295 → 707 (incl. RT) |
+| AlphaPeptDeep RT | 1,810 | 478 | 3.8× | |
+| DeepLC RT | 16,691 | 3,900 | 4.3× | 3,019 → 711 |
+| MS²PIP CID (traversal graph) | 3,694 | 502 | 7.4× | 731 → 112 |
+| MS²PIP CID (`--format ensemble`) | — (tract cannot load it) | 127 | 29× vs tract traversal | 39 |
+
+Per-row features from the two engines agree to the 6 decimals the TSV is written with (max
+|Δ| ≤ 1.2e-5 over every feature column, no missing-value differences), and both engines
+match the reference Python packages to the same tolerance (`model_parity`).
 
 ## Roadmap
 

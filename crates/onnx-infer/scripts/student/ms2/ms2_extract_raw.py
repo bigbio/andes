@@ -16,9 +16,13 @@ For each run of the task (``ms2_select.py`` ``tasks.tsv``):
 
 Spectra that are not HCD/CID, fail the precursor check or match fewer than
 --min-matched plain b/y ions are dropped and counted. The task writes
-``<out-dir>/<dataset>/part-<task>.parquet`` (schema ``ms2_common.SHARD_COLUMNS``)
-and ``part-<task>.json`` with the counts; an existing part is skipped unless
---overwrite, so a re-submitted array resumes.
+``<out-dir>/<dataset>/part-<task>.json`` with the counts and, when every run of
+the task succeeded, ``part-<task>.parquet`` (schema ``ms2_common.SHARD_COLUMNS``;
+not written when no spectrum was kept). The JSON's ``complete`` field marks the
+task done: a complete task is skipped unless --overwrite, so a re-submitted
+array resumes. When any run fails (missing file, conversion error, unreadable
+mzML), no parquet is written, a stale one is removed, ``complete`` is false and
+the script exits with status 1; the next submission redoes the whole task.
 
 Usage::
 
@@ -129,6 +133,15 @@ def process_run(mzml: str, psms, dataset: str, run: str, a, stats) -> list[dict]
     return out
 
 
+def task_complete(summary: str) -> bool:
+    """Whether ``part-<task>.json`` records a task whose runs all succeeded."""
+    try:
+        with open(summary) as fh:
+            return json.load(fh).get("complete") is True
+    except (OSError, ValueError):
+        return False
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--tasks", required=True)
@@ -154,8 +167,9 @@ def main():
     out_dir = os.path.join(a.out_dir, ds)
     os.makedirs(out_dir, exist_ok=True)
     part = os.path.join(out_dir, f"part-{a.task_index:05d}.parquet")
-    if os.path.exists(part) and not a.overwrite:
-        print(f"{part} exists; skipping")
+    summary = part[:-8] + ".json"
+    if task_complete(summary) and not a.overwrite:
+        print(f"{summary} marks the task complete; skipping")
         return
     runs = task["runs"].split("|")
     sel = pq.read_table(task["selected"], filters=[("run", "in", runs)]).to_pandas()
@@ -191,15 +205,26 @@ def main():
             print(f"kept the converted mzML files in {work}", flush=True)
         else:
             shutil.rmtree(work, ignore_errors=True)
-    if rows:
-        pq.write_table(shard_table(rows), part + ".tmp", compression="zstd")
-        os.replace(part + ".tmp", part)
     tot = {k: sum(s.get(k, 0) for s in log) for k in
            ("selected", "found", "activation_skipped", "precursor_mismatch", "too_few_ions", "kept")}
     tot["runs"], tot["runs_failed"] = len(log), sum("error" in s for s in log)
+    complete = tot["runs_failed"] == 0
+    if complete and rows:
+        pq.write_table(shard_table(rows), part + ".tmp", compression="zstd")
+        os.replace(part + ".tmp", part)
+    elif os.path.exists(part):
+        # Either a failed task (its part would be missing the failed runs) or a
+        # complete task that kept nothing: no part may outlive the summary.
+        os.remove(part)
     tot["seconds"] = round(time.time() - t0, 1)
-    json.dump({"task": a.task_index, "dataset": ds, "total": tot, "runs": log}, open(part[:-8] + ".json", "w"), indent=1)
+    with open(summary + ".tmp", "w") as fh:
+        json.dump({"task": a.task_index, "dataset": ds, "complete": complete, "total": tot, "runs": log},
+                  fh, indent=1)
+    os.replace(summary + ".tmp", summary)
     print(f"task {a.task_index} {ds}: {json.dumps(tot)}", flush=True)
+    if not complete:
+        sys.exit(f"task {a.task_index} {ds}: {tot['runs_failed']} of {tot['runs']} runs failed; "
+                 "no part written, resubmit to retry")
 
 
 if __name__ == "__main__":

@@ -10,7 +10,8 @@
 # SCRATCH_DIR         node-local scratch for the converted mzML (deleted per run)
 # TRFP_COMMAND_PREFIX how to run ThermoRawFileParser, e.g.
 #                     "singularity exec --bind DATA_ROOT IMAGE.sif ThermoRawFileParser.sh"
-# A finished task is skipped on resubmission, so the same array can be re-sent after failures.
+# A task whose runs all succeeded is skipped on resubmission; a task with a failed run writes
+# no part and exits 1, so re-sending the same array retries it.
 set -euo pipefail
 PY=$1; TASKS=$2; OUT=$3; SCRATCH=$4; TRFP=$5; shift 5
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

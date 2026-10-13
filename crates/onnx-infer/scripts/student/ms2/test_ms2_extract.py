@@ -87,3 +87,42 @@ def test_keep_mzml_preserves_the_converted_file(tmp_path):
         subprocess.run(["rm", "-rf", d], check=True)
     run_script("ms2_extract_raw.py", *common)
     assert glob.glob(str(work / "**" / "*.mzML"), recursive=True) == []
+
+
+def test_failed_run_does_not_complete_the_task(tmp_path):
+    seq, z = "PEPTIDEK", 2
+    mz, inten = perfect_spectrum(seq, [], z)
+    pmz = precursor_mz(seq, [], z)
+    mzml_dir = tmp_path / "mzml"
+    mzml_dir.mkdir()
+    write_mzml(mzml_dir / "run_a.mzML",
+               [(1, f"FTMS + p NSI d Full ms2 {pmz:.2f}@hcd27.00 [100.00-2000.00]", pmz, z, mz, inten)])
+    selected = tmp_path / "selected.parquet"
+    pq.write_table(pa.table({"run": ["run_a", "run_b"], "scan": [1, 1], "peptidoform": [seq, seq],
+                             "charge": [z, z], "pep": [0.001, 0.001]}), selected)
+    tasks = tmp_path / "tasks.tsv"
+    tasks.write_text(f"task\tdataset\truns\tselected\traw_dir\n1\tPXD000000\trun_a|run_b\t{selected}\t{tmp_path}\n")
+    shards = tmp_path / "shards"
+    cmd = [sys.executable, os.path.join(HERE, "ms2_extract_raw.py"), "--tasks", str(tasks), "--task-index", "1",
+           "--out-dir", str(shards), "--work-dir", str(tmp_path / "work"), "--mzml-dir", str(mzml_dir)]
+    part = shards / "PXD000000" / "part-00001.parquet"
+    summary = shards / "PXD000000" / "part-00001.json"
+
+    # run_b has no mzML: the task fails, writes no part and is not complete.
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert not part.exists()
+    st = json.load(open(summary))
+    assert st["complete"] is False and st["total"]["runs_failed"] == 1, st
+
+    # The resubmission is not skipped; once run_b is readable the task completes.
+    write_mzml(mzml_dir / "run_b.mzML",
+               [(1, f"FTMS + p NSI d Full ms2 {pmz:.2f}@hcd27.00 [100.00-2000.00]", pmz, z, mz, inten)])
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert json.load(open(summary))["complete"] is True
+    assert pq.read_table(part).column("run").to_pylist() == ["run_a", "run_b"]
+
+    # A complete task is skipped.
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    assert r.returncode == 0 and "skipping" in r.stdout, r.stdout + r.stderr

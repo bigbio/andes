@@ -557,3 +557,103 @@ fn fragment_tol_flags_are_mutually_exclusive() {
         "expected conflict error in stderr, got: {err}"
     );
 }
+
+/// Peptide whose 3+ ETD spectrum the c/z regression below searches.
+const ETD_PEPTIDE: &str = "FPEVQGELISLLEK";
+
+fn residue_mass(aa: u8) -> f64 {
+    match aa {
+        b'G' => 57.021464,
+        b'S' => 87.032028,
+        b'P' => 97.052764,
+        b'V' => 99.068414,
+        b'L' | b'I' => 113.084064,
+        b'K' => 128.094963,
+        b'Q' => 128.058578,
+        b'E' => 129.042593,
+        b'F' => 147.068414,
+        _ => panic!("residue {} not in the table", aa as char),
+    }
+}
+
+/// A 3+ ETD spectrum of `ETD_PEPTIDE` holding only its singly charged c and z•
+/// ions (13 + 13 peaks) and no b/y ion.
+fn etd_cz_only_mgf() -> String {
+    const PROTON: f64 = 1.007276;
+    const H2O: f64 = 18.010565;
+    const NH3: f64 = 17.026549;
+    const H: f64 = 1.007825;
+    let res: Vec<f64> = ETD_PEPTIDE.bytes().map(residue_mass).collect();
+    let neutral: f64 = res.iter().sum::<f64>() + H2O;
+    let mut peaks: Vec<f64> = Vec::new();
+    for i in 1..res.len() {
+        let prefix: f64 = res[..i].iter().sum();
+        let suffix: f64 = res[i..].iter().sum();
+        peaks.push(prefix + NH3 + PROTON); // c
+        peaks.push(suffix + H2O - NH3 + H + PROTON); // z•
+    }
+    peaks.sort_by(f64::total_cmp);
+    let mut mgf = format!(
+        "BEGIN IONS\nTITLE=etd_cz_only\nSCANS=1\nPEPMASS={:.6}\nCHARGE=3+\n",
+        (neutral + 3.0 * PROTON) / 3.0
+    );
+    for mz in peaks {
+        mgf.push_str(&format!("{mz:.5} 1000.0\n"));
+    }
+    mgf.push_str("END IONS\n");
+    mgf
+}
+
+/// The PIN `Peptide` of the first (rank-1) row, if any.
+fn rank1_peptide(pin: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(pin).expect("read PIN");
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next()?.split('\t').collect();
+    let col = header.iter().position(|c| *c == "Peptide")?;
+    let label = header.iter().position(|c| *c == "Label")?;
+    lines
+        .next()
+        .map(|row| row.split('\t').collect::<Vec<_>>())
+        .map(|f| format!("{}:{}", f[label], f[col]))
+}
+
+/// Low-resolution ETD under the default candidate index: the fragment-ion index
+/// holds only b/y ions, so a spectrum explained by c/z ions alone must not be
+/// retrieved through it. The ETD search keeps enumeration and returns the
+/// target at rank 1.
+#[test]
+fn lowres_etd_cz_only_spectrum_is_identified_under_the_default_index() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mgf = dir.path().join("etd.mgf");
+    let fasta = dir.path().join("etd.fasta");
+    std::fs::write(&mgf, etd_cz_only_mgf()).unwrap();
+    // The peptide is the whole protein, so its reversed decoy has no tryptic
+    // peptide of the same mass and the target is the only candidate.
+    std::fs::write(&fasta, format!(">sp|ETD1|ETD1_TEST\n{ETD_PEPTIDE}\n")).unwrap();
+    for extra in [&[][..], &["--fragment-index", "off"][..]] {
+        let pin = dir.path().join(format!("etd{}.pin", extra.len()));
+        let out = Command::new(env!("CARGO_BIN_EXE_andes"))
+            .arg("--spectrum")
+            .arg(&mgf)
+            .arg("--database")
+            .arg(&fasta)
+            .arg("--output-pin")
+            .arg(&pin)
+            .args(["--fragmentation", "ETD", "--protocol", "phospho"])
+            .args(extra)
+            .output()
+            .expect("run andes");
+        assert!(
+            out.status.success(),
+            "andes {extra:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let top = rank1_peptide(&pin);
+        assert!(
+            top.as_deref()
+                .is_some_and(|p| p.starts_with("1:") && p.contains(ETD_PEPTIDE)),
+            "{extra:?}: expected target {ETD_PEPTIDE} at rank 1, got {top:?}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}

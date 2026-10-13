@@ -92,7 +92,9 @@ noise swamp the count (TMT 12,281 -> 4,368 PSMs at 1%). Capped, the index matche
 enumeration (TMT 12,347 vs 12,281 PSMs at 1%, UPS1 15,848 vs 15,838) at the same CPU and wall time
 in less than half the memory (TMT 1.7 vs 5.9 GB). Every search uses the out-of-core index: `--glyco`
 looks its candidates up by backbone mass in its own sequon-only table built from it, and the
-`--refine` second pass searches an in-memory index of its anchored peptides. The engine prints
+`--refine` second pass searches an in-memory index of its anchored peptides. ETD and UVPD spectra
+score every candidate in each precursor window, because the b/y-only fragment-ion index does not
+hold their c/z and a/x ions. The engine prints
 its choice; `--fragment-index off` scores every candidate in each precursor window instead
 ([measurements](docs/benchmarks/README.md#choosing-the-retrieval-strategy)).
 

@@ -99,15 +99,30 @@ MASSES = {k: mass_of(parse_composition(c)) for k, (_, c, _) in UNIMOD.items()}
 def match_mass(delta: float, residue: str | None, nterm: bool, tol: float = 2e-3, cterm: bool = False):
     """Unimod id for a mass delta at a residue (or the N- or C-terminus), else None.
 
-    When several entries match, a site-compatible one wins; ties go to the
-    lowest id (e.g. Oxidation over other O-adding entries)."""
-    hits = [k for k, m in MASSES.items() if abs(m - delta) <= tol]
-    if not hits:
-        return None
-    ok = [k for k in hits
-          if (nterm and "^" in UNIMOD[k][2]) or (cterm and "$" in UNIMOD[k][2])
-          or (residue and residue in UNIMOD[k][2])]
-    return min(ok) if ok else None
+    Among site-compatible entries within ``tol``, the smallest mass error wins
+    and the lowest id breaks exact ties (e.g. Oxidation over other O-adding
+    entries). TMTpro and iTRAQ8plex are 1.8 mDa apart, so the error, not the
+    id, has to separate them. Mirrors ``rt_native::mods::match_mass``."""
+    ok = [k for k, m in MASSES.items()
+          if abs(m - delta) <= tol
+          and ((nterm and "^" in UNIMOD[k][2]) or (cterm and "$" in UNIMOD[k][2])
+               or (residue and residue in UNIMOD[k][2]))]
+    return min(ok, key=lambda k: (abs(MASSES[k] - delta), k)) if ok else None
+
+
+def split_nterm_residue(delta: float, residue: str, tol: float = 2e-3):
+    """(n-term id, residue id) whose masses sum to a delta printed on residue 1.
+
+    andes prints stacked N-terminal + residue mods as one delta. The pair
+    closest in mass wins; exact ties go to the lowest N-terminal id, then the
+    lowest residue id. Mirrors ``rt_native::mods::split_nterm_residue``."""
+    best = None
+    for n in sorted(k for k in UNIMOD if "^" in UNIMOD[k][2]):
+        for r in sorted(k for k in UNIMOD if residue in UNIMOD[k][2]):
+            err = abs(MASSES[n] + MASSES[r] - delta)
+            if err <= tol and (best is None or err < best[0]):
+                best = (err, n, r)
+    return None if best is None else (best[1], best[2])
 
 
 if __name__ == "__main__":
@@ -120,4 +135,6 @@ if __name__ == "__main__":
     assert match_mass(229.1629, "K", False) == 737 and match_mass(229.1629, "P", True) == 737
     assert match_mass(42.01057, "M", True) == 1
     assert match_mass(-0.98402, None, False, cterm=True) == 2 and match_mass(-0.98402, None, False) is None
+    assert match_mass(304.20715, "K", False) == 2016 and match_mass(304.20715, None, True) == 2016
+    assert match_mass(304.20536, "K", False) == 730
     print("composition table ok:", len(UNIMOD), "entries")

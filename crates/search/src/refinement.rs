@@ -2348,10 +2348,10 @@ mod tests {
     }
 
     /// Retrieval must cover every exact precursor match. The K-oxidised
-    /// `CEMEMSDDDGWSSFCEGNVNCGMDCK` (no Cam-C) observed at its mass + 2 isotopes
-    /// + 0.02 Da matches at isotope +2 within 20 ppm, but its nominal residue
-    /// mass (2887) lies one below the nominal window derived from the observed
-    /// mass (2888..=2891).
+    /// `CEMEMSDDDGWSSFCEGNVNCGMDCK` (no Cam-C) observed 2 isotopes and 0.02 Da
+    /// above its mass matches at isotope +2 within 20 ppm, but its nominal
+    /// residue mass (2887) lies one below the nominal window derived from the
+    /// observed mass (2888..=2891).
     #[test]
     fn refinement_retrieves_exact_precursor_matches_outside_the_nominal_window() {
         let anchor: &[u8] = b"CEMEMSDDDGWSSFCEGNVNCGMDCK";

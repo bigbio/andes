@@ -3136,7 +3136,7 @@ fn build_target_bare_seqs_where(
             let span = seq.get(start..start + rec.length as usize)?;
             expand_base_record(db, params, &rec)
                 .iter()
-                .any(|c| keep(c))
+                .any(keep)
                 .then_some(span)
         })
         .collect();

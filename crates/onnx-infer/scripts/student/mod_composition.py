@@ -109,6 +109,21 @@ def match_mass(delta: float, residue: str | None, nterm: bool, tol: float = 2e-3
     return min(ok, key=lambda k: (abs(MASSES[k] - delta), k)) if ok else None
 
 
+def split_nterm_residue(delta: float, residue: str, tol: float = 2e-3):
+    """(n-term id, residue id) whose masses sum to a delta printed on residue 1.
+
+    andes prints stacked N-terminal + residue mods as one delta. The pair
+    closest in mass wins; exact ties go to the lowest N-terminal id, then the
+    lowest residue id. Mirrors ``rt_native::mods::split_nterm_residue``."""
+    best = None
+    for n in sorted(k for k in UNIMOD if "^" in UNIMOD[k][2]):
+        for r in sorted(k for k in UNIMOD if residue in UNIMOD[k][2]):
+            err = abs(MASSES[n] + MASSES[r] - delta)
+            if err <= tol and (best is None or err < best[0]):
+                best = (err, n, r)
+    return None if best is None else (best[1], best[2])
+
+
 if __name__ == "__main__":
     ref = {1: 42.010565, 4: 57.021464, 7: 0.984016, 21: 79.966331, 27: -18.010565, 28: -17.026549,
            35: 15.994915, 121: 114.042927, 214: 144.102063, 354: 44.985078, 730: 304.205360,

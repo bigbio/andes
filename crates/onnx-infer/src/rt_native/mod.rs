@@ -112,8 +112,12 @@ impl RtPeptide {
     ///
     /// Mass deltas follow their residue; N-terminal deltas follow the first
     /// residue, and the first one that is N-term-capable goes to the N-terminus
-    /// (`K+42.01` reads as N-terminal acetyl, the common case). `None` when a
-    /// delta matches no Unimod entry within 2 mDa.
+    /// (`K+42.01` reads as N-terminal acetyl, the common case). andes writes an
+    /// N-terminal and a residue mod on residue 1 as one summed delta
+    /// (`_.C+99.03203PEPTIDEK.R` is acetyl + carbamidomethyl-C); a delta there
+    /// that matches no single entry is split into the N-terminal + residue
+    /// pair closest in mass. `None` when a delta matches no Unimod entry (or,
+    /// on residue 1, no pair) within 2 mDa.
     pub fn from_andes(s: &str) -> Option<Self> {
         let b = s.as_bytes();
         let core = if b.len() > 4 && b[1] == b'.' && b[b.len() - 2] == b'.' {
@@ -158,6 +162,12 @@ impl RtPeptide {
                     nterm_used = true;
                 }
                 (None, Some(r)) => mods.push((pos, r)),
+                (None, None) if pos == 1 && !nterm_used && mods.is_empty() => {
+                    let (nt, r) = mods::split_nterm_residue(d, aa, 2e-3)?;
+                    mods.push((0, nt));
+                    mods.push((1, r));
+                    nterm_used = true;
+                }
                 (None, None) => return None,
             }
         }

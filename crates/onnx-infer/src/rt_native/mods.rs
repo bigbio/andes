@@ -309,6 +309,24 @@ pub fn match_mass(delta: f64, residue: Option<u8>, nterm: bool, tol: f64) -> Opt
         .map(|e| e.id)
 }
 
+/// Split a delta printed on residue 1 into an N-terminal and a residue entry
+/// whose masses sum to it (andes prints stacked mods as one delta), as
+/// `(n-term id, residue id)`. The pair closest in mass wins; exact ties go to
+/// the lowest N-terminal id, then the lowest residue id.
+pub fn split_nterm_residue(delta: f64, residue: u8, tol: f64) -> Option<(u32, u32)> {
+    let nterm: Vec<(u32, f64)> = UNIMOD
+        .iter()
+        .filter(|e| e.sites.contains('^'))
+        .map(|e| (e.id, e.mono))
+        .collect();
+    let on_residue: Vec<(u32, f64)> = UNIMOD
+        .iter()
+        .filter(|e| e.sites.as_bytes().contains(&residue))
+        .map(|e| (e.id, e.mono))
+        .collect();
+    crate::andes_peptide::split_nterm_residue_delta(delta, tol, &nterm, &on_residue)
+}
+
 /// Feature vector of one entry (unscaled).
 pub fn features(e: &UnimodEntry) -> [f32; N_COMP] {
     let mut v = [0.0f32; N_COMP];

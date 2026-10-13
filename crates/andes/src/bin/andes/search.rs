@@ -83,7 +83,7 @@ pub(crate) fn retrieval_choice(
         return RetrievalChoice {
             use_index: false,
             report: None,
-            refused_because: (flag == FragmentIndexFlag::On).then(|| match excluded_because {
+            refused_because: (flag == FragmentIndexFlag::On).then_some(match excluded_because {
                 Some(reason) if out_of_core => reason,
                 _ => "the candidate index fits in RAM",
             }),

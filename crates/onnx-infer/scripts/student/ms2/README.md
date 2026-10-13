@@ -141,6 +141,12 @@ $PY $S/ms2_extract_flats.py --dataset PXD009875 --out $BASE/ms2/shards_flats/PXD
 ```
 
 - PXD009875 is also a qpx dataset. Train on the flats **or** on its raw extraction, not both.
+- Check each run's MS2 analyser before extraction. 24 of the 40 PXD009875 flats (the MudPIT and
+  `_FL_` runs, 37% of PSMs) are ion-trap MS2, with about 0.066 Da fragment errors and about 800
+  peaks per spectrum. Extract those runs with `--tol 0.5 --unit da`, not 20 ppm.
+- Drop deamidated PSMs whose precursor needs a non-zero isotope offset. In the PXD009875 flats,
+  45.5% of deamidated PSMs need the isotope −1 peak (1.5% of other PSMs): deamidation on a precursor
+  picked one isotope low is the unmodified peptide.
 - The flats have no NCE, so `--nce` stays unknown.
 
 ### 4. Teacher labels (optional, one GPU job)

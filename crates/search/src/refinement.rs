@@ -2334,7 +2334,12 @@ mod tests {
             .flat_map(|q| q.iter_psms())
             .map(|p| &out.candidates[p.primary_candidate_idx() as usize])
             .filter(|c| {
-                c.peptide.residues.iter().map(|aa| aa.residue).collect::<Vec<_>>() == b"ACDEFGK"
+                c.peptide
+                    .residues
+                    .iter()
+                    .map(|aa| aa.residue)
+                    .collect::<Vec<_>>()
+                    == b"ACDEFGK"
             })
             .collect();
         assert!(!hits.is_empty(), "the K-oxidised ACDEFGK PSM is emitted");
@@ -2377,10 +2382,21 @@ mod tests {
         let found = found.into_iter().any(|(p, c)| {
             !c.is_decoy
                 && p.isotope_offset == 2
-                && c.peptide.residues.iter().map(|aa| aa.residue).collect::<Vec<_>>() == anchor
-                && c.peptide.residues.last().is_some_and(|aa| aa.mod_.is_some())
+                && c.peptide
+                    .residues
+                    .iter()
+                    .map(|aa| aa.residue)
+                    .collect::<Vec<_>>()
+                    == anchor
+                && c.peptide
+                    .residues
+                    .last()
+                    .is_some_and(|aa| aa.mod_.is_some())
         });
-        assert!(found, "the K-oxidised target at isotope +2 is a refinement PSM");
+        assert!(
+            found,
+            "the K-oxidised target at isotope +2 is a refinement PSM"
+        );
     }
 
     // ── (g) merge_into_pass1 ───────────────────────────────────────────────

@@ -4,14 +4,10 @@
 //! residues and the same multiset of modification mass deltas, with the
 //! modifications on different sites. Site alternatives of one peptide score
 //! almost identically, so the per-spectrum rows keep one of them
-//! ([`collapse_isomers`]) and the per-spectrum competition features
-//! (DeltaRawScore, ListwiseScoreGap, CandidateRankEntropy) are taken over the
-//! same collapsed pool, so a kept row never counts its own dropped isomer as
-//! its runner-up.
+//! ([`collapse_isomers`]).
 
 use crate::candidate_gen::Candidate;
 use crate::psm::PsmMatch;
-use model::Peptide;
 
 /// A modification mass delta in units of 1e-5 Da, the precision of the PIN
 /// `Peptide` column.
@@ -62,41 +58,6 @@ impl IsomerKey {
             mod_deltas,
         }
     }
-}
-
-/// Allocation-free 64-bit hash of a peptide's residues and its multiset of
-/// modification mass deltas (quantised as in [`IsomerKey`]); positional
-/// isomers hash equal. The deltas are combined with a commutative sum of
-/// mixed values, so the hash does not depend on which residues carry them.
-/// Used on every scored candidate, where [`IsomerKey`]'s allocations would
-/// cost too much; a collision merges two unrelated peptides, with negligible
-/// probability.
-#[inline]
-pub fn isomer_class_hash(peptide: &Peptide) -> u64 {
-    use std::hash::Hasher;
-    let mut h = rustc_hash::FxHasher::default();
-    let mut mods: u64 = 0;
-    let mut n_mods: u64 = 0;
-    for aa in &peptide.residues {
-        h.write_u8(aa.residue);
-        if let Some(m) = aa.mod_.as_ref() {
-            mods = mods.wrapping_add(splitmix64(mod_delta_units(m.mass_delta) as u64));
-            n_mods += 1;
-        }
-    }
-    h.write_u64(mods);
-    h.write_u64(n_mods);
-    h.finish()
-}
-
-/// SplitMix64 finaliser: a bijective mix that spreads each delta over all 64
-/// bits before the commutative sum.
-#[inline]
-fn splitmix64(mut z: u64) -> u64 {
-    z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
 }
 
 /// The PSMs that represent each positional-isomer class of one spectrum, in
@@ -156,20 +117,6 @@ mod tests {
 
     fn pep(residues: Vec<AminoAcid>) -> Peptide {
         Peptide::new(residues, b'K', b'A')
-    }
-
-    #[test]
-    fn class_hash_ignores_mod_site_but_not_mod_mass_or_residues() {
-        let phospho = 79.96633;
-        let a = pep(vec![modded(b'S', phospho), aa(b'T'), aa(b'K')]);
-        let b = pep(vec![aa(b'S'), modded(b'T', phospho), aa(b'K')]);
-        let unmod = pep(vec![aa(b'S'), aa(b'T'), aa(b'K')]);
-        let other = pep(vec![aa(b'T'), modded(b'S', phospho), aa(b'K')]);
-        let ox = pep(vec![modded(b'S', 15.99491), aa(b'T'), aa(b'K')]);
-        assert_eq!(isomer_class_hash(&a), isomer_class_hash(&b));
-        assert_ne!(isomer_class_hash(&a), isomer_class_hash(&unmod));
-        assert_ne!(isomer_class_hash(&a), isomer_class_hash(&other));
-        assert_ne!(isomer_class_hash(&a), isomer_class_hash(&ox));
     }
 
     fn cand(peptide: Peptide, protein_index: usize, is_decoy: bool) -> Candidate {

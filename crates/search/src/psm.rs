@@ -703,32 +703,38 @@ impl TopNQueue {
     /// sole ranking signal now that the generating function is removed.
     pub fn into_rank_sorted_vec(self) -> Vec<PsmMatch> {
         let mut v: Vec<PsmMatch> = self.heap.into_iter().map(|Reverse(m)| m).collect();
-        v.sort_by(rank_output_order);
+        v.sort_by(|a, b| {
+            // `total_cmp` (a TOTAL order), NOT `partial_cmp(..).unwrap_or(Equal)`:
+            // the latter left this sort UNORDERED under release optimisation on
+            // the pinned toolchain, so the PIN winner (the first element — see
+            // output/pin.rs) became wrong AND environment-dependent (a target vs
+            // decoy tie flipped between CI runners). NaN → worst (NEG_INFINITY).
+            let ar = if a.rank_score.is_nan() {
+                f32::NEG_INFINITY
+            } else {
+                a.rank_score
+            };
+            let br = if b.rank_score.is_nan() {
+                f32::NEG_INFINITY
+            } else {
+                b.rank_score
+            };
+            br.total_cmp(&ar).then_with(|| {
+                let asc = if a.score.is_nan() {
+                    f32::NEG_INFINITY
+                } else {
+                    a.score
+                };
+                let bsc = if b.score.is_nan() {
+                    f32::NEG_INFINITY
+                } else {
+                    b.score
+                };
+                bsc.total_cmp(&asc)
+            })
+        });
         v
     }
-
-    /// The retained PSMs, borrowed, in the order
-    /// [`Self::into_rank_sorted_vec`] would return them.
-    pub fn rank_sorted_refs(&self) -> Vec<&PsmMatch> {
-        let mut v: Vec<&PsmMatch> = self.heap.iter().map(|Reverse(m)| m).collect();
-        v.sort_by(|a, b| rank_output_order(a, b));
-        v
-    }
-}
-
-/// The canonical output order: `rank_score` descending, then `score`
-/// descending, NaN worst.
-///
-/// `total_cmp` (a TOTAL order), NOT `partial_cmp(..).unwrap_or(Equal)`: the
-/// latter left this sort UNORDERED under release optimisation on the pinned
-/// toolchain, so the PIN winner (the first element — see output/pin.rs) became
-/// wrong AND environment-dependent (a target vs decoy tie flipped between CI
-/// runners). NaN → worst (NEG_INFINITY).
-fn rank_output_order(a: &PsmMatch, b: &PsmMatch) -> std::cmp::Ordering {
-    let nan_worst = |v: f32| if v.is_nan() { f32::NEG_INFINITY } else { v };
-    nan_worst(b.rank_score)
-        .total_cmp(&nan_worst(a.rank_score))
-        .then_with(|| nan_worst(b.score).total_cmp(&nan_worst(a.score)))
 }
 
 #[cfg(test)]
@@ -776,32 +782,6 @@ mod tests {
         q.update_in_place(|m| m.features.strong_score += 1.0);
         assert_eq!(order(&q), before);
         assert!(q.iter_psms().all(|m| m.features.strong_score == 1.0));
-    }
-
-    #[test]
-    fn rank_sorted_refs_match_the_rank_sorted_vec() {
-        let mut q = TopNQueue::new(32);
-        for i in 0..20usize {
-            let mut m = make_match(i, (i % 4) as f32);
-            m.rank_score = (i % 3) as f32;
-            if i == 7 {
-                m.rank_score = f32::NAN;
-            }
-            m.candidate_idxs = vec![i as u32];
-            q.force_push(m);
-        }
-        let refs: Vec<u32> = q
-            .rank_sorted_refs()
-            .iter()
-            .map(|m| m.candidate_idxs[0])
-            .collect();
-        let owned: Vec<u32> = q
-            .clone()
-            .into_rank_sorted_vec()
-            .iter()
-            .map(|m| m.candidate_idxs[0])
-            .collect();
-        assert_eq!(refs, owned);
     }
 
     fn make_match_with_rank(spectrum_idx: usize, score: f32, rank_score: f32) -> PsmMatch {

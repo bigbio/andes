@@ -9,10 +9,10 @@ use crate::precursor_cal::adjusted_observed_neutral_mass;
 use crate::psm::{PsmFeatures, PsmMatch, TopNQueue};
 use crate::search_params::SearchParams;
 use model::aa_set::AminoAcidSet;
-use rustc_hash::FxHashMap;
 use model::mass::{nominal_from, H2O, ISOTOPE, PROTON};
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;
+use rustc_hash::FxHashMap;
 use scoring_crate::scoring::{
     predict_by_ions, psm_edge_score, score_psm, RankScorer, ScoredSpectrum,
 };

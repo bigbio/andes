@@ -119,7 +119,9 @@ pub(crate) fn emitted_rows<'a>(
     } else {
         collapse_isomers(spec.precursor_mz, psms_sorted, candidates)
             .into_iter()
-            .map(|(i, collapsed)| with_collapsed_proteins(&psms_sorted[i], &collapsed, psms_sorted, candidates))
+            .map(|(i, collapsed)| {
+                with_collapsed_proteins(&psms_sorted[i], &collapsed, psms_sorted, candidates)
+            })
             .collect()
     };
     let ranks: Vec<u32> = iter_ranked_by_rank_score(kept.iter().map(|p| &**p))

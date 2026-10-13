@@ -211,7 +211,14 @@ mod tests {
             cand(s2(), 2, false), // isomer of 0 in another protein
             cand(pep(vec![aa(b'S'), aa(b'T'), aa(b'K')]), 0, false),
         ];
-        let psms = vec![psm(0, 2), psm(1, 2), psm(2, 2), psm(3, 2), psm(4, 2), psm(1, 3)];
+        let psms = vec![
+            psm(0, 2),
+            psm(1, 2),
+            psm(2, 2),
+            psm(3, 2),
+            psm(4, 2),
+            psm(1, 3),
+        ];
         let kept = collapse_isomers(500.0, &psms, &cands);
         assert_eq!(
             kept,

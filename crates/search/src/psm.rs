@@ -790,7 +790,11 @@ mod tests {
             m.candidate_idxs = vec![i as u32];
             q.force_push(m);
         }
-        let refs: Vec<u32> = q.rank_sorted_refs().iter().map(|m| m.candidate_idxs[0]).collect();
+        let refs: Vec<u32> = q
+            .rank_sorted_refs()
+            .iter()
+            .map(|m| m.candidate_idxs[0])
+            .collect();
         let owned: Vec<u32> = q
             .clone()
             .into_rank_sorted_vec()

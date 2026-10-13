@@ -156,8 +156,8 @@ def strata(data, idx, sa):
     res["length"] = {f"{lo}-{hi}": med((L >= lo) & (L <= hi)) for lo, hi in ((6, 10), (11, 15), (16, 20), (21, 50))}
     forms = np.asarray(data.forms, dtype=object)[data.form_id[idx]]
     res["ptm"] = {
-        "phospho": med(np.array(["UNIMOD:21]" in f for f in forms))),
-        "oxidation": med(np.array(["UNIMOD:35]" in f for f in forms))),
+        "phospho": med(np.array(["UNIMOD:21]" in f for f in forms])),
+        "oxidation": med(np.array(["UNIMOD:35]" in f for f in forms])),
         "tmt": med(np.array([("UNIMOD:737]" in f or "UNIMOD:2016]" in f) for f in forms])),
     }
     return res
@@ -233,6 +233,10 @@ def main():
         json.dump({**meta, "best_val_median_sa": val_sa, "best_step": step, "history": hist},
                   open(os.path.join(a.out, "train.json"), "w"), indent=1)
 
+    _, sa0 = sa_rows(model, data, val_idx, dev)
+    hist.append({"step": 0, "train_loss": None, "val_median_sa_base": round(float(np.median(sa0)), 5),
+                 "seconds": round(time.time() - t0, 1)})
+    print(f"step 0 val median SA (b/y 1-2+) {np.median(sa0):.4f}", flush=True)
     for step in range(1, a.steps + 1):
         idx = rng.choice(train, a.batch, replace=True, p=weights)
         x, tgt, tch = data.batch(idx, dev)

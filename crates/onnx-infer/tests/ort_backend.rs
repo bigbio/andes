@@ -143,3 +143,19 @@ fn matches_tract() {
         }
     }
 }
+
+/// A graph without nodes whose input `x` is also its output: the output
+/// ONNX Runtime returns aliases the input buffer.
+#[test]
+fn output_aliasing_an_input() {
+    let mut s = OnnxSession::from_onnx(fixture("identity.onnx"), BackendKind::Ort).expect("load");
+    let y = s
+        .run_one(NamedTensor::new("x", vec![1], vec![17.0]).unwrap())
+        .unwrap();
+    assert_eq!((y.shape, y.data), (vec![1], vec![17.0]));
+    let x: Vec<f32> = (0..4096).map(|v| v as f32).collect();
+    let y = s
+        .run_one(NamedTensor::new("x", vec![4096], x.clone()).unwrap())
+        .unwrap();
+    assert_eq!(y.data, x);
+}

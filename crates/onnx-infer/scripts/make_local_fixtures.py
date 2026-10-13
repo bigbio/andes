@@ -5,6 +5,7 @@ Produces under fixtures/:
   - tree_leq.agbd / tree_leq.onnx     (1-feature LEAF split; already may exist)
   - peak_gbdt.agbd / peak_gbdt.onnx   (3-feature multi-tree, andes peak-like)
   - intensity_mlp.onnx                (tiny MatMul+ReLU; tract-runnable)
+  - identity.onnx                     (no nodes; input x is also the output)
 
 Usage:
   python scripts/make_local_fixtures.py
@@ -145,10 +146,27 @@ def make_intensity_mlp():
     print("wrote", out, "smoke", y.reshape(-1))
 
 
+def make_identity():
+    """A graph without nodes whose input `x` is also its output."""
+    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, ["n"])
+    graph = helper.make_graph([], "identity", [x], [x])
+    model = helper.make_model(
+        graph,
+        producer_name="onnx-infer/make_local_fixtures",
+        opset_imports=[helper.make_opsetid("", 17)],
+        ir_version=8,
+    )
+    checker.check_model(model)
+    out = FIX / "identity.onnx"
+    save(model, out)
+    print("wrote", out)
+
+
 def main():
     FIX.mkdir(exist_ok=True)
     make_peak_gbdt()
     make_intensity_mlp()
+    make_identity()
 
 
 if __name__ == "__main__":

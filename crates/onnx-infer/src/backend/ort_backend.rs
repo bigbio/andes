@@ -308,8 +308,11 @@ impl InferenceBackend for OrtSession {
                     .map(|p| unsafe { DynValue::from_ptr(p, Some(Arc::clone(&m.inner))) })
             })
             .collect();
-        drop(values);
-        m.output_names
+        // An output may alias an input buffer (a graph that returns an input
+        // as an output), so `values` stays alive until every output is copied
+        // and dropped.
+        let result = m
+            .output_names
             .iter()
             .zip(outputs)
             .map(|(name, v)| {
@@ -318,6 +321,8 @@ impl InferenceBackend for OrtSession {
                 })?;
                 to_named(name, &v)
             })
-            .collect()
+            .collect();
+        drop(values);
+        result
     }
 }

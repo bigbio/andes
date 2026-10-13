@@ -11,7 +11,8 @@ For each run of the task (``ms2_select.py`` ``tasks.tsv``):
 4. check the precursor m/z against the peptidoform (isotope offsets -1..3 within
    --prec-tol-ppm), annotate the ``ms2_common.ION_TYPES`` channels at the
    analyser's tolerance and normalise;
-5. delete the mzML (unless --keep-mzml).
+5. delete the mzML. With --keep-mzml the task's scratch directory under
+   --work-dir, with the converted mzML files, is kept and its path printed.
 
 Spectra that are not HCD/CID, fail the precursor check or match fewer than
 --min-matched plain b/y ions are dropped and counted. The task writes
@@ -186,7 +187,10 @@ def main():
             log.append(st)
             print(json.dumps(st), flush=True)
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        if a.keep_mzml and not a.mzml_dir:
+            print(f"kept the converted mzML files in {work}", flush=True)
+        else:
+            shutil.rmtree(work, ignore_errors=True)
     if rows:
         pq.write_table(shard_table(rows), part + ".tmp", compression="zstd")
         os.replace(part + ".tmp", part)

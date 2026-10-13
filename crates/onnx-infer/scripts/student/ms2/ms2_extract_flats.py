@@ -4,8 +4,9 @@
 Flat schema: ``seq, charge, prec_mz, res_mod_pos (1-based), res_mod_delta,
 nterm_delta, cterm_delta, mz[], intensity[]``. Mass deltas are mapped to the
 built-in Unimod table (``mod_composition.match_mass``; an N-terminal delta to an
-N-term-capable entry). Flats may omit fixed carbamidomethylation: when the
-precursor m/z only fits with +57.0215 on every C, it is added.
+N-term-capable entry, a C-terminal delta to a C-term-capable one). Flats may
+omit fixed carbamidomethylation: when the precursor m/z only fits with +57.0215
+on every C, it is added.
 
 The flats carry no run, scan, NCE or activation, so those come from arguments
 (--activation, --instrument, --nce; NCE NaN = unknown). Rows whose precursor
@@ -56,7 +57,7 @@ def parse_flat(seq, pos, delta, nterm, cterm):
             return None
         mods.append((0, uid))
     if cterm and abs(cterm) > 1e-6:
-        uid = match_mass(float(cterm), None, False)
+        uid = match_mass(float(cterm), None, False, cterm=True)
         if uid is None:
             return None
         mods.append((len(seq) + 1, uid))

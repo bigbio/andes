@@ -1445,10 +1445,40 @@ pub fn run_pass2_coisolation(
     let found = mmap_secondaries(prepared, spectra, &scans, params);
 
     // (C) Emit. Winners are interned into the accumulator (scan order) and
-    // their indices rewritten to the global ones.
+    // their indices rewritten to the global ones. A winner whose peptidoform,
+    // charge and target/decoy label the scan already emits (a retained Pass-1
+    // candidate, typically at another isotope offset, or an earlier secondary)
+    // is dropped: its distinct ExpMass would put it in its own competition
+    // group and count the identification twice.
     let mut accum = prepared.mmap_accum.lock().unwrap();
     for (spec_idx, (q, secondaries)) in queues.iter_mut().zip(found).enumerate() {
+        if secondaries.is_empty() {
+            continue;
+        }
+        let mut emitted: std::collections::BTreeSet<(PepDedupKey, u8, bool)> = q
+            .iter_psms()
+            .filter_map(|p| {
+                let i = p.primary_candidate_idx() as usize;
+                let c = accum
+                    .candidates
+                    .get(i)
+                    .or_else(|| prepared.candidates.get(i))?;
+                Some((
+                    PepDedupKey::from_peptide(&c.peptide),
+                    p.charge_used,
+                    c.is_decoy,
+                ))
+            })
+            .collect();
         for (mut psm, cand) in secondaries {
+            let key = (
+                PepDedupKey::from_peptide(&cand.peptide),
+                psm.charge_used,
+                cand.is_decoy,
+            );
+            if !emitted.insert(key) {
+                continue;
+            }
             psm.candidate_idxs = vec![accum.intern(cand)];
             // `spec_idx` is chunk-local (indexes `spectra` + `link`); the emitted
             // spectrum_idx must be global to align with `all_spectra`.

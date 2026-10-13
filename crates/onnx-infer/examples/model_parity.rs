@@ -116,7 +116,7 @@ fn ms2pip_parity(a: &Args) {
 }
 
 fn peptdeep_parity(a: &Args) {
-    use models::{Form, Mod, PeptDeep, Predictor};
+    use models::{PeptDeep, Predictor, parse_peptide};
     let pred = PeptDeep::new(&a.models, 30.0, "Lumos");
     let mut s = pred.sessions();
     let text = fs::read_to_string(&a.reference).expect("reference TSV");
@@ -128,21 +128,22 @@ fn peptdeep_parity(a: &Args) {
     for l in lines {
         let x: Vec<&str> = l.split('\t').collect();
         let seq = x[col("sequence")];
+        // The andes spelling must parse to peptdeep's own mod names and sites.
+        let andes = x[col("andes")];
+        let (form, _) = parse_peptide(andes).unwrap_or_else(|| panic!("parse {andes}"));
+        let got: Vec<(String, String)> = form
+            .mods
+            .iter()
+            .map(|(site, m)| (m.alphabase(*site, form.residue(*site)), site.to_string()))
+            .collect();
         let names = x[col("mods")].split(';').filter(|s| !s.is_empty());
         let sites = x[col("mod_sites")].split(';').filter(|s| !s.is_empty());
-        let mods: Vec<(usize, Mod)> = names
-            .zip(sites)
-            .map(|(n, s)| {
-                let m = match n {
-                    "Carbamidomethyl@C" => Mod::Carbamidomethyl,
-                    "Oxidation@M" => Mod::Oxidation,
-                    "Acetyl@Protein_N-term" => Mod::Acetyl,
-                    other => panic!("mod {other} not in the parity panel"),
-                };
-                (s.parse().unwrap(), m)
-            })
-            .collect();
-        let form = Form { seq: seq.to_string(), mods };
+        let mut want: Vec<(String, String)> = names.zip(sites).map(|(n, s)| (n.into(), s.into())).collect();
+        let mut got_sorted = got.clone();
+        got_sorted.sort();
+        want.sort();
+        assert_eq!(form.seq, seq, "{andes}");
+        assert_eq!(got_sorted, want, "{andes}: parsed mods differ from peptdeep's");
         let z: u8 = x[col("charge")].parse().unwrap();
         rt.add(pred.rt(&mut s, &[&form])[0], x[col("rt_peptdeep")].parse().unwrap());
         let m = &pred.ms2(&mut s, &[(&form, z)])[0];

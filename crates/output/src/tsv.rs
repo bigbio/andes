@@ -210,11 +210,10 @@ fn write_spectrum_rows<W: Write>(
         ppm_mode: matches!(params.precursor_tolerance.left, Tolerance::Ppm(_)),
     };
 
-    let ranked: Vec<(u32, &PsmMatch)> = emitted_rows(spec, &psms, candidates);
-    for (_rank, psm) in ranked {
+    for (_rank, psm) in emitted_rows(spec, &psms, candidates) {
         let cand = &candidates[psm.primary_candidate_idx() as usize];
         let ctx = RowContext::new(spec, cand, search_index);
-        write_psm_row(writer, spec, psm, cand, &ctx, &row_ctx)?;
+        write_psm_row(writer, spec, &psm, cand, &ctx, &row_ctx)?;
     }
     Ok(())
 }

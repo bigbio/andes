@@ -434,8 +434,8 @@ fn build_psms_batch(
         // `rank` from it, `row_idx` = the per-scan emission index (== `hit`),
         // `multi_row` = scan emits >1 row.
         let rows = emitted_rows(spec, &sorted, candidates);
-        let ranks: Vec<u32> = rows.iter().map(|&(r, _)| r).collect();
-        let psms: Vec<&PsmMatch> = rows.iter().map(|&(_, p)| p).collect();
+        let ranks: Vec<u32> = rows.iter().map(|(r, _)| *r).collect();
+        let psms: Vec<&PsmMatch> = rows.iter().map(|(_, p)| &**p).collect();
         let multi_row = psms.len() > 1;
         let spec_id_str = if spec.title.is_empty() {
             format!("scan={}", spec.scan.unwrap_or(0))

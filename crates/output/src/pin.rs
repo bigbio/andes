@@ -606,7 +606,7 @@ fn write_spectrum_rows<W: Write>(
     // Order by rank_score (RawScore) descending — the sole ranking signal.
     let psms = queue.clone().into_rank_sorted_vec();
 
-    let ranked: Vec<(u32, &PsmMatch)> = emitted_rows(spec, &psms, candidates);
+    let ranked = emitted_rows(spec, &psms, candidates);
     // When a scan emits more than one row, `rank` alone can collide (ranks tie
     // on equal `rank_score`, and `TopNQueue` retains ties at capacity), so the
     // SpecId must include the per-row index to stay unique. Single-row scans
@@ -618,7 +618,7 @@ fn write_spectrum_rows<W: Write>(
         write_psm_row(
             writer,
             spec,
-            psm,
+            &psm,
             cand,
             &ctx,
             rank,
@@ -1528,6 +1528,53 @@ mod tests {
         // Both survivors share rank 1 and stay distinguishable by row index.
         let ids: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
         assert_eq!(ids, ["Scan 1_1_1_0", "Scan 1_1_1_1"]);
+    }
+
+    #[test]
+    fn target_and_decoy_isomers_are_kept_apart() {
+        // A decoy repeating the target's residues and modification multiset keeps
+        // its own row and label.
+        let mut decoy = make_candidate_seq(b"SATSK", &[(3, PHOSPHO)], 1);
+        decoy.is_decoy = true;
+        let cands = vec![make_candidate_seq(b"SATSK", &[(0, PHOSPHO)], 0), decoy];
+        let rows = emitted(
+            vec![make_psm(0, 10.0, 10.0, 0, 2), make_psm(0, 9.0, 9.0, 1, 2)],
+            &cands,
+        );
+        assert_eq!(rows.len(), 2, "{rows:?}");
+    }
+
+    #[test]
+    fn collapsed_isomers_add_their_proteins_to_the_kept_row() {
+        // Candidates 0 and 1 share protein 0; candidate 2 is the same peptidoform
+        // as 1 in protein 1, scored apart (different flanking residues).
+        let cands = vec![
+            make_candidate_seq(b"SATSK", &[(0, PHOSPHO)], 0),
+            make_candidate_seq(b"SATSK", &[(3, PHOSPHO)], 0),
+            make_candidate_seq(b"SATSK", &[(3, PHOSPHO)], 1),
+        ];
+        let params = make_params(2..=3);
+        let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
+        let mut queue = TopNQueue::new(10);
+        queue.push(make_psm(0, 10.0, 10.0, 0, 2));
+        queue.push(make_psm(0, 9.0, 9.0, 1, 2));
+        queue.push(make_psm(0, 8.0, 8.0, 2, 2));
+        let mut buf = Vec::<u8>::new();
+        write_pin_to(
+            &mut buf,
+            &spectra,
+            &[queue],
+            &cands,
+            &params,
+            &make_empty_search_index(),
+        )
+        .unwrap();
+        let header = parse_header(&buf);
+        let pep_col = header.iter().position(|h| h == "Peptide").unwrap();
+        let rows = parse_rows(&buf);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0][pep_col], "K.S+79.96633ATSK.S");
+        assert_eq!(rows[0][pep_col + 1..], ["PROT_0", "PROT_1"]);
     }
 
     // ── Test 4: empty queue → only header ────────────────────────────────────

@@ -1,0 +1,14 @@
+stratum	files_checked	standard_ids	engine_outputs	research_needed
+HLA (any)	410	136	143	131
+HLA-II	123	38	56	29
+ETD/EThcD (text)	115	54	26	35
+timsTOF	157	39	60	58
+Astral	10	2	2	6
+other Q-TOF	108	42	28	38
+ion trap only	19	11	2	6
+TMTpro	43	18	13	12
+iTRAQ	25	10	7	8
+non-tryptic enzyme (non-HLA)	193	89	65	39
+rare PTM enrichment	176	57	75	44
+synthetic	79	22	32	25
+all checked	1004	341	367	296

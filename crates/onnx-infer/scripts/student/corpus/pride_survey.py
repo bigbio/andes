@@ -41,6 +41,7 @@ import urllib.error
 import urllib.request
 
 API = "https://www.ebi.ac.uk/pride/ws/archive/v3"
+UA = "andes-corpus-survey/1.0 (python-urllib)"
 KEEP = [
     "accession", "title", "projectDescription", "sampleProcessingProtocol", "dataProcessingProtocol",
     "projectTags", "keywords", "submissionType", "license", "submissionDate", "publicationDate",
@@ -337,7 +338,10 @@ FORMAT_RULES = [
     ("thermo_raw", r"\.raw(\.zip)?$"),
     ("bruker_d", r"\.d\.zip$|\.d\.tar|\.tdf$|\.baf$|\.d$"),
     ("sciex_wiff", r"\.wiff(\.scan)?$|\.wiff2$"),
-    ("dia_lib", r"\.speclib$|\.tsv$"),
+    ("dia_lib", r"\.speclib$"),
+    # generic search-result archives ("search.zip", "*_txt.zip", ProteomeTools per-pool zips) are
+    # usually MaxQuant txt folders; verify with peek-zip before relying on it
+    ("search_zip?", r"search[^/]*\.zip$|txt[^/]*\.zip$|[-_](un)?specific\.zip$|[-_](semi)?tryptic\.zip$"),
     ("sdrf", r"sdrf"),
 ]
 _FMT = [(k, re.compile(v, re.I)) for k, v in FORMAT_RULES]
@@ -360,17 +364,52 @@ def list_files(acc: str):
     return out, total
 
 
+FILE_COLS = ["accession", "n_files", "total_records", "listing_complete", "categories", "formats",
+             "n_raw", "raw_gb", "n_peak", "n_result", "n_search", "usable_without_research", "example_result"]
+IDENT = {"mzIdentML", "mzTab", "PRIDE_XML", "pepXML", "MaxQuant", "FragPipe", "Sage", "PD_msf", "Mascot_xml_dat",
+         "search_zip?"}
+
+
+def summarise_files(acc, files, total):
+    """files: [(name, category, size)] -> one FILE_COLS row."""
+    cats = collections.Counter(c or "?" for _, c, _ in files)
+    fmts = collections.Counter(k for n, _, _ in files for k in file_formats(n or ""))
+    raw = [f for f in files if f[1] == "RAW"]
+    peaks = fmts["mzML"] + fmts["MGF"] + fmts["MS2/apl"]
+    has_id = sorted(k for k in IDENT if fmts[k])
+    if fmts["mzIdentML"] or fmts["mzTab"] or fmts["PRIDE_XML"]:
+        usable = "standard_ids" + ("+peaks" if peaks else "+raw_only" if raw else "")
+    elif has_id:
+        usable = "engine_ids(" + ",".join(has_id) + ")" + ("+peaks" if peaks else "+raw" if raw else "")
+    else:
+        usable = "research_needed"
+    ex = next((n for n, _, _ in files if set(file_formats(n or "")) & IDENT), "")
+    return [acc, len(files), total, int(total == len(files)),
+            ",".join(f"{k}:{v}" for k, v in cats.most_common()), ",".join(f"{k}:{v}" for k, v in fmts.most_common()),
+            len(raw), round(sum(sz or 0 for _, _, sz in raw) / 1e9, 1),
+            cats.get("PEAK", 0), cats.get("RESULT", 0), cats.get("SEARCH", 0), usable, ex]
+
+
 def cmd_files(a):
+    if a.from_listing:  # re-summarise saved listings (after a format-rule change) without the API
+        rows = {}
+        for line in open(a.from_listing):
+            d = json.loads(line)
+            rows[d["accession"]] = summarise_files(d["accession"], d["files"], len(d["files"]))
+        with open(a.out, "w") as fh:
+            fh.write("\t".join(FILE_COLS) + "\n")
+            for r in rows.values():
+                fh.write("\t".join(map(str, r)) + "\n")
+        print(f"{len(rows)} projects re-summarised -> {a.out}")
+        return
     accs = [x.strip() for x in open(a.accessions) if x.strip() and not x.startswith("#")]
     done = set()
     if os.path.exists(a.out):
         done = {r["accession"] for r in csv.DictReader(open(a.out), delimiter="\t")}
-    cols = ["accession", "n_files", "total_records", "listing_complete", "categories", "formats",
-            "n_raw", "raw_gb", "n_peak", "n_result", "n_search", "usable_without_research", "example_result"]
     new = not os.path.exists(a.out)
     with open(a.out, "a") as fh:
         if new:
-            fh.write("\t".join(cols) + "\n")
+            fh.write("\t".join(FILE_COLS) + "\n")
         for acc in accs:
             if acc in done:
                 continue
@@ -379,28 +418,10 @@ def cmd_files(a):
             except Exception as e:  # noqa: BLE001 - keep going; record the failure
                 fh.write(f"{acc}\t-1\t-1\t0\tERROR {e}\t\t0\t0\t0\t0\t0\tunknown\t\n")
                 continue
+            slim = [[f.get("fileName"), (f.get("fileCategory") or {}).get("value"), f.get("fileSizeBytes")] for f in files]
             with open(a.out + ".listing.jsonl", "a") as lf:
-                lf.write(json.dumps({"accession": acc, "files": [
-                    [f.get("fileName"), (f.get("fileCategory") or {}).get("value"), f.get("fileSizeBytes")] for f in files]}) + "\n")
-            cats = collections.Counter((f.get("fileCategory") or {}).get("value", "?") for f in files)
-            fmts = collections.Counter(k for f in files for k in file_formats(f.get("fileName", "")))
-            raw = [f for f in files if (f.get("fileCategory") or {}).get("value") == "RAW"]
-            ident = {"mzIdentML", "mzTab", "PRIDE_XML", "pepXML", "MaxQuant", "FragPipe", "Sage", "PD_msf", "Mascot_xml_dat"}
-            peaks = fmts["mzML"] + fmts["MGF"] + fmts["MS2/apl"]
-            has_id = sorted(k for k in ident if fmts[k])
-            if fmts["mzIdentML"] or fmts["mzTab"] or fmts["PRIDE_XML"]:
-                usable = "standard_ids" + ("+peaks" if peaks else "+raw_only" if raw else "")
-            elif has_id:
-                usable = "engine_ids(" + ",".join(has_id) + ")" + ("+peaks" if peaks else "+raw" if raw else "")
-            else:
-                usable = "research_needed"
-            ex = next((f["fileName"] for f in files if set(file_formats(f.get("fileName", ""))) & ident), "")
-            fh.write("\t".join(map(str, [
-                acc, len(files), total, int(total == len(files)),
-                ",".join(f"{k}:{v}" for k, v in cats.most_common()),
-                ",".join(f"{k}:{v}" for k, v in fmts.most_common()),
-                len(raw), round(sum(f.get("fileSizeBytes") or 0 for f in raw) / 1e9, 1),
-                cats.get("PEAK", 0), cats.get("RESULT", 0), cats.get("SEARCH", 0), usable, ex])) + "\n")
+                lf.write(json.dumps({"accession": acc, "files": slim}) + "\n")
+            fh.write("\t".join(map(str, summarise_files(acc, slim, total))) + "\n")
             fh.flush()
             time.sleep(a.sleep)
     print(f"files summary -> {a.out}")
@@ -530,7 +551,7 @@ def cmd_summary(a):
 
 # ----------------------------------------------------------------------------- peek-zip
 def _range(url, start, end=None):
-    h = {"Range": f"bytes={start}-{'' if end is None else end}"}
+    h = {"Range": f"bytes={start}-{'' if end is None else end}", "User-Agent": UA}
     with urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=120) as r:
         return r.read()
 
@@ -540,7 +561,7 @@ def zip_members(url):
     Range requests (no download). Handles zip64."""
     import struct
 
-    with urllib.request.urlopen(urllib.request.Request(url, method="HEAD"), timeout=120) as r:
+    with urllib.request.urlopen(urllib.request.Request(url, method="HEAD", headers={"User-Agent": UA}), timeout=120) as r:
         size = int(r.headers["Content-Length"])
     tail = _range(url, max(0, size - 65536))
     i = tail.rfind(b"PK\x05\x06")
@@ -637,7 +658,8 @@ def main():
     c.add_argument("--projects", required=True)
     c.add_argument("--out-dir", required=True)
     fl = sub.add_parser("files")
-    fl.add_argument("--accessions", required=True, help="one accession per line")
+    fl.add_argument("--accessions", help="one accession per line")
+    fl.add_argument("--from-listing", help="re-summarise a saved <out>.listing.jsonl instead of calling the API")
     fl.add_argument("--out", required=True)
     fl.add_argument("--sleep", type=float, default=0.2)
     rk = sub.add_parser("rank")

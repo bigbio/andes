@@ -2001,6 +2001,8 @@ name = "onnx-infer"
 version = "0.3.0"
 dependencies = [
  "input",
+ "model",
+ "scoring",
  "serde",
  "serde_json",
  "tempfile",

@@ -63,6 +63,22 @@
 //! | `--chimeric` slice | 1,751 | 1,717 |
 //! | `--refine` slice | 1,764 | 1,595 |
 //!
+//! REGENERATED 2026-10-13 when the positional-isomer key began separating
+//! target from decoy and a kept row began listing the proteins of the rows
+//! collapsed into it. Against the previous binary's PIN for the same command
+//! line: same rows and SpecIds, every spectrum's winner unchanged, every
+//! column but `Proteins` identical; `Proteins` gains accessions on the rows
+//! whose collapsed copies came from another protein (same residues, different
+//! flanking residues). No target/decoy pair had collided, so no row returned.
+//!
+//! | case | rows | rows with new proteins |
+//! |---|---|---|
+//! | E. coli default mods (and precursor-cal auto) | 74,442 | 2 |
+//! | E. coli fixed mods only | 75,750 | 0 (golden unchanged) |
+//! | E. coli one variable mod | 74,998 | 4 |
+//! | `--chimeric` slice | 1,717 | 0 (golden unchanged) |
+//! | `--refine` slice | 1,595 | 24 |
+//!
 //! To regenerate after an intentional change, run the case's command line (see
 //! `run`), then either digest the PIN with `identity_digest` (E. coli) or write
 //! its header and sorted rows, gzipped, over the case's golden PIN (slices).
@@ -242,14 +258,14 @@ fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
 /// One E. coli case: (rows, `identity_digest` FNV-1a 64, calibration outcome line).
 type Golden = (usize, u64, Option<&'static str>);
 
-const ECOLI_DEFAULT_MODS: Golden = (74_442, 0x74fc_7245_ca2d_ee2d, None);
+const ECOLI_DEFAULT_MODS: Golden = (74_442, 0x8d7e_e17f_0589_776a, None);
 const ECOLI_FIXED_MODS_ONLY: Golden = (75_750, 0xb351_f0e9_b195_ade3, None);
-const ECOLI_ONE_VARIABLE_MOD: Golden = (74_998, 0x7da4_731a_cc14_f176, None);
+const ECOLI_ONE_VARIABLE_MOD: Golden = (74_998, 0xd0a6_5c10_f1d5_29f3, None);
 /// The pre-pass scores but the sample is too small to calibrate, so the PIN
 /// equals the calibration-off one.
 const ECOLI_PRECURSOR_CAL_AUTO: Golden = (
     74_442,
-    0x74fc_7245_ca2d_ee2d,
+    0x8d7e_e17f_0589_776a,
     Some("Precursor mass calibration skipped (insufficient confident PSMs: 492 with PSMs, 55 below RawScore floor, 0 failed |residual|>50ppm"),
 );
 

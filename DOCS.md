@@ -189,7 +189,7 @@ See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model)
 | `--tmt-correction` | path | *(none)* | Isotope impurity sheet of the kit lot (§10); corrected intensities by NNLS, raw kept alongside. |
 | `--tmt-min-purity` | 0..1 | `0` | Drop PSMs below this precursor isolation purity from `tmt.tsv` (they stay in the parquet). |
 | `--lfq` | flag | off | Label-free MS1 quantification of the confident precursors (§10). Writes `<stem>.lfq.tsv` and `<stem>.lfq_features.tsv`. mzML / `.raw` with high-resolution MS1; the MS2 may be ion-trap. |
-| `--quant-dir` | dir | *(none)* | Per input file writes `<stem>.cache` (the run's MS1 scans, every FAIMS voltage) and `<stem>.quant.parquet` (every rank-1 PSM, targets and decoys, no FDR filter; `spec_id` is the PIN SpecId, `search_score` the PIN `RawScore`) for the multi-run quantification stages. Implies MS1 capture; same inputs as `--lfq`. Two inputs with the same stem, or an input without MS1 scans, are an error. Other outputs are unchanged. |
+| `--quant-dir` | dir | *(none)* | Per input file writes `<stem>.ms1.parquet` (the run's MS1 scans, every FAIMS voltage) and `<stem>.quant.parquet` (every rank-1 PSM, targets and decoys, no FDR filter; `spec_id` is the PIN SpecId, `search_score` the PIN `RawScore`) for the multi-run quantification stages. Implies MS1 capture; same inputs as `--lfq`. Two inputs with the same stem, or an input without MS1 scans, are an error. Other outputs are unchanged. |
 | `--lfq-tol` | tolerance | `10ppm` | MS1 tolerance of the isotope chromatograms, and of the `--mbr` template fit (ppm only there). |
 | `--lfq-rt-window` | seconds | `60` | Half-window around the identifying PSM's retention time. |
 | `--lfq-gaussian-width` | seconds | *(none)* | Experimental Gaussian smoothing width (eight sigma) for peak detection; areas use raw traces. Validate feature-q coverage for the acquisition. Default detection uses five-scan Savitzky–Golay. |
@@ -446,10 +446,13 @@ standard error), so every LFQ intensity in the parquet passed the transfer q-val
 that fail the library entry gate are absent. Modifications come from the peptidoform's tags (the
 accession is the name), proteins carry no positions, and `psm_ids` is empty.
 
-Files in the quant directory (`--quant-dir`): per run `<stem>.cache` and `<stem>.quant.parquet`
-(search), `<stem>.extract.parquet` (extract); once `library.parquet` and `alignment.parquet`
-(library). Each Parquet file carries a schema version (`andes.<table>.schema`); a reader rejects
-another major version and names the file.
+Files in the quant directory (`--quant-dir`), all Parquet: per run `<stem>.ms1.parquet` and
+`<stem>.quant.parquet` (search), `<stem>.extract.parquet` (extract); once `library.parquet` and
+`alignment.parquet` (library). Each file carries a schema version (`andes.<table>.schema`); a
+reader rejects another major version and names the file. `<stem>.ms1.parquet` holds one row per
+MS1 scan in retention-time order: `native_id`, `rt_s`, `faims_cv` (null without FAIMS), and the
+centroids as two equal-length lists `mz` (Float64) and `intensity` (Float32), stored bit for bit;
+its metadata also names the run (`andes.ms1.run`).
 
 ---
 
@@ -743,7 +746,8 @@ andes --spectrum tmt_run.mzML --database human.fasta --mods tmt10_mods.txt \
   (standard residues exact; modification deltas as averagine atoms).
 * **Extraction.** The first four isotope chromatograms at `--lfq-tol` over ± `--lfq-rt-window`
   around the anchor, from every MS1 scan of the run (16 bytes per centroid in memory;
-  cached to temporary storage between search and quantification). The monoisotopic trace is smoothed
+  kept in a temporary MS1 table, the `<stem>.ms1.parquet` format, between search and
+  quantification). The monoisotopic trace is smoothed
   (5-point Savitzky–Golay by default). `--lfq-gaussian-width <seconds>` instead uses an
   RT-weighted Gaussian kernel (width = eight sigma, finite support ± four sigma), following
   the OpenMS width convention. This optional setting can reduce premature boundaries in noisy
@@ -800,7 +804,7 @@ each (precursor, run) gets one consistent quantity. Four stages, run in one proc
 directory (for a pipeline that scatters runs over machines):
 
 ```bash
-# per run (any machine): MS1 cache + PSM table into the shared directory, PIN, Percolator
+# per run (any machine): MS1 + PSM tables into the shared directory, PIN, Percolator
 andes --spectrum a.mzML --database db.fasta --output-pin a.pin --quant-dir q/
 andes --spectrum b.mzML --database db.fasta --output-pin b.pin --quant-dir q/
 # once: the library, from each run's Percolator results
@@ -825,7 +829,7 @@ Percolator run per input: the library ranks each precursor by its best score acr
 scores from separately trained Percolator models are not on one scale.
 
 * **Library** (`quant library`). Reads every run's `<stem>.quant.parquet` (`--runs`, or every
-  table in the directory; a missing table or cache is an error) and joins Percolator's
+  table in the directory; a missing PSM or MS1 table is an error) and joins Percolator's
   `score`, `q-value` and PEP to its PSMs on (run, SpecId) (target and decoy result files; every
   PSM needs a finite `score`). Each joined PSM is checked against the result's residue sequence (flanks and
   modification notation ignored) and target/decoy file. A PSM that disagrees is skipped
@@ -845,7 +849,7 @@ scores from separately trained Percolator models are not on one scale.
   less than 30 % of the RT range, is unaligned: it is logged, neither gives nor receives
   transfers, and keeps the `identified` rows of its own identifications.
 * **Extract** (`quant extract`, one run, reads `library.parquet`, `alignment.parquet` and the
-  run's `<stem>.cache`). Every library precursor
+  run's `<stem>.ms1.parquet`). Every library precursor
   is measured, at the `--lfq-tol` m/z tolerance (ppm; default 10 ppm), by a likelihood template fit of its isotope pattern and elution profile around
   the predicted apex (around the PSM's RT where it was identified), with two decoy hypotheses
   per transfer: a mass-defect-preserving m/z shift and an RT shift. Identified pairs are also
@@ -867,14 +871,15 @@ scores from separately trained Percolator models are not on one scale.
 `library.parquet` records a fingerprint of the library (and of `alignment.parquet`, checked on
 read); each extract table records that fingerprint and its `--lfq-tol`. `quant finalize` fails,
 naming the file, on an extract made from another library (stale) or at another tolerance than
-the other runs. The fingerprint covers the library, not the MS1 caches or the run tables: after
+the other runs. The fingerprint covers the library, not the MS1 tables or the run tables: after
 searching a run again, run `quant library`, every `quant extract` and `quant finalize` again.
 
 `--mbr` without `--quant-dir` writes the per-run artifacts to a temporary directory (under
-`TMPDIR`): each run's MS1 cache (about 12 bytes per centroid, zstd-compressed; hundreds of MB
-for a long high-resolution run) plus its tables. For large runs pass `--quant-dir` on a disk
-with room. In-process, the stages run after every search output is written and the search
-state is freed, one run's MS1 at a time.
+`TMPDIR`): each run's `<stem>.ms1.parquet` (about 5–6 bytes per centroid; about 200 MB for an
+Orbitrap run with 38 million MS1 centroids) plus its tables. For large runs pass
+`--quant-dir` on a disk with room. Any search that quantifies also keeps a temporary copy of
+each run's MS1 table under `TMPDIR` until quantification ends. In-process, the stages run
+after every search output is written and the search state is freed, one run's MS1 at a time.
 
 `--mbr` is label-free only and is refused with `--tmt`. With `--mbr --output-parquet`,
 `quantms.feature.parquet` holds the match-between-runs rows (identified and `transfer_ms1`)

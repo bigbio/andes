@@ -342,14 +342,16 @@ fn pin_spec_ids(pin: &std::path::Path) -> std::collections::HashSet<String> {
 }
 
 #[test]
-fn quant_dir_writes_cache_and_table() {
+fn quant_dir_writes_ms1_and_psm_tables() {
     let out = tempfile::tempdir().unwrap();
     let qdir = out.path().join("q");
     let pin = out.path().join("lfq.pin");
     let qpx = out.path().join("lfq.idparquet");
     run_lfq_fixture(&pin, &qpx, &["--quant-dir", qdir.to_str().unwrap()]);
     let stem = "lfq_synthetic";
-    assert!(qdir.join(format!("{stem}.cache")).exists());
+    let ms1 = output::ms1_table::read_ms1_table(&qdir.join(format!("{stem}.ms1.parquet"))).unwrap();
+    assert!(!ms1.is_empty());
+    assert!(!qdir.join(format!("{stem}.ms1.parquet.partial")).exists());
     let (run, rows) =
         output::run_quant_table::read_run_quant_table(&qdir.join(format!("{stem}.quant.parquet")))
             .unwrap();
@@ -397,7 +399,7 @@ fn quant_dir_table_contains_decoys() {
         .join("slice.idparquet/quantms.feature.parquet")
         .exists());
     let stem = "astral_pxd070049_slice";
-    assert!(qdir.join(format!("{stem}.cache")).exists());
+    assert!(qdir.join(format!("{stem}.ms1.parquet")).exists());
     let (run, rows) =
         output::run_quant_table::read_run_quant_table(&qdir.join(format!("{stem}.quant.parquet")))
             .unwrap();

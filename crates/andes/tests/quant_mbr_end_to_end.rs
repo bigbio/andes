@@ -586,7 +586,7 @@ fn library_stage_errors_name_what_is_missing() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("absent_run.quant.parquet"), "{err}");
-    assert!(err.contains("absent_run.cache"), "{err}");
+    assert!(err.contains("absent_run.ms1.parquet"), "{err}");
 
     // A Percolator file without the score column.
     let text = std::fs::read_to_string(&targets).unwrap();

@@ -2,8 +2,9 @@
 //! all-in-one run.
 //!
 //! Extract: for one run, every library precursor is measured on the run's
-//! cached MS1 by the template fit of [`quant::evidence`], whether the run
-//! identified it or not, and the rows go to `<stem>.extract.parquet`.
+//! MS1 table (`<stem>.ms1.parquet`) by the template fit of
+//! [`quant::evidence`], whether the run identified it or not, and the rows go
+//! to `<stem>.extract.parquet`.
 //!
 //! Per library entry and run:
 //!
@@ -25,7 +26,7 @@
 //! mixed series). Only one copy of the run's MS1 is held at a time: the whole run
 //! serves the width-prior fits of the whole-run entries; the scans are then
 //! moved into one series per voltage for the voltage entries' width-prior
-//! fits and rows; the split is dropped and the cache read again for the
+//! fits and rows; the split is dropped and the MS1 table read again for the
 //! whole-run entries' rows. A run with at most one voltage is never split.
 //!
 //! Width prior: the identified pairs are first fitted with the width free on
@@ -56,13 +57,13 @@ use output::mbr_out::{
     write_mbr_tsv, write_mbr_validation, Accepted, EvidenceType, MbrRow, MbrValidation,
     VALIDATION_Q,
 };
+use output::ms1_table::read_ms1_table;
 use quant::decoys::{probes, Hypothesis, Probe};
 use quant::evidence::{fit_many, Evidence, EvidenceParams, FitJob, WIDTH_GRID};
 use quant::library::{Library, LibraryEntry};
 use quant::ms1_index::Ms1RunIndex;
 use rayon::prelude::*;
 
-use crate::quant_run::ms1_cache::Ms1Cache;
 use crate::transfer_fdr::{transfer_fdr, FdrCounts, FdrRow, TRANSFER_FEATURES};
 
 pub(crate) use output::extract_table::{ExtractRole as Role, ExtractRow};
@@ -136,7 +137,7 @@ impl Drop for Held {
     }
 }
 
-/// Per-thread counters of MS1 copies and cache reads, for tests.
+/// Per-thread counters of MS1 copies and MS1 table reads, for tests.
 #[cfg(test)]
 mod tracking {
     use std::cell::Cell;
@@ -166,7 +167,7 @@ mod tracking {
         LOADS.set(0);
     }
 
-    /// `(peak live copies, cache reads)` since the last reset.
+    /// `(peak live copies, MS1 table reads)` since the last reset.
     pub(super) fn stats() -> (usize, usize) {
         (PEAK.get(), LOADS.get())
     }
@@ -481,14 +482,14 @@ fn entry_rows(
     (rows, counts)
 }
 
-/// Measures every library precursor in run `run` from its MS1 cache.
+/// Measures every library precursor in run `run` from its MS1 table.
 ///
 /// An unaligned run yields its identified rows only and `counts.unaligned`.
 /// Errors: `run` outside the library's runs, an entry whose precursor has no
-/// metadata, or an unreadable cache (the message names the file).
+/// metadata, or an unreadable MS1 table (the message names the file).
 pub(crate) fn extract_run(
     run: u16,
-    cache: &Path,
+    ms1_table: &Path,
     lib: &Library,
     ep: &EvidenceParams,
 ) -> Result<RunExtract, String> {
@@ -514,7 +515,7 @@ pub(crate) fn extract_run(
     let load = || {
         #[cfg(test)]
         tracking::loaded();
-        Ms1Cache::load_from(cache).map_err(|e| e.to_string())
+        read_ms1_table(ms1_table)
     };
     let n = lib.entries.len();
     let ms1 = load()?;
@@ -894,13 +895,13 @@ mod tests {
     use model::mass::ISOTOPE;
     use model::scan::Ms1Scan;
     use output::extract_table::{read_extract_table, write_extract_table};
+    use output::ms1_table::write_ms1_table;
     use quant::align::AlignParams;
     use quant::decoys::Hypothesis;
     use quant::library::{build_library, PrecursorMeta, PsmIn};
     use quant::ms1_index::Ms1RunIndex;
 
     use super::*;
-    use crate::quant_run::ms1_cache::Ms1Cache;
 
     const ENVELOPE: [f32; 4] = [0.55, 0.30, 0.11, 0.04];
     const CHARGE: u8 = 2;
@@ -979,7 +980,7 @@ mod tests {
     struct Fixture {
         _dir: tempfile::TempDir,
         lib: Library,
-        caches: Vec<PathBuf>,
+        ms1_tables: Vec<PathBuf>,
     }
 
     /// Three runs: precursors 0..30 identified in runs 0 and 1, 30 only in
@@ -1039,19 +1040,19 @@ mod tests {
             ..AlignParams::default()
         };
         let lib = build_library(&psms, meta, N_RUNS, 1.0, DONOR_Q, None, &ap);
-        let caches = (0..N_RUNS as u16)
+        let ms1_tables = (0..N_RUNS as u16)
             .map(|r| {
-                let path = dir.path().join(format!("run{r}.ms1cache"));
+                let path = dir.path().join(format!("run{r}.ms1.parquet"));
                 let silent = |p: u32| r == 1 && silent_in_run1(p);
                 let index = Ms1RunIndex::new(run_scans(r, faims && r == 1, &silent));
-                Ms1Cache::store_at(&index, &path).unwrap();
+                write_ms1_table(&path, &format!("run{r}"), &index).unwrap();
                 path
             })
             .collect();
         Fixture {
             _dir: dir,
             lib,
-            caches,
+            ms1_tables,
         }
     }
 
@@ -1067,7 +1068,7 @@ mod tests {
     fn identified_pairs_get_identified_and_pseudo_rows() {
         let fx = fixture(false);
         assert!(fx.lib.alignment.maps[1].is_some());
-        let out = extract_run(1, &fx.caches[1], &fx.lib, &params()).unwrap();
+        let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         for p in 0..BOTH {
             let rows = rows_of(&out.rows, p);
             assert_eq!(rows.len(), 2, "precursor {p}: {rows:?}");
@@ -1098,7 +1099,7 @@ mod tests {
     #[test]
     fn missing_pairs_get_target_and_decoys() {
         let fx = fixture(false);
-        let out = extract_run(1, &fx.caches[1], &fx.lib, &params()).unwrap();
+        let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         let rows = rows_of(&out.rows, ONLY_RUN0);
         assert_eq!(rows.len(), 3, "{rows:?}");
         assert!(rows
@@ -1115,7 +1116,7 @@ mod tests {
             assert!(e.llr < target.llr / 10.0, "{d:?}");
         }
         // The run-1-only precursor is a transfer into run 0.
-        let out0 = extract_run(0, &fx.caches[0], &fx.lib, &params()).unwrap();
+        let out0 = extract_run(0, &fx.ms1_tables[0], &fx.lib, &params()).unwrap();
         let rows = rows_of(&out0.rows, ONLY_RUN1);
         assert_eq!(rows.len(), 3);
         assert!(rows.iter().all(|r| r.role == Role::Transfer));
@@ -1133,7 +1134,7 @@ mod tests {
     fn unaligned_run_keeps_its_identified_rows() {
         let fx = fixture(false);
         assert!(fx.lib.alignment.maps[2].is_none());
-        let out = extract_run(2, &fx.caches[2], &fx.lib, &params()).unwrap();
+        let out = extract_run(2, &fx.ms1_tables[2], &fx.lib, &params()).unwrap();
         assert!(out.counts.unaligned);
         // Run 2 identifies precursor 0 only: its identified row, and no
         // pseudo-transfer or transfer rows.
@@ -1150,12 +1151,12 @@ mod tests {
             (out.counts.no_prediction, out.counts.no_pseudo_prediction),
             (0, 0)
         );
-        assert!(extract_run(N_RUNS as u16, &fx.caches[2], &fx.lib, &params()).is_err());
+        assert!(extract_run(N_RUNS as u16, &fx.ms1_tables[2], &fx.lib, &params()).is_err());
 
         // The identified row reaches the mbr.tsv.
         let runs: Vec<Vec<ExtractRow>> = (0..N_RUNS)
             .map(|r| {
-                extract_run(r as u16, &fx.caches[r], &fx.lib, &params())
+                extract_run(r as u16, &fx.ms1_tables[r], &fx.lib, &params())
                     .unwrap()
                     .rows
             })
@@ -1182,7 +1183,7 @@ mod tests {
         let fx = fixture_with(false, &|_| false, &|p| p == 7);
         let e = fx.lib.entries.iter().find(|e| e.precursor == 7).unwrap();
         assert_eq!(e.donors, vec![0]);
-        let out = extract_run(1, &fx.caches[1], &fx.lib, &params()).unwrap();
+        let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         let rows = rows_of(&out.rows, 7);
         assert_eq!(rows.len(), 3, "{rows:?}");
         assert!(rows.iter().all(|r| r.role == Role::Transfer), "{rows:?}");
@@ -1203,13 +1204,13 @@ mod tests {
                 e.faims_cv = Some(-30.0);
             }
         }
-        let out = extract_run(1, &fx.caches[1], &fx.lib, &params()).unwrap();
+        let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         assert!(rows_of(&out.rows, ONLY_RUN0).is_empty());
         assert!(rows_of(&out.rows, 3).is_empty());
         assert_eq!(out.counts.foreign_cv, 2);
         assert!(!rows_of(&out.rows, 4).is_empty());
         // A run without FAIMS fits them on the whole run.
-        let out0 = extract_run(0, &fx.caches[0], &fx.lib, &params()).unwrap();
+        let out0 = extract_run(0, &fx.ms1_tables[0], &fx.lib, &params()).unwrap();
         assert_eq!(out0.counts.foreign_cv, 0);
         assert_eq!(rows_of(&out0.rows, ONLY_RUN0)[0].role, Role::Identified);
         assert_eq!(rows_of(&out0.rows, 3)[0].role, Role::Identified);
@@ -1218,8 +1219,8 @@ mod tests {
     #[test]
     fn output_order_is_deterministic() {
         let fx = fixture(false);
-        let a = extract_run(1, &fx.caches[1], &fx.lib, &params()).unwrap();
-        let b = extract_run(1, &fx.caches[1], &fx.lib, &params()).unwrap();
+        let a = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
+        let b = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         assert_eq!(a, b);
         // Library order: each entry's rows are contiguous and in entry order.
         let order: Vec<u32> = fx.lib.entries.iter().map(|e| e.precursor).collect();
@@ -1244,7 +1245,7 @@ mod tests {
                 *rt = f64::NAN;
             }
         }
-        let out = extract_run(1, &fx.caches[1], &fx.lib, &params()).unwrap();
+        let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         assert!(rows_of(&out.rows, 5).is_empty());
         assert_eq!(out.counts.nonfinite_best_rt, 1);
     }
@@ -1252,7 +1253,7 @@ mod tests {
     #[test]
     fn width_prior_follows_identified_fits() {
         let fx = fixture(false);
-        let out = extract_run(1, &fx.caches[1], &fx.lib, &params()).unwrap();
+        let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         assert!(out.counts.width_fits >= 20, "{:?}", out.counts);
         assert!(!out.counts.width_prior_fallback);
         for r in out.rows.iter().filter(|r| r.role == Role::Identified) {
@@ -1268,7 +1269,7 @@ mod tests {
     #[test]
     fn faims_entry_is_fitted_on_its_voltage_series() {
         let fx = fixture(true);
-        let out = extract_run(1, &fx.caches[1], &fx.lib, &params()).unwrap();
+        let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         for r in out.rows.iter().filter(|r| r.role == Role::Identified) {
             let e = r.evidence.as_ref().unwrap();
             assert!(
@@ -1282,7 +1283,7 @@ mod tests {
     #[test]
     fn rows_round_trip_through_the_extract_table() {
         let fx = fixture(false);
-        let out = extract_run(1, &fx.caches[1], &fx.lib, &params()).unwrap();
+        let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         let path = fx._dir.path().join("run1.extract.parquet");
         write_extract_table(&path, &out.rows).unwrap();
         assert_eq!(read_extract_table(&path).unwrap(), out.rows);
@@ -1299,7 +1300,7 @@ mod tests {
             .unwrap();
         assert_eq!(whole.faims_cv, None);
         tracking::reset();
-        let out = extract_run(1, &fx.caches[1], &fx.lib, &params()).unwrap();
+        let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         let (peak, loads) = tracking::stats();
         assert_eq!(peak, 1, "at most one MS1 copy is live");
         assert_eq!(loads, 2, "the whole run is read again for its entries");
@@ -1310,10 +1311,10 @@ mod tests {
         let order: Vec<u32> = fx.lib.entries.iter().map(|e| e.precursor).collect();
         assert_eq!(seen, order);
 
-        // Without FAIMS the cache is read once.
+        // Without FAIMS the MS1 table is read once.
         let fx = fixture(false);
         tracking::reset();
-        extract_run(1, &fx.caches[1], &fx.lib, &params()).unwrap();
+        extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         assert_eq!(tracking::stats(), (1, 1));
     }
 
@@ -1322,7 +1323,7 @@ mod tests {
         // About 30% of run 1's identified pairs have no MS1 signal.
         let silent = |p: u32| p % 10 < 3;
         let fx = fixture_with(false, &silent, &|_| false);
-        let out = extract_run(1, &fx.caches[1], &fx.lib, &params()).unwrap();
+        let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         assert!(out.counts.width_fits >= 20, "{:?}", out.counts);
         assert!(!out.counts.width_prior_fallback);
         for r in out.rows.iter().filter(|r| r.role == Role::Identified) {
@@ -1348,7 +1349,7 @@ mod tests {
             .find(|e| e.precursor == ONLY_RUN0)
             .unwrap();
         e.faims_cv = Some(FAIMS_CVS[ONLY_RUN0 as usize % 2]);
-        let out = extract_run(1, &fx.caches[1], &fx.lib, &params()).unwrap();
+        let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         let rows = rows_of(&out.rows, ONLY_RUN0);
         assert_eq!(rows.len(), 3);
         let target = rows[0].evidence.as_ref().unwrap();

@@ -29,8 +29,6 @@ parquet = "53"
 # Temp PIN destination for `--rescore` without `--output-pin` (and the
 # `--keep-pin false` path).
 tempfile = "3.10"
-# Persistent per-run MS1 cache (`ANDESRC1`) is zstd-compressed.
-zstd = "0.13"
 
 [features]
 # Native Thermo .raw input (delegates to the input crate's `thermo` feature).

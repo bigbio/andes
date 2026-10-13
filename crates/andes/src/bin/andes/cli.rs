@@ -706,7 +706,7 @@ pub(crate) struct SearchArgs {
     pub(crate) lfq_feature_fdr: f64,
 
     /// Directory for the per-run artifacts of multi-run quantification: for
-    /// each input file `<stem>.cache` (its MS1 scans, all FAIMS voltages) and
+    /// each input file `<stem>.ms1.parquet` (its MS1 scans, all FAIMS voltages) and
     /// `<stem>.quant.parquet` (every rank-1 PSM, targets and decoys, with no
     /// FDR filter). Implies MS1 capture; same inputs as `--lfq` (mzML or
     /// Thermo `.raw`; not with `--chimeric`, MGF, `.d` or `--glyco`).
@@ -760,7 +760,7 @@ pub(crate) enum QuantCommand {
     /// Writes `library.parquet` and `alignment.parquet` into the quant
     /// directory.
     Library(QuantLibraryArgs),
-    /// Measure every library precursor in one run from its MS1 cache. Writes
+    /// Measure every library precursor in one run from its MS1 table. Writes
     /// `<stem>.extract.parquet`.
     Extract(QuantExtractArgs),
     /// Transfer q-values and the match-between-runs tables from every run's
@@ -780,12 +780,12 @@ impl QuantCommand {
 
 #[derive(Args, Debug)]
 pub(crate) struct QuantLibraryArgs {
-    /// Directory with each run's `<stem>.quant.parquet` and `<stem>.cache`.
+    /// Directory with each run's `<stem>.quant.parquet` and `<stem>.ms1.parquet`.
     #[arg(long = "quant-dir", value_name = "DIR")]
     pub(crate) quant_dir: PathBuf,
 
     /// Run stems to include. Default: every `<stem>.quant.parquet` in the
-    /// directory. A run whose table or cache is missing is an error.
+    /// directory. A run whose PSM or MS1 table is missing is an error.
     #[arg(long = "runs", value_name = "STEM", num_args = 1..)]
     pub(crate) runs: Vec<String>,
 
@@ -828,7 +828,7 @@ pub(crate) struct QuantLibraryArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct QuantExtractArgs {
-    /// Directory with the library and the run's `<stem>.cache`.
+    /// Directory with the library and the run's `<stem>.ms1.parquet`.
     #[arg(long = "quant-dir", value_name = "DIR")]
     pub(crate) quant_dir: PathBuf,
 

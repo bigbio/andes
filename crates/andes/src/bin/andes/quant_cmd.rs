@@ -5,7 +5,7 @@
 //! an in-process run give the same `<base>.mbr.tsv`.
 //!
 //! Files in the quant directory, per run stem: `<stem>.quant.parquet` and
-//! `<stem>.cache` (written by `andes search --quant-dir`),
+//! `<stem>.ms1.parquet` (written by `andes search --quant-dir`),
 //! `<stem>.extract.parquet` (extract); once per experiment: `library.parquet`
 //! and `alignment.parquet` (library).
 //!
@@ -41,7 +41,7 @@ use crate::quant_mbr::{extract_run, finalize, mbr_paths, ExtractCounts, ExtractR
 pub(crate) const MBR_SEED: u64 = 42;
 
 const TABLE_SUFFIX: &str = ".quant.parquet";
-const CACHE_SUFFIX: &str = ".cache";
+const MS1_SUFFIX: &str = ".ms1.parquet";
 const EXTRACT_SUFFIX: &str = ".extract.parquet";
 /// Extract-table metadata key of the template-fit m/z tolerance, ppm.
 const TOL_KEY: &str = "andes.extract.tol_ppm";
@@ -54,7 +54,7 @@ fn artifact(dir: &Path, stem: &str, suffix: &str) -> PathBuf {
 
 /// The run stems of the library, sorted: `runs` when given, else every
 /// `<stem>.quant.parquet` in `dir`. Errors: no runs, a repeated stem, or a
-/// run whose PSM table or MS1 cache is missing (every such file is named).
+/// run whose PSM table or MS1 table is missing (every such file is named).
 pub(crate) fn library_runs(dir: &Path, runs: &[String]) -> Result<Vec<String>, String> {
     let mut stems: Vec<String> = if runs.is_empty() {
         let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -91,12 +91,7 @@ pub(crate) fn library_runs(dir: &Path, runs: &[String]) -> Result<Vec<String>, S
     }
     let missing: Vec<String> = stems
         .iter()
-        .flat_map(|s| {
-            [
-                artifact(dir, s, TABLE_SUFFIX),
-                artifact(dir, s, CACHE_SUFFIX),
-            ]
-        })
+        .flat_map(|s| [artifact(dir, s, TABLE_SUFFIX), artifact(dir, s, MS1_SUFFIX)])
         .filter(|p| !p.is_file())
         .map(|p| p.display().to_string())
         .collect();
@@ -541,7 +536,7 @@ fn log_extract(stem: &str, rows: usize, c: &ExtractCounts) {
     );
 }
 
-/// Measures run `run` of the library on its cache and writes
+/// Measures run `run` of the library on its MS1 table and writes
 /// `<stem>.extract.parquet`.
 pub(crate) fn extract_and_write(
     dir: &Path,
@@ -551,8 +546,8 @@ pub(crate) fn extract_and_write(
     ep: &EvidenceParams,
 ) -> Result<Vec<ExtractRow>, String> {
     let stem = &stored.runs[run as usize];
-    let cache = artifact(dir, stem, CACHE_SUFFIX);
-    let ex = extract_run(run, &cache, &stored.library, ep)?;
+    let ms1 = artifact(dir, stem, MS1_SUFFIX);
+    let ex = extract_run(run, &ms1, &stored.library, ep)?;
     log_extract(stem, ex.rows.len(), &ex.counts);
     let path = artifact(dir, stem, EXTRACT_SUFFIX);
     write_extract_table_tagged(
@@ -853,12 +848,12 @@ mod tests {
     fn library_runs_checks_artifacts_and_duplicates() {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
-        for f in ["b.quant.parquet", "b.cache", "a.quant.parquet"] {
+        for f in ["b.quant.parquet", "b.ms1.parquet", "a.quant.parquet"] {
             std::fs::write(d.join(f), b"x").unwrap();
         }
         let e = library_runs(d, &[]).unwrap_err();
-        assert!(e.contains("a.cache"), "{e}");
-        std::fs::write(d.join("a.cache"), b"x").unwrap();
+        assert!(e.contains("a.ms1.parquet"), "{e}");
+        std::fs::write(d.join("a.ms1.parquet"), b"x").unwrap();
         assert_eq!(library_runs(d, &[]).unwrap(), vec!["a", "b"]);
         assert_eq!(
             library_runs(d, &["b".into(), "a".into()]).unwrap(),
@@ -868,7 +863,7 @@ mod tests {
         assert!(e.contains("twice"), "{e}");
         let e = library_runs(d, &["c".into()]).unwrap_err();
         assert!(
-            e.contains("c.quant.parquet") && e.contains("c.cache"),
+            e.contains("c.quant.parquet") && e.contains("c.ms1.parquet"),
             "{e}"
         );
     }

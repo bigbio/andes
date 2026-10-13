@@ -33,7 +33,7 @@ use search::search_index::SearchIndex;
 use crate::cli::Cli;
 
 #[path = "ms1_cache.rs"]
-pub(crate) mod ms1_cache;
+mod ms1_cache;
 use ms1_cache::Ms1Cache;
 
 /// Isotope-peak tolerance of the precursor-purity ladder (OpenMS default).
@@ -61,7 +61,7 @@ pub(crate) struct QuantSettings {
     /// PSM q-value cut for quantification targets (applied when rescoring ran).
     pub quant_fdr: f64,
     pub pep_cap: Option<f64>,
-    /// `--quant-dir`: where each run's MS1 cache and PSM table are written.
+    /// `--quant-dir`: where each run's MS1 table and PSM table are written.
     pub quant_dir: Option<PathBuf>,
 }
 
@@ -148,7 +148,7 @@ impl QuantSettings {
         }))
     }
 
-    /// MS1 scans are needed for label-free quant, for the per-run cache of
+    /// MS1 scans are needed for label-free quant, for the per-run MS1 table of
     /// `--quant-dir` and for the precursor purity of isobaric PSMs.
     pub(crate) fn needs_ms1(&self) -> bool {
         self.lfq || self.plex.is_some() || self.quant_dir.is_some()
@@ -201,7 +201,7 @@ impl QuantSettings {
             ));
         }
         if let Some(dir) = &self.quant_dir {
-            parts.push(format!("per-run cache and PSM table in {}", dir.display()));
+            parts.push(format!("per-run MS1 and PSM tables in {}", dir.display()));
         }
         parts.join("; ")
     }
@@ -376,7 +376,7 @@ impl QuantCollector {
         }
         let ms1 = ms1
             .as_ref()
-            .map(Ms1Cache::store)
+            .map(|index| Ms1Cache::store(index, &stem))
             .transpose()
             .map_err(|e| format!("cache MS1 scans for {stem}: {e}"))?;
         self.runs.push(RunCapture {
@@ -838,7 +838,7 @@ fn envelope_of(cand: &Candidate, n_iso: usize) -> Vec<f32> {
 /// Isotope peaks in the envelope of the per-run PSM table.
 const TABLE_ENVELOPE_ISOTOPES: usize = 4;
 
-/// `--quant-dir`: write `<dir>/<stem>.cache` (the run's captured MS1, every
+/// `--quant-dir`: write `<dir>/<stem>.ms1.parquet` (the run's captured MS1, every
 /// FAIMS voltage) and `<dir>/<stem>.quant.parquet` (every rank-1 PSM of the
 /// run, targets and decoys, unfiltered) for each run.
 fn write_run_artifacts(
@@ -853,16 +853,13 @@ fn write_run_artifacts(
         .map_err(|e| format!("create --quant-dir {}: {e}", quant_dir.display()))?;
     let hits = select_rank1_all(collector, spectra, queues, candidates);
     for (run_idx, run) in collector.runs.iter().enumerate() {
-        let cache = run
+        let ms1 = run
             .ms1
             .as_ref()
             .ok_or_else(|| format!("--quant-dir: run {} has no MS1 scans", run.stem))?;
-        let ms1 = cache
-            .load()
-            .map_err(|e| format!("load MS1 scans for {}: {e}", run.stem))?;
-        let cache_path = quant_dir.join(format!("{}.cache", run.stem));
-        Ms1Cache::store_at(&ms1, &cache_path)
-            .map_err(|e| format!("write {}: {e}", cache_path.display()))?;
+        let ms1_path = quant_dir.join(format!("{}.ms1.parquet", run.stem));
+        ms1.persist(&ms1_path)
+            .map_err(|e| format!("write MS1 table: {e}"))?;
         let mut rows: Vec<RunPsmRow> = Vec::new();
         let mut no_rt = 0usize;
         for hit in hits.iter().filter(|h| h.run_idx == run_idx) {
@@ -900,7 +897,7 @@ fn write_run_artifacts(
         eprintln!(
             "quant: {}: wrote {} and {} ({} rank-1 PSMs, targets and decoys{})",
             run.stem,
-            cache_path.display(),
+            ms1_path.display(),
             table_path.display(),
             rows.len(),
             if no_rt > 0 {

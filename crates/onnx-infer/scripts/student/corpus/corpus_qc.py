@@ -11,6 +11,9 @@ Three input kinds, one set of metrics (written per PSM, per run and per dataset)
               is_decoy, run_file_name, scan, rt). No spectra: score, decoy and
               composition metrics only.
 ``shard``     andes-ms2 shards (already annotated): annotation metrics re-aggregated.
+``msms``      MaxQuant ``msms.txt`` (ProteomeTools and many PRIDE PARTIAL submissions):
+              per-scan Fragmentation / Mass analyzer, PEP, Score, Reverse decoys and MaxQuant's
+              own ``Intensity coverage`` (its annotated-intensity fraction).
 
 Metrics
 -------
@@ -529,10 +532,86 @@ def cmd_overlap(a):
     print(f"union {len(counts)}; in >=2 datasets {sum(1 for v in counts.values() if v > 1)}")
 
 
+# ----------------------------------------------------------------------------- MaxQuant msms.txt
+# MaxQuant modification names -> Unimod (the common ones; anything else is kept by name).
+MQ_MODS = {
+    "Oxidation (M)": "UNIMOD:35", "Acetyl (Protein N-term)": "UNIMOD:1", "Acetyl (N-term)": "UNIMOD:1",
+    "Acetyl (K)": "UNIMOD:1", "Phospho (STY)": "UNIMOD:21", "Deamidation (NQ)": "UNIMOD:7",
+    "Gln->pyro-Glu": "UNIMOD:28", "Glu->pyro-Glu": "UNIMOD:27", "Carbamidomethyl (C)": "UNIMOD:4",
+    "GlyGly (K)": "UNIMOD:121", "Methyl (KR)": "UNIMOD:34", "Dimethyl (KR)": "UNIMOD:36", "Trimethyl (K)": "UNIMOD:37",
+    "Citrullin (R)": "UNIMOD:7", "Deamidation (R)": "UNIMOD:7", "Succinyl (K)": "UNIMOD:64", "Malonyl (K)": "UNIMOD:747",
+    "Crotonyl (K)": "UNIMOD:1363", "Nitro (Y)": "UNIMOD:354", "Sulfo (STY)": "UNIMOD:40", "Hydroxyproline": "UNIMOD:35",
+    "Oxidation (P)": "UNIMOD:35", "Cysteinyl": "UNIMOD:312", "Formyl (K)": "UNIMOD:122",
+}
+
+
+def cmd_msms(a):
+    """MaxQuant msms.txt (one or more): identification-level QC. MaxQuant writes per-scan
+    Fragmentation and Mass analyzer, PEP, Score, Reverse (decoys) and its own annotated
+    'Intensity coverage', so activation strata and decoy separation come for free."""
+    import pandas as pd
+
+    os.makedirs(a.out_dir, exist_ok=True)
+    want = ["Raw file", "Scan number", "Sequence", "Length", "Modifications", "Modified sequence", "Charge",
+            "Fragmentation", "Mass analyzer", "PEP", "Score", "Reverse", "Retention time", "Intensity coverage",
+            "Peak coverage", "Number of Matches", "Mass Error [ppm]", "Type"]
+    frames = []
+    for path in a.inputs:
+        cols = pd.read_csv(path, sep="\t", nrows=0).columns
+        frames.append(pd.read_csv(path, sep="\t", usecols=[c for c in want if c in cols], low_memory=False))
+    df = pd.concat(frames, ignore_index=True)
+    dec = df.get("Reverse", pd.Series("", index=df.index)).fillna("").astype(str).eq("+")
+    S = {"source": "maxquant_msms", "dataset": a.dataset or "", "n_rows": int(len(df)), "decoy_frac": float(dec.mean())}
+    if dec.any() and "Score" in df:
+        S["target_decoy_auc"] = {"Score": auc(df.Score[~dec], df.Score[dec])}
+    t = df[~dec].copy()
+    if a.max_pep is not None and "PEP" in t:
+        t = t[t.PEP <= a.max_pep]
+    S["pep_quantiles_targets"] = {p: q(t.PEP, p) for p in (0.5, 0.9, 0.99, 1.0)} if "PEP" in t else None
+    t["sequence"] = t.Sequence
+    t["charge"] = t.Charge
+    t["peptidoform"] = t["Modified sequence"].astype(str).str.strip("_")
+    mods = []
+    for m in t.get("Modifications", pd.Series("Unmodified", index=t.index)).fillna("Unmodified"):
+        out = set()
+        if m != "Unmodified":
+            for part in str(m).split(","):
+                name = re.sub(r"^\d+ ", "", part.strip())
+                out.add(MQ_MODS.get(name, f"name:{name}"))
+        mods.append("|".join(sorted(out)))
+    t["mods"] = mods
+    S.update(composition_summary(t))
+    if "Fragmentation" in t and "Mass analyzer" in t:
+        act = (t.Fragmentation.astype(str) + "-" + t["Mass analyzer"].astype(str))
+        S["activation_counts"] = {k: int(v) for k, v in act.value_counts().items()}
+        if "Intensity coverage" in t:
+            S["intensity_coverage_by_activation"] = {k: {p: q(g["Intensity coverage"], p) for p in (0.25, 0.5, 0.75)}
+                                                     for k, g in t.groupby(act)}
+    if "Mass Error [ppm]" in t:
+        S["prec_err_ppm_quantiles"] = {p: q(t["Mass Error [ppm]"], p) for p in (0.05, 0.5, 0.95)}
+    S["filter"] = f"targets, PEP <= {a.max_pep}"
+    if "Raw file" in t:
+        g = t.groupby("Raw file")
+        runs = pd.DataFrame({"n_psms": g.size(), "unique_peptidoforms": g.peptidoform.nunique(),
+                             "rt_max": g["Retention time"].max() * 60 if "Retention time" in t else np.nan,
+                             "ann_frac_median": g["Intensity coverage"].median() if "Intensity coverage" in t else np.nan})
+        runs.index.name = "run"
+        runs["z_n_psms"] = robust_z(runs.n_psms)
+        runs["outlier_flags"] = np.where(np.abs(runs.z_n_psms) > a.outlier_z, "n_psms", "")
+        runs.to_csv(os.path.join(a.out_dir, "run_qc.tsv"), sep="\t", float_format="%.5g")
+        S["n_runs"] = int(len(runs))
+        S["outlier_runs"] = runs.index[runs.outlier_flags != ""].tolist()
+    pq.write_table(pa.Table.from_pandas(t[["peptidoform", "sequence", "charge", "mods"]].assign(dataset=a.dataset or ""),
+                                        preserve_index=False), os.path.join(a.out_dir, "psm_qc.parquet"), compression="zstd")
+    json.dump(S, open(os.path.join(a.out_dir, "dataset_qc.json"), "w"), indent=1, default=float)
+    print(json.dumps({k: S.get(k) for k in ("n_rows", "decoy_frac", "target_decoy_auc", "unique_peptidoforms",
+                                            "isoleucine_written_as_L", "activation_counts")}, default=float))
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
-    for name in ("flat", "psm_table", "shard"):
+    for name in ("flat", "psm_table", "shard", "msms"):
         s = sub.add_parser(name)
         s.add_argument("--out-dir", required=True)
         s.add_argument("--dataset", default=None)
@@ -542,7 +621,7 @@ def main():
             s.add_argument("--workers", type=int, default=os.cpu_count())
             s.add_argument("--prec-tol-ppm", type=float, default=20.0)
             s.add_argument("--limit", type=int, default=0, help="rows per file (0 = all)")
-        if name == "psm_table":
+        if name in ("psm_table", "msms"):
             s.add_argument("--max-pep", type=float, default=0.01)
     s = sub.add_parser("peptidoforms")
     s.add_argument("--out", required=True)
@@ -550,7 +629,7 @@ def main():
     s = sub.add_parser("overlap")
     s.add_argument("inputs", nargs="+")
     a = p.parse_args()
-    {"flat": cmd_flat, "psm_table": cmd_psm_table, "shard": cmd_shard,
+    {"flat": cmd_flat, "psm_table": cmd_psm_table, "shard": cmd_shard, "msms": cmd_msms,
      "peptidoforms": cmd_peptidoforms, "overlap": cmd_overlap}[a.cmd](a)
 
 

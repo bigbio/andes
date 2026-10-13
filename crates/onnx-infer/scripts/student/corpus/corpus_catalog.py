@@ -26,6 +26,8 @@ Usage::
   python corpus_catalog.py spec > SCHEMA.tsv
   python corpus_catalog.py msnet --accession PXD009875 --qc-dir QC/PXD009875 --out-dir CAT [FLAT_DIR_OR_FILES...]
   python corpus_catalog.py qpx --accession PXD012255 --qc-dir QC/PXD012255 --out-dir CAT --sdrf PXD012255.sdrf.tsv
+  python corpus_catalog.py proteometools --accession PXD021013 --qc-dir QC/PXD021013 --out-dir CAT   # corpus_qc.py msms
+  python corpus_catalog.py pride-ids --accession PXD019643 --qc-dir QC/PXD019643 --meta meta.json --out-dir CAT
   python corpus_catalog.py pride --classified projects_classified.tsv --files files_summary.tsv \\
          --accessions PXD021013 PXD004732 --out-dir CAT
   python corpus_catalog.py merge --out-dir CAT CAT_PART...       # concatenate + validate
@@ -267,6 +269,9 @@ def cmd_from_qc(a, source):
     if source == "qpx":
         d.update(id_format="qpx parquet", id_engine="quantms (SAGE/Comet/MSGF+ + Percolator)",
                  id_fdr_method="Percolator PEP<=0.01 (as filtered here)", spectra_available="raw only")
+    if source == "proteometools":
+        d.update(id_format="MaxQuant msms.txt (per-pool zip)", id_engine="MaxQuant", sample_type="synthetic",
+                 id_fdr_method="MaxQuant PEP (filtered here)", spectra_available="raw only (+ matched peaks in msms.txt)")
     d.update({k: v for k, v in meta.items() if k in d})
     for k in meta:
         if k in d and f"{k}_src" in d:
@@ -312,7 +317,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("spec")
-    for src in ("msnet", "qpx", "other"):
+    for src in ("msnet", "qpx", "proteometools", "pride-ids", "other"):
         s = sub.add_parser(src)
         s.add_argument("--accession", required=True)
         s.add_argument("--qc-dir", required=True, help="corpus_qc.py output directory")
@@ -330,8 +335,8 @@ def main():
     a = p.parse_args()
     if a.cmd == "spec":
         cmd_spec(a)
-    elif a.cmd in ("msnet", "qpx", "other"):
-        cmd_from_qc(a, a.cmd)
+    elif a.cmd in ("msnet", "qpx", "proteometools", "pride-ids", "other"):
+        cmd_from_qc(a, "pride" if a.cmd == "pride-ids" else a.cmd)
     elif a.cmd == "pride":
         cmd_pride(a)
     else:

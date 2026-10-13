@@ -528,6 +528,100 @@ def cmd_summary(a):
     print(pd.crosstab(d.year, d.submission_type).to_string())
 
 
+# ----------------------------------------------------------------------------- peek-zip
+def _range(url, start, end=None):
+    h = {"Range": f"bytes={start}-{'' if end is None else end}"}
+    with urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=120) as r:
+        return r.read()
+
+
+def zip_members(url):
+    """Member names + sizes of a remote zip, read from its central directory with two HTTP
+    Range requests (no download). Handles zip64."""
+    import struct
+
+    with urllib.request.urlopen(urllib.request.Request(url, method="HEAD"), timeout=120) as r:
+        size = int(r.headers["Content-Length"])
+    tail = _range(url, max(0, size - 65536))
+    i = tail.rfind(b"PK\x05\x06")
+    cd_size, cd_off = struct.unpack("<II", tail[i + 12:i + 20])
+    if cd_off == 0xFFFFFFFF:
+        j = tail.rfind(b"PK\x06\x06")
+        cd_size, cd_off = struct.unpack("<QQ", tail[j + 40:j + 56])
+    cd = _range(url, cd_off, cd_off + cd_size - 1)
+    out, p = [], 0
+    while cd[p:p + 4] == b"PK\x01\x02":
+        method = struct.unpack("<H", cd[p + 10:p + 12])[0]
+        csize, usize = struct.unpack("<II", cd[p + 20:p + 28])
+        n, e, c = struct.unpack("<HHH", cd[p + 28:p + 34])
+        off = struct.unpack("<I", cd[p + 42:p + 46])[0]
+        extra = cd[p + 46 + n:p + 46 + n + e]
+        q = 0
+        while q + 4 <= len(extra):  # zip64 extended information
+            tag, ln = struct.unpack("<HH", extra[q:q + 4])
+            if tag == 1:
+                vals, k = extra[q + 4:q + 4 + ln], 0
+                if usize == 0xFFFFFFFF:
+                    usize = struct.unpack("<Q", vals[k:k + 8])[0]
+                    k += 8
+                if csize == 0xFFFFFFFF:
+                    csize = struct.unpack("<Q", vals[k:k + 8])[0]
+                    k += 8
+                if off == 0xFFFFFFFF:
+                    off = struct.unpack("<Q", vals[k:k + 8])[0]
+            q += 4 + ln
+        out.append((cd[p + 46:p + 46 + n].decode(errors="replace"), usize, csize, off, method))
+        p += 46 + n + e + c
+    return size, out
+
+
+def zip_extract(url, member, dest):
+    """Fetch one member of a remote zip by HTTP Range (deflate or stored) into dest."""
+    import struct
+    import zlib
+
+    _, members = zip_members(url)
+    hit = [m for m in members if m[0] == member]
+    if not hit:
+        raise SystemExit(f"{member} not in zip")
+    _, usize, csize, off, method = hit[0]
+    head = _range(url, off, off + 29)
+    n, e = struct.unpack("<HH", head[26:30])
+    start = off + 30 + n + e
+    d = zlib.decompressobj(-15) if method == 8 else None
+    with open(dest, "wb") as fh:
+        pos, step = start, 64 << 20
+        while pos < start + csize:
+            chunk = _range(url, pos, min(pos + step, start + csize) - 1)
+            fh.write(d.decompress(chunk) if d else chunk)
+            pos += len(chunk)
+        if d:
+            fh.write(d.flush())
+    return usize
+
+
+def cmd_peek_zip(a):
+    """Verify what a submission's zip holds (e.g. MaxQuant txt/msms.txt) without downloading it."""
+    page = 0
+    while True:
+        rows, _ = get(f"{API}/projects/{a.accession}/files?pageSize=100&page={page}")
+        hit = [x for x in rows if x["fileName"] == a.file]
+        if hit or len(rows) < 100:
+            break
+        page += 1
+    if not hit:
+        sys.exit(f"{a.file} not in {a.accession}")
+    loc = [x["value"] for x in hit[0]["publicFileLocations"] if x["value"].startswith("ftp://")][0]
+    url = loc.replace("ftp://ftp.pride.ebi.ac.uk", "https://ftp.pride.ebi.ac.uk")
+    size, members = zip_members(url)
+    print(f"{url}\t{size}")
+    for m in members:
+        print(f"{m[1]}\t{m[0]}")
+    if a.extract:
+        n = zip_extract(url, a.extract, a.out or os.path.basename(a.extract))
+        print(f"extracted {a.extract} ({n} bytes) -> {a.out or os.path.basename(a.extract)}")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -554,9 +648,14 @@ def main():
     sm = sub.add_parser("summary")
     sm.add_argument("--classified", required=True)
     sm.add_argument("--out", required=True)
+    pz = sub.add_parser("peek-zip")
+    pz.add_argument("--accession", required=True)
+    pz.add_argument("--file", required=True)
+    pz.add_argument("--extract", help="member to fetch by HTTP Range (e.g. txt/msms.txt)")
+    pz.add_argument("--out", help="destination of --extract")
     a = p.parse_args()
     {"fetch": cmd_fetch, "classify": cmd_classify, "files": cmd_files, "rank": cmd_rank,
-     "summary": cmd_summary}[a.cmd](a)
+     "summary": cmd_summary, "peek-zip": cmd_peek_zip}[a.cmd](a)
 
 
 if __name__ == "__main__":

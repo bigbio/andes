@@ -15,6 +15,7 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::OnceLock;
 
+use onnx_infer::andes_peptide::split_nterm_residue_delta;
 use onnx_infer::peptdeep::{PeptDeepPeptide, pack_ms2_batch, pack_rt_batch};
 use onnx_infer::deeplc::{self, DeepLcPeptide};
 use onnx_infer::ms2_native::{Ms2Conditions, Ms2Model, Ms2Scratch, N_BASE_ION, N_ION};
@@ -222,7 +223,30 @@ pub fn parse_peptide(s: &str) -> Option<(Form, Mass)> {
                         .iter()
                         .find(|(_, _, p)| pos == 1 && *p == Placement::ResidueOrNTerm && free(0, &mods))
                         .map(|(m, _, _)| (0, *m))
-                })?;
+                });
+            let Some(pick) = pick else {
+                // An N-terminal and a residue mod on residue 1 print as one summed delta.
+                if pos != 1 || !mods.is_empty() {
+                    return None;
+                }
+                let nterm_cands: Vec<(Mod, f64)> = MODS
+                    .iter()
+                    .filter(|m| matches!(m.3, Placement::NTerm | Placement::ResidueOrNTerm))
+                    .map(|m| (m.0, m.1))
+                    .collect();
+                let residue_cands: Vec<(Mod, f64)> = MODS
+                    .iter()
+                    .filter(|m| m.3 != Placement::NTerm && m.2.contains(aa))
+                    .map(|m| (m.0, m.1))
+                    .collect();
+                let (n, r) = split_nterm_residue_delta(delta, 2e-3, &nterm_cands, &residue_cands)?;
+                let n_mass = nterm_cands.iter().find(|m| m.0 == n).map(|m| m.1)?;
+                mods.push((0, n));
+                mods.push((1, r));
+                nterm += n_mass;
+                res[0] += delta - n_mass;
+                continue;
+            };
             if pick.0 == 0 {
                 nterm += delta;
             } else {
@@ -686,5 +710,53 @@ mod tests {
         let (f, _) = parse_peptide("K.Q-17.02655PEPTIDEK.D").unwrap();
         assert_eq!(f.mods, vec![(1, Mod::GlnPyroGlu)]);
         assert!(parse_peptide("K.AQ-17.02655PEPTIDEK.D").is_none());
+    }
+
+    /// The PIN string andes writes for a protein N-terminal Cys under fixed
+    /// carbamidomethyl-C and variable protein N-terminal acetyl.
+    fn andes_cam_acetyl_nterm_cys() -> String {
+        use model::{AminoAcidSetBuilder, ModLocation, Modification, Peptide};
+        let aa_set = AminoAcidSetBuilder::new_standard()
+            .add_fixed_mod(
+                Modification::from_mods_txt_line("57.021464,C,fix,any,Carbamidomethyl").unwrap(),
+            )
+            .add_variable_mod(
+                Modification::from_mods_txt_line("42.010565,*,opt,Prot-N-term,Acetyl").unwrap(),
+            )
+            .build()
+            .unwrap();
+        let first = aa_set
+            .variants_for(b'C', ModLocation::ProtNTerm)
+            .iter()
+            .find(|aa| {
+                aa.mod_
+                    .as_ref()
+                    .is_some_and(|m| (m.mass_delta - 99.032029).abs() < 1e-3)
+            })
+            .expect("stacked CAM + acetyl variant")
+            .clone();
+        let mut residues = vec![first];
+        for r in b"PEPTIDEK" {
+            residues.push(aa_set.standard(*r).unwrap().clone());
+        }
+        Peptide::new(residues, b'M', b'R').to_string()
+    }
+
+    #[test]
+    fn parses_summed_nterm_and_residue_delta_from_the_andes_writer() {
+        let s = andes_cam_acetyl_nterm_cys();
+        assert_eq!(s, "M.C+99.03203PEPTIDEK.R");
+        let (f, m) = parse_peptide(&s).expect("summed CAM + acetyl delta");
+        assert_eq!(f.seq, "CPEPTIDEK");
+        assert_eq!(f.mods, vec![(0, Mod::Acetyl), (1, Mod::Carbamidomethyl)]);
+        assert!((m.nterm - 42.010565).abs() < 1e-4);
+        assert!((m.res[0] - (103.009_184_5 + 57.021464)).abs() < 1e-4);
+        assert!((m.nterm + m.res[0] - (103.009_184_5 + 99.03203)).abs() < 1e-9);
+        // fixed TMT6plex on K under variable N-terminal acetyl: K+271.17350
+        let (f, _) = parse_peptide("_.K+271.17350PEPTIDEK+229.16293.R").unwrap();
+        assert_eq!(
+            f.mods,
+            vec![(0, Mod::Acetyl), (1, Mod::Tmt6plex), (9, Mod::Tmt6plex)]
+        );
     }
 }

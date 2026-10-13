@@ -31,7 +31,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from mod_composition import N_COMP, UNIMOD, VECTORS, match_mass  # noqa: E402
+from mod_composition import N_COMP, UNIMOD, VECTORS, match_mass, split_nterm_residue  # noqa: E402
 
 AA = "ACDEFGHIKLMNPQRSTVWY"
 AA_TOK = {a: i + 3 for i, a in enumerate(AA)}
@@ -72,7 +72,11 @@ def parse_andes(s: str):
 
     N-terminal deltas follow the first residue; the first N-term-capable delta
     there goes to the N-term token (``K+42.01`` is read as N-terminal acetyl,
-    the common case). Returns None for an unmatched delta."""
+    the common case). andes writes an N-terminal and a residue mod on residue 1
+    as one summed delta (``_.C+99.03203PEPTIDEK.R`` is acetyl +
+    carbamidomethyl-C); such a delta is split into the closest N-terminal +
+    residue pair. Returns None for an unmatched delta. Mirrors
+    ``RtPeptide::from_andes``."""
     b = s
     if len(b) > 4 and b[1] == "." and b[-2] == ".":
         b = b[2:-2]
@@ -94,6 +98,12 @@ def parse_andes(s: str):
             nterm_used = True
         elif res_id is not None:
             mods.append((pos, res_id))
+        elif pos == 1 and not nterm_used and not mods:
+            pair = split_nterm_residue(d, aa)
+            if pair is None:
+                return None
+            mods += [(0, pair[0]), (1, pair[1])]
+            nterm_used = True
         else:
             return None
     return "".join(seq), sorted(mods)

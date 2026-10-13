@@ -885,16 +885,19 @@ impl<R: BufRead> MzMLReader<R> {
                             }
                         }
                         b"binaryDataArray" if self.state == State::Spectrum => {
-                            // The arrays of a spectrum the level filter drops are
-                            // never decoded (MS1 and MS3 scans of an MS2 search).
-                            // `ms level` precedes the binary arrays in mzML.
+                            // The arrays of a spectrum the level filter drops and
+                            // no capture keeps are never decoded (MS1 and MS3 scans
+                            // of an MS2 search without quantification). `ms level`
+                            // precedes the binary arrays in mzML.
                             let dropped = self
                                 .current
                                 .as_ref()
                                 .and_then(|sb| sb.ms_level)
                                 .is_some_and(|level| {
                                     (level < self.ms_level_min || level > self.ms_level_max)
-                                        && !(self.capture_ms1 && level == 1)
+                                        && !((self.capture_ms1 || self.capture_run_ms1)
+                                            && level == 1)
+                                        && !(self.capture_product_scans && level >= 3)
                                 });
                             self.binary_ctx = (!dropped).then(BinaryArrayCtx::new);
                             self.state = State::BinaryDataArray;

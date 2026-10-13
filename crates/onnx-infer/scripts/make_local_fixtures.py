@@ -5,6 +5,7 @@ Produces under fixtures/:
   - tree_leq.agbd / tree_leq.onnx     (1-feature LEAF split; already may exist)
   - peak_gbdt.agbd / peak_gbdt.onnx   (3-feature multi-tree, andes peak-like)
   - intensity_mlp.onnx                (tiny MatMul+ReLU; tract-runnable)
+  - identity_named.onnx               (Identity node `copy_node`: x -> y; output-name check)
 
 Usage:
   python scripts/make_local_fixtures.py
@@ -145,10 +146,35 @@ def make_intensity_mlp():
     print("wrote", out, "smoke", y.reshape(-1))
 
 
+def make_identity_named():
+    """`Identity(x) -> y` in a node named `copy_node`.
+
+    The node name differs from the graph output name, so a backend that reports
+    node names instead of output tensor names fails the tract test on this file.
+    """
+    graph = helper.make_graph(
+        [helper.make_node("Identity", ["x"], ["y"], name="copy_node")],
+        "identity_named",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, ["batch", 1])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, ["batch", 1])],
+    )
+    model = helper.make_model(
+        graph,
+        producer_name="onnx-infer/make_local_fixtures",
+        opset_imports=[helper.make_opsetid("", 17)],
+        ir_version=8,
+    )
+    checker.check_model(model)
+    out = FIX / "identity_named.onnx"
+    save(model, out)
+    print("wrote", out)
+
+
 def main():
     FIX.mkdir(exist_ok=True)
     make_peak_gbdt()
     make_intensity_mlp()
+    make_identity_named()
 
 
 if __name__ == "__main__":

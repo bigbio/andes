@@ -179,10 +179,11 @@ def make_batch(items):
             torch.from_numpy(act), torch.from_numpy(ins))
 
 
-def predict(model: Ms2Cnn, requests, bs: int = 1024, device="cpu"):
+def predict(model: Ms2Cnn, requests, bs: int = 1024, device="cpu", raw: bool = False):
     """requests: (proforma, charge, nce, activation name, instrument name) ->
-    list of (n-1, N_ION) arrays clipped at 0 with invalid channels set to 0, or None
-    when the peptidoform cannot be encoded."""
+    list of (n-1, N_ION) arrays clipped at 0 with invalid channels set to 0 (the
+    unprocessed network output with ``raw``), or None when the peptidoform cannot
+    be encoded."""
     out = [None] * len(requests)
     enc = []
     for i, (pf, z, nce, act, instr) in enumerate(requests):
@@ -199,7 +200,8 @@ def predict(model: Ms2Cnn, requests, bs: int = 1024, device="cpu"):
             for b, (i, (seq, mods), it) in enumerate(chunk):
                 n = len(seq)
                 v = valid_mask(seq, mods, it[2])
-                out[i] = np.where(v, np.maximum(y[b, : n - 1], 0), 0).astype(np.float32)
+                y_b = y[b, : n - 1]
+                out[i] = (y_b if raw else np.where(v, np.maximum(y_b, 0), 0)).astype(np.float32)
     return out
 
 

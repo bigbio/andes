@@ -166,7 +166,7 @@ pub fn valid_mask(p: &RtPeptide, charge: u8) -> Vec<bool> {
             ox[pos] += u32::from(id == OXIDATION && aa == b'M');
         }
     }
-    let prefix = |v: &mut Vec<u32>| {
+    let prefix = |v: &mut [u32]| {
         let mut acc = 0;
         for x in v.iter_mut() {
             acc += *x;

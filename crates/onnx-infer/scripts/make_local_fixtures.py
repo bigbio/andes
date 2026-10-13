@@ -152,10 +152,13 @@ def make_intensity_mlp():
     b = np.array([0.05], dtype=np.float32)
     w_init = numpy_helper.from_array(W, name="W")
     b_init = numpy_helper.from_array(b, name="B")
+    # Node names differ from their output tensor names (as in torch exports, where
+    # the output `rt_pred` is produced by a node `/Squeeze`), so backends are
+    # tested to report tensor names.
     nodes = [
-        helper.make_node("MatMul", ["features", "W"], ["xw"]),
-        helper.make_node("Add", ["xw", "B"], ["pre"]),
-        helper.make_node("Relu", ["pre"], ["score"]),
+        helper.make_node("MatMul", ["features", "W"], ["xw"], name="/MatMul"),
+        helper.make_node("Add", ["xw", "B"], ["pre"], name="/Add"),
+        helper.make_node("Relu", ["pre"], ["score"], name="/Relu"),
     ]
     graph = helper.make_graph(
         nodes,

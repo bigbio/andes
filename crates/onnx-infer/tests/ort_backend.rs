@@ -34,6 +34,18 @@ fn doubles_from_path_and_manifest() {
 }
 
 #[test]
+fn reports_onnx_tensor_names() {
+    let mut s =
+        OnnxSession::from_manifest(fixture("intensity_mlp.json"), BackendKind::Ort).unwrap();
+    assert_eq!(s.input_names(), ["features"]);
+    assert_eq!(s.output_names(), ["score"]);
+    let out = s
+        .run_one(NamedTensor::new("features", vec![1, 4], vec![0.0; 4]).unwrap())
+        .unwrap();
+    assert_eq!(out.name, "score");
+}
+
+#[test]
 fn rejects_unknown_input_name() {
     let mut s =
         OnnxSession::from_manifest(fixture("intensity_mlp.json"), BackendKind::Ort).unwrap();

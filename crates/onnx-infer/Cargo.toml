@@ -29,10 +29,14 @@ tracing = { workspace = true }
 tract-onnx = { version = "0.21.13", optional = true }
 
 [dev-dependencies]
+# Native AGBD decoder for the fixture parity test.
+scoring = { path = "../scoring" }
 serde_json = "1"
 tempfile = "3.10"
 # mzML reading for the `rescore_pin` example only.
 input = { path = "../input" }
+# andes's peptide writer, for parser tests on the strings andes actually writes.
+model = { path = "../model" }
 
 [[example]]
 name = "rescore_pin"

@@ -26,6 +26,9 @@ impl TractSession {
             .map_err(|e| Error::Inference(format!("tract load {}: {e}", path.display())))?;
 
         // Capture ONNX-facing names before optimization rewrites the graph.
+        // An input is a source node named after its tensor. An output is an
+        // outlet of an arbitrary node: its ONNX tensor name is the outlet
+        // label, while the node name is the producing operator's name.
         let input_names: Vec<String> = inferred
             .inputs
             .iter()
@@ -36,7 +39,9 @@ impl TractSession {
             .outputs
             .iter()
             .enumerate()
-            .map(|(i, outlet)| name_or_fallback(&inferred.nodes[outlet.node].name, "output", i))
+            .map(|(i, outlet)| {
+                name_or_fallback(inferred.outlet_label(*outlet).unwrap_or(""), "output", i)
+            })
             .collect();
 
         let runnable = inferred

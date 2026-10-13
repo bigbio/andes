@@ -157,6 +157,7 @@ impl Ms2Conditions {
 pub fn valid_mask(p: &RtPeptide, charge: u8) -> Vec<bool> {
     let seq = p.sequence.as_bytes();
     let n = seq.len();
+    // per residue (1-based, slot 0 = before the first residue): carriers, then prefix sums
     let (mut ph, mut ox) = (vec![0u32; n + 1], vec![0u32; n + 1]);
     for &(pos, id) in &p.mods {
         if (1..=n).contains(&pos) {
@@ -165,10 +166,15 @@ pub fn valid_mask(p: &RtPeptide, charge: u8) -> Vec<bool> {
             ox[pos] += u32::from(id == OXIDATION && aa == b'M');
         }
     }
-    for i in 1..=n {
-        ph[i] += ph[i - 1];
-        ox[i] += ox[i - 1];
-    }
+    let prefix = |v: &mut Vec<u32>| {
+        let mut acc = 0;
+        for x in v.iter_mut() {
+            acc += *x;
+            *x = acc;
+        }
+    };
+    prefix(&mut ph);
+    prefix(&mut ox);
     let mut v = vec![false; n.saturating_sub(1) * N_ION];
     for i in 0..n.saturating_sub(1) {
         for (k, &(b, z, loss)) in ION_TYPES.iter().enumerate() {
@@ -469,11 +475,10 @@ impl Ms2Model {
                 for i in 0..np {
                     let qi = &s.qkv[i * 3 * ch + off..i * 3 * ch + off + dh];
                     let mut mx = f32::NEG_INFINITY;
-                    for j in 0..np {
+                    for (j, a) in s.att.iter_mut().enumerate() {
                         let kj = &s.qkv[j * 3 * ch + ch + off..j * 3 * ch + ch + off + dh];
-                        let sc = qi.iter().zip(kj).map(|(a, b)| a * b).sum::<f32>() * scale;
-                        s.att[j] = sc;
-                        mx = mx.max(sc);
+                        *a = qi.iter().zip(kj).map(|(x, y)| x * y).sum::<f32>() * scale;
+                        mx = mx.max(*a);
                     }
                     let mut sum = 0.0f32;
                     for w in s.att.iter_mut() {
@@ -481,8 +486,8 @@ impl Ms2Model {
                         sum += *w;
                     }
                     let oi = &mut s.h[i * ch + off..i * ch + off + dh];
-                    for j in 0..np {
-                        let w = s.att[j] / sum;
+                    for (j, &a) in s.att.iter().enumerate() {
+                        let w = a / sum;
                         let vj = &s.qkv[j * 3 * ch + 2 * ch + off..j * 3 * ch + 2 * ch + off + dh];
                         for (o, v) in oi.iter_mut().zip(vj) {
                             *o += w * v;

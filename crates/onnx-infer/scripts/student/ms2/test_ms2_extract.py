@@ -14,6 +14,7 @@ import pyarrow.parquet as pq
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from ms2_common import fragment_mz, precursor_mz, valid_mask  # noqa: E402
+from ms2_selftest import write_mzml  # noqa: E402
 from mod_composition import MASSES  # noqa: E402
 
 AMIDATED = 2
@@ -54,3 +55,35 @@ def test_flats_keep_c_terminal_amidation(tmp_path):
     kept = pq.read_table(glob.glob(str(out / "part-flat-*.parquet"))[0]).column("peptidoform").to_pylist()
     assert kept == ["PEPTIDEK", "PEPTIDEK-[UNIMOD:2]"], kept
 
+
+def test_keep_mzml_preserves_the_converted_file(tmp_path):
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / "run_a.raw").write_bytes(b"")
+    source = tmp_path / "source.mzML"
+    write_mzml(source, [])
+    # Stand-in converter: copies the prepared mzML to <outdir>/<stem>.mzML.
+    trfp = tmp_path / "trfp.sh"
+    trfp.write_text('#!/bin/sh\n'
+                    'while [ $# -gt 0 ]; do case "$1" in -i) I="$2"; shift 2;; -o) O="$2"; shift 2;; *) shift;; esac; done\n'
+                    f'cp "{source}" "$O/$(basename "$I" .raw).mzML"\n')
+    trfp.chmod(0o755)
+    selected = tmp_path / "selected.parquet"
+    pq.write_table(pa.table({"run": ["run_a"], "scan": [1], "peptidoform": ["PEPTIDEK"], "charge": [2],
+                             "pep": [0.001]}), selected)
+    tasks = tmp_path / "tasks.tsv"
+    tasks.write_text(f"task\tdataset\truns\tselected\traw_dir\n1\tPXD000000\trun_a\t{selected}\t{raw_dir}\n")
+    work = tmp_path / "work"
+    common = ["--tasks", tasks, "--task-index", 1, "--out-dir", tmp_path / "shards", "--work-dir", work,
+              "--trfp", trfp, "--overwrite"]
+
+    run_script("ms2_extract_raw.py", *common, "--keep-mzml")
+    kept = glob.glob(str(work / "**" / "run_a.mzML"), recursive=True)
+    assert len(kept) == 1, kept
+    assert open(kept[0]).read() == open(source).read()
+
+    # Without the flag the scratch directory is removed.
+    for d in glob.glob(str(work / "*")):
+        subprocess.run(["rm", "-rf", d], check=True)
+    run_script("ms2_extract_raw.py", *common)
+    assert glob.glob(str(work / "**" / "*.mzML"), recursive=True) == []

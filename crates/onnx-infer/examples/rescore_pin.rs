@@ -1,4 +1,5 @@
-//! Predicted-spectrum and RT features for every row of a Percolator PIN, with tract.
+//! Predicted-spectrum and RT features for every row of a Percolator PIN, with
+//! tract or ONNX Runtime (`--backend tract|ort`).
 //!
 //! Reads an andes PIN and the mzML it was searched from, predicts fragment
 //! intensities and/or retention time for each distinct peptidoform with one
@@ -11,6 +12,10 @@
 //!   --model peptdeep --pin search.pin --mzml run.mzML --models DIR --out features.tsv \
 //!   --frag-tol 0.5 --frag-unit da --threads 8
 //! ```
+//!
+//! `--backend ort` (build with `--features ort`) runs the graphs on ONNX
+//! Runtime; `--intra-threads N` gives each ONNX Runtime session an N-thread
+//! operator pool (default 1: parallelism comes from `--threads` workers).
 //!
 //! `--model` selects the family (feature-column prefix in brackets):
 //!
@@ -40,7 +45,7 @@ use std::time::Instant;
 use models::{
     AndesMs2, DeepLc, Form, H2O, Ion, Mass, Ms2pip, PROTON, PeptDeep, Predictor, Prosit, parse_peptide,
 };
-use onnx_infer::OnnxSession;
+use onnx_infer::{BackendKind, BackendOptions, OnnxSession};
 
 struct Args {
     model: String,
@@ -56,6 +61,8 @@ struct Args {
     instrument: String,
     activation: String,
     ms2pip_model: String,
+    backend: BackendKind,
+    intra_threads: usize,
 }
 
 fn parse_args() -> Args {
@@ -73,6 +80,8 @@ fn parse_args() -> Args {
         instrument: "Lumos".into(),
         activation: "HCD-FTMS".into(),
         ms2pip_model: "HCD2021".into(),
+        backend: BackendKind::Tract,
+        intra_threads: 1,
     };
     let v: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -92,6 +101,8 @@ fn parse_args() -> Args {
             "--instrument" => a.instrument = val,
             "--activation" => a.activation = val,
             "--ms2pip-model" => a.ms2pip_model = val,
+            "--backend" => a.backend = models::parse_backend(&val),
+            "--intra-threads" => a.intra_threads = val.parse().expect("--intra-threads"),
             other => panic!("unknown argument {other}"),
         }
         i += 2;
@@ -193,6 +204,20 @@ fn ms2_features(
     ]
 }
 
+/// Process CPU time (user + system) in seconds; 0 where `/proc` is absent.
+fn cpu_s() -> f64 {
+    std::fs::read_to_string("/proc/self/stat")
+        .ok()
+        .and_then(|s| {
+            // Fields after the parenthesised command name; utime, stime are 14, 15.
+            let rest = s.rsplit_once(')')?.1;
+            let f: Vec<&str> = rest.split_whitespace().collect();
+            let t = f.get(11)?.parse::<f64>().ok()? + f.get(12)?.parse::<f64>().ok()?;
+            Some(t / 100.0)
+        })
+        .unwrap_or(0.0)
+}
+
 fn rss_mb() -> f64 {
     std::fs::read_to_string("/proc/self/status")
         .ok()
@@ -204,13 +229,15 @@ fn rss_mb() -> f64 {
         .map_or(0.0, |kb| kb / 1024.0)
 }
 
-/// Run `jobs` across worker threads, each with shared handles on `master`.
-fn run_parallel<J: Sync, F>(master: &[OnnxSession], threads: usize, jobs: &[J], work: F) -> f64
+/// Run `jobs` across worker threads, each with shared handles on `master`;
+/// returns (wall, process CPU) seconds.
+fn run_parallel<J: Sync, F>(master: &[OnnxSession], threads: usize, jobs: &[J], work: F) -> (f64, f64)
 where
     F: Fn(&mut [OnnxSession], &J) + Sync,
 {
     let next = AtomicUsize::new(0);
     let t0 = Instant::now();
+    let c0 = cpu_s();
     let handles: Vec<Vec<OnnxSession>> = (0..threads)
         .map(|_| master.iter().map(|s| s.share().expect("share session")).collect())
         .collect();
@@ -228,7 +255,7 @@ where
             });
         }
     });
-    t0.elapsed().as_secs_f64()
+    (t0.elapsed().as_secs_f64(), cpu_s() - c0)
 }
 
 /// Group item indices by `key` and chunk each group into batches.
@@ -247,6 +274,7 @@ fn batches(keys: impl Iterator<Item = usize>, batch: usize) -> Vec<Vec<usize>> {
 
 fn main() {
     let args = parse_args();
+    models::set_backend(args.backend, BackendOptions { intra_threads: args.intra_threads });
     let pred: Box<dyn Predictor> = match args.model.as_str() {
         "peptdeep" => Box::new(PeptDeep::new(&args.models, args.nce, &args.instrument)),
         "ms2pip" => Box::new(Ms2pip { dir: args.models.clone(), model: args.ms2pip_model.clone() }),
@@ -297,8 +325,9 @@ fn main() {
     }
     let unparsed = rows.iter().filter(|r| r.form.is_none() || r.charge == 0).count();
     eprintln!(
-        "model {} | PIN rows {} distinct peptidoforms {} unparsed rows {} ({:.1}s)",
+        "model {} backend {:?} | PIN rows {} distinct peptidoforms {} unparsed rows {} ({:.1}s)",
         args.model,
+        args.backend,
         rows.len(),
         forms.len(),
         unparsed,
@@ -326,7 +355,7 @@ fn main() {
         let rt_forms: Vec<usize> = (0..forms.len()).filter(|&i| pred.supports_rt(&forms[i].0)).collect();
         let jobs = batches(rt_forms.iter().map(|&i| pred.batch_key(&forms[i].0)), args.batch);
         let out = Mutex::new(&mut rt_pred);
-        let wall = run_parallel(&master, args.threads, &jobs, |s, job| {
+        let (wall, cpu) = run_parallel(&master, args.threads, &jobs, |s, job| {
             let fs: Vec<&Form> = job.iter().map(|&j| &forms[rt_forms[j]].0).collect();
             let v = pred.rt(s, &fs);
             let mut g = out.lock().unwrap();
@@ -334,7 +363,12 @@ fn main() {
                 g[rt_forms[j]] = x;
             }
         });
-        eprintln!("RT: {} forms in {} batches, wall {wall:.1}s", rt_forms.len(), jobs.len());
+        eprintln!(
+            "RT: {} forms in {} batches, wall {wall:.1}s cpu {cpu:.1}s ({:.0} us/form cpu)",
+            rt_forms.len(),
+            jobs.len(),
+            cpu * 1e6 / rt_forms.len().max(1) as f64
+        );
     }
 
     // MS2 over distinct supported (form, charge).
@@ -356,7 +390,7 @@ fn main() {
     if !fz.is_empty() {
         let jobs = batches(fz.iter().map(|(f, _)| pred.batch_key(&forms[*f].0)), args.batch);
         let out = Mutex::new(&mut ms2_pred);
-        let wall = run_parallel(&master, args.threads, &jobs, |s, job| {
+        let (wall, cpu) = run_parallel(&master, args.threads, &jobs, |s, job| {
             let items: Vec<(&Form, u8)> = job.iter().map(|&i| (&forms[fz[i].0].0, fz[i].1)).collect();
             let v = pred.ms2(s, &items);
             let mut g = out.lock().unwrap();
@@ -364,7 +398,12 @@ fn main() {
                 g[i] = x;
             }
         });
-        eprintln!("MS2: {} (form, charge) in {} batches, wall {wall:.1}s", fz.len(), jobs.len());
+        eprintln!(
+            "MS2: {} (form, charge) in {} batches, wall {wall:.1}s cpu {cpu:.1}s ({:.0} us/item cpu)",
+            fz.len(),
+            jobs.len(),
+            cpu * 1e6 / fz.len() as f64
+        );
     }
 
     // Features per PIN row.

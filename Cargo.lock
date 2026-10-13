@@ -1321,7 +1321,7 @@ dependencies = [
  "icu_normalizer_data",
  "icu_properties",
  "icu_provider",
- "smallvec",
+ "smallvec 1.15.1",
  "zerovec",
 ]
 
@@ -1379,7 +1379,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b0875f23caa03898994f6ddc501886a45c7d3d62d04d2d90788d47be1b1e4de"
 dependencies = [
  "idna_adapter",
- "smallvec",
+ "smallvec 1.15.1",
  "utf8_iter",
 ]
 
@@ -1604,6 +1604,16 @@ name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+
+[[package]]
+name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
 
 [[package]]
 name = "libm"
@@ -2001,6 +2011,7 @@ name = "onnx-infer"
 version = "0.3.0"
 dependencies = [
  "input",
+ "ort",
  "serde",
  "serde_json",
  "tempfile",
@@ -2019,6 +2030,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "ort"
+version = "2.0.0-rc.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fa7e49bd669d32d7bc2a15ec540a527e7764aec722a45467814005725bcd721"
+dependencies = [
+ "libloading",
+ "ndarray",
+ "ort-sys",
+ "smallvec 2.0.0-alpha.10",
+ "tracing",
+]
+
+[[package]]
+name = "ort-sys"
+version = "2.0.0-rc.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e2aba9f5c7c479925205799216e7e5d07cc1d4fa76ea8058c60a9a30f6a4e890"
+dependencies = [
+ "pkg-config",
+]
+
+[[package]]
 name = "output"
 version = "0.3.0"
 dependencies = [
@@ -2032,7 +2065,7 @@ dependencies = [
  "rayon",
  "scoring",
  "search",
- "smallvec",
+ "smallvec 1.15.1",
  "tempfile",
 ]
 
@@ -2055,7 +2088,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "redox_syscall",
- "smallvec",
+ "smallvec 1.15.1",
  "windows-link",
 ]
 
@@ -2435,7 +2468,7 @@ dependencies = [
  "fallible-streaming-iterator",
  "hashlink",
  "libsqlite3-sys",
- "smallvec",
+ "smallvec 1.15.1",
 ]
 
 [[package]]
@@ -2575,7 +2608,7 @@ dependencies = [
  "scoring",
  "serde",
  "serde_yaml",
- "smallvec",
+ "smallvec 1.15.1",
  "tempfile",
 ]
 
@@ -2692,6 +2725,12 @@ name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
+
+[[package]]
+name = "smallvec"
+version = "2.0.0-alpha.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51d44cfb396c3caf6fbfd0ab422af02631b69ddd96d2eff0b0f0724f9024051b"
 
 [[package]]
 name = "snap"
@@ -3020,7 +3059,7 @@ dependencies = [
  "num-traits",
  "paste",
  "rustfft",
- "smallvec",
+ "smallvec 1.15.1",
  "tract-data",
  "tract-linalg",
 ]
@@ -3046,7 +3085,7 @@ dependencies = [
  "num-traits",
  "parking_lot",
  "scan_fmt",
- "smallvec",
+ "smallvec 1.15.1",
  "string-interner",
 ]
 
@@ -3082,7 +3121,7 @@ dependencies = [
  "num-traits",
  "paste",
  "scan_fmt",
- "smallvec",
+ "smallvec 1.15.1",
  "time",
  "tract-data",
  "unicode-normalization",
@@ -3116,7 +3155,7 @@ dependencies = [
  "memmap2",
  "num-integer",
  "prost",
- "smallvec",
+ "smallvec 1.15.1",
  "tract-hir",
  "tract-nnef",
  "tract-onnx-opl",

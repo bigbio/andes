@@ -35,9 +35,6 @@ pub enum Error {
         feature: &'static str,
     },
 
-    #[error("ONNX backend {0:?} is not implemented yet")]
-    BackendUnimplemented(BackendKind),
-
     #[error("ONNX load/run failed: {0}")]
     Inference(String),
 
@@ -66,7 +63,7 @@ pub enum Error {
 pub enum BackendKind {
     /// Pure-Rust [`tract`](https://github.com/sonos/tract) (`--features tract`).
     Tract,
-    /// ONNX Runtime via `ort` (planned; broader operator coverage).
+    /// ONNX Runtime via [`ort`](https://ort.pyke.io) (`--features ort`).
     Ort,
 }
 

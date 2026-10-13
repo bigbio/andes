@@ -1,9 +1,10 @@
-//! Parity of onnx-infer (tract) predictions with a model's reference Python
-//! implementation, from the TSV its `scripts/<model>_reference.py` writes.
+//! Parity of onnx-infer predictions (tract or ONNX Runtime, `--backend`) with a
+//! model's reference Python implementation, from the TSV its
+//! `scripts/<model>_reference.py` writes.
 //!
 //! ```text
 //! cargo run --release -p onnx-infer --features tract --example model_parity -- \
-//!   --model ms2pip --reference ms2pip_reference.tsv --models DIR
+//!   --model ms2pip --reference ms2pip_reference.tsv --models DIR [--backend ort]
 //! ```
 //!
 //! Prints the largest absolute and relative deviation per model variant.
@@ -18,7 +19,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use onnx_infer::{BackendKind, OnnxSession, ms2pip};
+use onnx_infer::{BackendOptions, OnnxSession, ms2pip};
 
 struct Args {
     model: String,
@@ -28,13 +29,11 @@ struct Args {
 
 fn parse_args() -> Args {
     let v: Vec<String> = std::env::args().skip(1).collect();
-    let get = |k: &str| {
-        v.iter()
-            .position(|a| a == k)
-            .and_then(|i| v.get(i + 1))
-            .unwrap_or_else(|| panic!("missing {k}"))
-            .clone()
-    };
+    let opt = |k: &str| v.iter().position(|a| a == k).and_then(|i| v.get(i + 1)).cloned();
+    let get = |k: &str| opt(k).unwrap_or_else(|| panic!("missing {k}"));
+    let backend = models::parse_backend(opt("--backend").as_deref().unwrap_or("tract"));
+    models::set_backend(backend, BackendOptions::default());
+    println!("backend {backend:?}");
     Args {
         model: get("--model"),
         reference: get("--reference").into(),
@@ -64,8 +63,7 @@ impl Dev {
 
 fn load(dir: &Path, stem: &str) -> OnnxSession {
     let t = Instant::now();
-    let s = OnnxSession::from_manifest(dir.join(format!("{stem}.json")), BackendKind::Tract)
-        .unwrap_or_else(|e| panic!("load {stem}: {e}"));
+    let s = models::load(dir, &format!("{stem}.json"));
     println!("load {stem}: {:.2}s", t.elapsed().as_secs_f64());
     s
 }
@@ -184,7 +182,7 @@ fn deeplc_parity(a: &Args) {
         let r = pred.rt(&mut s, &[&form])[0];
         let w: f32 = x[col("rt_deeplc")].parse().unwrap();
         rt.add(r, w);
-        println!("{:60} tract {r:12.4} deeplc {w:12.4}", x[col("proforma")]);
+        println!("{:60} onnx-infer {r:12.4} deeplc {w:12.4}", x[col("proforma")]);
         n += 1;
     }
     println!(

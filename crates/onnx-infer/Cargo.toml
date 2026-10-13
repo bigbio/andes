@@ -14,9 +14,10 @@ categories = ["science", "algorithms"]
 default = []
 # Pure-Rust ONNX Runtime (Apache-2.0). Preferred for an Apache-clean core.
 tract = ["dep:tract-onnx"]
-# Placeholder for ONNX Runtime (`ort`) — broader op coverage, native dep.
-# Not wired yet; enabling this feature currently fails at compile time with a clear message.
-ort = []
+# ONNX Runtime (MIT) through the `ort` crate. The runtime library is loaded at
+# run time (`load-dynamic`): nothing is downloaded or linked at build time. See
+# README "ONNX Runtime backend" for how the shared library is located.
+ort = ["dep:ort"]
 
 [dependencies]
 thiserror = { workspace = true }
@@ -28,6 +29,10 @@ tracing = { workspace = true }
 # 0.21.x pulls liquid → kstring; keep Cargo.lock on kstring ≤2.0.2 until MSRV ≥1.96.
 tract-onnx = { version = "0.21.13", optional = true }
 
+# rc.10 targets ONNX Runtime 1.22 and builds on the workspace toolchain; newer
+# runtime libraries (1.22+) load through the same C API version.
+ort = { version = "=2.0.0-rc.10", optional = true, default-features = false, features = ["std", "load-dynamic"] }
+
 [dev-dependencies]
 serde_json = "1"
 tempfile = "3.10"
@@ -36,8 +41,6 @@ input = { path = "../input" }
 
 [[example]]
 name = "rescore_pin"
-required-features = ["tract"]
 
 [[example]]
 name = "model_parity"
-required-features = ["tract"]

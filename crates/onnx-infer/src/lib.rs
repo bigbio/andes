@@ -17,9 +17,11 @@
 //!   not depend on tract vs ONNX Runtime.
 //! - **Sidecar manifests** ([`ModelManifest`]) carry provenance, I/O names, task
 //!   hints, and tool-specific `extras` (NCE, vocab path, …).
-//! - **Feature-gated engines**: enable `--features tract` for the pure-Rust
-//!   Apache-2.0 backend. An `ort` feature is reserved for broader op coverage
-//!   (required for `ai.onnx.ml` TreeEnsemble and many Transformer graphs).
+//! - **Feature-gated engines**: `--features tract` for the pure-Rust
+//!   Apache-2.0 backend; `--features ort` for ONNX Runtime (MIT), loaded as a
+//!   shared library at run time (see [`backend::ort_backend`]). ONNX Runtime
+//!   covers `ai.onnx.ml` (TreeEnsemble) and is several times faster on the
+//!   bundled predictor graphs.
 //!
 //! ## Example (tract)
 //!
@@ -53,5 +55,5 @@ pub mod rt_native;
 
 pub use error::{BackendKind, Error, Result};
 pub use manifest::{ModelManifest, ModelTask, Provenance, TensorSpec};
-pub use session::{InferenceBackend, OnnxSession};
+pub use session::{BackendOptions, InferenceBackend, OnnxSession};
 pub use tensor::NamedTensor;

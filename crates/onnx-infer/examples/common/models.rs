@@ -2,7 +2,8 @@
 //! parsing and one predictor per supported model family.
 //!
 //! A predictor turns peptidoforms into retention-time and/or fragment
-//! intensity predictions with tract. Peptidoforms a model cannot encode are
+//! intensity predictions with the engine chosen by [`set_backend`] (tract or
+//! ONNX Runtime). Peptidoforms a model cannot encode are
 //! rejected by [`Predictor::supports_rt`] / [`Predictor::supports_ms2`] and
 //! become missing features downstream, never a silently wrong tensor.
 
@@ -12,13 +13,14 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use onnx_infer::peptdeep::{PeptDeepPeptide, pack_ms2_batch, pack_rt_batch};
 use onnx_infer::deeplc::{self, DeepLcPeptide};
 use onnx_infer::ms2_native::{Ms2Conditions, Ms2Model, Ms2Scratch, N_BASE_ION, N_ION};
 use onnx_infer::rt_native::RtPeptide;
 use onnx_infer::prosit::{self, PrositPeptide, ResidueState};
-use onnx_infer::{BackendKind, OnnxSession, ms2pip};
+use onnx_infer::{BackendKind, BackendOptions, OnnxSession, ms2pip};
 use serde::Deserialize;
 
 pub const PROTON: f64 = 1.007_276_466_8;
@@ -260,8 +262,30 @@ pub trait Predictor: Sync {
     fn ms2(&self, s: &mut [OnnxSession], items: &[(&Form, u8)]) -> Vec<Vec<f32>>;
 }
 
+static BACKEND: OnceLock<(BackendKind, BackendOptions)> = OnceLock::new();
+
+/// Parse a `--backend` value.
+pub fn parse_backend(s: &str) -> BackendKind {
+    match s {
+        "tract" => BackendKind::Tract,
+        "ort" | "onnxruntime" => BackendKind::Ort,
+        other => panic!("unknown --backend {other} (tract | ort)"),
+    }
+}
+
+/// Engine for every graph [`load`]ed afterwards; call once, before loading.
+pub fn set_backend(kind: BackendKind, opts: BackendOptions) {
+    BACKEND.set((kind, opts)).expect("set_backend called twice");
+}
+
+/// The engine set by [`set_backend`]; tract with default options otherwise.
+pub fn backend() -> &'static (BackendKind, BackendOptions) {
+    BACKEND.get_or_init(|| (BackendKind::Tract, BackendOptions::default()))
+}
+
 pub fn load(models: &Path, manifest: &str) -> OnnxSession {
-    OnnxSession::from_manifest(models.join(manifest), BackendKind::Tract)
+    let (kind, opts) = backend();
+    OnnxSession::from_manifest_with(models.join(manifest), *kind, opts)
         .unwrap_or_else(|e| panic!("load {manifest}: {e}"))
 }
 

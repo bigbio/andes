@@ -27,6 +27,22 @@ pub trait InferenceBackend: Send {
     fn run(&mut self, inputs: &[NamedTensor]) -> Result<Vec<NamedTensor>>;
 }
 
+/// Engine settings applied when a model is loaded.
+#[derive(Clone, Debug)]
+pub struct BackendOptions {
+    /// Operator threads inside one `run` call. tract always runs on the
+    /// calling thread and ignores this; ONNX Runtime uses it as the session's
+    /// intra-op pool size (inter-op is fixed at 1). The default, 1, suits
+    /// callers that parallelise across batches with [`OnnxSession::share`].
+    pub intra_threads: usize,
+}
+
+impl Default for BackendOptions {
+    fn default() -> Self {
+        Self { intra_threads: 1 }
+    }
+}
+
 /// A loaded model: optional sidecar manifest + live backend.
 pub struct OnnxSession {
     manifest: Option<ModelManifest>,
@@ -36,7 +52,16 @@ pub struct OnnxSession {
 impl OnnxSession {
     /// Load weights from `onnx_path` with the given backend.
     pub fn from_onnx(onnx_path: impl AsRef<Path>, backend: BackendKind) -> Result<Self> {
-        let backend = load_backend(onnx_path.as_ref(), backend)?;
+        Self::from_onnx_with(onnx_path, backend, &BackendOptions::default())
+    }
+
+    /// [`Self::from_onnx`] with explicit engine settings.
+    pub fn from_onnx_with(
+        onnx_path: impl AsRef<Path>,
+        backend: BackendKind,
+        opts: &BackendOptions,
+    ) -> Result<Self> {
+        let backend = load_backend(onnx_path.as_ref(), backend, opts)?;
         Ok(Self {
             manifest: None,
             backend,
@@ -45,8 +70,17 @@ impl OnnxSession {
 
     /// Load from a JSON manifest (resolves the ONNX path, keeps provenance).
     pub fn from_manifest(manifest_path: impl AsRef<Path>, backend: BackendKind) -> Result<Self> {
+        Self::from_manifest_with(manifest_path, backend, &BackendOptions::default())
+    }
+
+    /// [`Self::from_manifest`] with explicit engine settings.
+    pub fn from_manifest_with(
+        manifest_path: impl AsRef<Path>,
+        backend: BackendKind,
+        opts: &BackendOptions,
+    ) -> Result<Self> {
         let manifest = ModelManifest::from_path(manifest_path)?;
-        let backend = load_backend(manifest.onnx_path(), backend)?;
+        let backend = load_backend(manifest.onnx_path(), backend, opts)?;
         Ok(Self {
             manifest: Some(manifest),
             backend,
@@ -57,7 +91,10 @@ impl OnnxSession {
     /// worker threads can share one large model.
     pub fn share(&self) -> Result<Self> {
         let backend = self.backend.share().ok_or_else(|| {
-            Error::Inference(format!("{:?} backend cannot share a loaded model", self.backend.kind()))
+            Error::Inference(format!(
+                "{:?} backend cannot share a loaded model",
+                self.backend.kind()
+            ))
         })?;
         Ok(Self {
             manifest: self.manifest.clone(),
@@ -99,37 +136,25 @@ impl OnnxSession {
     }
 }
 
-fn load_backend(onnx_path: &Path, backend: BackendKind) -> Result<Box<dyn InferenceBackend>> {
+fn load_backend(
+    onnx_path: &Path,
+    backend: BackendKind,
+    opts: &BackendOptions,
+) -> Result<Box<dyn InferenceBackend>> {
+    let _ = (onnx_path, opts);
     match backend {
-        BackendKind::Tract => {
-            #[cfg(feature = "tract")]
-            {
-                Ok(Box::new(crate::backend::tract_backend::TractSession::load(
-                    onnx_path,
-                )?))
-            }
-            #[cfg(not(feature = "tract"))]
-            {
-                let _ = onnx_path;
-                Err(Error::BackendDisabled {
-                    backend: BackendKind::Tract,
-                    feature: "tract",
-                })
-            }
-        }
-        BackendKind::Ort => {
-            let _ = onnx_path;
-            #[cfg(feature = "ort")]
-            {
-                Err(Error::BackendUnimplemented(BackendKind::Ort))
-            }
-            #[cfg(not(feature = "ort"))]
-            {
-                Err(Error::BackendDisabled {
-                    backend: BackendKind::Ort,
-                    feature: "ort",
-                })
-            }
-        }
+        #[cfg(feature = "tract")]
+        BackendKind::Tract => Ok(Box::new(crate::backend::tract_backend::TractSession::load(
+            onnx_path,
+        )?)),
+        #[cfg(feature = "ort")]
+        BackendKind::Ort => Ok(Box::new(crate::backend::ort_backend::OrtSession::load(
+            onnx_path, opts,
+        )?)),
+        #[allow(unreachable_patterns)]
+        other => Err(Error::BackendDisabled {
+            backend: other,
+            feature: other.feature_name(),
+        }),
     }
 }

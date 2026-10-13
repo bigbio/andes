@@ -298,7 +298,17 @@ pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams) -> PathBuf {
         protein.accession.hash(&mut h);
         protein.sequence.hash(&mut h);
     }
+    // The affix test decides each record's IS_DECOY flag (`SearchIndex::
+    // is_decoy_accession`): an accession is a decoy if it carries the prefix
+    // needle OR ends with the decoy suffix. Both are part of the key, so adding
+    // `--decoy-suffix` to an external target/decoy FASTA rebuilds the index
+    // rather than reusing one whose suffixed decoys are flagged as targets. An
+    // empty suffix matches nothing and keys like no suffix.
     idx.decoy_prefix.hash(&mut h);
+    idx.decoy_suffix
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .hash(&mut h);
 
     // Hash the FIXED modifications. Base-peptide masses fold fixed mods in (e.g.
     // Carbamidomethyl-C), so two runs with the same FASTA/enzyme/lengths but a
@@ -1085,6 +1095,54 @@ mod tests {
             index_cache_path(&idx, &p_cam),
             "cache key must differ when the fixed-mod set differs"
         );
+    }
+
+    /// The decoy suffix decides which proteins are decoys, so an index built
+    /// without it must not be reused once it is given: for an external
+    /// target/decoy FASTA (`--decoy-strategy none`), adding `--decoy-suffix _rev`
+    /// has to turn `P1_rev` into a decoy rather than reuse the cached index in
+    /// which every record is a target.
+    #[test]
+    fn index_cache_path_keys_on_the_decoy_suffix() {
+        let db = ProteinDb {
+            proteins: vec![
+                Protein {
+                    accession: "P1".into(),
+                    description: String::new(),
+                    sequence: b"MNGSK".to_vec(),
+                },
+                Protein {
+                    accession: "P1_rev".into(),
+                    description: String::new(),
+                    sequence: b"ASNVTR".to_vec(),
+                },
+            ],
+        };
+        let strategy = crate::decoy::DecoyStrategy::None;
+        let seed = crate::decoy::DEFAULT_DECOY_SEED;
+        let plain = SearchIndex::from_target_db_with_strategy(&db, "XXX", None, strategy, seed);
+        let suffixed =
+            SearchIndex::from_target_db_with_strategy(&db, "XXX", Some("_rev"), strategy, seed);
+        let mut params =
+            SearchParams::default_tryptic(AminoAcidSetBuilder::new_standard().build().unwrap());
+        params.min_length = 3;
+        params.require_nxst_sequon = true;
+
+        let plain_path = index_cache_path(&plain, &params);
+        let suffixed_path = index_cache_path(&suffixed, &params);
+        let _ = std::fs::remove_file(&plain_path);
+        let _ = std::fs::remove_file(&suffixed_path);
+        let (first, _) = MmapCandidateIndex::open_or_build(&plain_path, &plain, &params, "XXX")
+            .expect("build the suffix-less index");
+        assert!(first.records().iter().all(|r| !r.is_decoy()));
+        let (second, _) =
+            MmapCandidateIndex::open_or_build(&suffixed_path, &suffixed, &params, "XXX")
+                .expect("open the suffixed index");
+        let decoys = second.records().iter().filter(|r| r.is_decoy()).count();
+        let _ = std::fs::remove_file(&plain_path);
+        let _ = std::fs::remove_file(&suffixed_path);
+        assert_eq!(decoys, 1, "ASNVTR from P1_rev is the one sequon decoy");
+        assert_ne!(plain_path, suffixed_path, "the decoy suffix must key the cache");
     }
 
     /// `index_cache_path` returns the same path when params are identical.

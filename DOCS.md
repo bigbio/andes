@@ -844,7 +844,10 @@ scores from separately trained Percolator models are not on one scale.
   any PSM. In process, `--quant-fdr` and `--pep` are the search's (default `--fdr`, no PEP
   cap); `quant library --quant-fdr` defaults to 0.01 and `quant library --pep` to no cap. A joint, reference-free
   retention-time alignment maps every run onto a consensus scale and gives each transfer a
-  predicted apex and its uncertainty. The per-run residual width is floored at 0.5 s. A run
+  predicted apex and its uncertainty. The per-run residual width is floored at 0.5 s. The
+  uncertainty combines the receiving run's residual width with the donor runs' own widths
+  (carried through each run's map), so a precursor seen only in a run with noisy RTs gets a
+  correspondingly wide search window everywhere. A run
   with fewer than 50 anchors, or whose anchors cover
   less than 30 % of the RT range, is unaligned: it is logged, neither gives nor receives
   transfers, and keeps the `identified` rows of its own identifications.

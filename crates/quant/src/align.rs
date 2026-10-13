@@ -27,8 +27,18 @@
 //!    `tau_p^2 = max(0, mean_r e^2 - mean_r sigma_r^2) * n_p / (n_p + 3)`
 //!    over the same residuals (0 when `n_p = 1`).
 //!
-//! The transfer uncertainty into run `r` is
-//! `s = sqrt(sigma_r(t_p)^2 * (1 + 1 / n_p) + tau_p^2)`.
+//! The transfer uncertainty into run `q` combines the recipient's residual
+//! width, the donors' residual widths and the extra dispersion:
+//! `s^2 = sigma_q(t_p)^2 + f_q'(t_p)^2 * V_p + tau_p^2`, with
+//! `V_p = sum_{r in D_p} (sigma_r(t_p) / f_r'(t_p))^2 / n_p^2` the variance
+//! of the consensus RT on the consensus scale: each donor run's width is
+//! carried into consensus time by its map's local slope `f_r'`, averaged over
+//! the `n_p` donor runs `D_p`, and carried into run `q` by `f_q'`. A
+//! precursor seen in one noisy run thus gets that run's width in every
+//! recipient. With equal widths and unit slopes this is
+//! `sigma^2 * (1 + 1 / n_p) + tau_p^2`. The local slope of a map at `t` is
+//! the chord over the knot segment holding `t` and one segment on each side
+//! (the end slope beyond the knots).
 //!
 //! A run is unaligned when it has fewer than [`AlignParams::min_anchors`]
 //! anchors, or when its anchors span less than [`AlignParams::min_coverage`]
@@ -111,6 +121,26 @@ impl RunMap {
             1.0 / self.slope_hi,
             rt,
         )
+    }
+
+    /// Local slope `d run RT / d consensus RT` at consensus RT `t`: the chord
+    /// over the knot segment holding `t` and one segment on each side, clamped
+    /// to the knots; the end slope below the first or above the last knot.
+    pub fn slope_at(&self, t: f64) -> f64 {
+        let n = self.knots_x.len();
+        if t.is_nan() {
+            return f64::NAN;
+        }
+        if n < 2 || t <= self.knots_x[0] {
+            return self.slope_lo;
+        }
+        if t >= self.knots_x[n - 1] {
+            return self.slope_hi;
+        }
+        // knots_x[i - 1] <= t < knots_x[i], with 1 <= i <= n - 1.
+        let i = self.knots_x.partition_point(|&k| k <= t);
+        let (a, b) = (i.saturating_sub(2), (i + 1).min(n - 1));
+        (self.knots_y[b] - self.knots_y[a]) / (self.knots_x[b] - self.knots_x[a])
     }
 
     /// Knot x (consensus RT) and y (run RT).
@@ -213,6 +243,9 @@ pub struct Alignment {
     /// Fraction of the consensus RT range covered by each run's anchors, as
     /// measured when the run was last checked.
     pub coverage: Vec<f64>,
+    /// Per precursor, the variance `V_p` of `consensus` (0 without
+    /// observations).
+    consensus_var: Vec<f64>,
     /// Observations in aligned runs grouped by precursor: those of `p` are
     /// `obs_runs[obs_offsets[p]..obs_offsets[p + 1]]` (runs ascending).
     obs_offsets: Vec<usize>,
@@ -231,20 +264,20 @@ impl Alignment {
         if !t.is_finite() {
             return None;
         }
-        let n = self.n_runs_seen[p as usize] as usize;
-        Some(self.transfer(map, run, t, n, self.tau[p as usize]))
+        let pi = p as usize;
+        Some(self.transfer(map, run, t, self.consensus_var[pi], self.tau[pi]))
     }
 
-    /// Like [`Alignment::predict`], but the consensus RT, `n_p` and `tau_p`
-    /// are recomputed without `run`'s own observation of `p`. `None` when the
+    /// Like [`Alignment::predict`], but the consensus RT, `n_p`, `tau_p` and
+    /// `V_p` are recomputed without `run`'s own observation of `p`. `None` when the
     /// run is unaligned or `p` has no observation in another aligned run.
     pub fn predict_excluding(&self, p: u32, run: u16) -> Option<(f64, f64)> {
         let map = self.maps.get(run as usize)?.as_ref()?;
         if p as usize >= self.consensus.len() {
             return None;
         }
-        let (t, n, tau) = self.estimate(p as usize, Some(run))?;
-        Some(self.transfer(map, run, t, n, tau))
+        let e = self.estimate(p as usize, Some(run))?;
+        Some(self.transfer(map, run, e.t, e.var, e.tau))
     }
 
     /// The per-run state, in run order, from which [`Alignment::from_runs`]
@@ -342,22 +375,32 @@ impl Alignment {
             n_runs_seen,
             anchors,
             coverage,
+            consensus_var: vec![0.0; n_precursors],
             obs_offsets,
             obs_runs: all.iter().map(|o| o.1).collect(),
             obs_rts: all.iter().map(|o| o.2).collect(),
         };
-        for p in 0..n_precursors {
-            if let Some((tc, _, tau)) = out.estimate(p, None) {
-                out.consensus[p] = tc;
-                out.tau[p] = tau;
-            }
-        }
+        out.fill_consensus();
         Ok(out)
     }
 
-    fn transfer(&self, map: &RunMap, run: u16, t: f64, n: usize, tau: f64) -> (f64, f64) {
+    /// Sets `consensus`, `tau` and `consensus_var` of every precursor.
+    fn fill_consensus(&mut self) {
+        for p in 0..self.consensus.len() {
+            if let Some(e) = self.estimate(p, None) {
+                self.consensus[p] = e.t;
+                self.tau[p] = e.tau;
+                self.consensus_var[p] = e.var;
+            }
+        }
+    }
+
+    /// `(f_q(t), s)` for recipient `run` with map `map`, consensus `t`,
+    /// consensus variance `var` and extra dispersion `tau`.
+    fn transfer(&self, map: &RunMap, run: u16, t: f64, var: f64, tau: f64) -> (f64, f64) {
         let sigma = self.sigma_at(run, t);
-        let s = (sigma * sigma * (1.0 + 1.0 / n as f64) + tau * tau).sqrt();
+        let slope = map.slope_at(t);
+        let s = (sigma * sigma + slope * slope * var + tau * tau).sqrt();
         (map.apply(t), s)
     }
 
@@ -381,10 +424,10 @@ impl Alignment {
         s0 + (s1 - s0) * (t - x0) / (x1 - x0)
     }
 
-    /// Consensus RT, `n_p` and `tau_p` of precursor `p` from its observations
+    /// Consensus RT, `tau_p` and `V_p` of precursor `p` from its observations
     /// in aligned runs other than `exclude`, under the final maps. `None` when
     /// none is left.
-    fn estimate(&self, p: usize, exclude: Option<u16>) -> Option<(f64, usize, f64)> {
+    fn estimate(&self, p: usize, exclude: Option<u16>) -> Option<Estimate> {
         let range = self.obs_offsets[p]..self.obs_offsets[p + 1];
         let used = || {
             range
@@ -405,8 +448,19 @@ impl Alignment {
         let n = inv.len();
         let mut sorted = inv.clone();
         let t = median_in_place(&mut sorted);
+        let nf = n as f64;
+        let var = used()
+            .map(|(r, _)| {
+                let sd = self.sigma_at(r, t)
+                    / self.maps[r as usize]
+                        .as_ref()
+                        .map_or(f64::NAN, |m| m.slope_at(t));
+                sd * sd
+            })
+            .sum::<f64>()
+            / (nf * nf);
         if n < 2 {
-            return Some((t, n, 0.0));
+            return Some(Estimate { t, tau: 0.0, var });
         }
         let pairs: Vec<(u16, f64)> = used().collect();
         let res = loo_residuals(&self.maps, &pairs, &inv);
@@ -416,10 +470,21 @@ impl Alignment {
             e2 += e * e;
             s2 += s * s;
         }
-        let nf = n as f64;
         let tau2 = (e2 / nf - s2 / nf).max(0.0) * nf / (nf + 3.0);
-        Some((t, n, tau2.sqrt()))
+        Some(Estimate {
+            t,
+            tau: tau2.sqrt(),
+            var,
+        })
     }
+}
+
+/// Consensus RT `t`, extra dispersion `tau` and consensus variance `var`
+/// (`V_p`) of one precursor.
+struct Estimate {
+    t: f64,
+    tau: f64,
+    var: f64,
 }
 
 /// Jointly aligns all runs; see the module documentation for the method.
@@ -570,16 +635,12 @@ pub fn align(
         n_runs_seen,
         anchors,
         coverage,
+        consensus_var: vec![0.0; n_precursors],
         obs_offsets,
         obs_runs,
         obs_rts,
     };
-    for pr in 0..n_precursors {
-        if let Some((tc, _, tau)) = out.estimate(pr, None) {
-            out.consensus[pr] = tc;
-            out.tau[pr] = tau;
-        }
-    }
+    out.fill_consensus();
     out
 }
 
@@ -1203,6 +1264,121 @@ mod tests {
             "{t2} {t6}"
         );
         assert!(s2 > s6, "{s2} <= {s6}");
+    }
+
+    /// Four runs over 300 shared anchors: run 0 has PSM RT jitter of +-20 or
+    /// +-40 s, runs 1 to 3 are exact. Precursor 300 is seen only in run 0,
+    /// 47 s after its true apex at 2000 s; precursor 301 is seen in run 0 at
+    /// 2047 s and in run 1 at 2000 s. Returns the alignment and the noisy
+    /// run's median residual width.
+    fn noisy_singleton_donor() -> (Alignment, f64) {
+        let mut rng = Rng(21);
+        let mut obs = Vec::new();
+        for p in 0..300u32 {
+            let t = 600.0 + 3000.0 * rng.uniform();
+            for r in 0..4u16 {
+                let jitter = if r == 0 {
+                    [-40.0, -20.0, 20.0, 40.0][(rng.next_u64() % 4) as usize]
+                } else {
+                    0.0
+                };
+                obs.push(Observation {
+                    precursor: p,
+                    run: r,
+                    rt: t + jitter,
+                });
+            }
+        }
+        for (precursor, run, rt) in [(300, 0, 2047.0), (301, 0, 2047.0), (301, 1, 2000.0)] {
+            obs.push(Observation { precursor, run, rt });
+        }
+        let a = align(&obs, 302, 4, &AlignParams::default());
+        let sds: Vec<f64> = a.residual_sd[0]
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|k| k.1)
+            .collect();
+        let sd0 = median(&sds);
+        (a, sd0)
+    }
+
+    #[test]
+    fn transfer_window_includes_the_donor_uncertainty() {
+        use crate::decoys::{Hypothesis, Probe};
+        use crate::evidence::{fit, EvidenceParams, Prior};
+        use crate::ms1_index::{Ms1RunIndex, Ms1Scan};
+        use model::mass::ISOTOPE;
+
+        let (a, sd0) = noisy_singleton_donor();
+        let (t_hat, s) = a.predict(300, 1).unwrap();
+        eprintln!(
+            "transfer_window_includes_the_donor_uncertainty: donor sigma = {sd0:.2}, \
+             t_hat = {t_hat:.2}, s = {s:.3}"
+        );
+        let probe = Probe {
+            kind: Hypothesis::Target,
+            mz: 600.0,
+            t_hat,
+            s,
+            w_prior: 5.0,
+        };
+        let prior = Prior::of(&probe);
+
+        // A strong peak at the true apex in the recipient is recovered.
+        let env = [0.55f32, 0.30, 0.11, 0.04];
+        let scans: Vec<Ms1Scan> = (1700..2300)
+            .map(|k| {
+                let t = k as f64;
+                let g = (-(t - 2000.0).powi(2) / (2.0 * 25.0)).exp();
+                let peaks = (0..4)
+                    .map(|i| {
+                        (
+                            600.0 + i as f64 * ISOTOPE / 2.0,
+                            (100.0 + 1e6 * env[i] as f64 * g) as f32,
+                        )
+                    })
+                    .collect();
+                Ms1Scan {
+                    rt: t,
+                    peaks,
+                    ..Ms1Scan::default()
+                }
+            })
+            .collect();
+        let run = Ms1RunIndex::new(scans);
+        let e = fit(&run, &probe, 2, &env, &EvidenceParams::default()).unwrap();
+        eprintln!(
+            "transfer_window_includes_the_donor_uncertainty: quantity = {:.0}, t0 = {:.2}",
+            e.quantity, e.t0
+        );
+        assert!(e.quantity > 0.0, "{e:?}");
+        assert!((e.t0 - 2000.0).abs() <= 1.0, "{e:?}");
+        // The true apex lies inside the search and extraction windows, and
+        // the donor's own width enters the transfer width.
+        assert!((2000.0 - t_hat).abs() <= 3.0 * s, "{t_hat} {s}");
+        assert!(t_hat - prior.half_window() < 2000.0);
+        assert!(sd0 > 20.0, "{sd0}");
+        assert!(s >= 0.8 * sd0, "s = {s}, donor sigma = {sd0}");
+    }
+
+    #[test]
+    fn excluded_prediction_carries_the_donor_uncertainty() {
+        let (a, sd0) = noisy_singleton_donor();
+        // Anchor 0 is seen in every run: without exact run 1, two exact
+        // donors and the noisy one remain. The noisy donor's width enters,
+        // shrunk by the three donors.
+        let (_, s) = a.predict_excluding(0, 1).unwrap();
+        eprintln!(
+            "excluded_prediction_carries_the_donor_uncertainty: s = {s:.3}, \
+             donor sigma = {sd0:.2}"
+        );
+        assert!(s > 0.2 * sd0 && s < 0.6 * sd0, "{s}");
+        // Precursor 301 without run 1 has only the noisy donor left.
+        let (_, s) = a.predict_excluding(301, 1).unwrap();
+        assert!(s >= 0.8 * sd0, "{s}");
+        // Predicting the singleton into a run without it excludes nothing.
+        assert_eq!(a.predict_excluding(300, 1), a.predict(300, 1));
     }
 
     #[test]

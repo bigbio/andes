@@ -239,9 +239,12 @@ fn prefetch_window_candidates(cands: &[Candidate], window: &[usize], pos: usize)
 /// mass lies inside are the ones retrieved for it.
 ///
 /// The window is centered on the precursor m/z and widened by the precursor
-/// tolerance plus the isotope-error range. This is the original, byte-for-byte
-/// unchanged derivation used by both the standard search and the cascade's
-/// NARROW Pass 1.
+/// tolerance plus the isotope-error range, then extended to cover every peptide
+/// mass `matches_precursor` accepts at some isotope offset. The nominal centre
+/// alone can miss one: the scaled, rounded nominal mass drifts from the residue
+/// mass by more than a bucket over an isotope shift on heavy peptides (a 2887 Da
+/// residue mass observed at isotope +2 centres the window on 2890 and starts it
+/// at 2888).
 pub(crate) fn candidate_nominal_bounds(
     spec: &Spectrum,
     z: u8,
@@ -267,7 +270,21 @@ pub(crate) fn candidate_nominal_bounds(
     // wrong side there prunes real candidates before the exact filter.)
     let min_nominal = nominal_center - iso_max - widen_left;
     let max_nominal = nominal_center - iso_min + widen_right;
-    (min_nominal, max_nominal)
+    // The lightest and heaviest peptide masses `matches_precursor` accepts over
+    // the isotope range. `nominal_from` is monotone, so their nominal residue
+    // masses bound every accepted peptide's.
+    let observed =
+        adjusted_observed_neutral_mass(spec.precursor_mz * charge_f - charge_f * PROTON, shift_ppm);
+    let (mut lightest, mut heaviest) = (f64::MAX, f64::MIN);
+    for offset in params.isotope_error_range.clone() {
+        let target = observed - offset as f64 * model::mass::ISOTOPE;
+        lightest = lightest.min(target - params.precursor_tolerance.left.as_da(target));
+        heaviest = heaviest.max(target + params.precursor_tolerance.right.as_da(target));
+    }
+    (
+        min_nominal.min(nominal_from(lightest - H2O)),
+        max_nominal.max(nominal_from(heaviest - H2O)),
+    )
 }
 
 /// The charge states a spectrum is searched at: the reported precursor charge is

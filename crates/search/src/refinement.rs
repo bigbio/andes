@@ -2347,6 +2347,42 @@ mod tests {
         }
     }
 
+    /// Retrieval must cover every exact precursor match. The K-oxidised
+    /// `CEMEMSDDDGWSSFCEGNVNCGMDCK` (no Cam-C) observed at its mass + 2 isotopes
+    /// + 0.02 Da matches at isotope +2 within 20 ppm, but its nominal residue
+    /// mass (2887) lies one below the nominal window derived from the observed
+    /// mass (2888..=2891).
+    #[test]
+    fn refinement_retrieves_exact_precursor_matches_outside_the_nominal_window() {
+        let anchor: &[u8] = b"CEMEMSDDDGWSSFCEGNVNCGMDCK";
+        let db = ProteinDb {
+            proteins: vec![protein("P1", &[b"GR".as_slice(), anchor, b"AR"].concat())],
+        };
+        let out = refine_fixture(
+            &[(anchor, 0)],
+            &db,
+            false,
+            fixture_spectrum(
+                b"CEMEMSDDDGWSSFCEGNVNCGMDCk",
+                false,
+                2.0 * model::mass::ISOTOPE + 0.02,
+            ),
+        );
+        let found = out.iter().flat_map(|o| {
+            o.queues
+                .iter()
+                .flat_map(|q| q.iter_psms())
+                .map(move |p| (p, &o.candidates[p.primary_candidate_idx() as usize]))
+        });
+        let found = found.into_iter().any(|(p, c)| {
+            !c.is_decoy
+                && p.isotope_offset == 2
+                && c.peptide.residues.iter().map(|aa| aa.residue).collect::<Vec<_>>() == anchor
+                && c.peptide.residues.last().is_some_and(|aa| aa.mod_.is_some())
+        });
+        assert!(found, "the K-oxidised target at isotope +2 is a refinement PSM");
+    }
+
     // ── (g) merge_into_pass1 ───────────────────────────────────────────────
 
     #[test]

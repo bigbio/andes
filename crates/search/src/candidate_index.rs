@@ -1142,7 +1142,10 @@ mod tests {
         let _ = std::fs::remove_file(&plain_path);
         let _ = std::fs::remove_file(&suffixed_path);
         assert_eq!(decoys, 1, "ASNVTR from P1_rev is the one sequon decoy");
-        assert_ne!(plain_path, suffixed_path, "the decoy suffix must key the cache");
+        assert_ne!(
+            plain_path, suffixed_path,
+            "the decoy suffix must key the cache"
+        );
     }
 
     /// `index_cache_path` returns the same path when params are identical.

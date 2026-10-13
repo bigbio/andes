@@ -1,7 +1,8 @@
 //! The match-between-runs library on disk: `library.parquet` (one row per
 //! precursor id: identity, proteins and, for library entries, the entry
 //! fields) and `alignment.parquet` (one row per run: the run map, residual
-//! widths, anchor statistics and the run's observations). Together they
+//! widths, anchor statistics, alignment component and the run's
+//! observations). Together they
 //! rebuild the [`Library`] exactly, so an extract in another process gives the
 //! same rows as one in the process that built the library.
 //!
@@ -30,7 +31,7 @@ use quant::align::{Alignment, RunAlignment, RunMap};
 use quant::library::{Library, LibraryEntry, PrecursorMeta};
 
 /// Major version of both layouts. A reader rejects any other major.
-pub const LIBRARY_SCHEMA_MAJOR: u32 = 1;
+pub const LIBRARY_SCHEMA_MAJOR: u32 = 2;
 /// File name of the precursor table inside the quant directory.
 pub const LIBRARY_FILE: &str = "library.parquet";
 /// File name of the alignment table inside the quant directory.
@@ -46,7 +47,7 @@ const DONOR_PEP_KEY: &str = "andes.library.donor_pep";
 /// Key of [`library_fingerprint`] in `library.parquet`; extract tables copy it.
 pub const FINGERPRINT_KEY: &str = "andes.library.fingerprint";
 const ALIGNMENT_FINGERPRINT_KEY: &str = "andes.alignment.fingerprint";
-const SCHEMA_VERSION: &str = "1.0";
+const SCHEMA_VERSION: &str = "2.0";
 /// Rows per Parquet row group / record batch of the precursor table.
 const BATCH_ROWS: usize = 65_536;
 const ENVELOPE_LEN: usize = 4;
@@ -101,6 +102,7 @@ fn alignment_schema() -> Schema {
         Field::new("sd", list(DataType::Float64), false),
         Field::new("anchors", DataType::UInt64, false),
         Field::new("coverage", DataType::Float64, false),
+        Field::new("component", DataType::UInt32, true),
         Field::new("obs_precursor", list(DataType::UInt32), false),
         Field::new("obs_rt", list(DataType::Float64), false),
     ])
@@ -135,7 +137,7 @@ impl Fnv {
 }
 
 /// A stable hash of an alignment's stored state (maps, residual widths,
-/// anchor statistics and observations of every run).
+/// anchor statistics, components and observations of every run).
 pub fn alignment_fingerprint(a: &Alignment) -> String {
     let mut h = Fnv::new();
     let runs = a.runs();
@@ -160,6 +162,7 @@ pub fn alignment_fingerprint(a: &Alignment) -> String {
         }
         h.u64(r.anchors as u64);
         h.f64(r.coverage);
+        h.u64(r.component.map_or(u64::MAX, u64::from));
         h.u64(r.observations.len() as u64);
         for &(p, t) in &r.observations {
             h.u64(p as u64);
@@ -282,6 +285,7 @@ fn alignment_batch(
     let mut sd = ListBuilder::new(Float64Builder::new());
     let mut anchors = UInt64Builder::new();
     let mut coverage = Float64Builder::new();
+    let mut component = UInt32Builder::new();
     let mut obs_p = ListBuilder::new(UInt32Builder::new());
     let mut obs_rt = ListBuilder::new(Float64Builder::new());
     for (r, ra) in runs.iter().enumerate() {
@@ -312,6 +316,7 @@ fn alignment_batch(
         sd.append(true);
         anchors.append_value(ra.anchors as u64);
         coverage.append_value(ra.coverage);
+        component.append_option(ra.component);
         for &(p, t) in &ra.observations {
             obs_p.values().append_value(p);
             obs_rt.values().append_value(t);
@@ -331,6 +336,7 @@ fn alignment_batch(
         Arc::new(sd.finish()),
         Arc::new(anchors.finish()),
         Arc::new(coverage.finish()),
+        Arc::new(component.finish()),
         Arc::new(obs_p.finish()),
         Arc::new(obs_rt.finish()),
     ];
@@ -684,8 +690,9 @@ pub fn read_library(dir: &Path) -> Result<StoredLibrary, String> {
         let sd = column::<ListArray>(&b, 8, &align_path)?;
         let anchors = column::<UInt64Array>(&b, 9, &align_path)?;
         let coverage = column::<Float64Array>(&b, 10, &align_path)?;
-        let obs_p = column::<ListArray>(&b, 11, &align_path)?;
-        let obs_rt = column::<ListArray>(&b, 12, &align_path)?;
+        let component = column::<UInt32Array>(&b, 11, &align_path)?;
+        let obs_p = column::<ListArray>(&b, 12, &align_path)?;
+        let obs_rt = column::<ListArray>(&b, 13, &align_path)?;
         for i in 0..b.num_rows() {
             let r = run_states.len();
             if run.value(i) as usize != r {
@@ -737,6 +744,7 @@ pub fn read_library(dir: &Path) -> Result<StoredLibrary, String> {
                 residual_sd,
                 anchors: anchors.value(i) as usize,
                 coverage: coverage.value(i),
+                component: (!component.is_null(i)).then(|| component.value(i)),
                 observations: ps.into_iter().zip(ts).collect(),
             });
         }
@@ -893,13 +901,13 @@ mod tests {
     #[test]
     fn library_rejects_unknown_major_version_naming_the_file() {
         let dir = tempfile::tempdir().unwrap();
-        write_with_schema_version(dir.path(), &stored(), "2.0").unwrap();
+        write_with_schema_version(dir.path(), &stored(), "3.0").unwrap();
         let e = read_library(dir.path()).unwrap_err();
         assert!(
             e.contains("alignment.parquet") || e.contains("library.parquet"),
             "{e}"
         );
-        assert!(e.contains("2.0"), "{e}");
+        assert!(e.contains("3.0"), "{e}");
     }
 
     #[test]

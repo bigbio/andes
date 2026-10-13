@@ -459,15 +459,8 @@ pub(crate) fn build_and_write_library(
         Some(c) => format!("PSM q<={donor_q} and PEP<={c}"),
         None => format!("PSM q<={donor_q}"),
     };
-    let library = build_library(
-        &psms,
-        meta,
-        stems.len(),
-        max_q,
-        donor_q,
-        donor_pep,
-        &AlignParams::default(),
-    );
+    let ap = AlignParams::default();
+    let library = build_library(&psms, meta, stems.len(), max_q, donor_q, donor_pep, &ap);
     eprintln!(
         "[mbr] library: {} runs, {} PSMs scored, {donor_psms} target PSMs at {donor_gate} identify their precursor in their run; skipped: {} PSMs whose SpecId joins a rescoring PSM of another peptide or target/decoy label, {} target and {} decoy PSMs without a rescoring score, {} decoy PSMs sharing a target's key; {} precursors, {} entries at the internal entry gate q<={max_q} (precursor-level, not an identification FDR) with a PSM at {donor_gate}",
         stems.len(),
@@ -490,11 +483,40 @@ pub(crate) fn build_and_write_library(
             "[mbr] library: {no_consensus} entries have no consensus RT (no observation in an aligned run) and are not transferred"
         );
     }
+    if a.n_components() > 1 {
+        let mut groups: Vec<Vec<&str>> = vec![Vec::new(); a.n_components()];
+        for (r, stem) in stems.iter().enumerate() {
+            if let Some(c) = a.component(r as u16) {
+                groups[c as usize].push(stem);
+            }
+        }
+        eprintln!(
+            "[mbr] alignment: the aligned runs form {} components (runs joined when they share at least {} precursors); transfers stay inside a component: {}",
+            groups.len(),
+            ap.min_shared,
+            groups
+                .iter()
+                .enumerate()
+                .map(|(c, g)| format!("component {c}: {}", g.join(", ")))
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
     for (r, stem) in stems.iter().enumerate() {
         if a.maps[r].is_none() {
+            let isolated = a.anchors[r] >= ap.min_anchors && a.coverage[r] >= ap.min_coverage;
             eprintln!(
-                "[mbr] run {stem} is unaligned ({} anchors, {:.2} of the consensus RT range): it neither gives nor receives transfers and keeps its identified quantities",
-                a.anchors[r], a.coverage[r]
+                "[mbr] run {stem} is unaligned ({} anchors, {:.2} of the consensus RT range{}): it neither gives nor receives transfers and keeps its identified quantities",
+                a.anchors[r],
+                a.coverage[r],
+                if isolated {
+                    format!(
+                        "; shares fewer than {} precursors with every other aligned run",
+                        ap.min_shared
+                    )
+                } else {
+                    String::new()
+                }
             );
         }
     }
@@ -517,7 +539,7 @@ pub(crate) fn build_and_write_library(
 
 fn log_extract(stem: &str, rows: usize, c: &ExtractCounts) {
     eprintln!(
-        "[mbr] extract {stem}: {rows} rows{}; skipped: {} entries at a FAIMS voltage the run lacks, {} identified pairs with a non-finite best PSM RT, {} identified pairs without a prediction from other runs (no pseudo-transfer), {} transfers without a prediction; width prior from {} fits{}",
+        "[mbr] extract {stem}: {rows} rows{}; skipped: {} entries at a FAIMS voltage the run lacks, {} identified pairs with a non-finite best PSM RT, {} identified pairs without a prediction from other runs (no pseudo-transfer), {} transfers without a prediction, {} pseudo-transfers and {} transfers whose donor runs are all in other alignment components; width prior from {} fits{}",
         if c.unaligned {
             " (unaligned run: identified rows only)"
         } else {
@@ -527,6 +549,8 @@ fn log_extract(stem: &str, rows: usize, c: &ExtractCounts) {
         c.nonfinite_best_rt,
         c.no_pseudo_prediction,
         c.no_prediction,
+        c.pseudo_other_component,
+        c.other_component,
         c.width_fits,
         if c.width_prior_fallback {
             " (too few: the default width is used)"

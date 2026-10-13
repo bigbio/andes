@@ -4,14 +4,17 @@
 //! precursor, `f_r` is a monotone piecewise-linear map per run and the errors
 //! `e` are heavy-tailed. All runs enter the fit symmetrically:
 //!
-//! 1. Anchors are precursors observed in at least two aligned runs; `t_p`
-//!    starts as the median of their observed RTs.
+//! 1. Anchors are precursors observed in at least two aligned runs of one
+//!    alignment component (below), once per such component; only those
+//!    observations enter the fit. `t_p` starts as the median of their
+//!    observed RTs.
 //! 2. Each round fits every run's map to its `(t_p, rt)` pairs (equal-count
 //!    bins, the median x and y per bin, pool-adjacent-violators on y, linear
 //!    interpolation, least-squares end slopes from the outer 20% of anchors),
 //!    sets `t_p` to the median over runs of `f_r^{-1}(rt)`, and fixes the
-//!    gauge by mapping `t_p` through the mean map `g = mean_r f_r`, so the
-//!    consensus scale is the average run.
+//!    gauge by mapping `t_p` through the mean map `g = mean_r f_r` of the
+//!    anchor's component, so each component's consensus scale is its average
+//!    run.
 //! 3. After the last round the maps are fitted once more to the gauge-fixed
 //!    `t_p`, and every precursor's consensus is the median over its aligned
 //!    runs of `f_r^{-1}(rt)` under those final maps (for a precursor seen in
@@ -40,11 +43,25 @@
 //! the chord over the knot segment holding `t` and one segment on each side
 //! (the end slope beyond the knots).
 //!
+//! Two aligned runs that share at least [`AlignParams::min_shared`]
+//! precursors are joined; the connected components of that graph are the
+//! alignment components, numbered in the order of their lowest run. Only
+//! shared precursors fix the relative RT scale of two runs, so each
+//! component is fitted and gauged on its own anchors (with one component,
+//! this is the plain joint fit), and a transfer stays inside a component: the
+//! consensus RT, `n_p`, `tau_p` and `V_p` of a prediction into run `q` use
+//! only `p`'s observations in `q`'s component, and there is no prediction
+//! when `p` has none there. [`Alignment::consensus`] is taken in the
+//! component holding most of `p`'s observations (the lowest component id on
+//! ties). A run alone in its component is unaligned.
+//!
 //! A run is unaligned when it has fewer than [`AlignParams::min_anchors`]
 //! anchors, or when its anchors span less than [`AlignParams::min_coverage`]
 //! of the anchors' consensus RT range (1st to 99th percentile of the initial
 //! `t_p`). Removing a run can drop others below the thresholds, so the check
-//! repeats until no run changes. An unaligned run is excluded from the fit and
+//! repeats until no run changes. A run that passes these checks but shares
+//! fewer than [`AlignParams::min_shared`] precursors with every other aligned
+//! run is then unaligned too. An unaligned run is excluded from the fit and
 //! has no map; its observations are ignored everywhere, and [`Alignment`]
 //! records its anchor count and coverage so the caller can log why.
 //!
@@ -75,6 +92,9 @@ pub struct AlignParams {
     /// Floor of the residual width `sigma_r(t)`, in seconds; the caller sets it
     /// to half the median MS1 scan spacing.
     pub min_spacing_s: f64,
+    /// Two aligned runs that share at least this many precursors are in one
+    /// alignment component; transfers never cross components.
+    pub min_shared: usize,
 }
 
 impl Default for AlignParams {
@@ -84,6 +104,7 @@ impl Default for AlignParams {
             min_anchors: 50,
             min_coverage: 0.30,
             min_spacing_s: 0.5,
+            min_shared: 20,
         }
     }
 }
@@ -198,6 +219,8 @@ pub struct RunAlignment {
     pub residual_sd: Option<Vec<(f64, f64)>>,
     pub anchors: usize,
     pub coverage: f64,
+    /// Alignment component; `None` for an unaligned run.
+    pub component: Option<u32>,
     /// The run's observations `(precursor, rt)`, ascending by precursor;
     /// empty for an unaligned run.
     pub observations: Vec<(u32, f64)>,
@@ -225,15 +248,16 @@ fn interp(xs: &[f64], ys: &[f64], slope_lo: f64, slope_hi: f64, t: f64) -> f64 {
 /// Result of [`align`]. Vectors are indexed by precursor id or run id.
 #[derive(Debug, Clone)]
 pub struct Alignment {
-    /// Consensus RT per precursor; NaN when it has no observation in an
-    /// aligned run.
+    /// Consensus RT per precursor, in the component holding most of its
+    /// observations; NaN when it has no observation in an aligned run.
     pub consensus: Vec<f64>,
     /// Map per run; `None` for an unaligned run.
     pub maps: Vec<Option<RunMap>>,
     /// Residual width per run as `(consensus t, sd)` knots, interpolated
     /// linearly and held constant beyond the ends; `None` for an unaligned run.
     pub residual_sd: Vec<Option<Vec<(f64, f64)>>>,
-    /// Extra RT dispersion per precursor (0 without observations).
+    /// Extra RT dispersion per precursor, in the same component as
+    /// `consensus` (0 without observations).
     pub tau: Vec<f64>,
     /// Number of aligned runs in which each precursor is observed (`n_p`).
     pub n_runs_seen: Vec<u16>,
@@ -243,8 +267,11 @@ pub struct Alignment {
     /// Fraction of the consensus RT range covered by each run's anchors, as
     /// measured when the run was last checked.
     pub coverage: Vec<f64>,
-    /// Per precursor, the variance `V_p` of `consensus` (0 without
-    /// observations).
+    /// Alignment component per run; `None` for an unaligned run.
+    components: Vec<Option<u32>>,
+    /// Per precursor, the component of `consensus` and `tau` (`u32::MAX`
+    /// without observations) and the consensus variance `V_p` there.
+    home: Vec<u32>,
     consensus_var: Vec<f64>,
     /// Observations in aligned runs grouped by precursor: those of `p` are
     /// `obs_runs[obs_offsets[p]..obs_offsets[p + 1]]` (runs ascending).
@@ -254,30 +281,78 @@ pub struct Alignment {
 }
 
 impl Alignment {
-    /// Predicted apex RT of precursor `p` in `run` and its uncertainty `s`.
+    /// Predicted apex RT of precursor `p` in `run` and its uncertainty `s`,
+    /// from `p`'s observations in `run`'s alignment component.
     ///
     /// `None` when the run is unaligned or `p` has no observation in an
-    /// aligned run.
+    /// aligned run of `run`'s component.
     pub fn predict(&self, p: u32, run: u16) -> Option<(f64, f64)> {
         let map = self.maps.get(run as usize)?.as_ref()?;
-        let t = *self.consensus.get(p as usize)?;
-        if !t.is_finite() {
+        let c = self.component(run)?;
+        let pi = p as usize;
+        if pi >= self.consensus.len() {
             return None;
         }
-        let pi = p as usize;
-        Some(self.transfer(map, run, t, self.consensus_var[pi], self.tau[pi]))
+        if self.home[pi] == c {
+            let t = self.consensus[pi];
+            return Some(self.transfer(map, run, t, self.consensus_var[pi], self.tau[pi]));
+        }
+        let e = self.estimate(pi, None, c)?;
+        Some(self.transfer(map, run, e.t, e.var, e.tau))
     }
 
     /// Like [`Alignment::predict`], but the consensus RT, `n_p`, `tau_p` and
-    /// `V_p` are recomputed without `run`'s own observation of `p`. `None` when the
-    /// run is unaligned or `p` has no observation in another aligned run.
+    /// `V_p` are recomputed without `run`'s own observation of `p`. `None`
+    /// when the run is unaligned or `p` has no observation in another aligned
+    /// run of `run`'s component.
     pub fn predict_excluding(&self, p: u32, run: u16) -> Option<(f64, f64)> {
         let map = self.maps.get(run as usize)?.as_ref()?;
+        let c = self.component(run)?;
         if p as usize >= self.consensus.len() {
             return None;
         }
-        let e = self.estimate(p as usize, Some(run))?;
+        let e = self.estimate(p as usize, Some(run), c)?;
         Some(self.transfer(map, run, e.t, e.var, e.tau))
+    }
+
+    /// Alignment component of `run`; `None` for an unaligned run or a run
+    /// outside the alignment.
+    pub fn component(&self, run: u16) -> Option<u32> {
+        self.components.get(run as usize).copied().flatten()
+    }
+
+    /// Number of alignment components.
+    pub fn n_components(&self) -> usize {
+        self.components
+            .iter()
+            .flatten()
+            .max()
+            .map_or(0, |&c| c as usize + 1)
+    }
+
+    /// True when `run` is aligned and `p` is observed in an aligned run
+    /// other than `exclude`, but in none of `run`'s component: the
+    /// prediction is refused only because it would cross components.
+    pub fn blocked_by_component(&self, p: u32, run: u16, exclude: Option<u16>) -> bool {
+        let Some(c) = self.component(run) else {
+            return false;
+        };
+        let pi = p as usize;
+        if pi >= self.consensus.len() {
+            return false;
+        }
+        let mut other = false;
+        for i in self.obs_offsets[pi]..self.obs_offsets[pi + 1] {
+            let r = self.obs_runs[i];
+            if Some(r) == exclude {
+                continue;
+            }
+            if self.components[r as usize] == Some(c) {
+                return false;
+            }
+            other = true;
+        }
+        other
     }
 
     /// The per-run state, in run order, from which [`Alignment::from_runs`]
@@ -297,6 +372,7 @@ impl Alignment {
                 residual_sd: self.residual_sd[r].clone(),
                 anchors: self.anchors[r],
                 coverage: self.coverage[r],
+                component: self.components[r],
                 observations,
             })
             .collect()
@@ -307,9 +383,10 @@ impl Alignment {
     /// recomputed from the observations by the same code [`align`] uses, so
     /// every prediction equals the original's bit for bit.
     ///
-    /// Errors: a map without residual widths or the reverse, an observation in
-    /// an unaligned run, a precursor outside `0..n_precursors`, a non-finite
-    /// RT, or two observations of one precursor in one run.
+    /// Errors: a map without residual widths or the reverse, an aligned run
+    /// without a component or the reverse, an observation in an unaligned
+    /// run, a precursor outside `0..n_precursors`, a non-finite RT, or two
+    /// observations of one precursor in one run.
     pub fn from_runs(runs: Vec<RunAlignment>, n_precursors: usize) -> Result<Alignment, String> {
         let n_runs = runs.len();
         if n_runs > u16::MAX as usize + 1 {
@@ -320,6 +397,11 @@ impl Alignment {
             if run.map.is_some() != run.residual_sd.is_some() {
                 return Err(format!(
                     "run {r}: a run map needs residual widths and the reverse"
+                ));
+            }
+            if run.map.is_some() != run.component.is_some() {
+                return Err(format!(
+                    "run {r}: an aligned run needs a component and the reverse"
                 ));
             }
             if run.map.is_none() && !run.observations.is_empty() {
@@ -361,11 +443,13 @@ impl Alignment {
         let mut residual_sd = Vec::with_capacity(n_runs);
         let mut anchors = Vec::with_capacity(n_runs);
         let mut coverage = Vec::with_capacity(n_runs);
+        let mut components = Vec::with_capacity(n_runs);
         for run in runs {
             maps.push(run.map);
             residual_sd.push(run.residual_sd);
             anchors.push(run.anchors);
             coverage.push(run.coverage);
+            components.push(run.component);
         }
         let mut out = Alignment {
             consensus: vec![f64::NAN; n_precursors],
@@ -375,6 +459,8 @@ impl Alignment {
             n_runs_seen,
             anchors,
             coverage,
+            components,
+            home: vec![u32::MAX; n_precursors],
             consensus_var: vec![0.0; n_precursors],
             obs_offsets,
             obs_runs: all.iter().map(|o| o.1).collect(),
@@ -384,12 +470,32 @@ impl Alignment {
         Ok(out)
     }
 
-    /// Sets `consensus`, `tau` and `consensus_var` of every precursor.
+    /// Sets `consensus`, `tau`, `home` and `consensus_var` of every precursor
+    /// from its observations in its home component.
     fn fill_consensus(&mut self) {
+        let mut counts: Vec<(u32, usize)> = Vec::new();
         for p in 0..self.consensus.len() {
-            if let Some(e) = self.estimate(p, None) {
+            counts.clear();
+            for i in self.obs_offsets[p]..self.obs_offsets[p + 1] {
+                let Some(c) = self.components[self.obs_runs[i] as usize] else {
+                    continue;
+                };
+                match counts.iter_mut().find(|e| e.0 == c) {
+                    Some(e) => e.1 += 1,
+                    None => counts.push((c, 1)),
+                }
+            }
+            // Most observations, then the lowest component id.
+            let Some(&(c, _)) = counts
+                .iter()
+                .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
+            else {
+                continue;
+            };
+            if let Some(e) = self.estimate(p, None, c) {
                 self.consensus[p] = e.t;
                 self.tau[p] = e.tau;
+                self.home[p] = c;
                 self.consensus_var[p] = e.var;
             }
         }
@@ -424,15 +530,18 @@ impl Alignment {
         s0 + (s1 - s0) * (t - x0) / (x1 - x0)
     }
 
-    /// Consensus RT, `tau_p` and `V_p` of precursor `p` from its observations
-    /// in aligned runs other than `exclude`, under the final maps. `None` when
-    /// none is left.
-    fn estimate(&self, p: usize, exclude: Option<u16>) -> Option<Estimate> {
+    /// Consensus RT, `n_p`, `tau_p` and `V_p` of precursor `p` from its
+    /// observations in the aligned runs of `component` other than `exclude`,
+    /// under the final maps. `None` when none is left.
+    fn estimate(&self, p: usize, exclude: Option<u16>, component: u32) -> Option<Estimate> {
         let range = self.obs_offsets[p]..self.obs_offsets[p + 1];
         let used = || {
             range
                 .clone()
-                .filter(move |&i| Some(self.obs_runs[i]) != exclude)
+                .filter(move |&i| {
+                    let r = self.obs_runs[i];
+                    Some(r) != exclude && self.components[r as usize] == Some(component)
+                })
                 .map(|i| (self.obs_runs[i], self.obs_rts[i]))
         };
         let inv: Vec<f64> = used()
@@ -480,7 +589,7 @@ impl Alignment {
 }
 
 /// Consensus RT `t`, extra dispersion `tau` and consensus variance `var`
-/// (`V_p`) of one precursor.
+/// (`V_p`) of one precursor in one component.
 struct Estimate {
     t: f64,
     tau: f64,
@@ -531,7 +640,28 @@ pub fn align(
         }
     }
 
-    let (aligned, anchors, coverage) = select_runs(&all, n_precursors, n_runs, p);
+    let (mut aligned, anchors, coverage) = select_runs(&all, n_precursors, n_runs, p);
+    let mut components = find_components(&all, &aligned, p.min_shared);
+    // A run alone in its component shares no anchor with a run of its own
+    // component, so nothing fixes its map: it is unaligned.
+    let mut size = vec![0usize; n_runs];
+    for &c in components.iter().flatten() {
+        size[c as usize] += 1;
+    }
+    let isolated: Vec<usize> = (0..n_runs)
+        .filter(|&r| components[r].is_some_and(|c| size[c as usize] == 1))
+        .collect();
+    if !isolated.is_empty() {
+        for &r in &isolated {
+            aligned[r] = false;
+        }
+        components = find_components(&all, &aligned, p.min_shared);
+    }
+    let n_components = components
+        .iter()
+        .flatten()
+        .max()
+        .map_or(0, |&c| c as usize + 1);
 
     // Observations in aligned runs, grouped by precursor.
     let mut obs_offsets = vec![0usize; n_precursors + 1];
@@ -549,22 +679,39 @@ pub fn align(
     }
     let group = |pr: usize| obs_offsets[pr]..obs_offsets[pr + 1];
 
-    // Anchors and their initial consensus.
-    let anchor_ids: Vec<usize> = (0..n_precursors)
-        .filter(|&pr| group(pr).len() >= 2)
-        .collect();
-    let mut t = vec![f64::NAN; n_precursors];
-    let mut buf = Vec::new();
-    for &pr in &anchor_ids {
-        buf.clear();
-        buf.extend(group(pr).map(|i| obs_rts[i]));
-        t[pr] = median_in_place(&mut buf);
-    }
-    // Per run, the anchors' (precursor, rt) pairs.
-    let mut run_pairs: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n_runs];
-    for &pr in &anchor_ids {
+    // Anchors: a precursor seen in at least two runs of one component, once
+    // per such component (ascending precursor, then component). Only those
+    // observations enter the fit; anchor `a` has id `a` in `t`.
+    let mut anchor_ids: Vec<(usize, u32)> = Vec::new();
+    let mut counts: Vec<(u32, usize)> = Vec::new();
+    for pr in 0..n_precursors {
+        counts.clear();
         for i in group(pr) {
-            run_pairs[obs_runs[i] as usize].push((pr, obs_rts[i]));
+            let c = components[obs_runs[i] as usize].expect("aligned run has a component");
+            match counts.iter_mut().find(|e| e.0 == c) {
+                Some(e) => e.1 += 1,
+                None => counts.push((c, 1)),
+            }
+        }
+        counts.sort_unstable();
+        anchor_ids.extend(counts.iter().filter(|e| e.1 >= 2).map(|e| (pr, e.0)));
+    }
+    let (offsets, runs_of, comp_of) = (&obs_offsets, &obs_runs, &components);
+    let anchor_obs = move |&(pr, c): &(usize, u32)| {
+        (offsets[pr]..offsets[pr + 1]).filter(move |&i| comp_of[runs_of[i] as usize] == Some(c))
+    };
+    let mut t = vec![f64::NAN; anchor_ids.len()];
+    let mut buf = Vec::new();
+    for (a, anchor) in anchor_ids.iter().enumerate() {
+        buf.clear();
+        buf.extend(anchor_obs(anchor).map(|i| obs_rts[i]));
+        t[a] = median_in_place(&mut buf);
+    }
+    // Per run, the anchors' (anchor id, rt) pairs.
+    let mut run_pairs: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n_runs];
+    for (a, anchor) in anchor_ids.iter().enumerate() {
+        for i in anchor_obs(anchor) {
+            run_pairs[obs_runs[i] as usize].push((a, obs_rts[i]));
         }
     }
 
@@ -580,18 +727,28 @@ pub fn align(
     };
     for _ in 0..p.rounds {
         fit_all(&mut maps, &t);
-        for &pr in &anchor_ids {
+        for (a, anchor) in anchor_ids.iter().enumerate() {
             buf.clear();
-            buf.extend(group(pr).map(|i| {
+            buf.extend(anchor_obs(anchor).map(|i| {
                 maps[obs_runs[i] as usize]
                     .as_ref()
                     .map_or(f64::NAN, |m| m.invert(obs_rts[i]))
             }));
-            t[pr] = median_in_place(&mut buf);
+            t[a] = median_in_place(&mut buf);
         }
-        if let Some(g) = mean_map(&maps) {
-            for &pr in &anchor_ids {
-                t[pr] = g.apply(t[pr]);
+        // The gauge of each component is the mean map of its runs.
+        let gauges: Vec<Option<RunMap>> = (0..n_components as u32)
+            .map(|c| {
+                mean_map(
+                    (0..n_runs)
+                        .filter(|&r| components[r] == Some(c))
+                        .filter_map(|r| maps[r].as_ref()),
+                )
+            })
+            .collect();
+        for (a, &(_, c)) in anchor_ids.iter().enumerate() {
+            if let Some(g) = &gauges[c as usize] {
+                t[a] = g.apply(t[a]);
             }
         }
     }
@@ -600,9 +757,9 @@ pub fn align(
     // Leave-one-out residuals of the anchors, as (consensus t_p, e) per run.
     let mut run_res: Vec<Vec<(f64, f64)>> = vec![Vec::new(); n_runs];
     let mut pairs: Vec<(u16, f64)> = Vec::new();
-    for &pr in &anchor_ids {
+    for anchor in &anchor_ids {
         pairs.clear();
-        pairs.extend(group(pr).map(|i| (obs_runs[i], obs_rts[i])));
+        pairs.extend(anchor_obs(anchor).map(|i| (obs_runs[i], obs_rts[i])));
         let inv: Vec<f64> = pairs
             .iter()
             .map(|&(r, rt)| maps[r as usize].as_ref().map_or(f64::NAN, |m| m.invert(rt)))
@@ -635,12 +792,88 @@ pub fn align(
         n_runs_seen,
         anchors,
         coverage,
+        components,
+        home: vec![u32::MAX; n_precursors],
         consensus_var: vec![0.0; n_precursors],
         obs_offsets,
         obs_runs,
         obs_rts,
     };
     out.fill_consensus();
+    out
+}
+
+/// Alignment component per run: the connected components of the graph whose
+/// edges join two aligned runs sharing at least `min_shared` precursors,
+/// numbered from 0 in the order of their lowest run; `None` for an unaligned
+/// run. `all` is sorted by precursor.
+fn find_components(
+    all: &[(u32, u16, f64)],
+    aligned: &[bool],
+    min_shared: usize,
+) -> Vec<Option<u32>> {
+    let n_runs = aligned.len();
+    let mut per_run: Vec<Vec<u32>> = vec![Vec::new(); n_runs];
+    for &(pr, r, _) in all {
+        if aligned[r as usize] {
+            per_run[r as usize].push(pr);
+        }
+    }
+    let need = min_shared.max(1);
+    let shares = |a: &[u32], b: &[u32]| {
+        let (mut i, mut j, mut k) = (0, 0, 0);
+        while i < a.len() && j < b.len() {
+            match a[i].cmp(&b[j]) {
+                std::cmp::Ordering::Less => i += 1,
+                std::cmp::Ordering::Greater => j += 1,
+                std::cmp::Ordering::Equal => {
+                    k += 1;
+                    if k >= need {
+                        return true;
+                    }
+                    i += 1;
+                    j += 1;
+                }
+            }
+        }
+        false
+    };
+    let mut parent: Vec<usize> = (0..n_runs).collect();
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+    for r in 0..n_runs {
+        if !aligned[r] {
+            continue;
+        }
+        for q in 0..r {
+            if !aligned[q] {
+                continue;
+            }
+            let (a, b) = (find(&mut parent, r), find(&mut parent, q));
+            if a != b && shares(&per_run[r], &per_run[q]) {
+                parent[a.max(b)] = a.min(b);
+            }
+        }
+    }
+    let mut label: Vec<Option<u32>> = vec![None; n_runs];
+    let mut out = vec![None; n_runs];
+    let mut next = 0u32;
+    for r in 0..n_runs {
+        if !aligned[r] {
+            continue;
+        }
+        let root = find(&mut parent, r);
+        let c = *label[root].get_or_insert_with(|| {
+            next += 1;
+            next - 1
+        });
+        out[r] = Some(c);
+    }
     out
 }
 
@@ -815,10 +1048,10 @@ fn ls_slope(pairs: &[(f64, f64)]) -> f64 {
     }
 }
 
-/// Mean of the aligned maps, evaluated on the union of their knots (exact for
-/// piecewise-linear maps); `None` without aligned maps.
-fn mean_map(maps: &[Option<RunMap>]) -> Option<RunMap> {
-    let ms: Vec<&RunMap> = maps.iter().flatten().collect();
+/// Mean of the maps, evaluated on the union of their knots (exact for
+/// piecewise-linear maps); `None` without maps.
+fn mean_map<'a>(maps: impl Iterator<Item = &'a RunMap>) -> Option<RunMap> {
+    let ms: Vec<&RunMap> = maps.collect();
     if ms.is_empty() {
         return None;
     }
@@ -1379,6 +1612,138 @@ mod tests {
         assert!(s >= 0.8 * sd0, "{s}");
         // Predicting the singleton into a run without it excludes nothing.
         assert_eq!(a.predict_excluding(300, 1), a.predict(300, 1));
+    }
+
+    /// Runs 0 and 1 share precursors 0..100, runs 2 and 3 share 100..200,
+    /// and no precursor is seen in both pairs; runs 2 and 3 elute 120 s
+    /// later. Precursor 200 is seen in run 0 only, 201 in run 2 only.
+    fn two_pairs() -> Alignment {
+        let mut rng = Rng(31);
+        let mut obs = Vec::new();
+        for p in 0..200u32 {
+            let t = 600.0 + 3000.0 * rng.uniform();
+            let (runs, shift) = if p < 100 { (0..2u16, 0.0) } else { (2..4u16, 120.0) };
+            for r in runs {
+                obs.push(Observation {
+                    precursor: p,
+                    run: r,
+                    rt: t + shift + 0.5 * rng.normal(),
+                });
+            }
+        }
+        obs.push(Observation {
+            precursor: 200,
+            run: 0,
+            rt: 1500.0,
+        });
+        obs.push(Observation {
+            precursor: 201,
+            run: 2,
+            rt: 1620.0,
+        });
+        align(&obs, 202, 4, &AlignParams::default())
+    }
+
+    #[test]
+    fn no_transfer_between_disconnected_runs() {
+        let a = two_pairs();
+        assert!(a.maps.iter().all(Option::is_some));
+        assert_eq!(a.component(0), a.component(1));
+        assert_eq!(a.component(2), a.component(3));
+        assert_ne!(a.component(0), a.component(2));
+        if let Some((t, s)) = a.predict(200, 2) {
+            panic!("precursor 200 transferred across components: {t:.2} +- {s:.3}");
+        }
+        for (p, r) in [(200u32, 3u16), (201, 0), (201, 1), (5, 2), (150, 0)] {
+            assert!(a.predict(p, r).is_none(), "{p} into {r}");
+            assert!(a.predict_excluding(p, r).is_none(), "{p} into {r}");
+            assert!(a.blocked_by_component(p, r, None), "{p} into {r}");
+        }
+        // Within a pair transfers still work.
+        let (t, _) = a.predict(200, 1).unwrap();
+        assert!((t - 1500.0).abs() < 3.0, "{t}");
+        let (t, _) = a.predict(201, 3).unwrap();
+        assert!((t - 1620.0).abs() < 3.0, "{t}");
+        assert!(a.predict_excluding(5, 1).is_some());
+        assert!(a.predict_excluding(150, 3).is_some());
+        assert!(!a.blocked_by_component(200, 1, None));
+        assert!(!a.blocked_by_component(5, 1, Some(1)));
+    }
+
+    #[test]
+    fn precursor_seen_in_two_components_uses_the_destination_component() {
+        // As `two_pairs`, with 600 precursors per pair.
+        let mut rng = Rng(31);
+        let mut obs = Vec::new();
+        for p in 0..1200u32 {
+            let t = 600.0 + 3000.0 * rng.uniform();
+            let (runs, shift) = if p < 600 { (0..2u16, 0.0) } else { (2..4u16, 120.0) };
+            for r in runs {
+                obs.push(Observation {
+                    precursor: p,
+                    run: r,
+                    rt: t + shift + 0.5 * rng.normal(),
+                });
+            }
+        }
+        // Precursor 1200 elutes at 1500 s in the first pair, 1620 s in the
+        // second.
+        obs.push(Observation {
+            precursor: 1200,
+            run: 0,
+            rt: 1500.0,
+        });
+        obs.push(Observation {
+            precursor: 1200,
+            run: 2,
+            rt: 1620.0,
+        });
+        let a = align(&obs, 1201, 4, &AlignParams::default());
+        assert_eq!(a.n_components(), 2);
+        let (t1, _) = a.predict(1200, 1).unwrap();
+        let (t3, _) = a.predict(1200, 3).unwrap();
+        eprintln!(
+            "precursor_seen_in_two_components_uses_the_destination_component: \
+             run 1 {t1:.2} (1500), run 3 {t3:.2} (1620)"
+        );
+        assert!((t1 - 1500.0).abs() < 3.0, "{t1}");
+        assert!((t3 - 1620.0).abs() < 3.0, "{t3}");
+        // Without run 2, the second pair has no donor.
+        assert!(a.predict_excluding(1200, 2).is_none());
+        assert!(a.blocked_by_component(1200, 2, Some(2)));
+    }
+
+    #[test]
+    fn run_sharing_too_few_precursors_with_any_run_is_unaligned() {
+        // Runs 0/1 and 2/3 as in `two_pairs`; run 4 sees 12 precursors of
+        // each pair, so it shares 12 with every run.
+        let mut rng = Rng(41);
+        let mut obs = Vec::new();
+        for p in 0..200u32 {
+            let t = 600.0 + 3000.0 * rng.uniform();
+            let mut runs: Vec<u16> = if p < 100 { vec![0, 1] } else { vec![2, 3] };
+            if p % 100 < 12 {
+                runs.push(4);
+            }
+            for r in runs {
+                obs.push(Observation {
+                    precursor: p,
+                    run: r,
+                    rt: t + 0.5 * rng.normal(),
+                });
+            }
+        }
+        let ap = AlignParams {
+            min_anchors: 20,
+            ..AlignParams::default()
+        };
+        let a = align(&obs, 200, 5, &ap);
+        assert_eq!(a.anchors[4], 24);
+        assert!(a.maps[4].is_none() && a.component(4).is_none());
+        assert!(a.maps[..4].iter().all(Option::is_some));
+        assert_eq!(a.n_components(), 2);
+        assert!(a.predict(0, 4).is_none());
+        assert_eq!(a.n_runs_seen[0], 2);
     }
 
     #[test]

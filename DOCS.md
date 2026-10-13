@@ -850,7 +850,15 @@ scores from separately trained Percolator models are not on one scale.
   correspondingly wide search window everywhere. A run
   with fewer than 50 anchors, or whose anchors cover
   less than 30 % of the RT range, is unaligned: it is logged, neither gives nor receives
-  transfers, and keeps the `identified` rows of its own identifications.
+  transfers, and keeps the `identified` rows of its own identifications. Two aligned runs
+  that share at least 20 identified precursors are linked; the groups of runs connected this
+  way are alignment components. Only shared precursors fix the relative RT scale of two
+  runs, so each component is fitted on its own anchors, and a precursor is transferred into
+  a run only from donor runs in the same component. A run that shares fewer than 20
+  precursors with every other aligned run is unaligned.
+  When the aligned runs form several components the library log lists them, and each
+  extract log counts the transfers and pseudo-transfers skipped because every donor run lies
+  in another component.
 * **Extract** (`quant extract`, one run, reads `library.parquet`, `alignment.parquet` and the
   run's `<stem>.ms1.parquet`). Every library precursor
   is measured, at the `--lfq-tol` m/z tolerance (ppm; default 10 ppm), by a likelihood template fit of its isotope pattern and elution profile around

@@ -96,6 +96,12 @@ pub(crate) struct ExtractCounts {
     pub no_pseudo_prediction: usize,
     /// Unidentified pairs without a prediction (no transfer rows).
     pub no_prediction: usize,
+    /// Identified pairs whose other donor runs are all in other alignment
+    /// components (no pseudo-transfer row; not in `no_pseudo_prediction`).
+    pub pseudo_other_component: usize,
+    /// Unidentified pairs whose donor runs are all in other alignment
+    /// components (no transfer rows; not in `no_prediction`).
+    pub other_component: usize,
     /// Identified fits that set the run's width prior.
     pub width_fits: usize,
     /// Fewer than the needed identified fits: the width prior is the default.
@@ -108,6 +114,8 @@ impl ExtractCounts {
         self.nonfinite_best_rt += o.nonfinite_best_rt;
         self.no_pseudo_prediction += o.no_pseudo_prediction;
         self.no_prediction += o.no_prediction;
+        self.pseudo_other_component += o.pseudo_other_component;
+        self.other_component += o.other_component;
     }
 }
 
@@ -456,6 +464,12 @@ fn entry_rows(
                         other_donors,
                     ));
                 }
+                None if lib
+                    .alignment
+                    .blocked_by_component(e.precursor, run, Some(run)) =>
+                {
+                    counts.pseudo_other_component += 1
+                }
                 None => counts.no_pseudo_prediction += 1,
             }
         }
@@ -475,6 +489,9 @@ fn entry_rows(
                 ) {
                     rows.push(row(probe.kind, Role::Transfer, &probe, other_donors));
                 }
+            }
+            None if lib.alignment.blocked_by_component(e.precursor, run, None) => {
+                counts.other_component += 1
             }
             None => counts.no_prediction += 1,
         },
@@ -1128,6 +1145,73 @@ mod tests {
             .unwrap()
             .q;
         assert!(rows.iter().all(|r| r.library_q == lq));
+    }
+
+    #[test]
+    fn transfers_stay_inside_an_alignment_component() {
+        // Runs 0/1 share precursors 0..60, runs 2/3 share 60..120; precursor
+        // 120 is identified in run 0 only, 121 in runs 0 and 2.
+        let dir = tempfile::tempdir().unwrap();
+        let n = 122u32;
+        let meta: Vec<PrecursorMeta> = (0..n)
+            .map(|p| PrecursorMeta {
+                key: format!("PEP{p}/2"),
+                mz: 400.0 + 7.3 * p as f64,
+                charge: CHARGE,
+                envelope: ENVELOPE,
+            })
+            .collect();
+        let mut psms = Vec::new();
+        let mut psm = |p: u32, run: u16| {
+            psms.push(PsmIn {
+                run,
+                precursor: p,
+                rt: 100.0 + 8.0 * p as f64 + if run >= 2 { 120.0 } else { 0.0 },
+                score: 10.0,
+                q: 0.001,
+                pep: 0.0,
+                is_decoy: false,
+                faims_cv: None,
+            })
+        };
+        for p in 0..120 {
+            let pair = if p < 60 { [0, 1] } else { [2, 3] };
+            pair.into_iter().for_each(|r| psm(p, r));
+        }
+        psm(120, 0);
+        psm(121, 0);
+        psm(121, 2);
+        let ap = AlignParams {
+            min_anchors: 10,
+            ..AlignParams::default()
+        };
+        let lib = build_library(&psms, meta, 4, 1.0, DONOR_Q, None, &ap);
+        assert_eq!(lib.alignment.n_components(), 2);
+        let path = dir.path().join("run3.ms1.parquet");
+        let index = Ms1RunIndex::new(run_scans(3, false, &|_| false));
+        write_ms1_table(&path, "run3", &index).unwrap();
+        let out = extract_run(3, &path, &lib, &params()).unwrap();
+        // 0..60 and 120 come from the other component: no rows, counted.
+        assert_eq!(out.counts.other_component, 61);
+        assert_eq!(out.counts.no_prediction, 0);
+        for p in (0..60).chain([120]) {
+            assert!(rows_of(&out.rows, p).is_empty(), "{p}");
+        }
+        // 121 is transferred from run 2, its donor in this component.
+        let rows = rows_of(&out.rows, 121);
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|r| r.role == Role::Transfer), "{rows:?}");
+        assert_eq!(rows[0].kind, Hypothesis::Target);
+        // Run 2 identifies 121, but its only other donor is in the other
+        // component: no pseudo-transfer.
+        let path = dir.path().join("run2.ms1.parquet");
+        let index = Ms1RunIndex::new(run_scans(2, false, &|_| false));
+        write_ms1_table(&path, "run2", &index).unwrap();
+        let out = extract_run(2, &path, &lib, &params()).unwrap();
+        assert_eq!(out.counts.pseudo_other_component, 1);
+        let rows = rows_of(&out.rows, 121);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].role, Role::Identified);
     }
 
     #[test]

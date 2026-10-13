@@ -79,6 +79,10 @@ fn ms2pip_parity(a: &Args) {
         by_model.entry(x[col("model")].to_string()).or_default().push(x);
     }
     for (model, rows) in by_model {
+        if !a.models.join(format!("ms2pip_{model}_b.json")).is_file() {
+            println!("SKIP ms2pip {model}: no ms2pip_{model}_b.json in {}", a.models.display());
+            continue;
+        }
         let mut sb = load(&a.models, &format!("ms2pip_{model}_b"));
         let mut sy = load(&a.models, &format!("ms2pip_{model}_y"));
         let (mut feat, mut pb, mut py) = (Dev::default(), Dev::default(), Dev::default());

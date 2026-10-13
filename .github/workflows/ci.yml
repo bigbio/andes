@@ -78,6 +78,12 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: cargo test -p andes --release --test out_of_core_pin_goldens -- --ignored
 
+      - name: onnx-infer (tract + fixture models)
+        # Default workspace test builds onnx-infer without engines. Tract is
+        # opt-in; this lane exercises committed fixtures (double, intensity_mlp)
+        # and always-on contracts (feature names, PeptDeep packing, manifests).
+        run: cargo test -p onnx-infer --release --features tract
+
   lint:
     name: Lint (clippy + rustfmt)
     runs-on: ubuntu-latest

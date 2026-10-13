@@ -337,8 +337,8 @@ the fused strong score Percolator weights most; historically `StrongScore`; it a
 | 57 | `ModSiteLocalized` | 0/1 | one-hot | 1 if a bracketing ion pair localizes the mod. |
 | 58 | `ModSiteDetCount` | int | ≥0 | Site-determining (bracketing) ions over all sites. |
 | 59 | `MassCompetitionEvidence` | float | ≥0 | `Σ 1/(1+ambiguity+ρ)`, alternative-mass competition. |
-| 60 | `CandidateRankEntropy` | float | ≥0 | Softmax entropy of the retained top-K scores, one per emitted row. |
-| 61 | `ListwiseScoreGap` | float | signed | Top-1 − top-2 `RankScore` among the retained queue's emitted rows. |
+| 60 | `CandidateRankEntropy` | float | ≥0 | Softmax entropy of the retained top-K scores, one per positional-isomer class. |
+| 61 | `ListwiseScoreGap` | float | signed | Top-1 − top-2 `RankScore` in the retained queue, one per positional-isomer class. |
 | 62 | `RawScore` | float | unbounded | **Fused strong score** `signal − null`; the primary feature. |
 | 63 | `RawScoreCal` | float | signed | Per-spectrum z-scored `RawScore`. |
 | 64 | `RankScoreFloat` | float | unbounded | Unrounded `RankScore` (continuous split-sum). |

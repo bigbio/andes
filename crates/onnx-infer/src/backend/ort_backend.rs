@@ -29,7 +29,9 @@ use crate::tensor::NamedTensor;
 
 /// Load the ONNX Runtime shared library from `path` instead of
 /// `ORT_DYLIB_PATH` / the loader search path. Call before the first model is
-/// loaded; later calls have no effect.
+/// loaded; later calls have no effect. A file that cannot be loaded as the
+/// runtime (not a shared library, an incompatible build, missing
+/// dependencies) is an error.
 pub fn init_runtime(path: impl AsRef<Path>) -> Result<()> {
     let path = path.as_ref();
     if !path.is_file() {
@@ -38,26 +40,38 @@ pub fn init_runtime(path: impl AsRef<Path>) -> Result<()> {
             path.display()
         )));
     }
-    ort::init_from(path.display().to_string())
-        .commit()
+    let lib = path.display().to_string();
+    catch_load(|| ort::init_from(lib).commit())
+        .map_err(|msg| {
+            Error::Inference(format!(
+                "cannot load the ONNX Runtime library {} ({msg})",
+                path.display()
+            ))
+        })?
         .map(|_| ())
         .map_err(|e| Error::Inference(format!("ONNX Runtime init: {e}")))
 }
 
 /// Resolve the runtime library once, turning `ort`'s load panic into an error.
 fn ensure_runtime() -> Result<()> {
-    std::panic::catch_unwind(|| {
+    catch_load(|| {
         ort::api();
     })
-    .map_err(|p| {
-        let msg = p
-            .downcast_ref::<String>()
-            .cloned()
-            .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
-            .unwrap_or_default();
+    .map_err(|msg| {
         Error::Inference(format!(
             "cannot load the ONNX Runtime library ({msg}); set ORT_DYLIB_PATH to libonnxruntime"
         ))
+    })
+}
+
+/// Runs `f`, which may load the runtime library; `ort` panics when the
+/// library cannot be loaded, and the panic message is returned as the error.
+fn catch_load<T>(f: impl FnOnce() -> T) -> std::result::Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|p| {
+        p.downcast_ref::<String>()
+            .cloned()
+            .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default()
     })
 }
 

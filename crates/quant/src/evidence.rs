@@ -50,6 +50,17 @@
 //! weight). Isotope 0 is never dropped. Target and decoy probes go through the
 //! same test.
 //!
+//! Refit. When an isotope is dropped, `(t0, w)` is searched again over the
+//! same grid and RT prior with the retained isotopes only, so that an
+//! interferer on one trace does not keep the apex at its own elution time.
+//! The test is then repeated at the new optimum over all isotopes. When it
+//! keeps every isotope or drops the same one, the refit without the dropped
+//! isotope stands; when it drops a different isotope, that one is dropped
+//! instead (the first is used again) and `(t0, w)` is searched once more,
+//! which is final. At most two refits, so at most three grid
+//! searches per probe. Every reported value (amplitude, LLR, features) is
+//! computed at the final `(t0, w)` and isotope set.
+//!
 //! The per-probe arithmetic, [`fit_traces`], takes the extracted traces as
 //! slices. [`fit_many`] extracts the traces of many probes in one RT sweep
 //! over the run and passes them to the same arithmetic, so it reproduces
@@ -685,8 +696,41 @@ fn fit_traces_on_grid(
             mask |= 1 << i;
         }
     }
-    let (t0, w) = best_alignment(rt, traces, &pi, &ybar, &sigma, mask, prior, widths, work);
-    let g = &mut work.g;
+    let all = mask;
+    let fit_at = |used: u8, work: &mut Workspace| {
+        let (t0, w) = best_alignment(rt, traces, &pi, &ybar, &sigma, used, prior, widths, work);
+        let (sgg, proj) = profile(rt, traces, &ybar, t0, w, &mut work.g);
+        (t0, w, sgg, proj)
+    };
+    let (mut t0, mut w, mut sgg, mut proj) = fit_at(all, work);
+    // The refits of the module docs: at most two.
+    let mut mask = exclude_interfered(&proj, sgg, &pi, &sigma, all);
+    if mask != all {
+        (t0, w, sgg, proj) = fit_at(mask, work);
+        let again = exclude_interfered(&proj, sgg, &pi, &sigma, all);
+        if again != all && again != mask {
+            mask = again;
+            (t0, w, sgg, proj) = fit_at(mask, work);
+        }
+    }
+    let g = &work.g;
+    let m1_proj = project(m1, mean(m1), g);
+    features(
+        rt, traces, mz0, mu, prior, &pi, &sigma, &proj, sgg, m1_proj, mask, t0, w, g,
+    )
+}
+
+/// Fills `g` with the profile at `(t0, w)` over `rt` and returns
+/// `sgg = sum_j (g_j - gbar)^2` (floored at [`MIN_CENTRED_SGG`]) and each
+/// trace's centred projection on it.
+fn profile(
+    rt: &[f64],
+    traces: &[&[f32]],
+    ybar: &[f64; MAX_ISOTOPES],
+    t0: f64,
+    w: f64,
+    g: &mut Vec<f64>,
+) -> (f64, [f64; MAX_ISOTOPES]) {
     g.clear();
     g.extend(rt.iter().map(|&t| gaussian(t, t0, w)));
     let gbar = g.iter().sum::<f64>() / g.len() as f64;
@@ -696,14 +740,10 @@ fn fit_traces_on_grid(
         .sum::<f64>()
         .max(MIN_CENTRED_SGG);
     let mut proj = [0.0f64; MAX_ISOTOPES];
-    for i in 0..n_iso {
-        proj[i] = project(traces[i], ybar[i], g);
+    for (p, (trace, &yb)) in proj.iter_mut().zip(traces.iter().zip(ybar)) {
+        *p = project(trace, yb, g);
     }
-    let mask = exclude_interfered(&proj, sgg, &pi, &sigma, mask);
-    let m1_proj = project(m1, mean(m1), g);
-    features(
-        rt, traces, mz0, mu, prior, &pi, &sigma, &proj, sgg, m1_proj, mask, t0, w, g,
-    )
+    (sgg, proj)
 }
 
 /// `envelope / sum(envelope)`, or `[1, 0, 0, 0]` when that is not a valid
@@ -1263,6 +1303,40 @@ mod tests {
         assert_eq!(e.isotopes_used & 0b0100, 0);
         assert_eq!(e.isotopes_used & 0b0001, 1);
         assert!((e.quantity / truth - 1.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn apex_is_refitted_after_an_isotope_is_excluded() {
+        // The target elutes at 100 s; an interferer on its M+1 trace elutes at
+        // 114 s, inside the RT prior, and is strong enough to pull the joint
+        // fit towards it.
+        let (w, dt) = (5.0, 1.0);
+        let iso1 = MZ + ISOTOPE / 2.0;
+        let truth = AMP * w * (2.0 * std::f64::consts::PI).sqrt();
+        for strength in [20.0, 100.0] {
+            let interferer = (
+                iso1 * (1.0 + 3e-6),
+                2,
+                [1.0, 0.0, 0.0, 0.0],
+                114.0,
+                w,
+                strength * AMP * ENV[1] as f64,
+            );
+            let run = synth_run(&[(MZ, 2, ENV, 100.0, w, AMP), interferer], NOISE, dt);
+            let e = fit(&run, &probe(MZ, 100.0, 6.0, w), 2, &ENV, &params()).unwrap();
+            eprintln!(
+                "M+1 interferer at 114 s ({strength}x): used = {:#06b}, t0 = {}, w = {}, \
+                 quantity/true = {:.4}",
+                e.isotopes_used,
+                e.t0,
+                e.w,
+                e.quantity / truth
+            );
+            assert_finite(&e);
+            assert_eq!(e.isotopes_used & 0b0010, 0, "M+1 is excluded");
+            assert!((e.t0 - 100.0).abs() <= dt, "t0 = {}", e.t0);
+            assert!((e.quantity / truth - 1.0).abs() < 0.1);
+        }
     }
 
     #[test]

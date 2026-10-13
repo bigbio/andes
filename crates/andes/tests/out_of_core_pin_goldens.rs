@@ -52,8 +52,8 @@
 //! emission order kept): identical row for row with SpecId excluded, SpecIds
 //! unique, every spectrum's first row unchanged. Rows dropped, all isomer
 //! alternatives (Ox-M sites, protein-N-terminal Acetyl vs internal K, and on the
-//! refine slice deamidation sites plus 24 repeats of the same modified peptide
-//! from the two passes):
+//! refine slice deamidation sites, plus 24 rows repeating a kept modified
+//! peptide with different flanking residues):
 //!
 //! | case | rows before | rows after |
 //! |---|---|---|

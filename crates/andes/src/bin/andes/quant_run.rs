@@ -297,10 +297,14 @@ impl QuantCollector {
             None
         };
         let mut ms3_reporters: HashMap<String, ReporterScan> = HashMap::new();
+        let mut ms3_no_parent = 0usize;
         if let Some(plex) = self.settings.plex {
             if self.settings.tmt_level >= 3 {
                 for p in scans.ms3 {
-                    let Some(parent) = p.parent_id else { continue };
+                    let Some(parent) = p.parent_id else {
+                        ms3_no_parent += 1;
+                        continue;
+                    };
                     let raw = extract_reporters(&p.peaks, plex, self.settings.tmt_tol);
                     // Keep the most intense MS3 if several reference the same MS2.
                     let total: f32 = raw.iter().sum();
@@ -339,6 +343,12 @@ impl QuantCollector {
                     );
                 }
             }
+        }
+        if ms3_no_parent > 0 {
+            eprintln!(
+                "quant: {stem}: {ms3_no_parent} MS3 scans without a parent reference \
+                 (not linked to an MS2, not quantified)"
+            );
         }
         if let Some(idx) = &ms1 {
             eprintln!(
@@ -854,9 +864,11 @@ fn write_run_artifacts(
         Ms1Cache::store_at(&ms1, &cache_path)
             .map_err(|e| format!("write {}: {e}", cache_path.display()))?;
         let mut rows: Vec<RunPsmRow> = Vec::new();
+        let mut no_rt = 0usize;
         for hit in hits.iter().filter(|h| h.run_idx == run_idx) {
             let spec = &spectra[hit.spec_idx];
             let Some(rt_s) = spec.rt_seconds else {
+                no_rt += 1;
                 continue;
             };
             let z = hit.psm.charge_used.max(1);
@@ -886,11 +898,16 @@ fn write_run_artifacts(
         write_run_quant_table(&table_path, &run.stem, &rows)
             .map_err(|e| format!("write {}: {e}", table_path.display()))?;
         eprintln!(
-            "quant: {}: wrote {} and {} ({} rank-1 PSMs, targets and decoys)",
+            "quant: {}: wrote {} and {} ({} rank-1 PSMs, targets and decoys{})",
             run.stem,
             cache_path.display(),
             table_path.display(),
-            rows.len()
+            rows.len(),
+            if no_rt > 0 {
+                format!("; {no_rt} without a retention time left out")
+            } else {
+                String::new()
+            }
         );
     }
     Ok(())
@@ -1117,16 +1134,21 @@ pub(crate) fn run_quant(
                 .load()
                 .map_err(|e| format!("load MS1 scans for {}: {e}", run.stem))?;
             let groups = faims_groups(ms1);
-            let mut targets: Vec<(usize, usize, LfqTarget)> = best
-                .iter()
-                .filter(|((r, _, _), _)| *r == run_idx)
-                .filter_map(|(_, &hi)| {
-                    let h = &hits[hi];
-                    let spec = &spectra[h.spec_idx];
-                    let group = group_of(&groups, run, spec)?;
-                    Some((hi, group, lfq_target(h, spec.rt_seconds?, n_iso)))
-                })
-                .collect();
+            let (mut no_series, mut no_rt) = (0usize, 0usize);
+            let mut targets: Vec<(usize, usize, LfqTarget)> = Vec::new();
+            for (_, &hi) in best.iter().filter(|((r, _, _), _)| *r == run_idx) {
+                let h = &hits[hi];
+                let spec = &spectra[h.spec_idx];
+                let Some(group) = group_of(&groups, run, spec) else {
+                    no_series += 1;
+                    continue;
+                };
+                let Some(rt) = spec.rt_seconds else {
+                    no_rt += 1;
+                    continue;
+                };
+                targets.push((hi, group, lfq_target(h, rt, n_iso)));
+            }
             // HashMap iteration must not determine feature row/ID order.
             targets.sort_unstable_by_key(|(hi, _, _)| *hi);
             let quantified = quantify_targets(&groups, &targets, params);
@@ -1149,7 +1171,7 @@ pub(crate) fn run_quant(
                 });
             }
             eprintln!(
-                "quant: {}: {} of {} precursors quantified, {} at feature q<={} and envelope cosine>={}",
+                "quant: {}: {} of {} precursors quantified, {} at feature q<={} and envelope cosine>={}{}{}",
                 run.stem,
                 n_found,
                 targets.len(),
@@ -1158,7 +1180,20 @@ pub(crate) fn run_quant(
                     .filter(|r| r.id.file_idx == run_idx && is_confident(r, s))
                     .count(),
                 s.feature_fdr,
-                s.lfq_params.min_cosine
+                s.lfq_params.min_cosine,
+                if no_series > 0 {
+                    format!(
+                        ", {no_series} whose MS2 has no FAIMS voltage with an MS1 series \
+                         (not quantified)"
+                    )
+                } else {
+                    String::new()
+                },
+                if no_rt > 0 {
+                    format!(", {no_rt} whose MS2 has no retention time (not quantified)")
+                } else {
+                    String::new()
+                }
             );
         }
         let runs: Vec<String> = collector.runs.iter().map(|r| r.stem.clone()).collect();

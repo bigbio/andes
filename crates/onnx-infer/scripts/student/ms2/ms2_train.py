@@ -70,7 +70,8 @@ class Data:
             t = t.take(pa.array(idx))
         self.n = t.num_rows
         self.has_teacher = has_teacher
-        self.dataset = np.asarray(t["dataset"].to_pylist(), dtype=object)
+        dss = pc.dictionary_encode(t["dataset"]).combine_chunks()
+        self.dataset = np.asarray(dss.dictionary.to_pylist(), dtype=object)[dss.indices.to_numpy()]
         forms = pc.dictionary_encode(t["peptidoform"]).combine_chunks()
         self.form_id = forms.indices.to_numpy().astype(np.int64)
         self.forms = forms.dictionary.to_pylist()

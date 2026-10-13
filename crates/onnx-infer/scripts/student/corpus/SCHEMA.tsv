@@ -1,0 +1,58 @@
+field	type	level	description
+source	str	DR	msnet | qpx | pride | proteometools | other
+accession	str	DR	PXD / MSV / IPX / PMID-derived id of the dataset
+run	str	R	run (raw file stem)
+title	str	D	project title
+year	int	D	publication year
+licence	str	D	repository licence string (PRIDE: 'EBI terms of use' or CC*)
+doi	str	D	paper DOI(s), '|'-separated
+pubmed	str	D	PubMed id(s)
+organism	str	D	organism name(s) ('|')
+taxid	str	D	NCBI taxon id(s) ('|')
+sample_type	str	D	cell line | tissue | plasma/serum | HLA immunoprecipitate | synthetic | microbe | ...
+enrichment	str	DR	none | phospho | glyco | ubiquitin(GG) | acetyl | HLA-I | HLA-II | ... ('|')
+labelling	str	DR	LFQ | TMT6/10/11 | TMTpro | iTRAQ4/8 | SILAC | dimethyl
+enzyme	str	DR	trypsin | LysC | GluC | AspN | chymotrypsin | ArgC | LysN | none (HLA) ('|')
+enzyme_specificity	str	DR	specific | semi | nonspecific
+instrument_model	str	DR	instrument model(s) (PSI-MS name)
+analyser	str	DR	MS2 analyser: FTMS (Orbitrap) | ASTMS (Astral) | ITMS | TOF | timsTOF
+fragmentation	str	DR	HCD | CID | ETD | EThcD | ETciD | UVPD ('|')
+activation	str	R	andes-ms2 activation token, e.g. HCD-FTMS, CID-ITMS
+nce	float	DR	normalised collision energy (median over MS2 scans if read from runs)
+ms2_resolution	float	DR	MS2 resolving power (Orbitrap, at m/z 200) if known
+gradient_min	float	DR	LC gradient length in minutes (run: max RT)
+acquisition	str	DR	DDA | DIA | PRM
+id_engine	str	D	search engine(s) of the provided identifications
+id_fdr_method	str	D	e.g. Percolator PEP<=0.01 | target-decoy q<=0.01 | MSFragger expect<=0.01
+id_format	str	D	mzIdentML | mzTab | PRIDE XML | MaxQuant txt | pepXML | qpx parquet | MsNet flat
+spectra_available	str	DR	attached | mzML/MGF in submission | raw only | none
+n_runs	int	D	runs with PSMs
+n_psms	int	DR	target PSMs after the source's own filter
+n_unique_peptidoforms	int	DR	distinct ProForma peptidoforms (I kept as given)
+n_unique_peptidoforms_il	int	D	distinct peptidoforms with I->L merged
+ptm_inventory	json	D	{'UNIMOD:21': n_psms, ..., 'mass:+x': n} incl. fixed mods
+n_ptm_types	int	D	distinct non-fixed modifications (excl. UNIMOD:4 and labels)
+length_hist	json	D	{length: n_psms}, lengths >= 40 pooled at 40
+charge_hist	json	D	{charge: n_psms}
+tryptic_cterm_frac	float	DR	fraction of PSMs whose sequence ends in K/R
+isoleucine_written_as_L	bool	D	no I in any sequence while L present (qpx convention)
+qc_ann_frac_median	float	DR	median annotated-intensity fraction, b/y 1+/2+ at analyser tolerance
+qc_ann_frac_p10	float	D	10th percentile of the same
+qc_low_ann_frac	float	DR	fraction of PSMs with annotated fraction < 0.2
+qc_n_peaks_median	float	DR	median peaks per MS2
+qc_prec_err_ppm_median	float	DR	median precursor error (ppm, best isotope)
+qc_prec_fit_frac	float	DR	fraction of PSMs whose precursor fits the peptidoform within tolerance
+qc_frag_err_da_median	float	DR	median signed fragment error (Da) of b/y 1+ in 0.5 Da
+qc_charge_alt_fit_frac	float	DR	fraction whose precursor fits better at z +/- 1
+qc_decoy_auc	float	D	target-vs-decoy score AUC where decoys exist
+qc_pep_p99	float	D	99th percentile PEP of retained targets
+qc_outlier_runs	int	D	runs flagged by robust z / analyser mismatch
+qc_outlier_flags	str	R	flags of the run
+analyser_src	str	DR	cv | text | qc | manual
+fragmentation_src	str	DR	cv | text | qc | manual
+excluded_benchmark	bool	D	accession is an andes benchmark/test set: never train
+in_model_store_ledger	bool	D	trained a bundled andes model: never use as a test set for it
+predictor_heldout	bool	D	held out by andes-rt/andes-ms2 v1
+contamination_note	str	D	free text
+priority	str	D	user-priority stratum: HLA | PTM | activation | instrument | none
+notes	str	D	free text

@@ -1,0 +1,411 @@
+#!/usr/bin/env python3
+"""Survey PRIDE Archive for training-corpus candidates (metadata only, no data download).
+
+Subcommands
+-----------
+``fetch``     page through ``/v3/projects`` (100 per page; larger pageSize is silently
+              clamped) into a compact JSONL. Submitter/PI contact details are dropped.
+              Resumable; finishes by checking the unique-accession count against
+              ``/v3/projects/count`` and refuses to report success on a short listing.
+``classify``  derive the corpus strata of every project (analyser, fragmentation,
+              labelling, enrichment, sample type, enzyme, organism, year, licence) from
+              its CV terms + free text, write ``projects_classified.tsv`` and the
+              per-stratum counts ``strata_counts.tsv``.
+``files``     for a list of accessions, page through ``/v3/projects/<acc>/files`` (checked
+              against the ``total_records`` header) and summarise which identification
+              formats are present (mzIdentML, mzTab, PRIDE XML, pepXML, MaxQuant txt,
+              FragPipe/Sage/DIA-NN outputs, peak lists, raw), i.e. whether the submission
+              is usable without re-searching.
+
+Every value derived from text is a *heuristic* and is flagged as such in the output
+(``*_src`` columns say ``cv`` or ``text``). Shortlisted datasets must be verified
+against the paper before use.
+
+Usage::
+
+  python pride_survey.py fetch --out projects.jsonl
+  python pride_survey.py classify --projects projects.jsonl --out-dir survey/
+  python pride_survey.py files --accessions acc.txt --out files_summary.tsv
+"""
+from __future__ import annotations
+
+import argparse
+import collections
+import csv
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.request
+
+API = "https://www.ebi.ac.uk/pride/ws/archive/v3"
+KEEP = [
+    "accession", "title", "projectDescription", "sampleProcessingProtocol", "dataProcessingProtocol",
+    "projectTags", "keywords", "submissionType", "license", "submissionDate", "publicationDate",
+    "instruments", "softwares", "experimentTypes", "quantificationMethods", "sampleAttributes",
+    "organisms", "organismParts", "diseases", "references", "identifiedPTMStrings", "totalFileDownloads",
+]
+
+
+def get(url: str, tries: int = 6):
+    for k in range(tries):
+        try:
+            with urllib.request.urlopen(url, timeout=120) as r:
+                return json.load(r), dict(r.headers)
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:  # transient
+            if k == tries - 1:
+                raise
+            time.sleep(2 ** k)
+            print(f"retry {k + 1} {url}: {e}", file=sys.stderr)
+
+
+# ----------------------------------------------------------------------------- fetch
+def cmd_fetch(a):
+    total, _ = get(f"{API}/projects/count")
+    seen = set()
+    page = 0
+    if os.path.exists(a.out):
+        with open(a.out) as fh:
+            for line in fh:
+                seen.add(json.loads(line)["accession"])
+        page = len(seen) // 100  # resume roughly; duplicates are skipped below
+    with open(a.out, "a") as out:
+        while True:
+            rows, _ = get(f"{API}/projects?pageSize=100&page={page}")
+            if not rows:
+                break
+            for r in rows:
+                if r["accession"] in seen:
+                    continue
+                seen.add(r["accession"])
+                out.write(json.dumps({k: r.get(k) for k in KEEP}) + "\n")
+            page += 1
+            if page % 20 == 0:
+                print(f"page {page}: {len(seen)}/{total}", file=sys.stderr, flush=True)
+            if len(rows) < 100:
+                break
+    print(f"{len(seen)} unique projects fetched; API count {total}")
+    if len(seen) < total:
+        sys.exit(f"SHORT LISTING: {total - len(seen)} projects missing; rerun (resumes) before using")
+
+
+# ----------------------------------------------------------------------------- classify
+ANALYSER_BY_INSTRUMENT = [
+    # (regex on the instrument name, analyser of the MS2 scan most often used, family)
+    (r"astral", "Astral", "Astral"),
+    (r"timstof|tims tof", "TOF(timsTOF)", "timsTOF"),
+    (r"tripletof|triple tof|qstar|5600|6600|7600|zenotof|x500|synapt|xevo|impact|maxis|compact|q-tof|qtof|6550|6545|6560|tof", "TOF", "QTOF"),
+    (r"exploris", "Orbitrap", "Exploris"),
+    (r"q exactive|q-exactive|qexactive|exactive", "Orbitrap", "QExactive"),
+    (r"fusion|lumos|eclipse|ascend|tribrid", "Orbitrap/IT (tribrid)", "Tribrid"),
+    (r"orbitrap velos|orbitrap elite|ltq orbitrap|orbitrap xl|orbitrap classic|orbitrap", "Orbitrap/IT (hybrid)", "LTQ-Orbitrap"),
+    (r"ltq ft|ft-icr|fticr|solarix|apex", "FT-ICR/IT", "FT-ICR"),
+    (r"ltq|velos pro|lcq|ion trap|amazon|hct|4000 qtrap|qtrap|lxq", "IonTrap", "IonTrap"),
+]
+
+TEXT_FLAGS = {
+    # fragmentation
+    "frag_etd": r"\b(etd|electron[- ]transfer dissociation)\b",
+    "frag_ethcd": r"\bet[-]?hcd\b|\betcid\b",
+    "frag_ecd": r"\becd\b|electron[- ]capture dissociation",
+    "frag_uvpd": r"\buvpd\b|ultraviolet photodissociation",
+    "frag_cid": r"\bcid\b|collision[- ]induced dissociation|\bcad\b",
+    "frag_hcd": r"\bhcd\b|higher[- ]energy collision|beam[- ]type",
+    "ms2_ion_trap": r"(ion trap|linear trap|\blit\b|\bitms\b|rapid scan|ion-trap|turbo scan).{0,40}(ms2|ms/ms|ms\/ms|fragment|detect|acquir)|(ms2|ms/ms|fragment).{0,60}(in the|linear) ion trap",
+    "ms2_orbitrap": r"(ms2|ms/ms|fragment).{0,80}orbitrap|orbitrap.{0,40}(ms2|ms/ms)|resolution of 1[57],?[05]00|17,?500|15,?000 (resolution|at m/z)",
+    # labelling
+    "lab_tmt": r"\btmt|tandem mass tag|tmtpro|tmt10|tmt11|tmt16|tmt18",
+    "lab_itraq": r"\bitraq",
+    "lab_silac": r"\bsilac\b|stable isotope labell?ing (by|with) amino",
+    "lab_dimethyl": r"dimethyl labell?ing|reductive dimethyl",
+    # enrichment / PTM focus
+    "enr_phospho": r"phospho|tio2|imac|fe-nta|ti-imac",
+    "enr_glyco": r"glyco|n-glycan|o-glycan|hilic enrich|lectin",
+    "enr_ubiquitin": r"ubiquitin|diglycine|di-glycine|k-[eε]-gg|\bgg[- ]remnant|ubiscan",
+    "enr_acetyl": r"acetyl[- ]?(ome|lysine|ation enrich)|acetyl-lysine|lysine acetylation",
+    "enr_methyl": r"methyl[- ]?(ome|arginine|lysine)|arginine methylation",
+    "enr_succinyl_acyl": r"succinyl|crotonyl|malonyl|lactyl|glutaryl|hydroxybutyryl|propionyl",
+    "enr_citrullin": r"citrullin",
+    "enr_sumo": r"sumo",
+    "enr_crosslink": r"cross-?link|xl-ms|\bdss\b|\bdsso\b|\bbs3\b",
+    "enr_redox": r"cysteine oxidation|redox|s-nitrosyl|persulfid|sulfenyl",
+    "enr_adpr": r"adp-ribosyl",
+    "enr_histone": r"histone",
+    "hla_class1": r"hla[- ]?(class[- ]?)?(i\b|a\b|b\b|c\b|-a|-b|-c)|mhc[- ]?(class[- ]?)?i\b|w6/32|hla class i\b|class i hla",
+    "hla_class2": r"hla[- ]?(class[- ]?)?ii\b|hla-dr|hla-dq|hla-dp|mhc[- ]?(class[- ]?)?ii\b|l243|class ii",
+    "immunopeptidome": r"immunopeptid|hla[- ]?peptid|mhc[- ]?peptid|hla ligand|mhc ligand|ligandome|hla-bound|mhc-bound|neoantigen|antigen presentation",
+    # enzyme
+    "enz_trypsin": r"tryps",
+    "enz_lysc": r"lys-?c\b|lysc",
+    "enz_gluc": r"glu-?c\b|gluc|v8 protease",
+    "enz_aspn": r"asp-?n\b|aspn",
+    "enz_chymo": r"chymotryp",
+    "enz_argc": r"arg-?c\b|argc",
+    "enz_lysn": r"lys-?n\b|lysn",
+    "enz_pepsin_ntryp": r"pepsin|elastase|proteinase k|alpha-lytic|non-?tryptic|unspecific|no enzyme|nonspecific|semi-?specific",
+    "dia": r"\bdia\b|data[- ]independent|swath|diapasef",
+    "synthetic": r"synthetic peptide|proteometools|peptide library",
+    "plasma": r"plasma|serum",
+    "single_cell": r"single[- ]cell",
+    "metaproteomics": r"metaproteom|microbiome",
+    "crosslink_ms": r"cross-?linking mass spec",
+}
+_TEXT_RE = {k: re.compile(v, re.I) for k, v in TEXT_FLAGS.items()}
+
+ID_SOFTWARE = {
+    "maxquant": "MaxQuant", "andromeda": "MaxQuant", "mascot": "Mascot", "sequest": "SEQUEST",
+    "proteome discoverer": "ProteomeDiscoverer", "msfragger": "MSFragger", "fragpipe": "MSFragger",
+    "ms-gf": "MS-GF+", "msgf": "MS-GF+", "comet": "Comet", "x!tandem": "X!Tandem", "xtandem": "X!Tandem",
+    "peaks": "PEAKS", "spectrum mill": "SpectrumMill", "byonic": "Byonic", "pfind": "pFind",
+    "sage": "Sage", "dia-nn": "DIA-NN", "diann": "DIA-NN", "spectronaut": "Spectronaut",
+    "scaffold": "Scaffold", "percolator": "Percolator", "skyline": "Skyline", "omssa": "OMSSA",
+    "chimerys": "CHIMERYS", "metamorpheus": "MetaMorpheus", "msamanda": "MSAmanda", "ms amanda": "MSAmanda",
+    "netmhc": "NetMHC", "pglyco": "pGlyco", "protein pilot": "ProteinPilot", "proteinpilot": "ProteinPilot",
+    "philosopher": "MSFragger", "quantms": "quantms", "openms": "OpenMS",
+}
+
+
+def names(lst):
+    return [x.get("name", "") for x in (lst or []) if isinstance(x, dict)]
+
+
+def classify_one(r: dict) -> dict:
+    instr = names(r.get("instruments"))
+    text = " ".join(str(r.get(k) or "") for k in (
+        "title", "projectDescription", "sampleProcessingProtocol", "dataProcessingProtocol"))
+    text += " " + " ".join(r.get("keywords") or []) + " " + " ".join(r.get("projectTags") or [])
+    t = text.lower()
+    flags = {k: bool(rx.search(t)) for k, rx in _TEXT_RE.items()}
+
+    analysers, families = set(), set()
+    for name in instr:
+        n = name.lower()
+        for rx, an, fam in ANALYSER_BY_INSTRUMENT:
+            if re.search(rx, n):
+                analysers.add(an)
+                families.add(fam)
+                break
+        else:
+            families.add("other")
+    ptms = [x.get("accession", "") + ":" + x.get("name", "") for x in (r.get("identifiedPTMStrings") or [])]
+    ptm_names = " ".join(ptms).lower()
+    quant = " ".join(names(r.get("quantificationMethods"))).lower()
+    sw = sorted({v for k, v in ID_SOFTWARE.items() if k in (" ".join(names(r.get("softwares"))) + " " +
+                                                         str(r.get("dataProcessingProtocol") or "")).lower()})
+    orgs = names(r.get("organisms"))
+    # Labelling: CV PTM / quantification first (cv), then text.
+    lab = []
+    if "tmt" in ptm_names or "tmt" in quant:
+        lab.append("TMT")
+    if "itraq" in ptm_names or "itraq" in quant:
+        lab.append("iTRAQ")
+    if "silac" in quant or "label:13c(6)" in ptm_names:
+        lab.append("SILAC")
+    lab_src = "cv" if lab else "text"
+    if not lab:
+        lab = [n for n, f in (("TMT", "lab_tmt"), ("iTRAQ", "lab_itraq"), ("SILAC", "lab_silac"),
+                              ("dimethyl", "lab_dimethyl")) if flags[f]]
+    enr = []
+    for name, f, cv in (("phospho", "enr_phospho", "unimod:21:"), ("glyco", "enr_glyco", "hexnac"),
+                        ("ubiquitin", "enr_ubiquitin", "unimod:121:"), ("acetyl", "enr_acetyl", None),
+                        ("methyl", "enr_methyl", None), ("acyl", "enr_succinyl_acyl", None),
+                        ("citrullination", "enr_citrullin", None), ("crosslink", "enr_crosslink", None),
+                        ("ADP-ribosyl", "enr_adpr", None), ("histone", "enr_histone", None)):
+        if flags[f] or (cv and cv in ptm_names):
+            enr.append(name)
+    hla = []
+    if flags["immunopeptidome"] or flags["hla_class1"] or flags["hla_class2"]:
+        if flags["immunopeptidome"] or (flags["hla_class1"] and "peptid" in t) or (flags["hla_class2"] and "peptid" in t):
+            hla.append("HLA")
+            if flags["hla_class1"]:
+                hla.append("HLA-I")
+            if flags["hla_class2"]:
+                hla.append("HLA-II")
+    frag = [n for n, f in (("ETD", "frag_etd"), ("EThcD", "frag_ethcd"), ("ECD", "frag_ecd"), ("UVPD", "frag_uvpd"),
+                           ("CID", "frag_cid"), ("HCD", "frag_hcd")) if flags[f]]
+    ms2 = []
+    if flags["ms2_ion_trap"]:
+        ms2.append("IT")
+    if flags["ms2_orbitrap"]:
+        ms2.append("OT")
+    enz = [n for n, f in (("trypsin", "enz_trypsin"), ("LysC", "enz_lysc"), ("GluC", "enz_gluc"), ("AspN", "enz_aspn"),
+                          ("chymotrypsin", "enz_chymo"), ("ArgC", "enz_argc"), ("LysN", "enz_lysn"),
+                          ("nonspecific", "enz_pepsin_ntryp")) if flags[f]]
+    year = (r.get("publicationDate") or r.get("submissionDate") or "")[:4]
+    refs = r.get("references") or []
+    return {
+        "accession": r["accession"],
+        "year": year,
+        "submission_type": r.get("submissionType") or "",
+        "licence": r.get("license") or "",
+        "organisms": "|".join(orgs),
+        "human": int(any("9606" in (x.get("accession") or "") for x in (r.get("organisms") or []))),
+        "instruments": "|".join(instr),
+        "instrument_family": "|".join(sorted(families)),
+        "analyser": "|".join(sorted(analysers)),
+        "fragmentation_text": "|".join(frag),
+        "ms2_analyser_text": "|".join(ms2),
+        "labelling": "|".join(lab) or "LFQ?",
+        "labelling_src": lab_src,
+        "enrichment": "|".join(enr),
+        "hla": "|".join(hla),
+        "enzymes_text": "|".join(enz),
+        "dia": int(flags["dia"]),
+        "synthetic": int(flags["synthetic"]),
+        "plasma": int(flags["plasma"]),
+        "single_cell": int(flags["single_cell"]),
+        "metaproteomics": int(flags["metaproteomics"]),
+        "software": "|".join(sw),
+        "ptms_cv": "|".join(ptms),
+        "n_ptms_cv": len(ptms),
+        "experiment_types": "|".join(names(r.get("experimentTypes"))),
+        "pubmed": "|".join(str(x.get("pubmedID") or "") for x in refs if x.get("pubmedID")),
+        "doi": "|".join(str(x.get("doi") or "") for x in refs if x.get("doi")),
+        "downloads": r.get("totalFileDownloads") or 0,
+        "title": (r.get("title") or "").replace("\t", " ").replace("\n", " ")[:200],
+    }
+
+
+def cmd_classify(a):
+    os.makedirs(a.out_dir, exist_ok=True)
+    rows = []
+    with open(a.projects) as fh:
+        for line in fh:
+            rows.append(classify_one(json.loads(line)))
+    cols = list(rows[0])
+    with open(os.path.join(a.out_dir, "projects_classified.tsv"), "w", newline="") as fh:
+        w = csv.DictWriter(fh, cols, delimiter="\t")
+        w.writeheader()
+        w.writerows(rows)
+    # strata counts: overall and restricted to COMPLETE submissions (identifications inside)
+    def explode(v):
+        return [x for x in v.split("|") if x] or ["(none)"]
+
+    counts = collections.Counter()
+    for r in rows:
+        dda = not r["dia"]
+        for subset, ok in (("all", True), ("COMPLETE", r["submission_type"] == "COMPLETE"),
+                           ("COMPLETE_DDA", r["submission_type"] == "COMPLETE" and dda)):
+            if not ok:
+                continue
+            counts[(subset, "total", "all")] += 1
+            counts[(subset, "submission_type", r["submission_type"])] += 1
+            counts[(subset, "year", r["year"])] += 1
+            counts[(subset, "human", str(r["human"]))] += 1
+            for k in ("analyser", "instrument_family", "fragmentation_text", "ms2_analyser_text", "labelling",
+                      "enrichment", "hla", "enzymes_text", "licence"):
+                for v in explode(r[k]):
+                    counts[(subset, k, v)] += 1
+            for k in ("dia", "synthetic", "plasma", "single_cell", "metaproteomics"):
+                counts[(subset, k, str(r[k]))] += 1
+            for p in explode(r["ptms_cv"]):
+                counts[(subset, "ptm_cv", p)] += 1
+    with open(os.path.join(a.out_dir, "strata_counts.tsv"), "w") as fh:
+        fh.write("subset\tfield\tvalue\tn_projects\n")
+        for (s, f, v), n in sorted(counts.items(), key=lambda kv: (kv[0][0], kv[0][1], -kv[1])):
+            fh.write(f"{s}\t{f}\t{v}\t{n}\n")
+    print(f"{len(rows)} projects classified -> {a.out_dir}")
+
+
+# ----------------------------------------------------------------------------- files
+FORMAT_RULES = [
+    ("mzIdentML", r"\.mzid(\.gz|\.zip)?$"),
+    ("mzTab", r"\.mztab(\.gz|\.zip)?$"),
+    ("PRIDE_XML", r"\.(pride\.)?xml(\.gz)?$"),
+    ("pepXML", r"\.pep\.xml(\.gz)?$|\.pepxml(\.gz)?$"),
+    ("MaxQuant", r"msms\.txt|evidence\.txt|txt\.zip$|combined.*\.zip$|maxquant|_txt\.zip$|/txt/"),
+    ("FragPipe", r"psm\.tsv$|fragpipe|\.pin$"),
+    ("Sage", r"results\.sage\.tsv"),
+    ("PD_msf", r"\.msf$|\.pdresult$"),
+    ("mzML", r"\.mzml(\.gz|\.zip)?$"),
+    ("MGF", r"\.mgf(\.gz|\.zip)?$"),
+    ("MS2/apl", r"\.ms2$|\.apl$|\.mzxml(\.gz)?$|\.dta"),
+    ("thermo_raw", r"\.raw(\.zip)?$"),
+    ("bruker_d", r"\.d\.zip$|\.d\.tar|\.tdf$|\.baf$|\.d$"),
+    ("sciex_wiff", r"\.wiff(\.scan)?$|\.wiff2$"),
+    ("dia_lib", r"\.speclib$|\.tsv$"),
+    ("sdrf", r"sdrf"),
+]
+_FMT = [(k, re.compile(v, re.I)) for k, v in FORMAT_RULES]
+
+
+def file_formats(name: str):
+    return [k for k, rx in _FMT if rx.search(name)]
+
+
+def list_files(acc: str):
+    out, page, total = [], 0, None
+    while True:
+        rows, hdr = get(f"{API}/projects/{acc}/files?pageSize=100&page={page}")
+        if total is None:
+            total = int({k.lower(): v for k, v in hdr.items()}.get("total_records", -1))
+        out += rows or []
+        if not rows or len(rows) < 100:
+            break
+        page += 1
+    return out, total
+
+
+def cmd_files(a):
+    accs = [x.strip() for x in open(a.accessions) if x.strip() and not x.startswith("#")]
+    done = set()
+    if os.path.exists(a.out):
+        done = {r["accession"] for r in csv.DictReader(open(a.out), delimiter="\t")}
+    cols = ["accession", "n_files", "total_records", "listing_complete", "categories", "formats",
+            "n_raw", "raw_gb", "n_peak", "n_result", "n_search", "usable_without_research", "example_result"]
+    new = not os.path.exists(a.out)
+    with open(a.out, "a") as fh:
+        if new:
+            fh.write("\t".join(cols) + "\n")
+        for acc in accs:
+            if acc in done:
+                continue
+            try:
+                files, total = list_files(acc)
+            except Exception as e:  # noqa: BLE001 - keep going; record the failure
+                fh.write(f"{acc}\t-1\t-1\t0\tERROR {e}\t\t0\t0\t0\t0\t0\tunknown\t\n")
+                continue
+            cats = collections.Counter((f.get("fileCategory") or {}).get("value", "?") for f in files)
+            fmts = collections.Counter(k for f in files for k in file_formats(f.get("fileName", "")))
+            raw = [f for f in files if (f.get("fileCategory") or {}).get("value") == "RAW"]
+            ident = {"mzIdentML", "mzTab", "PRIDE_XML", "pepXML", "MaxQuant", "FragPipe", "Sage", "PD_msf"}
+            peaks = fmts["mzML"] + fmts["MGF"] + fmts["MS2/apl"]
+            has_id = sorted(k for k in ident if fmts[k])
+            if fmts["mzIdentML"] or fmts["mzTab"] or fmts["PRIDE_XML"]:
+                usable = "standard_ids" + ("+peaks" if peaks else "+raw_only" if raw else "")
+            elif has_id:
+                usable = "engine_ids(" + ",".join(has_id) + ")" + ("+peaks" if peaks else "+raw" if raw else "")
+            else:
+                usable = "research_needed"
+            ex = next((f["fileName"] for f in files if set(file_formats(f.get("fileName", ""))) & ident), "")
+            fh.write("\t".join(map(str, [
+                acc, len(files), total, int(total == len(files)),
+                ",".join(f"{k}:{v}" for k, v in cats.most_common()),
+                ",".join(f"{k}:{v}" for k, v in fmts.most_common()),
+                len(raw), round(sum(f.get("fileSizeBytes") or 0 for f in raw) / 1e9, 1),
+                cats.get("PEAK", 0), cats.get("RESULT", 0), cats.get("SEARCH", 0), usable, ex])) + "\n")
+            fh.flush()
+            time.sleep(a.sleep)
+    print(f"files summary -> {a.out}")
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    f = sub.add_parser("fetch")
+    f.add_argument("--out", required=True)
+    c = sub.add_parser("classify")
+    c.add_argument("--projects", required=True)
+    c.add_argument("--out-dir", required=True)
+    fl = sub.add_parser("files")
+    fl.add_argument("--accessions", required=True, help="one accession per line")
+    fl.add_argument("--out", required=True)
+    fl.add_argument("--sleep", type=float, default=0.2)
+    a = p.parse_args()
+    {"fetch": cmd_fetch, "classify": cmd_classify, "files": cmd_files}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    main()

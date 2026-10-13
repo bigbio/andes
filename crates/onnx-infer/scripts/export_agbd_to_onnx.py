@@ -29,7 +29,24 @@ def _read_exact(c: io.BytesIO, n: int, what: str) -> bytes:
     return data
 
 
+# Same bound as `scoring::gbdt_eval` applies to the calibration count.
+MAX_ISO = 10_000_000
+
+
 def parse_agbd(blob: bytes):
+    """(n_features, flags, trees) of an AGBD v1 blob; see `parse_agbd_full`."""
+    nfeat, flags, trees, _, _ = parse_agbd_full(blob)
+    return nfeat, flags, trees
+
+
+def parse_agbd_full(blob: bytes):
+    """(n_features, flags, trees, iso_x, iso_y) of an AGBD v1 blob.
+
+    The layout is the one `GbdtPeakModel::to_bytes` writes: header, trees, then
+    the calibration footer (`u32 n_iso`, `n_iso` f32 `iso_x`, `n_iso` f32
+    `iso_y`; `n_iso = 0` when uncalibrated). Anything after the footer is an
+    error.
+    """
     c = io.BytesIO(blob)
     magic = _read_exact(c, 4, "magic")
     if magic != b"AGBD":
@@ -56,10 +73,17 @@ def parse_agbd(blob: bytes):
                 default_left=dl,
             )
         )
+    n_iso = struct.unpack("<I", _read_exact(c, 4, "calibration count"))[0]
+    if n_iso > MAX_ISO:
+        raise ValueError(f"AGBD calibration count {n_iso} exceeds {MAX_ISO}")
+    iso_x = list(struct.unpack(f"<{n_iso}f", _read_exact(c, 4 * n_iso, "calibration iso_x")))
+    iso_y = list(struct.unpack(f"<{n_iso}f", _read_exact(c, 4 * n_iso, "calibration iso_y")))
     trailing = len(blob) - c.tell()
     if trailing:
-        raise ValueError(f"AGBD blob has {trailing} trailing bytes after {ntree} trees")
-    return nfeat, flags, trees
+        raise ValueError(
+            f"AGBD blob has {trailing} trailing bytes after {ntree} trees and {n_iso} calibration points"
+        )
+    return nfeat, flags, trees, iso_x, iso_y
 
 
 def trees_to_onnx(nfeat: int, trees: list, input_name: str = "features", output_name: str = "score"):
@@ -151,11 +175,14 @@ def main():
     args = ap.parse_args()
 
     blob = args.agbd.read_bytes()
-    nfeat, flags, trees = parse_agbd(blob)
+    nfeat, flags, trees, iso_x, _ = parse_agbd_full(blob)
     model = trees_to_onnx(nfeat, trees)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     save(model, args.out)
-    print(f"Wrote {args.out} ({len(trees)} trees, {nfeat} features, flags={flags})")
+    print(
+        f"Wrote {args.out} ({len(trees)} trees, {nfeat} features, flags={flags}, "
+        f"{len(iso_x)} calibration points; the ONNX output is the raw tree sum)"
+    )
 
     man_path = args.manifest or args.out.with_suffix(".json")
     man = {
@@ -168,9 +195,15 @@ def main():
         "provenance": {
             "origin": "andes AGBD v1",
             "license": "Apache-2.0",
-            "notes": f"flags={flags}; prefer native AGBD in-search",
+            "notes": f"flags={flags}; output is the raw tree sum (no sigmoid or "
+            f"calibration); prefer native AGBD in-search",
         },
-        "extras": {"n_features": nfeat, "n_trees": len(trees), "agbd_flags": flags},
+        "extras": {
+            "n_features": nfeat,
+            "n_trees": len(trees),
+            "agbd_flags": flags,
+            "agbd_n_iso": len(iso_x),
+        },
     }
     man_path.write_text(json.dumps(man, indent=2) + "\n")
     print(f"Wrote {man_path}")

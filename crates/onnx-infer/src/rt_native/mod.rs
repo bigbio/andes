@@ -549,6 +549,12 @@ mod tests {
     }
 
     #[test]
+    fn tmtpro_is_not_itraq8plex() {
+        let p = RtPeptide::from_andes("K.P+304.20715EPTIDEK+304.20715.R").unwrap();
+        assert_eq!(p.to_proforma(), "[UNIMOD:2016]-PEPTIDEK[UNIMOD:2016]");
+    }
+
+    #[test]
     fn encodes_composition_on_terminal_tokens() {
         let p = RtPeptide::from_proforma("[UNIMOD:1]-AK").unwrap();
         let (tok, comp) = p.encode().unwrap();

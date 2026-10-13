@@ -395,7 +395,10 @@ per-modification tally to stderr and to `statistics.log` next to the PIN.
 [quantms](https://github.com/bigbio/quantms). `psms.parquet` carries the peptidoform,
 modifications, charge, m/z, `is_decoy`, scan/rt, proteins, the spectrum arrays, `score`
 (`andes:RawScore`) and the other features in `additional_scores`. PEP and q-value are null
-until rescoring; andes does no protein inference.
+until rescoring; andes does no protein inference. With `--rescore`, every target row must join a
+Percolator result, except where target-decoy competition (`--percolator-args=-Y`) kept another
+PSM of its scan/`ExpMass` group: those target rows are left out of the bundle, as they are out
+of Percolator's output.
 
 ```bash
 andes --spectrum spectra.mzML --database db.fasta \

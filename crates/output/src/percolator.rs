@@ -10,7 +10,7 @@
 //! column-offset differences between engines (e.g. a a comparison search engine-style extra `FileName`
 //! column).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -324,6 +324,18 @@ pub fn run_percolator(
     pin: &Path,
     extra_args: &[String],
 ) -> Result<HashMap<String, PercolatorPsm>, PercolatorError> {
+    run_percolator_with_decoys(backend, pin, extra_args).map(|(targets, _)| targets)
+}
+
+/// [`run_percolator`], also returning the `PSMId`s of the decoy result file.
+/// With target-decoy competition (`-Y`) Percolator keeps one PSM per
+/// scan/`ExpMass` group in either file; the decoy ids let the QPX join tell a
+/// target that lost the competition from one whose join drifted.
+pub fn run_percolator_with_decoys(
+    backend: &PercolatorBackend,
+    pin: &Path,
+    extra_args: &[String],
+) -> Result<(HashMap<String, PercolatorPsm>, HashSet<String>), PercolatorError> {
     let out_dir = pin.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
     let stem = pin
         .file_stem()
@@ -360,7 +372,13 @@ pub fn run_percolator(
     }
 
     let text = std::fs::read_to_string(&out.target)?;
-    parse_psm_results(&text)
+    let targets = parse_psm_results(&text)?;
+    let decoys = match std::fs::read_to_string(&out.decoy) {
+        Ok(text) => parse_psm_results(&text)?.into_keys().collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashSet::new(),
+        Err(e) => return Err(e.into()),
+    };
+    Ok((targets, decoys))
 }
 
 /// Keep the last `n` lines of `s`.

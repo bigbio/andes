@@ -1822,6 +1822,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         (false, false)
     };
+    // Percolator's decoy-result ids: with target-decoy competition (`-Y`) they
+    // let the QPX join tell a target that lost its scan/ExpMass group from one
+    // whose join drifted. `None` for the native rescorer.
+    let mut rescore_decoys: Option<std::collections::HashSet<String>> = None;
     let rescore_map: Option<std::collections::HashMap<String, output::PercolatorPsm>> =
         if use_percolator {
             let backend = output::resolve_backend(
@@ -1837,8 +1841,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .map(|s| s.to_string())
                 .collect();
             let t_resc = std::time::Instant::now();
-            let map = output::run_percolator(&backend, &output_pin_path, &extra)
-                .map_err(|e| format!("{e}"))?;
+            let (map, decoys) =
+                output::run_percolator_with_decoys(&backend, &output_pin_path, &extra)
+                    .map_err(|e| format!("{e}"))?;
+            rescore_decoys = Some(decoys);
             eprintln!(
                 "Rescore: Percolator produced {} target PSMs [{:.2}s]",
                 map.len(),
@@ -1946,6 +1952,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &run_id,
             &primary_paths,
             rescore_map.as_ref(),
+            rescore_decoys.as_ref(),
         ) {
             Ok(()) => eprintln!("Wrote QPX bundle: {}", parquet_dir.display()),
             // Finding 3.9: failure to write an explicitly-requested output is a

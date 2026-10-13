@@ -793,6 +793,16 @@ fn write_psm_row<W: Write>(
 /// `ExpMass` and `CalcMass` are not Percolator features, but downstream tools read them
 /// to recompute precursor error. Six significant figures would round a 1,000–9,999 Da
 /// mass to 0.01 Da (5–10 ppm), quantizing every error computed from these columns.
+/// The `ExpMass` column text of a row: the neutral precursor mass of
+/// `precursor_mz` at `charge`, printed as [`write_mass`] prints it. Percolator
+/// groups PSMs for target-decoy competition by scan and this value.
+pub(crate) fn exp_mass_text(precursor_mz: f64, charge: u8) -> String {
+    let z = charge as f64;
+    let mut out = Vec::new();
+    write_mass(&mut out, precursor_mz * z - z * PROTON).expect("write to a Vec");
+    String::from_utf8(out).expect("ASCII mass")
+}
+
 fn write_mass<W: Write>(writer: &mut W, v: f64) -> io::Result<()> {
     if !v.is_finite() || v == 0.0 {
         return writer.write_all(b"0");

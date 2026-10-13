@@ -2222,6 +2222,131 @@ mod tests {
         assert_eq!(queues[0].peek_top().unwrap().features.is_refinement, 0);
     }
 
+    /// Residue mass (Cam-C when `cam`) and, for a `k`, the tier's K oxidation.
+    fn fixture_residue_mass(aa: u8, cam: bool) -> f64 {
+        match aa {
+            b'G' => 57.021464,
+            b'A' => 71.037114,
+            b'S' => 87.032028,
+            b'P' => 97.052764,
+            b'V' => 99.068414,
+            b'T' => 101.047679,
+            b'C' if cam => 103.009185 + 57.021464,
+            b'C' => 103.009185,
+            b'N' => 114.042927,
+            b'D' => 115.026943,
+            b'Q' => 128.058578,
+            b'K' => 128.094963,
+            b'k' => 128.094963 + 15.994915,
+            b'E' => 129.042593,
+            b'M' => 131.040485,
+            b'F' => 147.068414,
+            b'W' => 186.079313,
+            _ => panic!("residue {} not in the fixture table", aa as char),
+        }
+    }
+
+    /// A charge-2 spectrum of `seq` (lower-case `k` = oxidised K; Cam-C when
+    /// `cam`) holding its singly charged b and y ions, at `extra_da` above the
+    /// peptide's neutral mass.
+    fn fixture_spectrum(seq: &[u8], cam: bool, extra_da: f64) -> model::spectrum::Spectrum {
+        use model::mass::{H2O, PROTON};
+        let res: Vec<f64> = seq.iter().map(|&a| fixture_residue_mass(a, cam)).collect();
+        let neutral: f64 = res.iter().sum::<f64>() + H2O;
+        let mut peaks: Vec<(f64, f32)> = Vec::new();
+        for i in 1..res.len() {
+            let b: f64 = res[..i].iter().sum();
+            peaks.push((b + PROTON, 1000.0));
+            peaks.push((neutral - b + PROTON, 1000.0));
+        }
+        peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+        model::spectrum::Spectrum {
+            precursor_mz: (neutral + extra_da + 2.0 * PROTON) / 2.0,
+            precursor_charge: Some(2),
+            scan: Some(1),
+            peaks,
+            ..Default::default()
+        }
+    }
+
+    /// Pass 1 identifies one spectrum per anchor confidently and leaves `query`
+    /// unidentified; returns the refinement output over `db` (Cam-C fixed when
+    /// `cam`).
+    fn refine_fixture(
+        anchors: &[(&[u8], usize)],
+        db: &ProteinDb,
+        cam: bool,
+        query: model::spectrum::Spectrum,
+    ) -> Option<RefinementOutput> {
+        let aa_set = if cam {
+            base_set_with_cam_c()
+        } else {
+            AminoAcidSetBuilder::new_standard().build().unwrap()
+        };
+        let params = SearchParams::default_tryptic(aa_set);
+        let mut candidates = Vec::new();
+        let mut queues = Vec::new();
+        let mut spectra = Vec::new();
+        for (i, (seq, protein_index)) in anchors.iter().enumerate() {
+            candidates.push(cand_pep(unmod_peptide(seq), *protein_index, false));
+            queues.push(queue_with(vec![psm(i, i as u32, 90.0 - i as f32)]));
+            spectra.push(model::spectrum::Spectrum::default());
+        }
+        queues.push(TopNQueue::new(10));
+        spectra.push(query);
+        run_refinement(
+            &queues,
+            &spectra,
+            &candidates,
+            db,
+            &params,
+            &tiny_scorer(),
+            &RefineConfig::default_tier(),
+            0.01,
+            true,
+            0.5,
+            "XXX",
+            DecoyStrategy::Reverse,
+            42,
+        )
+    }
+
+    /// The anchor filter drops Met-cleaved spans of anchors that do not start a
+    /// protein, so such a span is not a target of the refinement search and must
+    /// not relabel a decoy as a target. `ACDEFGK` is both the Met-cleaved span of
+    /// the internal anchor `MACDEFGK` and the reversed-interior decoy of
+    /// `AGFEDCK`; the K-oxidised `ACDEFGK` Pass-2 PSM is that decoy.
+    #[test]
+    fn refinement_collision_targets_respect_the_anchor_filter() {
+        let db = ProteinDb {
+            proteins: vec![protein("P1", b"GRAGFEDCKSSRMACDEFGKWR")],
+        };
+        let out = refine_fixture(
+            &[(b"AGFEDCK", 0), (b"MACDEFGK", 0)],
+            &db,
+            true,
+            fixture_spectrum(b"ACDEFGk", true, 0.0),
+        )
+        .expect("refinement emits PSMs");
+        let hits: Vec<&Candidate> = out
+            .queues
+            .iter()
+            .flat_map(|q| q.iter_psms())
+            .map(|p| &out.candidates[p.primary_candidate_idx() as usize])
+            .filter(|c| {
+                c.peptide.residues.iter().map(|aa| aa.residue).collect::<Vec<_>>() == b"ACDEFGK"
+            })
+            .collect();
+        assert!(!hits.is_empty(), "the K-oxidised ACDEFGK PSM is emitted");
+        for c in hits {
+            assert!(
+                c.is_decoy,
+                "ACDEFGK comes only from the decoy of AGFEDCK here (protein {})",
+                out.index.db.proteins[c.protein_index].accession
+            );
+        }
+    }
+
     // ── (g) merge_into_pass1 ───────────────────────────────────────────────
 
     #[test]

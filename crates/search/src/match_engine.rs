@@ -415,7 +415,13 @@ impl<'a> PreparedSearch<'a> {
     /// each spectrum's retrieved candidates (after the fragment-index shortlist
     /// when that retrieval is on), and on [`Self::out_of_core_candidates_where`]
     /// and the chimeric Pass-2 pools, so every scored candidate passed it.
+    ///
+    /// The collision-decoy target set is rebuilt from the targets the filter
+    /// keeps: a span none of whose peptidoforms passes is not a target of this
+    /// search, so it must not relabel a decoy with the same sequence.
     pub fn with_candidate_filter(mut self, keep: CandidateFilter) -> Self {
+        self.target_bare_seqs =
+            build_target_bare_seqs_where(&self.mmap_index, self.idx, self.params, &keep);
         self.candidate_filter = Some(keep);
         self
     }
@@ -3053,6 +3059,38 @@ fn build_target_bare_seqs(mi: &MmapCandidateIndex, db: &SearchIndex) -> FxHashSe
             let seq = &db.db.proteins.get(rec.protein_index as usize)?.sequence;
             let start = rec.start_offset as usize;
             seq.get(start..start + rec.length as usize)
+        })
+        .collect();
+    spans.par_sort_unstable();
+    spans.dedup();
+    let mut set = FxHashSet::with_capacity_and_hasher(spans.len(), Default::default());
+    set.extend(spans.into_iter().map(|s| s.to_vec().into_boxed_slice()));
+    set
+}
+
+/// [`build_target_bare_seqs`] restricted to the target spans with at least one
+/// peptidoform that `keep` accepts.
+fn build_target_bare_seqs_where(
+    mi: &MmapCandidateIndex,
+    db: &SearchIndex,
+    params: &SearchParams,
+    keep: &CandidateFilter,
+) -> FxHashSet<Box<[u8]>> {
+    use crate::candidate_index::flags as rec_flags;
+    let mut spans: Vec<&[u8]> = (0..mi.len())
+        .into_par_iter()
+        .filter_map(|i| {
+            let rec = mi.record_at(i);
+            if rec.flags & rec_flags::IS_DECOY != 0 {
+                return None;
+            }
+            let seq = &db.db.proteins.get(rec.protein_index as usize)?.sequence;
+            let start = rec.start_offset as usize;
+            let span = seq.get(start..start + rec.length as usize)?;
+            expand_base_record(db, params, &rec)
+                .iter()
+                .any(|c| keep(c))
+                .then_some(span)
         })
         .collect();
     spans.par_sort_unstable();

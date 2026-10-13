@@ -44,7 +44,7 @@ def eval_agbd_trees(trees, x: np.ndarray) -> float:
 
 
 def test_tree_fixture(agbd_name: str, onnx_name: str, rows: np.ndarray):
-    nfeat, flags, trees = parse_agbd((FIX / agbd_name).read_bytes())
+    nfeat, flags, trees, _calib = parse_agbd((FIX / agbd_name).read_bytes())
     assert rows.shape[1] == nfeat, (rows.shape, nfeat)
     sess = ort.InferenceSession(str(FIX / onnx_name), providers=["CPUExecutionProvider"])
     y_ort = sess.run(None, {"features": rows.astype(np.float32)})[0].reshape(-1)

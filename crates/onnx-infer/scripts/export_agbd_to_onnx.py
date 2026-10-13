@@ -5,6 +5,15 @@ The native AGBD evaluator in `scoring::gbdt_eval` remains the in-search hot path
 This export is for interoperability with quantms-rescoring / OpenMS / ort, and
 for offline parity checks against the Rust evaluator.
 
+The ONNX graph computes the raw ensemble output (the sum of the tree leaf values),
+which is `GbdtPeakModel::predict_value`. It does not apply the sigmoid flag or the
+isotonic calibration footer that `predict_proba` / `predict_logit` apply on top of
+that sum; both are written to the manifest `extras` (`apply_sigmoid`, `iso_x`,
+`iso_y`) so a consumer that needs the calibrated probability can apply them:
+  p = sigmoid(raw) if apply_sigmoid else raw
+  s = piecewise-linear interpolation of (iso_x, iso_y) at p, clamped to the end
+      points (identity when iso_x is empty)
+
 Usage:
   python export_agbd_to_onnx.py --agbd path/to/model.agbd --out model.onnx
 
@@ -22,6 +31,9 @@ import numpy as np
 from onnx import TensorProto, checker, helper, save
 
 
+FLAG_SIGMOID = 1
+
+
 def _read_exact(c: io.BytesIO, n: int, what: str) -> bytes:
     data = c.read(n)
     if len(data) != n:
@@ -30,6 +42,12 @@ def _read_exact(c: io.BytesIO, n: int, what: str) -> bytes:
 
 
 def parse_agbd(blob: bytes):
+    """Decode an AGBD v1 blob as written by `GbdtPeakModel::to_bytes`.
+
+    Returns `(n_features, flags, trees, calibration)` where `calibration` is
+    `{"iso_x": [...], "iso_y": [...]}` from the footer that follows the trees
+    (`n_iso` u32, then `iso_x` f32 x n_iso, then `iso_y` f32 x n_iso).
+    """
     c = io.BytesIO(blob)
     magic = _read_exact(c, 4, "magic")
     if magic != b"AGBD":
@@ -56,10 +74,16 @@ def parse_agbd(blob: bytes):
                 default_left=dl,
             )
         )
+    n_iso = struct.unpack("<I", _read_exact(c, 4, "calibration point count"))[0]
+    iso_x = list(struct.unpack(f"<{n_iso}f", _read_exact(c, 4 * n_iso, "calibration iso_x")))
+    iso_y = list(struct.unpack(f"<{n_iso}f", _read_exact(c, 4 * n_iso, "calibration iso_y")))
     trailing = len(blob) - c.tell()
     if trailing:
-        raise ValueError(f"AGBD blob has {trailing} trailing bytes after {ntree} trees")
-    return nfeat, flags, trees
+        raise ValueError(
+            f"AGBD blob has {trailing} trailing bytes after {ntree} trees and "
+            f"{n_iso} calibration points"
+        )
+    return nfeat, flags, trees, dict(iso_x=iso_x, iso_y=iso_y)
 
 
 def trees_to_onnx(nfeat: int, trees: list, input_name: str = "features", output_name: str = "score"):
@@ -151,11 +175,18 @@ def main():
     args = ap.parse_args()
 
     blob = args.agbd.read_bytes()
-    nfeat, flags, trees = parse_agbd(blob)
+    nfeat, flags, trees, calib = parse_agbd(blob)
+    apply_sigmoid = bool(flags & FLAG_SIGMOID)
     model = trees_to_onnx(nfeat, trees)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     save(model, args.out)
     print(f"Wrote {args.out} ({len(trees)} trees, {nfeat} features, flags={flags})")
+    if apply_sigmoid or calib["iso_x"]:
+        print(
+            f"note: the graph outputs the raw tree sum; sigmoid={apply_sigmoid} and "
+            f"{len(calib['iso_x'])} isotonic points are recorded in the manifest extras, "
+            "not applied in the graph"
+        )
 
     man_path = args.manifest or args.out.with_suffix(".json")
     man = {
@@ -168,9 +199,17 @@ def main():
         "provenance": {
             "origin": "andes AGBD v1",
             "license": "Apache-2.0",
-            "notes": f"flags={flags}; prefer native AGBD in-search",
+            "notes": f"flags={flags}; output is the raw tree sum; prefer native AGBD in-search",
         },
-        "extras": {"n_features": nfeat, "n_trees": len(trees), "agbd_flags": flags},
+        "extras": {
+            "n_features": nfeat,
+            "n_trees": len(trees),
+            "agbd_flags": flags,
+            "output": "raw_tree_sum",
+            "apply_sigmoid": apply_sigmoid,
+            "iso_x": calib["iso_x"],
+            "iso_y": calib["iso_y"],
+        },
     }
     man_path.write_text(json.dumps(man, indent=2) + "\n")
     print(f"Wrote {man_path}")

@@ -36,6 +36,8 @@ ort = { version = "=2.0.0-rc.10", optional = true, default-features = false, fea
 [dev-dependencies]
 serde_json = "1"
 tempfile = "3.10"
+# Native AGBD decoder, to check the committed `.agbd` fixtures.
+scoring = { path = "../scoring" }
 # mzML reading for the `rescore_pin` example only.
 input = { path = "../input" }
 

@@ -2012,6 +2012,7 @@ version = "0.3.0"
 dependencies = [
  "input",
  "ort",
+ "scoring",
  "serde",
  "serde_json",
  "tempfile",

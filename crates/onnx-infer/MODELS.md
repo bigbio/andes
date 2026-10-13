@@ -41,6 +41,11 @@ In-search peak GBDT stays native `AGBD` (`scoring::gbdt_eval`). Convert for quan
 python scripts/export_agbd_to_onnx.py --agbd path/to/model.agbd --out model.onnx
 ```
 
+The graph outputs the raw tree sum (`GbdtPeakModel::predict_value`). The blob's
+sigmoid flag and isotonic calibration footer are copied into the manifest
+`extras` (`apply_sigmoid`, `iso_x`, `iso_y`) and are not applied in the graph;
+`predict_proba` is `isotonic(sigmoid(raw))` (sigmoid only when the flag is set).
+
 ## Third-party predictors exported to ONNX (not in git)
 
 Weights stay outside git (`models/`, gitignored); the export scripts below

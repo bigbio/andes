@@ -2,7 +2,7 @@
 """Build local ONNX/AGBD fixtures that do not need PeptDeep or torch.
 
 Produces under fixtures/:
-  - tree_leq.agbd / tree_leq.onnx     (1-feature LEAF split; already may exist)
+  - tree_leq.agbd / tree_leq.onnx     (1-feature split: x0 <= 0.5 -> 1.0 else 3.0)
   - peak_gbdt.agbd / peak_gbdt.onnx   (3-feature multi-tree, andes peak-like)
   - intensity_mlp.onnx                (tiny MatMul+ReLU; tract-runnable)
   - identity.onnx                     (no nodes; input x is also the output)
@@ -23,7 +23,19 @@ ROOT = Path(__file__).resolve().parents[1]
 FIX = ROOT / "fixtures"
 
 
-def write_agbd(path: Path, nfeat: int, flags: int, trees: list) -> None:
+def write_agbd(
+    path: Path,
+    nfeat: int,
+    flags: int,
+    trees: list,
+    iso_x: list | None = None,
+    iso_y: list | None = None,
+) -> None:
+    """Write the layout `GbdtPeakModel::to_bytes` writes, calibration footer included."""
+    iso_x = list(iso_x or [])
+    iso_y = list(iso_y or [])
+    if len(iso_x) != len(iso_y):
+        raise ValueError("iso_x and iso_y must have the same length")
     buf = bytearray()
     buf += b"AGBD"
     buf += struct.pack("<IIII", 1, nfeat, flags, len(trees))
@@ -36,7 +48,38 @@ def write_agbd(path: Path, nfeat: int, flags: int, trees: list) -> None:
         buf += struct.pack(f"<{n}i", *t["right"])
         buf += struct.pack(f"<{n}f", *t["value"])
         buf += bytes(t["default_left"])
+    buf += struct.pack("<I", len(iso_x))
+    buf += struct.pack(f"<{len(iso_x)}f", *iso_x)
+    buf += struct.pack(f"<{len(iso_y)}f", *iso_y)
     path.write_bytes(buf)
+
+
+def _export_onnx(nfeat: int, trees: list, onnx_path: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from export_agbd_to_onnx import trees_to_onnx as conv
+
+    save(conv(nfeat, trees), onnx_path)
+
+
+def make_tree_leq():
+    """One tree, one split; no calibration points. `tree_leq.json` is hand-written."""
+    trees = [
+        dict(
+            feature=[0, -1, -1],
+            threshold=[0.5, 0.0, 0.0],
+            left=[1, 0, 0],
+            right=[2, 0, 0],
+            value=[0.0, 1.0, 3.0],
+            default_left=[1, 0, 0],
+        )
+    ]
+    agbd = FIX / "tree_leq.agbd"
+    onnx_path = FIX / "tree_leq.onnx"
+    write_agbd(agbd, 1, 0, trees)
+    _export_onnx(1, trees, onnx_path)
+    print("wrote", agbd, onnx_path)
 
 
 def make_peak_gbdt():
@@ -70,14 +113,12 @@ def make_peak_gbdt():
     nfeat = 3
     agbd = FIX / "peak_gbdt.agbd"
     onnx_path = FIX / "peak_gbdt.onnx"
-    write_agbd(agbd, nfeat, 0, trees)
-    # import sibling script
-    import sys
-
-    sys.path.insert(0, str(ROOT / "scripts"))
-    from export_agbd_to_onnx import trees_to_onnx as conv
-
-    save(conv(nfeat, trees), onnx_path)
+    # Sigmoid flag plus a three-point isotonic map, so the footer is exercised by
+    # the native decoder test; the ONNX graph is the raw tree sum either way.
+    write_agbd(
+        agbd, nfeat, 1, trees, iso_x=[0.0, 0.5, 1.0], iso_y=[0.05, 0.4, 0.95]
+    )
+    _export_onnx(nfeat, trees, onnx_path)
     man = {
         "id": "peak-gbdt-fixture",
         "description": "3-feature multi-tree AGBD→ONNX (andes peak-GBDT shape)",
@@ -93,6 +134,10 @@ def make_peak_gbdt():
             "n_features": 3,
             "n_trees": 3,
             "agbd": "peak_gbdt.agbd",
+            "output": "raw_tree_sum",
+            "apply_sigmoid": True,
+            "iso_x": [0.0, 0.5, 1.0],
+            "iso_y": [0.05, 0.4, 0.95],
             "consumer": "quantms-rescoring",
         },
     }
@@ -164,6 +209,7 @@ def make_identity():
 
 def main():
     FIX.mkdir(exist_ok=True)
+    make_tree_leq()
     make_peak_gbdt()
     make_intensity_mlp()
     make_identity()

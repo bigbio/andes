@@ -38,8 +38,7 @@ mod train_intensity;
 // Re-imported so `config.rs` can keep its `crate::…` paths unchanged.
 use crate::cli::{
     parse_charge_range, parse_enzyme_specificity, parse_fragmentation, parse_isotope_error_range,
-    parse_precursor_cal, parse_precursor_tol, parse_protocol, CandidateIndexFlag, Cli, ScoreFlag,
-    SearchArgs,
+    parse_precursor_cal, parse_precursor_tol, parse_protocol, Cli, ScoreFlag, SearchArgs,
 };
 use crate::search::run;
 use crate::train::{run_train, run_train_from_search, TrainArgs, TrainFromSearchArgs};

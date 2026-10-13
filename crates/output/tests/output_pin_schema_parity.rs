@@ -19,7 +19,7 @@ use model::{
     AminoAcidSetBuilder, Enzyme, ModLocation, Modification, ProteinDb, ResidueSpec, Tolerance,
 };
 use scoring_crate::RankScorer;
-use search::{match_spectra, SearchIndex, SearchParams};
+use search::{match_spectra_out_of_core, SearchIndex, SearchParams};
 
 fn fixture(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -177,7 +177,8 @@ fn rust_pin_rows_have_at_least_header_column_count() {
         .filter_map(|r| r.ok())
         .collect();
 
-    let (queues, candidates) = match_spectra(&spectra, &idx, &params, &scorer, 0.5, "XXX_");
+    let (queues, candidates) =
+        match_spectra_out_of_core(&spectra, &idx, &params, &scorer, 0.5, "XXX_").expect("search");
 
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let rust_pin_path = tmp_dir.path().join("bsa.pin");

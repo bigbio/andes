@@ -757,7 +757,9 @@ pub struct RefinementOutput {
 ///   3. `build_peptide_anchored_index` scoped to the confident base peptides.
 ///   4. A Pass-2 `SearchParams` clone whose `aa_set` is the refinement tier
 ///      ([`refinement_aa_set`]) and whose `max_variable_mods_per_peptide` is
-///      `cfg.max_mods`, prepared via `PreparedSearch::prepare`.
+///      `cfg.max_mods`, prepared via `PreparedSearch::prepare_in_memory` over the
+///      anchored index with per-spectrum enumeration of every candidate in the
+///      precursor window.
 ///   5. `run_chunk` over the (cloned) unidentified spectra; each winner is tagged
 ///      `is_refinement = 1`, has `(num_mods, refine_mod_class)` filled from its
 ///      Pass-2 peptide, and has its `spectrum_idx` fixed to the GLOBAL index.
@@ -902,6 +904,9 @@ pub fn run_refinement(
         }
     };
     refine_params.max_variable_mods_per_peptide = capped_max_mods;
+    // The anchored database is small, so Pass 2 scores every candidate in each
+    // spectrum's precursor window instead of a fragment-index shortlist.
+    refine_params.fragment_index_top_k = 0;
 
     // 5. Search ONLY the unidentified spectra. We clone them into a contiguous
     //    sub-vec (run_chunk takes a &[Spectrum]); `spectrum_idx_offset = 0` is
@@ -912,40 +917,54 @@ pub fn run_refinement(
     //    search, so we extract the Pass-2 candidate pool into an owned Vec and
     //    DROP `refine_prepared` (ending the borrow) before moving `refine_idx`
     //    into the output below.
-    let (pass2_queues, refine_candidates) = {
+    let (pass2_queues, refine_candidates, pass2_base_peptides) = {
         // Mini-protein k is anchor k mod n (targets, then their decoys). Each
         // mini-protein starts at position 0, so enumeration offers protein-N-terminal
         // modifications and the Met-cleaved variant on every anchor; keep them only
         // for anchors that really start a protein.
         let n_anchors = base_seqs.len();
-        let refine_prepared = PreparedSearch::prepare_filtered(
+        let starts_with_met: Vec<bool> =
+            base_seqs.iter().map(|s| s.first() == Some(&b'M')).collect();
+        let mut refine_prepared = match PreparedSearch::prepare_in_memory(
             &refine_idx,
             &refine_params,
             scorer,
             fragment_tol_da,
             decoy_prefix,
-            |c| {
-                let a = c.protein_index % n_anchors;
-                anchor_nterm[a] || !uses_protein_nterm(c, base_seqs[a].first() == Some(&b'M'))
-            },
-        );
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!(
+                    "WARN: --refine could not build the Pass-2 candidate index ({e}); \
+                     skipping refinement for this run."
+                );
+                return None;
+            }
+        }
+        .with_candidate_filter(Box::new(move |c: &Candidate| {
+            let a = c.protein_index % n_anchors;
+            anchor_nterm[a] || !uses_protein_nterm(c, starts_with_met[a])
+        }));
         let subset: Vec<model::spectrum::Spectrum> =
             unident.iter().map(|&i| all_spectra[i].clone()).collect();
         let queues = refine_prepared.run_chunk(&subset, 0);
-        // `PreparedSearch.candidates` is an owned `Vec<Candidate>`; move it out so
-        // the prepared search (and its `&refine_idx` borrow) can be dropped.
-        (queues, refine_prepared.candidates)
+        // Move the materialized candidates out so the prepared search (and its
+        // `&refine_idx` borrow) can be dropped.
+        refine_prepared.sync_materialized_candidates();
+        let base_peptides = refine_prepared.mmap_index.len();
+        (
+            queues,
+            std::mem::take(&mut refine_prepared.candidates),
+            base_peptides,
+        )
     };
 
     // Tag each Pass-2 winner; collect into one queue per refined spectrum, AND
-    // PRUNE the candidate pool to just the winners. The Pass-2 search visits an
-    // enormous pool (mod permutations over every anchored peptide — millions of
-    // candidates), but only the few thousand referenced by a surviving PSM are
-    // ever needed downstream: the PIN resolves peptide/accession through
-    // `candidate_idxs`. We copy those into a compact pool, remap indices, and drop
-    // the full pool — it is the dominant refine memory driver (the cloned peaks
-    // are ~45 MB by comparison). Output is unchanged: each PSM still resolves to
-    // the same peptide/candidate, only the internal index numbering differs.
+    // PRUNE the candidate pool to just the winners: the scan's pool holds every
+    // candidate a retained PSM referenced, but the PIN resolves peptide/accession
+    // only through the emitted rows' `candidate_idxs`. We copy those into a
+    // compact pool and remap indices; each PSM still resolves to the same
+    // peptide/candidate, only the internal index numbering differs.
     let pass2_total = refine_candidates.len();
     let pass2_decoys = refine_candidates.iter().filter(|c| c.is_decoy).count();
     let mut isotope_mimics = 0usize;
@@ -998,16 +1017,17 @@ pub fn run_refinement(
         }
         out_queues.push(tagged);
     }
-    drop(refine_candidates); // free the full Pass-2 pool now; `compact` replaces it
+    drop(refine_candidates); // `compact` replaces the Pass-2 pool
 
-    // Transparency + cost visibility: show the full Pass-2 pool size and the
+    // Transparency + cost visibility: show the Pass-2 index size and the
     // pruned winners-only count so a user/operator sees both the search cost and
     // what survives into the merged PIN.
     eprintln!(
-        "[REFINE] anchors={} unident={}/{} pass2_candidates={} (targets={} decoys={}) (pruned to {} winners; {} dropped as isotope mimics)",
+        "[REFINE] anchors={} unident={}/{} pass2_base_peptides={} pass2_candidates_retained={} (targets={} decoys={}) (pruned to {} winners; {} dropped as isotope mimics)",
         base_seqs.len(),
         unident.len(),
         all_spectra.len(),
+        pass2_base_peptides,
         pass2_total,
         pass2_total - pass2_decoys,
         pass2_decoys,
@@ -2200,6 +2220,183 @@ mod tests {
         assert!(out.is_none());
         assert_eq!(queues[0].len(), 1);
         assert_eq!(queues[0].peek_top().unwrap().features.is_refinement, 0);
+    }
+
+    /// Residue mass (Cam-C when `cam`) and, for a `k`, the tier's K oxidation.
+    fn fixture_residue_mass(aa: u8, cam: bool) -> f64 {
+        match aa {
+            b'G' => 57.021464,
+            b'A' => 71.037114,
+            b'S' => 87.032028,
+            b'P' => 97.052764,
+            b'V' => 99.068414,
+            b'T' => 101.047679,
+            b'C' if cam => 103.009185 + 57.021464,
+            b'C' => 103.009185,
+            b'N' => 114.042927,
+            b'D' => 115.026943,
+            b'Q' => 128.058578,
+            b'K' => 128.094963,
+            b'k' => 128.094963 + 15.994915,
+            b'E' => 129.042593,
+            b'M' => 131.040485,
+            b'F' => 147.068414,
+            b'W' => 186.079313,
+            _ => panic!("residue {} not in the fixture table", aa as char),
+        }
+    }
+
+    /// A charge-2 spectrum of `seq` (lower-case `k` = oxidised K; Cam-C when
+    /// `cam`) holding its singly charged b and y ions, at `extra_da` above the
+    /// peptide's neutral mass.
+    fn fixture_spectrum(seq: &[u8], cam: bool, extra_da: f64) -> model::spectrum::Spectrum {
+        use model::mass::{H2O, PROTON};
+        let res: Vec<f64> = seq.iter().map(|&a| fixture_residue_mass(a, cam)).collect();
+        let neutral: f64 = res.iter().sum::<f64>() + H2O;
+        let mut peaks: Vec<(f64, f32)> = Vec::new();
+        for i in 1..res.len() {
+            let b: f64 = res[..i].iter().sum();
+            peaks.push((b + PROTON, 1000.0));
+            peaks.push((neutral - b + PROTON, 1000.0));
+        }
+        peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+        model::spectrum::Spectrum {
+            precursor_mz: (neutral + extra_da + 2.0 * PROTON) / 2.0,
+            precursor_charge: Some(2),
+            scan: Some(1),
+            peaks,
+            ..Default::default()
+        }
+    }
+
+    /// Pass 1 identifies one spectrum per anchor confidently and leaves `query`
+    /// unidentified; returns the refinement output over `db` (Cam-C fixed when
+    /// `cam`).
+    fn refine_fixture(
+        anchors: &[(&[u8], usize)],
+        db: &ProteinDb,
+        cam: bool,
+        query: model::spectrum::Spectrum,
+    ) -> Option<RefinementOutput> {
+        let aa_set = if cam {
+            base_set_with_cam_c()
+        } else {
+            AminoAcidSetBuilder::new_standard().build().unwrap()
+        };
+        let params = SearchParams::default_tryptic(aa_set);
+        let mut candidates = Vec::new();
+        let mut queues = Vec::new();
+        let mut spectra = Vec::new();
+        for (i, (seq, protein_index)) in anchors.iter().enumerate() {
+            candidates.push(cand_pep(unmod_peptide(seq), *protein_index, false));
+            queues.push(queue_with(vec![psm(i, i as u32, 90.0 - i as f32)]));
+            spectra.push(model::spectrum::Spectrum::default());
+        }
+        queues.push(TopNQueue::new(10));
+        spectra.push(query);
+        run_refinement(
+            &queues,
+            &spectra,
+            &candidates,
+            db,
+            &params,
+            &tiny_scorer(),
+            &RefineConfig::default_tier(),
+            0.01,
+            true,
+            0.5,
+            "XXX",
+            DecoyStrategy::Reverse,
+            42,
+        )
+    }
+
+    /// The anchor filter drops Met-cleaved spans of anchors that do not start a
+    /// protein, so such a span is not a target of the refinement search and must
+    /// not relabel a decoy as a target. `ACDEFGK` is both the Met-cleaved span of
+    /// the internal anchor `MACDEFGK` and the reversed-interior decoy of
+    /// `AGFEDCK`; the K-oxidised `ACDEFGK` Pass-2 PSM is that decoy.
+    #[test]
+    fn refinement_collision_targets_respect_the_anchor_filter() {
+        let db = ProteinDb {
+            proteins: vec![protein("P1", b"GRAGFEDCKSSRMACDEFGKWR")],
+        };
+        let out = refine_fixture(
+            &[(b"AGFEDCK", 0), (b"MACDEFGK", 0)],
+            &db,
+            true,
+            fixture_spectrum(b"ACDEFGk", true, 0.0),
+        )
+        .expect("refinement emits PSMs");
+        let hits: Vec<&Candidate> = out
+            .queues
+            .iter()
+            .flat_map(|q| q.iter_psms())
+            .map(|p| &out.candidates[p.primary_candidate_idx() as usize])
+            .filter(|c| {
+                c.peptide
+                    .residues
+                    .iter()
+                    .map(|aa| aa.residue)
+                    .collect::<Vec<_>>()
+                    == b"ACDEFGK"
+            })
+            .collect();
+        assert!(!hits.is_empty(), "the K-oxidised ACDEFGK PSM is emitted");
+        for c in hits {
+            assert!(
+                c.is_decoy,
+                "ACDEFGK comes only from the decoy of AGFEDCK here (protein {})",
+                out.index.db.proteins[c.protein_index].accession
+            );
+        }
+    }
+
+    /// Retrieval must cover every exact precursor match. The K-oxidised
+    /// `CEMEMSDDDGWSSFCEGNVNCGMDCK` (no Cam-C) observed 2 isotopes and 0.02 Da
+    /// above its mass matches at isotope +2 within 20 ppm, but its nominal
+    /// residue mass (2887) lies one below the nominal window derived from the
+    /// observed mass (2888..=2891).
+    #[test]
+    fn refinement_retrieves_exact_precursor_matches_outside_the_nominal_window() {
+        let anchor: &[u8] = b"CEMEMSDDDGWSSFCEGNVNCGMDCK";
+        let db = ProteinDb {
+            proteins: vec![protein("P1", &[b"GR".as_slice(), anchor, b"AR"].concat())],
+        };
+        let out = refine_fixture(
+            &[(anchor, 0)],
+            &db,
+            false,
+            fixture_spectrum(
+                b"CEMEMSDDDGWSSFCEGNVNCGMDCk",
+                false,
+                2.0 * model::mass::ISOTOPE + 0.02,
+            ),
+        );
+        let found = out.iter().flat_map(|o| {
+            o.queues
+                .iter()
+                .flat_map(|q| q.iter_psms())
+                .map(move |p| (p, &o.candidates[p.primary_candidate_idx() as usize]))
+        });
+        let found = found.into_iter().any(|(p, c)| {
+            !c.is_decoy
+                && p.isotope_offset == 2
+                && c.peptide
+                    .residues
+                    .iter()
+                    .map(|aa| aa.residue)
+                    .collect::<Vec<_>>()
+                    == anchor
+                && c.peptide
+                    .residues
+                    .last()
+                    .is_some_and(|aa| aa.mod_.is_some())
+        });
+        assert!(
+            found,
+            "the K-oxidised target at isotope +2 is a refinement PSM"
+        );
     }
 
     // ── (g) merge_into_pass1 ───────────────────────────────────────────────

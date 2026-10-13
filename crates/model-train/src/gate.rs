@@ -6,10 +6,9 @@
 //!
 //! # Reuse of search/FDR code
 //!
-//! The inner search-and-count logic lives in [`count_target_psms`]: the TDC
-//! steps of `bootstrap_labels` ([`crate::labeled`]) over a search on the
-//! out-of-core path with fragment-ion retrieval, returning only the count of
-//! accepted TARGET PSMs instead of the full `LabeledMatch` list.
+//! The inner search-and-count logic lives in [`count_target_psms`]: the search
+//! and TDC steps of `bootstrap_labels` ([`crate::labeled`]), returning only the
+//! count of accepted TARGET PSMs instead of the full `LabeledMatch` list.
 
 use std::fs::File;
 use std::io::BufReader;
@@ -99,10 +98,9 @@ pub fn evaluate_candidate(
 
 /// Run a single search and return the number of TARGET PSMs at `fdr`.
 ///
-/// Steps 3-7 are those of [`crate::labeled::bootstrap_labels`]; the search in
-/// step 2 runs on the out-of-core path with fragment-ion retrieval, which
-/// `bootstrap_labels` does not yet use. Returns `usize` instead of
-/// `Vec<LabeledMatch>`.
+/// Steps 2-7 are those of [`crate::labeled::bootstrap_labels`], including the
+/// search on the out-of-core path with fragment-ion retrieval. Returns `usize`
+/// instead of `Vec<LabeledMatch>`.
 pub(crate) fn count_target_psms(
     spectra: &[Spectrum],
     idx: &SearchIndex,

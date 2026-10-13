@@ -1,3 +1,10 @@
+//! REGENERATED 2026-10-10: low-resolution searches now retrieve candidates with the
+//! out-of-core fragment-ion index (the 150 most intense peaks vote). Verified before
+//! copying: identical header; 635 -> 354 rows, because a spectrum gets a row only when
+//! some candidate matches at least 3 b/y ions. The 364 rows that went are noise (177
+//! targets, 187 decoys; one target scores above the best of those decoys), 83 spectra gain
+//! a row, and of the 271 spectra in both goldens 270 keep the same winning peptide.
+//!
 //! REGENERATED 2026-09-03: `--gbdt-max-trees` now defaults to 100 for standard search
 //! (measured ID-neutral on Astral and UPS1, 33-41% faster; see the flag's doc comment).
 //! Verified before copying: identical header, identical 635 SpecIds, all 635 winning

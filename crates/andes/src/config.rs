@@ -649,8 +649,8 @@ glyco:
         )
         .unwrap();
         assert!(apply(ok, &mut a, &matches).is_ok());
-        assert_eq!(a.quant_feature_fdr.0, Some(0.05), "the default");
-        for (value, want) in [("off", None), ("0.01", Some(0.01))] {
+        assert_eq!(a.quant_feature_fdr.0, None, "the default is off");
+        for (value, want) in [("off", None), ("0.01", Some(0.01)), ("0.05", Some(0.05))] {
             let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
             let cfg = RunConfig::from_yaml_str(&format!("quant:\n  quant_feature_fdr: {value}\n"))
                 .unwrap();

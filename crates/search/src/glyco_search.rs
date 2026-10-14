@@ -79,8 +79,8 @@ pub struct GlycoConfig {
     /// `isotope_error_override`; the others keep the params' window. `None`
     /// applies the override to every spectrum. The driver sets one flag per
     /// spectrum from the `--precursor-mono` table: only a spectrum whose MS1
-    /// envelope was actually fitted has a verified monoisotope, and only those
-    /// can afford to drop the `+2` step.
+    /// envelope fitted, with its best fit inside the narrowed window, has a
+    /// verified monoisotope, and only those can afford to drop the `+2` step.
     pub isotope_error_override_mask: Option<Vec<bool>>,
     /// Cap on the number of peaks the GENERATION stage sees (the most intense N),
     /// as a guard against pathological scans. 0 = no cap. Scoring always reads the
@@ -304,20 +304,15 @@ fn glyco_aware_peptide(
     model::peptide::Peptide::new(residues, pep.pre, pep.post)
 }
 
-/// First N-X-S/T sequon position in `pep`, defaulting to 0 when none is found
-/// (matches the existing model-free `cz` closure's site convention in
-/// [`score_spectrum_glyco`] — factored out so the ETD rank-glycan path uses the
-/// identical glycosite).
+/// First glycosite of `pep` ([`andes_glyco::sequon::glycosites`]: internal
+/// sequons first, then the boundary sequon completed by `pep.post`), defaulting
+/// to 0 when there is none. Shared by every c/z and rank-glycan scorer so they
+/// place the glycan on the same residue.
 fn glyco_site_for(pep: &model::peptide::Peptide) -> usize {
     let res: Vec<u8> = pep.residues.iter().map(|aa| aa.residue).collect();
-    // Internal sequon; else the boundary-sequon N (…N-X | S/T-…, the N at len-2)
-    // so the glycan is placed on the right residue for boundary glycopeptides
-    // (post was validated S/T at sequon-membership time; here we only need the N).
-    andes_glyco::sequon::first_nxst_site(&res)
-        .or_else(|| {
-            let n = res.len();
-            (n >= 2 && res[n - 2] == b'N' && res[n - 1] != b'P').then_some(n - 2)
-        })
+    andes_glyco::sequon::glycosites(&res, pep.post)
+        .first()
+        .copied()
         .unwrap_or(0)
 }
 
@@ -376,10 +371,13 @@ fn dedup_backbone_hits(mut all_backbone: Vec<BackboneHit>, tol_ppm: f64) -> Vec<
             _ => rep.isotope_offset == next.isotope_offset,
         };
         if same_backbone && same_hypothesis {
+            // The merged hypothesis keeps peptide-first provenance from either side.
+            let peptide_first = rep.peptide_first || next.peptide_first;
             if rep.source == Source::DeNovo && next.source == Source::Db {
                 rep = next; // prefer the annotated representative
             }
             // otherwise `next` is a duplicate of `rep` (e.g. different charge)
+            rep.peptide_first = peptide_first;
         } else {
             deduped.push(rep);
             rep = next;
@@ -818,6 +816,14 @@ pub fn glycan_source(full_glycan_db: bool, oxonium_fired: bool, is_etd: bool) ->
     }
 }
 
+/// Whether a backbone hypothesis carries evidence beyond a mass coincidence,
+/// which exempts it from the zero-core-Y prefilter: a de-novo backbone (read
+/// off the Y ladder), a peptide-first one (fragment-index b/y support), or any
+/// backbone with at least one core-Y ion.
+fn has_backbone_evidence(hit: &BackboneHit, core_y_hits: u8) -> bool {
+    hit.source != Source::Db || hit.peptide_first || core_y_hits > 0
+}
+
 /// Indices of the candidates whose residue mass is within `tol_da` of
 /// `bb_residue` (plus a 1e-6 Da slack; the caller re-checks exactly), ordered by
 /// (nominal residue mass, index), which is the nominal-bucket walk's order.
@@ -1125,6 +1131,7 @@ fn score_spectrum_glyco(
                             charge: z,
                             isotope_offset: iso,
                             glycan_mass_residual: precursor_neutral - bb,
+                            peptide_first: true,
                         });
                         pf_added += 1;
                         if pf_added >= max_peptide_first {
@@ -1271,15 +1278,14 @@ fn score_spectrum_glyco(
     // b/y-scoring raw DB-branch backbones (precursor − glycan) that are
     // spurious mass coincidences with NO glycan evidence. A real
     // N-glycopeptide backbone almost always shows ≥1 core-Y ion (at least
-    // Y0/Y1). So skip full scoring of a `Source::Db` backbone with
+    // Y0/Y1). So skip full scoring of a mass-only backbone with
     // core_y_counts == 0 — UNLESS the scan has no evidence backbone at all,
     // in which case we score everything (non-dropping fallback preserves
-    // recall on genuinely weak spectra). De-novo / peptide-first
-    // backbones carry their own evidence and are never skipped.
+    // recall on genuinely weak spectra). See `has_backbone_evidence`.
     let scan_has_evidence = deduped_backbone
         .iter()
         .enumerate()
-        .any(|(i, h)| h.source != Source::Db || core_y_counts[i] > 0);
+        .any(|(i, h)| has_backbone_evidence(h, core_y_counts[i]));
 
     for (bb_idx, bb_hit) in deduped_backbone.iter().enumerate() {
         // The cz-gate (AXIS 4) rescues backbones with weak b/y AND weak
@@ -1288,10 +1294,7 @@ fn score_spectrum_glyco(
         // backbone MUST still be scored so its `backbone_best_cz` is computed
         // and AXIS 4 can retain it (otherwise the gate is silently defeated
         // for its target population). Default path (gate off) unchanged.
-        if scan_has_evidence
-            && bb_hit.source == Source::Db
-            && core_y_counts[bb_idx] == 0
-            && !cz_gate_on
+        if scan_has_evidence && !has_backbone_evidence(bb_hit, core_y_counts[bb_idx]) && !cz_gate_on
         {
             continue;
         }
@@ -2268,6 +2271,36 @@ mod glycan_source_tests {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn peptide_first_backbones_are_exempt_from_the_core_y_prefilter() {
+        use super::{dedup_backbone_hits, has_backbone_evidence, BackboneHit, Source};
+        let mass_only = BackboneHit {
+            backbone_mass: 1500.0,
+            glycan: None,
+            source: Source::Db,
+            charge: 3,
+            isotope_offset: 0,
+            glycan_mass_residual: 1800.0,
+            peptide_first: false,
+        };
+        let peptide_first = BackboneHit {
+            peptide_first: true,
+            ..mass_only.clone()
+        };
+        // A mass-only backbone needs a core-Y ion; a peptide-first one does not.
+        assert!(!has_backbone_evidence(&mass_only, 0));
+        assert!(has_backbone_evidence(&mass_only, 1));
+        assert!(has_backbone_evidence(&peptide_first, 0));
+        // When the DB branch and peptide-first retrieval propose the same
+        // hypothesis, the merged hit keeps the peptide-first provenance.
+        let merged = dedup_backbone_hits(vec![mass_only.clone(), peptide_first.clone()], 20.0);
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].peptide_first);
+        let merged = dedup_backbone_hits(vec![peptide_first, mass_only], 20.0);
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].peptide_first);
+    }
+
+    #[test]
     fn isotope_window_for_applies_the_override_per_spectrum() {
         use super::isotope_window_for;
         let default = 0..=2;
@@ -2559,6 +2592,7 @@ mod tests {
             charge: 3,
             isotope_offset: iso,
             glycan_mass_residual: residual,
+            peptide_first: false,
         };
         // Two isotope hypotheses at the same backbone → both must survive.
         let out = dedup_backbone_hits(vec![mk(0, 892.317), mk(1, 891.313)], 20.0);

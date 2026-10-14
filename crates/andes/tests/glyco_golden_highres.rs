@@ -1,5 +1,11 @@
 //! HIGH-RES glyco serve-path golden.
 //!
+//! REGENERATED 2026-10-14 when the glycosite tag began counting the boundary
+//! sequon (an N-X-S/T completed by the residue after the peptide). Verified before
+//! copying: header identical, 120 -> 120 rows, 0 winner changes; only the Peptide
+//! column moved, on 2 rows (scans 24129 and 24902, R.GTAGNALMDGASQLMGENR.T, whose
+//! only sequon is N18-R|T): `@N?` -> `@N18`.
+//!
 //! REGENERATED 2026-09-09 when the glycan-first pre-filter's Y-ion generation
 //! became structure-aware (core + antenna-subset losses + core ladder, replacing
 //! the full 2^n power set that over-generated physically-impossible "trim a core

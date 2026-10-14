@@ -51,6 +51,11 @@ pub struct BackboneHit {
     /// for the intact `CalcMass` rather than `glycan.map(|g| g.mass).unwrap_or(0.0)`,
     /// which silently reported the bare peptide for novel glycans.
     pub glycan_mass_residual: f64,
+    /// Whether peptide-first retrieval proposed this hypothesis: a sequon
+    /// peptide with fragment-index b/y support whose glycan-by-subtraction
+    /// matched a known glycan. Such a hit carries peptide evidence of its own,
+    /// independent of the core-Y ladder.
+    pub peptide_first: bool,
 }
 
 /// DB-branch backbone enumeration.
@@ -78,6 +83,7 @@ pub fn db_branch(
                     // By construction bb = precursor − g.mass, so the observed
                     // residual is exactly the glycan mass.
                     glycan_mass_residual: precursor_neutral - bb,
+                    peptide_first: false,
                 })
             } else {
                 None
@@ -343,6 +349,7 @@ pub fn hybrid_candidates_presolved(
             // Keep the observed residual even when annotation returned None so a
             // novel glycan's intact mass is not lost (Codex finding #3).
             glycan_mass_residual: residual,
+            peptide_first: false,
         });
     }
 

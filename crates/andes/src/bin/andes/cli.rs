@@ -910,8 +910,6 @@ pub(crate) enum EthcdActivationFlag {
 pub(crate) enum GlycoSpeciesFlag {
     /// Human N-glycans.
     Human,
-    /// Human, multi-antennary.
-    HumanMulti,
     /// Mouse N-glycans.
     Mouse,
     /// Mouse, extended.
@@ -925,7 +923,6 @@ impl GlycoSpeciesFlag {
     pub(crate) fn key(self) -> &'static str {
         match self {
             GlycoSpeciesFlag::Human => "human",
-            GlycoSpeciesFlag::HumanMulti => "human-multi",
             GlycoSpeciesFlag::Mouse => "mouse",
             GlycoSpeciesFlag::MouseLarge => "mouse-large",
             GlycoSpeciesFlag::HighMannose => "high-mannose",

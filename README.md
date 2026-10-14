@@ -283,7 +283,7 @@ andes --spectrum sample.mzML \
       --output-pin results.pin
 ```
 
-- A glycan database is required: `--glyco-species` (`human`, `human-multi`, `mouse`,
+- A glycan database is required: `--glyco-species` (`human`, `mouse`,
   `mouse-large`, `high-mannose`) or your own `.gdb` with `--glyco-glycan-gdb`.
 - Output is only `results.glyco.pin`; `--output-tsv`, `--output-parquet`, `--rescore` and
   `--refine` are rejected. Run Percolator on it with `--trainFDR 0.05`.

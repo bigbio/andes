@@ -79,6 +79,15 @@
 //! | `--chimeric` slice | 1,717 | 0 (golden unchanged) |
 //! | `--refine` slice | 1,595 | 24 |
 //!
+//! REGENERATED 2026-10-14 for the `--chimeric` slice after merging main, whose
+//! Pass 2 no longer emits a secondary that repeats a retained candidate (main's
+//! golden: 1,749 rows). The new golden is main's with its positional-isomer
+//! alternatives removed: 34 rows dropped, the remaining 1,715 identical row for
+//! row with SpecId excluded (no row gains a protein on this slice), every
+//! spectrum's winner unchanged. Against this branch's previous golden (1,717
+//! rows) it lacks exactly main's two dropped Pass-2 rows (scans 60160 and
+//! 60179); every other row is identical with SpecId excluded.
+//!
 //! To regenerate after an intentional change, run the case's command line (see
 //! `run`), then either digest the PIN with `identity_digest` (E. coli) or write
 //! its header and sorted rows, gzipped, over the case's golden PIN (slices).

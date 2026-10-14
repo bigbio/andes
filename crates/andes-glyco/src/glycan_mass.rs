@@ -32,9 +32,9 @@ pub const WATER: f64 = 18.010565;
 /// Core oxonium ions: HexNAc-derived fragments + HexHexNAc; singly-charged m/z.
 /// [138.05496, 168.06552, 186.07608, 204.08665, 366.13947]
 pub const CORE_OXONIUM_MZ: [f64; 5] = [
-    138.05496, // HexNAc fragment (loss of C2H4O2 from HexNAc+H)
-    168.06552, // HexNAc fragment
-    186.07608, // HexNAc fragment (ring-open)
+    138.05496, // HexNAc fragment C7H8NO2+ (HexNAc+H − CH6O3)
+    168.06552, // HexNAc+H − 2H2O
+    186.07608, // HexNAc+H − H2O
     204.08665, // HexNAc+H (intact oxonium)
     366.13947, // HexHexNAc oxonium
 ];

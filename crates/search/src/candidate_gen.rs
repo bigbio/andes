@@ -324,19 +324,31 @@ fn enumerate_all_spans(ctx: &EmitCtx<'_>, n: u32) -> Vec<Candidate> {
     out
 }
 
+/// The (N-terminal, C-terminal) context of position `i` of a span of length
+/// `n`, for [`model::AminoAcidSet::forms`].
+#[inline]
+fn position_termini(
+    i: usize,
+    n: usize,
+    is_protein_n_term: bool,
+    is_protein_c_term: bool,
+) -> (Terminus, Terminus) {
+    (
+        Terminus::at(i == 0, is_protein_n_term),
+        Terminus::at(i + 1 == n, is_protein_c_term),
+    )
+}
+
 /// Generate every combination of variable-mod applications for `span`,
 /// up to `params.max_variable_mods_per_peptide` mods total.
 ///
-/// `is_protein_n_term`: the span begins at position 0 of the protein sequence.
-/// `is_protein_c_term`: the span ends at the last residue of the protein sequence.
+/// `is_protein_n_term`: the span begins at the protein's (biological)
+/// N-terminus. `is_protein_c_term`: the span ends at the protein's C-terminus.
 ///
-/// These flags control which terminal-location mod variants are consulted:
-/// - Position 0: Protein_N_Term (if is_protein_n_term) or N_Term variants are
-///   merged in addition to Anywhere variants.
-/// - Position n-1: Protein_C_Term (if is_protein_c_term) or C_Term variants are
-///   merged in addition to Anywhere variants.
-/// - All other positions: Anywhere only — borrowed directly from AminoAcidSet,
-///   no clone.
+/// Each position takes the forms [`model::AminoAcidSet::forms`] lists for its
+/// terminal context: the first and last positions carry the peptide- (or
+/// protein-) terminal mods stacked with the residue's side-chain mods;
+/// interior positions carry side-chain mods only.
 pub(crate) fn expand_mod_combinations(
     span: &[u8],
     params: &SearchParams,
@@ -344,49 +356,19 @@ pub(crate) fn expand_mod_combinations(
     is_protein_c_term: bool,
 ) -> Vec<Vec<AminoAcid>> {
     let n = span.len();
-
-    // Build owned merged-variant vecs only for the (up to two) terminal
-    // positions. Interior positions will borrow the Anywhere slice directly,
-    // eliminating the per-position `to_vec` clone that showed up in perf
-    // traces (~87% of positions on real tryptic peptides).
-    let pos0_owned: Option<Vec<AminoAcid>> = (n > 0).then(|| {
-        build_terminal_variants(params, span[0], 0, n, is_protein_n_term, is_protein_c_term)
-    });
-    let pos_last_owned: Option<Vec<AminoAcid>> = (n > 1).then(|| {
-        build_terminal_variants(
-            params,
-            span[n - 1],
-            n - 1,
-            n,
-            is_protein_n_term,
-            is_protein_c_term,
-        )
-    });
-
-    // Collect per-position variant slices. Terminal positions reference the
-    // owned vecs above; interior positions borrow directly from AminoAcidSet.
-    // All borrows are valid for the duration of this function.
-    let position_variants_refs: Vec<&[AminoAcid]> = span
-        .iter()
-        .enumerate()
-        .map(|(i, &r)| {
-            if i == 0 {
-                pos0_owned.as_ref().unwrap().as_slice()
-            } else if i == n - 1 {
-                // n > 1 guaranteed here because n == 1 means i == 0 == n-1,
-                // which is already handled by the first branch.
-                pos_last_owned.as_ref().unwrap().as_slice()
-            } else {
-                // Interior position: borrow Anywhere variants — no clone.
-                params.aa_set.variants_for(r, ModLocation::Anywhere)
-            }
-        })
-        .collect();
+    let mut position_variants: Vec<&[AminoAcid]> = Vec::with_capacity(n);
+    let mut position_slots: Vec<&[u8]> = Vec::with_capacity(n);
+    for (i, &r) in span.iter().enumerate() {
+        let (nt, ct) = position_termini(i, n, is_protein_n_term, is_protein_c_term);
+        position_variants.push(params.aa_set.forms(r, nt, ct));
+        position_slots.push(params.aa_set.form_slots(r, nt, ct));
+    }
 
     let mut out = Vec::new();
     let mut current = Vec::with_capacity(n);
     expand_recursive(
-        &position_variants_refs,
+        &position_variants,
+        &position_slots,
         0,
         &mut current,
         0,
@@ -396,18 +378,12 @@ pub(crate) fn expand_mod_combinations(
     out
 }
 
-/// Per-search variant tables for [`walk_forms_bounded`]: each residue's
-/// Anywhere variants, and the merged terminal variants
-/// ([`build_terminal_variants`]) for every (residue, first, last, protein
-/// N-term, protein C-term) combination. The walk reads these instead of
-/// building the terminal lists and looking up the interior ones per record.
+/// Per-search mass bounds for [`walk_forms_bounded`]: the (lightest,
+/// heaviest) form mass of every `(residue, N context, C context)` entry of
+/// [`model::AminoAcidSet::forms`], indexed by [`form_index`];
+/// `(f64::MAX, f64::MIN)` for an entry with no form.
 pub struct FormWalkTables {
-    anywhere: Vec<Vec<AminoAcid>>,
-    terminal: Vec<Vec<AminoAcid>>,
-    /// (lightest, heaviest) variant mass of each `anywhere` / `terminal` entry;
-    /// `(f64::MAX, f64::MIN)` for an entry with no variant.
-    anywhere_bounds: Vec<(f64, f64)>,
-    terminal_bounds: Vec<(f64, f64)>,
+    bounds: Vec<(f64, f64)>,
 }
 
 /// Mass of one variant: residue plus its modification delta.

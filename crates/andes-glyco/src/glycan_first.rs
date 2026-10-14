@@ -141,33 +141,33 @@ pub fn default_diagnostic_ions() -> Vec<DiagnosticIon> {
     use crate::glycan_mass::WATER;
     // (mz, hex, hexnac, fuc, neuac, neugc)
     const IONS: [(f64, u8, u8, u8, u8, u8); 28] = [
-        (84.04439, 0, 1, 0, 0, 0),                  // HexNAc C4H6NO+
-        (85.02841, 1, 0, 0, 0, 0),                  // Hex C4H5O2+
-        (97.02841, 1, 0, 0, 0, 0),                  // Hex C5H5O2+
-        (HEX + PROTON - 3.0 * WATER, 1, 0, 0, 0, 0), // Hex−3H2O
-        (115.03897, 1, 0, 0, 0, 0),                 // Hex C5H7O3+
-        (126.05495, 0, 1, 0, 0, 0),                 // HexNAc C6H8NO2+
-        (HEX + PROTON - 2.0 * WATER, 1, 0, 0, 0, 0), // Hex−2H2O
-        (138.05495, 0, 1, 0, 0, 0),                 // HexNAc C7H8NO2+
-        (144.06552, 0, 1, 0, 0, 0),                 // HexNAc C6H10NO3+
-        (HEX + PROTON - WATER, 1, 0, 0, 0, 0),      // Hex−H2O
-        (HEX + PROTON, 1, 0, 0, 0, 0),              // Hex
-        (HEXNAC + PROTON - 2.0 * WATER, 0, 1, 0, 0, 0), // HexNAc−2H2O
-        (HEXNAC + PROTON - WATER, 0, 1, 0, 0, 0),   // HexNAc−H2O
-        (HEXNAC + PROTON, 0, 1, 0, 0, 0),           // HexNAc
-        (NEUAC + PROTON - WATER, 0, 0, 0, 1, 0),    // NeuAc−H2O
-        (NEUGC + PROTON - WATER, 0, 0, 0, 0, 1),    // NeuGc−H2O
-        (NEUAC + PROTON, 0, 0, 0, 1, 0),            // NeuAc
-        (NEUGC + PROTON, 0, 0, 0, 0, 1),            // NeuGc
-        (2.0 * HEX + PROTON, 2, 0, 0, 0, 0),        // Hex2
-        (HEX + HEXNAC + PROTON, 1, 1, 0, 0, 0),     // HexHexNAc
-        (HEX + NEUAC + PROTON, 1, 0, 0, 1, 0),      // HexNeuAc
-        (HEX + HEXNAC + FUC + PROTON, 1, 1, 1, 0, 0), // HexHexNAcFuc
-        (2.0 * HEX + HEXNAC + PROTON, 2, 1, 0, 0, 0), // Hex2HexNAc
-        (HEX + HEXNAC + NEUAC + PROTON, 1, 1, 0, 1, 0), // HexHexNAcNeuAc
-        (3.0 * HEX + HEXNAC + PROTON, 3, 1, 0, 0, 0), // Hex3HexNAc
-        (HEX + HEXNAC + NEUAC + FUC + PROTON, 1, 1, 1, 1, 0), // HexHexNAcNeuAcFuc
-        (3.0 * HEX + 2.0 * HEXNAC + PROTON, 3, 2, 0, 0, 0), // Hex3HexNAc2
+        (84.04439, 0, 1, 0, 0, 0),                                // HexNAc C4H6NO+
+        (85.02841, 1, 0, 0, 0, 0),                                // Hex C4H5O2+
+        (97.02841, 1, 0, 0, 0, 0),                                // Hex C5H5O2+
+        (HEX + PROTON - 3.0 * WATER, 1, 0, 0, 0, 0),              // Hex−3H2O
+        (115.03897, 1, 0, 0, 0, 0),                               // Hex C5H7O3+
+        (126.05495, 0, 1, 0, 0, 0),                               // HexNAc C6H8NO2+
+        (HEX + PROTON - 2.0 * WATER, 1, 0, 0, 0, 0),              // Hex−2H2O
+        (138.05495, 0, 1, 0, 0, 0),                               // HexNAc C7H8NO2+
+        (144.06552, 0, 1, 0, 0, 0),                               // HexNAc C6H10NO3+
+        (HEX + PROTON - WATER, 1, 0, 0, 0, 0),                    // Hex−H2O
+        (HEX + PROTON, 1, 0, 0, 0, 0),                            // Hex
+        (HEXNAC + PROTON - 2.0 * WATER, 0, 1, 0, 0, 0),           // HexNAc−2H2O
+        (HEXNAC + PROTON - WATER, 0, 1, 0, 0, 0),                 // HexNAc−H2O
+        (HEXNAC + PROTON, 0, 1, 0, 0, 0),                         // HexNAc
+        (NEUAC + PROTON - WATER, 0, 0, 0, 1, 0),                  // NeuAc−H2O
+        (NEUGC + PROTON - WATER, 0, 0, 0, 0, 1),                  // NeuGc−H2O
+        (NEUAC + PROTON, 0, 0, 0, 1, 0),                          // NeuAc
+        (NEUGC + PROTON, 0, 0, 0, 0, 1),                          // NeuGc
+        (2.0 * HEX + PROTON, 2, 0, 0, 0, 0),                      // Hex2
+        (HEX + HEXNAC + PROTON, 1, 1, 0, 0, 0),                   // HexHexNAc
+        (HEX + NEUAC + PROTON, 1, 0, 0, 1, 0),                    // HexNeuAc
+        (HEX + HEXNAC + FUC + PROTON, 1, 1, 1, 0, 0),             // HexHexNAcFuc
+        (2.0 * HEX + HEXNAC + PROTON, 2, 1, 0, 0, 0),             // Hex2HexNAc
+        (HEX + HEXNAC + NEUAC + PROTON, 1, 1, 0, 1, 0),           // HexHexNAcNeuAc
+        (3.0 * HEX + HEXNAC + PROTON, 3, 1, 0, 0, 0),             // Hex3HexNAc
+        (HEX + HEXNAC + NEUAC + FUC + PROTON, 1, 1, 1, 1, 0),     // HexHexNAcNeuAcFuc
+        (3.0 * HEX + 2.0 * HEXNAC + PROTON, 3, 2, 0, 0, 0),       // Hex3HexNAc2
         (3.0 * HEX + 2.0 * HEXNAC + FUC + PROTON, 3, 2, 1, 0, 0), // Hex3HexNAc2Fuc
     ];
     IONS
@@ -721,34 +721,34 @@ mod tests {
         };
         // Cation formula of each ion, in panel order.
         let formulas: [(u32, u32, u32, u32); 28] = [
-            (4, 6, 1, 1),     // 84
-            (4, 5, 0, 2),     // 85
-            (5, 5, 0, 2),     // 97
-            (6, 5, 0, 2),     // 109 Hex−3H2O
-            (5, 7, 0, 3),     // 115
-            (6, 8, 1, 2),     // 126
-            (6, 7, 0, 3),     // 127 Hex−2H2O
-            (7, 8, 1, 2),     // 138
-            (6, 10, 1, 3),    // 144
-            (6, 9, 0, 4),     // 145 Hex−H2O
-            (6, 11, 0, 5),    // 163 Hex
-            (8, 10, 1, 3),    // 168 HexNAc−2H2O
-            (8, 12, 1, 4),    // 186 HexNAc−H2O
-            (8, 14, 1, 5),    // 204 HexNAc
-            (11, 16, 1, 7),   // 274 NeuAc−H2O
-            (11, 16, 1, 8),   // 290 NeuGc−H2O
-            (11, 18, 1, 8),   // 292 NeuAc
-            (11, 18, 1, 9),   // 308 NeuGc
-            (12, 21, 0, 10),  // Hex2
-            (14, 24, 1, 10),  // HexHexNAc
-            (17, 28, 1, 13),  // HexNeuAc
-            (20, 34, 1, 14),  // HexHexNAcFuc
-            (20, 34, 1, 15),  // Hex2HexNAc
-            (25, 41, 2, 18),  // HexHexNAcNeuAc
-            (26, 44, 1, 20),  // Hex3HexNAc
-            (31, 51, 2, 22),  // HexHexNAcNeuAcFuc
-            (34, 57, 2, 25),  // Hex3HexNAc2
-            (40, 67, 2, 29),  // Hex3HexNAc2Fuc
+            (4, 6, 1, 1),    // 84
+            (4, 5, 0, 2),    // 85
+            (5, 5, 0, 2),    // 97
+            (6, 5, 0, 2),    // 109 Hex−3H2O
+            (5, 7, 0, 3),    // 115
+            (6, 8, 1, 2),    // 126
+            (6, 7, 0, 3),    // 127 Hex−2H2O
+            (7, 8, 1, 2),    // 138
+            (6, 10, 1, 3),   // 144
+            (6, 9, 0, 4),    // 145 Hex−H2O
+            (6, 11, 0, 5),   // 163 Hex
+            (8, 10, 1, 3),   // 168 HexNAc−2H2O
+            (8, 12, 1, 4),   // 186 HexNAc−H2O
+            (8, 14, 1, 5),   // 204 HexNAc
+            (11, 16, 1, 7),  // 274 NeuAc−H2O
+            (11, 16, 1, 8),  // 290 NeuGc−H2O
+            (11, 18, 1, 8),  // 292 NeuAc
+            (11, 18, 1, 9),  // 308 NeuGc
+            (12, 21, 0, 10), // Hex2
+            (14, 24, 1, 10), // HexHexNAc
+            (17, 28, 1, 13), // HexNeuAc
+            (20, 34, 1, 14), // HexHexNAcFuc
+            (20, 34, 1, 15), // Hex2HexNAc
+            (25, 41, 2, 18), // HexHexNAcNeuAc
+            (26, 44, 1, 20), // Hex3HexNAc
+            (31, 51, 2, 22), // HexHexNAcNeuAcFuc
+            (34, 57, 2, 25), // Hex3HexNAc2
+            (40, 67, 2, 29), // Hex3HexNAc2Fuc
         ];
         let panel = default_diagnostic_ions();
         assert_eq!(panel.len(), formulas.len());

@@ -459,9 +459,9 @@ fn rescore_rows(
         }
         let spec = &spectra[spec_idx];
         let sorted = queue.clone().into_rank_sorted_vec();
-        let rows = emitted_rows(spec, &sorted, candidates);
-        let ranks: Vec<u32> = rows.iter().map(|(r, _)| *r).collect();
-        let psms: Vec<&PsmMatch> = rows.iter().map(|(_, p)| &**p).collect();
+        let emitted = emitted_rows(spec, &sorted, candidates);
+        let ranks: Vec<u32> = emitted.iter().map(|(r, _)| *r).collect();
+        let psms: Vec<&PsmMatch> = emitted.iter().map(|(_, p)| &**p).collect();
         let multi_row = psms.len() > 1;
         let spec_id_str = if spec.title.is_empty() {
             format!("scan={}", spec.scan.unwrap_or(0))

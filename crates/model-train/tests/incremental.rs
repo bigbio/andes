@@ -458,3 +458,28 @@ fn repeated_decay_on_same_day_equals_one_decay() {
     let (reweighted, _) = update_reweight(&path, "m", "s1", 1.0, cfg).unwrap();
     assert_eq!(reweighted, once, "reweight must keep the recorded decay");
 }
+
+/// Update operations refuse a partitioned (directory) store up front instead
+/// of failing at commit time after the work is done.
+#[test]
+fn update_rejects_partitioned_store() {
+    let bundled = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../resources/models"
+    ));
+    let cfg = EstimatorConfig::default();
+    let err = update_decay(bundled, "hcd_qexactive_tryp", 365.0, cfg.clone()).unwrap_err();
+    assert!(err.to_string().contains("partitioned"), "{err}");
+    let err = update_add(
+        bundled,
+        "hcd_qexactive_tryp",
+        make_ledger("s1"),
+        make_stats_s1(),
+        cfg,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("partitioned"), "{err}");
+    let p = fixture_param();
+    let err = commit_update(bundled, "hcd_qexactive_tryp", &p, &[]).unwrap_err();
+    assert!(err.to_string().contains("partitioned"), "{err}");
+}

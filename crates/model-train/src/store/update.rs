@@ -89,6 +89,24 @@ fn validate_weight(source_id: &str, weight: f32) -> Result<(), TrainError> {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Reject a store path the update and attach writers cannot rewrite in place.
+///
+/// These writers replace a single Parquet file atomically. A partitioned
+/// (directory) store such as the bundled `resources/models/` is laid out per
+/// protocol by `scripts/split_store_by_protocol.py`, so it is read-only here:
+/// copy the model into a single-file store, update that, and re-split.
+pub fn ensure_single_file_store(path: &Path) -> Result<(), TrainError> {
+    if path.is_dir() {
+        return Err(TrainError::Other(format!(
+            "{} is a partitioned (directory) model store, which cannot be rewritten \
+             in place; write the model into a single-file store (e.g. models.parquet) \
+             and re-split it with scripts/split_store_by_protocol.py",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 /// Append a new source to `model_id`, re-sum all per-source stats (applying
 /// each source's `weight` via `stats.scaled(weight)`), and re-estimate a
 /// candidate [`Param`].
@@ -106,6 +124,7 @@ pub fn update_add(
     // counts.
     validate_weight(&ledger.source_id, ledger.weight)?;
 
+    ensure_single_file_store(path)?;
     let store = ModelStore::open(path)?;
     let template = store.load_param(model_id)?;
     let existing_ledgers = store.load_sources(model_id)?;
@@ -150,6 +169,7 @@ pub fn update_remove(
     source_id: &str,
     est_cfg: EstimatorConfig,
 ) -> Result<(Param, Vec<(SourceLedger, CountStats)>), TrainError> {
+    ensure_single_file_store(path)?;
     let store = ModelStore::open(path)?;
     let template = store.load_param(model_id)?;
     let existing_ledgers = store.load_sources(model_id)?;
@@ -191,6 +211,7 @@ pub fn update_reweight(
     // Validate the new weight up front (finding 3.5).
     validate_weight(source_id, weight)?;
 
+    ensure_single_file_store(path)?;
     let store = ModelStore::open(path)?;
     let template = store.load_param(model_id)?;
     let existing_ledgers = store.load_sources(model_id)?;
@@ -239,6 +260,7 @@ pub fn update_decay(
         )));
     }
 
+    ensure_single_file_store(path)?;
     let store = ModelStore::open(path)?;
     let template = store.load_param(model_id)?;
     let existing_ledgers = store.load_sources(model_id)?;
@@ -289,6 +311,7 @@ pub fn commit_update(
     new_param: &Param,
     new_sources: &[(SourceLedger, CountStats)],
 ) -> Result<(), TrainError> {
+    ensure_single_file_store(path)?;
     // Read all existing models into memory, preserving their GBDT blobs.
     let mut other_models: Vec<ModelEntry> = Vec::new();
     let mut other_blobs: Vec<Option<Vec<u8>>> = Vec::new();

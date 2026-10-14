@@ -17,7 +17,7 @@ use crate::search_index::SearchIndex;
 use crate::search_params::SearchParams;
 use model::amino_acid::AminoAcid;
 use model::enzyme::Enzyme;
-use model::modification::ModLocation;
+use model::aa_set::{form_index, Terminus, FORM_TABLE_LEN};
 use model::peptide::Peptide;
 use model::protein::Protein;
 
@@ -406,63 +406,22 @@ fn variant_bounds(variants: &[AminoAcid]) -> (f64, f64) {
 
 impl FormWalkTables {
     pub fn new(params: &SearchParams) -> Self {
-        let anywhere: Vec<Vec<AminoAcid>> = (0..=255u8)
-            .map(|r| params.aa_set.variants_for(r, ModLocation::Anywhere).to_vec())
-            .collect();
-        let mut terminal = Vec::with_capacity(256 * 16);
+        let mut bounds = vec![(f64::MAX, f64::MIN); FORM_TABLE_LEN];
         for r in 0..=255u8 {
-            for key in 0..16u8 {
-                let (first, last, prot_n, prot_c) =
-                    (key & 1 != 0, key & 2 != 0, key & 4 != 0, key & 8 != 0);
-                // `build_terminal_variants` reads its position only through
-                // `pos == 0` and `pos == span_len - 1`.
-                let (pos, span_len) = match (first, last) {
-                    (true, true) => (0, 1),
-                    (true, false) => (0, 2),
-                    (false, true) => (1, 2),
-                    (false, false) => {
-                        terminal.push(Vec::new());
-                        continue;
-                    }
-                };
-                terminal.push(build_terminal_variants(
-                    params, r, pos, span_len, prot_n, prot_c,
-                ));
+            for nt in Terminus::ALL {
+                for ct in Terminus::ALL {
+                    bounds[form_index(r, nt, ct)] = variant_bounds(params.aa_set.forms(r, nt, ct));
+                }
             }
         }
-        let anywhere_bounds = anywhere.iter().map(|v| variant_bounds(v)).collect();
-        let terminal_bounds = terminal.iter().map(|v| variant_bounds(v)).collect();
-        Self {
-            anywhere,
-            terminal,
-            anywhere_bounds,
-            terminal_bounds,
-        }
-    }
-
-    #[inline]
-    fn terminal_key(residue: u8, first: bool, last: bool, prot_n: bool, prot_c: bool) -> usize {
-        let key = first as usize | (last as usize) << 1 | (prot_n as usize) << 2 | (prot_c as usize) << 3;
-        residue as usize * 16 + key
-    }
-
-    #[inline]
-    fn terminal(&self, residue: u8, first: bool, last: bool, prot_n: bool, prot_c: bool) -> &[AminoAcid] {
-        &self.terminal[Self::terminal_key(residue, first, last, prot_n, prot_c)]
+        Self { bounds }
     }
 
     /// (lightest, heaviest) variant mass at position `i` of a span of length `n`.
     #[inline]
     fn position_bounds(&self, span: &[u8], i: usize, prot_n: bool, prot_c: bool) -> (f64, f64) {
-        let n = span.len();
-        let r = span[i];
-        if i == 0 {
-            self.terminal_bounds[Self::terminal_key(r, true, n == 1, prot_n, prot_c)]
-        } else if i == n - 1 {
-            self.terminal_bounds[Self::terminal_key(r, false, true, prot_n, prot_c)]
-        } else {
-            self.anywhere_bounds[r as usize]
-        }
+        let (nt, ct) = position_termini(i, span.len(), prot_n, prot_c);
+        self.bounds[form_index(span[i], nt, ct)]
     }
 }
 
@@ -472,19 +431,25 @@ const WALK_INLINE_LEN: usize = 64;
 
 /// Per-position variant lists of one walk.
 type WalkVariants<'t> = smallvec::SmallVec<[&'t [AminoAcid]; WALK_INLINE_LEN]>;
+/// Per-position variable-mod counts of each variant of one walk.
+type WalkSlots<'t> = smallvec::SmallVec<[&'t [u8]; WALK_INLINE_LEN]>;
 /// Suffix sums of the per-position minimum or maximum variant mass.
 type WalkRest = smallvec::SmallVec<[f64; WALK_INLINE_LEN]>;
 
-/// Fill `position_variants` with the variant list of every position of `span`,
-/// and `min_rest` / `max_rest` with the suffix sums of the per-position minimum
-/// and maximum variant mass; `false` when the span is empty or a position has
-/// no variant. The buffers are the caller's, so nothing is returned by value.
+/// Fill `position_variants` / `position_slots` with the forms (and their
+/// variable-mod counts) of every position of `span`, and `min_rest` /
+/// `max_rest` with the suffix sums of the per-position minimum and maximum
+/// variant mass; `false` when the span is empty or a position has no variant.
+/// The buffers are the caller's, so nothing is returned by value.
+#[allow(clippy::too_many_arguments)]
 fn walk_bounds<'t>(
     span: &[u8],
-    tables: &'t FormWalkTables,
+    params: &'t SearchParams,
+    tables: &FormWalkTables,
     is_protein_n_term: bool,
     is_protein_c_term: bool,
     position_variants: &mut WalkVariants<'t>,
+    position_slots: &mut WalkSlots<'t>,
     min_rest: &mut WalkRest,
     max_rest: &mut WalkRest,
 ) -> bool {
@@ -493,15 +458,12 @@ fn walk_bounds<'t>(
         return false;
     }
     position_variants.clear();
-    position_variants.extend(span.iter().enumerate().map(|(i, &r)| {
-        if i == 0 {
-            tables.terminal(r, true, n == 1, is_protein_n_term, is_protein_c_term)
-        } else if i == n - 1 {
-            tables.terminal(r, false, true, is_protein_n_term, is_protein_c_term)
-        } else {
-            tables.anywhere[r as usize].as_slice()
-        }
-    }));
+    position_slots.clear();
+    for (i, &r) in span.iter().enumerate() {
+        let (nt, ct) = position_termini(i, n, is_protein_n_term, is_protein_c_term);
+        position_variants.push(params.aa_set.forms(r, nt, ct));
+        position_slots.push(params.aa_set.form_slots(r, nt, ct));
+    }
     min_rest.clear();
     min_rest.resize(n + 1, 0.0);
     max_rest.clear();
@@ -625,14 +587,17 @@ fn walk_forms_bounded(
     use model::mass::H2O;
     use smallvec::SmallVec;
     let mut position_variants = WalkVariants::new();
+    let mut position_slots = WalkSlots::new();
     let mut min_rest = WalkRest::new();
     let mut max_rest = WalkRest::new();
     if !walk_bounds(
         span,
+        params,
         tables,
         is_protein_n_term,
         is_protein_c_term,
         &mut position_variants,
+        &mut position_slots,
         &mut min_rest,
         &mut max_rest,
     ) {
@@ -648,6 +613,7 @@ fn walk_forms_bounded(
     #[allow(clippy::too_many_arguments)]
     fn rec<'a>(
         pv: &[&'a [AminoAcid]],
+        ps: &[&[u8]],
         pos: usize,
         sum: f64,
         masses: &mut SmallVec<[f64; WALK_INLINE_LEN]>,
@@ -666,9 +632,8 @@ fn walk_forms_bounded(
             *k += 1;
             return;
         }
-        for variant in pv[pos] {
-            let consumes_slot = variant.mod_.as_ref().map(|m| !m.fixed).unwrap_or(false);
-            let new_mods = mods_used + if consumes_slot { 1 } else { 0 };
+        for (variant, &slots) in pv[pos].iter().zip(ps[pos]) {
+            let new_mods = mods_used + u32::from(slots);
             if new_mods > max_mods {
                 continue;
             }
@@ -682,6 +647,7 @@ fn walk_forms_bounded(
             chosen.push(variant);
             rec(
                 pv,
+                ps,
                 pos + 1,
                 next,
                 masses,
@@ -701,6 +667,7 @@ fn walk_forms_bounded(
     }
     rec(
         &position_variants,
+        &position_slots,
         0,
         0.0,
         &mut masses,
@@ -825,109 +792,12 @@ pub fn expand_base_record_bounded(
     out
 }
 
-/// Build the merged variant list for a terminal position (pos 0 or pos n-1).
-///
-/// Only called for the 1-2 terminal positions per span.
-fn build_terminal_variants(
-    params: &SearchParams,
-    residue: u8,
-    pos: usize,
-    span_len: usize,
-    is_protein_n_term: bool,
-    is_protein_c_term: bool,
-) -> Vec<AminoAcid> {
-    let anywhere_variants = params.aa_set.variants_for(residue, ModLocation::Anywhere);
-
-    // Helper: returns true if `term_variants` contains a FIXED mod variant
-    // for this residue. When a fixed terminal mod applies, the residue
-    // MUST carry it — the unmodified Anywhere variant is not a valid
-    // candidate. Fixed mods are mandatory (Kim et al., Nat Commun 5:5277, 2014).
-    let has_fixed_in = |term_variants: &[AminoAcid]| -> bool {
-        term_variants
-            .iter()
-            .any(|aa| aa.mod_.as_ref().map(|m| m.fixed).unwrap_or(false))
-    };
-
-    // Peptide-terminal mods (NTerm/CTerm — e.g. the fixed TMT/iTRAQ N-term tag)
-    // apply at EVERY pos-0 / last residue. Protein-terminal mods (ProtNTerm/
-    // ProtCTerm — e.g. variable Acetyl) additionally apply only at the protein
-    // terminus. UNION both at a protein terminus so a protein-N/C-term peptide
-    // still carries its fixed peptide-terminal tag (finding 2.3: the lookup was
-    // ProtNTerm XOR NTerm, silently dropping a fixed N-term tag on protein-N-term
-    // peptides → wrong precursor/fragment mass for TMT/iTRAQ). Non-protein-term
-    // and label-free cases are unchanged (the union adds nothing there).
-    let union_terminal = |peptide_loc: ModLocation,
-                          protein_loc: ModLocation,
-                          at_protein_term: bool|
-     -> Vec<AminoAcid> {
-        let mut v = params.aa_set.variants_for(residue, peptide_loc).to_vec();
-        if at_protein_term {
-            for pv in params.aa_set.variants_for(residue, protein_loc) {
-                if !v.contains(pv) {
-                    v.push(pv.clone());
-                }
-            }
-        }
-        v
-    };
-    let n_term_variants: Vec<AminoAcid> = if pos == 0 {
-        union_terminal(
-            ModLocation::NTerm,
-            ModLocation::ProtNTerm,
-            is_protein_n_term,
-        )
-    } else {
-        Vec::new()
-    };
-    let c_term_variants: Vec<AminoAcid> = if pos == span_len - 1 {
-        union_terminal(
-            ModLocation::CTerm,
-            ModLocation::ProtCTerm,
-            is_protein_c_term,
-        )
-    } else {
-        Vec::new()
-    };
-
-    let has_fixed_n = has_fixed_in(&n_term_variants);
-    let has_fixed_c = has_fixed_in(&c_term_variants);
-
-    // If a fixed terminal mod is mandatory at this position, the
-    // unmodified Anywhere variant is not a legal candidate. Drop the
-    // Anywhere variants in that case; otherwise include them. This
-    // prevents the candidate explosion that wildcard fixed N-term TMT
-    // would otherwise cause (every peptide would be enumerated twice
-    // at position 0: once unmodded, once TMT-modded).
-    //
-    // Note: Anywhere variants always include the residue's own fixed
-    // mods folded in (e.g. K-anywhere already carries K-TMT), so this
-    // rule applies only to terminal mods.
-    let mut variants: Vec<AminoAcid> = if has_fixed_n || has_fixed_c {
-        Vec::new()
-    } else {
-        anywhere_variants.to_vec()
-    };
-
-    // Append all terminal variants (fixed + variable). When a fixed
-    // mod is present, the modded variant is the only legal one for
-    // that mod's residue/location slot; variable mods stack on top
-    // by adding additional explored variants.
-    for v in &n_term_variants {
-        if !variants.contains(v) {
-            variants.push(v.clone());
-        }
-    }
-    for v in &c_term_variants {
-        if !variants.contains(v) {
-            variants.push(v.clone());
-        }
-    }
-
-    variants
-}
-
+/// Every combination of one form per position of `position_variants`
+/// carrying at most `max_mods` variable modifications in total, counted by
+/// `position_slots` (fixed modifications never count).
 fn expand_recursive(
     position_variants: &[&[AminoAcid]],
+    position_slots: &[&[u8]],
     pos: usize,
     current: &mut Vec<AminoAcid>,
     mods_used: u32,
@@ -938,24 +808,21 @@ fn expand_recursive(
         out.push(current.clone());
         return;
     }
-    for variant in position_variants[pos] {
-        // Only VARIABLE mods consume slots against the per-peptide cap.
-        // Fixed mods are unconditionally applied by the AminoAcidSet (e.g.
-        // CAM-on-C, TMT-on-K, TMT-on-N-term-wildcard) and must not count
-        // against max_variable_mods_per_peptide — otherwise a peptide with
-        // two fixed mods (e.g. TQAHTQQNMVEK + N-term-TMT + K-TMT) is pruned
-        // when NumMods=1, which is exactly the bug that caused 86% of TMT
-        // top-1 PSMs to diverge from the reference implementation.
-        //
-        // Kim et al. (Nat Commun 5:5277, 2014): only variable mods consume
-        // slots against the per-peptide modification cap.
-        let consumes_slot = variant.mod_.as_ref().map(|m| !m.fixed).unwrap_or(false);
-        let new_mods = mods_used + if consumes_slot { 1 } else { 0 };
+    for (variant, &slots) in position_variants[pos].iter().zip(position_slots[pos]) {
+        let new_mods = mods_used + u32::from(slots);
         if new_mods > max_mods {
             continue;
         }
         current.push(variant.clone());
-        expand_recursive(position_variants, pos + 1, current, new_mods, max_mods, out);
+        expand_recursive(
+            position_variants,
+            position_slots,
+            pos + 1,
+            current,
+            new_mods,
+            max_mods,
+            out,
+        );
         current.pop();
     }
 }
@@ -1002,19 +869,30 @@ fn compute_cleavage_positions(seq: &[u8], primary: Enzyme, extras: &[Enzyme]) ->
     positions
 }
 
-/// Distinct variable-mod mass deltas configured in `params.aa_set`.
-///
-/// Walks every variant in the set, keeps the non-fixed (variable) mods, and
-/// de-duplicates by `mass_delta.to_bits()`. Fixed mods are excluded — they are
-/// already folded into each residue's mass (and into the base-peptide index),
-/// so they never contribute to the lazy mod-mass offset `Δ`.
+/// Distinct mass offsets a single position's form can add to the base
+/// peptide: for every form list of `params.aa_set`, each form's mass minus the
+/// mass of the list's form without variable modifications (the form the
+/// base-peptide index folds in), de-duplicated by `to_bits()`. A form that
+/// stacks two variable mods, or replaces a fixed terminal mod with a variable
+/// one, contributes its whole offset; every such form carries at least one
+/// variable mod, so a peptidoform's offset from its base is a sum of at most
+/// `max_variable_mods_per_peptide` of these.
 fn variable_mod_deltas(params: &SearchParams) -> Vec<f64> {
     let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut out: Vec<f64> = Vec::new();
-    for aa in params.aa_set.iter_variants() {
-        if let Some(m) = aa.mod_.as_ref() {
-            if !m.fixed && seen.insert(m.mass_delta.to_bits()) {
-                out.push(m.mass_delta);
+    for (variants, slots) in params.aa_set.form_lists() {
+        let Some(base) = variants
+            .iter()
+            .zip(slots)
+            .find(|(_, &s)| s == 0)
+            .map(|(aa, _)| variant_mass(aa))
+        else {
+            continue;
+        };
+        for (aa, _) in variants.iter().zip(slots).filter(|(_, &s)| s > 0) {
+            let d = variant_mass(aa) - base;
+            if seen.insert(d.to_bits()) {
+                out.push(d);
             }
         }
     }

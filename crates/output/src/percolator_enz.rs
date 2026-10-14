@@ -40,9 +40,10 @@ pub(crate) fn is_enzymatic_boundary(n: u8, c: u8, enzyme: Enzyme) -> bool {
         Enzyme::GluC => n == b'E' && c != b'P',
         Enzyme::ArgC => n == b'R' && c != b'P',
         Enzyme::AspN => c == b'D',
+        Enzyme::AlphaLP => matches!(n, b'T' | b'A' | b'S' | b'V'),
         // Unknown enzymes: OpenMS default "else" branch returns true so
         // unspecific searches don't penalise every PSM as non-enzymatic.
-        Enzyme::AlphaLP | Enzyme::NoCleavage | Enzyme::NonSpecific => true,
+        Enzyme::NoCleavage | Enzyme::NonSpecific => true,
     }
 }
 
@@ -126,7 +127,6 @@ mod tests {
 
     #[test]
     fn unspecific_enzymes_always_cleavable() {
-        assert!(is_enzymatic_boundary(b'A', b'A', Enzyme::AlphaLP));
         assert!(is_enzymatic_boundary(b'A', b'A', Enzyme::NonSpecific));
         // NoCleavage follows the unknown-enzyme → true convention (OpenMS default).
         assert!(is_enzymatic_boundary(b'A', b'A', Enzyme::NoCleavage));

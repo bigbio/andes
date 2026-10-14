@@ -302,7 +302,7 @@ impl AminoAcidSet {
     /// `enzyme.residues()`. Standard AA probability is uniform `1/20 = 0.05`.
     ///
     /// Returns `0.0` if `enzyme` has no specific residues (NoCleavage /
-    /// NonSpecific / AlphaLP).
+    /// NonSpecific).
     pub fn prob_cleavage_sites(&self, enzyme: Enzyme) -> f32 {
         let residues = enzyme.residues();
         if residues.is_empty() {

@@ -251,6 +251,12 @@ pub(crate) fn search_secondary(
     let mut have_best = false;
     let mut second_raw: i32 = i32::MIN;
     let mut secondary_scores: Vec<f32> = Vec::new();
+    // Best RawScore per distinct (peptidoform, decoy) for the listwise terms. The
+    // pool holds one candidate per protein occurrence, so a shared target peptide
+    // appears several times with the same score; scored as-is, its listwise gap
+    // would be 0 against itself, a value decoys (rarely shared) almost never take.
+    let mut distinct_best: rustc_hash::FxHashMap<(u64, bool), f32> =
+        rustc_hash::FxHashMap::default();
     for (_nm, idxs) in bucket_index.range(lo..=hi) {
         for &ci in idxs {
             let cand = &candidates[ci];
@@ -286,6 +292,10 @@ pub(crate) fn search_secondary(
             // row — the exact "zeros give Percolator inconsistent rows" outcome this
             // block's own comment says it exists to prevent.
             let mkey = crate::match_engine::peptidoform_key(&cand.peptide);
+            distinct_best
+                .entry((mkey, cand.is_decoy))
+                .and_modify(|b| *b = b.max(raw_score))
+                .or_insert(raw_score);
             if have_best && mkey == best_pep_key {
                 if s > best_raw {
                     best_raw = s;
@@ -349,7 +359,7 @@ pub(crate) fn search_secondary(
     } else {
         0.0
     };
-    let mut sorted_secondary = secondary_scores.clone();
+    let mut sorted_secondary: Vec<f32> = distinct_best.into_values().collect();
     sorted_secondary.sort_by(|a, b| b.total_cmp(a)); // total order; release-safe
     features.listwise_score_gap = scoring_crate::scoring::listwise_score_gap(&sorted_secondary);
     features.candidate_rank_entropy =
@@ -675,6 +685,97 @@ pub(crate) mod tests {
             psm.rank_score > 0.0,
             "secondary PSM rank_score (RawScore) must be positive, got {}",
             psm.rank_score
+        );
+    }
+
+    /// Spectrum whose peaks are `planted`'s charge-1 b/y ions, with `primary`'s
+    /// precursor m/z, plus the co-isolated precursor at `planted`'s mass.
+    fn planted_secondary_spectrum(planted: &Peptide, primary: &Peptide) -> (Spectrum, CoIsolated) {
+        let z = 2u8;
+        let mut peaks: Vec<(f64, f32)> = predict_by_ions(planted, 1..=1)
+            .into_iter()
+            .map(|p| (p.mz, 100.0_f32))
+            .collect();
+        peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let spec = Spectrum {
+            title: "chimeric-planted".into(),
+            precursor_mz: (primary.mass() + z as f64 * PROTON) / z as f64,
+            precursor_intensity: None,
+            precursor_charge: Some(z as i32),
+            rt_seconds: None,
+            scan: None,
+            peaks,
+            activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
+            isolation_target_mz: None,
+        };
+        let co = CoIsolated {
+            mono_mz: (planted.mass() + z as f64 * PROTON) / z as f64,
+            charge: z,
+            neutral_mass: planted.mass(),
+        };
+        (spec, co)
+    }
+
+    #[test]
+    fn secondary_listwise_gap_ignores_duplicate_occurrences_of_the_winner() {
+        // DAFLGSFLYEYSR occurs in two proteins with the same flanks, so the pool
+        // holds it twice at the same RawScore. The listwise gap must be taken
+        // against the best DIFFERENT peptidoform (here its isobaric decoy), not
+        // against the winner's own second occurrence.
+        let target = ProteinDb {
+            proteins: vec![
+                Protein {
+                    accession: "P1".into(),
+                    description: "".into(),
+                    sequence: b"MKWVTFISLLRKDAFLGSFLYEYSRK".to_vec(),
+                },
+                Protein {
+                    accession: "P2".into(),
+                    description: "".into(),
+                    sequence: b"GGGKDAFLGSFLYEYSRKGGG".to_vec(),
+                },
+            ],
+        };
+        let idx = SearchIndex::from_target_db(&target, "XXX");
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let params = SearchParams::default_tryptic(aa_set);
+        let scorer = tiny_scorer();
+        let frag_tol = 0.02_f64;
+        let prepared =
+            PreparedSearch::prepare_in_memory(&idx, &params, &scorer, frag_tol, "XXX").unwrap();
+        let (candidates, bucket_index) = whole_db_pool(&prepared);
+
+        let planted = peptide(b"DAFLGSFLYEYSR", b'K', b'K');
+        let occurrences = candidates
+            .iter()
+            .filter(|c| !c.is_decoy && c.peptide.residues == planted.residues)
+            .count();
+        assert!(occurrences >= 2, "fixture must hold the winner twice, got {occurrences}");
+
+        let primary = peptide(b"WVTFISLLR", b'K', b'K');
+        let (spec, co) = planted_secondary_spectrum(&planted, &primary);
+        let (psm, _) = search_secondary(
+            &spec,
+            &primary,
+            &std::collections::HashSet::new(),
+            co,
+            &candidates,
+            &bucket_index,
+            &scorer,
+            &prepared.aa_set_for_scoring,
+            &params,
+            frag_tol,
+        )
+        .expect("planted secondary must be found");
+        let winner = &candidates[psm.primary_candidate_idx() as usize];
+        assert!(!winner.is_decoy);
+        assert_eq!(winner.peptide.residues, planted.residues);
+        assert!(
+            psm.features.listwise_score_gap > 0.0,
+            "gap must be measured against a different peptidoform, got {}",
+            psm.features.listwise_score_gap
         );
     }
 

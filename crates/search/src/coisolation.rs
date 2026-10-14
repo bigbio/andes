@@ -6,14 +6,15 @@
 use crate::candidate_gen::Candidate;
 use crate::chimeric_features::precursor_isotope_match;
 use crate::precursor_cal::adjusted_observed_neutral_mass;
-use crate::psm::{PsmFeatures, PsmMatch, TopNQueue};
+use crate::psm::{PsmFeatures, PsmMatch};
 use crate::search_params::SearchParams;
 use model::aa_set::AminoAcidSet;
 use model::mass::{nominal_from, H2O, ISOTOPE, PROTON};
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;
 use scoring_crate::scoring::{
-    predict_by_ions, psm_edge_score, score_psm, RankScorer, ScoredSpectrum,
+    fuse_strong_score, predict_by_ions, psm_edge_score, score_psm, score_psm_float,
+    strong_score_calibrated, OnlineStats, RankScorer, ScoredSpectrum, StrongScoreInputs,
 };
 use std::collections::BTreeMap;
 
@@ -146,6 +147,15 @@ fn primary_matched_peak_keys(
     keys
 }
 
+/// Largest `rank_score` first, then smallest candidate index: the deterministic
+/// order secondaries are ranked in.
+fn rank_desc_then_idx(a: &PsmMatch, b: &PsmMatch) -> std::cmp::Ordering {
+    b.rank_score
+        .partial_cmp(&a.rank_score)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| a.primary_candidate_idx().cmp(&b.primary_candidate_idx()))
+}
+
 /// Calibration-adjusted neutral mass of `co` and the precursor tolerance (Da)
 /// around it that a secondary candidate must fall within.
 pub(crate) fn secondary_mass_window(co: CoIsolated, params: &SearchParams) -> (f64, f64) {
@@ -239,23 +249,20 @@ pub(crate) fn search_secondary(
     let (co_neutral, tol) = secondary_mass_window(co, params);
     let (lo, hi) = secondary_nominal_window(co, params);
 
-    let mut queue = TopNQueue::new(1);
     // Tailor + DeltaRawScore accumulation over this secondary's candidate score
-    // distribution on the RESIDUAL spectrum. Mirrors `run_chunk_inner`'s
-    // per-spectrum computation so secondary PIN rows carry the same features as
-    // primaries instead of zeros (which would give Percolator inconsistent rows).
+    // distribution on the RESIDUAL spectrum, as `run_chunk_inner` does per spectrum.
     let mut tailor_hist: std::collections::HashMap<i32, u32> = std::collections::HashMap::new();
     let mut tailor_total: u32 = 0;
     let mut best_raw: i32 = i32::MIN;
     let mut best_pep_key: u64 = 0;
     let mut have_best = false;
     let mut second_raw: i32 = i32::MIN;
-    let mut secondary_scores: Vec<f32> = Vec::new();
-    // Best RawScore per distinct (peptidoform, decoy) for the listwise terms. The
-    // pool holds one candidate per protein occurrence, so a shared target peptide
-    // appears several times with the same score; scored as-is, its listwise gap
-    // would be 0 against itself, a value decoys (rarely shared) almost never take.
-    let mut distinct_best: rustc_hash::FxHashMap<(u64, bool), f32> =
+    let mut strong_null = OnlineStats::default();
+    // Best PSM per distinct (peptidoform, decoy). The pool holds one candidate per
+    // protein occurrence, so a shared target peptide appears several times with
+    // the same score; ranked as-is, its listwise gap would be 0 against itself, a
+    // value decoys (rarely shared) almost never take.
+    let mut distinct: rustc_hash::FxHashMap<(u64, bool), PsmMatch> =
         rustc_hash::FxHashMap::default();
     for (_nm, idxs) in bucket_index.range(lo..=hi) {
         for &ci in idxs {
@@ -272,30 +279,18 @@ pub(crate) fn search_secondary(
             }
             let pin = score_psm(&res_ss, &cand.peptide, scorer, z, fragment_tolerance_da);
             let edge = psm_edge_score(&res_ss, &cand.peptide, scorer, z);
-            // Mirror the production RawScore scale: `score_psm(...) + cleavage_credit`.
+            // Production RawScore scale: `score_psm(...) + cleavage_credit`.
             let cleavage = crate::match_engine::cleavage_credit_for(cand, params.enzyme, aa_set);
             let raw_score = pin + cleavage as f32;
 
-            // Fold this candidate's RawScore into the tailor histogram + the
-            // best/second-best-distinct-peptide trackers (same logic as
-            // run_chunk_inner's per-spectrum DeltaRawScore/Tailor capture).
-            secondary_scores.push(raw_score);
+            strong_null.push(raw_score);
             let s = raw_score.round() as i32;
             *tailor_hist.entry(s).or_insert(0) += 1;
             tailor_total += 1;
-            // Keyed on PEPTIDOFORM identity, not nominal mass. On this path the
-            // nominal key was not merely coarse but inert: the exact-mass gate above
-            // admits only candidates within `tol` of `co_neutral`, so EVERY surviving
-            // candidate shares one nominal mass, every one took the
-            // `mkey == best_mass_key` branch, `second_raw` was never written, and
-            // `delta_raw_score` below was identically 0.0 on every chimeric secondary
-            // row — the exact "zeros give Percolator inconsistent rows" outcome this
-            // block's own comment says it exists to prevent.
+            // Best / second-best DISTINCT peptidoform, keyed on peptidoform identity:
+            // the exact-mass gate admits only one nominal mass, so a nominal key
+            // would never see a runner-up.
             let mkey = crate::match_engine::peptidoform_key(&cand.peptide);
-            distinct_best
-                .entry((mkey, cand.is_decoy))
-                .and_modify(|b| *b = b.max(raw_score))
-                .or_insert(raw_score);
             if have_best && mkey == best_pep_key {
                 if s > best_raw {
                     best_raw = s;
@@ -323,66 +318,101 @@ pub(crate) fn search_secondary(
                 // Set to co.mono_mz once the winner is chosen (end of fn).
                 precursor_mz_override: None,
             };
-            queue.push(psm);
+            distinct
+                .entry((mkey, cand.is_decoy))
+                .and_modify(|kept| {
+                    if rank_desc_then_idx(&psm, kept) == std::cmp::Ordering::Less {
+                        *kept = psm.clone();
+                    }
+                })
+                .or_insert(psm);
         }
     }
 
-    if queue.is_empty() {
+    if distinct.is_empty() {
         return None;
     }
 
-    // 3. Pick the winning secondary by `rank_score` (RawScore), not heap order:
-    // `drain_into_vec` is unordered and `TopNQueue` keeps ties even at capacity
-    // 1, so selecting `.next()` would be heap-order dependent (nondeterministic)
-    // in a user-visible ranking path. Order by largest rank_score, then smallest
-    // candidate index as a deterministic final tiebreak.
-    let mut best = queue.drain_into_vec().into_iter().min_by(|a, b| {
-        b.rank_score
-            .partial_cmp(&a.rank_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.primary_candidate_idx().cmp(&b.primary_candidate_idx()))
-    })?;
-    // Features on the RESIDUAL (the spectrum the secondary was scored against), so
-    // they stay consistent with its RawScore / SpecEValue. The override makes the
-    // PIN writer compute ExpMass/dm/absdm from the co-isolated mass.
-    let cand_peptide = &candidates[best.primary_candidate_idx() as usize].peptide;
-    let mut features = crate::match_engine::compute_psm_features(&res_ss, cand_peptide, scorer, z);
-    features.edge_score = best.edge_score;
-    // TailorScore / DeltaRawScore over this secondary's residual candidate
-    // distribution — the same per-spectrum features run_chunk_inner fills for
-    // primaries. Without these the secondary PIN rows carried 0.0 while
-    // primaries did not, giving Percolator inconsistent rows for the same scan.
+    // 3. The retained pool: the best distinct peptidoforms by `rank_score`, cut to
+    // the same retention cap the primary queue uses, ordered deterministically
+    // (largest rank_score, then smallest candidate index).
+    let mut retained: Vec<PsmMatch> = distinct.into_values().collect();
+    retained.sort_by(rank_desc_then_idx);
+    retained.truncate(params.hot_loop_retention_cap().max(1) as usize);
+
+    // Listwise terms over the retained pool's RawScores, as for primaries.
+    let mut retained_scores: Vec<f32> = retained.iter().map(|p| p.score).collect();
+    retained_scores.sort_by(|a, b| b.total_cmp(a)); // total order; release-safe
+    let listwise_score_gap = scoring_crate::scoring::listwise_score_gap(&retained_scores);
+    let candidate_rank_entropy = scoring_crate::scoring::candidate_rank_entropy(&retained_scores);
     let tailor_denom = crate::psm::tailor_denominator(&tailor_hist, tailor_total) as f32;
-    features.tailor_score = best.score / tailor_denom;
-    features.delta_raw_score = if second_raw > i32::MIN {
+    let delta_raw_score = if second_raw > i32::MIN {
         (best_raw - second_raw) as f32
     } else {
         0.0
     };
-    let mut sorted_secondary: Vec<f32> = distinct_best.into_values().collect();
-    sorted_secondary.sort_by(|a, b| b.total_cmp(a)); // total order; release-safe
-    features.listwise_score_gap = scoring_crate::scoring::listwise_score_gap(&sorted_secondary);
-    features.candidate_rank_entropy =
-        scoring_crate::scoring::candidate_rank_entropy(&sorted_secondary);
-    features.strong_score =
-        scoring_crate::scoring::fuse_strong_score(&scoring_crate::scoring::StrongScoreInputs {
-            intensity_signal: features.intensity_signal,
-            chance_match_surprise: features.chance_match_surprise,
-            mass_competition_evidence: features.mass_competition_evidence,
-            candidate_rank_entropy: features.candidate_rank_entropy,
-            listwise_score_gap: features.listwise_score_gap,
+
+    // Features on the RESIDUAL (the spectrum the secondary was scored against),
+    // filled exactly as `run_chunk_inner` fills a primary's.
+    let make_features = |psm: &PsmMatch, full: bool| -> PsmFeatures {
+        let cand = &candidates[psm.primary_candidate_idx() as usize];
+        let mut f = crate::match_engine::compute_psm_features_with_edge(
+            &res_ss,
+            &cand.peptide,
+            scorer,
+            z,
+            Some(psm.edge_score),
+            full,
+        );
+        f.delta_raw_score = delta_raw_score;
+        f.listwise_score_gap = listwise_score_gap;
+        f.candidate_rank_entropy = candidate_rank_entropy;
+        f.tailor_score = psm.score / tailor_denom;
+        let credit = crate::match_engine::cleavage_credit_for(cand, params.enzyme, aa_set) as f32;
+        f.rank_score_float =
+            score_psm_float(&res_ss, &cand.peptide, scorer, z, fragment_tolerance_da) + credit;
+        f.strong_score = fuse_strong_score(&StrongScoreInputs {
+            intensity_signal: f.intensity_signal,
+            chance_match_surprise: f.chance_match_surprise,
+            mass_competition_evidence: f.mass_competition_evidence,
+            candidate_rank_entropy: f.candidate_rank_entropy,
+            listwise_score_gap: f.listwise_score_gap,
         });
-    let mut strong_null = scoring_crate::scoring::OnlineStats::default();
-    for &s in &secondary_scores {
-        strong_null.push(s);
-    }
+        f
+    };
+    let retained_strong: Vec<f32> = retained
+        .iter()
+        .map(|p| make_features(p, false).strong_score)
+        .collect();
+
+    // 4. The winner: the top of the retained pool, or under `--score strong` the
+    // highest strong score (earlier = higher rank_score wins ties), mirroring the
+    // primary's `reorder_by_strong_score`.
+    let winner_pos = if params.score_mode == crate::search_params::ScoreMode::Strong {
+        (0..retained.len())
+            .reduce(|a, b| {
+                if retained_strong[b] > retained_strong[a] {
+                    b
+                } else {
+                    a
+                }
+            })
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let mut best = retained.swap_remove(winner_pos);
+    let mut features = make_features(&best, true);
     features.strong_score_cal =
-        scoring_crate::scoring::strong_score_zscore(features.strong_score, &strong_null);
+        strong_score_calibrated(features.strong_score, &retained_strong, &strong_null);
     if params.score_mode == crate::search_params::ScoreMode::Strong {
-        best.score = features.strong_score;
+        // `score` stays the RawScore so RankScore keeps the primaries' scale.
         best.rank_score = features.strong_score;
     }
+    let cand_peptide = &candidates[best.primary_candidate_idx() as usize].peptide;
     best.features = features;
+    // The override makes the PIN writer compute ExpMass/dm/absdm from the
+    // co-isolated mass.
     best.precursor_mz_override = Some(co.mono_mz);
     // Peaks this secondary explained (its charge-1 b/y matches on the FULL spectrum),
     // returned so the caller can remove them before the next co-isolated mass on
@@ -777,6 +807,63 @@ pub(crate) mod tests {
             "gap must be measured against a different peptidoform, got {}",
             psm.features.listwise_score_gap
         );
+    }
+
+    #[test]
+    fn secondary_features_share_the_primary_scales() {
+        let target = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "".into(),
+                sequence: b"MKWVTFISLLRKDAFLGSFLYEYSRK".to_vec(),
+            }],
+        };
+        let idx = SearchIndex::from_target_db(&target, "XXX");
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let scorer = tiny_scorer();
+        let frag_tol = 0.02_f64;
+        let planted = peptide(b"DAFLGSFLYEYSR", b'K', b'K');
+        let primary = peptide(b"WVTFISLLR", b'K', b'K');
+        let (spec, co) = planted_secondary_spectrum(&planted, &primary);
+
+        let run = |mode: crate::search_params::ScoreMode| {
+            let mut params = SearchParams::default_tryptic(aa_set.clone());
+            params.score_mode = mode;
+            let prepared =
+                PreparedSearch::prepare_in_memory(&idx, &params, &scorer, frag_tol, "XXX").unwrap();
+            let (candidates, bucket_index) = whole_db_pool(&prepared);
+            search_secondary(
+                &spec,
+                &primary,
+                &std::collections::HashSet::new(),
+                co,
+                &candidates,
+                &bucket_index,
+                &scorer,
+                &prepared.aa_set_for_scoring,
+                &params,
+                frag_tol,
+            )
+            .expect("planted secondary must be found")
+            .0
+        };
+        let rank = run(crate::search_params::ScoreMode::Rank);
+        let f = &rank.features;
+        // RankScoreFloat is the unrounded RawScore, never left at 0.
+        assert!(f.rank_score_float > 0.0, "RankScoreFloat {}", f.rank_score_float);
+        assert!((f.rank_score_float - rank.score).abs() < 5.0);
+        // The planted peptide and its isobaric decoy are both retained, so
+        // RawScoreCal is the leave-one-out z-score over the retained strong
+        // scores, not the raw strong score.
+        assert!(f.listwise_score_gap > 0.0);
+        assert!(f.strong_score_cal.is_finite());
+        assert_ne!(f.strong_score_cal, f.strong_score);
+
+        // Under --score strong, RankScore (`score`) keeps the RawScore scale; only
+        // the ranking field carries the strong score.
+        let strong = run(crate::search_params::ScoreMode::Strong);
+        assert_eq!(strong.score, rank.score);
+        assert_eq!(strong.rank_score, strong.features.strong_score);
     }
 
     #[test]

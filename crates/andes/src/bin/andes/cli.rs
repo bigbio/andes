@@ -221,8 +221,8 @@ pub(crate) struct SearchArgs {
     /// protease (the union of their cleavage rules). The FIRST entry is the
     /// primary — it drives model selection and the cleavage-credit feature; if
     /// no model matches that enzyme for the data, andes WARNs and you should
-    /// pass `--model`. Combining a universal protease (nonspecific/alphalp)
-    /// with specific ones makes the whole digest non-specific (warned).
+    /// pass `--model`. Combining the universal protease (nonspecific) with
+    /// specific ones makes the whole digest non-specific (warned).
     #[arg(long, default_value = "trypsin")]
     pub(crate) enzyme: String,
 

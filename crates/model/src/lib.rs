@@ -20,7 +20,7 @@ pub mod spectrum;
 pub mod tolerance;
 pub mod unimod;
 
-pub use aa_set::{AaSetError, AminoAcidSet, AminoAcidSetBuilder};
+pub use aa_set::{AaSetError, AminoAcidSet, AminoAcidSetBuilder, Terminus};
 pub use activation::ActivationMethod;
 pub use amino_acid::AminoAcid;
 pub use enzyme::Enzyme;

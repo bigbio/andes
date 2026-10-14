@@ -41,6 +41,15 @@
 //! UNRELATED columns changing on every row, which is what caught exactly that mistake here.
 //!
 //! Regenerating is a deliberate act: diff the columns first and know which ones moved.
+//!
+//! REGENERATED 2026-10-14 when the N-terminal Met-cleaved walk began emitting
+//! only the peptides starting at the post-Met residue (it had enumerated every
+//! other span of an M-initial protein a second time) and side-chain mods began
+//! stacking with terminal mods. Against the previous binary: 120 rows, every
+//! SpecId, peptide and protein unchanged (0 winner flips); each spectrum's
+//! candidate pool changes, so
+//! `CandidateRankEntropy` and `RawScore` moved on all 120
+//! rows and `ListwiseScoreGap` on 53.
 
 use std::path::PathBuf;
 use std::process::Command;

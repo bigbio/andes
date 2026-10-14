@@ -16,14 +16,71 @@ const STANDARD_RESIDUES: &[u8] = b"ACDEFGHIKLMNPQRSTVWY";
 // 2204.77) while still catching gross typos / composition-string mistakes.
 const IMPLAUSIBLE_MASS_THRESHOLD: f64 = 5000.0;
 
+/// Whether a residue sits at one terminus of the peptide, and whether that
+/// peptide terminus is also the protein terminus. Selects the form list of
+/// [`AminoAcidSet::forms`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Terminus {
+    /// Not at this terminus.
+    No,
+    /// At the peptide terminus.
+    Peptide,
+    /// At the peptide terminus, which is also the protein terminus.
+    Protein,
+}
+
+impl Terminus {
+    /// Every context, in [`Self::rank`] order.
+    pub const ALL: [Terminus; 3] = [Terminus::No, Terminus::Peptide, Terminus::Protein];
+
+    /// 0, 1 or 2, in [`Self::ALL`] order.
+    #[inline]
+    pub fn rank(self) -> usize {
+        match self {
+            Terminus::No => 0,
+            Terminus::Peptide => 1,
+            Terminus::Protein => 2,
+        }
+    }
+
+    /// `No`, `Peptide` or `Protein` from the two position flags.
+    #[inline]
+    pub fn at(is_peptide_terminus: bool, is_protein_terminus: bool) -> Self {
+        match (is_peptide_terminus, is_protein_terminus) {
+            (false, _) => Terminus::No,
+            (true, false) => Terminus::Peptide,
+            (true, true) => Terminus::Protein,
+        }
+    }
+}
+
+/// Every form one residue takes in one terminal context, with the number of
+/// variable modifications each form carries.
+#[derive(Debug, Clone, Default)]
+struct FormList {
+    variants: Vec<AminoAcid>,
+    slots: Vec<u8>,
+}
+
+/// Index of `(residue, n, c)` in the form table: `residue * 9 + n.rank() * 3
+/// + c.rank()`. The table has [`FORM_TABLE_LEN`] entries.
+#[inline]
+pub fn form_index(residue: u8, n: Terminus, c: Terminus) -> usize {
+    residue as usize * 9 + n.rank() * 3 + c.rank()
+}
+
+/// Number of `(residue, n, c)` entries addressed by [`form_index`].
+pub const FORM_TABLE_LEN: usize = 256 * 9;
+
 #[derive(Debug, Clone)]
 pub struct AminoAcidSet {
-    /// (residue, location) → all variants (unmodified + modified) at that position.
-    ///
-    /// Uses `FxHashMap` rather than the std `HashMap`: `variants_for` is a
-    /// hot lookup, and profiling showed SipHash (std's default hasher)
-    /// dominating its cost. Same hashbrown internals, faster hasher.
-    table: FxHashMap<(u8, ModLocation), Vec<AminoAcid>>,
+    /// Every form of each residue in each terminal context, indexed by
+    /// [`form_index`]. A form folds in every fixed modification that applies
+    /// at that position (side chain and terminal groups) and at most one
+    /// variable modification per site; see [`AminoAcidSetBuilder::build`].
+    forms: Vec<FormList>,
+    /// The declared modifications, fixed then variable, in declaration order.
+    declared: Vec<&'static Modification>,
     /// Per-location flattened AA lists, precomputed at build time. Avoids
     /// per-call rebuild in the node-scoring DP hot path (PrimitiveAaGraph::new).
     aa_lists_cache: FxHashMap<ModLocation, Vec<AminoAcid>>,
@@ -40,12 +97,42 @@ pub struct AminoAcidSet {
 }
 
 impl AminoAcidSet {
-    /// All variants of `residue` valid at the given `location`.
+    /// Every form of `residue` at the given `location`: [`Self::forms`] with
+    /// that single terminus (`Anywhere` = an interior position).
     pub fn variants_for(&self, residue: u8, location: ModLocation) -> &[AminoAcid] {
-        self.table
-            .get(&(residue, location))
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        let (n, c) = match location {
+            ModLocation::Anywhere => (Terminus::No, Terminus::No),
+            ModLocation::NTerm => (Terminus::Peptide, Terminus::No),
+            ModLocation::ProtNTerm => (Terminus::Protein, Terminus::No),
+            ModLocation::CTerm => (Terminus::No, Terminus::Peptide),
+            ModLocation::ProtCTerm => (Terminus::No, Terminus::Protein),
+        };
+        self.forms(residue, n, c)
+    }
+
+    /// Every form `residue` takes at a position whose N-terminal context is
+    /// `n` and C-terminal context is `c` (both `No` for an interior residue;
+    /// both set for a one-residue peptide). The first form carries only fixed
+    /// modifications; [`Self::form_slots`] gives each form's number of
+    /// variable modifications. Empty for a non-standard residue.
+    #[inline]
+    pub fn forms(&self, residue: u8, n: Terminus, c: Terminus) -> &[AminoAcid] {
+        &self.forms[form_index(residue, n, c)].variants
+    }
+
+    /// Number of variable modifications carried by each form of
+    /// [`Self::forms`], in the same order.
+    #[inline]
+    pub fn form_slots(&self, residue: u8, n: Terminus, c: Terminus) -> &[u8] {
+        &self.forms[form_index(residue, n, c)].slots
+    }
+
+    /// Every non-empty form list with its slot counts.
+    pub fn form_lists(&self) -> impl Iterator<Item = (&[AminoAcid], &[u8])> {
+        self.forms
+            .iter()
+            .filter(|f| !f.variants.is_empty())
+            .map(|f| (f.variants.as_slice(), f.slots.as_slice()))
     }
 
     pub fn standard(&self, residue: u8) -> Option<&AminoAcid> {
@@ -70,19 +157,14 @@ impl AminoAcidSet {
         self.max_fixed_term_mod_mass
     }
 
+    /// Every form in every terminal context (see [`Self::forms`]).
     pub fn iter_variants(&self) -> impl Iterator<Item = &AminoAcid> {
-        self.table.values().flat_map(|v| v.iter())
+        self.forms.iter().flat_map(|f| f.variants.iter())
     }
 
-    /// Enumerate the FIXED modifications carried by this set as
-    /// `(residue, mass_delta)` pairs.
-    ///
-    /// Fixed mods are folded into the per-`(residue, location)` variant table
-    /// at build time, so a single fixed `Modification` (e.g. Carbamidomethyl-C)
-    /// is referenced by several `AminoAcid` variants (its Anywhere slot plus the
-    /// terminal lists). This walks `iter_variants`, keeps only fixed mods, and
-    /// de-duplicates by `(residue, mass_delta.to_bits())` so each distinct fixed
-    /// mod is reported exactly once. Order is unspecified (table iteration).
+    /// The declared FIXED modifications as `(residue, mass_delta)` pairs, one
+    /// per standard residue each mod applies to, de-duplicated by
+    /// `(residue, mass_delta.to_bits())`.
     ///
     /// Read-only; intended for callers that must inspect which fixed chemistry
     /// is active (e.g. the refinement cascade, which only supports the standard
@@ -90,52 +172,30 @@ impl AminoAcidSet {
     pub fn fixed_mod_deltas(&self) -> Vec<(u8, f64)> {
         let mut seen: std::collections::HashSet<(u8, u64)> = std::collections::HashSet::new();
         let mut out: Vec<(u8, f64)> = Vec::new();
-        for aa in self.iter_variants() {
-            if let Some(m) = aa.mod_.as_ref() {
-                if m.fixed && seen.insert((aa.residue, m.mass_delta.to_bits())) {
-                    out.push((aa.residue, m.mass_delta));
+        for m in self.declared.iter().filter(|m| m.fixed) {
+            for &r in STANDARD_RESIDUES {
+                if m.applies_to(r, m.location) && seen.insert((r, m.mass_delta.to_bits())) {
+                    out.push((r, m.mass_delta));
                 }
             }
         }
         out
     }
 
-    /// All DISTINCT modifications carried by this set — FIXED and VARIABLE — as
-    /// the original `&'static Modification` records (location, `ResidueSpec`, and the
-    /// `fixed` flag preserved).
+    /// The declared modifications — FIXED and VARIABLE — as the original
+    /// `&'static Modification` records (location, `ResidueSpec`, and the
+    /// `fixed` flag preserved), fixed first, in declaration order.
     ///
-    /// The builder shares ONE `&'static Modification` per registered mod across every
-    /// `(residue, location)` variant it folds into (a wildcard or anywhere mod is
-    /// referenced from many slots), so de-duplicating by `Arc` identity returns
-    /// each registered mod exactly once. Order is unspecified (table iteration).
+    /// Forms of [`Self::forms`] that stack several of them carry a combined
+    /// `"<a>+<b>"` record built by [`AminoAcidSetBuilder::build`]; those are
+    /// not declared mods and are not returned, so re-adding the result to a
+    /// fresh builder reproduces this set.
     ///
     /// Used by the refinement cascade to seed Pass-2 with the base search's FULL
     /// chemistry (Cam-C, TMT, iTRAQ, Ox-M, …) before layering the discovery tier —
     /// so labeled/non-standard fixed mods are reported, not dropped.
-    ///
-    /// EXCLUDES the builder's synthesized "stacked" terminal variants — when a
-    /// residue carries a fixed Anywhere mod AND a variable terminal mod, `build`
-    /// folds them into a combined `"<fixed>+<variable>"` `Modification` (see the
-    /// terminal-cache logic) with a distinct Arc. That combined entry is a build
-    /// artifact, NOT an independently-declared mod (its primitive components are
-    /// each enumerated separately), so re-adding it to a fresh builder would
-    /// inject a spurious summed-mass variable mod. The `+` in the name is the
-    /// builder's own stacking marker (also relied on elsewhere); we filter on it.
     pub fn distinct_mods(&self) -> Vec<&'static Modification> {
-        let mut seen: std::collections::HashSet<*const Modification> =
-            std::collections::HashSet::new();
-        let mut out: Vec<&'static Modification> = Vec::new();
-        for aa in self.iter_variants() {
-            if let Some(m) = aa.mod_.as_ref() {
-                if m.name.contains('+') {
-                    continue; // synthesized fixed+variable stacked variant
-                }
-                if seen.insert(std::ptr::from_ref::<Modification>(m)) {
-                    out.push(*m);
-                }
-            }
-        }
-        out
+        self.declared.clone()
     }
 
     /// Canonical, order-independent fingerprint of the FIXED modifications that
@@ -146,9 +206,9 @@ impl AminoAcidSet {
     /// +229 `Anywhere` yield the SAME `(residue, delta)` set yet fold very
     /// different base masses into a peptide (N-term once vs every residue). Any
     /// cache keyed on `fixed_mod_deltas` would treat them as identical and reuse
-    /// a stale, mass-shifted candidate index. This fingerprint keys on the
-    /// `(residue, location)` table entries — which differ between those two
-    /// configs — so it tells them apart. Returns sorted `(residue,
+    /// a stale, mass-shifted candidate index. This fingerprint keys on each
+    /// declared fixed mod's `(residue, location)` — which differ between those
+    /// two configs — so it tells them apart. Returns sorted `(residue,
     /// location_rank, mass_delta_bits)`, deduplicated.
     pub fn fixed_mod_fingerprint(&self) -> Vec<(u8, u8, u64)> {
         fn loc_rank(l: ModLocation) -> u8 {
@@ -160,21 +220,16 @@ impl AminoAcidSet {
                 ModLocation::ProtCTerm => 4,
             }
         }
-        let mut seen: std::collections::HashSet<(u8, u8, u64)> = std::collections::HashSet::new();
         let mut out: Vec<(u8, u8, u64)> = Vec::new();
-        for ((residue, location), variants) in &self.table {
-            for aa in variants {
-                if let Some(m) = aa.mod_.as_ref() {
-                    if m.fixed {
-                        let key = (*residue, loc_rank(*location), m.mass_delta.to_bits());
-                        if seen.insert(key) {
-                            out.push(key);
-                        }
-                    }
+        for m in self.declared.iter().filter(|m| m.fixed) {
+            for &r in STANDARD_RESIDUES {
+                if m.applies_to(r, m.location) {
+                    out.push((r, loc_rank(m.location), m.mass_delta.to_bits()));
                 }
             }
         }
         out.sort_unstable();
+        out.dedup();
         out
     }
 
@@ -247,7 +302,7 @@ impl AminoAcidSet {
     /// `enzyme.residues()`. Standard AA probability is uniform `1/20 = 0.05`.
     ///
     /// Returns `0.0` if `enzyme` has no specific residues (NoCleavage /
-    /// NonSpecific / AlphaLP).
+    /// NonSpecific).
     pub fn prob_cleavage_sites(&self, enzyme: Enzyme) -> f32 {
         let residues = enzyme.residues();
         if residues.is_empty() {
@@ -426,107 +481,97 @@ impl AminoAcidSetBuilder {
             }
         }
 
-        // 3. Build the table.
+        // 3. Build the form lists.
         //
         // Wrap every distinct `Modification` declaration in a single shared
         // `&'static Modification` up front. All `AminoAcid` variants that carry
-        // a given mod will reference the same allocation. At Astral scale
-        // this is the difference between cloning a 24-byte struct (Arc
-        // refcount bump) and cloning a 96-byte struct plus the
-        // `Modification`'s `String name` heap allocation per cloned
-        // residue — the latter blew up `PreparedSearch::prepare` to ~27 GB
-        // RSS. The intermediate fixed/variable match `Vec<Modification>`
-        // copies below are gone; we hand out `Arc::clone(...)` calls
-        // instead.
-        let fixed_mods_arc: Vec<&'static Modification> = self
+        // a given mod reference the same allocation, so cloning a residue is
+        // a pointer copy (see `amino_acid.rs`).
+        let fixed_mods: Vec<&'static Modification> = self
             .fixed_mods
             .iter()
             .cloned()
             .map(crate::modification::leak_mod)
             .collect();
-        let variable_mods_arc: Vec<&'static Modification> = self
+        let variable_mods: Vec<&'static Modification> = self
             .variable_mods
             .iter()
             .cloned()
             .map(crate::modification::leak_mod)
             .collect();
 
-        let mut table: FxHashMap<(u8, ModLocation), Vec<AminoAcid>> = FxHashMap::default();
-        let locations = [
-            ModLocation::Anywhere,
-            ModLocation::NTerm,
-            ModLocation::CTerm,
-            ModLocation::ProtNTerm,
-            ModLocation::ProtCTerm,
-        ];
-
+        // A residue has up to three modification sites: its side chain, its
+        // alpha-amine (at the peptide N-terminus) and its carboxyl (at the
+        // peptide C-terminus). Each site takes either all the fixed mods that
+        // apply there, or one variable mod declared for it in their place
+        // (two mods on one site would modify the same group). The forms of a
+        // position are every combination of one choice per site it has, so a
+        // fixed or variable side-chain mod (CAM-C, TMT-K, Ox-M, Phospho-S)
+        // stacks with a fixed or variable terminal mod (TMT N-term, protein
+        // N-term Acetyl). At a protein terminus the protein-terminal fixed mods
+        // replace the peptide-terminal ones, and the variable mods of both
+        // locations apply.
+        let mut stacked: FxHashMap<(u8, Vec<usize>), &'static Modification> =
+            FxHashMap::default();
+        let mut forms = vec![FormList::default(); FORM_TABLE_LEN];
         for &r in STANDARD_RESIDUES {
             let std_aa = AminoAcid::standard(r).expect("STANDARD_RESIDUES has only valid residues");
-
-            for &loc in &locations {
-                let fixed_match: Option<&&'static Modification> =
-                    fixed_mods_arc.iter().find(|m| m.applies_to(r, loc));
-
-                let variable_matches: Vec<&&'static Modification> = variable_mods_arc
-                    .iter()
-                    .filter(|m| m.applies_to(r, loc))
-                    .collect();
-
-                let mut variants = Vec::new();
-                if loc == ModLocation::Anywhere {
-                    if let Some(fm) = fixed_match {
-                        variants.push(std_aa.clone().with_mod(*fm));
-                    } else {
-                        variants.push(std_aa.clone());
-                    }
-                    for vm in &variable_matches {
-                        variants.push(std_aa.clone().with_mod(**vm));
-                    }
-                } else {
-                    if let Some(fm) = fixed_match {
-                        if fm.location == loc {
-                            variants.push(std_aa.clone().with_mod(*fm));
-                        }
-                    }
-                    // A residue carrying a fixed ANYWHERE mod (e.g. Carbamidomethyl-C)
-                    // keeps it at EVERY position, including the termini. A terminal
-                    // VARIABLE mod (e.g. protein-N-term Acetyl) must therefore STACK on
-                    // top of that fixed mass — emitting variable-alone would drop the
-                    // mandatory fixed mod (e.g. an N-terminal Cys would become Acetyl-only
-                    // +42 instead of CAM+Acetyl +99, a wrong-mass candidate). Fold the
-                    // fixed-anywhere mass into a combined mod so the stacked form is
-                    // enumerated. (The fixed-anywhere-only form is already present via the
-                    // Anywhere list propagated into this terminal cache.)
-                    let fixed_anywhere: Option<&&'static Modification> =
-                        fixed_mods_arc.iter().find(|m| {
-                            m.location == ModLocation::Anywhere
-                                && m.applies_to(r, ModLocation::Anywhere)
-                        });
-                    for vm in &variable_matches {
-                        if vm.location == loc {
-                            let aa = match fixed_anywhere {
-                                Some(fm) => {
-                                    let combined = Modification {
-                                        name: format!("{}+{}", fm.name, vm.name),
-                                        mass_delta: fm.mass_delta + vm.mass_delta,
-                                        residue: vm.residue,
-                                        location: vm.location,
-                                        fixed: false, // stacked variant still consumes a variable slot
-                                        accession: None,
-                                        neutral_losses: vm.neutral_losses.clone(),
-                                        loss_class: vm.loss_class,
-                                    };
-                                    std_aa.clone().with_mod(combined)
+            let side = site_choices(r, &fixed_mods, &variable_mods, &[ModLocation::Anywhere]);
+            for n in Terminus::ALL {
+                let n_choices = terminal_choices(
+                    r,
+                    n,
+                    ModLocation::NTerm,
+                    ModLocation::ProtNTerm,
+                    &fixed_mods,
+                    &variable_mods,
+                );
+                for c in Terminus::ALL {
+                    let c_choices = terminal_choices(
+                        r,
+                        c,
+                        ModLocation::CTerm,
+                        ModLocation::ProtCTerm,
+                        &fixed_mods,
+                        &variable_mods,
+                    );
+                    let list = &mut forms[form_index(r, n, c)];
+                    for (n_mods, n_slots) in &n_choices {
+                        for (c_mods, c_slots) in &c_choices {
+                            for (s_mods, s_slots) in &side {
+                                let parts: Vec<&'static Modification> = s_mods
+                                    .iter()
+                                    .chain(n_mods)
+                                    .chain(c_mods)
+                                    .copied()
+                                    .collect();
+                                let slots = s_slots + n_slots + c_slots;
+                                let aa = match parts.as_slice() {
+                                    [] => std_aa.clone(),
+                                    [m] => std_aa.clone().with_mod(*m),
+                                    _ => {
+                                        let key = (
+                                            r,
+                                            parts
+                                                .iter()
+                                                .map(|m| std::ptr::from_ref(*m) as usize)
+                                                .collect(),
+                                        );
+                                        let m = *stacked.entry(key).or_insert_with(|| {
+                                            crate::modification::leak_mod(stack_mods(
+                                                r, &parts, slots,
+                                            ))
+                                        });
+                                        std_aa.clone().with_mod(m)
+                                    }
+                                };
+                                if !list.variants.contains(&aa) {
+                                    list.variants.push(aa);
+                                    list.slots.push(slots);
                                 }
-                                None => std_aa.clone().with_mod(**vm),
-                            };
-                            variants.push(aa);
+                            }
                         }
                     }
-                }
-
-                if !variants.is_empty() {
-                    table.insert((r, loc), variants);
                 }
             }
         }
@@ -578,34 +623,23 @@ impl AminoAcidSetBuilder {
         // `cached_aa_list`. Runs once at build time so the node-scoring DP hot path
         // can borrow a slice.
         let mut aa_lists_cache: FxHashMap<ModLocation, Vec<AminoAcid>> = FxHashMap::default();
-        let anywhere_list: Vec<AminoAcid> = STANDARD_RESIDUES
-            .iter()
-            .flat_map(|&r| {
-                table
-                    .get(&(r, ModLocation::Anywhere))
-                    .map(|v| v.iter().cloned())
-                    .into_iter()
-                    .flatten()
-            })
-            .collect();
-        aa_lists_cache.insert(ModLocation::Anywhere, anywhere_list.clone());
-        for &loc in &[
-            ModLocation::NTerm,
-            ModLocation::CTerm,
-            ModLocation::ProtNTerm,
-            ModLocation::ProtCTerm,
+        for (loc, n, c) in [
+            (ModLocation::Anywhere, Terminus::No, Terminus::No),
+            (ModLocation::NTerm, Terminus::Peptide, Terminus::No),
+            (ModLocation::CTerm, Terminus::No, Terminus::Peptide),
+            (ModLocation::ProtNTerm, Terminus::Protein, Terminus::No),
+            (ModLocation::ProtCTerm, Terminus::No, Terminus::Protein),
         ] {
-            let mut list = anywhere_list.clone();
-            for &r in STANDARD_RESIDUES {
-                if let Some(variants) = table.get(&(r, loc)) {
-                    list.extend(variants.iter().cloned());
-                }
-            }
+            let list: Vec<AminoAcid> = STANDARD_RESIDUES
+                .iter()
+                .flat_map(|&r| forms[form_index(r, n, c)].variants.iter().cloned())
+                .collect();
             aa_lists_cache.insert(loc, list);
         }
 
         Ok(AminoAcidSet {
-            table,
+            forms,
+            declared: fixed_mods.into_iter().chain(variable_mods).collect(),
             aa_lists_cache,
             has_cterm_mods,
             min_aa_mass,
@@ -617,6 +651,95 @@ impl AminoAcidSetBuilder {
             neighboring_aa_cleavage_credit: 0,
             neighboring_aa_cleavage_penalty: 0,
         })
+    }
+}
+
+/// The choices for one modification site of residue `r`: first every fixed mod
+/// declared at one of `locations` that applies to `r` (0 variable slots; no
+/// mod when none apply), then each such variable mod alone (1 slot).
+fn site_choices(
+    r: u8,
+    fixed_mods: &[&'static Modification],
+    variable_mods: &[&'static Modification],
+    locations: &[ModLocation],
+) -> Vec<(Vec<&'static Modification>, u8)> {
+    let at = |m: &&&'static Modification| locations.contains(&m.location) && m.applies_to(r, m.location);
+    let mut fixed: Vec<&'static Modification> = fixed_mods.iter().filter(at).copied().collect();
+    // Fold several fixed mods on one site in a declaration-order-independent order.
+    fixed.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then(a.mass_delta.to_bits().cmp(&b.mass_delta.to_bits()))
+    });
+    let mut out = vec![(fixed, 0u8)];
+    out.extend(variable_mods.iter().filter(at).map(|m| (vec![*m], 1u8)));
+    out
+}
+
+/// The choices for the terminal-group site of residue `r` in context `t`:
+/// no mod when `t` is [`Terminus::No`]; the peptide-terminal (`peptide_loc`)
+/// mods at a peptide terminus; at a protein terminus, the protein-terminal
+/// (`protein_loc`) fixed mods when any apply (else the peptide-terminal ones)
+/// and the variable mods of both locations.
+fn terminal_choices(
+    r: u8,
+    t: Terminus,
+    peptide_loc: ModLocation,
+    protein_loc: ModLocation,
+    fixed_mods: &[&'static Modification],
+    variable_mods: &[&'static Modification],
+) -> Vec<(Vec<&'static Modification>, u8)> {
+    match t {
+        Terminus::No => vec![(Vec::new(), 0)],
+        Terminus::Peptide => site_choices(r, fixed_mods, variable_mods, &[peptide_loc]),
+        Terminus::Protein => {
+            let protein_fixed = fixed_mods
+                .iter()
+                .any(|m| m.location == protein_loc && m.applies_to(r, protein_loc));
+            let fixed_loc = if protein_fixed { protein_loc } else { peptide_loc };
+            let mut out = site_choices(r, fixed_mods, &[], &[fixed_loc]);
+            out.extend(
+                site_choices(r, &[], variable_mods, &[peptide_loc, protein_loc])
+                    .into_iter()
+                    .skip(1),
+            );
+            out
+        }
+    }
+}
+
+/// One record for several mods stacked on residue `r`: the names joined by
+/// `+`, the deltas summed in order, the declared neutral losses of every part,
+/// and the first non-zero loss class. Fixed when it carries no variable mod
+/// (`slots == 0`). Its location is the first terminal part's.
+fn stack_mods(r: u8, parts: &[&'static Modification], slots: u8) -> Modification {
+    let mut neutral_losses: Vec<f64> = Vec::new();
+    for loss in parts.iter().flat_map(|m| m.neutral_losses.iter()) {
+        if !neutral_losses.iter().any(|l| l.to_bits() == loss.to_bits()) {
+            neutral_losses.push(*loss);
+        }
+    }
+    Modification {
+        name: parts
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect::<Vec<_>>()
+            .join("+"),
+        mass_delta: parts.iter().map(|m| m.mass_delta).sum(),
+        residue: ResidueSpec::Specific(r),
+        location: parts
+            .iter()
+            .map(|m| m.location)
+            .find(|l| *l != ModLocation::Anywhere)
+            .unwrap_or(ModLocation::Anywhere),
+        fixed: slots == 0,
+        accession: None,
+        neutral_losses,
+        loss_class: parts
+            .iter()
+            .map(|m| m.loss_class)
+            .find(|c| *c != 0)
+            .unwrap_or(0),
     }
 }
 
@@ -1168,17 +1291,18 @@ mod tests {
             "Acetyl Prot-N-term must NOT appear in Anywhere AA list"
         );
 
-        // Prot-N-term: starts from Anywhere list + one acetyl-bearing variant per
-        // residue (wildcard residue → 20 acetyl variants added at Prot-N-term).
-        // For Cys, the fixed Carbamidomethyl STACKS under the variable Acetyl, so
-        // its variant is the combined "Carbamidomethyl+Acetyl" (not Acetyl-alone).
+        // Prot-N-term: every form of each residue, plus that form with Acetyl on
+        // the alpha-amine: 20 residues + M-ox → 21 acetyl-bearing forms. For
+        // Cys, the fixed Carbamidomethyl STACKS under the variable Acetyl, so
+        // its form is the combined "Carbamidomethyl+Acetyl" (not Acetyl-alone);
+        // M-ox stacks with Acetyl as "Oxidation+Acetyl".
         let n_pn_acetyl = prot_n
             .iter()
             .filter(|aa| aa.mod_.as_ref().is_some_and(|m| m.name.contains("Acetyl")))
             .count();
         assert_eq!(
-            n_pn_acetyl, 20,
-            "Prot-N-term AA list must include 20 acetyl-bearing variants (one per residue)"
+            n_pn_acetyl, 21,
+            "Prot-N-term AA list must include 21 acetyl-bearing forms (one per Anywhere form)"
         );
 
         // P1b regression: protein-N-term Cys must carry CAM+Acetyl (+99.032590),
@@ -1196,16 +1320,86 @@ mod tests {
              (Acetyl-alone +42.01 would drop the mandatory fixed CAM)"
         );
 
-        // Total Prot-N-term list = Anywhere list + 20 acetyl-bearing variants.
+        // Total Prot-N-term list = Anywhere list + 21 acetyl-bearing forms.
         assert_eq!(
             prot_n.len(),
-            anywhere.len() + 20,
-            "Prot-N-term list = Anywhere list + 20 acetyl-bearing variants; \
+            anywhere.len() + 21,
+            "Prot-N-term list = Anywhere list + 21 acetyl-bearing forms; \
              actual Anywhere len = {}, Prot-N-term len = {}, Anywhere modified = {}",
             anywhere.len(),
             prot_n.len(),
             n_any_modified
         );
+    }
+
+    /// `(mass_delta, slots)` of every form of `r` in context `(n, c)`, sorted.
+    fn form_deltas(set: &AminoAcidSet, r: u8, n: Terminus, c: Terminus) -> Vec<(f64, u8)> {
+        let mut v: Vec<(f64, u8)> = set
+            .forms(r, n, c)
+            .iter()
+            .zip(set.form_slots(r, n, c))
+            .map(|(aa, &s)| {
+                let d = aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
+                ((d * 1e4).round() / 1e4, s)
+            })
+            .collect();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v
+    }
+
+    #[test]
+    fn terminal_forms_stack_side_chain_and_terminal_mods() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            "229.162932,K,fix,any,TMT6plex\n\
+             229.162932,*,fix,N-term,TMT6plex\n\
+             57.021464,C,fix,any,Carbamidomethyl\n\
+             15.994915,M,opt,any,Oxidation\n\
+             42.010565,*,opt,Prot-N-term,Acetyl\n",
+        )
+        .unwrap();
+        let set = AminoAcidSetBuilder::new_standard()
+            .add_mods_from_file(tmp.path())
+            .unwrap()
+            .build()
+            .unwrap();
+        let (no, pep, prot) = (Terminus::No, Terminus::Peptide, Terminus::Protein);
+        let (tmt, ac) = (229.1629, 42.0106);
+        let r4 = |x: f64| (x * 1e4).round() / 1e4;
+        // Interior K carries its side-chain tag only; an N-terminal K carries
+        // both the side-chain and the N-terminal tag.
+        assert_eq!(form_deltas(&set, b'K', no, no), vec![(tmt, 0)]);
+        assert_eq!(form_deltas(&set, b'K', pep, no), vec![(r4(2.0 * 229.162932), 0)]);
+        // An N-terminal C keeps CAM under the N-terminal tag.
+        assert_eq!(form_deltas(&set, b'C', pep, no), vec![(r4(57.021464 + 229.162932), 0)]);
+        // An N-terminal M is tried tagged and tagged + oxidised.
+        assert_eq!(
+            form_deltas(&set, b'M', pep, no),
+            vec![(tmt, 0), (r4(229.162932 + 15.994915), 1)]
+        );
+        // At the protein N-terminus Acetyl replaces the N-terminal tag and
+        // stacks with the side-chain forms; Ox + Ac carries two variable mods.
+        assert_eq!(
+            form_deltas(&set, b'M', prot, no),
+            vec![
+                (ac, 1),
+                (r4(15.994915 + 42.010565), 2),
+                (tmt, 0),
+                (r4(229.162932 + 15.994915), 1),
+            ]
+        );
+        assert_eq!(
+            form_deltas(&set, b'K', prot, no),
+            vec![(r4(229.162932 + 42.010565), 1), (r4(2.0 * 229.162932), 0)]
+        );
+        // A C-terminus has no mods here: a one-residue peptide matches its N-term.
+        assert_eq!(form_deltas(&set, b'K', pep, pep), form_deltas(&set, b'K', pep, no));
+        // The first form of every list carries no variable mod.
+        for (_, slots) in set.form_lists() {
+            assert_eq!(slots[0], 0);
+            assert!(slots[1..].iter().all(|&s| s > 0));
+        }
     }
 
     #[test]

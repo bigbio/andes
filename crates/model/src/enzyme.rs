@@ -64,10 +64,11 @@ impl Enzyme {
                 before: b"",
                 universal: None,
             },
+            // Alpha-lytic protease cleaves C-terminal to T, A, S and V.
             Enzyme::AlphaLP => EnzymeRules {
-                after: b"",
+                after: b"TASV",
                 before: b"",
-                universal: Some(true),
+                universal: None,
             },
             Enzyme::NoCleavage => EnzymeRules {
                 after: b"",
@@ -144,7 +145,7 @@ impl Enzyme {
 
     /// Returns `true` for N-terminal enzymes (cleavage before the target
     /// residue: LysN, AspN). `false` for C-terminal enzymes (Trypsin, LysC,
-    /// ArgC, Chymotrypsin, GluC) and for AlphaLP / NoCleavage /
+    /// ArgC, Chymotrypsin, GluC, AlphaLP) and for NoCleavage /
     /// NonSpecific. LysN and AspN are the only two builtins with
     /// `is_n_term = true`.
     pub fn is_n_term(self) -> bool {
@@ -162,7 +163,7 @@ impl Enzyme {
     /// For C-terminal enzymes (`after` list) this is equivalent to
     /// `is_cleavable_after`. For N-terminal enzymes (`before` list) this is
     /// equivalent to `is_cleavable_before`. For NoCleavage always `false`; for
-    /// AlphaLP / NonSpecific always `true`.
+    /// NonSpecific always `true`.
     pub fn is_cleavable(self, residue: u8) -> bool {
         match self.rules().universal {
             Some(b) => b,
@@ -180,7 +181,7 @@ impl Enzyme {
     ///
     /// For C-terminal enzymes: the `after` residues (e.g. `[b'K', b'R']` for
     /// Trypsin). For N-terminal enzymes: the `before` residues (e.g. `[b'K']`
-    /// for LysN). For NoCleavage / NonSpecific / AlphaLP: `&[]` (the
+    /// for LysN). For NoCleavage / NonSpecific: `&[]` (the
     /// `universal` flag handles cleavability; there are no specific residues).
     pub fn residues(self) -> &'static [u8] {
         if self.rules().universal.is_some() {
@@ -267,11 +268,13 @@ mod tests {
     }
 
     #[test]
-    fn alphalp_is_universal() {
+    fn alphalp_cleaves_after_tasv() {
         for r in b'A'..=b'Z' {
-            assert!(Enzyme::AlphaLP.is_cleavable_after(r));
-            assert!(Enzyme::AlphaLP.is_cleavable_before(r));
+            assert_eq!(Enzyme::AlphaLP.is_cleavable_after(r), b"TASV".contains(&r));
+            assert!(!Enzyme::AlphaLP.is_cleavable_before(r));
         }
+        assert_eq!(Enzyme::AlphaLP.residues(), b"TASV");
+        assert!(Enzyme::AlphaLP.is_c_term());
     }
 
     #[test]

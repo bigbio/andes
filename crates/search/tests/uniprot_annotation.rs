@@ -1114,3 +1114,11 @@ fn origin_alone_leaves_the_reverse_decoy_unchanged() {
     assert!(target.proteins[4].mod_sites().is_empty() || checked >= 1);
     assert!(checked >= 3, "{checked}");
 }
+
+#[test]
+fn index_knows_whether_it_holds_alternative_entries() {
+    let plain = SearchIndex::from_target_db(&target_db(EvidenceLevel::Experimental, false), "XXX");
+    assert!(!plain.has_alternative_entries);
+    let with = SearchIndex::from_target_db(&target_db(EvidenceLevel::Experimental, true), "XXX");
+    assert!(with.has_alternative_entries);
+}

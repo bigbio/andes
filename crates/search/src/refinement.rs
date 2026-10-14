@@ -246,6 +246,7 @@ pub fn build_refinement_index(
     let subset = full_target_db.subset_by_index(&keep);
     let db = build_search_db(&subset, decoy_prefix, decoy_strategy, seed);
     SearchIndex {
+        has_alternative_entries: crate::search_index::holds_alternative_entries(&db),
         db,
         decoy_prefix: crate::decoy::normalize_decoy_prefix(decoy_prefix),
         decoy_suffix: None,
@@ -314,6 +315,7 @@ pub fn build_peptide_anchored_index(
     };
     let combined = anchored_target_plus_decoy(&minidb, decoy_prefix, decoy_strategy, seed);
     SearchIndex {
+        has_alternative_entries: crate::search_index::holds_alternative_entries(&combined),
         db: combined,
         decoy_prefix: crate::decoy::normalize_decoy_prefix(decoy_prefix),
         decoy_suffix: None,
@@ -2377,6 +2379,7 @@ mod tests {
             db: ProteinDb {
                 proteins: vec![protein("P0", b"PEPTIDEK")],
             },
+            has_alternative_entries: false,
             decoy_prefix: "XXX".into(),
             decoy_suffix: None,
         };
@@ -2388,6 +2391,7 @@ mod tests {
                 db: ProteinDb {
                     proteins: vec![protein("BASEPEP_0", b"PEPTIDEK")],
                 },
+                has_alternative_entries: false,
                 decoy_prefix: "XXX".into(),
                 decoy_suffix: None,
             },
@@ -2431,6 +2435,7 @@ mod tests {
             db: ProteinDb {
                 proteins: vec![protein("P0", b"AAAK"), protein("P1", b"BBBK")],
             }, // prot_offset = 2
+            has_alternative_entries: false,
             decoy_prefix: "XXX".into(),
             decoy_suffix: None,
         };
@@ -2447,6 +2452,7 @@ mod tests {
                         protein("BASEPEP_1", b"SAMPLEK"),
                     ],
                 },
+                has_alternative_entries: false,
                 decoy_prefix: "XXX".into(),
                 decoy_suffix: None,
             },

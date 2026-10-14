@@ -242,6 +242,13 @@ pub struct PsmFeatures {
     /// `delta_rt` normalised by the run's gradient span (max−min observed RT, in
     /// minutes); 0.0 when the span is non-positive. Transfers across runs.
     pub delta_rt_norm: f32,
+    /// 1 when a candidate from a Reference entry (canonical or FASTA protein)
+    /// was scored for this spectrum. Only tracked when the database holds
+    /// isoform, variant or chain entries.
+    pub ref_competitor: u32,
+    /// The best rounded RawScore among those Reference candidates; 0.0 when
+    /// `ref_competitor` is 0.
+    pub ref_best_raw: f32,
     /// Calibrated predicted retention time in minutes for this PSM's peptide, or
     /// 0.0 when RT is unavailable / calibration failed. Not a PIN feature column;
     /// surfaced only into the QPX `.idparquet` `predicted_rt` field.

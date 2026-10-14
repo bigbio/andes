@@ -877,6 +877,11 @@ impl<'a> PreparedSearch<'a> {
                 let mut best_pep_key: u64 = 0;
                 let mut have_best = false;
                 let mut second_raw = i32::MIN;
+                // Best RawScore among candidates from Reference entries, for
+                // `DeltaRefScore`; only tracked when the database holds
+                // isoform, variant or chain entries.
+                let mut best_ref_raw = i32::MIN;
+                let track_ref = self.idx.has_alternative_entries;
 
                 // Tailor per-spectrum score calibration (additive PIN feature):
                 // accumulate a histogram of EVERY scored candidate's rounded RawScore
@@ -1050,6 +1055,13 @@ impl<'a> PreparedSearch<'a> {
                         // that can't beat the top-1 still contributes to the delta.
                         {
                             let s = pin_score.round() as i32;
+                            if track_ref
+                                && s > best_ref_raw
+                                && self.idx.db.proteins[cand.protein_index].entry_kind()
+                                    == model::EntryKind::Reference
+                            {
+                                best_ref_raw = s;
+                            }
                             // Tailor histogram: fold this candidate's rounded RawScore
                             // in (same `s` the DeltaRawScore tracker uses). One u32
                             // increment, no per-candidate allocation.
@@ -1227,6 +1239,10 @@ impl<'a> PreparedSearch<'a> {
                     // co-isolation detection — `ms1_link` and its loading stay.
 
                     features.delta_raw_score = delta_raw_score;
+                    if best_ref_raw > i32::MIN {
+                        features.ref_competitor = 1;
+                        features.ref_best_raw = best_ref_raw as f32;
+                    }
                     features.listwise_score_gap = listwise_score_gap;
                     features.candidate_rank_entropy = candidate_rank_entropy;
                     // Tailor calibrated score: this PSM's RawScore divided by the
@@ -2322,6 +2338,8 @@ pub(crate) fn compute_psm_features_with_edge(
         delta_rt: 0.0,
         abs_delta_rt: 0.0,
         delta_rt_norm: 0.0,
+        ref_competitor: 0,
+        ref_best_raw: 0.0,
         predicted_rt_min: 0.0,
         isobaric_rt_margin: 0.0, // glyco-only; set by populate_glyco_rt_features
     }

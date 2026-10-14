@@ -104,6 +104,18 @@ const CV_ETCID: &str = "MS:1003182"; // electron-transfer/collision-induced diss
 
 /// Unit: minutes → multiply by 60 to get seconds.
 const CV_UNIT_MINUTE: &str = "UO:0000031";
+/// The obsolete PSI-MS `minute` term, still written by older converters.
+const CV_UNIT_MINUTE_LEGACY: &str = "MS:1000038";
+
+/// Whether a `scan start time` is in minutes: the unit accession says so, or,
+/// when the converter wrote only a unit name, the name does.
+fn is_minute_unit(unit_accession: &str, unit_name: &str) -> bool {
+    match unit_accession {
+        CV_UNIT_MINUTE | CV_UNIT_MINUTE_LEGACY => true,
+        "" => matches!(unit_name.trim().to_ascii_lowercase().as_str(), "minute" | "min" | "minutes"),
+        _ => false,
+    }
+}
 
 // ── Error type ───────────────────────────────────────────────────────────────
 
@@ -338,6 +350,7 @@ struct CvParamInfo {
     accession: String,
     value: String,
     unit_accession: String,
+    unit_name: String,
 }
 
 impl CvParamInfo {
@@ -345,10 +358,12 @@ impl CvParamInfo {
         let accession = attr_str(e, b"accession")?;
         let value = attr_str(e, b"value").unwrap_or_default();
         let unit_accession = attr_str(e, b"unitAccession").unwrap_or_default();
+        let unit_name = attr_str(e, b"unitName").unwrap_or_default();
         Some(CvParamInfo {
             accession,
             value,
             unit_accession,
+            unit_name,
         })
     }
 }
@@ -643,7 +658,7 @@ impl<R: BufRead> MzMLReader<R> {
 
             CV_SCAN_TIME if matches!(self.state, State::Scan | State::Spectrum) => {
                 if let Ok(t) = cv.value.parse::<f64>() {
-                    let secs = if cv.unit_accession == CV_UNIT_MINUTE {
+                    let secs = if is_minute_unit(&cv.unit_accession, &cv.unit_name) {
                         t * 60.0
                     } else {
                         t
@@ -2354,6 +2369,17 @@ mod tests {
         let s = &spectra[0];
         assert!(!s.peaks.is_empty(), "MS2 spectrum should have peaks");
         assert!(s.precursor_mz > 0.0, "precursor m/z should be positive");
+    }
+
+    #[test]
+    fn minute_unit_by_accession_legacy_term_or_name() {
+        assert!(is_minute_unit("UO:0000031", "minute"));
+        assert!(is_minute_unit("MS:1000038", ""));
+        assert!(is_minute_unit("", "minute"));
+        assert!(is_minute_unit("", "Min"));
+        assert!(!is_minute_unit("UO:0000010", "second"));
+        assert!(!is_minute_unit("", "second"));
+        assert!(!is_minute_unit("", ""));
     }
 
     // ── Unit helpers for extract_scan_from_id ────────────────────────────────

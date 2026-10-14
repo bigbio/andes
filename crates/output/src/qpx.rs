@@ -30,7 +30,7 @@
 //! queue is `into_rank_sorted_vec()`, positional isomers collapsed by
 //! `row_context::emitted_rows`), one row per emitted PIN row.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -52,7 +52,9 @@ use search::search_index::SearchIndex;
 use search::search_params::SearchParams;
 
 use crate::percolator::PercolatorPsm;
-use crate::pin::{feature_value_type, format_feature_value, format_spec_id, psm_feature_values};
+use crate::pin::{
+    exp_mass_text, feature_value_type, format_feature_value, format_spec_id, psm_feature_values,
+};
 use crate::row_context::{emitted_rows, resolve_accession};
 
 /// QPX format version string written into every file's schema metadata.
@@ -92,21 +94,54 @@ pub fn write_qpx(
     run_id: &str,
     primary_ms_run_paths: &[String],
     rescore: Option<&HashMap<String, PercolatorPsm>>,
+    rescore_decoys: Option<&HashSet<String>>,
 ) -> std::io::Result<()> {
     std::fs::create_dir_all(out_dir)?;
 
     let reference_file = primary_ms_run_paths.first().cloned().unwrap_or_default();
 
-    let psm_batch = build_psms_batch(
-        spectra,
-        queues,
-        candidates,
-        search_index,
-        run_id,
-        &reference_file,
-        rescore,
+    // When rescoring is on, audit the Percolator join over the whole run before
+    // writing any row (fail loud on target rows with no result rather than emit
+    // null q-values), and leave out the target rows target-decoy competition
+    // removed: they are not in Percolator's FDR-controlled output. Empty when
+    // rescore is off, keeping that path identical.
+    let competed_away = match rescore {
+        Some(m) => audit_rescore_join(
+            &rescore_rows(spectra, queues, candidates),
+            m,
+            rescore_decoys,
+        )?,
+        None => HashSet::new(),
+    };
+
+    // Bound Arrow's Utf8/List buffers before they reach their 32-bit offset
+    // limit. Slicing an already-built batch is too late. Preserve the global
+    // PSM row order and identification indices across batches.
+    let mut row_offset = 0usize;
+    let batches = spectra
+        .chunks(1024)
+        .zip(queues.chunks(1024))
+        .map(|(spectra, queues)| {
+            let batch = build_psms_batch(
+                spectra,
+                queues,
+                candidates,
+                search_index,
+                run_id,
+                &reference_file,
+                rescore,
+                &competed_away,
+                row_offset,
+            )?;
+            row_offset += batch.num_rows();
+            Ok(batch)
+        });
+    write_parquet_batches(
+        &out_dir.join("psms.parquet"),
+        "psms",
+        psms_schema(),
+        batches,
     )?;
-    write_parquet(&out_dir.join("psms.parquet"), "psms", psm_batch)?;
 
     let prot_batch = build_proteins_batch(queues, candidates, search_index, run_id)?;
     write_parquet(&out_dir.join("proteins.parquet"), "proteins", prot_batch)?;
@@ -132,26 +167,36 @@ pub fn write_qpx(
     Ok(())
 }
 
-// ── parquet file writer (metadata + single batch) ─────────────────────────────
+// ── parquet file writer (metadata + bounded batches) ─────────────────────────────
 
 /// Write one RecordBatch to `path`, stamping the QPX schema metadata
 /// (`file_type` = `file_type`) onto the schema before writing.
 fn write_parquet(path: &Path, file_type: &str, batch: RecordBatch) -> std::io::Result<()> {
-    // Re-key the batch's schema with the QPX metadata so the written file
-    // carries it (OpenMS readers key on these). UUID is per-file.
-    let meta = qpx_metadata(file_type);
-    let schema_with_meta = Arc::new(Schema::new_with_metadata(
-        batch.schema().fields().clone(),
-        meta,
-    ));
-    // Rebuild the batch against the metadata-bearing schema (same columns).
-    let batch =
-        RecordBatch::try_new(schema_with_meta.clone(), batch.columns().to_vec()).map_err(to_io)?;
+    write_parquet_batches(path, file_type, batch.schema(), std::iter::once(Ok(batch)))
+}
 
+fn write_parquet_batches(
+    path: &Path,
+    file_type: &str,
+    schema: Arc<Schema>,
+    batches: impl IntoIterator<Item = std::io::Result<RecordBatch>>,
+) -> std::io::Result<()> {
+    let schema_with_meta = Arc::new(Schema::new_with_metadata(
+        schema.fields().clone(),
+        qpx_metadata(file_type),
+    ));
     let props = WriterProperties::builder().build();
     let file = std::fs::File::create(path)?;
-    let mut writer = ArrowWriter::try_new(file, schema_with_meta, Some(props)).map_err(to_io)?;
-    writer.write(&batch).map_err(to_io)?;
+    let mut writer =
+        ArrowWriter::try_new(file, schema_with_meta.clone(), Some(props)).map_err(to_io)?;
+    for batch in batches {
+        let batch = batch?;
+        let batch = RecordBatch::try_new(schema_with_meta.clone(), batch.columns().to_vec())
+            .map_err(to_io)?;
+        writer.write(&batch).map_err(to_io)?;
+        // Also bound the writer's buffered row group, not only Arrow arrays.
+        writer.flush().map_err(to_io)?;
+    }
     writer.close().map_err(to_io)?;
     Ok(())
 }
@@ -177,7 +222,7 @@ fn to_io<E: std::fmt::Display>(e: E) -> std::io::Error {
 /// is not in the workspace lockfile). 122 random bits + the version/variant
 /// nibbles, sourced from `RandomState`-seeded hashing of high-resolution
 /// clocks — sufficient for a per-file identifier (not a security token).
-fn uuid_v4() -> String {
+pub(crate) fn uuid_v4() -> String {
     use std::hash::{BuildHasher, Hasher};
     let mk = || {
         let mut h = std::collections::hash_map::RandomState::new().build_hasher();
@@ -329,28 +374,58 @@ fn psms_schema() -> Arc<Schema> {
 
 // ── psms.parquet builder ──────────────────────────────────────────────────────
 
-/// Validate the Percolator (`--rescore`) join. When rescoring is on, every
-/// emitted **non-decoy** PSM row must have a matching Percolator result; a
-/// missing match means the `SpecId` derivation drifted between the PIN and the
-/// idparquet, which silently corrupts downstream FDR (those target rows would
-/// otherwise be written with a null q-value). Decoys are exempt — Percolator
-/// writes them to a separate file the caller does not load. On failure the
-/// error reports how many target rows were unmatched and how many Percolator
-/// keys went unused.
+/// One emitted PSM row as the Percolator join sees it.
+struct RescoreRow {
+    /// The PIN `SpecId` (Percolator's `PSMId`).
+    spec_id: String,
+    is_decoy: bool,
+    /// Percolator's target-decoy competition group: the PIN `ScanNr` and the
+    /// `ExpMass` text.
+    group: (i32, String),
+}
+
+/// Validate the Percolator (`--rescore`) join and return the target rows that
+/// target-decoy competition removed.
+///
+/// Every emitted **non-decoy** PSM row must have a matching Percolator result;
+/// a missing match means the `SpecId` derivation drifted between the PIN and
+/// the idparquet, which silently corrupts downstream FDR (those target rows
+/// would otherwise be written with a null q-value). Decoys are exempt.
+///
+/// One exception: with target-decoy competition (`-Y`), Percolator keeps one
+/// PSM per scan/`ExpMass` group and writes it to the target or the decoy result
+/// file; the other rows of the group appear in neither. When the decoy results
+/// are given, a missing target row is accepted as competed away iff exactly one
+/// row of its group is present in the target or decoy results (the group's
+/// winner). A group with no result, or with several (no competition there),
+/// keeps the strict check. Without the decoy results every target must match.
+///
+/// On failure the error reports how many target rows were unmatched and how
+/// many Percolator keys went unused.
 fn audit_rescore_join(
-    emitted: &[(String, bool)],
+    rows: &[RescoreRow],
     rescore: &HashMap<String, PercolatorPsm>,
-) -> std::io::Result<()> {
+    decoys: Option<&HashSet<String>>,
+) -> std::io::Result<HashSet<String>> {
+    let present = |r: &RescoreRow| {
+        rescore.contains_key(&r.spec_id) || decoys.is_some_and(|d| d.contains(&r.spec_id))
+    };
+    let mut winners: HashMap<&(i32, String), usize> = HashMap::new();
+    if decoys.is_some() {
+        for r in rows.iter().filter(|r| present(r)) {
+            *winners.entry(&r.group).or_insert(0) += 1;
+        }
+    }
     let mut targets = 0usize;
     let mut missing = 0usize;
-    let mut consumed: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for (spec_id, is_decoy) in emitted {
-        if *is_decoy {
-            continue;
-        }
+    let mut consumed: HashSet<&str> = HashSet::new();
+    let mut competed_away: HashSet<String> = HashSet::new();
+    for r in rows.iter().filter(|r| !r.is_decoy) {
         targets += 1;
-        if rescore.contains_key(spec_id) {
-            consumed.insert(spec_id.as_str());
+        if rescore.contains_key(&r.spec_id) {
+            consumed.insert(r.spec_id.as_str());
+        } else if winners.get(&r.group) == Some(&1) {
+            competed_away.insert(r.spec_id.clone());
         } else {
             missing += 1;
         }
@@ -367,7 +442,44 @@ fn audit_rescore_join(
             ),
         ));
     }
-    Ok(())
+    Ok(competed_away)
+}
+
+/// The PIN `SpecId`, label and competition group of every emitted row, in
+/// emission order (spectrum, then `emitted_rows`, positional isomers collapsed).
+fn rescore_rows(
+    spectra: &[Spectrum],
+    queues: &[TopNQueue],
+    candidates: &[Candidate],
+) -> Vec<RescoreRow> {
+    let mut rows = Vec::new();
+    for (spec_idx, queue) in queues.iter().enumerate() {
+        if queue.is_empty() {
+            continue;
+        }
+        let spec = &spectra[spec_idx];
+        let sorted = queue.clone().into_rank_sorted_vec();
+        let rows = emitted_rows(spec, &sorted, candidates);
+        let ranks: Vec<u32> = rows.iter().map(|(r, _)| *r).collect();
+        let psms: Vec<&PsmMatch> = rows.iter().map(|(_, p)| &**p).collect();
+        let multi_row = psms.len() > 1;
+        let spec_id_str = if spec.title.is_empty() {
+            format!("scan={}", spec.scan.unwrap_or(0))
+        } else {
+            spec.title.clone()
+        };
+        let scan_num = spec.scan.unwrap_or(0);
+        for (hit, psm) in psms.iter().enumerate() {
+            let cand = &candidates[psm.primary_candidate_idx() as usize];
+            let precursor_mz = psm.precursor_mz_override.unwrap_or(spec.precursor_mz);
+            rows.push(RescoreRow {
+                spec_id: format_spec_id(&spec_id_str, scan_num, ranks[hit], hit, multi_row),
+                is_decoy: cand.is_decoy,
+                group: (scan_num, exp_mass_text(precursor_mz, psm.charge_used)),
+            });
+        }
+    }
+    rows
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -379,6 +491,8 @@ fn build_psms_batch(
     run_id: &str,
     reference_file: &str,
     rescore: Option<&HashMap<String, PercolatorPsm>>,
+    competed_away: &HashSet<String>,
+    row_offset: usize,
 ) -> std::io::Result<RecordBatch> {
     let schema = psms_schema();
 
@@ -416,12 +530,7 @@ fn build_psms_batch(
 
     // Per-spectrum identification index (matches OpenMS, which gives each
     // spectrum's hit-list a stable index). Incremented once per emitted PSM.
-    let mut pep_id_index: i32 = 0;
-
-    // When rescoring is on, record each emitted row's (SpecId, is_decoy) so the
-    // Percolator join can be audited for completeness after the loop. Empty (no
-    // allocation) and unused when rescore is off, keeping that path identical.
-    let mut rescore_emitted: Vec<(String, bool)> = Vec::new();
+    let mut pep_id_index = row_offset;
 
     for (spec_idx, queue) in queues.iter().enumerate() {
         if queue.is_empty() {
@@ -457,9 +566,10 @@ fn build_psms_batch(
             // which Percolator writes to the decoy file we do not load here).
             let matched = if let Some(m) = rescore {
                 let spec_id = format_spec_id(&spec_id_str, scan_num, ranks[hit], hit, multi_row);
-                let hit_result = m.get(&spec_id);
-                rescore_emitted.push((spec_id, cand.is_decoy));
-                hit_result
+                if competed_away.contains(&spec_id) {
+                    continue;
+                }
+                m.get(&spec_id)
             } else {
                 None
             };
@@ -501,7 +611,7 @@ fn build_psms_batch(
             score_type.append_value("andes:RawScore");
             higher_score_better.append_value(true);
             hit_index.append_value(hit as i32);
-            peptide_identification_index.append_value(pep_id_index);
+            peptide_identification_index.append_value(i32::try_from(pep_id_index).map_err(to_io)?);
             // Per-PSM discriminative features (the column OpenMS'
             // PercolatorAdapter reads). Sourced from the SHARED pin.rs feature
             // vector so the idparquet carries the SAME features as the PIN.
@@ -542,12 +652,6 @@ fn build_psms_batch(
         }
     }
 
-    // Fail loud if the Percolator join was incomplete (target rows with no
-    // matching result), rather than silently emitting null q-values.
-    if let Some(m) = rescore {
-        audit_rescore_join(&rescore_emitted, m)?;
-    }
-
     let columns: Vec<ArrayRef> = vec![
         Arc::new(sequence.finish()),
         Arc::new(peptidoform.finish()),
@@ -585,7 +689,7 @@ fn build_psms_batch(
 // ── per-PSM field derivations ─────────────────────────────────────────────────
 
 /// Bare residue sequence (no mods, no flanks).
-fn bare_sequence(cand: &Candidate) -> String {
+pub fn bare_sequence(cand: &Candidate) -> String {
     cand.peptide
         .residues
         .iter()
@@ -596,7 +700,7 @@ fn bare_sequence(cand: &Candidate) -> String {
 /// ProForma-ish peptidoform: residues with `[UNIMOD:NN]` (or `[+delta]`) after
 /// each modified residue. Falls back to the accession when known, else the mass
 /// delta. No flanks (OpenMS peptidoform convention).
-fn peptidoform_string(cand: &Candidate) -> String {
+pub fn peptidoform_string(cand: &Candidate) -> String {
     let mut s = String::new();
     for aa in &cand.peptide.residues {
         s.push(aa.residue as char);
@@ -1026,8 +1130,17 @@ mod rescore_join_tests {
             psm_id: id.to_string(),
             q_value: 0.0,
             pep: 0.0,
+            score: None,
             peptide: "PEPTIDE".to_string(),
             proteins: String::new(),
+        }
+    }
+
+    fn row(id: &str, is_decoy: bool, scan: i32, exp_mass: &str) -> RescoreRow {
+        RescoreRow {
+            spec_id: id.to_string(),
+            is_decoy,
+            group: (scan, exp_mass.to_string()),
         }
     }
 
@@ -1036,8 +1149,11 @@ mod rescore_join_tests {
         let mut map = HashMap::new();
         map.insert("scan=1_1_1".to_string(), psm("scan=1_1_1"));
         // A target (non-decoy) row whose SpecId is absent from Percolator output.
-        let emitted = vec![("scan=2_2_1".to_string(), false)];
-        let err = audit_rescore_join(&emitted, &map).unwrap_err();
+        let emitted = vec![row("scan=2_2_1", false, 2, "1000")];
+        let err = audit_rescore_join(&emitted, &map, None).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        // Decoy results do not excuse a target whose group has no result at all.
+        let err = audit_rescore_join(&emitted, &map, Some(&HashSet::new())).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 
@@ -1046,9 +1162,58 @@ mod rescore_join_tests {
         let mut map = HashMap::new();
         map.insert("scan=1_1_1".to_string(), psm("scan=1_1_1"));
         let emitted = vec![
-            ("scan=1_1_1".to_string(), false), // target, matched
-            ("scan=9_9_1".to_string(), true),  // decoy, no match is fine
+            row("scan=1_1_1", false, 1, "1000"), // target, matched
+            row("scan=9_9_1", true, 9, "1000"),  // decoy, no match is fine
         ];
-        assert!(audit_rescore_join(&emitted, &map).is_ok());
+        assert!(audit_rescore_join(&emitted, &map, None).unwrap().is_empty());
+    }
+
+    /// Percolator `-Y` keeps one PSM per scan/ExpMass group, written to the
+    /// target or the decoy file. The other targets of the group are competed
+    /// away, not missing; a group with no winner, or with several (no
+    /// competition), still fails.
+    #[test]
+    fn rescore_join_accepts_targets_removed_by_target_decoy_competition() {
+        let emitted = vec![
+            // Scan 1: a target won; its runner-up target is competed away.
+            row("s1_1_0", false, 1, "1000.5"),
+            row("s1_2_1", false, 1, "1000.5"),
+            // Scan 1 at another precursor (chimeric secondary): its own group.
+            row("s1_1_2", false, 1, "1500.25"),
+            // Scan 2: a decoy won; both targets are competed away.
+            row("s2_1_0", true, 2, "900"),
+            row("s2_2_1", false, 2, "900"),
+            row("s2_3_2", false, 2, "900"),
+        ];
+        let mut map = HashMap::new();
+        for id in ["s1_1_0", "s1_1_2"] {
+            map.insert(id.to_string(), psm(id));
+        }
+        let decoys: HashSet<String> = ["s2_1_0".to_string()].into();
+        let away = audit_rescore_join(&emitted, &map, Some(&decoys)).unwrap();
+        let mut away: Vec<&str> = away.iter().map(String::as_str).collect();
+        away.sort();
+        assert_eq!(away, ["s1_2_1", "s2_2_1", "s2_3_2"]);
+
+        // Without the decoy results nothing shows competition happened.
+        assert!(audit_rescore_join(&emitted, &map, None).is_err());
+
+        // A group with no result at all is a genuinely missing join.
+        let lost = vec![
+            row("s3_1_0", false, 3, "800"),
+            row("s3_2_1", false, 3, "800"),
+        ];
+        assert!(audit_rescore_join(&lost, &map, Some(&decoys)).is_err());
+
+        // Two results in one group: no competition there, so a missing target
+        // in it is a drifted join.
+        let mut both = map.clone();
+        both.insert("s1_2_1".to_string(), psm("s1_2_1"));
+        let three = vec![
+            row("s1_1_0", false, 1, "1000.5"),
+            row("s1_2_1", false, 1, "1000.5"),
+            row("s1_3_2", false, 1, "1000.5"),
+        ];
+        assert!(audit_rescore_join(&three, &both, Some(&decoys)).is_err());
     }
 }

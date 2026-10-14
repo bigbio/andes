@@ -222,6 +222,7 @@ pub(crate) fn search_secondary(
         activation_method: spec.activation_method,
         isolation_lower_offset: spec.isolation_lower_offset,
         isolation_upper_offset: spec.isolation_upper_offset,
+        isolation_target_mz: spec.isolation_target_mz,
     };
     let res_ss = ScoredSpectrum::new(&co_spec, scorer, z);
 
@@ -612,6 +613,7 @@ mod tests {
             activation_method: None,
             isolation_lower_offset: None,
             isolation_upper_offset: None,
+            isolation_target_mz: None,
         };
 
         let got = search_secondary(
@@ -733,6 +735,7 @@ mod tests {
             activation_method: None,
             isolation_lower_offset: None,
             isolation_upper_offset: None,
+            isolation_target_mz: None,
         };
 
         let got = search_secondary(

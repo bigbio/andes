@@ -1022,6 +1022,7 @@ pub(crate) fn read_msnet_parquet(path: &Path) -> Result<Vec<MsnetPsm>, Box<dyn s
                 activation_method: None,
                 isolation_lower_offset: None,
                 isolation_upper_offset: None,
+                isolation_target_mz: None,
             };
 
             out.push(MsnetPsm {

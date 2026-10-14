@@ -109,7 +109,7 @@ where
 ///
 /// Every writer that emits per-PSM rows (PIN, TSV, QPX) goes through this, so
 /// the same rows — and the same `SpecId`s — appear in each.
-pub(crate) fn emitted_rows<'a>(
+pub fn emitted_rows<'a>(
     spec: &Spectrum,
     psms_sorted: &'a [PsmMatch],
     candidates: &[Candidate],

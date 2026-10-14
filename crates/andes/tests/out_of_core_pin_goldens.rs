@@ -410,17 +410,44 @@ const CHIMERIC_SLICE_PIN: &str = "test-fixtures/goldens/chimeric_slice.pin.gz";
 /// without it. Pass 1 of the cascade is that search, so the difference is the
 /// rows Pass 2 contributed.
 fn secondary_rows(fragment_index: &str, chimeric_rows: &[String], dir: &Path) -> usize {
-    let (_, plain_rows, _) = run_slice(fragment_index, false, &dir.join(format!("plain_{fragment_index}.pin")));
+    let (_, plain_rows, _) = run_slice(
+        fragment_index,
+        false,
+        &dir.join(format!("plain_{fragment_index}.pin")),
+    );
     chimeric_rows
         .len()
         .checked_sub(plain_rows.len())
         .expect("a --chimeric run must not emit fewer rows than the plain search")
 }
 
+/// Rows that repeat a (scan, peptidoform, charge, label) already emitted: the
+/// chimeric Pass 2 must not re-emit a peptide the scan's retained Pass-1
+/// candidates already carry (it would sit in its own competition group).
+fn duplicate_identifications(header: &str, rows: &[String]) -> Vec<String> {
+    let cols: Vec<&str> = header.split('\t').collect();
+    let col = |name: &str| cols.iter().position(|c| *c == name).expect(name);
+    let (scan, label, pep) = (col("ScanNr"), col("Label"), col("Peptide"));
+    let charges: Vec<usize> = (2..=5).map(|z| col(&format!("charge{z}"))).collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut dups = Vec::new();
+    for row in rows {
+        let f: Vec<&str> = row.split('\t').collect();
+        let charge: Vec<&str> = charges.iter().map(|&i| f[i]).collect();
+        let key = (f[scan], f[pep], charge, f[label]);
+        if !seen.insert(key) {
+            dups.push(format!("scan {} {} label {}", f[scan], f[pep], f[label]));
+        }
+    }
+    dups
+}
+
 #[test]
 fn chimeric_enumeration_pin_matches_golden() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (header, rows, _) = run_chimeric("off", &dir.path().join("enum.pin"));
+    let dups = duplicate_identifications(&header, &rows);
+    assert!(dups.is_empty(), "repeated identifications: {dups:?}");
     let secondaries = secondary_rows("off", &rows, dir.path());
     assert!(
         secondaries > 50,
@@ -436,7 +463,9 @@ fn chimeric_enumeration_pin_matches_golden() {
 fn chimeric_fragment_index_runs_with_unique_specids() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (_, enum_rows, _) = run_chimeric("off", &dir.path().join("enum.pin"));
-    let (_, idx_rows, idx_err) = run_chimeric("auto", &dir.path().join("idx.pin"));
+    let (idx_header, idx_rows, idx_err) = run_chimeric("auto", &dir.path().join("idx.pin"));
+    let dups = duplicate_identifications(&idx_header, &idx_rows);
+    assert!(dups.is_empty(), "repeated identifications: {dups:?}");
     assert!(
         idx_err.contains("candidate retrieval: fragment-ion index"),
         "the fragment-ion index did not run:\n{idx_err}"

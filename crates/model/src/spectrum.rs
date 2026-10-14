@@ -32,6 +32,11 @@ pub struct Spectrum {
     pub isolation_lower_offset: Option<f64>,
     /// Isolation-window upper offset in Da (selected m/z + upper = window end).
     pub isolation_upper_offset: Option<f64>,
+    /// Isolation-window target m/z (mzML `MS:1000827`): the centre the lower
+    /// and upper offsets are measured from. It can differ from `precursor_mz`,
+    /// which may be the monoisotopic m/z the instrument assigned. `None` when
+    /// the source does not record it.
+    pub isolation_target_mz: Option<f64>,
 }
 
 impl Spectrum {
@@ -56,6 +61,7 @@ impl Default for Spectrum {
             activation_method: None,
             isolation_lower_offset: None,
             isolation_upper_offset: None,
+            isolation_target_mz: None,
         }
     }
 }
@@ -76,6 +82,7 @@ mod tests {
             activation_method: None,
             isolation_lower_offset: None,
             isolation_upper_offset: None,
+            isolation_target_mz: None,
         }
     }
 
@@ -84,6 +91,7 @@ mod tests {
         let s = Spectrum::default();
         assert_eq!(s.isolation_lower_offset, None);
         assert_eq!(s.isolation_upper_offset, None);
+        assert_eq!(s.isolation_target_mz, None);
     }
 
     #[test]
@@ -111,6 +119,7 @@ mod tests {
             activation_method: None,
             isolation_lower_offset: None,
             isolation_upper_offset: None,
+            isolation_target_mz: None,
         };
         assert!(s.is_empty());
         assert_eq!(s.len(), 0);

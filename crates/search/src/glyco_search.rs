@@ -824,15 +824,6 @@ fn has_backbone_evidence(hit: &BackboneHit, core_y_hits: u8) -> bool {
     hit.source != Source::Db || hit.peptide_first || core_y_hits > 0
 }
 
-/// Peptide-matching window (Da) for a backbone hypothesis. The backbone is
-/// `precursor − theoretical glycan`, so its only error is the precursor's: the
-/// ppm tolerance applies to the precursor mass (`backbone + glycan residual`),
-/// not to the smaller backbone, floored at 0.01 Da.
-fn backbone_tol_da(hit: &BackboneHit, tol_ppm: f64) -> f64 {
-    let precursor_residue = hit.backbone_mass + hit.glycan_mass_residual;
-    (precursor_residue * tol_ppm * 1e-6_f64).max(0.01)
-}
-
 /// Indices of the candidates whose residue mass is within `tol_da` of
 /// `bb_residue` (plus a 1e-6 Da slack; the caller re-checks exactly), ordered by
 /// (nominal residue mass, index), which is the nominal-bucket walk's order.
@@ -1316,7 +1307,7 @@ fn score_spectrum_glyco(
         // charge silently dropped).
         let z = bb_hit.charge;
 
-        let tol_da = backbone_tol_da(bb_hit, tol_ppm);
+        let tol_da = (bb_residue * tol_ppm * 1e-6_f64).max(0.01);
 
         // Phase-1 gating/selection ranks on the generation spectrum (HCD
         // partner when paired; ETD scan otherwise — see `phase1_scored`).
@@ -2279,31 +2270,6 @@ mod glycan_source_tests {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn backbone_tolerance_scales_with_the_precursor_mass() {
-        use super::{backbone_tol_da, BackboneHit, Source};
-        // A 1,200 Da backbone carrying a 2,200 Da glycan: at 20 ppm the window is
-        // 20 ppm of the 3,400 Da precursor (0.068 Da), not of the backbone
-        // (0.024 Da), since the precursor is what was measured.
-        let hit = BackboneHit {
-            backbone_mass: 1200.0,
-            glycan: None,
-            source: Source::Db,
-            charge: 3,
-            isotope_offset: 0,
-            glycan_mass_residual: 2200.0,
-            peptide_first: false,
-        };
-        assert!((backbone_tol_da(&hit, 20.0) - 0.068).abs() < 1e-9);
-        // The 0.01 Da floor still applies to a light precursor at a tight ppm.
-        let light = BackboneHit {
-            backbone_mass: 300.0,
-            glycan_mass_residual: 400.0,
-            ..hit
-        };
-        assert_eq!(backbone_tol_da(&light, 5.0), 0.01);
-    }
-
     #[test]
     fn peptide_first_backbones_are_exempt_from_the_core_y_prefilter() {
         use super::{dedup_backbone_hits, has_backbone_evidence, BackboneHit, Source};

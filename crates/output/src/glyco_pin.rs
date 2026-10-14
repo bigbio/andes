@@ -834,7 +834,9 @@ mod tests {
         // an internal sequon plus a boundary one is two sites, not one.
         assert!(glycan_tag_with_site(&g, b"ANLTANK", b'T').ends_with("@N?]"));
         // the composition itself is unchanged by the site suffix.
-        assert!(glycan_tag_with_site(&g, b"AANLTK", b'A').starts_with("[HexNAc2Hex5Fuc0NeuAc0NeuGc0"));
+        assert!(
+            glycan_tag_with_site(&g, b"AANLTK", b'A').starts_with("[HexNAc2Hex5Fuc0NeuAc0NeuGc0")
+        );
     }
 
     #[test]

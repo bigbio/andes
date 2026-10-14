@@ -1303,9 +1303,7 @@ fn score_spectrum_glyco(
         // backbone MUST still be scored so its `backbone_best_cz` is computed
         // and AXIS 4 can retain it (otherwise the gate is silently defeated
         // for its target population). Default path (gate off) unchanged.
-        if scan_has_evidence
-            && !has_backbone_evidence(bb_hit, core_y_counts[bb_idx])
-            && !cz_gate_on
+        if scan_has_evidence && !has_backbone_evidence(bb_hit, core_y_counts[bb_idx]) && !cz_gate_on
         {
             continue;
         }

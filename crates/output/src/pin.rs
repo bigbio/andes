@@ -10,7 +10,7 @@
 //! ```text
 //! SpecId  Label  ScanNr  ExpMass  CalcMass  mass  RawScore  DeNovoScore
 //! lnSpecEValue  lnEValue  isotope_error  peplen  dm  absdm
-//! charge<min>  charge<min+1>  ...  charge<max>
+//! charge<min>  charge<min+1>  ...  charge<max>   (--charge range ∪ PSM charges)
 //! enzN  enzC  enzInt
 //! NumMatchedMainIons  longest_b  longest_y  longest_y_pct
 //! ExplainedIonCurrentRatio  NTermIonCurrentRatio  CTermIonCurrentRatio
@@ -71,7 +71,7 @@
 
 use std::io::{self, BufWriter, Write};
 
-use crate::percolator_enz::{count_internal_enzymatic, is_enzymatic_boundary};
+use crate::percolator_enz::{count_internal_enzymatic_any, is_enzymatic_boundary_any};
 use crate::row_context::{emitted_rows, RowContext};
 use model::mass::{ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
@@ -326,8 +326,7 @@ pub fn write_pin_to<W: Write>(
     params: &SearchParams,
     search_index: &SearchIndex,
 ) -> io::Result<()> {
-    let min_charge = *params.charge_range.start();
-    let max_charge = *params.charge_range.end();
+    let (min_charge, max_charge) = pin_charge_columns(params, queues);
 
     // FDR-join guard: the PIN `SpecId` (`{spec_id}_{scan}` base) is the key
     // Percolator joins q-values/PEPs back onto (its result map is keyed by
@@ -395,6 +394,17 @@ pub fn write_pin_to<W: Write>(
         }
     }
     Ok(())
+}
+
+/// The charge one-hot columns: the searched `--charge` range, widened to every
+/// charge a PSM carries. A declared precursor charge is searched even outside
+/// the range, and such a PSM needs its own column rather than an all-zero
+/// charge vector.
+fn pin_charge_columns(params: &SearchParams, queues: &[TopNQueue]) -> (u8, u8) {
+    queues.iter().flat_map(TopNQueue::iter_psms).fold(
+        (*params.charge_range.start(), *params.charge_range.end()),
+        |(lo, hi), psm| (lo.min(psm.charge_used), hi.max(psm.charge_used)),
+    )
 }
 
 /// Spectra whose PIN rows are formatted in parallel before being written out.
@@ -742,9 +752,12 @@ fn write_psm_row<W: Write>(
     let residues: Vec<u8> = cand.peptide.residues.iter().map(|aa| aa.residue).collect();
     let first = residues.first().copied().unwrap_or(b'-');
     let last = residues.last().copied().unwrap_or(b'-');
-    let enz_n: u8 = is_enzymatic_boundary(cand.peptide.pre, first, params.enzyme) as u8;
-    let enz_c: u8 = is_enzymatic_boundary(last, cand.peptide.post, params.enzyme) as u8;
-    let enz_int = count_internal_enzymatic(&residues, params.enzyme);
+    // A multi-protease digest (`--enzyme a,b`) counts a boundary any of its
+    // enzymes cleaves.
+    let extra = &params.extra_enzymes;
+    let enz_n: u8 = is_enzymatic_boundary_any(cand.peptide.pre, first, params.enzyme, extra) as u8;
+    let enz_c: u8 = is_enzymatic_boundary_any(last, cand.peptide.post, params.enzyme, extra) as u8;
+    let enz_int = count_internal_enzymatic_any(&residues, params.enzyme, extra);
     write!(writer, "\t{}\t{}\t{}", enz_n, enz_c, enz_int)?;
 
     // Fragment/error/strong-score feature block — written from the SHARED
@@ -1330,6 +1343,82 @@ mod tests {
             rows[0][charge3_idx], "0",
             "charge3 should be 0 for a charge-2 PSM"
         );
+    }
+
+    #[test]
+    fn pin_enzyme_features_use_every_enzyme_of_a_multi_protease_digest() {
+        // K.AEAKAE.S: enzN via trypsin (K|A); enzC only via GluC (E|S);
+        // internal (K,A) via trypsin, (E,A) via GluC.
+        let cands = vec![make_candidate_seq(b"AEAKAE", &[], 0)];
+        let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
+        let idx = make_empty_search_index();
+        let enz = |extra: Vec<model::enzyme::Enzyme>| {
+            let mut params = make_params(2..=3);
+            params.extra_enzymes = extra;
+            let mut queue = TopNQueue::new(10);
+            queue.push(make_psm(0, 10.0, 10.0, 0, 2));
+            let mut buf = Vec::<u8>::new();
+            write_pin_to(&mut buf, &spectra, &[queue], &cands, &params, &idx).unwrap();
+            let cols = parse_header(&buf);
+            let row = parse_rows(&buf).remove(0);
+            ["enzN", "enzC", "enzInt"].map(|name| {
+                let i = cols.iter().position(|c| c == name).unwrap();
+                row[i].clone()
+            })
+        };
+        assert_eq!(enz(Vec::new()), ["1", "0", "1"]);
+        assert_eq!(enz(vec![model::enzyme::Enzyme::GluC]), ["1", "1", "2"]);
+    }
+
+    #[test]
+    fn pin_charge_columns_cover_declared_charges_outside_range() {
+        let params = make_params(2..=3);
+        let spectra = vec![
+            make_spectrum("Scan 1", 1, 500.0),
+            make_spectrum("Scan 2", 2, 500.0),
+            make_spectrum("Scan 3", 3, 500.0),
+        ];
+        let mut queues = Vec::new();
+        for (i, z) in [(0, 1u8), (1, 2), (2, 6)] {
+            let mut q = TopNQueue::new(10);
+            q.push(make_psm(i, 10.0, 10.0, 0, z));
+            queues.push(q);
+        }
+        let idx = make_empty_search_index();
+        let cands = vec![make_candidate(0, false)];
+        let mut buf = Vec::<u8>::new();
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
+
+        let cols = parse_header(&buf);
+        let charge_cols: Vec<&String> = cols.iter().filter(|c| c.starts_with("charge")).collect();
+        assert_eq!(
+            charge_cols,
+            ["charge1", "charge2", "charge3", "charge4", "charge5", "charge6"]
+        );
+        let rows = parse_rows(&buf);
+        assert_eq!(rows.len(), 3);
+        let first = cols.iter().position(|c| c == "charge1").unwrap();
+        for (row, z) in rows.iter().zip([1usize, 2, 6]) {
+            let hot: Vec<&str> = row[first..first + 6].iter().map(String::as_str).collect();
+            let mut expected = ["0"; 6];
+            expected[z - 1] = "1";
+            assert_eq!(hot, expected, "charge {z}");
+        }
+
+        // PSMs inside the range leave the columns at the `--charge` range.
+        let mut buf = Vec::<u8>::new();
+        write_pin_to(
+            &mut buf,
+            &spectra[1..2],
+            &queues[1..2],
+            &cands,
+            &params,
+            &idx,
+        )
+        .unwrap();
+        let cols = parse_header(&buf);
+        let charge_cols: Vec<&String> = cols.iter().filter(|c| c.starts_with("charge")).collect();
+        assert_eq!(charge_cols, ["charge2", "charge3"]);
     }
 
     // ── Test: chimeric SpecId uniqueness for co-fragmented peptides ─────────

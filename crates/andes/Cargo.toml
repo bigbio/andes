@@ -26,8 +26,8 @@ rayon = "1.10"
 rustc-hash = "2"
 arrow = "53"
 parquet = "53"
-# Temp PIN destination for `--rescore` without `--output-pin` (and the
-# `--keep-pin false` path).
+# Temp PIN destination for `--rescore` with `--keep-pin false` and no
+# `--output-pin`.
 tempfile = "3.10"
 
 [features]

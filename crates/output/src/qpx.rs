@@ -72,8 +72,12 @@ const CREATOR: &str = "andes";
 /// pool; `search_index` resolves protein accessions; `params`/`fragment_tol`
 /// populate `search_params.parquet` (`fragment_tol` is the resolved per-model
 /// `param.mme`). `run_id` is a stable identifier for this run, written into the
-/// `run_identifier` column of every row. `primary_ms_run_paths` are the input
-/// spectrum file paths.
+/// `run_identifier` column of every row; it is the join key to
+/// `search_params.parquet`, whose one row lists every input. `primary_ms_run_paths`
+/// are the input spectrum file paths, and `run_ends[r]` is the exclusive end
+/// index in `spectra` of input `r` (spectra are concatenated in input order):
+/// each PSM row's `reference_file_name` is the path of the input its spectrum
+/// came from.
 ///
 /// `rescore` is an optional `SpecId → PercolatorPsm` map (from a `--rescore`
 /// Percolator run). When `Some`, each row's `posterior_error_probability` is
@@ -93,12 +97,25 @@ pub fn write_qpx(
     fragment_tol: &Tolerance,
     run_id: &str,
     primary_ms_run_paths: &[String],
+    run_ends: &[usize],
     rescore: Option<&HashMap<String, PercolatorPsm>>,
     rescore_decoys: Option<&HashSet<String>>,
 ) -> std::io::Result<()> {
+    if run_ends.len() != primary_ms_run_paths.len()
+        || run_ends.windows(2).any(|w| w[0] > w[1])
+        || run_ends.last().copied().unwrap_or(0) != spectra.len()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "QPX: run_ends {:?} do not partition {} spectra over {} inputs",
+                run_ends,
+                spectra.len(),
+                primary_ms_run_paths.len()
+            ),
+        ));
+    }
     std::fs::create_dir_all(out_dir)?;
-
-    let reference_file = primary_ms_run_paths.first().cloned().unwrap_or_default();
 
     // When rescoring is on, audit the Percolator join over the whole run before
     // writing any row (fail loud on target rows with no result rather than emit
@@ -121,14 +138,19 @@ pub fn write_qpx(
     let batches = spectra
         .chunks(1024)
         .zip(queues.chunks(1024))
-        .map(|(spectra, queues)| {
+        .enumerate()
+        .map(|(chunk, (spectra, queues))| {
+            let first = chunk * 1024;
+            let reference_files: Vec<&str> = (first..first + spectra.len())
+                .map(|i| primary_ms_run_paths[run_ends.partition_point(|&end| end <= i)].as_str())
+                .collect();
             let batch = build_psms_batch(
                 spectra,
                 queues,
                 candidates,
                 search_index,
                 run_id,
-                &reference_file,
+                &reference_files,
                 rescore,
                 &competed_away,
                 row_offset,
@@ -489,7 +511,7 @@ fn build_psms_batch(
     candidates: &[Candidate],
     search_index: &SearchIndex,
     run_id: &str,
-    reference_file: &str,
+    reference_files: &[&str],
     rescore: Option<&HashMap<String, PercolatorPsm>>,
     competed_away: &HashSet<String>,
     row_offset: usize,
@@ -596,7 +618,7 @@ fn build_psms_batch(
             } else {
                 predicted_rt.append_null();
             }
-            reference_file_name.append_value(reference_file);
+            reference_file_name.append_value(reference_files[spec_idx]);
             cv_params.append_null();
             scan.append_value(scan_num);
             match spec.rt_seconds {
@@ -638,13 +660,18 @@ fn build_psms_batch(
             }
             run_identifier.append_value(run_id);
 
-            // Spectrum peak arrays (charge/ion-type unknown → null lists).
+            // Spectrum peak arrays (charge/ion-type unknown → null lists). The
+            // search releases a spectrum's peaks once it is scored unless a later
+            // pass re-reads them, so a scored spectrum with no peaks here had its
+            // peaks dropped: write null lists, not empty ones that would claim
+            // the spectrum has no peaks.
+            let has_peaks = !spec.peaks.is_empty();
             for &(mz, inten) in &spec.peaks {
                 mz_array.values().append_value(mz as f32);
                 intensity_array.values().append_value(inten);
             }
-            mz_array.append(true);
-            intensity_array.append(true);
+            mz_array.append(has_peaks);
+            intensity_array.append(has_peaks);
             charge_array.append(false);
             ion_type_array.append(false);
 

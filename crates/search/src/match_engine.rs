@@ -422,9 +422,14 @@ impl<'a> PreparedSearch<'a> {
 
     /// Drain the scan accumulator into `self.candidates` so downstream
     /// consumers (PIN/TSV writers) resolve `candidate_idxs` against the final
-    /// materialized candidate slice. Idempotent.
+    /// materialized candidate slice. The accumulator is left empty, identity map
+    /// included, so a later scan interns from index 0 instead of returning
+    /// indices into the drained store.
     pub fn sync_materialized_candidates(&mut self) {
-        let materialized = std::mem::take(&mut self.mmap_accum.lock().unwrap().candidates);
+        let mut accum = self.mmap_accum.lock().unwrap();
+        let materialized = std::mem::take(&mut accum.candidates);
+        accum.index_of = Default::default();
+        drop(accum);
         self.candidates = materialized;
     }
 
@@ -2278,6 +2283,44 @@ pub(crate) fn compute_psm_features_with_edge(
 }
 
 // ── Unit tests for feature columns ───────────────────────────────────────────
+
+#[cfg(test)]
+mod accumulator_tests {
+    use super::*;
+    use model::{AminoAcidSetBuilder, Protein, ProteinDb};
+
+    /// After the accumulator is drained, a candidate interned again gets a fresh
+    /// index into the new store, not its index in the drained one.
+    #[test]
+    fn sync_resets_the_identity_map() {
+        let db = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "".into(),
+                sequence: b"MKWVTFISLLRKDAFLGSFLYEYSRK".to_vec(),
+            }],
+        };
+        let idx = SearchIndex::from_target_db(&db, "XXX");
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let params = SearchParams::default_tryptic(aa_set);
+        let scorer = crate::coisolation::tests::tiny_scorer();
+        let mut prepared =
+            PreparedSearch::prepare_in_memory(&idx, &params, &scorer, 0.02, "XXX").unwrap();
+        let cands = prepared.out_of_core_candidates_where(|_, _| true);
+        assert!(cands.len() >= 2);
+        {
+            let mut accum = prepared.mmap_accum.lock().unwrap();
+            assert_eq!(accum.intern(cands[0].clone()), 0);
+            assert_eq!(accum.intern(cands[1].clone()), 1);
+        }
+        prepared.sync_materialized_candidates();
+        assert_eq!(prepared.candidates.len(), 2);
+        let mut accum = prepared.mmap_accum.lock().unwrap();
+        assert!(accum.index_of.is_empty());
+        assert_eq!(accum.intern(cands[1].clone()), 0);
+        assert_eq!(accum.candidates.len(), 1);
+    }
+}
 
 #[cfg(test)]
 mod charges_to_try_tests {

@@ -187,6 +187,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         return Err("no --spectrum inputs".into());
     }
     let mut cli = cli;
+    if cli.top_n == 0 {
+        return Err("--top-n must be at least 1".into());
+    }
     // `--mbr`: the per-run artifacts go to `--quant-dir`, or to a temporary
     // directory that lives until the end of the run.
     let mut _mbr_tmp: Option<tempfile::TempDir> = None;

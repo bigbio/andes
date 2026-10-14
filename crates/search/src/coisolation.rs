@@ -382,7 +382,7 @@ pub(crate) fn search_secondary(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::search_index::SearchIndex;
     use model::isotope::averagine_isotope_envelope;
@@ -469,7 +469,7 @@ mod tests {
 
     /// Minimal RankScorer (mirrors `tests/match_engine_smoke.rs::tiny_scorer`):
     /// non-trivial prefix/suffix rank tables so b/y matches earn positive score.
-    fn tiny_scorer() -> RankScorer {
+    pub(crate) fn tiny_scorer() -> RankScorer {
         let part = Partition {
             charge: 2,
             parent_mass: 500.0,

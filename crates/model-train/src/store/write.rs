@@ -42,10 +42,15 @@ pub struct SourceLedger {
     pub n_psms: i64,
     /// ISO 8601 date string (e.g. `"2026-01-01"`).
     pub date: String,
-    /// Relative weight applied when mixing this source into training.
+    /// Relative weight applied when mixing this source into training, before
+    /// any age decay.
     pub weight: f32,
     /// FDR threshold used to select confident PSMs from this source.
     pub train_fdr: f32,
+    /// Half-life (days) of the exponential age decay applied to `weight` each
+    /// time the model is re-estimated, measured from `date` to the day of
+    /// estimation. `None` ⇒ the source is not decayed.
+    pub decay_half_life_days: Option<f32>,
     /// Instrument label (e.g. `"QExactive"`).
     pub instrument: String,
     /// Experiment class slug(s) (e.g. `"standard"`, `"tmt"`).
@@ -392,6 +397,7 @@ fn build_manifest_batch(
         null_utf8.clone(), // date
         null_f32.clone(),  // weight
         null_f32.clone(),  // train_fdr
+        null_f32.clone(),  // decay_half_life_days
         null_utf8.clone(), // src_instrument
         null_utf8.clone(), // src_experiment_class
         null_int64_list,   // counts
@@ -727,6 +733,7 @@ fn build_table_batch(
         null_utf8.clone(), // date
         null_f32.clone(),  // weight
         null_f32.clone(),  // train_fdr
+        null_f32.clone(),  // decay_half_life_days
         null_utf8.clone(), // src_instrument
         null_utf8.clone(), // src_experiment_class
         null_int64_list,   // counts
@@ -990,6 +997,7 @@ fn build_source_batch(
     let mut date_b = StringBuilder::new();
     let mut weight_b = Float32Builder::new();
     let mut train_fdr_b = Float32Builder::new();
+    let mut decay_b = Float32Builder::new();
     let mut src_instrument_b = StringBuilder::new();
     let mut src_experiment_class_b = StringBuilder::new();
 
@@ -1000,6 +1008,7 @@ fn build_source_batch(
         date_b.append_value(&ledger.date);
         weight_b.append_value(ledger.weight);
         train_fdr_b.append_value(ledger.train_fdr);
+        decay_b.append_option(ledger.decay_half_life_days);
         src_instrument_b.append_value(&ledger.instrument);
         src_experiment_class_b.append_value(&ledger.experiment_class);
     }
@@ -1073,6 +1082,7 @@ fn build_source_batch(
         Arc::new(date_b.finish()),
         Arc::new(weight_b.finish()),
         Arc::new(train_fdr_b.finish()),
+        Arc::new(decay_b.finish()),
         Arc::new(src_instrument_b.finish()),
         Arc::new(src_experiment_class_b.finish()),
         // stat-only → null
@@ -1366,6 +1376,7 @@ fn build_stat_batch(
         null_utf8.clone(), // date
         null_f32.clone(),  // weight
         null_f32.clone(),  // train_fdr
+        null_f32.clone(),  // decay_half_life_days
         null_utf8.clone(), // src_instrument
         null_utf8.clone(), // src_experiment_class
         counts_arr,

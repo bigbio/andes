@@ -94,6 +94,7 @@ fn make_ledger(id: &str) -> SourceLedger {
         date: "2026-01-01".to_string(),
         weight: 1.0,
         train_fdr: 0.01,
+        decay_half_life_days: None,
         instrument: "QExactive".to_string(),
         experiment_class: "standard".to_string(),
     }
@@ -416,4 +417,44 @@ fn update_keeps_gbdt_models_byte_identical() {
     ] {
         assert_eq!(gbdt_blobs(&candidate), before);
     }
+}
+
+/// Decay is a function of source age, not of how often it runs: decaying,
+/// committing and decaying again on the same day yields the same ledger and
+/// the same candidate as a single decay, and the base weight is kept.
+#[test]
+fn repeated_decay_on_same_day_equals_one_decay() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("m.parquet");
+
+    let param = fixture_param();
+    let mut old = make_ledger("s0");
+    old.date = "2020-01-01".to_string();
+    let recent = make_ledger("s1");
+    write_model_with_sources(
+        &path,
+        "m",
+        &param,
+        &[(old, make_stats_s0()), (recent, make_stats_s1())],
+        None,
+    )
+    .unwrap();
+
+    let cfg = EstimatorConfig::default();
+    let (undecayed, _) = update_reweight(&path, "m", "s0", 1.0, cfg.clone()).unwrap();
+    let (once, once_sources) = update_decay(&path, "m", 30.0, cfg.clone()).unwrap();
+    assert_ne!(once, undecayed, "decay must change the estimate");
+    commit_update(&path, "m", &once, &once_sources).unwrap();
+
+    let (twice, twice_sources) = update_decay(&path, "m", 30.0, cfg.clone()).unwrap();
+    assert_eq!(twice, once, "second same-day decay must not compound");
+    for (l, _) in &twice_sources {
+        assert_eq!(l.weight, 1.0, "ledger keeps the undecayed base weight");
+        assert_eq!(l.decay_half_life_days, Some(30.0));
+    }
+    commit_update(&path, "m", &twice, &twice_sources).unwrap();
+
+    // The recorded half-life persists, so a later reweight keeps the decay.
+    let (reweighted, _) = update_reweight(&path, "m", "s1", 1.0, cfg).unwrap();
+    assert_eq!(reweighted, once, "reweight must keep the recorded decay");
 }

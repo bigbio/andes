@@ -710,6 +710,7 @@ pub(crate) fn run_train_from_search(
         date: date_str,
         weight: 1.0,
         train_fdr: args.train_fdr as f32,
+        decay_half_life_days: None,
         instrument: args.instrument.clone(),
         experiment_class: args.protocol.clone(),
     };
@@ -1224,6 +1225,7 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
         date: format_today_iso8601(),
         weight: 1.0,
         train_fdr: 1.0, // sentinel: input is pre-labeled, no q-value filtering here
+        decay_half_life_days: None,
         instrument: trained_param.data_type.instrument.name().to_string(),
         experiment_class: trained_param.data_type.protocol.name().to_string(),
     };
@@ -1427,6 +1429,7 @@ pub(crate) fn run_train_update(
             date: date_str,
             weight: 1.0,
             train_fdr: args.train_fdr as f32,
+            decay_half_life_days: None,
             instrument: args.instrument.clone(),
             experiment_class: args.protocol.clone(),
         };

@@ -2,10 +2,10 @@
 
 use std::path::PathBuf;
 
-use crate::model_select::{load_seed_param, ModelEntryOwned};
+use crate::model_select::load_seed_param;
 use crate::train::{read_msnet_parquet, MsnetPsm};
 use clap::{Args, ValueEnum};
-use model_train::{store::write_all_models_with_sources_and_gbdt_pub, ModelStore};
+use model_train::store::{attach_to_model, ensure_single_file_store};
 use scoring_crate::RankScorer;
 
 /// GBDT training mode for `andes train`.
@@ -32,8 +32,10 @@ pub(crate) struct TrainIntensityGbdtArgs {
     #[arg(long = "in", required = true)]
     pub(crate) inputs: Vec<PathBuf>,
 
-    /// Path to the Parquet model store to write (created if absent; existing
-    /// models are preserved and re-written alongside the new one). REQUIRED.
+    /// Single-file Parquet model store to write (created if absent; other
+    /// models are preserved). When `--model-id` already exists there, only its
+    /// fragment-intensity GBDT is replaced; its rank tables, other GBDTs and source
+    /// ledger are kept. REQUIRED.
     #[arg(long = "out-store", required = true)]
     pub(crate) out_store: PathBuf,
 
@@ -72,8 +74,10 @@ pub(crate) struct TrainRichIonLlrArgs {
     #[arg(long = "in", required = true)]
     pub(crate) inputs: Vec<PathBuf>,
 
-    /// Path to the Parquet model store to write (created if absent; existing
-    /// models are preserved and re-written alongside the new one). REQUIRED.
+    /// Single-file Parquet model store to write (created if absent; other
+    /// models are preserved). When `--model-id` already exists there, only its
+    /// rich-ion GBDT is replaced; its rank tables, other GBDTs and source
+    /// ledger are kept. REQUIRED.
     #[arg(long = "out-store", required = true)]
     pub(crate) out_store: PathBuf,
 
@@ -102,7 +106,8 @@ pub(crate) struct TrainRichIonLlrArgs {
 ///
 /// The function reuses `read_msnet_parquet` / `load_seed_param` / `RankScorer`
 /// from the `run_train` path and delegates the store write to
-/// `write_all_models_with_sources_and_gbdt_pub`, preserving all other models.
+/// `attach_to_model`, preserving the target model's other content and all
+/// other models.
 pub(crate) fn run_train_intensity_gbdt(
     args: TrainIntensityGbdtArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -116,6 +121,7 @@ pub(crate) fn run_train_intensity_gbdt(
     let seed = args.seed_model.clone();
     let t = args.threads;
     eprintln!("train-intensity-gbdt: in={n_files} model_id={model_id} seed={seed} threads={t}");
+    ensure_single_file_store(&args.out_store)?;
 
     let t0 = std::time::Instant::now();
 
@@ -184,64 +190,17 @@ pub(crate) fn run_train_intensity_gbdt(
         trained_frag.trees.len()
     );
 
-    // ── 6. Embed the trained model in the seed Param ──────────────────────────
-    // The seed Param supplies selection columns (activation/instrument/enzyme/
-    // protocol) so model routing works; we stamp the frag model onto it.
-    let mut out_param = seed_param;
-    out_param.frag_intensity_model = Some(Arc::new(trained_frag));
-
-    // ── 7. Write to store, preserving existing models ─────────────────────────
+    // ── 6. Attach the trained model to --model-id in --out-store ─────────────
+    // An existing model keeps its rank tables, other GBDTs and source ledger;
+    // a new one starts from the seed Param, whose selection columns
+    // (activation/instrument/enzyme/protocol) route it.
     let store_path = &args.out_store;
-
-    {
-        let mut existing_other: Vec<ModelEntryOwned> = Vec::new();
-        let mut existing_blobs: Vec<Option<Vec<u8>>> = Vec::new();
-        if store_path.exists() {
-            let store = ModelStore::open(store_path)
-                .map_err(|e| format!("opening existing store {}: {e}", store_path.display()))?;
-            for id in store.model_ids() {
-                if id == args.model_id {
-                    eprintln!("train-intensity-gbdt: overwriting existing model '{id}' in store");
-                    continue;
-                }
-                let p = store
-                    .load_param(&id)
-                    .map_err(|e| format!("reading model '{id}': {e}"))?;
-                let blob = p.gbdt_peak_model.as_ref().map(|m| m.to_bytes());
-                let src_ledgers = store.load_sources(&id).unwrap_or_default();
-                let mut src = Vec::new();
-                for l in src_ledgers {
-                    if let Ok(s) = store.load_source_stats(&id, &l.source_id) {
-                        src.push((l, s));
-                    }
-                }
-                existing_other.push((id, p, src));
-                existing_blobs.push(blob);
-            }
-        }
-
-        // New model has no rank-core sources; sources slice is empty.
-        let mut all_entries: Vec<ModelEntryOwned> = Vec::new();
-        all_entries.push((args.model_id.clone(), out_param, vec![]));
-        for (id, p, src) in existing_other {
-            all_entries.push((id, p, src));
-        }
-
-        // New model carries no separate GBDT peak-model blob (the frag-intensity
-        // model is embedded directly on Param.frag_intensity_model, not in the
-        // gbdt_model_bytes column).  Existing models' blobs are preserved.
-        let mut all_blobs: Vec<Option<Vec<u8>>> = vec![None];
-        all_blobs.extend(existing_blobs);
-
-        write_all_models_with_sources_and_gbdt_pub(
-            store_path,
-            &all_entries
-                .iter()
-                .map(|(id, p, s)| (id.as_str(), p, s.as_slice()))
-                .collect::<Vec<_>>(),
-            &all_blobs,
-        )
-        .map_err(|e| format!("writing model store {}: {e}", store_path.display()))?;
+    let existed = attach_to_model(store_path, &model_id, seed_param, |p| {
+        p.frag_intensity_model = Some(Arc::new(trained_frag));
+    })
+    .map_err(|e| format!("writing model store {}: {e}", store_path.display()))?;
+    if existed {
+        eprintln!("train-intensity-gbdt: replaced the frag model of existing '{model_id}'");
     }
 
     eprintln!(
@@ -259,7 +218,8 @@ pub(crate) fn run_train_intensity_gbdt(
 ///
 /// The function reuses `read_msnet_parquet` / `load_seed_param` / `RankScorer`
 /// from the `run_train` path and delegates the store write to
-/// `write_all_models_with_sources_and_gbdt_pub`, preserving all other models.
+/// `attach_to_model`, preserving the target model's other content and all
+/// other models.
 pub(crate) fn run_train_rich_ion_llr(
     args: TrainRichIonLlrArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -273,6 +233,7 @@ pub(crate) fn run_train_rich_ion_llr(
     let seed = args.seed_model.clone();
     let t = args.threads;
     eprintln!("train-rich-ion-llr: in={n_files} model_id={model_id} seed={seed} threads={t}");
+    ensure_single_file_store(&args.out_store)?;
 
     let t0 = std::time::Instant::now();
 
@@ -339,64 +300,17 @@ pub(crate) fn run_train_rich_ion_llr(
         trained_rich_ion.trees.len()
     );
 
-    // ── 6. Embed the trained model in the seed Param ──────────────────────────
-    // The seed Param supplies selection columns (activation/instrument/enzyme/
-    // protocol) so model routing works; we stamp the rich-ion model onto it.
-    let mut out_param = seed_param;
-    out_param.rich_ion_model = Some(Arc::new(trained_rich_ion));
-
-    // ── 7. Write to store, preserving existing models ─────────────────────────
+    // ── 6. Attach the trained model to --model-id in --out-store ─────────────
+    // An existing model keeps its rank tables, other GBDTs and source ledger;
+    // a new one starts from the seed Param, whose selection columns
+    // (activation/instrument/enzyme/protocol) route it.
     let store_path = &args.out_store;
-
-    {
-        let mut existing_other: Vec<ModelEntryOwned> = Vec::new();
-        let mut existing_blobs: Vec<Option<Vec<u8>>> = Vec::new();
-        if store_path.exists() {
-            let store = ModelStore::open(store_path)
-                .map_err(|e| format!("opening existing store {}: {e}", store_path.display()))?;
-            for id in store.model_ids() {
-                if id == args.model_id {
-                    eprintln!("train-rich-ion-llr: overwriting existing model '{id}' in store");
-                    continue;
-                }
-                let p = store
-                    .load_param(&id)
-                    .map_err(|e| format!("reading model '{id}': {e}"))?;
-                let blob = p.gbdt_peak_model.as_ref().map(|m| m.to_bytes());
-                let src_ledgers = store.load_sources(&id).unwrap_or_default();
-                let mut src = Vec::new();
-                for l in src_ledgers {
-                    if let Ok(s) = store.load_source_stats(&id, &l.source_id) {
-                        src.push((l, s));
-                    }
-                }
-                existing_other.push((id, p, src));
-                existing_blobs.push(blob);
-            }
-        }
-
-        // New model has no rank-core sources; sources slice is empty.
-        let mut all_entries: Vec<ModelEntryOwned> = Vec::new();
-        all_entries.push((args.model_id.clone(), out_param, vec![]));
-        for (id, p, src) in existing_other {
-            all_entries.push((id, p, src));
-        }
-
-        // New model carries no separate GBDT peak-model blob (the rich-ion
-        // model is embedded directly on Param.rich_ion_model, not in the
-        // gbdt_model_bytes column).  Existing models' blobs are preserved.
-        let mut all_blobs: Vec<Option<Vec<u8>>> = vec![None];
-        all_blobs.extend(existing_blobs);
-
-        write_all_models_with_sources_and_gbdt_pub(
-            store_path,
-            &all_entries
-                .iter()
-                .map(|(id, p, s)| (id.as_str(), p, s.as_slice()))
-                .collect::<Vec<_>>(),
-            &all_blobs,
-        )
-        .map_err(|e| format!("writing model store {}: {e}", store_path.display()))?;
+    let existed = attach_to_model(store_path, &model_id, seed_param, |p| {
+        p.rich_ion_model = Some(Arc::new(trained_rich_ion));
+    })
+    .map_err(|e| format!("writing model store {}: {e}", store_path.display()))?;
+    if existed {
+        eprintln!("train-rich-ion-llr: replaced the rich-ion model of existing '{model_id}'");
     }
 
     eprintln!(

@@ -373,6 +373,47 @@ pub fn commit_update(
     Ok(())
 }
 
+/// Attach separately trained components (e.g. a fragment-intensity or rich-ion
+/// GBDT) to `model_id` in the single-file store at `path`, keeping everything
+/// else about the model.
+///
+/// When the store already holds `model_id`, that model — its rank tables,
+/// its other GBDT blobs and its source ledger with per-source stats — is the
+/// base. Otherwise `fallback` (typically the seed model the components were
+/// trained against) is the base and the model starts with no sources. `attach`
+/// edits the base, and the result is committed with [`commit_update`], so all
+/// other models in the store are preserved. Returns whether `model_id`
+/// already existed.
+pub fn attach_to_model(
+    path: &Path,
+    model_id: &str,
+    fallback: Param,
+    attach: impl FnOnce(&mut Param),
+) -> Result<bool, TrainError> {
+    ensure_single_file_store(path)?;
+    let existing = if path.exists() {
+        let store = ModelStore::open(path)?;
+        if store.model_ids().iter().any(|id| id == model_id) {
+            let param = store.load_param(model_id)?;
+            let mut sources = Vec::new();
+            for l in store.load_sources(model_id)? {
+                let s = store.load_source_stats(model_id, &l.source_id)?;
+                sources.push((l, s));
+            }
+            Some((param, sources))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let existed = existing.is_some();
+    let (mut param, sources) = existing.unwrap_or((fallback, Vec::new()));
+    attach(&mut param);
+    commit_update(path, model_id, &param, &sources)?;
+    Ok(existed)
+}
+
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------

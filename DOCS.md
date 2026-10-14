@@ -234,18 +234,25 @@ chain's cut sites, so each terminal peptide of the target has a decoy peptide of
 and mass. A plain reverse would move the cut sites, and could leave a chain with no admissible
 decoy peptide at all.
 
-**Provenance columns.** Each PIN row says which kind of entry its peptide is specific to:
-`IsVariant`, `IsIsoform`, `IsChain`. A peptide shared with a canonical (or FASTA) entry is
-canonical and sets none. `RefCompetitor` is 1 when a canonical candidate was scored for the
-spectrum, and `DeltaRefScore` is a non-canonical row's score minus the best canonical
-candidate's: how much better the alternative sequence explains the spectrum than the canonical
-one. `IsotopeMimic` is 1 when the precursor fits better if the row's isotope-like deltas
+**Provenance columns.** Each PIN row says which kinds of entry its peptide comes from:
+`IsVariant`, `IsIsoform`, `IsChain` are 1 when any protein of the peptide is such an entry, also
+when the canonical entry has the same peptide. (Counting a shared peptide as canonical would set
+the flags on decoys more often than on targets, because decoy entries do not keep the peptides
+their targets share, and Percolator would learn the label.) A peptide is specific evidence for an
+alternative sequence only when its `Proteins` column names no canonical entry. `RefCompetitor`
+is 1 when a canonical candidate with another peptidoform was scored for the spectrum, and
+`DeltaRefScore` is a flagged row's score minus the best such candidate's: how much better the
+alternative explains the spectrum than the best canonical peptide. `IsotopeMimic` is 1 when the precursor fits better if the row's isotope-like deltas
 (deamidation, or an N→D / Q→E substitution) are read as isotope steps, the signature of an
 unmodified canonical peptide picked on its M+1 peak. Decoy rows carry their target entry's
 class. All six are Percolator features. For an error rate per class, run Percolator once and
 estimate FDR separately on each class's rows afterwards. Chimeric co-isolation rows (Pass 2 of
-`--chimeric`) get `RefCompetitor` and `DeltaRefScore` = 0; the glyco PIN leaves all six out. The TSV adds `ProteinFamily`, `EntryKind` and `FeatureIds` for the named
+`--chimeric`) get `RefCompetitor` and `DeltaRefScore` = 0; the glyco PIN leaves all six out.
+`--refine` Pass-2 rows keep the provenance of the entry their backbone came from. The TSV adds `ProteinFamily`, `EntryKind` and `FeatureIds` for the named
 protein.
+
+`--decoy-strategy shuffle` is refused when the database holds isoform or mature-chain entries:
+shuffled decoys do not keep the peptides those entries share with their canonical entry.
 
 With `--uniprot-variants`, restricting an artefact mod (deamidation, oxidation, carbamylation,
 methylation) to annotated sites removes the canonical explanation that competes with a variant
@@ -541,11 +548,11 @@ the fused strong score Percolator weights most; historically `StrongScore`; it a
 | 65 | `DeltaRT` | float | signed | Observed − predicted retention time (min); 0 without RT. |
 | 66 | `AbsDeltaRT` | float | ≥0 | `|DeltaRT|`. |
 | 67 | `DeltaRTNorm` | float | signed | `DeltaRT` divided by the run's gradient span. |
-| 68 | `IsVariant` | 0/1 | — | The peptide is specific to UniProt natural-variant entries (§1a, provenance). |
-| 69 | `IsIsoform` | 0/1 | — | Specific to isoform entries. |
-| 70 | `IsChain` | 0/1 | — | Specific to mature-chain entries. |
-| 71 | `RefCompetitor` | 0/1 | — | A candidate from a canonical (or FASTA) entry was scored for the spectrum. |
-| 72 | `DeltaRefScore` | float | signed | Non-canonical rows: `RankScore` minus the best canonical candidate's; 0 otherwise. |
+| 68 | `IsVariant` | 0/1 | — | A protein of the peptide is a UniProt natural-variant entry (§1a, provenance). |
+| 69 | `IsIsoform` | 0/1 | — | A protein of the peptide is an isoform entry. |
+| 70 | `IsChain` | 0/1 | — | A protein of the peptide is a mature-chain entry. |
+| 71 | `RefCompetitor` | 0/1 | — | A canonical (or FASTA) candidate with another peptidoform was scored for the spectrum. |
+| 72 | `DeltaRefScore` | float | signed | Flagged rows: `RankScore` minus that best canonical candidate's; 0 otherwise. |
 | 73 | `IsotopeMimic` | 0/1 | — | The precursor fits better when isotope-like deltas (deamidation, N→D, Q→E) are read as isotope steps. |
 | 74 | `Peptide` | string | — | `pre.SEQUENCE.post` with `+mass` mod annotations. |
 | 75 | `Proteins` | string | — | Protein accession(s), tab-separated; decoys carry `--decoy-prefix`. A UniProt variant entry names its change (`sp\|P04637_VAR_005851_D7H\|P53_HUMAN`), an isoform its id (`sp\|P04637-2\|P53_HUMAN`), a mature chain its feature id (`sp\|P02769_PRO_0000001058\|ALBU_BOVIN`). |

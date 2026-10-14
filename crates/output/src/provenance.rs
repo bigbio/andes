@@ -22,12 +22,12 @@ pub fn populate_provenance_features(
 }
 
 fn set_features(psm: &mut PsmMatch, candidates: &[Candidate], idx: &SearchIndex) {
-    let (mut reference, mut variant, mut isoform, mut chain) = (false, false, false, false);
+    let (mut variant, mut isoform, mut chain) = (false, false, false);
     let mut variant_gap = 0.0;
     for &ci in &psm.candidate_idxs {
         let protein = &idx.db.proteins[candidates[ci as usize].protein_index];
         match protein.entry_kind() {
-            EntryKind::Reference => reference = true,
+            EntryKind::Reference => {}
             EntryKind::Isoform => isoform = true,
             EntryKind::Chain => chain = true,
             EntryKind::Variant => {
@@ -38,11 +38,18 @@ fn set_features(psm: &mut PsmMatch, candidates: &[Candidate], idx: &SearchIndex)
     }
     let rounded = psm.score.round();
     let peptide = &candidates[psm.primary_candidate_idx() as usize].peptide;
+    // A flag is set when ANY protein of the peptide is of that kind, shared
+    // with a Reference entry or not. Decoy generators do not keep a decoy
+    // peptide shared with the decoy canonical (shuffle permutes each entry on
+    // its own; a chain decoy is pseudo-reversed, its canonical fully
+    // reversed), so "shared means reference" would set flags on decoys more
+    // often than on targets, and Percolator would learn the label.
     let f = &mut psm.features;
-    f.is_variant = (!reference && variant) as u32;
-    f.is_isoform = (!reference && isoform) as u32;
-    f.is_chain = (!reference && chain) as u32;
-    f.delta_ref_score = if !reference && f.ref_competitor == 1 {
+    f.is_variant = variant as u32;
+    f.is_isoform = isoform as u32;
+    f.is_chain = chain as u32;
+    let alternative = variant || isoform || chain;
+    f.delta_ref_score = if alternative && f.ref_competitor == 1 {
         rounded - f.ref_best_raw
     } else {
         0.0
@@ -162,8 +169,30 @@ mod tests {
     }
 
     #[test]
-    fn shared_peptide_is_reference() {
+    fn shared_peptide_carries_every_kind_it_maps_to() {
+        // A peptide in the canonical entry and its isoform is flagged as
+        // isoform: decoy generators do not keep a decoy peptide shared with
+        // the decoy canonical, so "shared means reference" would set the flag
+        // on decoys more often than on targets.
         let (idx, cands, mut queues) = fixture();
+        queues[0].update_in_place(|p| {
+            p.features.ref_competitor = 1;
+            p.features.ref_best_raw = 35.0;
+        });
+        populate_provenance_features(&mut queues, &cands, &idx);
+        let f = features(&queues[0]);
+        assert_eq!((f.is_variant, f.is_isoform, f.is_chain), (0, 1, 0));
+        assert_eq!(f.delta_ref_score, 5.0);
+    }
+
+    #[test]
+    fn reference_only_row_has_no_flags_and_no_gap() {
+        let (idx, cands, _) = fixture();
+        let mut queues = vec![queue(psm(vec![0], 40.0))];
+        queues[0].update_in_place(|p| {
+            p.features.ref_competitor = 1;
+            p.features.ref_best_raw = 35.0;
+        });
         populate_provenance_features(&mut queues, &cands, &idx);
         let f = features(&queues[0]);
         assert_eq!((f.is_variant, f.is_isoform, f.is_chain), (0, 0, 0));

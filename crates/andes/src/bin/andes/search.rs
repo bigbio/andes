@@ -312,6 +312,26 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 cli.decoy_strategy
             )
         })?;
+    // Isoform and chain entries share most peptides with their canonical
+    // entry. A shuffled decoy is permuted per entry, so the decoys share none,
+    // and the provenance columns (and the decoy search space) would differ
+    // between targets and decoys.
+    if decoy_strategy == search::decoy::DecoyStrategy::Shuffle
+        && target_db.proteins.iter().any(|p| {
+            matches!(
+                p.entry_kind(),
+                model::EntryKind::Isoform | model::EntryKind::Chain
+            )
+        })
+    {
+        return Err(
+            "--decoy-strategy shuffle cannot search isoform or mature-chain entries \
+                    (--uniprot-isoforms, --uniprot-chains): shuffled decoys do not keep the \
+                    peptides these entries share with their canonical entry. Use \
+                    --decoy-strategy reverse."
+                .into(),
+        );
+    }
     let t_phase = std::time::Instant::now();
     let idx = SearchIndex::from_target_db_for(
         &target_db,

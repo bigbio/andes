@@ -188,3 +188,22 @@ fn restricted_artefact_mods_warn_only_with_variants() {
     );
     assert!(!String::from_utf8_lossy(&out.stderr).contains(warning));
 }
+
+#[test]
+fn shuffle_decoys_are_refused_with_isoforms_or_chains() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_andes"))
+        .arg("--spectrum")
+        .arg(fixture("test-fixtures/test.mgf.gz"))
+        .arg("--database")
+        .arg(fixture("test-fixtures/BSA.xml.gz"))
+        .arg("--output-pin")
+        .arg(dir.path().join("x.pin"))
+        .args(["--decoy-strategy", "shuffle", "--uniprot-chains"])
+        .args(["--uniprot-evidence", "curated"])
+        .output()
+        .expect("run andes");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--decoy-strategy shuffle"), "{stderr}");
+}

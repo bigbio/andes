@@ -708,12 +708,16 @@ impl UniProtEntry {
         let description = self.fasta_description();
         let sites = self.mod_sites(None, &self.sequence, opts, stats);
         stats.mod_sites += sites.len();
+        // The canonical entry carries its family accession too, so every entry
+        // of a family reports the same family.
         let mut out = vec![Protein {
             accession,
             description: description.clone(),
             sequence: self.sequence.clone(),
-            annotation: (!sites.is_empty())
-                .then(|| Arc::new(ProteinAnnotation::new(sites.clone(), None))),
+            annotation: Some(Arc::new(
+                ProteinAnnotation::new(sites.clone(), None)
+                    .with_origin(Some(self.origin(EntryKind::Reference, ""))),
+            )),
         }];
 
         if opts.variants {
@@ -1517,8 +1521,10 @@ mod tests {
         assert_eq!(db.proteins[0].sequence, CANONICAL);
         assert_eq!(stats.entries, 2);
         assert_eq!(stats.variant_proteins, 0);
-        // An entry without usable sites carries no annotation at all.
-        assert!(db.proteins[1].annotation.is_none());
+        // An entry without usable sites carries only its origin.
+        let ann = db.proteins[1].annotation.as_deref().unwrap();
+        assert!(ann.mod_sites.is_empty() && ann.variant.is_empty() && ann.chain.is_none());
+        assert_eq!(&*ann.origin.as_ref().unwrap().family, "A0A000");
     }
 
     #[test]
@@ -1633,7 +1639,9 @@ mod tests {
             "{}",
             o.variant_delta_da
         );
-        assert_eq!(db.proteins[0].entry_kind(), model::EntryKind::Reference);
+        let canonical = db.proteins[0].origin().unwrap();
+        assert_eq!(canonical.kind, model::EntryKind::Reference);
+        assert_eq!((&*canonical.family, &*canonical.feature), ("P00001", ""));
 
         let ins = &db.proteins[4];
         assert_eq!(ins.sequence, b"MSEKRSPTKVVVNLSTYKDER");

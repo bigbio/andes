@@ -277,6 +277,9 @@ pub fn build_peptide_anchored_index(
     // silently defeat the fallback, emitting a blank Proteins column -- worse than a
     // synthetic name, because it names nothing AND looks like data.
     base_accessions: &[Option<String>],
+    // Origin of the Pass-1 protein each backbone came from (UniProt isoform,
+    // variant or chain entry), parallel to `base_seqs`; missing means Reference.
+    base_origins: &[Option<model::EntryOrigin>],
     decoy_prefix: &str,
     decoy_strategy: DecoyStrategy,
     seed: u64,
@@ -309,7 +312,12 @@ pub fn build_peptide_anchored_index(
                     .unwrap_or_else(|| format!("BASEPEP_{i}")),
                 description: String::new(),
                 sequence: seq.clone(),
-                annotation: None,
+                // Pass-2 rows keep the provenance of the entry they came from.
+                annotation: base_origins.get(i).cloned().flatten().map(|o| {
+                    std::sync::Arc::new(
+                        model::ProteinAnnotation::new(Vec::new(), None).with_origin(Some(o)),
+                    )
+                }),
             })
             .collect(),
     };
@@ -369,6 +377,8 @@ fn anchored_target_plus_decoy(
                     full.push(seq[seq.len() - 1]);
                     d.sequence = full;
                 }
+                // The target's annotation holds only its origin; the decoy keeps it.
+                d.annotation = t.annotation.clone();
                 d
             }),
     );
@@ -787,6 +797,17 @@ pub fn run_refinement(
         .iter()
         .map(|&(_, pi)| full_target_db.proteins.get(pi).map(|p| p.accession.clone()))
         .collect();
+    let base_origins: Vec<Option<model::EntryOrigin>> = base_with_src
+        .iter()
+        .map(|&(_, pi)| {
+            full_target_db
+                .proteins
+                .get(pi)
+                .and_then(|p| p.origin())
+                .filter(|o| o.kind != model::EntryKind::Reference)
+                .cloned()
+        })
+        .collect();
     // Protein N-terminal status per anchor, decided from the target database (the
     // anchor's own mini-protein always starts at 0, so enumeration cannot tell).
     let mut anchor_nterm = anchors_at_protein_nterm(&base_seqs, full_target_db);
@@ -845,8 +866,14 @@ pub fn run_refinement(
     //    peptide + a 1:1 decoy each. Built as an owned local so it can be MOVED
     //    into the returned `RefinementOutput` once the `PreparedSearch` borrow of
     //    it ends (see below).
-    let refine_idx =
-        build_peptide_anchored_index(&base_seqs, &base_accs, decoy_prefix, decoy_strategy, seed);
+    let refine_idx = build_peptide_anchored_index(
+        &base_seqs,
+        &base_accs,
+        &base_origins,
+        decoy_prefix,
+        decoy_strategy,
+        seed,
+    );
 
     // 4. Pass-2 params: refinement variable-mod tier + the tier's mod cap.
     //    Bound the per-peptide mod cap: the candidate count grows combinatorially
@@ -1461,9 +1488,35 @@ mod tests {
     // ── (c') build_peptide_anchored_index ──────────────────────────────────
 
     #[test]
+    fn anchored_mini_proteins_keep_their_source_origin() {
+        let origin = model::EntryOrigin {
+            kind: model::EntryKind::Variant,
+            family: std::sync::Arc::from("P1"),
+            feature: std::sync::Arc::from("VAR_1"),
+            variant_delta_da: 0.984016,
+        };
+        let base_seqs = vec![b"PEPTIDK".to_vec(), b"SAMPLER".to_vec()];
+        let idx = build_peptide_anchored_index(
+            &base_seqs,
+            &[],
+            &[Some(origin.clone()), None],
+            "XXX",
+            DecoyStrategy::Reverse,
+            42,
+        );
+        assert_eq!(idx.db.proteins[0].origin(), Some(&origin));
+        assert_eq!(idx.db.proteins[1].origin(), None);
+        // The paired decoys carry the same origin as their targets.
+        assert_eq!(idx.db.proteins[2].origin(), Some(&origin));
+        assert_eq!(idx.db.proteins[3].origin(), None);
+        assert!(idx.has_alternative_entries);
+    }
+
+    #[test]
     fn build_peptide_anchored_index_one_mini_protein_per_base_seq_plus_decoys() {
         let base_seqs = vec![b"PEPTIK".to_vec(), b"SAMPLER".to_vec()];
-        let idx = build_peptide_anchored_index(&base_seqs, &[], "XXX", DecoyStrategy::Reverse, 42);
+        let idx =
+            build_peptide_anchored_index(&base_seqs, &[], &[], "XXX", DecoyStrategy::Reverse, 42);
 
         // 2 target mini-proteins + 2 paired Reverse decoys.
         assert_eq!(idx.db.len(), 4);
@@ -1493,7 +1546,8 @@ mod tests {
             b"ACDKNQMR",
         ];
         let base_seqs: Vec<Vec<u8>> = anchors.iter().map(|a| a.to_vec()).collect();
-        let idx = build_peptide_anchored_index(&base_seqs, &[], "XXX", DecoyStrategy::Reverse, 42);
+        let idx =
+            build_peptide_anchored_index(&base_seqs, &[], &[], "XXX", DecoyStrategy::Reverse, 42);
         let n = anchors.len();
         assert_eq!(idx.db.proteins[n].sequence, b"PEDITPEK".to_vec());
         assert_eq!(idx.db.proteins[n + 1].sequence, b"PEDITKPEK".to_vec());

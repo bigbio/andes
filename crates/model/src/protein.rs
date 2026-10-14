@@ -113,10 +113,20 @@ pub enum SiteAnchor {
     CTerminus,
 }
 
-/// The residues a sequence variant changed, in the variant sequence's own
-/// 0-based coordinates: `[start, end)` holds the replacement residues. A
-/// deletion replaces with nothing, so `start == end` and the variant is the
-/// junction between residues `start - 1` and `start`.
+/// Where a sequence variant differs from its canonical sequence, in the
+/// variant sequence's own 0-based coordinates. `start` is the length of the
+/// prefix the two sequences share, and `end` is the variant's length minus
+/// the length of the suffix they share. Every span ending at or before
+/// `start`, or starting at or after `end`, reads exactly like the canonical
+/// sequence at the aligned position.
+///
+/// - A substitution or insertion has `start < end`: `[start, end)` holds the
+///   changed residues.
+/// - A deletion has `start == end`: the junction between residues
+///   `start - 1` and `start`.
+/// - An indel inside a repeat (`AQR` → `AQQR`, `KQQQR` → `KQQR`) can slide
+///   along the repeat, which makes `start > end`. Only a span holding all of
+///   `[end - 1, start]` then differs from the canonical sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VariantRegion {
     pub start: u32,
@@ -124,18 +134,36 @@ pub struct VariantRegion {
 }
 
 impl VariantRegion {
-    /// Whether the residue span `[span_start, span_end)` carries the variant:
-    /// it overlaps the replacement residues or, for a deletion, holds both
-    /// residues on either side of the junction. Any other span has a
-    /// canonical sequence. Its cleavage context can still differ (a variant
-    /// to K or R makes the next peptide tryptic); such peptides are not
-    /// variant peptides and are left out.
-    pub fn covered_by(&self, span_start: u32, span_end: u32) -> bool {
-        if self.start < self.end {
-            span_start < self.end && span_end > self.start
-        } else {
-            span_start < self.start && span_end > self.start
+    /// The region of the variant sequence `variant` of `canonical`, from the
+    /// prefix and suffix the two share.
+    pub fn between(canonical: &[u8], variant: &[u8]) -> Self {
+        let prefix = canonical
+            .iter()
+            .zip(variant)
+            .take_while(|(a, b)| a == b)
+            .count();
+        let suffix = canonical
+            .iter()
+            .rev()
+            .zip(variant.iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        Self {
+            start: prefix as u32,
+            end: (variant.len() - suffix) as u32,
         }
+    }
+
+    /// Whether the residue span `[span_start, span_end)` carries the variant,
+    /// i.e. reads differently from the canonical sequence at the aligned
+    /// position: it starts before `end` and ends after `start`. That covers
+    /// overlapping a substitution or insertion, holding both residues of a
+    /// deletion junction, and holding a whole repeat stretch. Any other span
+    /// has a canonical sequence. Its cleavage context can still differ (a
+    /// variant to K or R makes the next peptide tryptic); such peptides are
+    /// not variant peptides and are left out.
+    pub fn covered_by(&self, span_start: u32, span_end: u32) -> bool {
+        span_start < self.end && span_end > self.start
     }
 }
 
@@ -238,6 +266,38 @@ mod tests {
             "only the residue before the junction"
         );
         assert!(!del.covered_by(5, 9), "only the residue after the junction");
+    }
+
+    #[test]
+    fn variant_region_in_a_repeat_keeps_only_differing_spans() {
+        // Duplication AQR -> AQQR: only spans holding both Qs differ.
+        let dup = VariantRegion::between(b"AQR", b"AQQR");
+        assert_eq!(dup, VariantRegion { start: 2, end: 2 });
+        assert!(dup.covered_by(1, 3), "QQ");
+        assert!(!dup.covered_by(2, 4), "QR is canonical");
+        assert!(!dup.covered_by(0, 2), "AQ is canonical");
+        // Deletion KQQQR -> KQQR: only the whole KQQR differs.
+        let del = VariantRegion::between(b"KQQQR", b"KQQR");
+        assert_eq!(del, VariantRegion { start: 3, end: 1 });
+        assert!(del.covered_by(0, 4));
+        assert!(!del.covered_by(1, 4), "QQR is canonical");
+        assert!(!del.covered_by(0, 3), "KQQ is canonical");
+        // Outside repeats the region is the replaced residues, as UniProt
+        // gives them.
+        assert_eq!(
+            VariantRegion::between(b"MKDEF", b"MKHEF"),
+            VariantRegion { start: 2, end: 3 }
+        );
+        assert_eq!(
+            VariantRegion::between(b"MKDEF", b"MKEF"),
+            VariantRegion { start: 2, end: 2 }
+        );
+        // An insertion whose first residue repeats the original is narrowed
+        // to what is new: P -> PRAA.
+        assert_eq!(
+            VariantRegion::between(b"MPEK", b"MPRAAEK"),
+            VariantRegion { start: 2, end: 5 }
+        );
     }
 
     #[test]

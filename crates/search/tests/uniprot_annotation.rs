@@ -495,3 +495,78 @@ fn index_cache_key_tells_variant_entries_apart() {
     let again = index_cache_path(&SearchIndex::from_target_db(&plain, "XXX"), &p);
     assert_eq!(a, again);
 }
+
+#[test]
+fn variants_in_repeats_add_no_canonical_peptides() {
+    // MWAQRSTYKQQQRLE with Q4 duplicated (MWAQQRSTYKQQQRLE) and one Q of the
+    // QQQ run deleted (MWAQRSTYKQQRLE). A region taken from UniProt's
+    // coordinates would let QRST (dup) and QQRL (del) through, though both
+    // read exactly like the canonical protein.
+    let xml = r#"<uniprot><entry dataset="Swiss-Prot">
+  <accession>P00009</accession><name>REP_HUMAN</name>
+  <feature type="sequence variant" evidence="1">
+    <original>Q</original><variation>QQ</variation>
+    <location><position position="4"/></location>
+  </feature>
+  <feature type="sequence variant" evidence="1">
+    <location><position position="11"/></location>
+  </feature>
+  <evidence type="ECO:0000269" key="1"/>
+  <sequence length="15">MWAQRSTYKQQQRLE</sequence>
+</entry></uniprot>"#;
+    let opts = UniProtOptions {
+        variants: true,
+        ..UniProtOptions::default()
+    };
+    let target = load_uniprot_xml(xml.as_bytes(), &opts).unwrap().0;
+    let idx = SearchIndex::from_target_db(&target, "XXX");
+    let mut p = params(false);
+    p.num_tolerable_termini = 0;
+    p.min_length = 4;
+    p.max_length = 6;
+    let cands: Vec<Candidate> = enumerate_candidates(&idx, &p, "XXX").collect();
+    let bare = |c: &Candidate| -> String {
+        c.peptide
+            .residues
+            .iter()
+            .map(|a| a.residue as char)
+            .collect()
+    };
+    let canonical: HashSet<String> = cands
+        .iter()
+        .filter(|c| c.protein_index == 0)
+        .map(bare)
+        .collect();
+    let of = |pi: usize| -> HashSet<String> {
+        cands
+            .iter()
+            .filter(|c| c.protein_index == pi)
+            .map(bare)
+            .collect()
+    };
+    let (dup, del) = (of(1), of(2));
+    assert!(dup.contains("AQQR") && dup.contains("WAQQ"), "{dup:?}");
+    assert!(!dup.contains("QRST"), "QRST is canonical");
+    assert!(del.contains("KQQR") && del.contains("YKQQRL"), "{del:?}");
+    assert!(!del.contains("QQRL"), "QQRL is canonical");
+    for v in dup.union(&del) {
+        assert!(
+            !canonical.contains(v),
+            "variant peptide {v} reads canonical"
+        );
+    }
+    // Reversal mirrors these regions exactly.
+    let n = target.len();
+    for i in [1, 2] {
+        let len = target.proteins[i].len() as u32;
+        let t = target.proteins[i].variant_region().unwrap();
+        let d = idx.db.proteins[n + i].variant_region().unwrap();
+        assert_eq!(
+            d,
+            model::VariantRegion {
+                start: len - t.end,
+                end: len - t.start
+            }
+        );
+    }
+}

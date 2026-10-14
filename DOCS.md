@@ -165,8 +165,10 @@ not used.
 sequence with the change applied, e.g. `sp|P04637_VAR_005851_D7H|P53_HUMAN`. The middle field is
 `<accession>_<feature id>_<change>`, or `<accession>_VAR_<change>` when UniProt gives no id. The
 change is written `D7H`, `KR120-121EE` or `F508del` (1-based). Candidate generation keeps only
-the spans that overlap the replaced residues, or that hold both residues next to a deletion. Every
-hit on a variant entry is therefore a hit on the variant, and its `Proteins` / `Protein` column
+the spans that read differently from the canonical sequence. Such a span overlaps the replaced
+residues, or holds both residues next to a deletion. For an indel inside a repeat (`AQR` →
+`AQQR`), which could sit at more than one place in the run, the span must hold the whole run
+around it. Every hit on a variant entry is therefore a hit on the variant, and its `Proteins` / `Protein` column
 names it; the canonical peptides are not searched twice. Multi-allelic variants give one entry
 per allele. These variants are skipped:
 

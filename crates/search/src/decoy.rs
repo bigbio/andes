@@ -117,11 +117,10 @@ pub fn reverse_db(db: &ProteinDb, prefix: &str) -> ProteinDb {
 /// annotated sites is offered on decoys as often as on targets.
 ///
 /// A variant region maps to its image when that is contiguous (always, under
-/// reversal); otherwise
-/// (shuffling scatters it) to a region of the same length at the image of its
-/// first residue, and a deletion junction to the junction between the images
-/// of its two residues, or before the image of the second when those are no
-/// longer adjacent. Either way the decoy yields variant spans of the same
+/// reversal); otherwise (shuffling scatters it) to a region of the same
+/// length at the image of its first residue. The same holds for the stretch a
+/// deletion junction or an indel in a repeat requires a span to hold (see
+/// [`VariantRegion`]). Either way the decoy yields variant spans of the same
 /// shape as the target, which is what keeps the two sides' search spaces
 /// matched. `None` when the target has no annotation.
 pub fn decoy_annotation(target: &Protein, source: &[u32]) -> Option<Arc<ProteinAnnotation>> {
@@ -164,13 +163,24 @@ pub fn decoy_annotation(target: &Protein, source: &[u32]) -> Option<Arc<ProteinA
                     end: (start + (b - a) as u32).min(n as u32),
                 }
             }
-        } else if a == b && a >= 1 && a < n {
-            let (x, y) = (image[a - 1], image[a]);
-            let junction = if x.abs_diff(y) == 1 { x.max(y) } else { y };
-            let junction = junction.clamp(1, n as u32 - 1);
+        } else if a >= b && b >= 1 && a < n {
+            // A covering span holds all of [b - 1, a]: the two residues of a
+            // deletion junction (a == b) or a repeat stretch (a > b). Keep
+            // that requirement on the image, or on a stretch of the same
+            // length at the image of its first residue when shuffling
+            // scattered it.
+            let (lo, hi) = (b - 1, a);
+            let width = (hi - lo) as u32;
+            let min = image[lo..=hi].iter().copied().min().unwrap_or(0);
+            let max = image[lo..=hi].iter().copied().max().unwrap_or(0);
+            let first = if max - min == width {
+                min
+            } else {
+                image[lo].min(n as u32 - 1 - width)
+            };
             VariantRegion {
-                start: junction,
-                end: junction,
+                start: first + width,
+                end: first + 1,
             }
         } else {
             v

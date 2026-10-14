@@ -419,6 +419,10 @@ impl UniProtEntry {
             sequence.extend_from_slice(&self.sequence[..v.start]);
             sequence.extend_from_slice(&v.replacement);
             sequence.extend_from_slice(&self.sequence[v.end..]);
+            // From the sequences, not UniProt's coordinates: an indel in a
+            // repeat can slide along it, and spans past the shared prefix or
+            // suffix would read like canonical peptides.
+            let region = VariantRegion::between(&self.sequence, &sequence);
             // Sites keep their residue: before the variant unchanged, after it
             // shifted by the length change, inside it dropped.
             let shift = v.replacement.len() as i64 - (v.end - v.start) as i64;
@@ -444,13 +448,7 @@ impl UniProtEntry {
                 ),
                 description: format!("{description} VARIANT={}", v.tag),
                 sequence,
-                annotation: Some(Arc::new(ProteinAnnotation::new(
-                    mod_sites,
-                    Some(VariantRegion {
-                        start: v.start as u32,
-                        end: (v.start + v.replacement.len()) as u32,
-                    }),
-                ))),
+                annotation: Some(Arc::new(ProteinAnnotation::new(mod_sites, Some(region)))),
             });
         }
         stats.variant_proteins += out.len();
@@ -1276,6 +1274,42 @@ mod tests {
         );
         // The canonical protein is not a variant.
         assert_eq!(db.proteins[0].variant_region(), None);
+    }
+
+    #[test]
+    fn variants_in_repeats_get_the_region_that_differs() {
+        // MWAQRSTYKQQQRLE: Q4 duplicated, and one Q of the QQQ run deleted.
+        let xml = r#"<uniprot><entry dataset="Swiss-Prot">
+  <accession>P00009</accession><name>REP_HUMAN</name>
+  <feature type="sequence variant" evidence="1">
+    <original>Q</original><variation>QQ</variation>
+    <location><position position="4"/></location>
+  </feature>
+  <feature type="sequence variant" evidence="1">
+    <location><position position="11"/></location>
+  </feature>
+  <evidence type="ECO:0000269" key="1"/>
+  <sequence length="15">MWAQRSTYKQQQRLE</sequence>
+</entry></uniprot>"#;
+        let opts = UniProtOptions {
+            variants: true,
+            ..UniProtOptions::default()
+        };
+        let (db, _) = load_uniprot_xml(xml.as_bytes(), &opts).unwrap();
+        let dup = &db.proteins[1];
+        assert_eq!(dup.sequence, b"MWAQQRSTYKQQQRLE");
+        // Only spans holding both Qs differ from the canonical sequence.
+        assert_eq!(
+            dup.variant_region(),
+            Some(VariantRegion { start: 4, end: 4 })
+        );
+        let del = &db.proteins[2];
+        assert_eq!(del.sequence, b"MWAQRSTYKQQRLE");
+        // Only spans holding all of KQQR (positions 8..=11) differ.
+        assert_eq!(
+            del.variant_region(),
+            Some(VariantRegion { start: 11, end: 9 })
+        );
     }
 
     #[test]

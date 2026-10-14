@@ -155,8 +155,9 @@ fn enumerate_protein_from_offset(
     let window = match protein.variant_region() {
         Some(v) => {
             let reach = params.max_length as usize;
-            let lo = (v.start as usize).saturating_sub(reach);
-            let hi = v.end as usize + reach;
+            // `start > end` for an indel in a repeat (see `VariantRegion`).
+            let lo = (v.start.min(v.end) as usize).saturating_sub(reach);
+            let hi = v.start.max(v.end) as usize + reach;
             (
                 lo.saturating_sub(seq_offset) as u32,
                 hi.saturating_sub(seq_offset).min(n as usize) as u32,

@@ -118,6 +118,22 @@ pub(crate) struct SearchArgs {
     #[arg(long = "uniprot-variants")]
     pub(crate) uniprot_variants: bool,
 
+    /// UniProt XML database: also search every described isoform as its own
+    /// target entry (`sp|P04637-2|P53_HUMAN`), rebuilt from the canonical
+    /// sequence and its splice variants. An isoform carries its own annotated
+    /// sites and the canonical ones on the residues it shares, and, with
+    /// `--uniprot-variants`, its own natural variants. Grows the search space.
+    #[arg(long = "uniprot-isoforms")]
+    pub(crate) uniprot_isoforms: bool,
+
+    /// UniProt XML database: also search every mature chain or peptide whose
+    /// ends differ from the precursor's (after a signal peptide, propeptide or
+    /// transit peptide is removed) as its own target entry. Only the peptides
+    /// at those new termini are added; they are protein-terminal there, so
+    /// protein-terminal mods apply. Grows the search space.
+    #[arg(long = "uniprot-chains")]
+    pub(crate) uniprot_chains: bool,
+
     /// UniProt XML database: minimum UniProt evidence for a sequence variant or
     /// an annotated modification site to be used. `experimental` (default:
     /// experimental and large-scale proteomics evidence), `curated` (adds manual

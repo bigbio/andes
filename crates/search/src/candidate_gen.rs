@@ -16,7 +16,9 @@
 //!
 //! A sequence-variant protein ([`Protein::variant_region`]) only yields spans
 //! that carry its variant; the rest of it reads like the canonical protein,
-//! which is searched already. A variable mod declared `sites=annotated`
+//! which is searched already. A mature-chain entry ([`Protein::chain_ends`])
+//! only yields the spans at its new termini, and is never Met-cleaved. A
+//! variable mod declared `sites=annotated`
 //! ([`model::Modification::annotated_site_mass`]) is only placed on residues
 //! the span's protein annotates with a modification of that mass
 //! ([`Protein::mod_sites`]); every expansion path below applies the same test
@@ -30,7 +32,7 @@ use model::amino_acid::AminoAcid;
 use model::enzyme::Enzyme;
 use model::modification::ModLocation;
 use model::peptide::Peptide;
-use model::protein::{ModSite, Protein, VariantRegion};
+use model::protein::{ChainEnds, ModSite, Protein, VariantRegion};
 
 #[derive(Debug, Clone)]
 pub struct Candidate {
@@ -107,7 +109,9 @@ fn enumerate_protein(
     // is_protein_n_term=true (the post-Met residue is the new biological
     // N-terminus) and are NOT deduplicated — they differ by terminal-mod
     // search space.
-    if seq.first() == Some(&b'M') && seq.len() > 1 {
+    // A mature chain was cut out of its precursor; its first residue is not
+    // an initiator Met.
+    if seq.first() == Some(&b'M') && seq.len() > 1 && protein.chain_ends().is_none() {
         out.extend(enumerate_protein_from_offset(
             protein,
             1,
@@ -186,6 +190,7 @@ fn enumerate_protein_from_offset(
             is_decoy,
             params,
             variant: protein.variant_region(),
+            chain: protein.chain_ends(),
             sites: protein.mod_sites(),
         };
         return enumerate_all_spans(&ctx, window.0..window.1, n);
@@ -227,6 +232,7 @@ fn enumerate_protein_from_offset(
         is_decoy,
         params,
         variant: protein.variant_region(),
+        chain: protein.chain_ends(),
         sites: protein.mod_sites(),
     };
 
@@ -309,6 +315,8 @@ struct EmitCtx<'a> {
     params: &'a SearchParams,
     /// The protein's variant, when it is a sequence-variant entry.
     variant: Option<VariantRegion>,
+    /// The protein's new termini, when it is a mature-chain entry.
+    chain: Option<ChainEnds>,
     /// The protein's annotated modification sites.
     sites: &'a [ModSite],
 }
@@ -319,10 +327,14 @@ struct EmitCtx<'a> {
 fn emit_span(ctx: &EmitCtx<'_>, start: u32, end: u32, out: &mut Vec<Candidate>) {
     let abs_start = start as usize + ctx.seq_offset;
     let abs_end = end as usize + ctx.seq_offset;
-    // A variant protein contributes only the spans that carry its variant.
+    // A variant protein contributes only the spans that carry its variant, a
+    // mature chain only those at its new termini.
     if ctx
         .variant
         .is_some_and(|v| !v.covered_by(abs_start as u32, abs_end as u32))
+        || ctx
+            .chain
+            .is_some_and(|c| !c.covered_by(abs_start as u32, abs_end as u32, ctx.seq.len() as u32))
     {
         return;
     }

@@ -71,6 +71,8 @@ fn annotated_site_mods_and_variants_run_end_to_end() {
             "--uniprot-evidence",
             "curated",
             "--uniprot-variants",
+            "--uniprot-chains",
+            "--uniprot-isoforms",
         ],
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -78,9 +80,16 @@ fn annotated_site_mods_and_variants_run_end_to_end() {
         stderr.contains("14 annotated modification sites, 1 variant entries"),
         "{stderr}"
     );
-    // Ten phosphosites on the canonical entry, inherited by the variant entry.
+    // The mature chain after the propeptide (25-607) is a new N-terminus;
+    // BSA has no isoforms.
     assert!(
-        stderr.contains("Annotated-site mod Phospho (+79.9663 Da): 20 sites on 2 target proteins"),
+        stderr.contains("0 isoform entries (0 isoforms not rebuildable), 1 mature-chain entries"),
+        "{stderr}"
+    );
+    // Ten phosphosites on the canonical entry, inherited by the variant and
+    // the chain entry.
+    assert!(
+        stderr.contains("Annotated-site mod Phospho (+79.9663 Da): 30 sites on 3 target proteins"),
         "{stderr}"
     );
     // Every PIN row names either the canonical entry or the variant entry.
@@ -91,7 +100,7 @@ fn annotated_site_mods_and_variants_run_end_to_end() {
     let out = search(
         "test-fixtures/BSA.fasta",
         &dir.path().join("fasta.pin"),
-        &["--mods", mods, "--uniprot-variants"],
+        &["--mods", mods, "--uniprot-variants", "--uniprot-chains"],
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -99,10 +108,12 @@ fn annotated_site_mods_and_variants_run_end_to_end() {
         "{stderr}"
     );
     assert!(stderr.contains("never placed"), "{stderr}");
-    assert!(
-        stderr.contains("--uniprot-variants needs a UniProt XML database"),
-        "{stderr}"
-    );
+    for flag in ["--uniprot-variants", "--uniprot-chains"] {
+        assert!(
+            stderr.contains(&format!("{flag} needs a UniProt XML database")),
+            "{stderr}"
+        );
+    }
 
     // XML at the default (experimental) evidence keeps only BSA's glycation
     // site: there is no phosphosite, which is reported, not counted as one.

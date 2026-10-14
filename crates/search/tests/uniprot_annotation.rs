@@ -54,9 +54,16 @@ const XML: &str = r#"<uniprot xmlns="http://uniprot.org/uniprot">
 const PHOSPHO: f64 = 79.966331;
 
 fn target_db(evidence: EvidenceLevel, variants: bool) -> ProteinDb {
-    load_uniprot_xml(XML.as_bytes(), &UniProtOptions { variants, evidence })
-        .unwrap()
-        .0
+    load_uniprot_xml(
+        XML.as_bytes(),
+        &UniProtOptions {
+            variants,
+            evidence,
+            ..UniProtOptions::default()
+        },
+    )
+    .unwrap()
+    .0
 }
 
 /// Phospho on S and T: restricted to annotated sites or not.
@@ -568,5 +575,179 @@ fn variants_in_repeats_add_no_canonical_peptides() {
                 end: len - t.start
             }
         );
+    }
+}
+
+/// A precursor with signal peptide 1-5 and propeptide 6-8 (mature chain
+/// 9-30, released peptide 13-18), an entry whose isoform 2 replaces
+/// STN(2-4) by Q and drops 20-27, and one with a C-terminal propeptide
+/// (chain 1-20).
+const PROCESSED_XML: &str = r#"<uniprot>
+<entry dataset="Swiss-Prot">
+  <accession>P00010</accession><name>TEN_HUMAN</name>
+  <feature type="signal peptide" evidence="1"><location><begin position="1"/><end position="5"/></location></feature>
+  <feature type="propeptide" evidence="1"><location><begin position="6"/><end position="8"/></location></feature>
+  <feature type="chain" id="PRO_1"><location><begin position="9"/><end position="30"/></location></feature>
+  <feature type="peptide" id="PRO_2"><location><begin position="13"/><end position="18"/></location></feature>
+  <evidence type="ECO:0000269" key="1"/>
+  <sequence length="30">MALWARGRDTHKSEIAHRFKDLGEEHFKAR</sequence>
+</entry>
+<entry dataset="Swiss-Prot">
+  <accession>P00011</accession><name>ELEVEN_HUMAN</name>
+  <comment type="alternative products">
+    <isoform><id>P00011-1</id><name>1</name><sequence type="displayed"/></isoform>
+    <isoform><id>P00011-2</id><name>2</name><sequence type="described" ref="VSP_A VSP_B"/></isoform>
+  </comment>
+  <feature type="modified residue" description="Phosphothreonine" evidence="1"><location><position position="11"/></location></feature>
+  <feature type="splice variant" id="VSP_A"><original>STN</original><variation>Q</variation><location><begin position="2"/><end position="4"/></location></feature>
+  <feature type="splice variant" id="VSP_B"><location><begin position="20"/><end position="27"/></location></feature>
+  <evidence type="ECO:0000269" key="1"/>
+  <sequence length="27">MSTNPKPQRKTKRNTSRRPQDVKFPGG</sequence>
+</entry>
+<entry dataset="Swiss-Prot">
+  <accession>P00012</accession><name>TWELVE_HUMAN</name>
+  <feature type="chain" id="PRO_3"><location><begin position="1"/><end position="20"/></location></feature>
+  <feature type="propeptide" id="PRO_4"><location><begin position="21"/><end position="26"/></location></feature>
+  <sequence length="26">MPEPTIDEKLLGEERAFDYHGKSPAR</sequence>
+</entry>
+</uniprot>"#;
+
+fn processed_db() -> ProteinDb {
+    let opts = UniProtOptions {
+        isoforms: true,
+        chains: true,
+        evidence: EvidenceLevel::Curated,
+        ..UniProtOptions::default()
+    };
+    load_uniprot_xml(PROCESSED_XML.as_bytes(), &opts).unwrap().0
+}
+
+#[test]
+fn chain_entries_yield_only_their_new_termini() {
+    let target = processed_db();
+    let accs: Vec<&str> = target
+        .proteins
+        .iter()
+        .map(|p| p.accession.as_str())
+        .collect();
+    assert_eq!(
+        accs,
+        [
+            "sp|P00010|TEN_HUMAN",
+            "sp|P00010_PRO_1|TEN_HUMAN",
+            "sp|P00010_PRO_2|TEN_HUMAN",
+            "sp|P00011|ELEVEN_HUMAN",
+            "sp|P00011-2|ELEVEN_HUMAN",
+            "sp|P00012|TWELVE_HUMAN",
+            "sp|P00012_PRO_3|TWELVE_HUMAN",
+        ]
+    );
+    let idx = SearchIndex::from_target_db(&target, "XXX");
+    let mut builder = AminoAcidSetBuilder::new_standard();
+    builder = builder.add_variable_mod(
+        Modification::from_mods_txt_line("42.010565,*,opt,Prot-N-term,Acetyl").unwrap(),
+    );
+    let mut p = SearchParams::default_tryptic(builder.build().unwrap());
+    p.min_length = 4;
+    p.max_missed_cleavages = 1;
+    let cands: Vec<Candidate> = enumerate_candidates(&idx, &p, "XXX").collect();
+    let from = |pi: usize| -> Vec<String> {
+        cands
+            .iter()
+            .filter(|c| c.protein_index == pi)
+            .map(|c| c.peptide.to_string())
+            .collect()
+    };
+    // The mature chain starts at D9: DTHK and DTHKSEIAHR (one missed
+    // cleavage) are its N-terminal spans, protein N-termini with and without
+    // Acetyl; nothing else, and no Met-cleaved walk.
+    let mut chain = from(1);
+    chain.sort();
+    assert_eq!(
+        chain,
+        [
+            "_.D+42.01056THK.S",
+            "_.D+42.01056THKSEIAHR.F",
+            "_.DTHK.S",
+            "_.DTHKSEIAHR.F"
+        ],
+        "{chain:?}"
+    );
+    assert!(chain.iter().any(|f| f.contains("+42")), "{chain:?}");
+    assert!(cands
+        .iter()
+        .filter(|c| c.protein_index == 1)
+        .all(|c| c.is_protein_n_term && c.start_offset_in_protein == 0));
+    // The released peptide SEIAHR is both termini at once.
+    let peptide = from(2);
+    assert!(!peptide.is_empty());
+    assert!(cands
+        .iter()
+        .filter(|c| c.protein_index == 2)
+        .all(|c| c.start_offset_in_protein == 0 && c.is_protein_c_term));
+    // The chain before the C-terminal propeptide ends at H20: AFDYH and
+    // LLGEERAFDYH (one missed cleavage) are its C-terminal spans; its
+    // N-terminus is the precursor's, so nothing starts there.
+    let mut c_chain = from(6);
+    c_chain.sort();
+    assert_eq!(c_chain, ["K.LLGEERAFDYH.-", "R.AFDYH.-"], "{c_chain:?}");
+    assert!(cands
+        .iter()
+        .filter(|c| c.protein_index == 6)
+        .all(|c| c.is_protein_c_term && !c.is_protein_n_term));
+    // The isoform is an ordinary protein: all of its tryptic spans.
+    assert!(from(4).len() > 2, "{:?}", from(4));
+    // Decoy chains keep their new-terminus flags, and yield only those spans.
+    let n = target.len();
+    for pi in [n + 1, n + 2, n + 6] {
+        let d = &idx.db.proteins[pi];
+        assert_eq!(d.chain_ends(), target.proteins[pi - n].chain_ends());
+        let ends = d.chain_ends().unwrap();
+        for c in cands.iter().filter(|c| c.protein_index == pi) {
+            let s = c.start_offset_in_protein as u32;
+            let e = s + c.peptide.residues.len() as u32;
+            assert!(
+                ends.covered_by(s, e, d.len() as u32),
+                "decoy {pi}: {}",
+                c.peptide
+            );
+        }
+    }
+}
+
+#[test]
+fn every_expansion_path_agrees_on_isoforms_and_chains() {
+    let idx = SearchIndex::from_target_db(&processed_db(), "XXX");
+    let mut p = params(false);
+    p.min_length = 4;
+    p.max_missed_cleavages = 1;
+    let mi = MmapCandidateIndex::build_in_memory(&idx, &p, "XXX").unwrap();
+    let inram: Vec<Candidate> = enumerate_candidates(&idx, &p, "XXX").collect();
+    let want: HashSet<_> = inram.iter().map(key).collect();
+    let mut all: HashSet<_> = HashSet::new();
+    for i in 0..mi.len() {
+        all.extend(
+            expand_base_record(&idx, &p, &mi.record_at(i))
+                .iter()
+                .map(key),
+        );
+    }
+    assert_eq!(all, want);
+    let masses: BTreeSet<u64> = inram
+        .iter()
+        .map(|c| (c.peptide.mass() * 1000.0).round() as u64)
+        .collect();
+    for m in masses {
+        let precursor = m as f64 / 1000.0;
+        let lazy: HashSet<_> = lazy_candidates_for_precursor(&mi, &idx, &p, precursor, 0.02, 0.02)
+            .iter()
+            .map(key)
+            .collect();
+        let expect: HashSet<_> = inram
+            .iter()
+            .filter(|c| (c.peptide.mass() - precursor).abs() <= 0.02)
+            .map(key)
+            .collect();
+        assert_eq!(lazy, expect, "precursor {precursor}");
     }
 }

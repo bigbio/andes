@@ -228,8 +228,8 @@ pub fn build_base_peptide_index<W: Write>(
 /// derived by hashing:
 ///
 /// 1. Every **target** protein's accession and sequence (in iteration order from
-///    [`SearchIndex::iter_target_proteins`]), and a variant entry's variant
-///    region.  Decoy sequences are derived from targets deterministically, so
+///    [`SearchIndex::iter_target_proteins`]), a variant entry's variant
+///    region and a mature-chain entry's new termini.  Decoy sequences are derived from targets deterministically, so
 ///    they need not be hashed separately.
 /// 2. The search parameters that affect which base peptides are produced:
 ///    `enzyme`, `extra_enzymes`, `max_missed_cleavages`, `min_length`,
@@ -262,6 +262,10 @@ pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams) -> PathBuf {
         // region shapes the records too (absent for every FASTA protein).
         if let Some(v) = protein.variant_region() {
             (v.start, v.end).hash(&mut h);
+        }
+        // Likewise a mature-chain entry yields only its new-terminus spans.
+        if let Some(c) = protein.chain_ends() {
+            (c.n_term, c.c_term).hash(&mut h);
         }
     }
     // The affix test decides each record's IS_DECOY flag (`SearchIndex::

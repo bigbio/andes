@@ -40,6 +40,12 @@ impl Protein {
     pub fn variant_region(&self) -> Option<VariantRegion> {
         self.annotation.as_deref().and_then(|a| a.variant)
     }
+
+    /// The new termini of a mature-chain entry, `None` for an ordinary
+    /// protein.
+    pub fn chain_ends(&self) -> Option<ChainEnds> {
+        self.annotation.as_deref().and_then(|a| a.chain)
+    }
 }
 
 /// Tolerance (Da) within which an annotated site's mass and a modification's
@@ -59,6 +65,10 @@ pub struct ProteinAnnotation {
     /// the peptides it shares with the canonical sequence are not searched
     /// twice and every hit on it is a hit on the variant.
     pub variant: Option<VariantRegion>,
+    /// Set when this protein is a mature chain cut out of a precursor entry:
+    /// only the candidate peptides at its new termini are enumerated, which
+    /// the precursor does not have as protein termini.
+    pub chain: Option<ChainEnds>,
 }
 
 impl ProteinAnnotation {
@@ -74,7 +84,36 @@ impl ProteinAnnotation {
         mod_sites.dedup_by(|b, a| {
             a.position == b.position && (a.mass_delta - b.mass_delta).abs() <= SITE_MASS_TOLERANCE
         });
-        Self { mod_sites, variant }
+        Self {
+            mod_sites,
+            variant,
+            chain: None,
+        }
+    }
+
+    /// This annotation for a mature-chain entry with new termini `chain`.
+    pub fn with_chain(mut self, chain: Option<ChainEnds>) -> Self {
+        self.chain = chain;
+        self
+    }
+}
+
+/// Which ends of a mature-chain entry are new termini, i.e. not termini of
+/// the precursor (or the residue after an initiator Met) it was cut from.
+/// The entry yields only the spans that start at a new N-terminus or end at
+/// a new C-terminus; they are protein-terminal there, so protein-terminal
+/// mods apply. Every other span reads like the precursor's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChainEnds {
+    pub n_term: bool,
+    pub c_term: bool,
+}
+
+impl ChainEnds {
+    /// Whether the residue span `[span_start, span_end)` of a chain of
+    /// length `len` starts at a new N-terminus or ends at a new C-terminus.
+    pub fn covered_by(&self, span_start: u32, span_end: u32, len: u32) -> bool {
+        (self.n_term && span_start == 0) || (self.c_term && span_end == len)
     }
 }
 

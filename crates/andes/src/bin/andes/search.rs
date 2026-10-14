@@ -261,6 +261,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // ── 1. Load the target database (FASTA or UniProt XML) ───────────────────
     let uniprot_opts = input::UniProtOptions {
         variants: cli.uniprot_variants,
+        isoforms: cli.uniprot_isoforms,
+        chains: cli.uniprot_chains,
         evidence: cli.uniprot_evidence,
     };
     let loaded = input::load_protein_database(&database_path, &uniprot_opts)?;
@@ -273,12 +275,21 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
     match &loaded.uniprot {
         Some(stats) => log_uniprot_load(stats, &uniprot_opts),
-        None if cli.uniprot_variants => eprintln!(
-            "WARN: --uniprot-variants needs a UniProt XML database (*.xml[.gz]); {} is \
-             FASTA, so no variants are searched.",
-            database_path.display()
-        ),
-        None => {}
+        None => {
+            for (set, flag) in [
+                (cli.uniprot_variants, "--uniprot-variants"),
+                (cli.uniprot_isoforms, "--uniprot-isoforms"),
+                (cli.uniprot_chains, "--uniprot-chains"),
+            ] {
+                if set {
+                    eprintln!(
+                        "WARN: {flag} needs a UniProt XML database (*.xml[.gz]); {} is FASTA, \
+                         so it does nothing.",
+                        database_path.display()
+                    );
+                }
+            }
+        }
     }
 
     // ── 2. Build SearchIndex (targets + strategy-generated decoys) ────────────
@@ -2250,8 +2261,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 fn log_uniprot_load(stats: &input::UniProtLoadStats, opts: &input::UniProtOptions) {
     eprintln!(
         "UniProt XML: {} entries, {} annotated modification sites, {} variant entries \
-         (evidence >= {}; {} features below it, {} not on the canonical sequence, \
-         {} on other isoforms)",
+         (evidence >= {}; {} features below it, {} not fitting their sequence, \
+         {} on isoforms not searched)",
         stats.entries,
         stats.mod_sites,
         stats.variant_proteins,
@@ -2260,6 +2271,12 @@ fn log_uniprot_load(stats: &input::UniProtLoadStats, opts: &input::UniProtOption
         stats.unusable_features,
         stats.isoform_features,
     );
+    if opts.isoforms || opts.chains {
+        eprintln!(
+            "UniProt XML: {} isoform entries ({} isoforms not rebuildable), {} mature-chain entries",
+            stats.isoform_proteins, stats.unbuilt_isoforms, stats.chain_proteins,
+        );
+    }
     if !stats.unknown_modifications.is_empty() {
         let mut names: Vec<(&String, &usize)> = stats.unknown_modifications.iter().collect();
         names.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));

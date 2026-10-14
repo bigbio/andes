@@ -186,7 +186,10 @@ pub fn decoy_annotation(target: &Protein, source: &[u32]) -> Option<Arc<ProteinA
             v
         }
     });
-    Some(Arc::new(ProteinAnnotation::new(mod_sites, variant)))
+    // A chain's new termini are the decoy's own ends, whatever the permutation.
+    Some(Arc::new(
+        ProteinAnnotation::new(mod_sites, variant).with_chain(ann.chain),
+    ))
 }
 
 /// Concatenate target + decoy.

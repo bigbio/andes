@@ -44,6 +44,8 @@ pub struct IoCfg {
     pub spectrum: Option<Vec<PathBuf>>,
     pub database: Option<PathBuf>,
     pub uniprot_variants: Option<bool>,
+    pub uniprot_isoforms: Option<bool>,
+    pub uniprot_chains: Option<bool>,
     pub uniprot_evidence: Option<String>,
     pub output_pin: Option<PathBuf>,
     pub output_tsv: Option<PathBuf>,
@@ -220,6 +222,12 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         uniprot_variants,
         cfg.io.uniprot_variants
     );
+    set!(
+        "uniprot_isoforms",
+        uniprot_isoforms,
+        cfg.io.uniprot_isoforms
+    );
+    set!("uniprot_chains", uniprot_chains, cfg.io.uniprot_chains);
     set_parsed!(
         "uniprot_evidence",
         uniprot_evidence,
@@ -650,12 +658,14 @@ glyco:
         let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
         assert!(!a.uniprot_variants);
         assert_eq!(a.uniprot_evidence, input::EvidenceLevel::Experimental);
+        assert!(!a.uniprot_isoforms && !a.uniprot_chains);
         let cfg = RunConfig::from_yaml_str(
-            "io:\n  uniprot_variants: true\n  uniprot_evidence: curated\n",
+            "io:\n  uniprot_variants: true\n  uniprot_isoforms: true\n  uniprot_chains: true\n  \
+             uniprot_evidence: curated\n",
         )
         .unwrap();
         apply(cfg, &mut a, &matches).unwrap();
-        assert!(a.uniprot_variants);
+        assert!(a.uniprot_variants && a.uniprot_isoforms && a.uniprot_chains);
         assert_eq!(a.uniprot_evidence, input::EvidenceLevel::Curated);
 
         let bad = RunConfig::from_yaml_str("io:\n  uniprot_evidence: strong\n").unwrap();

@@ -34,7 +34,7 @@ use std::collections::BTreeMap;
 use std::io::BufRead;
 use std::sync::Arc;
 
-use model::{ModSite, Protein, ProteinAnnotation, ProteinDb, SiteAnchor, VariantRegion};
+use model::{ChainEnds, ModSite, Protein, ProteinAnnotation, ProteinDb, SiteAnchor, VariantRegion};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
@@ -106,6 +106,12 @@ pub struct UniProtOptions {
     /// Add one target protein per natural sequence variant (off by default:
     /// it grows the search space, so it must be measured before being used).
     pub variants: bool,
+    /// Add one target protein per described isoform, rebuilt from its splice
+    /// variants (off by default, for the same reason).
+    pub isoforms: bool,
+    /// Add one target protein per mature chain with a terminus the canonical
+    /// sequence does not have (off by default, for the same reason).
+    pub chains: bool,
     /// Minimum evidence for a variant or a modification site to be used.
     pub evidence: EvidenceLevel,
 }
@@ -128,8 +134,15 @@ pub struct UniProtLoadStats {
     /// matching, replacement that is not a residue string), and variants a
     /// search cannot tell from the canonical sequence (I↔L only).
     pub unusable_features: usize,
-    /// Features located on a non-canonical isoform (not applied).
+    /// Features located on an isoform that is not searched.
     pub isoform_features: usize,
+    /// Isoform proteins added.
+    pub isoform_proteins: usize,
+    /// Non-canonical isoforms that cannot be rebuilt (external, not
+    /// described, or a splice variant that does not fit).
+    pub unbuilt_isoforms: usize,
+    /// Mature-chain proteins added.
+    pub chain_proteins: usize,
 }
 
 /// One `<feature>` of an entry.
@@ -154,6 +167,21 @@ pub struct UniProtFeature {
     /// `<variation>` residues; several for a multi-allelic variant, none for
     /// a deletion.
     pub variations: Vec<String>,
+}
+
+/// One `<isoform>` of an entry's alternative-products comment.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UniProtIsoform {
+    /// First `<id>`, e.g. `P04637-2`.
+    pub id: String,
+    /// First `<name>`, e.g. `2`.
+    pub name: String,
+    /// `<sequence @type>`: `displayed` (the canonical sequence), `described`
+    /// (built from splice variants), `external` or `not described`.
+    pub sequence_type: String,
+    /// `<sequence @ref>`: ids of the `splice variant` features that build a
+    /// described isoform from the canonical sequence.
+    pub splice_refs: Vec<String>,
 }
 
 /// One `<entry>` of a UniProtKB XML file.
@@ -183,14 +211,14 @@ pub struct UniProtEntry {
     pub features: Vec<UniProtFeature>,
     /// `(key, ECO code)` of the entry's `<evidence>` elements.
     pub evidence: Vec<(u32, String)>,
-    /// Ids of the isoforms whose sequence is the displayed (canonical) one.
-    pub displayed_isoforms: Vec<String>,
+    /// Isoforms of the alternative-products comment, in document order.
+    pub isoforms: Vec<UniProtIsoform>,
 }
 
-/// A sequence variant applied to its entry's canonical sequence.
+/// A sequence variant applied to a sequence (canonical or isoform).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SequenceVariant {
-    /// 0-based half-open canonical range the variant replaces.
+    /// 0-based half-open range of the base sequence the variant replaces.
     start: usize,
     end: usize,
     /// Replacement residues; empty for a deletion.
@@ -198,6 +226,58 @@ struct SequenceVariant {
     /// Accession tag: `<feature id>_<change>` or `VAR_<change>`.
     tag: String,
 }
+
+/// A mature chain cut out of the canonical sequence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MatureChain {
+    /// 0-based half-open canonical range.
+    start: usize,
+    end: usize,
+    ends: ChainEnds,
+    /// Accession tag: the feature id (`PRO_…`) or `CHAIN_<begin>-<end>`.
+    tag: String,
+}
+
+/// Edits turning one sequence into another, sorted and disjoint: canonical
+/// `[start, end)` is replaced by `len` residues.
+type Edits = Vec<(usize, usize, usize)>;
+
+/// Where residue `p` of the edited sequence's source ends up, `None` when an
+/// edit replaced it.
+fn map_through(edits: &[(usize, usize, usize)], p: usize) -> Option<usize> {
+    let mut shift = 0i64;
+    for &(start, end, len) in edits {
+        if p < start {
+            break;
+        }
+        if p < end {
+            return None;
+        }
+        shift += len as i64 - (end - start) as i64;
+    }
+    Some((p as i64 + shift) as usize)
+}
+
+/// `sites` carried through `edits`: a site keeps its residue, and is dropped
+/// when an edit replaced that residue.
+fn sites_through(sites: &[ModSite], edits: &[(usize, usize, usize)]) -> Vec<ModSite> {
+    sites
+        .iter()
+        .filter_map(|s| {
+            map_through(edits, s.position as usize).map(|p| ModSite {
+                position: p as u32,
+                ..*s
+            })
+        })
+        .collect()
+}
+
+const PROCESSING_FEATURES: [&str; 4] = [
+    "signal peptide",
+    "transit peptide",
+    "propeptide",
+    "initiator methionine",
+];
 
 impl UniProtEntry {
     /// UniProt FASTA accession token: `sp|P02769|ALBU_BOVIN`.
@@ -216,7 +296,20 @@ impl UniProtEntry {
     /// UniProt FASTA description: `Albumin OS=Bos taurus OX=9913 GN=ALB PE=1 SV=4`
     /// (fields UniProt has no value for are left out).
     pub fn fasta_description(&self) -> String {
-        let mut d = self.full_name.clone();
+        self.description_with(&self.full_name, true)
+    }
+
+    /// UniProt's isoform FASTA description: `Isoform 2 of Cellular tumor
+    /// antigen p53 OS=Homo sapiens OX=9606 GN=TP53` (no PE, no SV).
+    fn isoform_description(&self, iso: &UniProtIsoform) -> String {
+        self.description_with(
+            &format!("Isoform {} of {}", iso.name, self.full_name),
+            false,
+        )
+    }
+
+    fn description_with(&self, title: &str, existence_and_version: bool) -> String {
+        let mut d = title.to_string();
         let mut field = |key: &str, value: &str| {
             if !value.is_empty() {
                 if !d.is_empty() {
@@ -230,8 +323,10 @@ impl UniProtEntry {
         field("OS", &self.organism);
         field("OX", &self.taxon_id);
         field("GN", &self.gene);
-        field("PE", protein_existence_code(&self.protein_existence));
-        field("SV", &self.sequence_version);
+        if existence_and_version {
+            field("PE", protein_existence_code(&self.protein_existence));
+            field("SV", &self.sequence_version);
+        }
         d
     }
 
@@ -245,61 +340,77 @@ impl UniProtEntry {
         })
     }
 
-    /// Whether `feature`'s coordinates are the canonical sequence's.
-    fn on_canonical(&self, feature: &UniProtFeature) -> bool {
-        let s = &feature.location_sequence;
-        s.is_empty() || *s == self.accession || self.displayed_isoforms.iter().any(|d| d == s)
+    /// Ids of the isoforms whose sequence is the displayed (canonical) one.
+    pub fn displayed_isoforms(&self) -> impl Iterator<Item = &str> {
+        self.isoforms
+            .iter()
+            .filter(|i| i.sequence_type == "displayed")
+            .map(|i| i.id.as_str())
     }
 
-    /// The annotated modification sites of the canonical sequence that pass
-    /// `opts.evidence`, sorted by position; tallies the rest in `stats`.
-    fn mod_sites(&self, opts: &UniProtOptions, stats: &mut UniProtLoadStats) -> Vec<ModSite> {
+    /// Whether `feature`'s coordinates are the canonical sequence's.
+    fn on_canonical(&self, feature: &UniProtFeature) -> bool {
+        let s = feature.location_sequence.as_str();
+        s.is_empty() || s == self.accession || self.displayed_isoforms().any(|d| d == s)
+    }
+
+    /// Whether `feature`'s coordinates are those of `isoform` (`None`: the
+    /// canonical sequence).
+    fn located_on(&self, feature: &UniProtFeature, isoform: Option<&str>) -> bool {
+        match isoform {
+            None => self.on_canonical(feature),
+            Some(id) => feature.location_sequence == id,
+        }
+    }
+
+    /// The annotated modification sites located on `isoform` (`None`: the
+    /// canonical sequence, `seq`) that pass `opts.evidence`, sorted by
+    /// position; tallies the rest in `stats`.
+    fn mod_sites(
+        &self,
+        isoform: Option<&str>,
+        seq: &[u8],
+        opts: &UniProtOptions,
+        stats: &mut UniProtLoadStats,
+    ) -> Vec<ModSite> {
         let mut sites = Vec::new();
         for f in &self.features {
-            let resolved = match f.kind.as_str() {
-                "modified residue" | "lipid moiety-binding region" | "glycosylation site" => {
-                    let name = clean_description(&f.description);
-                    match ptm_mass(name) {
-                        Some(m) => m,
-                        None => {
-                            *stats
-                                .unknown_modifications
-                                .entry(name.to_string())
-                                .or_insert(0) += 1;
-                            continue;
-                        }
-                    }
-                }
-                "cross-link" => {
-                    let name = clean_description(&f.description);
-                    match name.strip_prefix(GLYGLY_CROSSLINK_PREFIX) {
-                        Some(rest) if GLYGLY_MODIFIERS.contains(&rest) => {
-                            (b'K', GLYGLY_MASS, SiteAnchor::Residue)
-                        }
-                        _ => {
-                            *stats
-                                .unknown_modifications
-                                .entry(name.to_string())
-                                .or_insert(0) += 1;
-                            continue;
-                        }
-                    }
-                }
-                _ => continue,
-            };
-            if !self.on_canonical(f) {
-                stats.isoform_features += 1;
+            let site_kind = matches!(
+                f.kind.as_str(),
+                "modified residue"
+                    | "lipid moiety-binding region"
+                    | "glycosylation site"
+                    | "cross-link"
+            );
+            if !site_kind || !self.located_on(f, isoform) {
                 continue;
             }
-            let (target, mass_delta, anchor) = resolved;
+            let name = clean_description(&f.description);
+            let resolved = if f.kind == "cross-link" {
+                match name.strip_prefix(GLYGLY_CROSSLINK_PREFIX) {
+                    Some(rest) if GLYGLY_MODIFIERS.contains(&rest) => {
+                        Some((b'K', GLYGLY_MASS, SiteAnchor::Residue))
+                    }
+                    _ => None,
+                }
+            } else {
+                ptm_mass(name)
+            };
+            let Some((target, mass_delta, anchor)) = resolved else {
+                *stats
+                    .unknown_modifications
+                    .entry(name.to_string())
+                    .or_insert(0) += 1;
+                continue;
+            };
             let position = match f.location {
-                Some((b, e)) if b == e && b >= 1 && (b as usize) <= self.sequence.len() => b - 1,
+                Some((b, e)) if b == e && b >= 1 && (b as usize) <= seq.len() => b - 1,
                 _ => {
                     stats.unusable_features += 1;
                     continue;
                 }
             };
-            if self.sequence[position as usize] != target {
+            if seq[position as usize] != target {
                 stats.unusable_features += 1;
                 continue;
             }
@@ -316,32 +427,30 @@ impl UniProtEntry {
         ProteinAnnotation::new(sites, None).mod_sites
     }
 
-    /// The natural sequence variants that pass `opts.evidence` and fit the
-    /// canonical sequence, in document order with duplicates dropped.
+    /// The natural sequence variants located on `isoform` (`None`: the
+    /// canonical sequence, `seq`) that pass `opts.evidence` and fit `seq`, in
+    /// document order with duplicates dropped.
     fn sequence_variants(
         &self,
+        isoform: Option<&str>,
+        seq: &[u8],
         opts: &UniProtOptions,
         stats: &mut UniProtLoadStats,
     ) -> Vec<SequenceVariant> {
         let mut out: Vec<SequenceVariant> = Vec::new();
-        for f in self
-            .features
-            .iter()
-            .filter(|f| f.kind == "sequence variant")
-        {
-            if !self.on_canonical(f) {
-                stats.isoform_features += 1;
+        for f in &self.features {
+            if f.kind != "sequence variant" || !self.located_on(f, isoform) {
                 continue;
             }
             let Some((begin, end)) = f
                 .location
-                .filter(|&(b, e)| b >= 1 && b <= e && (e as usize) <= self.sequence.len())
+                .filter(|&(b, e)| b >= 1 && b <= e && (e as usize) <= seq.len())
             else {
                 stats.unusable_features += 1;
                 continue;
             };
             let (start, end) = (begin as usize - 1, end as usize);
-            let canonical = &self.sequence[start..end];
+            let canonical = &seq[start..end];
             // A deletion ("Missing") carries neither <original> nor <variation>:
             // the location is the deleted residues.
             let replacements: Vec<&[u8]> = if f.original.is_empty() && f.variations.is_empty() {
@@ -362,8 +471,7 @@ impl UniProtEntry {
             for replacement in replacements {
                 // A deletion at either end only moves a protein terminus: its
                 // peptides read like canonical ones, so it has nothing to add.
-                let terminal_deletion =
-                    replacement.is_empty() && (start == 0 || end == self.sequence.len());
+                let terminal_deletion = replacement.is_empty() && (start == 0 || end == seq.len());
                 // I and L have the same mass: an I↔L change is the canonical
                 // peptide again as far as a mass spectrum can tell.
                 let il = |c: &u8| if *c == b'I' { b'L' } else { *c };
@@ -397,8 +505,167 @@ impl UniProtEntry {
         out
     }
 
+    /// The variant proteins of `base` (canonical or isoform), named after
+    /// the base accession field `base_id` and described as `description`.
+    fn variant_proteins(
+        &self,
+        base_id: &str,
+        description: &str,
+        base: &[u8],
+        sites: &[ModSite],
+        variants: Vec<SequenceVariant>,
+    ) -> Vec<Protein> {
+        variants
+            .into_iter()
+            .map(|v| {
+                let mut sequence = Vec::with_capacity(base.len() + v.replacement.len());
+                sequence.extend_from_slice(&base[..v.start]);
+                sequence.extend_from_slice(&v.replacement);
+                sequence.extend_from_slice(&base[v.end..]);
+                // From the sequences, not UniProt's coordinates: an indel in a
+                // repeat can slide along it, and spans past the shared prefix
+                // or suffix would read like canonical peptides.
+                let region = VariantRegion::between(base, &sequence);
+                let mod_sites = sites_through(sites, &[(v.start, v.end, v.replacement.len())]);
+                Protein {
+                    accession: format!("{}|{}_{}|{}", self.db_code(), base_id, v.tag, self.name),
+                    description: format!("{description} VARIANT={}", v.tag),
+                    sequence,
+                    annotation: Some(Arc::new(ProteinAnnotation::new(mod_sites, Some(region)))),
+                }
+            })
+            .collect()
+    }
+
+    /// Whether a processing feature (or the chain itself) is supported well
+    /// enough for `opts.evidence`. Swiss-Prot often gives chain and
+    /// processing features no evidence code; there they are manual
+    /// annotation and count as curated.
+    fn processing_admitted(&self, f: &UniProtFeature, opts: &UniProtOptions) -> bool {
+        if f.evidence_keys.is_empty() && self.dataset.eq_ignore_ascii_case("Swiss-Prot") {
+            opts.evidence >= EvidenceLevel::Curated
+        } else {
+            opts.evidence.admits(self.evidence_codes(f))
+        }
+    }
+
+    /// The mature chains (`chain` and `peptide` features) with a terminus the
+    /// canonical sequence does not have, that pass `opts.evidence` through
+    /// the chain or a processing feature (signal, transit or propeptide,
+    /// initiator Met) cut at that terminus.
+    fn mature_chains(
+        &self,
+        opts: &UniProtOptions,
+        stats: &mut UniProtLoadStats,
+    ) -> Vec<MatureChain> {
+        let len = self.sequence.len();
+        let mut out: Vec<MatureChain> = Vec::new();
+        for f in &self.features {
+            if !matches!(f.kind.as_str(), "chain" | "peptide") || !self.on_canonical(f) {
+                continue;
+            }
+            let Some((begin, end)) = f
+                .location
+                .filter(|&(b, e)| b >= 1 && b <= e && (e as usize) <= len)
+            else {
+                stats.unusable_features += 1;
+                continue;
+            };
+            let (start, end_excl) = (begin as usize - 1, end as usize);
+            // Starting right after an initiator Met is the Met-cleaved
+            // canonical N-terminus, which the search already has.
+            let ends = ChainEnds {
+                n_term: start > 0 && !(start == 1 && self.sequence[0] == b'M'),
+                c_term: end_excl < len,
+            };
+            if !ends.n_term && !ends.c_term {
+                continue;
+            }
+            let cut_here = |g: &UniProtFeature| {
+                PROCESSING_FEATURES.contains(&g.kind.as_str())
+                    && self.on_canonical(g)
+                    && g.location.is_some_and(|(gb, ge)| {
+                        (ends.n_term && ge + 1 == begin) || (ends.c_term && gb == end + 1)
+                    })
+            };
+            let admitted = self.processing_admitted(f, opts)
+                || self
+                    .features
+                    .iter()
+                    .any(|g| cut_here(g) && self.processing_admitted(g, opts));
+            if !admitted {
+                stats.below_evidence += 1;
+                continue;
+            }
+            let tag = if f.id.is_empty() {
+                format!("CHAIN_{begin}-{end}")
+            } else {
+                f.id.clone()
+            };
+            if !out.iter().any(|c| c.start == start && c.end == end_excl) {
+                out.push(MatureChain {
+                    start,
+                    end: end_excl,
+                    ends,
+                    tag,
+                });
+            }
+        }
+        out
+    }
+
+    /// The sequence of a `described` isoform, the canonical sequence with its
+    /// splice variants applied, and those edits; `None` when it is not
+    /// described or one of its splice variants is missing, does not fit the
+    /// canonical sequence, or overlaps another.
+    fn isoform_sequence(&self, iso: &UniProtIsoform) -> Option<(Vec<u8>, Edits)> {
+        if iso.sequence_type != "described" || iso.splice_refs.is_empty() {
+            return None;
+        }
+        let mut edits: Vec<(usize, usize, &[u8])> = Vec::new();
+        for r in &iso.splice_refs {
+            let f = self
+                .features
+                .iter()
+                .find(|f| f.kind == "splice variant" && f.id == *r && self.on_canonical(f))?;
+            let (begin, end) = f
+                .location
+                .filter(|&(b, e)| b >= 1 && b <= e && (e as usize) <= self.sequence.len())?;
+            let (start, end) = (begin as usize - 1, end as usize);
+            if !f.original.is_empty() && f.original.as_bytes() != &self.sequence[start..end] {
+                return None;
+            }
+            let replacement = f.variations.first().map_or(&[][..], |v| v.as_bytes());
+            if !replacement.iter().all(u8::is_ascii_uppercase) {
+                return None;
+            }
+            edits.push((start, end, replacement));
+        }
+        edits.sort_by_key(|e| e.0);
+        if edits.windows(2).any(|w| w[1].0 < w[0].1) {
+            return None;
+        }
+        let mut sequence = Vec::with_capacity(self.sequence.len());
+        let mut at = 0;
+        for &(start, end, replacement) in &edits {
+            sequence.extend_from_slice(&self.sequence[at..start]);
+            sequence.extend_from_slice(replacement);
+            at = end;
+        }
+        sequence.extend_from_slice(&self.sequence[at..]);
+        if sequence.is_empty() || sequence == self.sequence {
+            return None;
+        }
+        Some((
+            sequence,
+            edits.iter().map(|&(s, e, r)| (s, e, r.len())).collect(),
+        ))
+    }
+
     /// The proteins this entry contributes: the canonical one, then (with
-    /// `opts.variants`) one per sequence variant.
+    /// `opts.variants`) one per sequence variant, (with `opts.chains`) one
+    /// per mature chain with a new terminus, and (with `opts.isoforms`) each
+    /// described isoform followed by its own variants.
     pub fn into_proteins(
         self,
         opts: &UniProtOptions,
@@ -406,59 +673,123 @@ impl UniProtEntry {
     ) -> Vec<Protein> {
         let accession = self.fasta_accession();
         let description = self.fasta_description();
-        let sites = self.mod_sites(opts, stats);
+        let sites = self.mod_sites(None, &self.sequence, opts, stats);
         stats.mod_sites += sites.len();
-        let variants = if opts.variants {
-            self.sequence_variants(opts, stats)
-        } else {
-            Vec::new()
-        };
-        let mut out = Vec::with_capacity(1 + variants.len());
-        for v in variants {
-            let mut sequence = Vec::with_capacity(self.sequence.len() + v.replacement.len());
-            sequence.extend_from_slice(&self.sequence[..v.start]);
-            sequence.extend_from_slice(&v.replacement);
-            sequence.extend_from_slice(&self.sequence[v.end..]);
-            // From the sequences, not UniProt's coordinates: an indel in a
-            // repeat can slide along it, and spans past the shared prefix or
-            // suffix would read like canonical peptides.
-            let region = VariantRegion::between(&self.sequence, &sequence);
-            // Sites keep their residue: before the variant unchanged, after it
-            // shifted by the length change, inside it dropped.
-            let shift = v.replacement.len() as i64 - (v.end - v.start) as i64;
-            let mod_sites = sites
-                .iter()
-                .filter(|s| (s.position as usize) < v.start || (s.position as usize) >= v.end)
-                .map(|s| ModSite {
-                    position: if (s.position as usize) < v.start {
-                        s.position
-                    } else {
-                        (s.position as i64 + shift) as u32
-                    },
-                    ..*s
-                })
-                .collect();
-            out.push(Protein {
-                accession: format!(
-                    "{}|{}_{}|{}",
-                    self.db_code(),
-                    self.accession,
-                    v.tag,
-                    self.name
-                ),
-                description: format!("{description} VARIANT={}", v.tag),
-                sequence,
-                annotation: Some(Arc::new(ProteinAnnotation::new(mod_sites, Some(region)))),
-            });
-        }
-        stats.variant_proteins += out.len();
-        let canonical = Protein {
+        let mut out = vec![Protein {
             accession,
-            description,
-            sequence: self.sequence,
-            annotation: (!sites.is_empty()).then(|| Arc::new(ProteinAnnotation::new(sites, None))),
-        };
-        out.insert(0, canonical);
+            description: description.clone(),
+            sequence: self.sequence.clone(),
+            annotation: (!sites.is_empty())
+                .then(|| Arc::new(ProteinAnnotation::new(sites.clone(), None))),
+        }];
+
+        if opts.variants {
+            let variants = self.sequence_variants(None, &self.sequence, opts, stats);
+            let proteins = self.variant_proteins(
+                &self.accession,
+                &description,
+                &self.sequence,
+                &sites,
+                variants,
+            );
+            stats.variant_proteins += proteins.len();
+            out.extend(proteins);
+        }
+
+        if opts.chains {
+            for c in self.mature_chains(opts, stats) {
+                let mod_sites = sites
+                    .iter()
+                    .filter(|s| (c.start..c.end).contains(&(s.position as usize)))
+                    .map(|s| ModSite {
+                        position: s.position - c.start as u32,
+                        ..*s
+                    })
+                    .collect();
+                out.push(Protein {
+                    accession: format!(
+                        "{}|{}_{}|{}",
+                        self.db_code(),
+                        self.accession,
+                        c.tag,
+                        self.name
+                    ),
+                    description: format!("{description} CHAIN={}:{}-{}", c.tag, c.start + 1, c.end),
+                    sequence: self.sequence[c.start..c.end].to_vec(),
+                    annotation: Some(Arc::new(
+                        ProteinAnnotation::new(mod_sites, None).with_chain(Some(c.ends)),
+                    )),
+                });
+                stats.chain_proteins += 1;
+            }
+        }
+
+        let mut built: Vec<&str> = Vec::new();
+        if opts.isoforms {
+            for iso in self
+                .isoforms
+                .iter()
+                .filter(|i| i.sequence_type != "displayed")
+            {
+                let Some((sequence, edits)) = self.isoform_sequence(iso) else {
+                    stats.unbuilt_isoforms += 1;
+                    continue;
+                };
+                built.push(&iso.id);
+                // The isoform's own sites, plus the canonical sites on the
+                // residues it shares with the canonical sequence.
+                let own = self.mod_sites(Some(&iso.id), &sequence, opts, stats);
+                stats.mod_sites += own.len();
+                let mut iso_sites = sites_through(&sites, &edits);
+                iso_sites.extend(own);
+                let annotation = ProteinAnnotation::new(iso_sites, None);
+                let iso_description = self.isoform_description(iso);
+                if opts.variants {
+                    let variants = self.sequence_variants(Some(&iso.id), &sequence, opts, stats);
+                    let proteins = self.variant_proteins(
+                        &iso.id,
+                        &iso_description,
+                        &sequence,
+                        &annotation.mod_sites,
+                        variants,
+                    );
+                    stats.variant_proteins += proteins.len();
+                    out.push(Protein {
+                        accession: format!("{}|{}|{}", self.db_code(), iso.id, self.name),
+                        description: iso_description,
+                        sequence,
+                        annotation: (!annotation.mod_sites.is_empty())
+                            .then(|| Arc::new(annotation)),
+                    });
+                    out.extend(proteins);
+                } else {
+                    out.push(Protein {
+                        accession: format!("{}|{}|{}", self.db_code(), iso.id, self.name),
+                        description: iso_description,
+                        sequence,
+                        annotation: (!annotation.mod_sites.is_empty())
+                            .then(|| Arc::new(annotation)),
+                    });
+                }
+                stats.isoform_proteins += 1;
+            }
+        }
+
+        // Features in the coordinates of an isoform that is not searched.
+        stats.isoform_features += self
+            .features
+            .iter()
+            .filter(|f| {
+                let used_kind = matches!(
+                    f.kind.as_str(),
+                    "modified residue"
+                        | "lipid moiety-binding region"
+                        | "glycosylation site"
+                        | "cross-link"
+                ) || (opts.variants && f.kind == "sequence variant");
+                used_kind && !self.on_canonical(f) && !built.contains(&f.location_sequence.as_str())
+            })
+            .count();
         out
     }
 }
@@ -626,6 +957,7 @@ enum Capture {
     Gene,
     Organism,
     IsoformId,
+    IsoformName,
     Original,
     Variation,
     Sequence,
@@ -645,9 +977,8 @@ pub struct UniProtXmlReader<R: BufRead> {
     end: Option<u32>,
     /// Inside `<comment type="alternative products">`.
     in_alt_products: bool,
-    /// Current isoform: first `<id>` and whether its sequence is displayed.
-    isoform_id: Option<String>,
-    isoform_displayed: bool,
+    /// The `<isoform>` being read.
+    isoform: UniProtIsoform,
     genes_seen: usize,
     submitted_name: String,
     capture: Option<(Capture, usize)>,
@@ -668,8 +999,7 @@ impl<R: BufRead> UniProtXmlReader<R> {
             begin: None,
             end: None,
             in_alt_products: false,
-            isoform_id: None,
-            isoform_displayed: false,
+            isoform: UniProtIsoform::default(),
             genes_seen: 0,
             submitted_name: String::new(),
             capture: None,
@@ -762,14 +1092,19 @@ impl<R: BufRead> UniProtXmlReader<R> {
                 self.in_alt_products = attr(e, b"type")?.as_deref() == Some("alternative products");
             }
             (Tag::Isoform, Some(Tag::Comment)) if self.in_alt_products => {
-                self.isoform_id = None;
-                self.isoform_displayed = false;
+                self.isoform = UniProtIsoform::default();
             }
-            (Tag::Id, Some(Tag::Isoform)) if self.isoform_id.is_none() => {
+            (Tag::Id, Some(Tag::Isoform)) if self.isoform.id.is_empty() => {
                 self.capture = capture(Capture::IsoformId);
             }
+            (Tag::Name, Some(Tag::Isoform)) if self.isoform.name.is_empty() => {
+                self.capture = capture(Capture::IsoformName);
+            }
             (Tag::Sequence, Some(Tag::Isoform)) => {
-                self.isoform_displayed = attr(e, b"type")?.as_deref() == Some("displayed");
+                self.isoform.sequence_type = attr(e, b"type")?.unwrap_or_default();
+                self.isoform.splice_refs = attr(e, b"ref")?
+                    .map(|r| r.split_whitespace().map(str::to_string).collect())
+                    .unwrap_or_default();
             }
             (Tag::Feature, Some(Tag::Entry)) => {
                 self.feature = UniProtFeature {
@@ -839,7 +1174,8 @@ impl<R: BufRead> UniProtXmlReader<R> {
                     }
                     Capture::Gene => e.gene = text,
                     Capture::Organism => e.organism = text,
-                    Capture::IsoformId => self.isoform_id = Some(text),
+                    Capture::IsoformId => self.isoform.id = text,
+                    Capture::IsoformName => self.isoform.name = text,
                     Capture::Original => self.feature.original = text,
                     Capture::Variation => self.feature.variations.push(text),
                     Capture::Sequence => {
@@ -857,10 +1193,9 @@ impl<R: BufRead> UniProtXmlReader<R> {
         let parent = self.ancestor(0);
         match (tag, parent) {
             (Some(Tag::Isoform), Some(Tag::Comment)) if self.in_alt_products => {
-                if self.isoform_displayed {
-                    if let Some(id) = self.isoform_id.take() {
-                        self.entry.displayed_isoforms.push(id);
-                    }
+                let iso = std::mem::take(&mut self.isoform);
+                if !iso.id.is_empty() {
+                    self.entry.isoforms.push(iso);
                 }
             }
             (Some(Tag::Comment), Some(Tag::Entry)) => self.in_alt_products = false,
@@ -957,6 +1292,7 @@ fn attr(e: &BytesStart<'_>, name: &[u8]) -> Result<Option<String>, quick_xml::Er
 #[cfg(test)]
 mod tests {
     use super::*;
+    use model::ChainEnds;
 
     /// Two entries exercising every branch the reader takes. Sequence of
     /// P00001 (1-based): M1 S2 E3 K4 R5 S6 P7 T8 K9 A10 G11 N12 L13 S14 T15
@@ -1111,7 +1447,10 @@ mod tests {
         assert_eq!(e.organism, "Homo sapiens", "not the organism host");
         assert_eq!(e.taxon_id, "9606");
         assert_eq!(e.sequence, CANONICAL);
-        assert_eq!(e.displayed_isoforms, vec!["P00001-1".to_string()]);
+        assert_eq!(e.displayed_isoforms().collect::<Vec<_>>(), ["P00001-1"]);
+        assert_eq!(e.isoforms.len(), 2);
+        assert_eq!(e.isoforms[1].name, "2");
+        assert_eq!(e.isoforms[1].splice_refs, ["VSP_1"]);
         assert_eq!(e.features.len(), 22);
         assert_eq!(e.evidence.len(), 3);
         assert_eq!(e.fasta_accession(), "sp|P00001|TEST1_HUMAN");
@@ -1309,6 +1648,156 @@ mod tests {
         assert_eq!(
             del.variant_region(),
             Some(VariantRegion { start: 11, end: 9 })
+        );
+    }
+
+    /// P00010: signal peptide 1-5, propeptide 6-8, mature chain 9-30, a
+    /// released peptide 13-18, and a Met-removed chain 2-30.
+    /// P00011: isoform 2 = canonical with STN(2-4) -> Q and 20-27 deleted;
+    /// isoform 3 uses a splice variant that does not fit; isoform 4 is
+    /// external.
+    const PROCESSED_XML: &str = r#"<uniprot>
+<entry dataset="Swiss-Prot">
+  <accession>P00010</accession><name>TEN_HUMAN</name>
+  <feature type="signal peptide" evidence="1"><location><begin position="1"/><end position="5"/></location></feature>
+  <feature type="propeptide" id="PRO_0" evidence="1"><location><begin position="6"/><end position="8"/></location></feature>
+  <feature type="chain" id="PRO_1" description="Ten"><location><begin position="9"/><end position="30"/></location></feature>
+  <feature type="peptide" id="PRO_2" description="Ten peptide"><location><begin position="13"/><end position="18"/></location></feature>
+  <feature type="chain" id="PRO_3"><location><begin position="2"/><end position="30"/></location></feature>
+  <feature type="chain" id="PRO_4"><location><begin position="1"/><end position="26"/></location></feature>
+  <feature type="modified residue" description="Phosphoserine" evidence="1"><location><position position="13"/></location></feature>
+  <evidence type="ECO:0000269" key="1"/>
+  <sequence length="30">MALWARGRDTHKSEIAHRFKDLGEEHFKAR</sequence>
+</entry>
+<entry dataset="Swiss-Prot">
+  <accession>P00011</accession><name>ELEVEN_HUMAN</name>
+  <protein><recommendedName><fullName>Eleven protein</fullName></recommendedName></protein>
+  <gene><name type="primary">ELV</name></gene>
+  <organism><name type="scientific">Homo sapiens</name><dbReference type="NCBI Taxonomy" id="9606"/></organism>
+  <comment type="alternative products">
+    <isoform><id>P00011-1</id><name>1</name><sequence type="displayed"/></isoform>
+    <isoform><id>P00011-2</id><name>2</name><sequence type="described" ref="VSP_A VSP_B"/></isoform>
+    <isoform><id>P00011-3</id><name>3</name><sequence type="described" ref="VSP_A VSP_C"/></isoform>
+    <isoform><id>P00011-4</id><name>4</name><sequence type="external"/></isoform>
+  </comment>
+  <feature type="modified residue" description="Phosphoserine" evidence="1"><location><position position="2"/></location></feature>
+  <feature type="modified residue" description="Phosphothreonine" evidence="1"><location><position position="11"/></location></feature>
+  <feature type="modified residue" description="Phosphoserine" evidence="1"><location sequence="P00011-2"><position position="14"/></location></feature>
+  <feature type="modified residue" description="Phosphoserine" evidence="1"><location sequence="P00011-3"><position position="2"/></location></feature>
+  <feature type="sequence variant" evidence="1"><original>T</original><variation>A</variation><location sequence="P00011-2"><position position="9"/></location></feature>
+  <feature type="splice variant" id="VSP_A"><original>STN</original><variation>Q</variation><location><begin position="2"/><end position="4"/></location></feature>
+  <feature type="splice variant" id="VSP_B"><location><begin position="20"/><end position="27"/></location></feature>
+  <feature type="splice variant" id="VSP_C"><original>XXXX</original><variation>A</variation><location><begin position="10"/><end position="13"/></location></feature>
+  <evidence type="ECO:0000269" key="1"/>
+  <sequence length="27">MSTNPKPQRKTKRNTSRRPQDVKFPGG</sequence>
+</entry>
+</uniprot>"#;
+
+    #[test]
+    fn isoforms_are_rebuilt_with_their_sites_and_variants() {
+        let opts = UniProtOptions {
+            variants: true,
+            isoforms: true,
+            ..UniProtOptions::default()
+        };
+        let (db, stats) = load_uniprot_xml(PROCESSED_XML.as_bytes(), &opts).unwrap();
+        let accs: Vec<&str> = db.proteins.iter().map(|p| p.accession.as_str()).collect();
+        assert_eq!(
+            accs,
+            [
+                "sp|P00010|TEN_HUMAN",
+                "sp|P00011|ELEVEN_HUMAN",
+                "sp|P00011-2|ELEVEN_HUMAN",
+                "sp|P00011-2_VAR_T9A|ELEVEN_HUMAN",
+            ]
+        );
+        let iso = &db.proteins[2];
+        assert_eq!(iso.sequence, b"MQPKPQRKTKRNTSRRP");
+        assert_eq!(
+            iso.description,
+            "Isoform 2 of Eleven protein OS=Homo sapiens OX=9606 GN=ELV"
+        );
+        // Canonical T11 lands on T9 (S2 sat in the spliced-out STN); the
+        // isoform's own S14 is in its coordinates already.
+        assert_eq!(sites(iso), vec![(8, 79.966331), (13, 79.966331)]);
+        assert_eq!(iso.variant_region(), None);
+        let var = &db.proteins[3];
+        assert_eq!(var.sequence, b"MQPKPQRKAKRNTSRRP");
+        assert_eq!(
+            var.variant_region(),
+            Some(VariantRegion { start: 8, end: 9 })
+        );
+        assert!(var.description.starts_with("Isoform 2 of Eleven protein"));
+        assert_eq!(stats.isoform_proteins, 1);
+        assert_eq!(
+            stats.unbuilt_isoforms, 2,
+            "isoform 3 does not fit, 4 is external"
+        );
+        assert_eq!(stats.isoform_features, 1, "the site on unbuilt isoform 3");
+        assert_eq!(stats.variant_proteins, 1);
+        assert_eq!(stats.mod_sites, 4, "S13; S2 and T11; the isoform's own S14");
+
+        // Without isoforms, the isoform-located features are not searched.
+        let (db, stats) =
+            load_uniprot_xml(PROCESSED_XML.as_bytes(), &UniProtOptions::default()).unwrap();
+        assert_eq!(db.len(), 2);
+        assert_eq!(stats.isoform_features, 2);
+    }
+
+    #[test]
+    fn mature_chains_keep_only_new_termini() {
+        let load = |evidence| {
+            let opts = UniProtOptions {
+                chains: true,
+                evidence,
+                ..UniProtOptions::default()
+            };
+            load_uniprot_xml(PROCESSED_XML.as_bytes(), &opts).unwrap()
+        };
+        // Experimental: the chain is supported by its propeptide's evidence;
+        // the released peptide has none, and the chain after the initiator
+        // Met is the Met-cleaved canonical N-terminus.
+        let (db, stats) = load(EvidenceLevel::Experimental);
+        let chain = &db.proteins[1];
+        assert_eq!(chain.accession, "sp|P00010_PRO_1|TEN_HUMAN");
+        assert!(chain.description.ends_with(" CHAIN=PRO_1:9-30"));
+        assert_eq!(chain.sequence, b"DTHKSEIAHRFKDLGEEHFKAR");
+        assert_eq!(
+            chain.chain_ends(),
+            Some(ChainEnds {
+                n_term: true,
+                c_term: false
+            })
+        );
+        assert_eq!(sites(chain), vec![(4, 79.966331)], "S13 on the chain's S5");
+        assert_eq!(stats.chain_proteins, 1);
+        assert_eq!(
+            stats.below_evidence, 2,
+            "the released peptide and PRO_4, which has no evidence"
+        );
+        // Curated: Swiss-Prot processing features without a code count.
+        let (db, stats) = load(EvidenceLevel::Curated);
+        assert_eq!(stats.chain_proteins, 3);
+        let peptide = &db.proteins[2];
+        assert_eq!(peptide.accession, "sp|P00010_PRO_2|TEN_HUMAN");
+        assert_eq!(peptide.sequence, b"SEIAHR");
+        assert_eq!(
+            peptide.chain_ends(),
+            Some(ChainEnds {
+                n_term: true,
+                c_term: true
+            })
+        );
+        // A chain from residue 1 only has a new C-terminus.
+        let c_chain = &db.proteins[3];
+        assert_eq!(c_chain.accession, "sp|P00010_PRO_4|TEN_HUMAN");
+        assert_eq!(c_chain.sequence, b"MALWARGRDTHKSEIAHRFKDLGEEH");
+        assert_eq!(
+            c_chain.chain_ends(),
+            Some(ChainEnds {
+                n_term: false,
+                c_term: true
+            })
         );
     }
 

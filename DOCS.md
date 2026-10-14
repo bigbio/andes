@@ -34,7 +34,7 @@ Native `.raw`/`.d` search MS2 only (MS3 reporter scans are filtered at load).
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
 | `--spectrum` | path | *(required)* | Input spectrum file; reader chosen by extension (see above). | Java `-s <FILE>` |
-| `--database` | path | *(required)* | Target FASTA, or UniProt XML when the name ends in `.xml` / `.xml.gz` ([§1a](#uniprot-xml-databases-variants-and-annotated-sites)). Gzip is read directly. Decoys are generated (see `--decoy-strategy`, `--decoy-prefix`). | Java `-d <FILE>` |
+| `--database` | path | *(required)* | Target FASTA, or UniProt XML when the name ends in `.xml` / `.xml.gz` ([§1a](#uniprot-xml-databases)). Gzip is read directly. Decoys are generated (see `--decoy-strategy`, `--decoy-prefix`). | Java `-d <FILE>` |
 | `--output-pin` | path | *(required)* | Output Percolator `.pin`. | Java `-o <FILE>` (when `-outputFormat pin`) |
 
 ### Search parameters
@@ -134,19 +134,22 @@ For a pre-built target+decoy FASTA, use `--decoy-strategy none` with `--decoy-pr
 | `--decoy-suffix` | string | *(off)* | Decoy accession suffix (OpenMS `_rev` convention). |
 | `--decoy-seed` | u64 | fixed | *(advanced)* RNG seed for `shuffle` decoys. |
 
-### UniProt XML databases (variants and annotated sites)
+### UniProt XML databases
 
 `--database` also reads UniProtKB XML (`uniprot_sprot.xml.gz`, a proteome download, or
 `rest.uniprot.org/uniprotkb/<acc>.xml`). Each entry becomes one protein with the UniProt FASTA
 header (`sp|P02769|ALBU_BOVIN`, `Albumin OS=Bos taurus OX=9913 GN=ALB PE=1 SV=4`), so on its own
 an XML database searches exactly like the UniProt FASTA. The XML also holds annotation that FASTA
-drops. andes uses two kinds, both off until asked for. A file that ends inside an element
-(a truncated download), or an XML file with no UniProt entries, is an error.
+drops. andes uses four kinds, all off until asked for: annotated modification sites, natural
+variants, isoforms and mature chains. A file that ends inside an element (a truncated download),
+or an XML file with no UniProt entries, is an error.
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--uniprot-variants` | bool | off | Add one target entry per natural `sequence variant`. Only peptides that carry the variant are enumerated from it. |
-| `--uniprot-evidence` | enum | `experimental` | Minimum UniProt evidence for a variant or an annotated site: `experimental`, `curated`, or `any` (see below). |
+| `--uniprot-isoforms` | bool | off | Add one target entry per described isoform, rebuilt from the canonical sequence and its splice variants. |
+| `--uniprot-chains` | bool | off | Add one target entry per mature chain or peptide with a terminus the precursor lacks. Only peptides at those new termini are enumerated from it. |
+| `--uniprot-evidence` | enum | `experimental` | Minimum UniProt evidence for a variant, an annotated site or a mature chain: `experimental`, `curated`, or `any` (see below). |
 
 **Annotated modification sites.** `modified residue`, `lipid moiety-binding region` and
 `glycosylation site` features become sites with the monoisotopic mass of the named modification,
@@ -174,13 +177,41 @@ per allele. These variants are skipped:
 
 - the original residues do not match the canonical sequence;
 - the position is unknown;
-- the location is on another isoform;
+- the location is on an isoform that is not searched (see below);
 - the variant deletes a protein terminus;
 - the change is only I↔L, which no mass spectrum tells from the canonical sequence.
 
 A peptide carries at most one variant. A peptide that does not contain the variant is not a
 variant peptide, even when the variant changes its cleavage context. For example, after an E→K
 variant the next peptide becomes tryptic, but it is not searched.
+
+**Isoforms** (`--uniprot-isoforms`). Each `described` isoform of the entry's alternative products
+becomes its own target protein, as in UniProt's canonical-and-isoform FASTA:
+`sp|P04637-2|P53_HUMAN`, `Isoform 2 of Cellular tumor antigen p53 OS=Homo sapiens OX=9606 GN=TP53`.
+Its sequence is the canonical one with the isoform's `splice variant` features applied. It
+carries the canonical sites on the residues it shares with the canonical sequence, plus the sites
+UniProt locates on the isoform itself. With `--uniprot-variants`, the variants UniProt locates on
+the isoform become entries of their own, named after the isoform id
+(`<isoform id>_<feature id>_<change>`). A peptide the isoform shares with the canonical sequence
+lists both proteins, as with the FASTA. Isoforms are not
+filtered by evidence: UniProt only describes an isoform it has curated. An isoform is skipped,
+and counted in the log, when it is `external` or `not described`, or when one of its splice
+variants is missing, does not fit the canonical sequence, or overlaps another.
+
+**Mature chains** (`--uniprot-chains`). Removing a signal peptide, transit peptide, propeptide or
+initiator Met gives the mature protein new termini. The peptides there are often not cleavage
+products of the search enzyme in the precursor, and they can carry protein-terminal mods. Each `chain` or `peptide` feature with such a terminus becomes its own target protein
+holding the chain's residues: `sp|P02769_PRO_0000001058|ALBU_BOVIN`, with
+` CHAIN=PRO_0000001058:25-607` appended to the description (`CHAIN_<begin>-<end>` when the
+feature has no id). Only peptides that start at a new N-terminus or end at a new C-terminus are
+enumerated from it. All other peptides of the chain are also in the precursor, so they are not
+searched twice. The new termini are protein termini, so protein-terminal mods (`ProtNTerm`,
+`ProtCTerm`) apply there, and the canonical sites on the chain's residues carry over. A chain
+that starts right after the initiator Met adds nothing, because the Met-cleaved canonical
+N-terminus is already searched. The search's own initiator-Met removal does not apply to chains. A chain is used
+when it, or a processing feature cut at its new terminus, meets `--uniprot-evidence`. Swiss-Prot
+gives most chain and processing features no evidence code. There they are manual annotation and
+count as `curated`.
 
 **Decoys.** The annotation travels with each decoy through the permutation that builds the decoy.
 Sites stay on the same residues, so a decoy has as many annotated sites as its target, on the
@@ -191,7 +222,8 @@ sites would have no decoy competition. A variant region maps to its mirror image
 `sequon-reverse` unless a sequon swap moved one of its residues. Otherwise, as under `shuffle`, it
 maps to a region of the same length at the image of its first residue. Variant entries thus
 get decoy twins with the same kind of variant region, and the target and decoy search spaces grow
-together.
+together. An isoform's decoy is built like any protein's. A chain's decoy keeps the chain's
+new termini, so it offers as many terminal peptides as its target.
 
 **Evidence** (`--uniprot-evidence`, from the features' ECO codes):
 
@@ -201,21 +233,23 @@ together.
 | `curated` | the above plus manual assertions without direct experimental support: combinatorial (ECO:0000244), by similarity (ECO:0000250), sequence model (ECO:0000255), author statement (ECO:0000303), curator inference (ECO:0000305), imported (ECO:0000312) |
 | `any` | everything, including automatic annotation and features without evidence (most dbSNP-only variants) |
 
-The run log reports the entries, the sites and variant entries kept, and the features left out
-(below the evidence level, not fitting the canonical sequence, on other isoforms, or with no
-known mass).
+The run log reports the entries, the sites, variant, isoform and chain entries kept, the isoforms
+it could not rebuild, and the features left out (below the evidence level, not fitting their
+sequence, on isoforms not searched, or with no known mass).
 
 **Limits.**
 
-- Isoforms (`VAR_SEQ`) are not rebuilt, and mature-chain, signal-peptide and propeptide
-  boundaries are not used.
+- Variants and chains are not combined. A variant peptide at a chain terminus is not searched,
+  and chains are only read on the canonical sequence, not on isoforms.
+- A proprotein (signal peptide removed, propeptide not yet) is not an entry of its own. Only
+  `chain` and `peptide` features are.
 - The `--refine` second pass searches peptide mini-proteins that carry no annotation. It leaves
   the restricted mods out, so they apply in the main search only, and the refinement tier's own
   mods apply there as usual.
 - `andes train` reads FASTA only.
 
-**Validation.** Both options grow the search space, which can raise identifications and error
-together. Measure them before relying on them: PSMs at 1% FDR on the standard datasets, plus an
+**Validation.** The variant, isoform and chain options grow the search space, which can raise
+identifications and error together. Measure them before relying on them: PSMs at 1% FDR on the standard datasets, plus an
 entrapment FDP.
 
 ### Chimeric cascade
@@ -298,7 +332,8 @@ With `--output-parquet`, both modules add `quantms.feature.parquet` (the QPX fea
 `decoys`, `chimeric`, `refine`, `rescoring`, `glyco`, `quant` (template:
 [`config.example.yaml`](config.example.yaml)). Keys are optional; **`CLI flag > --config >
 built-in default`**; unknown keys are a hard error. The UniProt XML options are `io` keys
-(`uniprot_variants: true`, `uniprot_evidence: curated`). Values use the CLI strings
+(`uniprot_variants: true`, `uniprot_isoforms: true`, `uniprot_chains: true`,
+`uniprot_evidence: curated`). Values use the CLI strings
 (`precursor_tol: 20ppm`, `charge: "2..5"`, `isotope_error: "-1..2"`, `enzyme: gluc,trypsin`).
 
 ```yaml
@@ -342,7 +377,7 @@ Optional `key=value` attributes may follow the name, comma-separated:
 | `loss=<m1;m2;…>` | Neutral-loss masses (Da) predicted for this mod's fragment ions. |
 | `class=<glyco\|phospho\|sulfo\|generic>` | Pool the mod's loss ions with others of the class. |
 | `accession=<CURIE>` | Ontology accession reported in the outputs, e.g. `UNIMOD:21`. |
-| `sites=<annotated\|any>` | `annotated` restricts a **variable** mod to the residues a UniProt XML database annotates with a modification of the same mass ([§1a](#uniprot-xml-databases-variants-and-annotated-sites)). `any` (default) applies it to every matching residue. |
+| `sites=<annotated\|any>` | `annotated` restricts a **variable** mod to the residues a UniProt XML database annotates with a modification of the same mass ([§1a](#uniprot-xml-databases)). `any` (default) applies it to every matching residue. |
 
 ### Example (a) — Carbamidomethyl C + Oxidation M
 
@@ -477,7 +512,7 @@ the fused strong score Percolator weights most; historically `StrongScore`; it a
 | 63 | `RawScoreCal` | float | signed | Per-spectrum z-scored `RawScore`. |
 | 64 | `RankScoreFloat` | float | unbounded | Unrounded `RankScore` (continuous split-sum). |
 | 65 | `Peptide` | string | — | `pre.SEQUENCE.post` with `+mass` mod annotations. |
-| 66 | `Proteins` | string | — | Protein accession(s), tab-separated; decoys carry `--decoy-prefix`. A UniProt variant entry names its change (`sp\|P04637_VAR_005851_D7H\|P53_HUMAN`). |
+| 66 | `Proteins` | string | — | Protein accession(s), tab-separated; decoys carry `--decoy-prefix`. A UniProt variant entry names its change (`sp\|P04637_VAR_005851_D7H\|P53_HUMAN`), an isoform its id (`sp\|P04637-2\|P53_HUMAN`), a mature chain its feature id (`sp\|P02769_PRO_0000001058\|ALBU_BOVIN`). |
 
 Columns marked **0.0 unless/without** stay in the header and are zero when their condition
 does not hold.

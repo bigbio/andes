@@ -40,7 +40,11 @@ fn bsa_sites_and_variant_follow_the_evidence_level() {
     let load = |evidence, variants| {
         load_protein_database(
             &fixture("BSA.xml.gz"),
-            &UniProtOptions { variants, evidence },
+            &UniProtOptions {
+                variants,
+                evidence,
+                ..UniProtOptions::default()
+            },
         )
         .unwrap()
     };

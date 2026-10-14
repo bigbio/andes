@@ -1291,17 +1291,18 @@ mod tests {
             "Acetyl Prot-N-term must NOT appear in Anywhere AA list"
         );
 
-        // Prot-N-term: starts from Anywhere list + one acetyl-bearing variant per
-        // residue (wildcard residue → 20 acetyl variants added at Prot-N-term).
-        // For Cys, the fixed Carbamidomethyl STACKS under the variable Acetyl, so
-        // its variant is the combined "Carbamidomethyl+Acetyl" (not Acetyl-alone).
+        // Prot-N-term: every form of each residue, plus that form with Acetyl on
+        // the alpha-amine: 20 residues + M-ox → 21 acetyl-bearing forms. For
+        // Cys, the fixed Carbamidomethyl STACKS under the variable Acetyl, so
+        // its form is the combined "Carbamidomethyl+Acetyl" (not Acetyl-alone);
+        // M-ox stacks with Acetyl as "Oxidation+Acetyl".
         let n_pn_acetyl = prot_n
             .iter()
             .filter(|aa| aa.mod_.as_ref().is_some_and(|m| m.name.contains("Acetyl")))
             .count();
         assert_eq!(
-            n_pn_acetyl, 20,
-            "Prot-N-term AA list must include 20 acetyl-bearing variants (one per residue)"
+            n_pn_acetyl, 21,
+            "Prot-N-term AA list must include 21 acetyl-bearing forms (one per Anywhere form)"
         );
 
         // P1b regression: protein-N-term Cys must carry CAM+Acetyl (+99.032590),
@@ -1319,16 +1320,86 @@ mod tests {
              (Acetyl-alone +42.01 would drop the mandatory fixed CAM)"
         );
 
-        // Total Prot-N-term list = Anywhere list + 20 acetyl-bearing variants.
+        // Total Prot-N-term list = Anywhere list + 21 acetyl-bearing forms.
         assert_eq!(
             prot_n.len(),
-            anywhere.len() + 20,
-            "Prot-N-term list = Anywhere list + 20 acetyl-bearing variants; \
+            anywhere.len() + 21,
+            "Prot-N-term list = Anywhere list + 21 acetyl-bearing forms; \
              actual Anywhere len = {}, Prot-N-term len = {}, Anywhere modified = {}",
             anywhere.len(),
             prot_n.len(),
             n_any_modified
         );
+    }
+
+    /// `(mass_delta, slots)` of every form of `r` in context `(n, c)`, sorted.
+    fn form_deltas(set: &AminoAcidSet, r: u8, n: Terminus, c: Terminus) -> Vec<(f64, u8)> {
+        let mut v: Vec<(f64, u8)> = set
+            .forms(r, n, c)
+            .iter()
+            .zip(set.form_slots(r, n, c))
+            .map(|(aa, &s)| {
+                let d = aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
+                ((d * 1e4).round() / 1e4, s)
+            })
+            .collect();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v
+    }
+
+    #[test]
+    fn terminal_forms_stack_side_chain_and_terminal_mods() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            "229.162932,K,fix,any,TMT6plex\n\
+             229.162932,*,fix,N-term,TMT6plex\n\
+             57.021464,C,fix,any,Carbamidomethyl\n\
+             15.994915,M,opt,any,Oxidation\n\
+             42.010565,*,opt,Prot-N-term,Acetyl\n",
+        )
+        .unwrap();
+        let set = AminoAcidSetBuilder::new_standard()
+            .add_mods_from_file(tmp.path())
+            .unwrap()
+            .build()
+            .unwrap();
+        let (no, pep, prot) = (Terminus::No, Terminus::Peptide, Terminus::Protein);
+        let (tmt, ac) = (229.1629, 42.0106);
+        let r4 = |x: f64| (x * 1e4).round() / 1e4;
+        // Interior K carries its side-chain tag only; an N-terminal K carries
+        // both the side-chain and the N-terminal tag.
+        assert_eq!(form_deltas(&set, b'K', no, no), vec![(tmt, 0)]);
+        assert_eq!(form_deltas(&set, b'K', pep, no), vec![(r4(2.0 * 229.162932), 0)]);
+        // An N-terminal C keeps CAM under the N-terminal tag.
+        assert_eq!(form_deltas(&set, b'C', pep, no), vec![(r4(57.021464 + 229.162932), 0)]);
+        // An N-terminal M is tried tagged and tagged + oxidised.
+        assert_eq!(
+            form_deltas(&set, b'M', pep, no),
+            vec![(tmt, 0), (r4(229.162932 + 15.994915), 1)]
+        );
+        // At the protein N-terminus Acetyl replaces the N-terminal tag and
+        // stacks with the side-chain forms; Ox + Ac carries two variable mods.
+        assert_eq!(
+            form_deltas(&set, b'M', prot, no),
+            vec![
+                (ac, 1),
+                (r4(15.994915 + 42.010565), 2),
+                (tmt, 0),
+                (r4(229.162932 + 15.994915), 1),
+            ]
+        );
+        assert_eq!(
+            form_deltas(&set, b'K', prot, no),
+            vec![(r4(229.162932 + 42.010565), 1), (r4(2.0 * 229.162932), 0)]
+        );
+        // A C-terminus has no mods here: a one-residue peptide matches its N-term.
+        assert_eq!(form_deltas(&set, b'K', pep, pep), form_deltas(&set, b'K', pep, no));
+        // The first form of every list carries no variable mod.
+        for (_, slots) in set.form_lists() {
+            assert_eq!(slots[0], 0);
+            assert!(slots[1..].iter().all(|&s| s > 0));
+        }
     }
 
     #[test]

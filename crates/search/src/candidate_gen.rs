@@ -5,12 +5,11 @@
 //!
 //! ## N-terminal Met cleavage
 //!
-//! When a protein starts with M, a parallel enumeration treats
-//! `sequence[1..]` as the effective protein sequence (initial Met loss).
-//! Both enumerations run concurrently; Met-cleaved candidates differ by
-//! `is_protein_n_term=true` at offset 1 of the original sequence and are
-//! NOT deduplicated — they have a distinct search space (protein-N-term
-//! mod variants apply).
+//! When a protein starts with M, a second walk treats `sequence[1..]` as the
+//! effective protein sequence (initial Met loss) and emits only the peptides
+//! starting at its first residue, with `is_protein_n_term=true` (so the
+//! protein-N-term mod forms apply). The full walk leaves those spans to it,
+//! so every span of the protein is enumerated once.
 
 use crate::decoy::is_decoy_accession_affix;
 use crate::search_index::SearchIndex;
@@ -93,8 +92,9 @@ fn enumerate_protein(
     // N-terminal Met cleavage: when the protein starts with M (and has >1
     // residue), also enumerate the peptides that start at the post-Met
     // residue, the new biological N-terminus (is_protein_n_term=true). Every
-    // other span of sequence[1..] is already emitted by the walk above.
-    if seq.first() == Some(&b'M') && seq.len() > 1 {
+    // other span of sequence[1..] is emitted by the walk above, which leaves
+    // the post-Met spans to this one.
+    if has_met_cleaved_walk(seq) {
         out.extend(enumerate_protein_from_offset(
             seq,
             1,
@@ -105,6 +105,13 @@ fn enumerate_protein(
     }
 
     out
+}
+
+/// Whether `seq` gets the Met-cleaved walk: it starts with M and has more
+/// than one residue.
+#[inline]
+fn has_met_cleaved_walk(seq: &[u8]) -> bool {
+    seq.len() > 1 && seq[0] == b'M'
 }
 
 /// Enumerate candidates starting from `seq_offset` into `seq`.
@@ -289,6 +296,11 @@ fn emit_span(ctx: &EmitCtx<'_>, start: u32, end: u32, out: &mut Vec<Candidate>) 
 
     let abs_start = start as usize + ctx.seq_offset;
     let abs_end = end as usize + ctx.seq_offset;
+    // A span starting at the post-Met residue of an M-initial protein belongs
+    // to the Met-cleaved walk (as a protein N-terminal peptide), not this one.
+    if ctx.seq_offset == 0 && abs_start == 1 && has_met_cleaved_walk(ctx.seq) {
+        return;
+    }
     let pre = if abs_start == 0 {
         b'_'
     } else {
@@ -1581,10 +1593,9 @@ mod tests {
         (db, params)
     }
 
-    // 2.3: a FIXED peptide-N-term mod (e.g. the TMT/iTRAQ tag) must be applied at
-    // EVERY pos-0 residue, INCLUDING protein-N-term peptides. Before the fix,
-    // build_terminal_variants looked up ProtNTerm XOR NTerm, so a protein-N-term
-    // peptide silently lost its fixed N-term tag → wrong precursor/fragment mass.
+    // A FIXED peptide-N-term mod (e.g. the TMT/iTRAQ tag) must be applied at
+    // EVERY pos-0 residue, INCLUDING protein-N-term peptides; otherwise a
+    // protein-N-term peptide carries the wrong precursor/fragment mass.
     #[test]
     fn fixed_n_term_tag_applies_to_protein_n_term_peptides() {
         use model::modification::ResidueSpec;
@@ -1645,6 +1656,116 @@ mod tests {
             has_tmt,
             "protein-N-term peptide must carry the fixed N-term TMT tag (finding 2.3)"
         );
+    }
+
+    /// The Met-cleaved walk adds only the peptides starting at the post-Met
+    /// residue: every other span of an M-initial protein is enumerated once.
+    #[test]
+    fn met_cleaved_walk_adds_only_post_met_n_term_peptides() {
+        let target = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "met fixture".into(),
+                sequence: b"MAKAGERLLKPEPTIDER".to_vec(),
+            }],
+        };
+        let db = SearchIndex::from_target_db(&target, "XXX");
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.min_length = 2;
+        params.max_missed_cleavages = 1;
+        for ntt in [2u8, 1, 0] {
+            params.num_tolerable_termini = ntt;
+            let cands: Vec<_> = enumerate_candidates(&db, &params, "XXX")
+                .filter(|c| !c.is_decoy)
+                .collect();
+            let mut keys: Vec<(usize, usize)> = cands
+                .iter()
+                .map(|c| (c.start_offset_in_protein, c.peptide.residues.len()))
+                .collect();
+            let n = keys.len();
+            keys.sort_unstable();
+            keys.dedup();
+            assert_eq!(keys.len(), n, "ntt={ntt}: a span is enumerated twice");
+            assert!(
+                cands.iter().any(|c| c.start_offset_in_protein == 1 && c.is_protein_n_term),
+                "ntt={ntt}: missing the Met-cleaved N-terminal peptide"
+            );
+            assert!(
+                cands
+                    .iter()
+                    .all(|c| c.is_protein_n_term == (c.start_offset_in_protein <= 1)),
+                "ntt={ntt}: only spans starting at 0 or 1 are protein N-terminal"
+            );
+        }
+    }
+
+    /// TMT fixed on K and the N-terminus, CAM fixed on C, Ox-M and protein
+    /// N-term Acetyl variable: the N-terminal residue carries its side-chain
+    /// mod stacked with the terminal one, and the lazy out-of-core path (whose
+    /// Δ offsets include Acetyl replacing the N-terminal tag) matches the
+    /// in-RAM candidate set.
+    #[test]
+    fn stacked_terminal_forms_enumerate_and_match_lazy() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            "229.162932,K,fix,any,TMT6plex\n\
+             229.162932,*,fix,N-term,TMT6plex\n\
+             57.021464,C,fix,any,Carbamidomethyl\n\
+             15.994915,M,opt,any,Oxidation\n\
+             42.010565,*,opt,Prot-N-term,Acetyl\n",
+        )
+        .unwrap();
+        let aa_set = AminoAcidSetBuilder::new_standard()
+            .add_mods_from_file(tmp.path())
+            .unwrap()
+            .build()
+            .unwrap();
+        let target = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "tmt stacking fixture".into(),
+                sequence: b"MCKAGERKLLRMAEPK".to_vec(),
+            }],
+        };
+        let db = SearchIndex::from_target_db(&target, "XXX");
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.min_length = 2;
+        params.max_variable_mods_per_peptide = 2;
+        let all: Vec<_> = enumerate_candidates(&db, &params, "XXX").collect();
+        let first_delta = |c: &Candidate| {
+            c.peptide.residues[0]
+                .mod_
+                .as_ref()
+                .map_or(0.0, |m| m.mass_delta)
+        };
+        let has = |start: usize, len: usize, delta: f64| {
+            all.iter().any(|c| {
+                !c.is_decoy
+                    && c.start_offset_in_protein == start
+                    && c.peptide.residues.len() == len
+                    && (first_delta(c) - delta).abs() < 1e-3
+            })
+        };
+        // MCK at the protein N-terminus: M with Ox + Ac (two variable mods).
+        assert!(has(0, 3, 15.994915 + 42.010565));
+        // CK after Met cleavage: C keeps CAM under the TMT tag or under Acetyl.
+        assert!(has(1, 2, 57.021464 + 229.162932));
+        assert!(has(1, 2, 57.021464 + 42.010565));
+        assert!(!has(1, 2, 42.010565));
+        // KLLR: an N-terminal K carries both TMT tags.
+        assert!(has(7, 4, 2.0 * 229.162932));
+        // MAEPK inside the protein: N-terminal M is tagged, optionally oxidised.
+        assert!(has(11, 5, 229.162932 + 15.994915));
+
+        let (_tmp, mi) = build_and_open(&db, &params);
+        let mut masses: Vec<f64> = all.iter().map(|c| c.peptide.mass()).collect();
+        masses.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        masses.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+        for &m in &masses {
+            assert_lazy_matches_inram(&db, &params, &mi, m, 0.01);
+        }
     }
 
     /// Set-equality assertion shared by both tests: the lazy candidate set for

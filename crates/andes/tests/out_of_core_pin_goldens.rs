@@ -88,6 +88,12 @@
 //! rows) it lacks exactly main's two dropped Pass-2 rows (scans 60160 and
 //! 60179); every other row is identical with SpecId excluded.
 //!
+//! REGENERATED 2026-10-14 (E. coli digests) when the MGF reader began taking
+//! the scan number from the TITLE (`... scan=N`) instead of reporting 0. Same
+//! row counts; with ScanNr set back to 0 and SpecId's scan field back to `_0_`,
+//! each new PIN digests to its previous golden exactly, so only those two
+//! fields changed.
+//!
 //! To regenerate after an intentional change, run the case's command line (see
 //! `run`), then either digest the PIN with `identity_digest` (E. coli) or write
 //! its header and sorted rows, gzipped, over the case's golden PIN (slices).
@@ -267,14 +273,14 @@ fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
 /// One E. coli case: (rows, `identity_digest` FNV-1a 64, calibration outcome line).
 type Golden = (usize, u64, Option<&'static str>);
 
-const ECOLI_DEFAULT_MODS: Golden = (74_442, 0x8d7e_e17f_0589_776a, None);
-const ECOLI_FIXED_MODS_ONLY: Golden = (75_750, 0xb351_f0e9_b195_ade3, None);
-const ECOLI_ONE_VARIABLE_MOD: Golden = (74_998, 0xd0a6_5c10_f1d5_29f3, None);
+const ECOLI_DEFAULT_MODS: Golden = (74_442, 0xddc8_e6d8_0b07_a390, None);
+const ECOLI_FIXED_MODS_ONLY: Golden = (75_750, 0x404a_1b62_f3da_87f1, None);
+const ECOLI_ONE_VARIABLE_MOD: Golden = (74_998, 0x703c_69ff_122b_a7e9, None);
 /// The pre-pass scores but the sample is too small to calibrate, so the PIN
 /// equals the calibration-off one.
 const ECOLI_PRECURSOR_CAL_AUTO: Golden = (
     74_442,
-    0x8d7e_e17f_0589_776a,
+    0xddc8_e6d8_0b07_a390,
     Some("Precursor mass calibration skipped (insufficient confident PSMs: 492 with PSMs, 55 below RawScore floor, 0 failed |residual|>50ppm"),
 );
 

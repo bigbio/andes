@@ -16,6 +16,7 @@ use model::scan::{Ms1Scan, ProductScan, ScanContext};
 use model::spectrum::Spectrum;
 use model::Tolerance;
 use output::feature_parquet::FeatureRecord;
+use output::ms2_table::{write_ms2_table, Ms2Table};
 use output::run_quant_table::{write_run_quant_table, RunPsmRow};
 use output::{LfqRow, ModRecord, PercolatorPsm, QuantId, TmtRow};
 use quant::formula::Formula;
@@ -24,6 +25,7 @@ use quant::lfq::{
     competition_score, feature_score, quantify, quantify_decoy, FeatureQuant, LfqParams, LfqTarget,
 };
 use quant::ms1_index::Ms1RunIndex;
+use quant::ms2::Ms2Scan;
 use quant::tdc::{picked_qvalues, Pair};
 use rayon::prelude::*;
 use search::candidate_gen::Candidate;
@@ -47,6 +49,9 @@ const PURITY_ISOTOPE_PPM: f64 = 10.0;
 const MS1_RESOLUTION_CHECK_PPM: f64 = 10.0;
 const MS1_MIN_ISOTOPE_PARTNER_FRACTION: f64 = 0.5;
 
+/// Centroids kept per MS2 scan in `<stem>.ms2.parquet` (the most intense).
+const MS2_TOP_PEAKS: usize = 100;
+
 /// Resolved quantification settings for a run.
 #[derive(Debug, Clone)]
 pub(crate) struct QuantSettings {
@@ -61,8 +66,10 @@ pub(crate) struct QuantSettings {
     /// PSM q-value cut for quantification targets (applied when rescoring ran).
     pub quant_fdr: f64,
     pub pep_cap: Option<f64>,
-    /// `--quant-dir`: where each run's MS1 table and PSM table are written.
+    /// `--quant-dir`: where each run's MS1, MS2 and PSM tables are written.
     pub quant_dir: Option<PathBuf>,
+    /// The search's fragment tolerance, recorded in each run's MS2 table.
+    pub fragment_tol: Option<Tolerance>,
 }
 
 impl QuantSettings {
@@ -145,6 +152,7 @@ impl QuantSettings {
             quant_fdr: cli.quant_fdr.or(cli.fdr).unwrap_or(0.01),
             pep_cap: cli.pep,
             quant_dir: cli.quant_dir.clone(),
+            fragment_tol: None,
         }))
     }
 
@@ -201,7 +209,10 @@ impl QuantSettings {
             ));
         }
         if let Some(dir) = &self.quant_dir {
-            parts.push(format!("per-run MS1 and PSM tables in {}", dir.display()));
+            parts.push(format!(
+                "per-run MS1, MS2 and PSM tables in {}",
+                dir.display()
+            ));
         }
         parts.join("; ")
     }
@@ -247,6 +258,9 @@ pub(crate) struct QuantCollector {
     /// False when the read path does not capture MS1 scans for quantification
     /// (`--chimeric`); the missing purity was announced once at setup.
     ms1_captured: bool,
+    /// The current file's reduced MS2 scans (`--quant-dir`), written to its
+    /// MS2 table by `finish_file`.
+    ms2: Vec<Ms2Scan>,
 }
 
 impl QuantCollector {
@@ -257,6 +271,7 @@ impl QuantCollector {
             runs: Vec::new(),
             next_span_start: 0,
             ms1_captured: true,
+            ms2: Vec::new(),
         }
     }
 
@@ -272,6 +287,9 @@ impl QuantCollector {
         if let Some(plex) = self.settings.plex {
             self.ms2_reporters
                 .push(extract_reporters(&spec.peaks, plex, self.settings.tmt_tol));
+        }
+        if self.settings.quant_dir.is_some() {
+            self.ms2.push(reduced_ms2(spec));
         }
     }
 
@@ -379,6 +397,18 @@ impl QuantCollector {
             .map(|index| Ms1Cache::store(index, &stem))
             .transpose()
             .map_err(|e| format!("cache MS1 scans for {stem}: {e}"))?;
+        let ms2 = std::mem::take(&mut self.ms2);
+        if let Some(dir) = &self.settings.quant_dir {
+            let contexts_cv = |id: &str| contexts.get(id).and_then(|c| c.faims_cv);
+            write_run_ms2(
+                dir,
+                &stem,
+                title_prefix,
+                ms2,
+                self.settings.fragment_tol,
+                contexts_cv,
+            )?;
+        }
         self.runs.push(RunCapture {
             stem,
             title_prefix: title_prefix.map(str::to_string),
@@ -393,6 +423,103 @@ impl QuantCollector {
     fn run_of(&self, spec_idx: usize) -> Option<usize> {
         self.runs.iter().position(|r| r.span.contains(&spec_idx))
     }
+}
+
+/// One MS2 spectrum reduced for its run's MS2 table: the
+/// [`MS2_TOP_PEAKS`] most intense centroids (sorted by m/z), the precursor
+/// and isolation window, and the PSM SpecId prefix of its matches. The
+/// native id is the spectrum title until `write_run_ms2` strips the run
+/// prefix of a multi-file search.
+fn reduced_ms2(spec: &Spectrum) -> Ms2Scan {
+    let scan = spec.scan.unwrap_or(0);
+    let base = if spec.title.is_empty() {
+        format!("scan={scan}")
+    } else {
+        spec.title.clone()
+    };
+    let mut peaks: Vec<(f32, f32)> = spec
+        .peaks
+        .iter()
+        .filter(|p| p.0.is_finite() && p.1.is_finite() && p.1 > 0.0)
+        .map(|&(mz, i)| (mz as f32, i))
+        .collect();
+    if peaks.len() > MS2_TOP_PEAKS {
+        peaks.select_nth_unstable_by(MS2_TOP_PEAKS - 1, |a, b| {
+            b.1.total_cmp(&a.1).then(a.0.total_cmp(&b.0))
+        });
+        peaks.truncate(MS2_TOP_PEAKS);
+    }
+    peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let isolation = match (
+        spec.isolation_target_mz.or(Some(spec.precursor_mz)),
+        spec.isolation_lower_offset,
+        spec.isolation_upper_offset,
+    ) {
+        (Some(t), Some(lo), Some(hi)) => Some((t, lo, hi)),
+        _ => None,
+    };
+    Ms2Scan {
+        native_id: spec.title.clone(),
+        spec_key: format!("{base}_{scan}"),
+        rt: spec.rt_seconds.unwrap_or(f64::NAN),
+        precursor_mz: spec.precursor_mz,
+        charge: spec
+            .precursor_charge
+            .and_then(|z| u8::try_from(z).ok())
+            .unwrap_or(0),
+        isolation,
+        faims_cv: None,
+        peaks,
+    }
+}
+
+/// Writes `<dir>/<stem>.ms2.parquet` from one file's reduced MS2 scans: run
+/// prefix stripped from the native ids, FAIMS voltage from the scan contexts,
+/// scans without a retention time and repeated SpecId prefixes (a spectrum
+/// searched at several charges) left out, retention-time order.
+fn write_run_ms2(
+    dir: &Path,
+    stem: &str,
+    title_prefix: Option<&str>,
+    mut scans: Vec<Ms2Scan>,
+    fragment_tol: Option<Tolerance>,
+    faims_cv: impl Fn(&str) -> Option<f32>,
+) -> Result<(), String> {
+    let fragment_tol = fragment_tol
+        .ok_or_else(|| format!("--quant-dir: no fragment tolerance for the MS2 table of {stem}"))?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("create --quant-dir {}: {e}", dir.display()))?;
+    for s in &mut scans {
+        if let Some(p) = title_prefix {
+            if let Some(id) = s.native_id.strip_prefix(p) {
+                s.native_id = id.to_string();
+            }
+        }
+        s.faims_cv = faims_cv(&s.native_id);
+    }
+    scans.retain(|s| s.rt.is_finite());
+    scans.sort_by(|a, b| a.spec_key.cmp(&b.spec_key));
+    scans.dedup_by(|a, b| a.spec_key == b.spec_key);
+    scans.sort_by(|a, b| a.rt.total_cmp(&b.rt).then(a.spec_key.cmp(&b.spec_key)));
+    let path = dir.join(format!("{stem}.ms2.parquet"));
+    let n = scans.len();
+    write_ms2_table(
+        &path,
+        &Ms2Table {
+            run: stem.to_string(),
+            fragment_tol,
+            top_peaks: MS2_TOP_PEAKS,
+            scans,
+        },
+    )
+    .map_err(|e| format!("write MS2 table: {e}"))?;
+    let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    eprintln!(
+        "quant: {stem}: wrote {} ({n} MS2 scans, {:.1} MB)",
+        path.display(),
+        bytes as f64 / 1e6
+    );
+    Ok(())
 }
 
 /// A rank-1 target PSM selected for quantification.
@@ -851,6 +978,7 @@ fn write_run_artifacts(
         ms1.persist(&ms1_path)
             .map_err(|e| format!("write MS1 table: {e}"))?;
         let mut rows: Vec<RunPsmRow> = Vec::new();
+        let mut mods: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
         let mut no_rt = 0usize;
         for hit in hits.iter().filter(|h| h.run_idx == run_idx) {
             let spec = &spectra[hit.spec_idx];
@@ -858,6 +986,11 @@ fn write_run_artifacts(
                 no_rt += 1;
                 continue;
             };
+            for m in hit.cand.peptide.residues.iter().filter_map(|aa| aa.mod_) {
+                if let Some(acc) = m.accession.as_deref().filter(|a| !a.is_empty()) {
+                    mods.entry(acc.to_string()).or_insert(m.mass_delta);
+                }
+            }
             let z = hit.psm.charge_used.max(1);
             let peptidoform = peptidoform_of(hit.cand);
             rows.push(RunPsmRow {
@@ -882,7 +1015,8 @@ fn write_run_artifacts(
             });
         }
         let table_path = quant_dir.join(format!("{}.quant.parquet", run.stem));
-        write_run_quant_table(&table_path, &run.stem, &rows)
+        let mods: Vec<(String, f64)> = mods.into_iter().collect();
+        write_run_quant_table(&table_path, &run.stem, &rows, &mods)
             .map_err(|e| format!("write {}: {e}", table_path.display()))?;
         eprintln!(
             "quant: {}: wrote {} and {} ({} rank-1 PSMs, targets and decoys{})",
@@ -1317,6 +1451,7 @@ mod tests {
             quant_fdr: 0.01,
             pep_cap: None,
             quant_dir: quant_dir.map(PathBuf::from),
+            fragment_tol: Some(Tolerance::Ppm(20.0)),
         }
     }
 

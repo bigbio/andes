@@ -7,7 +7,7 @@
 //! |---|---|
 //! | `precursor_key` | peptidoform and charge key |
 //! | `run` | run stem |
-//! | `evidence_type` | `identified`, `identified_below_threshold` (identified, quality q-value above the identified threshold or missing), `transfer_ms1` (transfer q-value at or below the threshold) or `below_threshold` |
+//! | `evidence_type` | `identified`, `identified_below_threshold` (identified, quality q-value above the identified threshold or missing), `transfer_ms2` (transfer q-value at or below the threshold, and an MS2 scan of the run supports the transfer), `transfer_ms1` (transfer q-value at or below the threshold, without that MS2 support) or `below_threshold` |
 //! | `quantity`, `quantity_se` | fitted MS1 quantity and its standard error |
 //! | `quantity_normalized` | `quantity` with the run's normalisation offset at the row's apex RT removed (a level per run and an RT-local term fitted across runs); `NA` when the run is not normalised. `quantity` stays the raw measurement |
 //! | `transfer_q` | internal transfer quant-quality q-value (not an identification FDR); `NA` for identified rows |
@@ -26,7 +26,11 @@
 //! threshold (columns ending `_at_threshold`, equal to the `_q01` ones when the
 //! threshold is 0.01), then the identified quality threshold (`NA` when none)
 //! and the identified row counts: all, with a quality q-value, at
-//! `quant_q <= 0.01`, and reported as `identified_below_threshold`.
+//! `quant_q <= 0.01`, and reported as `identified_below_threshold`; then the
+//! MS2 evidence of the transfer rows: per hypothesis (target, mass-shift
+//! decoy, RT-shift decoy) the rows with MS2 evidence and how many of them an
+//! MS2 scan supports, the pseudo-transfers likewise, and the accepted
+//! transfers reported as `transfer_ms2`.
 //!
 //! Both files are written to `<path>.partial` and renamed into place.
 
@@ -40,6 +44,8 @@ pub enum EvidenceType {
     /// Identified, with a quality q-value above the identified threshold (or
     /// none).
     IdentifiedBelowThreshold,
+    /// An accepted transfer that an MS2 scan of the run supports.
+    TransferMs2,
     TransferMs1,
     BelowThreshold,
 }
@@ -49,6 +55,7 @@ impl EvidenceType {
         match self {
             EvidenceType::Identified => "identified",
             EvidenceType::IdentifiedBelowThreshold => "identified_below_threshold",
+            EvidenceType::TransferMs2 => "transfer_ms2",
             EvidenceType::TransferMs1 => "transfer_ms1",
             EvidenceType::BelowThreshold => "below_threshold",
         }
@@ -136,6 +143,17 @@ pub struct MbrValidation {
     pub identified_q01: usize,
     /// Identified target rows reported as `identified_below_threshold`.
     pub identified_below_threshold: usize,
+    /// Transfer rows with MS2 evidence, per hypothesis: target, mass-shift
+    /// decoy, RT-shift decoy.
+    pub ms2_rows: [usize; 3],
+    /// Of those, the rows an MS2 scan supports.
+    pub ms2_supported: [usize; 3],
+    /// Pseudo-transfers with MS2 evidence.
+    pub ms2_pseudo_rows: usize,
+    /// Of those, the ones an MS2 scan supports.
+    pub ms2_pseudo_supported: usize,
+    /// Accepted transfers reported as `transfer_ms2`.
+    pub transfer_ms2: usize,
 }
 
 /// Columns of the accepted counts, each followed by `_q01` and by
@@ -176,6 +194,15 @@ pub fn validation_columns() -> Vec<String> {
             "identified_scored",
             "identified_accepted_q01",
             "identified_below_threshold",
+            "ms2_target_rows",
+            "ms2_target_supported",
+            "ms2_mass_decoy_rows",
+            "ms2_mass_decoy_supported",
+            "ms2_rt_decoy_rows",
+            "ms2_rt_decoy_supported",
+            "ms2_pseudo_rows",
+            "ms2_pseudo_supported",
+            "transfer_ms2",
         ]
         .iter()
         .map(|s| s.to_string()),
@@ -277,6 +304,14 @@ pub fn write_mbr_validation(path: &Path, v: &MbrValidation) -> Result<(), String
         "\t{}\t{}\t{}\t{}",
         v.identified, v.identified_scored, v.identified_q01, v.identified_below_threshold
     );
+    for f in 0..3 {
+        let _ = write!(line, "\t{}\t{}", v.ms2_rows[f], v.ms2_supported[f]);
+    }
+    let _ = write!(
+        line,
+        "\t{}\t{}\t{}",
+        v.ms2_pseudo_rows, v.ms2_pseudo_supported, v.transfer_ms2
+    );
     text.push_str(&line);
     text.push('\n');
     write_atomic(path, &text)
@@ -367,6 +402,11 @@ mod tests {
             identified_scored: 48,
             identified_q01: 45,
             identified_below_threshold: 0,
+            ms2_rows: [100, 90, 80],
+            ms2_supported: [30, 1, 2],
+            ms2_pseudo_rows: 10,
+            ms2_pseudo_supported: 4,
+            transfer_ms2: 25,
         };
         write_mbr_validation(&p, &v).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
@@ -389,5 +429,10 @@ mod tests {
         assert_eq!(get("identified_scored"), "48");
         assert_eq!(get("identified_accepted_q01"), "45");
         assert_eq!(get("identified_below_threshold"), "0");
+        assert_eq!(get("ms2_target_rows"), "100");
+        assert_eq!(get("ms2_mass_decoy_supported"), "1");
+        assert_eq!(get("ms2_rt_decoy_rows"), "80");
+        assert_eq!(get("ms2_pseudo_supported"), "4");
+        assert_eq!(get("transfer_ms2"), "25");
     }
 }

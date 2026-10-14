@@ -8,7 +8,10 @@
 //! the other kinds. `role` is 0 identified, 1 transfer, 2 pseudo-transfer;
 //! identified and transfer targets are each followed by their decoys (same
 //! role), pseudo-transfers have none. Schema 2 added the identified rows'
-//! decoys; a schema-1 table has none, so it is rejected.
+//! decoys; a schema-1 table has none, so it is rejected. Schema 3 added the
+//! MS2 evidence of the transfer and pseudo-transfer rows (`ms2_n_scans`,
+//! `ms2_n_matched`, `ms2_angle`, `ms2_explained`; null for identified rows
+//! and rows without a fit); a schema-2 table is rejected.
 //! The evidence columns are null when the fit was not possible.
 //! `n_donor_runs` counts the aligned runs with a PSM of the precursor, this
 //! run included for an identified row and excluded otherwise: the runs that
@@ -21,8 +24,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, Float64Array, Float64Builder, Int8Array, Int8Builder, UInt16Array,
-    UInt16Builder, UInt32Array, UInt32Builder, UInt8Array, UInt8Builder,
+    Array, ArrayRef, Float32Array, Float32Builder, Float64Array, Float64Builder, Int8Array,
+    Int8Builder, UInt16Array, UInt16Builder, UInt32Array, UInt32Builder, UInt8Array, UInt8Builder,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
@@ -33,12 +36,13 @@ use parquet::file::properties::WriterProperties;
 use parquet::format::KeyValue;
 use quant::decoys::Hypothesis;
 use quant::evidence::Evidence;
+use quant::ms2::{Ms2Evidence, ScanMatch};
 
 /// Major version of the table layout. A reader rejects any other major.
-pub const EXTRACT_SCHEMA_MAJOR: u32 = 2;
+pub const EXTRACT_SCHEMA_MAJOR: u32 = 3;
 
 const SCHEMA_KEY: &str = "andes.extract.schema";
-const SCHEMA_VERSION: &str = "2.0";
+const SCHEMA_VERSION: &str = "3.0";
 /// Rows per Parquet row group / record batch.
 const BATCH_ROWS: usize = 65_536;
 
@@ -69,6 +73,9 @@ pub struct ExtractRow {
     pub n_donor_runs: u16,
     /// Library confidence (internal quant gate, not an identification FDR).
     pub library_q: f64,
+    /// The MS2 evidence of a transfer or pseudo-transfer row with a fit;
+    /// `None` otherwise.
+    pub ms2: Option<Ms2Evidence>,
 }
 
 const F64_EVIDENCE: [&str; 13] = [
@@ -107,7 +114,9 @@ fn f64_fields(e: &Evidence) -> [f64; 13] {
 
 /// Columns before the evidence block.
 const N_KEY_COLUMNS: usize = 7;
-const N_COLUMNS: usize = N_KEY_COLUMNS + F64_EVIDENCE.len() + 2;
+/// The MS2 evidence columns, after the fit evidence.
+const MS2_COLUMNS: [&str; 4] = ["ms2_n_scans", "ms2_n_matched", "ms2_angle", "ms2_explained"];
+const N_COLUMNS: usize = N_KEY_COLUMNS + F64_EVIDENCE.len() + 2 + MS2_COLUMNS.len();
 
 fn schema() -> Schema {
     let mut fields = vec![
@@ -126,6 +135,10 @@ fn schema() -> Schema {
     );
     fields.push(Field::new("n_points", DataType::UInt32, true));
     fields.push(Field::new("isotopes_used", DataType::UInt8, true));
+    fields.push(Field::new(MS2_COLUMNS[0], DataType::UInt16, true));
+    fields.push(Field::new(MS2_COLUMNS[1], DataType::UInt8, true));
+    fields.push(Field::new(MS2_COLUMNS[2], DataType::Float32, true));
+    fields.push(Field::new(MS2_COLUMNS[3], DataType::Float32, true));
     Schema::new(fields)
 }
 
@@ -177,7 +190,15 @@ fn batch(schema: &Arc<Schema>, rows: &[ExtractRow]) -> Result<RecordBatch, Strin
     let mut ev: Vec<Float64Builder> = F64_EVIDENCE.iter().map(|_| Float64Builder::new()).collect();
     let mut n_points = UInt32Builder::new();
     let mut isotopes = UInt8Builder::new();
+    let mut ms2_scans = UInt16Builder::new();
+    let mut ms2_matched = UInt8Builder::new();
+    let mut ms2_angle = Float32Builder::new();
+    let mut ms2_explained = Float32Builder::new();
     for r in rows {
+        ms2_scans.append_option(r.ms2.map(|m| m.n_scans));
+        ms2_matched.append_option(r.ms2.map(|m| m.best.n_matched));
+        ms2_angle.append_option(r.ms2.map(|m| m.best.angle));
+        ms2_explained.append_option(r.ms2.map(|m| m.best.explained));
         let (k, n) = encode_kind(r.kind);
         precursor.append_value(r.precursor);
         run.append_value(r.run);
@@ -215,6 +236,10 @@ fn batch(schema: &Arc<Schema>, rows: &[ExtractRow]) -> Result<RecordBatch, Strin
     cols.extend(ev.iter_mut().map(|b| Arc::new(b.finish()) as ArrayRef));
     cols.push(Arc::new(n_points.finish()));
     cols.push(Arc::new(isotopes.finish()));
+    cols.push(Arc::new(ms2_scans.finish()));
+    cols.push(Arc::new(ms2_matched.finish()));
+    cols.push(Arc::new(ms2_angle.finish()));
+    cols.push(Arc::new(ms2_explained.finish()));
     RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
 }
 
@@ -378,8 +403,13 @@ pub fn read_extract_table(path: &Path) -> Result<Vec<ExtractRow>, String> {
         let ev: Vec<&Float64Array> = (0..F64_EVIDENCE.len())
             .map(|k| column::<Float64Array>(&b, N_KEY_COLUMNS + k, path))
             .collect::<Result<_, _>>()?;
-        let n_points = column::<UInt32Array>(&b, N_COLUMNS - 2, path)?;
-        let isotopes = column::<UInt8Array>(&b, N_COLUMNS - 1, path)?;
+        let after = N_KEY_COLUMNS + F64_EVIDENCE.len();
+        let n_points = column::<UInt32Array>(&b, after, path)?;
+        let isotopes = column::<UInt8Array>(&b, after + 1, path)?;
+        let ms2_scans = column::<UInt16Array>(&b, after + 2, path)?;
+        let ms2_matched = column::<UInt8Array>(&b, after + 3, path)?;
+        let ms2_angle = column::<Float32Array>(&b, after + 4, path)?;
+        let ms2_explained = column::<Float32Array>(&b, after + 5, path)?;
         for i in 0..b.num_rows() {
             let kind = decode_kind(kind.value(i), shift.value(i)).ok_or_else(|| {
                 err(&format!(
@@ -412,6 +442,21 @@ pub fn read_extract_table(path: &Path) -> Result<Vec<ExtractRow>, String> {
                     w: v(12),
                 })
             };
+            let ms2 = if ms2_scans.is_null(i) {
+                None
+            } else {
+                if ms2_matched.is_null(i) || ms2_angle.is_null(i) || ms2_explained.is_null(i) {
+                    return Err(err(&"corrupt row: partial MS2 evidence"));
+                }
+                Some(Ms2Evidence {
+                    n_scans: ms2_scans.value(i),
+                    best: ScanMatch {
+                        n_matched: ms2_matched.value(i),
+                        angle: ms2_angle.value(i),
+                        explained: ms2_explained.value(i),
+                    },
+                })
+            };
             rows.push(ExtractRow {
                 precursor: precursor.value(i),
                 run: run.value(i),
@@ -420,6 +465,7 @@ pub fn read_extract_table(path: &Path) -> Result<Vec<ExtractRow>, String> {
                 evidence,
                 n_donor_runs: donors.value(i),
                 library_q: library_q.value(i),
+                ms2,
             });
         }
     }
@@ -472,6 +518,14 @@ mod tests {
                 evidence: (i % 4 != 2).then(|| evidence(i)),
                 n_donor_runs: i as u16,
                 library_q: 0.001 * i as f64,
+                ms2: (i % 3 == 1).then_some(Ms2Evidence {
+                    n_scans: i as u16,
+                    best: ScanMatch {
+                        n_matched: (i % 5) as u8,
+                        angle: 0.123 * i as f32,
+                        explained: 0.5,
+                    },
+                }),
             })
             .collect()
     }
@@ -493,7 +547,7 @@ mod tests {
     fn extract_table_rejects_unknown_major_version() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("b.extract.parquet");
-        for version in ["3.0", "1.0"] {
+        for version in ["4.0", "2.0"] {
             write_with_schema_version(&p, &rows(), version).unwrap();
             let e = read_extract_table(&p).unwrap_err();
             assert!(

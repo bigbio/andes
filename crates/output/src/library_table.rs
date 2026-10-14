@@ -1,6 +1,7 @@
 //! The match-between-runs library on disk: `library.parquet` (one row per
 //! precursor id: identity, proteins and, for library entries, the entry
-//! fields) and `alignment.parquet` (one row per run: the run map, residual
+//! fields, the empirical fragment spectrum of the best donor PSM and the
+//! retention times of every donor PSM) and `alignment.parquet` (one row per run: the run map, residual
 //! widths, anchor statistics, alignment component and the run's
 //! observations). Together they
 //! rebuild the [`Library`] exactly, so an extract in another process gives the
@@ -29,9 +30,10 @@ use parquet::file::properties::WriterProperties;
 use parquet::format::KeyValue;
 use quant::align::{Alignment, RunAlignment, RunMap};
 use quant::library::{Library, LibraryEntry, PrecursorMeta};
+use quant::ms2::{Ion, LibraryFragment, LibrarySpectrum};
 
 /// Major version of both layouts. A reader rejects any other major.
-pub const LIBRARY_SCHEMA_MAJOR: u32 = 2;
+pub const LIBRARY_SCHEMA_MAJOR: u32 = 3;
 /// File name of the precursor table inside the quant directory.
 pub const LIBRARY_FILE: &str = "library.parquet";
 /// File name of the alignment table inside the quant directory.
@@ -47,7 +49,7 @@ const DONOR_PEP_KEY: &str = "andes.library.donor_pep";
 /// Key of [`library_fingerprint`] in `library.parquet`; extract tables copy it.
 pub const FINGERPRINT_KEY: &str = "andes.library.fingerprint";
 const ALIGNMENT_FINGERPRINT_KEY: &str = "andes.alignment.fingerprint";
-const SCHEMA_VERSION: &str = "2.0";
+const SCHEMA_VERSION: &str = "3.0";
 /// Rows per Parquet row group / record batch of the precursor table.
 const BATCH_ROWS: usize = 65_536;
 const ENVELOPE_LEN: usize = 4;
@@ -68,6 +70,12 @@ pub struct StoredLibrary {
     pub library: Library,
     /// Per precursor id; same length as `library.meta`.
     pub proteins: Vec<String>,
+    /// Per precursor id: the empirical fragment spectrum of an entry's best
+    /// donor PSM, when its scan gave one; same length as `library.meta`.
+    pub spectra: Vec<Option<LibrarySpectrum>>,
+    /// Per precursor id: `(run, RT)` of every donor PSM of an entry; same
+    /// length as `library.meta`.
+    pub donor_scans: Vec<Vec<(u16, f64)>>,
 }
 
 fn list(item: DataType) -> DataType {
@@ -86,6 +94,11 @@ fn library_schema() -> Schema {
         Field::new("donors", list(DataType::UInt16), false),
         Field::new("best_rt_run", list(DataType::UInt16), false),
         Field::new("best_rt", list(DataType::Float64), false),
+        Field::new("frag_mz", list(DataType::Float64), false),
+        Field::new("frag_intensity", list(DataType::Float32), false),
+        Field::new("frag_ion", list(DataType::Utf8), false),
+        Field::new("donor_scan_run", list(DataType::UInt16), false),
+        Field::new("donor_scan_rt", list(DataType::Float64), false),
     ])
 }
 
@@ -195,6 +208,28 @@ pub fn library_fingerprint(lib: &StoredLibrary) -> String {
         m.envelope.iter().for_each(|&v| h.u64(v.to_bits() as u64));
         h.str(p);
     }
+    h.u64(lib.spectra.len() as u64);
+    for s in &lib.spectra {
+        match s {
+            Some(s) => {
+                h.u64(s.fragments.len() as u64);
+                for f in &s.fragments {
+                    h.f64(f.mz);
+                    h.u64(f.intensity.to_bits() as u64);
+                    h.str(&f.ion.label());
+                }
+            }
+            None => h.u64(u64::MAX),
+        }
+    }
+    h.u64(lib.donor_scans.len() as u64);
+    for d in &lib.donor_scans {
+        h.u64(d.len() as u64);
+        for &(r, t) in d {
+            h.u64(r as u64);
+            h.f64(t);
+        }
+    }
     h.u64(lib.library.entries.len() as u64);
     for e in &lib.library.entries {
         h.u64(e.precursor as u64);
@@ -232,6 +267,11 @@ fn library_batch(
     let mut donors = ListBuilder::new(UInt16Builder::new());
     let mut best_run = ListBuilder::new(UInt16Builder::new());
     let mut best_rt = ListBuilder::new(Float64Builder::new());
+    let mut frag_mz = ListBuilder::new(Float64Builder::new());
+    let mut frag_int = ListBuilder::new(Float32Builder::new());
+    let mut frag_ion = ListBuilder::new(StringBuilder::new());
+    let mut scan_run = ListBuilder::new(UInt16Builder::new());
+    let mut scan_rt = ListBuilder::new(Float64Builder::new());
     for id in ids {
         let m = &lib.library.meta[id];
         key.append_value(&m.key);
@@ -253,6 +293,20 @@ fn library_batch(
         donors.append(true);
         best_run.append(true);
         best_rt.append(true);
+        for f in lib.spectra[id].iter().flat_map(|s| &s.fragments) {
+            frag_mz.values().append_value(f.mz);
+            frag_int.values().append_value(f.intensity);
+            frag_ion.values().append_value(f.ion.label());
+        }
+        frag_mz.append(true);
+        frag_int.append(true);
+        frag_ion.append(true);
+        for &(r, t) in &lib.donor_scans[id] {
+            scan_run.values().append_value(r);
+            scan_rt.values().append_value(t);
+        }
+        scan_run.append(true);
+        scan_rt.append(true);
     }
     let cols: Vec<ArrayRef> = vec![
         Arc::new(key.finish()),
@@ -265,6 +319,11 @@ fn library_batch(
         Arc::new(donors.finish()),
         Arc::new(best_run.finish()),
         Arc::new(best_rt.finish()),
+        Arc::new(frag_mz.finish()),
+        Arc::new(frag_int.finish()),
+        Arc::new(frag_ion.finish()),
+        Arc::new(scan_run.finish()),
+        Arc::new(scan_rt.finish()),
     ];
     RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
 }
@@ -380,11 +439,13 @@ fn write_parquet(
 fn write_versioned(dir: &Path, lib: &StoredLibrary, version: &str) -> Result<(), String> {
     let (lib_path, align_path) = library_paths(dir);
     let n = lib.library.meta.len();
-    if lib.proteins.len() != n {
+    if lib.proteins.len() != n || lib.spectra.len() != n || lib.donor_scans.len() != n {
         return Err(format!(
-            "{}: {} protein lists for {n} precursors",
+            "{}: {} protein lists, {} spectra and {} donor scan lists for {n} precursors",
             lib_path.display(),
-            lib.proteins.len()
+            lib.proteins.len(),
+            lib.spectra.len(),
+            lib.donor_scans.len()
         ));
     }
     if lib.library.alignment.maps.len() != lib.runs.len() {
@@ -621,6 +682,8 @@ pub fn read_library(dir: &Path) -> Result<StoredLibrary, String> {
     let mut meta_rows: Vec<PrecursorMeta> = Vec::new();
     let mut proteins: Vec<String> = Vec::new();
     let mut entries: Vec<LibraryEntry> = Vec::new();
+    let mut spectra: Vec<Option<LibrarySpectrum>> = Vec::new();
+    let mut donor_scans: Vec<Vec<(u16, f64)>> = Vec::new();
     for b in reader {
         let b = b.map_err(|e| lerr(&e))?;
         let key = column::<StringArray>(&b, 0, &lib_path)?;
@@ -633,8 +696,51 @@ pub fn read_library(dir: &Path) -> Result<StoredLibrary, String> {
         let donors = column::<ListArray>(&b, 7, &lib_path)?;
         let best_run = column::<ListArray>(&b, 8, &lib_path)?;
         let best_rt = column::<ListArray>(&b, 9, &lib_path)?;
+        let frag_mz = column::<ListArray>(&b, 10, &lib_path)?;
+        let frag_int = column::<ListArray>(&b, 11, &lib_path)?;
+        let frag_ion = column::<ListArray>(&b, 12, &lib_path)?;
+        let scan_run = column::<ListArray>(&b, 13, &lib_path)?;
+        let scan_rt = column::<ListArray>(&b, 14, &lib_path)?;
         for i in 0..b.num_rows() {
             let id = meta_rows.len();
+            let mzs = f64s(frag_mz, i, &lib_path)?;
+            let ints =
+                items::<f32, Float32Array>(frag_int, i, &lib_path, |a: &Float32Array| a.values())?;
+            let ions_v = frag_ion.value(i);
+            let ions = ions_v
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .filter(|a| a.null_count() == 0)
+                .ok_or_else(|| lerr(&format!("precursor {id}: unreadable frag_ion")))?;
+            if mzs.len() != ints.len() || mzs.len() != ions.len() {
+                return Err(lerr(&format!(
+                    "precursor {id}: {} fragment m/z, {} intensities and {} ions",
+                    mzs.len(),
+                    ints.len(),
+                    ions.len()
+                )));
+            }
+            let mut fragments = Vec::with_capacity(mzs.len());
+            for (k, (&mz, &intensity)) in mzs.iter().zip(&ints).enumerate() {
+                let ion = Ion::parse(ions.value(k)).ok_or_else(|| {
+                    lerr(&format!(
+                        "precursor {id}: unreadable ion {:?}",
+                        ions.value(k)
+                    ))
+                })?;
+                fragments.push(LibraryFragment { mz, intensity, ion });
+            }
+            spectra.push((!fragments.is_empty()).then_some(LibrarySpectrum { fragments }));
+            let sr = u16s(scan_run, i, &lib_path)?;
+            let st = f64s(scan_rt, i, &lib_path)?;
+            if sr.len() != st.len() {
+                return Err(lerr(&format!(
+                    "precursor {id}: {} donor scan runs for {} RTs",
+                    sr.len(),
+                    st.len()
+                )));
+            }
+            donor_scans.push(sr.into_iter().zip(st).collect());
             let e: Vec<f32> =
                 items::<f32, Float32Array>(env, i, &lib_path, |a: &Float32Array| a.values())?;
             let envelope: [f32; ENVELOPE_LEN] = e.try_into().map_err(|e: Vec<f32>| {
@@ -794,6 +900,8 @@ pub fn read_library(dir: &Path) -> Result<StoredLibrary, String> {
             meta: meta_rows,
         },
         proteins,
+        spectra,
+        donor_scans,
     };
     if library_fingerprint(&stored) != fingerprint {
         return Err(lerr(
@@ -847,6 +955,32 @@ mod tests {
             }
         }
         let library = build_library(&psms, meta, 3, 0.01, 0.01, None, &AlignParams::default());
+        let ion = |l: &str| Ion::parse(l).unwrap();
+        let spectra = (0..n)
+            .map(|i| {
+                (i % 4 == 1).then(|| LibrarySpectrum {
+                    fragments: vec![
+                        LibraryFragment {
+                            mz: 300.123456789 + i as f64,
+                            intensity: 0.25,
+                            ion: ion("b3"),
+                        },
+                        LibraryFragment {
+                            mz: 700.5 + i as f64,
+                            intensity: 1.0,
+                            ion: ion("y6^2"),
+                        },
+                    ],
+                })
+            })
+            .collect();
+        let donor_scans = (0..n)
+            .map(|i| {
+                (0..(i % 3) as u16)
+                    .map(|r| (r, 100.0 + i as f64 + 0.1 * r as f64))
+                    .collect()
+            })
+            .collect();
         StoredLibrary {
             runs: vec!["a".into(), "b".into(), "c".into()],
             max_q: 0.01,
@@ -854,6 +988,8 @@ mod tests {
             donor_pep: Some(0.05),
             library,
             proteins: (0..n).map(|i| format!("P{i};Q{i}")).collect(),
+            spectra,
+            donor_scans,
         }
     }
 
@@ -873,6 +1009,9 @@ mod tests {
         assert_eq!(back.donor_q, s.donor_q);
         assert_eq!(back.donor_pep, s.donor_pep);
         assert_eq!(back.proteins, s.proteins);
+        assert_eq!(back.spectra, s.spectra);
+        assert_eq!(back.donor_scans, s.donor_scans);
+        assert_eq!(library_fingerprint(&back), library_fingerprint(&s));
         assert_eq!(back.library.meta, s.library.meta);
         assert_eq!(back.library.entries.len(), s.library.entries.len());
         for (a, b) in s.library.entries.iter().zip(&back.library.entries) {
@@ -901,13 +1040,13 @@ mod tests {
     #[test]
     fn library_rejects_unknown_major_version_naming_the_file() {
         let dir = tempfile::tempdir().unwrap();
-        write_with_schema_version(dir.path(), &stored(), "3.0").unwrap();
+        write_with_schema_version(dir.path(), &stored(), "2.0").unwrap();
         let e = read_library(dir.path()).unwrap_err();
         assert!(
             e.contains("alignment.parquet") || e.contains("library.parquet"),
             "{e}"
         );
-        assert!(e.contains("3.0"), "{e}");
+        assert!(e.contains("2.0"), "{e}");
     }
 
     #[test]
@@ -922,6 +1061,12 @@ mod tests {
         assert_ne!(library_fingerprint(&s), library_fingerprint(&other));
         let mut other = s.clone();
         other.donor_pep = None;
+        assert_ne!(library_fingerprint(&s), library_fingerprint(&other));
+        let mut other = s.clone();
+        other.spectra[1].as_mut().unwrap().fragments[0].intensity = 0.5;
+        assert_ne!(library_fingerprint(&s), library_fingerprint(&other));
+        let mut other = s.clone();
+        other.donor_scans[2][0].1 += 0.5;
         assert_ne!(library_fingerprint(&s), library_fingerprint(&other));
 
         // An alignment.parquet from another library is rejected by name.

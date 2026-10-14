@@ -414,6 +414,65 @@ fn quant_dir_table_contains_decoys() {
         assert!(pin_ids.contains(&r.spec_id), "{} not in PIN", r.spec_id);
         assert!((r.envelope.iter().sum::<f32>() - 1.0).abs() < 1e-3);
     }
+
+    // The MS2 table: every PSM's scan, reduced, with its isolation window;
+    // the best target PSM's scan gives a library spectrum (the slice is
+    // searched against one of its three proteomes, so most lower-ranked
+    // targets are random matches with few fragments).
+    let ms2 = output::ms2_table::read_ms2_table(&qdir.join(format!("{stem}.ms2.parquet"))).unwrap();
+    assert!(!qdir.join(format!("{stem}.ms2.parquet.partial")).exists());
+    assert_eq!(ms2.run, stem);
+    assert!(ms2.scans.windows(2).all(|w| w[0].rt <= w[1].rt));
+    assert!(ms2
+        .scans
+        .iter()
+        .all(|s| s.peaks.len() <= ms2.top_peaks && s.peaks.windows(2).all(|w| w[0].0 <= w[1].0)));
+    assert!(
+        ms2.scans.iter().all(|s| s.isolation.is_some()),
+        "isolation windows recorded"
+    );
+    let by_key: std::collections::HashMap<&str, &quant::ms2::Ms2Scan> =
+        ms2.scans.iter().map(|s| (s.spec_key.as_str(), s)).collect();
+    let mods =
+        output::run_quant_table::read_run_quant_mods(&qdir.join(format!("{stem}.quant.parquet")))
+            .unwrap();
+    let mut targets: Vec<&output::run_quant_table::RunPsmRow> =
+        rows.iter().filter(|r| !r.is_decoy).collect();
+    targets.sort_by(|a, b| b.search_score.total_cmp(&a.search_score));
+    let best = &targets[..targets.len().min(20)];
+    let mut with_spectrum = 0;
+    for r in best {
+        // `<spec_key>_<rank>` or `<spec_key>_<rank>_<row>`.
+        let one = r.spec_id.rsplit_once('_').unwrap().0;
+        let scan = by_key
+            .get(one)
+            .or_else(|| by_key.get(one.rsplit_once('_')?.0))
+            .unwrap_or_else(|| panic!("{} has no scan", r.spec_id));
+        assert!((scan.rt - r.rt_s).abs() < 1e-9);
+        let (lo, hi) = scan.window();
+        assert!(
+            (lo - 1.5..hi + 1.5).contains(&r.mz),
+            "{} outside {lo}-{hi}",
+            r.mz
+        );
+        let masses = quant::ms2::residue_masses(&r.peptidoform, &mods).unwrap();
+        let ladder = quant::ms2::fragment_ladder(&masses, r.charge);
+        with_spectrum += usize::from(
+            quant::ms2::library_spectrum(&ladder, &scan.peaks, ms2.fragment_tol).is_some(),
+        );
+    }
+    assert!(with_spectrum >= 1, "{with_spectrum} of {}", best.len());
+    let first = best[0];
+    let one = first.spec_id.rsplit_once('_').unwrap().0;
+    let scan = by_key
+        .get(one)
+        .or_else(|| by_key.get(one.rsplit_once('_')?.0))
+        .unwrap();
+    let masses = quant::ms2::residue_masses(&first.peptidoform, &mods).unwrap();
+    let ladder = quant::ms2::fragment_ladder(&masses, first.charge);
+    let lib = quant::ms2::library_spectrum(&ladder, &scan.peaks, ms2.fragment_tol)
+        .expect("the best target PSM's scan gives a library spectrum");
+    assert!(quant::ms2::score_scan(&lib, &scan.peaks, ms2.fragment_tol).angle > 0.99);
 }
 
 #[test]

@@ -712,7 +712,7 @@ mod tests {
             "{}:/pin:ro",
             std::path::absolute("/data").unwrap().display()
         );
-        assert!(args.iter().any(|a| *a == pin_mount));
+        assert!(args.contains(&pin_mount));
         assert!(args.contains(&DEFAULT_PERCOLATOR_IMAGE.to_string()));
         assert_eq!(args.last().unwrap(), "/pin/run.pin");
         // result paths rewritten under /out

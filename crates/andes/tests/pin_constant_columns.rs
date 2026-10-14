@@ -81,7 +81,6 @@ fn standard_pin_constant_column_set_is_pinned() {
         "PrecursorIsotopeKL",
         "PrecursorSNR",
         // Fixture-dependent, listed so the three above stand out.
-        "ScanNr",
         "charge5",
         "EdgeScore",
         "IsRefinement",

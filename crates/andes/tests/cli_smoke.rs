@@ -657,3 +657,20 @@ fn lowres_etd_cz_only_spectrum_is_identified_under_the_default_index() {
         );
     }
 }
+
+#[test]
+fn top_n_zero_is_rejected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = base_cmd(
+        "test-fixtures/test.mgf.gz",
+        "test-fixtures/BSA.fasta",
+        &dir.path().join("rust.pin"),
+    )
+    .arg("--top-n")
+    .arg("0")
+    .output()
+    .expect("run andes");
+    assert!(!out.status.success(), "--top-n 0 must be rejected");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--top-n must be at least 1"), "stderr: {stderr}");
+}

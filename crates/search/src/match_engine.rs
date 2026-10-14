@@ -422,9 +422,14 @@ impl<'a> PreparedSearch<'a> {
 
     /// Drain the scan accumulator into `self.candidates` so downstream
     /// consumers (PIN/TSV writers) resolve `candidate_idxs` against the final
-    /// materialized candidate slice. Idempotent.
+    /// materialized candidate slice. The accumulator is left empty, identity map
+    /// included, so a later scan interns from index 0 instead of returning
+    /// indices into the drained store.
     pub fn sync_materialized_candidates(&mut self) {
-        let materialized = std::mem::take(&mut self.mmap_accum.lock().unwrap().candidates);
+        let mut accum = self.mmap_accum.lock().unwrap();
+        let materialized = std::mem::take(&mut accum.candidates);
+        accum.index_of = Default::default();
+        drop(accum);
         self.candidates = materialized;
     }
 
@@ -471,13 +476,58 @@ impl<'a> PreparedSearch<'a> {
     /// Like [`Self::run_chunk`] but uses `params` for precursor matching and
     /// queue sizing instead of the params reference stored at prepare time.
     /// Candidate enumeration and mass buckets are unchanged.
+    ///
+    /// In fragment-index mode a spectrum without a precursor charge is searched
+    /// as one unit per charge in `params.charge_range`, each at its own
+    /// precursor mass, and the units' PSMs are merged into that spectrum's
+    /// queue. Searched whole, its windows span every charge (m/z x 2 to m/z x 5),
+    /// so the chunk's index covered that whole mass range and the index's top-K
+    /// was spent across all of it rather than on any one precursor window.
     pub fn run_chunk_with_params(
         &self,
         spectra: &[Spectrum],
         spectrum_idx_offset: usize,
         params: &SearchParams,
     ) -> Vec<TopNQueue> {
-        self.run_chunk_inner(spectra, spectrum_idx_offset, params)
+        let has_charge = |s: &Spectrum| s.precursor_charge.is_some_and(|z| z > 0);
+        if params.fragment_index_top_k == 0
+            || params.charge_range.clone().count() < 2
+            || spectra.iter().all(has_charge)
+        {
+            return self.run_chunk_inner(spectra, spectrum_idx_offset, params);
+        }
+        let mass = crate::fragment_index::index_order_mass;
+        let (lo, hi) = spectra.iter().map(mass).fold((f64::MAX, f64::MIN), |(lo, hi), m| {
+            (lo.min(m), hi.max(m))
+        });
+        let span_da = (hi - lo).max(1.0);
+        let mut units: Vec<(usize, Spectrum)> = Vec::with_capacity(spectra.len());
+        for (i, s) in spectra.iter().enumerate() {
+            if has_charge(s) {
+                units.push((i, s.clone()));
+            } else {
+                for z in params.charge_range.clone() {
+                    let mut unit = s.clone();
+                    unit.precursor_charge = Some(z as i32);
+                    units.push((i, unit));
+                }
+            }
+        }
+        units.sort_by(|a, b| mass(&a.1).total_cmp(&mass(&b.1)).then(a.0.cmp(&b.0)));
+        let mut merged: Vec<TopNQueue> = (0..spectra.len())
+            .map(|_| TopNQueue::new(params.top_n_psms_per_spectrum))
+            .collect();
+        while !units.is_empty() {
+            let take = crate::fragment_index::index_chunk_len(&units, |u| mass(&u.1), span_da);
+            let (owners, chunk): (Vec<usize>, Vec<Spectrum>) = units.drain(..take).unzip();
+            for (mut q, i) in self.run_chunk_inner(&chunk, 0, params).into_iter().zip(owners) {
+                for mut psm in q.drain_into_vec() {
+                    psm.spectrum_idx = spectrum_idx_offset + i;
+                    merged[i].push(psm);
+                }
+            }
+        }
+        merged
     }
 
     /// The fully-prepared candidate list for one set of nominal-mass `windows`
@@ -2278,6 +2328,127 @@ pub(crate) fn compute_psm_features_with_edge(
 }
 
 // ── Unit tests for feature columns ───────────────────────────────────────────
+
+#[cfg(test)]
+mod accumulator_tests {
+    use super::*;
+    use model::{AminoAcidSetBuilder, Protein, ProteinDb};
+
+    /// After the accumulator is drained, a candidate interned again gets a fresh
+    /// index into the new store, not its index in the drained one.
+    #[test]
+    fn sync_resets_the_identity_map() {
+        let db = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "".into(),
+                sequence: b"MKWVTFISLLRKDAFLGSFLYEYSRK".to_vec(),
+            }],
+        };
+        let idx = SearchIndex::from_target_db(&db, "XXX");
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let params = SearchParams::default_tryptic(aa_set);
+        let scorer = crate::coisolation::tests::tiny_scorer();
+        let mut prepared =
+            PreparedSearch::prepare_in_memory(&idx, &params, &scorer, 0.02, "XXX").unwrap();
+        let cands = prepared.out_of_core_candidates_where(|_, _| true);
+        assert!(cands.len() >= 2);
+        {
+            let mut accum = prepared.mmap_accum.lock().unwrap();
+            assert_eq!(accum.intern(cands[0].clone()), 0);
+            assert_eq!(accum.intern(cands[1].clone()), 1);
+        }
+        prepared.sync_materialized_candidates();
+        assert_eq!(prepared.candidates.len(), 2);
+        let mut accum = prepared.mmap_accum.lock().unwrap();
+        assert!(accum.index_of.is_empty());
+        assert_eq!(accum.intern(cands[1].clone()), 0);
+        assert_eq!(accum.candidates.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod chargeless_unit_tests {
+    use super::*;
+    use model::{AminoAcid, AminoAcidSetBuilder, Protein, ProteinDb};
+    use scoring_crate::scoring::fragment_ions::predict_by_ions;
+
+    fn peptide(residues: &[u8]) -> Peptide {
+        let aas: Vec<AminoAcid> = residues
+            .iter()
+            .map(|&r| AminoAcid::standard(r).unwrap())
+            .collect();
+        Peptide::new(aas, b'K', b'K')
+    }
+
+    fn spectrum(precursor_mz: f64, charge: Option<i32>, peptides: &[&Peptide]) -> Spectrum {
+        let mut peaks: Vec<(f64, f32)> = peptides
+            .iter()
+            .flat_map(|p| predict_by_ions(p, 1..=1))
+            .map(|ion| (ion.mz, 100.0_f32))
+            .collect();
+        peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+        Spectrum {
+            title: "chargeless".into(),
+            precursor_mz,
+            precursor_intensity: None,
+            precursor_charge: charge,
+            rt_seconds: None,
+            scan: None,
+            peaks,
+            activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
+            isolation_target_mz: None,
+        }
+    }
+
+    /// A spectrum without a charge is searched at each charge's own window. The
+    /// peaks also hold every ion of a longer peptide whose mass lies between the
+    /// 3+ and 4+ windows: with one index slot over the union of all charges'
+    /// windows, that out-of-window peptide out-voted the true 3+ peptide and the
+    /// spectrum came back empty.
+    #[test]
+    fn chargeless_spectrum_is_searched_per_charge() {
+        let db = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "".into(),
+                sequence: b"GKDAFLGSFLYEYSRKSAFLWEYSPLLTNNGVRK".to_vec(),
+            }],
+        };
+        let idx = SearchIndex::from_target_db(&db, "XXX");
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.charge_range = 2..=5;
+        params.fragment_index_top_k = 1;
+        let scorer = crate::coisolation::tests::tiny_scorer();
+        let prepared =
+            PreparedSearch::prepare_in_memory(&idx, &params, &scorer, 0.02, "XXX").unwrap();
+
+        let truth = peptide(b"DAFLGSFLYEYSR");
+        let bait = peptide(b"SAFLWEYSPLLTNNGVR");
+        let mz3 = (truth.mass() + 3.0 * PROTON) / 3.0;
+        let spectra = [
+            spectrum(mz3, Some(3), &[&truth, &bait]),
+            spectrum(mz3, None, &[&truth, &bait]),
+        ];
+        let mut queues = prepared.run_chunk(&spectra, 7);
+        assert_eq!(queues.len(), 2);
+        for (i, q) in queues.iter_mut().enumerate() {
+            let psms = q.drain_into_vec();
+            let best = psms
+                .iter()
+                .max_by(|a, b| a.rank_score.total_cmp(&b.rank_score))
+                .unwrap_or_else(|| panic!("spectrum {i} came back empty"));
+            assert_eq!(best.spectrum_idx, 7 + i);
+            assert_eq!(best.charge_used, 3, "spectrum {i}");
+            let accum = prepared.mmap_accum.lock().unwrap();
+            let pep = &accum.candidates[best.primary_candidate_idx() as usize].peptide;
+            assert_eq!(pep.residues, truth.residues, "spectrum {i}");
+        }
+    }
+}
 
 #[cfg(test)]
 mod charges_to_try_tests {

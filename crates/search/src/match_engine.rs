@@ -1174,13 +1174,14 @@ impl<'a> PreparedSearch<'a> {
                 // Pre-computed `psm.edge_score` from the candidate loop
                 // is moved into `features.edge_score` to avoid the per-PSM
                 // recomputation that `compute_psm_features` would otherwise do.
-                // DeltaRawScore is filled per PSM by `DeltaTrackers::delta_for` from these
-                // trackers; the PIN writer emits it on the rank-1 row only.
-                let delta_trackers = DeltaTrackers {
-                    best_raw,
-                    best_pep_key,
-                    have_best,
-                    second_raw,
+                // Spectrum-level DeltaRawScore: positive lead of the best RawScore
+                // over the second-best distinct peptide. 0.0 when no distinct
+                // runner-up was scored (uncontested top-1, e.g. top_n=1 with a
+                // single candidate). The PIN writer emits it on the rank-1 row only.
+                let delta_raw_score = if second_raw > i32::MIN {
+                    (best_raw - second_raw) as f32
+                } else {
+                    0.0
                 };
 
                 // Tailor denominator: the RawScore at the top-1% quantile of this
@@ -1225,8 +1226,7 @@ impl<'a> PreparedSearch<'a> {
                     // only in Pass 2's `run_pass2_coisolation` / `detect_coisolated`
                     // co-isolation detection — `ms1_link` and its loading stay.
 
-                    features.delta_raw_score =
-                        delta_trackers.delta_for(psm.score, peptidoform_key(&cand.peptide));
+                    features.delta_raw_score = delta_raw_score;
                     features.listwise_score_gap = listwise_score_gap;
                     features.candidate_rank_entropy = candidate_rank_entropy;
                     // Tailor calibrated score: this PSM's RawScore divided by the
@@ -2368,45 +2368,6 @@ mod accumulator_tests {
 }
 
 #[cfg(test)]
-mod delta_tracker_tests {
-    use super::DeltaTrackers;
-
-    const T: DeltaTrackers = DeltaTrackers {
-        best_raw: 40,
-        best_pep_key: 1,
-        have_best: true,
-        second_raw: 33,
-    };
-
-    #[test]
-    fn best_peptidoform_gets_its_lead_over_the_runner_up() {
-        assert_eq!(T.delta_for(40.2, 1), 7.0);
-    }
-
-    #[test]
-    fn other_peptidoform_gets_its_deficit_to_the_best() {
-        // A rank-1 row promoted by edge or strong score over the RawScore best.
-        assert_eq!(T.delta_for(36.0, 2), -4.0);
-    }
-
-    #[test]
-    fn uncontested_and_empty_trackers_give_zero() {
-        let alone = DeltaTrackers {
-            second_raw: i32::MIN,
-            ..T
-        };
-        assert_eq!(alone.delta_for(40.0, 1), 0.0);
-        let empty = DeltaTrackers {
-            best_raw: i32::MIN,
-            best_pep_key: 0,
-            have_best: false,
-            second_raw: i32::MIN,
-        };
-        assert_eq!(empty.delta_for(10.0, 0), 0.0);
-    }
-}
-
-#[cfg(test)]
 mod chargeless_unit_tests {
     use super::*;
     use model::{AminoAcid, AminoAcidSetBuilder, Protein, ProteinDb};
@@ -3248,39 +3209,6 @@ pub(crate) fn dedup_pepseq_score(psms: Vec<PsmMatch>, candidates: &[Candidate]) 
     let mut out = Vec::with_capacity(groups.len());
     out.extend(groups.into_values());
     out
-}
-
-/// The per-spectrum best and second-best distinct-peptidoform rounded RawScores
-/// behind DeltaRawScore (`second_raw` is the best over every OTHER peptidoform).
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct DeltaTrackers {
-    pub best_raw: i32,
-    pub best_pep_key: u64,
-    pub have_best: bool,
-    pub second_raw: i32,
-}
-
-impl DeltaTrackers {
-    /// DeltaRawScore of a PSM with RawScore `score` and peptidoform `pep_key`: its
-    /// lead over the best OTHER peptidoform. For the RawScore-best peptidoform that
-    /// is `best - second` (0.0 with no distinct runner-up); for any other it is
-    /// `own - best`, at most 0. The rank-1 row is ranked by `rank_score` (RawScore
-    /// plus edge, or the strong score), so it is not always the RawScore best, and
-    /// the best's lead would credit it with a margin it does not have.
-    pub(crate) fn delta_for(&self, score: f32, pep_key: u64) -> f32 {
-        if !self.have_best {
-            return 0.0;
-        }
-        if pep_key == self.best_pep_key {
-            if self.second_raw > i32::MIN {
-                (self.best_raw - self.second_raw) as f32
-            } else {
-                0.0
-            }
-        } else {
-            (score.round() as i32 - self.best_raw).min(0) as f32
-        }
-    }
 }
 
 /// Allocation-free peptidoform identity for the per-spectrum DeltaRankScore tracker:

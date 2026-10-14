@@ -185,7 +185,7 @@ impl ThermoRawReader {
             peaks: extract_peaks(raw),
             // Real activation from the .raw, used by the param auto-router so a
             // CID/ETD .raw is not silently scored with the HCD model.
-            activation_method: map_dissociation(p.activation().dissociation_method()),
+            activation_method: scan_activation(raw),
             isolation_lower_offset,
             isolation_upper_offset,
             isolation_target_mz,
@@ -385,6 +385,56 @@ fn sanitize_thermo_peaks(pairs: Vec<(f64, f32)>) -> Vec<(f64, f32)> {
     peaks
 }
 
+/// The activation of an MSn scan. RawFileReader reports only the primary
+/// activation of the last stage, so an EThcD/ETciD scan arrives as plain ETD
+/// (or ECD); the supplemental collision is read from the filter string's
+/// activation chain (`784.37@etd50.00@hcd25.00`) and the scan is then mapped
+/// like the combined method.
+fn scan_activation(raw: &RawSpectrum) -> Option<ActivationMethod> {
+    let d = raw.precursor()?.activation().dissociation_method();
+    let electron = matches!(d.0, 4 | 8 | 16);
+    if electron
+        && raw
+            .filter_string()
+            .is_some_and(filter_has_supplemental_collision)
+    {
+        return map_dissociation(DissociationMethod::ETHCD);
+    }
+    map_dissociation(d)
+}
+
+/// Whether the last activation stage of a Thermo filter string chains an
+/// electron-based activation with a collisional one, e.g.
+/// `FTMS + p NSI d Full ms2 784.37@etd50.00@hcd25.00 [120.00-2000.00]`.
+fn filter_has_supplemental_collision(filter: &str) -> bool {
+    let head = filter.split('[').next().unwrap_or("");
+    let mut tokens = head.split_whitespace();
+    if !tokens.any(|t| {
+        let t = t.to_ascii_lowercase();
+        t.len() > 2 && t.starts_with("ms") && t[2..].bytes().all(|b| b.is_ascii_digit())
+    }) {
+        return false;
+    }
+    let Some(last_stage) = tokens.filter(|t| t.contains('@')).last() else {
+        return false;
+    };
+    let methods: Vec<String> = last_stage
+        .split('@')
+        .skip(1)
+        .map(|a| {
+            a.chars()
+                .take_while(char::is_ascii_alphabetic)
+                .collect::<String>()
+                .to_ascii_lowercase()
+        })
+        .collect();
+    let electron = methods
+        .iter()
+        .any(|m| matches!(m.as_str(), "etd" | "ecd" | "netd"));
+    let collisional = methods.iter().any(|m| matches!(m.as_str(), "hcd" | "cid"));
+    electron && collisional
+}
+
 /// Map a Thermo `DissociationMethod` to the model's [`ActivationMethod`].
 /// Pure electron-based methods (ETD/ECD/NETD) map to `ETD`. Supplemental-
 /// activation methods (ETciD/EThcD/ECciD/EChcD) are EThcD-class: the
@@ -456,10 +506,8 @@ pub fn detect_activation_instrument<P: AsRef<Path>>(
             continue;
         }
         seen += 1;
-        if let Some(p) = raw.precursor() {
-            if let Some(m) = map_dissociation(p.activation().dissociation_method()) {
-                *act.entry(m as u8).or_insert(0) += 1;
-            }
+        if let Some(m) = scan_activation(&raw) {
+            *act.entry(m as u8).or_insert(0) += 1;
         }
         if let Some(a) = raw.acquisition() {
             if let Some(t) = map_analyzer(a.mass_analyzer()) {
@@ -628,6 +676,27 @@ mod tests {
             );
         }
         assert_eq!(map_dissociation(DissociationMethod(0)), None); // Unknown
+    }
+
+    #[test]
+    fn supplemental_collision_read_from_the_filter_chain() {
+        for f in [
+            "FTMS + p NSI d Full ms2 784.37@etd50.00@hcd25.00 [120.00-2000.00]",
+            "ITMS + c NSI d Full ms2 652.10@etd100.00@cid35.00 [50.00-1315.00]",
+            "FTMS + c NSI Full ms3 900.00@cid35.00 450.20@etd50.00@hcd20.00 [100.00-1000.00]",
+        ] {
+            assert!(filter_has_supplemental_collision(f), "{f}");
+        }
+        for f in [
+            "FTMS + p NSI d Full ms2 784.37@etd50.00 [120.00-2000.00]",
+            "FTMS + p NSI d Full ms2 784.37@hcd28.00 [120.00-2000.00]",
+            // A collisional MS2 stage followed by an ETD MS3 stage is not EThcD.
+            "FTMS + c NSI Full ms3 900.00@cid35.00 450.20@etd50.00 [100.00-1000.00]",
+            "FTMS + p NSI Full ms [350.00-1800.00]",
+            "",
+        ] {
+            assert!(!filter_has_supplemental_collision(f), "{f}");
+        }
     }
 
     #[test]

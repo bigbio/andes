@@ -20,9 +20,9 @@ use crate::mono::{correct_chunk, MonoDump, MonoStats};
 use crate::quant_run::{QuantCollector, QuantSettings, RunScans};
 use crate::rescore;
 use crate::spectra::{
-    detect_dominant_activation, detect_instrument_type_for_path, detect_isobaric_sampled,
-    input_format_flags, merge_parse_stats, prefix_spectrum_titles, run_precursor_calibration,
-    send_chunks, title_prefix_for, tolerance_ppm_display, ParseStats,
+    add_mzml_skipped, detect_dominant_activation, detect_instrument_type_for_path,
+    detect_isobaric_sampled, input_format_flags, merge_parse_stats, prefix_spectrum_titles,
+    run_precursor_calibration, send_chunks, title_prefix_for, tolerance_ppm_display, ParseStats,
 };
 use crate::{arg_present, report_search_progress, EXPLICIT_MISSED_CLEAVAGES};
 use input::{FastaReader, MgfReader, Ms1Link, MzMLReader};
@@ -1495,7 +1495,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         .with_run_ms1_capture(capture_ms1)
                         .with_product_scan_capture(capture_ms3)
                         .with_scan_context_capture(capture_context);
-                        let stats = send_chunks(reader.by_ref(), CHUNK_SIZE, remaining_cap, tx);
+                        let mut stats =
+                            send_chunks(reader.by_ref(), CHUNK_SIZE, remaining_cap, tx);
+                        add_mzml_skipped(&mut stats, &reader);
                         let scans = RunScans {
                             ms1: reader.take_run_ms1(),
                             ms3: reader.take_product_scans(),

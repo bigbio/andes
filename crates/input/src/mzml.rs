@@ -76,6 +76,30 @@ const CV_INTENSITY_ARRAY: &str = "MS:1000515";
 const CV_64BIT: &str = "MS:1000523";
 const CV_32BIT: &str = "MS:1000521";
 const CV_ZLIB: &str = "MS:1000574";
+/// Mantissa truncation followed by zlib: the values stay IEEE floats, so the
+/// array decodes exactly like a zlib one.
+const CV_TRUNCATION_ZLIB: &str = "MS:1003088";
+
+/// Binary encodings the reader cannot decode (MS-Numpress, prediction after
+/// truncation, zstd, grid encoding). A spectrum carrying one fails with
+/// [`MzMLParseError::UnsupportedCompression`] instead of yielding garbage peaks.
+const UNSUPPORTED_COMPRESSION: &[(&str, &str)] = &[
+    ("MS:1002312", "MS-Numpress linear prediction"),
+    ("MS:1002313", "MS-Numpress positive integer"),
+    ("MS:1002314", "MS-Numpress short logged float"),
+    ("MS:1002746", "MS-Numpress linear prediction + zlib"),
+    ("MS:1002747", "MS-Numpress positive integer + zlib"),
+    ("MS:1002748", "MS-Numpress short logged float + zlib"),
+    ("MS:1003089", "truncation, delta prediction + zlib"),
+    ("MS:1003090", "truncation, linear prediction + zlib"),
+    ("MS:1003780", "zstd"),
+    ("MS:1003781", "byte-shuffled zstd"),
+    ("MS:1003782", "dictionary-encoded zstd"),
+    ("MS:1003783", "MS-Numpress linear prediction + zstd"),
+    ("MS:1003784", "MS-Numpress positive integer + zstd"),
+    ("MS:1003785", "MS-Numpress short logged float + zstd"),
+    ("MS:1003826", "coordinate grid encoding"),
+];
 
 // Activation-method CV accessions (inside <precursor><activation>).
 // Mapped to the five canonical ActivationMethod variants per PSI-MS
@@ -91,13 +115,16 @@ const CV_UVPD: &str = "MS:1000435"; // photodissociation (PSI-MS UVPD term)
                                     // We map ECD → ETD for electron-based activation grouping when ECD is
                                     // the only signal (canonical table covers ETD/CID/HCD/PQD/UVPD).
 const CV_ECD: &str = "MS:1000250"; // electron capture dissociation
+
 // Child terms of the methods above, written by newer converters.
 const CV_TRAP_CID: &str = "MS:1002472"; // trap-type collision-induced dissociation
 const CV_HIGH_ENERGY_BEAM_CID: &str = "MS:1002481"; // higher energy beam-type CID
 const CV_UVPD_CHILD: &str = "MS:1003246"; // ultraviolet photodissociation
+
 // The collisional half of EThcD/ETciD, written next to an ETD/ECD term.
 const CV_SUPPLEMENTAL_HCD: &str = "MS:1002678"; // supplemental beam-type CID
 const CV_SUPPLEMENTAL_CID: &str = "MS:1002679"; // supplemental CID
+
 // A combined method written as a single term.
 const CV_ETHCD: &str = "MS:1002631"; // electron-transfer/higher-energy collision dissociation
 const CV_ETCID: &str = "MS:1003182"; // electron-transfer/collision-induced dissociation
@@ -112,7 +139,10 @@ const CV_UNIT_MINUTE_LEGACY: &str = "MS:1000038";
 fn is_minute_unit(unit_accession: &str, unit_name: &str) -> bool {
     match unit_accession {
         CV_UNIT_MINUTE | CV_UNIT_MINUTE_LEGACY => true,
-        "" => matches!(unit_name.trim().to_ascii_lowercase().as_str(), "minute" | "min" | "minutes"),
+        "" => matches!(
+            unit_name.trim().to_ascii_lowercase().as_str(),
+            "minute" | "min" | "minutes"
+        ),
         _ => false,
     }
 }
@@ -135,6 +165,15 @@ pub enum MzMLParseError {
 
     #[error("mismatched binary array lengths: m/z {mz_len} vs intensity {int_len}")]
     LengthMismatch { mz_len: usize, int_len: usize },
+
+    #[error(
+        "unsupported binary encoding {accession} ({name}); re-convert without it \
+         (e.g. msconvert without --numpress*/--zstd)"
+    )]
+    UnsupportedCompression {
+        accession: &'static str,
+        name: &'static str,
+    },
 
     #[error("truncated binary array: decoded {decoded_len} bytes is not a multiple of the {elem_bytes}-byte element width")]
     TruncatedBinary {
@@ -181,6 +220,8 @@ struct BinaryArrayCtx {
     /// 32 or 64 bits.
     precision_bits: u8,
     zlib: bool,
+    /// An encoding from [`UNSUPPORTED_COMPRESSION`], as `(accession, name)`.
+    unsupported: Option<(&'static str, &'static str)>,
     b64_text: String,
 }
 
@@ -191,6 +232,7 @@ impl BinaryArrayCtx {
             is_intensity: false,
             precision_bits: 64,
             zlib: false,
+            unsupported: None,
             b64_text: String::new(),
         }
     }
@@ -438,6 +480,8 @@ pub struct MzMLReader<R: BufRead> {
     /// Count of malformed spectra skipped by the tolerant path. Lets a tolerant
     /// caller observe that data was dropped (see [`Self::skipped_count`]).
     skipped: usize,
+    /// The messages of the first few skipped spectra, for the run log.
+    skipped_errors: Vec<String>,
 }
 
 impl<R: BufRead> MzMLReader<R> {
@@ -465,6 +509,7 @@ impl<R: BufRead> MzMLReader<R> {
             scan_contexts: Vec::new(),
             strict: false,
             skipped: 0,
+            skipped_errors: Vec::new(),
         }
     }
 
@@ -480,6 +525,11 @@ impl<R: BufRead> MzMLReader<R> {
     /// tolerant caller can check this after iteration to detect dropped data.
     pub fn skipped_count(&self) -> usize {
         self.skipped
+    }
+
+    /// The parse errors of the first [`MAX_SKIPPED_ERRORS`] skipped spectra.
+    pub fn skipped_errors(&self) -> &[String] {
+        &self.skipped_errors
     }
 
     /// Widen or narrow the ms-level filter (e.g. `with_ms_level_range(1, 2)`
@@ -847,9 +897,17 @@ impl<R: BufRead> MzMLReader<R> {
                     ctx.precision_bits = 32;
                 }
             }
-            CV_ZLIB if self.state == State::BinaryDataArray => {
+            CV_ZLIB | CV_TRUNCATION_ZLIB if self.state == State::BinaryDataArray => {
                 if let Some(ctx) = self.binary_ctx.as_mut() {
                     ctx.zlib = true;
+                }
+            }
+            acc if self.state == State::BinaryDataArray => {
+                if let (Some(&known), Some(ctx)) = (
+                    UNSUPPORTED_COMPRESSION.iter().find(|(a, _)| *a == acc),
+                    self.binary_ctx.as_mut(),
+                ) {
+                    ctx.unsupported = Some(known);
                 }
             }
 
@@ -1353,6 +1411,9 @@ impl<R: BufRead> MzMLReader<R> {
     }
 }
 
+/// How many skipped-spectrum messages [`MzMLReader::skipped_errors`] keeps.
+pub const MAX_SKIPPED_ERRORS: usize = 3;
+
 impl<R: BufRead> Iterator for MzMLReader<R> {
     type Item = Result<Spectrum, MzMLParseError>;
 
@@ -1373,13 +1434,16 @@ impl<R: BufRead> Iterator for MzMLReader<R> {
                     self.done = true;
                     return Some(Err(_e));
                 }
-                Err(_e) => {
+                Err(e) => {
                     // Tolerant (default): resync past the malformed spectrum and
                     // keep parsing (skip the bad scan, not the rest of the file).
                     // Only an unreadable XML stream stops us — mirrors
                     // `read_with_ms1` / chunked paths. Count the drop so a caller
-                    // can observe it via `skipped_count`.
+                    // can report it via `skipped_count` / `skipped_errors`.
                     self.skipped += 1;
+                    if self.skipped_errors.len() < MAX_SKIPPED_ERRORS {
+                        self.skipped_errors.push(e.to_string());
+                    }
                     match self.resync_to_next_spectrum() {
                         Ok(true) => continue,
                         Ok(false) => {
@@ -1454,7 +1518,13 @@ pub fn read_spectra_parallel(
     ms_level_max: u32,
     threads: usize,
 ) -> std::io::Result<(Vec<Spectrum>, Vec<String>)> {
-    read_spectra_in_pieces(path, ms_level_min, ms_level_max, threads, PARALLEL_PIECE_BYTES)
+    read_spectra_in_pieces(
+        path,
+        ms_level_min,
+        ms_level_max,
+        threads,
+        PARALLEL_PIECE_BYTES,
+    )
 }
 
 fn read_spectra_in_pieces(
@@ -1497,15 +1567,21 @@ fn read_spectra_in_pieces(
                 bytes.truncate(p);
             }
         }
-        let reader = MzMLReader::new(bytes.as_slice()).with_ms_level_range(ms_level_min, ms_level_max);
+        let mut reader =
+            MzMLReader::new(bytes.as_slice()).with_ms_level_range(ms_level_min, ms_level_max);
         let mut spectra = Vec::new();
         let mut errors = Vec::new();
-        for r in reader {
+        for r in reader.by_ref() {
             match r {
                 Ok(s) => spectra.push(s),
                 Err(e) => errors.push(e.to_string()),
             }
         }
+        // One entry per skipped spectrum, so the caller's count is exact.
+        let kept = reader.skipped_errors().to_vec();
+        let unlisted = reader.skipped_count() - kept.len();
+        errors.extend(kept);
+        errors.extend(std::iter::repeat("malformed spectrum skipped".to_string()).take(unlisted));
         Ok((spectra, errors))
     };
     let mut results: Vec<(usize, PieceResult)> = std::thread::scope(|scope| {
@@ -1926,6 +2002,9 @@ fn extract_scan_from_id(id: &str) -> Option<i32> {
 
 /// Decode a `<binaryDataArray>` payload: base64 → optional zlib → f64 values.
 fn decode_binary_array(ctx: &BinaryArrayCtx) -> Result<Vec<f64>, MzMLParseError> {
+    if let Some((accession, name)) = ctx.unsupported {
+        return Err(MzMLParseError::UnsupportedCompression { accession, name });
+    }
     let trimmed = ctx.b64_text.trim();
     if trimmed.is_empty() {
         return Ok(Vec::new());
@@ -2391,6 +2470,48 @@ mod tests {
         assert!(!is_minute_unit("", ""));
     }
 
+    #[test]
+    fn numpress_array_is_an_error_not_garbage_peaks() {
+        // Eight bytes that would decode as one plausible-looking f64 if the
+        // encoding were ignored.
+        let b64 = encode_f64_b64(&[100.0]);
+        let xml = ms2_spectrum_xml(
+            "scan=1",
+            &bda_block("MS:1000514", "MS:1002312", &b64),
+            &bda_plain("MS:1000515", &encode_f64_b64(&[1000.0])),
+            500.5,
+            Some(2),
+        );
+        let mut reader = MzMLReader::new(Cursor::new(wrap_spectra(&xml)));
+        assert_eq!(reader.by_ref().filter_map(Result::ok).count(), 0);
+        assert_eq!(reader.skipped_count(), 1);
+        let err = &reader.skipped_errors()[0];
+        assert!(
+            err.contains("MS:1002312") && err.contains("Numpress"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn truncation_zlib_decodes_like_zlib() {
+        let mz: Vec<u8> = [100.0f64, 200.0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut enc, &mz).unwrap();
+        let b64 = STANDARD.encode(enc.finish().unwrap());
+        let xml = ms2_spectrum_xml(
+            "scan=1",
+            &bda_block("MS:1000514", "MS:1003088", &b64),
+            &bda_plain("MS:1000515", &encode_f64_b64(&[1.0, 2.0])),
+            500.5,
+            Some(2),
+        );
+        let spectra = collect_ok(&wrap_spectra(&xml));
+        assert_eq!(spectra[0].peaks, vec![(100.0, 1.0), (200.0, 2.0)]);
+    }
+
     // ── Unit helpers for extract_scan_from_id ────────────────────────────────
 
     #[test]
@@ -2669,9 +2790,12 @@ mod tests {
         // (MS:1002678) and ETciD as ETD + "supplemental CID" (MS:1002679).
         for supp in ["MS:1002678", "MS:1002679"] {
             for (a, b) in [("MS:1000598", supp), (supp, "MS:1000598")] {
-                let spectra =
-                    collect_ok(&wrap_spectra(&spectrum_xml_with_two_activations(a, b)));
-                assert_eq!(spectra[0].activation_method, Some(ActivationMethod::HCD), "{a} + {b}");
+                let spectra = collect_ok(&wrap_spectra(&spectrum_xml_with_two_activations(a, b)));
+                assert_eq!(
+                    spectra[0].activation_method,
+                    Some(ActivationMethod::HCD),
+                    "{a} + {b}"
+                );
             }
         }
     }
@@ -3931,10 +4055,8 @@ mod tests {
         flate2::read::GzDecoder::new(std::fs::File::open(&gz).expect("open fixture"))
             .read_to_end(&mut xml)
             .expect("decompress fixture");
-        let path = std::env::temp_dir().join(format!(
-            "andes-parallel-mzml-{}.mzML",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("andes-parallel-mzml-{}.mzML", std::process::id()));
         std::fs::write(&path, &xml).expect("write fixture copy");
         for (min, max) in [(2, 2), (1, 2), (1, 1)] {
             let sequential: Vec<String> = MzMLReader::new(xml.as_slice())

@@ -92,6 +92,20 @@ pub(crate) fn prefix_spectrum_titles(chunk: &mut [Spectrum], prefix: &str) {
     }
 }
 
+/// Fold the spectra a tolerant mzML reader skipped (malformed or in an
+/// unsupported binary encoding) into `stats`, so the run reports them.
+pub(crate) fn add_mzml_skipped<R: std::io::BufRead>(
+    stats: &mut ParseStats,
+    reader: &MzMLReader<R>,
+) {
+    stats.error_count += reader.skipped_count();
+    for e in reader.skipped_errors() {
+        if stats.first_errors.len() < 3 {
+            stats.first_errors.push(e.clone());
+        }
+    }
+}
+
 pub(crate) fn merge_parse_stats(acc: &mut ParseStats, part: ParseStats) {
     acc.error_count += part.error_count;
     for e in part.first_errors {

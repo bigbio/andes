@@ -373,7 +373,10 @@ mod tests {
             ),
             Some(1234)
         );
-        assert_eq!(scan_from_title("controllerType=0 controllerNumber=1 scan=77"), Some(77));
+        assert_eq!(
+            scan_from_title("controllerType=0 controllerNumber=1 scan=77"),
+            Some(77)
+        );
         assert_eq!(scan_from_title("my.sample.v2.3"), None);
         assert_eq!(scan_from_title("spectrum 5"), None);
         assert_eq!(scan_from_title(""), None);

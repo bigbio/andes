@@ -282,12 +282,21 @@ pub(crate) fn load_spectra_for_train(
     let mut spectra = Vec::new();
     match ext_lower.as_deref() {
         Some("mzml") => {
-            let reader = MzMLReader::new(input::open_buf_maybe_gz(path)?).with_ms_level_range(2, 2);
-            for item in reader {
+            let mut reader =
+                MzMLReader::new(input::open_buf_maybe_gz(path)?).with_ms_level_range(2, 2);
+            for item in reader.by_ref() {
                 match item {
                     Ok(s) => spectra.push(s),
                     Err(e) => eprintln!("WARN: mzML parse: {e}"),
                 }
+            }
+            if reader.skipped_count() > 0 {
+                eprintln!(
+                    "WARN: {} spectra of {} failed to parse and were skipped (first: {})",
+                    reader.skipped_count(),
+                    path.display(),
+                    reader.skipped_errors().join("; ")
+                );
             }
         }
         // Native Thermo `.raw` — MS2 only, same Spectrum stream as the search

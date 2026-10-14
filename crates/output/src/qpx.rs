@@ -27,7 +27,8 @@
 //! see the module-level field-mapping note in the closing report.
 //!
 //! Rows are emitted rank-1-first per spectrum (same ordering as the PIN: each
-//! queue is `into_rank_sorted_vec()`), one row per retained PSM.
+//! queue is `into_rank_sorted_vec()`, positional isomers collapsed by
+//! `row_context::emitted_rows`), one row per emitted PIN row.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -46,7 +47,7 @@ use model::mass::{ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
 use model::tolerance::{PrecursorTolerance, Tolerance};
 use search::candidate_gen::Candidate;
-use search::psm::TopNQueue;
+use search::psm::{PsmMatch, TopNQueue};
 use search::search_index::SearchIndex;
 use search::search_params::SearchParams;
 
@@ -54,7 +55,7 @@ use crate::percolator::PercolatorPsm;
 use crate::pin::{
     exp_mass_text, feature_value_type, format_feature_value, format_spec_id, psm_feature_values,
 };
-use crate::row_context::{iter_ranked_by_rank_score, resolve_accession};
+use crate::row_context::{emitted_rows, resolve_accession};
 
 /// QPX format version string written into every file's schema metadata.
 const QPX_VERSION: &str = "1.0";
@@ -445,7 +446,7 @@ fn audit_rescore_join(
 }
 
 /// The PIN `SpecId`, label and competition group of every emitted row, in
-/// emission order (spectrum, then rank-sorted queue).
+/// emission order (spectrum, then `emitted_rows`, positional isomers collapsed).
 fn rescore_rows(
     spectra: &[Spectrum],
     queues: &[TopNQueue],
@@ -457,8 +458,10 @@ fn rescore_rows(
             continue;
         }
         let spec = &spectra[spec_idx];
-        let psms = queue.clone().into_rank_sorted_vec();
-        let ranks: Vec<u32> = iter_ranked_by_rank_score(&psms).map(|(r, _)| r).collect();
+        let sorted = queue.clone().into_rank_sorted_vec();
+        let emitted = emitted_rows(spec, &sorted, candidates);
+        let ranks: Vec<u32> = emitted.iter().map(|(r, _)| *r).collect();
+        let psms: Vec<&PsmMatch> = emitted.iter().map(|(_, p)| &**p).collect();
         let multi_row = psms.len() > 1;
         let spec_id_str = if spec.title.is_empty() {
             format!("scan={}", spec.scan.unwrap_or(0))
@@ -534,18 +537,21 @@ fn build_psms_batch(
             continue;
         }
         let spec = &spectra[spec_idx];
-        let psms = queue.clone().into_rank_sorted_vec();
-        // Reproduce the PIN's SpecId derivation EXACTLY so the Percolator join
-        // key matches: `rank` from iter_ranked_by_rank_score, `row_idx` = the
-        // per-scan emission index (== `hit`), `multi_row` = scan emits >1 row.
-        let ranks: Vec<u32> = iter_ranked_by_rank_score(&psms).map(|(r, _)| r).collect();
+        let sorted = queue.clone().into_rank_sorted_vec();
+        // Reproduce the PIN's rows and SpecId derivation EXACTLY so the Percolator
+        // join key matches: the same `emitted_rows` (positional isomers collapsed),
+        // `rank` from it, `row_idx` = the per-scan emission index (== `hit`),
+        // `multi_row` = scan emits >1 row.
+        let rows = emitted_rows(spec, &sorted, candidates);
+        let ranks: Vec<u32> = rows.iter().map(|(r, _)| *r).collect();
+        let psms: Vec<&PsmMatch> = rows.iter().map(|(_, p)| &**p).collect();
         let multi_row = psms.len() > 1;
         let spec_id_str = if spec.title.is_empty() {
             format!("scan={}", spec.scan.unwrap_or(0))
         } else {
             spec.title.clone()
         };
-        for (hit, psm) in psms.iter().enumerate() {
+        for (hit, &psm) in psms.iter().enumerate() {
             let cand = &candidates[psm.primary_candidate_idx() as usize];
             let z = psm.charge_used as f64;
             let precursor_mz = psm.precursor_mz_override.unwrap_or(spec.precursor_mz);

@@ -393,10 +393,22 @@ fn qpx_join_accepts_targets_removed_by_target_decoy_competition() {
     let (spectra, mut queues, candidates, idx, params) = run_bsa_search();
     // Give every scan a lower-ranked second candidate at the same charge and
     // precursor, as the top-N chimeric search does: one competition group with
-    // two rows.
+    // two rows. The alternative is a different target peptide, so the writers'
+    // positional-isomer collapse keeps both rows.
     for q in queues.iter_mut() {
         if let Some(top) = q.peek_top().cloned() {
+            let residues = |c: &search::candidate_gen::Candidate| -> Vec<u8> {
+                c.peptide.residues.iter().map(|aa| aa.residue).collect()
+            };
+            let top_residues = residues(&candidates[top.primary_candidate_idx() as usize]);
+            let Some(other) = candidates
+                .iter()
+                .position(|c| !c.is_decoy && residues(c) != top_residues)
+            else {
+                continue;
+            };
             let mut alt = top;
+            alt.candidate_idxs = vec![other as u32];
             alt.score -= 1.0;
             alt.rank_score -= 1.0;
             q.force_push(alt);

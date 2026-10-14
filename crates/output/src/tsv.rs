@@ -18,7 +18,7 @@
 
 use std::io::{self, BufWriter, Write};
 
-use crate::row_context::{iter_ranked_by_rank_score, RowContext};
+use crate::row_context::{emitted_rows, RowContext};
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;
 use model::tolerance::Tolerance;
@@ -210,11 +210,10 @@ fn write_spectrum_rows<W: Write>(
         ppm_mode: matches!(params.precursor_tolerance.left, Tolerance::Ppm(_)),
     };
 
-    let ranked: Vec<(u32, &PsmMatch)> = iter_ranked_by_rank_score(&psms).collect();
-    for (_rank, psm) in ranked {
+    for (_rank, psm) in emitted_rows(spec, &psms, candidates) {
         let cand = &candidates[psm.primary_candidate_idx() as usize];
         let ctx = RowContext::new(spec, cand, search_index);
-        write_psm_row(writer, spec, psm, cand, &ctx, &row_ctx)?;
+        write_psm_row(writer, spec, &psm, cand, &ctx, &row_ctx)?;
     }
     Ok(())
 }
@@ -528,15 +527,26 @@ mod tests {
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
         let mut queue = TopNQueue::new(10);
-        // Push 3 PSMs with descending rank_score (best = largest)
-        queue.push(make_psm(0, 10.0, 10.0)); // best (rank 1)
-        queue.push(make_psm(0, 8.0, 8.0)); // middle (rank 2)
-        queue.push(make_psm(0, 6.0, 6.0)); // worst (rank 3)
+        // Push 3 PSMs on 3 distinct peptides with descending rank_score (best =
+        // largest). Distinct peptides: a positional isomer of an emitted row
+        // would be collapsed into it.
+        for (cidx, score) in [(0u32, 10.0f32), (1, 8.0), (2, 6.0)] {
+            let mut psm = make_psm(0, score, score);
+            psm.candidate_idxs = vec![cidx];
+            queue.push(psm);
+        }
         let queues = vec![queue];
         let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        let cands = vec![make_candidate(0, false)];
+        let cands: Vec<Candidate> = [b'A', b'G', b'S']
+            .iter()
+            .map(|&r| {
+                let mut c = make_candidate(0, false);
+                c.peptide = Peptide::new(vec![AminoAcid::standard(r).unwrap()], b'K', b'S');
+                c
+            })
+            .collect();
         write_tsv_to(
             &mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true,
         )

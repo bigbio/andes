@@ -306,10 +306,11 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
     for run in ["mbr_run1", "mbr_run2"] {
         assert_eq!(row("HLVDEPQNLIK/2", run).unwrap()[ev], "identified");
     }
-    // Peptide 6 has no MS1 signal anywhere and is identified in run 1 only.
+    // Peptide 6 has no MS1 signal anywhere and is identified in run 1 only:
+    // its identified rows fail the identified quality q-value.
     for key in ["DAFLGSFLYEYSR/2", "DAFLGSFLYEYSR/3"] {
         let r1 = row(key, "mbr_run1").unwrap_or_else(|| panic!("{key} in run 1"));
-        assert_eq!(r1[ev], "identified");
+        assert_eq!(r1[ev], "identified_below_threshold", "{key}: {r1:?}");
         for run in ["mbr_run2", "mbr_run3"] {
             let r = row(key, run).unwrap_or_else(|| panic!("{key} in {run}"));
             assert_ne!(r[ev], "transfer_ms1", "{key} in {run}: {r:?}");
@@ -324,10 +325,10 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
     assert!(transfers >= 50, "only {transfers} transfers");
 
     // The feature parquet holds every mbr.tsv row except the below-threshold
-    // transfers.
+    // transfers and identified rows.
     let below: Vec<&Vec<String>> = rows
         .values()
-        .filter(|r| r[ev] == "below_threshold")
+        .filter(|r| r[ev] == "below_threshold" || r[ev] == "identified_below_threshold")
         .collect();
     assert!(
         !below.is_empty(),
@@ -335,7 +336,9 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
     );
     let features = feature_rows(&staged_parquet);
     assert_eq!(features.len(), rows.len() - below.len());
-    assert!(features.iter().all(|f| f.3 != "below_threshold"));
+    assert!(features
+        .iter()
+        .all(|f| f.3 != "below_threshold" && f.3 != "identified_below_threshold"));
     for r in below {
         let (pf, z) = r[0].rsplit_once('/').unwrap();
         assert!(

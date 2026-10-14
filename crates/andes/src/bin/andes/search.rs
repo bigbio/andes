@@ -2223,7 +2223,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         donor_q,
         donor_pep,
         cli.mbr_fdr,
-        cli.quant_feature_fdr,
+        cli.quant_feature_fdr.0,
         &report_base.with_extension(""),
         cli.output_parquet.as_deref(),
     )?;

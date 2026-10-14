@@ -844,7 +844,7 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
         &stored,
         &runs,
         a.mbr_fdr,
-        a.quant_feature_fdr,
+        a.quant_feature_fdr.0,
         &a.output,
         a.output_parquet.as_deref(),
     )

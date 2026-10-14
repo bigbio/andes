@@ -90,4 +90,4 @@ quant:
   # mbr: false                   # match-between-runs across the inputs (needs lfq and rescoring, 2+ inputs)
   # mbr_library_fdr: 0.01        # internal library entry gate (precursor-level), not a reported identification FDR
   # mbr_fdr: 0.01                # transfer quality q-value for transfer_ms1 (internal, not an identification FDR)
-  # quant_feature_fdr: 0.05      # identified-row quality q-value; above it: identified_below_threshold (internal; default off)
+  # quant_feature_fdr: 0.05      # identified-row quality q-value; above it: identified_below_threshold (internal); off to report all

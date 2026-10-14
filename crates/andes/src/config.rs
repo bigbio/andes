@@ -138,7 +138,31 @@ pub struct QuantCfg {
     pub mbr: Option<bool>,
     pub mbr_library_fdr: Option<f64>,
     pub mbr_fdr: Option<f64>,
-    pub quant_feature_fdr: Option<f64>,
+    /// A number in `(0, 1]` or `off`, as `--quant-feature-fdr`.
+    pub quant_feature_fdr: Option<NumberOrString>,
+}
+
+/// A YAML scalar written as a number or as a string (e.g. `0.05` or `off`),
+/// passed to the CLI validator as its text.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum NumberOrString {
+    Number(f64),
+    String(String),
+}
+
+/// `quant_feature_fdr` through the CLI validator, the error naming the key.
+fn parse_quant_feature_fdr(s: &str) -> Result<crate::cli::FractionOrOff, String> {
+    crate::cli::parse_fraction_or_off(s).map_err(|e| format!("quant_feature_fdr: {e}"))
+}
+
+impl NumberOrString {
+    fn text(&self) -> String {
+        match self {
+            NumberOrString::Number(v) => v.to_string(),
+            NumberOrString::String(s) => s.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -386,10 +410,11 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         cfg.quant.mbr_library_fdr
     );
     set!("mbr_fdr", mbr_fdr, cfg.quant.mbr_fdr);
-    set_opt!(
+    set_parsed!(
         "quant_feature_fdr",
         quant_feature_fdr,
-        cfg.quant.quant_feature_fdr
+        cfg.quant.quant_feature_fdr.map(|v| v.text()),
+        parse_quant_feature_fdr
     );
 
     // ── glyco ──
@@ -417,9 +442,6 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     check_unit_fraction("lfq_feature_fdr", args.lfq_feature_fdr)?;
     if let Some(v) = args.quant_fdr {
         check_unit_fraction("quant_fdr", v)?;
-    }
-    if let Some(v) = args.quant_feature_fdr {
-        check_unit_fraction("quant_feature_fdr", v)?;
     }
     check_positive("lfq_rt_window", args.lfq_rt_window)?;
     if let Some(v) = args.fragment_tol_ppm {
@@ -592,6 +614,9 @@ glyco:
             ("lfq_feature_fdr", "-0.5"),
             ("quant_fdr", "5.0"),
             ("quant_fdr", ".nan"),
+            ("quant_feature_fdr", "1.5"),
+            ("quant_feature_fdr", "0"),
+            ("quant_feature_fdr", "none"),
             ("lfq_rt_window", "0"),
             ("lfq_rt_window", "-30"),
             ("lfq_rt_window", ".inf"),
@@ -624,6 +649,14 @@ glyco:
         )
         .unwrap();
         assert!(apply(ok, &mut a, &matches).is_ok());
+        assert_eq!(a.quant_feature_fdr.0, Some(0.05), "the default");
+        for (value, want) in [("off", None), ("0.01", Some(0.01))] {
+            let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
+            let cfg = RunConfig::from_yaml_str(&format!("quant:\n  quant_feature_fdr: {value}\n"))
+                .unwrap();
+            apply(cfg, &mut a, &matches).unwrap();
+            assert_eq!(a.quant_feature_fdr.0, want, "{value}");
+        }
     }
 
     /// The shipped `config.example.yaml` must parse against the current schema, so

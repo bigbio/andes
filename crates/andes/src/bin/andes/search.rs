@@ -643,6 +643,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     report_annotated_site_mods(&aa, &target_db);
+    warn_restricted_artefacts(&aa, cli.uniprot_variants);
 
     // ── 5. Build SearchParams ─────────────────────────────────────────────────
     let mut params = SearchParams::default_tryptic(aa);
@@ -2381,6 +2382,33 @@ fn log_uniprot_load(stats: &input::UniProtLoadStats, opts: &input::UniProtOption
 /// Say how many annotated sites each `sites=annotated` mod of `aa` can use,
 /// and warn about one the database annotates no site of its mass for: it is
 /// never placed.
+/// Artefact masses that mimic common substitutions: deamidation (N→D, Q→E),
+/// oxidation (A→S, P→T…), carbamylation, methylation (G→A, S→T, D→E…).
+const ARTEFACT_MASSES: [f64; 4] = [0.984016, 15.994915, 43.005814, 14.015650];
+
+/// With natural variants searched, restricting one of these mods to annotated
+/// sites removes the canonical explanation that competes with a variant of the
+/// same mass.
+fn warn_restricted_artefacts(aa: &model::AminoAcidSet, variants_on: bool) {
+    if !variants_on {
+        return;
+    }
+    for m in aa.distinct_mods() {
+        if m.annotated_site_mass.is_some()
+            && ARTEFACT_MASSES
+                .iter()
+                .any(|a| (m.mass_delta - a).abs() <= model::protein::SITE_MASS_TOLERANCE)
+        {
+            eprintln!(
+                "WARN: {} ({:+.4} Da) is restricted to annotated sites while \
+                 --uniprot-variants is on: variants of the same mass lose the \
+                 competing explanation at unannotated residues.",
+                m.name, m.mass_delta
+            );
+        }
+    }
+}
+
 fn report_annotated_site_mods(aa: &model::AminoAcidSet, target_db: &model::ProteinDb) {
     let mut mods: Vec<(&str, f64)> = aa
         .distinct_mods()

@@ -160,3 +160,31 @@ fn annotated_site_mods_and_variants_run_end_to_end() {
     );
     assert!(stderr.contains("never placed"), "{stderr}");
 }
+
+#[test]
+fn restricted_artefact_mods_warn_only_with_variants() {
+    let dir = tempfile::tempdir().unwrap();
+    let mods = dir.path().join("mods.txt");
+    std::fs::write(
+        &mods,
+        "57.021464,C,fix,any,Carbamidomethyl\n\
+         0.984016,N,opt,any,Deamidated,sites=annotated\n",
+    )
+    .unwrap();
+    let mods = mods.to_str().unwrap();
+    let warning = "variants of the same mass lose the competing explanation";
+    let out = search(
+        "test-fixtures/BSA.xml.gz",
+        &dir.path().join("on.pin"),
+        &["--mods", mods, "--uniprot-variants"],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("WARN: Deamidated"), "{stderr}");
+    assert!(stderr.contains(warning), "{stderr}");
+    let out = search(
+        "test-fixtures/BSA.xml.gz",
+        &dir.path().join("off.pin"),
+        &["--mods", mods],
+    );
+    assert!(!String::from_utf8_lossy(&out.stderr).contains(warning));
+}

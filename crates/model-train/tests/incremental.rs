@@ -12,7 +12,7 @@ use model_train::{
     estimate::EstimatorConfig,
     gate::{evaluate_candidate, YieldDelta},
     store::{
-        commit_update, update_add, update_decay, update_remove, update_reweight,
+        attach_to_model, commit_update, update_add, update_decay, update_remove, update_reweight,
         write_model_with_sources, ModelStore, SourceLedger,
     },
 };
@@ -482,4 +482,77 @@ fn update_rejects_partitioned_store() {
     let p = fixture_param();
     let err = commit_update(bundled, "hcd_qexactive_tryp", &p, &[]).unwrap_err();
     assert!(err.to_string().contains("partitioned"), "{err}");
+}
+
+/// Attaching a GBDT to an existing model replaces only that GBDT: the rank
+/// tables, the other GBDT blobs and the source ledger with its stats survive,
+/// and other models are untouched. A model id not in the store starts from
+/// the fallback with no sources.
+#[test]
+fn attach_to_model_keeps_existing_model_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("m.parquet");
+
+    let param = fixture_param();
+    let peak_blob = param.gbdt_peak_model.as_ref().map(|m| m.to_bytes());
+    write_model_with_sources(
+        &path,
+        "m",
+        &param,
+        &[(make_ledger("s0"), make_stats_s0())],
+        peak_blob,
+    )
+    .unwrap();
+    let other = model_train::estimate::Estimator::new(EstimatorConfig::default())
+        .estimate(&make_stats_s1(), &param);
+    let (cand, srcs) = update_add(
+        &path,
+        "m",
+        make_ledger("s1"),
+        make_stats_s1(),
+        EstimatorConfig::default(),
+    )
+    .unwrap();
+    commit_update(&path, "m", &cand, &srcs).unwrap();
+    commit_update(&path, "other", &other, &[(make_ledger("o"), make_stats_s1())]).unwrap();
+    let before = ModelStore::open(&path).unwrap().load_param("m").unwrap();
+
+    // A distinguishable replacement rich-ion model: the stored frag model.
+    let replacement = param.frag_intensity_model.clone().unwrap();
+    let existed = attach_to_model(&path, "m", other.clone(), |p| {
+        p.rich_ion_model = Some(replacement.clone());
+    })
+    .unwrap();
+    assert!(existed);
+
+    let store = ModelStore::open(&path).unwrap();
+    let after = store.load_param("m").unwrap();
+    let mut expected = before.clone();
+    expected.rich_ion_model = Some(replacement.clone());
+    assert_eq!(after, expected, "only the rich-ion model may change");
+    assert_eq!(gbdt_blobs(&after)[..2], gbdt_blobs(&before)[..2]);
+    let ids: Vec<String> = store
+        .load_sources("m")
+        .unwrap()
+        .into_iter()
+        .map(|l| l.source_id)
+        .collect();
+    assert_eq!(ids, ["s0", "s1"], "source ledger must survive");
+    assert_eq!(
+        store.load_source_stats("m", "s1").unwrap(),
+        make_stats_s1(),
+        "per-source stats must survive"
+    );
+    assert_eq!(store.load_param("other").unwrap(), other);
+
+    let existed = attach_to_model(&path, "fresh", other.clone(), |p| {
+        p.rich_ion_model = Some(replacement.clone());
+    })
+    .unwrap();
+    assert!(!existed);
+    let store = ModelStore::open(&path).unwrap();
+    assert!(store.load_sources("fresh").unwrap().is_empty());
+    let mut expected = other;
+    expected.rich_ion_model = Some(replacement);
+    assert_eq!(store.load_param("fresh").unwrap(), expected);
 }

@@ -108,6 +108,9 @@
 //! | E. coli fixed mods only | 75,750 | 35 |
 //! | E. coli one variable mod | 74,998 | 40 |
 //!
+//! The E. coli digests above carry both of these changes together (TITLE scan
+//! numbers and the widened charge columns); row counts are unchanged.
+//!
 //! To regenerate after an intentional change, run the case's command line (see
 //! `run`), then either digest the PIN with `identity_digest` (E. coli) or write
 //! its header and sorted rows, gzipped, over the case's golden PIN (slices).
@@ -287,14 +290,14 @@ fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
 /// One E. coli case: (rows, `identity_digest` FNV-1a 64, calibration outcome line).
 type Golden = (usize, u64, Option<&'static str>);
 
-const ECOLI_DEFAULT_MODS: Golden = (74_442, 0xddc8_e6d8_0b07_a390, None);
-const ECOLI_FIXED_MODS_ONLY: Golden = (75_750, 0x404a_1b62_f3da_87f1, None);
-const ECOLI_ONE_VARIABLE_MOD: Golden = (74_998, 0x703c_69ff_122b_a7e9, None);
+const ECOLI_DEFAULT_MODS: Golden = (74_442, 0x3f9e_c3db_6433_7c0c, None);
+const ECOLI_FIXED_MODS_ONLY: Golden = (75_750, 0xb52f_79d9_9428_a435, None);
+const ECOLI_ONE_VARIABLE_MOD: Golden = (74_998, 0xb104_6966_331a_b78c, None);
 /// The pre-pass scores but the sample is too small to calibrate, so the PIN
 /// equals the calibration-off one.
 const ECOLI_PRECURSOR_CAL_AUTO: Golden = (
     74_442,
-    0xddc8_e6d8_0b07_a390,
+    0x3f9e_c3db_6433_7c0c,
     Some("Precursor mass calibration skipped (insufficient confident PSMs: 492 with PSMs, 55 below RawScore floor, 0 failed |residual|>50ppm"),
 );
 

@@ -51,6 +51,12 @@ pub(crate) fn detect_coisolated(
         .collect();
     cands.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
+    let is_selected_isotope = |mz: f64| {
+        charge_range.clone().filter(|&z| z != 0).any(|z| {
+            let d = (mz - selected_mz).abs();
+            (1..6).any(|k| (d - k as f64 * ISOTOPE / z as f64).abs() <= tol_da)
+        })
+    };
     let mut out: Vec<CoIsolated> = Vec::new();
     for &(mz, _inten) in &cands {
         // Cap check BEFORE accepting any candidate, so `max_n == 0` is a hard
@@ -67,10 +73,7 @@ pub(crate) fn detect_coisolated(
         // M+1/M+2; without this guard Pass 2 re-discovers the primary as a fake
         // secondary (self-inflation). Selected charge is unknown, so reject any isotope
         // spacing in `charge_range` on either side (`d.abs()` makes it symmetric).
-        if charge_range.clone().filter(|&z| z != 0).any(|z| {
-            let d = (mz - selected_mz).abs();
-            (1..6).any(|k| (d - k as f64 * ISOTOPE / z as f64).abs() <= tol_da)
-        }) {
+        if is_selected_isotope(mz) {
             continue;
         }
         // Don't re-report a peak that's an isotope of an already-accepted envelope.
@@ -99,11 +102,55 @@ pub(crate) fn detect_coisolated(
                 ));
             }
         }
-        if let Some((_, c)) = best {
-            out.push(c);
+        if let Some((kl, c)) = best {
+            out.push(walk_to_monoisotope(ms1_peaks, c, kl, tol_da, |m| {
+                (m - selected_mz).abs() <= tol_da || is_selected_isotope(m)
+            }));
         }
     }
     out
+}
+
+/// Most isotope steps [`walk_to_monoisotope`] takes below an accepted peak.
+const MAX_MONO_WALK: usize = 3;
+
+/// The monoisotopic form of an accepted envelope. Peaks are tried most intense
+/// first, and above ~1.8 kDa the M+1 peak outweighs M, so the envelope is first
+/// accepted at M+1 (its shifted shape still fits averagine) and the true M is then
+/// skipped as its isotope: the secondary is searched one isotope spacing too
+/// heavy. Step down by `ISOTOPE / z` while a peak sits there (inside the window
+/// or not, since an M+1 in the window means M was co-isolated too), the envelope
+/// from it fits averagine strictly better, and it is not the selected
+/// precursor's own envelope (`is_selected`).
+fn walk_to_monoisotope(
+    ms1_peaks: &[(f64, f32)],
+    mut c: CoIsolated,
+    mut kl: f32,
+    tol_da: f64,
+    is_selected: impl Fn(f64) -> bool,
+) -> CoIsolated {
+    for _ in 0..MAX_MONO_WALK {
+        let lower = c.mono_mz - ISOTOPE / c.charge as f64;
+        let start = ms1_peaks.partition_point(|&(mz, _)| mz < lower - tol_da);
+        let has_peak = ms1_peaks[start..]
+            .first()
+            .is_some_and(|&(mz, _)| mz <= lower + tol_da);
+        if !has_peak || is_selected(lower) {
+            break;
+        }
+        let neutral = (lower - PROTON) * c.charge as f64;
+        let (lower_kl, _) = precursor_isotope_match(ms1_peaks, lower, c.charge, neutral, tol_da, 4);
+        if lower_kl >= kl {
+            break;
+        }
+        c = CoIsolated {
+            mono_mz: lower,
+            charge: c.charge,
+            neutral_mass: neutral,
+        };
+        kl = lower_kl;
+    }
+    c
 }
 
 /// Raw MS2 peaks claimed by `peptide`'s charge-1 b/y ions, as quantized m/z keys
@@ -456,6 +503,32 @@ pub(crate) mod tests {
         assert_eq!(got.len(), 1, "exactly one co-isolated (selected excluded)");
         assert!((got[0].mono_mz - co_mz).abs() < 0.02);
         assert_eq!(got[0].charge, z);
+    }
+
+    #[test]
+    fn heavy_coisolated_envelope_is_reported_at_its_monoisotope() {
+        // At ~3 kDa the M+1 peak is the most intense, so it is tried first; the
+        // envelope must still be reported at M, not one isotope spacing heavier.
+        let z = 2u8;
+        let selected_mz = 1200.0;
+        let sel_neutral = (selected_mz - PROTON) * z as f64;
+        let co_mz = 1501.2;
+        let co_neutral = (co_mz - PROTON) * z as f64;
+        let env = averagine_isotope_envelope(co_neutral, 4);
+        assert!(env[1] > env[0], "fixture needs M+1 > M");
+        let mut peaks = envelope(selected_mz, z, sel_neutral, 1000.0);
+        peaks.extend(envelope(co_mz, z, co_neutral, 500.0));
+        peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+        let got = detect_coisolated(&peaks, 1499.0, 1504.0, selected_mz, 2..=3, 0.01, 0.5, 4);
+        assert_eq!(got.len(), 1, "one co-isolated envelope: {got:?}");
+        assert!(
+            (got[0].mono_mz - co_mz).abs() < 0.01,
+            "reported at {} instead of the monoisotope {co_mz}",
+            got[0].mono_mz
+        );
+        assert_eq!(got[0].charge, z);
+        assert!((got[0].neutral_mass - co_neutral).abs() < 0.02);
     }
 
     #[test]

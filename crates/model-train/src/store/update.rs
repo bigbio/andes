@@ -347,6 +347,13 @@ pub fn commit_update(
 
 /// Re-sum all per-source stats (each scaled by its `weight`) and estimate a
 /// new [`Param`] from the combined counts.
+///
+/// The template's GBDT models (peak, fragment-intensity, rich-ion) are carried
+/// onto the candidate unchanged. Their features are spectrum-derived (intensity
+/// ranks, peak geometry, fragment m/z errors) and never read the rank,
+/// error or existence tables re-estimated here, so they stay valid for the
+/// candidate. Retraining them on new data is a separate step
+/// (`train-intensity-gbdt`, `train-rich-ion-llr`, `train-msnet --gbdt`).
 fn estimate_from_sources(
     sources: &[(SourceLedger, CountStats)],
     template: &Param,
@@ -361,7 +368,11 @@ fn estimate_from_sources(
         combined.add(&stats.scaled(ledger.weight));
     }
     let estimator = Estimator::new(est_cfg);
-    Ok(estimator.estimate(&combined, template))
+    let mut candidate = estimator.estimate(&combined, template);
+    candidate.gbdt_peak_model = template.gbdt_peak_model.clone();
+    candidate.frag_intensity_model = template.frag_intensity_model.clone();
+    candidate.rich_ion_model = template.rich_ion_model.clone();
+    Ok(candidate)
 }
 
 /// Write multiple models (each with their per-source stats) to a single

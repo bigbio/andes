@@ -365,3 +365,55 @@ fn acceptance_gate_same_model_is_accepted() {
         "identical models must be accepted by the gate"
     );
 }
+
+/// Serialised GBDT blobs of a Param: (peak, fragment-intensity, rich-ion).
+fn gbdt_blobs(p: &Param) -> [Option<Vec<u8>>; 3] {
+    [
+        p.gbdt_peak_model.as_ref().map(|m| m.to_bytes()),
+        p.frag_intensity_model.as_ref().map(|m| m.to_bytes()),
+        p.rich_ion_model.as_ref().map(|m| m.to_bytes()),
+    ]
+}
+
+/// An update re-estimates the rank tables only: every GBDT carried by the
+/// stored model (a copy of a bundled model) survives the candidate, the gate
+/// input and the committed store byte-identically.
+#[test]
+fn update_keeps_gbdt_models_byte_identical() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("m.parquet");
+
+    let param = fixture_param();
+    assert!(
+        param.frag_intensity_model.is_some() && param.rich_ion_model.is_some(),
+        "bundled hcd_qexactive_tryp must carry frag-intensity and rich-ion GBDTs"
+    );
+    let before = gbdt_blobs(&param);
+    let peak_blob = before[0].clone();
+    write_model_with_sources(
+        &path,
+        "m",
+        &param,
+        &[(make_ledger("s0"), make_stats_s0())],
+        peak_blob,
+    )
+    .unwrap();
+    let stored = ModelStore::open(&path).unwrap().load_param("m").unwrap();
+    assert_eq!(gbdt_blobs(&stored), before, "store round-trip");
+
+    let cfg = EstimatorConfig::default();
+    let (candidate, sources) =
+        update_add(&path, "m", make_ledger("s1"), make_stats_s1(), cfg.clone()).unwrap();
+    assert_eq!(gbdt_blobs(&candidate), before, "update_add candidate");
+    commit_update(&path, "m", &candidate, &sources).unwrap();
+    let committed = ModelStore::open(&path).unwrap().load_param("m").unwrap();
+    assert_eq!(gbdt_blobs(&committed), before, "committed after update_add");
+
+    for (candidate, _) in [
+        update_reweight(&path, "m", "s1", 0.5, cfg.clone()).unwrap(),
+        update_remove(&path, "m", "s1", cfg.clone()).unwrap(),
+        update_decay(&path, "m", 365.0, cfg.clone()).unwrap(),
+    ] {
+        assert_eq!(gbdt_blobs(&candidate), before);
+    }
+}

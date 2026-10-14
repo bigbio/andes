@@ -56,6 +56,20 @@ def test_flats_keep_c_terminal_amidation(tmp_path):
     assert kept == ["PEPTIDEK", "PEPTIDEK-[UNIMOD:2]"], kept
 
 
+def test_flats_decode_summed_nterm_plus_residue_delta():
+    import re
+    from pathlib import Path
+    from ms2_extract_flats import parse_flat
+    fixture = Path(HERE).parents[2] / "fixtures" / "andes_writer_peptides.tsv"
+    andes = fixture.read_text().splitlines()[1].split("\t")[0]  # _.C+99.03203PEPTIDEK.R
+    delta = float(re.search(r"C\+([0-9.]+)", andes).group(1))
+    assert parse_flat("CPEPTIDEK", [1], [delta], 0.0, 0.0) == ("CPEPTIDEK", [(0, 1), (1, 4)])
+    # C-terminal amidation still decodes alongside
+    assert parse_flat("CPEPTIDEK", [1], [delta], 0.0, MASSES[AMIDATED]) == \
+        ("CPEPTIDEK", [(0, 1), (1, 4), (10, AMIDATED)])
+    assert parse_flat("CPEPTIDEK", [1], [1.23456], 0.0, 0.0) is None
+
+
 def test_keep_mzml_preserves_the_converted_file(tmp_path):
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()

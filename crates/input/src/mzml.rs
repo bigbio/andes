@@ -167,6 +167,9 @@ enum State {
     /// Inside `<precursor><activation>` — we read activation-method
     /// cvParams here and set `SpectrumBuilder::activation_method`.
     Activation,
+    /// Inside `<productList>`: its `<isolationWindow>` describes the product
+    /// (fragment) isolation, not the precursor's, so its cvParams are ignored.
+    ProductList,
     BinaryDataArray,
     Binary,
 }
@@ -898,6 +901,9 @@ impl<R: BufRead> MzMLReader<R> {
                                 }
                             }
                         }
+                        b"productList" if self.state == State::Spectrum => {
+                            self.state = State::ProductList;
+                        }
                         b"isolationWindow" if self.state == State::Spectrum => {
                             // `<isolationWindow>` is a sibling of
                             // `<selectedIon>` / `<activation>` under
@@ -1100,6 +1106,9 @@ impl<R: BufRead> MzMLReader<R> {
                             self.state = State::Spectrum;
                         }
                         b"isolationWindow" if self.state == State::IsolationWindow => {
+                            self.state = State::Spectrum;
+                        }
+                        b"productList" if self.state == State::ProductList => {
                             self.state = State::Spectrum;
                         }
                         b"activation" if self.state == State::Activation => {
@@ -2994,6 +3003,55 @@ mod tests {
         // The isolation-window target (MS:1000827) must NOT clobber the
         // selectedIon precursor m/z.
         assert!((spectra[0].precursor_mz - 500.5).abs() < 1e-6);
+    }
+
+    /// A `<productList>` isolation window (the fragment isolation of an
+    /// SRM/PRM-style scan) must not overwrite the precursor's.
+    #[test]
+    fn product_isolation_window_does_not_overwrite_precursor_window() {
+        let mz_b64 = encode_f64_b64(&[100.0]);
+        let int_b64 = encode_f64_b64(&[1000.0]);
+        let xml = format!(
+            r#"<spectrum index="0" id="scan=1" defaultArrayLength="1">
+              <cvParam accession="MS:1000511" name="ms level" value="2"/>
+              <scanList count="1"><scan/></scanList>
+              <precursorList count="1">
+                <precursor>
+                  <isolationWindow>
+                    <cvParam accession="MS:1000827" name="isolation window target m/z" value="500.5"/>
+                    <cvParam accession="MS:1000828" name="isolation window lower offset" value="0.7"/>
+                    <cvParam accession="MS:1000829" name="isolation window upper offset" value="0.7"/>
+                  </isolationWindow>
+                  <selectedIonList count="1">
+                    <selectedIon>
+                      <cvParam accession="MS:1000744" name="selected ion m/z" value="500.5"/>
+                    </selectedIon>
+                  </selectedIonList>
+                </precursor>
+              </precursorList>
+              <productList count="1">
+                <product>
+                  <isolationWindow>
+                    <cvParam accession="MS:1000827" name="isolation window target m/z" value="800.0"/>
+                    <cvParam accession="MS:1000828" name="isolation window lower offset" value="400.0"/>
+                    <cvParam accession="MS:1000829" name="isolation window upper offset" value="400.0"/>
+                  </isolationWindow>
+                </product>
+              </productList>
+              <binaryDataArrayList count="2">
+                {mz}
+                {int}
+              </binaryDataArrayList>
+            </spectrum>"#,
+            mz = bda_plain("MS:1000514", &mz_b64),
+            int = bda_plain("MS:1000515", &int_b64),
+        );
+        let spectra = collect_ok(&wrap_spectra(&xml));
+        assert_eq!(spectra.len(), 1);
+        assert_eq!(spectra[0].isolation_lower_offset, Some(0.7));
+        assert_eq!(spectra[0].isolation_upper_offset, Some(0.7));
+        assert_eq!(spectra[0].isolation_target_mz, Some(500.5));
+        assert_eq!(spectra[0].peaks.len(), 1);
     }
 
     /// When the mzML omits `<isolationWindow>`, both offsets stay `None`.

@@ -283,9 +283,17 @@ fn variant_entries_yield_only_peptides_carrying_the_variant() {
 fn every_expansion_path_agrees_with_annotation() {
     let idx = SearchIndex::from_target_db(&target_db(EvidenceLevel::Curated, true), "XXX");
     let p = params(true);
-    let mi = MmapCandidateIndex::build_in_memory(&idx, &p, "XXX").unwrap();
     let inram: Vec<Candidate> = enumerate_candidates(&idx, &p, "XXX").collect();
     assert!(inram.iter().any(|c| !phospho_positions(c).is_empty()));
+    assert_every_path_agrees(&idx, &p);
+}
+
+/// The lazy precursor window, the plain per-record expansion, the bounded walk
+/// the fragment index is built from and its materialisation all see the
+/// in-RAM candidate set.
+fn assert_every_path_agrees(idx: &SearchIndex, p: &SearchParams) {
+    let mi = MmapCandidateIndex::build_in_memory(idx, p, "XXX").unwrap();
+    let inram: Vec<Candidate> = enumerate_candidates(idx, p, "XXX").collect();
 
     // Lazy precursor window == mass-filtered in-RAM set, at every candidate mass.
     let masses: BTreeSet<u64> = inram
@@ -295,7 +303,7 @@ fn every_expansion_path_agrees_with_annotation() {
     let tol = 0.02;
     for m in masses {
         let precursor = m as f64 / 1000.0;
-        let lazy: HashSet<_> = lazy_candidates_for_precursor(&mi, &idx, &p, precursor, tol, tol)
+        let lazy: HashSet<_> = lazy_candidates_for_precursor(&mi, idx, p, precursor, tol, tol)
             .iter()
             .map(key)
             .collect();
@@ -309,18 +317,18 @@ fn every_expansion_path_agrees_with_annotation() {
 
     // Per record: the plain expansion, the bounded walk the fragment index is
     // built from, and its materialisation see the same forms.
-    let tables = FormWalkTables::new(&p);
+    let tables = FormWalkTables::new(p);
     let mut all: HashSet<_> = HashSet::new();
     for i in 0..mi.len() {
         let rec = mi.record_at(i);
-        let plain: Vec<Candidate> = expand_base_record(&idx, &p, &rec);
+        let plain: Vec<Candidate> = expand_base_record(idx, p, &rec);
         let mut masses = Vec::new();
-        for_each_record_form_masses_bounded(&idx, &p, &tables, &rec, 0.0, 1e9, |_, m| {
+        for_each_record_form_masses_bounded(idx, p, &tables, &rec, 0.0, 1e9, |_, m| {
             masses.push(m.iter().sum::<f64>())
         });
         assert_eq!(masses.len(), plain.len(), "record {rec:?}");
         let ks: Vec<u32> = (0..masses.len() as u32).collect();
-        let bounded = expand_base_record_bounded(&idx, &p, &tables, &rec, 0.0, 1e9, &ks);
+        let bounded = expand_base_record_bounded(idx, p, &tables, &rec, 0.0, 1e9, &ks);
         let a: HashSet<_> = plain.iter().map(key).collect();
         let b: HashSet<_> = bounded.iter().map(key).collect();
         assert_eq!(a, b, "record {rec:?}");
@@ -1121,4 +1129,71 @@ fn index_knows_whether_it_holds_alternative_entries() {
     assert!(!plain.has_alternative_entries);
     let with = SearchIndex::from_target_db(&target_db(EvidenceLevel::Experimental, true), "XXX");
     assert!(with.has_alternative_entries);
+}
+
+/// N10D and D18N on one entry: with deamidation searched, D10 is the
+/// canonical N10 deamidated, and N18 deamidated is the canonical D18.
+const DEAMIDATION_XML: &str = r#"<uniprot xmlns="http://uniprot.org/uniprot">
+<entry dataset="Swiss-Prot">
+  <accession>P00030</accession><name>DEAM_HUMAN</name>
+  <feature type="sequence variant" id="VAR_000030" evidence="1">
+    <original>N</original><variation>D</variation>
+    <location><position position="10"/></location>
+  </feature>
+  <feature type="sequence variant" id="VAR_000031" evidence="1">
+    <original>D</original><variation>N</variation>
+    <location><position position="18"/></location>
+  </feature>
+  <evidence type="ECO:0000269" key="1"/>
+  <sequence length="22" version="1">AGSPEAKVLNGSTRAPEDLTGR</sequence>
+</entry>
+</uniprot>"#;
+
+fn deamidation_params(deamidation: bool) -> SearchParams {
+    let mut builder = AminoAcidSetBuilder::new_standard();
+    if deamidation {
+        builder = builder.add_variable_mod(
+            Modification::from_mods_txt_line("0.984016,N,opt,any,Deamidated").unwrap(),
+        );
+    }
+    let mut p = SearchParams::default_tryptic(builder.build().unwrap());
+    p.min_length = 4;
+    p.max_missed_cleavages = 0;
+    p
+}
+
+#[test]
+fn variant_forms_a_searched_mod_makes_canonical_are_left_out() {
+    let opts = UniProtOptions {
+        variants: true,
+        ..UniProtOptions::default()
+    };
+    let target = load_uniprot_xml(DEAMIDATION_XML.as_bytes(), &opts)
+        .unwrap()
+        .0;
+    assert_eq!(target.len(), 3);
+    let idx = SearchIndex::from_target_db(&target, "XXX");
+    let variant_forms = |p: &SearchParams, decoy: bool| -> Vec<String> {
+        let mut v: Vec<String> = enumerate_candidates(&idx, p, "XXX")
+            .filter(|c| c.is_decoy == decoy)
+            .filter(|c| idx.db.proteins[c.protein_index].variant_region().is_some())
+            .map(|c| c.peptide.to_string())
+            .collect();
+        v.sort();
+        v
+    };
+    // Without deamidation both variants are searched as they are.
+    let plain = variant_forms(&deamidation_params(false), false);
+    assert!(plain.iter().any(|f| f.contains("VLDGSTR")), "{plain:?}");
+    assert!(plain.iter().any(|f| f.contains("APENLTGR")), "{plain:?}");
+    // With deamidation: VLDGSTR is canonical VLNGSTR deamidated, so N10D yields
+    // nothing; D18N keeps APENLTGR but not its deamidated form (= APEDLTGR).
+    let deam = deamidation_params(true);
+    let forms = variant_forms(&deam, false);
+    assert!(!forms.iter().any(|f| f.contains("VLD")), "{forms:?}");
+    assert!(forms.iter().any(|f| f.contains("APENLTGR")), "{forms:?}");
+    assert!(!forms.iter().any(|f| f.contains("APEN+0.98")), "{forms:?}");
+    // Decoys make the same decision, and every expansion path agrees.
+    assert_eq!(forms.len(), variant_forms(&deam, true).len());
+    assert_every_path_agrees(&idx, &deam);
 }

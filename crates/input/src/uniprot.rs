@@ -36,7 +36,7 @@ use std::sync::Arc;
 
 use model::{
     AminoAcid, ChainEnds, EntryKind, EntryOrigin, ModSite, Protein, ProteinAnnotation, ProteinDb,
-    SiteAnchor, VariantRegion,
+    SiteAnchor, Substitution, VariantRegion,
 };
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
@@ -545,6 +545,19 @@ impl UniProtEntry {
                     feature: Arc::from(v.tag.as_str()),
                     variant_delta_da: mass(&v.replacement) - mass(&base[v.start..v.end]),
                 };
+                // Equal-length changes: each differing residue and the one it
+                // replaced, so a form a searched mod makes canonical is skipped.
+                let substitutions: Vec<Substitution> = if v.replacement.len() == v.end - v.start {
+                    (v.start..v.end)
+                        .filter(|&i| sequence[i] != base[i])
+                        .map(|i| Substitution {
+                            position: i as u32,
+                            original: base[i],
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 Protein {
                     accession: format!("{}|{}_{}|{}", self.db_code(), base_id, v.tag, self.name),
                     description: format!("{description} VARIANT={}", v.tag),
@@ -552,7 +565,8 @@ impl UniProtEntry {
                     annotation: Some(Arc::new(
                         ProteinAnnotation::new(mod_sites, None)
                             .with_variant(parts)
-                            .with_origin(Some(origin)),
+                            .with_origin(Some(origin))
+                            .with_substitutions(substitutions),
                     )),
                 }
             })

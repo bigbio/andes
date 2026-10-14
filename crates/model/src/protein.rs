@@ -66,6 +66,13 @@ impl Protein {
         self.annotation.as_deref().and_then(|a| a.origin.as_ref())
     }
 
+    /// The single-residue substitutions of a variant entry (empty otherwise).
+    pub fn substitutions(&self) -> &[Substitution] {
+        self.annotation
+            .as_deref()
+            .map_or(&[], |a| a.substitutions.as_slice())
+    }
+
     /// The entry's kind; `Reference` for any protein without an origin.
     pub fn entry_kind(&self) -> EntryKind {
         self.origin().map_or(EntryKind::Reference, |o| o.kind)
@@ -98,6 +105,10 @@ pub struct ProteinAnnotation {
     /// Set on the entries a UniProt XML database adds (isoforms, variants,
     /// chains).
     pub origin: Option<EntryOrigin>,
+    /// The single-residue substitutions of a variant entry (equal-length
+    /// changes only), sorted by position: where a residue differs from the
+    /// sequence the variant was built from, and which residue it replaced.
+    pub substitutions: Vec<Substitution>,
 }
 
 impl ProteinAnnotation {
@@ -118,6 +129,7 @@ impl ProteinAnnotation {
             variant: variant.into_iter().collect(),
             chain: None,
             origin: None,
+            substitutions: Vec::new(),
         }
     }
 
@@ -125,6 +137,13 @@ impl ProteinAnnotation {
     /// `parts`.
     pub fn with_variant(mut self, parts: Vec<VariantRegion>) -> Self {
         self.variant = parts;
+        self
+    }
+
+    /// This annotation for a variant entry with `substitutions`, sorted here.
+    pub fn with_substitutions(mut self, mut substitutions: Vec<Substitution>) -> Self {
+        substitutions.sort_by_key(|s| s.position);
+        self.substitutions = substitutions;
         self
     }
 
@@ -139,6 +158,14 @@ impl ProteinAnnotation {
         self.chain = chain;
         self
     }
+}
+
+/// A residue of a variant entry that replaced `original` at `position` (0-based,
+/// in the variant's own coordinates).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Substitution {
+    pub position: u32,
+    pub original: u8,
 }
 
 /// What kind of database entry a protein is. Every FASTA protein, and every

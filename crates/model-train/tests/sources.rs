@@ -104,6 +104,7 @@ fn per_source_stats_round_trip_and_sum() {
         date: "2026-01-01".to_string(),
         weight: 1.0,
         train_fdr: 0.01,
+        decay_half_life_days: None,
         instrument: "QExactive".to_string(),
         experiment_class: "standard".to_string(),
     };
@@ -114,6 +115,7 @@ fn per_source_stats_round_trip_and_sum() {
         date: "2026-02-01".to_string(),
         weight: 0.5,
         train_fdr: 0.01,
+        decay_half_life_days: None,
         instrument: "Fusion".to_string(),
         experiment_class: "tmt".to_string(),
     };

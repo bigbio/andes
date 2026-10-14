@@ -131,7 +131,8 @@ pub fn tables_schema() -> SchemaRef {
 ///
 /// One row per `(model_id, source_id)` that was used during training.
 /// Columns: `source_id`, `dataset`, `n_psms`, `date`, `weight`,
-/// `train_fdr`, `src_instrument`, `src_experiment_class`.
+/// `train_fdr`, `decay_half_life_days`, `src_instrument`,
+/// `src_experiment_class`.
 ///
 /// # Per-source sufficient statistics (`"stat"` rows)
 ///
@@ -227,6 +228,9 @@ pub fn combined_schema() -> SchemaRef {
         nf("date", DataType::Utf8),
         nf("weight", DataType::Float32),
         nf("train_fdr", DataType::Float32),
+        // Age-decay half-life applied to `weight` at estimation time; null =
+        // no decay.
+        nf("decay_half_life_days", DataType::Float32),
         nf("src_instrument", DataType::Utf8),
         nf("src_experiment_class", DataType::Utf8),
         // ── stat-only ────────────────────────────────────────────────────────

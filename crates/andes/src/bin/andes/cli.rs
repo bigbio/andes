@@ -728,8 +728,11 @@ pub(crate) struct SearchArgs {
     #[arg(long = "quant-fdr", hide = true, value_parser = parse_unit_fraction)]
     pub(crate) quant_fdr: Option<f64>,
 
-    /// Keep the PIN file after rescoring. With `--rescore` and no `--output-pin`,
-    /// a temporary PIN is used and deleted unless this is true. Default true.
+    /// Keep the PIN file after rescoring. With `--rescore`/`--rescore-native`
+    /// and no `--output-pin`, true writes the PIN (and Percolator's result
+    /// files) as `<base>.pin`, where `<base>` is `--output-tsv`, else
+    /// `--output-parquet`, else `./andes`; false uses a temporary PIN that is
+    /// deleted at exit. An explicit `--output-pin` is always kept. Default true.
     #[arg(long = "keep-pin", hide = true, default_value_t = true, action = clap::ArgAction::Set)]
     pub(crate) keep_pin: bool,
 }
@@ -926,8 +929,6 @@ pub(crate) enum EthcdActivationFlag {
 pub(crate) enum GlycoSpeciesFlag {
     /// Human N-glycans.
     Human,
-    /// Human, multi-antennary.
-    HumanMulti,
     /// Mouse N-glycans.
     Mouse,
     /// Mouse, extended.
@@ -941,7 +942,6 @@ impl GlycoSpeciesFlag {
     pub(crate) fn key(self) -> &'static str {
         match self {
             GlycoSpeciesFlag::Human => "human",
-            GlycoSpeciesFlag::HumanMulti => "human-multi",
             GlycoSpeciesFlag::Mouse => "mouse",
             GlycoSpeciesFlag::MouseLarge => "mouse-large",
             GlycoSpeciesFlag::HighMannose => "high-mannose",

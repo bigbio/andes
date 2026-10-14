@@ -1,5 +1,11 @@
 //! Golden test for the `--glyco` path.
 //!
+//! REGENERATED 2026-10-14 when the glycosite tag began counting the boundary
+//! sequon (an N-X-S/T completed by the residue after the peptide). Verified before
+//! copying: header identical, 120 -> 120 rows, 0 winner changes; only the Peptide
+//! column moved, on 2 rows (scans 24129 and 24902, R.GTAGNALMDGASQLMGENR.T, whose
+//! only sequon is N18-R|T): `@N?` -> `@N18`.
+//!
 //! WHY THIS EXISTS. Until this file was added, the ONLY golden in the repo covered
 //! the standard peptide path (`precursor_cal_bit_identical.rs`). Nothing pinned glyco
 //! output, and a commit labelled `fix(train)` consequently changed SERVE-TIME glyco

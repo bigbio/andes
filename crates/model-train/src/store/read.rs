@@ -1146,6 +1146,12 @@ fn read_sources(path: &Path, model_id: &str) -> Result<Vec<SourceLedger>, TrainE
                 0.01
             };
 
+            // Null or absent ⇒ no decay recorded for this source.
+            let decay_half_life_days = f32_col(&batch, "decay_half_life_days")
+                .ok()
+                .filter(|col| !col.is_null(i))
+                .map(|col| col.value(i));
+
             ledgers.push(SourceLedger {
                 source_id,
                 dataset,
@@ -1153,6 +1159,7 @@ fn read_sources(path: &Path, model_id: &str) -> Result<Vec<SourceLedger>, TrainE
                 date,
                 weight,
                 train_fdr,
+                decay_half_life_days,
                 instrument,
                 experiment_class,
             });

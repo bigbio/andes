@@ -141,7 +141,7 @@ impl ThermoRawReader {
     /// has no usable precursor m/z — matching the mzML reader, which skips
     /// precursor-less MS2 rather than forwarding a `precursor_mz = 0.0` spectrum
     /// that would search against a nonsense mass window.
-    fn convert(raw: &RawSpectrum) -> Option<Spectrum> {
+    fn convert(raw: &RawSpectrum, handle: &RawFileReader) -> Option<Spectrum> {
         let scan_number = raw.index() as i32 + 1;
 
         // A precursor record with a positive m/z is required to search an MS2.
@@ -162,7 +162,12 @@ impl ThermoRawReader {
         // from it, matching mzML's `isolation window target m/z` and
         // `lower/upper offset`. Skip a degenerate/absent window.
         let w = p.isolation_window();
-        let (lo, tg, up) = (w.lower(), w.target(), w.upper());
+        let (lo, tg) = (w.lower(), w.target());
+        let (lo, up) = full_width_isolation_bounds(
+            lo,
+            w.upper(),
+            isolation_width_trailer(handle, raw.index(), raw.ms_level()),
+        );
         let (isolation_lower_offset, isolation_upper_offset, isolation_target_mz) =
             if tg > 0.0 && up > lo {
                 (Some((tg - lo).abs()), Some((up - tg).abs()), Some(tg))
@@ -185,7 +190,7 @@ impl ThermoRawReader {
             peaks: extract_peaks(raw),
             // Real activation from the .raw, used by the param auto-router so a
             // CID/ETD .raw is not silently scored with the HCD model.
-            activation_method: map_dissociation(p.activation().dissociation_method()),
+            activation_method: scan_activation(raw),
             isolation_lower_offset,
             isolation_upper_offset,
             isolation_target_mz,
@@ -241,7 +246,7 @@ impl ThermoRawReader {
                 2 => {
                     // Skip MS2 with no usable precursor (mirrors mzML); such a
                     // scan must not consume a chunk slot or an Ms1Link entry.
-                    let spec = match Self::convert(&raw) {
+                    let spec = match Self::convert(&raw, &self.handle) {
                         Some(spec) => spec,
                         None => continue,
                     };
@@ -295,6 +300,39 @@ fn master_scan_number(handle: &RawFileReader, index: usize) -> Option<usize> {
         .iter()
         .find_map(|t| is_master_scan_label(t.label).then(|| t.value.trim().to_string()))?;
     value.parse::<usize>().ok().filter(|&scan| scan > 0)
+}
+
+/// The `MSn Isolation Width` trailer of the scan at `index`: the FULL width of
+/// the isolation window in m/z, when the file records it.
+fn isolation_width_trailer(handle: &RawFileReader, index: usize, ms_level: u8) -> Option<f64> {
+    if ms_level < 2 {
+        return None;
+    }
+    let label = format!("MS{ms_level} Isolation Width");
+    let trailers = handle.get_raw_trailers_for(index)?;
+    let value = trailers.iter().find_map(|t| {
+        (t.label.trim().trim_end_matches(':').trim() == label).then(|| t.value.trim().to_string())
+    })?;
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|w| w.is_finite() && *w > 0.0)
+}
+
+/// Isolation bounds with the window `full_width` wide. RawFileReader builds the
+/// window as `center ± width` from the `MSn Isolation Width` trailer, which
+/// holds the full width, so such a window is twice the isolated range. When the
+/// bounds match that construction they are rebuilt as `center ± width / 2`;
+/// otherwise (no trailer, or the reader fell back to the filter's width, which
+/// it halves) they are returned unchanged.
+fn full_width_isolation_bounds(lower: f64, upper: f64, full_width: Option<f64>) -> (f64, f64) {
+    match full_width {
+        Some(w) if ((upper - lower) - 2.0 * w).abs() <= 1e-6 => {
+            let center = 0.5 * (lower + upper);
+            (center - 0.5 * w, center + 0.5 * w)
+        }
+        _ => (lower, upper),
+    }
 }
 
 /// Acquired m/z range of a scan, when the acquisition block records one.
@@ -385,6 +423,56 @@ fn sanitize_thermo_peaks(pairs: Vec<(f64, f32)>) -> Vec<(f64, f32)> {
     peaks
 }
 
+/// The activation of an MSn scan. RawFileReader reports only the primary
+/// activation of the last stage, so an EThcD/ETciD scan arrives as plain ETD
+/// (or ECD); the supplemental collision is read from the filter string's
+/// activation chain (`784.37@etd50.00@hcd25.00`) and the scan is then mapped
+/// like the combined method.
+fn scan_activation(raw: &RawSpectrum) -> Option<ActivationMethod> {
+    let d = raw.precursor()?.activation().dissociation_method();
+    let electron = matches!(d.0, 4 | 8 | 16);
+    if electron
+        && raw
+            .filter_string()
+            .is_some_and(filter_has_supplemental_collision)
+    {
+        return map_dissociation(DissociationMethod::ETHCD);
+    }
+    map_dissociation(d)
+}
+
+/// Whether the last activation stage of a Thermo filter string chains an
+/// electron-based activation with a collisional one, e.g.
+/// `FTMS + p NSI d Full ms2 784.37@etd50.00@hcd25.00 [120.00-2000.00]`.
+fn filter_has_supplemental_collision(filter: &str) -> bool {
+    let head = filter.split('[').next().unwrap_or("");
+    let mut tokens = head.split_whitespace();
+    if !tokens.any(|t| {
+        let t = t.to_ascii_lowercase();
+        t.len() > 2 && t.starts_with("ms") && t[2..].bytes().all(|b| b.is_ascii_digit())
+    }) {
+        return false;
+    }
+    let Some(last_stage) = tokens.filter(|t| t.contains('@')).last() else {
+        return false;
+    };
+    let methods: Vec<String> = last_stage
+        .split('@')
+        .skip(1)
+        .map(|a| {
+            a.chars()
+                .take_while(char::is_ascii_alphabetic)
+                .collect::<String>()
+                .to_ascii_lowercase()
+        })
+        .collect();
+    let electron = methods
+        .iter()
+        .any(|m| matches!(m.as_str(), "etd" | "ecd" | "netd"));
+    let collisional = methods.iter().any(|m| matches!(m.as_str(), "hcd" | "cid"));
+    electron && collisional
+}
+
 /// Map a Thermo `DissociationMethod` to the model's [`ActivationMethod`].
 /// Pure electron-based methods (ETD/ECD/NETD) map to `ETD`. Supplemental-
 /// activation methods (ETciD/EThcD/ECciD/EChcD) are EThcD-class: the
@@ -456,10 +544,8 @@ pub fn detect_activation_instrument<P: AsRef<Path>>(
             continue;
         }
         seen += 1;
-        if let Some(p) = raw.precursor() {
-            if let Some(m) = map_dissociation(p.activation().dissociation_method()) {
-                *act.entry(m as u8).or_insert(0) += 1;
-            }
+        if let Some(m) = scan_activation(&raw) {
+            *act.entry(m as u8).or_insert(0) += 1;
         }
         if let Some(a) = raw.acquisition() {
             if let Some(t) = map_analyzer(a.mass_analyzer()) {
@@ -544,7 +630,7 @@ impl Iterator for ThermoRawReader {
                     continue;
                 }
             }
-            match Self::convert(&raw) {
+            match Self::convert(&raw, &self.handle) {
                 // Skip MS2 scans with no usable precursor (mirrors mzML).
                 Some(spec) => {
                     if self.capture_scan_context {
@@ -628,6 +714,52 @@ mod tests {
             );
         }
         assert_eq!(map_dissociation(DissociationMethod(0)), None); // Unknown
+    }
+
+    #[test]
+    fn supplemental_collision_read_from_the_filter_chain() {
+        for f in [
+            "FTMS + p NSI d Full ms2 784.37@etd50.00@hcd25.00 [120.00-2000.00]",
+            "ITMS + c NSI d Full ms2 652.10@etd100.00@cid35.00 [50.00-1315.00]",
+            "FTMS + c NSI Full ms3 900.00@cid35.00 450.20@etd50.00@hcd20.00 [100.00-1000.00]",
+        ] {
+            assert!(filter_has_supplemental_collision(f), "{f}");
+        }
+        for f in [
+            "FTMS + p NSI d Full ms2 784.37@etd50.00 [120.00-2000.00]",
+            "FTMS + p NSI d Full ms2 784.37@hcd28.00 [120.00-2000.00]",
+            // A collisional MS2 stage followed by an ETD MS3 stage is not EThcD.
+            "FTMS + c NSI Full ms3 900.00@cid35.00 450.20@etd50.00 [100.00-1000.00]",
+            "FTMS + p NSI Full ms [350.00-1800.00]",
+            "",
+        ] {
+            assert!(!filter_has_supplemental_collision(f), "{f}");
+        }
+    }
+
+    #[test]
+    fn trailer_isolation_width_is_the_full_width() {
+        // Trailer 1.6 used as the half-width: 500 ± 1.6 → 500 ± 0.8.
+        let (lo, up) = full_width_isolation_bounds(498.4, 501.6, Some(1.6));
+        assert!(
+            (lo - 499.2).abs() < 1e-9 && (up - 500.8).abs() < 1e-9,
+            "{lo} {up}"
+        );
+        // An offset window keeps its center.
+        let (lo, up) = full_width_isolation_bounds(498.6, 501.8, Some(1.6));
+        assert!(
+            (lo - 499.4).abs() < 1e-9 && (up - 501.0).abs() < 1e-9,
+            "{lo} {up}"
+        );
+        // Filter fallback (already halved) and no trailer: unchanged.
+        assert_eq!(
+            full_width_isolation_bounds(499.2, 500.8, Some(1.6)),
+            (499.2, 500.8)
+        );
+        assert_eq!(
+            full_width_isolation_bounds(498.4, 501.6, None),
+            (498.4, 501.6)
+        );
     }
 
     #[test]

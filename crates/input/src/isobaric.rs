@@ -22,15 +22,42 @@ use model::spectrum::Spectrum;
 /// An isobaric label detected from reporter ions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IsobaricLabel {
-    /// TMT (6/10/11/16/18-plex share the 126–131 reporter cluster).
+    /// TMT 6/10/11-plex: the 126–131 reporter cluster only.
     Tmt,
-    /// iTRAQ (4/8-plex; the 114–117 reporter cluster is the 4-plex core).
+    /// TMTpro 16/18-plex: the 126–131 cluster plus the 132–134(135) reporters.
+    TmtPro,
+    /// iTRAQ 4-plex: the 114–117 reporter cluster.
     Itraq,
+    /// iTRAQ 8-plex: the 114–117 cluster plus 113, 118, 119 and 121.
+    Itraq8,
+}
+
+impl IsobaricLabel {
+    /// The Unimod name and monoisotopic mass of the label added to K and the
+    /// peptide N-terminus.
+    pub fn tag(self) -> (&'static str, f64) {
+        match self {
+            IsobaricLabel::Tmt => ("TMT6plex", 229.162932),
+            IsobaricLabel::TmtPro => ("TMTpro", 304.207146),
+            IsobaricLabel::Itraq => ("iTRAQ4plex", 144.102063),
+            IsobaricLabel::Itraq8 => ("iTRAQ8plex", 304.205360),
+        }
+    }
 }
 
 // Reporter-ion m/z, one representative per nominal channel.
 const TMT_CHANNELS: &[f64] = &[126.1277, 127.1248, 128.1344, 129.1378, 130.1411, 131.1382];
 const ITRAQ_CHANNELS: &[f64] = &[114.1112, 115.1083, 116.1116, 117.1150];
+// Reporters only the larger kits carry. TMTpro 132N/132C/133N/133C/134N
+// (TMT 6–11 stop at 131); iTRAQ 8-plex 113/118/119/121 (4-plex is 114–117).
+// At the loose low-res window the N/C pairs merge, so the count still reaches
+// the minimum below from the nominal 132–134 peaks.
+const TMTPRO_EXTRA: &[f64] = &[132.1415, 132.1479, 133.1449, 133.1512, 134.1482];
+const ITRAQ8_EXTRA: &[f64] = &[113.1079, 118.1120, 119.1153, 121.1220];
+/// A labeled spectrum shows the larger kit if ≥ this many extra reporters are present.
+const EXTRA_MIN_CHANNELS: usize = 2;
+/// The run is the larger kit if ≥ this fraction of its labeled spectra show it.
+const EXTRA_FRACTION: f64 = 0.5;
 
 // Match window, resolution-dependent. High-res analyzers (Orbitrap/TOF) resolve
 // reporters to a few mDa, so a TIGHT window is essential: the low-m/z region of
@@ -91,22 +118,40 @@ pub fn detect_isobaric(spectra: &[Spectrum], high_res: bool) -> Option<IsobaricL
     }
     let n = ms2.len() as f64;
 
-    let tmt_hits = ms2
+    let tmt_hits: Vec<&&Spectrum> = ms2
         .iter()
         .filter(|s| channels_present(s, TMT_CHANNELS, REL_FLOOR, tol) >= TMT_MIN_CHANNELS)
-        .count();
-    let itraq_hits = ms2
+        .collect();
+    let itraq_hits: Vec<&&Spectrum> = ms2
         .iter()
         .filter(|s| channels_present(s, ITRAQ_CHANNELS, REL_FLOOR, tol) >= ITRAQ_MIN_CHANNELS)
-        .count();
+        .collect();
 
-    let tmt_frac = tmt_hits as f64 / n;
-    let itraq_frac = itraq_hits as f64 / n;
+    let tmt_frac = tmt_hits.len() as f64 / n;
+    let itraq_frac = itraq_hits.len() as f64 / n;
+
+    // Among the spectra that carry the core cluster, how many also carry the
+    // larger kit's extra reporters.
+    let shows_extra = |hits: &[&&Spectrum], extra: &[f64]| {
+        let with_extra = hits
+            .iter()
+            .filter(|s| channels_present(s, extra, REL_FLOOR, tol) >= EXTRA_MIN_CHANNELS)
+            .count();
+        with_extra as f64 >= EXTRA_FRACTION * hits.len() as f64
+    };
 
     if tmt_frac >= FRACTION_THRESHOLD && tmt_frac >= itraq_frac {
-        Some(IsobaricLabel::Tmt)
+        Some(if shows_extra(&tmt_hits, TMTPRO_EXTRA) {
+            IsobaricLabel::TmtPro
+        } else {
+            IsobaricLabel::Tmt
+        })
     } else if itraq_frac >= FRACTION_THRESHOLD {
-        Some(IsobaricLabel::Itraq)
+        Some(if shows_extra(&itraq_hits, ITRAQ8_EXTRA) {
+            IsobaricLabel::Itraq8
+        } else {
+            IsobaricLabel::Itraq
+        })
     } else {
         None
     }
@@ -198,6 +243,52 @@ mod tests {
             })
             .collect();
         assert_eq!(detect_isobaric(&run, false), Some(IsobaricLabel::Tmt));
+    }
+
+    fn run_with(channels: &[f64]) -> Vec<Spectrum> {
+        (0..200)
+            .map(|_| {
+                let mut p = backbone();
+                for &c in channels {
+                    p.push((c, 200.0));
+                }
+                p.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+                spec_with(p)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn detects_tmtpro_and_itraq8_from_their_extra_reporters() {
+        let tmtpro: Vec<f64> = TMT_CHANNELS.iter().chain(TMTPRO_EXTRA).copied().collect();
+        assert_eq!(
+            detect_isobaric(&run_with(&tmtpro), true),
+            Some(IsobaricLabel::TmtPro)
+        );
+        let itraq8: Vec<f64> = ITRAQ_CHANNELS.iter().chain(ITRAQ8_EXTRA).copied().collect();
+        assert_eq!(
+            detect_isobaric(&run_with(&itraq8), true),
+            Some(IsobaricLabel::Itraq8)
+        );
+        // Low-res: nominal 132–134 peaks still read as TMTpro.
+        let lowres: Vec<f64> = (126..=134).map(|c| c as f64 + 0.1).collect();
+        assert_eq!(
+            detect_isobaric(&run_with(&lowres), false),
+            Some(IsobaricLabel::TmtPro)
+        );
+        // The 6–11-plex cluster alone stays TMT.
+        assert_eq!(
+            detect_isobaric(&run_with(TMT_CHANNELS), true),
+            Some(IsobaricLabel::Tmt)
+        );
+    }
+
+    #[test]
+    fn label_masses() {
+        assert_eq!(IsobaricLabel::Tmt.tag().1, 229.162932);
+        assert_eq!(IsobaricLabel::TmtPro.tag().1, 304.207146);
+        assert_eq!(IsobaricLabel::Itraq.tag().1, 144.102063);
+        assert_eq!(IsobaricLabel::Itraq8.tag().1, 304.205360);
     }
 
     #[test]

@@ -10,10 +10,11 @@ monosaccharide symbols, then one canonical S-expression per glycan (grammar:
 |---|---|---|---|
 | `pGlyco-N-HighMannose.gdb` | high-mannose N-glycans (species-independent) | 30 | derived (curated subset) |
 | `pGlyco-N-Human.gdb` | *Homo sapiens* N-glycans | 2922 | verbatim |
-| `pGlyco-N-Human-multi.gdb` | human, multi-antennary | 5634 | verbatim |
 | `pGlyco-N-Mouse.gdb` | *Mus musculus* N-glycans | 6662 | verbatim |
 | `pGlyco-N-Mouse-large.gdb` | mouse, extended | 7878 | verbatim |
 
+pGlyco's `*-multi` databases are not bundled: each of their extra lines is a combination
+of glycans for a peptide with several glycosites, and andes places one glycan per peptide.
 Plant databases are not bundled: xylose (`X`) is not yet represented in `GlycanComp`.
 
 Attribution: redistributed from the pGlyco project (https://github.com/pFindStudio/pGlyco3),

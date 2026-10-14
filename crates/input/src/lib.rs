@@ -27,7 +27,8 @@ pub use timstof::{TimsTofParseError, TimsTofReader};
 /// Returns a boxed `BufRead + Send` so the generic MGF / mzML / FASTA readers —
 /// and the streaming parser thread — consume gzipped and plain inputs uniformly.
 /// Callers that dispatch on file extension should strip a trailing `.gz` first to
-/// detect the underlying format (e.g. `spectra.mgf.gz` → MGF).
+/// detect the underlying format (e.g. `spectra.mgf.gz` → MGF). Every gzip member
+/// is read, so concatenated (`cat a.gz b.gz`) and bgzip files decode in full.
 pub fn open_buf_maybe_gz(
     path: &std::path::Path,
 ) -> std::io::Result<Box<dyn std::io::BufRead + Send>> {
@@ -39,9 +40,35 @@ pub fn open_buf_maybe_gz(
         .unwrap_or(false);
     if is_gz {
         Ok(Box::new(std::io::BufReader::new(
-            flate2::read::GzDecoder::new(std::io::BufReader::new(file)),
+            flate2::read::MultiGzDecoder::new(std::io::BufReader::new(file)),
         )))
     } else {
         Ok(Box::new(std::io::BufReader::new(file)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+
+    #[test]
+    fn multi_member_gzip_is_read_in_full() {
+        let mut bytes = Vec::new();
+        for part in ["BEGIN IONS\n", "END IONS\n"] {
+            let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            enc.write_all(part.as_bytes()).unwrap();
+            bytes.extend(enc.finish().unwrap());
+        }
+        let dir = std::env::temp_dir().join(format!("andes-gz-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("two_members.mgf.gz");
+        std::fs::write(&path, &bytes).unwrap();
+        let mut text = String::new();
+        super::open_buf_maybe_gz(&path)
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(text, "BEGIN IONS\nEND IONS\n");
     }
 }

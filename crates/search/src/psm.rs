@@ -656,8 +656,13 @@ impl TopNQueue {
 
     /// Drop PSMs strictly worse than the Nth-best, keeping ties at the cutoff
     /// (same tie-retention rule as `TopNQueue::push`).
+    /// `cap == 0` keeps nothing.
     fn retain_top_with_ties(psms: &mut Vec<PsmMatch>, cap: usize) {
         if psms.len() <= cap {
+            return;
+        }
+        if cap == 0 {
+            psms.clear();
             return;
         }
         let cutoff = psms[cap - 1].clone();
@@ -1042,6 +1047,16 @@ mod tests {
         assert_eq!(f.stdev_rel_error_top7, 0.0);
         assert_eq!(f.strong_score, 0.0);
         assert_eq!(f.strong_score_cal, 0.0);
+    }
+
+    #[test]
+    fn trim_to_zero_capacity_empties_the_queue() {
+        let mut q = TopNQueue::new(10);
+        for s in [5.0, 4.0, 3.0] {
+            q.push(make_match(0, s));
+        }
+        q.trim_to_capacity(0);
+        assert!(q.is_empty());
     }
 
     #[test]

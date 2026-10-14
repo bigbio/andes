@@ -383,6 +383,7 @@ fn multi_model_write_preserves_blobs_and_sources() {
         date: "2026-01-01".to_string(),
         weight: 1.0,
         train_fdr: 0.01,
+        decay_half_life_days: None,
         instrument: "QExactive".to_string(),
         experiment_class: "standard".to_string(),
     };

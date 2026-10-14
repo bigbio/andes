@@ -253,8 +253,9 @@ pub(crate) fn warn_if_universal_protease_combo(
 
 /// Resolve (activation, instrument) for model selection on metadata-less input
 /// (MGF, or mzML/.raw with no analyzer metadata). Resolution class comes from
-/// the `--fragment-tol-*` unit; activation from detected method, else
-/// `--fragmentation`, else the class-consistent default. When nothing
+/// the `--fragment-tol-*` unit; activation from an explicit `--fragmentation`,
+/// else the detected method, else the class-consistent default (the same
+/// precedence as a fully detected input). When nothing
 /// disambiguates, defaults to CID / LowRes (→ `cid_lowres_tryp`) + a warning.
 pub(crate) fn resolve_metadataless_selection(
     detected_activation: Option<ActivationMethod>,
@@ -278,7 +279,16 @@ pub(crate) fn resolve_metadataless_selection(
         | Some(InstrumentType::TOF) => ActivationMethod::HCD,
         _ => ActivationMethod::CID,
     };
-    let activation = detected_activation.or(explicit).unwrap_or(class_default);
+    if let (Some(e), Some(d)) = (explicit, detected_activation) {
+        if e != d {
+            eprintln!(
+                "Param resolver: auto-detected activation = {}, OVERRIDDEN by --fragmentation {}",
+                d.name(),
+                e.name()
+            );
+        }
+    }
+    let activation = explicit.or(detected_activation).unwrap_or(class_default);
     if detected_activation.is_none() && explicit.is_none() && instrument.is_none() {
         eprintln!(
             "WARN: MGF input with no --fragmentation/--fragment-tol; assuming \
@@ -478,6 +488,24 @@ pub(crate) fn load_param_from_store(
 #[cfg(test)]
 mod param_resolver_tests {
     use super::*;
+
+    #[test]
+    fn explicit_fragmentation_beats_a_detected_activation_without_instrument() {
+        let (act, inst) = resolve_metadataless_selection(
+            Some(ActivationMethod::HCD),
+            Fragmentation::Etd,
+            None,
+            None,
+        );
+        assert_eq!((act, inst), (ActivationMethod::ETD, None));
+        let (act, _) = resolve_metadataless_selection(
+            Some(ActivationMethod::HCD),
+            Fragmentation::Auto,
+            None,
+            None,
+        );
+        assert_eq!(act, ActivationMethod::HCD);
+    }
     use crate::cli::{
         parse_charge_range, parse_enzyme_specificity, parse_fragmentation,
         parse_isotope_error_range, parse_precursor_cal, parse_precursor_tol, parse_protocol,

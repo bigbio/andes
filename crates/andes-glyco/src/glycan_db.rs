@@ -35,6 +35,11 @@ pub enum GdbLoadError {
     UnknownSymbol { line: usize, symbol: String },
     /// A glycan line was not a well-formed parenthesized tree.
     MalformedTree { line: usize, reason: &'static str },
+    /// A glycan line held more than one complete tree. pGlyco's `*-multi`
+    /// databases list combinations of glycans for peptides with several
+    /// glycosites; andes places one glycan per peptide, so such a line has no
+    /// meaning here.
+    MultiSite { line: usize, trees: usize },
     /// `--glyco-species` named a species we do not bundle.
     UnknownSpecies { species: String },
 }
@@ -52,6 +57,12 @@ impl std::fmt::Display for GdbLoadError {
             GdbLoadError::MalformedTree { line, reason } => {
                 write!(f, "glycan .gdb line {line}: malformed tree ({reason})")
             }
+            GdbLoadError::MultiSite { line, trees } => write!(
+                f,
+                "glycan .gdb line {line}: {trees} glycan trees on one line (a multi-site \
+                 combination); andes places one glycan per peptide, so use a single-site \
+                 database"
+            ),
             GdbLoadError::UnknownSpecies { species } => {
                 write!(f, "unknown --glyco-species {species:?}")
             }
@@ -154,9 +165,7 @@ fn tally(node: &Node, counts: &mut [u8; 5]) {
 }
 
 /// Parse one glycan tree starting at `*pos`, recovering `core_fuc` from the tree.
-/// Advances `*pos` past the tree. A `.gdb` line may carry several concatenated
-/// trees (the pGlyco `*-multi` databases do), so callers loop until the line is
-/// consumed rather than assuming one tree per line.
+/// Advances `*pos` past the tree.
 fn parse_glycan_at(
     bytes: &[u8],
     pos: &mut usize,
@@ -196,11 +205,13 @@ fn parse_glycan_at(
 /// H,N,A,G,F          <- header: monosaccharide symbols (order irrelevant)
 /// (N(F)(N(H(H)(H)))) <- glycan 1 (nested tree of symbols; reducing end outermost)
 /// ```
-/// Symbols: `N`=HexNAc, `H`=Hex, `F`=Fuc, `A`=NeuAc, `G`=NeuGc. Each glycan is a
-/// nested parenthesized tree; a line may hold several concatenated trees (the
-/// pGlyco `*-multi` databases concatenate structures), each parsed separately. We
-/// walk each tree once to count residues and recover `core_fuc` (a `F` that is a
-/// direct child of the outermost symbol). Returns
+/// Symbols: `N`=HexNAc, `H`=Hex, `F`=Fuc, `A`=NeuAc, `G`=NeuGc. Each line is one
+/// nested parenthesized tree. A line with several concatenated trees is a pGlyco
+/// `*-multi` multi-site combination (one glycan per glycosite of the same
+/// peptide); the search places one glycan per peptide, so such a line is
+/// rejected with [`GdbLoadError::MultiSite`] rather than read as separate
+/// glycans. We walk each tree once to count residues and recover `core_fuc` (a
+/// `F` that is a direct child of the outermost symbol). Returns
 /// glycans sorted by mass ascending (tiebroken by composition, then `core_fuc`)
 /// and deduplicated by `(counts, core_fuc)` — so a core-fucosylated glycan and an
 /// antenna-fucosylated isomer of the same composition stay distinct.
@@ -218,26 +229,33 @@ pub fn load_glycan_gdb(content: &str) -> Result<Vec<GlycanComp>, GdbLoadError> {
         let line_no = i + 2; // header is line 1
         let bytes = line.as_bytes();
         let mut pos = 0usize;
-        while pos < bytes.len() {
-            // Skip stray whitespace between concatenated trees (none in practice,
-            // but harmless to tolerate).
-            while pos < bytes.len() && (bytes[pos] as char).is_whitespace() {
-                pos += 1;
+        let comp = parse_glycan_at(bytes, &mut pos, line_no)?;
+        if pos < bytes.len() {
+            if bytes[pos] != b'(' {
+                return Err(GdbLoadError::MalformedTree {
+                    line: line_no,
+                    reason: "trailing characters after the glycan tree",
+                });
             }
-            if pos >= bytes.len() {
-                break;
+            let mut trees = 1usize;
+            while pos < bytes.len() {
+                parse_glycan_at(bytes, &mut pos, line_no)?;
+                trees += 1;
             }
-            let comp = parse_glycan_at(bytes, &mut pos, line_no)?;
-            if seen.insert((
-                comp.hexnac,
-                comp.hex,
-                comp.fuc,
-                comp.neuac,
-                comp.neugc,
-                comp.core_fuc,
-            )) {
-                out.push(comp);
-            }
+            return Err(GdbLoadError::MultiSite {
+                line: line_no,
+                trees,
+            });
+        }
+        if seen.insert((
+            comp.hexnac,
+            comp.hex,
+            comp.fuc,
+            comp.neuac,
+            comp.neugc,
+            comp.core_fuc,
+        )) {
+            out.push(comp);
         }
     }
     out.sort_by(|a, b| {
@@ -261,13 +279,11 @@ pub fn load_glycan_gdb(content: &str) -> Result<Vec<GlycanComp>, GdbLoadError> {
 ///
 /// The databases are compiled in via `include_str!` (see `glycan-db/`); `species`
 /// is the kebab-case name exposed by the `--glyco-species` flag (`human`,
-/// `human-multi`, `mouse`, `mouse-large`, `plant`, `plant-multi`,
-/// `high-mannose`). This is the `--glyco-species` path of the glycan-first
+/// `mouse`, `mouse-large`, `high-mannose`). This is the `--glyco-species` path of the glycan-first
 /// search; an explicit `--glyco-glycan-gdb` file bypasses it entirely.
 pub fn load_species_glycan_db(species: &str) -> Result<Vec<GlycanComp>, GdbLoadError> {
     let content = match species {
         "human" => include_str!("../glycan-db/pGlyco-N-Human.gdb"),
-        "human-multi" => include_str!("../glycan-db/pGlyco-N-Human-multi.gdb"),
         "mouse" => include_str!("../glycan-db/pGlyco-N-Mouse.gdb"),
         "mouse-large" => include_str!("../glycan-db/pGlyco-N-Mouse-large.gdb"),
         "high-mannose" => include_str!("../glycan-db/pGlyco-N-HighMannose.gdb"),
@@ -351,11 +367,14 @@ mod tests {
     }
 
     #[test]
-    fn concatenated_trees_on_one_line_are_split() {
-        // pGlyco `*-multi` databases concatenate two trees with no separator.
-        let content = "H,N,A,G,F\n(N(N(H(H)(H))))(N(N(H(H(H))(H(H)))))\n";
-        let list = load_glycan_gdb(content).unwrap();
-        assert_eq!(list.len(), 2);
+    fn multi_site_line_is_rejected_not_split() {
+        // pGlyco `*-multi` lines concatenate one complete tree per glycosite (each
+        // with its own reducing-end GlcNAc). Splitting them would add each half as
+        // a single glycan; andes places one glycan per peptide, so refuse.
+        let content = "H,N,A,G,F\n(N(N(H(H)(H))))\n(N(N(H(H)(H))))(N(N(H(H(H))(H(H)))))\n";
+        let err = load_glycan_gdb(content).unwrap_err();
+        assert_eq!(err, GdbLoadError::MultiSite { line: 3, trees: 2 });
+        assert!(err.to_string().contains("multi-site"));
     }
 
     #[test]
@@ -395,7 +414,6 @@ mod tests {
     fn bundled_species_databases_load() {
         for sp in [
             "human",
-            "human-multi",
             "mouse",
             "mouse-large",
             "high-mannose",
@@ -413,6 +431,8 @@ mod tests {
     #[test]
     fn unknown_species_is_rejected() {
         let err = load_species_glycan_db("zebra").unwrap_err();
+        assert!(matches!(err, GdbLoadError::UnknownSpecies { .. }));
+        let err = load_species_glycan_db("human-multi").unwrap_err();
         assert!(matches!(err, GdbLoadError::UnknownSpecies { .. }));
     }
 }

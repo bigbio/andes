@@ -92,6 +92,20 @@ pub(crate) fn prefix_spectrum_titles(chunk: &mut [Spectrum], prefix: &str) {
     }
 }
 
+/// Fold the spectra a tolerant mzML reader skipped (malformed or in an
+/// unsupported binary encoding) into `stats`, so the run reports them.
+pub(crate) fn add_mzml_skipped<R: std::io::BufRead>(
+    stats: &mut ParseStats,
+    reader: &MzMLReader<R>,
+) {
+    stats.error_count += reader.skipped_count();
+    for e in reader.skipped_errors() {
+        if stats.first_errors.len() < 3 {
+            stats.first_errors.push(e.clone());
+        }
+    }
+}
+
 pub(crate) fn merge_parse_stats(acc: &mut ParseStats, part: ParseStats) {
     acc.error_count += part.error_count;
     for e in part.first_errors {
@@ -260,30 +274,60 @@ pub(crate) fn load_spectra_by_index(
     Ok(loaded)
 }
 
-/// Auto-detect an isobaric label (TMT/iTRAQ) by sampling the first `SAMPLE_N`
-/// MS2 spectra and inspecting their reporter-ion region. Used only when
-/// `--protocol auto` is left at its default, to engage the isobaric windowed
-/// peak filter with zero config.
+/// Auto-detect an isobaric label (TMT/TMTpro/iTRAQ 4/8) by sampling the first
+/// `SAMPLE_N` spectra at `ms_level` and inspecting their reporter-ion region.
 ///
-/// Returns `None` for `.raw`/`.d` (the sampling reader here is mzML/MGF only —
-/// the protocol then stays as-is, byte-identical) and for label-free data, so
-/// non-isobaric runs are unchanged. The mzML benchmark datasets (Astral, UPS1,
-/// TMT) all flow through the mzML branch.
+/// An SPS-MS3 run carries its reporters in the MS3 scans, not the (ion-trap)
+/// MS2 it searches, so when an MS2 sample shows no label the MS3 scans of an
+/// mzML or `.raw` are sampled too (high-res: SPS-MS3 reporters are read in the
+/// Orbitrap). Returns `None` for `.d` input and for label-free data.
 pub(crate) fn detect_isobaric_sampled(
     path: &Path,
     is_mzml: bool,
     is_mgf: bool,
+    is_raw: bool,
     ms_level: u32,
     high_res: bool,
 ) -> Option<input::IsobaricLabel> {
+    let found = sample_spectra(path, is_mzml, is_mgf, is_raw, ms_level)
+        .and_then(|sample| input::detect_isobaric(&sample, high_res));
+    if found.is_some() || ms_level != 2 || !(is_mzml || is_raw) {
+        return found;
+    }
+    let ms3 = sample_spectra(path, is_mzml, is_mgf, is_raw, 3)?;
+    let label = input::detect_isobaric(&ms3, true);
+    if label.is_some() {
+        eprintln!("Protocol resolver: isobaric reporters found in the MS3 scans (SPS-MS3)");
+    }
+    label
+}
+
+/// The first spectra at `ms_level` of an mzML, MGF or Thermo `.raw`.
+fn sample_spectra(
+    path: &Path,
+    is_mzml: bool,
+    is_mgf: bool,
+    is_raw: bool,
+    ms_level: u32,
+) -> Option<Vec<Spectrum>> {
     const SAMPLE_N: usize = 1000;
+    if is_raw {
+        #[cfg(feature = "thermo")]
+        {
+            let reader = input::ThermoRawReader::open(path)
+                .ok()?
+                .with_ms_level(Some(u8::try_from(ms_level).ok()?));
+            return Some(reader.filter_map(Result::ok).take(SAMPLE_N).collect());
+        }
+        #[cfg(not(feature = "thermo"))]
+        return None;
+    }
     if !(is_mzml || is_mgf) {
         return None;
     }
     let indices: HashSet<usize> = (0..SAMPLE_N).collect();
     let loaded = load_spectra_by_index(path, is_mzml, ms_level, &indices, usize::MAX).ok()?;
-    let sample: Vec<Spectrum> = loaded.into_values().collect();
-    input::detect_isobaric(&sample, high_res)
+    Some(loaded.into_values().collect())
 }
 
 pub(crate) fn tolerance_ppm_display(t: Tolerance) -> Option<f64> {

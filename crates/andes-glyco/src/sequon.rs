@@ -79,6 +79,17 @@ pub fn all_nxst_sites(residues: &[u8]) -> Vec<usize> {
         .collect()
 }
 
+/// Every glycosite of a peptide in its protein context: the N of each internal
+/// N-X-S/T sequon ([`all_nxst_sites`]) followed by the boundary-sequon N
+/// ([`boundary_nxst_site`]) when the residue after the peptide, `post`,
+/// completes one. The two never coincide: an internal sequon's N sits at most
+/// at `len-3`, the boundary N at `len-2`.
+pub fn glycosites(residues: &[u8], post: u8) -> Vec<usize> {
+    let mut sites = all_nxst_sites(residues);
+    sites.extend(boundary_nxst_site(residues, post));
+    sites
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,6 +110,18 @@ mod tests {
         assert_eq!(boundary_nxst_site(b"AAANP", b'S'), None); // X=P excluded
         assert_eq!(boundary_nxst_site(b"AAAKN", b'S'), None); // last is N, n-2 is K
         assert_eq!(boundary_nxst_site(b"N", b'S'), None); // too short
+    }
+
+    #[test]
+    fn glycosites_include_the_boundary_sequon() {
+        // Boundary only: …N-K | S-…
+        assert_eq!(glycosites(b"AAANK", b'S'), vec![3]);
+        // Internal plus boundary: two sites.
+        assert_eq!(glycosites(b"ANLTANK", b'T'), vec![1, 5]);
+        // A flank that does not complete the sequon adds nothing.
+        assert_eq!(glycosites(b"ANLTANK", b'A'), vec![1]);
+        // Protein C-terminus.
+        assert_eq!(glycosites(b"AAANK", b'-'), Vec::<usize>::new());
     }
 
     #[test]

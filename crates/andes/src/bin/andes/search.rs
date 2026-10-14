@@ -20,9 +20,9 @@ use crate::mono::{correct_chunk, MonoDump, MonoStats};
 use crate::quant_run::{QuantCollector, QuantSettings, RunScans};
 use crate::rescore;
 use crate::spectra::{
-    detect_dominant_activation, detect_instrument_type_for_path, detect_isobaric_sampled,
-    input_format_flags, merge_parse_stats, prefix_spectrum_titles, run_precursor_calibration,
-    send_chunks, title_prefix_for, tolerance_ppm_display, ParseStats,
+    add_mzml_skipped, detect_dominant_activation, detect_instrument_type_for_path,
+    detect_isobaric_sampled, input_format_flags, merge_parse_stats, prefix_spectrum_titles,
+    run_precursor_calibration, send_chunks, title_prefix_for, tolerance_ppm_display, ParseStats,
 };
 use crate::{arg_present, report_search_progress, EXPLICIT_MISSED_CLEAVAGES};
 use input::{FastaReader, MgfReader, Ms1Link, MzMLReader};
@@ -181,12 +181,44 @@ fn score_mass_ordered(
     }
 }
 
+/// Resolve the PIN path and the durable report base (the filtered q-value
+/// TSV and `statistics.log` are named from it).
+///
+/// An explicit `--output-pin` is both. Otherwise the base is `--output-tsv`,
+/// else `--output-parquet`, else `./andes.pin`; with `keep_pin` the PIN is
+/// `<base>.pin`, without it the PIN goes into a temp dir stored in `tmp`.
+fn rescore_pin_destination(
+    output_pin: Option<&Path>,
+    output_tsv: Option<&Path>,
+    output_parquet: Option<&Path>,
+    keep_pin: bool,
+    tmp: &mut Option<tempfile::TempDir>,
+) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
+    if let Some(p) = output_pin {
+        return Ok((p.to_path_buf(), p.to_path_buf()));
+    }
+    let base: PathBuf = output_tsv
+        .or(output_parquet)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("andes.pin"));
+    if keep_pin {
+        return Ok((base.with_extension("pin"), base));
+    }
+    let dir = tempfile::tempdir().map_err(|e| format!("creating temp dir for rescore PIN: {e}"))?;
+    let path = dir.path().join("andes.pin");
+    *tmp = Some(dir);
+    Ok((path, base))
+}
+
 pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // These three were validated as Some(..) by main() before calling run().
     if cli.spectrum.is_empty() {
         return Err("no --spectrum inputs".into());
     }
     let mut cli = cli;
+    if cli.top_n == 0 {
+        return Err("--top-n must be at least 1".into());
+    }
     // `--mbr`: the per-run artifacts go to `--quant-dir`, or to a temporary
     // directory that lives until the end of the run.
     let mut _mbr_tmp: Option<tempfile::TempDir> = None;
@@ -215,40 +247,20 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let spectrum_paths = &cli.spectrum;
     let spectrum_path: PathBuf = spectrum_paths[0].clone();
     let database_path: PathBuf = cli.database.clone().expect("database validated in main");
-    // PIN destination. Normally `--output-pin`. Under `--rescore` without an
-    // explicit path we write to a temp dir (kept alive in `_rescore_tmp` until
-    // the rescore phase has parsed it). `--keep-pin false` also routes the PIN
-    // to a temp dir so it is removed when the dir drops at function exit.
+    // PIN destination. Normally `--output-pin`. Under `--rescore` /
+    // `--rescore-native` without an explicit path, the PIN (and Percolator's
+    // result files, which sit next to it) goes next to the report base —
+    // `--output-tsv`, else `--output-parquet`, else `./andes` — as
+    // `<base>.pin` when `--keep-pin` is true (the default), or to a temp dir
+    // (kept alive in `_rescore_tmp`, removed at function exit) when it is false.
     let mut _rescore_tmp: Option<tempfile::TempDir> = None;
-    let output_pin_path: PathBuf = match cli.output_pin.clone() {
-        Some(p) if cli.keep_pin || !cli.rescore => p,
-        // --rescore with --keep-pin false but an explicit path: still honor the
-        // explicit path (user asked for it); keep-pin only governs the temp case.
-        Some(p) => p,
-        None => {
-            // --rescore without --output-pin → temp PIN.
-            let dir = tempfile::tempdir()
-                .map_err(|e| format!("creating temp dir for rescore PIN: {e}"))?;
-            let path = dir.path().join("andes.pin");
-            _rescore_tmp = Some(dir);
-            path
-        }
-    };
-    // DURABLE base for run artifacts that must survive function exit — the
-    // filtered q-value TSV and `statistics.log`. When the PIN is a real path
-    // these sit next to it; but when the PIN is a temp file (`--rescore`/`--fdr`
-    // without `--output-pin`) deriving them from `output_pin_path` would write
-    // them INTO the temp dir, which is deleted at exit — so the user would be
-    // told the TSV was written and then find it gone. Fall back to an explicit
-    // `--output-tsv`/`--output-parquet` location, else the current directory.
-    let report_base: PathBuf = if _rescore_tmp.is_some() {
-        cli.output_tsv
-            .clone()
-            .or_else(|| cli.output_parquet.clone())
-            .unwrap_or_else(|| PathBuf::from("andes.pin"))
-    } else {
-        output_pin_path.clone()
-    };
+    let (output_pin_path, report_base) = rescore_pin_destination(
+        cli.output_pin.as_deref(),
+        cli.output_tsv.as_deref(),
+        cli.output_parquet.as_deref(),
+        cli.keep_pin,
+        &mut _rescore_tmp,
+    )?;
     if spectrum_paths.len() > 1 {
         eprintln!(
             "Multi-spectrum search: {} inputs → one PIN",
@@ -343,8 +355,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Detect (activation, instrument) from the input for auto-routing.
     // mzML peeks the file; Thermo `.raw` reads vendor metadata; Bruker `.d`
     // is always CID/TimsTOF (DDA-PASEF). Detection runs for every metadata-
-    // bearing format and always wins over the MGF-only `--fragmentation` /
-    // `--fragment-tol-*` flags (which carry no metadata of their own).
+    // bearing format; an explicit `--fragmentation` still overrides the
+    // detected activation (see the resolution below).
     let auto_route_eligible = is_mzml || is_raw || is_d;
     let detected_activation_instrument: Option<(ActivationMethod, Option<InstrumentType>)> =
         if !auto_route_eligible {
@@ -377,8 +389,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // Metadata-first precedence: a fully detected (activation, instrument)
         // wins outright. When only the activation method is detected (analyzer
         // unknown), or nothing is detected (MGF / metadata-less mzML/.raw), the
-        // metadata-less resolver folds in the MGF-only `--fragmentation` and
-        // `--fragment-tol-*` flags. Default when no metadata: CID / low-res
+        // metadata-less resolver folds in `--fragmentation` (which wins over the
+        // detected activation) and the `--fragment-tol-*` flags. Default when no metadata: CID / low-res
         // (cid_lowres_tryp).
         let (activation, instrument_opt): (ActivationMethod, Option<InstrumentType>) =
             match detected_activation_instrument {
@@ -498,45 +510,82 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // windowed filter engages with zero config — the same path `--protocol TMT`
     // takes today. Detection returns None for label-free data, so non-isobaric
     // runs stay byte-identical.
+    // The label the run carries: `--tmt <plex>` names it; otherwise it is read
+    // from the reporter ions (also under an explicit `--protocol`, so the
+    // injected tag below gets the kit's mass: TMTpro and iTRAQ 8-plex are
+    // 304.2 Da, not the 229.2 / 144.1 Da of TMT 6–11 and iTRAQ 4-plex).
+    let detect = || {
+        detect_isobaric_sampled(
+            &spectrum_path,
+            is_mzml,
+            is_mgf,
+            is_raw,
+            cli.ms_level as u32,
+            param.data_type.instrument.is_high_resolution(),
+        )
+    };
+    let label: Option<input::IsobaricLabel> = match (cli.tmt, cli.protocol) {
+        (Some(plex), _) => Some(isobaric_label_of_plex(plex)),
+        (None, Protocol::Auto | Protocol::Tmt | Protocol::Itraq | Protocol::ItraqPhospho) => {
+            detect()
+        }
+        (None, _) => None,
+    };
     match cli.protocol {
         Protocol::Tmt => param.data_type.protocol = model::protocol::Protocol::TMT,
         Protocol::Itraq => param.data_type.protocol = model::protocol::Protocol::ITRAQ,
         Protocol::ItraqPhospho => {
             param.data_type.protocol = model::protocol::Protocol::ITRAQPhospho
         }
-        Protocol::Auto => {
-            let high_res = param.data_type.instrument.is_high_resolution();
-            match detect_isobaric_sampled(
-                &spectrum_path,
-                is_mzml,
-                is_mgf,
-                cli.ms_level as u32,
-                high_res,
-            ) {
-                Some(input::IsobaricLabel::Tmt) => {
-                    eprintln!("Protocol resolver: auto-detected TMT reporter ions → engaging isobaric windowed peak filter");
-                    param.data_type.protocol = model::protocol::Protocol::TMT;
-                }
-                Some(input::IsobaricLabel::Itraq) => {
-                    eprintln!("Protocol resolver: auto-detected iTRAQ reporter ions → engaging isobaric windowed peak filter");
-                    param.data_type.protocol = model::protocol::Protocol::ITRAQ;
-                }
-                None => {}
+        // `--protocol auto` (the default) engages the isobaric windowed peak
+        // filter when the run carries a label. Label-free runs are unchanged.
+        Protocol::Auto => match label {
+            Some(l @ (input::IsobaricLabel::Tmt | input::IsobaricLabel::TmtPro)) => {
+                eprintln!(
+                    "Protocol resolver: {} {l:?} → engaging isobaric windowed peak filter",
+                    if cli.tmt.is_some() {
+                        "--tmt"
+                    } else {
+                        "auto-detected"
+                    }
+                );
+                param.data_type.protocol = model::protocol::Protocol::TMT;
             }
-        }
+            Some(l @ (input::IsobaricLabel::Itraq | input::IsobaricLabel::Itraq8)) => {
+                eprintln!(
+                    "Protocol resolver: {} {l:?} → engaging isobaric windowed peak filter",
+                    if cli.tmt.is_some() {
+                        "--tmt"
+                    } else {
+                        "auto-detected"
+                    }
+                );
+                param.data_type.protocol = model::protocol::Protocol::ITRAQ;
+            }
+            None => {}
+        },
         _ => {}
     }
     // C1: parameter-free path only (no explicit --mods). When the protocol
     // resolves to TMT/iTRAQ, inject the tag as a fixed mod on K + peptide
     // N-term so labeled peptides match their precursor mass — otherwise the
     // reporter filter engages but every labeled candidate is +tag Da off and
-    // misses. With explicit --mods the user owns the mod set (they may already
-    // supply the tag), so those runs stay byte-identical.
+    // misses. The kit comes from `label` when known, else the protocol's
+    // smaller kit. With explicit --mods the user owns the mod set (they may
+    // already supply the tag), so those runs stay byte-identical.
     if cli.mods.is_none() {
-        let tag = match param.data_type.protocol {
-            model::protocol::Protocol::TMT => Some(("TMT6plex", 229.162932_f64)),
-            model::protocol::Protocol::ITRAQ | model::protocol::Protocol::ITRAQPhospho => {
-                Some(("iTRAQ4plex", 144.102063_f64))
+        let tag = match (param.data_type.protocol, label) {
+            (
+                model::protocol::Protocol::TMT,
+                Some(l @ (input::IsobaricLabel::Tmt | input::IsobaricLabel::TmtPro)),
+            ) => Some(l.tag()),
+            (model::protocol::Protocol::TMT, _) => Some(input::IsobaricLabel::Tmt.tag()),
+            (
+                model::protocol::Protocol::ITRAQ | model::protocol::Protocol::ITRAQPhospho,
+                Some(l @ (input::IsobaricLabel::Itraq | input::IsobaricLabel::Itraq8)),
+            ) => Some(l.tag()),
+            (model::protocol::Protocol::ITRAQ | model::protocol::Protocol::ITRAQPhospho, _) => {
+                Some(input::IsobaricLabel::Itraq.tag())
             }
             _ => None,
         };
@@ -1159,6 +1208,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut all_spectra: Vec<Spectrum> = Vec::new();
     let mut all_queues: Vec<TopNQueue> = Vec::new();
+    // Exclusive end index in `all_spectra` of each input, in input order.
+    let mut run_ends: Vec<usize> = Vec::with_capacity(spectrum_paths.len());
 
     let t_search_start = std::time::Instant::now();
 
@@ -1495,7 +1546,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         .with_run_ms1_capture(capture_ms1)
                         .with_product_scan_capture(capture_ms3)
                         .with_scan_context_capture(capture_context);
-                        let stats = send_chunks(reader.by_ref(), CHUNK_SIZE, remaining_cap, tx);
+                        let mut stats =
+                            send_chunks(reader.by_ref(), CHUNK_SIZE, remaining_cap, tx);
+                        add_mzml_skipped(&mut stats, &reader);
                         let scans = RunScans {
                             ms1: reader.take_run_ms1(),
                             ms3: reader.take_product_scans(),
@@ -1632,7 +1685,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 all_spectra.len(),
             )?;
         }
+        run_ends.push(all_spectra.len());
     }
+    // Inputs skipped by the bench cap contribute no spectra.
+    run_ends.resize(spectrum_paths.len(), all_spectra.len());
 
     if parse_stats.error_count > 0 {
         eprintln!(
@@ -1740,21 +1796,31 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         params.isotope_error_range.clone(),
     );
     let glyco_isotope_override = if narrowed {
+        // Only a spectrum whose envelope fitted, with its best fit inside the
+        // narrowed window, has a verified monoisotope; the rest keep the wide
+        // window they would have had without the flag.
+        let mask: Vec<bool> = mono_table
+            .iter()
+            .map(|c| {
+                c.as_ref()
+                    .is_some_and(|c| c.verified_within(mono_params.min_fit, *window.end()))
+            })
+            .collect();
         eprintln!(
             "precursor-mono: isotope-error window {}..={} -> {}..={} for the {} of {} MS2 \
-             with a fitted envelope (the others keep {}..={}; a verified monoisotope needs \
-             no +2 step, which only admits the Hex+Fuc/NeuGc composition degeneracy — pass \
-             --isotope-error to override)",
+             with a verified monoisotope (the others keep {}..={}; a verified monoisotope \
+             needs no +2 step, which only admits the Hex+Fuc/NeuGc composition degeneracy — \
+             pass --isotope-error to override)",
             params.isotope_error_range.start(),
             params.isotope_error_range.end(),
             window.start(),
             window.end(),
-            mono_stats.fitted,
+            mask.iter().filter(|&&v| v).count(),
             mono_stats.seen,
             params.isotope_error_range.start(),
             params.isotope_error_range.end()
         );
-        Some(window)
+        Some((window, mask))
     } else {
         None
     };
@@ -2090,8 +2156,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // ── QPX `.idparquet/` bundle (optional, OpenMS-compatible) ───────────────
     // Mirrors the PIN write from the SAME unified candidate/index pair. Sourced
     // here (not in the bench/TSV arms) so it is produced for every run that asks
-    // for it, including bench mode. Run identifier = the spectrum file stem so
-    // it is stable across re-runs of the same input.
+    // for it, including bench mode. Run identifier = the first spectrum file
+    // stem so it is stable across re-runs of the same input; each row's
+    // `reference_file_name` is its own input's path.
     if let Some(ref parquet_dir) = cli.output_parquet {
         let run_id = spectrum_path
             .file_stem()
@@ -2111,6 +2178,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &param.mme,
             &run_id,
             &primary_paths,
+            &run_ends,
             rescore_map.as_ref(),
             rescore_decoys.as_ref(),
         ) {
@@ -2287,6 +2355,16 @@ pub(crate) fn write_filtered_tsv(
     w.flush()
 }
 
+/// The detected-label class of a `--tmt` kit.
+fn isobaric_label_of_plex(plex: quant::Plex) -> input::IsobaricLabel {
+    match plex {
+        quant::Plex::Tmt6 | quant::Plex::Tmt10 | quant::Plex::Tmt11 => input::IsobaricLabel::Tmt,
+        quant::Plex::Tmt16 | quant::Plex::Tmt18 => input::IsobaricLabel::TmtPro,
+        quant::Plex::Itraq4 => input::IsobaricLabel::Itraq,
+        quant::Plex::Itraq8 => input::IsobaricLabel::Itraq8,
+    }
+}
+
 // ── Training pipeline ─────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2373,5 +2451,58 @@ mod retrieval_choice_tests {
         assert!(tight.report.unwrap().contains("high-resolution"));
         let wide = retrieval_choice(Tolerance::Da(0.2), None, FragmentIndexFlag::Auto);
         assert!(wide.report.unwrap().contains("low-resolution"));
+    }
+}
+
+#[cfg(test)]
+mod rescore_pin_destination_tests {
+    use super::rescore_pin_destination;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn explicit_output_pin_is_pin_and_base() {
+        let mut tmp = None;
+        let (pin, base) =
+            rescore_pin_destination(Some(Path::new("r/x.pin")), None, None, false, &mut tmp)
+                .unwrap();
+        assert_eq!(pin, PathBuf::from("r/x.pin"));
+        assert_eq!(base, PathBuf::from("r/x.pin"));
+        assert!(tmp.is_none());
+    }
+
+    #[test]
+    fn keep_pin_writes_next_to_report_base() {
+        let mut tmp = None;
+        let (pin, base) = rescore_pin_destination(
+            None,
+            Some(Path::new("r/out.tsv")),
+            Some(Path::new("r/out.idparquet")),
+            true,
+            &mut tmp,
+        )
+        .unwrap();
+        assert_eq!(pin, PathBuf::from("r/out.pin"));
+        assert_eq!(base, PathBuf::from("r/out.tsv"));
+        assert!(tmp.is_none());
+
+        let (pin, _) =
+            rescore_pin_destination(None, None, Some(Path::new("q.idparquet")), true, &mut tmp)
+                .unwrap();
+        assert_eq!(pin, PathBuf::from("q.pin"));
+        let (pin, base) = rescore_pin_destination(None, None, None, true, &mut tmp).unwrap();
+        assert_eq!(pin, PathBuf::from("andes.pin"));
+        assert_eq!(base, PathBuf::from("andes.pin"));
+        assert!(tmp.is_none());
+    }
+
+    #[test]
+    fn no_keep_pin_uses_temp_dir() {
+        let mut tmp = None;
+        let (pin, base) =
+            rescore_pin_destination(None, Some(Path::new("out.tsv")), None, false, &mut tmp)
+                .unwrap();
+        let dir = tmp.as_ref().expect("temp dir held").path().to_path_buf();
+        assert!(pin.starts_with(&dir));
+        assert_eq!(base, PathBuf::from("out.tsv"));
     }
 }

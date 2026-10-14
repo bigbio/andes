@@ -21,8 +21,8 @@ use model_train::{
     geometry::{corpus_charge_masses, derive_geometry},
     labeled::bootstrap_labels,
     store::{
-        commit_update, update_add, update_decay, update_remove, update_reweight,
-        write_all_models_with_sources_and_gbdt_pub, write_all_models_with_sources_pub,
+        commit_update, ensure_single_file_store, update_add, update_decay, update_remove,
+        update_reweight, write_all_models_with_sources_and_gbdt_pub, write_all_models_with_sources_pub,
         SourceLedger,
     },
     ModelStore,
@@ -282,12 +282,21 @@ pub(crate) fn load_spectra_for_train(
     let mut spectra = Vec::new();
     match ext_lower.as_deref() {
         Some("mzml") => {
-            let reader = MzMLReader::new(input::open_buf_maybe_gz(path)?).with_ms_level_range(2, 2);
-            for item in reader {
+            let mut reader =
+                MzMLReader::new(input::open_buf_maybe_gz(path)?).with_ms_level_range(2, 2);
+            for item in reader.by_ref() {
                 match item {
                     Ok(s) => spectra.push(s),
                     Err(e) => eprintln!("WARN: mzML parse: {e}"),
                 }
+            }
+            if reader.skipped_count() > 0 {
+                eprintln!(
+                    "WARN: {} spectra of {} failed to parse and were skipped (first: {})",
+                    reader.skipped_count(),
+                    path.display(),
+                    reader.skipped_errors().join("; ")
+                );
             }
         }
         // Native Thermo `.raw` — MS2 only, same Spectrum stream as the search
@@ -710,6 +719,7 @@ pub(crate) fn run_train_from_search(
         date: date_str,
         weight: 1.0,
         train_fdr: args.train_fdr as f32,
+        decay_half_life_days: None,
         instrument: args.instrument.clone(),
         experiment_class: args.protocol.clone(),
     };
@@ -1224,6 +1234,7 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
         date: format_today_iso8601(),
         weight: 1.0,
         train_fdr: 1.0, // sentinel: input is pre-labeled, no q-value filtering here
+        decay_half_life_days: None,
         instrument: trained_param.data_type.instrument.name().to_string(),
         experiment_class: trained_param.data_type.protocol.name().to_string(),
     };
@@ -1347,6 +1358,8 @@ pub(crate) fn run_train_update(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let store_path = &args.out_store;
     let cfg = EstimatorConfig::default();
+    // Fail before the seed search / acceptance gate, not at commit time.
+    ensure_single_file_store(store_path)?;
 
     // ── Dispatch to the right update operation ────────────────────────────────
     let (candidate, new_sources) = if args.add {
@@ -1427,6 +1440,7 @@ pub(crate) fn run_train_update(
             date: date_str,
             weight: 1.0,
             train_fdr: args.train_fdr as f32,
+            decay_half_life_days: None,
             instrument: args.instrument.clone(),
             experiment_class: args.protocol.clone(),
         };

@@ -25,9 +25,11 @@ pub(crate) fn run_glyco(
     // Mono* columns). `None` keeps the PIN byte-identical.
     mono: Option<&[Option<search::precursor_mono::MonoCorrection>]>,
     // The isotope-error window to search instead of `params.isotope_error_range`
-    // (`Some(0..=1)` once `--precursor-mono auto` corrected precursors; see
-    // `mono::coupled_isotope_window`). `None` keeps the params' window.
-    isotope_error_override: Option<std::ops::RangeInclusive<i8>>,
+    // (`0..=1` once `--precursor-mono auto` corrected precursors; see
+    // `mono::coupled_isotope_window`), with one flag per spectrum of `spectra`
+    // marking those with a verified monoisotope, the only ones that take it.
+    // `None` keeps the params' window everywhere.
+    isotope_error_override: Option<(std::ops::RangeInclusive<i8>, Vec<bool>)>,
     t_total: std::time::Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let t_glyco = std::time::Instant::now();
@@ -133,9 +135,8 @@ pub(crate) fn run_glyco(
         scan_filter_path: cli.glyco_scans.clone(),
         isotope_error_override_mask: isotope_error_override
             .as_ref()
-            .and(mono)
-            .map(|table| table.iter().map(Option::is_some).collect()),
-        isotope_error_override,
+            .map(|(_, mask)| mask.clone()),
+        isotope_error_override: isotope_error_override.map(|(window, _)| window),
         // Peptide-first RETRIEVAL window. High-resolution MS2 defaults to the
         // glyco ppm tolerance; low-resolution keeps the rank model's 0.5 Da.
         // Measured 2026-09-02 (five seeds): on high-res data the 0.5 Da

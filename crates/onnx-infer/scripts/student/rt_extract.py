@@ -30,7 +30,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mod_composition import UNIMOD  # noqa: E402
 
 def split_of(seq: str) -> str:
-    h = int(hashlib.md5(seq.encode()).hexdigest()[:8], 16) % 100
+    """train / val / test by an md5 of the stripped sequence, I as L (same rule as ms2_common)."""
+    h = int(hashlib.md5(seq.replace("I", "L").encode()).hexdigest()[:8], 16) % 100
     return "test" if h < 5 else "val" if h < 10 else "train"
 
 

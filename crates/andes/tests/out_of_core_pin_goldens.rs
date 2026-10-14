@@ -88,6 +88,41 @@
 //! rows) it lacks exactly main's two dropped Pass-2 rows (scans 60160 and
 //! 60179); every other row is identical with SpecId excluded.
 //!
+//! REGENERATED 2026-10-14 (E. coli digests) when the MGF reader began taking
+//! the scan number from the TITLE (`... scan=N`) instead of reporting 0. Same
+//! row counts; with ScanNr set back to 0 and SpecId's scan field back to `_0_`,
+//! each new PIN digests to its previous golden exactly, so only those two
+//! fields changed.
+//!
+//! REGENERATED 2026-10-14 (E. coli digests) when the PIN charge one-hot columns
+//! began spanning every charge a PSM carries, not only the `--charge` range.
+//! Against the PIN without that change, for the same command line: same rows and
+//! SpecIds, every non-charge field identical; the header gains `charge6`, set
+//! on the rows of spectra with a declared 6+ precursor, which previously had an
+//! all-zero charge vector. The slice goldens carry no out-of-range charge and
+//! are unchanged.
+//!
+//! | case | rows | rows moved to `charge6` |
+//! |---|---|---|
+//! | E. coli default mods (and precursor-cal auto) | 74,442 | 37 |
+//! | E. coli fixed mods only | 75,750 | 35 |
+//! | E. coli one variable mod | 74,998 | 40 |
+//!
+//! The E. coli digests above carry both of these changes together (TITLE scan
+//! numbers and the widened charge columns); row counts are unchanged.
+//!
+//! REGENERATED 2026-10-14 for the `--chimeric` slice when Pass 2 began reporting
+//! co-isolated envelopes at their monoisotopic peak, ranking secondaries over
+//! distinct peptidoforms and filling their features on the primaries' scales.
+//! Pass 1 is untouched: the same command line without `--chimeric` writes a
+//! byte-identical PIN before and after. Against the previous golden (1,715 rows)
+//! the new one has 1,716: all 1,449 primary rows keep their peptide, label and
+//! charge; the Pass-2 rows go from 266 to 267, 243 old ones replaced by 244 new
+//! ones (mostly secondaries searched at M rather than M+1). DeltaRT, AbsDeltaRT and
+//! DeltaRTNorm move on every row because the RT fit includes the secondary rows; RawScore, RankScore, RankScoreFloat,
+//! RawScoreCal, CandidateRankEntropy and ListwiseScoreGap move on ~20 matched
+//! rows. The E. coli and `--refine` goldens are unchanged.
+//!
 //! To regenerate after an intentional change, run the case's command line (see
 //! `run`), then either digest the PIN with `identity_digest` (E. coli) or write
 //! its header and sorted rows, gzipped, over the case's golden PIN (slices).
@@ -267,14 +302,14 @@ fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
 /// One E. coli case: (rows, `identity_digest` FNV-1a 64, calibration outcome line).
 type Golden = (usize, u64, Option<&'static str>);
 
-const ECOLI_DEFAULT_MODS: Golden = (74_442, 0x8d7e_e17f_0589_776a, None);
-const ECOLI_FIXED_MODS_ONLY: Golden = (75_750, 0xb351_f0e9_b195_ade3, None);
-const ECOLI_ONE_VARIABLE_MOD: Golden = (74_998, 0xd0a6_5c10_f1d5_29f3, None);
+const ECOLI_DEFAULT_MODS: Golden = (74_442, 0x3f9e_c3db_6433_7c0c, None);
+const ECOLI_FIXED_MODS_ONLY: Golden = (75_750, 0xb52f_79d9_9428_a435, None);
+const ECOLI_ONE_VARIABLE_MOD: Golden = (74_998, 0xb104_6966_331a_b78c, None);
 /// The pre-pass scores but the sample is too small to calibrate, so the PIN
 /// equals the calibration-off one.
 const ECOLI_PRECURSOR_CAL_AUTO: Golden = (
     74_442,
-    0x8d7e_e17f_0589_776a,
+    0x3f9e_c3db_6433_7c0c,
     Some("Precursor mass calibration skipped (insufficient confident PSMs: 492 with PSMs, 55 below RawScore floor, 0 failed |residual|>50ppm"),
 );
 

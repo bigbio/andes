@@ -150,6 +150,18 @@
 //! precursor-cal pre-pass outcome line is unchanged (492 with PSMs, 55 below
 //! the RawScore floor).
 //!
+//! COMBINED 2026-10-14 (review branch: input, output, search and
+//! candidate-generation changes together). E. coli: the PINs equal the
+//! candidate-generation branch's (whose binary reproduces its digests) except
+//! `ScanNr`/`SpecId` on every row (MGF TITLE scan numbers) and the `charge6`
+//! column, whose 35-41 out-of-range-charge rows per case move from no charge
+//! bit to `charge6`; same row counts, no top-row change. `--refine` slice:
+//! unchanged from the candidate-generation golden. `--chimeric` slice: Pass 1
+//! (the search without `--chimeric`, 1,451 rows) is identical to the
+//! candidate-generation branch in every column; of the 1,718 rows, 12 are in
+//! neither parent golden and 1 in both is dropped, all Pass-2 secondaries
+//! (the search branch's Pass 2 choosing among the new candidate set).
+//!
 //! To regenerate after an intentional change, run the case's command line (see
 //! `run`), then either digest the PIN with `identity_digest` (E. coli) or write
 //! its header and sorted rows, gzipped, over the case's golden PIN (slices).
@@ -329,14 +341,14 @@ fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
 /// One E. coli case: (rows, `identity_digest` FNV-1a 64, calibration outcome line).
 type Golden = (usize, u64, Option<&'static str>);
 
-const ECOLI_DEFAULT_MODS: Golden = (75_638, 0x21bf_e101_3492_e5d1, None);
-const ECOLI_FIXED_MODS_ONLY: Golden = (77_975, 0x8c8a_554f_a7ac_6d9c, None);
-const ECOLI_ONE_VARIABLE_MOD: Golden = (76_087, 0xeebe_f080_9369_9e90, None);
+const ECOLI_DEFAULT_MODS: Golden = (75_638, 0xa508_c28f_8b13_ac7e, None);
+const ECOLI_FIXED_MODS_ONLY: Golden = (77_975, 0x084b_5843_0417_6ac5, None);
+const ECOLI_ONE_VARIABLE_MOD: Golden = (76_087, 0xafb4_13f0_2591_c18b, None);
 /// The pre-pass scores but the sample is too small to calibrate, so the PIN
 /// equals the calibration-off one.
 const ECOLI_PRECURSOR_CAL_AUTO: Golden = (
     75_638,
-    0x21bf_e101_3492_e5d1,
+    0xa508_c28f_8b13_ac7e,
     Some("Precursor mass calibration skipped (insufficient confident PSMs: 492 with PSMs, 55 below RawScore floor, 0 failed |residual|>50ppm"),
 );
 

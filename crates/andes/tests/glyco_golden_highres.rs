@@ -64,6 +64,13 @@
 //!     --glyco-glycan-gdb test-fixtures/glyco_fixture.gdb \
 //!     --output-pin <tmp>/out.pin
 //!   cp <tmp>/out.glyco.pin test-fixtures/parity/goldens/glyco_highres.pin
+//!
+//! COMBINED 2026-10-14 (review branch: glyco and candidate-generation changes
+//! together). Against each parent golden the only differences are the other
+//! branch's changes: the boundary-sequon `@N18` tag on 2 peptides and the
+//! candidate-pool columns (`RawScore`, `CandidateRankEntropy`,
+//! `ListwiseScoreGap`, `TailorScore`); 120 rows, SpecIds and proteins
+//! unchanged.
 
 use std::path::PathBuf;
 use std::process::Command;

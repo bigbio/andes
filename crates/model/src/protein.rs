@@ -60,6 +60,16 @@ impl Protein {
     pub fn chain_ends(&self) -> Option<ChainEnds> {
         self.annotation.as_deref().and_then(|a| a.chain)
     }
+
+    /// The origin of an entry a UniProt XML database added, `None` otherwise.
+    pub fn origin(&self) -> Option<&EntryOrigin> {
+        self.annotation.as_deref().and_then(|a| a.origin.as_ref())
+    }
+
+    /// The entry's kind; `Reference` for any protein without an origin.
+    pub fn entry_kind(&self) -> EntryKind {
+        self.origin().map_or(EntryKind::Reference, |o| o.kind)
+    }
 }
 
 /// Tolerance (Da) within which an annotated site's mass and a modification's
@@ -85,6 +95,9 @@ pub struct ProteinAnnotation {
     /// only the candidate peptides at its new termini are enumerated, which
     /// the precursor does not have as protein termini.
     pub chain: Option<ChainEnds>,
+    /// Set on the entries a UniProt XML database adds (isoforms, variants,
+    /// chains).
+    pub origin: Option<EntryOrigin>,
 }
 
 impl ProteinAnnotation {
@@ -104,6 +117,7 @@ impl ProteinAnnotation {
             mod_sites,
             variant: variant.into_iter().collect(),
             chain: None,
+            origin: None,
         }
     }
 
@@ -114,11 +128,51 @@ impl ProteinAnnotation {
         self
     }
 
+    /// This annotation for an entry of origin `origin`.
+    pub fn with_origin(mut self, origin: Option<EntryOrigin>) -> Self {
+        self.origin = origin;
+        self
+    }
+
     /// This annotation for a mature-chain entry with new termini `chain`.
     pub fn with_chain(mut self, chain: Option<ChainEnds>) -> Self {
         self.chain = chain;
         self
     }
+}
+
+/// What kind of database entry a protein is. Every FASTA protein, and every
+/// UniProt entry's displayed sequence, is `Reference`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EntryKind {
+    #[default]
+    Reference,
+    Isoform,
+    Variant,
+    Chain,
+}
+
+impl EntryKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            EntryKind::Reference => "reference",
+            EntryKind::Isoform => "isoform",
+            EntryKind::Variant => "variant",
+            EntryKind::Chain => "chain",
+        }
+    }
+}
+
+/// Where a non-reference entry comes from: its kind, the accession of the
+/// family it belongs to (`P04637`), the feature that made it (`VAR_005851_D7H`,
+/// `P04637-2`, `PRO_0000001058`) and, for a variant, the mass of its replacement
+/// residues minus the mass of the residues they replace.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntryOrigin {
+    pub kind: EntryKind,
+    pub family: Arc<str>,
+    pub feature: Arc<str>,
+    pub variant_delta_da: f64,
 }
 
 /// Which ends of a mature-chain entry are new termini, i.e. not termini of
@@ -375,6 +429,33 @@ impl ProteinDb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entry_kind_defaults_to_reference() {
+        let plain = Protein {
+            accession: "P1".into(),
+            description: String::new(),
+            sequence: b"PEPTIDEK".to_vec(),
+            annotation: None,
+        };
+        assert_eq!(plain.entry_kind(), EntryKind::Reference);
+        assert!(plain.origin().is_none());
+        let origin = EntryOrigin {
+            kind: EntryKind::Variant,
+            family: Arc::from("P04637"),
+            feature: Arc::from("VAR_005851_D7H"),
+            variant_delta_da: 0.984016,
+        };
+        let var = Protein {
+            annotation: Some(Arc::new(
+                ProteinAnnotation::new(Vec::new(), None).with_origin(Some(origin.clone())),
+            )),
+            ..plain.clone()
+        };
+        assert_eq!(var.entry_kind(), EntryKind::Variant);
+        assert_eq!(var.origin(), Some(&origin));
+        assert_eq!(EntryKind::Chain.name(), "chain");
+    }
 
     fn make_protein() -> Protein {
         Protein {

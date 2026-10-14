@@ -88,6 +88,34 @@
 //! rows) it lacks exactly main's two dropped Pass-2 rows (scans 60160 and
 //! 60179); every other row is identical with SpecId excluded.
 //!
+//! REGENERATED 2026-10-14 for three candidate-generation and scoring changes:
+//! the N-terminal Met-cleaved walk emits only the peptides starting at the
+//! post-Met residue (main enumerated every other span of an M-initial protein
+//! twice); a residue's side-chain mods stack with its terminal mods (protein
+//! N-terminal Acetyl with Ox-M, e.g. `_.M+58.00548IVLPRR`); and `find_partition`
+//! keeps the requested charge and segment below a charge's lowest mass tier
+//! (main took the previous charge's or segment's partition). Every golden was
+//! recorded from this branch's binary with the test's command lines; main's
+//! binary reproduces the previous goldens byte for byte. Against main's PIN,
+//! rows keyed by spectrum, charge, peptide and label; "top row" is the
+//! highest-RawScore row of a spectrum and charge:
+//!
+//! | case | rows main → branch | only main / only branch | top row changed |
+//! |---|---|---|---|
+//! | E. coli default mods (and precursor-cal auto) | 74,442 → 75,651 | 7,206 / 8,415 | 553 of 5,574 |
+//! | E. coli fixed mods only | 75,750 → 77,999 | 7,294 / 9,543 | 542 of 5,562 |
+//! | E. coli one variable mod | 74,998 → 76,112 | 7,195 / 8,309 | 539 of 5,568 |
+//! | `--chimeric` slice | 1,715 → 1,717 | 131 / 133 | 19 of 250 |
+//! | `--refine` slice | 1,595 → 1,612 | 138 / 155 | 13 of 150 |
+//!
+//! On shared rows the columns that move are the partition-dependent scores
+//! (`RawScore`, `RawScoreCal`, `TailorScore`, and the features derived from
+//! them: `CandidateRankEntropy`, `ListwiseScoreGap`, `DeltaRankScore`,
+//! `RankScoreFloat`, `EdgeScore`; on the slices also the `DeltaRT` columns,
+//! whose RT fit follows the top rows) and `Proteins`, which no longer repeats an
+//! M-initial protein's accession. The precursor-cal pre-pass outcome line is
+//! unchanged (492 with PSMs, 55 below the RawScore floor).
+//!
 //! To regenerate after an intentional change, run the case's command line (see
 //! `run`), then either digest the PIN with `identity_digest` (E. coli) or write
 //! its header and sorted rows, gzipped, over the case's golden PIN (slices).
@@ -267,14 +295,14 @@ fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
 /// One E. coli case: (rows, `identity_digest` FNV-1a 64, calibration outcome line).
 type Golden = (usize, u64, Option<&'static str>);
 
-const ECOLI_DEFAULT_MODS: Golden = (74_442, 0x8d7e_e17f_0589_776a, None);
-const ECOLI_FIXED_MODS_ONLY: Golden = (75_750, 0xb351_f0e9_b195_ade3, None);
-const ECOLI_ONE_VARIABLE_MOD: Golden = (74_998, 0xd0a6_5c10_f1d5_29f3, None);
+const ECOLI_DEFAULT_MODS: Golden = (75_651, 0xa2cc_2b00_4ccd_18ba, None);
+const ECOLI_FIXED_MODS_ONLY: Golden = (77_999, 0xe927_8bc3_44ef_258a, None);
+const ECOLI_ONE_VARIABLE_MOD: Golden = (76_112, 0x7663_405e_9429_6633, None);
 /// The pre-pass scores but the sample is too small to calibrate, so the PIN
 /// equals the calibration-off one.
 const ECOLI_PRECURSOR_CAL_AUTO: Golden = (
-    74_442,
-    0x8d7e_e17f_0589_776a,
+    75_651,
+    0xa2cc_2b00_4ccd_18ba,
     Some("Precursor mass calibration skipped (insufficient confident PSMs: 492 with PSMs, 55 below RawScore floor, 0 failed |residual|>50ppm"),
 );
 

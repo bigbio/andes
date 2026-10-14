@@ -30,7 +30,6 @@ fn repo_root() -> std::path::PathBuf {
         .to_path_buf()
 }
 
-
 #[test]
 fn standard_pin_constant_column_set_is_pinned() {
     let root = repo_root();
@@ -89,6 +88,13 @@ fn standard_pin_constant_column_set_is_pinned() {
         "DeltaRT",
         "AbsDeltaRT",
         "DeltaRTNorm",
+        // Provenance: constant on a FASTA search.
+        "IsVariant",
+        "IsIsoform",
+        "IsChain",
+        "RefCompetitor",
+        "DeltaRefScore",
+        "IsotopeMimic",
     ]
     .into_iter()
     .collect();

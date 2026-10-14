@@ -2340,6 +2340,11 @@ pub(crate) fn compute_psm_features_with_edge(
         delta_rt_norm: 0.0,
         ref_competitor: 0,
         ref_best_raw: 0.0,
+        is_variant: 0,
+        is_isoform: 0,
+        is_chain: 0,
+        delta_ref_score: 0.0,
+        isotope_mimic: 0,
         predicted_rt_min: 0.0,
         isobaric_rt_margin: 0.0, // glyco-only; set by populate_glyco_rt_features
     }

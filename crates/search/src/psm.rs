@@ -249,6 +249,18 @@ pub struct PsmFeatures {
     /// The best rounded RawScore among those Reference candidates; 0.0 when
     /// `ref_competitor` is 0.
     pub ref_best_raw: f32,
+    /// 1 when every protein of the row's peptide is an entry of that kind (a
+    /// peptide shared with a Reference entry is Reference: all three 0). Set
+    /// by `output::populate_provenance_features`.
+    pub is_variant: u32,
+    pub is_isoform: u32,
+    pub is_chain: u32,
+    /// For a non-reference row with `ref_competitor` = 1: its rounded RawScore
+    /// minus `ref_best_raw`. 0.0 otherwise.
+    pub delta_ref_score: f32,
+    /// 1 when the precursor fits better if the row's isotope-like deltas
+    /// (variable mods, and a variant's substitution) are whole isotope steps.
+    pub isotope_mimic: u32,
     /// Calibrated predicted retention time in minutes for this PSM's peptide, or
     /// 0.0 when RT is unavailable / calibration failed. Not a PIN feature column;
     /// surfaced only into the QPX `.idparquet` `predicted_rt` field.

@@ -2012,6 +2012,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `docs/plans/glyco/50-roadmap/rt-prediction-design.md` (Commit 1).
     output::populate_rt_features(&spectra, &mut queues, &pin_candidates);
 
+    // Provenance (additive): entry class, gap to the best Reference candidate,
+    // isotope-mimic flag. All 0 on a FASTA search except IsotopeMimic with
+    // isotope-like variable mods.
+    output::populate_provenance_features(&mut queues, &pin_candidates, &pin_index);
+
     output::write_pin(
         &output_pin_path,
         &spectra,

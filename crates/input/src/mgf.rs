@@ -10,6 +10,8 @@ pub struct MgfReader<R: BufRead> {
     line_no: usize,
     /// Reusable line buffer to avoid per-line allocations.
     buf: String,
+    /// Number of spectra parsed so far.
+    spectrum_index: usize,
 }
 
 impl<R: BufRead> MgfReader<R> {
@@ -18,6 +20,7 @@ impl<R: BufRead> MgfReader<R> {
             reader,
             line_no: 0,
             buf: String::new(),
+            spectrum_index: 0,
         }
     }
 
@@ -64,6 +67,7 @@ impl<R: BufRead> Iterator for MgfReader<R> {
         }
 
         let begin_line_no = self.line_no;
+        self.spectrum_index += 1;
 
         let mut title = String::new();
         let mut precursor_mz: Option<f64> = None;
@@ -106,7 +110,9 @@ impl<R: BufRead> Iterator for MgfReader<R> {
                         }
                     },
                     "CHARGE" => match parse_charge(&value) {
-                        Ok(z) => precursor_charge = Some(z),
+                        // `CHARGE=0` means "unknown", as in mzML: leave it absent
+                        // so the search enumerates the charge range.
+                        Ok(z) => precursor_charge = (z != 0).then_some(z),
                         Err(()) => {
                             return Some(Err(MgfParseError::BadCharge {
                                 line: self.line_no,
@@ -151,6 +157,13 @@ impl<R: BufRead> Iterator for MgfReader<R> {
 
         peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
+        // `SCANS=` wins; msconvert omits it and puts the scan in the TITLE
+        // instead. Without either, the 1-based position in the file keeps
+        // the PIN `ScanNr` unique.
+        let scan = scan
+            .or_else(|| scan_from_title(&title))
+            .or_else(|| i32::try_from(self.spectrum_index).ok());
+
         Some(Ok(Spectrum {
             title,
             precursor_mz,
@@ -185,6 +198,33 @@ fn parse_pepmass(value: &str) -> Result<(f64, Option<f32>), ()> {
         .transpose()
         .map_err(|_| ())?;
     Ok((mz, intensity))
+}
+
+/// Scan number carried in an MGF `TITLE`: a native-id `scan=N` token
+/// (`... scan=1234`, `NativeID:"controllerType=0 controllerNumber=1
+/// scan=1234"`), or the TPP/msconvert `name.START.END.CHARGE` form.
+fn scan_from_title(title: &str) -> Option<i32> {
+    if let Some(pos) = title.find("scan=") {
+        let digits: String = title[pos + "scan=".len()..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        if let Ok(scan) = digits.parse::<i32>() {
+            return Some(scan);
+        }
+    }
+    // `name.START.END.CHARGE`, possibly followed by a space and free text.
+    let head = title.split_whitespace().next()?;
+    let mut fields = head.rsplit('.');
+    let charge = fields.next()?;
+    let end = fields.next()?;
+    let start = fields.next()?;
+    fields.next()?;
+    if charge.is_empty() || !charge.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let (start, end) = (start.parse::<i32>().ok()?, end.parse::<i32>().ok()?);
+    (start > 0 && end >= start).then_some(start)
 }
 
 fn parse_charge(value: &str) -> Result<i32, ()> {
@@ -304,6 +344,50 @@ mod tests {
         assert_eq!(parse_charge("2+ and 3+").unwrap(), 2);
         assert_eq!(parse_charge("2+,3+").unwrap(), 2);
         assert_eq!(parse_charge("3 and 4").unwrap(), 3);
+    }
+
+    fn read_all(mgf: &str) -> Vec<Spectrum> {
+        MgfReader::new(std::io::Cursor::new(mgf.as_bytes()))
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn charge_zero_is_unknown() {
+        let s = read_all("BEGIN IONS\nPEPMASS=500.5\nCHARGE=0\n100 1\nEND IONS\n");
+        assert_eq!(s[0].precursor_charge, None);
+        let s = read_all("BEGIN IONS\nPEPMASS=500.5\nCHARGE=2+\n100 1\nEND IONS\n");
+        assert_eq!(s[0].precursor_charge, Some(2));
+    }
+
+    #[test]
+    fn scan_from_title_forms() {
+        assert_eq!(scan_from_title("run01.1234.1234.2"), Some(1234));
+        assert_eq!(
+            scan_from_title("run01.1234.1234.2 File:\"run01.raw\", NativeID:\"x\""),
+            Some(1234)
+        );
+        assert_eq!(
+            scan_from_title(
+                "run01.1234.1234.2 File:\"run01.raw\", NativeID:\"controllerType=0 controllerNumber=1 scan=1234\""
+            ),
+            Some(1234)
+        );
+        assert_eq!(scan_from_title("controllerType=0 controllerNumber=1 scan=77"), Some(77));
+        assert_eq!(scan_from_title("my.sample.v2.3"), None);
+        assert_eq!(scan_from_title("spectrum 5"), None);
+        assert_eq!(scan_from_title(""), None);
+    }
+
+    #[test]
+    fn scan_number_precedence() {
+        // SCANS= wins over the title; the title wins over the file position;
+        // the 1-based file position keeps ScanNr unique otherwise.
+        let mgf = "BEGIN IONS\nTITLE=a.10.10.2\nSCANS=99\nPEPMASS=500\n100 1\nEND IONS\n\
+                   BEGIN IONS\nTITLE=a.20.20.2\nPEPMASS=500\n100 1\nEND IONS\n\
+                   BEGIN IONS\nTITLE=no scan here\nPEPMASS=500\n100 1\nEND IONS\n";
+        let scans: Vec<_> = read_all(mgf).iter().map(|s| s.scan).collect();
+        assert_eq!(scans, vec![Some(99), Some(20), Some(3)]);
     }
 
     #[test]

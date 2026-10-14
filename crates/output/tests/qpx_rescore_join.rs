@@ -192,6 +192,7 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         &Tolerance::Da(0.5),
         "test_run",
         &["test.mgf".to_string()],
+        &[spectra.len()],
         Some(&map),
         None,
     )
@@ -234,6 +235,7 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         &Tolerance::Da(0.5),
         "test_run",
         &["test.mgf".to_string()],
+        &[spectra.len()],
         None,
         None,
     )
@@ -299,6 +301,7 @@ fn batched_psms_preserve_global_indices_order_and_rescore_join() {
         &Tolerance::Da(0.5),
         "test",
         &["test.mgf".into()],
+        &[repeated_spectra.len()],
         Some(&map),
         None,
     )
@@ -329,6 +332,149 @@ fn batched_psms_preserve_global_indices_order_and_rescore_join() {
         }
     }
     assert_eq!(row, ids.len());
+}
+
+#[test]
+fn multi_input_rows_carry_their_own_reference_file() {
+    use arrow::array::{Int32Array, StringArray};
+    let (spectra, queues, candidates, idx, params) = run_bsa_search();
+    let seed = queues.iter().position(|q| !q.is_empty()).unwrap();
+    // 1025 spectra span two 1024-spectrum batches; the first input ends inside
+    // the first batch.
+    let repeated_spectra: Vec<_> = (0..1025)
+        .map(|i| {
+            let mut s = spectra[seed].clone();
+            s.scan = Some(i + 1);
+            s
+        })
+        .collect();
+    let repeated_queues = vec![queues[seed].clone(); repeated_spectra.len()];
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("two.idparquet");
+    let paths = ["a.mzML".to_string(), "b.mzML".to_string()];
+    output::write_qpx(
+        &out,
+        &repeated_spectra,
+        &repeated_queues,
+        &candidates,
+        &params,
+        &idx,
+        &Tolerance::Da(0.5),
+        "test",
+        &paths,
+        &[1000, 1025],
+        None,
+        None,
+    )
+    .unwrap();
+    let reader =
+        ParquetRecordBatchReaderBuilder::try_new(File::open(out.join("psms.parquet")).unwrap())
+            .unwrap()
+            .build()
+            .unwrap();
+    let (mut a, mut b) = (0usize, 0usize);
+    for batch in reader {
+        let batch = batch.unwrap();
+        let scans = batch
+            .column_by_name("scan")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        let files = batch
+            .column_by_name("reference_file_name")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            let expected = if scans.value(i) <= 1000 {
+                a += 1;
+                "a.mzML"
+            } else {
+                b += 1;
+                "b.mzML"
+            };
+            assert_eq!(files.value(i), expected, "scan {}", scans.value(i));
+        }
+    }
+    assert!(a > 0 && b > 0, "rows from both inputs: a={a} b={b}");
+
+    // A partition that does not cover the spectra is rejected.
+    let err = output::write_qpx(
+        &tmp.path().join("bad.idparquet"),
+        &repeated_spectra,
+        &repeated_queues,
+        &candidates,
+        &params,
+        &idx,
+        &Tolerance::Da(0.5),
+        "test",
+        &paths,
+        &[1000, 1024],
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn dropped_peaks_write_null_peak_lists() {
+    let (spectra, queues, candidates, idx, params) = run_bsa_search();
+    let null_counts = |spectra: &[model::spectrum::Spectrum], name: &str| {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join(format!("{name}.idparquet"));
+        output::write_qpx(
+            &out,
+            spectra,
+            &queues,
+            &candidates,
+            &params,
+            &idx,
+            &Tolerance::Da(0.5),
+            "test",
+            &["test.mgf".to_string()],
+            &[spectra.len()],
+            None,
+            None,
+        )
+        .unwrap();
+        let reader =
+            ParquetRecordBatchReaderBuilder::try_new(File::open(out.join("psms.parquet")).unwrap())
+                .unwrap()
+                .build()
+                .unwrap();
+        let (mut rows, mut mz_null, mut int_null) = (0, 0, 0);
+        for batch in reader {
+            let batch = batch.unwrap();
+            rows += batch.num_rows();
+            mz_null += batch.column_by_name("mz_array").unwrap().null_count();
+            int_null += batch
+                .column_by_name("intensity_array")
+                .unwrap()
+                .null_count();
+        }
+        (rows, mz_null, int_null)
+    };
+    let (rows, mz_null, int_null) = null_counts(&spectra, "kept");
+    assert!(rows > 0);
+    assert_eq!((mz_null, int_null), (0, 0), "peaks present → lists present");
+
+    let dropped: Vec<_> = spectra
+        .iter()
+        .cloned()
+        .map(|mut s| {
+            s.peaks = Vec::new();
+            s
+        })
+        .collect();
+    let (rows, mz_null, int_null) = null_counts(&dropped, "dropped");
+    assert_eq!(
+        (mz_null, int_null),
+        (rows, rows),
+        "peaks dropped → null lists"
+    );
 }
 
 /// Percolator `-Y` result for a PIN: per (ScanNr, ExpMass) group only the
@@ -435,6 +581,7 @@ fn qpx_join_accepts_targets_removed_by_target_decoy_competition() {
             &Tolerance::Da(0.5),
             "test_run",
             &["test.mgf".to_string()],
+            &[spectra.len()],
             Some(&targets),
             decoys,
         )

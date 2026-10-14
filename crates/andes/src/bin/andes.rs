@@ -137,15 +137,6 @@ fn main() -> ExitCode {
     let matches = <TopCli as clap::CommandFactory>::command().get_matches();
     let mut top =
         <TopCli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
-    // Record whether the user typed --max-missed-cleavages. `--glyco` raises the
-    // floor to 3, which costs real memory (measured +4.4 GB on a 20k-protein human
-    // FASTA), so an explicit lower value must be allowed to win. The default (1) is
-    // itself a plausible explicit value, so comparing against it cannot distinguish
-    // the two cases — only the ValueSource can.
-    let _ = EXPLICIT_MISSED_CLEAVAGES.set(matches!(
-        matches.value_source("max_missed_cleavages"),
-        Some(clap::parser::ValueSource::CommandLine)
-    ));
     let result = match top.command.take() {
         Some(Command::Train(args)) => run_train(*args),
         Some(Command::TrainFromSearch(args)) => run_train_from_search(*args),
@@ -154,14 +145,26 @@ fn main() -> ExitCode {
         Some(Command::Quant(cmd)) => quant_cmd::run_quant_command(cmd),
         None => {
             // --config: fill any parameter the user did not type on the CLI.
+            let mut cfg_missed_cleavages = false;
             if let Some(cfg_path) = top.search.config.clone() {
-                if let Err(e) = config::RunConfig::load(&cfg_path)
-                    .and_then(|c| config::apply(c, &mut top.search, &matches))
-                {
+                if let Err(e) = config::RunConfig::load(&cfg_path).and_then(|c| {
+                    cfg_missed_cleavages = c.search.max_missed_cleavages.is_some();
+                    config::apply(c, &mut top.search, &matches)
+                }) {
                     eprintln!("error: {e}");
                     return ExitCode::from(2);
                 }
             }
+            // Record whether the user set max missed cleavages, on the CLI or in
+            // the --config file. `--glyco` raises the floor to 3, which costs real
+            // memory (measured +4.4 GB on a 20k-protein human FASTA), so an
+            // explicit lower value must be allowed to win. The default (1) is
+            // itself a plausible explicit value, so comparing against it cannot
+            // distinguish the cases — only the ValueSource and the config can.
+            let _ = EXPLICIT_MISSED_CLEAVAGES.set(missed_cleavages_explicit(
+                matches.value_source("max_missed_cleavages"),
+                cfg_missed_cleavages,
+            ));
             // Validate required search args that are Option<> at the clap level.
             let search = top.search;
             if search.spectrum.is_empty() {
@@ -175,8 +178,8 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            // --output-pin is required UNLESS --rescore is set: rescore can route
-            // the search through a temporary PIN (deleted afterwards when
+            // --output-pin is required UNLESS rescoring is set: rescore derives
+            // the PIN path from the report base (or a temporary PIN under
             // --keep-pin false), so a PIN path is not mandatory in that mode.
             if search.output_pin.is_none() && !search.rescore && !search.rescore_native {
                 eprintln!("error: --output-pin is required for search (or use --rescore)");
@@ -242,6 +245,39 @@ fn arg_present(flag: &str) -> bool {
     std::env::args().any(|a| a == flag || a.starts_with(&format!("{flag}=")))
 }
 
-/// Set in `main` from clap's `ValueSource`: did the user type
-/// `--max-missed-cleavages` themselves? See the glyco floor below.
+/// Set in `main`: did the user set max missed cleavages themselves, with
+/// `--max-missed-cleavages` or `search.max_missed_cleavages` in `--config`?
+/// See the glyco floor in `search::run`.
 static EXPLICIT_MISSED_CLEAVAGES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// A typed CLI value or a config-file value counts as explicit; clap's
+/// default does not.
+fn missed_cleavages_explicit(
+    cli_source: Option<clap::parser::ValueSource>,
+    in_config: bool,
+) -> bool {
+    in_config || matches!(cli_source, Some(clap::parser::ValueSource::CommandLine))
+}
+
+#[cfg(test)]
+mod missed_cleavages_explicit_tests {
+    use super::missed_cleavages_explicit;
+    use clap::parser::ValueSource;
+
+    #[test]
+    fn config_value_is_explicit() {
+        assert!(missed_cleavages_explicit(
+            Some(ValueSource::DefaultValue),
+            true
+        ));
+        assert!(missed_cleavages_explicit(
+            Some(ValueSource::CommandLine),
+            false
+        ));
+        assert!(!missed_cleavages_explicit(
+            Some(ValueSource::DefaultValue),
+            false
+        ));
+        assert!(!missed_cleavages_explicit(None, false));
+    }
+}

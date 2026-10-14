@@ -270,15 +270,18 @@ fn native_args(pin: &Path, out: &ResultPaths, extra_args: &[String]) -> Vec<Stri
 /// Build the full `docker run …` argument vector. The PIN's directory is bind
 /// mounted read-only at `/pin` and the output dir at `/out`, exactly as the
 /// reference script does, so percolator reads/writes in place. Result paths are
-/// rewritten to their `/out` equivalents inside the container.
+/// rewritten to their `/out` equivalents inside the container. Both mount
+/// sources are made absolute: docker reads a relative or empty `-v` source as
+/// a named volume (or rejects it), not as a host directory.
 fn docker_args(
     image: &str,
     pin: &Path,
     out_dir: &Path,
     out: &ResultPaths,
     extra_args: &[String],
-) -> Vec<String> {
-    let pin_dir = pin.parent().unwrap_or_else(|| Path::new("."));
+) -> std::io::Result<Vec<String>> {
+    let pin_dir = host_dir(pin.parent().unwrap_or_else(|| Path::new(".")))?;
+    let out_dir = host_dir(out_dir)?;
     let pin_name = pin
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -313,7 +316,17 @@ fn docker_args(
     ];
     args.extend(extra_args.iter().cloned());
     args.push(format!("/pin/{pin_name}"));
-    args
+    Ok(args)
+}
+
+/// `dir` as an absolute host path; the empty parent of a bare file name is
+/// the current directory.
+fn host_dir(dir: &Path) -> std::io::Result<PathBuf> {
+    if dir.as_os_str().is_empty() {
+        std::env::current_dir()
+    } else {
+        std::path::absolute(dir)
+    }
 }
 
 /// Run Percolator on `pin` using `backend`, writing result files into the PIN's
@@ -352,7 +365,7 @@ pub fn run_percolator_with_decoys(
             .output()
             .map_err(PercolatorError::Spawn)?,
         PercolatorBackend::Docker { image } => Command::new("docker")
-            .args(docker_args(image, pin, &out_dir, &out, extra_args))
+            .args(docker_args(image, pin, &out_dir, &out, extra_args)?)
             .output()
             .map_err(PercolatorError::Spawn)?,
     };
@@ -691,7 +704,8 @@ mod tests {
             Path::new("/data"),
             &out,
             &[],
-        );
+        )
+        .unwrap();
         assert_eq!(args[0], "run");
         assert!(args.contains(&"--platform".to_string()));
         assert!(args.iter().any(|a| a == "/data:/pin:ro"));
@@ -701,5 +715,29 @@ mod tests {
         assert!(args
             .iter()
             .any(|a| a == "/out/run.percolator.target.psms.txt"));
+    }
+
+    #[test]
+    fn docker_args_relative_pin_mounts_absolute_dirs() {
+        let cwd = std::env::current_dir().unwrap();
+        for (pin, dir) in [("out.pin", cwd.clone()), ("res/out.pin", cwd.join("res"))] {
+            let pin = Path::new(pin);
+            let out_dir = pin.parent().unwrap();
+            let out = result_paths(pin);
+            let args = docker_args(DEFAULT_PERCOLATOR_IMAGE, pin, out_dir, &out, &[]).unwrap();
+            let mounts: Vec<&String> = args
+                .iter()
+                .zip(args.iter().skip(1))
+                .filter(|(flag, _)| *flag == "-v")
+                .map(|(_, m)| m)
+                .collect();
+            assert_eq!(
+                mounts,
+                [
+                    &format!("{}:/pin:ro", dir.display()),
+                    &format!("{}:/out", dir.display())
+                ]
+            );
+        }
     }
 }

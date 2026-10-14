@@ -30,7 +30,7 @@ use andes_glyco::glyco_psm::{
 };
 use andes_glyco::hybrid::Source;
 
-use crate::percolator_enz::{count_internal_enzymatic, is_enzymatic_boundary};
+use crate::percolator_enz::{count_internal_enzymatic_any, is_enzymatic_boundary_any};
 use crate::pin::{psm_feature_values, FeatureFmt};
 use crate::row_context::RowContext;
 use search::glyco_search::{FullGlycoPsm, GlycoSpectrumResult};
@@ -264,9 +264,10 @@ fn write_glyco_psm_row<W: Write>(
     let residues: Vec<u8> = cand.peptide.residues.iter().map(|aa| aa.residue).collect();
     let first = residues.first().copied().unwrap_or(b'-');
     let last = residues.last().copied().unwrap_or(b'-');
-    let enz_n: u8 = is_enzymatic_boundary(cand.peptide.pre, first, params.enzyme) as u8;
-    let enz_c: u8 = is_enzymatic_boundary(last, cand.peptide.post, params.enzyme) as u8;
-    let enz_int = count_internal_enzymatic(&residues, params.enzyme);
+    let extra = &params.extra_enzymes;
+    let enz_n: u8 = is_enzymatic_boundary_any(cand.peptide.pre, first, params.enzyme, extra) as u8;
+    let enz_c: u8 = is_enzymatic_boundary_any(last, cand.peptide.post, params.enzyme, extra) as u8;
+    let enz_int = count_internal_enzymatic_any(&residues, params.enzyme, extra);
     write!(writer, "\t{}\t{}\t{}", enz_n, enz_c, enz_int)?;
 
     // Standard feature block (reuse psm_feature_values; skip RankScore + isotope_error

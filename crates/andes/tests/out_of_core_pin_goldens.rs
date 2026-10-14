@@ -94,6 +94,20 @@
 //! each new PIN digests to its previous golden exactly, so only those two
 //! fields changed.
 //!
+//! REGENERATED 2026-10-14 (E. coli digests) when the PIN charge one-hot columns
+//! began spanning every charge a PSM carries, not only the `--charge` range.
+//! Against the PIN without that change, for the same command line: same rows and
+//! SpecIds, every non-charge field identical; the header gains `charge6`, set
+//! on the rows of spectra with a declared 6+ precursor, which previously had an
+//! all-zero charge vector. The slice goldens carry no out-of-range charge and
+//! are unchanged.
+//!
+//! | case | rows | rows moved to `charge6` |
+//! |---|---|---|
+//! | E. coli default mods (and precursor-cal auto) | 74,442 | 37 |
+//! | E. coli fixed mods only | 75,750 | 35 |
+//! | E. coli one variable mod | 74,998 | 40 |
+//!
 //! To regenerate after an intentional change, run the case's command line (see
 //! `run`), then either digest the PIN with `identity_digest` (E. coli) or write
 //! its header and sorted rows, gzipped, over the case's golden PIN (slices).

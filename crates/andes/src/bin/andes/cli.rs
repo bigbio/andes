@@ -719,8 +719,9 @@ pub(crate) struct SearchArgs {
     /// MS1 feature has a quality q-value against its decoys above this (or
     /// none) is reported as `identified_below_threshold` and left out of
     /// `quantms.feature.parquet`. An internal quant-quality q-value, not an
-    /// identification FDR. `off` reports every identified row. Default 0.05.
-    #[arg(long = "quant-feature-fdr", default_value = "0.05", value_parser = parse_fraction_or_off)]
+    /// identification FDR. `off` (the default) reports every identified row
+    /// and keeps `quant_q` as an annotation.
+    #[arg(long = "quant-feature-fdr", default_value = "off", value_parser = parse_fraction_or_off)]
     pub(crate) quant_feature_fdr: FractionOrOff,
 
     /// PSM q-value threshold for quantification targets when rescoring runs.
@@ -849,8 +850,9 @@ pub(crate) struct QuantFinalizeArgs {
     /// MS1 feature has a quality q-value against its decoys above this (or
     /// none) is reported as `identified_below_threshold` and left out of
     /// `quantms.feature.parquet`. An internal quant-quality q-value, not an
-    /// identification FDR. `off` reports every identified row. Default 0.05.
-    #[arg(long = "quant-feature-fdr", default_value = "0.05", value_parser = parse_fraction_or_off)]
+    /// identification FDR. `off` (the default) reports every identified row
+    /// and keeps `quant_q` as an annotation.
+    #[arg(long = "quant-feature-fdr", default_value = "off", value_parser = parse_fraction_or_off)]
     pub(crate) quant_feature_fdr: FractionOrOff,
 
     /// Also write the rows as `quantms.feature.parquet` into this directory.

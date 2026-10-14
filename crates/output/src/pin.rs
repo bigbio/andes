@@ -1428,7 +1428,7 @@ mod tests {
             make_candidate_seq(b"SATTK", &[(0, PHOSPHO)], 0), // different residues
             make_candidate_seq(b"MSATK", &[(0, OX), (1, PHOSPHO)], 0),
             make_candidate_seq(b"MSATK", &[(0, OX), (3, PHOSPHO)], 0), // isomer of 4
-            make_candidate_seq(b"MSATK", &[(1, PHOSPHO)], 0), // different multiset than 4
+            make_candidate_seq(b"MSATK", &[(1, PHOSPHO)], 0),          // different multiset than 4
         ];
         let rows = emitted(
             vec![
@@ -1535,7 +1535,10 @@ mod tests {
         let rows = emitted(psms, &cands);
         assert_eq!(rows.len(), 2, "{rows:?}");
         let kept_isomer = rows.iter().find(|r| r.1.starts_with("K.S")).unwrap();
-        assert_eq!(kept_isomer.1, cands[first_isomer as usize].peptide.to_string());
+        assert_eq!(
+            kept_isomer.1,
+            cands[first_isomer as usize].peptide.to_string()
+        );
         // Both survivors share rank 1 and stay distinguishable by row index.
         let ids: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
         assert_eq!(ids, ["Scan 1_1_1_0", "Scan 1_1_1_1"]);

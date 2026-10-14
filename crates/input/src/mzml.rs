@@ -1701,6 +1701,10 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
     // Stored under the IC currently being parsed.
     let mut current_ic_id: Option<String> = None;
     let mut current_ic_type: Option<InstrumentType> = None;
+    // The IC's first mass analyzer. An ion trap here beats the instrument model:
+    // a hybrid (Orbitrap Fusion, Elite, Velos) records its model on every IC,
+    // but the IC its ion-trap MS2 scans reference reads at unit resolution.
+    let mut current_ic_analyzer: Option<InstrumentType> = None;
 
     // referenceableParamGroup id → instrument-model InstrumentType. mzML emits
     // the `<referenceableParamGroupList>` BEFORE `<instrumentConfigurationList>`,
@@ -1752,6 +1756,7 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
                     b"instrumentConfiguration" if state == S::InstrumentConfigurationList => {
                         current_ic_id = attr_str(e, b"id");
                         current_ic_type = None;
+                        current_ic_analyzer = None;
                         state = S::InstrumentConfiguration;
                     }
                     b"analyzer" if state == S::InstrumentConfiguration => {
@@ -1822,6 +1827,7 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
                                 if current_ic_type.is_none() {
                                     current_ic_type = Some(t);
                                 }
+                                current_ic_analyzer.get_or_insert(t);
                             }
                         }
                         // Within <instrumentConfiguration> at the top level
@@ -1883,8 +1889,11 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
                         state = S::InstrumentConfiguration;
                     }
                     b"instrumentConfiguration" if state == S::InstrumentConfiguration => {
-                        if let (Some(id), Some(t)) = (current_ic_id.take(), current_ic_type.take())
-                        {
+                        let ic_type = match current_ic_analyzer.take() {
+                            Some(InstrumentType::LowRes) => Some(InstrumentType::LowRes),
+                            _ => current_ic_type.take(),
+                        };
+                        if let (Some(id), Some(t)) = (current_ic_id.take(), ic_type) {
                             ic_map.insert(id, t);
                         }
                         state = S::InstrumentConfigurationList;
@@ -3957,6 +3966,52 @@ mod tests {
             .replace("{spectrum}", &ms2_spectrum_with_ic_ref("IC1"));
         let result = detect_instrument_type(Cursor::new(xml));
         assert_eq!(result, Some(InstrumentType::OrbitrapAstral));
+    }
+
+    /// Orbitrap Fusion OT-IT: the model term sits on both ICs (here through a
+    /// referenceableParamGroup), MS1 on the orbitrap IC, MS2 on the ion-trap IC.
+    /// The MS2 IC must read as low-res, and an orbitrap IC with the same model
+    /// as high-res.
+    #[test]
+    fn detect_instrument_fusion_ion_trap_ms2_is_low_res() {
+        let doc = |ms2_ic: &str| {
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<mzML xmlns="http://psi.hupo.org/ms/mzml">
+  <referenceableParamGroupList count="1">
+    <referenceableParamGroup id="common">
+      <cvParam accession="MS:1002416" name="Orbitrap Fusion" value=""/>
+    </referenceableParamGroup>
+  </referenceableParamGroupList>
+  <instrumentConfigurationList count="2">
+    <instrumentConfiguration id="IC1">
+      <referenceableParamGroupRef ref="common"/>
+      <componentList count="1">
+        <analyzer order="2"><cvParam accession="MS:1000484" name="orbitrap" value=""/></analyzer>
+      </componentList>
+    </instrumentConfiguration>
+    <instrumentConfiguration id="IC2">
+      <referenceableParamGroupRef ref="common"/>
+      <componentList count="1">
+        <analyzer order="2"><cvParam accession="MS:1000083" name="radial ejection linear ion trap" value=""/></analyzer>
+      </componentList>
+    </instrumentConfiguration>
+  </instrumentConfigurationList>
+  <run id="r" defaultInstrumentConfigurationRef="IC1">
+    <spectrumList count="1" defaultDataProcessingRef="dp">
+      {spectrum}
+    </spectrumList>
+  </run>
+</mzML>"#
+                .replace("{spectrum}", &ms2_spectrum_with_ic_ref(ms2_ic))
+        };
+        assert_eq!(
+            detect_instrument_type(Cursor::new(doc("IC2"))),
+            Some(InstrumentType::LowRes)
+        );
+        assert_eq!(
+            detect_instrument_type(Cursor::new(doc("IC1"))),
+            Some(InstrumentType::QExactive)
+        );
     }
 
     // ── Finding 4.2: truncated binary array ───────────────────────────────────

@@ -319,3 +319,179 @@ fn every_expansion_path_agrees_with_annotation() {
     let want: HashSet<_> = inram.iter().map(key).collect();
     assert_eq!(all, want, "records expand to the in-RAM candidate set");
 }
+
+/// A protein starting `MS…` whose Ser2 is N-acetylated after initiator-Met
+/// removal (an N-terminal site), searched with a protein-N-term Acetyl
+/// restricted to annotated sites.
+const NTERM_XML: &str = r#"<uniprot>
+<entry dataset="Swiss-Prot">
+  <accession>P00003</accession>
+  <name>THREE_HUMAN</name>
+  <feature type="modified residue" description="N-acetylserine" evidence="1">
+    <location><position position="2"/></location>
+  </feature>
+  <evidence type="ECO:0000269" key="1"/>
+  <sequence length="24" version="1">MSAGPEKTLDYRADNPAKVNSTQR</sequence>
+</entry>
+</uniprot>"#;
+
+#[test]
+fn decoys_keep_terminal_sites_at_their_terminus() {
+    let target = load_uniprot_xml(NTERM_XML.as_bytes(), &UniProtOptions::default())
+        .unwrap()
+        .0;
+    let acetyl =
+        Modification::from_mods_txt_line("42.010565,*,opt,Prot-N-term,Acetyl,sites=annotated")
+            .unwrap();
+    let mut p = SearchParams::default_tryptic(
+        AminoAcidSetBuilder::new_standard()
+            .add_variable_mod(acetyl)
+            .build()
+            .unwrap(),
+    );
+    p.min_length = 4;
+    p.max_missed_cleavages = 1;
+    for strategy in [
+        DecoyStrategy::Reverse,
+        DecoyStrategy::Shuffle,
+        DecoyStrategy::SequonReverse,
+    ] {
+        let idx = SearchIndex::from_target_db_with_strategy(&target, "XXX", None, strategy, 7);
+        assert_eq!(
+            idx.db.proteins[1].mod_sites()[0].position,
+            0,
+            "{strategy:?}"
+        );
+        let acetylated = |decoy: bool| {
+            enumerate_candidates(&idx, &p, "XXX")
+                .filter(|c| c.is_decoy == decoy)
+                .filter(|c| c.peptide.residues[0].mod_.is_some())
+                .count()
+        };
+        // SAGPEK after Met removal, and SAGPEKTLDYR with a missed cleavage.
+        assert_eq!(acetylated(false), 2, "{strategy:?}");
+        // Following its residue, the site would sit deep inside the decoy,
+        // where a protein-N-term mod never applies.
+        assert!(acetylated(true) > 0, "{strategy:?}: no decoy N-term acetyl");
+    }
+}
+
+#[test]
+fn unrestricted_terminal_mod_is_not_hidden_by_a_restricted_twin() {
+    // Acetyl-K restricted to annotated sites, protein-N-term Acetyl on any
+    // residue unrestricted: an unannotated protein starting with K must still
+    // get its protein-N-term acetyl on that K.
+    let mut builder = AminoAcidSetBuilder::new_standard();
+    for line in [
+        "42.010565,K,opt,any,Acetyl,sites=annotated",
+        "42.010565,*,opt,Prot-N-term,Acetyl",
+    ] {
+        builder = builder.add_variable_mod(Modification::from_mods_txt_line(line).unwrap());
+    }
+    let mut p = SearchParams::default_tryptic(builder.build().unwrap());
+    p.min_length = 4;
+    p.max_missed_cleavages = 1;
+    let target = ProteinDb {
+        proteins: vec![model::Protein {
+            accession: "P1".into(),
+            description: String::new(),
+            sequence: b"KAAPEPTIDEKVLSTAGR".to_vec(),
+            annotation: None,
+        }],
+    };
+    let idx = SearchIndex::from_target_db(&target, "XXX");
+    let forms: Vec<String> = enumerate_candidates(&idx, &p, "XXX")
+        .filter(|c| !c.is_decoy && c.is_protein_n_term)
+        .map(|c| c.peptide.to_string())
+        .collect();
+    assert!(
+        forms.iter().any(|f| f.contains("K+42")),
+        "protein-N-term acetyl on K missing: {forms:?}"
+    );
+    // The internal K11 has no annotated site, so no Acetyl there.
+    assert!(enumerate_candidates(&idx, &p, "XXX")
+        .filter(|c| !c.is_decoy)
+        .all(|c| c.peptide.residues[1..].iter().all(|aa| aa.mod_.is_none())));
+}
+
+#[test]
+fn variant_window_walk_equals_filtering_the_whole_protein() {
+    use model::{ProteinAnnotation, VariantRegion};
+    use std::sync::Arc;
+    // Long enough that the window around the variants excludes most of it.
+    let seq = b"MAGSPEKTLSYRSDSPAKVNSTQRLLEDKGHIMPQRSTVAEKNNGLKDDCPWYRAHMESKTLIAGFRVEPQK".repeat(3);
+    for region in [
+        VariantRegion { start: 40, end: 41 },
+        VariantRegion {
+            start: 100,
+            end: 103,
+        },
+        VariantRegion {
+            start: 150,
+            end: 150,
+        },
+        VariantRegion { start: 1, end: 2 },
+    ] {
+        let annotated = model::Protein {
+            accession: "V".into(),
+            description: String::new(),
+            sequence: seq.clone(),
+            annotation: Some(Arc::new(ProteinAnnotation::new(Vec::new(), Some(region)))),
+        };
+        let plain = model::Protein {
+            accession: "P".into(),
+            annotation: None,
+            ..annotated.clone()
+        };
+        let db = ProteinDb {
+            proteins: vec![annotated, plain],
+        };
+        let idx =
+            SearchIndex::from_target_db_with_strategy(&db, "XXX", None, DecoyStrategy::None, 0);
+        for spec in [0u8, 1, 2] {
+            let mut p = params(false);
+            p.num_tolerable_termini = spec;
+            p.max_length = 12;
+            let cands: Vec<Candidate> = enumerate_candidates(&idx, &p, "XXX").collect();
+            let from = |pi: usize| -> Vec<(usize, String)> {
+                cands
+                    .iter()
+                    .filter(|c| c.protein_index == pi)
+                    .filter(|c| {
+                        let s = c.start_offset_in_protein as u32;
+                        region.covered_by(s, s + c.peptide.residues.len() as u32)
+                    })
+                    .map(|c| (c.start_offset_in_protein, c.peptide.to_string()))
+                    .collect()
+            };
+            let windowed = from(0);
+            assert!(!windowed.is_empty(), "{region:?} ntt={spec}");
+            assert_eq!(windowed, from(1), "{region:?} ntt={spec}");
+            assert_eq!(
+                windowed.len(),
+                cands.iter().filter(|c| c.protein_index == 0).count(),
+                "{region:?} ntt={spec}: a variant protein yields only covering spans"
+            );
+        }
+    }
+}
+
+#[test]
+fn index_cache_key_tells_variant_entries_apart() {
+    use model::{ProteinAnnotation, VariantRegion};
+    use search::candidate_index::index_cache_path;
+    use std::sync::Arc;
+    let plain = target_db(EvidenceLevel::Experimental, false);
+    let mut variant = plain.clone();
+    variant.proteins[0].annotation = Some(Arc::new(ProteinAnnotation::new(
+        Vec::new(),
+        Some(VariantRegion { start: 3, end: 4 }),
+    )));
+    let p = params(false);
+    let a = index_cache_path(&SearchIndex::from_target_db(&plain, "XXX"), &p);
+    let b = index_cache_path(&SearchIndex::from_target_db(&variant, "XXX"), &p);
+    assert_ne!(a, b);
+    // Annotated sites alone do not change which base records exist.
+    let again = index_cache_path(&SearchIndex::from_target_db(&plain, "XXX"), &p);
+    assert_eq!(a, again);
+}

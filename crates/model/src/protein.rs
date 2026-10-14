@@ -62,14 +62,25 @@ pub struct ProteinAnnotation {
 }
 
 impl ProteinAnnotation {
-    /// Whether a site at 0-based `position` is annotated with a modification
-    /// of mass `mass_delta` (within [`SITE_MASS_TOLERANCE`]).
-    pub fn has_site(&self, position: u32, mass_delta: f64) -> bool {
-        has_site(&self.mod_sites, position, mass_delta)
+    /// An annotation with `mod_sites` sorted by position (then mass) and
+    /// same-position sites of the same mass (within [`SITE_MASS_TOLERANCE`])
+    /// merged, the order [`has_site`] relies on.
+    pub fn new(mut mod_sites: Vec<ModSite>, variant: Option<VariantRegion>) -> Self {
+        mod_sites.sort_by(|a, b| {
+            a.position
+                .cmp(&b.position)
+                .then(a.mass_delta.total_cmp(&b.mass_delta))
+        });
+        mod_sites.dedup_by(|b, a| {
+            a.position == b.position && (a.mass_delta - b.mass_delta).abs() <= SITE_MASS_TOLERANCE
+        });
+        Self { mod_sites, variant }
     }
 }
 
-/// [`ProteinAnnotation::has_site`] on a sorted site list.
+/// Whether `sites` (sorted by position, see [`ProteinAnnotation::new`]) hold
+/// a site at 0-based `position` with a modification of mass `mass_delta`
+/// (within [`SITE_MASS_TOLERANCE`]).
 pub fn has_site(sites: &[ModSite], position: u32, mass_delta: f64) -> bool {
     let first = sites.partition_point(|s| s.position < position);
     sites[first..]
@@ -85,6 +96,21 @@ pub struct ModSite {
     pub position: u32,
     /// Monoisotopic mass change of the annotated modification (Da).
     pub mass_delta: f64,
+    /// What the modification is tied to besides its residue.
+    pub anchor: SiteAnchor,
+}
+
+/// What an annotated modification is tied to: its residue wherever it sits,
+/// or the terminus of the chain it modifies (UniProt's "position in the
+/// polypeptide", e.g. N-terminal for N-acetylserine, C-terminal for an
+/// amidation). Decoy generation keeps a terminal site at the decoy's own
+/// terminus rather than following the residue into the chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SiteAnchor {
+    #[default]
+    Residue,
+    NTerminus,
+    CTerminus,
 }
 
 /// The residues a sequence variant changed, in the variant sequence's own
@@ -100,8 +126,10 @@ pub struct VariantRegion {
 impl VariantRegion {
     /// Whether the residue span `[span_start, span_end)` carries the variant:
     /// it overlaps the replacement residues or, for a deletion, holds both
-    /// residues on either side of the junction. Any other span reads the same
-    /// as the canonical sequence.
+    /// residues on either side of the junction. Any other span has a
+    /// canonical sequence. Its cleavage context can still differ (a variant
+    /// to K or R makes the next peptide tryptic); such peptides are not
+    /// variant peptides and are left out.
     pub fn covered_by(&self, span_start: u32, span_end: u32) -> bool {
         if self.start < self.end {
             span_start < self.end && span_end > self.start
@@ -217,26 +245,35 @@ mod tests {
         let mut p = make_protein();
         assert!(p.mod_sites().is_empty());
         assert_eq!(p.variant_region(), None);
-        p.annotation = Some(Arc::new(ProteinAnnotation {
-            mod_sites: vec![
-                ModSite {
-                    position: 2,
-                    mass_delta: 15.994915,
-                },
+        p.annotation = Some(Arc::new(ProteinAnnotation::new(
+            vec![
                 ModSite {
                     position: 2,
                     mass_delta: 79.966331,
+                    anchor: SiteAnchor::Residue,
+                },
+                ModSite {
+                    position: 2,
+                    mass_delta: 15.994915,
+                    anchor: SiteAnchor::Residue,
+                },
+                ModSite {
+                    position: 2,
+                    mass_delta: 79.9663,
+                    anchor: SiteAnchor::Residue,
                 },
             ],
-            variant: Some(VariantRegion { start: 1, end: 2 }),
-        }));
+            Some(VariantRegion { start: 1, end: 2 }),
+        )));
+        // Sorted by mass, the near-duplicate phospho merged.
         assert_eq!(p.mod_sites().len(), 2);
+        assert!(p.mod_sites()[0].mass_delta < p.mod_sites()[1].mass_delta);
         assert_eq!(p.variant_region(), Some(VariantRegion { start: 1, end: 2 }));
         let ann = p.annotation.as_deref().unwrap();
-        assert!(ann.has_site(2, 79.966));
-        assert!(ann.has_site(2, 15.9949));
-        assert!(!ann.has_site(2, 42.010565));
-        assert!(!ann.has_site(3, 79.966331));
+        assert!(has_site(&ann.mod_sites, 2, 79.966));
+        assert!(has_site(&ann.mod_sites, 2, 15.9949));
+        assert!(!has_site(&ann.mod_sites, 2, 42.010565));
+        assert!(!has_site(&ann.mod_sites, 3, 79.966331));
     }
 
     #[test]

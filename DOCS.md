@@ -140,7 +140,8 @@ For a pre-built target+decoy FASTA, use `--decoy-strategy none` with `--decoy-pr
 `rest.uniprot.org/uniprotkb/<acc>.xml`). Each entry becomes one protein with the UniProt FASTA
 header (`sp|P02769|ALBU_BOVIN`, `Albumin OS=Bos taurus OX=9913 GN=ALB PE=1 SV=4`), so on its own
 an XML database searches exactly like the UniProt FASTA. The XML also holds annotation that FASTA
-drops. andes uses two kinds, both off until asked for:
+drops. andes uses two kinds, both off until asked for. A file that ends inside an element
+(a truncated download), or an XML file with no UniProt entries, is an error.
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
@@ -155,8 +156,10 @@ cross-links on K become Gly-Gly sites (+114.0429). A site only matters to a vari
 residues the protein annotates with a modification of the same mass (±0.005 Da, which keeps
 phospho and sulfo apart). Without that attribute a mod applies to every matching residue, as
 before. A restricted mod therefore searches far fewer positions than the same mod applied
-everywhere. Features with no single mass (`N-linked (GlcNAc...) asparagine`) are counted in the
-log and not used.
+everywhere. The log reports, for each restricted mod, how many annotated sites of its mass the
+database holds. It warns when there are none, because the mod is then never placed. Features with
+no single mass (`N-linked (GlcNAc...) asparagine`, SUMO cross-links) are counted in the log and
+not used.
 
 **Natural variants.** Each usable variant becomes its own target protein holding the canonical
 sequence with the change applied, e.g. `sp|P04637_VAR_005851_D7H|P53_HUMAN`. The middle field is
@@ -170,13 +173,19 @@ per allele. These variants are skipped:
 - the original residues do not match the canonical sequence;
 - the position is unknown;
 - the location is on another isoform;
-- the variant deletes a protein terminus.
+- the variant deletes a protein terminus;
+- the change is only I↔L, which no mass spectrum tells from the canonical sequence.
 
-A peptide carries at most one variant.
+A peptide carries at most one variant. A peptide that does not contain the variant is not a
+variant peptide, even when the variant changes its cleavage context. For example, after an E→K
+variant the next peptide becomes tryptic, but it is not searched.
 
 **Decoys.** The annotation travels with each decoy through the permutation that builds the decoy.
 Sites stay on the same residues, so a decoy has as many annotated sites as its target, on the
-same residue types. A variant region maps to its mirror image under `reverse`, and under
+same residue types. A site UniProt ties to a terminus is the exception. If the target carries it
+at its protein terminus (an N-acetylation of residue 1, or of residue 2 after the initiator Met),
+the decoy carries it at its own terminus. Otherwise a protein-terminal mod restricted to annotated
+sites would have no decoy competition. A variant region maps to its mirror image under `reverse`, and under
 `sequon-reverse` unless a sequon swap moved one of its residues. Otherwise, as under `shuffle`, it
 maps to a region of the same length at the image of its first residue. Variant entries thus
 get decoy twins with the same kind of variant region, and the target and decoy search spaces grow
@@ -187,7 +196,7 @@ together.
 | Level | Admits |
 |---|---|
 | `experimental` | ECO:0000269 (experimental), ECO:0007744 / ECO:0007829 (combined experimental and computational, e.g. large-scale proteomics) |
-| `curated` | the above plus manual assertions without direct experimental support: by similarity (ECO:0000250), sequence model (ECO:0000255), author statement (ECO:0000303), curator inference (ECO:0000305), imported (ECO:0000312) |
+| `curated` | the above plus manual assertions without direct experimental support: combinatorial (ECO:0000244), by similarity (ECO:0000250), sequence model (ECO:0000255), author statement (ECO:0000303), curator inference (ECO:0000305), imported (ECO:0000312) |
 | `any` | everything, including automatic annotation and features without evidence (most dbSNP-only variants) |
 
 The run log reports the entries, the sites and variant entries kept, and the features left out
@@ -198,8 +207,9 @@ known mass).
 
 - Isoforms (`VAR_SEQ`) are not rebuilt, and mature-chain, signal-peptide and propeptide
   boundaries are not used.
-- The `--refine` second pass searches peptide mini-proteins that carry no annotation, so
-  restricted mods apply in the main search only.
+- The `--refine` second pass searches peptide mini-proteins that carry no annotation. It leaves
+  the restricted mods out, so they apply in the main search only, and the refinement tier's own
+  mods apply there as usual.
 - `andes train` reads FASTA only.
 
 **Validation.** Both options grow the search space, which can raise identifications and error

@@ -2245,9 +2245,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// `--mbr` needs two or more inputs, `--lfq` and a rescoring run (the
-/// library ranks precursors by the rescored PSM scores), and is label-free
-/// only.
 /// Log what a UniProt XML load kept: annotated sites, variant entries, and
 /// the features the evidence level or the canonical sequence ruled out.
 fn log_uniprot_load(stats: &input::UniProtLoadStats, opts: &input::UniProtOptions) {
@@ -2280,40 +2277,49 @@ fn log_uniprot_load(stats: &input::UniProtLoadStats, opts: &input::UniProtOption
     }
 }
 
-/// Say where the `sites=annotated` mods of `aa` can apply, and warn when the
-/// database annotates no site for them (they would never be placed).
+/// Say how many annotated sites each `sites=annotated` mod of `aa` can use,
+/// and warn about one the database annotates no site of its mass for: it is
+/// never placed.
 fn report_annotated_site_mods(aa: &model::AminoAcidSet, target_db: &model::ProteinDb) {
-    let mut names: Vec<&str> = aa
-        .iter_variants()
-        .filter_map(|v| v.mod_)
-        .filter(|m| m.annotated_site_mass.is_some())
-        .map(|m| m.name.as_str())
-        .collect();
-    if names.is_empty() {
-        return;
-    }
-    names.sort_unstable();
-    names.dedup();
-    let annotated = target_db
-        .proteins
+    let mut mods: Vec<(&str, f64)> = aa
+        .distinct_mods()
         .iter()
-        .filter(|p| !p.mod_sites().is_empty())
-        .count();
-    if annotated == 0 {
-        eprintln!(
-            "WARN: {} restricted to annotated sites (sites=annotated), but the database \
-             annotates none: these mods are never placed. Annotated sites come from a UniProt \
-             XML database (--database *.xml[.gz]; see --uniprot-evidence).",
-            names.join(", ")
-        );
-    } else {
-        eprintln!(
-            "Annotated-site mods ({}) apply at the annotated sites of {annotated} target proteins",
-            names.join(", ")
-        );
+        .filter_map(|m| m.annotated_site_mass.map(|mass| (m.name.as_str(), mass)))
+        .collect();
+    mods.sort_by(|a, b| a.0.cmp(b.0).then(a.1.total_cmp(&b.1)));
+    mods.dedup_by(|b, a| a.0 == b.0 && a.1.to_bits() == b.1.to_bits());
+    for (name, mass) in mods {
+        let (mut sites, mut proteins) = (0usize, 0usize);
+        for p in &target_db.proteins {
+            let n = p
+                .mod_sites()
+                .iter()
+                .filter(|s| (s.mass_delta - mass).abs() <= model::protein::SITE_MASS_TOLERANCE)
+                .count();
+            if n > 0 {
+                sites += n;
+                proteins += 1;
+            }
+        }
+        if sites == 0 {
+            eprintln!(
+                "WARN: {name} ({mass:+.4} Da) is restricted to annotated sites (sites=annotated), \
+                 but no target protein annotates a site of that mass, so it is never placed. \
+                 Annotated sites come from a UniProt XML database (--database *.xml[.gz]); \
+                 --uniprot-evidence sets which are used."
+            );
+        } else {
+            eprintln!(
+                "Annotated-site mod {name} ({mass:+.4} Da): {sites} sites on {proteins} target \
+                 proteins"
+            );
+        }
     }
 }
 
+/// `--mbr` needs two or more inputs, `--lfq` and a rescoring run (the
+/// library ranks precursors by the rescored PSM scores), and is label-free
+/// only.
 fn check_mbr_args(cli: &Cli) -> Result<(), String> {
     if cli.spectrum.len() < 2 {
         return Err(format!(

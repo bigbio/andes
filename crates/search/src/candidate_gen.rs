@@ -149,6 +149,22 @@ fn enumerate_protein_from_offset(
         return Vec::new();
     }
 
+    // A variant protein only yields spans that cover its variant (`emit_span`),
+    // and those lie within `max_length` of it: walk just that window of
+    // `sub_seq` instead of the whole protein.
+    let window = match protein.variant_region() {
+        Some(v) => {
+            let reach = params.max_length as usize;
+            let lo = (v.start as usize).saturating_sub(reach);
+            let hi = v.end as usize + reach;
+            (
+                lo.saturating_sub(seq_offset) as u32,
+                hi.saturating_sub(seq_offset).min(n as usize) as u32,
+            )
+        }
+        None => (0, n),
+    };
+
     let ntt = params.num_tolerable_termini;
 
     // For ntt=0 (non-specific) with a non-NonSpecific enzyme, enumerate all
@@ -171,11 +187,16 @@ fn enumerate_protein_from_offset(
             variant: protein.variant_region(),
             sites: protein.mod_sites(),
         };
-        return enumerate_all_spans(&ctx, n);
+        return enumerate_all_spans(&ctx, window.0..window.1, n);
     }
 
     let cleavage_positions =
         compute_cleavage_positions(sub_seq, params.enzyme, &params.extra_enzymes);
+    // The cleavage positions inside the window, anchoring every span walked
+    // below. A span inside the window has all of its internal cleavage
+    // positions inside it too, so missed-cleavage counts are unchanged.
+    let anchors = &cleavage_positions[cleavage_positions.partition_point(|&c| c < window.0)
+        ..cleavage_positions.partition_point(|&c| c <= window.1)];
 
     // ntt=2: strict — only spans where both start and end are cleavage positions.
     // ntt=1: semi-specific — spans where at least one end is a cleavage position.
@@ -210,8 +231,8 @@ fn enumerate_protein_from_offset(
 
     // ── Strict spans (ntt=2 behaviour) ───────────────────────────────────────
     // Also included in ntt=1, since a strict span satisfies "at least one end".
-    for (i, &start) in cleavage_positions.iter().enumerate() {
-        for (offset, &end) in cleavage_positions[i + 1..].iter().enumerate() {
+    for (i, &start) in anchors.iter().enumerate() {
+        for (offset, &end) in anchors[i + 1..].iter().enumerate() {
             let len = end - start;
             if len > params.max_length {
                 break;
@@ -230,7 +251,7 @@ fn enumerate_protein_from_offset(
     // ── Semi-specific spans (ntt=1 only) ─────────────────────────────────────
     if ntt == 1 {
         // (b) Tryptic N-terminus, free C-terminus.
-        for &start in &cleavage_positions {
+        for &start in anchors {
             let c_min = start + params.min_length;
             let c_max = (start + params.max_length).min(n);
             for end in c_min..=c_max {
@@ -252,7 +273,7 @@ fn enumerate_protein_from_offset(
         }
 
         // (c) Free N-terminus, tryptic C-terminus.
-        for &end in &cleavage_positions {
+        for &end in anchors {
             if end < params.min_length {
                 continue;
             }
@@ -295,12 +316,6 @@ struct EmitCtx<'a> {
 /// validity checks. Appends to `out`.
 #[inline]
 fn emit_span(ctx: &EmitCtx<'_>, start: u32, end: u32, out: &mut Vec<Candidate>) {
-    let span = &ctx.sub_seq[start as usize..end as usize];
-    // Skip spans containing non-standard residues.
-    if span.iter().any(|&r| AminoAcid::standard(r).is_none()) {
-        return;
-    }
-
     let abs_start = start as usize + ctx.seq_offset;
     let abs_end = end as usize + ctx.seq_offset;
     // A variant protein contributes only the spans that carry its variant.
@@ -308,6 +323,11 @@ fn emit_span(ctx: &EmitCtx<'_>, start: u32, end: u32, out: &mut Vec<Candidate>) 
         .variant
         .is_some_and(|v| !v.covered_by(abs_start as u32, abs_end as u32))
     {
+        return;
+    }
+    let span = &ctx.sub_seq[start as usize..end as usize];
+    // Skip spans containing non-standard residues.
+    if span.iter().any(|&r| AminoAcid::standard(r).is_none()) {
         return;
     }
     let pre = if abs_start == 0 {
@@ -339,11 +359,12 @@ fn emit_span(ctx: &EmitCtx<'_>, start: u32, end: u32, out: &mut Vec<Candidate>) 
     }
 }
 
-/// Enumerate all valid-length spans without cleavage constraints (ntt=0 path).
-/// Invoked when `num_tolerable_termini = 0` with a non-NonSpecific enzyme.
-fn enumerate_all_spans(ctx: &EmitCtx<'_>, n: u32) -> Vec<Candidate> {
+/// Enumerate all valid-length spans starting in `starts` without cleavage
+/// constraints (ntt=0 path). Invoked when `num_tolerable_termini = 0` with a
+/// non-NonSpecific enzyme.
+fn enumerate_all_spans(ctx: &EmitCtx<'_>, starts: std::ops::Range<u32>, n: u32) -> Vec<Candidate> {
     let mut out = Vec::new();
-    for start in 0..n {
+    for start in starts {
         let end_max = (start + ctx.params.max_length).min(n);
         for end in (start + ctx.params.min_length)..=end_max {
             emit_span(ctx, start, end, &mut out);
@@ -985,9 +1006,7 @@ fn build_terminal_variants(
         let mut v = params.aa_set.variants_for(residue, peptide_loc).to_vec();
         if at_protein_term {
             for pv in params.aa_set.variants_for(residue, protein_loc) {
-                if !v.contains(pv) {
-                    v.push(pv.clone());
-                }
+                push_variant(&mut v, pv);
             }
         }
         v
@@ -1034,18 +1053,25 @@ fn build_terminal_variants(
     // mod is present, the modded variant is the only legal one for
     // that mod's residue/location slot; variable mods stack on top
     // by adding additional explored variants.
-    for v in &n_term_variants {
-        if !variants.contains(v) {
-            variants.push(v.clone());
-        }
-    }
-    for v in &c_term_variants {
-        if !variants.contains(v) {
-            variants.push(v.clone());
-        }
+    for v in n_term_variants.iter().chain(&c_term_variants) {
+        push_variant(&mut variants, v);
     }
 
     variants
+}
+
+/// Add `v` to `variants` unless an equal one (same residue, mod name and
+/// mass) is there. Equality ignores [`model::Modification::annotated_site_mass`],
+/// so when the one already there is restricted to annotated sites and `v` is
+/// not, `v` replaces it: the unrestricted mod applies wherever the restricted
+/// one would.
+fn push_variant(variants: &mut Vec<AminoAcid>, v: &AminoAcid) {
+    let restricted = |a: &AminoAcid| a.mod_.is_some_and(|m| m.annotated_site_mass.is_some());
+    match variants.iter_mut().find(|u| **u == *v) {
+        None => variants.push(v.clone()),
+        Some(u) if restricted(u) && !restricted(v) => *u = v.clone(),
+        Some(_) => {}
+    }
 }
 
 fn expand_recursive(

@@ -557,8 +557,14 @@ pub fn refinement_aa_set(
     // skipped — the fixed label owns that position.
     let mut fixed_slots: Vec<(ResidueSpec, ModLocation)> = Vec::new();
 
-    // 1. Inherit the base search's full mod set (fixed AND variable).
+    // 1. Inherit the base search's full mod set (fixed AND variable), except
+    //    mods restricted to annotated sites: the Pass-2 mini-proteins carry no
+    //    database annotation, so such a mod could never be placed there, and
+    //    claiming its slot would also block the tier's unrestricted mod.
     for m in base.distinct_mods() {
+        if m.annotated_site_mass.is_some() {
+            continue;
+        }
         present.insert(mod_key(m.residue, m.location, m.mass_delta));
         if m.fixed {
             fixed_slots.push((m.residue, m.location));
@@ -1568,6 +1574,28 @@ mod tests {
         AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn refinement_aa_set_leaves_out_mods_restricted_to_annotated_sites() {
+        // The Pass-2 mini-proteins carry no annotation: a restricted base mod
+        // could never be placed there, and must not block the tier's own mod.
+        let ox = model::modification::Modification::from_mods_txt_line(
+            "15.994915,M,opt,any,Oxidation,sites=annotated",
+        )
+        .unwrap();
+        let base = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
+            .add_variable_mod(ox)
+            .build()
+            .unwrap();
+        let set = refinement_aa_set(&base, &RefineConfig::default_tier(), true).unwrap();
+        assert!(set
+            .iter_variants()
+            .all(|aa| aa.mod_.is_none_or(|m| m.annotated_site_mass.is_none())));
+        assert!(set
+            .variants_for(b'M', ModLocation::Anywhere)
+            .iter()
+            .any(|aa| aa.mod_.is_some_and(|m| m.name == "Oxidation")));
     }
 
     #[test]

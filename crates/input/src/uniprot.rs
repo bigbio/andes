@@ -34,7 +34,7 @@ use std::collections::BTreeMap;
 use std::io::BufRead;
 use std::sync::Arc;
 
-use model::{ModSite, Protein, ProteinAnnotation, ProteinDb, VariantRegion};
+use model::{ModSite, Protein, ProteinAnnotation, ProteinDb, SiteAnchor, VariantRegion};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
@@ -51,9 +51,10 @@ pub enum EvidenceLevel {
     #[default]
     Experimental,
     /// Also manually curated assertions without direct experimental support:
-    /// by similarity (ECO:0000250), sequence model (ECO:0000255), author
-    /// statement (ECO:0000303), curator inference (ECO:0000305) and imported
-    /// information used in manual assertion (ECO:0000312).
+    /// combinatorial evidence (ECO:0000244), by similarity (ECO:0000250),
+    /// sequence model (ECO:0000255), author statement (ECO:0000303), curator
+    /// inference (ECO:0000305) and imported information (ECO:0000312), each
+    /// used in manual assertion.
     Curated,
     /// Every feature, including automatic annotation and features with no
     /// evidence at all (e.g. most dbSNP-only variants).
@@ -85,9 +86,8 @@ impl EvidenceLevel {
     fn of_code(code: &str) -> Option<Self> {
         match code {
             "ECO:0000269" | "ECO:0007744" | "ECO:0007829" => Some(Self::Experimental),
-            "ECO:0000250" | "ECO:0000255" | "ECO:0000303" | "ECO:0000305" | "ECO:0000312" => {
-                Some(Self::Curated)
-            }
+            "ECO:0000244" | "ECO:0000250" | "ECO:0000255" | "ECO:0000303" | "ECO:0000305"
+            | "ECO:0000312" => Some(Self::Curated),
             _ => None,
         }
     }
@@ -125,7 +125,8 @@ pub struct UniProtLoadStats {
     pub unknown_modifications: BTreeMap<String, usize>,
     /// Variant or modification features that do not fit the canonical
     /// sequence (unknown position, original residues or modified residue not
-    /// matching, replacement that is not a residue string).
+    /// matching, replacement that is not a residue string), and variants a
+    /// search cannot tell from the canonical sequence (I↔L only).
     pub unusable_features: usize,
     /// Features located on a non-canonical isoform (not applied).
     pub isoform_features: usize,
@@ -269,17 +270,28 @@ impl UniProtEntry {
                         }
                     }
                 }
-                "cross-link" => match f.description.strip_prefix(GLYGLY_CROSSLINK_PREFIX) {
-                    Some(rest) if GLYGLY_MODIFIERS.contains(&rest) => (b'K', GLYGLY_MASS),
-                    _ => continue,
-                },
+                "cross-link" => {
+                    let name = clean_description(&f.description);
+                    match name.strip_prefix(GLYGLY_CROSSLINK_PREFIX) {
+                        Some(rest) if GLYGLY_MODIFIERS.contains(&rest) => {
+                            (b'K', GLYGLY_MASS, SiteAnchor::Residue)
+                        }
+                        _ => {
+                            *stats
+                                .unknown_modifications
+                                .entry(name.to_string())
+                                .or_insert(0) += 1;
+                            continue;
+                        }
+                    }
+                }
                 _ => continue,
             };
             if !self.on_canonical(f) {
                 stats.isoform_features += 1;
                 continue;
             }
-            let (target, mass_delta) = resolved;
+            let (target, mass_delta, anchor) = resolved;
             let position = match f.location {
                 Some((b, e)) if b == e && b >= 1 && (b as usize) <= self.sequence.len() => b - 1,
                 _ => {
@@ -298,18 +310,10 @@ impl UniProtEntry {
             sites.push(ModSite {
                 position,
                 mass_delta,
+                anchor,
             });
         }
-        sites.sort_by(|a, b| {
-            a.position
-                .cmp(&b.position)
-                .then(a.mass_delta.total_cmp(&b.mass_delta))
-        });
-        sites.dedup_by(|b, a| {
-            a.position == b.position
-                && (a.mass_delta - b.mass_delta).abs() <= model::protein::SITE_MASS_TOLERANCE
-        });
-        sites
+        ProteinAnnotation::new(sites, None).mod_sites
     }
 
     /// The natural sequence variants that pass `opts.evidence` and fit the
@@ -360,9 +364,12 @@ impl UniProtEntry {
                 // peptides read like canonical ones, so it has nothing to add.
                 let terminal_deletion =
                     replacement.is_empty() && (start == 0 || end == self.sequence.len());
-                if replacement == canonical
-                    || terminal_deletion
-                    || !replacement.iter().all(u8::is_ascii_uppercase)
+                // I and L have the same mass: an I↔L change is the canonical
+                // peptide again as far as a mass spectrum can tell.
+                let il = |c: &u8| if *c == b'I' { b'L' } else { *c };
+                let isobaric = replacement.len() == canonical.len()
+                    && replacement.iter().map(il).eq(canonical.iter().map(il));
+                if isobaric || terminal_deletion || !replacement.iter().all(u8::is_ascii_uppercase)
                 {
                     stats.unusable_features += 1;
                     continue;
@@ -424,7 +431,7 @@ impl UniProtEntry {
                     } else {
                         (s.position as i64 + shift) as u32
                     },
-                    mass_delta: s.mass_delta,
+                    ..*s
                 })
                 .collect();
             out.push(Protein {
@@ -437,13 +444,13 @@ impl UniProtEntry {
                 ),
                 description: format!("{description} VARIANT={}", v.tag),
                 sequence,
-                annotation: Some(Arc::new(ProteinAnnotation {
+                annotation: Some(Arc::new(ProteinAnnotation::new(
                     mod_sites,
-                    variant: Some(VariantRegion {
+                    Some(VariantRegion {
                         start: v.start as u32,
                         end: (v.start + v.replacement.len()) as u32,
                     }),
-                })),
+                ))),
             });
         }
         stats.variant_proteins += out.len();
@@ -451,12 +458,7 @@ impl UniProtEntry {
             accession,
             description,
             sequence: self.sequence,
-            annotation: (!sites.is_empty()).then(|| {
-                Arc::new(ProteinAnnotation {
-                    mod_sites: sites,
-                    variant: None,
-                })
-            }),
+            annotation: (!sites.is_empty()).then(|| Arc::new(ProteinAnnotation::new(sites, None))),
         };
         out.insert(0, canonical);
         out
@@ -504,6 +506,9 @@ pub fn load_uniprot_xml<R: BufRead>(
         stats.entries += 1;
         proteins.extend(entry.into_proteins(opts, &mut stats));
     }
+    if stats.entries == 0 {
+        return Err(UniProtParseError::NoEntries);
+    }
     Ok((ProteinDb { proteins }, stats))
 }
 
@@ -517,6 +522,10 @@ pub enum UniProtParseError {
     },
     #[error("UniProt XML entry {accession:?} has no sequence")]
     MissingSequence { accession: String },
+    #[error("UniProt XML ends inside <{element}> (truncated file?)")]
+    Truncated { element: String },
+    #[error("no UniProt <entry> elements found (not a UniProtKB XML file?)")]
+    NoEntries,
 }
 
 /// Elements the reader tracks; everything else is [`Tag::Other`].
@@ -549,6 +558,36 @@ enum Tag {
 }
 
 impl Tag {
+    /// The element name, `"…"` for an untracked one.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Entry => "entry",
+            Self::Accession => "accession",
+            Self::Name => "name",
+            Self::Protein => "protein",
+            Self::RecommendedName => "recommendedName",
+            Self::SubmittedName => "submittedName",
+            Self::FullName => "fullName",
+            Self::Gene => "gene",
+            Self::Organism => "organism",
+            Self::DbReference => "dbReference",
+            Self::ProteinExistence => "proteinExistence",
+            Self::Comment => "comment",
+            Self::Isoform => "isoform",
+            Self::Id => "id",
+            Self::Feature => "feature",
+            Self::Original => "original",
+            Self::Variation => "variation",
+            Self::Location => "location",
+            Self::Position => "position",
+            Self::Begin => "begin",
+            Self::End => "end",
+            Self::Evidence => "evidence",
+            Self::Sequence => "sequence",
+            Self::Other => "…",
+        }
+    }
+
     fn of(local_name: &[u8]) -> Self {
         match local_name {
             b"entry" => Self::Entry,
@@ -646,6 +685,16 @@ impl<R: BufRead> UniProtXmlReader<R> {
             position: self.xml.buffer_position(),
             source,
         }
+    }
+
+    /// The innermost open element the reader tracks (`entry` inside an entry
+    /// whose children it does not track).
+    fn open_element(&self) -> &'static str {
+        self.stack
+            .iter()
+            .rev()
+            .find(|t| **t != Tag::Other)
+            .map_or("…", |t| t.name())
     }
 
     /// `stack[len - 1 - up]`, i.e. `up = 0` is the element itself.
@@ -874,7 +923,12 @@ impl<R: BufRead> Iterator for UniProtXmlReader<R> {
                     self.text.push_str(&String::from_utf8_lossy(t));
                     Ok(None)
                 }
-                Event::Eof => break None,
+                Event::Eof if self.stack.is_empty() => break None,
+                Event::Eof => {
+                    break Some(Err(UniProtParseError::Truncated {
+                        element: self.open_element().to_string(),
+                    }))
+                }
                 _ => Ok(None),
             };
             match finished {
@@ -956,7 +1010,7 @@ mod tests {
   <feature type="modified residue" description="Phosphoserine" evidence="1">
     <location><position position="10"/></location>
   </feature>
-  <feature type="cross-link" description="Glycyl lysine isopeptide (Lys-Gly) (interchain with G-Cter in ubiquitin)" evidence="1">
+  <feature type="cross-link" description="Glycyl lysine isopeptide (Lys-Gly) (interchain with G-Cter in ubiquitin); alternate" evidence="1">
     <location><position position="17"/></location>
   </feature>
   <feature type="cross-link" description="Glycyl lysine isopeptide (Lys-Gly) (interchain with G-Cter in SUMO2)" evidence="1">
@@ -1001,6 +1055,10 @@ mod tests {
   <feature type="sequence variant" id="VAR_000008" evidence="1">
     <original>S</original><variation>A</variation>
     <location sequence="P00001-2"><position position="2"/></location>
+  </feature>
+  <feature type="sequence variant" id="VAR_000009" evidence="1">
+    <original>L</original><variation>I</variation>
+    <location><position position="13"/></location>
   </feature>
   <feature type="mutagenesis site" description="Loss of function." evidence="1">
     <original>S</original><variation>A</variation>
@@ -1056,7 +1114,7 @@ mod tests {
         assert_eq!(e.taxon_id, "9606");
         assert_eq!(e.sequence, CANONICAL);
         assert_eq!(e.displayed_isoforms, vec!["P00001-1".to_string()]);
-        assert_eq!(e.features.len(), 21);
+        assert_eq!(e.features.len(), 22);
         assert_eq!(e.evidence.len(), 3);
         assert_eq!(e.fasta_accession(), "sp|P00001|TEST1_HUMAN");
         assert_eq!(
@@ -1109,7 +1167,25 @@ mod tests {
         assert_eq!(stats.isoform_features, 1, "S14 of isoform 2");
         assert_eq!(
             stats.unknown_modifications.keys().collect::<Vec<_>>(),
-            ["N-linked (GlcNAc...) asparagine", "N6-lactoyllysine"]
+            [
+                "Glycyl lysine isopeptide (Lys-Gly) (interchain with G-Cter in SUMO2)",
+                "N-linked (GlcNAc...) asparagine",
+                "N6-lactoyllysine"
+            ]
+        );
+        // N-acetylserine is tied to the N-terminus, the rest to their residue.
+        let anchors: Vec<SiteAnchor> = db.proteins[0]
+            .mod_sites()
+            .iter()
+            .map(|s| s.anchor)
+            .collect();
+        assert_eq!(
+            anchors,
+            [
+                SiteAnchor::NTerminus,
+                SiteAnchor::Residue,
+                SiteAnchor::Residue
+            ]
         );
 
         let curated = UniProtOptions {
@@ -1161,8 +1237,9 @@ mod tests {
         assert_eq!(stats.variant_proteins, 5);
         // + E19K without evidence; T8 and Y16 as before.
         assert_eq!(stats.below_evidence, 3);
-        // + Q3H (original mismatch), unknown range, M1 deletion at the terminus.
-        assert_eq!(stats.unusable_features, 4);
+        // + Q3H (original mismatch), unknown range, M1 deletion at the terminus,
+        // and L13I, which no mass spectrum tells from the canonical L13.
+        assert_eq!(stats.unusable_features, 5);
         assert_eq!(stats.isoform_features, 2);
 
         let k4e = &db.proteins[1];
@@ -1233,9 +1310,23 @@ mod tests {
 
     #[test]
     fn malformed_documents_are_errors() {
-        let truncated = &XML[..XML.find("</entry>").unwrap()];
-        let r: Result<Vec<_>, _> = UniProtXmlReader::new(truncated.as_bytes()).collect();
-        assert!(r.is_err() || r.unwrap().is_empty());
+        // Cut inside the second entry: the first is read, then the error.
+        let cut = XML.rfind("<sequence length=\"8\"").unwrap();
+        let r: Vec<_> = UniProtXmlReader::new(&XML.as_bytes()[..cut]).collect();
+        assert_eq!(r.len(), 2);
+        assert!(r[0].is_ok());
+        assert!(matches!(
+            &r[1],
+            Err(UniProtParseError::Truncated { element }) if element == "entry"
+        ));
+        let opts = UniProtOptions::default();
+        assert!(load_uniprot_xml(&XML.as_bytes()[..cut], &opts).is_err());
+        // Well-formed XML that is not UniProt holds no entries.
+        let html = "<html><body><p>not UniProt</p></body></html>";
+        assert!(matches!(
+            load_uniprot_xml(html.as_bytes(), &opts),
+            Err(UniProtParseError::NoEntries)
+        ));
         let mismatched = "<uniprot><entry><accession>X</name></entry></uniprot>";
         let r: Result<Vec<_>, _> = UniProtXmlReader::new(mismatched.as_bytes()).collect();
         assert!(matches!(r, Err(UniProtParseError::Xml { .. })));

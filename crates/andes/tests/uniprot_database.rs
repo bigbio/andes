@@ -78,10 +78,9 @@ fn annotated_site_mods_and_variants_run_end_to_end() {
         stderr.contains("14 annotated modification sites, 1 variant entries"),
         "{stderr}"
     );
+    // Ten phosphosites on the canonical entry, inherited by the variant entry.
     assert!(
-        stderr.contains(
-            "Annotated-site mods (Phospho) apply at the annotated sites of 2 target proteins"
-        ),
+        stderr.contains("Annotated-site mod Phospho (+79.9663 Da): 20 sites on 2 target proteins"),
         "{stderr}"
     );
     // Every PIN row names either the canonical entry or the variant entry.
@@ -95,9 +94,27 @@ fn annotated_site_mods_and_variants_run_end_to_end() {
         &["--mods", mods, "--uniprot-variants"],
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("the database annotates none"), "{stderr}");
+    assert!(
+        stderr.contains("Phospho (+79.9663 Da) is restricted to annotated sites"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("never placed"), "{stderr}");
     assert!(
         stderr.contains("--uniprot-variants needs a UniProt XML database"),
         "{stderr}"
     );
+
+    // XML at the default (experimental) evidence keeps only BSA's glycation
+    // site: there is no phosphosite, which is reported, not counted as one.
+    let out = search(
+        "test-fixtures/BSA.xml.gz",
+        &dir.path().join("exp.pin"),
+        &["--mods", mods],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("1 annotated modification sites"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("never placed"), "{stderr}");
 }

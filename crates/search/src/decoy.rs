@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use model::protein::{ModSite, Protein, ProteinAnnotation, ProteinDb, VariantRegion};
+use model::protein::{ModSite, Protein, ProteinAnnotation, ProteinDb, SiteAnchor, VariantRegion};
 
 /// Default decoy accession prefix.
 pub const DEFAULT_DECOY_PREFIX: &str = "XXX";
@@ -110,8 +110,14 @@ pub fn reverse_db(db: &ProteinDb, prefix: &str) -> ProteinDb {
 /// The annotation of the decoy built from `target` by a permutation of its
 /// residues: `source[i]` is the target position decoy residue `i` came from.
 ///
-/// Modification sites follow their residue exactly. A variant region maps to
-/// its image when that is contiguous (always, under reversal); otherwise
+/// Modification sites follow their residue exactly, except a site tied to a
+/// terminus ([`SiteAnchor`]) that sits at the target's protein terminus (the
+/// first residue, or the second after an initiator Met; the last residue): it
+/// moves to the decoy's own terminus, so a protein-terminal mod restricted to
+/// annotated sites is offered on decoys as often as on targets.
+///
+/// A variant region maps to its image when that is contiguous (always, under
+/// reversal); otherwise
 /// (shuffling scatters it) to a region of the same length at the image of its
 /// first residue, and a deletion junction to the junction between the images
 /// of its two residues, or before the image of the second when those are no
@@ -126,20 +132,21 @@ pub fn decoy_annotation(target: &Protein, source: &[u32]) -> Option<Arc<ProteinA
     for (i, &src) in source.iter().enumerate() {
         image[src as usize] = i as u32;
     }
-    let mut mod_sites: Vec<ModSite> = ann
+    let at_n_terminus = |p: usize| p == 0 || (p == 1 && target.sequence.first() == Some(&b'M'));
+    let mod_sites: Vec<ModSite> = ann
         .mod_sites
         .iter()
         .filter(|s| (s.position as usize) < n)
-        .map(|s| ModSite {
-            position: image[s.position as usize],
-            mass_delta: s.mass_delta,
+        .map(|s| {
+            let p = s.position as usize;
+            let position = match s.anchor {
+                SiteAnchor::NTerminus if at_n_terminus(p) => 0,
+                SiteAnchor::CTerminus if p + 1 == n => p as u32,
+                _ => image[p],
+            };
+            ModSite { position, ..*s }
         })
         .collect();
-    mod_sites.sort_by(|a, b| {
-        a.position
-            .cmp(&b.position)
-            .then(a.mass_delta.total_cmp(&b.mass_delta))
-    });
     let variant = ann.variant.map(|v| {
         let (a, b) = (v.start as usize, v.end as usize);
         if a < b && b <= n {
@@ -169,7 +176,7 @@ pub fn decoy_annotation(target: &Protein, source: &[u32]) -> Option<Arc<ProteinA
             v
         }
     });
-    Some(Arc::new(ProteinAnnotation { mod_sites, variant }))
+    Some(Arc::new(ProteinAnnotation::new(mod_sites, variant)))
 }
 
 /// Concatenate target + decoy.

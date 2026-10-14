@@ -795,7 +795,7 @@ xref: spec_1_site "C"
 
     #[test]
     fn allowed_at_needs_an_annotated_site_of_the_same_mass() {
-        use crate::protein::ModSite;
+        use crate::protein::{ModSite, SiteAnchor};
         let phospho =
             Modification::from_mods_txt_line("79.966331,S,opt,any,Phospho,sites=annotated")
                 .unwrap();
@@ -803,10 +803,12 @@ xref: spec_1_site "C"
             ModSite {
                 position: 3,
                 mass_delta: 79.966331,
+                anchor: SiteAnchor::Residue,
             },
             ModSite {
                 position: 7,
                 mass_delta: 79.956815, // sulfation: 9.5 mDa lighter
+                anchor: SiteAnchor::Residue,
             },
         ];
         assert!(phospho.allowed_at(&sites, 3));

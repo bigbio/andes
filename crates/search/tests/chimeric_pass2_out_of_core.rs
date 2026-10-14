@@ -198,6 +198,7 @@ fn chimeric_scan(
         activation_method: None,
         isolation_lower_offset: Some(300.0),
         isolation_upper_offset: Some(300.0),
+        isolation_target_mz: None,
     };
     let mut ms1 = envelope(primary.mass(), 2, 1000.0);
     ms1.extend(envelope(secondary.mass(), 3, 500.0));

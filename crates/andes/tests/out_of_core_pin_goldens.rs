@@ -63,6 +63,31 @@
 //! | `--chimeric` slice | 1,751 | 1,717 |
 //! | `--refine` slice | 1,764 | 1,595 |
 //!
+//! REGENERATED 2026-10-13 when the positional-isomer key began separating
+//! target from decoy and a kept row began listing the proteins of the rows
+//! collapsed into it. Against the previous binary's PIN for the same command
+//! line: same rows and SpecIds, every spectrum's winner unchanged, every
+//! column but `Proteins` identical; `Proteins` gains accessions on the rows
+//! whose collapsed copies came from another protein (same residues, different
+//! flanking residues). No target/decoy pair had collided, so no row returned.
+//!
+//! | case | rows | rows with new proteins |
+//! |---|---|---|
+//! | E. coli default mods (and precursor-cal auto) | 74,442 | 2 |
+//! | E. coli fixed mods only | 75,750 | 0 (golden unchanged) |
+//! | E. coli one variable mod | 74,998 | 4 |
+//! | `--chimeric` slice | 1,717 | 0 (golden unchanged) |
+//! | `--refine` slice | 1,595 | 24 |
+//!
+//! REGENERATED 2026-10-14 for the `--chimeric` slice after merging main, whose
+//! Pass 2 no longer emits a secondary that repeats a retained candidate (main's
+//! golden: 1,749 rows). The new golden is main's with its positional-isomer
+//! alternatives removed: 34 rows dropped, the remaining 1,715 identical row for
+//! row with SpecId excluded (no row gains a protein on this slice), every
+//! spectrum's winner unchanged. Against this branch's previous golden (1,717
+//! rows) it lacks exactly main's two dropped Pass-2 rows (scans 60160 and
+//! 60179); every other row is identical with SpecId excluded.
+//!
 //! To regenerate after an intentional change, run the case's command line (see
 //! `run`), then either digest the PIN with `identity_digest` (E. coli) or write
 //! its header and sorted rows, gzipped, over the case's golden PIN (slices).
@@ -242,14 +267,14 @@ fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
 /// One E. coli case: (rows, `identity_digest` FNV-1a 64, calibration outcome line).
 type Golden = (usize, u64, Option<&'static str>);
 
-const ECOLI_DEFAULT_MODS: Golden = (74_442, 0x74fc_7245_ca2d_ee2d, None);
+const ECOLI_DEFAULT_MODS: Golden = (74_442, 0x8d7e_e17f_0589_776a, None);
 const ECOLI_FIXED_MODS_ONLY: Golden = (75_750, 0xb351_f0e9_b195_ade3, None);
-const ECOLI_ONE_VARIABLE_MOD: Golden = (74_998, 0x7da4_731a_cc14_f176, None);
+const ECOLI_ONE_VARIABLE_MOD: Golden = (74_998, 0xd0a6_5c10_f1d5_29f3, None);
 /// The pre-pass scores but the sample is too small to calibrate, so the PIN
 /// equals the calibration-off one.
 const ECOLI_PRECURSOR_CAL_AUTO: Golden = (
     74_442,
-    0x74fc_7245_ca2d_ee2d,
+    0x8d7e_e17f_0589_776a,
     Some("Precursor mass calibration skipped (insufficient confident PSMs: 492 with PSMs, 55 below RawScore floor, 0 failed |residual|>50ppm"),
 );
 
@@ -394,17 +419,44 @@ const CHIMERIC_SLICE_PIN: &str = "test-fixtures/goldens/chimeric_slice.pin.gz";
 /// without it. Pass 1 of the cascade is that search, so the difference is the
 /// rows Pass 2 contributed.
 fn secondary_rows(fragment_index: &str, chimeric_rows: &[String], dir: &Path) -> usize {
-    let (_, plain_rows, _) = run_slice(fragment_index, false, &dir.join(format!("plain_{fragment_index}.pin")));
+    let (_, plain_rows, _) = run_slice(
+        fragment_index,
+        false,
+        &dir.join(format!("plain_{fragment_index}.pin")),
+    );
     chimeric_rows
         .len()
         .checked_sub(plain_rows.len())
         .expect("a --chimeric run must not emit fewer rows than the plain search")
 }
 
+/// Rows that repeat a (scan, peptidoform, charge, label) already emitted: the
+/// chimeric Pass 2 must not re-emit a peptide the scan's retained Pass-1
+/// candidates already carry (it would sit in its own competition group).
+fn duplicate_identifications(header: &str, rows: &[String]) -> Vec<String> {
+    let cols: Vec<&str> = header.split('\t').collect();
+    let col = |name: &str| cols.iter().position(|c| *c == name).expect(name);
+    let (scan, label, pep) = (col("ScanNr"), col("Label"), col("Peptide"));
+    let charges: Vec<usize> = (2..=5).map(|z| col(&format!("charge{z}"))).collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut dups = Vec::new();
+    for row in rows {
+        let f: Vec<&str> = row.split('\t').collect();
+        let charge: Vec<&str> = charges.iter().map(|&i| f[i]).collect();
+        let key = (f[scan], f[pep], charge, f[label]);
+        if !seen.insert(key) {
+            dups.push(format!("scan {} {} label {}", f[scan], f[pep], f[label]));
+        }
+    }
+    dups
+}
+
 #[test]
 fn chimeric_enumeration_pin_matches_golden() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (header, rows, _) = run_chimeric("off", &dir.path().join("enum.pin"));
+    let dups = duplicate_identifications(&header, &rows);
+    assert!(dups.is_empty(), "repeated identifications: {dups:?}");
     let secondaries = secondary_rows("off", &rows, dir.path());
     assert!(
         secondaries > 50,
@@ -420,7 +472,9 @@ fn chimeric_enumeration_pin_matches_golden() {
 fn chimeric_fragment_index_runs_with_unique_specids() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (_, enum_rows, _) = run_chimeric("off", &dir.path().join("enum.pin"));
-    let (_, idx_rows, idx_err) = run_chimeric("auto", &dir.path().join("idx.pin"));
+    let (idx_header, idx_rows, idx_err) = run_chimeric("auto", &dir.path().join("idx.pin"));
+    let dups = duplicate_identifications(&idx_header, &idx_rows);
+    assert!(dups.is_empty(), "repeated identifications: {dups:?}");
     assert!(
         idx_err.contains("candidate retrieval: fragment-ion index"),
         "the fragment-ion index did not run:\n{idx_err}"

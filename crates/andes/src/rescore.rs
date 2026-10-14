@@ -195,14 +195,33 @@ fn cv_scores(d: &PinData, seed: u64) -> Vec<f32> {
 /// Native rescore a PIN → `SpecId → PercolatorPsm` (monotone TDC q-value +
 /// calibrated PEP). Same map shape as `output::run_percolator`, so the caller
 /// reuses the QPX-injection + filtered-TSV path unchanged.
+#[cfg(test)]
 pub fn native_rescore_pin(
     pin_text: &str,
     seed: u64,
 ) -> Result<HashMap<String, PercolatorPsm>, String> {
+    native_rescore_pin_all(pin_text, seed).map(|r| r.targets)
+}
+
+/// [`native_rescore_pin`]'s target map plus every decoy PSM with its
+/// held-out score, keyed by SpecId (the match-between-runs library ranks
+/// targets and decoys by these scores).
+pub struct NativeRescore {
+    pub targets: HashMap<String, PercolatorPsm>,
+    pub decoys: HashMap<String, PercolatorPsm>,
+}
+
+/// Native rescore of a PIN, keeping the decoys' scores; see
+/// [`native_rescore_pin`].
+pub fn native_rescore_pin_all(pin_text: &str, seed: u64) -> Result<NativeRescore, String> {
     let d = parse_pin(pin_text)?;
     let n = d.is_decoy.len();
+    let mut decoys = HashMap::new();
     if n == 0 {
-        return Ok(HashMap::new());
+        return Ok(NativeRescore {
+            targets: HashMap::new(),
+            decoys,
+        });
     }
     let scores = cv_scores(&d, seed);
     let items: Vec<ScoredLabel> = (0..n)
@@ -220,6 +239,17 @@ pub fn native_rescore_pin(
         // filtered TSV / QPX as an accepted identification (the downstream path
         // filters by q-value/PEP and has no decoy label).
         if d.is_decoy[i] {
+            decoys.insert(
+                d.spec_ids[i].clone(),
+                PercolatorPsm {
+                    psm_id: d.spec_ids[i].clone(),
+                    q_value: q[i],
+                    pep: (1.0 - scores[i] as f64).clamp(PROB_EPS, 1.0),
+                    score: Some(scores[i] as f64),
+                    peptide: d.peptides[i].clone(),
+                    proteins: d.proteins[i].clone(),
+                },
+            );
             continue;
         }
         // PEP = 1 − calibrated P(target).
@@ -231,6 +261,7 @@ pub fn native_rescore_pin(
                     psm_id: d.spec_ids[i].clone(),
                     q_value: q[i],
                     pep,
+                    score: Some(scores[i] as f64),
                     peptide: d.peptides[i].clone(),
                     proteins: d.proteins[i].clone(),
                 },
@@ -246,7 +277,10 @@ pub fn native_rescore_pin(
             ));
         }
     }
-    Ok(map)
+    Ok(NativeRescore {
+        targets: map,
+        decoys,
+    })
 }
 
 #[cfg(test)]
@@ -336,6 +370,21 @@ mod tests {
             "result map must exclude decoys, got {} entries",
             map.len()
         );
+    }
+
+    #[test]
+    fn all_keeps_decoy_scores_and_the_same_targets() {
+        let pin = synth_pin(600, true);
+        let all = native_rescore_pin_all(&pin, 42).unwrap();
+        assert_eq!(all.targets, native_rescore_pin(&pin, 42).unwrap());
+        assert_eq!(all.decoys.len(), 300);
+        assert!(all.decoys.keys().all(|k| k.ends_with("_-1")));
+        assert!(all.targets.values().all(|p| p.score.is_some()));
+        // Separable data: the targets outscore the decoys on average.
+        let mean = |v: Vec<f64>| v.iter().sum::<f64>() / v.len() as f64;
+        let t = mean(all.targets.values().map(|p| p.score.unwrap()).collect());
+        let d = mean(all.decoys.values().map(|p| p.score.unwrap()).collect());
+        assert!(t > d, "{t} <= {d}");
     }
 
     #[test]

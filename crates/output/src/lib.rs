@@ -37,12 +37,29 @@ pub use glyco_rt::populate_glyco_rt_features;
 
 pub mod percolator;
 pub use percolator::{
-    parse_psm_results, resolve_backend, run_percolator, PercolatorBackend, PercolatorError,
-    PercolatorPsm, DEFAULT_PERCOLATOR_IMAGE,
+    decoy_results_path, parse_psm_results, resolve_backend, run_percolator,
+    run_percolator_with_decoys, PercolatorBackend, PercolatorError, PercolatorPsm,
+    DEFAULT_PERCOLATOR_IMAGE,
 };
 
 pub(crate) mod percolator_enz;
 pub(crate) mod row_context;
+pub use row_context::emitted_rows;
 
 pub mod glyco_pin;
 pub use glyco_pin::write_glyco_pin;
+
+pub mod quant_out;
+pub use quant_out::{
+    write_lfq_features_tsv, write_lfq_tsv, write_tmt_tsv, LfqRow, ModRecord, QuantId, TmtRow,
+};
+
+pub mod run_quant_table;
+
+pub mod extract_table;
+pub mod library_table;
+pub mod ms1_table;
+
+pub mod feature_parquet;
+pub mod mbr_out;
+pub use feature_parquet::{write_feature_parquet, FeatureRecord, ProteinPosition};

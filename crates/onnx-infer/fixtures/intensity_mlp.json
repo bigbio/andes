@@ -1,0 +1,32 @@
+{
+  "id": "intensity-mlp-fixture",
+  "description": "Toy intensity MLP (MatMul+Add+ReLU); tract CI + rescoring batch smoke",
+  "onnx": "intensity_mlp.onnx",
+  "inputs": [
+    {
+      "name": "features",
+      "shape": [
+        null,
+        4
+      ]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "score",
+      "shape": [
+        null,
+        1
+      ]
+    }
+  ],
+  "task": "rescoring",
+  "provenance": {
+    "origin": "onnx-infer fixture",
+    "license": "Apache-2.0"
+  },
+  "extras": {
+    "n_features": 4,
+    "consumer": "quantms-rescoring"
+  }
+}

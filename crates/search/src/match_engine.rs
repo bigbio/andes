@@ -239,9 +239,12 @@ fn prefetch_window_candidates(cands: &[Candidate], window: &[usize], pos: usize)
 /// mass lies inside are the ones retrieved for it.
 ///
 /// The window is centered on the precursor m/z and widened by the precursor
-/// tolerance plus the isotope-error range. This is the original, byte-for-byte
-/// unchanged derivation used by both the standard search and the cascade's
-/// NARROW Pass 1.
+/// tolerance plus the isotope-error range, then extended to cover every peptide
+/// mass `matches_precursor` accepts at some isotope offset. The nominal centre
+/// alone can miss one: the scaled, rounded nominal mass drifts from the residue
+/// mass by more than a bucket over an isotope shift on heavy peptides (a 2887 Da
+/// residue mass observed at isotope +2 centres the window on 2890 and starts it
+/// at 2888).
 pub(crate) fn candidate_nominal_bounds(
     spec: &Spectrum,
     z: u8,
@@ -267,7 +270,21 @@ pub(crate) fn candidate_nominal_bounds(
     // wrong side there prunes real candidates before the exact filter.)
     let min_nominal = nominal_center - iso_max - widen_left;
     let max_nominal = nominal_center - iso_min + widen_right;
-    (min_nominal, max_nominal)
+    // The lightest and heaviest peptide masses `matches_precursor` accepts over
+    // the isotope range. `nominal_from` is monotone, so their nominal residue
+    // masses bound every accepted peptide's.
+    let observed =
+        adjusted_observed_neutral_mass(spec.precursor_mz * charge_f - charge_f * PROTON, shift_ppm);
+    let (mut lightest, mut heaviest) = (f64::MAX, f64::MIN);
+    for offset in params.isotope_error_range.clone() {
+        let target = observed - offset as f64 * model::mass::ISOTOPE;
+        lightest = lightest.min(target - params.precursor_tolerance.left.as_da(target));
+        heaviest = heaviest.max(target + params.precursor_tolerance.right.as_da(target));
+    }
+    (
+        min_nominal.min(nominal_from(lightest - H2O)),
+        max_nominal.max(nominal_from(heaviest - H2O)),
+    )
 }
 
 /// The charge states a spectrum is searched at: the reported precursor charge is
@@ -415,7 +432,13 @@ impl<'a> PreparedSearch<'a> {
     /// each spectrum's retrieved candidates (after the fragment-index shortlist
     /// when that retrieval is on), and on [`Self::out_of_core_candidates_where`]
     /// and the chimeric Pass-2 pools, so every scored candidate passed it.
+    ///
+    /// The collision-decoy target set is rebuilt from the targets the filter
+    /// keeps: a span none of whose peptidoforms passes is not a target of this
+    /// search, so it must not relabel a decoy with the same sequence.
     pub fn with_candidate_filter(mut self, keep: CandidateFilter) -> Self {
+        self.target_bare_seqs =
+            build_target_bare_seqs_where(&self.mmap_index, self.idx, self.params, &keep);
         self.candidate_filter = Some(keep);
         self
     }
@@ -1422,10 +1445,40 @@ pub fn run_pass2_coisolation(
     let found = mmap_secondaries(prepared, spectra, &scans, params);
 
     // (C) Emit. Winners are interned into the accumulator (scan order) and
-    // their indices rewritten to the global ones.
+    // their indices rewritten to the global ones. A winner whose peptidoform,
+    // charge and target/decoy label the scan already emits (a retained Pass-1
+    // candidate, typically at another isotope offset, or an earlier secondary)
+    // is dropped: its distinct ExpMass would put it in its own competition
+    // group and count the identification twice.
     let mut accum = prepared.mmap_accum.lock().unwrap();
     for (spec_idx, (q, secondaries)) in queues.iter_mut().zip(found).enumerate() {
+        if secondaries.is_empty() {
+            continue;
+        }
+        let mut emitted: std::collections::BTreeSet<(PepDedupKey, u8, bool)> = q
+            .iter_psms()
+            .filter_map(|p| {
+                let i = p.primary_candidate_idx() as usize;
+                let c = accum
+                    .candidates
+                    .get(i)
+                    .or_else(|| prepared.candidates.get(i))?;
+                Some((
+                    PepDedupKey::from_peptide(&c.peptide),
+                    p.charge_used,
+                    c.is_decoy,
+                ))
+            })
+            .collect();
         for (mut psm, cand) in secondaries {
+            let key = (
+                PepDedupKey::from_peptide(&cand.peptide),
+                psm.charge_used,
+                cand.is_decoy,
+            );
+            if !emitted.insert(key) {
+                continue;
+            }
             psm.candidate_idxs = vec![accum.intern(cand)];
             // `spec_idx` is chunk-local (indexes `spectra` + `link`); the emitted
             // spectrum_idx must be global to align with `all_spectra`.
@@ -2371,6 +2424,7 @@ mod feature_tests {
             activation_method: None,
             isolation_lower_offset: None,
             isolation_upper_offset: None,
+            isolation_target_mz: None,
         }
     }
 
@@ -3053,6 +3107,38 @@ fn build_target_bare_seqs(mi: &MmapCandidateIndex, db: &SearchIndex) -> FxHashSe
             let seq = &db.db.proteins.get(rec.protein_index as usize)?.sequence;
             let start = rec.start_offset as usize;
             seq.get(start..start + rec.length as usize)
+        })
+        .collect();
+    spans.par_sort_unstable();
+    spans.dedup();
+    let mut set = FxHashSet::with_capacity_and_hasher(spans.len(), Default::default());
+    set.extend(spans.into_iter().map(|s| s.to_vec().into_boxed_slice()));
+    set
+}
+
+/// [`build_target_bare_seqs`] restricted to the target spans with at least one
+/// peptidoform that `keep` accepts.
+fn build_target_bare_seqs_where(
+    mi: &MmapCandidateIndex,
+    db: &SearchIndex,
+    params: &SearchParams,
+    keep: &CandidateFilter,
+) -> FxHashSet<Box<[u8]>> {
+    use crate::candidate_index::flags as rec_flags;
+    let mut spans: Vec<&[u8]> = (0..mi.len())
+        .into_par_iter()
+        .filter_map(|i| {
+            let rec = mi.record_at(i);
+            if rec.flags & rec_flags::IS_DECOY != 0 {
+                return None;
+            }
+            let seq = &db.db.proteins.get(rec.protein_index as usize)?.sequence;
+            let start = rec.start_offset as usize;
+            let span = seq.get(start..start + rec.length as usize)?;
+            expand_base_record(db, params, &rec)
+                .iter()
+                .any(keep)
+                .then_some(span)
         })
         .collect();
     spans.par_sort_unstable();

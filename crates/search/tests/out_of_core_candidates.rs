@@ -137,6 +137,7 @@ fn spectrum_for(pep: &Peptide, charge: u8, title: &str) -> Spectrum {
         activation_method: None,
         isolation_lower_offset: None,
         isolation_upper_offset: None,
+        isolation_target_mz: None,
     }
 }
 

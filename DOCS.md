@@ -92,7 +92,9 @@ noise swamp the count (TMT 12,281 -> 4,368 PSMs at 1%). Capped, the index matche
 enumeration (TMT 12,347 vs 12,281 PSMs at 1%, UPS1 15,848 vs 15,838) at the same CPU and wall time
 in less than half the memory (TMT 1.7 vs 5.9 GB). Every search uses the out-of-core index: `--glyco`
 looks its candidates up by backbone mass in its own sequon-only table built from it, and the
-`--refine` second pass searches an in-memory index of its anchored peptides. The engine prints
+`--refine` second pass searches an in-memory index of its anchored peptides. ETD and UVPD spectra
+score every candidate in each precursor window, because the b/y-only fragment-ion index does not
+hold their c/z and a/x ions. The engine prints
 its choice; `--fragment-index off` scores every candidate in each precursor window instead
 ([measurements](docs/benchmarks/README.md#choosing-the-retrieval-strategy)).
 
@@ -138,7 +140,7 @@ Needs MS1: **mzML or Thermo `.raw`** only (MGF/`.d` warn and run a normal search
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--chimeric` | flag | *(off)* | Pass 2 finds co-isolated precursors in the MS1 isolation window (averagine match) and searches the residual spectrum for a second peptide. Forces top-1 per pass and MS2. Experimental. |
+| `--chimeric` | flag | *(off)* | Pass 2 finds co-isolated precursors in the MS1 isolation window (averagine match) and searches the residual spectrum for a second peptide. Pass 1 keeps the same `--top-n` candidates per scan as a plain search; Pass 2 takes the best one as the primary peptide. Forces MS2. Experimental. |
 | `--chimeric-max-coisolated` | u32 | `4` | *(advanced)* Max co-isolated precursors per scan. |
 | `--chimeric-max-kl` | f64 | `0.3` | *(advanced)* Max isotope-envelope KL divergence to accept a co-isolated precursor. |
 
@@ -168,7 +170,7 @@ when a pipeline (e.g. quantms) owns rescoring. `--fdr`/`--pep` alone are ignored
 | `--rescore` | flag | *(off)* | Run Percolator and write rescored, filtered output. |
 | `--rescore-native` | flag | *(off)* | *(advanced)* Built-in GBDT rescorer (3-fold CV folded by spectrum); non-production fallback. |
 | `--fdr` | fraction | `0.01` | q-value threshold applied by a rescoring run. |
-| `--pep` | fraction | *(off)* | *(advanced)* PEP threshold, ANDed with `--fdr`. |
+| `--pep` | fraction | *(off)* | *(advanced)* PEP threshold, ANDed with `--fdr` (and with `--quant-fdr` for quantification targets and `--mbr` donors). |
 | `--percolator-bin` / `--percolator-docker` / `--percolator-image` / `--percolator-args` | — | auto | *(advanced)* Backend: `--percolator-bin`, else `$PATH`, else Docker; `--percolator-args` passes flags through. |
 | `--keep-pin` | bool | `true` | *(advanced)* Keep the intermediate PIN after rescoring. |
 
@@ -178,14 +180,38 @@ See [§9](#9-glycopeptide-search-experimental--advanced-knobs).
 
 ### Isobaric labeling (TMT / iTRAQ)
 
-See [§7](#7-isobaric-labeling).
+See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model) and
+[§10](#10-quantification) for reporter-ion quantification (`--tmt`).
+
+### Quantification (reporter ions, label-free)
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--tmt` | enum | *(off)* | Isobaric reporter quantification of the confident PSMs: `tmt6`, `tmt10`, `tmt11`, `tmt16`, `tmt18`, `itraq4`, `itraq8`. Writes `<stem>.tmt.tsv` (§3f). |
+| `--tmt-level` | `2\|3` | `2` | Reporter scan: the identified MS2, or the SPS-MS3 whose precursor references it (mzML `<precursor spectrumRef>`, `.raw` `Master Scan Number` trailer). |
+| `--tmt-tol` | tolerance | `20ppm` for high-res MS2 and for `--tmt-level 3`; `0.3da` for ion-trap MS2 | Most intense centroid within this window of each reporter m/z. A window that reaches half the spacing of the kit's closest channels (6.3 mDa for the TMT 10/11/16/18-plex N/C pairs) is refused, so ion-trap MS2 cannot quantify those kits at `--tmt-level 2`. |
+| `--tmt-correction` | path | *(none)* | Isotope impurity sheet of the kit lot (§10); corrected intensities by NNLS, raw kept alongside. |
+| `--tmt-min-purity` | 0..1 | `0` | Drop PSMs below this precursor isolation purity from `tmt.tsv` (they stay in the parquet). |
+| `--lfq` | flag | off | Label-free MS1 quantification of the confident precursors (§10). Writes `<stem>.lfq.tsv` and `<stem>.lfq_features.tsv`. mzML / `.raw` with high-resolution MS1; the MS2 may be ion-trap. |
+| `--quant-dir` | dir | *(none)* | Per input file writes `<stem>.ms1.parquet` (the run's MS1 scans, every FAIMS voltage) and `<stem>.quant.parquet` (every rank-1 PSM, targets and decoys, no FDR filter; `spec_id` is the PIN SpecId, `search_score` the PIN `RawScore`) for the multi-run quantification stages. Implies MS1 capture; same inputs as `--lfq`. Two inputs with the same stem, or an input without MS1 scans, are an error. Other outputs are unchanged. |
+| `--lfq-tol` | tolerance | `10ppm` | MS1 tolerance of the isotope chromatograms, and of the `--mbr` template fit (ppm only there). |
+| `--lfq-rt-window` | seconds | `60` | Half-window around the identifying PSM's retention time. |
+| `--lfq-gaussian-width` | seconds | *(none)* | Experimental Gaussian smoothing width (eight sigma) for peak detection; areas use raw traces. Validate feature-q coverage for the acquisition. Default detection uses five-scan Savitzky–Golay. |
+| `--lfq-min-cosine` | 0..1 | `0.7` | Minimum isotope-envelope cosine for both target and decoy eligibility before feature competition. All target features remain in `lfq_features.tsv` and the parquet. |
+| `--lfq-feature-fdr` | 0..1 | `0.05` | Feature FDR for `lfq.tsv` from the target/decoy competition of each feature against its +11 Th twin. |
+| `--quant-fdr` | 0..1 | `--fdr` | PSM q-value cut for quantification targets when `--rescore`/`--rescore-native` ran. With `--mbr`, also the PSM q-value at which a run identifies a precursor (§10). |
+| `--mbr` | flag | off | Match-between-runs label-free quantification across two or more inputs (§10). Needs `--lfq` and `--rescore` (or `--rescore-native`); not with `--tmt`. Writes `<stem>.mbr.tsv` and `<stem>.mbr_validation.tsv`; with `--output-parquet`, `quantms.feature.parquet` holds these rows (without the below-threshold transfers) instead of the per-run features. Uses `--quant-dir`, or a temporary directory removed at exit. With `--rescore` (Percolator), same result as `andes quant library`, `extract` and `finalize` on the same Percolator results. |
+| `--mbr-library-fdr` | 0..1 | `0.01` | Internal library entry gate (precursor-level), not a reported identification FDR: best-PSM-per-precursor target/decoy q-value over the rescored PSM scores of all runs. |
+| `--mbr-fdr` | 0..1 | `0.01` | Transfer quality q-value: transfers at or below it are `transfer_ms1`. An internal quant-quality q-value, not an identification FDR. |
+
+With `--output-parquet`, both modules add `quantms.feature.parquet` (the QPX feature view) to the bundle.
 
 ---
 
 ## 1b. Configuration file (`--config`)
 
 `andes --config run.yaml` sets any parameter from YAML, in sections `io`, `search`, `scoring`,
-`decoys`, `chimeric`, `refine`, `rescoring`, `glyco` (template:
+`decoys`, `chimeric`, `refine`, `rescoring`, `glyco`, `quant` (template:
 [`config.example.yaml`](config.example.yaml)). Keys are optional; **`CLI flag > --config >
 built-in default`**; unknown keys are a hard error. Values use the CLI strings
 (`precursor_tol: 20ppm`, `charge: "2..5"`, `isotope_error: "-1..2"`, `enzyme: gluc,trypsin`).
@@ -269,8 +295,9 @@ Percolator `.pin` (always), plus optional `.tsv` and QPX parquet. Implementation
 Tab-separated, one row per PSM, best-first within each spectrum by `RankScore`. Positional
 isomers are collapsed: of the PSMs a spectrum keeps at one precursor and charge that share their
 residues and their multiset of modification masses (the same peptide with a modification on
-another site), only the best-ranked row is written. The TSV and QPX outputs carry the same rows.
-Rank is assigned after the collapse. The `chargeN`
+another site), only the best-ranked row is written; a decoy never collapses into a target, and the
+kept row's `Proteins` lists the proteins of the rows collapsed into it. The TSV and QPX outputs
+carry the same rows. Rank is assigned after the collapse. The `chargeN`
 one-hots follow `--charge`; the default 2–5 gives the 66 columns below. Do not confuse
 **`RankScore`** (col 7, orders candidates; historically `RawScore`) with **`RawScore`** (col 62,
 the fused strong score Percolator weights most; historically `StrongScore`; it also ranks under
@@ -397,12 +424,47 @@ per-modification tally to stderr and to `statistics.log` next to the PIN.
 [quantms](https://github.com/bigbio/quantms). `psms.parquet` carries the peptidoform,
 modifications, charge, m/z, `is_decoy`, scan/rt, proteins, the spectrum arrays, `score`
 (`andes:RawScore`) and the other features in `additional_scores`. PEP and q-value are null
-until rescoring; andes does no protein inference.
+until rescoring; andes does no protein inference. With `--rescore`, every target row must join a
+Percolator result, except where target-decoy competition (`--percolator-args=-Y`) kept another
+PSM of its scan/`ExpMass` group: those target rows are left out of the bundle, as they are out
+of Percolator's output.
 
 ```bash
 andes --spectrum spectra.mzML --database db.fasta \
   --output-pin out.pin --output-parquet out.idparquet
 ```
+
+---
+
+### 3f. Quantification tables (`--tmt`, `--lfq`)
+
+Written next to the PIN (or next to `--output-tsv`/`--output-parquet` under `--rescore` without
+`--output-pin`), see §10 for the methods:
+
+| File | Rows | Columns |
+|---|---|---|
+| `<stem>.tmt.tsv` | one per quantified PSM | `filename scannr spec_id quant_scan quant_ms_level rt peptide charge proteins is_decoy psm_q_value psm_pep purity`, then one `tmt_<channel>` (or `itraq_<channel>`) per channel, then `raw_<...>` when a correction matrix was applied |
+| `<stem>.lfq.tsv` | one per (peptidoform, charge) at feature q ≤ `--lfq-feature-fdr` and cosine ≥ `--lfq-min-cosine` | `peptide charge proteins feature_q_value score cosine`, then the integrated area per input file |
+| `<stem>.lfq_features.tsv` | one per feature per run (all, with their q-value) | apex RT, boundaries, scan count, area, apex height, per-isotope areas, cosine, score, decoy score, feature q-value |
+| `<stem>.mbr.tsv` (`--mbr`, `andes quant finalize -o <stem>`) | one per (precursor, run) identified in or transferred into the run | `precursor_key run evidence_type quantity quantity_se transfer_q apex_rt_s library_q`; `evidence_type` is `identified` (the run has a target PSM of the precursor at PSM q ≤ `--quant-fdr` and, with `--pep`, PEP ≤ `--pep`), `transfer_ms1` (transfer q ≤ `--mbr-fdr`) or `below_threshold` (quantity kept, as censored; in this table only); `transfer_q` and `library_q` are internal quant-quality values, not identification FDR; `NA` for missing values. Precursors that fail the library entry gate have no rows |
+| `<stem>.mbr_validation.tsv` | one | pseudo-transfer validation (identified pairs re-measured as transfers: acceptance rate `pseudo_acceptance_*`, wrong-peak rate) and accepted transfer counts for the pooled and per-decoy-family estimates, at q ≤ 0.01 (`_q01`) and at `--mbr-fdr` (`_at_threshold`) |
+| `<dir>/quantms.feature.parquet` | one per feature (LFQ) or quantified PSM (isobaric) | the QPX feature view (`intensities` as `[{label, intensity}]` with `LFQ` or `TMT126`-style labels; `additional_intensities` with the raw/apex/isotope values; purity, cosine, q-values in `additional_scores`; `psm_ids` pointing at `psms.parquet` rows) |
+
+With `--mbr` (or `andes quant finalize --output-parquet <dir>`), `quantms.feature.parquet` holds
+one row per `identified` or `transfer_ms1` row of `<stem>.mbr.tsv` instead of the per-run
+`--lfq` features, with three extra columns: `evidence_type`, `transfer_q` and `quantity_se`.
+`below_threshold` transfers are left out (they stay in `<stem>.mbr.tsv` with their quantity and
+standard error), so every LFQ intensity in the parquet passed the transfer q-value; precursors
+that fail the library entry gate are absent. Modifications come from the peptidoform's tags (the
+accession is the name), proteins carry no positions, and `psm_ids` is empty.
+
+Files in the quant directory (`--quant-dir`), all Parquet: per run `<stem>.ms1.parquet` and
+`<stem>.quant.parquet` (search), `<stem>.extract.parquet` (extract); once `library.parquet` and
+`alignment.parquet` (library). Each file carries a schema version (`andes.<table>.schema`); a
+reader rejects another major version and names the file. `<stem>.ms1.parquet` holds one row per
+MS1 scan in retention-time order: `native_id`, `rt_s`, `faims_cv` (null without FAIMS), and the
+centroids as two equal-length lists `mz` (Float64) and `intensity` (Float32), stored bit for bit;
+its metadata also names the run (`andes.ms1.run`).
 
 ---
 
@@ -627,7 +689,268 @@ needs them to place a threshold.
 
 ---
 
-## 10. License and citation
+## 10. Quantification
+
+andes quantifies at the **feature level** inside the search run and leaves normalization across
+samples, peptide-to-protein roll-up and statistics to quantms / OpenMS (ProteinQuantifier,
+MSstats, MSstatsTMT), which know the experimental design. Both modules run after rescoring, on
+the rank-1 target PSMs at `q ≤ --quant-fdr` (default `--fdr`, 0.01); without `--rescore` /
+`--rescore-native` every rank-1 target PSM is quantified and the tables must be filtered
+downstream (a warning says so).
+
+MS1 scans are stored losslessly in private temporary files after each input run is
+searched, then loaded one run at a time for quantification and precursor purity.
+They do not remain in memory while Percolator runs. Scratch space is approximately
+12 bytes per centroid plus scan headers; files are removed when the run exits
+normally or returns an error. Set `TMPDIR` to choose the scratch directory. A
+single input run's MS1 scans still need to fit in memory while it is processed.
+
+### Isobaric reporter ions (`--tmt <plex>`)
+
+* **Extraction.** For each quantified spectrum, the most intense centroid within `--tmt-tol` of
+  each reporter m/z of the kit (OpenMS's channel tables: TMT 6/10/11/16/18-plex, iTRAQ 4/8-plex);
+  0 when absent. `--tmt-level 2` reads the identified MS2; `--tmt-level 3` reads the MS3 whose
+  `<precursor spectrumRef>` (mzML) or `Master Scan Number` trailer (`.raw`) is that MS2 — the MS3
+  scans are kept by the reader for this and are never searched. The default `--tmt-tol` follows
+  the reporter scan: SPS-MS3 reporters are read in the Orbitrap even when the MS2 is an ion-trap
+  scan, so `--tmt-level 3` defaults to 20 ppm. A reporter scan whose recorded scan window
+  (`scan window lower/upper limit`, the `.raw` acquisition range) does not reach every reporter
+  m/z is not quantified — an automatic first mass above 126 Th never measured the low channels,
+  and their zeros are not ratios — and is counted in the log.
+* **Impurity correction** (`--tmt-correction <file>`). The kit lot sheet in the OpenMS text form,
+  one line per channel in kit order, `-2/-1/+1/+2` percentages separated by `/` (eight columns
+  `-2C13/-N15-C13/-C13/-N15/+N15/+C13/+N15+C13/+2C13` for TMTpro), optional `<channel>:` prefix,
+  `#` comments, `NA`/`-1` for no spill. Labels must match kit order; rows whose percentages
+  sum to more than 100 are rejected. The observed vector is solved as `observed = M · true`
+  by non-negative least squares (the `IsobaricIsotopeCorrector` model), so corrected intensities
+  agree with IsobaricAnalyzer / IsobaricWorkflow for the same matrix. Without a sheet, no
+  correction (Sage's behavior). The raw values are always kept (`raw_` columns, parquet
+  `additional_intensities`).
+* **Precursor purity.** The share of the MS1 isolation window's ion current that belongs to the
+  precursor's isotope envelope, from the MS2's survey scan — the scan its precursor references
+  (mzML `<precursor spectrumRef>`, `.raw` `Master Scan Number`), else the last MS1 before it at
+  the same FAIMS compensation voltage, else the last MS1 before it. (On FAIMS runs the last MS1 in
+  time is usually a survey scan at another voltage, which does not contain the precursor.) The most intense peak
+  within 10 ppm of the precursor m/z anchors a ¹³C isotope ladder (10 ppm per step, both
+  directions); the isotopes that fall inside the strict isolation window count as envelope. The
+  window is centred on the isolation target m/z (mzML `isolation window target m/z`), not on the
+  precursor m/z: when the instrument isolated a heavier isotope than the monoisotopic m/z it
+  assigned, the window covers what was actually isolated. Without a recorded target the window
+  is centred on the precursor m/z. The native `.raw` reader reports the window around the
+  monoisotopic m/z, so on `.raw` input the window stays centred there. This is the ladder of OpenMS's
+  `IsobaricChannelExtractor` without its fuzzy window border and next-scan interpolation, and
+  with ¹³C spacing and a two-sided nearest-peak match (OpenMS steps by the neutron mass and
+  misses the upper isotopes, OpenMS/OpenMS#10467). Reported per PSM; `--tmt-min-purity`
+  filters `tmt.tsv`. Needs the isolation window offsets in the file, and is not computed under
+  `--chimeric`.
+* **Not done here:** reference-channel ratios, channel normalization, protein aggregation.
+
+```bash
+andes --spectrum tmt_run.mzML --database human.fasta --mods tmt10_mods.txt \
+      --rescore --fdr 0.01 --tmt tmt10 --tmt-correction lot_XY.txt \
+      --output-parquet run.idparquet
+```
+
+### Label-free MS1 features (`--lfq`)
+
+* **Targets.** One per (peptidoform, charge, run) from the best confident PSM, with its retention
+  time as the anchor; the theoretical isotope envelope comes from the peptide's elemental formula
+  (standard residues exact; modification deltas as averagine atoms).
+* **Extraction.** The first four isotope chromatograms at `--lfq-tol` over ± `--lfq-rt-window`
+  around the anchor, from every MS1 scan of the run (16 bytes per centroid in memory;
+  kept in a temporary MS1 table, the `<stem>.ms1.parquet` format, between search and
+  quantification). The monoisotopic trace is smoothed
+  (5-point Savitzky–Golay by default). `--lfq-gaussian-width <seconds>` instead uses an
+  RT-weighted Gaussian kernel (width = eight sigma, finite support ± four sigma), following
+  the OpenMS width convention. This optional setting can reduce premature boundaries in noisy
+  traces; choose it for the chromatography and validate accuracy and coverage on held-out runs.
+  It also changes the feature-score distribution: a width that improves dilution ratios on
+  one acquisition can sharply reduce acceptance at the same feature-q cutoff on another.
+  Audit both diagnostic features and accepted features; this is an experimental opt-in setting.
+  Both targets and decoys use the same smoothing; integrated intensities always come from raw
+  traces. The peak that contains the anchor is climbed to its apex, and each
+  boundary is placed two half-widths at half maximum from the apex (±2.35 σ of a Gaussian, 98 %
+  of its area) or at an earlier deep valley (the trace fell below half the apex and rose 1.5x
+  again). Every isotope is integrated (trapezoid, intensity·seconds) over the same boundaries.
+  Intensity = summed isotope areas; the apex height and per-isotope areas are reported too.
+* **Envelope check.** Cosine between the per-isotope areas and the theoretical envelope;
+  targets and decoys below `--lfq-min-cosine` are excluded before competition. The diagnostic
+  outputs retain all target features. A feature whose monoisotopic area holds
+  less than 30 % of its theoretical share is not reported at all: its M+1.. traces belong to an
+  isotope-shifted species (a deamidated form, say), not to the target.
+* **Resolution check.** Each run's MS1 scans are tested once: Orbitrap/TOF survey scans give 70–95 %
+  of their most intense centroids an isotope partner within 10 ppm. A run far below that is
+  reported as low-resolution in a warning; label-free areas from it are not meaningful.
+* **Feature q-value (experimental).** Each target gets a decoy twin extracted 11 Th above it;
+  unrelated real peptides can occur there. The score
+  `cosine³ · (1 − |Δrt|/window)^⅓ · √(apex/max apex)` uses the maximum apex over both targets
+  and decoys. After applying the same cosine cutoff to both, picked competition retains the
+  higher score (exact ties go to the decoy). The `(decoys + 1)/targets` estimate is evaluated
+  over complete equal-score groups and converted to monotone q-values. `lfq.tsv` keeps target
+  winners at q ≤ `--lfq-feature-fdr`; the diagnostic TSV and parquet retain all target features,
+  with no feature q-value for ineligible targets or targets that lost competition.
+  These are decoy-based estimates, not a demonstrated error-rate guarantee: the shifted-decoy
+  model still needs calibration on representative negative-control/entrapment datasets.
+  PSM identification FDR and quantitative accuracy are separate from this estimate.
+  Feature competition does not replace PSM confidence: an incorrect peptide assignment
+  can still anchor a convincing MS1 trace and survive the feature filter.
+* **FAIMS.** On runs with several FAIMS compensation voltages the survey scans of each voltage
+  form their own chromatographic series, and each precursor is extracted from the series of the
+  voltage its PSM was acquired at. (Interleaved voltages otherwise put zeros between every
+  measured scan, which truncates the peak boundaries: on a three-voltage Lumos run the mixed
+  series gave a median integration window of 4 s instead of 22 s and areas ~10x too small.)
+* **Runs.** Each `--spectrum` file is quantified on its own identifications; `lfq.tsv` is wide
+  over the files. Transfers between runs are `--mbr` (below).
+* **Not done here:** normalization, MaxLFQ / top-N protein intensities.
+
+```bash
+andes --spectrum run1.mzML --spectrum run2.mzML --database human.fasta \
+      --rescore --fdr 0.01 --lfq --output-parquet runs.idparquet
+```
+
+### Match between runs (`--mbr`, `andes quant`)
+
+A precursor (peptidoform and charge) identified in some runs is measured in every run, so
+each (precursor, run) gets one consistent quantity. Four stages, run in one process by
+`andes search --lfq --mbr --rescore` on two or more inputs, or one at a time over a quant
+directory (for a pipeline that scatters runs over machines):
+
+```bash
+# per run (any machine): MS1 + PSM tables into the shared directory, PIN, Percolator
+andes --spectrum a.mzML --database db.fasta --output-pin a.pin --quant-dir q/
+andes --spectrum b.mzML --database db.fasta --output-pin b.pin --quant-dir q/
+# once: the library, from each run's Percolator results
+andes quant library  --quant-dir q/ [--quant-fdr 0.01] [--pep 0.05] \
+      --psms a=a.target.psms --psms b=b.target.psms \
+      --decoy-psms a=a.decoy.psms --decoy-psms b=b.decoy.psms
+# per run (any machine that sees q/); --lfq-tol as in the search, default 10ppm
+andes quant extract  --quant-dir q/ --run a [--lfq-tol 10ppm]
+andes quant extract  --quant-dir q/ --run b [--lfq-tol 10ppm]
+# once
+andes quant finalize --quant-dir q/ -o experiment [--mbr-fdr 0.01] [--output-parquet dir]
+```
+
+PSMs are joined to the run tables on (run, SpecId). Percolator results come either per run
+(`--psms <stem>=<file>` and `--decoy-psms <stem>=<file>` for every run) or as one merged pair
+of files (`--psms <file> --decoy-psms <file>`, e.g. Percolator over the PIN of one
+multi-input search, whose SpecIds carry the file name). Separately searched runs usually share
+SpecIds (the scan titles); a merged pair over such runs is rejected, naming the SpecId and the
+runs, because it cannot say which run a score belongs to. Where possible, prefer one
+Percolator run over the PINs of all runs (one merged pair, or split per run) to a separate
+Percolator run per input: the library ranks each precursor by its best score across runs, and
+scores from separately trained Percolator models are not on one scale.
+
+* **Library** (`quant library`). Reads every run's `<stem>.quant.parquet` (`--runs`, or every
+  table in the directory; a missing PSM or MS1 table is an error) and joins Percolator's
+  `score`, `q-value` and PEP to its PSMs on (run, SpecId) (target and decoy result files; every
+  PSM needs a finite `score`). Each joined PSM is checked against the result's residue sequence (flanks and
+  modification notation ignored) and target/decoy file. A PSM that disagrees is skipped
+  (counted in the log), and a run where more than 1 % of the joined PSMs disagree fails, naming the run and the file (swapped or foreign results). Runs are indexed by sorted stem, precursors by sorted key. A precursor enters
+  the library when its best-PSM target/decoy q-value over all runs is at most
+  `--mbr-library-fdr` (an internal entry gate over every PSM's score, not a reported FDR) and
+  it has a target PSM at PSM q-value ≤ `--quant-fdr` (and PEP ≤ `--pep` when given, as for
+  the per-run quantification). A run identifies the precursor (is a donor) when it has such a
+  PSM there: only those PSMs give the identified RT, the alignment
+  anchors and the `identified` rows. A run where the precursor has only PSMs above
+  `--quant-fdr` (or above `--pep`) gets a transfer, with a transfer q-value, like a run without
+  any PSM. In process, `--quant-fdr` and `--pep` are the search's (default `--fdr`, no PEP
+  cap); `quant library --quant-fdr` defaults to 0.01 and `quant library --pep` to no cap. A joint, reference-free
+  retention-time alignment maps every run onto a consensus scale and gives each transfer a
+  predicted apex and its uncertainty. The per-run residual width is floored at 0.5 s. The
+  uncertainty combines the receiving run's residual width with the donor runs' own widths
+  (carried through each run's map), so a precursor seen only in a run with noisy RTs gets a
+  correspondingly wide search window everywhere. A run
+  with fewer than 50 anchors, or whose anchors cover
+  less than 30 % of the RT range, is unaligned: it is logged, neither gives nor receives
+  transfers, and keeps the `identified` rows of its own identifications. Two aligned runs
+  that share at least 20 identified precursors are linked; the groups of runs connected this
+  way are alignment components. Only shared precursors fix the relative RT scale of two
+  runs, so each component is fitted on its own anchors, and a precursor is transferred into
+  a run only from donor runs in the same component. A run that shares fewer than 20
+  precursors with every other aligned run is unaligned.
+  When the aligned runs form several components the library log lists them, and each
+  extract log counts the transfers and pseudo-transfers skipped because every donor run lies
+  in another component.
+* **Extract** (`quant extract`, one run, reads `library.parquet`, `alignment.parquet` and the
+  run's `<stem>.ms1.parquet`). Every library precursor
+  is measured, at the `--lfq-tol` m/z tolerance (ppm; default 10 ppm), by a likelihood template fit of its isotope pattern and elution profile around
+  the predicted apex (around the PSM's RT where it was identified), with two decoy hypotheses
+  per transfer: a mass-defect-preserving m/z shift and an RT shift. Identified pairs are also
+  measured as if they were transfers (pseudo-transfers). FAIMS runs are fitted on the series of
+  the precursor's compensation voltage (its most frequent voltage among the donor PSMs). A
+  precursor whose voltage the FAIMS run lacks is not measured there and is counted in the log;
+  it is never fitted on another voltage or on the mixed series. Precursors without a voltage,
+  and every precursor in a run without FAIMS, are fitted on the whole run.
+* **Finalize** (`quant finalize`). A cross-validated GBDT (3 folds by precursor) separates
+  transfer targets from their decoys; the transfer q-value is the K-decoy estimate over held-out
+  scores, `(D + 1) / (K · max(T, 1))` at each score threshold (capped at 1, then the running
+  minimum), with `K` the decoy-to-target ratio; it is also reported per decoy family. The `+1`
+  keeps a small fold from giving q = 0 to targets that merely outscore a few decoys. It is a quant-quality q-value, not an identification
+  FDR. Pseudo-transfers give an acceptance rate and the wrong-peak rate, which decoys cannot
+  see. The acceptance rate is optimistic as a transfer sensitivity: a pseudo-transfer's
+  predicted apex leaves the run's own observation out of the consensus RT, but the run's
+  alignment map was fitted with that observation as one of its anchors.
+
+`library.parquet` records a fingerprint of the library (and of `alignment.parquet`, checked on
+read); each extract table records that fingerprint and its `--lfq-tol`. `quant finalize` fails,
+naming the file, on an extract made from another library (stale) or at another tolerance than
+the other runs. The fingerprint covers the library, not the MS1 tables or the run tables: after
+searching a run again, run `quant library`, every `quant extract` and `quant finalize` again.
+
+`--mbr` without `--quant-dir` writes the per-run artifacts to a temporary directory (under
+`TMPDIR`): each run's `<stem>.ms1.parquet` (about 5–6 bytes per centroid; about 200 MB for an
+Orbitrap run with 38 million MS1 centroids) plus its tables. For large runs pass
+`--quant-dir` on a disk with room. Any search that quantifies also keeps a temporary copy of
+each run's MS1 table under `TMPDIR` until quantification ends. In-process, the stages run
+after every search output is written and the search state is freed, one run's MS1 at a time.
+
+`--mbr` is label-free only and is refused with `--tmt`. With `--mbr --output-parquet`,
+`quantms.feature.parquet` holds the match-between-runs rows (identified and `transfer_ms1`)
+and replaces the per-run `--lfq` feature rows, which stay in `<stem>.lfq.tsv` and
+`<stem>.lfq_features.tsv`; below-threshold transfers and precursors that fail the library
+entry gate are not in it (§3f).
+
+The stage path and the in-process run use the same code on the same files. With `--rescore`
+(Percolator) they give a byte-identical `<stem>.mbr.tsv` for the same Percolator results,
+`--quant-fdr`, `--pep` and `--lfq-tol`: pass the search's `<pin>.percolator.target.psms.txt` and
+`<pin>.percolator.decoy.psms.txt` to `quant library`. With `--rescore-native` the scores
+(held-out scores and q-values of the native rescorer) are only available in process;
+`quant library` has no input for them.
+
+**Known limits (memory).** The library stage holds every run's rank-1 PSMs (targets and
+decoys) with their joined scores at once, so its memory grows with the total PSM count across
+runs, about 0.5-0.7 KB per rank-1 PSM (around 100 GB for 1,000 long runs). Finalize holds
+every run's extract rows at once, and each extract loads the whole alignment. Streaming these
+stages is planned.
+
+### Relation to other quantifiers
+
+* [IonQuant](https://doi.org/10.1016/j.mcpro.2021.100077) estimates **match-between-runs**
+  error using multiple scores and a semiparametric mixture model. Its shifted decoy search
+  starts at +11 × 1.0005 Th and tries smaller shifts when no peak can be traced. Andes
+  `--mbr` uses its own estimator (above): a classifier over template-fit features with
+  mass-shift and RT-shift decoys.
+* [Sage](https://github.com/lazear/sage/blob/master/crates/sage/src/lfq.rs) uses aligned RT
+  grids, a normalized spectral-angle score, and +11.06 Th / shifted-RT decoys. Its hybrid
+  score inspired the powers above; Andes uses cosine, a run-wide height scale and independent
+  within-run extraction, so the scores and thresholds are not interchangeable. Sage applies
+  its envelope threshold during peak selection, before estimating precursor q-values.
+* [OpenMS FeatureFinderIdentification](https://openms.org/documentation/html/TOPP_FeatureFinderIdentification.html)
+  combines identification-guided extraction with chromatographic coelution/shape and mass-error
+  scores, and supports elution-model fitting. Those checks are useful next steps for Andes;
+  matching integrated isotope areas alone does not establish coelution.
+
+### Limits in this release
+
+`--lfq` and `--tmt-level 3` need mzML or Thermo `.raw` (MS1 / MS3 scans; MGF carries MS2 only
+and Bruker `.d` MS1 frames are not read yet) and cannot be combined with `--chimeric`;
+`--tmt <plex>` at MS2 works with every input and with `--chimeric`, without precursor purity
+there (`--tmt-min-purity` is refused). Purity is unavailable without MS1 scans or isolation
+offsets. Neither module runs in `--glyco` mode.
+
+---
+
+## 11. License and citation
 
 andes is licensed under the **Apache License 2.0**. See [`LICENSE`](LICENSE) for the full text and [`NOTICE`](NOTICE) for attribution and the project's origin in MS-GF+. The software is provided **"as is"** without warranty.
 

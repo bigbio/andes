@@ -715,6 +715,7 @@ mod tests {
             activation_method: None,
             isolation_lower_offset: None,
             isolation_upper_offset: None,
+            isolation_target_mz: None,
         }
     }
 
@@ -872,6 +873,7 @@ mod tests {
             activation_method: None,
             isolation_lower_offset: None,
             isolation_upper_offset: None,
+            isolation_target_mz: None,
         };
 
         let loss_scorer = RankScorer::new(&loss_table_param());
@@ -900,6 +902,7 @@ mod tests {
             activation_method: None,
             isolation_lower_offset: None,
             isolation_upper_offset: None,
+            isolation_target_mz: None,
         };
         let a = score_psm(
             &ScoredSpectrum::new(&sp, &loss_scorer, 2),
@@ -971,6 +974,7 @@ mod tests {
             activation_method: None,
             isolation_lower_offset: None,
             isolation_upper_offset: None,
+            isolation_target_mz: None,
         };
         let scored = ScoredSpectrum::new_without_filtering(&spec);
         let scorer = RankScorer::new(&param);
@@ -1014,6 +1018,7 @@ mod tests {
             activation_method: None,
             isolation_lower_offset: None,
             isolation_upper_offset: None,
+            isolation_target_mz: None,
         };
 
         let scorer = RankScorer::new(&param);

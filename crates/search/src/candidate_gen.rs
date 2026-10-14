@@ -62,7 +62,7 @@ pub fn enumerate_candidates<'a>(
         .filter(move |c| !require_sequon || candidate_has_nxst_sequon(c))
 }
 
-/// The glyco path's sequon membership test (`glyco_search::GlycoCtxOwned::build`):
+/// The glyco path's sequon membership test (`glyco_search::GlycoCandidates::from_out_of_core`):
 /// an internal N-X-S/T, or one completed by the residue after the peptide.
 /// Kept in one place so `SearchParams::require_nxst_sequon` can never admit a
 /// different candidate set than the scorer would use.
@@ -1860,6 +1860,7 @@ mod tests {
             activation_method: None,
             isolation_lower_offset: None,
             isolation_upper_offset: None,
+            isolation_target_mz: None,
         }
     }
 

@@ -1003,6 +1003,7 @@ mod tests {
             evidence_type,
             quantity: Some(1e6),
             quantity_se: Some(1e4),
+            quantity_normalized: Some(1e6),
             transfer_q,
             quant_q: transfer_q.or(Some(0.003)),
             apex_rt_s: Some(100.0),

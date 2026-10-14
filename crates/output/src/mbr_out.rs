@@ -9,6 +9,7 @@
 //! | `run` | run stem |
 //! | `evidence_type` | `identified`, `identified_below_threshold` (identified, quality q-value above the identified threshold or missing), `transfer_ms1` (transfer q-value at or below the threshold) or `below_threshold` |
 //! | `quantity`, `quantity_se` | fitted MS1 quantity and its standard error |
+//! | `quantity_normalized` | `quantity` with the run's normalisation offset at the row's apex RT removed (a level per run and an RT-local term fitted across runs); `NA` when the run is not normalised. `quantity` stays the raw measurement |
 //! | `transfer_q` | internal transfer quant-quality q-value (not an identification FDR); `NA` for identified rows |
 //! | `quant_q` | internal quality q-value of the row's MS1 feature against its decoys (not an identification FDR): the identified-row estimate for identified rows, `transfer_q` for transfers |
 //! | `apex_rt_s` | fitted apex, seconds |
@@ -62,18 +63,20 @@ pub struct MbrRow<'a> {
     pub evidence_type: EvidenceType,
     pub quantity: Option<f64>,
     pub quantity_se: Option<f64>,
+    pub quantity_normalized: Option<f64>,
     pub transfer_q: Option<f64>,
     pub quant_q: Option<f64>,
     pub apex_rt_s: Option<f64>,
     pub library_q: f64,
 }
 
-pub const MBR_COLUMNS: [&str; 9] = [
+pub const MBR_COLUMNS: [&str; 10] = [
     "precursor_key",
     "run",
     "evidence_type",
     "quantity",
     "quantity_se",
+    "quantity_normalized",
     "transfer_q",
     "quant_q",
     "apex_rt_s",
@@ -239,6 +242,7 @@ pub fn write_mbr_tsv(path: &Path, rows: &[MbrRow<'_>]) -> Result<(), String> {
         text.push_str(r.evidence_type.as_str());
         push_opt(&mut text, r.quantity);
         push_opt(&mut text, r.quantity_se);
+        push_opt(&mut text, r.quantity_normalized);
         push_opt(&mut text, r.transfer_q);
         push_opt(&mut text, r.quant_q);
         push_opt(&mut text, r.apex_rt_s);
@@ -293,6 +297,7 @@ mod tests {
                 evidence_type: EvidenceType::Identified,
                 quantity: Some(1.5e6),
                 quantity_se: Some(2e4),
+                quantity_normalized: Some(1.25e6),
                 transfer_q: None,
                 quant_q: Some(0.003),
                 apex_rt_s: Some(612.25),
@@ -304,6 +309,7 @@ mod tests {
                 evidence_type: EvidenceType::BelowThreshold,
                 quantity: None,
                 quantity_se: None,
+                quantity_normalized: None,
                 transfer_q: Some(0.2),
                 quant_q: Some(0.2),
                 apex_rt_s: None,
@@ -315,15 +321,15 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(
             lines[0],
-            "precursor_key\trun\tevidence_type\tquantity\tquantity_se\ttransfer_q\tquant_q\tapex_rt_s\tlibrary_q"
+            "precursor_key\trun\tevidence_type\tquantity\tquantity_se\tquantity_normalized\ttransfer_q\tquant_q\tapex_rt_s\tlibrary_q"
         );
         assert_eq!(
             lines[1],
-            "PEPTIDEK/2\ta\tidentified\t1500000\t20000\tNA\t0.003\t612.25\t0.001"
+            "PEPTIDEK/2\ta\tidentified\t1500000\t20000\t1250000\tNA\t0.003\t612.25\t0.001"
         );
         assert_eq!(
             lines[2],
-            "PEPTIDEK/2\tb\tbelow_threshold\tNA\tNA\t0.2\t0.2\tNA\t0.001"
+            "PEPTIDEK/2\tb\tbelow_threshold\tNA\tNA\tNA\t0.2\t0.2\tNA\t0.001"
         );
         assert!(!dir.path().join("x.mbr.tsv.partial").exists());
     }

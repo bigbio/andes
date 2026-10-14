@@ -68,6 +68,12 @@
 //! of a precursor without such a fit, and every row of an unaligned run,
 //! reports the extract's own `quantity` and `quantity_se`. The extract
 //! tables keep the per-run values.
+//!
+//! Normalised quantity: `quantity_normalized` is the reported quantity with
+//! its run's offset at the row's apex RT removed ([`quant::normalize`]: a
+//! level per run and an RT-local term). The offsets are fitted on the
+//! identified targets with `quant_q <= 0.01` and a positive quantity; a run
+//! without enough of them reports `NA`. `quantity` stays the raw measurement.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -82,6 +88,7 @@ use quant::decoys::{probes, Hypothesis, Probe};
 use quant::evidence::{fit_many, Evidence, EvidenceParams, FitJob, WIDTH_GRID};
 use quant::library::{Library, LibraryEntry};
 use quant::ms1_index::Ms1RunIndex;
+use quant::normalize::{fit as fit_normalization, NormCell, NormParams, RunNormalization};
 use rayon::prelude::*;
 
 use crate::transfer_fdr::{
@@ -680,6 +687,37 @@ fn reported_quantity(
     }
 }
 
+/// The run normalisation of the reported quantities ([`quant::normalize`]),
+/// fitted on the identified targets with a quality q-value at or below
+/// [`VALIDATION_Q`] (`id_q(i)` for row `i`) and a positive reported quantity
+/// (`quantity(row)`).
+fn run_normalization(
+    rows: &[&ExtractRow],
+    id_q: impl Fn(usize) -> Option<f64>,
+    quantity: impl Fn(&ExtractRow) -> Option<f64>,
+    n_runs: usize,
+) -> RunNormalization {
+    let cells: Vec<NormCell> = rows
+        .iter()
+        .enumerate()
+        .filter(|(i, r)| {
+            (r.role, r.kind) == (Role::Identified, Hypothesis::Target)
+                && id_q(*i).is_some_and(|q| q <= VALIDATION_Q)
+        })
+        .filter_map(|(_, r)| {
+            let e = r.evidence.as_ref()?;
+            let q = quantity(r).filter(|q| *q > 0.0 && q.is_finite())?;
+            Some(NormCell {
+                precursor: r.precursor,
+                run: r.run,
+                log2_quantity: q.log2(),
+                rt: e.t0,
+            })
+        })
+        .collect();
+    fit_normalization(&cells, n_runs, &NormParams::default())
+}
+
 /// Floor of `amplitude_se` in the amplitude signal-to-noise feature.
 const MIN_AMPLITUDE_SE: f64 = 1e-12;
 
@@ -777,6 +815,7 @@ pub(crate) struct MbrFeature {
     pub evidence_type: EvidenceType,
     pub quantity: Option<f64>,
     pub quantity_se: Option<f64>,
+    pub quantity_normalized: Option<f64>,
     pub transfer_q: Option<f64>,
     pub quant_q: Option<f64>,
     pub apex_rt_s: Option<f64>,
@@ -876,6 +915,17 @@ pub(crate) fn finalize(
     let id_fdr = transfer_fdr(&id_rows, seed);
     let maps = &lib.alignment.maps;
     let w_c = consensus_widths(rows.iter().copied(), maps);
+    let reported = |r: &ExtractRow| {
+        r.evidence
+            .as_ref()
+            .map(|e| reported_quantity(e, r.run, w_c.get(&r.precursor).copied(), maps))
+    };
+    let norm = run_normalization(
+        &rows,
+        |i| fdr_index[i].and_then(|k| id_fdr.result.q[k]),
+        |r| reported(r).map(|q| q.0),
+        stems.len(),
+    );
     let accepted = |q: Option<f64>| q.is_some_and(|q| q <= mbr_fdr);
     // The validation thresholds, VALIDATION_Q then mbr_fdr, and their counts.
     let thresholds = [VALIDATION_Q, mbr_fdr];
@@ -892,7 +942,10 @@ pub(crate) fn finalize(
             continue;
         }
         let e = r.evidence.as_ref();
-        let quantity = e.map(|e| reported_quantity(e, r.run, w_c.get(&r.precursor).copied(), maps));
+        let quantity = reported(r);
+        let quantity_normalized = quantity
+            .zip(e)
+            .and_then(|((q, _), e)| norm.normalize(r.run, r.precursor, e.t0, q));
         let (evidence_type, transfer_q, quant_q) = match r.role {
             Role::Identified => {
                 let q = fdr_index[i].and_then(|k| id_fdr.result.q[k]);
@@ -961,6 +1014,7 @@ pub(crate) fn finalize(
                 evidence_type,
                 quantity: quantity.map(|q| q.0),
                 quantity_se: quantity.map(|q| q.1),
+                quantity_normalized,
                 transfer_q,
                 quant_q,
                 apex_rt_s: e.map(|e| e.t0),
@@ -981,6 +1035,7 @@ pub(crate) fn finalize(
             evidence_type: r.evidence_type,
             quantity: r.quantity,
             quantity_se: r.quantity_se,
+            quantity_normalized: r.quantity_normalized,
             transfer_q: r.transfer_q,
             quant_q: r.quant_q,
             apex_rt_s: r.apex_rt_s,
@@ -1027,6 +1082,18 @@ pub(crate) fn finalize(
         "[mbr] pseudo-transfers {}: wrong peak {} of {}",
         v.pseudo_transfers, v.wrong_peak, v.wrong_peak_pairs
     );
+    eprintln!(
+        "[mbr] run normalisation (quantity_normalized): {} reference precursors (identified, quant_q <= {VALIDATION_Q}, in >= 3 runs or all runs)",
+        norm.precursors
+    );
+    for (run, stem) in stems.iter().enumerate() {
+        match norm.summary(run as u16) {
+            Some((level, sd, n)) => eprintln!(
+                "[mbr]   {stem}: median offset {level:+.3} log2, sd along RT {sd:.3}, {n} reference cells"
+            ),
+            None => eprintln!("[mbr]   {stem}: not normalised (too few reference cells)"),
+        }
+    }
     let shown: &[(f64, &Accepted)] = if mbr_fdr == VALIDATION_Q {
         &[(VALIDATION_Q, &v.at_q01)]
     } else {
@@ -1487,7 +1554,9 @@ mod tests {
             in_r2[0].starts_with("PEP0/2\tr2\tidentified\t"),
             "{in_r2:?}"
         );
-        assert!(!in_r2[0].contains("\tNA\tNA\tNA"), "{in_r2:?}");
+        // Its quantity and standard error are reported.
+        let fields: Vec<&str> = in_r2[0].split('\t').collect();
+        assert!(fields[3] != "NA" && fields[4] != "NA", "{in_r2:?}");
     }
 
     #[test]
@@ -2190,6 +2259,96 @@ mod finalize_tests {
         }
     }
 
+    /// [`extract_with_identified_decoys`] with run 1 identifying the even
+    /// precursors as run 0 does (same targets and decoys) at `gain` times run
+    /// 0's quantity; the odd precursors stay transfers into run 1.
+    fn extract_two_identified_runs(gain: f64) -> Vec<Vec<ExtractRow>> {
+        let mut runs = extract_with_identified_decoys();
+        let copies: Vec<ExtractRow> = runs[0]
+            .iter()
+            .filter(|r| r.precursor % 2 == 0 && r.role == Role::Identified)
+            .map(|r| {
+                let mut r = r.clone();
+                r.run = 1;
+                if let Some(e) = r.evidence.as_mut() {
+                    e.amplitude *= gain;
+                    e.amplitude_se *= gain;
+                    e.quantity *= gain;
+                    e.quantity_se *= gain;
+                }
+                r
+            })
+            .collect();
+        let run1: Vec<ExtractRow> = runs[1]
+            .drain(..)
+            .filter(|r| r.precursor % 2 == 1)
+            .chain(copies)
+            .collect();
+        runs[1] = run1;
+        runs
+    }
+
+    #[test]
+    fn finalize_reports_run_normalized_quantities() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mbr, val) = mbr_paths(&dir.path().join("x"));
+        let runs = extract_two_identified_runs(2.0);
+        let s = finalize(&stems(), &library(), &runs, 0.01, None, 7, &mbr, &val).unwrap();
+        let get = |p: u32, run: u16| {
+            s.features
+                .iter()
+                .find(|f| f.precursor == p && f.run == run)
+                .unwrap()
+        };
+        let mut clean = 0;
+        for p in (0..N).filter(|p| p % 2 == 0 && identified_kind(*p) == "clean") {
+            let (a, b) = (get(p, 0), get(p, 1));
+            // Raw run 1 reads twice run 0; normalised, the two runs agree and
+            // sit halfway (log2 offsets -0.5 and +0.5).
+            assert!((b.quantity.unwrap() / a.quantity.unwrap() - 2.0).abs() < 1e-9);
+            let (na, nb) = (
+                a.quantity_normalized.unwrap(),
+                b.quantity_normalized.unwrap(),
+            );
+            assert!((nb / na - 1.0).abs() < 1e-9, "{p}: {na} {nb}");
+            assert!((na / (a.quantity.unwrap() * 2f64.sqrt()) - 1.0).abs() < 1e-9);
+            clean += 1;
+        }
+        assert!(clean > 300, "{clean}");
+        // Every other row with a quantity is scaled by its run's offset:
+        // transfers into run 1 and identified rows that are not references.
+        for f in s.features.iter().filter(|f| f.quantity.is_some()) {
+            let want = f.quantity.unwrap()
+                * if f.run == 0 {
+                    2f64.sqrt()
+                } else {
+                    0.5f64.sqrt()
+                };
+            let got = f.quantity_normalized.unwrap();
+            assert!((got / want - 1.0).abs() < 1e-9, "{f:?}");
+        }
+        // The column is in the table, after quantity_se.
+        let t = table(&mbr);
+        let col = |name: &str| t[0].iter().position(|h| h == name).unwrap();
+        assert_eq!(col("quantity_normalized"), col("quantity_se") + 1);
+    }
+
+    #[test]
+    fn finalize_leaves_quantities_unnormalized_without_two_reference_runs() {
+        // Only run 0 has identified rows: no run is normalised.
+        let dir = tempfile::tempdir().unwrap();
+        let (mbr, val) = mbr_paths(&dir.path().join("x"));
+        let runs = extract_with_identified_decoys();
+        let s = finalize(&stems(), &library(), &runs, 0.01, None, 7, &mbr, &val).unwrap();
+        assert!(s.features.iter().all(|f| f.quantity_normalized.is_none()));
+        let t = table(&mbr);
+        let col = t[0]
+            .iter()
+            .position(|h| h == "quantity_normalized")
+            .unwrap();
+        assert!(t[1..].iter().all(|r| r[col] == "NA"));
+    }
+
     #[test]
     fn identified_quality_leaves_the_transfer_q_values_unchanged() {
         let dir = tempfile::tempdir().unwrap();
@@ -2244,7 +2403,7 @@ mod finalize_tests {
             "{flagged} flagged, {kept} kept"
         );
         let t = table(&mbr);
-        assert_eq!(t[0][6], "quant_q");
+        assert_eq!(t[0][7], "quant_q");
         let flagged_rows = t
             .iter()
             .filter(|r| r[2] == "identified_below_threshold")

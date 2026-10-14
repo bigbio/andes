@@ -447,7 +447,7 @@ Written next to the PIN (or next to `--output-tsv`/`--output-parquet` under `--r
 | `<stem>.tmt.tsv` | one per quantified PSM | `filename scannr spec_id quant_scan quant_ms_level rt peptide charge proteins is_decoy psm_q_value psm_pep purity`, then one `tmt_<channel>` (or `itraq_<channel>`) per channel, then `raw_<...>` when a correction matrix was applied |
 | `<stem>.lfq.tsv` | one per (peptidoform, charge) at feature q ≤ `--lfq-feature-fdr` and cosine ≥ `--lfq-min-cosine` | `peptide charge proteins feature_q_value score cosine`, then the integrated area per input file |
 | `<stem>.lfq_features.tsv` | one per feature per run (all, with their q-value) | apex RT, boundaries, scan count, area, apex height, per-isotope areas, cosine, score, decoy score, feature q-value |
-| `<stem>.mbr.tsv` (`--mbr`, `andes quant finalize -o <stem>`) | one per (precursor, run) identified in or transferred into the run | `precursor_key run evidence_type quantity quantity_se transfer_q quant_q apex_rt_s library_q`; `evidence_type` is `identified` (the run has a target PSM of the precursor at PSM q ≤ `--quant-fdr` and, with `--pep`, PEP ≤ `--pep`), `identified_below_threshold` (identified, but `quant_q` above `--quant-feature-fdr` or missing; quantity kept, in this table only), `transfer_ms1` (transfer q ≤ `--mbr-fdr`) or `below_threshold` (quantity kept, as censored; in this table only); `quant_q` is the quality q-value of the row's MS1 feature against its decoys (the identified-row estimate for identified rows, equal to `transfer_q` for transfers); `transfer_q`, `quant_q` and `library_q` are internal quant-quality values, not identification FDR; `NA` for missing values. Precursors that fail the library entry gate have no rows |
+| `<stem>.mbr.tsv` (`--mbr`, `andes quant finalize -o <stem>`) | one per (precursor, run) identified in or transferred into the run | `precursor_key run evidence_type quantity quantity_se quantity_normalized transfer_q quant_q apex_rt_s library_q`; `quantity_normalized` is `quantity` with the run's level and RT-local offset removed (§10, `NA` when the run is not normalised); `evidence_type` is `identified` (the run has a target PSM of the precursor at PSM q ≤ `--quant-fdr` and, with `--pep`, PEP ≤ `--pep`), `identified_below_threshold` (identified, but `quant_q` above `--quant-feature-fdr` or missing; quantity kept, in this table only), `transfer_ms1` (transfer q ≤ `--mbr-fdr`) or `below_threshold` (quantity kept, as censored; in this table only); `quant_q` is the quality q-value of the row's MS1 feature against its decoys (the identified-row estimate for identified rows, equal to `transfer_q` for transfers); `transfer_q`, `quant_q` and `library_q` are internal quant-quality values, not identification FDR; `NA` for missing values. Precursors that fail the library entry gate have no rows |
 | `<stem>.mbr_validation.tsv` | one | pseudo-transfer validation (identified pairs re-measured as transfers: acceptance rate `pseudo_acceptance_*`, wrong-peak rate) and accepted transfer counts for the pooled and per-decoy-family estimates, at q ≤ 0.01 (`_q01`) and at `--mbr-fdr` (`_at_threshold`); then `--quant-feature-fdr` (`NA` when off) and the identified rows: all, with a `quant_q`, at `quant_q` ≤ 0.01, and `identified_below_threshold` |
 | `<dir>/quantms.feature.parquet` | one per feature (LFQ) or quantified PSM (isobaric) | the QPX feature view (`intensities` as `[{label, intensity}]` with `LFQ` or `TMT126`-style labels; `additional_intensities` with the raw/apex/isotope values; purity, cosine, q-values in `additional_scores`; `psm_ids` pointing at `psms.parquet` rows) |
 
@@ -919,6 +919,21 @@ scores from separately trained Percolator models are not on one scale.
   `w_p`. A precursor without such an identified fit, and every row of an unaligned run,
   reports its own per-run area. `<stem>.extract.parquet` keeps the per-run `quantity` and
   `quantity_se` (`A · w · √(2π)`) for provenance.
+* **Normalised quantity.** `<stem>.mbr.tsv` also reports `quantity_normalized`: the reported
+  quantity divided by `2^o`, where `o` is the run's log2 offset at the row's apex RT. The
+  offsets are fitted across runs on the identified rows with `quant_q ≤ 0.01` of precursors
+  seen in at least 3 runs (all runs when there are only 2): starting from 0, each of 5 rounds
+  sets a precursor's level to the mean over its runs of `log2 quantity − o`, gives each cell
+  `z = log2 quantity − level`, and sets a reference cell's `o` to the median `z` of the 50
+  reference cells of its run just before and the 50 just after it in apex RT order (its own
+  `z` left out). Any other row takes the median `z` of the 50 reference cells before and after
+  its apex. The offset carries the run's loading and the changes of its ion signal along the
+  gradient (electrospray drifts of seconds to minutes, which a single factor per run cannot
+  follow). It assumes most precursors do not change between runs. A run with fewer than 20
+  reference cells, and every run when fewer than two runs have them, reports `NA`.
+  `quantity` and `quantity_se` stay the raw measurement, and `quantms.feature.parquet` carries
+  the raw `quantity` (normalisation there is the downstream tool's choice); `quantity_se`
+  scales by the same factor as `quantity_normalized / quantity`.
 
 `library.parquet` records a fingerprint of the library (and of `alignment.parquet`, checked on
 read); each extract table records that fingerprint and its `--lfq-tol`. `quant finalize` fails,

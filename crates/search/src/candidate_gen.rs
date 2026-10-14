@@ -91,11 +91,9 @@ fn enumerate_protein(
     let mut out = enumerate_protein_from_offset(seq, 0, protein_index, is_decoy, params);
 
     // N-terminal Met cleavage: when the protein starts with M (and has >1
-    // residue), also enumerate candidates treating sequence[1..] as the
-    // effective start. The Met-cleaved peptides still carry
-    // is_protein_n_term=true (the post-Met residue is the new biological
-    // N-terminus) and are NOT deduplicated — they differ by terminal-mod
-    // search space.
+    // residue), also enumerate the peptides that start at the post-Met
+    // residue, the new biological N-terminus (is_protein_n_term=true). Every
+    // other span of sequence[1..] is already emitted by the walk above.
     if seq.first() == Some(&b'M') && seq.len() > 1 {
         out.extend(enumerate_protein_from_offset(
             seq,
@@ -113,12 +111,11 @@ fn enumerate_protein(
 ///
 /// `seq_offset = 0` → normal full-protein walk.
 /// `seq_offset = 1` → Met-cleaved walk: `seq[1..]` is the effective protein
-///   sequence. Cleavage positions, lengths, and missed-cleavage counts are
-///   computed over the sub-sequence. The `start_offset_in_protein` stored on
-///   each `Candidate` is adjusted back to the original protein coordinates
-///   (i.e. `sub_start + seq_offset`). When `sub_start == 0`, `is_protein_n_term`
-///   is set to `true` — the post-Met residue is the effective protein N-terminus.
-///   The `pre` context residue for sub_start == 0 is `b'M'` (the cleaved Met).
+///   sequence, and only the spans starting at its first residue are emitted
+///   (with `is_protein_n_term = true`; the `pre` residue is the cleaved `M`).
+///   Cleavage positions, lengths, and missed-cleavage counts are computed over
+///   the sub-sequence. The `start_offset_in_protein` stored on each
+///   `Candidate` is in the original protein coordinates (`sub_start + 1`).
 ///
 /// The `params.num_tolerable_termini` field controls cleavage enforcement:
 /// - `2`: both ends must be enzyme-cleavage sites (strict / fully specific, default).
@@ -138,6 +135,8 @@ fn enumerate_protein_from_offset(
     }
 
     let ntt = params.num_tolerable_termini;
+    // The Met-cleaved walk emits only spans that start at the new N-terminus.
+    let n_term_only = seq_offset > 0;
 
     // For ntt=0 (non-specific) with a non-NonSpecific enzyme, enumerate all
     // valid-length spans without any cleavage constraint. This produces the
@@ -157,7 +156,7 @@ fn enumerate_protein_from_offset(
             is_decoy,
             params,
         };
-        return enumerate_all_spans(&ctx, n);
+        return enumerate_all_spans(&ctx, n, if n_term_only { 1 } else { n });
     }
 
     let cleavage_positions =
@@ -195,6 +194,9 @@ fn enumerate_protein_from_offset(
     // ── Strict spans (ntt=2 behaviour) ───────────────────────────────────────
     // Also included in ntt=1, since a strict span satisfies "at least one end".
     for (i, &start) in cleavage_positions.iter().enumerate() {
+        if n_term_only && start != 0 {
+            break;
+        }
         for (offset, &end) in cleavage_positions[i + 1..].iter().enumerate() {
             let len = end - start;
             if len > params.max_length {
@@ -215,6 +217,9 @@ fn enumerate_protein_from_offset(
     if ntt == 1 {
         // (b) Tryptic N-terminus, free C-terminus.
         for &start in &cleavage_positions {
+            if n_term_only && start != 0 {
+                break;
+            }
             let c_min = start + params.min_length;
             let c_max = (start + params.max_length).min(n);
             for end in c_min..=c_max {
@@ -235,8 +240,9 @@ fn enumerate_protein_from_offset(
             }
         }
 
-        // (c) Free N-terminus, tryptic C-terminus.
-        for &end in &cleavage_positions {
+        // (c) Free N-terminus, tryptic C-terminus. Its starts are never
+        // cleavage positions, so never the N-terminus of a Met-cleaved walk.
+        for &end in cleavage_positions.iter().filter(|_| !n_term_only) {
             if end < params.min_length {
                 continue;
             }
@@ -311,11 +317,12 @@ fn emit_span(ctx: &EmitCtx<'_>, start: u32, end: u32, out: &mut Vec<Candidate>) 
     }
 }
 
-/// Enumerate all valid-length spans without cleavage constraints (ntt=0 path).
-/// Invoked when `num_tolerable_termini = 0` with a non-NonSpecific enzyme.
-fn enumerate_all_spans(ctx: &EmitCtx<'_>, n: u32) -> Vec<Candidate> {
+/// Enumerate all valid-length spans starting before `start_limit`, without
+/// cleavage constraints (ntt=0 path). Invoked when `num_tolerable_termini = 0`
+/// with a non-NonSpecific enzyme.
+fn enumerate_all_spans(ctx: &EmitCtx<'_>, n: u32, start_limit: u32) -> Vec<Candidate> {
     let mut out = Vec::new();
-    for start in 0..n {
+    for start in 0..start_limit {
         let end_max = (start + ctx.params.max_length).min(n);
         for end in (start + ctx.params.min_length)..=end_max {
             emit_span(ctx, start, end, &mut out);

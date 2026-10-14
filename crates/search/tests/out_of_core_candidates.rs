@@ -437,16 +437,18 @@ fn out_of_core_candidate_list_equals_the_enumeration() {
     assert!(relabelled > 0, "no fixture exercises the collision relabel");
 }
 
+/// Protein 0 starts with M; each of its peptides is enumerated once, so it is
+/// listed once in `prots`.
 const FIXTURE_SIGNATURE: &[&[&str]] = &[
     &[
         "pep=E[0]D[0]I[0]M[1599491]T[0]P[0]E[0]P[0]K[0] z=2 score=-87.000000 rank=-87.000000 iso=0 decoy=true prots=[2]",
-        "pep=P[0]E[0]P[0]T[0]M[1599491]I[0]D[0]E[0]K[0] z=2 score=-43.000000 rank=-43.000000 iso=0 decoy=false prots=[0,0]",
+        "pep=P[0]E[0]P[0]T[0]M[1599491]I[0]D[0]E[0]K[0] z=2 score=-43.000000 rank=-43.000000 iso=0 decoy=false prots=[0]",
     ],
     &[
-        "pep=W[0]V[0]T[0]F[0]I[0]S[0]L[0]L[0]R[0] z=2 score=-53.000000 rank=-53.000000 iso=0 decoy=false prots=[0,0]",
+        "pep=W[0]V[0]T[0]F[0]I[0]S[0]L[0]L[0]R[0] z=2 score=-53.000000 rank=-53.000000 iso=0 decoy=false prots=[0]",
     ],
     &[
-        "pep=S[0]H[0]A[0]R[0]E[0]D[0]P[0]E[0]P[0]K[0] z=2 score=-43.000000 rank=-43.000000 iso=0 decoy=false prots=[0,0,1]",
+        "pep=S[0]H[0]A[0]R[0]E[0]D[0]P[0]E[0]P[0]K[0] z=2 score=-43.000000 rank=-43.000000 iso=0 decoy=false prots=[0,1]",
     ],
 ];
 

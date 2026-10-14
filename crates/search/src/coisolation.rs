@@ -827,8 +827,8 @@ pub(crate) mod tests {
     fn secondary_listwise_gap_ignores_duplicate_occurrences_of_the_winner() {
         // DAFLGSFLYEYSR occurs in two proteins with the same flanks, so the pool
         // holds it twice at the same RawScore. The listwise gap must be taken
-        // against the best DIFFERENT peptidoform (here its isobaric decoy), not
-        // against the winner's own second occurrence.
+        // against the best DIFFERENT peptidoform (here the isobaric ADFLGSFLYEYSR),
+        // not against the winner's own second occurrence.
         let target = ProteinDb {
             proteins: vec![
                 Protein {
@@ -840,6 +840,11 @@ pub(crate) mod tests {
                     accession: "P2".into(),
                     description: "".into(),
                     sequence: b"GGGKDAFLGSFLYEYSRKGGG".to_vec(),
+                },
+                Protein {
+                    accession: "P3".into(),
+                    description: "".into(),
+                    sequence: b"GGGKADFLGSFLYEYSRKGGG".to_vec(),
                 },
             ],
         };
@@ -887,11 +892,18 @@ pub(crate) mod tests {
     #[test]
     fn secondary_features_share_the_primary_scales() {
         let target = ProteinDb {
-            proteins: vec![Protein {
-                accession: "P1".into(),
-                description: "".into(),
-                sequence: b"MKWVTFISLLRKDAFLGSFLYEYSRK".to_vec(),
-            }],
+            proteins: vec![
+                Protein {
+                    accession: "P1".into(),
+                    description: "".into(),
+                    sequence: b"MKWVTFISLLRKDAFLGSFLYEYSRK".to_vec(),
+                },
+                Protein {
+                    accession: "P2".into(),
+                    description: "".into(),
+                    sequence: b"GGGKADFLGSFLYEYSRKGGG".to_vec(),
+                },
+            ],
         };
         let idx = SearchIndex::from_target_db(&target, "XXX");
         let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
@@ -927,7 +939,7 @@ pub(crate) mod tests {
         // RankScoreFloat is the unrounded RawScore, never left at 0.
         assert!(f.rank_score_float > 0.0, "RankScoreFloat {}", f.rank_score_float);
         assert!((f.rank_score_float - rank.score).abs() < 5.0);
-        // The planted peptide and its isobaric decoy are both retained, so
+        // The planted peptide and the isobaric ADFLGSFLYEYSR are both retained, so
         // RawScoreCal is the leave-one-out z-score over the retained strong
         // scores, not the raw strong score.
         assert!(f.listwise_score_gap > 0.0);

@@ -31,7 +31,7 @@ import pyarrow.parquet as pq
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ms2_common import ACTIVATIONS, annotate, precursor_mz, shard_table, to_proforma  # noqa: E402
-from mod_composition import match_mass  # noqa: E402
+from mod_composition import match_mass, split_nterm_residue  # noqa: E402
 
 CAM = 4
 
@@ -39,6 +39,7 @@ CAM = 4
 def parse_flat(seq, pos, delta, nterm, cterm):
     """-> (seq, [(pos, unimod)]) or None for an unmapped delta / residue."""
     mods = []
+    has_nterm = bool(nterm and abs(nterm) > 1e-6)
     for p, d in zip(pos or [], delta or []):
         if not 1 <= p <= len(seq):
             return None
@@ -47,7 +48,12 @@ def parse_flat(seq, pos, delta, nterm, cterm):
             # an N-terminal mod folded onto residue 1
             uid = match_mass(float(d), None, True) if p == 1 else None
             if uid is None:
-                return None
+                # andes prints stacked N-terminal + residue mods as one summed delta
+                pair = split_nterm_residue(float(d), seq[0]) if p == 1 and not has_nterm else None
+                if pair is None:
+                    return None
+                mods += [(0, pair[0]), (1, pair[1])]
+                continue
             mods.append((0, uid))
             continue
         mods.append((p, uid))

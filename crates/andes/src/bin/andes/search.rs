@@ -498,45 +498,82 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // windowed filter engages with zero config — the same path `--protocol TMT`
     // takes today. Detection returns None for label-free data, so non-isobaric
     // runs stay byte-identical.
+    // The label the run carries: `--tmt <plex>` names it; otherwise it is read
+    // from the reporter ions (also under an explicit `--protocol`, so the
+    // injected tag below gets the kit's mass: TMTpro and iTRAQ 8-plex are
+    // 304.2 Da, not the 229.2 / 144.1 Da of TMT 6–11 and iTRAQ 4-plex).
+    let detect = || {
+        detect_isobaric_sampled(
+            &spectrum_path,
+            is_mzml,
+            is_mgf,
+            is_raw,
+            cli.ms_level as u32,
+            param.data_type.instrument.is_high_resolution(),
+        )
+    };
+    let label: Option<input::IsobaricLabel> = match (cli.tmt, cli.protocol) {
+        (Some(plex), _) => Some(isobaric_label_of_plex(plex)),
+        (None, Protocol::Auto | Protocol::Tmt | Protocol::Itraq | Protocol::ItraqPhospho) => {
+            detect()
+        }
+        (None, _) => None,
+    };
     match cli.protocol {
         Protocol::Tmt => param.data_type.protocol = model::protocol::Protocol::TMT,
         Protocol::Itraq => param.data_type.protocol = model::protocol::Protocol::ITRAQ,
         Protocol::ItraqPhospho => {
             param.data_type.protocol = model::protocol::Protocol::ITRAQPhospho
         }
-        Protocol::Auto => {
-            let high_res = param.data_type.instrument.is_high_resolution();
-            match detect_isobaric_sampled(
-                &spectrum_path,
-                is_mzml,
-                is_mgf,
-                cli.ms_level as u32,
-                high_res,
-            ) {
-                Some(input::IsobaricLabel::Tmt) => {
-                    eprintln!("Protocol resolver: auto-detected TMT reporter ions → engaging isobaric windowed peak filter");
-                    param.data_type.protocol = model::protocol::Protocol::TMT;
-                }
-                Some(input::IsobaricLabel::Itraq) => {
-                    eprintln!("Protocol resolver: auto-detected iTRAQ reporter ions → engaging isobaric windowed peak filter");
-                    param.data_type.protocol = model::protocol::Protocol::ITRAQ;
-                }
-                None => {}
+        // `--protocol auto` (the default) engages the isobaric windowed peak
+        // filter when the run carries a label. Label-free runs are unchanged.
+        Protocol::Auto => match label {
+            Some(l @ (input::IsobaricLabel::Tmt | input::IsobaricLabel::TmtPro)) => {
+                eprintln!(
+                    "Protocol resolver: {} {l:?} → engaging isobaric windowed peak filter",
+                    if cli.tmt.is_some() {
+                        "--tmt"
+                    } else {
+                        "auto-detected"
+                    }
+                );
+                param.data_type.protocol = model::protocol::Protocol::TMT;
             }
-        }
+            Some(l @ (input::IsobaricLabel::Itraq | input::IsobaricLabel::Itraq8)) => {
+                eprintln!(
+                    "Protocol resolver: {} {l:?} → engaging isobaric windowed peak filter",
+                    if cli.tmt.is_some() {
+                        "--tmt"
+                    } else {
+                        "auto-detected"
+                    }
+                );
+                param.data_type.protocol = model::protocol::Protocol::ITRAQ;
+            }
+            None => {}
+        },
         _ => {}
     }
     // C1: parameter-free path only (no explicit --mods). When the protocol
     // resolves to TMT/iTRAQ, inject the tag as a fixed mod on K + peptide
     // N-term so labeled peptides match their precursor mass — otherwise the
     // reporter filter engages but every labeled candidate is +tag Da off and
-    // misses. With explicit --mods the user owns the mod set (they may already
-    // supply the tag), so those runs stay byte-identical.
+    // misses. The kit comes from `label` when known, else the protocol's
+    // smaller kit. With explicit --mods the user owns the mod set (they may
+    // already supply the tag), so those runs stay byte-identical.
     if cli.mods.is_none() {
-        let tag = match param.data_type.protocol {
-            model::protocol::Protocol::TMT => Some(("TMT6plex", 229.162932_f64)),
-            model::protocol::Protocol::ITRAQ | model::protocol::Protocol::ITRAQPhospho => {
-                Some(("iTRAQ4plex", 144.102063_f64))
+        let tag = match (param.data_type.protocol, label) {
+            (
+                model::protocol::Protocol::TMT,
+                Some(l @ (input::IsobaricLabel::Tmt | input::IsobaricLabel::TmtPro)),
+            ) => Some(l.tag()),
+            (model::protocol::Protocol::TMT, _) => Some(input::IsobaricLabel::Tmt.tag()),
+            (
+                model::protocol::Protocol::ITRAQ | model::protocol::Protocol::ITRAQPhospho,
+                Some(l @ (input::IsobaricLabel::Itraq | input::IsobaricLabel::Itraq8)),
+            ) => Some(l.tag()),
+            (model::protocol::Protocol::ITRAQ | model::protocol::Protocol::ITRAQPhospho, _) => {
+                Some(input::IsobaricLabel::Itraq.tag())
             }
             _ => None,
         };
@@ -2374,5 +2411,15 @@ mod retrieval_choice_tests {
         assert!(tight.report.unwrap().contains("high-resolution"));
         let wide = retrieval_choice(Tolerance::Da(0.2), None, FragmentIndexFlag::Auto);
         assert!(wide.report.unwrap().contains("low-resolution"));
+    }
+}
+
+/// The detected-label class of a `--tmt` kit.
+fn isobaric_label_of_plex(plex: quant::Plex) -> input::IsobaricLabel {
+    match plex {
+        quant::Plex::Tmt6 | quant::Plex::Tmt10 | quant::Plex::Tmt11 => input::IsobaricLabel::Tmt,
+        quant::Plex::Tmt16 | quant::Plex::Tmt18 => input::IsobaricLabel::TmtPro,
+        quant::Plex::Itraq4 => input::IsobaricLabel::Itraq,
+        quant::Plex::Itraq8 => input::IsobaricLabel::Itraq8,
     }
 }

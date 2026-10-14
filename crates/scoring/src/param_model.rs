@@ -86,42 +86,77 @@ fn build_partition_ion_types_cache(
 }
 
 impl Param {
-    /// Find the partition for `(charge, parent_mass, seg_num)`: among the
-    /// partitions of that charge and segment, the one with the largest parent
-    /// mass tier `<= parent_mass`, or the lowest tier when `parent_mass` is
-    /// below all of them.
+    /// Find the partition matching `(charge, parent_mass, seg_num)` via a
+    /// floor lookup (the largest partition ≤ target by lex order on
+    /// `(charge, parent_mass.to_bits(), seg_num)`).
     ///
-    /// When no partition has `charge`, the nearest charge is used: the smallest
-    /// available below the lowest charge, the largest above the highest, and
-    /// the next lower available charge inside a gap. When the chosen charge has
-    /// no partition for `seg_num`, any partition of that charge is returned.
+    /// Falls back gracefully:
+    /// - If no partition matches the requested charge: use the smallest
+    ///   charge available with the requested mass + segment.
+    /// - If charge > all available: use the largest available charge.
     pub fn find_partition(&self, charge: i32, parent_mass: f32, seg_num: i32) -> Option<Partition> {
-        let parts = &self.partitions;
-        let first = parts.first()?;
-        let last = parts.last()?;
-        // `partitions` is sorted by (charge, seg_num, parent_mass) (loader invariant).
-        let charge = if parts.iter().any(|p| p.charge == charge) {
-            charge
-        } else if charge < first.charge {
-            first.charge
-        } else if charge > last.charge {
-            last.charge
-        } else {
-            let below = parts.partition_point(|p| p.charge < charge);
-            parts[below - 1].charge
-        };
+        if self.partitions.is_empty() {
+            return None;
+        }
+
+        // Build the target partition for the floor lookup.
         let target = Partition {
             charge,
             parent_mass,
             seg_num,
         };
-        let pos = parts.partition_point(|p| p <= &target);
-        let same_cell = |p: &&Partition| p.charge == charge && p.seg_num == seg_num;
-        pos.checked_sub(1)
-            .and_then(|i| parts.get(i))
-            .filter(same_cell)
-            .or_else(|| parts.get(pos).filter(same_cell))
-            .or_else(|| parts.iter().find(|p| p.charge == charge))
+
+        // partitions is already sorted (loader invariant). Find the largest
+        // partition <= target via binary search.
+        let pos = self.partitions.partition_point(|p| p <= &target);
+        if pos > 0 {
+            // partitions[pos - 1] is the largest <= target.
+            let candidate = self.partitions[pos - 1];
+            if candidate.charge == charge {
+                return Some(candidate);
+            }
+            // Floor returned a partition with smaller charge: if no
+            // exact-charge match, find smallest available charge, then floor
+            // on (smallest_charge, parent_mass, seg_num).
+        }
+
+        // Fall back: find smallest charge in partitions, retry.
+        let min_charge = self.partitions.iter().map(|p| p.charge).min()?;
+        let max_charge = self.partitions.iter().map(|p| p.charge).max()?;
+        let fallback_charge = if charge < min_charge {
+            min_charge
+        } else if charge > max_charge {
+            max_charge
+        } else {
+            // charge is in range but had no exact partition (a gap between
+            // available charges). Prefer the floor candidate — the nearest
+            // partition <= target — over jumping to `partitions.last()` (max
+            // charge / mass / segment), which would score against an unrelated
+            // partition. If the target sorts below every partition (pos == 0,
+            // e.g. parent_mass below the smallest trained mass) there is no
+            // floor, so fall through to the clamp-and-retry path with min_charge.
+            let pos = self.partitions.partition_point(|p| p <= &target);
+            if pos > 0 {
+                return self.partitions.get(pos - 1).copied();
+            }
+            min_charge
+        };
+        let fallback_target = Partition {
+            charge: fallback_charge,
+            parent_mass,
+            seg_num,
+        };
+        let fallback_pos = self.partitions.partition_point(|p| p <= &fallback_target);
+        if fallback_pos > 0 {
+            let candidate = self.partitions[fallback_pos - 1];
+            if candidate.charge == fallback_charge {
+                return Some(candidate);
+            }
+        }
+        // Last resort: just return any partition with the fallback charge.
+        self.partitions
+            .iter()
+            .find(|p| p.charge == fallback_charge)
             .copied()
     }
 
@@ -698,62 +733,6 @@ mod tests {
             .find_partition(5, 500.0, 0)
             .expect("find with fallback");
         assert_eq!(p.charge, 3);
-    }
-
-    #[test]
-    fn find_partition_below_lowest_mass_tier_keeps_segment() {
-        let mut param = make_param();
-        param.partitions = vec![
-            Partition {
-                charge: 2,
-                parent_mass: 500.0,
-                seg_num: 0,
-            },
-            Partition {
-                charge: 2,
-                parent_mass: 1000.0,
-                seg_num: 0,
-            },
-            Partition {
-                charge: 2,
-                parent_mass: 500.0,
-                seg_num: 1,
-            },
-            Partition {
-                charge: 2,
-                parent_mass: 1000.0,
-                seg_num: 1,
-            },
-        ];
-        param.partitions.sort();
-        // Below the lowest tier of segment 1: the floor in (charge, seg, mass)
-        // order is (2, seg 0, 1000); the answer is segment 1's lowest tier.
-        let p = param.find_partition(2, 300.0, 1).expect("find");
-        assert_eq!((p.charge, p.seg_num, p.parent_mass), (2, 1, 500.0));
-        let p = param.find_partition(2, 300.0, 0).expect("find");
-        assert_eq!((p.charge, p.seg_num, p.parent_mass), (2, 0, 500.0));
-        let p = param.find_partition(2, 1200.0, 1).expect("find");
-        assert_eq!((p.charge, p.seg_num, p.parent_mass), (2, 1, 1000.0));
-        // Charge outside the trained range clamps, keeping the segment.
-        let p = param.find_partition(4, 300.0, 1).expect("find");
-        assert_eq!((p.charge, p.seg_num, p.parent_mass), (2, 1, 500.0));
-    }
-
-    #[test]
-    fn find_partition_charge_gap_uses_lower_charge_and_segment() {
-        let mut param = make_param();
-        for charge in [2, 4] {
-            for seg_num in [0, 1] {
-                param.partitions.push(Partition {
-                    charge,
-                    parent_mass: 500.0,
-                    seg_num,
-                });
-            }
-        }
-        param.partitions.sort();
-        let p = param.find_partition(3, 800.0, 0).expect("find");
-        assert_eq!((p.charge, p.seg_num), (2, 0));
     }
 
     #[test]

@@ -1060,3 +1060,57 @@ fn variant_peptides_carry_a_change_not_just_its_neighbourhood() {
         assert_eq!(widths(&idx.db.proteins[3]), [1, 1], "{strategy:?}");
     }
 }
+
+#[test]
+fn origins_follow_entries_onto_decoys() {
+    use model::EntryKind::*;
+    let target = processed_db();
+    let kinds: Vec<model::EntryKind> = target.proteins.iter().map(|p| p.entry_kind()).collect();
+    assert_eq!(
+        kinds,
+        [Reference, Chain, Chain, Reference, Isoform, Reference, Chain]
+    );
+    let iso = target.proteins[4].origin().unwrap();
+    assert_eq!((&*iso.family, &*iso.feature), ("P00011", "P00011-2"));
+    let chain = target.proteins[1].origin().unwrap();
+    assert_eq!((&*chain.family, &*chain.feature), ("P00010", "PRO_1"));
+    for strategy in [
+        DecoyStrategy::Reverse,
+        DecoyStrategy::Shuffle,
+        DecoyStrategy::SequonReverse,
+    ] {
+        let idx = SearchIndex::from_target_db_with_strategy(&target, "XXX", None, strategy, 7);
+        let n = target.len();
+        for i in 0..n {
+            assert_eq!(
+                idx.db.proteins[n + i].origin(),
+                target.proteins[i].origin(),
+                "{strategy:?} {i}"
+            );
+        }
+    }
+}
+
+#[test]
+fn origin_alone_leaves_the_reverse_decoy_unchanged() {
+    // Isoforms now always carry an annotation (their origin). Without a chain
+    // or a protein-terminal site, the reverse decoy is still the plain reversal.
+    let target = processed_db();
+    let idx = SearchIndex::from_target_db(&target, "XXX");
+    let n = target.len();
+    let mut checked = 0;
+    for (i, p) in target.proteins.iter().enumerate() {
+        let terminal_site = p
+            .mod_sites()
+            .iter()
+            .any(|s| s.anchor != model::SiteAnchor::Residue);
+        if p.chain_ends().is_some() || terminal_site {
+            continue;
+        }
+        let want: Vec<u8> = p.sequence.iter().rev().copied().collect();
+        assert_eq!(idx.db.proteins[n + i].sequence, want, "{}", p.accession);
+        checked += 1;
+    }
+    assert!(target.proteins[4].mod_sites().is_empty() || checked >= 1);
+    assert!(checked >= 3, "{checked}");
+}

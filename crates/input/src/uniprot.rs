@@ -34,7 +34,10 @@ use std::collections::BTreeMap;
 use std::io::BufRead;
 use std::sync::Arc;
 
-use model::{ChainEnds, ModSite, Protein, ProteinAnnotation, ProteinDb, SiteAnchor, VariantRegion};
+use model::{
+    AminoAcid, ChainEnds, EntryKind, EntryOrigin, ModSite, Protein, ProteinAnnotation, ProteinDb,
+    SiteAnchor, VariantRegion,
+};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
@@ -510,6 +513,7 @@ impl UniProtEntry {
     /// the base accession field `base_id` and described as `description`.
     fn variant_proteins(
         &self,
+        family: &str,
         base_id: &str,
         description: &str,
         base: &[u8],
@@ -529,16 +533,41 @@ impl UniProtEntry {
                 // inside a run the replacement keeps.
                 let parts = VariantRegion::of_edit(base, v.start, v.end, &v.replacement);
                 let mod_sites = sites_through(sites, &[(v.start, v.end, v.replacement.len())]);
+                let mass = |r: &[u8]| -> f64 {
+                    r.iter()
+                        .filter_map(|&a| AminoAcid::standard(a))
+                        .map(|a| a.mass)
+                        .sum()
+                };
+                let origin = EntryOrigin {
+                    kind: EntryKind::Variant,
+                    family: Arc::from(family),
+                    feature: Arc::from(v.tag.as_str()),
+                    variant_delta_da: mass(&v.replacement) - mass(&base[v.start..v.end]),
+                };
                 Protein {
                     accession: format!("{}|{}_{}|{}", self.db_code(), base_id, v.tag, self.name),
                     description: format!("{description} VARIANT={}", v.tag),
                     sequence,
                     annotation: Some(Arc::new(
-                        ProteinAnnotation::new(mod_sites, None).with_variant(parts),
+                        ProteinAnnotation::new(mod_sites, None)
+                            .with_variant(parts)
+                            .with_origin(Some(origin)),
                     )),
                 }
             })
             .collect()
+    }
+
+    /// The origin of an entry of this UniProt entry's family, made by
+    /// `feature`.
+    fn origin(&self, kind: EntryKind, feature: &str) -> EntryOrigin {
+        EntryOrigin {
+            kind,
+            family: Arc::from(self.accession.as_str()),
+            feature: Arc::from(feature),
+            variant_delta_da: 0.0,
+        }
     }
 
     /// Whether a processing feature (or the chain itself) is supported well
@@ -691,6 +720,7 @@ impl UniProtEntry {
             let variants = self.sequence_variants(None, &self.sequence, opts, stats);
             let proteins = self.variant_proteins(
                 &self.accession,
+                &self.accession,
                 &description,
                 &self.sequence,
                 &sites,
@@ -721,7 +751,9 @@ impl UniProtEntry {
                     description: format!("{description} CHAIN={}:{}-{}", c.tag, c.start + 1, c.end),
                     sequence: self.sequence[c.start..c.end].to_vec(),
                     annotation: Some(Arc::new(
-                        ProteinAnnotation::new(mod_sites, None).with_chain(Some(c.ends)),
+                        ProteinAnnotation::new(mod_sites, None)
+                            .with_chain(Some(c.ends))
+                            .with_origin(Some(self.origin(EntryKind::Chain, &c.tag))),
                     )),
                 });
                 stats.chain_proteins += 1;
@@ -746,11 +778,13 @@ impl UniProtEntry {
                 stats.mod_sites += own.len();
                 let mut iso_sites = sites_through(&sites, &edits);
                 iso_sites.extend(own);
-                let annotation = ProteinAnnotation::new(iso_sites, None);
+                let annotation = ProteinAnnotation::new(iso_sites, None)
+                    .with_origin(Some(self.origin(EntryKind::Isoform, &iso.id)));
                 let iso_description = self.isoform_description(iso);
                 if opts.variants {
                     let variants = self.sequence_variants(Some(&iso.id), &sequence, opts, stats);
                     let proteins = self.variant_proteins(
+                        &self.accession,
                         &iso.id,
                         &iso_description,
                         &sequence,
@@ -762,8 +796,7 @@ impl UniProtEntry {
                         accession: format!("{}|{}|{}", self.db_code(), iso.id, self.name),
                         description: iso_description,
                         sequence,
-                        annotation: (!annotation.mod_sites.is_empty())
-                            .then(|| Arc::new(annotation)),
+                        annotation: Some(Arc::new(annotation)),
                     });
                     out.extend(proteins);
                 } else {
@@ -771,8 +804,7 @@ impl UniProtEntry {
                         accession: format!("{}|{}|{}", self.db_code(), iso.id, self.name),
                         description: iso_description,
                         sequence,
-                        annotation: (!annotation.mod_sites.is_empty())
-                            .then(|| Arc::new(annotation)),
+                        annotation: Some(Arc::new(annotation)),
                     });
                 }
                 stats.isoform_proteins += 1;
@@ -1591,6 +1623,17 @@ mod tests {
         );
         assert!(k4e.description.ends_with("SV=2 VARIANT=VAR_000001_K4E"));
         assert_eq!(sites(k4e), sites(&db.proteins[0]), "same-length change");
+        let o = k4e.origin().unwrap();
+        assert_eq!(o.kind, model::EntryKind::Variant);
+        assert_eq!(&*o.family, "P00001");
+        assert_eq!(&*o.feature, "VAR_000001_K4E");
+        // K -> E: 129.042593 - 128.094963
+        assert!(
+            (o.variant_delta_da - 0.947630).abs() < 1e-5,
+            "{}",
+            o.variant_delta_da
+        );
+        assert_eq!(db.proteins[0].entry_kind(), model::EntryKind::Reference);
 
         let ins = &db.proteins[4];
         assert_eq!(ins.sequence, b"MSEKRSPTKVVVNLSTYKDER");

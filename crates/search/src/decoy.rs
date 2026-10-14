@@ -273,7 +273,8 @@ pub fn decoy_annotation(target: &Protein, source: &[u32]) -> Option<Arc<ProteinA
     Some(Arc::new(
         ProteinAnnotation::new(mod_sites, None)
             .with_variant(variant)
-            .with_chain(ann.chain),
+            .with_chain(ann.chain)
+            .with_origin(ann.origin.clone()),
     ))
 }
 

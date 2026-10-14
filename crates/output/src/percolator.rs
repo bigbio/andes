@@ -708,7 +708,11 @@ mod tests {
         .unwrap();
         assert_eq!(args[0], "run");
         assert!(args.contains(&"--platform".to_string()));
-        assert!(args.iter().any(|a| a == "/data:/pin:ro"));
+        let pin_mount = format!(
+            "{}:/pin:ro",
+            std::path::absolute("/data").unwrap().display()
+        );
+        assert!(args.iter().any(|a| *a == pin_mount));
         assert!(args.contains(&DEFAULT_PERCOLATOR_IMAGE.to_string()));
         assert_eq!(args.last().unwrap(), "/pin/run.pin");
         // result paths rewritten under /out

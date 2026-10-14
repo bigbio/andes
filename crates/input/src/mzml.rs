@@ -91,6 +91,16 @@ const CV_UVPD: &str = "MS:1000435"; // photodissociation (PSI-MS UVPD term)
                                     // We map ECD → ETD for electron-based activation grouping when ECD is
                                     // the only signal (canonical table covers ETD/CID/HCD/PQD/UVPD).
 const CV_ECD: &str = "MS:1000250"; // electron capture dissociation
+// Child terms of the methods above, written by newer converters.
+const CV_TRAP_CID: &str = "MS:1002472"; // trap-type collision-induced dissociation
+const CV_HIGH_ENERGY_BEAM_CID: &str = "MS:1002481"; // higher energy beam-type CID
+const CV_UVPD_CHILD: &str = "MS:1003246"; // ultraviolet photodissociation
+// The collisional half of EThcD/ETciD, written next to an ETD/ECD term.
+const CV_SUPPLEMENTAL_HCD: &str = "MS:1002678"; // supplemental beam-type CID
+const CV_SUPPLEMENTAL_CID: &str = "MS:1002679"; // supplemental CID
+// A combined method written as a single term.
+const CV_ETHCD: &str = "MS:1002631"; // electron-transfer/higher-energy collision dissociation
+const CV_ETCID: &str = "MS:1003182"; // electron-transfer/collision-induced dissociation
 
 /// Unit: minutes → multiply by 60 to get seconds.
 const CV_UNIT_MINUTE: &str = "UO:0000031";
@@ -736,7 +746,7 @@ impl<R: BufRead> MzMLReader<R> {
             // Why first-wins matters: TMT SPS-MS3 mzMLs chain CID (MS2
             // isolation) → HCD (MS3 fragmentation). First-wins routes those
             // to a CID-trained model.
-            CV_CID if self.state == State::Activation => {
+            CV_CID | CV_TRAP_CID if self.state == State::Activation => {
                 if let Some(sb) = self.current.as_mut() {
                     sb.act_saw_collisional = true;
                     if sb.activation_method.is_none() {
@@ -744,7 +754,7 @@ impl<R: BufRead> MzMLReader<R> {
                     }
                 }
             }
-            CV_HCD if self.state == State::Activation => {
+            CV_HCD | CV_HIGH_ENERGY_BEAM_CID if self.state == State::Activation => {
                 if let Some(sb) = self.current.as_mut() {
                     sb.act_saw_collisional = true;
                     if sb.activation_method.is_none() {
@@ -756,6 +766,22 @@ impl<R: BufRead> MzMLReader<R> {
                 // ETD wins unconditionally over other activation methods.
                 if let Some(sb) = self.current.as_mut() {
                     sb.act_saw_electron = true;
+                    sb.activation_method = Some(ActivationMethod::ETD);
+                }
+            }
+            // Supplemental activation is never the primary method: it only marks
+            // the block as EThcD/ETciD when an electron term is also present.
+            CV_SUPPLEMENTAL_HCD | CV_SUPPLEMENTAL_CID if self.state == State::Activation => {
+                if let Some(sb) = self.current.as_mut() {
+                    sb.act_saw_collisional = true;
+                }
+            }
+            // A single combined term carries both halves; the block's closing
+            // tag resolves it like ETD + supplemental collision.
+            CV_ETHCD | CV_ETCID if self.state == State::Activation => {
+                if let Some(sb) = self.current.as_mut() {
+                    sb.act_saw_electron = true;
+                    sb.act_saw_collisional = true;
                     sb.activation_method = Some(ActivationMethod::ETD);
                 }
             }
@@ -775,7 +801,7 @@ impl<R: BufRead> MzMLReader<R> {
                     }
                 }
             }
-            CV_UVPD if self.state == State::Activation => {
+            CV_UVPD | CV_UVPD_CHILD if self.state == State::Activation => {
                 if let Some(sb) = self.current.as_mut() {
                     if sb.activation_method.is_none() {
                         sb.activation_method = Some(ActivationMethod::UVPD);
@@ -2600,6 +2626,38 @@ mod tests {
         )));
         assert_eq!(spectra.len(), 1);
         assert_eq!(spectra[0].activation_method, Some(ActivationMethod::HCD));
+    }
+
+    #[test]
+    fn supplemental_activation_terms_mark_ethcd_and_etcid() {
+        // msconvert writes EThcD as ETD + "supplemental beam-type CID"
+        // (MS:1002678) and ETciD as ETD + "supplemental CID" (MS:1002679).
+        for supp in ["MS:1002678", "MS:1002679"] {
+            for (a, b) in [("MS:1000598", supp), (supp, "MS:1000598")] {
+                let spectra =
+                    collect_ok(&wrap_spectra(&spectrum_xml_with_two_activations(a, b)));
+                assert_eq!(spectra[0].activation_method, Some(ActivationMethod::HCD), "{a} + {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn combined_and_child_activation_terms() {
+        for (cv, want) in [
+            ("MS:1002631", ActivationMethod::HCD), // EThcD as one term
+            ("MS:1003182", ActivationMethod::HCD), // ETciD as one term
+            ("MS:1002472", ActivationMethod::CID), // trap-type CID
+            ("MS:1002481", ActivationMethod::HCD), // higher energy beam-type CID
+            ("MS:1003246", ActivationMethod::UVPD),
+        ] {
+            let spectra = collect_ok(&wrap_spectra(&spectrum_xml_with_activation(Some(cv))));
+            assert_eq!(spectra[0].activation_method, Some(want), "{cv}");
+        }
+        // A supplemental term without an electron term does not set a method.
+        let spectra = collect_ok(&wrap_spectra(&spectrum_xml_with_activation(Some(
+            "MS:1002678",
+        ))));
+        assert_eq!(spectra[0].activation_method, None);
     }
 
     #[test]

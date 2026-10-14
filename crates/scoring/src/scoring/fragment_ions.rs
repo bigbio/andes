@@ -167,8 +167,9 @@ pub fn predict_by_ions(peptide: &Peptide, charge_range: RangeInclusive<u8>) -> V
 /// losses, ZERO loss ions are emitted and the output is byte-identical to the
 /// canonical b/y set (this is the safety guarantee behind [`predict_by_ions`]).
 ///
-/// Multiple loss-bearing residues within a single fragment emit each
-/// residue's losses independently (no cross-products of simultaneous losses).
+/// Multiple loss-bearing residues within a single fragment each contribute
+/// their losses (no cross-products of simultaneous losses); a loss two of them
+/// share (e.g. −H3PO4 from two phosphosites) is one ion, emitted once.
 pub fn predict_by_ions_with_losses(
     peptide: &Peptide,
     charge_range: RangeInclusive<u8>,
@@ -424,11 +425,20 @@ fn emit_loss_ions(
     z: f64,
     intact_mz: f64,
 ) {
-    for &(idx, loss_class, losses) in loss_residues {
+    for (j, &(idx, loss_class, losses)) in loss_residues.iter().enumerate() {
         if !span.contains(&idx) {
             continue;
         }
-        for &loss in losses {
+        for (k, &loss) in losses.iter().enumerate() {
+            // One ion per distinct (class, loss) on this fragment.
+            let same = |&l: &f64| l.to_bits() == loss.to_bits();
+            let earlier = losses[..k].iter().any(same)
+                || loss_residues[..j].iter().any(|&(i, c, ls)| {
+                    span.contains(&i) && c == loss_class && ls.iter().any(same)
+                });
+            if earlier {
+                continue;
+            }
             let mz = intact_mz - loss / z;
             // Skip non-physical ions (e.g. a full-glycan loss on a singly-charged
             // ion drives m/z <= 0). The scoring visitors in `scored_spectrum.rs`
@@ -605,6 +615,41 @@ mod tests {
                 && i.charge == l.charge
                 && (i.mz - l.mz - 324.1056).abs() < 1e-4
         })));
+    }
+
+    #[test]
+    fn shared_loss_of_two_sites_is_one_ion() {
+        let m = model::modification::leak_mod(Modification {
+            name: "Phospho".to_string(),
+            mass_delta: 79.96633,
+            residue: ResidueSpec::Specific(b'S'),
+            location: ModLocation::Anywhere,
+            fixed: false,
+            accession: None,
+            neutral_losses: vec![97.97690],
+            loss_class: 2,
+        });
+        let residues: Vec<AminoAcid> = b"SSAK"
+            .iter()
+            .map(|&r| {
+                let aa = AminoAcid::standard(r).unwrap();
+                if r == b'S' {
+                    aa.with_mod(m)
+                } else {
+                    aa
+                }
+            })
+            .collect();
+        let pep = Peptide::new(residues, b'_', b'-');
+        let ions = predict_by_ions_with_losses(&pep, 1..=1, true);
+        // b2 and y3 span both phosphosites: each has exactly one −H3PO4 partner.
+        for (kind, position) in [(IonKind::B, 2), (IonKind::Y, 3)] {
+            let n = ions
+                .iter()
+                .filter(|p| p.is_loss() && p.kind == kind && p.position == position)
+                .count();
+            assert_eq!(n, 1, "{kind:?}{position}");
+        }
     }
 
     #[test]

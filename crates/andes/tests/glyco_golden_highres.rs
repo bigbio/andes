@@ -1,5 +1,13 @@
 //! HIGH-RES glyco serve-path golden.
 //!
+//! REGENERATED 2026-10-14 when the N-terminal Met-cleaved walk began emitting
+//! only the peptides starting at the post-Met residue (it had enumerated every
+//! other span of an M-initial protein a second time). Against the previous
+//! binary: 120 rows, every SpecId, peptide and protein unchanged (0 winner
+//! flips); the duplicate copies leave each spectrum's candidate pool, so
+//! `CandidateRankEntropy` and `RawScore` moved on 117 rows,
+//! `ListwiseScoreGap` on 83 and `TailorScore` on 15.
+//!
 //! REGENERATED 2026-09-09 when the glycan-first pre-filter's Y-ion generation
 //! became structure-aware (core + antenna-subset losses + core ladder, replacing
 //! the full 2^n power set that over-generated physically-impossible "trim a core

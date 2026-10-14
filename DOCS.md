@@ -234,6 +234,23 @@ chain's cut sites, so each terminal peptide of the target has a decoy peptide of
 and mass. A plain reverse would move the cut sites, and could leave a chain with no admissible
 decoy peptide at all.
 
+**Provenance columns.** Each PIN row says which kind of entry its peptide is specific to:
+`IsVariant`, `IsIsoform`, `IsChain`. A peptide shared with a canonical (or FASTA) entry is
+canonical and sets none. `RefCompetitor` is 1 when a canonical candidate was scored for the
+spectrum, and `DeltaRefScore` is a non-canonical row's score minus the best canonical
+candidate's: how much better the alternative sequence explains the spectrum than the canonical
+one. `IsotopeMimic` is 1 when the precursor fits better if the row's isotope-like deltas
+(deamidation, or an N→D / Q→E substitution) are read as isotope steps, the signature of an
+unmodified canonical peptide picked on its M+1 peak. Decoy rows carry their target entry's
+class. All six are Percolator features. For an error rate per class, run Percolator once and
+estimate FDR separately on each class's rows afterwards. Chimeric co-isolation rows (Pass 2 of
+`--chimeric`) get `RefCompetitor` and `DeltaRefScore` = 0; the glyco PIN leaves all six out. The TSV adds `ProteinFamily`, `EntryKind` and `FeatureIds` for the named
+protein.
+
+With `--uniprot-variants`, restricting an artefact mod (deamidation, oxidation, carbamylation,
+methylation) to annotated sites removes the canonical explanation that competes with a variant
+of the same mass. andes warns when a mods file does that.
+
 **Evidence** (`--uniprot-evidence`, from the features' ECO codes):
 
 | Level | Admits |
@@ -521,8 +538,17 @@ the fused strong score Percolator weights most; historically `StrongScore`; it a
 | 62 | `RawScore` | float | unbounded | **Fused strong score** `signal − null`; the primary feature. |
 | 63 | `RawScoreCal` | float | signed | Per-spectrum z-scored `RawScore`. |
 | 64 | `RankScoreFloat` | float | unbounded | Unrounded `RankScore` (continuous split-sum). |
-| 65 | `Peptide` | string | — | `pre.SEQUENCE.post` with `+mass` mod annotations. |
-| 66 | `Proteins` | string | — | Protein accession(s), tab-separated; decoys carry `--decoy-prefix`. A UniProt variant entry names its change (`sp\|P04637_VAR_005851_D7H\|P53_HUMAN`), an isoform its id (`sp\|P04637-2\|P53_HUMAN`), a mature chain its feature id (`sp\|P02769_PRO_0000001058\|ALBU_BOVIN`). |
+| 65 | `DeltaRT` | float | signed | Observed − predicted retention time (min); 0 without RT. |
+| 66 | `AbsDeltaRT` | float | ≥0 | `|DeltaRT|`. |
+| 67 | `DeltaRTNorm` | float | signed | `DeltaRT` divided by the run's gradient span. |
+| 68 | `IsVariant` | 0/1 | — | The peptide is specific to UniProt natural-variant entries (§1a, provenance). |
+| 69 | `IsIsoform` | 0/1 | — | Specific to isoform entries. |
+| 70 | `IsChain` | 0/1 | — | Specific to mature-chain entries. |
+| 71 | `RefCompetitor` | 0/1 | — | A candidate from a canonical (or FASTA) entry was scored for the spectrum. |
+| 72 | `DeltaRefScore` | float | signed | Non-canonical rows: `RankScore` minus the best canonical candidate's; 0 otherwise. |
+| 73 | `IsotopeMimic` | 0/1 | — | The precursor fits better when isotope-like deltas (deamidation, N→D, Q→E) are read as isotope steps. |
+| 74 | `Peptide` | string | — | `pre.SEQUENCE.post` with `+mass` mod annotations. |
+| 75 | `Proteins` | string | — | Protein accession(s), tab-separated; decoys carry `--decoy-prefix`. A UniProt variant entry names its change (`sp\|P04637_VAR_005851_D7H\|P53_HUMAN`), an isoform its id (`sp\|P04637-2\|P53_HUMAN`), a mature chain its feature id (`sp\|P02769_PRO_0000001058\|ALBU_BOVIN`). |
 
 Columns marked **0.0 unless/without** stay in the header and are zero when their condition
 does not hold.
@@ -544,9 +570,13 @@ does not hold.
 | `Charge` | int | Assigned precursor charge. |
 | `Peptide` | string | Peptide with modifications. |
 | `Protein` | string | Primary protein accession. |
-| `RawScore` | int | Rounded raw score (the only score column). |
+| `RankScore` | int | Rounded rank score (the only score column). |
+| `Modifications` | string | `;`-joined `{1-based position}:{CV accession}`. |
+| `ProteinFamily` | string | Family accession of the `Protein` entry (its own accession for a FASTA or canonical entry). |
+| `EntryKind` | string | `reference`, `isoform`, `variant` or `chain`. |
+| `FeatureIds` | string | The feature that made the entry (`VAR_…`, `P04637-2`, `PRO_…`); empty for `reference`. |
 
-**mzML header**: the same without `Title` (11 columns).
+**mzML header**: the same without `Title` (15 columns).
 
 ### 3c. PIN vs TSV — which to use
 

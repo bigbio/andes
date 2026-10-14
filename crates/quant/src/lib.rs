@@ -18,6 +18,8 @@
 //!   reference run, and the predicted RT and its uncertainty per run.
 //! * [`decoys`]: mass-defect-preserving and RT-shifted decoy hypotheses for
 //!   the match-between-runs transfer FDR.
+//! * [`normalize`]: run normalisation of MS1 quantities across runs (a level
+//!   per run and an RT-local term).
 //! * [`evidence`]: the likelihood template fit that measures one (precursor,
 //!   run) hypothesis: amplitude, quantity and the evidence statistics.
 
@@ -30,6 +32,7 @@ pub mod lfq;
 pub mod library;
 pub mod ms1_index;
 pub mod nnls;
+pub mod normalize;
 pub mod purity;
 pub mod tdc;
 pub mod xic;

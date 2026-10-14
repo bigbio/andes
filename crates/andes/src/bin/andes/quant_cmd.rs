@@ -630,11 +630,17 @@ fn parse_peptidoform(peptidoform: &str) -> (String, Vec<ModRecord>) {
 }
 
 /// The QPX feature rows of the MBR table: every row except the
-/// below-threshold transfers, which stay in `<base>.mbr.tsv` only.
+/// below-threshold transfers and identified rows, which stay in
+/// `<base>.mbr.tsv` only.
 fn feature_records(stored: &StoredLibrary, features: &[MbrFeature]) -> Vec<FeatureRecord> {
     features
         .iter()
-        .filter(|f| f.evidence_type != EvidenceType::BelowThreshold)
+        .filter(|f| {
+            !matches!(
+                f.evidence_type,
+                EvidenceType::BelowThreshold | EvidenceType::IdentifiedBelowThreshold
+            )
+        })
         .enumerate()
         .map(|(i, f)| {
             let m = &stored.library.meta[f.precursor as usize];
@@ -676,6 +682,7 @@ fn feature_records(stored: &StoredLibrary, features: &[MbrFeature]) -> Vec<Featu
                 mbr: Some(MbrColumns {
                     evidence_type: f.evidence_type.as_str().to_string(),
                     transfer_q: f.transfer_q,
+                    quant_q: f.quant_q,
                     quantity_se: f.quantity_se,
                 }),
             }
@@ -683,12 +690,14 @@ fn feature_records(stored: &StoredLibrary, features: &[MbrFeature]) -> Vec<Featu
         .collect()
 }
 
-/// Transfer FDR and the MBR outputs over the extract rows of every run (in
-/// run order); with `parquet_dir`, also `<parquet_dir>/quantms.feature.parquet`.
+/// Transfer FDR, identified quality q-values and the MBR outputs over the
+/// extract rows of every run (in run order); with `parquet_dir`, also
+/// `<parquet_dir>/quantms.feature.parquet`.
 pub(crate) fn finalize_and_write(
     stored: &StoredLibrary,
     runs: &[Vec<ExtractRow>],
     mbr_fdr: f64,
+    quant_feature_fdr: Option<f64>,
     base: &Path,
     parquet_dir: Option<&Path>,
 ) -> Result<(), String> {
@@ -698,12 +707,13 @@ pub(crate) fn finalize_and_write(
         &stored.library,
         runs,
         mbr_fdr,
+        quant_feature_fdr,
         MBR_SEED,
         &tsv,
         &validation,
     )?;
     eprintln!(
-        "[mbr] wrote {} ({} rows; transfer_q is an internal quant-quality q-value, not an identification FDR) and {}",
+        "[mbr] wrote {} ({} rows; transfer_q and quant_q are internal quant-quality q-values, not identification FDR) and {}",
         tsv.display(),
         summary.rows_written,
         validation.display()
@@ -715,7 +725,7 @@ pub(crate) fn finalize_and_write(
         output::write_feature_parquet(&path, &records)
             .map_err(|e| format!("write {}: {e}", path.display()))?;
         eprintln!(
-            "[mbr] wrote {} ({} feature rows with evidence type; below-threshold transfers are in the mbr.tsv only)",
+            "[mbr] wrote {} ({} feature rows with evidence type; below-threshold transfers and identified rows are in the mbr.tsv only)",
             path.display(),
             records.len()
         );
@@ -735,6 +745,7 @@ pub(crate) fn run_in_process(
     donor_q: f64,
     donor_pep: Option<f64>,
     mbr_fdr: f64,
+    quant_feature_fdr: Option<f64>,
     base: &Path,
     parquet_dir: Option<&Path>,
 ) -> Result<(), String> {
@@ -754,7 +765,14 @@ pub(crate) fn run_in_process(
     let runs: Vec<Vec<ExtractRow>> = (0..stems.len())
         .map(|r| extract_and_write(dir, &stored, &fingerprint, r as u16, ep))
         .collect::<Result<_, _>>()?;
-    finalize_and_write(&stored, &runs, mbr_fdr, base, parquet_dir)?;
+    finalize_and_write(
+        &stored,
+        &runs,
+        mbr_fdr,
+        quant_feature_fdr,
+        base,
+        parquet_dir,
+    )?;
     eprintln!("[PHASE mbr: {:.2}s]", t0.elapsed().as_secs_f64());
     Ok(())
 }
@@ -826,6 +844,7 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
         &stored,
         &runs,
         a.mbr_fdr,
+        a.quant_feature_fdr.0,
         &a.output,
         a.output_parquet.as_deref(),
     )
@@ -960,7 +979,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_records_leave_out_below_threshold_transfers() {
+    fn feature_records_leave_out_below_threshold_rows() {
         let meta: Vec<PrecursorMeta> = (0..2)
             .map(|i| PrecursorMeta {
                 key: format!("PEPT{}IDEK/2", ["", "M[UNIMOD:35]"][i]),
@@ -984,7 +1003,9 @@ mod tests {
             evidence_type,
             quantity: Some(1e6),
             quantity_se: Some(1e4),
+            quantity_normalized: Some(1e6),
             transfer_q,
+            quant_q: transfer_q.or(Some(0.003)),
             apex_rt_s: Some(100.0),
             library_q: 0.001,
             mass_err_ppm: Some(0.5),
@@ -993,7 +1014,7 @@ mod tests {
             feature(0, 0, EvidenceType::Identified, None),
             feature(0, 1, EvidenceType::BelowThreshold, Some(0.2)),
             feature(1, 0, EvidenceType::TransferMs1, Some(0.004)),
-            feature(1, 1, EvidenceType::BelowThreshold, Some(0.5)),
+            feature(1, 1, EvidenceType::IdentifiedBelowThreshold, None),
         ];
         let records = feature_records(&stored, &features);
         let got: Vec<(i64, &str, &str)> = records
@@ -1009,9 +1030,14 @@ mod tests {
         assert_eq!(
             got,
             [(1, "a", "identified"), (2, "a", "transfer_ms1")],
-            "below-threshold transfers are not feature rows"
+            "below-threshold transfers and identified rows are not feature rows"
         );
         assert_eq!(records[1].peptidoform, "PEPTM[UNIMOD:35]IDEK");
+        let quant_q: Vec<Option<f64>> = records
+            .iter()
+            .map(|r| r.mbr.as_ref().unwrap().quant_q)
+            .collect();
+        assert_eq!(quant_q, [Some(0.003), Some(0.004)]);
     }
 
     /// 200 target PSMs of distinct peptides in run `a`, scored by a rescoring

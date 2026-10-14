@@ -715,6 +715,14 @@ pub(crate) struct SearchArgs {
     #[arg(long = "mbr-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
     pub(crate) mbr_fdr: f64,
 
+    /// Identified-row quality q-value: an identified (precursor, run) whose
+    /// MS1 feature has a quality q-value against its decoys above this (or
+    /// none) is reported as `identified_below_threshold` and left out of
+    /// `quantms.feature.parquet`. An internal quant-quality q-value, not an
+    /// identification FDR. `off` reports every identified row. Default 0.05.
+    #[arg(long = "quant-feature-fdr", default_value = "0.05", value_parser = parse_fraction_or_off)]
+    pub(crate) quant_feature_fdr: FractionOrOff,
+
     /// PSM q-value threshold for quantification targets when rescoring runs.
     /// Default: the `--fdr` value (0.01).
     #[arg(long = "quant-fdr", hide = true, value_parser = parse_unit_fraction)]
@@ -836,6 +844,14 @@ pub(crate) struct QuantFinalizeArgs {
     /// identification FDR. Default 0.01.
     #[arg(long = "mbr-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
     pub(crate) mbr_fdr: f64,
+
+    /// Identified-row quality q-value: an identified (precursor, run) whose
+    /// MS1 feature has a quality q-value against its decoys above this (or
+    /// none) is reported as `identified_below_threshold` and left out of
+    /// `quantms.feature.parquet`. An internal quant-quality q-value, not an
+    /// identification FDR. `off` reports every identified row. Default 0.05.
+    #[arg(long = "quant-feature-fdr", default_value = "0.05", value_parser = parse_fraction_or_off)]
+    pub(crate) quant_feature_fdr: FractionOrOff,
 
     /// Also write the rows as `quantms.feature.parquet` into this directory.
     #[arg(long = "output-parquet", value_name = "DIR")]
@@ -1065,6 +1081,22 @@ pub(crate) fn parse_precursor_tol(s: &str) -> Result<Tolerance, String> {
 /// Parse a probability-domain CLI value (FDR / PEP / refine-FDR) — must be a
 /// finite number in `[0, 1]` (finding 3.8). Used as a clap `value_parser` so a
 /// bad value is rejected at parse time with a clear message.
+/// A threshold in `(0, 1]`, or `off` (`None`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct FractionOrOff(pub(crate) Option<f64>);
+
+/// `off`, or a number in `(0, 1]`.
+pub(crate) fn parse_fraction_or_off(s: &str) -> Result<FractionOrOff, String> {
+    if s.trim().eq_ignore_ascii_case("off") {
+        return Ok(FractionOrOff(None));
+    }
+    let v = parse_unit_fraction(s)?;
+    if v == 0.0 {
+        return Err(format!("invalid value `{s}`: must be above 0, or `off`"));
+    }
+    Ok(FractionOrOff(Some(v)))
+}
+
 pub(crate) fn parse_unit_fraction(s: &str) -> Result<f64, String> {
     let v: f64 = s
         .trim()

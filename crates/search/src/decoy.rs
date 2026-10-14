@@ -2,21 +2,46 @@
 //! or none (target-only / externally-supplied decoys).
 //!
 //! A target's database annotation (UniProt XML: annotated modification sites,
-//! sequence-variant region) is carried onto its decoy through the same
-//! permutation that builds the decoy sequence ([`decoy_annotation`]), so the
-//! decoy offers site-restricted modifications on the same residues and, for a
-//! variant entry, a variant region of the same shape: the decoy side mirrors
-//! the search space the annotation adds on the target side.
+//! sequence-variant parts, mature-chain termini) is carried onto its decoy
+//! through the same permutation that builds the decoy sequence
+//! ([`decoy_annotation`]), so the decoy offers site-restricted modifications
+//! on the same residues and, for a variant entry, variant parts of the same
+//! shape. For an annotated target that permutation is first fitted
+//! ([`fit_permutation`]): a terminal site keeps its residue at the decoy's
+//! terminus, and a mature chain keeps its cleavage sites. The decoy side thus
+//! mirrors the search space the annotation adds on the target side.
 
 use std::sync::Arc;
 
+use model::enzyme::Enzyme;
 use model::protein::{ModSite, Protein, ProteinAnnotation, ProteinDb, SiteAnchor, VariantRegion};
+
+use crate::candidate_gen::compute_cleavage_positions;
 
 /// Default decoy accession prefix.
 pub const DEFAULT_DECOY_PREFIX: &str = "XXX";
 
 /// Default seed for the reproducible shuffle decoy strategy.
 pub const DEFAULT_DECOY_SEED: u64 = 42;
+
+/// The proteases of a search. A mature-chain entry's decoy keeps the
+/// cleavage sites they make (see [`fit_permutation`]); nothing else depends
+/// on them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Proteases {
+    pub primary: Enzyme,
+    pub extra: Vec<Enzyme>,
+}
+
+impl Default for Proteases {
+    /// Trypsin, the default search enzyme.
+    fn default() -> Self {
+        Self {
+            primary: Enzyme::Trypsin,
+            extra: Vec::new(),
+        }
+    }
+}
 
 /// How decoy proteins are generated for the target+decoy search database.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -89,40 +114,144 @@ impl DecoyStrategy {
 /// measure sequon-density parity target vs. decoy directly before trusting
 /// glyco q-values from an andes-generated decoy DB.
 pub fn reverse_db(db: &ProteinDb, prefix: &str) -> ProteinDb {
+    reverse_decoys(db, prefix, &Proteases::default())
+}
+
+fn reverse_decoys(db: &ProteinDb, prefix: &str, proteases: &Proteases) -> ProteinDb {
     let normalized = normalize_decoy_prefix(prefix);
     let proteins = db
         .proteins
         .iter()
-        .map(|p| Protein {
-            accession: format!("{}_{}", normalized, p.accession),
-            description: p.description.clone(),
-            sequence: p.sequence.iter().rev().copied().collect(),
-            annotation: p.annotation.as_ref().and_then(|_| {
-                let n = p.sequence.len() as u32;
-                let source: Vec<u32> = (0..n).rev().collect();
-                decoy_annotation(p, &source)
-            }),
+        .map(|p| {
+            let accession = format!("{}_{}", normalized, p.accession);
+            if p.annotation.is_some() {
+                let source: Vec<u32> = (0..p.sequence.len() as u32).rev().collect();
+                return annotated_decoy(p, accession, source, proteases);
+            }
+            Protein {
+                accession,
+                description: p.description.clone(),
+                sequence: p.sequence.iter().rev().copied().collect(),
+                annotation: None,
+            }
         })
         .collect();
     ProteinDb { proteins }
 }
 
+/// The decoy of the annotated target `p` under the strategy's permutation
+/// `source` (`source[i]`: the target position decoy residue `i` comes from),
+/// fitted to the annotation first ([`fit_permutation`]).
+fn annotated_decoy(
+    p: &Protein,
+    accession: String,
+    mut source: Vec<u32>,
+    proteases: &Proteases,
+) -> Protein {
+    fit_permutation(p, &mut source, proteases);
+    Protein {
+        accession,
+        description: p.description.clone(),
+        sequence: source.iter().map(|&i| p.sequence[i as usize]).collect(),
+        annotation: decoy_annotation(p, &source),
+    }
+}
+
+/// Fit the strategy's permutation `source` of an annotated target so that its
+/// decoy offers the search space the annotation adds:
+///
+/// - A mature-chain entry yields only its terminal spans, so its decoy keeps
+///   their cleavage structure. Residues are permuted only within the
+///   cleavage segments of `proteases`, in the order the strategy gave them
+///   (reversed where that is no change), and every residue that makes a cut
+///   stays in place. Cleavage rules look only at the residues around a cut,
+///   so the decoy has the same cut sites, and each terminal span of the
+///   target has a decoy span with the same length, mass and missed
+///   cleavages (under reversal, the usual pseudo-reverse). A non-specific
+///   digest cuts everywhere, so any permutation keeps that.
+/// - A residue carrying a site tied to the protein terminus where the target
+///   has it (the first residue; the second after an initiator Met, which then
+///   stays too; the last residue) stays at the decoy's terminus. A
+///   residue-specific terminal mod restricted to annotated sites (pyro-Glu on
+///   Q) can then be placed on the decoy as on the target.
+fn fit_permutation(target: &Protein, source: &mut [u32], proteases: &Proteases) {
+    let seq = &target.sequence;
+    let n = seq.len();
+    if n == 0 {
+        return;
+    }
+    let chain = target.chain_ends().is_some();
+    let all = || std::iter::once(proteases.primary).chain(proteases.extra.iter().copied());
+    if chain && !all().any(|e| matches!(e, Enzyme::NonSpecific)) {
+        let makes_cut = |r: u8| all().any(|e| e.is_cleavable_after(r) || e.is_cleavable_before(r));
+        let mut image = vec![0u32; n];
+        for (i, &from) in source.iter().enumerate() {
+            image[from as usize] = i as u32;
+        }
+        for (i, from) in source.iter_mut().enumerate() {
+            *from = i as u32;
+        }
+        let cuts = compute_cleavage_positions(seq, proteases.primary, &proteases.extra);
+        for w in cuts.windows(2) {
+            let free: Vec<u32> = (w[0]..w[1])
+                .filter(|&i| !makes_cut(seq[i as usize]))
+                .collect();
+            let mut order = free.clone();
+            order.sort_by_key(|&i| image[i as usize]);
+            // A shuffle can leave a short segment as it was, which would make
+            // the decoy peptide the target's; reverse it then.
+            if order == free {
+                order.reverse();
+            }
+            for (&at, &from) in free.iter().zip(&order) {
+                source[at as usize] = from;
+            }
+        }
+    }
+    // Keep target residue `q` at decoy position `q`. Within a chain both
+    // positions lie in the first or last segment, so the cuts stay too.
+    let pin = |source: &mut [u32], q: usize| {
+        if let Some(i) = source.iter().position(|&from| from as usize == q) {
+            source.swap(i, q);
+        }
+    };
+    let after_met = !chain && seq[0] == b'M';
+    let (mut first, mut second, mut last) = (false, false, false);
+    for s in target.mod_sites() {
+        match s.anchor {
+            SiteAnchor::NTerminus if s.position == 0 => first = true,
+            SiteAnchor::NTerminus if s.position == 1 && after_met => second = true,
+            SiteAnchor::CTerminus if s.position as usize + 1 == n => last = true,
+            _ => {}
+        }
+    }
+    if first || second {
+        pin(source, 0);
+    }
+    if second {
+        pin(source, 1);
+    }
+    if last {
+        pin(source, n - 1);
+    }
+}
+
 /// The annotation of the decoy built from `target` by a permutation of its
 /// residues: `source[i]` is the target position decoy residue `i` came from.
 ///
-/// Modification sites follow their residue exactly, except a site tied to a
-/// terminus ([`SiteAnchor`]) that sits at the target's protein terminus (the
-/// first residue, or the second after an initiator Met; the last residue): it
-/// moves to the decoy's own terminus, so a protein-terminal mod restricted to
-/// annotated sites is offered on decoys as often as on targets.
+/// Modification sites follow their residue; a mature chain keeps its
+/// new-terminus flags. Builders fit the permutation first
+/// ([`fit_permutation`]), so a terminal site's residue is already at the
+/// decoy's terminus and a chain's terminal spans keep their cleavage sites.
 ///
-/// A variant region maps to its image when that is contiguous (always, under
-/// reversal); otherwise (shuffling scatters it) to a region of the same
-/// length at the image of its first residue. The same holds for the stretch a
-/// deletion junction or an indel in a repeat requires a span to hold (see
-/// [`VariantRegion`]). Either way the decoy yields variant spans of the same
-/// shape as the target, which is what keeps the two sides' search spaces
-/// matched. `None` when the target has no annotation.
+/// Each variant part maps to its image when that is contiguous (always,
+/// under reversal); otherwise (shuffling scatters it) to a part of the same
+/// length at the image of its first residue, moved back from the end if
+/// needed. The same holds for the stretch a deletion junction or an indel in
+/// a repeat requires a span to hold (see [`VariantRegion`]). Either way the
+/// decoy yields variant spans of the same shape as the target, which is what
+/// keeps the two sides' search spaces matched. `None` when the target has no
+/// annotation.
 pub fn decoy_annotation(target: &Protein, source: &[u32]) -> Option<Arc<ProteinAnnotation>> {
     let ann = target.annotation.as_deref()?;
     let n = source.len();
@@ -131,65 +260,65 @@ pub fn decoy_annotation(target: &Protein, source: &[u32]) -> Option<Arc<ProteinA
     for (i, &src) in source.iter().enumerate() {
         image[src as usize] = i as u32;
     }
-    let at_n_terminus = |p: usize| p == 0 || (p == 1 && target.sequence.first() == Some(&b'M'));
     let mod_sites: Vec<ModSite> = ann
         .mod_sites
         .iter()
         .filter(|s| (s.position as usize) < n)
-        .map(|s| {
-            let p = s.position as usize;
-            let position = match s.anchor {
-                SiteAnchor::NTerminus if at_n_terminus(p) => 0,
-                SiteAnchor::CTerminus if p + 1 == n => p as u32,
-                _ => image[p],
-            };
-            ModSite { position, ..*s }
+        .map(|s| ModSite {
+            position: image[s.position as usize],
+            ..*s
         })
         .collect();
-    let variant = ann.variant.map(|v| {
-        let (a, b) = (v.start as usize, v.end as usize);
-        if a < b && b <= n {
-            let lo = image[a..b].iter().copied().min().unwrap_or(0);
-            let hi = image[a..b].iter().copied().max().unwrap_or(0);
-            if (hi - lo) as usize + 1 == b - a {
-                VariantRegion {
-                    start: lo,
-                    end: hi + 1,
-                }
-            } else {
-                let start = image[a];
-                VariantRegion {
-                    start,
-                    end: (start + (b - a) as u32).min(n as u32),
-                }
-            }
-        } else if a >= b && b >= 1 && a < n {
-            // A covering span holds all of [b - 1, a]: the two residues of a
-            // deletion junction (a == b) or a repeat stretch (a > b). Keep
-            // that requirement on the image, or on a stretch of the same
-            // length at the image of its first residue when shuffling
-            // scattered it.
-            let (lo, hi) = (b - 1, a);
-            let width = (hi - lo) as u32;
-            let min = image[lo..=hi].iter().copied().min().unwrap_or(0);
-            let max = image[lo..=hi].iter().copied().max().unwrap_or(0);
-            let first = if max - min == width {
-                min
-            } else {
-                image[lo].min(n as u32 - 1 - width)
-            };
+    let variant = ann.variant.iter().map(|&v| map_region(v, &image)).collect();
+    Some(Arc::new(
+        ProteinAnnotation::new(mod_sites, None)
+            .with_variant(variant)
+            .with_chain(ann.chain),
+    ))
+}
+
+/// The decoy image of variant part `v` under the permutation whose inverse
+/// is `image` (see [`decoy_annotation`]).
+fn map_region(v: VariantRegion, image: &[u32]) -> VariantRegion {
+    let n = image.len();
+    let (a, b) = (v.start as usize, v.end as usize);
+    if a < b && b <= n {
+        let lo = image[a..b].iter().copied().min().unwrap_or(0);
+        let hi = image[a..b].iter().copied().max().unwrap_or(0);
+        let width = (b - a) as u32;
+        if hi - lo + 1 == width {
             VariantRegion {
-                start: first + width,
-                end: first + 1,
+                start: lo,
+                end: hi + 1,
             }
         } else {
-            v
+            let start = image[a].min(n as u32 - width);
+            VariantRegion {
+                start,
+                end: start + width,
+            }
         }
-    });
-    // A chain's new termini are the decoy's own ends, whatever the permutation.
-    Some(Arc::new(
-        ProteinAnnotation::new(mod_sites, variant).with_chain(ann.chain),
-    ))
+    } else if a >= b && b >= 1 && a < n {
+        // A covering span holds all of [b - 1, a]: the two residues of a
+        // deletion junction (a == b) or a repeat stretch (a > b). Keep that
+        // requirement on the image, or on a stretch of the same length at
+        // the image of its first residue when shuffling scattered it.
+        let (lo, hi) = (b - 1, a);
+        let width = (hi - lo) as u32;
+        let min = image[lo..=hi].iter().copied().min().unwrap_or(0);
+        let max = image[lo..=hi].iter().copied().max().unwrap_or(0);
+        let first = if max - min == width {
+            min
+        } else {
+            image[lo].min(n as u32 - 1 - width)
+        };
+        VariantRegion {
+            start: first + width,
+            end: first + 1,
+        }
+    } else {
+        v
+    }
 }
 
 /// Concatenate target + decoy.
@@ -274,6 +403,10 @@ fn sequon_preserving_reverse_tracked(orig: &[u8], mut source: Option<&mut Vec<u3
 /// [`sequon_preserving_reverse`] and [`DecoyStrategy::SequonReverse`]. Accession
 /// scheme matches [`reverse_db`].
 pub fn sequon_preserving_reverse_db(db: &ProteinDb, prefix: &str) -> ProteinDb {
+    sequon_decoys(db, prefix, &Proteases::default())
+}
+
+fn sequon_decoys(db: &ProteinDb, prefix: &str, proteases: &Proteases) -> ProteinDb {
     let normalized = normalize_decoy_prefix(prefix);
     let proteins = db
         .proteins
@@ -288,13 +421,9 @@ pub fn sequon_preserving_reverse_db(db: &ProteinDb, prefix: &str) -> ProteinDb {
                 };
             }
             let mut source: Vec<u32> = (0..p.sequence.len() as u32).rev().collect();
-            let sequence = sequon_preserving_reverse_tracked(&p.sequence, Some(&mut source));
-            Protein {
-                accession: format!("{}_{}", normalized, p.accession),
-                description: p.description.clone(),
-                sequence,
-                annotation: decoy_annotation(p, &source),
-            }
+            sequon_preserving_reverse_tracked(&p.sequence, Some(&mut source));
+            let accession = format!("{}_{}", normalized, p.accession);
+            annotated_decoy(p, accession, source, proteases)
         })
         .collect();
     ProteinDb { proteins }
@@ -308,6 +437,10 @@ pub fn sequon_preserving_reverse_db(db: &ProteinDb, prefix: &str) -> ProteinDb {
 /// dependency-free xorshift64 RNG + Fisher–Yates; the per-protein seed mixes the
 /// global seed with the protein index so identical sequences don't shuffle alike.
 pub fn shuffle_db(db: &ProteinDb, prefix: &str, seed: u64) -> ProteinDb {
+    shuffle_decoys(db, prefix, seed, &Proteases::default())
+}
+
+fn shuffle_decoys(db: &ProteinDb, prefix: &str, seed: u64, proteases: &Proteases) -> ProteinDb {
     let normalized = normalize_decoy_prefix(prefix);
     let proteins = db
         .proteins
@@ -339,11 +472,15 @@ pub fn shuffle_db(db: &ProteinDb, prefix: &str, seed: u64) -> ProteinDb {
                     src.swap(j, k);
                 }
             }
-            Protein {
-                accession: format!("{}_{}", normalized, p.accession),
-                description: p.description.clone(),
-                sequence: seq,
-                annotation: source.and_then(|src| decoy_annotation(p, &src)),
+            let accession = format!("{}_{}", normalized, p.accession);
+            match source {
+                Some(src) => annotated_decoy(p, accession, src, proteases),
+                None => Protein {
+                    accession,
+                    description: p.description.clone(),
+                    sequence: seq,
+                    annotation: None,
+                },
             }
         })
         .collect();
@@ -361,22 +498,27 @@ pub fn build_search_db(
     strategy: DecoyStrategy,
     seed: u64,
 ) -> ProteinDb {
-    match strategy {
-        DecoyStrategy::Reverse => target_plus_decoy(target, prefix),
-        DecoyStrategy::Shuffle => {
-            let decoy = shuffle_db(target, prefix, seed);
-            let mut proteins = target.proteins.clone();
-            proteins.extend(decoy.proteins);
-            ProteinDb { proteins }
-        }
-        DecoyStrategy::SequonReverse => {
-            let decoy = sequon_preserving_reverse_db(target, prefix);
-            let mut proteins = target.proteins.clone();
-            proteins.extend(decoy.proteins);
-            ProteinDb { proteins }
-        }
-        DecoyStrategy::None => target.clone(),
-    }
+    build_search_db_for(target, prefix, strategy, seed, &Proteases::default())
+}
+
+/// [`build_search_db`] for a search with `proteases`, which the decoys of
+/// mature-chain entries depend on (see [`fit_permutation`]).
+pub fn build_search_db_for(
+    target: &ProteinDb,
+    prefix: &str,
+    strategy: DecoyStrategy,
+    seed: u64,
+    proteases: &Proteases,
+) -> ProteinDb {
+    let decoy = match strategy {
+        DecoyStrategy::Reverse => reverse_decoys(target, prefix, proteases),
+        DecoyStrategy::Shuffle => shuffle_decoys(target, prefix, seed, proteases),
+        DecoyStrategy::SequonReverse => sequon_decoys(target, prefix, proteases),
+        DecoyStrategy::None => return target.clone(),
+    };
+    let mut proteins = target.proteins.clone();
+    proteins.extend(decoy.proteins);
+    ProteinDb { proteins }
 }
 
 /// Normalize a user-supplied decoy accession prefix: trim whitespace,

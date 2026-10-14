@@ -35,10 +35,24 @@ impl Protein {
             .map_or(&[], |a| a.mod_sites.as_slice())
     }
 
-    /// The residues a sequence-variant entry changed, `None` for an ordinary
-    /// protein.
+    /// The region of a sequence-variant entry that holds all of its changed
+    /// parts (for most variants the one part), `None` for an ordinary
+    /// protein. A span carrying the variant lies within `max_length` of it.
     pub fn variant_region(&self) -> Option<VariantRegion> {
-        self.annotation.as_deref().and_then(|a| a.variant)
+        let parts = self.variant_parts();
+        Some(VariantRegion {
+            start: parts.iter().map(|v| v.start).min()?,
+            end: parts.iter().map(|v| v.end).max()?,
+        })
+    }
+
+    /// The parts of a sequence-variant entry that read differently from its
+    /// canonical sequence; a span carries the variant iff it covers one of
+    /// them. Empty for an ordinary protein.
+    pub fn variant_parts(&self) -> &[VariantRegion] {
+        self.annotation
+            .as_deref()
+            .map_or(&[], |a| a.variant.as_slice())
     }
 
     /// The new termini of a mature-chain entry, `None` for an ordinary
@@ -60,11 +74,13 @@ pub struct ProteinAnnotation {
     /// Annotated modification sites, sorted by `position`. A variable
     /// modification declared `sites=annotated` is only placed on these.
     pub mod_sites: Vec<ModSite>,
-    /// Set when this protein is a sequence variant of another entry: only
-    /// candidate peptides that carry the variant are enumerated from it, so
-    /// the peptides it shares with the canonical sequence are not searched
-    /// twice and every hit on it is a hit on the variant.
-    pub variant: Option<VariantRegion>,
+    /// Set when this protein is a sequence variant of another entry: the
+    /// parts of it that read differently from that entry, usually one (see
+    /// [`VariantRegion::of_edit`]). Only candidate peptides covering one of
+    /// them are enumerated from it, so the peptides it shares with the
+    /// canonical sequence are not searched twice and every hit on it is a
+    /// hit on the variant. Empty for any other protein.
+    pub variant: Vec<VariantRegion>,
     /// Set when this protein is a mature chain cut out of a precursor entry:
     /// only the candidate peptides at its new termini are enumerated, which
     /// the precursor does not have as protein termini.
@@ -86,9 +102,16 @@ impl ProteinAnnotation {
         });
         Self {
             mod_sites,
-            variant,
+            variant: variant.into_iter().collect(),
             chain: None,
         }
+    }
+
+    /// This annotation for a sequence-variant entry whose differing parts are
+    /// `parts`.
+    pub fn with_variant(mut self, parts: Vec<VariantRegion>) -> Self {
+        self.variant = parts;
+        self
     }
 
     /// This annotation for a mature-chain entry with new termini `chain`.
@@ -142,8 +165,8 @@ pub struct ModSite {
 /// What an annotated modification is tied to: its residue wherever it sits,
 /// or the terminus of the chain it modifies (UniProt's "position in the
 /// polypeptide", e.g. N-terminal for N-acetylserine, C-terminal for an
-/// amidation). Decoy generation keeps a terminal site at the decoy's own
-/// terminus rather than following the residue into the chain.
+/// amidation). Decoy generation keeps the residue of a terminal site at the
+/// decoy's own terminus, so the site stays both terminal and on its residue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SiteAnchor {
     #[default]
@@ -155,9 +178,12 @@ pub enum SiteAnchor {
 /// Where a sequence variant differs from its canonical sequence, in the
 /// variant sequence's own 0-based coordinates. `start` is the length of the
 /// prefix the two sequences share, and `end` is the variant's length minus
-/// the length of the suffix they share. Every span ending at or before
-/// `start`, or starting at or after `end`, reads exactly like the canonical
-/// sequence at the aligned position.
+/// the length of the suffix they share (I and L count as the same residue:
+/// no mass spectrum tells them apart). Every span ending at or before
+/// `start`, or starting at or after `end`, reads like the canonical sequence
+/// at the aligned position. A variant that changes residues on both sides of
+/// an unchanged run has one region per changed part
+/// ([`VariantRegion::of_edit`]).
 ///
 /// - A substitution or insertion has `start < end`: `[start, end)` holds the
 ///   changed residues.
@@ -179,18 +205,108 @@ impl VariantRegion {
         let prefix = canonical
             .iter()
             .zip(variant)
-            .take_while(|(a, b)| a == b)
+            .take_while(|&(&a, &b)| same_residue(a, b))
             .count();
         let suffix = canonical
             .iter()
             .rev()
             .zip(variant.iter().rev())
-            .take_while(|(a, b)| a == b)
+            .take_while(|&(&a, &b)| same_residue(a, b))
             .count();
         Self {
             start: prefix as u32,
             end: (variant.len() - suffix) as u32,
         }
+    }
+
+    /// The parts of the variant that replaces `canonical[start..end]` by
+    /// `replacement` which read differently from `canonical`, in the variant
+    /// sequence's coordinates. Usually one, [`VariantRegion::between`] the
+    /// two sequences. A replacement that keeps a run of the original
+    /// residues between two changes (`KRAPEPTIDEKR` → `ERAPEPTIDEKE`) gets one
+    /// region per change, so a peptide inside the kept run (`APEPTIDEK`), which
+    /// reads like the canonical one, is not taken for a variant peptide. The
+    /// changes come from a longest-common-subsequence alignment of the
+    /// original and replacement residues; when a change could slide along a
+    /// repeat into its neighbour, the variant keeps the single region instead.
+    pub fn of_edit(canonical: &[u8], start: usize, end: usize, replacement: &[u8]) -> Vec<Self> {
+        let edited = |from: usize, to: usize, with: &[u8]| -> Vec<u8> {
+            let mut s = Vec::with_capacity(canonical.len() + with.len());
+            s.extend_from_slice(&canonical[..from]);
+            s.extend_from_slice(with);
+            s.extend_from_slice(&canonical[to..]);
+            s
+        };
+        let whole = vec![Self::between(canonical, &edited(start, end, replacement))];
+        let original = &canonical[start..end];
+        let (m, k) = (original.len(), replacement.len());
+        // Alignment table cost; UniProt variants are a few residues long.
+        if m == 0 || k == 0 || m * k > 1 << 16 {
+            return whole;
+        }
+        // lcs[i][j]: longest common subsequence of original[i..], replacement[j..].
+        let mut lcs = vec![vec![0u16; k + 1]; m + 1];
+        for i in (0..m).rev() {
+            for j in (0..k).rev() {
+                lcs[i][j] = if same_residue(original[i], replacement[j]) {
+                    lcs[i + 1][j + 1] + 1
+                } else {
+                    lcs[i + 1][j].max(lcs[i][j + 1])
+                };
+            }
+        }
+        // Changed blocks between aligned runs: (original range, replacement range).
+        let mut blocks: Vec<(usize, usize, usize, usize)> = Vec::new();
+        let (mut i, mut j) = (0, 0);
+        let mut open: Option<(usize, usize)> = None;
+        while i < m || j < k {
+            if i < m
+                && j < k
+                && same_residue(original[i], replacement[j])
+                && lcs[i][j] == lcs[i + 1][j + 1] + 1
+            {
+                if let Some((oi, oj)) = open.take() {
+                    blocks.push((oi, i, oj, j));
+                }
+                i += 1;
+                j += 1;
+                continue;
+            }
+            open.get_or_insert((i, j));
+            if j == k || (i < m && lcs[i + 1][j] >= lcs[i][j + 1]) {
+                i += 1;
+            } else {
+                j += 1;
+            }
+        }
+        if let Some((oi, oj)) = open {
+            blocks.push((oi, m, oj, k));
+        }
+        if blocks.len() < 2 {
+            return whole;
+        }
+        let mut parts = Vec::with_capacity(blocks.len());
+        for (oi, oe, ri, re) in blocks {
+            // This change alone: its region must be exactly its own residues
+            // (or its junction), i.e. it must not slide along a repeat.
+            let alone = Self::between(
+                canonical,
+                &edited(start + oi, start + oe, &replacement[ri..re]),
+            );
+            let own = Self {
+                start: (start + oi) as u32,
+                end: (start + oi + re - ri) as u32,
+            };
+            if alone != own {
+                return whole;
+            }
+            // Earlier changes shift it by their length difference (`ri - oi`).
+            parts.push(Self {
+                start: (start + ri) as u32,
+                end: (start + re) as u32,
+            });
+        }
+        parts
     }
 
     /// Whether the residue span `[span_start, span_end)` carries the variant,
@@ -204,6 +320,12 @@ impl VariantRegion {
     pub fn covered_by(&self, span_start: u32, span_end: u32) -> bool {
         span_start < self.end && span_end > self.start
     }
+}
+
+/// Whether residues `a` and `b` read the same to a mass spectrum: equal, or
+/// I and L.
+fn same_residue(a: u8, b: u8) -> bool {
+    a == b || matches!((a, b), (b'I', b'L') | (b'L', b'I'))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -336,6 +458,74 @@ mod tests {
         assert_eq!(
             VariantRegion::between(b"MPEK", b"MPRAAEK"),
             VariantRegion { start: 2, end: 5 }
+        );
+        // I and L read the same: only K -> E differs in IK -> LE.
+        assert_eq!(
+            VariantRegion::between(b"AIKDE", b"ALEDE"),
+            VariantRegion { start: 2, end: 3 }
+        );
+    }
+
+    #[test]
+    fn edits_keeping_a_run_get_one_region_per_change() {
+        // KRAPEPTIDEKR -> ERAPEPTIDEKE keeps RAPEPTIDEK: K2E and R13E.
+        let canonical = b"MKRAPEPTIDEKRGH";
+        let parts = VariantRegion::of_edit(canonical, 1, 13, b"ERAPEPTIDEKE");
+        assert_eq!(
+            parts,
+            [
+                VariantRegion { start: 1, end: 2 },
+                VariantRegion { start: 12, end: 13 }
+            ]
+        );
+        // APEPTIDEK (3..12) reads like the canonical peptide.
+        assert!(!parts.iter().any(|v| v.covered_by(3, 12)));
+        assert!(parts.iter().any(|v| v.covered_by(1, 12)));
+        // Kept runs between an insertion and a deletion: KRAPEPTIDEKR ->
+        // KRWAPEPTIDEK (W inserted, final R deleted).
+        assert_eq!(
+            VariantRegion::of_edit(canonical, 1, 13, b"KRWAPEPTIDEK"),
+            [
+                VariantRegion { start: 3, end: 4 },
+                VariantRegion { start: 13, end: 13 }
+            ]
+        );
+        // A single change is the region between the sequences.
+        assert_eq!(
+            VariantRegion::of_edit(b"MKDEF", 2, 3, b"H"),
+            [VariantRegion { start: 2, end: 3 }]
+        );
+        assert_eq!(
+            VariantRegion::of_edit(b"MKDEF", 2, 3, b""),
+            [VariantRegion { start: 2, end: 2 }]
+        );
+        // A change that could slide along a repeat (one Q of QQ deleted)
+        // keeps the single region holding everything.
+        let canonical = b"KQQRAPEPTIDEKRG";
+        let variant = b"KQRAPEPTIDEKEG";
+        assert_eq!(
+            VariantRegion::of_edit(canonical, 1, 14, &variant[1..13]),
+            [VariantRegion::between(canonical, variant)]
+        );
+    }
+
+    #[test]
+    fn variant_region_holds_all_parts() {
+        let p = Protein {
+            accession: "v".to_string(),
+            description: String::new(),
+            sequence: b"MERAPEPTIDEKEGH".to_vec(),
+            annotation: Some(Arc::new(
+                ProteinAnnotation::new(Vec::new(), None).with_variant(vec![
+                    VariantRegion { start: 1, end: 2 },
+                    VariantRegion { start: 12, end: 13 },
+                ]),
+            )),
+        };
+        assert_eq!(p.variant_parts().len(), 2);
+        assert_eq!(
+            p.variant_region(),
+            Some(VariantRegion { start: 1, end: 13 })
         );
     }
 

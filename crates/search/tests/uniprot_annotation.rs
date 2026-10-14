@@ -7,13 +7,16 @@
 use std::collections::{BTreeSet, HashSet};
 
 use input::{load_uniprot_xml, EvidenceLevel, UniProtOptions};
-use model::{AminoAcidSetBuilder, Modification, ProteinDb};
+use model::enzyme::Enzyme;
+use model::{
+    AminoAcidSetBuilder, Modification, Protein, ProteinAnnotation, ProteinDb, VariantRegion,
+};
 use search::candidate_gen::{
     expand_base_record, expand_base_record_bounded, for_each_record_form_masses_bounded,
     lazy_candidates_for_precursor, Candidate, FormWalkTables,
 };
 use search::candidate_index::MmapCandidateIndex;
-use search::decoy::DecoyStrategy;
+use search::decoy::{shuffle_db, DecoyStrategy, Proteases};
 use search::{enumerate_candidates, SearchIndex, SearchParams};
 
 /// P1 (tryptic peptides AGSPEK | TLSYR | SDSPAK | VNSTQR, 0-based S2, S8, S11,
@@ -364,11 +367,10 @@ fn decoys_keep_terminal_sites_at_their_terminus() {
         DecoyStrategy::SequonReverse,
     ] {
         let idx = SearchIndex::from_target_db_with_strategy(&target, "XXX", None, strategy, 7);
-        assert_eq!(
-            idx.db.proteins[1].mod_sites()[0].position,
-            0,
-            "{strategy:?}"
-        );
+        // The decoy keeps the initiator Met and the acetylated S after it.
+        let decoy = &idx.db.proteins[1];
+        assert_eq!(decoy.mod_sites()[0].position, 1, "{strategy:?}");
+        assert_eq!(&decoy.sequence[..2], b"MS", "{strategy:?}");
         let acetylated = |decoy: bool| {
             enumerate_candidates(&idx, &p, "XXX")
                 .filter(|c| c.is_decoy == decoy)
@@ -749,5 +751,312 @@ fn every_expansion_path_agrees_on_isoforms_and_chains() {
             .map(key)
             .collect();
         assert_eq!(lazy, expect, "precursor {precursor}");
+    }
+}
+
+/// Builds `target` into a search index under `strategy`, enumerates with
+/// `p`, and returns each target protein's candidates and its decoy's (the
+/// decoy of target `i` is protein `n + i`).
+fn target_and_decoy_forms(
+    target: &ProteinDb,
+    p: &SearchParams,
+    strategy: DecoyStrategy,
+) -> Vec<(Vec<Candidate>, Vec<Candidate>)> {
+    let proteases = Proteases {
+        primary: p.enzyme,
+        extra: p.extra_enzymes.clone(),
+    };
+    let idx = SearchIndex::from_target_db_for(target, "XXX", None, strategy, 7, &proteases);
+    let cands: Vec<Candidate> = enumerate_candidates(&idx, p, "XXX").collect();
+    let n = target.len();
+    (0..n)
+        .map(|i| {
+            let of = |pi: usize| -> Vec<Candidate> {
+                cands
+                    .iter()
+                    .filter(|c| c.protein_index == pi)
+                    .cloned()
+                    .collect()
+            };
+            (of(i), of(n + i))
+        })
+        .collect()
+}
+
+/// A protein-N-terminal pyro-Glu on Q, annotated at residue 1.
+const PYRO_XML: &str = r#"<uniprot>
+<entry dataset="Swiss-Prot">
+  <accession>P00030</accession><name>PYRO_HUMAN</name>
+  <feature type="modified residue" description="Pyrrolidone carboxylic acid" evidence="1"><location><position position="1"/></location></feature>
+  <evidence type="ECO:0000269" key="1"/>
+  <sequence length="23">QAGPEKTLDYRADNPAKVNSTQR</sequence>
+</entry>
+</uniprot>"#;
+
+#[test]
+fn residue_specific_terminal_mods_get_decoys() {
+    let target = load_uniprot_xml(PYRO_XML.as_bytes(), &UniProtOptions::default())
+        .unwrap()
+        .0;
+    let pyro =
+        Modification::from_mods_txt_line("-17.026549,Q,opt,Prot-N-term,PyroGlu,sites=annotated")
+            .unwrap();
+    let p = SearchParams::default_tryptic(
+        AminoAcidSetBuilder::new_standard()
+            .add_variable_mod(pyro)
+            .build()
+            .unwrap(),
+    );
+    let modified = |forms: &[Candidate]| {
+        forms
+            .iter()
+            .filter(|c| c.peptide.residues[0].mod_.is_some())
+            .count()
+    };
+    for strategy in [
+        DecoyStrategy::Reverse,
+        DecoyStrategy::Shuffle,
+        DecoyStrategy::SequonReverse,
+    ] {
+        // The Q and its site stay at the decoy's N-terminus. Following the
+        // residue alone, or moving the site alone onto another residue,
+        // leaves no modified decoy.
+        let idx = SearchIndex::from_target_db_with_strategy(&target, "XXX", None, strategy, 7);
+        let decoy = &idx.db.proteins[1];
+        assert_eq!(decoy.sequence[0], b'Q', "{strategy:?}");
+        assert_eq!(decoy.mod_sites()[0].position, 0, "{strategy:?}");
+        let forms = target_and_decoy_forms(&target, &p, strategy);
+        for (side, forms) in [("target", &forms[0].0), ("decoy", &forms[0].1)] {
+            // Every N-terminal span has its modified twin.
+            let n_terminal = forms
+                .iter()
+                .filter(|c| c.start_offset_in_protein == 0)
+                .count();
+            assert_eq!(modified(forms) * 2, n_terminal, "{strategy:?} {side}");
+        }
+        assert!(modified(&forms[0].0) > 0, "{strategy:?}");
+        if strategy != DecoyStrategy::Shuffle {
+            // How many N-terminal spans a shuffled decoy has is chance.
+            assert!(modified(&forms[0].1) > 0, "{strategy:?}: no modified decoy");
+        }
+    }
+}
+
+/// Precursors whose mature chains have only a new N-terminus (`APEPTIDEK`
+/// after `MSSQ`, the review case) or longer chains with both kinds of ends.
+const CHAIN_DECOY_XML: &str = r#"<uniprot>
+<entry dataset="Swiss-Prot">
+  <accession>P00040</accession><name>FORTY_HUMAN</name>
+  <feature type="chain" id="PRO_40"><location><begin position="5"/><end position="13"/></location></feature>
+  <sequence length="13">MSSQAPEPTIDEK</sequence>
+</entry>
+<entry dataset="Swiss-Prot">
+  <accession>P00041</accession><name>FORTYONE_HUMAN</name>
+  <feature type="chain" id="PRO_41"><location><begin position="7"/><end position="44"/></location></feature>
+  <feature type="chain" id="PRO_42"><location><begin position="1"/><end position="38"/></location></feature>
+  <sequence length="50">MKWVTFDTHKSEIAHRFKDLGEENFKALVLIAFAQYLQQCPFDEHVKLRE</sequence>
+</entry>
+</uniprot>"#;
+
+#[test]
+fn chain_decoys_keep_the_terminal_spans() {
+    let target = load_uniprot_xml(
+        CHAIN_DECOY_XML.as_bytes(),
+        &UniProtOptions {
+            chains: true,
+            evidence: EvidenceLevel::Curated,
+            ..UniProtOptions::default()
+        },
+    )
+    .unwrap()
+    .0;
+    let chains: Vec<usize> = (0..target.len())
+        .filter(|&i| target.proteins[i].chain_ends().is_some())
+        .collect();
+    assert_eq!(chains.len(), 3);
+
+    // The review case: trypsin, min length 6, no missed cleavage. APEPTIDEK
+    // has one target span; its plain reverse KEDITPEPA had none.
+    let base = || AminoAcidSetBuilder::new_standard().build().unwrap();
+    let mut p = SearchParams::default_tryptic(base());
+    p.min_length = 6;
+    p.max_missed_cleavages = 0;
+    let forms = target_and_decoy_forms(&target, &p, DecoyStrategy::Reverse);
+    let (t, d) = &forms[chains[0]];
+    assert_eq!(t.len(), 1);
+    assert_eq!(
+        d.len(),
+        1,
+        "{:?}",
+        d.iter().map(|c| c.peptide.to_string()).collect::<Vec<_>>()
+    );
+    assert_eq!(d[0].peptide.to_string(), "_.EDITPEPAK.-");
+
+    // Every enzyme and strategy: the decoy chain has the target chain's
+    // terminal spans, with the same lengths and masses.
+    let shape = |forms: &[Candidate]| {
+        let mut v: Vec<(bool, usize, u64)> = forms
+            .iter()
+            .map(|c| {
+                (
+                    c.start_offset_in_protein == 0,
+                    c.peptide.residues.len(),
+                    (c.peptide.mass() * 1000.0).round() as u64,
+                )
+            })
+            .collect();
+        v.sort_unstable();
+        v
+    };
+    for enzyme in [
+        Enzyme::Trypsin,
+        Enzyme::LysC,
+        Enzyme::ArgC,
+        Enzyme::GluC,
+        Enzyme::AspN,
+        Enzyme::Chymotrypsin,
+    ] {
+        let mut p = SearchParams::default_tryptic(base());
+        p.enzyme = enzyme;
+        p.min_length = 4;
+        p.max_missed_cleavages = 2;
+        for strategy in [
+            DecoyStrategy::Reverse,
+            DecoyStrategy::Shuffle,
+            DecoyStrategy::SequonReverse,
+        ] {
+            let forms = target_and_decoy_forms(&target, &p, strategy);
+            for &i in &chains {
+                let (t, d) = &forms[i];
+                assert!(!t.is_empty(), "{enzyme:?} {strategy:?} chain {i}");
+                assert_eq!(shape(t), shape(d), "{enzyme:?} {strategy:?} chain {i}");
+                // A decoy, not the target again.
+                let seqs = |f: &[Candidate]| -> HashSet<String> {
+                    f.iter().map(|c| c.peptide.to_string()).collect()
+                };
+                assert!(
+                    seqs(t).is_disjoint(&seqs(d))
+                        || t.iter().all(|c| c.peptide.residues.len() <= 3),
+                    "{enzyme:?} {strategy:?} chain {i}: {:?}",
+                    seqs(d)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn shuffled_variant_parts_keep_their_width() {
+    // The review case: three changed residues near the end of the decoy.
+    let protein = |region: VariantRegion| Protein {
+        accession: "v".to_string(),
+        description: String::new(),
+        sequence: b"ACDECCCIKNPQSTVWY".to_vec(),
+        annotation: Some(std::sync::Arc::new(ProteinAnnotation::new(
+            Vec::new(),
+            Some(region),
+        ))),
+    };
+    let db = ProteinDb {
+        proteins: vec![protein(VariantRegion { start: 4, end: 7 })],
+    };
+    let decoy = &shuffle_db(&db, "XXX", 2).proteins[0];
+    let v = decoy.variant_parts()[0];
+    assert_eq!((v.end - v.start, v.end <= 17), (3, true), "{v:?}");
+    // Every seed and region shape: the part keeps its width and stays inside.
+    for seed in 0..300 {
+        for region in [
+            VariantRegion { start: 4, end: 7 },
+            VariantRegion { start: 0, end: 5 },
+            VariantRegion { start: 12, end: 17 },
+            VariantRegion { start: 9, end: 9 },
+            VariantRegion { start: 11, end: 8 },
+        ] {
+            let db = ProteinDb {
+                proteins: vec![protein(region)],
+            };
+            let d = shuffle_db(&db, "XXX", seed).proteins[0].variant_parts()[0];
+            if region.start < region.end {
+                assert_eq!(
+                    d.end - d.start,
+                    region.end - region.start,
+                    "{seed} {region:?}"
+                );
+                assert!(d.end <= 17, "{seed} {region:?} -> {d:?}");
+            } else {
+                assert_eq!(
+                    d.start + region.end,
+                    d.end + region.start,
+                    "{seed} {region:?}"
+                );
+                assert!(d.end >= 1 && d.start < 17, "{seed} {region:?} -> {d:?}");
+            }
+        }
+    }
+}
+
+/// A variant changing K2 and R13 and keeping RAPEPTIDEK between them.
+const MULTI_XML: &str = r#"<uniprot>
+<entry dataset="Swiss-Prot">
+  <accession>P00050</accession><name>FIFTY_HUMAN</name>
+  <feature type="sequence variant" id="VAR_000050" evidence="1"><original>KRAPEPTIDEKR</original><variation>ERAPEPTIDEKE</variation><location><begin position="2"/><end position="13"/></location></feature>
+  <evidence type="ECO:0000269" key="1"/>
+  <sequence length="15">MKRAPEPTIDEKRGH</sequence>
+</entry>
+</uniprot>"#;
+
+#[test]
+fn variant_peptides_carry_a_change_not_just_its_neighbourhood() {
+    let target = load_uniprot_xml(
+        MULTI_XML.as_bytes(),
+        &UniProtOptions {
+            variants: true,
+            ..UniProtOptions::default()
+        },
+    )
+    .unwrap()
+    .0;
+    assert_eq!(target.len(), 2);
+    assert_eq!(
+        target.proteins[1].variant_parts(),
+        [
+            VariantRegion { start: 1, end: 2 },
+            VariantRegion { start: 12, end: 13 }
+        ]
+    );
+    let base = || AminoAcidSetBuilder::new_standard().build().unwrap();
+    let from_variant = |missed: u32| -> Vec<String> {
+        let mut p = SearchParams::default_tryptic(base());
+        p.min_length = 4;
+        p.max_missed_cleavages = missed;
+        let idx = SearchIndex::from_target_db(&target, "XXX");
+        let mut v: Vec<String> = enumerate_candidates(&idx, &p, "XXX")
+            .filter(|c| c.protein_index == 1)
+            .map(|c| c.peptide.to_string())
+            .collect();
+        v.sort();
+        v
+    };
+    // The canonical APEPTIDEK is not a variant peptide.
+    assert!(from_variant(0).is_empty(), "{:?}", from_variant(0));
+    let mut with_one: Vec<String> = from_variant(1);
+    with_one.dedup();
+    assert_eq!(
+        with_one,
+        ["M.ERAPEPTIDEK.E", "R.APEPTIDEKEGH.-", "_.MERAPEPTIDEK.E"]
+    );
+    // Decoys get parts of the same widths.
+    for strategy in [
+        DecoyStrategy::Reverse,
+        DecoyStrategy::Shuffle,
+        DecoyStrategy::SequonReverse,
+    ] {
+        let idx = SearchIndex::from_target_db_with_strategy(&target, "XXX", None, strategy, 7);
+        let widths = |p: &Protein| -> Vec<u32> {
+            let mut w: Vec<u32> = p.variant_parts().iter().map(|v| v.end - v.start).collect();
+            w.sort_unstable();
+            w
+        };
+        assert_eq!(widths(&idx.db.proteins[3]), [1, 1], "{strategy:?}");
     }
 }

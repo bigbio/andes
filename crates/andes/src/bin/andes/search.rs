@@ -301,12 +301,16 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             )
         })?;
     let t_phase = std::time::Instant::now();
-    let idx = SearchIndex::from_target_db_with_strategy(
+    let idx = SearchIndex::from_target_db_for(
         &target_db,
         &cli.decoy_prefix,
         cli.decoy_suffix.as_deref(),
         decoy_strategy,
         cli.decoy_seed,
+        &search::decoy::Proteases {
+            primary: search_enzyme,
+            extra: extra_enzymes.clone(),
+        },
     );
     eprintln!(
         "[PHASE search_index_build: {:.2}s]",

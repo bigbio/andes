@@ -14,7 +14,7 @@
 //!
 //! ## Database annotation (UniProt XML)
 //!
-//! A sequence-variant protein ([`Protein::variant_region`]) only yields spans
+//! A sequence-variant protein ([`Protein::variant_parts`]) only yields spans
 //! that carry its variant; the rest of it reads like the canonical protein,
 //! which is searched already. A mature-chain entry ([`Protein::chain_ends`])
 //! only yields the spans at its new termini, and is never Met-cleaved. A
@@ -189,7 +189,7 @@ fn enumerate_protein_from_offset(
             protein_index,
             is_decoy,
             params,
-            variant: protein.variant_region(),
+            variant: protein.variant_parts(),
             chain: protein.chain_ends(),
             sites: protein.mod_sites(),
         };
@@ -231,7 +231,7 @@ fn enumerate_protein_from_offset(
         protein_index,
         is_decoy,
         params,
-        variant: protein.variant_region(),
+        variant: protein.variant_parts(),
         chain: protein.chain_ends(),
         sites: protein.mod_sites(),
     };
@@ -313,8 +313,9 @@ struct EmitCtx<'a> {
     protein_index: usize,
     is_decoy: bool,
     params: &'a SearchParams,
-    /// The protein's variant, when it is a sequence-variant entry.
-    variant: Option<VariantRegion>,
+    /// The parts of the protein's variant, when it is a sequence-variant
+    /// entry (empty otherwise).
+    variant: &'a [VariantRegion],
     /// The protein's new termini, when it is a mature-chain entry.
     chain: Option<ChainEnds>,
     /// The protein's annotated modification sites.
@@ -329,9 +330,11 @@ fn emit_span(ctx: &EmitCtx<'_>, start: u32, end: u32, out: &mut Vec<Candidate>) 
     let abs_end = end as usize + ctx.seq_offset;
     // A variant protein contributes only the spans that carry its variant, a
     // mature chain only those at its new termini.
-    if ctx
-        .variant
-        .is_some_and(|v| !v.covered_by(abs_start as u32, abs_end as u32))
+    if (!ctx.variant.is_empty()
+        && !ctx
+            .variant
+            .iter()
+            .any(|v| v.covered_by(abs_start as u32, abs_end as u32)))
         || ctx
             .chain
             .is_some_and(|c| !c.covered_by(abs_start as u32, abs_end as u32, ctx.seq.len() as u32))
@@ -1144,7 +1147,7 @@ fn expand_recursive(
 /// when they apply to *every* configured protease — a NonSpecific extra makes
 /// the whole digest non-specific; a NoCleavage extra contributes no cut sites
 /// (it never short-circuits unless it's the only protease).
-fn compute_cleavage_positions(seq: &[u8], primary: Enzyme, extras: &[Enzyme]) -> Vec<u32> {
+pub(crate) fn compute_cleavage_positions(seq: &[u8], primary: Enzyme, extras: &[Enzyme]) -> Vec<u32> {
     let n = seq.len() as u32;
 
     let all = || std::iter::once(primary).chain(extras.iter().copied());

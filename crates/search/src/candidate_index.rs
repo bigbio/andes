@@ -260,7 +260,7 @@ pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams) -> PathBuf {
         protein.sequence.hash(&mut h);
         // A variant entry only yields the spans covering its variant, so the
         // region shapes the records too (absent for every FASTA protein).
-        if let Some(v) = protein.variant_region() {
+        for v in protein.variant_parts() {
             (v.start, v.end).hash(&mut h);
         }
         // Likewise a mature-chain entry yields only its new-terminus spans.

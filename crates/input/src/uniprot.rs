@@ -524,15 +524,18 @@ impl UniProtEntry {
                 sequence.extend_from_slice(&v.replacement);
                 sequence.extend_from_slice(&base[v.end..]);
                 // From the sequences, not UniProt's coordinates: an indel in a
-                // repeat can slide along it, and spans past the shared prefix
-                // or suffix would read like canonical peptides.
-                let region = VariantRegion::between(base, &sequence);
+                // repeat can slide along it, spans past the shared prefix or
+                // suffix would read like canonical peptides, and so would one
+                // inside a run the replacement keeps.
+                let parts = VariantRegion::of_edit(base, v.start, v.end, &v.replacement);
                 let mod_sites = sites_through(sites, &[(v.start, v.end, v.replacement.len())]);
                 Protein {
                     accession: format!("{}|{}_{}|{}", self.db_code(), base_id, v.tag, self.name),
                     description: format!("{description} VARIANT={}", v.tag),
                     sequence,
-                    annotation: Some(Arc::new(ProteinAnnotation::new(mod_sites, Some(region)))),
+                    annotation: Some(Arc::new(
+                        ProteinAnnotation::new(mod_sites, None).with_variant(parts),
+                    )),
                 }
             })
             .collect()

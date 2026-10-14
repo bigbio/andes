@@ -2,8 +2,8 @@
 //! generation.
 
 use crate::decoy::{
-    build_search_db, is_decoy_accession_affix, normalize_decoy_prefix, DecoyStrategy,
-    DEFAULT_DECOY_SEED,
+    build_search_db_for, is_decoy_accession_affix, normalize_decoy_prefix, DecoyStrategy,
+    Proteases, DEFAULT_DECOY_SEED,
 };
 use model::protein::ProteinDb;
 
@@ -54,6 +54,27 @@ impl SearchIndex {
         strategy: DecoyStrategy,
         seed: u64,
     ) -> Self {
+        Self::from_target_db_for(
+            target,
+            decoy_prefix,
+            decoy_suffix,
+            strategy,
+            seed,
+            &Proteases::default(),
+        )
+    }
+
+    /// [`Self::from_target_db_with_strategy`] for a search with `proteases`:
+    /// the decoys of UniProt mature-chain entries keep the cleavage sites
+    /// these make (FASTA databases do not depend on them).
+    pub fn from_target_db_for(
+        target: &ProteinDb,
+        decoy_prefix: &str,
+        decoy_suffix: Option<&str>,
+        strategy: DecoyStrategy,
+        seed: u64,
+        proteases: &Proteases,
+    ) -> Self {
         let norm = normalize_decoy_prefix(decoy_prefix);
         let pre = target
             .proteins
@@ -92,7 +113,7 @@ impl SearchIndex {
                 }
             }
         }
-        let db = build_search_db(target, decoy_prefix, strategy, seed);
+        let db = build_search_db_for(target, decoy_prefix, strategy, seed, proteases);
         Self {
             db,
             decoy_prefix: norm,

@@ -171,8 +171,11 @@ change is written `D7H`, `KR120-121EE` or `F508del` (1-based). Candidate generat
 the spans that read differently from the canonical sequence. Such a span overlaps the replaced
 residues, or holds both residues next to a deletion. For an indel inside a repeat (`AQR` →
 `AQQR`), which could sit at more than one place in the run, the span must hold the whole run
-around it. Every hit on a variant entry is therefore a hit on the variant, and its `Proteins` / `Protein` column
-names it; the canonical peptides are not searched twice. Multi-allelic variants give one entry
+around it. A replacement that keeps a run of the original residues between two changes
+(`KRAPEPTIDEKR` → `ERAPEPTIDEKE`) counts each change on its own, so a peptide inside the kept run
+(`APEPTIDEK`) is not a variant peptide. I and L count as the same residue throughout. Every hit on
+a variant entry is therefore a hit on the variant, and its `Proteins` / `Protein` column names
+it; the canonical peptides are not searched twice. Multi-allelic variants give one entry
 per allele. These variants are skipped:
 
 - the original residues do not match the canonical sequence;
@@ -215,15 +218,21 @@ count as `curated`.
 
 **Decoys.** The annotation travels with each decoy through the permutation that builds the decoy.
 Sites stay on the same residues, so a decoy has as many annotated sites as its target, on the
-same residue types. A site UniProt ties to a terminus is the exception. If the target carries it
-at its protein terminus (an N-acetylation of residue 1, or of residue 2 after the initiator Met),
-the decoy carries it at its own terminus. Otherwise a protein-terminal mod restricted to annotated
-sites would have no decoy competition. A variant region maps to its mirror image under `reverse`, and under
-`sequon-reverse` unless a sequon swap moved one of its residues. Otherwise, as under `shuffle`, it
-maps to a region of the same length at the image of its first residue. Variant entries thus
-get decoy twins with the same kind of variant region, and the target and decoy search spaces grow
-together. An isoform's decoy is built like any protein's. A chain's decoy keeps the chain's
-new termini, so it offers as many terminal peptides as its target.
+same residue types. A site UniProt ties to a terminus also stays terminal. If the target carries
+it at its protein terminus (an N-acetylation or pyro-Glu of residue 1, an N-acetylation of
+residue 2 after the initiator Met, a C-terminal amidation), the decoy is built with that residue,
+and the initiator Met before it, at its own terminus. A residue-specific protein-terminal mod
+restricted to annotated sites (pyro-Glu on Q) thus has decoy competition. A variant part maps to
+its mirror image under `reverse`, and under `sequon-reverse` unless a sequon swap moved one of
+its residues. Otherwise, as under `shuffle`, it maps to a part of the same length at the image of
+its first residue, moved back from the end if needed. Variant entries thus get decoy twins with
+the same kind of variant parts, and the target and decoy search spaces grow together. An
+isoform's decoy is built like any protein's. A chain's decoy is permuted only within the cleavage
+segments of the search enzyme(s): residues that make a cut stay in place, and the others are
+reversed (or shuffled) within their segment, a pseudo-reverse. The decoy chain has the target
+chain's cut sites, so each terminal peptide of the target has a decoy peptide of the same length
+and mass. A plain reverse would move the cut sites, and could leave a chain with no admissible
+decoy peptide at all.
 
 **Evidence** (`--uniprot-evidence`, from the features' ECO codes):
 

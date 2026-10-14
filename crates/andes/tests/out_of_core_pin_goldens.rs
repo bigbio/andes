@@ -88,6 +88,18 @@
 //! rows) it lacks exactly main's two dropped Pass-2 rows (scans 60160 and
 //! 60179); every other row is identical with SpecId excluded.
 //!
+//! REGENERATED 2026-10-14 for the `--chimeric` slice when Pass 2 began reporting
+//! co-isolated envelopes at their monoisotopic peak, ranking secondaries over
+//! distinct peptidoforms and filling their features on the primaries' scales.
+//! Pass 1 is untouched: the same command line without `--chimeric` writes a
+//! byte-identical PIN before and after. Against the previous golden (1,715 rows)
+//! the new one has 1,716: all 1,449 primary rows keep their peptide, label and
+//! charge; the Pass-2 rows go from 266 to 267, 243 old ones replaced by 244 new
+//! ones (mostly secondaries searched at M rather than M+1). DeltaRT, AbsDeltaRT and DeltaRTNorm move on every row because
+//! the RT fit includes the secondary rows; RawScore, RankScore, RankScoreFloat,
+//! RawScoreCal, CandidateRankEntropy and ListwiseScoreGap move on ~20 matched
+//! rows. The E. coli and `--refine` goldens are unchanged.
+//!
 //! To regenerate after an intentional change, run the case's command line (see
 //! `run`), then either digest the PIN with `identity_digest` (E. coli) or write
 //! its header and sorted rows, gzipped, over the case's golden PIN (slices).

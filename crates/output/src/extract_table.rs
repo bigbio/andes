@@ -5,7 +5,10 @@
 //!
 //! Encoding: `kind` is 0 for a target, 1 for a mass-shift decoy (its nominal
 //! shift in `mass_shift`) and 2 for an RT-shift decoy; `mass_shift` is 0 for
-//! the other kinds. `role` is 0 identified, 1 transfer, 2 pseudo-transfer.
+//! the other kinds. `role` is 0 identified, 1 transfer, 2 pseudo-transfer;
+//! identified and transfer targets are each followed by their decoys (same
+//! role), pseudo-transfers have none. Schema 2 added the identified rows'
+//! decoys; a schema-1 table has none, so it is rejected.
 //! The evidence columns are null when the fit was not possible.
 //! `n_donor_runs` counts the aligned runs with a PSM of the precursor, this
 //! run included for an identified row and excluded otherwise: the runs that
@@ -32,10 +35,10 @@ use quant::decoys::Hypothesis;
 use quant::evidence::Evidence;
 
 /// Major version of the table layout. A reader rejects any other major.
-pub const EXTRACT_SCHEMA_MAJOR: u32 = 1;
+pub const EXTRACT_SCHEMA_MAJOR: u32 = 2;
 
 const SCHEMA_KEY: &str = "andes.extract.schema";
-const SCHEMA_VERSION: &str = "1.0";
+const SCHEMA_VERSION: &str = "2.0";
 /// Rows per Parquet row group / record batch.
 const BATCH_ROWS: usize = 65_536;
 
@@ -43,6 +46,7 @@ const BATCH_ROWS: usize = 65_536;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtractRole {
     /// Identified in this run; the prior is centred on its best PSM's RT.
+    /// The target and its decoys carry this role.
     Identified,
     /// Not identified in this run; the prior comes from the alignment.
     Transfer,
@@ -340,7 +344,7 @@ pub fn read_extract_table(path: &Path) -> Result<Vec<ExtractRow>, String> {
         .ok_or_else(|| err(&format!("unparseable schema version {version:?}")))?;
     if major != EXTRACT_SCHEMA_MAJOR {
         return Err(err(&format!(
-            "unsupported extract table schema {version} (this build reads major {EXTRACT_SCHEMA_MAJOR})"
+            "unsupported extract table schema {version} (this build reads major {EXTRACT_SCHEMA_MAJOR}); run `andes quant extract` again"
         )));
     }
 
@@ -489,12 +493,14 @@ mod tests {
     fn extract_table_rejects_unknown_major_version() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("b.extract.parquet");
-        write_with_schema_version(&p, &rows(), "2.0").unwrap();
-        let e = read_extract_table(&p).unwrap_err();
-        assert!(
-            e.contains("b.extract.parquet") && e.contains("schema 2.0"),
-            "{e}"
-        );
+        for version in ["3.0", "1.0"] {
+            write_with_schema_version(&p, &rows(), version).unwrap();
+            let e = read_extract_table(&p).unwrap_err();
+            assert!(
+                e.contains("b.extract.parquet") && e.contains(&format!("schema {version}")),
+                "{e}"
+            );
+        }
     }
 
     #[test]

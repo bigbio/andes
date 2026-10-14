@@ -715,6 +715,14 @@ pub(crate) struct SearchArgs {
     #[arg(long = "mbr-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
     pub(crate) mbr_fdr: f64,
 
+    /// Identified-row quality q-value: an identified (precursor, run) whose
+    /// MS1 feature has a quality q-value against its decoys above this (or
+    /// none) is reported as `identified_below_threshold` and left out of
+    /// `quantms.feature.parquet`. An internal quant-quality q-value, not an
+    /// identification FDR. Default: off (every identified row is reported).
+    #[arg(long = "quant-feature-fdr", value_parser = parse_unit_fraction)]
+    pub(crate) quant_feature_fdr: Option<f64>,
+
     /// PSM q-value threshold for quantification targets when rescoring runs.
     /// Default: the `--fdr` value (0.01).
     #[arg(long = "quant-fdr", hide = true, value_parser = parse_unit_fraction)]
@@ -836,6 +844,14 @@ pub(crate) struct QuantFinalizeArgs {
     /// identification FDR. Default 0.01.
     #[arg(long = "mbr-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
     pub(crate) mbr_fdr: f64,
+
+    /// Identified-row quality q-value: an identified (precursor, run) whose
+    /// MS1 feature has a quality q-value against its decoys above this (or
+    /// none) is reported as `identified_below_threshold` and left out of
+    /// `quantms.feature.parquet`. An internal quant-quality q-value, not an
+    /// identification FDR. Default: off (every identified row is reported).
+    #[arg(long = "quant-feature-fdr", value_parser = parse_unit_fraction)]
+    pub(crate) quant_feature_fdr: Option<f64>,
 
     /// Also write the rows as `quantms.feature.parquet` into this directory.
     #[arg(long = "output-parquet", value_name = "DIR")]

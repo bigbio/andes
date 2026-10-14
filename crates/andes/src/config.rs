@@ -138,6 +138,7 @@ pub struct QuantCfg {
     pub mbr: Option<bool>,
     pub mbr_library_fdr: Option<f64>,
     pub mbr_fdr: Option<f64>,
+    pub quant_feature_fdr: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -385,6 +386,11 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         cfg.quant.mbr_library_fdr
     );
     set!("mbr_fdr", mbr_fdr, cfg.quant.mbr_fdr);
+    set_opt!(
+        "quant_feature_fdr",
+        quant_feature_fdr,
+        cfg.quant.quant_feature_fdr
+    );
 
     // ── glyco ──
     set!("glyco", glyco, cfg.glyco.enabled);
@@ -411,6 +417,9 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     check_unit_fraction("lfq_feature_fdr", args.lfq_feature_fdr)?;
     if let Some(v) = args.quant_fdr {
         check_unit_fraction("quant_fdr", v)?;
+    }
+    if let Some(v) = args.quant_feature_fdr {
+        check_unit_fraction("quant_feature_fdr", v)?;
     }
     check_positive("lfq_rt_window", args.lfq_rt_window)?;
     if let Some(v) = args.fragment_tol_ppm {

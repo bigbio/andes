@@ -1,12 +1,5 @@
 //! HIGH-RES glyco serve-path golden.
 //!
-//! REGENERATED 2026-10-14 when `find_partition` began keeping the requested
-//! charge and segment below a charge's lowest parent-mass tier (it had taken
-//! the previous charge's or segment's partition). Against the previous binary:
-//! 120 rows, every SpecId, peptide and protein unchanged (0 winner flips);
-//! `RawScore` and `CandidateRankEntropy` moved on 117 rows, `ListwiseScoreGap`
-//! on 83 and `TailorScore` on 15.
-//!
 //! REGENERATED 2026-09-09 when the glycan-first pre-filter's Y-ion generation
 //! became structure-aware (core + antenna-subset losses + core ladder, replacing
 //! the full 2^n power set that over-generated physically-impossible "trim a core

@@ -35,13 +35,6 @@
 //! UNRELATED columns changing on every row, which is what caught exactly that mistake here.
 //!
 //! Regenerating is a deliberate act: diff the columns first and know which ones moved.
-//!
-//! REGENERATED 2026-10-14 when `find_partition` began keeping the requested
-//! charge and segment below a charge's lowest parent-mass tier (it had taken
-//! the previous charge's or segment's partition). Against the previous binary:
-//! 120 rows, every SpecId, peptide and protein unchanged (0 winner flips);
-//! `RawScore` and `CandidateRankEntropy` moved on all 120 rows and
-//! `ListwiseScoreGap` on 53.
 
 use std::path::PathBuf;
 use std::process::Command;

@@ -517,8 +517,19 @@ fn attach_to_model_keeps_existing_model_content() {
     commit_update(&path, "other", &other, &[(make_ledger("o"), make_stats_s1())]).unwrap();
     let before = ModelStore::open(&path).unwrap().load_param("m").unwrap();
 
-    // A distinguishable replacement rich-ion model: the stored frag model.
-    let replacement = param.frag_intensity_model.clone().unwrap();
+    // A distinguishable replacement rich-ion model that still satisfies the
+    // rich-ion feature contract: the stored one with its last tree dropped.
+    let stored = param.rich_ion_model.as_deref().expect("bundled rich-ion model");
+    assert!(stored.trees.len() > 1);
+    let replacement = std::sync::Arc::new(scoring_crate::gbdt_eval::GbdtPeakModel {
+        n_features: stored.n_features,
+        apply_sigmoid: stored.apply_sigmoid,
+        trees: stored.trees[..stored.trees.len() - 1].to_vec(),
+        iso_x: stored.iso_x.clone(),
+        iso_y: stored.iso_y.clone(),
+        packed: Default::default(),
+    });
+    assert_ne!(*replacement, *stored);
     let existed = attach_to_model(&path, "m", other.clone(), |p| {
         p.rich_ion_model = Some(replacement.clone());
     })

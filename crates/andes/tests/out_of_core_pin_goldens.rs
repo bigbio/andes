@@ -88,6 +88,20 @@
 //! rows) it lacks exactly main's two dropped Pass-2 rows (scans 60160 and
 //! 60179); every other row is identical with SpecId excluded.
 //!
+//! REGENERATED 2026-10-14 (E. coli digests) when the PIN charge one-hot columns
+//! began spanning every charge a PSM carries, not only the `--charge` range.
+//! Against the previous binary's PIN for the same command line: same rows and
+//! SpecIds, every non-charge field identical; the header gains `charge6`, set
+//! on the rows of spectra with a declared 6+ precursor, which previously had an
+//! all-zero charge vector. The slice goldens carry no out-of-range charge and
+//! are unchanged.
+//!
+//! | case | rows | rows moved to `charge6` |
+//! |---|---|---|
+//! | E. coli default mods (and precursor-cal auto) | 74,442 | 37 |
+//! | E. coli fixed mods only | 75,750 | 35 |
+//! | E. coli one variable mod | 74,998 | 40 |
+//!
 //! To regenerate after an intentional change, run the case's command line (see
 //! `run`), then either digest the PIN with `identity_digest` (E. coli) or write
 //! its header and sorted rows, gzipped, over the case's golden PIN (slices).
@@ -267,14 +281,14 @@ fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
 /// One E. coli case: (rows, `identity_digest` FNV-1a 64, calibration outcome line).
 type Golden = (usize, u64, Option<&'static str>);
 
-const ECOLI_DEFAULT_MODS: Golden = (74_442, 0x8d7e_e17f_0589_776a, None);
-const ECOLI_FIXED_MODS_ONLY: Golden = (75_750, 0xb351_f0e9_b195_ade3, None);
-const ECOLI_ONE_VARIABLE_MOD: Golden = (74_998, 0xd0a6_5c10_f1d5_29f3, None);
+const ECOLI_DEFAULT_MODS: Golden = (74_442, 0x8bbe_c229_9997_23ba, None);
+const ECOLI_FIXED_MODS_ONLY: Golden = (75_750, 0x6e73_21f0_0764_da43, None);
+const ECOLI_ONE_VARIABLE_MOD: Golden = (74_998, 0xf6de_9f66_2d33_6aae, None);
 /// The pre-pass scores but the sample is too small to calibrate, so the PIN
 /// equals the calibration-off one.
 const ECOLI_PRECURSOR_CAL_AUTO: Golden = (
     74_442,
-    0x8d7e_e17f_0589_776a,
+    0x8bbe_c229_9997_23ba,
     Some("Precursor mass calibration skipped (insufficient confident PSMs: 492 with PSMs, 55 below RawScore floor, 0 failed |residual|>50ppm"),
 );
 

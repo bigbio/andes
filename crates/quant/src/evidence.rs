@@ -42,7 +42,15 @@
 //! standard error `se_i = sigma_i / (pi_i sqrt(S))`, where
 //! `S = sum_j (g_j - gbar)^2`, and is compared with `A_(-i)`, the joint
 //! amplitude fitted without it at the same `(t0, w)`, whose standard error is
-//! `se_(-i) = 1 / sqrt(den_(-i))`. If the largest
+//! `se_(-i) = 1 / sqrt(den_(-i))`. Both standard errors also carry the
+//! peak's own signal-dependent noise: a trace whose expected signal is
+//! `mu_j = A_(-i) pi_i g_j` gets, beyond `sigma_i`, the variance
+//! `kappa L mu_j` (ion statistics, scaled by the detection limit `L` so
+//! that `kappa = 3` is unit-free), which adds
+//! `kappa L A_(-i) T / (pi_i S^2)` to `se_i^2` and
+//! `kappa L A_(-i) T sum_k c_k^2 pi_k / den_(-i)^2` to `se_(-i)^2`, with
+//! `T = sum_j (g_j - gbar)^2 g_j` and `c_k = pi_k / sigma_k^2` over the
+//! isotopes `k` of the leave-one-out fit. If the largest
 //! `|A_i - A_(-i)| / sqrt(se_i^2 + se_(-i)^2)` exceeds 3, that one isotope is
 //! dropped and `A_(-i)` is the refitted amplitude. The test is two-sided: an
 //! interfered isotope deviates upwards, and a missing or below-detection one
@@ -88,6 +96,10 @@ const NOISE_FLOOR_OF_LIMIT: f64 = 0.5;
 const MIN_CENTRED_SGG: f64 = 1e-9;
 /// Two-sided z threshold of the isotope exclusion test.
 const EXCLUSION_Z: f64 = 3.0;
+/// `kappa` of the isotope exclusion test: the signal-dependent variance of a
+/// trace point with expected peak signal `mu` is `kappa * L * mu`, `L` the
+/// detection limit (see the module docs).
+const SIGNAL_VARIANCE_PER_LIMIT: f64 = 3.0;
 /// Floor, seconds, on `s` and `w_prior` (a zero or non-finite value would
 /// divide by zero in the RT prior or the elution profile).
 const MIN_SCALE_S: f64 = 1e-3;
@@ -701,17 +713,20 @@ fn fit_traces_on_grid(
     let fit_at = |used: u8, work: &mut Workspace| {
         let (t0, w) = best_alignment(rt, traces, &pi, &ybar, &sigma, used, prior, widths, work);
         let (sgg, proj) = profile(rt, traces, &ybar, t0, w, &mut work.g);
-        (t0, w, sgg, proj)
+        let gbar = work.g.iter().sum::<f64>() / work.g.len() as f64;
+        let tg: f64 = work.g.iter().map(|&v| (v - gbar) * (v - gbar) * v).sum();
+        (t0, w, sgg, proj, tg)
     };
-    let (mut t0, mut w, mut sgg, mut proj) = fit_at(all, work);
+    let (mut t0, mut w, mut sgg, mut proj, mut tg) = fit_at(all, work);
+    let shot = SIGNAL_VARIANCE_PER_LIMIT * limit;
     // The refits of the module docs: at most two.
-    let mut mask = exclude_interfered(&proj, sgg, &pi, &sigma, all);
+    let mut mask = exclude_interfered(&proj, sgg, tg, shot, &pi, &sigma, all);
     if mask != all {
-        (t0, w, sgg, proj) = fit_at(mask, work);
-        let again = exclude_interfered(&proj, sgg, &pi, &sigma, all);
+        (t0, w, sgg, proj, tg) = fit_at(mask, work);
+        let again = exclude_interfered(&proj, sgg, tg, shot, &pi, &sigma, all);
         if again != all && again != mask {
             mask = again;
-            (t0, w, sgg, proj) = fit_at(mask, work);
+            (t0, w, sgg, proj, _) = fit_at(mask, work);
         }
     }
     let g = &work.g;
@@ -994,10 +1009,14 @@ fn num_den(
 /// either direction, from the joint amplitude fitted without it, if that
 /// deviation is more than [`EXCLUSION_Z`] combined standard errors. Comparing
 /// against the leave-one-out amplitude keeps a suspect isotope from pulling the
-/// reference it is tested against.
+/// reference it is tested against. `tg` is `T` and `shot` is `kappa L` of the
+/// module docs.
+#[allow(clippy::too_many_arguments)]
 fn exclude_interfered(
     proj: &[f64; MAX_ISOTOPES],
     sgg: f64,
+    tg: f64,
+    shot: f64,
     pi: &[f64; MAX_ISOTOPES],
     sigma: &[f64; MAX_ISOTOPES],
     mask: u8,
@@ -1007,12 +1026,21 @@ fn exclude_interfered(
         if mask & (1 << i) == 0 {
             continue;
         }
-        let (num, den) = num_den(proj, sgg, pi, sigma, mask & !(1 << i));
+        let without = mask & !(1 << i);
+        let (num, den) = num_den(proj, sgg, pi, sigma, without);
         let a_without = (num / den).max(0.0);
-        let se_without2 = 1.0 / den;
+        let signal = shot * a_without * tg.max(0.0);
+        let c2pi: f64 = (0..MAX_ISOTOPES)
+            .filter(|&k| without & (1 << k) != 0)
+            .map(|k| {
+                let c = pi[k] / (sigma[k] * sigma[k]);
+                c * c * pi[k]
+            })
+            .sum();
+        let se_without2 = 1.0 / den + signal * c2pi / (den * den);
         let a_i = proj[i] / (pi[i] * sgg);
-        let se_i = sigma[i] / (pi[i] * sgg.sqrt());
-        let score = (a_i - a_without).abs() / (se_i * se_i + se_without2).sqrt();
+        let se_i2 = sigma[i] * sigma[i] / (pi[i] * pi[i] * sgg) + signal / (pi[i] * sgg * sgg);
+        let score = (a_i - a_without).abs() / (se_i2 + se_without2).sqrt();
         if worst.is_none_or(|(_, s)| score > s) {
             worst = Some((i, score));
         }
@@ -1178,6 +1206,19 @@ mod tests {
     /// plus Gaussian noise of standard deviation `noise`. Non-positive
     /// intensities are dropped, as centroiding would.
     fn synth_scans(features: &[Feature], noise: f32, scan_dt: f64, seed: u64) -> Vec<Ms1Scan> {
+        synth_scans_with_gain(features, noise, 0.0, scan_dt, seed)
+    }
+
+    /// [`synth_scans`] where a feature centroid with elution signal `x` also
+    /// carries signal-dependent noise: its Gaussian noise has variance
+    /// `noise^2 + gain * x`, as ion statistics give.
+    fn synth_scans_with_gain(
+        features: &[Feature],
+        noise: f32,
+        gain: f64,
+        scan_dt: f64,
+        seed: u64,
+    ) -> Vec<Ms1Scan> {
         let noise = noise as f64;
         let end = features
             .iter()
@@ -1205,7 +1246,8 @@ mod tests {
                         } else {
                             0.0
                         };
-                        let inten = 5.0 * noise + signal + noise * rng.normal();
+                        let sd = (noise * noise + gain * signal).sqrt();
+                        let inten = 5.0 * noise + signal + sd * rng.normal();
                         if inten > 0.0 {
                             peaks.push((mz + iso as f64 * ISOTOPE / z as f64, inten as f32));
                         }
@@ -1432,6 +1474,75 @@ mod tests {
         assert_eq!(e.isotopes_used & 0b0100, 0);
         assert_eq!(e.isotopes_used & 0b0001, 1);
         assert!((e.quantity / truth - 1.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn clean_peaks_with_signal_dependent_noise_keep_every_isotope() {
+        // Ion-statistics noise of variance 2 * NOISE * signal on top of the
+        // baseline noise, from 1e5 to 1e8 amplitude (the M+3 apex is 1 to
+        // 1,000 times NOISE).
+        let gain = 2.0 * NOISE as f64;
+        let mut excluded = Vec::new();
+        for amp in [1e5, 1e6, 1e7, 1e8] {
+            let mut n = 0;
+            for seed in 0..25 {
+                let scans = synth_scans_with_gain(
+                    &[(MZ, 2, ENV, 300.0, 5.0, amp)],
+                    NOISE,
+                    gain,
+                    1.0,
+                    40 + seed,
+                );
+                let e = fit(
+                    &Ms1RunIndex::new(scans),
+                    &probe(MZ, 300.0, 6.0, 5.0),
+                    2,
+                    &ENV,
+                    &params(),
+                )
+                .unwrap();
+                n += usize::from(e.isotopes_used != 0b1111);
+            }
+            excluded.push(n);
+        }
+        eprintln!(
+            "clean peaks with an isotope excluded, of 25 per amplitude 1e5..1e8: {excluded:?}"
+        );
+        assert!(excluded.iter().all(|&n| n <= 2), "{excluded:?}");
+
+        // Interfered (5x on M+2) and missing (no M+3) isotopes of an intense
+        // peak with the same noise are still excluded.
+        let amp = 1e7;
+        let iso2 = MZ + 2.0 * ISOTOPE / 2.0;
+        let interferer = (
+            iso2 * (1.0 + 3e-6),
+            2,
+            [1.0, 0.0, 0.0, 0.0],
+            300.0,
+            5.0,
+            5.0 * amp * ENV[2] as f64,
+        );
+        let scans = synth_scans_with_gain(
+            &[(MZ, 2, ENV, 300.0, 5.0, amp), interferer],
+            NOISE,
+            gain,
+            1.0,
+            7,
+        );
+        let pr = probe(MZ, 300.0, 6.0, 5.0);
+        let e = fit(&Ms1RunIndex::new(scans), &pr, 2, &ENV, &params()).unwrap();
+        assert_eq!(e.isotopes_used, 0b1011, "interfered M+2: {e:?}");
+        let m3 = MZ + 3.0 * ISOTOPE / 2.0;
+        let scans: Vec<Ms1Scan> =
+            synth_scans_with_gain(&[(MZ, 2, ENV, 300.0, 5.0, amp)], NOISE, gain, 1.0, 8)
+                .into_iter()
+                .map(|mut s| {
+                    s.peaks.retain(|p| (p.0 - m3).abs() > 0.01);
+                    s
+                })
+                .collect();
+        let e = fit(&Ms1RunIndex::new(scans), &pr, 2, &ENV, &params()).unwrap();
+        assert_eq!(e.isotopes_used, 0b0111, "missing M+3: {e:?}");
     }
 
     #[test]

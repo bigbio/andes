@@ -665,6 +665,7 @@ mod tests {
                 accession: "P1".into(),
                 description: "toy protein".into(),
                 sequence: b"MKWVRPK".to_vec(),
+                annotation: None,
             }],
         };
         SearchIndex::from_target_db(&target, "XXX")
@@ -776,6 +777,7 @@ mod tests {
                 accession: "P2".into(),
                 description: "test protein".into(),
                 sequence: b"WMKDALERQPK".to_vec(),
+                annotation: None,
             }],
         };
         let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -791,6 +793,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         let aa_set = AminoAcidSetBuilder::new_standard()
             .add_variable_mod(ox_m)
@@ -1053,11 +1056,13 @@ mod tests {
                     accession: "P1".into(),
                     description: String::new(),
                     sequence: b"MNGSK".to_vec(),
+                    annotation: None,
                 },
                 Protein {
                     accession: "P1_rev".into(),
                     description: String::new(),
                     sequence: b"ASNVTR".to_vec(),
+                    annotation: None,
                 },
             ],
         };

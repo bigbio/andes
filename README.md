@@ -165,6 +165,18 @@ andes \
   --protocol TMT
 ```
 
+**UniProt XML database.** `--database uniprot_sprot_human.xml.gz` searches like the UniProt
+FASTA. It also offers two opt-in uses of UniProt's annotation. A mod declared `sites=annotated`
+in the mods file is placed only where UniProt annotates that modification.
+`--uniprot-variants` searches natural sequence variants as their own entries, with the change in
+the accession. Both are filtered by evidence (`--uniprot-evidence`); see
+[`DOCS.md` §1a](DOCS.md#uniprot-xml-databases-variants-and-annotated-sites).
+
+```bash
+andes --spectrum spectra.mzML --database uniprot_sprot_human.xml.gz \
+  --mods phospho_annotated_mods.txt --uniprot-variants --output-pin out.pin
+```
+
 **TSV and Parquet output:**
 
 ```bash

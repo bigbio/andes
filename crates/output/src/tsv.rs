@@ -326,6 +326,7 @@ mod tests {
                 accession: accession.to_string(),
                 description: String::new(),
                 sequence: b"MKWVTFISLL".to_vec(),
+                annotation: None,
             }],
         };
         SearchIndex::from_target_db(&target, "XXX_")
@@ -573,6 +574,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         let m_ox = AminoAcid {
             residue: b'M',
@@ -718,6 +720,7 @@ mod tests {
             accession: accession.map(|s| s.to_string()),
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         }
     }
 

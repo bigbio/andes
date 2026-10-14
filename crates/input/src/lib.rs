@@ -1,5 +1,7 @@
-//! Input readers: MGF, mzML, FASTA, and (optional) Thermo `.raw` / Bruker timsTOF `.d`.
+//! Input readers: MGF, mzML, FASTA, UniProt XML, and (optional) Thermo `.raw` /
+//! Bruker timsTOF `.d`.
 
+pub mod database;
 pub mod fasta;
 pub mod isobaric;
 pub mod mgf;
@@ -8,7 +10,10 @@ pub mod mzml;
 pub mod thermo;
 #[cfg(feature = "timstof")]
 pub mod timstof;
+pub mod uniprot;
+mod uniprot_ptm;
 
+pub use database::{load_protein_database, DatabaseError, DatabaseFormat, LoadedDatabase};
 pub use fasta::{FastaParseError, FastaReader};
 pub use isobaric::{detect_isobaric, IsobaricLabel};
 pub use mgf::{MgfParseError, MgfReader};
@@ -20,6 +25,10 @@ pub use mzml::{
 pub use thermo::{ThermoParseError, ThermoRawReader};
 #[cfg(feature = "timstof")]
 pub use timstof::{TimsTofParseError, TimsTofReader};
+pub use uniprot::{
+    load_uniprot_xml, EvidenceLevel, UniProtLoadStats, UniProtOptions, UniProtParseError,
+    UniProtXmlReader,
+};
 
 /// Open a spectrum/FASTA file for buffered reading, **transparently
 /// gzip-decompressing** when the path ends in `.gz` (case-insensitive).

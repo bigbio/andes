@@ -102,9 +102,33 @@ pub(crate) struct SearchArgs {
     #[arg(long)]
     pub(crate) spectrum: Vec<PathBuf>,
 
-    /// Input FASTA database (target sequences only; decoys are generated automatically).
+    /// Input protein database (target sequences only; decoys are generated
+    /// automatically): FASTA, or UniProt XML when the name ends in `.xml`
+    /// (`.gz` is decompressed either way). A UniProt XML database searches like
+    /// the UniProt FASTA and also carries annotated modification sites (used by
+    /// `sites=annotated` mods) and, with `--uniprot-variants`, natural variants.
     #[arg(long)]
     pub(crate) database: Option<PathBuf>,
+
+    /// UniProt XML database: also search every natural sequence variant
+    /// (`sequence variant` feature) as its own target entry. Only the peptides
+    /// carrying the variant are added, under an accession naming the change
+    /// (`sp|P04637_VAR_005851_D7H|P53_HUMAN`), and decoys mirror them. Grows the
+    /// search space: measure PSMs at 1% FDR and entrapment FDP before relying on it.
+    #[arg(long = "uniprot-variants")]
+    pub(crate) uniprot_variants: bool,
+
+    /// UniProt XML database: minimum UniProt evidence for a sequence variant or
+    /// an annotated modification site to be used. `experimental` (default:
+    /// experimental and large-scale proteomics evidence), `curated` (adds manual
+    /// assertions without experimental support, e.g. "by similarity"), or `any`
+    /// (adds automatic annotation and features without evidence).
+    #[arg(
+        long = "uniprot-evidence",
+        default_value = "experimental",
+        value_parser = parse_uniprot_evidence
+    )]
+    pub(crate) uniprot_evidence: input::EvidenceLevel,
 
     /// Output Percolator PIN file path.
     #[arg(long)]
@@ -1102,6 +1126,12 @@ pub(crate) fn parse_precursor_cal(s: &str) -> Result<PrecursorCalMode, String> {
             "invalid precursor-cal `{s}`: expected auto|on|off (Java -precursorCal)"
         )),
     }
+}
+
+pub(crate) fn parse_uniprot_evidence(s: &str) -> Result<input::EvidenceLevel, String> {
+    input::EvidenceLevel::from_name(s).ok_or_else(|| {
+        format!("invalid UniProt evidence level `{s}`: expected experimental|curated|any")
+    })
 }
 
 pub(crate) fn parse_enzyme_specificity(s: &str) -> Result<EnzymeSpecificity, String> {

@@ -25,7 +25,7 @@ use crate::spectra::{
     send_chunks, title_prefix_for, tolerance_ppm_display, ParseStats,
 };
 use crate::{arg_present, report_search_progress, EXPLICIT_MISSED_CLEAVAGES};
-use input::{FastaReader, MgfReader, Ms1Link, MzMLReader};
+use input::{MgfReader, Ms1Link, MzMLReader};
 use model::{
     activation::ActivationMethod, AminoAcidSetBuilder, InstrumentType, PrecursorTolerance, Spectrum,
 };
@@ -258,14 +258,28 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let t_total = std::time::Instant::now();
     let t_phase = std::time::Instant::now();
-    // ── 1. Load FASTA target database ────────────────────────────────────────
-    let target_db = FastaReader::load_all(input::open_buf_maybe_gz(&database_path)?)?;
+    // ── 1. Load the target database (FASTA or UniProt XML) ───────────────────
+    let uniprot_opts = input::UniProtOptions {
+        variants: cli.uniprot_variants,
+        evidence: cli.uniprot_evidence,
+    };
+    let loaded = input::load_protein_database(&database_path, &uniprot_opts)?;
+    let target_db = loaded.db;
     eprintln!(
         "Loaded {} target proteins from {} [PHASE fasta_load: {:.2}s]",
         target_db.proteins.len(),
         database_path.display(),
         t_phase.elapsed().as_secs_f64()
     );
+    match &loaded.uniprot {
+        Some(stats) => log_uniprot_load(stats, &uniprot_opts),
+        None if cli.uniprot_variants => eprintln!(
+            "WARN: --uniprot-variants needs a UniProt XML database (*.xml[.gz]); {} is \
+             FASTA, so no variants are searched.",
+            database_path.display()
+        ),
+        None => {}
+    }
 
     // ── 2. Build SearchIndex (targets + strategy-generated decoys) ────────────
     let decoy_strategy =
@@ -563,6 +577,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "[PHASE param_and_scorer: {:.2}s]",
         t_phase.elapsed().as_secs_f64()
     );
+
+    report_annotated_site_mods(&aa, &target_db);
 
     // ── 5. Build SearchParams ─────────────────────────────────────────────────
     let mut params = SearchParams::default_tryptic(aa);
@@ -2232,6 +2248,72 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 /// `--mbr` needs two or more inputs, `--lfq` and a rescoring run (the
 /// library ranks precursors by the rescored PSM scores), and is label-free
 /// only.
+/// Log what a UniProt XML load kept: annotated sites, variant entries, and
+/// the features the evidence level or the canonical sequence ruled out.
+fn log_uniprot_load(stats: &input::UniProtLoadStats, opts: &input::UniProtOptions) {
+    eprintln!(
+        "UniProt XML: {} entries, {} annotated modification sites, {} variant entries \
+         (evidence >= {}; {} features below it, {} not on the canonical sequence, \
+         {} on other isoforms)",
+        stats.entries,
+        stats.mod_sites,
+        stats.variant_proteins,
+        opts.evidence.as_str(),
+        stats.below_evidence,
+        stats.unusable_features,
+        stats.isoform_features,
+    );
+    if !stats.unknown_modifications.is_empty() {
+        let mut names: Vec<(&String, &usize)> = stats.unknown_modifications.iter().collect();
+        names.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        let total: usize = names.iter().map(|(_, n)| **n).sum();
+        let examples: Vec<String> = names
+            .iter()
+            .take(5)
+            .map(|(name, n)| format!("{name} ({n})"))
+            .collect();
+        eprintln!(
+            "UniProt XML: {total} modification features have no single known mass and are not \
+             used as sites, e.g. {}",
+            examples.join(", ")
+        );
+    }
+}
+
+/// Say where the `sites=annotated` mods of `aa` can apply, and warn when the
+/// database annotates no site for them (they would never be placed).
+fn report_annotated_site_mods(aa: &model::AminoAcidSet, target_db: &model::ProteinDb) {
+    let mut names: Vec<&str> = aa
+        .iter_variants()
+        .filter_map(|v| v.mod_)
+        .filter(|m| m.annotated_site_mass.is_some())
+        .map(|m| m.name.as_str())
+        .collect();
+    if names.is_empty() {
+        return;
+    }
+    names.sort_unstable();
+    names.dedup();
+    let annotated = target_db
+        .proteins
+        .iter()
+        .filter(|p| !p.mod_sites().is_empty())
+        .count();
+    if annotated == 0 {
+        eprintln!(
+            "WARN: {} restricted to annotated sites (sites=annotated), but the database \
+             annotates none: these mods are never placed. Annotated sites come from a UniProt \
+             XML database (--database *.xml[.gz]; see --uniprot-evidence).",
+            names.join(", ")
+        );
+    } else {
+        eprintln!(
+            "Annotated-site mods ({}) apply at the annotated sites of {annotated} target proteins",
+            names.join(", ")
+        );
+    }
+}
+
 fn check_mbr_args(cli: &Cli) -> Result<(), String> {
     if cli.spectrum.len() < 2 {
         return Err(format!(

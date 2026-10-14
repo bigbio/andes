@@ -11,7 +11,9 @@
 # ── Inputs / outputs ────────────────────────────────────────────────────────
 io:
   spectrum: [sample.mzML]        # one or more files (mzML / MGF / .raw / .d)
-  database: human.fasta          # target-only FASTA (decoys generated per `decoys:`)
+  database: human.fasta          # target-only FASTA or UniProt XML (*.xml[.gz]); decoys per `decoys:`
+  # uniprot_variants: false      # UniProt XML: search natural sequence variants as extra entries
+  # uniprot_evidence: experimental  # UniProt XML: experimental | curated | any (variants + annotated sites)
   output_pin: out.pin            # Percolator PIN (required unless rescoring in-process)
   # output_tsv: out.tsv          # optional human-readable PSM table
   # output_parquet: out.idparquet

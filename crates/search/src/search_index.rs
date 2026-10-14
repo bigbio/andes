@@ -187,11 +187,13 @@ mod tests {
                     accession: "P1".into(),
                     description: "".into(),
                     sequence: b"MKWV".to_vec(),
+                    annotation: None,
                 },
                 Protein {
                     accession: "P2".into(),
                     description: "".into(),
                     sequence: b"AGCT".to_vec(),
+                    annotation: None,
                 },
             ],
         };
@@ -206,6 +208,7 @@ mod tests {
                 accession: "P1".into(),
                 description: "".into(),
                 sequence: b"AB".to_vec(),
+                annotation: None,
             }],
         };
         let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -224,11 +227,13 @@ mod tests {
                     accession: "P1".into(),
                     description: "".into(),
                     sequence: b"MKWV".to_vec(),
+                    annotation: None,
                 },
                 Protein {
                     accession: "P2".into(),
                     description: "".into(),
                     sequence: b"AGCT".to_vec(),
+                    annotation: None,
                 },
             ],
         };
@@ -260,6 +265,7 @@ mod tests {
                 accession: "P1".into(),
                 description: "".into(),
                 sequence: b"MABCDEFGHIK".to_vec(),
+                annotation: None,
             }],
         };
         let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -278,6 +284,7 @@ mod tests {
                 accession: "P1".into(),
                 description: "".into(),
                 sequence: b"MABCDEFGHIK".to_vec(),
+                annotation: None,
             }],
         };
         let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -296,6 +303,7 @@ mod tests {
                 accession: "P1".into(),
                 description: "".into(),
                 sequence: b"MABCDEFGHIK".to_vec(),
+                annotation: None,
             }],
         };
         let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -318,6 +326,7 @@ mod tests {
                     accession: "P".into(),
                     description: String::new(),
                     sequence: b"AK".to_vec(),
+                    annotation: None,
                 }],
             },
             decoy_prefix: "ZZZ".into(),

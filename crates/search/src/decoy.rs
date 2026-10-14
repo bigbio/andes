@@ -1,7 +1,16 @@
 //! Decoy database generation via sequence reversal (default), seeded shuffling,
 //! or none (target-only / externally-supplied decoys).
+//!
+//! A target's database annotation (UniProt XML: annotated modification sites,
+//! sequence-variant region) is carried onto its decoy through the same
+//! permutation that builds the decoy sequence ([`decoy_annotation`]), so the
+//! decoy offers site-restricted modifications on the same residues and, for a
+//! variant entry, a variant region of the same shape: the decoy side mirrors
+//! the search space the annotation adds on the target side.
 
-use model::protein::{Protein, ProteinDb};
+use std::sync::Arc;
+
+use model::protein::{ModSite, Protein, ProteinAnnotation, ProteinDb, VariantRegion};
 
 /// Default decoy accession prefix.
 pub const DEFAULT_DECOY_PREFIX: &str = "XXX";
@@ -88,9 +97,79 @@ pub fn reverse_db(db: &ProteinDb, prefix: &str) -> ProteinDb {
             accession: format!("{}_{}", normalized, p.accession),
             description: p.description.clone(),
             sequence: p.sequence.iter().rev().copied().collect(),
+            annotation: p.annotation.as_ref().and_then(|_| {
+                let n = p.sequence.len() as u32;
+                let source: Vec<u32> = (0..n).rev().collect();
+                decoy_annotation(p, &source)
+            }),
         })
         .collect();
     ProteinDb { proteins }
+}
+
+/// The annotation of the decoy built from `target` by a permutation of its
+/// residues: `source[i]` is the target position decoy residue `i` came from.
+///
+/// Modification sites follow their residue exactly. A variant region maps to
+/// its image when that is contiguous (always, under reversal); otherwise
+/// (shuffling scatters it) to a region of the same length at the image of its
+/// first residue, and a deletion junction to the junction between the images
+/// of its two residues, or before the image of the second when those are no
+/// longer adjacent. Either way the decoy yields variant spans of the same
+/// shape as the target, which is what keeps the two sides' search spaces
+/// matched. `None` when the target has no annotation.
+pub fn decoy_annotation(target: &Protein, source: &[u32]) -> Option<Arc<ProteinAnnotation>> {
+    let ann = target.annotation.as_deref()?;
+    let n = source.len();
+    debug_assert_eq!(n, target.sequence.len());
+    let mut image = vec![0u32; n];
+    for (i, &src) in source.iter().enumerate() {
+        image[src as usize] = i as u32;
+    }
+    let mut mod_sites: Vec<ModSite> = ann
+        .mod_sites
+        .iter()
+        .filter(|s| (s.position as usize) < n)
+        .map(|s| ModSite {
+            position: image[s.position as usize],
+            mass_delta: s.mass_delta,
+        })
+        .collect();
+    mod_sites.sort_by(|a, b| {
+        a.position
+            .cmp(&b.position)
+            .then(a.mass_delta.total_cmp(&b.mass_delta))
+    });
+    let variant = ann.variant.map(|v| {
+        let (a, b) = (v.start as usize, v.end as usize);
+        if a < b && b <= n {
+            let lo = image[a..b].iter().copied().min().unwrap_or(0);
+            let hi = image[a..b].iter().copied().max().unwrap_or(0);
+            if (hi - lo) as usize + 1 == b - a {
+                VariantRegion {
+                    start: lo,
+                    end: hi + 1,
+                }
+            } else {
+                let start = image[a];
+                VariantRegion {
+                    start,
+                    end: (start + (b - a) as u32).min(n as u32),
+                }
+            }
+        } else if a == b && a >= 1 && a < n {
+            let (x, y) = (image[a - 1], image[a]);
+            let junction = if x.abs_diff(y) == 1 { x.max(y) } else { y };
+            let junction = junction.clamp(1, n as u32 - 1);
+            VariantRegion {
+                start: junction,
+                end: junction,
+            }
+        } else {
+            v
+        }
+    });
+    Some(Arc::new(ProteinAnnotation { mod_sites, variant }))
 }
 
 /// Concatenate target + decoy.
@@ -128,6 +207,13 @@ fn count_sequon_starts(s: &[u8]) -> usize {
 /// window) make a naive `+1` unreliable, so a swap is committed only if it strictly
 /// increases the real count and never overshoots the target (adversarial review).
 fn sequon_preserving_reverse(orig: &[u8]) -> Vec<u8> {
+    sequon_preserving_reverse_tracked(orig, None)
+}
+
+/// [`sequon_preserving_reverse`], also applying every committed swap to
+/// `source` (the reversed position list on entry), so that it ends up mapping
+/// each decoy position to the target position its residue came from.
+fn sequon_preserving_reverse_tracked(orig: &[u8], mut source: Option<&mut Vec<u32>>) -> Vec<u8> {
     let n = orig.len();
     let mut r: Vec<u8> = orig.iter().rev().copied().collect();
     if n < 3 {
@@ -151,6 +237,9 @@ fn sequon_preserving_reverse(orig: &[u8]) -> Vec<u8> {
                 let new_count = count_sequon_starts(&r);
                 if new_count > cur && new_count <= target {
                     cur = new_count;
+                    if let Some(src) = source.as_deref_mut() {
+                        src.swap(i + 2, j);
+                    }
                 } else {
                     r.swap(i + 2, j); // revert
                 }
@@ -169,10 +258,23 @@ pub fn sequon_preserving_reverse_db(db: &ProteinDb, prefix: &str) -> ProteinDb {
     let proteins = db
         .proteins
         .iter()
-        .map(|p| Protein {
-            accession: format!("{}_{}", normalized, p.accession),
-            description: p.description.clone(),
-            sequence: sequon_preserving_reverse(&p.sequence),
+        .map(|p| {
+            if p.annotation.is_none() {
+                return Protein {
+                    accession: format!("{}_{}", normalized, p.accession),
+                    description: p.description.clone(),
+                    sequence: sequon_preserving_reverse(&p.sequence),
+                    annotation: None,
+                };
+            }
+            let mut source: Vec<u32> = (0..p.sequence.len() as u32).rev().collect();
+            let sequence = sequon_preserving_reverse_tracked(&p.sequence, Some(&mut source));
+            Protein {
+                accession: format!("{}_{}", normalized, p.accession),
+                description: p.description.clone(),
+                sequence,
+                annotation: decoy_annotation(p, &source),
+            }
         })
         .collect();
     ProteinDb { proteins }
@@ -193,6 +295,12 @@ pub fn shuffle_db(db: &ProteinDb, prefix: &str, seed: u64) -> ProteinDb {
         .enumerate()
         .map(|(i, p)| {
             let mut seq = p.sequence.clone();
+            // An annotated target also tracks where each residue goes, so the
+            // annotation can follow it onto the decoy.
+            let mut source: Option<Vec<u32>> = p
+                .annotation
+                .as_ref()
+                .map(|_| (0..seq.len() as u32).collect());
             // Per-protein RNG state: mix the global seed with the index via the
             // splitmix64 multiplier so adjacent proteins get well-separated
             // streams. Never let the xorshift state be zero (it would stick).
@@ -207,11 +315,15 @@ pub fn shuffle_db(db: &ProteinDb, prefix: &str, seed: u64) -> ProteinDb {
                 state ^= state << 17;
                 let k = (state % (j as u64 + 1)) as usize;
                 seq.swap(j, k);
+                if let Some(src) = source.as_mut() {
+                    src.swap(j, k);
+                }
             }
             Protein {
                 accession: format!("{}_{}", normalized, p.accession),
                 description: p.description.clone(),
                 sequence: seq,
+                annotation: source.and_then(|src| decoy_annotation(p, &src)),
             }
         })
         .collect();
@@ -303,6 +415,7 @@ mod tests {
                     accession: acc.to_string(),
                     description: String::new(),
                     sequence: seq.to_vec(),
+                    annotation: None,
                 })
                 .collect(),
         }

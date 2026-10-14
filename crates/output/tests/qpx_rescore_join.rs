@@ -57,6 +57,7 @@ fn run_bsa_search() -> (
         accession: None,
         neutral_losses: Vec::new(),
         loss_class: 0,
+        annotated_site_mass: None,
     };
     let ox = Modification {
         name: "Oxidation".into(),
@@ -67,6 +68,7 @@ fn run_bsa_search() -> (
         accession: None,
         neutral_losses: Vec::new(),
         loss_class: 0,
+        annotated_site_mass: None,
     };
     let aa = AminoAcidSetBuilder::new_standard()
         .add_fixed_mod(cam)

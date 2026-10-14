@@ -34,7 +34,7 @@ Native `.raw`/`.d` search MS2 only (MS3 reporter scans are filtered at load).
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
 | `--spectrum` | path | *(required)* | Input spectrum file; reader chosen by extension (see above). | Java `-s <FILE>` |
-| `--database` | path | *(required)* | Target FASTA. Decoys are generated (see `--decoy-strategy`, `--decoy-prefix`). | Java `-d <FILE>` |
+| `--database` | path | *(required)* | Target FASTA, or UniProt XML when the name ends in `.xml` / `.xml.gz` ([§1a](#uniprot-xml-databases-variants-and-annotated-sites)). Gzip is read directly. Decoys are generated (see `--decoy-strategy`, `--decoy-prefix`). | Java `-d <FILE>` |
 | `--output-pin` | path | *(required)* | Output Percolator `.pin`. | Java `-o <FILE>` (when `-outputFormat pin`) |
 
 ### Search parameters
@@ -134,6 +134,78 @@ For a pre-built target+decoy FASTA, use `--decoy-strategy none` with `--decoy-pr
 | `--decoy-suffix` | string | *(off)* | Decoy accession suffix (OpenMS `_rev` convention). |
 | `--decoy-seed` | u64 | fixed | *(advanced)* RNG seed for `shuffle` decoys. |
 
+### UniProt XML databases (variants and annotated sites)
+
+`--database` also reads UniProtKB XML (`uniprot_sprot.xml.gz`, a proteome download, or
+`rest.uniprot.org/uniprotkb/<acc>.xml`). Each entry becomes one protein with the UniProt FASTA
+header (`sp|P02769|ALBU_BOVIN`, `Albumin OS=Bos taurus OX=9913 GN=ALB PE=1 SV=4`), so on its own
+an XML database searches exactly like the UniProt FASTA. The XML also holds annotation that FASTA
+drops. andes uses two kinds, both off until asked for:
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--uniprot-variants` | bool | off | Add one target entry per natural `sequence variant`. Only peptides that carry the variant are enumerated from it. |
+| `--uniprot-evidence` | enum | `experimental` | Minimum UniProt evidence for a variant or an annotated site: `experimental`, `curated`, or `any` (see below). |
+
+**Annotated modification sites.** `modified residue`, `lipid moiety-binding region` and
+`glycosylation site` features become sites with the monoisotopic mass of the named modification,
+taken from UniProt's PTM vocabulary (`ptmlist.txt`). Interchain ubiquitin, NEDD8 and ISG15
+cross-links on K become Gly-Gly sites (+114.0429). A site only matters to a variable mod declared
+`sites=annotated` in the mods file ([§2](#2-modstxt-format)). That mod is then placed only on
+residues the protein annotates with a modification of the same mass (±0.005 Da, which keeps
+phospho and sulfo apart). Without that attribute a mod applies to every matching residue, as
+before. A restricted mod therefore searches far fewer positions than the same mod applied
+everywhere. Features with no single mass (`N-linked (GlcNAc...) asparagine`) are counted in the
+log and not used.
+
+**Natural variants.** Each usable variant becomes its own target protein holding the canonical
+sequence with the change applied, e.g. `sp|P04637_VAR_005851_D7H|P53_HUMAN`. The middle field is
+`<accession>_<feature id>_<change>`, or `<accession>_VAR_<change>` when UniProt gives no id. The
+change is written `D7H`, `KR120-121EE` or `F508del` (1-based). Candidate generation keeps only
+the spans that overlap the replaced residues, or that hold both residues next to a deletion. Every
+hit on a variant entry is therefore a hit on the variant, and its `Proteins` / `Protein` column
+names it; the canonical peptides are not searched twice. Multi-allelic variants give one entry
+per allele. These variants are skipped:
+
+- the original residues do not match the canonical sequence;
+- the position is unknown;
+- the location is on another isoform;
+- the variant deletes a protein terminus.
+
+A peptide carries at most one variant.
+
+**Decoys.** The annotation travels with each decoy through the permutation that builds the decoy.
+Sites stay on the same residues, so a decoy has as many annotated sites as its target, on the
+same residue types. A variant region maps to its mirror image under `reverse`, and under
+`sequon-reverse` unless a sequon swap moved one of its residues. Otherwise, as under `shuffle`, it
+maps to a region of the same length at the image of its first residue. Variant entries thus
+get decoy twins with the same kind of variant region, and the target and decoy search spaces grow
+together.
+
+**Evidence** (`--uniprot-evidence`, from the features' ECO codes):
+
+| Level | Admits |
+|---|---|
+| `experimental` | ECO:0000269 (experimental), ECO:0007744 / ECO:0007829 (combined experimental and computational, e.g. large-scale proteomics) |
+| `curated` | the above plus manual assertions without direct experimental support: by similarity (ECO:0000250), sequence model (ECO:0000255), author statement (ECO:0000303), curator inference (ECO:0000305), imported (ECO:0000312) |
+| `any` | everything, including automatic annotation and features without evidence (most dbSNP-only variants) |
+
+The run log reports the entries, the sites and variant entries kept, and the features left out
+(below the evidence level, not fitting the canonical sequence, on other isoforms, or with no
+known mass).
+
+**Limits.**
+
+- Isoforms (`VAR_SEQ`) are not rebuilt, and mature-chain, signal-peptide and propeptide
+  boundaries are not used.
+- The `--refine` second pass searches peptide mini-proteins that carry no annotation, so
+  restricted mods apply in the main search only.
+- `andes train` reads FASTA only.
+
+**Validation.** Both options grow the search space, which can raise identifications and error
+together. Measure them before relying on them: PSMs at 1% FDR on the standard datasets, plus an
+entrapment FDP.
+
 ### Chimeric cascade
 
 Needs MS1: **mzML or Thermo `.raw`** only (MGF/`.d` warn and run a normal search).
@@ -213,7 +285,8 @@ With `--output-parquet`, both modules add `quantms.feature.parquet` (the QPX fea
 `andes --config run.yaml` sets any parameter from YAML, in sections `io`, `search`, `scoring`,
 `decoys`, `chimeric`, `refine`, `rescoring`, `glyco`, `quant` (template:
 [`config.example.yaml`](config.example.yaml)). Keys are optional; **`CLI flag > --config >
-built-in default`**; unknown keys are a hard error. Values use the CLI strings
+built-in default`**; unknown keys are a hard error. The UniProt XML options are `io` keys
+(`uniprot_variants: true`, `uniprot_evidence: curated`). Values use the CLI strings
 (`precursor_tol: 20ppm`, `charge: "2..5"`, `isotope_error: "-1..2"`, `enzyme: gluc,trypsin`).
 
 ```yaml
@@ -250,6 +323,15 @@ The Java MS-GF+ format (`crates/model/src/modification.rs`). Each line has five 
 `NumMods=N` sets the maximum variable mods per peptide (default `3`). `#` starts a comment. A
 fixed and a variable mod on the same `(residue, location)` is rejected.
 
+Optional `key=value` attributes may follow the name, comma-separated:
+
+| Attribute | Meaning |
+|---|---|
+| `loss=<m1;m2;…>` | Neutral-loss masses (Da) predicted for this mod's fragment ions. |
+| `class=<glyco\|phospho\|sulfo\|generic>` | Pool the mod's loss ions with others of the class. |
+| `accession=<CURIE>` | Ontology accession reported in the outputs, e.g. `UNIMOD:21`. |
+| `sites=<annotated\|any>` | `annotated` restricts a **variable** mod to the residues a UniProt XML database annotates with a modification of the same mass ([§1a](#uniprot-xml-databases-variants-and-annotated-sites)). `any` (default) applies it to every matching residue. |
+
 ### Example (a) — Carbamidomethyl C + Oxidation M
 
 ```text
@@ -282,6 +364,22 @@ NumMods=3
 ```
 
 Add `--protocol phospho` to prefer a phospho model (e.g. `hcd_qexactive_tryp_phosphorylation`).
+
+### Example (d) — Phosphorylation only at UniProt-annotated sites
+
+```text
+NumMods=3
+57.02146,C,fix,any,Carbamidomethyl
+15.99491,M,opt,any,Oxidation
+79.966331,S,opt,any,Phospho,sites=annotated
+79.966331,T,opt,any,Phospho,sites=annotated
+79.966331,Y,opt,any,Phospho,sites=annotated
+42.010565,*,opt,Prot-N-term,Acetyl,sites=annotated
+```
+
+Search it against a UniProt XML database: `--database uniprot_sprot_human.xml.gz`. Add
+`--uniprot-evidence curated` to also use sites UniProt annotates by similarity. Against a FASTA,
+the restricted mods are never placed and andes warns.
 
 ---
 
@@ -362,7 +460,7 @@ the fused strong score Percolator weights most; historically `StrongScore`; it a
 | 63 | `RawScoreCal` | float | signed | Per-spectrum z-scored `RawScore`. |
 | 64 | `RankScoreFloat` | float | unbounded | Unrounded `RankScore` (continuous split-sum). |
 | 65 | `Peptide` | string | — | `pre.SEQUENCE.post` with `+mass` mod annotations. |
-| 66 | `Proteins` | string | — | Protein accession(s), tab-separated; decoys carry `--decoy-prefix`. |
+| 66 | `Proteins` | string | — | Protein accession(s), tab-separated; decoys carry `--decoy-prefix`. A UniProt variant entry names its change (`sp\|P04637_VAR_005851_D7H\|P53_HUMAN`). |
 
 Columns marked **0.0 unless/without** stay in the header and are zero when their condition
 does not hold.

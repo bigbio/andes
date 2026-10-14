@@ -2645,6 +2645,7 @@ mod tests {
             accession: None,
             neutral_losses: vec![162.0528],
             loss_class: 1,
+            annotated_site_mass: None,
         };
         let t = AminoAcid::standard(b'T').unwrap().with_mod(m);
         let w1 = AminoAcid::standard(b'W').unwrap();

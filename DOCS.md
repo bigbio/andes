@@ -890,6 +890,18 @@ scores from separately trained Percolator models are not on one scale.
   see. The acceptance rate is optimistic as a transfer sensitivity: a pseudo-transfer's
   predicted apex leaves the run's own observation out of the consensus RT, but the run's
   alignment map was fitted with that observation as one of its anchors.
+* **Reported quantity.** The extract fit gives each (precursor, run) an apex amplitude `A`
+  and an elution width `w`; `A · w · √(2π)` is the area under the fitted profile. Fitting the
+  width separately in each run lets one precursor's area jump between runs with the width
+  pick alone, so `<stem>.mbr.tsv` and `quantms.feature.parquet` report `A · w_p · √(2π)`
+  (standard error `amplitude_se · w_p · √(2π)`) with one width per precursor: `w_p` is the
+  median, over the runs that identify the precursor (aligned runs, fits with `A > 0`), of the
+  fitted width divided by the run map's local slope at the apex, carried back into each run
+  by that run's slope at the row's apex (the slope is about 1 when the runs share a gradient;
+  the mapping keeps the area right when one run elutes more slowly). Transfers use the same
+  `w_p`. A precursor without such an identified fit, and every row of an unaligned run,
+  reports its own per-run area. `<stem>.extract.parquet` keeps the per-run `quantity` and
+  `quantity_se` (`A · w · √(2π)`) for provenance.
 
 `library.parquet` records a fingerprint of the library (and of `alignment.parquet`, checked on
 read); each extract table records that fingerprint and its `--lfq-tol`. `quant finalize` fails,

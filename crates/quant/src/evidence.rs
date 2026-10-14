@@ -230,8 +230,9 @@ pub fn fit_with(
     fit_on_grid(ms1, probe, charge, envelope, p, &WIDTH_GRID, scratch)
 }
 
-/// [`fit_with`] over the width grid `widths` (multiples of `w_prior`, not
-/// empty) instead of [`WIDTH_GRID`]. The extraction window is unchanged.
+/// [`fit_with`] over the width grid `widths` (multiples of `w_prior`,
+/// ascending, not empty) instead of [`WIDTH_GRID`]. The extraction window is
+/// unchanged.
 pub fn fit_on_grid(
     ms1: &Ms1RunIndex,
     probe: &Probe,
@@ -801,7 +802,8 @@ fn median_sorted(v: &[f32]) -> f64 {
 }
 
 /// The (t0, w) maximising `LLR - (t0 - t_hat)^2 / (2 s^2)` over the scan RTs
-/// and `widths * w_prior`, with every isotope in `mask`.
+/// and `widths * w_prior`, with every isotope in `mask`, with `w` then
+/// refined continuously at that `t0` (see the module docs).
 #[allow(clippy::too_many_arguments)]
 fn best_alignment(
     rt: &[f64],
@@ -840,32 +842,119 @@ fn best_alignment(
         k..k + 1
     };
     let n = rt.len() as f64;
-    let mut best = (f64::NEG_INFINITY, rt[candidates.start], prior.w_prior);
+    // The profile log-likelihood ratio at (t0, w); minus infinity for a
+    // profile flat over the window.
+    let llr = |t0: f64, w: f64| {
+        let (mut num, mut sg, mut sgg) = (0.0, 0.0, 0.0);
+        for (&t, &zj) in rt.iter().zip(z.iter()) {
+            let g = gaussian(t, t0, w);
+            num += zj * g;
+            sg += g;
+            sgg += g * g;
+        }
+        let centred = sgg - sg * sg / n;
+        if centred < MIN_CENTRED_SGG {
+            return f64::NEG_INFINITY;
+        }
+        let den = d * centred;
+        let a = (num / den).max(0.0);
+        a * num - 0.5 * a * a * den
+    };
+    // (objective, t0, index into widths)
+    let mut best = (f64::NEG_INFINITY, rt[candidates.start], usize::MAX);
     for k in candidates {
         let t0 = rt[k];
         let penalty = (t0 - t_hat) * (t0 - t_hat) / (2.0 * s * s);
-        for &f in widths {
-            let w = f * prior.w_prior;
-            let (mut num, mut sg, mut sgg) = (0.0, 0.0, 0.0);
-            for (&t, &zj) in rt.iter().zip(z.iter()) {
-                let g = gaussian(t, t0, w);
-                num += zj * g;
-                sg += g;
-                sgg += g * g;
-            }
-            let centred = sgg - sg * sg / n;
-            if centred < MIN_CENTRED_SGG {
-                continue;
-            }
-            let den = d * centred;
-            let a = (num / den).max(0.0);
-            let objective = a * num - 0.5 * a * a * den - penalty;
+        for (i, &f) in widths.iter().enumerate() {
+            let objective = llr(t0, f * prior.w_prior) - penalty;
             if objective > best.0 {
-                best = (objective, t0, w);
+                best = (objective, t0, i);
             }
         }
     }
-    (best.1, best.2)
+    let (value, t0, i) = best;
+    if i == usize::MAX {
+        return (t0, prior.w_prior);
+    }
+    let (lo, hi) = width_bracket(widths, i);
+    let w = golden_max(
+        |log_f| llr(t0, log_f.exp() * prior.w_prior),
+        lo.ln(),
+        hi.ln(),
+        widths[i].ln(),
+        value + (t0 - t_hat) * (t0 - t_hat) / (2.0 * s * s),
+    )
+    .exp()
+        * prior.w_prior;
+    (t0, w)
+}
+
+/// Golden-section steps of the width refinement; each shrinks the bracket
+/// by a factor 0.618.
+const WIDTH_REFINE_STEPS: usize = 16;
+
+/// The bracket, as multiples of `w_prior`, of the width refinement around
+/// `widths[i]`: its neighbours on the grid, or one grid step (as a ratio)
+/// beyond the grid's ends; `(f, f)` for a one-point grid. `widths` is
+/// ascending and positive.
+fn width_bracket(widths: &[f64], i: usize) -> (f64, f64) {
+    let f = widths[i];
+    match widths.len() {
+        0 | 1 => (f, f),
+        n => {
+            let lo = if i == 0 {
+                f * f / widths[1]
+            } else {
+                widths[i - 1]
+            };
+            let hi = if i + 1 == n {
+                f * f / widths[n - 2]
+            } else {
+                widths[i + 1]
+            };
+            (lo, hi)
+        }
+    }
+}
+
+/// The argument in `[lo, hi]` maximising `f` by golden-section search,
+/// starting from `x0` (inside the bracket) with `f(x0) = f0`; `x0` is kept
+/// unless a probe beats it, so the result is never worse than the start.
+fn golden_max<F: Fn(f64) -> f64>(f: F, mut lo: f64, mut hi: f64, x0: f64, f0: f64) -> f64 {
+    const INV_PHI: f64 = 0.618_033_988_749_894_9;
+    let (mut best_x, mut best_f) = (x0, f0);
+    if lo.is_nan() || hi.is_nan() || hi <= lo {
+        return best_x;
+    }
+    let mut a = hi - INV_PHI * (hi - lo);
+    let mut b = lo + INV_PHI * (hi - lo);
+    let (mut fa, mut fb) = (f(a), f(b));
+    for _ in 0..WIDTH_REFINE_STEPS {
+        for (x, v) in [(a, fa), (b, fb)] {
+            if v > best_f {
+                (best_x, best_f) = (x, v);
+            }
+        }
+        if fa >= fb {
+            hi = b;
+            b = a;
+            fb = fa;
+            a = hi - INV_PHI * (hi - lo);
+            fa = f(a);
+        } else {
+            lo = a;
+            a = b;
+            fa = fb;
+            b = lo + INV_PHI * (hi - lo);
+            fb = f(b);
+        }
+    }
+    for (x, v) in [(a, fa), (b, fb)] {
+        if v > best_f {
+            (best_x, best_f) = (x, v);
+        }
+    }
+    best_x
 }
 
 /// Index of the RT nearest `t` (the earlier one on a tie); `rt` non-empty.
@@ -1203,6 +1292,46 @@ mod tests {
     /// 1.5 times the largest null LLR over 100 noise seeds at 1 s and 2 s scan
     /// spacing (7.23).
     const NULL_LLR_BOUND: f64 = 10.8;
+
+    #[test]
+    fn width_is_recovered_between_grid_points() {
+        // True widths between and beyond the grid widths {4.2, 6, 8.4} s of
+        // w_prior = 6 s.
+        for (k, w_true) in [3.3, 5.0, 7.1, 10.5].into_iter().enumerate() {
+            for noise in [0.0, NOISE] {
+                let run = Ms1RunIndex::new(synth_scans(
+                    &[(MZ, 2, ENV, 300.0, w_true, AMP)],
+                    noise,
+                    0.5,
+                    20 + k as u64,
+                ));
+                let e = fit(&run, &probe(MZ, 300.0, 6.0, 6.0), 2, &ENV, &params()).unwrap();
+                eprintln!(
+                    "width: true {w_true}, fitted {:.3} (noise {noise}), A/A_true = {:.4}",
+                    e.w,
+                    e.amplitude / AMP
+                );
+                assert!((e.w / w_true - 1.0).abs() < 0.03, "{w_true}: {}", e.w);
+                assert!((e.amplitude / AMP - 1.0).abs() < 0.03);
+            }
+        }
+    }
+
+    #[test]
+    fn golden_section_finds_the_maximum_and_never_loses_the_start() {
+        let f = |x: f64| -(x - 0.3) * (x - 0.3);
+        let x = golden_max(f, -1.0, 1.0, -1.0, f(-1.0));
+        assert!((x - 0.3).abs() < 1e-3, "{x}");
+        // A start better than every probe is kept.
+        assert_eq!(golden_max(f, -1.0, 1.0, 0.3, 1.0), 0.3);
+        assert_eq!(golden_max(f, 0.5, 0.5, 0.5, f(0.5)), 0.5);
+        assert_eq!(width_bracket(&WIDTH_GRID, 1), (0.7, 1.4));
+        let (lo, hi) = width_bracket(&WIDTH_GRID, 0);
+        assert!((lo - 0.49).abs() < 1e-12 && hi == 1.0);
+        let (lo, hi) = width_bracket(&WIDTH_GRID, 2);
+        assert!(lo == 1.0 && (hi - 1.96).abs() < 1e-12);
+        assert_eq!(width_bracket(&[1.0], 0), (1.0, 1.0));
+    }
 
     #[test]
     fn noise_estimator_scales_successive_differences() {

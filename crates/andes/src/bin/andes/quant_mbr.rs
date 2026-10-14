@@ -49,6 +49,16 @@
 //! acceptance rate is optimistic for real transfers: the alignment map was
 //! fitted with the pseudo-transfer's own run observation as an anchor, and
 //! only the consensus RT leaves it out.
+//!
+//! Reported quantity: one elution width per precursor. Its consensus width
+//! `w_c` is the median, over its identified rows in aligned runs with a fit
+//! of positive amplitude, of `w_r / f_r'(f_r^-1(t0_r))`: the fitted width
+//! carried onto the consensus RT scale by the run map's local slope. A row
+//! in aligned run `r` with apex `t0` reports `A * w * sqrt(2 pi)` and
+//! `amplitude_se * w * sqrt(2 pi)` with `w = w_c * f_r'(f_r^-1(t0))`. A row
+//! of a precursor without such a fit, and every row of an unaligned run,
+//! reports the extract's own `quantity` and `quantity_se`. The extract
+//! tables keep the per-run values.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -58,6 +68,7 @@ use output::mbr_out::{
     VALIDATION_Q,
 };
 use output::ms1_table::read_ms1_table;
+use quant::align::RunMap;
 use quant::decoys::{probes, Hypothesis, Probe};
 use quant::evidence::{fit_many, Evidence, EvidenceParams, FitJob, WIDTH_GRID};
 use quant::library::{Library, LibraryEntry};
@@ -608,6 +619,54 @@ pub(crate) fn extract_run(
     Ok(finish(slots, width_fit_count, &wp))
 }
 
+/// `d run RT / d consensus RT` of run `run`'s map at run RT `rt`; `None` for
+/// an unaligned run or a slope that is not finite and positive.
+fn local_slope(maps: &[Option<RunMap>], run: u16, rt: f64) -> Option<f64> {
+    let map = maps.get(run as usize)?.as_ref()?;
+    let slope = map.slope_at(map.invert(rt));
+    (slope.is_finite() && slope > 0.0).then_some(slope)
+}
+
+/// Per precursor, the consensus width `w_c` of the module docs, from the
+/// identified target rows among `rows`.
+fn consensus_widths<'a>(
+    rows: impl IntoIterator<Item = &'a ExtractRow>,
+    maps: &[Option<RunMap>],
+) -> HashMap<u32, f64> {
+    let mut widths: HashMap<u32, Vec<f64>> = HashMap::new();
+    for r in rows {
+        if (r.role, r.kind) != (Role::Identified, Hypothesis::Target) {
+            continue;
+        }
+        let Some(e) = &r.evidence else { continue };
+        if !(e.amplitude > 0.0 && e.w.is_finite() && e.w > 0.0) {
+            continue;
+        }
+        if let Some(slope) = local_slope(maps, r.run, e.t0) {
+            widths.entry(r.precursor).or_default().push(e.w / slope);
+        }
+    }
+    widths.into_iter().map(|(p, w)| (p, median(w))).collect()
+}
+
+/// `(quantity, quantity_se)` of evidence `e` in run `run`: at the consensus
+/// width `w_c` carried into the run, or the extract's own values without a
+/// consensus width or in an unaligned run.
+fn reported_quantity(
+    e: &Evidence,
+    run: u16,
+    w_c: Option<f64>,
+    maps: &[Option<RunMap>],
+) -> (f64, f64) {
+    match w_c.zip(local_slope(maps, run, e.t0)) {
+        Some((w_c, slope)) => {
+            let area = w_c * slope * (2.0 * std::f64::consts::PI).sqrt();
+            (e.amplitude * area, e.amplitude_se * area)
+        }
+        None => (e.quantity, e.quantity_se),
+    }
+}
+
 /// Floor of `amplitude_se` in the amplitude signal-to-noise feature.
 const MIN_AMPLITUDE_SE: f64 = 1e-12;
 
@@ -749,6 +808,8 @@ pub(crate) fn finalize(
         }
     }
     let fdr = transfer_fdr(&fdr_rows, seed);
+    let maps = &lib.alignment.maps;
+    let w_c = consensus_widths(rows.iter().copied(), maps);
     let accepted = |q: Option<f64>| q.is_some_and(|q| q <= mbr_fdr);
     // The validation thresholds, VALIDATION_Q then mbr_fdr, and their counts.
     let thresholds = [VALIDATION_Q, mbr_fdr];
@@ -764,6 +825,7 @@ pub(crate) fn finalize(
             continue;
         }
         let e = r.evidence.as_ref();
+        let quantity = e.map(|e| reported_quantity(e, r.run, w_c.get(&r.precursor).copied(), maps));
         let (evidence_type, transfer_q) = match r.role {
             Role::Identified => (EvidenceType::Identified, None),
             Role::Transfer => {
@@ -817,8 +879,8 @@ pub(crate) fn finalize(
                 precursor_key: &lib.meta[r.precursor as usize].key,
                 run: &stems[r.run as usize],
                 evidence_type,
-                quantity: e.map(|e| e.quantity),
-                quantity_se: e.map(|e| e.quantity_se),
+                quantity: quantity.map(|q| q.0),
+                quantity_se: quantity.map(|q| q.1),
                 transfer_q,
                 apex_rt_s: e.map(|e| e.t0),
                 library_q: r.library_q,
@@ -1711,6 +1773,150 @@ mod finalize_tests {
             assert!(finalize(&stems(), &library(), &extract(), bad, 1, &mbr, &val).is_err());
         }
         assert!(!mbr.exists());
+    }
+
+    /// Run 0 on the consensus scale, run 1 stretched by 1.25 and run 2
+    /// unaligned.
+    fn stretched_maps() -> Vec<Option<RunMap>> {
+        let map = |slope: f64| {
+            RunMap::from_parts(vec![0.0, 3000.0], vec![0.0, 3000.0 * slope], slope, slope).unwrap()
+        };
+        vec![Some(map(1.0)), Some(map(1.25)), None]
+    }
+
+    /// A precursor seen in runs 0 and 1 (and 2, unaligned) with the same
+    /// abundance: in run `r` the apex is `A0 / slope_r` and the true width
+    /// `w0 * slope_r`, and the fitted width is off by `jitter[r]`, as a
+    /// coarse width grid makes it, while the amplitude is right.
+    fn jittered_rows(p: u32, jitter: [f64; 3]) -> Vec<ExtractRow> {
+        let (a0, w0) = (1e6, 5.0);
+        let slopes = [1.0, 1.25, 1.0];
+        let mut g = Rng(p as u64 + 1);
+        (0..3u16)
+            .flat_map(|run| {
+                let slope = slopes[run as usize];
+                let w = w0 * slope * jitter[run as usize];
+                let amplitude = a0 / slope;
+                let mut e = evidence(&mut g, true, 500.0 * slope);
+                e.amplitude = amplitude;
+                e.amplitude_se = 0.01 * amplitude;
+                e.w = w;
+                e.quantity = amplitude * w * (2.0 * std::f64::consts::PI).sqrt();
+                e.quantity_se = 0.01 * e.quantity;
+                let identified = row(
+                    p,
+                    run,
+                    Hypothesis::Target,
+                    Role::Identified,
+                    Some(e.clone()),
+                );
+                let pseudo = row(p, run, Hypothesis::Target, Role::PseudoTransfer, Some(e));
+                [identified, pseudo]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn consensus_width_gives_one_quantity_across_runs() {
+        let maps = stretched_maps();
+        let truth = 1e6 * 5.0 * (2.0 * std::f64::consts::PI).sqrt();
+        for jitter in [[0.7, 1.4, 1.0], [1.4, 0.7, 1.4], [1.0, 1.0, 0.7]] {
+            let rows = jittered_rows(3, jitter);
+            let w_c = consensus_widths(&rows, &maps);
+            let per_run: Vec<(f64, f64)> = rows
+                .iter()
+                .filter(|r| r.role == Role::Identified)
+                .map(|r| {
+                    let e = r.evidence.as_ref().unwrap();
+                    reported_quantity(e, r.run, w_c.get(&3).copied(), &maps)
+                })
+                .collect();
+            let raw: Vec<f64> = rows
+                .iter()
+                .filter(|r| r.role == Role::Identified)
+                .map(|r| r.evidence.as_ref().unwrap().quantity)
+                .collect();
+            eprintln!("jitter {jitter:?}: raw {raw:?}, consensus {per_run:?}");
+            // Runs 0 and 1 report one quantity: the jitter is gone.
+            let (q0, q1) = (per_run[0].0, per_run[1].0);
+            assert!((q0 / q1 - 1.0).abs() < 1e-12, "{per_run:?}");
+            // w_c is the median of the two aligned runs' widths.
+            let want = truth * 0.5 * (jitter[0] + jitter[1]);
+            assert!((q0 / want - 1.0).abs() < 1e-12, "{q0} vs {want}");
+            for &(q, se) in &per_run[..2] {
+                assert!((se / q - 0.01).abs() < 1e-12);
+            }
+            // The unaligned run keeps the extract's own values.
+            let e2 = rows[4].evidence.as_ref().unwrap();
+            assert_eq!(per_run[2], (e2.quantity, e2.quantity_se));
+        }
+        // Raw quantities with jitter 0.7 vs 1.4 differ twofold; the
+        // consensus removes it.
+        let rows = jittered_rows(3, [0.7, 1.4, 1.0]);
+        let raw = |run: usize| rows[2 * run].evidence.as_ref().unwrap().quantity;
+        assert!((raw(1) / raw(0) - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn consensus_width_skips_unfitted_and_unaligned_rows() {
+        let maps = stretched_maps();
+        let mut rows = jittered_rows(4, [1.0, 1.0, 1.0]);
+        // Only run 0's identified fit has signal; run 2 is unaligned.
+        rows[2].evidence.as_mut().unwrap().amplitude = 0.0;
+        rows[4].evidence.as_mut().unwrap().w = 50.0;
+        let w_c = consensus_widths(&rows, &maps);
+        assert!((w_c[&4] - 5.0).abs() < 1e-12, "{w_c:?}");
+        // A precursor without an identified fit keeps its own quantity.
+        let mut rows = jittered_rows(5, [1.0, 1.0, 1.0]);
+        for r in rows.iter_mut().filter(|r| r.role == Role::Identified) {
+            r.evidence = None;
+        }
+        assert!(consensus_widths(&rows, &maps).is_empty());
+        let e = rows[1].evidence.as_ref().unwrap();
+        assert_eq!(
+            reported_quantity(e, 1, None, &maps),
+            (e.quantity, e.quantity_se)
+        );
+    }
+
+    #[test]
+    fn finalize_reports_the_consensus_quantity() {
+        // Precursor 0 is identified in runs 0 and 1 with widths 4 and 8; with
+        // unit-slope maps each row reports its A * 6 * sqrt(2 pi).
+        let mut lib = library();
+        let unit = RunMap::from_parts(vec![0.0, 3000.0], vec![0.0, 3000.0], 1.0, 1.0).unwrap();
+        lib.alignment.maps = vec![Some(unit.clone()), Some(unit)];
+        let mut runs = extract();
+        let mut g = Rng(9);
+        for (run, w) in [(0u16, 4.0), (1, 8.0)] {
+            let mut e = evidence(&mut g, true, 100.0);
+            e.amplitude = 4e6 / w;
+            e.amplitude_se = 1e3;
+            e.w = w;
+            e.quantity = e.amplitude * w * (2.0 * std::f64::consts::PI).sqrt();
+            let rows = &mut runs[run as usize];
+            rows.retain(|r| !(r.precursor == 0 && r.role != Role::PseudoTransfer));
+            rows.push(row(0, run, Hypothesis::Target, Role::Identified, Some(e)));
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (mbr, val) = mbr_paths(&dir.path().join("x"));
+        let s = finalize(&stems(), &lib, &runs, 0.01, 7, &mbr, &val).unwrap();
+        let mut p0 = s.features.iter().filter(|f| f.precursor == 0);
+        let sqrt_2pi = (2.0 * std::f64::consts::PI).sqrt();
+        let a = p0.next().unwrap();
+        let b = p0.next().unwrap();
+        assert_eq!((a.run, b.run), (0, 1));
+        assert!((a.quantity.unwrap() / (1e6 * 6.0 * sqrt_2pi) - 1.0).abs() < 1e-12);
+        assert!((b.quantity.unwrap() / (5e5 * 6.0 * sqrt_2pi) - 1.0).abs() < 1e-12);
+        assert!((a.quantity_se.unwrap() / (1e3 * 6.0 * sqrt_2pi) - 1.0).abs() < 1e-12);
+        // The extract rows keep their per-run quantities.
+        let id0 = runs[0]
+            .iter()
+            .find(|r| r.precursor == 0 && r.role == Role::Identified);
+        assert!(
+            (id0.unwrap().evidence.as_ref().unwrap().quantity / (4e6 * sqrt_2pi) - 1.0).abs()
+                < 1e-12
+        );
     }
 
     #[test]

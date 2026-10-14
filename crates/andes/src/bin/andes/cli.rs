@@ -134,11 +134,12 @@ pub(crate) struct SearchArgs {
     #[arg(long = "uniprot-chains")]
     pub(crate) uniprot_chains: bool,
 
-    /// UniProt XML database: minimum UniProt evidence for a sequence variant or
-    /// an annotated modification site to be used. `experimental` (default:
-    /// experimental and large-scale proteomics evidence), `curated` (adds manual
-    /// assertions without experimental support, e.g. "by similarity"), or `any`
-    /// (adds automatic annotation and features without evidence).
+    /// UniProt XML database: minimum UniProt evidence for a sequence variant, an
+    /// annotated modification site or a mature chain to be used. `experimental`
+    /// (default: experimental and large-scale proteomics evidence), `curated`
+    /// (adds manual assertions without experimental support, e.g. "by
+    /// similarity"; Swiss-Prot chains without evidence codes count here), or
+    /// `any` (adds automatic annotation and features without evidence).
     #[arg(
         long = "uniprot-evidence",
         default_value = "experimental",

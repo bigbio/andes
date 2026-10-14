@@ -112,7 +112,8 @@ pub struct UniProtOptions {
     /// Add one target protein per mature chain with a terminus the canonical
     /// sequence does not have (off by default, for the same reason).
     pub chains: bool,
-    /// Minimum evidence for a variant or a modification site to be used.
+    /// Minimum evidence for a variant, a modification site or a mature chain
+    /// to be used.
     pub evidence: EvidenceLevel,
 }
 

@@ -647,6 +647,81 @@ pub(crate) mod tests {
         RankScorer::new(&param)
     }
 
+    /// A RankScorer whose b/y ion types sit at the singly charged b/y offsets, so
+    /// a peptide's score depends on which of its fragment ions the spectrum holds
+    /// (`tiny_scorer`'s zero offsets never place an ion on a predicted peak, which
+    /// leaves every candidate at its cleavage credit).
+    fn ion_scorer() -> RankScorer {
+        use scoring_crate::param_model::FragmentOffsetFrequency;
+        let part = Partition {
+            charge: 2,
+            parent_mass: 0.0,
+            seg_num: 0,
+        };
+        let prefix1 = IonType::Prefix {
+            charge: 1,
+            offset_bits: (PROTON as f32).to_bits(),
+            loss_class: 0,
+        };
+        let suffix1 = IonType::Suffix {
+            charge: 1,
+            offset_bits: ((H2O + PROTON) as f32).to_bits(),
+            loss_class: 0,
+        };
+        let mut ion_table = FxHashMap::default();
+        ion_table.insert(prefix1, vec![0.6_f32, 0.3, 0.05, 0.001]);
+        ion_table.insert(suffix1, vec![0.6_f32, 0.3, 0.05, 0.001]);
+        ion_table.insert(IonType::Noise, vec![0.1_f32, 0.2, 0.3, 0.4]);
+        let mut rank_dist_table = FxHashMap::default();
+        rank_dist_table.insert(part, ion_table);
+        let mut frag_off_table = FxHashMap::default();
+        frag_off_table.insert(
+            part,
+            vec![
+                FragmentOffsetFrequency {
+                    ion_type: prefix1,
+                    frequency: 0.7,
+                },
+                FragmentOffsetFrequency {
+                    ion_type: suffix1,
+                    frequency: 0.7,
+                },
+            ],
+        );
+        let mut param = Param {
+            version: 10001,
+            data_type: SpecDataType {
+                activation: ActivationMethod::HCD,
+                instrument: InstrumentType::QExactive,
+                enzyme: None,
+                protocol: Protocol::Automatic,
+            },
+            mme: Tolerance::Da(0.02),
+            apply_deconvolution: false,
+            deconvolution_error_tolerance: 0.0,
+            charge_hist: vec![(2, 100)],
+            min_charge: 2,
+            max_charge: 2,
+            num_segments: 1,
+            partitions: vec![part],
+            num_precursor_off: 0,
+            precursor_off_map: FxHashMap::default(),
+            frag_off_table,
+            max_rank: 3,
+            rank_dist_table,
+            error_scaling_factor: 0,
+            ion_err_dist_table: FxHashMap::default(),
+            noise_err_dist_table: FxHashMap::default(),
+            ion_existence_table: FxHashMap::default(),
+            partition_ion_types_cache: FxHashMap::default(),
+            gbdt_peak_model: None,
+            frag_intensity_model: None,
+            rich_ion_model: None,
+        };
+        param.rebuild_cache();
+        RankScorer::new(&param)
+    }
+
     /// Every candidate of the prepared out-of-core index and its nominal-mass
     /// bucket index: the shape of one Pass-2 pool covering the whole database.
     fn whole_db_pool(prepared: &PreparedSearch<'_>) -> (Vec<Candidate>, BTreeMap<i32, Vec<usize>>) {
@@ -827,7 +902,7 @@ pub(crate) mod tests {
     fn secondary_listwise_gap_ignores_duplicate_occurrences_of_the_winner() {
         // DAFLGSFLYEYSR occurs in two proteins with the same flanks, so the pool
         // holds it twice at the same RawScore. The listwise gap must be taken
-        // against the best DIFFERENT peptidoform (here the isobaric ADFLGSFLYEYSR),
+        // against the best DIFFERENT peptidoform (here the isobaric ADFGLSFLYEYSR),
         // not against the winner's own second occurrence.
         let target = ProteinDb {
             proteins: vec![
@@ -844,14 +919,14 @@ pub(crate) mod tests {
                 Protein {
                     accession: "P3".into(),
                     description: "".into(),
-                    sequence: b"GGGKADFLGSFLYEYSRKGGG".to_vec(),
+                    sequence: b"GGGKADFGLSFLYEYSRKGGG".to_vec(),
                 },
             ],
         };
         let idx = SearchIndex::from_target_db(&target, "XXX");
         let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
         let params = SearchParams::default_tryptic(aa_set);
-        let scorer = tiny_scorer();
+        let scorer = ion_scorer();
         let frag_tol = 0.02_f64;
         let prepared =
             PreparedSearch::prepare_in_memory(&idx, &params, &scorer, frag_tol, "XXX").unwrap();
@@ -901,13 +976,13 @@ pub(crate) mod tests {
                 Protein {
                     accession: "P2".into(),
                     description: "".into(),
-                    sequence: b"GGGKADFLGSFLYEYSRKGGG".to_vec(),
+                    sequence: b"GGGKADFGLSFLYEYSRKGGG".to_vec(),
                 },
             ],
         };
         let idx = SearchIndex::from_target_db(&target, "XXX");
         let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
-        let scorer = tiny_scorer();
+        let scorer = ion_scorer();
         let frag_tol = 0.02_f64;
         let planted = peptide(b"DAFLGSFLYEYSR", b'K', b'K');
         let primary = peptide(b"WVTFISLLR", b'K', b'K');
@@ -937,9 +1012,14 @@ pub(crate) mod tests {
         let rank = run(crate::search_params::ScoreMode::Rank);
         let f = &rank.features;
         // RankScoreFloat is the unrounded RawScore, never left at 0.
-        assert!(f.rank_score_float > 0.0, "RankScoreFloat {}", f.rank_score_float);
-        assert!((f.rank_score_float - rank.score).abs() < 5.0);
-        // The planted peptide and the isobaric ADFLGSFLYEYSR are both retained, so
+        assert_ne!(f.rank_score_float, 0.0);
+        assert!(
+            (f.rank_score_float - rank.score).abs() < 0.5 * f.num_matched_main_ions as f32 + 1.0,
+            "RankScoreFloat {} vs RawScore {}",
+            f.rank_score_float,
+            rank.score
+        );
+        // The planted peptide and the isobaric ADFGLSFLYEYSR are both retained, so
         // RawScoreCal is the leave-one-out z-score over the retained strong
         // scores, not the raw strong score.
         assert!(f.listwise_score_gap > 0.0);

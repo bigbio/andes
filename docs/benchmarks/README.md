@@ -42,7 +42,7 @@ Reference identifications for scoring ship in [`glyco/truth/`](glyco/truth/). Re
 |---|---|---|---:|---:|---|---:|
 | **Standard, high-res** | Astral, PXD070049, HCD LFQ | PSMs @ q≤0.01 | **47,080** | Comet 31,435 (+49.8%), 215 s · Java MS-GF+ 26,542 † | entrapment version of the database: at an equal true FDP of 1.00%, +22.2% over the previous in-RAM retrieval; the nominal 1% is **1.07% true** | **160–161 s** |
 | **Standard + TMT labels** | a05058, PXD007683, ion-trap CID | PSMs @ q≤0.01 | **12,347** | Comet 10,504 (+17.5%), 76 s · Java 10,651 | not measurable | **53–55 s** |
-| **Standard, low-res LFQ** | UPS1, PXD001819, ion-trap CID | PSMs @ q≤0.01 | 15,848 | Comet 14,734 (+7.6%), 46 s · **Java 15,904** | **3.5% true FDP** at nominal 1% by entrapment (in-RAM retrieval, 15,838 PSMs: 3.6%); Comet: 154 hits on 14,734, the same rate | **34–35 s** |
+| **Standard, low-res LFQ** | UPS1, PXD001819, ion-trap CID | PSMs @ q≤0.01 | 15,848 | Comet 14,734 (+7.6%), 46 s · **Java 15,904** | **2.6% true FDP** at nominal 1% by entrapment (2.58–2.65% over seeds 42/1/2; PSMs at true FDP ≤ 1%: 13,045–13,269) | **34–35 s** |
 | **Chimeric** (`--chimeric`, in-RAM path) | Astral | PSMs @ q≤0.01 | **65,028** (+69%; 55,616 distinct scans) | in-RAM baseline 38,394 | not measurable | 337 s ¶ |
 | | TMT a05058 | PSMs @ q≤0.01 | 12,540 (+2.1%) | baseline 12,281 | not measurable | 73 s ¶ |
 | | UPS1 | PSMs @ q≤0.01 | **17,112** (+8.0%) | baseline 15,838 | 167 entrapment hits — flat against 166 | 50 s ¶ |
@@ -60,9 +60,12 @@ Reference identifications for scoring ship in [`glyco/truth/`](glyco/truth/). Re
 
 **How to read it.**
 
-- **Only UPS1 measures error among the standard sets.** Its nominal 1% is **~3.6% true FDP**
-  (166 entrapment hits on 15,838 PSMs, factor 3.42), and Comet sits at the same rate (154 hits
-  on 14,734). Astral was checked separately against a 1:1 shuffled entrapment version of its
+- **Only UPS1 measures error among the standard sets.** Its nominal 1% is **~2.6% true FDP**
+  (2.58–2.65% over seeds 42/1/2, factor 3.311). Earlier versions of this page reported ~3.6% and
+  a matching Comet rate: that evaluator counted a PSM as entrapment when *any* of its proteins was
+  an entrapment sequence, so peptides shared between yeast and E. coli (one conserved peptide
+  alone has 32 PSMs) counted as false. Comet has not been re-evaluated with the corrected rule.
+  Astral was checked separately against a 1:1 shuffled entrapment version of its
   database (see [retrieval strategy](#choosing-the-retrieval-strategy)); TMT has no entrapment
   component, so its counts are rescored `q ≤ 0.01` only.
 - **Speed against Comet.** #105 (exact-mass candidate lookup, memoised fragment predictions,
@@ -115,6 +118,21 @@ Phospho PSMs are Percolator seed 42.
   0.4% of PSMs and 1.1% of peptides (its nominal 1% moves from 1.17–1.19% to 1.08–1.14% true
   FDP). On UPS1, the earlier top-1 measurement found +1,274 PSMs with entrapment hits flat
   (166 → 167).
+- **Positional isomers are collapsed in the PIN** (2026-10-13): of a spectrum's candidates at one
+  precursor and charge with the same residues and modification masses, only the best-ranked row
+  is written. The phospho loss above came from these site alternatives (363,181 of 932,015
+  phospho rows); the table was measured before the collapse. Same protocol, before → after:
+
+  | Dataset | Rows dropped | Before | After |
+  |---|---|---|---|
+  | Phospho, `--chimeric` | 363,181 (39%) | 39,261–39,307 / 14,896–14,922 | **39,470–39,592 / 15,107–15,156** |
+  | Phospho | 363,181 (40%) | 37,038–37,110 / 14,522–14,561 | **37,220–37,356 / 14,726–14,771** |
+  | Astral | 5,850 (0.6%) | 43,076–43,145 / 26,723–26,746 | 43,170–43,210 / 26,756–26,779 |
+  | TMT (nominal 1%) | 3,753 (1.1%) | 12,329–12,372 / 10,429–10,474 | 12,359–12,385 / 10,469–10,490 |
+  | UPS1 | 4,560 (1.3%) | 7,760–8,031 / 2,240–2,347 | 7,973–8,016 / 2,296–2,315 |
+
+  Phospho with `--chimeric` now beats top-1 on both PSMs and peptides. The other datasets carry
+  only oxidation and deamidation site alternatives and move within or just above seed noise.
 - **`--refine` is high-res only** and skips both low-res sets by design: at low resolution a
   deamidation (+0.984) cannot be told from a C13 isotope error.
 - **`--refine` on Astral.** Three fixes landed before the refresh: #100 pairs each Pass-2 decoy
@@ -445,7 +463,9 @@ effects are *not demonstrable*, not refuted.
 ### Entrapment FDP
 
 A target PSM matching only entrapment sequences is false by construction, which makes true
-error measurable:
+error measurable. A PSM whose peptide also occurs in a target protein is a target
+identification, not an entrapment hit: count a PSM as entrapment only when **all** its
+proteins are entrapment sequences (`reproduce/run.sh` does).
 
 ```
 FDP = (entrapment hits / total accepted) x (1 + T/E)
@@ -456,12 +476,14 @@ assumed to be 1:
 
 | database | T : E | factor |
 |---|---|---:|
-| `yeast_entrap.fasta` (UPS1) | 734,280 : 303,537 tryptic peptides | **3.42** |
+| `yeast_entrap.fasta` (UPS1) | 440,309 : 190,540 tryptic peptides (≤ 1 missed cleavage, 6–50 aa; peptides shared with a target protein counted as targets) | **3.311** |
 | a genuine 1:1 database | 1 : 1 | 2.00 |
 
 Assuming 1:1 has understated error here twice (UPS1 by 1.7x; a foreign-proteome glyco database
-by ~2.5x). **UPS1** (2026-09-04): 166 entrapment hits on 15,838 PSMs ⇒ **3.58% true FDP** at a
-nominal 1% (2.61% on the cruder protein-count basis). At ~380 PSMs with 1–2 hits, one hit moves
+by ~2.5x). **UPS1** (2026-10-13, corrected rule): **2.6% true FDP** at a nominal 1%. The
+2026-09-04 figure of 3.58% (166 "entrapment" hits on 15,838 PSMs, factor 3.42) counted peptides
+shared with yeast as entrapment and used a digest with up to 3 missed cleavages; tables on this
+page measured before 2026-10-13 used that rule for UPS1. At ~380 PSMs with 1–2 hits, one hit moves
 the estimate by ~2.6 points, so "FDP 0.00" means *too few hits to measure*. The Astral HYE
 database has no entrapment component.
 

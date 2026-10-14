@@ -38,8 +38,10 @@ both now in less than half the memory). andes finds 7.6–49.8% more PSMs in 0.3
 wall time. **†** Java MS-GF+ was not re-run; its counts are from an earlier session, and it
 remains ~10–40x slower. **Error rates:** checked against an entrapment version of the Astral
 database, the Astral gain holds at an equal true FDP (+22.2% over the previous in-RAM retrieval at
-1.00%; the index's nominal 1% is 1.07% true). TMT has no entrapment component; on UPS1 the true FDP
-at a nominal 1% is **~3.5%**, the same rate as Comet's. Details:
+1.00%). Counting a PSM as entrapment only when all its proteins are entrapment sequences, andes's
+nominal 1% is 0.95–1.03% true FDP on Astral, 0.97–1.08% on phospho and 2.6% on UPS1 (2026-10-13;
+earlier figures counted shared peptides as entrapment and overstated UPS1 at ~3.5%). TMT has no
+entrapment component. Details:
 [`docs/benchmarks/`](docs/benchmarks/README.md).</sub>
 
 **Time, CPU and memory** (same VM, 8 threads, `/usr/bin/time`; andes Astral and phospho 2026-10-07
@@ -258,8 +260,11 @@ With `--chimeric` (mzML or Thermo `.raw`), pass 1 is the normal search, keeping 
 candidates per scan (`--top-n`, default 10); pass 2 takes the best one as the primary peptide,
 finds co-isolated precursors in the MS1 isolation window and searches the residual spectrum for
 a second peptide. Keeping the alternatives (rather than only the best candidate) took Astral from
-60,435 to 66,405 PSMs and 26,717 to 29,400 peptides at an equal entrapment true FDP of 1%; on
-phospho it cost about 1% of peptides (15,084 → 14,904).
+60,435 to 66,405 PSMs and 26,717 to 29,400 peptides at an equal entrapment true FDP of 1%. On
+phospho the alternatives first cost about 1% of peptides (15,084 → 14,904): most of them were the
+same phosphopeptide with the phosphate on another site. The PIN now keeps one row per peptide and
+modification multiset per precursor (see [DOCS.md](DOCS.md) §3a), and phospho with `--chimeric`
+reaches 39,470–39,592 PSMs and 15,107–15,156 peptides, above top-1 (39,404–39,489 / 15,046–15,084).
 
 On UPS1 (with entrapment) PSMs at q ≤ 0.01 rose from 15,838 to 17,112 (+8.0%) with entrapment
 hits flat (166 → 167). On high-res data `--chimeric` runs on the default out-of-core path with

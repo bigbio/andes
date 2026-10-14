@@ -57,7 +57,7 @@ for ds in "${SETS[@]}"; do
     > "$OUT/$ds.perc.log" 2>&1
   read -r n ent < <(awk -F'\t' '
     NR==1{for(i=1;i<=NF;i++) if($i=="q-value") q=i; p=NF; next}
-    $q<=0.01{c++; for(i=p;i<=NF;i++) if($i ~ /ENTRAP_/){e++; break}}
+    $q<=0.01{c++; all=1; for(i=p;i<=NF;i++) if($i !~ /ENTRAP_/){all=0; break}; e+=all}
     END{print c+0, e+0}' "$OUT/$ds.t.psms")
   printf '%-8s %9ss %12s %14s\n' "$ds" "$((e-s))" "$n" "$ent"
 done

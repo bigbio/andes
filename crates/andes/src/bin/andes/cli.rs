@@ -327,10 +327,11 @@ pub(crate) struct SearchArgs {
     pub(crate) ms_level: u8,
 
     /// Enable the two-pass chimeric cascade for co-isolated (co-fragmented)
-    /// peptides. Pass 1 is the normal top-1 search; Pass 2 detects co-isolated
-    /// precursors in each scan's MS1 isolation window and runs a targeted search
-    /// for the second peptide on the residual spectrum, emitting it as an extra
-    /// PSM. Requires mzML (MS1 scans); has no effect on MGF input.
+    /// peptides. Pass 1 is the normal search and keeps the same `--top-n`
+    /// candidates per scan; Pass 2 takes the best one as the primary peptide,
+    /// detects co-isolated precursors in each scan's MS1 isolation window and
+    /// runs a targeted search for the second peptide on the residual spectrum,
+    /// emitting it as an extra PSM. Requires mzML (MS1 scans); has no effect on MGF input.
     #[arg(long, default_value = "false")]
     pub(crate) chimeric: bool,
 

@@ -72,7 +72,7 @@
 use std::io::{self, BufWriter, Write};
 
 use crate::percolator_enz::{count_internal_enzymatic, is_enzymatic_boundary};
-use crate::row_context::{iter_ranked_by_rank_score, RowContext};
+use crate::row_context::{emitted_rows, RowContext};
 use model::mass::{ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
 use rayon::prelude::*;
@@ -95,8 +95,8 @@ use search::search_params::SearchParams;
 ///
 /// `spec_id` is `spec.title` (or `"scan={scan}"` when the title is empty — see
 /// [`crate::row_context::RowContext`]); `rank` is the 1-based rank from
-/// [`crate::row_context::iter_ranked_by_rank_score`]; `row_idx` is the per-scan
-/// emission index; `multi_row` is true when the scan emits more than one row
+/// [`crate::row_context::emitted_rows`] (assigned after positional isomers are
+/// collapsed); `row_idx` is the per-scan emission index; `multi_row` is true when the scan emits more than one row
 /// (under `--chimeric` or when ties at queue capacity are retained), in which
 /// case `_{row_idx}` disambiguates SpecIds that would otherwise collide on equal
 /// `rank`. Single-row scans keep the historical `specID_scan_rank` format.
@@ -606,7 +606,7 @@ fn write_spectrum_rows<W: Write>(
     // Order by rank_score (RawScore) descending — the sole ranking signal.
     let psms = queue.clone().into_rank_sorted_vec();
 
-    let ranked: Vec<(u32, &PsmMatch)> = iter_ranked_by_rank_score(&psms).collect();
+    let ranked = emitted_rows(spec, &psms, candidates);
     // When a scan emits more than one row, `rank` alone can collide (ranks tie
     // on equal `rank_score`, and `TopNQueue` retains ties at capacity), so the
     // SpecId must include the per-row index to stay unique. Single-row scans
@@ -618,7 +618,7 @@ fn write_spectrum_rows<W: Write>(
         write_psm_row(
             writer,
             spec,
-            psm,
+            &psm,
             cand,
             &ctx,
             rank,
@@ -994,6 +994,68 @@ mod tests {
         }
     }
 
+    /// A target Candidate with residues `seq` and variable mods `(position,
+    /// mass_delta)`.
+    fn make_candidate_seq(seq: &[u8], mods: &[(usize, f64)], protein_index: usize) -> Candidate {
+        use model::modification::{ModLocation, Modification, ResidueSpec};
+        let residues = seq
+            .iter()
+            .enumerate()
+            .map(|(i, &r)| {
+                let mut aa = AminoAcid::standard(r).unwrap();
+                if let Some(&(_, delta)) = mods.iter().find(|&&(p, _)| p == i) {
+                    let m: &'static Modification = Box::leak(Box::new(Modification {
+                        name: format!("mod{delta}"),
+                        mass_delta: delta,
+                        residue: ResidueSpec::Specific(r),
+                        location: ModLocation::Anywhere,
+                        fixed: false,
+                        accession: None,
+                        neutral_losses: Vec::new(),
+                        loss_class: 0,
+                        annotated_site_mass: None,
+                    }));
+                    aa.mod_ = Some(m);
+                }
+                aa
+            })
+            .collect();
+        Candidate {
+            peptide: Peptide::new(residues, b'K', b'S'),
+            protein_index,
+            start_offset_in_protein: 0,
+            is_decoy: false,
+            is_protein_n_term: false,
+            is_protein_c_term: false,
+        }
+    }
+
+    /// Write one spectrum's queue and return the emitted rows' (SpecId, Peptide).
+    fn emitted(psms: Vec<PsmMatch>, cands: &[Candidate]) -> Vec<(String, String)> {
+        let params = make_params(2..=3);
+        let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
+        let mut queue = TopNQueue::new(10);
+        for p in psms {
+            queue.push(p);
+        }
+        let mut buf = Vec::<u8>::new();
+        write_pin_to(
+            &mut buf,
+            &spectra,
+            &[queue],
+            cands,
+            &params,
+            &make_empty_search_index(),
+        )
+        .unwrap();
+        let header = parse_header(&buf);
+        let pep_col = header.iter().position(|h| h == "Peptide").unwrap();
+        parse_rows(&buf)
+            .into_iter()
+            .map(|r| (r[0].clone(), r[pep_col].clone()))
+            .collect()
+    }
+
     fn make_psm(
         spectrum_idx: usize,
         score: f32,
@@ -1288,7 +1350,7 @@ mod tests {
         queue.push(make_psm(0, 9.0, 10.0, 1, 2));
         let queues = vec![queue];
         let idx = make_empty_search_index();
-        let cands = vec![make_candidate(0, false), make_candidate(1, false)];
+        let cands = vec![make_candidate(0, false), make_candidate_seq(b"G", &[], 1)];
 
         let mut buf = Vec::<u8>::new();
         write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
@@ -1318,7 +1380,7 @@ mod tests {
         queue.push(make_psm(0, 10.0, 10.0, 1, 2));
         let queues = vec![queue];
         let idx = make_empty_search_index();
-        let cands = vec![make_candidate(0, false), make_candidate(1, false)];
+        let cands = vec![make_candidate(0, false), make_candidate_seq(b"G", &[], 1)];
 
         let mut buf = Vec::<u8>::new();
         write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
@@ -1330,6 +1392,205 @@ mod tests {
             "non-chimeric tied SpecIds must be unique, got {:?} and {:?}",
             rows[0][0], rows[1][0]
         );
+    }
+
+    // ── Positional-isomer collapse ────────────────────────────────────────────
+
+    const PHOSPHO: f64 = 79.96633;
+    const OX: f64 = 15.99491;
+
+    #[test]
+    fn positional_isomers_keep_only_the_best_ranked_site() {
+        // Same residues, same phospho, three different sites: only the best stays.
+        let cands = vec![
+            make_candidate_seq(b"SATSK", &[(0, PHOSPHO)], 0),
+            make_candidate_seq(b"SATSK", &[(2, PHOSPHO)], 0),
+            make_candidate_seq(b"SATSK", &[(3, PHOSPHO)], 0),
+        ];
+        let rows = emitted(
+            vec![
+                make_psm(0, 9.0, 9.0, 1, 2),
+                make_psm(0, 10.0, 10.0, 2, 2),
+                make_psm(0, 8.0, 8.0, 0, 2),
+            ],
+            &cands,
+        );
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].1, "K.SATS+79.96633K.S");
+        // A single surviving row takes the single-row SpecId form.
+        assert_eq!(rows[0].0, "Scan 1_1_1");
+    }
+
+    #[test]
+    fn non_isomers_are_kept_and_ranks_stay_contiguous() {
+        let cands = vec![
+            make_candidate_seq(b"SATSK", &[(0, PHOSPHO)], 0),
+            make_candidate_seq(b"SATSK", &[(3, PHOSPHO)], 0), // isomer of 0
+            make_candidate_seq(b"SATSK", &[], 0),             // no mod: different multiset
+            make_candidate_seq(b"SATTK", &[(0, PHOSPHO)], 0), // different residues
+            make_candidate_seq(b"MSATK", &[(0, OX), (1, PHOSPHO)], 0),
+            make_candidate_seq(b"MSATK", &[(0, OX), (3, PHOSPHO)], 0), // isomer of 4
+            make_candidate_seq(b"MSATK", &[(1, PHOSPHO)], 0),          // different multiset than 4
+        ];
+        let rows = emitted(
+            vec![
+                make_psm(0, 10.0, 10.0, 0, 2),
+                make_psm(0, 9.0, 9.0, 1, 2),
+                make_psm(0, 8.0, 8.0, 2, 2),
+                make_psm(0, 7.0, 7.0, 3, 2),
+                make_psm(0, 6.0, 6.0, 4, 2),
+                make_psm(0, 5.0, 5.0, 5, 2),
+                make_psm(0, 4.0, 4.0, 6, 2),
+            ],
+            &cands,
+        );
+        let peps: Vec<&str> = rows.iter().map(|r| r.1.as_str()).collect();
+        assert_eq!(
+            peps,
+            [
+                "K.S+79.96633ATSK.S",
+                "K.SATSK.S",
+                "K.S+79.96633ATTK.S",
+                "K.M+15.99491S+79.96633ATK.S",
+                "K.MS+79.96633ATK.S",
+            ]
+        );
+        let ids: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "Scan 1_1_1_0",
+                "Scan 1_1_2_1",
+                "Scan 1_1_3_2",
+                "Scan 1_1_4_3",
+                "Scan 1_1_5_4"
+            ]
+        );
+    }
+
+    #[test]
+    fn isomers_at_different_charge_or_precursor_are_kept() {
+        let cands = vec![
+            make_candidate_seq(b"SATSK", &[(0, PHOSPHO)], 0),
+            make_candidate_seq(b"SATSK", &[(3, PHOSPHO)], 0),
+        ];
+        // Different precursor charge: separate precursor hypotheses.
+        let rows = emitted(
+            vec![make_psm(0, 10.0, 10.0, 0, 2), make_psm(0, 9.0, 9.0, 1, 3)],
+            &cands,
+        );
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        // A chimeric secondary matched at its own co-isolated precursor.
+        let mut secondary = make_psm(0, 9.0, 9.0, 1, 2);
+        secondary.precursor_mz_override = Some(501.0);
+        let rows = emitted(vec![make_psm(0, 10.0, 10.0, 0, 2), secondary], &cands);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        // The same secondary precursor twice: the isomer collapses within it.
+        let mut a = make_psm(0, 9.0, 9.0, 0, 2);
+        a.precursor_mz_override = Some(501.0);
+        let mut b = make_psm(0, 8.0, 8.0, 1, 2);
+        b.precursor_mz_override = Some(501.0);
+        let rows = emitted(vec![make_psm(0, 10.0, 10.0, 0, 2), a, b], &cands);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+    }
+
+    #[test]
+    fn terminal_mod_isomers_collapse() {
+        // An N-terminal acetyl (carried on the first residue) and the same delta
+        // on an internal K are one multiset on the same residues.
+        const ACETYL: f64 = 42.01057;
+        let cands = vec![
+            make_candidate_seq(b"AKGK", &[(0, ACETYL)], 0),
+            make_candidate_seq(b"AKGK", &[(1, ACETYL)], 0),
+        ];
+        let rows = emitted(
+            vec![make_psm(0, 9.0, 9.0, 1, 2), make_psm(0, 8.0, 8.0, 0, 2)],
+            &cands,
+        );
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].1, "K.AK+42.01057GK.S");
+    }
+
+    #[test]
+    fn tied_isomers_keep_the_first_in_emission_order() {
+        let cands = vec![
+            make_candidate_seq(b"SATSK", &[(0, PHOSPHO)], 0),
+            make_candidate_seq(b"SATSK", &[(3, PHOSPHO)], 0),
+            make_candidate_seq(b"GGGGK", &[], 0),
+        ];
+        let psms = vec![
+            make_psm(0, 10.0, 10.0, 0, 2),
+            make_psm(0, 10.0, 10.0, 1, 2),
+            make_psm(0, 10.0, 10.0, 2, 2),
+        ];
+        // The uncollapsed emission order of the tie decides which site survives.
+        let mut queue = TopNQueue::new(10);
+        for p in psms.clone() {
+            queue.push(p);
+        }
+        let order: Vec<u32> = queue
+            .into_rank_sorted_vec()
+            .iter()
+            .map(|p| p.primary_candidate_idx())
+            .collect();
+        let first_isomer = *order.iter().find(|&&c| c != 2).unwrap();
+        let rows = emitted(psms, &cands);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        let kept_isomer = rows.iter().find(|r| r.1.starts_with("K.S")).unwrap();
+        assert_eq!(
+            kept_isomer.1,
+            cands[first_isomer as usize].peptide.to_string()
+        );
+        // Both survivors share rank 1 and stay distinguishable by row index.
+        let ids: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+        assert_eq!(ids, ["Scan 1_1_1_0", "Scan 1_1_1_1"]);
+    }
+
+    #[test]
+    fn target_and_decoy_isomers_are_kept_apart() {
+        // A decoy repeating the target's residues and modification multiset keeps
+        // its own row and label.
+        let mut decoy = make_candidate_seq(b"SATSK", &[(3, PHOSPHO)], 1);
+        decoy.is_decoy = true;
+        let cands = vec![make_candidate_seq(b"SATSK", &[(0, PHOSPHO)], 0), decoy];
+        let rows = emitted(
+            vec![make_psm(0, 10.0, 10.0, 0, 2), make_psm(0, 9.0, 9.0, 1, 2)],
+            &cands,
+        );
+        assert_eq!(rows.len(), 2, "{rows:?}");
+    }
+
+    #[test]
+    fn collapsed_isomers_add_their_proteins_to_the_kept_row() {
+        // Candidates 0 and 1 share protein 0; candidate 2 is the same peptidoform
+        // as 1 in protein 1, scored apart (different flanking residues).
+        let cands = vec![
+            make_candidate_seq(b"SATSK", &[(0, PHOSPHO)], 0),
+            make_candidate_seq(b"SATSK", &[(3, PHOSPHO)], 0),
+            make_candidate_seq(b"SATSK", &[(3, PHOSPHO)], 1),
+        ];
+        let params = make_params(2..=3);
+        let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
+        let mut queue = TopNQueue::new(10);
+        queue.push(make_psm(0, 10.0, 10.0, 0, 2));
+        queue.push(make_psm(0, 9.0, 9.0, 1, 2));
+        queue.push(make_psm(0, 8.0, 8.0, 2, 2));
+        let mut buf = Vec::<u8>::new();
+        write_pin_to(
+            &mut buf,
+            &spectra,
+            &[queue],
+            &cands,
+            &params,
+            &make_empty_search_index(),
+        )
+        .unwrap();
+        let header = parse_header(&buf);
+        let pep_col = header.iter().position(|h| h == "Peptide").unwrap();
+        let rows = parse_rows(&buf);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0][pep_col], "K.S+79.96633ATSK.S");
+        assert_eq!(rows[0][pep_col + 1..], ["PROT_0", "PROT_1"]);
     }
 
     // ── Test 4: empty queue → only header ────────────────────────────────────
@@ -1478,7 +1739,7 @@ mod tests {
         let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        let cands = vec![make_candidate(0, false), make_candidate(1, false)];
+        let cands = vec![make_candidate(0, false), make_candidate_seq(b"G", &[], 1)];
         write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
 
         let cols = parse_header(&buf);

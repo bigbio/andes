@@ -407,23 +407,6 @@ struct Hit<'a> {
     psm_index: i64,
 }
 
-/// 1-based ranks over a rank-sorted PSM list; ties share a rank (mirrors the
-/// PIN writer, so SpecIds match the Percolator join key).
-fn ranks_of(psms: &[PsmMatch]) -> Vec<u32> {
-    let mut out = Vec::with_capacity(psms.len());
-    let mut rank = 0u32;
-    let mut prev: Option<f32> = None;
-    for p in psms {
-        let ties = prev.is_some_and(|q| p.rank_score == q || (p.rank_score.is_nan() && q.is_nan()));
-        if !ties {
-            rank += 1;
-            prev = Some(p.rank_score);
-        }
-        out.push(rank);
-    }
-    out
-}
-
 /// Select the quantification targets: rank-1 target PSMs, at `q <= quant_fdr`
 /// (and `pep <= --pep`) when a rescoring result is available. The running
 /// `psm_index` reproduces the row order of `psms.parquet`.
@@ -464,18 +447,21 @@ fn select_rank1<'a>(
             continue;
         }
         let spec = &spectra[spec_idx];
-        let psms = queue.clone().into_rank_sorted_vec();
-        let ranks = ranks_of(&psms);
-        let multi_row = psms.len() > 1;
+        let sorted = queue.clone().into_rank_sorted_vec();
+        // The PIN's rows (positional isomers collapsed), so `spec_id` and
+        // `psm_index` match the PIN and `psms.parquet`.
+        let rows = output::emitted_rows(spec, &sorted, candidates);
+        let multi_row = rows.len() > 1;
         let scan = spec.scan.unwrap_or(0);
         let spec_id_base = if spec.title.is_empty() {
             format!("scan={scan}")
         } else {
             spec.title.clone()
         };
-        for (hit, psm) in psms.into_iter().enumerate() {
+        for (hit, (rank, psm)) in rows.into_iter().enumerate() {
+            let psm = psm.into_owned();
             let cand = &candidates[psm.primary_candidate_idx() as usize];
-            let spec_id = output::format_spec_id(&spec_id_base, scan, ranks[hit], hit, multi_row);
+            let spec_id = output::format_spec_id(&spec_id_base, scan, rank, hit, multi_row);
             let rescored = rescore.map(|m| m.get(&spec_id));
             // A rescored bundle leaves out the target rows target-decoy
             // competition removed (no target result), so they take no row.
@@ -484,7 +470,7 @@ fn select_rank1<'a>(
             }
             let this_index = psm_index;
             psm_index += 1;
-            if ranks[hit] != 1 {
+            if rank != 1 {
                 continue;
             }
             if cand.is_decoy && !include_decoys {

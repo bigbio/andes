@@ -141,7 +141,7 @@ impl ThermoRawReader {
     /// has no usable precursor m/z — matching the mzML reader, which skips
     /// precursor-less MS2 rather than forwarding a `precursor_mz = 0.0` spectrum
     /// that would search against a nonsense mass window.
-    fn convert(raw: &RawSpectrum) -> Option<Spectrum> {
+    fn convert(raw: &RawSpectrum, handle: &RawFileReader) -> Option<Spectrum> {
         let scan_number = raw.index() as i32 + 1;
 
         // A precursor record with a positive m/z is required to search an MS2.
@@ -162,7 +162,12 @@ impl ThermoRawReader {
         // from it, matching mzML's `isolation window target m/z` and
         // `lower/upper offset`. Skip a degenerate/absent window.
         let w = p.isolation_window();
-        let (lo, tg, up) = (w.lower(), w.target(), w.upper());
+        let (lo, tg) = (w.lower(), w.target());
+        let (lo, up) = full_width_isolation_bounds(
+            lo,
+            w.upper(),
+            isolation_width_trailer(handle, raw.index(), raw.ms_level()),
+        );
         let (isolation_lower_offset, isolation_upper_offset, isolation_target_mz) =
             if tg > 0.0 && up > lo {
                 (Some((tg - lo).abs()), Some((up - tg).abs()), Some(tg))
@@ -241,7 +246,7 @@ impl ThermoRawReader {
                 2 => {
                     // Skip MS2 with no usable precursor (mirrors mzML); such a
                     // scan must not consume a chunk slot or an Ms1Link entry.
-                    let spec = match Self::convert(&raw) {
+                    let spec = match Self::convert(&raw, &self.handle) {
                         Some(spec) => spec,
                         None => continue,
                     };
@@ -295,6 +300,39 @@ fn master_scan_number(handle: &RawFileReader, index: usize) -> Option<usize> {
         .iter()
         .find_map(|t| is_master_scan_label(t.label).then(|| t.value.trim().to_string()))?;
     value.parse::<usize>().ok().filter(|&scan| scan > 0)
+}
+
+/// The `MSn Isolation Width` trailer of the scan at `index`: the FULL width of
+/// the isolation window in m/z, when the file records it.
+fn isolation_width_trailer(handle: &RawFileReader, index: usize, ms_level: u8) -> Option<f64> {
+    if ms_level < 2 {
+        return None;
+    }
+    let label = format!("MS{ms_level} Isolation Width");
+    let trailers = handle.get_raw_trailers_for(index)?;
+    let value = trailers.iter().find_map(|t| {
+        (t.label.trim().trim_end_matches(':').trim() == label).then(|| t.value.trim().to_string())
+    })?;
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|w| w.is_finite() && *w > 0.0)
+}
+
+/// Isolation bounds with the window `full_width` wide. RawFileReader builds the
+/// window as `center ± width` from the `MSn Isolation Width` trailer, which
+/// holds the full width, so such a window is twice the isolated range. When the
+/// bounds match that construction they are rebuilt as `center ± width / 2`;
+/// otherwise (no trailer, or the reader fell back to the filter's width, which
+/// it halves) they are returned unchanged.
+fn full_width_isolation_bounds(lower: f64, upper: f64, full_width: Option<f64>) -> (f64, f64) {
+    match full_width {
+        Some(w) if ((upper - lower) - 2.0 * w).abs() <= 1e-6 => {
+            let center = 0.5 * (lower + upper);
+            (center - 0.5 * w, center + 0.5 * w)
+        }
+        _ => (lower, upper),
+    }
 }
 
 /// Acquired m/z range of a scan, when the acquisition block records one.
@@ -592,7 +630,7 @@ impl Iterator for ThermoRawReader {
                     continue;
                 }
             }
-            match Self::convert(&raw) {
+            match Self::convert(&raw, &self.handle) {
                 // Skip MS2 scans with no usable precursor (mirrors mzML).
                 Some(spec) => {
                     if self.capture_scan_context {
@@ -697,6 +735,31 @@ mod tests {
         ] {
             assert!(!filter_has_supplemental_collision(f), "{f}");
         }
+    }
+
+    #[test]
+    fn trailer_isolation_width_is_the_full_width() {
+        // Trailer 1.6 used as the half-width: 500 ± 1.6 → 500 ± 0.8.
+        let (lo, up) = full_width_isolation_bounds(498.4, 501.6, Some(1.6));
+        assert!(
+            (lo - 499.2).abs() < 1e-9 && (up - 500.8).abs() < 1e-9,
+            "{lo} {up}"
+        );
+        // An offset window keeps its center.
+        let (lo, up) = full_width_isolation_bounds(498.6, 501.8, Some(1.6));
+        assert!(
+            (lo - 499.4).abs() < 1e-9 && (up - 501.0).abs() < 1e-9,
+            "{lo} {up}"
+        );
+        // Filter fallback (already halved) and no trailer: unchanged.
+        assert_eq!(
+            full_width_isolation_bounds(499.2, 500.8, Some(1.6)),
+            (499.2, 500.8)
+        );
+        assert_eq!(
+            full_width_isolation_bounds(498.4, 501.6, None),
+            (498.4, 501.6)
+        );
     }
 
     #[test]

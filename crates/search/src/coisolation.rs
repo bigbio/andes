@@ -393,10 +393,11 @@ pub(crate) fn search_secondary(
     let listwise_score_gap = scoring_crate::scoring::listwise_score_gap(&retained_scores);
     let candidate_rank_entropy = scoring_crate::scoring::candidate_rank_entropy(&retained_scores);
     let tailor_denom = crate::psm::tailor_denominator(&tailor_hist, tailor_total) as f32;
-    let delta_raw_score = if second_raw > i32::MIN {
-        (best_raw - second_raw) as f32
-    } else {
-        0.0
+    let delta_trackers = crate::match_engine::DeltaTrackers {
+        best_raw,
+        best_pep_key,
+        have_best,
+        second_raw,
     };
 
     // Features on the RESIDUAL (the spectrum the secondary was scored against),
@@ -411,7 +412,8 @@ pub(crate) fn search_secondary(
             Some(psm.edge_score),
             full,
         );
-        f.delta_raw_score = delta_raw_score;
+        f.delta_raw_score = delta_trackers
+            .delta_for(psm.score, crate::match_engine::peptidoform_key(&cand.peptide));
         f.listwise_score_gap = listwise_score_gap;
         f.candidate_rank_entropy = candidate_rank_entropy;
         f.tailor_score = psm.score / tailor_denom;

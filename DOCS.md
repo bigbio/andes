@@ -203,7 +203,7 @@ See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model)
 | `--mbr` | flag | off | Match-between-runs label-free quantification across two or more inputs (§10). Needs `--lfq` and `--rescore` (or `--rescore-native`); not with `--tmt`. Writes `<stem>.mbr.tsv` and `<stem>.mbr_validation.tsv`; with `--output-parquet`, `quantms.feature.parquet` holds these rows (without the below-threshold transfers) instead of the per-run features. Uses `--quant-dir`, or a temporary directory removed at exit. With `--rescore` (Percolator), same result as `andes quant library`, `extract` and `finalize` on the same Percolator results. |
 | `--mbr-library-fdr` | 0..1 | `0.01` | Internal library entry gate (precursor-level), not a reported identification FDR: best-PSM-per-precursor target/decoy q-value over the rescored PSM scores of all runs. |
 | `--mbr-fdr` | 0..1 | `0.01` | Transfer quality q-value: transfers at or below it are `transfer_ms1`. An internal quant-quality q-value, not an identification FDR. |
-| `--quant-feature-fdr` | 0..1 or `off` | `0.05` | Identified-row quality q-value (`quant_q`): an identified row whose MS1 feature has a `quant_q` above it (or none) is `identified_below_threshold` and left out of `quantms.feature.parquet` (§10); `off` reports every identified row. An internal quant-quality q-value, not an identification FDR. |
+| `--quant-feature-fdr` | 0..1 or `off` | `off` | Identified-row quality q-value (`quant_q`): with a value, an identified row whose MS1 feature has a `quant_q` above it (or none) is `identified_below_threshold` and left out of `quantms.feature.parquet` (§10); `off` reports every identified row and keeps `quant_q` as an annotation. An internal quant-quality q-value, not an identification FDR. |
 
 With `--output-parquet`, both modules add `quantms.feature.parquet` (the QPX feature view) to the bundle.
 
@@ -457,7 +457,7 @@ one row per `identified` or `transfer_ms1` row of `<stem>.mbr.tsv` instead of th
 `quantity_se`. `below_threshold` transfers and `identified_below_threshold` rows are left out
 (they stay in `<stem>.mbr.tsv` with their quantity and standard error), so every LFQ intensity
 in the parquet passed the transfer q-value or, for an identified row, the identified quality
-q-value (unless `--quant-feature-fdr off`); precursors
+q-value (when `--quant-feature-fdr` is set; by default every identified row is kept); precursors
 that fail the library entry gate are absent. Modifications come from the peptidoform's tags (the
 accession is the name), proteins carry no positions, and `psm_ids` is empty.
 
@@ -832,7 +832,7 @@ andes quant library  --quant-dir q/ [--quant-fdr 0.01] [--pep 0.05] \
 andes quant extract  --quant-dir q/ --run a [--lfq-tol 10ppm]
 andes quant extract  --quant-dir q/ --run b [--lfq-tol 10ppm]
 # once
-andes quant finalize --quant-dir q/ -o experiment [--mbr-fdr 0.01] [--quant-feature-fdr 0.05] \
+andes quant finalize --quant-dir q/ -o experiment [--mbr-fdr 0.01] [--quant-feature-fdr off] \
       [--output-parquet dir]
 ```
 
@@ -901,8 +901,10 @@ scores from separately trained Percolator models are not on one scale.
   mass error, scan count, isotopes used, amplitude signal-to-noise): no donor count, library
   q-value or measurement from another run. Separate models keep the transfer q-values unchanged
   (an identified pair's prior is centred on its own PSM, so its targets look nothing like
-  transfers'). Identified rows above `--quant-feature-fdr` (default 0.05) are
-  `identified_below_threshold`; with `--quant-feature-fdr off`, `quant_q` is an annotation only. A
+  transfers'). By default (`--quant-feature-fdr off`) `quant_q` is an annotation only: at
+  matched coverage, flagging at 0.05 improves accuracy and CV only slightly, and it removes
+  close to a tenth of the least abundant precursors. With a threshold, identified rows above it are
+  `identified_below_threshold`. A
   transfer's `quant_q` is its `transfer_q`. Pseudo-transfers give an acceptance rate and the wrong-peak rate, which decoys cannot
   see. The acceptance rate is optimistic as a transfer sensitivity: a pseudo-transfer's
   predicted apex leaves the run's own observation out of the consensus RT, but the run's

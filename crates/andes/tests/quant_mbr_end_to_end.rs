@@ -240,6 +240,8 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
         s(&qpx),
         "--mbr-fdr",
         FIXTURE_MBR_FDR,
+        "--quant-feature-fdr",
+        "0.05",
     ]);
     assert!(qpx.join("quantms.feature.parquet").is_file());
 
@@ -262,6 +264,8 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
             s(&perc),
             "--mbr-fdr",
             FIXTURE_MBR_FDR,
+            "--quant-feature-fdr",
+            "0.05",
         ]
         .map(String::from),
     );
@@ -562,6 +566,17 @@ fn separate_searches_join_on_run_and_spec_id() {
             == std::fs::read(aio.join("a.mbr.tsv")).unwrap(),
         "mbr.tsv of the separate searches differs from the all-in-one run"
     );
+    // The default `--quant-feature-fdr off` keeps identified rows whose MS1
+    // feature fails its decoys (peptide 6 has no MS1 signal) as `identified`.
+    let (header, rows) = read_mbr(&sep.join("out.mbr.tsv"));
+    let ev = header.iter().position(|h| h == "evidence_type").unwrap();
+    for key in ["DAFLGSFLYEYSR/2", "DAFLGSFLYEYSR/3"] {
+        let r1 = rows
+            .get(&(key.to_string(), "mbr_run1".to_string()))
+            .unwrap_or_else(|| panic!("{key} in run 1"));
+        assert_eq!(r1[ev], "identified", "{key}: {r1:?}");
+    }
+    assert!(rows.values().all(|r| r[ev] != "identified_below_threshold"));
 }
 
 #[test]

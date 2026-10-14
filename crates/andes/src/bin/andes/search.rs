@@ -343,8 +343,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Detect (activation, instrument) from the input for auto-routing.
     // mzML peeks the file; Thermo `.raw` reads vendor metadata; Bruker `.d`
     // is always CID/TimsTOF (DDA-PASEF). Detection runs for every metadata-
-    // bearing format and always wins over the MGF-only `--fragmentation` /
-    // `--fragment-tol-*` flags (which carry no metadata of their own).
+    // bearing format; an explicit `--fragmentation` still overrides the
+    // detected activation (see the resolution below).
     let auto_route_eligible = is_mzml || is_raw || is_d;
     let detected_activation_instrument: Option<(ActivationMethod, Option<InstrumentType>)> =
         if !auto_route_eligible {
@@ -377,8 +377,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // Metadata-first precedence: a fully detected (activation, instrument)
         // wins outright. When only the activation method is detected (analyzer
         // unknown), or nothing is detected (MGF / metadata-less mzML/.raw), the
-        // metadata-less resolver folds in the MGF-only `--fragmentation` and
-        // `--fragment-tol-*` flags. Default when no metadata: CID / low-res
+        // metadata-less resolver folds in `--fragmentation` (which wins over the
+        // detected activation) and the `--fragment-tol-*` flags. Default when no metadata: CID / low-res
         // (cid_lowres_tryp).
         let (activation, instrument_opt): (ActivationMethod, Option<InstrumentType>) =
             match detected_activation_instrument {

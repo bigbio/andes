@@ -26,9 +26,10 @@ use search::precursor_mono::{
 /// MGF and MS1-less mzML stay byte-identical to `off`, and never over an
 /// explicit `--isotope-error`.
 ///
-/// The window is applied per spectrum by the glyco driver: only spectra whose
-/// envelope was fitted (a `Some` in the correction table) take it, the rest keep
-/// the configured window (`search::glyco_search::isotope_window_for`).
+/// The window is applied per spectrum by the glyco driver: only spectra with a
+/// verified monoisotope (`MonoCorrection::verified_within` the narrowed window)
+/// take it, the rest keep the configured window
+/// (`search::glyco_search::isotope_window_for`).
 ///
 /// Returns the window to search and whether it was narrowed.
 pub(crate) fn coupled_isotope_window(

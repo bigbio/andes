@@ -1740,21 +1740,31 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         params.isotope_error_range.clone(),
     );
     let glyco_isotope_override = if narrowed {
+        // Only a spectrum whose envelope fitted, with its best fit inside the
+        // narrowed window, has a verified monoisotope; the rest keep the wide
+        // window they would have had without the flag.
+        let mask: Vec<bool> = mono_table
+            .iter()
+            .map(|c| {
+                c.as_ref()
+                    .is_some_and(|c| c.verified_within(mono_params.min_fit, *window.end()))
+            })
+            .collect();
         eprintln!(
             "precursor-mono: isotope-error window {}..={} -> {}..={} for the {} of {} MS2 \
-             with a fitted envelope (the others keep {}..={}; a verified monoisotope needs \
-             no +2 step, which only admits the Hex+Fuc/NeuGc composition degeneracy — pass \
-             --isotope-error to override)",
+             with a verified monoisotope (the others keep {}..={}; a verified monoisotope \
+             needs no +2 step, which only admits the Hex+Fuc/NeuGc composition degeneracy — \
+             pass --isotope-error to override)",
             params.isotope_error_range.start(),
             params.isotope_error_range.end(),
             window.start(),
             window.end(),
-            mono_stats.fitted,
+            mask.iter().filter(|&&v| v).count(),
             mono_stats.seen,
             params.isotope_error_range.start(),
             params.isotope_error_range.end()
         );
-        Some(window)
+        Some((window, mask))
     } else {
         None
     };

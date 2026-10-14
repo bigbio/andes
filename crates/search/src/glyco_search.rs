@@ -79,8 +79,8 @@ pub struct GlycoConfig {
     /// `isotope_error_override`; the others keep the params' window. `None`
     /// applies the override to every spectrum. The driver sets one flag per
     /// spectrum from the `--precursor-mono` table: only a spectrum whose MS1
-    /// envelope was actually fitted has a verified monoisotope, and only those
-    /// can afford to drop the `+2` step.
+    /// envelope fitted, with its best fit inside the narrowed window, has a
+    /// verified monoisotope, and only those can afford to drop the `+2` step.
     pub isotope_error_override_mask: Option<Vec<bool>>,
     /// Cap on the number of peaks the GENERATION stage sees (the most intense N),
     /// as a guard against pathological scans. 0 = no cap. Scoring always reads the

@@ -304,20 +304,15 @@ fn glyco_aware_peptide(
     model::peptide::Peptide::new(residues, pep.pre, pep.post)
 }
 
-/// First N-X-S/T sequon position in `pep`, defaulting to 0 when none is found
-/// (matches the existing model-free `cz` closure's site convention in
-/// [`score_spectrum_glyco`] — factored out so the ETD rank-glycan path uses the
-/// identical glycosite).
+/// First glycosite of `pep` ([`andes_glyco::sequon::glycosites`]: internal
+/// sequons first, then the boundary sequon completed by `pep.post`), defaulting
+/// to 0 when there is none. Shared by every c/z and rank-glycan scorer so they
+/// place the glycan on the same residue.
 fn glyco_site_for(pep: &model::peptide::Peptide) -> usize {
     let res: Vec<u8> = pep.residues.iter().map(|aa| aa.residue).collect();
-    // Internal sequon; else the boundary-sequon N (…N-X | S/T-…, the N at len-2)
-    // so the glycan is placed on the right residue for boundary glycopeptides
-    // (post was validated S/T at sequon-membership time; here we only need the N).
-    andes_glyco::sequon::first_nxst_site(&res)
-        .or_else(|| {
-            let n = res.len();
-            (n >= 2 && res[n - 2] == b'N' && res[n - 1] != b'P').then_some(n - 2)
-        })
+    andes_glyco::sequon::glycosites(&res, pep.post)
+        .first()
+        .copied()
         .unwrap_or(0)
 }
 

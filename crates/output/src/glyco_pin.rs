@@ -12,8 +12,9 @@
 // The `Peptide` column appends a glycan composition tag for DB hits:
 //   `[HexNAc{n}Hex{m}Fuc{f}NeuAc{a}NeuGc{g}@N{site}]`
 // where `@N{site}` is the 1-based position of the sequon Asn in the backbone
-// when the backbone has exactly one N-X-S/T, and `@N?` when it has zero or
-// several (andes does not localize between sequons by default).
+// when the backbone has exactly one N-X-S/T (internal, or completed by the
+// residue after the peptide), and `@N?` when it has zero or several (andes
+// does not localize between sequons by default).
 
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
@@ -378,7 +379,8 @@ fn write_glyco_psm_row<W: Write>(
     //
     // The tag carries the glycosite as `@N<pos>` (1-based position of the sequon
     // Asn in the backbone) ONLY when the backbone has exactly one N-X-S/T sequon,
-    // in which case the site is a fact about the sequence and needs no evidence.
+    // counting a boundary sequon completed by the residue after the peptide, in
+    // which case the site is a fact about the sequence and needs no evidence.
     // With two or more sequons it emits `@N?`: andes does not localize between
     // them by default (the site used internally for c/z scoring is the first
     // sequon, a positional convention, not a localization), and printing that
@@ -387,7 +389,7 @@ fn write_glyco_psm_row<W: Write>(
     // Target and glycan-decoy rows are tagged identically, so this is symmetric
     // on the FDR axis; and PSM-level q-values do not depend on the Peptide string.
     let glycan_tag = match &key.glycan {
-        Some(g) => glycan_tag_with_site(g, &residues),
+        Some(g) => glycan_tag_with_site(g, &residues, cand.peptide.post),
         None => String::new(),
     };
     write!(writer, "\t{}{}", cand.peptide, glycan_tag)?;
@@ -404,8 +406,12 @@ fn write_glyco_psm_row<W: Write>(
 /// Render the Peptide-column glycan tag, including the glycosite when the
 /// backbone determines it. See the call site for why an ambiguous backbone
 /// emits `@N?` rather than andes's internal first-sequon convention.
-fn glycan_tag_with_site(g: &andes_glyco::glycan_db::GlycanComp, residues: &[u8]) -> String {
-    let site = match andes_glyco::sequon::all_nxst_sites(residues).as_slice() {
+fn glycan_tag_with_site(
+    g: &andes_glyco::glycan_db::GlycanComp,
+    residues: &[u8],
+    post: u8,
+) -> String {
+    let site = match andes_glyco::sequon::glycosites(residues, post).as_slice() {
         [only] => format!("@N{}", only + 1),
         _ => "@N?".to_string(),
     };
@@ -816,15 +822,19 @@ mod tests {
             mass: 0.0,
         };
         // exactly one N-X-S/T: the site is a fact about the sequence.
-        assert!(glycan_tag_with_site(&g, b"AANLTK").ends_with("@N3]"));
+        assert!(glycan_tag_with_site(&g, b"AANLTK", b'A').ends_with("@N3]"));
         // the sequon may sit at the very start; positions are 1-based.
-        assert!(glycan_tag_with_site(&g, b"NLTAAK").ends_with("@N1]"));
+        assert!(glycan_tag_with_site(&g, b"NLTAAK", b'A').ends_with("@N1]"));
         // two sequons: andes does not localize by default, so it must not pick.
-        assert!(glycan_tag_with_site(&g, b"ANLTANCSK").ends_with("@N?]"));
+        assert!(glycan_tag_with_site(&g, b"ANLTANCSK", b'A').ends_with("@N?]"));
         // no sequon at all is also "not a site andes assigned".
-        assert!(glycan_tag_with_site(&g, b"AAAAK").ends_with("@N?]"));
+        assert!(glycan_tag_with_site(&g, b"AAAAK", b'A').ends_with("@N?]"));
+        // a boundary sequon (…N-K | S-…) is the peptide's only glycosite.
+        assert!(glycan_tag_with_site(&g, b"AAANK", b'S').ends_with("@N4]"));
+        // an internal sequon plus a boundary one is two sites, not one.
+        assert!(glycan_tag_with_site(&g, b"ANLTANK", b'T').ends_with("@N?]"));
         // the composition itself is unchanged by the site suffix.
-        assert!(glycan_tag_with_site(&g, b"AANLTK").starts_with("[HexNAc2Hex5Fuc0NeuAc0NeuGc0"));
+        assert!(glycan_tag_with_site(&g, b"AANLTK", b'A').starts_with("[HexNAc2Hex5Fuc0NeuAc0NeuGc0"));
     }
 
     #[test]

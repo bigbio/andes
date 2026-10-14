@@ -2335,6 +2335,16 @@ pub(crate) fn write_filtered_tsv(
     w.flush()
 }
 
+/// The detected-label class of a `--tmt` kit.
+fn isobaric_label_of_plex(plex: quant::Plex) -> input::IsobaricLabel {
+    match plex {
+        quant::Plex::Tmt6 | quant::Plex::Tmt10 | quant::Plex::Tmt11 => input::IsobaricLabel::Tmt,
+        quant::Plex::Tmt16 | quant::Plex::Tmt18 => input::IsobaricLabel::TmtPro,
+        quant::Plex::Itraq4 => input::IsobaricLabel::Itraq,
+        quant::Plex::Itraq8 => input::IsobaricLabel::Itraq8,
+    }
+}
+
 // ── Training pipeline ─────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2421,15 +2431,5 @@ mod retrieval_choice_tests {
         assert!(tight.report.unwrap().contains("high-resolution"));
         let wide = retrieval_choice(Tolerance::Da(0.2), None, FragmentIndexFlag::Auto);
         assert!(wide.report.unwrap().contains("low-resolution"));
-    }
-}
-
-/// The detected-label class of a `--tmt` kit.
-fn isobaric_label_of_plex(plex: quant::Plex) -> input::IsobaricLabel {
-    match plex {
-        quant::Plex::Tmt6 | quant::Plex::Tmt10 | quant::Plex::Tmt11 => input::IsobaricLabel::Tmt,
-        quant::Plex::Tmt16 | quant::Plex::Tmt18 => input::IsobaricLabel::TmtPro,
-        quant::Plex::Itraq4 => input::IsobaricLabel::Itraq,
-        quant::Plex::Itraq8 => input::IsobaricLabel::Itraq8,
     }
 }

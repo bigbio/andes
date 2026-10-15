@@ -6,6 +6,15 @@
 //! column moved, on 2 rows (scans 24129 and 24902, R.GTAGNALMDGASQLMGENR.T, whose
 //! only sequon is N18-R|T): `@N?` -> `@N18`.
 //!
+//! REGENERATED 2026-10-14 when the N-terminal Met-cleaved walk began emitting
+//! only the peptides starting at the post-Met residue (it had enumerated every
+//! other span of an M-initial protein a second time) and side-chain mods began
+//! stacking with terminal mods. Against the previous binary: 120 rows, every
+//! SpecId, peptide and protein unchanged (0 winner flips); each spectrum's
+//! candidate pool changes, so
+//! `CandidateRankEntropy` and `RawScore` moved on 117 rows,
+//! `ListwiseScoreGap` on 83 and `TailorScore` on 15.
+//!
 //! REGENERATED 2026-09-09 when the glycan-first pre-filter's Y-ion generation
 //! became structure-aware (core + antenna-subset losses + core ladder, replacing
 //! the full 2^n power set that over-generated physically-impossible "trim a core
@@ -55,6 +64,13 @@
 //!     --glyco-glycan-gdb test-fixtures/glyco_fixture.gdb \
 //!     --output-pin <tmp>/out.pin
 //!   cp <tmp>/out.glyco.pin test-fixtures/parity/goldens/glyco_highres.pin
+//!
+//! COMBINED 2026-10-14 (review branch: glyco and candidate-generation changes
+//! together). Against each parent golden the only differences are the other
+//! branch's changes: the boundary-sequon `@N18` tag on 2 peptides and the
+//! candidate-pool columns (`RawScore`, `CandidateRankEntropy`,
+//! `ListwiseScoreGap`, `TailorScore`); 120 rows, SpecIds and proteins
+//! unchanged.
 
 use std::path::PathBuf;
 use std::process::Command;

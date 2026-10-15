@@ -66,9 +66,9 @@ fn nonspecific_universal_true() {
 }
 
 #[test]
-fn alphalp_universal_true() {
+fn alphalp_cleaves_after_tasv() {
     for r in b'A'..=b'Z' {
-        assert!(Enzyme::AlphaLP.is_cleavable_after(r));
-        assert!(Enzyme::AlphaLP.is_cleavable_before(r));
+        assert_eq!(Enzyme::AlphaLP.is_cleavable_after(r), b"TASV".contains(&r));
+        assert!(!Enzyme::AlphaLP.is_cleavable_before(r));
     }
 }

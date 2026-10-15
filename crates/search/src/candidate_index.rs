@@ -44,6 +44,11 @@ const INDEX_MAGIC: &[u8; 8] = b"ANDESCI\x00";
 /// On-disk format version. BUMP whenever `IndexRecord`'s layout or the file
 /// structure changes so a stale-format cache is rebuilt rather than misread.
 const INDEX_FORMAT_VERSION: u32 = 1;
+/// Revision of the base-peptide set [`base_peptide_records`] produces from a
+/// given FASTA and parameters, hashed into [`index_cache_path`]. BUMP whenever
+/// the digest emits different spans or folds a different fixed-mod mass into a
+/// span, so a cached index built by another rule is never reused.
+const CANDIDATE_SET_REVISION: u32 = 2;
 /// Header = 8 magic bytes + 4 version bytes (LE); records follow at this offset.
 const INDEX_HEADER_SIZE: usize = INDEX_MAGIC.len() + 4;
 
@@ -249,6 +254,10 @@ pub fn build_base_peptide_index<W: Write>(
 /// subsequent call with the same parameters opens the cached file.
 pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams) -> PathBuf {
     let mut h = DefaultHasher::new();
+
+    // The candidate-set revision: which spans the digest emits and which
+    // base mass each carries, so an index built by an earlier rule is rebuilt.
+    CANDIDATE_SET_REVISION.hash(&mut h);
 
     // Hash ALL protein content (targets AND decoys): accession + sequence bytes.
     // Hashing the decoy sequences directly (not just `decoy_prefix`) captures the

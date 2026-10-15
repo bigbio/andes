@@ -229,8 +229,8 @@ pub(crate) fn parse_enzymes(
     Ok((*primary, extras.to_vec()))
 }
 
-/// Warn when a universal protease (NonSpecific, or AlphaLP which cleaves every
-/// bond) is combined with specific protease(s): the cleavage-site union then
+/// Warn when a universal protease (NonSpecific, which cleaves every bond) is
+/// combined with specific protease(s): the cleavage-site union then
 /// covers EVERY position, so the digest is effectively non-specific — usually
 /// not what a user adding it to a specific list intends.
 pub(crate) fn warn_if_universal_protease_combo(
@@ -238,19 +238,14 @@ pub(crate) fn warn_if_universal_protease_combo(
     extras: &[model::enzyme::Enzyme],
 ) {
     use model::enzyme::Enzyme;
-    let is_universal = |e: &Enzyme| matches!(e, Enzyme::NonSpecific | Enzyme::AlphaLP);
-    let is_specific = |e: &Enzyme| {
-        !matches!(
-            e,
-            Enzyme::NonSpecific | Enzyme::AlphaLP | Enzyme::NoCleavage
-        )
-    };
+    let is_universal = |e: &Enzyme| matches!(e, Enzyme::NonSpecific);
+    let is_specific = |e: &Enzyme| !matches!(e, Enzyme::NonSpecific | Enzyme::NoCleavage);
     let all: Vec<Enzyme> = std::iter::once(primary)
         .chain(extras.iter().copied())
         .collect();
     if all.len() > 1 && all.iter().any(is_universal) && all.iter().any(is_specific) {
         eprintln!(
-            "WARN: --enzyme combines a universal protease (NonSpecific/AlphaLP) with specific \
+            "WARN: --enzyme combines a universal protease (NonSpecific) with specific \
              one(s); their union cleaves at EVERY position, so this is effectively a \
              non-specific digest (much larger search space). Drop the universal protease to \
              keep the specific cleavage rules."

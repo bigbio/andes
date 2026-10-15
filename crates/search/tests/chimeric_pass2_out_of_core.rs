@@ -121,6 +121,7 @@ fn acetyl() -> Modification {
         accession: None,
         neutral_losses: Vec::new(),
         loss_class: 0,
+        annotated_site_mass: None,
     }
 }
 
@@ -134,11 +135,13 @@ fn fixture() -> (SearchIndex, SearchParams) {
                 accession: "P1".into(),
                 description: "".into(),
                 sequence: b"MKWVTFISLLRKDAFLGSFLYEYSRVDLLAGEKGR".to_vec(),
+                annotation: None,
             },
             Protein {
                 accession: "P2".into(),
                 description: "".into(),
                 sequence: b"MPSTRKEGALLDV".to_vec(),
+                annotation: None,
             },
         ],
     };

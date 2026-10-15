@@ -144,6 +144,7 @@ fn rust_pin_rows_have_at_least_header_column_count() {
         accession: None,
         neutral_losses: Vec::new(),
         loss_class: 0,
+        annotated_site_mass: None,
     };
     let ox = Modification {
         name: "Oxidation".into(),
@@ -154,6 +155,7 @@ fn rust_pin_rows_have_at_least_header_column_count() {
         accession: None,
         neutral_losses: Vec::new(),
         loss_class: 0,
+        annotated_site_mass: None,
     };
     let aa = AminoAcidSetBuilder::new_standard()
         .add_fixed_mod(cam)

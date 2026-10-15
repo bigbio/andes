@@ -28,7 +28,9 @@ pub use instrument::InstrumentType;
 pub use mass::{nominal_from, H2O, PROTON};
 pub use modification::{ModLocation, ModParseError, Modification, ResidueSpec};
 pub use peptide::Peptide;
-pub use protein::{Protein, ProteinDb};
+pub use protein::{
+    ChainEnds, ModSite, Protein, ProteinAnnotation, ProteinDb, SiteAnchor, VariantRegion,
+};
 pub use protocol::Protocol;
 pub use scan::{Ms1Scan, ProductScan};
 pub use spectrum::Spectrum;

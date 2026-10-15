@@ -40,6 +40,14 @@ pub struct Modification {
     /// 1.. = a per-mod-class pool (glyco=1, phospho=2, sulfo=3, generic=255).
     /// Loss ions of the same class share one trained distribution.
     pub loss_class: u8,
+    /// `Some(delta)` restricts a variable mod to the positions the protein
+    /// database annotates with a modification of mass `delta` (Mods.txt
+    /// `sites=annotated`; the annotations come from a UniProt XML database, see
+    /// [`crate::protein::ProteinAnnotation`]). `None` (the default) places the
+    /// mod wherever its residue and location allow. For a fixed-anywhere mod
+    /// stacked with a restricted terminal mod, `delta` is the restricted mod's
+    /// own mass, not the stacked sum.
+    pub annotated_site_mass: Option<f64>,
 }
 
 impl Modification {
@@ -57,6 +65,16 @@ impl Modification {
             (a, b) => a == b,
         };
         residue_ok && location_ok
+    }
+
+    /// Whether this mod may sit at a position annotated with `sites`: always
+    /// for an unrestricted mod; for a `sites=annotated` mod only when one of
+    /// `sites` carries a modification of the same mass.
+    pub fn allowed_at(&self, sites: &[crate::protein::ModSite], position: u32) -> bool {
+        match self.annotated_site_mass {
+            None => true,
+            Some(mass) => crate::protein::has_site(sites, position, mass),
+        }
     }
 }
 
@@ -76,7 +94,7 @@ pub enum ModParseError {
     BadLocation { field: String },
     #[error("invalid fixed/variable flag {field:?} (expected `fix|opt`)")]
     BadFixedFlag { field: String },
-    #[error("unknown mod attribute key {key:?} (expected loss|accession|class)")]
+    #[error("unknown mod attribute key {key:?} (expected loss|accession|class|sites)")]
     UnknownModAttr { key: String },
     #[error("malformed mod attribute {field:?} (expected key=value)")]
     BadModAttr { field: String },
@@ -84,6 +102,10 @@ pub enum ModParseError {
     BadNeutralLoss { value: String },
     #[error("unknown loss class {name:?} (expected glyco|phospho|sulfo|generic)")]
     UnknownLossClass { name: String },
+    #[error("invalid sites value {value:?} (expected annotated|any)")]
+    BadSites { value: String },
+    #[error("sites=annotated needs a variable (`opt`) mod; a fixed mod applies everywhere")]
+    AnnotatedSitesOnFixedMod,
     #[error("unknown Unimod accession {token:?}")]
     UnknownUnimodAccession { token: String },
     #[error("ambiguous modification name {token:?} (matches {accessions:?})")]
@@ -144,6 +166,10 @@ impl Modification {
     ///   ions. Loss ions of the same class share one trained distribution. If `loss=` is
     ///   present but `class=` is omitted, the class defaults to `generic` (id 255). If
     ///   neither `loss=` nor `class=` is present, `loss_class` is 0 (no loss ions).
+    /// - `sites=<annotated|any>` — `annotated` restricts a variable mod to the
+    ///   positions a UniProt XML database annotates with a modification of the
+    ///   same mass (see [`Modification::annotated_site_mass`]); `any` (default)
+    ///   applies it to every matching residue.
     ///
     /// **Caveat:** the mod name must not contain a comma. A comma after the name
     /// is parsed as the start of attribute fields; a token there that is not
@@ -251,6 +277,7 @@ impl Modification {
         let mut neutral_losses: Vec<f64> = Vec::new();
         let mut accession: Option<String> = None;
         let mut loss_class: u8 = 0;
+        let mut annotated_sites = false;
         for attr in &parts[5..] {
             let attr = attr.trim();
             if attr.is_empty() {
@@ -295,6 +322,17 @@ impl Modification {
                             name: value.trim().to_string(),
                         })?;
                 }
+                "sites" => {
+                    annotated_sites = match value.trim().to_ascii_lowercase().as_str() {
+                        "annotated" => true,
+                        "any" => false,
+                        _ => {
+                            return Err(ModParseError::BadSites {
+                                value: value.trim().to_string(),
+                            })
+                        }
+                    };
+                }
                 other => {
                     return Err(ModParseError::UnknownModAttr {
                         key: other.to_string(),
@@ -318,6 +356,9 @@ impl Modification {
         if accession.is_none() {
             accession = resolved_accession;
         }
+        if annotated_sites && fixed {
+            return Err(ModParseError::AnnotatedSitesOnFixedMod);
+        }
 
         Ok(Modification {
             name,
@@ -328,6 +369,7 @@ impl Modification {
             accession,
             neutral_losses,
             loss_class,
+            annotated_site_mass: annotated_sites.then_some(mass_delta),
         })
     }
 }
@@ -362,6 +404,7 @@ mod tests {
             accession: Some("UNIMOD:4".to_string()),
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         }
     }
 
@@ -390,6 +433,7 @@ mod tests {
             accession: Some("UNIMOD:1".to_string()),
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         // Wildcard matches any residue at the specified location only.
         assert!(m.applies_to(b'A', ModLocation::ProtNTerm));
@@ -410,6 +454,7 @@ mod tests {
             accession: Some("UNIMOD:737".to_string()),
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         assert!(m.applies_to(b'K', ModLocation::Anywhere));
         assert!(!m.applies_to(b'R', ModLocation::Anywhere));
@@ -426,6 +471,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         assert!(m.applies_to(b'A', ModLocation::NTerm));
         assert!(!m.applies_to(b'A', ModLocation::Anywhere));
@@ -711,5 +757,69 @@ xref: spec_1_site "C"
             Modification::from_mods_txt_line_with("Frobnicate,M,opt,any,X", &db),
             Err(ModParseError::UnresolvedMassField { .. })
         ));
+    }
+
+    #[test]
+    fn sites_annotated_restricts_to_the_mods_own_mass() {
+        let m = Modification::from_mods_txt_line("79.966331,S,opt,any,Phospho,sites=annotated")
+            .unwrap();
+        assert_eq!(m.annotated_site_mass, Some(79.966331));
+        let any =
+            Modification::from_mods_txt_line("79.966331,S,opt,any,Phospho,sites=any").unwrap();
+        assert_eq!(any.annotated_site_mass, None);
+        let default = Modification::from_mods_txt_line("79.966331,S,opt,any,Phospho").unwrap();
+        assert_eq!(default.annotated_site_mass, None);
+    }
+
+    #[test]
+    fn sites_annotated_works_with_a_resolved_unimod_mass() {
+        let m = Modification::from_mods_txt_line_with(
+            "Oxidation,M,opt,any,Oxidation,sites=Annotated",
+            &test_db(),
+        )
+        .unwrap();
+        assert_eq!(m.annotated_site_mass, Some(15.994915));
+    }
+
+    #[test]
+    fn sites_rejects_bad_values_and_fixed_mods() {
+        assert!(matches!(
+            Modification::from_mods_txt_line("79.966331,S,opt,any,Phospho,sites=some"),
+            Err(ModParseError::BadSites { .. })
+        ));
+        assert!(matches!(
+            Modification::from_mods_txt_line("57.021464,C,fix,any,CAM,sites=annotated"),
+            Err(ModParseError::AnnotatedSitesOnFixedMod)
+        ));
+    }
+
+    #[test]
+    fn allowed_at_needs_an_annotated_site_of_the_same_mass() {
+        use crate::protein::{ModSite, SiteAnchor};
+        let phospho =
+            Modification::from_mods_txt_line("79.966331,S,opt,any,Phospho,sites=annotated")
+                .unwrap();
+        let sites = [
+            ModSite {
+                position: 3,
+                mass_delta: 79.966331,
+                anchor: SiteAnchor::Residue,
+            },
+            ModSite {
+                position: 7,
+                mass_delta: 79.956815, // sulfation: 9.5 mDa lighter
+                anchor: SiteAnchor::Residue,
+            },
+        ];
+        assert!(phospho.allowed_at(&sites, 3));
+        assert!(!phospho.allowed_at(&sites, 4), "no site at 4");
+        assert!(
+            !phospho.allowed_at(&sites, 7),
+            "a sulfo site is not a phospho site"
+        );
+        assert!(!phospho.allowed_at(&[], 3), "no annotation, no site");
+        // An unrestricted mod is allowed anywhere.
+        let free = Modification::from_mods_txt_line("79.966331,S,opt,any,Phospho").unwrap();
+        assert!(free.allowed_at(&[], 4));
     }
 }

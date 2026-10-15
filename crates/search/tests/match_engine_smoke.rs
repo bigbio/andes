@@ -121,6 +121,7 @@ fn known_peptide_appears_in_top_n() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"MKWVTFISLLR".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -167,11 +168,13 @@ fn top_n_capacity_respected() {
                 accession: "P1".into(),
                 description: "".into(),
                 sequence: b"AAAAAAAAAG".to_vec(),
+                annotation: None,
             },
             Protein {
                 accession: "P2".into(),
                 description: "".into(),
                 sequence: b"GAAAAAAAAA".to_vec(),
+                annotation: None,
             },
         ],
     };
@@ -235,6 +238,7 @@ fn spectrum_without_charge_tries_charge_range() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"MKWVTFISLLR".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -276,6 +280,7 @@ fn charge_missing_spectrum_uses_per_charge_scored_spec() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"MKWVTFISLLR".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");

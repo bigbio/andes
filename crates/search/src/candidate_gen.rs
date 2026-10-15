@@ -11,6 +11,19 @@
 //! `is_protein_n_term=true` at offset 1 of the original sequence and are
 //! NOT deduplicated — they have a distinct search space (protein-N-term
 //! mod variants apply).
+//!
+//! ## Database annotation (UniProt XML)
+//!
+//! A sequence-variant protein ([`Protein::variant_parts`]) only yields spans
+//! that carry its variant; the rest of it reads like the canonical protein,
+//! which is searched already. A mature-chain entry ([`Protein::chain_ends`])
+//! only yields the spans at its new termini, and is never Met-cleaved. A
+//! variable mod declared `sites=annotated`
+//! ([`model::Modification::annotated_site_mass`]) is only placed on residues
+//! the span's protein annotates with a modification of that mass
+//! ([`Protein::mod_sites`]); every expansion path below applies the same test
+//! through [`SpanSites`], so the in-RAM, lazy and fragment-index candidate
+//! sets stay identical.
 
 use crate::decoy::is_decoy_accession_affix;
 use crate::search_index::SearchIndex;
@@ -19,7 +32,7 @@ use model::amino_acid::AminoAcid;
 use model::enzyme::Enzyme;
 use model::modification::ModLocation;
 use model::peptide::Peptide;
-use model::protein::Protein;
+use model::protein::{ChainEnds, ModSite, Protein, VariantRegion};
 
 #[derive(Debug, Clone)]
 pub struct Candidate {
@@ -88,7 +101,7 @@ fn enumerate_protein(
     let seq = &protein.sequence;
 
     // Standard enumeration: full sequence from offset 0.
-    let mut out = enumerate_protein_from_offset(seq, 0, protein_index, is_decoy, params);
+    let mut out = enumerate_protein_from_offset(protein, 0, protein_index, is_decoy, params);
 
     // N-terminal Met cleavage: when the protein starts with M (and has >1
     // residue), also enumerate candidates treating sequence[1..] as the
@@ -96,9 +109,11 @@ fn enumerate_protein(
     // is_protein_n_term=true (the post-Met residue is the new biological
     // N-terminus) and are NOT deduplicated — they differ by terminal-mod
     // search space.
-    if seq.first() == Some(&b'M') && seq.len() > 1 {
+    // A mature chain was cut out of its precursor; its first residue is not
+    // an initiator Met.
+    if seq.first() == Some(&b'M') && seq.len() > 1 && protein.chain_ends().is_none() {
         out.extend(enumerate_protein_from_offset(
-            seq,
+            protein,
             1,
             protein_index,
             is_decoy,
@@ -125,17 +140,35 @@ fn enumerate_protein(
 /// - `1`: at least one end must be an enzyme-cleavage site (semi-specific).
 /// - `0`: neither end needs to be a cleavage site (non-specific).
 fn enumerate_protein_from_offset(
-    seq: &[u8],
+    protein: &Protein,
     seq_offset: usize,
     protein_index: usize,
     is_decoy: bool,
     params: &SearchParams,
 ) -> Vec<Candidate> {
+    let seq = &protein.sequence;
     let sub_seq = &seq[seq_offset..];
     let n = sub_seq.len() as u32;
     if n < params.min_length {
         return Vec::new();
     }
+
+    // A variant protein only yields spans that cover its variant (`emit_span`),
+    // and those lie within `max_length` of it: walk just that window of
+    // `sub_seq` instead of the whole protein.
+    let window = match protein.variant_region() {
+        Some(v) => {
+            let reach = params.max_length as usize;
+            // `start > end` for an indel in a repeat (see `VariantRegion`).
+            let lo = (v.start.min(v.end) as usize).saturating_sub(reach);
+            let hi = v.start.max(v.end) as usize + reach;
+            (
+                lo.saturating_sub(seq_offset) as u32,
+                hi.saturating_sub(seq_offset).min(n as usize) as u32,
+            )
+        }
+        None => (0, n),
+    };
 
     let ntt = params.num_tolerable_termini;
 
@@ -156,12 +189,20 @@ fn enumerate_protein_from_offset(
             protein_index,
             is_decoy,
             params,
+            variant: protein.variant_parts(),
+            chain: protein.chain_ends(),
+            sites: protein.mod_sites(),
         };
-        return enumerate_all_spans(&ctx, n);
+        return enumerate_all_spans(&ctx, window.0..window.1, n);
     }
 
     let cleavage_positions =
         compute_cleavage_positions(sub_seq, params.enzyme, &params.extra_enzymes);
+    // The cleavage positions inside the window, anchoring every span walked
+    // below. A span inside the window has all of its internal cleavage
+    // positions inside it too, so missed-cleavage counts are unchanged.
+    let anchors = &cleavage_positions[cleavage_positions.partition_point(|&c| c < window.0)
+        ..cleavage_positions.partition_point(|&c| c <= window.1)];
 
     // ntt=2: strict — only spans where both start and end are cleavage positions.
     // ntt=1: semi-specific — spans where at least one end is a cleavage position.
@@ -190,12 +231,15 @@ fn enumerate_protein_from_offset(
         protein_index,
         is_decoy,
         params,
+        variant: protein.variant_parts(),
+        chain: protein.chain_ends(),
+        sites: protein.mod_sites(),
     };
 
     // ── Strict spans (ntt=2 behaviour) ───────────────────────────────────────
     // Also included in ntt=1, since a strict span satisfies "at least one end".
-    for (i, &start) in cleavage_positions.iter().enumerate() {
-        for (offset, &end) in cleavage_positions[i + 1..].iter().enumerate() {
+    for (i, &start) in anchors.iter().enumerate() {
+        for (offset, &end) in anchors[i + 1..].iter().enumerate() {
             let len = end - start;
             if len > params.max_length {
                 break;
@@ -214,7 +258,7 @@ fn enumerate_protein_from_offset(
     // ── Semi-specific spans (ntt=1 only) ─────────────────────────────────────
     if ntt == 1 {
         // (b) Tryptic N-terminus, free C-terminus.
-        for &start in &cleavage_positions {
+        for &start in anchors {
             let c_min = start + params.min_length;
             let c_max = (start + params.max_length).min(n);
             for end in c_min..=c_max {
@@ -236,7 +280,7 @@ fn enumerate_protein_from_offset(
         }
 
         // (c) Free N-terminus, tryptic C-terminus.
-        for &end in &cleavage_positions {
+        for &end in anchors {
             if end < params.min_length {
                 continue;
             }
@@ -269,20 +313,39 @@ struct EmitCtx<'a> {
     protein_index: usize,
     is_decoy: bool,
     params: &'a SearchParams,
+    /// The parts of the protein's variant, when it is a sequence-variant
+    /// entry (empty otherwise).
+    variant: &'a [VariantRegion],
+    /// The protein's new termini, when it is a mature-chain entry.
+    chain: Option<ChainEnds>,
+    /// The protein's annotated modification sites.
+    sites: &'a [ModSite],
 }
 
 /// Emit a single (start, end) span as candidates, if the span passes residue
 /// validity checks. Appends to `out`.
 #[inline]
 fn emit_span(ctx: &EmitCtx<'_>, start: u32, end: u32, out: &mut Vec<Candidate>) {
+    let abs_start = start as usize + ctx.seq_offset;
+    let abs_end = end as usize + ctx.seq_offset;
+    // A variant protein contributes only the spans that carry its variant, a
+    // mature chain only those at its new termini.
+    if (!ctx.variant.is_empty()
+        && !ctx
+            .variant
+            .iter()
+            .any(|v| v.covered_by(abs_start as u32, abs_end as u32)))
+        || ctx
+            .chain
+            .is_some_and(|c| !c.covered_by(abs_start as u32, abs_end as u32, ctx.seq.len() as u32))
+    {
+        return;
+    }
     let span = &ctx.sub_seq[start as usize..end as usize];
     // Skip spans containing non-standard residues.
     if span.iter().any(|&r| AminoAcid::standard(r).is_none()) {
         return;
     }
-
-    let abs_start = start as usize + ctx.seq_offset;
-    let abs_end = end as usize + ctx.seq_offset;
     let pre = if abs_start == 0 {
         b'_'
     } else {
@@ -296,8 +359,9 @@ fn emit_span(ctx: &EmitCtx<'_>, start: u32, end: u32, out: &mut Vec<Candidate>) 
 
     let is_protein_n_term = start == 0;
     let is_protein_c_term = abs_end == ctx.seq.len();
+    let sites = SpanSites::new(ctx.sites, abs_start);
     let mod_combinations =
-        expand_mod_combinations(span, ctx.params, is_protein_n_term, is_protein_c_term);
+        expand_mod_combinations(span, ctx.params, is_protein_n_term, is_protein_c_term, sites);
     for residues in mod_combinations {
         let peptide = Peptide::new(residues, pre, post);
         out.push(Candidate {
@@ -311,11 +375,12 @@ fn emit_span(ctx: &EmitCtx<'_>, start: u32, end: u32, out: &mut Vec<Candidate>) 
     }
 }
 
-/// Enumerate all valid-length spans without cleavage constraints (ntt=0 path).
-/// Invoked when `num_tolerable_termini = 0` with a non-NonSpecific enzyme.
-fn enumerate_all_spans(ctx: &EmitCtx<'_>, n: u32) -> Vec<Candidate> {
+/// Enumerate all valid-length spans starting in `starts` without cleavage
+/// constraints (ntt=0 path). Invoked when `num_tolerable_termini = 0` with a
+/// non-NonSpecific enzyme.
+fn enumerate_all_spans(ctx: &EmitCtx<'_>, starts: std::ops::Range<u32>, n: u32) -> Vec<Candidate> {
     let mut out = Vec::new();
-    for start in 0..n {
+    for start in starts {
         let end_max = (start + ctx.params.max_length).min(n);
         for end in (start + ctx.params.min_length)..=end_max {
             emit_span(ctx, start, end, &mut out);
@@ -324,8 +389,36 @@ fn enumerate_all_spans(ctx: &EmitCtx<'_>, n: u32) -> Vec<Candidate> {
     out
 }
 
+/// The annotated modification sites a span sees: its protein's sites and the
+/// span's start in protein coordinates. Decides where a mod restricted to
+/// annotated sites ([`model::Modification::annotated_site_mass`]) may go;
+/// every other variant is always allowed.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct SpanSites<'a> {
+    sites: &'a [ModSite],
+    start: u32,
+}
+
+impl<'a> SpanSites<'a> {
+    pub(crate) fn new(sites: &'a [ModSite], span_start: usize) -> Self {
+        Self {
+            sites,
+            start: span_start as u32,
+        }
+    }
+
+    /// Whether `variant` may sit at position `i` of the span.
+    #[inline]
+    fn allows(&self, i: usize, variant: &AminoAcid) -> bool {
+        variant
+            .mod_
+            .is_none_or(|m| m.allowed_at(self.sites, self.start + i as u32))
+    }
+}
+
 /// Generate every combination of variable-mod applications for `span`,
-/// up to `params.max_variable_mods_per_peptide` mods total.
+/// up to `params.max_variable_mods_per_peptide` mods total. A mod restricted
+/// to annotated sites is only placed where `sites` allows it.
 ///
 /// `is_protein_n_term`: the span begins at position 0 of the protein sequence.
 /// `is_protein_c_term`: the span ends at the last residue of the protein sequence.
@@ -342,6 +435,7 @@ pub(crate) fn expand_mod_combinations(
     params: &SearchParams,
     is_protein_n_term: bool,
     is_protein_c_term: bool,
+    sites: SpanSites<'_>,
 ) -> Vec<Vec<AminoAcid>> {
     let n = span.len();
 
@@ -391,6 +485,7 @@ pub(crate) fn expand_mod_combinations(
         &mut current,
         0,
         params.max_variable_mods_per_peptide,
+        sites,
         &mut out,
     );
     out
@@ -577,7 +672,13 @@ pub fn record_may_have_forms_in(
     mass_hi: f64,
 ) -> bool {
     use model::mass::H2O;
-    let Some((span, n_term, c_term, _, _)) = record_span(db, rec) else {
+    let Some(RecordSpan {
+        span,
+        n_term,
+        c_term,
+        ..
+    }) = record_span(db, rec)
+    else {
         return false;
     };
     match span_mass_bounds(span, tables, n_term, c_term) {
@@ -634,7 +735,9 @@ pub fn retain_records_with_forms_in(
 /// drop a feasible one. `visit` sees the pruned index `k` (dense over the
 /// forms that survive), the chosen variants, and their masses. Both the
 /// fragment-ion index build and its materialisation use this walk, so `k`
-/// means the same thing on both sides.
+/// means the same thing on both sides. Mods restricted to annotated sites are
+/// placed where `sites` allows them, as in [`expand_mod_combinations`]; the
+/// bounds still count them everywhere, which only loosens the pruning.
 #[allow(clippy::too_many_arguments)]
 fn walk_forms_bounded(
     span: &[u8],
@@ -642,6 +745,7 @@ fn walk_forms_bounded(
     tables: &FormWalkTables,
     is_protein_n_term: bool,
     is_protein_c_term: bool,
+    sites: SpanSites<'_>,
     mass_lo: f64,
     mass_hi: f64,
     mut visit: impl FnMut(usize, &[&AminoAcid], &[f64]),
@@ -678,6 +782,7 @@ fn walk_forms_bounded(
         chosen: &mut SmallVec<[&'a AminoAcid; WALK_INLINE_LEN]>,
         mods_used: u32,
         max_mods: u32,
+        sites: SpanSites<'_>,
         min_rest: &[f64],
         max_rest: &[f64],
         lo: f64,
@@ -693,7 +798,7 @@ fn walk_forms_bounded(
         for variant in pv[pos] {
             let consumes_slot = variant.mod_.as_ref().map(|m| !m.fixed).unwrap_or(false);
             let new_mods = mods_used + if consumes_slot { 1 } else { 0 };
-            if new_mods > max_mods {
+            if new_mods > max_mods || !sites.allows(pos, variant) {
                 continue;
             }
             let m = variant.mass + variant.mod_.as_ref().map_or(0.0, |md| md.mass_delta);
@@ -712,6 +817,7 @@ fn walk_forms_bounded(
                 chosen,
                 new_mods,
                 max_mods,
+                sites,
                 min_rest,
                 max_rest,
                 lo,
@@ -731,6 +837,7 @@ fn walk_forms_bounded(
         &mut chosen,
         0,
         params.max_variable_mods_per_peptide,
+        sites,
         &min_rest,
         &max_rest,
         mass_lo,
@@ -740,12 +847,22 @@ fn walk_forms_bounded(
     );
 }
 
-/// Span, terminal flags, and flanks of an index record; `None` when the
-/// record does not fit its protein.
+/// An index record resolved against its protein.
+struct RecordSpan<'a> {
+    span: &'a [u8],
+    n_term: bool,
+    c_term: bool,
+    pre: u8,
+    post: u8,
+    sites: SpanSites<'a>,
+}
+
+/// Span, terminal flags, flanks and annotated sites of an index record;
+/// `None` when the record does not fit its protein.
 fn record_span<'a>(
     db: &'a SearchIndex,
     rec: &crate::candidate_index::IndexRecord,
-) -> Option<(&'a [u8], bool, bool, u8, u8)> {
+) -> Option<RecordSpan<'a>> {
     use crate::candidate_index::flags;
     let protein = db.db.proteins.get(rec.protein_index as usize)?;
     let seq = &protein.sequence;
@@ -764,13 +881,14 @@ fn record_span<'a>(
     } else {
         seq[abs_end]
     };
-    Some((
-        &seq[abs_start..abs_end],
-        rec.flags & flags::IS_PROTEIN_N_TERM != 0,
-        rec.flags & flags::IS_PROTEIN_C_TERM != 0,
+    Some(RecordSpan {
+        span: &seq[abs_start..abs_end],
+        n_term: rec.flags & flags::IS_PROTEIN_N_TERM != 0,
+        c_term: rec.flags & flags::IS_PROTEIN_C_TERM != 0,
         pre,
         post,
-    ))
+        sites: SpanSites::new(protein.mod_sites(), abs_start),
+    })
 }
 
 /// Visit the peptidoforms of one index record whose neutral mass lies in
@@ -785,7 +903,14 @@ pub fn for_each_record_form_masses_bounded(
     mass_hi: f64,
     mut f: impl FnMut(usize, &[f64]),
 ) {
-    let Some((span, n_term, c_term, _, _)) = record_span(db, rec) else {
+    let Some(RecordSpan {
+        span,
+        n_term,
+        c_term,
+        sites,
+        ..
+    }) = record_span(db, rec)
+    else {
         return;
     };
     walk_forms_bounded(
@@ -794,6 +919,7 @@ pub fn for_each_record_form_masses_bounded(
         tables,
         n_term,
         c_term,
+        sites,
         mass_lo,
         mass_hi,
         |k, _, masses| f(k, masses),
@@ -816,7 +942,15 @@ pub fn expand_base_record_bounded(
     ks: &[u32],
 ) -> Vec<Candidate> {
     use crate::candidate_index::flags;
-    let Some((span, n_term, c_term, pre, post)) = record_span(db, rec) else {
+    let Some(RecordSpan {
+        span,
+        n_term,
+        c_term,
+        pre,
+        post,
+        sites,
+    }) = record_span(db, rec)
+    else {
         return Vec::new();
     };
     let is_decoy = rec.flags & flags::IS_DECOY != 0;
@@ -828,6 +962,7 @@ pub fn expand_base_record_bounded(
         tables,
         n_term,
         c_term,
+        sites,
         mass_lo,
         mass_hi,
         |k, chosen, _| {
@@ -887,9 +1022,7 @@ fn build_terminal_variants(
         let mut v = params.aa_set.variants_for(residue, peptide_loc).to_vec();
         if at_protein_term {
             for pv in params.aa_set.variants_for(residue, protein_loc) {
-                if !v.contains(pv) {
-                    v.push(pv.clone());
-                }
+                push_variant(&mut v, pv);
             }
         }
         v
@@ -936,18 +1069,25 @@ fn build_terminal_variants(
     // mod is present, the modded variant is the only legal one for
     // that mod's residue/location slot; variable mods stack on top
     // by adding additional explored variants.
-    for v in &n_term_variants {
-        if !variants.contains(v) {
-            variants.push(v.clone());
-        }
-    }
-    for v in &c_term_variants {
-        if !variants.contains(v) {
-            variants.push(v.clone());
-        }
+    for v in n_term_variants.iter().chain(&c_term_variants) {
+        push_variant(&mut variants, v);
     }
 
     variants
+}
+
+/// Add `v` to `variants` unless an equal one (same residue, mod name and
+/// mass) is there. Equality ignores [`model::Modification::annotated_site_mass`],
+/// so when the one already there is restricted to annotated sites and `v` is
+/// not, `v` replaces it: the unrestricted mod applies wherever the restricted
+/// one would.
+fn push_variant(variants: &mut Vec<AminoAcid>, v: &AminoAcid) {
+    let restricted = |a: &AminoAcid| a.mod_.is_some_and(|m| m.annotated_site_mass.is_some());
+    match variants.iter_mut().find(|u| **u == *v) {
+        None => variants.push(v.clone()),
+        Some(u) if restricted(u) && !restricted(v) => *u = v.clone(),
+        Some(_) => {}
+    }
 }
 
 fn expand_recursive(
@@ -956,6 +1096,7 @@ fn expand_recursive(
     current: &mut Vec<AminoAcid>,
     mods_used: u32,
     max_mods: u32,
+    sites: SpanSites<'_>,
     out: &mut Vec<Vec<AminoAcid>>,
 ) {
     if pos == position_variants.len() {
@@ -975,11 +1116,19 @@ fn expand_recursive(
         // slots against the per-peptide modification cap.
         let consumes_slot = variant.mod_.as_ref().map(|m| !m.fixed).unwrap_or(false);
         let new_mods = mods_used + if consumes_slot { 1 } else { 0 };
-        if new_mods > max_mods {
+        if new_mods > max_mods || !sites.allows(pos, variant) {
             continue;
         }
         current.push(variant.clone());
-        expand_recursive(position_variants, pos + 1, current, new_mods, max_mods, out);
+        expand_recursive(
+            position_variants,
+            pos + 1,
+            current,
+            new_mods,
+            max_mods,
+            sites,
+            out,
+        );
         current.pop();
     }
 }
@@ -998,7 +1147,7 @@ fn expand_recursive(
 /// when they apply to *every* configured protease — a NonSpecific extra makes
 /// the whole digest non-specific; a NoCleavage extra contributes no cut sites
 /// (it never short-circuits unless it's the only protease).
-fn compute_cleavage_positions(seq: &[u8], primary: Enzyme, extras: &[Enzyme]) -> Vec<u32> {
+pub(crate) fn compute_cleavage_positions(seq: &[u8], primary: Enzyme, extras: &[Enzyme]) -> Vec<u32> {
     let n = seq.len() as u32;
 
     let all = || std::iter::once(primary).chain(extras.iter().copied());
@@ -1220,8 +1369,9 @@ pub fn lazy_candidates_for_precursor(
             seq[abs_end]
         };
 
+        let sites = SpanSites::new(protein.mod_sites(), abs_start);
         let mod_combinations =
-            expand_mod_combinations(span, params, is_protein_n_term, is_protein_c_term);
+            expand_mod_combinations(span, params, is_protein_n_term, is_protein_c_term, sites);
         for residues in mod_combinations {
             let peptide = Peptide::new(residues, pre, post);
             // DIRECTIONAL final gate, mirroring `matches_precursor`: lighter →
@@ -1450,7 +1600,8 @@ pub fn expand_base_record(
         seq[abs_end]
     };
 
-    expand_mod_combinations(span, params, is_protein_n_term, is_protein_c_term)
+    let sites = SpanSites::new(protein.mod_sites(), abs_start);
+    expand_mod_combinations(span, params, is_protein_n_term, is_protein_c_term, sites)
         .into_iter()
         .map(|residues| Candidate {
             peptide: Peptide::new(residues, pre, post),
@@ -1682,6 +1833,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         }
     }
 
@@ -1695,6 +1847,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         }
     }
 
@@ -1707,6 +1860,7 @@ mod tests {
                 description: "ox-m fixture".into(),
                 // PEPTMK | DALMR | QPK  → tryptic peptides with M present.
                 sequence: b"PEPTMKDALMRQPK".to_vec(),
+                annotation: None,
             }],
         };
         let db = SearchIndex::from_target_db(&target, "XXX");
@@ -1736,6 +1890,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         let acetyl = Modification {
             name: "Acetyl".into(),
@@ -1746,6 +1901,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         // First tryptic peptide AAAPEPTIDEK sits at the protein N-terminus (offset 0).
         let target = ProteinDb {
@@ -1753,6 +1909,7 @@ mod tests {
                 accession: "P1".into(),
                 description: "tmt protein-nterm".into(),
                 sequence: b"AAAPEPTIDEKQQQR".to_vec(),
+                annotation: None,
             }],
         };
         let db = SearchIndex::from_target_db(&target, "XXX");
@@ -2005,6 +2162,7 @@ mod tests {
                 description: "two-mod fixture".into(),
                 // Tryptic peptides containing M and N (sometimes both).
                 sequence: b"MNPEMTKNMDALERQNMPK".to_vec(),
+                annotation: None,
             }],
         };
         let db = SearchIndex::from_target_db(&target, "XXX");

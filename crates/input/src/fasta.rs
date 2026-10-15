@@ -115,6 +115,7 @@ impl<R: BufRead> Iterator for FastaReader<R> {
             accession,
             description,
             sequence,
+            annotation: None,
         }))
     }
 }

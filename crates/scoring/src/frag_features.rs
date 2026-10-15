@@ -214,6 +214,7 @@ mod tests {
             accession: None,
             neutral_losses: vec![],
             loss_class: 0,
+            annotated_site_mass: None,
         };
         r[pos1 - 1] = r[pos1 - 1].clone().with_mod(m);
         Peptide::new(r, b'K', b'R')

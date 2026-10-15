@@ -308,6 +308,7 @@ pub fn build_peptide_anchored_index(
                     .unwrap_or_else(|| format!("BASEPEP_{i}")),
                 description: String::new(),
                 sequence: seq.clone(),
+                annotation: None,
             })
             .collect(),
     };
@@ -344,6 +345,7 @@ fn anchored_target_plus_decoy(
                 accession: p.accession.clone(),
                 description: p.description.clone(),
                 sequence: interior(&p.sequence).to_vec(),
+                annotation: None,
             })
             .collect(),
     };
@@ -555,8 +557,14 @@ pub fn refinement_aa_set(
     // skipped — the fixed label owns that position.
     let mut fixed_slots: Vec<(ResidueSpec, ModLocation)> = Vec::new();
 
-    // 1. Inherit the base search's full mod set (fixed AND variable).
+    // 1. Inherit the base search's full mod set (fixed AND variable), except
+    //    mods restricted to annotated sites: the Pass-2 mini-proteins carry no
+    //    database annotation, so such a mod could never be placed there, and
+    //    claiming its slot would also block the tier's unrestricted mod.
     for m in base.distinct_mods() {
+        if m.annotated_site_mass.is_some() {
+            continue;
+        }
         present.insert(mod_key(m.residue, m.location, m.mass_delta));
         if m.fixed {
             fixed_slots.push((m.residue, m.location));
@@ -606,6 +614,7 @@ pub fn refinement_aa_set(
                 accession: None,
                 neutral_losses: Vec::new(),
                 loss_class: 0,
+                annotated_site_mass: None,
             };
             builder = builder.add_variable_mod(m);
         }
@@ -1166,6 +1175,7 @@ mod tests {
             accession: acc.into(),
             description: String::new(),
             sequence: seq.to_vec(),
+            annotation: None,
         }
     }
 
@@ -1293,6 +1303,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         });
         let pep = Peptide::new(
             vec![
@@ -1566,6 +1577,28 @@ mod tests {
     }
 
     #[test]
+    fn refinement_aa_set_leaves_out_mods_restricted_to_annotated_sites() {
+        // The Pass-2 mini-proteins carry no annotation: a restricted base mod
+        // could never be placed there, and must not block the tier's own mod.
+        let ox = model::modification::Modification::from_mods_txt_line(
+            "15.994915,M,opt,any,Oxidation,sites=annotated",
+        )
+        .unwrap();
+        let base = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
+            .add_variable_mod(ox)
+            .build()
+            .unwrap();
+        let set = refinement_aa_set(&base, &RefineConfig::default_tier(), true).unwrap();
+        assert!(set
+            .iter_variants()
+            .all(|aa| aa.mod_.is_none_or(|m| m.annotated_site_mass.is_none())));
+        assert!(set
+            .variants_for(b'M', ModLocation::Anywhere)
+            .iter()
+            .any(|aa| aa.mod_.is_some_and(|m| m.name == "Oxidation")));
+    }
+
+    #[test]
     fn refinement_aa_set_high_res_exposes_five_variable_mods() {
         let base = base_set_with_cam_c();
         let set = refinement_aa_set(&base, &RefineConfig::default_tier(), true).unwrap();
@@ -1649,6 +1682,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         let base = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
             .add_variable_mod(acetyl)
@@ -1691,6 +1725,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         let base = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
             .add_fixed_mod(tmt_k)
@@ -1727,6 +1762,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         let base = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
             .add_variable_mod(ox_m)
@@ -1762,6 +1798,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         let aa = AminoAcid::standard(residue).unwrap().with_mod(m);
         Peptide::new(vec![aa, AminoAcid::standard(b'G').unwrap()], b'_', b'-')
@@ -1775,11 +1812,13 @@ mod tests {
                     accession: "P1".into(),
                     description: String::new(),
                     sequence: b"MSAMPLERPEPTIDEK".to_vec(),
+                    annotation: None,
                 },
                 Protein {
                     accession: "P2".into(),
                     description: String::new(),
                     sequence: b"QWERTYKLMNPQR".to_vec(),
+                    annotation: None,
                 },
             ],
         };
@@ -1815,6 +1854,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         let mut res = unmod_peptide(b"SAMPLER").residues;
         res[0] = res[0].clone().with_mod(acetyl);
@@ -1946,6 +1986,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         });
         let deam = AminoAcid::standard(b'N').unwrap().with_mod(Modification {
             name: "Deamidation".into(),
@@ -1956,6 +1997,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         });
         let pep = Peptide::new(vec![ox, deam], b'_', b'-');
         let (n, class) = mod_count_and_class(&pep, &cfg);

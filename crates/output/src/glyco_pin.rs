@@ -442,6 +442,8 @@ fn glycan_tag_with_site(
 /// RawScoreCal is byte-identical to RawScore under the 1-hit collapse
 /// (strong_score_calibrated_loo returns its input for len<2); DeltaRTRank is
 /// structurally 0 under the collapse (delta_rt_rank returns 0 for <2 hits).
+/// The six provenance columns are filled only by the standard search's
+/// provenance pass, which the glyco driver does not run.
 const GLYCO_PIN_ALWAYS_DROP: &[&str] = &[
     "mass",
     "IsolationWindowEfficiency",
@@ -457,6 +459,12 @@ const GLYCO_PIN_ALWAYS_DROP: &[&str] = &[
     "ModSiteDetCount",
     "RawScoreCal",
     "DeltaRTRank",
+    "IsVariant",
+    "IsIsoform",
+    "IsChain",
+    "RefCompetitor",
+    "DeltaRefScore",
+    "IsotopeMimic",
 ];
 
 /// Is `name` emitted? Charge one-hots are always kept.

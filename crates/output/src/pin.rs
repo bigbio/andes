@@ -276,6 +276,14 @@ pub fn psm_feature_values(psm: &PsmMatch, rank: u32) -> Vec<Feature> {
         ("DeltaRT", f.delta_rt as f64, Double),
         ("AbsDeltaRT", f.abs_delta_rt as f64, Double),
         ("DeltaRTNorm", f.delta_rt_norm as f64, Double),
+        // ── Provenance (additive; set by `crate::provenance`). All 0 on a FASTA
+        // search except IsotopeMimic with isotope-like variable mods. ──
+        ("IsVariant", f.is_variant as f64, Int),
+        ("IsIsoform", f.is_isoform as f64, Int),
+        ("IsChain", f.is_chain as f64, Int),
+        ("RefCompetitor", f.ref_competitor as f64, Int),
+        ("DeltaRefScore", f.delta_ref_score as f64, Double),
+        ("IsotopeMimic", f.isotope_mimic as f64, Int),
     ]
 }
 
@@ -561,6 +569,13 @@ fn write_header<W: Write>(writer: &mut W, min_charge: u8, max_charge: u8) -> io:
         "DeltaRT".to_string(),
         "AbsDeltaRT".to_string(),
         "DeltaRTNorm".to_string(),
+        // Provenance (crate::provenance).
+        "IsVariant".to_string(),
+        "IsIsoform".to_string(),
+        "IsChain".to_string(),
+        "RefCompetitor".to_string(),
+        "DeltaRefScore".to_string(),
+        "IsotopeMimic".to_string(),
     ]);
 
     cols.extend_from_slice(&[
@@ -1217,6 +1232,12 @@ mod tests {
             "DeltaRT",
             "AbsDeltaRT",
             "DeltaRTNorm",
+            "IsVariant",
+            "IsIsoform",
+            "IsChain",
+            "RefCompetitor",
+            "DeltaRefScore",
+            "IsotopeMimic",
             "Peptide",
             "Proteins",
         ];

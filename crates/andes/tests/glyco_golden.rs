@@ -41,6 +41,22 @@
 //! UNRELATED columns changing on every row, which is what caught exactly that mistake here.
 //!
 //! Regenerating is a deliberate act: diff the columns first and know which ones moved.
+//!
+//! REGENERATED 2026-10-14 when the N-terminal Met-cleaved walk began emitting
+//! only the peptides starting at the post-Met residue (it had enumerated every
+//! other span of an M-initial protein a second time) and side-chain mods began
+//! stacking with terminal mods. Against the previous binary: 120 rows, every
+//! SpecId, peptide and protein unchanged (0 winner flips); each spectrum's
+//! candidate pool changes, so
+//! `CandidateRankEntropy` and `RawScore` moved on all 120
+//! rows and `ListwiseScoreGap` on 53.
+//!
+//! COMBINED 2026-10-14 (review branch: input, glyco and candidate-generation
+//! changes together). Against each parent golden the only differences are the
+//! other branches' changes: `ScanNr`/`SpecId` on every row (MGF TITLE scan
+//! numbers), the boundary-sequon `@N18` tag on 2 peptides, and the
+//! candidate-pool columns (`RawScore`, `CandidateRankEntropy`,
+//! `ListwiseScoreGap`); 120 rows, proteins unchanged.
 
 use std::path::PathBuf;
 use std::process::Command;

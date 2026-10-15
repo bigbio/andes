@@ -262,8 +262,8 @@ pub(crate) struct SearchArgs {
     /// protease (the union of their cleavage rules). The FIRST entry is the
     /// primary — it drives model selection and the cleavage-credit feature; if
     /// no model matches that enzyme for the data, andes WARNs and you should
-    /// pass `--model`. Combining a universal protease (nonspecific/alphalp)
-    /// with specific ones makes the whole digest non-specific (warned).
+    /// pass `--model`. Combining the universal protease (nonspecific) with
+    /// specific ones makes the whole digest non-specific (warned).
     #[arg(long, default_value = "trypsin")]
     pub(crate) enzyme: String,
 
@@ -654,7 +654,8 @@ pub(crate) struct SearchArgs {
 
     // ── Quantification ─────────────────────────────────────────────────────
     /// Isobaric reporter-ion quantification of the confident PSMs with this
-    /// labelling kit: tmt6, tmt10, tmt11, tmt16, tmt18, itraq4 or itraq8.
+    /// labelling kit: tmt6, tmt10, tmt11, tmt16, tmt18, tmt32, tmt35, itraq4 or
+    /// itraq8.
     /// Writes `<stem>.tmt.tsv` and, with `--output-parquet`, the QPX
     /// `quantms.feature.parquet`. Combine with `--rescore` so only PSMs at
     /// q <= --fdr are quantified.
@@ -668,16 +669,18 @@ pub(crate) struct SearchArgs {
     pub(crate) tmt_level: u8,
 
     /// Reporter-ion m/z tolerance, e.g. `20ppm` or `0.003da`. Default: 20 ppm
-    /// on high-resolution MS2 and at `--tmt-level 3` (SPS-MS3 reporters are
-    /// read in the Orbitrap), 0.3 Da on ion-trap MS2. A window that reaches
-    /// half the spacing of the kit's closest channels is refused.
+    /// (10 ppm for tmt32/tmt35) on high-resolution MS2 and at `--tmt-level 3`
+    /// (SPS-MS3 reporters are read in the Orbitrap), 0.3 Da on ion-trap MS2.
+    /// A window that reaches half the spacing of the kit's closest channels is
+    /// refused.
     #[arg(long = "tmt-tol", value_parser = parse_precursor_tol)]
     pub(crate) tmt_tol: Option<Tolerance>,
 
     /// Isotope impurity matrix of the kit lot (OpenMS text form: one line per
-    /// channel, `-2/-1/+1/+2` percentages, eight columns for TMTpro). Corrected
-    /// intensities are solved by non-negative least squares; the raw values are
-    /// kept alongside. Default: no correction.
+    /// channel, `-2/-1/+1/+2` percentages, eight columns for TMTpro 16/18).
+    /// Corrected intensities are solved by non-negative least squares; the raw
+    /// values are kept alongside. Not supported for tmt32/tmt35. Default: no
+    /// correction.
     #[arg(long = "tmt-correction", value_name = "FILE")]
     pub(crate) tmt_correction: Option<PathBuf>,
 

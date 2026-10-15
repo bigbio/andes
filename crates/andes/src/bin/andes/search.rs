@@ -237,6 +237,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.quant_dir.is_some() {
         crate::quant_run::check_unique_stems(&cli.spectrum)?;
     }
+    QuantSettings::check_args(&cli)?;
+    if let Some(warning) = deuterated_tag_warning(cli.tmt, cli.precursor_tol) {
+        eprintln!("{warning}");
+    }
     // Parse the digestion enzyme(s) once. `--enzyme` accepts a comma-separated
     // list for a multi-protease digest; the FIRST entry is the primary (drives
     // model selection via build_selection_key + the cleavage-credit feature),
@@ -312,6 +316,26 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 cli.decoy_strategy
             )
         })?;
+    // Isoform and chain entries share most peptides with their canonical
+    // entry. A shuffled decoy is permuted per entry, so the decoys share none,
+    // and the provenance columns (and the decoy search space) would differ
+    // between targets and decoys.
+    if decoy_strategy == search::decoy::DecoyStrategy::Shuffle
+        && target_db.proteins.iter().any(|p| {
+            matches!(
+                p.entry_kind(),
+                model::EntryKind::Isoform | model::EntryKind::Chain
+            )
+        })
+    {
+        return Err(
+            "--decoy-strategy shuffle cannot search isoform or mature-chain entries \
+                    (--uniprot-isoforms, --uniprot-chains): shuffled decoys do not keep the \
+                    peptides these entries share with their canonical entry. Use \
+                    --decoy-strategy reverse."
+                .into(),
+        );
+    }
     let t_phase = std::time::Instant::now();
     let idx = SearchIndex::from_target_db_for(
         &target_db,
@@ -643,6 +667,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     report_annotated_site_mods(&aa, &target_db);
+    warn_restricted_artefacts(&aa, cli.uniprot_variants);
 
     // ── 5. Build SearchParams ─────────────────────────────────────────────────
     let mut params = SearchParams::default_tryptic(aa);
@@ -2012,6 +2037,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `docs/plans/glyco/50-roadmap/rt-prediction-design.md` (Commit 1).
     output::populate_rt_features(&spectra, &mut queues, &pin_candidates);
 
+    // Provenance (additive): entry class, gap to the best Reference candidate,
+    // isotope-mimic flag. All 0 on a FASTA search except IsotopeMimic with
+    // isotope-like variable mods.
+    output::populate_provenance_features(&mut queues, &pin_candidates, &pin_index);
+
     output::write_pin(
         &output_pin_path,
         &spectra,
@@ -2376,6 +2406,33 @@ fn log_uniprot_load(stats: &input::UniProtLoadStats, opts: &input::UniProtOption
 /// Say how many annotated sites each `sites=annotated` mod of `aa` can use,
 /// and warn about one the database annotates no site of its mass for: it is
 /// never placed.
+/// Artefact masses that mimic common substitutions: deamidation (N→D, Q→E),
+/// oxidation (A→S, P→T…), carbamylation, methylation (G→A, S→T, D→E…).
+const ARTEFACT_MASSES: [f64; 4] = [0.984016, 15.994915, 43.005814, 14.015650];
+
+/// With natural variants searched, restricting one of these mods to annotated
+/// sites removes the canonical explanation that competes with a variant of the
+/// same mass.
+fn warn_restricted_artefacts(aa: &model::AminoAcidSet, variants_on: bool) {
+    if !variants_on {
+        return;
+    }
+    for m in aa.distinct_mods() {
+        if m.annotated_site_mass.is_some()
+            && ARTEFACT_MASSES
+                .iter()
+                .any(|a| (m.mass_delta - a).abs() <= model::protein::SITE_MASS_TOLERANCE)
+        {
+            eprintln!(
+                "WARN: {} ({:+.4} Da) is restricted to annotated sites while \
+                 --uniprot-variants is on: variants of the same mass lose the \
+                 competing explanation at unannotated residues.",
+                m.name, m.mass_delta
+            );
+        }
+    }
+}
+
 fn report_annotated_site_mods(aa: &model::AminoAcidSet, target_db: &model::ProteinDb) {
     let mut mods: Vec<(&str, f64)> = aa
         .distinct_mods()
@@ -2470,17 +2527,65 @@ pub(crate) fn write_filtered_tsv(
     w.flush()
 }
 
+/// TMTpro 32/35-plex peptides are searched with the TMTpro tag mass, but each
+/// deuterated tag is 2.9 mDa heavier. Below three such tags on a 1000 Da
+/// peptide (8.8 ppm), the precursor window misses the deuterated precursors.
+fn deuterated_tag_warning(
+    plex: Option<quant::Plex>,
+    precursor_tol: model::Tolerance,
+) -> Option<String> {
+    use model::Tolerance;
+    let plex = plex.filter(|p| p.has_deuterated_channels())?;
+    let shift = 3.0 * quant::isobaric::DEUTERATED_TAG_SHIFT_DA;
+    if precursor_tol.as_da(1000.0) >= shift {
+        return None;
+    }
+    let tol = match precursor_tol {
+        Tolerance::Ppm(v) => format!("{v}ppm"),
+        Tolerance::Da(v) => format!("{v}da"),
+    };
+    Some(format!(
+        "WARN: --tmt {}: each deuterated TMTpro tag is {:.1} mDa heavier than the TMTpro mass \
+         (304.2071 Da), so a 1000 Da peptide with three of them sits {:.1} ppm above its \
+         candidate, outside --precursor-tol {tol}. Widen it to 10ppm or more, or the \
+         deuterated channels' precursors are missed.",
+        plex.name(),
+        quant::isobaric::DEUTERATED_TAG_SHIFT_DA * 1e3,
+        shift / 1000.0 * 1e6,
+    ))
+}
+
 /// The detected-label class of a `--tmt` kit.
 fn isobaric_label_of_plex(plex: quant::Plex) -> input::IsobaricLabel {
     match plex {
         quant::Plex::Tmt6 | quant::Plex::Tmt10 | quant::Plex::Tmt11 => input::IsobaricLabel::Tmt,
-        quant::Plex::Tmt16 | quant::Plex::Tmt18 => input::IsobaricLabel::TmtPro,
+        quant::Plex::Tmt16 | quant::Plex::Tmt18 | quant::Plex::Tmt32 | quant::Plex::Tmt35 => {
+            input::IsobaricLabel::TmtPro
+        }
         quant::Plex::Itraq4 => input::IsobaricLabel::Itraq,
         quant::Plex::Itraq8 => input::IsobaricLabel::Itraq8,
     }
 }
 
 // ── Training pipeline ─────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod deuterated_tag_warning_tests {
+    use super::deuterated_tag_warning;
+    use model::Tolerance;
+    use quant::Plex;
+
+    #[test]
+    fn warns_only_for_deuterated_kits_under_a_narrow_window() {
+        let w = deuterated_tag_warning(Some(Plex::Tmt35), Tolerance::Ppm(5.0)).unwrap();
+        assert!(w.contains("8.8 ppm") && w.contains("5ppm"), "{w}");
+        assert!(deuterated_tag_warning(Some(Plex::Tmt32), Tolerance::Da(0.005)).is_some());
+        assert!(deuterated_tag_warning(Some(Plex::Tmt35), Tolerance::Ppm(10.0)).is_none());
+        assert!(deuterated_tag_warning(Some(Plex::Tmt35), Tolerance::Da(0.02)).is_none());
+        assert!(deuterated_tag_warning(Some(Plex::Tmt18), Tolerance::Ppm(5.0)).is_none());
+        assert!(deuterated_tag_warning(None, Tolerance::Ppm(5.0)).is_none());
+    }
+}
 
 #[cfg(test)]
 mod retrieval_choice_tests {

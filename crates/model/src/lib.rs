@@ -20,7 +20,7 @@ pub mod spectrum;
 pub mod tolerance;
 pub mod unimod;
 
-pub use aa_set::{AaSetError, AminoAcidSet, AminoAcidSetBuilder};
+pub use aa_set::{AaSetError, AminoAcidSet, AminoAcidSetBuilder, Terminus};
 pub use activation::ActivationMethod;
 pub use amino_acid::AminoAcid;
 pub use enzyme::Enzyme;
@@ -29,7 +29,8 @@ pub use mass::{nominal_from, H2O, PROTON};
 pub use modification::{ModLocation, ModParseError, Modification, ResidueSpec};
 pub use peptide::Peptide;
 pub use protein::{
-    ChainEnds, ModSite, Protein, ProteinAnnotation, ProteinDb, SiteAnchor, VariantRegion,
+    ChainEnds, EntryKind, EntryOrigin, ModSite, Protein, ProteinAnnotation, ProteinDb, SiteAnchor,
+    Substitution, VariantRegion,
 };
 pub use protocol::Protocol;
 pub use scan::{Ms1Scan, ProductScan};

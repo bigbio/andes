@@ -222,6 +222,115 @@ fn tmt10_ms3_reporters_follow_the_sps_scan() {
 }
 
 #[test]
+fn tmt35_reads_the_deuterated_kit_in_openms_order() {
+    // The TMT10 fixture's reporters sit on the 35-plex channels of the same
+    // name (TMT10's 131 is 131N); the deuterated channels, 2.9 mDa above
+    // their twins, read nothing at the 10 ppm default.
+    let dir = tempfile::tempdir().unwrap();
+    let pin = dir.path().join("tmt35.pin");
+    let qpx = dir.path().join("tmt35.idparquet");
+    run_andes(&[
+        "--spectrum",
+        fixture("test-fixtures/tmt10_synthetic.mzML.gz")
+            .to_str()
+            .unwrap(),
+        "--database",
+        fixture("test-fixtures/BSA.fasta").to_str().unwrap(),
+        "--mods",
+        fixture("test-fixtures/tmt10_mods.txt").to_str().unwrap(),
+        "--output-pin",
+        pin.to_str().unwrap(),
+        "--output-parquet",
+        qpx.to_str().unwrap(),
+        "--tmt",
+        "tmt35",
+        "--threads",
+        "2",
+    ]);
+    let (header, rows) = read_tsv(&dir.path().join("tmt35.tmt.tsv"));
+    assert!(rows.len() >= 4, "got {} rows", rows.len());
+    let first = col(&header, "tmt_126");
+    let channels: Vec<&str> = header[first..].iter().map(String::as_str).collect();
+    assert_eq!(channels.len(), 35, "{channels:?}");
+    assert_eq!(
+        &channels[..8],
+        &[
+            "tmt_126",
+            "tmt_127N",
+            "tmt_127C",
+            "tmt_127D",
+            "tmt_128N",
+            "tmt_128C",
+            "tmt_128ND",
+            "tmt_128CD"
+        ]
+    );
+    assert_eq!(channels[34], "tmt_135CD");
+    let c126 = col(&header, "tmt_126");
+    let c129c = col(&header, "tmt_129C");
+    let c131n = col(&header, "tmt_131N");
+    let deuterated: Vec<usize> = header
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| h.starts_with("tmt_") && h.ends_with('D'))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(deuterated.len(), 17);
+    for r in &rows {
+        let a: f64 = r[c126].parse().unwrap();
+        let b: f64 = r[c129c].parse().unwrap();
+        assert!(a > 0.0 && (b / a - 2.0).abs() < 0.02, "{a} vs {b}");
+        assert!(r[c131n].parse::<f64>().unwrap() > 0.0);
+        for &d in &deuterated {
+            assert_eq!(r[d].parse::<f64>().unwrap(), 0.0, "{}", header[d]);
+        }
+    }
+    let (n, _) = parquet_rows(&qpx.join("quantms.feature.parquet"));
+    assert_eq!(n, rows.len());
+}
+
+#[test]
+fn tmt35_refuses_a_correction_sheet_and_a_20ppm_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let pin = dir.path().join("tmt35.pin");
+    let refused = |extra: &[&str]| {
+        let spectrum = fixture("test-fixtures/tmt10_synthetic.mzML.gz");
+        let database = fixture("test-fixtures/BSA.fasta");
+        let mods = fixture("test-fixtures/tmt10_mods.txt");
+        let mut args = vec![
+            "--spectrum",
+            spectrum.to_str().unwrap(),
+            "--database",
+            database.to_str().unwrap(),
+            "--mods",
+            mods.to_str().unwrap(),
+            "--output-pin",
+            pin.to_str().unwrap(),
+            "--tmt",
+            "tmt35",
+            "--threads",
+            "2",
+        ];
+        args.extend_from_slice(extra);
+        let out = Command::new(env!("CARGO_BIN_EXE_andes"))
+            .args(&args)
+            .output()
+            .expect("run andes");
+        assert!(!out.status.success(), "andes accepted {extra:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        // Refused from the command line alone, before the database is loaded.
+        assert!(!stderr.contains("target proteins"), "{stderr}");
+        stderr
+    };
+    let sheet = dir.path().join("lot.txt");
+    std::fs::write(&sheet, "NA/NA/NA/NA/NA/NA/NA/NA\n".repeat(35)).unwrap();
+    let stderr = refused(&["--tmt-correction", sheet.to_str().unwrap()]);
+    assert!(stderr.contains("not supported for tmt35plex"), "{stderr}");
+    let stderr = refused(&["--tmt-tol", "20ppm"]);
+    assert!(stderr.contains("e.g. 10ppm"), "{stderr}");
+}
+
+#[test]
 fn lfq_areas_track_the_designed_intensities() {
     let dir = tempfile::tempdir().unwrap();
     let pin = dir.path().join("lfq.pin");

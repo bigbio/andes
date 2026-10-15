@@ -909,16 +909,19 @@ pub(crate) mod tests {
                     accession: "P1".into(),
                     description: "".into(),
                     sequence: b"MKWVTFISLLRKDAFLGSFLYEYSRK".to_vec(),
+                    annotation: None,
                 },
                 Protein {
                     accession: "P2".into(),
                     description: "".into(),
                     sequence: b"GGGKDAFLGSFLYEYSRKGGG".to_vec(),
+                    annotation: None,
                 },
                 Protein {
                     accession: "P3".into(),
                     description: "".into(),
                     sequence: b"GGGKADFGLSFLYEYSRKGGG".to_vec(),
+                    annotation: None,
                 },
             ],
         };
@@ -971,11 +974,13 @@ pub(crate) mod tests {
                     accession: "P1".into(),
                     description: "".into(),
                     sequence: b"MKWVTFISLLRKDAFLGSFLYEYSRK".to_vec(),
+                    annotation: None,
                 },
                 Protein {
                     accession: "P2".into(),
                     description: "".into(),
                     sequence: b"GGGKADFGLSFLYEYSRKGGG".to_vec(),
+                    annotation: None,
                 },
             ],
         };

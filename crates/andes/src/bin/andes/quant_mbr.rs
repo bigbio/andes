@@ -84,10 +84,11 @@ use output::mbr_out::{
 };
 use output::ms1_table::read_ms1_table;
 use quant::align::RunMap;
-use quant::decoys::{probes, Hypothesis, Probe};
+use quant::decoys::{probes, Hypothesis, Probe, PEPTIDE_MASS_SLOPE};
 use quant::evidence::{fit_many, Evidence, EvidenceParams, FitJob, WIDTH_GRID};
 use quant::library::{Library, LibraryEntry};
 use quant::ms1_index::Ms1RunIndex;
+use quant::ms2::{elution_window, LibrarySpectrum, Ms2RunIndex};
 use quant::normalize::{fit as fit_normalization, NormCell, NormParams, RunNormalization};
 use rayon::prelude::*;
 
@@ -464,6 +465,7 @@ fn entry_rows(
             evidence: None,
             n_donor_runs,
             library_q: e.q,
+            ms2: None,
         };
         (row, *probe)
     };
@@ -639,6 +641,100 @@ pub(crate) fn extract_run(
     Ok(finish(slots, width_fit_count, &wp))
 }
 
+/// MS2 evidence of one run's transfer and pseudo-transfer rows, by role and
+/// decoy family, for the extract log.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct Ms2Counts {
+    /// Per role (0 transfer, 1 pseudo-transfer) and family (0 target, 1 mass
+    /// shift, 2 RT shift): rows with MS2 evidence, of them with at least one
+    /// scan in the window, and of them supported
+    /// ([`quant::ms2::Ms2Evidence::supports`]).
+    pub rows: [[usize; 3]; 2],
+    pub with_scan: [[usize; 3]; 2],
+    pub supported: [[usize; 3]; 2],
+    /// Transfer and pseudo-transfer rows with a fit whose entry has no
+    /// library spectrum (no MS2 evidence).
+    pub no_spectrum: usize,
+}
+
+/// The m/z of a probe of precursor `meta` with hypothesis `kind`, as
+/// [`quant::decoys::probes`] builds it.
+fn probe_mz(meta: &quant::library::PrecursorMeta, kind: Hypothesis) -> f64 {
+    match kind {
+        Hypothesis::MassShiftDecoy(n) => {
+            meta.mz + n as f64 * PEPTIDE_MASS_SLOPE / meta.charge.max(1) as f64
+        }
+        Hypothesis::Target | Hypothesis::RtShiftDecoy => meta.mz,
+    }
+}
+
+/// Sets the MS2 evidence of every transfer and pseudo-transfer row with a
+/// fit: the best scan of run `ms2` for the entry's library spectrum
+/// (`spectra`, per precursor id) among the scans isolating the row's probe
+/// m/z within its fitted elution window, at the entry's FAIMS voltage. A
+/// decoy row is scored with its target's spectrum on its own m/z and window.
+/// A pseudo-transfer leaves out the scans of its run's donor PSMs
+/// (`donor_scans`, per precursor id), whose identifications make it a
+/// pseudo-transfer; a transfer has none in its run. Rows of entries without
+/// a spectrum, identified rows and rows without a fit keep `None`.
+pub(crate) fn attach_ms2(
+    rows: &mut [ExtractRow],
+    lib: &Library,
+    spectra: &[Option<LibrarySpectrum>],
+    donor_scans: &[Vec<(u16, f64)>],
+    ms2: &Ms2RunIndex,
+    tol: model::Tolerance,
+) -> Ms2Counts {
+    let mut faims: Vec<Option<f32>> = vec![None; lib.meta.len()];
+    for e in &lib.entries {
+        faims[e.precursor as usize] = e.faims_cv;
+    }
+    rows.par_iter_mut().for_each(|r| {
+        r.ms2 = None;
+        if r.role == Role::Identified {
+            return;
+        }
+        let (Some(e), Some(Some(lib_spec))) = (&r.evidence, spectra.get(r.precursor as usize))
+        else {
+            return;
+        };
+        let Some(window) = elution_window(e.t0, e.w) else {
+            return;
+        };
+        let p = r.precursor as usize;
+        let exclude: Vec<f64> = if r.role == Role::PseudoTransfer {
+            donor_scans[p]
+                .iter()
+                .filter(|(run, _)| *run == r.run)
+                .map(|&(_, t)| t)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mz = probe_mz(&lib.meta[p], r.kind);
+        r.ms2 = Some(ms2.best_match(lib_spec, mz, window, faims[p], &exclude, tol));
+    });
+    let mut c = Ms2Counts::default();
+    for r in rows.iter() {
+        let role = match r.role {
+            Role::Identified => continue,
+            Role::Transfer => 0,
+            Role::PseudoTransfer => 1,
+        };
+        let Some(m) = &r.ms2 else {
+            if r.evidence.is_some() {
+                c.no_spectrum += 1;
+            }
+            continue;
+        };
+        let f = family(r.kind) as usize;
+        c.rows[role][f] += 1;
+        c.with_scan[role][f] += usize::from(m.n_scans > 0);
+        c.supported[role][f] += usize::from(m.supports());
+    }
+    c
+}
+
 /// `d run RT / d consensus RT` of run `run`'s map at run RT `rt`; `None` for
 /// an unaligned run or a slope that is not finite and positive.
 fn local_slope(maps: &[Option<RunMap>], run: u16, rt: f64) -> Option<f64> {
@@ -722,9 +818,12 @@ fn run_normalization(
 const MIN_AMPLITUDE_SE: f64 = 1e-12;
 
 /// The transfer FDR features of a row, in [`TRANSFER_FEATURES`] order;
-/// `None` without evidence or with a non-finite value.
+/// `None` without evidence or with a non-finite value. A row without MS2
+/// evidence (no library spectrum) has zero MS2 features, as a row whose
+/// window holds no scan.
 pub(crate) fn transfer_features(row: &ExtractRow) -> Option<Vec<f32>> {
     let e = row.evidence.as_ref()?;
+    let ms2 = row.ms2.unwrap_or_default();
     let snr = e.amplitude / e.amplitude_se.max(MIN_AMPLITUDE_SE);
     let x = [
         e.llr,
@@ -740,6 +839,9 @@ pub(crate) fn transfer_features(row: &ExtractRow) -> Option<Vec<f32>> {
         (snr + 1.0).log10(),
         row.n_donor_runs as f64,
         row.library_q,
+        ms2.best.angle as f64,
+        ms2.best.n_matched as f64,
+        ms2.best.explained as f64,
     ];
     debug_assert_eq!(x.len(), TRANSFER_FEATURES.len());
     let x: Vec<f32> = x.iter().map(|&v| v as f32).collect();
@@ -939,6 +1041,11 @@ pub(crate) fn finalize(
     let mut out: Vec<(u32, u16, MbrRow<'_>, Option<f64>)> = Vec::new();
     for (i, r) in rows.iter().enumerate() {
         if r.kind != Hypothesis::Target {
+            if let (Role::Transfer, Some(m)) = (r.role, &r.ms2) {
+                let f = family(r.kind) as usize;
+                v.ms2_rows[f] += 1;
+                v.ms2_supported[f] += usize::from(m.supports());
+            }
             continue;
         }
         let e = r.evidence.as_ref();
@@ -973,16 +1080,28 @@ pub(crate) fn finalize(
                         a.rt_only += ok(fdr.result.q_rt_only[k]);
                     }
                 }
-                let t = if accepted(q) {
-                    EvidenceType::TransferMs1
-                } else {
-                    EvidenceType::BelowThreshold
+                let supported = r.ms2.is_some_and(|m| m.supports());
+                if let Some(m) = &r.ms2 {
+                    v.ms2_rows[0] += 1;
+                    v.ms2_supported[0] += usize::from(m.supports());
+                }
+                let t = match (accepted(q), supported) {
+                    (true, true) => {
+                        v.transfer_ms2 += 1;
+                        EvidenceType::TransferMs2
+                    }
+                    (true, false) => EvidenceType::TransferMs1,
+                    (false, _) => EvidenceType::BelowThreshold,
                 };
                 (t, q, q)
             }
             Role::PseudoTransfer => {
                 let q = transfer_features(r).and_then(|x| fdr.pseudo_q(r.precursor, &x));
                 v.pseudo_transfers += 1;
+                if let Some(m) = &r.ms2 {
+                    v.ms2_pseudo_rows += 1;
+                    v.ms2_pseudo_supported += usize::from(m.supports());
+                }
                 v.pseudo_scored += usize::from(q.is_some());
                 let wrong = match (e, identified.get(&(r.precursor, r.run))) {
                     (Some(p), Some(id)) => Some((p.t0 - id.t0).abs() > id.w),
@@ -1081,6 +1200,31 @@ pub(crate) fn finalize(
     eprintln!(
         "[mbr] pseudo-transfers {}: wrong peak {} of {}",
         v.pseudo_transfers, v.wrong_peak, v.wrong_peak_pairs
+    );
+    let rate = |a: usize, b: usize| {
+        if b > 0 {
+            format!("{:.4}", a as f64 / b as f64)
+        } else {
+            "NA".to_string()
+        }
+    };
+    eprintln!(
+        "[mbr] MS2 support (at least {} fragments at angle >= {}): transfer targets {} of {} ({}), mass-shift decoys {} of {} ({}), RT-shift decoys {} of {} ({}), pseudo-transfers {} of {} ({}); {} accepted transfers are transfer_ms2",
+        quant::ms2::SUPPORT_MIN_MATCHED,
+        quant::ms2::SUPPORT_MIN_ANGLE,
+        v.ms2_supported[0],
+        v.ms2_rows[0],
+        rate(v.ms2_supported[0], v.ms2_rows[0]),
+        v.ms2_supported[1],
+        v.ms2_rows[1],
+        rate(v.ms2_supported[1], v.ms2_rows[1]),
+        v.ms2_supported[2],
+        v.ms2_rows[2],
+        rate(v.ms2_supported[2], v.ms2_rows[2]),
+        v.ms2_pseudo_supported,
+        v.ms2_pseudo_rows,
+        rate(v.ms2_pseudo_supported, v.ms2_pseudo_rows),
+        v.transfer_ms2
     );
     eprintln!(
         "[mbr] run normalisation (quantity_normalized): {} reference precursors (identified, quant_q <= {VALIDATION_Q}, in >= 3 runs or all runs)",
@@ -1826,6 +1970,7 @@ mod finalize_tests {
             evidence: e,
             n_donor_runs: 1,
             library_q: 0.001,
+            ms2: None,
         }
     }
 
@@ -2446,5 +2591,238 @@ mod finalize_tests {
         assert!(transfer_features(&r).is_none());
         r.evidence = None;
         assert!(transfer_features(&r).is_none());
+    }
+
+    use quant::ms2::Ms2Evidence;
+
+    fn supporting() -> Ms2Evidence {
+        Ms2Evidence {
+            n_scans: 2,
+            best: quant::ms2::ScanMatch {
+                n_matched: 9,
+                angle: 0.9,
+                explained: 0.95,
+            },
+        }
+    }
+
+    fn empty_ms2() -> Ms2Evidence {
+        Ms2Evidence {
+            n_scans: 1,
+            best: quant::ms2::ScanMatch::default(),
+        }
+    }
+
+    #[test]
+    fn transfer_features_carry_the_ms2_evidence() {
+        let mut g = Rng(3);
+        let mut r = row(
+            0,
+            1,
+            Hypothesis::Target,
+            Role::Transfer,
+            Some(evidence(&mut g, true, 100.0)),
+        );
+        let n = TRANSFER_FEATURES.len();
+        let x = transfer_features(&r).unwrap();
+        assert_eq!(&x[n - 3..], [0.0, 0.0, 0.0]);
+        r.ms2 = Some(supporting());
+        let x = transfer_features(&r).unwrap();
+        assert_eq!(&x[n - 3..], [0.9, 9.0, 0.95]);
+        assert_eq!(
+            &TRANSFER_FEATURES[n - 3..],
+            ["ms2_angle", "ms2_n_matched", "ms2_explained"]
+        );
+    }
+
+    #[test]
+    fn supported_accepted_transfers_are_transfer_ms2() {
+        let mut runs = extract();
+        for r in runs[1].iter_mut() {
+            r.ms2 = Some(if r.kind == Hypothesis::Target && r.precursor % 4 == 0 {
+                supporting()
+            } else {
+                empty_ms2()
+            });
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (mbr, val) = mbr_paths(&dir.path().join("x"));
+        let s = finalize(&stems(), &library(), &runs, 0.01, None, 7, &mbr, &val).unwrap();
+        let t = table(&mbr);
+        let ms2_rows: Vec<&Vec<String>> =
+            t[1..].iter().filter(|r| r[2] == "transfer_ms2").collect();
+        assert!(!ms2_rows.is_empty());
+        for r in &ms2_rows {
+            let p: u32 = r[0]
+                .trim_start_matches("PEP")
+                .trim_end_matches("/2")
+                .parse()
+                .unwrap();
+            assert_eq!(p % 4, 0, "{r:?}");
+        }
+        let v = &s.validation;
+        assert_eq!(v.transfer_ms2, ms2_rows.len());
+        assert_eq!(v.ms2_rows[0], N as usize);
+        assert_eq!(v.ms2_supported[0], (N as usize).div_ceil(4));
+        assert_eq!((v.ms2_supported[1], v.ms2_supported[2]), (0, 0));
+        assert!(v.ms2_rows[1] > 0 && v.ms2_rows[2] > 0);
+        let vt = table(&val);
+        let get = |name: &str| &vt[1][vt[0].iter().position(|h| h == name).unwrap()];
+        assert_eq!(get("transfer_ms2"), &ms2_rows.len().to_string());
+    }
+
+    /// Run 1: every transfer target and every decoy sits on a clean MS1 peak
+    /// (decoys on other peptides' peaks); only the present targets (even
+    /// precursors) have an MS2 scan that matches their library spectrum.
+    fn ambiguous_ms1(with_ms2: bool) -> Vec<Vec<ExtractRow>> {
+        let mut runs = extract();
+        let mut g = Rng(11);
+        let mut run1 = Vec::new();
+        for p in 0..N {
+            let apex = 100.0 + p as f64;
+            for kind in [
+                Hypothesis::Target,
+                Hypothesis::MassShiftDecoy(7),
+                Hypothesis::RtShiftDecoy,
+            ] {
+                let mut r = row(
+                    p,
+                    1,
+                    kind,
+                    Role::Transfer,
+                    Some(evidence(&mut g, true, apex)),
+                );
+                if with_ms2 {
+                    r.ms2 = Some(if kind == Hypothesis::Target && p % 2 == 0 {
+                        supporting()
+                    } else {
+                        empty_ms2()
+                    });
+                }
+                run1.push(r);
+            }
+        }
+        runs[1] = run1;
+        runs
+    }
+
+    #[test]
+    fn ms2_evidence_separates_transfers_that_ms1_cannot() {
+        let accepted = |with_ms2: bool| {
+            let dir = tempfile::tempdir().unwrap();
+            let (mbr, val) = mbr_paths(&dir.path().join("x"));
+            let runs = ambiguous_ms1(with_ms2);
+            finalize(&stems(), &library(), &runs, 0.01, None, 7, &mbr, &val).unwrap();
+            let (mut present, mut absent) = (0usize, 0usize);
+            for r in &table(&mbr)[1..] {
+                if r[1] != "b" || !r[2].starts_with("transfer_ms") {
+                    continue;
+                }
+                let p: u32 = r[0]
+                    .trim_start_matches("PEP")
+                    .trim_end_matches("/2")
+                    .parse()
+                    .unwrap();
+                if p % 2 == 0 {
+                    present += 1;
+                } else {
+                    absent += 1;
+                }
+            }
+            (present, absent)
+        };
+        let (p0, a0) = accepted(false);
+        let (p1, a1) = accepted(true);
+        eprintln!(
+            "MS1 only: {p0} present, {a0} absent accepted; with MS2: {p1} present, {a1} absent"
+        );
+        assert!(
+            p0 + a0 < 50,
+            "MS1 alone should not separate these: {p0} + {a0}"
+        );
+        assert!(p1 >= 400, "{p1} of 450 present transfers accepted with MS2");
+        assert!(a1 <= 5, "{a1} absent transfers accepted with MS2");
+    }
+
+    #[test]
+    fn attach_ms2_scores_each_probe_on_its_own_window() {
+        use quant::ms2::{fragment_ladder, library_spectrum, residue_masses, Ms2Scan};
+        let lib = library();
+        let tol = model::Tolerance::Ppm(20.0);
+        let ladder = fragment_ladder(
+            &residue_masses("LGEYGFQNALIVR", &std::collections::HashMap::new()).unwrap(),
+            2,
+        );
+        let donor: Vec<(f32, f32)> = ladder
+            .iter()
+            .enumerate()
+            .map(|(k, f)| (f.mz as f32, 100.0 + k as f32))
+            .collect();
+        let spectrum = library_spectrum(&ladder, &donor, tol).unwrap();
+        let mut spectra = vec![None; lib.meta.len()];
+        spectra[0] = Some(spectrum);
+        let mut donor_scans = vec![Vec::new(); lib.meta.len()];
+        donor_scans[0] = vec![(0u16, 50.0), (1u16, 100.0)];
+        let noise = vec![(321.1f32, 10.0f32), (654.3, 20.0)];
+        let target_mz = lib.meta[0].mz;
+        let decoy_mz = probe_mz(&lib.meta[0], Hypothesis::MassShiftDecoy(7));
+        assert!((decoy_mz - target_mz - 7.0 * PEPTIDE_MASS_SLOPE / 2.0).abs() < 1e-12);
+        let scan = |rt: f64, mz: f64, peaks: &Vec<(f32, f32)>| Ms2Scan {
+            native_id: format!("scan={rt}"),
+            spec_key: format!("k{rt}"),
+            rt,
+            precursor_mz: mz,
+            charge: 2,
+            isolation: Some((mz, 0.7, 0.7)),
+            faims_cv: None,
+            peaks: peaks.clone(),
+        };
+        let index = Ms2RunIndex::new(vec![
+            scan(100.0, target_mz, &donor),
+            scan(101.0, target_mz, &noise),
+            scan(200.0, decoy_mz, &noise),
+            scan(400.0, target_mz, &donor),
+        ]);
+        let ev = |t0: f64| {
+            let mut g = Rng(1);
+            Some(evidence(&mut g, true, t0))
+        };
+        let mut rows = vec![
+            row(0, 1, Hypothesis::Target, Role::Transfer, ev(100.0)),
+            row(
+                0,
+                1,
+                Hypothesis::MassShiftDecoy(7),
+                Role::Transfer,
+                ev(200.0),
+            ),
+            row(0, 1, Hypothesis::RtShiftDecoy, Role::Transfer, ev(400.0)),
+            row(0, 1, Hypothesis::Target, Role::PseudoTransfer, ev(100.0)),
+            row(0, 1, Hypothesis::Target, Role::Identified, ev(100.0)),
+            row(0, 1, Hypothesis::Target, Role::Transfer, None),
+            row(1, 1, Hypothesis::Target, Role::Transfer, ev(100.0)),
+        ];
+        let c = attach_ms2(&mut rows, &lib, &spectra, &donor_scans, &index, tol);
+        let m = |i: usize| rows[i].ms2.unwrap();
+        // The target sees both scans at its m/z; the donor-like one wins.
+        assert_eq!(m(0).n_scans, 2);
+        assert!(m(0).supports());
+        // The mass-shift decoy sees only the scan of its own m/z.
+        assert_eq!(m(1).n_scans, 1);
+        assert!(!m(1).supports());
+        // The RT-shift decoy at the same m/z elsewhere in the run is scored
+        // with the same spectrum: a scan there with that spectrum supports it.
+        assert_eq!(m(2).n_scans, 1);
+        assert!(m(2).supports());
+        // The pseudo-transfer leaves out its run's donor scan (RT 100).
+        assert_eq!(m(3).n_scans, 1);
+        assert!(!m(3).supports());
+        // Identified rows, rows without a fit and entries without a spectrum
+        // get none.
+        assert!(rows[4].ms2.is_none() && rows[5].ms2.is_none() && rows[6].ms2.is_none());
+        assert_eq!(c.rows[0], [1, 1, 1]);
+        assert_eq!(c.supported[0], [1, 0, 1]);
+        assert_eq!((c.rows[1][0], c.supported[1][0]), (1, 0));
+        assert_eq!(c.no_spectrum, 1);
     }
 }

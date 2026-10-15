@@ -1186,8 +1186,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // reporters) are captured by the readers next to the MS2 stream and handed
     // to the collector per file. Quantification itself runs after rescoring.
     let mut quant: Option<QuantCollector> =
-        QuantSettings::from_cli(&cli, param.data_type.instrument.is_high_resolution())?
-            .map(QuantCollector::new);
+        QuantSettings::from_cli(&cli, param.data_type.instrument.is_high_resolution())?.map(
+            |mut settings| {
+                // Recorded in each run's MS2 table, where the library matches
+                // its fragment spectra and extract scores transfers.
+                settings.fragment_tol = Some(scorer.feature_match_tolerance());
+                QuantCollector::new(settings)
+            },
+        );
     if let Some(q) = &quant {
         let s = &q.settings;
         if is_mgf && (s.needs_ms1_series() || s.needs_ms3()) {

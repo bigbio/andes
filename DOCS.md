@@ -320,7 +320,7 @@ See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model)
 | `--tmt-correction` | path | *(none)* | Isotope impurity sheet of the kit lot (§10); corrected intensities by NNLS, raw kept alongside. |
 | `--tmt-min-purity` | 0..1 | `0` | Drop PSMs below this precursor isolation purity from `tmt.tsv` (they stay in the parquet). |
 | `--lfq` | flag | off | Label-free MS1 quantification of the confident precursors (§10). Writes `<stem>.lfq.tsv` and `<stem>.lfq_features.tsv`. mzML / `.raw` with high-resolution MS1; the MS2 may be ion-trap. |
-| `--quant-dir` | dir | *(none)* | Per input file writes `<stem>.ms1.parquet` (the run's MS1 scans, every FAIMS voltage) and `<stem>.quant.parquet` (every rank-1 PSM, targets and decoys, no FDR filter; `spec_id` is the PIN SpecId, `search_score` the PIN `RawScore`) for the multi-run quantification stages. Implies MS1 capture; same inputs as `--lfq`. Two inputs with the same stem, or an input without MS1 scans, are an error. Other outputs are unchanged. |
+| `--quant-dir` | dir | *(none)* | Per input file writes `<stem>.ms1.parquet` (the run's MS1 scans, every FAIMS voltage), `<stem>.ms2.parquet` (every MS2 scan reduced to its 100 most intense centroids, with its precursor and isolation window) and `<stem>.quant.parquet` (every rank-1 PSM, targets and decoys, no FDR filter; `spec_id` is the PIN SpecId, `search_score` the PIN `RawScore`) for the multi-run quantification stages. Implies MS1 capture; same inputs as `--lfq`. Two inputs with the same stem, or an input without MS1 scans, are an error. Other outputs are unchanged. |
 | `--lfq-tol` | tolerance | `10ppm` | MS1 tolerance of the isotope chromatograms, and of the `--mbr` template fit (ppm only there). |
 | `--lfq-rt-window` | seconds | `60` | Half-window around the identifying PSM's retention time. |
 | `--lfq-gaussian-width` | seconds | *(none)* | Experimental Gaussian smoothing width (eight sigma) for peak detection; areas use raw traces. Validate feature-q coverage for the acquisition. Default detection uses five-scan Savitzky–Golay. |
@@ -329,8 +329,8 @@ See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model)
 | `--quant-fdr` | 0..1 | `--fdr` | PSM q-value cut for quantification targets when `--rescore`/`--rescore-native` ran. With `--mbr`, also the PSM q-value at which a run identifies a precursor (§10). |
 | `--mbr` | flag | off | Match-between-runs label-free quantification across two or more inputs (§10). Needs `--lfq` and `--rescore` (or `--rescore-native`); not with `--tmt`. Writes `<stem>.mbr.tsv` and `<stem>.mbr_validation.tsv`; with `--output-parquet`, `quantms.feature.parquet` holds these rows (without the below-threshold transfers) instead of the per-run features. Uses `--quant-dir`, or a temporary directory removed at exit. With `--rescore` (Percolator), same result as `andes quant library`, `extract` and `finalize` on the same Percolator results. |
 | `--mbr-library-fdr` | 0..1 | `0.01` | Internal library entry gate (precursor-level), not a reported identification FDR: best-PSM-per-precursor target/decoy q-value over the rescored PSM scores of all runs. |
-| `--mbr-fdr` | 0..1 | `0.01` | Transfer quality q-value: transfers at or below it are `transfer_ms1`. An internal quant-quality q-value, not an identification FDR. |
-| `--quant-feature-fdr` | 0..1 or `off` | `0.05` | Identified-row quality q-value (`quant_q`): an identified row whose MS1 feature has a `quant_q` above it (or none) is `identified_below_threshold` and left out of `quantms.feature.parquet` (§10); `off` reports every identified row. An internal quant-quality q-value, not an identification FDR. |
+| `--mbr-fdr` | 0..1 | `0.01` | Transfer quality q-value: transfers at or below it are `transfer_ms2` (an MS2 scan of the run supports them) or `transfer_ms1`. An internal quant-quality q-value, not an identification FDR. |
+| `--quant-feature-fdr` | 0..1 or `off` | `off` | Identified-row quality q-value (`quant_q`): with a value, an identified row whose MS1 feature has a `quant_q` above it (or none) is `identified_below_threshold` and left out of `quantms.feature.parquet` (§10); `off` reports every identified row and keeps `quant_q` as an annotation. An internal quant-quality q-value, not an identification FDR. |
 
 With `--output-parquet`, both modules add `quantms.feature.parquet` (the QPX feature view) to the bundle.
 
@@ -601,29 +601,41 @@ Written next to the PIN (or next to `--output-tsv`/`--output-parquet` under `--r
 | `<stem>.tmt.tsv` | one per quantified PSM | `filename scannr spec_id quant_scan quant_ms_level rt peptide charge proteins is_decoy psm_q_value psm_pep purity`, then one `tmt_<channel>` (or `itraq_<channel>`) per channel, then `raw_<...>` when a correction matrix was applied |
 | `<stem>.lfq.tsv` | one per (peptidoform, charge) at feature q ≤ `--lfq-feature-fdr` and cosine ≥ `--lfq-min-cosine` | `peptide charge proteins feature_q_value score cosine`, then the integrated area per input file |
 | `<stem>.lfq_features.tsv` | one per feature per run (all, with their q-value) | apex RT, boundaries, scan count, area, apex height, per-isotope areas, cosine, score, decoy score, feature q-value |
-| `<stem>.mbr.tsv` (`--mbr`, `andes quant finalize -o <stem>`) | one per (precursor, run) identified in or transferred into the run | `precursor_key run evidence_type quantity quantity_se quantity_normalized transfer_q quant_q apex_rt_s library_q`; `quantity_normalized` is `quantity` with the run's level and RT-local offset removed (§10, `NA` when the run is not normalised); `evidence_type` is `identified` (the run has a target PSM of the precursor at PSM q ≤ `--quant-fdr` and, with `--pep`, PEP ≤ `--pep`), `identified_below_threshold` (identified, but `quant_q` above `--quant-feature-fdr` or missing; quantity kept, in this table only), `transfer_ms1` (transfer q ≤ `--mbr-fdr`) or `below_threshold` (quantity kept, as censored; in this table only); `quant_q` is the quality q-value of the row's MS1 feature against its decoys (the identified-row estimate for identified rows, equal to `transfer_q` for transfers); `transfer_q`, `quant_q` and `library_q` are internal quant-quality values, not identification FDR; `NA` for missing values. Precursors that fail the library entry gate have no rows |
-| `<stem>.mbr_validation.tsv` | one | pseudo-transfer validation (identified pairs re-measured as transfers: acceptance rate `pseudo_acceptance_*`, wrong-peak rate) and accepted transfer counts for the pooled and per-decoy-family estimates, at q ≤ 0.01 (`_q01`) and at `--mbr-fdr` (`_at_threshold`); then `--quant-feature-fdr` (`NA` when off) and the identified rows: all, with a `quant_q`, at `quant_q` ≤ 0.01, and `identified_below_threshold` |
+| `<stem>.mbr.tsv` (`--mbr`, `andes quant finalize -o <stem>`) | one per (precursor, run) identified in or transferred into the run | `precursor_key run evidence_type quantity quantity_se quantity_normalized transfer_q quant_q apex_rt_s library_q`; `quantity_normalized` is `quantity` with the run's level and RT-local offset removed (§10, `NA` when the run is not normalised); `evidence_type` is `identified` (the run has a target PSM of the precursor at PSM q ≤ `--quant-fdr` and, with `--pep`, PEP ≤ `--pep`), `identified_below_threshold` (identified, but `quant_q` above `--quant-feature-fdr` or missing; quantity kept, in this table only), `transfer_ms2` (transfer q ≤ `--mbr-fdr`, and an MS2 scan of the run matches the precursor's library spectrum: at least 4 fragments at a spectral angle of at least 0.6), `transfer_ms1` (transfer q ≤ `--mbr-fdr`, without that MS2 support) or `below_threshold` (quantity kept, as censored; in this table only); `quant_q` is the quality q-value of the row's MS1 feature against its decoys (the identified-row estimate for identified rows, equal to `transfer_q` for transfers); `transfer_q`, `quant_q` and `library_q` are internal quant-quality values, not identification FDR; `NA` for missing values. Precursors that fail the library entry gate have no rows |
+| `<stem>.mbr_validation.tsv` | one | pseudo-transfer validation (identified pairs re-measured as transfers: acceptance rate `pseudo_acceptance_*`, wrong-peak rate) and accepted transfer counts for the pooled and per-decoy-family estimates, at q ≤ 0.01 (`_q01`) and at `--mbr-fdr` (`_at_threshold`); then `--quant-feature-fdr` (`NA` when off) and the identified rows: all, with a `quant_q`, at `quant_q` ≤ 0.01, and `identified_below_threshold`; then the MS2 evidence of the transfer rows: per hypothesis (`ms2_target_*`, `ms2_mass_decoy_*`, `ms2_rt_decoy_*`) and for the pseudo-transfers (`ms2_pseudo_*`) the rows with MS2 evidence (`_rows`) and those an MS2 scan supports (`_supported`), and the accepted transfers reported as `transfer_ms2` |
 | `<dir>/quantms.feature.parquet` | one per feature (LFQ) or quantified PSM (isobaric) | the QPX feature view (`intensities` as `[{label, intensity}]` with `LFQ` or `TMT126`-style labels; `additional_intensities` with the raw/apex/isotope values; purity, cosine, q-values in `additional_scores`; `psm_ids` pointing at `psms.parquet` rows) |
 
 With `--mbr` (or `andes quant finalize --output-parquet <dir>`), `quantms.feature.parquet` holds
-one row per `identified` or `transfer_ms1` row of `<stem>.mbr.tsv` instead of the per-run
+one row per `identified`, `transfer_ms2` or `transfer_ms1` row of `<stem>.mbr.tsv` instead of the per-run
 `--lfq` features, with four extra columns: `evidence_type`, `transfer_q`, `quant_q` and
 `quantity_se`. `below_threshold` transfers and `identified_below_threshold` rows are left out
 (they stay in `<stem>.mbr.tsv` with their quantity and standard error), so every LFQ intensity
 in the parquet passed the transfer q-value or, for an identified row, the identified quality
-q-value (unless `--quant-feature-fdr off`); precursors
+q-value (when `--quant-feature-fdr` is set; by default every identified row is kept); precursors
 that fail the library entry gate are absent. Modifications come from the peptidoform's tags (the
 accession is the name), proteins carry no positions, and `psm_ids` is empty.
 
-Files in the quant directory (`--quant-dir`), all Parquet: per run `<stem>.ms1.parquet` and
-`<stem>.quant.parquet` (search), `<stem>.extract.parquet` (extract); once `library.parquet` and
-`alignment.parquet` (library). Each file carries a schema version (`andes.<table>.schema`); a
-reader rejects another major version and names the file. `<stem>.extract.parquet` is at schema
-2, which added the identified pairs' decoy rows; a schema-1 extract table is rejected (run
-`andes quant extract` again). `<stem>.ms1.parquet` holds one row per
+Files in the quant directory (`--quant-dir`), all Parquet: per run `<stem>.ms1.parquet`,
+`<stem>.ms2.parquet` and `<stem>.quant.parquet` (search), `<stem>.extract.parquet` (extract);
+once `library.parquet` and `alignment.parquet` (library). Each file carries a schema version
+(`andes.<table>.schema`); a reader rejects another major version and names the file.
+`<stem>.extract.parquet` is at schema 3, which added the MS2 evidence of the transfer and
+pseudo-transfer rows (`ms2_n_scans`, `ms2_n_matched`, `ms2_angle`, `ms2_explained`); an older
+extract table is rejected (run `andes quant extract` again). `library.parquet` is at schema 3,
+which added each entry's fragment spectrum (`frag_mz`, `frag_intensity`, `frag_ion` such as
+`y7` or `b5^2`) and its donor PSMs' runs and RTs (`donor_scan_run`, `donor_scan_rt`).
+`<stem>.ms1.parquet` holds one row per
 MS1 scan in retention-time order: `native_id`, `rt_s`, `faims_cv` (null without FAIMS), and the
 centroids as two equal-length lists `mz` (Float64) and `intensity` (Float32), stored bit for bit;
-its metadata also names the run (`andes.ms1.run`).
+its metadata also names the run (`andes.ms1.run`). `<stem>.ms2.parquet` holds one row per MS2
+scan in retention-time order: `native_id`, `spec_key` (the PIN SpecId of its matches without
+the `_<rank>` suffix), `rt_s`, `precursor_mz`, `charge` (0 when unknown), the isolation window
+`isolation_target`, `isolation_lower`, `isolation_upper` (offsets in Th; null when the source
+has none, then the precursor m/z ± 1 Th is used), `faims_cv`, and the 100 most intense
+centroids as `mz` and `intensity` (Float32, sorted by m/z); its metadata names the run
+(`andes.ms2.run`), the search's fragment tolerance (`andes.ms2.fragment_tol`, e.g. `20ppm`) and
+the centroids kept (`andes.ms2.top_peaks`). `<stem>.quant.parquet` records the mass delta of
+every modification accession its peptidoforms use (`andes.run_quant.mods`).
 
 ---
 
@@ -986,7 +998,7 @@ andes quant library  --quant-dir q/ [--quant-fdr 0.01] [--pep 0.05] \
 andes quant extract  --quant-dir q/ --run a [--lfq-tol 10ppm]
 andes quant extract  --quant-dir q/ --run b [--lfq-tol 10ppm]
 # once
-andes quant finalize --quant-dir q/ -o experiment [--mbr-fdr 0.01] [--quant-feature-fdr 0.05] \
+andes quant finalize --quant-dir q/ -o experiment [--mbr-fdr 0.01] [--quant-feature-fdr off] \
       [--output-parquet dir]
 ```
 
@@ -1001,7 +1013,7 @@ Percolator run per input: the library ranks each precursor by its best score acr
 scores from separately trained Percolator models are not on one scale.
 
 * **Library** (`quant library`). Reads every run's `<stem>.quant.parquet` (`--runs`, or every
-  table in the directory; a missing PSM or MS1 table is an error) and joins Percolator's
+  table in the directory; a missing PSM, MS1 or MS2 table is an error) and joins Percolator's
   `score`, `q-value` and PEP to its PSMs on (run, SpecId) (target and decoy result files; every
   PSM needs a finite `score`). Each joined PSM is checked against the result's residue sequence (flanks and
   modification notation ignored) and target/decoy file. A PSM that disagrees is skipped
@@ -1030,7 +1042,12 @@ scores from separately trained Percolator models are not on one scale.
   precursors with every other aligned run is unaligned.
   When the aligned runs form several components the library log lists them, and each
   extract log counts the transfers and pseudo-transfers skipped because every donor run lies
-  in another component.
+  in another component. Each entry also gets an empirical fragment spectrum from its best
+  donor PSM (highest rescorer score): the peptidoform's b and y ions of at least 3 residues
+  (charge 1, and 2 for precursors of charge 3 or more) are matched on that PSM's scan in the
+  run's `<stem>.ms2.parquet` at the search's fragment tolerance, and the 12 most intense
+  matches are kept (intensities relative to the most intense). An entry with fewer than 3
+  matches has no spectrum; the library log counts them.
 * **Extract** (`quant extract`, one run, reads `library.parquet`, `alignment.parquet` and the
   run's `<stem>.ms1.parquet`). Every library precursor
   is measured, at the `--lfq-tol` m/z tolerance (ppm; default 10 ppm), by a likelihood template fit of its isotope pattern and elution profile around
@@ -1043,10 +1060,26 @@ scores from separately trained Percolator models are not on one scale.
   precursor whose voltage the FAIMS run lacks is not measured there and is counted in the log;
   it is never fitted on another voltage or on the mixed series. Precursors without a voltage,
   and every precursor in a run without FAIMS, are fitted on the whole run.
+  Every transfer row (target and both decoys) and every pseudo-transfer with a fit then gets
+  MS2 evidence from the run's `<stem>.ms2.parquet`: among the MS2 scans whose isolation window
+  holds the row's probe m/z (the decoy's own shifted m/z for a mass-shift decoy) and whose RT
+  lies within 3 fitted widths of the fitted apex (widths bounded to 1–20 s), at the entry's
+  FAIMS voltage, each is scored against the entry's library spectrum: matched fragments, the
+  normalised spectral angle of the square-root intensities (unmatched fragments count as 0) and
+  the share of the library intensity matched. The best scan by angle gives the row's MS2
+  evidence; no scan gives zeros. Decoys use their target's library spectrum, so a decoy on
+  another peptide's peak is scored against that peptide's MS2, as a false transfer would be.
+  A pseudo-transfer leaves out the scans of its run's donor PSMs, whose identification makes
+  it a pseudo-transfer. The extract log gives, per role and hypothesis, the share of rows with
+  a scan in the window and the share an MS2 scan supports.
 * **Finalize** (`quant finalize`). A cross-validated GBDT (3 folds by precursor) separates
   transfer targets from their decoys; the transfer q-value is the K-decoy estimate over held-out
   scores, `(D + 1) / (K · max(T, 1))` at each score threshold (capped at 1, then the running
-  minimum), with `K` the decoy-to-target ratio; it is also reported per decoy family. The `+1`
+  minimum), with `K` the decoy-to-target ratio; it is also reported per decoy family. The
+  transfer features are the fit evidence, the donor-run count, the library q-value and the MS2
+  evidence (angle, matched fragments, matched library intensity); no measurement from another
+  run. An accepted transfer whose best MS2 scan matches at least 4 fragments at an angle of at
+  least 0.6 is `transfer_ms2`, any other accepted transfer `transfer_ms1`. The `+1`
   keeps a small fold from giving q = 0 to targets that merely outscore a few decoys. It is a quant-quality q-value, not an identification
   FDR. The identified pairs and their decoys go through the same estimate with their own models
   (same folds), which gives every identified row a quality q-value `quant_q`: how far its MS1
@@ -1055,8 +1088,10 @@ scores from separately trained Percolator models are not on one scale.
   mass error, scan count, isotopes used, amplitude signal-to-noise): no donor count, library
   q-value or measurement from another run. Separate models keep the transfer q-values unchanged
   (an identified pair's prior is centred on its own PSM, so its targets look nothing like
-  transfers'). Identified rows above `--quant-feature-fdr` (default 0.05) are
-  `identified_below_threshold`; with `--quant-feature-fdr off`, `quant_q` is an annotation only. A
+  transfers'). By default (`--quant-feature-fdr off`) `quant_q` is an annotation only: at
+  matched coverage, flagging at 0.05 improves accuracy and CV only slightly, and it removes
+  close to a tenth of the least abundant precursors. With a threshold, identified rows above it are
+  `identified_below_threshold`. A
   transfer's `quant_q` is its `transfer_q`. Pseudo-transfers give an acceptance rate and the wrong-peak rate, which decoys cannot
   see. The acceptance rate is optimistic as a transfer sensitivity: a pseudo-transfer's
   predicted apex leaves the run's own observation out of the consensus RT, but the run's
@@ -1097,13 +1132,14 @@ searching a run again, run `quant library`, every `quant extract` and `quant fin
 
 `--mbr` without `--quant-dir` writes the per-run artifacts to a temporary directory (under
 `TMPDIR`): each run's `<stem>.ms1.parquet` (about 5–6 bytes per centroid; about 200 MB for an
-Orbitrap run with 38 million MS1 centroids) plus its tables. For large runs pass
+Orbitrap run with 38 million MS1 centroids) and `<stem>.ms2.parquet` (at most 100 centroids
+per MS2 scan) plus its tables. For large runs pass
 `--quant-dir` on a disk with room. Any search that quantifies also keeps a temporary copy of
 each run's MS1 table under `TMPDIR` until quantification ends. In-process, the stages run
 after every search output is written and the search state is freed, one run's MS1 at a time.
 
 `--mbr` is label-free only and is refused with `--tmt`. With `--mbr --output-parquet`,
-`quantms.feature.parquet` holds the match-between-runs rows (identified and `transfer_ms1`)
+`quantms.feature.parquet` holds the match-between-runs rows (identified, `transfer_ms2` and `transfer_ms1`)
 and replaces the per-run `--lfq` feature rows, which stay in `<stem>.lfq.tsv` and
 `<stem>.lfq_features.tsv`; below-threshold transfers and precursors that fail the library
 entry gate are not in it (§3f).

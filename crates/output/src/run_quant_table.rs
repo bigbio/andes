@@ -1,8 +1,12 @@
 //! Per-run PSM table `<stem>.quant.parquet`: every rank-1 PSM of one run
 //! (targets and decoys) with the fields the multi-run quantification stage
 //! needs. The file carries a schema version in its key-value metadata; a
-//! reader rejects a different major version.
+//! reader rejects a different major version. The metadata also maps each
+//! modification accession used in the peptidoforms to its mass delta
+//! (`andes.run_quant.mods`, `<accession>=<delta>` joined by `;`), so a
+//! peptidoform's fragment masses can be computed from the table alone.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
@@ -24,7 +28,8 @@ pub const RUN_QUANT_SCHEMA_MAJOR: u32 = 1;
 
 const SCHEMA_KEY: &str = "andes.run_quant.schema";
 const RUN_KEY: &str = "andes.run_quant.run";
-const SCHEMA_VERSION: &str = "1.0";
+const MODS_KEY: &str = "andes.run_quant.mods";
+const SCHEMA_VERSION: &str = "1.1";
 /// Rows per Parquet row group / record batch.
 const BATCH_ROWS: usize = 65_536;
 
@@ -113,10 +118,22 @@ fn batch(schema: &Arc<Schema>, rows: &[RunPsmRow]) -> Result<RecordBatch, String
     RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
 }
 
+fn encode_mods(mods: &[(String, f64)]) -> Result<String, String> {
+    let mut parts = Vec::with_capacity(mods.len());
+    for (acc, delta) in mods {
+        if acc.is_empty() || acc.contains([';', '=']) || !delta.is_finite() {
+            return Err(format!("modification {acc:?} = {delta} cannot be stored"));
+        }
+        parts.push(format!("{acc}={delta:?}"));
+    }
+    Ok(parts.join(";"))
+}
+
 fn write_versioned(
     path: &Path,
     run_stem: &str,
     rows: &[RunPsmRow],
+    mods: &[(String, f64)],
     version: &str,
 ) -> Result<(), String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
@@ -127,6 +144,10 @@ fn write_versioned(
         .set_key_value_metadata(Some(vec![
             KeyValue::new(SCHEMA_KEY.to_string(), version.to_string()),
             KeyValue::new(RUN_KEY.to_string(), run_stem.to_string()),
+            KeyValue::new(
+                MODS_KEY.to_string(),
+                encode_mods(mods).map_err(|e| err(&e))?,
+            ),
         ]))
         .build();
     let file = File::create(path).map_err(|e| err(&e))?;
@@ -140,13 +161,15 @@ fn write_versioned(
     Ok(())
 }
 
-/// Write the per-run PSM table for run `run_stem`.
+/// Write the per-run PSM table for run `run_stem`, with the mass delta of
+/// every modification accession its peptidoforms use.
 pub fn write_run_quant_table(
     path: &Path,
     run_stem: &str,
     rows: &[RunPsmRow],
+    mods: &[(String, f64)],
 ) -> Result<(), String> {
-    write_versioned(path, run_stem, rows, SCHEMA_VERSION)
+    write_versioned(path, run_stem, rows, mods, SCHEMA_VERSION)
 }
 
 #[cfg(test)]
@@ -156,7 +179,34 @@ pub(crate) fn write_with_schema_version(
     rows: &[RunPsmRow],
     version: &str,
 ) -> Result<(), String> {
-    write_versioned(path, run_stem, rows, version)
+    write_versioned(path, run_stem, rows, &[], version)
+}
+
+/// The modification accessions of a per-run PSM table and their mass deltas
+/// (empty for a table written before they were recorded). Every error names
+/// `path`.
+pub fn read_run_quant_mods(path: &Path) -> Result<HashMap<String, f64>, String> {
+    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    let file = File::open(path).map_err(|e| err(&e))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| err(&e))?;
+    let text = builder
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .and_then(|kv| kv.iter().find(|kv| kv.key == MODS_KEY))
+        .and_then(|kv| kv.value.clone())
+        .unwrap_or_default();
+    let mut out = HashMap::new();
+    for part in text.split(';').filter(|p| !p.is_empty()) {
+        let (acc, delta) = part
+            .split_once('=')
+            .ok_or_else(|| err(&format!("unreadable {MODS_KEY} entry {part:?}")))?;
+        let delta: f64 = delta
+            .parse()
+            .map_err(|_| err(&format!("unreadable {MODS_KEY} entry {part:?}")))?;
+        out.insert(acc.to_string(), delta);
+    }
+    Ok(out)
 }
 
 fn column<'a, T: 'static>(b: &'a RecordBatch, i: usize, path: &Path) -> Result<&'a T, String> {
@@ -283,10 +333,20 @@ mod tests {
             envelope: vec![0.6, 0.3, 0.08, 0.02],
             proteins: "P1;P2".into(),
         }];
-        write_run_quant_table(&p, "a", &rows).unwrap();
+        let mods = [
+            ("UNIMOD:4".to_string(), 57.021464),
+            ("UNIMOD:35".to_string(), 15.994915),
+        ];
+        write_run_quant_table(&p, "a", &rows, &mods).unwrap();
         let (stem, back) = read_run_quant_table(&p).unwrap();
         assert_eq!(stem, "a");
         assert_eq!(back, rows);
+        let m = read_run_quant_mods(&p).unwrap();
+        assert_eq!(m.len(), 2);
+        assert_eq!(m["UNIMOD:4"].to_bits(), 57.021464f64.to_bits());
+        assert_eq!(m["UNIMOD:35"].to_bits(), 15.994915f64.to_bits());
+        let bad = [("A;B".to_string(), 1.0)];
+        assert!(write_run_quant_table(&p, "a", &rows, &bad).is_err());
     }
 
     #[test]
@@ -294,11 +354,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("m.quant.parquet");
         let rows: Vec<RunPsmRow> = (0..5).map(row).collect();
-        write_run_quant_table(&p, "m", &rows).unwrap();
+        write_run_quant_table(&p, "m", &rows, &[]).unwrap();
+        assert!(read_run_quant_mods(&p).unwrap().is_empty());
         assert_eq!(read_run_quant_table(&p).unwrap(), ("m".to_string(), rows));
 
         let e = dir.path().join("e.quant.parquet");
-        write_run_quant_table(&e, "e", &[]).unwrap();
+        write_run_quant_table(&e, "e", &[], &[]).unwrap();
         assert_eq!(read_run_quant_table(&e).unwrap(), ("e".to_string(), vec![]));
     }
 

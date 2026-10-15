@@ -98,8 +98,6 @@ fn enumerate_protein(
     is_decoy: bool,
     params: &SearchParams,
 ) -> Vec<Candidate> {
-    let seq = &protein.sequence;
-
     // Standard enumeration: full sequence from offset 0.
     let mut out = enumerate_protein_from_offset(protein, 0, protein_index, is_decoy, params);
 
@@ -1808,6 +1806,41 @@ mod tests {
         );
     }
 
+    /// A mature chain starting with M gets no Met-cleaved walk, so the full
+    /// walk keeps its spans that start at the second residue: a C-terminal
+    /// chain's span from there to its end is enumerated once, not as a
+    /// protein N-terminal peptide.
+    #[test]
+    fn mature_chain_starting_with_met_keeps_its_second_residue_spans() {
+        use model::protein::{ChainEnds, ProteinAnnotation};
+        let annotation = ProteinAnnotation {
+            chain: Some(ChainEnds {
+                n_term: false,
+                c_term: true,
+            }),
+            ..Default::default()
+        };
+        let target = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "chain fixture".into(),
+                sequence: b"MAKAGERLLK".to_vec(),
+                annotation: Some(std::sync::Arc::new(annotation)),
+            }],
+        };
+        let db = SearchIndex::from_target_db(&target, "XXX");
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.min_length = 2;
+        params.num_tolerable_termini = 0;
+        let starting_at_1: Vec<_> = enumerate_candidates(&db, &params, "XXX")
+            .filter(|c| !c.is_decoy && c.start_offset_in_protein == 1)
+            .collect();
+        assert_eq!(starting_at_1.len(), 1, "AKAGERLLK once");
+        assert_eq!(starting_at_1[0].peptide.residues.len(), 9);
+        assert!(!starting_at_1[0].is_protein_n_term);
+    }
+
     /// The Met-cleaved walk adds only the peptides starting at the post-Met
     /// residue: every other span of an M-initial protein is enumerated once.
     #[test]
@@ -1817,6 +1850,7 @@ mod tests {
                 accession: "P1".into(),
                 description: "met fixture".into(),
                 sequence: b"MAKAGERLLKPEPTIDER".to_vec(),
+                annotation: None,
             }],
         };
         let db = SearchIndex::from_target_db(&target, "XXX");
@@ -1877,6 +1911,7 @@ mod tests {
                 accession: "P1".into(),
                 description: "tmt stacking fixture".into(),
                 sequence: b"MCKAGERKLLRMAEPK".to_vec(),
+                annotation: None,
             }],
         };
         let db = SearchIndex::from_target_db(&target, "XXX");

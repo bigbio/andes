@@ -1471,6 +1471,41 @@ mod tests {
     }
 
     #[test]
+    fn stacks_carry_at_most_one_restricted_part_and_prefer_unrestricted_forms() {
+        let line = |l: &str| Modification::from_mods_txt_line(l).unwrap();
+        let (prot, no) = (Terminus::Protein, Terminus::No);
+        let mod_named = |set: &AminoAcidSet, r: u8, name: &str| {
+            set.forms(r, prot, no)
+                .iter()
+                .filter_map(|aa| aa.mod_)
+                .filter(|m| m.name == name)
+                .collect::<Vec<_>>()
+        };
+        let set = AminoAcidSetBuilder::new_standard()
+            .add_variable_mod(line("79.966331,S,opt,any,Phospho,sites=annotated"))
+            .add_variable_mod(line("15.994915,M,opt,any,Oxidation"))
+            .add_variable_mod(line("42.010565,*,opt,Prot-N-term,Acetyl,sites=annotated"))
+            .build()
+            .unwrap();
+        // Two restricted parts would need two annotated sites: not formed.
+        assert!(mod_named(&set, b'S', "Phospho+Acetyl").is_empty());
+        // A restricted part stacked with an unrestricted one keeps its own mass.
+        let ox_ac = mod_named(&set, b'M', "Oxidation+Acetyl");
+        assert_eq!(ox_ac.len(), 1);
+        assert_eq!(ox_ac[0].annotated_site_mass, Some(42.010565));
+
+        // An unrestricted mod equal to a restricted one replaces it.
+        let set = AminoAcidSetBuilder::new_standard()
+            .add_variable_mod(line("42.010565,*,opt,Prot-N-term,Acetyl,sites=annotated"))
+            .add_variable_mod(line("42.010565,*,opt,N-term,Acetyl"))
+            .build()
+            .unwrap();
+        let ac = mod_named(&set, b'A', "Acetyl");
+        assert_eq!(ac.len(), 1);
+        assert_eq!(ac[0].annotated_site_mass, None);
+    }
+
+    #[test]
     fn stacked_terminal_mod_keeps_the_restricted_mods_own_site_mass() {
         // Fixed CAM-C stacks under a variable protein-N-term Acetyl restricted to
         // annotated sites: the combined mod still matches sites by Acetyl's mass.

@@ -629,6 +629,7 @@ mod tests {
             accession: None,
             neutral_losses: vec![97.97690],
             loss_class: 2,
+            annotated_site_mass: None,
         });
         let residues: Vec<AminoAcid> = b"SSAK"
             .iter()

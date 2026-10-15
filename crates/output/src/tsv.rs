@@ -20,6 +20,7 @@ use std::io::{self, BufWriter, Write};
 
 use crate::row_context::{emitted_rows, RowContext};
 use model::peptide::Peptide;
+use model::protein::{EntryKind, EntryOrigin};
 use model::spectrum::Spectrum;
 use model::tolerance::Tolerance;
 use search::candidate_gen::Candidate;
@@ -174,6 +175,9 @@ fn write_header<W: Write>(writer: &mut W, params: &SearchParams, is_mgf: bool) -
     cols.push("RankScore");
     // Modifications: additive last column — CV accession-based annotations.
     cols.push("Modifications");
+    // Provenance of the named protein (UniProt XML databases): family
+    // accession, entry kind, and the feature that made the entry.
+    cols.extend_from_slice(&["ProteinFamily", "EntryKind", "FeatureIds"]);
 
     writeln!(writer, "{}", cols.join("\t"))
 }
@@ -213,7 +217,10 @@ fn write_spectrum_rows<W: Write>(
     for (_rank, psm) in emitted_rows(spec, &psms, candidates) {
         let cand = &candidates[psm.primary_candidate_idx() as usize];
         let ctx = RowContext::new(spec, cand, search_index);
-        write_psm_row(writer, spec, &psm, cand, &ctx, &row_ctx)?;
+        let origin = search_index
+            .protein_at(cand.protein_index)
+            .and_then(|p| p.origin());
+        write_psm_row(writer, spec, &psm, cand, &ctx, origin, &row_ctx)?;
     }
     Ok(())
 }
@@ -224,6 +231,7 @@ fn write_psm_row<W: Write>(
     psm: &PsmMatch,
     cand: &Candidate,
     ctx: &RowContext,
+    origin: Option<&EntryOrigin>,
     row_ctx: &RowCtx<'_>,
 ) -> io::Result<()> {
     let is_mgf = row_ctx.is_mgf;
@@ -300,7 +308,17 @@ fn write_psm_row<W: Write>(
     };
     // Modifications: additive last column — ';'-joined "{1-based-pos}:{CURIE}".
     let mods = modifications_field(&cand.peptide);
-    writeln!(writer, "{}\t{}\t{}", lead, raw_score, mods)
+    // Provenance of the named protein: its family accession, entry kind and
+    // the feature that made it (empty for a reference entry).
+    let (family, kind, feature) = match origin {
+        Some(o) => (&*o.family, o.kind.name(), &*o.feature),
+        None => (protein.as_str(), EntryKind::Reference.name(), ""),
+    };
+    writeln!(
+        writer,
+        "{}\t{}\t{}\t{}\t{}\t{}",
+        lead, raw_score, mods, family, kind, feature
+    )
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -463,6 +481,9 @@ mod tests {
                 "RankScore",
                 // Additive: CV accession-based modification annotation (last column).
                 "Modifications",
+                "ProteinFamily",
+                "EntryKind",
+                "FeatureIds",
             ],
             "Header columns must match expected order when is_mgf=true"
         );
@@ -679,6 +700,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tsv_ends_with_provenance_of_the_named_protein() {
+        let accession = "sp|P02769|ALBU_BOVIN";
+        let idx = make_search_index(accession);
+        let params = make_params_ppm();
+        let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
+        let mut q = TopNQueue::new(10);
+        q.push(make_psm(0, 10.0, 10.0));
+        let queues = vec![q];
+        let mut buf = Vec::<u8>::new();
+        let cands = vec![make_candidate(0, false)];
+        write_tsv_to(
+            &mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true,
+        )
+        .unwrap();
+        let cols = parse_header(&buf);
+        assert_eq!(
+            &cols[cols.len() - 4..],
+            ["Modifications", "ProteinFamily", "EntryKind", "FeatureIds"]
+        );
+        let row = &parse_rows(&buf)[0];
+        assert_eq!(row.len(), cols.len());
+        let at = |name: &str| row[cols.iter().position(|c| c == name).unwrap()].as_str();
+        assert_eq!(at("ProteinFamily"), accession);
+        assert_eq!(at("EntryKind"), "reference");
+        assert_eq!(at("FeatureIds"), "");
+    }
+
     // ── Test 7: decoy accession carries decoy prefix ──────────────────────────
 
     #[test]
@@ -734,10 +783,10 @@ mod tests {
         }
     }
 
-    // ── Test: Modifications column is LAST in the TSV header ─────────────────
+    // ── Test: Modifications follows RankScore, before the provenance columns ─
 
     #[test]
-    fn tsv_modifications_column_is_last() {
+    fn tsv_modifications_column_precedes_provenance() {
         let params = make_params_ppm();
         let spectra: Vec<Spectrum> = vec![];
         let queues: Vec<TopNQueue> = vec![];
@@ -752,9 +801,15 @@ mod tests {
 
         let cols = parse_header(&buf);
         assert_eq!(
-            cols.last().map(|s| s.as_str()),
-            Some("Modifications"),
-            "Modifications must be the last column in the TSV header"
+            &cols[cols.len() - 5..],
+            [
+                "RankScore",
+                "Modifications",
+                "ProteinFamily",
+                "EntryKind",
+                "FeatureIds"
+            ],
+            "the provenance columns are appended after Modifications"
         );
     }
 

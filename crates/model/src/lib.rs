@@ -29,7 +29,8 @@ pub use mass::{nominal_from, H2O, PROTON};
 pub use modification::{ModLocation, ModParseError, Modification, ResidueSpec};
 pub use peptide::Peptide;
 pub use protein::{
-    ChainEnds, ModSite, Protein, ProteinAnnotation, ProteinDb, SiteAnchor, VariantRegion,
+    ChainEnds, EntryKind, EntryOrigin, ModSite, Protein, ProteinAnnotation, ProteinDb, SiteAnchor,
+    Substitution, VariantRegion,
 };
 pub use protocol::Protocol;
 pub use scan::{Ms1Scan, ProductScan};

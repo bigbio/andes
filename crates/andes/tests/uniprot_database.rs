@@ -95,6 +95,37 @@ fn annotated_site_mods_and_variants_run_end_to_end() {
     // Every PIN row names either the canonical entry or the variant entry.
     let pin_text = std::fs::read_to_string(&pin).unwrap();
     assert!(pin_text.lines().skip(1).all(|l| l.contains("P02769")));
+    // Provenance columns: a row is non-reference only when every protein it
+    // names is a variant or chain entry; only those carry a DeltaRefScore. The
+    // canonical BSA entry competes in most spectra.
+    let header: Vec<&str> = pin_text.lines().next().unwrap().split('\t').collect();
+    let col = |name: &str| header.iter().position(|h| *h == name).unwrap();
+    let (var, chain, iso) = (col("IsVariant"), col("IsChain"), col("IsIsoform"));
+    let (comp, gap) = (col("RefCompetitor"), col("DeltaRefScore"));
+    let (prot, rows): (usize, Vec<Vec<&str>>) = (
+        col("Proteins"),
+        pin_text
+            .lines()
+            .skip(1)
+            .map(|l| l.split('\t').collect())
+            .collect(),
+    );
+    assert!(
+        rows.iter().any(|r| r[comp] == "1"),
+        "no spectrum scored a canonical candidate"
+    );
+    for r in &rows {
+        let named = &r[prot..];
+        let alternative = named
+            .iter()
+            .all(|a| a.contains("_VAR_") || a.contains("_PRO_"));
+        let flagged = r[var] == "1" || r[chain] == "1";
+        assert_eq!(flagged, alternative, "{named:?}");
+        assert_eq!(r[iso], "0");
+        if !flagged {
+            assert_eq!(r[gap].parse::<f64>().unwrap(), 0.0, "{named:?}");
+        }
+    }
 
     // The same mods over FASTA: no annotation, so the restricted mods never apply.
     let out = search(
@@ -128,4 +159,51 @@ fn annotated_site_mods_and_variants_run_end_to_end() {
         "{stderr}"
     );
     assert!(stderr.contains("never placed"), "{stderr}");
+}
+
+#[test]
+fn restricted_artefact_mods_warn_only_with_variants() {
+    let dir = tempfile::tempdir().unwrap();
+    let mods = dir.path().join("mods.txt");
+    std::fs::write(
+        &mods,
+        "57.021464,C,fix,any,Carbamidomethyl\n\
+         0.984016,N,opt,any,Deamidated,sites=annotated\n",
+    )
+    .unwrap();
+    let mods = mods.to_str().unwrap();
+    let warning = "variants of the same mass lose the competing explanation";
+    let out = search(
+        "test-fixtures/BSA.xml.gz",
+        &dir.path().join("on.pin"),
+        &["--mods", mods, "--uniprot-variants"],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("WARN: Deamidated"), "{stderr}");
+    assert!(stderr.contains(warning), "{stderr}");
+    let out = search(
+        "test-fixtures/BSA.xml.gz",
+        &dir.path().join("off.pin"),
+        &["--mods", mods],
+    );
+    assert!(!String::from_utf8_lossy(&out.stderr).contains(warning));
+}
+
+#[test]
+fn shuffle_decoys_are_refused_with_isoforms_or_chains() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_andes"))
+        .arg("--spectrum")
+        .arg(fixture("test-fixtures/test.mgf.gz"))
+        .arg("--database")
+        .arg(fixture("test-fixtures/BSA.xml.gz"))
+        .arg("--output-pin")
+        .arg(dir.path().join("x.pin"))
+        .args(["--decoy-strategy", "shuffle", "--uniprot-chains"])
+        .args(["--uniprot-evidence", "curated"])
+        .output()
+        .expect("run andes");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--decoy-strategy shuffle"), "{stderr}");
 }

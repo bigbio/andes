@@ -242,6 +242,26 @@ pub struct PsmFeatures {
     /// `delta_rt` normalised by the run's gradient span (max−min observed RT, in
     /// minutes); 0.0 when the span is non-positive. Transfers across runs.
     pub delta_rt_norm: f32,
+    /// 1 when a candidate from a Reference entry (canonical or FASTA protein)
+    /// with a peptidoform other than this row's was scored for the spectrum.
+    /// Only tracked when the database holds isoform, variant or chain entries.
+    pub ref_competitor: u32,
+    /// The best rounded RawScore among those Reference candidates; 0.0 when
+    /// `ref_competitor` is 0.
+    pub ref_best_raw: f32,
+    /// 1 when any protein of the row's peptide is an entry of that kind,
+    /// including a peptide it shares with a Reference entry. Set by
+    /// `output::populate_provenance_features`.
+    pub is_variant: u32,
+    pub is_isoform: u32,
+    pub is_chain: u32,
+    /// For a row with any isoform, variant or chain protein and
+    /// `ref_competitor` = 1: its rounded RawScore minus `ref_best_raw`. 0.0
+    /// otherwise.
+    pub delta_ref_score: f32,
+    /// 1 when the precursor fits better if the row's isotope-like deltas
+    /// (variable mods, and a variant's substitution) are whole isotope steps.
+    pub isotope_mimic: u32,
     /// Calibrated predicted retention time in minutes for this PSM's peptide, or
     /// 0.0 when RT is unavailable / calibration failed. Not a PIN feature column;
     /// surfaced only into the QPX `.idparquet` `predicted_rt` field.

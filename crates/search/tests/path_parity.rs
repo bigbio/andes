@@ -78,14 +78,28 @@ fn assigned_features(line: &str) -> Vec<String> {
 
 // Known, deliberate exceptions. Each needs a REASON, not just a name: an entry here
 // is a decision to ship a constant column, and it should be re-argued when touched.
-const EXCEPTIONS: &[(&str, &str)] = &[(
-    "strong_score_cal",
-    "the calibrated strong score needs a per-spectrum population of strong \
+const EXCEPTIONS: &[(&str, &str)] = &[
+    (
+        "strong_score_cal",
+        "the calibrated strong score needs a per-spectrum population of strong \
          scores to z-score against. The glyco driver computes a strong score only \
          for the single collapse winner, so no such population exists. Filling it \
          requires scoring the accepted set, which is a real design change and not a \
          transcription fix — tracked separately.",
-)];
+    ),
+    (
+        "ref_competitor",
+        "the gap to the best Reference-entry candidate only matters when the \
+         database holds UniProt isoform, variant or chain entries. The glyco driver \
+         scores backbones per glycan composition and keeps no per-spectrum \
+         Reference tracker; a glyco search over such entries reports 0 here \
+         (documented in DOCS §1a).",
+    ),
+    (
+        "ref_best_raw",
+        "companion of ref_competitor, same reason.",
+    ),
+];
 
 #[test]
 fn glyco_path_fills_every_feature_the_standard_path_fills() {

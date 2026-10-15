@@ -1,3 +1,9 @@
+//! REGENERATED 2026-10-14: six provenance columns appended to the PIN before
+//! `Peptide` and three (`ProteinFamily`, `EntryKind`, `FeatureIds`) to the TSV.
+//! Verified before copying: with those columns removed, both files equal the
+//! previous goldens row for row (354 rows); every new PIN value is 0 and every
+//! row's `EntryKind` is `reference`.
+//!
 //! REGENERATED 2026-10-10: low-resolution searches now retrieve candidates with the
 //! out-of-core fragment-ion index (the 150 most intense peaks vote). Verified before
 //! copying: identical header; 635 -> 354 rows, because a spectrum gets a row only when

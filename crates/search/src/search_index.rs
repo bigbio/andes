@@ -10,6 +10,9 @@ use model::protein::ProteinDb;
 #[derive(Debug, Clone)]
 pub struct SearchIndex {
     pub db: ProteinDb,
+    /// Whether any protein is an isoform, variant or chain entry. Without one,
+    /// the match engine skips its per-candidate origin lookup.
+    pub has_alternative_entries: bool,
     /// Normalized decoy-accession prefix (no trailing `_`). A protein is a decoy
     /// iff its accession is `"<decoy_prefix>_…"`, independent of FASTA layout
     /// (supports target-only and shuffle modes). The single source of truth for
@@ -115,6 +118,7 @@ impl SearchIndex {
         }
         let db = build_search_db_for(target, decoy_prefix, strategy, seed, proteases);
         Self {
+            has_alternative_entries: holds_alternative_entries(&db),
             db,
             decoy_prefix: norm,
             decoy_suffix: decoy_suffix.map(str::to_string),
@@ -188,11 +192,19 @@ impl SearchIndex {
     /// values by `self.db.len()` when merging its candidates.
     pub fn concat(&self, other: &SearchIndex) -> SearchIndex {
         SearchIndex {
+            has_alternative_entries: self.has_alternative_entries || other.has_alternative_entries,
             db: self.db.concat(&other.db),
             decoy_prefix: self.decoy_prefix.clone(),
             decoy_suffix: self.decoy_suffix.clone(),
         }
     }
+}
+
+/// Whether `db` holds any isoform, variant or chain entry.
+pub fn holds_alternative_entries(db: &ProteinDb) -> bool {
+    db.proteins
+        .iter()
+        .any(|p| p.entry_kind() != model::EntryKind::Reference)
 }
 
 #[cfg(test)]
@@ -338,6 +350,7 @@ mod tests {
     fn searchindex_concat_keeps_self_decoy_prefix_and_appends_db() {
         let a = SearchIndex {
             db: ProteinDb { proteins: vec![] },
+            has_alternative_entries: false,
             decoy_prefix: "XXX".into(),
             decoy_suffix: None,
         };
@@ -350,6 +363,7 @@ mod tests {
                     annotation: None,
                 }],
             },
+            has_alternative_entries: false,
             decoy_prefix: "ZZZ".into(),
             decoy_suffix: None,
         };

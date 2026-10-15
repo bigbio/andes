@@ -14,6 +14,7 @@ pub mod fragment_index;
 pub mod glyco_fragment_index;
 pub mod glyco_search;
 pub mod isomer;
+pub mod isotope_mimic;
 pub mod mass_calibrator;
 pub mod match_engine;
 pub mod precursor_cal;

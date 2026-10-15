@@ -28,11 +28,11 @@
 use crate::decoy::is_decoy_accession_affix;
 use crate::search_index::SearchIndex;
 use crate::search_params::SearchParams;
+use model::aa_set::{form_index, AminoAcidSet, Terminus, FORM_TABLE_LEN};
 use model::amino_acid::AminoAcid;
 use model::enzyme::Enzyme;
-use model::aa_set::{form_index, Terminus, FORM_TABLE_LEN};
 use model::peptide::Peptide;
-use model::protein::{ChainEnds, ModSite, Protein, VariantRegion};
+use model::protein::{ChainEnds, ModSite, Protein, Substitution, VariantRegion};
 
 #[derive(Debug, Clone)]
 pub struct Candidate {
@@ -196,7 +196,7 @@ fn enumerate_protein_from_offset(
             params,
             variant: protein.variant_parts(),
             chain: protein.chain_ends(),
-            sites: protein.mod_sites(),
+            protein,
             met_cleaved_walk: has_met_cleaved_walk(protein),
         };
         let starts_end = if n_term_only { window.1.min(1) } else { window.1 };
@@ -240,7 +240,7 @@ fn enumerate_protein_from_offset(
         params,
         variant: protein.variant_parts(),
         chain: protein.chain_ends(),
-        sites: protein.mod_sites(),
+        protein,
         met_cleaved_walk: has_met_cleaved_walk(protein),
     };
 
@@ -333,8 +333,8 @@ struct EmitCtx<'a> {
     variant: &'a [VariantRegion],
     /// The protein's new termini, when it is a mature-chain entry.
     chain: Option<ChainEnds>,
-    /// The protein's annotated modification sites.
-    sites: &'a [ModSite],
+    /// The protein (annotated sites and variant substitutions).
+    protein: &'a Protein,
     /// Whether the protein gets the Met-cleaved walk ([`has_met_cleaved_walk`]).
     met_cleaved_walk: bool,
 }
@@ -381,9 +381,14 @@ fn emit_span(ctx: &EmitCtx<'_>, start: u32, end: u32, out: &mut Vec<Candidate>) 
 
     let is_protein_n_term = start == 0;
     let is_protein_c_term = abs_end == ctx.seq.len();
-    let sites = SpanSites::new(ctx.sites, abs_start);
-    let mod_combinations =
-        expand_mod_combinations(span, ctx.params, is_protein_n_term, is_protein_c_term, sites);
+    let sites = SpanSites::new(ctx.protein, abs_start);
+    let mod_combinations = expand_mod_combinations(
+        span,
+        ctx.params,
+        is_protein_n_term,
+        is_protein_c_term,
+        sites,
+    );
     for residues in mod_combinations {
         let peptide = Peptide::new(residues, pre, post);
         out.push(Candidate {
@@ -426,30 +431,92 @@ fn position_termini(
     )
 }
 
-/// The annotated modification sites a span sees: its protein's sites and the
-/// span's start in protein coordinates. Decides where a mod restricted to
-/// annotated sites ([`model::Modification::annotated_site_mass`]) may go;
-/// every other variant is always allowed.
+/// What a span's protein annotation says about its residues: the annotated
+/// modification sites and, for a variant entry, its single-residue
+/// substitutions, with the span's start in protein coordinates. Decides where
+/// a mod restricted to annotated sites
+/// ([`model::Modification::annotated_site_mass`]) may go, and leaves out a
+/// substituted residue whose form weighs the same as a searchable form of the
+/// residue it replaced (D, or N deamidated, where the canonical has N): that
+/// form is the canonical peptide's, not evidence for the variant.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct SpanSites<'a> {
     sites: &'a [ModSite],
+    substitutions: &'a [Substitution],
     start: u32,
+    /// The search's residue forms and the span's length and protein-terminal
+    /// flags; set by [`SpanSites::with_forms`] before a walk, needed only for
+    /// a span with substitutions.
+    forms: Option<&'a AminoAcidSet>,
+    len: usize,
+    protein_n_term: bool,
+    protein_c_term: bool,
 }
 
 impl<'a> SpanSites<'a> {
-    pub(crate) fn new(sites: &'a [ModSite], span_start: usize) -> Self {
+    pub(crate) fn new(protein: &'a Protein, span_start: usize) -> Self {
         Self {
-            sites,
+            sites: protein.mod_sites(),
+            substitutions: protein.substitutions(),
             start: span_start as u32,
+            forms: None,
+            len: 0,
+            protein_n_term: false,
+            protein_c_term: false,
+        }
+    }
+
+    /// These sites, judging substitutions against the residue forms of `aa`
+    /// for a span of `len` residues with the given protein-terminal flags: a
+    /// substituted position is compared with the forms the replaced residue
+    /// takes in the same terminal context.
+    pub(crate) fn with_forms<'b>(
+        self,
+        aa: &'b AminoAcidSet,
+        len: usize,
+        protein_n_term: bool,
+        protein_c_term: bool,
+    ) -> SpanSites<'b>
+    where
+        'a: 'b,
+    {
+        SpanSites {
+            forms: Some(aa),
+            len,
+            protein_n_term,
+            protein_c_term,
+            ..self
         }
     }
 
     /// Whether `variant` may sit at position `i` of the span.
     #[inline]
     fn allows(&self, i: usize, variant: &AminoAcid) -> bool {
-        variant
+        let position = self.start + i as u32;
+        if !variant
             .mod_
-            .is_none_or(|m| m.allowed_at(self.sites, self.start + i as u32))
+            .is_none_or(|m| m.allowed_at(self.sites, position))
+        {
+            return false;
+        }
+        let Some(aa) = self.forms else {
+            return true;
+        };
+        if self.substitutions.is_empty() {
+            return true;
+        }
+        let Ok(k) = self
+            .substitutions
+            .binary_search_by_key(&position, |s| s.position)
+        else {
+            return true;
+        };
+        let mass = |a: &AminoAcid| a.mass + a.mod_.map_or(0.0, |m| m.mass_delta);
+        let here = mass(variant);
+        let (nt, ct) = position_termini(i, self.len, self.protein_n_term, self.protein_c_term);
+        !aa.forms(self.substitutions[k].original, nt, ct)
+            .iter()
+            .any(|f| (mass(f) - here).abs() <= model::protein::SITE_MASS_TOLERANCE)
     }
 }
 
@@ -489,7 +556,7 @@ pub(crate) fn expand_mod_combinations(
         &mut current,
         0,
         params.max_variable_mods_per_peptide,
-        sites,
+        sites.with_forms(&params.aa_set, n, is_protein_n_term, is_protein_c_term),
         &mut out,
     );
     out
@@ -802,7 +869,7 @@ fn walk_forms_bounded(
         &mut chosen,
         0,
         params.max_variable_mods_per_peptide,
-        sites,
+        sites.with_forms(&params.aa_set, n, is_protein_n_term, is_protein_c_term),
         &min_rest,
         &max_rest,
         mass_lo,
@@ -852,7 +919,7 @@ fn record_span<'a>(
         c_term: rec.flags & flags::IS_PROTEIN_C_TERM != 0,
         pre,
         post,
-        sites: SpanSites::new(protein.mod_sites(), abs_start),
+        sites: SpanSites::new(protein, abs_start),
     })
 }
 
@@ -952,6 +1019,7 @@ pub fn expand_base_record_bounded(
 /// Every combination of one form per position of `position_variants`
 /// carrying at most `max_mods` variable modifications in total, counted by
 /// `position_slots` (fixed modifications never count).
+#[allow(clippy::too_many_arguments)]
 fn expand_recursive(
     position_variants: &[&[AminoAcid]],
     position_slots: &[&[u8]],
@@ -1000,7 +1068,11 @@ fn expand_recursive(
 /// when they apply to *every* configured protease — a NonSpecific extra makes
 /// the whole digest non-specific; a NoCleavage extra contributes no cut sites
 /// (it never short-circuits unless it's the only protease).
-pub(crate) fn compute_cleavage_positions(seq: &[u8], primary: Enzyme, extras: &[Enzyme]) -> Vec<u32> {
+pub(crate) fn compute_cleavage_positions(
+    seq: &[u8],
+    primary: Enzyme,
+    extras: &[Enzyme],
+) -> Vec<u32> {
     let n = seq.len() as u32;
 
     let all = || std::iter::once(primary).chain(extras.iter().copied());
@@ -1233,7 +1305,7 @@ pub fn lazy_candidates_for_precursor(
             seq[abs_end]
         };
 
-        let sites = SpanSites::new(protein.mod_sites(), abs_start);
+        let sites = SpanSites::new(protein, abs_start);
         let mod_combinations =
             expand_mod_combinations(span, params, is_protein_n_term, is_protein_c_term, sites);
         for residues in mod_combinations {
@@ -1407,7 +1479,16 @@ pub fn distinct_base_records_for_nominal_window(
     let slices: Vec<(u64, u64)> = (0..)
         .map(|i| span_lo + i * step)
         .take_while(|&a| a <= span_hi)
-        .map(|a| (a, if a + step > span_hi { span_hi } else { a + step - 1 }))
+        .map(|a| {
+            (
+                a,
+                if a + step > span_hi {
+                    span_hi
+                } else {
+                    a + step - 1
+                },
+            )
+        })
         .collect();
     let mut out: Vec<crate::candidate_index::IndexRecord> = slices
         .par_iter()
@@ -1464,7 +1545,7 @@ pub fn expand_base_record(
         seq[abs_end]
     };
 
-    let sites = SpanSites::new(protein.mod_sites(), abs_start);
+    let sites = SpanSites::new(protein, abs_start);
     expand_mod_combinations(span, params, is_protein_n_term, is_protein_c_term, sites)
         .into_iter()
         .map(|residues| Candidate {
@@ -1804,6 +1885,56 @@ mod tests {
             has_tmt,
             "protein-N-term peptide must carry the fixed N-term TMT tag (finding 2.3)"
         );
+    }
+
+    /// A substituted residue at a peptide N-terminus is judged against the
+    /// forms the replaced residue takes there: with a fixed N-term tag and
+    /// deamidation searched, D+tag at the start of a peptide weighs the same as
+    /// the canonical N deamidated + tag, so the variant form is left out.
+    #[test]
+    fn substitution_at_a_peptide_terminus_uses_the_terminal_forms() {
+        use model::protein::{ProteinAnnotation, Substitution, VariantRegion};
+        let annotation = ProteinAnnotation {
+            variant: vec![VariantRegion { start: 4, end: 5 }],
+            ..Default::default()
+        }
+        .with_substitutions(vec![Substitution {
+            position: 4,
+            original: b'N',
+        }]);
+        let target = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "variant fixture".into(),
+                sequence: b"PEPKDAGTRK".to_vec(),
+                annotation: Some(std::sync::Arc::new(annotation)),
+            }],
+        };
+        let db = SearchIndex::from_target_db(&target, "XXX");
+        let has_dagtr = |deamidation: bool| {
+            let mut b = AminoAcidSetBuilder::new_standard().add_fixed_mod(Modification {
+                name: "TMT6plex".into(),
+                mass_delta: 229.162932,
+                residue: ResidueSpec::Wildcard,
+                location: ModLocation::NTerm,
+                fixed: true,
+                accession: None,
+                neutral_losses: Vec::new(),
+                loss_class: 0,
+                annotated_site_mass: None,
+            });
+            if deamidation {
+                b = b.add_variable_mod(deamidation_n());
+            }
+            let mut params = SearchParams::default_tryptic(b.build().unwrap());
+            params.min_length = 3;
+            params.max_variable_mods_per_peptide = 1;
+            let found = enumerate_candidates(&db, &params, "XXX")
+                .any(|c| !c.is_decoy && c.start_offset_in_protein == 4 && c.peptide.length() == 5);
+            found
+        };
+        assert!(has_dagtr(false), "without deamidation D is evidence for the variant");
+        assert!(!has_dagtr(true), "D+TMT is the canonical N deamidated + TMT");
     }
 
     /// A mature chain starting with M gets no Met-cleaved walk, so the full

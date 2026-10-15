@@ -16,6 +16,7 @@ fn make_index(seq: &[u8]) -> SearchIndex {
             accession: "P1".into(),
             description: "".into(),
             sequence: seq.to_vec(),
+            annotation: None,
         }],
     };
     SearchIndex::from_target_db(&target, "XXX")
@@ -77,6 +78,7 @@ fn no_cleavage_enzyme_emits_full_protein_only() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"MKWVTFISLLR".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -116,6 +118,7 @@ fn nonspecific_enzyme_emits_every_length_valid_span() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"AAAAAA".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -154,6 +157,7 @@ fn missed_cleavages_increase_candidate_count() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"AKMKCKDK".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -198,6 +202,7 @@ fn missed_cleavages_zero_emits_only_perfectly_cleaved() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"AKMKLR".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -225,6 +230,7 @@ fn aa_set_with_oxidation() -> model::AminoAcidSet {
         accession: None,
         neutral_losses: Vec::new(),
         loss_class: 0,
+        annotated_site_mass: None,
     };
     model::AminoAcidSetBuilder::new_standard()
         .add_variable_mod(ox)
@@ -244,6 +250,7 @@ fn one_variable_mod_site_doubles_candidates() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"MKAR".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -273,6 +280,7 @@ fn two_variable_mod_sites_quadruple_candidates() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"MMK".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -300,6 +308,7 @@ fn max_variable_mods_caps_combinations() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"MMMK".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -336,6 +345,7 @@ fn aa_set_with_protein_nterm_acetyl() -> AminoAcidSet {
         accession: None,
         neutral_losses: Vec::new(),
         loss_class: 0,
+        annotated_site_mass: None,
     };
     AminoAcidSetBuilder::new_standard()
         .add_variable_mod(acetyl)
@@ -354,6 +364,7 @@ fn aa_set_with_nterm_acetyl() -> AminoAcidSet {
         accession: None,
         neutral_losses: Vec::new(),
         loss_class: 0,
+        annotated_site_mass: None,
     };
     AminoAcidSetBuilder::new_standard()
         .add_variable_mod(acetyl)
@@ -372,6 +383,7 @@ fn aa_set_with_both_cterm_mods() -> AminoAcidSet {
         accession: None,
         neutral_losses: Vec::new(),
         loss_class: 0,
+        annotated_site_mass: None,
     };
     let prot_cterm = Modification {
         name: "GlyGly_PCT".into(),
@@ -382,6 +394,7 @@ fn aa_set_with_both_cterm_mods() -> AminoAcidSet {
         accession: None,
         neutral_losses: Vec::new(),
         loss_class: 0,
+        annotated_site_mass: None,
     };
     AminoAcidSetBuilder::new_standard()
         .add_variable_mod(cterm)
@@ -409,6 +422,7 @@ fn protein_n_term_mod_only_at_protein_start() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"MAAAAKMAAAAAK".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -470,6 +484,7 @@ fn nterm_mod_applies_to_every_peptide_n_terminus() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"AAAAAAKMAAAAAK".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -539,6 +554,7 @@ fn c_term_and_protein_c_term_distinguished() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"MAAAAKR".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -609,6 +625,7 @@ fn met_cleavage_generates_alternative_candidates() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"MAGER".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -656,6 +673,7 @@ fn non_met_first_residue_does_not_trigger_cleavage() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"KAGER".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -919,6 +937,7 @@ fn met_alone_does_not_trigger_cleavage() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"M".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -948,6 +967,7 @@ fn empty_decoy_prefix_labels_only_normalized_decoys() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"MKWVTFISLLR".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "");

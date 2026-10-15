@@ -371,6 +371,7 @@ impl AminoAcidSetBuilder {
             accession: Some("UNIMOD:4".to_string()),
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         Self {
             fixed_mods: vec![cam],
@@ -545,6 +546,11 @@ impl AminoAcidSetBuilder {
                                     .chain(c_mods)
                                     .copied()
                                     .collect();
+                                // One `annotated_site_mass` holds one site mass, so a
+                                // form cannot require two annotated sites at once.
+                                if parts.iter().filter(|m| m.annotated_site_mass.is_some()).count() > 1 {
+                                    continue;
+                                }
                                 let slots = s_slots + n_slots + c_slots;
                                 let aa = match parts.as_slice() {
                                     [] => std_aa.clone(),
@@ -565,9 +571,21 @@ impl AminoAcidSetBuilder {
                                         std_aa.clone().with_mod(m)
                                     }
                                 };
-                                if !list.variants.contains(&aa) {
-                                    list.variants.push(aa);
-                                    list.slots.push(slots);
+                                // Equality ignores `annotated_site_mass`: an
+                                // unrestricted form replaces an equal restricted one,
+                                // since it applies wherever that one would.
+                                let restricted =
+                                    |a: &AminoAcid| a.mod_.is_some_and(|m| m.annotated_site_mass.is_some());
+                                match list.variants.iter().position(|u| *u == aa) {
+                                    None => {
+                                        list.variants.push(aa);
+                                        list.slots.push(slots);
+                                    }
+                                    Some(i) if restricted(&list.variants[i]) && !restricted(&aa) => {
+                                        list.variants[i] = aa;
+                                        list.slots[i] = slots;
+                                    }
+                                    Some(_) => {}
                                 }
                             }
                         }
@@ -711,7 +729,9 @@ fn terminal_choices(
 /// One record for several mods stacked on residue `r`: the names joined by
 /// `+`, the deltas summed in order, the declared neutral losses of every part,
 /// and the first non-zero loss class. Fixed when it carries no variable mod
-/// (`slots == 0`). Its location is the first terminal part's.
+/// (`slots == 0`). Its location is the first terminal part's. A part
+/// restricted to annotated sites (at most one, see `build`) restricts the
+/// stack to that part's own site mass.
 fn stack_mods(r: u8, parts: &[&'static Modification], slots: u8) -> Modification {
     let mut neutral_losses: Vec<f64> = Vec::new();
     for loss in parts.iter().flat_map(|m| m.neutral_losses.iter()) {
@@ -740,6 +760,8 @@ fn stack_mods(r: u8, parts: &[&'static Modification], slots: u8) -> Modification
             .map(|m| m.loss_class)
             .find(|c| *c != 0)
             .unwrap_or(0),
+        // The restricted part's own mass: the other parts apply everywhere.
+        annotated_site_mass: parts.iter().find_map(|m| m.annotated_site_mass),
     }
 }
 
@@ -800,6 +822,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         }
     }
 
@@ -813,6 +836,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         }
     }
 
@@ -888,6 +912,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         let err = AminoAcidSetBuilder::new_standard()
             .add_fixed_mod(bad)
@@ -942,6 +967,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         let set = AminoAcidSetBuilder::new_standard()
             .add_variable_mod(cterm_mod)
@@ -1001,6 +1027,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         let set = AminoAcidSetBuilder::new_standard()
             .add_fixed_mod(carbamidomethyl_c())
@@ -1033,6 +1060,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         let anywhere = AminoAcidSetBuilder::new_standard()
             .add_fixed_mod(mk(ModLocation::Anywhere))
@@ -1134,6 +1162,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         let set = AminoAcidSetBuilder::new_standard()
             .add_variable_mod(nterm_mod)
@@ -1268,6 +1297,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         let set = AminoAcidSetBuilder::new_standard()
             .add_fixed_mod(carbamidomethyl_c())
@@ -1438,5 +1468,32 @@ mod tests {
         assert_eq!(set.variants_for(b'C', ModLocation::Anywhere).len(), 1);
         let n = AminoAcidSetBuilder::parse_num_mods_from_file(tmp.path()).unwrap();
         assert_eq!(n, Some(3));
+    }
+
+    #[test]
+    fn stacked_terminal_mod_keeps_the_restricted_mods_own_site_mass() {
+        // Fixed CAM-C stacks under a variable protein-N-term Acetyl restricted to
+        // annotated sites: the combined mod still matches sites by Acetyl's mass.
+        let acetyl =
+            Modification::from_mods_txt_line("42.010565,*,opt,Prot-N-term,Acetyl,sites=annotated")
+                .unwrap();
+        let set = AminoAcidSetBuilder::new_standard()
+            .add_fixed_mod(carbamidomethyl_c())
+            .add_variable_mod(acetyl)
+            .build()
+            .unwrap();
+        let c = set
+            .variants_for(b'C', ModLocation::ProtNTerm)
+            .iter()
+            .find_map(|aa| aa.mod_.filter(|m| m.name.contains("Acetyl")))
+            .expect("Cys has a stacked acetyl variant");
+        assert!((c.mass_delta - (57.02146 + 42.010565)).abs() < 1e-6);
+        assert_eq!(c.annotated_site_mass, Some(42.010565));
+        let a = set
+            .variants_for(b'A', ModLocation::ProtNTerm)
+            .iter()
+            .find_map(|aa| aa.mod_)
+            .expect("Ala has an acetyl variant");
+        assert_eq!(a.annotated_site_mass, Some(42.010565));
     }
 }

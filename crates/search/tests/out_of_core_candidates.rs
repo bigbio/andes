@@ -152,11 +152,13 @@ fn small_search_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
                 accession: "P1".into(),
                 description: "fixture one".into(),
                 sequence: b"MKPEPTMIDEKWVTFISLLRSHAREDPEPK".to_vec(),
+                annotation: None,
             },
             Protein {
                 accession: "P2".into(),
                 description: "fixture two".into(),
                 sequence: b"AAGTLLNRSHAREDPEPKGGGR".to_vec(),
+                annotation: None,
             },
         ],
     };
@@ -171,6 +173,7 @@ fn small_search_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
         accession: None,
         neutral_losses: Vec::new(),
         loss_class: 0,
+        annotated_site_mass: None,
     };
     let aa_set = AminoAcidSetBuilder::new_standard()
         .add_variable_mod(ox_m.clone())
@@ -219,6 +222,7 @@ fn asymmetric_cam_only_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
             // DAVIDCMENGEK, GASLYCDEFGHIK, ... several Cys-bearing peptides so the
             // fixed CAM mass shifts each, and several near-mass neighbours.
             sequence: b"ELVISCLIVEKSAMPLERPEPTIDEKDAVIDCMENGEKGASLYCDEFGHIKWANDACEDFGHIK".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -233,6 +237,7 @@ fn asymmetric_cam_only_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
         accession: None,
         neutral_losses: Vec::new(),
         loss_class: 0,
+        annotated_site_mass: None,
     };
     let aa_set = AminoAcidSetBuilder::new_standard()
         .add_fixed_mod(cam)
@@ -269,6 +274,7 @@ fn asymmetric_cam_only_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         for aa in r.iter_mut() {
             if aa.residue == b'C' {
@@ -308,6 +314,7 @@ fn palindrome_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
             accession: "P1".into(),
             description: "palindrome collision".into(),
             sequence: b"MAEKKEAM".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -819,16 +826,19 @@ fn glyco_table_from_the_index_is_the_enumeration_sequon_subset_in_order() {
                 accession: "G1".into(),
                 description: "glyco one".into(),
                 sequence: b"MNGSPEKLLNLTMRAENTKWVNASGRPEPNKTGK".to_vec(),
+                annotation: None,
             },
             Protein {
                 accession: "G2".into(),
                 description: "glyco two".into(),
                 sequence: b"MKNMSYKAANVTRLLNLTMRSTNGK".to_vec(),
+                annotation: None,
             },
             Protein {
                 accession: "G3".into(),
                 description: "no sequon".into(),
                 sequence: b"AAGTLLDRSHAREDPEPKGGGR".to_vec(),
+                annotation: None,
             },
         ],
     };
@@ -842,6 +852,7 @@ fn glyco_table_from_the_index_is_the_enumeration_sequon_subset_in_order() {
         accession: None,
         neutral_losses: Vec::new(),
         loss_class: 0,
+        annotated_site_mass: None,
     };
     let aa_set = AminoAcidSetBuilder::new_standard()
         .add_variable_mod(ox_m)

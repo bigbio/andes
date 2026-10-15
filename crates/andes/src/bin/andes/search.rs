@@ -25,7 +25,7 @@ use crate::spectra::{
     run_precursor_calibration, send_chunks, title_prefix_for, tolerance_ppm_display, ParseStats,
 };
 use crate::{arg_present, report_search_progress, EXPLICIT_MISSED_CLEAVAGES};
-use input::{FastaReader, MgfReader, Ms1Link, MzMLReader};
+use input::{MgfReader, Ms1Link, MzMLReader};
 use model::{
     activation::ActivationMethod, AminoAcidSetBuilder, InstrumentType, PrecursorTolerance, Spectrum,
 };
@@ -270,14 +270,39 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let t_total = std::time::Instant::now();
     let t_phase = std::time::Instant::now();
-    // ── 1. Load FASTA target database ────────────────────────────────────────
-    let target_db = FastaReader::load_all(input::open_buf_maybe_gz(&database_path)?)?;
+    // ── 1. Load the target database (FASTA or UniProt XML) ───────────────────
+    let uniprot_opts = input::UniProtOptions {
+        variants: cli.uniprot_variants,
+        isoforms: cli.uniprot_isoforms,
+        chains: cli.uniprot_chains,
+        evidence: cli.uniprot_evidence,
+    };
+    let loaded = input::load_protein_database(&database_path, &uniprot_opts)?;
+    let target_db = loaded.db;
     eprintln!(
         "Loaded {} target proteins from {} [PHASE fasta_load: {:.2}s]",
         target_db.proteins.len(),
         database_path.display(),
         t_phase.elapsed().as_secs_f64()
     );
+    match &loaded.uniprot {
+        Some(stats) => log_uniprot_load(stats, &uniprot_opts),
+        None => {
+            for (set, flag) in [
+                (cli.uniprot_variants, "--uniprot-variants"),
+                (cli.uniprot_isoforms, "--uniprot-isoforms"),
+                (cli.uniprot_chains, "--uniprot-chains"),
+            ] {
+                if set {
+                    eprintln!(
+                        "WARN: {flag} needs a UniProt XML database (*.xml[.gz]); {} is FASTA, \
+                         so it does nothing.",
+                        database_path.display()
+                    );
+                }
+            }
+        }
+    }
 
     // ── 2. Build SearchIndex (targets + strategy-generated decoys) ────────────
     let decoy_strategy =
@@ -288,12 +313,16 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             )
         })?;
     let t_phase = std::time::Instant::now();
-    let idx = SearchIndex::from_target_db_with_strategy(
+    let idx = SearchIndex::from_target_db_for(
         &target_db,
         &cli.decoy_prefix,
         cli.decoy_suffix.as_deref(),
         decoy_strategy,
         cli.decoy_seed,
+        &search::decoy::Proteases {
+            primary: search_enzyme,
+            extra: extra_enzymes.clone(),
+        },
     );
     eprintln!(
         "[PHASE search_index_build: {:.2}s]",
@@ -612,6 +641,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "[PHASE param_and_scorer: {:.2}s]",
         t_phase.elapsed().as_secs_f64()
     );
+
+    report_annotated_site_mods(&aa, &target_db);
 
     // ── 5. Build SearchParams ─────────────────────────────────────────────────
     let mut params = SearchParams::default_tryptic(aa);
@@ -1155,8 +1186,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // reporters) are captured by the readers next to the MS2 stream and handed
     // to the collector per file. Quantification itself runs after rescoring.
     let mut quant: Option<QuantCollector> =
-        QuantSettings::from_cli(&cli, param.data_type.instrument.is_high_resolution())?
-            .map(QuantCollector::new);
+        QuantSettings::from_cli(&cli, param.data_type.instrument.is_high_resolution())?.map(
+            |mut settings| {
+                // Recorded in each run's MS2 table, where the library matches
+                // its fragment spectra and extract scores transfers.
+                settings.fragment_tol = Some(scorer.feature_match_tolerance());
+                QuantCollector::new(settings)
+            },
+        );
     if let Some(q) = &quant {
         let s = &q.settings;
         if is_mgf && (s.needs_ms1_series() || s.needs_ms3()) {
@@ -2291,10 +2328,89 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         donor_q,
         donor_pep,
         cli.mbr_fdr,
+        cli.quant_feature_fdr.0,
         &report_base.with_extension(""),
         cli.output_parquet.as_deref(),
     )?;
     Ok(())
+}
+
+/// Log what a UniProt XML load kept: annotated sites, variant entries, and
+/// the features the evidence level or the canonical sequence ruled out.
+fn log_uniprot_load(stats: &input::UniProtLoadStats, opts: &input::UniProtOptions) {
+    eprintln!(
+        "UniProt XML: {} entries, {} annotated modification sites, {} variant entries \
+         (evidence >= {}; {} features below it, {} not fitting their sequence, \
+         {} on isoforms not searched)",
+        stats.entries,
+        stats.mod_sites,
+        stats.variant_proteins,
+        opts.evidence.as_str(),
+        stats.below_evidence,
+        stats.unusable_features,
+        stats.isoform_features,
+    );
+    if opts.isoforms || opts.chains {
+        eprintln!(
+            "UniProt XML: {} isoform entries ({} isoforms not rebuildable), {} mature-chain entries",
+            stats.isoform_proteins, stats.unbuilt_isoforms, stats.chain_proteins,
+        );
+    }
+    if !stats.unknown_modifications.is_empty() {
+        let mut names: Vec<(&String, &usize)> = stats.unknown_modifications.iter().collect();
+        names.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        let total: usize = names.iter().map(|(_, n)| **n).sum();
+        let examples: Vec<String> = names
+            .iter()
+            .take(5)
+            .map(|(name, n)| format!("{name} ({n})"))
+            .collect();
+        eprintln!(
+            "UniProt XML: {total} modification features have no single known mass and are not \
+             used as sites, e.g. {}",
+            examples.join(", ")
+        );
+    }
+}
+
+/// Say how many annotated sites each `sites=annotated` mod of `aa` can use,
+/// and warn about one the database annotates no site of its mass for: it is
+/// never placed.
+fn report_annotated_site_mods(aa: &model::AminoAcidSet, target_db: &model::ProteinDb) {
+    let mut mods: Vec<(&str, f64)> = aa
+        .distinct_mods()
+        .iter()
+        .filter_map(|m| m.annotated_site_mass.map(|mass| (m.name.as_str(), mass)))
+        .collect();
+    mods.sort_by(|a, b| a.0.cmp(b.0).then(a.1.total_cmp(&b.1)));
+    mods.dedup_by(|b, a| a.0 == b.0 && a.1.to_bits() == b.1.to_bits());
+    for (name, mass) in mods {
+        let (mut sites, mut proteins) = (0usize, 0usize);
+        for p in &target_db.proteins {
+            let n = p
+                .mod_sites()
+                .iter()
+                .filter(|s| (s.mass_delta - mass).abs() <= model::protein::SITE_MASS_TOLERANCE)
+                .count();
+            if n > 0 {
+                sites += n;
+                proteins += 1;
+            }
+        }
+        if sites == 0 {
+            eprintln!(
+                "WARN: {name} ({mass:+.4} Da) is restricted to annotated sites (sites=annotated), \
+                 but no target protein annotates a site of that mass, so it is never placed. \
+                 Annotated sites come from a UniProt XML database (--database *.xml[.gz]); \
+                 --uniprot-evidence sets which are used."
+            );
+        } else {
+            eprintln!(
+                "Annotated-site mod {name} ({mass:+.4} Da): {sites} sites on {proteins} target \
+                 proteins"
+            );
+        }
+    }
 }
 
 /// `--mbr` needs two or more inputs, `--lfq` and a rescoring run (the

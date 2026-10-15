@@ -43,6 +43,10 @@ pub struct RunConfig {
 pub struct IoCfg {
     pub spectrum: Option<Vec<PathBuf>>,
     pub database: Option<PathBuf>,
+    pub uniprot_variants: Option<bool>,
+    pub uniprot_isoforms: Option<bool>,
+    pub uniprot_chains: Option<bool>,
+    pub uniprot_evidence: Option<String>,
     pub output_pin: Option<PathBuf>,
     pub output_tsv: Option<PathBuf>,
     pub output_parquet: Option<PathBuf>,
@@ -138,6 +142,31 @@ pub struct QuantCfg {
     pub mbr: Option<bool>,
     pub mbr_library_fdr: Option<f64>,
     pub mbr_fdr: Option<f64>,
+    /// A number in `(0, 1]` or `off`, as `--quant-feature-fdr`.
+    pub quant_feature_fdr: Option<NumberOrString>,
+}
+
+/// A YAML scalar written as a number or as a string (e.g. `0.05` or `off`),
+/// passed to the CLI validator as its text.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum NumberOrString {
+    Number(f64),
+    String(String),
+}
+
+/// `quant_feature_fdr` through the CLI validator, the error naming the key.
+fn parse_quant_feature_fdr(s: &str) -> Result<crate::cli::FractionOrOff, String> {
+    crate::cli::parse_fraction_or_off(s).map_err(|e| format!("quant_feature_fdr: {e}"))
+}
+
+impl NumberOrString {
+    fn text(&self) -> String {
+        match self {
+            NumberOrString::Number(v) => v.to_string(),
+            NumberOrString::String(s) => s.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -213,6 +242,23 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     // ── io ──
     set!("spectrum", spectrum, cfg.io.spectrum);
     set_opt!("database", database, cfg.io.database);
+    set!(
+        "uniprot_variants",
+        uniprot_variants,
+        cfg.io.uniprot_variants
+    );
+    set!(
+        "uniprot_isoforms",
+        uniprot_isoforms,
+        cfg.io.uniprot_isoforms
+    );
+    set!("uniprot_chains", uniprot_chains, cfg.io.uniprot_chains);
+    set_parsed!(
+        "uniprot_evidence",
+        uniprot_evidence,
+        cfg.io.uniprot_evidence,
+        crate::parse_uniprot_evidence
+    );
     set_opt!("output_pin", output_pin, cfg.io.output_pin);
     set_opt!("output_tsv", output_tsv, cfg.io.output_tsv);
     set_opt!("output_parquet", output_parquet, cfg.io.output_parquet);
@@ -385,6 +431,12 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         cfg.quant.mbr_library_fdr
     );
     set!("mbr_fdr", mbr_fdr, cfg.quant.mbr_fdr);
+    set_parsed!(
+        "quant_feature_fdr",
+        quant_feature_fdr,
+        cfg.quant.quant_feature_fdr.map(|v| v.text()),
+        parse_quant_feature_fdr
+    );
 
     // ── glyco ──
     set!("glyco", glyco, cfg.glyco.enabled);
@@ -583,6 +635,9 @@ glyco:
             ("lfq_feature_fdr", "-0.5"),
             ("quant_fdr", "5.0"),
             ("quant_fdr", ".nan"),
+            ("quant_feature_fdr", "1.5"),
+            ("quant_feature_fdr", "0"),
+            ("quant_feature_fdr", "none"),
             ("lfq_rt_window", "0"),
             ("lfq_rt_window", "-30"),
             ("lfq_rt_window", ".inf"),
@@ -615,6 +670,57 @@ glyco:
         )
         .unwrap();
         assert!(apply(ok, &mut a, &matches).is_ok());
+        assert_eq!(a.quant_feature_fdr.0, None, "the default is off");
+        for (value, want) in [("off", None), ("0.01", Some(0.01)), ("0.05", Some(0.05))] {
+            let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
+            let cfg = RunConfig::from_yaml_str(&format!("quant:\n  quant_feature_fdr: {value}\n"))
+                .unwrap();
+            apply(cfg, &mut a, &matches).unwrap();
+            assert_eq!(a.quant_feature_fdr.0, want, "{value}");
+        }
+    }
+
+    /// The UniProt XML keys apply through the CLI's validator; an explicit CLI
+    /// flag still wins.
+    #[test]
+    fn uniprot_keys_apply_with_cli_precedence() {
+        use clap::{CommandFactory, FromArgMatches};
+        let base = [
+            "andes",
+            "--spectrum",
+            "x",
+            "--database",
+            "y.xml.gz",
+            "--output-pin",
+            "o",
+        ];
+        let matches = crate::TopCli::command()
+            .try_get_matches_from(base)
+            .expect("parse baseline args");
+        let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
+        assert!(!a.uniprot_variants);
+        assert_eq!(a.uniprot_evidence, input::EvidenceLevel::Experimental);
+        assert!(!a.uniprot_isoforms && !a.uniprot_chains);
+        let cfg = RunConfig::from_yaml_str(
+            "io:\n  uniprot_variants: true\n  uniprot_isoforms: true\n  uniprot_chains: true\n  \
+             uniprot_evidence: curated\n",
+        )
+        .unwrap();
+        apply(cfg, &mut a, &matches).unwrap();
+        assert!(a.uniprot_variants && a.uniprot_isoforms && a.uniprot_chains);
+        assert_eq!(a.uniprot_evidence, input::EvidenceLevel::Curated);
+
+        let bad = RunConfig::from_yaml_str("io:\n  uniprot_evidence: strong\n").unwrap();
+        let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
+        assert!(apply(bad, &mut a, &matches).is_err());
+
+        let cli = crate::TopCli::command()
+            .try_get_matches_from(base.into_iter().chain(["--uniprot-evidence", "any"]))
+            .unwrap();
+        let mut a = crate::SearchArgs::from_arg_matches(&cli).unwrap();
+        let cfg = RunConfig::from_yaml_str("io:\n  uniprot_evidence: curated\n").unwrap();
+        apply(cfg, &mut a, &cli).unwrap();
+        assert_eq!(a.uniprot_evidence, input::EvidenceLevel::Any);
     }
 
     /// The shipped `config.example.yaml` must parse against the current schema, so

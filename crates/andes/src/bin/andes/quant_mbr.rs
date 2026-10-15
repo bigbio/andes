@@ -11,12 +11,13 @@
 //! * identified in the run (a donor run: a target PSM at PSM q-value within
 //!   the library's donor threshold): an `Identified` target fit with the
 //!   prior centred on the best donor PSM's RT and `s = max(w_prior, 6 s)`,
-//!   plus a `PseudoTransfer` target fit with the alignment prior computed
-//!   without this run's own observation;
+//!   with its decoy probes ([`quant::decoys::probes`], same prior), plus a
+//!   `PseudoTransfer` target fit with the alignment prior computed without
+//!   this run's own observation;
 //! * not identified: a `Transfer` target and its decoy probes, with the
 //!   alignment prior;
-//! * an unaligned run gets its `Identified` rows only (no pseudo-transfers,
-//!   no transfers); pairs without a prediction, and identified pairs whose
+//! * an unaligned run gets its `Identified` rows (target and decoys) only (no
+//!   pseudo-transfers, no transfers); pairs without a prediction, and identified pairs whose
 //!   best PSM RT is not finite, are skipped and counted.
 //!
 //! An entry is fitted on the MS1 series of its FAIMS compensation voltage.
@@ -39,7 +40,15 @@
 //! Finalize: the transfer targets and decoys of every run go to the
 //! cross-validated transfer FDR of [`crate::transfer_fdr`] (features
 //! [`TRANSFER_FEATURES`], built by [`transfer_features`]); rows without
-//! evidence or with a non-finite feature take no part and get no q-value. Each
+//! evidence or with a non-finite feature take no part and get no q-value.
+//! The identified targets and their decoys go, separately, through the same
+//! machinery with their own models (features [`IDENTIFIED_FEATURES`], built
+//! by [`identified_features`]): their prior is centred on the PSM's RT, so
+//! their feature distribution is not the transfers', and the transfer
+//! q-values stay what they are without them. Each identified target gets the
+//! quality q-value `quant_q`; a transfer's `quant_q` is its `transfer_q`.
+//! With a quality threshold, an identified row above it (or without a
+//! q-value) is `identified_below_threshold`. Each
 //! pseudo-transfer is scored by the model of its precursor's fold, which never
 //! saw it, and placed against that fold's transfer scores. `<base>.mbr.tsv`
 //! gets one row per identified or transferred (precursor, run) target, and
@@ -49,6 +58,22 @@
 //! acceptance rate is optimistic for real transfers: the alignment map was
 //! fitted with the pseudo-transfer's own run observation as an anchor, and
 //! only the consensus RT leaves it out.
+//!
+//! Reported quantity: one elution width per precursor. Its consensus width
+//! `w_c` is the median, over its identified rows in aligned runs with a fit
+//! of positive amplitude, of `w_r / f_r'(f_r^-1(t0_r))`: the fitted width
+//! carried onto the consensus RT scale by the run map's local slope. A row
+//! in aligned run `r` with apex `t0` reports `A * w * sqrt(2 pi)` and
+//! `amplitude_se * w * sqrt(2 pi)` with `w = w_c * f_r'(f_r^-1(t0))`. A row
+//! of a precursor without such a fit, and every row of an unaligned run,
+//! reports the extract's own `quantity` and `quantity_se`. The extract
+//! tables keep the per-run values.
+//!
+//! Normalised quantity: `quantity_normalized` is the reported quantity with
+//! its run's offset at the row's apex RT removed ([`quant::normalize`]: a
+//! level per run and an RT-local term). The offsets are fitted on the
+//! identified targets with `quant_q <= 0.01` and a positive quantity; a run
+//! without enough of them reports `NA`. `quantity` stays the raw measurement.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -58,13 +83,18 @@ use output::mbr_out::{
     VALIDATION_Q,
 };
 use output::ms1_table::read_ms1_table;
-use quant::decoys::{probes, Hypothesis, Probe};
+use quant::align::RunMap;
+use quant::decoys::{probes, Hypothesis, Probe, PEPTIDE_MASS_SLOPE};
 use quant::evidence::{fit_many, Evidence, EvidenceParams, FitJob, WIDTH_GRID};
 use quant::library::{Library, LibraryEntry};
 use quant::ms1_index::Ms1RunIndex;
+use quant::ms2::{elution_window, LibrarySpectrum, Ms2RunIndex};
+use quant::normalize::{fit as fit_normalization, NormCell, NormParams, RunNormalization};
 use rayon::prelude::*;
 
-use crate::transfer_fdr::{transfer_fdr, FdrCounts, FdrRow, TRANSFER_FEATURES};
+use crate::transfer_fdr::{
+    transfer_fdr, FdrCounts, FdrRow, IDENTIFIED_FEATURES, TRANSFER_FEATURES,
+};
 
 pub(crate) use output::extract_table::{ExtractRole as Role, ExtractRow};
 
@@ -435,6 +465,7 @@ fn entry_rows(
             evidence: None,
             n_donor_runs,
             library_q: e.q,
+            ms2: None,
         };
         (row, *probe)
     };
@@ -445,12 +476,15 @@ fn entry_rows(
         s,
         w_prior,
     };
+    let run_rt = || ms1.rt_range().unwrap_or((f64::NAN, f64::NAN));
     match identified_rt(e, run) {
         Some(rt) if !rt.is_finite() => counts.nonfinite_best_rt += 1,
         Some(rt) => {
             let w = wp.at(rt);
-            let probe = target(rt, w.max(IDENTIFIED_MIN_S), w);
-            rows.push(row(Hypothesis::Target, Role::Identified, &probe, donors));
+            let s = w.max(IDENTIFIED_MIN_S);
+            for probe in probes(e.precursor, run, meta.mz, charge, rt, s, w, run_rt()) {
+                rows.push(row(probe.kind, Role::Identified, &probe, donors));
+            }
             if !run_aligned {
                 return (rows, counts);
             }
@@ -476,7 +510,6 @@ fn entry_rows(
         None if !run_aligned => {}
         None => match lib.alignment.predict(e.precursor, run) {
             Some((t_hat, s)) => {
-                let run_rt = ms1.rt_range().unwrap_or((f64::NAN, f64::NAN));
                 for probe in probes(
                     e.precursor,
                     run,
@@ -485,7 +518,7 @@ fn entry_rows(
                     t_hat,
                     s,
                     wp.at(t_hat),
-                    run_rt,
+                    run_rt(),
                 ) {
                     rows.push(row(probe.kind, Role::Transfer, &probe, other_donors));
                 }
@@ -608,13 +641,189 @@ pub(crate) fn extract_run(
     Ok(finish(slots, width_fit_count, &wp))
 }
 
+/// MS2 evidence of one run's transfer and pseudo-transfer rows, by role and
+/// decoy family, for the extract log.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct Ms2Counts {
+    /// Per role (0 transfer, 1 pseudo-transfer) and family (0 target, 1 mass
+    /// shift, 2 RT shift): rows with MS2 evidence, of them with at least one
+    /// scan in the window, and of them supported
+    /// ([`quant::ms2::Ms2Evidence::supports`]).
+    pub rows: [[usize; 3]; 2],
+    pub with_scan: [[usize; 3]; 2],
+    pub supported: [[usize; 3]; 2],
+    /// Transfer and pseudo-transfer rows with a fit whose entry has no
+    /// library spectrum (no MS2 evidence).
+    pub no_spectrum: usize,
+}
+
+/// The m/z of a probe of precursor `meta` with hypothesis `kind`, as
+/// [`quant::decoys::probes`] builds it.
+fn probe_mz(meta: &quant::library::PrecursorMeta, kind: Hypothesis) -> f64 {
+    match kind {
+        Hypothesis::MassShiftDecoy(n) => {
+            meta.mz + n as f64 * PEPTIDE_MASS_SLOPE / meta.charge.max(1) as f64
+        }
+        Hypothesis::Target | Hypothesis::RtShiftDecoy => meta.mz,
+    }
+}
+
+/// Sets the MS2 evidence of every transfer and pseudo-transfer row with a
+/// fit: the best scan of run `ms2` for the entry's library spectrum
+/// (`spectra`, per precursor id) among the scans isolating the row's probe
+/// m/z within its fitted elution window, at the entry's FAIMS voltage. A
+/// decoy row is scored with its target's spectrum on its own m/z and window.
+/// A pseudo-transfer leaves out the scans of its run's donor PSMs
+/// (`donor_scans`, per precursor id), whose identifications make it a
+/// pseudo-transfer; a transfer has none in its run. Rows of entries without
+/// a spectrum, identified rows and rows without a fit keep `None`.
+pub(crate) fn attach_ms2(
+    rows: &mut [ExtractRow],
+    lib: &Library,
+    spectra: &[Option<LibrarySpectrum>],
+    donor_scans: &[Vec<(u16, f64)>],
+    ms2: &Ms2RunIndex,
+    tol: model::Tolerance,
+) -> Ms2Counts {
+    let mut faims: Vec<Option<f32>> = vec![None; lib.meta.len()];
+    for e in &lib.entries {
+        faims[e.precursor as usize] = e.faims_cv;
+    }
+    rows.par_iter_mut().for_each(|r| {
+        r.ms2 = None;
+        if r.role == Role::Identified {
+            return;
+        }
+        let (Some(e), Some(Some(lib_spec))) = (&r.evidence, spectra.get(r.precursor as usize))
+        else {
+            return;
+        };
+        let Some(window) = elution_window(e.t0, e.w) else {
+            return;
+        };
+        let p = r.precursor as usize;
+        let exclude: Vec<f64> = if r.role == Role::PseudoTransfer {
+            donor_scans[p]
+                .iter()
+                .filter(|(run, _)| *run == r.run)
+                .map(|&(_, t)| t)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mz = probe_mz(&lib.meta[p], r.kind);
+        r.ms2 = Some(ms2.best_match(lib_spec, mz, window, faims[p], &exclude, tol));
+    });
+    let mut c = Ms2Counts::default();
+    for r in rows.iter() {
+        let role = match r.role {
+            Role::Identified => continue,
+            Role::Transfer => 0,
+            Role::PseudoTransfer => 1,
+        };
+        let Some(m) = &r.ms2 else {
+            if r.evidence.is_some() {
+                c.no_spectrum += 1;
+            }
+            continue;
+        };
+        let f = family(r.kind) as usize;
+        c.rows[role][f] += 1;
+        c.with_scan[role][f] += usize::from(m.n_scans > 0);
+        c.supported[role][f] += usize::from(m.supports());
+    }
+    c
+}
+
+/// `d run RT / d consensus RT` of run `run`'s map at run RT `rt`; `None` for
+/// an unaligned run or a slope that is not finite and positive.
+fn local_slope(maps: &[Option<RunMap>], run: u16, rt: f64) -> Option<f64> {
+    let map = maps.get(run as usize)?.as_ref()?;
+    let slope = map.slope_at(map.invert(rt));
+    (slope.is_finite() && slope > 0.0).then_some(slope)
+}
+
+/// Per precursor, the consensus width `w_c` of the module docs, from the
+/// identified target rows among `rows`.
+fn consensus_widths<'a>(
+    rows: impl IntoIterator<Item = &'a ExtractRow>,
+    maps: &[Option<RunMap>],
+) -> HashMap<u32, f64> {
+    let mut widths: HashMap<u32, Vec<f64>> = HashMap::new();
+    for r in rows {
+        if (r.role, r.kind) != (Role::Identified, Hypothesis::Target) {
+            continue;
+        }
+        let Some(e) = &r.evidence else { continue };
+        if !(e.amplitude > 0.0 && e.w.is_finite() && e.w > 0.0) {
+            continue;
+        }
+        if let Some(slope) = local_slope(maps, r.run, e.t0) {
+            widths.entry(r.precursor).or_default().push(e.w / slope);
+        }
+    }
+    widths.into_iter().map(|(p, w)| (p, median(w))).collect()
+}
+
+/// `(quantity, quantity_se)` of evidence `e` in run `run`: at the consensus
+/// width `w_c` carried into the run, or the extract's own values without a
+/// consensus width or in an unaligned run.
+fn reported_quantity(
+    e: &Evidence,
+    run: u16,
+    w_c: Option<f64>,
+    maps: &[Option<RunMap>],
+) -> (f64, f64) {
+    match w_c.zip(local_slope(maps, run, e.t0)) {
+        Some((w_c, slope)) => {
+            let area = w_c * slope * (2.0 * std::f64::consts::PI).sqrt();
+            (e.amplitude * area, e.amplitude_se * area)
+        }
+        None => (e.quantity, e.quantity_se),
+    }
+}
+
+/// The run normalisation of the reported quantities ([`quant::normalize`]),
+/// fitted on the identified targets with a quality q-value at or below
+/// [`VALIDATION_Q`] (`id_q(i)` for row `i`) and a positive reported quantity
+/// (`quantity(row)`).
+fn run_normalization(
+    rows: &[&ExtractRow],
+    id_q: impl Fn(usize) -> Option<f64>,
+    quantity: impl Fn(&ExtractRow) -> Option<f64>,
+    n_runs: usize,
+) -> RunNormalization {
+    let cells: Vec<NormCell> = rows
+        .iter()
+        .enumerate()
+        .filter(|(i, r)| {
+            (r.role, r.kind) == (Role::Identified, Hypothesis::Target)
+                && id_q(*i).is_some_and(|q| q <= VALIDATION_Q)
+        })
+        .filter_map(|(_, r)| {
+            let e = r.evidence.as_ref()?;
+            let q = quantity(r).filter(|q| *q > 0.0 && q.is_finite())?;
+            Some(NormCell {
+                precursor: r.precursor,
+                run: r.run,
+                log2_quantity: q.log2(),
+                rt: e.t0,
+            })
+        })
+        .collect();
+    fit_normalization(&cells, n_runs, &NormParams::default())
+}
+
 /// Floor of `amplitude_se` in the amplitude signal-to-noise feature.
 const MIN_AMPLITUDE_SE: f64 = 1e-12;
 
 /// The transfer FDR features of a row, in [`TRANSFER_FEATURES`] order;
-/// `None` without evidence or with a non-finite value.
+/// `None` without evidence or with a non-finite value. A row without MS2
+/// evidence (no library spectrum) has zero MS2 features, as a row whose
+/// window holds no scan.
 pub(crate) fn transfer_features(row: &ExtractRow) -> Option<Vec<f32>> {
     let e = row.evidence.as_ref()?;
+    let ms2 = row.ms2.unwrap_or_default();
     let snr = e.amplitude / e.amplitude_se.max(MIN_AMPLITUDE_SE);
     let x = [
         e.llr,
@@ -630,10 +839,46 @@ pub(crate) fn transfer_features(row: &ExtractRow) -> Option<Vec<f32>> {
         (snr + 1.0).log10(),
         row.n_donor_runs as f64,
         row.library_q,
+        ms2.best.angle as f64,
+        ms2.best.n_matched as f64,
+        ms2.best.explained as f64,
     ];
     debug_assert_eq!(x.len(), TRANSFER_FEATURES.len());
     let x: Vec<f32> = x.iter().map(|&v| v as f32).collect();
     x.iter().all(|v| v.is_finite()).then_some(x)
+}
+
+/// The identified-row quality features of a row, in [`IDENTIFIED_FEATURES`]
+/// order: the fit evidence only (no donor count, library q-value or other
+/// run's measurement); `None` without evidence or with a non-finite value.
+pub(crate) fn identified_features(row: &ExtractRow) -> Option<Vec<f32>> {
+    let e = row.evidence.as_ref()?;
+    let snr = e.amplitude / e.amplitude_se.max(MIN_AMPLITUDE_SE);
+    let x = [
+        e.llr,
+        e.rt_z,
+        e.rt_z.abs(),
+        e.width_ratio,
+        e.envelope_cos,
+        e.coherence,
+        e.m1_ratio,
+        e.mass_err_ppm.abs(),
+        e.n_points as f64,
+        e.isotopes_used.count_ones() as f64,
+        (snr + 1.0).log10(),
+    ];
+    debug_assert_eq!(x.len(), IDENTIFIED_FEATURES.len());
+    let x: Vec<f32> = x.iter().map(|&v| v as f32).collect();
+    x.iter().all(|v| v.is_finite()).then_some(x)
+}
+
+/// The decoy family of a hypothesis: 0 target, 1 mass shift, 2 RT shift.
+fn family(kind: Hypothesis) -> u8 {
+    match kind {
+        Hypothesis::Target => 0,
+        Hypothesis::MassShiftDecoy(_) => 1,
+        Hypothesis::RtShiftDecoy => 2,
+    }
 }
 
 /// `<base>.mbr.tsv` and `<base>.mbr_validation.tsv`.
@@ -656,6 +901,10 @@ pub(crate) struct FinalizeSummary {
     /// feature (no q-value).
     pub no_features: usize,
     pub fdr: FdrCounts,
+    /// Identified targets and decoys without evidence or with a non-finite
+    /// feature (no quality q-value).
+    pub identified_no_features: usize,
+    pub identified_fdr: FdrCounts,
     /// The rows of `<base>.mbr.tsv`, in file order.
     pub features: Vec<MbrFeature>,
 }
@@ -668,24 +917,31 @@ pub(crate) struct MbrFeature {
     pub evidence_type: EvidenceType,
     pub quantity: Option<f64>,
     pub quantity_se: Option<f64>,
+    pub quantity_normalized: Option<f64>,
     pub transfer_q: Option<f64>,
+    pub quant_q: Option<f64>,
     pub apex_rt_s: Option<f64>,
     pub library_q: f64,
     /// Intensity-weighted isotope-0 mass error of the fit, ppm.
     pub mass_err_ppm: Option<f64>,
 }
 
-/// Transfer FDR, pseudo-transfer validation and the MBR outputs over the
-/// extract rows of every run (`runs[i]` holds rows of any runs; a row's `run`
-/// indexes `stems`, its `precursor` indexes `lib.meta`).
+/// Transfer FDR, identified-row quality q-values, pseudo-transfer validation
+/// and the MBR outputs over the extract rows of every run (`runs[i]` holds
+/// rows of any runs; a row's `run` indexes `stems`, its `precursor` indexes
+/// `lib.meta`). With `quant_feature_fdr`, identified rows whose quality
+/// q-value is above it, or missing, are `identified_below_threshold`.
 ///
-/// Errors: `mbr_fdr` outside `(0, 1]`, a row whose run or precursor is out of
-/// range, or an unwritable output (the message names the file).
+/// Errors: `mbr_fdr` or `quant_feature_fdr` outside `(0, 1]`, a row whose run
+/// or precursor is out of range, or an unwritable output (the message names
+/// the file).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn finalize(
     stems: &[String],
     lib: &Library,
     runs: &[Vec<ExtractRow>],
     mbr_fdr: f64,
+    quant_feature_fdr: Option<f64>,
     seed: u64,
     mbr_tsv: &Path,
     validation_tsv: &Path,
@@ -693,6 +949,11 @@ pub(crate) fn finalize(
     if !(mbr_fdr > 0.0 && mbr_fdr <= 1.0) {
         return Err(format!(
             "transfer q-value threshold {mbr_fdr} is outside (0, 1]"
+        ));
+    }
+    if let Some(t) = quant_feature_fdr.filter(|t| !(*t > 0.0 && *t <= 1.0)) {
+        return Err(format!(
+            "identified quality q-value threshold {t} is outside (0, 1]"
         ));
     }
     let rows: Vec<&ExtractRow> = runs.iter().flatten().collect();
@@ -711,44 +972,62 @@ pub(crate) fn finalize(
 
     let mut summary = FinalizeSummary::default();
     let mut fdr_rows = Vec::new();
-    // Per row: the index of its FdrRow, for transfer targets and decoys.
+    let mut id_rows = Vec::new();
+    // Per row: the index of its FdrRow among `fdr_rows` (transfer targets and
+    // decoys) or `id_rows` (identified targets and decoys).
     let mut fdr_index: Vec<Option<usize>> = vec![None; rows.len()];
     let mut identified: HashMap<(u32, u16), &Evidence> = HashMap::new();
     for (i, r) in rows.iter().enumerate() {
-        match (r.role, r.kind) {
-            (Role::Identified, Hypothesis::Target) => {
-                if let Some(e) = &r.evidence {
-                    let previous = identified.insert((r.precursor, r.run), e);
-                    debug_assert!(
-                        previous.is_none(),
-                        "two identified rows of precursor {} in run {}",
-                        r.precursor,
-                        r.run
-                    );
-                }
-            }
-            (Role::Transfer, kind) => {
-                let Some(x) = transfer_features(r) else {
-                    summary.no_features += 1;
-                    continue;
-                };
-                let family = match kind {
-                    Hypothesis::Target => 0,
-                    Hypothesis::MassShiftDecoy(_) => 1,
-                    Hypothesis::RtShiftDecoy => 2,
-                };
-                fdr_index[i] = Some(fdr_rows.len());
-                fdr_rows.push(FdrRow {
-                    precursor: r.precursor,
-                    is_decoy: family != 0,
-                    family,
-                    x,
-                });
-            }
-            _ => {}
+        if let (Role::Identified, Hypothesis::Target, Some(e)) = (r.role, r.kind, &r.evidence) {
+            let previous = identified.insert((r.precursor, r.run), e);
+            debug_assert!(
+                previous.is_none(),
+                "two identified rows of precursor {} in run {}",
+                r.precursor,
+                r.run
+            );
         }
+        let (features, table, missing) = match r.role {
+            Role::Identified => (
+                identified_features(r),
+                &mut id_rows,
+                &mut summary.identified_no_features,
+            ),
+            Role::Transfer => (
+                transfer_features(r),
+                &mut fdr_rows,
+                &mut summary.no_features,
+            ),
+            Role::PseudoTransfer => continue,
+        };
+        let Some(x) = features else {
+            *missing += 1;
+            continue;
+        };
+        let family = family(r.kind);
+        fdr_index[i] = Some(table.len());
+        table.push(FdrRow {
+            precursor: r.precursor,
+            is_decoy: family != 0,
+            family,
+            x,
+        });
     }
     let fdr = transfer_fdr(&fdr_rows, seed);
+    let id_fdr = transfer_fdr(&id_rows, seed);
+    let maps = &lib.alignment.maps;
+    let w_c = consensus_widths(rows.iter().copied(), maps);
+    let reported = |r: &ExtractRow| {
+        r.evidence
+            .as_ref()
+            .map(|e| reported_quantity(e, r.run, w_c.get(&r.precursor).copied(), maps))
+    };
+    let norm = run_normalization(
+        &rows,
+        |i| fdr_index[i].and_then(|k| id_fdr.result.q[k]),
+        |r| reported(r).map(|q| q.0),
+        stems.len(),
+    );
     let accepted = |q: Option<f64>| q.is_some_and(|q| q <= mbr_fdr);
     // The validation thresholds, VALIDATION_Q then mbr_fdr, and their counts.
     let thresholds = [VALIDATION_Q, mbr_fdr];
@@ -756,16 +1035,39 @@ pub(crate) fn finalize(
 
     let mut v = MbrValidation {
         q_threshold: mbr_fdr,
+        quant_feature_threshold: quant_feature_fdr,
         ..MbrValidation::default()
     };
     let mut out: Vec<(u32, u16, MbrRow<'_>, Option<f64>)> = Vec::new();
     for (i, r) in rows.iter().enumerate() {
         if r.kind != Hypothesis::Target {
+            if let (Role::Transfer, Some(m)) = (r.role, &r.ms2) {
+                let f = family(r.kind) as usize;
+                v.ms2_rows[f] += 1;
+                v.ms2_supported[f] += usize::from(m.supports());
+            }
             continue;
         }
         let e = r.evidence.as_ref();
-        let (evidence_type, transfer_q) = match r.role {
-            Role::Identified => (EvidenceType::Identified, None),
+        let quantity = reported(r);
+        let quantity_normalized = quantity
+            .zip(e)
+            .and_then(|((q, _), e)| norm.normalize(r.run, r.precursor, e.t0, q));
+        let (evidence_type, transfer_q, quant_q) = match r.role {
+            Role::Identified => {
+                let q = fdr_index[i].and_then(|k| id_fdr.result.q[k]);
+                v.identified += 1;
+                v.identified_scored += usize::from(q.is_some());
+                v.identified_q01 += usize::from(q.is_some_and(|q| q <= VALIDATION_Q));
+                let t = match quant_feature_fdr {
+                    Some(t) if !q.is_some_and(|q| q <= t) => {
+                        v.identified_below_threshold += 1;
+                        EvidenceType::IdentifiedBelowThreshold
+                    }
+                    _ => EvidenceType::Identified,
+                };
+                (t, None, q)
+            }
             Role::Transfer => {
                 let q = fdr_index[i].and_then(|k| fdr.result.q[k]);
                 v.transfers += 1;
@@ -778,16 +1080,28 @@ pub(crate) fn finalize(
                         a.rt_only += ok(fdr.result.q_rt_only[k]);
                     }
                 }
-                let t = if accepted(q) {
-                    EvidenceType::TransferMs1
-                } else {
-                    EvidenceType::BelowThreshold
+                let supported = r.ms2.is_some_and(|m| m.supports());
+                if let Some(m) = &r.ms2 {
+                    v.ms2_rows[0] += 1;
+                    v.ms2_supported[0] += usize::from(m.supports());
+                }
+                let t = match (accepted(q), supported) {
+                    (true, true) => {
+                        v.transfer_ms2 += 1;
+                        EvidenceType::TransferMs2
+                    }
+                    (true, false) => EvidenceType::TransferMs1,
+                    (false, _) => EvidenceType::BelowThreshold,
                 };
-                (t, q)
+                (t, q, q)
             }
             Role::PseudoTransfer => {
                 let q = transfer_features(r).and_then(|x| fdr.pseudo_q(r.precursor, &x));
                 v.pseudo_transfers += 1;
+                if let Some(m) = &r.ms2 {
+                    v.ms2_pseudo_rows += 1;
+                    v.ms2_pseudo_supported += usize::from(m.supports());
+                }
                 v.pseudo_scored += usize::from(q.is_some());
                 let wrong = match (e, identified.get(&(r.precursor, r.run))) {
                     (Some(p), Some(id)) => Some((p.t0 - id.t0).abs() > id.w),
@@ -817,9 +1131,11 @@ pub(crate) fn finalize(
                 precursor_key: &lib.meta[r.precursor as usize].key,
                 run: &stems[r.run as usize],
                 evidence_type,
-                quantity: e.map(|e| e.quantity),
-                quantity_se: e.map(|e| e.quantity_se),
+                quantity: quantity.map(|q| q.0),
+                quantity_se: quantity.map(|q| q.1),
+                quantity_normalized,
                 transfer_q,
+                quant_q,
                 apex_rt_s: e.map(|e| e.t0),
                 library_q: r.library_q,
             },
@@ -838,7 +1154,9 @@ pub(crate) fn finalize(
             evidence_type: r.evidence_type,
             quantity: r.quantity,
             quantity_se: r.quantity_se,
+            quantity_normalized: r.quantity_normalized,
             transfer_q: r.transfer_q,
+            quant_q: r.quant_q,
             apex_rt_s: r.apex_rt_s,
             library_q: r.library_q,
             mass_err_ppm: *mass_err,
@@ -863,10 +1181,63 @@ pub(crate) fn finalize(
         fdr.counts.unscored,
         fdr.counts.no_q
     );
+    for f in &id_fdr.counts.failed_folds {
+        eprintln!("[mbr] identified quality fold without a model: {f}");
+    }
+    eprintln!(
+        "[mbr] identified rows {}: {} with a quality q-value (quant_q, internal), {} at q <= {VALIDATION_Q}; {} identified rows without features, {} unscored, {} scored without a q-value{}",
+        v.identified,
+        v.identified_scored,
+        v.identified_q01,
+        summary.identified_no_features,
+        id_fdr.counts.unscored,
+        id_fdr.counts.no_q,
+        quant_feature_fdr.map_or(String::new(), |t| format!(
+            "; {} identified_below_threshold at --quant-feature-fdr {t}",
+            v.identified_below_threshold
+        ))
+    );
     eprintln!(
         "[mbr] pseudo-transfers {}: wrong peak {} of {}",
         v.pseudo_transfers, v.wrong_peak, v.wrong_peak_pairs
     );
+    let rate = |a: usize, b: usize| {
+        if b > 0 {
+            format!("{:.4}", a as f64 / b as f64)
+        } else {
+            "NA".to_string()
+        }
+    };
+    eprintln!(
+        "[mbr] MS2 support (at least {} fragments at angle >= {}): transfer targets {} of {} ({}), mass-shift decoys {} of {} ({}), RT-shift decoys {} of {} ({}), pseudo-transfers {} of {} ({}); {} accepted transfers are transfer_ms2",
+        quant::ms2::SUPPORT_MIN_MATCHED,
+        quant::ms2::SUPPORT_MIN_ANGLE,
+        v.ms2_supported[0],
+        v.ms2_rows[0],
+        rate(v.ms2_supported[0], v.ms2_rows[0]),
+        v.ms2_supported[1],
+        v.ms2_rows[1],
+        rate(v.ms2_supported[1], v.ms2_rows[1]),
+        v.ms2_supported[2],
+        v.ms2_rows[2],
+        rate(v.ms2_supported[2], v.ms2_rows[2]),
+        v.ms2_pseudo_supported,
+        v.ms2_pseudo_rows,
+        rate(v.ms2_pseudo_supported, v.ms2_pseudo_rows),
+        v.transfer_ms2
+    );
+    eprintln!(
+        "[mbr] run normalisation (quantity_normalized): {} reference precursors (identified, quant_q <= {VALIDATION_Q}, in >= 3 runs or all runs)",
+        norm.precursors
+    );
+    for (run, stem) in stems.iter().enumerate() {
+        match norm.summary(run as u16) {
+            Some((level, sd, n)) => eprintln!(
+                "[mbr]   {stem}: median offset {level:+.3} log2, sd along RT {sd:.3}, {n} reference cells"
+            ),
+            None => eprintln!("[mbr]   {stem}: not normalised (too few reference cells)"),
+        }
+    }
     let shown: &[(f64, &Accepted)] = if mbr_fdr == VALIDATION_Q {
         &[(VALIDATION_Q, &v.at_q01)]
     } else {
@@ -887,6 +1258,7 @@ pub(crate) fn finalize(
     summary.rows_written = out.len();
     summary.validation = v;
     summary.fdr = fdr.counts;
+    summary.identified_fdr = id_fdr.counts;
     Ok(summary)
 }
 
@@ -1081,6 +1453,10 @@ mod tests {
         rows.iter().filter(|r| r.precursor == p).collect()
     }
 
+    fn is_identified_target(r: &ExtractRow) -> bool {
+        (r.role, r.kind) == (Role::Identified, Hypothesis::Target)
+    }
+
     #[test]
     fn identified_pairs_get_identified_and_pseudo_rows() {
         let fx = fixture(false);
@@ -1088,9 +1464,25 @@ mod tests {
         let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         for p in 0..BOTH {
             let rows = rows_of(&out.rows, p);
-            assert_eq!(rows.len(), 2, "precursor {p}: {rows:?}");
-            let (id, pseudo) = (rows[0], rows[1]);
+            assert_eq!(rows.len(), 4, "precursor {p}: {rows:?}");
+            let (id, pseudo) = (rows[0], rows[3]);
             assert_eq!((id.role, id.kind), (Role::Identified, Hypothesis::Target));
+            // The identified target's decoys follow it, with its role.
+            assert_eq!(rows[1].role, Role::Identified);
+            assert!(matches!(rows[1].kind, Hypothesis::MassShiftDecoy(_)));
+            assert_eq!(
+                (rows[2].role, rows[2].kind),
+                (Role::Identified, Hypothesis::RtShiftDecoy)
+            );
+            for d in &rows[1..3] {
+                assert_eq!(
+                    (d.n_donor_runs, d.library_q),
+                    (id.n_donor_runs, id.library_q)
+                );
+                let e = d.evidence.as_ref().unwrap();
+                let target_llr = id.evidence.as_ref().unwrap().llr;
+                assert!(e.llr < target_llr / 10.0, "precursor {p}: {d:?}");
+            }
             assert_eq!(
                 (pseudo.role, pseudo.kind),
                 (Role::PseudoTransfer, Hypothesis::Target)
@@ -1107,10 +1499,57 @@ mod tests {
         }
         // Seen only in run 1: no other run predicts it.
         let rows = rows_of(&out.rows, ONLY_RUN1);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].role, Role::Identified);
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|r| r.role == Role::Identified));
         assert_eq!(out.counts.no_pseudo_prediction, 1);
         assert!(!out.counts.unaligned);
+    }
+
+    #[test]
+    fn identified_decoys_are_the_transfer_probes_at_the_identified_prior() {
+        let fx = fixture(false);
+        let ms1 = Ms1RunIndex::new(run_scans(1, false, &|_| false));
+        let wp = WidthPrior::from_fits(Vec::new());
+        let entry = fx.lib.entries.iter().find(|e| e.precursor == 4).unwrap();
+        let (rows, _) = entry_rows(entry, 1, true, &fx.lib, &ms1, &wp);
+        let id: Vec<&(ExtractRow, Probe)> = rows
+            .iter()
+            .filter(|(r, _)| r.role == Role::Identified)
+            .collect();
+        assert_eq!(id.len(), 3, "{rows:?}");
+        let rt = identified_rt(entry, 1).unwrap();
+        let w = wp.at(rt);
+        // Exactly the probes a transfer gets, with the identified prior.
+        let want = probes(
+            4,
+            1,
+            mz_of(4),
+            CHARGE,
+            rt,
+            w.max(IDENTIFIED_MIN_S),
+            w,
+            ms1.rt_range().unwrap(),
+        );
+        let got: Vec<Probe> = id.iter().map(|(_, p)| *p).collect();
+        assert_eq!(got, want);
+        let target = got[0];
+        assert_eq!(target.kind, Hypothesis::Target);
+        assert_eq!((target.t_hat, target.mz), (rt, mz_of(4)));
+        for (row, probe) in &id {
+            assert_eq!(row.kind, probe.kind);
+            // Same search breadth for target and decoys.
+            assert_eq!((probe.s, probe.w_prior), (target.s, target.w_prior));
+        }
+        let mass = got[1];
+        let Hypothesis::MassShiftDecoy(n) = mass.kind else {
+            panic!("{mass:?}")
+        };
+        assert_eq!(mass.t_hat, target.t_hat);
+        let shift = n as f64 * quant::decoys::PEPTIDE_MASS_SLOPE / CHARGE as f64;
+        assert!((mass.mz - target.mz - shift).abs() < 1e-9);
+        let rt_decoy = got[2];
+        assert_eq!(rt_decoy.mz, target.mz);
+        assert!((rt_decoy.t_hat - rt).abs() >= 8.0 * target.s + 4.0 * target.w_prior);
     }
 
     #[test]
@@ -1210,8 +1649,8 @@ mod tests {
         let out = extract_run(2, &path, &lib, &params()).unwrap();
         assert_eq!(out.counts.pseudo_other_component, 1);
         let rows = rows_of(&out.rows, 121);
-        assert_eq!(rows.len(), 1, "{rows:?}");
-        assert_eq!(rows[0].role, Role::Identified);
+        assert!(rows.iter().all(|r| r.role == Role::Identified), "{rows:?}");
+        assert_eq!(rows.iter().filter(|r| is_identified_target(r)).count(), 1);
     }
 
     #[test]
@@ -1220,9 +1659,10 @@ mod tests {
         assert!(fx.lib.alignment.maps[2].is_none());
         let out = extract_run(2, &fx.ms1_tables[2], &fx.lib, &params()).unwrap();
         assert!(out.counts.unaligned);
-        // Run 2 identifies precursor 0 only: its identified row, and no
-        // pseudo-transfer or transfer rows.
-        assert_eq!(out.rows.len(), 1, "{:?}", out.rows);
+        // Run 2 identifies precursor 0 only: its identified row and decoys,
+        // and no pseudo-transfer or transfer rows.
+        assert_eq!(out.rows.len(), 3, "{:?}", out.rows);
+        assert!(out.rows.iter().all(|r| r.role == Role::Identified));
         let r = &out.rows[0];
         assert_eq!(
             (r.precursor, r.run, r.role, r.kind),
@@ -1247,7 +1687,7 @@ mod tests {
             .collect();
         let stems: Vec<String> = ["r0", "r1", "r2"].map(String::from).to_vec();
         let (mbr, val) = mbr_paths(&fx._dir.path().join("x"));
-        finalize(&stems, &fx.lib, &runs, 0.01, 7, &mbr, &val).unwrap();
+        finalize(&stems, &fx.lib, &runs, 0.01, None, 7, &mbr, &val).unwrap();
         let text = std::fs::read_to_string(&mbr).unwrap();
         let in_r2: Vec<&str> = text
             .lines()
@@ -1258,7 +1698,9 @@ mod tests {
             in_r2[0].starts_with("PEP0/2\tr2\tidentified\t"),
             "{in_r2:?}"
         );
-        assert!(!in_r2[0].contains("\tNA\tNA\tNA"), "{in_r2:?}");
+        // Its quantity and standard error are reported.
+        let fields: Vec<&str> = in_r2[0].split('\t').collect();
+        assert!(fields[3] != "NA" && fields[4] != "NA", "{in_r2:?}");
     }
 
     #[test]
@@ -1340,7 +1782,7 @@ mod tests {
         let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         assert!(out.counts.width_fits >= 20, "{:?}", out.counts);
         assert!(!out.counts.width_prior_fallback);
-        for r in out.rows.iter().filter(|r| r.role == Role::Identified) {
+        for r in out.rows.iter().filter(|r| is_identified_target(r)) {
             let e = r.evidence.as_ref().unwrap();
             let w_prior = e.w / e.width_ratio;
             assert!(
@@ -1354,7 +1796,7 @@ mod tests {
     fn faims_entry_is_fitted_on_its_voltage_series() {
         let fx = fixture(true);
         let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
-        for r in out.rows.iter().filter(|r| r.role == Role::Identified) {
+        for r in out.rows.iter().filter(|r| is_identified_target(r)) {
             let e = r.evidence.as_ref().unwrap();
             assert!(
                 (e.amplitude / AMPLITUDE - 1.0).abs() < 0.1,
@@ -1410,7 +1852,7 @@ mod tests {
         let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         assert!(out.counts.width_fits >= 20, "{:?}", out.counts);
         assert!(!out.counts.width_prior_fallback);
-        for r in out.rows.iter().filter(|r| r.role == Role::Identified) {
+        for r in out.rows.iter().filter(|r| is_identified_target(r)) {
             let e = r.evidence.as_ref().unwrap();
             let w_prior = e.w / e.width_ratio;
             assert!(
@@ -1528,6 +1970,7 @@ mod finalize_tests {
             evidence: e,
             n_donor_runs: 1,
             library_q: 0.001,
+            ms2: None,
         }
     }
 
@@ -1608,7 +2051,7 @@ mod finalize_tests {
     fn finalize_writes_one_row_per_target_pair_with_evidence_types() {
         let dir = tempfile::tempdir().unwrap();
         let (mbr, val) = mbr_paths(&dir.path().join("x"));
-        let s = finalize(&stems(), &library(), &extract(), 0.01, 7, &mbr, &val).unwrap();
+        let s = finalize(&stems(), &library(), &extract(), 0.01, None, 7, &mbr, &val).unwrap();
         let t = table(&mbr);
         assert_eq!(t[0][2], "evidence_type");
         let body = &t[1..];
@@ -1650,7 +2093,7 @@ mod finalize_tests {
     fn finalize_reports_pseudo_transfer_validation() {
         let dir = tempfile::tempdir().unwrap();
         let (mbr, val) = mbr_paths(&dir.path().join("x"));
-        let s = finalize(&stems(), &library(), &extract(), 0.01, 7, &mbr, &val).unwrap();
+        let s = finalize(&stems(), &library(), &extract(), 0.01, None, 7, &mbr, &val).unwrap();
         let v = &s.validation;
         eprintln!("validation: {v:?}");
         assert_eq!(v.pseudo_transfers, N as usize);
@@ -1669,7 +2112,7 @@ mod finalize_tests {
         assert_eq!(get("accepted_pooled_q01"), &v.at_q01.pooled.to_string());
 
         // A looser threshold keeps the q <= 0.01 counts and adds its own.
-        let loose = finalize(&stems(), &library(), &extract(), 0.5, 7, &mbr, &val).unwrap();
+        let loose = finalize(&stems(), &library(), &extract(), 0.5, None, 7, &mbr, &val).unwrap();
         let w = &loose.validation;
         assert_eq!(w.q_threshold, 0.5);
         assert_eq!(w.at_q01, v.at_q01);
@@ -1689,8 +2132,8 @@ mod finalize_tests {
         let runs = extract();
         let (m1, v1) = mbr_paths(&dir.path().join("one"));
         let (m2, v2) = mbr_paths(&dir.path().join("two"));
-        finalize(&stems(), &library(), &runs, 0.01, 3, &m1, &v1).unwrap();
-        finalize(&stems(), &library(), &runs, 0.01, 3, &m2, &v2).unwrap();
+        finalize(&stems(), &library(), &runs, 0.01, None, 3, &m1, &v1).unwrap();
+        finalize(&stems(), &library(), &runs, 0.01, None, 3, &m2, &v2).unwrap();
         assert_eq!(std::fs::read(&m1).unwrap(), std::fs::read(&m2).unwrap());
         assert_eq!(std::fs::read(&v1).unwrap(), std::fs::read(&v2).unwrap());
     }
@@ -1701,16 +2144,423 @@ mod finalize_tests {
         let (mbr, val) = mbr_paths(&dir.path().join("x"));
         let mut runs = extract();
         runs[1].push(row(0, 2, Hypothesis::Target, Role::Transfer, None));
-        let e = finalize(&stems(), &library(), &runs, 0.01, 1, &mbr, &val).unwrap_err();
+        let e = finalize(&stems(), &library(), &runs, 0.01, None, 1, &mbr, &val).unwrap_err();
         assert!(e.contains("run 2"), "{e}");
         runs[1].pop();
         runs[1].push(row(N, 1, Hypothesis::Target, Role::Transfer, None));
-        let e = finalize(&stems(), &library(), &runs, 0.01, 1, &mbr, &val).unwrap_err();
+        let e = finalize(&stems(), &library(), &runs, 0.01, None, 1, &mbr, &val).unwrap_err();
         assert!(e.contains(&format!("precursor {N}")), "{e}");
         for bad in [0.0, -0.1, 1.5, f64::NAN] {
-            assert!(finalize(&stems(), &library(), &extract(), bad, 1, &mbr, &val).is_err());
+            assert!(finalize(&stems(), &library(), &extract(), bad, None, 1, &mbr, &val).is_err());
         }
         assert!(!mbr.exists());
+    }
+
+    /// Run 0 on the consensus scale, run 1 stretched by 1.25 and run 2
+    /// unaligned.
+    fn stretched_maps() -> Vec<Option<RunMap>> {
+        let map = |slope: f64| {
+            RunMap::from_parts(vec![0.0, 3000.0], vec![0.0, 3000.0 * slope], slope, slope).unwrap()
+        };
+        vec![Some(map(1.0)), Some(map(1.25)), None]
+    }
+
+    /// A precursor seen in runs 0 and 1 (and 2, unaligned) with the same
+    /// abundance: in run `r` the apex is `A0 / slope_r` and the true width
+    /// `w0 * slope_r`, and the fitted width is off by `jitter[r]`, as a
+    /// coarse width grid makes it, while the amplitude is right.
+    fn jittered_rows(p: u32, jitter: [f64; 3]) -> Vec<ExtractRow> {
+        let (a0, w0) = (1e6, 5.0);
+        let slopes = [1.0, 1.25, 1.0];
+        let mut g = Rng(p as u64 + 1);
+        (0..3u16)
+            .flat_map(|run| {
+                let slope = slopes[run as usize];
+                let w = w0 * slope * jitter[run as usize];
+                let amplitude = a0 / slope;
+                let mut e = evidence(&mut g, true, 500.0 * slope);
+                e.amplitude = amplitude;
+                e.amplitude_se = 0.01 * amplitude;
+                e.w = w;
+                e.quantity = amplitude * w * (2.0 * std::f64::consts::PI).sqrt();
+                e.quantity_se = 0.01 * e.quantity;
+                let identified = row(
+                    p,
+                    run,
+                    Hypothesis::Target,
+                    Role::Identified,
+                    Some(e.clone()),
+                );
+                let pseudo = row(p, run, Hypothesis::Target, Role::PseudoTransfer, Some(e));
+                [identified, pseudo]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn consensus_width_gives_one_quantity_across_runs() {
+        let maps = stretched_maps();
+        let truth = 1e6 * 5.0 * (2.0 * std::f64::consts::PI).sqrt();
+        for jitter in [[0.7, 1.4, 1.0], [1.4, 0.7, 1.4], [1.0, 1.0, 0.7]] {
+            let rows = jittered_rows(3, jitter);
+            let w_c = consensus_widths(&rows, &maps);
+            let per_run: Vec<(f64, f64)> = rows
+                .iter()
+                .filter(|r| r.role == Role::Identified)
+                .map(|r| {
+                    let e = r.evidence.as_ref().unwrap();
+                    reported_quantity(e, r.run, w_c.get(&3).copied(), &maps)
+                })
+                .collect();
+            let raw: Vec<f64> = rows
+                .iter()
+                .filter(|r| r.role == Role::Identified)
+                .map(|r| r.evidence.as_ref().unwrap().quantity)
+                .collect();
+            eprintln!("jitter {jitter:?}: raw {raw:?}, consensus {per_run:?}");
+            // Runs 0 and 1 report one quantity: the jitter is gone.
+            let (q0, q1) = (per_run[0].0, per_run[1].0);
+            assert!((q0 / q1 - 1.0).abs() < 1e-12, "{per_run:?}");
+            // w_c is the median of the two aligned runs' widths.
+            let want = truth * 0.5 * (jitter[0] + jitter[1]);
+            assert!((q0 / want - 1.0).abs() < 1e-12, "{q0} vs {want}");
+            for &(q, se) in &per_run[..2] {
+                assert!((se / q - 0.01).abs() < 1e-12);
+            }
+            // The unaligned run keeps the extract's own values.
+            let e2 = rows[4].evidence.as_ref().unwrap();
+            assert_eq!(per_run[2], (e2.quantity, e2.quantity_se));
+        }
+        // Raw quantities with jitter 0.7 vs 1.4 differ twofold; the
+        // consensus removes it.
+        let rows = jittered_rows(3, [0.7, 1.4, 1.0]);
+        let raw = |run: usize| rows[2 * run].evidence.as_ref().unwrap().quantity;
+        assert!((raw(1) / raw(0) - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn consensus_width_skips_unfitted_and_unaligned_rows() {
+        let maps = stretched_maps();
+        let mut rows = jittered_rows(4, [1.0, 1.0, 1.0]);
+        // Only run 0's identified fit has signal; run 2 is unaligned.
+        rows[2].evidence.as_mut().unwrap().amplitude = 0.0;
+        rows[4].evidence.as_mut().unwrap().w = 50.0;
+        let w_c = consensus_widths(&rows, &maps);
+        assert!((w_c[&4] - 5.0).abs() < 1e-12, "{w_c:?}");
+        // A precursor without an identified fit keeps its own quantity.
+        let mut rows = jittered_rows(5, [1.0, 1.0, 1.0]);
+        for r in rows.iter_mut().filter(|r| r.role == Role::Identified) {
+            r.evidence = None;
+        }
+        assert!(consensus_widths(&rows, &maps).is_empty());
+        let e = rows[1].evidence.as_ref().unwrap();
+        assert_eq!(
+            reported_quantity(e, 1, None, &maps),
+            (e.quantity, e.quantity_se)
+        );
+    }
+
+    #[test]
+    fn finalize_reports_the_consensus_quantity() {
+        // Precursor 0 is identified in runs 0 and 1 with widths 4 and 8; with
+        // unit-slope maps each row reports its A * 6 * sqrt(2 pi).
+        let mut lib = library();
+        let unit = RunMap::from_parts(vec![0.0, 3000.0], vec![0.0, 3000.0], 1.0, 1.0).unwrap();
+        lib.alignment.maps = vec![Some(unit.clone()), Some(unit)];
+        let mut runs = extract();
+        let mut g = Rng(9);
+        for (run, w) in [(0u16, 4.0), (1, 8.0)] {
+            let mut e = evidence(&mut g, true, 100.0);
+            e.amplitude = 4e6 / w;
+            e.amplitude_se = 1e3;
+            e.w = w;
+            e.quantity = e.amplitude * w * (2.0 * std::f64::consts::PI).sqrt();
+            let rows = &mut runs[run as usize];
+            rows.retain(|r| !(r.precursor == 0 && r.role != Role::PseudoTransfer));
+            rows.push(row(0, run, Hypothesis::Target, Role::Identified, Some(e)));
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (mbr, val) = mbr_paths(&dir.path().join("x"));
+        let s = finalize(&stems(), &lib, &runs, 0.01, None, 7, &mbr, &val).unwrap();
+        let mut p0 = s.features.iter().filter(|f| f.precursor == 0);
+        let sqrt_2pi = (2.0 * std::f64::consts::PI).sqrt();
+        let a = p0.next().unwrap();
+        let b = p0.next().unwrap();
+        assert_eq!((a.run, b.run), (0, 1));
+        assert!((a.quantity.unwrap() / (1e6 * 6.0 * sqrt_2pi) - 1.0).abs() < 1e-12);
+        assert!((b.quantity.unwrap() / (5e5 * 6.0 * sqrt_2pi) - 1.0).abs() < 1e-12);
+        assert!((a.quantity_se.unwrap() / (1e3 * 6.0 * sqrt_2pi) - 1.0).abs() < 1e-12);
+        // The extract rows keep their per-run quantities.
+        let id0 = runs[0]
+            .iter()
+            .find(|r| r.precursor == 0 && r.role == Role::Identified);
+        assert!(
+            (id0.unwrap().evidence.as_ref().unwrap().quantity / (4e6 * sqrt_2pi) - 1.0).abs()
+                < 1e-12
+        );
+    }
+
+    /// Evidence of another precursor's feature caught in the window: strong,
+    /// but with the wrong isotope pattern and a poor elution profile.
+    fn foreign(g: &mut Rng, t0: f64) -> Evidence {
+        let mut e = evidence(g, true, t0);
+        e.llr = 50.0 + 15.0 * g.normal();
+        e.envelope_cos = 0.7 + 0.1 * g.normal();
+        e.coherence = 0.4 + 0.15 * g.normal();
+        e.rt_z = 2.0 * g.normal();
+        e.m1_ratio = 0.5 + 0.2 * g.unit();
+        e.isotopes_used = 0b0111;
+        e.mass_err_ppm = 5.0 * g.normal();
+        e
+    }
+
+    /// Identified precursor `p` in run 0 is clean, at the wrong peak (no
+    /// signal of its own: `p % 10 == 0`) or interfered (`p % 10 == 5`).
+    fn identified_kind(p: u32) -> &'static str {
+        match p % 10 {
+            0 => "wrong",
+            5 => "interfered",
+            _ => "clean",
+        }
+    }
+
+    /// [`extract`] with run 0's identified targets as [`identified_kind`]
+    /// says, each followed by a mass-shift and an RT-shift decoy; a third of
+    /// the decoys catch another precursor's feature.
+    fn extract_with_identified_decoys() -> Vec<Vec<ExtractRow>> {
+        let mut runs = extract();
+        let mut g = Rng(11);
+        let mut run0 = Vec::new();
+        for r in runs[0].drain(..) {
+            if r.role != Role::Identified {
+                run0.push(r);
+                continue;
+            }
+            let (p, apex) = (r.precursor, r.evidence.as_ref().unwrap().t0);
+            let target = match identified_kind(p) {
+                "wrong" => evidence(&mut g, false, apex),
+                "interfered" => foreign(&mut g, apex),
+                _ => evidence(&mut g, true, apex),
+            };
+            run0.push(row(
+                p,
+                0,
+                Hypothesis::Target,
+                Role::Identified,
+                Some(target),
+            ));
+            for (k, kind) in [Hypothesis::MassShiftDecoy(-7), Hypothesis::RtShiftDecoy]
+                .into_iter()
+                .enumerate()
+            {
+                let t0 = apex + 300.0 * k as f64;
+                let e = if (p + k as u32) % 3 == 0 {
+                    foreign(&mut g, t0)
+                } else {
+                    evidence(&mut g, false, t0)
+                };
+                run0.push(row(p, 0, kind, Role::Identified, Some(e)));
+            }
+        }
+        runs[0] = run0;
+        runs
+    }
+
+    #[test]
+    fn identified_quality_q_separates_clean_from_wrong_and_interfered_peaks() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mbr, val) = mbr_paths(&dir.path().join("x"));
+        let runs = extract_with_identified_decoys();
+        let s = finalize(&stems(), &library(), &runs, 0.01, None, 7, &mbr, &val).unwrap();
+        let mut q: HashMap<&str, Vec<f64>> = HashMap::new();
+        for f in s.features.iter().filter(|f| f.run == 0) {
+            assert_eq!(f.evidence_type, EvidenceType::Identified);
+            assert_eq!(f.transfer_q, None);
+            q.entry(identified_kind(f.precursor))
+                .or_default()
+                .push(f.quant_q.unwrap());
+        }
+        let share = |kind: &str, ok: &dyn Fn(f64) -> bool| {
+            let v = &q[kind];
+            v.iter().filter(|&&x| ok(x)).count() as f64 / v.len() as f64
+        };
+        let clean = share("clean", &|x| x <= 0.01);
+        let wrong = share("wrong", &|x| x > 0.05);
+        let interfered = share("interfered", &|x| x > 0.05);
+        eprintln!("clean q<=0.01 {clean}, wrong q>0.05 {wrong}, interfered q>0.05 {interfered}");
+        assert!(clean >= 0.95, "{clean}");
+        assert!(wrong >= 0.95, "{wrong}");
+        assert!(interfered >= 0.8, "{interfered}");
+        let v = &s.validation;
+        assert_eq!(
+            (v.identified, v.identified_scored),
+            (N as usize, N as usize)
+        );
+        assert_eq!(v.identified_below_threshold, 0);
+        assert_eq!(s.identified_no_features, 0);
+        // A transfer's quant_q is its transfer_q.
+        for f in s.features.iter().filter(|f| f.run == 1) {
+            assert_eq!(f.quant_q, f.transfer_q);
+        }
+    }
+
+    /// [`extract_with_identified_decoys`] with run 1 identifying the even
+    /// precursors as run 0 does (same targets and decoys) at `gain` times run
+    /// 0's quantity; the odd precursors stay transfers into run 1.
+    fn extract_two_identified_runs(gain: f64) -> Vec<Vec<ExtractRow>> {
+        let mut runs = extract_with_identified_decoys();
+        let copies: Vec<ExtractRow> = runs[0]
+            .iter()
+            .filter(|r| r.precursor % 2 == 0 && r.role == Role::Identified)
+            .map(|r| {
+                let mut r = r.clone();
+                r.run = 1;
+                if let Some(e) = r.evidence.as_mut() {
+                    e.amplitude *= gain;
+                    e.amplitude_se *= gain;
+                    e.quantity *= gain;
+                    e.quantity_se *= gain;
+                }
+                r
+            })
+            .collect();
+        let run1: Vec<ExtractRow> = runs[1]
+            .drain(..)
+            .filter(|r| r.precursor % 2 == 1)
+            .chain(copies)
+            .collect();
+        runs[1] = run1;
+        runs
+    }
+
+    #[test]
+    fn finalize_reports_run_normalized_quantities() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mbr, val) = mbr_paths(&dir.path().join("x"));
+        let runs = extract_two_identified_runs(2.0);
+        let s = finalize(&stems(), &library(), &runs, 0.01, None, 7, &mbr, &val).unwrap();
+        let get = |p: u32, run: u16| {
+            s.features
+                .iter()
+                .find(|f| f.precursor == p && f.run == run)
+                .unwrap()
+        };
+        let mut clean = 0;
+        for p in (0..N).filter(|p| p % 2 == 0 && identified_kind(*p) == "clean") {
+            let (a, b) = (get(p, 0), get(p, 1));
+            // Raw run 1 reads twice run 0; normalised, the two runs agree and
+            // sit halfway (log2 offsets -0.5 and +0.5).
+            assert!((b.quantity.unwrap() / a.quantity.unwrap() - 2.0).abs() < 1e-9);
+            let (na, nb) = (
+                a.quantity_normalized.unwrap(),
+                b.quantity_normalized.unwrap(),
+            );
+            assert!((nb / na - 1.0).abs() < 1e-9, "{p}: {na} {nb}");
+            assert!((na / (a.quantity.unwrap() * 2f64.sqrt()) - 1.0).abs() < 1e-9);
+            clean += 1;
+        }
+        assert!(clean > 300, "{clean}");
+        // Every other row with a quantity is scaled by its run's offset:
+        // transfers into run 1 and identified rows that are not references.
+        for f in s.features.iter().filter(|f| f.quantity.is_some()) {
+            let want = f.quantity.unwrap()
+                * if f.run == 0 {
+                    2f64.sqrt()
+                } else {
+                    0.5f64.sqrt()
+                };
+            let got = f.quantity_normalized.unwrap();
+            assert!((got / want - 1.0).abs() < 1e-9, "{f:?}");
+        }
+        // The column is in the table, after quantity_se.
+        let t = table(&mbr);
+        let col = |name: &str| t[0].iter().position(|h| h == name).unwrap();
+        assert_eq!(col("quantity_normalized"), col("quantity_se") + 1);
+    }
+
+    #[test]
+    fn finalize_leaves_quantities_unnormalized_without_two_reference_runs() {
+        // Only run 0 has identified rows: no run is normalised.
+        let dir = tempfile::tempdir().unwrap();
+        let (mbr, val) = mbr_paths(&dir.path().join("x"));
+        let runs = extract_with_identified_decoys();
+        let s = finalize(&stems(), &library(), &runs, 0.01, None, 7, &mbr, &val).unwrap();
+        assert!(s.features.iter().all(|f| f.quantity_normalized.is_none()));
+        let t = table(&mbr);
+        let col = t[0]
+            .iter()
+            .position(|h| h == "quantity_normalized")
+            .unwrap();
+        assert!(t[1..].iter().all(|r| r[col] == "NA"));
+    }
+
+    #[test]
+    fn identified_quality_leaves_the_transfer_q_values_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let (m1, v1) = mbr_paths(&dir.path().join("plain"));
+        let (m2, v2) = mbr_paths(&dir.path().join("decoys"));
+        let plain = finalize(&stems(), &library(), &extract(), 0.01, None, 7, &m1, &v1).unwrap();
+        let runs = extract_with_identified_decoys();
+        let with = finalize(&stems(), &library(), &runs, 0.01, None, 7, &m2, &v2).unwrap();
+        let transfers = |s: &FinalizeSummary| -> Vec<(u32, Option<f64>, EvidenceType)> {
+            s.features
+                .iter()
+                .filter(|f| f.run == 1)
+                .map(|f| (f.precursor, f.transfer_q, f.evidence_type))
+                .collect()
+        };
+        assert_eq!(transfers(&plain), transfers(&with));
+        assert_eq!(plain.validation.at_q01, with.validation.at_q01);
+        // Without identified decoys there is no identified quality q-value.
+        assert!(plain
+            .features
+            .iter()
+            .filter(|f| f.run == 0)
+            .all(|f| f.quant_q.is_none() && f.evidence_type == EvidenceType::Identified));
+    }
+
+    #[test]
+    fn quant_feature_fdr_flags_identified_rows_above_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mbr, val) = mbr_paths(&dir.path().join("x"));
+        let runs = extract_with_identified_decoys();
+        let s = finalize(&stems(), &library(), &runs, 0.01, Some(0.01), 7, &mbr, &val).unwrap();
+        let (mut flagged, mut kept) = (0, 0);
+        for f in s.features.iter().filter(|f| f.run == 0) {
+            let below = f.quant_q.is_none_or(|q| q > 0.01);
+            let want = if below {
+                EvidenceType::IdentifiedBelowThreshold
+            } else {
+                EvidenceType::Identified
+            };
+            assert_eq!(f.evidence_type, want, "{f:?}");
+            // A flagged row keeps its quantity.
+            assert!(f.quantity.is_some());
+            if below {
+                flagged += 1;
+            } else {
+                kept += 1;
+            }
+        }
+        assert_eq!(s.validation.identified_below_threshold, flagged);
+        assert!(
+            flagged >= 160 && kept >= 680,
+            "{flagged} flagged, {kept} kept"
+        );
+        let t = table(&mbr);
+        assert_eq!(t[0][7], "quant_q");
+        let flagged_rows = t
+            .iter()
+            .filter(|r| r[2] == "identified_below_threshold")
+            .count();
+        assert_eq!(flagged_rows, flagged);
+        let t = table(&val);
+        let get = |name: &str| &t[1][t[0].iter().position(|h| h == name).unwrap()];
+        assert_eq!(get("quant_feature_threshold"), "0.01");
+        assert_eq!(get("identified_below_threshold"), &flagged.to_string());
+        for bad in [0.0, 1.5, f64::NAN] {
+            assert!(finalize(&stems(), &library(), &runs, 0.01, Some(bad), 7, &mbr, &val).is_err());
+        }
     }
 
     #[test]
@@ -1741,5 +2591,238 @@ mod finalize_tests {
         assert!(transfer_features(&r).is_none());
         r.evidence = None;
         assert!(transfer_features(&r).is_none());
+    }
+
+    use quant::ms2::Ms2Evidence;
+
+    fn supporting() -> Ms2Evidence {
+        Ms2Evidence {
+            n_scans: 2,
+            best: quant::ms2::ScanMatch {
+                n_matched: 9,
+                angle: 0.9,
+                explained: 0.95,
+            },
+        }
+    }
+
+    fn empty_ms2() -> Ms2Evidence {
+        Ms2Evidence {
+            n_scans: 1,
+            best: quant::ms2::ScanMatch::default(),
+        }
+    }
+
+    #[test]
+    fn transfer_features_carry_the_ms2_evidence() {
+        let mut g = Rng(3);
+        let mut r = row(
+            0,
+            1,
+            Hypothesis::Target,
+            Role::Transfer,
+            Some(evidence(&mut g, true, 100.0)),
+        );
+        let n = TRANSFER_FEATURES.len();
+        let x = transfer_features(&r).unwrap();
+        assert_eq!(&x[n - 3..], [0.0, 0.0, 0.0]);
+        r.ms2 = Some(supporting());
+        let x = transfer_features(&r).unwrap();
+        assert_eq!(&x[n - 3..], [0.9, 9.0, 0.95]);
+        assert_eq!(
+            &TRANSFER_FEATURES[n - 3..],
+            ["ms2_angle", "ms2_n_matched", "ms2_explained"]
+        );
+    }
+
+    #[test]
+    fn supported_accepted_transfers_are_transfer_ms2() {
+        let mut runs = extract();
+        for r in runs[1].iter_mut() {
+            r.ms2 = Some(if r.kind == Hypothesis::Target && r.precursor % 4 == 0 {
+                supporting()
+            } else {
+                empty_ms2()
+            });
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (mbr, val) = mbr_paths(&dir.path().join("x"));
+        let s = finalize(&stems(), &library(), &runs, 0.01, None, 7, &mbr, &val).unwrap();
+        let t = table(&mbr);
+        let ms2_rows: Vec<&Vec<String>> =
+            t[1..].iter().filter(|r| r[2] == "transfer_ms2").collect();
+        assert!(!ms2_rows.is_empty());
+        for r in &ms2_rows {
+            let p: u32 = r[0]
+                .trim_start_matches("PEP")
+                .trim_end_matches("/2")
+                .parse()
+                .unwrap();
+            assert_eq!(p % 4, 0, "{r:?}");
+        }
+        let v = &s.validation;
+        assert_eq!(v.transfer_ms2, ms2_rows.len());
+        assert_eq!(v.ms2_rows[0], N as usize);
+        assert_eq!(v.ms2_supported[0], (N as usize).div_ceil(4));
+        assert_eq!((v.ms2_supported[1], v.ms2_supported[2]), (0, 0));
+        assert!(v.ms2_rows[1] > 0 && v.ms2_rows[2] > 0);
+        let vt = table(&val);
+        let get = |name: &str| &vt[1][vt[0].iter().position(|h| h == name).unwrap()];
+        assert_eq!(get("transfer_ms2"), &ms2_rows.len().to_string());
+    }
+
+    /// Run 1: every transfer target and every decoy sits on a clean MS1 peak
+    /// (decoys on other peptides' peaks); only the present targets (even
+    /// precursors) have an MS2 scan that matches their library spectrum.
+    fn ambiguous_ms1(with_ms2: bool) -> Vec<Vec<ExtractRow>> {
+        let mut runs = extract();
+        let mut g = Rng(11);
+        let mut run1 = Vec::new();
+        for p in 0..N {
+            let apex = 100.0 + p as f64;
+            for kind in [
+                Hypothesis::Target,
+                Hypothesis::MassShiftDecoy(7),
+                Hypothesis::RtShiftDecoy,
+            ] {
+                let mut r = row(
+                    p,
+                    1,
+                    kind,
+                    Role::Transfer,
+                    Some(evidence(&mut g, true, apex)),
+                );
+                if with_ms2 {
+                    r.ms2 = Some(if kind == Hypothesis::Target && p % 2 == 0 {
+                        supporting()
+                    } else {
+                        empty_ms2()
+                    });
+                }
+                run1.push(r);
+            }
+        }
+        runs[1] = run1;
+        runs
+    }
+
+    #[test]
+    fn ms2_evidence_separates_transfers_that_ms1_cannot() {
+        let accepted = |with_ms2: bool| {
+            let dir = tempfile::tempdir().unwrap();
+            let (mbr, val) = mbr_paths(&dir.path().join("x"));
+            let runs = ambiguous_ms1(with_ms2);
+            finalize(&stems(), &library(), &runs, 0.01, None, 7, &mbr, &val).unwrap();
+            let (mut present, mut absent) = (0usize, 0usize);
+            for r in &table(&mbr)[1..] {
+                if r[1] != "b" || !r[2].starts_with("transfer_ms") {
+                    continue;
+                }
+                let p: u32 = r[0]
+                    .trim_start_matches("PEP")
+                    .trim_end_matches("/2")
+                    .parse()
+                    .unwrap();
+                if p % 2 == 0 {
+                    present += 1;
+                } else {
+                    absent += 1;
+                }
+            }
+            (present, absent)
+        };
+        let (p0, a0) = accepted(false);
+        let (p1, a1) = accepted(true);
+        eprintln!(
+            "MS1 only: {p0} present, {a0} absent accepted; with MS2: {p1} present, {a1} absent"
+        );
+        assert!(
+            p0 + a0 < 50,
+            "MS1 alone should not separate these: {p0} + {a0}"
+        );
+        assert!(p1 >= 400, "{p1} of 450 present transfers accepted with MS2");
+        assert!(a1 <= 5, "{a1} absent transfers accepted with MS2");
+    }
+
+    #[test]
+    fn attach_ms2_scores_each_probe_on_its_own_window() {
+        use quant::ms2::{fragment_ladder, library_spectrum, residue_masses, Ms2Scan};
+        let lib = library();
+        let tol = model::Tolerance::Ppm(20.0);
+        let ladder = fragment_ladder(
+            &residue_masses("LGEYGFQNALIVR", &std::collections::HashMap::new()).unwrap(),
+            2,
+        );
+        let donor: Vec<(f32, f32)> = ladder
+            .iter()
+            .enumerate()
+            .map(|(k, f)| (f.mz as f32, 100.0 + k as f32))
+            .collect();
+        let spectrum = library_spectrum(&ladder, &donor, tol).unwrap();
+        let mut spectra = vec![None; lib.meta.len()];
+        spectra[0] = Some(spectrum);
+        let mut donor_scans = vec![Vec::new(); lib.meta.len()];
+        donor_scans[0] = vec![(0u16, 50.0), (1u16, 100.0)];
+        let noise = vec![(321.1f32, 10.0f32), (654.3, 20.0)];
+        let target_mz = lib.meta[0].mz;
+        let decoy_mz = probe_mz(&lib.meta[0], Hypothesis::MassShiftDecoy(7));
+        assert!((decoy_mz - target_mz - 7.0 * PEPTIDE_MASS_SLOPE / 2.0).abs() < 1e-12);
+        let scan = |rt: f64, mz: f64, peaks: &Vec<(f32, f32)>| Ms2Scan {
+            native_id: format!("scan={rt}"),
+            spec_key: format!("k{rt}"),
+            rt,
+            precursor_mz: mz,
+            charge: 2,
+            isolation: Some((mz, 0.7, 0.7)),
+            faims_cv: None,
+            peaks: peaks.clone(),
+        };
+        let index = Ms2RunIndex::new(vec![
+            scan(100.0, target_mz, &donor),
+            scan(101.0, target_mz, &noise),
+            scan(200.0, decoy_mz, &noise),
+            scan(400.0, target_mz, &donor),
+        ]);
+        let ev = |t0: f64| {
+            let mut g = Rng(1);
+            Some(evidence(&mut g, true, t0))
+        };
+        let mut rows = vec![
+            row(0, 1, Hypothesis::Target, Role::Transfer, ev(100.0)),
+            row(
+                0,
+                1,
+                Hypothesis::MassShiftDecoy(7),
+                Role::Transfer,
+                ev(200.0),
+            ),
+            row(0, 1, Hypothesis::RtShiftDecoy, Role::Transfer, ev(400.0)),
+            row(0, 1, Hypothesis::Target, Role::PseudoTransfer, ev(100.0)),
+            row(0, 1, Hypothesis::Target, Role::Identified, ev(100.0)),
+            row(0, 1, Hypothesis::Target, Role::Transfer, None),
+            row(1, 1, Hypothesis::Target, Role::Transfer, ev(100.0)),
+        ];
+        let c = attach_ms2(&mut rows, &lib, &spectra, &donor_scans, &index, tol);
+        let m = |i: usize| rows[i].ms2.unwrap();
+        // The target sees both scans at its m/z; the donor-like one wins.
+        assert_eq!(m(0).n_scans, 2);
+        assert!(m(0).supports());
+        // The mass-shift decoy sees only the scan of its own m/z.
+        assert_eq!(m(1).n_scans, 1);
+        assert!(!m(1).supports());
+        // The RT-shift decoy at the same m/z elsewhere in the run is scored
+        // with the same spectrum: a scan there with that spectrum supports it.
+        assert_eq!(m(2).n_scans, 1);
+        assert!(m(2).supports());
+        // The pseudo-transfer leaves out its run's donor scan (RT 100).
+        assert_eq!(m(3).n_scans, 1);
+        assert!(!m(3).supports());
+        // Identified rows, rows without a fit and entries without a spectrum
+        // get none.
+        assert!(rows[4].ms2.is_none() && rows[5].ms2.is_none() && rows[6].ms2.is_none());
+        assert_eq!(c.rows[0], [1, 1, 1]);
+        assert_eq!(c.supported[0], [1, 0, 1]);
+        assert_eq!((c.rows[1][0], c.supported[1][0]), (1, 0));
+        assert_eq!(c.no_spectrum, 1);
     }
 }

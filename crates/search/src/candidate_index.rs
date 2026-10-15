@@ -233,8 +233,9 @@ pub fn build_base_peptide_index<W: Write>(
 /// derived by hashing:
 ///
 /// 1. Every **target** protein's accession and sequence (in iteration order from
-///    [`SearchIndex::iter_target_proteins`]).  Decoy sequences are derived from
-///    targets deterministically, so they need not be hashed separately.
+///    [`SearchIndex::iter_target_proteins`]), a variant entry's variant
+///    region and a mature-chain entry's new termini.  Decoy sequences are derived from targets deterministically, so
+///    they need not be hashed separately.
 /// 2. The search parameters that affect which base peptides are produced:
 ///    `enzyme`, `extra_enzymes`, `max_missed_cleavages`, `min_length`,
 ///    `max_length`, `num_tolerable_termini`, `require_nxst_sequon` and
@@ -266,6 +267,15 @@ pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams) -> PathBuf {
     for protein in &idx.db.proteins {
         protein.accession.hash(&mut h);
         protein.sequence.hash(&mut h);
+        // A variant entry only yields the spans covering its variant, so the
+        // region shapes the records too (absent for every FASTA protein).
+        for v in protein.variant_parts() {
+            (v.start, v.end).hash(&mut h);
+        }
+        // Likewise a mature-chain entry yields only its new-terminus spans.
+        if let Some(c) = protein.chain_ends() {
+            (c.n_term, c.c_term).hash(&mut h);
+        }
     }
     // The affix test decides each record's IS_DECOY flag (`SearchIndex::
     // is_decoy_accession`): an accession is a decoy if it carries the prefix
@@ -674,6 +684,7 @@ mod tests {
                 accession: "P1".into(),
                 description: "toy protein".into(),
                 sequence: b"MKWVRPK".to_vec(),
+                annotation: None,
             }],
         };
         SearchIndex::from_target_db(&target, "XXX")
@@ -785,6 +796,7 @@ mod tests {
                 accession: "P2".into(),
                 description: "test protein".into(),
                 sequence: b"WMKDALERQPK".to_vec(),
+                annotation: None,
             }],
         };
         let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -800,6 +812,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         let aa_set = AminoAcidSetBuilder::new_standard()
             .add_variable_mod(ox_m)
@@ -1062,11 +1075,13 @@ mod tests {
                     accession: "P1".into(),
                     description: String::new(),
                     sequence: b"MNGSK".to_vec(),
+                    annotation: None,
                 },
                 Protein {
                     accession: "P1_rev".into(),
                     description: String::new(),
                     sequence: b"ASNVTR".to_vec(),
+                    annotation: None,
                 },
             ],
         };

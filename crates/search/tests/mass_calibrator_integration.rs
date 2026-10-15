@@ -101,6 +101,7 @@ fn threshold_skip_returns_empty_stats() {
             accession: "P1".into(),
             description: String::new(),
             sequence: b"MKWVTFISLLR".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");

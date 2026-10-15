@@ -7,21 +7,30 @@
 //! |---|---|
 //! | `precursor_key` | peptidoform and charge key |
 //! | `run` | run stem |
-//! | `evidence_type` | `identified`, `transfer_ms1` (transfer q-value at or below the threshold) or `below_threshold` |
+//! | `evidence_type` | `identified`, `identified_below_threshold` (identified, quality q-value above the identified threshold or missing), `transfer_ms2` (transfer q-value at or below the threshold, and an MS2 scan of the run supports the transfer), `transfer_ms1` (transfer q-value at or below the threshold, without that MS2 support) or `below_threshold` |
 //! | `quantity`, `quantity_se` | fitted MS1 quantity and its standard error |
+//! | `quantity_normalized` | `quantity` with the run's normalisation offset at the row's apex RT removed (a level per run and an RT-local term fitted across runs); `NA` when the run is not normalised. `quantity` stays the raw measurement |
 //! | `transfer_q` | internal transfer quant-quality q-value (not an identification FDR); `NA` for identified rows |
+//! | `quant_q` | internal quality q-value of the row's MS1 feature against its decoys (not an identification FDR): the identified-row estimate for identified rows, `transfer_q` for transfers |
 //! | `apex_rt_s` | fitted apex, seconds |
 //! | `library_q` | internal library entry gate (not an identification FDR) |
 //!
-//! Missing values are `NA`. A `below_threshold` row keeps its quantity so a
-//! downstream tool can treat it as censored rather than missing.
+//! Missing values are `NA`. A `below_threshold` or `identified_below_threshold`
+//! row keeps its quantity so a downstream tool can treat it as censored rather
+//! than missing.
 //!
 //! `<base>.mbr_validation.tsv`: a header and one line with the pseudo-transfer
 //! validation (acceptance rate, wrong-peak rate) and the accepted
 //! transfer counts of the pooled and per-family decoy estimates, always at
 //! q <= 0.01 (columns ending `_q01`) and at the run's transfer q-value
 //! threshold (columns ending `_at_threshold`, equal to the `_q01` ones when the
-//! threshold is 0.01).
+//! threshold is 0.01), then the identified quality threshold (`NA` when none)
+//! and the identified row counts: all, with a quality q-value, at
+//! `quant_q <= 0.01`, and reported as `identified_below_threshold`; then the
+//! MS2 evidence of the transfer rows: per hypothesis (target, mass-shift
+//! decoy, RT-shift decoy) the rows with MS2 evidence and how many of them an
+//! MS2 scan supports, the pseudo-transfers likewise, and the accepted
+//! transfers reported as `transfer_ms2`.
 //!
 //! Both files are written to `<path>.partial` and renamed into place.
 
@@ -32,6 +41,11 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvidenceType {
     Identified,
+    /// Identified, with a quality q-value above the identified threshold (or
+    /// none).
+    IdentifiedBelowThreshold,
+    /// An accepted transfer that an MS2 scan of the run supports.
+    TransferMs2,
     TransferMs1,
     BelowThreshold,
 }
@@ -40,6 +54,8 @@ impl EvidenceType {
     pub fn as_str(self) -> &'static str {
         match self {
             EvidenceType::Identified => "identified",
+            EvidenceType::IdentifiedBelowThreshold => "identified_below_threshold",
+            EvidenceType::TransferMs2 => "transfer_ms2",
             EvidenceType::TransferMs1 => "transfer_ms1",
             EvidenceType::BelowThreshold => "below_threshold",
         }
@@ -54,18 +70,22 @@ pub struct MbrRow<'a> {
     pub evidence_type: EvidenceType,
     pub quantity: Option<f64>,
     pub quantity_se: Option<f64>,
+    pub quantity_normalized: Option<f64>,
     pub transfer_q: Option<f64>,
+    pub quant_q: Option<f64>,
     pub apex_rt_s: Option<f64>,
     pub library_q: f64,
 }
 
-pub const MBR_COLUMNS: [&str; 8] = [
+pub const MBR_COLUMNS: [&str; 10] = [
     "precursor_key",
     "run",
     "evidence_type",
     "quantity",
     "quantity_se",
+    "quantity_normalized",
     "transfer_q",
+    "quant_q",
     "apex_rt_s",
     "library_q",
 ];
@@ -112,6 +132,28 @@ pub struct MbrValidation {
     pub at_q01: Accepted,
     /// Accepted at `q_threshold`.
     pub at_threshold: Accepted,
+    /// The identified quality q-value threshold, when one is applied.
+    pub quant_feature_threshold: Option<f64>,
+    /// Identified target rows.
+    pub identified: usize,
+    /// Identified target rows with a quality q-value.
+    pub identified_scored: usize,
+    /// Identified target rows with a quality q-value at or below
+    /// [`VALIDATION_Q`].
+    pub identified_q01: usize,
+    /// Identified target rows reported as `identified_below_threshold`.
+    pub identified_below_threshold: usize,
+    /// Transfer rows with MS2 evidence, per hypothesis: target, mass-shift
+    /// decoy, RT-shift decoy.
+    pub ms2_rows: [usize; 3],
+    /// Of those, the rows an MS2 scan supports.
+    pub ms2_supported: [usize; 3],
+    /// Pseudo-transfers with MS2 evidence.
+    pub ms2_pseudo_rows: usize,
+    /// Of those, the ones an MS2 scan supports.
+    pub ms2_pseudo_supported: usize,
+    /// Accepted transfers reported as `transfer_ms2`.
+    pub transfer_ms2: usize,
 }
 
 /// Columns of the accepted counts, each followed by `_q01` and by
@@ -145,6 +187,26 @@ pub fn validation_columns() -> Vec<String> {
     for suffix in ["_q01", "_at_threshold"] {
         c.extend(ACCEPTED_COLUMNS.iter().map(|n| format!("{n}{suffix}")));
     }
+    c.extend(
+        [
+            "quant_feature_threshold",
+            "identified",
+            "identified_scored",
+            "identified_accepted_q01",
+            "identified_below_threshold",
+            "ms2_target_rows",
+            "ms2_target_supported",
+            "ms2_mass_decoy_rows",
+            "ms2_mass_decoy_supported",
+            "ms2_rt_decoy_rows",
+            "ms2_rt_decoy_supported",
+            "ms2_pseudo_rows",
+            "ms2_pseudo_supported",
+            "transfer_ms2",
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+    );
     c
 }
 
@@ -207,7 +269,9 @@ pub fn write_mbr_tsv(path: &Path, rows: &[MbrRow<'_>]) -> Result<(), String> {
         text.push_str(r.evidence_type.as_str());
         push_opt(&mut text, r.quantity);
         push_opt(&mut text, r.quantity_se);
+        push_opt(&mut text, r.quantity_normalized);
         push_opt(&mut text, r.transfer_q);
+        push_opt(&mut text, r.quant_q);
         push_opt(&mut text, r.apex_rt_s);
         push_opt(&mut text, Some(r.library_q));
         text.push('\n');
@@ -234,6 +298,20 @@ pub fn write_mbr_validation(path: &Path, v: &MbrValidation) -> Result<(), String
         push_opt(&mut line, a.wrong_peak_rate());
         let _ = write!(line, "\t{}\t{}\t{}", a.pooled, a.mass_only, a.rt_only);
     }
+    push_opt(&mut line, v.quant_feature_threshold);
+    let _ = write!(
+        line,
+        "\t{}\t{}\t{}\t{}",
+        v.identified, v.identified_scored, v.identified_q01, v.identified_below_threshold
+    );
+    for f in 0..3 {
+        let _ = write!(line, "\t{}\t{}", v.ms2_rows[f], v.ms2_supported[f]);
+    }
+    let _ = write!(
+        line,
+        "\t{}\t{}\t{}",
+        v.ms2_pseudo_rows, v.ms2_pseudo_supported, v.transfer_ms2
+    );
     text.push_str(&line);
     text.push('\n');
     write_atomic(path, &text)
@@ -254,7 +332,9 @@ mod tests {
                 evidence_type: EvidenceType::Identified,
                 quantity: Some(1.5e6),
                 quantity_se: Some(2e4),
+                quantity_normalized: Some(1.25e6),
                 transfer_q: None,
+                quant_q: Some(0.003),
                 apex_rt_s: Some(612.25),
                 library_q: 0.001,
             },
@@ -264,7 +344,9 @@ mod tests {
                 evidence_type: EvidenceType::BelowThreshold,
                 quantity: None,
                 quantity_se: None,
+                quantity_normalized: None,
                 transfer_q: Some(0.2),
+                quant_q: Some(0.2),
                 apex_rt_s: None,
                 library_q: 0.001,
             },
@@ -274,15 +356,15 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(
             lines[0],
-            "precursor_key\trun\tevidence_type\tquantity\tquantity_se\ttransfer_q\tapex_rt_s\tlibrary_q"
+            "precursor_key\trun\tevidence_type\tquantity\tquantity_se\tquantity_normalized\ttransfer_q\tquant_q\tapex_rt_s\tlibrary_q"
         );
         assert_eq!(
             lines[1],
-            "PEPTIDEK/2\ta\tidentified\t1500000\t20000\tNA\t612.25\t0.001"
+            "PEPTIDEK/2\ta\tidentified\t1500000\t20000\t1250000\tNA\t0.003\t612.25\t0.001"
         );
         assert_eq!(
             lines[2],
-            "PEPTIDEK/2\tb\tbelow_threshold\tNA\tNA\t0.2\tNA\t0.001"
+            "PEPTIDEK/2\tb\tbelow_threshold\tNA\tNA\tNA\t0.2\t0.2\tNA\t0.001"
         );
         assert!(!dir.path().join("x.mbr.tsv.partial").exists());
     }
@@ -315,6 +397,16 @@ mod tests {
                 mass_only: 61,
                 rt_only: 59,
             },
+            quant_feature_threshold: None,
+            identified: 50,
+            identified_scored: 48,
+            identified_q01: 45,
+            identified_below_threshold: 0,
+            ms2_rows: [100, 90, 80],
+            ms2_supported: [30, 1, 2],
+            ms2_pseudo_rows: 10,
+            ms2_pseudo_supported: 4,
+            transfer_ms2: 25,
         };
         write_mbr_validation(&p, &v).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
@@ -333,5 +425,14 @@ mod tests {
         assert_eq!(get("accepted_wrong_peak_rate_at_threshold"), "0.25");
         assert_eq!(get("accepted_rt_only_q01"), "39");
         assert_eq!(get("accepted_pooled_at_threshold"), "60");
+        assert_eq!(get("quant_feature_threshold"), "NA");
+        assert_eq!(get("identified_scored"), "48");
+        assert_eq!(get("identified_accepted_q01"), "45");
+        assert_eq!(get("identified_below_threshold"), "0");
+        assert_eq!(get("ms2_target_rows"), "100");
+        assert_eq!(get("ms2_mass_decoy_supported"), "1");
+        assert_eq!(get("ms2_rt_decoy_rows"), "80");
+        assert_eq!(get("ms2_pseudo_supported"), "4");
+        assert_eq!(get("transfer_ms2"), "25");
     }
 }

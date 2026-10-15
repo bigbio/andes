@@ -7,10 +7,12 @@
 //! entry per channel (`TMT126`, `TMT127N`, ...). Normalized or protein-level
 //! values are never written here; they belong to the quantms / OpenMS layer.
 //!
-//! When any record carries match-between-runs columns ([`MbrColumns`]), three
+//! When any record carries match-between-runs columns ([`MbrColumns`]), four
 //! nullable columns follow the QPX ones: `evidence_type` (`identified`,
 //! `transfer_ms1` or `below_threshold`), `transfer_q` (the internal transfer
-//! quant-quality q-value, not an identification FDR) and `quantity_se`.
+//! quant-quality q-value, not an identification FDR), `quant_q` (the internal
+//! quality q-value of the row's MS1 feature: the identified-row estimate, or
+//! `transfer_q` for a transfer) and `quantity_se`.
 //! Otherwise the file has exactly the QPX columns.
 
 use std::path::Path;
@@ -88,12 +90,15 @@ pub struct MbrColumns {
     pub evidence_type: String,
     /// Internal transfer quant-quality q-value; `None` for identified rows.
     pub transfer_q: Option<f64>,
+    /// Internal quality q-value of the MS1 feature against its decoys.
+    pub quant_q: Option<f64>,
     pub quantity_se: Option<f64>,
 }
 
-const MBR_FIELDS: [(&str, DataType); 3] = [
+const MBR_FIELDS: [(&str, DataType); 4] = [
     ("evidence_type", DataType::Utf8),
     ("transfer_q", DataType::Float64),
+    ("quant_q", DataType::Float64),
     ("quantity_se", DataType::Float64),
 ];
 
@@ -389,6 +394,7 @@ fn build_batch(records: &[FeatureRecord], mbr: bool) -> std::io::Result<RecordBa
     });
     let mut evidence_type = StringBuilder::new();
     let mut transfer_q = Float64Builder::new();
+    let mut quant_q = Float64Builder::new();
     let mut quantity_se = Float64Builder::new();
 
     let mut feature_id = Int64Builder::new();
@@ -628,6 +634,7 @@ fn build_batch(records: &[FeatureRecord], mbr: bool) -> std::io::Result<RecordBa
         let m = r.mbr.as_ref();
         evidence_type.append_option(m.map(|m| m.evidence_type.as_str()));
         transfer_q.append_option(m.and_then(|m| m.transfer_q));
+        quant_q.append_option(m.and_then(|m| m.quant_q));
         quantity_se.append_option(m.and_then(|m| m.quantity_se));
     }
 
@@ -669,6 +676,7 @@ fn build_batch(records: &[FeatureRecord], mbr: bool) -> std::io::Result<RecordBa
     if mbr {
         columns.push(Arc::new(evidence_type.finish()));
         columns.push(Arc::new(transfer_q.finish()));
+        columns.push(Arc::new(quant_q.finish()));
         columns.push(Arc::new(quantity_se.finish()));
     }
     RecordBatch::try_new(schema, columns).map_err(|e| std::io::Error::other(e.to_string()))
@@ -867,6 +875,7 @@ mod tests {
         transferred.mbr = Some(MbrColumns {
             evidence_type: "transfer_ms1".into(),
             transfer_q: Some(0.004),
+            quant_q: Some(0.004),
             quantity_se: Some(1.5e3),
         });
         let plain = record("LFQ");
@@ -879,9 +888,12 @@ mod tests {
             .iter()
             .map(|f| f.name().clone())
             .collect();
-        assert_eq!(names.len(), 36);
+        assert_eq!(names.len(), 37);
         assert_eq!(names[32], "psm_ids");
-        assert_eq!(&names[33..], ["evidence_type", "transfer_q", "quantity_se"]);
+        assert_eq!(
+            &names[33..],
+            ["evidence_type", "transfer_q", "quant_q", "quantity_se"]
+        );
         let batch = builder.build().unwrap().next().unwrap().unwrap();
         let et = batch
             .column_by_name("evidence_type")

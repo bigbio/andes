@@ -240,6 +240,8 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
         s(&qpx),
         "--mbr-fdr",
         FIXTURE_MBR_FDR,
+        "--quant-feature-fdr",
+        "0.05",
     ]);
     assert!(qpx.join("quantms.feature.parquet").is_file());
 
@@ -262,6 +264,8 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
             s(&perc),
             "--mbr-fdr",
             FIXTURE_MBR_FDR,
+            "--quant-feature-fdr",
+            "0.05",
         ]
         .map(String::from),
     );
@@ -297,7 +301,7 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
     // Peptide 4 was never triggered in run 3: it is transferred there, with
     // the designed quantity.
     let p4 = row("HLVDEPQNLIK/2", "mbr_run3").expect("peptide 4 in run 3");
-    assert_eq!(p4[ev], "transfer_ms1", "{p4:?}");
+    assert!(p4[ev].starts_with("transfer_ms"), "{p4:?}");
     let qv: f64 = p4[quantity].parse().unwrap();
     assert!(
         (qv / PEPTIDE4_QUANTITY - 1.0).abs() < 0.10,
@@ -306,17 +310,21 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
     for run in ["mbr_run1", "mbr_run2"] {
         assert_eq!(row("HLVDEPQNLIK/2", run).unwrap()[ev], "identified");
     }
-    // Peptide 6 has no MS1 signal anywhere and is identified in run 1 only.
+    // Peptide 6 has no MS1 signal anywhere and is identified in run 1 only:
+    // its identified rows fail the identified quality q-value.
     for key in ["DAFLGSFLYEYSR/2", "DAFLGSFLYEYSR/3"] {
         let r1 = row(key, "mbr_run1").unwrap_or_else(|| panic!("{key} in run 1"));
-        assert_eq!(r1[ev], "identified");
+        assert_eq!(r1[ev], "identified_below_threshold", "{key}: {r1:?}");
         for run in ["mbr_run2", "mbr_run3"] {
             let r = row(key, run).unwrap_or_else(|| panic!("{key} in {run}"));
-            assert_ne!(r[ev], "transfer_ms1", "{key} in {run}: {r:?}");
+            assert!(!r[ev].starts_with("transfer_ms"), "{key} in {run}: {r:?}");
         }
     }
     // Most untriggered precursors with signal are transferred.
-    let transfers = rows.values().filter(|r| r[ev] == "transfer_ms1").count();
+    let transfers = rows
+        .values()
+        .filter(|r| r[ev].starts_with("transfer_ms"))
+        .count();
     eprintln!(
         "transfers at --mbr-fdr {FIXTURE_MBR_FDR}: {transfers} of {} rows",
         rows.len()
@@ -324,10 +332,10 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
     assert!(transfers >= 50, "only {transfers} transfers");
 
     // The feature parquet holds every mbr.tsv row except the below-threshold
-    // transfers.
+    // transfers and identified rows.
     let below: Vec<&Vec<String>> = rows
         .values()
-        .filter(|r| r[ev] == "below_threshold")
+        .filter(|r| r[ev] == "below_threshold" || r[ev] == "identified_below_threshold")
         .collect();
     assert!(
         !below.is_empty(),
@@ -335,7 +343,9 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
     );
     let features = feature_rows(&staged_parquet);
     assert_eq!(features.len(), rows.len() - below.len());
-    assert!(features.iter().all(|f| f.3 != "below_threshold"));
+    assert!(features
+        .iter()
+        .all(|f| f.3 != "below_threshold" && f.3 != "identified_below_threshold"));
     for r in below {
         let (pf, z) = r[0].rsplit_once('/').unwrap();
         assert!(
@@ -559,6 +569,17 @@ fn separate_searches_join_on_run_and_spec_id() {
             == std::fs::read(aio.join("a.mbr.tsv")).unwrap(),
         "mbr.tsv of the separate searches differs from the all-in-one run"
     );
+    // The default `--quant-feature-fdr off` keeps identified rows whose MS1
+    // feature fails its decoys (peptide 6 has no MS1 signal) as `identified`.
+    let (header, rows) = read_mbr(&sep.join("out.mbr.tsv"));
+    let ev = header.iter().position(|h| h == "evidence_type").unwrap();
+    for key in ["DAFLGSFLYEYSR/2", "DAFLGSFLYEYSR/3"] {
+        let r1 = rows
+            .get(&(key.to_string(), "mbr_run1".to_string()))
+            .unwrap_or_else(|| panic!("{key} in run 1"));
+        assert_eq!(r1[ev], "identified", "{key}: {r1:?}");
+    }
+    assert!(rows.values().all(|r| r[ev] != "identified_below_threshold"));
 }
 
 #[test]

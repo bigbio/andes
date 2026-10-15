@@ -4,8 +4,9 @@
 //! functions on the same files in the quant directory, so a scattered run and
 //! an in-process run give the same `<base>.mbr.tsv`.
 //!
-//! Files in the quant directory, per run stem: `<stem>.quant.parquet` and
-//! `<stem>.ms1.parquet` (written by `andes search --quant-dir`),
+//! Files in the quant directory, per run stem: `<stem>.quant.parquet`,
+//! `<stem>.ms1.parquet` and `<stem>.ms2.parquet` (written by `andes search
+//! --quant-dir`),
 //! `<stem>.extract.parquet` (extract); once per experiment: `library.parquet`
 //! and `alignment.parquet` (library).
 //!
@@ -28,20 +29,26 @@ use output::library_table::{
     library_fingerprint, read_library, write_library, StoredLibrary, FINGERPRINT_KEY,
 };
 use output::mbr_out::EvidenceType;
-use output::run_quant_table::read_run_quant_table;
+use output::ms2_table::read_ms2_table;
+use output::run_quant_table::{read_run_quant_mods, read_run_quant_table};
 use output::{ModRecord, PercolatorPsm, ProteinPosition};
 use quant::align::AlignParams;
 use quant::evidence::EvidenceParams;
-use quant::library::{build_library, PrecursorMeta, PsmIn};
+use quant::library::{build_library, Library, PrecursorMeta, PsmIn};
+use quant::ms2::{fragment_ladder, library_spectrum, residue_masses, LibrarySpectrum, Ms2RunIndex};
+use rayon::prelude::*;
 
 use crate::cli::{QuantCommand, QuantExtractArgs, QuantFinalizeArgs, QuantLibraryArgs};
-use crate::quant_mbr::{extract_run, finalize, mbr_paths, ExtractCounts, ExtractRow, MbrFeature};
+use crate::quant_mbr::{
+    attach_ms2, extract_run, finalize, mbr_paths, ExtractCounts, ExtractRow, MbrFeature, Ms2Counts,
+};
 
 /// Seed of the transfer FDR's folds and models, in every path.
 pub(crate) const MBR_SEED: u64 = 42;
 
 const TABLE_SUFFIX: &str = ".quant.parquet";
 const MS1_SUFFIX: &str = ".ms1.parquet";
+const MS2_SUFFIX: &str = ".ms2.parquet";
 const EXTRACT_SUFFIX: &str = ".extract.parquet";
 /// Extract-table metadata key of the template-fit m/z tolerance, ppm.
 const TOL_KEY: &str = "andes.extract.tol_ppm";
@@ -54,7 +61,7 @@ fn artifact(dir: &Path, stem: &str, suffix: &str) -> PathBuf {
 
 /// The run stems of the library, sorted: `runs` when given, else every
 /// `<stem>.quant.parquet` in `dir`. Errors: no runs, a repeated stem, or a
-/// run whose PSM table or MS1 table is missing (every such file is named).
+/// run whose PSM, MS1 or MS2 table is missing (every such file is named).
 pub(crate) fn library_runs(dir: &Path, runs: &[String]) -> Result<Vec<String>, String> {
     let mut stems: Vec<String> = if runs.is_empty() {
         let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -91,7 +98,13 @@ pub(crate) fn library_runs(dir: &Path, runs: &[String]) -> Result<Vec<String>, S
     }
     let missing: Vec<String> = stems
         .iter()
-        .flat_map(|s| [artifact(dir, s, TABLE_SUFFIX), artifact(dir, s, MS1_SUFFIX)])
+        .flat_map(|s| {
+            [
+                artifact(dir, s, TABLE_SUFFIX),
+                artifact(dir, s, MS1_SUFFIX),
+                artifact(dir, s, MS2_SUFFIX),
+            ]
+        })
         .filter(|p| !p.is_file())
         .map(|p| p.display().to_string())
         .collect();
@@ -401,6 +414,8 @@ pub(crate) fn build_and_write_library(
     }
     let (mut unscored_t, mut unscored_d, mut shadowed, mut mismatched) = (0usize, 0, 0, 0);
     let mut psms = Vec::new();
+    // The SpecId of each PSM in `psms`.
+    let mut spec_ids: Vec<String> = Vec::new();
     for (r, (_, rows)) in tables.iter().enumerate() {
         let (mut run_joined, mut run_mismatched) = (0usize, 0usize);
         for row in rows {
@@ -432,6 +447,7 @@ pub(crate) fn build_and_write_library(
                 is_decoy: row.is_decoy,
                 faims_cv: row.faims_cv,
             });
+            spec_ids.push(row.spec_id.clone());
         }
         if run_mismatched as f64 > MAX_JOIN_MISMATCH * run_joined as f64 {
             return Err(format!(
@@ -461,6 +477,11 @@ pub(crate) fn build_and_write_library(
     };
     let ap = AlignParams::default();
     let library = build_library(&psms, meta, stems.len(), max_q, donor_q, donor_pep, &ap);
+    let is_donor =
+        |p: &PsmIn| !p.is_decoy && p.q <= donor_q && donor_pep.is_none_or(|c| p.pep <= c);
+    let (spectra, donor_scans, sc) =
+        entry_spectra(dir, stems, &library, &psms, &spec_ids, is_donor)?;
+    drop(spec_ids);
     eprintln!(
         "[mbr] library: {} runs, {} PSMs scored, {donor_psms} target PSMs at {donor_gate} identify their precursor in their run; skipped: {} PSMs whose SpecId joins a rescoring PSM of another peptide or target/decoy label, {} target and {} decoy PSMs without a rescoring score, {} decoy PSMs sharing a target's key; {} precursors, {} entries at the internal entry gate q<={max_q} (precursor-level, not an identification FDR) with a PSM at {donor_gate}",
         stems.len(),
@@ -471,6 +492,17 @@ pub(crate) fn build_and_write_library(
         shadowed,
         library.meta.len(),
         library.entries.len()
+    );
+    eprintln!(
+        "[mbr] library: fragment spectra (best donor PSM, at most {} b/y fragments of {}+ residues matched on its scan) for {} of {} entries; none for {} whose scan is not in the MS2 table, {} without fragment masses, {} with fewer than {} matched fragments",
+        quant::ms2::LIBRARY_FRAGMENTS,
+        quant::ms2::MIN_ION_LENGTH,
+        sc.with_spectrum,
+        library.entries.len(),
+        sc.no_scan,
+        sc.no_masses,
+        sc.too_few,
+        quant::ms2::MIN_LIBRARY_FRAGMENTS
     );
     let a = &library.alignment;
     let no_consensus = library
@@ -527,6 +559,8 @@ pub(crate) fn build_and_write_library(
         donor_pep,
         library,
         proteins,
+        spectra,
+        donor_scans,
     };
     write_library(dir, &stored)?;
     eprintln!(
@@ -535,6 +569,141 @@ pub(crate) fn build_and_write_library(
         dir.join(output::library_table::ALIGNMENT_FILE).display()
     );
     Ok(stored)
+}
+
+/// What [`entry_spectra`] gave, for the log.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct SpectrumCounts {
+    pub with_spectrum: usize,
+    /// The best donor PSM's scan is not in its run's MS2 table.
+    pub no_scan: usize,
+    /// The peptidoform holds a residue or modification without a mass.
+    pub no_masses: usize,
+    /// Fewer than [`quant::ms2::MIN_LIBRARY_FRAGMENTS`] fragments matched.
+    pub too_few: usize,
+}
+
+/// Per precursor id: the library spectrum and the donor PSMs' `(run, RT)`;
+/// and the counts.
+pub(crate) type EntrySpectra = (
+    Vec<Option<LibrarySpectrum>>,
+    Vec<Vec<(u16, f64)>>,
+    SpectrumCounts,
+);
+
+/// The MS2 table scan of a PSM SpecId (`<spec_key>_<rank>` or
+/// `<spec_key>_<rank>_<row>`).
+fn scan_of(by_key: &HashMap<&str, usize>, spec_id: &str) -> Option<usize> {
+    let mut id = spec_id;
+    for _ in 0..2 {
+        id = id.rsplit_once('_')?.0;
+        if let Some(&i) = by_key.get(id) {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Per precursor id of `lib`: the empirical fragment spectrum of an entry's
+/// best donor PSM (highest score; then earliest RT, lowest run), matched on
+/// its scan in the run's MS2 table at the table's fragment tolerance, and the
+/// `(run, RT)` of every donor PSM of the entry (`is_donor`), sorted.
+/// `spec_ids[i]` is the SpecId of `psms[i]`. Errors: an unreadable MS2 or PSM
+/// table (the message names it).
+pub(crate) fn entry_spectra(
+    dir: &Path,
+    stems: &[String],
+    lib: &Library,
+    psms: &[PsmIn],
+    spec_ids: &[String],
+    is_donor: impl Fn(&PsmIn) -> bool,
+) -> Result<EntrySpectra, String> {
+    let n = lib.meta.len();
+    let mut is_entry = vec![false; n];
+    for e in &lib.entries {
+        is_entry[e.precursor as usize] = true;
+    }
+    let mut donor_scans: Vec<Vec<(u16, f64)>> = vec![Vec::new(); n];
+    let mut best: Vec<Option<usize>> = vec![None; n];
+    for (i, p) in psms.iter().enumerate() {
+        let id = p.precursor as usize;
+        if id >= n || !is_entry[id] || !is_donor(p) {
+            continue;
+        }
+        donor_scans[id].push((p.run, p.rt));
+        let better = best[id].is_none_or(|j| {
+            let b = &psms[j];
+            p.score > b.score
+                || (p.score == b.score && (p.rt.total_cmp(&b.rt).then(p.run.cmp(&b.run)).is_lt()))
+        });
+        if better {
+            best[id] = Some(i);
+        }
+    }
+    for d in &mut donor_scans {
+        d.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    }
+    let mut spectra: Vec<Option<LibrarySpectrum>> = vec![None; n];
+    let mut c = SpectrumCounts::default();
+    for (r, stem) in stems.iter().enumerate() {
+        let wanted: Vec<(usize, &str)> = best
+            .iter()
+            .enumerate()
+            .filter_map(|(id, b)| {
+                b.filter(|&i| psms[i].run as usize == r)
+                    .map(|i| (id, spec_ids[i].as_str()))
+            })
+            .collect();
+        if wanted.is_empty() {
+            continue;
+        }
+        let ms2_path = artifact(dir, stem, MS2_SUFFIX);
+        let table = read_ms2_table(&ms2_path)?;
+        if table.run != *stem {
+            return Err(format!(
+                "{}: the table is of run {:?}, not {stem:?}",
+                ms2_path.display(),
+                table.run
+            ));
+        }
+        let mods = read_run_quant_mods(&artifact(dir, stem, TABLE_SUFFIX))?;
+        let by_key: HashMap<&str, usize> = table
+            .scans
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.spec_key.as_str(), i))
+            .collect();
+        let made: Vec<(usize, Result<LibrarySpectrum, u8>)> = wanted
+            .par_iter()
+            .map(|&(id, spec_id)| {
+                let m = &lib.meta[id];
+                let Some(scan) = scan_of(&by_key, spec_id) else {
+                    return (id, Err(0));
+                };
+                let Ok(masses) = residue_masses(split_key(&m.key), &mods) else {
+                    return (id, Err(1));
+                };
+                let ladder = fragment_ladder(&masses, m.charge.max(1));
+                let peaks = &table.scans[scan].peaks;
+                (
+                    id,
+                    library_spectrum(&ladder, peaks, table.fragment_tol).ok_or(2),
+                )
+            })
+            .collect();
+        for (id, s) in made {
+            match s {
+                Ok(s) => {
+                    c.with_spectrum += 1;
+                    spectra[id] = Some(s);
+                }
+                Err(0) => c.no_scan += 1,
+                Err(1) => c.no_masses += 1,
+                Err(_) => c.too_few += 1,
+            }
+        }
+    }
+    Ok((spectra, donor_scans, c))
 }
 
 fn log_extract(stem: &str, rows: usize, c: &ExtractCounts) {
@@ -560,7 +729,34 @@ fn log_extract(stem: &str, rows: usize, c: &ExtractCounts) {
     );
 }
 
-/// Measures run `run` of the library on its MS1 table and writes
+fn log_ms2(stem: &str, c: &Ms2Counts, secs: f64) {
+    let part = |role: usize| {
+        ["target", "mass-shift decoy", "RT-shift decoy"]
+            .iter()
+            .enumerate()
+            .filter(|&(f, _)| c.rows[role][f] > 0)
+            .map(|(f, name)| {
+                let n = c.rows[role][f] as f64;
+                format!(
+                    "{name} {} (scan in window {:.3}, supported {:.4})",
+                    c.rows[role][f],
+                    c.with_scan[role][f] as f64 / n,
+                    c.supported[role][f] as f64 / n
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    eprintln!(
+        "[mbr] extract {stem}: MS2 evidence ({secs:.1} s): transfers: {}; pseudo-transfers: {}; {} rows of entries without a library spectrum",
+        part(0),
+        part(1),
+        c.no_spectrum
+    );
+}
+
+/// Measures run `run` of the library on its MS1 table, checks its transfer
+/// and pseudo-transfer rows against its MS2 table, and writes
 /// `<stem>.extract.parquet`.
 pub(crate) fn extract_and_write(
     dir: &Path,
@@ -571,8 +767,30 @@ pub(crate) fn extract_and_write(
 ) -> Result<Vec<ExtractRow>, String> {
     let stem = &stored.runs[run as usize];
     let ms1 = artifact(dir, stem, MS1_SUFFIX);
-    let ex = extract_run(run, &ms1, &stored.library, ep)?;
+    let mut ex = extract_run(run, &ms1, &stored.library, ep)?;
     log_extract(stem, ex.rows.len(), &ex.counts);
+    let t = std::time::Instant::now();
+    let ms2_path = artifact(dir, stem, MS2_SUFFIX);
+    let table = read_ms2_table(&ms2_path)?;
+    if table.run != *stem {
+        return Err(format!(
+            "{}: the table is of run {:?}, not {stem:?}",
+            ms2_path.display(),
+            table.run
+        ));
+    }
+    let tol = table.fragment_tol;
+    let index = Ms2RunIndex::new(table.scans);
+    let c = attach_ms2(
+        &mut ex.rows,
+        &stored.library,
+        &stored.spectra,
+        &stored.donor_scans,
+        &index,
+        tol,
+    );
+    drop(index);
+    log_ms2(stem, &c, t.elapsed().as_secs_f64());
     let path = artifact(dir, stem, EXTRACT_SUFFIX);
     write_extract_table_tagged(
         &path,
@@ -630,11 +848,17 @@ fn parse_peptidoform(peptidoform: &str) -> (String, Vec<ModRecord>) {
 }
 
 /// The QPX feature rows of the MBR table: every row except the
-/// below-threshold transfers, which stay in `<base>.mbr.tsv` only.
+/// below-threshold transfers and identified rows, which stay in
+/// `<base>.mbr.tsv` only.
 fn feature_records(stored: &StoredLibrary, features: &[MbrFeature]) -> Vec<FeatureRecord> {
     features
         .iter()
-        .filter(|f| f.evidence_type != EvidenceType::BelowThreshold)
+        .filter(|f| {
+            !matches!(
+                f.evidence_type,
+                EvidenceType::BelowThreshold | EvidenceType::IdentifiedBelowThreshold
+            )
+        })
         .enumerate()
         .map(|(i, f)| {
             let m = &stored.library.meta[f.precursor as usize];
@@ -676,6 +900,7 @@ fn feature_records(stored: &StoredLibrary, features: &[MbrFeature]) -> Vec<Featu
                 mbr: Some(MbrColumns {
                     evidence_type: f.evidence_type.as_str().to_string(),
                     transfer_q: f.transfer_q,
+                    quant_q: f.quant_q,
                     quantity_se: f.quantity_se,
                 }),
             }
@@ -683,12 +908,14 @@ fn feature_records(stored: &StoredLibrary, features: &[MbrFeature]) -> Vec<Featu
         .collect()
 }
 
-/// Transfer FDR and the MBR outputs over the extract rows of every run (in
-/// run order); with `parquet_dir`, also `<parquet_dir>/quantms.feature.parquet`.
+/// Transfer FDR, identified quality q-values and the MBR outputs over the
+/// extract rows of every run (in run order); with `parquet_dir`, also
+/// `<parquet_dir>/quantms.feature.parquet`.
 pub(crate) fn finalize_and_write(
     stored: &StoredLibrary,
     runs: &[Vec<ExtractRow>],
     mbr_fdr: f64,
+    quant_feature_fdr: Option<f64>,
     base: &Path,
     parquet_dir: Option<&Path>,
 ) -> Result<(), String> {
@@ -698,12 +925,13 @@ pub(crate) fn finalize_and_write(
         &stored.library,
         runs,
         mbr_fdr,
+        quant_feature_fdr,
         MBR_SEED,
         &tsv,
         &validation,
     )?;
     eprintln!(
-        "[mbr] wrote {} ({} rows; transfer_q is an internal quant-quality q-value, not an identification FDR) and {}",
+        "[mbr] wrote {} ({} rows; transfer_q and quant_q are internal quant-quality q-values, not identification FDR) and {}",
         tsv.display(),
         summary.rows_written,
         validation.display()
@@ -715,7 +943,7 @@ pub(crate) fn finalize_and_write(
         output::write_feature_parquet(&path, &records)
             .map_err(|e| format!("write {}: {e}", path.display()))?;
         eprintln!(
-            "[mbr] wrote {} ({} feature rows with evidence type; below-threshold transfers are in the mbr.tsv only)",
+            "[mbr] wrote {} ({} feature rows with evidence type; below-threshold transfers and identified rows are in the mbr.tsv only)",
             path.display(),
             records.len()
         );
@@ -735,6 +963,7 @@ pub(crate) fn run_in_process(
     donor_q: f64,
     donor_pep: Option<f64>,
     mbr_fdr: f64,
+    quant_feature_fdr: Option<f64>,
     base: &Path,
     parquet_dir: Option<&Path>,
 ) -> Result<(), String> {
@@ -754,7 +983,14 @@ pub(crate) fn run_in_process(
     let runs: Vec<Vec<ExtractRow>> = (0..stems.len())
         .map(|r| extract_and_write(dir, &stored, &fingerprint, r as u16, ep))
         .collect::<Result<_, _>>()?;
-    finalize_and_write(&stored, &runs, mbr_fdr, base, parquet_dir)?;
+    finalize_and_write(
+        &stored,
+        &runs,
+        mbr_fdr,
+        quant_feature_fdr,
+        base,
+        parquet_dir,
+    )?;
     eprintln!("[PHASE mbr: {:.2}s]", t0.elapsed().as_secs_f64());
     Ok(())
 }
@@ -826,6 +1062,7 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
         &stored,
         &runs,
         a.mbr_fdr,
+        a.quant_feature_fdr.0,
         &a.output,
         a.output_parquet.as_deref(),
     )
@@ -872,12 +1109,22 @@ mod tests {
     fn library_runs_checks_artifacts_and_duplicates() {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
-        for f in ["b.quant.parquet", "b.ms1.parquet", "a.quant.parquet"] {
+        for f in [
+            "b.quant.parquet",
+            "b.ms1.parquet",
+            "b.ms2.parquet",
+            "a.quant.parquet",
+            "a.ms2.parquet",
+        ] {
             std::fs::write(d.join(f), b"x").unwrap();
         }
         let e = library_runs(d, &[]).unwrap_err();
-        assert!(e.contains("a.ms1.parquet"), "{e}");
+        assert!(e.contains("a.ms1.parquet") && !e.contains("b.ms"), "{e}");
+        std::fs::remove_file(d.join("a.ms2.parquet")).unwrap();
         std::fs::write(d.join("a.ms1.parquet"), b"x").unwrap();
+        let e = library_runs(d, &[]).unwrap_err();
+        assert!(e.contains("a.ms2.parquet"), "{e}");
+        std::fs::write(d.join("a.ms2.parquet"), b"x").unwrap();
         assert_eq!(library_runs(d, &[]).unwrap(), vec!["a", "b"]);
         assert_eq!(
             library_runs(d, &["b".into(), "a".into()]).unwrap(),
@@ -887,7 +1134,9 @@ mod tests {
         assert!(e.contains("twice"), "{e}");
         let e = library_runs(d, &["c".into()]).unwrap_err();
         assert!(
-            e.contains("c.quant.parquet") && e.contains("c.ms1.parquet"),
+            e.contains("c.quant.parquet")
+                && e.contains("c.ms1.parquet")
+                && e.contains("c.ms2.parquet"),
             "{e}"
         );
     }
@@ -960,7 +1209,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_records_leave_out_below_threshold_transfers() {
+    fn feature_records_leave_out_below_threshold_rows() {
         let meta: Vec<PrecursorMeta> = (0..2)
             .map(|i| PrecursorMeta {
                 key: format!("PEPT{}IDEK/2", ["", "M[UNIMOD:35]"][i]),
@@ -977,6 +1226,8 @@ mod tests {
             donor_pep: None,
             library,
             proteins: vec!["P1".into(), "P2".into()],
+            spectra: vec![None; 2],
+            donor_scans: vec![Vec::new(); 2],
         };
         let feature = |precursor: u32, run: u16, evidence_type, transfer_q| MbrFeature {
             precursor,
@@ -984,7 +1235,9 @@ mod tests {
             evidence_type,
             quantity: Some(1e6),
             quantity_se: Some(1e4),
+            quantity_normalized: Some(1e6),
             transfer_q,
+            quant_q: transfer_q.or(Some(0.003)),
             apex_rt_s: Some(100.0),
             library_q: 0.001,
             mass_err_ppm: Some(0.5),
@@ -993,7 +1246,7 @@ mod tests {
             feature(0, 0, EvidenceType::Identified, None),
             feature(0, 1, EvidenceType::BelowThreshold, Some(0.2)),
             feature(1, 0, EvidenceType::TransferMs1, Some(0.004)),
-            feature(1, 1, EvidenceType::BelowThreshold, Some(0.5)),
+            feature(1, 1, EvidenceType::IdentifiedBelowThreshold, None),
         ];
         let records = feature_records(&stored, &features);
         let got: Vec<(i64, &str, &str)> = records
@@ -1009,14 +1262,20 @@ mod tests {
         assert_eq!(
             got,
             [(1, "a", "identified"), (2, "a", "transfer_ms1")],
-            "below-threshold transfers are not feature rows"
+            "below-threshold transfers and identified rows are not feature rows"
         );
         assert_eq!(records[1].peptidoform, "PEPTM[UNIMOD:35]IDEK");
+        let quant_q: Vec<Option<f64>> = records
+            .iter()
+            .map(|r| r.mbr.as_ref().unwrap().quant_q)
+            .collect();
+        assert_eq!(quant_q, [Some(0.003), Some(0.004)]);
     }
 
     /// 200 target PSMs of distinct peptides in run `a`, scored by a rescoring
     /// result at q = 0.001 and PEP = `pep`; the result names `wrong` (a
-    /// SpecId) with another peptide.
+    /// SpecId) with another peptide. The MS2 table holds every PSM's scan:
+    /// the even ones carry the peptide's b/y ladder, the odd ones noise.
     fn one_run_library(
         dir: &Path,
         pep: f64,
@@ -1033,7 +1292,7 @@ mod tests {
         };
         let rows: Vec<RunPsmRow> = (0..200)
             .map(|i| RunPsmRow {
-                spec_id: format!("s{i}"),
+                spec_id: format!("s{i}_{i}_1"),
                 rt_s: 100.0 + i as f64,
                 precursor_key: format!("{}/2", peptide(i)),
                 peptidoform: peptide(i),
@@ -1046,7 +1305,44 @@ mod tests {
                 proteins: "P1".into(),
             })
             .collect();
-        write_run_quant_table(&artifact(dir, "a", TABLE_SUFFIX), "a", &rows).unwrap();
+        write_run_quant_table(&artifact(dir, "a", TABLE_SUFFIX), "a", &rows, &[]).unwrap();
+        let scans: Vec<quant::ms2::Ms2Scan> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let ladder =
+                    fragment_ladder(&residue_masses(&r.peptidoform, &HashMap::new()).unwrap(), 2);
+                let peaks: Vec<(f32, f32)> = if i % 2 == 0 {
+                    ladder
+                        .iter()
+                        .enumerate()
+                        .map(|(k, f)| (f.mz as f32, 100.0 + k as f32))
+                        .collect()
+                } else {
+                    vec![(150.05, 10.0), (250.5, 20.0)]
+                };
+                quant::ms2::Ms2Scan {
+                    native_id: format!("scan={i}"),
+                    spec_key: format!("s{i}_{i}"),
+                    rt: r.rt_s,
+                    precursor_mz: r.mz,
+                    charge: 2,
+                    isolation: Some((r.mz, 0.7, 0.7)),
+                    faims_cv: None,
+                    peaks,
+                }
+            })
+            .collect();
+        output::ms2_table::write_ms2_table(
+            &artifact(dir, "a", MS2_SUFFIX),
+            &output::ms2_table::Ms2Table {
+                run: "a".into(),
+                fragment_tol: Tolerance::Ppm(20.0),
+                top_peaks: 100,
+                scans,
+            },
+        )
+        .unwrap();
         let scores = rows
             .iter()
             .map(|r| {
@@ -1069,6 +1365,25 @@ mod tests {
         (vec!["a".to_string()], scores)
     }
 
+    fn open_peptide(i: usize) -> String {
+        let aa = b"ACDEFGHIKLMNPQRSTVWY";
+        let tail: String = [aa[i % 20], aa[(i / 20) % 20]]
+            .iter()
+            .map(|&c| c as char)
+            .collect();
+        format!("PEPTIDE{tail}K")
+    }
+
+    #[test]
+    fn scan_of_strips_rank_and_row() {
+        let keys: HashMap<&str, usize> = [("a/scan=5_5", 0usize), ("x_1", 1)].into_iter().collect();
+        assert_eq!(scan_of(&keys, "a/scan=5_5_1"), Some(0));
+        assert_eq!(scan_of(&keys, "a/scan=5_5_1_2"), Some(0));
+        assert_eq!(scan_of(&keys, "x_1_1"), Some(1));
+        assert_eq!(scan_of(&keys, "a/scan=6_6_1"), None);
+        assert_eq!(scan_of(&keys, "nounderscore"), None);
+    }
+
     #[test]
     fn donors_honour_the_pep_cap() {
         // q = 0.001 and PEP = 0.5 for every PSM.
@@ -1088,6 +1403,23 @@ mod tests {
         };
         let open = build(None);
         assert_eq!(open.library.entries.len(), 200);
+        // The even PSMs' scans carry their ladder: a spectrum each; every
+        // entry keeps its one donor scan.
+        let with: Vec<usize> = (0..open.spectra.len())
+            .filter(|&id| open.spectra[id].is_some())
+            .collect();
+        assert_eq!(with.len(), 100);
+        for &id in &with {
+            let key = &open.library.meta[id].key;
+            let i = (0..200)
+                .find(|&i| key == &format!("{}/2", open_peptide(i)))
+                .unwrap();
+            assert_eq!(i % 2, 0, "{key}");
+            let s = open.spectra[id].as_ref().unwrap();
+            assert_eq!(s.fragments.len(), quant::ms2::LIBRARY_FRAGMENTS);
+        }
+        assert!(open.donor_scans.iter().all(|d| d.len() == 1));
+        assert_eq!(read_library(dir.path()).unwrap().spectra, open.spectra);
         let capped = build(Some(0.01));
         assert!(
             capped.library.entries.is_empty(),
@@ -1101,7 +1433,7 @@ mod tests {
     #[test]
     fn mismatched_joins_are_not_donors() {
         let dir = tempfile::tempdir().unwrap();
-        let (stems, t) = one_run_library(dir.path(), 0.001, Some("s7"));
+        let (stems, t) = one_run_library(dir.path(), 0.001, Some("s7_7_1"));
         let set = rescore_scores(&t, &HashMap::new(), "t.tsv").unwrap();
         let stored = build_and_write_library(
             dir.path(),

@@ -575,6 +575,7 @@ mod tests {
             accession: None,
             neutral_losses: losses,
             loss_class,
+            annotated_site_mass: None,
         };
         let arc = model::modification::leak_mod(m);
         let residues: Vec<AminoAcid> = b"PEPTIDE"

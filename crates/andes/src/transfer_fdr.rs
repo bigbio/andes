@@ -4,6 +4,9 @@
 //!
 //! The transfer q-value is an internal quant-quality score that decides which
 //! transferred MS1 quantities are reported; it is not an identification FDR.
+//! The identified rows' quality q-value (`quant_q`) is the same estimate over
+//! the identified targets and their decoys, fitted separately with
+//! [`IDENTIFIED_FEATURES`].
 //!
 //! Folds: a hash of the precursor id (splitmix64, seeded) gives each precursor
 //! one of three folds, so its targets and decoys in every run share a fold.
@@ -55,9 +58,30 @@ pub const TRANSFER_FEATURES: &[&str] = &[
     "log10_amplitude_snr",
     "n_donor_runs",
     "library_q",
+    "ms2_angle",
+    "ms2_n_matched",
+    "ms2_explained",
 ];
 
-/// One transfer target or decoy to be scored.
+/// Feature names of the identified-row quality classifier: the template-fit
+/// evidence of [`TRANSFER_FEATURES`] without `n_donor_runs` and `library_q`,
+/// which are the same for an identified target and its decoys, and without
+/// the MS2 features (an identified row has its identifying scan).
+pub const IDENTIFIED_FEATURES: &[&str] = &[
+    "llr",
+    "rt_z",
+    "abs_rt_z",
+    "width_ratio",
+    "envelope_cos",
+    "coherence",
+    "m1_ratio",
+    "abs_mass_err_ppm",
+    "n_points",
+    "n_isotopes_used",
+    "log10_amplitude_snr",
+];
+
+/// One target or decoy to be scored.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FdrRow {
     pub precursor: u32,

@@ -962,6 +962,7 @@ mod tests {
                 accession: accession.to_string(),
                 description: String::new(),
                 sequence: b"MKWVTFISLL".to_vec(),
+                annotation: None,
             }],
         };
         SearchIndex::from_target_db(&target, "XXX_")
@@ -1025,6 +1026,7 @@ mod tests {
                         accession: None,
                         neutral_losses: Vec::new(),
                         loss_class: 0,
+                        annotated_site_mass: None,
                     }));
                     aa.mod_ = Some(m);
                 }

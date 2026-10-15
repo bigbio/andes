@@ -2106,7 +2106,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // let the QPX join tell a target that lost its scan/ExpMass group from one
     // whose join drifted. `None` for the native rescorer.
     let mut rescore_decoys: Option<std::collections::HashSet<String>> = None;
-    let rescore_map: Option<std::collections::HashMap<String, output::PercolatorPsm>> =
+    // The rescorer's decoy PSMs with their scores, for FDR within each class.
+    let mut rescore_decoy_psms: std::collections::HashMap<String, output::PercolatorPsm> =
+        std::collections::HashMap::new();
+    let mut rescore_map: Option<std::collections::HashMap<String, output::PercolatorPsm>> =
         if use_percolator {
             let backend = output::resolve_backend(
                 cli.percolator_bin.as_deref(),
@@ -2130,12 +2133,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 map.len(),
                 t_resc.elapsed().as_secs_f64()
             );
+            let path = output::decoy_results_path(&output_pin_path);
+            let text =
+                std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            rescore_decoy_psms =
+                output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", path.display()))?;
             if cli.mbr {
-                let path = output::decoy_results_path(&output_pin_path);
-                let text = std::fs::read_to_string(&path)
-                    .map_err(|e| format!("{}: {e}", path.display()))?;
-                mbr_decoys = output::parse_psm_results(&text)
-                    .map_err(|e| format!("{}: {e}", path.display()))?;
                 mbr_source = format!("the Percolator results of {}", output_pin_path.display());
             }
             Some(map)
@@ -2149,8 +2152,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("reading PIN for native rescore: {e}"))?;
             let all = rescore::native_rescore_pin_all(&pin_text, 42)
                 .map_err(|e| format!("native rescore: {e}"))?;
+            rescore_decoy_psms = all.decoys;
             if cli.mbr {
-                mbr_decoys = all.decoys;
                 mbr_source = "the native rescoring result".to_string();
             }
             let map = all.targets;
@@ -2163,6 +2166,27 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             None
         };
+
+    // FDR within each evidence class (canonical, isoform, variant, chain): a
+    // target's q-value becomes the larger of the global and its class q-value,
+    // so the filtered TSV, the QPX and quantification accept a PSM only if it
+    // passes both. A search with one class (any FASTA) is left unchanged.
+    if let Some(ref mut map) = rescore_map {
+        let counts = output::apply_class_fdr(map, &rescore_decoy_psms, &pin_index);
+        if counts.len() > 1 {
+            let line: Vec<String> = counts
+                .iter()
+                .map(|c| format!("{} {}/{}", c.class, c.targets, c.decoys))
+                .collect();
+            eprintln!(
+                "Rescore: FDR within each class (targets/decoys): {}",
+                line.join(", ")
+            );
+        }
+    }
+    if cli.mbr {
+        mbr_decoys = std::mem::take(&mut rescore_decoy_psms);
+    }
 
     // Filtered TSV: target PSMs whose Percolator q-value ≤ --fdr. Written next to
     // the PIN as `<stem>.q<fdr>.tsv` (rescore only). One row per accepted PSM with

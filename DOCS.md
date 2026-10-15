@@ -245,8 +245,14 @@ is 1 when a canonical candidate with another peptidoform was scored for the spec
 alternative explains the spectrum than the best canonical peptide. `IsotopeMimic` is 1 when the precursor fits better if the row's isotope-like deltas
 (deamidation, or an N→D / Q→E substitution) are read as isotope steps, the signature of an
 unmodified canonical peptide picked on its M+1 peak. Decoy rows carry their target entry's
-class. All six are Percolator features. For an error rate per class, run Percolator once and
-estimate FDR separately on each class's rows afterwards. Chimeric co-isolation rows (Pass 2 of
+class. All six are Percolator features. With `--rescore` or `--rescore-native`, andes also
+estimates FDR within each class: every PSM gets the class of its most canonical protein
+(`canonical`, else `isoform`, `variant`, `chain` or a `+` combination), target-decoy competition
+on the rescorer's score is run inside each class, and a target's q-value becomes the larger of
+its global and its class q-value. The filtered TSV, the QPX q-value and quantification then
+accept a PSM only if it passes both, and the run log prints each class's target and decoy
+counts. A class with few PSMs cannot reach a low q-value (with 50 targets the smallest is 1/50).
+A search with a single class, any FASTA search, is unchanged. Chimeric co-isolation rows (Pass 2 of
 `--chimeric`) get `RefCompetitor` and `DeltaRefScore` = 0; the glyco PIN leaves all six out.
 `--refine` Pass-2 rows keep the provenance of the entry their backbone came from. The TSV adds `ProteinFamily`, `EntryKind` and `FeatureIds` for the named
 protein.
@@ -320,7 +326,7 @@ when a pipeline (e.g. quantms) owns rescoring. `--fdr`/`--pep` alone are ignored
 |---|---|---|---|
 | `--rescore` | flag | *(off)* | Run Percolator and write rescored, filtered output. |
 | `--rescore-native` | flag | *(off)* | *(advanced)* Built-in GBDT rescorer (3-fold CV folded by spectrum); non-production fallback. |
-| `--fdr` | fraction | `0.01` | q-value threshold applied by a rescoring run. |
+| `--fdr` | fraction | `0.01` | q-value threshold applied by a rescoring run. With UniProt isoform, variant or chain entries, a PSM must also pass it within its class (§1a, provenance). |
 | `--pep` | fraction | *(off)* | *(advanced)* PEP threshold, ANDed with `--fdr` (and with `--quant-fdr` for quantification targets and `--mbr` donors). |
 | `--percolator-bin` / `--percolator-docker` / `--percolator-image` / `--percolator-args` | — | auto | *(advanced)* Backend: `--percolator-bin`, else `$PATH`, else Docker; `--percolator-args` passes flags through. |
 | `--keep-pin` | bool | `true` | *(advanced)* With `--rescore`/`--rescore-native` and no `--output-pin`: `true` writes the PIN (and Percolator's result files) as `<base>.pin`, where `<base>` is `--output-tsv`, else `--output-parquet`, else `./andes`; `false` uses a temporary PIN deleted at exit. An explicit `--output-pin` is always kept. |

@@ -921,14 +921,14 @@ single input run's MS1 scans still need to fit in memory while it is processed.
   `<precursor spectrumRef>` (mzML) or `Master Scan Number` trailer (`.raw`) is that MS2 — the MS3
   scans are kept by the reader for this and are never searched. The default `--tmt-tol` follows
   the reporter scan: SPS-MS3 reporters are read in the Orbitrap even when the MS2 is an ion-trap
-  scan, so `--tmt-level 3` defaults to 20 ppm. A reporter scan whose recorded scan window
-  (`scan window lower/upper limit`, the `.raw` acquisition range) does not reach every reporter
-  m/z is not quantified — an automatic first mass above 126 Th never measured the low channels,
+  scan, so `--tmt-level 3` defaults to 20 ppm (10 ppm for TMTpro 32/35-plex). A reporter scan
+  whose recorded scan window (`scan window lower/upper limit`, the `.raw` acquisition range) does
+  not reach every reporter m/z is not quantified — an automatic first mass above 126 Th never measured the low channels,
   and their zeros are not ratios — and is counted in the log.
 * **Impurity correction** (`--tmt-correction <file>`). The kit lot sheet in the OpenMS text form,
   one line per channel in kit order, `-2/-1/+1/+2` percentages separated by `/` (eight columns
-  `-2C13/-N15-C13/-C13/-N15/+N15/+C13/+N15+C13/+2C13` for TMTpro), optional `<channel>:` prefix,
-  `#` comments, `NA`/`-1` for no spill. Labels must match kit order; rows whose percentages
+  `-2C13/-N15-C13/-C13/-N15/+N15/+C13/+N15+C13/+2C13` for TMTpro 16/18), optional `<channel>:`
+  prefix, `#` comments, `NA`/`-1` for no spill. Labels must match kit order; rows whose percentages
   sum to more than 100 are rejected. The observed vector is solved as `observed = M · true`
   by non-negative least squares (the `IsobaricIsotopeCorrector` model), so corrected intensities
   agree with IsobaricAnalyzer / IsobaricWorkflow for the same matrix. Without a sheet, no
@@ -939,8 +939,10 @@ single input run's MS1 scans still need to fit in memory while it is processed.
   `--tmt-tol` is 10 ppm instead of 20 ppm (a window must stay below 10.8 ppm at 135 Th). Channels
   are reported in OpenMS's kit order (`128N`, `128C`, `128ND`, `128CD`, ...), not by m/z. There is
   no impurity correction: OpenMS ignores a sheet for these kits and applies the identity, and
-  `--tmt-correction` is refused. Peptides are searched with the TMTpro tag mass (304.2071 Da);
-  the deuterated tags are 3 mDa heavier, inside the precursor tolerance.
+  `--tmt-correction` is refused before the database is loaded. Peptides are searched with the
+  TMTpro tag mass (304.2071 Da); each deuterated tag is 2.9 mDa heavier, which the default 20 ppm
+  precursor window absorbs. Below 8.8 ppm (three deuterated tags on a 1000 Da peptide) andes
+  warns that the deuterated channels' precursors can fall outside `--precursor-tol`.
 * **Precursor purity.** The share of the MS1 isolation window's ion current that belongs to the
   precursor's isotope envelope, from the MS2's survey scan — the scan its precursor references
   (mzML `<precursor spectrumRef>`, `.raw` `Master Scan Number`), else the last MS1 before it at

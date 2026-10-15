@@ -317,7 +317,10 @@ fn tmt35_refuses_a_correction_sheet_and_a_20ppm_window() {
             .output()
             .expect("run andes");
         assert!(!out.status.success(), "andes accepted {extra:?}");
-        String::from_utf8_lossy(&out.stderr).into_owned()
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        // Refused from the command line alone, before the database is loaded.
+        assert!(!stderr.contains("target proteins"), "{stderr}");
+        stderr
     };
     let sheet = dir.path().join("lot.txt");
     std::fs::write(&sheet, "NA/NA/NA/NA/NA/NA/NA/NA\n".repeat(35)).unwrap();

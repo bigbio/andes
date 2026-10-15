@@ -73,14 +73,43 @@ pub(crate) struct QuantSettings {
 }
 
 impl QuantSettings {
+    /// The checks that need only the command line, so `run` makes them before
+    /// the database is loaded and the index built; `from_cli` repeats them.
+    pub(crate) fn check_args(cli: &Cli) -> Result<(), String> {
+        if cli.tmt.is_none() && !cli.lfq && cli.quant_dir.is_none() {
+            return Ok(());
+        }
+        if !(2..=3).contains(&cli.tmt_level) {
+            return Err(format!("--tmt-level must be 2 or 3, got {}", cli.tmt_level));
+        }
+        let Some(plex) = cli.tmt else {
+            if cli.tmt_correction.is_some() {
+                return Err("--tmt-correction needs --tmt <plex>".into());
+            }
+            return Ok(());
+        };
+        if let Some(tol) = cli.tmt_tol {
+            plex.check_tolerance(tol).map_err(|e| {
+                format!(
+                    "--tmt {}: {e}. Use a narrower --tmt-tol (e.g. {}ppm).",
+                    plex.name(),
+                    plex.default_reporter_ppm()
+                )
+            })?;
+        }
+        if let Some(path) = &cli.tmt_correction {
+            CorrectionMatrix::check_supported(plex)
+                .map_err(|e| format!("--tmt-correction {}: {e}", path.display()))?;
+        }
+        Ok(())
+    }
+
     /// `None` when none of `--tmt`, `--lfq` and `--quant-dir` is set.
     pub(crate) fn from_cli(cli: &Cli, high_res: bool) -> Result<Option<Self>, String> {
         if cli.tmt.is_none() && !cli.lfq && cli.quant_dir.is_none() {
             return Ok(None);
         }
-        if !(2..=3).contains(&cli.tmt_level) {
-            return Err(format!("--tmt-level must be 2 or 3, got {}", cli.tmt_level));
-        }
+        Self::check_args(cli)?;
         // The default follows the scan the reporters are read from. SPS-MS3
         // reporters are read in the Orbitrap even when the identifying MS2 is
         // an ion-trap scan (Fusion/Lumos SPS methods), so the MS2 resolution
@@ -90,21 +119,14 @@ impl QuantSettings {
         } else {
             Tolerance::Da(0.3)
         });
-        if let Some(plex) = cli.tmt {
+        // An explicit --tmt-tol was checked by check_args.
+        if let (Some(plex), None) = (cli.tmt, cli.tmt_tol) {
             plex.check_tolerance(tmt_tol).map_err(|e| {
                 format!(
-                    "--tmt {}: {e}. {}",
-                    plex.name(),
-                    if cli.tmt_tol.is_some() {
-                        format!(
-                            "Use a narrower --tmt-tol (e.g. {}ppm).",
-                            plex.default_reporter_ppm()
-                        )
-                    } else {
-                        "The MS2 is low-resolution, so its reporter ions cannot separate this \
-                         kit's channels: use --tmt-level 3 for SPS-MS3 data, or set --tmt-tol."
-                            .to_string()
-                    }
+                    "--tmt {}: {e}. The MS2 is low-resolution, so its reporter ions cannot \
+                     separate this kit's channels: use --tmt-level 3 for SPS-MS3 data, or set \
+                     --tmt-tol.",
+                    plex.name()
                 )
             })?;
         }
@@ -124,7 +146,7 @@ impl QuantSettings {
                     Some(m)
                 }
             }
-            (Some(_), None) => return Err("--tmt-correction needs --tmt <plex>".into()),
+            // Without --tmt a sheet was refused by check_args.
             _ => None,
         };
         let lfq_params = LfqParams {
@@ -838,9 +860,13 @@ fn covers_reporters(scan_window: Option<(f64, f64)>, plex: Plex, tol: Tolerance)
     let Some((lo, hi)) = scan_window else {
         return true;
     };
-    let channels = plex.channels();
-    let first = channels[0].mz;
-    let last = channels[channels.len() - 1].mz;
+    // The lowest and highest reporters: kit order is not m/z order (32/35-plex).
+    let (first, last) = plex
+        .channels()
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), c| {
+            (a.min(c.mz), b.max(c.mz))
+        });
     lo <= first - tol.as_da(first) && hi >= last + tol.as_da(last)
 }
 
@@ -1501,5 +1527,45 @@ mod tests {
         assert!(!covers_reporters(Some((130.0, 2000.0)), Plex::Tmt16, tol));
         assert!(!covers_reporters(Some((148.0, 1866.0)), Plex::Tmt10, tol));
         assert!(!covers_reporters(Some((100.0, 134.0)), Plex::Tmt16, tol));
+        // The 35-plex's highest reporter is 135CD (135.1608), above 135N.
+        let tol = Tolerance::Ppm(10.0);
+        assert!(covers_reporters(Some((126.0, 135.1625)), Plex::Tmt35, tol));
+        assert!(!covers_reporters(Some((126.0, 135.1590)), Plex::Tmt35, tol));
+        assert!(!covers_reporters(Some((126.2, 2000.0)), Plex::Tmt32, tol));
+    }
+
+    fn search_args(extra: &[&str]) -> Cli {
+        use clap::{CommandFactory, FromArgMatches};
+        let mut argv = vec![
+            "andes",
+            "--spectrum",
+            "x",
+            "--database",
+            "y",
+            "--output-pin",
+            "o",
+        ];
+        argv.extend_from_slice(extra);
+        let matches = crate::TopCli::command()
+            .try_get_matches_from(argv)
+            .expect("parse args");
+        crate::SearchArgs::from_arg_matches(&matches).unwrap()
+    }
+
+    #[test]
+    fn command_line_checks_need_no_input() {
+        let ok = |extra: &[&str]| QuantSettings::check_args(&search_args(extra));
+        assert!(ok(&[]).is_ok());
+        assert!(ok(&["--tmt", "tmt35"]).is_ok());
+        assert!(ok(&["--tmt", "tmt35", "--tmt-tol", "10ppm"]).is_ok());
+        assert!(ok(&["--tmt", "tmt10", "--tmt-correction", "lot.txt"]).is_ok());
+        let e = ok(&["--tmt", "tmt35", "--tmt-correction", "lot.txt"]).unwrap_err();
+        assert!(e.contains("not supported for tmt35plex"), "{e}");
+        let e = ok(&["--tmt", "tmt32", "--tmt-tol", "20ppm"]).unwrap_err();
+        assert!(e.contains("e.g. 10ppm"), "{e}");
+        let e = ok(&["--lfq", "--tmt-correction", "lot.txt"]).unwrap_err();
+        assert!(e.contains("needs --tmt"), "{e}");
+        let e = ok(&["--tmt", "tmt10", "--tmt-level", "4"]).unwrap_err();
+        assert!(e.contains("--tmt-level"), "{e}");
     }
 }

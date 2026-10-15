@@ -102,11 +102,15 @@ const TMT18: &[Channel] = &[
     ch("135N", 135.151600),
 ];
 
-// TMTpro 32/35-plex add the deuterated reagents: each `D` channel trades one
-// 13C of its non-deuterated twin for a 2H, which puts it 2.9 mDa higher
-// (`127D` above `127C`, `128ND` above `128N`, `128CD` above `128C`). OpenMS
-// order: each nominal mass lists N, C, ND, CD, so the tables are not sorted
-// by m/z.
+/// What trading one 13C for a 2H adds (2H − 13C): each deuterated TMTpro
+/// reporter, and each deuterated tag on a peptide, is this much heavier than
+/// its non-deuterated twin.
+pub const DEUTERATED_TAG_SHIFT_DA: f64 = 0.002922;
+
+// TMTpro 32/35-plex add the deuterated reagents: each `D` channel sits
+// DEUTERATED_TAG_SHIFT_DA above its non-deuterated twin (`127D` above `127C`,
+// `128ND` above `128N`, `128CD` above `128C`). OpenMS order: each nominal
+// mass lists N, C, ND, CD, so the tables are not sorted by m/z.
 
 const TMT32: &[Channel] = &[
     ch("126", 126.127726),
@@ -297,10 +301,16 @@ impl Plex {
     /// for TMTpro 32/35-plex, whose 2.9 mDa channel spacing a 20 ppm window
     /// would reach across (half the spacing is 10.8 ppm at 135 Th).
     pub fn default_reporter_ppm(&self) -> f64 {
-        match self {
-            Plex::Tmt32 | Plex::Tmt35 => 10.0,
-            _ => 20.0,
+        if self.has_deuterated_channels() {
+            10.0
+        } else {
+            20.0
         }
+    }
+
+    /// Whether the kit includes the deuterated TMTpro reagents (32/35-plex).
+    pub fn has_deuterated_channels(&self) -> bool {
+        matches!(self, Plex::Tmt32 | Plex::Tmt35)
     }
 
     /// Reject a reporter tolerance under which two channels can read the same
@@ -329,8 +339,8 @@ impl Plex {
     /// The label mass added to K and the peptide N-terminus by this kit
     /// (Unimod monoisotopic delta), for the run log and the default fixed mod.
     /// TMTpro 32/35-plex carry the TMTpro mass: their deuterated tags are
-    /// 3 mDa heavier (304.2101), well inside a precursor tolerance, and have
-    /// no Unimod entry of their own.
+    /// [`DEUTERATED_TAG_SHIFT_DA`] heavier (304.2101) and have no Unimod entry
+    /// of their own, which the default 20 ppm precursor window absorbs.
     pub fn label_mass(&self) -> f64 {
         match self {
             Plex::Tmt6 | Plex::Tmt10 | Plex::Tmt11 => 229.162932,
@@ -474,9 +484,10 @@ pub struct CorrectionMatrix {
 
 impl CorrectionMatrix {
     /// Parse the OpenMS / vendor sheet text: one line per channel in kit
-    /// order, `-2/-1/+1/+2` percentages (eight entries for TMTpro) separated
-    /// by `/`. An optional `<channel>:` or `<channel>,` prefix names the row;
-    /// `#` starts a comment; `NA`, `-1` and blank entries mean no spill.
+    /// order, `-2/-1/+1/+2` percentages (eight entries for TMTpro 16/18)
+    /// separated by `/`. An optional `<channel>:` or `<channel>,` prefix names
+    /// the row; `#` starts a comment; `NA`, `-1` and blank entries mean no
+    /// spill. TMTpro 32/35-plex have no correction and are refused.
     ///
     /// ```text
     /// # TMT10plex lot XY
@@ -486,13 +497,7 @@ impl CorrectionMatrix {
     /// ```
     pub fn parse(plex: Plex, text: &str) -> Result<Self, String> {
         let n = plex.n_channels();
-        let cols = plex.correction_columns().ok_or_else(|| {
-            format!(
-                "isotope impurity correction is not supported for {} (OpenMS applies none \
-                 for this kit either)",
-                plex.name()
-            )
-        })?;
+        let cols = Self::check_supported(plex)?;
         let rows: Vec<&str> = text
             .lines()
             .map(|l| l.split('#').next().unwrap_or("").trim())
@@ -573,6 +578,17 @@ impl CorrectionMatrix {
             m[from * n + from] = self_share / 100.0;
         }
         Ok(Self { plex, n, m })
+    }
+
+    /// The sheet's column count for `plex`, or why the kit takes no sheet.
+    pub fn check_supported(plex: Plex) -> Result<usize, String> {
+        plex.correction_columns().ok_or_else(|| {
+            format!(
+                "isotope impurity correction is not supported for {} (OpenMS applies none \
+                 for this kit either)",
+                plex.name()
+            )
+        })
     }
 
     pub fn plex(&self) -> Plex {
@@ -694,7 +710,10 @@ mod tests {
             ("134ND", "134N"),
             ("135ND", "135N"),
         ] {
-            assert!((mz(d) - mz(twin) - 0.002922).abs() < 5e-6, "{d}");
+            assert!(
+                (mz(d) - mz(twin) - DEUTERATED_TAG_SHIFT_DA).abs() < 5e-6,
+                "{d}"
+            );
         }
         assert_eq!(Plex::Tmt35.label_mass(), Plex::Tmt18.label_mass());
     }
@@ -735,7 +754,8 @@ mod tests {
         // The deuterated twins are 2.9 mDa apart: 20 ppm (2.7 mDa) reaches
         // across, 10 ppm does not.
         for plex in [Plex::Tmt32, Plex::Tmt35] {
-            assert!((plex.min_channel_spacing() - 0.002922).abs() < 5e-6);
+            assert!(plex.has_deuterated_channels());
+            assert!((plex.min_channel_spacing() - DEUTERATED_TAG_SHIFT_DA).abs() < 5e-6);
             assert!(plex.check_tolerance(Tolerance::Ppm(20.0)).is_err());
             assert!(plex.check_tolerance(Tolerance::Ppm(10.0)).is_ok());
         }

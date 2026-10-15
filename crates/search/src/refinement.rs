@@ -246,6 +246,7 @@ pub fn build_refinement_index(
     let subset = full_target_db.subset_by_index(&keep);
     let db = build_search_db(&subset, decoy_prefix, decoy_strategy, seed);
     SearchIndex {
+        has_alternative_entries: crate::search_index::holds_alternative_entries(&db),
         db,
         decoy_prefix: crate::decoy::normalize_decoy_prefix(decoy_prefix),
         decoy_suffix: None,
@@ -276,6 +277,9 @@ pub fn build_peptide_anchored_index(
     // silently defeat the fallback, emitting a blank Proteins column -- worse than a
     // synthetic name, because it names nothing AND looks like data.
     base_accessions: &[Option<String>],
+    // Origin of the Pass-1 protein each backbone came from (UniProt isoform,
+    // variant or chain entry), parallel to `base_seqs`; missing means Reference.
+    base_origins: &[Option<model::EntryOrigin>],
     decoy_prefix: &str,
     decoy_strategy: DecoyStrategy,
     seed: u64,
@@ -308,12 +312,18 @@ pub fn build_peptide_anchored_index(
                     .unwrap_or_else(|| format!("BASEPEP_{i}")),
                 description: String::new(),
                 sequence: seq.clone(),
-                annotation: None,
+                // Pass-2 rows keep the provenance of the entry they came from.
+                annotation: base_origins.get(i).cloned().flatten().map(|o| {
+                    std::sync::Arc::new(
+                        model::ProteinAnnotation::new(Vec::new(), None).with_origin(Some(o)),
+                    )
+                }),
             })
             .collect(),
     };
     let combined = anchored_target_plus_decoy(&minidb, decoy_prefix, decoy_strategy, seed);
     SearchIndex {
+        has_alternative_entries: crate::search_index::holds_alternative_entries(&combined),
         db: combined,
         decoy_prefix: crate::decoy::normalize_decoy_prefix(decoy_prefix),
         decoy_suffix: None,
@@ -367,6 +377,8 @@ fn anchored_target_plus_decoy(
                     full.push(seq[seq.len() - 1]);
                     d.sequence = full;
                 }
+                // The target's annotation holds only its origin; the decoy keeps it.
+                d.annotation = t.annotation.clone();
                 d
             }),
     );
@@ -687,49 +699,6 @@ pub fn mod_count_and_class(peptide: &Peptide, cfg: &RefineConfig) -> (u32, u32) 
     (num_mods, class_id)
 }
 
-/// Daltons between successive precursor isotope peaks (13C minus 12C).
-const ISOTOPE_STEP_DA: f64 = 1.003_355;
-/// A variable mod within this many daltons of one or two isotope steps can be
-/// mimicked by a precursor picked on the wrong isotope peak.
-const ISOTOPE_MIMIC_TOL_DA: f64 = 0.05;
-
-/// Total mass the peptide's isotope-like variable mods differ from whole isotope
-/// steps: `Σ (k·step − delta)` over mods with `delta ≈ k·step`, `1 ≤ |k| ≤ 2`.
-/// Deamidation (+0.984016) contributes +0.019339 per site.
-fn isotope_mimic_shift_da(peptide: &Peptide) -> f64 {
-    peptide
-        .residues
-        .iter()
-        .filter_map(|aa| aa.mod_.as_ref())
-        .filter(|m| !m.fixed)
-        .filter_map(|m| {
-            let k = (m.mass_delta / ISOTOPE_STEP_DA).round();
-            let gap = k * ISOTOPE_STEP_DA - m.mass_delta;
-            (k != 0.0 && k.abs() <= 2.0 && gap.abs() < ISOTOPE_MIMIC_TOL_DA).then_some(gap)
-        })
-        .sum()
-}
-
-/// Whether the precursor mass is better explained by the same peptide WITHOUT its
-/// isotope-like mods, observed on a precursor picked that many isotope peaks high.
-///
-/// Deamidation (+0.984) sits 19 mDa from one isotope step (+1.003). When an unmodified
-/// peptide's precursor is picked on its M+1 peak, the deamidated candidate fits the
-/// precursor within tolerance and pairs with spectra Pass 1 already scored. Decoys
-/// cannot model this, so on Astral 61% of accepted deamidations sat at the
-/// mis-pick position. `mass_error_ppm` is `peptide − spectrum`; replacing the mods
-/// with whole isotope steps moves the error by `isotope_mimic_shift_da`, and the PSM
-/// is a mimic when that alternative error is the smaller one. The rule reads only
-/// the precursor mass, so it applies to targets and decoys alike.
-fn isotope_mimic_fits_better(peptide: &Peptide, mass_error_ppm: f64) -> bool {
-    let shift = isotope_mimic_shift_da(peptide);
-    if shift == 0.0 {
-        return false;
-    }
-    let err_da = mass_error_ppm * 1e-6 * peptide.mass();
-    (err_da + shift).abs() < err_da.abs()
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // (f) run_refinement
 // ─────────────────────────────────────────────────────────────────────────────
@@ -828,6 +797,17 @@ pub fn run_refinement(
         .iter()
         .map(|&(_, pi)| full_target_db.proteins.get(pi).map(|p| p.accession.clone()))
         .collect();
+    let base_origins: Vec<Option<model::EntryOrigin>> = base_with_src
+        .iter()
+        .map(|&(_, pi)| {
+            full_target_db
+                .proteins
+                .get(pi)
+                .and_then(|p| p.origin())
+                .filter(|o| o.kind != model::EntryKind::Reference)
+                .cloned()
+        })
+        .collect();
     // Protein N-terminal status per anchor, decided from the target database (the
     // anchor's own mini-protein always starts at 0, so enumeration cannot tell).
     let mut anchor_nterm = anchors_at_protein_nterm(&base_seqs, full_target_db);
@@ -886,8 +866,14 @@ pub fn run_refinement(
     //    peptide + a 1:1 decoy each. Built as an owned local so it can be MOVED
     //    into the returned `RefinementOutput` once the `PreparedSearch` borrow of
     //    it ends (see below).
-    let refine_idx =
-        build_peptide_anchored_index(&base_seqs, &base_accs, decoy_prefix, decoy_strategy, seed);
+    let refine_idx = build_peptide_anchored_index(
+        &base_seqs,
+        &base_accs,
+        &base_origins,
+        decoy_prefix,
+        decoy_strategy,
+        seed,
+    );
 
     // 4. Pass-2 params: refinement variable-mod tier + the tier's mod cap.
     //    Bound the per-peptide mod cap: the candidate count grows combinatorially
@@ -997,8 +983,10 @@ pub fn run_refinement(
             if num_mods == 0 {
                 continue;
             }
-            if isotope_mimic_fits_better(
-                &refine_candidates[psm.primary_candidate_idx() as usize].peptide,
+            let pep = &refine_candidates[psm.primary_candidate_idx() as usize].peptide;
+            if crate::isotope_mimic::fits_better(
+                pep,
+                crate::isotope_mimic::mod_shift_da(pep),
                 psm.mass_error_ppm,
             ) {
                 isotope_mimics += 1;
@@ -1500,9 +1488,35 @@ mod tests {
     // ── (c') build_peptide_anchored_index ──────────────────────────────────
 
     #[test]
+    fn anchored_mini_proteins_keep_their_source_origin() {
+        let origin = model::EntryOrigin {
+            kind: model::EntryKind::Variant,
+            family: std::sync::Arc::from("P1"),
+            feature: std::sync::Arc::from("VAR_1"),
+            variant_delta_da: 0.984016,
+        };
+        let base_seqs = vec![b"PEPTIDK".to_vec(), b"SAMPLER".to_vec()];
+        let idx = build_peptide_anchored_index(
+            &base_seqs,
+            &[],
+            &[Some(origin.clone()), None],
+            "XXX",
+            DecoyStrategy::Reverse,
+            42,
+        );
+        assert_eq!(idx.db.proteins[0].origin(), Some(&origin));
+        assert_eq!(idx.db.proteins[1].origin(), None);
+        // The paired decoys carry the same origin as their targets.
+        assert_eq!(idx.db.proteins[2].origin(), Some(&origin));
+        assert_eq!(idx.db.proteins[3].origin(), None);
+        assert!(idx.has_alternative_entries);
+    }
+
+    #[test]
     fn build_peptide_anchored_index_one_mini_protein_per_base_seq_plus_decoys() {
         let base_seqs = vec![b"PEPTIK".to_vec(), b"SAMPLER".to_vec()];
-        let idx = build_peptide_anchored_index(&base_seqs, &[], "XXX", DecoyStrategy::Reverse, 42);
+        let idx =
+            build_peptide_anchored_index(&base_seqs, &[], &[], "XXX", DecoyStrategy::Reverse, 42);
 
         // 2 target mini-proteins + 2 paired Reverse decoys.
         assert_eq!(idx.db.len(), 4);
@@ -1532,7 +1546,8 @@ mod tests {
             b"ACDKNQMR",
         ];
         let base_seqs: Vec<Vec<u8>> = anchors.iter().map(|a| a.to_vec()).collect();
-        let idx = build_peptide_anchored_index(&base_seqs, &[], "XXX", DecoyStrategy::Reverse, 42);
+        let idx =
+            build_peptide_anchored_index(&base_seqs, &[], &[], "XXX", DecoyStrategy::Reverse, 42);
         let n = anchors.len();
         assert_eq!(idx.db.proteins[n].sequence, b"PEDITPEK".to_vec());
         assert_eq!(idx.db.proteins[n + 1].sequence, b"PEDITKPEK".to_vec());
@@ -1899,39 +1914,6 @@ mod tests {
         }
         // Deterministic for a given seed.
         assert_eq!(entrapment_anchors(&base, &accs, 1).0, seqs);
-    }
-
-    #[test]
-    fn isotope_mimic_shift_counts_only_isotope_like_mods() {
-        let deam = isotope_mimic_shift_da(&modded_pep(b'N', 0.984016));
-        assert!((deam - 0.019339).abs() < 1e-5, "deamidation gap {deam}");
-        // Oxidation, acetyl and pyro-Glu are not within 50 mDa of ±1–2 isotope steps.
-        for d in [15.994915, 42.010565, -17.026549, -18.010565] {
-            assert_eq!(
-                isotope_mimic_shift_da(&modded_pep(b'Q', d)),
-                0.0,
-                "delta {d}"
-            );
-        }
-        assert_eq!(isotope_mimic_shift_da(&unmod_peptide(b"PEPTIDE")), 0.0);
-    }
-
-    #[test]
-    fn isotope_mimic_drops_deamidation_at_the_mis_pick_position_only() {
-        let pep = modded_pep(b'N', 0.984016);
-        let ppm = |err_da: f64| err_da / pep.mass() * 1e6;
-        // Peptide 19 mDa lighter than the precursor: an M+1 pick of the unmodified form.
-        assert!(isotope_mimic_fits_better(&pep, ppm(-0.0193)));
-        assert!(isotope_mimic_fits_better(&pep, ppm(-0.012)));
-        // A real deamidation sits near zero error.
-        assert!(!isotope_mimic_fits_better(&pep, ppm(0.0)));
-        assert!(!isotope_mimic_fits_better(&pep, ppm(-0.008)));
-        assert!(!isotope_mimic_fits_better(&pep, ppm(0.01)));
-        // No isotope-like mod: never a mimic.
-        assert!(!isotope_mimic_fits_better(
-            &modded_pep(b'M', 15.994915),
-            ppm(-0.0193)
-        ));
     }
 
     #[test]
@@ -2451,6 +2433,7 @@ mod tests {
             db: ProteinDb {
                 proteins: vec![protein("P0", b"PEPTIDEK")],
             },
+            has_alternative_entries: false,
             decoy_prefix: "XXX".into(),
             decoy_suffix: None,
         };
@@ -2462,6 +2445,7 @@ mod tests {
                 db: ProteinDb {
                     proteins: vec![protein("BASEPEP_0", b"PEPTIDEK")],
                 },
+                has_alternative_entries: false,
                 decoy_prefix: "XXX".into(),
                 decoy_suffix: None,
             },
@@ -2505,6 +2489,7 @@ mod tests {
             db: ProteinDb {
                 proteins: vec![protein("P0", b"AAAK"), protein("P1", b"BBBK")],
             }, // prot_offset = 2
+            has_alternative_entries: false,
             decoy_prefix: "XXX".into(),
             decoy_suffix: None,
         };
@@ -2521,6 +2506,7 @@ mod tests {
                         protein("BASEPEP_1", b"SAMPLEK"),
                     ],
                 },
+                has_alternative_entries: false,
                 decoy_prefix: "XXX".into(),
                 decoy_suffix: None,
             },

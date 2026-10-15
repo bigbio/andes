@@ -28,11 +28,12 @@
 use crate::decoy::is_decoy_accession_affix;
 use crate::search_index::SearchIndex;
 use crate::search_params::SearchParams;
+use model::aa_set::AminoAcidSet;
 use model::amino_acid::AminoAcid;
 use model::enzyme::Enzyme;
 use model::modification::ModLocation;
 use model::peptide::Peptide;
-use model::protein::{ChainEnds, ModSite, Protein, VariantRegion};
+use model::protein::{ChainEnds, ModSite, Protein, Substitution, VariantRegion};
 
 #[derive(Debug, Clone)]
 pub struct Candidate {
@@ -191,7 +192,7 @@ fn enumerate_protein_from_offset(
             params,
             variant: protein.variant_parts(),
             chain: protein.chain_ends(),
-            sites: protein.mod_sites(),
+            protein,
         };
         return enumerate_all_spans(&ctx, window.0..window.1, n);
     }
@@ -233,7 +234,7 @@ fn enumerate_protein_from_offset(
         params,
         variant: protein.variant_parts(),
         chain: protein.chain_ends(),
-        sites: protein.mod_sites(),
+        protein,
     };
 
     // ── Strict spans (ntt=2 behaviour) ───────────────────────────────────────
@@ -318,8 +319,8 @@ struct EmitCtx<'a> {
     variant: &'a [VariantRegion],
     /// The protein's new termini, when it is a mature-chain entry.
     chain: Option<ChainEnds>,
-    /// The protein's annotated modification sites.
-    sites: &'a [ModSite],
+    /// The protein (annotated sites and variant substitutions).
+    protein: &'a Protein,
 }
 
 /// Emit a single (start, end) span as candidates, if the span passes residue
@@ -359,9 +360,14 @@ fn emit_span(ctx: &EmitCtx<'_>, start: u32, end: u32, out: &mut Vec<Candidate>) 
 
     let is_protein_n_term = start == 0;
     let is_protein_c_term = abs_end == ctx.seq.len();
-    let sites = SpanSites::new(ctx.sites, abs_start);
-    let mod_combinations =
-        expand_mod_combinations(span, ctx.params, is_protein_n_term, is_protein_c_term, sites);
+    let sites = SpanSites::new(ctx.protein, abs_start);
+    let mod_combinations = expand_mod_combinations(
+        span,
+        ctx.params,
+        is_protein_n_term,
+        is_protein_c_term,
+        sites,
+    );
     for residues in mod_combinations {
         let peptide = Peptide::new(residues, pre, post);
         out.push(Candidate {
@@ -389,30 +395,72 @@ fn enumerate_all_spans(ctx: &EmitCtx<'_>, starts: std::ops::Range<u32>, n: u32) 
     out
 }
 
-/// The annotated modification sites a span sees: its protein's sites and the
-/// span's start in protein coordinates. Decides where a mod restricted to
-/// annotated sites ([`model::Modification::annotated_site_mass`]) may go;
-/// every other variant is always allowed.
+/// What a span's protein annotation says about its residues: the annotated
+/// modification sites and, for a variant entry, its single-residue
+/// substitutions, with the span's start in protein coordinates. Decides where
+/// a mod restricted to annotated sites
+/// ([`model::Modification::annotated_site_mass`]) may go, and leaves out a
+/// substituted residue whose form weighs the same as a searchable form of the
+/// residue it replaced (D, or N deamidated, where the canonical has N): that
+/// form is the canonical peptide's, not evidence for the variant.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct SpanSites<'a> {
     sites: &'a [ModSite],
+    substitutions: &'a [Substitution],
     start: u32,
+    /// The search's residue forms; set by [`SpanSites::with_forms`] before a
+    /// walk, needed only for a span with substitutions.
+    forms: Option<&'a AminoAcidSet>,
 }
 
 impl<'a> SpanSites<'a> {
-    pub(crate) fn new(sites: &'a [ModSite], span_start: usize) -> Self {
+    pub(crate) fn new(protein: &'a Protein, span_start: usize) -> Self {
         Self {
-            sites,
+            sites: protein.mod_sites(),
+            substitutions: protein.substitutions(),
             start: span_start as u32,
+            forms: None,
+        }
+    }
+
+    /// These sites, judging substitutions against the residue forms of `aa`.
+    pub(crate) fn with_forms<'b>(self, aa: &'b AminoAcidSet) -> SpanSites<'b>
+    where
+        'a: 'b,
+    {
+        SpanSites {
+            forms: Some(aa),
+            ..self
         }
     }
 
     /// Whether `variant` may sit at position `i` of the span.
     #[inline]
     fn allows(&self, i: usize, variant: &AminoAcid) -> bool {
-        variant
+        let position = self.start + i as u32;
+        if !variant
             .mod_
-            .is_none_or(|m| m.allowed_at(self.sites, self.start + i as u32))
+            .is_none_or(|m| m.allowed_at(self.sites, position))
+        {
+            return false;
+        }
+        let Some(aa) = self.forms else {
+            return true;
+        };
+        if self.substitutions.is_empty() {
+            return true;
+        }
+        let Ok(k) = self
+            .substitutions
+            .binary_search_by_key(&position, |s| s.position)
+        else {
+            return true;
+        };
+        let mass = |a: &AminoAcid| a.mass + a.mod_.map_or(0.0, |m| m.mass_delta);
+        let here = mass(variant);
+        !aa.variants_for(self.substitutions[k].original, ModLocation::Anywhere)
+            .iter()
+            .any(|f| (mass(f) - here).abs() <= model::protein::SITE_MASS_TOLERANCE)
     }
 }
 
@@ -485,7 +533,7 @@ pub(crate) fn expand_mod_combinations(
         &mut current,
         0,
         params.max_variable_mods_per_peptide,
-        sites,
+        sites.with_forms(&params.aa_set),
         &mut out,
     );
     out
@@ -526,7 +574,12 @@ fn variant_bounds(variants: &[AminoAcid]) -> (f64, f64) {
 impl FormWalkTables {
     pub fn new(params: &SearchParams) -> Self {
         let anywhere: Vec<Vec<AminoAcid>> = (0..=255u8)
-            .map(|r| params.aa_set.variants_for(r, ModLocation::Anywhere).to_vec())
+            .map(|r| {
+                params
+                    .aa_set
+                    .variants_for(r, ModLocation::Anywhere)
+                    .to_vec()
+            })
             .collect();
         let mut terminal = Vec::with_capacity(256 * 16);
         for r in 0..=255u8 {
@@ -561,12 +614,20 @@ impl FormWalkTables {
 
     #[inline]
     fn terminal_key(residue: u8, first: bool, last: bool, prot_n: bool, prot_c: bool) -> usize {
-        let key = first as usize | (last as usize) << 1 | (prot_n as usize) << 2 | (prot_c as usize) << 3;
+        let key =
+            first as usize | (last as usize) << 1 | (prot_n as usize) << 2 | (prot_c as usize) << 3;
         residue as usize * 16 + key
     }
 
     #[inline]
-    fn terminal(&self, residue: u8, first: bool, last: bool, prot_n: bool, prot_c: bool) -> &[AminoAcid] {
+    fn terminal(
+        &self,
+        residue: u8,
+        first: bool,
+        last: bool,
+        prot_n: bool,
+        prot_c: bool,
+    ) -> &[AminoAcid] {
         &self.terminal[Self::terminal_key(residue, first, last, prot_n, prot_c)]
     }
 
@@ -837,7 +898,7 @@ fn walk_forms_bounded(
         &mut chosen,
         0,
         params.max_variable_mods_per_peptide,
-        sites,
+        sites.with_forms(&params.aa_set),
         &min_rest,
         &max_rest,
         mass_lo,
@@ -887,7 +948,7 @@ fn record_span<'a>(
         c_term: rec.flags & flags::IS_PROTEIN_C_TERM != 0,
         pre,
         post,
-        sites: SpanSites::new(protein.mod_sites(), abs_start),
+        sites: SpanSites::new(protein, abs_start),
     })
 }
 
@@ -1147,7 +1208,11 @@ fn expand_recursive(
 /// when they apply to *every* configured protease — a NonSpecific extra makes
 /// the whole digest non-specific; a NoCleavage extra contributes no cut sites
 /// (it never short-circuits unless it's the only protease).
-pub(crate) fn compute_cleavage_positions(seq: &[u8], primary: Enzyme, extras: &[Enzyme]) -> Vec<u32> {
+pub(crate) fn compute_cleavage_positions(
+    seq: &[u8],
+    primary: Enzyme,
+    extras: &[Enzyme],
+) -> Vec<u32> {
     let n = seq.len() as u32;
 
     let all = || std::iter::once(primary).chain(extras.iter().copied());
@@ -1369,7 +1434,7 @@ pub fn lazy_candidates_for_precursor(
             seq[abs_end]
         };
 
-        let sites = SpanSites::new(protein.mod_sites(), abs_start);
+        let sites = SpanSites::new(protein, abs_start);
         let mod_combinations =
             expand_mod_combinations(span, params, is_protein_n_term, is_protein_c_term, sites);
         for residues in mod_combinations {
@@ -1543,7 +1608,16 @@ pub fn distinct_base_records_for_nominal_window(
     let slices: Vec<(u64, u64)> = (0..)
         .map(|i| span_lo + i * step)
         .take_while(|&a| a <= span_hi)
-        .map(|a| (a, if a + step > span_hi { span_hi } else { a + step - 1 }))
+        .map(|a| {
+            (
+                a,
+                if a + step > span_hi {
+                    span_hi
+                } else {
+                    a + step - 1
+                },
+            )
+        })
         .collect();
     let mut out: Vec<crate::candidate_index::IndexRecord> = slices
         .par_iter()
@@ -1600,7 +1674,7 @@ pub fn expand_base_record(
         seq[abs_end]
     };
 
-    let sites = SpanSites::new(protein.mod_sites(), abs_start);
+    let sites = SpanSites::new(protein, abs_start);
     expand_mod_combinations(span, params, is_protein_n_term, is_protein_c_term, sites)
         .into_iter()
         .map(|residues| Candidate {

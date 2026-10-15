@@ -273,7 +273,18 @@ pub fn decoy_annotation(target: &Protein, source: &[u32]) -> Option<Arc<ProteinA
     Some(Arc::new(
         ProteinAnnotation::new(mod_sites, None)
             .with_variant(variant)
-            .with_chain(ann.chain),
+            .with_chain(ann.chain)
+            .with_origin(ann.origin.clone())
+            .with_substitutions(
+                ann.substitutions
+                    .iter()
+                    .filter(|s| (s.position as usize) < n)
+                    .map(|s| model::Substitution {
+                        position: image[s.position as usize],
+                        ..*s
+                    })
+                    .collect(),
+            ),
     ))
 }
 

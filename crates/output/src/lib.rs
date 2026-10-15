@@ -32,6 +32,9 @@ pub use qpx::write_qpx;
 pub mod rt_wiring;
 pub use rt_wiring::populate_rt_features;
 
+pub mod provenance;
+pub use provenance::populate_provenance_features;
+
 pub mod glyco_rt;
 pub use glyco_rt::populate_glyco_rt_features;
 

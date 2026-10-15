@@ -312,6 +312,26 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 cli.decoy_strategy
             )
         })?;
+    // Isoform and chain entries share most peptides with their canonical
+    // entry. A shuffled decoy is permuted per entry, so the decoys share none,
+    // and the provenance columns (and the decoy search space) would differ
+    // between targets and decoys.
+    if decoy_strategy == search::decoy::DecoyStrategy::Shuffle
+        && target_db.proteins.iter().any(|p| {
+            matches!(
+                p.entry_kind(),
+                model::EntryKind::Isoform | model::EntryKind::Chain
+            )
+        })
+    {
+        return Err(
+            "--decoy-strategy shuffle cannot search isoform or mature-chain entries \
+                    (--uniprot-isoforms, --uniprot-chains): shuffled decoys do not keep the \
+                    peptides these entries share with their canonical entry. Use \
+                    --decoy-strategy reverse."
+                .into(),
+        );
+    }
     let t_phase = std::time::Instant::now();
     let idx = SearchIndex::from_target_db_for(
         &target_db,
@@ -643,6 +663,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     report_annotated_site_mods(&aa, &target_db);
+    warn_restricted_artefacts(&aa, cli.uniprot_variants);
 
     // ── 5. Build SearchParams ─────────────────────────────────────────────────
     let mut params = SearchParams::default_tryptic(aa);
@@ -2012,6 +2033,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `docs/plans/glyco/50-roadmap/rt-prediction-design.md` (Commit 1).
     output::populate_rt_features(&spectra, &mut queues, &pin_candidates);
 
+    // Provenance (additive): entry class, gap to the best Reference candidate,
+    // isotope-mimic flag. All 0 on a FASTA search except IsotopeMimic with
+    // isotope-like variable mods.
+    output::populate_provenance_features(&mut queues, &pin_candidates, &pin_index);
+
     output::write_pin(
         &output_pin_path,
         &spectra,
@@ -2376,6 +2402,33 @@ fn log_uniprot_load(stats: &input::UniProtLoadStats, opts: &input::UniProtOption
 /// Say how many annotated sites each `sites=annotated` mod of `aa` can use,
 /// and warn about one the database annotates no site of its mass for: it is
 /// never placed.
+/// Artefact masses that mimic common substitutions: deamidation (N→D, Q→E),
+/// oxidation (A→S, P→T…), carbamylation, methylation (G→A, S→T, D→E…).
+const ARTEFACT_MASSES: [f64; 4] = [0.984016, 15.994915, 43.005814, 14.015650];
+
+/// With natural variants searched, restricting one of these mods to annotated
+/// sites removes the canonical explanation that competes with a variant of the
+/// same mass.
+fn warn_restricted_artefacts(aa: &model::AminoAcidSet, variants_on: bool) {
+    if !variants_on {
+        return;
+    }
+    for m in aa.distinct_mods() {
+        if m.annotated_site_mass.is_some()
+            && ARTEFACT_MASSES
+                .iter()
+                .any(|a| (m.mass_delta - a).abs() <= model::protein::SITE_MASS_TOLERANCE)
+        {
+            eprintln!(
+                "WARN: {} ({:+.4} Da) is restricted to annotated sites while \
+                 --uniprot-variants is on: variants of the same mass lose the \
+                 competing explanation at unannotated residues.",
+                m.name, m.mass_delta
+            );
+        }
+    }
+}
+
 fn report_annotated_site_mods(aa: &model::AminoAcidSet, target_db: &model::ProteinDb) {
     let mut mods: Vec<(&str, f64)> = aa
         .distinct_mods()

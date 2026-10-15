@@ -877,6 +877,11 @@ impl<'a> PreparedSearch<'a> {
                 let mut best_pep_key: u64 = 0;
                 let mut have_best = false;
                 let mut second_raw = i32::MIN;
+                // Best RawScores among candidates from Reference entries, for
+                // `DeltaRefScore`; only tracked when the database holds
+                // isoform, variant or chain entries.
+                let mut ref_tracker = RefTracker::default();
+                let track_ref = self.idx.has_alternative_entries;
 
                 // Tailor per-spectrum score calibration (additive PIN feature):
                 // accumulate a histogram of EVERY scored candidate's rounded RawScore
@@ -1050,6 +1055,12 @@ impl<'a> PreparedSearch<'a> {
                         // that can't beat the top-1 still contributes to the delta.
                         {
                             let s = pin_score.round() as i32;
+                            if track_ref
+                                && self.idx.db.proteins[cand.protein_index].entry_kind()
+                                    == model::EntryKind::Reference
+                            {
+                                ref_tracker.fold(s, peptidoform_key(&cand.peptide));
+                            }
                             // Tailor histogram: fold this candidate's rounded RawScore
                             // in (same `s` the DeltaRawScore tracker uses). One u32
                             // increment, no per-candidate allocation.
@@ -1227,6 +1238,13 @@ impl<'a> PreparedSearch<'a> {
                     // co-isolation detection — `ms1_link` and its loading stay.
 
                     features.delta_raw_score = delta_raw_score;
+                    if track_ref {
+                        if let Some(r) = ref_tracker.best_excluding(peptidoform_key(&cand.peptide))
+                        {
+                            features.ref_competitor = 1;
+                            features.ref_best_raw = r as f32;
+                        }
+                    }
                     features.listwise_score_gap = listwise_score_gap;
                     features.candidate_rank_entropy = candidate_rank_entropy;
                     // Tailor calibrated score: this PSM's RawScore divided by the
@@ -2322,6 +2340,13 @@ pub(crate) fn compute_psm_features_with_edge(
         delta_rt: 0.0,
         abs_delta_rt: 0.0,
         delta_rt_norm: 0.0,
+        ref_competitor: 0,
+        ref_best_raw: 0.0,
+        is_variant: 0,
+        is_isoform: 0,
+        is_chain: 0,
+        delta_ref_score: 0.0,
+        isotope_mimic: 0,
         predicted_rt_min: 0.0,
         isobaric_rt_margin: 0.0, // glyco-only; set by populate_glyco_rt_features
     }
@@ -3499,5 +3524,63 @@ mod dedup_tests {
         let out = dedup_pepseq_score(psms, &cands);
         assert_eq!(out.len(), 1);
         assert!((out[0].rank_score - 60.4).abs() < f32::EPSILON);
+    }
+}
+
+/// Best RawScore among a spectrum's Reference-entry candidates, kept so a row
+/// can be compared with the best Reference candidate of a *different*
+/// peptidoform: a peptide shared by a canonical entry and an isoform or chain
+/// must not compete with its own canonical copy.
+#[derive(Debug, Default, Clone, Copy)]
+struct RefTracker {
+    best: Option<(i32, u64)>,
+    second: Option<i32>,
+}
+
+impl RefTracker {
+    fn fold(&mut self, score: i32, key: u64) {
+        match self.best {
+            None => self.best = Some((score, key)),
+            Some((best, best_key)) if key == best_key => {
+                self.best = Some((best.max(score), key));
+            }
+            Some((best, _)) if score > best => {
+                self.second = Some(self.second.map_or(best, |s| s.max(best)));
+                self.best = Some((score, key));
+            }
+            Some(_) => self.second = Some(self.second.map_or(score, |s| s.max(score))),
+        }
+    }
+
+    /// The best score among peptidoforms other than `key`.
+    fn best_excluding(&self, key: u64) -> Option<i32> {
+        match self.best {
+            Some((_, best_key)) if best_key == key => self.second,
+            Some((best, _)) => Some(best),
+            None => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod ref_tracker_tests {
+    use super::RefTracker;
+
+    #[test]
+    fn competitor_excludes_the_rows_own_peptidoform() {
+        let mut t = RefTracker::default();
+        t.fold(30, 1);
+        t.fold(25, 2);
+        t.fold(28, 1);
+        assert_eq!(t.best_excluding(1), Some(25));
+        assert_eq!(t.best_excluding(2), Some(30));
+        assert_eq!(t.best_excluding(3), Some(30));
+        t.fold(40, 3);
+        assert_eq!(t.best_excluding(3), Some(30));
+        assert_eq!(RefTracker::default().best_excluding(1), None);
+        let mut one = RefTracker::default();
+        one.fold(30, 1);
+        assert_eq!(one.best_excluding(1), None);
+        assert_eq!(one.best_excluding(2), Some(30));
     }
 }

@@ -1063,7 +1063,7 @@ scores from separately trained Percolator models are not on one scale.
   Every transfer row (target and both decoys) and every pseudo-transfer with a fit then gets
   MS2 evidence from the run's `<stem>.ms2.parquet`: among the MS2 scans whose isolation window
   holds the row's probe m/z (the decoy's own shifted m/z for a mass-shift decoy) and whose RT
-  lies within 3 fitted widths of the fitted apex (widths bounded to 1–20 s), at the entry's
+  lies within one fitted width of the fitted apex (the width bounded to 1–20 s), so the scan belongs to the quantified peak, at the entry's
   FAIMS voltage, each is scored against the entry's library spectrum: matched fragments, the
   normalised spectral angle of the square-root intensities (unmatched fragments count as 0) and
   the share of the library intensity matched. The best scan by angle gives the row's MS2

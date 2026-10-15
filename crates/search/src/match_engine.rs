@@ -2343,6 +2343,7 @@ mod accumulator_tests {
                 accession: "P1".into(),
                 description: "".into(),
                 sequence: b"MKWVTFISLLRKDAFLGSFLYEYSRK".to_vec(),
+                annotation: None,
             }],
         };
         let idx = SearchIndex::from_target_db(&db, "XXX");
@@ -2415,6 +2416,7 @@ mod chargeless_unit_tests {
                 accession: "P1".into(),
                 description: "".into(),
                 sequence: b"GKDAFLGSFLYEYSRKSAFLWEYSPLLTNNGVRK".to_vec(),
+                annotation: None,
             }],
         };
         let idx = SearchIndex::from_target_db(&db, "XXX");

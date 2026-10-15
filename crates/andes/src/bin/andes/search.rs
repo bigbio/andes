@@ -237,6 +237,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.quant_dir.is_some() {
         crate::quant_run::check_unique_stems(&cli.spectrum)?;
     }
+    QuantSettings::check_args(&cli)?;
+    if let Some(warning) = deuterated_tag_warning(cli.tmt, cli.precursor_tol) {
+        eprintln!("{warning}");
+    }
     // Parse the digestion enzyme(s) once. `--enzyme` accepts a comma-separated
     // list for a multi-protease digest; the FIRST entry is the primary (drives
     // model selection via build_selection_key + the cleavage-credit feature),
@@ -2523,17 +2527,65 @@ pub(crate) fn write_filtered_tsv(
     w.flush()
 }
 
+/// TMTpro 32/35-plex peptides are searched with the TMTpro tag mass, but each
+/// deuterated tag is 2.9 mDa heavier. Below three such tags on a 1000 Da
+/// peptide (8.8 ppm), the precursor window misses the deuterated precursors.
+fn deuterated_tag_warning(
+    plex: Option<quant::Plex>,
+    precursor_tol: model::Tolerance,
+) -> Option<String> {
+    use model::Tolerance;
+    let plex = plex.filter(|p| p.has_deuterated_channels())?;
+    let shift = 3.0 * quant::isobaric::DEUTERATED_TAG_SHIFT_DA;
+    if precursor_tol.as_da(1000.0) >= shift {
+        return None;
+    }
+    let tol = match precursor_tol {
+        Tolerance::Ppm(v) => format!("{v}ppm"),
+        Tolerance::Da(v) => format!("{v}da"),
+    };
+    Some(format!(
+        "WARN: --tmt {}: each deuterated TMTpro tag is {:.1} mDa heavier than the TMTpro mass \
+         (304.2071 Da), so a 1000 Da peptide with three of them sits {:.1} ppm above its \
+         candidate, outside --precursor-tol {tol}. Widen it to 10ppm or more, or the \
+         deuterated channels' precursors are missed.",
+        plex.name(),
+        quant::isobaric::DEUTERATED_TAG_SHIFT_DA * 1e3,
+        shift / 1000.0 * 1e6,
+    ))
+}
+
 /// The detected-label class of a `--tmt` kit.
 fn isobaric_label_of_plex(plex: quant::Plex) -> input::IsobaricLabel {
     match plex {
         quant::Plex::Tmt6 | quant::Plex::Tmt10 | quant::Plex::Tmt11 => input::IsobaricLabel::Tmt,
-        quant::Plex::Tmt16 | quant::Plex::Tmt18 => input::IsobaricLabel::TmtPro,
+        quant::Plex::Tmt16 | quant::Plex::Tmt18 | quant::Plex::Tmt32 | quant::Plex::Tmt35 => {
+            input::IsobaricLabel::TmtPro
+        }
         quant::Plex::Itraq4 => input::IsobaricLabel::Itraq,
         quant::Plex::Itraq8 => input::IsobaricLabel::Itraq8,
     }
 }
 
 // ── Training pipeline ─────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod deuterated_tag_warning_tests {
+    use super::deuterated_tag_warning;
+    use model::Tolerance;
+    use quant::Plex;
+
+    #[test]
+    fn warns_only_for_deuterated_kits_under_a_narrow_window() {
+        let w = deuterated_tag_warning(Some(Plex::Tmt35), Tolerance::Ppm(5.0)).unwrap();
+        assert!(w.contains("8.8 ppm") && w.contains("5ppm"), "{w}");
+        assert!(deuterated_tag_warning(Some(Plex::Tmt32), Tolerance::Da(0.005)).is_some());
+        assert!(deuterated_tag_warning(Some(Plex::Tmt35), Tolerance::Ppm(10.0)).is_none());
+        assert!(deuterated_tag_warning(Some(Plex::Tmt35), Tolerance::Da(0.02)).is_none());
+        assert!(deuterated_tag_warning(Some(Plex::Tmt18), Tolerance::Ppm(5.0)).is_none());
+        assert!(deuterated_tag_warning(None, Tolerance::Ppm(5.0)).is_none());
+    }
+}
 
 #[cfg(test)]
 mod retrieval_choice_tests {

@@ -1076,10 +1076,12 @@ scores from separately trained Percolator models are not on one scale.
   transfer targets from their decoys; the transfer q-value is the K-decoy estimate over held-out
   scores, `(D + 1) / (K · max(T, 1))` at each score threshold (capped at 1, then the running
   minimum), with `K` the decoy-to-target ratio; it is also reported per decoy family. The
-  transfer features are the fit evidence, the donor-run count, the library q-value and the MS2
-  evidence (angle, matched fragments, matched library intensity); no measurement from another
-  run. An accepted transfer whose best MS2 scan matches at least 4 fragments at an angle of at
-  least 0.6 is `transfer_ms2`, any other accepted transfer `transfer_ms1`. The `+1`
+  transfer features are the fit evidence, the donor-run count and the library q-value; no
+  measurement from another run. The MS2 evidence is not a feature: it shows that the peptide was
+  isolated near the fitted peak, but the decoys cannot imitate the right peptide quantified on
+  the wrong peak, so as a feature it accepted many such transfers. It labels the accepted ones:
+  an accepted transfer whose best MS2 scan (inside its fitted peak) matches at least 4 fragments
+  at an angle of at least 0.6 is `transfer_ms2`, any other accepted transfer `transfer_ms1`. The `+1`
   keeps a small fold from giving q = 0 to targets that merely outscore a few decoys. It is a quant-quality q-value, not an identification
   FDR. The identified pairs and their decoys go through the same estimate with their own models
   (same folds), which gives every identified row a quality q-value `quant_q`: how far its MS1

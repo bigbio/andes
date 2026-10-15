@@ -24,7 +24,7 @@ use model::spectrum::Spectrum;
 pub enum IsobaricLabel {
     /// TMT 6/10/11-plex: the 126–131 reporter cluster only.
     Tmt,
-    /// TMTpro 16/18-plex: the 126–131 cluster plus the 132–134(135) reporters.
+    /// TMTpro 16/18/32/35-plex: the 126–131 cluster plus the 132–135 reporters.
     TmtPro,
     /// iTRAQ 4-plex: the 114–117 reporter cluster.
     Itraq,

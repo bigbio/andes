@@ -2527,7 +2527,9 @@ pub(crate) fn write_filtered_tsv(
 fn isobaric_label_of_plex(plex: quant::Plex) -> input::IsobaricLabel {
     match plex {
         quant::Plex::Tmt6 | quant::Plex::Tmt10 | quant::Plex::Tmt11 => input::IsobaricLabel::Tmt,
-        quant::Plex::Tmt16 | quant::Plex::Tmt18 => input::IsobaricLabel::TmtPro,
+        quant::Plex::Tmt16 | quant::Plex::Tmt18 | quant::Plex::Tmt32 | quant::Plex::Tmt35 => {
+            input::IsobaricLabel::TmtPro
+        }
         quant::Plex::Itraq4 => input::IsobaricLabel::Itraq,
         quant::Plex::Itraq8 => input::IsobaricLabel::Itraq8,
     }

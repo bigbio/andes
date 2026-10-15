@@ -2,13 +2,14 @@
 //! isotope-impurity correction.
 //!
 //! Reporter m/z values are the ones OpenMS's `IsobaricQuantitationMethod`
-//! subclasses carry (TMT 6/10/11/16/18, iTRAQ 4/8). Extraction takes the most
-//! intense centroid within a tolerance of each reporter (Sage's rule; OpenMS
-//! takes the nearest within `reporter_mass_shift`). Impurity correction reads
-//! the vendor lot sheet in the OpenMS text form (one line per channel,
-//! `-2/-1/+1/+2` percentages, eight columns for TMTpro) and solves the
+//! subclasses carry (TMT 6/10/11/16/18/32/35, iTRAQ 4/8). Extraction takes the
+//! most intense centroid within a tolerance of each reporter (Sage's rule;
+//! OpenMS takes the nearest within `reporter_mass_shift`). Impurity correction
+//! reads the vendor lot sheet in the OpenMS text form (one line per channel,
+//! `-2/-1/+1/+2` percentages, eight columns for TMTpro 16/18) and solves the
 //! observed = M · true system by non-negative least squares, as
-//! `IsobaricIsotopeCorrector` does.
+//! `IsobaricIsotopeCorrector` does. The deuterated TMTpro 32/35-plex kits have
+//! no correction: OpenMS always applies the identity for them.
 
 use model::Tolerance;
 
@@ -101,6 +102,85 @@ const TMT18: &[Channel] = &[
     ch("135N", 135.151600),
 ];
 
+// TMTpro 32/35-plex add the deuterated reagents: each `D` channel trades one
+// 13C of its non-deuterated twin for a 2H, which puts it 2.9 mDa higher
+// (`127D` above `127C`, `128ND` above `128N`, `128CD` above `128C`). OpenMS
+// order: each nominal mass lists N, C, ND, CD, so the tables are not sorted
+// by m/z.
+
+const TMT32: &[Channel] = &[
+    ch("126", 126.127726),
+    ch("127N", 127.124761),
+    ch("127C", 127.131081),
+    ch("127D", 127.134003),
+    ch("128N", 128.128116),
+    ch("128C", 128.134436),
+    ch("128ND", 128.131038),
+    ch("128CD", 128.137358),
+    ch("129N", 129.131471),
+    ch("129C", 129.137790),
+    ch("129ND", 129.134393),
+    ch("129CD", 129.140713),
+    ch("130N", 130.134825),
+    ch("130C", 130.141145),
+    ch("130ND", 130.137748),
+    ch("130CD", 130.144068),
+    ch("131N", 131.138180),
+    ch("131C", 131.144500),
+    ch("131ND", 131.141103),
+    ch("131CD", 131.147423),
+    ch("132N", 132.141535),
+    ch("132C", 132.147855),
+    ch("132ND", 132.144458),
+    ch("132CD", 132.150778),
+    ch("133N", 133.144890),
+    ch("133C", 133.151210),
+    ch("133ND", 133.147813),
+    ch("133CD", 133.154133),
+    ch("134N", 134.148245),
+    ch("134ND", 134.151171),
+    ch("134CD", 134.157491),
+    ch("135ND", 135.154526),
+];
+
+const TMT35: &[Channel] = &[
+    ch("126", 126.127726),
+    ch("127N", 127.124761),
+    ch("127C", 127.131081),
+    ch("127D", 127.134003),
+    ch("128N", 128.128116),
+    ch("128C", 128.134436),
+    ch("128ND", 128.131038),
+    ch("128CD", 128.137358),
+    ch("129N", 129.131471),
+    ch("129C", 129.137790),
+    ch("129ND", 129.134393),
+    ch("129CD", 129.140713),
+    ch("130N", 130.134825),
+    ch("130C", 130.141145),
+    ch("130ND", 130.137748),
+    ch("130CD", 130.144068),
+    ch("131N", 131.138180),
+    ch("131C", 131.144500),
+    ch("131ND", 131.141103),
+    ch("131CD", 131.147423),
+    ch("132N", 132.141535),
+    ch("132C", 132.147855),
+    ch("132ND", 132.144458),
+    ch("132CD", 132.150778),
+    ch("133N", 133.144890),
+    ch("133C", 133.151210),
+    ch("133ND", 133.147813),
+    ch("133CD", 133.154133),
+    ch("134N", 134.148245),
+    ch("134C", 134.154566),
+    ch("134ND", 134.151171),
+    ch("134CD", 134.157491),
+    ch("135N", 135.151601),
+    ch("135ND", 135.154526),
+    ch("135CD", 135.160846),
+];
+
 const ITRAQ4: &[Channel] = &[
     ch("114", 114.1112),
     ch("115", 115.1082),
@@ -127,13 +207,16 @@ pub enum Plex {
     Tmt11,
     Tmt16,
     Tmt18,
+    Tmt32,
+    Tmt35,
     Itraq4,
     Itraq8,
 }
 
 impl Plex {
-    /// Parse a CLI name: `tmt6`, `tmt10`, `tmt11`, `tmt16`, `tmt18`, `itraq4`,
-    /// `itraq8` (case-insensitive, `plex` suffix optional, e.g. `tmt10plex`).
+    /// Parse a CLI name: `tmt6`, `tmt10`, `tmt11`, `tmt16`, `tmt18`, `tmt32`,
+    /// `tmt35`, `itraq4`, `itraq8` (case-insensitive, `plex` suffix optional,
+    /// e.g. `tmt10plex`).
     pub fn parse(s: &str) -> Result<Self, String> {
         let lower = s.trim().to_ascii_lowercase();
         let key = lower.strip_suffix("plex").unwrap_or(&lower);
@@ -143,12 +226,14 @@ impl Plex {
             "tmt11" => Plex::Tmt11,
             "tmt16" | "tmtpro16" | "tmtpro" => Plex::Tmt16,
             "tmt18" | "tmtpro18" => Plex::Tmt18,
+            "tmt32" | "tmtpro32" => Plex::Tmt32,
+            "tmt35" | "tmtpro35" => Plex::Tmt35,
             "itraq4" => Plex::Itraq4,
             "itraq8" => Plex::Itraq8,
             _ => {
                 return Err(format!(
                     "unknown isobaric plex '{s}' (expected tmt6, tmt10, tmt11, tmt16, tmt18, \
-                     itraq4 or itraq8)"
+                     tmt32, tmt35, itraq4 or itraq8)"
                 ))
             }
         })
@@ -162,6 +247,8 @@ impl Plex {
             Plex::Tmt11 => "tmt11plex",
             Plex::Tmt16 => "tmt16plex",
             Plex::Tmt18 => "tmt18plex",
+            Plex::Tmt32 => "tmt32plex",
+            Plex::Tmt35 => "tmt35plex",
             Plex::Itraq4 => "itraq4plex",
             Plex::Itraq8 => "itraq8plex",
         }
@@ -184,6 +271,8 @@ impl Plex {
             Plex::Tmt11 => TMT11,
             Plex::Tmt16 => TMT16,
             Plex::Tmt18 => TMT18,
+            Plex::Tmt32 => TMT32,
+            Plex::Tmt35 => TMT35,
             Plex::Itraq4 => ITRAQ4,
             Plex::Itraq8 => ITRAQ8,
         }
@@ -194,12 +283,24 @@ impl Plex {
     }
 
     /// Smallest m/z distance between two reporter channels of the kit
-    /// (6.3 mDa for the TMT 10/11/16/18-plex N/C pairs, ~1 Th otherwise).
+    /// (6.3 mDa for the TMT 10/11/16/18-plex N/C pairs, 2.9 mDa for the
+    /// TMTpro 32/35-plex deuterated twins, ~1 Th otherwise).
     pub fn min_channel_spacing(&self) -> f64 {
-        self.channels()
-            .windows(2)
-            .map(|w| w[1].mz - w[0].mz)
+        let mut mz: Vec<f64> = self.channels().iter().map(|c| c.mz).collect();
+        mz.sort_by(f64::total_cmp);
+        mz.windows(2)
+            .map(|w| w[1] - w[0])
             .fold(f64::INFINITY, f64::min)
+    }
+
+    /// Default reporter tolerance in ppm on Orbitrap reporter scans: 20, or 10
+    /// for TMTpro 32/35-plex, whose 2.9 mDa channel spacing a 20 ppm window
+    /// would reach across (half the spacing is 10.8 ppm at 135 Th).
+    pub fn default_reporter_ppm(&self) -> f64 {
+        match self {
+            Plex::Tmt32 | Plex::Tmt35 => 10.0,
+            _ => 20.0,
+        }
     }
 
     /// Reject a reporter tolerance under which two channels can read the same
@@ -227,22 +328,28 @@ impl Plex {
 
     /// The label mass added to K and the peptide N-terminus by this kit
     /// (Unimod monoisotopic delta), for the run log and the default fixed mod.
+    /// TMTpro 32/35-plex carry the TMTpro mass: their deuterated tags are
+    /// 3 mDa heavier (304.2101), well inside a precursor tolerance, and have
+    /// no Unimod entry of their own.
     pub fn label_mass(&self) -> f64 {
         match self {
             Plex::Tmt6 | Plex::Tmt10 | Plex::Tmt11 => 229.162932,
-            Plex::Tmt16 | Plex::Tmt18 => 304.207146,
+            Plex::Tmt16 | Plex::Tmt18 | Plex::Tmt32 | Plex::Tmt35 => 304.207146,
             Plex::Itraq4 => 144.102063,
             Plex::Itraq8 => 304.205360,
         }
     }
 
     /// Number of impurity columns per channel in the vendor sheet: four
-    /// (`-2/-1/+1/+2`) for TMT ≤ 11-plex and iTRAQ, eight for TMTpro
-    /// (`-2C13/-N15-C13/-C13/-N15/+N15/+C13/+N15+C13/+2C13`).
-    pub fn correction_columns(&self) -> usize {
+    /// (`-2/-1/+1/+2`) for TMT ≤ 11-plex and iTRAQ, eight for TMTpro 16/18
+    /// (`-2C13/-N15-C13/-C13/-N15/+N15/+C13/+N15+C13/+2C13`). `None` for
+    /// TMTpro 32/35-plex, which have no impurity correction (OpenMS ignores a
+    /// sheet for them and always applies the identity).
+    pub fn correction_columns(&self) -> Option<usize> {
         match self {
-            Plex::Tmt16 | Plex::Tmt18 => 8,
-            _ => 4,
+            Plex::Tmt6 | Plex::Tmt10 | Plex::Tmt11 | Plex::Itraq4 | Plex::Itraq8 => Some(4),
+            Plex::Tmt16 | Plex::Tmt18 => Some(8),
+            Plex::Tmt32 | Plex::Tmt35 => None,
         }
     }
 
@@ -252,7 +359,7 @@ impl Plex {
     fn affected(&self, from: usize, col: usize) -> Option<usize> {
         let chans = self.channels();
         let (nominal, series) = parse_channel(chans[from].name, *self);
-        let (delta, series_change): (i32, SeriesChange) = match self.correction_columns() {
+        let (delta, series_change): (i32, SeriesChange) = match self.correction_columns()? {
             4 => {
                 let d = [-2, -1, 1, 2][col];
                 (d, SeriesChange::Same)
@@ -379,7 +486,13 @@ impl CorrectionMatrix {
     /// ```
     pub fn parse(plex: Plex, text: &str) -> Result<Self, String> {
         let n = plex.n_channels();
-        let cols = plex.correction_columns();
+        let cols = plex.correction_columns().ok_or_else(|| {
+            format!(
+                "isotope impurity correction is not supported for {} (OpenMS applies none \
+                 for this kit either)",
+                plex.name()
+            )
+        })?;
         let rows: Vec<&str> = text
             .lines()
             .map(|l| l.split('#').next().unwrap_or("").trim())
@@ -500,32 +613,90 @@ impl CorrectionMatrix {
 mod tests {
     use super::*;
 
+    const ALL: [Plex; 9] = [
+        Plex::Tmt6,
+        Plex::Tmt10,
+        Plex::Tmt11,
+        Plex::Tmt16,
+        Plex::Tmt18,
+        Plex::Tmt32,
+        Plex::Tmt35,
+        Plex::Itraq4,
+        Plex::Itraq8,
+    ];
+
     #[test]
     fn plex_parse_accepts_common_spellings() {
         assert_eq!(Plex::parse("tmt10").unwrap(), Plex::Tmt10);
         assert_eq!(Plex::parse("TMT11plex").unwrap(), Plex::Tmt11);
         assert_eq!(Plex::parse("tmtpro").unwrap(), Plex::Tmt16);
         assert_eq!(Plex::parse("iTRAQ8").unwrap(), Plex::Itraq8);
+        assert_eq!(Plex::parse("tmt32").unwrap(), Plex::Tmt32);
+        assert_eq!(Plex::parse("TMT35plex").unwrap(), Plex::Tmt35);
+        assert_eq!(Plex::parse("tmtpro35").unwrap(), Plex::Tmt35);
         assert!(Plex::parse("tmt12").is_err());
+        assert!(Plex::parse("tmt36").is_err());
+        for plex in ALL {
+            assert_eq!(Plex::parse(plex.name()).unwrap(), plex);
+        }
     }
 
     #[test]
     fn channel_tables_are_sorted_and_sized() {
-        for plex in [
-            Plex::Tmt6,
-            Plex::Tmt10,
-            Plex::Tmt11,
-            Plex::Tmt16,
-            Plex::Tmt18,
-            Plex::Itraq4,
-            Plex::Itraq8,
-        ] {
+        for plex in ALL {
             let c = plex.channels();
-            assert!(c.windows(2).all(|w| w[0].mz < w[1].mz), "{plex:?}");
+            if matches!(plex, Plex::Tmt32 | Plex::Tmt35) {
+                // OpenMS order: sorted by nominal mass, N/C before ND/CD.
+                assert!(
+                    c.windows(2).all(|w| w[0].mz.floor() <= w[1].mz.floor()),
+                    "{plex:?}"
+                );
+            } else {
+                assert!(c.windows(2).all(|w| w[0].mz < w[1].mz), "{plex:?}");
+            }
+            assert!(plex.min_channel_spacing() > 0.0029, "{plex:?}");
+            let names: std::collections::HashSet<_> = c.iter().map(|c| c.name).collect();
+            assert_eq!(names.len(), c.len(), "{plex:?}");
         }
         assert_eq!(Plex::Tmt10.n_channels(), 10);
         assert_eq!(Plex::Tmt18.n_channels(), 18);
+        assert_eq!(Plex::Tmt32.n_channels(), 32);
+        assert_eq!(Plex::Tmt35.n_channels(), 35);
         assert_eq!(Plex::Itraq8.n_channels(), 8);
+    }
+
+    #[test]
+    fn deuterated_kits_extend_tmtpro() {
+        let in_35 = |c: &Channel| {
+            Plex::Tmt35
+                .channels()
+                .iter()
+                .any(|d| d.name == c.name && (d.mz - c.mz).abs() < 2e-6)
+        };
+        // Every TMTpro 18-plex and 32-plex channel is a 35-plex channel at
+        // the same m/z.
+        assert!(Plex::Tmt18.channels().iter().all(in_35));
+        assert!(Plex::Tmt32.channels().iter().all(in_35));
+        // Each deuterated channel is 2H − 13C = 2.922 mDa above its twin.
+        let mz = |name: &str| {
+            Plex::Tmt35
+                .channels()
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap()
+                .mz
+        };
+        for (d, twin) in [
+            ("127D", "127C"),
+            ("128ND", "128N"),
+            ("128CD", "128C"),
+            ("133CD", "133C"),
+            ("134ND", "134N"),
+            ("135ND", "135N"),
+        ] {
+            assert!((mz(d) - mz(twin) - 0.002922).abs() < 5e-6, "{d}");
+        }
+        assert_eq!(Plex::Tmt35.label_mass(), Plex::Tmt18.label_mass());
     }
 
     #[test]
@@ -561,6 +732,42 @@ mod tests {
         // One-dalton kits tolerate an ion-trap window.
         assert!(Plex::Tmt6.check_tolerance(Tolerance::Da(0.3)).is_ok());
         assert!(Plex::Itraq8.check_tolerance(Tolerance::Da(0.3)).is_ok());
+        // The deuterated twins are 2.9 mDa apart: 20 ppm (2.7 mDa) reaches
+        // across, 10 ppm does not.
+        for plex in [Plex::Tmt32, Plex::Tmt35] {
+            assert!((plex.min_channel_spacing() - 0.002922).abs() < 5e-6);
+            assert!(plex.check_tolerance(Tolerance::Ppm(20.0)).is_err());
+            assert!(plex.check_tolerance(Tolerance::Ppm(10.0)).is_ok());
+        }
+        // Every kit's default Orbitrap tolerance passes its own check.
+        for plex in ALL {
+            let tol = Tolerance::Ppm(plex.default_reporter_ppm());
+            assert!(plex.check_tolerance(tol).is_ok(), "{plex:?}");
+        }
+    }
+
+    #[test]
+    fn deuterated_channels_are_read_separately() {
+        // 128N, 128ND, 128C, 128CD within 9.2 mDa, each its own peak.
+        let peaks = vec![
+            (128.128116, 100.0f32),
+            (128.131038, 200.0),
+            (128.134436, 300.0),
+            (128.137358, 400.0),
+        ];
+        let r = extract_reporters(&peaks, Plex::Tmt35, Tolerance::Ppm(10.0));
+        let idx = |name: &str| {
+            Plex::Tmt35
+                .channels()
+                .iter()
+                .position(|c| c.name == name)
+                .unwrap()
+        };
+        assert_eq!(r[idx("128N")], 100.0);
+        assert_eq!(r[idx("128ND")], 200.0);
+        assert_eq!(r[idx("128C")], 300.0);
+        assert_eq!(r[idx("128CD")], 400.0);
+        assert_eq!(r[idx("127D")], 0.0);
     }
 
     #[test]
@@ -626,6 +833,15 @@ mod tests {
         let corrected = m.correct(&observed);
         for (c, t) in corrected.iter().zip(truth.iter()) {
             assert!((c - t).abs() < 1e-2, "{corrected:?}");
+        }
+    }
+
+    #[test]
+    fn deuterated_kits_refuse_an_impurity_sheet() {
+        for plex in [Plex::Tmt32, Plex::Tmt35] {
+            let na = "NA/NA/NA/NA/NA/NA/NA/NA\n".repeat(plex.n_channels());
+            let error = CorrectionMatrix::parse(plex, &na).unwrap_err();
+            assert!(error.contains("not supported"), "{error}");
         }
     }
 

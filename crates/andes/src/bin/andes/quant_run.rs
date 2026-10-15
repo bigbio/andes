@@ -86,7 +86,7 @@ impl QuantSettings {
         // an ion-trap scan (Fusion/Lumos SPS methods), so the MS2 resolution
         // says nothing about them.
         let tmt_tol = cli.tmt_tol.unwrap_or(if high_res || cli.tmt_level >= 3 {
-            Tolerance::Ppm(20.0)
+            Tolerance::Ppm(cli.tmt.map_or(20.0, |p| p.default_reporter_ppm()))
         } else {
             Tolerance::Da(0.3)
         });
@@ -96,10 +96,14 @@ impl QuantSettings {
                     "--tmt {}: {e}. {}",
                     plex.name(),
                     if cli.tmt_tol.is_some() {
-                        "Use a narrower --tmt-tol (e.g. 20ppm)."
+                        format!(
+                            "Use a narrower --tmt-tol (e.g. {}ppm).",
+                            plex.default_reporter_ppm()
+                        )
                     } else {
                         "The MS2 is low-resolution, so its reporter ions cannot separate this \
                          kit's channels: use --tmt-level 3 for SPS-MS3 data, or set --tmt-tol."
+                            .to_string()
                     }
                 )
             })?;

@@ -1559,8 +1559,11 @@ mod tests {
             candidate(b"SAMPLERK", false),
             candidate(b"KEDITPEP", true),
         ];
-        let (c, spectra, queues) =
-            one_spectrum(vec![psm(10.0, 0, None), psm(9.0, 1, None), psm(8.0, 2, None)]);
+        let (c, spectra, queues) = one_spectrum(vec![
+            psm(10.0, 0, None),
+            psm(9.0, 1, None),
+            psm(8.0, 2, None),
+        ]);
         let hits = select_rank1_all(&c, &spectra, &queues, &cands);
         assert_eq!(
             selected(&hits),

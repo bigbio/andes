@@ -3793,7 +3793,9 @@ mod tests {
         );
         let run = reader.take_run_ms1();
         assert_eq!(
-            run.iter().map(|s| (s.id.as_str(), s.rt)).collect::<Vec<_>>(),
+            run.iter()
+                .map(|s| (s.id.as_str(), s.rt))
+                .collect::<Vec<_>>(),
             vec![("scan=1", 60.0), ("scan=4", 90.0), ("scan=6", 120.0)],
             "every MS1 of the run, the trailing one included"
         );

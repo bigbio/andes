@@ -818,12 +818,14 @@ fn run_normalization(
 const MIN_AMPLITUDE_SE: f64 = 1e-12;
 
 /// The transfer FDR features of a row, in [`TRANSFER_FEATURES`] order;
-/// `None` without evidence or with a non-finite value. A row without MS2
-/// evidence (no library spectrum) has zero MS2 features, as a row whose
-/// window holds no scan.
+/// `None` without evidence or with a non-finite value. The MS2 evidence is
+/// not a feature: MS2 support shows that the peptide was isolated, not that
+/// the quantified MS1 peak is its peak, and the decoys cannot imitate a
+/// transfer of the right peptide on the wrong peak (with MS2 features the
+/// accepted wrong-peak rate rose from 1.0 % to 3.6 % on ProteoBench). It only
+/// labels accepted transfers `transfer_ms2`.
 pub(crate) fn transfer_features(row: &ExtractRow) -> Option<Vec<f32>> {
     let e = row.evidence.as_ref()?;
-    let ms2 = row.ms2.unwrap_or_default();
     let snr = e.amplitude / e.amplitude_se.max(MIN_AMPLITUDE_SE);
     let x = [
         e.llr,
@@ -839,9 +841,6 @@ pub(crate) fn transfer_features(row: &ExtractRow) -> Option<Vec<f32>> {
         (snr + 1.0).log10(),
         row.n_donor_runs as f64,
         row.library_q,
-        ms2.best.angle as f64,
-        ms2.best.n_matched as f64,
-        ms2.best.explained as f64,
     ];
     debug_assert_eq!(x.len(), TRANSFER_FEATURES.len());
     let x: Vec<f32> = x.iter().map(|&v| v as f32).collect();
@@ -2614,7 +2613,7 @@ mod finalize_tests {
     }
 
     #[test]
-    fn transfer_features_carry_the_ms2_evidence() {
+    fn transfer_features_leave_out_the_ms2_evidence() {
         let mut g = Rng(3);
         let mut r = row(
             0,
@@ -2623,16 +2622,10 @@ mod finalize_tests {
             Role::Transfer,
             Some(evidence(&mut g, true, 100.0)),
         );
-        let n = TRANSFER_FEATURES.len();
         let x = transfer_features(&r).unwrap();
-        assert_eq!(&x[n - 3..], [0.0, 0.0, 0.0]);
         r.ms2 = Some(supporting());
-        let x = transfer_features(&r).unwrap();
-        assert_eq!(&x[n - 3..], [0.9, 9.0, 0.95]);
-        assert_eq!(
-            &TRANSFER_FEATURES[n - 3..],
-            ["ms2_angle", "ms2_n_matched", "ms2_explained"]
-        );
+        assert_eq!(transfer_features(&r).unwrap(), x);
+        assert!(TRANSFER_FEATURES.iter().all(|f| !f.starts_with("ms2")));
     }
 
     #[test]
@@ -2707,7 +2700,7 @@ mod finalize_tests {
     }
 
     #[test]
-    fn ms2_evidence_separates_transfers_that_ms1_cannot() {
+    fn ms2_evidence_does_not_change_the_transfer_q_values() {
         let accepted = |with_ms2: bool| {
             let dir = tempfile::tempdir().unwrap();
             let (mbr, val) = mbr_paths(&dir.path().join("x"));
@@ -2731,17 +2724,16 @@ mod finalize_tests {
             }
             (present, absent)
         };
+        // Decoys on clean peaks make targets and decoys indistinguishable in
+        // MS1; MS2 support of the present targets does not change which
+        // transfers are accepted (it only labels them).
         let (p0, a0) = accepted(false);
         let (p1, a1) = accepted(true);
         eprintln!(
             "MS1 only: {p0} present, {a0} absent accepted; with MS2: {p1} present, {a1} absent"
         );
-        assert!(
-            p0 + a0 < 50,
-            "MS1 alone should not separate these: {p0} + {a0}"
-        );
-        assert!(p1 >= 400, "{p1} of 450 present transfers accepted with MS2");
-        assert!(a1 <= 5, "{a1} absent transfers accepted with MS2");
+        assert_eq!((p0, a0), (p1, a1));
+        assert!(p0 + a0 < 50, "{p0} + {a0}");
     }
 
     #[test]

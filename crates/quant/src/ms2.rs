@@ -27,7 +27,7 @@ pub const MIN_ION_LENGTH: usize = 3;
 /// Half-width (Th) of the isolation window of a scan that does not record one.
 pub const DEFAULT_ISOLATION_HALF_WIDTH: f64 = 1.0;
 /// The elution window of a probe is its fitted apex ± this many fitted widths.
-pub const ELUTION_WINDOW_WIDTHS: f64 = 3.0;
+pub const ELUTION_WINDOW_WIDTHS: f64 = 1.0;
 /// Bounds of the fitted width used for the elution window, seconds.
 pub const ELUTION_WIDTH_BOUNDS_S: (f64, f64) = (1.0, 20.0);
 /// MS2 support: at least this many matched library fragments ...
@@ -645,9 +645,9 @@ mod tests {
         s.isolation = Some((500.2, 0.6, 0.8));
         let (lo, hi) = s.window();
         assert!((lo - 499.6).abs() < 1e-9 && (hi - 501.0).abs() < 1e-9);
-        assert_eq!(elution_window(100.0, 5.0), Some((85.0, 115.0)));
-        assert_eq!(elution_window(100.0, 0.1), Some((97.0, 103.0)));
-        assert_eq!(elution_window(100.0, 100.0), Some((40.0, 160.0)));
+        assert_eq!(elution_window(100.0, 5.0), Some((95.0, 105.0)));
+        assert_eq!(elution_window(100.0, 0.1), Some((99.0, 101.0)));
+        assert_eq!(elution_window(100.0, 100.0), Some((80.0, 120.0)));
         assert_eq!(elution_window(f64::NAN, 5.0), None);
         // Unsorted input and non-finite RTs.
         let idx = Ms2RunIndex::new(vec![

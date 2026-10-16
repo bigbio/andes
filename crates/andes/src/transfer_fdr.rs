@@ -58,9 +58,6 @@ pub const TRANSFER_FEATURES: &[&str] = &[
     "log10_amplitude_snr",
     "n_donor_runs",
     "library_q",
-    "ms2_angle",
-    "ms2_n_matched",
-    "ms2_explained",
 ];
 
 /// Feature names of the identified-row quality classifier: the template-fit

@@ -997,7 +997,8 @@ const TABLE_ENVELOPE_ISOTOPES: usize = 4;
 
 /// `--quant-dir`: write `<dir>/<stem>.ms1.parquet` (the run's captured MS1, every
 /// FAIMS voltage) and `<dir>/<stem>.quant.parquet` (every rank-1 PSM of the
-/// run, targets and decoys, unfiltered) for each run.
+/// run and, under `--chimeric`, the best PSM of each co-isolated precursor;
+/// targets and decoys, unfiltered) for each run.
 fn write_run_artifacts(
     collector: &QuantCollector,
     spectra: &[Spectrum],
@@ -1059,7 +1060,7 @@ fn write_run_artifacts(
         write_run_quant_table(&table_path, &run.stem, &rows, &mods)
             .map_err(|e| format!("write {}: {e}", table_path.display()))?;
         eprintln!(
-            "quant: {}: wrote {} and {} ({} rank-1 PSMs, targets and decoys{})",
+            "quant: {}: wrote {} and {} ({} PSMs, one per precursor of a spectrum, targets and decoys{})",
             run.stem,
             ms1_path.display(),
             table_path.display(),

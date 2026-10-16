@@ -1321,18 +1321,26 @@ mod tests {
         assert!(e.tailing.abs() < 0.05, "symmetric peak: {}", e.tailing);
         // A slower second component after the apex makes the peak tail.
         let tailed = synth_run(
-            &[(MZ, 2, ENV, apex, 5.0, AMP), (MZ, 2, ENV, apex + 9.0, 8.0, 0.35 * AMP)],
+            &[
+                (MZ, 2, ENV, apex, 5.0, AMP),
+                (MZ, 2, ENV, apex + 9.0, 8.0, 0.35 * AMP),
+            ],
             NOISE,
             1.0,
         );
         let t = fit(&tailed, &p, 2, &ENV, &params()).unwrap();
-        assert!(t.tailing > e.tailing + 0.1, "{} vs {}", t.tailing, e.tailing);
+        assert!(
+            t.tailing > e.tailing + 0.1,
+            "{} vs {}",
+            t.tailing,
+            e.tailing
+        );
         // A zero amplitude has no tailing.
-        let empty = synth_run(&[], NOISE, 1.0);
-        let z = fit(&empty, &p, 2, &ENV, &params()).unwrap();
-        if z.amplitude == 0.0 {
-            assert_eq!(z.tailing, 0.0);
-        }
+        let rt = [0.0, 1.0, 2.0];
+        assert_eq!(
+            tailing(&rt, &[1.0, 5.0, 1.0], &[0.5, 1.0, 0.5], 0.0, 1.0, 1.0),
+            0.0
+        );
     }
 
     #[test]

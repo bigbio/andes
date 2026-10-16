@@ -1204,8 +1204,8 @@ pub(crate) fn finalize(
                 (t, q, q)
             }
             Role::PseudoTransfer => {
-                let q = transfer_features(r, &shapes, maps)
-                    .and_then(|x| fdr.pseudo_q(r.precursor, &x));
+                let q =
+                    transfer_features(r, &shapes, maps).and_then(|x| fdr.pseudo_q(r.precursor, &x));
                 v.pseudo_transfers += 1;
                 if let Some(m) = &r.ms2 {
                     v.ms2_pseudo_rows += 1;
@@ -2697,7 +2697,10 @@ mod finalize_tests {
             (1e6f64 / 1e4 + 1.0).log10() as f32
         );
         r.evidence.as_mut().unwrap().amplitude_se = 0.0;
-        assert!(transfer_features(&r, &DonorShapes::default(), &[]).unwrap().iter().all(|v| v.is_finite()));
+        assert!(transfer_features(&r, &DonorShapes::default(), &[])
+            .unwrap()
+            .iter()
+            .all(|v| v.is_finite()));
         r.evidence.as_mut().unwrap().llr = f64::NAN;
         assert!(transfer_features(&r, &DonorShapes::default(), &[]).is_none());
         r.evidence = None;
@@ -2727,7 +2730,9 @@ mod finalize_tests {
     /// Identity maps for `n` runs (unit slope everywhere).
     fn identity_maps(n: usize) -> Vec<Option<RunMap>> {
         (0..n)
-            .map(|_| Some(RunMap::from_parts(vec![0.0, 1000.0], vec![0.0, 1000.0], 1.0, 1.0).unwrap()))
+            .map(|_| {
+                Some(RunMap::from_parts(vec![0.0, 1000.0], vec![0.0, 1000.0], 1.0, 1.0).unwrap())
+            })
             .collect()
     }
 
@@ -2746,14 +2751,29 @@ mod finalize_tests {
     fn shape_features_compare_with_the_donor_fits_of_other_runs() {
         let maps = identity_maps(3);
         let id = |run: u16, w: f64, tail: f64, iso| {
-            row(7, run, Hypothesis::Target, Role::Identified, Some(shaped(w, tail, iso)))
+            row(
+                7,
+                run,
+                Hypothesis::Target,
+                Role::Identified,
+                Some(shaped(w, tail, iso)),
+            )
         };
         let donors = [id(0, 4.0, 0.10, DONOR_ISO), id(2, 4.0, 0.10, DONOR_ISO)];
         let shapes = DonorShapes::from_rows(&donors, &maps);
         // A transfer at the donors' shape agrees on every count.
-        let like = row(7, 1, Hypothesis::Target, Role::Transfer, Some(shaped(4.0, 0.10, DONOR_ISO.map(|v| 2.0 * v))));
+        let like = row(
+            7,
+            1,
+            Hypothesis::Target,
+            Role::Transfer,
+            Some(shaped(4.0, 0.10, DONOR_ISO.map(|v| 2.0 * v))),
+        );
         let f = shapes.features(&like, &maps);
-        assert!(f[0].abs() < 1e-12 && f[1].abs() < 1e-12 && (f[2] - 1.0).abs() < 1e-12, "{f:?}");
+        assert!(
+            f[0].abs() < 1e-12 && f[1].abs() < 1e-12 && (f[2] - 1.0).abs() < 1e-12,
+            "{f:?}"
+        );
         // A decoy of that precursor on another peak (wider, other isotope
         // ratios) is compared with the same donors and disagrees.
         let other = row(
@@ -2771,7 +2791,10 @@ mod finalize_tests {
         let x = transfer_features(&other, &shapes, &maps).unwrap();
         let n = TRANSFER_FEATURES.len();
         assert_eq!(x.len(), n);
-        assert_eq!(&TRANSFER_FEATURES[n - 3..], ["shape_log_width", "shape_tailing_diff", "shape_iso_cos"]);
+        assert_eq!(
+            &TRANSFER_FEATURES[n - 3..],
+            ["shape_log_width", "shape_tailing_diff", "shape_iso_cos"]
+        );
         assert_eq!(&x[n - 3..], &g.map(|v| v as f32));
     }
 
@@ -2781,11 +2804,29 @@ mod finalize_tests {
         // Run 1 identifies the precursor with an odd shape; run 0 is the
         // only other donor.
         let donors = [
-            row(3, 0, Hypothesis::Target, Role::Identified, Some(shaped(4.0, 0.0, DONOR_ISO))),
-            row(3, 1, Hypothesis::Target, Role::Identified, Some(shaped(9.0, 0.5, [1.0, 1.0, 1.0, 1.0]))),
+            row(
+                3,
+                0,
+                Hypothesis::Target,
+                Role::Identified,
+                Some(shaped(4.0, 0.0, DONOR_ISO)),
+            ),
+            row(
+                3,
+                1,
+                Hypothesis::Target,
+                Role::Identified,
+                Some(shaped(9.0, 0.5, [1.0, 1.0, 1.0, 1.0])),
+            ),
         ];
         let shapes = DonorShapes::from_rows(&donors, &maps);
-        let pseudo = row(3, 1, Hypothesis::Target, Role::PseudoTransfer, Some(shaped(9.0, 0.5, [1.0, 1.0, 1.0, 1.0])));
+        let pseudo = row(
+            3,
+            1,
+            Hypothesis::Target,
+            Role::PseudoTransfer,
+            Some(shaped(9.0, 0.5, [1.0, 1.0, 1.0, 1.0])),
+        );
         let f = shapes.features(&pseudo, &maps);
         assert!((f[0] - (9.0f64 / 4.0).ln()).abs() < 1e-12, "{f:?}");
         assert!((f[1] - 0.5).abs() < 1e-12, "{f:?}");
@@ -2799,7 +2840,13 @@ mod finalize_tests {
         empty.evidence.as_mut().unwrap().amplitude = 0.0;
         assert_eq!(shapes.features(&empty, &maps), NO_SHAPE);
         // Decoy and identified decoy rows never become references.
-        let decoy = row(3, 0, Hypothesis::RtShiftDecoy, Role::Identified, Some(shaped(1.0, 0.0, DONOR_ISO)));
+        let decoy = row(
+            3,
+            0,
+            Hypothesis::RtShiftDecoy,
+            Role::Identified,
+            Some(shaped(1.0, 0.0, DONOR_ISO)),
+        );
         let with_decoy = DonorShapes::from_rows(donors.iter().chain([&decoy]), &maps);
         assert_eq!(with_decoy.features(&pseudo, &maps), f);
     }
@@ -2816,7 +2863,10 @@ mod finalize_tests {
         );
         let x = transfer_features(&r, &DonorShapes::default(), &[]).unwrap();
         r.ms2 = Some(supporting());
-        assert_eq!(transfer_features(&r, &DonorShapes::default(), &[]).unwrap(), x);
+        assert_eq!(
+            transfer_features(&r, &DonorShapes::default(), &[]).unwrap(),
+            x
+        );
         assert!(TRANSFER_FEATURES.iter().all(|f| !f.starts_with("ms2")));
     }
 

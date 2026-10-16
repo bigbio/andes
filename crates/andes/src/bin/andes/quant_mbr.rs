@@ -827,8 +827,12 @@ const NO_SHAPE: [f64; 3] = [0.0, 0.0, -1.0];
 /// aligned runs with a positive amplitude.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DonorShapes {
-    fits: HashMap<u32, Vec<(u16, f64, f64, [f64; 4])>>,
+    fits: HashMap<u32, Vec<DonorFit>>,
 }
+
+/// One identified fit of [`DonorShapes`]: run, width on the consensus scale,
+/// tailing and isotope profile.
+type DonorFit = (u16, f64, f64, [f64; 4]);
 
 /// Isotope heights clamped at 0 and scaled to sum 1; `None` when all are 0
 /// or not finite.
@@ -856,7 +860,7 @@ impl DonorShapes {
         rows: impl IntoIterator<Item = &'a ExtractRow>,
         maps: &[Option<RunMap>],
     ) -> Self {
-        let mut fits: HashMap<u32, Vec<(u16, f64, f64, [f64; 4])>> = HashMap::new();
+        let mut fits: HashMap<u32, Vec<DonorFit>> = HashMap::new();
         for r in rows {
             if (r.role, r.kind) != (Role::Identified, Hypothesis::Target) {
                 continue;
@@ -887,7 +891,7 @@ impl DonorShapes {
         let Some(e) = row.evidence.as_ref().filter(|e| e.amplitude > 0.0) else {
             return NO_SHAPE;
         };
-        let refs: Vec<&(u16, f64, f64, [f64; 4])> = self
+        let refs: Vec<&DonorFit> = self
             .fits
             .get(&row.precursor)
             .map(|v| v.iter().filter(|f| f.0 != row.run).collect())

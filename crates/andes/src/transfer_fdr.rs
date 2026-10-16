@@ -58,12 +58,15 @@ pub const TRANSFER_FEATURES: &[&str] = &[
     "log10_amplitude_snr",
     "n_donor_runs",
     "library_q",
+    "shape_log_width",
+    "shape_tailing_diff",
+    "shape_iso_cos",
 ];
 
 /// Feature names of the identified-row quality classifier: the template-fit
 /// evidence of [`TRANSFER_FEATURES`] without `n_donor_runs` and `library_q`,
 /// which are the same for an identified target and its decoys, and without
-/// the MS2 features (an identified row has its identifying scan).
+/// the donor shape comparison (an identified row is itself a donor).
 pub const IDENTIFIED_FEATURES: &[&str] = &[
     "llr",
     "rt_z",

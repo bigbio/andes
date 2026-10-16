@@ -158,6 +158,16 @@ pub struct Evidence {
     pub t0: f64,
     /// Fitted Gaussian width (standard deviation), seconds.
     pub w: f64,
+    /// Per isotope `i`, its own fitted height `A_i * pi_i` (the trace's
+    /// centred projection on `g` over `S`) at the final `(t0, w)`, whether or
+    /// not the isotope is in the final fit; 0 beyond the extracted isotopes.
+    pub iso_heights: [f64; MAX_ISOTOPES],
+    /// Asymmetry of the isotope-0 residual around the apex: over the scans
+    /// within `[t0 - 3w, t0 + 3w]`, `sum_j r_j sign(t_j - t0)` over
+    /// `sum_j A pi_0 g_j`, with `r_j` the trace minus its fitted background
+    /// and profile. Positive when the peak tails after the apex; 0 when
+    /// `A = 0`.
+    pub tailing: f64,
 }
 
 /// The RT prior of a probe, with the floors of [`fit`] applied.
@@ -1090,6 +1100,12 @@ fn features(
     }
     let mass_err_ppm = if sw > 0.0 { swe / sw } else { 0.0 };
 
+    let mut iso_heights = [0.0f64; MAX_ISOTOPES];
+    for (h, p) in iso_heights.iter_mut().zip(proj).take(traces.len()) {
+        *h = p / sgg;
+    }
+    let tailing = tailing(rt, traces[0], g, amplitude * pi[0], t0, w);
+
     Evidence {
         amplitude,
         amplitude_se,
@@ -1106,6 +1122,36 @@ fn features(
         isotopes_used: mask,
         t0,
         w,
+        iso_heights,
+        tailing,
+    }
+}
+
+/// The [`Evidence::tailing`] of trace `y` with profile `g` at `(t0, w)` and
+/// fitted isotope-0 height `h0`.
+fn tailing(rt: &[f64], y: &[f32], g: &[f64], h0: f64, t0: f64, w: f64) -> f64 {
+    if h0.is_nan() || h0 <= 0.0 || g.is_empty() {
+        return 0.0;
+    }
+    let gbar = g.iter().sum::<f64>() / g.len() as f64;
+    let b0 = mean(y) - h0 * gbar;
+    let lo = rt.partition_point(|&t| t < t0 - 3.0 * w);
+    let hi = rt.partition_point(|&t| t <= t0 + 3.0 * w);
+    let (mut num, mut den) = (0.0, 0.0);
+    for ((&t, &v), &gj) in rt[lo..hi].iter().zip(&y[lo..hi]).zip(&g[lo..hi]) {
+        let fitted = h0 * gj;
+        let r = v as f64 - b0 - fitted;
+        if t > t0 {
+            num += r;
+        } else if t < t0 {
+            num -= r;
+        }
+        den += fitted;
+    }
+    if den > 0.0 {
+        num / den
+    } else {
+        0.0
     }
 }
 
@@ -1258,6 +1304,34 @@ mod tests {
             ("w", e.w),
         ] {
             assert!(v.is_finite(), "{name} = {v} is not finite");
+        }
+    }
+
+    #[test]
+    fn isotope_heights_and_tailing_describe_the_peak_shape() {
+        let apex = 300.0;
+        let p = probe(MZ, apex, 6.0, 5.0);
+        let clean = synth_run(&[(MZ, 2, ENV, apex, 5.0, AMP)], NOISE, 1.0);
+        let e = fit(&clean, &p, 2, &ENV, &params()).unwrap();
+        // Each isotope's own height follows the envelope.
+        let sum: f64 = e.iso_heights.iter().sum();
+        for (h, &pi) in e.iso_heights.iter().zip(&ENV) {
+            assert!((h / sum - pi as f64).abs() < 0.02, "{:?}", e.iso_heights);
+        }
+        assert!(e.tailing.abs() < 0.05, "symmetric peak: {}", e.tailing);
+        // A slower second component after the apex makes the peak tail.
+        let tailed = synth_run(
+            &[(MZ, 2, ENV, apex, 5.0, AMP), (MZ, 2, ENV, apex + 9.0, 8.0, 0.35 * AMP)],
+            NOISE,
+            1.0,
+        );
+        let t = fit(&tailed, &p, 2, &ENV, &params()).unwrap();
+        assert!(t.tailing > e.tailing + 0.1, "{} vs {}", t.tailing, e.tailing);
+        // A zero amplitude has no tailing.
+        let empty = synth_run(&[], NOISE, 1.0);
+        let z = fit(&empty, &p, 2, &ENV, &params()).unwrap();
+        if z.amplitude == 0.0 {
+            assert_eq!(z.tailing, 0.0);
         }
     }
 

@@ -207,3 +207,32 @@ fn shuffle_decoys_are_refused_with_isoforms_or_chains() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("--decoy-strategy shuffle"), "{stderr}");
 }
+
+#[test]
+fn rescoring_estimates_fdr_within_each_class() {
+    let dir = tempfile::tempdir().unwrap();
+    let with_classes = search(
+        "test-fixtures/BSA.xml.gz",
+        &dir.path().join("xml.pin"),
+        &[
+            "--uniprot-variants",
+            "--uniprot-chains",
+            "--uniprot-evidence",
+            "curated",
+            "--rescore-native",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&with_classes.stderr);
+    assert!(
+        stderr.contains("Rescore: FDR within each class (targets/decoys, method, pi0): canonical"),
+        "{stderr}"
+    );
+    // One class (FASTA): the step reports nothing and changes nothing.
+    let plain = search(
+        "test-fixtures/BSA.fasta",
+        &dir.path().join("fasta.pin"),
+        &["--rescore-native"],
+    );
+    let stderr = String::from_utf8_lossy(&plain.stderr);
+    assert!(!stderr.contains("FDR within each class"), "{stderr}");
+}

@@ -1285,8 +1285,12 @@ impl<R: BufRead> MzMLReader<R> {
     /// error stops streaming and the successfully-parsed spectra so far are still
     /// delivered (mirroring the MS2-only streaming path); the error count and the
     /// first few messages are returned for reporting.
+    ///
+    /// The quantification captures ([`Self::with_run_ms1_capture`],
+    /// [`Self::with_scan_context_capture`]) work on this path too: take them
+    /// from the reader once it returns.
     pub fn read_with_ms1_chunked<F>(
-        mut self,
+        &mut self,
         chunk_size: usize,
         cap: usize,
         mut on_chunk: F,
@@ -3726,6 +3730,86 @@ mod tests {
         // Sanity: MS2 #2 (chunk-2 first) carried over MS1#a; MS2 #3 linked to MS1#b.
         assert_eq!(chunked_resolved[2].as_ref().map(|v| v.len()), Some(2)); // a has 2 peaks
         assert_eq!(chunked_resolved[3].as_ref().map(|v| v.len()), Some(1)); // b has 1 peak
+    }
+
+    #[test]
+    fn chunked_read_keeps_run_ms1_and_scan_contexts_for_quantification() {
+        // The chimeric read path streams MS1 for co-isolation; with the
+        // quantification captures on it must also keep every MS1 scan of the
+        // run and the context of every MS2, exactly as the plain iterator does.
+        let ms1 = |id: &str, rt_min: f64, mz: f64| {
+            format!(
+                r#"<spectrum index="0" id="{id}" defaultArrayLength="1">
+              <cvParam accession="MS:1000511" name="ms level" value="1"/>
+              <scanList count="1"><scan>
+                <cvParam accession="MS:1000016" name="scan start time" value="{rt_min}"
+                         unitAccession="UO:0000031" unitName="minute"/>
+              </scan></scanList>
+              <binaryDataArrayList count="2">{mzb}{intb}</binaryDataArrayList>
+            </spectrum>"#,
+                mzb = bda_plain("MS:1000514", &encode_f64_b64(&[mz])),
+                intb = bda_plain("MS:1000515", &encode_f64_b64(&[7.0])),
+            )
+        };
+        let ms2 = |id: &str, mz: f64| {
+            ms2_spectrum_xml(
+                id,
+                &bda_plain("MS:1000514", &encode_f64_b64(&[mz])),
+                &bda_plain("MS:1000515", &encode_f64_b64(&[1.0])),
+                mz + 50.0,
+                Some(2),
+            )
+        };
+        let xml = wrap_spectra(&format!(
+            "{}{}{}{}{}{}",
+            ms1("scan=1", 1.0, 400.0),
+            ms2("scan=2", 300.0),
+            ms2("scan=3", 310.0),
+            ms1("scan=4", 1.5, 401.0),
+            ms2("scan=5", 320.0),
+            ms1("scan=6", 2.0, 402.0),
+        ));
+        let mut reader = MzMLReader::new(Cursor::new(xml.clone()))
+            .with_run_ms1_capture(true)
+            .with_scan_context_capture(true);
+        let mut linked: Vec<Option<Vec<(f64, f32)>>> = Vec::new();
+        let mut n_ms2 = 0usize;
+        let (errc, _) = reader.read_with_ms1_chunked(2, usize::MAX, |chunk, link| {
+            n_ms2 += chunk.len();
+            for i in 0..chunk.len() {
+                linked.push(link.ms2_to_ms1[i].map(|j| link.ms1_peaks[j].clone()));
+            }
+        });
+        assert_eq!(errc, 0);
+        assert_eq!(n_ms2, 3, "only MS2 is emitted");
+        // The co-isolation link is unchanged by the run capture.
+        assert_eq!(
+            linked,
+            vec![
+                Some(vec![(400.0, 7.0)]),
+                Some(vec![(400.0, 7.0)]),
+                Some(vec![(401.0, 7.0)])
+            ]
+        );
+        let run = reader.take_run_ms1();
+        assert_eq!(
+            run.iter().map(|s| (s.id.as_str(), s.rt)).collect::<Vec<_>>(),
+            vec![("scan=1", 60.0), ("scan=4", 90.0), ("scan=6", 120.0)],
+            "every MS1 of the run, the trailing one included"
+        );
+        assert_eq!(run[2].peaks, vec![(402.0, 7.0)]);
+        let contexts = reader.take_scan_contexts();
+        assert_eq!(
+            contexts.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec!["scan=2", "scan=3", "scan=5"]
+        );
+        // The same captures as the plain iterator.
+        let mut plain = MzMLReader::new(Cursor::new(xml))
+            .with_run_ms1_capture(true)
+            .with_scan_context_capture(true);
+        assert_eq!(plain.by_ref().count(), 3);
+        assert_eq!(plain.take_run_ms1(), run);
+        assert_eq!(plain.take_scan_contexts(), contexts);
     }
 
     #[test]

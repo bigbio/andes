@@ -11,7 +11,12 @@
 //! decoys; a schema-1 table has none, so it is rejected. Schema 3 added the
 //! MS2 evidence of the transfer and pseudo-transfer rows (`ms2_n_scans`,
 //! `ms2_n_matched`, `ms2_angle`, `ms2_explained`; null for identified rows
-//! and rows without a fit); a schema-2 table is rejected.
+//! and rows without a fit); a schema-2 table is rejected. Schema 4 added
+//! the per-isotope heights `iso_h0`..`iso_h3` and `tailing` of the fit, and
+//! the transfer evidence of the transfer and pseudo-transfer rows: the
+//! charge-state partner (`partner_llr`, `partner_dt`, `coel_llr`,
+//! `coel_dt`; null without a fit) and the local RT prior (`local_t_hat`,
+//! `local_s`; null without one); a schema-3 table is rejected.
 //! The evidence columns are null when the fit was not possible.
 //! `n_donor_runs` counts the aligned runs with a PSM of the precursor, this
 //! run included for an identified row and excluded otherwise: the runs that
@@ -37,12 +42,13 @@ use parquet::format::KeyValue;
 use quant::decoys::Hypothesis;
 use quant::evidence::Evidence;
 use quant::ms2::{Ms2Evidence, ScanMatch};
+use quant::transfer_evidence::{LocalPrior, PartnerEvidence};
 
 /// Major version of the table layout. A reader rejects any other major.
-pub const EXTRACT_SCHEMA_MAJOR: u32 = 3;
+pub const EXTRACT_SCHEMA_MAJOR: u32 = 4;
 
 const SCHEMA_KEY: &str = "andes.extract.schema";
-const SCHEMA_VERSION: &str = "3.0";
+const SCHEMA_VERSION: &str = "4.0";
 /// Rows per Parquet row group / record batch.
 const BATCH_ROWS: usize = 65_536;
 
@@ -76,9 +82,15 @@ pub struct ExtractRow {
     /// The MS2 evidence of a transfer or pseudo-transfer row with a fit;
     /// `None` otherwise.
     pub ms2: Option<Ms2Evidence>,
+    /// The charge-state partner evidence of a transfer or pseudo-transfer
+    /// row with a fit; `None` otherwise.
+    pub partner: Option<PartnerEvidence>,
+    /// The local RT prior of a transfer or pseudo-transfer row, when the run
+    /// has one; `None` otherwise.
+    pub local_prior: Option<LocalPrior>,
 }
 
-const F64_EVIDENCE: [&str; 13] = [
+const F64_EVIDENCE: [&str; 18] = [
     "amplitude",
     "amplitude_se",
     "quantity",
@@ -92,9 +104,14 @@ const F64_EVIDENCE: [&str; 13] = [
     "mass_err_ppm",
     "t0",
     "w",
+    "iso_h0",
+    "iso_h1",
+    "iso_h2",
+    "iso_h3",
+    "tailing",
 ];
 
-fn f64_fields(e: &Evidence) -> [f64; 13] {
+fn f64_fields(e: &Evidence) -> [f64; 18] {
     [
         e.amplitude,
         e.amplitude_se,
@@ -109,6 +126,11 @@ fn f64_fields(e: &Evidence) -> [f64; 13] {
         e.mass_err_ppm,
         e.t0,
         e.w,
+        e.iso_heights[0],
+        e.iso_heights[1],
+        e.iso_heights[2],
+        e.iso_heights[3],
+        e.tailing,
     ]
 }
 
@@ -116,7 +138,24 @@ fn f64_fields(e: &Evidence) -> [f64; 13] {
 const N_KEY_COLUMNS: usize = 7;
 /// The MS2 evidence columns, after the fit evidence.
 const MS2_COLUMNS: [&str; 4] = ["ms2_n_scans", "ms2_n_matched", "ms2_angle", "ms2_explained"];
-const N_COLUMNS: usize = N_KEY_COLUMNS + F64_EVIDENCE.len() + 2 + MS2_COLUMNS.len();
+/// The transfer evidence columns, after the MS2 evidence.
+const TRANSFER_COLUMNS: [&str; 6] = [
+    "partner_llr",
+    "partner_dt",
+    "coel_llr",
+    "coel_dt",
+    "local_t_hat",
+    "local_s",
+];
+const N_COLUMNS: usize =
+    N_KEY_COLUMNS + F64_EVIDENCE.len() + 2 + MS2_COLUMNS.len() + TRANSFER_COLUMNS.len();
+
+fn partner_fields(p: Option<PartnerEvidence>) -> [Option<f64>; 4] {
+    match p {
+        Some(p) => [Some(p.llr), Some(p.dt), Some(p.coel_llr), Some(p.coel_dt)],
+        None => [None; 4],
+    }
+}
 
 fn schema() -> Schema {
     let mut fields = vec![
@@ -139,6 +178,11 @@ fn schema() -> Schema {
     fields.push(Field::new(MS2_COLUMNS[1], DataType::UInt8, true));
     fields.push(Field::new(MS2_COLUMNS[2], DataType::Float32, true));
     fields.push(Field::new(MS2_COLUMNS[3], DataType::Float32, true));
+    fields.extend(
+        TRANSFER_COLUMNS
+            .iter()
+            .map(|n| Field::new(*n, DataType::Float64, true)),
+    );
     Schema::new(fields)
 }
 
@@ -194,7 +238,18 @@ fn batch(schema: &Arc<Schema>, rows: &[ExtractRow]) -> Result<RecordBatch, Strin
     let mut ms2_matched = UInt8Builder::new();
     let mut ms2_angle = Float32Builder::new();
     let mut ms2_explained = Float32Builder::new();
+    let mut te: Vec<Float64Builder> = TRANSFER_COLUMNS
+        .iter()
+        .map(|_| Float64Builder::new())
+        .collect();
     for r in rows {
+        let local = r.local_prior.map(|l| [Some(l.t_hat), Some(l.s)]);
+        for (b, v) in te
+            .iter_mut()
+            .zip(partner_fields(r.partner).into_iter().chain(local.unwrap_or([None; 2])))
+        {
+            b.append_option(v);
+        }
         ms2_scans.append_option(r.ms2.map(|m| m.n_scans));
         ms2_matched.append_option(r.ms2.map(|m| m.best.n_matched));
         ms2_angle.append_option(r.ms2.map(|m| m.best.angle));
@@ -240,6 +295,7 @@ fn batch(schema: &Arc<Schema>, rows: &[ExtractRow]) -> Result<RecordBatch, Strin
     cols.push(Arc::new(ms2_matched.finish()));
     cols.push(Arc::new(ms2_angle.finish()));
     cols.push(Arc::new(ms2_explained.finish()));
+    cols.extend(te.iter_mut().map(|b| Arc::new(b.finish()) as ArrayRef));
     RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
 }
 
@@ -410,6 +466,9 @@ pub fn read_extract_table(path: &Path) -> Result<Vec<ExtractRow>, String> {
         let ms2_matched = column::<UInt8Array>(&b, after + 3, path)?;
         let ms2_angle = column::<Float32Array>(&b, after + 4, path)?;
         let ms2_explained = column::<Float32Array>(&b, after + 5, path)?;
+        let te: Vec<&Float64Array> = (0..TRANSFER_COLUMNS.len())
+            .map(|k| column::<Float64Array>(&b, after + 6 + k, path))
+            .collect::<Result<_, _>>()?;
         for i in 0..b.num_rows() {
             let kind = decode_kind(kind.value(i), shift.value(i)).ok_or_else(|| {
                 err(&format!(
@@ -440,6 +499,8 @@ pub fn read_extract_table(path: &Path) -> Result<Vec<ExtractRow>, String> {
                     isotopes_used: isotopes.value(i),
                     t0: v(11),
                     w: v(12),
+                    iso_heights: [v(13), v(14), v(15), v(16)],
+                    tailing: v(17),
                 })
             };
             let ms2 = if ms2_scans.is_null(i) {
@@ -457,6 +518,22 @@ pub fn read_extract_table(path: &Path) -> Result<Vec<ExtractRow>, String> {
                     },
                 })
             };
+            let opt = |k: usize| (!te[k].is_null(i)).then(|| te[k].value(i));
+            let partner = match (opt(0), opt(1), opt(2), opt(3)) {
+                (Some(llr), Some(dt), Some(coel_llr), Some(coel_dt)) => Some(PartnerEvidence {
+                    llr,
+                    dt,
+                    coel_llr,
+                    coel_dt,
+                }),
+                (None, None, None, None) => None,
+                _ => return Err(err(&"corrupt row: partial partner evidence")),
+            };
+            let local_prior = match (opt(4), opt(5)) {
+                (Some(t_hat), Some(s)) => Some(LocalPrior { t_hat, s }),
+                (None, None) => None,
+                _ => return Err(err(&"corrupt row: partial local RT prior")),
+            };
             rows.push(ExtractRow {
                 precursor: precursor.value(i),
                 run: run.value(i),
@@ -466,6 +543,8 @@ pub fn read_extract_table(path: &Path) -> Result<Vec<ExtractRow>, String> {
                 n_donor_runs: donors.value(i),
                 library_q: library_q.value(i),
                 ms2,
+                partner,
+                local_prior,
             });
         }
     }
@@ -494,6 +573,8 @@ mod tests {
             isotopes_used: 0b0111,
             t0: 1234.5,
             w: 4.2,
+            iso_heights: [5.0 + f, 3.0, 1.0, -0.5],
+            tailing: 0.1 * f,
         }
     }
 
@@ -526,6 +607,16 @@ mod tests {
                         explained: 0.5,
                     },
                 }),
+                partner: (i % 2 == 1).then_some(PartnerEvidence {
+                    llr: 12.0 + i as f64,
+                    dt: -1.5,
+                    coel_llr: 9.0,
+                    coel_dt: 0.25,
+                }),
+                local_prior: (i % 3 == 2).then_some(LocalPrior {
+                    t_hat: 1200.0 + i as f64,
+                    s: 3.5,
+                }),
             })
             .collect()
     }
@@ -547,7 +638,7 @@ mod tests {
     fn extract_table_rejects_unknown_major_version() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("b.extract.parquet");
-        for version in ["4.0", "2.0"] {
+        for version in ["5.0", "3.0"] {
             write_with_schema_version(&p, &rows(), version).unwrap();
             let e = read_extract_table(&p).unwrap_err();
             assert!(

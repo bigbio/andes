@@ -315,6 +315,14 @@ impl Alignment {
         Some(self.transfer(map, run, e.t, e.var, e.tau))
     }
 
+    /// The residual width `sigma_run` of an aligned `run` at run RT `rt`
+    /// (carried to the consensus scale by the run's map); `None` for an
+    /// unaligned run.
+    pub fn residual_sd_at(&self, run: u16, rt: f64) -> Option<f64> {
+        let map = self.maps.get(run as usize)?.as_ref()?;
+        Some(self.sigma_at(run, map.invert(rt)))
+    }
+
     /// Alignment component of `run`; `None` for an unaligned run or a run
     /// outside the alignment.
     pub fn component(&self, run: u16) -> Option<u32> {

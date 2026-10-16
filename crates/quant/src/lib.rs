@@ -38,6 +38,7 @@ pub mod nnls;
 pub mod normalize;
 pub mod purity;
 pub mod tdc;
+pub mod transfer_evidence;
 pub mod xic;
 
 pub use isobaric::{extract_reporters, Channel, CorrectionMatrix, Plex};

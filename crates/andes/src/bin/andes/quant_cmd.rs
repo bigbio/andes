@@ -727,6 +727,29 @@ fn log_extract(stem: &str, rows: usize, c: &ExtractCounts) {
             ""
         }
     );
+    let d = &c.local_diag;
+    if !d.is_empty() {
+        let med = |k: usize| {
+            let mut v: Vec<f64> = d.iter().map(|x| x[k]).collect();
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        let within = |e: usize, s: usize| {
+            d.iter().filter(|x| x[e] <= x[s]).count() as f64 / d.len() as f64
+        };
+        eprintln!(
+            "[mbr] extract {stem}: local RT ({} reference precursors): {} pseudo-transfers, median |PSM RT - t_hat| {:.2} s -> {:.2} s, median s {:.2} s -> {:.2} s, within s {:.3} -> {:.3}",
+            c.local_points,
+            d.len(),
+            med(0),
+            med(1),
+            med(2),
+            med(3),
+            within(0, 2),
+            within(1, 3)
+        );
+    }
+    eprintln!("[mbr] extract {stem}: partner fits {:.1} s", c.partner_secs);
 }
 
 fn log_ms2(stem: &str, c: &Ms2Counts, secs: f64) {

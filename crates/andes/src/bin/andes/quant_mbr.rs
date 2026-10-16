@@ -90,6 +90,9 @@ use quant::library::{Library, LibraryEntry};
 use quant::ms1_index::Ms1RunIndex;
 use quant::ms2::{elution_window, LibrarySpectrum, Ms2RunIndex};
 use quant::normalize::{fit as fit_normalization, NormCell, NormParams, RunNormalization};
+use quant::transfer_evidence::{
+    anchored_prior, partner_mzs, LocalPrior, LocalRt, PartnerEvidence,
+};
 use rayon::prelude::*;
 
 use crate::transfer_fdr::{
@@ -136,6 +139,40 @@ pub(crate) struct ExtractCounts {
     pub width_fits: usize,
     /// Fewer than the needed identified fits: the width prior is the default.
     pub width_prior_fallback: bool,
+    /// Per pseudo-transfer with a local prior: `|rt - t_hat|`,
+    /// `|rt - t_hat_local|`, `s`, `s_local`, with `rt` its best PSM's RT.
+    pub local_diag: Vec<[f64; 4]>,
+    /// Identified precursors the run's local RT correction uses.
+    pub local_points: usize,
+    /// Seconds spent on the charge-state partner fits.
+    pub partner_secs: f64,
+}
+
+/// Transfer-evidence settings of the extract stage.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct TransferEvidenceParams {
+    /// Fit the charge-state partners of transfer and pseudo-transfer rows.
+    pub partner: bool,
+    /// Neighbours of the local RT correction (0: none).
+    pub local_k: usize,
+    /// Use the local RT prior for the transfer probes (otherwise it is only
+    /// recorded).
+    pub local_prior: bool,
+}
+
+impl TransferEvidenceParams {
+    /// From the environment: `ANDES_PARTNER` (`0` off, default on),
+    /// `ANDES_LOCAL_K` (default 40) and `ANDES_LOCAL_RT` (`prior` to use it).
+    pub(crate) fn from_env() -> Self {
+        let var = |k: &str| std::env::var(k).ok();
+        Self {
+            partner: var("ANDES_PARTNER").as_deref() != Some("0"),
+            local_k: var("ANDES_LOCAL_K")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(40),
+            local_prior: var("ANDES_LOCAL_RT").as_deref() == Some("prior"),
+        }
+    }
 }
 
 impl ExtractCounts {
@@ -146,6 +183,7 @@ impl ExtractCounts {
         self.no_prediction += o.no_prediction;
         self.pseudo_other_component += o.pseudo_other_component;
         self.other_component += o.other_component;
+        self.local_diag.extend_from_slice(&o.local_diag);
     }
 }
 
@@ -401,12 +439,25 @@ fn rows_into<F>(
     ep: &EvidenceParams,
     series: &[&Ms1RunIndex],
     series_of: F,
-) where
+    local: Option<(&LocalRt, bool)>,
+    partner: bool,
+) -> f64
+where
     F: Fn(usize) -> usize + Sync,
 {
     let planned: Vec<(Vec<(ExtractRow, Probe)>, ExtractCounts)> = ids
         .par_iter()
-        .map(|&i| entry_rows(&lib.entries[i], run, aligned, lib, series[series_of(i)], wp))
+        .map(|&i| {
+            entry_rows(
+                &lib.entries[i],
+                run,
+                aligned,
+                lib,
+                series[series_of(i)],
+                wp,
+                local,
+            )
+        })
         .collect();
     let mut jobs = Vec::new();
     for (&i, (rows, _)) in ids.iter().zip(&planned) {
@@ -422,15 +473,99 @@ fn rows_into<F>(
         }
     }
     let mut evidence = fit_on_series(series, &jobs, ep).into_iter();
+    let mut planned: Vec<(Vec<(ExtractRow, Probe)>, ExtractCounts)> = planned
+        .into_iter()
+        .map(|(rows, counts)| {
+            let rows = rows
+                .into_iter()
+                .map(|(mut row, probe)| {
+                    row.evidence = evidence.next().flatten();
+                    (row, probe)
+                })
+                .collect();
+            (rows, counts)
+        })
+        .collect();
+    let started = std::time::Instant::now();
+    if partner {
+        attach_partners(&mut planned, ids, lib, ep, series, &series_of);
+    }
     for (&i, (rows, counts)) in ids.iter().zip(planned) {
-        let rows = rows
-            .into_iter()
-            .map(|(mut row, _)| {
-                row.evidence = evidence.next().flatten();
-                row
-            })
-            .collect();
-        slots[i] = Some((rows, counts));
+        slots[i] = Some((rows.into_iter().map(|(row, _)| row).collect(), counts));
+    }
+    started.elapsed().as_secs_f64()
+}
+
+/// Sets the charge-state partner evidence
+/// ([`quant::transfer_evidence`]) of every transfer and pseudo-transfer row
+/// with a fit: partners at the probe's own m/z (a decoy's shifted mass) and
+/// charge `z - 1` and `z + 1`, fitted once with the probe's prior and once
+/// anchored on its fitted apex.
+fn attach_partners<F>(
+    planned: &mut [(Vec<(ExtractRow, Probe)>, ExtractCounts)],
+    ids: &[usize],
+    lib: &Library,
+    ep: &EvidenceParams,
+    series: &[&Ms1RunIndex],
+    series_of: &F,
+) where
+    F: Fn(usize) -> usize,
+{
+    // Per job: (entry slot, row, anchored).
+    let mut owner: Vec<(usize, usize, bool)> = Vec::new();
+    let mut jobs: Vec<(usize, FitJob)> = Vec::new();
+    for (slot, (&i, (rows, _))) in ids.iter().zip(planned.iter()).enumerate() {
+        let meta = &lib.meta[lib.entries[i].precursor as usize];
+        for (k, (row, probe)) in rows.iter().enumerate() {
+            if row.role == Role::Identified {
+                continue;
+            }
+            let Some(e) = &row.evidence else { continue };
+            let (a_t, a_s, a_w) = anchored_prior(e);
+            for (charge, mz) in partner_mzs(probe.mz, meta.charge.max(1)) {
+                for anchored in [false, true] {
+                    let p = if anchored {
+                        Probe {
+                            mz,
+                            t_hat: a_t,
+                            s: a_s,
+                            w_prior: a_w,
+                            ..*probe
+                        }
+                    } else {
+                        Probe { mz, ..*probe }
+                    };
+                    owner.push((slot, k, anchored));
+                    jobs.push((
+                        series_of(i),
+                        FitJob {
+                            probe: p,
+                            charge,
+                            envelope: &meta.envelope,
+                            widths: &WIDTH_GRID,
+                        },
+                    ));
+                }
+            }
+        }
+    }
+    let fits = fit_on_series(series, &jobs, ep);
+    // Group per row: (same-prior fits, anchored fits).
+    let mut grouped: HashMap<(usize, usize), (Vec<Option<Evidence>>, Vec<Option<Evidence>>)> =
+        HashMap::new();
+    for ((slot, k, anchored), fit) in owner.into_iter().zip(fits) {
+        let g = grouped.entry((slot, k)).or_default();
+        if anchored {
+            g.1.push(fit);
+        } else {
+            g.0.push(fit);
+        }
+    }
+    for ((slot, k), (same, anchored)) in grouped {
+        let row = &mut planned[slot].0[k].0;
+        if let Some(e) = &row.evidence {
+            row.partner = Some(PartnerEvidence::from_fits(e, &same, &anchored));
+        }
     }
 }
 
@@ -443,6 +578,7 @@ fn entry_rows(
     lib: &Library,
     ms1: &Ms1RunIndex,
     wp: &WidthPrior,
+    local: Option<(&LocalRt, bool)>,
 ) -> (Vec<(ExtractRow, Probe)>, ExtractCounts) {
     let mut counts = ExtractCounts::default();
     let mut rows = Vec::new();
@@ -466,8 +602,32 @@ fn entry_rows(
             n_donor_runs,
             library_q: e.q,
             ms2: None,
+            partner: None,
+            local_prior: None,
         };
         (row, *probe)
+    };
+    // The local correction of a prediction `(t_hat, s)`: `(delta, s_local)`.
+    let correct = |t_hat: f64, s: f64| {
+        let (l, _) = local?;
+        let sigma = lib.alignment.residual_sd_at(run, t_hat)?;
+        l.correct(e.precursor, t_hat, s, sigma)
+            .map(|c| (c.t_hat - t_hat, c.s))
+    };
+    let use_local = local.is_some_and(|(_, prior)| prior);
+    // The probe prior and the recorded local prior of a row whose probe is
+    // centred on `t` with uncertainty `s`.
+    let with_local = |row: &mut ExtractRow, t: f64, s: f64, c: Option<(f64, f64)>| {
+        row.local_prior = c.map(|(delta, s_l)| {
+            if use_local {
+                LocalPrior { t_hat: t, s }
+            } else {
+                LocalPrior {
+                    t_hat: t + delta,
+                    s: s_l,
+                }
+            }
+        });
     };
     let target = |t_hat: f64, s: f64, w_prior: f64| Probe {
         kind: Hypothesis::Target,
@@ -490,13 +650,25 @@ fn entry_rows(
             }
             match lib.alignment.predict_excluding(e.precursor, run) {
                 Some((t_hat, s)) => {
-                    let probe = target(t_hat, s, wp.at(t_hat));
-                    rows.push(row(
+                    let c = correct(t_hat, s);
+                    let (t_p, s_p) = match c {
+                        Some((delta, s_l)) if use_local => (t_hat + delta, s_l),
+                        _ => (t_hat, s),
+                    };
+                    if let Some((delta, s_l)) = c {
+                        counts
+                            .local_diag
+                            .push([(rt - t_hat).abs(), (rt - t_hat - delta).abs(), s, s_l]);
+                    }
+                    let probe = target(t_p, s_p, wp.at(t_p));
+                    let mut r = row(
                         Hypothesis::Target,
                         Role::PseudoTransfer,
                         &probe,
                         other_donors,
-                    ));
+                    );
+                    with_local(&mut r.0, probe.t_hat, probe.s, c);
+                    rows.push(r);
                 }
                 None if lib
                     .alignment
@@ -510,17 +682,24 @@ fn entry_rows(
         None if !run_aligned => {}
         None => match lib.alignment.predict(e.precursor, run) {
             Some((t_hat, s)) => {
+                let c = correct(t_hat, s);
+                let (t_p, s_p) = match c {
+                    Some((delta, s_l)) if use_local => (t_hat + delta, s_l),
+                    _ => (t_hat, s),
+                };
                 for probe in probes(
                     e.precursor,
                     run,
                     meta.mz,
                     charge,
-                    t_hat,
-                    s,
-                    wp.at(t_hat),
+                    t_p,
+                    s_p,
+                    wp.at(t_p),
                     run_rt(),
                 ) {
-                    rows.push(row(probe.kind, Role::Transfer, &probe, other_donors));
+                    let mut r = row(probe.kind, Role::Transfer, &probe, other_donors);
+                    with_local(&mut r.0, probe.t_hat, probe.s, c);
+                    rows.push(r);
                 }
             }
             None if lib.alignment.blocked_by_component(e.precursor, run, None) => {
@@ -542,6 +721,36 @@ pub(crate) fn extract_run(
     ms1_table: &Path,
     lib: &Library,
     ep: &EvidenceParams,
+) -> Result<RunExtract, String> {
+    extract_run_with(run, ms1_table, lib, ep, &TransferEvidenceParams::from_env())
+}
+
+/// The local RT correction of `run` from its identified precursors
+/// ([`quant::transfer_evidence::LocalRt`]); `None` for an unaligned run or
+/// `k = 0`.
+fn local_rt(lib: &Library, run: u16, k: usize) -> Option<LocalRt> {
+    if k == 0 || !lib.alignment.maps.get(run as usize).is_some_and(|m| m.is_some()) {
+        return None;
+    }
+    let points: Vec<(u32, f64, f64)> = lib
+        .entries
+        .par_iter()
+        .filter_map(|e| {
+            let rt = identified_rt(e, run)?;
+            let (t, _) = lib.alignment.predict_excluding(e.precursor, run)?;
+            Some((e.precursor, rt, t))
+        })
+        .collect();
+    Some(LocalRt::new(points, k))
+}
+
+/// [`extract_run`] with explicit transfer-evidence settings.
+pub(crate) fn extract_run_with(
+    run: u16,
+    ms1_table: &Path,
+    lib: &Library,
+    ep: &EvidenceParams,
+    te: &TransferEvidenceParams,
 ) -> Result<RunExtract, String> {
     let maps = &lib.alignment.maps;
     let Some(map) = maps.get(run as usize) else {
@@ -577,10 +786,16 @@ pub(crate) fn extract_run(
         .collect();
     let foreign = groups.iter().filter(|&&g| g == Group::Foreign).count();
     let mut slots: Vec<Option<EntryRows>> = (0..n).map(|_| None).collect();
-    let finish = |slots, width_fits: usize, wp: &WidthPrior| {
+    let local = local_rt(lib, run, te.local_k);
+    let local_points = local.as_ref().map_or(0, |l| l.len());
+    let local_arg = local.as_ref().map(|l| (l, te.local_prior));
+    let mut partner_secs = 0.0;
+    let finish = |slots, width_fits: usize, wp: &WidthPrior, partner_secs: f64| {
         let mut out = assemble(slots, width_fits, wp.is_default());
         out.counts.unaligned = !aligned;
         out.counts.foreign_cv = foreign;
+        out.counts.local_points = local_points;
+        out.counts.partner_secs = partner_secs;
         out
     };
 
@@ -589,7 +804,7 @@ pub(crate) fn extract_run(
     if cv_ids.is_empty() {
         width_fit_count = fits.len();
         let wp = WidthPrior::from_fits(fits);
-        rows_into(
+        partner_secs += rows_into(
             &mut slots,
             &whole_ids,
             run,
@@ -599,10 +814,12 @@ pub(crate) fn extract_run(
             ep,
             &[&ms1],
             |_| 0,
+            local_arg,
+            te.partner,
         );
         drop(ms1);
         drop(held);
-        return Ok(finish(slots, width_fit_count, &wp));
+        return Ok(finish(slots, width_fit_count, &wp, partner_secs));
     }
 
     drop(held);
@@ -616,8 +833,9 @@ pub(crate) fn extract_run(
     fits.extend(width_fits(&cv_ids, run, lib, ep, &series, series_of));
     width_fit_count = fits.len();
     let wp = WidthPrior::from_fits(fits);
-    rows_into(
-        &mut slots, &cv_ids, run, aligned, lib, &wp, ep, &series, series_of,
+    partner_secs += rows_into(
+        &mut slots, &cv_ids, run, aligned, lib, &wp, ep, &series, series_of, local_arg,
+        te.partner,
     );
     drop(series);
     drop(split);
@@ -626,7 +844,7 @@ pub(crate) fn extract_run(
     if !whole_ids.is_empty() {
         let ms1 = load()?;
         let _held = Held::new();
-        rows_into(
+        partner_secs += rows_into(
             &mut slots,
             &whole_ids,
             run,
@@ -636,9 +854,11 @@ pub(crate) fn extract_run(
             ep,
             &[&ms1],
             |_| 0,
+            local_arg,
+            te.partner,
         );
     }
-    Ok(finish(slots, width_fit_count, &wp))
+    Ok(finish(slots, width_fit_count, &wp, partner_secs))
 }
 
 /// MS2 evidence of one run's transfer and pseudo-transfer rows, by role and
@@ -814,6 +1034,132 @@ fn run_normalization(
     fit_normalization(&cells, n_runs, &NormParams::default())
 }
 
+/// The transfer-evidence features [`extra_features`] appends, by group:
+/// `partner`, `coel`, `localz`, `shape`.
+pub(crate) fn extra_feature_names(groups: &[String]) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for g in groups {
+        out.extend_from_slice(match g.as_str() {
+            "partner" => &["partner_llr", "partner_abs_dt_w"][..],
+            "coel" => &["coel_llr", "coel_abs_dt_w"][..],
+            "localz" => &["local_rt_z", "abs_local_rt_z"][..],
+            "shape" => &["shape_log_width", "shape_tailing_diff", "shape_iso_cos"][..],
+            _ => &[][..],
+        });
+    }
+    out
+}
+
+/// The feature groups of `ANDES_TE_FEATURES` (comma separated).
+pub(crate) fn extra_feature_groups() -> Vec<String> {
+    std::env::var("ANDES_TE_FEATURES")
+        .unwrap_or_default()
+        .split(',')
+        .map(|g| g.trim().to_string())
+        .filter(|g| matches!(g.as_str(), "partner" | "coel" | "localz" | "shape"))
+        .collect()
+}
+
+/// One identified fit of a precursor, the donor reference of the shape
+/// features: run, width on the consensus scale, tailing and normalised
+/// isotope heights.
+type ShapeRef = (u16, f64, f64, [f64; 4]);
+
+/// Isotope heights clamped at 0 and scaled to sum 1 (`None` when all are 0).
+fn iso_profile(h: &[f64; 4]) -> Option<[f64; 4]> {
+    let c = h.map(|v| if v.is_finite() { v.max(0.0) } else { 0.0 });
+    let sum: f64 = c.iter().sum();
+    (sum > 0.0).then(|| c.map(|v| v / sum))
+}
+
+/// Per precursor, the identified target fits of aligned runs with a positive
+/// amplitude, as [`ShapeRef`]s.
+fn shape_refs<'a>(
+    rows: impl IntoIterator<Item = &'a ExtractRow>,
+    maps: &[Option<RunMap>],
+) -> HashMap<u32, Vec<ShapeRef>> {
+    let mut out: HashMap<u32, Vec<ShapeRef>> = HashMap::new();
+    for r in rows {
+        if (r.role, r.kind) != (Role::Identified, Hypothesis::Target) {
+            continue;
+        }
+        let Some(e) = &r.evidence else { continue };
+        if !(e.amplitude > 0.0 && e.w.is_finite() && e.w > 0.0) {
+            continue;
+        }
+        let (Some(slope), Some(iso)) = (local_slope(maps, r.run, e.t0), iso_profile(&e.iso_heights))
+        else {
+            continue;
+        };
+        out.entry(r.precursor)
+            .or_default()
+            .push((r.run, e.w / slope, e.tailing, iso));
+    }
+    out
+}
+
+/// The transfer-evidence features of `groups` for a transfer or
+/// pseudo-transfer row (target or decoy); `None` without evidence. The shape
+/// reference of a row leaves out its own run's identified fit.
+pub(crate) fn extra_features(
+    row: &ExtractRow,
+    groups: &[String],
+    refs: &HashMap<u32, Vec<ShapeRef>>,
+    maps: &[Option<RunMap>],
+) -> Option<Vec<f32>> {
+    let e = row.evidence.as_ref()?;
+    let w = e.w.max(1e-3);
+    let mut x: Vec<f64> = Vec::new();
+    for g in groups {
+        match g.as_str() {
+            "partner" => {
+                let (llr, dt) = row.partner.map_or((0.0, 10.0 * w), |p| (p.llr, p.dt));
+                x.extend([llr, (dt.abs() / w).min(10.0)]);
+            }
+            "coel" => {
+                let (llr, dt) = row
+                    .partner
+                    .map_or((0.0, 10.0 * w), |p| (p.coel_llr, p.coel_dt));
+                x.extend([llr, (dt.abs() / w).min(10.0)]);
+            }
+            "localz" => {
+                let z = row
+                    .local_prior
+                    .map_or(e.rt_z, |l| (e.t0 - l.t_hat) / l.s.max(1e-3));
+                x.extend([z, z.abs()]);
+            }
+            "shape" => {
+                let others: Vec<&ShapeRef> = refs
+                    .get(&row.precursor)
+                    .map(|v| v.iter().filter(|r| r.0 != row.run).collect())
+                    .unwrap_or_default();
+                let mine = local_slope(maps, row.run, e.t0)
+                    .zip(iso_profile(&e.iso_heights))
+                    .filter(|_| e.amplitude > 0.0);
+                match mine {
+                    Some((slope, iso)) if !others.is_empty() => {
+                        let w_ref = median(others.iter().map(|r| r.1).collect());
+                        let t_ref = median(others.iter().map(|r| r.2).collect());
+                        let mut iso_ref = [0.0; 4];
+                        for (i, v) in iso_ref.iter_mut().enumerate() {
+                            *v = median(others.iter().map(|r| r.3[i]).collect());
+                        }
+                        let dot: f64 = iso.iter().zip(&iso_ref).map(|(a, b)| a * b).sum();
+                        let na = iso.iter().map(|a| a * a).sum::<f64>().sqrt();
+                        let nb = iso_ref.iter().map(|a| a * a).sum::<f64>().sqrt();
+                        let cos = if na > 0.0 && nb > 0.0 { dot / (na * nb) } else { -1.0 };
+                        x.extend([((e.w / slope) / w_ref).ln(), e.tailing - t_ref, cos]);
+                    }
+                    _ => x.extend([0.0, 0.0, -1.0]),
+                }
+            }
+            _ => {}
+        }
+    }
+    let x: Vec<f32> = x.iter().map(|&v| v as f32).collect();
+    x.iter().all(|v| v.is_finite()).then_some(x)
+}
+
 /// Floor of `amplitude_se` in the amplitude signal-to-noise feature.
 const MIN_AMPLITUDE_SE: f64 = 1e-12;
 
@@ -975,6 +1321,13 @@ pub(crate) fn finalize(
     // Per row: the index of its FdrRow among `fdr_rows` (transfer targets and
     // decoys) or `id_rows` (identified targets and decoys).
     let mut fdr_index: Vec<Option<usize>> = vec![None; rows.len()];
+    let groups = extra_feature_groups();
+    let refs = shape_refs(rows.iter().copied(), &lib.alignment.maps);
+    let tf = |r: &ExtractRow| {
+        let mut x = transfer_features(r)?;
+        x.extend(extra_features(r, &groups, &refs, &lib.alignment.maps)?);
+        Some(x)
+    };
     let mut identified: HashMap<(u32, u16), &Evidence> = HashMap::new();
     for (i, r) in rows.iter().enumerate() {
         if let (Role::Identified, Hypothesis::Target, Some(e)) = (r.role, r.kind, &r.evidence) {
@@ -993,7 +1346,7 @@ pub(crate) fn finalize(
                 &mut summary.identified_no_features,
             ),
             Role::Transfer => (
-                transfer_features(r),
+                tf(r),
                 &mut fdr_rows,
                 &mut summary.no_features,
             ),
@@ -1095,7 +1448,7 @@ pub(crate) fn finalize(
                 (t, q, q)
             }
             Role::PseudoTransfer => {
-                let q = transfer_features(r).and_then(|x| fdr.pseudo_q(r.precursor, &x));
+                let q = tf(r).and_then(|x| fdr.pseudo_q(r.precursor, &x));
                 v.pseudo_transfers += 1;
                 if let Some(m) = &r.ms2 {
                     v.ms2_pseudo_rows += 1;
@@ -1167,8 +1520,33 @@ pub(crate) fn finalize(
 
     eprintln!(
         "[mbr] transfer FDR (internal quant-quality score) features: {}",
-        TRANSFER_FEATURES.join(",")
+        TRANSFER_FEATURES
+            .iter()
+            .chain(extra_feature_names(&groups).iter())
+            .copied()
+            .collect::<Vec<_>>()
+            .join(",")
     );
+    for t in thresholds {
+        let mut acc = [0usize; 3];
+        let mut all = [0usize; 3];
+        for (k, row) in fdr_rows.iter().enumerate() {
+            let f = row.family as usize;
+            all[f] += 1;
+            acc[f] += usize::from(fdr.result.q[k].is_some_and(|q| q <= t));
+        }
+        eprintln!(
+            "[mbr] at pooled q <= {t}: targets {} of {}, mass-shift decoys {} of {} ({:.5}), RT-shift decoys {} of {} ({:.5})",
+            acc[0],
+            all[0],
+            acc[1],
+            all[1],
+            acc[1] as f64 / all[1].max(1) as f64,
+            acc[2],
+            all[2],
+            acc[2] as f64 / all[2].max(1) as f64
+        );
+    }
     for f in &fdr.counts.failed_folds {
         eprintln!("[mbr] transfer FDR fold without a model: {f}");
     }
@@ -1510,7 +1888,7 @@ mod tests {
         let ms1 = Ms1RunIndex::new(run_scans(1, false, &|_| false));
         let wp = WidthPrior::from_fits(Vec::new());
         let entry = fx.lib.entries.iter().find(|e| e.precursor == 4).unwrap();
-        let (rows, _) = entry_rows(entry, 1, true, &fx.lib, &ms1, &wp);
+        let (rows, _) = entry_rows(entry, 1, true, &fx.lib, &ms1, &wp, None);
         let id: Vec<&(ExtractRow, Probe)> = rows
             .iter()
             .filter(|(r, _)| r.role == Role::Identified)
@@ -1549,6 +1927,139 @@ mod tests {
         let rt_decoy = got[2];
         assert_eq!(rt_decoy.mz, target.mz);
         assert!((rt_decoy.t_hat - rt).abs() >= 8.0 * target.s + 4.0 * target.w_prior);
+    }
+
+    /// Run 1's scans with, when `partner`, precursor `p` also present at
+    /// charge 3 at its run-1 apex (same neutral mass and envelope).
+    fn scans_with_partner(p: u32, partner: bool) -> Vec<Ms1Scan> {
+        let mut scans = run_scans(1, false, &|_| false);
+        if partner {
+            let (z, mz) = partner_mzs(mz_of(p), CHARGE)
+                .into_iter()
+                .find(|&(z, _)| z == 3)
+                .unwrap();
+            for s in &mut scans {
+                let g = (-(s.rt - apex(p, 1)).powi(2) / (2.0 * WIDTH * WIDTH)).exp();
+                for (i, &e) in ENVELOPE.iter().enumerate() {
+                    let inten = 200.0 + 0.5 * AMPLITUDE * e as f64 * g;
+                    s.peaks.push((mz + i as f64 * ISOTOPE / z as f64, inten as f32));
+                }
+                s.peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+            }
+        }
+        scans
+    }
+
+    /// The transfer rows of precursor `ONLY_RUN0` in run 1 on `scans`, with
+    /// their main fits and partner evidence.
+    fn transfer_rows_with_partners(fx: &Fixture, scans: Vec<Ms1Scan>) -> Vec<ExtractRow> {
+        let ms1 = Ms1RunIndex::new(scans);
+        let wp = WidthPrior::from_fits(Vec::new());
+        let ids: Vec<usize> = fx
+            .lib
+            .entries
+            .iter()
+            .position(|e| e.precursor == ONLY_RUN0)
+            .into_iter()
+            .collect();
+        let mut slots: Vec<Option<EntryRows>> = (0..fx.lib.entries.len()).map(|_| None).collect();
+        rows_into(
+            &mut slots,
+            &ids,
+            1,
+            true,
+            &fx.lib,
+            &wp,
+            &params(),
+            &[&ms1],
+            |_| 0,
+            None,
+            true,
+        );
+        slots[ids[0]].take().unwrap().0
+    }
+
+    #[test]
+    fn partner_evidence_is_computed_for_targets_and_every_decoy() {
+        let fx = fixture(false);
+        let rows = transfer_rows_with_partners(&fx, scans_with_partner(ONLY_RUN0, true));
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        for r in &rows {
+            assert_eq!(r.role, Role::Transfer);
+            assert!(r.evidence.is_some(), "{r:?}");
+            assert!(r.partner.is_some(), "{r:?}");
+        }
+        // Identified rows never get partner evidence.
+        let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
+        assert!(out
+            .rows
+            .iter()
+            .filter(|r| r.role == Role::Identified)
+            .all(|r| r.partner.is_none()));
+        assert!(out
+            .rows
+            .iter()
+            .filter(|r| r.role != Role::Identified && r.evidence.is_some())
+            .all(|r| r.partner.is_some()));
+    }
+
+    #[test]
+    fn a_coeluting_partner_raises_the_target_partner_evidence() {
+        let fx = fixture(false);
+        let with = transfer_rows_with_partners(&fx, scans_with_partner(ONLY_RUN0, true));
+        let without = transfer_rows_with_partners(&fx, scans_with_partner(ONLY_RUN0, false));
+        let p = |rows: &[ExtractRow], k: usize| rows[k].partner.unwrap();
+        let (a, b) = (p(&with, 0), p(&without, 0));
+        assert!(a.coel_llr > 100.0, "{a:?}");
+        assert!(a.coel_llr > 20.0 * b.coel_llr.max(1.0), "{a:?} vs {b:?}");
+        assert!(a.llr > 100.0 && a.dt.abs() <= 1.0, "{a:?}");
+        assert!(a.coel_dt.abs() <= 1.0, "{a:?}");
+        // The decoys look for their own partners, which are absent.
+        for k in 1..3 {
+            let d = p(&with, k);
+            assert!(d.coel_llr < a.coel_llr / 10.0, "decoy {k}: {d:?}");
+        }
+    }
+
+    #[test]
+    fn decoys_keep_the_targets_local_rt_prior() {
+        let fx = fixture(false);
+        let ms1 = Ms1RunIndex::new(run_scans(1, false, &|_| false));
+        let wp = WidthPrior::from_fits(Vec::new());
+        let entry = fx
+            .lib
+            .entries
+            .iter()
+            .find(|e| e.precursor == ONLY_RUN0)
+            .unwrap();
+        // A local correction from run 1's identified precursors, shifted by
+        // +5 s everywhere.
+        let points = (0..BOTH).filter_map(|p| {
+            let (t, _) = fx.lib.alignment.predict_excluding(p, 1)?;
+            Some((p, t + 5.0, t))
+        });
+        let local = LocalRt::new(points, 5);
+        let (plain, _) = entry_rows(entry, 1, true, &fx.lib, &ms1, &wp, None);
+        for use_prior in [false, true] {
+            let (rows, _) = entry_rows(entry, 1, true, &fx.lib, &ms1, &wp, Some((&local, use_prior)));
+            assert_eq!(rows.len(), 3);
+            let target = rows[0].1;
+            let base = plain[0].1;
+            if use_prior {
+                assert!((target.t_hat - base.t_hat - 5.0).abs() < 1e-9, "{target:?}");
+            } else {
+                assert_eq!(target.t_hat, base.t_hat);
+            }
+            let lt = rows[0].0.local_prior.unwrap();
+            for (row, probe) in &rows {
+                let l = row.local_prior.unwrap();
+                // Same width for every hypothesis, centred on its own probe.
+                assert_eq!(l.s, lt.s);
+                assert_eq!((probe.s, probe.w_prior), (target.s, target.w_prior));
+                assert!((l.t_hat - probe.t_hat - (lt.t_hat - target.t_hat)).abs() < 1e-9);
+            }
+            assert_eq!(rows[1].1.t_hat, target.t_hat);
+        }
     }
 
     #[test]
@@ -1957,6 +2468,8 @@ mod finalize_tests {
             isotopes_used: 0b1111,
             t0,
             w: 4.0,
+            iso_heights: [0.55, 0.3, 0.11, 0.04].map(|v| v * amplitude),
+            tailing: 0.0,
         }
     }
 
@@ -1970,6 +2483,8 @@ mod finalize_tests {
             n_donor_runs: 1,
             library_q: 0.001,
             ms2: None,
+            partner: None,
+            local_prior: None,
         }
     }
 

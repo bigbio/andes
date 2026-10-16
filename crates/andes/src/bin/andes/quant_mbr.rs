@@ -1044,6 +1044,9 @@ pub(crate) fn extra_feature_names(groups: &[String]) -> Vec<&'static str> {
             "coel" => &["coel_llr", "coel_abs_dt_w"][..],
             "localz" => &["local_rt_z", "abs_local_rt_z"][..],
             "shape" => &["shape_log_width", "shape_tailing_diff", "shape_iso_cos"][..],
+            "shape_w" => &["shape_log_width"][..],
+            "shape_tail" => &["shape_tailing_diff"][..],
+            "shape_iso" => &["shape_iso_cos"][..],
             _ => &[][..],
         });
     }
@@ -1056,7 +1059,12 @@ pub(crate) fn extra_feature_groups() -> Vec<String> {
         .unwrap_or_default()
         .split(',')
         .map(|g| g.trim().to_string())
-        .filter(|g| matches!(g.as_str(), "partner" | "coel" | "localz" | "shape"))
+        .filter(|g| {
+            matches!(
+                g.as_str(),
+                "partner" | "coel" | "localz" | "shape" | "shape_w" | "shape_tail" | "shape_iso"
+            )
+        })
         .collect()
 }
 
@@ -1128,7 +1136,7 @@ pub(crate) fn extra_features(
                     .map_or(e.rt_z, |l| (e.t0 - l.t_hat) / l.s.max(1e-3));
                 x.extend([z, z.abs()]);
             }
-            "shape" => {
+            "shape" | "shape_w" | "shape_tail" | "shape_iso" => {
                 let others: Vec<&ShapeRef> = refs
                     .get(&row.precursor)
                     .map(|v| v.iter().filter(|r| r.0 != row.run).collect())
@@ -1148,9 +1156,10 @@ pub(crate) fn extra_features(
                         let na = iso.iter().map(|a| a * a).sum::<f64>().sqrt();
                         let nb = iso_ref.iter().map(|a| a * a).sum::<f64>().sqrt();
                         let cos = if na > 0.0 && nb > 0.0 { dot / (na * nb) } else { -1.0 };
-                        x.extend([((e.w / slope) / w_ref).ln(), e.tailing - t_ref, cos]);
+                        let all = [((e.w / slope) / w_ref).ln(), e.tailing - t_ref, cos];
+                        x.extend(shape_pick(g, all));
                     }
-                    _ => x.extend([0.0, 0.0, -1.0]),
+                    _ => x.extend(shape_pick(g, [0.0, 0.0, -1.0])),
                 }
             }
             _ => {}
@@ -1158,6 +1167,16 @@ pub(crate) fn extra_features(
     }
     let x: Vec<f32> = x.iter().map(|&v| v as f32).collect();
     x.iter().all(|v| v.is_finite()).then_some(x)
+}
+
+/// The shape features of group `g` among `[log width, tailing, iso cos]`.
+fn shape_pick(g: &str, all: [f64; 3]) -> Vec<f64> {
+    match g {
+        "shape_w" => vec![all[0]],
+        "shape_tail" => vec![all[1]],
+        "shape_iso" => vec![all[2]],
+        _ => all.to_vec(),
+    }
 }
 
 /// Floor of `amplitude_se` in the amplitude signal-to-noise feature.

@@ -224,7 +224,7 @@ fn rescoring_estimates_fdr_within_each_class() {
     );
     let stderr = String::from_utf8_lossy(&with_classes.stderr);
     assert!(
-        stderr.contains("Rescore: FDR within each class (targets/decoys): canonical"),
+        stderr.contains("Rescore: FDR within each class (targets/decoys, method, pi0): canonical"),
         "{stderr}"
     );
     // One class (FASTA): the step reports nothing and changes nothing.

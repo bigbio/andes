@@ -247,11 +247,15 @@ alternative explains the spectrum than the best canonical peptide. `IsotopeMimic
 unmodified canonical peptide picked on its M+1 peak. Decoy rows carry their target entry's
 class. All six are Percolator features. With `--rescore` or `--rescore-native`, andes also
 estimates FDR within each class: every PSM gets the class of its most canonical protein
-(`canonical`, else `isoform`, `variant`, `chain` or a `+` combination), target-decoy competition
-on the rescorer's score is run inside each class, and a target's q-value becomes the larger of
-its global and its class q-value. The filtered TSV, the QPX q-value and quantification then
-accept a PSM only if it passes both, and the run log prints each class's target and decoy
-counts. A class with few PSMs cannot reach a low q-value (with 50 targets the smallest is 1/50).
+(`canonical`, else `isoform`, `variant`, `chain` or a `+` combination). Each target gets an
+empirical p-value against every decoy of the run, and Storey q-values are computed within its
+class. Pooling the decoys gives a small class the power of the canonical decoy set, and it is
+conservative as long as the class's own decoys score no higher than the pool. andes checks this:
+a class whose decoys fall in the pool's top 5% significantly more often than 5%, or that has
+fewer than 20 decoys, uses target-decoy competition inside the class instead,
+q = (decoys + 1) / targets. A target's q-value becomes the larger of its global and its class
+q-value, so the filtered TSV, the QPX q-value and quantification accept a PSM only if it passes
+both. The run log prints each class's target and decoy counts, method and Storey null fraction.
 A search with a single class, any FASTA search, is unchanged. Chimeric co-isolation rows (Pass 2 of
 `--chimeric`) get `RefCompetitor` and `DeltaRefScore` = 0; the glyco PIN leaves all six out.
 `--refine` Pass-2 rows keep the provenance of the entry their backbone came from. The TSV adds `ProteinFamily`, `EntryKind` and `FeatureIds` for the named

@@ -2176,10 +2176,19 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if counts.len() > 1 {
             let line: Vec<String> = counts
                 .iter()
-                .map(|c| format!("{} {}/{}", c.class, c.targets, c.decoys))
+                .map(|c| {
+                    format!(
+                        "{} {}/{} {} pi0 {:.2}",
+                        c.class,
+                        c.targets,
+                        c.decoys,
+                        c.method.name(),
+                        c.pi0
+                    )
+                })
                 .collect();
             eprintln!(
-                "Rescore: FDR within each class (targets/decoys): {}",
+                "Rescore: FDR within each class (targets/decoys, method, pi0): {}",
                 line.join(", ")
             );
         }

@@ -261,6 +261,19 @@ A search with a single class, any FASTA search, is unchanged. Chimeric co-isolat
 `--refine` Pass-2 rows keep the provenance of the entry their backbone came from. The TSV adds `ProteinFamily`, `EntryKind` and `FeatureIds` for the named
 protein.
 
+**Proteoform table.** With rescoring and a database that holds isoform, variant or chain entries,
+andes writes `<stem>.proteoforms.tsv`: for each protein family (a UniProt entry), the canonical
+entry first and then each isoform, variant and chain entry with a *specific* target PSM at
+q ≤ `--fdr`.
+Within its family, a peptide is *specific* to a member when no other member explains it, and
+*shared* otherwise. A member's `confidence` is 1 − q of its best specific PSM, the class-aware
+q-value above (`evidence` `specific`), or of its best shared PSM when it has no specific one
+(`evidence` `shared`). For a variant, `alternative_explanation` says whether its substitution
+weighs the same as deamidation, methylation or oxidation, and whether the canonical counterpart
+peptide (the substitution reverted) was identified: decoys cannot measure that error, so these
+rows are candidates rather than claims. With `--lfq` or `--tmt`, `quantity_<run or channel>` is
+the summed abundance of the member's specific peptides.
+
 `--decoy-strategy shuffle` is refused when the database holds isoform or mature-chain entries:
 shuffled decoys do not keep the peptides those entries share with their canonical entry.
 
@@ -646,6 +659,7 @@ Written next to the PIN (or next to `--output-tsv`/`--output-parquet` under `--r
 | File | Rows | Columns |
 |---|---|---|
 | `<stem>.tmt.tsv` | one per quantified PSM | `filename scannr spec_id quant_scan quant_ms_level rt peptide charge proteins is_decoy psm_q_value psm_pep purity`, then one `tmt_<channel>` (or `itraq_<channel>`) per channel, then `raw_<...>` when a correction matrix was applied |
+| `<stem>.proteoforms.tsv` (`--rescore`/`--rescore-native` with UniProt isoform, variant or chain entries) | one per family member with a target PSM at q ≤ `--fdr` (a specific one for isoform, variant and chain entries) | `family member kind feature confidence q_value evidence specific_peptides shared_peptides psms best_psm alternative_explanation`, then `quantity_<run or channel>` with `--lfq`/`--tmt` (§1a, proteoform table) |
 | `<stem>.lfq.tsv` | one per (peptidoform, charge) at feature q ≤ `--lfq-feature-fdr` and cosine ≥ `--lfq-min-cosine` | `peptide charge proteins feature_q_value score cosine`, then the integrated area per input file |
 | `<stem>.lfq_features.tsv` | one per feature per run (all, with their q-value) | apex RT, boundaries, scan count, area, apex height, per-isotope areas, cosine, score, decoy score, feature q-value |
 | `<stem>.mbr.tsv` (`--mbr`, `andes quant finalize -o <stem>`) | one per (precursor, run) identified in or transferred into the run | `precursor_key run evidence_type quantity quantity_se quantity_normalized transfer_q quant_q apex_rt_s library_q`; `quantity_normalized` is `quantity` with the run's level and RT-local offset removed (§10, `NA` when the run is not normalised); `evidence_type` is `identified` (the run has a target PSM of the precursor at PSM q ≤ `--quant-fdr` and, with `--pep`, PEP ≤ `--pep`), `identified_below_threshold` (identified, but `quant_q` above `--quant-feature-fdr` or missing; quantity kept, in this table only), `transfer_ms2` (transfer q ≤ `--mbr-fdr`, and an MS2 scan of the run matches the precursor's library spectrum: at least 4 fragments at a spectral angle of at least 0.6), `transfer_ms1` (transfer q ≤ `--mbr-fdr`, without that MS2 support) or `below_threshold` (quantity kept, as censored; in this table only); `quant_q` is the quality q-value of the row's MS1 feature against its decoys (the identified-row estimate for identified rows, equal to `transfer_q` for transfers); `transfer_q`, `quant_q` and `library_q` are internal quant-quality values, not identification FDR; `NA` for missing values. Precursors that fail the library entry gate have no rows |

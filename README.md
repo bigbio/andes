@@ -206,7 +206,11 @@ downstream ([`DOCS.md` §10](DOCS.md#10-quantification)). `--lfq --mbr` adds mat
 over two or more inputs: every confident precursor is measured in every run, and transfers carry
 an internal quant-quality q-value (`<stem>.mbr.tsv`). The same stages run one at a time with
 `andes quant library|extract|finalize` over a `--quant-dir`, for pipelines that spread runs
-over machines.
+over machines. On the ProteoBench label-free DDA module (PXD028735, six runs), `main` quantifies
+54,932 precursors in at least 3 runs at transfer q 0.01 (67,035 at the default 0.05) with a
+median |ε| of 0.155 and a CV of 0.110 using `quantity_normalized`, lower on both than every
+match-between-runs submission on the public leaderboard; one dataset, one seed
+([benchmarks](docs/benchmarks/README.md#quantification-label-free-with-match-between-runs-and-tmt)).
 
 ```bash
 andes --spectrum tmt_run.mzML --database human.fasta --mods tmt10_mods.txt \

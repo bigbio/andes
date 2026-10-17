@@ -37,8 +37,9 @@
 //! with `D` and `K` over the wrong-peak families only. The two error classes
 //! overlap (a false donor's transfer can also land on a wrong peak), so the
 //! sum is conservative. Without identity-decoy rows it is the wrong-peak
-//! estimate. Identity decoys enter the classifier's training as negatives
-//! only when asked; either way they are scored by their fold's model.
+//! estimate. Identity decoys are negatives of the classifier's training like
+//! the other decoys (held out by the same folds), so it learns what sets a
+//! false donor's transfer apart where it can.
 //!
 //! `K` is counted over the rows passed in, which are the rows that have
 //! features: a target or decoy without evidence takes no part. When decoys are
@@ -77,10 +78,6 @@ pub const TRANSFER_FEATURES: &[&str] = &[
     "shape_tailing_diff",
     "shape_iso_cos",
 ];
-
-/// Feature names of the best donor PSM, appended to the transfer features
-/// when the transfer model uses them.
-pub const DONOR_FEATURES: &[&str] = &["donor_score", "donor_psm_q", "donor_psm_pep"];
 
 /// Feature names of the identified-row quality classifier: the template-fit
 /// evidence of [`TRANSFER_FEATURES`] without `n_donor_runs` and `library_q`,
@@ -167,11 +164,10 @@ pub fn fold_of(precursor: u32, seed: u64) -> usize {
     (z % N_FOLDS as u64) as usize
 }
 
-/// Cross-validated q-values of transfer targets and decoys, identity decoys
-/// trained as negatives.
+/// Cross-validated q-values of transfer targets and decoys.
 #[allow(dead_code)]
 pub fn transfer_qvalues(rows: &[FdrRow], seed: u64) -> FdrResult {
-    transfer_fdr(rows, seed, true).result
+    transfer_fdr(rows, seed).result
 }
 
 /// Trains the classifier of `fold` on the rows of the other folds.
@@ -181,13 +177,12 @@ fn train_fold(
     nf: usize,
     fold: usize,
     seed: u64,
-    train_identity: bool,
 ) -> Result<GbdtPeakModel, String> {
     let mut x = Vec::new();
     let mut y = Vec::new();
     let mut groups = Vec::new();
     for (r, &f) in rows.iter().zip(folds) {
-        if f == fold || (r.family == IDENTITY && !train_identity) {
+        if f == fold {
             continue;
         }
         x.extend_from_slice(&r.x);
@@ -215,12 +210,11 @@ fn train_fold(
     .map_err(|e| format!("fold {fold}: {e:?}"))
 }
 
-/// [`transfer_qvalues`] keeping the fold models; identity-decoy rows are
-/// training negatives only with `train_identity`.
+/// [`transfer_qvalues`] keeping the fold models.
 ///
 /// # Panics
 /// When the rows do not all have the same number of features.
-pub fn transfer_fdr(rows: &[FdrRow], seed: u64, train_identity: bool) -> TransferFdr {
+pub fn transfer_fdr(rows: &[FdrRow], seed: u64) -> TransferFdr {
     let n = rows.len();
     let nf = rows.first().map_or(0, |r| r.x.len());
     assert!(
@@ -238,7 +232,7 @@ pub fn transfer_fdr(rows: &[FdrRow], seed: u64, train_identity: bool) -> Transfe
     let mut counts = FdrCounts::default();
     let fitted: Vec<Result<GbdtPeakModel, String>> = (0..N_FOLDS)
         .into_par_iter()
-        .map(|f| train_fold(rows, &folds, nf, f, seed, train_identity))
+        .map(|f| train_fold(rows, &folds, nf, f, seed))
         .collect();
     let mut models = Vec::with_capacity(N_FOLDS);
     let mut tables = Vec::with_capacity(N_FOLDS);
@@ -539,7 +533,7 @@ mod tests {
         assert!(empty.q.is_empty() && empty.score.is_empty());
 
         let no_decoys = rows(300, 3.0, &[], 2);
-        let r = transfer_fdr(&no_decoys, 1, true);
+        let r = transfer_fdr(&no_decoys, 1);
         assert!(r.result.q.iter().all(Option::is_none));
         assert_eq!(r.counts.failed_folds.len(), N_FOLDS);
         assert_eq!(r.counts.unscored, no_decoys.len());
@@ -557,7 +551,7 @@ mod tests {
             .into_iter()
             .filter(|r| !(r.is_decoy && fold_of(r.precursor, seed) == 0))
             .collect();
-        let r = transfer_fdr(&mixed, seed, true);
+        let r = transfer_fdr(&mixed, seed);
         for (row, q) in mixed.iter().zip(&r.result.q) {
             if fold_of(row.precursor, seed) == 0 {
                 assert!(q.is_none(), "one-class fold row got q {q:?}");
@@ -635,7 +629,7 @@ mod tests {
     #[test]
     fn pseudo_rows_take_the_q_of_the_nearest_lower_score() {
         let rows = rows(500, 3.0, &[1, 2], 12);
-        let fdr = transfer_fdr(&rows, 4, true);
+        let fdr = transfer_fdr(&rows, 4);
         // A pseudo row identical to a scored target gets that target's q.
         for (i, row) in rows
             .iter()
@@ -670,11 +664,11 @@ mod tests {
         // targets: the wrong-peak estimate accepts nearly every target at
         // 0.01, the combined one sees about 3 % false donors and keeps few.
         let rows = with_identity(1000, 30, 31);
-        for train in [false, true] {
-            let r = transfer_fdr(&rows, 5, train).result;
+        {
+            let r = transfer_fdr(&rows, 5).result;
             let wp = accepted_targets(&rows, &r.q_wrong_peak);
             let all = accepted_targets(&rows, &r.q);
-            eprintln!("identity (train {train}): wrong-peak {wp}, combined {all} at q <= 0.01");
+            eprintln!("identity: wrong-peak {wp}, combined {all} at q <= 0.01");
             assert!(wp >= 800, "{wp}");
             // Only targets above every identity decoy of their fold remain.
             assert!(5 * all < wp, "{all} of {wp}");
@@ -690,31 +684,6 @@ mod tests {
                 .zip(&r.q)
                 .filter(|(row, _)| row.family == IDENTITY)
                 .all(|(_, q)| q.is_some()));
-        }
-    }
-
-    #[test]
-    fn untrained_identity_decoys_leave_the_model_unchanged() {
-        let plain = rows(600, 2.0, &[MASS_SHIFT, RT_SHIFT], 14);
-        let mut more = plain.clone();
-        let mut g = Normal(99);
-        more.extend((0..20u32).map(|i| FdrRow {
-            precursor: 600 + i,
-            is_decoy: true,
-            family: IDENTITY,
-            x: g.vector(2.0),
-        }));
-        let a = transfer_fdr(&plain, 3, false).result;
-        let b = transfer_fdr(&more, 3, false).result;
-        let n = plain.len();
-        assert_eq!(a.score, b.score[..n]);
-        assert_eq!(a.q_wrong_peak, b.q_wrong_peak[..n]);
-        assert_eq!(a.q, a.q_wrong_peak);
-        // The identity decoys only raise the targets' q-values.
-        for i in 0..n {
-            if let (Some(x), Some(y)) = (a.q[i], b.q[i]) {
-                assert!(y >= x, "{i}: {y} < {x}");
-            }
         }
     }
 

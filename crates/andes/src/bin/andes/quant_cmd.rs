@@ -41,7 +41,6 @@ use rayon::prelude::*;
 use crate::cli::{QuantCommand, QuantExtractArgs, QuantFinalizeArgs, QuantLibraryArgs};
 use crate::quant_mbr::{
     attach_ms2, extract_run, finalize, mbr_paths, ExtractCounts, ExtractRow, MbrFeature, Ms2Counts,
-    TransferModel,
 };
 
 /// Seed of the transfer FDR's folds and models, in every path.
@@ -929,7 +928,6 @@ pub(crate) fn finalize_and_write(
         runs,
         mbr_fdr,
         quant_feature_fdr,
-        &TransferModel::default(),
         MBR_SEED,
         &tsv,
         &validation,

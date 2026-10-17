@@ -77,6 +77,11 @@ impl Protein {
     pub fn entry_kind(&self) -> EntryKind {
         self.origin().map_or(EntryKind::Reference, |o| o.kind)
     }
+
+    /// Whether this is a knockoff entry (see [`EntryOrigin::knockoff_of`]).
+    pub fn is_knockoff(&self) -> bool {
+        self.origin().is_some_and(|o| o.knockoff_of.is_some())
+    }
 }
 
 /// Tolerance (Da) within which an annotated site's mass and a modification's
@@ -193,13 +198,16 @@ impl EntryKind {
 /// Where a non-reference entry comes from: its kind, the accession of the
 /// family it belongs to (`P04637`), the feature that made it (`VAR_005851_D7H`,
 /// `P04637-2`, `PRO_0000001058`) and, for a variant, the mass of its replacement
-/// residues minus the mass of the residues they replace.
+/// residues minus the mass of the residues they replace. A knockoff entry (the
+/// same substitution moved to a position no known variant has, an almost
+/// certainly false target) names the feature it copies in `knockoff_of`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntryOrigin {
     pub kind: EntryKind,
     pub family: Arc<str>,
     pub feature: Arc<str>,
     pub variant_delta_da: f64,
+    pub knockoff_of: Option<Arc<str>>,
 }
 
 /// Which ends of a mature-chain entry are new termini, i.e. not termini of
@@ -472,6 +480,7 @@ mod tests {
             family: Arc::from("P04637"),
             feature: Arc::from("VAR_005851_D7H"),
             variant_delta_da: 0.984016,
+            knockoff_of: None,
         };
         let var = Protein {
             annotation: Some(Arc::new(

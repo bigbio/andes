@@ -147,6 +147,18 @@ pub(crate) struct SearchArgs {
     )]
     pub(crate) uniprot_evidence: input::EvidenceLevel,
 
+    /// UniProt XML database, with `--uniprot-variants`: knockoff entries per
+    /// single-residue variant of a canonical sequence (0: none). A knockoff is
+    /// the same substitution at another position holding the same residue, in a
+    /// matched sequence context and at least 10 residues from every known
+    /// variant, so it is almost certainly absent from the sample but fits a mass
+    /// coincidence or an isotope error as well as the real variant does. The
+    /// knockoffs accepted per substitution class estimate how many accepted
+    /// variant PSMs are false, and variant PSMs get a q-value from that estimate
+    /// too (with --rescore). Knockoff PSMs are never reported.
+    #[arg(long = "uniprot-knockoffs", default_value_t = 4)]
+    pub(crate) uniprot_knockoffs: usize,
+
     /// Output Percolator PIN file path.
     #[arg(long)]
     pub(crate) output_pin: Option<PathBuf>,

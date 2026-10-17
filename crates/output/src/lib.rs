@@ -38,6 +38,9 @@ pub use provenance::populate_provenance_features;
 pub mod class_fdr;
 pub use class_fdr::{apply_class_fdr, ClassCount};
 
+pub mod knockoff_fdr;
+pub use knockoff_fdr::{apply_knockoff_fdr, KnockoffCount, KnockoffOutcome};
+
 pub mod proteoform_table;
 pub use proteoform_table::{proteoform_table, write_proteoform_tsv, QuantSummary};
 

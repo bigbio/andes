@@ -303,6 +303,7 @@ mod tests {
                         family: Arc::from("P1"),
                         feature: Arc::from(feature),
                         variant_delta_da: delta,
+                        knockoff_of: None,
                     }))
                     .with_substitutions(subs),
             )),

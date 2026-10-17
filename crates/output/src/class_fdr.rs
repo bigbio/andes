@@ -241,6 +241,7 @@ mod tests {
                     family: Arc::from("P1"),
                     feature: Arc::from("F"),
                     variant_delta_da: 0.0,
+                    knockoff_of: None,
                 })),
             )
         });

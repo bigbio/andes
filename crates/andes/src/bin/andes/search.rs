@@ -280,6 +280,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         isoforms: cli.uniprot_isoforms,
         chains: cli.uniprot_chains,
         evidence: cli.uniprot_evidence,
+        knockoffs: Some(input::KnockoffOptions {
+            per_variant: cli.uniprot_knockoffs,
+            enzyme: search_enzyme,
+        }),
     };
     let loaded = input::load_protein_database(&database_path, &uniprot_opts)?;
     let target_db = loaded.db;
@@ -2173,6 +2177,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // target's q-value becomes the larger of the global and its class q-value,
     // so the filtered TSV, the QPX and quantification accept a PSM only if it
     // passes both. A search with one class (any FASTA) is left unchanged.
+    // Knockoff rows: in the PIN and the QPX bundle as targets with q = 1, in
+    // no other output.
+    let mut knockoff_rows: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Some(ref mut map) = rescore_map {
         let counts = output::apply_class_fdr(map, &rescore_decoy_psms, &pin_index);
         if counts.len() > 1 {
@@ -2191,6 +2198,32 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .collect();
             eprintln!(
                 "Rescore: FDR within each class (targets/decoys, method, pi0): {}",
+                line.join(", ")
+            );
+        }
+        // Knockoff variants: the knockoff PSMs accepted per substitution class
+        // estimate the false real variant PSMs, and give them a q-value too.
+        let outcome = output::apply_knockoff_fdr(map, &pin_index, fdr_threshold);
+        knockoff_rows = outcome.knockoff_rows;
+        if !outcome.counts.is_empty() {
+            let line: Vec<String> = outcome
+                .counts
+                .iter()
+                .map(|c| {
+                    format!(
+                        "{} {} -> {} (knockoffs {:.1} for {} tested, false share {:.2})",
+                        c.stratum,
+                        c.real_before,
+                        c.real_after,
+                        c.knockoff_weighted,
+                        c.tested_before,
+                        c.false_share()
+                    )
+                })
+                .collect();
+            eprintln!(
+                "Rescore: variant PSMs at q<={fdr_threshold} per substitution class, before -> \
+                 after knockoff q-values: {}",
                 line.join(", ")
             );
         }
@@ -2215,8 +2248,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // per-PSM local-FDR cap on top.
         let pep_cap = cli.pep;
         let mut accepted: Vec<&output::PercolatorPsm> = map
-            .values()
-            .filter(|p| p.q_value <= fdr && pep_cap.is_none_or(|t| p.pep <= t))
+            .iter()
+            .filter(|(id, p)| {
+                p.q_value <= fdr && pep_cap.is_none_or(|t| p.pep <= t) && !knockoff_rows.contains(*id)
+            })
+            .map(|(_, p)| p)
             .collect();
         accepted.sort_by(|a, b| {
             a.q_value
@@ -2297,6 +2333,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .into());
             }
         }
+    }
+
+    if let Some(ref mut map) = rescore_map {
+        map.retain(|id, _| !knockoff_rows.contains(id));
     }
 
     // ── Quantification (`--tmt` / `--lfq`) ────────────────────────────────────
@@ -2445,6 +2485,13 @@ fn log_uniprot_load(stats: &input::UniProtLoadStats, opts: &input::UniProtOption
         stats.unusable_features,
         stats.isoform_features,
     );
+    if opts.variants && opts.knockoffs.is_some_and(|k| k.per_variant > 0) {
+        eprintln!(
+            "UniProt XML: {} knockoff variant entries ({} single-residue variants with no \
+             position for a knockoff)",
+            stats.knockoff_proteins, stats.variants_without_knockoff,
+        );
+    }
     if opts.isoforms || opts.chains {
         eprintln!(
             "UniProt XML: {} isoform entries ({} isoforms not rebuildable), {} mature-chain entries",

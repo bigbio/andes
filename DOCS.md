@@ -1172,7 +1172,10 @@ scores from separately trained Percolator models are not on one scale.
   `below_threshold` without a q-value; its identified rows are unchanged): a single marginal
   donor PSM is the commonest false donor. On a public LFQ benchmark (six runs, 1:1 shuffled
   entrapment) the identity-decoy estimate of the false-donor share of accepted transfers was
-  0.49 % at transfer q 0.01 where the entrapment gave 0.43 %, and 1.7 % against 1.7 % at 0.05.
+  0.25 % at transfer q 0.01 where the entrapment gave 0.24 %, and 0.40 % against 0.39 % at
+  0.05; the transfers of entrapment donors fell from 728 to 88 at 0.01 (48 before the
+  peak-shape features), with 62.8k precursors quantified in at least 3 runs (67.6k, and
+  54.9k before the peak-shape features).
   The validation file and the finalize log count the decoys accepted per family (mass shift,
   RT shift, identity) and the transfers the wrong-peak decoys alone would accept. The
   transfer features are the fit evidence, the donor-run count, the library q-value and the

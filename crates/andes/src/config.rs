@@ -47,6 +47,7 @@ pub struct IoCfg {
     pub uniprot_isoforms: Option<bool>,
     pub uniprot_chains: Option<bool>,
     pub uniprot_evidence: Option<String>,
+    pub uniprot_knockoffs: Option<usize>,
     pub output_pin: Option<PathBuf>,
     pub output_tsv: Option<PathBuf>,
     pub output_parquet: Option<PathBuf>,
@@ -116,6 +117,7 @@ pub struct RescoringCfg {
     pub enabled: Option<bool>,
     pub native: Option<bool>,
     pub fdr: Option<f64>,
+    pub variant_fdr: Option<f64>,
     pub pep: Option<f64>,
     pub percolator_bin: Option<PathBuf>,
     pub percolator_docker: Option<bool>,
@@ -253,6 +255,11 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         cfg.io.uniprot_isoforms
     );
     set!("uniprot_chains", uniprot_chains, cfg.io.uniprot_chains);
+    set!(
+        "uniprot_knockoffs",
+        uniprot_knockoffs,
+        cfg.io.uniprot_knockoffs
+    );
     set_parsed!(
         "uniprot_evidence",
         uniprot_evidence,
@@ -372,6 +379,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set!("rescore", rescore, cfg.rescoring.enabled);
     set!("rescore_native", rescore_native, cfg.rescoring.native);
     set_opt!("fdr", fdr, cfg.rescoring.fdr);
+    set_opt!("variant_fdr", variant_fdr, cfg.rescoring.variant_fdr);
     set_opt!("pep", pep, cfg.rescoring.pep);
     set_opt!(
         "percolator_bin",
@@ -451,6 +459,9 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     // rejects out-of-range values injected through `--config`.
     if let Some(v) = args.fdr {
         check_unit_fraction("fdr", v)?;
+    }
+    if let Some(v) = args.variant_fdr {
+        check_unit_fraction("variant_fdr", v)?;
     }
     if let Some(v) = args.pep {
         check_unit_fraction("pep", v)?;

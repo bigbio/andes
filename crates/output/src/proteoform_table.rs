@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use model::{EntryKind, Protein};
 use search::SearchIndex;
 
+use crate::class_fdr::Cutoffs;
 use crate::percolator::PercolatorPsm;
 
 /// Quantities of identified peptides, from the quantification step.
@@ -76,11 +77,11 @@ pub fn mass_coincidence(delta_da: f64) -> Option<&'static str> {
     .map(|(name, _)| name)
 }
 
-/// Build the table from the rescored targets passing `fdr`.
+/// Build the table from the rescored targets passing their `cutoffs`.
 pub fn proteoform_table(
     targets: &HashMap<String, PercolatorPsm>,
     idx: &SearchIndex,
-    fdr: f64,
+    cutoffs: &Cutoffs,
     quant: Option<&QuantSummary>,
 ) -> Vec<ProteoformRow> {
     let proteins: HashMap<&str, &Protein> = idx
@@ -104,7 +105,7 @@ pub fn proteoform_table(
             .is_none_or(|(cq, cid)| q < *cq || (q == *cq && id < cid.as_str()))
     };
     let mut members: BTreeMap<(String, String), Acc> = BTreeMap::new();
-    for (id, t) in targets.iter().filter(|(_, t)| t.q_value <= fdr) {
+    for (id, t) in targets.iter().filter(|(id, t)| t.q_value <= cutoffs.of(id)) {
         let seq = bare_sequence(&t.peptide);
         let mut by_family: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
         for acc in t.proteins.split(';').filter(|a| !a.is_empty()) {
@@ -303,6 +304,7 @@ mod tests {
                         family: Arc::from("P1"),
                         feature: Arc::from(feature),
                         variant_delta_da: delta,
+                        knockoff_of: None,
                     }))
                     .with_substitutions(subs),
             )),
@@ -375,7 +377,7 @@ mod tests {
 
     #[test]
     fn members_get_specific_and_shared_evidence() {
-        let rows = proteoform_table(&targets(), &index(), 0.01, None);
+        let rows = proteoform_table(&targets(), &index(), &Cutoffs::uniform(0.01), None);
         let m: HashMap<&str, &ProteoformRow> =
             rows.iter().map(|r| (r.member.as_str(), r)).collect();
         assert_eq!(rows[0].member, "sp|P1|A", "canonical first");
@@ -405,7 +407,7 @@ mod tests {
         let only_shared: HashMap<_, _> = [psm("s1", 0.001, "AAAK", "sp|P1|A;sp|P1-2|A")]
             .into_iter()
             .collect();
-        let rows = proteoform_table(&only_shared, &index(), 0.01, None);
+        let rows = proteoform_table(&only_shared, &index(), &Cutoffs::uniform(0.01), None);
         let members: Vec<&str> = rows.iter().map(|r| r.member.as_str()).collect();
         assert_eq!(members, ["sp|P1|A"]);
         assert_eq!(rows[0].evidence, "shared");
@@ -413,7 +415,7 @@ mod tests {
 
     #[test]
     fn a_variant_reports_its_alternative_explanation() {
-        let rows = proteoform_table(&targets(), &index(), 0.01, None);
+        let rows = proteoform_table(&targets(), &index(), &Cutoffs::uniform(0.01), None);
         let var = rows.iter().find(|r| r.kind == EntryKind::Variant).unwrap();
         assert_eq!(var.feature, "VAR_1_N10D");
         assert_eq!(
@@ -439,7 +441,7 @@ mod tests {
                 ("CCCK".into(), vec!["sp|P1-2|A".into()], 1, 3.0),
             ],
         };
-        let rows = proteoform_table(&targets(), &index(), 0.01, Some(&quant));
+        let rows = proteoform_table(&targets(), &index(), &Cutoffs::uniform(0.01), Some(&quant));
         let m: HashMap<&str, &ProteoformRow> =
             rows.iter().map(|r| (r.member.as_str(), r)).collect();
         assert_eq!(

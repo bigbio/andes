@@ -666,8 +666,9 @@ Files in the quant directory (`--quant-dir`), all Parquet: per run `<stem>.ms1.p
 `<stem>.ms2.parquet` and `<stem>.quant.parquet` (search), `<stem>.extract.parquet` (extract);
 once `library.parquet` and `alignment.parquet` (library). Each file carries a schema version
 (`andes.<table>.schema`); a reader rejects another major version and names the file.
-`<stem>.extract.parquet` is at schema 3, which added the MS2 evidence of the transfer and
-pseudo-transfer rows (`ms2_n_scans`, `ms2_n_matched`, `ms2_angle`, `ms2_explained`); an older
+`<stem>.extract.parquet` is at schema 4: schema 3 added the MS2 evidence of the transfer and
+pseudo-transfer rows (`ms2_n_scans`, `ms2_n_matched`, `ms2_angle`, `ms2_explained`) and
+schema 4 the per-isotope heights (`iso_h0` to `iso_h3`) and `tailing` of every fit; an older
 extract table is rejected (run `andes quant extract` again). `library.parquet` is at schema 3,
 which added each entry's fragment spectrum (`frag_mz`, `frag_intensity`, `frag_ion` such as
 `y7` or `b5^2`) and its donor PSMs' runs and RTs (`donor_scan_run`, `donor_scan_rt`).
@@ -1132,8 +1133,15 @@ scores from separately trained Percolator models are not on one scale.
   transfer targets from their decoys; the transfer q-value is the K-decoy estimate over held-out
   scores, `(D + 1) / (K · max(T, 1))` at each score threshold (capped at 1, then the running
   minimum), with `K` the decoy-to-target ratio; it is also reported per decoy family. The
-  transfer features are the fit evidence, the donor-run count and the library q-value; no
-  measurement from another run. The MS2 evidence is not a feature: it shows that the peptide was
+  transfer features are the fit evidence, the donor-run count, the library q-value and the
+  agreement of the row's peak shape with the precursor's identified fits in the other runs
+  (the median over those runs, leaving out the row's own run so a pseudo-transfer is not
+  compared with its own identification): the log ratio of the fitted width carried onto the
+  consensus RT scale, the difference in tailing (the isotope-0 residual after the apex minus
+  before it, within three widths, over the fitted profile), and the cosine between the
+  per-isotope heights scaled to sum 1. A decoy is compared with its target's donors. Width,
+  tailing and isotope ratios describe the peak, not its size: no quantity measured in another
+  run is a feature. Without a donor fit in another aligned run the three are 0, 0 and −1. The MS2 evidence is not a feature: it shows that the peptide was
   isolated near the fitted peak, but the decoys cannot imitate the right peptide quantified on
   the wrong peak, so as a feature it accepted many such transfers. It labels the accepted ones:
   an accepted transfer whose best MS2 scan (inside its fitted peak) matches at least 4 fragments

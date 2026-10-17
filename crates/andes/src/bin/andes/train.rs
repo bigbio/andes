@@ -62,7 +62,7 @@ pub(crate) struct TrainFromSearchArgs {
     /// deglycosylated backbone); Cam-C and any `--mods` are applied via the
     /// AminoAcidSet. Rows whose scan is absent from `--spectra` or whose peptide
     /// fails to parse are skipped. Use to train a glyco-regime rank model from
-    /// the reference engine/a glyco search engine backbone IDs (see docs/plans/glyco/50-roadmap/spb-design.md).
+    /// the reference engine/a glyco search engine backbone IDs.
     #[arg(long = "labels")]
     pub(crate) labels: Option<PathBuf>,
 

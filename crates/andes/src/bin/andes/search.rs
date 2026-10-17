@@ -2036,8 +2036,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // and the final PIN candidate pool is fixed, run per-run RT self-calibration
     // and populate DeltaRT/AbsDeltaRT/DeltaRTNorm (+ predicted_rt for the QPX)
     // onto each PSM. Neutral 0.0 (baseline-identical) when observed RT is
-    // unavailable or calibration cannot be fit. See
-    // `docs/plans/glyco/50-roadmap/rt-prediction-design.md` (Commit 1).
+    // unavailable or calibration cannot be fit.
     output::populate_rt_features(&spectra, &mut queues, &pin_candidates);
 
     // Provenance (additive): entry class, gap to the best Reference candidate,

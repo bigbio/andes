@@ -515,8 +515,8 @@ pub fn write_glyco_pin(
 /// index breaking full ties. This is REQUIRED for a valid per-scan FDR:
 /// Percolator does NOT do target/decoy competition within a scan, so emitting the
 /// ~4.5 correlated (peptide×glycan) alternatives per scan fabricates the
-/// target/decoy balance and produces fake recovery (docs/plans/glyco/LESSONS.md
-/// L1 — collapsing g4off's 1.02M rows→5,954 changed 155 "recovered" → 0 @1% FDR).
+/// target/decoy balance and produces fake recovery (collapsing one
+/// benchmark's 1.02M rows to 5,954 changed 155 "recovered" to 0 @1% FDR).
 /// The non-glyco path enforces the same one-PSM-per-scan rule
 /// (`top_n_psms_per_spectrum = 1`). `collapse=false` dumps all hits — DIAGNOSTIC
 /// ONLY, never for FDR.
@@ -528,8 +528,7 @@ pub(crate) fn select_emitted_hits(
     // GI-1: a glyco IDENTIFICATION requires an ENUMERATED glycan composition. The
     // de-novo branch (glycan = None) reports a bare precursor−backbone mass
     // RESIDUAL that is not in the glycan DB — ~half of raw glyco rows. Those are
-    // not glycopeptide IDs and must not enter the FDR PIN (docs/plans/glyco/ISSUES.md
-    // GI-1). Filter them out first, THEN collapse.
+    // not glycopeptide IDs and must not enter the FDR PIN. Filter them out first, THEN collapse.
     if !collapse {
         // Diagnostic dump: all hits (optionally enumerated-filtered).
         return (0..hits.len())

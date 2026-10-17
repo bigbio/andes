@@ -41,6 +41,7 @@ use rayon::prelude::*;
 use crate::cli::{QuantCommand, QuantExtractArgs, QuantFinalizeArgs, QuantLibraryArgs};
 use crate::quant_mbr::{
     attach_ms2, extract_run, finalize, mbr_paths, ExtractCounts, ExtractRow, MbrFeature, Ms2Counts,
+    TransferModel,
 };
 
 /// Seed of the transfer FDR's folds and models, in every path.
@@ -477,13 +478,14 @@ pub(crate) fn build_and_write_library(
     };
     let ap = AlignParams::default();
     let library = build_library(&psms, meta, stems.len(), max_q, donor_q, donor_pep, &ap);
-    let is_donor =
-        |p: &PsmIn| !p.is_decoy && p.q <= donor_q && donor_pep.is_none_or(|c| p.pep <= c);
+    // A precursor is all-target or all-decoy: an identity decoy's donors
+    // are its decoy PSMs.
+    let is_donor = |p: &PsmIn| p.q <= donor_q && donor_pep.is_none_or(|c| p.pep <= c);
     let (spectra, donor_scans, sc) =
         entry_spectra(dir, stems, &library, &psms, &spec_ids, is_donor)?;
     drop(spec_ids);
     eprintln!(
-        "[mbr] library: {} runs, {} PSMs scored, {donor_psms} target PSMs at {donor_gate} identify their precursor in their run; skipped: {} PSMs whose SpecId joins a rescoring PSM of another peptide or target/decoy label, {} target and {} decoy PSMs without a rescoring score, {} decoy PSMs sharing a target's key; {} precursors, {} entries at the internal entry gate q<={max_q} (precursor-level, not an identification FDR) with a PSM at {donor_gate}",
+        "[mbr] library: {} runs, {} PSMs scored, {donor_psms} target PSMs at {donor_gate} identify their precursor in their run; skipped: {} PSMs whose SpecId joins a rescoring PSM of another peptide or target/decoy label, {} target and {} decoy PSMs without a rescoring score, {} decoy PSMs sharing a target's key; {} precursors, {} entries at the internal entry gate q<={max_q} (precursor-level, not an identification FDR) with a PSM at {donor_gate}, {} of them identity decoys (decoy precursors with decoy PSMs at {donor_gate}, measured as targets and never reported)",
         stems.len(),
         psms.len(),
         mismatched,
@@ -491,7 +493,8 @@ pub(crate) fn build_and_write_library(
         unscored_d,
         shadowed,
         library.meta.len(),
-        library.entries.len()
+        library.entries.len(),
+        library.entries.iter().filter(|e| e.identity_decoy).count()
     );
     eprintln!(
         "[mbr] library: fragment spectra (best donor PSM, at most {} b/y fragments of {}+ residues matched on its scan) for {} of {} entries; none for {} whose scan is not in the MS2 table, {} without fragment masses, {} with fewer than {} matched fragments",
@@ -926,6 +929,7 @@ pub(crate) fn finalize_and_write(
         runs,
         mbr_fdr,
         quant_feature_fdr,
+        &TransferModel::default(),
         MBR_SEED,
         &tsv,
         &validation,

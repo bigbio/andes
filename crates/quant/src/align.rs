@@ -378,6 +378,33 @@ impl Alignment {
             .collect()
     }
 
+    /// Adds observations that take no part in the fit: the run maps, residual
+    /// widths, anchors and components stay as they are, and each observed
+    /// precursor gets its consensus RT, `n_p`, `tau_p` and `V_p` from its
+    /// observations under the fitted maps, by the code every precursor's
+    /// estimate uses. Observations in unaligned runs and with a non-finite RT
+    /// are dropped.
+    ///
+    /// Errors: a precursor outside the alignment, or a second observation of
+    /// one precursor in one run (counting the existing observations).
+    pub fn add_observations(&mut self, obs: &[Observation]) -> Result<(), String> {
+        if obs.is_empty() {
+            return Ok(());
+        }
+        let n = self.consensus.len();
+        let mut runs = self.runs();
+        for o in obs {
+            let Some(run) = runs.get_mut(o.run as usize) else {
+                continue;
+            };
+            if run.map.is_some() && o.rt.is_finite() {
+                run.observations.push((o.precursor, o.rt));
+            }
+        }
+        *self = Alignment::from_runs(runs, n)?;
+        Ok(())
+    }
+
     /// Rebuilds an alignment of `n_precursors` precursors from the per-run
     /// state of [`Alignment::runs`]. The consensus RT, `tau_p` and `n_p` are
     /// recomputed from the observations by the same code [`align`] uses, so
@@ -1351,6 +1378,55 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn added_observations_are_predicted_without_moving_the_fit() {
+        let warps = three_warps();
+        let (truth, mut obs) = synth_truth(620, &warps, 5.0, 9);
+        // Precursors 600..620 are observed after the fit, in two runs each,
+        // at RTs far off their truth: anchors would bend the maps.
+        let extra: Vec<Observation> = obs
+            .iter()
+            .filter(|o| o.precursor >= 600 && o.run < 2)
+            .map(|o| Observation {
+                rt: o.rt + 400.0,
+                ..*o
+            })
+            .collect();
+        obs.retain(|o| o.precursor < 600);
+        let fitted = align(&obs, 620, 3, &AlignParams::default());
+        let mut a = fitted.clone();
+        a.add_observations(&extra).unwrap();
+        for r in 0..3 {
+            let (x, y) = (fitted.maps[r].as_ref(), a.maps[r].as_ref());
+            assert_eq!(x.map(|m| m.knots()), y.map(|m| m.knots()));
+        }
+        assert_eq!(fitted.anchors, a.anchors);
+        for p in 0..600u32 {
+            for r in 0..3u16 {
+                assert_eq!(bits(fitted.predict(p, r)), bits(a.predict(p, r)));
+            }
+        }
+        // An added precursor is predicted from its own observations as a
+        // fitted one would be: the median of its RTs carried onto the
+        // consensus scale, mapped into run 2.
+        let map = |r: usize| a.maps[r].as_ref().unwrap();
+        for p in 600..620u32 {
+            assert!(fitted.predict(p, 2).is_none());
+            assert_eq!(a.n_runs_seen[p as usize], 2);
+            let rt = |r: u16| extra.iter().find(|o| o.precursor == p && o.run == r).unwrap().rt;
+            let tc = 0.5 * (map(0).invert(rt(0)) + map(1).invert(rt(1)));
+            let (t, s) = a.predict(p, 2).unwrap();
+            assert!((t - map(2).apply(tc)).abs() < 1e-6, "{p}");
+            assert!(t > warps[2](truth[p as usize]) + 200.0, "{p}");
+            assert!(s.is_finite() && s > 0.0);
+            assert!(a.predict_excluding(p, 0).is_some());
+        }
+        // Round trip, and a second observation of a pair is refused.
+        let b = Alignment::from_runs(a.runs(), 620).unwrap();
+        assert_eq!(bits(a.predict(605, 2)), bits(b.predict(605, 2)));
+        assert!(a.add_observations(&extra[..1]).is_err());
     }
 
     #[test]

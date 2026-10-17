@@ -1,6 +1,7 @@
 //! The match-between-runs library on disk: `library.parquet` (one row per
 //! precursor id: identity, proteins and, for library entries, the entry
-//! fields, the empirical fragment spectrum of the best donor PSM and the
+//! fields (with the identity-decoy flag and the best donor PSM's score,
+//! q-value and PEP), the empirical fragment spectrum of the best donor PSM and the
 //! retention times of every donor PSM) and `alignment.parquet` (one row per run: the run map, residual
 //! widths, anchor statistics, alignment component and the run's
 //! observations). Together they
@@ -29,11 +30,11 @@ use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use parquet::format::KeyValue;
 use quant::align::{Alignment, RunAlignment, RunMap};
-use quant::library::{Library, LibraryEntry, PrecursorMeta};
+use quant::library::{DonorPsm, Library, LibraryEntry, PrecursorMeta};
 use quant::ms2::{Ion, LibraryFragment, LibrarySpectrum};
 
 /// Major version of both layouts. A reader rejects any other major.
-pub const LIBRARY_SCHEMA_MAJOR: u32 = 3;
+pub const LIBRARY_SCHEMA_MAJOR: u32 = 4;
 /// File name of the precursor table inside the quant directory.
 pub const LIBRARY_FILE: &str = "library.parquet";
 /// File name of the alignment table inside the quant directory.
@@ -49,7 +50,7 @@ const DONOR_PEP_KEY: &str = "andes.library.donor_pep";
 /// Key of [`library_fingerprint`] in `library.parquet`; extract tables copy it.
 pub const FINGERPRINT_KEY: &str = "andes.library.fingerprint";
 const ALIGNMENT_FINGERPRINT_KEY: &str = "andes.alignment.fingerprint";
-const SCHEMA_VERSION: &str = "3.0";
+const SCHEMA_VERSION: &str = "4.0";
 /// Rows per Parquet row group / record batch of the precursor table.
 const BATCH_ROWS: usize = 65_536;
 const ENVELOPE_LEN: usize = 4;
@@ -90,6 +91,10 @@ fn library_schema() -> Schema {
         Field::new("envelope", list(DataType::Float32), false),
         Field::new("proteins", DataType::Utf8, false),
         Field::new("entry_q", DataType::Float64, true),
+        Field::new("identity_decoy", DataType::Boolean, true),
+        Field::new("donor_score", DataType::Float64, true),
+        Field::new("donor_psm_q", DataType::Float64, true),
+        Field::new("donor_psm_pep", DataType::Float64, true),
         Field::new("faims_cv", DataType::Float32, true),
         Field::new("donors", list(DataType::UInt16), false),
         Field::new("best_rt_run", list(DataType::UInt16), false),
@@ -233,7 +238,11 @@ pub fn library_fingerprint(lib: &StoredLibrary) -> String {
     h.u64(lib.library.entries.len() as u64);
     for e in &lib.library.entries {
         h.u64(e.precursor as u64);
+        h.u64(u64::from(e.identity_decoy));
         h.f64(e.q);
+        h.f64(e.donor_psm.score);
+        h.f64(e.donor_psm.q);
+        h.f64(e.donor_psm.pep);
         h.u64(e.faims_cv.map_or(u64::MAX, |v| v.to_bits() as u64));
         h.u64(e.donors.len() as u64);
         e.donors.iter().for_each(|&d| h.u64(d as u64));
@@ -263,6 +272,10 @@ fn library_batch(
     let mut env = ListBuilder::new(Float32Builder::new());
     let mut prot = StringBuilder::new();
     let mut q = Float64Builder::new();
+    let mut id_decoy = BooleanBuilder::new();
+    let mut d_score = Float64Builder::new();
+    let mut d_q = Float64Builder::new();
+    let mut d_pep = Float64Builder::new();
     let mut cv = Float32Builder::new();
     let mut donors = ListBuilder::new(UInt16Builder::new());
     let mut best_run = ListBuilder::new(UInt16Builder::new());
@@ -282,6 +295,10 @@ fn library_batch(
         prot.append_value(&lib.proteins[id]);
         let e = entry_of[id];
         q.append_option(e.map(|e| e.q));
+        id_decoy.append_option(e.map(|e| e.identity_decoy));
+        d_score.append_option(e.map(|e| e.donor_psm.score));
+        d_q.append_option(e.map(|e| e.donor_psm.q));
+        d_pep.append_option(e.map(|e| e.donor_psm.pep));
         cv.append_option(e.and_then(|e| e.faims_cv));
         if let Some(e) = e {
             donors.values().append_slice(&e.donors);
@@ -315,6 +332,10 @@ fn library_batch(
         Arc::new(env.finish()),
         Arc::new(prot.finish()),
         Arc::new(q.finish()),
+        Arc::new(id_decoy.finish()),
+        Arc::new(d_score.finish()),
+        Arc::new(d_q.finish()),
+        Arc::new(d_pep.finish()),
         Arc::new(cv.finish()),
         Arc::new(donors.finish()),
         Arc::new(best_run.finish()),
@@ -692,15 +713,19 @@ pub fn read_library(dir: &Path) -> Result<StoredLibrary, String> {
         let env = column::<ListArray>(&b, 3, &lib_path)?;
         let prot = column::<StringArray>(&b, 4, &lib_path)?;
         let q = column::<Float64Array>(&b, 5, &lib_path)?;
-        let cv = column::<Float32Array>(&b, 6, &lib_path)?;
-        let donors = column::<ListArray>(&b, 7, &lib_path)?;
-        let best_run = column::<ListArray>(&b, 8, &lib_path)?;
-        let best_rt = column::<ListArray>(&b, 9, &lib_path)?;
-        let frag_mz = column::<ListArray>(&b, 10, &lib_path)?;
-        let frag_int = column::<ListArray>(&b, 11, &lib_path)?;
-        let frag_ion = column::<ListArray>(&b, 12, &lib_path)?;
-        let scan_run = column::<ListArray>(&b, 13, &lib_path)?;
-        let scan_rt = column::<ListArray>(&b, 14, &lib_path)?;
+        let id_decoy = column::<BooleanArray>(&b, 6, &lib_path)?;
+        let d_score = column::<Float64Array>(&b, 7, &lib_path)?;
+        let d_q = column::<Float64Array>(&b, 8, &lib_path)?;
+        let d_pep = column::<Float64Array>(&b, 9, &lib_path)?;
+        let cv = column::<Float32Array>(&b, 10, &lib_path)?;
+        let donors = column::<ListArray>(&b, 11, &lib_path)?;
+        let best_run = column::<ListArray>(&b, 12, &lib_path)?;
+        let best_rt = column::<ListArray>(&b, 13, &lib_path)?;
+        let frag_mz = column::<ListArray>(&b, 14, &lib_path)?;
+        let frag_int = column::<ListArray>(&b, 15, &lib_path)?;
+        let frag_ion = column::<ListArray>(&b, 16, &lib_path)?;
+        let scan_run = column::<ListArray>(&b, 17, &lib_path)?;
+        let scan_rt = column::<ListArray>(&b, 18, &lib_path)?;
         for i in 0..b.num_rows() {
             let id = meta_rows.len();
             let mzs = f64s(frag_mz, i, &lib_path)?;
@@ -768,10 +793,21 @@ pub fn read_library(dir: &Path) -> Result<StoredLibrary, String> {
                     rts_b.len()
                 )));
             }
+            if id_decoy.is_null(i) || d_score.is_null(i) || d_q.is_null(i) || d_pep.is_null(i) {
+                return Err(lerr(&format!(
+                    "precursor {id}: an entry without its identity decoy flag or donor PSM"
+                )));
+            }
             entries.push(LibraryEntry {
                 precursor: u32::try_from(id)
                     .map_err(|_| lerr(&"more precursors than the id range"))?,
+                identity_decoy: id_decoy.value(i),
                 q: q.value(i),
+                donor_psm: DonorPsm {
+                    score: d_score.value(i),
+                    q: d_q.value(i),
+                    pep: d_pep.value(i),
+                },
                 consensus_rt: f64::NAN,
                 faims_cv: (!cv.is_null(i)).then(|| cv.value(i)),
                 donors: u16s(donors, i, &lib_path)?,
@@ -917,8 +953,8 @@ mod tests {
     use quant::align::AlignParams;
     use quant::library::{build_library, PsmIn};
 
-    /// 300 precursors over three warped runs, 20 decoys, a FAIMS voltage on
-    /// some, precursor 0 seen in run 0 only.
+    /// 300 precursors over three warped runs, 20 decoys (one an identity
+    /// decoy), a FAIMS voltage on some, precursor 0 seen in run 0 only.
     fn stored() -> StoredLibrary {
         let n = 320usize;
         let meta: Vec<PrecursorMeta> = (0..n)
@@ -946,9 +982,14 @@ mod tests {
                     run: r,
                     precursor: p,
                     rt,
-                    score: if decoy { 1.0 } else { 100.0 + p as f64 },
+                    // Decoy 300 passes the entry gate: an identity decoy.
+                    score: match p {
+                        300 => 250.5,
+                        _ if decoy => 1.0,
+                        _ => 100.0 + p as f64,
+                    },
                     q: 0.0,
-                    pep: 0.0,
+                    pep: 1e-3 * r as f64,
                     is_decoy: decoy,
                     faims_cv: (p % 3 == 0).then_some(-45.0),
                 });
@@ -1002,6 +1043,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = stored();
         assert!(s.library.alignment.maps.iter().all(Option::is_some));
+        let decoys: Vec<u32> = s
+            .library
+            .entries
+            .iter()
+            .filter(|e| e.identity_decoy)
+            .map(|e| e.precursor)
+            .collect();
+        assert_eq!(decoys, vec![300]);
         write_library(dir.path(), &s).unwrap();
         let back = read_library(dir.path()).unwrap();
         assert_eq!(back.runs, s.runs);
@@ -1016,6 +1065,8 @@ mod tests {
         assert_eq!(back.library.entries.len(), s.library.entries.len());
         for (a, b) in s.library.entries.iter().zip(&back.library.entries) {
             assert_eq!(a.precursor, b.precursor);
+            assert_eq!(a.identity_decoy, b.identity_decoy);
+            assert_eq!(a.donor_psm, b.donor_psm);
             assert_eq!(a.q.to_bits(), b.q.to_bits());
             assert_eq!(a.consensus_rt.to_bits(), b.consensus_rt.to_bits());
             assert_eq!(

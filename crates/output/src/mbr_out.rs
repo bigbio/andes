@@ -109,6 +109,12 @@ pub struct Accepted {
     pub mass_only: usize,
     /// RT-shift decoys only.
     pub rt_only: usize,
+    /// Transfer targets at or below the threshold by the wrong-peak decoy
+    /// families alone (without the identity decoys).
+    pub wrong_peak_only: usize,
+    /// Decoy transfer rows at or below the threshold: mass-shift, RT-shift,
+    /// identity decoys.
+    pub decoys: [usize; 3],
 }
 
 /// The pseudo-transfer validation and transfer counts of one finalize.
@@ -154,7 +160,25 @@ pub struct MbrValidation {
     pub ms2_pseudo_supported: usize,
     /// Accepted transfers reported as `transfer_ms2`.
     pub transfer_ms2: usize,
+    /// Target and identity-decoy library entries.
+    pub target_entries: usize,
+    pub identity_entries: usize,
+    /// Decoy transfer rows with a q-value: mass-shift, RT-shift, identity
+    /// decoys.
+    pub decoy_transfers: [usize; 3],
+    /// Transfer targets not transferred because their best donor PSM is
+    /// above the transfer donor q-value.
+    pub donor_gated: usize,
 }
+
+/// Columns of the decoy acceptance, each followed by `_q01` and by
+/// `_at_threshold`, after the MS2 columns.
+const DECOY_ACCEPTED_COLUMNS: [&str; 4] = [
+    "accepted_wrong_peak_only",
+    "accepted_mass_decoys",
+    "accepted_rt_decoys",
+    "accepted_identity_decoys",
+];
 
 /// Columns of the accepted counts, each followed by `_q01` and by
 /// `_at_threshold`.
@@ -203,6 +227,21 @@ pub fn validation_columns() -> Vec<String> {
             "ms2_pseudo_rows",
             "ms2_pseudo_supported",
             "transfer_ms2",
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+    );
+    for suffix in ["_q01", "_at_threshold"] {
+        c.extend(DECOY_ACCEPTED_COLUMNS.iter().map(|n| format!("{n}{suffix}")));
+    }
+    c.extend(
+        [
+            "target_entries",
+            "identity_entries",
+            "mass_decoy_transfers",
+            "rt_decoy_transfers",
+            "identity_decoy_transfers",
+            "donor_gated",
         ]
         .iter()
         .map(|s| s.to_string()),
@@ -312,6 +351,23 @@ pub fn write_mbr_validation(path: &Path, v: &MbrValidation) -> Result<(), String
         "\t{}\t{}\t{}",
         v.ms2_pseudo_rows, v.ms2_pseudo_supported, v.transfer_ms2
     );
+    for a in [&v.at_q01, &v.at_threshold] {
+        let _ = write!(
+            line,
+            "\t{}\t{}\t{}\t{}",
+            a.wrong_peak_only, a.decoys[0], a.decoys[1], a.decoys[2]
+        );
+    }
+    let _ = write!(
+        line,
+        "\t{}\t{}\t{}\t{}\t{}\t{}",
+        v.target_entries,
+        v.identity_entries,
+        v.decoy_transfers[0],
+        v.decoy_transfers[1],
+        v.decoy_transfers[2],
+        v.donor_gated
+    );
     text.push_str(&line);
     text.push('\n');
     write_atomic(path, &text)
@@ -388,6 +444,8 @@ mod tests {
                 pooled: 40,
                 mass_only: 41,
                 rt_only: 39,
+                wrong_peak_only: 44,
+                decoys: [1, 2, 3],
             },
             at_threshold: Accepted {
                 pseudo: 9,
@@ -396,6 +454,8 @@ mod tests {
                 pooled: 60,
                 mass_only: 61,
                 rt_only: 59,
+                wrong_peak_only: 66,
+                decoys: [4, 5, 6],
             },
             quant_feature_threshold: None,
             identified: 50,
@@ -407,6 +467,10 @@ mod tests {
             ms2_pseudo_rows: 10,
             ms2_pseudo_supported: 4,
             transfer_ms2: 25,
+            target_entries: 70,
+            identity_entries: 2,
+            decoy_transfers: [95, 85, 7],
+            donor_gated: 3,
         };
         write_mbr_validation(&p, &v).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
@@ -434,5 +498,11 @@ mod tests {
         assert_eq!(get("ms2_rt_decoy_rows"), "80");
         assert_eq!(get("ms2_pseudo_supported"), "4");
         assert_eq!(get("transfer_ms2"), "25");
+        assert_eq!(get("accepted_wrong_peak_only_q01"), "44");
+        assert_eq!(get("accepted_identity_decoys_q01"), "3");
+        assert_eq!(get("accepted_mass_decoys_at_threshold"), "4");
+        assert_eq!(get("identity_entries"), "2");
+        assert_eq!(get("identity_decoy_transfers"), "7");
+        assert_eq!(get("donor_gated"), "3");
     }
 }

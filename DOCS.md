@@ -683,9 +683,11 @@ once `library.parquet` and `alignment.parquet` (library). Each file carries a sc
 `<stem>.extract.parquet` is at schema 4: schema 3 added the MS2 evidence of the transfer and
 pseudo-transfer rows (`ms2_n_scans`, `ms2_n_matched`, `ms2_angle`, `ms2_explained`) and
 schema 4 the per-isotope heights (`iso_h0` to `iso_h3`) and `tailing` of every fit; an older
-extract table is rejected (run `andes quant extract` again). `library.parquet` is at schema 3,
-which added each entry's fragment spectrum (`frag_mz`, `frag_intensity`, `frag_ion` such as
-`y7` or `b5^2`) and its donor PSMs' runs and RTs (`donor_scan_run`, `donor_scan_rt`).
+extract table is rejected (run `andes quant extract` again). `library.parquet` is at schema 4:
+schema 3 added each entry's fragment spectrum (`frag_mz`, `frag_intensity`, `frag_ion` such as
+`y7` or `b5^2`) and its donor PSMs' runs and RTs (`donor_scan_run`, `donor_scan_rt`), and
+schema 4 the identity-decoy flag (`identity_decoy`) and the best donor PSM's score, q-value
+and PEP (`donor_score`, `donor_psm_q`, `donor_psm_pep`) of every entry.
 `<stem>.ms1.parquet` holds one row per
 MS1 scan in retention-time order: `native_id`, `rt_s`, `faims_cv` (null without FAIMS), and the
 centroids as two equal-length lists `mz` (Float64) and `intensity` (Float32), stored bit for bit;

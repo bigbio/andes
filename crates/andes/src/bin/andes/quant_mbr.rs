@@ -86,14 +86,15 @@ use output::ms1_table::read_ms1_table;
 use quant::align::RunMap;
 use quant::decoys::{probes, Hypothesis, Probe, PEPTIDE_MASS_SLOPE};
 use quant::evidence::{fit_many, Evidence, EvidenceParams, FitJob, WIDTH_GRID};
-use quant::library::{Library, LibraryEntry};
+use quant::library::{DonorPsm, Library, LibraryEntry};
 use quant::ms1_index::Ms1RunIndex;
 use quant::ms2::{elution_window, LibrarySpectrum, Ms2RunIndex};
 use quant::normalize::{fit as fit_normalization, NormCell, NormParams, RunNormalization};
 use rayon::prelude::*;
 
 use crate::transfer_fdr::{
-    transfer_fdr, FdrCounts, FdrRow, IDENTIFIED_FEATURES, TRANSFER_FEATURES,
+    transfer_fdr, FdrCounts, FdrRow, DONOR_FEATURES, IDENTIFIED_FEATURES, IDENTITY,
+    TRANSFER_FEATURES,
 };
 
 pub(crate) use output::extract_table::{ExtractRole as Role, ExtractRow};
@@ -344,7 +345,8 @@ fn fit_on_series(
 }
 
 /// The usable width-free fits `(t0, w)` of the identified pairs among the
-/// entries `ids`, each fitted on `series[series_of(id)]`.
+/// entries `ids` (identity decoys left out), each fitted on
+/// `series[series_of(id)]`.
 fn width_fits<F>(
     ids: &[usize],
     run: u16,
@@ -360,6 +362,9 @@ where
         .iter()
         .filter_map(|&i| {
             let e = &lib.entries[i];
+            if e.identity_decoy {
+                return None;
+            }
             let rt = identified_rt(e, run).filter(|rt| rt.is_finite())?;
             let meta = &lib.meta[e.precursor as usize];
             let probe = Probe {
@@ -914,11 +919,69 @@ impl DonorShapes {
     }
 }
 
-/// The transfer FDR features of a row, in [`TRANSFER_FEATURES`] order;
-/// `None` without evidence or with a non-finite value. The last three
-/// compare the row's peak shape with its precursor's identified fits in the
-/// other runs ([`DonorShapes::features`]): width, tailing and isotope
-/// ratios, none of them a quantity. The MS2 evidence is
+/// How the identity decoys take part in the transfer FDR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IdentityDecoys {
+    /// Left out: the transfer q-value sees wrong peaks only.
+    Off,
+    /// Scored by the fold models and counted in the transfer q-value.
+    Scored,
+    /// Also negatives of the classifier's training.
+    Trained,
+}
+
+/// The transfer model of [`finalize`]: the identity decoys, the feature
+/// groups beyond the fit evidence, and the donor PSM q-value a transfer
+/// needs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct TransferModel {
+    pub identity: IdentityDecoys,
+    /// The peak-shape agreement with the donor fits.
+    pub shape: bool,
+    /// The best donor PSM's score, q-value and PEP.
+    pub donor_psm: bool,
+    /// Entries whose best donor PSM has a larger q-value are not
+    /// transferred.
+    pub transfer_donor_q: Option<f64>,
+}
+
+impl Default for TransferModel {
+    fn default() -> Self {
+        Self {
+            identity: IdentityDecoys::Off,
+            shape: true,
+            donor_psm: false,
+            transfer_donor_q: None,
+        }
+    }
+}
+
+impl TransferModel {
+    /// The feature names, in [`transfer_features`] order.
+    pub(crate) fn feature_names(&self) -> Vec<&'static str> {
+        let mut v = TRANSFER_FEATURES[..TRANSFER_FEATURES.len() - SHAPE_FEATURES].to_vec();
+        if self.shape {
+            v.extend_from_slice(&TRANSFER_FEATURES[TRANSFER_FEATURES.len() - SHAPE_FEATURES..]);
+        }
+        if self.donor_psm {
+            v.extend_from_slice(DONOR_FEATURES);
+        }
+        v
+    }
+}
+
+/// The shape features at the end of [`TRANSFER_FEATURES`].
+const SHAPE_FEATURES: usize = 3;
+
+/// The transfer FDR features of a row, in [`TransferModel::feature_names`]
+/// order; `None` without evidence or with a non-finite value. The fit
+/// evidence, the donor-run count and the library q-value come first. The
+/// shape features compare the row's peak shape with its precursor's
+/// identified fits in the other runs ([`DonorShapes::features`]): width,
+/// tailing and isotope ratios, none of them a quantity. The donor features
+/// are the score, q-value and PEP of the entry's best donor PSM (`donor`).
+/// A row and its decoys share the donor-run count, library q-value and donor
+/// features; only an identity decoy's own donors differ. The MS2 evidence is
 /// not a feature: MS2 support shows that the peptide was isolated, not that
 /// the quantified MS1 peak is its peak, and the decoys cannot imitate a
 /// transfer of the right peptide on the wrong peak (with MS2 features the
@@ -928,11 +991,12 @@ pub(crate) fn transfer_features(
     row: &ExtractRow,
     shapes: &DonorShapes,
     maps: &[Option<RunMap>],
+    model: &TransferModel,
+    donor: &DonorPsm,
 ) -> Option<Vec<f32>> {
     let e = row.evidence.as_ref()?;
     let snr = e.amplitude / e.amplitude_se.max(MIN_AMPLITUDE_SE);
-    let [shape_width, shape_tailing, shape_iso] = shapes.features(row, maps);
-    let x = [
+    let mut x = vec![
         e.llr,
         e.rt_z,
         e.rt_z.abs(),
@@ -946,11 +1010,14 @@ pub(crate) fn transfer_features(
         (snr + 1.0).log10(),
         row.n_donor_runs as f64,
         row.library_q,
-        shape_width,
-        shape_tailing,
-        shape_iso,
     ];
-    debug_assert_eq!(x.len(), TRANSFER_FEATURES.len());
+    if model.shape {
+        x.extend(shapes.features(row, maps));
+    }
+    if model.donor_psm {
+        x.extend([donor.score, donor.q, donor.pep]);
+    }
+    debug_assert_eq!(x.len(), model.feature_names().len());
     let x: Vec<f32> = x.iter().map(|&v| v as f32).collect();
     x.iter().all(|v| v.is_finite()).then_some(x)
 }
@@ -1049,6 +1116,7 @@ pub(crate) fn finalize(
     runs: &[Vec<ExtractRow>],
     mbr_fdr: f64,
     quant_feature_fdr: Option<f64>,
+    model: &TransferModel,
     seed: u64,
     mbr_tsv: &Path,
     validation_tsv: &Path,
@@ -1077,6 +1145,28 @@ pub(crate) fn finalize(
         ));
     }
 
+    // Per precursor id, its library entry.
+    let mut entry_of: Vec<Option<&LibraryEntry>> = vec![None; lib.meta.len()];
+    for e in &lib.entries {
+        if let Some(slot) = entry_of.get_mut(e.precursor as usize) {
+            *slot = Some(e);
+        }
+    }
+    let is_identity = |p: u32| entry_of[p as usize].is_some_and(|e| e.identity_decoy);
+    let no_donor = DonorPsm {
+        score: f64::NAN,
+        q: f64::NAN,
+        pep: f64::NAN,
+    };
+    let donor_of = |p: u32| entry_of[p as usize].map_or(no_donor, |e| e.donor_psm);
+    // Not transferred: the best donor PSM is above the transfer donor q.
+    let gated = |p: u32| {
+        model.transfer_donor_q.is_some_and(|t| {
+            let q = donor_of(p).q;
+            q.is_nan() || q > t
+        })
+    };
+
     let mut summary = FinalizeSummary::default();
     let mut fdr_rows = Vec::new();
     let mut id_rows = Vec::new();
@@ -1096,14 +1186,26 @@ pub(crate) fn finalize(
                 r.run
             );
         }
+        // An identity decoy's rows take part only through its transfer
+        // targets, as the identity-decoy family.
+        let identity = is_identity(r.precursor);
         let (features, table, missing) = match r.role {
+            Role::Identified if identity => continue,
             Role::Identified => (
                 identified_features(r),
                 &mut id_rows,
                 &mut summary.identified_no_features,
             ),
+            Role::Transfer
+                if identity
+                    && (r.kind != Hypothesis::Target
+                        || model.identity == IdentityDecoys::Off) =>
+            {
+                continue
+            }
+            Role::Transfer if gated(r.precursor) => continue,
             Role::Transfer => (
-                transfer_features(r, &shapes, maps),
+                transfer_features(r, &shapes, maps, model, &donor_of(r.precursor)),
                 &mut fdr_rows,
                 &mut summary.no_features,
             ),
@@ -1113,7 +1215,7 @@ pub(crate) fn finalize(
             *missing += 1;
             continue;
         };
-        let family = family(r.kind);
+        let family = if identity { IDENTITY } else { family(r.kind) };
         fdr_index[i] = Some(table.len());
         table.push(FdrRow {
             precursor: r.precursor,
@@ -1122,8 +1224,8 @@ pub(crate) fn finalize(
             x,
         });
     }
-    let fdr = transfer_fdr(&fdr_rows, seed);
-    let id_fdr = transfer_fdr(&id_rows, seed);
+    let fdr = transfer_fdr(&fdr_rows, seed, model.identity == IdentityDecoys::Trained);
+    let id_fdr = transfer_fdr(&id_rows, seed, false);
     let w_c = consensus_widths(rows.iter().copied(), maps);
     let reported = |r: &ExtractRow| {
         r.evidence
@@ -1141,18 +1243,45 @@ pub(crate) fn finalize(
     let thresholds = [VALIDATION_Q, mbr_fdr];
     let mut at = [Accepted::default(), Accepted::default()];
 
+    let identity_entries = lib.entries.iter().filter(|e| e.identity_decoy).count();
     let mut v = MbrValidation {
         q_threshold: mbr_fdr,
         quant_feature_threshold: quant_feature_fdr,
+        target_entries: lib.entries.len() - identity_entries,
+        identity_entries,
         ..MbrValidation::default()
+    };
+    // Decoy transfer rows with a q-value, and their acceptance, by family:
+    // mass shift, RT shift, identity decoy.
+    let count_decoy = |v: &mut MbrValidation, at: &mut [Accepted; 2], i: usize, f: usize| {
+        let Some(q) = fdr_index[i].and_then(|k| fdr.result.q[k]) else {
+            return;
+        };
+        v.decoy_transfers[f] += 1;
+        for (a, &t) in at.iter_mut().zip(&thresholds) {
+            a.decoys[f] += usize::from(q <= t);
+        }
     };
     let mut out: Vec<(u32, u16, MbrRow<'_>, Option<f64>)> = Vec::new();
     for (i, r) in rows.iter().enumerate() {
+        if is_identity(r.precursor) {
+            // Never reported: only the identity-decoy family's counts.
+            if (r.role, r.kind) == (Role::Transfer, Hypothesis::Target) {
+                count_decoy(&mut v, &mut at, i, 2);
+            }
+            continue;
+        }
+        if r.role == Role::Transfer && r.kind == Hypothesis::Target && gated(r.precursor) {
+            v.donor_gated += 1;
+        }
         if r.kind != Hypothesis::Target {
-            if let (Role::Transfer, Some(m)) = (r.role, &r.ms2) {
+            if r.role == Role::Transfer {
                 let f = family(r.kind) as usize;
-                v.ms2_rows[f] += 1;
-                v.ms2_supported[f] += usize::from(m.supports());
+                count_decoy(&mut v, &mut at, i, f - 1);
+                if let Some(m) = &r.ms2 {
+                    v.ms2_rows[f] += 1;
+                    v.ms2_supported[f] += usize::from(m.supports());
+                }
             }
             continue;
         }
@@ -1186,6 +1315,7 @@ pub(crate) fn finalize(
                     if let Some(k) = fdr_index[i] {
                         a.mass_only += ok(fdr.result.q_mass_only[k]);
                         a.rt_only += ok(fdr.result.q_rt_only[k]);
+                        a.wrong_peak_only += ok(fdr.result.q_wrong_peak[k]);
                     }
                 }
                 let supported = r.ms2.is_some_and(|m| m.supports());
@@ -1204,8 +1334,8 @@ pub(crate) fn finalize(
                 (t, q, q)
             }
             Role::PseudoTransfer => {
-                let q =
-                    transfer_features(r, &shapes, maps).and_then(|x| fdr.pseudo_q(r.precursor, &x));
+                let q = transfer_features(r, &shapes, maps, model, &donor_of(r.precursor))
+                    .and_then(|x| fdr.pseudo_q(r.precursor, &x));
                 v.pseudo_transfers += 1;
                 if let Some(m) = &r.ms2 {
                     v.ms2_pseudo_rows += 1;
@@ -1277,7 +1407,17 @@ pub(crate) fn finalize(
 
     eprintln!(
         "[mbr] transfer FDR (internal quant-quality score) features: {}",
-        TRANSFER_FEATURES.join(",")
+        model.feature_names().join(",")
+    );
+    eprintln!(
+        "[mbr] transfer model: identity decoys {:?}, transfer donor PSM q {}; library entries {} targets, {} identity decoys; {} transfer targets not transferred for their donor PSM",
+        model.identity,
+        model
+            .transfer_donor_q
+            .map_or("any".to_string(), |t| format!("<= {t}")),
+        v.target_entries,
+        v.identity_entries,
+        v.donor_gated
     );
     for f in &fdr.counts.failed_folds {
         eprintln!("[mbr] transfer FDR fold without a model: {f}");
@@ -1353,6 +1493,16 @@ pub(crate) fn finalize(
         &[(VALIDATION_Q, &v.at_q01), (mbr_fdr, &v.at_threshold)]
     };
     for &(t, a) in shown {
+        eprintln!(
+            "[mbr] at q <= {t}: decoy transfers accepted: mass-shift {} of {}, RT-shift {} of {}, identity decoys {} of {}; {} transfers would pass on the wrong-peak decoys alone",
+            a.decoys[0],
+            v.decoy_transfers[0],
+            a.decoys[1],
+            v.decoy_transfers[1],
+            a.decoys[2],
+            v.decoy_transfers[2],
+            a.wrong_peak_only
+        );
         eprintln!(
             "[mbr] at q <= {t}: {} transfers (mass-shift decoys only {}, RT-shift decoys only {}); {} pseudo-transfers (acceptance rate {}, optimistic for transfers: the alignment kept their runs' anchors), {} of {} accepted at the wrong peak",
             a.pooled,
@@ -1500,6 +1650,17 @@ mod tests {
         silent_in_run1: &dyn Fn(u32) -> bool,
         weak_in_run1: &dyn Fn(u32) -> bool,
     ) -> Fixture {
+        fixture_decoys(faims, silent_in_run1, weak_in_run1, &|_| false)
+    }
+
+    /// [`fixture_with`] where the precursors in `decoy` are decoy
+    /// precursors: their PSMs are decoy PSMs, so they are identity decoys.
+    fn fixture_decoys(
+        faims: bool,
+        silent_in_run1: &dyn Fn(u32) -> bool,
+        weak_in_run1: &dyn Fn(u32) -> bool,
+        decoy: &dyn Fn(u32) -> bool,
+    ) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let meta: Vec<PrecursorMeta> = (0..N_PREC)
             .map(|p| PrecursorMeta {
@@ -1522,7 +1683,7 @@ mod tests {
                     0.001
                 },
                 pep: 0.0,
-                is_decoy: false,
+                is_decoy: decoy(p),
                 faims_cv: (faims && run == 1).then_some(FAIMS_CVS[p as usize % 2]),
             })
         };
@@ -1662,6 +1823,56 @@ mod tests {
     }
 
     #[test]
+    fn identity_decoys_are_measured_as_targets() {
+        // Precursor ONLY_RUN0 as a decoy precursor: its decoy PSM in run 0
+        // makes it an identity decoy on the same real MS1 feature.
+        let target = fixture(false);
+        let decoy = fixture_decoys(false, &|_| false, &|_| false, &|p| p == ONLY_RUN0);
+        let e = decoy
+            .lib
+            .entries
+            .iter()
+            .find(|e| e.precursor == ONLY_RUN0)
+            .unwrap();
+        assert!(e.identity_decoy);
+        assert_eq!(e.donors, vec![0]);
+        // The decoy moves every entry gate q-value; nothing else differs.
+        let same = |rows: Vec<&ExtractRow>| -> Vec<ExtractRow> {
+            rows.into_iter()
+                .map(|r| ExtractRow {
+                    library_q: 0.0,
+                    ..r.clone()
+                })
+                .collect()
+        };
+        for run in [0u16, 1] {
+            let a = extract_run(run, &target.ms1_tables[run as usize], &target.lib, &params())
+                .unwrap();
+            let b =
+                extract_run(run, &decoy.ms1_tables[run as usize], &decoy.lib, &params()).unwrap();
+            let rows = rows_of(&b.rows, ONLY_RUN0);
+            // Identified in run 0 (target and decoy probes), a transfer with
+            // its decoys in run 1: the target entry's rows, fitted alike.
+            assert_eq!(rows.len(), 3, "run {run}: {rows:?}");
+            let role = if run == 0 {
+                Role::Identified
+            } else {
+                Role::Transfer
+            };
+            assert!(rows.iter().all(|r| r.role == role));
+            if run == 1 {
+                assert_eq!(same(rows_of(&a.rows, ONLY_RUN0)), same(rows));
+                let ev = rows[0].evidence.as_ref().unwrap();
+                assert!(ev.llr > 100.0, "{ev:?}");
+                assert_eq!(same(a.rows.iter().collect()), same(b.rows.iter().collect()));
+            } else {
+                // The width prior of run 0 leaves the identity decoy out.
+                assert_eq!(a.counts.width_fits, b.counts.width_fits + 1);
+            }
+        }
+    }
+
+    #[test]
     fn missing_pairs_get_target_and_decoys() {
         let fx = fixture(false);
         let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
@@ -1796,7 +2007,7 @@ mod tests {
             .collect();
         let stems: Vec<String> = ["r0", "r1", "r2"].map(String::from).to_vec();
         let (mbr, val) = mbr_paths(&fx._dir.path().join("x"));
-        finalize(&stems, &fx.lib, &runs, 0.01, None, 7, &mbr, &val).unwrap();
+        finalize(&stems, &fx.lib, &runs, 0.01, None, &TransferModel::default(), 7, &mbr, &val).unwrap();
         let text = std::fs::read_to_string(&mbr).unwrap();
         let in_r2: Vec<&str> = text
             .lines()
@@ -2010,6 +2221,13 @@ mod finalize_tests {
     use quant::align::AlignParams;
     use quant::library::{build_library, PrecursorMeta};
 
+    /// A donor PSM for feature tests.
+    const DONOR: DonorPsm = DonorPsm {
+        score: 10.0,
+        q: 0.001,
+        pep: 0.001,
+    };
+
     use super::*;
 
     const N: u32 = 900;
@@ -2150,6 +2368,155 @@ mod finalize_tests {
         vec!["a".into(), "b".into()]
     }
 
+    /// [`library`] with every precursor an entry identified in run 0; those
+    /// in `identity` are identity decoys. Precursor `p`'s best donor PSM has
+    /// q-value `p / 1e5`.
+    fn library_with(identity: &dyn Fn(u32) -> bool) -> Library {
+        let mut lib = library();
+        lib.entries = (0..N)
+            .map(|p| LibraryEntry {
+                precursor: p,
+                identity_decoy: identity(p),
+                q: 0.001,
+                donor_psm: DonorPsm {
+                    score: 10.0,
+                    q: p as f64 * 1e-5,
+                    pep: 1e-4,
+                },
+                consensus_rt: f64::NAN,
+                faims_cv: None,
+                donors: vec![0],
+                best_rt: vec![(0, 100.0 + p as f64)],
+            })
+            .collect();
+        lib
+    }
+
+    /// Every 50th precursor from 2 on: 18 identity decoys, all on a real
+    /// feature in run 1 (even precursors are present there), as the
+    /// transfer of a false donor onto the feature it was misidentified on.
+    fn on_real_features(p: u32) -> bool {
+        p % 50 == 2
+    }
+
+    fn model(identity: IdentityDecoys) -> TransferModel {
+        TransferModel {
+            identity,
+            ..TransferModel::default()
+        }
+    }
+
+    #[test]
+    fn identity_decoys_on_real_features_count_in_the_transfer_q() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mbr, val) = mbr_paths(&dir.path().join("x"));
+        let lib = library_with(&on_real_features);
+        for mode in [IdentityDecoys::Scored, IdentityDecoys::Trained] {
+            let s = finalize(&stems(), &lib, &extract(), 0.2, None, &model(mode), 7, &mbr, &val)
+                .unwrap();
+            let v = &s.validation;
+            eprintln!(
+                "{mode:?}: q 0.01 pooled {} wrong-peak only {}; identity decoys accepted at 0.2: {} of {}",
+                v.at_q01.pooled, v.at_q01.wrong_peak_only, v.at_threshold.decoys[2], v.decoy_transfers[2]
+            );
+            assert_eq!((v.target_entries, v.identity_entries), (882, 18));
+            assert_eq!(v.decoy_transfers[2], 18);
+            // On real features they look like true transfers and pass ...
+            assert!(v.at_threshold.decoys[2] >= 12, "{v:?}");
+            // ... so the transfer q-value counts about 4 % false donors
+            // that the wrong-peak decoys alone do not see.
+            assert!(v.at_q01.wrong_peak_only >= 380, "{v:?}");
+            assert!(2 * v.at_q01.pooled < v.at_q01.wrong_peak_only, "{v:?}");
+            assert!(v.at_threshold.pooled >= 380, "{v:?}");
+        }
+        let s = finalize(
+            &stems(),
+            &lib,
+            &extract(),
+            0.2,
+            None,
+            &model(IdentityDecoys::Off),
+            7,
+            &mbr,
+            &val,
+        )
+        .unwrap();
+        let v = &s.validation;
+        assert_eq!(v.decoy_transfers[2], 0);
+        assert_eq!(v.at_q01.pooled, v.at_q01.wrong_peak_only);
+    }
+
+    #[test]
+    fn identity_decoy_rows_never_reach_the_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mbr, val) = mbr_paths(&dir.path().join("x"));
+        let lib = library_with(&on_real_features);
+        for mode in [
+            IdentityDecoys::Off,
+            IdentityDecoys::Scored,
+            IdentityDecoys::Trained,
+        ] {
+            let s = finalize(&stems(), &lib, &extract(), 0.5, None, &model(mode), 7, &mbr, &val)
+                .unwrap();
+            let t = table(&mbr);
+            let keys: Vec<&str> = t[1..].iter().map(|r| r[0].as_str()).collect();
+            assert_eq!(keys.len(), 2 * (N as usize - 18), "{mode:?}");
+            for p in (0..N).filter(|&p| on_real_features(p)) {
+                let key = format!("PEP{p}/2");
+                assert!(!keys.contains(&key.as_str()), "{mode:?}: {key}");
+            }
+            assert_eq!(s.rows_written, keys.len());
+            assert!(s.features.iter().all(|f| !on_real_features(f.precursor)));
+            // The identified quality model and the normalisation never see
+            // them either: every reported identified row is a target's.
+            assert_eq!(s.validation.identified, N as usize - 18);
+        }
+    }
+
+    #[test]
+    fn donor_psm_features_and_transfer_donor_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mbr, val) = mbr_paths(&dir.path().join("x"));
+        let lib = library_with(&|_| false);
+        let m = TransferModel {
+            donor_psm: true,
+            ..TransferModel::default()
+        };
+        let names = m.feature_names();
+        assert_eq!(names.len(), TRANSFER_FEATURES.len() + DONOR_FEATURES.len());
+        let d = DonorPsm {
+            score: 3.5,
+            q: 0.002,
+            pep: 0.01,
+        };
+        let r = extract()[1][0].clone();
+        let x = transfer_features(&r, &DonorShapes::default(), &[], &m, &d).unwrap();
+        assert_eq!(x.len(), names.len());
+        for (a, b) in x[x.len() - 3..].iter().zip([3.5, 0.002, 0.01]) {
+            assert!((*a as f64 - b).abs() < 1e-9, "{a} vs {b}");
+        }
+        let no_shape = TransferModel {
+            shape: false,
+            ..m
+        };
+        let y = transfer_features(&r, &DonorShapes::default(), &[], &no_shape, &d).unwrap();
+        assert_eq!(y.len(), names.len() - 3);
+        // Precursors whose best donor PSM is above 0.004005 (p > 400) are
+        // not transferred: below threshold, without a q-value.
+        let gate = TransferModel {
+            transfer_donor_q: Some(0.004005),
+            ..TransferModel::default()
+        };
+        let s = finalize(&stems(), &lib, &extract(), 0.01, None, &gate, 7, &mbr, &val).unwrap();
+        assert_eq!(s.validation.donor_gated, N as usize - 401);
+        for f in &s.features {
+            if f.run == 1 && f.precursor > 400 {
+                assert_eq!(f.evidence_type, EvidenceType::BelowThreshold);
+                assert_eq!(f.transfer_q, None);
+            }
+        }
+    }
+
     fn table(path: &Path) -> Vec<Vec<String>> {
         std::fs::read_to_string(path)
             .unwrap()
@@ -2162,7 +2529,7 @@ mod finalize_tests {
     fn finalize_writes_one_row_per_target_pair_with_evidence_types() {
         let dir = tempfile::tempdir().unwrap();
         let (mbr, val) = mbr_paths(&dir.path().join("x"));
-        let s = finalize(&stems(), &library(), &extract(), 0.01, None, 7, &mbr, &val).unwrap();
+        let s = finalize(&stems(), &library(), &extract(), 0.01, None, &TransferModel::default(), 7, &mbr, &val).unwrap();
         let t = table(&mbr);
         assert_eq!(t[0][2], "evidence_type");
         let body = &t[1..];
@@ -2204,7 +2571,7 @@ mod finalize_tests {
     fn finalize_reports_pseudo_transfer_validation() {
         let dir = tempfile::tempdir().unwrap();
         let (mbr, val) = mbr_paths(&dir.path().join("x"));
-        let s = finalize(&stems(), &library(), &extract(), 0.01, None, 7, &mbr, &val).unwrap();
+        let s = finalize(&stems(), &library(), &extract(), 0.01, None, &TransferModel::default(), 7, &mbr, &val).unwrap();
         let v = &s.validation;
         eprintln!("validation: {v:?}");
         assert_eq!(v.pseudo_transfers, N as usize);
@@ -2223,7 +2590,7 @@ mod finalize_tests {
         assert_eq!(get("accepted_pooled_q01"), &v.at_q01.pooled.to_string());
 
         // A looser threshold keeps the q <= 0.01 counts and adds its own.
-        let loose = finalize(&stems(), &library(), &extract(), 0.5, None, 7, &mbr, &val).unwrap();
+        let loose = finalize(&stems(), &library(), &extract(), 0.5, None, &TransferModel::default(), 7, &mbr, &val).unwrap();
         let w = &loose.validation;
         assert_eq!(w.q_threshold, 0.5);
         assert_eq!(w.at_q01, v.at_q01);
@@ -2243,8 +2610,8 @@ mod finalize_tests {
         let runs = extract();
         let (m1, v1) = mbr_paths(&dir.path().join("one"));
         let (m2, v2) = mbr_paths(&dir.path().join("two"));
-        finalize(&stems(), &library(), &runs, 0.01, None, 3, &m1, &v1).unwrap();
-        finalize(&stems(), &library(), &runs, 0.01, None, 3, &m2, &v2).unwrap();
+        finalize(&stems(), &library(), &runs, 0.01, None, &TransferModel::default(), 3, &m1, &v1).unwrap();
+        finalize(&stems(), &library(), &runs, 0.01, None, &TransferModel::default(), 3, &m2, &v2).unwrap();
         assert_eq!(std::fs::read(&m1).unwrap(), std::fs::read(&m2).unwrap());
         assert_eq!(std::fs::read(&v1).unwrap(), std::fs::read(&v2).unwrap());
     }
@@ -2255,14 +2622,14 @@ mod finalize_tests {
         let (mbr, val) = mbr_paths(&dir.path().join("x"));
         let mut runs = extract();
         runs[1].push(row(0, 2, Hypothesis::Target, Role::Transfer, None));
-        let e = finalize(&stems(), &library(), &runs, 0.01, None, 1, &mbr, &val).unwrap_err();
+        let e = finalize(&stems(), &library(), &runs, 0.01, None, &TransferModel::default(), 1, &mbr, &val).unwrap_err();
         assert!(e.contains("run 2"), "{e}");
         runs[1].pop();
         runs[1].push(row(N, 1, Hypothesis::Target, Role::Transfer, None));
-        let e = finalize(&stems(), &library(), &runs, 0.01, None, 1, &mbr, &val).unwrap_err();
+        let e = finalize(&stems(), &library(), &runs, 0.01, None, &TransferModel::default(), 1, &mbr, &val).unwrap_err();
         assert!(e.contains(&format!("precursor {N}")), "{e}");
         for bad in [0.0, -0.1, 1.5, f64::NAN] {
-            assert!(finalize(&stems(), &library(), &extract(), bad, None, 1, &mbr, &val).is_err());
+            assert!(finalize(&stems(), &library(), &extract(), bad, None, &TransferModel::default(), 1, &mbr, &val).is_err());
         }
         assert!(!mbr.exists());
     }
@@ -2392,7 +2759,7 @@ mod finalize_tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let (mbr, val) = mbr_paths(&dir.path().join("x"));
-        let s = finalize(&stems(), &lib, &runs, 0.01, None, 7, &mbr, &val).unwrap();
+        let s = finalize(&stems(), &lib, &runs, 0.01, None, &TransferModel::default(), 7, &mbr, &val).unwrap();
         let mut p0 = s.features.iter().filter(|f| f.precursor == 0);
         let sqrt_2pi = (2.0 * std::f64::consts::PI).sqrt();
         let a = p0.next().unwrap();
@@ -2482,7 +2849,7 @@ mod finalize_tests {
         let dir = tempfile::tempdir().unwrap();
         let (mbr, val) = mbr_paths(&dir.path().join("x"));
         let runs = extract_with_identified_decoys();
-        let s = finalize(&stems(), &library(), &runs, 0.01, None, 7, &mbr, &val).unwrap();
+        let s = finalize(&stems(), &library(), &runs, 0.01, None, &TransferModel::default(), 7, &mbr, &val).unwrap();
         let mut q: HashMap<&str, Vec<f64>> = HashMap::new();
         for f in s.features.iter().filter(|f| f.run == 0) {
             assert_eq!(f.evidence_type, EvidenceType::Identified);
@@ -2549,7 +2916,7 @@ mod finalize_tests {
         let dir = tempfile::tempdir().unwrap();
         let (mbr, val) = mbr_paths(&dir.path().join("x"));
         let runs = extract_two_identified_runs(2.0);
-        let s = finalize(&stems(), &library(), &runs, 0.01, None, 7, &mbr, &val).unwrap();
+        let s = finalize(&stems(), &library(), &runs, 0.01, None, &TransferModel::default(), 7, &mbr, &val).unwrap();
         let get = |p: u32, run: u16| {
             s.features
                 .iter()
@@ -2595,7 +2962,7 @@ mod finalize_tests {
         let dir = tempfile::tempdir().unwrap();
         let (mbr, val) = mbr_paths(&dir.path().join("x"));
         let runs = extract_with_identified_decoys();
-        let s = finalize(&stems(), &library(), &runs, 0.01, None, 7, &mbr, &val).unwrap();
+        let s = finalize(&stems(), &library(), &runs, 0.01, None, &TransferModel::default(), 7, &mbr, &val).unwrap();
         assert!(s.features.iter().all(|f| f.quantity_normalized.is_none()));
         let t = table(&mbr);
         let col = t[0]
@@ -2610,9 +2977,9 @@ mod finalize_tests {
         let dir = tempfile::tempdir().unwrap();
         let (m1, v1) = mbr_paths(&dir.path().join("plain"));
         let (m2, v2) = mbr_paths(&dir.path().join("decoys"));
-        let plain = finalize(&stems(), &library(), &extract(), 0.01, None, 7, &m1, &v1).unwrap();
+        let plain = finalize(&stems(), &library(), &extract(), 0.01, None, &TransferModel::default(), 7, &m1, &v1).unwrap();
         let runs = extract_with_identified_decoys();
-        let with = finalize(&stems(), &library(), &runs, 0.01, None, 7, &m2, &v2).unwrap();
+        let with = finalize(&stems(), &library(), &runs, 0.01, None, &TransferModel::default(), 7, &m2, &v2).unwrap();
         let transfers = |s: &FinalizeSummary| -> Vec<(u32, Option<f64>, EvidenceType)> {
             s.features
                 .iter()
@@ -2635,7 +3002,7 @@ mod finalize_tests {
         let dir = tempfile::tempdir().unwrap();
         let (mbr, val) = mbr_paths(&dir.path().join("x"));
         let runs = extract_with_identified_decoys();
-        let s = finalize(&stems(), &library(), &runs, 0.01, Some(0.01), 7, &mbr, &val).unwrap();
+        let s = finalize(&stems(), &library(), &runs, 0.01, Some(0.01), &TransferModel::default(), 7, &mbr, &val).unwrap();
         let (mut flagged, mut kept) = (0, 0);
         for f in s.features.iter().filter(|f| f.run == 0) {
             let below = f.quant_q.is_none_or(|q| q > 0.01);
@@ -2670,7 +3037,7 @@ mod finalize_tests {
         assert_eq!(get("quant_feature_threshold"), "0.01");
         assert_eq!(get("identified_below_threshold"), &flagged.to_string());
         for bad in [0.0, 1.5, f64::NAN] {
-            assert!(finalize(&stems(), &library(), &runs, 0.01, Some(bad), 7, &mbr, &val).is_err());
+            assert!(finalize(&stems(), &library(), &runs, 0.01, Some(bad), &TransferModel::default(), 7, &mbr, &val).is_err());
         }
     }
 
@@ -2686,7 +3053,7 @@ mod finalize_tests {
         );
         r.n_donor_runs = 3;
         let e = r.evidence.clone().unwrap();
-        let x = transfer_features(&r, &DonorShapes::default(), &[]).unwrap();
+        let x = transfer_features(&r, &DonorShapes::default(), &[], &TransferModel::default(), &DONOR).unwrap();
         assert_eq!(x.len(), TRANSFER_FEATURES.len());
         let at = |name: &str| x[TRANSFER_FEATURES.iter().position(|n| *n == name).unwrap()];
         assert_eq!(at("abs_rt_z"), e.rt_z.abs() as f32);
@@ -2697,14 +3064,14 @@ mod finalize_tests {
             (1e6f64 / 1e4 + 1.0).log10() as f32
         );
         r.evidence.as_mut().unwrap().amplitude_se = 0.0;
-        assert!(transfer_features(&r, &DonorShapes::default(), &[])
+        assert!(transfer_features(&r, &DonorShapes::default(), &[], &TransferModel::default(), &DONOR)
             .unwrap()
             .iter()
             .all(|v| v.is_finite()));
         r.evidence.as_mut().unwrap().llr = f64::NAN;
-        assert!(transfer_features(&r, &DonorShapes::default(), &[]).is_none());
+        assert!(transfer_features(&r, &DonorShapes::default(), &[], &TransferModel::default(), &DONOR).is_none());
         r.evidence = None;
-        assert!(transfer_features(&r, &DonorShapes::default(), &[]).is_none());
+        assert!(transfer_features(&r, &DonorShapes::default(), &[], &TransferModel::default(), &DONOR).is_none());
     }
 
     use quant::ms2::Ms2Evidence;
@@ -2788,7 +3155,7 @@ mod finalize_tests {
         assert!((g[1] + 0.4).abs() < 1e-12, "{g:?}");
         assert!(g[2] < f[2] - 0.1, "{g:?}");
         // The same numbers end the transfer feature vector.
-        let x = transfer_features(&other, &shapes, &maps).unwrap();
+        let x = transfer_features(&other, &shapes, &maps, &TransferModel::default(), &DONOR).unwrap();
         let n = TRANSFER_FEATURES.len();
         assert_eq!(x.len(), n);
         assert_eq!(
@@ -2861,10 +3228,10 @@ mod finalize_tests {
             Role::Transfer,
             Some(evidence(&mut g, true, 100.0)),
         );
-        let x = transfer_features(&r, &DonorShapes::default(), &[]).unwrap();
+        let x = transfer_features(&r, &DonorShapes::default(), &[], &TransferModel::default(), &DONOR).unwrap();
         r.ms2 = Some(supporting());
         assert_eq!(
-            transfer_features(&r, &DonorShapes::default(), &[]).unwrap(),
+            transfer_features(&r, &DonorShapes::default(), &[], &TransferModel::default(), &DONOR).unwrap(),
             x
         );
         assert!(TRANSFER_FEATURES.iter().all(|f| !f.starts_with("ms2")));
@@ -2882,7 +3249,7 @@ mod finalize_tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let (mbr, val) = mbr_paths(&dir.path().join("x"));
-        let s = finalize(&stems(), &library(), &runs, 0.01, None, 7, &mbr, &val).unwrap();
+        let s = finalize(&stems(), &library(), &runs, 0.01, None, &TransferModel::default(), 7, &mbr, &val).unwrap();
         let t = table(&mbr);
         let ms2_rows: Vec<&Vec<String>> =
             t[1..].iter().filter(|r| r[2] == "transfer_ms2").collect();
@@ -2947,7 +3314,7 @@ mod finalize_tests {
             let dir = tempfile::tempdir().unwrap();
             let (mbr, val) = mbr_paths(&dir.path().join("x"));
             let runs = ambiguous_ms1(with_ms2);
-            finalize(&stems(), &library(), &runs, 0.01, None, 7, &mbr, &val).unwrap();
+            finalize(&stems(), &library(), &runs, 0.01, None, &TransferModel::default(), 7, &mbr, &val).unwrap();
             let (mut present, mut absent) = (0usize, 0usize);
             for r in &table(&mbr)[1..] {
                 if r[1] != "b" || !r[2].starts_with("transfer_ms") {

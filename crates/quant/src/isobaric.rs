@@ -1,21 +1,21 @@
 //! Isobaric reporter-ion quantification: plex tables, extraction and
 //! isotope-impurity correction.
 //!
-//! Reporter m/z values are the ones OpenMS's `IsobaricQuantitationMethod`
-//! subclasses carry (TMT 6/10/11/16/18/32/35, iTRAQ 4/8). Extraction takes the
-//! most intense centroid within a tolerance of each reporter (Sage's rule;
-//! OpenMS takes the nearest within `reporter_mass_shift`). Impurity correction
-//! reads the vendor lot sheet in the OpenMS text form (one line per channel,
-//! `-2/-1/+1/+2` percentages, eight columns for TMTpro 16/18) and solves the
-//! observed = M · true system by non-negative least squares, as
-//! `IsobaricIsotopeCorrector` does. The deuterated TMTpro 32/35-plex kits have
-//! no correction: OpenMS always applies the identity for them.
+//! Reporter m/z values are the ones the reference isobaric implementation
+//! carries (TMT 6/10/11/16/18/32/35, iTRAQ 4/8). Extraction takes the most
+//! intense centroid within a tolerance of each reporter (the reference
+//! implementation takes the nearest). Impurity correction reads the vendor lot
+//! sheet in the quantms text form (one line per channel, `-2/-1/+1/+2`
+//! percentages, eight columns for TMTpro 16/18) and solves the observed =
+//! M · true system by non-negative least squares, as the reference does. The
+//! deuterated TMTpro 32/35-plex kits have no correction: the reference always
+//! applies the identity for them.
 
 use model::Tolerance;
 
 use crate::nnls::nnls;
 
-/// One reporter channel: its name (as OpenMS labels it) and exact m/z.
+/// One reporter channel: its name (as quantms labels it) and exact m/z.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Channel {
     pub name: &'static str,
@@ -109,7 +109,7 @@ pub const DEUTERATED_TAG_SHIFT_DA: f64 = 0.002922;
 
 // TMTpro 32/35-plex add the deuterated reagents: each `D` channel sits
 // DEUTERATED_TAG_SHIFT_DA above its non-deuterated twin (`127D` above `127C`,
-// `128ND` above `128N`, `128CD` above `128C`). OpenMS order: each nominal
+// `128ND` above `128N`, `128CD` above `128C`). Reference kit order: each nominal
 // mass lists N, C, ND, CD, so the tables are not sorted by m/z.
 
 const TMT32: &[Channel] = &[
@@ -243,7 +243,7 @@ impl Plex {
         })
     }
 
-    /// The kit's name in OpenMS form (`tmt10plex`, `itraq4plex`, ...).
+    /// The kit's name in quantms form (`tmt10plex`, `itraq4plex`, ...).
     pub fn name(&self) -> &'static str {
         match self {
             Plex::Tmt6 => "tmt6plex",
@@ -259,8 +259,8 @@ impl Plex {
     }
 
     /// The QPX / mzTab label prefix for this kit's channels: `TMT126`,
-    /// `ITRAQ114`, ... (OpenMS's canonical spelling, which its QPX value
-    /// validation requires).
+    /// `ITRAQ114`, ... (the canonical spelling, which QPX value validation
+    /// requires).
     pub fn label_prefix(&self) -> &'static str {
         match self {
             Plex::Itraq4 | Plex::Itraq8 => "ITRAQ",
@@ -353,8 +353,8 @@ impl Plex {
     /// Number of impurity columns per channel in the vendor sheet: four
     /// (`-2/-1/+1/+2`) for TMT ≤ 11-plex and iTRAQ, eight for TMTpro 16/18
     /// (`-2C13/-N15-C13/-C13/-N15/+N15/+C13/+N15+C13/+2C13`). `None` for
-    /// TMTpro 32/35-plex, which have no impurity correction (OpenMS ignores a
-    /// sheet for them and always applies the identity).
+    /// TMTpro 32/35-plex, which have no impurity correction (the reference
+    /// implementation ignores a sheet for them and always applies the identity).
     pub fn correction_columns(&self) -> Option<usize> {
         match self {
             Plex::Tmt6 | Plex::Tmt10 | Plex::Tmt11 | Plex::Itraq4 | Plex::Itraq8 => Some(4),
@@ -483,7 +483,7 @@ pub struct CorrectionMatrix {
 }
 
 impl CorrectionMatrix {
-    /// Parse the OpenMS / vendor sheet text: one line per channel in kit
+    /// Parse the quantms / vendor sheet text: one line per channel in kit
     /// order, `-2/-1/+1/+2` percentages (eight entries for TMTpro 16/18)
     /// separated by `/`. An optional `<channel>:` or `<channel>,` prefix names
     /// the row; `#` starts a comment; `NA`, `-1` and blank entries mean no
@@ -584,8 +584,8 @@ impl CorrectionMatrix {
     pub fn check_supported(plex: Plex) -> Result<usize, String> {
         plex.correction_columns().ok_or_else(|| {
             format!(
-                "isotope impurity correction is not supported for {} (OpenMS applies none \
-                 for this kit either)",
+                "isotope impurity correction is not supported for {} (the reference \
+                 isobaric implementation applies none for this kit either)",
                 plex.name()
             )
         })
@@ -662,7 +662,7 @@ mod tests {
         for plex in ALL {
             let c = plex.channels();
             if matches!(plex, Plex::Tmt32 | Plex::Tmt35) {
-                // OpenMS order: sorted by nominal mass, N/C before ND/CD.
+                // Reference kit order: sorted by nominal mass, N/C before ND/CD.
                 assert!(
                     c.windows(2).all(|w| w[0].mz.floor() <= w[1].mz.floor()),
                     "{plex:?}"
@@ -836,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_openms_style_matrix_and_corrects() {
+    fn parses_text_matrix_and_corrects() {
         // TMT6 with a 5 % +1 spill from every channel except the last.
         let text = "126:0.0/0.0/5.0/0.0\n127:0.0/0.0/5.0/0.0\n128:0.0/0.0/5.0/0.0\n\
                     129:0.0/0.0/5.0/0.0\n130:0.0/0.0/5.0/0.0\n131:0.0/0.0/0.0/0.0\n";

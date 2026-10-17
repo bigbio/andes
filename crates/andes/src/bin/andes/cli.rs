@@ -155,7 +155,7 @@ pub(crate) struct SearchArgs {
     #[arg(long)]
     pub(crate) output_tsv: Option<PathBuf>,
 
-    /// Output QPX `.idparquet/` bundle directory (optional; OpenMS-compatible).
+    /// Output QPX `.idparquet/` bundle directory (optional; quantms-compatible).
     /// Writes `psms.parquet` + `proteins.parquet` + `search_params.parquet`.
     #[arg(long)]
     pub(crate) output_parquet: Option<PathBuf>,
@@ -165,7 +165,7 @@ pub(crate) struct SearchArgs {
     pub(crate) decoy_prefix: String,
 
     /// Decoy-accession SUFFIX used to RECOGNIZE pre-built decoys in the input
-    /// FASTA (e.g. `rev` for quantms/OpenMS `<orig>_rev` decoys). When set, a
+    /// FASTA (e.g. `rev` for quantms `<orig>_rev` decoys). When set, a
     /// protein is a decoy iff its accession starts with `<decoy-prefix>_` OR ends
     /// with this suffix. Typically paired with `--decoy-strategy none` so andes
     /// consumes an externally-built target+decoy database instead of generating
@@ -410,7 +410,7 @@ pub(crate) struct SearchArgs {
     ///     because the scale factor is common to all three.)
     /// So the last 200 trees buy nothing on either resolution class while costing
     /// 33–41% of wall time, and true error is unchanged. Below ~50 the loss becomes
-    /// real. (For scale: even ONE tree still beats Comet by ~19% on Astral, so the
+    /// real. (For scale: even ONE tree still beats engine K by ~19% on Astral, so the
     /// whole ensemble is worth ~2% of identifications for 77% of the runtime.)
     ///
     /// GLYCO IS EXEMPT: under `--glyco` the ensembles are ~0.3% of wall time, so
@@ -490,18 +490,17 @@ pub(crate) struct SearchArgs {
     #[arg(long = "glyco-index-sequon-only", hide = true, default_value_t = false)]
     pub(crate) glyco_index_sequon_only: bool,
 
-    /// Load an external pGlyco-style `.gdb` glycan database: the glycan-first search
+    /// Load an external `.gdb` glycan database: the glycan-first search
     /// space. Each canonical string is parsed with its tree structure preserved
     /// (core- vs antenna-fucose), and the file's NeuGc content is used as-is (no
-    /// species filtering). Use a real pGlyco `.gdb` (e.g. `pGlyco-N-Human.gdb`) for a
-    /// like-for-like comparison against pGlyco. Takes precedence over `--glyco-species`.
+    /// species filtering). Takes precedence over `--glyco-species`.
     #[arg(long = "glyco-glycan-gdb")]
     pub(crate) glyco_glycan_gdb: Option<PathBuf>,
 
     /// Select a bundled species-specific N-glycan database instead of an external
     /// `--glyco-glycan-gdb` file. `--glyco` requires one of the two; an explicit
-    /// `--glyco-glycan-gdb` wins. Databases are pGlyco's (see
-    /// `crates/andes-glyco/glycan-db/`).
+    /// `--glyco-glycan-gdb` wins. Databases and their attribution:
+    /// `crates/andes-glyco/glycan-db/`.
     #[arg(long = "glyco-species", value_enum)]
     pub(crate) glyco_species: Option<GlycoSpeciesFlag>,
 
@@ -515,8 +514,8 @@ pub(crate) struct SearchArgs {
     /// only carries the Hex+Fuc/NeuGc composition degeneracy once the monoisotope
     /// is verified; bigbio/andes#64 arm F), while spectra with no linked MS1 or
     /// charge keep the default window. An explicit `--isotope-error` is honoured.
-    /// `auto` is the default; `off` leaves every precursor as recorded. Motivation: on pGlyco2
-    /// mouse liver the firmware records 3-6 Da above the monoisotope on a class of
+    /// `auto` is the default; `off` leaves every precursor as recorded. Motivation: on the engine L
+    /// mouse-liver reference the firmware records 3-6 Da above the monoisotope on a class of
     /// wide, high-mass glycopeptide envelopes, and widening the isotope window to
     /// reach them is mass-degenerate with a glycan composition change
     /// (bigbio/andes#64). Byte-identical output with `off`, or without MS1.
@@ -540,7 +539,7 @@ pub(crate) struct SearchArgs {
     /// Minimum trimannosyl-core Y ions required before `--glyco` reports a PSM for a
     /// scan. andes historically reported a best guess for every scan clearing the
     /// oxonium gate, so most reported rows had no glycan evidence at all. Every other
-    /// engine requires this: pGlyco3 and O-Pair require 2 core Y ions, Glyco-Decipher 3
+    /// engine requires this: the common standard is 2 core Y ions, some engines require 3
     /// with Y1 mandatory. Reads only spectral evidence, so it applies equally to target
     /// and decoy scans and cannot skew the target/decoy ratio. 0 disables.
     ///
@@ -676,7 +675,7 @@ pub(crate) struct SearchArgs {
     #[arg(long = "tmt-tol", value_parser = parse_precursor_tol)]
     pub(crate) tmt_tol: Option<Tolerance>,
 
-    /// Isotope impurity matrix of the kit lot (OpenMS text form: one line per
+    /// Isotope impurity matrix of the kit lot (quantms text form: one line per
     /// channel, `-2/-1/+1/+2` percentages, eight columns for TMTpro 16/18).
     /// Corrected intensities are solved by non-negative least squares; the raw
     /// values are kept alongside. Not supported for tmt32/tmt35. Default: no

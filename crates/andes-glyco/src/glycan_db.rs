@@ -1,6 +1,6 @@
-// Clean-room pGlyco `.gdb` glycan database loader.
+// Clean-room `.gdb` glycan database loader.
 //
-// Loads a pGlyco-style canonical-string glycan database and preserves the tree
+// Loads a canonical-string `.gdb` glycan database and preserves the tree
 // structure just far enough to recover the one structural fact the glycan-first
 // index needs: whether a fucose is **core-fucose** (a direct child of the
 // reducing-end monosaccharide, retained on every core Y ion) or antenna fucose.
@@ -35,7 +35,7 @@ pub enum GdbLoadError {
     UnknownSymbol { line: usize, symbol: String },
     /// A glycan line was not a well-formed parenthesized tree.
     MalformedTree { line: usize, reason: &'static str },
-    /// A glycan line held more than one complete tree. pGlyco's `*-multi`
+    /// A glycan line held more than one complete tree. Upstream `*-multi`
     /// databases list combinations of glycans for peptides with several
     /// glycosites; andes places one glycan per peptide, so such a line has no
     /// meaning here.
@@ -198,7 +198,7 @@ fn parse_glycan_at(
     })
 }
 
-/// Load a pGlyco-style `.gdb` glycan database, preserving the tree structure.
+/// Load a `.gdb` glycan database, preserving the tree structure.
 ///
 /// Format:
 /// ```text
@@ -206,7 +206,7 @@ fn parse_glycan_at(
 /// (N(F)(N(H(H)(H)))) <- glycan 1 (nested tree of symbols; reducing end outermost)
 /// ```
 /// Symbols: `N`=HexNAc, `H`=Hex, `F`=Fuc, `A`=NeuAc, `G`=NeuGc. Each line is one
-/// nested parenthesized tree. A line with several concatenated trees is a pGlyco
+/// nested parenthesized tree. A line with several concatenated trees is an upstream
 /// `*-multi` multi-site combination (one glycan per glycosite of the same
 /// peptide); the search places one glycan per peptide, so such a line is
 /// rejected with [`GdbLoadError::MultiSite`] rather than read as separate
@@ -283,10 +283,10 @@ pub fn load_glycan_gdb(content: &str) -> Result<Vec<GlycanComp>, GdbLoadError> {
 /// search; an explicit `--glyco-glycan-gdb` file bypasses it entirely.
 pub fn load_species_glycan_db(species: &str) -> Result<Vec<GlycanComp>, GdbLoadError> {
     let content = match species {
-        "human" => include_str!("../glycan-db/pGlyco-N-Human.gdb"),
-        "mouse" => include_str!("../glycan-db/pGlyco-N-Mouse.gdb"),
-        "mouse-large" => include_str!("../glycan-db/pGlyco-N-Mouse-large.gdb"),
-        "high-mannose" => include_str!("../glycan-db/pGlyco-N-HighMannose.gdb"),
+        "human" => include_str!("../glycan-db/N-glycan-human.gdb"),
+        "mouse" => include_str!("../glycan-db/N-glycan-mouse.gdb"),
+        "mouse-large" => include_str!("../glycan-db/N-glycan-mouse-large.gdb"),
+        "high-mannose" => include_str!("../glycan-db/N-glycan-high-mannose.gdb"),
         _ => {
             return Err(GdbLoadError::UnknownSpecies {
                 species: species.to_string(),
@@ -368,7 +368,7 @@ mod tests {
 
     #[test]
     fn multi_site_line_is_rejected_not_split() {
-        // pGlyco `*-multi` lines concatenate one complete tree per glycosite (each
+        // Upstream `*-multi` lines concatenate one complete tree per glycosite (each
         // with its own reducing-end GlcNAc). Splitting them would add each half as
         // a single glycan; andes places one glycan per peptide, so refuse.
         let content = "H,N,A,G,F\n(N(N(H(H)(H))))\n(N(N(H(H)(H))))(N(N(H(H(H))(H(H)))))\n";

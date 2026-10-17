@@ -41,7 +41,7 @@ pub(crate) fn run_glyco(
     andes_glyco::backbone::init_y_max_charge(cli.glyco_y_max_charge);
 
     // The glycan-first search space comes from one of two sources: an explicit
-    // pGlyco `.gdb` file (`--glyco-glycan-gdb`, takes precedence) or a bundled
+    // `.gdb` file (`--glyco-glycan-gdb`, takes precedence) or a bundled
     // species-specific database (`--glyco-species`). Trees are parsed with
     // structure preserved (core- vs antenna-fucose) and NeuGc content is used
     // as-is. The composition enumerator and its NeuGc/taxon tuning are gone.
@@ -62,7 +62,7 @@ pub(crate) fn run_glyco(
         (None, None) => {
             return Err(
                 "--glyco requires --glyco-glycan-gdb or --glyco-species: the built-in \
-                 composition enumerator was removed; supply a pGlyco `.gdb` or a bundled \
+                 composition enumerator was removed; supply a `.gdb` glycan database or a bundled \
                  species"
                     .into(),
             );

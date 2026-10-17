@@ -91,7 +91,7 @@ fn rescoring_batch_column_order_matches_feature_names() {
 }
 
 #[test]
-fn peptdeep_packing_matches_openms_export_tensor_names() {
+fn peptdeep_packing_matches_reference_export_tensor_names() {
     let rt = pack_rt_inputs(&["PEPTIDE"], 16).unwrap();
     assert_eq!(rt.input_sequences.name, "input_sequences");
     assert_eq!(rt.mod_x.name, "mod_x");

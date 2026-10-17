@@ -27,8 +27,8 @@
 //!
 //! Features located on another isoform (`<location sequence="P04637-2">`) are
 //! in that isoform's coordinates and are not applied to the canonical sequence;
-//! isoforms themselves are not reconstructed (as in OpenMS' `UniProtXMLHandler`,
-//! which this parser follows for element scoping).
+//! isoforms themselves are not reconstructed (as in common UniProt XML
+//! readers, which this parser follows for element scoping).
 
 use std::collections::BTreeMap;
 use std::io::BufRead;

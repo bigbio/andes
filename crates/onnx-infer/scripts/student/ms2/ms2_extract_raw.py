@@ -4,8 +4,9 @@
 For each run of the task (``ms2_select.py`` ``tasks.tsv``):
 1. find ``<run>.raw`` under the dataset's raw directory (or ``<run>.mzML[.gz]``
    under --mzml-dir, which skips conversion);
-2. convert it with ThermoRawFileParser (``--trfp``: the command prefix, e.g. a
-   container exec; ``--trfp-args``: the argument template) into --work-dir;
+2. convert it with a raw-to-mzML converter (``--converter``: the command prefix,
+   e.g. a container exec; ``--converter-args``: the argument template) into
+   --work-dir;
 3. stream the mzML, keeping only the selected scans; read NCE and activation
    from the scan's filter string, the instrument model from the file header;
 4. check the precursor m/z against the peptidoform (isotope offsets -1..3 within
@@ -27,7 +28,7 @@ the script exits with status 1; the next submission redoes the whole task.
 Usage::
 
   python ms2_extract_raw.py --tasks SEL/tasks.tsv --task-index N --out-dir SHARDS \\
-      --work-dir SCRATCH --trfp "CONTAINER_EXEC ThermoRawFileParser.sh"
+      --work-dir SCRATCH --converter "CONTAINER_EXEC CONVERTER"
 """
 from __future__ import annotations
 
@@ -48,7 +49,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ms2_common import annotate, parse_filter, parse_proforma, precursor_mz, shard_table  # noqa: E402
 from mzml_reader import instrument_name, read_scans  # noqa: E402
 
-DEFAULT_TRFP_ARGS = "-i {raw} -o {outdir} -f 1"
+DEFAULT_CONVERTER_ARGS = "-i {raw} -o {outdir} -f 1"
 
 
 def tolerance(activation: str, a) -> tuple[float, bool]:
@@ -83,14 +84,14 @@ def find_file(root: str, stem: str, exts) -> str | None:
 def convert(raw: str, work: str, a) -> str:
     outdir = os.path.join(work, "mzml")
     os.makedirs(outdir, exist_ok=True)
-    cmd = shlex.split(a.trfp) + shlex.split(a.trfp_args.format(raw=raw, outdir=outdir))
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, timeout=a.trfp_timeout)
+    cmd = shlex.split(a.converter) + shlex.split(a.converter_args.format(raw=raw, outdir=outdir))
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, timeout=a.converter_timeout)
     stem = os.path.splitext(os.path.basename(raw))[0]
     for ext in (".mzML", ".mzML.gz"):
         p = os.path.join(outdir, stem + ext)
         if os.path.exists(p):
             return p
-    raise FileNotFoundError(f"ThermoRawFileParser wrote no mzML for {raw} in {outdir}")
+    raise FileNotFoundError(f"the converter wrote no mzML for {raw} in {outdir}")
 
 
 def prec_ok(seq, mods, z, mz_obs, tol_ppm) -> bool:
@@ -148,9 +149,9 @@ def main():
     p.add_argument("--task-index", type=int, required=True, help="1-based row of tasks.tsv (SLURM_ARRAY_TASK_ID)")
     p.add_argument("--out-dir", required=True)
     p.add_argument("--work-dir", required=True, help="scratch for mzML files")
-    p.add_argument("--trfp", default="ThermoRawFileParser", help="command prefix that runs ThermoRawFileParser")
-    p.add_argument("--trfp-args", default=DEFAULT_TRFP_ARGS, help="argument template ({raw}, {outdir})")
-    p.add_argument("--trfp-timeout", type=int, default=3600)
+    p.add_argument("--converter", help="command prefix that runs the raw-to-mzML converter (required unless --mzml-dir)")
+    p.add_argument("--converter-args", default=DEFAULT_CONVERTER_ARGS, help="argument template ({raw}, {outdir})")
+    p.add_argument("--converter-timeout", type=int, default=3600)
     p.add_argument("--mzml-dir", help="use <run>.mzML[.gz] from here instead of converting raw files")
     p.add_argument("--keep-mzml", action="store_true")
     p.add_argument("--ftms-tol-ppm", type=float, default=20.0)
@@ -159,6 +160,8 @@ def main():
     p.add_argument("--min-matched", type=int, default=4)
     p.add_argument("--overwrite", action="store_true")
     a = p.parse_args()
+    if not a.converter and not a.mzml_dir:
+        p.error("--converter is required unless --mzml-dir is given")
 
     task = next((r for r in csv.DictReader(open(a.tasks), delimiter="\t") if int(r["task"]) == a.task_index), None)
     if task is None:

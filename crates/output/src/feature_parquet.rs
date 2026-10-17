@@ -1,11 +1,10 @@
-//! `quantms.feature.parquet`: the QPX feature view (OpenMS
-//! `QPXFeatureSchema::schema()`, as `IsobaricWorkflow -out_qpx` and
-//! `ConsensusMapArrowExport` write it).
+//! `quantms.feature.parquet`: the QPX feature view (the reference QPX feature
+//! schema, as the quantms isobaric and consensus exports write it).
 //!
 //! One row is "a quantified peptidoform in one run": a label-free feature
 //! carries a single `{label: "LFQ", intensity}`; an isobaric PSM carries one
 //! entry per channel (`TMT126`, `TMT127N`, ...). Normalized or protein-level
-//! values are never written here; they belong to the quantms / OpenMS layer.
+//! values are never written here; they belong to the quantms layer.
 //!
 //! When any record carries match-between-runs columns ([`MbrColumns`]), four
 //! nullable columns follow the QPX ones: `evidence_type` (`identified`,
@@ -31,10 +30,10 @@ use parquet::file::properties::WriterProperties;
 use crate::quant_out::ModRecord;
 
 /// QPX version of the feature view written here (the psm/feature views are
-/// unchanged between 1.0 and 1.1; OpenMS stamps 1.1).
+/// unchanged between 1.0 and 1.1; the reference writer stamps 1.1).
 const FEATURE_QPX_VERSION: &str = "1.1";
-/// The columns a reader re-derives a feature's identity from (OpenMS
-/// `QPXIdentity::FEATURE_COMPOSITE`).
+/// The columns a reader re-derives a feature's identity from (the QPX
+/// feature identity composite).
 const FEATURE_IDENTITY_COMPOSITE: &str = "run_file_name,peptidoform,charge,rt,scan,observed_mz";
 
 /// A protein the peptide maps to: `(accession, start, end, pre, post)` with
@@ -683,7 +682,7 @@ fn build_batch(records: &[FeatureRecord], mbr: bool) -> std::io::Result<RecordBa
 }
 
 /// Write `records` to `path` as a QPX feature file with the schema metadata
-/// OpenMS readers key on (`file_type = feature_file`).
+/// QPX readers key on (`file_type = feature_file`).
 pub fn write_feature_parquet(path: &Path, records: &[FeatureRecord]) -> std::io::Result<()> {
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let mut meta = std::collections::HashMap::new();

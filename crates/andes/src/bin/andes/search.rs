@@ -2255,7 +2255,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => eprintln!("WARN: could not write {}: {e}", stats_path.display()),
     }
 
-    // ── QPX `.idparquet/` bundle (optional, OpenMS-compatible) ───────────────
+    // ── QPX `.idparquet/` bundle (optional, quantms-compatible) ──────────────
     // Mirrors the PIN write from the SAME unified candidate/index pair. Sourced
     // here (not in the bench/TSV arms) so it is produced for every run that asks
     // for it, including bench mode. Run identifier = the first spectrum file

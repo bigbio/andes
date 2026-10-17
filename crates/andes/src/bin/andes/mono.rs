@@ -16,8 +16,8 @@ use search::precursor_mono::{
 
 /// The isotope-error window to search once `--precursor-mono auto` has corrected
 /// precursors. With corrected precursors the `+2` step of the sweep only carries
-/// the (k, X) ≡ (k−1, X + Hex + Fuc − NeuGc) composition degeneracy: on pGlyco2
-/// liver T-1 the `0..1` window confirmed 59 of the 62 firmware-mispicked +4
+/// the (k, X) ≡ (k−1, X + Hex + Fuc − NeuGc) composition degeneracy: on the engine L
+/// liver T-1 reference the `0..1` window confirmed 59 of the 62 firmware-mispicked +4
 /// reference scans against 55 with `0..2`, at 96.9% vs 96.8% peptidoform
 /// agreement and 0.98% vs 0.91% entrapment FDP, and the `+2` tier went from 402
 /// accepted PSMs to 21; the same held on all five liver fractions, heart and

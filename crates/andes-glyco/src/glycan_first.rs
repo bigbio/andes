@@ -1,4 +1,4 @@
-//! Glycan-first candidate retrieval (pGlyco3-style "glycan ion indexing").
+//! Glycan-first candidate retrieval ("glycan ion indexing").
 //!
 //! This is the search-strategy counterpart to the backbone-first driver: instead
 //! of enumerating `precursor − glycan` for every glycan and then scoring the
@@ -130,7 +130,7 @@ impl DiagnosticIon {
 }
 
 /// The default N-glycan diagnostic-ion panel: the 28 oxonium (B-fragment) ions
-/// of Glyco-Decipher's `OxoniumIonEnum`. `counts` are the monosaccharides each
+/// of a published glyco engine's oxonium panel. `counts` are the monosaccharides each
 /// ion implies (a fragment implies ≥ that many of each monosaccharide).
 /// Configurable via [`GlycanConfig::diagnostic_ions`].
 ///
@@ -201,7 +201,7 @@ pub const O_CORE_Y_LADDER: [(u8, u8); 1] = [(1, 0)]; // Y1 = GalNAc (HexNAc)
 /// The glycan core (reducing-end) type. Determines which Y ions count as *core*
 /// ions, whether core-fucose is recognized, and the default core-ion filter
 /// threshold. A single [`GlycanIonIndex`] indexes one core type at a time
-/// (pGlyco3 likewise ships separate N- and O-glycan databases).
+/// (glycan databases are likewise shipped separately for N- and O-glycans).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GlycanCore {
     /// Canonical N-glycan trimannosyl core (GlcNAc₂Man₃).
@@ -489,10 +489,10 @@ pub struct GlycanConfig {
     /// as a glycopeptide at all.
     pub min_diagnostic_ions: u32,
     /// Minimum matched core ions a candidate must have to survive core filtering.
-    /// pGlyco3 uses 2 for N-glycans and 1 for O-glycans.
+    /// The field standard is 2 for N-glycans and 1 for O-glycans.
     pub min_core_ions: u32,
-    /// Number of top candidates to return per spectrum. pGlyco3 keeps the top 100
-    /// candidate glycan compositions for the peptide search.
+    /// Number of top candidates to return per spectrum. The field standard keeps the
+    /// top 100 candidate glycan compositions for the peptide search.
     pub top_k: usize,
     /// Diagnostic-ion panel (defaults to [`default_diagnostic_ions`]).
     pub diagnostic_ions: Vec<DiagnosticIon>,
@@ -971,7 +971,7 @@ mod tests {
     /// index). Prints timing for eyeballing; assertions keep it regression-safe.
     ///
     /// The glycan DB is read from the `.gdb` at `$ANDES_GLYCO_GDB` when set (so
-    /// the benchmark measures the *input* database, e.g. pGlyco-N-Mouse.gdb's
+    /// the benchmark measures the *input* database, e.g. N-glycan-mouse.gdb's
     /// 1234 compositions); otherwise it falls back to the built-in common list.
     #[test]
     fn benchmark_index_construction_and_query() {

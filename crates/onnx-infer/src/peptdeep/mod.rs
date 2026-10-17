@@ -1,8 +1,7 @@
 //! AlphaPeptDeep / PeptDeep ONNX I/O contracts.
 //!
-//! Tensor names and shapes match OpenMS
-//! [`export_peptdeep_models_to_onnx.py`](https://github.com/OpenMS/OpenMS/blob/develop/tools/scripts/export_peptdeep_models_to_onnx.py)
-//! and the local copy under `scripts/export_peptdeep_to_onnx.py`:
+//! Tensor names and shapes match the reference PeptDeep ONNX export, adapted
+//! locally as `scripts/export_peptdeep_to_onnx.py`:
 //!
 //! | Task | Inputs | Output |
 //! |---|---|---|

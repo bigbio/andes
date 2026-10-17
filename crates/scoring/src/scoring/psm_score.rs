@@ -385,7 +385,7 @@ pub fn hyperscore_psm_with_matches(
 /// z-charged precursor reach ~z-1). Returns 0.0 for peptides shorter than 2.
 /// The two cz_hyperscore correctness fixes (bug hunt 2026-07-16/17), now DEFAULT
 /// ON after validation (6-frac pooled AI-ETD: +251 backbone-correct @1%, +11%,
-/// 43%→48% of Byonic, decoy-safe): (1) match c/z with a PER-ION PPM tolerance
+/// 43%→48% of engine M, decoy-safe): (1) match c/z with a PER-ION PPM tolerance
 /// instead of a flat 0.5 Da window (0.5 Da is 6-83x too loose on high-res AI-ETD →
 /// noise-dominated); (2) NORMALIZE the score by peptide length so a longer
 /// wrong/decoy peptide can't out-count a shorter true one in the per-scan collapse

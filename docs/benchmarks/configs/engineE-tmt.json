@@ -26,5 +26,5 @@
   "max_peaks": 150,
   "min_matched_peaks": 4,
   "report_psms": 1,
-  "output_directory": "SAGE_OUT_PLACEHOLDER"
+  "output_directory": "OUT_PLACEHOLDER"
 }

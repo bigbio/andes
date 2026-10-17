@@ -222,7 +222,7 @@ fn tmt10_ms3_reporters_follow_the_sps_scan() {
 }
 
 #[test]
-fn tmt35_reads_the_deuterated_kit_in_openms_order() {
+fn tmt35_reads_the_deuterated_kit_in_reference_order() {
     // The TMT10 fixture's reporters sit on the 35-plex channels of the same
     // name (TMT10's 131 is 131N); the deuterated channels, 2.9 mDa above
     // their twins, read nothing at the 10 ppm default.

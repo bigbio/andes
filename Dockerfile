@@ -10,7 +10,7 @@
 # (no system runtime required). Native Thermo `.raw` (needs a bundled .NET 8
 # runtime) and native Bruker timsTOF `.d` are shipped in the per-platform
 # release archives instead — see the GitHub Releases page. For `.raw`/`.d` in a
-# container, convert to mzML first (e.g. ThermoRawFileParser) or use a release
+# container, convert to mzML first (with a raw-to-mzML converter) or use a release
 # binary.
 #
 # Build:  docker build -t andes .

@@ -102,15 +102,32 @@ pub struct PrecursorMeta {
     pub envelope: [f32; 4],
 }
 
+/// The best donor PSM of an entry (highest score; then earliest RT, lowest
+/// run): its rescorer score, PSM q-value and PEP.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DonorPsm {
+    pub score: f64,
+    pub q: f64,
+    pub pep: f64,
+}
+
 /// A confident precursor that is measured (identified or transferred) in
-/// every run. Its donor runs are the runs with a target PSM of it at PSM
-/// q-value at most the library's donor threshold; only those PSMs count
-/// below.
+/// every run. Its donor runs are the runs with a PSM of it at PSM q-value at
+/// most the library's donor threshold; only those PSMs count below.
+///
+/// An identity decoy is a decoy precursor that passes the same entry gate and
+/// donor rules with its decoy PSMs. It is measured exactly like a target
+/// entry, so its transfers show how often the transfer of a false donor
+/// identification is accepted; it is never reported.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LibraryEntry {
     pub precursor: u32,
+    /// True for an identity decoy (a decoy precursor's entry).
+    pub identity_decoy: bool,
     /// Library confidence (internal quant gate, not an identification FDR).
     pub q: f64,
+    /// The best donor PSM.
+    pub donor_psm: DonorPsm,
     /// Consensus RT from the joint alignment (NaN without an observation in
     /// an aligned run).
     pub consensus_rt: f64,
@@ -137,12 +154,16 @@ pub struct Library {
 ///
 /// Precursors are independent: confidence is [`precursor_qvalues`] over the
 /// best score per precursor id (every PSM, whatever its PSM q-value), with no
-/// per-scan competition. Donor PSMs are the target PSMs with PSM `q <=
-/// donor_q` and, when `donor_pep` is given, PSM `pep <= donor_pep`. Entries are target precursors with `q <= max_q` and at least one
-/// donor PSM, sorted by `(mz, id)`. The alignment is fitted on one
-/// observation per `(entry, donor run)`, the RT of the best donor PSM there;
-/// decoys never enter it. PSMs with an id outside `0..meta.len()` or a run
-/// outside `0..n_runs` are ignored.
+/// per-scan competition. Donor PSMs are the PSMs with PSM `q <= donor_q` and,
+/// when `donor_pep` is given, PSM `pep <= donor_pep`. Entries are the
+/// precursors with `q <= max_q` and at least one donor PSM, sorted by
+/// `(mz, id)`: target precursors, and decoy precursors as identity decoys
+/// (the same rules on their decoy PSMs). The alignment is fitted on one
+/// observation per `(target entry, donor run)`, the RT of the best donor PSM
+/// there; an identity decoy's observations are added after the fit
+/// ([`Alignment::add_observations`]), so they never move a run map but give
+/// the decoy its consensus RT and predictions as a target's would. PSMs with
+/// an id outside `0..meta.len()` or a run outside `0..n_runs` are ignored.
 pub fn build_library(
     psms: &[PsmIn],
     meta: Vec<PrecursorMeta>,
@@ -168,8 +189,7 @@ pub fn build_library(
         .iter()
         .copied()
         .filter(|p| {
-            !p.is_decoy
-                && p.q <= donor_q
+            p.q <= donor_q
                 && donor_pep.is_none_or(|c| p.pep <= c)
                 && qs
                     .get(p.precursor as usize)
@@ -182,6 +202,15 @@ pub fn build_library(
 
     let mut entries: Vec<LibraryEntry> = Vec::new();
     let mut obs: Vec<Observation> = Vec::new();
+    let mut decoy_obs: Vec<Observation> = Vec::new();
+    // NaN scores rank worst, as in the confidence gate.
+    let score_of = |p: &PsmIn| {
+        if p.score.is_nan() {
+            f64::NEG_INFINITY
+        } else {
+            p.score
+        }
+    };
     let mut i = 0;
     while i < by_prec.len() {
         let id = by_prec[i].precursor;
@@ -191,6 +220,12 @@ pub fn build_library(
         }
         let group = &by_prec[i..j];
         i = j;
+        let identity_decoy = group[0].is_decoy;
+        debug_assert!(
+            group.iter().all(|p| p.is_decoy == identity_decoy),
+            "precursor {id} mixes target and decoy PSMs"
+        );
+        let mut best_psm: Option<&PsmIn> = None;
 
         let mut donors: Vec<u16> = Vec::new();
         let mut best_rt: Vec<(u16, f64)> = Vec::new();
@@ -200,21 +235,10 @@ pub fn build_library(
             let mut best: Option<&PsmIn> = None;
             while k < group.len() && group[k].run == run {
                 let c = group[k];
-                // NaN scores rank worst, as in the confidence gate.
-                let cs = if c.score.is_nan() {
-                    f64::NEG_INFINITY
-                } else {
-                    c.score
-                };
                 let better = match best {
                     None => true,
                     Some(b) => {
-                        let bs = if b.score.is_nan() {
-                            f64::NEG_INFINITY
-                        } else {
-                            b.score
-                        };
-                        cs > bs || (cs == bs && c.rt < b.rt)
+                        score_of(c) > score_of(b) || (score_of(c) == score_of(b) && c.rt < b.rt)
                     }
                 };
                 if better {
@@ -223,14 +247,25 @@ pub fn build_library(
                 k += 1;
             }
             let b = best.expect("run group is non-empty");
+            // Runs ascend, so a tie on score and RT keeps the lowest run.
+            if best_psm.is_none_or(|a| {
+                score_of(b) > score_of(a) || (score_of(b) == score_of(a) && b.rt < a.rt)
+            }) {
+                best_psm = Some(b);
+            }
             donors.push(run);
             best_rt.push((run, b.rt));
             if b.rt.is_finite() {
-                obs.push(Observation {
+                let o = Observation {
                     precursor: id,
                     run,
                     rt: b.rt,
-                });
+                };
+                if identity_decoy {
+                    decoy_obs.push(o);
+                } else {
+                    obs.push(o);
+                }
             }
         }
 
@@ -254,7 +289,15 @@ pub fn build_library(
 
         entries.push(LibraryEntry {
             precursor: id,
+            identity_decoy,
             q: qs[id as usize].expect("entry has a q-value"),
+            donor_psm: best_psm
+                .map(|b| DonorPsm {
+                    score: b.score,
+                    q: b.q,
+                    pep: b.pep,
+                })
+                .expect("an entry has a donor PSM"),
             consensus_rt: f64::NAN,
             faims_cv,
             donors,
@@ -262,7 +305,10 @@ pub fn build_library(
         });
     }
 
-    let alignment = align(&obs, n_prec, n_runs, ap);
+    let mut alignment = align(&obs, n_prec, n_runs, ap);
+    alignment
+        .add_observations(&decoy_obs)
+        .expect("one observation per identity decoy and run");
     for e in &mut entries {
         e.consensus_rt = alignment
             .consensus
@@ -324,14 +370,126 @@ mod tests {
     }
 
     #[test]
-    fn decoys_never_enter_library() {
-        // Decoy 200 outscores every target; it must still not be an entry or
-        // an alignment observation.
-        let psms = base(vec![psm(0, 200, 5.0, 1000.0, true)]);
-        let lib = build_library(&psms, meta(201), 2, 1.0, 1.0, None, &AlignParams::default());
-        assert!(lib.entries.iter().all(|e| e.precursor != 200));
-        assert_eq!(lib.entries.len(), 200);
-        assert!(lib.alignment.consensus[200].is_nan());
+    fn decoys_enter_as_identity_decoys_without_moving_the_alignment() {
+        // Decoy 200 outscores every target and is seen in both runs, at RTs
+        // that would bend the maps if it were an anchor.
+        let psms = base(vec![
+            psm(0, 200, 5.0, 1000.0, true),
+            psm(1, 200, 900.0, 990.0, true),
+        ]);
+        let ap = AlignParams::default();
+        let lib = build_library(&psms, meta(201), 2, 1.0, 1.0, None, &ap);
+        let targets = build_library(&base(vec![]), meta(201), 2, 1.0, 1.0, None, &ap);
+        assert_eq!(lib.entries.len(), 201);
+        let d = lib.entries.iter().find(|e| e.precursor == 200).unwrap();
+        assert!(d.identity_decoy);
+        assert_eq!(d.donors, vec![0, 1]);
+        assert_eq!(
+            d.donor_psm,
+            DonorPsm {
+                score: 1000.0,
+                q: 0.0,
+                pep: 0.0
+            }
+        );
+        assert!(d.consensus_rt.is_finite());
+        assert!(lib
+            .entries
+            .iter()
+            .all(|e| e.identity_decoy == (e.precursor == 200)));
+        // The target entries and their predictions are those of a library
+        // built without the decoy (the entry gate q-values aside, which the
+        // decoy's score moves).
+        for (a, b) in lib
+            .entries
+            .iter()
+            .filter(|e| !e.identity_decoy)
+            .zip(&targets.entries)
+        {
+            assert_eq!(
+                LibraryEntry {
+                    q: b.q,
+                    ..a.clone()
+                },
+                *b
+            );
+            for r in 0..2 {
+                assert_eq!(
+                    lib.alignment.predict(a.precursor, r),
+                    targets.alignment.predict(b.precursor, r)
+                );
+            }
+        }
+        assert_eq!(lib.alignment.anchors, targets.alignment.anchors);
+    }
+
+    #[test]
+    fn identity_decoys_follow_the_target_entry_rules() {
+        // Decoy 200: no PSM at the donor threshold. Decoy 201: one donor
+        // PSM, but its precursor fails the entry gate (a weak best score).
+        let weak = |run, precursor, rt, score| PsmIn {
+            q: 0.2,
+            ..psm(run, precursor, rt, score, true)
+        };
+        let psms = base(vec![
+            weak(0, 200, 20.0, 900.0),
+            psm(1, 201, 30.0, -5.0, true),
+        ]);
+        let lib = build_library(
+            &psms,
+            meta(202),
+            2,
+            0.01,
+            0.01,
+            None,
+            &AlignParams::default(),
+        );
+        assert!(lib.entries.iter().all(|e| !e.identity_decoy));
+        let open = build_library(&psms, meta(202), 2, 1.0, 1.0, None, &AlignParams::default());
+        let ids: Vec<u32> = open
+            .entries
+            .iter()
+            .filter(|e| e.identity_decoy)
+            .map(|e| e.precursor)
+            .collect();
+        assert_eq!(ids, vec![200, 201]);
+    }
+
+    #[test]
+    fn donor_psm_is_the_best_scoring_donor_psm() {
+        let with = |run, rt, score, q, pep| PsmIn {
+            q,
+            pep,
+            ..psm(run, 0, rt, score, false)
+        };
+        let mut psms: Vec<PsmIn> = base(vec![])
+            .into_iter()
+            .filter(|p| p.precursor != 0)
+            .collect();
+        psms.extend([
+            with(0, 10.0, 50.0, 0.001, 0.01),
+            with(1, 11.0, 70.0, 0.0005, 0.002),
+            with(1, 12.0, 90.0, 0.2, 0.5),
+        ]);
+        let lib = build_library(
+            &psms,
+            meta(200),
+            2,
+            1.0,
+            0.01,
+            None,
+            &AlignParams::default(),
+        );
+        let e0 = lib.entries.iter().find(|e| e.precursor == 0).unwrap();
+        // The PSM scoring 90 is above the donor threshold and does not count.
+        assert_eq!(
+            e0.donor_psm,
+            DonorPsm {
+                score: 70.0,
+                q: 0.0005,
+                pep: 0.002
+            }
+        );
     }
 
     #[test]

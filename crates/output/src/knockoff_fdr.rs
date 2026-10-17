@@ -6,7 +6,8 @@
 //! peptide carrying a modification of the substitution's mass or picked at the
 //! wrong isotope, which is how most false variant calls arise. The knockoff
 //! PSMs above a score estimate the false real variant PSMs above it, within
-//! each substitution class (see [`apply_knockoff_fdr`]).
+//! each substitution class (see [`apply_knockoff_fdr`]). A variant with no
+//! knockoff has no such estimate and is not accepted.
 
 use std::collections::{HashMap, HashSet};
 
@@ -43,7 +44,7 @@ pub struct KnockoffCount {
     /// Knockoff PSMs at q ≤ the cutoff, each counting 1/k for a variant with
     /// k knockoffs.
     pub knockoff_weighted: f64,
-    /// Real variant PSMs still at q ≤ the cutoff after.
+    /// Real variant PSMs still at q ≤ the cutoff after (tested ones only).
     pub real_after: usize,
 }
 
@@ -86,9 +87,10 @@ enum Row {
 /// Within a substitution class, at score `t`:
 /// FDP(t) = (1/K + Σ 1/k over knockoff rows ≥ t) / #(tested real rows ≥ t),
 /// with K the most knockoffs of any variant; a real row's knockoff q-value is
-/// the least FDP(t) over t at or below its score. Untested real rows (whose
-/// variants have no knockoff) take the q-value at their score too: the error
-/// rate is a property of the substitution class, which the tested rows sample.
+/// the least FDP(t) over t at or below its score. An untested real row (no
+/// variant of it has a knockoff) gets q = 1: no null covers it, and variants
+/// that no knockoff can match are false far more often than those that can,
+/// so the tested rows' estimate does not carry over to them.
 pub fn apply_knockoff_fdr(
     targets: &mut HashMap<String, PercolatorPsm>,
     idx: &SearchIndex,
@@ -215,10 +217,11 @@ pub fn apply_knockoff_fdr(
                     p.pep = 1.0;
                     knockoff_rows.insert(id.clone());
                 }
-                Row::Real { .. } => {
+                Row::Real { tested: true } => {
                     p.q_value = p.q_value.max(q);
                     count.real_after += (p.q_value <= fdr) as usize;
                 }
+                Row::Real { tested: false } => p.q_value = 1.0,
             }
         }
         counts.push(count);
@@ -328,7 +331,10 @@ mod tests {
         let idx = SearchIndex::from_target_db(&target, "XXX");
         let mut t: HashMap<_, _> = [psm("a", 5.0, 0.001, "sp|P1_V2|A")].into_iter().collect();
         let before = t.clone();
-        assert_eq!(apply_knockoff_fdr(&mut t, &idx, 0.01), KnockoffOutcome::default());
+        assert_eq!(
+            apply_knockoff_fdr(&mut t, &idx, 0.01),
+            KnockoffOutcome::default()
+        );
         assert_eq!(t, before);
     }
 
@@ -388,13 +394,23 @@ mod tests {
     }
 
     #[test]
-    fn untested_variants_take_their_class_estimate() {
+    fn untested_variants_are_not_accepted() {
         let idx = index();
-        // V2 (other) has no knockoff: no tested row, so FDP = (1/K) / 1.
+        // V2 (other) has no knockoff.
         let mut t: HashMap<_, _> = [psm("v2", 5.0, 0.001, "sp|P1_V2|A")].into_iter().collect();
         let counts = apply_knockoff_fdr(&mut t, &idx, 0.01).counts;
-        assert!((t["v2"].q_value - 0.5).abs() < 1e-9);
+        assert_eq!(t["v2"].q_value, 1.0);
         assert_eq!(counts[0].stratum, "other");
-        assert_eq!(counts[0].tested_before, 0);
+        assert_eq!(
+            (
+                counts[0].real_before,
+                counts[0].tested_before,
+                counts[0].real_after
+            ),
+            (1, 0, 0)
+        );
+        assert!(!apply_knockoff_fdr(&mut t, &idx, 0.01)
+            .knockoff_rows
+            .contains("v2"));
     }
 }

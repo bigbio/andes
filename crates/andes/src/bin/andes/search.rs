@@ -2212,12 +2212,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .iter()
                 .map(|c| {
                     format!(
-                        "{} {} -> {} (knockoffs {:.1} for {} tested, false share {:.2})",
+                        "{} {} -> {} ({} tested; knockoffs {:.1}, false share {:.2})",
                         c.stratum,
                         c.real_before,
                         c.real_after,
-                        c.knockoff_weighted,
                         c.tested_before,
+                        c.knockoff_weighted,
                         c.false_share()
                     )
                 })

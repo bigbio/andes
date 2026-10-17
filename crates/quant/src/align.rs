@@ -1415,7 +1415,13 @@ mod tests {
         for p in 600..620u32 {
             assert!(fitted.predict(p, 2).is_none());
             assert_eq!(a.n_runs_seen[p as usize], 2);
-            let rt = |r: u16| extra.iter().find(|o| o.precursor == p && o.run == r).unwrap().rt;
+            let rt = |r: u16| {
+                extra
+                    .iter()
+                    .find(|o| o.precursor == p && o.run == r)
+                    .unwrap()
+                    .rt
+            };
             let tc = 0.5 * (map(0).invert(rt(0)) + map(1).invert(rt(1)));
             let (t, s) = a.predict(p, 2).unwrap();
             assert!((t - map(2).apply(tc)).abs() < 1e-6, "{p}");

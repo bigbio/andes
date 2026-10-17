@@ -232,7 +232,11 @@ pub fn validation_columns() -> Vec<String> {
         .map(|s| s.to_string()),
     );
     for suffix in ["_q01", "_at_threshold"] {
-        c.extend(DECOY_ACCEPTED_COLUMNS.iter().map(|n| format!("{n}{suffix}")));
+        c.extend(
+            DECOY_ACCEPTED_COLUMNS
+                .iter()
+                .map(|n| format!("{n}{suffix}")),
+        );
     }
     c.extend(
         [

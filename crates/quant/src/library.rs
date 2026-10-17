@@ -406,7 +406,13 @@ mod tests {
             .filter(|e| !e.identity_decoy)
             .zip(&targets.entries)
         {
-            assert_eq!(LibraryEntry { q: b.q, ..a.clone() }, *b);
+            assert_eq!(
+                LibraryEntry {
+                    q: b.q,
+                    ..a.clone()
+                },
+                *b
+            );
             for r in 0..2 {
                 assert_eq!(
                     lib.alignment.predict(a.precursor, r),
@@ -425,7 +431,10 @@ mod tests {
             q: 0.2,
             ..psm(run, precursor, rt, score, true)
         };
-        let psms = base(vec![weak(0, 200, 20.0, 900.0), psm(1, 201, 30.0, -5.0, true)]);
+        let psms = base(vec![
+            weak(0, 200, 20.0, 900.0),
+            psm(1, 201, 30.0, -5.0, true),
+        ]);
         let lib = build_library(
             &psms,
             meta(202),
@@ -462,7 +471,15 @@ mod tests {
             with(1, 11.0, 70.0, 0.0005, 0.002),
             with(1, 12.0, 90.0, 0.2, 0.5),
         ]);
-        let lib = build_library(&psms, meta(200), 2, 1.0, 0.01, None, &AlignParams::default());
+        let lib = build_library(
+            &psms,
+            meta(200),
+            2,
+            1.0,
+            0.01,
+            None,
+            &AlignParams::default(),
+        );
         let e0 = lib.entries.iter().find(|e| e.precursor == 0).unwrap();
         // The PSM scoring 90 is above the donor threshold and does not count.
         assert_eq!(

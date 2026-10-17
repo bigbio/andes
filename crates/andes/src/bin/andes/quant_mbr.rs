@@ -1098,7 +1098,8 @@ pub(crate) fn finalize(
     let is_identity = |p: u32| entry_of[p as usize].is_some_and(|e| e.identity_decoy);
     // Not transferred: the entry's best donor PSM is above TRANSFER_DONOR_Q.
     let gated = |p: u32| {
-        entry_of[p as usize].is_some_and(|e| e.donor_psm.q.is_nan() || e.donor_psm.q > TRANSFER_DONOR_Q)
+        entry_of[p as usize]
+            .is_some_and(|e| e.donor_psm.q.is_nan() || e.donor_psm.q > TRANSFER_DONOR_Q)
     };
 
     let mut summary = FinalizeSummary::default();
@@ -1770,8 +1771,13 @@ mod tests {
                 .collect()
         };
         for run in [0u16, 1] {
-            let a = extract_run(run, &target.ms1_tables[run as usize], &target.lib, &params())
-                .unwrap();
+            let a = extract_run(
+                run,
+                &target.ms1_tables[run as usize],
+                &target.lib,
+                &params(),
+            )
+            .unwrap();
             let b =
                 extract_run(run, &decoy.ms1_tables[run as usize], &decoy.lib, &params()).unwrap();
             let rows = rows_of(&b.rows, ONLY_RUN0);
@@ -2329,7 +2335,10 @@ mod finalize_tests {
         let v = &s.validation;
         eprintln!(
             "q 0.01 pooled {} wrong-peak only {}; identity decoys accepted at 0.2: {} of {}",
-            v.at_q01.pooled, v.at_q01.wrong_peak_only, v.at_threshold.decoys[2], v.decoy_transfers[2]
+            v.at_q01.pooled,
+            v.at_q01.wrong_peak_only,
+            v.at_threshold.decoys[2],
+            v.decoy_transfers[2]
         );
         assert_eq!((v.target_entries, v.identity_entries), (882, 18));
         assert_eq!(v.decoy_transfers[2], 18);
@@ -2373,7 +2382,13 @@ mod finalize_tests {
         let dir = tempfile::tempdir().unwrap();
         let (mbr, val) = mbr_paths(&dir.path().join("x"));
         // Precursors above 400 have a best donor PSM at q 0.005.
-        let lib = library_with(&|_| false, &|p| if p > 400 { 0.005 } else { TRANSFER_DONOR_Q });
+        let lib = library_with(&|_| false, &|p| {
+            if p > 400 {
+                0.005
+            } else {
+                TRANSFER_DONOR_Q
+            }
+        });
         let s = finalize(&stems(), &lib, &extract(), 0.01, None, 7, &mbr, &val).unwrap();
         assert_eq!(s.validation.donor_gated, N as usize - 401);
         let mut accepted_low = 0;

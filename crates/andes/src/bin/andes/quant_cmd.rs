@@ -911,6 +911,35 @@ fn feature_records(stored: &StoredLibrary, features: &[MbrFeature]) -> Vec<Featu
         .collect()
 }
 
+/// Experiment only: the transfer model from `ANDES_TM_IDENTITY`
+/// (`off`, `scored`, `trained`), `ANDES_TM_SHAPE` (`0` drops the shape
+/// features), `ANDES_TM_DONOR` (`1` adds the donor PSM features) and
+/// `ANDES_TM_DONOR_Q` (transfer donor PSM q-value); unset gives the default.
+fn transfer_model_from_env() -> TransferModel {
+    use crate::quant_mbr::IdentityDecoys;
+    let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let mut m = TransferModel::default();
+    if let Some(v) = var("ANDES_TM_IDENTITY") {
+        m.identity = match v.as_str() {
+            "off" => IdentityDecoys::Off,
+            "scored" => IdentityDecoys::Scored,
+            "trained" => IdentityDecoys::Trained,
+            other => panic!("ANDES_TM_IDENTITY={other}"),
+        };
+    }
+    if let Some(v) = var("ANDES_TM_SHAPE") {
+        m.shape = v != "0";
+    }
+    if let Some(v) = var("ANDES_TM_DONOR") {
+        m.donor_psm = v == "1";
+    }
+    if let Some(v) = var("ANDES_TM_DONOR_Q") {
+        m.transfer_donor_q = Some(v.parse().expect("ANDES_TM_DONOR_Q"));
+    }
+    eprintln!("[mbr] experiment transfer model {m:?}");
+    m
+}
+
 /// Transfer FDR, identified quality q-values and the MBR outputs over the
 /// extract rows of every run (in run order); with `parquet_dir`, also
 /// `<parquet_dir>/quantms.feature.parquet`.
@@ -929,7 +958,7 @@ pub(crate) fn finalize_and_write(
         runs,
         mbr_fdr,
         quant_feature_fdr,
-        &TransferModel::default(),
+        &transfer_model_from_env(),
         MBR_SEED,
         &tsv,
         &validation,

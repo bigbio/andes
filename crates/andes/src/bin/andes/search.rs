@@ -2081,6 +2081,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `--pep` are thresholds applied by such a run; they never start one on their
     // own (that would silently launch a backend / the non-production native path).
     let fdr_threshold = cli.fdr.unwrap_or(0.01);
+    let variant_fdr = cli.variant_fdr.unwrap_or(fdr_threshold.max(0.05));
     let (use_percolator, use_native) = if cli.rescore {
         (true, false)
     } else if cli.rescore_native {
@@ -2203,7 +2204,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         // Knockoff variants: the knockoff PSMs accepted per substitution class
         // estimate the false real variant PSMs, and give them a q-value too.
-        let outcome = output::apply_knockoff_fdr(map, &pin_index, fdr_threshold);
+        let outcome = output::apply_knockoff_fdr(map, &pin_index, variant_fdr);
         knockoff_rows = outcome.knockoff_rows;
         if !outcome.counts.is_empty() {
             let line: Vec<String> = outcome
@@ -2222,7 +2223,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .collect();
             eprintln!(
-                "Rescore: variant PSMs at q<={fdr_threshold} per substitution class, before -> \
+                "Rescore: variant PSMs at q<={variant_fdr} per substitution class, before -> \
                  after knockoff q-values: {}",
                 line.join(", ")
             );
@@ -2231,11 +2232,16 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.mbr {
         mbr_decoys = std::mem::take(&mut rescore_decoy_psms);
     }
+    // The cutoff each row is accepted at: --variant-fdr for variant-class rows,
+    // --fdr for the rest.
+    let cutoffs = rescore_map
+        .as_ref()
+        .map(|m| output::Cutoffs::new(m, &pin_index, fdr_threshold, variant_fdr));
 
-    // Filtered TSV: target PSMs whose Percolator q-value ≤ --fdr. Written next to
-    // the PIN as `<stem>.q<fdr>.tsv` (rescore only). One row per accepted PSM with
-    // the join key + q/PEP + peptide/proteins from the Percolator result.
-    if let Some(ref map) = rescore_map {
+    // Filtered TSV: target PSMs whose q-value passes their cutoff. Written next
+    // to the PIN as `<stem>.q<fdr>.tsv` (rescore only). One row per accepted PSM
+    // with the join key + q/PEP + peptide/proteins from the Percolator result.
+    if let (Some(map), Some(cutoffs)) = (rescore_map.as_ref(), cutoffs.as_ref()) {
         let fdr = fdr_threshold;
         let stem = report_base
             .file_stem()
@@ -2250,7 +2256,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let mut accepted: Vec<&output::PercolatorPsm> = map
             .iter()
             .filter(|(id, p)| {
-                p.q_value <= fdr && pep_cap.is_none_or(|t| p.pep <= t) && !knockoff_rows.contains(*id)
+                p.q_value <= cutoffs.of(id)
+                    && pep_cap.is_none_or(|t| p.pep <= t)
+                    && !knockoff_rows.contains(*id)
             })
             .map(|(_, p)| p)
             .collect();
@@ -2259,9 +2267,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .partial_cmp(&b.q_value)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        let pep_note = pep_cap
+        let mut pep_note = pep_cap
             .map(|t| format!(" and PEP<={t}"))
             .unwrap_or_default();
+        if pin_index.has_alternative_entries && variant_fdr != fdr {
+            pep_note.push_str(&format!(", variant-class PSMs at q<={variant_fdr}"));
+        }
         match write_filtered_tsv(&filtered_path, &accepted) {
             Ok(()) => eprintln!(
                 "Wrote filtered TSV: {} ({} PSMs at q<={}{})",
@@ -2350,6 +2361,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &pin_candidates,
             &pin_index,
             rescore_map.as_ref(),
+            cutoffs.as_ref(),
             &report_base,
             cli.output_parquet.as_deref(),
         )?),
@@ -2359,8 +2371,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Proteoform table: per protein family, the canonical entry and each
     // isoform, variant and chain entry with accepted evidence, its confidence
     // and quantity. Written with rescoring when the database holds such entries.
-    if let (Some(map), true) = (rescore_map.as_ref(), pin_index.has_alternative_entries) {
-        let rows = output::proteoform_table(map, &pin_index, fdr_threshold, quant_summary.as_ref());
+    if let (Some(map), Some(cutoffs), true) = (
+        rescore_map.as_ref(),
+        cutoffs.as_ref(),
+        pin_index.has_alternative_entries,
+    ) {
+        let rows = output::proteoform_table(map, &pin_index, cutoffs, quant_summary.as_ref());
         let stem = report_base
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())

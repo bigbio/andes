@@ -636,6 +636,15 @@ pub(crate) struct SearchArgs {
     #[arg(long = "fdr", value_parser = parse_unit_fraction)]
     pub(crate) fdr: Option<f64>,
 
+    /// q-value threshold for PSMs of the variant class (every protein a
+    /// UniProt variant entry), with rescoring: the filtered TSV, the
+    /// proteoform table and quantification accept them at this level instead
+    /// of `--fdr`. Their q-value already includes the class FDR and, with
+    /// knockoffs, the knockoff estimate. Default: the larger of `--fdr` and
+    /// 0.05.
+    #[arg(long = "variant-fdr", value_parser = parse_unit_fraction)]
+    pub(crate) variant_fdr: Option<f64>,
+
     /// Optional per-PSM PEP (posterior error probability / local FDR) cap,
     /// applied IN ADDITION to `--fdr` (a PSM must pass both q ≤ `--fdr` AND
     /// PEP ≤ `--pep`). The q-value stays the primary set-level FDR control;

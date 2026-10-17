@@ -96,7 +96,7 @@ looks its candidates up by backbone mass in its own sequon-only table built from
 score every candidate in each precursor window, because the b/y-only fragment-ion index does not
 hold their c/z and a/x ions. The engine prints
 its choice; `--fragment-index off` scores every candidate in each precursor window instead
-([measurements](docs/benchmarks/README.md#choosing-the-retrieval-strategy)).
+([benchmarks](docs/benchmarks/README.md)).
 
 ### Runtime
 
@@ -896,7 +896,7 @@ Deleted after A/B tests (2026-09-05): `--glyco-split-election`, `--glyco-gp-g`,
 `--glyco-cz-intensity`, `--glyco-per-spectrum-model`, `--tight-highres-scoring`,
 `--glyco-y-tree`, `--glyco-oxonium-llr`, `--glyco-rank-masked`, `--glyco-chance-llr-masked`,
 `--glyco-transfer` (and its five knobs) and `--glyco-decoy`
-([*Refuted*](docs/benchmarks/README.md#refuted--do-not-re-try-without-new-evidence)).
+(refuted).
 Removed 2026-10 (defaults fixed as above, or diagnostics/opt-ins that were never adopted):
 `--glyco-gp-k/-j/-h/-cz/-iso`, `--glyco-backbone-top-k`, `--glyco-pf-charge`,
 `--glyco-max-pf`, `--glyco-retrieval-tol-da`, `--glyco-isotope-error`,

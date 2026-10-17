@@ -2,7 +2,7 @@
 """Export an andes AGBD v1 GBDT blob to ONNX TreeEnsembleRegressor.
 
 The native AGBD evaluator in `scoring::gbdt_eval` remains the in-search hot path.
-This export is for interoperability with quantms-rescoring / OpenMS / ort, and
+This export is for interoperability with quantms-rescoring / ort, and
 for offline parity checks against the Rust evaluator.
 
 Usage:

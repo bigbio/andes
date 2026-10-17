@@ -4,7 +4,7 @@
 //! [quantms-rescoring](https://github.com/bigbio/quantms-rescoring): feature
 //! *names* and *roles* match the Python package (AlphaPeptDeep / DeepLC /
 //! spectrum SNR columns) so andes PIN / idparquet writers and a future Rust
-//! rescoring path can share one vocabulary with OpenMS / Percolator.
+//! rescoring path can share one vocabulary with quantms / Percolator.
 //!
 //! Inference itself stays in [`crate::OnnxSession`]; this module only defines
 //! the data contracts and batching discipline (top-N only).

@@ -50,7 +50,7 @@ scoring:
 decoys:
   strategy: reverse              # reverse | shuffle | none (input already has decoys)
   prefix: XXX_
-  # suffix: _rev                 # for OpenMS/quantms-style suffixed decoy DBs
+  # suffix: _rev                 # for quantms-style suffixed decoy DBs
 
 # ── Experiment modes (each opt-in; sub-knobs are advanced) ───────────────────
 chimeric:
@@ -82,7 +82,7 @@ quant:
   # tmt: tmt10                  # reporter-ion quantification: tmt6|tmt10|tmt11|tmt16|tmt18|tmt32|tmt35|itraq4|itraq8
   # tmt_level: 2                 # 2 = identified MS2, 3 = its SPS-MS3 scan
   # tmt_tol: 20ppm               # reporter m/z window (default 20ppm (10ppm tmt32/tmt35) high-res MS2 or tmt_level 3, 0.3da ion-trap MS2)
-  # tmt_correction: lot.txt      # kit impurity sheet (OpenMS text form); default none
+  # tmt_correction: lot.txt      # kit impurity sheet (quantms text form); default none
   # tmt_min_purity: 0            # drop PSMs below this precursor purity from tmt.tsv
   # lfq: false                   # label-free MS1 feature quantification
   # lfq_tol: 10ppm

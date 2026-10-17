@@ -1,6 +1,6 @@
 //! Search-engine–agnostic PSM handles for rescoring batches.
 //!
-//! Deliberately thin: no dependency on andes `PsmMatch` / Comet / Sage types.
+//! Deliberately thin: no dependency on andes `PsmMatch` or other engines' types.
 //! Callers map their candidate structs into [`CandidateKey`] + feature rows.
 //! This keeps `onnx-infer` extractable for quantms while staying compatible
 //! with andes PIN / idparquet writers that already share `psm_feature_values`.

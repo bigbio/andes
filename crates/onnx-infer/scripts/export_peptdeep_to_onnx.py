@@ -115,7 +115,7 @@ def write_manifest(out_dir: Path, task: str, onnx_name: str, inputs, outputs):
     task_map = {"rt": "retention_time", "ms2": "ms2_intensity", "ccs": "ccs"}
     man = {
         "id": f"peptdeep-{task}-onnx",
-        "description": f"PeptDeep {task} ONNX (OpenMS / quantms-rescoring contract)",
+        "description": f"PeptDeep {task} ONNX (quantms-rescoring contract)",
         "onnx": onnx_name,
         "inputs": inputs,
         "outputs": outputs,

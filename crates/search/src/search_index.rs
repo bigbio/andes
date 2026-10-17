@@ -18,7 +18,7 @@ pub struct SearchIndex {
     /// (supports target-only and shuffle modes). The single source of truth for
     /// target/decoy membership, shared with candidate generation.
     pub decoy_prefix: String,
-    /// Optional decoy-accession SUFFIX (e.g. `"rev"` for quantms/OpenMS
+    /// Optional decoy-accession SUFFIX (e.g. `"rev"` for quantms
     /// `<orig>_rev` decoys). When set, a protein is a decoy iff its accession
     /// starts with `"<decoy_prefix>_"` OR ends with this suffix. `None` =
     /// andes-native prefix-only decoys. Set with `--decoy-suffix` (typically

@@ -818,7 +818,7 @@ pub fn glycan_y_hit_frac(
 /// backbone/spectrum-level oxonium / core-Y / glycan-mass features (which are
 /// identical for two peptides competing at the same backbone window) — their m/z
 /// is a function of the PEPTIDE mass, so they discriminate competing peptides.
-/// This is the SP-B lever (see docs/plans/glyco/20-theory/why-andes-fails-and-succeed.md §2).
+/// This is the SP-B lever.
 ///
 /// Returns the summed base-peak-normalised intensity of Y0 and Y1 matched at
 /// charges `1..=min(prec_z, 2)`. `bb_neutral` is the NEUTRAL peptide backbone

@@ -220,6 +220,10 @@ fn rescoring_estimates_fdr_within_each_class() {
             "--uniprot-evidence",
             "curated",
             "--rescore-native",
+            // The fixture's few spectra pass no strict cutoff; keep every PSM
+            // so the table has rows to check.
+            "--fdr",
+            "1",
         ],
     );
     let stderr = String::from_utf8_lossy(&with_classes.stderr);
@@ -227,6 +231,22 @@ fn rescoring_estimates_fdr_within_each_class() {
         stderr.contains("Rescore: FDR within each class (targets/decoys, method, pi0): canonical"),
         "{stderr}"
     );
+    // The proteoform table: one row per family member with accepted evidence,
+    // the canonical entry first.
+    let table = std::fs::read_to_string(dir.path().join("xml.proteoforms.tsv")).unwrap();
+    let mut lines = table.lines();
+    let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+    assert_eq!(
+        &header[..5],
+        ["family", "member", "kind", "feature", "confidence"]
+    );
+    let first: Vec<&str> = lines.next().expect("a family member").split('\t').collect();
+    assert_eq!(
+        (first[0], first[1], first[2]),
+        ("P02769", "sp|P02769|ALBU_BOVIN", "reference")
+    );
+    let confidence: f64 = first[4].parse().unwrap();
+    assert!((0.0..=1.0).contains(&confidence), "{first:?}");
     // One class (FASTA): the step reports nothing and changes nothing.
     let plain = search(
         "test-fixtures/BSA.fasta",
@@ -235,4 +255,5 @@ fn rescoring_estimates_fdr_within_each_class() {
     );
     let stderr = String::from_utf8_lossy(&plain.stderr);
     assert!(!stderr.contains("FDR within each class"), "{stderr}");
+    assert!(!dir.path().join("fasta.proteoforms.tsv").exists());
 }

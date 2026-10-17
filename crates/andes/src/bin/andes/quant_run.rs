@@ -1086,8 +1086,10 @@ pub(crate) fn run_quant(
     rescore: Option<&HashMap<String, PercolatorPsm>>,
     report_base: &Path,
     parquet_dir: Option<&Path>,
-) -> Result<(), String> {
+) -> Result<output::QuantSummary, String> {
     let s = &collector.settings;
+    // Per-peptide quantities for the proteoform table.
+    let mut summary = output::QuantSummary::default();
     let t0 = std::time::Instant::now();
     if let Some(dir) = &s.quant_dir {
         write_run_artifacts(collector, spectra, queues, candidates, index, dir)?;
@@ -1204,6 +1206,14 @@ pub(crate) fn run_quant(
             .filter(|r| r.purity.is_none_or(|p| p >= s.min_purity))
             .cloned()
             .collect();
+        summary.columns = plex.channels().iter().map(|c| c.name.to_string()).collect();
+        for r in &tsv_rows {
+            for (col, &v) in r.corrected.iter().enumerate() {
+                summary
+                    .values
+                    .push((r.id.sequence.clone(), r.id.proteins.clone(), col, v as f64));
+            }
+        }
         let tmt_path = dir.join(format!("{stem}.tmt.tsv"));
         output::write_tmt_tsv(&tmt_path, plex, &tsv_rows, s.correction.is_some())
             .map_err(|e| format!("write {}: {e}", tmt_path.display()))?;
@@ -1369,6 +1379,15 @@ pub(crate) fn run_quant(
             .filter(|r| is_confident(r, s))
             .cloned()
             .collect();
+        summary.columns = runs.clone();
+        for r in &confident {
+            summary.values.push((
+                r.id.sequence.clone(),
+                r.id.proteins.clone(),
+                r.id.file_idx,
+                r.feature.area,
+            ));
+        }
         let lfq_path = dir.join(format!("{stem}.lfq.tsv"));
         output::write_lfq_tsv(&lfq_path, &runs, &confident)
             .map_err(|e| format!("write {}: {e}", lfq_path.display()))?;
@@ -1437,7 +1456,7 @@ pub(crate) fn run_quant(
         );
     }
     eprintln!("[PHASE quant: {:.2}s]", t0.elapsed().as_secs_f64());
-    Ok(())
+    Ok(summary)
 }
 
 #[cfg(test)]

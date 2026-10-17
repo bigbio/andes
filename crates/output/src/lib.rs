@@ -38,6 +38,9 @@ pub use provenance::populate_provenance_features;
 pub mod class_fdr;
 pub use class_fdr::{apply_class_fdr, ClassCount};
 
+pub mod proteoform_table;
+pub use proteoform_table::{proteoform_table, write_proteoform_tsv, QuantSummary};
+
 pub mod glyco_rt;
 pub use glyco_rt::populate_glyco_rt_features;
 

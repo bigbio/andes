@@ -2303,8 +2303,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // ── Quantification (`--tmt` / `--lfq`) ────────────────────────────────────
     // After rescoring so the targets are the confident PSMs; after the QPX
     // write so the feature parquet joins a bundle that already exists.
-    if let Some(q) = &quant {
-        crate::quant_run::run_quant(
+    let quant_summary = match &quant {
+        Some(q) => Some(crate::quant_run::run_quant(
             q,
             &spectra,
             &queues,
@@ -2313,7 +2313,37 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             rescore_map.as_ref(),
             &report_base,
             cli.output_parquet.as_deref(),
-        )?;
+        )?),
+        None => None,
+    };
+
+    // Proteoform table: per protein family, the canonical entry and each
+    // isoform, variant and chain entry with accepted evidence, its confidence
+    // and quantity. Written with rescoring when the database holds such entries.
+    if let (Some(map), true) = (rescore_map.as_ref(), pin_index.has_alternative_entries) {
+        let rows = output::proteoform_table(map, &pin_index, fdr_threshold, quant_summary.as_ref());
+        let stem = report_base
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "andes".to_string());
+        let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
+        let path = dir.join(format!("{stem}.proteoforms.tsv"));
+        let columns = quant_summary
+            .as_ref()
+            .map(|q| q.columns.clone())
+            .unwrap_or_default();
+        match output::write_proteoform_tsv(&path, &rows, &columns) {
+            Ok(()) => eprintln!(
+                "Wrote proteoform table: {} ({} family members, {} families)",
+                path.display(),
+                rows.len(),
+                rows.iter()
+                    .map(|r| r.family.as_str())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+            ),
+            Err(e) => eprintln!("WARN: could not write {}: {e}", path.display()),
+        }
     }
 
     // `--mbr` inputs; the stages run after the last search output is

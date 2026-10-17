@@ -281,9 +281,6 @@ pub(crate) struct QuantCollector {
     ms2_reporters: Vec<Vec<f32>>,
     runs: Vec<RunCapture>,
     next_span_start: usize,
-    /// False when the read path does not capture MS1 scans for quantification
-    /// (`--chimeric`); the missing purity was announced once at setup.
-    ms1_captured: bool,
     /// The current file's reduced MS2 scans (`--quant-dir`), written to its
     /// MS2 table by `finish_file`.
     ms2: Vec<Ms2Scan>,
@@ -296,15 +293,8 @@ impl QuantCollector {
             ms2_reporters: Vec::new(),
             runs: Vec::new(),
             next_span_start: 0,
-            ms1_captured: true,
             ms2: Vec::new(),
         }
-    }
-
-    /// The read path does not capture MS1 scans (`--chimeric`): skip the
-    /// per-file warning about them.
-    pub(crate) fn ms1_not_captured(&mut self) {
-        self.ms1_captured = false;
     }
 
     /// Call for every spectrum right before it is pushed to the global list
@@ -406,7 +396,7 @@ impl QuantCollector {
                     String::new()
                 }
             );
-        } else if self.settings.needs_ms1() && self.ms1_captured {
+        } else if self.settings.needs_ms1() {
             eprintln!(
                 "WARN: quant: {}: no MS1 scans captured ({}); {}",
                 stem,
@@ -548,9 +538,12 @@ fn write_run_ms2(
     Ok(())
 }
 
-/// A rank-1 target PSM selected for quantification.
+/// A PSM selected for quantification: the rank-1 PSM of a spectrum's selected
+/// precursor, or under `--chimeric` the best PSM of a co-isolated precursor.
 struct Hit<'a> {
     spec_idx: usize,
+    /// Matched at a co-isolated precursor (`--chimeric`), not the selected one.
+    co_isolated: bool,
     run_idx: usize,
     psm: PsmMatch,
     cand: &'a Candidate,
@@ -560,9 +553,10 @@ struct Hit<'a> {
     psm_index: i64,
 }
 
-/// Select the quantification targets: rank-1 target PSMs, at `q <= quant_fdr`
-/// (and `pep <= --pep`) when a rescoring result is available. The running
-/// `psm_index` reproduces the row order of `psms.parquet`.
+/// Select the quantification targets: rank-1 target PSMs (and the best PSM of
+/// each co-isolated precursor), at `q <= quant_fdr` (and `pep <= --pep`) when a
+/// rescoring result is available. The running `psm_index` reproduces the row
+/// order of `psms.parquet`.
 fn select_hits<'a>(
     collector: &QuantCollector,
     spectra: &[Spectrum],
@@ -573,8 +567,9 @@ fn select_hits<'a>(
     select_rank1(collector, spectra, queues, candidates, rescore, false)
 }
 
-/// Every rank-1 PSM, targets and decoys, with no q-value or PEP filter: the
-/// rows of the per-run PSM table.
+/// Every rank-1 PSM (and the best PSM of each co-isolated precursor), targets
+/// and decoys, with no q-value or PEP filter: the rows of the per-run PSM
+/// table.
 fn select_rank1_all<'a>(
     collector: &QuantCollector,
     spectra: &[Spectrum],
@@ -605,6 +600,19 @@ fn select_rank1<'a>(
         // `psm_index` match the PIN and `psms.parquet`.
         let rows = output::emitted_rows(spec, &sorted, candidates);
         let multi_row = rows.len() > 1;
+        // Each precursor of the spectrum is quantified from its best row: the
+        // selected precursor's (no override) and, under `--chimeric`, each
+        // co-isolated precursor's (its override m/z). A co-isolated PSM that
+        // outscores the selected precursor's best takes rank 1 of the spectrum
+        // without displacing it. Ties at the best rank are all kept, as before.
+        let mut best_rank: Vec<(Option<u64>, u32)> = Vec::new();
+        for (rank, psm) in &rows {
+            let key = psm.precursor_mz_override.map(f64::to_bits);
+            match best_rank.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, r)) => *r = (*r).min(*rank),
+                None => best_rank.push((key, *rank)),
+            }
+        }
         let scan = spec.scan.unwrap_or(0);
         let spec_id_base = if spec.title.is_empty() {
             format!("scan={scan}")
@@ -623,7 +631,8 @@ fn select_rank1<'a>(
             }
             let this_index = psm_index;
             psm_index += 1;
-            if rank != 1 {
+            let key = psm.precursor_mz_override.map(f64::to_bits);
+            if !best_rank.iter().any(|&(k, r)| k == key && r == rank) {
                 continue;
             }
             if cand.is_decoy && !include_decoys {
@@ -644,6 +653,7 @@ fn select_rank1<'a>(
             };
             hits.push(Hit {
                 spec_idx,
+                co_isolated: key.is_some(),
                 run_idx,
                 psm,
                 cand,
@@ -987,7 +997,8 @@ const TABLE_ENVELOPE_ISOTOPES: usize = 4;
 
 /// `--quant-dir`: write `<dir>/<stem>.ms1.parquet` (the run's captured MS1, every
 /// FAIMS voltage) and `<dir>/<stem>.quant.parquet` (every rank-1 PSM of the
-/// run, targets and decoys, unfiltered) for each run.
+/// run and, under `--chimeric`, the best PSM of each co-isolated precursor;
+/// targets and decoys, unfiltered) for each run.
 fn write_run_artifacts(
     collector: &QuantCollector,
     spectra: &[Spectrum],
@@ -1049,7 +1060,7 @@ fn write_run_artifacts(
         write_run_quant_table(&table_path, &run.stem, &rows, &mods)
             .map_err(|e| format!("write {}: {e}", table_path.display()))?;
         eprintln!(
-            "quant: {}: wrote {} and {} ({} rank-1 PSMs, targets and decoys{})",
+            "quant: {}: wrote {} and {} ({} PSMs, one per precursor of a spectrum, targets and decoys{})",
             run.stem,
             ms1_path.display(),
             table_path.display(),
@@ -1120,7 +1131,12 @@ pub(crate) fn run_quant(
                 .map(Ms1Cache::load)
                 .transpose()
                 .map_err(|e| format!("load MS1 scans for {}: {e}", run.stem))?;
-            for hit in hits.iter().filter(|h| h.run_idx == run_idx) {
+            // The reporter ions of a scan measure its selected precursor; a
+            // co-isolated PSM has none of its own.
+            for hit in hits
+                .iter()
+                .filter(|h| h.run_idx == run_idx && !h.co_isolated)
+            {
                 let spec = &spectra[hit.spec_idx];
                 let context = run.contexts.get(native_id(run, &spec.title));
                 let (quant_scan_id, raw, scan_window) = if s.tmt_level >= 3 {
@@ -1466,6 +1482,147 @@ mod tests {
         // No context at all: the last scan in time.
         assert_eq!(survey_scan(&ms1, None, 4.5), Some(4));
         assert_eq!(survey_scan(&ms1, None, -1.0), None);
+    }
+
+    fn candidate(seq: &[u8], is_decoy: bool) -> Candidate {
+        let residues = seq
+            .iter()
+            .map(|&r| model::AminoAcid::standard(r).unwrap())
+            .collect();
+        Candidate {
+            peptide: model::Peptide::new(residues, b'K', b'S'),
+            protein_index: 0,
+            start_offset_in_protein: 0,
+            is_decoy,
+            is_protein_n_term: false,
+            is_protein_c_term: false,
+        }
+    }
+
+    fn psm(rank_score: f32, candidate: u32, co_isolated_mz: Option<f64>) -> PsmMatch {
+        PsmMatch {
+            spectrum_idx: 0,
+            candidate_idxs: vec![candidate],
+            charge_used: 2,
+            mass_error_ppm: 0.0,
+            score: rank_score,
+            rank_score,
+            edge_score: 0,
+            activation_method: None,
+            features: search::psm::PsmFeatures::default(),
+            isotope_offset: 0,
+            precursor_mz_override: co_isolated_mz,
+        }
+    }
+
+    /// One spectrum ("Scan 1", scan 1) with `psms` in its queue, in a
+    /// one-run collector.
+    fn one_spectrum(psms: Vec<PsmMatch>) -> (QuantCollector, Vec<Spectrum>, Vec<TopNQueue>) {
+        let mut c = QuantCollector::new(settings(true, Some("q")));
+        c.runs.push(RunCapture {
+            stem: "run".into(),
+            title_prefix: None,
+            span: 0..1,
+            ms1: None,
+            ms3_reporters: HashMap::new(),
+            contexts: HashMap::new(),
+        });
+        let spec = Spectrum {
+            title: "Scan 1".into(),
+            precursor_mz: 500.0,
+            precursor_intensity: None,
+            precursor_charge: Some(2),
+            rt_seconds: Some(60.0),
+            scan: Some(1),
+            peaks: vec![],
+            activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
+            isolation_target_mz: None,
+        };
+        let mut queue = TopNQueue::new(10);
+        for p in psms {
+            queue.push(p);
+        }
+        (c, vec![spec], vec![queue])
+    }
+
+    fn selected(hits: &[Hit<'_>]) -> Vec<(String, bool, bool)> {
+        hits.iter()
+            .map(|h| (h.spec_id.clone(), h.cand.is_decoy, h.co_isolated))
+            .collect()
+    }
+
+    #[test]
+    fn plain_search_quantifies_rank1_rows_only() {
+        let cands = vec![
+            candidate(b"PEPTIDEK", false),
+            candidate(b"SAMPLERK", false),
+            candidate(b"KEDITPEP", true),
+        ];
+        let (c, spectra, queues) = one_spectrum(vec![
+            psm(10.0, 0, None),
+            psm(9.0, 1, None),
+            psm(8.0, 2, None),
+        ]);
+        let hits = select_rank1_all(&c, &spectra, &queues, &cands);
+        assert_eq!(
+            selected(&hits),
+            vec![("Scan 1_1_1_0".to_string(), false, false)]
+        );
+    }
+
+    #[test]
+    fn chimeric_search_quantifies_each_co_isolated_precursor() {
+        let cands = vec![
+            candidate(b"PEPTIDEK", false),
+            candidate(b"SAMPLERK", false),
+            candidate(b"LLLLLLLK", false),
+            candidate(b"KEDITPEP", true),
+        ];
+        // The co-isolated precursor at 600.3 outscores the selected one: its
+        // best PSM is rank 1 of the spectrum and the selected precursor's best
+        // is rank 2. Both are quantified; the selected precursor's runner-up
+        // (rank 3) and the second co-isolated precursor's decoy winner are
+        // rows of their own precursor.
+        let (c, spectra, queues) = one_spectrum(vec![
+            psm(12.0, 1, Some(600.3)),
+            psm(10.0, 0, None),
+            psm(9.0, 2, None),
+            psm(7.0, 3, Some(450.2)),
+        ]);
+        let hits = select_rank1_all(&c, &spectra, &queues, &cands);
+        assert_eq!(
+            selected(&hits),
+            vec![
+                ("Scan 1_1_1_0".to_string(), false, true),
+                ("Scan 1_1_2_1".to_string(), false, false),
+                ("Scan 1_1_4_3".to_string(), true, true),
+            ]
+        );
+        // Without decoys (the per-run quantification), the decoy winner goes.
+        let hits = select_hits(&c, &spectra, &queues, &cands, None);
+        assert_eq!(hits.len(), 2);
+        // A rescoring result decides each co-isolated PSM on its own q-value.
+        let mut rescore = HashMap::new();
+        for (id, q) in [("Scan 1_1_1_0", 0.2), ("Scan 1_1_2_1", 0.001)] {
+            rescore.insert(
+                id.to_string(),
+                PercolatorPsm {
+                    psm_id: id.to_string(),
+                    q_value: q,
+                    pep: 0.0,
+                    score: Some(1.0),
+                    peptide: String::new(),
+                    proteins: String::new(),
+                },
+            );
+        }
+        let hits = select_hits(&c, &spectra, &queues, &cands, Some(&rescore));
+        assert_eq!(
+            selected(&hits),
+            vec![("Scan 1_1_2_1".to_string(), false, false)]
+        );
     }
 
     fn settings(lfq: bool, quant_dir: Option<&str>) -> QuantSettings {

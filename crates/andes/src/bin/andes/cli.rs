@@ -727,8 +727,9 @@ pub(crate) struct SearchArgs {
     /// Directory for the per-run artifacts of multi-run quantification: for
     /// each input file `<stem>.ms1.parquet` (its MS1 scans, all FAIMS voltages) and
     /// `<stem>.quant.parquet` (every rank-1 PSM, targets and decoys, with no
-    /// FDR filter). Implies MS1 capture; same inputs as `--lfq` (mzML or
-    /// Thermo `.raw`; not with `--chimeric`, MGF, `.d` or `--glyco`).
+    /// FDR filter; under `--chimeric` also the best PSM of each co-isolated
+    /// precursor). Implies MS1 capture; same inputs as `--lfq` (mzML or
+    /// Thermo `.raw`; not with MGF, `.d` or `--glyco`).
     #[arg(long = "quant-dir", value_name = "DIR")]
     pub(crate) quant_dir: Option<PathBuf>,
 

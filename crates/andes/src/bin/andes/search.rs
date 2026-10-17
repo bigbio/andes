@@ -1232,28 +1232,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     .into(),
             );
         }
-        if cli.chimeric && (s.needs_ms1_series() || s.needs_ms3()) {
+        if cli.chimeric && s.needs_ms3() {
             return Err(
-                "--lfq, --quant-dir and --tmt-level 3 cannot be combined with --chimeric yet; \
-                        reporter quantification at MS2 (`--tmt <plex>`) works with it"
+                "--tmt-level 3 cannot be combined with --chimeric: the cascade reads MS2 only"
                     .into(),
             );
         }
         if cli.glyco {
             return Err("--tmt/--lfq/--quant-dir are not available in --glyco mode".into());
-        }
-        if chimeric_active && s.plex.is_some() {
-            // The chimeric read path streams MS1 for the co-isolation search
-            // and does not hand it to quantification.
-            if s.min_purity > 0.0 {
-                return Err("--tmt-min-purity needs the precursor purity, which is not \
-                            computed under --chimeric"
-                    .into());
-            }
-            eprintln!(
-                "WARN: --tmt with --chimeric: precursor purity is not computed (the purity \
-                 column stays empty)"
-            );
         }
         if !cli.rescore && !cli.rescore_native && (s.plex.is_some() || s.lfq) {
             eprintln!(
@@ -1264,10 +1250,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         eprintln!("Quantification: {}", s.describe());
     }
-    if let (true, Some(q)) = (chimeric_active, quant.as_mut()) {
-        q.ms1_not_captured();
-    }
-
     let mut all_spectra: Vec<Spectrum> = Vec::new();
     let mut all_queues: Vec<TopNQueue> = Vec::new();
     // Exclusive end index in `all_spectra` of each input, in input order.
@@ -1372,29 +1354,49 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // MS1); hardcode MS2 so `--ms-level 3` can never widen the mzML reader's
             // range to admit MS3 (the .raw chunked reader is already MS2-only).
             let mslevel = 2;
-            let parser_handle = thread::spawn(move || -> Result<(usize, Vec<String>), String> {
+            // Label-free quantification reads the run's MS1 scans and each MS2's
+            // context from this path too (the reader keeps them next to the
+            // per-chunk co-isolation link).
+            let capture_ms1 = quant.as_ref().is_some_and(|q| q.settings.needs_ms1());
+            let capture_context = quant.is_some();
+            type Ms1Parsed = (usize, Vec<String>, RunScans);
+            let parser_handle = thread::spawn(move || -> Result<Ms1Parsed, String> {
                 if file_is_mzml {
-                    let reader = MzMLReader::new(
+                    let mut reader = MzMLReader::new(
                         input::open_buf_maybe_gz(&spectrum_path)
                             .map_err(|e| format!("open mzML: {e}"))?,
                     )
                     .with_ms_level_range(mslevel, mslevel)
-                    .with_ms1_capture(true);
+                    .with_ms1_capture(true)
+                    .with_run_ms1_capture(capture_ms1)
+                    .with_scan_context_capture(capture_context);
                     let (errc, errs) =
                         reader.read_with_ms1_chunked(CHUNK_SIZE, cap, |chunk, link| {
                             let _ = tx.send((chunk, link));
                         });
-                    Ok((errc, errs))
+                    let scans = RunScans {
+                        ms1: reader.take_run_ms1(),
+                        ms3: Vec::new(),
+                        contexts: reader.take_scan_contexts(),
+                    };
+                    Ok((errc, errs, scans))
                 } else {
                     #[cfg(feature = "thermo")]
                     {
-                        let reader = input::ThermoRawReader::open(&spectrum_path)
-                            .map_err(|e| format!("open Thermo .raw: {e}"))?;
+                        let mut reader = input::ThermoRawReader::open(&spectrum_path)
+                            .map_err(|e| format!("open Thermo .raw: {e}"))?
+                            .with_run_ms1_capture(capture_ms1)
+                            .with_scan_context_capture(capture_context);
                         let (errc, errs) =
                             reader.read_with_ms1_chunked(CHUNK_SIZE, cap, |chunk, link| {
                                 let _ = tx.send((chunk, link));
                             });
-                        Ok((errc, errs))
+                        let scans = RunScans {
+                            ms1: reader.take_run_ms1(),
+                            ms3: Vec::new(),
+                            contexts: reader.take_scan_contexts(),
+                        };
+                        Ok((errc, errs, scans))
                     }
                     #[cfg(not(feature = "thermo"))]
                     {
@@ -1542,9 +1544,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     all_spectra.push(spec);
                 }
             }
-            let (err_count, first_errors) = parser_handle
+            let (err_count, first_errors, scans) = parser_handle
                 .join()
                 .map_err(|_| "MS1-linked parser thread panicked".to_string())??;
+            run_scans = scans;
             eprintln!(
                 "{}: streamed {} MS2 spectra ({} MS1 scans linked) from {}",
                 if chimeric_active {

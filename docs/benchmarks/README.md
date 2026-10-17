@@ -313,6 +313,109 @@ competition features (median DeltaRankScore 0 → 2, rank entropy 1.21 → 0.19)
 most. A wider index pool (200 or 300 candidates, or 2 matched ions) does not recover the 2,751
 scans only enumeration identifies.
 
+### Quantification: label-free with match-between-runs, and TMT
+
+#### Label-free with match between runs (ProteoBench "Quant LFQ DDA ion", QExactive)
+
+**Measured 2026-10-17** at `main` `47d2844` (rustc 1.87.0, default features) on a cluster
+node, search and extract at 6 threads. Input: the six `LFQ_Orbitrap_DDA_Condition_{A,B}_Sample_Alpha_0{1,2,3}`
+runs of PXD028735 (Q Exactive HF-X, human/yeast/E. coli at known ratios), peak-picked mzML
+converted from the vendor `.raw`, searched against the HYE FASTA linked from the module's
+documentation (31,889 entries). Per-run search and Percolator 3.7.1 (`--seed 42 --only-psms`),
+then `andes quant library`, `extract` and `finalize`. Scored with the official `proteobench`
+Python package 0.18.6 (`DDAQuantIonModuleQExactive`, "Custom" format), which reports minimum
+1, 3 and 6 runs per precursor in one pass; the leaderboard default is min 3. One dataset, one
+Percolator seed.
+
+andes, with the quantity column `quantity_normalized` (per-run level and RT-local offset
+removed, [`DOCS.md` §10](../../DOCS.md#10-quantification)); median |ε|, E. coli |ε| and CV are at
+min 3:
+
+| transfer q (`--mbr-fdr`) | precursors, min 1 / 3 / 6 | median \|ε\| | E. coli \|ε\| | CV median |
+|---|---:|---:|---:|---:|
+| 0.01 | 76,570 / **54,932** / 27,430 | **0.155** | **0.212** | **0.110** |
+| 0.05 (default since #163) | 76,669 / **67,035** / 46,701 | 0.164 | 0.317 | 0.124 |
+
+The raw `quantity` column, which is what andes hands to quantms (the feature parquet), is not
+normalised. Same run, min 3: median |ε| 0.225 / E. coli 0.276 / CV 0.240 at transfer q 0.01,
+and 0.226 / 0.336 / 0.249 at 0.05. Normalisation does not change which precursors are reported.
+
+ProteoBench public leaderboard, MBR submissions at min 3 (results repository
+`Results_quant_ion_DDA` at commit `206f241`, 2026-07-16). Engines are anonymised with the
+labels used in #155, where an engine's submissions are numbered by precursor count at min 3:
+
+| submission | precursors | median \|ε\| | CV median |
+|---|---:|---:|---:|
+| engine E | 81,933 | 0.388 | 0.394 |
+| engine C, submission 1 | 74,697 | 0.222 | 0.132 |
+| engine A, submission 1 | 63,701 | 0.200 | 0.155 |
+| engine C, submission 7 | 57,787 | 0.208 | 0.127 |
+| engine A, submission 2 | 54,374 | 0.190 | 0.154 |
+| engine B, submission 3 | 43,380 | 0.207 | 0.217 |
+| engine D, submission 2 | 36,218 | 0.216 | 0.165 |
+
+**Matched coverage.** Each submission's per-precursor table is on the ProteoBench data server;
+on the precursors that both report at min 3 (andes at transfer q 0.01, same run as above),
+median |ε| / E. coli |ε| / CV:
+
+| shared with | shared precursors | that submission | andes `quantity_normalized` |
+|---|---:|---|---|
+| engine A, submission 1 | 47,534 | 0.187 / 0.247 / 0.157 | **0.146 / 0.194 / 0.104** |
+| engine C, submission 1 | 46,614 | 0.204 / 0.316 / 0.124 | **0.150 / 0.203 / 0.107** |
+
+**Error control on the same six runs.** The HYE FASTA plus a whole-sequence shuffled twin of
+every protein (`ENTRAP_`), counted with the ALL rule ([§3](#entrapment-fdp)); target : entrapment
+peptides 0.911, factor 1.911. Same commit, host and pipeline.
+
+- Identification at Percolator q ≤ 0.01: PSM FDP **0.97%** (per run 0.91–1.05%); per-run
+  peptide FDP **1.40%** (the distinct peptides of those PSMs; there is no separate peptide-level q).
+- Quantified precursors at min 3, transfer q 0.01: 74 of 54,281 are entrapment-only, an
+  estimated FDP of **0.26%** (0.52% at transfer q 0.05).
+- Wrong-peak rate among accepted transfers (pseudo-transfer validation in `mbr_validation.tsv`):
+  **1.02%** at transfer q 0.01, **1.85%** at 0.05. The transfer q-value is an internal
+  quant-quality score; it measures the wrong-peak error, not whether the donor identification
+  was right.
+
+**CPU per stage**, user + sys summed over the six runs, from the same cluster-node run. Not
+comparable with the wall and CPU times elsewhere on this page, which come from a different host;
+extract CPU varies by about ±30% between node types.
+
+| stage | CPU s |
+|---|---:|
+| search | 1,081 |
+| Percolator | 2,484 |
+| library | 13 |
+| extract | 4,944 |
+| finalize (transfer q 0.01) | 109 |
+
+**Where andes stands.** With `quantity_normalized`, andes's median |ε| and CV at min 3 are lower
+than those of every MBR submission on the leaderboard snapshot, at both transfer thresholds;
+on the shared precursors this was checked at transfer q 0.01. Precursor count is not the lead:
+at min 3, 12 of the 30 MBR submissions report more than andes at transfer q 0.01, and 5 do at
+0.05 (engine E and engine C's four largest). The raw `quantity` is not best on either metric;
+compare it with submissions that do not normalise their intensities (engine B's; see #155).
+
+#### TMT reporter ions (PXD017803, yeast triple-knockout, TMTpro 16-plex)
+
+**Earlier measurement, 2026-10-10**, not re-measured on current `main`: a branch build of the
+patch merged as `0a458a2` (MS2 acquisition context: survey scan, scan window, FAIMS voltage),
+on the 8-thread benchmark host of the tables above. Reporter extraction and impurity correction
+match a reference isobaric implementation exactly on the same scans, with and without the
+TMTpro impurity matrix.
+
+Interference is the median ratio of the knockout channels to the non-knockout channels
+(lower is better), after impurity correction:
+
+| acquisition | knockout / non-knockout |
+|---|---:|
+| hrMS2 | 0.210 |
+| SPS-MS3 | 0.127 |
+| SPS-MS3, andes precursor purity ≥ 0.9 (3,487 PSMs) | **0.040** |
+| SPS-MS3, a reference purity filter at ≥ 0.9 | 0.139 |
+
+Only a few dozen knockout-channel PSMs stand behind the purity comparison, so read it as a
+direction, not a precise ratio.
+
 ### Refuted — do not re-try without new evidence
 
 - **Charge-neighbour search** (2026-10-03; its `--charge-expand` flag has been removed). On UPS1, accepted
@@ -413,6 +516,37 @@ change at once.
 those from pGlyco2 TSV or StrucGP xlsx. To run everything from scratch, see
 [`reproduce/`](reproduce/), which also lists what will not reproduce exactly.
 
+### Quantification (ProteoBench LFQ DDA ion)
+
+The six PXD028735 runs as peak-picked mzML, the module's HYE FASTA, `R` each run's stem:
+
+```bash
+# per run: search; MS1, MS2 and PSM tables go into q/; then Percolator on the run's PIN
+andes --spectrum $R.mzML --database ProteoBenchFASTA_MixedSpecies_HYE.fasta \
+      --mods configs/astral_mods.txt --precursor-tol 10ppm --max-missed-cleavages 2 \
+      --threads 6 --output-pin $R.pin --quant-dir q/
+percolator --seed 42 --only-psms --results-psms $R.target.psms \
+      --decoy-results-psms $R.decoy.psms $R.pin
+# once: the library, from every run's Percolator results
+andes quant library --quant-dir q/ \
+      --psms A1=A1.target.psms ... --decoy-psms A1=A1.decoy.psms ...
+# per run
+andes quant extract --quant-dir q/ --run $R --lfq-tol 10ppm
+# once per transfer threshold
+andes quant finalize --quant-dir q/ -o pb --mbr-fdr 0.01     # and --mbr-fdr 0.05
+```
+
+`andes --spectrum ... (six runs) --rescore --lfq --mbr --quant-dir q/` runs the same four
+stages in one process, with one Percolator over all runs; that variant was not the one measured.
+
+Then convert `pb.mbr.tsv` to ProteoBench's "Custom" format: one row per precursor with
+`Sequence`, ProForma `Modified sequence`, `Proteins`, `Charge` and the six
+`LFQ_Orbitrap_DDA_Condition_*` intensity columns, filled from `quantity_normalized` (or
+`quantity` for the raw figures) of the `identified`, `transfer_ms1` and `transfer_ms2` rows
+only. Score with the `proteobench` package (0.18.6):
+`DDAQuantIonModuleQExactive(...).benchmarking(file, "Custom", ...)`, which reports minimum
+1, 3 and 6 runs.
+
 ## Layout
 
     docs/benchmarks/
@@ -510,6 +644,11 @@ database has no entrapment component.
   ion Y1+Fuc is not a ladder rung, which is the open lead.
 - **Glyco selection is the open problem**; testing it needs a candidate-pool dump under
   production settings.
+- **Quantification is measured on one label-free dataset (PXD028735, six runs) and one Percolator
+  seed;** the run-level normalisation of `quantity_normalized` is andes's own, while the raw
+  `quantity` stays the contract with quantms. The TMT figures predate current `main`. Work on
+  precursor depth for match between runs (more donors and more accepted transfers) is under
+  evaluation and not shipped; no numbers from it are claimed here.
 
 ---
 

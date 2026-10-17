@@ -2291,6 +2291,14 @@ mod finalize_tests {
         vec!["a".into(), "b".into()]
     }
 
+    fn table(path: &Path) -> Vec<Vec<String>> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|l| l.split('\t').map(String::from).collect())
+            .collect()
+    }
+
     /// [`library`] with every precursor an entry identified in run 0; those
     /// in `identity` are identity decoys. Precursor `p`'s best donor PSM has
     /// q-value `donor_q(p)`.

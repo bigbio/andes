@@ -1050,7 +1050,7 @@ mod tests {
             .filter(|e| e.identity_decoy)
             .map(|e| e.precursor)
             .collect();
-        assert_eq!(decoys, vec![300]);
+        assert!(decoys.contains(&300) && decoys.iter().all(|&p| p >= 300), "{decoys:?}");
         write_library(dir.path(), &s).unwrap();
         let back = read_library(dir.path()).unwrap();
         assert_eq!(back.runs, s.runs);

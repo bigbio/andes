@@ -1861,9 +1861,9 @@ mod tests {
             };
             assert!(rows.iter().all(|r| r.role == role));
             if run == 1 {
-                assert_eq!(same(rows_of(&a.rows, ONLY_RUN0)), same(rows));
                 let ev = rows[0].evidence.as_ref().unwrap();
                 assert!(ev.llr > 100.0, "{ev:?}");
+                assert_eq!(same(rows_of(&a.rows, ONLY_RUN0)), same(rows));
                 assert_eq!(same(a.rows.iter().collect()), same(b.rows.iter().collect()));
             } else {
                 // The width prior of run 0 leaves the identity decoy out.

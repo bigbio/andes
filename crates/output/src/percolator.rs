@@ -573,17 +573,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_sage_style_extra_column() {
+    fn parse_leading_filename_column() {
         // a comparison search engine adds a leading FileName column, shifting q-value to col 4. The
         // by-NAME lookup must still find every field correctly.
         let text =
             "PSMId\tFileName\tscore\tq-value\tposterior_error_probability\tpeptide\tproteinIds\n\
-                    sc_5_1\trun.mzML\t9.1\t0.004\t0.002\tK.SAGEPEPK.L\tDECOY_x\n";
+                    sc_5_1\trun.mzML\t9.1\t0.004\t0.002\tK.SAGTPEPK.L\tDECOY_x\n";
         let m = parse_psm_results(text).unwrap();
         let r = &m["sc_5_1"];
         assert_eq!(r.q_value, 0.004);
         assert_eq!(r.pep, 0.002);
-        assert_eq!(r.peptide, "K.SAGEPEPK.L");
+        assert_eq!(r.peptide, "K.SAGTPEPK.L");
         assert_eq!(r.proteins, "DECOY_x");
     }
 

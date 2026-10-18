@@ -2,7 +2,7 @@
 //! glycopeptide spectra. Gated on two env vars (the data is not vendored):
 //!
 //! ```text
-//! ANDES_GLYCO_GDB=/path/to/pGlyco-N-Mouse.gdb \
+//! ANDES_GLYCO_GDB=/path/to/N-glycan-mouse.gdb \
 //! ANDES_GLYCO_MGF=/path/to/glycopeptide-filtered.mgf \
 //! cargo test -p andes-glyco --test glycan_first_mouse -- --nocapture
 //! ```

@@ -217,7 +217,7 @@ pub fn hybrid_candidates_with_isotope(
 /// read the glycan-independent trimannosyl-core Y-ion ladder to determine the
 /// backbone mass from the spectrum, then annotate the glycan by subtraction
 /// (glycan = precursor_neutral − backbone). This is the architecture of
-/// a glyco search engine / a cross-spectrum glyco engine / StrucGP.
+/// several published glyco search engines.
 pub fn solve_backbones_for_charge(
     peaks: &[(f64, f32)],
     precursor_neutral: f64,

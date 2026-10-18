@@ -64,7 +64,7 @@ pub const GLYCO_MAX_PF: usize = 1024;
 #[derive(Clone, Debug, Default)]
 pub struct GlycoConfig {
     /// Minimum trimannosyl-core Y ions required to emit a glyco PSM. 0 = no requirement
-    /// (previous behaviour). The field standard is 2 (pGlyco3, O-Pair).
+    /// (previous behaviour). The field standard is 2.
     pub min_core_y: u32,
     /// Diagnostic: restrict scoring to the scan numbers listed in this file, one per
     /// line. `None` scores every spectrum.
@@ -639,7 +639,7 @@ impl GlycoCtxOwned {
             tol_ppm,
             min_diagnostic_ions: 2,
             min_core_ions: 1, // permissive: this is a pre-filter, not a gate
-            top_k: 100,       // pGlyco3: top 100 candidate glycan compositions for peptide search
+            top_k: 100,       // field standard: top 100 glycan compositions per peptide search
             diagnostic_ions: andes_glyco::glycan_first::default_diagnostic_ions(),
             diagnostic_filter: true,
             score_weights: (1.0, 1.0, 0.5),
@@ -1819,10 +1819,9 @@ fn score_spectrum_glyco(
         // MINIMUM-EVIDENCE GATE. andes previously emitted a best guess for
         // every gated scan — 7304 of 24857 on a human plasma file, of which
         // ~2% were correct. Every other engine in the field refuses to answer
-        // without structural evidence: MSFragger requires >=2 non-Y sequence
-        // ions and >=4 matched fragments, pGlyco3 and O-Pair require >=2
-        // trimannosyl-core Y ions, Glyco-Decipher requires >=3 with Y1
-        // mandatory. We required nothing.
+        // without structural evidence: >=2 non-Y sequence ions and >=4
+        // matched fragments, or >=2 trimannosyl-core Y ions, or >=3 with Y1
+        // mandatory, depending on the engine. We required nothing.
         //
         // This matters because the reportable count is bounded by the number
         // of targets ranked above the FIRST decoy (Percolator's concatenated

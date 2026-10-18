@@ -280,6 +280,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         isoforms: cli.uniprot_isoforms,
         chains: cli.uniprot_chains,
         evidence: cli.uniprot_evidence,
+        knockoffs: Some(input::KnockoffOptions {
+            per_variant: cli.uniprot_knockoffs,
+            enzyme: search_enzyme,
+        }),
     };
     let loaded = input::load_protein_database(&database_path, &uniprot_opts)?;
     let target_db = loaded.db;
@@ -1232,28 +1236,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     .into(),
             );
         }
-        if cli.chimeric && (s.needs_ms1_series() || s.needs_ms3()) {
+        if cli.chimeric && s.needs_ms3() {
             return Err(
-                "--lfq, --quant-dir and --tmt-level 3 cannot be combined with --chimeric yet; \
-                        reporter quantification at MS2 (`--tmt <plex>`) works with it"
+                "--tmt-level 3 cannot be combined with --chimeric: the cascade reads MS2 only"
                     .into(),
             );
         }
         if cli.glyco {
             return Err("--tmt/--lfq/--quant-dir are not available in --glyco mode".into());
-        }
-        if chimeric_active && s.plex.is_some() {
-            // The chimeric read path streams MS1 for the co-isolation search
-            // and does not hand it to quantification.
-            if s.min_purity > 0.0 {
-                return Err("--tmt-min-purity needs the precursor purity, which is not \
-                            computed under --chimeric"
-                    .into());
-            }
-            eprintln!(
-                "WARN: --tmt with --chimeric: precursor purity is not computed (the purity \
-                 column stays empty)"
-            );
         }
         if !cli.rescore && !cli.rescore_native && (s.plex.is_some() || s.lfq) {
             eprintln!(
@@ -1264,10 +1254,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         eprintln!("Quantification: {}", s.describe());
     }
-    if let (true, Some(q)) = (chimeric_active, quant.as_mut()) {
-        q.ms1_not_captured();
-    }
-
     let mut all_spectra: Vec<Spectrum> = Vec::new();
     let mut all_queues: Vec<TopNQueue> = Vec::new();
     // Exclusive end index in `all_spectra` of each input, in input order.
@@ -1372,29 +1358,49 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // MS1); hardcode MS2 so `--ms-level 3` can never widen the mzML reader's
             // range to admit MS3 (the .raw chunked reader is already MS2-only).
             let mslevel = 2;
-            let parser_handle = thread::spawn(move || -> Result<(usize, Vec<String>), String> {
+            // Label-free quantification reads the run's MS1 scans and each MS2's
+            // context from this path too (the reader keeps them next to the
+            // per-chunk co-isolation link).
+            let capture_ms1 = quant.as_ref().is_some_and(|q| q.settings.needs_ms1());
+            let capture_context = quant.is_some();
+            type Ms1Parsed = (usize, Vec<String>, RunScans);
+            let parser_handle = thread::spawn(move || -> Result<Ms1Parsed, String> {
                 if file_is_mzml {
-                    let reader = MzMLReader::new(
+                    let mut reader = MzMLReader::new(
                         input::open_buf_maybe_gz(&spectrum_path)
                             .map_err(|e| format!("open mzML: {e}"))?,
                     )
                     .with_ms_level_range(mslevel, mslevel)
-                    .with_ms1_capture(true);
+                    .with_ms1_capture(true)
+                    .with_run_ms1_capture(capture_ms1)
+                    .with_scan_context_capture(capture_context);
                     let (errc, errs) =
                         reader.read_with_ms1_chunked(CHUNK_SIZE, cap, |chunk, link| {
                             let _ = tx.send((chunk, link));
                         });
-                    Ok((errc, errs))
+                    let scans = RunScans {
+                        ms1: reader.take_run_ms1(),
+                        ms3: Vec::new(),
+                        contexts: reader.take_scan_contexts(),
+                    };
+                    Ok((errc, errs, scans))
                 } else {
                     #[cfg(feature = "thermo")]
                     {
-                        let reader = input::ThermoRawReader::open(&spectrum_path)
-                            .map_err(|e| format!("open Thermo .raw: {e}"))?;
+                        let mut reader = input::ThermoRawReader::open(&spectrum_path)
+                            .map_err(|e| format!("open Thermo .raw: {e}"))?
+                            .with_run_ms1_capture(capture_ms1)
+                            .with_scan_context_capture(capture_context);
                         let (errc, errs) =
                             reader.read_with_ms1_chunked(CHUNK_SIZE, cap, |chunk, link| {
                                 let _ = tx.send((chunk, link));
                             });
-                        Ok((errc, errs))
+                        let scans = RunScans {
+                            ms1: reader.take_run_ms1(),
+                            ms3: Vec::new(),
+                            contexts: reader.take_scan_contexts(),
+                        };
+                        Ok((errc, errs, scans))
                     }
                     #[cfg(not(feature = "thermo"))]
                     {
@@ -1542,9 +1548,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     all_spectra.push(spec);
                 }
             }
-            let (err_count, first_errors) = parser_handle
+            let (err_count, first_errors, scans) = parser_handle
                 .join()
                 .map_err(|_| "MS1-linked parser thread panicked".to_string())??;
+            run_scans = scans;
             eprintln!(
                 "{}: streamed {} MS2 spectra ({} MS1 scans linked) from {}",
                 if chimeric_active {
@@ -2033,8 +2040,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // and the final PIN candidate pool is fixed, run per-run RT self-calibration
     // and populate DeltaRT/AbsDeltaRT/DeltaRTNorm (+ predicted_rt for the QPX)
     // onto each PSM. Neutral 0.0 (baseline-identical) when observed RT is
-    // unavailable or calibration cannot be fit. See
-    // `docs/plans/glyco/50-roadmap/rt-prediction-design.md` (Commit 1).
+    // unavailable or calibration cannot be fit.
     output::populate_rt_features(&spectra, &mut queues, &pin_candidates);
 
     // Provenance (additive): entry class, gap to the best Reference candidate,
@@ -2075,6 +2081,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `--pep` are thresholds applied by such a run; they never start one on their
     // own (that would silently launch a backend / the non-production native path).
     let fdr_threshold = cli.fdr.unwrap_or(0.01);
+    let variant_fdr = cli.variant_fdr.unwrap_or(fdr_threshold.max(0.05));
     let (use_percolator, use_native) = if cli.rescore {
         (true, false)
     } else if cli.rescore_native {
@@ -2171,6 +2178,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // target's q-value becomes the larger of the global and its class q-value,
     // so the filtered TSV, the QPX and quantification accept a PSM only if it
     // passes both. A search with one class (any FASTA) is left unchanged.
+    // Knockoff rows: in the PIN and the QPX bundle as targets with q = 1, in
+    // no other output.
+    let mut knockoff_rows: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Some(ref mut map) = rescore_map {
         let counts = output::apply_class_fdr(map, &rescore_decoy_psms, &pin_index);
         if counts.len() > 1 {
@@ -2192,15 +2202,46 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 line.join(", ")
             );
         }
+        // Knockoff variants: the knockoff PSMs accepted per substitution class
+        // estimate the false real variant PSMs, and give them a q-value too.
+        let outcome = output::apply_knockoff_fdr(map, &pin_index, variant_fdr);
+        knockoff_rows = outcome.knockoff_rows;
+        if !outcome.counts.is_empty() {
+            let line: Vec<String> = outcome
+                .counts
+                .iter()
+                .map(|c| {
+                    format!(
+                        "{} {} -> {} ({} tested; knockoffs {:.1}, false share {:.2})",
+                        c.stratum,
+                        c.real_before,
+                        c.real_after,
+                        c.tested_before,
+                        c.knockoff_weighted,
+                        c.false_share()
+                    )
+                })
+                .collect();
+            eprintln!(
+                "Rescore: variant PSMs at q<={variant_fdr} per substitution class, before -> \
+                 after knockoff q-values: {}",
+                line.join(", ")
+            );
+        }
     }
     if cli.mbr {
         mbr_decoys = std::mem::take(&mut rescore_decoy_psms);
     }
+    // The cutoff each row is accepted at: --variant-fdr for variant-class rows,
+    // --fdr for the rest.
+    let cutoffs = rescore_map
+        .as_ref()
+        .map(|m| output::Cutoffs::new(m, &pin_index, fdr_threshold, variant_fdr));
 
-    // Filtered TSV: target PSMs whose Percolator q-value ≤ --fdr. Written next to
-    // the PIN as `<stem>.q<fdr>.tsv` (rescore only). One row per accepted PSM with
-    // the join key + q/PEP + peptide/proteins from the Percolator result.
-    if let Some(ref map) = rescore_map {
+    // Filtered TSV: target PSMs whose q-value passes their cutoff. Written next
+    // to the PIN as `<stem>.q<fdr>.tsv` (rescore only). One row per accepted PSM
+    // with the join key + q/PEP + peptide/proteins from the Percolator result.
+    if let (Some(map), Some(cutoffs)) = (rescore_map.as_ref(), cutoffs.as_ref()) {
         let fdr = fdr_threshold;
         let stem = report_base
             .file_stem()
@@ -2213,17 +2254,25 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // per-PSM local-FDR cap on top.
         let pep_cap = cli.pep;
         let mut accepted: Vec<&output::PercolatorPsm> = map
-            .values()
-            .filter(|p| p.q_value <= fdr && pep_cap.is_none_or(|t| p.pep <= t))
+            .iter()
+            .filter(|(id, p)| {
+                p.q_value <= cutoffs.of(id)
+                    && pep_cap.is_none_or(|t| p.pep <= t)
+                    && !knockoff_rows.contains(*id)
+            })
+            .map(|(_, p)| p)
             .collect();
         accepted.sort_by(|a, b| {
             a.q_value
                 .partial_cmp(&b.q_value)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        let pep_note = pep_cap
+        let mut pep_note = pep_cap
             .map(|t| format!(" and PEP<={t}"))
             .unwrap_or_default();
+        if pin_index.has_alternative_entries && variant_fdr != fdr {
+            pep_note.push_str(&format!(", variant-class PSMs at q<={variant_fdr}"));
+        }
         match write_filtered_tsv(&filtered_path, &accepted) {
             Ok(()) => eprintln!(
                 "Wrote filtered TSV: {} ({} PSMs at q<={}{})",
@@ -2253,7 +2302,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => eprintln!("WARN: could not write {}: {e}", stats_path.display()),
     }
 
-    // ── QPX `.idparquet/` bundle (optional, OpenMS-compatible) ───────────────
+    // ── QPX `.idparquet/` bundle (optional, quantms-compatible) ──────────────
     // Mirrors the PIN write from the SAME unified candidate/index pair. Sourced
     // here (not in the bench/TSV arms) so it is produced for every run that asks
     // for it, including bench mode. Run identifier = the first spectrum file
@@ -2297,20 +2346,59 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    if let Some(ref mut map) = rescore_map {
+        map.retain(|id, _| !knockoff_rows.contains(id));
+    }
+
     // ── Quantification (`--tmt` / `--lfq`) ────────────────────────────────────
     // After rescoring so the targets are the confident PSMs; after the QPX
     // write so the feature parquet joins a bundle that already exists.
-    if let Some(q) = &quant {
-        crate::quant_run::run_quant(
+    let quant_summary = match &quant {
+        Some(q) => Some(crate::quant_run::run_quant(
             q,
             &spectra,
             &queues,
             &pin_candidates,
             &pin_index,
             rescore_map.as_ref(),
+            cutoffs.as_ref(),
             &report_base,
             cli.output_parquet.as_deref(),
-        )?;
+        )?),
+        None => None,
+    };
+
+    // Proteoform table: per protein family, the canonical entry and each
+    // isoform, variant and chain entry with accepted evidence, its confidence
+    // and quantity. Written with rescoring when the database holds such entries.
+    if let (Some(map), Some(cutoffs), true) = (
+        rescore_map.as_ref(),
+        cutoffs.as_ref(),
+        pin_index.has_alternative_entries,
+    ) {
+        let rows = output::proteoform_table(map, &pin_index, cutoffs, quant_summary.as_ref());
+        let stem = report_base
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "andes".to_string());
+        let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
+        let path = dir.join(format!("{stem}.proteoforms.tsv"));
+        let columns = quant_summary
+            .as_ref()
+            .map(|q| q.columns.clone())
+            .unwrap_or_default();
+        match output::write_proteoform_tsv(&path, &rows, &columns) {
+            Ok(()) => eprintln!(
+                "Wrote proteoform table: {} ({} family members, {} families)",
+                path.display(),
+                rows.len(),
+                rows.iter()
+                    .map(|r| r.family.as_str())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+            ),
+            Err(e) => eprintln!("WARN: could not write {}: {e}", path.display()),
+        }
     }
 
     // `--mbr` inputs; the stages run after the last search output is
@@ -2413,6 +2501,13 @@ fn log_uniprot_load(stats: &input::UniProtLoadStats, opts: &input::UniProtOption
         stats.unusable_features,
         stats.isoform_features,
     );
+    if opts.variants && opts.knockoffs.is_some_and(|k| k.per_variant > 0) {
+        eprintln!(
+            "UniProt XML: {} knockoff variant entries ({} single-residue variants with no \
+             position for a knockoff)",
+            stats.knockoff_proteins, stats.variants_without_knockoff,
+        );
+    }
     if opts.isoforms || opts.chains {
         eprintln!(
             "UniProt XML: {} isoform entries ({} isoforms not rebuildable), {} mature-chain entries",

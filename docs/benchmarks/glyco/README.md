@@ -53,7 +53,7 @@ python3 eval_entrap.py pooled.pin out.psms             # false-discovery proport
 ```
 
 `--glyco` also needs `--glyco-species` or `--glyco-glycan-gdb`. The benchmark tiers use the
-shuffled-self database; see [`../README.md`](../README.md#2-how-to-reproduce).
+shuffled-self database; see [`../README.md`](../README.md#3-how-to-reproduce).
 
 ## Reading `eval_honest.py`
 

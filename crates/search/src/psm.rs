@@ -234,7 +234,7 @@ pub struct PsmFeatures {
     // per-run calibration. ALL default to 0.0 (Default), which is the NEUTRAL
     // value: a run without observed RT, or one where calibration failed, leaves
     // these at 0.0 so the PIN is byte-identical to the pre-RT baseline on these
-    // columns. See `docs/plans/glyco/50-roadmap/rt-prediction-design.md`.
+    // columns.
     /// Signed retention-time delta in minutes: `observed_rt_min − predicted_rt_min`.
     pub delta_rt: f32,
     /// Absolute retention-time delta in minutes: `|delta_rt|`.

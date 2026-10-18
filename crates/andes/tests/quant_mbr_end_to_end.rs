@@ -19,8 +19,8 @@ use arrow::array::{Array, Int16Array, StringArray};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 /// Designed quantity of HLVDEPQNLIK/2 (peptide 4): mono apex 8e5 times the
-/// summed first four isotope fractions over the mono's (2.06764, pyOpenMS
-/// coarse isotope pattern), times sigma (4 s) times sqrt(2 pi).
+/// summed first four isotope fractions over the mono's (2.06764, a coarse
+/// isotope pattern), times sigma (4 s) times sqrt(2 pi).
 const PEPTIDE4_QUANTITY: f64 = 16_584_995.85;
 
 const RUNS: [&str; 3] = ["mbr_run1", "mbr_run2", "mbr_run3"];

@@ -27,16 +27,16 @@
 //!
 //! Features located on another isoform (`<location sequence="P04637-2">`) are
 //! in that isoform's coordinates and are not applied to the canonical sequence;
-//! isoforms themselves are not reconstructed (as in OpenMS' `UniProtXMLHandler`,
-//! which this parser follows for element scoping).
+//! isoforms themselves are not reconstructed (as in common UniProt XML
+//! readers, which this parser follows for element scoping).
 
 use std::collections::BTreeMap;
 use std::io::BufRead;
 use std::sync::Arc;
 
 use model::{
-    AminoAcid, ChainEnds, EntryKind, EntryOrigin, ModSite, Protein, ProteinAnnotation, ProteinDb,
-    SiteAnchor, Substitution, VariantRegion,
+    AminoAcid, ChainEnds, EntryKind, EntryOrigin, Enzyme, ModSite, Protein, ProteinAnnotation,
+    ProteinDb, SiteAnchor, Substitution, VariantRegion,
 };
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
@@ -118,6 +118,23 @@ pub struct UniProtOptions {
     /// Minimum evidence for a variant, a modification site or a mature chain
     /// to be used.
     pub evidence: EvidenceLevel,
+    /// Knockoff entries for the canonical sequence's single-residue variants
+    /// (with `variants`; `None` for none).
+    pub knockoffs: Option<KnockoffOptions>,
+}
+
+/// How knockoff variant entries are made. A knockoff is a real variant's
+/// substitution moved to another position of the same sequence that holds the
+/// same residue, in a matched context and far from every known variant: an
+/// almost certainly false target that a mass coincidence or an isotope error
+/// fits as well as it fits the real variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KnockoffOptions {
+    /// Knockoffs per substitution, at most.
+    pub per_variant: usize,
+    /// The search's enzyme: a knockoff sits in another enzymatic span of a
+    /// similar length.
+    pub enzyme: Enzyme,
 }
 
 /// Counts from a UniProt XML load, for the run log.
@@ -147,6 +164,10 @@ pub struct UniProtLoadStats {
     pub unbuilt_isoforms: usize,
     /// Mature-chain proteins added.
     pub chain_proteins: usize,
+    /// Knockoff variant proteins added.
+    pub knockoff_proteins: usize,
+    /// Single-residue variants for which no position qualified for a knockoff.
+    pub variants_without_knockoff: usize,
 }
 
 /// One `<feature>` of an entry.
@@ -227,8 +248,11 @@ struct SequenceVariant {
     end: usize,
     /// Replacement residues; empty for a deletion.
     replacement: Vec<u8>,
-    /// Accession tag: `<feature id>_<change>` or `VAR_<change>`.
+    /// Accession tag: `<feature id>_<change>` or `VAR_<change>`; a knockoff's
+    /// is `KO<i>_<change>_<tag of the variant it copies>`.
     tag: String,
+    /// For a knockoff, the tag of the variant it copies.
+    knockoff_of: Option<String>,
 }
 
 /// A mature chain cut out of the canonical sequence.
@@ -497,6 +521,7 @@ impl UniProtEntry {
                     end,
                     replacement: replacement.to_vec(),
                     tag,
+                    knockoff_of: None,
                 };
                 if !out
                     .iter()
@@ -544,6 +569,7 @@ impl UniProtEntry {
                     family: Arc::from(family),
                     feature: Arc::from(v.tag.as_str()),
                     variant_delta_da: mass(&v.replacement) - mass(&base[v.start..v.end]),
+                    knockoff_of: v.knockoff_of.as_deref().map(Arc::from),
                 };
                 // Equal-length changes: each differing residue and the one it
                 // replaced, so a form a searched mod makes canonical is skipped.
@@ -573,6 +599,50 @@ impl UniProtEntry {
             .collect()
     }
 
+    /// Up to `ko.per_variant` knockoffs of each single-residue variant in
+    /// `real` (variants of the canonical sequence). Their positions keep clear
+    /// of every sequence variant UniProt lists on the canonical sequence,
+    /// whatever its evidence.
+    fn knockoff_variants(
+        &self,
+        real: &[SequenceVariant],
+        ko: KnockoffOptions,
+        stats: &mut UniProtLoadStats,
+    ) -> Vec<SequenceVariant> {
+        let seq = &self.sequence;
+        let listed: Vec<usize> = self
+            .features
+            .iter()
+            .filter(|f| f.kind == "sequence variant" && self.on_canonical(f))
+            .filter_map(|f| f.location)
+            .flat_map(|(b, e)| (b as usize).saturating_sub(1)..e as usize)
+            .collect();
+        let mut out = Vec::new();
+        for v in real
+            .iter()
+            .filter(|v| v.end == v.start + 1 && v.replacement.len() == 1)
+        {
+            let seed = fnv1a(format!("{}:{}", self.accession, v.tag).as_bytes());
+            let positions = knockoff_positions(seq, v.start, &listed, ko, seed);
+            if positions.is_empty() {
+                stats.variants_without_knockoff += 1;
+                continue;
+            }
+            for (i, q) in positions.into_iter().enumerate() {
+                let at = q as u32 + 1;
+                let change = change_label(&seq[q..q + 1], at, at, &v.replacement);
+                out.push(SequenceVariant {
+                    start: q,
+                    end: q + 1,
+                    replacement: v.replacement.clone(),
+                    tag: format!("KO{}_{change}_{}", i + 1, v.tag),
+                    knockoff_of: Some(v.tag.clone()),
+                });
+            }
+        }
+        out
+    }
+
     /// The origin of an entry of this UniProt entry's family, made by
     /// `feature`.
     fn origin(&self, kind: EntryKind, feature: &str) -> EntryOrigin {
@@ -581,6 +651,7 @@ impl UniProtEntry {
             family: Arc::from(self.accession.as_str()),
             feature: Arc::from(feature),
             variant_delta_da: 0.0,
+            knockoff_of: None,
         }
     }
 
@@ -736,6 +807,10 @@ impl UniProtEntry {
 
         if opts.variants {
             let variants = self.sequence_variants(None, &self.sequence, opts, stats);
+            let knockoffs = match opts.knockoffs.filter(|k| k.per_variant > 0) {
+                Some(ko) => self.knockoff_variants(&variants, ko, stats),
+                None => Vec::new(),
+            };
             let proteins = self.variant_proteins(
                 &self.accession,
                 &self.accession,
@@ -745,6 +820,16 @@ impl UniProtEntry {
                 variants,
             );
             stats.variant_proteins += proteins.len();
+            out.extend(proteins);
+            let proteins = self.variant_proteins(
+                &self.accession,
+                &self.accession,
+                &description,
+                &self.sequence,
+                &sites,
+                knockoffs,
+            );
+            stats.knockoff_proteins += proteins.len();
             out.extend(proteins);
         }
 
@@ -846,6 +931,112 @@ impl UniProtEntry {
             .count();
         out
     }
+}
+
+/// The class a knockoff site's next residue must share with the real site's:
+/// hydrophobic, aromatic, polar, basic, acidic, or the residue itself.
+fn residue_class(r: u8) -> u8 {
+    match r {
+        b'A' | b'V' | b'L' | b'I' | b'M' => b'h',
+        b'F' | b'W' | b'Y' => b'a',
+        b'S' | b'T' | b'N' | b'Q' => b'p',
+        b'K' | b'R' | b'H' => b'+',
+        b'D' | b'E' => b'-',
+        other => other,
+    }
+}
+
+/// The `[start, end)` span between the enzyme's cleavage sites around residue
+/// `i` (no missed cleavage).
+fn enzymatic_span(seq: &[u8], i: usize, enzyme: Enzyme) -> (usize, usize) {
+    let cut = |j: usize| {
+        j == 0
+            || j == seq.len()
+            || if enzyme.is_n_term() {
+                enzyme.is_cleavable_before(seq[j])
+            } else {
+                enzyme.is_cleavable_after(seq[j - 1])
+            }
+    };
+    let mut a = i;
+    while !cut(a) {
+        a -= 1;
+    }
+    let mut b = i + 1;
+    while !cut(b) {
+        b += 1;
+    }
+    (a, b)
+}
+
+/// Whether residue `i` is the N of an N-x-S/T sequon (x not P).
+fn sequon(seq: &[u8], i: usize) -> bool {
+    seq[i] == b'N' && i + 2 < seq.len() && seq[i + 1] != b'P' && matches!(seq[i + 2], b'S' | b'T')
+}
+
+/// Knockoff positions for a substitution of residue `p` of `seq`: positions
+/// `q` holding the same residue, whose next residue matches (the same residue
+/// when the site is N, Q, K or R or either next residue is P or G, else the
+/// same [`residue_class`]), with the same sequon status, in another enzymatic
+/// span whose length is within 3 of `p`'s and 6..=50, and at least 10 residues
+/// from every position in `listed`. Up to `ko.per_variant` of them, drawn
+/// without replacement by a generator seeded with `seed`.
+fn knockoff_positions(
+    seq: &[u8],
+    p: usize,
+    listed: &[usize],
+    ko: KnockoffOptions,
+    seed: u64,
+) -> Vec<usize> {
+    if p + 1 >= seq.len() {
+        return Vec::new();
+    }
+    let o = seq[p];
+    let (pa, pb) = enzymatic_span(seq, p, ko.enzyme);
+    let next_ok = |q: usize| {
+        let (a, b) = (seq[p + 1], seq[q + 1]);
+        if b"NQKR".contains(&o) || matches!(a, b'P' | b'G') || matches!(b, b'P' | b'G') {
+            a == b
+        } else {
+            residue_class(a) == residue_class(b)
+        }
+    };
+    let mut eligible: Vec<usize> = (0..seq.len() - 1)
+        .filter(|&q| {
+            seq[q] == o
+                && next_ok(q)
+                && sequon(seq, q) == sequon(seq, p)
+                && listed.iter().all(|&r| r.abs_diff(q) >= 10)
+                && {
+                    let (qa, qb) = enzymatic_span(seq, q, ko.enzyme);
+                    qa != pa && (qb - qa).abs_diff(pb - pa) <= 3 && (6..=50).contains(&(qb - qa))
+                }
+        })
+        .collect();
+    let mut state = seed;
+    let take = ko.per_variant.min(eligible.len());
+    for i in 0..take {
+        let j = i + (splitmix64(&mut state) % (eligible.len() - i) as u64) as usize;
+        eligible.swap(i, j);
+    }
+    eligible.truncate(take);
+    eligible
+}
+
+/// 64-bit FNV-1a hash.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
+        (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// The next value of a SplitMix64 generator.
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
 }
 
 /// UniProt FASTA `PE=` code of a `<proteinExistence @type>`.
@@ -1936,5 +2127,122 @@ mod tests {
         assert_eq!(change_label(b"D", 7, 7, b"H"), "D7H");
         assert_eq!(change_label(b"KR", 120, 121, b"EE"), "KR120-121EE");
         assert_eq!(change_label(b"F", 508, 508, b""), "F508del");
+    }
+
+    const TRYPSIN_KO: KnockoffOptions = KnockoffOptions {
+        per_variant: 4,
+        enzyme: Enzyme::Trypsin,
+    };
+
+    /// Eight tryptic spans `GGGGDLGGGK`: a D followed by L in each, at 0-based
+    /// positions 4, 14, …, 74.
+    fn repeats() -> Vec<u8> {
+        b"GGGGDLGGGK".repeat(8)
+    }
+
+    #[test]
+    fn knockoffs_take_the_same_residue_in_another_matched_span() {
+        let seq = repeats();
+        let qs = knockoff_positions(&seq, 4, &[4], TRYPSIN_KO, 7);
+        assert_eq!(qs.len(), 4);
+        for &q in &qs {
+            assert_eq!(seq[q], b'D');
+            assert_eq!(seq[q + 1], b'L');
+            assert!(q.abs_diff(4) >= 10);
+            assert_ne!(enzymatic_span(&seq, q, Enzyme::Trypsin).0, 0);
+        }
+        let mut sorted = qs.clone();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 4, "drawn without replacement");
+        assert_eq!(
+            qs,
+            knockoff_positions(&seq, 4, &[4], TRYPSIN_KO, 7),
+            "deterministic"
+        );
+    }
+
+    #[test]
+    fn knockoffs_keep_clear_of_listed_variants_and_mismatched_contexts() {
+        let seq = repeats();
+        // Every D is a listed variant.
+        let listed: Vec<usize> = (0..8).map(|i| 4 + 10 * i).collect();
+        assert_eq!(knockoff_positions(&seq, 4, &listed, TRYPSIN_KO, 1), vec![]);
+        // Every D but the last, which is 10 residues from the nearest.
+        let listed: Vec<usize> = (0..7).map(|i| 4 + 10 * i).collect();
+        assert_eq!(
+            knockoff_positions(&seq, 4, &listed, TRYPSIN_KO, 1),
+            vec![74]
+        );
+        // A next residue of another class (D-L at the site, D-E elsewhere).
+        let mut other = b"GGGGDLGGGK".to_vec();
+        other.extend(b"GGGGDEGGGK".repeat(3));
+        assert_eq!(knockoff_positions(&other, 4, &[4], TRYPSIN_KO, 1), vec![]);
+        // A span too short (5 residues) holds no knockoff.
+        let mut short = b"GGGGDLGGGK".to_vec();
+        short.extend(b"GDLGK".repeat(3));
+        assert_eq!(knockoff_positions(&short, 4, &[4], TRYPSIN_KO, 1), vec![]);
+    }
+
+    #[test]
+    fn a_sequon_is_matched_by_a_sequon() {
+        // N at 4 is a sequon (N-L-S); the N of the other spans is not (N-L-G).
+        let mut seq = b"GGGGNLSGGK".to_vec();
+        seq.extend(b"GGGGNLGGGK".repeat(3));
+        assert_eq!(knockoff_positions(&seq, 4, &[4], TRYPSIN_KO, 1), vec![]);
+    }
+
+    #[test]
+    fn knockoff_entries_copy_the_substitution_and_name_the_variant() {
+        let seq = String::from_utf8(repeats()).unwrap();
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<uniprot xmlns="http://uniprot.org/uniprot">
+<entry dataset="Swiss-Prot" version="1">
+  <accession>P00009</accession>
+  <name>KO_HUMAN</name>
+  <protein><recommendedName><fullName>Knockoff test</fullName></recommendedName></protein>
+  <organism><name type="scientific">Homo sapiens</name></organism>
+  <proteinExistence type="evidence at protein level"/>
+  <feature type="sequence variant" id="VAR_000009" evidence="1">
+    <original>D</original><variation>N</variation>
+    <location><position position="5"/></location>
+  </feature>
+  <evidence key="1" type="ECO:0000269"/>
+  <sequence length="80" mass="1" checksum="0" modified="2000-01-01" version="1">{seq}</sequence>
+</entry>
+</uniprot>"#
+        );
+        let opts = UniProtOptions {
+            variants: true,
+            knockoffs: Some(TRYPSIN_KO),
+            ..UniProtOptions::default()
+        };
+        let (db, stats) = load_uniprot_xml(xml.as_bytes(), &opts).unwrap();
+        assert_eq!((stats.variant_proteins, stats.knockoff_proteins), (1, 4));
+        let real = db.proteins[1].origin().unwrap().clone();
+        assert!(real.knockoff_of.is_none() && !db.proteins[1].is_knockoff());
+        for (i, p) in db.proteins[2..].iter().enumerate() {
+            let o = p.origin().unwrap();
+            assert!(p.is_knockoff());
+            assert_eq!(o.kind, model::EntryKind::Variant);
+            assert_eq!(o.knockoff_of.as_deref(), Some("VAR_000009_D5N"));
+            assert_eq!(o.variant_delta_da, real.variant_delta_da);
+            assert!(
+                o.feature.starts_with(&format!("KO{}_D", i + 1)),
+                "{}",
+                o.feature
+            );
+            assert!(o.feature.ends_with("N_VAR_000009_D5N"), "{}", o.feature);
+            let changed: Vec<usize> = (0..80).filter(|&j| p.sequence[j] != repeats()[j]).collect();
+            assert_eq!(changed.len(), 1);
+            assert_eq!(p.sequence[changed[0]], b'N');
+            assert_eq!(p.substitutions().len(), 1);
+        }
+        let off = UniProtOptions {
+            knockoffs: None,
+            ..opts
+        };
+        let (_, stats) = load_uniprot_xml(xml.as_bytes(), &off).unwrap();
+        assert_eq!(stats.knockoff_proteins, 0);
     }
 }

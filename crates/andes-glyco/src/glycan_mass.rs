@@ -1,8 +1,7 @@
 // Monoisotopic residue masses (water already subtracted): the mass a
 // monosaccharide contributes when POLYMERISED (attached), = free sugar − H2O.
 // Values pinned to the campaign 6-decimal standard, cross-checked vs
-// Unimod/a glyco search engine — see docs/plans/glyco/30-standards/masses.md + roadmap §4, and
-// the `residue_masses_match_standard` test below. A glycan attached to Asn is a
+// Unimod/a glyco search engine — see the `residue_masses_match_standard` test below. A glycan attached to Asn is a
 // single delta = Σ(residue masses); never add an extra +H2O (that water is only
 // for a FREE/released glycan — the −18.0106 double-count is the #1 divergence).
 
@@ -64,8 +63,7 @@ mod tests {
     use super::*;
 
     /// G0 (mass standardization): the residue/constant table must match the
-    /// campaign 6-decimal standard (docs/plans/glyco/30-standards/masses.md +
-    /// roadmap §4), cross-checked vs Unimod/a glyco search engine. A >~few-µDa drift here
+    /// campaign 6-decimal standard, cross-checked vs Unimod/a glyco search engine. A >~few-µDa drift here
     /// summed over 8 monosaccharides can nudge near-isobaric compositions, so we
     /// pin to 1e-6 Da. Do not retype masses elsewhere — reference these consts.
     #[test]

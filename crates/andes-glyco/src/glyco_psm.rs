@@ -57,7 +57,7 @@ pub const GLYCO_GP_H_DEFAULT: f32 = 1.0;
 /// An M+1 assignment costs an extra assumption — that the instrument selected a
 /// non-monoisotopic peak — so when two candidates explain the same precursor with
 /// equal fragment evidence, the one needing no correction should win. Measured on
-/// pGlyco2 mouse heart (issue #79): of 237 scans where andes called NeuGc and the
+/// the engine L mouse-heart reference (issue #79): of 237 scans where andes called NeuGc and the
 /// reference called Hex+Fuc, 235 sat on isotope offset 1, while the reference
 /// composition was present in the candidate pool at offset 0 on 163 of 163
 /// recoverable scans with a seven-fold better precursor residual. The two
@@ -206,8 +206,7 @@ pub struct GlycoPsmKey {
     /// composition can out-score a right, smaller one by predicting more rungs and
     /// matching a few extra. A fraction cannot be inflated that way — predicting
     /// rungs you cannot support LOWERS it. This is the form the field converged on
-    /// (pGlyco's coverage ratios, StrucGP's `matched_branchY_ratio`,
-    /// PTM-Shepherd's explicit miss penalty).
+    /// (coverage ratios, matched branch-Y ratios, explicit miss penalties).
     ///
     /// Measured motivation: 96.9% of our decoy winners sit at a DIFFERENT backbone
     /// mass than the truth, i.e. the failing decision is which mass split /

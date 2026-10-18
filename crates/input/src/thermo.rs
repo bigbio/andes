@@ -206,8 +206,12 @@ impl ThermoRawReader {
     ///
     /// Returns `(error_count, sample_errors)` for API symmetry; `.raw` reads do
     /// not surface per-scan parse errors, so these are always `(0, vec![])`.
+    ///
+    /// The quantification captures ([`Self::with_run_ms1_capture`],
+    /// [`Self::with_scan_context_capture`]) work on this path too: take them
+    /// from the reader once it returns.
     pub fn read_with_ms1_chunked<F>(
-        self,
+        &mut self,
         chunk_size: usize,
         cap: usize,
         mut on_chunk: F,
@@ -233,7 +237,16 @@ impl ThermoRawReader {
             match raw.ms_level() {
                 1 => {
                     let idx = ms1_peaks.len();
-                    ms1_peaks.push(extract_peaks(&raw));
+                    let peaks = extract_peaks(&raw);
+                    if self.capture_run_ms1 {
+                        self.run_ms1.push(Ms1Scan {
+                            rt: raw.time() * 60.0,
+                            peaks: peaks.clone(),
+                            id: raw.native_id(),
+                            faims_cv: faims_cv(&raw),
+                        });
+                    }
+                    ms1_peaks.push(peaks);
                     current_ms1 = Some(idx);
                 }
                 // MS3+ scans (e.g. TMT SPS-MS3 reporter-quant scans) are NOT
@@ -250,6 +263,15 @@ impl ThermoRawReader {
                         Some(spec) => spec,
                         None => continue,
                     };
+                    if self.capture_scan_context {
+                        self.scan_contexts.push(ScanContext {
+                            id: spec.title.clone(),
+                            parent_id: master_scan_number(&self.handle, i)
+                                .map(|scan| with_scan_number(&spec.title, scan)),
+                            scan_window: scan_window(&raw),
+                            faims_cv: faims_cv(&raw),
+                        });
+                    }
                     chunk.push(spec);
                     ms2_to_ms1.push(current_ms1);
                     emitted_ms2 += 1;

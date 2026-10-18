@@ -1494,6 +1494,7 @@ mod tests {
             family: std::sync::Arc::from("P1"),
             feature: std::sync::Arc::from("VAR_1"),
             variant_delta_da: 0.984016,
+            knockoff_of: None,
         };
         let base_seqs = vec![b"PEPTIDK".to_vec(), b"SAMPLER".to_vec()];
         let idx = build_peptide_anchored_index(

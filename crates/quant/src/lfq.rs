@@ -30,7 +30,7 @@ pub struct LfqParams {
     /// All target features are still returned for `lfq_features.tsv` diagnostics.
     pub min_cosine: f32,
     /// m/z shift of the decoy twin (Th). This fixed-shift heuristic differs
-    /// from IonQuant's adaptive +11 * 1.0005 Th and Sage's +11.06 Th + RT shift.
+    /// from engine A's adaptive +11 * 1.0005 Th and engine E's +11.06 Th + RT shift.
     pub decoy_mz_shift: f64,
     /// Scans the apex may be from the anchor scan.
     pub max_apex_climb: usize,
@@ -199,7 +199,7 @@ fn quantify_at(
 }
 
 /// Feature score for the target/decoy competition: envelope similarity
-/// cubed, proximity to the anchor, and relative height. Inspired by Sage's
+/// cubed, proximity to the anchor, and relative height. Inspired by engine E's
 /// hybrid rule, which uses spectral angle rather than cosine.
 /// `max_apex` must include BOTH targets and decoys in the run so neither side
 /// is preferentially clipped by the height term.

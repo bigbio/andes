@@ -568,7 +568,7 @@ pub fn is_decoy_accession(accession: &str, prefix: &str) -> bool {
 ///
 /// The suffix form lets andes recognize decoys produced by an external pipeline
 /// whose pre-built target+decoy DB tags decoys with an accession SUFFIX (e.g.
-/// quantms / OpenMS DecoyDatabase: `<orig>_rev`) rather than andes' prefix. Used
+/// quantms: `<orig>_rev`) rather than andes' prefix. Used
 /// with `--decoy-strategy none` so andes consumes the shared decoy DB verbatim
 /// instead of generating its own (which would double-decoy and bias FDR).
 pub fn is_decoy_accession_affix(accession: &str, prefix: &str, suffix: Option<&str>) -> bool {
@@ -749,7 +749,7 @@ mod tests {
         // Prefix (andes-native) still works with no suffix configured.
         assert!(is_decoy_accession_affix("XXX_P12345", "XXX", None));
         assert!(!is_decoy_accession_affix("P12345", "XXX", None));
-        // Suffix form recognizes quantms/OpenMS "<orig>_rev" decoys that the
+        // Suffix form recognizes quantms "<orig>_rev" decoys that the
         // prefix test alone misses.
         assert!(is_decoy_accession_affix(
             "sp|P02769|ALBU_BOVIN_rev",

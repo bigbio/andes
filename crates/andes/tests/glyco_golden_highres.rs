@@ -26,7 +26,7 @@
 //! spectrum where both old and new winners are weak: CoreYHits 3->0). Net decoy
 //! winners 4->4. DeltaRT/AbsDeltaRT/DeltaRTNorm moved on every row because the
 //! winner changes shift the per-run RT-calibration anchors. The glycan-first
-//! top_k was then aligned to pGlyco3's 100 (was 50); that widened the candidate
+//! top_k was then aligned to the field-standard 100 (was 50); that widened the candidate
 //! pool and moved only the per-spectrum competition statistics (RawScore,
 //! TailorScore, DeltaRankScore, CandidateRankEntropy, ListwiseScoreGap) on 4
 //! rows, with 0 winner flips.
@@ -249,7 +249,7 @@ fn glyco_highres_pin_matches_golden() {
 /// link, fits nothing, says so, and writes a `.glyco.pin` byte-identical to the
 /// golden — no Mono columns — while the diagnostic dump still has one NA row
 /// per MS2. (The linked case is covered by the `mono` unit tests and the
-/// measured pGlyco2 liver run in docs/benchmarks/README.md.)
+/// measured engine L liver run in docs/benchmarks/README.md.)
 #[test]
 fn glyco_highres_precursor_mono_without_ms1_is_identical_to_golden() {
     let root = repo_root();

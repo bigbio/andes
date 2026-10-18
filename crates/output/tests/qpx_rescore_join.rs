@@ -245,7 +245,7 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
     let peps_off = read_pep_column(&qdir_off.join("psms.parquet"));
     assert!(
         peps_off.iter().all(|p| p.is_none()),
-        "rescore-off bundle must keep PEP null (OpenMS schema parity)"
+        "rescore-off bundle must keep PEP null (QPX schema parity)"
     );
 }
 

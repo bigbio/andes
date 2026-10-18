@@ -26,8 +26,8 @@ pub use thermo::{ThermoParseError, ThermoRawReader};
 #[cfg(feature = "timstof")]
 pub use timstof::{TimsTofParseError, TimsTofReader};
 pub use uniprot::{
-    load_uniprot_xml, EvidenceLevel, UniProtLoadStats, UniProtOptions, UniProtParseError,
-    UniProtXmlReader,
+    load_uniprot_xml, EvidenceLevel, KnockoffOptions, UniProtLoadStats, UniProtOptions,
+    UniProtParseError, UniProtXmlReader,
 };
 
 /// Open a spectrum/FASTA file for buffered reading, **transparently

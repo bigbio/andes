@@ -1,7 +1,7 @@
-# the reference engine 4.2 — Astral DDA+ (chimeric) — key parameters.
+# engine A 4.2 — Astral DDA+ (chimeric) — key parameters.
 # Only the settings that define this benchmark are listed; all other options are
-# the reference engine 4.2 defaults. NOTE: database_name must point at a target+decoy FASTA
-# (rev_ prefix) — the reference engine does not append decoys at search time.
+# engine A 4.2 defaults. NOTE: database_name must point at a target+decoy FASTA
+# (rev_ prefix) — engine A does not append decoys at search time.
 
 database_name = ProteoBenchFASTA_MixedSpecies_HYE.td.fasta   # target + rev_ decoys
 num_threads = 8

@@ -36,7 +36,7 @@ pub struct PeptDeepPeptide<'a> {
     pub mods: Vec<(usize, &'a [f32])>,
 }
 
-/// One RT prediction batch (OpenMS export names).
+/// One RT prediction batch (reference export names).
 #[derive(Debug, Clone)]
 pub struct PeptDeepRtBatch {
     /// `input_sequences` — [B, L+2] integer indices carried as f32; the backend
@@ -46,7 +46,7 @@ pub struct PeptDeepRtBatch {
     pub mod_x: NamedTensor,
 }
 
-/// One MS2 intensity batch (OpenMS export names).
+/// One MS2 intensity batch (reference export names).
 #[derive(Debug, Clone)]
 pub struct PeptDeepMs2Batch {
     /// `aa_indices` — [B, L+2] integer indices carried as f32.

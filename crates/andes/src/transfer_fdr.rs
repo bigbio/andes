@@ -25,6 +25,22 @@
 //! is at most the threshold. The same estimate is made with one decoy family
 //! at a time (`K` = that family's ratio).
 //!
+//! Identity decoys (family [`IDENTITY`]): the transfers of decoy precursors
+//! that passed the library's donor rules with decoy PSMs. The mass- and
+//! RT-shift decoys model a transfer of the right peptide onto the wrong peak;
+//! a false donor identification sits on a real MS1 feature that recurs in
+//! every run, which they cannot model. Under target-decoy competition each
+//! identity-decoy entry stands for one false target entry, so the accepted
+//! identity-decoy transfers estimate the accepted target transfers of false
+//! donors, and the combined estimate adds that share:
+//! `FDR(c) = (D(c) + 1) / (K * max(T(c), 1)) + D_id(c) / max(T(c), 1)`,
+//! with `D` and `K` over the wrong-peak families only. The two error classes
+//! overlap (a false donor's transfer can also land on a wrong peak), so the
+//! sum is conservative. Without identity-decoy rows it is the wrong-peak
+//! estimate. Identity decoys are negatives of the classifier's training like
+//! the other decoys (held out by the same folds), so it learns what sets a
+//! false donor's transfer apart where it can.
+//!
 //! `K` is counted over the rows passed in, which are the rows that have
 //! features: a target or decoy without evidence takes no part. When decoys are
 //! missing (no RT-shift decoy near a run edge, a window too short to fit), `K`
@@ -58,12 +74,15 @@ pub const TRANSFER_FEATURES: &[&str] = &[
     "log10_amplitude_snr",
     "n_donor_runs",
     "library_q",
+    "shape_log_width",
+    "shape_tailing_diff",
+    "shape_iso_cos",
 ];
 
 /// Feature names of the identified-row quality classifier: the template-fit
 /// evidence of [`TRANSFER_FEATURES`] without `n_donor_runs` and `library_q`,
 /// which are the same for an identified target and its decoys, and without
-/// the MS2 features (an identified row has its identifying scan).
+/// the donor shape comparison (an identified row is itself a donor).
 pub const IDENTIFIED_FEATURES: &[&str] = &[
     "llr",
     "rt_z",
@@ -78,12 +97,22 @@ pub const IDENTIFIED_FEATURES: &[&str] = &[
     "log10_amplitude_snr",
 ];
 
+/// [`FdrRow::family`] of a target.
+pub const TARGET: u8 = 0;
+/// [`FdrRow::family`] of a mass-shift decoy.
+pub const MASS_SHIFT: u8 = 1;
+/// [`FdrRow::family`] of an RT-shift decoy.
+pub const RT_SHIFT: u8 = 2;
+/// [`FdrRow::family`] of an identity decoy: the target probe of a decoy
+/// precursor's transfer.
+pub const IDENTITY: u8 = 3;
+
 /// One target or decoy to be scored.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FdrRow {
     pub precursor: u32,
     pub is_decoy: bool,
-    /// 0 target, 1 mass-shift decoy, 2 RT-shift decoy.
+    /// [`TARGET`], [`MASS_SHIFT`], [`RT_SHIFT`] or [`IDENTITY`].
     pub family: u8,
     pub x: Vec<f32>,
 }
@@ -91,8 +120,10 @@ pub struct FdrRow {
 /// Per-row output of [`transfer_qvalues`], in input order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FdrResult {
-    /// Both decoy families.
+    /// The wrong-peak families and the identity decoys.
     pub q: Vec<Option<f64>>,
+    /// Both wrong-peak families, without the identity decoys.
+    pub q_wrong_peak: Vec<Option<f64>>,
     /// Mass-shift decoys only; `None` for RT-shift decoy rows.
     pub q_mass_only: Vec<Option<f64>>,
     /// RT-shift decoys only; `None` for mass-shift decoy rows.
@@ -193,6 +224,7 @@ pub fn transfer_fdr(rows: &[FdrRow], seed: u64) -> TransferFdr {
     let folds: Vec<usize> = rows.iter().map(|r| fold_of(r.precursor, seed)).collect();
     let mut result = FdrResult {
         q: vec![None; n],
+        q_wrong_peak: vec![None; n],
         q_mass_only: vec![None; n],
         q_rt_only: vec![None; n],
         score: vec![f32::NAN; n],
@@ -222,17 +254,18 @@ pub fn transfer_fdr(rows: &[FdrRow], seed: u64) -> TransferFdr {
         for (&i, &s) in members.iter().zip(&scores) {
             result.score[i] = s;
         }
-        let estimate = |keep: &dyn Fn(&FdrRow) -> bool, q: &mut [Option<f64>]| {
-            let items: Vec<(usize, f32, bool)> = members
+        let estimate = |keep: &dyn Fn(u8) -> bool, q: &mut [Option<f64>]| {
+            let items: Vec<(usize, f32, u8)> = members
                 .iter()
-                .filter(|&&i| result.score[i].is_finite() && keep(&rows[i]))
-                .map(|&i| (i, result.score[i], rows[i].is_decoy))
+                .filter(|&&i| result.score[i].is_finite() && keep(rows[i].family))
+                .map(|&i| (i, result.score[i], rows[i].family))
                 .collect();
             kdecoy_q(&items, q);
         };
         estimate(&|_| true, &mut result.q);
-        estimate(&|r| !r.is_decoy || r.family == 1, &mut result.q_mass_only);
-        estimate(&|r| !r.is_decoy || r.family == 2, &mut result.q_rt_only);
+        estimate(&|f| f != IDENTITY, &mut result.q_wrong_peak);
+        estimate(&|f| f == TARGET || f == MASS_SHIFT, &mut result.q_mass_only);
+        estimate(&|f| f == TARGET || f == RT_SHIFT, &mut result.q_rt_only);
         let mut table: Vec<(f32, f64)> = members
             .iter()
             .filter_map(|&i| result.q[i].map(|q| (result.score[i], q)))
@@ -269,12 +302,17 @@ impl TransferFdr {
     }
 }
 
-/// K-decoy q-values of `(row, score, is_decoy)` into `q[row]`, with `K` the
-/// decoy-to-target ratio of `items` and `FDR = (D + 1) / (K * max(T, 1))`. Leaves `q` untouched when `items` has no
-/// targets or no decoys.
-fn kdecoy_q(items: &[(usize, f32, bool)], q: &mut [Option<f64>]) {
-    let targets = items.iter().filter(|it| !it.2).count();
-    let decoys = items.len() - targets;
+/// K-decoy q-values of `(row, score, family)` into `q[row]`, with `K` the
+/// wrong-peak-decoy-to-target ratio of `items` and
+/// `FDR = (D + 1) / (K * max(T, 1)) + D_id / max(T, 1)` (`D` wrong-peak
+/// decoys, `D_id` identity decoys at or above the score). Leaves `q`
+/// untouched when `items` has no targets or no wrong-peak decoys.
+fn kdecoy_q(items: &[(usize, f32, u8)], q: &mut [Option<f64>]) {
+    let targets = items.iter().filter(|it| it.2 == TARGET).count();
+    let decoys = items
+        .iter()
+        .filter(|it| it.2 == MASS_SHIFT || it.2 == RT_SHIFT)
+        .count();
     if targets == 0 || decoys == 0 {
         return;
     }
@@ -282,20 +320,21 @@ fn kdecoy_q(items: &[(usize, f32, bool)], q: &mut [Option<f64>]) {
     let mut order: Vec<usize> = (0..items.len()).collect();
     order.sort_by(|&a, &b| items[b].1.total_cmp(&items[a].1));
     let mut fdr = vec![0.0f64; order.len()];
-    let (mut t, mut d) = (0usize, 0usize);
+    let (mut t, mut d, mut d_id) = (0usize, 0usize, 0usize);
     let mut start = 0;
     while start < order.len() {
         let score = items[order[start]].1;
         let mut end = start;
         while end < order.len() && (end == start || items[order[end]].1 == score) {
-            if items[order[end]].2 {
-                d += 1;
-            } else {
-                t += 1;
+            match items[order[end]].2 {
+                TARGET => t += 1,
+                IDENTITY => d_id += 1,
+                _ => d += 1,
             }
             end += 1;
         }
-        let v = ((d + 1) as f64 / (k * t.max(1) as f64)).min(1.0);
+        let tf = t.max(1) as f64;
+        let v = ((d + 1) as f64 / (k * tf) + d_id as f64 / tf).min(1.0);
         fdr[start..end].fill(v);
         start = end;
     }
@@ -399,7 +438,9 @@ mod tests {
         let mut with_false = 0usize;
         let mut q = vec![None; 60];
         for _ in 0..n_exp {
-            let items: Vec<(usize, f32, bool)> = (0..60).map(|i| (i, g.draw(), i >= 20)).collect();
+            let items: Vec<(usize, f32, u8)> = (0..60)
+                .map(|i| (i, g.draw(), if i >= 20 { MASS_SHIFT } else { TARGET }))
+                .collect();
             q.fill(None);
             kdecoy_q(&items, &mut q);
             if q[..20].iter().any(|q| q.is_some_and(|q| q <= 0.01)) {
@@ -572,10 +613,10 @@ mod tests {
             }
         }
         let mut q = vec![None; rows.len()];
-        let scored: Vec<(usize, f32, bool)> = rows
+        let scored: Vec<(usize, f32, u8)> = rows
             .iter()
             .enumerate()
-            .map(|(i, r)| (i, r.x[0], r.is_decoy))
+            .map(|(i, r)| (i, r.x[0], r.family))
             .collect();
         kdecoy_q(&scored, &mut q);
         assert!(
@@ -601,6 +642,68 @@ mod tests {
         // Far below every row: the fold's largest q.
         let low = vec![-50.0f32; TRANSFER_FEATURES.len()];
         assert!(fdr.pseudo_q(0, &low).is_some_and(|q| q > 0.1));
+    }
+
+    /// `rows(n, 3.0, [1, 2])` plus `n_id` identity decoys drawn like the
+    /// targets: false donors whose transfers look like real ones.
+    fn with_identity(n: u32, n_id: u32, seed: u64) -> Vec<FdrRow> {
+        let mut out = rows(n, 3.0, &[MASS_SHIFT, RT_SHIFT], seed);
+        let mut g = Normal(seed ^ 0xabc);
+        out.extend((0..n_id).map(|i| FdrRow {
+            precursor: n + i,
+            is_decoy: true,
+            family: IDENTITY,
+            x: g.vector(3.0),
+        }));
+        out
+    }
+
+    #[test]
+    fn identity_decoys_add_their_share_to_the_estimate() {
+        // 1,000 well separated targets and 30 identity decoys that look like
+        // targets: the wrong-peak estimate accepts nearly every target at
+        // 0.01, the combined one sees about 3 % false donors and keeps few.
+        let rows = with_identity(1000, 30, 31);
+        {
+            let r = transfer_fdr(&rows, 5).result;
+            let wp = accepted_targets(&rows, &r.q_wrong_peak);
+            let all = accepted_targets(&rows, &r.q);
+            eprintln!("identity: wrong-peak {wp}, combined {all} at q <= 0.01");
+            assert!(wp >= 800, "{wp}");
+            // Only targets above every identity decoy of their fold remain.
+            assert!(5 * all < wp, "{all} of {wp}");
+            let at10 = rows
+                .iter()
+                .zip(&r.q)
+                .filter(|(row, q)| row.family == TARGET && q.is_some_and(|q| q <= 0.1))
+                .count();
+            assert!(at10 >= 800, "{at10}");
+            // Identity decoys get q-values like the targets they mimic.
+            assert!(rows
+                .iter()
+                .zip(&r.q)
+                .filter(|(row, _)| row.family == IDENTITY)
+                .all(|(_, q)| q.is_some()));
+        }
+    }
+
+    #[test]
+    fn kdecoy_counts_identity_decoys_once_each() {
+        // 100 targets, then 50 mass-shift decoys and 2 identity decoys below
+        // them: K = 0.5. Over all rows (D + 1) / (K T) + D_id / T =
+        // 51 / 50 + 2 / 100, capped at 1; over the targets alone 1 / 50.
+        let mut items: Vec<(usize, f32, u8)> =
+            (0..100).map(|i| (i, 1000.0 - i as f32, TARGET)).collect();
+        items.extend((100..150).map(|i| (i, 10.0 - i as f32 * 0.01, MASS_SHIFT)));
+        items.extend([(150, 0.5, IDENTITY), (151, 0.4, IDENTITY)]);
+        let mut q = vec![None; items.len()];
+        kdecoy_q(&items, &mut q);
+        assert!((q[0].unwrap() - 1.0 / 50.0).abs() < 1e-12, "{:?}", q[0]);
+        assert_eq!(q[151], Some(1.0));
+        // An identity decoy above the targets counts against every target.
+        items[150].1 = 2000.0;
+        kdecoy_q(&items, &mut q);
+        assert!((q[0].unwrap() - (1.0 / 50.0 + 1.0 / 100.0)).abs() < 1e-12);
     }
 
     #[test]

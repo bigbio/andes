@@ -10,7 +10,7 @@ Two sources exist on the compute cluster.
 
 **1. andes training flats.** One slug remains: `hcd_qexactive_tryp`. It holds 40
 parquet files from PXD009875 (HeLa, Q Exactive, FTMS HCD) with 526,234 PSMs
-(MSFragger expect ≤ 0.01).
+(depositor-search expect ≤ 0.01).
 
 Schema: `seq, charge, prec_mz, res_mod_pos, res_mod_delta, nterm/cterm_delta, mz[], intensity[]`.
 - Each row carries the full centroided MS2 peak list, so observed b/y intensities
@@ -29,7 +29,7 @@ covering 33 datasets.
 - `mz_array` / `intensity_array` are empty in every file.
 - RT is present on 100% of rows.
 - The source `.raw` files are still on disk for every dataset in the table below.
-  A ThermoRawFileParser pass plus the scan numbers recovers observed spectra and
+  A raw-to-mzML conversion pass plus the scan numbers recovers observed spectra and
   NCE.
 
 Target PSMs with PEP ≤ 0.01, latest run per dataset (M = millions):
@@ -142,7 +142,7 @@ Setup:
 - Reduced to the exact median RT per (run, peptidoform): 58.8M rows, 1.28M peptidoforms, 6,754 runs.
 - No benchmark accessions are present.
 - Splits: train / val / test by an md5 hash of the stripped sequence (90 / 5 / 5). Held-out datasets never trained on: PXD019263 (label-free), PXD005235 (TMT) and PXD012255 (phospho).
-- Unmapped mods dropped: 13.8k rows, all `UNIMOD:99913` (OpenMS phospho-decoy placeholder on Ala).
+- Unmapped mods dropped: 13.8k rows, all `UNIMOD:99913` (a phospho-decoy placeholder on Ala).
 - **The quantms sequences carry no isoleucine (I is written as L).** The encoder now maps I→L. Before that fix the I embedding was untrained, and benchmark MAE was 4× worse (Astral 1.72 vs 0.43 min) while the qpx test looked excellent.
 
 **Model** (`rt_model.py`, 77,794 parameters):

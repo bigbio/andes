@@ -17,24 +17,25 @@ and built end-to-end with AI coding agents, under human direction.
 
 ## Why andes?
 
-andes finds more PSMs than Comet on all three reference datasets. On low-res LFQ (UPS1), Java
+andes finds more PSMs than a widely used open-source search engine (engine K) on all three
+reference datasets. On low-res LFQ (UPS1), Java
 MS-GF+'s strongest regime, it trails Java.
 
 | Engine | Astral (high-res HCD) | TMT a05058 (low-res CID) | UPS1 (low-res LFQ) |
 |---|---:|---:|---:|
 | **andes** | **47,080** | **12,347** | 15,848 |
-| Comet 2025.01 | 31,435 | 10,504 | 14,734 |
+| engine K | 31,435 | 10,504 | 14,734 |
 | Java MS-GF+ v20240326 † | 26,542 | 10,651 | **15,904** |
 | *andes wall time* | *160–161 s* | *28 s* | *18 s* |
-| *Comet wall time* | *215 s* | *76 s* | *46 s* |
+| *engine K wall time* | *215 s* | *76 s* | *46 s* |
 
 <sub>**Metric and provenance.** PSMs at Percolator `q ≤ 0.01`, one method for every row (plain
 FASTA, andes `XXX_` decoys, Percolator 3.7.1 `--seed 42 -Y`, same 8-thread host). andes measured
-**2026-10-07** at #112 (`40774aca`); Comet on 2026-10-05, reproducing its 2026-09-04 counts.
+**2026-10-07** at #112 (`40774aca`); engine K on 2026-10-05, reproducing its 2026-09-04 counts.
 Since #112, high-res searches retrieve candidates with the fragment-ion index, which moved Astral
 from 38,394 to 46,774, and breaking the index's vote ties by matched intensity took it to 47,080;
 low-res searches use the index too since 2026-10-10 (TMT 12,281 → 12,347, UPS1 15,838 → 15,848,
-both now in less than half the memory). andes finds 7.6–49.8% more PSMs in 0.36–0.74x Comet's
+both now in less than half the memory). andes finds 7.6–49.8% more PSMs in 0.36–0.74x engine K's
 wall time. **†** Java MS-GF+ was not re-run; its counts are from an earlier session, and it
 remains ~10–40x slower. **Error rates:** checked against an entrapment version of the Astral
 database, the Astral gain holds at an equal true FDP (+22.2% over the previous in-RAM retrieval at
@@ -45,20 +46,20 @@ entrapment component. Details:
 [`docs/benchmarks/`](docs/benchmarks/README.md).</sub>
 
 **Time, CPU and memory** (same VM, 8 threads, `/usr/bin/time`; andes Astral and phospho 2026-10-07
-at #112, TMT and UPS1 2026-10-10 on the out-of-core index, two runs on the standard sets; Comet
-2026-10-06, one run). andes uses 51–70% less CPU time than Comet and 26–64% less wall time. It
+at #112, TMT and UPS1 2026-10-10 on the out-of-core index, two runs on the standard sets; engine K
+2026-10-06, one run). andes uses 51–70% less CPU time than engine K and 26–64% less wall time. It
 needs less memory on Astral, TMT and UPS1, and more on phospho (2.3x, 80 Da index slices).
 
 | dataset | engine | PSMs @ q≤0.01 | wall | CPU time | peak memory |
 |---|---|---:|---:|---:|---:|
 | Astral | **andes** | **47,080** | **160 s** | **787 s** | **4.1 GB** |
-| | Comet | 31,435 | 217 s | 1,594 s | 8.1 GB |
+| | engine K | 31,435 | 217 s | 1,594 s | 8.1 GB |
 | TMT a05058 | **andes** | **12,347** | **28 s** | **171 s** | **1.7 GB** |
-| | Comet | 10,504 | 77 s | 568 s | 2.9 GB |
+| | engine K | 10,504 | 77 s | 568 s | 2.9 GB |
 | UPS1 | **andes** | **15,848** | **18 s** | **117 s** | **1.3 GB** |
-| | Comet | 14,734 | 42 s | 309 s | 2.9 GB |
+| | engine K | 14,734 | 42 s | 309 s | 2.9 GB |
 | Phospho (PXD007653) | **andes** | **37,190** (1.02% FDP) | **637 s** | **3,608 s** | 13.7 GB |
-| | Comet | 33,984 (1.77% FDP) | 1,096 s | 8,399 s | 6.0 GB |
+| | engine K | 33,984 (1.77% FDP) | 1,096 s | 8,399 s | 6.0 GB |
 
 <sub>PSM counts: 2026-10-05 refresh; TMT and UPS1 2026-10-10 (phospho: seed 42). Wall times vary 5–15% between sessions;
 CPU time is steadier.</sub>
@@ -174,7 +175,8 @@ in the mods file is placed only where UniProt annotates that modification.
 the accession. `--uniprot-isoforms` adds the described isoforms, and `--uniprot-chains` the
 peptides at the new termini of mature chains (after signal peptide or propeptide removal).
 Annotation is filtered by evidence (`--uniprot-evidence`); see
-[`DOCS.md` §1a](DOCS.md#uniprot-xml-databases).
+[`DOCS.md` §1a](DOCS.md#uniprot-xml-databases). With rescoring, variant calls are checked
+against knockoff variants ([below](#variant-calls-checked-against-knockoffs---uniprot-knockoffs---variant-fdr)).
 
 ```bash
 andes --spectrum spectra.mzML --database uniprot_sprot_human.xml.gz \
@@ -184,7 +186,7 @@ andes --spectrum spectra.mzML --database uniprot_sprot_human.xml.gz \
 **TSV and Parquet output:**
 
 ```bash
-# TSV for inspection; OpenMS-compatible QPX .idparquet bundle for quantms/OpenMS
+# TSV for inspection; QPX .idparquet bundle for quantms
 andes --spectrum spectra.mzML --database db.fasta \
   --output-pin out.pin --output-tsv out.tsv --output-parquet out.idparquet
 ```
@@ -199,14 +201,18 @@ without one of them.
 `--tmt tmt10` reads the reporter ions of every identified MS2 (or its SPS-MS3 with
 `--tmt-level 3`), applies the kit's impurity matrix (`--tmt-correction`) and reports the
 precursor isolation purity; `--lfq` integrates the isotope chromatograms of every identified
-precursor from the MS1 scans with an experimental decoy-based feature q-value estimate. Both write Sage-style
+precursor from the MS1 scans with an experimental decoy-based feature q-value estimate. Both write plain
 tables (`<stem>.tmt.tsv`, `<stem>.lfq.tsv`) and, with `--output-parquet`, the QPX
-`quantms.feature.parquet` that quantms / OpenMS consume. Normalization and protein roll-up stay
+`quantms.feature.parquet` that quantms consumes. Normalization and protein roll-up stay
 downstream ([`DOCS.md` §10](DOCS.md#10-quantification)). `--lfq --mbr` adds match between runs
 over two or more inputs: every confident precursor is measured in every run, and transfers carry
 an internal quant-quality q-value (`<stem>.mbr.tsv`). The same stages run one at a time with
 `andes quant library|extract|finalize` over a `--quant-dir`, for pipelines that spread runs
-over machines.
+over machines. On the ProteoBench label-free DDA module (PXD028735, six runs; measured at
+`47d2844`, before #166 and #167), andes quantified 54,932 precursors in at least 3 runs at
+transfer q 0.01 (67,035 at the default 0.05), with a median |ε| of 0.155 and a CV of 0.110 using
+`quantity_normalized`: lower on both than every match-between-runs submission on the public
+leaderboard. One dataset, one seed ([benchmarks](docs/benchmarks/README.md#2-the-benchmarks)).
 
 ```bash
 andes --spectrum tmt_run.mzML --database human.fasta --mods tmt10_mods.txt \
@@ -233,7 +239,7 @@ model data.
 
 | `model_id` | activation / instrument / enzyme / protocol | Training data (public PRIDE) | Benchmark |
 |---|---|---|---|
-| `hcd_astral_tryp` | HCD / OrbitrapAstral / Trypsin / Automatic | PXD046453 | Astral: +22% PSMs vs Comet |
+| `hcd_astral_tryp` | HCD / OrbitrapAstral / Trypsin / Automatic | PXD046453 | Astral: +22% PSMs vs engine K |
 | `hcd_qexactive_tryp` | HCD / QExactive / Trypsin / Automatic | ProteomeTools (PXD009449) | global default model |
 | `hcd_qexactive_tryp_tmt` | HCD / QExactive / Trypsin / TMT | PXD010429 | — |
 | `hcd_qexactive_tryp_itraq` | HCD / QExactive / Trypsin / iTRAQ | public PRIDE (see manifest) | — |
@@ -285,6 +291,102 @@ does not discover new modifications and runs on high-resolution data only. On As
 40,028 PSMs (+4.3%), but its Pass-2 PSMs (`IsRefinement = 1`) sit at **~2.8% FDP** under a
 merged 1% threshold; threshold them separately for 1% on modified PSMs ([`DOCS.md`](DOCS.md#refine--secondary-chemistry-cascade)).
 
+## Variant calls checked against knockoffs (`--uniprot-knockoffs`, `--variant-fdr`)
+
+**Aim.** A PSM on a UniProt variant entry claims that the sample carries that variant. Most false
+claims are not random matches. They are a canonical peptide that a common modification or an
+isotope error makes look like the variant: N→D and Q→E look like deamidation, G→A and D→E like
+methylation, and a one-isotope mis-pick fits a +1 Da substitution. Decoys model only random
+matches, so a decoy-based q-value does not see this error. Measured against donor genotypes, 65%
+of the variant PSMs accepted at a class q-value ≤ 0.01 were variants no donor carries, and 96% of
+the deamidation-like ones were. Knockoff variants give the variant claim a null that makes the
+same mistakes.
+
+**How it works.**
+1. **Knockoff entries.** With `--uniprot-variants`, each single-residue variant X→Y of a canonical
+   sequence gets up to `--uniprot-knockoffs` (default 4) knockoff entries. A knockoff is the same
+   substitution at another position of the same sequence that holds X, where:
+   - the next residue matches: the same residue when X is N, Q, K or R or either next residue is
+     P or G, otherwise the same residue class;
+   - the N-x-S/T sequon status is the same;
+   - the position lies in another enzymatic span whose length is within 3 residues of the real
+     one's and between 6 and 50;
+   - every variant UniProt lists for the protein is at least 10 residues away.
+
+   The positions are chosen at random but reproducibly, from the accession and the variant id.
+   A knockoff is almost certainly absent from the sample. A modification or an isotope error that
+   mimics the real substitution mimics the knockoff equally well. Knockoffs are variant entries:
+   they get decoys, PIN flags and Percolator scores exactly like real variants
+   (`sp|P04637_KO1_D21H_VAR_005851_D7H|P53_HUMAN` moves `VAR_005851_D7H` to position 21).
+2. **Knockoff q-value.** After Percolator and the class FDR, variant-class PSMs are split by
+   substitution class (deamidation-like, methyl-like, oxidation-like, other). Within a class, the
+   knockoff PSMs above a score estimate how many real variant PSMs above it are false. A knockoff
+   PSM counts 1/k for a variant with k knockoffs, and the estimate starts at 1/K for a finite-sample
+   margin, with K the most knockoffs any variant has:
+
+   FDP(t) = (1/K + Σ 1/k over knockoff PSMs ≥ t) / (real PSMs ≥ t whose variant has knockoffs)
+
+   A real PSM's knockoff q-value is the smallest FDP over the thresholds at or below its score. Its
+   reported q-value is the largest of the global, class and knockoff q-values.
+3. **Untested variants.** A variant with no position that qualifies for a knockoff has no null, so
+   its PSMs are not accepted. Measured against genotypes, those variants are false several times
+   more often than the tested ones, so the tested variants' estimate cannot be lent to them.
+4. **Reporting.** Variant-class PSMs (every protein a variant entry) are accepted at
+   `--variant-fdr`, every other PSM at `--fdr`. Knockoff PSMs stay in the PIN and the QPX bundle
+   as targets with q = 1. They are never in the filtered TSV, quantification, MBR or the
+   proteoform table, and knockoff accessions are dropped from other rows' protein lists.
+
+**Input and parameters.** A UniProt XML database with `--uniprot-variants`, and `--rescore`.
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--uniprot-knockoffs` | `4` | Knockoffs per single-residue variant. `0` turns them off and leaves variant PSMs to the class FDR alone. |
+| `--variant-fdr` | the larger of `--fdr` and 0.05 | q-value cutoff for variant-class PSMs in the filtered TSV, the proteoform table and quantification. |
+| `--uniprot-evidence` | `experimental` | Minimum evidence for a variant to be searched (`curated` was used below). |
+
+The run log gives, per substitution class, the knockoff entries made, the variant PSMs accepted
+before and after the knockoff q-values, how many were tested, and the estimated false share:
+
+```
+UniProt XML: 39142 knockoff variant entries (44773 single-residue variants with no position for a knockoff)
+Rescore: variant PSMs at q<=0.05 per substitution class, before -> after knockoff q-values:
+  deamidation-like 1201 -> 0 (147 tested; knockoffs 150.6, false share 1.02), methyl-like 212 -> 89 ...
+```
+
+```bash
+andes --spectrum run1.mzML --spectrum run2.mzML --database uniprot_sprot_human.xml.gz \
+  --uniprot-variants --uniprot-evidence curated --rescore --output-pin variants.pin
+```
+
+**Current benchmark.**
+
+*Genotype truth.* PXD022787 (four donors, one TMT10 set, 69 runs, ion-trap MS2) was searched
+against reviewed human UniProt with curated variants. The donor-haplotype tags of the personal
+protein FASTA deposited with the dataset label each reported variant as carried or absent. The
+true FDP below counts the labelled PSMs whose variant no donor haplotype carries:
+
+| Setting | Variant PSMs reported | Absent / labelled | True FDP | Variants reported (true FDP) |
+|---|---|---|---|---|
+| No knockoffs, class q ≤ 0.01 | 2,452 | 1,075 / 1,653 | 65% | 552 (33%) |
+| No knockoffs, class q ≤ 0.05 | 3,886 | 1,872 / 2,622 | 71% | 840 (45%) |
+| Knockoffs, `--variant-fdr 0.05` | 201 | 4 / 160 | **2.5%** | 83 (3.4%) |
+| Knockoffs, `--variant-fdr 0.10` | 307 | 14 / 233 | **6.0%** | 126 (8.2%) |
+
+Only 0.55% of the knockoffs turned out to be a real donor variant, so the null is clean.
+
+*Cost on the rest of the search.* Knockoffs grow the variant entries by about 60%. PSMs at
+q ≤ 0.01 change by −0.43% on pooled Astral DDA (PXD070049, 21 runs: 1,003,367 → 999,103) and by
+−0.30% on the TMT set. Search time is unchanged. On the Astral set, 129 variant-class PSMs are
+reported at `--variant-fdr 0.05`.
+
+**Limits.**
+- About 30% of single-residue variants can be given a knockoff, so most variants are not reported.
+- Multi-residue variants, indels, isoform-borne variants, isoforms and mature chains get no
+  knockoffs. Variant-class PSMs of those are not accepted while knockoffs are on; isoform and
+  chain PSMs keep the class FDR.
+- The calibration is measured on one genotyped dataset with low-resolution MS2. Small counts
+  make the deamidation- and oxidation-like classes the least certain.
+
 ## Intact N-glycopeptide search (`--glyco`, experimental)
 
 `--glyco` identifies the backbone and the glycan composition from one MS2 scan.
@@ -307,9 +409,9 @@ andes --spectrum sample.mzML \
 - HCD/CID and ETD/EThcD/AI-ETD are supported; c/z fragments localize the glycosite. The site is
   reported as `@N<pos>` only for a single N-X-S/T sequon, otherwise `@N?`.
 
-On one pGlyco2 mouse-liver fraction (PXD005553) andes reports 6,922–6,959 glycoPSMs at 1% at
-0.85–1.36% true FDP over 3 seeds, confirming 89.0% of pGlyco2's and 89.6% of MSFragger-Glyco's
-identifications, in 6 minutes on 8 threads ([`docs/benchmarks/`](docs/benchmarks/README.md)).
+On one mouse-liver fraction (PXD005553) andes reports 6,922–6,959 glycoPSMs at 1% at
+0.85–1.36% true FDP over 3 seeds, confirming 89.0% of the depositors' (engine L) and 89.6% of a reanalysis's
+(engine A) identifications, in 6 minutes on 8 threads ([`docs/benchmarks/`](docs/benchmarks/README.md)).
 `--glyco-peptide-first` finds ~2% more at ~13x the run time.
 
 Memory: `--glyco` runs on the out-of-core candidate index and holds in memory only the

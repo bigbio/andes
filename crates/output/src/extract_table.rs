@@ -11,7 +11,9 @@
 //! decoys; a schema-1 table has none, so it is rejected. Schema 3 added the
 //! MS2 evidence of the transfer and pseudo-transfer rows (`ms2_n_scans`,
 //! `ms2_n_matched`, `ms2_angle`, `ms2_explained`; null for identified rows
-//! and rows without a fit); a schema-2 table is rejected.
+//! and rows without a fit); a schema-2 table is rejected. Schema 4 added
+//! the per-isotope heights `iso_h0`..`iso_h3` and the `tailing` of the fit;
+//! a schema-3 table is rejected.
 //! The evidence columns are null when the fit was not possible.
 //! `n_donor_runs` counts the aligned runs with a PSM of the precursor, this
 //! run included for an identified row and excluded otherwise: the runs that
@@ -39,10 +41,10 @@ use quant::evidence::Evidence;
 use quant::ms2::{Ms2Evidence, ScanMatch};
 
 /// Major version of the table layout. A reader rejects any other major.
-pub const EXTRACT_SCHEMA_MAJOR: u32 = 3;
+pub const EXTRACT_SCHEMA_MAJOR: u32 = 4;
 
 const SCHEMA_KEY: &str = "andes.extract.schema";
-const SCHEMA_VERSION: &str = "3.0";
+const SCHEMA_VERSION: &str = "4.0";
 /// Rows per Parquet row group / record batch.
 const BATCH_ROWS: usize = 65_536;
 
@@ -78,7 +80,7 @@ pub struct ExtractRow {
     pub ms2: Option<Ms2Evidence>,
 }
 
-const F64_EVIDENCE: [&str; 13] = [
+const F64_EVIDENCE: [&str; 18] = [
     "amplitude",
     "amplitude_se",
     "quantity",
@@ -92,9 +94,14 @@ const F64_EVIDENCE: [&str; 13] = [
     "mass_err_ppm",
     "t0",
     "w",
+    "iso_h0",
+    "iso_h1",
+    "iso_h2",
+    "iso_h3",
+    "tailing",
 ];
 
-fn f64_fields(e: &Evidence) -> [f64; 13] {
+fn f64_fields(e: &Evidence) -> [f64; 18] {
     [
         e.amplitude,
         e.amplitude_se,
@@ -109,6 +116,11 @@ fn f64_fields(e: &Evidence) -> [f64; 13] {
         e.mass_err_ppm,
         e.t0,
         e.w,
+        e.iso_heights[0],
+        e.iso_heights[1],
+        e.iso_heights[2],
+        e.iso_heights[3],
+        e.tailing,
     ]
 }
 
@@ -410,6 +422,7 @@ pub fn read_extract_table(path: &Path) -> Result<Vec<ExtractRow>, String> {
         let ms2_matched = column::<UInt8Array>(&b, after + 3, path)?;
         let ms2_angle = column::<Float32Array>(&b, after + 4, path)?;
         let ms2_explained = column::<Float32Array>(&b, after + 5, path)?;
+
         for i in 0..b.num_rows() {
             let kind = decode_kind(kind.value(i), shift.value(i)).ok_or_else(|| {
                 err(&format!(
@@ -440,6 +453,8 @@ pub fn read_extract_table(path: &Path) -> Result<Vec<ExtractRow>, String> {
                     isotopes_used: isotopes.value(i),
                     t0: v(11),
                     w: v(12),
+                    iso_heights: [v(13), v(14), v(15), v(16)],
+                    tailing: v(17),
                 })
             };
             let ms2 = if ms2_scans.is_null(i) {
@@ -494,6 +509,8 @@ mod tests {
             isotopes_used: 0b0111,
             t0: 1234.5,
             w: 4.2,
+            iso_heights: [5.0 + f, 3.0, 1.0, -0.5],
+            tailing: 0.1 * f,
         }
     }
 
@@ -547,7 +564,7 @@ mod tests {
     fn extract_table_rejects_unknown_major_version() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("b.extract.parquet");
-        for version in ["4.0", "2.0"] {
+        for version in ["5.0", "3.0"] {
             write_with_schema_version(&p, &rows(), version).unwrap();
             let e = read_extract_table(&p).unwrap_err();
             assert!(

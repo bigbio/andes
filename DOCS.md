@@ -1086,6 +1086,23 @@ Percolator run over the PINs of all runs (one merged pair, or split per run) to 
 Percolator run per input: the library ranks each precursor by its best score across runs, and
 scores from separately trained Percolator models are not on one scale.
 
+Percolator is the slowest stage of this pipeline on a full-size run (a PIN of about one
+million PSMs). Two settings shorten it; neither is applied by andes, which passes only
+`--seed 42 --only-psms`:
+
+* **Threads.** Percolator trains its three cross-validation folds in parallel when it has
+  three CPUs (`--num-threads`, default 3); on one CPU the same run takes about 2.5 times as
+  long. Its results depend on the thread count (deterministically: the same count gives the
+  same output), so keep `--num-threads` fixed when results are compared.
+* **`--subset-max-train 300000`.** Trains the SVM on a random subset of 300,000 PSMs (seeded)
+  and scores all of them; about a third of the CPU time. On the ProteoBench HF-X runs it
+  moved PSMs at q 0.01 per run by -0.1 to +0.2 % and the precursors quantified in at least
+  three runs by +0.4 % (transfer q 0.01; median |ε| 0.162 and CV 0.119 before and after,
+  E. coli |ε| 0.273 to 0.274). With a shuffled entrapment database the PSM entrapment FDP
+  went from 0.97 % to 1.01 %, entrapment-only quantified precursors (at least three runs) from
+  0.24 % to 0.23 %, and entrapment rows among about 70,000 accepted transfers from 88 to 107.
+  100,000 cost about 0.5 % of the quantified precursors.
+
 * **Library** (`quant library`). Reads every run's `<stem>.quant.parquet` (`--runs`, or every
   table in the directory; a missing PSM, MS1 or MS2 table is an error) and joins Percolator's
   `score`, `q-value` and PEP to its PSMs on (run, SpecId) (target and decoy result files; every

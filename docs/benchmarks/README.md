@@ -6,7 +6,8 @@ TMT). Identifications are counted after Percolator at `q ≤ 0.01`. Where the da
 entrapment component, the page also gives the **true** false discovery proportion (FDP), which
 is what tells you whether the nominal 1% holds. Other engines are anonymised (engine A, B, ...).
 Their numbers come either from runs on the same host with the same rescoring, or from a public
-leaderboard. Section 2 gives the date and the andes commit behind each row.
+leaderboard. quantms, the bigbio workflow andes plugs into, is named where it was run on the same
+data. Section 2 gives the date and the andes commit behind each row.
 
 ## 1. Summary
 
@@ -25,7 +26,7 @@ leaderboard. Section 2 gives the date and the andes commit behind each row.
 
 | benchmark | dataset | andes | best comparison | error control | andes cost |
 |---|---|---|---|---|---|
-| Label-free, match between runs (ProteoBench "Quant LFQ DDA ion") | PXD028735, 6 runs, Q Exactive HF-X, human/yeast/E. coli mix | **54,932** precursors in ≥ 3 runs; median \|ε\| **0.155**, CV **0.110** (transfer q 0.01) | median \|ε\| 0.190 (engine A, submission 2); CV 0.127 (engine C, submission 7); most precursors 81,933 (engine E, median \|ε\| 0.388) | PSM FDP 0.97%; entrapment-only quantified precursors 0.26% | 8.6k CPU-s for 6 runs |
+| Label-free, match between runs (ProteoBench "Quant LFQ DDA ion") | PXD028735, 6 runs, Q Exactive HF-X, human/yeast/E. coli mix | **62,797** precursors in ≥ 3 runs; median \|ε\| **0.162**, E. coli \|ε\| **0.273**, CV **0.118** (transfer q 0.01) | quantms default: 34,677 precursors, 0.210 / 0.401 / 0.225. Leaderboard: median \|ε\| 0.190 (engine A, submission 2); CV 0.127 (engine C, submission 7); most precursors 81,933 (engine E, median \|ε\| 0.388) | PSM FDP 0.97%; entrapment-only quantified precursors 0.24%; false-donor share of transfers 0.25% estimated, 0.24% by entrapment | ≈ 8.7k CPU-s, ≈ 16 min wall for 6 runs |
 | TMT reporter ions | yeast triple knockout, TMTpro 16-plex, PXD017803 | knockout-channel interference **0.127** (SPS-MS3), **0.040** at purity ≥ 0.9 | 0.139 with a reference purity filter at ≥ 0.9 | — | — |
 
 **Opt-in modes** (Astral, PSMs / distinct peptides, Percolator seeds 42, 1 and 2):
@@ -76,20 +77,37 @@ reference's spectra that andes identifies with the same peptide.
 **Label-free quantification with match between runs (ProteoBench).**
 - *Data and measurement:* the six `LFQ_Orbitrap_DDA_Condition_{A,B}_Sample_Alpha_0{1,2,3}`
   runs, where the human, yeast and E. coli ratios between conditions A and B are known. Measured
-  2026-10-17 at `47d2844` on a cluster node, scored with the official `proteobench` package
-  0.18.6.
+  2026-10-17 at #172 (`e1ff3d7`) on a cluster node, scored with the official `proteobench`
+  package 0.18.6 (ion module, precursors quantified in at least 3 runs).
 - *Which quantity is scored:* the `quantity_normalized` column of `mbr.tsv`, which removes each
-  run's loading level and its drift along the gradient. The raw `quantity` column, which is what
-  andes hands to quantms, scores median |ε| 0.225 and CV 0.240 on the same precursors.
-- *Transfer threshold:* at the default `--mbr-fdr 0.05`, andes quantifies 67,035 precursors in
-  at least 3 runs, at median |ε| 0.164, E. coli |ε| 0.317 and CV 0.124.
-- *Where andes stands:* its median |ε| and CV are lower than those of every match-between-runs
-  submission on the leaderboard (snapshot 2026-07-16), and that also holds on the precursors
-  andes shares with engine A's and engine C's largest submissions. Its precursor count is not
-  the highest: 12 of the 30 submissions report more at transfer q 0.01. Engine labels follow
-  #155.
-- *Error control* is measured on the same runs with a shuffled entrapment database. Wrong-peak
-  transfers are 1.02% of accepted transfers at transfer q 0.01 and 1.85% at 0.05.
+  run's loading level and its drift along the gradient. The raw `quantity` column is what andes
+  hands to quantms.
+- *Results:*
+
+  | configuration | precursors in ≥ 3 runs | median \|ε\| | E. coli \|ε\| | CV | wall |
+  |---|---:|---:|---:|---:|---:|
+  | andes, match between runs, transfer q 0.01 (`--mbr-fdr 0.01`) | **62,797** | 0.162 | 0.273 | 0.118 | ≈ 16 min |
+  | andes, match between runs, transfer q 0.05 (the default `--mbr-fdr`) | 68,017 | 0.173 | 0.431 | 0.132 | ≈ 16 min |
+  | andes, identified rows only (no match between runs) | 50,305 | 0.151 | 0.192 | 0.104 | same run |
+  | quantms default DDA LFQ (no match-between-runs) | 34,677 | 0.210 | 0.401 | 0.225 | ≈ 35 min |
+  | quantms with untargeted feature linking | 39,257 | 0.221 | 0.563 | 0.234 | ≈ 84 min |
+  | quantms with its FDR-controlled MBR option (FDR 0.05) | 37,628 | 0.209 | 0.459 | 0.227 | ≈ 115 min |
+
+  Wall time covers search, rescoring and quantification of all six runs. andes ran as
+  six-thread jobs and quantms with twelve-thread tasks on cluster nodes of varying type, so
+  read the times as ±30%. quantms reports no precursor-level normalisation, so its rows score
+  its raw intensities; a per-run median shift applied afterwards brings the quantms default to
+  E. coli \|ε\| 0.337 and CV 0.152 on the same precursors.
+- *Where andes stands on the leaderboard* (snapshot 2026-07-16, 30 match-between-runs
+  submissions): at transfer q 0.01, no submission has a lower median \|ε\| or CV; 3 have a
+  lower E. coli \|ε\| and 6 report more precursors. Engine labels follow #155.
+- *Error control* is measured on the same runs with a 1:1 shuffled entrapment database.
+  Entrapment-only precursors are 0.24% of those quantified in at least 3 runs at transfer
+  q 0.01. The transfer q-value counts wrong peaks and the transfers of false donor
+  identifications (DOCS.md §10): its identity-decoy estimate of the false-donor share of
+  accepted transfers is 0.25% at transfer q 0.01 and 0.40% at 0.05, where the entrapment
+  gives 0.24% and 0.39%. Wrong-peak transfers are 1.7% of accepted transfers at transfer
+  q 0.01 and 2.7% at 0.05.
 
 **TMT quantification (yeast triple knockout).**
 - *Data and measurement:* the hrMS2 and SPS-MS3 runs of PXD017803 (TMTpro 16-plex). Three
@@ -201,6 +219,34 @@ andes quant finalize --quant-dir q/ -o pb --mbr-fdr 0.01
 `andes --spectrum ... --spectrum ... --rescore --lfq --mbr` runs the same four stages in one
 process, with one Percolator over all runs. It was not the configuration measured here. On a
 cluster the six searches take about 1 minute each; Percolator and extract about 7 minutes per run.
+The identified-only row keeps only the `identified` rows of the same `pb.mbr.tsv`.
+
+**quantms on the same runs.** quantms dev at commit `96f263c` (version 1.10.0dev) with its
+pinned tool container, Nextflow 25.10.4, on the same six mzML files and HYE FASTA. The SDRF
+declares conditions A and B (three runs each), trypsin, Carbamidomethyl C fixed, Oxidation M and
+protein N-terminal Acetyl variable, 10 ppm precursor and 0.02 Da fragment tolerance. quantms
+used its default search engine and Percolator rescoring, without MS2 or RT prediction features.
+Parameters:
+
+```bash
+nextflow run bigbio/quantms -r 96f263cbf268126362248d99d3b7d5c7ea9f8bfd -profile singularity \
+    --input pb_hye.sdrf.tsv --database ProteoBenchFASTA_MixedSpecies_HYE.fasta \
+    --add_decoys true --allowed_missed_cleavages 2 \
+    --min_peptide_length 6 --max_peptide_length 50 \
+    --min_precursor_charge 2 --max_precursor_charge 5 --isotope_error_range 0,1 \
+    --enable_pmultiqc false --outdir qms_default
+```
+
+- *quantms default DDA LFQ (no match-between-runs):* as above (`--targeted_only true`, the
+  default).
+- *quantms with untargeted feature linking:* add `--targeted_only false`.
+- *quantms with its FDR-controlled MBR option:* `--targeted_only false`, plus
+  `-pip_echo true -PipEcho:fdr 0.05` passed to the quantification step through its `ext.args`.
+
+The quantms numbers were obtained without the QPX export step of the quantification task (its
+`-out_qpx` output): the task was run with its generated command minus that output, plus the
+flags of each configuration, on the same inputs and container. Each run's `msstats_in.csv` is converted to ProteoBench's "Custom" format
+with one row per ProForma precursor and charge, decoys removed, and scored as above.
 
 ### TMT quantification, knockout (commands, not a tested script)
 
@@ -248,11 +294,11 @@ with `purity ≥ 0.9`.
 
 ## 5. Known gaps
 
-- **The match-between-runs numbers predate #166 and #167**, which since changed how transfers
-  are scored and which donors are used; they have not been re-measured on current `main`.
-  Quantification rests on one label-free dataset and one Percolator seed, and its best scores
-  use andes's own normalisation (`quantity_normalized`; the raw `quantity` is the quantms
-  contract). The TMT figures are from 2026-10-10.
+- **Label-free quantification rests on one dataset and one Percolator seed**, and its best
+  scores use andes's own normalisation (`quantity_normalized`; the raw `quantity` is the
+  quantms contract). quantms ran one search configuration, its default search engine with
+  untuned parameters, so its rows are "quantms default", not the best quantms can do. No
+  entrapment was run for quantms. The TMT figures are from 2026-10-10.
 - **Only some identification sets measure error.** TMT has no entrapment component. UPS1's
   entrapment is not 1:1, and its nominal 1% is 2.6% true FDP.
 - **Single files.** Phospho is one file, peptide-level only; `--refine` is measured on Astral

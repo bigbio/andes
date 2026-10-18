@@ -220,22 +220,49 @@ pub struct Workspace {
 /// Grid profiles kept per workspace: a refit, and a mass-shift decoy fitted
 /// next to its target, search the same grid as the fit before.
 const GRID_CACHE_ENTRIES: usize = 3;
-/// Largest grid, in profile values (candidates x widths x scans), that is
-/// cached; a larger one is computed in place.
+/// Largest grid, in stored profile values, that is cached; a larger one is
+/// computed in place.
 const GRID_CACHE_MAX_VALUES: usize = 1 << 21;
+/// `|t - t0| / w` beyond which `exp(-(t - t0)^2 / (2 w^2))` underflows to
+/// exactly 0 in `f64` (the threshold is 38.6), so leaving those scans out of
+/// a sum does not change it.
+const ZERO_PROFILE_REACH: f64 = 38.7;
 
-/// The profile of every candidate `(t0, w)` of one grid search: `g` holds,
-/// per candidate (t0 major, width minor), `g_j` over the window's scans, and
-/// `sums` its `(sum_j g_j, sum_j g_j^2)`. The key is the window's RTs, the
-/// prior and the width grid, compared bit for bit, so a hit holds exactly
-/// the values a search would compute.
+/// The scans of `rt` (ascending) where the profile at `(t0, w)` can be
+/// nonzero: outside the range every `g_j` is exactly 0. Every scan when
+/// `rt` is not all finite (`finite`), or `t0` or the reach is not.
+fn support(rt: &[f64], finite: bool, t0: f64, w: f64) -> std::ops::Range<usize> {
+    let reach = ZERO_PROFILE_REACH * w;
+    if !(finite && t0.is_finite() && reach.is_finite()) {
+        return 0..rt.len();
+    }
+    let lo = rt.partition_point(|&t| t < t0 - reach);
+    let hi = rt.partition_point(|&t| t <= t0 + reach);
+    lo..hi.max(lo)
+}
+
+/// One cell `(t0, w)` of a grid: its support among the window's scans, the
+/// offset of its profile values in [`GridProfiles::g`], and
+/// `(sum_j g_j, sum_j g_j^2)`.
+#[derive(Debug, Clone)]
+struct Cell {
+    scans: std::ops::Range<usize>,
+    at: usize,
+    sg: f64,
+    sgg: f64,
+}
+
+/// The profile of every candidate `(t0, w)` of one grid search, t0 major,
+/// width minor: per cell, `g_j` over its support. The key is the window's
+/// RTs, the prior and the width grid, compared bit for bit, so a hit holds
+/// exactly the values a search would compute.
 #[derive(Debug, Default)]
 struct GridProfiles {
     rt: Vec<u64>,
     prior: [u64; 3],
     widths: Vec<u64>,
     g: Vec<f64>,
-    sums: Vec<(f64, f64)>,
+    cells: Vec<Cell>,
 }
 
 impl GridProfiles {
@@ -260,14 +287,15 @@ struct GridCache {
 
 impl GridCache {
     /// The profiles of the grid over `rt` (candidates `candidates`, widths
-    /// `widths * prior.w_prior`), computed unless cached.
+    /// `widths * prior.w_prior`), computed unless cached; `None` when the
+    /// grid holds more than [`GRID_CACHE_MAX_VALUES`] values.
     fn get(
         &mut self,
         rt: &[f64],
         prior: &Prior,
         widths: &[f64],
         candidates: std::ops::Range<usize>,
-    ) -> &GridProfiles {
+    ) -> Option<&GridProfiles> {
         let key = [
             prior.t_hat.to_bits(),
             prior.s.to_bits(),
@@ -276,6 +304,24 @@ impl GridCache {
         let at = match self.entries.iter().position(|e| e.matches(rt, key, widths)) {
             Some(i) => i,
             None => {
+                let finite = rt.iter().all(|t| t.is_finite());
+                let mut cells = Vec::with_capacity(candidates.len() * widths.len());
+                let mut values = 0;
+                for k in candidates.clone() {
+                    for &f in widths {
+                        let scans = support(rt, finite, rt[k], f * prior.w_prior);
+                        values += scans.len();
+                        cells.push(Cell {
+                            scans,
+                            at: 0,
+                            sg: 0.0,
+                            sgg: 0.0,
+                        });
+                    }
+                }
+                if values > GRID_CACHE_MAX_VALUES {
+                    return None;
+                }
                 let mut e = if self.entries.len() < GRID_CACHE_ENTRIES {
                     GridProfiles::default()
                 } else {
@@ -287,28 +333,31 @@ impl GridCache {
                 e.widths.clear();
                 e.widths.extend(widths.iter().map(|f| f.to_bits()));
                 e.g.clear();
-                e.sums.clear();
+                let mut c = cells.iter_mut();
                 for k in candidates {
                     let t0 = rt[k];
                     for &f in widths {
                         let w = f * prior.w_prior;
+                        let cell = c.next().expect("one cell per candidate and width");
+                        cell.at = e.g.len();
                         let (mut sg, mut sgg) = (0.0, 0.0);
-                        for &t in rt {
+                        for &t in &rt[cell.scans.clone()] {
                             let g = gaussian(t, t0, w);
                             e.g.push(g);
                             sg += g;
                             sgg += g * g;
                         }
-                        e.sums.push((sg, sgg));
+                        (cell.sg, cell.sgg) = (sg, sgg);
                     }
                 }
+                e.cells = cells;
                 self.entries.push(e);
                 self.entries.len() - 1
             }
         };
         let e = self.entries.remove(at);
         self.entries.push(e);
-        self.entries.last().expect("just pushed")
+        self.entries.last()
     }
 }
 
@@ -962,10 +1011,13 @@ fn best_alignment(
         let a = (num / den).max(0.0);
         a * num - 0.5 * a * a * den
     };
-    // The profile log-likelihood ratio at (t0, w).
+    // The profile log-likelihood ratio at (t0, w). The scans outside the
+    // profile's support add exactly 0 to each sum.
+    let finite = rt.iter().all(|t| t.is_finite());
     let llr = |t0: f64, w: f64| {
         let (mut num, mut sg, mut sgg) = (0.0, 0.0, 0.0);
-        for (&t, &zj) in rt.iter().zip(z.iter()) {
+        let on = support(rt, finite, t0, w);
+        for (&t, &zj) in rt[on.clone()].iter().zip(&z[on]) {
             let g = gaussian(t, t0, w);
             num += zj * g;
             sg += g;
@@ -975,19 +1027,19 @@ fn best_alignment(
     };
     // (objective, t0, index into widths)
     let mut best = (f64::NEG_INFINITY, rt[candidates.start], usize::MAX);
-    if candidates.len() * widths.len() * rt.len() <= GRID_CACHE_MAX_VALUES {
-        let grid = work.grids.get(rt, prior, widths, candidates.clone());
-        let mut cells = grid.g.chunks_exact(rt.len()).zip(&grid.sums);
+    if let Some(grid) = work.grids.get(rt, prior, widths, candidates.clone()) {
+        let mut cells = grid.cells.iter();
         for k in candidates {
             let t0 = rt[k];
             let penalty = (t0 - t_hat) * (t0 - t_hat) / (2.0 * s * s);
             for i in 0..widths.len() {
-                let (g, &(sg, sgg)) = cells.next().expect("one cell per candidate and width");
+                let cell = cells.next().expect("one cell per candidate and width");
+                let g = &grid.g[cell.at..cell.at + cell.scans.len()];
                 let mut num = 0.0;
-                for (&zj, &gj) in z.iter().zip(g) {
+                for (&zj, &gj) in z[cell.scans.clone()].iter().zip(g) {
                     num += zj * gj;
                 }
-                let objective = llr_of(num, sg, sgg) - penalty;
+                let objective = llr_of(num, cell.sg, cell.sgg) - penalty;
                 if objective > best.0 {
                     best = (objective, t0, i);
                 }
@@ -1855,35 +1907,45 @@ mod tests {
 
     #[test]
     fn cached_grid_profiles_are_the_direct_profiles() {
-        let rt: Vec<f64> = (0..40)
+        // Narrow widths: the far scans of each candidate are outside its
+        // support, where the direct profile is exactly 0.
+        let rt: Vec<f64> = (0..400)
             .map(|k| 100.0 + 0.7 * k as f64 + 0.01 * (k % 3) as f64)
             .collect();
         let prior = Prior {
-            t_hat: 113.2,
-            s: 3.0,
-            w_prior: 4.0,
+            t_hat: 240.0,
+            s: 10.0,
+            w_prior: 2.0,
         };
         let mut cache = GridCache::default();
-        let g = cache.get(&rt, &prior, &WIDTH_GRID, 5..30);
-        assert_eq!(g.sums.len(), 25 * WIDTH_GRID.len());
-        let mut cells = g.g.chunks_exact(rt.len()).zip(&g.sums);
-        for k in 5..30 {
+        let g = cache.get(&rt, &prior, &WIDTH_GRID, 150..250).unwrap();
+        assert_eq!(g.cells.len(), 100 * WIDTH_GRID.len());
+        let mut cells = g.cells.iter();
+        let mut outside = 0;
+        for k in 150..250 {
             for &f in &WIDTH_GRID {
-                let (values, &(sg, sgg)) = cells.next().unwrap();
+                let cell = cells.next().unwrap();
                 let (mut want_sg, mut want_sgg) = (0.0, 0.0);
-                for (&t, &v) in rt.iter().zip(values) {
+                for (j, &t) in rt.iter().enumerate() {
                     let want = gaussian(t, rt[k], f * prior.w_prior);
-                    assert_eq!(v.to_bits(), want.to_bits());
+                    if cell.scans.contains(&j) {
+                        let got = g.g[cell.at + j - cell.scans.start];
+                        assert_eq!(got.to_bits(), want.to_bits());
+                    } else {
+                        assert_eq!(want.to_bits(), 0, "scan {j} of candidate {k}");
+                        outside += 1;
+                    }
                     want_sg += want;
                     want_sgg += want * want;
                 }
                 assert_eq!(
-                    (sg.to_bits(), sgg.to_bits()),
+                    (cell.sg.to_bits(), cell.sgg.to_bits()),
                     (want_sg.to_bits(), want_sgg.to_bits())
                 );
             }
         }
         assert!(cells.next().is_none());
+        assert!(outside > 0, "the test exercises the support");
     }
 
     #[test]
@@ -1895,15 +1957,19 @@ mod tests {
             w_prior: 3.0,
         };
         let mut cache = GridCache::default();
-        let first = cache.get(&rt, &prior, &WIDTH_GRID, 9..22).g.clone();
+        let first = cache
+            .get(&rt, &prior, &WIDTH_GRID, 9..22)
+            .unwrap()
+            .g
+            .clone();
         assert_eq!(cache.entries.len(), 1);
-        assert_eq!(cache.get(&rt, &prior, &WIDTH_GRID, 9..22).g, first);
+        assert_eq!(cache.get(&rt, &prior, &WIDTH_GRID, 9..22).unwrap().g, first);
         assert_eq!(cache.entries.len(), 1, "a hit computes nothing new");
         let wider = Prior {
             w_prior: 3.5,
             ..prior
         };
-        assert_ne!(cache.get(&rt, &wider, &WIDTH_GRID, 9..22).g, first);
+        assert_ne!(cache.get(&rt, &wider, &WIDTH_GRID, 9..22).unwrap().g, first);
         let mut shifted = rt.clone();
         shifted[29] += 0.5;
         cache.get(&shifted, &prior, &WIDTH_GRID, 9..22);

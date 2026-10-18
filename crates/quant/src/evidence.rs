@@ -206,12 +206,110 @@ pub struct FitScratch {
     work: Workspace,
 }
 
-/// Work space of [`fit_traces`]; contents are overwritten on every call.
+/// Work space of [`fit_traces`]; contents are overwritten on every call,
+/// except the cached grid profiles, which only depend on the call's RTs,
+/// prior and width grid.
 #[derive(Debug, Default)]
 pub struct Workspace {
     sort: Vec<f32>,
     z: Vec<f64>,
     g: Vec<f64>,
+    grids: GridCache,
+}
+
+/// Grid profiles kept per workspace: a refit, and a mass-shift decoy fitted
+/// next to its target, search the same grid as the fit before.
+const GRID_CACHE_ENTRIES: usize = 3;
+/// Largest grid, in profile values (candidates x widths x scans), that is
+/// cached; a larger one is computed in place.
+const GRID_CACHE_MAX_VALUES: usize = 1 << 21;
+
+/// The profile of every candidate `(t0, w)` of one grid search: `g` holds,
+/// per candidate (t0 major, width minor), `g_j` over the window's scans, and
+/// `sums` its `(sum_j g_j, sum_j g_j^2)`. The key is the window's RTs, the
+/// prior and the width grid, compared bit for bit, so a hit holds exactly
+/// the values a search would compute.
+#[derive(Debug, Default)]
+struct GridProfiles {
+    rt: Vec<u64>,
+    prior: [u64; 3],
+    widths: Vec<u64>,
+    g: Vec<f64>,
+    sums: Vec<(f64, f64)>,
+}
+
+impl GridProfiles {
+    fn matches(&self, rt: &[f64], prior: [u64; 3], widths: &[f64]) -> bool {
+        self.prior == prior
+            && self.rt.len() == rt.len()
+            && self.widths.len() == widths.len()
+            && self.rt.iter().zip(rt).all(|(a, b)| *a == b.to_bits())
+            && self
+                .widths
+                .iter()
+                .zip(widths)
+                .all(|(a, b)| *a == b.to_bits())
+    }
+}
+
+/// The most recently used grid profiles, most recent last.
+#[derive(Debug, Default)]
+struct GridCache {
+    entries: Vec<GridProfiles>,
+}
+
+impl GridCache {
+    /// The profiles of the grid over `rt` (candidates `candidates`, widths
+    /// `widths * prior.w_prior`), computed unless cached.
+    fn get(
+        &mut self,
+        rt: &[f64],
+        prior: &Prior,
+        widths: &[f64],
+        candidates: std::ops::Range<usize>,
+    ) -> &GridProfiles {
+        let key = [
+            prior.t_hat.to_bits(),
+            prior.s.to_bits(),
+            prior.w_prior.to_bits(),
+        ];
+        let at = match self.entries.iter().position(|e| e.matches(rt, key, widths)) {
+            Some(i) => i,
+            None => {
+                let mut e = if self.entries.len() < GRID_CACHE_ENTRIES {
+                    GridProfiles::default()
+                } else {
+                    self.entries.remove(0)
+                };
+                e.rt.clear();
+                e.rt.extend(rt.iter().map(|t| t.to_bits()));
+                e.prior = key;
+                e.widths.clear();
+                e.widths.extend(widths.iter().map(|f| f.to_bits()));
+                e.g.clear();
+                e.sums.clear();
+                for k in candidates {
+                    let t0 = rt[k];
+                    for &f in widths {
+                        let w = f * prior.w_prior;
+                        let (mut sg, mut sgg) = (0.0, 0.0);
+                        for &t in rt {
+                            let g = gaussian(t, t0, w);
+                            e.g.push(g);
+                            sg += g;
+                            sgg += g * g;
+                        }
+                        e.sums.push((sg, sgg));
+                    }
+                }
+                self.entries.push(e);
+                self.entries.len() - 1
+            }
+        };
+        let e = self.entries.remove(at);
+        self.entries.push(e);
+        self.entries.last().expect("just pushed")
+    }
 }
 
 /// Fit `probe` (monoisotopic m/z, charge `charge`, isotope fractions
@@ -852,16 +950,10 @@ fn best_alignment(
         k..k + 1
     };
     let n = rt.len() as f64;
-    // The profile log-likelihood ratio at (t0, w); minus infinity for a
-    // profile flat over the window.
-    let llr = |t0: f64, w: f64| {
-        let (mut num, mut sg, mut sgg) = (0.0, 0.0, 0.0);
-        for (&t, &zj) in rt.iter().zip(z.iter()) {
-            let g = gaussian(t, t0, w);
-            num += zj * g;
-            sg += g;
-            sgg += g * g;
-        }
+    // The profile log-likelihood ratio from num = sum_j z_j g_j,
+    // sg = sum_j g_j and sgg = sum_j g_j^2; minus infinity for a profile
+    // flat over the window.
+    let llr_of = |num: f64, sg: f64, sgg: f64| {
         let centred = sgg - sg * sg / n;
         if centred < MIN_CENTRED_SGG {
             return f64::NEG_INFINITY;
@@ -870,15 +962,46 @@ fn best_alignment(
         let a = (num / den).max(0.0);
         a * num - 0.5 * a * a * den
     };
+    // The profile log-likelihood ratio at (t0, w).
+    let llr = |t0: f64, w: f64| {
+        let (mut num, mut sg, mut sgg) = (0.0, 0.0, 0.0);
+        for (&t, &zj) in rt.iter().zip(z.iter()) {
+            let g = gaussian(t, t0, w);
+            num += zj * g;
+            sg += g;
+            sgg += g * g;
+        }
+        llr_of(num, sg, sgg)
+    };
     // (objective, t0, index into widths)
     let mut best = (f64::NEG_INFINITY, rt[candidates.start], usize::MAX);
-    for k in candidates {
-        let t0 = rt[k];
-        let penalty = (t0 - t_hat) * (t0 - t_hat) / (2.0 * s * s);
-        for (i, &f) in widths.iter().enumerate() {
-            let objective = llr(t0, f * prior.w_prior) - penalty;
-            if objective > best.0 {
-                best = (objective, t0, i);
+    if candidates.len() * widths.len() * rt.len() <= GRID_CACHE_MAX_VALUES {
+        let grid = work.grids.get(rt, prior, widths, candidates.clone());
+        let mut cells = grid.g.chunks_exact(rt.len()).zip(&grid.sums);
+        for k in candidates {
+            let t0 = rt[k];
+            let penalty = (t0 - t_hat) * (t0 - t_hat) / (2.0 * s * s);
+            for i in 0..widths.len() {
+                let (g, &(sg, sgg)) = cells.next().expect("one cell per candidate and width");
+                let mut num = 0.0;
+                for (&zj, &gj) in z.iter().zip(g) {
+                    num += zj * gj;
+                }
+                let objective = llr_of(num, sg, sgg) - penalty;
+                if objective > best.0 {
+                    best = (objective, t0, i);
+                }
+            }
+        }
+    } else {
+        for k in candidates {
+            let t0 = rt[k];
+            let penalty = (t0 - t_hat) * (t0 - t_hat) / (2.0 * s * s);
+            for (i, &f) in widths.iter().enumerate() {
+                let objective = llr(t0, f * prior.w_prior) - penalty;
+                if objective > best.0 {
+                    best = (objective, t0, i);
+                }
             }
         }
     }
@@ -1728,6 +1851,101 @@ mod tests {
         assert_eq!(missing.isotopes_used & 0b0010, 0b0010, "isotope 1 kept");
         assert_eq!(missing.isotopes_used & 0b1000, 0, "missing M+3 dropped");
         assert!(missing.llr > 0.5 * intact.llr && missing.llr < 2.0 * intact.llr);
+    }
+
+    #[test]
+    fn cached_grid_profiles_are_the_direct_profiles() {
+        let rt: Vec<f64> = (0..40)
+            .map(|k| 100.0 + 0.7 * k as f64 + 0.01 * (k % 3) as f64)
+            .collect();
+        let prior = Prior {
+            t_hat: 113.2,
+            s: 3.0,
+            w_prior: 4.0,
+        };
+        let mut cache = GridCache::default();
+        let g = cache.get(&rt, &prior, &WIDTH_GRID, 5..30);
+        assert_eq!(g.sums.len(), 25 * WIDTH_GRID.len());
+        let mut cells = g.g.chunks_exact(rt.len()).zip(&g.sums);
+        for k in 5..30 {
+            for &f in &WIDTH_GRID {
+                let (values, &(sg, sgg)) = cells.next().unwrap();
+                let (mut want_sg, mut want_sgg) = (0.0, 0.0);
+                for (&t, &v) in rt.iter().zip(values) {
+                    let want = gaussian(t, rt[k], f * prior.w_prior);
+                    assert_eq!(v.to_bits(), want.to_bits());
+                    want_sg += want;
+                    want_sgg += want * want;
+                }
+                assert_eq!(
+                    (sg.to_bits(), sgg.to_bits()),
+                    (want_sg.to_bits(), want_sgg.to_bits())
+                );
+            }
+        }
+        assert!(cells.next().is_none());
+    }
+
+    #[test]
+    fn grid_cache_hits_only_on_the_same_window_prior_and_widths() {
+        let rt: Vec<f64> = (0..30).map(|k| k as f64).collect();
+        let prior = Prior {
+            t_hat: 15.0,
+            s: 2.0,
+            w_prior: 3.0,
+        };
+        let mut cache = GridCache::default();
+        let first = cache.get(&rt, &prior, &WIDTH_GRID, 9..22).g.clone();
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.get(&rt, &prior, &WIDTH_GRID, 9..22).g, first);
+        assert_eq!(cache.entries.len(), 1, "a hit computes nothing new");
+        let wider = Prior {
+            w_prior: 3.5,
+            ..prior
+        };
+        assert_ne!(cache.get(&rt, &wider, &WIDTH_GRID, 9..22).g, first);
+        let mut shifted = rt.clone();
+        shifted[29] += 0.5;
+        cache.get(&shifted, &prior, &WIDTH_GRID, 9..22);
+        cache.get(&rt, &prior, &FIVE_POINT_GRID, 9..22);
+        assert_eq!(cache.entries.len(), GRID_CACHE_ENTRIES);
+        assert!(
+            cache.entries.iter().all(|e| !e.matches(
+                &rt,
+                [
+                    prior.t_hat.to_bits(),
+                    prior.s.to_bits(),
+                    prior.w_prior.to_bits()
+                ],
+                &WIDTH_GRID
+            )),
+            "the oldest entry was replaced"
+        );
+    }
+
+    #[test]
+    fn fits_sharing_a_workspace_equal_fresh_fits() {
+        // Targets with an interfered isotope (refits) and their mass-shift
+        // decoys on the same window: every fit through one scratch equals
+        // the fit with a fresh one.
+        let interferer = (
+            MZ + 2.0 * ISOTOPE / 2.0,
+            1,
+            [1.0, 0.0, 0.0, 0.0],
+            330.0,
+            4.0,
+            AMP,
+        );
+        let run = synth_run(&[(MZ, 2, ENV, 300.0, 5.0, AMP), interferer], NOISE, 0.5);
+        let mut scratch = FitScratch::default();
+        for t_hat in [290.0, 300.0, 300.0, 318.0] {
+            for mz in [MZ, MZ + 7.0 * PEPTIDE_MASS_SLOPE / 2.0, MZ] {
+                let pr = probe(mz, t_hat, 12.0, 5.0);
+                let shared = fit_with(&run, &pr, 2, &ENV, &params(), &mut scratch);
+                let fresh = fit(&run, &pr, 2, &ENV, &params());
+                assert_eq!(format!("{shared:?}"), format!("{fresh:?}"));
+            }
+        }
     }
 
     /// Every job of `jobs` through [`fit_many`] and through [`fit_on_grid`]

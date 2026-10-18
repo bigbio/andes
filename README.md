@@ -397,6 +397,20 @@ true FDP below counts the labelled PSMs whose variant no donor haplotype carries
 
 Only 0.55% of the knockoffs turned out to be a real donor variant, so the null is clean.
 
+*Prior tiers.* The same EN-TEx runs were searched against a FASTA of reviewed human UniProt plus
+an annotation file holding UniProt's 83,472 single-residue variants. In one arm, the variants a
+donor carries were given a sample genotype (tier `sample`), as a sample's own variant calls
+would be. In the other, every variant was in one tier. At `--proteoform-fdr 0.05`:
+
+| Setting | Carried variant PSMs (variants) | Donor-absent PSMs (variants) | True FDP, variants |
+|---|---|---|---|
+| One tier | 228 (84) | 70 (9) | 9.7% |
+| Tiers split | 330 (123) | 50 (4) | 3.1% |
+
+Separate tiers recover 45% more carried variant PSMs and report fewer false ones. At the PSM
+level the false share is still 13% (24% with one tier): all 50 false PSMs in the split arm come
+from four abundant variants in one stratum, which the knockoffs underestimate.
+
 *Cost on the rest of the search.* Knockoffs grow the variant entries by about 60%. PSMs at
 q ≤ 0.01 change by −0.43% on pooled Astral DDA (PXD070049, 21 runs: 1,003,367 → 999,103) and by
 −0.30% on the TMT set. Search time is unchanged. On the Astral set, 129 variant-class PSMs are

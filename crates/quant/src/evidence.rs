@@ -35,7 +35,11 @@
 //! "background only" is `LLR = A num - A^2 den / 2`. The fit maximises
 //! `LLR - (t0 - t_hat)^2 / (2 s^2)`; the first maximum in (t0, w) order wins.
 //! A candidate whose `sum_j (g_j - gbar)^2` is below `1e-9` (a profile flat
-//! over the window) is skipped.
+//! over the window) is skipped. The search sums each candidate's profile over
+//! the scans within `9 w` of `t0` only: beyond, `g_j < 3e-18` while the
+//! candidate's own apex scan has `g = 1`, so the terms left out can only move
+//! the objective by rounding. The reported fit (amplitude, LLR, features) is
+//! computed over the whole window.
 //!
 //! Interference. At the optimum, each isotope `i` in `{1, 2, 3}` gets its own
 //! amplitude `A_i = sum_j (y_i[j] - ybar_i) (g_j - gbar) / (pi_i S)` with
@@ -223,16 +227,16 @@ const GRID_CACHE_ENTRIES: usize = 3;
 /// Largest grid, in stored profile values, that is cached; a larger one is
 /// computed in place.
 const GRID_CACHE_MAX_VALUES: usize = 1 << 21;
-/// `|t - t0| / w` beyond which `exp(-(t - t0)^2 / (2 w^2))` underflows to
-/// exactly 0 in `f64` (the threshold is 38.6), so leaving those scans out of
-/// a sum does not change it.
-const ZERO_PROFILE_REACH: f64 = 38.7;
+/// `|t - t0| / w` beyond which the grid search and the width refinement
+/// leave a scan out of a profile's sums: there
+/// `exp(-(t - t0)^2 / (2 w^2)) < 3e-18`, against 1 at the candidate's apex.
+const PROFILE_REACH: f64 = 9.0;
 
-/// The scans of `rt` (ascending) where the profile at `(t0, w)` can be
-/// nonzero: outside the range every `g_j` is exactly 0. Every scan when
-/// `rt` is not all finite (`finite`), or `t0` or the reach is not.
+/// The scans of `rt` (ascending) within [`PROFILE_REACH`] widths of `t0`.
+/// Every scan when `rt` is not all finite (`finite`), or `t0` or the reach
+/// is not.
 fn support(rt: &[f64], finite: bool, t0: f64, w: f64) -> std::ops::Range<usize> {
-    let reach = ZERO_PROFILE_REACH * w;
+    let reach = PROFILE_REACH * w;
     if !(finite && t0.is_finite() && reach.is_finite()) {
         return 0..rt.len();
     }
@@ -1011,8 +1015,8 @@ fn best_alignment(
         let a = (num / den).max(0.0);
         a * num - 0.5 * a * a * den
     };
-    // The profile log-likelihood ratio at (t0, w). The scans outside the
-    // profile's support add exactly 0 to each sum.
+    // The profile log-likelihood ratio at (t0, w), over the profile's
+    // support.
     let finite = rt.iter().all(|t| t.is_finite());
     let llr = |t0: f64, w: f64| {
         let (mut num, mut sg, mut sgg) = (0.0, 0.0, 0.0);
@@ -1908,7 +1912,7 @@ mod tests {
     #[test]
     fn cached_grid_profiles_are_the_direct_profiles() {
         // Narrow widths: the far scans of each candidate are outside its
-        // support, where the direct profile is exactly 0.
+        // support, where the direct profile is below 3e-18.
         let rt: Vec<f64> = (0..400)
             .map(|k| 100.0 + 0.7 * k as f64 + 0.01 * (k % 3) as f64)
             .collect();
@@ -1931,12 +1935,12 @@ mod tests {
                     if cell.scans.contains(&j) {
                         let got = g.g[cell.at + j - cell.scans.start];
                         assert_eq!(got.to_bits(), want.to_bits());
+                        want_sg += want;
+                        want_sgg += want * want;
                     } else {
-                        assert_eq!(want.to_bits(), 0, "scan {j} of candidate {k}");
+                        assert!(want < 3e-18, "scan {j} of candidate {k}: {want}");
                         outside += 1;
                     }
-                    want_sg += want;
-                    want_sgg += want * want;
                 }
                 assert_eq!(
                     (cell.sg.to_bits(), cell.sgg.to_bits()),

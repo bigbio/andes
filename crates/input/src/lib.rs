@@ -8,6 +8,7 @@ pub mod fasta;
 pub mod isobaric;
 pub mod mgf;
 pub mod mzml;
+pub mod peff;
 #[cfg(feature = "thermo")]
 pub mod thermo;
 #[cfg(feature = "timstof")]
@@ -25,6 +26,7 @@ pub use model::{InstrumentType, Protein, ProteinDb, Spectrum};
 pub use mzml::{
     detect_instrument_type, read_spectra_parallel, Ms1Link, MzMLParseError, MzMLReader,
 };
+pub use peff::{load_peff, PeffError, PeffLoadStats};
 #[cfg(feature = "thermo")]
 pub use thermo::{ThermoParseError, ThermoRawReader};
 #[cfg(feature = "timstof")]

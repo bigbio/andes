@@ -552,7 +552,7 @@ pub fn fit_many(ms1: &Ms1RunIndex, jobs: &[FitJob], p: &EvidenceParams) -> Vec<O
 /// Fewest jobs per parallel sweep of [`fit_many`].
 const MIN_SWEEP_CHUNK: usize = 64;
 /// Parallel sweeps per worker thread in [`fit_many`], for load balance.
-const SWEEP_CHUNKS_PER_THREAD: usize = 4;
+const SWEEP_CHUNKS_PER_THREAD: usize = 32;
 
 /// A job of [`fit_many`] with its extraction window and trace slices.
 struct Planned {

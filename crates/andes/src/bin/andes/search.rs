@@ -281,12 +281,44 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         chains: cli.uniprot_chains,
         evidence: cli.uniprot_evidence,
         knockoffs: Some(input::KnockoffOptions {
-            per_variant: cli.uniprot_knockoffs,
+            per_variant: cli.knockoffs,
             enzyme: search_enzyme,
         }),
     };
     let loaded = input::load_protein_database(&database_path, &uniprot_opts)?;
-    let target_db = loaded.db;
+    let mut target_db = loaded.db;
+    if !cli.annotations.is_empty() {
+        let stats =
+            input::load_annotations(&cli.annotations, &mut target_db, uniprot_opts.knockoffs)?;
+        let dropped: Vec<String> = stats
+            .dropped
+            .iter()
+            .map(|(reason, n)| format!("{reason} ({n})"))
+            .collect();
+        eprintln!(
+            "Annotations: {} rows from {} files: {} variant, {} knockoff and {} chain entries, \
+             {} sites on reference proteins, {} rows merged into an equal claim{}{}",
+            stats.rows,
+            stats.files,
+            stats.variant_entries,
+            stats.knockoff_entries,
+            stats.chain_entries,
+            stats.sites,
+            stats.merged,
+            if dropped.is_empty() {
+                ""
+            } else {
+                "; left out: "
+            },
+            dropped.join(", "),
+        );
+        if stats.knockoff_entries > 0 {
+            eprintln!(
+                "Annotations: {} single-residue variants with no position for a knockoff",
+                stats.variants_without_knockoff
+            );
+        }
+    }
     eprintln!(
         "Loaded {} target proteins from {} [PHASE fasta_load: {:.2}s]",
         target_db.proteins.len(),

@@ -47,7 +47,8 @@ pub struct IoCfg {
     pub uniprot_isoforms: Option<bool>,
     pub uniprot_chains: Option<bool>,
     pub uniprot_evidence: Option<String>,
-    pub uniprot_knockoffs: Option<usize>,
+    pub annotations: Option<Vec<PathBuf>>,
+    pub knockoffs: Option<usize>,
     pub output_pin: Option<PathBuf>,
     pub output_tsv: Option<PathBuf>,
     pub output_parquet: Option<PathBuf>,
@@ -255,11 +256,8 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         cfg.io.uniprot_isoforms
     );
     set!("uniprot_chains", uniprot_chains, cfg.io.uniprot_chains);
-    set!(
-        "uniprot_knockoffs",
-        uniprot_knockoffs,
-        cfg.io.uniprot_knockoffs
-    );
+    set!("annotations", annotations, cfg.io.annotations);
+    set!("knockoffs", knockoffs, cfg.io.knockoffs);
     set_parsed!(
         "uniprot_evidence",
         uniprot_evidence,

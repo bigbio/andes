@@ -2,6 +2,7 @@
 //! Bruker timsTOF `.d`.
 
 pub mod annotation;
+pub mod annotations_file;
 pub mod database;
 pub mod fasta;
 pub mod isobaric;
@@ -15,6 +16,7 @@ pub mod uniprot;
 mod uniprot_ptm;
 
 pub use annotation::{build_entry, knockoff_annotations, KnockoffOptions};
+pub use annotations_file::{load_annotations, sequence_md5, AnnotationLoadStats, AnnotationsError};
 pub use database::{load_protein_database, DatabaseError, DatabaseFormat, LoadedDatabase};
 pub use fasta::{FastaParseError, FastaReader};
 pub use isobaric::{detect_isobaric, IsobaricLabel};

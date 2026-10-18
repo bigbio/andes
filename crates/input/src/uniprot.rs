@@ -1862,7 +1862,10 @@ mod tests {
         let seq = repeats();
         // Every D is a listed variant.
         let listed: Vec<usize> = (0..8).map(|i| 4 + 10 * i).collect();
-        assert_eq!(knockoff_positions(&seq, 4, &listed, TRYPSIN_KO, 1), vec![]);
+        assert_eq!(
+            knockoff_positions(&seq, 4, &listed, TRYPSIN_KO, 1),
+            Vec::<usize>::new()
+        );
         // Every D but the last, which is 10 residues from the nearest.
         let listed: Vec<usize> = (0..7).map(|i| 4 + 10 * i).collect();
         assert_eq!(
@@ -1872,11 +1875,17 @@ mod tests {
         // A next residue of another class (D-L at the site, D-E elsewhere).
         let mut other = b"GGGGDLGGGK".to_vec();
         other.extend(b"GGGGDEGGGK".repeat(3));
-        assert_eq!(knockoff_positions(&other, 4, &[4], TRYPSIN_KO, 1), vec![]);
+        assert_eq!(
+            knockoff_positions(&other, 4, &[4], TRYPSIN_KO, 1),
+            Vec::<usize>::new()
+        );
         // A span too short (5 residues) holds no knockoff.
         let mut short = b"GGGGDLGGGK".to_vec();
         short.extend(b"GDLGK".repeat(3));
-        assert_eq!(knockoff_positions(&short, 4, &[4], TRYPSIN_KO, 1), vec![]);
+        assert_eq!(
+            knockoff_positions(&short, 4, &[4], TRYPSIN_KO, 1),
+            Vec::<usize>::new()
+        );
     }
 
     #[test]
@@ -1884,7 +1893,10 @@ mod tests {
         // N at 4 is a sequon (N-L-S); the N of the other spans is not (N-L-G).
         let mut seq = b"GGGGNLSGGK".to_vec();
         seq.extend(b"GGGGNLGGGK".repeat(3));
-        assert_eq!(knockoff_positions(&seq, 4, &[4], TRYPSIN_KO, 1), vec![]);
+        assert_eq!(
+            knockoff_positions(&seq, 4, &[4], TRYPSIN_KO, 1),
+            Vec::<usize>::new()
+        );
     }
 
     #[test]

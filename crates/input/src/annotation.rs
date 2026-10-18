@@ -25,11 +25,12 @@ pub struct KnockoffOptions {
 /// The entry `annotation` makes from `reference`, or `None` for a kind that
 /// makes no entry (`Reference`). The entry carries the reference's sites that
 /// its edits keep, plus the annotation's own; its origin names the
-/// reference's family.
+/// reference's family (for a reference with no origin, its primary
+/// accession).
 pub fn build_entry(reference: &Protein, annotation: &Annotation) -> Option<Protein> {
     let base = &reference.sequence;
     let family: Arc<str> = reference.origin().map_or_else(
-        || Arc::from(reference.accession.as_str()),
+        || Arc::from(primary_accession(&reference.accession)),
         |o| o.family.clone(),
     );
     let origin = |variant_delta_da: f64| EntryOrigin {
@@ -98,6 +99,16 @@ pub fn build_entry(reference: &Protein, annotation: &Annotation) -> Option<Prote
         sequence,
         annotation: Some(Arc::new(info)),
     })
+}
+
+/// The primary accession of a FASTA accession: the middle field of
+/// `sp|P04637|P53_HUMAN`, else the whole accession.
+pub fn primary_accession(accession: &str) -> &str {
+    let parts: Vec<&str> = accession.split('|').collect();
+    match parts.as_slice() {
+        [_, acc, _] => acc,
+        _ => accession,
+    }
 }
 
 /// `accession` with `_<id>` added to its middle field (`sp|P04637|P53_HUMAN`

@@ -20,7 +20,7 @@ pub fn savitzky_golay5(x: &[f32]) -> Vec<f32> {
 }
 
 /// Gaussian smoothing in retention-time units. `width_s` spans eight sigma,
-/// following OpenMS's Gaussian-width convention. Trapezoidal sample weights
+/// following the common eight-sigma Gaussian-width convention. Trapezoidal sample weights
 /// keep densely sampled intervals from dominating an irregularly sampled XIC.
 /// Only peak detection uses this trace; areas are integrated from raw signal.
 pub fn gaussian_smooth(rt: &[f64], x: &[f32], width_s: f64) -> Vec<f32> {

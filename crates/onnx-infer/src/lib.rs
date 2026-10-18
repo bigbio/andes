@@ -9,7 +9,7 @@
 //! [quantms-rescoring](https://github.com/bigbio/quantms-rescoring) inference
 //! paths (AlphaPeptDeep / DeepLC / spectrum features → PIN / idparquet). See
 //! [`rescoring`] for feature-name contracts and top-N batching, and
-//! [`peptdeep`] for PeptDeep ONNX I/O aligned with OpenMS exports.
+//! [`peptdeep`] for PeptDeep ONNX I/O aligned with the quantms-rescoring exports.
 //!
 //! ## Design
 //!

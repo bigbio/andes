@@ -4,7 +4,7 @@
 //!
 //! Position in the run: `spectra → search → PIN → rescore → quant → outputs`.
 //! Everything above the feature level (normalization across samples, protein
-//! roll-up, statistics) is left to quantms / OpenMS, which know the
+//! roll-up, statistics) is left to quantms, which knows the
 //! experimental design.
 
 use std::collections::HashMap;
@@ -38,13 +38,13 @@ use crate::cli::Cli;
 mod ms1_cache;
 use ms1_cache::Ms1Cache;
 
-/// Isotope-peak tolerance of the precursor-purity ladder (OpenMS default).
+/// Isotope-peak tolerance of the precursor-purity ladder (reference default).
 const PURITY_ISOTOPE_PPM: f64 = 10.0;
 
 /// MS1 resolution check for `--lfq`: isotope partners are matched at this
 /// tolerance, and a run whose most intense MS1 centroids find one less often
 /// than [`MS1_MIN_ISOTOPE_PARTNER_FRACTION`] is reported as low-resolution.
-/// Orbitrap survey scans measured 0.70-0.93 (PXD000001, PXD001819, the OpenMS
+/// Orbitrap survey scans measured 0.70-0.93 (PXD000001, PXD001819, a public
 /// BSA example); the same scans with ion-trap-sized centroid errors 0.09-0.32.
 const MS1_RESOLUTION_CHECK_PPM: f64 = 10.0;
 const MS1_MIN_ISOTOPE_PARTNER_FRACTION: f64 = 0.5;
@@ -775,7 +775,7 @@ fn base_record(id: &QuantId, proteins: Vec<ProteinPos>, feature_id: i64) -> Feat
         run_file_name: id.run.clone(),
         cv_params: Vec::new(),
         // No scan number (e.g. `spectrum=N` native ids): an empty list, as
-        // OpenMS writes it, not a made-up scan 0.
+        // the reference QPX writer writes it, not a made-up scan 0.
         scan: if id.scan > 0 {
             vec![id.scan]
         } else {

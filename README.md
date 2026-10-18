@@ -17,24 +17,25 @@ and built end-to-end with AI coding agents, under human direction.
 
 ## Why andes?
 
-andes finds more PSMs than Comet on all three reference datasets. On low-res LFQ (UPS1), Java
+andes finds more PSMs than a widely used open-source search engine (engine K) on all three
+reference datasets. On low-res LFQ (UPS1), Java
 MS-GF+'s strongest regime, it trails Java.
 
 | Engine | Astral (high-res HCD) | TMT a05058 (low-res CID) | UPS1 (low-res LFQ) |
 |---|---:|---:|---:|
 | **andes** | **47,080** | **12,347** | 15,848 |
-| Comet 2025.01 | 31,435 | 10,504 | 14,734 |
+| engine K | 31,435 | 10,504 | 14,734 |
 | Java MS-GF+ v20240326 † | 26,542 | 10,651 | **15,904** |
 | *andes wall time* | *160–161 s* | *28 s* | *18 s* |
-| *Comet wall time* | *215 s* | *76 s* | *46 s* |
+| *engine K wall time* | *215 s* | *76 s* | *46 s* |
 
 <sub>**Metric and provenance.** PSMs at Percolator `q ≤ 0.01`, one method for every row (plain
 FASTA, andes `XXX_` decoys, Percolator 3.7.1 `--seed 42 -Y`, same 8-thread host). andes measured
-**2026-10-07** at #112 (`40774aca`); Comet on 2026-10-05, reproducing its 2026-09-04 counts.
+**2026-10-07** at #112 (`40774aca`); engine K on 2026-10-05, reproducing its 2026-09-04 counts.
 Since #112, high-res searches retrieve candidates with the fragment-ion index, which moved Astral
 from 38,394 to 46,774, and breaking the index's vote ties by matched intensity took it to 47,080;
 low-res searches use the index too since 2026-10-10 (TMT 12,281 → 12,347, UPS1 15,838 → 15,848,
-both now in less than half the memory). andes finds 7.6–49.8% more PSMs in 0.36–0.74x Comet's
+both now in less than half the memory). andes finds 7.6–49.8% more PSMs in 0.36–0.74x engine K's
 wall time. **†** Java MS-GF+ was not re-run; its counts are from an earlier session, and it
 remains ~10–40x slower. **Error rates:** checked against an entrapment version of the Astral
 database, the Astral gain holds at an equal true FDP (+22.2% over the previous in-RAM retrieval at
@@ -45,20 +46,20 @@ entrapment component. Details:
 [`docs/benchmarks/`](docs/benchmarks/README.md).</sub>
 
 **Time, CPU and memory** (same VM, 8 threads, `/usr/bin/time`; andes Astral and phospho 2026-10-07
-at #112, TMT and UPS1 2026-10-10 on the out-of-core index, two runs on the standard sets; Comet
-2026-10-06, one run). andes uses 51–70% less CPU time than Comet and 26–64% less wall time. It
+at #112, TMT and UPS1 2026-10-10 on the out-of-core index, two runs on the standard sets; engine K
+2026-10-06, one run). andes uses 51–70% less CPU time than engine K and 26–64% less wall time. It
 needs less memory on Astral, TMT and UPS1, and more on phospho (2.3x, 80 Da index slices).
 
 | dataset | engine | PSMs @ q≤0.01 | wall | CPU time | peak memory |
 |---|---|---:|---:|---:|---:|
 | Astral | **andes** | **47,080** | **160 s** | **787 s** | **4.1 GB** |
-| | Comet | 31,435 | 217 s | 1,594 s | 8.1 GB |
+| | engine K | 31,435 | 217 s | 1,594 s | 8.1 GB |
 | TMT a05058 | **andes** | **12,347** | **28 s** | **171 s** | **1.7 GB** |
-| | Comet | 10,504 | 77 s | 568 s | 2.9 GB |
+| | engine K | 10,504 | 77 s | 568 s | 2.9 GB |
 | UPS1 | **andes** | **15,848** | **18 s** | **117 s** | **1.3 GB** |
-| | Comet | 14,734 | 42 s | 309 s | 2.9 GB |
+| | engine K | 14,734 | 42 s | 309 s | 2.9 GB |
 | Phospho (PXD007653) | **andes** | **37,190** (1.02% FDP) | **637 s** | **3,608 s** | 13.7 GB |
-| | Comet | 33,984 (1.77% FDP) | 1,096 s | 8,399 s | 6.0 GB |
+| | engine K | 33,984 (1.77% FDP) | 1,096 s | 8,399 s | 6.0 GB |
 
 <sub>PSM counts: 2026-10-05 refresh; TMT and UPS1 2026-10-10 (phospho: seed 42). Wall times vary 5–15% between sessions;
 CPU time is steadier.</sub>
@@ -184,7 +185,7 @@ andes --spectrum spectra.mzML --database uniprot_sprot_human.xml.gz \
 **TSV and Parquet output:**
 
 ```bash
-# TSV for inspection; OpenMS-compatible QPX .idparquet bundle for quantms/OpenMS
+# TSV for inspection; QPX .idparquet bundle for quantms
 andes --spectrum spectra.mzML --database db.fasta \
   --output-pin out.pin --output-tsv out.tsv --output-parquet out.idparquet
 ```
@@ -199,9 +200,9 @@ without one of them.
 `--tmt tmt10` reads the reporter ions of every identified MS2 (or its SPS-MS3 with
 `--tmt-level 3`), applies the kit's impurity matrix (`--tmt-correction`) and reports the
 precursor isolation purity; `--lfq` integrates the isotope chromatograms of every identified
-precursor from the MS1 scans with an experimental decoy-based feature q-value estimate. Both write Sage-style
+precursor from the MS1 scans with an experimental decoy-based feature q-value estimate. Both write plain
 tables (`<stem>.tmt.tsv`, `<stem>.lfq.tsv`) and, with `--output-parquet`, the QPX
-`quantms.feature.parquet` that quantms / OpenMS consume. Normalization and protein roll-up stay
+`quantms.feature.parquet` that quantms consumes. Normalization and protein roll-up stay
 downstream ([`DOCS.md` §10](DOCS.md#10-quantification)). `--lfq --mbr` adds match between runs
 over two or more inputs: every confident precursor is measured in every run, and transfers carry
 an internal quant-quality q-value (`<stem>.mbr.tsv`). The same stages run one at a time with
@@ -237,7 +238,7 @@ model data.
 
 | `model_id` | activation / instrument / enzyme / protocol | Training data (public PRIDE) | Benchmark |
 |---|---|---|---|
-| `hcd_astral_tryp` | HCD / OrbitrapAstral / Trypsin / Automatic | PXD046453 | Astral: +22% PSMs vs Comet |
+| `hcd_astral_tryp` | HCD / OrbitrapAstral / Trypsin / Automatic | PXD046453 | Astral: +22% PSMs vs engine K |
 | `hcd_qexactive_tryp` | HCD / QExactive / Trypsin / Automatic | ProteomeTools (PXD009449) | global default model |
 | `hcd_qexactive_tryp_tmt` | HCD / QExactive / Trypsin / TMT | PXD010429 | — |
 | `hcd_qexactive_tryp_itraq` | HCD / QExactive / Trypsin / iTRAQ | public PRIDE (see manifest) | — |
@@ -311,9 +312,9 @@ andes --spectrum sample.mzML \
 - HCD/CID and ETD/EThcD/AI-ETD are supported; c/z fragments localize the glycosite. The site is
   reported as `@N<pos>` only for a single N-X-S/T sequon, otherwise `@N?`.
 
-On one pGlyco2 mouse-liver fraction (PXD005553) andes reports 6,922–6,959 glycoPSMs at 1% at
-0.85–1.36% true FDP over 3 seeds, confirming 89.0% of pGlyco2's and 89.6% of MSFragger-Glyco's
-identifications, in 6 minutes on 8 threads ([`docs/benchmarks/`](docs/benchmarks/README.md)).
+On one mouse-liver fraction (PXD005553) andes reports 6,922–6,959 glycoPSMs at 1% at
+0.85–1.36% true FDP over 3 seeds, confirming 89.0% of the depositors' (engine L) and 89.6% of a reanalysis's
+(engine A) identifications, in 6 minutes on 8 threads ([`docs/benchmarks/`](docs/benchmarks/README.md)).
 `--glyco-peptide-first` finds ~2% more at ~13x the run time.
 
 Memory: `--glyco` runs on the out-of-core candidate index and holds in memory only the

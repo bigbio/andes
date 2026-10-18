@@ -1,7 +1,7 @@
 //! Quantification tables: the flat `tmt.tsv` / `lfq.tsv` files and the record
 //! type the QPX feature parquet is written from.
 //!
-//! The TSVs follow Sage's shapes so notebooks written for `tmt.tsv` /
+//! The TSVs keep a stable wide layout so notebooks written for `tmt.tsv` /
 //! `lfq.tsv` keep working: one row per quantified PSM with one column per
 //! channel, and one row per peptidoform-charge with one column per run.
 

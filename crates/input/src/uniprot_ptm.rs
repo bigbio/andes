@@ -452,8 +452,8 @@ pub(crate) fn ptm_mass(name: &str) -> Option<(u8, f64, SiteAnchor)> {
 
 /// The modification name inside a UniProt feature description: drops a
 /// leading `(Microbial infection) ` and anything after the first `;`
-/// (`Phosphoserine; by PKA`, `N6-acetyllysine; alternate`), as OpenMS'
-/// UniPEFF does.
+/// (`Phosphoserine; by PKA`, `N6-acetyllysine; alternate`), as common
+/// UniProt-to-PEFF converters do.
 pub(crate) fn clean_description(description: &str) -> &str {
     let d = description
         .strip_prefix("(Microbial infection) ")

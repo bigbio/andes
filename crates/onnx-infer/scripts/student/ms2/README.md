@@ -35,7 +35,7 @@ AlphaPeptDeep predictions can be added.
 | `mzml_reader.py` | Streaming mzML reader for selected scans (stdlib + numpy) |
 | `ms2_manifest.py` | Datasets → fragmentation group (`HCD-LFQ`, `HCD-TMT`, `CID-TMT`, `CID-ITMS-LFQ`); drops benchmark accessions |
 | `ms2_select.py` | Confident PSMs (PEP ≤ 0.01, supported mods, ≤ 4 per precursor) → `selected/*.parquet` + `tasks.tsv` |
-| `ms2_extract_raw.py` | One array task: raw → mzML (ThermoRawFileParser) → annotated shard |
+| `ms2_extract_raw.py` | One array task: raw → mzML (raw-to-mzML converter) → annotated shard |
 | `ms2_extract_flats.py` | The same from andes training flats (peak lists attached; e.g. PXD009875) |
 | `ms2_teacher.py` | Adds a `teacher` column with AlphaPeptDeep predictions (optional distillation) |
 | `ms2_model.py` | Network, loss, `AMS20001` export |
@@ -88,7 +88,7 @@ Placeholders:
 - `$BASE`: the project directory.
 - `$QPX`: the qpx `psm.parquet` tables.
 - `$RAW`: raw files per dataset.
-- `$SIF`: the ThermoRawFileParser image.
+- `$SIF`: the raw-to-mzML converter image; `$CONVERTER`: its entry point.
 - `$FLATS`: the andes training flats.
 - `$SCRATCH`: node-local scratch.
 
@@ -119,16 +119,16 @@ A high `precursor_mismatch` means the run/scan join is wrong. Fix it before
 launching the full array.
 
 ```bash
-TRFP="singularity exec --bind $BASE $SIF ThermoRawFileParser.sh"
+CONV="singularity exec --bind $BASE $SIF $CONVERTER"
 sbatch --array=1-2 --cpus-per-task=2 --mem=8G --time=12:00:00 \
-    $S/slurm/extract_array.sh $PY $BASE/ms2/sel/tasks.tsv $BASE/ms2/shards $SCRATCH "$TRFP"
+    $S/slurm/extract_array.sh $PY $BASE/ms2/sel/tasks.tsv $BASE/ms2/shards $SCRATCH "$CONV"
 # then the rest; finished tasks are skipped, so resubmitting the same array resumes it
 sbatch --array=1-N%40 --cpus-per-task=2 --mem=8G --time=12:00:00 \
-    $S/slurm/extract_array.sh $PY $BASE/ms2/sel/tasks.tsv $BASE/ms2/shards $SCRATCH "$TRFP"
+    $S/slurm/extract_array.sh $PY $BASE/ms2/sel/tasks.tsv $BASE/ms2/shards $SCRATCH "$CONV"
 ```
 
-Add `--trfp-args "-i {raw} -o {outdir} -f 1 -L 2"` to write MS2 only when the
-image's ThermoRawFileParser supports `-L` (1.4+).
+Add `--converter-args "-i {raw} -o {outdir} -f 1 -L 2"` to write MS2 only when the
+image's converter supports `-L` (1.4+).
 
 **Size.** About 4 PSMs per (peptidoform, charge) across 33 datasets is about
 10–15M spectra, around 1 KB each before zstd.

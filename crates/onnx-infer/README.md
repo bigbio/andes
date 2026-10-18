@@ -6,7 +6,7 @@ rescoring, de novo sequencing, MS2/RT predictors.
 **Future quantms role:** Rust home for
 [quantms-rescoring](https://github.com/bigbio/quantms-rescoring) inference
 (AlphaPeptDeep, DeepLC, spectrum features → PIN / idparquet), sharing feature
-names and PeptDeep I/O with OpenMS. Developed in the andes workspace today
+names and PeptDeep I/O with quantms-rescoring. Developed in the andes workspace today
 ([#92](https://github.com/bigbio/andes/issues/92)); extractable later.
 
 ## Features
@@ -51,7 +51,7 @@ thread spinning is off, so CPU time is not burned waiting.
 |---|---|
 | `OnnxSession` / `ModelManifest` | Load + run ONNX with sidecar provenance |
 | [`rescoring`](src/rescoring/) | quantms-rescoring feature names, `CandidateKey`, `TopNPolicy`, `RescoringBatch` |
-| [`peptdeep`](src/peptdeep/) | PeptDeep ONNX tensor packing (OpenMS export contract) |
+| [`peptdeep`](src/peptdeep/) | PeptDeep ONNX tensor packing (shared export contract) |
 | [`ms2pip`](src/ms2pip/) | MS²PIP 139-feature vectors per cleavage site (ms2pip 4.2 / ms2rescore-rs) |
 | [`deeplc`](src/deeplc/) | DeepLC 4.x atom-composition encoding (`global67_terminal`) |
 | [`prosit`](src/prosit/) | Prosit 2020 intensity / 2019 iRT inputs and Koina-style output decoding |
@@ -60,7 +60,7 @@ thread spinning is off, so CPU time is not burned waiting.
 
 1. **Top-N only** — use [`rescoring::TopNPolicy`](src/rescoring/psm.rs); never call ONNX inside the full candidate loop.
 2. **Feature names** — short forms matching `quantmsrescore.constants` / AlphaPeptDeep generator (`spec_pearson_norm`, `rt_diff`, …) so andes PIN, idparquet, and quantms-rescoring stay aligned.
-3. **Search-engine agnostic keys** — [`CandidateKey`](src/rescoring/psm.rs) (`spectrum_ref`, `rank`, `charge`, `peptide`); map from andes `PsmMatch`, Comet, or Sage at the boundary.
+3. **Search-engine agnostic keys** — [`CandidateKey`](src/rescoring/psm.rs) (`spectrum_ref`, `rank`, `charge`, `peptide`); map from andes `PsmMatch` or any other engine's PSM type at the boundary.
 4. **Native AGBD stays hot** — andes in-search peak GBDT keeps the `AGBD` blob evaluator; ONNX TreeEnsemble is the interchange / quantms path (`scripts/export_agbd_to_onnx.py`).
 
 ## Model export / porting
@@ -68,7 +68,7 @@ thread spinning is off, so CPU time is not burned waiting.
 | Script | From → To |
 |---|---|
 | [`scripts/export_agbd_to_onnx.py`](scripts/export_agbd_to_onnx.py) | andes `AGBD` v1 → ONNX `TreeEnsembleRegressor` |
-| [`scripts/export_peptdeep_to_onnx.py`](scripts/export_peptdeep_to_onnx.py) | PeptDeep `.pth` → ONNX (+ manifests), OpenMS-compatible names |
+| [`scripts/export_peptdeep_to_onnx.py`](scripts/export_peptdeep_to_onnx.py) | PeptDeep `.pth` → ONNX (+ manifests), quantms-rescoring-compatible names |
 | [`scripts/export_ms2pip_to_onnx.py`](scripts/export_ms2pip_to_onnx.py) | MS²PIP XGBoost → ONNX Gather tree traversal (tract and ort), or `--format ensemble` → `TreeEnsembleRegressor` (ort only, faster) |
 | [`scripts/export_deeplc_to_onnx.py`](scripts/export_deeplc_to_onnx.py) | DeepLC default PyTorch model → ONNX |
 | [`scripts/export_prosit_to_onnx.py`](scripts/export_prosit_to_onnx.py) | Koina Prosit SavedModels → ONNX (tf2onnx) |

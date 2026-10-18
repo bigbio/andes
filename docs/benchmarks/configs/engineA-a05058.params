@@ -1,4 +1,4 @@
-# the reference engine-4.2
+# engine A 4.2
 database_name = $BENCH/tmt-data/PXD007683_reviewed.td.fasta
 num_threads = 8
 

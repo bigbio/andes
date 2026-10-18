@@ -1,7 +1,7 @@
 //! Feature name tables aligned with quantms-rescoring / ms2rescore.
 //!
 //! Names are the *short* forms written into PIN / idparquet `psm_metavalues`
-//! (matching `quantmsrescore.constants` value side). OpenMS-prefixed aliases
+//! (matching `quantmsrescore.constants` value side). Tool-prefixed aliases
 //! (`MS2PIP:…`, `DeepLC:…`) live in the Python package; Rust consumers should
 //! use these short names so andes PIN and quantms-rescoring never diverge.
 

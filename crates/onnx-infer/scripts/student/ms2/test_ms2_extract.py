@@ -77,11 +77,11 @@ def test_keep_mzml_preserves_the_converted_file(tmp_path):
     source = tmp_path / "source.mzML"
     write_mzml(source, [])
     # Stand-in converter: copies the prepared mzML to <outdir>/<stem>.mzML.
-    trfp = tmp_path / "trfp.sh"
-    trfp.write_text('#!/bin/sh\n'
+    converter = tmp_path / "converter.sh"
+    converter.write_text('#!/bin/sh\n'
                     'while [ $# -gt 0 ]; do case "$1" in -i) I="$2"; shift 2;; -o) O="$2"; shift 2;; *) shift;; esac; done\n'
                     f'cp "{source}" "$O/$(basename "$I" .raw).mzML"\n')
-    trfp.chmod(0o755)
+    converter.chmod(0o755)
     selected = tmp_path / "selected.parquet"
     pq.write_table(pa.table({"run": ["run_a"], "scan": [1], "peptidoform": ["PEPTIDEK"], "charge": [2],
                              "pep": [0.001]}), selected)
@@ -89,7 +89,7 @@ def test_keep_mzml_preserves_the_converted_file(tmp_path):
     tasks.write_text(f"task\tdataset\truns\tselected\traw_dir\n1\tPXD000000\trun_a\t{selected}\t{raw_dir}\n")
     work = tmp_path / "work"
     common = ["--tasks", tasks, "--task-index", 1, "--out-dir", tmp_path / "shards", "--work-dir", work,
-              "--trfp", trfp, "--overwrite"]
+              "--converter", converter, "--overwrite"]
 
     run_script("ms2_extract_raw.py", *common, "--keep-mzml")
     kept = glob.glob(str(work / "**" / "run_a.mzML"), recursive=True)

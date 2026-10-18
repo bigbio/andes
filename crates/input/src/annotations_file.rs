@@ -6,7 +6,7 @@
 //!
 //! | column | type | |
 //! |---|---|---|
-//! | `annotation_id` | utf8 | stable id, unique across files |
+//! | `annotation_id` | utf8 | stable id, naming one claim of its reference across files |
 //! | `reference_accession` | utf8 | accession (first header token) of the reference |
 //! | `reference_md5` | utf8 | md5 (hex) of the reference sequence it was written against |
 //! | `source_db` | utf8 | where the claim comes from (`COSMIC`, `dbSNP`, `sample_vcf`, …) |
@@ -75,26 +75,45 @@ pub struct AnnotationLoadStats {
     pub dropped: BTreeMap<&'static str, usize>,
 }
 
-/// One row as read, before it is checked against its reference.
-struct Row {
-    id: String,
-    reference: String,
-    md5: String,
-    edits: Vec<(u32, u32, String, String)>,
-    mods: Vec<(u32, String, f64, String)>,
-    processing: Option<(u32, u32)>,
+/// One claim as read (from an annotation file or a PEFF header), before it
+/// is checked against its reference.
+pub(crate) struct Row {
+    pub(crate) id: String,
+    pub(crate) reference: String,
+    pub(crate) md5: String,
+    /// `(start, end, ref, alt)`, 0-based half-open.
+    pub(crate) edits: Vec<(u32, u32, String, String)>,
+    /// `(position, residue, mass, anchor)`.
+    pub(crate) mods: Vec<(u32, String, f64, String)>,
+    pub(crate) processing: Option<(u32, u32)>,
 }
 
-/// Read `paths` and add their claims to `db`: sites to the reference
-/// proteins, then (in reference order, after every existing protein) each
-/// reference's variant entries, their knockoffs (with `knockoffs`) and its
-/// chain entries. Only `Reference` proteins can be annotated.
+/// Read `paths` and add their claims to `db` (see [`add_claims`]).
 pub fn load_annotations(
     paths: &[impl AsRef<Path>],
     db: &mut ProteinDb,
     knockoffs: Option<KnockoffOptions>,
 ) -> Result<AnnotationLoadStats, AnnotationsError> {
     let mut stats = AnnotationLoadStats::default();
+    let mut rows = Vec::new();
+    for path in paths {
+        stats.files += 1;
+        rows.extend(read_rows(path.as_ref())?);
+    }
+    add_claims(rows, db, knockoffs, &mut stats)?;
+    Ok(stats)
+}
+
+/// Check `rows` against their reference proteins in `db` and add them: sites
+/// to the references, then (in reference order, after every existing protein)
+/// each reference's variant entries, their knockoffs (with `knockoffs`) and
+/// its chain entries. Only `Reference` proteins can be annotated.
+pub(crate) fn add_claims(
+    rows: Vec<Row>,
+    db: &mut ProteinDb,
+    knockoffs: Option<KnockoffOptions>,
+    stats: &mut AnnotationLoadStats,
+) -> Result<(), AnnotationsError> {
     let index: HashMap<String, usize> = db
         .proteins
         .iter()
@@ -107,68 +126,66 @@ pub fn load_annotations(
         .map(|&i| (i, sequence_md5(&db.proteins[i].sequence)))
         .collect();
 
-    // Claims per reference, in file and row order; each claim's content key by
-    // id, and the content keys seen.
+    // Claims per reference in row order, each claim's content key by
+    // (reference, id), and the content keys seen.
     let mut claims: BTreeMap<usize, Vec<Annotation>> = BTreeMap::new();
     let mut sites: BTreeMap<usize, Vec<ModSite>> = BTreeMap::new();
     let mut listed: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     let mut ids: HashMap<String, String> = HashMap::new();
     let mut seen: HashSet<String> = HashSet::new();
-    for path in paths {
-        let path = path.as_ref();
-        stats.files += 1;
-        for row in read_rows(path)? {
-            stats.rows += 1;
-            let skip = |stats: &mut AnnotationLoadStats, reason: &'static str| {
-                *stats.dropped.entry(reason).or_insert(0) += 1;
-            };
-            let Some(&r) = index.get(&row.reference) else {
-                skip(&mut stats, "reference not in the database");
-                continue;
-            };
-            if !md5s[&r].eq_ignore_ascii_case(&row.md5) {
-                skip(&mut stats, "reference sequence differs (md5)");
-                continue;
-            }
-            let reference = &db.proteins[r];
-            let claim = match claim_of(&row, reference) {
-                Ok(c) => c,
-                Err(reason) => {
-                    skip(&mut stats, reason);
-                    continue;
-                }
-            };
-            listed.entry(r).or_default().extend(
-                claim
-                    .edits
-                    .iter()
-                    .flat_map(|e| e.start as usize..(e.end as usize).max(e.start as usize + 1)),
-            );
-            let key = format!(
-                "{}\t{:?}\t{:?}\t{:?}",
-                r, claim.edits, claim.mods, claim.processing
-            );
-            match ids.get(&row.id) {
-                Some(k) if *k != key => {
-                    return Err(AnnotationsError::DuplicateId {
-                        id: row.id.clone(),
-                        first: k.clone(),
-                        second: key,
-                    })
-                }
-                _ => {
-                    ids.insert(row.id.clone(), key.clone());
-                }
-            }
-            if !seen.insert(key) {
-                stats.merged += 1;
+    for row in rows {
+        stats.rows += 1;
+        let skip = |stats: &mut AnnotationLoadStats, reason: &'static str| {
+            *stats.dropped.entry(reason).or_insert(0) += 1;
+        };
+        let Some(&r) = index.get(&row.reference) else {
+            skip(stats, "reference not in the database");
+            continue;
+        };
+        if !md5s[&r].eq_ignore_ascii_case(&row.md5) {
+            skip(stats, "reference sequence differs (md5)");
+            continue;
+        }
+        let reference = &db.proteins[r];
+        let claim = match claim_of(&row, reference) {
+            Ok(c) => c,
+            Err(reason) => {
+                skip(stats, reason);
                 continue;
             }
-            if claim.edits.is_empty() && claim.processing.is_none() {
-                sites.entry(r).or_default().extend(claim.mods);
-            } else {
-                claims.entry(r).or_default().push(claim);
+        };
+        listed.entry(r).or_default().extend(
+            claim
+                .edits
+                .iter()
+                .flat_map(|e| e.start as usize..(e.end as usize).max(e.start as usize + 1)),
+        );
+        let key = format!(
+            "{}\t{:?}\t{:?}\t{:?}",
+            r, claim.edits, claim.mods, claim.processing
+        );
+        // An id names one claim of its reference.
+        let id = format!("{}\t{}", row.reference, row.id);
+        match ids.get(&id) {
+            Some(k) if *k != key => {
+                return Err(AnnotationsError::DuplicateId {
+                    id: row.id.clone(),
+                    first: k.clone(),
+                    second: key,
+                })
             }
+            _ => {
+                ids.insert(id, key.clone());
+            }
+        }
+        if !seen.insert(key) {
+            stats.merged += 1;
+            continue;
+        }
+        if claim.edits.is_empty() && claim.processing.is_none() {
+            sites.entry(r).or_default().extend(claim.mods);
+        } else {
+            claims.entry(r).or_default().push(claim);
         }
     }
 
@@ -217,7 +234,7 @@ pub fn load_annotations(
             }
         }
     }
-    Ok(stats)
+    Ok(())
 }
 
 /// The claim a row makes about `reference`, or why it is left out.

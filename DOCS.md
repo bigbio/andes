@@ -320,7 +320,7 @@ of the matching FASTA gives the same entries and the same PIN.
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--annotations` | path, repeatable | *(none)* | A Parquet annotations file. Several files are merged: equal claims become one entry, and an `annotation_id` must name one claim across all files. |
+| `--annotations` | path, repeatable | *(none)* | A Parquet annotations file. Several files are merged: equal claims become one entry, and an `annotation_id` must name one claim of its reference across all files. |
 
 **File format.** Parquet with the key-value metadata `andes.annotations.schema = 1`. One row per
 claim. Integer fields may be of any integer type, and other columns are ignored.
@@ -349,6 +349,26 @@ Edits together with processing are not supported yet. Rows are checked on load:
   reference.
 
 The run log counts every row left out, by reason.
+
+### PEFF databases
+
+`--database x.peff` (or `.peff.gz`) reads a PSI Extended FASTA Format file: FASTA whose headers
+carry `\Key=value` annotations. The accession is the header's first token (`sp:P04637`), whose
+primary accession (`P04637`) names the family; `\PName` is the description. The variant,
+modification and processing keys become claims about the entry, checked and built exactly like
+the rows of an annotation file. Positions are 1-based and inclusive.
+
+| Key | Value | Becomes |
+|---|---|---|
+| `\VariantSimple` | `(pos\|aa[\|tag])…` | a one-residue substitution, named by its tag or `VAR_<change>` |
+| `\VariantComplex` | `(start\|end\|seq[\|tag])…` | an edit; an empty `seq` is a deletion |
+| `\ModResUnimod` | `(pos\|UNIMOD:n\|name)…` | a site, with the mass of that UniMod accession |
+| `\ModRes`, `\ModResPsi` | `(pos\|accession\|name)…` | a site, when `name` is in UniProt's modification vocabulary |
+| `\Processed` | `(start\|end[\|accession]\|name)…` | a mature chain; signal peptides, transit peptides, propeptides and initiator Met are left out |
+
+PEFF keys are always used: the file was written to carry them. Other keys are ignored, as are
+sites with no known mass, which the log counts. `--knockoffs` applies to PEFF variants as to any
+other.
 
 ### Chimeric cascade
 

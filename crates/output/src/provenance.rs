@@ -73,6 +73,7 @@ mod tests {
                     family: Arc::from("P0"),
                     feature: Arc::from("F"),
                     variant_delta_da: delta,
+                    knockoff_of: None,
                 })),
             )
         });

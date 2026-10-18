@@ -554,8 +554,9 @@ struct Hit<'a> {
 }
 
 /// Select the quantification targets: rank-1 target PSMs (and the best PSM of
-/// each co-isolated precursor), at `q <= quant_fdr` (and `pep <= --pep`) when a
-/// rescoring result is available. The running `psm_index` reproduces the row
+/// each co-isolated precursor), at `q <= quant_fdr` (a variant-class row at
+/// its `cutoffs` level) and `pep <= --pep` when a rescoring result is
+/// available. The running `psm_index` reproduces the row
 /// order of `psms.parquet`.
 fn select_hits<'a>(
     collector: &QuantCollector,
@@ -563,8 +564,11 @@ fn select_hits<'a>(
     queues: &[TopNQueue],
     candidates: &'a [Candidate],
     rescore: Option<&HashMap<String, PercolatorPsm>>,
+    cutoffs: Option<&output::Cutoffs>,
 ) -> Vec<Hit<'a>> {
-    select_rank1(collector, spectra, queues, candidates, rescore, false)
+    select_rank1(
+        collector, spectra, queues, candidates, rescore, cutoffs, false,
+    )
 }
 
 /// Every rank-1 PSM (and the best PSM of each co-isolated precursor), targets
@@ -576,7 +580,7 @@ fn select_rank1_all<'a>(
     queues: &[TopNQueue],
     candidates: &'a [Candidate],
 ) -> Vec<Hit<'a>> {
-    select_rank1(collector, spectra, queues, candidates, None, true)
+    select_rank1(collector, spectra, queues, candidates, None, None, true)
 }
 
 fn select_rank1<'a>(
@@ -585,6 +589,7 @@ fn select_rank1<'a>(
     queues: &[TopNQueue],
     candidates: &'a [Candidate],
     rescore: Option<&HashMap<String, PercolatorPsm>>,
+    cutoffs: Option<&output::Cutoffs>,
     include_decoys: bool,
 ) -> Vec<Hit<'a>> {
     let s = &collector.settings;
@@ -640,7 +645,8 @@ fn select_rank1<'a>(
             }
             let (q_value, pep) = match rescored {
                 Some(Some(r)) => {
-                    if r.q_value > s.quant_fdr || s.pep_cap.is_some_and(|c| r.pep > c) {
+                    let cutoff = cutoffs.map_or(s.quant_fdr, |c| c.or(&spec_id, s.quant_fdr));
+                    if r.q_value > cutoff || s.pep_cap.is_some_and(|c| r.pep > c) {
                         continue;
                     }
                     (Some(r.q_value), Some(r.pep))
@@ -1084,6 +1090,7 @@ pub(crate) fn run_quant(
     candidates: &[Candidate],
     index: &SearchIndex,
     rescore: Option<&HashMap<String, PercolatorPsm>>,
+    cutoffs: Option<&output::Cutoffs>,
     report_base: &Path,
     parquet_dir: Option<&Path>,
 ) -> Result<output::QuantSummary, String> {
@@ -1094,7 +1101,7 @@ pub(crate) fn run_quant(
     if let Some(dir) = &s.quant_dir {
         write_run_artifacts(collector, spectra, queues, candidates, index, dir)?;
     }
-    let hits = select_hits(collector, spectra, queues, candidates, rescore);
+    let hits = select_hits(collector, spectra, queues, candidates, rescore, cutoffs);
     eprintln!(
         "quant: {} rank-1 target PSMs selected{} ({})",
         hits.len(),
@@ -1620,7 +1627,7 @@ mod tests {
             ]
         );
         // Without decoys (the per-run quantification), the decoy winner goes.
-        let hits = select_hits(&c, &spectra, &queues, &cands, None);
+        let hits = select_hits(&c, &spectra, &queues, &cands, None, None);
         assert_eq!(hits.len(), 2);
         // A rescoring result decides each co-isolated PSM on its own q-value.
         let mut rescore = HashMap::new();
@@ -1637,7 +1644,7 @@ mod tests {
                 },
             );
         }
-        let hits = select_hits(&c, &spectra, &queues, &cands, Some(&rescore));
+        let hits = select_hits(&c, &spectra, &queues, &cands, Some(&rescore), None);
         assert_eq!(
             selected(&hits),
             vec![("Scan 1_1_2_1".to_string(), false, false)]

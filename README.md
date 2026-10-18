@@ -175,7 +175,8 @@ in the mods file is placed only where UniProt annotates that modification.
 the accession. `--uniprot-isoforms` adds the described isoforms, and `--uniprot-chains` the
 peptides at the new termini of mature chains (after signal peptide or propeptide removal).
 Annotation is filtered by evidence (`--uniprot-evidence`); see
-[`DOCS.md` §1a](DOCS.md#uniprot-xml-databases).
+[`DOCS.md` §1a](DOCS.md#uniprot-xml-databases). With rescoring, variant calls are checked
+against knockoff variants ([below](#variant-calls-checked-against-knockoffs---uniprot-knockoffs---variant-fdr)).
 
 ```bash
 andes --spectrum spectra.mzML --database uniprot_sprot_human.xml.gz \
@@ -289,6 +290,102 @@ five chemistries (oxidation, deamidation, two pyro-Glu losses, protein N-termina
 does not discover new modifications and runs on high-resolution data only. On Astral it gives
 40,028 PSMs (+4.3%), but its Pass-2 PSMs (`IsRefinement = 1`) sit at **~2.8% FDP** under a
 merged 1% threshold; threshold them separately for 1% on modified PSMs ([`DOCS.md`](DOCS.md#refine--secondary-chemistry-cascade)).
+
+## Variant calls checked against knockoffs (`--uniprot-knockoffs`, `--variant-fdr`)
+
+**Aim.** A PSM on a UniProt variant entry claims that the sample carries that variant. Most false
+claims are not random matches. They are a canonical peptide that a common modification or an
+isotope error makes look like the variant: N→D and Q→E look like deamidation, G→A and D→E like
+methylation, and a one-isotope mis-pick fits a +1 Da substitution. Decoys model only random
+matches, so a decoy-based q-value does not see this error. Measured against donor genotypes, 65%
+of the variant PSMs accepted at a class q-value ≤ 0.01 were variants no donor carries, and 96% of
+the deamidation-like ones were. Knockoff variants give the variant claim a null that makes the
+same mistakes.
+
+**How it works.**
+1. **Knockoff entries.** With `--uniprot-variants`, each single-residue variant X→Y of a canonical
+   sequence gets up to `--uniprot-knockoffs` (default 4) knockoff entries. A knockoff is the same
+   substitution at another position of the same sequence that holds X, where:
+   - the next residue matches: the same residue when X is N, Q, K or R or either next residue is
+     P or G, otherwise the same residue class;
+   - the N-x-S/T sequon status is the same;
+   - the position lies in another enzymatic span whose length is within 3 residues of the real
+     one's and between 6 and 50;
+   - every variant UniProt lists for the protein is at least 10 residues away.
+
+   The positions are chosen at random but reproducibly, from the accession and the variant id.
+   A knockoff is almost certainly absent from the sample. A modification or an isotope error that
+   mimics the real substitution mimics the knockoff equally well. Knockoffs are variant entries:
+   they get decoys, PIN flags and Percolator scores exactly like real variants
+   (`sp|P04637_KO1_D21H_VAR_005851_D7H|P53_HUMAN` moves `VAR_005851_D7H` to position 21).
+2. **Knockoff q-value.** After Percolator and the class FDR, variant-class PSMs are split by
+   substitution class (deamidation-like, methyl-like, oxidation-like, other). Within a class, the
+   knockoff PSMs above a score estimate how many real variant PSMs above it are false. A knockoff
+   PSM counts 1/k for a variant with k knockoffs, and the estimate starts at 1/K for a finite-sample
+   margin, with K the most knockoffs any variant has:
+
+   FDP(t) = (1/K + Σ 1/k over knockoff PSMs ≥ t) / (real PSMs ≥ t whose variant has knockoffs)
+
+   A real PSM's knockoff q-value is the smallest FDP over the thresholds at or below its score. Its
+   reported q-value is the largest of the global, class and knockoff q-values.
+3. **Untested variants.** A variant with no position that qualifies for a knockoff has no null, so
+   its PSMs are not accepted. Measured against genotypes, those variants are false several times
+   more often than the tested ones, so the tested variants' estimate cannot be lent to them.
+4. **Reporting.** Variant-class PSMs (every protein a variant entry) are accepted at
+   `--variant-fdr`, every other PSM at `--fdr`. Knockoff PSMs stay in the PIN and the QPX bundle
+   as targets with q = 1. They are never in the filtered TSV, quantification, MBR or the
+   proteoform table, and knockoff accessions are dropped from other rows' protein lists.
+
+**Input and parameters.** A UniProt XML database with `--uniprot-variants`, and `--rescore`.
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--uniprot-knockoffs` | `4` | Knockoffs per single-residue variant. `0` turns them off and leaves variant PSMs to the class FDR alone. |
+| `--variant-fdr` | the larger of `--fdr` and 0.05 | q-value cutoff for variant-class PSMs in the filtered TSV, the proteoform table and quantification. |
+| `--uniprot-evidence` | `experimental` | Minimum evidence for a variant to be searched (`curated` was used below). |
+
+The run log gives, per substitution class, the knockoff entries made, the variant PSMs accepted
+before and after the knockoff q-values, how many were tested, and the estimated false share:
+
+```
+UniProt XML: 39142 knockoff variant entries (44773 single-residue variants with no position for a knockoff)
+Rescore: variant PSMs at q<=0.05 per substitution class, before -> after knockoff q-values:
+  deamidation-like 1201 -> 0 (147 tested; knockoffs 150.6, false share 1.02), methyl-like 212 -> 89 ...
+```
+
+```bash
+andes --spectrum run1.mzML --spectrum run2.mzML --database uniprot_sprot_human.xml.gz \
+  --uniprot-variants --uniprot-evidence curated --rescore --output-pin variants.pin
+```
+
+**Current benchmark.**
+
+*Genotype truth.* PXD022787 (four donors, one TMT10 set, 69 runs, ion-trap MS2) was searched
+against reviewed human UniProt with curated variants. The donor-haplotype tags of the personal
+protein FASTA deposited with the dataset label each reported variant as carried or absent. The
+true FDP below counts the labelled PSMs whose variant no donor haplotype carries:
+
+| Setting | Variant PSMs reported | Absent / labelled | True FDP | Variants reported (true FDP) |
+|---|---|---|---|---|
+| No knockoffs, class q ≤ 0.01 | 2,452 | 1,075 / 1,653 | 65% | 552 (33%) |
+| No knockoffs, class q ≤ 0.05 | 3,886 | 1,872 / 2,622 | 71% | 840 (45%) |
+| Knockoffs, `--variant-fdr 0.05` | 201 | 4 / 160 | **2.5%** | 83 (3.4%) |
+| Knockoffs, `--variant-fdr 0.10` | 307 | 14 / 233 | **6.0%** | 126 (8.2%) |
+
+Only 0.55% of the knockoffs turned out to be a real donor variant, so the null is clean.
+
+*Cost on the rest of the search.* Knockoffs grow the variant entries by about 60%. PSMs at
+q ≤ 0.01 change by −0.43% on pooled Astral DDA (PXD070049, 21 runs: 1,003,367 → 999,103) and by
+−0.30% on the TMT set. Search time is unchanged. On the Astral set, 129 variant-class PSMs are
+reported at `--variant-fdr 0.05`.
+
+**Limits.**
+- About 30% of single-residue variants can be given a knockoff, so most variants are not reported.
+- Multi-residue variants, indels, isoform-borne variants, isoforms and mature chains get no
+  knockoffs. Variant-class PSMs of those are not accepted while knockoffs are on; isoform and
+  chain PSMs keep the class FDR.
+- The calibration is measured on one genotyped dataset with low-resolution MS2. Small counts
+  make the deamidation- and oxidation-like classes the least certain.
 
 ## Intact N-glycopeptide search (`--glyco`, experimental)
 

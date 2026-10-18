@@ -71,6 +71,8 @@ fn annotated_site_mods_and_variants_run_end_to_end() {
             "--uniprot-evidence",
             "curated",
             "--uniprot-variants",
+            "--uniprot-knockoffs",
+            "0",
             "--uniprot-chains",
             "--uniprot-isoforms",
         ],
@@ -256,4 +258,49 @@ fn rescoring_estimates_fdr_within_each_class() {
     let stderr = String::from_utf8_lossy(&plain.stderr);
     assert!(!stderr.contains("FDR within each class"), "{stderr}");
     assert!(!dir.path().join("fasta.proteoforms.tsv").exists());
+}
+
+#[test]
+fn knockoff_variants_are_searched_but_never_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = search(
+        "test-fixtures/BSA.xml.gz",
+        &dir.path().join("ko.pin"),
+        &[
+            "--uniprot-variants",
+            "--uniprot-evidence",
+            "any",
+            "--rescore-native",
+            // Keep every PSM, knockoff rows included, so their absence from
+            // the reports is what is checked.
+            "--fdr",
+            "1",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let line = stderr
+        .lines()
+        .find(|l| l.contains("knockoff variant entries"))
+        .unwrap_or_else(|| panic!("{stderr}"));
+    let made: usize = line
+        .split_whitespace()
+        .nth(2)
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("{line}"));
+    assert!(made > 0, "{line}");
+    let pin = std::fs::read_to_string(dir.path().join("ko.pin")).unwrap();
+    assert!(pin.contains("_KO1_"), "knockoff entries are searched");
+    for report in ["ko.q1.tsv", "ko.proteoforms.tsv"] {
+        let text = std::fs::read_to_string(dir.path().join(report)).unwrap();
+        assert!(text.lines().count() > 1, "{report} has rows");
+        assert!(!text.contains("_KO"), "{report} names a knockoff entry");
+    }
+    let off = search(
+        "test-fixtures/BSA.xml.gz",
+        &dir.path().join("off.pin"),
+        &["--uniprot-variants", "--uniprot-evidence", "any", "--uniprot-knockoffs", "0"],
+    );
+    assert!(!String::from_utf8_lossy(&off.stderr).contains("knockoff variant entries"));
+    let pin = std::fs::read_to_string(dir.path().join("off.pin")).unwrap();
+    assert!(!pin.contains("_KO"));
 }

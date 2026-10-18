@@ -147,6 +147,20 @@ pub(crate) struct SearchArgs {
     )]
     pub(crate) uniprot_evidence: input::EvidenceLevel,
 
+    /// UniProt XML database, with `--uniprot-variants`: knockoff entries per
+    /// single-residue variant of a canonical sequence (0: none). A knockoff is
+    /// the same substitution at another position holding the same residue, in a
+    /// matched sequence context and at least 10 residues from every known
+    /// variant, so it is almost certainly absent from the sample but fits a mass
+    /// coincidence or an isotope error as well as the real variant does. The
+    /// knockoffs accepted per substitution class estimate how many accepted
+    /// variant PSMs are false, and variant PSMs get a q-value from that estimate
+    /// too (with --rescore). A variant PSM is accepted only when its variant has
+    /// a knockoff; knockoff PSMs are never reported. 0 turns this off and
+    /// leaves variant PSMs to the class FDR alone.
+    #[arg(long = "uniprot-knockoffs", default_value_t = 4)]
+    pub(crate) uniprot_knockoffs: usize,
+
     /// Output Percolator PIN file path.
     #[arg(long)]
     pub(crate) output_pin: Option<PathBuf>,
@@ -622,6 +636,15 @@ pub(crate) struct SearchArgs {
     /// writes no filtered output. Defaults to 0.01 when rescoring does run.
     #[arg(long = "fdr", value_parser = parse_unit_fraction)]
     pub(crate) fdr: Option<f64>,
+
+    /// q-value threshold for PSMs of the variant class (every protein a
+    /// UniProt variant entry), with rescoring: the filtered TSV, the
+    /// proteoform table and quantification accept them at this level instead
+    /// of `--fdr`. Their q-value already includes the class FDR and, with
+    /// knockoffs, the knockoff estimate. Default: the larger of `--fdr` and
+    /// 0.05.
+    #[arg(long = "variant-fdr", value_parser = parse_unit_fraction)]
+    pub(crate) variant_fdr: Option<f64>,
 
     /// Optional per-PSM PEP (posterior error probability / local FDR) cap,
     /// applied IN ADDITION to `--fdr` (a PSM must pass both q ≤ `--fdr` AND

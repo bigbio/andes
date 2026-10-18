@@ -8,7 +8,7 @@
 //! of the global and the class q-value. A PSM then passes a cutoff only if it
 //! passes it both overall and within its class.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use model::EntryKind;
 use search::SearchIndex;
@@ -70,6 +70,69 @@ pub fn class_of(proteins: &str, kinds: &HashMap<&str, EntryKind>) -> String {
         "canonical".to_string()
     } else {
         parts.join("+")
+    }
+}
+
+/// The q-value cutoff each target row is accepted at: `variant_fdr` for a
+/// row of the variant class (every protein a variant entry), `fdr` for every
+/// other row. A variant claim and a canonical identification are different
+/// claims, and the variant class's error is estimated on its own (class FDR,
+/// knockoffs), so it can be reported at its own level.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Cutoffs {
+    pub fdr: f64,
+    pub variant_fdr: f64,
+    variant_rows: HashSet<String>,
+}
+
+impl Cutoffs {
+    /// One cutoff for every row.
+    pub fn uniform(fdr: f64) -> Self {
+        Cutoffs {
+            fdr,
+            variant_fdr: fdr,
+            variant_rows: HashSet::new(),
+        }
+    }
+
+    /// Cutoffs for `targets`, whose variant-class rows take `variant_fdr`.
+    pub fn new(
+        targets: &HashMap<String, PercolatorPsm>,
+        idx: &SearchIndex,
+        fdr: f64,
+        variant_fdr: f64,
+    ) -> Self {
+        let kinds: HashMap<&str, EntryKind> = idx
+            .db
+            .proteins
+            .iter()
+            .map(|p| (p.accession.as_str(), p.entry_kind()))
+            .collect();
+        let variant_rows = targets
+            .iter()
+            .filter(|(_, p)| class_of(&p.proteins, &kinds) == "variant")
+            .map(|(id, _)| id.clone())
+            .collect();
+        Cutoffs {
+            fdr,
+            variant_fdr,
+            variant_rows,
+        }
+    }
+
+    /// The cutoff of row `id`.
+    pub fn of(&self, id: &str) -> f64 {
+        self.or(id, self.fdr)
+    }
+
+    /// `variant_fdr` for a variant-class row, else `base` (a stage with its
+    /// own cutoff for the other rows, such as quantification).
+    pub fn or(&self, id: &str, base: f64) -> f64 {
+        if self.variant_rows.contains(id) {
+            self.variant_fdr
+        } else {
+            base
+        }
     }
 }
 
@@ -241,6 +304,7 @@ mod tests {
                     family: Arc::from("P1"),
                     feature: Arc::from("F"),
                     variant_delta_da: 0.0,
+                    knockoff_of: None,
                 })),
             )
         });
@@ -299,6 +363,25 @@ mod tests {
             "decoys keep the class"
         );
         assert_eq!(class_of("unknown", &k), "canonical");
+    }
+
+    #[test]
+    fn variant_class_rows_take_the_variant_cutoff() {
+        let idx = index();
+        let t: HashMap<_, _> = [
+            psm("v", 5.0, 0.03, "sp|P1_VAR_1|A"),
+            psm("c", 5.0, 0.03, "sp|P1|A;sp|P1_VAR_1|A"),
+            psm("i", 5.0, 0.03, "sp|P1_VAR_1|A;sp|P1-2|A"),
+        ]
+        .into_iter()
+        .collect();
+        let c = Cutoffs::new(&t, &idx, 0.01, 0.05);
+        assert_eq!(c.of("v"), 0.05);
+        assert_eq!(c.of("c"), 0.01, "a canonical row");
+        assert_eq!(c.of("i"), 0.01, "an isoform+variant row");
+        assert_eq!(c.or("v", 0.02), 0.05);
+        assert_eq!(c.or("c", 0.02), 0.02);
+        assert_eq!(Cutoffs::uniform(0.01).of("v"), 0.01);
     }
 
     #[test]

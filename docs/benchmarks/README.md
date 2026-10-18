@@ -200,7 +200,12 @@ andes quant finalize --quant-dir q/ -o pb --mbr-fdr 0.01
 
 `andes --spectrum ... --spectrum ... --rescore --lfq --mbr` runs the same four stages in one
 process, with one Percolator over all runs. It was not the configuration measured here. On a
-cluster the six searches take about 1 minute each; Percolator and extract about 7 minutes per run.
+cluster node (6 threads) the six searches take about 1 minute each, Percolator about 7 minutes
+per run on one CPU (under 3 minutes with its default three threads on three CPUs), extract
+about 20 seconds per run and finalize under a minute. CPU time for the six runs: search 1.1k s,
+Percolator 2.4k s, library and extract 0.7k s, finalize 0.1k s. Percolator's
+`--subset-max-train 300000` cuts its share to 0.8k s; see the match-between-runs section of
+`DOCS.md` for what it changes.
 
 ### TMT quantification, knockout (commands, not a tested script)
 

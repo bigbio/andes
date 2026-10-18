@@ -637,14 +637,14 @@ pub(crate) struct SearchArgs {
     #[arg(long = "fdr", value_parser = parse_unit_fraction)]
     pub(crate) fdr: Option<f64>,
 
-    /// q-value threshold for PSMs of the variant class (every protein a
-    /// UniProt variant entry), with rescoring: the filtered TSV, the
-    /// proteoform table and quantification accept them at this level instead
-    /// of `--fdr`. Their q-value already includes the class FDR and, with
-    /// knockoffs, the knockoff estimate. Default: the larger of `--fdr` and
-    /// 0.05.
-    #[arg(long = "variant-fdr", value_parser = parse_unit_fraction)]
-    pub(crate) variant_fdr: Option<f64>,
+    /// q-value threshold for proteoform claims, with rescoring: the filtered
+    /// TSV, the proteoform table and quantification accept them at this level
+    /// instead of `--fdr`. A proteoform claim is a PSM whose every protein is
+    /// a UniProt variant entry; its q-value already includes the class FDR
+    /// and, with knockoffs, the knockoff estimate. Isoform and chain PSMs keep
+    /// `--fdr`. Default: the larger of `--fdr` and 0.05.
+    #[arg(long = "proteoform-fdr", value_parser = parse_unit_fraction)]
+    pub(crate) proteoform_fdr: Option<f64>,
 
     /// Optional per-PSM PEP (posterior error probability / local FDR) cap,
     /// applied IN ADDITION to `--fdr` (a PSM must pass both q ≤ `--fdr` AND

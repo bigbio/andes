@@ -176,7 +176,7 @@ the accession. `--uniprot-isoforms` adds the described isoforms, and `--uniprot-
 peptides at the new termini of mature chains (after signal peptide or propeptide removal).
 Annotation is filtered by evidence (`--uniprot-evidence`); see
 [`DOCS.md` §1a](DOCS.md#uniprot-xml-databases). With rescoring, variant calls are checked
-against knockoff variants ([below](#variant-calls-checked-against-knockoffs---uniprot-knockoffs---variant-fdr)).
+against knockoff variants ([below](#variant-calls-checked-against-knockoffs---uniprot-knockoffs---proteoform-fdr)).
 
 ```bash
 andes --spectrum spectra.mzML --database uniprot_sprot_human.xml.gz \
@@ -291,7 +291,7 @@ does not discover new modifications and runs on high-resolution data only. On As
 40,028 PSMs (+4.3%), but its Pass-2 PSMs (`IsRefinement = 1`) sit at **~2.8% FDP** under a
 merged 1% threshold; threshold them separately for 1% on modified PSMs ([`DOCS.md`](DOCS.md#refine--secondary-chemistry-cascade)).
 
-## Variant calls checked against knockoffs (`--uniprot-knockoffs`, `--variant-fdr`)
+## Variant calls checked against knockoffs (`--uniprot-knockoffs`, `--proteoform-fdr`)
 
 **Aim.** A PSM on a UniProt variant entry claims that the sample carries that variant. Most false
 claims are not random matches. They are a canonical peptide that a common modification or an
@@ -332,7 +332,7 @@ same mistakes.
    its PSMs are not accepted. Measured against genotypes, those variants are false several times
    more often than the tested ones, so the tested variants' estimate cannot be lent to them.
 4. **Reporting.** Variant-class PSMs (every protein a variant entry) are accepted at
-   `--variant-fdr`, every other PSM at `--fdr`. Knockoff PSMs stay in the PIN and the QPX bundle
+   `--proteoform-fdr`, every other PSM at `--fdr`. Knockoff PSMs stay in the PIN and the QPX bundle
    as targets with q = 1. They are never in the filtered TSV, quantification, MBR or the
    proteoform table, and knockoff accessions are dropped from other rows' protein lists.
 
@@ -341,7 +341,7 @@ same mistakes.
 | Flag | Default | Effect |
 |---|---|---|
 | `--uniprot-knockoffs` | `4` | Knockoffs per single-residue variant. `0` turns them off and leaves variant PSMs to the class FDR alone. |
-| `--variant-fdr` | the larger of `--fdr` and 0.05 | q-value cutoff for variant-class PSMs in the filtered TSV, the proteoform table and quantification. |
+| `--proteoform-fdr` | the larger of `--fdr` and 0.05 | q-value cutoff for variant-class PSMs in the filtered TSV, the proteoform table and quantification. |
 | `--uniprot-evidence` | `experimental` | Minimum evidence for a variant to be searched (`curated` was used below). |
 
 The run log gives, per substitution class, the knockoff entries made, the variant PSMs accepted
@@ -369,15 +369,15 @@ true FDP below counts the labelled PSMs whose variant no donor haplotype carries
 |---|---|---|---|---|
 | No knockoffs, class q ≤ 0.01 | 2,452 | 1,075 / 1,653 | 65% | 552 (33%) |
 | No knockoffs, class q ≤ 0.05 | 3,886 | 1,872 / 2,622 | 71% | 840 (45%) |
-| Knockoffs, `--variant-fdr 0.05` | 201 | 4 / 160 | **2.5%** | 83 (3.4%) |
-| Knockoffs, `--variant-fdr 0.10` | 307 | 14 / 233 | **6.0%** | 126 (8.2%) |
+| Knockoffs, `--proteoform-fdr 0.05` | 201 | 4 / 160 | **2.5%** | 83 (3.4%) |
+| Knockoffs, `--proteoform-fdr 0.10` | 307 | 14 / 233 | **6.0%** | 126 (8.2%) |
 
 Only 0.55% of the knockoffs turned out to be a real donor variant, so the null is clean.
 
 *Cost on the rest of the search.* Knockoffs grow the variant entries by about 60%. PSMs at
 q ≤ 0.01 change by −0.43% on pooled Astral DDA (PXD070049, 21 runs: 1,003,367 → 999,103) and by
 −0.30% on the TMT set. Search time is unchanged. On the Astral set, 129 variant-class PSMs are
-reported at `--variant-fdr 0.05`.
+reported at `--proteoform-fdr 0.05`.
 
 **Limits.**
 - About 30% of single-residue variants can be given a knockoff, so most variants are not reported.

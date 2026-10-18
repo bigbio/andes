@@ -74,6 +74,8 @@ mod tests {
                     feature: Arc::from("F"),
                     variant_delta_da: delta,
                     knockoff_of: None,
+                    source: None,
+                    tier: model::PriorTier::Catalogue,
                 })),
             )
         });

@@ -346,6 +346,10 @@ same mistakes.
 
    A real PSM's knockoff q-value is the smallest FDP over the thresholds at or below its score. Its
    reported q-value is the largest of the global, class and knockoff q-values.
+   With claims from several sources, each substitution class is split further by prior tier
+   (`sample`, `common`, `curated`, `catalogue`; see
+   [`DOCS.md` §1a](DOCS.md#annotation-files---annotations)), so a sample's own variants and
+   catalogue variants do not share one estimate.
 3. **Untested variants.** A variant with no position that qualifies for a knockoff has no null, so
    its PSMs are not accepted. Measured against genotypes, those variants are false several times
    more often than the tested ones, so the tested variants' estimate cannot be lent to them.

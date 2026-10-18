@@ -39,6 +39,8 @@ pub fn build_entry(reference: &Protein, annotation: &Annotation) -> Option<Prote
         feature: annotation.id.clone(),
         variant_delta_da,
         knockoff_of: annotation.knockoff_of.clone(),
+        source: annotation.source.clone(),
+        tier: annotation.tier,
     };
     let edits = triples(&annotation.edits);
     let (sequence, info) = match annotation.kind {
@@ -283,6 +285,8 @@ pub fn knockoff_annotations(
                 alt: e.alt.clone(),
             }];
             k.knockoff_of = Some(a.id.clone());
+            k.source = a.source.clone();
+            k.tier = a.tier;
             out.push(k);
         }
     }

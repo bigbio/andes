@@ -402,14 +402,16 @@ an annotation file holding UniProt's 83,472 single-residue variants. In one arm,
 donor carries were given a sample genotype (tier `sample`), as a sample's own variant calls
 would be. In the other, every variant was in one tier. At `--proteoform-fdr 0.05`:
 
-| Setting | Carried variant PSMs (variants) | Donor-absent PSMs (variants) | True FDP, variants |
-|---|---|---|---|
-| One tier | 228 (84) | 70 (9) | 9.7% |
-| Tiers split | 330 (123) | 50 (4) | 3.1% |
+| Setting | Carried variant PSMs (variants) | Donor-absent PSMs (variants) | True FDP, PSMs | True FDP, variants |
+|---|---|---|---|---|
+| One tier | 218 (83) | 13 (7) | 5.6% | 7.8% |
+| Tiers split | 329 (122) | 8 (3) | 2.4% | 2.4% |
 
-Separate tiers recover 45% more carried variant PSMs and report fewer false ones. At the PSM
-level the false share is still 13% (24% with one tier): all 50 false PSMs in the split arm come
-from four abundant variants in one stratum, which the knockoffs underestimate.
+Separate tiers recover half again as many carried variants and stay below the 5% target, which
+one shared tier does not. A variant peptide that a reference protein holds once I and L are taken
+as equal (for example a V→L variant spelling a paralog's `…VIDEVR` as `…VLDEVR`) is reported for
+that reference, not as the variant. Without that step, one such tubulin peptide alone gave 42
+false variant PSMs here.
 
 *Cost on the rest of the search.* Knockoffs grow the variant entries by about 60%. PSMs at
 q ≤ 0.01 change by −0.43% on pooled Astral DDA (PXD070049, 21 runs: 1,003,367 → 999,103) and by

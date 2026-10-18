@@ -18,7 +18,7 @@
 //!   [`UniProtOptions::variants`], become extra target proteins, one per
 //!   variant, whose accession names the change (`sp|P04637_VAR_005851_D7H|P53_HUMAN`).
 //!   Candidate generation enumerates only the peptides of such a protein that
-//!   carry the variant ([`VariantRegion`]), so every hit on it is a hit on
+//!   carry the variant ([`model::VariantRegion`]), so every hit on it is a hit on
 //!   the variant and the canonical peptides are not searched twice.
 //!
 //! Both are filtered by UniProt's evidence codes ([`EvidenceLevel`]): expanding
@@ -35,9 +35,11 @@ use std::io::BufRead;
 use std::sync::Arc;
 
 use model::{
-    AminoAcid, ChainEnds, EntryKind, EntryOrigin, Enzyme, ModSite, Protein, ProteinAnnotation,
-    ProteinDb, SiteAnchor, Substitution, VariantRegion,
+    Annotation, ChainEnds, Edit, EntryKind, EntryOrigin, ModSite, Processing, Protein,
+    ProteinAnnotation, ProteinDb, SiteAnchor,
 };
+
+use crate::annotation::{build_entry, change_label, knockoff_annotations, KnockoffOptions};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
@@ -121,20 +123,6 @@ pub struct UniProtOptions {
     /// Knockoff entries for the canonical sequence's single-residue variants
     /// (with `variants`; `None` for none).
     pub knockoffs: Option<KnockoffOptions>,
-}
-
-/// How knockoff variant entries are made. A knockoff is a real variant's
-/// substitution moved to another position of the same sequence that holds the
-/// same residue, in a matched context and far from every known variant: an
-/// almost certainly false target that a mass coincidence or an isotope error
-/// fits as well as it fits the real variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KnockoffOptions {
-    /// Knockoffs per substitution, at most.
-    pub per_variant: usize,
-    /// The search's enzyme: a knockoff sits in another enzymatic span of a
-    /// similar length.
-    pub enzyme: Enzyme,
 }
 
 /// Counts from a UniProt XML load, for the run log.
@@ -240,21 +228,6 @@ pub struct UniProtEntry {
     pub isoforms: Vec<UniProtIsoform>,
 }
 
-/// A sequence variant applied to a sequence (canonical or isoform).
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SequenceVariant {
-    /// 0-based half-open range of the base sequence the variant replaces.
-    start: usize,
-    end: usize,
-    /// Replacement residues; empty for a deletion.
-    replacement: Vec<u8>,
-    /// Accession tag: `<feature id>_<change>` or `VAR_<change>`; a knockoff's
-    /// is `KO<i>_<change>_<tag of the variant it copies>`.
-    tag: String,
-    /// For a knockoff, the tag of the variant it copies.
-    knockoff_of: Option<String>,
-}
-
 /// A mature chain cut out of the canonical sequence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MatureChain {
@@ -264,40 +237,6 @@ struct MatureChain {
     ends: ChainEnds,
     /// Accession tag: the feature id (`PRO_…`) or `CHAIN_<begin>-<end>`.
     tag: String,
-}
-
-/// Edits turning one sequence into another, sorted and disjoint: canonical
-/// `[start, end)` is replaced by `len` residues.
-type Edits = Vec<(usize, usize, usize)>;
-
-/// Where residue `p` of the edited sequence's source ends up, `None` when an
-/// edit replaced it.
-fn map_through(edits: &[(usize, usize, usize)], p: usize) -> Option<usize> {
-    let mut shift = 0i64;
-    for &(start, end, len) in edits {
-        if p < start {
-            break;
-        }
-        if p < end {
-            return None;
-        }
-        shift += len as i64 - (end - start) as i64;
-    }
-    Some((p as i64 + shift) as usize)
-}
-
-/// `sites` carried through `edits`: a site keeps its residue, and is dropped
-/// when an edit replaced that residue.
-fn sites_through(sites: &[ModSite], edits: &[(usize, usize, usize)]) -> Vec<ModSite> {
-    sites
-        .iter()
-        .filter_map(|s| {
-            map_through(edits, s.position as usize).map(|p| ModSite {
-                position: p as u32,
-                ..*s
-            })
-        })
-        .collect()
 }
 
 const PROCESSING_FEATURES: [&str; 4] = [
@@ -464,8 +403,8 @@ impl UniProtEntry {
         seq: &[u8],
         opts: &UniProtOptions,
         stats: &mut UniProtLoadStats,
-    ) -> Vec<SequenceVariant> {
-        let mut out: Vec<SequenceVariant> = Vec::new();
+    ) -> Vec<Annotation> {
+        let mut out: Vec<Annotation> = Vec::new();
         for f in &self.features {
             if f.kind != "sequence variant" || !self.located_on(f, isoform) {
                 continue;
@@ -516,87 +455,18 @@ impl UniProtEntry {
                 } else {
                     format!("{}_{change}", f.id)
                 };
-                let v = SequenceVariant {
-                    start,
-                    end,
-                    replacement: replacement.to_vec(),
-                    tag,
-                    knockoff_of: None,
-                };
-                if !out
-                    .iter()
-                    .any(|o| o.start == v.start && o.end == v.end && o.replacement == v.replacement)
-                {
+                let mut v = Annotation::new(&tag, EntryKind::Variant);
+                v.edits = vec![Edit {
+                    start: start as u32,
+                    end: end as u32,
+                    alt: replacement.to_vec(),
+                }];
+                if !out.iter().any(|o| o.edits == v.edits) {
                     out.push(v);
                 }
             }
         }
         out
-    }
-
-    /// The variant proteins of `base` (canonical or isoform), named after
-    /// the base accession field `base_id` and described as `description`.
-    fn variant_proteins(
-        &self,
-        family: &str,
-        base_id: &str,
-        description: &str,
-        base: &[u8],
-        sites: &[ModSite],
-        variants: Vec<SequenceVariant>,
-    ) -> Vec<Protein> {
-        variants
-            .into_iter()
-            .map(|v| {
-                let mut sequence = Vec::with_capacity(base.len() + v.replacement.len());
-                sequence.extend_from_slice(&base[..v.start]);
-                sequence.extend_from_slice(&v.replacement);
-                sequence.extend_from_slice(&base[v.end..]);
-                // From the sequences, not UniProt's coordinates: an indel in a
-                // repeat can slide along it, spans past the shared prefix or
-                // suffix would read like canonical peptides, and so would one
-                // inside a run the replacement keeps.
-                let parts = VariantRegion::of_edit(base, v.start, v.end, &v.replacement);
-                let mod_sites = sites_through(sites, &[(v.start, v.end, v.replacement.len())]);
-                let mass = |r: &[u8]| -> f64 {
-                    r.iter()
-                        .filter_map(|&a| AminoAcid::standard(a))
-                        .map(|a| a.mass)
-                        .sum()
-                };
-                let origin = EntryOrigin {
-                    kind: EntryKind::Variant,
-                    family: Arc::from(family),
-                    feature: Arc::from(v.tag.as_str()),
-                    variant_delta_da: mass(&v.replacement) - mass(&base[v.start..v.end]),
-                    knockoff_of: v.knockoff_of.as_deref().map(Arc::from),
-                };
-                // Equal-length changes: each differing residue and the one it
-                // replaced, so a form a searched mod makes canonical is skipped.
-                let substitutions: Vec<Substitution> = if v.replacement.len() == v.end - v.start {
-                    (v.start..v.end)
-                        .filter(|&i| sequence[i] != base[i])
-                        .map(|i| Substitution {
-                            position: i as u32,
-                            original: base[i],
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                Protein {
-                    accession: format!("{}|{}_{}|{}", self.db_code(), base_id, v.tag, self.name),
-                    description: format!("{description} VARIANT={}", v.tag),
-                    sequence,
-                    annotation: Some(Arc::new(
-                        ProteinAnnotation::new(mod_sites, None)
-                            .with_variant(parts)
-                            .with_origin(Some(origin))
-                            .with_substitutions(substitutions),
-                    )),
-                }
-            })
-            .collect()
     }
 
     /// Up to `ko.per_variant` knockoffs of each single-residue variant in
@@ -605,11 +475,10 @@ impl UniProtEntry {
     /// whatever its evidence.
     fn knockoff_variants(
         &self,
-        real: &[SequenceVariant],
+        real: &[Annotation],
         ko: KnockoffOptions,
         stats: &mut UniProtLoadStats,
-    ) -> Vec<SequenceVariant> {
-        let seq = &self.sequence;
+    ) -> Vec<Annotation> {
         let listed: Vec<usize> = self
             .features
             .iter()
@@ -617,29 +486,9 @@ impl UniProtEntry {
             .filter_map(|f| f.location)
             .flat_map(|(b, e)| (b as usize).saturating_sub(1)..e as usize)
             .collect();
-        let mut out = Vec::new();
-        for v in real
-            .iter()
-            .filter(|v| v.end == v.start + 1 && v.replacement.len() == 1)
-        {
-            let seed = fnv1a(format!("{}:{}", self.accession, v.tag).as_bytes());
-            let positions = knockoff_positions(seq, v.start, &listed, ko, seed);
-            if positions.is_empty() {
-                stats.variants_without_knockoff += 1;
-                continue;
-            }
-            for (i, q) in positions.into_iter().enumerate() {
-                let at = q as u32 + 1;
-                let change = change_label(&seq[q..q + 1], at, at, &v.replacement);
-                out.push(SequenceVariant {
-                    start: q,
-                    end: q + 1,
-                    replacement: v.replacement.clone(),
-                    tag: format!("KO{}_{change}_{}", i + 1, v.tag),
-                    knockoff_of: Some(v.tag.clone()),
-                });
-            }
-        }
+        let (out, untested) =
+            knockoff_annotations(&self.sequence, &self.accession, real, &listed, ko);
+        stats.variants_without_knockoff += untested;
         out
     }
 
@@ -732,11 +581,11 @@ impl UniProtEntry {
         out
     }
 
-    /// The sequence of a `described` isoform, the canonical sequence with its
-    /// splice variants applied, and those edits; `None` when it is not
-    /// described or one of its splice variants is missing, does not fit the
-    /// canonical sequence, or overlaps another.
-    fn isoform_sequence(&self, iso: &UniProtIsoform) -> Option<(Vec<u8>, Edits)> {
+    /// The splice edits that build a `described` isoform from the canonical
+    /// sequence; `None` when it is not described, one of its splice variants
+    /// is missing, does not fit the canonical sequence or overlaps another, or
+    /// the isoform reads like the canonical sequence.
+    fn isoform_edits(&self, iso: &UniProtIsoform) -> Option<Vec<Edit>> {
         if iso.sequence_type != "described" || iso.splice_refs.is_empty() {
             return None;
         }
@@ -774,10 +623,16 @@ impl UniProtEntry {
         if sequence.is_empty() || sequence == self.sequence {
             return None;
         }
-        Some((
-            sequence,
-            edits.iter().map(|&(s, e, r)| (s, e, r.len())).collect(),
-        ))
+        Some(
+            edits
+                .iter()
+                .map(|&(start, end, alt)| Edit {
+                    start: start as u32,
+                    end: end as u32,
+                    alt: alt.to_vec(),
+                })
+                .collect(),
+        )
     }
 
     /// The proteins this entry contributes: the canonical one, then (with
@@ -805,60 +660,33 @@ impl UniProtEntry {
             )),
         }];
 
+        // Every alternative entry is built from an annotation of the canonical
+        // entry (or, for an isoform's variants, of the isoform entry).
+        let canonical = out[0].clone();
+        let build = |reference: &Protein, a: &Annotation| {
+            build_entry(reference, a).expect("an alternative kind makes an entry")
+        };
         if opts.variants {
             let variants = self.sequence_variants(None, &self.sequence, opts, stats);
             let knockoffs = match opts.knockoffs.filter(|k| k.per_variant > 0) {
                 Some(ko) => self.knockoff_variants(&variants, ko, stats),
                 None => Vec::new(),
             };
-            let proteins = self.variant_proteins(
-                &self.accession,
-                &self.accession,
-                &description,
-                &self.sequence,
-                &sites,
-                variants,
-            );
-            stats.variant_proteins += proteins.len();
-            out.extend(proteins);
-            let proteins = self.variant_proteins(
-                &self.accession,
-                &self.accession,
-                &description,
-                &self.sequence,
-                &sites,
-                knockoffs,
-            );
-            stats.knockoff_proteins += proteins.len();
-            out.extend(proteins);
+            stats.variant_proteins += variants.len();
+            out.extend(variants.iter().map(|a| build(&canonical, a)));
+            stats.knockoff_proteins += knockoffs.len();
+            out.extend(knockoffs.iter().map(|a| build(&canonical, a)));
         }
 
         if opts.chains {
             for c in self.mature_chains(opts, stats) {
-                let mod_sites = sites
-                    .iter()
-                    .filter(|s| (c.start..c.end).contains(&(s.position as usize)))
-                    .map(|s| ModSite {
-                        position: s.position - c.start as u32,
-                        ..*s
-                    })
-                    .collect();
-                out.push(Protein {
-                    accession: format!(
-                        "{}|{}_{}|{}",
-                        self.db_code(),
-                        self.accession,
-                        c.tag,
-                        self.name
-                    ),
-                    description: format!("{description} CHAIN={}:{}-{}", c.tag, c.start + 1, c.end),
-                    sequence: self.sequence[c.start..c.end].to_vec(),
-                    annotation: Some(Arc::new(
-                        ProteinAnnotation::new(mod_sites, None)
-                            .with_chain(Some(c.ends))
-                            .with_origin(Some(self.origin(EntryKind::Chain, &c.tag))),
-                    )),
+                let mut a = Annotation::new(&c.tag, EntryKind::Chain);
+                a.processing = Some(Processing {
+                    start: c.start as u32,
+                    end: c.end as u32,
+                    ends: c.ends,
                 });
+                out.push(build(&canonical, &a));
                 stats.chain_proteins += 1;
             }
         }
@@ -870,46 +698,33 @@ impl UniProtEntry {
                 .iter()
                 .filter(|i| i.sequence_type != "displayed")
             {
-                let Some((sequence, edits)) = self.isoform_sequence(iso) else {
+                let Some(edits) = self.isoform_edits(iso) else {
                     stats.unbuilt_isoforms += 1;
                     continue;
                 };
                 built.push(&iso.id);
-                // The isoform's own sites, plus the canonical sites on the
-                // residues it shares with the canonical sequence.
-                let own = self.mod_sites(Some(&iso.id), &sequence, opts, stats);
-                stats.mod_sites += own.len();
-                let mut iso_sites = sites_through(&sites, &edits);
-                iso_sites.extend(own);
-                let annotation = ProteinAnnotation::new(iso_sites, None)
-                    .with_origin(Some(self.origin(EntryKind::Isoform, &iso.id)));
-                let iso_description = self.isoform_description(iso);
-                if opts.variants {
-                    let variants = self.sequence_variants(Some(&iso.id), &sequence, opts, stats);
-                    let proteins = self.variant_proteins(
-                        &self.accession,
-                        &iso.id,
-                        &iso_description,
-                        &sequence,
-                        &annotation.mod_sites,
-                        variants,
-                    );
-                    stats.variant_proteins += proteins.len();
-                    out.push(Protein {
-                        accession: format!("{}|{}|{}", self.db_code(), iso.id, self.name),
-                        description: iso_description,
-                        sequence,
-                        annotation: Some(Arc::new(annotation)),
-                    });
-                    out.extend(proteins);
+                // The isoform's own sites, plus (by the builder) the canonical
+                // sites on the residues it shares with the canonical sequence.
+                let mut a = Annotation::new(&iso.id, EntryKind::Isoform);
+                a.edits = edits;
+                a.accession = Some(format!("{}|{}|{}", self.db_code(), iso.id, self.name));
+                a.description = Some(self.isoform_description(iso));
+                let isoform = {
+                    let sequence = build(&canonical, &a).sequence;
+                    let own = self.mod_sites(Some(&iso.id), &sequence, opts, stats);
+                    stats.mod_sites += own.len();
+                    a.mods = own;
+                    build(&canonical, &a)
+                };
+                let variants = if opts.variants {
+                    self.sequence_variants(Some(&iso.id), &isoform.sequence, opts, stats)
                 } else {
-                    out.push(Protein {
-                        accession: format!("{}|{}|{}", self.db_code(), iso.id, self.name),
-                        description: iso_description,
-                        sequence,
-                        annotation: Some(Arc::new(annotation)),
-                    });
-                }
+                    Vec::new()
+                };
+                stats.variant_proteins += variants.len();
+                let proteins: Vec<Protein> = variants.iter().map(|v| build(&isoform, v)).collect();
+                out.push(isoform);
+                out.extend(proteins);
                 stats.isoform_proteins += 1;
             }
         }
@@ -933,112 +748,6 @@ impl UniProtEntry {
     }
 }
 
-/// The class a knockoff site's next residue must share with the real site's:
-/// hydrophobic, aromatic, polar, basic, acidic, or the residue itself.
-fn residue_class(r: u8) -> u8 {
-    match r {
-        b'A' | b'V' | b'L' | b'I' | b'M' => b'h',
-        b'F' | b'W' | b'Y' => b'a',
-        b'S' | b'T' | b'N' | b'Q' => b'p',
-        b'K' | b'R' | b'H' => b'+',
-        b'D' | b'E' => b'-',
-        other => other,
-    }
-}
-
-/// The `[start, end)` span between the enzyme's cleavage sites around residue
-/// `i` (no missed cleavage).
-fn enzymatic_span(seq: &[u8], i: usize, enzyme: Enzyme) -> (usize, usize) {
-    let cut = |j: usize| {
-        j == 0
-            || j == seq.len()
-            || if enzyme.is_n_term() {
-                enzyme.is_cleavable_before(seq[j])
-            } else {
-                enzyme.is_cleavable_after(seq[j - 1])
-            }
-    };
-    let mut a = i;
-    while !cut(a) {
-        a -= 1;
-    }
-    let mut b = i + 1;
-    while !cut(b) {
-        b += 1;
-    }
-    (a, b)
-}
-
-/// Whether residue `i` is the N of an N-x-S/T sequon (x not P).
-fn sequon(seq: &[u8], i: usize) -> bool {
-    seq[i] == b'N' && i + 2 < seq.len() && seq[i + 1] != b'P' && matches!(seq[i + 2], b'S' | b'T')
-}
-
-/// Knockoff positions for a substitution of residue `p` of `seq`: positions
-/// `q` holding the same residue, whose next residue matches (the same residue
-/// when the site is N, Q, K or R or either next residue is P or G, else the
-/// same [`residue_class`]), with the same sequon status, in another enzymatic
-/// span whose length is within 3 of `p`'s and 6..=50, and at least 10 residues
-/// from every position in `listed`. Up to `ko.per_variant` of them, drawn
-/// without replacement by a generator seeded with `seed`.
-fn knockoff_positions(
-    seq: &[u8],
-    p: usize,
-    listed: &[usize],
-    ko: KnockoffOptions,
-    seed: u64,
-) -> Vec<usize> {
-    if p + 1 >= seq.len() {
-        return Vec::new();
-    }
-    let o = seq[p];
-    let (pa, pb) = enzymatic_span(seq, p, ko.enzyme);
-    let next_ok = |q: usize| {
-        let (a, b) = (seq[p + 1], seq[q + 1]);
-        if b"NQKR".contains(&o) || matches!(a, b'P' | b'G') || matches!(b, b'P' | b'G') {
-            a == b
-        } else {
-            residue_class(a) == residue_class(b)
-        }
-    };
-    let mut eligible: Vec<usize> = (0..seq.len() - 1)
-        .filter(|&q| {
-            seq[q] == o
-                && next_ok(q)
-                && sequon(seq, q) == sequon(seq, p)
-                && listed.iter().all(|&r| r.abs_diff(q) >= 10)
-                && {
-                    let (qa, qb) = enzymatic_span(seq, q, ko.enzyme);
-                    qa != pa && (qb - qa).abs_diff(pb - pa) <= 3 && (6..=50).contains(&(qb - qa))
-                }
-        })
-        .collect();
-    let mut state = seed;
-    let take = ko.per_variant.min(eligible.len());
-    for i in 0..take {
-        let j = i + (splitmix64(&mut state) % (eligible.len() - i) as u64) as usize;
-        eligible.swap(i, j);
-    }
-    eligible.truncate(take);
-    eligible
-}
-
-/// 64-bit FNV-1a hash.
-fn fnv1a(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
-        (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3)
-    })
-}
-
-/// The next value of a SplitMix64 generator.
-fn splitmix64(state: &mut u64) -> u64 {
-    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    let mut z = *state;
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
-}
-
 /// UniProt FASTA `PE=` code of a `<proteinExistence @type>`.
 fn protein_existence_code(kind: &str) -> &'static str {
     match kind {
@@ -1048,21 +757,6 @@ fn protein_existence_code(kind: &str) -> &'static str {
         "predicted" => "4",
         "uncertain" => "5",
         _ => "",
-    }
-}
-
-/// The change a variant makes, 1-based: `D7H`, `KR120-121EE`, `F508del`.
-fn change_label(original: &[u8], begin: u32, end: u32, replacement: &[u8]) -> String {
-    let original = String::from_utf8_lossy(original);
-    let range = if begin == end {
-        begin.to_string()
-    } else {
-        format!("{begin}-{end}")
-    };
-    if replacement.is_empty() {
-        format!("{original}{range}del")
-    } else {
-        format!("{original}{range}{}", String::from_utf8_lossy(replacement))
     }
 }
 
@@ -1537,7 +1231,9 @@ fn attr(e: &BytesStart<'_>, name: &[u8]) -> Result<Option<String>, quick_xml::Er
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::annotation::{enzymatic_span, knockoff_positions};
     use model::ChainEnds;
+    use model::{Enzyme, VariantRegion};
 
     /// Two entries exercising every branch the reader takes. Sequence of
     /// P00001 (1-based): M1 S2 E3 K4 R5 S6 P7 T8 K9 A10 G11 N12 L13 S14 T15

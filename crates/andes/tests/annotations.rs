@@ -40,10 +40,12 @@ fn search(database: &str, pin: &Path, extra: &[&str]) -> Output {
     out
 }
 
-/// An annotations file with one substitution per row: (id, reference, md5,
-/// start, end, ref, alt).
-fn write_substitutions(path: &Path, rows: &[(&str, &str, &str, i64, i64, &str, &str)]) {
-    let col = |f: &dyn Fn(&(&str, &str, &str, i64, i64, &str, &str)) -> String| -> ArrayRef {
+/// One substitution row: (id, reference, md5, start, end, ref, alt).
+type Substitution<'a> = (&'a str, &'a str, &'a str, i64, i64, &'a str, &'a str);
+
+/// An annotations file with one substitution per row.
+fn write_substitutions(path: &Path, rows: &[Substitution]) {
+    let col = |f: &dyn Fn(&Substitution) -> String| -> ArrayRef {
         Arc::new(StringArray::from(rows.iter().map(f).collect::<Vec<_>>()))
     };
     let st = StructArray::from(vec![

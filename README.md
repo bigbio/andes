@@ -176,11 +176,25 @@ the accession. `--uniprot-isoforms` adds the described isoforms, and `--uniprot-
 peptides at the new termini of mature chains (after signal peptide or propeptide removal).
 Annotation is filtered by evidence (`--uniprot-evidence`); see
 [`DOCS.md` §1a](DOCS.md#uniprot-xml-databases). With rescoring, variant calls are checked
-against knockoff variants ([below](#variant-calls-checked-against-knockoffs---uniprot-knockoffs---proteoform-fdr)).
+against knockoff variants ([below](#variant-calls-checked-against-knockoffs---knockoffs---proteoform-fdr)).
 
 ```bash
 andes --spectrum spectra.mzML --database uniprot_sprot_human.xml.gz \
   --mods phospho_annotated_mods.txt --uniprot-variants --output-pin out.pin
+```
+
+**Annotation files.** `--annotations claims.annotations.parquet` adds claims about the proteins
+of any database, FASTA included: sequence edits (variant entries), modification sites, mature
+chains. The claims can come from variant catalogues, a sample's own variant calls or site
+databases, one row per claim, with a checksum of the sequence each was written against. They are
+built into entries exactly like UniProt's own, so knockoffs, the class FDR and the proteoform table
+apply unchanged. The flag can be repeated, and equal claims are merged. The columns are listed in
+[`DOCS.md` §1a](DOCS.md#annotation-files---annotations).
+
+```bash
+andes --spectrum spectra.mzML --database human.fasta \
+  --annotations cosmic.annotations.parquet --annotations sample.annotations.parquet \
+  --rescore --output-pin out.pin
 ```
 
 **TSV and Parquet output:**
@@ -291,7 +305,7 @@ does not discover new modifications and runs on high-resolution data only. On As
 40,028 PSMs (+4.3%), but its Pass-2 PSMs (`IsRefinement = 1`) sit at **~2.8% FDP** under a
 merged 1% threshold; threshold them separately for 1% on modified PSMs ([`DOCS.md`](DOCS.md#refine--secondary-chemistry-cascade)).
 
-## Variant calls checked against knockoffs (`--uniprot-knockoffs`, `--proteoform-fdr`)
+## Variant calls checked against knockoffs (`--knockoffs`, `--proteoform-fdr`)
 
 **Aim.** A PSM on a UniProt variant entry claims that the sample carries that variant. Most false
 claims are not random matches. They are a canonical peptide that a common modification or an
@@ -303,8 +317,8 @@ the deamidation-like ones were. Knockoff variants give the variant claim a null 
 same mistakes.
 
 **How it works.**
-1. **Knockoff entries.** With `--uniprot-variants`, each single-residue variant X→Y of a canonical
-   sequence gets up to `--uniprot-knockoffs` (default 4) knockoff entries. A knockoff is the same
+1. **Knockoff entries.** Each single-residue variant X→Y of a canonical sequence, from
+   `--uniprot-variants` or `--annotations`, gets up to `--knockoffs` (default 4) knockoff entries. A knockoff is the same
    substitution at another position of the same sequence that holds X, where:
    - the next residue matches: the same residue when X is N, Q, K or R or either next residue is
      P or G, otherwise the same residue class;
@@ -336,11 +350,12 @@ same mistakes.
    as targets with q = 1. They are never in the filtered TSV, quantification, MBR or the
    proteoform table, and knockoff accessions are dropped from other rows' protein lists.
 
-**Input and parameters.** A UniProt XML database with `--uniprot-variants`, and `--rescore`.
+**Input and parameters.** Variants from a UniProt XML database (`--uniprot-variants`) or from
+annotation files (`--annotations`), and `--rescore`.
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--uniprot-knockoffs` | `4` | Knockoffs per single-residue variant. `0` turns them off and leaves variant PSMs to the class FDR alone. |
+| `--knockoffs` | `4` | Knockoffs per single-residue variant. `0` turns them off and leaves variant PSMs to the class FDR alone. |
 | `--proteoform-fdr` | the larger of `--fdr` and 0.05 | q-value cutoff for variant-class PSMs in the filtered TSV, the proteoform table and quantification. |
 | `--uniprot-evidence` | `experimental` | Minimum evidence for a variant to be searched (`curated` was used below). |
 

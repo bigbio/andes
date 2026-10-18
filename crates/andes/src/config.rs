@@ -117,7 +117,7 @@ pub struct RescoringCfg {
     pub enabled: Option<bool>,
     pub native: Option<bool>,
     pub fdr: Option<f64>,
-    pub variant_fdr: Option<f64>,
+    pub proteoform_fdr: Option<f64>,
     pub pep: Option<f64>,
     pub percolator_bin: Option<PathBuf>,
     pub percolator_docker: Option<bool>,
@@ -379,7 +379,11 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set!("rescore", rescore, cfg.rescoring.enabled);
     set!("rescore_native", rescore_native, cfg.rescoring.native);
     set_opt!("fdr", fdr, cfg.rescoring.fdr);
-    set_opt!("variant_fdr", variant_fdr, cfg.rescoring.variant_fdr);
+    set_opt!(
+        "proteoform_fdr",
+        proteoform_fdr,
+        cfg.rescoring.proteoform_fdr
+    );
     set_opt!("pep", pep, cfg.rescoring.pep);
     set_opt!(
         "percolator_bin",
@@ -460,8 +464,8 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     if let Some(v) = args.fdr {
         check_unit_fraction("fdr", v)?;
     }
-    if let Some(v) = args.variant_fdr {
-        check_unit_fraction("variant_fdr", v)?;
+    if let Some(v) = args.proteoform_fdr {
+        check_unit_fraction("proteoform_fdr", v)?;
     }
     if let Some(v) = args.pep {
         check_unit_fraction("pep", v)?;

@@ -2081,7 +2081,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `--pep` are thresholds applied by such a run; they never start one on their
     // own (that would silently launch a backend / the non-production native path).
     let fdr_threshold = cli.fdr.unwrap_or(0.01);
-    let variant_fdr = cli.variant_fdr.unwrap_or(fdr_threshold.max(0.05));
+    let proteoform_fdr = cli.proteoform_fdr.unwrap_or(fdr_threshold.max(0.05));
     let (use_percolator, use_native) = if cli.rescore {
         (true, false)
     } else if cli.rescore_native {
@@ -2204,7 +2204,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         // Knockoff variants: the knockoff PSMs accepted per substitution class
         // estimate the false real variant PSMs, and give them a q-value too.
-        let outcome = output::apply_knockoff_fdr(map, &pin_index, variant_fdr);
+        let outcome = output::apply_knockoff_fdr(map, &pin_index, proteoform_fdr);
         knockoff_rows = outcome.knockoff_rows;
         if !outcome.counts.is_empty() {
             let line: Vec<String> = outcome
@@ -2223,7 +2223,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .collect();
             eprintln!(
-                "Rescore: variant PSMs at q<={variant_fdr} per substitution class, before -> \
+                "Rescore: variant PSMs at q<={proteoform_fdr} per substitution class, before -> \
                  after knockoff q-values: {}",
                 line.join(", ")
             );
@@ -2232,11 +2232,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.mbr {
         mbr_decoys = std::mem::take(&mut rescore_decoy_psms);
     }
-    // The cutoff each row is accepted at: --variant-fdr for variant-class rows,
-    // --fdr for the rest.
+    // The cutoff each row is accepted at: --proteoform-fdr for proteoform
+    // claims (variant-class rows), --fdr for the rest.
     let cutoffs = rescore_map
         .as_ref()
-        .map(|m| output::Cutoffs::new(m, &pin_index, fdr_threshold, variant_fdr));
+        .map(|m| output::Cutoffs::new(m, &pin_index, fdr_threshold, proteoform_fdr));
 
     // Filtered TSV: target PSMs whose q-value passes their cutoff. Written next
     // to the PIN as `<stem>.q<fdr>.tsv` (rescore only). One row per accepted PSM
@@ -2270,8 +2270,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let mut pep_note = pep_cap
             .map(|t| format!(" and PEP<={t}"))
             .unwrap_or_default();
-        if pin_index.has_alternative_entries && variant_fdr != fdr {
-            pep_note.push_str(&format!(", variant-class PSMs at q<={variant_fdr}"));
+        if pin_index.has_alternative_entries && proteoform_fdr != fdr {
+            pep_note.push_str(&format!(", proteoform claims at q<={proteoform_fdr}"));
         }
         match write_filtered_tsv(&filtered_path, &accepted) {
             Ok(()) => eprintln!(

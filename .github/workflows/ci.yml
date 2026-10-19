@@ -29,7 +29,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build (release)
-        run: cargo build --release --workspace
+        run: cargo build --release --workspace --locked
 
       - name: Test (release)
         # Force bash on all runners (Windows defaults to PowerShell, which
@@ -107,4 +107,4 @@ jobs:
         continue-on-error: true
 
       - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings

@@ -275,13 +275,27 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let t_total = std::time::Instant::now();
     let t_phase = std::time::Instant::now();
     // ── 1. Load the target database (FASTA or UniProt XML) ───────────────────
+    // Knockoffs exist for andes's own rescoring, which estimates from them and
+    // drops them. Without it nothing removes them, so they are not built: a
+    // PIN for an external Percolator must not carry knockoff targets.
+    let rescoring = cli.rescore || cli.rescore_native;
+    let knockoffs_per_variant = if rescoring { cli.knockoffs } else { 0 };
+    if !rescoring
+        && cli.knockoffs > 0
+        && (cli.uniprot_variants || !cli.annotations.is_empty())
+    {
+        eprintln!(
+            "Note: no knockoff variants are built without --rescore or --rescore-native; \
+             variant PSMs in the PIN have no knockoff q-value"
+        );
+    }
     let uniprot_opts = input::UniProtOptions {
         variants: cli.uniprot_variants,
         isoforms: cli.uniprot_isoforms,
         chains: cli.uniprot_chains,
         evidence: cli.uniprot_evidence,
         knockoffs: Some(input::KnockoffOptions {
-            per_variant: cli.knockoffs,
+            per_variant: knockoffs_per_variant,
             enzyme: search_enzyme,
         }),
     };

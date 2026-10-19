@@ -359,7 +359,9 @@ same mistakes.
    proteoform table, and knockoff accessions are dropped from other rows' protein lists.
 
 **Input and parameters.** Variants from a UniProt XML database (`--uniprot-variants`) or from
-annotation files (`--annotations`), and `--rescore`.
+annotation files (`--annotations`), and `--rescore`. Knockoffs are built only with `--rescore` or
+`--rescore-native`; a PIN written for an external Percolator has no knockoff entries, and its
+variant PSMs get no knockoff q-value.
 
 | Flag | Default | Effect |
 |---|---|---|

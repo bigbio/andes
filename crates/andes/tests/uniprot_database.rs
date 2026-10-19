@@ -303,4 +303,16 @@ fn knockoff_variants_are_searched_but_never_reported() {
     assert!(!String::from_utf8_lossy(&off.stderr).contains("knockoff variant entries"));
     let pin = std::fs::read_to_string(dir.path().join("off.pin")).unwrap();
     assert!(!pin.contains("_KO"));
+
+    // Without andes rescoring nothing removes knockoffs, so none are built and
+    // a PIN for an external Percolator carries no knockoff targets.
+    let external = search(
+        "test-fixtures/BSA.xml.gz",
+        &dir.path().join("external.pin"),
+        &["--uniprot-variants", "--uniprot-evidence", "any"],
+    );
+    let stderr = String::from_utf8_lossy(&external.stderr);
+    assert!(stderr.contains("no knockoff variants are built"), "{stderr}");
+    let pin = std::fs::read_to_string(dir.path().join("external.pin")).unwrap();
+    assert!(!pin.contains("_KO"));
 }

@@ -164,9 +164,11 @@ pub(crate) struct SearchArgs {
     /// coincidence or an isotope error as well as the real variant does. The
     /// knockoffs accepted per substitution class estimate how many accepted
     /// variant PSMs are false, and variant PSMs get a q-value from that estimate
-    /// too (with --rescore). A variant PSM is accepted only when its variant has
-    /// a knockoff; knockoff PSMs are never reported. 0 turns this off and
-    /// leaves variant PSMs to the class FDR alone.
+    /// too. A variant PSM is accepted only when its variant has a knockoff;
+    /// knockoff PSMs are never reported. Knockoffs are built only with
+    /// --rescore or --rescore-native, which estimate from them and remove them;
+    /// without rescoring the PIN carries no knockoff entries. 0 turns this off
+    /// and leaves variant PSMs to the class FDR alone.
     #[arg(long = "knockoffs", default_value_t = 4)]
     pub(crate) knockoffs: usize,
 

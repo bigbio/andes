@@ -1156,9 +1156,12 @@ pub(crate) fn finalize(
     let fdr = transfer_fdr(&fdr_rows, seed);
     let id_fdr = transfer_fdr(&id_rows, seed);
     let w_c = consensus_widths(rows.iter().copied(), maps);
+    // A fit whose amplitude is clamped to 0 found no signal: the quantity is
+    // missing, not zero, in mbr.tsv, the normalisation and the feature parquet.
     let reported = |r: &ExtractRow| {
         r.evidence
             .as_ref()
+            .filter(|e| e.amplitude > 0.0)
             .map(|e| reported_quantity(e, r.run, w_c.get(&r.precursor).copied(), maps))
     };
     let norm = run_normalization(

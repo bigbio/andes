@@ -373,7 +373,7 @@ Edits together with processing are not supported yet. Rows are checked on load:
 
 The run log counts every row left out, by reason.
 
-### Site claims (knockoff sites)
+### Site claims (knockoff sites, experimental)
 
 An annotated modification site is a claim: residue r of protein P carries modification M. Sites
 come from UniProt XML (`modified residue` and similar features), annotation-file `mods` rows and
@@ -409,6 +409,19 @@ PSMs.
 
 Some knockoff sites are really modified, because annotation is incomplete. Counting them as false
 makes the estimate err towards rejecting true site claims, never towards accepting false ones.
+
+**Experimental.** How conservative the estimate is has not yet been measured against known sites.
+
+Measured on a mouse-liver phospho run (PXD007653, reviewed mouse UniProt, 51,906 annotated sites,
+42,985 knockoff sites):
+- **Phospho placed freely** (the usual search): identifications are identical with and without
+  knockoff sites, and 1,403 annotated sites pass a site q-value of 0.05.
+- **Phospho restricted to annotated sites** (`sites=annotated`): the knockoff placements cost 0.7%
+  of PSMs and 0.8% of phosphopeptides, and only 119 sites pass, because many knockoff residues are
+  really phosphorylated.
+
+Site claims are therefore most useful with freely placed mods. 31,165 of the sites had no residue
+matching all their context rules, so no knockoff.
 
 With rescoring, `<stem>.sites.tsv` lists the accepted claims, one row per site whose best PSM
 passes `--fdr` and whose site q-value passes `--proteoform-fdr`. Its columns are `family

@@ -21,7 +21,8 @@ use crate::quant_run::{QuantCollector, QuantSettings, RunScans};
 use crate::rescore;
 use crate::spectra::{
     add_mzml_skipped, detect_dominant_activation, detect_instrument_type_for_path,
-    detect_isobaric_sampled, input_format_flags, merge_parse_stats, prefix_spectrum_titles,
+    detect_isobaric_sampled, input_format_flags, merge_parse_stats, ms3_carries_reporters,
+    prefix_spectrum_titles,
     run_precursor_calibration, send_chunks, title_prefix_for, tolerance_ppm_display, ParseStats,
 };
 use crate::{arg_present, report_search_progress, EXPLICIT_MISSED_CLEAVAGES};
@@ -1246,8 +1247,27 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // MS1 scans (purity, label-free chromatograms) and MS3 scans (SPS-MS3
     // reporters) are captured by the readers next to the MS2 stream and handed
     // to the collector per file. Quantification itself runs after rescoring.
+    let high_res = param.data_type.instrument.is_high_resolution();
+    // Without --tmt-level, SPS-MS3 reporters are read from the MS3 when the
+    // low-resolution MS2 cannot separate the plex's channels.
+    let tmt_level = match (cli.tmt_level, cli.tmt) {
+        (Some(level), _) => level,
+        (None, Some(plex))
+            if !high_res
+                && plex.check_tolerance(model::tolerance::Tolerance::Da(0.3)).is_err()
+                && ms3_carries_reporters(&spectrum_path, is_mzml, is_raw) =>
+        {
+            eprintln!(
+                "Protocol resolver: --tmt {}: the MS2 is low-resolution and the MS3 scans carry \
+                 reporters (SPS-MS3); reading reporters from the MS3 (--tmt-level 3)",
+                plex.name()
+            );
+            3
+        }
+        _ => 2,
+    };
     let mut quant: Option<QuantCollector> =
-        QuantSettings::from_cli(&cli, param.data_type.instrument.is_high_resolution())?.map(
+        QuantSettings::from_cli(&cli, high_res, tmt_level)?.map(
             |mut settings| {
                 // Recorded in each run's MS2 table, where the library matches
                 // its fragment spectra and extract scores transfers.

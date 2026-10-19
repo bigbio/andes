@@ -302,6 +302,15 @@ pub(crate) fn detect_isobaric_sampled(
     label
 }
 
+/// Whether the MS3 scans of an mzML or Thermo `.raw` carry isobaric reporter
+/// ions (an SPS-MS3 run).
+pub(crate) fn ms3_carries_reporters(path: &Path, is_mzml: bool, is_raw: bool) -> bool {
+    (is_mzml || is_raw)
+        && sample_spectra(path, is_mzml, false, is_raw, 3)
+            .and_then(|ms3| input::detect_isobaric(&ms3, true))
+            .is_some()
+}
+
 /// The first spectra at `ms_level` of an mzML, MGF or Thermo `.raw`.
 fn sample_spectra(
     path: &Path,

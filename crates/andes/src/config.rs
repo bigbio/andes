@@ -413,7 +413,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
             args.tmt = Some(crate::cli::parse_plex(&v)?);
         }
     }
-    set!("tmt_level", tmt_level, cfg.quant.tmt_level);
+    set_opt!("tmt_level", tmt_level, cfg.quant.tmt_level);
     if let Some(v) = cfg.quant.tmt_tol {
         if !cli_set(m, "tmt_tol") {
             args.tmt_tol = Some(parse_tol("tmt_tol", &v)?);

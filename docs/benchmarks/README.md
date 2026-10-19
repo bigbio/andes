@@ -78,7 +78,7 @@ reference's spectra that andes identifies with the same peptide.
   runs, where the human, yeast and E. coli ratios between conditions A and B are known. Measured
   2026-10-17 at `47d2844` on a cluster node, scored with the official `proteobench` package
   0.18.6.
-- *Which quantity is scored:* the `quantity_normalized` column of `mbr.tsv`, which removes each
+- *Which quantity is scored:* the `quantity_normalized` column of the MBR table, which removes each
   run's loading level and its drift along the gradient. The raw `quantity` column, which is what
   andes hands to quantms, scores median |ε| 0.225 and CV 0.240 on the same precursors.
 - *Transfer threshold:* at the default `--mbr-fdr 0.05`, andes quantifies 67,035 precursors in
@@ -190,10 +190,17 @@ andes quant extract --quant-dir q/ --run $R --lfq-tol 10ppm
 andes quant finalize --quant-dir q/ -o pb --mbr-fdr 0.01
 ```
 
-5. Convert `pb.mbr.tsv` to ProteoBench's "Custom" format. Keep the `identified`,
+5. Convert `pb.mbr.parquet` to ProteoBench's "Custom" format. Keep the `identified`,
    `transfer_ms1` and `transfer_ms2` rows, and write one row per precursor with `Sequence`,
    ProForma `Modified sequence`, `Proteins`, `Charge` and the six
-   `LFQ_Orbitrap_DDA_Condition_*` columns filled from `quantity_normalized`.
+   `LFQ_Orbitrap_DDA_Condition_*` columns filled from `quantity_normalized`:
+
+   ```python
+   import pandas as pd
+   m = pd.read_parquet("pb.mbr.parquet")
+   m = m[m.evidence_type.isin(["identified", "transfer_ms1", "transfer_ms2"])]
+   wide = m.pivot(index="precursor_key", columns="run", values="quantity_normalized")
+   ```
 6. Score with `proteobench` 0.18.6:
    `DDAQuantIonModuleQExactive(...).benchmarking(file, "Custom", ...)`. It reports minimum
    1, 3 and 6 runs in one pass.
@@ -225,7 +232,8 @@ andes --spectrum Fig2_m23145_SPSms3.raw --database yeast.fasta --mods mods_tmtpr
 
 Channel layout: MET6 (P05694) is knocked out in 126–128N, HIS4 (P00815) in 128C–130N and URA2
 (P07259) in 130C–132N; 132C–134N is the parental strain. For each PSM of those proteins, divide
-the mean of its knockout channels by the mean of the other channels in `<stem>.tmt.tsv`. Report
+the mean of its knockout channels by the mean of the other channels in `<stem>.tmt.parquet`
+(rows with `quant_gate_passed`). Report
 the median, using only scans whose reporter scan window starts below 126 Th. Repeat on PSMs
 with `purity ≥ 0.9`.
 

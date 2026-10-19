@@ -2,7 +2,7 @@
 //! `andes quant extract` and `andes quant finalize`, and the in-process run of
 //! all three behind `andes search --lfq --mbr`. Both paths call the same
 //! functions on the same files in the quant directory, so a scattered run and
-//! an in-process run give the same `<base>.mbr.tsv`.
+//! an in-process run give the same `<base>.mbr.parquet`.
 //!
 //! Files in the quant directory, per run stem: `<stem>.quant.parquet`,
 //! `<stem>.ms1.parquet` and `<stem>.ms2.parquet` (written by `andes search
@@ -851,7 +851,7 @@ fn parse_peptidoform(peptidoform: &str) -> (String, Vec<ModRecord>) {
 
 /// The QPX feature rows of the MBR table: every row except the
 /// below-threshold transfers and identified rows, which stay in
-/// `<base>.mbr.tsv` only.
+/// `<base>.mbr.parquet` only.
 fn feature_records(stored: &StoredLibrary, features: &[MbrFeature]) -> Vec<FeatureRecord> {
     features
         .iter()
@@ -921,7 +921,7 @@ pub(crate) fn finalize_and_write(
     base: &Path,
     parquet_dir: Option<&Path>,
 ) -> Result<(), String> {
-    let (tsv, validation) = mbr_paths(base);
+    let (table, validation) = mbr_paths(base);
     let summary = finalize(
         &stored.runs,
         &stored.library,
@@ -929,12 +929,12 @@ pub(crate) fn finalize_and_write(
         mbr_fdr,
         quant_feature_fdr,
         MBR_SEED,
-        &tsv,
+        &table,
         &validation,
     )?;
     eprintln!(
         "[mbr] wrote {} ({} rows; transfer_q and quant_q are internal quant-quality q-values, not identification FDR) and {}",
-        tsv.display(),
+        table.display(),
         summary.rows_written,
         validation.display()
     );
@@ -945,7 +945,7 @@ pub(crate) fn finalize_and_write(
         output::write_feature_parquet(&path, &records)
             .map_err(|e| format!("write {}: {e}", path.display()))?;
         eprintln!(
-            "[mbr] wrote {} ({} feature rows with evidence type; below-threshold transfers and identified rows are in the mbr.tsv only)",
+            "[mbr] wrote {} ({} feature rows with evidence type; below-threshold transfers and identified rows are in the mbr.parquet only)",
             path.display(),
             records.len()
         );

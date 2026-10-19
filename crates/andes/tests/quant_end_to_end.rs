@@ -7,9 +7,12 @@
 //! proportional to the designed apex intensities.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use arrow::array::{Array, Float64Array, ListArray};
+use arrow::datatypes::DataType;
+use arrow::util::display::{ArrayFormatter, FormatOptions};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 fn fixture(rel: &str) -> PathBuf {
@@ -20,19 +23,55 @@ fn fixture(rel: &str) -> PathBuf {
         .unwrap_or_else(|e| panic!("canonicalize {rel}: {e}"))
 }
 
-fn read_tsv(path: &PathBuf) -> (Vec<String>, Vec<Vec<String>>) {
-    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
-    let mut lines = text.lines();
-    let header: Vec<String> = lines
-        .next()
-        .expect("header")
-        .split('\t')
-        .map(String::from)
+/// The header and rows of a quantification table, every cell as text: a
+/// null is empty and a list is `;`-joined.
+fn read_table(t: &output::ReadTable) -> (Vec<String>, Vec<Vec<String>>) {
+    let header: Vec<String> = t.batches[0]
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
         .collect();
-    let rows = lines
-        .map(|l| l.split('\t').map(String::from).collect::<Vec<_>>())
-        .collect();
+    let opts = FormatOptions::default().with_null("");
+    let mut rows = Vec::new();
+    for b in &t.batches {
+        let mut cols: Vec<Vec<String>> = Vec::new();
+        for c in b.columns() {
+            let cells = if let DataType::List(_) = c.data_type() {
+                let l = c.as_any().downcast_ref::<ListArray>().unwrap();
+                (0..l.len())
+                    .map(|i| {
+                        let v = l.value(i);
+                        let v = v.as_any().downcast_ref::<Float64Array>().unwrap();
+                        v.values()
+                            .iter()
+                            .map(|x| x.to_string())
+                            .collect::<Vec<_>>()
+                            .join(";")
+                    })
+                    .collect()
+            } else {
+                let f = ArrayFormatter::try_new(c.as_ref(), &opts).unwrap();
+                (0..c.len()).map(|i| f.value(i).to_string()).collect()
+            };
+            cols.push(cells);
+        }
+        for i in 0..b.num_rows() {
+            rows.push(cols.iter().map(|c| c[i].clone()).collect());
+        }
+    }
     (header, rows)
+}
+
+/// `tmt.parquet` as text, with only the PSMs that passed the quantification
+/// gate, and its row count with the gated ones.
+fn read_tmt(path: &Path) -> (Vec<String>, Vec<Vec<String>>, usize) {
+    let t = output::read_tmt_parquet(path).unwrap_or_else(|e| panic!("{e}"));
+    let (header, rows) = read_table(&t);
+    let all = rows.len();
+    let passed = col(&header, "quant_gate_passed");
+    let rows = rows.into_iter().filter(|r| r[passed] == "true").collect();
+    (header, rows, all)
 }
 
 /// Peptidoform without its `[...]` modification tags.
@@ -116,7 +155,7 @@ fn tmt10_ms2_reporters_purity_and_correction() {
         "--threads",
         "2",
     ]);
-    let (header, rows) = read_tsv(&dir.path().join("tmt.tmt.tsv"));
+    let (header, rows, all) = read_tmt(&dir.path().join("tmt.tmt.parquet"));
     assert!(
         rows.len() >= 4,
         "expected most of the 6 peptides quantified, got {}",
@@ -189,7 +228,7 @@ fn tmt10_ms2_reporters_purity_and_correction() {
         "YLYEIAR (the interfered peptide) should be quantified"
     );
     let (n, names) = parquet_rows(&qpx.join("quantms.feature.parquet"));
-    assert_eq!(n, rows.len());
+    assert_eq!(n, all);
     assert!(names.contains(&"intensities".to_string()));
 }
 
@@ -215,7 +254,7 @@ fn tmt10_ms3_reporters_follow_the_sps_scan() {
         "--threads",
         "2",
     ]);
-    let (header, rows) = read_tsv(&dir.path().join("tmt3.tmt.tsv"));
+    let (header, rows, _) = read_tmt(&dir.path().join("tmt3.tmt.parquet"));
     assert!(rows.len() >= 4, "got {} rows", rows.len());
     let c126 = col(&header, "tmt_126");
     let c131 = col(&header, "tmt_131");
@@ -265,7 +304,7 @@ fn tmt35_reads_the_deuterated_kit_in_reference_order() {
         "--threads",
         "2",
     ]);
-    let (header, rows) = read_tsv(&dir.path().join("tmt35.tmt.tsv"));
+    let (header, rows, all) = read_tmt(&dir.path().join("tmt35.tmt.parquet"));
     assert!(rows.len() >= 4, "got {} rows", rows.len());
     let first = col(&header, "tmt_126");
     let channels: Vec<&str> = header[first..]
@@ -308,7 +347,7 @@ fn tmt35_reads_the_deuterated_kit_in_reference_order() {
         }
     }
     let (n, _) = parquet_rows(&qpx.join("quantms.feature.parquet"));
-    assert_eq!(n, rows.len());
+    assert_eq!(n, all);
 }
 
 #[test]
@@ -376,7 +415,9 @@ fn lfq_areas_track_the_designed_intensities() {
         "--threads",
         "2",
     ]);
-    let (header, rows) = read_tsv(&dir.path().join("lfq.lfq_features.tsv"));
+    let lfq = output::read_lfq_parquet(&dir.path().join("lfq.lfq.parquet"))
+        .unwrap_or_else(|e| panic!("{e}"));
+    let (header, rows) = read_table(&lfq);
     assert!(
         rows.len() >= 4,
         "expected most of the 6 peptides, got {}",
@@ -427,14 +468,21 @@ fn lfq_areas_track_the_designed_intensities() {
             "{seq}: summed area {a} must exceed the mono area {mono_area}"
         );
     }
-    // Wide table: one column for the run, every confident row has a value.
-    let (wide_header, wide_rows) = read_tsv(&dir.path().join("lfq.lfq.tsv"));
+    // The table records its run and cuts; every feature on this fixture
+    // passes them.
     assert_eq!(
-        wide_header.last().map(String::as_str),
+        lfq.meta.get("andes.lfq.runs").map(String::as_str),
         Some("lfq_synthetic")
     );
-    assert_eq!(wide_rows.len(), rows.len());
-    assert!(wide_rows.iter().all(|r| !r.last().unwrap().is_empty()));
+    assert_eq!(
+        lfq.meta.get("andes.lfq.feature_fdr").map(String::as_str),
+        Some("0.2")
+    );
+    let accepted = col(&header, "accepted");
+    assert!(rows.iter().all(|r| r[accepted] == "true"));
+    assert!(rows
+        .iter()
+        .all(|r| r[col(&header, "filename")] == "lfq_synthetic"));
     let (n, _) = parquet_rows(&qpx.join("quantms.feature.parquet"));
     assert_eq!(n, rows.len());
 }
@@ -620,7 +668,7 @@ fn outputs_unchanged_without_quant_dir() {
             run_lfq_fixture(&pin, &qpx, &[]);
         }
     }
-    for name in ["lfq.lfq.tsv", "lfq.lfq_features.tsv", "lfq.pin"] {
+    for name in ["lfq.lfq.parquet", "lfq.pin"] {
         let a = std::fs::read(plain.path().join(name)).unwrap();
         let b = std::fs::read(with.path().join(name)).unwrap();
         assert!(!a.is_empty(), "{name} is empty");

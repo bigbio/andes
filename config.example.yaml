@@ -83,13 +83,13 @@ quant:
   # tmt_level: 2                 # 2 = identified MS2, 3 = its SPS-MS3 scan
   # tmt_tol: 20ppm               # reporter m/z window (default 20ppm (10ppm tmt32/tmt35) high-res MS2 or tmt_level 3, 0.3da ion-trap MS2)
   # tmt_correction: lot.txt      # kit impurity sheet (quantms text form); default none
-  # tmt_min_purity: 0.7          # quantification gate: precursor purity floor for tmt.tsv (0 = off)
-  # tmt_max_pep: 0.05            # quantification gate: Percolator PEP cap for tmt.tsv (1 = off; needs rescoring)
+  # tmt_min_purity: 0.7          # quantification gate: precursor purity floor (0 = off)
+  # tmt_max_pep: 0.05            # quantification gate: Percolator PEP cap (1 = off; needs rescoring)
   # tmt_min_sn: 0                # quantification gate: summed reporter S/N floor (0 = off; needs noise values)
   # lfq: false                   # label-free MS1 feature quantification
   # lfq_tol: 10ppm
   # lfq_rt_window: 60            # seconds around the identifying PSM
-  # lfq_min_cosine: 0.7          # envelope cosine below which a feature is left out of lfq.tsv
+  # lfq_min_cosine: 0.7          # envelope cosine below which a feature is not accepted in lfq.parquet
   # lfq_feature_fdr: 0.05
   # dir: quant_out              # per-run <stem>.ms1.parquet + <stem>.quant.parquet for multi-run quantification
   # quant_fdr: 0.01              # PSM q-value cut for quant targets (default: rescoring fdr)

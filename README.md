@@ -225,12 +225,12 @@ without one of them.
 `--tmt tmt10` reads the reporter ions of every identified MS2 (or its SPS-MS3 with
 `--tmt-level 3`), applies the kit's impurity matrix (`--tmt-correction`) and reports the
 precursor isolation purity; `--lfq` integrates the isotope chromatograms of every identified
-precursor from the MS1 scans with an experimental decoy-based feature q-value estimate. Both write plain
-tables (`<stem>.tmt.tsv`, `<stem>.lfq.tsv`) and, with `--output-parquet`, the QPX
+precursor from the MS1 scans with an experimental decoy-based feature q-value estimate. Both write
+versioned Parquet tables (`<stem>.tmt.parquet`, `<stem>.lfq.parquet`) and, with `--output-parquet`, the QPX
 `quantms.feature.parquet` that quantms consumes. Normalization and protein roll-up stay
 downstream ([`DOCS.md` §10](DOCS.md#10-quantification)). `--lfq --mbr` adds match between runs
 over two or more inputs: every confident precursor is measured in every run, and transfers carry
-an internal quant-quality q-value (`<stem>.mbr.tsv`). The same stages run one at a time with
+an internal quant-quality q-value (`<stem>.mbr.parquet`). The same stages run one at a time with
 `andes quant library|extract|finalize` over a `--quant-dir`, for pipelines that spread runs
 over machines. On the ProteoBench label-free DDA module (PXD028735, six runs; measured at
 `47d2844`, before #166 and #167), andes quantified 54,932 precursors in at least 3 runs at

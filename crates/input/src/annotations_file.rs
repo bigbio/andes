@@ -29,7 +29,7 @@ use arrow::datatypes::{DataType, Float64Type, UInt32Type};
 use md5::{Digest, Md5};
 use model::{
     Annotation, ChainEnds, Edit, EntryKind, ModSite, PriorTier, Processing, Protein,
-    ProteinAnnotation, ProteinDb, SiteAnchor,
+    ProteinAnnotation, ProteinDb, SiteAnchor, SiteClaim,
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -160,7 +160,7 @@ pub(crate) fn add_claims(
     // Claims per reference in row order, each claim's content key by
     // (reference, id), and the content keys seen.
     let mut claims: BTreeMap<usize, Vec<Annotation>> = BTreeMap::new();
-    let mut sites: BTreeMap<usize, Vec<ModSite>> = BTreeMap::new();
+    let mut sites: BTreeMap<usize, Vec<(ModSite, PriorTier)>> = BTreeMap::new();
     let mut listed: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     let mut ids: HashMap<String, String> = HashMap::new();
     // Where each content key's claim went, so a better tier can replace a
@@ -223,7 +223,10 @@ pub(crate) fn add_claims(
         }
         if claim.edits.is_empty() && claim.processing.is_none() {
             seen.insert(key, (usize::MAX, 0));
-            sites.entry(r).or_default().extend(claim.mods);
+            sites
+                .entry(r)
+                .or_default()
+                .extend(claim.mods.iter().map(|m| (*m, claim.tier)));
         } else {
             let list = claims.entry(r).or_default();
             seen.insert(key, (r, list.len()));
@@ -240,8 +243,26 @@ pub(crate) fn add_claims(
             .cloned()
             .unwrap_or_else(|| ProteinAnnotation::new(Vec::new(), None));
         let mut all = info.mod_sites.clone();
-        all.extend(extra);
+        all.extend(extra.iter().map(|(m, _)| *m));
         info.mod_sites = ProteinAnnotation::new(all, None).mod_sites;
+        let mut claims = info.site_claims.clone();
+        for (m, tier) in &extra {
+            // One claim per site: an equal claim keeps the better tier.
+            match claims.iter_mut().find(|c| {
+                c.knockoff_of.is_none()
+                    && c.position == m.position
+                    && (c.mass_delta - m.mass_delta).abs() <= model::protein::SITE_MASS_TOLERANCE
+            }) {
+                Some(c) => c.tier = c.tier.min(*tier),
+                None => claims.push(SiteClaim {
+                    position: m.position,
+                    mass_delta: m.mass_delta,
+                    tier: *tier,
+                    knockoff_of: None,
+                }),
+            }
+        }
+        info = info.with_site_claims(claims);
         p.annotation = Some(Arc::new(info));
     }
 

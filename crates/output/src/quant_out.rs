@@ -57,6 +57,24 @@ pub struct TmtRow {
     pub purity: Option<f32>,
     pub raw: Vec<f32>,
     pub corrected: Vec<f32>,
+    /// Per-channel signal-to-noise of the corrected intensities (the raw ones
+    /// without a correction matrix), when the reporter scan records noise.
+    pub sn: Option<Vec<f32>>,
+    /// Suggested weight of this PSM in a protein or peptide roll-up (0 for a
+    /// PSM the quantification gate removed).
+    pub quant_weight: f32,
+}
+
+impl TmtRow {
+    /// Summed raw reporter intensity.
+    pub fn intensity_sum(&self) -> f32 {
+        self.raw.iter().map(|v| v.max(0.0)).sum()
+    }
+
+    /// Summed reporter signal-to-noise, when noise is known.
+    pub fn sn_sum(&self) -> Option<f32> {
+        self.sn.as_ref().map(|sn| sn.iter().sum())
+    }
 }
 
 /// One quantified precursor feature of a label-free run.
@@ -83,8 +101,10 @@ fn fmt_f32(v: f32) -> String {
 }
 
 /// Write `tmt.tsv`: one row per quantified PSM, the corrected channel
-/// intensities in kit order (`tmt_126 … tmt_131`), and the raw values in a
-/// trailing `raw_` block when a correction matrix was applied.
+/// intensities in kit order (`tmt_126 … tmt_131`), the raw values in a
+/// `raw_` block when a correction matrix was applied, then the summed reporter
+/// intensity, summed signal-to-noise and roll-up weight, and a per-channel
+/// `sn_` block (empty cells when the reporter scan carries no noise).
 pub fn write_tmt_tsv(path: &Path, plex: Plex, rows: &[TmtRow], corrected: bool) -> io::Result<()> {
     let mut w = BufWriter::new(std::fs::File::create(path)?);
     let prefix = if matches!(plex, Plex::Itraq4 | Plex::Itraq8) {
@@ -118,6 +138,12 @@ pub fn write_tmt_tsv(path: &Path, plex: Plex, rows: &[TmtRow], corrected: bool) 
             header.push(format!("raw_{prefix}_{}", c.name));
         }
     }
+    for name in ["reporter_intensity_sum", "reporter_sn_sum", "quant_weight"] {
+        header.push(name.to_string());
+    }
+    for c in plex.channels() {
+        header.push(format!("sn_{prefix}_{}", c.name));
+    }
     writeln!(w, "{}", header.join("\t"))?;
     for r in rows {
         let id = &r.id;
@@ -140,6 +166,13 @@ pub fn write_tmt_tsv(path: &Path, plex: Plex, rows: &[TmtRow], corrected: bool) 
         cols.extend(shown.iter().map(|&v| fmt_f32(v)));
         if corrected {
             cols.extend(r.raw.iter().map(|&v| fmt_f32(v)));
+        }
+        cols.push(fmt_f32(r.intensity_sum()));
+        cols.push(fmt_opt(r.sn_sum().map(|v| format!("{v:.2}"))));
+        cols.push(format!("{:.4}", r.quant_weight));
+        match &r.sn {
+            Some(sn) => cols.extend(sn.iter().map(|v| format!("{v:.2}"))),
+            None => cols.extend(plex.channels().iter().map(|_| String::new())),
         }
         writeln!(w, "{}", cols.join("\t"))?;
     }
@@ -303,19 +336,40 @@ mod tests {
             purity: Some(0.9),
             raw: vec![1.0, 2.0, 3.0, 4.0],
             corrected: vec![1.1, 2.1, 3.1, 4.1],
+            sn: Some(vec![11.0, 21.0, 31.0, 41.0]),
+            quant_weight: 0.81,
         }];
         write_tmt_tsv(&p, Plex::Itraq4, &rows, true).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
         let mut lines = text.lines();
         let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
-        assert_eq!(header.len(), 13 + 8);
+        assert_eq!(header.len(), 13 + 8 + 3 + 4);
         assert_eq!(header[13], "itraq_114");
         assert_eq!(header[17], "raw_itraq_114");
+        assert_eq!(
+            header[21..24],
+            ["reporter_intensity_sum", "reporter_sn_sum", "quant_weight"]
+        );
+        assert_eq!(header[24], "sn_itraq_114");
         let row: Vec<&str> = lines.next().unwrap().split('\t').collect();
         assert_eq!(row[6], "PEPTIDEK");
         assert_eq!(row[12], "0.9000");
         assert_eq!(row[13], "1.100000e0");
         assert_eq!(row[17], "1.000000e0");
+        assert_eq!(row[21], "1.000000e1");
+        assert_eq!(row[22], "104.00");
+        assert_eq!(row[23], "0.8100");
+        assert_eq!(row[27], "41.00");
+        // Without noise the S/N cells stay empty and the layout is unchanged.
+        let mut no_noise = rows[0].clone();
+        no_noise.sn = None;
+        write_tmt_tsv(&p, Plex::Itraq4, &[no_noise], false).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        let mut lines = text.lines();
+        assert_eq!(lines.next().unwrap().split('\t').count(), 13 + 4 + 3 + 4);
+        let row: Vec<&str> = lines.next().unwrap().split('\t').collect();
+        assert_eq!(row[18], "");
+        assert_eq!(row[20..24], ["", "", "", ""]);
     }
 
     /// Assert every non-empty cell outside `text_cols` parses as `f64`
@@ -356,6 +410,8 @@ mod tests {
             purity: Some(0.9),
             raw: vec![3.4, 0.0, 12.5, 4.2e6],
             corrected: vec![3.3, 0.0, 9.99, 4.1e6],
+            sn: Some(vec![0.5, 0.0, 2.0, 1.0e4]),
+            quant_weight: 1.0,
         }];
         write_tmt_tsv(&tmt, Plex::Itraq4, &tmt_rows, true).unwrap();
         assert_numeric_cells_parse(

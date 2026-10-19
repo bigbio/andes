@@ -717,11 +717,25 @@ pub(crate) struct SearchArgs {
     #[arg(long = "tmt-correction", value_name = "FILE")]
     pub(crate) tmt_correction: Option<PathBuf>,
 
-    /// Drop PSMs whose precursor isolation purity (share of the MS1 isolation
-    /// window that belongs to the precursor) is below this from `tmt.tsv`.
-    /// They stay in the parquet with their purity. Default 0 (report only).
-    #[arg(long = "tmt-min-purity", default_value = "0", value_parser = parse_unit_fraction)]
+    /// Quantification gate: leave PSMs whose precursor isolation purity (share
+    /// of the MS1 isolation window that belongs to the precursor) is below
+    /// this out of `tmt.tsv`. They stay in the identification output, and in
+    /// the parquet with `quant_weight` 0. 0 turns the criterion off.
+    #[arg(long = "tmt-min-purity", default_value = "0.7", value_parser = parse_unit_fraction)]
     pub(crate) tmt_min_purity: f64,
+
+    /// Quantification gate: leave PSMs whose Percolator PEP is above this out
+    /// of `tmt.tsv` (they stay in the identification output). Needs
+    /// `--rescore`. 1 turns the criterion off.
+    #[arg(long = "tmt-max-pep", default_value = "0.05", value_parser = parse_unit_fraction)]
+    pub(crate) tmt_max_pep: f64,
+
+    /// Quantification gate: leave PSMs whose summed reporter signal-to-noise
+    /// is below this out of `tmt.tsv`. Applies only where the reporter scan
+    /// records noise (Thermo `.raw`, or mzML converted with noise arrays);
+    /// other PSMs are not held to it. 0 turns the criterion off.
+    #[arg(long = "tmt-min-sn", default_value = "0", value_parser = parse_non_negative)]
+    pub(crate) tmt_min_sn: f64,
 
     /// Label-free MS1 quantification of the confident precursors: isotope
     /// chromatograms are extracted around each identified peptidoform's
@@ -1185,6 +1199,20 @@ pub(crate) fn parse_unit_fraction(s: &str) -> Result<f64, String> {
     if !v.is_finite() || !(0.0..=1.0).contains(&v) {
         return Err(format!(
             "invalid value `{s}`: must be finite and within [0, 1] (got {v})"
+        ));
+    }
+    Ok(v)
+}
+
+/// A finite number `>= 0`.
+pub(crate) fn parse_non_negative(s: &str) -> Result<f64, String> {
+    let v: f64 = s
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid value `{s}`: expected a number >= 0"))?;
+    if !v.is_finite() || v < 0.0 {
+        return Err(format!(
+            "invalid value `{s}`: must be finite and >= 0 (got {v})"
         ));
     }
     Ok(v)

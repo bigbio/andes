@@ -135,6 +135,8 @@ pub struct QuantCfg {
     pub tmt_tol: Option<String>,
     pub tmt_correction: Option<PathBuf>,
     pub tmt_min_purity: Option<f64>,
+    pub tmt_max_pep: Option<f64>,
+    pub tmt_min_sn: Option<f64>,
     pub lfq: Option<bool>,
     pub lfq_tol: Option<String>,
     pub lfq_rt_window: Option<f64>,
@@ -419,6 +421,8 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     }
     set_opt!("tmt_correction", tmt_correction, cfg.quant.tmt_correction);
     set!("tmt_min_purity", tmt_min_purity, cfg.quant.tmt_min_purity);
+    set!("tmt_max_pep", tmt_max_pep, cfg.quant.tmt_max_pep);
+    set!("tmt_min_sn", tmt_min_sn, cfg.quant.tmt_min_sn);
     set!("lfq", lfq, cfg.quant.lfq);
     if let Some(v) = cfg.quant.lfq_tol {
         if !cli_set(m, "lfq_tol") {
@@ -472,6 +476,13 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     check_unit_fraction("mbr_library_fdr", args.mbr_library_fdr)?;
     check_unit_fraction("mbr_fdr", args.mbr_fdr)?;
     check_unit_fraction("tmt_min_purity", args.tmt_min_purity)?;
+    check_unit_fraction("tmt_max_pep", args.tmt_max_pep)?;
+    if !args.tmt_min_sn.is_finite() || args.tmt_min_sn < 0.0 {
+        return Err(format!(
+            "config: tmt_min_sn must be >= 0, got {}",
+            args.tmt_min_sn
+        ));
+    }
     check_unit_fraction("lfq_min_cosine", args.lfq_min_cosine)?;
     check_unit_fraction("lfq_feature_fdr", args.lfq_feature_fdr)?;
     if let Some(v) = args.quant_fdr {

@@ -150,7 +150,7 @@ or an XML file with no UniProt entries, is an error.
 | `--uniprot-isoforms` | bool | off | Add one target entry per described isoform, rebuilt from the canonical sequence and its splice variants. |
 | `--uniprot-chains` | bool | off | Add one target entry per mature chain or peptide with a terminus the precursor lacks. Only peptides at those new termini are enumerated from it. |
 | `--uniprot-evidence` | enum | `experimental` | Minimum UniProt evidence for a variant, an annotated site or a mature chain: `experimental`, `curated`, or `any` (see below). |
-| `--knockoffs` | int | `4` | Knockoff entries per single-residue variant of a canonical sequence, from `--uniprot-variants` or `--annotations` (`0`: none). With rescoring they give variant PSMs a knockoff q-value, and variant PSMs whose variant has no knockoff are not accepted. See the README section on knockoff variants. |
+| `--knockoffs` | int | `4` | Knockoff entries per single-residue variant of a canonical sequence, from `--uniprot-variants` or `--annotations`, and knockoff sites per annotated modification site (`0`: none). With rescoring they give variant PSMs a knockoff q-value, and variant PSMs whose variant has no knockoff are not accepted. See the README section on knockoff variants. |
 
 **Annotated modification sites.** `modified residue`, `lipid moiety-binding region` and
 `glycosylation site` features become sites with the monoisotopic mass of the named modification,
@@ -374,6 +374,60 @@ Edits together with processing are not supported yet. Rows are checked on load:
 
 The run log counts every row left out, by reason.
 
+### Site claims (knockoff sites, experimental)
+
+An annotated modification site is a claim: residue r of protein P carries modification M. Sites
+come from UniProt XML (`modified residue` and similar features), annotation-file `mods` rows and
+PEFF `\ModRes*` keys. For each one, andes adds up to `--knockoffs` knockoff sites. A knockoff
+site carries the same modification on a matched residue of the same protein that no annotation
+names. It must have:
+- the same residue;
+- the same digestion: a modified K or R blocks cleavage, so the merged peptide is compared;
+- the next-residue rule of variant knockoffs;
+- the same motif status:
+
+  | Modification | Status matched |
+  |---|---|
+  | Phospho S/T | proline at +1, R/K at −3, D/E at +3 |
+  | Phospho Y | D/E at −1..−4 |
+  | Methyl or dimethyl R, deamidated N, hydroxy P | G at +1 |
+  | N | the N-x-S/T sequon |
+
+- another peptide whose length is within 3 of the real one's;
+- at least 5 residues from every real site of that modification.
+
+Terminal sites get none.
+
+A `sites=annotated` mod may also be placed on knockoff sites. A PSM that puts the modification on
+an annotated site supports that site's claim. One that puts it on a knockoff site is a false
+claim. Within each modification × residue × tier, the knockoff PSMs estimate the false claims, as
+for variants, and each site gets a site q-value. A PSM's own q-value is unchanged: a peptide
+identification does not depend on which residue carries the modification.
+
+Placements on knockoff sites are never reported for a `sites=annotated` mod, because they exist
+only for the estimate. For an unrestricted mod, which may sit anywhere anyway, they stay ordinary
+PSMs.
+
+Some knockoff sites are really modified, because annotation is incomplete. Counting them as false
+makes the estimate err towards rejecting true site claims, never towards accepting false ones.
+
+**Experimental.** How conservative the estimate is has not yet been measured against known sites.
+
+Measured on a mouse-liver phospho run (PXD007653, reviewed mouse UniProt, 51,906 annotated sites,
+42,985 knockoff sites):
+- **Phospho placed freely** (the usual search): identifications are identical with and without
+  knockoff sites, and 1,403 annotated sites pass a site q-value of 0.05.
+- **Phospho restricted to annotated sites** (`sites=annotated`): the knockoff placements cost 0.7%
+  of PSMs and 0.8% of phosphopeptides, and only 119 sites pass, because many knockoff residues are
+  really phosphorylated.
+
+Site claims are therefore most useful with freely placed mods. 31,165 of the sites had no residue
+matching all their context rules, so no knockoff.
+
+With rescoring, `<stem>.sites.tsv` lists the accepted claims, one row per site whose best PSM
+passes `--fdr` and whose site q-value passes `--proteoform-fdr`. Its columns are `family
+accession position residue modification_mass prior_tier psms best_psm site_q confidence`.
+
 ### PEFF databases
 
 `--database x.peff` (or `.peff.gz`) reads a PSI Extended FASTA Format file: FASTA whose headers
@@ -452,7 +506,9 @@ See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model)
 | `--tmt-level` | `2\|3` | `2` | Reporter scan: the identified MS2, or the SPS-MS3 whose precursor references it (mzML `<precursor spectrumRef>`, `.raw` `Master Scan Number` trailer). |
 | `--tmt-tol` | tolerance | `20ppm` (`10ppm` for `tmt32`/`tmt35`) for high-res MS2 and for `--tmt-level 3`; `0.3da` for ion-trap MS2 | Most intense centroid within this window of each reporter m/z. A window that reaches half the spacing of the kit's closest channels (6.3 mDa for the TMT 10/11/16/18-plex N/C pairs, 2.9 mDa for the TMTpro 32/35-plex deuterated channels, so at most 10.8 ppm) is refused, so ion-trap MS2 cannot quantify those kits at `--tmt-level 2`. |
 | `--tmt-correction` | path | *(none)* | Isotope impurity sheet of the kit lot (§10); corrected intensities by NNLS, raw kept alongside. Refused for `tmt32`/`tmt35`. |
-| `--tmt-min-purity` | 0..1 | `0` | Drop PSMs below this precursor isolation purity from `tmt.tsv` (they stay in the parquet). |
+| `--tmt-min-purity` | 0..1 | `0.7` | Quantification gate (§10): PSMs below this precursor isolation purity are left out of `tmt.tsv`. `0` turns it off. |
+| `--tmt-max-pep` | 0..1 | `0.05` | Quantification gate: PSMs whose Percolator PEP is above this are left out of `tmt.tsv`. Needs `--rescore`; `1` turns it off. |
+| `--tmt-min-sn` | ≥ 0 | `0` (off) | Quantification gate: PSMs whose summed reporter signal-to-noise is below this are left out of `tmt.tsv`. Applies only where the reporter scan records noise (Thermo `.raw`, mzML with noise arrays). |
 | `--lfq` | flag | off | Label-free MS1 quantification of the confident precursors (§10). Writes `<stem>.lfq.tsv` and `<stem>.lfq_features.tsv`. mzML / `.raw` with high-resolution MS1; the MS2 may be ion-trap. |
 | `--quant-dir` | dir | *(none)* | Per input file writes `<stem>.ms1.parquet` (the run's MS1 scans, every FAIMS voltage), `<stem>.ms2.parquet` (every MS2 scan reduced to its 100 most intense centroids, with its precursor and isolation window) and `<stem>.quant.parquet` (every rank-1 PSM, targets and decoys, no FDR filter; `spec_id` is the PIN SpecId, `search_score` the PIN `RawScore`) for the multi-run quantification stages. Implies MS1 capture; same inputs as `--lfq`. Two inputs with the same stem, or an input without MS1 scans, are an error. Other outputs are unchanged. |
 | `--lfq-tol` | tolerance | `10ppm` | MS1 tolerance of the isotope chromatograms, and of the `--mbr` template fit (ppm only there). |
@@ -746,7 +802,7 @@ Written next to the PIN (or next to `--output-tsv`/`--output-parquet` under `--r
 
 | File | Rows | Columns |
 |---|---|---|
-| `<stem>.tmt.tsv` | one per quantified PSM | `filename scannr spec_id quant_scan quant_ms_level rt peptide charge proteins is_decoy psm_q_value psm_pep purity`, then one `tmt_<channel>` (or `itraq_<channel>`) per channel, then `raw_<...>` when a correction matrix was applied |
+| `<stem>.tmt.tsv` | one per PSM that passed the quantification gate (§10) | `filename scannr spec_id quant_scan quant_ms_level rt peptide charge proteins is_decoy psm_q_value psm_pep purity`, then one `tmt_<channel>` (or `itraq_<channel>`) per channel, then `raw_<...>` when a correction matrix was applied, then `reporter_intensity_sum reporter_sn_sum quant_weight`, then one `sn_<prefix>_<channel>` per channel (empty without noise values) |
 | `<stem>.proteoforms.tsv` (`--rescore`/`--rescore-native` with UniProt isoform, variant or chain entries) | one per family member with a target PSM at q ≤ `--fdr` (a specific one for isoform, variant and chain entries) | `family member kind feature confidence q_value evidence specific_peptides shared_peptides psms best_psm alternative_explanation source prior_tier`, then `quantity_<run or channel>` with `--lfq`/`--tmt` (§1a, proteoform table) |
 | `<stem>.lfq.tsv` | one per (peptidoform, charge) at feature q ≤ `--lfq-feature-fdr` and cosine ≥ `--lfq-min-cosine` | `peptide charge proteins feature_q_value score cosine`, then the integrated area per input file |
 | `<stem>.lfq_features.tsv` | one per feature per run (all, with their q-value) | apex RT, boundaries, scan count, area, apex height, per-isotope areas, cosine, score, decoy score, feature q-value |
@@ -1071,9 +1127,30 @@ single input run's MS1 scans still need to fit in memory while it is processed.
   monoisotopic m/z, so on `.raw` input the window stays centred there. This is the ladder of a reference
   purity filter without its fuzzy window border and next-scan interpolation, and with ¹³C
   spacing and a two-sided nearest-peak match (stepping by the neutron mass misses the upper
-  isotopes). Reported per PSM; `--tmt-min-purity`
-  filters `tmt.tsv`. Needs the isolation window offsets in the file, and is not computed under
-  `--chimeric`.
+  isotopes). Reported per PSM. Needs the isolation window offsets in the file, and is not
+  computed under `--chimeric`.
+* **Signal-to-noise.** Orbitrap reporter scans carry the instrument's noise estimate: per
+  centroid in a Thermo `.raw`, and as the `sampled noise m/z array` / `sampled noise intensity
+  array` of an mzML converted with noise data (the converter's noise-array option). The noise at each
+  reporter m/z (linear between the sampled points) divides the reporter intensity (the corrected
+  one when `--tmt-correction` is given) into a per-channel signal-to-noise, written as the `sn_`
+  columns and their sum `reporter_sn_sum`. Both noise sources give the same values on the same
+  scans. Ion-trap reporter scans, and mzML written without noise arrays (the converters'
+  default), have none: the `sn_` cells stay empty and `--tmt-min-sn` does not apply to them.
+* **Quantification gate.** A PSM enters `tmt.tsv` only if its precursor purity is at least
+  `--tmt-min-purity` (0.7), its Percolator PEP is at most `--tmt-max-pep` (0.05) and its summed
+  reporter signal-to-noise is at least `--tmt-min-sn` (off). A PSM without the value a criterion
+  needs (no MS1 or isolation window for purity, no `--rescore` for PEP, no noise for S/N) is not
+  held to that criterion. The gate only chooses which PSMs are quantified: every PSM stays in the
+  identification output (PIN, TSV, `psms.parquet`), and the quantms feature parquet keeps every
+  quantified PSM with `quant_weight` 0 for the gated ones. The log counts the PSMs each criterion
+  removed. On SPS-MS3 data low-purity and high-PEP PSMs carry most of the interference and
+  ratio compression of the PSMs a deep search adds; purity barely matters for high-resolution
+  MS2 reporters, where the remaining interference is co-isolation inside a pure-looking window.
+  Set all three to their off values to quantify every confident PSM.
+* **Roll-up weight** (`quant_weight`). For a PSM that passed the gate, purity² (1 without a
+  purity); 0 for a gated PSM. A protein or peptide sum weighted by it lowers the influence of
+  the PSMs most exposed to co-isolation. The corrected intensities are never rescaled by it.
 * **Not done here:** reference-channel ratios, channel normalization, protein aggregation.
 
 ```bash
@@ -1396,7 +1473,7 @@ Other tools are anonymised with the engine labels of [`docs/benchmarks/`](docs/b
 `--lfq` and `--tmt-level 3` need mzML or Thermo `.raw` (MS1 / MS3 scans; MGF carries MS2 only
 and Bruker `.d` MS1 frames are not read yet) and cannot be combined with `--chimeric`;
 `--tmt <plex>` at MS2 works with every input and with `--chimeric`, without precursor purity
-there (`--tmt-min-purity` is refused). Purity is unavailable without MS1 scans or isolation
+there (no purity, so `--tmt-min-purity` has no effect). Purity is unavailable without MS1 scans or isolation
 offsets. Neither module runs in `--glyco` mode.
 
 ---

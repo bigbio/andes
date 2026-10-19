@@ -18,7 +18,7 @@
 //! processing: edits make a variant entry, processing a chain entry, and mods
 //! alone add sites to the reference itself. Unknown columns are ignored.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
@@ -28,8 +28,8 @@ use arrow::compute::cast;
 use arrow::datatypes::{DataType, Float64Type, UInt32Type};
 use md5::{Digest, Md5};
 use model::{
-    Annotation, ChainEnds, Edit, EntryKind, ModSite, Processing, Protein, ProteinAnnotation,
-    ProteinDb, SiteAnchor,
+    Annotation, ChainEnds, Edit, EntryKind, ModSite, PriorTier, Processing, Protein,
+    ProteinAnnotation, ProteinDb, SiteAnchor,
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -86,6 +86,34 @@ pub(crate) struct Row {
     /// `(position, residue, mass, anchor)`.
     pub(crate) mods: Vec<(u32, String, f64, String)>,
     pub(crate) processing: Option<(u32, u32)>,
+    pub(crate) source: String,
+    pub(crate) tier: PriorTier,
+}
+
+/// The tier of a claim from what its source says: the sample's own call
+/// (`genotype` not reference), then a common allele (`population_af` ≥ 0.01),
+/// then curated or experimental evidence or a benign clinical class, else a
+/// catalogue claim.
+pub(crate) fn tier_of(
+    genotype: &str,
+    population_af: Option<f64>,
+    evidence: &str,
+    clinical_significance: &str,
+) -> PriorTier {
+    let g = genotype.trim();
+    if !g.is_empty() && !matches!(g, "0/0" | "0|0" | "./." | ".|." | ".") {
+        PriorTier::Sample
+    } else if population_af.is_some_and(|af| af >= 0.01) {
+        PriorTier::Common
+    } else if matches!(evidence.trim(), "experimental" | "curated")
+        || clinical_significance
+            .to_ascii_lowercase()
+            .contains("benign")
+    {
+        PriorTier::Curated
+    } else {
+        PriorTier::Catalogue
+    }
 }
 
 /// Read `paths` and add their claims to `db` (see [`add_claims`]).
@@ -132,7 +160,9 @@ pub(crate) fn add_claims(
     let mut sites: BTreeMap<usize, Vec<ModSite>> = BTreeMap::new();
     let mut listed: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     let mut ids: HashMap<String, String> = HashMap::new();
-    let mut seen: HashSet<String> = HashSet::new();
+    // Where each content key's claim went, so a better tier can replace a
+    // merged claim's.
+    let mut seen: HashMap<String, (usize, usize)> = HashMap::new();
     for row in rows {
         stats.rows += 1;
         let skip = |stats: &mut AnnotationLoadStats, reason: &'static str| {
@@ -178,14 +208,23 @@ pub(crate) fn add_claims(
                 ids.insert(id, key.clone());
             }
         }
-        if !seen.insert(key) {
+        if let Some(&(cr, ci)) = seen.get(&key) {
             stats.merged += 1;
+            if let Some(kept) = claims.get_mut(&cr).and_then(|c| c.get_mut(ci)) {
+                if claim.tier < kept.tier {
+                    kept.tier = claim.tier;
+                    kept.source = claim.source;
+                }
+            }
             continue;
         }
         if claim.edits.is_empty() && claim.processing.is_none() {
+            seen.insert(key, (usize::MAX, 0));
             sites.entry(r).or_default().extend(claim.mods);
         } else {
-            claims.entry(r).or_default().push(claim);
+            let list = claims.entry(r).or_default();
+            seen.insert(key, (r, list.len()));
+            list.push(claim);
         }
     }
 
@@ -340,6 +379,8 @@ fn claim_of(row: &Row, reference: &Protein) -> Result<Annotation, &'static str> 
     a.edits = edits;
     a.mods = mods;
     a.processing = processing;
+    a.source = (!row.source.is_empty()).then(|| Arc::from(row.source.as_str()));
+    a.tier = row.tier;
     Ok(a)
 }
 
@@ -385,7 +426,26 @@ fn read_rows(path: &Path) -> Result<Vec<Row>, AnnotationsError> {
         let id = utf8(&required("annotation_id")?).map_err(bad)?;
         let reference = utf8(&required("reference_accession")?).map_err(bad)?;
         let md5 = utf8(&required("reference_md5")?).map_err(bad)?;
-        required("source_db")?;
+        let source = utf8(&required("source_db")?).map_err(bad)?;
+        let optional_utf8 = |n: &str| -> Result<Vec<Option<String>>, AnnotationsError> {
+            match column(n) {
+                Some(c) => utf8(&c).map_err(bad),
+                None => Ok(vec![None; batch.num_rows()]),
+            }
+        };
+        let genotype = optional_utf8("genotype")?;
+        let evidence = optional_utf8("evidence")?;
+        let clinical = optional_utf8("clinical_significance")?;
+        let population_af = match column("population_af") {
+            Some(c) => {
+                let c = cast(&c, &DataType::Float64).map_err(|e| bad(e.to_string()))?;
+                let c = c.as_primitive::<Float64Type>();
+                (0..c.len())
+                    .map(|i| (!c.is_null(i)).then(|| c.value(i)))
+                    .collect()
+            }
+            None => vec![None; batch.num_rows()],
+        };
         let edits = match column("edits") {
             Some(c) => list_of_structs(&c, &["start", "end", "ref", "alt"]).map_err(bad)?,
             None => vec![None; batch.num_rows()],
@@ -439,6 +499,13 @@ fn read_rows(path: &Path) -> Result<Vec<Row>, AnnotationsError> {
                 edits,
                 mods,
                 processing: processing[i],
+                source: source[i].clone().unwrap_or_default(),
+                tier: tier_of(
+                    genotype[i].as_deref().unwrap_or(""),
+                    population_af[i],
+                    evidence[i].as_deref().unwrap_or(""),
+                    clinical[i].as_deref().unwrap_or(""),
+                ),
             });
         }
     }
@@ -579,6 +646,7 @@ mod tests {
         edits: Vec<EditRow<'a>>,
         mods: Vec<ModRow<'a>>,
         processing: Option<(i64, i64)>,
+        genotype: Option<&'a str>,
     }
 
     fn list_of(fields: Vec<(Arc<Field>, ArrayRef)>, lengths: Vec<usize>) -> ArrayRef {
@@ -679,6 +747,12 @@ mod tests {
             ("edits", edits),
             ("mods", mods),
             ("processing", processing),
+            (
+                "genotype",
+                Arc::new(StringArray::from(
+                    rows.iter().map(|r| r.genotype).collect::<Vec<_>>(),
+                )),
+            ),
         ];
         let schema = Arc::new(Schema::new(
             columns
@@ -731,6 +805,7 @@ mod tests {
             edits: Vec::new(),
             mods: Vec::new(),
             processing: None,
+            genotype: None,
         }
     }
 
@@ -939,7 +1014,55 @@ mod tests {
         for (x, f) in xml_db.proteins.iter().zip(&file_db.proteins).skip(1) {
             assert_eq!(x.accession, f.accession);
             assert_eq!(x.sequence, f.sequence);
-            assert_eq!(x.annotation, f.annotation, "{}", x.accession);
+            // The same claim, apart from where it is said to come from.
+            let strip = |p: &Protein| {
+                let mut a = p.annotation.as_deref().cloned().unwrap();
+                if let Some(o) = a.origin.as_mut() {
+                    o.source = None;
+                    o.tier = PriorTier::Catalogue;
+                }
+                a
+            };
+            assert_eq!(strip(x), strip(f), "{}", x.accession);
         }
+    }
+
+    #[test]
+    fn tiers_follow_the_first_rule_that_holds() {
+        assert_eq!(tier_of("0/1", Some(0.5), "curated", ""), PriorTier::Sample);
+        assert_eq!(tier_of("0/0", Some(0.02), "", ""), PriorTier::Common);
+        assert_eq!(
+            tier_of("", Some(0.001), "", "Likely benign"),
+            PriorTier::Curated
+        );
+        assert_eq!(tier_of("./.", None, "experimental", ""), PriorTier::Curated);
+        assert_eq!(tier_of("", None, "any", "pathogenic"), PriorTier::Catalogue);
+    }
+
+    #[test]
+    fn a_merged_claim_keeps_the_best_tier() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.parquet"), dir.path().join("b.parquet"));
+        write(
+            &a,
+            &[In {
+                edits: vec![(4, 5, "D", "N")],
+                ..row("cat")
+            }],
+            ANNOTATIONS_SCHEMA,
+        );
+        write(
+            &b,
+            &[In {
+                edits: vec![(4, 5, "D", "N")],
+                genotype: Some("0/1"),
+                ..row("own")
+            }],
+            ANNOTATIONS_SCHEMA,
+        );
+        let mut d = db();
+        load_annotations(&[&a, &b], &mut d, None).unwrap();
+        let v = d.proteins[1].origin().unwrap();
+        assert_eq!((v.tier, &*v.feature), (PriorTier::Sample, "cat"));
     }
 }

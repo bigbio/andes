@@ -17,7 +17,7 @@
 
 use std::io::BufRead;
 
-use model::{Protein, ProteinDb, SiteAnchor};
+use model::{PriorTier, Protein, ProteinDb, SiteAnchor};
 
 use crate::annotation::{change_label, KnockoffOptions};
 use crate::annotations_file::{
@@ -183,6 +183,8 @@ fn entry_rows(
         edits: Vec::new(),
         mods: Vec::new(),
         processing: None,
+        source: "PEFF".to_string(),
+        tier: PriorTier::Catalogue,
     };
     let mut rows = Vec::new();
     for (key, value) in keys {

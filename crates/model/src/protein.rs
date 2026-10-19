@@ -201,6 +201,9 @@ impl EntryKind {
 /// residues minus the mass of the residues they replace. A knockoff entry (the
 /// same substitution moved to a position no known variant has, an almost
 /// certainly false target) names the feature it copies in `knockoff_of`.
+/// `source` names the database the claim comes from, and `tier` how likely
+/// claims of its kind are to be real, which keeps claims of different
+/// reliability from sharing one error estimate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntryOrigin {
     pub kind: EntryKind,
@@ -208,6 +211,33 @@ pub struct EntryOrigin {
     pub feature: Arc<str>,
     pub variant_delta_da: f64,
     pub knockoff_of: Option<Arc<str>>,
+    pub source: Option<Arc<str>>,
+    pub tier: PriorTier,
+}
+
+/// How likely a claim is to be real, from what its source says about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub enum PriorTier {
+    /// Called in the sample itself (its own genotype).
+    Sample,
+    /// Common in a reference population (allele frequency at least 1%).
+    Common,
+    /// Curated or experimental evidence, or classed benign.
+    Curated,
+    /// Anything else: a catalogue entry, weak evidence, no prior given.
+    #[default]
+    Catalogue,
+}
+
+impl PriorTier {
+    pub fn name(self) -> &'static str {
+        match self {
+            PriorTier::Sample => "sample",
+            PriorTier::Common => "common",
+            PriorTier::Curated => "curated",
+            PriorTier::Catalogue => "catalogue",
+        }
+    }
 }
 
 /// Which ends of a mature-chain entry are new termini, i.e. not termini of
@@ -481,6 +511,8 @@ mod tests {
             feature: Arc::from("VAR_005851_D7H"),
             variant_delta_da: 0.984016,
             knockoff_of: None,
+            source: None,
+            tier: PriorTier::Catalogue,
         };
         let var = Protein {
             annotation: Some(Arc::new(

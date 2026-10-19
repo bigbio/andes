@@ -2197,6 +2197,22 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // no other output.
     let mut knockoff_rows: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Some(ref mut map) = rescore_map {
+        // A variant peptide a reference protein holds once I and L are taken
+        // as equal identifies that reference too: share it before classes are
+        // assigned. Only rows that could be reported are checked.
+        if pin_index.has_alternative_entries {
+            let shared = output::share_isobaric_references(
+                map,
+                &pin_index,
+                fdr_threshold.max(proteoform_fdr),
+            );
+            if shared > 0 {
+                eprintln!(
+                    "Rescore: {shared} variant-class PSMs share their peptide with a reference \
+                     protein once I and L are taken as equal; they now name it"
+                );
+            }
+        }
         let counts = output::apply_class_fdr(map, &rescore_decoy_psms, &pin_index);
         if counts.len() > 1 {
             let line: Vec<String> = counts

@@ -305,6 +305,8 @@ mod tests {
                     feature: Arc::from("F"),
                     variant_delta_da: 0.0,
                     knockoff_of: None,
+                    source: None,
+                    tier: model::PriorTier::Catalogue,
                 })),
             )
         });

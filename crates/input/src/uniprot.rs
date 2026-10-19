@@ -35,7 +35,7 @@ use std::io::BufRead;
 use std::sync::Arc;
 
 use model::{
-    Annotation, ChainEnds, Edit, EntryKind, EntryOrigin, ModSite, Processing, Protein,
+    Annotation, ChainEnds, Edit, EntryKind, EntryOrigin, ModSite, PriorTier, Processing, Protein,
     ProteinAnnotation, ProteinDb, SiteAnchor,
 };
 
@@ -238,6 +238,9 @@ struct MatureChain {
     /// Accession tag: the feature id (`PRO_…`) or `CHAIN_<begin>-<end>`.
     tag: String,
 }
+
+/// The `source` of every UniProt XML entry.
+const UNIPROT: &str = "UniProt";
 
 const PROCESSING_FEATURES: [&str; 4] = [
     "signal peptide",
@@ -456,6 +459,13 @@ impl UniProtEntry {
                     format!("{}_{change}", f.id)
                 };
                 let mut v = Annotation::new(&tag, EntryKind::Variant);
+                v.source = Some(Arc::from(UNIPROT));
+                // Curated or experimental evidence, or weaker (`--uniprot-evidence any`).
+                v.tier = if EvidenceLevel::Curated.admits(self.evidence_codes(f)) {
+                    PriorTier::Curated
+                } else {
+                    PriorTier::Catalogue
+                };
                 v.edits = vec![Edit {
                     start: start as u32,
                     end: end as u32,
@@ -501,6 +511,8 @@ impl UniProtEntry {
             feature: Arc::from(feature),
             variant_delta_da: 0.0,
             knockoff_of: None,
+            source: Some(Arc::from(UNIPROT)),
+            tier: PriorTier::Curated,
         }
     }
 
@@ -681,6 +693,8 @@ impl UniProtEntry {
         if opts.chains {
             for c in self.mature_chains(opts, stats) {
                 let mut a = Annotation::new(&c.tag, EntryKind::Chain);
+                a.source = Some(Arc::from(UNIPROT));
+                a.tier = PriorTier::Curated;
                 a.processing = Some(Processing {
                     start: c.start as u32,
                     end: c.end as u32,
@@ -706,6 +720,8 @@ impl UniProtEntry {
                 // The isoform's own sites, plus (by the builder) the canonical
                 // sites on the residues it shares with the canonical sequence.
                 let mut a = Annotation::new(&iso.id, EntryKind::Isoform);
+                a.source = Some(Arc::from(UNIPROT));
+                a.tier = PriorTier::Curated;
                 a.edits = edits;
                 a.accession = Some(format!("{}|{}|{}", self.db_code(), iso.id, self.name));
                 a.description = Some(self.isoform_description(iso));

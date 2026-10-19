@@ -45,6 +45,11 @@ pub struct ProteoformRow {
     /// modification, and whether the canonical counterpart peptide was
     /// identified. Empty otherwise.
     pub alternative: String,
+    /// The database the member's claim comes from (empty for a FASTA entry).
+    pub source: String,
+    /// How likely claims like the member's are to be real (empty for a
+    /// FASTA entry).
+    pub tier: &'static str,
     /// Summed abundance of the member's specific peptides, per quant column.
     pub quantity: Vec<f64>,
 }
@@ -182,6 +187,12 @@ pub fn proteoform_table(
                 feature: p
                     .origin()
                     .map_or_else(String::new, |o| o.feature.to_string()),
+                source: p
+                    .origin()
+                    .and_then(|o| o.source.as_deref())
+                    .unwrap_or_default()
+                    .to_string(),
+                tier: p.origin().map_or("", |o| o.tier.name()),
                 specific_peptides: a.specific.len(),
                 shared_peptides: a.shared.len(),
                 psms: a.psms,
@@ -248,7 +259,7 @@ pub fn write_proteoform_tsv(
     let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
     write!(
         w,
-        "family\tmember\tkind\tfeature\tconfidence\tq_value\tevidence\tspecific_peptides\tshared_peptides\tpsms\tbest_psm\talternative_explanation"
+        "family\tmember\tkind\tfeature\tconfidence\tq_value\tevidence\tspecific_peptides\tshared_peptides\tpsms\tbest_psm\talternative_explanation\tsource\tprior_tier"
     )?;
     for c in quant_columns {
         write!(w, "\tquantity_{c}")?;
@@ -257,7 +268,7 @@ pub fn write_proteoform_tsv(
     for r in rows {
         write!(
             w,
-            "{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             r.family,
             r.member,
             r.kind.name(),
@@ -269,7 +280,9 @@ pub fn write_proteoform_tsv(
             r.shared_peptides,
             r.psms,
             r.best_psm,
-            r.alternative
+            r.alternative,
+            r.source,
+            r.tier
         )?;
         for v in &r.quantity {
             write!(w, "\t{v}")?;
@@ -305,6 +318,8 @@ mod tests {
                         feature: Arc::from(feature),
                         variant_delta_da: delta,
                         knockoff_of: None,
+                        source: None,
+                        tier: model::PriorTier::Catalogue,
                     }))
                     .with_substitutions(subs),
             )),

@@ -80,7 +80,7 @@ pub(crate) fn write_table(
 }
 
 /// A table read back: its record batches and key-value metadata.
-pub(crate) struct ReadTable {
+pub struct ReadTable {
     pub batches: Vec<RecordBatch>,
     pub meta: HashMap<String, String>,
 }

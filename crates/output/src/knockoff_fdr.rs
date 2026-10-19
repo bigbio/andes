@@ -89,7 +89,10 @@ enum Row {
 
 /// Raise each real variant target's q-value to its knockoff q-value, give
 /// knockoff rows q = 1 and PEP = 1, and drop knockoff accessions from other
-/// rows' protein lists. Does nothing when the database has no knockoff entry.
+/// rows' protein lists. With `knockoffs_requested` false and no knockoff entry
+/// in the database, does nothing: variants keep their class q-values. With it
+/// true, a database without any knockoff entry leaves every real variant row
+/// untested, so each gets q = 1.
 /// Returns per-class counts at `fdr` and the knockoff rows, which the caller
 /// keeps out of every reported output.
 ///
@@ -108,6 +111,7 @@ pub fn apply_knockoff_fdr(
     targets: &mut HashMap<String, PercolatorPsm>,
     idx: &SearchIndex,
     fdr: f64,
+    knockoffs_requested: bool,
 ) -> KnockoffOutcome {
     // Target knockoffs per real variant, keyed by (family, feature).
     let mut per_variant: HashMap<(&str, &str), usize> = HashMap::new();
@@ -123,7 +127,7 @@ pub fn apply_knockoff_fdr(
             }
         }
     }
-    if per_variant.is_empty() {
+    if per_variant.is_empty() && !knockoffs_requested {
         return KnockoffOutcome::default();
     }
     let k_max = per_variant.values().copied().max().unwrap_or(1) as f64;
@@ -386,10 +390,27 @@ mod tests {
         let mut t: HashMap<_, _> = [psm("a", 5.0, 0.001, "sp|P1_V2|A")].into_iter().collect();
         let before = t.clone();
         assert_eq!(
-            apply_knockoff_fdr(&mut t, &idx, 0.01),
+            apply_knockoff_fdr(&mut t, &idx, 0.01, false),
             KnockoffOutcome::default()
         );
         assert_eq!(t, before);
+    }
+
+    #[test]
+    fn requested_knockoffs_with_none_built_reject_every_variant() {
+        // An enzyme or variant set that leaves no position for a knockoff must
+        // not fall back to accepting variants on the class FDR alone.
+        let target = ProteinDb {
+            proteins: vec![protein("sp|P1_V2|A", EntryKind::Variant, "V2", 30.0, None)],
+        };
+        let idx = SearchIndex::from_target_db(&target, "XXX");
+        let mut t: HashMap<_, _> = [psm("a", 5.0, 0.001, "sp|P1_V2|A")].into_iter().collect();
+        let out = apply_knockoff_fdr(&mut t, &idx, 0.01, true);
+        assert_eq!(t["a"].q_value, 1.0);
+        assert_eq!(
+            (out.counts[0].real_before, out.counts[0].tested_before),
+            (1, 0)
+        );
     }
 
     #[test]
@@ -408,7 +429,7 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let out = apply_knockoff_fdr(&mut t, &idx, 0.01);
+        let out = apply_knockoff_fdr(&mut t, &idx, 0.01, true);
         let counts = out.counts;
         assert_eq!(
             out.knockoff_rows,
@@ -441,7 +462,7 @@ mod tests {
             .map(|i| psm(&format!("r{i}"), 100.0 - i as f64, 0.001, "sp|P1_V1|A"))
             .chain([psm("k", -5.0, 0.5, "sp|P1_KO1_V1|A")])
             .collect();
-        apply_knockoff_fdr(&mut t, &idx, 0.01);
+        apply_knockoff_fdr(&mut t, &idx, 0.01, true);
         // (1/2) / 100 at the bottom real row, the floor of the estimate.
         assert!((t["r99"].q_value - 0.005).abs() < 1e-9);
         assert!((t["r0"].q_value - 0.005).abs() < 1e-9);
@@ -452,7 +473,7 @@ mod tests {
         let idx = index();
         // V2 (other) has no knockoff.
         let mut t: HashMap<_, _> = [psm("v2", 5.0, 0.001, "sp|P1_V2|A")].into_iter().collect();
-        let counts = apply_knockoff_fdr(&mut t, &idx, 0.01).counts;
+        let counts = apply_knockoff_fdr(&mut t, &idx, 0.01, true).counts;
         assert_eq!(t["v2"].q_value, 1.0);
         assert_eq!(counts[0].stratum, "other");
         assert_eq!(
@@ -463,7 +484,7 @@ mod tests {
             ),
             (1, 0, 0)
         );
-        assert!(!apply_knockoff_fdr(&mut t, &idx, 0.01)
+        assert!(!apply_knockoff_fdr(&mut t, &idx, 0.01, true)
             .knockoff_rows
             .contains("v2"));
     }
@@ -518,7 +539,7 @@ mod tests {
             }))
             .chain((0..5).map(|i| psm(&format!("m{i}"), 100.0 - i as f64, 0.001, "sp|P1_M|A")))
             .collect();
-        let counts = apply_knockoff_fdr(&mut t, &idx, 0.05).counts;
+        let counts = apply_knockoff_fdr(&mut t, &idx, 0.05, true).counts;
         let names: Vec<&str> = counts.iter().map(|c| c.stratum.as_str()).collect();
         assert_eq!(
             names,
@@ -544,7 +565,7 @@ mod tests {
     fn one_tier_keeps_class_strata() {
         let idx = index();
         let mut t: HashMap<_, _> = [psm("r", 5.0, 0.001, "sp|P1_V1|A")].into_iter().collect();
-        let counts = apply_knockoff_fdr(&mut t, &idx, 0.01).counts;
+        let counts = apply_knockoff_fdr(&mut t, &idx, 0.01, true).counts;
         assert_eq!(counts[0].stratum, "deamidation-like");
     }
 }

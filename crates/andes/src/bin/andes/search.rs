@@ -2235,8 +2235,21 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         // Knockoff variants: the knockoff PSMs accepted per substitution class
         // estimate the false real variant PSMs, and give them a q-value too.
-        let outcome = output::apply_knockoff_fdr(map, &pin_index, proteoform_fdr);
+        let outcome =
+            output::apply_knockoff_fdr(map, &pin_index, proteoform_fdr, cli.knockoffs > 0);
         knockoff_rows = outcome.knockoff_rows;
+        let untested: usize = outcome
+            .counts
+            .iter()
+            .map(|c| c.real_before - c.tested_before)
+            .sum();
+        if untested > 0 {
+            eprintln!(
+                "Warning: {untested} variant PSMs at q <= {proteoform_fdr} have no knockoff \
+                 (the enzyme or the variant kind leaves no position for one) and are not \
+                 accepted; --knockoffs 0 leaves variants to the class FDR alone"
+            );
+        }
         if !outcome.counts.is_empty() {
             let line: Vec<String> = outcome
                 .counts

@@ -62,6 +62,9 @@ pub(crate) enum ScoreFlag {
     Strong,
 }
 
+/// Trees kept per GBDT ensemble when `--gbdt-max-trees` is unset (standard search).
+pub(crate) const DEFAULT_GBDT_MAX_TREES: usize = 100;
+
 /// Candidate retrieval from the out-of-core index.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub(crate) enum FragmentIndexFlag {
@@ -437,13 +440,14 @@ pub(crate) struct SearchArgs {
     /// whole ensemble is worth ~2% of identifications for 77% of the runtime.)
     ///
     /// GLYCO IS EXEMPT: under `--glyco` the ensembles are ~0.3% of wall time, so
-    /// truncation would trade identification fidelity for nothing. Pass the flag
-    /// explicitly to truncate there anyway.
+    /// truncation would trade identification fidelity for nothing. Set the flag
+    /// (or `scoring.gbdt_max_trees` in `--config`) to truncate there anyway.
     ///
     /// This CHANGES predicted intensities and therefore the emitted PIN feature
-    /// values; `--gbdt-max-trees 0` restores the full ensembles.
-    #[arg(long = "gbdt-max-trees", hide = true, default_value_t = 100usize)]
-    pub(crate) gbdt_max_trees: usize,
+    /// values; `--gbdt-max-trees 0` restores the full ensembles. Unset:
+    /// [`DEFAULT_GBDT_MAX_TREES`], or every tree under `--glyco`.
+    #[arg(long = "gbdt-max-trees", hide = true)]
+    pub(crate) gbdt_max_trees: Option<usize>,
 
     /// Ranking / PIN RawScore source: `auto` (default — `strong` for high-res
     /// instruments, `rank` for low-res), `rank`, or `strong` (fused intensity +
@@ -1044,9 +1048,9 @@ impl GlycoSpeciesFlag {
 /// `--precursor-mono`: MS1 isotope-envelope precursor correction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub(crate) enum PrecursorMonoFlag {
-    /// Leave every precursor m/z as recorded (default).
+    /// Leave every precursor m/z as recorded.
     Off,
-    /// Move a precursor down to the monoisotope its MS1 envelope supports.
+    /// Move a precursor down to the monoisotope its MS1 envelope supports (default).
     Auto,
 }
 

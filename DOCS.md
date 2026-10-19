@@ -534,6 +534,14 @@ built-in default`**; unknown keys are a hard error. The UniProt XML options are 
 (`uniprot_variants: true`, `uniprot_isoforms: true`, `uniprot_chains: true`,
 `uniprot_evidence: curated`). Values use the CLI strings
 (`precursor_tol: 20ppm`, `charge: "2..5"`, `isotope_error: "-1..2"`, `enzyme: gluc,trypsin`).
+Every search flag has a key; a key is the flag name without its section prefix
+(`--glyco-species` is `glyco.species`, `--glyco-glycan-gdb` is `glyco.glycan_gdb`,
+`--fragment-index` is `search.fragment_index`, `--gbdt-max-trees` is
+`scoring.gbdt_max_trees`, `--lfq-gaussian-width` is `quant.lfq_gaussian_width`). Four flags
+are CLI-only: `--config`, and the diagnostics `--cal-min-spec-keys`, `--precursor-mono-dump`
+and `--glyco-scans`. `glyco.enabled: true` needs `glyco.glycan_gdb` or `glyco.species` (or the
+CLI flag), checked after the merge; setting either glycan source on the command line replaces
+the config's choice.
 
 ```yaml
 # run.yaml (minimal)

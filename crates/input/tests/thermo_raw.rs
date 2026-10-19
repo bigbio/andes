@@ -27,7 +27,7 @@ fn thermo_raw_reads_ms2_spectra() {
     };
 
     let reader = ThermoRawReader::open(&path).expect("open .raw");
-    assert!(reader.len() > 0, "the file should report > 0 spectra");
+    assert!(!reader.is_empty(), "the file should report > 0 spectra");
 
     let mut ms2 = 0usize;
     let mut checked_first = false;

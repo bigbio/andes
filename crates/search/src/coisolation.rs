@@ -194,13 +194,10 @@ fn primary_matched_peak_keys(
     keys
 }
 
-/// Largest `rank_score` first, then smallest candidate index: the deterministic
-/// order secondaries are ranked in.
+/// Best first in the [`PsmMatch`] total order (largest `rank_score`, ties broken
+/// by peptide content): the deterministic order secondaries are ranked in.
 fn rank_desc_then_idx(a: &PsmMatch, b: &PsmMatch) -> std::cmp::Ordering {
-    b.rank_score
-        .partial_cmp(&a.rank_score)
-        .unwrap_or(std::cmp::Ordering::Equal)
-        .then_with(|| a.primary_candidate_idx().cmp(&b.primary_candidate_idx()))
+    b.cmp(a)
 }
 
 /// Calibration-adjusted neutral mass of `co` and the precursor tolerance (Da)
@@ -364,6 +361,7 @@ pub(crate) fn search_secondary(
                 isotope_offset: 0,
                 // Set to co.mono_mz once the winner is chosen (end of fn).
                 precursor_mz_override: None,
+                tie_key: crate::psm::tie_key_of(cand),
             };
             distinct
                 .entry((mkey, cand.is_decoy))
@@ -382,7 +380,7 @@ pub(crate) fn search_secondary(
 
     // 3. The retained pool: the best distinct peptidoforms by `rank_score`, cut to
     // the same retention cap the primary queue uses, ordered deterministically
-    // (largest rank_score, then smallest candidate index).
+    // (largest rank_score, ties broken by peptide content).
     let mut retained: Vec<PsmMatch> = distinct.into_values().collect();
     retained.sort_by(rank_desc_then_idx);
     retained.truncate(params.hot_loop_retention_cap().max(1) as usize);
@@ -939,7 +937,10 @@ pub(crate) mod tests {
             .iter()
             .filter(|c| !c.is_decoy && c.peptide.residues == planted.residues)
             .count();
-        assert!(occurrences >= 2, "fixture must hold the winner twice, got {occurrences}");
+        assert!(
+            occurrences >= 2,
+            "fixture must hold the winner twice, got {occurrences}"
+        );
 
         let primary = peptide(b"WVTFISLLR", b'K', b'K');
         let (spec, co) = planted_secondary_spectrum(&planted, &primary);

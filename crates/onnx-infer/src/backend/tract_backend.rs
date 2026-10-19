@@ -16,6 +16,27 @@ pub struct TractSession {
     model: Arc<TractRunnable>,
     input_names: Vec<String>,
     output_names: Vec<String>,
+    input_shapes: Vec<Option<Vec<Option<usize>>>>,
+    output_shapes: Vec<Option<Vec<Option<usize>>>>,
+}
+
+/// The shape an inference fact states: `None` for an open (unknown-rank) shape,
+/// else one entry per axis, `None` where the axis is not a fixed integer.
+fn fact_shape(model: &InferenceModel, outlet: OutletId) -> Option<Vec<Option<usize>>> {
+    use tract_onnx::tract_hir::infer::GenericFactoid;
+    let fact = model.outlet_fact(outlet).ok()?;
+    if fact.shape.is_open() {
+        return None;
+    }
+    Some(
+        fact.shape
+            .dims()
+            .map(|d| match d {
+                GenericFactoid::Only(dim) => dim.to_usize().ok(),
+                GenericFactoid::Any => None,
+            })
+            .collect(),
+    )
 }
 
 impl TractSession {
@@ -44,6 +65,17 @@ impl TractSession {
             })
             .collect();
 
+        let input_shapes = inferred
+            .inputs
+            .iter()
+            .map(|o| fact_shape(&inferred, *o))
+            .collect();
+        let output_shapes = inferred
+            .outputs
+            .iter()
+            .map(|o| fact_shape(&inferred, *o))
+            .collect();
+
         let runnable = inferred
             .into_optimized()
             .map_err(|e| Error::Inference(format!("tract optimize: {e}")))?
@@ -54,6 +86,8 @@ impl TractSession {
             model: Arc::new(runnable),
             input_names,
             output_names,
+            input_shapes,
+            output_shapes,
         })
     }
 
@@ -104,6 +138,8 @@ impl InferenceBackend for TractSession {
             model: Arc::clone(&self.model),
             input_names: self.input_names.clone(),
             output_names: self.output_names.clone(),
+            input_shapes: self.input_shapes.clone(),
+            output_shapes: self.output_shapes.clone(),
         }))
     }
 
@@ -113,6 +149,14 @@ impl InferenceBackend for TractSession {
 
     fn output_names(&self) -> &[String] {
         &self.output_names
+    }
+
+    fn input_shapes(&self) -> Vec<Option<Vec<Option<usize>>>> {
+        self.input_shapes.clone()
+    }
+
+    fn output_shapes(&self) -> Vec<Option<Vec<Option<usize>>>> {
+        self.output_shapes.clone()
     }
 
     fn run(&mut self, inputs: &[NamedTensor]) -> Result<Vec<NamedTensor>> {

@@ -1145,6 +1145,7 @@ impl<'a> PreparedSearch<'a> {
                             features,
                             isotope_offset: err.isotope_offset,
                             precursor_mz_override: None,
+                            tie_key: crate::psm::tie_key_of(cand),
                         };
                         per_charge_queues
                             .entry(z)
@@ -3456,6 +3457,7 @@ mod dedup_tests {
             features: Default::default(),
             isotope_offset: 0,
             precursor_mz_override: None,
+            tie_key: 0,
         }
     }
 

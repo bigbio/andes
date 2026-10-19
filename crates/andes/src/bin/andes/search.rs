@@ -2452,6 +2452,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &run_ends,
             rescore_map.as_ref(),
             rescore_decoys.as_ref(),
+            &knockoff_rows,
         ) {
             Ok(()) => eprintln!("Wrote QPX bundle: {}", parquet_dir.display()),
             // Finding 3.9: failure to write an explicitly-requested output is a

@@ -197,6 +197,7 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         &[spectra.len()],
         Some(&map),
         None,
+        &std::collections::HashSet::new(),
     )
     .unwrap();
 
@@ -225,6 +226,30 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         "mock map should have one entry per distinct PIN SpecId"
     );
 
+    // Excluded rows (knockoff PSMs) are left out of the bundle, and only they.
+    let excluded: HashSet<String> = [spec_ids[0].clone()].into_iter().collect();
+    let qdir_ex = tmp.path().join("excluded.idparquet");
+    output::write_qpx(
+        &qdir_ex,
+        &spectra,
+        &queues,
+        &candidates,
+        &params,
+        &idx,
+        &Tolerance::Da(0.5),
+        "test_run",
+        &["test.mgf".to_string()],
+        &[spectra.len()],
+        Some(&map),
+        None,
+        &excluded,
+    )
+    .unwrap();
+    assert_eq!(
+        read_pep_column(&qdir_ex.join("psms.parquet")).len(),
+        spec_ids.len() - 1
+    );
+
     // 4. Write QPX WITHOUT the rescore map → every PEP must be null (schema parity).
     let qdir_off = tmp.path().join("plain.idparquet");
     output::write_qpx(
@@ -240,6 +265,7 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         &[spectra.len()],
         None,
         None,
+        &std::collections::HashSet::new(),
     )
     .unwrap();
     let peps_off = read_pep_column(&qdir_off.join("psms.parquet"));
@@ -306,6 +332,7 @@ fn batched_psms_preserve_global_indices_order_and_rescore_join() {
         &[repeated_spectra.len()],
         Some(&map),
         None,
+        &std::collections::HashSet::new(),
     )
     .unwrap();
     let builder =
@@ -367,6 +394,7 @@ fn multi_input_rows_carry_their_own_reference_file() {
         &[1000, 1025],
         None,
         None,
+        &std::collections::HashSet::new(),
     )
     .unwrap();
     let reader =
@@ -416,6 +444,7 @@ fn multi_input_rows_carry_their_own_reference_file() {
         &[1000, 1024],
         None,
         None,
+        &std::collections::HashSet::new(),
     )
     .unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
@@ -440,6 +469,7 @@ fn dropped_peaks_write_null_peak_lists() {
             &[spectra.len()],
             None,
             None,
+            &std::collections::HashSet::new(),
         )
         .unwrap();
         let reader =
@@ -586,6 +616,7 @@ fn qpx_join_accepts_targets_removed_by_target_decoy_competition() {
             &[spectra.len()],
             Some(&targets),
             decoys,
+            &std::collections::HashSet::new(),
         )
     };
     let err = write(&tmp.path().join("strict.idparquet"), None).unwrap_err();

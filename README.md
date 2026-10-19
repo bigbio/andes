@@ -370,8 +370,8 @@ same mistakes.
    its PSMs are not accepted. Measured against genotypes, those variants are false several times
    more often than the tested ones, so the tested variants' estimate cannot be lent to them.
 4. **Reporting.** Variant-class PSMs (every protein a variant entry) are accepted at
-   `--proteoform-fdr`, every other PSM at `--fdr`. Knockoff PSMs stay in the PIN and the QPX bundle
-   as targets with q = 1. They are never in the filtered TSV, quantification, MBR or the
+   `--proteoform-fdr`, every other PSM at `--fdr`. Knockoff PSMs stay in the PIN as targets; they
+   are left out of the QPX bundle. They are never in the filtered TSV, quantification, MBR or the
    proteoform table, and knockoff accessions are dropped from other rows' protein lists.
 
 **Input and parameters.** Variants from a UniProt XML database (`--uniprot-variants`) or from

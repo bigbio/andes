@@ -85,7 +85,8 @@ const CREATOR: &str = "andes";
 /// to `additional_scores`. When `None` (rescore off) the bundle is byte-schema-
 /// identical to the pre-rescore output (PEP null, no q-value entry). The join key
 /// is reconstructed via [`crate::pin::format_spec_id`] so it matches the PIN's
-/// `SpecId` exactly.
+/// `SpecId` exactly. Rows whose SpecId is in `excluded` (knockoff PSMs, never
+/// reported) are left out of the bundle.
 #[allow(clippy::too_many_arguments)]
 pub fn write_qpx(
     out_dir: &Path,
@@ -100,6 +101,7 @@ pub fn write_qpx(
     run_ends: &[usize],
     rescore: Option<&HashMap<String, PercolatorPsm>>,
     rescore_decoys: Option<&HashSet<String>>,
+    excluded: &HashSet<String>,
 ) -> std::io::Result<()> {
     if run_ends.len() != primary_ms_run_paths.len()
         || run_ends.windows(2).any(|w| w[0] > w[1])
@@ -122,7 +124,7 @@ pub fn write_qpx(
     // null q-values), and leave out the target rows target-decoy competition
     // removed: they are not in Percolator's FDR-controlled output. Empty when
     // rescore is off, keeping that path identical.
-    let competed_away = match rescore {
+    let mut competed_away = match rescore {
         Some(m) => audit_rescore_join(
             &rescore_rows(spectra, queues, candidates),
             m,
@@ -130,6 +132,9 @@ pub fn write_qpx(
         )?,
         None => HashSet::new(),
     };
+    // Rows never reported (knockoff PSMs) are left out the same way, so the
+    // bundle and the feature parquet's `psm_ids` agree on the row order.
+    competed_away.extend(excluded.iter().cloned());
 
     // Bound Arrow's Utf8/List buffers before they reach their 32-bit offset
     // limit. Slicing an already-built batch is too late. Preserve the global
@@ -406,8 +411,8 @@ struct RescoreRow {
     group: (i32, String),
 }
 
-/// Validate the Percolator (`--rescore`) join and return the target rows that
-/// target-decoy competition removed.
+/// Validate the Percolator (`--rescore`) join and return the rows, target and
+/// decoy, that target-decoy competition removed.
 ///
 /// Every emitted **non-decoy** PSM row must have a matching Percolator result;
 /// a missing match means the `SpecId` derivation drifted between the PIN and
@@ -450,6 +455,15 @@ fn audit_rescore_join(
             competed_away.insert(r.spec_id.clone());
         } else {
             missing += 1;
+        }
+    }
+    // A decoy that lost its group's competition is left out like a losing
+    // target, so the bundle holds the same competed set for both labels.
+    if let Some(d) = decoys {
+        for r in rows.iter().filter(|r| r.is_decoy && !d.contains(&r.spec_id)) {
+            if winners.get(&r.group) == Some(&1) {
+                competed_away.insert(r.spec_id.clone());
+            }
         }
     }
     if missing > 0 {

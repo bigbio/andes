@@ -50,9 +50,9 @@
 //! With a quality threshold, an identified row above it (or without a
 //! q-value) is `identified_below_threshold`. Each
 //! pseudo-transfer is scored by the model of its precursor's fold, which never
-//! saw it, and placed against that fold's transfer scores. `<base>.mbr.tsv`
+//! saw it, and placed against that fold's transfer scores. `<base>.mbr.parquet`
 //! gets one row per identified or transferred (precursor, run) target, and
-//! `<base>.mbr_validation.tsv` the pseudo-transfer acceptance rate, the
+//! `<base>.mbr_validation.parquet` the pseudo-transfer acceptance rate, the
 //! wrong-peak rate (`|t0_pseudo - t0_identified| > w_identified`) and the
 //! accepted transfer counts of the pooled and per-family estimates. The
 //! acceptance rate is optimistic for real transfers: the alignment map was
@@ -73,13 +73,13 @@
 //! its run's offset at the row's apex RT removed ([`quant::normalize`]: a
 //! level per run and an RT-local term). The offsets are fitted on the
 //! identified targets with `quant_q <= 0.01` and a positive quantity; a run
-//! without enough of them reports `NA`. `quantity` stays the raw measurement.
+//! without enough of them reports null. `quantity` stays the raw measurement.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use output::mbr_out::{
-    write_mbr_tsv, write_mbr_validation, Accepted, EvidenceType, MbrRow, MbrValidation,
+    write_mbr_parquet, write_mbr_validation, Accepted, EvidenceType, MbrRow, MbrValidation,
     VALIDATION_Q,
 };
 use output::ms1_table::read_ms1_table;
@@ -999,21 +999,21 @@ fn family(kind: Hypothesis) -> u8 {
     }
 }
 
-/// `<base>.mbr.tsv` and `<base>.mbr_validation.tsv`.
+/// `<base>.mbr.parquet` and `<base>.mbr_validation.parquet`.
 pub(crate) fn mbr_paths(base: &Path) -> (PathBuf, PathBuf) {
     let with = |suffix: &str| {
         let mut s = base.as_os_str().to_owned();
         s.push(suffix);
         PathBuf::from(s)
     };
-    (with(".mbr.tsv"), with(".mbr_validation.tsv"))
+    (with(".mbr.parquet"), with(".mbr_validation.parquet"))
 }
 
 /// What one finalize did, for the caller to log.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct FinalizeSummary {
     pub validation: MbrValidation,
-    /// Rows of `<base>.mbr.tsv`.
+    /// Rows of `<base>.mbr.parquet`.
     pub rows_written: usize,
     /// Transfer targets and decoys without evidence or with a non-finite
     /// feature (no q-value).
@@ -1023,11 +1023,11 @@ pub(crate) struct FinalizeSummary {
     /// feature (no quality q-value).
     pub identified_no_features: usize,
     pub identified_fdr: FdrCounts,
-    /// The rows of `<base>.mbr.tsv`, in file order.
+    /// The rows of `<base>.mbr.parquet`, in file order.
     pub features: Vec<MbrFeature>,
 }
 
-/// One row of `<base>.mbr.tsv` by precursor id and run index.
+/// One row of `<base>.mbr.parquet` by precursor id and run index.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct MbrFeature {
     pub precursor: u32,
@@ -1061,8 +1061,8 @@ pub(crate) fn finalize(
     mbr_fdr: f64,
     quant_feature_fdr: Option<f64>,
     seed: u64,
-    mbr_tsv: &Path,
-    validation_tsv: &Path,
+    mbr_path: &Path,
+    validation_path: &Path,
 ) -> Result<FinalizeSummary, String> {
     if !(mbr_fdr > 0.0 && mbr_fdr <= 1.0) {
         return Err(format!(
@@ -1331,8 +1331,8 @@ pub(crate) fn finalize(
         })
         .collect();
     let out: Vec<MbrRow<'_>> = out.into_iter().map(|(_, _, row, _)| row).collect();
-    write_mbr_tsv(mbr_tsv, &out)?;
-    write_mbr_validation(validation_tsv, &v)?;
+    write_mbr_parquet(mbr_path, &out)?;
+    write_mbr_validation(validation_path, &v)?;
 
     eprintln!(
         "[mbr] transfer FDR (internal quant-quality score) features: {}",
@@ -1927,7 +1927,7 @@ mod tests {
         );
         assert!(extract_run(N_RUNS as u16, &fx.ms1_tables[2], &fx.lib, &params()).is_err());
 
-        // The identified row reaches the mbr.tsv.
+        // The identified row reaches the mbr.parquet.
         let runs: Vec<Vec<ExtractRow>> = (0..N_RUNS)
             .map(|r| {
                 extract_run(r as u16, &fx.ms1_tables[r], &fx.lib, &params())
@@ -1938,19 +1938,19 @@ mod tests {
         let stems: Vec<String> = ["r0", "r1", "r2"].map(String::from).to_vec();
         let (mbr, val) = mbr_paths(&fx._dir.path().join("x"));
         finalize(&stems, &fx.lib, &runs, 0.01, None, 7, &mbr, &val).unwrap();
-        let text = std::fs::read_to_string(&mbr).unwrap();
-        let in_r2: Vec<&str> = text
-            .lines()
-            .filter(|l| l.split('\t').nth(1) == Some("r2"))
-            .collect();
-        assert_eq!(in_r2.len(), 1, "{text}");
-        assert!(
-            in_r2[0].starts_with("PEP0/2\tr2\tidentified\t"),
+        let rows = output::mbr_out::read_mbr_parquet(&mbr).unwrap();
+        let in_r2: Vec<_> = rows.iter().filter(|r| r.run == "r2").collect();
+        assert_eq!(in_r2.len(), 1, "{rows:?}");
+        assert_eq!(
+            (in_r2[0].precursor_key.as_str(), in_r2[0].evidence_type.as_str()),
+            ("PEP0/2", "identified"),
             "{in_r2:?}"
         );
         // Its quantity and standard error are reported.
-        let fields: Vec<&str> = in_r2[0].split('\t').collect();
-        assert!(fields[3] != "NA" && fields[4] != "NA", "{in_r2:?}");
+        assert!(
+            in_r2[0].quantity.is_some() && in_r2[0].quantity_se.is_some(),
+            "{in_r2:?}"
+        );
     }
 
     #[test]
@@ -2291,12 +2291,42 @@ mod finalize_tests {
         vec!["a".into(), "b".into()]
     }
 
+    /// A header row and one row of cells per table row, numbers formatted
+    /// with `{}` and a null as `NA`, for `<base>.mbr.parquet` or
+    /// `<base>.mbr_validation.parquet` by file name.
     fn table(path: &Path) -> Vec<Vec<String>> {
-        std::fs::read_to_string(path)
-            .unwrap()
-            .lines()
-            .map(|l| l.split('\t').map(String::from).collect())
-            .collect()
+        use output::mbr_out::{
+            read_mbr_parquet, read_mbr_validation, ValidationCell, MBR_COLUMNS,
+        };
+        let num = |v: Option<f64>| v.map_or_else(|| "NA".to_string(), |v| v.to_string());
+        if path.to_string_lossy().ends_with(".mbr_validation.parquet") {
+            let cells = read_mbr_validation(path).unwrap();
+            let header = cells.iter().map(|(n, _)| n.clone()).collect();
+            let values = cells
+                .iter()
+                .map(|(_, c)| match *c {
+                    ValidationCell::Count(n) => n.to_string(),
+                    ValidationCell::Value(v) => num(v),
+                })
+                .collect();
+            return vec![header, values];
+        }
+        let mut t = vec![MBR_COLUMNS.iter().map(|c| c.to_string()).collect()];
+        for r in read_mbr_parquet(path).unwrap() {
+            t.push(vec![
+                r.precursor_key,
+                r.run,
+                r.evidence_type,
+                num(r.quantity),
+                num(r.quantity_se),
+                num(r.quantity_normalized),
+                num(r.transfer_q),
+                num(r.quant_q),
+                num(r.apex_rt_s),
+                num(Some(r.library_q)),
+            ]);
+        }
+        t
     }
 
     /// [`library`] with every precursor an entry identified in run 0; those

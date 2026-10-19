@@ -510,7 +510,7 @@ fn filter_has_supplemental_collision(filter: &str) -> bool {
     }) {
         return false;
     }
-    let Some(last_stage) = tokens.filter(|t| t.contains('@')).last() else {
+    let Some(last_stage) = tokens.filter(|t| t.contains('@')).next_back() else {
         return false;
     };
     let methods: Vec<String> = last_stage

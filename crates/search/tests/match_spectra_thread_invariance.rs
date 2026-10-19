@@ -163,7 +163,7 @@ fn run(
         let ties = queues
             .iter()
             .filter(|q| {
-                let v = q.clone().into_rank_sorted_vec();
+                let v = (*q).clone().into_rank_sorted_vec();
                 v.len() > 1 && v[0].rank_score == v[1].rank_score
             })
             .count();

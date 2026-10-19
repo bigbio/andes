@@ -101,12 +101,14 @@ pub fn build_entry(reference: &Protein, annotation: &Annotation) -> Option<Prote
     })
 }
 
-/// The primary accession of a FASTA accession: the middle field of
-/// `sp|P04637|P53_HUMAN`, else the whole accession.
+/// The primary accession of a database accession: the middle field of
+/// `sp|P04637|P53_HUMAN`, the part after the database prefix of `sp:P04637`
+/// (PEFF), else the whole accession.
 pub fn primary_accession(accession: &str) -> &str {
     let parts: Vec<&str> = accession.split('|').collect();
     match parts.as_slice() {
         [_, acc, _] => acc,
+        [one] => one.split_once(':').map_or(one, |(_, acc)| acc),
         _ => accession,
     }
 }

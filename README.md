@@ -183,6 +183,10 @@ andes --spectrum spectra.mzML --database uniprot_sprot_human.xml.gz \
   --mods phospho_annotated_mods.txt --uniprot-variants --output-pin out.pin
 ```
 
+**PEFF databases.** `--database x.peff` reads a PSI Extended FASTA file. Its variant,
+modification and processing header keys become claims built like UniProt's
+([`DOCS.md` §1a](DOCS.md#peff-databases)).
+
 **Annotation files.** `--annotations claims.annotations.parquet` adds claims about the proteins
 of any database, FASTA included: sequence edits (variant entries), modification sites, mature
 chains. The claims can come from variant catalogues, a sample's own variant calls or site

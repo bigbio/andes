@@ -287,37 +287,20 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
     let loaded = input::load_protein_database(&database_path, &uniprot_opts)?;
     let mut target_db = loaded.db;
+    if let Some(peff) = &loaded.peff {
+        log_claims("PEFF", &peff.claims);
+        if peff.sites_without_mass + peff.processing_not_chain > 0 {
+            eprintln!(
+                "PEFF: {} entries; left out {} sites with no known mass and {} processed spans \
+                 that are not mature chains",
+                peff.entries, peff.sites_without_mass, peff.processing_not_chain
+            );
+        }
+    }
     if !cli.annotations.is_empty() {
         let stats =
             input::load_annotations(&cli.annotations, &mut target_db, uniprot_opts.knockoffs)?;
-        let dropped: Vec<String> = stats
-            .dropped
-            .iter()
-            .map(|(reason, n)| format!("{reason} ({n})"))
-            .collect();
-        eprintln!(
-            "Annotations: {} rows from {} files: {} variant, {} knockoff and {} chain entries, \
-             {} sites on reference proteins, {} rows merged into an equal claim{}{}",
-            stats.rows,
-            stats.files,
-            stats.variant_entries,
-            stats.knockoff_entries,
-            stats.chain_entries,
-            stats.sites,
-            stats.merged,
-            if dropped.is_empty() {
-                ""
-            } else {
-                "; left out: "
-            },
-            dropped.join(", "),
-        );
-        if stats.knockoff_entries > 0 {
-            eprintln!(
-                "Annotations: {} single-residue variants with no position for a knockoff",
-                stats.variants_without_knockoff
-            );
-        }
+        log_claims("Annotations", &stats);
     }
     eprintln!(
         "Loaded {} target proteins from {} [PHASE fasta_load: {:.2}s]",
@@ -2520,6 +2503,43 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Log what a UniProt XML load kept: annotated sites, variant entries, and
 /// the features the evidence level or the canonical sequence ruled out.
+/// Log what an annotation source (`--annotations` files or a PEFF header)
+/// added to the database.
+fn log_claims(source: &str, stats: &input::AnnotationLoadStats) {
+    let dropped: Vec<String> = stats
+        .dropped
+        .iter()
+        .map(|(reason, n)| format!("{reason} ({n})"))
+        .collect();
+    let files = if stats.files > 0 {
+        format!(" from {} files", stats.files)
+    } else {
+        String::new()
+    };
+    eprintln!(
+        "{source}: {} rows{files}: {} variant, {} knockoff and {} chain entries, {} sites on \
+         reference proteins, {} rows merged into an equal claim{}{}",
+        stats.rows,
+        stats.variant_entries,
+        stats.knockoff_entries,
+        stats.chain_entries,
+        stats.sites,
+        stats.merged,
+        if dropped.is_empty() {
+            ""
+        } else {
+            "; left out: "
+        },
+        dropped.join(", "),
+    );
+    if stats.knockoff_entries > 0 {
+        eprintln!(
+            "{source}: {} single-residue variants with no position for a knockoff",
+            stats.variants_without_knockoff
+        );
+    }
+}
+
 fn log_uniprot_load(stats: &input::UniProtLoadStats, opts: &input::UniProtOptions) {
     eprintln!(
         "UniProt XML: {} entries, {} annotated modification sites, {} variant entries \

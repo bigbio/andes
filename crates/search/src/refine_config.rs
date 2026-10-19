@@ -24,6 +24,11 @@ pub struct RefineConfig {
     #[serde(default = "default_high_res_only")]
     pub high_res_only: bool,
     pub mods: Vec<RefineMod>,
+    /// Diagnostic: add one shuffled entrapment peptide (accession `ENT_<acc>`) per
+    /// Pass-2 anchor, so Pass-2 false discoveries can be counted. Changes the Pass-2
+    /// search space; not for production runs.
+    #[serde(default)]
+    pub entrapment: bool,
 }
 fn default_max_mods() -> u32 {
     2
@@ -46,6 +51,7 @@ impl RefineConfig {
         RefineConfig {
             max_mods: 2,
             high_res_only: true,
+            entrapment: false,
             mods: vec![
                 // Oxidation/hydroxylation (+15.995, Unimod 35). M is the common
                 // artifact; P and K cover collagen/ECM hydroxyproline &

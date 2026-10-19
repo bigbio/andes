@@ -10,8 +10,11 @@ pub mod candidate_index;
 mod chimeric_features;
 pub(crate) mod coisolation;
 pub mod decoy;
+pub mod fragment_index;
 pub mod glyco_fragment_index;
 pub mod glyco_search;
+pub mod isomer;
+pub mod isotope_mimic;
 pub mod mass_calibrator;
 pub mod match_engine;
 pub mod precursor_cal;
@@ -34,7 +37,7 @@ pub use mass_calibrator::{
     apply_shift_for_mode, apply_tightened_precursor_tolerance, build_spec_keys,
     learn_calibration_stats, prepass_search_params, CalibrationStats, SpecKey,
 };
-pub use match_engine::{match_spectra, run_pass2_coisolation, CandidateBacking, PreparedSearch};
+pub use match_engine::{match_spectra_out_of_core, run_pass2_coisolation, PreparedSearch};
 pub use precursor_cal::{
     adjusted_observed_neutral_mass, robust_sigma_ppm, tightened_tolerance_ppm, PrecursorCalMode,
 };
@@ -42,5 +45,5 @@ pub use precursor_matching::{matches_precursor, MassError};
 pub use psm::{PsmFeatures, PsmMatch, TopNQueue};
 pub use refine_config::{RefineConfig, RefineMod};
 pub use search_index::SearchIndex;
-pub use search_params::{CandidateIndexMode, ScoreMode, SearchParams};
+pub use search_params::{ScoreMode, SearchParams};
 pub use tdc::{confident_target_indices, ScoredLabel};

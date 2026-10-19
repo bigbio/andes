@@ -16,6 +16,7 @@ fn make_index(seq: &[u8]) -> SearchIndex {
             accession: "P1".into(),
             description: "".into(),
             sequence: seq.to_vec(),
+            annotation: None,
         }],
     };
     SearchIndex::from_target_db(&target, "XXX")
@@ -34,20 +35,19 @@ fn params(min: u32, max: u32, missed: u32) -> SearchParams {
 fn single_tryptic_peptide_no_missed() {
     // Protein "MKWVTFISLLR": trypsin cleaves after K (pos 1) → spans "MK" (too short) + "WVTFISLLR".
     // Standard pass: 1 candidate "WVTFISLLR" at offset 2.
-    // Met-cleavage pass (sub_seq="KWVTFISLLR"): trypsin cleaves after K (sub_pos 0) →
-    //   sub-spans "K" (too short) + "WVTFISLLR" at abs_offset=2. Adds 1 more candidate.
-    // Total target candidates: 2.
+    // Met-cleavage pass (sub_seq="KWVTFISLLR") emits only spans starting at its
+    //   first residue: "K" (too short); "KWVTFISLLR" needs a missed cleavage.
+    // Total target candidates: 1 — "WVTFISLLR" is not enumerated twice.
     let idx = make_index(b"MKWVTFISLLR");
     let p = params(6, 40, 0);
     let candidates: Vec<_> = enumerate_candidates(&idx, &p, "XXX").collect();
     let target_candidates: Vec<_> = candidates.iter().filter(|c| !c.is_decoy).collect();
     assert_eq!(
         target_candidates.len(),
-        2,
-        "expected 2 target candidates (standard + Met-cleaved), got {}",
+        1,
+        "expected 1 target candidate, got {}",
         target_candidates.len()
     );
-    // Both candidates are "WVTFISLLR" at offset 2 — one from each enumeration pass.
     for cand in &target_candidates {
         assert_eq!(cand.peptide.length(), 9);
         assert_eq!(cand.start_offset_in_protein, 2);
@@ -78,6 +78,7 @@ fn no_cleavage_enzyme_emits_full_protein_only() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"MKWVTFISLLR".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -117,6 +118,7 @@ fn nonspecific_enzyme_emits_every_length_valid_span() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"AAAAAA".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -155,6 +157,7 @@ fn missed_cleavages_increase_candidate_count() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"AKMKCKDK".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -199,6 +202,7 @@ fn missed_cleavages_zero_emits_only_perfectly_cleaved() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"AKMKLR".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -226,6 +230,7 @@ fn aa_set_with_oxidation() -> model::AminoAcidSet {
         accession: None,
         neutral_losses: Vec::new(),
         loss_class: 0,
+        annotated_site_mass: None,
     };
     model::AminoAcidSetBuilder::new_standard()
         .add_variable_mod(ox)
@@ -237,14 +242,15 @@ fn aa_set_with_oxidation() -> model::AminoAcidSet {
 fn one_variable_mod_site_doubles_candidates() {
     // "MKAR" — Trypsin spans (0,2)="MK" + (2,4)="AR".
     // Standard pass: "MK" → 2 (unmod + Mox); "AR" → 1. Total = 3.
-    // Met-cleavage pass (sub_seq="KAR"): spans "K" (too short) + "AR" at abs_offset=2.
-    //   "AR" has no M residue → 1 extra candidate.
-    // Total target = 4.
+    // Met-cleavage pass (sub_seq="KAR"): only spans starting at "K": "K" (too
+    //   short); "KAR" needs a missed cleavage. "AR" is not enumerated twice.
+    // Total target = 3.
     let target = ProteinDb {
         proteins: vec![Protein {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"MKAR".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -257,8 +263,8 @@ fn one_variable_mod_site_doubles_candidates() {
         .filter(|c| !c.is_decoy)
         .count();
     assert_eq!(
-        target_count, 4,
-        "expected 4 target candidates (MK + MKox + AR + AR[met-cleaved])"
+        target_count, 3,
+        "expected 3 target candidates (MK + MKox + AR)"
     );
 }
 
@@ -274,6 +280,7 @@ fn two_variable_mod_sites_quadruple_candidates() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"MMK".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -301,6 +308,7 @@ fn max_variable_mods_caps_combinations() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"MMMK".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -337,6 +345,7 @@ fn aa_set_with_protein_nterm_acetyl() -> AminoAcidSet {
         accession: None,
         neutral_losses: Vec::new(),
         loss_class: 0,
+        annotated_site_mass: None,
     };
     AminoAcidSetBuilder::new_standard()
         .add_variable_mod(acetyl)
@@ -355,6 +364,7 @@ fn aa_set_with_nterm_acetyl() -> AminoAcidSet {
         accession: None,
         neutral_losses: Vec::new(),
         loss_class: 0,
+        annotated_site_mass: None,
     };
     AminoAcidSetBuilder::new_standard()
         .add_variable_mod(acetyl)
@@ -373,6 +383,7 @@ fn aa_set_with_both_cterm_mods() -> AminoAcidSet {
         accession: None,
         neutral_losses: Vec::new(),
         loss_class: 0,
+        annotated_site_mass: None,
     };
     let prot_cterm = Modification {
         name: "GlyGly_PCT".into(),
@@ -383,6 +394,7 @@ fn aa_set_with_both_cterm_mods() -> AminoAcidSet {
         accession: None,
         neutral_losses: Vec::new(),
         loss_class: 0,
+        annotated_site_mass: None,
     };
     AminoAcidSetBuilder::new_standard()
         .add_variable_mod(cterm)
@@ -399,11 +411,10 @@ fn aa_set_with_both_cterm_mods() -> AminoAcidSet {
 /// - "MAAAAK" (protein start): gets Anywhere (unmod M) + ProtNTerm (Acetyl-M) → 2 candidates.
 /// - "MAAAAAK" (offset 6, not protein start): gets only Anywhere (unmod M) → 1 candidate.
 ///
-/// Met-cleavage pass (sub_seq="AAAAKMAAAAAK"):
-/// - "AAAAK" (sub_seq 0..5): length=5 < min=6, skipped.
-/// - "MAAAAAK" (sub_seq 5..12, abs_offset=6): is_protein_n_term=false, NTerm lookup empty → 1 candidate.
+/// Met-cleavage pass (sub_seq="AAAAKMAAAAAK") emits only spans starting at its
+/// first residue: "AAAAK" (length 5 < min 6) is skipped.
 ///
-/// Total target: 3 + 1 = 4. The ProtNTerm mod still appears exactly once (on offset-0 peptide).
+/// Total target: 3. The ProtNTerm mod appears exactly once (on offset-0 peptide).
 #[test]
 fn protein_n_term_mod_only_at_protein_start() {
     let target = ProteinDb {
@@ -411,6 +422,7 @@ fn protein_n_term_mod_only_at_protein_start() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"MAAAAKMAAAAAK".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -425,12 +437,12 @@ fn protein_n_term_mod_only_at_protein_start() {
         .collect();
 
     // Standard pass: 2 (offset-0 "MAAAAK": unmod + ProtNTerm Acetyl) + 1 (offset-6 "MAAAAAK": unmod).
-    // B5 Met-cleavage pass: 1 extra "MAAAAAK" at offset-6 (no ProtNTerm mod, NTerm lookup empty).
-    // Total: 4.
+    // Met-cleavage pass: nothing ("AAAAK" is too short).
+    // Total: 3.
     assert_eq!(
         candidates.len(),
-        4,
-        "expected 4 candidates (2 for protein-start peptide, 1+1 for offset-6 peptide), got {}",
+        3,
+        "expected 3 candidates (2 for protein-start peptide, 1 for offset-6 peptide), got {}",
         candidates.len()
     );
 
@@ -472,6 +484,7 @@ fn nterm_mod_applies_to_every_peptide_n_terminus() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"AAAAAAKMAAAAAK".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -527,11 +540,11 @@ fn nterm_mod_applies_to_every_peptide_n_terminus() {
 /// - "MAAAAK" (end < protein_len): CTerm Amide → unmod + Amide = 2.
 /// - "R" (end == protein_len): CTerm Amide ∪ ProtCTerm GlyGly → unmod + Amide + GlyGly = 3.
 ///
-/// Met-cleavage pass (sub_seq="AAAAKR"):
-/// - "AAAA" (abs_end=5, not protein C-term): CTerm Amide → 2.
-/// - "KR" (abs_end=7, protein C-term): CTerm Amide ∪ ProtCTerm GlyGly → 3.
+/// Met-cleavage pass (sub_seq="AAAAKR"), spans starting at its first residue only:
+/// - "AAAAK" (abs 1..6, not protein C-term): CTerm Amide → 2.
+/// - "AAAAKR" needs a missed cleavage.
 ///
-/// Total: (2 + 3) + (2 + 3) = 10.
+/// Total: (2 + 3) + 2 = 7.
 ///
 /// The CTerm mod does NOT bleed into NON-protein-C-term peptides (those get only Amide).
 #[test]
@@ -541,6 +554,7 @@ fn c_term_and_protein_c_term_distinguished() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"MAAAAKR".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -555,12 +569,12 @@ fn c_term_and_protein_c_term_distinguished() {
         .collect();
 
     // Standard pass: "MAAAAK"×2 + "R"×3 = 5.
-    // B5 Met-cleavage pass (sub_seq="AAAAKR"): "AAAA"×2 + "KR"×3 = 5.
-    // Total: 10 (protein-C-term peptides "R"/"KR" each carry unmod + CTerm Amide + ProtCTerm GlyGly).
+    // Met-cleavage pass (sub_seq="AAAAKR"): "AAAAK"×2 = 2.
+    // Total: 7 (protein-C-term peptide "R" carries unmod + CTerm Amide + ProtCTerm GlyGly).
     assert_eq!(
         candidates.len(),
-        10,
-        "expected 10 candidates, got {}",
+        7,
+        "expected 7 candidates, got {}",
         candidates.len()
     );
 
@@ -573,7 +587,7 @@ fn c_term_and_protein_c_term_distinguished() {
         if let Some(last) = residues.last() {
             if let Some(m) = &last.mod_ {
                 if is_prot_c_term {
-                    // Protein-C-term peptide "R"/"KR": it is BOTH a peptide and a
+                    // Protein-C-term peptide "R": it is BOTH a peptide and a
                     // protein C-terminus, so either the CTerm Amide (-0.984016) OR
                     // the ProtCTerm GlyGly (+114.042927) is valid here (finding 2.3).
                     assert!(
@@ -583,7 +597,7 @@ fn c_term_and_protein_c_term_distinguished() {
                         m.mass_delta
                     );
                 } else {
-                    // Non-protein-C-term peptide "MAAAAK" or Met-cleaved "AAAA": only CTerm Amide (-0.984016).
+                    // Non-protein-C-term peptide "MAAAAK" or Met-cleaved "AAAAK": only CTerm Amide (-0.984016).
                     assert!(
                         (m.mass_delta - (-0.984016)).abs() < 1e-4,
                         "non-protein-C-term peptide got an unexpected delta mod ({}); expected CTerm Amide (-0.984016)",
@@ -611,6 +625,7 @@ fn met_cleavage_generates_alternative_candidates() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"MAGER".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -658,6 +673,7 @@ fn non_met_first_residue_does_not_trigger_cleavage() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"KAGER".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -921,6 +937,7 @@ fn met_alone_does_not_trigger_cleavage() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"M".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -950,6 +967,7 @@ fn empty_decoy_prefix_labels_only_normalized_decoys() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"MKWVTFISLLR".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "");

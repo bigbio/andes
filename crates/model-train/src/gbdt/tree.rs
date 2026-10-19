@@ -330,6 +330,7 @@ mod tests {
         let bin_uppers = vec![vec![0.5_f32, 1.5, 2.5]];
         let tree = fit_tree(&binned, &grad, &hess, &params, &bin_uppers);
         let model = GbdtPeakModel {
+            packed: Default::default(),
             n_features: 1,
             apply_sigmoid: false,
             trees: vec![tree],

@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use thermorawfilereader::schema::{DissociationMethod, MassAnalyzer};
 use thermorawfilereader::{RawFileReader, RawSpectrum};
 
+use model::scan::{Ms1Scan, ProductScan, ScanContext};
 use model::{ActivationMethod, InstrumentType};
 
 use crate::{Ms1Link, Spectrum};
@@ -44,6 +45,16 @@ pub struct ThermoRawReader {
     len: usize,
     /// `Some(level)` emits only that MS level; `None` emits all levels.
     ms_level_filter: Option<u8>,
+    /// Quantification capture (see the mzML reader): every MS1 scan with its
+    /// retention time, and MS3+ scans with their master (parent) scan id.
+    capture_run_ms1: bool,
+    run_ms1: Vec<Ms1Scan>,
+    capture_product_scans: bool,
+    product_scans: Vec<ProductScan>,
+    /// The acquisition context of every emitted MS2 (master scan, acquired m/z
+    /// range, FAIMS voltage).
+    capture_scan_context: bool,
+    scan_contexts: Vec<ScanContext>,
 }
 
 impl ThermoRawReader {
@@ -62,7 +73,46 @@ impl ThermoRawReader {
             next: 0,
             len,
             ms_level_filter: Some(2),
+            capture_run_ms1: false,
+            run_ms1: Vec::new(),
+            capture_product_scans: false,
+            product_scans: Vec::new(),
+            capture_scan_context: false,
+            scan_contexts: Vec::new(),
         })
+    }
+
+    /// Keep every MS1 scan (RT + centroids) seen by the iterator for label-free
+    /// quantification; take them with [`Self::take_run_ms1`].
+    pub fn with_run_ms1_capture(mut self, capture: bool) -> Self {
+        self.capture_run_ms1 = capture;
+        self
+    }
+
+    /// Keep MS3+ scans (with the native id of their master scan) seen by the
+    /// iterator for reporter-ion quantification; they are never emitted.
+    pub fn with_product_scan_capture(mut self, capture: bool) -> Self {
+        self.capture_product_scans = capture;
+        self
+    }
+
+    /// Record the acquisition context of every emitted MS2 (see the mzML reader);
+    /// take them with [`Self::take_scan_contexts`].
+    pub fn with_scan_context_capture(mut self, capture: bool) -> Self {
+        self.capture_scan_context = capture;
+        self
+    }
+
+    pub fn take_scan_contexts(&mut self) -> Vec<ScanContext> {
+        std::mem::take(&mut self.scan_contexts)
+    }
+
+    pub fn take_run_ms1(&mut self) -> Vec<Ms1Scan> {
+        std::mem::take(&mut self.run_ms1)
+    }
+
+    pub fn take_product_scans(&mut self) -> Vec<ProductScan> {
+        std::mem::take(&mut self.product_scans)
     }
 
     /// Emit all MS levels (MS1 + MS2) instead of MS2-only. Needed for `--chimeric`.
@@ -91,7 +141,7 @@ impl ThermoRawReader {
     /// has no usable precursor m/z — matching the mzML reader, which skips
     /// precursor-less MS2 rather than forwarding a `precursor_mz = 0.0` spectrum
     /// that would search against a nonsense mass window.
-    fn convert(raw: &RawSpectrum) -> Option<Spectrum> {
+    fn convert(raw: &RawSpectrum, handle: &RawFileReader) -> Option<Spectrum> {
         let scan_number = raw.index() as i32 + 1;
 
         // A precursor record with a positive m/z is required to search an MS2.
@@ -108,16 +158,22 @@ impl ThermoRawReader {
         let precursor_intensity = if inten > 0.0 { Some(inten) } else { None };
 
         // Isolation window: RawFileReader gives absolute m/z bounds
-        // (lower, target, upper); the model stores offsets from the target,
-        // matching mzML's `isolation window lower/upper offset`. Skip a
-        // degenerate/absent window (the cascade is its only consumer).
+        // (lower, target, upper); the model stores the target and the offsets
+        // from it, matching mzML's `isolation window target m/z` and
+        // `lower/upper offset`. Skip a degenerate/absent window.
         let w = p.isolation_window();
-        let (lo, tg, up) = (w.lower(), w.target(), w.upper());
-        let (isolation_lower_offset, isolation_upper_offset) = if tg > 0.0 && up > lo {
-            (Some((tg - lo).abs()), Some((up - tg).abs()))
-        } else {
-            (None, None)
-        };
+        let (lo, tg) = (w.lower(), w.target());
+        let (lo, up) = full_width_isolation_bounds(
+            lo,
+            w.upper(),
+            isolation_width_trailer(handle, raw.index(), raw.ms_level()),
+        );
+        let (isolation_lower_offset, isolation_upper_offset, isolation_target_mz) =
+            if tg > 0.0 && up > lo {
+                (Some((tg - lo).abs()), Some((up - tg).abs()), Some(tg))
+            } else {
+                (None, None, None)
+            };
 
         Some(Spectrum {
             // The Thermo controller native id (e.g.
@@ -134,9 +190,10 @@ impl ThermoRawReader {
             peaks: extract_peaks(raw),
             // Real activation from the .raw, used by the param auto-router so a
             // CID/ETD .raw is not silently scored with the HCD model.
-            activation_method: map_dissociation(p.activation().dissociation_method()),
+            activation_method: scan_activation(raw),
             isolation_lower_offset,
             isolation_upper_offset,
+            isolation_target_mz,
         })
     }
 
@@ -149,8 +206,12 @@ impl ThermoRawReader {
     ///
     /// Returns `(error_count, sample_errors)` for API symmetry; `.raw` reads do
     /// not surface per-scan parse errors, so these are always `(0, vec![])`.
+    ///
+    /// The quantification captures ([`Self::with_run_ms1_capture`],
+    /// [`Self::with_scan_context_capture`]) work on this path too: take them
+    /// from the reader once it returns.
     pub fn read_with_ms1_chunked<F>(
-        self,
+        &mut self,
         chunk_size: usize,
         cap: usize,
         mut on_chunk: F,
@@ -176,7 +237,16 @@ impl ThermoRawReader {
             match raw.ms_level() {
                 1 => {
                     let idx = ms1_peaks.len();
-                    ms1_peaks.push(extract_peaks(&raw));
+                    let peaks = extract_peaks(&raw);
+                    if self.capture_run_ms1 {
+                        self.run_ms1.push(Ms1Scan {
+                            rt: raw.time() * 60.0,
+                            peaks: peaks.clone(),
+                            id: raw.native_id(),
+                            faims_cv: faims_cv(&raw),
+                        });
+                    }
+                    ms1_peaks.push(peaks);
                     current_ms1 = Some(idx);
                 }
                 // MS3+ scans (e.g. TMT SPS-MS3 reporter-quant scans) are NOT
@@ -189,10 +259,19 @@ impl ThermoRawReader {
                 2 => {
                     // Skip MS2 with no usable precursor (mirrors mzML); such a
                     // scan must not consume a chunk slot or an Ms1Link entry.
-                    let spec = match Self::convert(&raw) {
+                    let spec = match Self::convert(&raw, &self.handle) {
                         Some(spec) => spec,
                         None => continue,
                     };
+                    if self.capture_scan_context {
+                        self.scan_contexts.push(ScanContext {
+                            id: spec.title.clone(),
+                            parent_id: master_scan_number(&self.handle, i)
+                                .map(|scan| with_scan_number(&spec.title, scan)),
+                            scan_window: scan_window(&raw),
+                            faims_cv: faims_cv(&raw),
+                        });
+                    }
                     chunk.push(spec);
                     ms2_to_ms1.push(current_ms1);
                     emitted_ms2 += 1;
@@ -231,6 +310,87 @@ impl ThermoRawReader {
             );
         }
         (0, Vec::new())
+    }
+}
+
+/// The 1-based `Master Scan Number` trailer of the scan at `index`: the scan an
+/// MSn (n ≥ 3) scan was triggered from. `None` when the file carries no such
+/// trailer or its value is not a positive scan number.
+fn master_scan_number(handle: &RawFileReader, index: usize) -> Option<usize> {
+    let trailers = handle.get_raw_trailers_for(index)?;
+    let value = trailers
+        .iter()
+        .find_map(|t| is_master_scan_label(t.label).then(|| t.value.trim().to_string()))?;
+    value.parse::<usize>().ok().filter(|&scan| scan > 0)
+}
+
+/// The `MSn Isolation Width` trailer of the scan at `index`: the FULL width of
+/// the isolation window in m/z, when the file records it.
+fn isolation_width_trailer(handle: &RawFileReader, index: usize, ms_level: u8) -> Option<f64> {
+    if ms_level < 2 {
+        return None;
+    }
+    let label = format!("MS{ms_level} Isolation Width");
+    let trailers = handle.get_raw_trailers_for(index)?;
+    let value = trailers.iter().find_map(|t| {
+        (t.label.trim().trim_end_matches(':').trim() == label).then(|| t.value.trim().to_string())
+    })?;
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|w| w.is_finite() && *w > 0.0)
+}
+
+/// Isolation bounds with the window `full_width` wide. RawFileReader builds the
+/// window as `center ± width` from the `MSn Isolation Width` trailer, which
+/// holds the full width, so such a window is twice the isolated range. When the
+/// bounds match that construction they are rebuilt as `center ± width / 2`;
+/// otherwise (no trailer, or the reader fell back to the filter's width, which
+/// it halves) they are returned unchanged.
+fn full_width_isolation_bounds(lower: f64, upper: f64, full_width: Option<f64>) -> (f64, f64) {
+    match full_width {
+        Some(w) if ((upper - lower) - 2.0 * w).abs() <= 1e-6 => {
+            let center = 0.5 * (lower + upper);
+            (center - 0.5 * w, center + 0.5 * w)
+        }
+        _ => (lower, upper),
+    }
+}
+
+/// Acquired m/z range of a scan, when the acquisition block records one.
+fn scan_window(raw: &RawSpectrum) -> Option<(f64, f64)> {
+    let a = raw.acquisition()?;
+    let (lo, hi) = (a.low_mz(), a.high_mz());
+    (lo.is_finite() && hi > lo).then_some((lo, hi))
+}
+
+/// FAIMS compensation voltage of a scan, when the run used FAIMS.
+fn faims_cv(raw: &RawSpectrum) -> Option<f32> {
+    raw.acquisition()?
+        .compensation_voltages()
+        .and_then(|v| v.iter().next())
+}
+
+/// Trailer labels come as `Master Scan Number` or `Master Scan Number:`
+/// depending on the instrument software.
+fn is_master_scan_label(label: &str) -> bool {
+    label
+        .trim()
+        .trim_end_matches(':')
+        .trim()
+        .eq_ignore_ascii_case("Master Scan Number")
+}
+
+/// The native id of scan `scan` in the same file as `native_id`
+/// (`controllerType=0 controllerNumber=1 scan=N` with N replaced).
+fn with_scan_number(native_id: &str, scan: usize) -> String {
+    match native_id.rfind("scan=") {
+        Some(pos) => {
+            let rest = &native_id[pos + "scan=".len()..];
+            let digits = rest.chars().take_while(char::is_ascii_digit).count();
+            format!("{}scan={scan}{}", &native_id[..pos], &rest[digits..])
+        }
+        None => format!("controllerType=0 controllerNumber=1 scan={scan}"),
     }
 }
 
@@ -285,6 +445,56 @@ fn sanitize_thermo_peaks(pairs: Vec<(f64, f32)>) -> Vec<(f64, f32)> {
     peaks
 }
 
+/// The activation of an MSn scan. RawFileReader reports only the primary
+/// activation of the last stage, so an EThcD/ETciD scan arrives as plain ETD
+/// (or ECD); the supplemental collision is read from the filter string's
+/// activation chain (`784.37@etd50.00@hcd25.00`) and the scan is then mapped
+/// like the combined method.
+fn scan_activation(raw: &RawSpectrum) -> Option<ActivationMethod> {
+    let d = raw.precursor()?.activation().dissociation_method();
+    let electron = matches!(d.0, 4 | 8 | 16);
+    if electron
+        && raw
+            .filter_string()
+            .is_some_and(filter_has_supplemental_collision)
+    {
+        return map_dissociation(DissociationMethod::ETHCD);
+    }
+    map_dissociation(d)
+}
+
+/// Whether the last activation stage of a Thermo filter string chains an
+/// electron-based activation with a collisional one, e.g.
+/// `FTMS + p NSI d Full ms2 784.37@etd50.00@hcd25.00 [120.00-2000.00]`.
+fn filter_has_supplemental_collision(filter: &str) -> bool {
+    let head = filter.split('[').next().unwrap_or("");
+    let mut tokens = head.split_whitespace();
+    if !tokens.any(|t| {
+        let t = t.to_ascii_lowercase();
+        t.len() > 2 && t.starts_with("ms") && t[2..].bytes().all(|b| b.is_ascii_digit())
+    }) {
+        return false;
+    }
+    let Some(last_stage) = tokens.filter(|t| t.contains('@')).last() else {
+        return false;
+    };
+    let methods: Vec<String> = last_stage
+        .split('@')
+        .skip(1)
+        .map(|a| {
+            a.chars()
+                .take_while(char::is_ascii_alphabetic)
+                .collect::<String>()
+                .to_ascii_lowercase()
+        })
+        .collect();
+    let electron = methods
+        .iter()
+        .any(|m| matches!(m.as_str(), "etd" | "ecd" | "netd"));
+    let collisional = methods.iter().any(|m| matches!(m.as_str(), "hcd" | "cid"));
+    electron && collisional
+}
+
 /// Map a Thermo `DissociationMethod` to the model's [`ActivationMethod`].
 /// Pure electron-based methods (ETD/ECD/NETD) map to `ETD`. Supplemental-
 /// activation methods (ETciD/EThcD/ECciD/EChcD) are EThcD-class: the
@@ -301,7 +511,7 @@ fn map_dissociation(d: DissociationMethod) -> Option<ActivationMethod> {
         // resonant collision in one step → route to HCD (b/y), not pure ETD.
         //
         // This mirrors the mzML reader, INCLUDING its warning and its
-        // ANDES_ETHCD_AS_ETD escape hatch. Previously the `.raw` path did the
+        // --ethcd-activation escape hatch. Previously the `.raw` path did the
         // relabel silently and could not be overridden at all, so an EThcD
         // glyco run on native Thermo input lost the entire c/z stack with no
         // diagnostic — and `.raw` is the path most users take.
@@ -356,10 +566,8 @@ pub fn detect_activation_instrument<P: AsRef<Path>>(
             continue;
         }
         seen += 1;
-        if let Some(p) = raw.precursor() {
-            if let Some(m) = map_dissociation(p.activation().dissociation_method()) {
-                *act.entry(m as u8).or_insert(0) += 1;
-            }
+        if let Some(m) = scan_activation(&raw) {
+            *act.entry(m as u8).or_insert(0) += 1;
         }
         if let Some(a) = raw.acquisition() {
             if let Some(t) = map_analyzer(a.mass_analyzer()) {
@@ -409,14 +617,57 @@ impl Iterator for ThermoRawReader {
                 Some(raw) => raw,
                 None => continue,
             };
+            let level = raw.ms_level();
+            if level == 1 && self.capture_run_ms1 {
+                self.run_ms1.push(Ms1Scan {
+                    rt: raw.time() * 60.0,
+                    peaks: extract_peaks(&raw),
+                    id: raw.native_id(),
+                    faims_cv: faims_cv(&raw),
+                });
+            }
+            if level >= 3 && self.capture_product_scans {
+                // The MS2 an SPS-MS3 belongs to is the scan's `Master Scan
+                // Number` trailer. The precursor's `parent_index` is not: on a
+                // Lumos SPS-MS3 run it matched the master scan for 15% of the
+                // MS3 scans and otherwise named the MS3 itself or whichever MS2
+                // came last, which hands one peptide's reporter ions to
+                // another. Without the trailer the scan stays unlinked.
+                let parent_id = master_scan_number(&self.handle, i)
+                    .map(|scan| with_scan_number(&raw.native_id(), scan));
+                self.product_scans.push(ProductScan {
+                    id: raw.native_id(),
+                    scan: Some(raw.index() as i32 + 1),
+                    rt_seconds: Some(raw.time() * 60.0),
+                    ms_level: level,
+                    parent_id,
+                    precursor_mz: raw.precursor().map(|p| p.mz()).unwrap_or(0.0),
+                    scan_window: scan_window(&raw),
+                    peaks: extract_peaks(&raw),
+                });
+                continue;
+            }
             if let Some(want) = self.ms_level_filter {
-                if raw.ms_level() != want {
+                if level != want {
                     continue;
                 }
             }
-            match Self::convert(&raw) {
+            match Self::convert(&raw, &self.handle) {
                 // Skip MS2 scans with no usable precursor (mirrors mzML).
-                Some(spec) => return Some(Ok(spec)),
+                Some(spec) => {
+                    if self.capture_scan_context {
+                        // The survey scan of an MS2 is its `Master Scan Number`
+                        // trailer, as for SPS-MS3 above.
+                        self.scan_contexts.push(ScanContext {
+                            id: spec.title.clone(),
+                            parent_id: master_scan_number(&self.handle, i)
+                                .map(|scan| with_scan_number(&spec.title, scan)),
+                            scan_window: scan_window(&raw),
+                            faims_cv: faims_cv(&raw),
+                        });
+                    }
+                    return Some(Ok(spec));
+                }
                 None => continue,
             }
         }
@@ -427,6 +678,18 @@ impl Iterator for ThermoRawReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn master_scan_links_to_the_native_id_of_that_scan() {
+        assert_eq!(
+            with_scan_number("controllerType=0 controllerNumber=1 scan=4780", 4773),
+            "controllerType=0 controllerNumber=1 scan=4773"
+        );
+        assert_eq!(with_scan_number("scan=12", 3), "scan=3");
+        assert!(is_master_scan_label("Master Scan Number"));
+        assert!(is_master_scan_label("Master Scan Number:"));
+        assert!(!is_master_scan_label("Master Index"));
+    }
 
     #[test]
     fn sanitize_thermo_peaks_filters_and_sorts() {
@@ -473,6 +736,52 @@ mod tests {
             );
         }
         assert_eq!(map_dissociation(DissociationMethod(0)), None); // Unknown
+    }
+
+    #[test]
+    fn supplemental_collision_read_from_the_filter_chain() {
+        for f in [
+            "FTMS + p NSI d Full ms2 784.37@etd50.00@hcd25.00 [120.00-2000.00]",
+            "ITMS + c NSI d Full ms2 652.10@etd100.00@cid35.00 [50.00-1315.00]",
+            "FTMS + c NSI Full ms3 900.00@cid35.00 450.20@etd50.00@hcd20.00 [100.00-1000.00]",
+        ] {
+            assert!(filter_has_supplemental_collision(f), "{f}");
+        }
+        for f in [
+            "FTMS + p NSI d Full ms2 784.37@etd50.00 [120.00-2000.00]",
+            "FTMS + p NSI d Full ms2 784.37@hcd28.00 [120.00-2000.00]",
+            // A collisional MS2 stage followed by an ETD MS3 stage is not EThcD.
+            "FTMS + c NSI Full ms3 900.00@cid35.00 450.20@etd50.00 [100.00-1000.00]",
+            "FTMS + p NSI Full ms [350.00-1800.00]",
+            "",
+        ] {
+            assert!(!filter_has_supplemental_collision(f), "{f}");
+        }
+    }
+
+    #[test]
+    fn trailer_isolation_width_is_the_full_width() {
+        // Trailer 1.6 used as the half-width: 500 ± 1.6 → 500 ± 0.8.
+        let (lo, up) = full_width_isolation_bounds(498.4, 501.6, Some(1.6));
+        assert!(
+            (lo - 499.2).abs() < 1e-9 && (up - 500.8).abs() < 1e-9,
+            "{lo} {up}"
+        );
+        // An offset window keeps its center.
+        let (lo, up) = full_width_isolation_bounds(498.6, 501.8, Some(1.6));
+        assert!(
+            (lo - 499.4).abs() < 1e-9 && (up - 501.0).abs() < 1e-9,
+            "{lo} {up}"
+        );
+        // Filter fallback (already halved) and no trailer: unchanged.
+        assert_eq!(
+            full_width_isolation_bounds(499.2, 500.8, Some(1.6)),
+            (499.2, 500.8)
+        );
+        assert_eq!(
+            full_width_isolation_bounds(498.4, 501.6, None),
+            (498.4, 501.6)
+        );
     }
 
     #[test]

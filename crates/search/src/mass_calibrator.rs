@@ -121,6 +121,11 @@ pub fn prepass_search_params(main: &SearchParams) -> SearchParams {
     // before the strong-score model is relevant, and using Strong here would
     // make the precursor-mass calibration depend on the experimental score path.
     p.score_mode = crate::search_params::ScoreMode::Rank;
+    // The pre-pass samples spectra across the whole file, so its one chunk
+    // spans every precursor mass; a per-chunk fragment-ion index over that is
+    // the entire database (issue #76). Calibration stays on the enumeration
+    // path.
+    p.fragment_index_top_k = 0;
     p
 }
 
@@ -143,7 +148,7 @@ pub fn apply_shift_for_mode(mode: PrecursorCalMode, stats: CalibrationStats) -> 
 pub fn learn_calibration_stats(
     spec_keys: &[SpecKey],
     originals: &HashMap<usize, Spectrum>,
-    prepared: &PreparedSearch<'_>,
+    prepared: &mut PreparedSearch<'_>,
     main_params: &SearchParams,
 ) -> CalibrationStats {
     if spec_keys.len() < main_params.cal_min_spec_keys {
@@ -174,6 +179,9 @@ pub fn learn_calibration_stats(
     }
 
     let queues = prepared.run_chunk_with_params(&prepass_spectra, 0, &prepass_params);
+    // The scan materializes candidates lazily; pull them into `candidates` so
+    // the queue indices resolve.
+    prepared.sync_materialized_candidates();
     let (residuals, filter) = extract_residuals(
         &sampled,
         &queues,
@@ -260,6 +268,12 @@ struct CalCandidate {
     residual: f64,
     rank_score: f32,
     is_decoy: bool,
+    /// Tie-break key. `rank_score` is integer-valued, so the confident set is
+    /// full of exact ties and the cut at `keep_top_n` lands inside one. Without
+    /// a deterministic tie-break, which candidates survive depends on the order
+    /// they were collected in, and the calibration shift moves between runs of
+    /// the same input.
+    spectrum_idx: usize,
 }
 
 fn extract_residuals(
@@ -274,7 +288,10 @@ fn extract_residuals(
 
     // Keep the best (highest `rank_score`) PSM per spectrum index across all
     // sampled SpecKeys (e.g. charge variants).
-    let mut best_by_spec: HashMap<usize, crate::PsmMatch> = HashMap::new();
+    // BTreeMap, not HashMap: this map is ITERATED below to build the candidate
+    // list, and a randomised traversal order makes the run irreproducible.
+    let mut best_by_spec: std::collections::BTreeMap<usize, crate::PsmMatch> =
+        std::collections::BTreeMap::new();
     for (key, queue) in sampled.iter().zip(queues.iter()) {
         let Some(psm) = queue.iter_psms().max_by(|a, b| {
             a.rank_score
@@ -331,6 +348,7 @@ fn extract_residuals(
             residual,
             rank_score: psm.rank_score,
             is_decoy: cand.is_decoy,
+            spectrum_idx,
         });
     }
 
@@ -373,7 +391,11 @@ fn high_confidence_residuals(cands: &mut [CalCandidate], keep_top_n: usize) -> V
         } else {
             b.rank_score
         };
-        bv.partial_cmp(&av).unwrap_or(std::cmp::Ordering::Equal)
+        // `total_cmp`, not `partial_cmp(..).unwrap_or(Equal)` — see the note on
+        // `PsmMatch`'s comparator. The `spectrum_idx` tie-break makes the cut at
+        // `keep_top_n` a function of the DATA, not of the order it arrived in.
+        bv.total_cmp(&av)
+            .then_with(|| a.spectrum_idx.cmp(&b.spectrum_idx))
     });
 
     // Running TDC q-value.
@@ -456,15 +478,14 @@ mod tests {
             min_peaks: 10,
             precursor_cal_mode: PrecursorCalMode::Auto,
             cal_min_spec_keys: constants::MIN_SPECKEYS_FOR_PREPASS,
+            fragment_index_top_k: 0,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,
             chimeric_max_coisolated: 2,
             chimeric_max_kl: 0.3,
-            chimeric_allow_overlap: false,
             score_mode: crate::search_params::ScoreMode::Rank,
             refine_select_psm_fdr: 0.01,
-            candidate_index: crate::search_params::CandidateIndexMode::Ram,
             require_nxst_sequon: false,
         }
     }
@@ -482,6 +503,7 @@ mod tests {
             activation_method: None,
             isolation_lower_offset: None,
             isolation_upper_offset: None,
+            isolation_target_mz: None,
         };
         let keys = build_spec_keys(&[spec], &(2..=3), 10);
         assert_eq!(keys.len(), 2);
@@ -535,11 +557,53 @@ mod tests {
     }
 
     fn cand(residual: f64, rank_score: f32, is_decoy: bool) -> CalCandidate {
+        cand_from(residual, rank_score, is_decoy, 0)
+    }
+
+    fn cand_from(
+        residual: f64,
+        rank_score: f32,
+        is_decoy: bool,
+        spectrum_idx: usize,
+    ) -> CalCandidate {
         CalCandidate {
             residual,
             rank_score,
             is_decoy,
+            spectrum_idx,
         }
+    }
+
+    /// The confident set is full of exact `rank_score` ties (the score is an
+    /// integer sum), and `keep_top_n` cuts inside one. Selection must therefore
+    /// depend on the data alone — if it depends on the order the candidates were
+    /// collected in, the calibration shift, the tightened precursor tolerance and
+    /// hence the whole PSM set move between runs of identical input.
+    #[test]
+    fn residual_selection_is_independent_of_input_order() {
+        // 40 targets on one tied score, distinguishable only by residual, and a
+        // cap that cuts the tie in half.
+        let build = |order: &[usize]| -> Vec<f64> {
+            let mut cands: Vec<CalCandidate> = order
+                .iter()
+                .map(|&i| cand_from(i as f64 * 0.1, 20.0, false, i))
+                .collect();
+            // A few decoys well below so the q-gate admits the targets.
+            for i in 0..5 {
+                cands.push(cand_from(9.0, 1.0, true, 1000 + i));
+            }
+            high_confidence_residuals(&mut cands, 20)
+        };
+        let forward: Vec<usize> = (0..40).collect();
+        let reversed: Vec<usize> = (0..40).rev().collect();
+        let shuffled: Vec<usize> = (0..40).map(|i| (i * 17) % 40).collect();
+
+        let a = build(&forward);
+        let b = build(&reversed);
+        let c = build(&shuffled);
+        assert_eq!(a.len(), 20, "the cap should bite inside the tie");
+        assert_eq!(a, b, "reversing the input changed which residuals survived");
+        assert_eq!(a, c, "permuting the input changed which residuals survived");
     }
 
     #[test]

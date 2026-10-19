@@ -10,7 +10,7 @@
 //! column-offset differences between engines (e.g. a a comparison search engine-style extra `FileName`
 //! column).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -26,6 +26,9 @@ pub struct PercolatorPsm {
     pub q_value: f64,
     /// `posterior_error_probability` column (PEP; lower is better).
     pub pep: f64,
+    /// `score` column (higher is better); `None` when the file has no such
+    /// column or the value is missing or not a finite number.
+    pub score: Option<f64>,
     /// `peptide` column (Percolator's flanked peptide string).
     pub peptide: String,
     /// `proteinIds` column joined with `\t` collapsed to a single string (the
@@ -267,15 +270,18 @@ fn native_args(pin: &Path, out: &ResultPaths, extra_args: &[String]) -> Vec<Stri
 /// Build the full `docker run …` argument vector. The PIN's directory is bind
 /// mounted read-only at `/pin` and the output dir at `/out`, exactly as the
 /// reference script does, so percolator reads/writes in place. Result paths are
-/// rewritten to their `/out` equivalents inside the container.
+/// rewritten to their `/out` equivalents inside the container. Both mount
+/// sources are made absolute: docker reads a relative or empty `-v` source as
+/// a named volume (or rejects it), not as a host directory.
 fn docker_args(
     image: &str,
     pin: &Path,
     out_dir: &Path,
     out: &ResultPaths,
     extra_args: &[String],
-) -> Vec<String> {
-    let pin_dir = pin.parent().unwrap_or_else(|| Path::new("."));
+) -> std::io::Result<Vec<String>> {
+    let pin_dir = host_dir(pin.parent().unwrap_or_else(|| Path::new(".")))?;
+    let out_dir = host_dir(out_dir)?;
     let pin_name = pin
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -310,7 +316,17 @@ fn docker_args(
     ];
     args.extend(extra_args.iter().cloned());
     args.push(format!("/pin/{pin_name}"));
-    args
+    Ok(args)
+}
+
+/// `dir` as an absolute host path; the empty parent of a bare file name is
+/// the current directory.
+fn host_dir(dir: &Path) -> std::io::Result<PathBuf> {
+    if dir.as_os_str().is_empty() {
+        std::env::current_dir()
+    } else {
+        std::path::absolute(dir)
+    }
 }
 
 /// Run Percolator on `pin` using `backend`, writing result files into the PIN's
@@ -324,12 +340,20 @@ pub fn run_percolator(
     pin: &Path,
     extra_args: &[String],
 ) -> Result<HashMap<String, PercolatorPsm>, PercolatorError> {
+    run_percolator_with_decoys(backend, pin, extra_args).map(|(targets, _)| targets)
+}
+
+/// [`run_percolator`], also returning the `PSMId`s of the decoy result file.
+/// With target-decoy competition (`-Y`) Percolator keeps one PSM per
+/// scan/`ExpMass` group in either file; the decoy ids let the QPX join tell a
+/// target that lost the competition from one whose join drifted.
+pub fn run_percolator_with_decoys(
+    backend: &PercolatorBackend,
+    pin: &Path,
+    extra_args: &[String],
+) -> Result<(HashMap<String, PercolatorPsm>, HashSet<String>), PercolatorError> {
     let out_dir = pin.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
-    let stem = pin
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "andes".to_string());
-    let out = ResultPaths::new(&out_dir, &stem);
+    let out = result_paths(pin);
     // Remove any stale outputs from a previous run BEFORE launching, so the
     // `out.target.exists()` success check below can only pass on a file this
     // run actually wrote (guards against reading a previous run's results).
@@ -341,7 +365,7 @@ pub fn run_percolator(
             .output()
             .map_err(PercolatorError::Spawn)?,
         PercolatorBackend::Docker { image } => Command::new("docker")
-            .args(docker_args(image, pin, &out_dir, &out, extra_args))
+            .args(docker_args(image, pin, &out_dir, &out, extra_args)?)
             .output()
             .map_err(PercolatorError::Spawn)?,
     };
@@ -360,7 +384,29 @@ pub fn run_percolator(
     }
 
     let text = std::fs::read_to_string(&out.target)?;
-    parse_psm_results(&text)
+    let targets = parse_psm_results(&text)?;
+    let decoys = match std::fs::read_to_string(&out.decoy) {
+        Ok(text) => parse_psm_results(&text)?.into_keys().collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashSet::new(),
+        Err(e) => return Err(e.into()),
+    };
+    Ok((targets, decoys))
+}
+
+/// The result files `run_percolator` writes for `pin`, next to it.
+fn result_paths(pin: &Path) -> ResultPaths {
+    let out_dir = pin.parent().unwrap_or_else(|| Path::new("."));
+    let stem = pin
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "andes".to_string());
+    ResultPaths::new(out_dir, &stem)
+}
+
+/// The decoy-PSM result file a [`run_percolator`] call on `pin` writes; parse
+/// it with [`parse_psm_results`].
+pub fn decoy_results_path(pin: &Path) -> PathBuf {
+    result_paths(pin).decoy
 }
 
 /// Keep the last `n` lines of `s`.
@@ -419,6 +465,7 @@ pub fn parse_psm_results(text: &str) -> Result<HashMap<String, PercolatorPsm>, P
     let pep_col = find_prefix("posterior_error_prob")?;
     let pep_seq_col = find("peptide")?;
     let prot_col = find("proteinIds")?;
+    let score_col = cols.iter().position(|c| *c == "score");
 
     let mut map = HashMap::new();
     for line in lines {
@@ -439,6 +486,12 @@ pub fn parse_psm_results(text: &str) -> Result<HashMap<String, PercolatorPsm>, P
         // silent NaN — NaN compares false in every FDR threshold check.
         let q_value = parse_finite(fields[q_col], "q-value")?;
         let pep = parse_finite(fields[pep_col], "posterior_error_prob")?;
+        // The score is optional: a missing, unparseable or non-finite value is
+        // no score. Callers that rank by it reject such PSMs themselves.
+        let score = score_col
+            .and_then(|c| fields.get(c))
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| v.is_finite());
         let peptide = fields[pep_seq_col].to_string();
         // proteinIds is the trailing column: re-join everything from prot_col on.
         let proteins = if fields.len() > prot_col {
@@ -453,6 +506,7 @@ pub fn parse_psm_results(text: &str) -> Result<HashMap<String, PercolatorPsm>, P
                     psm_id: psm_id.clone(),
                     q_value,
                     pep,
+                    score,
                     peptide,
                     proteins,
                 },
@@ -485,20 +539,51 @@ mod tests {
         // Two trailing protein columns re-joined with ';'.
         assert_eq!(a.proteins, "sp|P1;sp|P2");
         assert_eq!(m["title_101_1"].proteins, "sp|P3");
+        assert_eq!(a.score, Some(2.5));
+        assert_eq!(m["title_101_1"].score, Some(1.0));
     }
 
     #[test]
-    fn parse_sage_style_extra_column() {
+    fn score_column_is_optional_and_lenient() {
+        let text = "PSMId\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n\
+                    a_1_1\t0.001\t0.0005\tR.PEPTIDEK.A\tsp|P1\n";
+        assert_eq!(parse_psm_results(text).unwrap()["a_1_1"].score, None);
+        // A non-finite or unparseable score is no score; the row still parses.
+        let text = "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n\
+                    a_1_1\tnan\t0.001\t0.0005\tR.PEPTIDEK.A\tsp|P1\n\
+                    b_1_1\tinf\t0.002\t0.0005\tR.PEPTIDEK.A\tsp|P1\n\
+                    c_1_1\tx\t0.003\t0.0005\tR.PEPTIDEK.A\tsp|P1\n";
+        let m = parse_psm_results(text).unwrap();
+        assert_eq!(m.len(), 3);
+        assert!(m.values().all(|p| p.score.is_none()));
+        assert_eq!(m["a_1_1"].q_value, 0.001);
+        // A score column after the scalar columns does not lengthen the rows
+        // that must be present.
+        let text = "PSMId\tq-value\tposterior_error_prob\tpeptide\tproteinIds\tscore\n\
+                    a_1_1\t0.001\t0.0005\tR.PEPTIDEK.A\n";
+        assert_eq!(parse_psm_results(text).unwrap()["a_1_1"].score, None);
+    }
+
+    #[test]
+    fn decoy_results_sit_next_to_the_pin() {
+        assert_eq!(
+            decoy_results_path(Path::new("/x/run.pin")),
+            Path::new("/x/run.percolator.decoy.psms.txt")
+        );
+    }
+
+    #[test]
+    fn parse_leading_filename_column() {
         // a comparison search engine adds a leading FileName column, shifting q-value to col 4. The
         // by-NAME lookup must still find every field correctly.
         let text =
             "PSMId\tFileName\tscore\tq-value\tposterior_error_probability\tpeptide\tproteinIds\n\
-                    sc_5_1\trun.mzML\t9.1\t0.004\t0.002\tK.SAGEPEPK.L\tDECOY_x\n";
+                    sc_5_1\trun.mzML\t9.1\t0.004\t0.002\tK.SAGTPEPK.L\tDECOY_x\n";
         let m = parse_psm_results(text).unwrap();
         let r = &m["sc_5_1"];
         assert_eq!(r.q_value, 0.004);
         assert_eq!(r.pep, 0.002);
-        assert_eq!(r.peptide, "K.SAGEPEPK.L");
+        assert_eq!(r.peptide, "K.SAGTPEPK.L");
         assert_eq!(r.proteins, "DECOY_x");
     }
 
@@ -619,15 +704,44 @@ mod tests {
             Path::new("/data"),
             &out,
             &[],
-        );
+        )
+        .unwrap();
         assert_eq!(args[0], "run");
         assert!(args.contains(&"--platform".to_string()));
-        assert!(args.iter().any(|a| a == "/data:/pin:ro"));
+        let pin_mount = format!(
+            "{}:/pin:ro",
+            std::path::absolute("/data").unwrap().display()
+        );
+        assert!(args.contains(&pin_mount));
         assert!(args.contains(&DEFAULT_PERCOLATOR_IMAGE.to_string()));
         assert_eq!(args.last().unwrap(), "/pin/run.pin");
         // result paths rewritten under /out
         assert!(args
             .iter()
             .any(|a| a == "/out/run.percolator.target.psms.txt"));
+    }
+
+    #[test]
+    fn docker_args_relative_pin_mounts_absolute_dirs() {
+        let cwd = std::env::current_dir().unwrap();
+        for (pin, dir) in [("out.pin", cwd.clone()), ("res/out.pin", cwd.join("res"))] {
+            let pin = Path::new(pin);
+            let out_dir = pin.parent().unwrap();
+            let out = result_paths(pin);
+            let args = docker_args(DEFAULT_PERCOLATOR_IMAGE, pin, out_dir, &out, &[]).unwrap();
+            let mounts: Vec<&String> = args
+                .iter()
+                .zip(args.iter().skip(1))
+                .filter(|(flag, _)| *flag == "-v")
+                .map(|(_, m)| m)
+                .collect();
+            assert_eq!(
+                mounts,
+                [
+                    &format!("{}:/pin:ro", dir.display()),
+                    &format!("{}:/out", dir.display())
+                ]
+            );
+        }
     }
 }

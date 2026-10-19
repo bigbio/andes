@@ -1,4 +1,4 @@
-//! Percolator-style enzymatic-boundary helpers (OpenMS PercolatorInfile rules).
+//! Percolator-style enzymatic-boundary helpers (the common PIN-writer rules).
 //! These compute the `enzN`, `enzC`, and `enzInt` PIN columns that feed
 //! Percolator as enzymatic-cleavage consistency features (Kim et al., Nat
 //! Commun 5:5277, 2014).
@@ -9,12 +9,12 @@
 //!   (n = the residue immediately N-terminal, c = the residue immediately
 //!   C-terminal of the boundary).
 //! - Protein-boundary flanking characters always count as enzymatic
-//!   (OpenMS `n == '-' || c == '-'` short-circuit). Rust's `Peptide::pre`
+//!   (the usual `n == '-' || c == '-'` short-circuit). Rust's `Peptide::pre`
 //!   uses `_` for the protein N-terminal boundary and `-` for the protein
 //!   C-terminal boundary, so both bytes are normalised to the same "boundary"
 //!   semantics here.
 //! - Unknown / non-builtin enzymes return `true` for any boundary —
-//!   matching OpenMS's default "else" branch and Percolator's
+//!   matching the common PIN writers' default branch and Percolator's
 //!   unspecific-cleavage semantics.
 
 use model::enzyme::Enzyme;
@@ -25,9 +25,9 @@ fn is_protein_boundary(c: u8) -> bool {
 }
 
 /// Returns `true` when the boundary between residues `n` and `c` is
-/// consistent with the enzyme's cleavage rule (OpenMS PercolatorInfile).
+/// consistent with the enzyme's cleavage rule (common PIN-writer rule).
 pub(crate) fn is_enzymatic_boundary(n: u8, c: u8, enzyme: Enzyme) -> bool {
-    // Protein boundaries are always enzymatic (OpenMS short-circuit),
+    // Protein boundaries are always enzymatic (usual short-circuit),
     // generalised to Rust's `_`/`-` boundary-byte convention.
     if is_protein_boundary(n) || is_protein_boundary(c) {
         return true;
@@ -40,29 +40,37 @@ pub(crate) fn is_enzymatic_boundary(n: u8, c: u8, enzyme: Enzyme) -> bool {
         Enzyme::GluC => n == b'E' && c != b'P',
         Enzyme::ArgC => n == b'R' && c != b'P',
         Enzyme::AspN => c == b'D',
-        // Unknown enzymes: OpenMS default "else" branch returns true so
+        Enzyme::AlphaLP => matches!(n, b'T' | b'A' | b'S' | b'V'),
+        // Unknown enzymes: the common default branch returns true so
         // unspecific searches don't penalise every PSM as non-enzymatic.
-        Enzyme::AlphaLP | Enzyme::NoCleavage | Enzyme::NonSpecific => true,
+        Enzyme::NoCleavage | Enzyme::NonSpecific => true,
     }
 }
 
-/// Count internal boundaries consistent with the enzyme cleavage rule
-/// (OpenMS PercolatorInfile).
+/// [`is_enzymatic_boundary`] for a digest of `primary` plus the `extra`
+/// enzymes of a multi-protease `--enzyme a,b,...`: the boundary is enzymatic
+/// when ANY of them cleaves it.
+pub(crate) fn is_enzymatic_boundary_any(n: u8, c: u8, primary: Enzyme, extra: &[Enzyme]) -> bool {
+    std::iter::once(&primary)
+        .chain(extra)
+        .any(|&e| is_enzymatic_boundary(n, c, e))
+}
+
+/// Count internal boundaries consistent with the cleavage rule of any of the
+/// digest's enzymes (common PIN-writer rule, per enzyme).
 ///
 /// For an empty / single-residue peptide returns `0` (no internal
 /// boundaries to evaluate). For an "unknown" enzyme (universal-true
 /// branch above) this returns `len - 1`.
-pub(crate) fn count_internal_enzymatic(residues: &[u8], enzyme: Enzyme) -> i32 {
-    if residues.len() < 2 {
-        return 0;
-    }
-    let mut count: i32 = 0;
-    for i in 1..residues.len() {
-        if is_enzymatic_boundary(residues[i - 1], residues[i], enzyme) {
-            count += 1;
-        }
-    }
-    count
+pub(crate) fn count_internal_enzymatic_any(
+    residues: &[u8],
+    primary: Enzyme,
+    extra: &[Enzyme],
+) -> i32 {
+    residues
+        .windows(2)
+        .filter(|w| is_enzymatic_boundary_any(w[0], w[1], primary, extra))
+        .count() as i32
 }
 
 #[cfg(test)]
@@ -126,9 +134,8 @@ mod tests {
 
     #[test]
     fn unspecific_enzymes_always_cleavable() {
-        assert!(is_enzymatic_boundary(b'A', b'A', Enzyme::AlphaLP));
         assert!(is_enzymatic_boundary(b'A', b'A', Enzyme::NonSpecific));
-        // NoCleavage follows the unknown-enzyme → true convention (OpenMS default).
+        // NoCleavage follows the unknown-enzyme → true convention (common default).
         assert!(is_enzymatic_boundary(b'A', b'A', Enzyme::NoCleavage));
     }
 
@@ -140,25 +147,55 @@ mod tests {
         // Peptide: ABKAR → residues [A, B, K, A, R].
         // Internal boundaries at i=1,2,3,4: (A,B), (B,K), (K,A), (A,R)
         //   trypsin: only (K,A) qualifies → count = 1.
-        let count = count_internal_enzymatic(b"ABKAR", Enzyme::Trypsin);
+        let count = count_internal_enzymatic_any(b"ABKAR", Enzyme::Trypsin, &[]);
         assert_eq!(count, 1);
     }
 
     #[test]
     fn count_internal_zero_for_short_peptide() {
-        assert_eq!(count_internal_enzymatic(b"", Enzyme::Trypsin), 0);
-        assert_eq!(count_internal_enzymatic(b"A", Enzyme::Trypsin), 0);
+        assert_eq!(count_internal_enzymatic_any(b"", Enzyme::Trypsin, &[]), 0);
+        assert_eq!(count_internal_enzymatic_any(b"A", Enzyme::Trypsin, &[]), 0);
     }
 
     #[test]
     fn count_internal_handles_p_block() {
         // KPKA: boundaries at i=1,2,3: (K,P), (P,K), (K,A)
         //   trypsin: (K,P) blocked, (P,K) no K/R before, (K,A) yes → count=1.
-        assert_eq!(count_internal_enzymatic(b"KPKA", Enzyme::Trypsin), 1);
+        assert_eq!(
+            count_internal_enzymatic_any(b"KPKA", Enzyme::Trypsin, &[]),
+            1
+        );
     }
 
     #[test]
     fn count_internal_universal_returns_len_minus_one() {
-        assert_eq!(count_internal_enzymatic(b"ABCDE", Enzyme::NonSpecific), 4);
+        assert_eq!(
+            count_internal_enzymatic_any(b"ABCDE", Enzyme::NonSpecific, &[]),
+            4
+        );
+    }
+
+    #[test]
+    fn multi_protease_boundaries_use_the_union_of_enzymes() {
+        // Trypsin + GluC: an E| boundary is enzymatic only through GluC.
+        let glu = [Enzyme::GluC];
+        assert!(!is_enzymatic_boundary_any(b'E', b'A', Enzyme::Trypsin, &[]));
+        assert!(is_enzymatic_boundary_any(b'E', b'A', Enzyme::Trypsin, &glu));
+        assert!(is_enzymatic_boundary_any(b'K', b'A', Enzyme::Trypsin, &glu));
+        assert!(!is_enzymatic_boundary_any(
+            b'A',
+            b'A',
+            Enzyme::Trypsin,
+            &glu
+        ));
+        // AKAEAKP: (K,A) trypsin, (E,A) GluC, (K,P) neither.
+        assert_eq!(
+            count_internal_enzymatic_any(b"AKAEAKP", Enzyme::Trypsin, &[]),
+            1
+        );
+        assert_eq!(
+            count_internal_enzymatic_any(b"AKAEAKP", Enzyme::Trypsin, &glu),
+            2
+        );
     }
 }

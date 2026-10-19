@@ -44,6 +44,11 @@ const INDEX_MAGIC: &[u8; 8] = b"ANDESCI\x00";
 /// On-disk format version. BUMP whenever `IndexRecord`'s layout or the file
 /// structure changes so a stale-format cache is rebuilt rather than misread.
 const INDEX_FORMAT_VERSION: u32 = 1;
+/// Revision of the base-peptide set [`base_peptide_records`] produces from a
+/// given FASTA and parameters, hashed into [`index_cache_path`]. BUMP whenever
+/// the digest emits different spans or folds a different fixed-mod mass into a
+/// span, so a cached index built by another rule is never reused.
+const CANDIDATE_SET_REVISION: u32 = 2;
 /// Header = 8 magic bytes + 4 version bytes (LE); records follow at this offset.
 const INDEX_HEADER_SIZE: usize = INDEX_MAGIC.len() + 4;
 
@@ -176,42 +181,6 @@ pub fn base_peptide_records(
         .collect()
 }
 
-/// Estimate whether the in-RAM candidate index (the `Vec<Candidate>` the default
-/// `Ram` backing materializes) would fit within `budget_bytes`.
-///
-/// Used by `--candidate-index auto` to choose RAM vs out-of-core mmap WITHOUT
-/// risking an OOM: the in-RAM path `.collect()`s every modified candidate (each
-/// owning a `Peptide` residue `Vec`), which for large mod searches is the term
-/// that blows up. We accumulate a per-candidate byte estimate over
-/// [`enumerate_candidates`] and **bail early** the moment it crosses the budget,
-/// so the cost is bounded by the budget (not by the — possibly enormous — total
-/// candidate count). Returns `true` if the full set fits, `false` if it would
-/// exceed `budget_bytes`.
-///
-/// The per-candidate cost is intentionally a slight OVER-estimate (so we err
-/// toward mmap near the limit and never under-predict into an OOM): the
-/// `Candidate` struct + its heap `Peptide` residues (the dominant term; each
-/// `AminoAcid` carries an `Arc<Modification>`) + the mass-bucket index entry.
-pub fn ram_candidate_index_fits(
-    idx: &SearchIndex,
-    params: &SearchParams,
-    decoy_prefix: &str,
-    budget_bytes: u64,
-) -> bool {
-    // Conservative per-residue / per-candidate constants (bytes).
-    const PER_RESIDUE: u64 = 32; // AminoAcid + Arc refcount slot + slack
-    const PER_CANDIDATE_OVERHEAD: u64 = 120; // struct + Vec header + bucket-idx entry + alloc overhead
-    let mut acc: u64 = 0;
-    for c in enumerate_candidates(idx, params, decoy_prefix) {
-        acc = acc
-            .saturating_add(PER_CANDIDATE_OVERHEAD + c.peptide.residues.len() as u64 * PER_RESIDUE);
-        if acc > budget_bytes {
-            return false;
-        }
-    }
-    true
-}
-
 /// Canonical builder: enumerate base peptides and write a mass-sorted binary
 /// index to `out`.
 ///
@@ -264,11 +233,13 @@ pub fn build_base_peptide_index<W: Write>(
 /// derived by hashing:
 ///
 /// 1. Every **target** protein's accession and sequence (in iteration order from
-///    [`SearchIndex::iter_target_proteins`]).  Decoy sequences are derived from
-///    targets deterministically, so they need not be hashed separately.
+///    [`SearchIndex::iter_target_proteins`]), a variant entry's variant
+///    region and a mature-chain entry's new termini.  Decoy sequences are derived from targets deterministically, so
+///    they need not be hashed separately.
 /// 2. The search parameters that affect which base peptides are produced:
 ///    `enzyme`, `extra_enzymes`, `max_missed_cleavages`, `min_length`,
-///    `max_length`, and `decoy_prefix`.
+///    `max_length`, `num_tolerable_termini`, `require_nxst_sequon` and
+///    `decoy_prefix`.
 ///
 /// The hash uses Rust's stable [`DefaultHasher`].  It is **not** a
 /// cryptographic hash — collisions are possible (though extremely unlikely in
@@ -284,6 +255,10 @@ pub fn build_base_peptide_index<W: Write>(
 pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams) -> PathBuf {
     let mut h = DefaultHasher::new();
 
+    // The candidate-set revision: which spans the digest emits and which
+    // base mass each carries, so an index built by an earlier rule is rebuilt.
+    CANDIDATE_SET_REVISION.hash(&mut h);
+
     // Hash ALL protein content (targets AND decoys): accession + sequence bytes.
     // Hashing the decoy sequences directly (not just `decoy_prefix`) captures the
     // decoy strategy and shuffle seed — a prefix-only key would let a
@@ -292,8 +267,27 @@ pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams) -> PathBuf {
     for protein in &idx.db.proteins {
         protein.accession.hash(&mut h);
         protein.sequence.hash(&mut h);
+        // A variant entry only yields the spans covering its variant, so the
+        // region shapes the records too (absent for every FASTA protein).
+        for v in protein.variant_parts() {
+            (v.start, v.end).hash(&mut h);
+        }
+        // Likewise a mature-chain entry yields only its new-terminus spans.
+        if let Some(c) = protein.chain_ends() {
+            (c.n_term, c.c_term).hash(&mut h);
+        }
     }
+    // The affix test decides each record's IS_DECOY flag (`SearchIndex::
+    // is_decoy_accession`): an accession is a decoy if it carries the prefix
+    // needle OR ends with the decoy suffix. Both are part of the key, so adding
+    // `--decoy-suffix` to an external target/decoy FASTA rebuilds the index
+    // rather than reusing one whose suffixed decoys are flagged as targets. An
+    // empty suffix matches nothing and keys like no suffix.
     idx.decoy_prefix.hash(&mut h);
+    idx.decoy_suffix
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .hash(&mut h);
 
     // Hash the FIXED modifications. Base-peptide masses fold fixed mods in (e.g.
     // Carbamidomethyl-C), so two runs with the same FASTA/enzyme/lengths but a
@@ -321,6 +315,9 @@ pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams) -> PathBuf {
     params.min_length.hash(&mut h);
     params.max_length.hash(&mut h);
     params.num_tolerable_termini.hash(&mut h);
+    // `--glyco-index-sequon-only` drops every span without a sequon from the
+    // index; such an index must never be reused by a search that needs them.
+    params.require_nxst_sequon.hash(&mut h);
 
     let digest = h.finish();
     std::env::temp_dir().join(format!("andes-candidx-{digest:016x}.bin"))
@@ -344,6 +341,8 @@ pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams) -> PathBuf {
 pub struct MmapCandidateIndex {
     mmap: memmap2::Mmap,
     len: usize,
+    /// Built in anonymous memory because the cache file could not be written.
+    in_memory: bool,
 }
 
 impl MmapCandidateIndex {
@@ -356,8 +355,7 @@ impl MmapCandidateIndex {
     /// blob as a valid index.
     pub fn open(path: &Path) -> io::Result<Self> {
         let file = std::fs::File::open(path)?;
-        let meta = file.metadata()?;
-        let byte_len = meta.len() as usize;
+        let byte_len = file.metadata()?.len() as usize;
         if byte_len < INDEX_HEADER_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -368,6 +366,18 @@ impl MmapCandidateIndex {
         // the lifetime of `mmap`.  No other process is expected to modify the
         // file while the search is running.
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        Self::from_mmap(mmap, false)
+    }
+
+    /// Validate an index image (magic, format version, payload alignment).
+    fn from_mmap(mmap: memmap2::Mmap, in_memory: bool) -> io::Result<Self> {
+        let byte_len = mmap.len();
+        if byte_len < INDEX_HEADER_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("index size {byte_len} is smaller than the {INDEX_HEADER_SIZE}-byte header"),
+            ));
+        }
         if &mmap[..INDEX_MAGIC.len()] != INDEX_MAGIC {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -393,7 +403,32 @@ impl MmapCandidateIndex {
             ));
         }
         let len = data_len / INDEX_RECORD_SIZE;
-        Ok(Self { mmap, len })
+        Ok(Self {
+            mmap,
+            len,
+            in_memory,
+        })
+    }
+
+    /// Build the index in anonymous memory instead of a cache file. The image
+    /// is byte-for-byte the one `open_or_build` would write, so a search over it
+    /// is identical; it is simply not reused by later runs.
+    pub fn build_in_memory(
+        idx: &SearchIndex,
+        params: &SearchParams,
+        decoy_prefix: &str,
+    ) -> io::Result<Self> {
+        let mut image = Vec::new();
+        build_base_peptide_index(idx, params, decoy_prefix, &mut image)?;
+        let mut anon = memmap2::MmapMut::map_anon(image.len())?;
+        anon.copy_from_slice(&image);
+        drop(image);
+        Self::from_mmap(anon.make_read_only()?, true)
+    }
+
+    /// Whether the index lives in anonymous memory rather than a cache file.
+    pub fn is_in_memory(&self) -> bool {
+        self.in_memory
     }
 
     /// Open the index from `path` if it already exists, or build it and then
@@ -442,13 +477,34 @@ impl MmapCandidateIndex {
             std::process::id(),
             seq,
         ));
-        {
-            use std::io::BufWriter;
-            let file = std::fs::File::create(&tmp_path)?;
+        // A cache directory that cannot be written (read-only temp dir, full
+        // disk, permissions) does not stop the search: the same index is built
+        // in memory instead.
+        let file = match std::fs::File::create(&tmp_path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!(
+                    "candidate-index: cannot write the cache in {} ({e}); building it in memory \
+                     (set TMPDIR to a writable directory to cache it across runs)",
+                    parent.display()
+                );
+                return Ok((Self::build_in_memory(idx, params, decoy_prefix)?, true));
+            }
+        };
+        let written = {
+            use std::io::{BufWriter, Write};
             let mut bw = BufWriter::new(file);
-            build_base_peptide_index(idx, params, decoy_prefix, &mut bw)?;
+            build_base_peptide_index(idx, params, decoy_prefix, &mut bw).and_then(|_| bw.flush())
+        };
+        if let Err(e) = written.and_then(|()| std::fs::rename(&tmp_path, path)) {
+            let _ = std::fs::remove_file(&tmp_path);
+            eprintln!(
+                "candidate-index: cannot write the cache in {} ({e}); building it in memory \
+                 (set TMPDIR to a writable directory to cache it across runs)",
+                parent.display()
+            );
+            return Ok((Self::build_in_memory(idx, params, decoy_prefix)?, true));
         }
-        std::fs::rename(&tmp_path, path)?;
 
         let mmap_index = Self::open(path)?;
         Ok((mmap_index, true))
@@ -628,26 +684,10 @@ mod tests {
                 accession: "P1".into(),
                 description: "toy protein".into(),
                 sequence: b"MKWVRPK".to_vec(),
+                annotation: None,
             }],
         };
         SearchIndex::from_target_db(&target, "XXX")
-    }
-
-    #[test]
-    fn ram_candidate_index_fits_respects_budget() {
-        let idx = make_toy_index();
-        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
-        let mut params = SearchParams::default_tryptic(aa_set);
-        params.min_length = 3;
-        // A generous budget fits the toy index; a zero budget never does.
-        assert!(
-            ram_candidate_index_fits(&idx, &params, "XXX", u64::MAX),
-            "toy index must fit an unbounded budget"
-        );
-        assert!(
-            !ram_candidate_index_fits(&idx, &params, "XXX", 0),
-            "no candidate set fits a zero budget"
-        );
     }
 
     #[test]
@@ -756,6 +796,7 @@ mod tests {
                 accession: "P2".into(),
                 description: "test protein".into(),
                 sequence: b"WMKDALERQPK".to_vec(),
+                annotation: None,
             }],
         };
         let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -771,6 +812,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         let aa_set = AminoAcidSetBuilder::new_standard()
             .add_variable_mod(ox_m)
@@ -861,6 +903,31 @@ mod tests {
     /// is byte-identical to the first call's result.  The file's modification
     /// time must not change on the second call (proving the builder was not
     /// re-invoked).
+    /// A cache path that cannot be written does not fail the search: the index
+    /// is built in memory, with the same records the cache file would hold.
+    #[test]
+    fn unwritable_cache_falls_back_to_an_identical_in_memory_index() {
+        let idx = make_toy_index();
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.min_length = 3;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let on_disk = dir.path().join("cache.idx");
+        let (file_idx, _) = MmapCandidateIndex::open_or_build(&on_disk, &idx, &params, "XXX")
+            .expect("build to a writable directory");
+        assert!(!file_idx.is_in_memory());
+
+        // The parent directory does not exist, so the cache cannot be created.
+        let unwritable = dir.path().join("missing").join("cache.idx");
+        let (mem_idx, built) = MmapCandidateIndex::open_or_build(&unwritable, &idx, &params, "XXX")
+            .expect("an unwritable cache must not fail");
+        assert!(built);
+        assert!(mem_idx.is_in_memory());
+        assert!(!unwritable.exists());
+        assert_eq!(file_idx.records(), mem_idx.records());
+    }
+
     #[test]
     fn open_or_build_reuses_existing_cache_file() {
         let idx = make_toy_index();
@@ -992,6 +1059,59 @@ mod tests {
             index_cache_path(&idx, &p_nomod),
             index_cache_path(&idx, &p_cam),
             "cache key must differ when the fixed-mod set differs"
+        );
+    }
+
+    /// The decoy suffix decides which proteins are decoys, so an index built
+    /// without it must not be reused once it is given: for an external
+    /// target/decoy FASTA (`--decoy-strategy none`), adding `--decoy-suffix _rev`
+    /// has to turn `P1_rev` into a decoy rather than reuse the cached index in
+    /// which every record is a target.
+    #[test]
+    fn index_cache_path_keys_on_the_decoy_suffix() {
+        let db = ProteinDb {
+            proteins: vec![
+                Protein {
+                    accession: "P1".into(),
+                    description: String::new(),
+                    sequence: b"MNGSK".to_vec(),
+                    annotation: None,
+                },
+                Protein {
+                    accession: "P1_rev".into(),
+                    description: String::new(),
+                    sequence: b"ASNVTR".to_vec(),
+                    annotation: None,
+                },
+            ],
+        };
+        let strategy = crate::decoy::DecoyStrategy::None;
+        let seed = crate::decoy::DEFAULT_DECOY_SEED;
+        let plain = SearchIndex::from_target_db_with_strategy(&db, "XXX", None, strategy, seed);
+        let suffixed =
+            SearchIndex::from_target_db_with_strategy(&db, "XXX", Some("_rev"), strategy, seed);
+        let mut params =
+            SearchParams::default_tryptic(AminoAcidSetBuilder::new_standard().build().unwrap());
+        params.min_length = 3;
+        params.require_nxst_sequon = true;
+
+        let plain_path = index_cache_path(&plain, &params);
+        let suffixed_path = index_cache_path(&suffixed, &params);
+        let _ = std::fs::remove_file(&plain_path);
+        let _ = std::fs::remove_file(&suffixed_path);
+        let (first, _) = MmapCandidateIndex::open_or_build(&plain_path, &plain, &params, "XXX")
+            .expect("build the suffix-less index");
+        assert!(first.records().iter().all(|r| !r.is_decoy()));
+        let (second, _) =
+            MmapCandidateIndex::open_or_build(&suffixed_path, &suffixed, &params, "XXX")
+                .expect("open the suffixed index");
+        let decoys = second.records().iter().filter(|r| r.is_decoy()).count();
+        let _ = std::fs::remove_file(&plain_path);
+        let _ = std::fs::remove_file(&suffixed_path);
+        assert_eq!(decoys, 1, "ASNVTR from P1_rev is the one sequon decoy");
+        assert_ne!(
+            plain_path, suffixed_path,
+            "the decoy suffix must key the cache"
         );
     }
 

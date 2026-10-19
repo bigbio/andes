@@ -24,6 +24,12 @@ mod memlimit;
 mod model_select;
 #[path = "andes/mono.rs"]
 mod mono;
+#[path = "andes/quant_cmd.rs"]
+mod quant_cmd;
+#[path = "andes/quant_mbr.rs"]
+mod quant_mbr;
+#[path = "andes/quant_run.rs"]
+mod quant_run;
 #[path = "../rescore.rs"]
 mod rescore;
 #[path = "andes/search.rs"]
@@ -34,21 +40,19 @@ mod spectra;
 mod train;
 #[path = "andes/train_intensity.rs"]
 mod train_intensity;
+#[path = "../transfer_fdr.rs"]
+mod transfer_fdr;
 
 // Re-imported so `config.rs` can keep its `crate::…` paths unchanged.
 use crate::cli::{
     parse_charge_range, parse_enzyme_specificity, parse_fragmentation, parse_isotope_error_range,
-    parse_precursor_cal, parse_precursor_tol, parse_protocol, CandidateIndexFlag, Cli,
-    GlycoCoreFlag, ScoreFlag, SearchArgs,
+    parse_precursor_cal, parse_precursor_tol, parse_protocol, parse_uniprot_evidence, Cli,
+    ScoreFlag, SearchArgs,
 };
 use crate::search::run;
-use crate::train::{
-    run_rescore_pin, run_train, run_train_from_search, RescorePinArgs, TrainArgs,
-    TrainFromSearchArgs,
-};
+use crate::train::{run_train, run_train_from_search, TrainArgs, TrainFromSearchArgs};
 use crate::train_intensity::{
-    run_train_intensity, run_train_intensity_gbdt, run_train_rich_ion_llr, TrainIntensityArgs,
-    TrainIntensityGbdtArgs, TrainRichIonLlrArgs,
+    run_train_intensity_gbdt, run_train_rich_ion_llr, TrainIntensityGbdtArgs, TrainRichIonLlrArgs,
 };
 
 /// Emit a one-line search-progress update after each scored chunk: cumulative
@@ -67,15 +71,6 @@ fn report_search_progress(scored: usize, start: std::time::Instant) {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Rescore an existing PIN with the built-in rescorer and write Percolator-shaped
-    /// `.psms` / `.dpsms` files.
-    ///
-    /// Exists so two rescorers can be compared on IDENTICAL input: without it the only
-    /// way to try the native rescorer was to re-run the whole search, which changes the
-    /// PIN as well as the rescoring and confounds the comparison.
-    #[command(name = "rescore-pin", hide = true)]
-    RescorePin(RescorePinArgs),
-
     /// Train a scoring model directly from externally-labeled, high-confidence
     /// PSMs supplied as flat training parquet(s), bypassing the bootstrap
     /// search. This is the primary training path for the Phase-3 "own models".
@@ -90,11 +85,6 @@ enum Command {
     /// Boxed to keep the `Command` enum compact.
     #[command(name = "train-from-search", hide = true)]
     TrainFromSearch(Box<TrainFromSearchArgs>),
-
-    /// Merge MSNet intensity aggregation parquets into a finalized intensity
-    /// model for the strong-score numerator.
-    #[command(name = "train-intensity", hide = true)]
-    TrainIntensity(Box<TrainIntensityArgs>),
 
     /// Train a v3 GBDT fragment-intensity regressor from flat training
     /// parquets and embed it in a Parquet model store alongside existing
@@ -111,6 +101,12 @@ enum Command {
     /// Boxed to keep the `Command` enum compact.
     #[command(name = "train-rich-ion-llr", hide = true)]
     TrainRichIonLlr(Box<TrainRichIonLlrArgs>),
+
+    /// Match-between-runs quantification stages over a `--quant-dir`:
+    /// `library` (global), `extract` (per run), `finalize` (global). The same
+    /// result as `andes search --lfq --mbr` on the same inputs.
+    #[command(subcommand)]
+    Quant(cli::QuantCommand),
 }
 
 /// Top-level CLI.  When no subcommand is given, the flattened `SearchArgs`
@@ -142,32 +138,34 @@ fn main() -> ExitCode {
     let matches = <TopCli as clap::CommandFactory>::command().get_matches();
     let mut top =
         <TopCli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
-    // Record whether the user typed --max-missed-cleavages. `--glyco` raises the
-    // floor to 3, which costs real memory (measured +4.4 GB on a 20k-protein human
-    // FASTA), so an explicit lower value must be allowed to win. The default (1) is
-    // itself a plausible explicit value, so comparing against it cannot distinguish
-    // the two cases — only the ValueSource can.
-    let _ = EXPLICIT_MISSED_CLEAVAGES.set(matches!(
-        matches.value_source("max_missed_cleavages"),
-        Some(clap::parser::ValueSource::CommandLine)
-    ));
     let result = match top.command.take() {
-        Some(Command::RescorePin(args)) => run_rescore_pin(args),
         Some(Command::Train(args)) => run_train(*args),
         Some(Command::TrainFromSearch(args)) => run_train_from_search(*args),
-        Some(Command::TrainIntensity(args)) => run_train_intensity(*args),
         Some(Command::TrainIntensityGbdt(args)) => run_train_intensity_gbdt(*args),
         Some(Command::TrainRichIonLlr(args)) => run_train_rich_ion_llr(*args),
+        Some(Command::Quant(cmd)) => quant_cmd::run_quant_command(cmd),
         None => {
             // --config: fill any parameter the user did not type on the CLI.
+            let mut cfg_missed_cleavages = false;
             if let Some(cfg_path) = top.search.config.clone() {
-                if let Err(e) = config::RunConfig::load(&cfg_path)
-                    .and_then(|c| config::apply(c, &mut top.search, &matches))
-                {
+                if let Err(e) = config::RunConfig::load(&cfg_path).and_then(|c| {
+                    cfg_missed_cleavages = c.search.max_missed_cleavages.is_some();
+                    config::apply(c, &mut top.search, &matches)
+                }) {
                     eprintln!("error: {e}");
                     return ExitCode::from(2);
                 }
             }
+            // Record whether the user set max missed cleavages, on the CLI or in
+            // the --config file. `--glyco` raises the floor to 3, which costs real
+            // memory (measured +4.4 GB on a 20k-protein human FASTA), so an
+            // explicit lower value must be allowed to win. The default (1) is
+            // itself a plausible explicit value, so comparing against it cannot
+            // distinguish the cases — only the ValueSource and the config can.
+            let _ = EXPLICIT_MISSED_CLEAVAGES.set(missed_cleavages_explicit(
+                matches.value_source("max_missed_cleavages"),
+                cfg_missed_cleavages,
+            ));
             // Validate required search args that are Option<> at the clap level.
             let search = top.search;
             if search.spectrum.is_empty() {
@@ -181,8 +179,8 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            // --output-pin is required UNLESS --rescore is set: rescore can route
-            // the search through a temporary PIN (deleted afterwards when
+            // --output-pin is required UNLESS rescoring is set: rescore derives
+            // the PIN path from the report base (or a temporary PIN under
             // --keep-pin false), so a PIN path is not mandatory in that mode.
             if search.output_pin.is_none() && !search.rescore && !search.rescore_native {
                 eprintln!("error: --output-pin is required for search (or use --rescore)");
@@ -241,33 +239,6 @@ fn configure_bundled_dotnet() {
     }
 }
 
-/// Print VmRSS for the current process when `ANDES_RSS_PROBE=1`. No-op
-/// otherwise and a no-op on non-Linux platforms regardless of the env var.
-///
-/// We gate behind an env var so production runs stay quiet; flip the var on
-/// when debugging memory regressions.
-fn log_rss(tag: &str) {
-    let probe_set = RSS_PROBE.get().copied().unwrap_or(false);
-    if !probe_set {
-        return;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
-            for line in s.lines() {
-                if line.starts_with("VmRSS:") {
-                    eprintln!("[RSS {tag}] {}", line.trim_start_matches("VmRSS:").trim());
-                    return;
-                }
-            }
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = tag;
-    }
-}
-
 /// True when `flag` appears literally in the process arguments. Used to tell a
 /// user-supplied value from a clap default, where the default itself is
 /// context-dependent (see `--gbdt-max-trees`, which is exempt under `--glyco`).
@@ -275,9 +246,39 @@ fn arg_present(flag: &str) -> bool {
     std::env::args().any(|a| a == flag || a.starts_with(&format!("{flag}=")))
 }
 
-/// Diagnostic RSS logging, installed from `--rss-probe`.
-static RSS_PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-
-/// Set in `main` from clap's `ValueSource`: did the user type
-/// `--max-missed-cleavages` themselves? See the glyco floor below.
+/// Set in `main`: did the user set max missed cleavages themselves, with
+/// `--max-missed-cleavages` or `search.max_missed_cleavages` in `--config`?
+/// See the glyco floor in `search::run`.
 static EXPLICIT_MISSED_CLEAVAGES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// A typed CLI value or a config-file value counts as explicit; clap's
+/// default does not.
+fn missed_cleavages_explicit(
+    cli_source: Option<clap::parser::ValueSource>,
+    in_config: bool,
+) -> bool {
+    in_config || matches!(cli_source, Some(clap::parser::ValueSource::CommandLine))
+}
+
+#[cfg(test)]
+mod missed_cleavages_explicit_tests {
+    use super::missed_cleavages_explicit;
+    use clap::parser::ValueSource;
+
+    #[test]
+    fn config_value_is_explicit() {
+        assert!(missed_cleavages_explicit(
+            Some(ValueSource::DefaultValue),
+            true
+        ));
+        assert!(missed_cleavages_explicit(
+            Some(ValueSource::CommandLine),
+            false
+        ));
+        assert!(!missed_cleavages_explicit(
+            Some(ValueSource::DefaultValue),
+            false
+        ));
+        assert!(!missed_cleavages_explicit(None, false));
+    }
+}

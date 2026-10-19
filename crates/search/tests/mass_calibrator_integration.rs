@@ -101,11 +101,13 @@ fn threshold_skip_returns_empty_stats() {
             accession: "P1".into(),
             description: String::new(),
             sequence: b"MKWVTFISLLR".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let scorer = tiny_scorer();
-    let prepared = PreparedSearch::prepare(&idx, &params, &scorer, 0.5, "XXX");
+    let mut prepared = PreparedSearch::prepare_in_memory(&idx, &params, &scorer, 0.5, "XXX")
+        .expect("build the in-memory candidate index");
 
     let too_few_keys: Vec<SpecKey> = (0..(cal_constants::MIN_SPECKEYS_FOR_PREPASS - 1))
         .map(|i| SpecKey {
@@ -114,7 +116,7 @@ fn threshold_skip_returns_empty_stats() {
         })
         .collect();
 
-    let stats = learn_calibration_stats(&too_few_keys, &HashMap::new(), &prepared, &params);
+    let stats = learn_calibration_stats(&too_few_keys, &HashMap::new(), &mut prepared, &params);
     assert!(!stats.has_reliable_stats());
     assert_eq!(stats.shift_ppm, 0.0);
     assert_eq!(stats.confident_psm_count, 0);
@@ -177,6 +179,7 @@ fn build_spec_keys_skips_below_min_peaks_and_expands_missing_charge() {
             activation_method: None,
             isolation_lower_offset: None,
             isolation_upper_offset: None,
+            isolation_target_mz: None,
         }
     }
     let spectra = vec![

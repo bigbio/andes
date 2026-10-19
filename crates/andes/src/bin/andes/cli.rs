@@ -62,22 +62,17 @@ pub(crate) enum ScoreFlag {
     Strong,
 }
 
-/// Candidate-resolution backing: in-RAM (`ram`, default) or out-of-core mmap
-/// base-peptide index with lazy mod enumeration (`mmap`).
+/// Candidate retrieval from the out-of-core index.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
-pub(crate) enum CandidateIndexFlag {
-    /// Pick automatically: estimate the in-RAM candidate index size against
-    /// available memory and use out-of-core mmap only if it would not fit
-    /// (default). Errs toward RAM (byte-identical to prior releases) and only
-    /// falls back to mmap when RAM would risk an OOM.
+pub(crate) enum FragmentIndexFlag {
+    /// The fragment-ion index (default; `--glyco` looks candidates up by
+    /// backbone mass instead).
     #[default]
     Auto,
-    /// Force the in-RAM candidate index (advanced; may OOM on very large mod
-    /// searches — that is what `auto` protects against).
-    Ram,
-    /// Force the out-of-core mmap'd base-peptide index (advanced; lower peak RAM,
-    /// result-equivalent but not byte-identical to `ram`).
-    Mmap,
+    /// Same as `auto`; a warning (and enumeration) under `--glyco`.
+    On,
+    /// Per-spectrum enumeration of every candidate in the precursor window.
+    Off,
 }
 
 /// Search arguments (shared by the default search path and exposed as a
@@ -89,6 +84,12 @@ pub(crate) enum CandidateIndexFlag {
 /// `train`) is given.  When no subcommand is present, `run()` validates them
 /// manually and returns an early error if they are missing.
 #[derive(Args, Debug)]
+#[command(group(
+    clap::ArgGroup::new("glycan_db")
+        .args(["glyco_glycan_gdb", "glyco_species"])
+        .multiple(false)
+        .required(false),
+))]
 pub(crate) struct SearchArgs {
     /// YAML run-configuration file. Any parameter can be set here (grouped by
     /// experiment: io/search/scoring/decoys/chimeric/refine/rescoring/glyco; see
@@ -101,9 +102,64 @@ pub(crate) struct SearchArgs {
     #[arg(long)]
     pub(crate) spectrum: Vec<PathBuf>,
 
-    /// Input FASTA database (target sequences only; decoys are generated automatically).
+    /// Input protein database (target sequences only; decoys are generated
+    /// automatically): FASTA, or UniProt XML when the name ends in `.xml`
+    /// (`.gz` is decompressed either way). A UniProt XML database searches like
+    /// the UniProt FASTA and also carries annotated modification sites (used by
+    /// `sites=annotated` mods) and, with `--uniprot-variants`, natural variants.
     #[arg(long)]
     pub(crate) database: Option<PathBuf>,
+
+    /// UniProt XML database: also search every natural sequence variant
+    /// (`sequence variant` feature) as its own target entry. Only the peptides
+    /// carrying the variant are added, under an accession naming the change
+    /// (`sp|P04637_VAR_005851_D7H|P53_HUMAN`), and decoys mirror them. Grows the
+    /// search space: measure PSMs at 1% FDR and entrapment FDP before relying on it.
+    #[arg(long = "uniprot-variants")]
+    pub(crate) uniprot_variants: bool,
+
+    /// UniProt XML database: also search every described isoform as its own
+    /// target entry (`sp|P04637-2|P53_HUMAN`), rebuilt from the canonical
+    /// sequence and its splice variants. An isoform carries its own annotated
+    /// sites and the canonical ones on the residues it shares, and, with
+    /// `--uniprot-variants`, its own natural variants. Grows the search space.
+    #[arg(long = "uniprot-isoforms")]
+    pub(crate) uniprot_isoforms: bool,
+
+    /// UniProt XML database: also search every mature chain or peptide whose
+    /// ends differ from the precursor's (after a signal peptide, propeptide or
+    /// transit peptide is removed) as its own target entry. Only the peptides
+    /// at those new termini are added; they are protein-terminal there, so
+    /// protein-terminal mods apply. Grows the search space.
+    #[arg(long = "uniprot-chains")]
+    pub(crate) uniprot_chains: bool,
+
+    /// UniProt XML database: minimum UniProt evidence for a sequence variant, an
+    /// annotated modification site or a mature chain to be used. `experimental`
+    /// (default: experimental and large-scale proteomics evidence), `curated`
+    /// (adds manual assertions without experimental support, e.g. "by
+    /// similarity"; Swiss-Prot chains without evidence codes count here), or
+    /// `any` (adds automatic annotation and features without evidence).
+    #[arg(
+        long = "uniprot-evidence",
+        default_value = "experimental",
+        value_parser = parse_uniprot_evidence
+    )]
+    pub(crate) uniprot_evidence: input::EvidenceLevel,
+
+    /// UniProt XML database, with `--uniprot-variants`: knockoff entries per
+    /// single-residue variant of a canonical sequence (0: none). A knockoff is
+    /// the same substitution at another position holding the same residue, in a
+    /// matched sequence context and at least 10 residues from every known
+    /// variant, so it is almost certainly absent from the sample but fits a mass
+    /// coincidence or an isotope error as well as the real variant does. The
+    /// knockoffs accepted per substitution class estimate how many accepted
+    /// variant PSMs are false, and variant PSMs get a q-value from that estimate
+    /// too (with --rescore). A variant PSM is accepted only when its variant has
+    /// a knockoff; knockoff PSMs are never reported. 0 turns this off and
+    /// leaves variant PSMs to the class FDR alone.
+    #[arg(long = "uniprot-knockoffs", default_value_t = 4)]
+    pub(crate) uniprot_knockoffs: usize,
 
     /// Output Percolator PIN file path.
     #[arg(long)]
@@ -113,7 +169,7 @@ pub(crate) struct SearchArgs {
     #[arg(long)]
     pub(crate) output_tsv: Option<PathBuf>,
 
-    /// Output QPX `.idparquet/` bundle directory (optional; OpenMS-compatible).
+    /// Output QPX `.idparquet/` bundle directory (optional; quantms-compatible).
     /// Writes `psms.parquet` + `proteins.parquet` + `search_params.parquet`.
     #[arg(long)]
     pub(crate) output_parquet: Option<PathBuf>,
@@ -123,7 +179,7 @@ pub(crate) struct SearchArgs {
     pub(crate) decoy_prefix: String,
 
     /// Decoy-accession SUFFIX used to RECOGNIZE pre-built decoys in the input
-    /// FASTA (e.g. `rev` for quantms/OpenMS `<orig>_rev` decoys). When set, a
+    /// FASTA (e.g. `rev` for quantms `<orig>_rev` decoys). When set, a
     /// protein is a decoy iff its accession starts with `<decoy-prefix>_` OR ends
     /// with this suffix. Typically paired with `--decoy-strategy none` so andes
     /// consumes an externally-built target+decoy database instead of generating
@@ -154,12 +210,38 @@ pub(crate) struct SearchArgs {
     #[arg(long = "isotope-error", hide = true, value_parser = parse_isotope_error_range)]
     pub(crate) isotope_error: Option<(i8, i8)>,
 
-    /// Precursor-mass calibration: `off`, `auto`, or `on`. `auto`/`on` learn a
-    /// systematic ppm shift from confident PSMs in a pre-pass and tighten the
-    /// precursor tolerance for the main search; `auto` skips the correction when
-    /// the sample is too small to be reliable.
-    #[arg(long = "precursor-cal", default_value = "auto", value_parser = parse_precursor_cal)]
+    /// Precursor-mass calibration: `off` (default), `auto`, or `on`. `auto`/`on`
+    /// learn a systematic ppm shift from confident PSMs in a pre-pass and tighten
+    /// the precursor tolerance for the main search; `auto` skips the correction
+    /// when the sample is too small to be reliable. Off by default: on the
+    /// benchmark sets the pre-pass cost 9-17% of the run and fired on none of
+    /// Astral, TMT, UPS1 or phospho; where a larger sample made it fire (UPS1),
+    /// the tightened window lost 7.6% of PSMs.
+    #[arg(long = "precursor-cal", default_value = "off", value_parser = parse_precursor_cal)]
     pub(crate) precursor_cal: PrecursorCalMode,
+
+    /// Minimum number of (spectrum, charge) keys before the calibration pre-pass
+    /// runs; below it calibration is skipped as unreliable. Default 10000. Hidden:
+    /// exists so the out-of-core equivalence gate can force the pre-pass on the
+    /// small in-repo fixture; production runs should leave it alone.
+    #[arg(long = "cal-min-spec-keys", hide = true)]
+    pub(crate) cal_min_spec_keys: Option<usize>,
+
+    /// Candidate retrieval from the out-of-core index. `auto` (the default, and
+    /// what every normal run uses) selects the fragment-ion index for every
+    /// non-glyco search; at a low-resolution fragment tolerance
+    /// only the 150 most intense peaks vote. `off` forces per-spectrum
+    /// enumeration and `on` is the same as `auto` — both are escape hatches for
+    /// reproducing a measurement, not tuning knobs. Hidden on purpose: the
+    /// engine reports which strategy it chose.
+    #[arg(long = "fragment-index", hide = true, default_value = "auto")]
+    pub(crate) fragment_index: FragmentIndexFlag,
+
+    /// Fragment-index mode: precursor-mass width of one index slice in Da.
+    /// Default: derived from the memory budget (10–150 Da; ~0.13 GB per Da on
+    /// a phospho search).
+    #[arg(long = "fragment-index-slice-da", hide = true)]
+    pub(crate) fragment_index_slice_da: Option<f64>,
 
     /// Precursor mass tolerance as `VALUE+unit`. Accepts ppm (e.g. `20ppm`,
     /// high-res) or Da (e.g. `0.02da`/`0.02Da`, low-res precursor selection).
@@ -180,7 +262,7 @@ pub(crate) struct SearchArgs {
     /// boundaries). `fully`: both termini must be cleavage sites (strict).
     /// `semi`: at least one terminus must be a cleavage site. `non-specific`:
     /// neither terminus needs to be a cleavage site.
-    #[arg(long = "enzyme-specificity", alias = "ntt",
+    #[arg(long = "enzyme-specificity",
           hide = true, default_value = "fully", value_parser = parse_enzyme_specificity)]
     pub(crate) enzyme_specificity: EnzymeSpecificity,
 
@@ -194,8 +276,8 @@ pub(crate) struct SearchArgs {
     /// protease (the union of their cleavage rules). The FIRST entry is the
     /// primary — it drives model selection and the cleavage-credit feature; if
     /// no model matches that enzyme for the data, andes WARNs and you should
-    /// pass `--model`. Combining a universal protease (nonspecific/alphalp)
-    /// with specific ones makes the whole digest non-specific (warned).
+    /// pass `--model`. Combining the universal protease (nonspecific) with
+    /// specific ones makes the whole digest non-specific (warned).
     #[arg(long, default_value = "trypsin")]
     pub(crate) enzyme: String,
 
@@ -276,10 +358,11 @@ pub(crate) struct SearchArgs {
     pub(crate) ms_level: u8,
 
     /// Enable the two-pass chimeric cascade for co-isolated (co-fragmented)
-    /// peptides. Pass 1 is the normal top-1 search; Pass 2 detects co-isolated
-    /// precursors in each scan's MS1 isolation window and runs a targeted search
-    /// for the second peptide on the residual spectrum, emitting it as an extra
-    /// PSM. Requires mzML (MS1 scans); has no effect on MGF input.
+    /// peptides. Pass 1 is the normal search and keeps the same `--top-n`
+    /// candidates per scan; Pass 2 takes the best one as the primary peptide,
+    /// detects co-isolated precursors in each scan's MS1 isolation window and
+    /// runs a targeted search for the second peptide on the residual spectrum,
+    /// emitting it as an extra PSM. Requires mzML (MS1 scans); has no effect on MGF input.
     #[arg(long, default_value = "false")]
     pub(crate) chimeric: bool,
 
@@ -341,7 +424,7 @@ pub(crate) struct SearchArgs {
     ///     because the scale factor is common to all three.)
     /// So the last 200 trees buy nothing on either resolution class while costing
     /// 33–41% of wall time, and true error is unchanged. Below ~50 the loss becomes
-    /// real. (For scale: even ONE tree still beats Comet by ~19% on Astral, so the
+    /// real. (For scale: even ONE tree still beats engine K by ~19% on Astral, so the
     /// whole ensemble is worth ~2% of identifications for 77% of the runtime.)
     ///
     /// GLYCO IS EXEMPT: under `--glyco` the ensembles are ~0.3% of wall time, so
@@ -350,14 +433,8 @@ pub(crate) struct SearchArgs {
     ///
     /// This CHANGES predicted intensities and therefore the emitted PIN feature
     /// values; `--gbdt-max-trees 0` restores the full ensembles.
-    #[arg(long = "gbdt-max-trees", default_value_t = 100usize)]
+    #[arg(long = "gbdt-max-trees", hide = true, default_value_t = 100usize)]
     pub(crate) gbdt_max_trees: usize,
-
-    /// Path to a trained intensity model parquet (`andes train-intensity` output).
-    /// Populates the additive `IntensitySignal` PIN column; ranking stays on RawScore
-    /// until `--score strong` is enabled in a later phase. When unset, the column is 0.0.
-    #[arg(long = "intensity-model", hide = true)]
-    pub(crate) intensity_model: Option<PathBuf>,
 
     /// Ranking / PIN RawScore source: `auto` (default — `strong` for high-res
     /// instruments, `rank` for low-res), `rank`, or `strong` (fused intensity +
@@ -365,26 +442,16 @@ pub(crate) struct SearchArgs {
     #[arg(long = "score", default_value = "auto")]
     pub(crate) score: ScoreFlag,
 
-    /// Candidate-index backing: `auto` (default — automatically use out-of-core
-    /// mmap only when the in-RAM candidate index would not fit available memory;
-    /// otherwise RAM, byte-identical to prior releases), or force `ram` / `mmap`
-    /// (advanced overrides). `mmap` lowers peak RAM with lazy per-spectrum mod
-    /// enumeration (result-equivalent PSMs, not byte-identical).
-    #[arg(long = "candidate-index", hide = true, default_value = "auto")]
-    pub(crate) candidate_index: CandidateIndexFlag,
-
-    /// Glycopeptide search mode: enumerate hybrid backbone candidates (DB + de-novo
-    /// Y-ladder), filter by N-X-S/T sequon, score bare backbones, and write a
+    /// Glycopeptide search mode: retrieve glycans from the loaded database, solve
+    /// the backbone as `precursor − glycan`, filter by N-X-S/T sequon, and write a
     /// `.glyco.pin` file instead of the standard PIN. Default off.
-    #[arg(long = "glyco", default_value_t = false)]
+    ///
+    /// Requires a glycan database: `--glyco-species` for a bundled one, or
+    /// `--glyco-glycan-gdb` for your own file. The requirement is enforced at
+    /// argument-parsing time, so a missing database fails immediately rather than
+    /// after the digest, index build and spectrum load.
+    #[arg(long = "glyco", default_value_t = false, requires = "glycan_db")]
     pub(crate) glyco: bool,
-
-    /// Maximum backbone candidates per spectrum in glyco mode (DB + de-novo
-    /// combined, after union-dedup). Hidden advanced knob; default 150.
-    /// Raised from 20: core-Y evidence ranking means the cap now cuts fewer
-    /// true positives, so more headroom is inexpensive and safe.
-    #[arg(long = "glyco-backbone-top-k", hide = true, default_value_t = 150usize)]
-    pub(crate) glyco_backbone_top_k: usize,
 
     /// Cap the peaks the glyco GENERATION stage considers, keeping the most
     /// intense N. The backbone solver is superlinear in peak count, so an
@@ -393,65 +460,42 @@ pub(crate) struct SearchArgs {
     /// Scoring always reads the full spectrum, so a generated candidate is never
     /// scored on truncated evidence. Default 0 = no cap; 300-500 is a reasonable
     /// value if you hit this. Changing it changes results.
-    #[arg(long = "glyco-max-peaks", default_value_t = 0usize)]
+    #[arg(long = "glyco-max-peaks", hide = true, default_value_t = 0usize)]
     pub(crate) glyco_max_peaks: usize,
 
     /// Maximum c/z fragment charge to probe in `--glyco` ETD scoring. Unset derives it
     /// from whether the spectrum was deconvoluted, which is correct in almost all cases:
     /// after deconvolution multiply-charged fragments have already been moved to 1+.
     /// Set this only for data known to carry unresolved high-charge c/z ions.
-    #[arg(long = "glyco-cz-max-charge")]
+    #[arg(long = "glyco-cz-max-charge", hide = true)]
     pub(crate) glyco_cz_max_charge: Option<u8>,
 
     /// Maximum glycan-Y fragment charge. Default 3; raising it reaches 4+/5+ Y ions on
     /// highly-charged precursors at the cost of more chance matches.
-    #[arg(long = "glyco-y-max-charge", default_value_t = 3u8)]
+    #[arg(long = "glyco-y-max-charge", hide = true, default_value_t = 3u8)]
     pub(crate) glyco_y_max_charge: u8,
-
-    /// Choose the glycosite by c/z evidence when a peptide carries more than one
-    /// N-X-S/T sequon (~8% of tryptic N-glycopeptides). Off by default: the default
-    /// positional convention is decoy-symmetric, and enabling this is gated on a
-    /// decoy-controlled A/B that would surface any sequon-count asymmetry.
-    #[arg(long = "glyco-cz-multisite", default_value_t = false)]
-    pub(crate) glyco_cz_multisite: bool,
 
     /// Windowed peak filtering as `WINDOW_DA:PEAKS` (e.g. `100:20`). Unset uses the
     /// protocol default — on for isobaric-labelled data, off otherwise. A window of 0
     /// forces it off.
-    #[arg(long = "peak-filter")]
+    #[arg(long = "peak-filter", hide = true)]
     pub(crate) peak_filter: Option<String>,
-
-    /// Clamp the precursor-offset lookup to the nearest available charge when the exact
-    /// charge is missing from the model, rather than dropping the correction.
-    #[arg(long = "precursor-offset-clamp", default_value_t = true, action = clap::ArgAction::Set)]
-    pub(crate) precursor_offset_clamp: bool,
-
-    /// Measure local peak density on the active (deconvoluted) peak list rather than the
-    /// raw list.
-    #[arg(long = "density-on-active-list", default_value_t = true, action = clap::ArgAction::Set)]
-    pub(crate) density_on_active_list: bool,
-
-    /// Allow a Pass-2 co-isolated candidate to overlap the primary's matched peaks.
-    /// Off by default: the residual spectrum has the primary's peaks removed, and
-    /// permitting overlap lets the same evidence support two PSMs.
-    #[arg(long = "chimeric-allow-overlap", default_value_t = false)]
-    pub(crate) chimeric_allow_overlap: bool,
 
     /// How to label EThcD/ETciD spectra (electron transfer with a supplemental
     /// collisional term). `hcd` is the default and is what model routing expects, since
     /// no EThcD model exists; `etd` labels them ETD so the c/z scoring path engages.
-    #[arg(long = "ethcd-activation", value_enum, default_value_t = EthcdActivationFlag::Hcd)]
+    #[arg(long = "ethcd-activation", hide = true, value_enum, default_value_t = EthcdActivationFlag::Hcd)]
     pub(crate) ethcd_activation: EthcdActivationFlag,
 
     /// Diagnostic: restrict `--glyco` scoring to the scan numbers in this file, one per
     /// line. Makes a `--debug-glyco` dump of a chosen set of scans affordable.
-    #[arg(long = "glyco-scans")]
+    #[arg(long = "glyco-scans", hide = true)]
     pub(crate) glyco_scans: Option<PathBuf>,
 
     /// Memory: enumerate only N-X-S/T-bearing peptides into the `--glyco` candidate
     /// index. Glyco scoring never reads any other candidate (the peptide-first
     /// fragment index and the backbone→candidate loop both gate on the same sequon
-    /// test), so this shrinks the in-RAM index roughly 10x. Measured on a
+    /// test), so this shrinks the index roughly 10x. Measured on a
     /// 1,500-protein mouse subset: identical rows, peptides and labels; 16 of 7,113
     /// rows (0.2%) differ in `RawScore`/`CandidateRankEntropy` only (per-spectrum
     /// candidate-distribution terms). Use on hosts where the full index does not fit
@@ -460,44 +504,36 @@ pub(crate) struct SearchArgs {
     #[arg(long = "glyco-index-sequon-only", hide = true, default_value_t = false)]
     pub(crate) glyco_index_sequon_only: bool,
 
-    /// Diagnostic: log resident set size at each phase boundary.
-    #[arg(long = "rss-probe", default_value_t = false)]
-    pub(crate) rss_probe: bool,
-
-    /// Load an external pGlyco-style `.gdb` glycan database: the glycan-first search
-    /// space. Required in `--glyco` mode. Each canonical string is parsed with its tree
-    /// structure preserved (core- vs antenna-fucose), and the file's NeuGc content is
-    /// used as-is (no species filtering). Use a real pGlyco `.gdb` (e.g.
-    /// `pGlyco-N-Human.gdb`) for a like-for-like comparison against pGlyco.
+    /// Load an external `.gdb` glycan database: the glycan-first search
+    /// space. Each canonical string is parsed with its tree structure preserved
+    /// (core- vs antenna-fucose), and the file's NeuGc content is used as-is (no
+    /// species filtering). Takes precedence over `--glyco-species`.
     #[arg(long = "glyco-glycan-gdb")]
     pub(crate) glyco_glycan_gdb: Option<PathBuf>,
 
-    /// Glycan core for `--glyco`: `n` (default, N-X-S/T + trimannosyl core) or `o`
-    /// (any Ser/Thr + single GalNAc core). Separate run modes; the `.gdb` loaded by
-    /// `--glyco-glycan-gdb` must match the selected core (e.g. pGlyco's O-glycan db
-    /// for `o`).
-    #[arg(long = "glyco-core", value_enum, default_value_t = GlycoCoreFlag::N)]
-    pub(crate) glyco_core: GlycoCoreFlag,
-
-    /// Isotope-error range for `--glyco`. `default` uses 0..=2 — the -1 offset costs
-    /// 0.29% of correct answers at a ~53:47 target:decoy ratio (pure FDR dilution),
-    /// and dropping it measured +81 backbone-correct @1%. `negative` restores
-    /// -1..=2; `wide` extends the upper bound to 5 for heavily-labelled precursors.
-    #[arg(long = "glyco-isotope-error", value_enum, default_value_t = GlycoIsotopeFlag::Default)]
-    pub(crate) glyco_isotope_error: GlycoIsotopeFlag,
+    /// Select a bundled species-specific N-glycan database instead of an external
+    /// `--glyco-glycan-gdb` file. `--glyco` requires one of the two; an explicit
+    /// `--glyco-glycan-gdb` wins. Databases and their attribution:
+    /// `crates/andes-glyco/glycan-db/`.
+    #[arg(long = "glyco-species", value_enum)]
+    pub(crate) glyco_species: Option<GlycoSpeciesFlag>,
 
     /// Correct each precursor to its monoisotopic peak from the preceding MS1
     /// isotope envelope BEFORE searching (`--glyco`; needs MS1, so mzML or Thermo
     /// `.raw`). `auto` fits the observed envelope at the reported charge against a
     /// glycopeptide isotope model under the hypotheses "the recorded precursor is
     /// the M+k peak", k = 0..6, and moves the precursor down when a k > 0 clearly
-    /// wins; the search then keeps its DEFAULT narrow `--isotope-error` window.
-    /// `off` (default) leaves every precursor as recorded. Motivation: on pGlyco2
-    /// mouse liver the firmware records 3-6 Da above the monoisotope on a class of
+    /// wins; every spectrum whose envelope was fitted is then searched with a
+    /// `0..1` isotope window instead of the glyco default `0..2` (the `+2` step
+    /// only carries the Hex+Fuc/NeuGc composition degeneracy once the monoisotope
+    /// is verified; bigbio/andes#64 arm F), while spectra with no linked MS1 or
+    /// charge keep the default window. An explicit `--isotope-error` is honoured.
+    /// `auto` is the default; `off` leaves every precursor as recorded. Motivation: on the engine L
+    /// mouse-liver reference the firmware records 3-6 Da above the monoisotope on a class of
     /// wide, high-mass glycopeptide envelopes, and widening the isotope window to
     /// reach them is mass-degenerate with a glycan composition change
     /// (bigbio/andes#64). Byte-identical output with `off`, or without MS1.
-    #[arg(long = "precursor-mono", value_enum, default_value_t = PrecursorMonoFlag::Off)]
+    #[arg(long = "precursor-mono", value_enum, default_value_t = PrecursorMonoFlag::Auto)]
     pub(crate) precursor_mono: PrecursorMonoFlag,
 
     /// Diagnostic: write one TSV row per MS2 with the recorded/corrected precursor,
@@ -505,106 +541,19 @@ pub(crate) struct SearchArgs {
     #[arg(long = "precursor-mono-dump", hide = true)]
     pub(crate) precursor_mono_dump: Option<PathBuf>,
 
-    /// `--precursor-mono` tuning: largest shift (isotopes) considered. Hidden.
-    #[arg(long = "precursor-mono-max-shift", hide = true, default_value_t = 6u8,
-          value_parser = clap::value_parser!(u8).range(1..=12))]
-    pub(crate) precursor_mono_max_shift: u8,
-
-    /// `--precursor-mono` tuning: minimum cosine fit of the winning shifted
-    /// hypothesis. Hidden.
-    #[arg(
-        long = "precursor-mono-min-fit",
-        hide = true,
-        default_value_t = 0.90f32
-    )]
-    pub(crate) precursor_mono_min_fit: f32,
-
-    /// `--precursor-mono` tuning: minimum fit improvement over the recorded
-    /// precursor. Hidden.
-    #[arg(
-        long = "precursor-mono-min-gain",
-        hide = true,
-        default_value_t = 0.15f32
-    )]
-    pub(crate) precursor_mono_min_gain: f32,
-
-    /// `--precursor-mono` tuning: minimum monoisotope intensity of the winning
-    /// hypothesis, in units of the MS1 median non-zero intensity. Hidden.
-    #[arg(long = "precursor-mono-min-snr", hide = true, default_value_t = 3.0f32)]
-    pub(crate) precursor_mono_min_snr: f32,
-
-    /// `--precursor-mono` tuning: MS1 peak-matching tolerance in ppm. Hidden.
-    #[arg(long = "precursor-mono-tol-ppm", hide = true, default_value_t = 10.0f64, value_parser = parse_positive_tol)]
-    pub(crate) precursor_mono_tol_ppm: f64,
-
-    /// `--precursor-mono` tuning: isotopes held back from the best-fitting shift
-    /// when applying it (the `--isotope-error` sweep takes the last step). Hidden.
-    #[arg(long = "precursor-mono-backoff", hide = true, default_value_t = 1u8,
-          value_parser = clap::value_parser!(u8).range(0..=2))]
-    pub(crate) precursor_mono_backoff: u8,
-
     /// Fragment tolerance (ppm) for the glyco-specific matching: oxonium ions,
     /// the core-Y ladder, backbone mass search, and c/z. Default 20 ppm, which
     /// suits Orbitrap MS2. **Raise this for low-resolution (ion-trap) MS2** —
     /// at 20 ppm a 0.3-0.5 Da ion-trap peak never matches, so the oxonium gate
     /// never fires and glyco IDs collapse to near zero. This is separate from
     /// `--fragment-tol-ppm`, which the scoring model owns.
-    #[arg(long = "glyco-tol-ppm", default_value_t = 20.0f64, value_parser = parse_positive_tol)]
+    #[arg(long = "glyco-tol-ppm", hide = true, default_value_t = 20.0f64, value_parser = parse_positive_tol)]
     pub(crate) glyco_tol_ppm: f64,
-
-    /// `gp` fused-selector ladder weight K (`rank + K·ladder + J·core_y + H·hyper`).
-    /// Hidden tuning knob; default 10 (lowered from 50 in round-2 — K·ladder is
-    /// per-backbone and non-discriminating between isobaric peptides; see
-    /// GLYCO_GP_K_DEFAULT).
-    #[arg(long = "glyco-gp-k", hide = true, default_value_t = andes_glyco::glyco_psm::GLYCO_GP_K_DEFAULT)]
-    pub(crate) glyco_gp_k: f32,
-
-    /// `gp` fused-selector core-Y hit-count weight J. Hidden tuning knob; default 5.
-    #[arg(long = "glyco-gp-j", hide = true, default_value_t = andes_glyco::glyco_psm::GLYCO_GP_J_DEFAULT)]
-    pub(crate) glyco_gp_j: f32,
-
-    /// `gp` fused-selector hyperscore weight H (0 disables). Hidden tuning knob; default 1.
-    #[arg(long = "glyco-gp-h", hide = true, default_value_t = andes_glyco::glyco_psm::GLYCO_GP_H_DEFAULT)]
-    pub(crate) glyco_gp_h: f32,
-
-    /// `gp` selector ETD c/z-hyperscore weight (added ONLY on ETD/AI-ETD spectra;
-    /// inert on HCD). Hidden knob; default 15 (raised from 5 in round-2 — c/z is
-    /// the only per-candidate discriminator on ETD). 0 disables ETD c/z selection.
-    #[arg(long = "glyco-gp-cz", hide = true, default_value_t = andes_glyco::glyco_psm::GLYCO_GP_CZ_DEFAULT)]
-    pub(crate) glyco_gp_cz: f32,
-
-    /// Require a matching sialic OXONIUM ion before a glycan composition may claim
-    /// NeuAc or NeuGc, as a fraction of base-peak intensity. 0 disables the gate.
-    ///
-    /// NeuAc and NeuGc are indistinguishable by precursor mass when traded against
-    /// Hex/Fuc -- Hex1NeuAc1 and Fuc1NeuGc1 are the SAME elemental formula -- but they
-    /// are distinguishable in oxonium ions: NeuAc gives m/z 274.092/292.103, NeuGc gives
-    /// 290.087/308.098. Gating on those is how pGlyco3 breaks the degeneracy, and it is
-    /// the evidence-based alternative to excluding NeuGc by database content
-    /// (a NeuGc-free `.gdb`), so it also works where NeuGc is real.
-    ///
-    /// Deliberately a threshold, not a presence test: Chalkley & Baker (MCP 2025) found
-    /// ~70% of spectra carrying a NeuGc oxonium contained no NeuGc, from co-isolation, so
-    /// a binary test admits almost everything.
-    ///
-    /// MEASURED on PXD030622 plasma with an E. coli entrapment database: it fixes
-    /// CALIBRATION, not yield. 2% gives 267 glycoPSMs @0.00% entrapment FDP and 5% gives
-    /// 241 @0.00%, against an ungated 268 @1.87% -- so it flips the verdict from
-    /// OPTIMISTIC to CONSERVATIVE at no yield cost, but buys no identifications, and an
-    /// FDP pinned at 0.00% means the threshold has tightened past the useful point.
-    /// A NeuGc-free glycan database still wins on yield there: 365 @0.55%.
-    /// If you tune this, go LOOSER (0.005-0.01), not stricter.
-    ///
-    /// Gates SIALIC only, never fucose -- PTM-Shepherd's published hit/miss ratios weight
-    /// absence of a fucose oxonium 10x weaker than absence of a sialic one
-    #[arg(long = "glyco-sialic-oxonium-min-frac", default_value_t = 0.0f32,
-          value_parser = parse_unit_fraction_f32)]
-    pub(crate) glyco_sialic_oxonium_min_frac: f32,
 
     /// Minimum trimannosyl-core Y ions required before `--glyco` reports a PSM for a
     /// scan. andes historically reported a best guess for every scan clearing the
     /// oxonium gate, so most reported rows had no glycan evidence at all. Every other
-    /// engine requires this: pGlyco3 and O-Pair require 2 core Y ions, Glyco-Decipher 3
+    /// engine requires this: the common standard is 2 core Y ions, some engines require 3
     /// with Y1 mandatory. Reads only spectral evidence, so it applies equally to target
     /// and decoy scans and cannot skew the target/decoy ratio. 0 disables.
     ///
@@ -618,102 +567,18 @@ pub(crate) struct SearchArgs {
     #[arg(long = "glyco-min-core-y", default_value_t = 0u32)]
     pub(crate) glyco_min_core_y: u32,
 
-    /// Minimum winner RawScore for a `--glyco` scan to emit a PIN row at all.
-    /// Unset = emit a best guess for every gated scan (historical behaviour).
-    ///
-    /// Measured on plasma (2026-08-28): 90.5% of emitted rows sit on scans with no
-    /// glycopeptide in them (median RawScore −2.5 vs +9.4 on real glyco scans);
-    /// that stratum is what Percolator trains on. At 3, it removes 83% of those
-    /// rows while keeping every measured agreement with an external engine.
-    /// Label-blind: reads only the winner's spectral match quality.
-    #[arg(long = "glyco-min-raw-score")]
-    pub(crate) glyco_min_raw_score: Option<f32>,
-
-    /// Run-ADAPTIVE emission floor: drop scans whose winner scores below this
-    /// quantile of the run's own decoy winners (e.g. 0.95). Self-calibrating --
-    /// unlike an absolute --glyco-min-raw-score, it transfers across datasets,
-    /// instruments and models, because the decoy winners ARE the run's null.
-    /// The derived threshold is printed and applied identically to target and
-    /// decoy scans. Mutually exclusive with --glyco-min-raw-score.
-    #[arg(
-        long = "glyco-min-raw-score-quantile",
-        conflicts_with = "glyco_min_raw_score"
-    )]
-    pub(crate) glyco_min_raw_score_quantile: Option<f64>,
-
-    /// Emit the CURATED glyco PIN column set (52 columns) instead of the full
-    /// one. Validated on pooled human plasma: 384.6 +/- 23 glycoPSMs @1% with
-    /// entrapment FDP 0.00% on all five seeds, vs 256.8 +/- 16.5 for the full
-    /// set (+50%). Drops per-scan spectrum-level columns the small-sample SVM
-    /// misuses, plus the ETD-only Cz* and opt-in Transfer* columns -- intended
-    /// for HCD-style runs. Pair with `percolator --trainFDR 0.05` (see docs).
-    #[arg(long = "glyco-pin-curated", default_value_t = false)]
-    pub(crate) glyco_pin_curated: bool,
-    /// Diagnostic TSV of per-candidate split evidence with sampled shifted-ladder
-    /// nulls (the LLR-calibration probe). Requires --debug-glyco; never affects
-    /// the PIN.
-    #[arg(long = "glyco-diag-splits", requires = "debug_glyco")]
-    pub(crate) glyco_diag_splits: Option<std::path::PathBuf>,
-
-    /// Minimum matched b/y sequence ions required before `--glyco` reports a PSM.
-    /// MSFragger's equivalents are 4 matched fragments with at least 2 non-Y. 0 disables.
-    #[arg(long = "glyco-min-matched-ions", default_value_t = 0u32)]
-    pub(crate) glyco_min_matched_ions: u32,
-
-    /// c/z truncation gate: keep the top-k backbones by glycosite-spanning c/z
-    /// evidence (AXIS 4) so high-charge ETD glycopeptides supported mainly by c/z
-    /// survive Phase-1 truncation. Default ON; ETD-only (inert on HCD/CID). Pass
-    /// `--glyco-cz-gate false` to disable. `action = Set` so the bool takes an
-    /// explicit value (a bare bool arg would be an un-disableable set-true flag).
-    #[arg(long = "glyco-cz-gate", hide = true, default_value_t = true, action = clap::ArgAction::Set)]
-    pub(crate) glyco_cz_gate: bool,
-
-    /// Read the glycan-Y ladder from the paired HCD partner instead of the ETD scan
-    /// being scored. Under --glyco-hcd-pair the core-Y hit COUNT is already taken
-    /// from the HCD partner while the ladder INTENSITY, YHitFrac and the glycan-axis
-    /// decoy are taken from the ETD scan, so one selector score sums two spectra.
-    /// Inert unless paired.
-    #[arg(long = "glyco-pair-y-on-gen", hide = true)]
-    pub(crate) glyco_pair_y_on_gen: bool,
-
-    /// Promote the best enumerated candidate when the argmax picks a de-novo one.
-    /// Default true (shipped behaviour). The promoted row lost the argmax and is
-    /// emitted anyway on roughly a fifth of scans; `false` runs that A/B.
-    #[arg(long = "glyco-enum-fallback", hide = true, default_value_t = true, action = clap::ArgAction::Set)]
-    pub(crate) glyco_enum_fallback: bool,
-
-    /// Require the oxonium gate to fire before an ETD/AI-ETD scan enumerates the full
-    /// glycan-database split lattice. ETD scans otherwise bypass every glycan gate.
-    #[arg(long = "glyco-etd-require-oxonium", hide = true)]
-    pub(crate) glyco_etd_require_oxonium: bool,
-
-    /// Re-elect the per-scan glyco winner by strong score among the top-N
-    /// candidates of the fused selector. 0 = fused argmax (shipped behaviour).
-    /// A/B switch, measured on the glyco quick tier on 2026-09-05.
-    #[arg(long = "glyco-elect-top-k", hide = true, default_value_t = 0usize)]
-    pub(crate) glyco_elect_top_k: usize,
-
     /// Peptide-first candidate RETRIEVAL tolerance in ppm. Default: --glyco-tol-ppm
     /// on high-resolution MS2, the rank model's 0.5 Da window on low-resolution.
     /// Retrieval only; the rank scorer and its tolerance are unchanged. Measured
     /// 7x faster than 0.5 Da on high-res data with identifications neutral.
-    #[arg(long = "glyco-retrieval-tol-ppm", value_parser = parse_positive_tol, conflicts_with = "glyco_retrieval_tol_da")]
+    #[arg(long = "glyco-retrieval-tol-ppm", hide = true, value_parser = parse_positive_tol)]
     pub(crate) glyco_retrieval_tol_ppm: Option<f64>,
 
-    /// Fixed-Da peptide-first candidate RETRIEVAL window, e.g. 0.5 to reproduce the
-    /// pre-2026-09 behaviour on high-resolution data for an A/B. Mutually exclusive
-    /// with --glyco-retrieval-tol-ppm; retrieval only, scoring unchanged.
-    #[arg(long = "glyco-retrieval-tol-da", value_parser = parse_positive_tol, conflicts_with = "glyco_retrieval_tol_ppm")]
-    pub(crate) glyco_retrieval_tol_da: Option<f64>,
-
-    /// Charge states indexed by the peptide-first fragment index (b/y at 1..=N,
-    /// clamped 1..=3); targets high-charge glycopeptides. Hidden knob; default 2.
-    #[arg(long = "glyco-pf-charge", hide = true, default_value_t = 2u8)]
-    pub(crate) glyco_pf_charge: u8,
-
-    /// Max peptide-first candidates per spectrum. Hidden knob; default 1024.
-    #[arg(long = "glyco-max-pf", hide = true, default_value_t = 1024usize)]
-    pub(crate) glyco_max_pf: usize,
+    /// Use the peptide-first b/y fragment-index fallback instead of the default
+    /// mass-driven full-glycan-list branch. On a mouse-liver fraction it finds ~2%
+    /// more glycoPSMs at ~13x the run time and ~1.5x the peak memory.
+    #[arg(long = "glyco-peptide-first", hide = true, default_value_t = false)]
+    pub(crate) glyco_peptide_first: bool,
 
     /// Diagnostic glyco mode: emit ALL candidate rows per scan (including de-novo
     /// mass-residual hits). The resulting PIN is for inspection ONLY and must never
@@ -728,15 +593,6 @@ pub(crate) struct SearchArgs {
     /// with `--glyco-hcd-pair false`. `action = Set` so the bool takes an explicit value.
     #[arg(long = "glyco-hcd-pair", default_value_t = true, action = clap::ArgAction::Set)]
     pub(crate) glyco_hcd_pair: bool,
-
-    /// BUG2 fix, EXPERIMENTAL: on ETD/AI-ETD spectra, score the rank/edge/
-    /// hyperscore path (RawScore, EdgeScore, hyperscore, RankScoreFloat) against a
-    /// peptide clone carrying the intact glycan on its glycosite instead of the
-    /// bare backbone, so glycosite-spanning c/z fragments are computed at the real
-    /// (glycan-carrying) mass. DEFAULT ON (round-6: validated +33 backbone-correct @1%,
-    /// decoy-safe); inert on HCD/CID. Disable with `--glyco-etd-rank-glycan false`.
-    #[arg(long = "glyco-etd-rank-glycan", default_value_t = true, action = clap::ArgAction::Set)]
-    pub(crate) glyco_etd_rank_glycan: bool,
 
     /// Enable the PTM-refinement cascade (Pass-2 over confident proteins). Default off.
     #[arg(long = "refine", default_value_t = false)]
@@ -771,18 +627,31 @@ pub(crate) struct SearchArgs {
     pub(crate) rescore_native: bool,
 
     /// FDR (q-value) threshold for the filtered `<stem>.q<fdr>.tsv` output
-    /// (target PSMs at q ≤ this). Setting it EXPLICITLY without `--rescore` /
-    /// `--rescore-native` TRIGGERS rescoring and auto-picks the backend:
-    /// Percolator if one is available, otherwise the built-in native rescorer.
-    /// When rescoring runs, the threshold defaults to 0.01 if unset.
+    /// (target PSMs at q ≤ this).
+    ///
+    /// This is a THRESHOLD, not a switch: it does nothing on its own. andes does
+    /// not compute FDR unless you ask it to, because doing so would silently
+    /// launch Percolator or the non-production native rescorer. Pair it with
+    /// `--rescore` (Percolator) or `--rescore-native`. Setting it alone warns and
+    /// writes no filtered output. Defaults to 0.01 when rescoring does run.
     #[arg(long = "fdr", value_parser = parse_unit_fraction)]
     pub(crate) fdr: Option<f64>,
+
+    /// q-value threshold for PSMs of the variant class (every protein a
+    /// UniProt variant entry), with rescoring: the filtered TSV, the
+    /// proteoform table and quantification accept them at this level instead
+    /// of `--fdr`. Their q-value already includes the class FDR and, with
+    /// knockoffs, the knockoff estimate. Default: the larger of `--fdr` and
+    /// 0.05.
+    #[arg(long = "variant-fdr", value_parser = parse_unit_fraction)]
+    pub(crate) variant_fdr: Option<f64>,
 
     /// Optional per-PSM PEP (posterior error probability / local FDR) cap,
     /// applied IN ADDITION to `--fdr` (a PSM must pass both q ≤ `--fdr` AND
     /// PEP ≤ `--pep`). The q-value stays the primary set-level FDR control;
-    /// `--pep` is a supplementary per-PSM gate. Like `--fdr`, setting it
-    /// explicitly triggers rescoring. Default: no PEP cap.
+    /// `--pep` is a supplementary per-PSM gate. Like `--fdr` it is a threshold
+    /// only: it does nothing without `--rescore` / `--rescore-native`.
+    /// Default: no PEP cap.
     #[arg(long = "pep", hide = true, value_parser = parse_unit_fraction)]
     pub(crate) pep: Option<f64>,
 
@@ -805,18 +674,269 @@ pub(crate) struct SearchArgs {
     #[arg(long = "percolator-args", hide = true, default_value = "")]
     pub(crate) percolator_args: String,
 
-    /// Keep the PIN file after rescoring. With `--rescore` and no `--output-pin`,
-    /// a temporary PIN is used and deleted unless this is true. Default true.
+    // ── Quantification ─────────────────────────────────────────────────────
+    /// Isobaric reporter-ion quantification of the confident PSMs with this
+    /// labelling kit: tmt6, tmt10, tmt11, tmt16, tmt18, tmt32, tmt35, itraq4 or
+    /// itraq8.
+    /// Writes `<stem>.tmt.tsv` and, with `--output-parquet`, the QPX
+    /// `quantms.feature.parquet`. Combine with `--rescore` so only PSMs at
+    /// q <= --fdr are quantified.
+    #[arg(long = "tmt", value_name = "PLEX", value_parser = parse_plex)]
+    pub(crate) tmt: Option<quant::Plex>,
+
+    /// MS level the reporter ions are read from: 2 (the identified MS2) or 3
+    /// (the SPS-MS3 scan whose precursor references that MS2; mzML and Thermo
+    /// `.raw`).
+    #[arg(long = "tmt-level", default_value = "2")]
+    pub(crate) tmt_level: u8,
+
+    /// Reporter-ion m/z tolerance, e.g. `20ppm` or `0.003da`. Default: 20 ppm
+    /// (10 ppm for tmt32/tmt35) on high-resolution MS2 and at `--tmt-level 3`
+    /// (SPS-MS3 reporters are read in the Orbitrap), 0.3 Da on ion-trap MS2.
+    /// A window that reaches half the spacing of the kit's closest channels is
+    /// refused.
+    #[arg(long = "tmt-tol", value_parser = parse_precursor_tol)]
+    pub(crate) tmt_tol: Option<Tolerance>,
+
+    /// Isotope impurity matrix of the kit lot (quantms text form: one line per
+    /// channel, `-2/-1/+1/+2` percentages, eight columns for TMTpro 16/18).
+    /// Corrected intensities are solved by non-negative least squares; the raw
+    /// values are kept alongside. Not supported for tmt32/tmt35. Default: no
+    /// correction.
+    #[arg(long = "tmt-correction", value_name = "FILE")]
+    pub(crate) tmt_correction: Option<PathBuf>,
+
+    /// Drop PSMs whose precursor isolation purity (share of the MS1 isolation
+    /// window that belongs to the precursor) is below this from `tmt.tsv`.
+    /// They stay in the parquet with their purity. Default 0 (report only).
+    #[arg(long = "tmt-min-purity", default_value = "0", value_parser = parse_unit_fraction)]
+    pub(crate) tmt_min_purity: f64,
+
+    /// Label-free MS1 quantification of the confident precursors: isotope
+    /// chromatograms are extracted around each identified peptidoform's
+    /// retention time and integrated. Writes `<stem>.lfq.tsv`,
+    /// `<stem>.lfq_features.tsv` and, with `--output-parquet`, the QPX
+    /// `quantms.feature.parquet`. mzML and Thermo `.raw` input.
+    #[arg(long = "lfq", default_value_t = false)]
+    pub(crate) lfq: bool,
+
+    /// MS1 m/z tolerance of the isotope chromatograms, e.g. `10ppm`. Default 10 ppm.
+    #[arg(long = "lfq-tol", value_parser = parse_precursor_tol)]
+    pub(crate) lfq_tol: Option<Tolerance>,
+
+    /// Retention-time half-window (seconds) around the identifying PSM in
+    /// which the chromatographic peak is searched. Default 60.
+    #[arg(long = "lfq-rt-window", default_value = "60", value_parser = parse_positive_tol)]
+    pub(crate) lfq_rt_window: f64,
+
+    /// Experimental Gaussian width in seconds (eight sigma) for LFQ peak detection.
+    /// Areas still use raw signal. Omit for five-scan Savitzky–Golay smoothing.
+    /// Validate feature-q coverage for the acquisition before using this setting.
+    #[arg(long = "lfq-gaussian-width", value_parser = parse_positive_tol)]
+    pub(crate) lfq_gaussian_width: Option<f64>,
+
+    /// Minimum cosine similarity between the observed and theoretical isotope
+    /// envelope for a feature to be reported in `lfq.tsv` (`lfq_features.tsv`
+    /// and the parquet keep it with its cosine). Default 0.7.
+    #[arg(long = "lfq-min-cosine", default_value = "0.7", value_parser = parse_unit_fraction)]
+    pub(crate) lfq_min_cosine: f64,
+
+    /// Feature-level FDR for `lfq.tsv`, from a target/decoy competition of each
+    /// feature against a twin extracted 11 Th above it. Default 0.05.
+    #[arg(long = "lfq-feature-fdr", default_value = "0.05", value_parser = parse_unit_fraction)]
+    pub(crate) lfq_feature_fdr: f64,
+
+    /// Directory for the per-run artifacts of multi-run quantification: for
+    /// each input file `<stem>.ms1.parquet` (its MS1 scans, all FAIMS voltages) and
+    /// `<stem>.quant.parquet` (every rank-1 PSM, targets and decoys, with no
+    /// FDR filter; under `--chimeric` also the best PSM of each co-isolated
+    /// precursor). Implies MS1 capture; same inputs as `--lfq` (mzML or
+    /// Thermo `.raw`; not with MGF, `.d` or `--glyco`).
+    #[arg(long = "quant-dir", value_name = "DIR")]
+    pub(crate) quant_dir: Option<PathBuf>,
+
+    /// Match-between-runs label-free quantification across the inputs (two or
+    /// more; needs `--lfq` and `--rescore` or `--rescore-native`). After the
+    /// per-run quantification, builds the precursor library, aligns retention
+    /// times across runs, measures every library precursor in every run and
+    /// writes `<base>.mbr.tsv` and `<base>.mbr_validation.tsv` (with
+    /// `--output-parquet`, `quantms.feature.parquet` holds these rows instead
+    /// of the per-run features, without the below-threshold transfers). Uses
+    /// `--quant-dir` for the per-run artifacts, or a temporary directory that
+    /// is removed afterwards. With `--rescore` (Percolator), same result as
+    /// `andes quant library`, `extract` and `finalize` on the same files and
+    /// Percolator results; the native rescorer's scores have no file input
+    /// to `quant library`.
+    #[arg(long = "mbr", default_value_t = false)]
+    pub(crate) mbr: bool,
+
+    /// Internal library entry gate (precursor-level), not a reported
+    /// identification FDR: precursors whose best-PSM target/decoy q-value is
+    /// at most this enter the match-between-runs library. Default 0.01.
+    #[arg(long = "mbr-library-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
+    pub(crate) mbr_library_fdr: f64,
+
+    /// Transfer quality q-value: transfers at or below it are reported as
+    /// `transfer_ms1` in `<base>.mbr.tsv`. An internal quant-quality
+    /// q-value, not an identification FDR. Default 0.05.
+    #[arg(long = "mbr-fdr", hide = true, default_value = "0.05", value_parser = parse_unit_fraction)]
+    pub(crate) mbr_fdr: f64,
+
+    /// Identified-row quality q-value: an identified (precursor, run) whose
+    /// MS1 feature has a quality q-value against its decoys above this (or
+    /// none) is reported as `identified_below_threshold` and left out of
+    /// `quantms.feature.parquet`. An internal quant-quality q-value, not an
+    /// identification FDR. `off` (the default) reports every identified row
+    /// and keeps `quant_q` as an annotation.
+    #[arg(long = "quant-feature-fdr", default_value = "off", value_parser = parse_fraction_or_off)]
+    pub(crate) quant_feature_fdr: FractionOrOff,
+
+    /// PSM q-value threshold for quantification targets when rescoring runs.
+    /// Default: the `--fdr` value (0.01).
+    #[arg(long = "quant-fdr", hide = true, value_parser = parse_unit_fraction)]
+    pub(crate) quant_fdr: Option<f64>,
+
+    /// Keep the PIN file after rescoring. With `--rescore`/`--rescore-native`
+    /// and no `--output-pin`, true writes the PIN (and Percolator's result
+    /// files) as `<base>.pin`, where `<base>` is `--output-tsv`, else
+    /// `--output-parquet`, else `./andes`; false uses a temporary PIN that is
+    /// deleted at exit. An explicit `--output-pin` is always kept. Default true.
     #[arg(long = "keep-pin", hide = true, default_value_t = true, action = clap::ArgAction::Set)]
     pub(crate) keep_pin: bool,
+}
+
+/// `andes quant`: the match-between-runs stages over a quant directory
+/// written by `andes search --quant-dir`.
+#[derive(clap::Subcommand, Debug)]
+pub(crate) enum QuantCommand {
+    /// Build the precursor library and the joint retention-time alignment
+    /// from every run's PSM table and the Percolator results of those PSMs.
+    /// Writes `library.parquet` and `alignment.parquet` into the quant
+    /// directory.
+    Library(QuantLibraryArgs),
+    /// Measure every library precursor in one run from its MS1 table. Writes
+    /// `<stem>.extract.parquet`.
+    Extract(QuantExtractArgs),
+    /// Transfer q-values and the match-between-runs tables from every run's
+    /// extract table. Writes `<base>.mbr.tsv` and `<base>.mbr_validation.tsv`.
+    Finalize(QuantFinalizeArgs),
+}
+
+impl QuantCommand {
+    pub(crate) fn threads(&self) -> Option<usize> {
+        match self {
+            QuantCommand::Library(a) => a.threads,
+            QuantCommand::Extract(a) => a.threads,
+            QuantCommand::Finalize(a) => a.threads,
+        }
+    }
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct QuantLibraryArgs {
+    /// Directory with each run's `<stem>.quant.parquet` and `<stem>.ms1.parquet`.
+    #[arg(long = "quant-dir", value_name = "DIR")]
+    pub(crate) quant_dir: PathBuf,
+
+    /// Run stems to include. Default: every `<stem>.quant.parquet` in the
+    /// directory. A run whose PSM or MS1 table is missing is an error.
+    #[arg(long = "runs", value_name = "STEM", num_args = 1..)]
+    pub(crate) runs: Vec<String>,
+
+    /// Percolator target PSM results (`--results-psms`), with its `score`
+    /// column: one file over every run (SpecIds must be distinct across
+    /// runs), or `<stem>=<file>` once per run, repeated. PSMs are joined to
+    /// the run tables on (run, SpecId).
+    #[arg(long = "psms", value_name = "TSV|STEM=TSV", num_args = 1.., required = true)]
+    pub(crate) psms: Vec<String>,
+
+    /// Percolator decoy PSM results (`--decoy-results-psms`), in the same
+    /// form as `--psms`.
+    #[arg(long = "decoy-psms", value_name = "TSV|STEM=TSV", num_args = 1.., required = true)]
+    pub(crate) decoy_psms: Vec<String>,
+
+    /// Internal library entry gate (precursor-level), not a reported
+    /// identification FDR. Default 0.01.
+    #[arg(long = "mbr-library-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
+    pub(crate) mbr_library_fdr: f64,
+
+    /// PSM q-value (the Percolator `q-value` column) at or below which a
+    /// target PSM identifies its precursor in its run: those runs are the
+    /// precursor's donors and get identified rows; the other runs get
+    /// transfers. Use the search's `--quant-fdr` (default `--fdr`) for the
+    /// same result as `--mbr`. Default 0.01.
+    #[arg(long = "quant-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
+    pub(crate) quant_fdr: f64,
+
+    /// PEP cap (the Percolator `posterior_error_prob` column) of the donor
+    /// PSMs, applied in addition to `--quant-fdr`: a target PSM identifies its
+    /// precursor only when it passes both. Use the search's `--pep` for the
+    /// same result as `--mbr`. Default: no PEP cap.
+    #[arg(long = "pep", value_parser = parse_unit_fraction)]
+    pub(crate) pep: Option<f64>,
+
+    /// Worker threads. Default: logical CPU count.
+    #[arg(long)]
+    pub(crate) threads: Option<usize>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct QuantExtractArgs {
+    /// Directory with the library and the run's `<stem>.ms1.parquet`.
+    #[arg(long = "quant-dir", value_name = "DIR")]
+    pub(crate) quant_dir: PathBuf,
+
+    /// Stem of the run to measure.
+    #[arg(long = "run", value_name = "STEM")]
+    pub(crate) run: String,
+
+    /// MS1 m/z tolerance of the template fit, in ppm (e.g. `10ppm`). Use the
+    /// `--lfq-tol` of the search for the same result as `--mbr`. Default 10 ppm.
+    #[arg(long = "lfq-tol", value_parser = parse_precursor_tol)]
+    pub(crate) lfq_tol: Option<Tolerance>,
+
+    /// Worker threads. Default: logical CPU count.
+    #[arg(long)]
+    pub(crate) threads: Option<usize>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct QuantFinalizeArgs {
+    /// Directory with the library and every run's `<stem>.extract.parquet`.
+    #[arg(long = "quant-dir", value_name = "DIR")]
+    pub(crate) quant_dir: PathBuf,
+
+    /// Output base: writes `<base>.mbr.tsv` and `<base>.mbr_validation.tsv`.
+    #[arg(short = 'o', long = "output", value_name = "BASE")]
+    pub(crate) output: PathBuf,
+
+    /// Transfer quality q-value: transfers at or below it are reported as
+    /// `transfer_ms1`. An internal quant-quality q-value, not an
+    /// identification FDR. Default 0.05.
+    #[arg(long = "mbr-fdr", hide = true, default_value = "0.05", value_parser = parse_unit_fraction)]
+    pub(crate) mbr_fdr: f64,
+
+    /// Identified-row quality q-value: an identified (precursor, run) whose
+    /// MS1 feature has a quality q-value against its decoys above this (or
+    /// none) is reported as `identified_below_threshold` and left out of
+    /// `quantms.feature.parquet`. An internal quant-quality q-value, not an
+    /// identification FDR. `off` (the default) reports every identified row
+    /// and keeps `quant_q` as an annotation.
+    #[arg(long = "quant-feature-fdr", default_value = "off", value_parser = parse_fraction_or_off)]
+    pub(crate) quant_feature_fdr: FractionOrOff,
+
+    /// Also write the rows as `quantms.feature.parquet` into this directory.
+    #[arg(long = "output-parquet", value_name = "DIR")]
+    pub(crate) output_parquet: Option<PathBuf>,
+
+    /// Worker threads. Default: logical CPU count.
+    #[arg(long)]
+    pub(crate) threads: Option<usize>,
 }
 
 // Alias used internally for the search-args type.
 pub(crate) type Cli = SearchArgs;
 
-/// Build the geometry-derivation [`GeometryConfig`], honouring `ANDES_GEO_*`
-/// env overrides so the structural knobs can be swept before settling on fixed
-/// defaults. Unset vars fall back to the validated defaults.
 /// Derived-geometry parameters for model training.
 ///
 /// Every field has the default the training pipeline shipped with; the `train`
@@ -873,34 +993,27 @@ pub(crate) enum EthcdActivationFlag {
     Etd,
 }
 
+/// Bundled species-specific N-glycan databases for `--glyco-species`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub(crate) enum GlycoIsotopeFlag {
-    /// 0..=2 — drops the -1 offset, which is pure FDR dilution for glyco.
-    Default,
-    /// -1..=2 — the pre-round-6 behaviour.
-    Negative,
-    /// 0..=5 — reaches candidates far above the monoisotopic peak.
-    Wide,
+pub(crate) enum GlycoSpeciesFlag {
+    /// Human N-glycans.
+    Human,
+    /// Mouse N-glycans.
+    Mouse,
+    /// Mouse, extended.
+    MouseLarge,
+    /// High-mannose N-glycans (species-independent).
+    HighMannose,
 }
 
-/// Glycan core for `--glyco`: selects the N- vs O-glycan search mode. They are
-/// separate runs (never combined), mirroring pGlyco3's separate N- and O-glycan
-/// databases.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub(crate) enum GlycoCoreFlag {
-    /// N-glycan: N-X-S/T sequon, trimannosyl (GlcNAc2Man3) core.
-    #[clap(name = "n")]
-    N,
-    /// O-glycan: any Ser/Thr site, single reducing-end GalNAc core.
-    #[clap(name = "o")]
-    O,
-}
-
-impl From<GlycoCoreFlag> for andes_glyco::glycan_first::GlycanCore {
-    fn from(f: GlycoCoreFlag) -> Self {
-        match f {
-            GlycoCoreFlag::N => andes_glyco::glycan_first::GlycanCore::NGlycan,
-            GlycoCoreFlag::O => andes_glyco::glycan_first::GlycanCore::OGlycan,
+impl GlycoSpeciesFlag {
+    /// The kebab-case key `load_species_glycan_db` expects.
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            GlycoSpeciesFlag::Human => "human",
+            GlycoSpeciesFlag::Mouse => "mouse",
+            GlycoSpeciesFlag::MouseLarge => "mouse-large",
+            GlycoSpeciesFlag::HighMannose => "high-mannose",
         }
     }
 }
@@ -919,6 +1032,11 @@ pub(crate) enum PrecursorMonoFlag {
 pub(crate) fn parse_fragmentation(s: &str) -> Result<Fragmentation, String> {
     <Fragmentation as ValueEnum>::from_str(s, true)
         .map_err(|_| format!("invalid fragmentation `{s}`: expected auto|CID|ETD|HCD|UVPD"))
+}
+
+/// Parse `--tmt` kit names.
+pub(crate) fn parse_plex(s: &str) -> Result<quant::Plex, String> {
+    quant::Plex::parse(s)
 }
 
 /// Parse `--protocol` value. Accepts named values only.
@@ -1029,16 +1147,25 @@ pub(crate) fn parse_precursor_tol(s: &str) -> Result<Tolerance, String> {
     })
 }
 
-/// f32 companion to [`parse_unit_fraction`], for CLI fractions stored as `f32`.
-/// Rejects NaN, negatives and values above 1 at PARSE time rather than letting a nonsense
-/// threshold silently disable or invert a gate.
-pub(crate) fn parse_unit_fraction_f32(s: &str) -> Result<f32, String> {
-    parse_unit_fraction(s).map(|v| v as f32)
-}
-
 /// Parse a probability-domain CLI value (FDR / PEP / refine-FDR) — must be a
 /// finite number in `[0, 1]` (finding 3.8). Used as a clap `value_parser` so a
 /// bad value is rejected at parse time with a clear message.
+/// A threshold in `(0, 1]`, or `off` (`None`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct FractionOrOff(pub(crate) Option<f64>);
+
+/// `off`, or a number in `(0, 1]`.
+pub(crate) fn parse_fraction_or_off(s: &str) -> Result<FractionOrOff, String> {
+    if s.trim().eq_ignore_ascii_case("off") {
+        return Ok(FractionOrOff(None));
+    }
+    let v = parse_unit_fraction(s)?;
+    if v == 0.0 {
+        return Err(format!("invalid value `{s}`: must be above 0, or `off`"));
+    }
+    Ok(FractionOrOff(Some(v)))
+}
+
 pub(crate) fn parse_unit_fraction(s: &str) -> Result<f64, String> {
     let v: f64 = s
         .trim()
@@ -1077,6 +1204,12 @@ pub(crate) fn parse_precursor_cal(s: &str) -> Result<PrecursorCalMode, String> {
             "invalid precursor-cal `{s}`: expected auto|on|off (Java -precursorCal)"
         )),
     }
+}
+
+pub(crate) fn parse_uniprot_evidence(s: &str) -> Result<input::EvidenceLevel, String> {
+    input::EvidenceLevel::from_name(s).ok_or_else(|| {
+        format!("invalid UniProt evidence level `{s}`: expected experimental|curated|any")
+    })
 }
 
 pub(crate) fn parse_enzyme_specificity(s: &str) -> Result<EnzymeSpecificity, String> {
@@ -1200,5 +1333,37 @@ mod enzyme_cli_tests {
     #[test]
     fn elastase_aliases_to_nonspecific() {
         assert_eq!(parse_enzymes("elastase").unwrap().0, Enzyme::NonSpecific);
+    }
+}
+
+#[cfg(test)]
+mod mbr_fdr_default_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser, Debug)]
+    struct SearchWrap {
+        #[command(flatten)]
+        args: SearchArgs,
+    }
+
+    #[derive(Parser, Debug)]
+    struct FinalizeWrap {
+        #[command(flatten)]
+        args: QuantFinalizeArgs,
+    }
+
+    #[test]
+    fn mbr_fdr_defaults_to_0_05_when_absent() {
+        let s = SearchWrap::try_parse_from(["andes"]).unwrap();
+        assert_eq!(s.args.mbr_fdr, 0.05);
+        let f = FinalizeWrap::try_parse_from(["andes", "--quant-dir", "q", "-o", "x"]).unwrap();
+        assert_eq!(f.args.mbr_fdr, 0.05);
+    }
+
+    #[test]
+    fn mbr_fdr_explicit_value_overrides_default() {
+        let s = SearchWrap::try_parse_from(["andes", "--mbr-fdr", "0.01"]).unwrap();
+        assert_eq!(s.args.mbr_fdr, 0.01);
     }
 }

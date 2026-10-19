@@ -10,7 +10,27 @@ use model::{
 };
 use scoring_crate::param_model::{IonType, Partition, SpecDataType};
 use scoring_crate::{Param, RankScorer};
-use search::{match_spectra, SearchIndex, SearchParams};
+use search::candidate_gen::Candidate;
+use search::{PreparedSearch, SearchIndex, SearchParams, TopNQueue};
+
+/// Search `spectra` on the out-of-core path with the index built in memory and
+/// `params`' retrieval (per-spectrum enumeration here: `fragment_index_top_k`
+/// is 0), so peakless spectra still reach every candidate in their window.
+fn search_enumerated(
+    spectra: &[Spectrum],
+    idx: &SearchIndex,
+    params: &SearchParams,
+    scorer: &RankScorer,
+    fragment_tolerance_da: f64,
+    decoy_prefix: &str,
+) -> (Vec<TopNQueue>, Vec<Candidate>) {
+    let mut prepared =
+        PreparedSearch::prepare_in_memory(idx, params, scorer, fragment_tolerance_da, decoy_prefix)
+            .expect("build the in-memory candidate index");
+    let queues = prepared.run_chunk(spectra, 0);
+    prepared.sync_materialized_candidates();
+    (queues, std::mem::take(&mut prepared.candidates))
+}
 
 fn make_spectrum(precursor_mz: f64, charge: Option<i32>) -> Spectrum {
     Spectrum {
@@ -24,6 +44,7 @@ fn make_spectrum(precursor_mz: f64, charge: Option<i32>) -> Spectrum {
         activation_method: None,
         isolation_lower_offset: None,
         isolation_upper_offset: None,
+        isolation_target_mz: None,
     }
 }
 
@@ -100,6 +121,7 @@ fn known_peptide_appears_in_top_n() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"MKWVTFISLLR".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -117,7 +139,8 @@ fn known_peptide_appears_in_top_n() {
     let mz = (target_mass + charge as f64 * PROTON) / charge as f64;
 
     let spec = make_spectrum(mz, Some(charge as i32));
-    let (queues, candidates) = match_spectra(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
+    let (queues, candidates) =
+        search_enumerated(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
 
     assert_eq!(queues.len(), 1);
     let top = queues.into_iter().next().unwrap().into_sorted_vec();
@@ -136,21 +159,32 @@ fn known_peptide_appears_in_top_n() {
 #[test]
 fn top_n_capacity_respected() {
     // NoCleavage gives exactly 1 candidate per protein. Top-N cap at 1.
+    // Two anagram proteins: with NoCleavage each yields one peptide, and the two
+    // peptides have identical mass, so both are candidates for the same
+    // precursor. Without competing candidates a cap test cannot fail.
     let target = ProteinDb {
-        proteins: vec![Protein {
-            accession: "P1".into(),
-            description: "".into(),
-            sequence: b"AAAAAAAAAA".to_vec(),
-        }],
+        proteins: vec![
+            Protein {
+                accession: "P1".into(),
+                description: "".into(),
+                sequence: b"AAAAAAAAAG".to_vec(),
+                annotation: None,
+            },
+            Protein {
+                accession: "P2".into(),
+                description: "".into(),
+                sequence: b"GAAAAAAAAA".to_vec(),
+                annotation: None,
+            },
+        ],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
     let mut params = SearchParams::default_tryptic(aa_set);
     params.enzyme = model::Enzyme::NoCleavage;
-    params.top_n_psms_per_spectrum = 1;
     params.max_variable_mods_per_peptide = 0;
 
-    let target_residues: Vec<AminoAcid> = b"AAAAAAAAAA"
+    let target_residues: Vec<AminoAcid> = b"AAAAAAAAAG"
         .iter()
         .map(|&r| AminoAcid::standard(r).unwrap())
         .collect();
@@ -159,9 +193,42 @@ fn top_n_capacity_respected() {
     let charge = 2u8;
     let mz = (mass + charge as f64 * PROTON) / charge as f64;
 
-    let spec = make_spectrum(mz, Some(charge as i32));
-    let (queues, _candidates) = match_spectra(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
-    assert!(queues[0].len() <= 1);
+    // Peakless smoke spectra: without this the default `min_peaks = 10` skips the
+    // spectrum entirely and the assertion below runs against an empty queue,
+    // which is what made this test pass with no cap in place at all.
+    params.min_peaks = 0;
+
+    let run = |top_n: u32| {
+        let mut p = params.clone();
+        p.top_n_psms_per_spectrum = top_n;
+        let spec = make_spectrum(mz, Some(charge as i32));
+        let (queues, _candidates) =
+            search_enumerated(&[spec], &idx, &p, &tiny_scorer(), 0.05, "XXX");
+        queues.into_iter().next().unwrap().into_sorted_vec()
+    };
+
+    // Both anagrams are scored, so there is a real competition to cap.
+    let uncapped = run(5);
+    assert!(
+        uncapped.len() > 1,
+        "fixture must produce competing candidates for the cap to mean anything, got {}",
+        uncapped.len()
+    );
+
+    // At capacity the queue deliberately RETAINS rank_score ties (Kim et al.,
+    // Nat Commun 5:5277 — see the merge comment in match_engine.rs), so the
+    // guarantee is not "exactly one row" but "nothing below the best score
+    // survives". A peakless fixture scores every candidate identically, which is
+    // why this is the invariant available here; a cap that stopped working would
+    // let a strictly worse PSM through.
+    let capped = run(1);
+    assert!(!capped.is_empty(), "top_n = 1 must keep at least one PSM");
+    let best = capped[0].rank_score;
+    assert!(
+        capped.iter().all(|p| p.rank_score == best),
+        "top_n = 1 retained a PSM below the best score: {:?}",
+        capped.iter().map(|p| p.rank_score).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -171,6 +238,7 @@ fn spectrum_without_charge_tries_charge_range() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"MKWVTFISLLR".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -188,7 +256,8 @@ fn spectrum_without_charge_tries_charge_range() {
     let mz = (mass + charge as f64 * PROTON) / charge as f64;
 
     let spec = make_spectrum(mz, None); // no charge!
-    let (queues, _candidates) = match_spectra(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
+    let (queues, _candidates) =
+        search_enumerated(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
     let top = queues.into_iter().next().unwrap().into_sorted_vec();
     assert!(!top.is_empty(), "expected charge_range to find a match");
     assert_eq!(top[0].charge_used, 2);
@@ -211,6 +280,7 @@ fn charge_missing_spectrum_uses_per_charge_scored_spec() {
             accession: "P1".into(),
             description: "".into(),
             sequence: b"MKWVTFISLLR".to_vec(),
+            annotation: None,
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -232,7 +302,8 @@ fn charge_missing_spectrum_uses_per_charge_scored_spec() {
     let mz = (mass + charge as f64 * PROTON) / charge as f64;
 
     let spec = make_spectrum(mz, None); // charge-missing
-    let (queues, _candidates) = match_spectra(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
+    let (queues, _candidates) =
+        search_enumerated(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
     let top = queues.into_iter().next().unwrap().into_sorted_vec();
 
     // The only match must be at charge 3 (the precursor m/z is z=3-exact).

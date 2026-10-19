@@ -1,0 +1,5 @@
+# Fixed modifications for the TMT10 quantification fixture (DOCS §2 format).
+NumMods=1
+57.021464,C,fix,any,Carbamidomethyl
+229.162932,K,fix,any,TMT10plex
+229.162932,*,fix,N-term,TMT10plex

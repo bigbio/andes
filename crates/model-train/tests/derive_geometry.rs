@@ -126,6 +126,7 @@ fn derived_geometry_trains_a_scorable_model_end_to_end() {
         activation_method: None,
         isolation_lower_offset: None,
         isolation_upper_offset: None,
+        isolation_target_mz: None,
     };
     let mut stats = CountStats::default();
     StatsAccumulator::new(&scorer).accumulate(&mut stats, &spectrum, &peptide, charge);

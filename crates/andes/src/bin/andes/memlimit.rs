@@ -4,10 +4,10 @@
 //! Kubernetes or a systemd slice the process sees the whole host while a cgroup
 //! caps what it is allowed to touch, so planning against `MemAvailable` there
 //! plans against memory that is not ours: a `--mem=240G` SLURM job on a 641 GiB
-//! node budgeted 384 GiB for the in-RAM candidate index and was OOM-killed.
+//! node budgeted 384 GiB of candidate memory and was OOM-killed.
 //!
 //! The effective figure is therefore `min(MemAvailable, applicable cgroup limit)`,
-//! and callers report which of the two they used.
+//! and the budget records which of the two it came from.
 
 use std::path::Path;
 
@@ -25,16 +25,6 @@ pub(crate) enum MemorySource {
     /// A cgroup memory limit (v2 `memory.max`/`memory.high`, or v1
     /// `memory.limit_in_bytes`) that is lower than the node figure.
     CgroupLimit,
-}
-
-impl MemorySource {
-    /// Short phrase for log lines, read as "… of 240 GiB from <this>".
-    pub(crate) fn describe(self) -> &'static str {
-        match self {
-            MemorySource::NodeAvailable => "node MemAvailable",
-            MemorySource::CgroupLimit => "cgroup memory limit",
-        }
-    }
 }
 
 /// The memory this process may plan against, and where the number came from.

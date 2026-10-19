@@ -1,5 +1,20 @@
 //! HIGH-RES glyco serve-path golden.
 //!
+//! REGENERATED 2026-10-14 when the glycosite tag began counting the boundary
+//! sequon (an N-X-S/T completed by the residue after the peptide). Verified before
+//! copying: header identical, 120 -> 120 rows, 0 winner changes; only the Peptide
+//! column moved, on 2 rows (scans 24129 and 24902, R.GTAGNALMDGASQLMGENR.T, whose
+//! only sequon is N18-R|T): `@N?` -> `@N18`.
+//!
+//! REGENERATED 2026-10-14 when the N-terminal Met-cleaved walk began emitting
+//! only the peptides starting at the post-Met residue (it had enumerated every
+//! other span of an M-initial protein a second time) and side-chain mods began
+//! stacking with terminal mods. Against the previous binary: 120 rows, every
+//! SpecId, peptide and protein unchanged (0 winner flips); each spectrum's
+//! candidate pool changes, so
+//! `CandidateRankEntropy` and `RawScore` moved on 117 rows,
+//! `ListwiseScoreGap` on 83 and `TailorScore` on 15.
+//!
 //! REGENERATED 2026-09-09 when the glycan-first pre-filter's Y-ion generation
 //! became structure-aware (core + antenna-subset losses + core ladder, replacing
 //! the full 2^n power set that over-generated physically-impossible "trim a core
@@ -11,7 +26,7 @@
 //! spectrum where both old and new winners are weak: CoreYHits 3->0). Net decoy
 //! winners 4->4. DeltaRT/AbsDeltaRT/DeltaRTNorm moved on every row because the
 //! winner changes shift the per-run RT-calibration anchors. The glycan-first
-//! top_k was then aligned to pGlyco3's 100 (was 50); that widened the candidate
+//! top_k was then aligned to the field-standard 100 (was 50); that widened the candidate
 //! pool and moved only the per-spectrum competition statistics (RawScore,
 //! TailorScore, DeltaRankScore, CandidateRankEntropy, ListwiseScoreGap) on 4
 //! rows, with 0 winner flips.
@@ -34,7 +49,7 @@
 //!
 //! MEASURED LIMIT, so nobody assumes more of this test than it delivers: on this
 //! fixture the high-res configuration is NOT sensitive to the fused-selector
-//! weights -- sweeping a `--glyco-gp-*` weight produces 0 differing lines, where
+//! weights -- sweeping a fused-selector weight produced 0 differing lines, where
 //! the same sweep moves all 120 rows on the low-res path in `glyco_golden.rs`. The 20 ppm
 //! window leaves too little candidate competition for the weight to change a
 //! winner. So selector regressions are caught by the LOW-RES golden; this one
@@ -49,6 +64,13 @@
 //!     --glyco-glycan-gdb test-fixtures/glyco_fixture.gdb \
 //!     --output-pin <tmp>/out.pin
 //!   cp <tmp>/out.glyco.pin test-fixtures/parity/goldens/glyco_highres.pin
+//!
+//! COMBINED 2026-10-14 (review branch: glyco and candidate-generation changes
+//! together). Against each parent golden the only differences are the other
+//! branch's changes: the boundary-sequon `@N18` tag on 2 peptides and the
+//! candidate-pool columns (`RawScore`, `CandidateRankEntropy`,
+//! `ListwiseScoreGap`, `TailorScore`); 120 rows, SpecIds and proteins
+//! unchanged.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -227,7 +249,7 @@ fn glyco_highres_pin_matches_golden() {
 /// link, fits nothing, says so, and writes a `.glyco.pin` byte-identical to the
 /// golden — no Mono columns — while the diagnostic dump still has one NA row
 /// per MS2. (The linked case is covered by the `mono` unit tests and the
-/// measured pGlyco2 liver run in docs/benchmarks/README.md.)
+/// measured engine L liver run in docs/benchmarks/README.md.)
 #[test]
 fn glyco_highres_precursor_mono_without_ms1_is_identical_to_golden() {
     let root = repo_root();

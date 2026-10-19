@@ -13,7 +13,7 @@ use std::io::Cursor;
 #[test]
 fn glyco_pin_default_header_carries_no_dead_columns() {
     let mut buf = Cursor::new(Vec::new());
-    output::glyco_pin::write_glyco_header_for_test(&mut buf, 2, 4, false).unwrap();
+    output::glyco_pin::write_glyco_header_for_test(&mut buf, 2, 4).unwrap();
     let hdr = String::from_utf8(buf.into_inner()).unwrap();
     let cols: Vec<&str> = hdr.trim_end().split('\t').collect();
     for dead in [
@@ -46,96 +46,10 @@ fn glyco_pin_default_header_carries_no_dead_columns() {
     }
 }
 
-#[test]
-fn glyco_pin_curated_header_is_exactly_the_validated_set() {
-    let mut buf = Cursor::new(Vec::new());
-    output::glyco_pin::write_glyco_header_for_test(&mut buf, 2, 4, true).unwrap();
-    let hdr = String::from_utf8(buf.into_inner()).unwrap();
-    let cols: Vec<&str> = hdr.trim_end().split('\t').collect();
-    // The validated set is defined by MEMBERSHIP, not a count: charge one-hot
-    // columns vary with the run's charge range (the plasma validation run
-    // carried 52 columns at its range). Every emitted column must be either a
-    // charge one-hot or in the validated keep-list, and no keep-listed
-    // non-charge column may be missing.
-    let keep: &[&str] = &[
-        "SpecId",
-        "Label",
-        "ScanNr",
-        "ExpMass",
-        "CalcMass",
-        "RankScore",
-        "RankScoreFloat",
-        "RawScore",
-        "TailorScore",
-        "EdgeScore",
-        "NumMatchedMainIons",
-        "matchedIonRatio",
-        "longest_y_pct",
-        "ExplainedIonCurrentRatio",
-        "NTermIonCurrentRatio",
-        "CTermIonCurrentRatio",
-        "ComplementaryIonBalance",
-        "MeanMatchedIntensityRank",
-        "PpmGaussianScore",
-        "ChanceMatchSurprise",
-        "MassCompetitionEvidence",
-        "RichIonLLR",
-        "FragPredExplained",
-        "FragPredChanceLLR",
-        "IntensitySignal",
-        "dm",
-        "absdm",
-        "peplen",
-        "isotope_error",
-        "enzN",
-        "enzC",
-        "enzInt",
-        "DeltaRT",
-        "AbsDeltaRT",
-        "DeltaRTNorm",
-        "IsobaricRTMargin",
-        "OxoniumScore",
-        "NCoreOxoniumIons",
-        "YLadderScore",
-        "YHitFrac",
-        "CoreYHits",
-        "PartialGlycanBY",
-        "Y0Y1Anchor",
-        "SialicConsistency",
-        "GlycanMass",
-        "Peptide",
-        "Proteins",
-    ];
-    for c in &cols {
-        assert!(
-            c.starts_with("charge") || keep.contains(c),
-            "unexpected column {c} in curated glyco PIN"
-        );
-    }
-    for k in keep {
-        assert!(
-            cols.contains(k),
-            "validated column {k} missing from curated PIN"
-        );
-    }
-    for gone in [
-        "CzHyperscore",
-        "MS2IonCurrent",
-        "CandidateRankEntropy",
-        "ListwiseScoreGap",
-        "DeltaRankScore",
-    ] {
-        assert!(
-            !cols.contains(&gone),
-            "{gone} must not appear in curated mode"
-        );
-    }
-}
-
 /// The four ID-neutral research emitters (`--glyco-y-tree`, `--glyco-oxonium-llr`,
 /// `--glyco-rank-masked`, `--glyco-chance-llr-masked`) were measured
-/// identification-neutral and removed. Their columns must not reappear in
-/// either header, curated or default.
+/// identification-neutral and removed. Their columns must not reappear in the
+/// header.
 #[test]
 fn retired_research_columns_are_gone() {
     let retired = [
@@ -149,16 +63,11 @@ fn retired_research_columns_are_gone() {
         "ChanceLlrMasked",
         "ExplainedMasked",
     ];
-    for curated in [false, true] {
-        let mut buf = Cursor::new(Vec::new());
-        output::glyco_pin::write_glyco_header_for_test(&mut buf, 2, 4, curated).unwrap();
-        let hdr = String::from_utf8(buf.into_inner()).unwrap();
-        let cols: Vec<&str> = hdr.trim_end().split('\t').collect();
-        for c in retired {
-            assert!(
-                !cols.contains(&c),
-                "retired column {c} is back (curated={curated})"
-            );
-        }
+    let mut buf = Cursor::new(Vec::new());
+    output::glyco_pin::write_glyco_header_for_test(&mut buf, 2, 4).unwrap();
+    let hdr = String::from_utf8(buf.into_inner()).unwrap();
+    let cols: Vec<&str> = hdr.trim_end().split('\t').collect();
+    for c in retired {
+        assert!(!cols.contains(&c), "retired column {c} is back");
     }
 }

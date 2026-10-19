@@ -6,9 +6,14 @@ use std::sync::{Arc, Mutex};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::{smallvec, SmallVec};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::candidate_gen::{enumerate_candidates, lazy_candidates_for_nominal_window, Candidate};
+use crate::candidate_gen::{
+    base_record_key, base_records_for_nominal_window, distinct_base_records_for_nominal_window,
+    expand_base_record, retain_records_with_forms_in, BaseRecordKey, Candidate, FormWalkTables,
+};
 use crate::candidate_index::MmapCandidateIndex;
+use crate::fragment_index::ChunkFragmentIndex;
 use crate::precursor_cal::adjusted_observed_neutral_mass;
 use crate::precursor_matching::{matches_precursor, MassError};
 use crate::psm::{PsmFeatures, PsmMatch, TopNQueue};
@@ -20,7 +25,6 @@ use model::enzyme::Enzyme;
 use model::mass::{nominal_from, H2O, PROTON};
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;
-use scoring_crate::intensity_model::IntensityModel;
 use scoring_crate::mod_site_features::{
     mod_site_features, FEAT_SITE_DET_COUNT, FEAT_SITE_INTENS_FRAC, FEAT_SITE_LOCALIZED,
     FEAT_SITE_SHIFTED_FRAC, FEAT_SITE_SHIFTED_MATCHED,
@@ -29,98 +33,40 @@ use scoring_crate::scoring::fragment_ions::{
     predict_by_ions, predict_by_ions_with_losses, IonKind,
 };
 use scoring_crate::scoring::{
-    frag_llr_battery, fuse_strong_score, intensity_signal, mass_competition_evidence,
-    predict_frag_intensities, psm_edge_score, rich_ion_llr, score_psm, score_psm_float,
-    scored_for_charge, strong_score_calibrated, OnlineStats, RankScorer, ScoredSpectrum,
-    StrongScoreInputs, DENSITY_HW,
+    edge_scoring_enabled, frag_llr_battery, fuse_strong_score, intensity_signal,
+    mass_competition_evidence, predict_frag_intensities, psm_edge_score, rich_ion_llr, score_psm,
+    score_psm_float, scored_for_charge, strong_score_calibrated, OnlineStats, RankScorer,
+    ScoredSpectrum, StrongScoreInputs, DENSITY_HW,
 };
 
 // One-time-built state shared across every chunk of a streamed search.
 //
-// `match_spectra` materializes its full set of candidates, bucket index,
-// distinct-peptide counts, and enzyme-registered aa_set in a single pass at
-// startup. For chunked / streaming spectrum loading we want to reuse that
-// state instead of rebuilding it per chunk. `PreparedSearch::prepare` does
-// the setup once; `PreparedSearch::run_chunk` runs the per-spectrum scoring
-// loop on any slice of `Spectrum`s using that prepared state.
-//
-// The two-pass split mirrors the original `match_spectra` body — there is
-// no algorithmic change. Pre-existing single-call callers can still use
-// `match_spectra(...)` which is now a thin wrapper around
-// `prepare` + a single `run_chunk` call.
+// `PreparedSearch::prepare_mmap` opens (or builds) the out-of-core base-peptide
+// index once; `PreparedSearch::run_chunk` scores any slice of `Spectrum`s against
+// it, materialising each spectrum's candidates lazily from the index.
 
-/// Selects how `PreparedSearch` resolves the per-spectrum candidate set.
-///
-/// `Ram` (default) materializes the full `Vec<Candidate>` + mass-bucket index at
-/// `prepare` time and resolves each spectrum's window through `bucket_index`
-/// (the original, byte-for-byte unchanged path). `Mmap` keeps only the
-/// out-of-core base-peptide index resident and resolves each spectrum's
-/// candidates lazily via [`crate::candidate_gen::lazy_candidates_for_nominal_window`]
-/// (the RAM nominal-bucket predicate, applied per lazily-fetched candidate); the materialized
-/// candidates are accumulated into `self.candidates` during the scan so the
-/// PIN/TSV writers resolve `candidate_idxs` exactly as in `Ram` mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum CandidateBacking {
-    /// In-RAM `Vec<Candidate>` + `bucket_index`. Default; byte-identical path.
-    #[default]
-    Ram,
-    /// Out-of-core mmap'd base-peptide index + lazy per-spectrum mod enumeration.
-    ///
-    /// # Identity guarantee (result-equivalent, not byte-identical at scale)
-    ///
-    /// `Mmap` is verified **identification-equivalent** to `Ram`: the scored
-    /// candidate **set** per spectrum is identical (it reproduces `Ram`'s exact
-    /// `candidate_nominal_bounds` window via `lazy_candidates_for_nominal_window`),
-    /// and on real data (PXD001468 b1931 + human_entrap, cam_only) the **top-1
-    /// peptide matches on 99.97% of scans** with identical `RankScore` and FDR
-    /// decisions.
-    ///
-    /// It is **NOT byte-identical at scale.** `Ram`'s `strong_score` (the
-    /// `RawScore` PIN column) depends on **order-dependent listwise features**
-    /// (`CandidateRankEntropy`, `listwise_score_gap`) computed over a
-    /// capacity-limited top-K queue whose `could_win` pruning depends on the
-    /// candidate *visitation order* — an `enumerate_candidates` emission-order
-    /// artifact, not a spectral property. `Mmap` visits candidates in a different
-    /// (lazy, mass-window) order, so on a minority of scans it retains a slightly
-    /// different top-K → `strong_score` can differ by ≤~0.2, occasionally flipping
-    /// a shared-peptide primary or a near-tie. This is **FDR-neutral in practice**
-    /// (primary identification is preserved). Cosmetic PIN-order diffs
-    /// (SpecId row index, `Proteins` column order) also occur.
-    ///
-    /// Byte-identity holds on small DBs / fixtures where the orders coincide. Full
-    /// bit-identity at scale would require either reproducing `Ram`'s exact
-    /// visitation order in the lazy path OR making the listwise features /
-    /// `could_win` pruning order-independent in BOTH backings (the latter removes
-    /// the latent `Ram` order-dependence) — both deferred follow-ups.
-    Mmap,
-}
+/// Keeps or drops a candidate after retrieval; see
+/// [`PreparedSearch::with_candidate_filter`].
+pub type CandidateFilter = Box<dyn Fn(&Candidate) -> bool + Send + Sync>;
 
 pub struct PreparedSearch<'a> {
     pub idx: &'a SearchIndex,
     pub params: &'a SearchParams,
     pub scorer: &'a RankScorer,
     pub fragment_tolerance_da: f64,
-    /// Final, deduplicated candidate list (target + decoy).
-    ///
-    /// In `Ram` mode this is the full enumeration built at `prepare` time. In
-    /// `Mmap` mode it starts empty and is grown lazily during `run_chunk` from
-    /// the per-spectrum materialized candidates (so downstream resolution of
-    /// `PsmMatch::candidate_idxs` is identical to the `Ram` path).
+    /// The candidates the emitted PSMs reference, indexed by
+    /// `PsmMatch::candidate_idxs`. Starts empty and is filled from the scan's
+    /// accumulator by [`Self::sync_materialized_candidates`].
     pub candidates: Vec<Candidate>,
-    /// `nominal(peptide.mass() - H2O)` → indices into `candidates`. Empty in
-    /// `Mmap` mode (candidate resolution goes through `mmap_index` instead).
-    pub bucket_index: BTreeMap<i32, Vec<usize>>,
-    /// Candidate-resolution mode. `Ram` (default) leaves every code path
-    /// byte-identical to before this field existed.
-    pub backing_mode: CandidateBacking,
-    /// Out-of-core base-peptide index, present only in `Mmap` mode.
-    pub mmap_index: Option<MmapCandidateIndex>,
-    /// `Mmap`-mode accumulator: the per-spectrum materialized candidates appended
-    /// (under lock) during the parallel scan, keyed for de-duplication so a
-    /// candidate scored across several chunks / spectra gets one stable global
-    /// index. Drained into `self.candidates` after each chunk's scan. `None` in
-    /// `Ram` mode (the field is never touched, so `Ram` stays unchanged).
-    mmap_accum: Option<Mutex<MmapAccumulator>>,
+    /// Out-of-core base-peptide index the per-spectrum candidates are
+    /// materialised from.
+    pub mmap_index: MmapCandidateIndex,
+    /// The per-spectrum materialized candidates the surviving PSMs reference,
+    /// appended (under lock) during the parallel scan and keyed for
+    /// de-duplication so a candidate scored across several chunks / spectra gets
+    /// one stable global index. Drained into `self.candidates` by
+    /// [`Self::sync_materialized_candidates`].
+    mmap_accum: Mutex<MmapAccumulator>,
     /// `params.aa_set` with the search enzyme registered for cleavage
     /// scoring. Cheap to clone, but we keep one shared copy here.
     pub aa_set_for_scoring: AminoAcidSet,
@@ -131,30 +77,24 @@ pub struct PreparedSearch<'a> {
     /// precursor-envelope computation and the two new `PsmFeatures` fields
     /// stay 0.0 — keeping the off path bit-identical.
     pub ms1_link: Option<Ms1Link>,
-    /// Optional context-intensity model for the strong-score signal numerator
-    /// (`IntensitySignal` PIN column). `None` unless the binary supplied
-    /// `--intensity-model`; when absent the column is 0.0 and ranking is unchanged.
-    pub intensity_model: Option<Arc<IntensityModel>>,
-    /// `Mmap`-mode ONLY: the GLOBAL set of target bare-peptide sequences (every
-    /// non-decoy base record in the index), built once at `prepare_mmap`. The
-    /// per-spectrum collision-decoy relabel uses THIS set so a decoy is relabeled
-    /// iff its bare sequence matches ANY DB target — identical to the in-RAM path,
-    /// which runs `relabel_collision_decoys` once globally over all candidates.
-    /// Relabeling per-spectrum from only the window candidates is WRONG: a decoy
-    /// whose target twin is absent from the current precursor window would keep its
-    /// `is_decoy` flag and diverge the TDC label from RAM. Bare sequences only, so
-    /// this is bounded (far smaller than the full candidate `Vec` we avoid in
-    /// out-of-core mode). `None` in `Ram` mode.
-    mmap_target_bare_seqs: Option<std::collections::HashSet<Box<[u8]>>>,
+    /// The GLOBAL set of target bare-peptide sequences (every non-decoy base
+    /// record in the index), built once at prepare time. The per-spectrum
+    /// collision-decoy relabel uses THIS set so a decoy is relabeled iff its bare
+    /// sequence matches ANY DB target. Relabeling from only the window candidates
+    /// would be WRONG: a decoy whose target twin lies outside the current
+    /// precursor window would keep its `is_decoy` flag. Bare sequences only, so
+    /// this is bounded (far smaller than the full candidate list).
+    target_bare_seqs: FxHashSet<Box<[u8]>>,
+    /// Optional post-retrieval candidate filter (see
+    /// [`Self::with_candidate_filter`]).
+    candidate_filter: Option<CandidateFilter>,
 }
 
-/// Global candidate identity for the `Mmap`-mode accumulator: enough to dedup a
+/// Global candidate identity for the scan accumulator: enough to dedup a
 /// peptidoform reached from multiple spectra/charges/isotope-offsets to one
-/// stable global index (mirrors the per-candidate identity the in-RAM `candidates`
-/// Vec carries). The peptidoform mod state is folded into `mod_units` (per-residue
-/// mod-mass in 1e-5 Da units) so two placements of the same residues at the same
-/// span but different mods get distinct indices, exactly as the in-RAM enumeration
-/// produces distinct candidates.
+/// stable global index. The peptidoform mod state is folded into `mod_units`
+/// (per-residue mod-mass in 1e-5 Da units) so two placements of the same residues
+/// at the same span but different mods get distinct indices.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct GlobalCandKey {
     protein_index: u32,
@@ -191,7 +131,7 @@ impl GlobalCandKey {
     }
 }
 
-/// `Mmap`-mode global candidate store: maps a candidate's identity to its stable
+/// Global candidate store of a scan: maps a candidate's identity to its stable
 /// global index in `candidates`, growing as the scan materializes new candidates.
 #[derive(Default)]
 struct MmapAccumulator {
@@ -214,24 +154,97 @@ impl MmapAccumulator {
     }
 }
 
-/// Owned, precursor-tolerance-independent products of [`PreparedSearch::prepare`]
-/// (candidates, bucket index, GF aa_set). Built once during the
-/// calibration pre-pass and reused for the tightened-tolerance main pass, avoiding
-/// a second full candidate enumeration (~15s on the 16.8M-candidate Astral search).
-pub struct PreparedParts {
-    candidates: Vec<Candidate>,
-    bucket_index: BTreeMap<i32, Vec<usize>>,
-    aa_set_for_scoring: AminoAcidSet,
+/// Which of `enumerate_protein`'s walks emits copy `copy` of `cand`'s span: the
+/// whole protein (pass 0) or, for a protein starting with Met, the walk over
+/// `sequence[1..]` (pass 1). Copy `k` of a span reachable from both walks is
+/// pass `k`; a span at offset 1 carrying the protein N-terminus flag is reached
+/// only by the Met-cleaved walk (the flag is set iff the span starts at that
+/// walk's offset), so it is pass 1 even though it has a single copy.
+fn enumeration_pass(cand: &Candidate, copy: u32) -> u32 {
+    if cand.is_protein_n_term && cand.start_offset_in_protein == 1 {
+        1
+    } else {
+        copy
+    }
+}
+
+/// Candidate indices sorted by exact neutral mass, ties by index.
+pub(crate) fn build_mass_order(candidates: &[Candidate]) -> Vec<u32> {
+    let mut order: Vec<u32> = (0..candidates.len() as u32).collect();
+    order.par_sort_unstable_by(|&a, &b| {
+        candidates[a as usize]
+            .peptide
+            .mass()
+            .total_cmp(&candidates[b as usize].peptide.mass())
+            .then(a.cmp(&b))
+    });
+    order
+}
+
+/// How many window slots ahead [`prefetch_window_candidates`] requests a
+/// candidate's struct, and how many ahead its residue array (whose address is read
+/// from the struct, so it is requested once the struct has had time to arrive).
+const PREFETCH_STRUCT_AHEAD: usize = 16;
+const PREFETCH_RESIDUES_AHEAD: usize = 8;
+/// Cache lines of a residue array requested per candidate (8 lines cover a
+/// 21-residue peptide).
+const PREFETCH_RESIDUE_LINES: usize = 8;
+
+/// Ask the CPU to start loading the candidates the window scan reaches a few
+/// iterations from now. The window visits candidates in index order, which is
+/// scattered across the whole candidate pool, so without this every candidate
+/// costs a cache miss on its struct and another on its heap residue array. A
+/// prefetch is only a hint: it never changes what the loop reads.
+#[inline(always)]
+fn prefetch_window_candidates(cands: &[Candidate], window: &[usize], pos: usize) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+        if let Some(c) = window
+            .get(pos + PREFETCH_STRUCT_AHEAD)
+            .and_then(|&slot| cands.get(slot))
+        {
+            let p = (c as *const Candidate).cast::<i8>();
+            // SAFETY: prefetch never dereferences; `p` and the struct's last byte
+            // both lie inside the borrowed `Candidate`.
+            #[allow(unused_unsafe)]
+            unsafe {
+                _mm_prefetch(p, _MM_HINT_T0);
+                _mm_prefetch(p.add(std::mem::size_of::<Candidate>() - 1), _MM_HINT_T0);
+            }
+        }
+        if let Some(c) = window
+            .get(pos + PREFETCH_RESIDUES_AHEAD)
+            .and_then(|&slot| cands.get(slot))
+        {
+            let residues = c.peptide.residues.as_slice();
+            let bytes = std::mem::size_of_val(residues);
+            let base = residues.as_ptr().cast::<i8>();
+            for line in 0..PREFETCH_RESIDUE_LINES.min(bytes.div_ceil(64)) {
+                // SAFETY: prefetch never dereferences; every address is inside
+                // the residue array (`line * 64 < bytes`).
+                #[allow(unused_unsafe)]
+                unsafe {
+                    _mm_prefetch(base.add(line * 64), _MM_HINT_T0);
+                }
+            }
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = (cands, window, pos);
 }
 
 /// Derive the inclusive `[min_nominal, max_nominal]` nominal-mass bucket bounds
-/// for one spectrum at one charge state `z`, used to enumerate candidate
-/// peptides from the mass-bucket index.
+/// for one spectrum at one charge state `z`: the candidates whose nominal residue
+/// mass lies inside are the ones retrieved for it.
 ///
 /// The window is centered on the precursor m/z and widened by the precursor
-/// tolerance plus the isotope-error range. This is the original, byte-for-byte
-/// unchanged derivation used by both the standard search and the cascade's
-/// NARROW Pass 1.
+/// tolerance plus the isotope-error range, then extended to cover every peptide
+/// mass `matches_precursor` accepts at some isotope offset. The nominal centre
+/// alone can miss one: the scaled, rounded nominal mass drifts from the residue
+/// mass by more than a bucket over an isotope shift on heavy peptides (a 2887 Da
+/// residue mass observed at isotope +2 centres the window on 2890 and starts it
+/// at 2888).
 pub(crate) fn candidate_nominal_bounds(
     spec: &Spectrum,
     z: u8,
@@ -257,11 +270,25 @@ pub(crate) fn candidate_nominal_bounds(
     // wrong side there prunes real candidates before the exact filter.)
     let min_nominal = nominal_center - iso_max - widen_left;
     let max_nominal = nominal_center - iso_min + widen_right;
-    (min_nominal, max_nominal)
+    // The lightest and heaviest peptide masses `matches_precursor` accepts over
+    // the isotope range. `nominal_from` is monotone, so their nominal residue
+    // masses bound every accepted peptide's.
+    let observed =
+        adjusted_observed_neutral_mass(spec.precursor_mz * charge_f - charge_f * PROTON, shift_ppm);
+    let (mut lightest, mut heaviest) = (f64::MAX, f64::MIN);
+    for offset in params.isotope_error_range.clone() {
+        let target = observed - offset as f64 * model::mass::ISOTOPE;
+        lightest = lightest.min(target - params.precursor_tolerance.left.as_da(target));
+        heaviest = heaviest.max(target + params.precursor_tolerance.right.as_da(target));
+    }
+    (
+        min_nominal.min(nominal_from(lightest - H2O)),
+        max_nominal.max(nominal_from(heaviest - H2O)),
+    )
 }
 
-/// The charge states a spectrum is searched at: the explicit precursor charge
-/// when present, otherwise the configured charge range.
+/// The charge states a spectrum is searched at: the reported precursor charge is
+/// trusted as the ONLY charge, else the configured range.
 fn charges_to_try(spec: &Spectrum, params: &SearchParams) -> SmallVec<[u8; 4]> {
     match spec.precursor_charge {
         Some(z) if z > 0 => smallvec![z as u8],
@@ -282,98 +309,30 @@ fn mmap_window_key(spec: &Spectrum, params: &SearchParams) -> MmapWindowKey {
         .collect()
 }
 
-/// Upper bound on distinct windows cached per chunk. Beyond it the remaining
-/// windows fall back to direct per-spectrum expansion, so peak extra memory is
-/// bounded regardless of how mass-diverse a chunk is.
-const MMAP_WINDOW_CACHE_MAX: usize = 4096;
-
 /// One spectrum's nominal-mass windows, one per charge state tried.
 type MmapWindowKey = SmallVec<[(i32, i32); 4]>;
 
-/// Per-chunk map from a window key to its fully-prepared candidate list.
-type MmapWindowCache = FxHashMap<MmapWindowKey, Vec<Candidate>>;
+/// Per-chunk map from a base record to ALL of its peptidoforms (no window
+/// filter, no multiplicity copies, decoy label as stored). Keyed on the base
+/// record rather than on the window because windows overlap heavily (±tolerance
+/// × isotope offsets × charge states) while a base record's expansion is the
+/// same in every window that contains it — so one expansion serves every
+/// spectrum in the chunk that reaches the record. Bounded by total candidates
+/// ([`crate::search_params::MMAP_WINDOW_CACHE_MAX_CANDIDATES`]).
+type MmapRecordCache = FxHashMap<BaseRecordKey, Vec<Candidate>>;
 
 impl<'a> PreparedSearch<'a> {
-    /// Build the per-search state once. Enumerates candidates, builds the
-    /// mass-bucket index, and clones+registers the aa_set for cleavage
-    /// scoring.
-    pub fn prepare(
-        idx: &'a SearchIndex,
-        params: &'a SearchParams,
-        scorer: &'a RankScorer,
-        fragment_tolerance_da: f64,
-        decoy_prefix: &str,
-    ) -> Self {
-        // Collect the production candidate list.
-        let mut candidates: Vec<Candidate> =
-            enumerate_candidates(idx, params, decoy_prefix).collect();
-
-        // Decoy↔target peptide-collision removal: a decoy peptide whose bare
-        // sequence coincides with a real target peptide (palindromes, reversal-
-        // coincident, short peptides) is not a valid decoy — it IS a true target
-        // sequence. Relabel it as target so per-spectrum dedup merges it with its
-        // target twin instead of inflating the decoy count (which biases TDC
-        // conservative and injects label noise into decoy-aware training).
-        relabel_collision_decoys(&mut candidates);
-
-        // Build mass-bucket index: nominal(peptide.mass() - H2O) → Vec<candidate_idx>.
-        //
-        // Uses the same nominal_from convention as the node-scoring DP's
-        // nominal-mass binning so that bucket keys align with that lookup.
-        // Stores only indices into `candidates` — no cloning, tiny memory overhead.
-        let mut bucket_index: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
-        for (cand_idx, cand) in candidates.iter().enumerate() {
-            let nominal = cand.peptide.nominal_residue_mass();
-            bucket_index.entry(nominal).or_default().push(cand_idx);
-        }
-
-        // Build an aa_set clone with enzyme registered (for cleavage scoring).
-        // Defaults: peptide_eff = 0.95, neighboring_eff = 0.95.
-        // Cloning is cheap (AminoAcidSet is a HashMap of ~20 entries).
-        // This avoids mutating the shared SearchParams.aa_set borrow.
-        let mut aa_set_for_scoring: AminoAcidSet = params.aa_set.clone();
-        if params.enzyme != Enzyme::NoCleavage && params.enzyme != Enzyme::NonSpecific {
-            aa_set_for_scoring.register_enzyme(params.enzyme, 0.95, 0.95);
-        }
-
-        PreparedSearch {
-            idx,
-            params,
-            scorer,
-            fragment_tolerance_da,
-            candidates,
-            bucket_index,
-            backing_mode: CandidateBacking::Ram,
-            mmap_index: None,
-            mmap_accum: None,
-            aa_set_for_scoring,
-            ms1_link: None,
-            intensity_model: None,
-            mmap_target_bare_seqs: None,
-        }
-    }
-
-    /// Build the per-search state for the OUT-OF-CORE (`Mmap`) candidate path.
+    /// Build the per-search state over the out-of-core base-peptide index.
     ///
-    /// Builds the mass-sorted base-peptide index file (via
+    /// Opens the mass-sorted base-peptide index cached at `index_path`, building
+    /// it (via
     /// [`build_base_peptide_index`](crate::candidate_index::build_base_peptide_index))
-    /// at `index_path`, opens it as an [`MmapCandidateIndex`], and arms the lazy
-    /// per-spectrum resolution path. Unlike [`Self::prepare`] this does NOT
-    /// materialize the full `Vec<Candidate>`; `self.candidates` starts empty and
-    /// is grown lazily during the scan so the PIN/TSV writers still resolve
-    /// `candidate_idxs` against a real candidate slice.
+    /// on a cache miss, or in memory when the cache cannot be written.
+    /// `self.candidates` starts empty and is grown lazily during the scan so the
+    /// PIN/TSV writers resolve `candidate_idxs` against a real candidate slice.
     ///
     /// `decoy_prefix` MUST match the prefix the `SearchIndex` was built with so
-    /// the index's per-record decoy flags align with the in-RAM enumeration.
-    ///
-    /// # Byte-identity scope
-    ///
-    /// The resulting PIN is byte-identical to [`Self::prepare`] (Ram mode) **only**
-    /// for fully-tryptic searches (`num_tolerable_termini = 2`) with at most one
-    /// variable mod per residue. For semi-tryptic or multi-mod-per-residue searches
-    /// the candidate set and scores are identical but the per-scan candidate order
-    /// (and therefore PIN row order / primary-peptide / Proteins-column order) may
-    /// differ — see [`CandidateBacking::Mmap`] for details.
+    /// the index's per-record decoy flags align with the database.
     pub fn prepare_mmap(
         idx: &'a SearchIndex,
         params: &'a SearchParams,
@@ -382,12 +341,14 @@ impl<'a> PreparedSearch<'a> {
         decoy_prefix: &str,
         index_path: &std::path::Path,
     ) -> std::io::Result<Self> {
-        // Out-of-core mmap mode cannot serve the chimeric Pass-2 (it needs the
-        // in-RAM candidate index); reject the combination before building anything.
-        reject_unsupported_mmap_combo(params)?;
         let (mmap_index, was_built) =
             MmapCandidateIndex::open_or_build(index_path, idx, params, decoy_prefix)?;
-        if was_built {
+        if mmap_index.is_in_memory() {
+            eprintln!(
+                "candidate-index: built {} records in memory (not cached)",
+                mmap_index.len()
+            );
+        } else if was_built {
             eprintln!(
                 "candidate-index: built and cached {} records → {}",
                 mmap_index.len(),
@@ -400,97 +361,100 @@ impl<'a> PreparedSearch<'a> {
                 index_path.display()
             );
         }
-
-        let mut aa_set_for_scoring: AminoAcidSet = params.aa_set.clone();
-        if params.enzyme != Enzyme::NoCleavage && params.enzyme != Enzyme::NonSpecific {
-            aa_set_for_scoring.register_enzyme(params.enzyme, 0.95, 0.95);
-        }
-
-        // RC1 fix: build the GLOBAL target bare-sequence set ONCE from the full
-        // base-peptide index (mirrors the in-RAM `relabel_collision_decoys`, which
-        // runs once globally over all candidates). Per-spectrum relabel from only
-        // the window candidates is WRONG (a collision decoy whose target twin is
-        // outside the current window would keep its decoy flag → TDC label
-        // diverges from RAM). Bare residues are reconstructed from each non-decoy
-        // record's protein span — bounded, far smaller than the candidate Vec.
-        let target_bare_seqs = build_target_bare_seqs(&mmap_index, idx);
-
-        Ok(PreparedSearch {
+        Ok(Self::over_index(
             idx,
             params,
             scorer,
             fragment_tolerance_da,
-            candidates: Vec::new(),
-            bucket_index: BTreeMap::new(),
-            backing_mode: CandidateBacking::Mmap,
-            mmap_index: Some(mmap_index),
-            mmap_accum: Some(Mutex::new(MmapAccumulator::default())),
-            aa_set_for_scoring,
-            ms1_link: None,
-            intensity_model: None,
-            mmap_target_bare_seqs: Some(target_bare_seqs),
-        })
+            mmap_index,
+        ))
     }
 
-    /// Drain the `Mmap`-mode accumulator into `self.candidates` so downstream
-    /// consumers (PIN/TSV writers, chimeric Pass 2) resolve `candidate_idxs`
-    /// against the final materialized candidate slice. No-op in `Ram` mode (the
-    /// candidates already live in `self.candidates`). Idempotent.
-    pub fn sync_materialized_candidates(&mut self) {
-        if let Some(accum) = self.mmap_accum.as_ref() {
-            let materialized = std::mem::take(&mut accum.lock().unwrap().candidates);
-            self.candidates = materialized;
-        }
-    }
-
-    /// Consume this prepared search into owned [`PreparedParts`], dropping the
-    /// `idx`/`params`/`scorer` borrows so the caller can mutate `params` (e.g.
-    /// tighten the precursor tolerance) before rebuilding via [`Self::from_parts`].
-    pub fn into_parts(self) -> PreparedParts {
-        PreparedParts {
-            candidates: self.candidates,
-            bucket_index: self.bucket_index,
-            aa_set_for_scoring: self.aa_set_for_scoring,
-        }
-    }
-
-    /// Rebuild a [`PreparedSearch`] from previously-enumerated [`PreparedParts`]
-    /// and a (possibly mutated) `params`, reusing the candidate enumeration. The
-    /// parts are precursor-tolerance independent, so this is correct after
-    /// calibration tightens the tolerance. `ms1_link` starts `None`.
-    pub fn from_parts(
+    /// As [`Self::prepare_mmap`], with the index built in memory and never
+    /// cached: for small, run-specific databases such as the refinement
+    /// cascade's peptide-anchored index.
+    pub fn prepare_in_memory(
         idx: &'a SearchIndex,
         params: &'a SearchParams,
         scorer: &'a RankScorer,
         fragment_tolerance_da: f64,
-        parts: PreparedParts,
+        decoy_prefix: &str,
+    ) -> std::io::Result<Self> {
+        let mmap_index = MmapCandidateIndex::build_in_memory(idx, params, decoy_prefix)?;
+        Ok(Self::over_index(
+            idx,
+            params,
+            scorer,
+            fragment_tolerance_da,
+            mmap_index,
+        ))
+    }
+
+    fn over_index(
+        idx: &'a SearchIndex,
+        params: &'a SearchParams,
+        scorer: &'a RankScorer,
+        fragment_tolerance_da: f64,
+        mmap_index: MmapCandidateIndex,
     ) -> Self {
+        let mut aa_set_for_scoring: AminoAcidSet = params.aa_set.clone();
+        if params.enzyme != Enzyme::NoCleavage && params.enzyme != Enzyme::NonSpecific {
+            aa_set_for_scoring.register_enzyme(params.enzyme, 0.95, 0.95);
+        }
+        // The GLOBAL target bare-sequence set, built once from the full index.
+        // Bare residues are reconstructed from each non-decoy record's protein
+        // span — bounded, far smaller than the candidate list.
+        let target_bare_seqs = build_target_bare_seqs(&mmap_index, idx);
         PreparedSearch {
             idx,
             params,
             scorer,
             fragment_tolerance_da,
-            candidates: parts.candidates,
-            bucket_index: parts.bucket_index,
-            backing_mode: CandidateBacking::Ram,
-            mmap_index: None,
-            mmap_accum: None,
-            aa_set_for_scoring: parts.aa_set_for_scoring,
+            candidates: Vec::new(),
+            mmap_index,
+            mmap_accum: Mutex::new(MmapAccumulator::default()),
+            aa_set_for_scoring,
             ms1_link: None,
-            intensity_model: None,
-            mmap_target_bare_seqs: None,
+            target_bare_seqs,
+            candidate_filter: None,
         }
     }
 
-    /// Attach an optional [`IntensityModel`] for the S1 signal PIN column.
-    pub fn with_intensity_model(mut self, model: Option<Arc<IntensityModel>>) -> Self {
-        self.intensity_model = model;
+    /// Drain the scan accumulator into `self.candidates` so downstream
+    /// consumers (PIN/TSV writers) resolve `candidate_idxs` against the final
+    /// materialized candidate slice. The accumulator is left empty, identity map
+    /// included, so a later scan interns from index 0 instead of returning
+    /// indices into the drained store.
+    pub fn sync_materialized_candidates(&mut self) {
+        let mut accum = self.mmap_accum.lock().unwrap();
+        let materialized = std::mem::take(&mut accum.candidates);
+        accum.index_of = Default::default();
+        drop(accum);
+        self.candidates = materialized;
+    }
+
+    /// Score only the retrieved candidates `keep` accepts. The filter runs on
+    /// each spectrum's retrieved candidates (after the fragment-index shortlist
+    /// when that retrieval is on), and on [`Self::out_of_core_candidates_where`]
+    /// and the chimeric Pass-2 pools, so every scored candidate passed it.
+    ///
+    /// The collision-decoy target set is rebuilt from the targets the filter
+    /// keeps: a span none of whose peptidoforms passes is not a target of this
+    /// search, so it must not relabel a decoy with the same sequence.
+    pub fn with_candidate_filter(mut self, keep: CandidateFilter) -> Self {
+        self.target_bare_seqs =
+            build_target_bare_seqs_where(&self.mmap_index, self.idx, self.params, &keep);
+        self.candidate_filter = Some(keep);
         self
     }
 
+    /// Whether `cand` passes the optional candidate filter.
+    fn keeps(&self, cand: &Candidate) -> bool {
+        self.candidate_filter.as_ref().is_none_or(|keep| keep(cand))
+    }
+
     /// Attach an [`Ms1Link`] for the chimeric precursor isotope features.
-    /// Builder-style so existing `prepare` callers are unchanged;
-    /// only the binary's `--chimeric` path calls this. Has NO effect unless
+    /// Builder-style; only the binary's `--chimeric` path calls this. Has NO effect unless
     /// `params.chimeric` is also set (the feature fill double-guards on it).
     pub fn with_ms1_link(mut self, ms1_link: Option<Ms1Link>) -> Self {
         self.ms1_link = ms1_link;
@@ -512,150 +476,240 @@ impl<'a> PreparedSearch<'a> {
     /// Like [`Self::run_chunk`] but uses `params` for precursor matching and
     /// queue sizing instead of the params reference stored at prepare time.
     /// Candidate enumeration and mass buckets are unchanged.
+    ///
+    /// In fragment-index mode a spectrum without a precursor charge is searched
+    /// as one unit per charge in `params.charge_range`, each at its own
+    /// precursor mass, and the units' PSMs are merged into that spectrum's
+    /// queue. Searched whole, its windows span every charge (m/z x 2 to m/z x 5),
+    /// so the chunk's index covered that whole mass range and the index's top-K
+    /// was spent across all of it rather than on any one precursor window.
     pub fn run_chunk_with_params(
         &self,
         spectra: &[Spectrum],
         spectrum_idx_offset: usize,
         params: &SearchParams,
     ) -> Vec<TopNQueue> {
-        self.run_chunk_inner(spectra, spectrum_idx_offset, params)
+        let has_charge = |s: &Spectrum| s.precursor_charge.is_some_and(|z| z > 0);
+        if params.fragment_index_top_k == 0
+            || params.charge_range.clone().count() < 2
+            || spectra.iter().all(has_charge)
+        {
+            return self.run_chunk_inner(spectra, spectrum_idx_offset, params);
+        }
+        let mass = crate::fragment_index::index_order_mass;
+        let (lo, hi) = spectra.iter().map(mass).fold((f64::MAX, f64::MIN), |(lo, hi), m| {
+            (lo.min(m), hi.max(m))
+        });
+        let span_da = (hi - lo).max(1.0);
+        let mut units: Vec<(usize, Spectrum)> = Vec::with_capacity(spectra.len());
+        for (i, s) in spectra.iter().enumerate() {
+            if has_charge(s) {
+                units.push((i, s.clone()));
+            } else {
+                for z in params.charge_range.clone() {
+                    let mut unit = s.clone();
+                    unit.precursor_charge = Some(z as i32);
+                    units.push((i, unit));
+                }
+            }
+        }
+        units.sort_by(|a, b| mass(&a.1).total_cmp(&mass(&b.1)).then(a.0.cmp(&b.0)));
+        let mut merged: Vec<TopNQueue> = (0..spectra.len())
+            .map(|_| TopNQueue::new(params.top_n_psms_per_spectrum))
+            .collect();
+        while !units.is_empty() {
+            let take = crate::fragment_index::index_chunk_len(&units, |u| mass(&u.1), span_da);
+            let (owners, chunk): (Vec<usize>, Vec<Spectrum>) = units.drain(..take).unzip();
+            for (mut q, i) in self.run_chunk_inner(&chunk, 0, params).into_iter().zip(owners) {
+                for mut psm in q.drain_into_vec() {
+                    psm.spectrum_idx = spectrum_idx_offset + i;
+                    merged[i].push(psm);
+                }
+            }
+        }
+        merged
     }
 
-    /// Expand the fully-prepared per-spectrum candidate list for one set of
-    /// nominal-mass `windows` (one entry per charge state to try) on the
-    /// out-of-core (`Mmap`) backing.
+    /// The fully-prepared candidate list for one set of nominal-mass `windows`
+    /// (one entry per charge state to try): every peptidoform whose nominal
+    /// residue mass lies in a window, each replicated by its enumeration
+    /// multiplicity, in database enumeration order, with collision decoys
+    /// relabelled and the candidate filter applied.
     ///
     /// The result is a pure function of `(windows, params, index)` — it depends
     /// on the spectrum ONLY through those nominal bounds — which is what makes
     /// the per-chunk window cache in `run_chunk_inner` result-identical.
+    /// `cache` holds base-record expansions shared across the chunk; records
+    /// missing from it are expanded here.
     fn expand_mmap_window_candidates(
         &self,
         params: &SearchParams,
         windows: &[(i32, i32)],
+        cache: Option<&MmapRecordCache>,
     ) -> Vec<Candidate> {
-        let mut mmap_cands: Vec<Candidate> = Vec::new();
-        let mi = self
-            .mmap_index
-            .as_ref()
-            .expect("Mmap backing requires an mmap index");
-        // Union of candidates over the same (charge, isotope-offset)
-        // grid the in-RAM precursor match scans, deduped by peptidoform
-        // identity (residues+mods+protein+offset+termini+decoy).
-        //
-        // `base_mult` reproduces the in-RAM enumeration MULTIPLICITY: a
-        // base peptide can appear in `enumerate_candidates` more than
-        // once at the SAME coordinates (notably the N-terminal-Met
-        // re-enumeration emits an identical-coordinate span), and the
-        // in-RAM `candidates` Vec keeps each copy as a distinct index.
-        // `dedup_pepseq_score` later aggregates those indices into one
-        // PSM's `candidate_idxs` — so the PIN `Proteins` column repeats
-        // the accession once per copy. `lazy_candidates_for_precursor`
-        // de-duplicates base records, so to stay byte-identical we count
-        // each base record's raw multiplicity here and replicate the
-        // expanded peptidoforms that many times. The on-disk index
-        // preserves the duplicates (it is built from the same
-        // `enumerate_candidates`), so the count is exact.
-        let mut seen: FxHashSet<GlobalCandKey> = FxHashSet::default();
-        let mut deduped: Vec<Candidate> = Vec::new();
+        let mi = &self.mmap_index;
+
+        // Union of base records over the spectrum's (charge, isotope-offset)
+        // windows, each with its enumeration multiplicity. Deduplicating at
+        // the record level is exact: a record's copies all sit at one mass, so
+        // every window either holds all of them or none, and two records never
+        // yield the same peptidoform (the key includes protein and offset).
+        let mut records: FxHashMap<BaseRecordKey, (crate::candidate_index::IndexRecord, u32)> =
+            FxHashMap::default();
         for &(min_nominal, max_nominal) in windows {
-            // RESULT-IDENTITY: the in-RAM (`Ram`) backing scores
-            // exactly the candidates whose nominal residue mass lands
-            // in the coarse integer bucket window
-            // `candidate_nominal_bounds(spec, z, ..)` (via
-            // `bucket_index.range(min..=max)`). The earlier f64
-            // directional milli-Da window used here was a DIFFERENT set
-            // at bucket boundaries (proven divergence on scan 33203:
-            // RAM kept an iso=+2 candidate, mmap an iso=−1). To stay
-            // result-identical to RAM we derive the SAME nominal bounds
-            // (reusing `candidate_nominal_bounds`, the single source of
-            // truth) and gate per-candidate ACCEPTANCE on the EXACT RAM
-            // nominal-bucket predicate
-            // `nominal_from(peptide.mass() − H2O) ∈ [min, max]`.
-            // `lazy_candidates_for_nominal_window` over-fetches base
-            // records over a padded mass window (bounded-RSS preserved)
-            // and applies that predicate — making the scored multiset
-            // identical to RAM's `bucket_index.range(..)` set.
-            for cand in
-                lazy_candidates_for_nominal_window(mi, self.idx, params, min_nominal, max_nominal)
+            for (rec, mult) in base_records_for_nominal_window(mi, params, min_nominal, max_nominal)
             {
-                if seen.insert(GlobalCandKey::from_candidate(&cand)) {
-                    deduped.push(cand);
+                records.entry(base_record_key(&rec)).or_insert((rec, mult));
+            }
+        }
+        let mut records: Vec<(crate::candidate_index::IndexRecord, u32)> =
+            records.into_values().collect();
+        // `enumerate_candidates` order: protein ASC, start ASC, length ASC, flags ASC.
+        records.sort_unstable_by_key(|(r, _)| base_record_key(r));
+
+        // A spectrum scores exactly the candidates whose nominal residue mass
+        // lands in the coarse integer window `candidate_nominal_bounds(spec, z,
+        // ..)`. The fetch above over-fetches base records over a padded mass
+        // window; acceptance is gated per peptidoform on the exact predicate
+        // `nominal_from(peptide.mass() − H2O) ∈ [min, max]` for ANY of the
+        // spectrum's windows.
+        let in_any_window = |c: &Candidate| {
+            let key = c.peptide.nominal_residue_mass();
+            windows.iter().any(|&(lo, hi)| key >= lo && key <= hi)
+        };
+
+        // Replicate each peptidoform by its base record's multiplicity, so the
+        // per-spectrum candidate set matches the database enumeration
+        // copy-for-copy (collapsed by the later `dedup_pepseq_score`; the PIN
+        // `Proteins` column repeats the accession once per copy).
+        //
+        // The copies are NOT adjacent in the enumeration: `enumerate_protein`
+        // walks the WHOLE protein at `seq_offset = 0`, then walks it AGAIN at
+        // `seq_offset = 1` (N-terminal-Met cleavage). So the order inside one
+        // protein is `[every pass-0 span, offset ASC] ++ [every pass-1 span,
+        // offset ASC]`. Tag each copy with its PASS index (`enumeration_pass`)
+        // and sort on it, so the two walks land in that block order.
+        let mut tagged: Vec<(u32, u32, u32, u16, Candidate)> = Vec::new();
+        let mut owned: Vec<Candidate>;
+        for (rec, mult) in &records {
+            let forms: &[Candidate] = match cache.and_then(|c| c.get(&base_record_key(rec))) {
+                Some(cached) => cached.as_slice(),
+                None => {
+                    owned = expand_base_record(self.idx, params, rec);
+                    owned.as_slice()
+                }
+            };
+            for cand in forms.iter().filter(|c| in_any_window(c)) {
+                for k in 0..*mult {
+                    let pass = enumeration_pass(cand, k);
+                    tagged.push((
+                        cand.protein_index as u32,
+                        pass,
+                        cand.start_offset_in_protein as u32,
+                        cand.peptide.residues.len() as u16,
+                        cand.clone(),
+                    ));
                 }
             }
         }
-        // Replicate each deduped peptidoform by its base record's raw
-        // multiplicity, so the per-spectrum candidate set matches the
-        // in-RAM enumeration copy-for-copy (collapsed identically by the
-        // later `dedup_pepseq_score`). The raw count is a fixed property
-        // of the index: query it at the candidate's EXACT base mass
-        // (peptide mass minus its mod deltas) and count records sharing
-        // the same (protein, start, length, flags) key.
-        //
-        // The copies are NOT adjacent in the RAM enumeration:
-        // `enumerate_protein` walks the WHOLE protein at
-        // `seq_offset = 0`, then walks it AGAIN at `seq_offset = 1`
-        // (N-terminal-Met cleavage). So RAM's global order inside one
-        // protein is `[every pass-0 span, offset ASC] ++ [every pass-1
-        // span, offset ASC]`. Pushing a candidate's copies back to back
-        // and sorting only on `(protein, start_offset)` interleaves them
-        // differently, which perturbs the order-dependent per-spectrum
-        // float accumulators (`strong_null_stats` → the PIN
-        // `RawScoreCal`) even when the multiset is identical.
-        //
-        // Tag each copy with its PASS index and sort on it, so the two
-        // walks land in RAM's block order:
-        //  - copy `k` of a span reachable from both walks is pass `k`;
-        //  - a span at `start_offset == 1` carrying `is_protein_n_term`
-        //    is reachable ONLY from the Met-cleaved walk (the flag is
-        //    set iff the span starts at `seq_offset`), so it is pass 1
-        //    even though it has a single copy.
-        let mut tagged: Vec<(u32, u32, u32, u16, Candidate)> = Vec::new();
-        for cand in deduped {
-            let mult = base_record_multiplicity(mi, &cand);
-            let met_clipped_only = cand.is_protein_n_term && cand.start_offset_in_protein == 1;
-            for k in 0..mult {
-                let pass = if met_clipped_only { 1 } else { k };
-                tagged.push((
-                    cand.protein_index as u32,
-                    pass,
-                    cand.start_offset_in_protein as u32,
-                    cand.peptide.residues.len() as u16,
-                    cand.clone(),
-                ));
+        // Canonical enumeration order: protein_index ASC, then PASS (see above),
+        // then start offset ASC, then span length ASC — exactly the order
+        // `enumerate_protein` emits spans in. Within each such group candidates
+        // keep the `expand_mod_combinations` order they were pushed in
+        // (`sort_by` is stable), which is the order `enumerate_candidates`
+        // uses. DO NOT add residues/mod_units tie-breaking here: lexicographic
+        // residue order diverges from the recursive expansion order, and the
+        // queue's tie-breaks follow candidate order.
+        tagged.sort_by(|a, b| (a.0, a.1, a.2, a.3).cmp(&(b.0, b.1, b.2, b.3)));
+        let mut mmap_cands: Vec<Candidate> = tagged.into_iter().map(|t| t.4).collect();
+
+        // Collision-decoy relabeling against the GLOBAL target bare-sequence set
+        // (built once at prepare time from the full index): a decoy is relabeled
+        // iff its bare sequence matches ANY DB target. Order-independent, so it
+        // runs after the sort.
+        relabel_collision_decoys_with(&mut mmap_cands, &self.target_bare_seqs);
+        if self.candidate_filter.is_some() {
+            mmap_cands.retain(|c| self.keeps(c));
+        }
+        mmap_cands
+    }
+
+    /// Every candidate of the out-of-core index whose bare span passes `keep`,
+    /// in database enumeration order (protein, enumeration pass, start, length,
+    /// then mod expansion order), with collision decoys relabelled against the
+    /// targets of the WHOLE database and the candidate filter applied. `keep`
+    /// sees a span's residues and the residue after it (`b'-'` at the protein
+    /// C-terminus), so it cannot depend on variable mods; every peptidoform of
+    /// a kept span is returned.
+    pub fn out_of_core_candidates_where(
+        &self,
+        keep: impl Fn(&[u8], u8) -> bool + Sync,
+    ) -> Vec<Candidate> {
+        let mi = &self.mmap_index;
+        let db = self.idx;
+        let params = self.params;
+        let mut kept: Vec<crate::candidate_index::IndexRecord> = (0..mi.len())
+            .into_par_iter()
+            .filter_map(|i| {
+                let rec = mi.record_at(i);
+                let seq = &db.db.proteins.get(rec.protein_index as usize)?.sequence;
+                let start = rec.start_offset as usize;
+                let end = start + rec.length as usize;
+                let span = seq.get(start..end)?;
+                let post = seq.get(end).copied().unwrap_or(b'-');
+                keep(span, post).then_some(rec)
+            })
+            .collect();
+        // Identical copies of a span (the N-terminal-Met re-enumeration) share a
+        // key; their count is the enumeration multiplicity.
+        kept.par_sort_unstable_by_key(base_record_key);
+        let mut records: Vec<(crate::candidate_index::IndexRecord, u32)> = Vec::new();
+        for rec in kept {
+            match records.last_mut() {
+                Some((last, n)) if base_record_key(last) == base_record_key(&rec) => *n += 1,
+                _ => records.push((rec, 1)),
             }
         }
-        // Collision-decoy relabeling against the GLOBAL target
-        // bare-sequence set (built once at `prepare_mmap` from the full
-        // index). This is IDENTICAL to the in-RAM path, which relabels
-        // once globally over all candidates: a decoy is relabeled iff
-        // its bare sequence matches ANY DB target. Relabeling against
-        // only this window's targets would be WRONG — a collision decoy
-        // whose target twin is outside the current precursor window
-        // would keep its decoy flag and diverge the TDC label from RAM.
-        let target_bare_seqs = self
-            .mmap_target_bare_seqs
-            .as_ref()
-            .expect("Mmap backing requires the global target bare-seq set");
-        // Canonical enumeration order: protein_index ASC, then PASS
-        // (see above), then start offset ASC, then span length ASC —
-        // exactly the order `enumerate_protein` emits spans in.
-        // Within each such group, candidates
-        // retain the order produced by `lazy_candidates_for_nominal_window`
-        // → `expand_mod_combinations`, which is the SAME order
-        // `enumerate_candidates` uses.  `sort_by` is stable, so the
-        // within-group ordering from `lazy_candidates_for_nominal_window`
-        // is preserved — reproducing the RAM path's ascending global-index
-        // iteration order exactly.
-        //
-        // DO NOT add residues/mod_units tie-breaking here: lexicographic
-        // residue order diverges from `expand_mod_combinations` recursive
-        // output order and causes tie-breaking differences vs RAM.
-        //
-        // Relabeling is order-independent, so it runs after the sort.
-        tagged.sort_by(|a, b| (a.0, a.1, a.2, a.3).cmp(&(b.0, b.1, b.2, b.3)));
-        mmap_cands.extend(tagged.into_iter().map(|t| t.4));
-        relabel_collision_decoys_with(&mut mmap_cands, target_bare_seqs);
-        mmap_cands
+        // Same ordering as `expand_mmap_window_candidates`: protein, enumeration
+        // pass, start, length; a span's peptidoforms keep their expansion order
+        // because the sort is stable and records arrive in key order.
+        let mut tagged: Vec<(u32, u32, u32, u16, Candidate)> = records
+            .par_iter()
+            .flat_map_iter(|(rec, mult)| {
+                let mult = *mult;
+                expand_base_record(db, params, rec)
+                    .into_iter()
+                    .flat_map(move |cand| {
+                        (0..mult).map(move |k| {
+                            (
+                                cand.protein_index as u32,
+                                enumeration_pass(&cand, k),
+                                cand.start_offset_in_protein as u32,
+                                cand.peptide.residues.len() as u16,
+                                cand.clone(),
+                            )
+                        })
+                    })
+            })
+            .collect();
+        tagged.par_sort_by(|a, b| (a.0, a.1, a.2, a.3).cmp(&(b.0, b.1, b.2, b.3)));
+        let mut cands: Vec<Candidate> = tagged.into_par_iter().map(|t| t.4).collect();
+        relabel_collision_decoys_with(&mut cands, &self.target_bare_seqs);
+        if self.candidate_filter.is_some() {
+            cands.retain(|c| self.keeps(c));
+        }
+        cands
+    }
+
+    /// The peptide of the candidate at GLOBAL index `global_idx`: an entry of
+    /// the scan accumulator (read under its lock) before
+    /// [`Self::sync_materialized_candidates`], of `self.candidates` after it.
+    pub fn candidate_peptide(&self, global_idx: u32) -> Peptide {
+        let accum = self.mmap_accum.lock().unwrap();
+        match accum.candidates.get(global_idx as usize) {
+            Some(c) => c.peptide.clone(),
+            None => self.candidates[global_idx as usize].peptide.clone(),
+        }
     }
 
     fn run_chunk_inner(
@@ -666,48 +720,113 @@ impl<'a> PreparedSearch<'a> {
     ) -> Vec<TopNQueue> {
         let scorer = self.scorer;
         let fragment_tolerance_da = self.fragment_tolerance_da;
-        let candidates = &self.candidates;
-        let bucket_index = &self.bucket_index;
         let aa_set_for_scoring = &self.aa_set_for_scoring;
-        // Out-of-core (`Mmap`) backing handles, `None` on the default `Ram` path.
-        let mmap_accum = self.mmap_accum.as_ref();
 
-        // Out-of-core per-chunk window cache. Every (spectrum, charge) search
-        // unit re-derives its candidate list from the on-disk index; on the test
-        // fixture 49,066 units cover only 1,657 distinct nominal windows (29.6x
-        // mean reuse), so expanding each distinct window once removes ~97% of the
-        // repeated base-record fetch / mod expansion / multiplicity / relabel /
-        // sort work. The map is built before the scoring loop and only read from
-        // it, so the hot path stays lock-free.
-        let window_cache: Option<MmapWindowCache> = if self.backing_mode == CandidateBacking::Mmap {
-            let mut keys: Vec<MmapWindowKey> = spectra
+        // Out-of-core per-chunk expansion cache, keyed by BASE RECORD. Every
+        // (spectrum, charge) search unit re-derives its candidate list from the
+        // on-disk index, and consecutive windows overlap heavily, so the same
+        // base peptide would otherwise be re-expanded for nearly every spectrum
+        // that reaches it — on a PTM-rich search (phospho S/T/Y, four variable
+        // mods) that expansion was ~95% of all CPU (issue #72). Fetch the
+        // distinct base records of every window in the chunk (index range
+        // scans, cheap), expand each ONCE in parallel, and let the per-spectrum
+        // assembly below look them up. The cache is a pure memo, so scored
+        // output never changes; it is bounded by total candidates — records
+        // admitted after the budget is spent are dropped and expanded on
+        // demand, and which ones land in the cache under parallel contention
+        // is not deterministic.
+        let (record_cache, frag_index): (Option<MmapRecordCache>, Option<ChunkFragmentIndex>) = {
+            let mi = &self.mmap_index;
+            let mut windows: Vec<(i32, i32)> = spectra
                 .iter()
                 .filter(|s| s.peaks.len() >= params.min_peaks as usize)
-                .map(|s| mmap_window_key(s, params))
+                .flat_map(|s| mmap_window_key(s, params))
                 .collect();
-            keys.sort_unstable();
-            keys.dedup();
-            keys.truncate(MMAP_WINDOW_CACHE_MAX);
-            Some(
-                keys.into_par_iter()
-                    .map(|k| {
-                        let v = self.expand_mmap_window_candidates(params, &k);
-                        (k, v)
+            windows.sort_unstable();
+            windows.dedup();
+            // Fragment-ion index over the chunk's records (issue #76): the
+            // forms are enumerated once here, and each spectrum then scores
+            // only the forms its peaks vote for, instead of every form in its
+            // precursor windows. Index mode indexes every form in the chunk's
+            // whole mass interval and each spectrum queries only its own
+            // window, so one range scan over the union of the windows yields
+            // every record it can select.
+            if params.fragment_index_top_k > 0 {
+                let frag_index = {
+                    // The chunk's precursor mass interval over every spectrum,
+                    // charge and isotope offset; only forms inside it are indexed.
+                    let shift_ppm = params.precursor_mass_shift_ppm;
+                    let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+                    for s in spectra
+                        .iter()
+                        .filter(|s| s.peaks.len() >= params.min_peaks as usize)
+                    {
+                        for z in charges_to_try(s, params) {
+                            let zf = z as f64;
+                            let obs = adjusted_observed_neutral_mass(
+                                s.precursor_mz * zf - zf * PROTON,
+                                shift_ppm,
+                            );
+                            for o in params.isotope_error_range.clone() {
+                                let c = obs - (o as f64) * model::mass::ISOTOPE;
+                                lo = lo.min(c - params.precursor_tolerance.left.as_da(c));
+                                hi = hi.max(c + params.precursor_tolerance.right.as_da(c));
+                            }
+                        }
+                    }
+                    // Records none of whose forms can reach the interval are
+                    // dropped during the fetch, before the records are sorted.
+                    let tables = FormWalkTables::new(params);
+                    let recs = match (
+                        windows.iter().map(|w| w.0).min(),
+                        windows.iter().map(|w| w.1).max(),
+                    ) {
+                        (Some(wlo), Some(whi)) => {
+                            distinct_base_records_for_nominal_window(mi, params, wlo, whi, |v| {
+                                retain_records_with_forms_in(self.idx, &tables, v, lo, hi)
+                            })
+                        }
+                        _ => Vec::new(),
+                    };
+                    ChunkFragmentIndex::build(
+                        recs,
+                        self.idx,
+                        params,
+                        self.scorer.feature_match_tolerance(),
+                        lo,
+                        hi,
+                    )
+                };
+                // The record cache serves the enumeration path only; index
+                // mode materialises through the bounded walk and never reads it.
+                (Some(MmapRecordCache::default()), Some(frag_index))
+            } else {
+                let records: FxHashMap<BaseRecordKey, crate::candidate_index::IndexRecord> =
+                    windows
+                        .par_iter()
+                        .fold(FxHashMap::default, |mut m, &(lo, hi)| {
+                            for (rec, _) in base_records_for_nominal_window(mi, params, lo, hi) {
+                                m.entry(base_record_key(&rec)).or_insert(rec);
+                            }
+                            m
+                        })
+                        .reduce(FxHashMap::default, |mut a, b| {
+                            a.extend(b);
+                            a
+                        });
+                let budget = crate::search_params::MMAP_WINDOW_CACHE_MAX_CANDIDATES;
+                let cached_total = AtomicUsize::new(0);
+                let cache: MmapRecordCache = records
+                    .into_par_iter()
+                    .filter_map(|(key, rec)| {
+                        let v = expand_base_record(self.idx, params, &rec);
+                        let before = cached_total.fetch_add(v.len(), Ordering::Relaxed);
+                        (before + v.len() <= budget).then_some((key, v))
                     })
-                    .collect(),
-            )
-        } else {
-            None
+                    .collect();
+                (Some(cache), None)
+            }
         };
-
-        // Yield-accounting counters.
-        // Aggregated across all worker threads via Relaxed atomics — exact counts
-        // don't require ordering with other memory ops.
-        // Research diagnostic (chimeric only): measure the shared-fragment
-        // overlap between the top-2 co-emitted distinct peptides per scan. Tests
-        // the "fragment theft" hypothesis behind chimeric FDR inflation. Gated by
-        // `--chimeric-allow-overlap` together with `--chimeric`; zero cost otherwise.
-        let chim_overlap = params.chimeric && params.chimeric_allow_overlap;
 
         // Parallel per-spectrum search. All inputs above are `&` immutable; the
         // closure owns its TopNQueue, scored_per_charge cache, and per-bin GF state.
@@ -740,7 +859,7 @@ impl<'a> PreparedSearch<'a> {
                 // It was previously keyed on `nominal_residue_mass()`, on the stated
                 // assumption that isobaric different-sequence peptides at the same
                 // nominal mass are "rare". That is inverted: the candidate window IS a
-                // nominal-mass window (`bucket_index.range(min_nominal..=max_nominal)` —
+                // nominal-mass window (`candidate_nominal_bounds` —
                 // four buckets at the default 20 ppm / -1..=2), so EVERY genuine sequence
                 // competitor shares the winner's nominal mass. They all took the
                 // `mkey == best_mass_key` branch, which only ever raises `best_raw` and
@@ -758,6 +877,11 @@ impl<'a> PreparedSearch<'a> {
                 let mut best_pep_key: u64 = 0;
                 let mut have_best = false;
                 let mut second_raw = i32::MIN;
+                // Best RawScores among candidates from Reference entries, for
+                // `DeltaRefScore`; only tracked when the database holds
+                // isoform, variant or chain entries.
+                let mut ref_tracker = RefTracker::default();
+                let track_ref = self.idx.has_alternative_entries;
 
                 // Tailor per-spectrum score calibration (additive PIN feature):
                 // accumulate a histogram of EVERY scored candidate's rounded RawScore
@@ -796,84 +920,39 @@ impl<'a> PreparedSearch<'a> {
                         .expect("scored spectrum exists for candidate charge")
                 };
 
-                // Compute per-charge candidate windows and union them into a deduplicated
-                // set of candidate indices. Window derivation mirrors the precursor
-                // mass-bin logic so any candidate admitted by matches_precursor is
-                // guaranteed to be in at least one charge's window.
-                //
-                // Vec + sort_unstable + dedup is faster than BTreeSet for the typical
-                // 1k-3k indices per spectrum: better cache locality, no tree pointer
-                // chasing, single sort pass at end. Iteration order matches BTreeSet
-                // (ascending), preserving downstream parity / determinism.
+                // This spectrum's candidates, retrieved from the out-of-core index:
+                // the fragment-index shortlist when that retrieval is on, else every
+                // peptidoform in its nominal precursor windows, in database
+                // enumeration order. The precursor gate is still
+                // `matches_precursor` inside the loop; retrieval only decides which
+                // candidates are looked at. PSM `candidate_idxs` start as LOCAL slot
+                // indices into this list and are remapped to global indices once, at
+                // the end of the closure.
                 let shift_ppm = params.precursor_mass_shift_ppm;
-
-                // `Ram` path (default, byte-identical): coarse mass-bucket lookup.
-                // Produces a sorted+deduped list of indices into `self.candidates`.
-                //
-                // `Mmap` path: lazily materialize the per-spectrum candidate set from
-                // the out-of-core base-peptide index (Task 3 `lazy_candidates_for_precursor`)
-                // for each (charge, isotope-offset) the in-RAM path would consider,
-                // then sort into the SAME enumeration order the in-RAM `candidates`
-                // Vec uses — `(protein_index, start_offset, mod placement)` — so the
-                // candidate iteration order (and therefore queue tie-breaking and
-                // `candidate_idxs` aggregation order) is identical. The actual
-                // precursor gate is still `matches_precursor` inside the loop, exactly
-                // as on the `Ram` path; the lazy retrieval only decides which
-                // candidates are *looked at*. Collision-decoy relabeling is applied to
-                // the per-spectrum set — a collision decoy and its target twin share a
-                // bare sequence (hence mass), so both land in the same window.
-                let mut window_cand_indices: Vec<usize> = Vec::new();
-                // Mmap backing: either a borrow of the per-chunk cache entry
-                // (`_ref`) or a directly expanded list owned here (`_owned`).
-                let mut mmap_cands_owned: Vec<Candidate> = Vec::new();
-                let mut mmap_cands_ref: Option<&[Candidate]> = None;
-                match self.backing_mode {
-                    CandidateBacking::Ram => {
-                        window_cand_indices.reserve(2048);
-                        for &z in &charges_to_try {
-                            let (min_nominal, max_nominal) =
-                                candidate_nominal_bounds(spec, z, params, shift_ppm);
-                            for (_nm, idxs) in bucket_index.range(min_nominal..=max_nominal) {
-                                window_cand_indices.extend_from_slice(idxs);
-                            }
-                        }
-                        window_cand_indices.sort_unstable();
-                        window_cand_indices.dedup();
-                    }
-                    CandidateBacking::Mmap => {
-                        // Per-chunk window cache: the expansion above is a pure
-                        // function of the nominal-mass windows, so spectra that
-                        // share a window share its fully-prepared candidate list
-                        // (measured 29.6x mean reuse on the test fixture). On a
-                        // cache miss (cap exceeded) expand directly.
-                        let key = mmap_window_key(spec, params);
-                        match window_cache.as_ref().and_then(|c| c.get(&key)) {
-                            Some(cached) => mmap_cands_ref = Some(cached.as_slice()),
-                            None => {
-                                mmap_cands_owned = self.expand_mmap_window_candidates(params, &key);
-                            }
-                        }
-                        window_cand_indices =
-                            (0..mmap_cands_ref.unwrap_or(&mmap_cands_owned).len()).collect();
-                    }
-                }
-                // Per-spectrum candidate resolution slice, uniform across both
-                // backings. In `Ram` mode this borrows `self.candidates` and the PSM
-                // `candidate_idxs` are already GLOBAL indices. In `Mmap` mode it
-                // borrows the per-spectrum `mmap_cands` and the PSM `candidate_idxs`
-                // start as LOCAL slot indices into `mmap_cands`; dedup + feature
-                // extraction resolve against this same slice exactly as `Ram` resolves
-                // against `self.candidates`. The local→global remap happens once at the
-                // END of the closure (see `mmap_global_idx` below), so everything in
-                // between is identical to the in-RAM path.
-                let mmap_cands: &[Candidate] = mmap_cands_ref.unwrap_or(&mmap_cands_owned);
-                let cand_slice: &[Candidate] = match self.backing_mode {
-                    CandidateBacking::Ram => candidates,
-                    CandidateBacking::Mmap => mmap_cands,
+                let mut mmap_cands_owned: Vec<Candidate> = if let Some(fi) = &frag_index {
+                    let sel = fi.query(
+                        spec,
+                        &charges_to_try,
+                        params,
+                        scorer.feature_match_tolerance(),
+                        params.fragment_index_top_k as usize,
+                        crate::search_params::FRAGMENT_INDEX_MIN_MATCHED,
+                        crate::fragment_index::vote_peaks_for(scorer.feature_match_tolerance()),
+                    );
+                    let relabel = |v: &mut [Candidate]| {
+                        relabel_collision_decoys_with(v, &self.target_bare_seqs)
+                    };
+                    fi.materialise(&sel, self.idx, params, record_cache.as_ref(), &relabel)
+                } else {
+                    let key = mmap_window_key(spec, params);
+                    self.expand_mmap_window_candidates(params, &key, record_cache.as_ref())
                 };
-                // Resolve a per-spectrum candidate slot to its `&Candidate` and the
-                // value to store in `candidate_idxs`. For both backings this is the
-                // slot's index into `cand_slice` (global for `Ram`, local for `Mmap`).
+                if frag_index.is_some() && self.candidate_filter.is_some() {
+                    mmap_cands_owned.retain(|c| self.keeps(c));
+                }
+                let window_cand_indices: Vec<usize> = (0..mmap_cands_owned.len()).collect();
+                let mmap_cands: &[Candidate] = &mmap_cands_owned;
+                let cand_slice: &[Candidate] = mmap_cands;
                 let resolve_cand =
                     |slot: usize| -> (&Candidate, u32) { (&cand_slice[slot], slot as u32) };
 
@@ -892,6 +971,7 @@ impl<'a> PreparedSearch<'a> {
                 let enz_is_c_term = params.enzyme.is_c_term();
                 let enz_is_n_term = params.enzyme.is_n_term();
                 let enz = params.enzyme;
+                let edge_enabled = edge_scoring_enabled(scorer);
 
                 // Per-charge queue keyed by charge state. Retains top-N PSMs
                 // independently per precursor charge (Kim et al., Nat Commun 5:5277, 2014).
@@ -899,7 +979,8 @@ impl<'a> PreparedSearch<'a> {
 
                 // Cascade Pass 1 is a NARROW brute-force window scan: iterate every
                 // candidate whose nominal mass falls in the precursor window.
-                for &cand_slot in &window_cand_indices {
+                for (pos, &cand_slot) in window_cand_indices.iter().enumerate() {
+                    prefetch_window_candidates(cand_slice, &window_cand_indices, pos);
                     let (cand, cand_idx) = resolve_cand(cand_slot);
                     let cleavage_credit = enzyme_cleavage_credit(
                         cand,
@@ -974,35 +1055,56 @@ impl<'a> PreparedSearch<'a> {
                         // that can't beat the top-1 still contributes to the delta.
                         {
                             let s = pin_score.round() as i32;
+                            if track_ref
+                                && self.idx.db.proteins[cand.protein_index].entry_kind()
+                                    == model::EntryKind::Reference
+                            {
+                                ref_tracker.fold(s, peptidoform_key(&cand.peptide));
+                            }
                             // Tailor histogram: fold this candidate's rounded RawScore
                             // in (same `s` the DeltaRawScore tracker uses). One u32
                             // increment, no per-candidate allocation.
                             *tailor_hist.entry(s).or_insert(0) += 1;
                             tailor_total += 1;
                             strong_null_stats.push(pin_score);
-                            let mkey = peptidoform_key(&cand.peptide);
-                            if have_best && mkey == best_pep_key {
-                                // Same peptidoform (another protein / another charge):
-                                // not a competitor, so it may only raise the best.
-                                if s > best_raw {
+                            // A score at or below the runner-up changes neither
+                            // tracker (the runner-up never exceeds the best), so
+                            // the peptidoform hash is only taken above it.
+                            if s > second_raw {
+                                let mkey = peptidoform_key(&cand.peptide);
+                                if have_best && mkey == best_pep_key {
+                                    // Same peptidoform (another protein / another
+                                    // charge): not a competitor, so it may only raise
+                                    // the best.
+                                    if s > best_raw {
+                                        best_raw = s;
+                                    }
+                                } else if s > best_raw {
+                                    second_raw = second_raw.max(best_raw);
                                     best_raw = s;
+                                    best_pep_key = mkey;
+                                    have_best = true;
+                                } else {
+                                    second_raw = s;
                                 }
-                            } else if s > best_raw {
-                                second_raw = second_raw.max(best_raw);
-                                best_raw = s;
-                                best_pep_key = mkey;
-                                have_best = true;
-                            } else {
-                                second_raw = second_raw.max(s);
                             }
                         }
 
                         // Gate against the queue's current worst rank_score
                         // before invoking edge_score.
                         let could_win = match per_charge_queues.get(&z) {
-                            Some(q) if q.len() >= q.capacity() as usize => q
-                                .worst_rank_score()
-                                .is_none_or(|worst| pin_score + max_edge_bonus > worst),
+                            // With edges disabled the bound is 0, so the gate must admit
+                            // a candidate tied with the worst retained one: the queue keeps
+                            // ties.
+                            Some(q) if q.len() >= q.capacity() as usize => {
+                                q.worst_rank_score().is_none_or(|worst| {
+                                    if edge_enabled {
+                                        pin_score + max_edge_bonus > worst
+                                    } else {
+                                        pin_score >= worst
+                                    }
+                                })
+                            }
                             // Queue below capacity (or doesn't exist yet): accept
                             // everything until it fills up.
                             _ => true,
@@ -1110,17 +1212,22 @@ impl<'a> PreparedSearch<'a> {
                 let candidate_rank_entropy =
                     scoring_crate::scoring::candidate_rank_entropy(&retained_scores);
 
-                queue.fill_post_topn(|psm| {
+                // Strong mode retains a wider pool, ranks it by the strong score and
+                // trims it to the user's top-N. The strong score needs only the cheap
+                // features, so the pool gets a light pass and only the survivors get
+                // the full one (rich-ion and fragment-LLR models, site features).
+                let strong_mode = params.score_mode == ScoreMode::Strong;
+                let make_features = |psm: &PsmMatch, full: bool| -> PsmFeatures {
                     let ss = scored_spec_for_charge(psm.charge_used);
                     let cand = &cand_slice[psm.primary_candidate_idx() as usize];
-                    let mut features = compute_psm_features(
+                    let mut features = compute_psm_features_with_edge(
                         ss,
                         &cand.peptide,
                         scorer,
                         psm.charge_used,
-                        self.intensity_model.as_deref(),
+                        Some(psm.edge_score),
+                        full,
                     );
-                    features.edge_score = psm.edge_score; // reuse per-candidate value
 
                     // The PIN `precursor_isotope_kl` / `precursor_snr` columns are
                     // left at their 0.0 defaults here. They were a per-PSM MS1
@@ -1131,6 +1238,13 @@ impl<'a> PreparedSearch<'a> {
                     // co-isolation detection — `ms1_link` and its loading stay.
 
                     features.delta_raw_score = delta_raw_score;
+                    if track_ref {
+                        if let Some(r) = ref_tracker.best_excluding(peptidoform_key(&cand.peptide))
+                        {
+                            features.ref_competitor = 1;
+                            features.ref_best_raw = r as f32;
+                        }
+                    }
                     features.listwise_score_gap = listwise_score_gap;
                     features.candidate_rank_entropy = candidate_rank_entropy;
                     // Tailor calibrated score: this PSM's RawScore divided by the
@@ -1168,7 +1282,10 @@ impl<'a> PreparedSearch<'a> {
                         candidate_rank_entropy: features.candidate_rank_entropy,
                         listwise_score_gap: features.listwise_score_gap,
                     });
-                    psm.features = features;
+                    features
+                };
+                queue.fill_post_topn(|psm| {
+                    psm.features = make_features(psm, !strong_mode);
                 });
 
                 let retained_strong: Vec<f32> =
@@ -1181,77 +1298,32 @@ impl<'a> PreparedSearch<'a> {
                     );
                 });
 
-                if params.score_mode == ScoreMode::Strong {
+                if strong_mode {
                     queue.reorder_by_strong_score();
                     // Emit only user top-N rows (gate uses top_n=1); retention pool was wider.
                     queue.trim_to_capacity(params.top_n_psms_per_spectrum);
                 }
-
-                // Chimeric fragment-overlap diagnostic (env-gated). For scans that
-                // emit ≥2 distinct peptides, measure how many MS2 peaks the runner-up
-                // claims that the top peptide also claims (the "fragment theft" the
-                // chimeric FDR inflation is hypothesized to come from).
-                if chim_overlap {
-                    let sorted = queue.clone().into_sorted_vec(); // best-first
-                    let mut picks: Vec<&PsmMatch> = Vec::new();
-                    'outer: for psm in &sorted {
-                        let seq: Vec<u8> = cand_slice[psm.primary_candidate_idx() as usize]
-                            .peptide
-                            .residues
-                            .iter()
-                            .map(|a| a.residue)
-                            .collect();
-                        for p in &picks {
-                            let pseq: Vec<u8> = cand_slice[p.primary_candidate_idx() as usize]
-                                .peptide
-                                .residues
-                                .iter()
-                                .map(|a| a.residue)
-                                .collect();
-                            if pseq == seq {
-                                continue 'outer;
-                            }
-                        }
-                        picks.push(psm);
-                        if picks.len() == 2 {
-                            break;
-                        }
-                    }
-                    if picks.len() == 2 {
-                        let pa = &cand_slice[picks[0].primary_candidate_idx() as usize].peptide;
-                        let pb = &cand_slice[picks[1].primary_candidate_idx() as usize].peptide;
-                        let ka = matched_peak_keys(
-                            scored_spec_for_charge(picks[0].charge_used),
-                            pa,
-                            scorer,
-                        );
-                        let kb = matched_peak_keys(
-                            scored_spec_for_charge(picks[1].charge_used),
-                            pb,
-                            scorer,
-                        );
-                        let shared = ka.intersection(&kb).count();
-                        let uni = ka.union(&kb).count();
-                        let minlen = ka.len().min(kb.len());
-                        eprintln!(
-                        "CHIM_OVERLAP spec_idx={} nA={} nB={} shared={} jacc={:.3} fracmin={:.3}",
-                        spec_idx, ka.len(), kb.len(), shared,
-                        if uni > 0 { shared as f64 / uni as f64 } else { 0.0 },
-                        if minlen > 0 { shared as f64 / minlen as f64 } else { 0.0 },
-                    );
-                    }
+                if strong_mode {
+                    // Full features for the emitted rows. The strong score depends only
+                    // on features both passes compute identically; the calibrated score
+                    // was taken over the whole pool, so keep it.
+                    queue.update_in_place(|psm| {
+                        let strong = psm.features.strong_score;
+                        let strong_cal = psm.features.strong_score_cal;
+                        psm.features = make_features(psm, true);
+                        debug_assert_eq!(psm.features.strong_score.to_bits(), strong.to_bits());
+                        psm.features.strong_score_cal = strong_cal;
+                    });
                 }
 
-                // `Mmap` mode: the surviving PSMs carry LOCAL `candidate_idxs` into
-                // this spectrum's `mmap_cands`. Intern each referenced candidate into
-                // the shared accumulator (de-duped by peptidoform identity, so the same
+                // The surviving PSMs carry LOCAL `candidate_idxs` into this
+                // spectrum's `mmap_cands`. Intern each referenced candidate into the
+                // shared accumulator (de-duped by peptidoform identity, so the same
                 // candidate seen from another spectrum reuses one global index) and
                 // rewrite `candidate_idxs` to the global indices the PIN/TSV writers
-                // resolve against `self.candidates` after the scan. `Ram` mode is
-                // untouched (indices are already global).
-                if self.backing_mode == CandidateBacking::Mmap {
-                    let accum = mmap_accum.expect("Mmap backing requires an accumulator");
-                    let mut accum = accum.lock().unwrap();
+                // resolve against `self.candidates` after the scan.
+                {
+                    let mut accum = self.mmap_accum.lock().unwrap();
                     queue.remap_candidate_idxs(|local| {
                         accum.intern(mmap_cands[local as usize].clone())
                     });
@@ -1265,38 +1337,107 @@ impl<'a> PreparedSearch<'a> {
     }
 }
 
-/// Match every spectrum against every candidate from the SearchIndex.
-/// Returns one top-N PSM queue per spectrum (in input order) PLUS the
-/// enumerated `Vec<Candidate>` that backs the `PsmMatch::candidate_idxs`
-/// handles inside each queue.
+/// Precursor-mass span (Da) of one chunk in [`match_spectra_out_of_core`].
+pub const OUT_OF_CORE_SLICE_DA: f64 = 80.0;
+
+/// Single-shot search with fragment-ion retrieval, the path `andes search`
+/// takes. Spectra are scored in precursor-mass-ordered
+/// chunks of at most [`OUT_OF_CORE_SLICE_DA`], so the per-chunk index stays
+/// bounded however many spectra are passed.
 ///
-/// Callers that need to resolve a PSM's peptide / protein info must hold
-/// on to the returned candidates vector and look up by
-/// `psm.primary_candidate_idx() as usize`. The previous API embedded a cloned
-/// `Candidate` directly in every PsmMatch; that allocation cost is now
-/// gone but the resolution responsibility shifts to the caller.
-///
-/// A `ScoredSpectrum` is built once per spectrum and reused across all
-/// candidates; candidates are bucketed by mass for sub-linear precursor
-/// lookup. After per-candidate scoring, SpecEValue is computed via the
-/// generating-function DP across the precursor tolerance window in nominal
-/// mass space and assigned to every PSM in the queue.
-///
-/// This is a thin wrapper around [`PreparedSearch::prepare`] +
-/// [`PreparedSearch::run_chunk`] preserved for single-shot callers (tests
-/// and the historic single-pass binary path).
-pub fn match_spectra(
+/// Returns one queue per input spectrum, in input order (`spectrum_idx` is the
+/// input position), and the candidates the queues reference. The candidate
+/// index is cached under the system temp directory and reused by later calls
+/// with the same database and parameters, or built in memory when the cache
+/// cannot be written.
+pub fn match_spectra_out_of_core(
     spectra: &[Spectrum],
     idx: &SearchIndex,
     params: &SearchParams,
     scorer: &RankScorer,
     fragment_tolerance_da: f64,
     decoy_prefix: &str,
-) -> (Vec<TopNQueue>, Vec<Candidate>) {
-    let prepared =
-        PreparedSearch::prepare(idx, params, scorer, fragment_tolerance_da, decoy_prefix);
-    let queues = prepared.run_chunk(spectra, 0);
-    (queues, prepared.candidates)
+) -> std::io::Result<(Vec<TopNQueue>, Vec<Candidate>)> {
+    let mut params = params.clone();
+    params.fragment_index_top_k = crate::search_params::FRAGMENT_INDEX_TOP_K;
+    let cache = crate::candidate_index::index_cache_path(idx, &params);
+    let mut prepared = PreparedSearch::prepare_mmap(
+        idx,
+        &params,
+        scorer,
+        fragment_tolerance_da,
+        decoy_prefix,
+        &cache,
+    )?;
+    let mut order: Vec<usize> = (0..spectra.len()).collect();
+    order.sort_by(|&a, &b| {
+        crate::fragment_index::index_order_mass(&spectra[a])
+            .total_cmp(&crate::fragment_index::index_order_mass(&spectra[b]))
+            .then(a.cmp(&b))
+    });
+    let mut queues: Vec<Option<TopNQueue>> = (0..spectra.len()).map(|_| None).collect();
+    let mut rest: &[usize] = &order;
+    while !rest.is_empty() {
+        let take = crate::fragment_index::index_chunk_len(
+            rest,
+            |&i| crate::fragment_index::index_order_mass(&spectra[i]),
+            OUT_OF_CORE_SLICE_DA,
+        );
+        let (head, tail) = rest.split_at(take);
+        let chunk: Vec<Spectrum> = head.iter().map(|&i| spectra[i].clone()).collect();
+        for (mut q, &orig) in prepared.run_chunk(&chunk, 0).into_iter().zip(head) {
+            q.update_in_place(|psm| psm.spectrum_idx = orig);
+            queues[orig] = Some(q);
+        }
+        rest = tail;
+    }
+    prepared.sync_materialized_candidates();
+    let queues = queues
+        .into_iter()
+        .map(|q| q.expect("every spectrum is in exactly one chunk"))
+        .collect();
+    Ok((queues, prepared.candidates))
+}
+
+/// Isolation window `[lo, hi]` (m/z) Pass 2 searches for co-isolated precursors
+/// of `spec`, and the m/z tolerance used to match their MS1 isotope peaks. Uses
+/// the per-scan isolation offsets when the parser recorded them, else the
+/// configured chimeric half-width.
+fn coisolation_window(spec: &Spectrum, params: &SearchParams) -> (f64, f64, f64) {
+    let lo = spec.precursor_mz
+        - spec
+            .isolation_lower_offset
+            .unwrap_or(params.chimeric_isolation_halfwidth_da);
+    let hi = spec.precursor_mz
+        + spec
+            .isolation_upper_offset
+            .unwrap_or(params.chimeric_isolation_halfwidth_da);
+    let tol = params
+        .precursor_tolerance
+        .left
+        .as_da(spec.precursor_mz)
+        .max(0.01);
+    (lo, hi, tol)
+}
+
+/// MS1 m/z range Pass 2 reads for `spec`: every peak co-isolation detection can
+/// consult (a monoisotopic candidate inside the isolation window and its first
+/// three isotope peaks at charge >= 1, each within the match tolerance), plus a
+/// 0.01 Da margin. Restricting a linked MS1 scan to this range leaves
+/// [`run_pass2_coisolation`]'s detections unchanged.
+pub fn coisolation_ms1_bounds(spec: &Spectrum, params: &SearchParams) -> (f64, f64) {
+    const MARGIN_DA: f64 = 0.01;
+    let (lo, hi, tol) = coisolation_window(spec, params);
+    (
+        lo - tol - MARGIN_DA,
+        hi + 3.0 * model::mass::ISOTOPE + tol + MARGIN_DA,
+    )
+}
+
+/// One scan's Pass-2 input: its primary peptide and co-isolated precursors.
+struct Pass2Scan {
+    primary: Peptide,
+    coisolated: Vec<crate::coisolation::CoIsolated>,
 }
 
 /// Pass 2 of the chimeric cascade. For each non-empty top-N queue (filled by
@@ -1313,6 +1454,8 @@ pub fn match_spectra(
 /// index, added to each emitted secondary's `spectrum_idx` so it aligns with the
 /// accumulated `all_spectra`. Peaks must still be present (the residual needs
 /// them) — call BEFORE peaks are dropped.
+///
+/// Candidates come from the out-of-core index; see [`mmap_secondaries`].
 pub fn run_pass2_coisolation(
     prepared: &PreparedSearch,
     spectra: &[Spectrum],
@@ -1326,95 +1469,211 @@ pub fn run_pass2_coisolation(
         return;
     }
 
-    queues.par_iter_mut().enumerate().for_each(|(spec_idx, q)| {
-        if q.is_empty() {
-            return;
+    // (A) Co-isolated precursors and the primary peptide of every scan Pass 1
+    // identified.
+    let scans: Vec<Option<Pass2Scan>> = queues
+        .par_iter()
+        .enumerate()
+        .map(|(spec_idx, q)| {
+            if q.is_empty() {
+                return None;
+            }
+            let spec = spectra.get(spec_idx)?;
+            // Linked MS1 scan for this MS2 (most-recent preceding MS1).
+            let ms1_idx = (*link.ms2_to_ms1.get(spec_idx)?)?;
+            let ms1 = link.ms1_peaks.get(ms1_idx)?;
+            let (lo, hi, tol) = coisolation_window(spec, params);
+            let coisolated = crate::coisolation::detect_coisolated(
+                ms1,
+                lo,
+                hi,
+                spec.precursor_mz,
+                *params.charge_range.start()..=*params.charge_range.end(),
+                tol,
+                // max_kl + max_n: the chimeric-N lever. Raising max_coisolated
+                // searches deeper co-fragments on the residual; the KL gate keeps
+                // secondaries clean.
+                params.chimeric_max_kl,
+                params.chimeric_max_coisolated,
+            );
+            if coisolated.is_empty() {
+                return None;
+            }
+            // Primary peptide = the queue's best PSM (smallest SpecEValue).
+            let primary = prepared.candidate_peptide(q.peek_top()?.primary_candidate_idx());
+            Some(Pass2Scan {
+                primary,
+                coisolated,
+            })
+        })
+        .collect();
+
+    // (B) Secondaries per scan, each with its winning candidate (its
+    // `candidate_idxs` index a pass-local pool).
+    let found = mmap_secondaries(prepared, spectra, &scans, params);
+
+    // (C) Emit. Winners are interned into the accumulator (scan order) and
+    // their indices rewritten to the global ones. A winner whose peptidoform,
+    // charge and target/decoy label the scan already emits (a retained Pass-1
+    // candidate, typically at another isotope offset, or an earlier secondary)
+    // is dropped: its distinct ExpMass would put it in its own competition
+    // group and count the identification twice.
+    let mut accum = prepared.mmap_accum.lock().unwrap();
+    for (spec_idx, (q, secondaries)) in queues.iter_mut().zip(found).enumerate() {
+        if secondaries.is_empty() {
+            continue;
         }
-        let Some(spec) = spectra.get(spec_idx) else {
-            return;
-        };
-
-        // Linked MS1 scan for this MS2 (most-recent preceding MS1).
-        let Some(Some(ms1_idx)) = link.ms2_to_ms1.get(spec_idx) else {
-            return;
-        };
-        let Some(ms1) = link.ms1_peaks.get(*ms1_idx) else {
-            return;
-        };
-
-        // Isolation window: prefer the per-scan offsets if the parser recorded
-        // them, else fall back to the configured chimeric half-width.
-        let lo = spec.precursor_mz
-            - spec
-                .isolation_lower_offset
-                .unwrap_or(params.chimeric_isolation_halfwidth_da);
-        let hi = spec.precursor_mz
-            + spec
-                .isolation_upper_offset
-                .unwrap_or(params.chimeric_isolation_halfwidth_da);
-
-        let tol = params
-            .precursor_tolerance
-            .left
-            .as_da(spec.precursor_mz)
-            .max(0.01);
-
-        let cos = crate::coisolation::detect_coisolated(
-            ms1,
-            lo,
-            hi,
-            spec.precursor_mz,
-            *params.charge_range.start()..=*params.charge_range.end(),
-            tol,
-            // max_kl + max_n: the chimeric-N lever (params; default 0.3 / 2 = the
-            // proven +101%-Astral setting). Raising max_coisolated searches deeper
-            // co-fragments on the residual; the KL gate keeps secondaries clean.
-            params.chimeric_max_kl,
-            params.chimeric_max_coisolated,
-        );
-        if cos.is_empty() {
-            return;
+        let mut emitted: std::collections::BTreeSet<(PepDedupKey, u8, bool)> = q
+            .iter_psms()
+            .filter_map(|p| {
+                let i = p.primary_candidate_idx() as usize;
+                let c = accum
+                    .candidates
+                    .get(i)
+                    .or_else(|| prepared.candidates.get(i))?;
+                Some((
+                    PepDedupKey::from_peptide(&c.peptide),
+                    p.charge_used,
+                    c.is_decoy,
+                ))
+            })
+            .collect();
+        for (mut psm, cand) in secondaries {
+            let key = (
+                PepDedupKey::from_peptide(&cand.peptide),
+                psm.charge_used,
+                cand.is_decoy,
+            );
+            if !emitted.insert(key) {
+                continue;
+            }
+            psm.candidate_idxs = vec![accum.intern(cand)];
+            // `spec_idx` is chunk-local (indexes `spectra` + `link`); the emitted
+            // spectrum_idx must be global to align with `all_spectra`.
+            psm.spectrum_idx = offset + spec_idx;
+            // Distinct co-isolated peptide — a legitimate EXTRA emission, not a
+            // competitor for the primary's slot. force_push skips capacity-based
+            // eviction (plain `push` at capacity 1 would evict the primary or
+            // drop the secondary).
+            q.force_push(psm);
         }
+    }
+}
 
-        // Primary peptide = the queue's best PSM (smallest SpecEValue).
-        let primary = match q.peek_top() {
-            Some(best) => prepared.candidates[best.primary_candidate_idx() as usize]
-                .peptide
-                .clone(),
-            None => return,
-        };
+/// Widest nominal-mass span (Da) of one Pass-2 candidate pool. Bounds the
+/// pool's memory: a pool holds every peptidoform of its secondaries' windows.
+const PASS2_POOL_SPAN_NOMINAL: i32 = 32;
 
-        // Secondaries on the SAME scan compete for residual evidence: each accepted
-        // secondary's matched peaks are added to `claimed` so the next co-isolated
-        // mass is scored against still-unexplained signal (no double-counting of
-        // shared leftover peaks across multiple co-isolated precursors).
-        let mut claimed: std::collections::HashSet<i64> = std::collections::HashSet::new();
-        for co in cos {
-            if let Some((mut psm, winner_claimed)) = crate::coisolation::search_secondary(
-                spec,
-                &primary,
-                &claimed,
-                co,
-                &prepared.candidates,
-                &prepared.bucket_index,
-                prepared.scorer,
-                &prepared.aa_set_for_scoring,
-                params,
-                prepared.fragment_tolerance_da,
-                prepared.intensity_model.as_deref(),
-            ) {
-                // `spec_idx` is chunk-local (indexes `spectra` + `link`); the
-                // emitted spectrum_idx must be global to align with `all_spectra`.
-                psm.spectrum_idx = offset + spec_idx;
-                // Distinct co-isolated peptide — a legitimate EXTRA emission, not a
-                // competitor for the primary's slot. force_push skips capacity-based
-                // eviction (plain `push` at capacity 1 would evict the primary or
-                // drop the secondary).
-                q.force_push(psm);
-                claimed.extend(winner_claimed);
+/// Pass 2: the winning secondary of every co-isolated precursor, per scan in
+/// detection order, each with its candidate.
+///
+/// The k-th co-isolated precursors of all scans form round k (a scan's
+/// secondaries compete for residual peaks, so round k needs the peaks claimed
+/// in rounds `< k`). Within a round, secondaries are sorted by nominal window
+/// and grouped into batches spanning at most [`PASS2_POOL_SPAN_NOMINAL`]; each
+/// batch expands the union of its windows from the out-of-core index ONCE
+/// (`expand_mmap_window_candidates`: enumeration multiset, order and
+/// collision-decoy labels) and scans it through a pool-local bucket index. A
+/// pool's order is the database enumeration order restricted to the pool, so
+/// `search_secondary`'s smallest-index tie-break picks the same winner whichever
+/// batch a secondary lands in.
+fn mmap_secondaries(
+    prepared: &PreparedSearch,
+    spectra: &[Spectrum],
+    scans: &[Option<Pass2Scan>],
+    params: &SearchParams,
+) -> Vec<Vec<(PsmMatch, Candidate)>> {
+    use crate::coisolation::{search_secondary, secondary_nominal_window, CoIsolated};
+    type Hit = (PsmMatch, Candidate, std::collections::HashSet<i64>);
+    // (scan index, co-isolated precursor, nominal window)
+    type Item = (usize, CoIsolated, (i32, i32));
+
+    let mut claimed: Vec<std::collections::HashSet<i64>> =
+        vec![std::collections::HashSet::new(); scans.len()];
+    let mut found: Vec<Vec<(PsmMatch, Candidate)>> = vec![Vec::new(); scans.len()];
+    let rounds = scans
+        .iter()
+        .flatten()
+        .map(|s| s.coisolated.len())
+        .max()
+        .unwrap_or(0);
+    for k in 0..rounds {
+        let mut items: Vec<Item> = scans
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| {
+                let co = *s.as_ref()?.coisolated.get(k)?;
+                Some((i, co, secondary_nominal_window(co, params)))
+            })
+            .collect();
+        items.sort_by_key(|&(i, _, w)| (w, i));
+        let mut batches: Vec<&[Item]> = Vec::new();
+        let mut rest = items.as_slice();
+        while let Some(&(_, _, (lo, _))) = rest.first() {
+            let n = rest
+                .iter()
+                .take_while(|&&(_, _, (_, hi))| hi - lo <= PASS2_POOL_SPAN_NOMINAL)
+                .count()
+                .max(1);
+            let (batch, tail) = rest.split_at(n);
+            batches.push(batch);
+            rest = tail;
+        }
+        let claimed_ref = &claimed;
+        let hits: Vec<(usize, Option<Hit>)> = batches
+            .par_iter()
+            .flat_map_iter(|batch| {
+                // Union of the batch's windows as disjoint intervals.
+                let mut windows: Vec<(i32, i32)> = Vec::new();
+                for &(_, _, (lo, hi)) in batch.iter() {
+                    match windows.last_mut() {
+                        Some(last) if lo <= last.1 + 1 => last.1 = last.1.max(hi),
+                        _ => windows.push((lo, hi)),
+                    }
+                }
+                let pool = prepared.expand_mmap_window_candidates(prepared.params, &windows, None);
+                let mut bucket_index: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
+                for (i, c) in pool.iter().enumerate() {
+                    bucket_index
+                        .entry(c.peptide.nominal_residue_mass())
+                        .or_default()
+                        .push(i);
+                }
+                batch
+                    .iter()
+                    .map(|&(spec_idx, co, _)| {
+                        let scan = scans[spec_idx]
+                            .as_ref()
+                            .expect("only scans with co-isolated precursors are batched");
+                        let hit = search_secondary(
+                            &spectra[spec_idx],
+                            &scan.primary,
+                            &claimed_ref[spec_idx],
+                            co,
+                            &pool,
+                            &bucket_index,
+                            prepared.scorer,
+                            &prepared.aa_set_for_scoring,
+                            params,
+                            prepared.fragment_tolerance_da,
+                        )
+                        .map(|(psm, winner_claimed)| {
+                            let cand = pool[psm.primary_candidate_idx() as usize].clone();
+                            (psm, cand, winner_claimed)
+                        });
+                        (spec_idx, hit)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (spec_idx, hit) in hits {
+            if let Some((psm, cand, winner_claimed)) = hit {
+                claimed[spec_idx].extend(winner_claimed);
+                found[spec_idx].push((psm, cand));
             }
         }
-    });
+    }
+    found
 }
 
 /// Per-candidate enzymatic cleavage credit: the RawScore term for whether the
@@ -1495,31 +1754,6 @@ pub(crate) fn cleavage_credit_for(cand: &Candidate, enz: Enzyme, aa_set: &AminoA
     )
 }
 
-/// Research diagnostic: the set of observed MS2 peaks claimed by `peptide`'s
-/// charge-1 b/y ions, as quantized m/z keys (round(mz·1000)). Mirrors the
-/// matching in `compute_psm_features`. Used only by the env-gated chimeric
-/// fragment-overlap diagnostic; not on any production path.
-pub(crate) fn matched_peak_keys(
-    scored_spec: &ScoredSpectrum<'_>,
-    peptide: &Peptide,
-    scorer: &RankScorer,
-) -> std::collections::HashSet<i64> {
-    let mut keys = std::collections::HashSet::new();
-    let n = peptide.length();
-    if n < 2 {
-        return keys;
-    }
-    let predicted = predict_by_ions(peptide, 1..=1);
-    let feat_tol = scorer.feature_match_tolerance();
-    for p in &predicted {
-        let tol_da = feat_tol.as_da(p.mz);
-        if let Some((_rank, _intensity, peak_mz)) = scored_spec.nearest_peak_full(p.mz, tol_da) {
-            keys.insert((peak_mz * 1000.0).round() as i64);
-        }
-    }
-    keys
-}
-
 /// Compute fragment-ion feature columns for a single PSM.
 ///
 /// Uses charge-1 b/y ions only (the `NumMatchedMainIons` convention).
@@ -1546,7 +1780,20 @@ pub(crate) fn compute_psm_features(
     peptide: &Peptide,
     scorer: &RankScorer,
     charge: u8,
-    intensity_model: Option<&IntensityModel>,
+) -> PsmFeatures {
+    compute_psm_features_with_edge(scored_spec, peptide, scorer, charge, None, true)
+}
+
+/// As [`compute_psm_features`], reusing an `edge_score` the caller already has
+/// (`PsmMatch::edge_score`, computed in the candidate loop for the same spectrum,
+/// peptide and charge) instead of recomputing it.
+pub(crate) fn compute_psm_features_with_edge(
+    scored_spec: &ScoredSpectrum<'_>,
+    peptide: &Peptide,
+    scorer: &RankScorer,
+    charge: u8,
+    known_edge_score: Option<i32>,
+    full: bool,
 ) -> PsmFeatures {
     let n = peptide.length();
     if n < 2 {
@@ -1556,7 +1803,8 @@ pub(crate) fn compute_psm_features(
     // ADDITIVE edge-score feature (new PIN column). Computed
     // here so it shares the per-PSM ScoredSpectrum + scorer references that
     // the existing feature-extraction code already has on hand.
-    let edge_score = psm_edge_score(scored_spec, peptide, scorer, charge);
+    let edge_score =
+        known_edge_score.unwrap_or_else(|| psm_edge_score(scored_spec, peptide, scorer, charge));
 
     // Predict charge-1 b/y ions; one bool per fragment position.
     //
@@ -1977,9 +2225,7 @@ pub(crate) fn compute_psm_features(
     );
 
     // ── Strong-score S1: intensity-model signal (additive PIN column) ───────
-    // NCE is not carried on Spectrum today; use "unknown" (model backs off).
-    // When a v3 frag-intensity regressor is present on the param it takes
-    // precedence; the coarse IntensityModel table is the fallback.
+    // Driven by the v3 frag-intensity regressor on the param; 0.0 without one.
     let frag_intensity_model = scorer.param().frag_intensity_model.as_deref();
     // Walk the GBDT ONCE for this candidate. `intensity_signal` and
     // `frag_llr_battery` below both need the identical per-ion predictions
@@ -1991,20 +2237,6 @@ pub(crate) fn compute_psm_features(
         .map(|g| predict_frag_intensities(g, peptide, charge));
     let frag_pred_slice = frag_pred.as_deref();
     let intensity_signal_val = intensity_signal(
-        intensity_model,
-        frag_intensity_model,
-        scored_spec,
-        peptide,
-        charge,
-        "unknown",
-        feature_tol,
-        feature_tol_is_ppm,
-        frag_pred_slice,
-    );
-
-    // Tier-2 frag-intensity LLR battery (additive PIN features; 0.0 when no
-    // frag model). Discriminative alternative to the cosine intensity_signal.
-    let (frag_pred_explained, frag_pred_chance_llr, frag_topk_observed) = frag_llr_battery(
         frag_intensity_model,
         scored_spec,
         peptide,
@@ -2014,20 +2246,39 @@ pub(crate) fn compute_psm_features(
         frag_pred_slice,
     );
 
-    // Decoy-aware rich-ion LLR (additive PIN feature; 0.0 when no rich-ion model).
-    let rich_ion_llr_val = rich_ion_llr(
-        scorer.param().rich_ion_model.as_deref(),
-        scored_spec,
-        peptide,
-        charge,
-        feature_tol,
-        feature_tol_is_ppm,
-    );
-
-    // Mod-localization site-determining-ion features (additive PIN columns; all
-    // 0.0 for an unmodified peptide). Uses the SAME feature tolerance as the
-    // RichIonLLR / ion-feature path above (train/serve parity).
-    let mod_site = mod_site_features(peptide, scored_spec, feature_tol, feature_tol_is_ppm);
+    // The remaining features feed only the PIN, never the strong score, so a
+    // light pass (`full == false`, used to rank strong-mode candidates before the
+    // trim) leaves them at 0.0 and the survivors get a full pass.
+    let (frag_pred_explained, frag_pred_chance_llr, frag_topk_observed, rich_ion_llr_val, mod_site) =
+        if full {
+            // Tier-2 frag-intensity LLR battery (additive PIN features; 0.0 when no
+            // frag model). Discriminative alternative to the cosine intensity_signal.
+            let (e, c, t) = frag_llr_battery(
+                frag_intensity_model,
+                scored_spec,
+                peptide,
+                charge,
+                feature_tol,
+                feature_tol_is_ppm,
+                frag_pred_slice,
+            );
+            // Decoy-aware rich-ion LLR (additive PIN feature; 0.0 when no rich-ion model).
+            let r = rich_ion_llr(
+                scorer.param().rich_ion_model.as_deref(),
+                scored_spec,
+                peptide,
+                charge,
+                feature_tol,
+                feature_tol_is_ppm,
+            );
+            // Mod-localization site-determining-ion features (additive PIN columns; all
+            // 0.0 for an unmodified peptide). Uses the SAME feature tolerance as the
+            // RichIonLLR / ion-feature path above (train/serve parity).
+            let m = mod_site_features(peptide, scored_spec, feature_tol, feature_tol_is_ppm);
+            (e, c, t, r, m)
+        } else {
+            (0.0, 0.0, 0.0, 0.0, Default::default())
+        };
 
     PsmFeatures {
         num_matched_main_ions: num_matched,
@@ -2089,52 +2340,172 @@ pub(crate) fn compute_psm_features(
         delta_rt: 0.0,
         abs_delta_rt: 0.0,
         delta_rt_norm: 0.0,
+        ref_competitor: 0,
+        ref_best_raw: 0.0,
+        is_variant: 0,
+        is_isoform: 0,
+        is_chain: 0,
+        delta_ref_score: 0.0,
+        isotope_mimic: 0,
         predicted_rt_min: 0.0,
         isobaric_rt_margin: 0.0, // glyco-only; set by populate_glyco_rt_features
     }
 }
 
-/// Reject combinations the mmap (out-of-core) candidate backing cannot serve.
-///
-/// The chimeric two-pass cascade (`run_pass2_coisolation` → `search_secondary`)
-/// resolves co-isolated peptides against the IN-RAM `candidates`/`bucket_index`,
-/// which are empty under mmap mode (candidate resolution goes through
-/// `mmap_index` instead). Running both together silently yields no secondaries,
-/// so the combination is rejected up front in [`PreparedSearch::prepare_mmap`].
-fn reject_unsupported_mmap_combo(params: &SearchParams) -> std::io::Result<()> {
-    if params.chimeric {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "--chimeric is not supported together with --candidate-index mmap: the \
-             chimeric Pass-2 search resolves co-isolated peptides against the \
-             in-memory candidate index, which is not populated in out-of-core mmap \
-             mode. Use either --chimeric or --candidate-index mmap, not both.",
-        ));
-    }
-    Ok(())
-}
-
 // ── Unit tests for feature columns ───────────────────────────────────────────
 
 #[cfg(test)]
-mod mmap_combo_tests {
+mod accumulator_tests {
     use super::*;
-    use model::aa_set::AminoAcidSetBuilder;
+    use model::{AminoAcidSetBuilder, Protein, ProteinDb};
 
+    /// After the accumulator is drained, a candidate interned again gets a fresh
+    /// index into the new store, not its index in the drained one.
     #[test]
-    fn mmap_rejects_chimeric() {
+    fn sync_resets_the_identity_map() {
+        let db = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "".into(),
+                sequence: b"MKWVTFISLLRKDAFLGSFLYEYSRK".to_vec(),
+                annotation: None,
+            }],
+        };
+        let idx = SearchIndex::from_target_db(&db, "XXX");
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let params = SearchParams::default_tryptic(aa_set);
+        let scorer = crate::coisolation::tests::tiny_scorer();
+        let mut prepared =
+            PreparedSearch::prepare_in_memory(&idx, &params, &scorer, 0.02, "XXX").unwrap();
+        let cands = prepared.out_of_core_candidates_where(|_, _| true);
+        assert!(cands.len() >= 2);
+        {
+            let mut accum = prepared.mmap_accum.lock().unwrap();
+            assert_eq!(accum.intern(cands[0].clone()), 0);
+            assert_eq!(accum.intern(cands[1].clone()), 1);
+        }
+        prepared.sync_materialized_candidates();
+        assert_eq!(prepared.candidates.len(), 2);
+        let mut accum = prepared.mmap_accum.lock().unwrap();
+        assert!(accum.index_of.is_empty());
+        assert_eq!(accum.intern(cands[1].clone()), 0);
+        assert_eq!(accum.candidates.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod chargeless_unit_tests {
+    use super::*;
+    use model::{AminoAcid, AminoAcidSetBuilder, Protein, ProteinDb};
+    use scoring_crate::scoring::fragment_ions::predict_by_ions;
+
+    fn peptide(residues: &[u8]) -> Peptide {
+        let aas: Vec<AminoAcid> = residues
+            .iter()
+            .map(|&r| AminoAcid::standard(r).unwrap())
+            .collect();
+        Peptide::new(aas, b'K', b'K')
+    }
+
+    fn spectrum(precursor_mz: f64, charge: Option<i32>, peptides: &[&Peptide]) -> Spectrum {
+        let mut peaks: Vec<(f64, f32)> = peptides
+            .iter()
+            .flat_map(|p| predict_by_ions(p, 1..=1))
+            .map(|ion| (ion.mz, 100.0_f32))
+            .collect();
+        peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+        Spectrum {
+            title: "chargeless".into(),
+            precursor_mz,
+            precursor_intensity: None,
+            precursor_charge: charge,
+            rt_seconds: None,
+            scan: None,
+            peaks,
+            activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
+            isolation_target_mz: None,
+        }
+    }
+
+    /// A spectrum without a charge is searched at each charge's own window. The
+    /// peaks also hold every ion of a longer peptide whose mass lies between the
+    /// 3+ and 4+ windows: with one index slot over the union of all charges'
+    /// windows, that out-of-window peptide out-voted the true 3+ peptide and the
+    /// spectrum came back empty.
+    #[test]
+    fn chargeless_spectrum_is_searched_per_charge() {
+        let db = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "".into(),
+                sequence: b"GKDAFLGSFLYEYSRKSAFLWEYSPLLTNNGVRK".to_vec(),
+                annotation: None,
+            }],
+        };
+        let idx = SearchIndex::from_target_db(&db, "XXX");
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.charge_range = 2..=5;
+        params.fragment_index_top_k = 1;
+        let scorer = crate::coisolation::tests::tiny_scorer();
+        let prepared =
+            PreparedSearch::prepare_in_memory(&idx, &params, &scorer, 0.02, "XXX").unwrap();
+
+        let truth = peptide(b"DAFLGSFLYEYSR");
+        let bait = peptide(b"SAFLWEYSPLLTNNGVR");
+        let mz3 = (truth.mass() + 3.0 * PROTON) / 3.0;
+        let spectra = [
+            spectrum(mz3, Some(3), &[&truth, &bait]),
+            spectrum(mz3, None, &[&truth, &bait]),
+        ];
+        let mut queues = prepared.run_chunk(&spectra, 7);
+        assert_eq!(queues.len(), 2);
+        for (i, q) in queues.iter_mut().enumerate() {
+            let psms = q.drain_into_vec();
+            let best = psms
+                .iter()
+                .max_by(|a, b| a.rank_score.total_cmp(&b.rank_score))
+                .unwrap_or_else(|| panic!("spectrum {i} came back empty"));
+            assert_eq!(best.spectrum_idx, 7 + i);
+            assert_eq!(best.charge_used, 3, "spectrum {i}");
+            let accum = prepared.mmap_accum.lock().unwrap();
+            let pep = &accum.candidates[best.primary_candidate_idx() as usize].peptide;
+            assert_eq!(pep.residues, truth.residues, "spectrum {i}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod charges_to_try_tests {
+    use super::charges_to_try;
+    use crate::search_params::SearchParams;
+    use model::aa_set::AminoAcidSetBuilder;
+    use model::Spectrum;
+
+    fn params() -> SearchParams {
         let aa = AminoAcidSetBuilder::new_standard().build().unwrap();
-        let mut p = SearchParams::default_tryptic(aa);
-        p.chimeric = true;
-        let err = reject_unsupported_mmap_combo(&p).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        SearchParams::default_tryptic(aa)
+    }
+
+    fn spec(charge: Option<i32>) -> Spectrum {
+        Spectrum {
+            precursor_charge: charge,
+            ..Default::default()
+        }
     }
 
     #[test]
-    fn mmap_allows_non_chimeric() {
-        let aa = AminoAcidSetBuilder::new_standard().build().unwrap();
-        let p = SearchParams::default_tryptic(aa);
-        assert!(reject_unsupported_mmap_combo(&p).is_ok());
+    fn reported_charge_is_searched_alone() {
+        let p = params();
+        assert_eq!(charges_to_try(&spec(Some(5)), &p).as_slice(), &[5]);
+    }
+
+    #[test]
+    fn missing_charge_still_falls_back_to_the_range() {
+        let p = params();
+        assert_eq!(charges_to_try(&spec(None), &p).as_slice(), &[2, 3]);
     }
 }
 
@@ -2251,6 +2622,7 @@ mod feature_tests {
             activation_method: None,
             isolation_lower_offset: None,
             isolation_upper_offset: None,
+            isolation_target_mz: None,
         }
     }
 
@@ -2261,7 +2633,7 @@ mod feature_tests {
         let pep = ala_peptide(4);
         let spec = make_spectrum(vec![]); // no peaks
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let f = compute_psm_features(&ss, &pep, &make_scorer(0.5), 2, None);
+        let f = compute_psm_features(&ss, &pep, &make_scorer(0.5), 2);
         assert_eq!(
             f.mean_error_top7, 0.0,
             "mean_error_top7 should be 0 with no matches"
@@ -2311,7 +2683,7 @@ mod feature_tests {
 
         let spec = make_spectrum(peaks);
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let f = compute_psm_features(&ss, &pep, &make_scorer(0.01), 2, None); // tight tolerance
+        let f = compute_psm_features(&ss, &pep, &make_scorer(0.01), 2); // tight tolerance
 
         // All ratios should be positive since all predicted ions match.
         assert!(
@@ -2371,7 +2743,6 @@ mod feature_tests {
             &pep,
             &scorer,
             2,
-            None,
         );
         // Neutral-loss offsets in the theo list can add minor ambiguity even
         // when peaks are well separated; still expect a high fraction.
@@ -2419,7 +2790,6 @@ mod feature_tests {
             &pep2,
             &scorer,
             2,
-            None,
         );
         assert!(
             f_contested.unique_match_fraction < f_unique.unique_match_fraction,
@@ -2452,7 +2822,6 @@ mod feature_tests {
             &pep,
             &make_scorer(0.01),
             3,
-            None,
         );
         assert_eq!(f_empty.doubly_charged_matched_ion_count, 0);
 
@@ -2468,7 +2837,6 @@ mod feature_tests {
             &pep,
             &make_scorer(0.01),
             3,
-            None,
         );
         assert!(
             f.doubly_charged_matched_ion_count > 0,
@@ -2502,7 +2870,6 @@ mod feature_tests {
             &pep,
             &make_scorer(0.01),
             2,
-            None,
         );
         // Only ion peaks present → ranks 1..4 → mean 2.5.
         assert!(
@@ -2526,7 +2893,6 @@ mod feature_tests {
             &pep,
             &make_scorer(0.01),
             2,
-            None,
         );
         assert!(
             f_buried.mean_matched_intensity_rank > f_top.mean_matched_intensity_rank,
@@ -2556,7 +2922,6 @@ mod feature_tests {
             &pep,
             &make_scorer(0.01),
             2,
-            None,
         );
         let expected = (n - 1) as u32;
         assert_eq!(
@@ -2579,7 +2944,6 @@ mod feature_tests {
             &pep,
             &make_scorer(0.01),
             2,
-            None,
         );
         // Bonds 1 and 2-4 split at bond 2: runs of 1 and 2 → longest = 2.
         assert_eq!(
@@ -2614,7 +2978,6 @@ mod feature_tests {
             &pep,
             &make_scorer(0.01),
             2,
-            None,
         );
         assert!(
             f_all.complementary_ion_balance > 0.0,
@@ -2635,7 +2998,6 @@ mod feature_tests {
             &pep,
             &make_scorer(0.01),
             2,
-            None,
         );
         assert_eq!(
             f_b.complementary_ion_balance, 0.0,
@@ -2663,7 +3025,6 @@ mod feature_tests {
             &pep,
             &make_scorer(0.01),
             2,
-            None,
         );
         assert_eq!(
             f.neutral_loss_ion_count, 1,
@@ -2694,7 +3055,6 @@ mod feature_tests {
             &pep,
             &make_scorer(0.01),
             2,
-            None,
         );
 
         // All 4 ions matched at 0 ppm → each Gaussian kernel == 1 → sum ≈ 4.
@@ -2724,7 +3084,6 @@ mod feature_tests {
             &pep,
             &make_scorer(0.01),
             2,
-            None,
         );
         assert!(
             f_shift.ppm_gaussian_score < f_exact.ppm_gaussian_score * 0.5,
@@ -2760,7 +3119,7 @@ mod feature_tests {
         let ss = ScoredSpectrum::new_without_filtering(&spec);
         // make_scorer still accepts a tol arg for legacy compatibility, but
         // compute_psm_features uses the instrument-based hardcoded tolerance.
-        let f = compute_psm_features(&ss, &pep, &make_scorer(0.05), 2, None);
+        let f = compute_psm_features(&ss, &pep, &make_scorer(0.05), 2);
 
         // Mean error should be nonzero when peaks are systematically offset.
         // MeanErrorTop7 is in PPM, not Da. PPM error =
@@ -2795,7 +3154,7 @@ mod feature_tests {
         let peaks = vec![(100.0, 50.0_f32), (200.0, 30.0), (300.0, 20.0)];
         let spec = make_spectrum(peaks.clone());
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let f = compute_psm_features(&ss, &pep, &make_scorer(0.5), 2, None);
+        let f = compute_psm_features(&ss, &pep, &make_scorer(0.5), 2);
 
         let expected: f32 = peaks.iter().map(|&(_, i)| i).sum();
         assert_eq!(
@@ -2900,106 +3259,23 @@ pub(crate) fn peptidoform_key(peptide: &model::Peptide) -> u64 {
     h.finish()
 }
 
-/// Number of raw base-peptide records in the mmap index that share `cand`'s
-/// `(protein_index, start_offset, length, decoy/n-term/c-term flags)` identity —
-/// i.e. how many times the in-RAM `enumerate_candidates` emits this base peptide
-/// at these exact coordinates (≥1; >1 only for the N-terminal-Met
-/// re-enumeration that produces identical-coordinate spans). Used by the `Mmap`
-/// path to replicate each lazily-expanded peptidoform so the per-spectrum
-/// candidate set (and thus the `dedup_pepseq_score`-aggregated `candidate_idxs`,
-/// hence the PIN `Proteins` column) matches the in-RAM path copy-for-copy.
-///
-/// The base mass (unmodified residue masses + water) is recovered from the
-/// candidate by subtracting each residue's mod delta; the index is queried at
-/// that exact `mass_milli`.
-fn base_record_multiplicity(mi: &MmapCandidateIndex, cand: &Candidate) -> u32 {
-    use crate::candidate_index::flags as rec_flags;
-    // Base mass = the mass the on-disk index stores for this span. The index is
-    // built by `base_peptide_records`, which zeroes ONLY
-    // `max_variable_mods_per_peptide`; FIXED mods (e.g. carbamidomethyl-C, a TMT
-    // tag) stay folded into every residue's mass. So the base mass is the
-    // peptide mass with the VARIABLE mod deltas removed and the fixed ones kept.
-    // Subtracting fixed deltas as well shifts the lookup off the stored mass by
-    // the fixed-mod total (57.02 Da for a single Cys), the window returns no
-    // matching record, and the multiplicity collapses to the `max(1)` floor —
-    // silently dropping the duplicate copies the RAM backing keeps for every
-    // fixed-mod-bearing peptide.
-    let mut base_mass = cand.peptide.mass();
-    for aa in &cand.peptide.residues {
-        if let Some(m) = aa.mod_.as_ref() {
-            if !m.fixed {
-                base_mass -= m.mass_delta;
-            }
-        }
-    }
-    let mass_milli = (base_mass * 1000.0).round() as u64;
-    let mut want_flags: u16 = 0;
-    if cand.is_decoy {
-        want_flags |= rec_flags::IS_DECOY;
-    }
-    if cand.is_protein_n_term {
-        want_flags |= rec_flags::IS_PROTEIN_N_TERM;
-    }
-    if cand.is_protein_c_term {
-        want_flags |= rec_flags::IS_PROTEIN_C_TERM;
-    }
-    let pidx = cand.protein_index as u32;
-    let start = cand.start_offset_in_protein as u32;
-    let len = cand.peptide.residues.len() as u16;
-    // Tolerate ±1 milli rounding between `peptide.mass()` here and the index's
-    // stored `mass_milli` (built from the same formula, but de-mod arithmetic can
-    // drift one unit at the rounding boundary).
-    let count = mi
-        .mass_window(mass_milli.saturating_sub(1), mass_milli + 1)
-        .into_iter()
-        .filter(|r| {
-            r.protein_index == pidx
-                && r.start_offset == start
-                && r.length == len
-                && r.flags == want_flags
-        })
-        .count() as u32;
-    count.max(1)
-}
-
 /// Bare residue sequence (no mods, no flanks) of a candidate's peptide.
 fn bare_residues(cand: &Candidate) -> Box<[u8]> {
     cand.peptide.residues.iter().map(|aa| aa.residue).collect()
 }
 
-/// Relabel decoy candidates whose bare peptide sequence is ALSO a target peptide
-/// as targets. Such "decoys" are reversal/shuffle coincidences (or palindromes /
-/// short peptides) that reproduce a real target sequence; counting them as decoys
-/// over-counts the decoy space (TDC conservative) and, for decoy-aware training,
-/// mislabels true-sequence ions as negatives. Relabeling to target lets the
-/// per-spectrum dedup merge the collision with its target twin — no EXTRA target
-/// is created, because the sequence is a real target peptide so the twin already
-/// exists. Bare residues only (mods don't change sequence identity).
+/// Relabel as targets the decoy candidates whose bare peptide sequence is ALSO a
+/// target peptide. Such "decoys" are reversal/shuffle coincidences (or
+/// palindromes / short peptides) that reproduce a real target sequence; counting
+/// them as decoys over-counts the decoy space (TDC conservative) and, for
+/// decoy-aware training, mislabels true-sequence ions as negatives. Relabeling to
+/// target lets the per-spectrum dedup merge the collision with its target twin.
+/// Bare residues only (mods don't change sequence identity).
 ///
-/// Cost: one HashSet of target peptide sequences, built once at index setup.
-fn relabel_collision_decoys(candidates: &mut [Candidate]) {
-    use std::collections::HashSet;
-    let target_seqs: HashSet<Box<[u8]>> = candidates
-        .iter()
-        .filter(|c| !c.is_decoy)
-        .map(bare_residues)
-        .collect();
-    relabel_collision_decoys_with(candidates, &target_seqs);
-}
-
-/// Relabel collision decoys against a PRE-COMPUTED target bare-sequence set.
-///
-/// Used by the out-of-core (`Mmap`) path, where the target set must be the GLOBAL
-/// set of all DB targets (built once from the full index), NOT the targets that
-/// happen to land in the current precursor window. This makes the relabel decision
-/// identical to the in-RAM path, which relabels once globally over all candidates.
-/// (`relabel_collision_decoys` is the in-RAM convenience wrapper that derives the
-/// set from the candidate slice itself — correct only when that slice IS the full
-/// candidate list.)
-fn relabel_collision_decoys_with(
-    candidates: &mut [Candidate],
-    target_seqs: &std::collections::HashSet<Box<[u8]>>,
-) {
+/// `target_seqs` must be the GLOBAL set of all DB targets (built once from the
+/// full index by [`build_target_bare_seqs`]), NOT the targets that happen to land
+/// in the current precursor window.
+fn relabel_collision_decoys_with(candidates: &mut [Candidate], target_seqs: &FxHashSet<Box<[u8]>>) {
     if target_seqs.is_empty() {
         return;
     }
@@ -3010,38 +3286,63 @@ fn relabel_collision_decoys_with(
     }
 }
 
-/// Build the GLOBAL set of target bare-peptide sequences from the full mmap
+/// Build the GLOBAL set of target bare-peptide sequences from the full
 /// base-peptide index. For every NON-decoy record, reconstruct the residue span
-/// from the protein sequence (`protein.sequence[start..start+length]`). This is
-/// the set the in-RAM `relabel_collision_decoys` derives from the complete
-/// candidate enumeration — built here directly from the index so the `Mmap` path
-/// makes the SAME global relabel decision without materializing all candidates.
+/// from the protein sequence (`protein.sequence[start..start+length]`), so the
+/// relabel decision is global without materializing all candidates.
 ///
 /// Bare residues only (no mods, no flanks) → bounded memory: one `Box<[u8]>` per
-/// distinct target backbone, far smaller than the candidate `Vec` the out-of-core
-/// mode exists to avoid.
-fn build_target_bare_seqs(
+/// distinct target backbone, far smaller than the full candidate list.
+fn build_target_bare_seqs(mi: &MmapCandidateIndex, db: &SearchIndex) -> FxHashSet<Box<[u8]>> {
+    use crate::candidate_index::flags as rec_flags;
+    let mut spans: Vec<&[u8]> = (0..mi.len())
+        .into_par_iter()
+        .filter_map(|i| {
+            let rec = mi.record_at(i);
+            if rec.flags & rec_flags::IS_DECOY != 0 {
+                return None;
+            }
+            let seq = &db.db.proteins.get(rec.protein_index as usize)?.sequence;
+            let start = rec.start_offset as usize;
+            seq.get(start..start + rec.length as usize)
+        })
+        .collect();
+    spans.par_sort_unstable();
+    spans.dedup();
+    let mut set = FxHashSet::with_capacity_and_hasher(spans.len(), Default::default());
+    set.extend(spans.into_iter().map(|s| s.to_vec().into_boxed_slice()));
+    set
+}
+
+/// [`build_target_bare_seqs`] restricted to the target spans with at least one
+/// peptidoform that `keep` accepts.
+fn build_target_bare_seqs_where(
     mi: &MmapCandidateIndex,
     db: &SearchIndex,
-) -> std::collections::HashSet<Box<[u8]>> {
+    params: &SearchParams,
+    keep: &CandidateFilter,
+) -> FxHashSet<Box<[u8]>> {
     use crate::candidate_index::flags as rec_flags;
-    let mut set: std::collections::HashSet<Box<[u8]>> = std::collections::HashSet::new();
-    for rec in mi.records() {
-        if rec.flags & rec_flags::IS_DECOY != 0 {
-            continue;
-        }
-        let pidx = rec.protein_index as usize;
-        if pidx >= db.db.proteins.len() {
-            continue;
-        }
-        let seq = &db.db.proteins[pidx].sequence;
-        let start = rec.start_offset as usize;
-        let end = start + rec.length as usize;
-        if end > seq.len() {
-            continue;
-        }
-        set.insert(seq[start..end].to_vec().into_boxed_slice());
-    }
+    let mut spans: Vec<&[u8]> = (0..mi.len())
+        .into_par_iter()
+        .filter_map(|i| {
+            let rec = mi.record_at(i);
+            if rec.flags & rec_flags::IS_DECOY != 0 {
+                return None;
+            }
+            let seq = &db.db.proteins.get(rec.protein_index as usize)?.sequence;
+            let start = rec.start_offset as usize;
+            let span = seq.get(start..start + rec.length as usize)?;
+            expand_base_record(db, params, &rec)
+                .iter()
+                .any(keep)
+                .then_some(span)
+        })
+        .collect();
+    spans.par_sort_unstable();
+    spans.dedup();
+    let mut set = FxHashSet::with_capacity_and_hasher(spans.len(), Default::default());
+    set.extend(spans.into_iter().map(|s| s.to_vec().into_boxed_slice()));
     set
 }
 
@@ -3122,7 +3423,6 @@ mod dedup_tests {
     use model::modification::{ModLocation, Modification};
     use model::peptide::Peptide;
     use model::ResidueSpec;
-    use std::sync::Arc;
 
     fn seq_peptide(bytes: &[u8]) -> Peptide {
         let residues: Vec<AminoAcid> = bytes
@@ -3174,7 +3474,10 @@ mod dedup_tests {
             cand(b"PEPTIDEK", true),  // a decoy that coincidentally equals the target
             cand(b"EDITPEPK", true),  // a genuine decoy (no target twin)
         ];
-        relabel_collision_decoys(&mut cands);
+        let targets: FxHashSet<Box<[u8]>> = [b"PEPTIDEK".to_vec().into_boxed_slice()]
+            .into_iter()
+            .collect();
+        relabel_collision_decoys_with(&mut cands, &targets);
         assert!(!cands[0].is_decoy, "target unchanged");
         assert!(!cands[1].is_decoy, "collision decoy relabeled to target");
         assert!(cands[2].is_decoy, "genuine decoy left as decoy");
@@ -3192,7 +3495,7 @@ mod dedup_tests {
     #[test]
     fn dedup_distinguishes_mod_state() {
         let mut ox = seq_peptide(b"PEPMK");
-        ox.residues[3].mod_ = Some(Arc::new(Modification {
+        ox.residues[3].mod_ = Some(model::modification::leak_mod(Modification {
             name: "Ox".into(),
             mass_delta: 15.99491,
             residue: ResidueSpec::Specific(b'M'),
@@ -3201,6 +3504,7 @@ mod dedup_tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         }));
         let cands = vec![
             cand_with_peptide(seq_peptide(b"PEPMK")),
@@ -3220,5 +3524,63 @@ mod dedup_tests {
         let out = dedup_pepseq_score(psms, &cands);
         assert_eq!(out.len(), 1);
         assert!((out[0].rank_score - 60.4).abs() < f32::EPSILON);
+    }
+}
+
+/// Best RawScore among a spectrum's Reference-entry candidates, kept so a row
+/// can be compared with the best Reference candidate of a *different*
+/// peptidoform: a peptide shared by a canonical entry and an isoform or chain
+/// must not compete with its own canonical copy.
+#[derive(Debug, Default, Clone, Copy)]
+struct RefTracker {
+    best: Option<(i32, u64)>,
+    second: Option<i32>,
+}
+
+impl RefTracker {
+    fn fold(&mut self, score: i32, key: u64) {
+        match self.best {
+            None => self.best = Some((score, key)),
+            Some((best, best_key)) if key == best_key => {
+                self.best = Some((best.max(score), key));
+            }
+            Some((best, _)) if score > best => {
+                self.second = Some(self.second.map_or(best, |s| s.max(best)));
+                self.best = Some((score, key));
+            }
+            Some(_) => self.second = Some(self.second.map_or(score, |s| s.max(score))),
+        }
+    }
+
+    /// The best score among peptidoforms other than `key`.
+    fn best_excluding(&self, key: u64) -> Option<i32> {
+        match self.best {
+            Some((_, best_key)) if best_key == key => self.second,
+            Some((best, _)) => Some(best),
+            None => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod ref_tracker_tests {
+    use super::RefTracker;
+
+    #[test]
+    fn competitor_excludes_the_rows_own_peptidoform() {
+        let mut t = RefTracker::default();
+        t.fold(30, 1);
+        t.fold(25, 2);
+        t.fold(28, 1);
+        assert_eq!(t.best_excluding(1), Some(25));
+        assert_eq!(t.best_excluding(2), Some(30));
+        assert_eq!(t.best_excluding(3), Some(30));
+        t.fold(40, 3);
+        assert_eq!(t.best_excluding(3), Some(30));
+        assert_eq!(RefTracker::default().best_excluding(1), None);
+        let mut one = RefTracker::default();
+        one.fold(30, 1);
+        assert_eq!(one.best_excluding(1), None);
+        assert_eq!(one.best_excluding(2), Some(30));
     }
 }

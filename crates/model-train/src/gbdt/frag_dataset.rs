@@ -5,9 +5,8 @@
 //! Only MATCHED ions contribute rows — unmatched ions are skipped so the model
 //! trains only on actual observations.
 //!
-//! The target `y` is `ln(obs_intensity / base_peak)` — the SAME log-relative-
-//! intensity space that `IntensityModel::predict_log_rel` uses, making the
-//! trained regression GBDT a drop-in for that prediction path.
+//! The target `y` is `ln(obs_intensity / base_peak)`, the log-relative-intensity
+//! space the strong-score `intensity_signal` exponentiates back to linear.
 
 use scoring_crate::frag_features::{extract_frag_features, N_FRAG_FEATURES};
 use scoring_crate::scoring::fragment_ions::predict_by_ions;
@@ -61,7 +60,7 @@ pub fn build_frag_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> Regressio
             .iter()
             .map(|aa| aa.residue as char)
             .collect();
-        let gid = group_id(&seq, row.charge);
+        let gid = group_id(&seq);
 
         // 1+ AND 2+ fragments — MUST match the serve range in strong_score.rs.
         let predicted = predict_by_ions(row.peptide, 1..=2);
@@ -134,6 +133,7 @@ mod tests {
             activation_method: None,
             isolation_lower_offset: None,
             isolation_upper_offset: None,
+            isolation_target_mz: None,
         }
     }
 

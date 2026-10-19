@@ -71,6 +71,7 @@ pub(crate) fn build_aa_set(
                 accession: None,
                 neutral_losses: Vec::new(),
                 loss_class: 0,
+                annotated_site_mass: None,
             };
             let ox = Modification {
                 name: "Oxidation".into(),
@@ -81,6 +82,7 @@ pub(crate) fn build_aa_set(
                 accession: None,
                 neutral_losses: Vec::new(),
                 loss_class: 0,
+                annotated_site_mass: None,
             };
             Ok(AminoAcidSetBuilder::new_standard()
                 .add_fixed_mod(cam)
@@ -108,6 +110,7 @@ pub(crate) fn default_aa_set_with_tag(
         accession: None,
         neutral_losses: Vec::new(),
         loss_class: 0,
+        annotated_site_mass: None,
     };
     let ox = Modification {
         name: "Oxidation".into(),
@@ -118,6 +121,7 @@ pub(crate) fn default_aa_set_with_tag(
         accession: None,
         neutral_losses: Vec::new(),
         loss_class: 0,
+        annotated_site_mass: None,
     };
     // Protein N-terminal acetylation (+42.010565) — a near-universal default in
     // the field (the reference engine / a comparison engine / a quantitation tool). Restricted to the PROTEIN N-term
@@ -132,6 +136,7 @@ pub(crate) fn default_aa_set_with_tag(
         accession: None,
         neutral_losses: Vec::new(),
         loss_class: 0,
+        annotated_site_mass: None,
     };
     let mut b = AminoAcidSetBuilder::new_standard()
         .add_fixed_mod(cam)
@@ -147,6 +152,7 @@ pub(crate) fn default_aa_set_with_tag(
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         let tag_nterm = Modification {
             name: name.into(),
@@ -157,6 +163,7 @@ pub(crate) fn default_aa_set_with_tag(
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         b = b.add_fixed_mod(tag_k).add_fixed_mod(tag_nterm);
     }
@@ -222,8 +229,8 @@ pub(crate) fn parse_enzymes(
     Ok((*primary, extras.to_vec()))
 }
 
-/// Warn when a universal protease (NonSpecific, or AlphaLP which cleaves every
-/// bond) is combined with specific protease(s): the cleavage-site union then
+/// Warn when a universal protease (NonSpecific, which cleaves every bond) is
+/// combined with specific protease(s): the cleavage-site union then
 /// covers EVERY position, so the digest is effectively non-specific — usually
 /// not what a user adding it to a specific list intends.
 pub(crate) fn warn_if_universal_protease_combo(
@@ -231,19 +238,14 @@ pub(crate) fn warn_if_universal_protease_combo(
     extras: &[model::enzyme::Enzyme],
 ) {
     use model::enzyme::Enzyme;
-    let is_universal = |e: &Enzyme| matches!(e, Enzyme::NonSpecific | Enzyme::AlphaLP);
-    let is_specific = |e: &Enzyme| {
-        !matches!(
-            e,
-            Enzyme::NonSpecific | Enzyme::AlphaLP | Enzyme::NoCleavage
-        )
-    };
+    let is_universal = |e: &Enzyme| matches!(e, Enzyme::NonSpecific);
+    let is_specific = |e: &Enzyme| !matches!(e, Enzyme::NonSpecific | Enzyme::NoCleavage);
     let all: Vec<Enzyme> = std::iter::once(primary)
         .chain(extras.iter().copied())
         .collect();
     if all.len() > 1 && all.iter().any(is_universal) && all.iter().any(is_specific) {
         eprintln!(
-            "WARN: --enzyme combines a universal protease (NonSpecific/AlphaLP) with specific \
+            "WARN: --enzyme combines a universal protease (NonSpecific) with specific \
              one(s); their union cleaves at EVERY position, so this is effectively a \
              non-specific digest (much larger search space). Drop the universal protease to \
              keep the specific cleavage rules."
@@ -253,8 +255,9 @@ pub(crate) fn warn_if_universal_protease_combo(
 
 /// Resolve (activation, instrument) for model selection on metadata-less input
 /// (MGF, or mzML/.raw with no analyzer metadata). Resolution class comes from
-/// the `--fragment-tol-*` unit; activation from detected method, else
-/// `--fragmentation`, else the class-consistent default. When nothing
+/// the `--fragment-tol-*` unit; activation from an explicit `--fragmentation`,
+/// else the detected method, else the class-consistent default (the same
+/// precedence as a fully detected input). When nothing
 /// disambiguates, defaults to CID / LowRes (→ `cid_lowres_tryp`) + a warning.
 pub(crate) fn resolve_metadataless_selection(
     detected_activation: Option<ActivationMethod>,
@@ -278,7 +281,16 @@ pub(crate) fn resolve_metadataless_selection(
         | Some(InstrumentType::TOF) => ActivationMethod::HCD,
         _ => ActivationMethod::CID,
     };
-    let activation = detected_activation.or(explicit).unwrap_or(class_default);
+    if let (Some(e), Some(d)) = (explicit, detected_activation) {
+        if e != d {
+            eprintln!(
+                "Param resolver: auto-detected activation = {}, OVERRIDDEN by --fragmentation {}",
+                d.name(),
+                e.name()
+            );
+        }
+    }
+    let activation = explicit.or(detected_activation).unwrap_or(class_default);
     if detected_activation.is_none() && explicit.is_none() && instrument.is_none() {
         eprintln!(
             "WARN: MGF input with no --fragmentation/--fragment-tol; assuming \
@@ -478,13 +490,30 @@ pub(crate) fn load_param_from_store(
 #[cfg(test)]
 mod param_resolver_tests {
     use super::*;
+
+    #[test]
+    fn explicit_fragmentation_beats_a_detected_activation_without_instrument() {
+        let (act, inst) = resolve_metadataless_selection(
+            Some(ActivationMethod::HCD),
+            Fragmentation::Etd,
+            None,
+            None,
+        );
+        assert_eq!((act, inst), (ActivationMethod::ETD, None));
+        let (act, _) = resolve_metadataless_selection(
+            Some(ActivationMethod::HCD),
+            Fragmentation::Auto,
+            None,
+            None,
+        );
+        assert_eq!(act, ActivationMethod::HCD);
+    }
     use crate::cli::{
         parse_charge_range, parse_enzyme_specificity, parse_fragmentation,
         parse_isotope_error_range, parse_precursor_cal, parse_precursor_tol, parse_protocol,
         EnzymeSpecificity,
     };
     use crate::spectra::title_prefix_for;
-    use crate::train_intensity::finalize_intensity_stats;
     use ::search::PrecursorCalMode;
     use model::Tolerance;
 
@@ -555,21 +584,6 @@ mod param_resolver_tests {
         assert_eq!(parse_precursor_cal("OFF").unwrap(), PrecursorCalMode::Off);
         assert_eq!(parse_precursor_cal("on").unwrap(), PrecursorCalMode::On);
         assert!(parse_precursor_cal("bogus").is_err());
-    }
-
-    #[test]
-    fn finalize_intensity_stats_drops_zero_count() {
-        // A count==0 key (e.g. from a partial aggregation parquet) must not
-        // produce NaN mean/var in the finalized model — it carries no signal.
-        assert_eq!(finalize_intensity_stats(0.0, 0.0, 0), None);
-    }
-
-    #[test]
-    fn finalize_intensity_stats_computes_mean_and_clamped_var() {
-        // sum=6, sum_sq=14, count=2 -> mean=3, var=max(0, 14/2 - 9)= max(0,-2)=0.
-        let (mean, var) = finalize_intensity_stats(6.0, 14.0, 2).unwrap();
-        assert_eq!(mean, 3.0);
-        assert_eq!(var, 0.0);
     }
 
     #[test]

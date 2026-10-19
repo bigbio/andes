@@ -14,8 +14,8 @@
 //! it exists and tune around it. Requiring a registry entry makes hiding a correction
 //! cost more than deciding what its default should be.
 //!
-//! The engine now reads none. Everything that affects a search or a training run is a
-//! CLI flag with a documented default, so a result is reproducible from the command line
+//! The engine reads none. Everything that affects a search or a training run is a CLI
+//! flag with a documented default, so a result is reproducible from the command line
 //! that produced it. What remains is test-harness only — variables that select optional
 //! fixtures at `cargo test` time and are never read by the shipped binary — and this
 //! test exists to keep it that way.
@@ -54,16 +54,24 @@ fn collect(dir: &std::path::Path, out: &mut BTreeSet<String>) {
             if p.file_name().is_some_and(|n| n == "env_registry.rs") {
                 continue;
             }
-            for (i, _) in text.match_indices("\"ANDES_") {
-                let rest = &text[i + 1..];
-                if let Some(end) = rest.find('"') {
-                    let name = &rest[..end];
-                    if name
-                        .chars()
-                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-                        && name.len() > "ANDES_".len()
-                    {
-                        out.insert(name.to_string());
+            // Scan READ SITES (`env::var(` / `env::var_os(` with a literal
+            // argument), not name literals, and compare the name
+            // case-insensitively: a variable spelled in any capitalisation is a
+            // read the guard must see.
+            for pat in ["env::var(", "env::var_os("] {
+                for (i, _) in text.match_indices(pat) {
+                    let rest = &text[i + pat.len()..];
+                    let Some(open) = rest.find('"') else { continue };
+                    // Only a literal argument; a computed name is out of scope.
+                    if rest[..open].trim() != "" {
+                        continue;
+                    }
+                    let after = &rest[open + 1..];
+                    if let Some(end) = after.find('"') {
+                        let name = &after[..end];
+                        if name.to_ascii_uppercase().starts_with("ANDES_") {
+                            out.insert(name.to_string());
+                        }
                     }
                 }
             }

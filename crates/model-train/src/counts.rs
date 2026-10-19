@@ -40,12 +40,18 @@ fn vec_sub(dst: &mut Vec<u64>, src: &[u64]) {
     }
 }
 
-/// Scale every element of `src` by `factor` (round half-away from zero) into
-/// a new `Vec<u64>`.
+/// Multiply one count by `factor` (round half-away from zero).
+///
+/// The product is computed in `f64`, which represents every count below 2^53
+/// exactly, so a factor of 1.0 returns the count unchanged.
+#[inline]
+fn scale_count(c: u64, factor: f32) -> u64 {
+    (c as f64 * f64::from(factor)).round() as u64
+}
+
+/// Scale every element of `src` by `factor` into a new `Vec<u64>`.
 fn vec_scale(src: &[u64], factor: f32) -> Vec<u64> {
-    src.iter()
-        .map(|&c| (c as f32 * factor).round() as u64)
-        .collect()
+    src.iter().map(|&c| scale_count(c, factor)).collect()
 }
 
 /// Trim trailing zeros from `vec` so that `derive(PartialEq)` works correctly.
@@ -278,12 +284,12 @@ impl CountStats {
         let existence = self
             .existence
             .iter()
-            .map(|(&k, &v)| (k, (v as f32 * factor).round() as u64))
+            .map(|(&k, &v)| (k, scale_count(v, factor)))
             .collect();
         let charge = self
             .charge
             .iter()
-            .map(|(&k, &v)| (k, (v as f32 * factor).round() as u64))
+            .map(|(&k, &v)| (k, scale_count(v, factor)))
             .collect();
         Self {
             rank,
@@ -481,5 +487,21 @@ mod tests {
         ba.add(&a);
 
         assert_eq!(ab, ba);
+    }
+
+    #[test]
+    fn scale_by_one_is_exact_above_f32_mantissa() {
+        // 2^24 + 1 is the first integer f32 cannot represent.
+        let big = (1u64 << 24) + 1;
+        let p = test_partition();
+        let ion = test_prefix_ion();
+        let mut a = CountStats::new();
+        a.rank.insert((p, ion), vec![0, big]);
+        a.charge.insert(2, big);
+        let s = a.scaled(1.0);
+        assert_eq!(s, a);
+        assert_eq!(s.rank_count(&p, ion, 1), big);
+        assert_eq!(s.charge[&2], big);
+        assert_eq!(a.scaled(0.5).charge[&2], big / 2 + 1);
     }
 }

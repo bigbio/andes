@@ -227,7 +227,6 @@ mod tests {
     use model::modification::{ModLocation, Modification, ResidueSpec};
     use model::peptide::Peptide;
     use model::spectrum::Spectrum;
-    use std::sync::Arc;
 
     /// Build an unmodified peptide from a residue string.
     fn pep(seq: &str) -> Peptide {
@@ -254,15 +253,16 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
-        let arc = Arc::new(m);
+        let arc = model::modification::leak_mod(m);
         let residues: Vec<AminoAcid> = bytes
             .iter()
             .enumerate()
             .map(|(i, &b)| {
                 let aa = AminoAcid::standard(b).unwrap();
                 if i == mod_idx {
-                    aa.with_mod(arc.clone())
+                    aa.with_mod(arc)
                 } else {
                     aa
                 }
@@ -283,15 +283,16 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
-        let arc = Arc::new(m);
+        let arc = model::modification::leak_mod(m);
         let residues: Vec<AminoAcid> = bytes
             .iter()
             .enumerate()
             .map(|(i, &b)| {
                 let aa = AminoAcid::standard(b).unwrap();
                 if i == mod_idx {
-                    aa.with_mod(arc.clone())
+                    aa.with_mod(arc)
                 } else {
                     aa
                 }
@@ -314,6 +315,7 @@ mod tests {
             activation_method: None,
             isolation_lower_offset: None,
             isolation_upper_offset: None,
+            isolation_target_mz: None,
         }
     }
 

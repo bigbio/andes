@@ -1,7 +1,7 @@
 //! PIN output writer.
 //!
 //! Produces a Percolator-consumable `.pin` file with the column layout used
-//! by Kim et al. (Nat Commun 5:5277, 2014) and OpenMS PercolatorAdapter so
+//! by Kim et al. (Nat Commun 5:5277, 2014) and common PIN writers so
 //! that downstream tools (Percolator, MS²Rescore, Mokapot) can consume the
 //! output interchangeably.
 //!
@@ -10,7 +10,7 @@
 //! ```text
 //! SpecId  Label  ScanNr  ExpMass  CalcMass  mass  RawScore  DeNovoScore
 //! lnSpecEValue  lnEValue  isotope_error  peplen  dm  absdm
-//! charge<min>  charge<min+1>  ...  charge<max>
+//! charge<min>  charge<min+1>  ...  charge<max>   (--charge range ∪ PSM charges)
 //! enzN  enzC  enzInt
 //! NumMatchedMainIons  longest_b  longest_y  longest_y_pct
 //! ExplainedIonCurrentRatio  NTermIonCurrentRatio  CTermIonCurrentRatio
@@ -31,7 +31,7 @@
 //!   `match_engine.rs` from `MassError::isotope_offset`.
 //!
 //! * **enzN / enzC / enzInt**: computed via `crate::percolator_enz`
-//!   (OpenMS PercolatorInfile enzymatic-boundary rules; Kim et al., Nat Commun
+//!   (common PIN-writer enzymatic-boundary rules; Kim et al., Nat Commun
 //!   5:5277, 2014 Percolator features).
 //!
 //! * **Proteins**: single column with the real protein accession resolved from
@@ -71,10 +71,11 @@
 
 use std::io::{self, BufWriter, Write};
 
-use crate::percolator_enz::{count_internal_enzymatic, is_enzymatic_boundary};
-use crate::row_context::{iter_ranked_by_rank_score, RowContext};
+use crate::percolator_enz::{count_internal_enzymatic_any, is_enzymatic_boundary_any};
+use crate::row_context::{emitted_rows, RowContext};
 use model::mass::{ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
+use rayon::prelude::*;
 use search::candidate_gen::Candidate;
 use search::psm::{PsmMatch, TopNQueue};
 use search::search_index::SearchIndex;
@@ -94,8 +95,8 @@ use search::search_params::SearchParams;
 ///
 /// `spec_id` is `spec.title` (or `"scan={scan}"` when the title is empty — see
 /// [`crate::row_context::RowContext`]); `rank` is the 1-based rank from
-/// [`crate::row_context::iter_ranked_by_rank_score`]; `row_idx` is the per-scan
-/// emission index; `multi_row` is true when the scan emits more than one row
+/// [`crate::row_context::emitted_rows`] (assigned after positional isomers are
+/// collapsed); `row_idx` is the per-scan emission index; `multi_row` is true when the scan emits more than one row
 /// (under `--chimeric` or when ties at queue capacity are retained), in which
 /// case `_{row_idx}` disambiguates SpecIds that would otherwise collide on equal
 /// `rank`. Single-row scans keep the historical `specID_scan_rank` format.
@@ -143,7 +144,7 @@ pub type Feature = (&'static str, f64, FeatureFmt);
 /// writer (`crate::qpx::build_psms_batch`, into the `psm_metavalues` column) so
 /// the discriminative power of the PIN and the idparquet never diverge.
 ///
-/// The list intentionally EXCLUDES the columns OpenMS' PercolatorAdapter adds
+/// The list intentionally EXCLUDES the columns a downstream Percolator adapter adds
 /// generically (SpecId / Label / ScanNr / ExpMass / CalcMass / mass / peplen /
 /// dm / absdm / the charge one-hots / enzN / enzC / enzInt) and the
 /// non-numeric Peptide / Proteins columns. It DOES include `RankScore` and
@@ -275,6 +276,14 @@ pub fn psm_feature_values(psm: &PsmMatch, rank: u32) -> Vec<Feature> {
         ("DeltaRT", f.delta_rt as f64, Double),
         ("AbsDeltaRT", f.abs_delta_rt as f64, Double),
         ("DeltaRTNorm", f.delta_rt_norm as f64, Double),
+        // ── Provenance (additive; set by `crate::provenance`). All 0 on a FASTA
+        // search except IsotopeMimic with isotope-like variable mods. ──
+        ("IsVariant", f.is_variant as f64, Int),
+        ("IsIsoform", f.is_isoform as f64, Int),
+        ("IsChain", f.is_chain as f64, Int),
+        ("RefCompetitor", f.ref_competitor as f64, Int),
+        ("DeltaRefScore", f.delta_ref_score as f64, Double),
+        ("IsotopeMimic", f.isotope_mimic as f64, Int),
     ]
 }
 
@@ -325,8 +334,7 @@ pub fn write_pin_to<W: Write>(
     params: &SearchParams,
     search_index: &SearchIndex,
 ) -> io::Result<()> {
-    let min_charge = *params.charge_range.start();
-    let max_charge = *params.charge_range.end();
+    let (min_charge, max_charge) = pin_charge_columns(params, queues);
 
     // FDR-join guard: the PIN `SpecId` (`{spec_id}_{scan}` base) is the key
     // Percolator joins q-values/PEPs back onto (its result map is keyed by
@@ -365,24 +373,50 @@ pub fn write_pin_to<W: Write>(
 
     write_header(writer, min_charge, max_charge)?;
 
-    for (spec_idx, queue) in queues.iter().enumerate() {
-        if queue.is_empty() {
-            continue;
+    // Rows are formatted in parallel, one buffer per spectrum, and written in
+    // spectrum order, so the file is the same as a sequential write. Batches
+    // bound the formatted-but-unwritten text held in memory.
+    let emitting: Vec<usize> = (0..queues.len())
+        .filter(|&i| !queues[i].is_empty())
+        .collect();
+    for batch in emitting.chunks(PIN_FORMAT_BATCH_SPECTRA) {
+        let buffers: Vec<io::Result<Vec<u8>>> = batch
+            .par_iter()
+            .map(|&spec_idx| {
+                let mut buf = Vec::with_capacity(4096);
+                write_spectrum_rows(
+                    &mut buf,
+                    &spectra[spec_idx],
+                    &queues[spec_idx],
+                    candidates,
+                    min_charge,
+                    max_charge,
+                    search_index,
+                    params,
+                )?;
+                Ok(buf)
+            })
+            .collect();
+        for buf in buffers {
+            writer.write_all(&buf?)?;
         }
-        let spec = &spectra[spec_idx];
-        write_spectrum_rows(
-            writer,
-            spec,
-            queue,
-            candidates,
-            min_charge,
-            max_charge,
-            search_index,
-            params,
-        )?;
     }
     Ok(())
 }
+
+/// The charge one-hot columns: the searched `--charge` range, widened to every
+/// charge a PSM carries. A declared precursor charge is searched even outside
+/// the range, and such a PSM needs its own column rather than an all-zero
+/// charge vector.
+fn pin_charge_columns(params: &SearchParams, queues: &[TopNQueue]) -> (u8, u8) {
+    queues.iter().flat_map(TopNQueue::iter_psms).fold(
+        (*params.charge_range.start(), *params.charge_range.end()),
+        |(lo, hi), psm| (lo.min(psm.charge_used), hi.max(psm.charge_used)),
+    )
+}
+
+/// Spectra whose PIN rows are formatted in parallel before being written out.
+const PIN_FORMAT_BATCH_SPECTRA: usize = 8192;
 
 // ── header ────────────────────────────────────────────────────────────────────
 
@@ -441,7 +475,12 @@ fn write_header<W: Write>(writer: &mut W, min_charge: u8, max_charge: u8) -> io:
         "EdgeScore".to_string(),
         // ADDITIVE chimeric MS1 precursor-envelope features: emitted
         // adjacent to EdgeScore so they sit just before Peptide/Proteins.
-        // Both are 0.0 unless `--chimeric` populates them from a linked MS1.
+        // Both are CURRENTLY ALWAYS 0.0, including under `--chimeric`: the two-pass
+        // cascade computes its own co-isolation features and does not consume these
+        // (see the note in match_engine.rs where they are left at their defaults).
+        // They are kept in the schema because downstream consumers index PIN columns
+        // positionally; `crates/andes/tests/pin_constant_columns.rs` pins the set so it cannot
+        // grow silently.
         "PrecursorIsotopeKL".to_string(),
         "PrecursorSNR".to_string(),
         // ADDITIVE top-1 dominance feature: RawScore(best) − RawScore(2nd-best
@@ -479,7 +518,7 @@ fn write_header<W: Write>(writer: &mut W, min_charge: u8, max_charge: u8) -> io:
         // -ln(ρ·Δ)) per matched ion — how improbable the matches are by chance.
         "ChanceMatchSurprise".to_string(),
         // IntensitySignal = strong-score S1 numerator: cosine similarity between
-        // IntensityModel predictions and observed relative intensities (0 without model).
+        // frag-intensity predictions and observed relative intensities (0 without model).
         "IntensitySignal".to_string(),
         // Tier-2 frag-intensity LLR battery (0 without a frag-intensity model).
         // FragPredExplained = Σ(matched·pred)/Σpred; FragPredChanceLLR =
@@ -530,6 +569,13 @@ fn write_header<W: Write>(writer: &mut W, min_charge: u8, max_charge: u8) -> io:
         "DeltaRT".to_string(),
         "AbsDeltaRT".to_string(),
         "DeltaRTNorm".to_string(),
+        // Provenance (crate::provenance).
+        "IsVariant".to_string(),
+        "IsIsoform".to_string(),
+        "IsChain".to_string(),
+        "RefCompetitor".to_string(),
+        "DeltaRefScore".to_string(),
+        "IsotopeMimic".to_string(),
     ]);
 
     cols.extend_from_slice(&[
@@ -585,7 +631,7 @@ fn write_spectrum_rows<W: Write>(
     // Order by rank_score (RawScore) descending — the sole ranking signal.
     let psms = queue.clone().into_rank_sorted_vec();
 
-    let ranked: Vec<(u32, &PsmMatch)> = iter_ranked_by_rank_score(&psms).collect();
+    let ranked = emitted_rows(spec, &psms, candidates);
     // When a scan emits more than one row, `rank` alone can collide (ranks tie
     // on equal `rank_score`, and `TopNQueue` retains ties at capacity), so the
     // SpecId must include the per-row index to stay unique. Single-row scans
@@ -597,7 +643,7 @@ fn write_spectrum_rows<W: Write>(
         write_psm_row(
             writer,
             spec,
-            psm,
+            &psm,
             cand,
             &ctx,
             rank,
@@ -694,9 +740,9 @@ fn write_psm_row<W: Write>(
         format_spec_id(&ctx.spec_id, ctx.scan, rank, row_idx, multi_row)
     )?;
     write!(writer, "\t{}\t{}\t", label, ctx.scan)?;
-    write_double(writer, exp_mass)?;
+    write_mass(writer, exp_mass)?;
     writer.write_all(b"\t")?;
-    write_double(writer, calc_mass)?;
+    write_mass(writer, calc_mass)?;
     writer.write_all(b"\t")?;
     write_double(writer, mass)?;
     // RawScore is the sole score column (GF-derived DeNovoScore / lnSpecEValue /
@@ -717,13 +763,16 @@ fn write_psm_row<W: Write>(
     // enzN = boundary between protein-pre and peptide[0]; enzC = boundary
     // between peptide[last] and protein-post; enzInt = count of internal
     // positions consistent with the enzyme. Per-rule semantics in
-    // crate::percolator_enz (OpenMS PercolatorInfile).
+    // crate::percolator_enz.
     let residues: Vec<u8> = cand.peptide.residues.iter().map(|aa| aa.residue).collect();
     let first = residues.first().copied().unwrap_or(b'-');
     let last = residues.last().copied().unwrap_or(b'-');
-    let enz_n: u8 = is_enzymatic_boundary(cand.peptide.pre, first, params.enzyme) as u8;
-    let enz_c: u8 = is_enzymatic_boundary(last, cand.peptide.post, params.enzyme) as u8;
-    let enz_int = count_internal_enzymatic(&residues, params.enzyme);
+    // A multi-protease digest (`--enzyme a,b`) counts a boundary any of its
+    // enzymes cleaves.
+    let extra = &params.extra_enzymes;
+    let enz_n: u8 = is_enzymatic_boundary_any(cand.peptide.pre, first, params.enzyme, extra) as u8;
+    let enz_c: u8 = is_enzymatic_boundary_any(last, cand.peptide.post, params.enzyme, extra) as u8;
+    let enz_int = count_internal_enzymatic_any(&residues, params.enzyme, extra);
     write!(writer, "\t{}\t{}\t{}", enz_n, enz_c, enz_int)?;
 
     // Fragment/error/strong-score feature block — written from the SHARED
@@ -766,6 +815,34 @@ fn write_psm_row<W: Write>(
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+/// Write a neutral mass with six decimal places (trailing zeros trimmed).
+///
+/// `ExpMass` and `CalcMass` are not Percolator features, but downstream tools read them
+/// to recompute precursor error. Six significant figures would round a 1,000–9,999 Da
+/// mass to 0.01 Da (5–10 ppm), quantizing every error computed from these columns.
+/// The `ExpMass` column text of a row: the neutral precursor mass of
+/// `precursor_mz` at `charge`, printed as [`write_mass`] prints it. Percolator
+/// groups PSMs for target-decoy competition by scan and this value.
+pub(crate) fn exp_mass_text(precursor_mz: f64, charge: u8) -> String {
+    let z = charge as f64;
+    let mut out = Vec::new();
+    write_mass(&mut out, precursor_mz * z - z * PROTON).expect("write to a Vec");
+    String::from_utf8(out).expect("ASCII mass")
+}
+
+fn write_mass<W: Write>(writer: &mut W, v: f64) -> io::Result<()> {
+    if !v.is_finite() || v == 0.0 {
+        return writer.write_all(b"0");
+    }
+    let mut buf = [0u8; 32];
+    let len = {
+        let mut cursor = &mut buf[..];
+        write!(cursor, "{:.6}", v)?;
+        32 - cursor.len()
+    };
+    write_trim_fixed(writer, &buf[..len])
+}
 
 /// Write a `f64` in `%.6g` style (6 significant figures) directly into
 /// `writer`.
@@ -875,6 +952,22 @@ mod tests {
     use search::candidate_gen::Candidate;
     use search::search_index::SearchIndex;
 
+    #[test]
+    fn write_mass_keeps_micro_dalton_precision() {
+        let fmt = |v: f64| {
+            let mut out = Vec::new();
+            write_mass(&mut out, v).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        // Six significant figures would print 1674.79 and 1674.8 for these two.
+        assert_eq!(fmt(1674.791234), "1674.791234");
+        assert_eq!(fmt(1674.801234), "1674.801234");
+        assert_eq!(fmt(790.3345), "790.3345");
+        assert_eq!(fmt(1500.0), "1500");
+        assert_eq!(fmt(0.0), "0");
+        assert_eq!(fmt(f64::NAN), "0");
+    }
+
     // ── fixture helpers ─────────────────────────────────────────────────────
 
     /// Build a minimal `SearchIndex` with one target protein.
@@ -884,6 +977,7 @@ mod tests {
                 accession: accession.to_string(),
                 description: String::new(),
                 sequence: b"MKWVTFISLL".to_vec(),
+                annotation: None,
             }],
         };
         SearchIndex::from_target_db(&target, "XXX_")
@@ -908,6 +1002,7 @@ mod tests {
             activation_method: None,
             isolation_lower_offset: None,
             isolation_upper_offset: None,
+            isolation_target_mz: None,
         }
     }
 
@@ -925,6 +1020,68 @@ mod tests {
             is_protein_n_term: false,
             is_protein_c_term: false,
         }
+    }
+
+    /// A target Candidate with residues `seq` and variable mods `(position,
+    /// mass_delta)`.
+    fn make_candidate_seq(seq: &[u8], mods: &[(usize, f64)], protein_index: usize) -> Candidate {
+        use model::modification::{ModLocation, Modification, ResidueSpec};
+        let residues = seq
+            .iter()
+            .enumerate()
+            .map(|(i, &r)| {
+                let mut aa = AminoAcid::standard(r).unwrap();
+                if let Some(&(_, delta)) = mods.iter().find(|&&(p, _)| p == i) {
+                    let m: &'static Modification = Box::leak(Box::new(Modification {
+                        name: format!("mod{delta}"),
+                        mass_delta: delta,
+                        residue: ResidueSpec::Specific(r),
+                        location: ModLocation::Anywhere,
+                        fixed: false,
+                        accession: None,
+                        neutral_losses: Vec::new(),
+                        loss_class: 0,
+                        annotated_site_mass: None,
+                    }));
+                    aa.mod_ = Some(m);
+                }
+                aa
+            })
+            .collect();
+        Candidate {
+            peptide: Peptide::new(residues, b'K', b'S'),
+            protein_index,
+            start_offset_in_protein: 0,
+            is_decoy: false,
+            is_protein_n_term: false,
+            is_protein_c_term: false,
+        }
+    }
+
+    /// Write one spectrum's queue and return the emitted rows' (SpecId, Peptide).
+    fn emitted(psms: Vec<PsmMatch>, cands: &[Candidate]) -> Vec<(String, String)> {
+        let params = make_params(2..=3);
+        let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
+        let mut queue = TopNQueue::new(10);
+        for p in psms {
+            queue.push(p);
+        }
+        let mut buf = Vec::<u8>::new();
+        write_pin_to(
+            &mut buf,
+            &spectra,
+            &[queue],
+            cands,
+            &params,
+            &make_empty_search_index(),
+        )
+        .unwrap();
+        let header = parse_header(&buf);
+        let pep_col = header.iter().position(|h| h == "Peptide").unwrap();
+        parse_rows(&buf)
+            .into_iter()
+            .map(|r| (r[0].clone(), r[pep_col].clone()))
+            .collect()
     }
 
     fn make_psm(
@@ -968,15 +1125,14 @@ mod tests {
             min_peaks: 10,
             precursor_cal_mode: search::PrecursorCalMode::Auto,
             cal_min_spec_keys: search::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS,
+            fragment_index_top_k: 0,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,
             chimeric_max_coisolated: 2,
             chimeric_max_kl: 0.3,
-            chimeric_allow_overlap: false,
             score_mode: search::ScoreMode::Rank,
             refine_select_psm_fdr: 0.01,
-            candidate_index: search::CandidateIndexMode::Ram,
             require_nxst_sequon: false,
         }
     }
@@ -1076,6 +1232,12 @@ mod tests {
             "DeltaRT",
             "AbsDeltaRT",
             "DeltaRTNorm",
+            "IsVariant",
+            "IsIsoform",
+            "IsChain",
+            "RefCompetitor",
+            "DeltaRefScore",
+            "IsotopeMimic",
             "Peptide",
             "Proteins",
         ];
@@ -1206,6 +1368,82 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pin_enzyme_features_use_every_enzyme_of_a_multi_protease_digest() {
+        // K.AEAKAE.S: enzN via trypsin (K|A); enzC only via GluC (E|S);
+        // internal (K,A) via trypsin, (E,A) via GluC.
+        let cands = vec![make_candidate_seq(b"AEAKAE", &[], 0)];
+        let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
+        let idx = make_empty_search_index();
+        let enz = |extra: Vec<model::enzyme::Enzyme>| {
+            let mut params = make_params(2..=3);
+            params.extra_enzymes = extra;
+            let mut queue = TopNQueue::new(10);
+            queue.push(make_psm(0, 10.0, 10.0, 0, 2));
+            let mut buf = Vec::<u8>::new();
+            write_pin_to(&mut buf, &spectra, &[queue], &cands, &params, &idx).unwrap();
+            let cols = parse_header(&buf);
+            let row = parse_rows(&buf).remove(0);
+            ["enzN", "enzC", "enzInt"].map(|name| {
+                let i = cols.iter().position(|c| c == name).unwrap();
+                row[i].clone()
+            })
+        };
+        assert_eq!(enz(Vec::new()), ["1", "0", "1"]);
+        assert_eq!(enz(vec![model::enzyme::Enzyme::GluC]), ["1", "1", "2"]);
+    }
+
+    #[test]
+    fn pin_charge_columns_cover_declared_charges_outside_range() {
+        let params = make_params(2..=3);
+        let spectra = vec![
+            make_spectrum("Scan 1", 1, 500.0),
+            make_spectrum("Scan 2", 2, 500.0),
+            make_spectrum("Scan 3", 3, 500.0),
+        ];
+        let mut queues = Vec::new();
+        for (i, z) in [(0, 1u8), (1, 2), (2, 6)] {
+            let mut q = TopNQueue::new(10);
+            q.push(make_psm(i, 10.0, 10.0, 0, z));
+            queues.push(q);
+        }
+        let idx = make_empty_search_index();
+        let cands = vec![make_candidate(0, false)];
+        let mut buf = Vec::<u8>::new();
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
+
+        let cols = parse_header(&buf);
+        let charge_cols: Vec<&String> = cols.iter().filter(|c| c.starts_with("charge")).collect();
+        assert_eq!(
+            charge_cols,
+            ["charge1", "charge2", "charge3", "charge4", "charge5", "charge6"]
+        );
+        let rows = parse_rows(&buf);
+        assert_eq!(rows.len(), 3);
+        let first = cols.iter().position(|c| c == "charge1").unwrap();
+        for (row, z) in rows.iter().zip([1usize, 2, 6]) {
+            let hot: Vec<&str> = row[first..first + 6].iter().map(String::as_str).collect();
+            let mut expected = ["0"; 6];
+            expected[z - 1] = "1";
+            assert_eq!(hot, expected, "charge {z}");
+        }
+
+        // PSMs inside the range leave the columns at the `--charge` range.
+        let mut buf = Vec::<u8>::new();
+        write_pin_to(
+            &mut buf,
+            &spectra[1..2],
+            &queues[1..2],
+            &cands,
+            &params,
+            &idx,
+        )
+        .unwrap();
+        let cols = parse_header(&buf);
+        let charge_cols: Vec<&String> = cols.iter().filter(|c| c.starts_with("charge")).collect();
+        assert_eq!(charge_cols, ["charge2", "charge3"]);
+    }
+
     // ── Test: chimeric SpecId uniqueness for co-fragmented peptides ─────────
 
     #[test]
@@ -1222,7 +1460,7 @@ mod tests {
         queue.push(make_psm(0, 9.0, 10.0, 1, 2));
         let queues = vec![queue];
         let idx = make_empty_search_index();
-        let cands = vec![make_candidate(0, false), make_candidate(1, false)];
+        let cands = vec![make_candidate(0, false), make_candidate_seq(b"G", &[], 1)];
 
         let mut buf = Vec::<u8>::new();
         write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
@@ -1252,7 +1490,7 @@ mod tests {
         queue.push(make_psm(0, 10.0, 10.0, 1, 2));
         let queues = vec![queue];
         let idx = make_empty_search_index();
-        let cands = vec![make_candidate(0, false), make_candidate(1, false)];
+        let cands = vec![make_candidate(0, false), make_candidate_seq(b"G", &[], 1)];
 
         let mut buf = Vec::<u8>::new();
         write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
@@ -1264,6 +1502,205 @@ mod tests {
             "non-chimeric tied SpecIds must be unique, got {:?} and {:?}",
             rows[0][0], rows[1][0]
         );
+    }
+
+    // ── Positional-isomer collapse ────────────────────────────────────────────
+
+    const PHOSPHO: f64 = 79.96633;
+    const OX: f64 = 15.99491;
+
+    #[test]
+    fn positional_isomers_keep_only_the_best_ranked_site() {
+        // Same residues, same phospho, three different sites: only the best stays.
+        let cands = vec![
+            make_candidate_seq(b"SATSK", &[(0, PHOSPHO)], 0),
+            make_candidate_seq(b"SATSK", &[(2, PHOSPHO)], 0),
+            make_candidate_seq(b"SATSK", &[(3, PHOSPHO)], 0),
+        ];
+        let rows = emitted(
+            vec![
+                make_psm(0, 9.0, 9.0, 1, 2),
+                make_psm(0, 10.0, 10.0, 2, 2),
+                make_psm(0, 8.0, 8.0, 0, 2),
+            ],
+            &cands,
+        );
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].1, "K.SATS+79.96633K.S");
+        // A single surviving row takes the single-row SpecId form.
+        assert_eq!(rows[0].0, "Scan 1_1_1");
+    }
+
+    #[test]
+    fn non_isomers_are_kept_and_ranks_stay_contiguous() {
+        let cands = vec![
+            make_candidate_seq(b"SATSK", &[(0, PHOSPHO)], 0),
+            make_candidate_seq(b"SATSK", &[(3, PHOSPHO)], 0), // isomer of 0
+            make_candidate_seq(b"SATSK", &[], 0),             // no mod: different multiset
+            make_candidate_seq(b"SATTK", &[(0, PHOSPHO)], 0), // different residues
+            make_candidate_seq(b"MSATK", &[(0, OX), (1, PHOSPHO)], 0),
+            make_candidate_seq(b"MSATK", &[(0, OX), (3, PHOSPHO)], 0), // isomer of 4
+            make_candidate_seq(b"MSATK", &[(1, PHOSPHO)], 0),          // different multiset than 4
+        ];
+        let rows = emitted(
+            vec![
+                make_psm(0, 10.0, 10.0, 0, 2),
+                make_psm(0, 9.0, 9.0, 1, 2),
+                make_psm(0, 8.0, 8.0, 2, 2),
+                make_psm(0, 7.0, 7.0, 3, 2),
+                make_psm(0, 6.0, 6.0, 4, 2),
+                make_psm(0, 5.0, 5.0, 5, 2),
+                make_psm(0, 4.0, 4.0, 6, 2),
+            ],
+            &cands,
+        );
+        let peps: Vec<&str> = rows.iter().map(|r| r.1.as_str()).collect();
+        assert_eq!(
+            peps,
+            [
+                "K.S+79.96633ATSK.S",
+                "K.SATSK.S",
+                "K.S+79.96633ATTK.S",
+                "K.M+15.99491S+79.96633ATK.S",
+                "K.MS+79.96633ATK.S",
+            ]
+        );
+        let ids: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "Scan 1_1_1_0",
+                "Scan 1_1_2_1",
+                "Scan 1_1_3_2",
+                "Scan 1_1_4_3",
+                "Scan 1_1_5_4"
+            ]
+        );
+    }
+
+    #[test]
+    fn isomers_at_different_charge_or_precursor_are_kept() {
+        let cands = vec![
+            make_candidate_seq(b"SATSK", &[(0, PHOSPHO)], 0),
+            make_candidate_seq(b"SATSK", &[(3, PHOSPHO)], 0),
+        ];
+        // Different precursor charge: separate precursor hypotheses.
+        let rows = emitted(
+            vec![make_psm(0, 10.0, 10.0, 0, 2), make_psm(0, 9.0, 9.0, 1, 3)],
+            &cands,
+        );
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        // A chimeric secondary matched at its own co-isolated precursor.
+        let mut secondary = make_psm(0, 9.0, 9.0, 1, 2);
+        secondary.precursor_mz_override = Some(501.0);
+        let rows = emitted(vec![make_psm(0, 10.0, 10.0, 0, 2), secondary], &cands);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        // The same secondary precursor twice: the isomer collapses within it.
+        let mut a = make_psm(0, 9.0, 9.0, 0, 2);
+        a.precursor_mz_override = Some(501.0);
+        let mut b = make_psm(0, 8.0, 8.0, 1, 2);
+        b.precursor_mz_override = Some(501.0);
+        let rows = emitted(vec![make_psm(0, 10.0, 10.0, 0, 2), a, b], &cands);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+    }
+
+    #[test]
+    fn terminal_mod_isomers_collapse() {
+        // An N-terminal acetyl (carried on the first residue) and the same delta
+        // on an internal K are one multiset on the same residues.
+        const ACETYL: f64 = 42.01057;
+        let cands = vec![
+            make_candidate_seq(b"AKGK", &[(0, ACETYL)], 0),
+            make_candidate_seq(b"AKGK", &[(1, ACETYL)], 0),
+        ];
+        let rows = emitted(
+            vec![make_psm(0, 9.0, 9.0, 1, 2), make_psm(0, 8.0, 8.0, 0, 2)],
+            &cands,
+        );
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].1, "K.AK+42.01057GK.S");
+    }
+
+    #[test]
+    fn tied_isomers_keep_the_first_in_emission_order() {
+        let cands = vec![
+            make_candidate_seq(b"SATSK", &[(0, PHOSPHO)], 0),
+            make_candidate_seq(b"SATSK", &[(3, PHOSPHO)], 0),
+            make_candidate_seq(b"GGGGK", &[], 0),
+        ];
+        let psms = vec![
+            make_psm(0, 10.0, 10.0, 0, 2),
+            make_psm(0, 10.0, 10.0, 1, 2),
+            make_psm(0, 10.0, 10.0, 2, 2),
+        ];
+        // The uncollapsed emission order of the tie decides which site survives.
+        let mut queue = TopNQueue::new(10);
+        for p in psms.clone() {
+            queue.push(p);
+        }
+        let order: Vec<u32> = queue
+            .into_rank_sorted_vec()
+            .iter()
+            .map(|p| p.primary_candidate_idx())
+            .collect();
+        let first_isomer = *order.iter().find(|&&c| c != 2).unwrap();
+        let rows = emitted(psms, &cands);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        let kept_isomer = rows.iter().find(|r| r.1.starts_with("K.S")).unwrap();
+        assert_eq!(
+            kept_isomer.1,
+            cands[first_isomer as usize].peptide.to_string()
+        );
+        // Both survivors share rank 1 and stay distinguishable by row index.
+        let ids: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+        assert_eq!(ids, ["Scan 1_1_1_0", "Scan 1_1_1_1"]);
+    }
+
+    #[test]
+    fn target_and_decoy_isomers_are_kept_apart() {
+        // A decoy repeating the target's residues and modification multiset keeps
+        // its own row and label.
+        let mut decoy = make_candidate_seq(b"SATSK", &[(3, PHOSPHO)], 1);
+        decoy.is_decoy = true;
+        let cands = vec![make_candidate_seq(b"SATSK", &[(0, PHOSPHO)], 0), decoy];
+        let rows = emitted(
+            vec![make_psm(0, 10.0, 10.0, 0, 2), make_psm(0, 9.0, 9.0, 1, 2)],
+            &cands,
+        );
+        assert_eq!(rows.len(), 2, "{rows:?}");
+    }
+
+    #[test]
+    fn collapsed_isomers_add_their_proteins_to_the_kept_row() {
+        // Candidates 0 and 1 share protein 0; candidate 2 is the same peptidoform
+        // as 1 in protein 1, scored apart (different flanking residues).
+        let cands = vec![
+            make_candidate_seq(b"SATSK", &[(0, PHOSPHO)], 0),
+            make_candidate_seq(b"SATSK", &[(3, PHOSPHO)], 0),
+            make_candidate_seq(b"SATSK", &[(3, PHOSPHO)], 1),
+        ];
+        let params = make_params(2..=3);
+        let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
+        let mut queue = TopNQueue::new(10);
+        queue.push(make_psm(0, 10.0, 10.0, 0, 2));
+        queue.push(make_psm(0, 9.0, 9.0, 1, 2));
+        queue.push(make_psm(0, 8.0, 8.0, 2, 2));
+        let mut buf = Vec::<u8>::new();
+        write_pin_to(
+            &mut buf,
+            &spectra,
+            &[queue],
+            &cands,
+            &params,
+            &make_empty_search_index(),
+        )
+        .unwrap();
+        let header = parse_header(&buf);
+        let pep_col = header.iter().position(|h| h == "Peptide").unwrap();
+        let rows = parse_rows(&buf);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0][pep_col], "K.S+79.96633ATSK.S");
+        assert_eq!(rows[0][pep_col + 1..], ["PROT_0", "PROT_1"]);
     }
 
     // ── Test 4: empty queue → only header ────────────────────────────────────
@@ -1412,7 +1849,7 @@ mod tests {
         let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        let cands = vec![make_candidate(0, false), make_candidate(1, false)];
+        let cands = vec![make_candidate(0, false), make_candidate_seq(b"G", &[], 1)];
         write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
 
         let cols = parse_header(&buf);

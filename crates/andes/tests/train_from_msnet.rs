@@ -200,8 +200,7 @@ fn run_train(in_parquet: &Path, store: &Path, extra: &[&str]) {
     run_train_env(in_parquet, store, extra, &[]);
 }
 
-/// Like [`run_train`] but injects environment variables — e.g.
-/// `ANDES_SEED_GEOMETRY=1` to opt OUT of own-geometry derivation.
+/// Like [`run_train`] but injects environment variables into the child process.
 fn run_train_env(in_parquet: &Path, store: &Path, extra: &[&str], env: &[(&str, &str)]) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_andes"));
     cmd.arg("train")
@@ -270,7 +269,7 @@ fn train_from_msnet_writes_model_with_rank_dist() {
 
 /// Wiring guard (finding 3.9): `run_train` — the binary's default training path —
 /// must DERIVE the partition geometry from the corpus (the own-geometry,
-/// MS-GF+-free path), and only reuse the seed geometry when `ANDES_SEED_GEOMETRY=1`
+/// MS-GF+-free path), and only reuse the seed geometry when `--seed-geometry`
 /// opts out. If the binary ever silently fell back to seed geometry, the two
 /// models trained below would be geometry-identical — so we assert they differ.
 /// This exercises the same `andes train` entry point `andes::main` uses, not just
@@ -292,8 +291,7 @@ fn geometry_derived_by_default_differs_from_seed() {
 
     // OPT-OUT: reuse the bundled seed's full partition geometry.
     let store_seed = dir.path().join("seed.parquet");
-    // `--seed-geometry` replaced the ANDES_SEED_GEOMETRY environment variable: the
-    // engine reads no environment, so the opt-out has to travel on the command line.
+    // The engine reads no environment, so the opt-out travels on the command line.
     run_train_env(
         &in_parquet,
         &store_seed,

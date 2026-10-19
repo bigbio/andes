@@ -34,6 +34,8 @@ pub struct RunConfig {
     pub refine: RefineCfg,
     pub rescoring: RescoringCfg,
     pub glyco: GlycoCfg,
+    #[serde(default)]
+    pub quant: QuantCfg,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -41,6 +43,11 @@ pub struct RunConfig {
 pub struct IoCfg {
     pub spectrum: Option<Vec<PathBuf>>,
     pub database: Option<PathBuf>,
+    pub uniprot_variants: Option<bool>,
+    pub uniprot_isoforms: Option<bool>,
+    pub uniprot_chains: Option<bool>,
+    pub uniprot_evidence: Option<String>,
+    pub uniprot_knockoffs: Option<usize>,
     pub output_pin: Option<PathBuf>,
     pub output_tsv: Option<PathBuf>,
     pub output_parquet: Option<PathBuf>,
@@ -75,8 +82,6 @@ pub struct ScoringCfg {
     pub fragment_tol_da: Option<f64>,
     pub model_store: Option<PathBuf>,
     pub model: Option<String>,
-    pub intensity_model: Option<PathBuf>,
-    pub candidate_index: Option<String>,
     pub ms_level: Option<u8>,
     pub max_spectra: Option<usize>,
 }
@@ -112,6 +117,7 @@ pub struct RescoringCfg {
     pub enabled: Option<bool>,
     pub native: Option<bool>,
     pub fdr: Option<f64>,
+    pub variant_fdr: Option<f64>,
     pub pep: Option<f64>,
     pub percolator_bin: Option<PathBuf>,
     pub percolator_docker: Option<bool>,
@@ -122,19 +128,55 @@ pub struct RescoringCfg {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+pub struct QuantCfg {
+    pub tmt: Option<String>,
+    pub tmt_level: Option<u8>,
+    pub tmt_tol: Option<String>,
+    pub tmt_correction: Option<PathBuf>,
+    pub tmt_min_purity: Option<f64>,
+    pub lfq: Option<bool>,
+    pub lfq_tol: Option<String>,
+    pub lfq_rt_window: Option<f64>,
+    pub lfq_min_cosine: Option<f64>,
+    pub lfq_feature_fdr: Option<f64>,
+    pub quant_fdr: Option<f64>,
+    pub dir: Option<PathBuf>,
+    pub mbr: Option<bool>,
+    pub mbr_library_fdr: Option<f64>,
+    pub mbr_fdr: Option<f64>,
+    /// A number in `(0, 1]` or `off`, as `--quant-feature-fdr`.
+    pub quant_feature_fdr: Option<NumberOrString>,
+}
+
+/// A YAML scalar written as a number or as a string (e.g. `0.05` or `off`),
+/// passed to the CLI validator as its text.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum NumberOrString {
+    Number(f64),
+    String(String),
+}
+
+/// `quant_feature_fdr` through the CLI validator, the error naming the key.
+fn parse_quant_feature_fdr(s: &str) -> Result<crate::cli::FractionOrOff, String> {
+    crate::cli::parse_fraction_or_off(s).map_err(|e| format!("quant_feature_fdr: {e}"))
+}
+
+impl NumberOrString {
+    fn text(&self) -> String {
+        match self {
+            NumberOrString::Number(v) => v.to_string(),
+            NumberOrString::String(s) => s.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct GlycoCfg {
     pub enabled: Option<bool>,
-    pub core: Option<String>,
-    pub backbone_top_k: Option<usize>,
-    pub elect_top_k: Option<usize>,
-    pub gp_k: Option<f32>,
-    pub gp_j: Option<f32>,
-    pub gp_h: Option<f32>,
-    pub gp_cz: Option<f32>,
     pub tol_ppm: Option<f64>,
     pub max_peaks: Option<usize>,
-    pub pf_charge: Option<u8>,
-    pub max_pf: Option<usize>,
     pub debug: Option<bool>,
     pub hcd_pair: Option<bool>,
 }
@@ -202,6 +244,28 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     // ── io ──
     set!("spectrum", spectrum, cfg.io.spectrum);
     set_opt!("database", database, cfg.io.database);
+    set!(
+        "uniprot_variants",
+        uniprot_variants,
+        cfg.io.uniprot_variants
+    );
+    set!(
+        "uniprot_isoforms",
+        uniprot_isoforms,
+        cfg.io.uniprot_isoforms
+    );
+    set!("uniprot_chains", uniprot_chains, cfg.io.uniprot_chains);
+    set!(
+        "uniprot_knockoffs",
+        uniprot_knockoffs,
+        cfg.io.uniprot_knockoffs
+    );
+    set_parsed!(
+        "uniprot_evidence",
+        uniprot_evidence,
+        cfg.io.uniprot_evidence,
+        crate::parse_uniprot_evidence
+    );
     set_opt!("output_pin", output_pin, cfg.io.output_pin);
     set_opt!("output_tsv", output_tsv, cfg.io.output_tsv);
     set_opt!("output_parquet", output_parquet, cfg.io.output_parquet);
@@ -284,17 +348,6 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     );
     set_opt!("model_store", model_store, cfg.scoring.model_store);
     set_opt!("model_id_override", model_id_override, cfg.scoring.model);
-    set_opt!(
-        "intensity_model",
-        intensity_model,
-        cfg.scoring.intensity_model
-    );
-    set_parsed!(
-        "candidate_index",
-        candidate_index,
-        cfg.scoring.candidate_index,
-        parse_value_enum::<crate::CandidateIndexFlag>
-    );
     set!("ms_level", ms_level, cfg.scoring.ms_level);
     set!("max_spectra", max_spectra, cfg.scoring.max_spectra);
 
@@ -326,6 +379,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set!("rescore", rescore, cfg.rescoring.enabled);
     set!("rescore_native", rescore_native, cfg.rescoring.native);
     set_opt!("fdr", fdr, cfg.rescoring.fdr);
+    set_opt!("variant_fdr", variant_fdr, cfg.rescoring.variant_fdr);
     set_opt!("pep", pep, cfg.rescoring.pep);
     set_opt!(
         "percolator_bin",
@@ -349,32 +403,53 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     );
     set!("keep_pin", keep_pin, cfg.rescoring.keep_pin);
 
+    // ── quant ──
+    if let Some(v) = cfg.quant.tmt {
+        if !cli_set(m, "tmt") {
+            args.tmt = Some(crate::cli::parse_plex(&v)?);
+        }
+    }
+    set!("tmt_level", tmt_level, cfg.quant.tmt_level);
+    if let Some(v) = cfg.quant.tmt_tol {
+        if !cli_set(m, "tmt_tol") {
+            args.tmt_tol = Some(parse_tol("tmt_tol", &v)?);
+        }
+    }
+    set_opt!("tmt_correction", tmt_correction, cfg.quant.tmt_correction);
+    set!("tmt_min_purity", tmt_min_purity, cfg.quant.tmt_min_purity);
+    set!("lfq", lfq, cfg.quant.lfq);
+    if let Some(v) = cfg.quant.lfq_tol {
+        if !cli_set(m, "lfq_tol") {
+            args.lfq_tol = Some(parse_tol("lfq_tol", &v)?);
+        }
+    }
+    set!("lfq_rt_window", lfq_rt_window, cfg.quant.lfq_rt_window);
+    set!("lfq_min_cosine", lfq_min_cosine, cfg.quant.lfq_min_cosine);
+    set!(
+        "lfq_feature_fdr",
+        lfq_feature_fdr,
+        cfg.quant.lfq_feature_fdr
+    );
+    set_opt!("quant_fdr", quant_fdr, cfg.quant.quant_fdr);
+    set_opt!("quant_dir", quant_dir, cfg.quant.dir);
+    set!("mbr", mbr, cfg.quant.mbr);
+    set!(
+        "mbr_library_fdr",
+        mbr_library_fdr,
+        cfg.quant.mbr_library_fdr
+    );
+    set!("mbr_fdr", mbr_fdr, cfg.quant.mbr_fdr);
+    set_parsed!(
+        "quant_feature_fdr",
+        quant_feature_fdr,
+        cfg.quant.quant_feature_fdr.map(|v| v.text()),
+        parse_quant_feature_fdr
+    );
+
     // ── glyco ──
     set!("glyco", glyco, cfg.glyco.enabled);
-    set_parsed!(
-        "glyco_core",
-        glyco_core,
-        cfg.glyco.core,
-        parse_value_enum::<crate::GlycoCoreFlag>
-    );
-    set!(
-        "glyco_backbone_top_k",
-        glyco_backbone_top_k,
-        cfg.glyco.backbone_top_k
-    );
-    set!(
-        "glyco_elect_top_k",
-        glyco_elect_top_k,
-        cfg.glyco.elect_top_k
-    );
-    set!("glyco_gp_k", glyco_gp_k, cfg.glyco.gp_k);
-    set!("glyco_gp_j", glyco_gp_j, cfg.glyco.gp_j);
-    set!("glyco_gp_h", glyco_gp_h, cfg.glyco.gp_h);
-    set!("glyco_gp_cz", glyco_gp_cz, cfg.glyco.gp_cz);
     set!("glyco_tol_ppm", glyco_tol_ppm, cfg.glyco.tol_ppm);
     set!("glyco_max_peaks", glyco_max_peaks, cfg.glyco.max_peaks);
-    set!("glyco_pf_charge", glyco_pf_charge, cfg.glyco.pf_charge);
-    set!("glyco_max_pf", glyco_max_pf, cfg.glyco.max_pf);
     set!("debug_glyco", debug_glyco, cfg.glyco.debug);
     set!("glyco_hcd_pair", glyco_hcd_pair, cfg.glyco.hcd_pair);
 
@@ -385,10 +460,22 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     if let Some(v) = args.fdr {
         check_unit_fraction("fdr", v)?;
     }
+    if let Some(v) = args.variant_fdr {
+        check_unit_fraction("variant_fdr", v)?;
+    }
     if let Some(v) = args.pep {
         check_unit_fraction("pep", v)?;
     }
     check_unit_fraction("refine_select_psm_fdr", args.refine_select_psm_fdr)?;
+    check_unit_fraction("mbr_library_fdr", args.mbr_library_fdr)?;
+    check_unit_fraction("mbr_fdr", args.mbr_fdr)?;
+    check_unit_fraction("tmt_min_purity", args.tmt_min_purity)?;
+    check_unit_fraction("lfq_min_cosine", args.lfq_min_cosine)?;
+    check_unit_fraction("lfq_feature_fdr", args.lfq_feature_fdr)?;
+    if let Some(v) = args.quant_fdr {
+        check_unit_fraction("quant_fdr", v)?;
+    }
+    check_positive("lfq_rt_window", args.lfq_rt_window)?;
     if let Some(v) = args.fragment_tol_ppm {
         check_positive("fragment_tol_ppm", v)?;
     }
@@ -421,6 +508,12 @@ fn check_unit_fraction(field: &str, v: f64) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// A tolerance string through the CLI's parser (finite and > 0), with the
+/// error naming the config key.
+fn parse_tol(field: &str, v: &str) -> Result<model::Tolerance, String> {
+    crate::parse_precursor_tol(v).map_err(|e| format!("config: `{field}`: {e}"))
 }
 
 /// Same bound the CLI's `parse_positive_tol` enforces: finite and > 0.
@@ -456,13 +549,13 @@ search:
   charge: \"2..4\"
 glyco:
   enabled: true
-  gp_k: 42.0
+  tol_ppm: 42.0
 ";
         let c = RunConfig::from_yaml_str(y).expect("valid config");
         assert_eq!(c.search.precursor_tol.as_deref(), Some("15ppm"));
         assert_eq!(c.search.charge.as_deref(), Some("2..4"));
         assert_eq!(c.glyco.enabled, Some(true));
-        assert_eq!(c.glyco.gp_k, Some(42.0));
+        assert_eq!(c.glyco.tol_ppm, Some(42.0));
         assert_eq!(c.io.database, Some(PathBuf::from("db.fasta")));
     }
 
@@ -528,6 +621,117 @@ glyco:
             RunConfig::from_yaml_str("rescoring:\n  fdr: 0.01\nscoring:\n  fragment_tol_ppm: 20\n")
                 .unwrap();
         assert!(apply(ok, &mut a, &matches).is_ok());
+    }
+
+    /// Out-of-range quant values from YAML fail with an error naming the key,
+    /// as the CLI's value parsers would.
+    #[test]
+    fn apply_rejects_out_of_range_quant_keys() {
+        use clap::{CommandFactory, FromArgMatches};
+        let matches = crate::TopCli::command()
+            .try_get_matches_from([
+                "andes",
+                "--spectrum",
+                "x",
+                "--database",
+                "y",
+                "--output-pin",
+                "o",
+            ])
+            .expect("parse baseline args");
+        for (key, value) in [
+            ("tmt_min_purity", "1.5"),
+            ("tmt_min_purity", "-0.1"),
+            ("lfq_min_cosine", "2.0"),
+            ("lfq_feature_fdr", "-0.5"),
+            ("quant_fdr", "5.0"),
+            ("quant_fdr", ".nan"),
+            ("quant_feature_fdr", "1.5"),
+            ("quant_feature_fdr", "0"),
+            ("quant_feature_fdr", "none"),
+            ("lfq_rt_window", "0"),
+            ("lfq_rt_window", "-30"),
+            ("lfq_rt_window", ".inf"),
+            ("lfq_tol", "0ppm"),
+            ("lfq_tol", "-5ppm"),
+            ("tmt_tol", "0da"),
+            ("tmt_tol", "-20ppm"),
+        ] {
+            let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
+            let yaml = if key.ends_with("_tol") {
+                format!("quant:\n  {key}: \"{value}\"\n")
+            } else {
+                format!("quant:\n  {key}: {value}\n")
+            };
+            let cfg = RunConfig::from_yaml_str(&yaml).unwrap();
+            let Err(e) = apply(cfg, &mut a, &matches) else {
+                panic!("{key}: {value} must be rejected");
+            };
+            assert!(
+                e.contains(key),
+                "{key}: {value}: error does not name the key: {e}"
+            );
+        }
+
+        // In-range values still apply.
+        let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
+        let ok = RunConfig::from_yaml_str(
+            "quant:\n  tmt_min_purity: 0.5\n  lfq_min_cosine: 0.8\n  lfq_feature_fdr: 0.05\n  \
+             quant_fdr: 0.01\n  lfq_rt_window: 45\n  lfq_tol: 10ppm\n  tmt_tol: 0.003da\n",
+        )
+        .unwrap();
+        assert!(apply(ok, &mut a, &matches).is_ok());
+        assert_eq!(a.quant_feature_fdr.0, None, "the default is off");
+        for (value, want) in [("off", None), ("0.01", Some(0.01)), ("0.05", Some(0.05))] {
+            let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
+            let cfg = RunConfig::from_yaml_str(&format!("quant:\n  quant_feature_fdr: {value}\n"))
+                .unwrap();
+            apply(cfg, &mut a, &matches).unwrap();
+            assert_eq!(a.quant_feature_fdr.0, want, "{value}");
+        }
+    }
+
+    /// The UniProt XML keys apply through the CLI's validator; an explicit CLI
+    /// flag still wins.
+    #[test]
+    fn uniprot_keys_apply_with_cli_precedence() {
+        use clap::{CommandFactory, FromArgMatches};
+        let base = [
+            "andes",
+            "--spectrum",
+            "x",
+            "--database",
+            "y.xml.gz",
+            "--output-pin",
+            "o",
+        ];
+        let matches = crate::TopCli::command()
+            .try_get_matches_from(base)
+            .expect("parse baseline args");
+        let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
+        assert!(!a.uniprot_variants);
+        assert_eq!(a.uniprot_evidence, input::EvidenceLevel::Experimental);
+        assert!(!a.uniprot_isoforms && !a.uniprot_chains);
+        let cfg = RunConfig::from_yaml_str(
+            "io:\n  uniprot_variants: true\n  uniprot_isoforms: true\n  uniprot_chains: true\n  \
+             uniprot_evidence: curated\n",
+        )
+        .unwrap();
+        apply(cfg, &mut a, &matches).unwrap();
+        assert!(a.uniprot_variants && a.uniprot_isoforms && a.uniprot_chains);
+        assert_eq!(a.uniprot_evidence, input::EvidenceLevel::Curated);
+
+        let bad = RunConfig::from_yaml_str("io:\n  uniprot_evidence: strong\n").unwrap();
+        let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
+        assert!(apply(bad, &mut a, &matches).is_err());
+
+        let cli = crate::TopCli::command()
+            .try_get_matches_from(base.into_iter().chain(["--uniprot-evidence", "any"]))
+            .unwrap();
+        let mut a = crate::SearchArgs::from_arg_matches(&cli).unwrap();
+        let cfg = RunConfig::from_yaml_str("io:\n  uniprot_evidence: curated\n").unwrap();
+        apply(cfg, &mut a, &cli).unwrap();
+        assert_eq!(a.uniprot_evidence, input::EvidenceLevel::Any);
     }
 
     /// The shipped `config.example.yaml` must parse against the current schema, so

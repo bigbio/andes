@@ -1,5 +1,11 @@
 //! Golden test for the `--glyco` path.
 //!
+//! REGENERATED 2026-10-14 when the glycosite tag began counting the boundary
+//! sequon (an N-X-S/T completed by the residue after the peptide). Verified before
+//! copying: header identical, 120 -> 120 rows, 0 winner changes; only the Peptide
+//! column moved, on 2 rows (scans 24129 and 24902, R.GTAGNALMDGASQLMGENR.T, whose
+//! only sequon is N18-R|T): `@N?` -> `@N18`.
+//!
 //! WHY THIS EXISTS. Until this file was added, the ONLY golden in the repo covered
 //! the standard peptide path (`precursor_cal_bit_identical.rs`). Nothing pinned glyco
 //! output, and a commit labelled `fix(train)` consequently changed SERVE-TIME glyco
@@ -35,6 +41,22 @@
 //! UNRELATED columns changing on every row, which is what caught exactly that mistake here.
 //!
 //! Regenerating is a deliberate act: diff the columns first and know which ones moved.
+//!
+//! REGENERATED 2026-10-14 when the N-terminal Met-cleaved walk began emitting
+//! only the peptides starting at the post-Met residue (it had enumerated every
+//! other span of an M-initial protein a second time) and side-chain mods began
+//! stacking with terminal mods. Against the previous binary: 120 rows, every
+//! SpecId, peptide and protein unchanged (0 winner flips); each spectrum's
+//! candidate pool changes, so
+//! `CandidateRankEntropy` and `RawScore` moved on all 120
+//! rows and `ListwiseScoreGap` on 53.
+//!
+//! COMBINED 2026-10-14 (review branch: input, glyco and candidate-generation
+//! changes together). Against each parent golden the only differences are the
+//! other branches' changes: `ScanNr`/`SpecId` on every row (MGF TITLE scan
+//! numbers), the boundary-sequon `@N18` tag on 2 peptides, and the
+//! candidate-pool columns (`RawScore`, `CandidateRankEntropy`,
+//! `ListwiseScoreGap`); 120 rows, proteins unchanged.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -195,43 +217,6 @@ fn glyco_pin_matches_golden_after_sort() {
             panic!("glyco PIN row mismatch at sorted index {i} ({d})\n golden: {g}\n actual: {a}");
         }
     }
-}
-
-/// `--glyco-elect-top-k 1` keeps only the fused winner in the re-election pool,
-/// so it must write the same `.glyco.pin` as the flag being off.
-#[test]
-fn glyco_elect_top_k_one_is_identical_to_off() {
-    let root = workspace_root();
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_andes"));
-    let spectra = root.join("test-fixtures/glyco_fixture.mgf.gz");
-    let fasta = root.join("test-fixtures/glyco_fixture.fasta");
-    let gdb = root.join("test-fixtures/glyco_fixture.gdb");
-    let outdir = tempfile::tempdir().expect("tempdir");
-    let run = |name: &str, extra: &[&str]| -> String {
-        let out_pin = outdir.path().join(format!("{name}.pin"));
-        let mut cmd = Command::new(&binary);
-        cmd.arg("--spectrum")
-            .arg(&spectra)
-            .arg("--database")
-            .arg(&fasta)
-            .args(["--glyco", "--glyco-tol-ppm", "20", "--fragmentation", "HCD"])
-            .arg("--glyco-glycan-gdb")
-            .arg(&gdb)
-            .args(extra)
-            .arg("--output-pin")
-            .arg(&out_pin);
-        let status = cmd.status().expect("run andes");
-        assert!(status.success(), "andes exited {status}");
-        let glyco = outdir.path().join(format!("{name}.glyco.pin"));
-        std::fs::read_to_string(&glyco).unwrap_or_else(|e| panic!("read {}: {e}", glyco.display()))
-    };
-    let off = run("off", &[]);
-    let one = run("one", &["--glyco-elect-top-k", "1"]);
-    assert!(off.lines().count() > 1, "fixture produced no glyco rows");
-    assert_eq!(
-        off, one,
-        "--glyco-elect-top-k 1 must be byte-identical to off"
-    );
 }
 
 /// `--precursor-mono auto` needs MS1. On MGF there is none, so the flag must warn

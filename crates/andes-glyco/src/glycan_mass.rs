@@ -1,8 +1,7 @@
 // Monoisotopic residue masses (water already subtracted): the mass a
 // monosaccharide contributes when POLYMERISED (attached), = free sugar − H2O.
 // Values pinned to the campaign 6-decimal standard, cross-checked vs
-// Unimod/a glyco search engine — see docs/plans/glyco/30-standards/masses.md + roadmap §4, and
-// the `residue_masses_match_standard` test below. A glycan attached to Asn is a
+// Unimod/a glyco search engine — see the `residue_masses_match_standard` test below. A glycan attached to Asn is a
 // single delta = Σ(residue masses); never add an extra +H2O (that water is only
 // for a FREE/released glycan — the −18.0106 double-count is the #1 divergence).
 
@@ -32,9 +31,9 @@ pub const WATER: f64 = 18.010565;
 /// Core oxonium ions: HexNAc-derived fragments + HexHexNAc; singly-charged m/z.
 /// [138.05496, 168.06552, 186.07608, 204.08665, 366.13947]
 pub const CORE_OXONIUM_MZ: [f64; 5] = [
-    138.05496, // HexNAc fragment (loss of C2H4O2 from HexNAc+H)
-    168.06552, // HexNAc fragment
-    186.07608, // HexNAc fragment (ring-open)
+    138.05496, // HexNAc fragment C7H8NO2+ (HexNAc+H − CH6O3)
+    168.06552, // HexNAc+H − 2H2O
+    186.07608, // HexNAc+H − H2O
     204.08665, // HexNAc+H (intact oxonium)
     366.13947, // HexHexNAc oxonium
 ];
@@ -70,8 +69,7 @@ mod tests {
     use super::*;
 
     /// G0 (mass standardization): the residue/constant table must match the
-    /// campaign 6-decimal standard (docs/plans/glyco/30-standards/masses.md +
-    /// roadmap §4), cross-checked vs Unimod/a glyco search engine. A >~few-µDa drift here
+    /// campaign 6-decimal standard, cross-checked vs Unimod/a glyco search engine. A >~few-µDa drift here
     /// summed over 8 monosaccharides can nudge near-isobaric compositions, so we
     /// pin to 1e-6 Da. Do not retype masses elsewhere — reference these consts.
     #[test]

@@ -16,8 +16,6 @@
 //! (Unimod 393 Hex/Hex2 on a glyco residue) is exercised by the real-corpus
 //! benchmark, not this mechanism test.
 
-use std::sync::Arc;
-
 use model::amino_acid::AminoAcid;
 use model::mass::nominal_from;
 use model::modification::{ModLocation, Modification, ResidueSpec};
@@ -135,15 +133,16 @@ fn glyco_peptide(declare_losses: bool) -> Peptide {
             vec![]
         },
         loss_class: if declare_losses { 1 } else { 0 },
+        annotated_site_mass: None,
     };
-    let arc = Arc::new(m);
+    let arc = model::modification::leak_mod(m);
     let residues: Vec<AminoAcid> = b"AAATAAA"
         .iter()
         .enumerate()
         .map(|(i, &r)| {
             let aa = AminoAcid::standard(r).unwrap();
             if i == 3 {
-                aa.with_mod(arc.clone())
+                aa.with_mod(arc)
             } else {
                 aa
             }
@@ -195,6 +194,7 @@ fn glyco_spectrum(peptide: &Peptide, charge: u8) -> Spectrum {
         activation_method: None,
         isolation_lower_offset: None,
         isolation_upper_offset: None,
+        isolation_target_mz: None,
     }
 }
 

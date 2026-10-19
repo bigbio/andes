@@ -167,8 +167,9 @@ pub fn predict_by_ions(peptide: &Peptide, charge_range: RangeInclusive<u8>) -> V
 /// losses, ZERO loss ions are emitted and the output is byte-identical to the
 /// canonical b/y set (this is the safety guarantee behind [`predict_by_ions`]).
 ///
-/// Multiple loss-bearing residues within a single fragment emit each
-/// residue's losses independently (no cross-products of simultaneous losses).
+/// Multiple loss-bearing residues within a single fragment each contribute
+/// their losses (no cross-products of simultaneous losses); a loss two of them
+/// share (e.g. −H3PO4 from two phosphosites) is one ion, emitted once.
 pub fn predict_by_ions_with_losses(
     peptide: &Peptide,
     charge_range: RangeInclusive<u8>,
@@ -203,8 +204,11 @@ pub fn predict_by_ions_with_losses(
             .enumerate()
             .filter_map(|(i, aa)| {
                 aa.mod_.as_ref().and_then(|m| {
-                    (!m.neutral_losses.is_empty())
-                        .then(|| (i, m.loss_class, m.neutral_losses.as_slice()))
+                    (!m.neutral_losses.is_empty()).then_some((
+                        i,
+                        m.loss_class,
+                        m.neutral_losses.as_slice(),
+                    ))
                 })
             })
             .collect()
@@ -282,7 +286,7 @@ pub const Z_DOT_OFFSET: f64 = -16.018724;
 /// peptide (then `glycosite` is irrelevant). Produces `2·(n-1)·|charge_range|`
 /// ions (c1..c_{n-1} and z1..z_{n-1} at each charge), mirroring
 /// [`predict_by_ions`]. Never emits neutral-loss ions (ETD is loss-poor).
-/// Cached `ANDES_GLYCO_CZ_REMNANT` flag (read once).
+/// Remnant c/z ion generation: off (see the body for why).
 fn cz_remnant_enabled() -> bool {
     use std::sync::OnceLock;
     static F: OnceLock<bool> = OnceLock::new();
@@ -295,10 +299,9 @@ fn cz_remnant_enabled() -> bool {
 }
 
 /// Neutral glycan-mass shifts to place on a glycosite-SPANNING c/z fragment.
-/// Default = `[glycan_mass]` (the intact glycan — historical behavior, so
-/// [`predict_cz_ions`] is byte-identical when the flag is off, and non-glyco
-/// peptides with `glycan_mass == 0.0` are untouched). With `ANDES_GLYCO_CZ_REMNANT`
-/// the glycosidic-cleavage remnant ladder is appended (bare backbone + common
+/// Without `remnant` this is `[glycan_mass]` (the intact glycan; non-glyco
+/// peptides with `glycan_mass == 0.0` are untouched). With `remnant` the
+/// glycosidic-cleavage remnant ladder is appended (bare backbone + common
 /// N-glycan core remnants): in AI-ETD the supplemental HCD strips the glycan to a
 /// PARTIAL before c/z cleavage, so spanning c/z overwhelmingly carry a remnant, not
 /// the intact glycan (#20 audit — full-glycan spanning c/z match at ~noise, worst at
@@ -345,8 +348,8 @@ pub fn predict_cz_ions(
         cumulative.push(acc);
     }
     let total_residue_mass = cumulative[n];
-    // Glycan-mass shift(s) for glycosite-spanning c/z. Default `[glycan_mass]`
-    // (byte-identical); with ANDES_GLYCO_CZ_REMNANT this is the remnant ladder.
+    // Glycan-mass shift(s) for glycosite-spanning c/z: `[glycan_mass]`, since
+    // remnant generation is off.
     let span_shifts = cz_spanning_shifts(glycan_mass, cz_remnant_enabled());
     let mut out = Vec::with_capacity(
         2 * (n - 1) * (charge_range.end() - charge_range.start() + 1) as usize * span_shifts.len(),
@@ -422,11 +425,20 @@ fn emit_loss_ions(
     z: f64,
     intact_mz: f64,
 ) {
-    for &(idx, loss_class, losses) in loss_residues {
+    for (j, &(idx, loss_class, losses)) in loss_residues.iter().enumerate() {
         if !span.contains(&idx) {
             continue;
         }
-        for &loss in losses {
+        for (k, &loss) in losses.iter().enumerate() {
+            // One ion per distinct (class, loss) on this fragment.
+            let same = |&l: &f64| l.to_bits() == loss.to_bits();
+            let earlier = losses[..k].iter().any(same)
+                || loss_residues[..j].iter().any(|&(i, c, ls)| {
+                    span.contains(&i) && c == loss_class && ls.iter().any(same)
+                });
+            if earlier {
+                continue;
+            }
             let mz = intact_mz - loss / z;
             // Skip non-physical ions (e.g. a full-glycan loss on a singly-charged
             // ion drives m/z <= 0). The scoring visitors in `scored_spectrum.rs`
@@ -454,7 +466,6 @@ fn residue_mass_with_mod(aa: &AminoAcid) -> f64 {
 mod tests {
     use super::*;
     use model::modification::{ModLocation, Modification, ResidueSpec};
-    use std::sync::Arc;
 
     fn pep(seq: &[u8]) -> Peptide {
         let residues: Vec<AminoAcid> = seq
@@ -564,14 +575,15 @@ mod tests {
             accession: None,
             neutral_losses: losses,
             loss_class,
+            annotated_site_mass: None,
         };
-        let arc = Arc::new(m);
+        let arc = model::modification::leak_mod(m);
         let residues: Vec<AminoAcid> = b"PEPTIDE"
             .iter()
             .map(|&r| {
                 let aa = AminoAcid::standard(r).unwrap();
                 if r == b'T' {
-                    aa.with_mod(arc.clone())
+                    aa.with_mod(arc)
                 } else {
                     aa
                 }
@@ -604,6 +616,42 @@ mod tests {
                 && i.charge == l.charge
                 && (i.mz - l.mz - 324.1056).abs() < 1e-4
         })));
+    }
+
+    #[test]
+    fn shared_loss_of_two_sites_is_one_ion() {
+        let m = model::modification::leak_mod(Modification {
+            name: "Phospho".to_string(),
+            mass_delta: 79.96633,
+            residue: ResidueSpec::Specific(b'S'),
+            location: ModLocation::Anywhere,
+            fixed: false,
+            accession: None,
+            neutral_losses: vec![97.97690],
+            loss_class: 2,
+            annotated_site_mass: None,
+        });
+        let residues: Vec<AminoAcid> = b"SSAK"
+            .iter()
+            .map(|&r| {
+                let aa = AminoAcid::standard(r).unwrap();
+                if r == b'S' {
+                    aa.with_mod(m)
+                } else {
+                    aa
+                }
+            })
+            .collect();
+        let pep = Peptide::new(residues, b'_', b'-');
+        let ions = predict_by_ions_with_losses(&pep, 1..=1, true);
+        // b2 and y3 span both phosphosites: each has exactly one −H3PO4 partner.
+        for (kind, position) in [(IonKind::B, 2), (IonKind::Y, 3)] {
+            let n = ions
+                .iter()
+                .filter(|p| p.is_loss() && p.kind == kind && p.position == position)
+                .count();
+            assert_eq!(n, 1, "{kind:?}{position}");
+        }
     }
 
     #[test]

@@ -52,6 +52,11 @@ pub struct BackboneHit {
     /// for the intact `CalcMass` rather than `glycan.map(|g| g.mass).unwrap_or(0.0)`,
     /// which silently reported the bare peptide for novel glycans.
     pub glycan_mass_residual: f64,
+    /// Whether peptide-first retrieval proposed this hypothesis: a sequon
+    /// peptide with fragment-index b/y support whose glycan-by-subtraction
+    /// matched a known glycan. Such a hit carries peptide evidence of its own,
+    /// independent of the core-Y ladder.
+    pub peptide_first: bool,
 }
 
 /// DB-branch backbone enumeration.
@@ -64,20 +69,10 @@ pub fn db_branch(
     min_backbone: f64,
     charge: u8,
     isotope_offset: i8,
-    // When Some, a composition may only claim NeuAc/NeuGc if the matching oxonium reaches
-    // `min_frac` of base peak in this spectrum. This is the evidence-based alternative to
-    // excluding NeuGc by species: NeuAc and NeuGc are degenerate in PRECURSOR mass but not
-    // in oxonium ions. See `SialicEvidence`.
-    sialic_gate: Option<(crate::oxonium::SialicEvidence, f32)>,
 ) -> Vec<BackboneHit> {
     let mut out: Vec<BackboneHit> = glycans
         .iter()
         .filter_map(|g| {
-            if let Some((ev, min_frac)) = sialic_gate {
-                if !ev.admits(g.neuac, g.neugc, min_frac) {
-                    return None;
-                }
-            }
             let bb = precursor_neutral - g.mass;
             if bb >= min_backbone {
                 Some(BackboneHit {
@@ -89,6 +84,7 @@ pub fn db_branch(
                     // By construction bb = precursor − g.mass, so the observed
                     // residual is exactly the glycan mass.
                     glycan_mass_residual: precursor_neutral - bb,
+                    peptide_first: false,
                 })
             } else {
                 None
@@ -203,7 +199,6 @@ pub fn hybrid_candidates_with_isotope(
         tol_ppm,
         top_k,
         false,
-        0.0, // sialic oxonium gate: off
     )
 }
 
@@ -223,7 +218,7 @@ pub fn hybrid_candidates_with_isotope(
 /// read the glycan-independent trimannosyl-core Y-ion ladder to determine the
 /// backbone mass from the spectrum, then annotate the glycan by subtraction
 /// (glycan = precursor_neutral − backbone). This is the architecture of
-/// a glyco search engine / a cross-spectrum glyco engine / StrucGP.
+/// several published glyco search engines.
 pub fn solve_backbones_for_charge(
     peaks: &[(f64, f32)],
     precursor_neutral: f64,
@@ -277,19 +272,8 @@ pub fn hybrid_candidates_presolved(
     tol_ppm: f64,
     top_k: usize,
     force_db_on_none: bool,
-    // When > 0, a composition may only claim NeuAc/NeuGc if the matching oxonium reaches
-    // this fraction of base peak. 0 disables the gate (historical behaviour).
-    sialic_oxonium_min_frac: f32,
 ) -> Vec<BackboneHit> {
     const MIN_BACKBONE: f64 = 500.0;
-    let sialic_gate = if sialic_oxonium_min_frac > 0.0 {
-        Some((
-            crate::oxonium::sialic_evidence(peaks, tol_ppm),
-            sialic_oxonium_min_frac,
-        ))
-    } else {
-        None
-    };
     // Must match `solve_backbone_min`'s MIN_GLYCAN so the widest-precursor
     // superset re-tightens to this isotope's exact candidate set.
     const MIN_GLYCAN: f64 = 406.0;
@@ -320,7 +304,6 @@ pub fn hybrid_candidates_presolved(
                     MIN_BACKBONE,
                     precursor_z,
                     isotope_offset,
-                    sialic_gate,
                 );
             }
             return Vec::new();
@@ -352,26 +335,7 @@ pub fn hybrid_candidates_presolved(
         // Annotate the glycan by subtraction. `precursor_neutral` and `bb` are
         // both residue-convention, so `precursor_neutral − bb` = glycan mass.
         let residual = precursor_neutral - bb;
-        // Gate this path too -- `db_branch` is not the only route to Source::Db.
-        //
-        // The gate must be applied BEFORE the argmin, not after it. Filtering the winner
-        // (`nearest_glycan(..).filter(..)`) would drop the annotation entirely whenever the
-        // closest composition happens to be a gated-out sialic claim, instead of falling
-        // through to the non-sialic isobaric twin that is also inside the tolerance window.
-        // That is precisely the "shadow steals the argmax" failure that motivated the
-        // species gate in the first place: a wrong-but-mass-matching candidate wins and the
-        // real composition never gets considered.
-        let glycan = match sialic_gate {
-            Some((ev, min_frac)) => {
-                let admitted: Vec<GlycanComp> = glycans
-                    .iter()
-                    .filter(|g| ev.admits(g.neuac, g.neugc, min_frac))
-                    .cloned()
-                    .collect();
-                nearest_glycan(&admitted, residual, tol_ppm)
-            }
-            None => nearest_glycan(glycans, residual, tol_ppm),
-        };
+        let glycan = nearest_glycan(glycans, residual, tol_ppm);
         let source = if glycan.is_some() {
             Source::Db
         } else {
@@ -386,6 +350,7 @@ pub fn hybrid_candidates_presolved(
             // Keep the observed residual even when annotation returned None so a
             // novel glycan's intact mass is not lost (Codex finding #3).
             glycan_mass_residual: residual,
+            peptide_first: false,
         });
     }
 
@@ -411,7 +376,6 @@ pub fn hybrid_candidates_presolved(
             MIN_BACKBONE,
             precursor_z,
             isotope_offset,
-            sialic_gate,
         ));
     } else {
         combined = db_branch(
@@ -420,7 +384,6 @@ pub fn hybrid_candidates_presolved(
             MIN_BACKBONE,
             precursor_z,
             isotope_offset,
-            sialic_gate,
         );
     }
 
@@ -546,7 +509,7 @@ mod tests {
         let true_backbone = 1500.0_f64;
         let precursor = true_backbone + glycan_mass;
 
-        let hits = db_branch(precursor, &glycans, 500.0, 2, 0, None);
+        let hits = db_branch(precursor, &glycans, 500.0, 2, 0);
         assert!(!hits.is_empty(), "expected DB branch hits");
 
         // Must include a hit within ±0.01 Da of true_backbone.
@@ -566,7 +529,7 @@ mod tests {
         let glycans = test_glycans();
         // Very small precursor so backbone would be < 500 Da.
         let precursor = 600.0; // glycan of ~100 Da not in list; backbone ~100 Da
-        let hits = db_branch(precursor, &glycans, 500.0, 2, 0, None);
+        let hits = db_branch(precursor, &glycans, 500.0, 2, 0);
         for h in &hits {
             assert!(
                 h.backbone_mass >= 500.0,
@@ -581,7 +544,7 @@ mod tests {
     fn db_branch_is_sorted() {
         let glycans = test_glycans();
         let precursor = 4000.0;
-        let hits = db_branch(precursor, &glycans, 500.0, 2, 0, None);
+        let hits = db_branch(precursor, &glycans, 500.0, 2, 0);
         for w in hits.windows(2) {
             assert!(
                 w[0].backbone_mass <= w[1].backbone_mass + 1e-9,
@@ -766,7 +729,6 @@ mod tests {
                 tol,
                 top_k,
                 false,
-                0.0, // sialic oxonium gate: off
             ));
         }
 
@@ -1018,7 +980,7 @@ mod tests {
         let true_backbone = 1500.0_f64;
         let precursor = true_backbone + glycan_mass;
 
-        let hits = db_branch(precursor, &glycans, 500.0, 3, -1, None);
+        let hits = db_branch(precursor, &glycans, 500.0, 3, -1);
         assert!(!hits.is_empty());
         for h in &hits {
             assert_eq!(h.charge, 3, "charge must be threaded onto BackboneHit");

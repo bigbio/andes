@@ -5,9 +5,10 @@ the build, and an entry the code no longer reads fails it too.
 
 ## Policy
 
-**The engine reads no environment variables.** Everything that affects a search — or a
+**No environment variable changes a search result.** Everything that affects a search — or a
 model-training run — is a CLI flag with a documented default, so a result can be
-reproduced from the command line that produced it.
+reproduced from the command line that produced it. The shipped binary reads no `ANDES_*`
+variable at all.
 
 Environment variables were removed because they are invisible in `--help`, untyped,
 unvalidated, and easy to tune around and then forget. This codebase re-tuned selector
@@ -20,17 +21,16 @@ reach hot inner functions are installed once at startup from validated CLI input
 (`ScoringSettings`, `CzSettings`, `init_y_max_charge`, `init_ethcd_as_etd`,
 `init_dense_noise`) rather than read from the environment on each call.
 
-What remains below is limited to **test-harness variables**, which select optional
+What remains below is the complete set: **test-harness variables**, which select optional
 fixtures at `cargo test` time and are never read by the shipped binary.
 
 | Variable | Kind | Defined at |
 | --- | --- | --- |
 | `ANDES_GBDT_DIR` | test-harness | `crates/scoring/tests/gbdt_bench.rs:17` |
-| `ANDES_GLYCO_GDB` | test-harness | `crates/andes-glyco/src/glycan_first.rs:714` |
+| `ANDES_GLYCO_GDB` | test-harness | `crates/andes-glyco/src/glycan_first.rs:917` |
 | `ANDES_GLYCO_MGF` | test-harness | `crates/andes-glyco/tests/glycan_first_mouse.rs:77` |
 | `ANDES_TEST_D` | test-harness | `crates/input/tests/timstof_d_loads.rs:18` |
 | `ANDES_TEST_PERCOLATOR_BIN` | test-harness | `crates/output/tests/percolator_integration.rs:18` |
 | `ANDES_TEST_RAW` | test-harness | `crates/input/tests/thermo_raw.rs:16` |
-| `ANDES_TRAIN_BENCH` | test-harness | `crates/model-train/tests/yield_nonregression.rs:107` |
-| `ANDES_V1_OUT` | test-harness | `crates/model-train/tests/partition_parity.rs:208` |
-| `ANDES_V1_STORE` | test-harness | `crates/model-train/tests/partition_parity.rs:179` |
+| `ANDES_TRAIN_BENCH` | test-harness | `crates/model-train/tests/yield_nonregression.rs:104` |
+| `ANDES_V1_STORE` | test-harness | `crates/model-train/tests/partition_parity.rs:220` |

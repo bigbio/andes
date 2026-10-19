@@ -19,6 +19,29 @@ use crate::precursor_cal::PrecursorCalMode;
 /// A/B after changing this; raise further if it keeps recovering PSMs.
 pub const STRONG_SCORE_RETENTION_K: u32 = 25;
 
+/// Fragment-index mode: peptidoforms scored per spectrum (best fragment votes
+/// first). Measured 50–1000 within seed noise on phospho.
+pub const FRAGMENT_INDEX_TOP_K: u32 = 100;
+
+/// Fragment-index mode: minimum singly-charged b/y ions a peptidoform must match
+/// to be scored at all.
+pub const FRAGMENT_INDEX_MIN_MATCHED: u16 = 3;
+
+/// How many of a spectrum's most intense peaks vote in the fragment-ion index at
+/// a low-resolution fragment tolerance (high resolution: every peak). Measured on
+/// the low-res TMT set out-of-core: all peaks voting 4,368 PSMs @1%; 50, 100 and
+/// 150 peaks 12,285, 12,276 and 12,347; exhaustive enumeration 12,281.
+pub const FRAGMENT_INDEX_LOWRES_VOTE_PEAKS: usize = 150;
+
+/// Out-of-core (`mmap`) mode only: upper bound on the TOTAL number of candidates
+/// held in the per-chunk base-record expansion cache (~1 GiB). The cache is a pure
+/// memo (output is identical with or without it); records past the bound are
+/// expanded per spectrum instead. Without this bound a PTM-rich search (phospho on
+/// S/T/Y, four variable mods) cached tens of thousands of peptidoforms per window
+/// for thousands of windows and was OOM-killed at 64 GiB before the first chunk
+/// finished.
+pub const MMAP_WINDOW_CACHE_MAX_CANDIDATES: usize = 4_000_000;
+
 /// Primary ranking mode for candidate selection and PIN `RawScore` emission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScoreMode {
@@ -81,6 +104,11 @@ pub struct SearchParams {
     /// exposed via `--cal-min-spec-keys` so targeted runs can opt in to
     /// calibrating with fewer spectra.
     pub cal_min_spec_keys: usize,
+    /// Out-of-core (`mmap`) mode only: when > 0, score each spectrum against at
+    /// most this many peptidoforms chosen by a per-chunk fragment-ion index
+    /// (issue #76) instead of every peptidoform in its precursor windows.
+    /// 0 (default) = off, byte-identical enumeration path.
+    pub fragment_index_top_k: u32,
     /// Learned file-wide ppm shift applied to observed neutral masses in the
     /// main pass. Stays 0.0 until the pre-pass calibrator runs.
     pub precursor_mass_shift_ppm: f64,
@@ -95,10 +123,6 @@ pub struct SearchParams {
     /// residual (Astral wide windows co-isolate 3-5+). Only consulted when
     /// `chimeric` is true.
     pub chimeric_max_coisolated: usize,
-    /// Allow a Pass-2 co-isolated candidate to overlap the primary's matched peaks.
-    /// Default false: the residual spectrum normally has the primary's peaks removed,
-    /// and permitting overlap lets the same evidence support two PSMs.
-    pub chimeric_allow_overlap: bool,
     /// Averagine-envelope KL gate for accepting a co-isolated MS1 envelope as a
     /// secondary precursor — lower = stricter/cleaner → fewer spurious
     /// secondaries. Default 0.3. Only consulted when `chimeric` is true.
@@ -111,35 +135,14 @@ pub struct SearchParams {
     /// leaks low-confidence anchors into the entrapment-FDP. Only consulted when
     /// `--refine` is set.
     pub refine_select_psm_fdr: f64,
-    /// Candidate-resolution backing: `Ram` (default, in-RAM `Vec<Candidate>` +
-    /// bucket index — byte-identical to the historic path) or `Mmap` (out-of-core
-    /// mmap'd base-peptide index + lazy per-spectrum mod enumeration). Exposed via
-    /// `--candidate-index {ram,mmap}`. Carries the user selection into
-    /// `PreparedSearch`; `Ram` leaves every code path unchanged.
-    pub candidate_index: CandidateIndexMode,
     /// Enumerate only peptides carrying an N-X-S/T sequon (internal, or completed
     /// by the following residue) into the candidate index. `--glyco` scoring
-    /// never consults any other candidate — the peptide-first fragment index and
-    /// the backbone→candidate loop both gate on the same sequon membership — so
-    /// on the glyco path this shrinks the in-RAM index (~10x on a mouse proteome at
-    /// 3 missed cleavages) and leaves rows, peptides and labels unchanged; a few
-    /// per-spectrum candidate-distribution features (`RawScore`,
-    /// `CandidateRankEntropy`) can move on ~0.2% of rows. Off by default;
-    /// `--glyco-index-sequon-only`.
+    /// never consults any other candidate (its candidate table holds only these),
+    /// so on the glyco path this only shrinks the out-of-core index the table is
+    /// built from. Collision decoys are then relabelled against sequon-bearing
+    /// targets only. Off by default; `--glyco-index-sequon-only`.
     /// Not for the standard peptide search, whose scoring reads every candidate.
     pub require_nxst_sequon: bool,
-}
-
-/// Candidate-resolution backing selected by `--candidate-index`. Mirrors
-/// [`crate::match_engine::CandidateBacking`] at the params layer so the binary
-/// can carry the user choice without depending on the engine type directly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum CandidateIndexMode {
-    /// In-RAM candidate Vec + mass-bucket index. Default; byte-identical path.
-    #[default]
-    Ram,
-    /// Out-of-core mmap'd base-peptide index + lazy mod enumeration.
-    Mmap,
 }
 
 impl SearchParams {
@@ -171,6 +174,7 @@ impl SearchParams {
             min_peaks: 10,
             precursor_cal_mode: PrecursorCalMode::Off,
             cal_min_spec_keys: crate::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS,
+            fragment_index_top_k: 0,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,
@@ -180,10 +184,8 @@ impl SearchParams {
             // setting; deeper co-fragments are the diminishing tail.
             chimeric_max_coisolated: 4,
             chimeric_max_kl: 0.3,
-            chimeric_allow_overlap: false,
             score_mode: ScoreMode::Rank,
             refine_select_psm_fdr: 0.01,
-            candidate_index: CandidateIndexMode::Ram,
             require_nxst_sequon: false,
         }
     }

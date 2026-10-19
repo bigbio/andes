@@ -9,8 +9,7 @@ use crate::hybrid::Source;
 use std::cmp::Ordering;
 
 /// Default balance constant for the `gp` fused selector (leg 2). K scales the
-/// glycan core-Y ladder term against the peptide b/y rank-LLR. The `--glyco-gp-k`
-/// flag overrides it.
+/// glycan core-Y ladder term against the peptide b/y rank-LLR.
 ///
 /// LOWERED 50 → 10 (2026-07-17 round-2). A data-backed collapse audit showed the
 /// `K·ladder` term is computed PER-BACKBONE (identical for every isobaric peptide
@@ -29,17 +28,17 @@ pub const GLYCO_GP_K_DEFAULT: f32 = 10.0;
 /// matched b/y count) than the wrong winner but a LOWER intensity-weighted
 /// RankScore — i.e. andes' rank under-rewards COUNT, exactly what the reference engine's
 /// hyperscore (∝ Nb!·Ny!) rewards. Adding this count term recovers them.
-/// The `--glyco-gp-j` flag overrides it. Offline top1-by-mass: 318 -> 334 at J=5.
+/// Offline top1-by-mass: 318 -> 334 at J=5.
 pub const GLYCO_GP_J_DEFAULT: f32 = 5.0;
 
 /// Default weight for the count-rewarding hyperscore term (andes-glyco 2.0 peptide
 /// channel `P`). Scales `ln(N_matched!)` against the rank-LLR. Offline blend
-/// (rank + hyperscore + ladder + core-Y) top1-by-mass 334 → 344. The `--glyco-gp-h` flag
-/// overrides it; 0.0 disables the hyperscore term.
+/// (rank + hyperscore + ladder + core-Y) top1-by-mass 334 → 344. 0.0 would disable
+/// the hyperscore term.
 pub const GLYCO_GP_H_DEFAULT: f32 = 1.0;
 
 /// Default weight for the ETD c/z backbone hyperscore term in the gp collapse
-/// selector (`--glyco-gp-cz`). Added to the fused score ONLY on ETD/AI-ETD
+/// selector. Added to the fused score ONLY on ETD/AI-ETD
 /// spectra (the per-candidate c/z hyperscore is 0.0 on HCD/CID, so this term is
 /// inert on the closed-HCD path → byte-identical). On electron-transfer spectra
 /// the intact-glycan c/z ladder is the primary backbone evidence (the labile b/y
@@ -53,6 +52,27 @@ pub const GLYCO_GP_H_DEFAULT: f32 = 1.0;
 /// the non-discriminating `K·ladder`. Raising c/z to 15 (with K lowered to 10)
 /// lets c/z decide the winner on ETD/AI-ETD. Inert on HCD/CID (the per-candidate
 /// c/z hyperscore is 0.0 there), so this is byte-identical on the closed-HCD path.
+/// Penalty per unit of precursor isotope offset in the collapse.
+///
+/// An M+1 assignment costs an extra assumption — that the instrument selected a
+/// non-monoisotopic peak — so when two candidates explain the same precursor with
+/// equal fragment evidence, the one needing no correction should win. Measured on
+/// the engine L mouse-heart reference (issue #79): of 237 scans where andes called NeuGc and the
+/// reference called Hex+Fuc, 235 sat on isotope offset 1, while the reference
+/// composition was present in the candidate pool at offset 0 on 163 of 163
+/// recoverable scans with a seven-fold better precursor residual. The two
+/// hypotheses differ by 1.0204 Da against a neutron's 1.0034, i.e. 17 mDa or
+/// 4.8 ppm at the median 3,581 Da precursor — inside a 20 ppm window, so both
+/// enter the candidate set and the comparator, which reads no mass term, decided
+/// them on a Y-ladder difference of 0.04-0.20 out of 120-170.
+///
+/// 1.0 is an order of magnitude above those near-tie gaps and far below any real
+/// evidence difference, so it settles ties without overriding a candidate that
+/// genuinely scores better. It only ever applies when candidates at DIFFERENT
+/// offsets compete for one scan; a scan whose truth really is at M+1 with no
+/// offset-0 competitor is unaffected.
+pub const GLYCO_GP_ISO_DEFAULT: f32 = 1.0;
+
 pub const GLYCO_GP_CZ_DEFAULT: f32 = 15.0;
 
 /// The `gp` fused selector score (leg 2): `rank + k·ladder + j·core_y_hits`.
@@ -81,7 +101,27 @@ pub fn glyco_gp_fused_score(
     j: f32,
     h: f32,
 ) -> f32 {
+    glyco_gp_fused_score_iso(rank, ladder, core_y_hits, hyperscore, k, j, h, 0, 0.0)
+}
+
+/// The fused score with the isotope-offset penalty (issue #79). `isotope_offset`
+/// is the precursor hypothesis the candidate was enumerated under, and `iso` is
+/// the penalty per unit — see [`GLYCO_GP_ISO_DEFAULT`] for why it exists and how
+/// it was measured. Both collapse sites must call THIS with the same arguments.
+#[allow(clippy::too_many_arguments)]
+pub fn glyco_gp_fused_score_iso(
+    rank: f32,
+    ladder: f32,
+    core_y_hits: f32,
+    hyperscore: f32,
+    k: f32,
+    j: f32,
+    h: f32,
+    isotope_offset: i8,
+    iso: f32,
+) -> f32 {
     rank + k * ladder + j * core_y_hits + h * hyperscore
+        - iso * (isotope_offset.unsigned_abs() as f32)
 }
 
 /// Total order for the top-1-per-scan collapse: `max_by(collapse_cmp(...))`
@@ -166,8 +206,7 @@ pub struct GlycoPsmKey {
     /// composition can out-score a right, smaller one by predicting more rungs and
     /// matching a few extra. A fraction cannot be inflated that way — predicting
     /// rungs you cannot support LOWERS it. This is the form the field converged on
-    /// (pGlyco's coverage ratios, StrucGP's `matched_branchY_ratio`,
-    /// PTM-Shepherd's explicit miss penalty).
+    /// (coverage ratios, matched branch-Y ratios, explicit miss penalties).
     ///
     /// Measured motivation: 96.9% of our decoy winners sit at a DIFFERENT backbone
     /// mass than the truth, i.e. the failing decision is which mass split /
@@ -202,7 +241,7 @@ pub struct GlycoPsmKey {
     /// electron-transfer evidence that recovers the high-charge glycopeptides the
     /// labile-glycan b/y ladder misses. On ETD spectra this same c/z hyperscore
     /// ALSO contributes to the per-scan collapse selector (weighted by
-    /// `--glyco-gp-cz`); the peptide `rank_score`/`RawScore` are unchanged.
+    /// `GLYCO_GP_CZ_DEFAULT`); the peptide `rank_score`/`RawScore` are unchanged.
     pub cz_hyperscore: f32,
     /// Fraction of base-peak intensity captured by matched glycopeptide-aware c/z
     /// ions (additive PIN feature `CzIntensity`), ETD/AI-ETD only (0.0 on HCD/CID).
@@ -216,6 +255,69 @@ pub struct GlycoPsmKey {
     pub cz_explained: f32,
     /// c/z local-noise chance LLR (additive PIN `CzChanceLlr`; ETD only, else 0).
     pub cz_chance_llr: f32,
+}
+
+#[cfg(test)]
+mod isotope_penalty_tests {
+    use super::*;
+
+    /// Issue #79 in miniature. Two candidates explain one precursor: the true
+    /// composition at the monoisotopic peak, and a NeuGc-for-Hex+Fuc substitution
+    /// that only fits if the instrument picked M+1. Measured on mouse heart, the
+    /// wrong one wins by 0.04-0.20 on a fused score of 120-170 — a Y-ladder
+    /// difference of about 0.1% — because the comparator reads no mass term.
+    #[test]
+    fn the_monoisotopic_hypothesis_wins_a_near_tie() {
+        let k = GLYCO_GP_K_DEFAULT;
+        let truth = glyco_gp_fused_score_iso(40.0, 12.00, 3.0, 0.0, k, 0.0, 0.0, 0, GLYCO_GP_ISO_DEFAULT);
+        let swap = glyco_gp_fused_score_iso(40.0, 12.02, 3.0, 0.0, k, 0.0, 0.0, 1, GLYCO_GP_ISO_DEFAULT);
+        assert!(
+            truth > swap,
+            "the M+1 candidate still wins a 0.2-point ladder edge: truth {truth}, swap {swap}"
+        );
+    }
+
+    /// The penalty settles near-ties; it must not overturn a candidate that is
+    /// genuinely better. A whole core-Y hit is worth 5 points at the shipped
+    /// weights, far more than the offset costs.
+    #[test]
+    fn real_evidence_still_beats_the_penalty() {
+        let (k, j) = (GLYCO_GP_K_DEFAULT, GLYCO_GP_J_DEFAULT);
+        let weak_mono = glyco_gp_fused_score_iso(40.0, 12.0, 2.0, 0.0, k, j, 0.0, 0, GLYCO_GP_ISO_DEFAULT);
+        let strong_m1 = glyco_gp_fused_score_iso(40.0, 12.0, 3.0, 0.0, k, j, 0.0, 1, GLYCO_GP_ISO_DEFAULT);
+        assert!(
+            strong_m1 > weak_mono,
+            "an extra core-Y hit must outweigh one isotope step"
+        );
+    }
+
+    /// Uncontested scans are untouched: the penalty is a comparison between
+    /// candidates, so a scan whose only candidate sits at M+1 is unaffected in
+    /// rank, and a zero weight reproduces the unpenalised ordering exactly.
+    #[test]
+    fn zero_weight_reproduces_the_old_ordering() {
+        let k = GLYCO_GP_K_DEFAULT;
+        let a = glyco_gp_fused_score_iso(40.0, 12.00, 3.0, 0.0, k, 0.0, 0.0, 0, 0.0);
+        let b = glyco_gp_fused_score_iso(40.0, 12.02, 3.0, 0.0, k, 0.0, 0.0, 1, 0.0);
+        assert!(b > a, "at weight 0 the ladder edge must still decide");
+        assert_eq!(
+            a,
+            glyco_gp_fused_score(40.0, 12.00, 3.0, 0.0, k, 0.0, 0.0),
+            "the seven-argument form must equal the penalty-free score"
+        );
+    }
+
+    /// The penalty grows with the size of the correction, so M+2 is not preferred
+    /// over M+1 when both are on the table.
+    #[test]
+    fn the_penalty_scales_with_the_offset() {
+        let k = GLYCO_GP_K_DEFAULT;
+        let one = glyco_gp_fused_score_iso(40.0, 12.0, 3.0, 0.0, k, 0.0, 0.0, 1, GLYCO_GP_ISO_DEFAULT);
+        let two = glyco_gp_fused_score_iso(40.0, 12.0, 3.0, 0.0, k, 0.0, 0.0, 2, GLYCO_GP_ISO_DEFAULT);
+        let neg = glyco_gp_fused_score_iso(40.0, 12.0, 3.0, 0.0, k, 0.0, 0.0, -1, GLYCO_GP_ISO_DEFAULT);
+        assert!(one > two, "M+2 must cost more than M+1");
+        assert_eq!(one, neg, "a -1 offset is the same size of correction as +1");
+    }
 }
 
 #[cfg(test)]

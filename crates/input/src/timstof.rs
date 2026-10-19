@@ -146,6 +146,7 @@ impl TimsTofReader {
             activation_method: None,
             isolation_lower_offset,
             isolation_upper_offset,
+            isolation_target_mz: None,
         })
     }
 }

@@ -1,6 +1,6 @@
 //! MS1 isotope-envelope precursor correction (`--precursor-mono`).
 //!
-//! WHY. On pGlyco2 mouse liver (`MouseLiver-Z-T-1`), 84 of the 515 reference
+//! WHY. On the engine L mouse-liver reference (`MouseLiver-Z-T-1`), 84 of the 515 reference
 //! spectra andes misses have the true backbone in the candidate set, but the
 //! precursor m/z the instrument recorded sits 3–6 Da (70 of them exactly
 //! +4.01 Da) ABOVE the glycopeptide's monoisotopic mass: the firmware's
@@ -56,7 +56,7 @@ use model::mass::{ISOTOPE, PROTON};
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MonoParams {
     /// Largest number of isotopes the recorded precursor may be moved DOWN by.
-    /// The pGlyco2 liver misses reach +6 (bigbio/andes#64 test set).
+    /// The engine L liver misses reach +6 (bigbio/andes#64 test set).
     pub max_shift: u8,
     /// MS1 peak-matching tolerance, ppm of the target m/z.
     pub tol_ppm: f64,
@@ -135,6 +135,16 @@ impl MonoCorrection {
         } else {
             self.fit_recorded
         }
+    }
+
+    /// Whether an isotope-error window reaching `max_offset` isotopes above the
+    /// searched precursor covers a verified monoisotope: the best-fitting
+    /// hypothesis clears `min_fit` and lies within `max_offset` of the searched
+    /// one. False for an envelope that does not fit (nothing was verified) and
+    /// for a fit that points further down than the window reaches (a shift the
+    /// gates declined).
+    pub fn verified_within(&self, min_fit: f32, max_offset: i8) -> bool {
+        self.fit_best >= min_fit && self.best_shift - self.shift <= max_offset
     }
 }
 
@@ -330,6 +340,28 @@ mod tests {
         }
         peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
         peaks
+    }
+
+    #[test]
+    fn verified_within_requires_a_fitted_envelope_the_window_reaches() {
+        let p = MonoParams::default();
+        let mono = 1500.25;
+        // A clean envelope recorded on its monoisotope: verified.
+        let ms1 = synth_ms1(mono, 2, 8, 1e6, 100.0);
+        let c = correct_precursor(&ms1, mono, 2, median_nonzero_intensity(&ms1), &p).unwrap();
+        assert!(c.verified_within(p.min_fit, 1));
+        // A corrected mis-pick (recorded on M+4, searched from M+3): the +1 step
+        // reaches the monoisotope, a 0-wide window does not.
+        let m4 = mono + 4.0 * ISOTOPE / 2.0;
+        let c = correct_precursor(&ms1, m4, 2, median_nonzero_intensity(&ms1), &p).unwrap();
+        assert!(c.applied());
+        assert!(c.verified_within(p.min_fit, 1));
+        assert!(!c.verified_within(p.min_fit, 0));
+        // An MS1 with nothing at the precursor: a correction record exists, but
+        // nothing about the monoisotope was verified.
+        let empty = synth_ms1(mono + 300.0, 2, 8, 1e6, 100.0);
+        let c = correct_precursor(&empty, mono, 2, median_nonzero_intensity(&empty), &p).unwrap();
+        assert!(!c.verified_within(p.min_fit, 1));
     }
 
     #[test]

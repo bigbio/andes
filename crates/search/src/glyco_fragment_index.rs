@@ -1,6 +1,6 @@
 //! Fragment-ion index for glyco candidate generation (peptide-first).
 //!
-//! The precursor-mass bucket index (`bucket_index`) that andes inherited from
+//! The precursor-mass bucket lookup that andes inherited from
 //! MS-GF+ forces the glyco driver to either fully b/y-score every candidate
 //! backbone (the ~40-min brute force) or truncate cheaply by core-Y intensity
 //! (which loses weak/absent-core-Y spectra — the measured candidate-generation

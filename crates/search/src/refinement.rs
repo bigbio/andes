@@ -246,6 +246,7 @@ pub fn build_refinement_index(
     let subset = full_target_db.subset_by_index(&keep);
     let db = build_search_db(&subset, decoy_prefix, decoy_strategy, seed);
     SearchIndex {
+        has_alternative_entries: crate::search_index::holds_alternative_entries(&db),
         db,
         decoy_prefix: crate::decoy::normalize_decoy_prefix(decoy_prefix),
         decoy_suffix: None,
@@ -276,6 +277,9 @@ pub fn build_peptide_anchored_index(
     // silently defeat the fallback, emitting a blank Proteins column -- worse than a
     // synthetic name, because it names nothing AND looks like data.
     base_accessions: &[Option<String>],
+    // Origin of the Pass-1 protein each backbone came from (UniProt isoform,
+    // variant or chain entry), parallel to `base_seqs`; missing means Reference.
+    base_origins: &[Option<model::EntryOrigin>],
     decoy_prefix: &str,
     decoy_strategy: DecoyStrategy,
     seed: u64,
@@ -308,14 +312,186 @@ pub fn build_peptide_anchored_index(
                     .unwrap_or_else(|| format!("BASEPEP_{i}")),
                 description: String::new(),
                 sequence: seq.clone(),
+                // Pass-2 rows keep the provenance of the entry they came from.
+                annotation: base_origins.get(i).cloned().flatten().map(|o| {
+                    std::sync::Arc::new(
+                        model::ProteinAnnotation::new(Vec::new(), None).with_origin(Some(o)),
+                    )
+                }),
             })
             .collect(),
     };
-    let combined = build_search_db(&minidb, decoy_prefix, decoy_strategy, seed);
+    let combined = anchored_target_plus_decoy(&minidb, decoy_prefix, decoy_strategy, seed);
     SearchIndex {
+        has_alternative_entries: crate::search_index::holds_alternative_entries(&combined),
         db: combined,
         decoy_prefix: crate::decoy::normalize_decoy_prefix(decoy_prefix),
         decoy_suffix: None,
+    }
+}
+
+/// Target + decoy DB for the peptide-anchored Pass-2 index, with each decoy keeping
+/// its target's FIRST and LAST residue in place and reversing (or shuffling) only the
+/// interior.
+///
+/// Every mini-protein here is a single peptide, so a whole-sequence decoy breaks the
+/// target/decoy pairing that competition relies on. Reversing `PEPKTIDEK` gives
+/// `KEDITKPEP`: the cleavage residue moves to the front, the full-length decoy needs one
+/// more missed cleavage than its target, and under the default limit of one it is never
+/// generated. Reversal also moves an N-terminal Q/E to the C-terminus, so pyro-Glu
+/// candidates exist only on the target side. Fixing both termini keeps the decoy's
+/// cleavage pattern and N-terminal modification eligibility equal to its target's.
+fn anchored_target_plus_decoy(
+    minidb: &ProteinDb,
+    decoy_prefix: &str,
+    decoy_strategy: DecoyStrategy,
+    seed: u64,
+) -> ProteinDb {
+    let interiors = ProteinDb {
+        proteins: minidb
+            .proteins
+            .iter()
+            .map(|p| model::protein::Protein {
+                accession: p.accession.clone(),
+                description: p.description.clone(),
+                sequence: interior(&p.sequence).to_vec(),
+                annotation: None,
+            })
+            .collect(),
+    };
+    let built = build_search_db(&interiors, decoy_prefix, decoy_strategy, seed);
+    let n = minidb.proteins.len();
+    let mut proteins = minidb.proteins.clone();
+    proteins.extend(
+        built
+            .proteins
+            .into_iter()
+            .skip(n)
+            .zip(minidb.proteins.iter().cycle())
+            .map(|(mut d, t)| {
+                let seq = &t.sequence;
+                if seq.len() >= 2 {
+                    let mut full = Vec::with_capacity(seq.len());
+                    full.push(seq[0]);
+                    full.extend_from_slice(&d.sequence);
+                    full.push(seq[seq.len() - 1]);
+                    d.sequence = full;
+                }
+                // The target's annotation holds only its origin; the decoy keeps it.
+                d.annotation = t.annotation.clone();
+                d
+            }),
+    );
+    ProteinDb { proteins }
+}
+
+/// For each anchor, whether its sequence starts a target protein, at position 0
+/// or right after an initiator Met.
+fn anchors_at_protein_nterm(base_seqs: &[Vec<u8>], db: &ProteinDb) -> Vec<bool> {
+    let starts: std::collections::HashSet<&[u8]> = db
+        .proteins
+        .iter()
+        .flat_map(|p| {
+            let s = p.sequence.as_slice();
+            let met_cleaved = (s.first() == Some(&b'M') && s.len() > 1).then(|| &s[1..]);
+            std::iter::once(s).chain(met_cleaved)
+        })
+        .collect();
+    // Any protein start that begins with the anchor makes it N-terminal. Compare on
+    // the anchor's length: group protein starts by prefix of each needed length.
+    let lens: std::collections::BTreeSet<usize> = base_seqs.iter().map(|s| s.len()).collect();
+    let prefixes: std::collections::HashSet<&[u8]> = lens
+        .iter()
+        .flat_map(|&l| {
+            starts
+                .iter()
+                .filter(move |s| s.len() >= l)
+                .map(move |s| &s[..l])
+        })
+        .collect();
+    base_seqs
+        .iter()
+        .map(|a| prefixes.contains(a.as_slice()))
+        .collect()
+}
+
+/// Whether a Pass-2 candidate exists only because its mini-protein starts at
+/// position 0: it carries a protein-N-terminal modification, or it is the
+/// Met-cleaved variant (offset 1 of a mini-protein starting with M; the decoy keeps
+/// its anchor's first residue, so targets and decoys are treated alike).
+fn uses_protein_nterm(c: &Candidate, starts_with_met: bool) -> bool {
+    (starts_with_met && c.start_offset_in_protein == 1)
+        || c.peptide.residues.iter().any(|aa| {
+            aa.mod_
+                .as_ref()
+                .is_some_and(|m| m.location == ModLocation::ProtNTerm)
+        })
+}
+
+/// Accession prefix of the entrapment anchors the refine config's
+/// `entrapment: true` adds.
+pub const ENTRAPMENT_PREFIX: &str = "ENT_";
+
+/// One entrapment anchor per Pass-2 anchor: the anchor with its interior shuffled
+/// and both termini kept, so it has the same mass, composition, cleavage pattern and
+/// modifiable residues but is not a real peptide. Anchors whose shuffle reproduces
+/// any anchor sequence (short or repetitive interiors) are skipped. Accessions are
+/// `ENT_<anchor accession>`.
+///
+/// Pass-2 anchors are confident real peptides, so the run-level entrapment database
+/// never reaches Pass 2. With one entrapment anchor per real anchor, the Pass-2
+/// false-discovery proportion at a threshold is about 2 × ENT hits / accepted
+/// Pass-2 PSMs.
+fn entrapment_anchors(
+    base_seqs: &[Vec<u8>],
+    base_accs: &[Option<String>],
+    seed: u64,
+) -> (Vec<Vec<u8>>, Vec<Option<String>>, Vec<usize>) {
+    let real: std::collections::HashSet<&[u8]> = base_seqs.iter().map(|s| s.as_slice()).collect();
+    let mut seqs = Vec::new();
+    let mut accs = Vec::new();
+    let mut sources = Vec::new();
+    for (i, seq) in base_seqs.iter().enumerate() {
+        if seq.len() < 4 {
+            continue;
+        }
+        let mut inner = interior(seq).to_vec();
+        // Seeded xorshift64 per anchor (never zero), Fisher–Yates from the back.
+        let mut state =
+            (seed ^ 0xE47A_9C1D_5B3F_2E61) ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        if state == 0 {
+            state = 0xD1B5_4A32_D192_ED03;
+        }
+        for j in (1..inner.len()).rev() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            inner.swap(j, (state % (j as u64 + 1)) as usize);
+        }
+        let mut ent = Vec::with_capacity(seq.len());
+        ent.push(seq[0]);
+        ent.extend_from_slice(&inner);
+        ent.push(seq[seq.len() - 1]);
+        if real.contains(ent.as_slice()) {
+            continue;
+        }
+        let acc = base_accs
+            .get(i)
+            .and_then(|a| a.as_ref())
+            .map_or_else(|| format!("BASEPEP_{i}"), |a| a.clone());
+        seqs.push(ent);
+        accs.push(Some(format!("{ENTRAPMENT_PREFIX}{acc}")));
+        sources.push(i);
+    }
+    (seqs, accs, sources)
+}
+
+/// The residues between the first and last; empty for sequences shorter than 3.
+fn interior(seq: &[u8]) -> &[u8] {
+    if seq.len() >= 2 {
+        &seq[1..seq.len() - 1]
+    } else {
+        seq
     }
 }
 
@@ -393,8 +569,14 @@ pub fn refinement_aa_set(
     // skipped — the fixed label owns that position.
     let mut fixed_slots: Vec<(ResidueSpec, ModLocation)> = Vec::new();
 
-    // 1. Inherit the base search's full mod set (fixed AND variable).
+    // 1. Inherit the base search's full mod set (fixed AND variable), except
+    //    mods restricted to annotated sites: the Pass-2 mini-proteins carry no
+    //    database annotation, so such a mod could never be placed there, and
+    //    claiming its slot would also block the tier's unrestricted mod.
     for m in base.distinct_mods() {
+        if m.annotated_site_mass.is_some() {
+            continue;
+        }
         present.insert(mod_key(m.residue, m.location, m.mass_delta));
         if m.fixed {
             fixed_slots.push((m.residue, m.location));
@@ -444,6 +626,7 @@ pub fn refinement_aa_set(
                 accession: None,
                 neutral_losses: Vec::new(),
                 loss_class: 0,
+                annotated_site_mass: None,
             };
             builder = builder.add_variable_mod(m);
         }
@@ -552,7 +735,9 @@ pub struct RefinementOutput {
 ///   3. `build_peptide_anchored_index` scoped to the confident base peptides.
 ///   4. A Pass-2 `SearchParams` clone whose `aa_set` is the refinement tier
 ///      ([`refinement_aa_set`]) and whose `max_variable_mods_per_peptide` is
-///      `cfg.max_mods`, prepared via `PreparedSearch::prepare`.
+///      `cfg.max_mods`, prepared via `PreparedSearch::prepare_in_memory` over the
+///      anchored index with per-spectrum enumeration of every candidate in the
+///      precursor window.
 ///   5. `run_chunk` over the (cloned) unidentified spectra; each winner is tagged
 ///      `is_refinement = 1`, has `(num_mods, refine_mod_class)` filled from its
 ///      Pass-2 peptide, and has its `spectrum_idx` fixed to the GLOBAL index.
@@ -602,12 +787,41 @@ pub fn run_refinement(
         pass1_candidates,
         base_params.refine_select_psm_fdr,
     );
-    let base_seqs: Vec<Vec<u8>> = base_with_src.iter().map(|(seq, _)| seq.clone()).collect();
-    // Real Pass-1 protein index per anchored backbone, so Pass-2 winners can be
-    // attributed to a protein instead of a synthetic BASEPEP_ accession.
-    let base_src: Vec<usize> = base_with_src.iter().map(|(_, pi)| *pi).collect();
+    let mut base_seqs: Vec<Vec<u8>> = base_with_src.iter().map(|(seq, _)| seq.clone()).collect();
     if base_seqs.is_empty() {
         return None;
+    }
+    // Real Pass-1 protein accession per anchored backbone, so Pass-2 winners can be
+    // attributed to a protein instead of a synthetic BASEPEP_ accession.
+    let mut base_accs: Vec<Option<String>> = base_with_src
+        .iter()
+        .map(|&(_, pi)| full_target_db.proteins.get(pi).map(|p| p.accession.clone()))
+        .collect();
+    let base_origins: Vec<Option<model::EntryOrigin>> = base_with_src
+        .iter()
+        .map(|&(_, pi)| {
+            full_target_db
+                .proteins
+                .get(pi)
+                .and_then(|p| p.origin())
+                .filter(|o| o.kind != model::EntryKind::Reference)
+                .cloned()
+        })
+        .collect();
+    // Protein N-terminal status per anchor, decided from the target database (the
+    // anchor's own mini-protein always starts at 0, so enumeration cannot tell).
+    let mut anchor_nterm = anchors_at_protein_nterm(&base_seqs, full_target_db);
+    if cfg.entrapment {
+        let (ent_seqs, ent_accs, ent_sources) = entrapment_anchors(&base_seqs, &base_accs, seed);
+        let ent_nterm: Vec<bool> = ent_sources.iter().map(|&i| anchor_nterm[i]).collect();
+        anchor_nterm.extend(ent_nterm);
+        eprintln!(
+            "[refine]   entrapment: {} shuffled anchors added ({} anchors had no distinct shuffle)",
+            ent_seqs.len(),
+            base_seqs.len() - ent_seqs.len()
+        );
+        base_seqs.extend(ent_seqs);
+        base_accs.extend(ent_accs);
     }
 
     // 2. Spectra Pass-1 did not confidently identify at the report FDR
@@ -652,14 +866,14 @@ pub fn run_refinement(
     //    peptide + a 1:1 decoy each. Built as an owned local so it can be MOVED
     //    into the returned `RefinementOutput` once the `PreparedSearch` borrow of
     //    it ends (see below).
-    let refine_idx = {
-        // Map each anchored backbone to its Pass-1 protein's real accession.
-        let base_accs: Vec<Option<String>> = base_src
-            .iter()
-            .map(|&pi| full_target_db.proteins.get(pi).map(|p| p.accession.clone()))
-            .collect();
-        build_peptide_anchored_index(&base_seqs, &base_accs, decoy_prefix, decoy_strategy, seed)
-    };
+    let refine_idx = build_peptide_anchored_index(
+        &base_seqs,
+        &base_accs,
+        &base_origins,
+        decoy_prefix,
+        decoy_strategy,
+        seed,
+    );
 
     // 4. Pass-2 params: refinement variable-mod tier + the tier's mod cap.
     //    Bound the per-peptide mod cap: the candidate count grows combinatorially
@@ -685,6 +899,9 @@ pub fn run_refinement(
         }
     };
     refine_params.max_variable_mods_per_peptide = capped_max_mods;
+    // The anchored database is small, so Pass 2 scores every candidate in each
+    // spectrum's precursor window instead of a fragment-index shortlist.
+    refine_params.fragment_index_top_k = 0;
 
     // 5. Search ONLY the unidentified spectra. We clone them into a contiguous
     //    sub-vec (run_chunk takes a &[Spectrum]); `spectrum_idx_offset = 0` is
@@ -695,32 +912,57 @@ pub fn run_refinement(
     //    search, so we extract the Pass-2 candidate pool into an owned Vec and
     //    DROP `refine_prepared` (ending the borrow) before moving `refine_idx`
     //    into the output below.
-    let (pass2_queues, refine_candidates) = {
-        let refine_prepared = PreparedSearch::prepare(
+    let (pass2_queues, refine_candidates, pass2_base_peptides) = {
+        // Mini-protein k is anchor k mod n (targets, then their decoys). Each
+        // mini-protein starts at position 0, so enumeration offers protein-N-terminal
+        // modifications and the Met-cleaved variant on every anchor; keep them only
+        // for anchors that really start a protein.
+        let n_anchors = base_seqs.len();
+        let starts_with_met: Vec<bool> =
+            base_seqs.iter().map(|s| s.first() == Some(&b'M')).collect();
+        let mut refine_prepared = match PreparedSearch::prepare_in_memory(
             &refine_idx,
             &refine_params,
             scorer,
             fragment_tol_da,
             decoy_prefix,
-        );
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!(
+                    "WARN: --refine could not build the Pass-2 candidate index ({e}); \
+                     skipping refinement for this run."
+                );
+                return None;
+            }
+        }
+        .with_candidate_filter(Box::new(move |c: &Candidate| {
+            let a = c.protein_index % n_anchors;
+            anchor_nterm[a] || !uses_protein_nterm(c, starts_with_met[a])
+        }));
         let subset: Vec<model::spectrum::Spectrum> =
             unident.iter().map(|&i| all_spectra[i].clone()).collect();
         let queues = refine_prepared.run_chunk(&subset, 0);
-        // `PreparedSearch.candidates` is an owned `Vec<Candidate>`; move it out so
-        // the prepared search (and its `&refine_idx` borrow) can be dropped.
-        (queues, refine_prepared.candidates)
+        // Move the materialized candidates out so the prepared search (and its
+        // `&refine_idx` borrow) can be dropped.
+        refine_prepared.sync_materialized_candidates();
+        let base_peptides = refine_prepared.mmap_index.len();
+        (
+            queues,
+            std::mem::take(&mut refine_prepared.candidates),
+            base_peptides,
+        )
     };
 
     // Tag each Pass-2 winner; collect into one queue per refined spectrum, AND
-    // PRUNE the candidate pool to just the winners. The Pass-2 search visits an
-    // enormous pool (mod permutations over every anchored peptide — millions of
-    // candidates), but only the few thousand referenced by a surviving PSM are
-    // ever needed downstream: the PIN resolves peptide/accession through
-    // `candidate_idxs`. We copy those into a compact pool, remap indices, and drop
-    // the full pool — it is the dominant refine memory driver (the cloned peaks
-    // are ~45 MB by comparison). Output is unchanged: each PSM still resolves to
-    // the same peptide/candidate, only the internal index numbering differs.
+    // PRUNE the candidate pool to just the winners: the scan's pool holds every
+    // candidate a retained PSM referenced, but the PIN resolves peptide/accession
+    // only through the emitted rows' `candidate_idxs`. We copy those into a
+    // compact pool and remap indices; each PSM still resolves to the same
+    // peptide/candidate, only the internal index numbering differs.
     let pass2_total = refine_candidates.len();
+    let pass2_decoys = refine_candidates.iter().filter(|c| c.is_decoy).count();
+    let mut isotope_mimics = 0usize;
     let mut compact: Vec<Candidate> = Vec::new();
     let mut remap: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
     let mut out_queues: Vec<TopNQueue> = Vec::with_capacity(unident.len());
@@ -739,6 +981,15 @@ pub fn run_refinement(
             // spectrum) and must not be emitted as refinement rows (`is_refinement=1`)
             // or they inflate the modified count and double-count per scan.
             if num_mods == 0 {
+                continue;
+            }
+            let pep = &refine_candidates[psm.primary_candidate_idx() as usize].peptide;
+            if crate::isotope_mimic::fits_better(
+                pep,
+                crate::isotope_mimic::mod_shift_da(pep),
+                psm.mass_error_ppm,
+            ) {
+                isotope_mimics += 1;
                 continue;
             }
             psm.features.is_refinement = 1;
@@ -763,18 +1014,22 @@ pub fn run_refinement(
         }
         out_queues.push(tagged);
     }
-    drop(refine_candidates); // free the full Pass-2 pool now; `compact` replaces it
+    drop(refine_candidates); // `compact` replaces the Pass-2 pool
 
-    // Transparency + cost visibility: show the full Pass-2 pool size and the
+    // Transparency + cost visibility: show the Pass-2 index size and the
     // pruned winners-only count so a user/operator sees both the search cost and
     // what survives into the merged PIN.
     eprintln!(
-        "[REFINE] anchors={} unident={}/{} pass2_candidates={} (pruned to {} winners)",
+        "[REFINE] anchors={} unident={}/{} pass2_base_peptides={} pass2_candidates_retained={} (targets={} decoys={}) (pruned to {} winners; {} dropped as isotope mimics)",
         base_seqs.len(),
         unident.len(),
         all_spectra.len(),
+        pass2_base_peptides,
         pass2_total,
+        pass2_total - pass2_decoys,
+        pass2_decoys,
         compact.len(),
+        isotope_mimics,
     );
 
     Some(RefinementOutput {
@@ -908,6 +1163,7 @@ mod tests {
             accession: acc.into(),
             description: String::new(),
             sequence: seq.to_vec(),
+            annotation: None,
         }
     }
 
@@ -1035,6 +1291,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         });
         let pep = Peptide::new(
             vec![
@@ -1231,9 +1488,36 @@ mod tests {
     // ── (c') build_peptide_anchored_index ──────────────────────────────────
 
     #[test]
+    fn anchored_mini_proteins_keep_their_source_origin() {
+        let origin = model::EntryOrigin {
+            kind: model::EntryKind::Variant,
+            family: std::sync::Arc::from("P1"),
+            feature: std::sync::Arc::from("VAR_1"),
+            variant_delta_da: 0.984016,
+            knockoff_of: None,
+        };
+        let base_seqs = vec![b"PEPTIDK".to_vec(), b"SAMPLER".to_vec()];
+        let idx = build_peptide_anchored_index(
+            &base_seqs,
+            &[],
+            &[Some(origin.clone()), None],
+            "XXX",
+            DecoyStrategy::Reverse,
+            42,
+        );
+        assert_eq!(idx.db.proteins[0].origin(), Some(&origin));
+        assert_eq!(idx.db.proteins[1].origin(), None);
+        // The paired decoys carry the same origin as their targets.
+        assert_eq!(idx.db.proteins[2].origin(), Some(&origin));
+        assert_eq!(idx.db.proteins[3].origin(), None);
+        assert!(idx.has_alternative_entries);
+    }
+
+    #[test]
     fn build_peptide_anchored_index_one_mini_protein_per_base_seq_plus_decoys() {
         let base_seqs = vec![b"PEPTIK".to_vec(), b"SAMPLER".to_vec()];
-        let idx = build_peptide_anchored_index(&base_seqs, &[], "XXX", DecoyStrategy::Reverse, 42);
+        let idx =
+            build_peptide_anchored_index(&base_seqs, &[], &[], "XXX", DecoyStrategy::Reverse, 42);
 
         // 2 target mini-proteins + 2 paired Reverse decoys.
         assert_eq!(idx.db.len(), 4);
@@ -1249,12 +1533,85 @@ mod tests {
         assert_eq!(idx.decoy_prefix, "XXX");
     }
 
+    #[test]
+    fn anchored_decoys_keep_termini_and_pair_full_length_with_targets() {
+        // A missed cleavage (PEPKTIDEK), N-terminal Q/E for pyro-Glu (QPEPTIDEK,
+        // EAMPLENR), and an internal K far from the C-terminus (ACDKNQMR): every case
+        // where reversing the whole peptide used to leave a target without a decoy.
+        let anchors: Vec<&[u8]> = vec![
+            b"PEPTIDEK",
+            b"PEPKTIDEK",
+            b"QPEPTIDEK",
+            b"EAMPLENR",
+            b"SAMNPLEQR",
+            b"ACDKNQMR",
+        ];
+        let base_seqs: Vec<Vec<u8>> = anchors.iter().map(|a| a.to_vec()).collect();
+        let idx =
+            build_peptide_anchored_index(&base_seqs, &[], &[], "XXX", DecoyStrategy::Reverse, 42);
+        let n = anchors.len();
+        assert_eq!(idx.db.proteins[n].sequence, b"PEDITPEK".to_vec());
+        assert_eq!(idx.db.proteins[n + 1].sequence, b"PEDITKPEK".to_vec());
+
+        let base = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
+            .build()
+            .unwrap();
+        let set = refinement_aa_set(&base, &RefineConfig::default_tier(), true).unwrap();
+        let mut params = SearchParams::default_tryptic(set);
+        params.min_length = 6;
+        params.max_variable_mods_per_peptide = 2;
+        let cands: Vec<Candidate> =
+            crate::candidate_gen::enumerate_candidates(&idx, &params, "XXX").collect();
+        for (i, a) in anchors.iter().enumerate() {
+            let full = |prot: usize| {
+                cands
+                    .iter()
+                    .filter(|c| c.protein_index == prot && c.peptide.length() == a.len())
+                    .count()
+            };
+            let (t, d) = (full(i), full(i + n));
+            assert!(
+                t > 0,
+                "{}: no full-length target",
+                String::from_utf8_lossy(a)
+            );
+            assert_eq!(
+                t,
+                d,
+                "{}: full-length target forms {t} vs decoy forms {d}",
+                String::from_utf8_lossy(a)
+            );
+        }
+    }
+
     // ── (d) refinement_aa_set ──────────────────────────────────────────────
 
     fn base_set_with_cam_c() -> AminoAcidSet {
         AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn refinement_aa_set_leaves_out_mods_restricted_to_annotated_sites() {
+        // The Pass-2 mini-proteins carry no annotation: a restricted base mod
+        // could never be placed there, and must not block the tier's own mod.
+        let ox = model::modification::Modification::from_mods_txt_line(
+            "15.994915,M,opt,any,Oxidation,sites=annotated",
+        )
+        .unwrap();
+        let base = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
+            .add_variable_mod(ox)
+            .build()
+            .unwrap();
+        let set = refinement_aa_set(&base, &RefineConfig::default_tier(), true).unwrap();
+        assert!(set
+            .iter_variants()
+            .all(|aa| aa.mod_.is_none_or(|m| m.annotated_site_mass.is_none())));
+        assert!(set
+            .variants_for(b'M', ModLocation::Anywhere)
+            .iter()
+            .any(|aa| aa.mod_.is_some_and(|m| m.name == "Oxidation")));
     }
 
     #[test]
@@ -1341,6 +1698,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         let base = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
             .add_variable_mod(acetyl)
@@ -1383,6 +1741,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         let base = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
             .add_fixed_mod(tmt_k)
@@ -1419,6 +1778,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         let base = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
             .add_variable_mod(ox_m)
@@ -1454,9 +1814,107 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         let aa = AminoAcid::standard(residue).unwrap().with_mod(m);
         Peptide::new(vec![aa, AminoAcid::standard(b'G').unwrap()], b'_', b'-')
+    }
+
+    #[test]
+    fn anchors_at_protein_nterm_sees_position_zero_and_initiator_met() {
+        let db = ProteinDb {
+            proteins: vec![
+                Protein {
+                    accession: "P1".into(),
+                    description: String::new(),
+                    sequence: b"MSAMPLERPEPTIDEK".to_vec(),
+                    annotation: None,
+                },
+                Protein {
+                    accession: "P2".into(),
+                    description: String::new(),
+                    sequence: b"QWERTYKLMNPQR".to_vec(),
+                    annotation: None,
+                },
+            ],
+        };
+        let anchors: Vec<Vec<u8>> = vec![
+            b"MSAMPLER".to_vec(), // starts P1
+            b"SAMPLER".to_vec(),  // starts P1 after the initiator Met
+            b"PEPTIDEK".to_vec(), // internal
+            b"QWERTYK".to_vec(),  // starts P2
+            b"WERTYK".to_vec(),   // P2 does not start with M
+        ];
+        assert_eq!(
+            anchors_at_protein_nterm(&anchors, &db),
+            vec![true, true, false, true, false]
+        );
+    }
+
+    #[test]
+    fn uses_protein_nterm_flags_prot_nterm_mods_and_met_cleavage_only() {
+        let cand = |pep: Peptide, offset: usize| Candidate {
+            peptide: pep,
+            protein_index: 0,
+            start_offset_in_protein: offset,
+            is_decoy: false,
+            is_protein_n_term: true,
+            is_protein_c_term: true,
+        };
+        let acetyl = Modification {
+            name: "Acetyl".into(),
+            mass_delta: 42.010565,
+            residue: ResidueSpec::Wildcard,
+            location: ModLocation::ProtNTerm,
+            fixed: false,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+            annotated_site_mass: None,
+        };
+        let mut res = unmod_peptide(b"SAMPLER").residues;
+        res[0] = res[0].clone().with_mod(acetyl);
+        let acetylated = Peptide::new(res, b'_', b'-');
+        assert!(uses_protein_nterm(&cand(acetylated, 0), false));
+        assert!(!uses_protein_nterm(
+            &cand(unmod_peptide(b"SAMPLER"), 0),
+            false
+        ));
+        // Offset 1 is the Met-cleaved variant only when the mini-protein starts with M.
+        assert!(uses_protein_nterm(
+            &cand(unmod_peptide(b"SAMPLER"), 1),
+            true
+        ));
+        assert!(!uses_protein_nterm(
+            &cand(unmod_peptide(b"SAMPLER"), 1),
+            false
+        ));
+    }
+
+    #[test]
+    fn entrapment_anchors_keep_termini_and_composition_and_are_not_real() {
+        let base: Vec<Vec<u8>> = vec![
+            b"PEPTIDEK".to_vec(),
+            b"SAMNPLEQR".to_vec(),
+            b"AAAAK".to_vec(), // interior shuffle can only reproduce itself
+        ];
+        let accs = vec![Some("P1".to_string()), None, Some("P3".to_string())];
+        let (seqs, ent_accs, sources) = entrapment_anchors(&base, &accs, 1);
+        assert_eq!(sources, vec![0, 1]);
+        assert_eq!(seqs.len(), 2, "the all-A interior has no distinct shuffle");
+        assert_eq!(ent_accs[0].as_deref(), Some("ENT_P1"));
+        assert_eq!(ent_accs[1].as_deref(), Some("ENT_BASEPEP_1"));
+        for (ent, orig) in seqs.iter().zip(&base) {
+            assert_ne!(ent, orig);
+            assert_eq!(ent.first(), orig.first());
+            assert_eq!(ent.last(), orig.last());
+            let (mut a, mut b) = (ent.clone(), orig.clone());
+            a.sort_unstable();
+            b.sort_unstable();
+            assert_eq!(a, b, "same composition, so same precursor mass");
+        }
+        // Deterministic for a given seed.
+        assert_eq!(entrapment_anchors(&base, &accs, 1).0, seqs);
     }
 
     #[test]
@@ -1511,6 +1969,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         });
         let deam = AminoAcid::standard(b'N').unwrap().with_mod(Modification {
             name: "Deamidation".into(),
@@ -1521,6 +1980,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         });
         let pep = Peptide::new(vec![ox, deam], b'_', b'-');
         let (n, class) = mod_count_and_class(&pep, &cfg);
@@ -1787,6 +2247,183 @@ mod tests {
         assert_eq!(queues[0].peek_top().unwrap().features.is_refinement, 0);
     }
 
+    /// Residue mass (Cam-C when `cam`) and, for a `k`, the tier's K oxidation.
+    fn fixture_residue_mass(aa: u8, cam: bool) -> f64 {
+        match aa {
+            b'G' => 57.021464,
+            b'A' => 71.037114,
+            b'S' => 87.032028,
+            b'P' => 97.052764,
+            b'V' => 99.068414,
+            b'T' => 101.047679,
+            b'C' if cam => 103.009185 + 57.021464,
+            b'C' => 103.009185,
+            b'N' => 114.042927,
+            b'D' => 115.026943,
+            b'Q' => 128.058578,
+            b'K' => 128.094963,
+            b'k' => 128.094963 + 15.994915,
+            b'E' => 129.042593,
+            b'M' => 131.040485,
+            b'F' => 147.068414,
+            b'W' => 186.079313,
+            _ => panic!("residue {} not in the fixture table", aa as char),
+        }
+    }
+
+    /// A charge-2 spectrum of `seq` (lower-case `k` = oxidised K; Cam-C when
+    /// `cam`) holding its singly charged b and y ions, at `extra_da` above the
+    /// peptide's neutral mass.
+    fn fixture_spectrum(seq: &[u8], cam: bool, extra_da: f64) -> model::spectrum::Spectrum {
+        use model::mass::{H2O, PROTON};
+        let res: Vec<f64> = seq.iter().map(|&a| fixture_residue_mass(a, cam)).collect();
+        let neutral: f64 = res.iter().sum::<f64>() + H2O;
+        let mut peaks: Vec<(f64, f32)> = Vec::new();
+        for i in 1..res.len() {
+            let b: f64 = res[..i].iter().sum();
+            peaks.push((b + PROTON, 1000.0));
+            peaks.push((neutral - b + PROTON, 1000.0));
+        }
+        peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+        model::spectrum::Spectrum {
+            precursor_mz: (neutral + extra_da + 2.0 * PROTON) / 2.0,
+            precursor_charge: Some(2),
+            scan: Some(1),
+            peaks,
+            ..Default::default()
+        }
+    }
+
+    /// Pass 1 identifies one spectrum per anchor confidently and leaves `query`
+    /// unidentified; returns the refinement output over `db` (Cam-C fixed when
+    /// `cam`).
+    fn refine_fixture(
+        anchors: &[(&[u8], usize)],
+        db: &ProteinDb,
+        cam: bool,
+        query: model::spectrum::Spectrum,
+    ) -> Option<RefinementOutput> {
+        let aa_set = if cam {
+            base_set_with_cam_c()
+        } else {
+            AminoAcidSetBuilder::new_standard().build().unwrap()
+        };
+        let params = SearchParams::default_tryptic(aa_set);
+        let mut candidates = Vec::new();
+        let mut queues = Vec::new();
+        let mut spectra = Vec::new();
+        for (i, (seq, protein_index)) in anchors.iter().enumerate() {
+            candidates.push(cand_pep(unmod_peptide(seq), *protein_index, false));
+            queues.push(queue_with(vec![psm(i, i as u32, 90.0 - i as f32)]));
+            spectra.push(model::spectrum::Spectrum::default());
+        }
+        queues.push(TopNQueue::new(10));
+        spectra.push(query);
+        run_refinement(
+            &queues,
+            &spectra,
+            &candidates,
+            db,
+            &params,
+            &tiny_scorer(),
+            &RefineConfig::default_tier(),
+            0.01,
+            true,
+            0.5,
+            "XXX",
+            DecoyStrategy::Reverse,
+            42,
+        )
+    }
+
+    /// The anchor filter drops Met-cleaved spans of anchors that do not start a
+    /// protein, so such a span is not a target of the refinement search and must
+    /// not relabel a decoy as a target. `ACDEFGK` is both the Met-cleaved span of
+    /// the internal anchor `MACDEFGK` and the reversed-interior decoy of
+    /// `AGFEDCK`; the K-oxidised `ACDEFGK` Pass-2 PSM is that decoy.
+    #[test]
+    fn refinement_collision_targets_respect_the_anchor_filter() {
+        let db = ProteinDb {
+            proteins: vec![protein("P1", b"GRAGFEDCKSSRMACDEFGKWR")],
+        };
+        let out = refine_fixture(
+            &[(b"AGFEDCK", 0), (b"MACDEFGK", 0)],
+            &db,
+            true,
+            fixture_spectrum(b"ACDEFGk", true, 0.0),
+        )
+        .expect("refinement emits PSMs");
+        let hits: Vec<&Candidate> = out
+            .queues
+            .iter()
+            .flat_map(|q| q.iter_psms())
+            .map(|p| &out.candidates[p.primary_candidate_idx() as usize])
+            .filter(|c| {
+                c.peptide
+                    .residues
+                    .iter()
+                    .map(|aa| aa.residue)
+                    .collect::<Vec<_>>()
+                    == b"ACDEFGK"
+            })
+            .collect();
+        assert!(!hits.is_empty(), "the K-oxidised ACDEFGK PSM is emitted");
+        for c in hits {
+            assert!(
+                c.is_decoy,
+                "ACDEFGK comes only from the decoy of AGFEDCK here (protein {})",
+                out.index.db.proteins[c.protein_index].accession
+            );
+        }
+    }
+
+    /// Retrieval must cover every exact precursor match. The K-oxidised
+    /// `CEMEMSDDDGWSSFCEGNVNCGMDCK` (no Cam-C) observed 2 isotopes and 0.02 Da
+    /// above its mass matches at isotope +2 within 20 ppm, but its nominal
+    /// residue mass (2887) lies one below the nominal window derived from the
+    /// observed mass (2888..=2891).
+    #[test]
+    fn refinement_retrieves_exact_precursor_matches_outside_the_nominal_window() {
+        let anchor: &[u8] = b"CEMEMSDDDGWSSFCEGNVNCGMDCK";
+        let db = ProteinDb {
+            proteins: vec![protein("P1", &[b"GR".as_slice(), anchor, b"AR"].concat())],
+        };
+        let out = refine_fixture(
+            &[(anchor, 0)],
+            &db,
+            false,
+            fixture_spectrum(
+                b"CEMEMSDDDGWSSFCEGNVNCGMDCk",
+                false,
+                2.0 * model::mass::ISOTOPE + 0.02,
+            ),
+        );
+        let found = out.iter().flat_map(|o| {
+            o.queues
+                .iter()
+                .flat_map(|q| q.iter_psms())
+                .map(move |p| (p, &o.candidates[p.primary_candidate_idx() as usize]))
+        });
+        let found = found.into_iter().any(|(p, c)| {
+            !c.is_decoy
+                && p.isotope_offset == 2
+                && c.peptide
+                    .residues
+                    .iter()
+                    .map(|aa| aa.residue)
+                    .collect::<Vec<_>>()
+                    == anchor
+                && c.peptide
+                    .residues
+                    .last()
+                    .is_some_and(|aa| aa.mod_.is_some())
+        });
+        assert!(
+            found,
+            "the K-oxidised target at isotope +2 is a refinement PSM"
+        );
+    }
+
     // ── (g) merge_into_pass1 ───────────────────────────────────────────────
 
     #[test]
@@ -1797,6 +2434,7 @@ mod tests {
             db: ProteinDb {
                 proteins: vec![protein("P0", b"PEPTIDEK")],
             },
+            has_alternative_entries: false,
             decoy_prefix: "XXX".into(),
             decoy_suffix: None,
         };
@@ -1808,6 +2446,7 @@ mod tests {
                 db: ProteinDb {
                     proteins: vec![protein("BASEPEP_0", b"PEPTIDEK")],
                 },
+                has_alternative_entries: false,
                 decoy_prefix: "XXX".into(),
                 decoy_suffix: None,
             },
@@ -1851,6 +2490,7 @@ mod tests {
             db: ProteinDb {
                 proteins: vec![protein("P0", b"AAAK"), protein("P1", b"BBBK")],
             }, // prot_offset = 2
+            has_alternative_entries: false,
             decoy_prefix: "XXX".into(),
             decoy_suffix: None,
         };
@@ -1867,6 +2507,7 @@ mod tests {
                         protein("BASEPEP_1", b"SAMPLEK"),
                     ],
                 },
+                has_alternative_entries: false,
                 decoy_prefix: "XXX".into(),
                 decoy_suffix: None,
             },

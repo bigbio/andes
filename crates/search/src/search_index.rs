@@ -2,20 +2,23 @@
 //! generation.
 
 use crate::decoy::{
-    build_search_db, is_decoy_accession_affix, normalize_decoy_prefix, DecoyStrategy,
-    DEFAULT_DECOY_SEED,
+    build_search_db_for, is_decoy_accession_affix, normalize_decoy_prefix, DecoyStrategy,
+    Proteases, DEFAULT_DECOY_SEED,
 };
 use model::protein::ProteinDb;
 
 #[derive(Debug, Clone)]
 pub struct SearchIndex {
     pub db: ProteinDb,
+    /// Whether any protein is an isoform, variant or chain entry. Without one,
+    /// the match engine skips its per-candidate origin lookup.
+    pub has_alternative_entries: bool,
     /// Normalized decoy-accession prefix (no trailing `_`). A protein is a decoy
     /// iff its accession is `"<decoy_prefix>_…"`, independent of FASTA layout
     /// (supports target-only and shuffle modes). The single source of truth for
     /// target/decoy membership, shared with candidate generation.
     pub decoy_prefix: String,
-    /// Optional decoy-accession SUFFIX (e.g. `"rev"` for quantms/OpenMS
+    /// Optional decoy-accession SUFFIX (e.g. `"rev"` for quantms
     /// `<orig>_rev` decoys). When set, a protein is a decoy iff its accession
     /// starts with `"<decoy_prefix>_"` OR ends with this suffix. `None` =
     /// andes-native prefix-only decoys. Set with `--decoy-suffix` (typically
@@ -27,7 +30,7 @@ pub struct SearchIndex {
 impl SearchIndex {
     /// Target/decoy membership for `accession` under this index's affix config
     /// (prefix needle OR optional suffix). Single entry point used by candidate
-    /// generation and the target-protein iterators so RAM and mmap paths agree.
+    /// generation and the target-protein iterators so the two always agree.
     pub fn is_decoy_accession(&self, accession: &str) -> bool {
         is_decoy_accession_affix(accession, &self.decoy_prefix, self.decoy_suffix.as_deref())
     }
@@ -53,6 +56,27 @@ impl SearchIndex {
         decoy_suffix: Option<&str>,
         strategy: DecoyStrategy,
         seed: u64,
+    ) -> Self {
+        Self::from_target_db_for(
+            target,
+            decoy_prefix,
+            decoy_suffix,
+            strategy,
+            seed,
+            &Proteases::default(),
+        )
+    }
+
+    /// [`Self::from_target_db_with_strategy`] for a search with `proteases`:
+    /// the decoys of UniProt mature-chain entries keep the cleavage sites
+    /// these make (FASTA databases do not depend on them).
+    pub fn from_target_db_for(
+        target: &ProteinDb,
+        decoy_prefix: &str,
+        decoy_suffix: Option<&str>,
+        strategy: DecoyStrategy,
+        seed: u64,
+        proteases: &Proteases,
     ) -> Self {
         let norm = normalize_decoy_prefix(decoy_prefix);
         let pre = target
@@ -92,8 +116,9 @@ impl SearchIndex {
                 }
             }
         }
-        let db = build_search_db(target, decoy_prefix, strategy, seed);
+        let db = build_search_db_for(target, decoy_prefix, strategy, seed, proteases);
         Self {
+            has_alternative_entries: holds_alternative_entries(&db),
             db,
             decoy_prefix: norm,
             decoy_suffix: decoy_suffix.map(str::to_string),
@@ -167,11 +192,19 @@ impl SearchIndex {
     /// values by `self.db.len()` when merging its candidates.
     pub fn concat(&self, other: &SearchIndex) -> SearchIndex {
         SearchIndex {
+            has_alternative_entries: self.has_alternative_entries || other.has_alternative_entries,
             db: self.db.concat(&other.db),
             decoy_prefix: self.decoy_prefix.clone(),
             decoy_suffix: self.decoy_suffix.clone(),
         }
     }
+}
+
+/// Whether `db` holds any isoform, variant or chain entry.
+pub fn holds_alternative_entries(db: &ProteinDb) -> bool {
+    db.proteins
+        .iter()
+        .any(|p| p.entry_kind() != model::EntryKind::Reference)
 }
 
 #[cfg(test)]
@@ -187,11 +220,13 @@ mod tests {
                     accession: "P1".into(),
                     description: "".into(),
                     sequence: b"MKWV".to_vec(),
+                    annotation: None,
                 },
                 Protein {
                     accession: "P2".into(),
                     description: "".into(),
                     sequence: b"AGCT".to_vec(),
+                    annotation: None,
                 },
             ],
         };
@@ -206,6 +241,7 @@ mod tests {
                 accession: "P1".into(),
                 description: "".into(),
                 sequence: b"AB".to_vec(),
+                annotation: None,
             }],
         };
         let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -224,11 +260,13 @@ mod tests {
                     accession: "P1".into(),
                     description: "".into(),
                     sequence: b"MKWV".to_vec(),
+                    annotation: None,
                 },
                 Protein {
                     accession: "P2".into(),
                     description: "".into(),
                     sequence: b"AGCT".to_vec(),
+                    annotation: None,
                 },
             ],
         };
@@ -260,6 +298,7 @@ mod tests {
                 accession: "P1".into(),
                 description: "".into(),
                 sequence: b"MABCDEFGHIK".to_vec(),
+                annotation: None,
             }],
         };
         let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -278,6 +317,7 @@ mod tests {
                 accession: "P1".into(),
                 description: "".into(),
                 sequence: b"MABCDEFGHIK".to_vec(),
+                annotation: None,
             }],
         };
         let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -296,6 +336,7 @@ mod tests {
                 accession: "P1".into(),
                 description: "".into(),
                 sequence: b"MABCDEFGHIK".to_vec(),
+                annotation: None,
             }],
         };
         let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -309,6 +350,7 @@ mod tests {
     fn searchindex_concat_keeps_self_decoy_prefix_and_appends_db() {
         let a = SearchIndex {
             db: ProteinDb { proteins: vec![] },
+            has_alternative_entries: false,
             decoy_prefix: "XXX".into(),
             decoy_suffix: None,
         };
@@ -318,8 +360,10 @@ mod tests {
                     accession: "P".into(),
                     description: String::new(),
                     sequence: b"AK".to_vec(),
+                    annotation: None,
                 }],
             },
+            has_alternative_entries: false,
             decoy_prefix: "ZZZ".into(),
             decoy_suffix: None,
         };

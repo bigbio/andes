@@ -9,10 +9,10 @@
 //!
 //! Each source stores its **unscaled** [`CountStats`] in the Parquet file.
 //! When building the combined statistics, each source's counts are scaled by
-//! its `weight` before summing:
+//! its effective weight before summing:
 //!
 //! ```text
-//! combined = Σ source_i.stats.scaled(source_i.ledger.weight)
+//! combined = Σ source_i.stats.scaled(effective_weight(source_i.ledger))
 //! ```
 //!
 //! This means `update_add` followed by `update_remove` of the same source is
@@ -21,14 +21,24 @@
 //! **to integer precision** (no floating-point drift: `scaled` rounds to `u64`).
 //! The add-then-remove restore test validates this end-to-end.
 //!
-//! # Decay without dates
+//! # Decay
 //!
-//! [`update_decay`] reads each source's `date` field and computes age decay
-//! `weight *= exp(-ln(2) * age_days / half_life_days)`. When a source's `date`
-//! field is empty (as written by `train` when `--date` is omitted), its age
-//! cannot be computed; the function **leaves that source's weight unchanged**
-//! and emits an `eprintln!` warning noting the source ID. This is documented
-//! as the decay-without-dates contract.
+//! A ledger's `weight` is the undecayed base weight. [`update_decay`] records a
+//! half-life on every source (`decay_half_life_days`); every re-estimation then
+//! uses
+//!
+//! ```text
+//! effective_weight = weight * exp(-ln(2) * age_days / half_life_days)
+//! ```
+//!
+//! with `age_days` measured from the source's `date` to the day of estimation.
+//! Decay is therefore a function of age, not of how many times `--decay` ran:
+//! two decays on the same day give the same model as one, and a later
+//! `--add` / `--reweight` / `--remove-source` keeps the decay applied.
+//!
+//! A source whose `date` is empty (as written by `train` when `--date` is
+//! omitted) or unparseable has no computable age; its weight is used
+//! undecayed and [`update_decay`] prints a warning naming the source.
 
 use std::path::Path;
 
@@ -79,6 +89,24 @@ fn validate_weight(source_id: &str, weight: f32) -> Result<(), TrainError> {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Reject a store path the update and attach writers cannot rewrite in place.
+///
+/// These writers replace a single Parquet file atomically. A partitioned
+/// (directory) store such as the bundled `resources/models/` is laid out per
+/// protocol by `scripts/split_store_by_protocol.py`, so it is read-only here:
+/// copy the model into a single-file store, update that, and re-split.
+pub fn ensure_single_file_store(path: &Path) -> Result<(), TrainError> {
+    if path.is_dir() {
+        return Err(TrainError::Other(format!(
+            "{} is a partitioned (directory) model store, which cannot be rewritten \
+             in place; write the model into a single-file store (e.g. models.parquet) \
+             and re-split it with scripts/split_store_by_protocol.py",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 /// Append a new source to `model_id`, re-sum all per-source stats (applying
 /// each source's `weight` via `stats.scaled(weight)`), and re-estimate a
 /// candidate [`Param`].
@@ -96,6 +124,7 @@ pub fn update_add(
     // counts.
     validate_weight(&ledger.source_id, ledger.weight)?;
 
+    ensure_single_file_store(path)?;
     let store = ModelStore::open(path)?;
     let template = store.load_param(model_id)?;
     let existing_ledgers = store.load_sources(model_id)?;
@@ -140,6 +169,7 @@ pub fn update_remove(
     source_id: &str,
     est_cfg: EstimatorConfig,
 ) -> Result<(Param, Vec<(SourceLedger, CountStats)>), TrainError> {
+    ensure_single_file_store(path)?;
     let store = ModelStore::open(path)?;
     let template = store.load_param(model_id)?;
     let existing_ledgers = store.load_sources(model_id)?;
@@ -181,6 +211,7 @@ pub fn update_reweight(
     // Validate the new weight up front (finding 3.5).
     validate_weight(source_id, weight)?;
 
+    ensure_single_file_store(path)?;
     let store = ModelStore::open(path)?;
     let template = store.load_param(model_id)?;
     let existing_ledgers = store.load_sources(model_id)?;
@@ -204,17 +235,14 @@ pub fn update_reweight(
     Ok((candidate, sources))
 }
 
-/// Apply exponential age-decay to each source's weight and re-estimate a
-/// candidate [`Param`].
+/// Set an exponential age-decay half-life on every source of `model_id` and
+/// re-estimate a candidate [`Param`].
 ///
-/// For each source whose `date` field is a valid `YYYY-MM-DD` string, the new
-/// weight is:
-/// ```text
-/// w' = w * exp(-ln(2) * age_days / half_life_days)
-/// ```
-///
-/// Sources with an **empty or unparseable `date`** are left with their current
-/// weight unchanged, and a warning is printed to stderr.
+/// The ledger weights stay the undecayed base weights; the decay is applied by
+/// [`estimate_from_sources`] from each source's `date` (see the module docs),
+/// so repeating the call with the same half-life on the same day is a no-op.
+/// Sources with an **empty or unparseable `date`** stay undecayed, and a
+/// warning is printed to stderr.
 ///
 /// **Does NOT persist** the candidate.  Call [`commit_update`] to write it.
 pub fn update_decay(
@@ -225,14 +253,14 @@ pub fn update_decay(
 ) -> Result<(Param, Vec<(SourceLedger, CountStats)>), TrainError> {
     // Guard against a non-positive half-life: `exp(-ln2 * age / 0)` underflows to
     // 0, silently zeroing every source weight and collapsing the model to a flat
-    // distribution. Reject it (and NaN) instead of corrupting the store.
-    if half_life_days <= 0.0 || half_life_days.is_nan() {
+    // distribution. Reject it (and NaN/inf) instead of corrupting the store.
+    if !(half_life_days.is_finite() && half_life_days > 0.0) {
         return Err(TrainError::Other(format!(
-            "decay half-life must be > 0 days, got {half_life_days}"
+            "decay half-life must be a finite number of days > 0, got {half_life_days}"
         )));
     }
-    let today = today_naive();
 
+    ensure_single_file_store(path)?;
     let store = ModelStore::open(path)?;
     let template = store.load_param(model_id)?;
     let existing_ledgers = store.load_sources(model_id)?;
@@ -240,33 +268,36 @@ pub fn update_decay(
     let mut sources: Vec<(SourceLedger, CountStats)> = Vec::new();
     for mut l in existing_ledgers {
         let s = store.load_source_stats(model_id, &l.source_id)?;
-
         if l.date.is_empty() {
             eprintln!(
-                "update_decay: source '{}' has no date — weight unchanged",
+                "update_decay: source '{}' has no date — weight not decayed",
                 l.source_id
             );
-        } else {
-            match parse_date(&l.date) {
-                Some(date_days) => {
-                    let age_days = today.saturating_sub(date_days) as f32;
-                    let decay = (-std::f32::consts::LN_2 * age_days / half_life_days).exp();
-                    l.weight *= decay;
-                }
-                None => {
-                    eprintln!(
-                        "update_decay: source '{}' has unparseable date '{}' — weight unchanged",
-                        l.source_id, l.date
-                    );
-                }
-            }
+        } else if parse_date(&l.date).is_none() {
+            eprintln!(
+                "update_decay: source '{}' has unparseable date '{}' — weight not decayed",
+                l.source_id, l.date
+            );
         }
-
+        l.decay_half_life_days = Some(half_life_days);
         sources.push((l, s));
     }
 
     let candidate = estimate_from_sources(&sources, &template, est_cfg)?;
     Ok((candidate, sources))
+}
+
+/// Weight a source contributes at estimation time on day `today` (days since
+/// 1970-01-01): the base `weight`, decayed by age when the ledger carries a
+/// half-life and a parseable `date`.
+fn effective_weight(ledger: &SourceLedger, today: u32) -> f32 {
+    match (ledger.decay_half_life_days, parse_date(&ledger.date)) {
+        (Some(half_life), Some(date_days)) => {
+            let age_days = today.saturating_sub(date_days) as f32;
+            ledger.weight * (-std::f32::consts::LN_2 * age_days / half_life).exp()
+        }
+        _ => ledger.weight,
+    }
 }
 
 /// Persist a candidate [`Param`] and its updated source list to the store at
@@ -280,6 +311,7 @@ pub fn commit_update(
     new_param: &Param,
     new_sources: &[(SourceLedger, CountStats)],
 ) -> Result<(), TrainError> {
+    ensure_single_file_store(path)?;
     // Read all existing models into memory, preserving their GBDT blobs.
     let mut other_models: Vec<ModelEntry> = Vec::new();
     let mut other_blobs: Vec<Option<Vec<u8>>> = Vec::new();
@@ -341,27 +373,89 @@ pub fn commit_update(
     Ok(())
 }
 
+/// Attach separately trained components (e.g. a fragment-intensity or rich-ion
+/// GBDT) to `model_id` in the single-file store at `path`, keeping everything
+/// else about the model.
+///
+/// When the store already holds `model_id`, that model — its rank tables,
+/// its other GBDT blobs and its source ledger with per-source stats — is the
+/// base. Otherwise `fallback` (typically the seed model the components were
+/// trained against) is the base and the model starts with no sources. `attach`
+/// edits the base, and the result is committed with [`commit_update`], so all
+/// other models in the store are preserved. Returns whether `model_id`
+/// already existed.
+pub fn attach_to_model(
+    path: &Path,
+    model_id: &str,
+    fallback: Param,
+    attach: impl FnOnce(&mut Param),
+) -> Result<bool, TrainError> {
+    ensure_single_file_store(path)?;
+    let existing = if path.exists() {
+        let store = ModelStore::open(path)?;
+        if store.model_ids().iter().any(|id| id == model_id) {
+            let param = store.load_param(model_id)?;
+            let mut sources = Vec::new();
+            for l in store.load_sources(model_id)? {
+                let s = store.load_source_stats(model_id, &l.source_id)?;
+                sources.push((l, s));
+            }
+            Some((param, sources))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let existed = existing.is_some();
+    let (mut param, sources) = existing.unwrap_or((fallback, Vec::new()));
+    attach(&mut param);
+    commit_update(path, model_id, &param, &sources)?;
+    Ok(existed)
+}
+
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
 
-/// Re-sum all per-source stats (each scaled by its `weight`) and estimate a
+/// Re-sum all per-source stats (each scaled by its effective weight, see
+/// [`effective_weight`]) and estimate a
 /// new [`Param`] from the combined counts.
+///
+/// The template's GBDT models (peak, fragment-intensity, rich-ion) are carried
+/// onto the candidate unchanged. Their features are spectrum-derived (intensity
+/// ranks, peak geometry, fragment m/z errors) and never read the rank,
+/// error or existence tables re-estimated here, so they stay valid for the
+/// candidate. Retraining them on new data is a separate step
+/// (`train-intensity-gbdt`, `train-rich-ion-llr`, `train-msnet --gbdt`).
 fn estimate_from_sources(
     sources: &[(SourceLedger, CountStats)],
     template: &Param,
     est_cfg: EstimatorConfig,
 ) -> Result<Param, TrainError> {
+    let today = today_naive();
     let mut combined = CountStats::new();
     for (ledger, stats) in sources {
         // Validate every weight before scaling (finding 3.5) — this is the
         // chokepoint that also covers weights loaded from Parquet ledgers, not
         // just the API entry points.
         validate_weight(&ledger.source_id, ledger.weight)?;
-        combined.add(&stats.scaled(ledger.weight));
+        if let Some(h) = ledger.decay_half_life_days {
+            if !(h.is_finite() && h > 0.0) {
+                return Err(TrainError::Other(format!(
+                    "source '{}' has invalid decay half-life {h}",
+                    ledger.source_id
+                )));
+            }
+        }
+        combined.add(&stats.scaled(effective_weight(ledger, today)));
     }
     let estimator = Estimator::new(est_cfg);
-    Ok(estimator.estimate(&combined, template))
+    let mut candidate = estimator.estimate(&combined, template);
+    candidate.gbdt_peak_model = template.gbdt_peak_model.clone();
+    candidate.frag_intensity_model = template.frag_intensity_model.clone();
+    candidate.rich_ion_model = template.rich_ion_model.clone();
+    Ok(candidate)
 }
 
 /// Write multiple models (each with their per-source stats) to a single

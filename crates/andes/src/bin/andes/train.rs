@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::{parse_unit_fraction, GeometryArgs, Protocol};
 use crate::model_select::{build_aa_set, load_param_from_store, load_seed_param, ModelEntryOwned};
-use crate::rescore;
 use crate::spectra::spectrum_ext_lower;
 use crate::train_intensity::GbdtMode;
 use clap::Args;
@@ -22,8 +21,8 @@ use model_train::{
     geometry::{corpus_charge_masses, derive_geometry},
     labeled::bootstrap_labels,
     store::{
-        commit_update, update_add, update_decay, update_remove, update_reweight,
-        write_all_models_with_sources_and_gbdt_pub, write_all_models_with_sources_pub,
+        commit_update, ensure_single_file_store, update_add, update_decay, update_remove,
+        update_reweight, write_all_models_with_sources_and_gbdt_pub, write_all_models_with_sources_pub,
         SourceLedger,
     },
     ModelStore,
@@ -63,7 +62,7 @@ pub(crate) struct TrainFromSearchArgs {
     /// deglycosylated backbone); Cam-C and any `--mods` are applied via the
     /// AminoAcidSet. Rows whose scan is absent from `--spectra` or whose peptide
     /// fails to parse are skipped. Use to train a glyco-regime rank model from
-    /// the reference engine/a glyco search engine backbone IDs (see docs/plans/glyco/50-roadmap/spb-design.md).
+    /// the reference engine/a glyco search engine backbone IDs.
     #[arg(long = "labels")]
     pub(crate) labels: Option<PathBuf>,
 
@@ -274,50 +273,6 @@ pub(crate) struct TrainArgs {
     pub(crate) allow_degenerate_model: bool,
 }
 
-/// Available subcommands.
-#[derive(clap::Args, Debug)]
-pub(crate) struct RescorePinArgs {
-    /// Input PIN.
-    #[arg(long = "in")]
-    pub(crate) input: PathBuf,
-    /// Output target PSMs (Percolator `.psms` shape: PSMId, score, q-value, PEP).
-    #[arg(long = "out-psms")]
-    pub(crate) out_psms: PathBuf,
-    /// Output decoy PSMs.
-    #[arg(long = "out-dpsms")]
-    pub(crate) out_dpsms: PathBuf,
-    /// Cross-validation seed.
-    #[arg(long = "seed", default_value_t = 42u64)]
-    pub(crate) seed: u64,
-}
-
-pub(crate) fn run_rescore_pin(args: RescorePinArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let pin_text = std::fs::read_to_string(&args.input)
-        .map_err(|e| format!("reading {}: {e}", args.input.display()))?;
-    let rows = rescore::native_rescore_qvalues(&pin_text, args.seed)?;
-    let mut t = std::io::BufWriter::new(std::fs::File::create(&args.out_psms)?);
-    let mut d = std::io::BufWriter::new(std::fs::File::create(&args.out_dpsms)?);
-    use std::io::Write;
-    for w in [&mut t, &mut d] {
-        writeln!(
-            w,
-            "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds"
-        )?;
-    }
-    let (mut nt, mut nd) = (0usize, 0usize);
-    for (id, is_decoy, q, score) in &rows {
-        let w: &mut dyn Write = if *is_decoy { &mut d } else { &mut t };
-        writeln!(w, "{id}\t{score}\t{q}\t{q}\t-\t-")?;
-        if *is_decoy {
-            nd += 1
-        } else {
-            nt += 1
-        }
-    }
-    eprintln!("rescore-pin: {nt} target and {nd} decoy rows written");
-    Ok(())
-}
-
 /// Load all MS2 spectra from a path using the same format-dispatch logic as
 /// the search path (mzML by extension, otherwise MGF).
 pub(crate) fn load_spectra_for_train(
@@ -327,12 +282,21 @@ pub(crate) fn load_spectra_for_train(
     let mut spectra = Vec::new();
     match ext_lower.as_deref() {
         Some("mzml") => {
-            let reader = MzMLReader::new(input::open_buf_maybe_gz(path)?).with_ms_level_range(2, 2);
-            for item in reader {
+            let mut reader =
+                MzMLReader::new(input::open_buf_maybe_gz(path)?).with_ms_level_range(2, 2);
+            for item in reader.by_ref() {
                 match item {
                     Ok(s) => spectra.push(s),
                     Err(e) => eprintln!("WARN: mzML parse: {e}"),
                 }
+            }
+            if reader.skipped_count() > 0 {
+                eprintln!(
+                    "WARN: {} spectra of {} failed to parse and were skipped (first: {})",
+                    reader.skipped_count(),
+                    path.display(),
+                    reader.skipped_errors().join("; ")
+                );
             }
         }
         // Native Thermo `.raw` — MS2 only, same Spectrum stream as the search
@@ -565,16 +529,19 @@ pub(crate) fn load_labels_from_tsv(
         if let Some((site, gmass)) = glyco {
             if let Some(res) = peptide.residues.get_mut(site) {
                 let base = res.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
-                res.mod_ = Some(std::sync::Arc::new(model::modification::Modification {
-                    name: "Glycan".to_string(),
-                    mass_delta: base + gmass,
-                    residue: model::modification::ResidueSpec::Specific(res.residue),
-                    location: model::modification::ModLocation::Anywhere,
-                    fixed: false,
-                    accession: None,
-                    neutral_losses: Vec::new(),
-                    loss_class: 1,
-                }));
+                res.mod_ = Some(model::modification::leak_mod(
+                    model::modification::Modification {
+                        name: "Glycan".to_string(),
+                        mass_delta: base + gmass,
+                        residue: model::modification::ResidueSpec::Specific(res.residue),
+                        location: model::modification::ModLocation::Anywhere,
+                        fixed: false,
+                        accession: None,
+                        neutral_losses: Vec::new(),
+                        loss_class: 1,
+                        annotated_site_mass: None,
+                    },
+                ));
             }
         }
         if !seen_scans.insert(scan) {
@@ -753,6 +720,7 @@ pub(crate) fn run_train_from_search(
         date: date_str,
         weight: 1.0,
         train_fdr: args.train_fdr as f32,
+        decay_half_life_days: None,
         instrument: args.instrument.clone(),
         experiment_class: args.protocol.clone(),
     };
@@ -859,8 +827,6 @@ pub(crate) fn build_msnet_peptide(
     nterm_delta: f64,
     cterm_delta: f64,
 ) -> Result<model::peptide::Peptide, Box<dyn std::error::Error>> {
-    use std::sync::Arc;
-
     if res_mod_pos.len() != res_mod_delta.len() {
         return Err(format!(
             "res_mod_pos ({}) and res_mod_delta ({}) length mismatch",
@@ -912,8 +878,9 @@ pub(crate) fn build_msnet_peptide(
                 accession: None,
                 neutral_losses: Vec::new(),
                 loss_class: 0,
+                annotated_site_mass: None,
             };
-            residues.push(aa.with_mod(Arc::new(m)));
+            residues.push(aa.with_mod(m));
         } else {
             residues.push(aa);
         }
@@ -1067,6 +1034,7 @@ pub(crate) fn read_msnet_parquet(path: &Path) -> Result<Vec<MsnetPsm>, Box<dyn s
                 activation_method: None,
                 isolation_lower_offset: None,
                 isolation_upper_offset: None,
+                isolation_target_mz: None,
             };
 
             out.push(MsnetPsm {
@@ -1078,9 +1046,6 @@ pub(crate) fn read_msnet_parquet(path: &Path) -> Result<Vec<MsnetPsm>, Box<dyn s
     }
     Ok(out)
 }
-
-// train-intensity: merge partial intensity stats into a finalized model parquet
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// `andes train`: train a scoring model directly from externally-labeled PSM
 /// parquets, reusing the existing accumulate → estimate → store machinery but
@@ -1271,6 +1236,7 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
         date: format_today_iso8601(),
         weight: 1.0,
         train_fdr: 1.0, // sentinel: input is pre-labeled, no q-value filtering here
+        decay_half_life_days: None,
         instrument: trained_param.data_type.instrument.name().to_string(),
         experiment_class: trained_param.data_type.protocol.name().to_string(),
     };
@@ -1394,6 +1360,8 @@ pub(crate) fn run_train_update(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let store_path = &args.out_store;
     let cfg = EstimatorConfig::default();
+    // Fail before the seed search / acceptance gate, not at commit time.
+    ensure_single_file_store(store_path)?;
 
     // ── Dispatch to the right update operation ────────────────────────────────
     let (candidate, new_sources) = if args.add {
@@ -1474,6 +1442,7 @@ pub(crate) fn run_train_update(
             date: date_str,
             weight: 1.0,
             train_fdr: args.train_fdr as f32,
+            decay_half_life_days: None,
             instrument: args.instrument.clone(),
             experiment_class: args.protocol.clone(),
         };

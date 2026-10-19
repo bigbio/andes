@@ -150,8 +150,8 @@ pub struct PsmFeatures {
     pub unique_match_fraction: f32,
 
     // ── Strong-score S1: intensity-model signal numerator ───────────────────
-    /// Cosine similarity between IntensityModel-predicted and observed relative
-    /// intensities over b/y ions. 0.0 when no intensity model is loaded.
+    /// Cosine similarity between frag-intensity-model-predicted and observed
+    /// relative intensities over b/y ions. 0.0 when the model carries none.
     pub intensity_signal: f32,
 
     // ── Strong-score S1b: frag-intensity LLR battery (additive PIN columns) ──
@@ -234,7 +234,7 @@ pub struct PsmFeatures {
     // per-run calibration. ALL default to 0.0 (Default), which is the NEUTRAL
     // value: a run without observed RT, or one where calibration failed, leaves
     // these at 0.0 so the PIN is byte-identical to the pre-RT baseline on these
-    // columns. See `docs/plans/glyco/50-roadmap/rt-prediction-design.md`.
+    // columns.
     /// Signed retention-time delta in minutes: `observed_rt_min − predicted_rt_min`.
     pub delta_rt: f32,
     /// Absolute retention-time delta in minutes: `|delta_rt|`.
@@ -242,6 +242,26 @@ pub struct PsmFeatures {
     /// `delta_rt` normalised by the run's gradient span (max−min observed RT, in
     /// minutes); 0.0 when the span is non-positive. Transfers across runs.
     pub delta_rt_norm: f32,
+    /// 1 when a candidate from a Reference entry (canonical or FASTA protein)
+    /// with a peptidoform other than this row's was scored for the spectrum.
+    /// Only tracked when the database holds isoform, variant or chain entries.
+    pub ref_competitor: u32,
+    /// The best rounded RawScore among those Reference candidates; 0.0 when
+    /// `ref_competitor` is 0.
+    pub ref_best_raw: f32,
+    /// 1 when any protein of the row's peptide is an entry of that kind,
+    /// including a peptide it shares with a Reference entry. Set by
+    /// `output::populate_provenance_features`.
+    pub is_variant: u32,
+    pub is_isoform: u32,
+    pub is_chain: u32,
+    /// For a row with any isoform, variant or chain protein and
+    /// `ref_competitor` = 1: its rounded RawScore minus `ref_best_raw`. 0.0
+    /// otherwise.
+    pub delta_ref_score: f32,
+    /// 1 when the precursor fits better if the row's isotope-like deltas
+    /// (variable mods, and a variant's substitution) are whole isotope steps.
+    pub isotope_mimic: u32,
     /// Calibrated predicted retention time in minutes for this PSM's peptide, or
     /// 0.0 when RT is unavailable / calibration failed. Not a PIN feature column;
     /// surfaced only into the QPX `.idparquet` `predicted_rt` field.
@@ -583,6 +603,27 @@ impl TopNQueue {
     /// (it would let callers break the heap invariant). Since features do
     /// not participate in ordering, the re-push is logically a no-op for
     /// retention.
+    /// Apply `f` to every retained PSM without changing the heap layout, so
+    /// PSMs tied on every sort key keep their relative order in the output.
+    /// `f` must not change `rank_score` (the heap's ordering key). The elements
+    /// are pushed back in the order of the heap's own array; each one is then
+    /// no greater than its parent, so no push moves anything and the layout is
+    /// rebuilt exactly. (`BinaryHeap::from` does not preserve the layout of ties.)
+    pub fn update_in_place<F: FnMut(&mut PsmMatch)>(&mut self, mut f: F) {
+        let v = std::mem::take(&mut self.heap).into_vec();
+        self.heap.reserve(v.len());
+        for Reverse(mut m) in v {
+            let key = m.rank_score.to_bits();
+            f(&mut m);
+            debug_assert_eq!(
+                key,
+                m.rank_score.to_bits(),
+                "update_in_place changed rank_score"
+            );
+            self.heap.push(Reverse(m));
+        }
+    }
+
     pub fn fill_post_topn<F: FnMut(&mut PsmMatch)>(&mut self, mut f: F) {
         let mut psms: Vec<PsmMatch> = self.heap.drain().map(|Reverse(m)| m).collect();
         for psm in &mut psms {
@@ -635,8 +676,13 @@ impl TopNQueue {
 
     /// Drop PSMs strictly worse than the Nth-best, keeping ties at the cutoff
     /// (same tie-retention rule as `TopNQueue::push`).
+    /// `cap == 0` keeps nothing.
     fn retain_top_with_ties(psms: &mut Vec<PsmMatch>, cap: usize) {
         if psms.len() <= cap {
+            return;
+        }
+        if cap == 0 {
+            psms.clear();
             return;
         }
         let cutoff = psms[cap - 1].clone();
@@ -740,6 +786,29 @@ mod tests {
     }
 
     /// Build a fixture PSM whose `rank_score` is set independently of `score`.
+    #[test]
+    fn update_in_place_keeps_the_output_order_of_ties() {
+        // Many PSMs tied on rank_score and score: their output order comes from the
+        // heap layout alone, so an in-place update must not move anything.
+        let mut q = TopNQueue::new(32);
+        for i in 0..20usize {
+            let mut m = make_match(i, (i % 3) as f32);
+            m.candidate_idxs = vec![i as u32];
+            q.force_push(m);
+        }
+        let order = |q: &TopNQueue| -> Vec<u32> {
+            q.clone()
+                .into_rank_sorted_vec()
+                .iter()
+                .map(|m| m.candidate_idxs[0])
+                .collect()
+        };
+        let before = order(&q);
+        q.update_in_place(|m| m.features.strong_score += 1.0);
+        assert_eq!(order(&q), before);
+        assert!(q.iter_psms().all(|m| m.features.strong_score == 1.0));
+    }
+
     fn make_match_with_rank(spectrum_idx: usize, score: f32, rank_score: f32) -> PsmMatch {
         let mut m = make_match(spectrum_idx, score);
         m.rank_score = rank_score;
@@ -998,6 +1067,16 @@ mod tests {
         assert_eq!(f.stdev_rel_error_top7, 0.0);
         assert_eq!(f.strong_score, 0.0);
         assert_eq!(f.strong_score_cal, 0.0);
+    }
+
+    #[test]
+    fn trim_to_zero_capacity_empties_the_queue() {
+        let mut q = TopNQueue::new(10);
+        for s in [5.0, 4.0, 3.0] {
+            q.push(make_match(0, s));
+        }
+        q.trim_to_capacity(0);
+        assert!(q.is_empty());
     }
 
     #[test]

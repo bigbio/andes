@@ -1,0 +1,1754 @@
+//! Quantification driver: collects what the search stream would otherwise
+//! drop (reporter ions, MS1 scans, MS3 scans), then — after rescoring — turns
+//! the confident rank-1 PSMs into quantified features and writes the tables.
+//!
+//! Position in the run: `spectra → search → PIN → rescore → quant → outputs`.
+//! Everything above the feature level (normalization across samples, protein
+//! roll-up, statistics) is left to quantms, which knows the
+//! experimental design.
+
+use std::collections::HashMap;
+use std::ops::Range;
+use std::path::{Path, PathBuf};
+
+use model::mass::{ISOTOPE, PROTON};
+use model::scan::{Ms1Scan, ProductScan, ScanContext};
+use model::spectrum::Spectrum;
+use model::Tolerance;
+use output::feature_parquet::FeatureRecord;
+use output::ms2_table::{write_ms2_table, Ms2Table};
+use output::run_quant_table::{write_run_quant_table, RunPsmRow};
+use output::{LfqRow, ModRecord, PercolatorPsm, QuantId, TmtRow};
+use quant::formula::Formula;
+use quant::isobaric::{extract_reporters, CorrectionMatrix, Plex};
+use quant::lfq::{
+    competition_score, feature_score, quantify, quantify_decoy, FeatureQuant, LfqParams, LfqTarget,
+};
+use quant::ms1_index::Ms1RunIndex;
+use quant::ms2::Ms2Scan;
+use quant::tdc::{picked_qvalues, Pair};
+use rayon::prelude::*;
+use search::candidate_gen::Candidate;
+use search::psm::{PsmMatch, TopNQueue};
+use search::search_index::SearchIndex;
+
+use crate::cli::Cli;
+
+#[path = "ms1_cache.rs"]
+mod ms1_cache;
+use ms1_cache::Ms1Cache;
+
+/// Isotope-peak tolerance of the precursor-purity ladder (reference default).
+const PURITY_ISOTOPE_PPM: f64 = 10.0;
+
+/// MS1 resolution check for `--lfq`: isotope partners are matched at this
+/// tolerance, and a run whose most intense MS1 centroids find one less often
+/// than [`MS1_MIN_ISOTOPE_PARTNER_FRACTION`] is reported as low-resolution.
+/// Orbitrap survey scans measured 0.70-0.93 (PXD000001, PXD001819, a public
+/// BSA example); the same scans with ion-trap-sized centroid errors 0.09-0.32.
+const MS1_RESOLUTION_CHECK_PPM: f64 = 10.0;
+const MS1_MIN_ISOTOPE_PARTNER_FRACTION: f64 = 0.5;
+
+/// Centroids kept per MS2 scan in `<stem>.ms2.parquet` (the most intense).
+const MS2_TOP_PEAKS: usize = 100;
+
+/// Resolved quantification settings for a run.
+#[derive(Debug, Clone)]
+pub(crate) struct QuantSettings {
+    pub plex: Option<Plex>,
+    pub tmt_level: u8,
+    pub tmt_tol: Tolerance,
+    pub correction: Option<CorrectionMatrix>,
+    pub min_purity: f32,
+    pub lfq: bool,
+    pub lfq_params: LfqParams,
+    pub feature_fdr: f64,
+    /// PSM q-value cut for quantification targets (applied when rescoring ran).
+    pub quant_fdr: f64,
+    pub pep_cap: Option<f64>,
+    /// `--quant-dir`: where each run's MS1, MS2 and PSM tables are written.
+    pub quant_dir: Option<PathBuf>,
+    /// The search's fragment tolerance, recorded in each run's MS2 table.
+    pub fragment_tol: Option<Tolerance>,
+}
+
+impl QuantSettings {
+    /// The checks that need only the command line, so `run` makes them before
+    /// the database is loaded and the index built; `from_cli` repeats them.
+    pub(crate) fn check_args(cli: &Cli) -> Result<(), String> {
+        if cli.tmt.is_none() && !cli.lfq && cli.quant_dir.is_none() {
+            return Ok(());
+        }
+        if !(2..=3).contains(&cli.tmt_level) {
+            return Err(format!("--tmt-level must be 2 or 3, got {}", cli.tmt_level));
+        }
+        let Some(plex) = cli.tmt else {
+            if cli.tmt_correction.is_some() {
+                return Err("--tmt-correction needs --tmt <plex>".into());
+            }
+            return Ok(());
+        };
+        if let Some(tol) = cli.tmt_tol {
+            plex.check_tolerance(tol).map_err(|e| {
+                format!(
+                    "--tmt {}: {e}. Use a narrower --tmt-tol (e.g. {}ppm).",
+                    plex.name(),
+                    plex.default_reporter_ppm()
+                )
+            })?;
+        }
+        if let Some(path) = &cli.tmt_correction {
+            CorrectionMatrix::check_supported(plex)
+                .map_err(|e| format!("--tmt-correction {}: {e}", path.display()))?;
+        }
+        Ok(())
+    }
+
+    /// `None` when none of `--tmt`, `--lfq` and `--quant-dir` is set.
+    pub(crate) fn from_cli(cli: &Cli, high_res: bool) -> Result<Option<Self>, String> {
+        if cli.tmt.is_none() && !cli.lfq && cli.quant_dir.is_none() {
+            return Ok(None);
+        }
+        Self::check_args(cli)?;
+        // The default follows the scan the reporters are read from. SPS-MS3
+        // reporters are read in the Orbitrap even when the identifying MS2 is
+        // an ion-trap scan (Fusion/Lumos SPS methods), so the MS2 resolution
+        // says nothing about them.
+        let tmt_tol = cli.tmt_tol.unwrap_or(if high_res || cli.tmt_level >= 3 {
+            Tolerance::Ppm(cli.tmt.map_or(20.0, |p| p.default_reporter_ppm()))
+        } else {
+            Tolerance::Da(0.3)
+        });
+        // An explicit --tmt-tol was checked by check_args.
+        if let (Some(plex), None) = (cli.tmt, cli.tmt_tol) {
+            plex.check_tolerance(tmt_tol).map_err(|e| {
+                format!(
+                    "--tmt {}: {e}. The MS2 is low-resolution, so its reporter ions cannot \
+                     separate this kit's channels: use --tmt-level 3 for SPS-MS3 data, or set \
+                     --tmt-tol.",
+                    plex.name()
+                )
+            })?;
+        }
+        let correction = match (&cli.tmt_correction, cli.tmt) {
+            (Some(path), Some(plex)) => {
+                let text = std::fs::read_to_string(path)
+                    .map_err(|e| format!("--tmt-correction {}: {e}", path.display()))?;
+                let m = CorrectionMatrix::parse(plex, &text)
+                    .map_err(|e| format!("--tmt-correction {}: {e}", path.display()))?;
+                if m.is_identity() {
+                    eprintln!(
+                        "WARN: --tmt-correction {} is an identity matrix; no correction applied",
+                        path.display()
+                    );
+                    None
+                } else {
+                    Some(m)
+                }
+            }
+            // Without --tmt a sheet was refused by check_args.
+            _ => None,
+        };
+        let lfq_params = LfqParams {
+            tol: cli.lfq_tol.unwrap_or(Tolerance::Ppm(10.0)),
+            rt_window_s: cli.lfq_rt_window,
+            gaussian_width_s: cli.lfq_gaussian_width,
+            min_cosine: cli.lfq_min_cosine as f32,
+            ..LfqParams::default()
+        };
+        // Label-free quant reads the MS1 scans, whose analyzer the MS2 model
+        // does not describe: Velos/Elite/Fusion/Lumos high-low methods pair an
+        // ion-trap MS2 with Orbitrap survey scans. Each run's MS1 is checked
+        // once it is captured (`finish_file`).
+        if cli.lfq && !high_res {
+            eprintln!(
+                "WARN: --lfq: the MS2 scans are low-resolution; label-free quantification \
+                 assumes high-resolution (Orbitrap/TOF) MS1 scans and checks them per run"
+            );
+        }
+        Ok(Some(Self {
+            plex: cli.tmt,
+            tmt_level: cli.tmt_level,
+            tmt_tol,
+            correction,
+            min_purity: cli.tmt_min_purity as f32,
+            lfq: cli.lfq,
+            lfq_params,
+            feature_fdr: cli.lfq_feature_fdr,
+            quant_fdr: cli.quant_fdr.or(cli.fdr).unwrap_or(0.01),
+            pep_cap: cli.pep,
+            quant_dir: cli.quant_dir.clone(),
+            fragment_tol: None,
+        }))
+    }
+
+    /// MS1 scans are needed for label-free quant, for the per-run MS1 table of
+    /// `--quant-dir` and for the precursor purity of isobaric PSMs.
+    pub(crate) fn needs_ms1(&self) -> bool {
+        self.lfq || self.plex.is_some() || self.quant_dir.is_some()
+    }
+
+    /// Whether the run reads MS1 scans for chromatograms rather than only for
+    /// purity (`--lfq`, `--quant-dir`): the input restrictions of `--lfq` apply.
+    pub(crate) fn needs_ms1_series(&self) -> bool {
+        self.lfq || self.quant_dir.is_some()
+    }
+
+    pub(crate) fn needs_ms3(&self) -> bool {
+        self.plex.is_some() && self.tmt_level >= 3
+    }
+
+    pub(crate) fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(p) = self.plex {
+            parts.push(format!(
+                "isobaric {} at MS{} (reporter tol {}, correction {}, min purity {})",
+                p.name(),
+                self.tmt_level,
+                match self.tmt_tol {
+                    Tolerance::Ppm(v) => format!("{v} ppm"),
+                    Tolerance::Da(v) => format!("{v} Da"),
+                },
+                if self.correction.is_some() {
+                    "on"
+                } else {
+                    "off"
+                },
+                self.min_purity
+            ));
+        }
+        if self.lfq {
+            parts.push(format!(
+                "label-free MS1 (tol {}, rt window ±{} s, {} isotopes, min cosine {}, feature FDR {}, smoothing {})",
+                match self.lfq_params.tol {
+                    Tolerance::Ppm(v) => format!("{v} ppm"),
+                    Tolerance::Da(v) => format!("{v} Da"),
+                },
+                self.lfq_params.rt_window_s,
+                self.lfq_params.n_isotopes,
+                self.lfq_params.min_cosine,
+                self.feature_fdr,
+                match self.lfq_params.gaussian_width_s {
+                    Some(width) => format!("Gaussian {width} s"),
+                    None => "Savitzky–Golay 5 scans".into(),
+                }
+            ));
+        }
+        if let Some(dir) = &self.quant_dir {
+            parts.push(format!(
+                "per-run MS1, MS2 and PSM tables in {}",
+                dir.display()
+            ));
+        }
+        parts.join("; ")
+    }
+}
+
+/// Scans a reader captured for one input file besides the MS2 stream.
+#[derive(Debug, Default)]
+pub(crate) struct RunScans {
+    pub ms1: Vec<Ms1Scan>,
+    pub ms3: Vec<ProductScan>,
+    /// Acquisition context of each emitted MS2 (survey scan, m/z range, FAIMS).
+    pub contexts: Vec<ScanContext>,
+}
+
+/// One input file's quantification state.
+struct RunCapture {
+    stem: String,
+    /// `"<stem>/"` under multi-file searches (spectrum titles carry it).
+    title_prefix: Option<String>,
+    /// Indices of this file's spectra in the global spectrum list.
+    span: Range<usize>,
+    ms1: Option<Ms1Cache>,
+    /// Parent MS2 native id → the reporter scan read for it.
+    ms3_reporters: HashMap<String, ReporterScan>,
+    /// MS2 native id → its acquisition context.
+    contexts: HashMap<String, ScanContext>,
+}
+
+/// An MS3 reporter scan: native id, raw reporter vector, acquired m/z range.
+struct ReporterScan {
+    id: String,
+    raw: Vec<f32>,
+    scan_window: Option<(f64, f64)>,
+}
+
+/// Collects quantification inputs while the search streams the spectra.
+pub(crate) struct QuantCollector {
+    pub settings: QuantSettings,
+    /// Raw MS2 reporter vectors, one per pushed spectrum (isobaric only).
+    ms2_reporters: Vec<Vec<f32>>,
+    runs: Vec<RunCapture>,
+    next_span_start: usize,
+    /// The current file's reduced MS2 scans (`--quant-dir`), written to its
+    /// MS2 table by `finish_file`.
+    ms2: Vec<Ms2Scan>,
+}
+
+impl QuantCollector {
+    pub(crate) fn new(settings: QuantSettings) -> Self {
+        Self {
+            settings,
+            ms2_reporters: Vec::new(),
+            runs: Vec::new(),
+            next_span_start: 0,
+            ms2: Vec::new(),
+        }
+    }
+
+    /// Call for every spectrum right before it is pushed to the global list
+    /// (while its peaks are still present).
+    pub(crate) fn on_spectrum(&mut self, spec: &Spectrum) {
+        if let Some(plex) = self.settings.plex {
+            self.ms2_reporters
+                .push(extract_reporters(&spec.peaks, plex, self.settings.tmt_tol));
+        }
+        if self.settings.quant_dir.is_some() {
+            self.ms2.push(reduced_ms2(spec));
+        }
+    }
+
+    /// Call after a file's spectra have all been pushed (`end` = global count).
+    pub(crate) fn finish_file(
+        &mut self,
+        path: &Path,
+        title_prefix: Option<&str>,
+        scans: RunScans,
+        end: usize,
+    ) -> Result<(), String> {
+        let stem = run_stem(path);
+        if self.settings.quant_dir.is_some() && scans.ms1.is_empty() {
+            return Err(format!(
+                "--quant-dir: no MS1 scans captured from {}; multi-run quantification needs \
+                 every input's MS1 scans",
+                path.display()
+            ));
+        }
+        let ms1 = if self.settings.needs_ms1() && !scans.ms1.is_empty() {
+            Some(Ms1RunIndex::new(scans.ms1))
+        } else {
+            None
+        };
+        let mut ms3_reporters: HashMap<String, ReporterScan> = HashMap::new();
+        let mut ms3_no_parent = 0usize;
+        if let Some(plex) = self.settings.plex {
+            if self.settings.tmt_level >= 3 {
+                for p in scans.ms3 {
+                    let Some(parent) = p.parent_id else {
+                        ms3_no_parent += 1;
+                        continue;
+                    };
+                    let raw = extract_reporters(&p.peaks, plex, self.settings.tmt_tol);
+                    // Keep the most intense MS3 if several reference the same MS2.
+                    let total: f32 = raw.iter().sum();
+                    match ms3_reporters.get(&parent) {
+                        Some(old) if old.raw.iter().sum::<f32>() >= total => {}
+                        _ => {
+                            ms3_reporters.insert(
+                                parent,
+                                ReporterScan {
+                                    id: p.id,
+                                    raw,
+                                    scan_window: p.scan_window,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let contexts: HashMap<String, ScanContext> = scans
+            .contexts
+            .into_iter()
+            .map(|c| (c.id.clone(), c))
+            .collect();
+        let span = self.next_span_start..end;
+        self.next_span_start = end;
+        if let (true, Some(idx)) = (self.settings.lfq, &ms1) {
+            if let Some(frac) = idx.isotope_partner_fraction(MS1_RESOLUTION_CHECK_PPM) {
+                if frac < MS1_MIN_ISOTOPE_PARTNER_FRACTION {
+                    eprintln!(
+                        "WARN: quant: {stem}: the MS1 scans do not look high-resolution \
+                         ({:.0}% of their most intense centroids have an isotope partner within \
+                         {MS1_RESOLUTION_CHECK_PPM} ppm; Orbitrap/TOF survey scans reach 70-95%). \
+                         Label-free areas from low-resolution MS1 are not meaningful.",
+                        100.0 * frac
+                    );
+                }
+            }
+        }
+        if ms3_no_parent > 0 {
+            eprintln!(
+                "quant: {stem}: {ms3_no_parent} MS3 scans without a parent reference \
+                 (not linked to an MS2, not quantified)"
+            );
+        }
+        if let Some(idx) = &ms1 {
+            eprintln!(
+                "quant: {}: {} MS1 scans ({} centroids) indexed{}",
+                stem,
+                idx.len(),
+                idx.total_peaks(),
+                if self.settings.tmt_level >= 3 && self.settings.plex.is_some() {
+                    format!(", {} MS3 scans linked to an MS2", ms3_reporters.len())
+                } else {
+                    String::new()
+                }
+            );
+        } else if self.settings.needs_ms1() {
+            eprintln!(
+                "WARN: quant: {}: no MS1 scans captured ({}); {}",
+                stem,
+                path.display(),
+                if self.settings.needs_ms1_series() {
+                    "label-free quantification is skipped for this file"
+                } else {
+                    "precursor purity is unavailable for this file"
+                }
+            );
+        }
+        let ms1 = ms1
+            .as_ref()
+            .map(|index| Ms1Cache::store(index, &stem))
+            .transpose()
+            .map_err(|e| format!("cache MS1 scans for {stem}: {e}"))?;
+        let ms2 = std::mem::take(&mut self.ms2);
+        if let Some(dir) = &self.settings.quant_dir {
+            let contexts_cv = |id: &str| contexts.get(id).and_then(|c| c.faims_cv);
+            write_run_ms2(
+                dir,
+                &stem,
+                title_prefix,
+                ms2,
+                self.settings.fragment_tol,
+                contexts_cv,
+            )?;
+        }
+        self.runs.push(RunCapture {
+            stem,
+            title_prefix: title_prefix.map(str::to_string),
+            span,
+            ms1,
+            ms3_reporters,
+            contexts,
+        });
+        Ok(())
+    }
+
+    fn run_of(&self, spec_idx: usize) -> Option<usize> {
+        self.runs.iter().position(|r| r.span.contains(&spec_idx))
+    }
+}
+
+/// One MS2 spectrum reduced for its run's MS2 table: the
+/// [`MS2_TOP_PEAKS`] most intense centroids (sorted by m/z), the precursor
+/// and isolation window, and the PSM SpecId prefix of its matches. The
+/// native id is the spectrum title until `write_run_ms2` strips the run
+/// prefix of a multi-file search.
+fn reduced_ms2(spec: &Spectrum) -> Ms2Scan {
+    let scan = spec.scan.unwrap_or(0);
+    let base = if spec.title.is_empty() {
+        format!("scan={scan}")
+    } else {
+        spec.title.clone()
+    };
+    let mut peaks: Vec<(f32, f32)> = spec
+        .peaks
+        .iter()
+        .filter(|p| p.0.is_finite() && p.1.is_finite() && p.1 > 0.0)
+        .map(|&(mz, i)| (mz as f32, i))
+        .collect();
+    if peaks.len() > MS2_TOP_PEAKS {
+        peaks.select_nth_unstable_by(MS2_TOP_PEAKS - 1, |a, b| {
+            b.1.total_cmp(&a.1).then(a.0.total_cmp(&b.0))
+        });
+        peaks.truncate(MS2_TOP_PEAKS);
+    }
+    peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let isolation = match (
+        spec.isolation_target_mz.or(Some(spec.precursor_mz)),
+        spec.isolation_lower_offset,
+        spec.isolation_upper_offset,
+    ) {
+        (Some(t), Some(lo), Some(hi)) => Some((t, lo, hi)),
+        _ => None,
+    };
+    Ms2Scan {
+        native_id: spec.title.clone(),
+        spec_key: format!("{base}_{scan}"),
+        rt: spec.rt_seconds.unwrap_or(f64::NAN),
+        precursor_mz: spec.precursor_mz,
+        charge: spec
+            .precursor_charge
+            .and_then(|z| u8::try_from(z).ok())
+            .unwrap_or(0),
+        isolation,
+        faims_cv: None,
+        peaks,
+    }
+}
+
+/// Writes `<dir>/<stem>.ms2.parquet` from one file's reduced MS2 scans: run
+/// prefix stripped from the native ids, FAIMS voltage from the scan contexts,
+/// scans without a retention time and repeated SpecId prefixes (a spectrum
+/// searched at several charges) left out, retention-time order.
+fn write_run_ms2(
+    dir: &Path,
+    stem: &str,
+    title_prefix: Option<&str>,
+    mut scans: Vec<Ms2Scan>,
+    fragment_tol: Option<Tolerance>,
+    faims_cv: impl Fn(&str) -> Option<f32>,
+) -> Result<(), String> {
+    let fragment_tol = fragment_tol
+        .ok_or_else(|| format!("--quant-dir: no fragment tolerance for the MS2 table of {stem}"))?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("create --quant-dir {}: {e}", dir.display()))?;
+    for s in &mut scans {
+        if let Some(p) = title_prefix {
+            if let Some(id) = s.native_id.strip_prefix(p) {
+                s.native_id = id.to_string();
+            }
+        }
+        s.faims_cv = faims_cv(&s.native_id);
+    }
+    scans.retain(|s| s.rt.is_finite());
+    scans.sort_by(|a, b| a.spec_key.cmp(&b.spec_key));
+    scans.dedup_by(|a, b| a.spec_key == b.spec_key);
+    scans.sort_by(|a, b| a.rt.total_cmp(&b.rt).then(a.spec_key.cmp(&b.spec_key)));
+    let path = dir.join(format!("{stem}.ms2.parquet"));
+    let n = scans.len();
+    write_ms2_table(
+        &path,
+        &Ms2Table {
+            run: stem.to_string(),
+            fragment_tol,
+            top_peaks: MS2_TOP_PEAKS,
+            scans,
+        },
+    )
+    .map_err(|e| format!("write MS2 table: {e}"))?;
+    let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    eprintln!(
+        "quant: {stem}: wrote {} ({n} MS2 scans, {:.1} MB)",
+        path.display(),
+        bytes as f64 / 1e6
+    );
+    Ok(())
+}
+
+/// A PSM selected for quantification: the rank-1 PSM of a spectrum's selected
+/// precursor, or under `--chimeric` the best PSM of a co-isolated precursor.
+struct Hit<'a> {
+    spec_idx: usize,
+    /// Matched at a co-isolated precursor (`--chimeric`), not the selected one.
+    co_isolated: bool,
+    run_idx: usize,
+    psm: PsmMatch,
+    cand: &'a Candidate,
+    spec_id: String,
+    q_value: Option<f64>,
+    pep: Option<f64>,
+    psm_index: i64,
+}
+
+/// Select the quantification targets: rank-1 target PSMs (and the best PSM of
+/// each co-isolated precursor), at `q <= quant_fdr` (a variant-class row at
+/// its `cutoffs` level) and `pep <= --pep` when a rescoring result is
+/// available. The running `psm_index` reproduces the row
+/// order of `psms.parquet`.
+fn select_hits<'a>(
+    collector: &QuantCollector,
+    spectra: &[Spectrum],
+    queues: &[TopNQueue],
+    candidates: &'a [Candidate],
+    rescore: Option<&HashMap<String, PercolatorPsm>>,
+    cutoffs: Option<&output::Cutoffs>,
+) -> Vec<Hit<'a>> {
+    select_rank1(
+        collector, spectra, queues, candidates, rescore, cutoffs, false,
+    )
+}
+
+/// Every rank-1 PSM (and the best PSM of each co-isolated precursor), targets
+/// and decoys, with no q-value or PEP filter: the rows of the per-run PSM
+/// table.
+fn select_rank1_all<'a>(
+    collector: &QuantCollector,
+    spectra: &[Spectrum],
+    queues: &[TopNQueue],
+    candidates: &'a [Candidate],
+) -> Vec<Hit<'a>> {
+    select_rank1(collector, spectra, queues, candidates, None, None, true)
+}
+
+fn select_rank1<'a>(
+    collector: &QuantCollector,
+    spectra: &[Spectrum],
+    queues: &[TopNQueue],
+    candidates: &'a [Candidate],
+    rescore: Option<&HashMap<String, PercolatorPsm>>,
+    cutoffs: Option<&output::Cutoffs>,
+    include_decoys: bool,
+) -> Vec<Hit<'a>> {
+    let s = &collector.settings;
+    let mut hits = Vec::new();
+    let mut psm_index: i64 = 0;
+    for (spec_idx, queue) in queues.iter().enumerate() {
+        if queue.is_empty() {
+            continue;
+        }
+        let spec = &spectra[spec_idx];
+        let sorted = queue.clone().into_rank_sorted_vec();
+        // The PIN's rows (positional isomers collapsed), so `spec_id` and
+        // `psm_index` match the PIN and `psms.parquet`.
+        let rows = output::emitted_rows(spec, &sorted, candidates);
+        let multi_row = rows.len() > 1;
+        // Each precursor of the spectrum is quantified from its best row: the
+        // selected precursor's (no override) and, under `--chimeric`, each
+        // co-isolated precursor's (its override m/z). A co-isolated PSM that
+        // outscores the selected precursor's best takes rank 1 of the spectrum
+        // without displacing it. Ties at the best rank are all kept, as before.
+        let mut best_rank: Vec<(Option<u64>, u32)> = Vec::new();
+        for (rank, psm) in &rows {
+            let key = psm.precursor_mz_override.map(f64::to_bits);
+            match best_rank.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, r)) => *r = (*r).min(*rank),
+                None => best_rank.push((key, *rank)),
+            }
+        }
+        let scan = spec.scan.unwrap_or(0);
+        let spec_id_base = if spec.title.is_empty() {
+            format!("scan={scan}")
+        } else {
+            spec.title.clone()
+        };
+        for (hit, (rank, psm)) in rows.into_iter().enumerate() {
+            let psm = psm.into_owned();
+            let cand = &candidates[psm.primary_candidate_idx() as usize];
+            let spec_id = output::format_spec_id(&spec_id_base, scan, rank, hit, multi_row);
+            let rescored = rescore.map(|m| m.get(&spec_id));
+            // A rescored bundle leaves out the target rows target-decoy
+            // competition removed (no target result), so they take no row.
+            if !cand.is_decoy && matches!(rescored, Some(None)) {
+                continue;
+            }
+            let this_index = psm_index;
+            psm_index += 1;
+            let key = psm.precursor_mz_override.map(f64::to_bits);
+            if !best_rank.iter().any(|&(k, r)| k == key && r == rank) {
+                continue;
+            }
+            if cand.is_decoy && !include_decoys {
+                continue;
+            }
+            let (q_value, pep) = match rescored {
+                Some(Some(r)) => {
+                    let cutoff = cutoffs.map_or(s.quant_fdr, |c| c.or(&spec_id, s.quant_fdr));
+                    if r.q_value > cutoff || s.pep_cap.is_some_and(|c| r.pep > c) {
+                        continue;
+                    }
+                    (Some(r.q_value), Some(r.pep))
+                }
+                Some(None) => continue,
+                None => (None, None),
+            };
+            let Some(run_idx) = collector.run_of(spec_idx) else {
+                continue;
+            };
+            hits.push(Hit {
+                spec_idx,
+                co_isolated: key.is_some(),
+                run_idx,
+                psm,
+                cand,
+                spec_id,
+                q_value,
+                pep,
+                psm_index: this_index,
+            });
+        }
+    }
+    hits
+}
+
+fn peptidoform_of(cand: &Candidate) -> String {
+    output::qpx::peptidoform_string(cand)
+}
+
+fn modifications_of(cand: &Candidate) -> Vec<ModRecord> {
+    cand.peptide
+        .residues
+        .iter()
+        .enumerate()
+        .filter_map(|(i, aa)| {
+            aa.mod_.as_ref().map(|m| ModRecord {
+                name: m.name.clone(),
+                accession: m.accession.clone().filter(|a| !a.is_empty()),
+                position: i as i32 + 1,
+                amino_acid: aa.residue as char,
+            })
+        })
+        .collect()
+}
+
+/// Accessions of every protein the PSM's candidates come from, with the
+/// peptide's position in each (`start`, `end`, `pre`, `post`).
+type ProteinPos = output::ProteinPosition;
+
+fn proteins_of(psm: &PsmMatch, candidates: &[Candidate], index: &SearchIndex) -> Vec<ProteinPos> {
+    let mut out: Vec<ProteinPos> = Vec::new();
+    for &ci in &psm.candidate_idxs {
+        let c = &candidates[ci as usize];
+        let acc = match index.protein_at(c.protein_index) {
+            Some(p) => p.accession.clone(),
+            None => format!("PROT_{}", c.protein_index),
+        };
+        if out.iter().any(|(a, ..)| *a == acc) {
+            continue;
+        }
+        let start = c.start_offset_in_protein as i32 + 1;
+        let end = start + c.peptide.length() as i32 - 1;
+        out.push((
+            acc,
+            Some(start),
+            Some(end),
+            Some((c.peptide.pre as char).to_string()),
+            Some((c.peptide.post as char).to_string()),
+        ));
+    }
+    out
+}
+
+fn quant_id(
+    hit: &Hit<'_>,
+    run: &RunCapture,
+    spec: &Spectrum,
+    candidates: &[Candidate],
+    index: &SearchIndex,
+) -> QuantId {
+    let z = hit.psm.charge_used.max(1) as f64;
+    let precursor_mz = hit.psm.precursor_mz_override.unwrap_or(spec.precursor_mz);
+    let observed_mz = precursor_mz - ISOTOPE * (hit.psm.isotope_offset as f64) / z;
+    let calculated_mz = hit.cand.peptide.mass() / z + PROTON;
+    QuantId {
+        file_idx: hit.run_idx,
+        run: run.stem.clone(),
+        spec_id: hit.spec_id.clone(),
+        scan: spec.scan.unwrap_or(0),
+        rt_seconds: spec.rt_seconds,
+        sequence: output::qpx::bare_sequence(hit.cand),
+        peptidoform: peptidoform_of(hit.cand),
+        modifications: modifications_of(hit.cand),
+        charge: hit.psm.charge_used,
+        proteins: proteins_of(&hit.psm, candidates, index)
+            .into_iter()
+            .map(|(a, ..)| a)
+            .collect(),
+        is_decoy: hit.cand.is_decoy,
+        calculated_mz,
+        observed_mz,
+        q_value: hit.q_value,
+        pep: hit.pep,
+        missed_cleavages: None,
+        psm_index: hit.psm_index,
+    }
+}
+
+fn base_record(id: &QuantId, proteins: Vec<ProteinPos>, feature_id: i64) -> FeatureRecord {
+    let mass_error_ppm = if id.calculated_mz > 0.0 {
+        Some(((id.observed_mz - id.calculated_mz) / id.calculated_mz * 1e6) as f32)
+    } else {
+        None
+    };
+    let mut additional_scores: Vec<(String, f64, bool)> = Vec::new();
+    if let Some(q) = id.q_value {
+        additional_scores.push(("psm_q_value".into(), q, false));
+    }
+    FeatureRecord {
+        feature_id,
+        sequence: id.sequence.clone(),
+        peptidoform: id.peptidoform.clone(),
+        modifications: id.modifications.clone(),
+        charge: id.charge as i16,
+        pep: id.pep,
+        is_decoy: id.is_decoy,
+        calculated_mz: id.calculated_mz as f32,
+        observed_mz: id.observed_mz as f32,
+        mass_error_ppm,
+        additional_scores,
+        run_file_name: id.run.clone(),
+        cv_params: Vec::new(),
+        // No scan number (e.g. `spectrum=N` native ids): an empty list, as
+        // the reference QPX writer writes it, not a made-up scan 0.
+        scan: if id.scan > 0 {
+            vec![id.scan]
+        } else {
+            Vec::new()
+        },
+        rt: id.rt_seconds.map(|t| t as f32),
+        missed_cleavages: id.missed_cleavages,
+        intensities: Vec::new(),
+        additional_intensities: Vec::new(),
+        proteins,
+        id_run_file_name: Some(id.run.clone()),
+        rt_start: None,
+        rt_stop: None,
+        psm_ids: vec![id.psm_index],
+        mbr: None,
+    }
+}
+
+/// A feature `lfq.tsv` reports: it won its decoy competition at the feature
+/// FDR and its isotope envelope matches theory (`--lfq-min-cosine`).
+/// `lfq_features.tsv` and the parquet keep every feature.
+fn is_confident(row: &LfqRow, s: &QuantSettings) -> bool {
+    row.feature_q_value.is_some_and(|q| q <= s.feature_fdr)
+        && row.feature.cosine >= s.lfq_params.min_cosine
+}
+
+/// Run name of an input path: the file name without its extension, and
+/// without a `.gz` before it (`run1.mzML.gz` → `run1`).
+pub(crate) fn run_stem(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    let name = name.strip_suffix(".gz").map(str::to_string).unwrap_or(name);
+    match name.rfind('.') {
+        Some(i) if i > 0 => name[..i].to_string(),
+        _ => name,
+    }
+}
+
+/// Errors when two inputs share a run stem, naming both paths: the per-run
+/// artifacts of `--quant-dir` are named by the stem.
+pub(crate) fn check_unique_stems(paths: &[PathBuf]) -> Result<(), String> {
+    let mut seen: HashMap<String, &Path> = HashMap::new();
+    for p in paths {
+        if let Some(first) = seen.insert(run_stem(p), p) {
+            return Err(format!(
+                "--quant-dir: inputs {} and {} share the run name {:?}; the per-run artifacts \
+                 are named by it, so rename one of the files",
+                first.display(),
+                p.display(),
+                run_stem(p)
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Strip the multi-file title prefix to get the native id MS3 parents use.
+fn native_id<'a>(run: &RunCapture, title: &'a str) -> &'a str {
+    match &run.title_prefix {
+        Some(p) => title.strip_prefix(p.as_str()).unwrap_or(title),
+        None => title,
+    }
+}
+
+/// The survey scan an MS2 was triggered from: the scan its precursor
+/// references, else the last MS1 at or before it at the same FAIMS voltage,
+/// else the last MS1 at or before it. On FAIMS runs the last MS1 in time is
+/// usually a survey scan at another voltage, which does not hold the precursor.
+fn survey_scan(ms1: &Ms1RunIndex, context: Option<&ScanContext>, rt: f64) -> Option<usize> {
+    const MAX_BACKTRACK: usize = 64;
+    if let Some(i) = context
+        .and_then(|c| c.parent_id.as_deref())
+        .and_then(|id| ms1.position_of(id))
+    {
+        return Some(i);
+    }
+    let last = ms1.scan_at_or_before(rt)?;
+    let Some(cv) = context.and_then(|c| c.faims_cv) else {
+        return Some(last);
+    };
+    (last.saturating_sub(MAX_BACKTRACK)..=last)
+        .rev()
+        .find(|&i| ms1.scan(i).faims_cv == Some(cv))
+}
+
+/// Whether a reporter scan acquired every channel of `plex`: a scan window
+/// that starts above the lowest reporter (or ends below the highest) reads
+/// zeros for channels that were never measured.
+fn covers_reporters(scan_window: Option<(f64, f64)>, plex: Plex, tol: Tolerance) -> bool {
+    let Some((lo, hi)) = scan_window else {
+        return true;
+    };
+    // The lowest and highest reporters: kit order is not m/z order (32/35-plex).
+    let (first, last) = plex
+        .channels()
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), c| {
+            (a.min(c.mz), b.max(c.mz))
+        });
+    lo <= first - tol.as_da(first) && hi >= last + tol.as_da(last)
+}
+
+/// A target, its feature and its decoy twin's feature.
+type Quantified = (usize, Option<FeatureQuant>, Option<FeatureQuant>);
+
+/// One chromatographic series per FAIMS compensation voltage (the whole run
+/// when it has at most one voltage).
+fn faims_groups(ms1: Ms1RunIndex) -> Vec<(Option<f32>, Ms1RunIndex)> {
+    if ms1.faims_voltages().len() > 1 {
+        ms1.split_by_faims()
+            .into_iter()
+            .map(|(cv, idx)| (Some(cv), idx))
+            .collect()
+    } else {
+        vec![(None, ms1)]
+    }
+}
+
+/// The series a PSM's precursor is extracted from: its MS2's FAIMS voltage.
+fn group_of(
+    groups: &[(Option<f32>, Ms1RunIndex)],
+    run: &RunCapture,
+    spec: &Spectrum,
+) -> Option<usize> {
+    match groups.first()?.0 {
+        None => Some(0),
+        Some(_) => {
+            let cv = run
+                .contexts
+                .get(native_id(run, &spec.title))
+                .and_then(|c| c.faims_cv)?;
+            groups.iter().position(|(g, _)| *g == Some(cv))
+        }
+    }
+}
+
+/// The label-free target of a PSM's peptidoform at `anchor_rt`.
+fn lfq_target(h: &Hit<'_>, anchor_rt: f64, n_iso: usize) -> LfqTarget {
+    let z = h.psm.charge_used.max(1);
+    let formula = Formula::peptide(
+        h.cand
+            .peptide
+            .residues
+            .iter()
+            .map(|aa| (aa.residue, aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta))),
+    );
+    LfqTarget {
+        mono_mz: h.cand.peptide.mass() / z as f64 + PROTON,
+        charge: z,
+        anchor_rt,
+        envelope: formula.envelope(n_iso),
+    }
+}
+
+fn quantify_targets(
+    groups: &[(Option<f32>, Ms1RunIndex)],
+    targets: &[(usize, usize, LfqTarget)],
+    params: &LfqParams,
+) -> Vec<Quantified> {
+    targets
+        .par_iter()
+        .map(|(hi, g, t)| {
+            let ms1 = &groups[*g].1;
+            (
+                *hi,
+                quantify(ms1, t, params),
+                quantify_decoy(ms1, t, params),
+            )
+        })
+        .collect()
+}
+
+/// The height scale of the feature score: the highest apex over targets and
+/// decoys alike.
+fn max_apex_of(quantified: &[Quantified]) -> f32 {
+    quantified
+        .iter()
+        .flat_map(|(_, f, d)| [f.as_ref(), d.as_ref()])
+        .flatten()
+        .map(|f| f.apex_intensity)
+        .fold(0.0f32, f32::max)
+}
+
+fn competition_pairs(quantified: &[Quantified], params: &LfqParams, max_apex: f32) -> Vec<Pair> {
+    quantified
+        .iter()
+        .map(|(_, f, d)| Pair {
+            target: f
+                .as_ref()
+                .and_then(|f| competition_score(f, params, max_apex)),
+            decoy: d
+                .as_ref()
+                .and_then(|f| competition_score(f, params, max_apex)),
+        })
+        .collect()
+}
+
+/// Theoretical isotope fractions of a candidate, normalised to sum 1.
+fn envelope_of(cand: &Candidate, n_iso: usize) -> Vec<f32> {
+    let formula = Formula::peptide(
+        cand.peptide
+            .residues
+            .iter()
+            .map(|aa| (aa.residue, aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta))),
+    );
+    let env = formula.envelope(n_iso);
+    let total: f64 = env.iter().sum();
+    if total > 0.0 {
+        env.iter().map(|v| (v / total) as f32).collect()
+    } else {
+        env.iter().map(|v| *v as f32).collect()
+    }
+}
+
+/// Isotope peaks in the envelope of the per-run PSM table.
+const TABLE_ENVELOPE_ISOTOPES: usize = 4;
+
+/// `--quant-dir`: write `<dir>/<stem>.ms1.parquet` (the run's captured MS1, every
+/// FAIMS voltage) and `<dir>/<stem>.quant.parquet` (every rank-1 PSM of the
+/// run and, under `--chimeric`, the best PSM of each co-isolated precursor;
+/// targets and decoys, unfiltered) for each run.
+fn write_run_artifacts(
+    collector: &QuantCollector,
+    spectra: &[Spectrum],
+    queues: &[TopNQueue],
+    candidates: &[Candidate],
+    index: &SearchIndex,
+    quant_dir: &Path,
+) -> Result<(), String> {
+    std::fs::create_dir_all(quant_dir)
+        .map_err(|e| format!("create --quant-dir {}: {e}", quant_dir.display()))?;
+    let hits = select_rank1_all(collector, spectra, queues, candidates);
+    for (run_idx, run) in collector.runs.iter().enumerate() {
+        let ms1 = run
+            .ms1
+            .as_ref()
+            .ok_or_else(|| format!("--quant-dir: run {} has no MS1 scans", run.stem))?;
+        let ms1_path = quant_dir.join(format!("{}.ms1.parquet", run.stem));
+        ms1.persist(&ms1_path)
+            .map_err(|e| format!("write MS1 table: {e}"))?;
+        let mut rows: Vec<RunPsmRow> = Vec::new();
+        let mut mods: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
+        let mut no_rt = 0usize;
+        for hit in hits.iter().filter(|h| h.run_idx == run_idx) {
+            let spec = &spectra[hit.spec_idx];
+            let Some(rt_s) = spec.rt_seconds else {
+                no_rt += 1;
+                continue;
+            };
+            for m in hit.cand.peptide.residues.iter().filter_map(|aa| aa.mod_) {
+                if let Some(acc) = m.accession.as_deref().filter(|a| !a.is_empty()) {
+                    mods.entry(acc.to_string()).or_insert(m.mass_delta);
+                }
+            }
+            let z = hit.psm.charge_used.max(1);
+            let peptidoform = peptidoform_of(hit.cand);
+            rows.push(RunPsmRow {
+                spec_id: hit.spec_id.clone(),
+                rt_s,
+                precursor_key: format!("{peptidoform}/{z}"),
+                peptidoform,
+                charge: z,
+                mz: hit.cand.peptide.mass() / z as f64 + PROTON,
+                is_decoy: hit.cand.is_decoy,
+                search_score: hit.psm.features.strong_score,
+                faims_cv: run
+                    .contexts
+                    .get(native_id(run, &spec.title))
+                    .and_then(|c| c.faims_cv),
+                envelope: envelope_of(hit.cand, TABLE_ENVELOPE_ISOTOPES),
+                proteins: proteins_of(&hit.psm, candidates, index)
+                    .into_iter()
+                    .map(|(a, ..)| a)
+                    .collect::<Vec<_>>()
+                    .join(";"),
+            });
+        }
+        let table_path = quant_dir.join(format!("{}.quant.parquet", run.stem));
+        let mods: Vec<(String, f64)> = mods.into_iter().collect();
+        write_run_quant_table(&table_path, &run.stem, &rows, &mods)
+            .map_err(|e| format!("write {}: {e}", table_path.display()))?;
+        eprintln!(
+            "quant: {}: wrote {} and {} ({} PSMs, one per precursor of a spectrum, targets and decoys{})",
+            run.stem,
+            ms1_path.display(),
+            table_path.display(),
+            rows.len(),
+            if no_rt > 0 {
+                format!("; {no_rt} without a retention time left out")
+            } else {
+                String::new()
+            }
+        );
+    }
+    Ok(())
+}
+
+/// Run quantification over the search result and write the tables.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_quant(
+    collector: &QuantCollector,
+    spectra: &[Spectrum],
+    queues: &[TopNQueue],
+    candidates: &[Candidate],
+    index: &SearchIndex,
+    rescore: Option<&HashMap<String, PercolatorPsm>>,
+    cutoffs: Option<&output::Cutoffs>,
+    report_base: &Path,
+    parquet_dir: Option<&Path>,
+) -> Result<output::QuantSummary, String> {
+    let s = &collector.settings;
+    // Per-peptide quantities for the proteoform table.
+    let mut summary = output::QuantSummary::default();
+    let t0 = std::time::Instant::now();
+    if let Some(dir) = &s.quant_dir {
+        write_run_artifacts(collector, spectra, queues, candidates, index, dir)?;
+    }
+    let hits = select_hits(collector, spectra, queues, candidates, rescore, cutoffs);
+    eprintln!(
+        "quant: {} rank-1 target PSMs selected{} ({})",
+        hits.len(),
+        match rescore {
+            Some(_) => format!(" at q<={}", s.quant_fdr),
+            None => " (no rescoring: every rank-1 target PSM; filter downstream)".to_string(),
+        },
+        s.describe()
+    );
+    let stem = report_base
+        .file_stem()
+        .map(|x| x.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "andes".to_string());
+    let dir: PathBuf = report_base
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| ".".into());
+    // Resolve output rows by their unique PSM row index, not by repeatedly
+    // scanning every selected hit (quadratic, and SpecIds can be ambiguous).
+    let hits_by_psm: HashMap<i64, &Hit<'_>> = if parquet_dir.is_some() {
+        hits.iter().map(|h| (h.psm_index, h)).collect()
+    } else {
+        HashMap::new()
+    };
+    let mut records: Vec<FeatureRecord> = Vec::new();
+    let mut next_feature_id: i64 = 1;
+
+    // ── Isobaric ──────────────────────────────────────────────────────────────
+    if let Some(plex) = s.plex {
+        let mut rows: Vec<TmtRow> = Vec::new();
+        let (mut no_scan, mut low_purity, mut out_of_range) = (0usize, 0usize, 0usize);
+        for (run_idx, run) in collector.runs.iter().enumerate() {
+            let ms1 = run
+                .ms1
+                .as_ref()
+                .map(Ms1Cache::load)
+                .transpose()
+                .map_err(|e| format!("load MS1 scans for {}: {e}", run.stem))?;
+            // The reporter ions of a scan measure its selected precursor; a
+            // co-isolated PSM has none of its own.
+            for hit in hits
+                .iter()
+                .filter(|h| h.run_idx == run_idx && !h.co_isolated)
+            {
+                let spec = &spectra[hit.spec_idx];
+                let context = run.contexts.get(native_id(run, &spec.title));
+                let (quant_scan_id, raw, scan_window) = if s.tmt_level >= 3 {
+                    match run.ms3_reporters.get(native_id(run, &spec.title)) {
+                        Some(r) => (r.id.clone(), r.raw.clone(), r.scan_window),
+                        None => {
+                            no_scan += 1;
+                            continue;
+                        }
+                    }
+                } else {
+                    match collector.ms2_reporters.get(hit.spec_idx) {
+                        Some(raw) => (
+                            spec.title.clone(),
+                            raw.clone(),
+                            context.and_then(|c| c.scan_window),
+                        ),
+                        None => {
+                            no_scan += 1;
+                            continue;
+                        }
+                    }
+                };
+                if !covers_reporters(scan_window, plex, s.tmt_tol) {
+                    out_of_range += 1;
+                    continue;
+                }
+                let purity = ms1.as_ref().and_then(|ms1| {
+                    let rt = spec.rt_seconds?;
+                    let scan = survey_scan(ms1, context, rt)?;
+                    let lo = spec.isolation_lower_offset?;
+                    let hi = spec.isolation_upper_offset?;
+                    let pmz = hit.psm.precursor_mz_override.unwrap_or(spec.precursor_mz);
+                    quant::precursor_purity(
+                        ms1.peaks(scan),
+                        pmz,
+                        spec.isolation_target_mz,
+                        hit.psm.charge_used,
+                        lo,
+                        hi,
+                        PURITY_ISOTOPE_PPM,
+                    )
+                });
+                if let Some(p) = purity {
+                    if p < s.min_purity {
+                        low_purity += 1;
+                    }
+                }
+                let corrected = match &s.correction {
+                    Some(m) => m.correct(&raw),
+                    None => raw.clone(),
+                };
+                rows.push(TmtRow {
+                    id: quant_id(hit, run, spec, candidates, index),
+                    quant_scan_id,
+                    quant_ms_level: s.tmt_level,
+                    purity,
+                    raw,
+                    corrected,
+                });
+            }
+        }
+        let tsv_rows: Vec<TmtRow> = rows
+            .iter()
+            .filter(|r| r.purity.is_none_or(|p| p >= s.min_purity))
+            .cloned()
+            .collect();
+        summary.columns = plex.channels().iter().map(|c| c.name.to_string()).collect();
+        for r in &tsv_rows {
+            for (col, &v) in r.corrected.iter().enumerate() {
+                summary
+                    .values
+                    .push((r.id.sequence.clone(), r.id.proteins.clone(), col, v as f64));
+            }
+        }
+        let tmt_path = dir.join(format!("{stem}.tmt.tsv"));
+        output::write_tmt_tsv(&tmt_path, plex, &tsv_rows, s.correction.is_some())
+            .map_err(|e| format!("write {}: {e}", tmt_path.display()))?;
+        eprintln!(
+            "quant: wrote {} ({} PSMs with reporter ions{}{}{})",
+            tmt_path.display(),
+            tsv_rows.len(),
+            if no_scan > 0 {
+                format!(", {no_scan} without a quantification scan")
+            } else {
+                String::new()
+            },
+            if out_of_range > 0 {
+                format!(
+                    ", {out_of_range} whose scan range does not cover the reporter ions \
+                     (not quantified)"
+                )
+            } else {
+                String::new()
+            },
+            if low_purity > 0 {
+                format!(
+                    ", {low_purity} below purity {} kept only in the parquet",
+                    s.min_purity
+                )
+            } else {
+                String::new()
+            }
+        );
+        for r in rows.iter().filter(|_| parquet_dir.is_some()) {
+            let hit = hits_by_psm[&r.id.psm_index];
+            let proteins = proteins_of(&hit.psm, candidates, index);
+            let mut rec = base_record(&r.id, proteins, next_feature_id);
+            next_feature_id += 1;
+            let labels: Vec<String> = plex
+                .channels()
+                .iter()
+                .map(|c| format!("{}{}", plex.label_prefix(), c.name))
+                .collect();
+            rec.intensities = labels
+                .iter()
+                .cloned()
+                .zip(r.corrected.iter().copied())
+                .collect();
+            if s.correction.is_some() {
+                rec.additional_intensities = labels
+                    .iter()
+                    .cloned()
+                    .zip(r.raw.iter().copied())
+                    .map(|(l, v)| (l, vec![("raw".to_string(), v)]))
+                    .collect();
+            }
+            if let Some(p) = r.purity {
+                rec.additional_scores
+                    .push(("precursor_purity".into(), p as f64, true));
+            }
+            rec.cv_params
+                .push(("quant_scan".into(), r.quant_scan_id.clone()));
+            rec.cv_params
+                .push(("quant_ms_level".into(), r.quant_ms_level.to_string()));
+            records.push(rec);
+        }
+    }
+
+    // ── Label-free ────────────────────────────────────────────────────────────
+    if s.lfq {
+        let n_iso = s.lfq_params.n_isotopes;
+        // Best PSM per (run, peptidoform, charge): lowest q, then highest score.
+        let mut best: HashMap<(usize, String, u8), usize> = HashMap::new();
+        for (i, h) in hits.iter().enumerate() {
+            let key = (h.run_idx, peptidoform_of(h.cand), h.psm.charge_used);
+            match best.get(&key) {
+                Some(&j) => {
+                    let other = &hits[j];
+                    let better = match (h.q_value, other.q_value) {
+                        (Some(a), Some(b)) if a != b => a < b,
+                        _ => h.psm.rank_score > other.psm.rank_score,
+                    };
+                    if better {
+                        best.insert(key, i);
+                    }
+                }
+                None => {
+                    best.insert(key, i);
+                }
+            }
+        }
+        let params = &s.lfq_params;
+        let mut all_rows: Vec<LfqRow> = Vec::new();
+        for (run_idx, run) in collector.runs.iter().enumerate() {
+            let Some(cache) = run.ms1.as_ref() else {
+                continue;
+            };
+            let ms1 = cache
+                .load()
+                .map_err(|e| format!("load MS1 scans for {}: {e}", run.stem))?;
+            let groups = faims_groups(ms1);
+            let (mut no_series, mut no_rt) = (0usize, 0usize);
+            let mut targets: Vec<(usize, usize, LfqTarget)> = Vec::new();
+            for (_, &hi) in best.iter().filter(|((r, _, _), _)| *r == run_idx) {
+                let h = &hits[hi];
+                let spec = &spectra[h.spec_idx];
+                let Some(group) = group_of(&groups, run, spec) else {
+                    no_series += 1;
+                    continue;
+                };
+                let Some(rt) = spec.rt_seconds else {
+                    no_rt += 1;
+                    continue;
+                };
+                targets.push((hi, group, lfq_target(h, rt, n_iso)));
+            }
+            // HashMap iteration must not determine feature row/ID order.
+            targets.sort_unstable_by_key(|(hi, _, _)| *hi);
+            let quantified = quantify_targets(&groups, &targets, params);
+            let max_apex = max_apex_of(&quantified);
+            let qvals = picked_qvalues(&competition_pairs(&quantified, params, max_apex));
+            let mut n_found = 0usize;
+            for (k, (hi, feature, decoy)) in quantified.into_iter().enumerate() {
+                let Some(feature) = feature else { continue };
+                n_found += 1;
+                let hit = &hits[hi];
+                let spec = &spectra[hit.spec_idx];
+                all_rows.push(LfqRow {
+                    id: quant_id(hit, run, spec, candidates, index),
+                    score: feature_score(&feature, params.rt_window_s, max_apex),
+                    feature_q_value: qvals[k],
+                    decoy_score: decoy
+                        .as_ref()
+                        .map(|d| feature_score(d, params.rt_window_s, max_apex)),
+                    feature,
+                });
+            }
+            eprintln!(
+                "quant: {}: {} of {} precursors quantified, {} at feature q<={} and envelope cosine>={}{}{}",
+                run.stem,
+                n_found,
+                targets.len(),
+                all_rows
+                    .iter()
+                    .filter(|r| r.id.file_idx == run_idx && is_confident(r, s))
+                    .count(),
+                s.feature_fdr,
+                s.lfq_params.min_cosine,
+                if no_series > 0 {
+                    format!(
+                        ", {no_series} whose MS2 has no FAIMS voltage with an MS1 series \
+                         (not quantified)"
+                    )
+                } else {
+                    String::new()
+                },
+                if no_rt > 0 {
+                    format!(", {no_rt} whose MS2 has no retention time (not quantified)")
+                } else {
+                    String::new()
+                }
+            );
+        }
+        let runs: Vec<String> = collector.runs.iter().map(|r| r.stem.clone()).collect();
+        let confident: Vec<LfqRow> = all_rows
+            .iter()
+            .filter(|r| is_confident(r, s))
+            .cloned()
+            .collect();
+        summary.columns = runs.clone();
+        for r in &confident {
+            summary.values.push((
+                r.id.sequence.clone(),
+                r.id.proteins.clone(),
+                r.id.file_idx,
+                r.feature.area,
+            ));
+        }
+        let lfq_path = dir.join(format!("{stem}.lfq.tsv"));
+        output::write_lfq_tsv(&lfq_path, &runs, &confident)
+            .map_err(|e| format!("write {}: {e}", lfq_path.display()))?;
+        let feat_path = dir.join(format!("{stem}.lfq_features.tsv"));
+        output::write_lfq_features_tsv(&feat_path, &all_rows)
+            .map_err(|e| format!("write {}: {e}", feat_path.display()))?;
+        eprintln!(
+            "quant: wrote {} ({} accepted run-level features at feature q<={}, cosine>={}) and {} ({} features)",
+            lfq_path.display(),
+            confident.len(),
+            s.feature_fdr,
+            s.lfq_params.min_cosine,
+            feat_path.display(),
+            all_rows.len()
+        );
+        for r in all_rows.iter().filter(|_| parquet_dir.is_some()) {
+            let hit = hits_by_psm[&r.id.psm_index];
+            let proteins = proteins_of(&hit.psm, candidates, index);
+            let mut rec = base_record(&r.id, proteins, next_feature_id);
+            next_feature_id += 1;
+            let f = &r.feature;
+            rec.rt = Some(f.apex_rt as f32);
+            rec.rt_start = Some(f.rt_start as f32);
+            rec.rt_stop = Some(f.rt_stop as f32);
+            rec.intensities = vec![("LFQ".to_string(), f.area as f32)];
+            let mut extra = vec![("apex".to_string(), f.apex_intensity)];
+            for (k, a) in f.isotope_areas.iter().enumerate() {
+                extra.push((format!("isotope_{k}_area"), *a as f32));
+            }
+            rec.additional_intensities = vec![("LFQ".to_string(), extra)];
+            rec.additional_scores
+                .push(("envelope_cosine".into(), f.cosine as f64, true));
+            rec.additional_scores
+                .push(("rt_delta_s".into(), f.rt_delta_s, false));
+            rec.additional_scores
+                .push(("n_isotopes".into(), f.n_isotopes_found as f64, true));
+            rec.additional_scores
+                .push(("feature_score".into(), r.score as f64, true));
+            if let Some(q) = r.feature_q_value {
+                rec.additional_scores
+                    .push(("feature_q_value".into(), q, false));
+            }
+            if let Some(d) = r.decoy_score {
+                rec.additional_scores
+                    .push(("decoy_feature_score".into(), d as f64, true));
+            }
+            rec.cv_params.push((
+                "psm_rt".into(),
+                format!("{:.3}", r.id.rt_seconds.unwrap_or(0.0)),
+            ));
+            records.push(rec);
+        }
+    }
+
+    // `--quant-dir` alone quantifies nothing here: no feature file.
+    let quantified = s.plex.is_some() || s.lfq || !records.is_empty();
+    if let (Some(pdir), true) = (parquet_dir, quantified) {
+        std::fs::create_dir_all(pdir).map_err(|e| format!("create {}: {e}", pdir.display()))?;
+        let path = pdir.join("quantms.feature.parquet");
+        output::write_feature_parquet(&path, &records)
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
+        eprintln!(
+            "quant: wrote {} ({} feature rows)",
+            path.display(),
+            records.len()
+        );
+    }
+    eprintln!("[PHASE quant: {:.2}s]", t0.elapsed().as_secs_f64());
+    Ok(summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn faims_run() -> Ms1RunIndex {
+        // Survey scans alternate between two voltages, one per second.
+        Ms1RunIndex::new(
+            (0..6)
+                .map(|i| Ms1Scan {
+                    rt: i as f64,
+                    peaks: Vec::new(),
+                    id: format!("scan={}", i + 1),
+                    faims_cv: Some(if i % 2 == 0 { -40.0 } else { -60.0 }),
+                })
+                .collect(),
+        )
+    }
+
+    fn context(parent: Option<&str>, cv: Option<f32>) -> ScanContext {
+        ScanContext {
+            id: "scan=99".into(),
+            parent_id: parent.map(str::to_string),
+            scan_window: None,
+            faims_cv: cv,
+        }
+    }
+
+    #[test]
+    fn survey_scan_follows_the_precursor_reference_then_the_voltage() {
+        let ms1 = faims_run();
+        // An MS2 at 3.5 s whose precursor references scan=3 (rt 2, -40 V).
+        let c = context(Some("scan=3"), Some(-40.0));
+        assert_eq!(survey_scan(&ms1, Some(&c), 3.5), Some(2));
+        // No reference: the last scan at the MS2's voltage, not the last in time.
+        let c = context(None, Some(-40.0));
+        assert_eq!(survey_scan(&ms1, Some(&c), 3.5), Some(2));
+        // An unknown reference falls back the same way.
+        let c = context(Some("scan=1000"), Some(-60.0));
+        assert_eq!(survey_scan(&ms1, Some(&c), 3.5), Some(3));
+        // No context at all: the last scan in time.
+        assert_eq!(survey_scan(&ms1, None, 4.5), Some(4));
+        assert_eq!(survey_scan(&ms1, None, -1.0), None);
+    }
+
+    fn candidate(seq: &[u8], is_decoy: bool) -> Candidate {
+        let residues = seq
+            .iter()
+            .map(|&r| model::AminoAcid::standard(r).unwrap())
+            .collect();
+        Candidate {
+            peptide: model::Peptide::new(residues, b'K', b'S'),
+            protein_index: 0,
+            start_offset_in_protein: 0,
+            is_decoy,
+            is_protein_n_term: false,
+            is_protein_c_term: false,
+        }
+    }
+
+    fn psm(rank_score: f32, candidate: u32, co_isolated_mz: Option<f64>) -> PsmMatch {
+        PsmMatch {
+            spectrum_idx: 0,
+            candidate_idxs: vec![candidate],
+            charge_used: 2,
+            mass_error_ppm: 0.0,
+            score: rank_score,
+            rank_score,
+            edge_score: 0,
+            activation_method: None,
+            features: search::psm::PsmFeatures::default(),
+            isotope_offset: 0,
+            precursor_mz_override: co_isolated_mz,
+        }
+    }
+
+    /// One spectrum ("Scan 1", scan 1) with `psms` in its queue, in a
+    /// one-run collector.
+    fn one_spectrum(psms: Vec<PsmMatch>) -> (QuantCollector, Vec<Spectrum>, Vec<TopNQueue>) {
+        let mut c = QuantCollector::new(settings(true, Some("q")));
+        c.runs.push(RunCapture {
+            stem: "run".into(),
+            title_prefix: None,
+            span: 0..1,
+            ms1: None,
+            ms3_reporters: HashMap::new(),
+            contexts: HashMap::new(),
+        });
+        let spec = Spectrum {
+            title: "Scan 1".into(),
+            precursor_mz: 500.0,
+            precursor_intensity: None,
+            precursor_charge: Some(2),
+            rt_seconds: Some(60.0),
+            scan: Some(1),
+            peaks: vec![],
+            activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
+            isolation_target_mz: None,
+        };
+        let mut queue = TopNQueue::new(10);
+        for p in psms {
+            queue.push(p);
+        }
+        (c, vec![spec], vec![queue])
+    }
+
+    fn selected(hits: &[Hit<'_>]) -> Vec<(String, bool, bool)> {
+        hits.iter()
+            .map(|h| (h.spec_id.clone(), h.cand.is_decoy, h.co_isolated))
+            .collect()
+    }
+
+    #[test]
+    fn plain_search_quantifies_rank1_rows_only() {
+        let cands = vec![
+            candidate(b"PEPTIDEK", false),
+            candidate(b"SAMPLERK", false),
+            candidate(b"KEDITPEP", true),
+        ];
+        let (c, spectra, queues) = one_spectrum(vec![
+            psm(10.0, 0, None),
+            psm(9.0, 1, None),
+            psm(8.0, 2, None),
+        ]);
+        let hits = select_rank1_all(&c, &spectra, &queues, &cands);
+        assert_eq!(
+            selected(&hits),
+            vec![("Scan 1_1_1_0".to_string(), false, false)]
+        );
+    }
+
+    #[test]
+    fn chimeric_search_quantifies_each_co_isolated_precursor() {
+        let cands = vec![
+            candidate(b"PEPTIDEK", false),
+            candidate(b"SAMPLERK", false),
+            candidate(b"LLLLLLLK", false),
+            candidate(b"KEDITPEP", true),
+        ];
+        // The co-isolated precursor at 600.3 outscores the selected one: its
+        // best PSM is rank 1 of the spectrum and the selected precursor's best
+        // is rank 2. Both are quantified; the selected precursor's runner-up
+        // (rank 3) and the second co-isolated precursor's decoy winner are
+        // rows of their own precursor.
+        let (c, spectra, queues) = one_spectrum(vec![
+            psm(12.0, 1, Some(600.3)),
+            psm(10.0, 0, None),
+            psm(9.0, 2, None),
+            psm(7.0, 3, Some(450.2)),
+        ]);
+        let hits = select_rank1_all(&c, &spectra, &queues, &cands);
+        assert_eq!(
+            selected(&hits),
+            vec![
+                ("Scan 1_1_1_0".to_string(), false, true),
+                ("Scan 1_1_2_1".to_string(), false, false),
+                ("Scan 1_1_4_3".to_string(), true, true),
+            ]
+        );
+        // Without decoys (the per-run quantification), the decoy winner goes.
+        let hits = select_hits(&c, &spectra, &queues, &cands, None, None);
+        assert_eq!(hits.len(), 2);
+        // A rescoring result decides each co-isolated PSM on its own q-value.
+        let mut rescore = HashMap::new();
+        for (id, q) in [("Scan 1_1_1_0", 0.2), ("Scan 1_1_2_1", 0.001)] {
+            rescore.insert(
+                id.to_string(),
+                PercolatorPsm {
+                    psm_id: id.to_string(),
+                    q_value: q,
+                    pep: 0.0,
+                    score: Some(1.0),
+                    peptide: String::new(),
+                    proteins: String::new(),
+                },
+            );
+        }
+        let hits = select_hits(&c, &spectra, &queues, &cands, Some(&rescore), None);
+        assert_eq!(
+            selected(&hits),
+            vec![("Scan 1_1_2_1".to_string(), false, false)]
+        );
+    }
+
+    fn settings(lfq: bool, quant_dir: Option<&str>) -> QuantSettings {
+        QuantSettings {
+            plex: None,
+            tmt_level: 2,
+            tmt_tol: Tolerance::Ppm(20.0),
+            correction: None,
+            min_purity: 0.0,
+            lfq,
+            lfq_params: LfqParams::default(),
+            feature_fdr: 0.05,
+            quant_fdr: 0.01,
+            pep_cap: None,
+            quant_dir: quant_dir.map(PathBuf::from),
+            fragment_tol: Some(Tolerance::Ppm(20.0)),
+        }
+    }
+
+    #[test]
+    fn quant_dir_needs_ms1_scans_from_every_input() {
+        let mut c = QuantCollector::new(settings(true, Some("q")));
+        let e = c
+            .finish_file(Path::new("/in/run_a.mzML"), None, RunScans::default(), 0)
+            .unwrap_err();
+        assert!(e.contains("/in/run_a.mzML") && e.contains("MS1"), "{e}");
+        // --lfq alone skips the run's label-free quantification.
+        let mut c = QuantCollector::new(settings(true, None));
+        c.finish_file(Path::new("/in/run_a.mzML"), None, RunScans::default(), 0)
+            .unwrap();
+    }
+
+    #[test]
+    fn duplicate_run_stems_name_both_inputs() {
+        let ok = [
+            PathBuf::from("a/run1.mzML"),
+            PathBuf::from("a/run2.mzML.gz"),
+        ];
+        check_unique_stems(&ok).unwrap();
+        let dup = [
+            PathBuf::from("a/run1.mzML"),
+            PathBuf::from("b/run2.raw"),
+            PathBuf::from("b/run1.mzML.gz"),
+        ];
+        let e = check_unique_stems(&dup).unwrap_err();
+        assert!(
+            e.contains("a/run1.mzML ") && e.contains("b/run1.mzML.gz") && e.contains("\"run1\""),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn reporter_coverage_needs_the_whole_channel_range() {
+        let tol = Tolerance::Ppm(20.0);
+        assert!(covers_reporters(None, Plex::Tmt16, tol));
+        assert!(covers_reporters(Some((100.0, 2000.0)), Plex::Tmt16, tol));
+        assert!(covers_reporters(Some((126.0, 2000.0)), Plex::Tmt16, tol));
+        // An auto scan range that starts above 126 never measured the low channels.
+        assert!(!covers_reporters(Some((130.0, 2000.0)), Plex::Tmt16, tol));
+        assert!(!covers_reporters(Some((148.0, 1866.0)), Plex::Tmt10, tol));
+        assert!(!covers_reporters(Some((100.0, 134.0)), Plex::Tmt16, tol));
+        // The 35-plex's highest reporter is 135CD (135.1608), above 135N.
+        let tol = Tolerance::Ppm(10.0);
+        assert!(covers_reporters(Some((126.0, 135.1625)), Plex::Tmt35, tol));
+        assert!(!covers_reporters(Some((126.0, 135.1590)), Plex::Tmt35, tol));
+        assert!(!covers_reporters(Some((126.2, 2000.0)), Plex::Tmt32, tol));
+    }
+
+    fn search_args(extra: &[&str]) -> Cli {
+        use clap::{CommandFactory, FromArgMatches};
+        let mut argv = vec![
+            "andes",
+            "--spectrum",
+            "x",
+            "--database",
+            "y",
+            "--output-pin",
+            "o",
+        ];
+        argv.extend_from_slice(extra);
+        let matches = crate::TopCli::command()
+            .try_get_matches_from(argv)
+            .expect("parse args");
+        crate::SearchArgs::from_arg_matches(&matches).unwrap()
+    }
+
+    #[test]
+    fn command_line_checks_need_no_input() {
+        let ok = |extra: &[&str]| QuantSettings::check_args(&search_args(extra));
+        assert!(ok(&[]).is_ok());
+        assert!(ok(&["--tmt", "tmt35"]).is_ok());
+        assert!(ok(&["--tmt", "tmt35", "--tmt-tol", "10ppm"]).is_ok());
+        assert!(ok(&["--tmt", "tmt10", "--tmt-correction", "lot.txt"]).is_ok());
+        let e = ok(&["--tmt", "tmt35", "--tmt-correction", "lot.txt"]).unwrap_err();
+        assert!(e.contains("not supported for tmt35plex"), "{e}");
+        let e = ok(&["--tmt", "tmt32", "--tmt-tol", "20ppm"]).unwrap_err();
+        assert!(e.contains("e.g. 10ppm"), "{e}");
+        let e = ok(&["--lfq", "--tmt-correction", "lot.txt"]).unwrap_err();
+        assert!(e.contains("needs --tmt"), "{e}");
+        let e = ok(&["--tmt", "tmt10", "--tmt-level", "4"]).unwrap_err();
+        assert!(e.contains("--tmt-level"), "{e}");
+    }
+}

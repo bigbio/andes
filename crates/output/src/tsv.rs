@@ -18,8 +18,9 @@
 
 use std::io::{self, BufWriter, Write};
 
-use crate::row_context::{iter_ranked_by_rank_score, RowContext};
+use crate::row_context::{emitted_rows, RowContext};
 use model::peptide::Peptide;
+use model::protein::{EntryKind, EntryOrigin};
 use model::spectrum::Spectrum;
 use model::tolerance::Tolerance;
 use search::candidate_gen::Candidate;
@@ -174,6 +175,9 @@ fn write_header<W: Write>(writer: &mut W, params: &SearchParams, is_mgf: bool) -
     cols.push("RankScore");
     // Modifications: additive last column — CV accession-based annotations.
     cols.push("Modifications");
+    // Provenance of the named protein (UniProt XML databases): family
+    // accession, entry kind, and the feature that made the entry.
+    cols.extend_from_slice(&["ProteinFamily", "EntryKind", "FeatureIds"]);
 
     writeln!(writer, "{}", cols.join("\t"))
 }
@@ -210,11 +214,13 @@ fn write_spectrum_rows<W: Write>(
         ppm_mode: matches!(params.precursor_tolerance.left, Tolerance::Ppm(_)),
     };
 
-    let ranked: Vec<(u32, &PsmMatch)> = iter_ranked_by_rank_score(&psms).collect();
-    for (_rank, psm) in ranked {
+    for (_rank, psm) in emitted_rows(spec, &psms, candidates) {
         let cand = &candidates[psm.primary_candidate_idx() as usize];
         let ctx = RowContext::new(spec, cand, search_index);
-        write_psm_row(writer, spec, psm, cand, &ctx, &row_ctx)?;
+        let origin = search_index
+            .protein_at(cand.protein_index)
+            .and_then(|p| p.origin());
+        write_psm_row(writer, spec, &psm, cand, &ctx, origin, &row_ctx)?;
     }
     Ok(())
 }
@@ -225,6 +231,7 @@ fn write_psm_row<W: Write>(
     psm: &PsmMatch,
     cand: &Candidate,
     ctx: &RowContext,
+    origin: Option<&EntryOrigin>,
     row_ctx: &RowCtx<'_>,
 ) -> io::Result<()> {
     let is_mgf = row_ctx.is_mgf;
@@ -301,7 +308,17 @@ fn write_psm_row<W: Write>(
     };
     // Modifications: additive last column — ';'-joined "{1-based-pos}:{CURIE}".
     let mods = modifications_field(&cand.peptide);
-    writeln!(writer, "{}\t{}\t{}", lead, raw_score, mods)
+    // Provenance of the named protein: its family accession, entry kind and
+    // the feature that made it (empty for a reference entry).
+    let (family, kind, feature) = match origin {
+        Some(o) => (&*o.family, o.kind.name(), &*o.feature),
+        None => (protein.as_str(), EntryKind::Reference.name(), ""),
+    };
+    writeln!(
+        writer,
+        "{}\t{}\t{}\t{}\t{}\t{}",
+        lead, raw_score, mods, family, kind, feature
+    )
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -326,6 +343,7 @@ mod tests {
                 accession: accession.to_string(),
                 description: String::new(),
                 sequence: b"MKWVTFISLL".to_vec(),
+                annotation: None,
             }],
         };
         SearchIndex::from_target_db(&target, "XXX_")
@@ -349,6 +367,7 @@ mod tests {
             activation_method: None,
             isolation_lower_offset: None,
             isolation_upper_offset: None,
+            isolation_target_mz: None,
         }
     }
 
@@ -401,15 +420,14 @@ mod tests {
             min_peaks: 10,
             precursor_cal_mode: search::PrecursorCalMode::Auto,
             cal_min_spec_keys: search::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS,
+            fragment_index_top_k: 0,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,
             chimeric_max_coisolated: 2,
             chimeric_max_kl: 0.3,
-            chimeric_allow_overlap: false,
             score_mode: search::ScoreMode::Rank,
             refine_select_psm_fdr: 0.01,
-            candidate_index: search::CandidateIndexMode::Ram,
             require_nxst_sequon: false,
         }
     }
@@ -463,6 +481,9 @@ mod tests {
                 "RankScore",
                 // Additive: CV accession-based modification annotation (last column).
                 "Modifications",
+                "ProteinFamily",
+                "EntryKind",
+                "FeatureIds",
             ],
             "Header columns must match expected order when is_mgf=true"
         );
@@ -528,15 +549,26 @@ mod tests {
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
         let mut queue = TopNQueue::new(10);
-        // Push 3 PSMs with descending rank_score (best = largest)
-        queue.push(make_psm(0, 10.0, 10.0)); // best (rank 1)
-        queue.push(make_psm(0, 8.0, 8.0)); // middle (rank 2)
-        queue.push(make_psm(0, 6.0, 6.0)); // worst (rank 3)
+        // Push 3 PSMs on 3 distinct peptides with descending rank_score (best =
+        // largest). Distinct peptides: a positional isomer of an emitted row
+        // would be collapsed into it.
+        for (cidx, score) in [(0u32, 10.0f32), (1, 8.0), (2, 6.0)] {
+            let mut psm = make_psm(0, score, score);
+            psm.candidate_idxs = vec![cidx];
+            queue.push(psm);
+        }
         let queues = vec![queue];
         let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        let cands = vec![make_candidate(0, false)];
+        let cands: Vec<Candidate> = [b'A', b'G', b'S']
+            .iter()
+            .map(|&r| {
+                let mut c = make_candidate(0, false);
+                c.peptide = Peptide::new(vec![AminoAcid::standard(r).unwrap()], b'K', b'S');
+                c
+            })
+            .collect();
         write_tsv_to(
             &mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true,
         )
@@ -573,11 +605,12 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         let m_ox = AminoAcid {
             residue: b'M',
             mass: m_unmod.mass,
-            mod_: Some(std::sync::Arc::new(ox_mod)),
+            mod_: Some(model::modification::leak_mod(ox_mod)),
         };
         let a = AminoAcid::standard(b'A').unwrap();
         // Peptide: K.AM(ox)A.S
@@ -667,6 +700,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tsv_ends_with_provenance_of_the_named_protein() {
+        let accession = "sp|P02769|ALBU_BOVIN";
+        let idx = make_search_index(accession);
+        let params = make_params_ppm();
+        let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
+        let mut q = TopNQueue::new(10);
+        q.push(make_psm(0, 10.0, 10.0));
+        let queues = vec![q];
+        let mut buf = Vec::<u8>::new();
+        let cands = vec![make_candidate(0, false)];
+        write_tsv_to(
+            &mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true,
+        )
+        .unwrap();
+        let cols = parse_header(&buf);
+        assert_eq!(
+            &cols[cols.len() - 4..],
+            ["Modifications", "ProteinFamily", "EntryKind", "FeatureIds"]
+        );
+        let row = &parse_rows(&buf)[0];
+        assert_eq!(row.len(), cols.len());
+        let at = |name: &str| row[cols.iter().position(|c| c == name).unwrap()].as_str();
+        assert_eq!(at("ProteinFamily"), accession);
+        assert_eq!(at("EntryKind"), "reference");
+        assert_eq!(at("FeatureIds"), "");
+    }
+
     // ── Test 7: decoy accession carries decoy prefix ──────────────────────────
 
     #[test]
@@ -718,13 +779,14 @@ mod tests {
             accession: accession.map(|s| s.to_string()),
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         }
     }
 
-    // ── Test: Modifications column is LAST in the TSV header ─────────────────
+    // ── Test: Modifications follows RankScore, before the provenance columns ─
 
     #[test]
-    fn tsv_modifications_column_is_last() {
+    fn tsv_modifications_column_precedes_provenance() {
         let params = make_params_ppm();
         let spectra: Vec<Spectrum> = vec![];
         let queues: Vec<TopNQueue> = vec![];
@@ -739,9 +801,15 @@ mod tests {
 
         let cols = parse_header(&buf);
         assert_eq!(
-            cols.last().map(|s| s.as_str()),
-            Some("Modifications"),
-            "Modifications must be the last column in the TSV header"
+            &cols[cols.len() - 5..],
+            [
+                "RankScore",
+                "Modifications",
+                "ProteinFamily",
+                "EntryKind",
+                "FeatureIds"
+            ],
+            "the provenance columns are appended after Modifications"
         );
     }
 
@@ -756,7 +824,7 @@ mod tests {
         let mod_aa = AminoAcid {
             residue: b'A',
             mass: plain_aa.mass,
-            mod_: Some(std::sync::Arc::new(make_mod(Some("UNIMOD:393")))),
+            mod_: Some(model::modification::leak_mod(make_mod(Some("UNIMOD:393")))),
         };
         // 6 residues; mod at 0-based 5 → 1-based 6
         let residues = vec![
@@ -816,7 +884,7 @@ mod tests {
         let noaccession_aa = AminoAcid {
             residue: b'A',
             mass: plain_aa.mass,
-            mod_: Some(std::sync::Arc::new(make_mod(None))),
+            mod_: Some(model::modification::leak_mod(make_mod(None))),
         };
         let residues = vec![plain_aa.clone(), noaccession_aa, plain_aa];
         let peptide = Peptide::new(residues, b'K', b'S');
@@ -868,12 +936,12 @@ mod tests {
         let mod1 = AminoAcid {
             residue: b'A',
             mass: plain_aa.mass,
-            mod_: Some(std::sync::Arc::new(make_mod(Some("UNIMOD:4")))),
+            mod_: Some(model::modification::leak_mod(make_mod(Some("UNIMOD:4")))),
         };
         let mod2 = AminoAcid {
             residue: b'A',
             mass: plain_aa.mass,
-            mod_: Some(std::sync::Arc::new(make_mod(Some("UNIMOD:393")))),
+            mod_: Some(model::modification::leak_mod(make_mod(Some("UNIMOD:393")))),
         };
         let residues = vec![
             plain_aa.clone(),

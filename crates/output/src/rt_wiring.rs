@@ -8,8 +8,7 @@
 //! single source of truth for both the PIN and the QPX `.idparquet` — can emit
 //! them without any extra plumbing.
 //!
-//! Design reference: `docs/plans/glyco/50-roadmap/rt-prediction-design.md`
-//! ("Commit 1 (engine-wide)"). This implements the engine-wide backbone RT
+//! This implements the engine-wide backbone RT
 //! index + per-run linear calibration ONLY; the glyco per-monosaccharide offset
 //! and `DeltaRTRank` (Commit 2) are a separate later task.
 //!
@@ -202,6 +201,7 @@ mod tests {
             activation_method: None,
             isolation_lower_offset: None,
             isolation_upper_offset: None,
+            isolation_target_mz: None,
         }
     }
 

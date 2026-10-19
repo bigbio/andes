@@ -53,7 +53,7 @@ pub fn build_ion_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> Dataset {
             .iter()
             .map(|aa| aa.residue as char)
             .collect();
-        let gid = group_id(&seq, row.charge);
+        let gid = group_id(&seq);
         let decoy = reverse_peptide(row.peptide);
 
         for (pep, label) in [(row.peptide, 1u8), (&decoy, 0u8)] {
@@ -129,6 +129,7 @@ mod tests {
             activation_method: None,
             isolation_lower_offset: None,
             isolation_upper_offset: None,
+            isolation_target_mz: None,
         }
     }
 

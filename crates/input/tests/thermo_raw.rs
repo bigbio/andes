@@ -74,7 +74,7 @@ fn thermo_raw_chunked_ms1_link_is_consistent() {
         }
     };
 
-    let reader = ThermoRawReader::open(&path).expect("open .raw");
+    let mut reader = ThermoRawReader::open(&path).expect("open .raw");
     let mut total_ms2 = 0usize;
     let mut chunks = 0usize;
     reader.read_with_ms1_chunked(5000, 0, |chunk, link| {

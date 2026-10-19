@@ -1,0 +1,8 @@
+.venv/
+.venv-py312/
+.venv-export/
+__pycache__/
+models/
+*.pyc
+*.pth
+*.zip

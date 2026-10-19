@@ -38,15 +38,18 @@ fn fnv1a_32(data: &[u8]) -> u32 {
     h
 }
 
-/// Compute a stable group id from peptide sequence and charge.
+/// Compute a stable group id from a stripped peptide sequence.
 ///
-/// Rows from the same (peptide, charge) pair share one group id, which
-/// prevents leakage across the group-disjoint train/validation split in
-/// [`super::train::train_gbdt`].
-pub(crate) fn group_id(peptide_seq: &str, charge: u8) -> u32 {
-    let mut buf = Vec::with_capacity(peptide_seq.len() + 1);
-    buf.extend_from_slice(peptide_seq.as_bytes());
-    buf.push(charge);
+/// Every row of the same backbone shares one group id regardless of charge
+/// state or modifications, and I/L are treated as the same residue (they are
+/// isobaric, so `PEPTIDE` and `PEPTLDE` are the same spectral evidence). This
+/// keeps the group-disjoint train/validation split in
+/// [`super::train::train_gbdt`] peptide-disjoint.
+pub(crate) fn group_id(peptide_seq: &str) -> u32 {
+    let buf: Vec<u8> = peptide_seq
+        .bytes()
+        .map(|b| if b == b'I' { b'L' } else { b })
+        .collect();
     fnv1a_32(&buf)
 }
 
@@ -90,15 +93,15 @@ pub fn build_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> Dataset {
         // (param.mme), not the old hardcoded 0.5 Da.
         let labels = label_peaks(active_peaks, &[row.peptide], row.charge, &param.mme);
 
-        // Group by unmodified sequence + charge (prevents train/val leakage of
-        // the same backbone; conservative across peptidoforms).
+        // Group by unmodified sequence (prevents train/val leakage of the same
+        // backbone across charge states and peptidoforms).
         let seq: String = row
             .peptide
             .residues
             .iter()
             .map(|aa| aa.residue as char)
             .collect();
-        let gid = group_id(&seq, row.charge);
+        let gid = group_id(&seq);
 
         for (feat, &label) in features.iter().zip(labels.iter()) {
             x.extend_from_slice(feat);
@@ -156,6 +159,7 @@ mod tests {
             activation_method: None,
             isolation_lower_offset: None,
             isolation_upper_offset: None,
+            isolation_target_mz: None,
         }
     }
 
@@ -225,13 +229,54 @@ mod tests {
 
     #[test]
     fn group_ids_differ_for_different_peptides() {
-        let g1 = group_id("PEPTIDE", 2);
-        let g2 = group_id("SAMPLER", 2);
-        let g3 = group_id("PEPTIDE", 3);
+        let g1 = group_id("PEPTIDE");
+        let g2 = group_id("SAMPLER");
         assert_ne!(
             g1, g2,
             "different sequences should give different group ids"
         );
-        assert_ne!(g1, g3, "different charges should give different group ids");
+    }
+
+    #[test]
+    fn group_ids_fold_isoleucine_to_leucine() {
+        assert_eq!(group_id("PEPTIDEK"), group_id("PEPTLDEK"));
+        assert_eq!(group_id("IIAK"), group_id("LLAK"));
+    }
+
+    #[test]
+    fn build_dataset_groups_one_peptide_across_charge_states() {
+        // The same backbone observed at 2+ and 3+ must share one group id so
+        // the group-disjoint train/validation split cannot place it on both
+        // sides.
+        let scorer = make_scorer();
+        let peaks = vec![
+            (200.0_f64, 100.0_f32),
+            (300.0, 50.0),
+            (400.0, 30.0),
+            (500.0, 20.0),
+        ];
+        let spec_z2 = tiny_spectrum(peaks.clone(), 600.0, 2);
+        let spec_z3 = tiny_spectrum(peaks, 400.0, 3);
+        let peptide = pep("PEPTIDE");
+        let rows = [
+            PsmRow {
+                spectrum: &spec_z2,
+                peptide: &peptide,
+                charge: 2,
+            },
+            PsmRow {
+                spectrum: &spec_z3,
+                peptide: &peptide,
+                charge: 3,
+            },
+        ];
+        let ds = build_dataset(&rows, &scorer);
+        let z2_only = build_dataset(&rows[..1], &scorer);
+        assert!(
+            ds.groups.len() > z2_only.groups.len(),
+            "the 3+ row must contribute peaks"
+        );
+        let first = ds.groups[0];
+        assert!(ds.groups.iter().all(|&g| g == first));
     }
 }

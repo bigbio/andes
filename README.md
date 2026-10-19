@@ -8,152 +8,95 @@ _The data-driven peptide search engine of the quantms ecosystem. Built and maint
 [![Release](https://img.shields.io/github/v/release/bigbio/andes)](https://github.com/bigbio/andes/releases)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
-> **A fast, data-driven peptide search engine** — spectra (mzML, MGF, native Thermo `.raw`, Bruker timsTOF `.d`) + a FASTA database in, Percolator-ready `.pin` out. Leading PSM counts at 1% FDR, in minutes where comparable Java tools take hours. To our knowledge, the **first proteomics search engine designed and built end-to-end with AI coding agents.**
-
-## What is this?
-
-andes is a peptide-spectrum database search engine for shotgun proteomics. It reads MS/MS spectra (mzML, MGF, native Thermo `.raw`, Bruker timsTOF `.d`), searches them against a FASTA protein database with **data-driven, per-regime scoring models**, and emits Percolator-ready PIN rows (or a TSV) with rich per-PSM features for rescoring. Beyond a fast closed search it offers opt-in **PTM discovery** (`--refine`), **chimeric** co-isolation recovery, multi-enzyme digestion, an out-of-core candidate index for large searches, and zero-config reanalysis — and it returns the most PSMs at 1% FDR on the reference datasets while running roughly 10–40× faster than Java MS-GF+ (that range was measured before the 2026-09-04 tree-count speedup, so it is conservative; see [Why andes?](#why-andes)).
-
-andes is also notable for *how* it was built: its engine, models, and benchmarks were developed iteratively by AI coding agents under human direction — a working demonstration of an agent-built scientific tool.
+andes is a peptide database search engine for shotgun proteomics. Spectra (mzML, MGF, native
+Thermo `.raw`, Bruker timsTOF `.d`) and a FASTA go in; a Percolator-ready `.pin` comes out. The
+scoring model is picked per file from its metadata. Opt-in modes recover co-isolated peptides
+(`--chimeric`), search secondary modifications (`--refine`) and identify intact
+N-glycopeptides (`--glyco`). To our knowledge it is the first proteomics search engine designed
+and built end-to-end with AI coding agents, under human direction.
 
 ## Why andes?
 
-Against the canonical open-source engines — **Java MS-GF+ and Comet** — andes leads the field on high-res Astral and low-res TMT, **beats Comet on all three** reference datasets, reads vendor formats natively, and runs in minutes where Java takes hours. The one place andes is edged out is **low-resolution LFQ (UPS1) — Java MS-GF+'s strongest regime** — where andes still beats Comet but trails Java; we report that honestly below. Every engine is re-scored through one uniform Percolator (3.7.1, `--seed 42 -Y`) on the same 8-thread VM, and andes ships a fully own-trained bundle with **own-derived partition geometry** (no MS-GF+ code, constants, or geometry).
-
-Benchmarked at 1% FDR across three reference datasets — **read the metric note under the table before quoting these numbers**:
+andes finds more PSMs than a widely used open-source search engine (engine K) on all three
+reference datasets. On low-res LFQ (UPS1), Java
+MS-GF+'s strongest regime, it trails Java.
 
 | Engine | Astral (high-res HCD) | TMT a05058 (low-res CID) | UPS1 (low-res LFQ) |
 |---|---:|---:|---:|
-| **andes** | **38,394** | **12,281** | 15,838 |
-| Comet 2025.01 | 31,435 | 10,504 | 14,734 |
+| **andes** | **47,080** | **12,347** | 15,848 |
+| engine K | 31,435 | 10,504 | 14,734 |
 | Java MS-GF+ v20240326 † | 26,542 | 10,651 | **15,904** |
-| *andes wall time* | *244 s* | *97 s* | *50 s* |
-| *Comet wall time* | *209 s* | *77 s* | *48 s* |
+| *andes wall time* | *160–161 s* | *28 s* | *18 s* |
+| *engine K wall time* | *215 s* | *76 s* | *46 s* |
 
-<sub>**Metric.** PSMs at Percolator `q ≤ 0.01` under one methodology for every row (plain FASTA + andes `XXX_` decoys + Percolator 3.7.1 `--seed 42 -Y`). andes and Comet were measured head-to-head on **2026-09-04**, same host, 8 threads, one session, commit `1b8520f8`; andes finds **7.5–22.1% more PSMs** for **1.04–1.26x** Comet's wall time. **†** Java MS-GF+ was not re-run that day; its counts are from the same protocol in an earlier session, and it remains ~10–40x slower than andes. These counts are **not** entrapment-validated: the Astral and TMT databases carry no entrapment component, and on UPS1 the measured true FDP at a nominal 1% is **~3.6%**. N=1 per dataset. Every number, its provenance, the opt-in modes and the glyco tiers: [`docs/benchmarks/`](docs/benchmarks/README.md).</sub>
+<sub>**Metric and provenance.** PSMs at Percolator `q ≤ 0.01`, one method for every row (plain
+FASTA, andes `XXX_` decoys, Percolator 3.7.1 `--seed 42 -Y`, same 8-thread host). andes measured
+**2026-10-07** at #112 (`40774aca`); engine K on 2026-10-05, reproducing its 2026-09-04 counts.
+Since #112, high-res searches retrieve candidates with the fragment-ion index, which moved Astral
+from 38,394 to 46,774, and breaking the index's vote ties by matched intensity took it to 47,080;
+low-res searches use the index too since 2026-10-10 (TMT 12,281 → 12,347, UPS1 15,838 → 15,848,
+both now in less than half the memory). andes finds 7.6–49.8% more PSMs in 0.36–0.74x engine K's
+wall time. **†** Java MS-GF+ was not re-run; its counts are from an earlier session, and it
+remains ~10–40x slower. **Error rates:** checked against an entrapment version of the Astral
+database, the Astral gain holds at an equal true FDP (+22.2% over the previous in-RAM retrieval at
+1.00%). Counting a PSM as entrapment only when all its proteins are entrapment sequences, andes's
+nominal 1% is 0.95–1.03% true FDP on Astral, 0.97–1.08% on phospho and 2.6% on UPS1 (2026-10-13;
+earlier figures counted shared peptides as entrapment and overstated UPS1 at ~3.5%). TMT has no
+entrapment component. Details:
+[`docs/benchmarks/`](docs/benchmarks/README.md).</sub>
 
-**On FDR honesty.** Target-decoy q-values are self-consistent by construction, so andes is checked against entrapment databases where one exists — a target PSM matching only a foreign `ENTRAP_` protein is false by construction, which makes the true FDP measurable rather than assumed. That check is real and has repeatedly changed conclusions here. It is also **not uniformly available**: as of the 2026-09-04 audit the Astral benchmark database carries no entrapment component, and the UPS1 one is not 1:1, so the honest summary is that UPS1 sits at ~3.6% true FDP at a nominal 1% and Astral is unvalidated in this configuration. (Opt-in `--refine` PTM discovery runs on top, but its gains are not yet entrapment-validated — the entrapment metric is blind to its peptide-anchored second pass — so it ships as a capability, not a headline number.)
+**Time, CPU and memory** (same VM, 8 threads, `/usr/bin/time`; andes Astral and phospho 2026-10-07
+at #112, TMT and UPS1 2026-10-10 on the out-of-core index, two runs on the standard sets; engine K
+2026-10-06, one run). andes uses 51–70% less CPU time than engine K and 26–64% less wall time. It
+needs less memory on Astral, TMT and UPS1, and more on phospho (2.3x, 80 Da index slices).
 
-<details>
-<summary>Bench methodology</summary>
+| dataset | engine | PSMs @ q≤0.01 | wall | CPU time | peak memory |
+|---|---|---:|---:|---:|---:|
+| Astral | **andes** | **47,080** | **160 s** | **787 s** | **4.1 GB** |
+| | engine K | 31,435 | 217 s | 1,594 s | 8.1 GB |
+| TMT a05058 | **andes** | **12,347** | **28 s** | **171 s** | **1.7 GB** |
+| | engine K | 10,504 | 77 s | 568 s | 2.9 GB |
+| UPS1 | **andes** | **15,848** | **18 s** | **117 s** | **1.3 GB** |
+| | engine K | 14,734 | 42 s | 309 s | 2.9 GB |
+| Phospho (PXD007653) | **andes** | **37,190** (1.02% FDP) | **637 s** | **3,608 s** | 13.7 GB |
+| | engine K | 33,984 (1.77% FDP) | 1,096 s | 8,399 s | 6.0 GB |
 
-- **Hardware:** 8-thread Intel Xeon Gold 6238 VM, Linux x86_64. Same machine for every engine.
-- **Reproducing these:** exact commands, the shared Percolator protocol and the entrapment arithmetic are in [`docs/benchmarks/`](docs/benchmarks/README.md).
-- **Engines:** andes (this repo), Java MS-GF+ [v20240326](https://github.com/MSGFPlus/msgfplus/releases/tag/v2024.03.26), Comet 2025.01 (via OpenMS). Parameters harmonized per dataset (trypsin, ≤2 missed cleavages, matched fixed/variable mods and precursor/fragment tolerances).
-- **Uniform FDR:** every engine's PSMs re-scored through the **same** Percolator (`quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2`, `--seed 42 -Y`), counts at `q ≤ 0.01`. One methodology for every row: plain FASTA, andes `XXX_` decoys, Percolator `-Y` target-decoy competition — which is what makes the rows comparable. Where an entrapment database exists, the true FDP is measured alongside using `ENT/total × (1 + T/E)`; note that `T/E` must be measured per database rather than assumed to be 1, and that not every benchmark database here has an entrapment component (see the metric note under the table).
-- **PIN building:** andes and Comet write Percolator PIN directly; Java MS-GF+ via `MzIDToTsv` + `build_pins.py` (its concatenated-TDA mzid crashes `msgf2pin`).
-- **Models:** all andes runs use the bundled per-protocol model store (`resources/models/`) — andes's **own models, each trained on public PRIDE data** for the regime it covers (see [Supported models](#supported-models)). The bundle is fully own-trained (no MS-GF+-derived model data).
-- **FDR honesty:** counts are at Percolator `q ≤ 0.01` under one methodology for every engine. Where an entrapment database exists the true FDP is measured alongside and reported; see the metric note under the table and [`docs/benchmarks/`](docs/benchmarks/README.md) for which datasets that covers and which it does not.
-- **Notes:** Java MS-GF+ is deterministic; the Astral count reuses a prior run (its `msgf2pin` step crashes here regardless of input, and the count is pin-builder-independent). Protein-level counts are omitted from the headline — they require uniform parsimony grouping to be comparable across engines, since raw `proteinIds` differ by output format. Precursor calibration is off (the andes default).
-
-</details>
-
-andes is also the only engine here that reads Thermo `.raw` and Bruker timsTOF `.d` natively. Full methodology, per-engine parameters, data URLs, config files, and the entrapment-FDP validation: [`docs/benchmarks/`](docs/benchmarks/).
+<sub>PSM counts: 2026-10-05 refresh; TMT and UPS1 2026-10-10 (phospho: seed 42). Wall times vary 5–15% between sessions;
+CPU time is steadier.</sub>
 
 ## How it works
 
-andes is a streaming search cascade: one data-driven scoring pass, optional second passes, and one
-Percolator rescoring step that owns the FDR. Nothing in the engine computes a production FDR.
-
 ```mermaid
-%%{init: {"theme":"base","themeVariables":{"fontFamily":"ui-sans-serif, system-ui, sans-serif","fontSize":"14px","lineColor":"#94a3b8","primaryBorderColor":"#cbd5e1"}}}%%
 flowchart TD
-    %% ---- Scoring models (trained offline) ----
-    subgraph TRAIN["🧠 Scoring models · 17, own-trained on public data"]
-      direction LR
-      PRIDE[("PRIDE datasets<br/>one accession per regime")] --> TR["andes train<br/>rank tables + GBDT ensembles"]
-      TR --> STORE[["resources/models/<br/>activation × instrument × enzyme × protocol"]]
-    end
-
-    %% ---- Inputs ----
-    SPEC(["📈 Spectra<br/>mzML · MGF · Thermo .raw · Bruker .d"])
-    DB(["🧬 FASTA<br/>targets only — decoys generated<br/>reverse · shuffle · sequon-reverse"])
-
-    %% ---- Resolve the run ----
-    SPEC --> DET["🔍 Auto-detect per file<br/>activation · analyser · isobaric label<br/>→ one model, its tolerances"]
-    STORE -. nearest model .-> DET
-    DET --> CAL["Precursor calibration pre-pass<br/>--precursor-cal auto"]
-
-    %% ---- Candidate generation ----
-    DB --> CAND["Candidate peptides<br/>enzyme(s) · missed cleavages · variable mods"]
-    CAND --> IDX{"Candidate index"}
-    IDX -->|"fits memory"| RAM["in-RAM"]
-    IDX -->|"too large"| MMAP["out-of-core mmap"]
-
-    %% ---- Pass 1 ----
-    CAL --> P1["⚡ Pass 1 · peptide–spectrum scoring<br/>rank score (low-res) or strong score (high-res)<br/>+ GBDT fragment features, 100 trees"]
-    RAM --> P1
-    MMAP --> P1
-    P1 --> QUEUE["Top-N PSM queues<br/>~50 features per PSM"]
-
-    %% ---- Optional second passes ----
-    QUEUE -.->|"--chimeric"| CHIM["Pass 2a · chimeric<br/>co-isolated 2nd peptide<br/>from the residual spectrum"]
-    QUEUE -.->|"--refine · high-res only"| REF["Pass 2b · PTM discovery<br/>on confident-protein anchors"]
-
-    %% ---- Glyco branch ----
-    CAL -.->|"--glyco"| GLY["🍬 Intact N-glycopeptide search<br/>oxonium gate · glycan list · sequon backbones<br/>per-scan collapse to one glycoPSM"]
-    RAM --> GLY
-    GLY --> GPIN["results.glyco.pin<br/>pool fractions before Percolator"]
-
-    %% ---- Merge + rescore ----
-    QUEUE --> PIN["Percolator PIN<br/>+ optional TSV · QPX parquet"]
-    CHIM --> PIN
-    REF --> PIN
-    PIN --> PERC["Percolator 3.7.1<br/>--rescore · or your own run"]
+    SPEC["Spectra<br/>mzML · MGF · Thermo .raw · Bruker .d"] --> SEARCH
+    FASTA["FASTA, targets only<br/>decoys generated for you"] --> SEARCH
+    SEARCH["Search<br/>one model chosen per file<br/>candidates scored per spectrum"]
+    SEARCH --> PIN["PIN<br/>one row per PSM"]
+    SEARCH -->|"--glyco"| GPIN["Glyco PIN<br/>one glycoPSM per scan"]
+    PIN --> PERC["Percolator<br/>owns the FDR"]
     GPIN --> PERC
-    PERC --> OUT(["✅ PSMs at q ≤ 0.01"])
-    PIN -.->|"--rescore-native · no Percolator"| NAT["built-in CV'd GBDT rescorer<br/>fallback, not production"]
-    NAT -.-> OUT
-
-    %% ---- palette ----
-    classDef io      fill:#eff6ff,stroke:#3b82f6,stroke-width:1.5px,color:#1e3a8a;
-    classDef model   fill:#faf5ff,stroke:#a855f7,stroke-width:1.5px,color:#6b21a8;
-    classDef core    fill:#ecfdf5,stroke:#10b981,stroke-width:1.5px,color:#065f46;
-    classDef opt     fill:#fff7ed,stroke:#f97316,stroke-width:1.5px,color:#9a3412,stroke-dasharray:4 3;
-    classDef out     fill:#fdf2f8,stroke:#ec4899,stroke-width:1.5px,color:#9d174f;
-    class SPEC,DB io;
-    class PRIDE,TR,STORE model;
-    class DET,CAL,CAND,IDX,RAM,MMAP,P1,QUEUE,PIN core;
-    class CHIM,REF,GLY,GPIN,NAT opt;
-    class PERC,OUT out;
-    style TRAIN fill:#fcfaff,stroke:#d8b4fe,stroke-width:1px,color:#6b21a8;
+    PERC --> OUT["PSMs at q ≤ 0.01"]
 ```
 
-1. **Resolve the run.** For mzML, `.raw` and `.d`, andes reads the activation method, analyser
-   resolution and any isobaric label from the file itself and picks the nearest of the 17 bundled
-   models by `(activation, instrument, enzyme, protocol)`; the model carries its own fragment
-   tolerance. `--precursor-cal auto` then learns a systematic precursor shift from a quick
-   pre-pass and tightens the precursor window. MGF carries no metadata, so there you say it.
-2. **Candidate generation.** The FASTA is digested (one or several enzymes, missed cleavages,
-   variable mods) and decoys are generated per `--decoy-strategy`. The candidate index stays in
-   RAM or goes out-of-core (`mmap`) when it would not fit (`--candidate-index auto|ram|mmap`);
-   `auto` budgets against `min(node MemAvailable, cgroup limit)`, so a SLURM or container
-   allowance below the host's free memory is respected.
-3. **Pass 1.** Every spectrum is scored against its candidates. Low-resolution data ranks by the
-   generating-function **rank score**; high-resolution data by the fused **strong score**
-   (`--score auto`). Two GBDT ensembles add fragment-intensity and rich-ion features; 100
-   trees per ensemble is the default, measured identification-neutral against the full
-   ensembles and 33–41% faster. The result is a top-N queue per spectrum with ~50 features.
-4. **Optional second passes**, off by default and leaving the default engine unchanged:
-   **`--chimeric`** finds co-isolated precursors in the MS1 isolation window and searches the
-   residual spectrum for the second peptide; **`--refine`** (high-resolution only) opens a
-   PTM-discovery search anchored on confident proteins.
-5. **`--glyco`** is a separate pipeline: an oxonium gate, a glycan composition list, sequon-bearing
-   backbone candidates, and a per-scan collapse to one glycoPSM, written to its own
-   `results.glyco.pin`. Fractions must be pooled before Percolator, because a single file rarely
-   has enough confident targets to reach 1% at all.
-6. **Rescoring.** Pass 1 and any second-pass PSMs go into **one Percolator PIN** (plus optional
-   TSV and OpenMS-compatible QPX parquet). Percolator, run by you or by `--rescore`, does the
-   semi-supervised rescoring and the FDR; `--rescore-native` is a built-in cross-validated
-   GBDT fallback for machines without Percolator, not the production path. The benchmarks in
-   [`docs/benchmarks/`](docs/benchmarks/README.md) check the reported 1% against entrapment
-   databases where one exists; that is a benchmark measurement, not something the engine does.
+1. **Pick the model** from the file's activation, resolution and isobaric label (one of 17
+   bundled models).
+2. **Build candidates**: digest the FASTA and generate decoys. The candidate index goes
+   out-of-core (cached in the system temp directory) so candidates can be retrieved by the
+   fragment-ion index; on low-res data only the 150 most intense peaks of each spectrum vote.
+   `--glyco` builds its own sequon-only candidate table from the same out-of-core index.
+3. **Score**: low-res by the generating-function rank score, high-res by the fused strong
+   score, plus GBDT fragment-intensity features. High-res searches score only the 100 candidates
+   whose fragment ions best match the spectrum (Astral: +22% PSMs at an equal true FDP; phospho:
+   164 s instead of 99 minutes).
+4. **Optional passes** `--chimeric`, `--refine` and the separate `--glyco` pipeline (below).
+5. **Rescore** with Percolator, run by you or by `--rescore`. andes computes no production FDR.
+6. **Quantify** the confident PSMs on request: reporter ions (`--tmt`) or MS1 features (`--lfq`).
+
+Full parameter reference: [`DOCS.md`](DOCS.md).
 
 ## Install
 
-**Option 1 — download a release archive** (recommended):
-
-Grab the archive for your platform from the [Releases page](https://github.com/bigbio/andes/releases). Five platform builds are published per release:
+**Option 1 — [release archive](https://github.com/bigbio/andes/releases)** (recommended):
 
 ```
 andes-<version>-x86_64-unknown-linux-gnu.tar.gz
@@ -163,7 +106,7 @@ andes-<version>-aarch64-apple-darwin.tar.gz
 andes-<version>-x86_64-pc-windows-msvc.zip
 ```
 
-Each archive contains the `andes` binary, the `resources/` tree (the bundled per-protocol model store in `resources/models/`, with all 17 own-trained scoring models), and LICENSE/NOTICE/README.
+Each archive holds the binary, the 17-model store in `resources/models/`, and LICENSE/NOTICE/README.
 
 **Option 2 — `cargo install`:**
 
@@ -191,51 +134,18 @@ andes \
   --output-pin out.pin
 ```
 
-This runs a tryptic search with **zero configuration**: for mzML, Thermo `.raw`, and Bruker `.d`, the fragmentation, analyzer resolution, and labeling are read from the file metadata, the matching scoring model is selected automatically, and tolerances default sensibly (`--precursor-tol 20ppm`). It writes Percolator-format PSMs to `out.pin` and per-phase timings to stderr — feed `out.pin` straight into Percolator (Docker or native) to compute q-values.
+This runs a tryptic search with no configuration: for mzML, `.raw` and `.d` the model is chosen
+from the file metadata, and the precursor tolerance defaults to `20ppm`. Feed `out.pin` to
+Percolator for q-values.
 
-> **MGF has no instrument metadata**, so for `.mgf` inputs pass the activation explicitly with `--fragmentation <CID\|ETD\|HCD\|UVPD>` (plus `--fragment-tol-ppm`/`--fragment-tol-da`). See [Selecting the scoring model](#selecting-the-scoring-model) for `--protocol` (labeled/enriched samples) and `--model` (pick a model directly).
+> **MGF has no instrument metadata.** Pass `--fragmentation <CID\|ETD\|HCD\|UVPD>` plus
+> `--fragment-tol-ppm` or `--fragment-tol-da`; otherwise andes assumes CID / low-res / 0.5 Da
+> and warns.
 
-A row in `out.pin` is one peptide–spectrum match, with rich per-PSM features plus Rust-only additive columns before `Peptide`. The number of charge one-hot columns scales with `--charge` (default **2..5** ⇒ `charge2…charge5`).
-
-### Output scores
-
-Each PSM row carries two scores plus a battery of additive discriminative features for Percolator. The most important columns (full **66-column** reference with per-column value ranges in [`DOCS.md` §3a](DOCS.md)):
-
-| Column | Type | Range | What it is |
-|---|---|---|---|
-| `RankScore` | int | unbounded | **Ranking** score (rank-LLR) — orders candidates within a spectrum. |
-| `RankScoreFloat` | float | unbounded | Unrounded `RankScore` (continuous split-sum) — finer-grained ranking feature for Percolator. |
-| `RawScore` | float | unbounded | **Headline discriminative** score (fused `signal − null`) — the feature Percolator weights most. |
-| `RawScoreCal` | float | signed | Per-spectrum z-scored `RawScore` (significance). |
-| `TailorScore` | float | ≥0 | `RankScore` ÷ spectrum top-1% quantile — cross-spectrum comparability. |
-| `DeltaRankScore` | float | ≥0 | Lead of the best peptide over the runner-up. |
-| `NumMatchedMainIons`, `longest_b/y` | int | ≥0 | Fragment-coverage counts. |
-| `ExplainedIonCurrentRatio`, `matchedIonRatio`, `UniqueMatchFraction` | float | [0, 1] | Fraction-of-signal / fraction-of-peptide explained. |
-| `dm`, `absdm`, `MeanErrorTop7` | float | Da / ppm | Precursor & fragment mass-accuracy. |
-| `EdgeScore`, `PpmGaussianScore`, `ComplementaryIonBalance`, `ChanceMatchSurprise` | float | varies | Additive evidence features (orthogonal to the core score). |
-| `RichIonLLR`, `IntensitySignal`, `FragPred*` | float | model-gated | Intensity-/rich-ion-model features (`0.0` without the model). |
-| `PrecursorIsotopeKL`, `PrecursorSNR` | float | ≥0 | MS1 precursor-envelope features (`0.0` without `--chimeric`). |
-| `IsRefinement`, `NumMods`, `ModSite*` | int/0-1 | ≥0 | PTM-refinement & mod-localization features (`0` without `--refine`). |
-
-### Run summary & `statistics.log`
-
-Because andes **auto-resolves the model and tolerances from the data**, a run can *end* with different parameters than it started with (precursor calibration tightens the window; a high-res model carries a 20 ppm fragment tolerance even when none was given). At the end of every search andes therefore prints a summary to stderr **and** writes a `statistics.log` next to the PIN, recording the **final** tolerances and a per-modification PSM tally:
-
-```text
-──────── andes run summary ────────
-  Final precursor tolerance : Symmetric(10.0 ppm) (calibration: Auto)
-  Final fragment tolerance  : 0.5 Da
-  Spectra with a match      : 48210
-  Rank-1 PSMs (pre-FDR)     : 31204 target, 17006 decoy
-  PTM report (rank-1 target PSMs carrying each modification):
-    Carbamidomethyl : 28933
-    Oxidation       :  6120
-    Acetyl          :   341
-    (unmodified)    :  2150
-  ───────────────────────────────────
-```
-
-(PTM counts are pre-FDR, over each spectrum's best candidate; Percolator applies FDR downstream.)
+Each PIN row is one PSM. `RankScore` orders candidates within a spectrum; `RawScore` is the
+score Percolator weights most. All 66 columns are in [`DOCS.md` §3a](DOCS.md#3a-pin-columns).
+The final tolerances and a per-modification PSM tally go to stderr and `statistics.log`
+([`DOCS.md` §3d](DOCS.md#3d-run-summary-statisticslog)).
 
 ## Common workflows
 
@@ -247,7 +157,7 @@ docker run --rm -v $(pwd):/data biocontainers/percolator:v3.7.1_cv1 \
   percolator -X /data/weights.txt /data/out.pin
 ```
 
-**TMT 10-plex search with mods.txt:**
+**TMT 10-plex search with mods.txt** (mods file format: [`DOCS.md` §2](DOCS.md#2-modstxt-format)):
 
 ```bash
 andes \
@@ -258,56 +168,78 @@ andes \
   --protocol TMT
 ```
 
-**Direct TSV / Parquet output:**
+**UniProt XML database.** `--database uniprot_sprot_human.xml.gz` searches like the UniProt
+FASTA. It also offers opt-in uses of UniProt's annotation. A mod declared `sites=annotated`
+in the mods file is placed only where UniProt annotates that modification.
+`--uniprot-variants` searches natural sequence variants as their own entries, with the change in
+the accession. `--uniprot-isoforms` adds the described isoforms, and `--uniprot-chains` the
+peptides at the new termini of mature chains (after signal peptide or propeptide removal).
+Annotation is filtered by evidence (`--uniprot-evidence`); see
+[`DOCS.md` §1a](DOCS.md#uniprot-xml-databases). With rescoring, variant calls are checked
+against knockoff variants ([below](#variant-calls-checked-against-knockoffs---uniprot-knockoffs---variant-fdr)).
 
 ```bash
-# TSV for inspection; OpenMS-compatible QPX .idparquet bundle for quantms/OpenMS
+andes --spectrum spectra.mzML --database uniprot_sprot_human.xml.gz \
+  --mods phospho_annotated_mods.txt --uniprot-variants --output-pin out.pin
+```
+
+**TSV and Parquet output:**
+
+```bash
+# TSV for inspection; QPX .idparquet bundle for quantms
 andes --spectrum spectra.mzML --database db.fasta \
   --output-pin out.pin --output-tsv out.tsv --output-parquet out.idparquet
 ```
 
-`--output-parquet` writes an OpenMS `QPXFile`-schema bundle (`psms`/`proteins`/`search_params` parquet) — see [`DOCS.md` §3e](DOCS.md). andes can emit `.pin`, `.tsv`, and `.parquet` in one run.
+**In-process rescoring.** `--rescore` runs Percolator (`--percolator-bin`, else `percolator` on
+`$PATH`, else the pinned Docker image). `--rescore-native` is a built-in cross-validated GBDT
+fallback. Both add a q-value and PEP to the outputs and write `<stem>.q<fdr>.tsv` (targets at
+q ≤ `--fdr`, default 0.01, e.g. `--rescore --fdr 0.01`). `--fdr` and `--pep` do nothing
+without one of them.
 
-**Integrated rescoring → q-values & PEP (`--rescore` / `--rescore-native`):** andes emits the PIN (feature matrix) and hands FDR to a **rescorer**, which joins a **q-value** and **PEP** back into the outputs — the QPX `posterior_error_probability` column, a `q-value` score, and a filtered `<stem>.q<fdr>.tsv` (target PSMs at q ≤ `--fdr`) next to the PIN. Two backends:
-
-- **`--rescore`** — **Percolator** (recommended, production-grade). andes resolves a backend in order: `--percolator-bin <path>` → `percolator` on `$PATH` → the pinned biocontainers docker image (force with `--percolator-docker`). Extra flags pass through `--percolator-args "<...>"`.
-- **`--rescore-native`** — a built-in, **Percolator-free** rescorer: a GBDT over the PIN features, trained with **leakage-safe 3-fold target-decoy cross-validation (folded by spectrum)** → q-value + calibrated PEP. A self-contained **fallback** for benchmarking / offline use; Percolator stays the recommended path. On real TMT data it lands within noise of Percolator at a true ≤1% entrapment-FDP.
+**Quantification (`--tmt`, `--lfq`).** andes quantifies the confident PSMs in the same run:
+`--tmt tmt10` reads the reporter ions of every identified MS2 (or its SPS-MS3 with
+`--tmt-level 3`), applies the kit's impurity matrix (`--tmt-correction`) and reports the
+precursor isolation purity; `--lfq` integrates the isotope chromatograms of every identified
+precursor from the MS1 scans with an experimental decoy-based feature q-value estimate. Both write plain
+tables (`<stem>.tmt.tsv`, `<stem>.lfq.tsv`) and, with `--output-parquet`, the QPX
+`quantms.feature.parquet` that quantms consumes. Normalization and protein roll-up stay
+downstream ([`DOCS.md` §10](DOCS.md#10-quantification)). `--lfq --mbr` adds match between runs
+over two or more inputs: every confident precursor is measured in every run, and transfers carry
+an internal quant-quality q-value (`<stem>.mbr.tsv`). The same stages run one at a time with
+`andes quant library|extract|finalize` over a `--quant-dir`, for pipelines that spread runs
+over machines. On the ProteoBench label-free DDA module (PXD028735, six runs; measured at
+`47d2844`, before #166 and #167), andes quantified 54,932 precursors in at least 3 runs at
+transfer q 0.01 (67,035 at the default 0.05), with a median |ε| of 0.155 and a CV of 0.110 using
+`quantity_normalized`: lower on both than every match-between-runs submission on the public
+leaderboard. One dataset, one seed ([benchmarks](docs/benchmarks/README.md#2-the-benchmarks)).
 
 ```bash
-andes --spectrum spectra.mzML --database db.fasta \
-  --output-pin out.pin --output-parquet out.idparquet \
-  --rescore --fdr 0.01            # Percolator; or --rescore-native; or just --fdr 0.01 to auto-pick a backend
+andes --spectrum tmt_run.mzML --database human.fasta --mods tmt10_mods.txt \
+      --rescore --tmt tmt10 --tmt-correction lot.txt --output-parquet run.idparquet
+andes --spectrum run1.mzML --spectrum run2.mzML --database human.fasta --rescore --lfq
+andes --spectrum run1.mzML --spectrum run2.mzML --database human.fasta --rescore --lfq --mbr
 ```
 
-**`--fdr` auto-picks a backend.** Setting `--fdr` **explicitly** without `--rescore`/`--rescore-native` *triggers* rescoring and auto-resolves: Percolator if one is available, else the native rescorer. So `--fdr 0.01` alone "just works".
-
-**Filtering.** `--fdr <q>` keeps target PSMs at **q-value ≤ q** — the set-level FDR control (default 0.01 when rescoring runs). `--pep <p>` optionally **ANDs** a per-PSM **PEP** (local-FDR) cap on top (kept iff q ≤ `--fdr` *and* PEP ≤ `--pep`); the q-value remains primary, `--pep` is a supplementary gate. Without `--output-pin`, a temporary PIN is used (keep it with `--keep-pin true`).
-
-**With `--chimeric` / `--refine`.** The rescorer reads every PIN row; chimeric secondary and refine Pass-2 PSMs share their scan's `ScanNr`, so the native rescorer's per-spectrum CV folds them with their primary (no decoy leakage) — `--chimeric` rescoring is entrapment-validated for both backends. `--refine`'s Pass-2 is **peptide-anchored**, so a single pooled q-value (Percolator *or* native) is not fully FDR-calibrated for the refined subset (it needs grouped/subset FDR); refine ships as a discovery capability, not an FDR-validated count.
-
-**[quantms](https://github.com/bigbio/quantms) pipeline integration:**
-
-Point quantms's PSM search step at `andes` and use the standard quantms post-processing. The `.pin` row format is the same; existing quantms scripts using legacy numeric flag values (`--fragmentation 3 --protocol 4`) keep working without modification (the legacy numeric flag values are documented in [`DOCS.md`](DOCS.md)).
+**[quantms](https://github.com/bigbio/quantms).** Point the search step at `andes`. Use named
+flag values; legacy numeric values are rejected ([`DOCS.md` §8](DOCS.md#8-legacy-numeric-values--behavior-notes)).
 
 ## Selecting the scoring model
 
-andes picks a per-spectrum scoring model from the bundled store, keyed by `(activation, instrument, enzyme, protocol)`. For **mzML / Thermo `.raw` / Bruker `.d` this is fully automatic** — nothing to set. Three optional flags steer or override it:
-
-- **`--fragmentation <CID\|ETD\|HCD\|UVPD>`** — the activation method. Auto-detected for mzML/`.raw`/`.d`; **only required for MGF**, which carries no instrument metadata.
-- **`--protocol <auto\|TMT\|iTRAQ\|iTRAQ-phospho\|phospho\|standard>`** — a hint for **labeled / enriched** samples, so andes selects the TMT/iTRAQ/phospho-aware model. Auto-detected from reporter ions in mzML/`.raw`/`.d`; set it explicitly for MGF or to force a choice. (The MS-GF+ numeric codes `0–5` are still accepted for quantms back-compat but are considered legacy — prefer the names.)
-- **`--model <slug>`** — bypass selection and load a specific model from the store (e.g. `--model hcd_qexactive_tryp_tmt`). This is the direct, scalable selector as the model store grows.
-
-The enzyme comes from `--enzyme` (default trypsin). In short: on modern formats you set none of these; on MGF you set `--fragmentation`; `--protocol`/`--model` are there when you want to steer the choice.
+andes picks a model by `(activation, instrument, enzyme, protocol)`, automatically for mzML,
+`.raw` and `.d`. `--fragmentation` is needed only for MGF; `--protocol
+<auto\|TMT\|iTRAQ\|iTRAQ-phospho\|phospho\|standard>` selects a labelled or enriched model;
+`--model <slug>` loads one model by id (e.g. `hcd_qexactive_tryp_tmt`). The enzyme comes from
+`--enzyme` (default trypsin). An uncovered regime uses the nearest model.
 
 ### Supported models
 
-The bundle ships **17 fully own-trained scoring models** in `resources/models/` (a per-protocol partitioned Parquet store), each trained on public PRIDE data for the regime it covers — with the partition geometry itself **derived from andes's own corpus** (no MS-GF+ code, constants, or geometry). Earlier bundles also shipped rarer regimes seeded from the original MS-GF+ models; those regimes that could not be retrained from a clean public corpus were **dropped** rather than shipped as seed copies, so the store contains no MS-GF+-derived model data.
-
-For a regime that is not bundled, andes auto-selects the nearest covered model (e.g. a TOF or low-res-ETD enzyme with no dedicated model falls back to the default `hcd_qexactive_tryp`); pass `--model <slug>` to force a specific one.
+All 17 models are trained by andes on public PRIDE data; the store contains no MS-GF+-derived
+model data.
 
 | `model_id` | activation / instrument / enzyme / protocol | Training data (public PRIDE) | Benchmark |
 |---|---|---|---|
-| `hcd_astral_tryp` | HCD / OrbitrapAstral / Trypsin / Automatic | PXD046453 | Astral: +22% PSMs vs Comet |
+| `hcd_astral_tryp` | HCD / OrbitrapAstral / Trypsin / Automatic | PXD046453 | Astral: +22% PSMs vs engine K |
 | `hcd_qexactive_tryp` | HCD / QExactive / Trypsin / Automatic | ProteomeTools (PXD009449) | global default model |
 | `hcd_qexactive_tryp_tmt` | HCD / QExactive / Trypsin / TMT | PXD010429 | — |
 | `hcd_qexactive_tryp_itraq` | HCD / QExactive / Trypsin / iTRAQ | public PRIDE (see manifest) | — |
@@ -325,232 +257,193 @@ For a regime that is not bundled, andes auto-selects the nearest covered model (
 | `etd_lowres_tryp_phosphorylation` | ETD / LowRes / Trypsin / Phosphorylation | public PRIDE (see manifest) | — |
 | `uvpd_qexactive_tryp` | UVPD / QExactive / Trypsin / Automatic | public PRIDE (see manifest) | — |
 
-<sub>"public PRIDE (see manifest)" marks regimes whose exact source accession is tracked in the training manifest but not yet pinned in this table; the model is still trained on public data only. Datasets cited as "ProteomeTools" are the synthetic-peptide ProteomeTools deposits (PXD009449 and related).</sub>
+<sub>"see manifest": the accession is tracked in the training manifest, not yet pinned here.
+**⚠ limited training data:** few PSMs were available, so treat these models as best-effort.</sub>
 
-> **Quality note — thin-data regimes.** The three rarer-enzyme low-res CID models flagged **⚠ limited training data** (`cid_lowres_lysc`, `cid_lowres_argc`, `cid_lowres_gluc`) are fully own-trained but on a thin corpus: their rank/fragment-offset tables are pseudocount-dominated (the prior carries most of the weight, since few PSMs were available for that exact enzyme+regime). They are independence-clean and usable, but should not be treated as high-confidence, fully-data-driven models on par with the trypsin/TMT/phospho regimes — treat their scoring as best-effort for those enzymes until a larger public corpus is harvested.
-
-## CLI summary
-
-Most-used flags (full reference in `DOCS.md` §1):
-
-Required:
-
-| Flag | Purpose |
-|---|---|
-| `--spectrum <FILE>` | Input mzML, MGF, Thermo `.raw` (needs `thermo` feature + .NET 8), or Bruker timsTOF `.d` (needs `timstof` feature). Auto-detected by extension |
-| `--database <FILE>` | Input FASTA (targets only; decoys generated) |
-| `--output-pin <FILE>` | Percolator PIN output |
-
-Optional (default in **bold**):
-
-| Flag | Purpose | Default |
-|---|---|---|
-| `--output-tsv <FILE>` | Also write a TSV | **none** |
-| `--output-parquet <DIR>` | Also write an OpenMS-compatible QPX `.idparquet/` bundle (`psms`/`proteins`/`search_params`) | **none** |
-| `--mods <FILE>` | mods.txt file | **Cam-C fixed + Ox-M variable** |
-| `--precursor-tol <VALUE>` | Precursor mass tolerance, e.g. `20ppm` or `0.02da` | **20ppm** |
-| `--precursor-cal <off\|auto\|on>` | Learn + apply a precursor ppm shift (`auto` skips it when the sample is too small) | **auto** |
-| `--isotope-error <MIN..MAX>` | Isotope-error range | **-1..2** |
-| `--charge <MIN..MAX>` | Charge range when absent in the spectrum | **2..5** |
-| `--enzyme-specificity <fully\|semi\|non-specific>` | Tolerable termini (NTT) | **fully** |
-| `--max-missed-cleavages <INT>` | Missed cleavages | **1** |
-| `--min-length/-max-length <INT>` | Peptide length range | **6, 50** |
-| `--score <auto\|rank\|strong>` | RawScore / ranking source — `auto` picks **strong** for high-res, **rank** for low-res, by the model's instrument | **auto** |
-| `--min-peaks <INT>` | Min peaks per spectrum to score | **10** |
-| `--top-n <INT>` | PSMs retained per spectrum | **10** |
-| `--fragmentation <CID\|ETD\|HCD\|UVPD>` | Fragmentation/activation method — **MGF-only** (auto-detected for mzML/`.raw`/`.d`) | *(see below)* |
-| `--protocol <auto\|phospho\|iTRAQ\|iTRAQ-phospho\|TMT\|standard>` | Search protocol | **auto** |
-| `--model <SLUG>` | Load a specific model from the store by id (bypass auto-select), e.g. `hcd_qexactive_tryp_tmt` | **auto-pick** |
-| `--model-store <PATH>` | Use a custom model store instead of the bundled `resources/models/` | **bundled** |
-| `--decoy-prefix <STR>` | Prefix for generated decoys | **XXX_** |
-| `--decoy-strategy <reverse\|shuffle\|sequon-reverse\|none>` | How decoys are generated; `sequon-reverse` with `--glyco`, `none` for a pre-built target+decoy FASTA | **reverse** |
-| `--enzyme <NAME>` | Digestion enzyme (`trypsin`, `chymotrypsin`, `lysc`, `aspn`, `gluc`, `lysn`, `argc`, `alphalp`, `nocleavage`, `nonspecific`; comma-list for multi-protease) | **trypsin** |
-| `--gbdt-max-trees <INT>` | Trees evaluated per GBDT ensemble (`0` = all). 100 is 33–41% faster than all trees and identification-neutral; `--glyco` uses all trees unless set | **100** |
-| `--ms-level <INT>` | MS level to search; MS1/MS3+ (e.g. TMT SPS-MS3) filtered out (mzML or `.raw`) | **2** |
-| `--threads <INT>` | Worker threads | **logical CPUs** |
-| `--chimeric` | Two-pass co-isolated-peptide cascade (mzML or Thermo `.raw`) | **off** — see below |
-| `--refine` | PTM-discovery second pass on confident-protein anchors | **off** |
-| `--rescore` | Rescore the PIN with **Percolator** → q-value + PEP (see [Integrated rescoring](#common-workflows)) | **off** |
-| `--rescore-native` | Rescore with the **built-in** CV'd-GBDT rescorer (no Percolator) | **off** |
-| `--fdr <FLOAT>` | q-value cutoff for the filtered TSV; **set explicitly → triggers rescoring + auto-picks a backend** | **0.01** (when rescoring) |
-| `--pep <FLOAT>` | optional per-PSM PEP cap, ANDed with `--fdr` | **none** |
-
-Run `andes --help` for the auto-generated help with full descriptions and the legacy numeric flag aliases.
-
-mzML, Thermo `.raw`, and Bruker `.d` are fully auto-detected — andes reads the
-activation method and analyzer resolution from the file, so you pass no
-fragmentation parameters for these formats.
-
-### MGF input (extended parameters)
-
-MGF files carry no activation or analyzer metadata, so you describe the
-acquisition yourself:
-
-| Parameter | When to pass | Example |
-|---|---|---|
-| `--fragmentation <CID\|ETD\|HCD\|UVPD>` | the activation method used | `--fragmentation HCD` |
-| `--fragment-tol-ppm <X>` | high-resolution MS/MS (Orbitrap/TOF) | `--fragment-tol-ppm 20` |
-| `--fragment-tol-da <X>`  | low-resolution MS/MS (ion trap)      | `--fragment-tol-da 0.5` |
-
-If you pass none of these for an MGF file, andes assumes CID / low-res / 0.5 Da
-and prints a warning. These parameters have no effect on mzML/`.raw`/`.d`.
+To train your own, see [`TRAIN.md`](TRAIN.md).
 
 ## Chimeric / co-isolated peptides (`--chimeric`, experimental)
 
-DDA scans frequently co-isolate more than one precursor, and the second peptide is normally lost. With `--chimeric` (mzML or Thermo `.raw`), andes runs a **two-pass cascade**: Pass 1 is the normal top-1 search; Pass 2 then detects co-isolated precursors in each scan's MS1 isolation window (averagine envelope match) and runs a targeted search for the second peptide on the *residual* spectrum (the primary's matched peaks removed), emitting it as an extra PSM. This recovers co-isolated identifications without the FDR inflation of a blind wide-window search — gains are entrapment-FDP validated. It is **opt-in and off by default**; the default engine is unchanged.
+With `--chimeric` (mzML or Thermo `.raw`), pass 1 is the normal search, keeping the same top-N
+candidates per scan (`--top-n`, default 10); pass 2 takes the best one as the primary peptide,
+finds co-isolated precursors in the MS1 isolation window and searches the residual spectrum for
+a second peptide. Keeping the alternatives (rather than only the best candidate) took Astral from
+60,435 to 66,405 PSMs and 26,717 to 29,400 peptides at an equal entrapment true FDP of 1%. On
+phospho the alternatives first cost about 1% of peptides (15,084 → 14,904): most of them were the
+same phosphopeptide with the phosphate on another site. The PIN now keeps one row per peptide and
+modification multiset per precursor (see [DOCS.md](DOCS.md) §3a), and phospho with `--chimeric`
+reaches 39,470–39,592 PSMs and 15,107–15,156 peptides, above top-1 (39,404–39,489 / 15,046–15,084).
 
-**Measured 2026-09-04** (same session as the headline table). On UPS1, the one dataset
-with an entrapment database, `--chimeric` raised PSMs at q ≤ 0.01 from 15,838 to 17,112
-(+8.0%) while entrapment hits stayed flat (166 → 167) — the extra identifications are real,
-not an artifact of the different candidate population the chimeric PIN presents (it forces
-`top_n = 1` in pass 1). On Astral the gain is far larger (38,394 → 65,028, +69%) but that
-database has no entrapment component, so the Astral figure is **not** entrapment-validated
-and should not be read as though it were. Details in
-[`docs/benchmarks/`](docs/benchmarks/README.md).
+On UPS1 (with entrapment) PSMs at q ≤ 0.01 rose from 15,838 to 17,112 (+8.0%) with entrapment
+hits flat (166 → 167). On high-res data `--chimeric` runs on the default out-of-core path with
+fragment-ion retrieval. On Astral with an entrapment database (Percolator, three seeds), at an
+equal 1% true FDP, it gives 60,403–60,435 PSMs against 43,076–43,145 without `--chimeric`
+(+40%) and 57,003–57,054 with `--chimeric` on the former in-RAM candidate path. Distinct peptides stay flat
+(26,432–26,454 vs 26,513–26,534): the second-peptide rows mostly re-identify peptides found
+elsewhere, which deepens PSM counts rather than coverage. At nominal q ≤ 0.01 the true FDP is
+1.18% (1.05% without `--chimeric`).
 
-## Soft fragment matching
+## Secondary modifications (`--refine`, experimental)
 
-andes replaces the hard fragment-tolerance cliff with a smooth Gaussian weighting of each matched peak by its mass error, blended toward the missing-ion score — so an off-centre (likely-noise) peak inside a wide low-res window is discounted instead of counting in full. It is **on by default and parameter-free**: the Gaussian width is the model's own match tolerance (`σ = tolerance`), so it scales per regime automatically (meaningful on low-res, ~inert on high-res, which deconvolves to a tight window) with nothing to tune. Measured net-positive across all three regimes when it shipped (2026-08: UPS1 +0.8%, TMT +0.3%, Astral +0.5% at 1% entrapment-FDP).
+`--refine` searches the spectra pass 1 missed against confident proteins with a fixed tier of
+five chemistries (oxidation, deamidation, two pyro-Glu losses, protein N-terminal acetyl). It
+does not discover new modifications and runs on high-resolution data only. On Astral it gives
+40,028 PSMs (+4.3%), but its Pass-2 PSMs (`IsRefinement = 1`) sit at **~2.8% FDP** under a
+merged 1% threshold; threshold them separately for 1% on modified PSMs ([`DOCS.md`](DOCS.md#refine--secondary-chemistry-cascade)).
+
+## Variant calls checked against knockoffs (`--uniprot-knockoffs`, `--variant-fdr`)
+
+**Aim.** A PSM on a UniProt variant entry claims that the sample carries that variant. Most false
+claims are not random matches. They are a canonical peptide that a common modification or an
+isotope error makes look like the variant: N→D and Q→E look like deamidation, G→A and D→E like
+methylation, and a one-isotope mis-pick fits a +1 Da substitution. Decoys model only random
+matches, so a decoy-based q-value does not see this error. Measured against donor genotypes, 65%
+of the variant PSMs accepted at a class q-value ≤ 0.01 were variants no donor carries, and 96% of
+the deamidation-like ones were. Knockoff variants give the variant claim a null that makes the
+same mistakes.
+
+**How it works.**
+1. **Knockoff entries.** With `--uniprot-variants`, each single-residue variant X→Y of a canonical
+   sequence gets up to `--uniprot-knockoffs` (default 4) knockoff entries. A knockoff is the same
+   substitution at another position of the same sequence that holds X, where:
+   - the next residue matches: the same residue when X is N, Q, K or R or either next residue is
+     P or G, otherwise the same residue class;
+   - the N-x-S/T sequon status is the same;
+   - the position lies in another enzymatic span whose length is within 3 residues of the real
+     one's and between 6 and 50;
+   - every variant UniProt lists for the protein is at least 10 residues away.
+
+   The positions are chosen at random but reproducibly, from the accession and the variant id.
+   A knockoff is almost certainly absent from the sample. A modification or an isotope error that
+   mimics the real substitution mimics the knockoff equally well. Knockoffs are variant entries:
+   they get decoys, PIN flags and Percolator scores exactly like real variants
+   (`sp|P04637_KO1_D21H_VAR_005851_D7H|P53_HUMAN` moves `VAR_005851_D7H` to position 21).
+2. **Knockoff q-value.** After Percolator and the class FDR, variant-class PSMs are split by
+   substitution class (deamidation-like, methyl-like, oxidation-like, other). Within a class, the
+   knockoff PSMs above a score estimate how many real variant PSMs above it are false. A knockoff
+   PSM counts 1/k for a variant with k knockoffs, and the estimate starts at 1/K for a finite-sample
+   margin, with K the most knockoffs any variant has:
+
+   FDP(t) = (1/K + Σ 1/k over knockoff PSMs ≥ t) / (real PSMs ≥ t whose variant has knockoffs)
+
+   A real PSM's knockoff q-value is the smallest FDP over the thresholds at or below its score. Its
+   reported q-value is the largest of the global, class and knockoff q-values.
+3. **Untested variants.** A variant with no position that qualifies for a knockoff has no null, so
+   its PSMs are not accepted. Measured against genotypes, those variants are false several times
+   more often than the tested ones, so the tested variants' estimate cannot be lent to them.
+4. **Reporting.** Variant-class PSMs (every protein a variant entry) are accepted at
+   `--variant-fdr`, every other PSM at `--fdr`. Knockoff PSMs stay in the PIN and the QPX bundle
+   as targets with q = 1. They are never in the filtered TSV, quantification, MBR or the
+   proteoform table, and knockoff accessions are dropped from other rows' protein lists.
+
+**Input and parameters.** A UniProt XML database with `--uniprot-variants`, and `--rescore`.
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--uniprot-knockoffs` | `4` | Knockoffs per single-residue variant. `0` turns them off and leaves variant PSMs to the class FDR alone. |
+| `--variant-fdr` | the larger of `--fdr` and 0.05 | q-value cutoff for variant-class PSMs in the filtered TSV, the proteoform table and quantification. |
+| `--uniprot-evidence` | `experimental` | Minimum evidence for a variant to be searched (`curated` was used below). |
+
+The run log gives, per substitution class, the knockoff entries made, the variant PSMs accepted
+before and after the knockoff q-values, how many were tested, and the estimated false share:
+
+```
+UniProt XML: 39142 knockoff variant entries (44773 single-residue variants with no position for a knockoff)
+Rescore: variant PSMs at q<=0.05 per substitution class, before -> after knockoff q-values:
+  deamidation-like 1201 -> 0 (147 tested; knockoffs 150.6, false share 1.02), methyl-like 212 -> 89 ...
+```
+
+```bash
+andes --spectrum run1.mzML --spectrum run2.mzML --database uniprot_sprot_human.xml.gz \
+  --uniprot-variants --uniprot-evidence curated --rescore --output-pin variants.pin
+```
+
+**Current benchmark.**
+
+*Genotype truth.* PXD022787 (four donors, one TMT10 set, 69 runs, ion-trap MS2) was searched
+against reviewed human UniProt with curated variants. The donor-haplotype tags of the personal
+protein FASTA deposited with the dataset label each reported variant as carried or absent. The
+true FDP below counts the labelled PSMs whose variant no donor haplotype carries:
+
+| Setting | Variant PSMs reported | Absent / labelled | True FDP | Variants reported (true FDP) |
+|---|---|---|---|---|
+| No knockoffs, class q ≤ 0.01 | 2,452 | 1,075 / 1,653 | 65% | 552 (33%) |
+| No knockoffs, class q ≤ 0.05 | 3,886 | 1,872 / 2,622 | 71% | 840 (45%) |
+| Knockoffs, `--variant-fdr 0.05` | 201 | 4 / 160 | **2.5%** | 83 (3.4%) |
+| Knockoffs, `--variant-fdr 0.10` | 307 | 14 / 233 | **6.0%** | 126 (8.2%) |
+
+Only 0.55% of the knockoffs turned out to be a real donor variant, so the null is clean.
+
+*Cost on the rest of the search.* Knockoffs grow the variant entries by about 60%. PSMs at
+q ≤ 0.01 change by −0.43% on pooled Astral DDA (PXD070049, 21 runs: 1,003,367 → 999,103) and by
+−0.30% on the TMT set. Search time is unchanged. On the Astral set, 129 variant-class PSMs are
+reported at `--variant-fdr 0.05`.
+
+**Limits.**
+- About 30% of single-residue variants can be given a knockoff, so most variants are not reported.
+- Multi-residue variants, indels, isoform-borne variants, isoforms and mature chains get no
+  knockoffs. Variant-class PSMs of those are not accepted while knockoffs are on; isoform and
+  chain PSMs keep the class FDR.
+- The calibration is measured on one genotyped dataset with low-resolution MS2. Small counts
+  make the deamidation- and oxidation-like classes the least certain.
 
 ## Intact N-glycopeptide search (`--glyco`, experimental)
 
-`--glyco` searches **intact N-glycopeptides**: it identifies the peptide backbone and the
-attached glycan composition together, from the same MS2 scan, without deglycosylation.
+`--glyco` identifies the backbone and the glycan composition from one MS2 scan.
 
 ```bash
 andes --spectrum sample.mzML \
       --database proteins.fasta \
       --decoy-strategy sequon-reverse \
-      --glyco \
+      --glyco --glyco-species human \
       --output-pin results.pin
 ```
 
-`--glyco` writes **only** `results.glyco.pin`. It is a standalone pipeline: the standard
-PIN, TSV, Parquet, rescore and refine outputs are all skipped, and passing
-`--output-tsv`, `--output-parquet`, `--rescore` or `--refine` alongside `--glyco` is a
-hard error rather than a silently ignored flag.
+- A glycan database is required: `--glyco-species` (`human`, `mouse`,
+  `mouse-large`, `high-mannose`) or your own `.gdb` with `--glyco-glycan-gdb`.
+- Output is only `results.glyco.pin`; `--output-tsv`, `--output-parquet`, `--rescore` and
+  `--refine` are rejected. Run Percolator on it with `--trainFDR 0.05`.
+- Use `--decoy-strategy sequon-reverse`; plain reversal makes q-values anti-conservative.
+- Search each fraction separately, concatenate the `.glyco.pin` files (one header) and run
+  Percolator once: one fraction has too few decoys for a stable 1%.
+- HCD/CID and ETD/EThcD/AI-ETD are supported; c/z fragments localize the glycosite. The site is
+  reported as `@N<pos>` only for a single N-X-S/T sequon, otherwise `@N?`.
 
-Two things differ from a normal run:
+On one mouse-liver fraction (PXD005553) andes reports 6,922–6,959 glycoPSMs at 1% at
+0.85–1.36% true FDP over 3 seeds, confirming 89.0% of the depositors' (engine L) and 89.6% of a reanalysis's
+(engine A) identifications, in 6 minutes on 8 threads ([`docs/benchmarks/`](docs/benchmarks/README.md)).
+`--glyco-peptide-first` finds ~2% more at ~13x the run time.
 
-- **`--decoy-strategy sequon-reverse` is strongly recommended.** Plain reversal maps an
-  N-X-S/T sequon to S/T-X-N, so reversed decoys reach the glyco sequon gate at a lower
-  rate than targets and q-values come out anti-conservative. `sequon-reverse` restores
-  each sequon at its mirrored position, so targets and decoys compete symmetrically.
-- **A second PIN is written**, `results.glyco.pin`, alongside the normal peptide PIN.
-  Glycopeptide PSMs carry glyco-specific features (oxonium evidence, core-Y ladder,
-  glycan-mass agreement, ETD c/z coverage) and must be run through Percolator
-  *separately* from the unmodified-peptide PIN — mixing the two feature sets in one
-  Percolator run is not valid. andes never computes FDR itself.
-
-Searching several fractions of one experiment? **Run each file separately, concatenate
-the `.glyco.pin` files (one header), and run Percolator once on the pooled result.**
-A single fraction typically yields only a handful of glyco decoys, which makes a
-per-fraction 1% q-value estimate almost pure noise.
-
-### Fragmentation
-
-Both HCD/CID and ETD-family activation are supported, and andes adapts to what it finds:
-
-| Activation | What andes uses |
-| --- | --- |
-| HCD / CID | oxonium ions, the core-Y ladder, and b/y fragments of the backbone |
-| ETD / EThcD / AI-ETD | the above **plus** c/z fragments, which retain the glycan and so localize the glycosite |
-
-On ETD-family data three ETD-only behaviours are on by default and inert on HCD/CID:
-`--glyco-cz-gate` (c/z evidence can rescue a backbone from truncation),
-`--glyco-etd-rank-glycan` (fragments are predicted at their glycan-carrying mass), and
-`--glyco-hcd-pair` (candidate backbones are generated from the paired HCD scan of the
-same precursor while c/z is scored on the ETD scan). `--glyco-hcd-pair` needs both scans
-in one file and is disabled with a warning for multi-file runs — another reason to search
-one file per invocation.
-
-### What to expect
-
-On the pGlyco2 mouse-liver dataset (PXD005553, five fractions, 17,855 reference
-glycoPSMs), andes reports **31,666 ± 9 glycoPSMs** at 1% PSM-level q-value from Percolator
-and **confirms 78.9% of the reference** (same scan, same backbone), at a measured true
-false-discovery proportion of **1.11% ± 0.03** against a 1:1 shuffled entrapment database
-— the reported 1% is where it claims to be. Where andes and pGlyco2 identify the same scan,
-99.1% agree on the backbone and 83.8% on the full peptidoform (backbone + glycan
-composition). Against MSFragger-Glyco's deposited identifications for the same spectra
-(PXD031032), andes confirms 88.0% of its glycoPSMs across the five fractions and agrees on
-the full peptidoform 95.8% of the time where both identify a scan.
-
-Treat these as a calibration point, not a guarantee. Glyco results depend heavily on
-activation type, glycan class, and how the reference set itself was filtered.
-
-### Memory
-
-The glyco path holds the candidate index in RAM; `--candidate-index mmap` is **not yet
-supported under `--glyco`** and is rejected rather than silently ignored. Measured on a
-20,411-protein human FASTA (whole reviewed proteome):
-
-| Search | Candidates | Peak resident |
-| --- | --- | --- |
-| plain, 1 missed cleavage | 13.2 M | ~7.8 GB |
-| plain, 3 missed cleavages | 18.8 M | ~12.3 GB |
-| `--glyco` (raises missed cleavages to 3) | 18.8 M | ~17.3 GB |
-
-So a whole-proteome glyco search wants **~20 GB**. andes now estimates this before
-scoring and warns if it will not fit, instead of being killed by the OOM killer half an
-hour in with nothing written. If you are short of memory, restrict the FASTA to the
-proteins of interest, or pass `--max-missed-cleavages 1` or `2` explicitly — `--glyco`
-raises the floor to 3, but an explicit lower value is honoured, and it costs
-~4.4 GB less at the price of some IDs.
-
-### Status
-
-`--glyco` is **experimental**. Its flags, defaults and PIN feature set may change between
-releases. The glycosite is reported in the Peptide column's glycan tag as `@N<pos>`
-(1-based Asn position) **only when the backbone contains a single N-X-S/T sequon**;
-with several sequons andes does not localize between them by default and emits `@N?`
-rather than a guess. The full flag list, the fused-selector weights, and the
-`ANDES_GLYCO_*` rollback switches are documented in
+Memory: `--glyco` runs on the out-of-core candidate index and holds in memory only the
+candidates that carry an N-X-S/T sequon (3.2 of 28.0 million on the mouse fraction above), so
+that run peaks at 4.5 GB with output identical to the former in-RAM path (20.0 GB). All flags:
 [DOCS.md §9](DOCS.md#9-glycopeptide-search-experimental--advanced-knobs).
 
 ## Reading Thermo `.raw` files
 
-andes reads native Thermo `.raw` directly — pass `--spectrum sample.raw`, no other flags; the format is auto-detected by extension just like mzML/MGF, and `--chimeric` works on `.raw` too. Output is parity-identical to searching the equivalent mzML (validated scan-for-scan on a 2.4 GB Orbitrap Astral run).
+Pass `--spectrum sample.raw`. Output is identical to the equivalent mzML (checked scan-for-scan
+on a 2.4 GB Orbitrap Astral run). Release archives (macOS x64/arm64, Windows x64, Linux x64)
+bundle a .NET 8 runtime. From source, install the
+[.NET 8 runtime](https://dotnet.microsoft.com/download/dotnet/8.0) and build with rustc ≥ 1.88:
+`RUSTUP_TOOLCHAIN=stable cargo build --release -p andes --features thermo`.
 
-There are two ways to use it:
-
-- **Pre-built release archives (recommended) — nothing to install.** The macOS (x64/arm64), Windows (x64), and Linux (x64) archives bundle a self-contained .NET 8 runtime next to the binary, so `.raw` reading works out of the box.
-- **Building from source** with `--features thermo`. Then `.raw` reading needs the **.NET 8 runtime** installed (the build itself does not need the .NET SDK — the RawFileReader assemblies are vendored):
-  - Linux: `sudo dnf install dotnet-runtime-8.0` (RHEL/Fedora) or `apt-get install dotnet-runtime-8.0` (Debian/Ubuntu), or `curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 8.0 --runtime dotnet`
-  - macOS: `brew install dotnet@8`
-  - Windows: the [.NET 8 Desktop/Runtime installer](https://dotnet.microsoft.com/download/dotnet/8.0)
-  - Build needs rustc ≥ 1.88: `RUSTUP_TOOLCHAIN=stable cargo build --release -p andes --features thermo`
-
-The runtime is auto-discovered: a bundled `dotnet/` next to the binary is used automatically; otherwise an existing `DOTNET_ROOT` or a system install is used. mzML/MGF reading never loads .NET. RawFileReader is under Thermo's license — see `crates/input/THERMO_LICENSE.txt`.
-
-**Containers:** base on a .NET 8 runtime image (or add the runtime), e.g.
-
-```dockerfile
-FROM mcr.microsoft.com/dotnet/runtime:8.0
-COPY andes /usr/local/bin/andes   # built with --features thermo
-ENTRYPOINT ["andes"]
-```
+andes uses a bundled `dotnet/` next to the binary, else `DOTNET_ROOT` or a system install;
+containers can start from `mcr.microsoft.com/dotnet/runtime:8.0`. RawFileReader is under
+Thermo's license (`crates/input/THERMO_LICENSE.txt`).
 
 ## Reading Bruker timsTOF `.d` files
 
-andes reads native Bruker timsTOF `.d` (DDA-PASEF) data directly — pass `--spectrum sample.d`, no other flags; the format is auto-detected by extension just like mzML/MGF. A `.d` is a *directory* (a TDF SQLite database plus a binary blob); reading it uses the pure-Rust [`timsrust`](https://crates.io/crates/timsrust) crate, so there is **no vendor runtime and nothing to bundle** — unlike Thermo `.raw`.
-
-It is feature-gated to keep the default build pure-Rust. Build with `--features timstof` on a toolchain with a recent rustc (the `timsrust` dependency tree needs rustc ≥ 1.88):
+Pass `--spectrum sample.d` (a directory). The pure-Rust
+[`timsrust`](https://crates.io/crates/timsrust) reader needs no vendor runtime; build with
+`--features timstof` (rustc ≥ 1.88):
 
 ```bash
 cargo build --release -p andes --features timstof
 andes --spectrum sample.d --database human.fasta --output-pin out.pin
 ```
 
-Scope: **MS2 only**, the non-chimeric search path. The ion-mobility dimension is carried as metadata but not used by scoring. `--chimeric` on a `.d` degrades gracefully to a normal search (the co-isolation cascade needs an MS1 stream the DDA reader does not expose), as does `--precursor-cal`. Default (non-`timstof`) builds read mzML/MGF only and never pull in `timsrust`.
-
-## Auto-detection
-
-For mzML, Thermo `.raw`, and Bruker `.d` inputs, andes auto-detects the activation method and analyzer type from file metadata — no fragmentation or instrument parameters are needed. `--protocol` from the CLI is still applied to select protocol-specific models (e.g. TMT, iTRAQ). MGF files carry no activation or analyzer metadata; use `--fragmentation` / `--fragment-tol-ppm` / `--fragment-tol-da` to describe the acquisition (see the MGF section above), or andes defaults to CID / low-res / 0.5 Da and prints a warning. Full resolution table: `DOCS.md` §4.
-
-## Training your own models
-
-andes can generate scoring models from your own data (`andes train`) and select them automatically by instrument at search time — useful for instruments or experiment classes the bundled models don't cover well (Orbitrap Astral, timsTOF, TMT/phospho/immunopeptidomics, …). Models live in a single Parquet store and support incremental add/remove/reweight updates with a held-out acceptance gate. See [`TRAIN.md`](TRAIN.md).
+Scope: DDA-PASEF, MS2 only; ion mobility is not scored; `--chimeric` and `--precursor-cal`
+fall back to a normal search.
 
 ## Citation
 
@@ -560,4 +453,4 @@ If you use andes in published work, please cite:
 
 ## License
 
-andes is released under the **Apache License 2.0** — see [`LICENSE`](LICENSE) for the full text and [`NOTICE`](NOTICE) for attribution. 
+andes is released under the **Apache License 2.0** — see [`LICENSE`](LICENSE) for the full text and [`NOTICE`](NOTICE) for attribution.

@@ -1,4 +1,4 @@
-//! Glycan-first candidate retrieval (pGlyco3-style "glycan ion indexing").
+//! Glycan-first candidate retrieval ("glycan ion indexing").
 //!
 //! This is the search-strategy counterpart to the backbone-first driver: instead
 //! of enumerating `precursor − glycan` for every glycan and then scoring the
@@ -130,70 +130,45 @@ impl DiagnosticIon {
 }
 
 /// The default N-glycan diagnostic-ion panel: the 28 oxonium (B-fragment) ions
-/// from Glyco-Decipher's `OxoniumIonEnum`. `counts` are the monosaccharides each
+/// of a published glyco engine's oxonium panel. `counts` are the monosaccharides each
 /// ion implies (a fragment implies ≥ that many of each monosaccharide).
 /// Configurable via [`GlycanConfig::diagnostic_ions`].
+///
+/// Oxonium ions and their water losses are computed from the residue masses in
+/// [`crate::glycan_mass`]; cross-ring fragments, which are not residue sums,
+/// carry the exact m/z of their cation formula.
 pub fn default_diagnostic_ions() -> Vec<DiagnosticIon> {
+    use crate::glycan_mass::WATER;
     // (mz, hex, hexnac, fuc, neuac, neugc)
     const IONS: [(f64, u8, u8, u8, u8, u8); 28] = [
-        (84.0444, 0, 1, 0, 0, 0),  // HexNAc fragment
-        (85.0284, 1, 0, 0, 0, 0),  // Hex fragment
-        (97.0284, 1, 0, 0, 0, 0),  // Hex fragment
-        (109.0270, 1, 0, 0, 0, 0), // Hex fragment
-        (115.0390, 1, 0, 0, 0, 0), // Hex fragment
-        (126.0550, 0, 1, 0, 0, 0), // HexNAc fragment
-        (127.0390, 1, 0, 0, 0, 0), // Hex fragment
-        (138.0550, 0, 1, 0, 0, 0), // HexNAc fragment
-        (144.0640, 0, 1, 0, 0, 0), // HexNAc fragment
-        (145.0670, 1, 0, 0, 0, 0), // Hex fragment
-        (163.0600, 1, 0, 0, 0, 0), // Hex
-        (168.0660, 0, 1, 0, 0, 0), // HexNAc fragment
-        (186.0760, 0, 1, 0, 0, 0), // HexNAc fragment
-        (204.0867, 0, 1, 0, 0, 0), // HexNAc
-        (274.0874, 0, 0, 0, 1, 0), // NeuAc−H2O
-        (290.0823, 0, 0, 0, 0, 1), // NeuGc−H2O
-        (292.1027, 0, 0, 0, 1, 0), // NeuAc
-        (308.0976, 0, 0, 0, 0, 1), // NeuGc
-        (325.1129, 2, 0, 0, 0, 0), // Hex2
-        (366.1395, 1, 1, 0, 0, 0), // HexHexNAc
-        (454.1560, 1, 0, 0, 1, 0), // HexNeuAc
-        (512.1970, 1, 1, 1, 0, 0), // HexHexNAcFuc
-        (528.1917, 2, 1, 0, 0, 0), // Hex2HexNAc
-        (657.2349, 1, 1, 0, 1, 0), // HexHexNAcNeuAc
-        (690.2445, 3, 1, 0, 0, 0), // Hex3HexNAc
-        (803.2930, 1, 1, 1, 1, 0), // HexHexNAcNeuAcFuc
-        (893.3239, 3, 2, 0, 0, 0), // Hex3HexNAc2
-        (1039.3823, 3, 2, 1, 0, 0), // Hex3HexNAc2Fuc
-    ];
-    IONS
-        .iter()
-        .map(|&(mz, hex, hexnac, fuc, neuac, neugc)| DiagnosticIon {
-            mz,
-            hex,
-            hexnac,
-            fuc,
-            neuac,
-            neugc,
-        })
-        .collect()
-}
-
-/// The default O-glycan diagnostic-ion panel: the reducing-end GalNAc oxonium
-/// (204.09, shared with N-glycans' HexNAc) plus the O-glycan-specific core-1
-/// (Gal-GalNAc, 366.14), sialyl-Tn (NeuAc-GalNAc, 495.18) and sialyl-T
-/// (NeuAc-Gal-GalNAc, 657.23) oxonium ions, and the low-mass HexNAc fragments
-/// every GalNAc produces. `counts` are the monosaccharides each ion implies.
-/// Configurable via [`GlycanConfig::diagnostic_ions`].
-pub fn o_glycan_diagnostic_ions() -> Vec<DiagnosticIon> {
-    // (mz, hex, hexnac, fuc, neuac, neugc)
-    const IONS: [(f64, u8, u8, u8, u8, u8); 7] = [
-        (138.0550, 0, 1, 0, 0, 0), // HexNAc/GalNAc fragment
-        (168.0660, 0, 1, 0, 0, 0), // HexNAc/GalNAc fragment
-        (186.0760, 0, 1, 0, 0, 0), // HexNAc/GalNAc fragment
-        (204.0867, 0, 1, 0, 0, 0), // GalNAc (reducing-end)
-        (366.1395, 1, 1, 0, 0, 0), // Gal-GalNAc (core-1)
-        (495.1821, 0, 1, 0, 1, 0), // NeuAc-GalNAc (sialyl-Tn)
-        (657.2349, 1, 1, 0, 1, 0), // NeuAc-Gal-GalNAc (sialyl-T)
+        (84.04439, 0, 1, 0, 0, 0),                                // HexNAc C4H6NO+
+        (85.02841, 1, 0, 0, 0, 0),                                // Hex C4H5O2+
+        (97.02841, 1, 0, 0, 0, 0),                                // Hex C5H5O2+
+        (HEX + PROTON - 3.0 * WATER, 1, 0, 0, 0, 0),              // Hex−3H2O
+        (115.03897, 1, 0, 0, 0, 0),                               // Hex C5H7O3+
+        (126.05495, 0, 1, 0, 0, 0),                               // HexNAc C6H8NO2+
+        (HEX + PROTON - 2.0 * WATER, 1, 0, 0, 0, 0),              // Hex−2H2O
+        (138.05495, 0, 1, 0, 0, 0),                               // HexNAc C7H8NO2+
+        (144.06552, 0, 1, 0, 0, 0),                               // HexNAc C6H10NO3+
+        (HEX + PROTON - WATER, 1, 0, 0, 0, 0),                    // Hex−H2O
+        (HEX + PROTON, 1, 0, 0, 0, 0),                            // Hex
+        (HEXNAC + PROTON - 2.0 * WATER, 0, 1, 0, 0, 0),           // HexNAc−2H2O
+        (HEXNAC + PROTON - WATER, 0, 1, 0, 0, 0),                 // HexNAc−H2O
+        (HEXNAC + PROTON, 0, 1, 0, 0, 0),                         // HexNAc
+        (NEUAC + PROTON - WATER, 0, 0, 0, 1, 0),                  // NeuAc−H2O
+        (NEUGC + PROTON - WATER, 0, 0, 0, 0, 1),                  // NeuGc−H2O
+        (NEUAC + PROTON, 0, 0, 0, 1, 0),                          // NeuAc
+        (NEUGC + PROTON, 0, 0, 0, 0, 1),                          // NeuGc
+        (2.0 * HEX + PROTON, 2, 0, 0, 0, 0),                      // Hex2
+        (HEX + HEXNAC + PROTON, 1, 1, 0, 0, 0),                   // HexHexNAc
+        (HEX + NEUAC + PROTON, 1, 0, 0, 1, 0),                    // HexNeuAc
+        (HEX + HEXNAC + FUC + PROTON, 1, 1, 1, 0, 0),             // HexHexNAcFuc
+        (2.0 * HEX + HEXNAC + PROTON, 2, 1, 0, 0, 0),             // Hex2HexNAc
+        (HEX + HEXNAC + NEUAC + PROTON, 1, 1, 0, 1, 0),           // HexHexNAcNeuAc
+        (3.0 * HEX + HEXNAC + PROTON, 3, 1, 0, 0, 0),             // Hex3HexNAc
+        (HEX + HEXNAC + NEUAC + FUC + PROTON, 1, 1, 1, 1, 0),     // HexHexNAcNeuAcFuc
+        (3.0 * HEX + 2.0 * HEXNAC + PROTON, 3, 2, 0, 0, 0),       // Hex3HexNAc2
+        (3.0 * HEX + 2.0 * HEXNAC + FUC + PROTON, 3, 2, 1, 0, 0), // Hex3HexNAc2Fuc
     ];
     IONS
         .iter()
@@ -226,7 +201,7 @@ pub const O_CORE_Y_LADDER: [(u8, u8); 1] = [(1, 0)]; // Y1 = GalNAc (HexNAc)
 /// The glycan core (reducing-end) type. Determines which Y ions count as *core*
 /// ions, whether core-fucose is recognized, and the default core-ion filter
 /// threshold. A single [`GlycanIonIndex`] indexes one core type at a time
-/// (pGlyco3 likewise ships separate N- and O-glycan databases).
+/// (glycan databases are likewise shipped separately for N- and O-glycans).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GlycanCore {
     /// Canonical N-glycan trimannosyl core (GlcNAc₂Man₃).
@@ -298,7 +273,7 @@ fn generate_y_ions(glycan: &Glycan, core: GlycanCore) -> Vec<GlycanIon> {
 
     let ant_hn = c.hexnac.saturating_sub(core_hn);
     let ant_h = c.hex.saturating_sub(core_h);
-    let ant_f = c.fuc - core_fuc;
+    let ant_f = c.fuc.saturating_sub(core_fuc);
     let ant_a = c.neuac;
     let ant_g = c.neugc;
 
@@ -514,10 +489,10 @@ pub struct GlycanConfig {
     /// as a glycopeptide at all.
     pub min_diagnostic_ions: u32,
     /// Minimum matched core ions a candidate must have to survive core filtering.
-    /// pGlyco3 uses 2 for N-glycans and 1 for O-glycans.
+    /// The field standard is 2 for N-glycans and 1 for O-glycans.
     pub min_core_ions: u32,
-    /// Number of top candidates to return per spectrum. pGlyco3 keeps the top 100
-    /// candidate glycan compositions for the peptide search.
+    /// Number of top candidates to return per spectrum. The field standard keeps the
+    /// top 100 candidate glycan compositions for the peptide search.
     pub top_k: usize,
     /// Diagnostic-ion panel (defaults to [`default_diagnostic_ions`]).
     pub diagnostic_ions: Vec<DiagnosticIon>,
@@ -650,7 +625,10 @@ pub fn search_glycans(
     candidates.truncate(config.top_k);
 
     GlycanSearchResult {
-        is_glycopeptide: !candidates.is_empty(),
+        // The diagnostic panel passed above, which is what makes this a
+        // glycopeptide spectrum. Whether retrieval then found candidates is
+        // reported by `candidates`, and the two are not the same question.
+        is_glycopeptide: true,
         candidates,
     }
 }
@@ -727,6 +705,62 @@ mod tests {
         assert_eq!(Monosaccharide::HexNAc.residue_mass(), HEXNAC);
         assert_eq!(Monosaccharide::Fuc.residue_mass(), FUC);
         assert_eq!(Monosaccharide::NeuAc.residue_mass(), NEUAC);
+    }
+
+    /// Every panel ion sits within 1 ppm of the m/z of its cation formula,
+    /// computed here from element masses independently of the residue table.
+    #[test]
+    fn diagnostic_panel_matches_cation_formulas() {
+        const C: f64 = 12.0;
+        const H: f64 = 1.007_825_032_07;
+        const N: f64 = 14.003_074_004_8;
+        const O: f64 = 15.994_914_619_56;
+        const E: f64 = 0.000_548_579_909_46;
+        let mz = |c: u32, h: u32, n: u32, o: u32| {
+            c as f64 * C + h as f64 * H + n as f64 * N + o as f64 * O - E
+        };
+        // Cation formula of each ion, in panel order.
+        let formulas: [(u32, u32, u32, u32); 28] = [
+            (4, 6, 1, 1),    // 84
+            (4, 5, 0, 2),    // 85
+            (5, 5, 0, 2),    // 97
+            (6, 5, 0, 2),    // 109 Hex−3H2O
+            (5, 7, 0, 3),    // 115
+            (6, 8, 1, 2),    // 126
+            (6, 7, 0, 3),    // 127 Hex−2H2O
+            (7, 8, 1, 2),    // 138
+            (6, 10, 1, 3),   // 144
+            (6, 9, 0, 4),    // 145 Hex−H2O
+            (6, 11, 0, 5),   // 163 Hex
+            (8, 10, 1, 3),   // 168 HexNAc−2H2O
+            (8, 12, 1, 4),   // 186 HexNAc−H2O
+            (8, 14, 1, 5),   // 204 HexNAc
+            (11, 16, 1, 7),  // 274 NeuAc−H2O
+            (11, 16, 1, 8),  // 290 NeuGc−H2O
+            (11, 18, 1, 8),  // 292 NeuAc
+            (11, 18, 1, 9),  // 308 NeuGc
+            (12, 21, 0, 10), // Hex2
+            (14, 24, 1, 10), // HexHexNAc
+            (17, 28, 1, 13), // HexNeuAc
+            (20, 34, 1, 14), // HexHexNAcFuc
+            (20, 34, 1, 15), // Hex2HexNAc
+            (25, 41, 2, 18), // HexHexNAcNeuAc
+            (26, 44, 1, 20), // Hex3HexNAc
+            (31, 51, 2, 22), // HexHexNAcNeuAcFuc
+            (34, 57, 2, 25), // Hex3HexNAc2
+            (40, 67, 2, 29), // Hex3HexNAc2Fuc
+        ];
+        let panel = default_diagnostic_ions();
+        assert_eq!(panel.len(), formulas.len());
+        for (ion, &(c, h, n, o)) in panel.iter().zip(formulas.iter()) {
+            let want = mz(c, h, n, o);
+            let ppm = (ion.mz - want) / want * 1e6;
+            assert!(
+                ppm.abs() < 1.0,
+                "diagnostic ion {:.5} vs formula C{c}H{h}N{n}O{o} {want:.5}: {ppm:.2} ppm",
+                ion.mz
+            );
+        }
     }
 
     #[test]
@@ -937,7 +971,7 @@ mod tests {
     /// index). Prints timing for eyeballing; assertions keep it regression-safe.
     ///
     /// The glycan DB is read from the `.gdb` at `$ANDES_GLYCO_GDB` when set (so
-    /// the benchmark measures the *input* database, e.g. pGlyco-N-Mouse.gdb's
+    /// the benchmark measures the *input* database, e.g. N-glycan-mouse.gdb's
     /// 1234 compositions); otherwise it falls back to the built-in common list.
     #[test]
     fn benchmark_index_construction_and_query() {

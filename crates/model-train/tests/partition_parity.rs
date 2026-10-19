@@ -208,11 +208,6 @@ fn partitioned_store_loads_identical_to_bundled_single_file() {
     assert_stores_equivalent(&single, &partitioned);
 }
 
-/// Build + verify the partitioned layout for an external v1 store.
-///
-/// Set `ANDES_V1_STORE=/path/to/models_v1_own.parquet` and optionally
-/// `ANDES_V1_OUT=/path/to/resources/models` to also write the partitions
-/// to a fixed location (used to produce the shipped `resources/models/`).
 /// Verify the *shipped* pyarrow-written partitions (`resources/models/`) load
 /// identically to the v1 single-file store. Unlike the test below, this does
 /// NOT run the Rust splitter — it reads the partitions exactly as they ship,
@@ -241,6 +236,11 @@ fn shipped_partitions_load_identical_to_v1_single_file() {
     );
 }
 
+/// Build + verify the partitioned layout for an external v1 store, written to a
+/// temporary directory.
+///
+/// Set `ANDES_V1_STORE=/path/to/models_v1_own.parquet` to enable. Skipped
+/// otherwise.
 #[test]
 fn partitioned_v1_store_loads_identical_when_present() {
     let Ok(src) = std::env::var("ANDES_V1_STORE") else {
@@ -250,14 +250,8 @@ fn partitioned_v1_store_loads_identical_when_present() {
     let src = PathBuf::from(src);
     let single = ModelStore::open(&src).expect("open v1 single-file store");
 
-    let out: PathBuf = match std::env::var("ANDES_V1_OUT") {
-        Ok(p) => PathBuf::from(p),
-        Err(_) => tempfile::tempdir().unwrap().keep().join("models"),
-    };
-    if out.exists() {
-        std::fs::remove_dir_all(&out)
-            .unwrap_or_else(|e| panic!("failed to clear {} before re-split: {e}", out.display()));
-    }
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out: PathBuf = tmp.path().join("models");
     let written = split_store_by_protocol(&src, &out).expect("split v1 store");
     eprintln!("v1 partitions written to {}:", out.display());
     for (proto, path) in &written {

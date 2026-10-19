@@ -6,8 +6,6 @@
 //! a *glyco extension* that lives in the `andes-glyco` crate and simply adds to
 //! the backbone index produced here — this module stays glyco-free.
 //!
-//! Design: `docs/plans/glyco/50-roadmap/rt-prediction-design.md`.
-//!
 //! # Pipeline
 //! 1. [`rt_features`] turns a [`Peptide`] into a fixed-length, deterministic
 //!    feature vector (AA composition, length, mass, Kyte-Doolittle hydropathy
@@ -429,6 +427,7 @@ mod tests {
             accession: None,
             neutral_losses: Vec::new(),
             loss_class: 0,
+            annotated_site_mass: None,
         };
         let residues = vec![
             AminoAcid::standard(b'M').unwrap().with_mod(ox),

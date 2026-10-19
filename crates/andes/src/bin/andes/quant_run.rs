@@ -59,7 +59,7 @@ pub(crate) struct QuantSettings {
     pub tmt_level: u8,
     pub tmt_tol: Tolerance,
     pub correction: Option<CorrectionMatrix>,
-    /// Quantification gate (`tmt.tsv`): precursor isolation purity floor,
+    /// Quantification gate (`tmt.parquet`): precursor isolation purity floor,
     /// summed reporter signal-to-noise floor (PSMs whose reporter scan has no
     /// noise are not held to it) and PEP cap.
     pub min_purity: f32,
@@ -454,8 +454,8 @@ impl QuantCollector {
     }
 }
 
-/// PSMs the isobaric quantification gate left out of `tmt.tsv`, by the first
-/// criterion they failed.
+/// PSMs the isobaric quantification gate marked as failed in `tmt.parquet`
+/// (`quant_gate_passed` false, weight 0), by the first criterion they failed.
 #[derive(Debug, Default)]
 struct GateCounts {
     purity: usize,
@@ -501,7 +501,7 @@ impl GateCounts {
             String::new()
         } else {
             format!(
-                ", {} left out by the quantification gate (kept in the parquet with \
+                ", {} failed the quantification gate (kept with quant_gate_passed false and \
                  quant_weight 0)",
                 parts.join(", ")
             )
@@ -875,9 +875,10 @@ fn base_record(id: &QuantId, proteins: Vec<ProteinPos>, feature_id: i64) -> Feat
     }
 }
 
-/// A feature `lfq.tsv` reports: it won its decoy competition at the feature
-/// FDR and its isotope envelope matches theory (`--lfq-min-cosine`).
-/// `lfq_features.tsv` and the parquet keep every feature.
+/// A feature `lfq.parquet` marks `accepted`: it won its decoy competition at
+/// the feature FDR and its isotope envelope matches theory
+/// (`--lfq-min-cosine`). `lfq.parquet` and the QPX feature parquet keep every
+/// feature.
 fn is_confident(row: &LfqRow, s: &QuantSettings) -> bool {
     row.feature_q_value.is_some_and(|q| q <= s.feature_fdr)
         && row.feature.cosine >= s.lfq_params.min_cosine
@@ -1207,8 +1208,6 @@ pub(crate) fn run_quant(
     // ── Isobaric ──────────────────────────────────────────────────────────────
     if let Some(plex) = s.plex {
         let mut rows: Vec<TmtRow> = Vec::new();
-        // Whether each row passed the quantification gate.
-        let mut passed: Vec<bool> = Vec::new();
         let (mut no_scan, mut out_of_range) = (0usize, 0usize);
         let mut gated = GateCounts::default();
         let mut with_noise = 0usize;
@@ -1279,7 +1278,6 @@ pub(crate) fn run_quant(
                 with_noise += usize::from(sn.is_some());
                 let sn_sum = sn.as_ref().map(|v| v.iter().sum::<f32>());
                 let passes = gated.check(s, purity, sn_sum, hit.pep);
-                passed.push(passes);
                 rows.push(TmtRow {
                     id: quant_id(hit, run, spec, candidates, index),
                     quant_scan_id,
@@ -1289,30 +1287,24 @@ pub(crate) fn run_quant(
                     corrected,
                     sn,
                     quant_weight: if passes { quant_weight(purity) } else { 0.0 },
+                    quant_gate_passed: passes,
                 });
             }
         }
-        let tsv_rows: Vec<TmtRow> = rows
-            .iter()
-            .zip(&passed)
-            .filter(|(_, &ok)| ok)
-            .map(|(r, _)| r.clone())
-            .collect();
         summary.columns = plex.channels().iter().map(|c| c.name.to_string()).collect();
-        for r in &tsv_rows {
+        for r in rows.iter().filter(|r| r.quant_gate_passed) {
             for (col, &v) in r.corrected.iter().enumerate() {
                 summary
                     .values
                     .push((r.id.sequence.clone(), r.id.proteins.clone(), col, v as f64));
             }
         }
-        let tmt_path = dir.join(format!("{stem}.tmt.tsv"));
-        output::write_tmt_tsv(&tmt_path, plex, &tsv_rows, s.correction.is_some())
-            .map_err(|e| format!("write {}: {e}", tmt_path.display()))?;
+        let tmt_path = dir.join(format!("{stem}.tmt.parquet"));
+        output::write_tmt_parquet(&tmt_path, plex, &rows, s.correction.is_some())?;
         eprintln!(
-            "quant: wrote {} ({} PSMs with reporter ions{}{}{})",
+            "quant: wrote {} ({} PSMs with reporter ions passing the quantification gate{}{}{})",
             tmt_path.display(),
-            tsv_rows.len(),
+            rows.iter().filter(|r| r.quant_gate_passed).count(),
             if no_scan > 0 {
                 format!(", {no_scan} without a quantification scan")
             } else {
@@ -1494,20 +1486,25 @@ pub(crate) fn run_quant(
                 r.feature.area,
             ));
         }
-        let lfq_path = dir.join(format!("{stem}.lfq.tsv"));
-        output::write_lfq_tsv(&lfq_path, &runs, &confident)
-            .map_err(|e| format!("write {}: {e}", lfq_path.display()))?;
-        let feat_path = dir.join(format!("{stem}.lfq_features.tsv"));
-        output::write_lfq_features_tsv(&feat_path, &all_rows)
-            .map_err(|e| format!("write {}: {e}", feat_path.display()))?;
+        let lfq_path = dir.join(format!("{stem}.lfq.parquet"));
+        let accepted: Vec<bool> = all_rows.iter().map(|r| is_confident(r, s)).collect();
+        output::write_lfq_parquet(
+            &lfq_path,
+            &all_rows,
+            &accepted,
+            &output::LfqTableMeta {
+                runs: &runs,
+                feature_fdr: s.feature_fdr,
+                min_cosine: s.lfq_params.min_cosine,
+            },
+        )?;
         eprintln!(
-            "quant: wrote {} ({} accepted run-level features at feature q<={}, cosine>={}) and {} ({} features)",
+            "quant: wrote {} ({} features, {} accepted at feature q<={}, cosine>={})",
             lfq_path.display(),
+            all_rows.len(),
             confident.len(),
             s.feature_fdr,
             s.lfq_params.min_cosine,
-            feat_path.display(),
-            all_rows.len()
         );
         for r in all_rows.iter().filter(|_| parquet_dir.is_some()) {
             let hit = hits_by_psm[&r.id.psm_index];

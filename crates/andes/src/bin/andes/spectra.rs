@@ -323,9 +323,14 @@ fn sample_spectra(
     if is_raw {
         #[cfg(feature = "thermo")]
         {
-            let reader = input::ThermoRawReader::open(path)
-                .ok()?
-                .with_ms_level(Some(u8::try_from(ms_level).ok()?));
+            let level = u8::try_from(ms_level).ok()?;
+            let reader = input::ThermoRawReader::open(path).ok()?;
+            // MS3 scans are sampled for their reporter ions only, so they are
+            // kept without a precursor m/z; MS2 goes through the search path.
+            if level >= 3 {
+                return Some(reader.sample_level(level, SAMPLE_N));
+            }
+            let reader = reader.with_ms_level(Some(level));
             return Some(reader.filter_map(Result::ok).take(SAMPLE_N).collect());
         }
         #[cfg(not(feature = "thermo"))]

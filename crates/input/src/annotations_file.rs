@@ -1256,6 +1256,45 @@ mod tests {
     }
 
     #[test]
+    fn knockoffs_keep_clear_of_both_sources_variants() {
+        // UniProt lists D5N (0-based 4); the file lists D15E (0-based 14).
+        // Every knockoff, from either source, must lie at least the knockoff
+        // distance from both.
+        let opts = crate::UniProtOptions {
+            variants: true,
+            knockoffs: Some(KO),
+            ..crate::UniProtOptions::default()
+        };
+        let (mut db, _) = crate::load_uniprot_xml(ko_xml().as_bytes(), &opts).unwrap();
+        let reference = db.proteins[0].accession.clone();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.parquet");
+        write(
+            &path,
+            &[In {
+                reference: &reference,
+                edits: vec![(14, 15, "D", "E")],
+                ..row("own")
+            }],
+            ANNOTATIONS_SCHEMA,
+        );
+        load_annotations(&[&path], &mut db, Some(KO)).unwrap();
+        let knockoffs: Vec<&Protein> = db.proteins.iter().filter(|p| p.is_knockoff()).collect();
+        assert!(!knockoffs.is_empty());
+        for p in knockoffs {
+            for q in variant_positions(p) {
+                for v in [4usize, 14] {
+                    assert!(
+                        q.abs_diff(v) >= KNOCKOFF_MIN_DISTANCE,
+                        "{} at {q} is within the knockoff distance of {v}",
+                        p.accession
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_claim_the_database_already_makes_joins_its_entry() {
         let opts = crate::UniProtOptions {
             variants: true,

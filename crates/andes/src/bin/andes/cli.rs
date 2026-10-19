@@ -518,6 +518,14 @@ pub(crate) struct SearchArgs {
     #[arg(long = "glyco-species", value_enum)]
     pub(crate) glyco_species: Option<GlycoSpeciesFlag>,
 
+    /// Glycan core type for `--glyco`: `n` searches N-glycans (N-X-S/T sequons,
+    /// trimannosyl core, default), `o` searches O-glycans (any S/T glycosite,
+    /// single reducing-end GalNAc core). O-glycans attach with no sequon, so an O
+    /// run's candidate gate is "has Ser or Thr" and its glycan database must be an
+    /// O-glycan `.gdb`.
+    #[arg(long = "glyco-core", value_enum, default_value_t = GlycoCoreFlag::N)]
+    pub(crate) glyco_core: GlycoCoreFlag,
+
     /// Correct each precursor to its monoisotopic peak from the preceding MS1
     /// isotope envelope BEFORE searching (`--glyco`; needs MS1, so mzML or Thermo
     /// `.raw`). `auto` fits the observed envelope at the reported charge against a
@@ -1014,6 +1022,24 @@ impl GlycoSpeciesFlag {
             GlycoSpeciesFlag::Mouse => "mouse",
             GlycoSpeciesFlag::MouseLarge => "mouse-large",
             GlycoSpeciesFlag::HighMannose => "high-mannose",
+        }
+    }
+}
+
+/// Glycan core type for `--glyco-core`: N- vs O-glycan search mode.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum GlycoCoreFlag {
+    /// N-glycan: N-X-S/T sequon gate, trimannosyl core.
+    N,
+    /// O-glycan: Ser/Thr gate, single reducing-end GalNAc core.
+    O,
+}
+
+impl From<GlycoCoreFlag> for andes_glyco::glycan_first::GlycanCore {
+    fn from(value: GlycoCoreFlag) -> Self {
+        match value {
+            GlycoCoreFlag::N => andes_glyco::glycan_first::GlycanCore::NGlycan,
+            GlycoCoreFlag::O => andes_glyco::glycan_first::GlycanCore::OGlycan,
         }
     }
 }

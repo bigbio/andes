@@ -69,7 +69,8 @@ rescoring:
   # native: false                # non-production built-in GBDT rescorer
 
 glyco:
-  enabled: false                 # intact N-glycopeptide search
+  enabled: false                 # intact glycopeptide search
+  # core: n                      # glycan core: n (N-glycan, default) | o (O-glycan)
   # --- advanced (validated defaults; see DOCS §9) ---
   # tol_ppm: 20                  # glyco fragment tolerance (raise for ion-trap MS2)
   # max_peaks: 0                 # cap peaks for candidate generation (0 = no cap)

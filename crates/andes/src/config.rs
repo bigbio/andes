@@ -162,6 +162,11 @@ fn parse_quant_feature_fdr(s: &str) -> Result<crate::cli::FractionOrOff, String>
     crate::cli::parse_fraction_or_off(s).map_err(|e| format!("quant_feature_fdr: {e}"))
 }
 
+fn parse_glyco_core(s: &str) -> Result<crate::cli::GlycoCoreFlag, String> {
+    <crate::cli::GlycoCoreFlag as clap::ValueEnum>::from_str(s, true)
+        .map_err(|_| format!("glyco.core: invalid `{s}`: expected n|o"))
+}
+
 impl NumberOrString {
     fn text(&self) -> String {
         match self {
@@ -175,6 +180,7 @@ impl NumberOrString {
 #[serde(default, deny_unknown_fields)]
 pub struct GlycoCfg {
     pub enabled: Option<bool>,
+    pub core: Option<String>,
     pub tol_ppm: Option<f64>,
     pub max_peaks: Option<usize>,
     pub debug: Option<bool>,
@@ -448,6 +454,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
 
     // ── glyco ──
     set!("glyco", glyco, cfg.glyco.enabled);
+    set_parsed!("glyco_core", glyco_core, cfg.glyco.core, parse_glyco_core);
     set!("glyco_tol_ppm", glyco_tol_ppm, cfg.glyco.tol_ppm);
     set!("glyco_max_peaks", glyco_max_peaks, cfg.glyco.max_peaks);
     set!("debug_glyco", debug_glyco, cfg.glyco.debug);

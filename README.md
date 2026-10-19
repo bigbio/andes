@@ -187,6 +187,12 @@ andes --spectrum spectra.mzML --database uniprot_sprot_human.xml.gz \
 modification and processing header keys become claims built like UniProt's
 ([`DOCS.md` §1a](DOCS.md#peff-databases)).
 
+**Site claims (experimental).** Annotated modification sites are checked against knockoff
+sites: the same modification on matched residues no annotation names. With rescoring, each site
+gets a site q-value and `<stem>.sites.tsv` lists the accepted ones. The estimate errs towards
+rejecting true claims; it is most useful with freely placed mods
+([`DOCS.md` §1a](DOCS.md#site-claims-knockoff-sites-experimental)).
+
 **Annotation files.** `--annotations claims.annotations.parquet` adds claims about the proteins
 of any database, FASTA included: sequence edits (variant entries), modification sites, mature
 chains. The claims can come from variant catalogues, a sample's own variant calls or site

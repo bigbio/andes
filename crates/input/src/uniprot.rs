@@ -36,7 +36,7 @@ use std::sync::Arc;
 
 use model::{
     Annotation, ChainEnds, Edit, EntryKind, EntryOrigin, ModSite, PriorTier, Processing, Protein,
-    ProteinAnnotation, ProteinDb, SiteAnchor,
+    ProteinAnnotation, ProteinDb, SiteAnchor, SiteClaim,
 };
 
 use crate::annotation::{build_entry, change_label, knockoff_annotations, KnockoffOptions};
@@ -668,7 +668,18 @@ impl UniProtEntry {
             sequence: self.sequence.clone(),
             annotation: Some(Arc::new(
                 ProteinAnnotation::new(sites.clone(), None)
-                    .with_origin(Some(self.origin(EntryKind::Reference, ""))),
+                    .with_origin(Some(self.origin(EntryKind::Reference, "")))
+                    .with_site_claims(
+                        sites
+                            .iter()
+                            .map(|m| SiteClaim {
+                                position: m.position,
+                                mass_delta: m.mass_delta,
+                                tier: PriorTier::Curated,
+                                knockoff_of: None,
+                            })
+                            .collect(),
+                    ),
             )),
         }];
 

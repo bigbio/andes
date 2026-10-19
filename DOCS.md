@@ -150,7 +150,7 @@ or an XML file with no UniProt entries, is an error.
 | `--uniprot-isoforms` | bool | off | Add one target entry per described isoform, rebuilt from the canonical sequence and its splice variants. |
 | `--uniprot-chains` | bool | off | Add one target entry per mature chain or peptide with a terminus the precursor lacks. Only peptides at those new termini are enumerated from it. |
 | `--uniprot-evidence` | enum | `experimental` | Minimum UniProt evidence for a variant, an annotated site or a mature chain: `experimental`, `curated`, or `any` (see below). |
-| `--knockoffs` | int | `4` | Knockoff entries per single-residue variant of a canonical sequence, from `--uniprot-variants` or `--annotations` (`0`: none). With rescoring they give variant PSMs a knockoff q-value, and variant PSMs whose variant has no knockoff are not accepted. See the README section on knockoff variants. |
+| `--knockoffs` | int | `4` | Knockoff entries per single-residue variant of a canonical sequence, from `--uniprot-variants` or `--annotations`, and knockoff sites per annotated modification site (`0`: none). With rescoring they give variant PSMs a knockoff q-value, and variant PSMs whose variant has no knockoff are not accepted. See the README section on knockoff variants. |
 
 **Annotated modification sites.** `modified residue`, `lipid moiety-binding region` and
 `glycosylation site` features become sites with the monoisotopic mass of the named modification,
@@ -372,6 +372,60 @@ Edits together with processing are not supported yet. Rows are checked on load:
   reference.
 
 The run log counts every row left out, by reason.
+
+### Site claims (knockoff sites, experimental)
+
+An annotated modification site is a claim: residue r of protein P carries modification M. Sites
+come from UniProt XML (`modified residue` and similar features), annotation-file `mods` rows and
+PEFF `\ModRes*` keys. For each one, andes adds up to `--knockoffs` knockoff sites. A knockoff
+site carries the same modification on a matched residue of the same protein that no annotation
+names. It must have:
+- the same residue;
+- the same digestion: a modified K or R blocks cleavage, so the merged peptide is compared;
+- the next-residue rule of variant knockoffs;
+- the same motif status:
+
+  | Modification | Status matched |
+  |---|---|
+  | Phospho S/T | proline at +1, R/K at −3, D/E at +3 |
+  | Phospho Y | D/E at −1..−4 |
+  | Methyl or dimethyl R, deamidated N, hydroxy P | G at +1 |
+  | N | the N-x-S/T sequon |
+
+- another peptide whose length is within 3 of the real one's;
+- at least 5 residues from every real site of that modification.
+
+Terminal sites get none.
+
+A `sites=annotated` mod may also be placed on knockoff sites. A PSM that puts the modification on
+an annotated site supports that site's claim. One that puts it on a knockoff site is a false
+claim. Within each modification × residue × tier, the knockoff PSMs estimate the false claims, as
+for variants, and each site gets a site q-value. A PSM's own q-value is unchanged: a peptide
+identification does not depend on which residue carries the modification.
+
+Placements on knockoff sites are never reported for a `sites=annotated` mod, because they exist
+only for the estimate. For an unrestricted mod, which may sit anywhere anyway, they stay ordinary
+PSMs.
+
+Some knockoff sites are really modified, because annotation is incomplete. Counting them as false
+makes the estimate err towards rejecting true site claims, never towards accepting false ones.
+
+**Experimental.** How conservative the estimate is has not yet been measured against known sites.
+
+Measured on a mouse-liver phospho run (PXD007653, reviewed mouse UniProt, 51,906 annotated sites,
+42,985 knockoff sites):
+- **Phospho placed freely** (the usual search): identifications are identical with and without
+  knockoff sites, and 1,403 annotated sites pass a site q-value of 0.05.
+- **Phospho restricted to annotated sites** (`sites=annotated`): the knockoff placements cost 0.7%
+  of PSMs and 0.8% of phosphopeptides, and only 119 sites pass, because many knockoff residues are
+  really phosphorylated.
+
+Site claims are therefore most useful with freely placed mods. 31,165 of the sites had no residue
+matching all their context rules, so no knockoff.
+
+With rescoring, `<stem>.sites.tsv` lists the accepted claims, one row per site whose best PSM
+passes `--fdr` and whose site q-value passes `--proteoform-fdr`. Its columns are `family
+accession position residue modification_mass prior_tier psms best_psm site_q confidence`.
 
 ### PEFF databases
 

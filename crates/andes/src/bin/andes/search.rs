@@ -302,6 +302,18 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             input::load_annotations(&cli.annotations, &mut target_db, uniprot_opts.knockoffs)?;
         log_claims("Annotations", &stats);
     }
+    // Knockoff sites for every annotated site, before decoys are built so they
+    // follow to the decoys like real sites.
+    if let Some(ko) = uniprot_opts.knockoffs {
+        let stats = input::add_site_knockoffs(&mut target_db, ko);
+        if stats.knockoffs > 0 {
+            eprintln!(
+                "Site claims: {} annotated sites, {} knockoff sites ({} sites with no position \
+                 for one)",
+                stats.sites, stats.knockoffs, stats.untested
+            );
+        }
+    }
     eprintln!(
         "Loaded {} target proteins from {} [PHASE fasta_load: {:.2}s]",
         target_db.proteins.len(),
@@ -689,6 +701,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     warn_restricted_artefacts(&aa, cli.uniprot_variants);
 
     // ── 5. Build SearchParams ─────────────────────────────────────────────────
+    // The `sites=annotated` mods, whose knockoff-site placements exist only for
+    // the site claims and are not reported.
+    let restricted_site_masses: Vec<f64> = aa
+        .distinct_mods()
+        .iter()
+        .filter_map(|m| m.annotated_site_mass)
+        .collect();
     let mut params = SearchParams::default_tryptic(aa);
     params.precursor_tolerance = PrecursorTolerance::symmetric(cli.precursor_tol);
     // Ranges are validated (min <= max) by the clap value parsers.
@@ -2265,6 +2284,46 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 line.join(", ")
             );
         }
+        // Site claims: annotated sites against their knockoff sites.
+        let sites = output::site_claims(
+            map,
+            &pin_index,
+            fdr_threshold,
+            proteoform_fdr,
+            &restricted_site_masses,
+        );
+        knockoff_rows.extend(sites.knockoff_rows.iter().cloned());
+        if !sites.counts.is_empty() {
+            let line: Vec<String> = sites
+                .counts
+                .iter()
+                .map(|c| {
+                    format!(
+                        "{} {} -> {} ({} tested; knockoffs {:.1})",
+                        c.stratum, c.claims, c.accepted, c.tested, c.knockoff_weighted
+                    )
+                })
+                .collect();
+            eprintln!(
+                "Rescore: site-claim PSMs at q<={fdr_threshold} per modification and residue, \
+                 before -> after site q<={proteoform_fdr}: {}",
+                line.join(", ")
+            );
+            let stem = report_base
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "andes".to_string());
+            let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
+            let path = dir.join(format!("{stem}.sites.tsv"));
+            match output::write_sites_tsv(&path, &sites.rows) {
+                Ok(()) => eprintln!(
+                    "Wrote site claims: {} ({} sites)",
+                    path.display(),
+                    sites.rows.len()
+                ),
+                Err(e) => eprintln!("WARN: could not write {}: {e}", path.display()),
+            }
+        }
     }
     if cli.mbr {
         mbr_decoys = std::mem::take(&mut rescore_decoy_psms);
@@ -2647,11 +2706,24 @@ fn report_annotated_site_mods(aa: &model::AminoAcidSet, target_db: &model::Prote
     mods.dedup_by(|b, a| a.0 == b.0 && a.1.to_bits() == b.1.to_bits());
     for (name, mass) in mods {
         let (mut sites, mut proteins) = (0usize, 0usize);
+        let same = |m: f64| (m - mass).abs() <= model::protein::SITE_MASS_TOLERANCE;
         for p in &target_db.proteins {
+            // Annotated sites only, not the knockoff sites added for them.
+            let knockoffs: Vec<u32> = p
+                .annotation
+                .as_deref()
+                .map(|a| {
+                    a.site_claims
+                        .iter()
+                        .filter(|c| c.knockoff_of.is_some() && same(c.mass_delta))
+                        .map(|c| c.position)
+                        .collect()
+                })
+                .unwrap_or_default();
             let n = p
                 .mod_sites()
                 .iter()
-                .filter(|s| (s.mass_delta - mass).abs() <= model::protein::SITE_MASS_TOLERANCE)
+                .filter(|s| same(s.mass_delta) && !knockoffs.contains(&s.position))
                 .count();
             if n > 0 {
                 sites += n;

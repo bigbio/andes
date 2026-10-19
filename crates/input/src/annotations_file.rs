@@ -69,6 +69,9 @@ pub struct AnnotationLoadStats {
     pub sites: usize,
     /// Rows whose claim another row already made (merged into it).
     pub merged: usize,
+    /// Rows whose claim an entry of the database already makes (a UniProt
+    /// XML or PEFF entry): merged into that entry, which keeps the better tier.
+    pub merged_into_database: usize,
     /// Single-residue variants for which no position qualified for a knockoff.
     pub variants_without_knockoff: usize,
     /// Rows left out, by reason.
@@ -242,10 +245,55 @@ pub(crate) fn add_claims(
         p.annotation = Some(Arc::new(info));
     }
 
+    // The database's own alternative entries (not knockoffs), by what they
+    // read: a claim equal to one of them joins it.
+    let mut existing: HashMap<(Arc<str>, EntryKind, Vec<u8>), usize> = HashMap::new();
+    // Each such entry with its knockoffs, by (family, feature).
+    let mut members: HashMap<(Arc<str>, Arc<str>), Vec<usize>> = HashMap::new();
+    for (i, p) in db.proteins.iter().enumerate() {
+        let Some(o) = p.origin() else {
+            continue;
+        };
+        if o.kind == EntryKind::Reference {
+            continue;
+        }
+        match &o.knockoff_of {
+            Some(of) => members
+                .entry((o.family.clone(), of.clone()))
+                .or_default()
+                .push(i),
+            None => {
+                existing.insert((o.family.clone(), o.kind, p.sequence.clone()), i);
+                members
+                    .entry((o.family.clone(), o.feature.clone()))
+                    .or_default()
+                    .push(i);
+            }
+        }
+    }
+
     for (r, list) in claims {
         let reference = db.proteins[r].clone();
+        let mut new = Vec::with_capacity(list.len());
+        for a in list {
+            let Some(entry) = build_entry(&reference, &a) else {
+                continue;
+            };
+            let o = entry.origin().expect("a built entry has an origin");
+            match existing.get(&(o.family.clone(), o.kind, entry.sequence.clone())) {
+                Some(&i) => {
+                    stats.merged_into_database += 1;
+                    let key = {
+                        let e = db.proteins[i].origin().expect("an entry with an origin");
+                        (e.family.clone(), e.feature.clone())
+                    };
+                    promote(db, &members[&key], a.tier, a.source.clone());
+                }
+                None => new.push(a),
+            }
+        }
         let (variants, chains): (Vec<Annotation>, Vec<Annotation>) =
-            list.into_iter().partition(|a| a.kind == EntryKind::Variant);
+            new.into_iter().partition(|a| a.kind == EntryKind::Variant);
         let ko = match knockoffs.filter(|k| k.per_variant > 0) {
             Some(ko) => {
                 let (ko, untested) = knockoff_annotations(
@@ -274,6 +322,31 @@ pub(crate) fn add_claims(
         }
     }
     Ok(())
+}
+
+/// Give the entries at `indices` (an entry and its knockoffs) `tier` and
+/// `source` when `tier` is better than the first one's own.
+fn promote(db: &mut ProteinDb, indices: &[usize], tier: PriorTier, source: Option<Arc<str>>) {
+    let better = indices
+        .first()
+        .and_then(|&i| db.proteins[i].origin())
+        .is_some_and(|o| tier < o.tier);
+    if !better {
+        return;
+    }
+    for &i in indices {
+        let p = &mut db.proteins[i];
+        let mut info = p
+            .annotation
+            .as_deref()
+            .cloned()
+            .expect("an entry with an origin");
+        if let Some(po) = info.origin.as_mut() {
+            po.tier = tier;
+            po.source = source.clone();
+        }
+        p.annotation = Some(Arc::new(info));
+    }
 }
 
 /// The claim a row makes about `reference`, or why it is left out.
@@ -971,10 +1044,11 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn a_variant_from_a_file_equals_the_same_variant_from_uniprot_xml() {
+    /// A UniProt XML entry with the `GGGGDLGGGK` x8 sequence and one curated
+    /// variant, D5N (`VAR_000009`).
+    fn ko_xml() -> String {
         let seq = String::from_utf8(b"GGGGDLGGGK".repeat(8)).unwrap();
-        let xml = format!(
+        format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <uniprot xmlns="http://uniprot.org/uniprot">
 <entry dataset="Swiss-Prot" version="1">
@@ -991,7 +1065,12 @@ mod tests {
   <sequence length="80" mass="1" checksum="0" modified="2000-01-01" version="1">{seq}</sequence>
 </entry>
 </uniprot>"#
-        );
+        )
+    }
+
+    #[test]
+    fn a_variant_from_a_file_equals_the_same_variant_from_uniprot_xml() {
+        let xml = ko_xml();
         let opts = crate::UniProtOptions {
             variants: true,
             knockoffs: Some(KO),
@@ -1064,5 +1143,64 @@ mod tests {
         load_annotations(&[&a, &b], &mut d, None).unwrap();
         let v = d.proteins[1].origin().unwrap();
         assert_eq!((v.tier, &*v.feature), (PriorTier::Sample, "cat"));
+    }
+
+    #[test]
+    fn a_claim_the_database_already_makes_joins_its_entry() {
+        let opts = crate::UniProtOptions {
+            variants: true,
+            knockoffs: Some(KO),
+            ..crate::UniProtOptions::default()
+        };
+        let (mut xml_db, _) = crate::load_uniprot_xml(ko_xml().as_bytes(), &opts).unwrap();
+        let before = xml_db.proteins.len();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.parquet");
+        let reference = xml_db.proteins[0].accession.clone();
+        write(
+            &path,
+            &[In {
+                reference: &reference,
+                edits: vec![(4, 5, "D", "N")],
+                genotype: Some("0/1"),
+                ..row("own")
+            }],
+            ANNOTATIONS_SCHEMA,
+        );
+        let stats = load_annotations(&[&path], &mut xml_db, Some(KO)).unwrap();
+        assert_eq!(
+            (
+                stats.merged_into_database,
+                stats.variant_entries,
+                stats.knockoff_entries
+            ),
+            (1, 0, 0)
+        );
+        assert_eq!(
+            xml_db.proteins.len(),
+            before,
+            "no second entry, no second knockoffs"
+        );
+        for p in &xml_db.proteins[1..] {
+            let o = p.origin().unwrap();
+            assert_eq!(o.tier, PriorTier::Sample, "{}", p.accession);
+            assert_eq!(o.source.as_deref(), Some("custom"));
+        }
+        // A weaker claim leaves the entry as it is.
+        let (mut xml_db, _) = crate::load_uniprot_xml(ko_xml().as_bytes(), &opts).unwrap();
+        write(
+            &path,
+            &[In {
+                reference: &reference,
+                edits: vec![(4, 5, "D", "N")],
+                ..row("cat")
+            }],
+            ANNOTATIONS_SCHEMA,
+        );
+        load_annotations(&[&path], &mut xml_db, Some(KO)).unwrap();
+        assert_eq!(
+            xml_db.proteins[1].origin().unwrap().tier,
+            PriorTier::Curated
+        );
     }
 }

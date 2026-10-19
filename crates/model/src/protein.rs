@@ -175,7 +175,7 @@ pub struct Substitution {
 
 /// What kind of database entry a protein is. Every FASTA protein, and every
 /// UniProt entry's displayed sequence, is `Reference`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum EntryKind {
     #[default]
     Reference,

@@ -2534,13 +2534,15 @@ fn log_claims(source: &str, stats: &input::AnnotationLoadStats) {
     };
     eprintln!(
         "{source}: {} rows{files}: {} variant, {} knockoff and {} chain entries, {} sites on \
-         reference proteins, {} rows merged into an equal claim{}{}",
+         reference proteins, {} rows merged into an equal claim, {} into an equal database \
+         entry{}{}",
         stats.rows,
         stats.variant_entries,
         stats.knockoff_entries,
         stats.chain_entries,
         stats.sites,
         stats.merged,
+        stats.merged_into_database,
         if dropped.is_empty() {
             ""
         } else {

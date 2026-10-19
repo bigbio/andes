@@ -237,27 +237,31 @@ fn entry_rows(
                     let [p, acc, name, ..] = g.as_slice() else {
                         return Err(malformed(key, value));
                     };
-                    let p = pos(p, key, value)?;
-                    let site = if key == "ModResUnimod" {
-                        model::unimod::bundled()
-                            .by_accession(acc)
-                            .map(|m| (m.mono_mass, SiteAnchor::Residue))
-                    } else {
-                        ptm_mass(clean_description(name)).map(|(_, mass, anchor)| (mass, anchor))
-                    };
-                    let Some((mass, anchor)) = site else {
-                        stats.sites_without_mass += 1;
-                        continue;
-                    };
-                    let anchor = match anchor {
-                        SiteAnchor::Residue => "residue",
-                        SiteAnchor::NTerminus => "protein_n_term",
-                        SiteAnchor::CTerminus => "protein_c_term",
-                    };
-                    let label = if acc.is_empty() { name } else { acc };
-                    let mut r = row(format!("SITE_{p}_{label}"));
-                    r.mods = vec![(p - 1, residues(p, p), mass, anchor.to_string())];
-                    rows.push(r);
+                    // A group may list several positions (`12,25|...`); an
+                    // unknown position (`?`) places nothing.
+                    for p in p.split(',').map(str::trim).filter(|p| *p != "?") {
+                        let p = pos(p, key, value)?;
+                        let site = if key == "ModResUnimod" {
+                            model::unimod::bundled()
+                                .by_accession(acc)
+                                .map(|m| (m.mono_mass, SiteAnchor::Residue))
+                        } else {
+                            ptm_mass(clean_description(name)).map(|(_, mass, anchor)| (mass, anchor))
+                        };
+                        let Some((mass, anchor)) = site else {
+                            stats.sites_without_mass += 1;
+                            continue;
+                        };
+                        let anchor = match anchor {
+                            SiteAnchor::Residue => "residue",
+                            SiteAnchor::NTerminus => "protein_n_term",
+                            SiteAnchor::CTerminus => "protein_c_term",
+                        };
+                        let label = if acc.is_empty() { name } else { acc };
+                        let mut r = row(format!("SITE_{p}_{label}"));
+                        r.mods = vec![(p - 1, residues(p, p), mass, anchor.to_string())];
+                        rows.push(r);
+                    }
                 }
             }
             "Processed" => {
@@ -340,6 +344,18 @@ mod tests {
             .find(|p| p.accession == "sp:P00009_VAR_000009")
             .unwrap();
         assert_eq!(&*v.origin().unwrap().family, "P00009");
+    }
+
+    #[test]
+    fn a_modification_group_may_list_several_positions() {
+        let text = peff().replace(
+            "\\ModResUnimod=(10|UNIMOD:121|GG)",
+            "\\ModResUnimod=(10,20|UNIMOD:121|GG)",
+        );
+        let (db, stats) = load_peff(text.as_bytes(), Some(KO)).unwrap();
+        assert_eq!(stats.claims.sites, 2);
+        let positions: Vec<u32> = db.proteins[0].mod_sites().iter().map(|m| m.position).collect();
+        assert_eq!(positions, [9, 19]);
     }
 
     #[test]

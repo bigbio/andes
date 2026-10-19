@@ -182,7 +182,7 @@ fn score_mass_ordered(
 }
 
 /// Resolve the PIN path and the durable report base (the filtered q-value
-/// TSV and `statistics.log` are named from it).
+/// TSV and `<stem>.statistics.log` are named from it).
 ///
 /// An explicit `--output-pin` is both. Otherwise the base is `--output-tsv`,
 /// else `--output-parquet`, else `./andes.pin`; with `keep_pin` the PIN is
@@ -2385,14 +2385,20 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // andes auto-resolves the scoring model and the precursor/fragment
     // tolerances from the data, so the FINAL search parameters differ from
     // whatever the user passed on the CLI. Emit a summary to stderr and write a
-    // `statistics.log` next to the PIN so a run's true parameters (and which
+    // `<stem>.statistics.log` next to the PIN so a run's true parameters (and which
     // PTMs were identified, with PSM counts) are always recoverable.
     let run_stats = output::RunStatistics::compute(&queues, &pin_candidates, &params, &param.mme);
     eprint!("{}", run_stats.render());
-    let stats_path = report_base
-        .parent()
-        .map(|d| d.join("statistics.log"))
-        .unwrap_or_else(|| std::path::PathBuf::from("statistics.log"));
+    // Named after the run like the other reports, so searches writing into
+    // one directory do not overwrite each other's summary.
+    let stats_path = {
+        let stem = report_base
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "andes".to_string());
+        let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
+        dir.join(format!("{stem}.statistics.log"))
+    };
     match output::write_statistics_log(&run_stats, &stats_path) {
         Ok(()) => eprintln!("Wrote statistics: {}", stats_path.display()),
         Err(e) => eprintln!("WARN: could not write {}: {e}", stats_path.display()),

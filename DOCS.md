@@ -754,11 +754,12 @@ does not hold.
 
 **PIN** for FDR and rescoring (Percolator, MS²Rescore, Mokapot, quantms); **TSV** for inspection.
 
-### 3d. Run summary (`statistics.log`)
+### 3d. Run summary (`<stem>.statistics.log`)
 
 Calibration and model choice can change the tolerances mid-run, so every search ends by
 printing the **final** tolerances, the pre-FDR rank-1 target/decoy split and a
-per-modification tally to stderr and to `statistics.log` next to the PIN.
+per-modification tally to stderr and to `<stem>.statistics.log` next to the PIN (`<stem>` is the
+PIN's name without its extension, so per-run searches into one directory keep one summary each).
 
 ```text
 ──────── andes run summary ────────

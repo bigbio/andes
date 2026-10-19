@@ -66,6 +66,7 @@ refine:
 rescoring:
   enabled: false                 # run Percolator in-process (else feed out.pin to Percolator)
   # fdr: 0.01                    # q-value threshold for filtered output
+  # protein_fdr: 0.01            # protein-group q cutoff on the filtered output (default: none)
   # native: false                # non-production built-in GBDT rescorer
 
 glyco:

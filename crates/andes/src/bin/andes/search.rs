@@ -2325,6 +2325,32 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    // Protein groups: parsimony per protein family and picked target-decoy
+    // q-values, from every rescored row. Independent of quantification.
+    let protein_groups = rescore_map.as_ref().map(|map| {
+        let cutoffs = output::Cutoffs::new(map, &pin_index, fdr_threshold, proteoform_fdr);
+        let inf = output::infer_protein_groups(map, &rescore_decoy_psms, &pin_index, |id| {
+            map[id].q_value <= cutoffs.of(id) && !knockoff_rows.contains(id)
+        });
+        let stem = report_base
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "andes".to_string());
+        let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
+        let path = dir.join(format!("{stem}.protein_groups.tsv"));
+        let at = |q: f64| inf.groups.iter().filter(|g| g.q_value <= q).count();
+        match output::write_protein_groups_tsv(&path, &inf) {
+            Ok(()) => eprintln!(
+                "Wrote protein groups: {} ({} groups; {} at protein q<=0.01, {} at q<=0.05)",
+                path.display(),
+                inf.groups.len(),
+                at(0.01),
+                at(0.05)
+            ),
+            Err(e) => eprintln!("WARN: could not write {}: {e}", path.display()),
+        }
+        inf
+    });
     if cli.mbr {
         mbr_decoys = std::mem::take(&mut rescore_decoy_psms);
     }
@@ -2355,6 +2381,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 p.q_value <= cutoffs.of(id)
                     && pep_cap.is_none_or(|t| p.pep <= t)
                     && !knockoff_rows.contains(*id)
+                    && cli.protein_fdr.is_none_or(|t| {
+                        protein_groups
+                            .as_ref()
+                            .and_then(|inf| inf.group_of(p))
+                            .is_some_and(|g| g.q_value <= t)
+                    })
             })
             .map(|(_, p)| p)
             .collect();
@@ -2369,7 +2401,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if pin_index.has_alternative_entries && proteoform_fdr != fdr {
             pep_note.push_str(&format!(", proteoform claims at q<={proteoform_fdr}"));
         }
-        match write_filtered_tsv(&filtered_path, &accepted) {
+        if let Some(t) = cli.protein_fdr {
+            pep_note.push_str(&format!(", protein groups at q<={t}"));
+        }
+        match write_filtered_tsv(&filtered_path, &accepted, protein_groups.as_ref()) {
             Ok(()) => eprintln!(
                 "Wrote filtered TSV: {} ({} PSMs at q<={}{})",
                 filtered_path.display(),
@@ -2472,7 +2507,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         cutoffs.as_ref(),
         pin_index.has_alternative_entries,
     ) {
-        let rows = output::proteoform_table(map, &pin_index, cutoffs, quant_summary.as_ref());
+        let mut rows = output::proteoform_table(map, &pin_index, cutoffs, quant_summary.as_ref());
+        if let (Some(t), Some(inf)) = (cli.protein_fdr, protein_groups.as_ref()) {
+            let fq = inf.family_q();
+            rows.retain(|r| fq.get(r.family.as_str()).is_some_and(|&q| q <= t));
+        }
         let stem = report_base
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
@@ -2786,18 +2825,24 @@ fn release_at_exit(candidates: Vec<search::candidate_gen::Candidate>) {
 pub(crate) fn write_filtered_tsv(
     path: &Path,
     psms: &[&output::PercolatorPsm],
+    groups: Option<&output::Inference>,
 ) -> std::io::Result<()> {
     use std::io::Write;
     let mut w = std::io::BufWriter::new(File::create(path)?);
     writeln!(
         w,
-        "PSMId\tq-value\tposterior_error_probability\tpeptide\tproteinIds"
+        "PSMId\tq-value\tposterior_error_probability\tpeptide\tproteinIds\tprotein_group\tprotein_q"
     )?;
     for p in psms {
+        let (group, q) = groups
+            .and_then(|g| g.group_of(p))
+            .map_or(("NA".to_string(), "NA".to_string()), |g| {
+                (g.id.to_string(), g.q_value.to_string())
+            });
         writeln!(
             w,
-            "{}\t{}\t{}\t{}\t{}",
-            p.psm_id, p.q_value, p.pep, p.peptide, p.proteins
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            p.psm_id, p.q_value, p.pep, p.peptide, p.proteins, group, q
         )?;
     }
     w.flush()

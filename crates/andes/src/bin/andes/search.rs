@@ -280,10 +280,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // PIN for an external Percolator must not carry knockoff targets.
     let rescoring = cli.rescore || cli.rescore_native;
     let knockoffs_per_variant = if rescoring { cli.knockoffs } else { 0 };
-    if !rescoring && cli.knockoffs > 0 && (cli.uniprot_variants || !cli.annotations.is_empty()) {
+    if !rescoring
+        && cli.knockoffs > 0
+        && (cli.uniprot_variants || !cli.annotations.is_empty() || cli.site_claims)
+    {
         eprintln!(
-            "Note: no knockoff variants are built without --rescore or --rescore-native; \
-             variant PSMs in the PIN have no knockoff q-value"
+            "Note: no knockoff variants or sites are built without --rescore or \
+             --rescore-native; variant PSMs and site claims get no knockoff q-value"
         );
     }
     let uniprot_opts = input::UniProtOptions {
@@ -682,6 +685,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             (model::protocol::Protocol::ITRAQ | model::protocol::Protocol::ITRAQPhospho, _) => {
                 Some(input::IsobaricLabel::Itraq.tag())
             }
+            // `--tmt PLEX` names the kit whatever the protocol (e.g. phospho).
+            (_, Some(l)) if cli.tmt.is_some() => Some(l.tag()),
             _ => None,
         };
         if let Some((name, mass)) = tag {

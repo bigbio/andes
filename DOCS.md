@@ -1146,10 +1146,10 @@ single input run's MS1 scans still need to fit in memory while it is processed.
 * **Quantification gate.** A PSM enters `tmt.tsv` only if its precursor purity is at least
   `--tmt-min-purity` (0.7), its Percolator PEP is at most `--tmt-max-pep` (0.05) and its summed
   reporter signal-to-noise is at least `--tmt-min-sn` (off). A PSM without the value a criterion
-  needs (no MS1 or isolation window for purity, no `--rescore` for PEP, no noise for S/N) is not
-  held to that criterion. The gate only chooses which PSMs are quantified: every PSM stays in the
-  identification output (PIN, TSV, `psms.parquet`), and the quantms feature parquet keeps every
-  quantified PSM with `quant_weight` 0 for the gated ones. The log counts the PSMs each criterion
+  needs (no MS1 or isolation window for purity, no `--rescore` or `--rescore-native` for PEP, no
+  noise for S/N) is not held to that criterion. The gate only chooses which PSMs are quantified:
+  every PSM stays in the identification output (PIN, TSV, `psms.parquet`), and the gated ones are
+  left out of `tmt.tsv` and the quantms feature parquet alike. The log counts the PSMs each criterion
   removed. On SPS-MS3 data low-purity and high-PEP PSMs carry most of the interference and
   ratio compression of the PSMs a deep search adds; purity barely matters for high-resolution
   MS2 reporters, where the remaining interference is co-isolation inside a pure-looking window.

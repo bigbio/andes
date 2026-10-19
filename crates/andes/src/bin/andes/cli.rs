@@ -729,14 +729,15 @@ pub(crate) struct SearchArgs {
 
     /// Quantification gate: leave PSMs whose precursor isolation purity (share
     /// of the MS1 isolation window that belongs to the precursor) is below
-    /// this out of `tmt.tsv`. They stay in the identification output, and in
-    /// the parquet with `quant_weight` 0. 0 turns the criterion off.
+    /// this out of `tmt.tsv` and the feature parquet. They stay in the
+    /// identification output. 0 turns the criterion off.
     #[arg(long = "tmt-min-purity", default_value = "0.7", value_parser = parse_unit_fraction)]
     pub(crate) tmt_min_purity: f64,
 
     /// Quantification gate: leave PSMs whose Percolator PEP is above this out
-    /// of `tmt.tsv` (they stay in the identification output). Needs
-    /// `--rescore`. 1 turns the criterion off.
+    /// of `tmt.tsv` and the feature parquet (they stay in the identification
+    /// output). Needs `--rescore` or `--rescore-native`. 1 turns the criterion
+    /// off.
     #[arg(long = "tmt-max-pep", default_value = "0.05", value_parser = parse_unit_fraction)]
     pub(crate) tmt_max_pep: f64,
 

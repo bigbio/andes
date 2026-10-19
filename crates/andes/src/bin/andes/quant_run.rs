@@ -501,8 +501,7 @@ impl GateCounts {
             String::new()
         } else {
             format!(
-                ", {} left out by the quantification gate (kept in the parquet with \
-                 quant_weight 0)",
+                ", {} left out by the quantification gate (and of the feature parquet)",
                 parts.join(", ")
             )
         }
@@ -1335,7 +1334,14 @@ pub(crate) fn run_quant(
                  the sn_ columns are empty"
             );
         }
-        for r in rows.iter().filter(|_| parquet_dir.is_some()) {
+        // Rows the gate left out are left out of the feature parquet too, so a
+        // roll-up reading `intensities` sees the same PSMs as tmt.tsv.
+        for r in rows
+            .iter()
+            .zip(&passed)
+            .filter(|(_, &ok)| ok && parquet_dir.is_some())
+            .map(|(r, _)| r)
+        {
             let hit = hits_by_psm[&r.id.psm_index];
             let proteins = proteins_of(&hit.psm, candidates, index);
             let mut rec = base_record(&r.id, proteins, next_feature_id);

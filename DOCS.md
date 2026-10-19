@@ -923,19 +923,9 @@ Tests:
 cargo test --release --workspace
 ```
 
-CI skips seven tests: three hit a `min_peaks` filter regression, three need Maven fixtures
-under `target/test-classes/`, and one hits Rayon tie-breaking nondeterminism:
-
-```bash
-cargo test --release --workspace -- \
-  --skip charge_missing_spectrum_uses_per_charge_scored_spec \
-  --skip spectrum_without_charge_tries_charge_range \
-  --skip known_peptide_appears_in_top_n \
-  --skip read_bsa_canno_text_format \
-  --skip read_tryp_pig_bov_revcat_csarr_cnlcp \
-  --skip tryp_pig_bov_revcat_full_set_loads \
-  --skip match_spectra_output_invariant_across_thread_counts
-```
+CI runs the whole workspace suite with no skips; the out-of-core PIN goldens
+(`cargo test -p andes --release --test out_of_core_pin_goldens -- --ignored`) and
+`cargo test -p onnx-infer --release --features tract` run as separate steps.
 
 ---
 

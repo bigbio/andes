@@ -1,8 +1,8 @@
 //! Golden gates for the enumeration retrieval path (`--fragment-index off`) of
 //! the out-of-core candidate index, driven through the real CLI.
 //!
-//! Rows are sorted before comparison because the rayon pipeline's row ORDER
-//! varies across runs; their content does not.
+//! Rows are sorted before comparison, so the gates check content, not the
+//! writer's row order.
 //!
 //! Floating-point features (RichIonLLR, RankScoreFloat, ...) go through the
 //! platform's `exp`/`log`/`pow`, whose last-ulp rounding differs between C
@@ -172,6 +172,30 @@
 //! every golden with the six provenance columns removed equals this branch's
 //! previous golden (slices row for row, E. coli digests equal), and every
 //! value in the six columns is 0; the calibration outcome line is unchanged.
+//!
+//! REGENERATED 2026-10-19 when PSMs began to be ordered by a total order:
+//! `rank_score`, then `score`, then a hash of the peptide content (residues,
+//! modification deltas, target/decoy), then charge, isotope offset and mass
+//! error. Exact ties used to go to whichever PSM reached the queue first, i.e.
+//! candidate enumeration order; the per-charge dedup and the spectrum-level
+//! merge now also hand PSMs to the queue best first, so the queue keeps the top
+//! N plus every tie at the N-th. Against the previous binary's PIN for the same
+//! command line, rows keyed by spectrum, charge, peptide and label, "top row"
+//! the highest-RawScore row of a spectrum and charge:
+//!
+//! | case | rows before → after | only before / only after | top row changed |
+//! |---|---|---|---|
+//! | E. coli default mods (and precursor-cal auto) | 75,638 → 75,391 | 8,100 / 7,853 | 509 of 5,562 |
+//! | E. coli fixed mods only | 77,975 → 77,450 | 6,994 / 6,469 | 436 of 5,550 |
+//! | E. coli one variable mod | 76,087 → 75,525 | 7,925 / 7,363 | 503 of 5,557 |
+//! | `--chimeric` slice | 1,718 → 1,717 | 225 / 224 | 34 of 250 |
+//! | `--refine` slice | 1,612 → 1,589 | 238 / 215 | 21 of 150 |
+//!
+//! The E. coli runs score in strong mode, where the winner is re-ranked by a
+//! score that folds in statistics of the retained pool (`CandidateRankEntropy`,
+//! `ListwiseScoreGap`, `DeltaRankScore`), so changing which tied rows are kept
+//! below the top moves those statistics and, through them, some winners. The
+//! calibration outcome line is unchanged.
 //!
 //! To regenerate after an intentional change, run the case's command line (see
 //! `run`), then either digest the PIN with `identity_digest` (E. coli) or write
@@ -352,14 +376,14 @@ fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
 /// One E. coli case: (rows, `identity_digest` FNV-1a 64, calibration outcome line).
 type Golden = (usize, u64, Option<&'static str>);
 
-const ECOLI_DEFAULT_MODS: Golden = (75_638, 0x66b7_f8de_8b7f_c383, None);
-const ECOLI_FIXED_MODS_ONLY: Golden = (77_975, 0xed8e_5650_c625_8062, None);
-const ECOLI_ONE_VARIABLE_MOD: Golden = (76_087, 0xcab6_cc41_7832_fee6, None);
+const ECOLI_DEFAULT_MODS: Golden = (75_391, 0x6b4b_4b2d_ba66_310c, None);
+const ECOLI_FIXED_MODS_ONLY: Golden = (77_450, 0xa195_7197_1336_3432, None);
+const ECOLI_ONE_VARIABLE_MOD: Golden = (75_525, 0x0ab3_c8a4_c85f_a662, None);
 /// The pre-pass scores but the sample is too small to calibrate, so the PIN
 /// equals the calibration-off one.
 const ECOLI_PRECURSOR_CAL_AUTO: Golden = (
-    75_638,
-    0x66b7_f8de_8b7f_c383,
+    75_391,
+    0x6b4b_4b2d_ba66_310c,
     Some("Precursor mass calibration skipped (insufficient confident PSMs: 492 with PSMs, 55 below RawScore floor, 0 failed |residual|>50ppm"),
 );
 

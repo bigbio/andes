@@ -22,8 +22,8 @@ use crate::rescore;
 use crate::spectra::{
     add_mzml_skipped, detect_dominant_activation, detect_instrument_type_for_path,
     detect_isobaric_sampled, input_format_flags, merge_parse_stats, ms3_carries_reporters,
-    prefix_spectrum_titles,
-    run_precursor_calibration, send_chunks, title_prefix_for, tolerance_ppm_display, ParseStats,
+    prefix_spectrum_titles, run_precursor_calibration, send_chunks, title_prefix_for,
+    tolerance_ppm_display, ParseStats,
 };
 use crate::{arg_present, report_search_progress, EXPLICIT_MISSED_CLEAVAGES};
 use input::{MgfReader, Ms1Link, MzMLReader};
@@ -1254,7 +1254,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         (Some(level), _) => level,
         (None, Some(plex))
             if !high_res
-                && plex.check_tolerance(model::tolerance::Tolerance::Da(0.3)).is_err()
+                && plex
+                    .check_tolerance(model::tolerance::Tolerance::Da(0.3))
+                    .is_err()
                 && ms3_carries_reporters(&spectrum_path, is_mzml, is_raw) =>
         {
             eprintln!(
@@ -1266,15 +1268,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => 2,
     };
-    let mut quant: Option<QuantCollector> =
-        QuantSettings::from_cli(&cli, high_res, tmt_level)?.map(
-            |mut settings| {
-                // Recorded in each run's MS2 table, where the library matches
-                // its fragment spectra and extract scores transfers.
-                settings.fragment_tol = Some(scorer.feature_match_tolerance());
-                QuantCollector::new(settings)
-            },
-        );
+    let mut quant: Option<QuantCollector> = QuantSettings::from_cli(&cli, high_res, tmt_level)?
+        .map(|mut settings| {
+            // Recorded in each run's MS2 table, where the library matches
+            // its fragment spectra and extract scores transfers.
+            settings.fragment_tol = Some(scorer.feature_match_tolerance());
+            QuantCollector::new(settings)
+        });
     if let Some(q) = &quant {
         let s = &q.settings;
         if is_mgf && (s.needs_ms1_series() || s.needs_ms3()) {

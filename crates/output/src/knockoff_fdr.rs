@@ -101,7 +101,8 @@ enum Row {
 /// fewer than [`MIN_STRATUM_TESTED`] tested real PSMs at the cutoff in a tier
 /// joins the class's other small tiers), so claims of different reliability
 /// do not share one estimate. Within a stratum, at score `t`:
-/// FDP(t) = (1/K + Σ 1/k over knockoff rows ≥ t) / #(tested real rows ≥ t),
+/// FDP(t) = (1/K + Σ 1/k over knockoff rows ≥ t) / #(tested real rows ≥ t)
+/// (a knockoff row whose peptide copies several variants counts 1/k for each),
 /// with K the most knockoffs of any variant; a real row's knockoff q-value is
 /// the least FDP(t) over t at or below its score. An untested real row (no
 /// variant of it has a knockoff) gets q = 1: no null covers it, and variants
@@ -113,8 +114,10 @@ pub fn apply_knockoff_fdr(
     fdr: f64,
     knockoffs_requested: bool,
 ) -> KnockoffOutcome {
-    // Target knockoffs per real variant, keyed by (family, feature).
-    let mut per_variant: HashMap<(&str, &str), usize> = HashMap::new();
+    // Target knockoffs per real variant, keyed by (family, feature): distinct
+    // knockoff features, so the `--refine` Pass-2 entries that copy a
+    // knockoff's origin do not count as further knockoffs.
+    let mut features: HashMap<(&str, &str), HashSet<&str>> = HashMap::new();
     for p in idx
         .db
         .proteins
@@ -123,10 +126,12 @@ pub fn apply_knockoff_fdr(
     {
         if let Some(o) = p.origin() {
             if let Some(of) = o.knockoff_of.as_deref() {
-                *per_variant.entry((&o.family, of)).or_insert(0) += 1;
+                features.entry((&o.family, of)).or_default().insert(&o.feature);
             }
         }
     }
+    let per_variant: HashMap<(&str, &str), usize> =
+        features.into_iter().map(|(k, f)| (k, f.len())).collect();
     if per_variant.is_empty() && !knockoffs_requested {
         return KnockoffOutcome::default();
     }
@@ -144,7 +149,10 @@ pub fn apply_knockoff_fdr(
     for (id, psm) in targets.iter() {
         let mut real_delta: Option<f64> = None;
         let mut real_tier: Option<PriorTier> = None;
-        let mut knockoff: Option<(f64, f64, PriorTier)> = None;
+        let mut knockoff: Option<(f64, PriorTier)> = None;
+        // The real variants this row's knockoffs copy: a knockoff peptide
+        // shared by several knockoffs stands in for a false hit of each.
+        let mut copied: HashSet<(&str, &str)> = HashSet::new();
         let mut tested = false;
         let mut variant_only = true;
         let mut all_knockoff = true;
@@ -160,12 +168,8 @@ pub fn apply_knockoff_fdr(
             let o = p.origin().expect("a variant entry has an origin");
             match o.knockoff_of.as_deref() {
                 Some(of) => {
-                    let k = per_variant[&(&*o.family, of)] as f64;
-                    let w = 1.0 / k;
-                    knockoff = Some(match knockoff {
-                        Some((d, prev, t)) => (d, prev.min(w), t),
-                        None => (o.variant_delta_da, w, o.tier),
-                    });
+                    copied.insert((&*o.family, of));
+                    knockoff.get_or_insert((o.variant_delta_da, o.tier));
                 }
                 None => {
                     all_knockoff = false;
@@ -180,7 +184,13 @@ pub fn apply_knockoff_fdr(
             continue;
         }
         let (delta, tier, row) = match (all_knockoff, knockoff, real_delta) {
-            (true, Some((d, w, t)), _) => (d, t, Row::Knockoff { weight: w }),
+            (true, Some((d, t)), _) => {
+                let w = copied
+                    .iter()
+                    .map(|v| 1.0 / per_variant[v] as f64)
+                    .sum();
+                (d, t, Row::Knockoff { weight: w })
+            }
             (false, _, Some(d)) => (d, real_tier.unwrap_or_default(), Row::Real { tested }),
             _ => continue,
         };
@@ -411,6 +421,42 @@ mod tests {
             (out.counts[0].real_before, out.counts[0].tested_before),
             (1, 0)
         );
+    }
+
+    #[test]
+    fn knockoff_counts_are_distinct_features_and_shared_rows_sum() {
+        // V1 has two knockoffs; a --refine Pass-2 copy of KO1_V1 carries the
+        // same feature and must not make it three. V3 has one knockoff, and a
+        // knockoff peptide held by KO1_V1 and KO1_V3 stands in for a false hit
+        // of both variants: 1/2 + 1/1.
+        let mut proteins = index().db.proteins.clone();
+        proteins.retain(|p| !p.accession.starts_with("XXX"));
+        proteins.push(protein(
+            "sp|P1_KO1_V1|A_refine",
+            EntryKind::Variant,
+            "KO1_V1",
+            0.984016,
+            Some("V1"),
+        ));
+        proteins.push(protein("sp|P1_V3|A", EntryKind::Variant, "V3", 0.984016, None));
+        proteins.push(protein(
+            "sp|P1_KO1_V3|A",
+            EntryKind::Variant,
+            "KO1_V3",
+            0.984016,
+            Some("V3"),
+        ));
+        let idx = SearchIndex::from_target_db(&ProteinDb { proteins }, "XXX");
+        let mut t: HashMap<_, _> = [
+            psm("r", 8.0, 0.001, "sp|P1_V1|A"),
+            psm("k", 7.0, 0.001, "sp|P1_KO1_V1|A;sp|P1_KO1_V3|A"),
+            psm("k2", 6.0, 0.001, "sp|P1_KO2_V1|A"),
+        ]
+        .into_iter()
+        .collect();
+        let counts = apply_knockoff_fdr(&mut t, &idx, 0.01, true).counts;
+        assert_eq!(counts.len(), 1);
+        assert!((counts[0].knockoff_weighted - (1.5 + 0.5)).abs() < 1e-9);
     }
 
     #[test]

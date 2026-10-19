@@ -1425,7 +1425,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             .map_err(|e| format!("open Thermo .raw: {e}"))?
                             .with_run_ms1_capture(capture_ms1)
                             .with_scan_context_capture(capture_context)
-                    .with_noise_capture(capture_noise);
+                            .with_noise_capture(capture_noise);
                         let (errc, errs) =
                             reader.read_with_ms1_chunked(CHUNK_SIZE, cap, |chunk, link| {
                                 let _ = tx.send((chunk, link));
@@ -1651,7 +1651,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         .with_run_ms1_capture(capture_ms1)
                         .with_product_scan_capture(capture_ms3)
                         .with_scan_context_capture(capture_context)
-                    .with_noise_capture(capture_noise);
+                        .with_noise_capture(capture_noise);
                         let mut stats =
                             send_chunks(reader.by_ref(), CHUNK_SIZE, remaining_cap, tx);
                         add_mzml_skipped(&mut stats, &reader);
@@ -1670,7 +1670,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                                 .with_run_ms1_capture(capture_ms1)
                                 .with_product_scan_capture(capture_ms3)
                                 .with_scan_context_capture(capture_context)
-                    .with_noise_capture(capture_noise);
+                                .with_noise_capture(capture_noise);
                             let stats =
                                 send_chunks(reader.by_ref(), CHUNK_SIZE, remaining_cap, tx);
                             let scans = RunScans {

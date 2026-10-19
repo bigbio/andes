@@ -38,7 +38,8 @@ pub struct ProteinGroup {
     pub families: Vec<String>,
     /// Every target entry of those families that one of its peptides names.
     pub accessions: Vec<String>,
-    /// Peptides of the group, unique to it, and taken from a shared peptide.
+    /// Peptides of the group with a PSM at its cutoff: all, unique to the
+    /// group, and taken from a shared peptide.
     pub peptides: usize,
     pub unique: usize,
     pub razor: usize,
@@ -81,8 +82,8 @@ impl Inference {
 struct SideGroup {
     families: Vec<String>,
     peptides: BTreeSet<usize>,
-    unique: usize,
-    razor: usize,
+    /// The assigned peptides another kept group also has.
+    shared: BTreeSet<usize>,
     score: f64,
     subsumed: Vec<String>,
 }
@@ -196,8 +197,7 @@ fn parsimony(rows: Vec<(String, f64, BTreeSet<String>)>) -> Side {
         index_of.insert(g, groups.len());
         groups.push(SideGroup {
             families: sets[g].1.clone(),
-            unique: assigned.iter().filter(|p| !shared[p]).count(),
-            razor: assigned.iter().filter(|p| shared[p]).count(),
+            shared: assigned.iter().copied().filter(|p| shared[p]).collect(),
             score: assigned
                 .iter()
                 .map(|&p| scores[p])
@@ -350,6 +350,7 @@ pub fn infer_protein_groups(
 
     // PSMs and named entries per target group.
     let mut psms = vec![0usize; target.groups.len()];
+    let mut accepted_peps: BTreeSet<usize> = BTreeSet::new();
     let mut named: Vec<BTreeSet<String>> = vec![BTreeSet::new(); target.groups.len()];
     let pep_index: HashMap<&str, usize> = target
         .peptides
@@ -372,6 +373,7 @@ pub fn infer_protein_groups(
         };
         if accepted(id) {
             psms[g] += 1;
+            accepted_peps.insert(pep_index[bare_sequence(&p.peptide).as_str()]);
         }
         for a in p.proteins.split(';').filter(|a| !a.is_empty()) {
             if target.groups[g].families.contains(&family_of(a)) {
@@ -411,9 +413,13 @@ pub fn infer_protein_groups(
                 lead: lead_of(g),
                 families: s.families.clone(),
                 accessions: named[g].iter().cloned().collect(),
-                peptides: s.peptides.len(),
-                unique: s.unique,
-                razor: s.razor,
+                peptides: s.peptides.intersection(&accepted_peps).count(),
+                unique: s
+                    .peptides
+                    .iter()
+                    .filter(|p| accepted_peps.contains(p) && !s.shared.contains(p))
+                    .count(),
+                razor: s.shared.intersection(&accepted_peps).count(),
                 psms: psms[g],
                 score: s.score,
                 // A target that lost its family's competition has no q-value
@@ -530,6 +536,11 @@ mod tests {
         assert_eq!(inf.group_of(&targets["5"]).unwrap().families, vec!["D"]);
         // No decoys: every group has q = 0.
         assert!(inf.groups.iter().all(|g| g.q_value == 0.0));
+        // A peptide whose PSM fails its cutoff still places the group but is
+        // not counted as its evidence.
+        let inf = infer_protein_groups(&targets, &HashMap::new(), &index(), |id| id != "6");
+        let e = &inf.groups[2];
+        assert_eq!((e.peptides, e.unique, e.psms, e.score), (0, 0, 0, 0.5));
     }
 
     #[test]

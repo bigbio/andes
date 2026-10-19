@@ -587,15 +587,9 @@ mod param_resolver_tests {
     }
 
     #[test]
-    fn single_file_search_does_not_prefix_titles() {
-        // Regression (default-path PIN parity): with one input file the
-        // SpecId/title must stay unprefixed so PIN output is byte-identical to
-        // the single-file behavior that predates multi-`--spectrum` support.
-        assert_eq!(title_prefix_for(1, "myfile"), None);
-    }
-
-    #[test]
-    fn multi_file_search_prefixes_titles_with_file_stem() {
-        assert_eq!(title_prefix_for(2, "myfile").as_deref(), Some("myfile/"));
+    fn every_search_prefixes_titles_with_file_stem() {
+        // One input file is prefixed too: per-file searches are pooled into one
+        // Percolator run, and native titles repeat across files.
+        assert_eq!(title_prefix_for("myfile").as_deref(), Some("myfile/"));
     }
 }

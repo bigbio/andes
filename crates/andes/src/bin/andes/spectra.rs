@@ -74,12 +74,12 @@ pub(crate) fn input_format_flags(path: &Path) -> (bool, bool, bool, bool) {
     (is_mzml, is_raw, is_d, is_mgf)
 }
 
-/// Prefix spectrum titles so pooled multi-file PIN SpecIds stay unique.
-/// Decide the per-file SpecId/title prefix. Returns `None` for a single-file
-/// search so its PIN output stays byte-identical to the pre-multi-file path;
-/// returns `Some("<stem>/")` only when disambiguating across multiple inputs.
-pub(crate) fn title_prefix_for(num_files: usize, file_stem: &str) -> Option<String> {
-    (num_files > 1).then(|| format!("{file_stem}/"))
+/// The per-file SpecId/title prefix, `<stem>/`. Every search applies it, also
+/// with one input: native spectrum titles repeat across files, and PINs from
+/// separate per-file searches are pooled into one Percolator run, so the
+/// SpecIds must be unique across runs, not only within one search.
+pub(crate) fn title_prefix_for(file_stem: &str) -> Option<String> {
+    Some(format!("{file_stem}/"))
 }
 
 pub(crate) fn prefix_spectrum_titles(chunk: &mut [Spectrum], prefix: &str) {

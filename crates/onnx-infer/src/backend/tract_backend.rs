@@ -32,7 +32,7 @@ fn fact_shape(model: &InferenceModel, outlet: OutletId) -> Option<Vec<Option<usi
         fact.shape
             .dims()
             .map(|d| match d {
-                GenericFactoid::Only(dim) => dim.to_usize().ok(),
+                GenericFactoid::Only(dim) => dim.as_i64().and_then(|d| usize::try_from(d).ok()),
                 GenericFactoid::Any => None,
             })
             .collect(),

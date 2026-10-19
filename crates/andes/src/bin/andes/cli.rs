@@ -460,10 +460,11 @@ pub(crate) struct SearchArgs {
     /// `.glyco.pin` file instead of the standard PIN. Default off.
     ///
     /// Requires a glycan database: `--glyco-species` for a bundled one, or
-    /// `--glyco-glycan-gdb` for your own file. The requirement is enforced at
-    /// argument-parsing time, so a missing database fails immediately rather than
-    /// after the digest, index build and spectrum load.
-    #[arg(long = "glyco", default_value_t = false, requires = "glycan_db")]
+    /// `--glyco-glycan-gdb` for your own file (or `glyco.species` /
+    /// `glyco.glycan_gdb` in `--config`). The requirement is checked as soon as the
+    /// command line and the config file are merged, so a missing database fails
+    /// immediately rather than after the digest, index build and spectrum load.
+    #[arg(long = "glyco", default_value_t = false)]
     pub(crate) glyco: bool,
 
     /// Cap the peaks the glyco GENERATION stage considers, keeping the most

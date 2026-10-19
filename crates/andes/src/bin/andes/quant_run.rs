@@ -20,9 +20,7 @@ use output::ms2_table::{write_ms2_table, Ms2Table};
 use output::run_quant_table::{write_run_quant_table, RunPsmRow};
 use output::{LfqRow, ModRecord, PercolatorPsm, QuantId, TmtRow};
 use quant::formula::Formula;
-use quant::isobaric::{
-    extract_reporters, reporter_noise, signal_to_noise, CorrectionMatrix, Plex,
-};
+use quant::isobaric::{extract_reporters, reporter_noise, signal_to_noise, CorrectionMatrix, Plex};
 use quant::lfq::{
     competition_score, feature_score, quantify, quantify_decoy, FeatureQuant, LfqParams, LfqTarget,
 };

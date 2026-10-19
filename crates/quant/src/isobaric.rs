@@ -763,7 +763,10 @@ mod tests {
         let noise = reporter_noise(&profile, Plex::Tmt6);
         assert_eq!(noise.len(), 6);
         // 126.13 sits between 125 (100) and 127 (300).
-        assert!((noise[0] - (100.0 + 200.0 * 1.127725 / 2.0)).abs() < 0.1, "{noise:?}");
+        assert!(
+            (noise[0] - (100.0 + 200.0 * 1.127725 / 2.0)).abs() < 0.1,
+            "{noise:?}"
+        );
         assert_eq!(noise[5], 300.0);
         let sn = signal_to_noise(&[3000.0, 0.0, 600.0, -1.0, 300.0, 900.0], &noise);
         assert!((sn[0] - 3000.0 / noise[0]).abs() < 1e-3);

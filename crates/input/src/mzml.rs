@@ -1643,7 +1643,10 @@ fn read_spectra_in_pieces(
         let kept = reader.skipped_errors().to_vec();
         let unlisted = reader.skipped_count() - kept.len();
         errors.extend(kept);
-        errors.extend(std::iter::repeat_n("malformed spectrum skipped".to_string(), unlisted));
+        errors.extend(std::iter::repeat_n(
+            "malformed spectrum skipped".to_string(),
+            unlisted,
+        ));
         Ok((spectra, errors))
     };
     let mut results: Vec<(usize, PieceResult)> = std::thread::scope(|scope| {

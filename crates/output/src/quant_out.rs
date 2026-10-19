@@ -346,7 +346,10 @@ mod tests {
         assert_eq!(header.len(), 13 + 8 + 3 + 4);
         assert_eq!(header[13], "itraq_114");
         assert_eq!(header[17], "raw_itraq_114");
-        assert_eq!(header[21..24], ["reporter_intensity_sum", "reporter_sn_sum", "quant_weight"]);
+        assert_eq!(
+            header[21..24],
+            ["reporter_intensity_sum", "reporter_sn_sum", "quant_weight"]
+        );
         assert_eq!(header[24], "sn_itraq_114");
         let row: Vec<&str> = lines.next().unwrap().split('\t').collect();
         assert_eq!(row[6], "PEPTIDEK");

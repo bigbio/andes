@@ -1209,7 +1209,9 @@ pub(crate) fn parse_non_negative(s: &str) -> Result<f64, String> {
         .parse()
         .map_err(|_| format!("invalid value `{s}`: expected a number >= 0"))?;
     if !v.is_finite() || v < 0.0 {
-        return Err(format!("invalid value `{s}`: must be finite and >= 0 (got {v})"));
+        return Err(format!(
+            "invalid value `{s}`: must be finite and >= 0 (got {v})"
+        ));
     }
     Ok(v)
 }

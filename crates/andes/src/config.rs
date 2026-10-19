@@ -478,7 +478,10 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     check_unit_fraction("tmt_min_purity", args.tmt_min_purity)?;
     check_unit_fraction("tmt_max_pep", args.tmt_max_pep)?;
     if !args.tmt_min_sn.is_finite() || args.tmt_min_sn < 0.0 {
-        return Err(format!("config: tmt_min_sn must be >= 0, got {}", args.tmt_min_sn));
+        return Err(format!(
+            "config: tmt_min_sn must be >= 0, got {}",
+            args.tmt_min_sn
+        ));
     }
     check_unit_fraction("lfq_min_cosine", args.lfq_min_cosine)?;
     check_unit_fraction("lfq_feature_fdr", args.lfq_feature_fdr)?;

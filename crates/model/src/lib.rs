@@ -32,7 +32,7 @@ pub use modification::{ModLocation, ModParseError, Modification, ResidueSpec};
 pub use peptide::Peptide;
 pub use protein::{
     ChainEnds, EntryKind, EntryOrigin, ModSite, PriorTier, Protein, ProteinAnnotation, ProteinDb,
-    SiteAnchor, Substitution, VariantRegion,
+    SiteAnchor, SiteClaim, Substitution, VariantRegion,
 };
 pub use protocol::Protocol;
 pub use scan::{Ms1Scan, ProductScan};

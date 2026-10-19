@@ -114,6 +114,24 @@ pub struct ProteinAnnotation {
     /// changes only), sorted by position: where a residue differs from the
     /// sequence the variant was built from, and which residue it replaced.
     pub substitutions: Vec<Substitution>,
+    /// The annotated sites of a reference protein as claims (each also in
+    /// `mod_sites`), and their knockoff sites, sorted by position. Empty for
+    /// alternative entries and decoys, which make no site claims.
+    pub site_claims: Vec<SiteClaim>,
+}
+
+/// A modification-site claim of a reference protein: modification
+/// `mass_delta` at `position`, with the tier of its source. A knockoff site
+/// (`knockoff_of`: the real site's position) carries the same modification on
+/// a matched residue no annotation names, an almost certainly unmodified
+/// position that a placement or localization error fits as well as the real
+/// site.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SiteClaim {
+    pub position: u32,
+    pub mass_delta: f64,
+    pub tier: PriorTier,
+    pub knockoff_of: Option<u32>,
 }
 
 impl ProteinAnnotation {
@@ -135,7 +153,19 @@ impl ProteinAnnotation {
             chain: None,
             origin: None,
             substitutions: Vec::new(),
+            site_claims: Vec::new(),
         }
+    }
+
+    /// This annotation with `claims` as its site claims, sorted by position.
+    pub fn with_site_claims(mut self, mut claims: Vec<SiteClaim>) -> Self {
+        claims.sort_by(|a, b| {
+            a.position
+                .cmp(&b.position)
+                .then(a.mass_delta.total_cmp(&b.mass_delta))
+        });
+        self.site_claims = claims;
+        self
     }
 
     /// This annotation for a sequence-variant entry whose differing parts are

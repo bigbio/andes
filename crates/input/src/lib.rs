@@ -16,7 +16,9 @@ pub mod timstof;
 pub mod uniprot;
 mod uniprot_ptm;
 
-pub use annotation::{build_entry, knockoff_annotations, KnockoffOptions};
+pub use annotation::{
+    add_site_knockoffs, build_entry, knockoff_annotations, KnockoffOptions, SiteKnockoffStats,
+};
 pub use annotations_file::{load_annotations, sequence_md5, AnnotationLoadStats, AnnotationsError};
 pub use database::{load_protein_database, DatabaseError, DatabaseFormat, LoadedDatabase};
 pub use fasta::{FastaParseError, FastaReader};

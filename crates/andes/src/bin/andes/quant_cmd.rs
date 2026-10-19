@@ -449,6 +449,20 @@ pub(crate) fn build_and_write_library(
             });
             spec_ids.push(row.spec_id.clone());
         }
+        // Per-run results whose SpecIds all belong to another run (every SpecId
+        // starts with its run's file stem) would join nothing and pass silently.
+        if matches!(scores, PsmScores::PerRun(_))
+            && run_joined == 0
+            && !rows.is_empty()
+            && !run_scores[r].psms.is_empty()
+        {
+            return Err(format!(
+                "run {}: none of the {} rescored PSMs in {} has a SpecId of this run; are these the rescoring results of this run?",
+                stems[r],
+                run_scores[r].psms.len(),
+                run_scores[r].source
+            ));
+        }
         if run_mismatched as f64 > MAX_JOIN_MISMATCH * run_joined as f64 {
             return Err(format!(
                 "run {}: {run_mismatched} of {run_joined} PSMs joined on SpecId disagree with {} on the peptide or the target/decoy label; are these the rescoring results of this run?",

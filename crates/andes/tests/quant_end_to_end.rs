@@ -232,6 +232,56 @@ fn tmt10_ms2_reporters_purity_and_correction() {
     assert!(names.contains(&"intensities".to_string()));
 }
 
+/// `--tmt-unmix` adds its block after the existing columns and leaves them
+/// unchanged; the fixture's handful of scans is too few to fit the run's
+/// interference model, so the block stays empty.
+#[test]
+fn tmt10_unmix_block_follows_the_existing_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |stem: &str, extra: &[&str]| {
+        let pin = dir.path().join(format!("{stem}.pin"));
+        let mut args = vec![
+            "--spectrum".to_string(),
+            fixture("test-fixtures/tmt10_synthetic.mzML.gz")
+                .to_string_lossy()
+                .into_owned(),
+            "--database".to_string(),
+            fixture("test-fixtures/BSA.fasta").to_string_lossy().into_owned(),
+            "--mods".to_string(),
+            fixture("test-fixtures/tmt10_mods.txt")
+                .to_string_lossy()
+                .into_owned(),
+            "--output-pin".to_string(),
+            pin.to_string_lossy().into_owned(),
+            "--tmt".to_string(),
+            "tmt10".to_string(),
+            "--threads".to_string(),
+            "2".to_string(),
+        ];
+        args.extend(extra.iter().map(|s| s.to_string()));
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        run_andes(&refs);
+        let t = output::read_tmt_parquet(&dir.path().join(format!("{stem}.tmt.parquet")))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let unmix_key = t.meta.get("andes.tmt.unmix").cloned();
+        let (header, rows) = read_table(&t);
+        (header, rows, unmix_key)
+    };
+    let (plain_h, plain_rows, plain_key) = run("plain", &[]);
+    let (h, rows, key) = run("unmix", &["--tmt-unmix"]);
+    assert_eq!(plain_key.as_deref(), Some("false"));
+    assert_eq!(key.as_deref(), Some("true"));
+    assert!(!rows.is_empty());
+    assert_eq!(h[..plain_h.len()], plain_h[..]);
+    assert_eq!(h.len(), plain_h.len() + 1 + 10);
+    assert_eq!(h[plain_h.len()], "interference");
+    assert_eq!(h[plain_h.len() + 1], "unmix_tmt_126");
+    for (r, p) in rows.iter().zip(&plain_rows) {
+        assert_eq!(r[..p.len()], p[..]);
+        assert!(r[p.len()..].iter().all(String::is_empty), "{r:?}");
+    }
+}
+
 #[test]
 fn tmt10_ms3_reporters_follow_the_sps_scan() {
     let dir = tempfile::tempdir().unwrap();

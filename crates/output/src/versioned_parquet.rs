@@ -49,16 +49,14 @@ pub(crate) fn write_table(
     partial.push(".partial");
     let partial = PathBuf::from(partial);
     let err = |p: &Path, e: &dyn std::fmt::Display| format!("{}: {e}", p.display());
-    let meta: Vec<KeyValue> = std::iter::once(KeyValue::new(
-        table.key.to_string(),
-        version.to_string(),
-    ))
-    .chain(
-        extra
-            .iter()
-            .map(|(k, v)| KeyValue::new(k.to_string(), v.clone())),
-    )
-    .collect();
+    let meta: Vec<KeyValue> =
+        std::iter::once(KeyValue::new(table.key.to_string(), version.to_string()))
+            .chain(
+                extra
+                    .iter()
+                    .map(|(k, v)| KeyValue::new(k.to_string(), v.clone())),
+            )
+            .collect();
     let props = WriterProperties::builder()
         .set_compression(Compression::ZSTD(ZstdLevel::default()))
         .set_max_row_group_size(BATCH_ROWS)
@@ -66,8 +64,8 @@ pub(crate) fn write_table(
         .build();
     let written = (|| {
         let file = File::create(&partial).map_err(|e| err(&partial, &e))?;
-        let mut writer = ArrowWriter::try_new(file, schema, Some(props))
-            .map_err(|e| err(&partial, &e))?;
+        let mut writer =
+            ArrowWriter::try_new(file, schema, Some(props)).map_err(|e| err(&partial, &e))?;
         for b in batches {
             let b = b.map_err(|e| err(path, &e))?;
             writer.write(&b).map_err(|e| err(&partial, &e))?;
@@ -173,7 +171,14 @@ mod tests {
             vec![Arc::new(Float64Array::from(vec![Some(1.5), None]))],
         )
         .map_err(|e| e.to_string());
-        write_table(path, &T, version, schema, [b], &[("andes.test.tag", "v".into())])
+        write_table(
+            path,
+            &T,
+            version,
+            schema,
+            [b],
+            &[("andes.test.tag", "v".into())],
+        )
     }
 
     #[test]

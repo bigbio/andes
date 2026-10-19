@@ -46,7 +46,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, Float64Array, Float64Builder, StringArray, StringBuilder, UInt64Array,
+    ArrayRef, Float64Array, Float64Builder, StringArray, StringBuilder, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
@@ -432,7 +432,14 @@ fn mbr_batch(schema: &Arc<Schema>, rows: &[MbrRow<'_>]) -> Result<RecordBatch, S
 pub fn write_mbr_parquet(path: &Path, rows: &[MbrRow<'_>]) -> Result<(), String> {
     let schema = Arc::new(mbr_schema());
     let batches = rows.chunks(BATCH_ROWS).map(|c| mbr_batch(&schema, c));
-    write_table(path, &MBR_TABLE, MBR_TABLE.version, schema.clone(), batches, &[])
+    write_table(
+        path,
+        &MBR_TABLE,
+        MBR_TABLE.version,
+        schema.clone(),
+        batches,
+        &[],
+    )
 }
 
 /// One row of `<base>.mbr.parquet` read back.
@@ -537,7 +544,9 @@ pub fn read_mbr_validation(path: &Path) -> Result<Vec<(String, ValidationCell)>,
             DataType::UInt64 => {
                 ValidationCell::Count(column::<UInt64Array>(b, name, path)?.value(0))
             }
-            DataType::Float64 => ValidationCell::Value(opt(column::<Float64Array>(b, name, path)?, 0)),
+            DataType::Float64 => {
+                ValidationCell::Value(opt(column::<Float64Array>(b, name, path)?, 0))
+            }
             other => {
                 return Err(format!(
                     "{}: column {name} has unexpected type {other}",
@@ -630,7 +639,10 @@ mod tests {
         let b = mbr_batch(&schema, &rows());
         write_table(&p, &MBR_TABLE, "2.0", schema, [b], &[]).unwrap();
         let e = read_mbr_parquet(&p).unwrap_err();
-        assert!(e.contains("x.mbr.parquet") && e.contains("schema 2.0"), "{e}");
+        assert!(
+            e.contains("x.mbr.parquet") && e.contains("schema 2.0"),
+            "{e}"
+        );
         write_mbr_parquet(&p, &rows()).unwrap();
         let e = read_mbr_validation(&p).unwrap_err();
         assert!(e.contains(VALIDATION_TABLE.key), "{e}");
@@ -695,7 +707,10 @@ mod tests {
         assert_eq!(get("pseudo_acceptance_q01"), Value(Some(0.8)));
         assert_eq!(get("pseudo_acceptance_at_threshold"), Value(Some(0.9)));
         assert_eq!(get("accepted_wrong_peak_rate_q01"), Value(None));
-        assert_eq!(get("accepted_wrong_peak_rate_at_threshold"), Value(Some(0.25)));
+        assert_eq!(
+            get("accepted_wrong_peak_rate_at_threshold"),
+            Value(Some(0.25))
+        );
         assert_eq!(get("accepted_rt_only_q01"), Count(39));
         assert_eq!(get("accepted_pooled_at_threshold"), Count(60));
         assert_eq!(get("quant_feature_threshold"), Value(None));

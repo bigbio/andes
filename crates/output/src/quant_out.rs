@@ -567,8 +567,14 @@ mod tests {
         gated.quant_gate_passed = false;
         write_tmt_parquet(&p, Plex::Itraq4, &[tmt_row(), gated], true).unwrap();
         let t = read_tmt_parquet(&p).unwrap();
-        assert_eq!(t.meta.get(TMT_PLEX_KEY).map(String::as_str), Some("itraq4plex"));
-        assert_eq!(t.meta.get(TMT_CORRECTED_KEY).map(String::as_str), Some("true"));
+        assert_eq!(
+            t.meta.get(TMT_PLEX_KEY).map(String::as_str),
+            Some("itraq4plex")
+        );
+        assert_eq!(
+            t.meta.get(TMT_CORRECTED_KEY).map(String::as_str),
+            Some("true")
+        );
         let header = names(&t);
         assert_eq!(header.len(), 13 + 8 + 4 + 4);
         assert_eq!(header[13], "itraq_114");
@@ -656,8 +662,14 @@ mod tests {
             t.meta.get(LFQ_RUNS_KEY).map(String::as_str),
             Some("a\nb\nempty")
         );
-        assert_eq!(t.meta.get(LFQ_FEATURE_FDR_KEY).map(String::as_str), Some("0.01"));
-        assert_eq!(t.meta.get(LFQ_MIN_COSINE_KEY).map(String::as_str), Some("0.7"));
+        assert_eq!(
+            t.meta.get(LFQ_FEATURE_FDR_KEY).map(String::as_str),
+            Some("0.01")
+        );
+        assert_eq!(
+            t.meta.get(LFQ_MIN_COSINE_KEY).map(String::as_str),
+            Some("0.7")
+        );
         assert_eq!(
             names(&t),
             [
@@ -695,7 +707,7 @@ mod tests {
         let iso = column::<ListArray>(b, "isotope_areas", &p).unwrap();
         let first = iso.value(0);
         let first = first.as_any().downcast_ref::<Float64Array>().unwrap();
-        assert_eq!(first.values().to_vec(), vec![6e5, 4e5]);
+        assert_eq!(first.values().to_vec(), rows[0].feature.isotope_areas);
         let acc = column::<BooleanArray>(b, "accepted", &p).unwrap();
         assert_eq!(
             (0..3).map(|i| acc.value(i)).collect::<Vec<_>>(),

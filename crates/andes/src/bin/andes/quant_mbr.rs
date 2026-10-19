@@ -1942,7 +1942,10 @@ mod tests {
         let in_r2: Vec<_> = rows.iter().filter(|r| r.run == "r2").collect();
         assert_eq!(in_r2.len(), 1, "{rows:?}");
         assert_eq!(
-            (in_r2[0].precursor_key.as_str(), in_r2[0].evidence_type.as_str()),
+            (
+                in_r2[0].precursor_key.as_str(),
+                in_r2[0].evidence_type.as_str()
+            ),
             ("PEP0/2", "identified"),
             "{in_r2:?}"
         );
@@ -2295,9 +2298,7 @@ mod finalize_tests {
     /// with `{}` and a null as `NA`, for `<base>.mbr.parquet` or
     /// `<base>.mbr_validation.parquet` by file name.
     fn table(path: &Path) -> Vec<Vec<String>> {
-        use output::mbr_out::{
-            read_mbr_parquet, read_mbr_validation, ValidationCell, MBR_COLUMNS,
-        };
+        use output::mbr_out::{read_mbr_parquet, read_mbr_validation, ValidationCell, MBR_COLUMNS};
         let num = |v: Option<f64>| v.map_or_else(|| "NA".to_string(), |v| v.to_string());
         if path.to_string_lossy().ends_with(".mbr_validation.parquet") {
             let cells = read_mbr_validation(path).unwrap();

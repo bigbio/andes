@@ -480,7 +480,9 @@ fn lfq_areas_track_the_designed_intensities() {
     );
     let accepted = col(&header, "accepted");
     assert!(rows.iter().all(|r| r[accepted] == "true"));
-    assert!(rows.iter().all(|r| r[col(&header, "filename")] == "lfq_synthetic"));
+    assert!(rows
+        .iter()
+        .all(|r| r[col(&header, "filename")] == "lfq_synthetic"));
     let (n, _) = parquet_rows(&qpx.join("quantms.feature.parquet"));
     assert_eq!(n, rows.len());
 }

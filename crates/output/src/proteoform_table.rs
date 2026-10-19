@@ -3,7 +3,9 @@
 //! its quantity.
 //!
 //! A peptide is *specific* to a member when, within its family, no other
-//! member explains it; otherwise it is *shared*. An isoform, variant or chain
+//! member explains it, and, for an isoform, variant or chain member, no
+//! reference entry of any family holds it (a paralog, or a reference sharing it
+//! up to I/L); otherwise it is *shared*. An isoform, variant or chain
 //! entry is listed only with specific evidence. A member's confidence is
 //! `1 - q` of its best specific PSM (the class-aware q-value of
 //! [`crate::class_fdr`]), or of its best shared PSM when it has no specific one
@@ -113,14 +115,19 @@ pub fn proteoform_table(
     for (id, t) in targets.iter().filter(|(id, t)| t.q_value <= cutoffs.of(id)) {
         let seq = bare_sequence(&t.peptide);
         let mut by_family: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
+        let mut has_reference = false;
         for acc in t.proteins.split(';').filter(|a| !a.is_empty()) {
             if let Some(p) = proteins.get(acc) {
                 by_family.entry(family_of(p)).or_default().insert(acc);
+                has_reference |= p.entry_kind() == EntryKind::Reference;
             }
         }
         for (family, accs) in by_family {
-            let specific = accs.len() == 1;
-            for acc in accs {
+            for acc in accs.iter().copied() {
+                // A reference of another family explains the peptide as well,
+                // so it is no evidence for an alternative member.
+                let specific = accs.len() == 1
+                    && (proteins[acc].entry_kind() == EntryKind::Reference || !has_reference);
                 let a = members
                     .entry((family.clone(), acc.to_string()))
                     .or_default();
@@ -413,6 +420,28 @@ mod tests {
             "the q 0.5 PSM is not accepted"
         );
         assert!(rows.iter().all(|r| r.family == "P1"));
+    }
+
+    #[test]
+    fn a_variant_peptide_another_familys_reference_holds_is_shared() {
+        // VLDGSTR is the P1 variant's peptide, and the reference of family Q9
+        // holds it too: the reference explains it, so the variant is not listed.
+        let mut proteins = index().db.proteins.clone();
+        proteins.retain(|p| !p.accession.starts_with("XXX"));
+        proteins.push(Protein {
+            accession: "sp|Q9|B".into(),
+            description: String::new(),
+            sequence: b"VLDGSTRK".to_vec(),
+            annotation: None,
+        });
+        let idx = SearchIndex::from_target_db(&ProteinDb { proteins }, "XXX");
+        let t: HashMap<_, _> = [psm("v", 0.001, "VLDGSTR", "sp|P1_VAR_1_N10D|A;sp|Q9|B")]
+            .into_iter()
+            .collect();
+        let rows = proteoform_table(&t, &idx, &Cutoffs::uniform(0.01), None);
+        let members: Vec<&str> = rows.iter().map(|r| r.member.as_str()).collect();
+        assert_eq!(members, ["sp|Q9|B"]);
+        assert_eq!(rows[0].evidence, "specific");
     }
 
     #[test]

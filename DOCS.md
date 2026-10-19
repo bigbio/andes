@@ -265,9 +265,10 @@ protein.
 **Proteoform table.** With rescoring and a database that holds isoform, variant or chain entries,
 andes writes `<stem>.proteoforms.tsv`: for each protein family (a UniProt entry), the canonical
 entry first and then each isoform, variant and chain entry with a *specific* target PSM at
-q ≤ `--fdr`.
-Within its family, a peptide is *specific* to a member when no other member explains it, and
-*shared* otherwise. A member's `confidence` is 1 − q of its best specific PSM, the class-aware
+q ≤ `--fdr` (variant-class PSMs at `--proteoform-fdr`).
+Within its family, a peptide is *specific* to a member when no other member explains it, and,
+for an isoform, variant or chain member, no reference entry of any family holds it (a paralog,
+or a reference sharing it up to I/L); it is *shared* otherwise. A member's `confidence` is 1 − q of its best specific PSM, the class-aware
 q-value above (`evidence` `specific`), or of its best shared PSM when it has no specific one
 (`evidence` `shared`). For a variant, `alternative_explanation` says whether its substitution
 weighs the same as deamidation, methylation or oxidation, and whether the canonical counterpart

@@ -452,6 +452,11 @@ fn promote(db: &mut ProteinDb, indices: &[usize], tier: PriorTier, source: Optio
 
 /// The claim a row makes about `reference`, or why it is left out.
 fn claim_of(row: &Row, reference: &Protein) -> Result<Annotation, &'static str> {
+    // The id becomes part of the entry's accession, which protein lists split
+    // on ';' (and the PIN on whitespace).
+    if row.id.is_empty() || row.id.contains(|c: char| c == ';' || c == '|' || c.is_whitespace()) {
+        return Err("id is empty or holds ';', '|' or whitespace");
+    }
     let seq = &reference.sequence;
     let mut edits = Vec::with_capacity(row.edits.len());
     for (start, end, rf, alt) in &row.edits {

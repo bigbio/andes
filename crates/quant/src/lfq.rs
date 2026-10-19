@@ -27,7 +27,7 @@ pub struct LfqParams {
     /// Isotopes extracted (monoisotopic + n−1).
     pub n_isotopes: usize,
     /// Minimum envelope cosine for target AND decoy eligibility in competition.
-    /// All target features are still returned for `lfq_features.tsv` diagnostics.
+    /// All target features are still returned for `lfq.parquet` diagnostics.
     pub min_cosine: f32,
     /// m/z shift of the decoy twin (Th). This fixed-shift heuristic differs
     /// from engine A's adaptive +11 * 1.0005 Th and engine E's +11.06 Th + RT shift.

@@ -115,26 +115,44 @@ fn s(p: &Path) -> &str {
     p.to_str().unwrap()
 }
 
-/// mbr.tsv rows by `(precursor_key, run)`.
+/// mbr.parquet rows by `(precursor_key, run)`, as text cells (a null is
+/// `NA`).
 type MbrRows = HashMap<(String, String), Vec<String>>;
 
-/// The header and rows of an mbr.tsv.
+/// The header and rows of an mbr.parquet.
 fn read_mbr(path: &Path) -> (Vec<String>, MbrRows) {
-    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
-    let mut lines = text.lines();
-    let header: Vec<String> = lines
-        .next()
-        .unwrap()
-        .split('\t')
-        .map(String::from)
-        .collect();
-    let rows = lines
-        .map(|l| {
-            let f: Vec<String> = l.split('\t').map(String::from).collect();
-            ((f[0].clone(), f[1].clone()), f)
+    let header = output::mbr_out::MBR_COLUMNS.map(String::from).to_vec();
+    let num = |v: Option<f64>| v.map_or_else(|| "NA".to_string(), |v| v.to_string());
+    let rows = output::mbr_out::read_mbr_parquet(path)
+        .unwrap_or_else(|e| panic!("{e}"))
+        .into_iter()
+        .map(|r| {
+            let f = vec![
+                r.precursor_key.clone(),
+                r.run.clone(),
+                r.evidence_type,
+                num(r.quantity),
+                num(r.quantity_se),
+                num(r.quantity_normalized),
+                num(r.transfer_q),
+                num(r.quant_q),
+                num(r.apex_rt_s),
+                num(Some(r.library_q)),
+            ];
+            ((r.precursor_key, r.run), f)
         })
         .collect();
     (header, rows)
+}
+
+/// Whether two runs wrote the same MBR tables (`<a>`/`<b>` are output bases).
+fn same_mbr_tables(a: &Path, b: &Path) -> bool {
+    let with = |p: &Path, s: &str| PathBuf::from(format!("{}{s}", p.display()));
+    let rows = |p: &Path| output::mbr_out::read_mbr_parquet(&with(p, ".mbr.parquet")).unwrap();
+    let val = |p: &Path| {
+        output::mbr_out::read_mbr_validation(&with(p, ".mbr_validation.parquet")).unwrap()
+    };
+    rows(a) == rows(b) && val(a) == val(b)
 }
 
 /// The column-data bytes of a Parquet file: everything between the leading
@@ -275,15 +293,9 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
     assert!(log.contains("[mbr] library:"), "{log}");
     assert!(log.contains("[mbr] extract mbr_run3:"), "{log}");
 
-    let staged_tsv = std::fs::read(staged.join("out.mbr.tsv")).unwrap();
-    let aio_tsv = std::fs::read(aio.join("a.mbr.tsv")).unwrap();
     assert!(
-        staged_tsv == aio_tsv,
-        "mbr.tsv differs between the stage path and the all-in-one run"
-    );
-    assert_eq!(
-        std::fs::read(staged.join("out.mbr_validation.tsv")).unwrap(),
-        std::fs::read(aio.join("a.mbr_validation.tsv")).unwrap()
+        same_mbr_tables(&staged.join("out"), &aio.join("a")),
+        "mbr.parquet or mbr_validation.parquet differs between the stage path and the all-in-one run"
     );
     // The feature parquets hold the same column data.
     let staged_parquet = qpx.join("quantms.feature.parquet");
@@ -293,7 +305,7 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
         "quantms.feature.parquet differs between the stage path and the all-in-one run"
     );
 
-    let (header, rows) = read_mbr(&aio.join("a.mbr.tsv"));
+    let (header, rows) = read_mbr(&aio.join("a.mbr.parquet"));
     let col = |name: &str| header.iter().position(|h| h == name).unwrap();
     let (ev, quantity) = (col("evidence_type"), col("quantity"));
     let row = |key: &str, run: &str| rows.get(&(key.to_string(), run.to_string()));
@@ -331,7 +343,7 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
     );
     assert!(transfers >= 50, "only {transfers} transfers");
 
-    // The feature parquet holds every mbr.tsv row except the below-threshold
+    // The feature parquet holds every mbr.parquet row except the below-threshold
     // transfers and identified rows.
     let below: Vec<&Vec<String>> = rows
         .values()
@@ -534,7 +546,7 @@ fn separate_searches_join_on_run_and_spec_id() {
     run_andes(&lib_args.iter().map(String::as_str).collect::<Vec<_>>());
     assert!(q.join("library.parquet").is_file());
 
-    // The same per-PSM scores as the all-in-one run give its mbr.tsv exactly.
+    // The same per-PSM scores as the all-in-one run give its mbr.parquet exactly.
     let mut lib_args: Vec<String> = ["quant", "library", "--quant-dir", s(&q), "--psms"]
         .map(String::from)
         .to_vec();
@@ -565,13 +577,12 @@ fn separate_searches_join_on_run_and_spec_id() {
     let base = sep.join("out");
     run_andes(&["quant", "finalize", "--quant-dir", s(&q), "-o", s(&base)]);
     assert!(
-        std::fs::read(sep.join("out.mbr.tsv")).unwrap()
-            == std::fs::read(aio.join("a.mbr.tsv")).unwrap(),
-        "mbr.tsv of the separate searches differs from the all-in-one run"
+        read_mbr(&sep.join("out.mbr.parquet")).1 == read_mbr(&aio.join("a.mbr.parquet")).1,
+        "mbr.parquet of the separate searches differs from the all-in-one run"
     );
     // The default `--quant-feature-fdr off` keeps identified rows whose MS1
     // feature fails its decoys (peptide 6 has no MS1 signal) as `identified`.
-    let (header, rows) = read_mbr(&sep.join("out.mbr.tsv"));
+    let (header, rows) = read_mbr(&sep.join("out.mbr.parquet"));
     let ev = header.iter().position(|h| h == "evidence_type").unwrap();
     for key in ["DAFLGSFLYEYSR/2", "DAFLGSFLYEYSR/3"] {
         let r1 = rows
@@ -703,7 +714,7 @@ fn library_stage_errors_name_what_is_missing() {
     );
 }
 
-/// `mbr.tsv` rows whose evidence type is `identified`.
+/// `mbr.parquet` rows whose evidence type is `identified`.
 fn identified_rows(path: &Path) -> usize {
     let (header, rows) = read_mbr(path);
     let ev = header.iter().position(|h| h == "evidence_type").unwrap();
@@ -737,7 +748,7 @@ fn mbr_donors_honour_the_pep_cap() {
     let out = andes(&args.iter().map(String::as_str).collect::<Vec<_>>());
     let log = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "all-in-one failed:\n{log}");
-    let n = identified_rows(&aio.join("a.mbr.tsv"));
+    let n = identified_rows(&aio.join("a.mbr.parquet"));
     eprintln!("all-in-one --pep 0.01: {n} identified rows");
     assert_eq!(n, 0, "identified rows from PSMs above the PEP cap");
 
@@ -762,7 +773,7 @@ fn mbr_donors_honour_the_pep_cap() {
         }
         let base = staged.join("out");
         run_andes(&["quant", "finalize", "--quant-dir", s(&q), "-o", s(&base)]);
-        identified_rows(&staged.join("out.mbr.tsv"))
+        identified_rows(&staged.join("out.mbr.parquet"))
     };
     let uncapped = library(None);
     let capped = library(Some("0.01"));

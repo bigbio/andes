@@ -1030,7 +1030,7 @@ pub(crate) struct StreamLimits {
     /// precursors (every row still scored by its fold's model).
     pub max_train_rows: usize,
     /// Reference cells of the run normalisation. Above it the fit uses a
-    /// hashed sample of whole precursors.
+    /// hashed sample of whole precursors (coarser RT-local offsets).
     pub max_norm_cells: usize,
 }
 
@@ -1039,7 +1039,7 @@ pub(crate) const DEFAULT_SHARD_ROWS: usize = 1_000_000;
 /// Default of [`StreamLimits::max_train_rows`].
 pub(crate) const DEFAULT_MAX_TRAIN_ROWS: usize = 3_000_000;
 /// Default of [`StreamLimits::max_norm_cells`].
-pub(crate) const DEFAULT_MAX_NORM_CELLS: usize = 5_000_000;
+pub(crate) const DEFAULT_MAX_NORM_CELLS: usize = 20_000_000;
 
 impl Default for StreamLimits {
     fn default() -> Self {

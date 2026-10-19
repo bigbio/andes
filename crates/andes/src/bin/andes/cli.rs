@@ -973,7 +973,11 @@ pub(crate) struct QuantFinalizeArgs {
     pub(crate) max_train_rows: usize,
 
     /// Advanced: reference cells of the run normalisation. Above it the fit
-    /// uses a hashed sample of whole precursors. Default 5000000.
+    /// uses a hashed sample of whole precursors, which coarsens the RT-local
+    /// offsets (on a 6-run benchmark, half the cells raised the median
+    /// absolute log2 ratio error from 0.162 to 0.173), so keep it above the
+    /// cells of the study
+    /// when memory allows (about 150 bytes per cell). Default 20000000.
     #[arg(long = "max-norm-cells", hide = true, default_value_t = crate::quant_mbr::DEFAULT_MAX_NORM_CELLS)]
     pub(crate) max_norm_cells: usize,
 

@@ -129,6 +129,9 @@ fn tmt10_ms2_reporters_purity_and_correction() {
     let purity = col(&header, "purity");
     let peptide = col(&header, "peptide");
     let level = col(&header, "quant_ms_level");
+    let weight = col(&header, "quant_weight");
+    let sn_sum = col(&header, "reporter_sn_sum");
+    let intensity_sum = col(&header, "reporter_intensity_sum");
     let mut saw_interfered = false;
     for r in &rows {
         assert_eq!(r[level], "2");
@@ -157,6 +160,21 @@ fn tmt10_ms2_reporters_purity_and_correction() {
             r[peptide]
         );
         let p: f64 = r[purity].parse().unwrap();
+        // Roll-up weight: purity squared. The fixture carries no noise arrays,
+        // so the S/N cells stay empty.
+        let w: f64 = r[weight].parse().unwrap();
+        assert!(
+            (w - p * p).abs() < 1e-3,
+            "{}: weight {w} purity {p}",
+            r[peptide]
+        );
+        assert!(r[sn_sum].is_empty());
+        let total: f64 = r[intensity_sum].parse().unwrap();
+        assert!(
+            total >= raw_a + raw_b,
+            "{}: summed intensity {total}",
+            r[peptide]
+        );
         if bare(&r[peptide]) == "YLYEIAR" {
             // Envelope inside the ±0.7 Th window (M, M+1) ≈ 1.5 × mono against an
             // interferer of 0.5 × mono → purity ≈ 0.75 (plus a little background).
@@ -250,7 +268,11 @@ fn tmt35_reads_the_deuterated_kit_in_reference_order() {
     let (header, rows) = read_tsv(&dir.path().join("tmt35.tmt.tsv"));
     assert!(rows.len() >= 4, "got {} rows", rows.len());
     let first = col(&header, "tmt_126");
-    let channels: Vec<&str> = header[first..].iter().map(String::as_str).collect();
+    let channels: Vec<&str> = header[first..]
+        .iter()
+        .map(String::as_str)
+        .filter(|h| h.starts_with("tmt_"))
+        .collect();
     assert_eq!(channels.len(), 35, "{channels:?}");
     assert_eq!(
         &channels[..8],

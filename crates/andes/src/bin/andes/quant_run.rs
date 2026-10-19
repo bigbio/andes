@@ -20,7 +20,7 @@ use output::ms2_table::{write_ms2_table, Ms2Table};
 use output::run_quant_table::{write_run_quant_table, RunPsmRow};
 use output::{LfqRow, ModRecord, PercolatorPsm, QuantId, TmtRow};
 use quant::formula::Formula;
-use quant::isobaric::{extract_reporters, CorrectionMatrix, Plex};
+use quant::isobaric::{extract_reporters, reporter_noise, signal_to_noise, CorrectionMatrix, Plex};
 use quant::lfq::{
     competition_score, feature_score, quantify, quantify_decoy, FeatureQuant, LfqParams, LfqTarget,
 };
@@ -59,7 +59,12 @@ pub(crate) struct QuantSettings {
     pub tmt_level: u8,
     pub tmt_tol: Tolerance,
     pub correction: Option<CorrectionMatrix>,
+    /// Quantification gate (`tmt.tsv`): precursor isolation purity floor,
+    /// summed reporter signal-to-noise floor (PSMs whose reporter scan has no
+    /// noise are not held to it) and PEP cap.
     pub min_purity: f32,
+    pub min_sn: f32,
+    pub max_pep: f64,
     pub lfq: bool,
     pub lfq_params: LfqParams,
     pub feature_fdr: f64,
@@ -172,6 +177,8 @@ impl QuantSettings {
             tmt_tol,
             correction,
             min_purity: cli.tmt_min_purity as f32,
+            min_sn: cli.tmt_min_sn as f32,
+            max_pep: cli.tmt_max_pep,
             lfq: cli.lfq,
             lfq_params,
             feature_fdr: cli.lfq_feature_fdr,
@@ -202,7 +209,8 @@ impl QuantSettings {
         let mut parts = Vec::new();
         if let Some(p) = self.plex {
             parts.push(format!(
-                "isobaric {} at MS{} (reporter tol {}, correction {}, min purity {})",
+                "isobaric {} at MS{} (reporter tol {}, correction {}, quantification gate: \
+                 purity >= {}, summed S/N >= {}, PEP <= {})",
                 p.name(),
                 self.tmt_level,
                 match self.tmt_tol {
@@ -214,7 +222,9 @@ impl QuantSettings {
                 } else {
                     "off"
                 },
-                self.min_purity
+                self.min_purity,
+                self.min_sn,
+                self.max_pep
             ));
         }
         if self.lfq {
@@ -267,11 +277,13 @@ struct RunCapture {
     contexts: HashMap<String, ScanContext>,
 }
 
-/// An MS3 reporter scan: native id, raw reporter vector, acquired m/z range.
+/// An MS3 reporter scan: native id, raw reporter vector, acquired m/z range
+/// and the noise at each reporter m/z (when the scan records noise).
 struct ReporterScan {
     id: String,
     raw: Vec<f32>,
     scan_window: Option<(f64, f64)>,
+    noise: Option<Vec<f32>>,
 }
 
 /// Collects quantification inputs while the search streams the spectra.
@@ -351,6 +363,7 @@ impl QuantCollector {
                                     id: p.id,
                                     raw,
                                     scan_window: p.scan_window,
+                                    noise: p.noise.as_ref().map(|n| reporter_noise(n, plex)),
                                 },
                             );
                         }
@@ -439,6 +452,68 @@ impl QuantCollector {
     fn run_of(&self, spec_idx: usize) -> Option<usize> {
         self.runs.iter().position(|r| r.span.contains(&spec_idx))
     }
+}
+
+/// PSMs the isobaric quantification gate left out of `tmt.tsv`, by the first
+/// criterion they failed.
+#[derive(Debug, Default)]
+struct GateCounts {
+    purity: usize,
+    pep: usize,
+    sn: usize,
+}
+
+impl GateCounts {
+    /// Whether a PSM passes the gate; counts the first criterion it fails. A
+    /// missing value (no MS1 for purity, no rescoring for PEP, no noise for
+    /// S/N) does not fail its criterion.
+    fn check(
+        &mut self,
+        s: &QuantSettings,
+        purity: Option<f32>,
+        sn_sum: Option<f32>,
+        pep: Option<f64>,
+    ) -> bool {
+        if purity.is_some_and(|p| p < s.min_purity) {
+            self.purity += 1;
+        } else if pep.is_some_and(|p| p > s.max_pep) {
+            self.pep += 1;
+        } else if sn_sum.is_some_and(|v| v < s.min_sn) {
+            self.sn += 1;
+        } else {
+            return true;
+        }
+        false
+    }
+
+    fn describe(&self, s: &QuantSettings) -> String {
+        let mut parts = Vec::new();
+        if self.purity > 0 {
+            parts.push(format!("{} below purity {}", self.purity, s.min_purity));
+        }
+        if self.pep > 0 {
+            parts.push(format!("{} above PEP {}", self.pep, s.max_pep));
+        }
+        if self.sn > 0 {
+            parts.push(format!("{} below summed S/N {}", self.sn, s.min_sn));
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!(
+                ", {} left out by the quantification gate (kept in the parquet with \
+                 quant_weight 0)",
+                parts.join(", ")
+            )
+        }
+    }
+}
+
+/// Suggested roll-up weight of a PSM that passed the quantification gate:
+/// purity squared (1 without a purity), so the PSMs most exposed to
+/// co-isolated ions count less in a weighted protein or peptide sum.
+fn quant_weight(purity: Option<f32>) -> f32 {
+    purity.unwrap_or(1.0).clamp(0.0, 1.0).powi(2)
 }
 
 /// One MS2 spectrum reduced for its run's MS2 table: the
@@ -1132,7 +1207,11 @@ pub(crate) fn run_quant(
     // ── Isobaric ──────────────────────────────────────────────────────────────
     if let Some(plex) = s.plex {
         let mut rows: Vec<TmtRow> = Vec::new();
-        let (mut no_scan, mut low_purity, mut out_of_range) = (0usize, 0usize, 0usize);
+        // Whether each row passed the quantification gate.
+        let mut passed: Vec<bool> = Vec::new();
+        let (mut no_scan, mut out_of_range) = (0usize, 0usize);
+        let mut gated = GateCounts::default();
+        let mut with_noise = 0usize;
         for (run_idx, run) in collector.runs.iter().enumerate() {
             let ms1 = run
                 .ms1
@@ -1148,9 +1227,9 @@ pub(crate) fn run_quant(
             {
                 let spec = &spectra[hit.spec_idx];
                 let context = run.contexts.get(native_id(run, &spec.title));
-                let (quant_scan_id, raw, scan_window) = if s.tmt_level >= 3 {
+                let (quant_scan_id, raw, scan_window, noise) = if s.tmt_level >= 3 {
                     match run.ms3_reporters.get(native_id(run, &spec.title)) {
-                        Some(r) => (r.id.clone(), r.raw.clone(), r.scan_window),
+                        Some(r) => (r.id.clone(), r.raw.clone(), r.scan_window, r.noise.clone()),
                         None => {
                             no_scan += 1;
                             continue;
@@ -1162,6 +1241,9 @@ pub(crate) fn run_quant(
                             spec.title.clone(),
                             raw.clone(),
                             context.and_then(|c| c.scan_window),
+                            context
+                                .and_then(|c| c.noise.as_ref())
+                                .map(|n| reporter_noise(n, plex)),
                         ),
                         None => {
                             no_scan += 1;
@@ -1189,15 +1271,15 @@ pub(crate) fn run_quant(
                         PURITY_ISOTOPE_PPM,
                     )
                 });
-                if let Some(p) = purity {
-                    if p < s.min_purity {
-                        low_purity += 1;
-                    }
-                }
                 let corrected = match &s.correction {
                     Some(m) => m.correct(&raw),
                     None => raw.clone(),
                 };
+                let sn = noise.map(|n| signal_to_noise(&corrected, &n));
+                with_noise += usize::from(sn.is_some());
+                let sn_sum = sn.as_ref().map(|v| v.iter().sum::<f32>());
+                let passes = gated.check(s, purity, sn_sum, hit.pep);
+                passed.push(passes);
                 rows.push(TmtRow {
                     id: quant_id(hit, run, spec, candidates, index),
                     quant_scan_id,
@@ -1205,13 +1287,16 @@ pub(crate) fn run_quant(
                     purity,
                     raw,
                     corrected,
+                    sn,
+                    quant_weight: if passes { quant_weight(purity) } else { 0.0 },
                 });
             }
         }
         let tsv_rows: Vec<TmtRow> = rows
             .iter()
-            .filter(|r| r.purity.is_none_or(|p| p >= s.min_purity))
-            .cloned()
+            .zip(&passed)
+            .filter(|(_, &ok)| ok)
+            .map(|(r, _)| r.clone())
             .collect();
         summary.columns = plex.channels().iter().map(|c| c.name.to_string()).collect();
         for r in &tsv_rows {
@@ -1241,15 +1326,15 @@ pub(crate) fn run_quant(
             } else {
                 String::new()
             },
-            if low_purity > 0 {
-                format!(
-                    ", {low_purity} below purity {} kept only in the parquet",
-                    s.min_purity
-                )
-            } else {
-                String::new()
-            }
+            gated.describe(s)
         );
+        if with_noise == 0 && s.min_sn > 0.0 && !rows.is_empty() {
+            eprintln!(
+                "WARN: quant: no reporter scan carries noise values (mzML converted without \
+                 noise arrays, or ion-trap reporter scans); --tmt-min-sn was not applied and \
+                 the sn_ columns are empty"
+            );
+        }
         for r in rows.iter().filter(|_| parquet_dir.is_some()) {
             let hit = hits_by_psm[&r.id.psm_index];
             let proteins = proteins_of(&hit.psm, candidates, index);
@@ -1265,18 +1350,32 @@ pub(crate) fn run_quant(
                 .cloned()
                 .zip(r.corrected.iter().copied())
                 .collect();
-            if s.correction.is_some() {
+            if s.correction.is_some() || r.sn.is_some() {
                 rec.additional_intensities = labels
                     .iter()
-                    .cloned()
-                    .zip(r.raw.iter().copied())
-                    .map(|(l, v)| (l, vec![("raw".to_string(), v)]))
+                    .enumerate()
+                    .map(|(i, l)| {
+                        let mut extra = Vec::new();
+                        if s.correction.is_some() {
+                            extra.push(("raw".to_string(), r.raw[i]));
+                        }
+                        if let Some(sn) = &r.sn {
+                            extra.push(("sn".to_string(), sn[i]));
+                        }
+                        (l.clone(), extra)
+                    })
                     .collect();
             }
             if let Some(p) = r.purity {
                 rec.additional_scores
                     .push(("precursor_purity".into(), p as f64, true));
             }
+            if let Some(v) = r.sn_sum() {
+                rec.additional_scores
+                    .push(("reporter_sn_sum".into(), v as f64, true));
+            }
+            rec.additional_scores
+                .push(("quant_weight".into(), r.quant_weight as f64, true));
             rec.cv_params
                 .push(("quant_scan".into(), r.quant_scan_id.clone()));
             rec.cv_params
@@ -1490,6 +1589,7 @@ mod tests {
             parent_id: parent.map(str::to_string),
             scan_window: None,
             faims_cv: cv,
+            noise: None,
         }
     }
 
@@ -1658,6 +1758,8 @@ mod tests {
             tmt_tol: Tolerance::Ppm(20.0),
             correction: None,
             min_purity: 0.0,
+            min_sn: 0.0,
+            max_pep: 1.0,
             lfq,
             lfq_params: LfqParams::default(),
             feature_fdr: 0.05,
@@ -1698,6 +1800,37 @@ mod tests {
             e.contains("a/run1.mzML ") && e.contains("b/run1.mzML.gz") && e.contains("\"run1\""),
             "{e}"
         );
+    }
+
+    #[test]
+    fn quantification_gate_counts_the_first_failed_criterion() {
+        let mut s = settings(false, None);
+        s.min_purity = 0.7;
+        s.max_pep = 0.05;
+        s.min_sn = 100.0;
+        let mut g = GateCounts::default();
+        assert!(g.check(&s, Some(0.9), Some(500.0), Some(0.01)));
+        // Missing values do not fail their criterion.
+        assert!(g.check(&s, None, None, None));
+        assert!(!g.check(&s, Some(0.5), Some(50.0), Some(0.5)));
+        assert!(!g.check(&s, Some(0.8), Some(50.0), Some(0.5)));
+        assert!(!g.check(&s, Some(0.8), Some(50.0), Some(0.01)));
+        assert_eq!((g.purity, g.pep, g.sn), (1, 1, 1));
+        let text = g.describe(&s);
+        assert!(text.contains("1 below purity 0.7"), "{text}");
+        assert!(text.contains("1 above PEP 0.05"), "{text}");
+        assert!(text.contains("1 below summed S/N 100"), "{text}");
+        // The off values let everything through.
+        let off = settings(false, None);
+        assert!(GateCounts::default().check(&off, Some(0.0), Some(0.0), Some(1.0)));
+        assert!(GateCounts::default().describe(&off).is_empty());
+    }
+
+    #[test]
+    fn roll_up_weight_is_purity_squared() {
+        assert_eq!(quant_weight(None), 1.0);
+        assert!((quant_weight(Some(0.8)) - 0.64).abs() < 1e-6);
+        assert_eq!(quant_weight(Some(1.2)), 1.0);
     }
 
     #[test]

@@ -1378,6 +1378,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // per-chunk co-isolation link).
             let capture_ms1 = quant.as_ref().is_some_and(|q| q.settings.needs_ms1());
             let capture_context = quant.is_some();
+            let capture_noise = quant.as_ref().is_some_and(|q| q.settings.plex.is_some());
             type Ms1Parsed = (usize, Vec<String>, RunScans);
             let parser_handle = thread::spawn(move || -> Result<Ms1Parsed, String> {
                 if file_is_mzml {
@@ -1388,7 +1389,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     .with_ms_level_range(mslevel, mslevel)
                     .with_ms1_capture(true)
                     .with_run_ms1_capture(capture_ms1)
-                    .with_scan_context_capture(capture_context);
+                    .with_scan_context_capture(capture_context)
+                    .with_noise_capture(capture_noise);
                     let (errc, errs) =
                         reader.read_with_ms1_chunked(CHUNK_SIZE, cap, |chunk, link| {
                             let _ = tx.send((chunk, link));
@@ -1405,7 +1407,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         let mut reader = input::ThermoRawReader::open(&spectrum_path)
                             .map_err(|e| format!("open Thermo .raw: {e}"))?
                             .with_run_ms1_capture(capture_ms1)
-                            .with_scan_context_capture(capture_context);
+                            .with_scan_context_capture(capture_context)
+                            .with_noise_capture(capture_noise);
                         let (errc, errs) =
                             reader.read_with_ms1_chunked(CHUNK_SIZE, cap, |chunk, link| {
                                 let _ = tx.send((chunk, link));
@@ -1619,6 +1622,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let capture_ms1 = quant.as_ref().is_some_and(|q| q.settings.needs_ms1());
             let capture_ms3 = quant.as_ref().is_some_and(|q| q.settings.needs_ms3());
             let capture_context = quant.is_some();
+            let capture_noise = quant.as_ref().is_some_and(|q| q.settings.plex.is_some());
             let parser_handle = thread::spawn(
                 move || -> Result<(ParseStats, RunScans), Box<dyn std::error::Error + Send + Sync>> {
                     if file_is_mzml {
@@ -1629,7 +1633,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         .with_ms_level_range(ms_level_u32, ms_level_u32)
                         .with_run_ms1_capture(capture_ms1)
                         .with_product_scan_capture(capture_ms3)
-                        .with_scan_context_capture(capture_context);
+                        .with_scan_context_capture(capture_context)
+                        .with_noise_capture(capture_noise);
                         let mut stats =
                             send_chunks(reader.by_ref(), CHUNK_SIZE, remaining_cap, tx);
                         add_mzml_skipped(&mut stats, &reader);
@@ -1647,7 +1652,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                                 .with_ms_level(Some(2))
                                 .with_run_ms1_capture(capture_ms1)
                                 .with_product_scan_capture(capture_ms3)
-                                .with_scan_context_capture(capture_context);
+                                .with_scan_context_capture(capture_context)
+                                .with_noise_capture(capture_noise);
                             let stats =
                                 send_chunks(reader.by_ref(), CHUNK_SIZE, remaining_cap, tx);
                             let scans = RunScans {

@@ -377,7 +377,19 @@ pub(crate) fn build_selection_key(
                 );
                 ("CID", "LowRes", true)
             }
-            ("HCD", "TOF") => ("CID", "TOF", true),
+            // TOF fragments are measured at high resolution, and CID on a
+            // (tims)TOF is beam-type collisional dissociation (b/y, like HCD).
+            // No TOF model is bundled; routing by activation alone picked the
+            // low-res CID model and its 0.5-Da tolerance. The high-res HCD
+            // models keep the resolution class, and their protocol variants
+            // (TMT, phospho, iTRAQ) still apply.
+            ("HCD", "TOF") | ("CID", "TOF") => {
+                eprintln!(
+                    "Note: no TOF model is bundled; routing {act_str} on TOF to the high-res \
+                     HCD models (b/y, high-res fragment matching). Pass --model to override."
+                );
+                ("HCD", "QExactive", false)
+            }
             ("CID", "QExactive") => ("CID", "LowRes", true),
             ("ETD", i) if !matches!(i, "LowRes" | "HighRes") => ("ETD", "LowRes", true),
             ("UVPD", i) if i != "QExactive" => ("CID", "LowRes", true),

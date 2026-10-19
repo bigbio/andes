@@ -1076,16 +1076,18 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // ── Resolved-parameter banner (reanalysis auditability) ───────────────────
     // One consolidated record of every resolved search parameter, so a
     // (zero-config) run is fully reproducible/auditable from its log. Values that
-    // were auto-detected from the data/store are tagged [detected].
+    // were auto-detected from the data/store are tagged [detected]; the
+    // activation and instrument are the selected model's, which differ from
+    // the detected ones when the nearest model was substituted (see the WARN).
     eprintln!("──────── andes resolved parameters ────────");
     eprintln!("  spectra        : {}", spectrum_path.display());
     eprintln!("  model          : (see 'Param model:' line above) [detected]");
     eprintln!(
-        "  activation     : {:?} [detected]",
+        "  activation     : {:?} [model]",
         param.data_type.activation
     );
     eprintln!(
-        "  instrument     : {:?} [detected]",
+        "  instrument     : {:?} [model]",
         param.data_type.instrument
     );
     eprintln!("  protocol       : {:?}", param.data_type.protocol);

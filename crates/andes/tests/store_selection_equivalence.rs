@@ -85,6 +85,12 @@ fn resolve_model_id_old(
         Instrument::Tof => "TOF",
         Instrument::QExactive => "QExactive",
     };
+    // Collisional fragmentation on TOF is high-res b/y: routed to the high-res
+    // HCD models, protocol kept. Mirrored in build_selection_key.
+    let (frag, inst) = match (frag, inst) {
+        ("CID", "TOF") | ("HCD", "TOF") => ("HCD", "QExactive"),
+        other => other,
+    };
     // H5: low-res (ion-trap) HCD is NOT routed to the high-res model. With no
     // hcd_lowres model bundled, frag="HCD"/inst="LowRes" finds no exact match
     // and falls through to the cid_lowres_tryp final-fallback below — the
@@ -124,8 +130,8 @@ fn resolve_model_id_old(
     // (the v1 case) falls straight through to the global default rather than to
     // `cid_lowres_tryp`. Encode that here so the reference tracks the binary.
     let final_fallback: Option<&str> = match (frag, inst) {
-        // TOF/HighRes HCD maps to cid_tof_tryp.
-        ("HCD", "TOF") | ("HCD", "HighRes") => Some("cid_tof_tryp"),
+        // HighRes HCD maps to cid_tof_tryp (not bundled → global default).
+        ("HCD", "HighRes") => Some("cid_tof_tryp"),
         // The binary only rewrites ETD when the instrument is neither LowRes nor
         // HighRes (`("ETD", i) if !matches!(i, "LowRes" | "HighRes")`); for those
         // two it keeps the instrument verbatim, so ETD/LowRes & ETD/HighRes are
@@ -269,10 +275,8 @@ fn normalize_activation_instrument(act: &str, inst: &str) -> (String, String, bo
         // low-res b/y model (cid_lowres_tryp). Protocol dropped (final-fallback
         // base model). Mirrored in build_selection_key.
         ("HCD", "LowRes") => ("CID".into(), "LowRes".into(), true),
-        // HCD + TOF → CID + TOF (no hcd_tof model bundled; final fallback
-        // maps (HCD, TOF|HighRes) → cid_tof_tryp).
-        // Protocol dropped: final fallback returns base model only.
-        ("HCD", "TOF") => ("CID".into(), "TOF".into(), true),
+        // CID/HCD + TOF → HCD + QExactive: high-res b/y, protocol kept.
+        ("HCD", "TOF") | ("CID", "TOF") => ("HCD".into(), "QExactive".into(), false),
         // CID + QExactive → CID + LowRes (no cid_qexactive model bundled;
         // final fallback default arm → cid_lowres_tryp).
         // Protocol dropped.

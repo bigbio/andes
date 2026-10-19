@@ -737,6 +737,17 @@ pub(crate) struct SearchArgs {
     #[arg(long = "tmt-min-sn", default_value = "0", value_parser = parse_non_negative)]
     pub(crate) tmt_min_sn: f64,
 
+    /// Estimate each MS2 scan's co-isolation interference and write the
+    /// reporter intensities with it removed, as an extra `unmix_` channel
+    /// block and an `interference` column in `tmt.parquet` (the existing
+    /// columns are unchanged). A per-run regression explains each scan's
+    /// summed reporter signal by the precursor's, the co-isolated ions' and
+    /// the sub-threshold ion current in the isolation window of the bordering
+    /// MS1 scans; the interference is removed with the run's mean reporter
+    /// profile. High-resolution MS2 reporters only (`--tmt-level 2`).
+    #[arg(long = "tmt-unmix", default_value_t = false)]
+    pub(crate) tmt_unmix: bool,
+
     /// Label-free MS1 quantification of the confident precursors: isotope
     /// chromatograms are extracted around each identified peptidoform's
     /// retention time and integrated. Writes `<stem>.lfq.parquet` and, with

@@ -2648,6 +2648,13 @@ fn log_claims(source: &str, stats: &input::AnnotationLoadStats) {
             stats.variants_without_knockoff
         );
     }
+    if stats.knockoffs_dropped > 0 {
+        eprintln!(
+            "{source}: {} earlier knockoff entries dropped, within the knockoff distance of a \
+             variant these files list",
+            stats.knockoffs_dropped
+        );
+    }
 }
 
 fn log_uniprot_load(stats: &input::UniProtLoadStats, opts: &input::UniProtOptions) {

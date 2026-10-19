@@ -341,6 +341,8 @@ fn sequon(seq: &[u8], i: usize) -> bool {
 /// span whose length is within 3 of `p`'s and 6..=50, and at least 10 residues
 /// from every position in `listed`. Up to `ko.per_variant` of them, drawn
 /// without replacement by a generator seeded with `seed`.
+pub(crate) const KNOCKOFF_MIN_DISTANCE: usize = 10;
+
 pub(crate) fn knockoff_positions(
     seq: &[u8],
     p: usize,
@@ -366,7 +368,7 @@ pub(crate) fn knockoff_positions(
             seq[q] == o
                 && next_ok(q)
                 && sequon(seq, q) == sequon(seq, p)
-                && listed.iter().all(|&r| r.abs_diff(q) >= 10)
+                && listed.iter().all(|&r| r.abs_diff(q) >= KNOCKOFF_MIN_DISTANCE)
                 && {
                     let (qa, qb) = enzymatic_span(seq, q, ko.enzyme);
                     qa != pa && (qb - qa).abs_diff(pb - pa) <= 3 && (6..=50).contains(&(qb - qa))

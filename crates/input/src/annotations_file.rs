@@ -18,7 +18,7 @@
 //! processing: edits make a variant entry, processing a chain entry, and mods
 //! alone add sites to the reference itself. Unknown columns are ignored.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
@@ -33,7 +33,9 @@ use model::{
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-use crate::annotation::{build_entry, knockoff_annotations, primary_accession, KnockoffOptions};
+use crate::annotation::{
+    build_entry, knockoff_annotations, primary_accession, KnockoffOptions, KNOCKOFF_MIN_DISTANCE,
+};
 
 /// The schema version this reader understands.
 pub const ANNOTATIONS_SCHEMA: &str = "1";
@@ -74,6 +76,9 @@ pub struct AnnotationLoadStats {
     pub merged_into_database: usize,
     /// Single-residue variants for which no position qualified for a knockoff.
     pub variants_without_knockoff: usize,
+    /// Knockoffs of an earlier source (UniProt XML, PEFF) dropped because a
+    /// variant of these files lies within the knockoff distance of them.
+    pub knockoffs_dropped: usize,
     /// Rows left out, by reason.
     pub dropped: BTreeMap<&'static str, usize>,
 }
@@ -266,6 +271,53 @@ pub(crate) fn add_claims(
         p.annotation = Some(Arc::new(info));
     }
 
+    // The family of each reference, as its entries carry it.
+    let family_of = |p: &Protein| -> Arc<str> {
+        p.origin()
+            .map_or_else(|| Arc::from(primary_accession(&p.accession)), |o| o.family.clone())
+    };
+    // Every source's variants must keep knockoffs clear: the positions of the
+    // database's own variant entries (from an earlier source) per family, and
+    // of this file's variants per family.
+    let mut db_variant_positions: HashMap<Arc<str>, Vec<usize>> = HashMap::new();
+    for p in &db.proteins {
+        let Some(o) = p.origin() else { continue };
+        if o.kind != EntryKind::Variant || o.knockoff_of.is_some() {
+            continue;
+        }
+        db_variant_positions
+            .entry(o.family.clone())
+            .or_default()
+            .extend(variant_positions(p));
+    }
+    let mut file_variant_positions: HashMap<Arc<str>, Vec<usize>> = HashMap::new();
+    for (&r, list) in &claims {
+        if list.iter().any(|a| a.kind == EntryKind::Variant) {
+            file_variant_positions
+                .entry(family_of(&db.proteins[r]))
+                .or_default()
+                .extend(listed.get(&r).into_iter().flatten().copied());
+        }
+    }
+    // Knockoffs already in the database (an earlier source's) that fall within
+    // the knockoff distance of a variant this file lists: not surely absent
+    // any more, so they are dropped below.
+    let stale_knockoffs: HashSet<usize> = db
+        .proteins
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| {
+            p.origin().is_some_and(|o| {
+                o.knockoff_of.is_some()
+                    && file_variant_positions.get(&o.family).is_some_and(|near| {
+                        variant_positions(p)
+                            .any(|q| near.iter().any(|&v| v.abs_diff(q) < KNOCKOFF_MIN_DISTANCE))
+                    })
+            })
+        })
+        .map(|(i, _)| i)
+        .collect();
+
     // The database's own alternative entries (not knockoffs), by what they
     // read: a claim equal to one of them joins it.
     let mut existing: HashMap<(Arc<str>, EntryKind, Vec<u8>), usize> = HashMap::new();
@@ -317,11 +369,15 @@ pub(crate) fn add_claims(
             new.into_iter().partition(|a| a.kind == EntryKind::Variant);
         let ko = match knockoffs.filter(|k| k.per_variant > 0) {
             Some(ko) => {
+                let mut clear = listed[&r].clone();
+                if let Some(other) = db_variant_positions.get(&family_of(&reference)) {
+                    clear.extend(other.iter().copied());
+                }
                 let (ko, untested) = knockoff_annotations(
                     &reference.sequence,
                     primary_accession(&reference.accession),
                     &variants,
-                    &listed[&r],
+                    &clear,
                     ko,
                 );
                 stats.variants_without_knockoff += untested;
@@ -342,7 +398,31 @@ pub(crate) fn add_claims(
             }
         }
     }
+    if !stale_knockoffs.is_empty() {
+        stats.knockoffs_dropped += stale_knockoffs.len();
+        let mut i = 0usize;
+        db.proteins.retain(|_| {
+            let keep = !stale_knockoffs.contains(&i);
+            i += 1;
+            keep
+        });
+    }
     Ok(())
+}
+
+/// The positions a variant entry reads differently at: its substitutions and
+/// its variant regions.
+fn variant_positions(p: &Protein) -> impl Iterator<Item = usize> + '_ {
+    let info = p.annotation.as_deref();
+    let subs = info
+        .into_iter()
+        .flat_map(|a| a.substitutions.iter().map(|s| s.position as usize));
+    let regions = info.into_iter().flat_map(|a| {
+        a.variant
+            .iter()
+            .flat_map(|v| v.start as usize..(v.end as usize).max(v.start as usize + 1))
+    });
+    subs.chain(regions)
 }
 
 /// Give the entries at `indices` (an entry and its knockoffs) `tier` and

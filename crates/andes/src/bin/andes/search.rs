@@ -771,15 +771,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // and each chunk's precursors are corrected BEFORE they reach the search.
     let mono_active =
         cli.precursor_mono == PrecursorMonoFlag::Auto && cli.glyco && (is_mzml || is_raw);
-    if cli.precursor_mono == PrecursorMonoFlag::Auto && !mono_active {
+    // `auto` is the default and the correction is glyco-only, so a search
+    // without --glyco is not told about it; a glyco search without MS1 is.
+    if cli.precursor_mono == PrecursorMonoFlag::Auto && cli.glyco && !mono_active {
         eprintln!(
-            "WARN: --precursor-mono auto needs --glyco and an input with MS1 (mzML or Thermo \
-             .raw); the input is {} — precursors are left as recorded.",
-            if !cli.glyco {
-                "searched without --glyco".to_string()
-            } else {
-                spectrum_path.display().to_string()
-            }
+            "WARN: --precursor-mono auto needs an input with MS1 (mzML or Thermo .raw); \
+             {} has none — precursors are left as recorded.",
+            spectrum_path.display()
         );
     }
     let mono_params = MonoParams::default();

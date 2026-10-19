@@ -956,7 +956,7 @@ pub(crate) fn finalize_and_write(
         std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
         let path = dir.join("quantms.feature.parquet");
         let records = feature_records(stored, &summary.features);
-        output::write_feature_parquet(&path, &records)
+        output::write_mbr_feature_parquet(&path, &records)
             .map_err(|e| format!("write {}: {e}", path.display()))?;
         eprintln!(
             "[mbr] wrote {} ({} feature rows with evidence type; below-threshold transfers and identified rows are in the mbr.tsv only)",

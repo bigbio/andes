@@ -684,6 +684,17 @@ fn build_batch(records: &[FeatureRecord], mbr: bool) -> std::io::Result<RecordBa
 /// Write `records` to `path` as a QPX feature file with the schema metadata
 /// QPX readers key on (`file_type = feature_file`).
 pub fn write_feature_parquet(path: &Path, records: &[FeatureRecord]) -> std::io::Result<()> {
+    write_features(path, records, has_mbr(records))
+}
+
+/// [`write_feature_parquet`] with the match-between-runs columns whatever the
+/// records hold, so a finalize with no rows still writes the schema its
+/// readers select from.
+pub fn write_mbr_feature_parquet(path: &Path, records: &[FeatureRecord]) -> std::io::Result<()> {
+    write_features(path, records, true)
+}
+
+fn write_features(path: &Path, records: &[FeatureRecord], mbr: bool) -> std::io::Result<()> {
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let mut meta = std::collections::HashMap::new();
     meta.insert("qpx_version".to_string(), FEATURE_QPX_VERSION.to_string());
@@ -698,7 +709,6 @@ pub fn write_feature_parquet(path: &Path, records: &[FeatureRecord]) -> std::io:
         "identity_composite".to_string(),
         FEATURE_IDENTITY_COMPOSITE.to_string(),
     );
-    let mbr = has_mbr(records);
     let fields = if mbr {
         feature_schema_mbr()
     } else {
@@ -920,6 +930,17 @@ mod tests {
         let file = std::fs::File::open(&p).unwrap();
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
         assert_eq!(builder.schema().fields().len(), 33);
+        // An empty MBR table keeps the MBR columns.
+        write_mbr_feature_parquet(&p, &[]).unwrap();
+        let file = std::fs::File::open(&p).unwrap();
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        let names: Vec<&str> = builder
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect();
+        assert!(names.contains(&"evidence_type") && names.contains(&"quantity_se"));
     }
 
     #[test]

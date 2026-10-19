@@ -80,4 +80,6 @@ pub mod ms2_table;
 
 pub mod feature_parquet;
 pub mod mbr_out;
-pub use feature_parquet::{write_feature_parquet, FeatureRecord, ProteinPosition};
+pub use feature_parquet::{
+    write_feature_parquet, write_mbr_feature_parquet, FeatureRecord, ProteinPosition,
+};

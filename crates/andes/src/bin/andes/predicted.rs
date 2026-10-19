@@ -344,6 +344,15 @@ impl Predictors {
             }
             let n_miss = miss.iter().filter(|m| **m).count();
             report.push(format!("{} missing rows {n_miss} of {n}", pred.prefix()));
+            if n > 0 && n_miss * 5 > n {
+                eprintln!(
+                    "WARN: --predict: {} could not score {n_miss} of {n} PIN rows ({:.0}%); \
+                     a modification the model does not encode (for AlphaPeptDeep: one missing \
+                     from peptdeep_mods.json) or missing retention times are the usual causes",
+                    pred.prefix(),
+                    100.0 * n_miss as f64 / n as f64
+                );
+            }
             let flags: Vec<f64> = miss.iter().map(|&m| f64::from(u8::from(m))).collect();
             // A missing row takes the column median over the predictor's scored rows.
             for col in &mut cols {

@@ -32,7 +32,11 @@ struct PinData {
     peptides: Vec<String>,
     proteins: Vec<String>,
     is_decoy: Vec<bool>,
-    scans: Vec<u32>,
+    /// The spectrum of each row, densely numbered: the rows of one spectrum
+    /// (its ranks and co-isolated peptides) share a fold and a GBDT group.
+    spectra: Vec<u32>,
+    /// Hash of each row's spectrum key, for the fold assignment.
+    spectrum_hashes: Vec<u64>,
     /// row-major, `n_rows × n_features`
     x: Vec<f32>,
     n_features: usize,
@@ -65,10 +69,12 @@ fn parse_pin(text: &str) -> Result<PinData, String> {
         peptides: Vec::new(),
         proteins: Vec::new(),
         is_decoy: Vec::new(),
-        scans: Vec::new(),
+        spectra: Vec::new(),
+        spectrum_hashes: Vec::new(),
         x: Vec::new(),
         n_features,
     };
+    let mut spectrum_ids: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     for (lineno, line) in lines.enumerate() {
         if line.is_empty() {
             continue;
@@ -101,8 +107,8 @@ fn parse_pin(text: &str) -> Result<PinData, String> {
             })?;
         d.is_decoy.push(label < 0);
         d.spec_ids.push(f[id_i].to_string());
-        // ScanNr drives the CV fold assignment — a bad value would silently
-        // mis-fold the spectrum, so fail loud instead of defaulting to 0.
+        // ScanNr is part of the spectrum key the CV folds use; a bad value would
+        // silently mis-fold the spectrum, so fail loud instead of defaulting.
         let scan_raw = f[scan_i].trim();
         let scan: u32 = scan_raw.parse().map_err(|_| {
             format!(
@@ -110,7 +116,11 @@ fn parse_pin(text: &str) -> Result<PinData, String> {
                 lineno + 2
             )
         })?;
-        d.scans.push(scan);
+        let key = spectrum_key(f[id_i], scan);
+        d.spectrum_hashes.push(fnv1a(key));
+        let next = spectrum_ids.len() as u32;
+        d.spectra
+            .push(*spectrum_ids.entry(key.to_string()).or_insert(next));
         d.peptides.push(f[pep_i].to_string());
         d.proteins
             .push(f.get(pep_i + 1..).map(|s| s.join(";")).unwrap_or_default());
@@ -134,9 +144,25 @@ fn parse_pin(text: &str) -> Result<PinData, String> {
     Ok(d)
 }
 
-/// Deterministic fold assignment by spectrum (splitmix64 of ScanNr).
-fn fold_of(scan: u32, seed: u64) -> usize {
-    let mut z = (seed ^ (scan as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))
+/// A row's spectrum: its SpecId (`{title}_{scan}_{rank}`, multi-row scans add
+/// `_{row}`) up to the last `_{scan}_`. The title, not ScanNr, identifies the
+/// spectrum: ScanNr is 0 when a native id carries no scan number, and repeats
+/// across the files of one search.
+fn spectrum_key(spec_id: &str, scan: u32) -> &str {
+    spec_id
+        .rfind(&format!("_{scan}_"))
+        .map_or(spec_id, |i| &spec_id[..i])
+}
+
+fn fnv1a(s: &str) -> u64 {
+    s.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// Deterministic fold assignment by spectrum (splitmix64 of its key hash).
+fn fold_of(spectrum: u64, seed: u64) -> usize {
+    let mut z = (seed ^ spectrum.wrapping_mul(0x9e37_79b9_7f4a_7c15))
         .wrapping_add(0x9e37_79b9_7f4a_7c15);
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
@@ -148,7 +174,11 @@ fn fold_of(scan: u32, seed: u64) -> usize {
 fn cv_scores(d: &PinData, seed: u64) -> Vec<f32> {
     let n = d.is_decoy.len();
     let nf = d.n_features;
-    let folds: Vec<usize> = d.scans.iter().map(|&s| fold_of(s, seed)).collect();
+    let folds: Vec<usize> = d
+        .spectrum_hashes
+        .iter()
+        .map(|&h| fold_of(h, seed))
+        .collect();
     let mut out = vec![0.0f32; n];
     let params = TrainParams::default();
     for fold in 0..N_FOLDS {
@@ -161,7 +191,7 @@ fn cv_scores(d: &PinData, seed: u64) -> Vec<f32> {
             }
             x.extend_from_slice(&d.x[r * nf..(r + 1) * nf]);
             y.push(if d.is_decoy[r] { 0u8 } else { 1u8 });
-            groups.push(d.scans[r]);
+            groups.push(d.spectra[r]);
         }
         // Degenerate fold (all one class) → leave held-out scores at 0.
         if y.is_empty() || y.iter().all(|&v| v == 0) || y.iter().all(|&v| v == 1) {
@@ -337,6 +367,36 @@ mod tests {
             min_pep < 0.5,
             "best target PEP should be small, got {min_pep}"
         );
+    }
+
+    #[test]
+    fn rows_without_scan_numbers_are_folded_by_spectrum() {
+        // Every ScanNr 0 (native ids without a scan number): the folds must
+        // still split the spectra, or one fold holds everything and nothing
+        // is scored.
+        let pin = synth_pin(600, true)
+            .lines()
+            .enumerate()
+            .map(|(i, l)| {
+                if i == 0 {
+                    return l.to_string();
+                }
+                let mut f: Vec<&str> = l.split('\t').collect();
+                f[2] = "0";
+                f.join("\t")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let map = native_rescore_pin(&pin, 42).unwrap();
+        let confident = map.values().filter(|p| p.q_value <= 0.01).count();
+        assert!(confident > 50, "got {confident}");
+    }
+
+    #[test]
+    fn spectrum_key_drops_scan_rank_and_row() {
+        assert_eq!(spectrum_key("run/index=101_101_1", 101), "run/index=101");
+        assert_eq!(spectrum_key("run/index=101_101_2_1", 101), "run/index=101");
+        assert_eq!(spectrum_key("run/cycle=4 experiment=2_0_1", 0), "run/cycle=4 experiment=2");
     }
 
     #[test]

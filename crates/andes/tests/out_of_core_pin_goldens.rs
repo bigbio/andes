@@ -111,6 +111,12 @@
 //! The E. coli digests above carry both of these changes together (TITLE scan
 //! numbers and the widened charge columns); row counts are unchanged.
 //!
+//! REGENERATED 2026-10-19 (E. coli digests and both slice goldens) when every
+//! SpecId began carrying its input's file stem (`test.mgf/...`), and the charge
+//! columns went back to the `--charge` range with a 6+ precursor setting
+//! `charge5`, so separately searched runs share one PIN header. Same row counts;
+//! the slice goldens differ only by the SpecId prefix.
+//!
 //! REGENERATED 2026-10-14 for the `--chimeric` slice when Pass 2 began reporting
 //! co-isolated envelopes at their monoisotopic peak, ranking secondaries over
 //! distinct peptidoforms and filling their features on the primaries' scales.
@@ -352,14 +358,14 @@ fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
 /// One E. coli case: (rows, `identity_digest` FNV-1a 64, calibration outcome line).
 type Golden = (usize, u64, Option<&'static str>);
 
-const ECOLI_DEFAULT_MODS: Golden = (75_638, 0x66b7_f8de_8b7f_c383, None);
-const ECOLI_FIXED_MODS_ONLY: Golden = (77_975, 0xed8e_5650_c625_8062, None);
-const ECOLI_ONE_VARIABLE_MOD: Golden = (76_087, 0xcab6_cc41_7832_fee6, None);
+const ECOLI_DEFAULT_MODS: Golden = (75_638, 0x821b_19ee_d188_9222, None);
+const ECOLI_FIXED_MODS_ONLY: Golden = (77_975, 0x1957_b4a8_932b_b81d, None);
+const ECOLI_ONE_VARIABLE_MOD: Golden = (76_087, 0xb5bd_eb5a_a093_4305, None);
 /// The pre-pass scores but the sample is too small to calibrate, so the PIN
 /// equals the calibration-off one.
 const ECOLI_PRECURSOR_CAL_AUTO: Golden = (
     75_638,
-    0x66b7_f8de_8b7f_c383,
+    0x821b_19ee_d188_9222,
     Some("Precursor mass calibration skipped (insufficient confident PSMs: 492 with PSMs, 55 below RawScore floor, 0 failed |residual|>50ppm"),
 );
 

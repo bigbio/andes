@@ -337,6 +337,7 @@ fn acceptance_gate_same_model_is_accepted() {
         loss_class: 0,
         annotated_site_mass: None,
         blocks_cleavage: false,
+        diagnostic_ions: Vec::new(),
     };
     let ox = Modification {
         name: "Oxidation".into(),
@@ -349,6 +350,7 @@ fn acceptance_gate_same_model_is_accepted() {
         loss_class: 0,
         annotated_site_mass: None,
         blocks_cleavage: false,
+        diagnostic_ions: Vec::new(),
     };
     let aa = AminoAcidSetBuilder::new_standard()
         .add_fixed_mod(cam)
@@ -518,12 +520,21 @@ fn attach_to_model_keeps_existing_model_content() {
     )
     .unwrap();
     commit_update(&path, "m", &cand, &srcs).unwrap();
-    commit_update(&path, "other", &other, &[(make_ledger("o"), make_stats_s1())]).unwrap();
+    commit_update(
+        &path,
+        "other",
+        &other,
+        &[(make_ledger("o"), make_stats_s1())],
+    )
+    .unwrap();
     let before = ModelStore::open(&path).unwrap().load_param("m").unwrap();
 
     // A distinguishable replacement rich-ion model that still satisfies the
     // rich-ion feature contract: the stored one with its last tree dropped.
-    let stored = param.rich_ion_model.as_deref().expect("bundled rich-ion model");
+    let stored = param
+        .rich_ion_model
+        .as_deref()
+        .expect("bundled rich-ion model");
     assert!(stored.trees.len() > 1);
     let replacement = std::sync::Arc::new(scoring_crate::gbdt_eval::GbdtPeakModel {
         n_features: stored.n_features,

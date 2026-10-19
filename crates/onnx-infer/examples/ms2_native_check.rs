@@ -27,7 +27,11 @@ fn main() {
     let text = std::fs::read_to_string(get("--reference").expect("--reference")).unwrap();
     let mut lines = text.lines();
     let h: Vec<&str> = lines.next().unwrap().split('\t').collect();
-    let col = |n: &str| h.iter().position(|x| *x == n).unwrap_or_else(|| panic!("column {n}"));
+    let col = |n: &str| {
+        h.iter()
+            .position(|x| *x == n)
+            .unwrap_or_else(|| panic!("column {n}"))
+    };
     let (cf, cp, cz, cn, ca, ci, cv, cr) = (
         col("format"),
         col("peptide"),
@@ -38,7 +42,11 @@ fn main() {
         col("values"),
         col("raw"),
     );
-    let parse = |s: &str| s.split(',').map(|x| x.parse::<f32>().unwrap()).collect::<Vec<_>>();
+    let parse = |s: &str| {
+        s.split(',')
+            .map(|x| x.parse::<f32>().unwrap())
+            .collect::<Vec<_>>()
+    };
     let mut items = Vec::new();
     let (mut abs_err, mut rel_err, mut n, mut n_unsup) = (0f32, 0f32, 0usize, 0usize);
     let mut s = Ms2Scratch::default();
@@ -54,7 +62,9 @@ fn main() {
         match got {
             Some(got) => {
                 assert!(x[cv] != "NA", "rust encodes {} but torch did not", x[cp]);
-                let raw = model.predict_raw_with(p.as_ref().unwrap(), &c, &mut s).unwrap();
+                let raw = model
+                    .predict_raw_with(p.as_ref().unwrap(), &c, &mut s)
+                    .unwrap();
                 let (want, want_raw) = (parse(x[cv]), parse(x[cr]));
                 assert_eq!(got.len(), want.len(), "{}: output length", x[cp]);
                 for (g, w) in got.iter().zip(&want).chain(raw.iter().zip(&want_raw)) {
@@ -72,7 +82,8 @@ fn main() {
     }
     println!("PARITY n={n} unsupported(both)={n_unsup} max|rust - torch| = {abs_err:.3e} (relative {rel_err:.3e})");
 
-    let mean_len = items.iter().map(|(p, _)| p.sequence.len()).sum::<usize>() as f64 / items.len() as f64;
+    let mean_len =
+        items.iter().map(|(p, _)| p.sequence.len()).sum::<usize>() as f64 / items.len() as f64;
     let t = Instant::now();
     let mut acc = 0.0f32;
     for _ in 0..repeat {
@@ -81,7 +92,10 @@ fn main() {
         }
     }
     let per = t.elapsed().as_secs_f64() / (repeat * items.len()) as f64;
-    println!("SPEED 1 thread: {:.1} us/peptide (mean length {mean_len:.1}) [{acc:.1}]", per * 1e6);
+    println!(
+        "SPEED 1 thread: {:.1} us/peptide (mean length {mean_len:.1}) [{acc:.1}]",
+        per * 1e6
+    );
 
     let t = Instant::now();
     std::thread::scope(|sc| {

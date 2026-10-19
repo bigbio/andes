@@ -1704,7 +1704,11 @@ mod tests {
         let mut obs = Vec::new();
         for p in 0..200u32 {
             let t = 600.0 + 3000.0 * rng.uniform();
-            let (runs, shift) = if p < 100 { (0..2u16, 0.0) } else { (2..4u16, 120.0) };
+            let (runs, shift) = if p < 100 {
+                (0..2u16, 0.0)
+            } else {
+                (2..4u16, 120.0)
+            };
             for r in runs {
                 obs.push(Observation {
                     precursor: p,
@@ -1759,7 +1763,11 @@ mod tests {
         let mut obs = Vec::new();
         for p in 0..1200u32 {
             let t = 600.0 + 3000.0 * rng.uniform();
-            let (runs, shift) = if p < 600 { (0..2u16, 0.0) } else { (2..4u16, 120.0) };
+            let (runs, shift) = if p < 600 {
+                (0..2u16, 0.0)
+            } else {
+                (2..4u16, 120.0)
+            };
             for r in runs {
                 obs.push(Observation {
                     precursor: p,

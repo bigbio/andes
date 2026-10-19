@@ -269,8 +269,10 @@ mod isotope_penalty_tests {
     #[test]
     fn the_monoisotopic_hypothesis_wins_a_near_tie() {
         let k = GLYCO_GP_K_DEFAULT;
-        let truth = glyco_gp_fused_score_iso(40.0, 12.00, 3.0, 0.0, k, 0.0, 0.0, 0, GLYCO_GP_ISO_DEFAULT);
-        let swap = glyco_gp_fused_score_iso(40.0, 12.02, 3.0, 0.0, k, 0.0, 0.0, 1, GLYCO_GP_ISO_DEFAULT);
+        let truth =
+            glyco_gp_fused_score_iso(40.0, 12.00, 3.0, 0.0, k, 0.0, 0.0, 0, GLYCO_GP_ISO_DEFAULT);
+        let swap =
+            glyco_gp_fused_score_iso(40.0, 12.02, 3.0, 0.0, k, 0.0, 0.0, 1, GLYCO_GP_ISO_DEFAULT);
         assert!(
             truth > swap,
             "the M+1 candidate still wins a 0.2-point ladder edge: truth {truth}, swap {swap}"
@@ -283,8 +285,10 @@ mod isotope_penalty_tests {
     #[test]
     fn real_evidence_still_beats_the_penalty() {
         let (k, j) = (GLYCO_GP_K_DEFAULT, GLYCO_GP_J_DEFAULT);
-        let weak_mono = glyco_gp_fused_score_iso(40.0, 12.0, 2.0, 0.0, k, j, 0.0, 0, GLYCO_GP_ISO_DEFAULT);
-        let strong_m1 = glyco_gp_fused_score_iso(40.0, 12.0, 3.0, 0.0, k, j, 0.0, 1, GLYCO_GP_ISO_DEFAULT);
+        let weak_mono =
+            glyco_gp_fused_score_iso(40.0, 12.0, 2.0, 0.0, k, j, 0.0, 0, GLYCO_GP_ISO_DEFAULT);
+        let strong_m1 =
+            glyco_gp_fused_score_iso(40.0, 12.0, 3.0, 0.0, k, j, 0.0, 1, GLYCO_GP_ISO_DEFAULT);
         assert!(
             strong_m1 > weak_mono,
             "an extra core-Y hit must outweigh one isotope step"
@@ -312,9 +316,12 @@ mod isotope_penalty_tests {
     #[test]
     fn the_penalty_scales_with_the_offset() {
         let k = GLYCO_GP_K_DEFAULT;
-        let one = glyco_gp_fused_score_iso(40.0, 12.0, 3.0, 0.0, k, 0.0, 0.0, 1, GLYCO_GP_ISO_DEFAULT);
-        let two = glyco_gp_fused_score_iso(40.0, 12.0, 3.0, 0.0, k, 0.0, 0.0, 2, GLYCO_GP_ISO_DEFAULT);
-        let neg = glyco_gp_fused_score_iso(40.0, 12.0, 3.0, 0.0, k, 0.0, 0.0, -1, GLYCO_GP_ISO_DEFAULT);
+        let one =
+            glyco_gp_fused_score_iso(40.0, 12.0, 3.0, 0.0, k, 0.0, 0.0, 1, GLYCO_GP_ISO_DEFAULT);
+        let two =
+            glyco_gp_fused_score_iso(40.0, 12.0, 3.0, 0.0, k, 0.0, 0.0, 2, GLYCO_GP_ISO_DEFAULT);
+        let neg =
+            glyco_gp_fused_score_iso(40.0, 12.0, 3.0, 0.0, k, 0.0, 0.0, -1, GLYCO_GP_ISO_DEFAULT);
         assert!(one > two, "M+2 must cost more than M+1");
         assert_eq!(one, neg, "a -1 offset is the same size of correction as +1");
     }

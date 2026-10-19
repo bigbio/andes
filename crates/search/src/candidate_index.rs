@@ -375,7 +375,9 @@ impl MmapCandidateIndex {
         if byte_len < INDEX_HEADER_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("index size {byte_len} is smaller than the {INDEX_HEADER_SIZE}-byte header"),
+                format!(
+                    "index size {byte_len} is smaller than the {INDEX_HEADER_SIZE}-byte header"
+                ),
             ));
         }
         if &mmap[..INDEX_MAGIC.len()] != INDEX_MAGIC {
@@ -814,6 +816,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         let aa_set = AminoAcidSetBuilder::new_standard()
             .add_variable_mod(ox_m)

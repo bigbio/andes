@@ -364,6 +364,7 @@ pub(crate) fn search_secondary(
                 isotope_offset: 0,
                 // Set to co.mono_mz once the winner is chosen (end of fn).
                 precursor_mz_override: None,
+                site_evidence: None,
             };
             distinct
                 .entry((mkey, cand.is_decoy))
@@ -939,7 +940,10 @@ pub(crate) mod tests {
             .iter()
             .filter(|c| !c.is_decoy && c.peptide.residues == planted.residues)
             .count();
-        assert!(occurrences >= 2, "fixture must hold the winner twice, got {occurrences}");
+        assert!(
+            occurrences >= 2,
+            "fixture must hold the winner twice, got {occurrences}"
+        );
 
         let primary = peptide(b"WVTFISLLR", b'K', b'K');
         let (spec, co) = planted_secondary_spectrum(&planted, &primary);

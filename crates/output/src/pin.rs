@@ -114,6 +114,36 @@ pub fn format_spec_id(
     }
 }
 
+/// The `SpecId` of every row the PIN writes for one spectrum, with the row's
+/// isotope offset and site evidence. Rows are emitted as [`write_pin`] emits
+/// them (isomers collapsed, ranked by score).
+pub fn emitted_row_evidence(
+    spec: &Spectrum,
+    queue: &TopNQueue,
+    candidates: &[Candidate],
+) -> Vec<(String, i8, Option<Box<search::site_evidence::SiteEvidence>>)> {
+    let psms = queue.clone().into_rank_sorted_vec();
+    let ranked = emitted_rows(spec, &psms, candidates);
+    let multi_row = ranked.len() > 1;
+    let scan = spec.scan.unwrap_or(0);
+    let title = if spec.title.is_empty() {
+        format!("scan={scan}")
+    } else {
+        spec.title.clone()
+    };
+    ranked
+        .into_iter()
+        .enumerate()
+        .map(|(row_idx, (rank, psm))| {
+            (
+                format_spec_id(&title, scan, rank, row_idx, multi_row),
+                psm.isotope_offset,
+                psm.site_evidence.clone(),
+            )
+        })
+        .collect()
+}
+
 // ── shared per-PSM feature vector ──────────────────────────────────────────────
 
 /// How a feature value is rendered (PIN bytes + QPX `value_type`).
@@ -1043,6 +1073,7 @@ mod tests {
                         loss_class: 0,
                         annotated_site_mass: None,
                         blocks_cleavage: false,
+                        diagnostic_ions: Vec::new(),
                     }));
                     aa.mod_ = Some(m);
                 }
@@ -1104,6 +1135,7 @@ mod tests {
             features: search::psm::PsmFeatures::default(),
             isotope_offset: 0,
             precursor_mz_override: None,
+            site_evidence: None,
         }
     }
 

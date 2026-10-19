@@ -15,12 +15,12 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::OnceLock;
 
-use onnx_infer::peptdeep::{PeptDeepPeptide, pack_ms2_batch, pack_rt_batch};
 use onnx_infer::deeplc::{self, DeepLcPeptide};
 use onnx_infer::ms2_native::{Ms2Conditions, Ms2Model, Ms2Scratch, N_BASE_ION, N_ION};
-use onnx_infer::rt_native::{self, RtPeptide};
+use onnx_infer::peptdeep::{pack_ms2_batch, pack_rt_batch, PeptDeepPeptide};
 use onnx_infer::prosit::{self, PrositPeptide, ResidueState};
-use onnx_infer::{BackendKind, BackendOptions, OnnxSession, ms2pip};
+use onnx_infer::rt_native::{self, RtPeptide};
+use onnx_infer::{ms2pip, BackendKind, BackendOptions, OnnxSession};
 use serde::Deserialize;
 
 pub const PROTON: f64 = 1.007_276_466_8;
@@ -108,14 +108,18 @@ impl Mod {
 
     /// Unimod accession.
     pub fn unimod(self) -> u32 {
-        MODS.iter().find(|m| m.0 == self).expect("every Mod is in MODS").1
+        MODS.iter()
+            .find(|m| m.0 == self)
+            .expect("every Mod is in MODS")
+            .1
     }
 
     /// The mod with Unimod accession `id`, if it sits at `site` of `seq` (0 =
     /// N-terminus, 1..=n residue) by its [`Placement`].
     fn at(id: u32, site: usize, seq: &[u8]) -> Option<Self> {
         let &(m, _, residues, placement) = MODS.iter().find(|m| m.1 == id)?;
-        let on_residue = site >= 1 && site <= seq.len() && residues.as_bytes().contains(&seq[site - 1]);
+        let on_residue =
+            site >= 1 && site <= seq.len() && residues.as_bytes().contains(&seq[site - 1]);
         let ok = match placement {
             Placement::Residue => on_residue,
             Placement::NTerm => site == 0,
@@ -176,7 +180,10 @@ pub struct Mass {
 pub fn parse_peptide(s: &str) -> Option<(Form, Mass)> {
     let p = RtPeptide::from_andes(s)?;
     let seq = p.sequence.as_bytes();
-    let mut res = seq.iter().map(|&c| residue_mass(c as char)).collect::<Option<Vec<f64>>>()?;
+    let mut res = seq
+        .iter()
+        .map(|&c| residue_mass(c as char))
+        .collect::<Option<Vec<f64>>>()?;
     let mut nterm = 0.0;
     let mut mods = Vec::with_capacity(p.mods.len());
     for &(site, id) in &p.mods {
@@ -190,7 +197,13 @@ pub fn parse_peptide(s: &str) -> Option<(Form, Mass)> {
         mods.push((site, m));
     }
     mods.sort();
-    Some((Form { seq: p.sequence, mods }, Mass { res, nterm }))
+    Some((
+        Form {
+            seq: p.sequence,
+            mods,
+        },
+        Mass { res, nterm },
+    ))
 }
 
 /// One fragment ion type in a predictor's per-site output: (is b ion, charge).
@@ -274,14 +287,26 @@ impl PeptDeep {
             .instrument_index
             .get(&instrument.to_uppercase())
             .unwrap_or(&meta.unknown_instrument_index);
-        Self { dir: dir.to_path_buf(), meta, nce, instrument, cols }
+        Self {
+            dir: dir.to_path_buf(),
+            meta,
+            nce,
+            instrument,
+            cols,
+        }
     }
 
     fn supported(&self, f: &Form) -> bool {
-        f.mods.iter().all(|(s, m)| self.meta.mods.contains_key(&m.alphabase(*s, f.residue(*s))))
+        f.mods
+            .iter()
+            .all(|(s, m)| self.meta.mods.contains_key(&m.alphabase(*s, f.residue(*s))))
     }
 
-    fn peptides<'f>(&'f self, forms: &[&'f Form], names: &'f [Vec<String>]) -> Vec<PeptDeepPeptide<'f>> {
+    fn peptides<'f>(
+        &'f self,
+        forms: &[&'f Form],
+        names: &'f [Vec<String>],
+    ) -> Vec<PeptDeepPeptide<'f>> {
         forms
             .iter()
             .zip(names)
@@ -300,7 +325,12 @@ impl PeptDeep {
     fn names(forms: &[&Form]) -> Vec<Vec<String>> {
         forms
             .iter()
-            .map(|f| f.mods.iter().map(|(s, m)| m.alphabase(*s, f.residue(*s))).collect())
+            .map(|f| {
+                f.mods
+                    .iter()
+                    .map(|(s, m)| m.alphabase(*s, f.residue(*s)))
+                    .collect()
+            })
             .collect()
     }
 }
@@ -334,7 +364,9 @@ impl Predictor for PeptDeep {
         let names = Self::names(forms);
         let len = forms[0].seq.len();
         let batch = pack_rt_batch(&self.peptides(forms, &names), len, self.meta.mod_dim).unwrap();
-        s[0].run(&batch.as_inputs()).expect("rt run")[0].data.clone()
+        s[0].run(&batch.as_inputs()).expect("rt run")[0]
+            .data
+            .clone()
     }
     fn ms2(&self, s: &mut [OnnxSession], items: &[(&Form, u8)]) -> Vec<Vec<f32>> {
         let len = items[0].0.seq.len();
@@ -440,7 +472,11 @@ impl DeepLc {
         };
         DeepLcPeptide {
             sequence: &f.seq,
-            mods: f.mods.iter().map(|&(s, m)| (site(s, m), m.composition())).collect(),
+            mods: f
+                .mods
+                .iter()
+                .map(|&(s, m)| (site(s, m), m.composition()))
+                .collect(),
         }
     }
 }
@@ -490,16 +526,29 @@ pub struct AndesMs2 {
 impl AndesMs2 {
     /// `path` is the `AMS20001` weight file, or a directory holding `andes_ms2.ams2`.
     pub fn new(path: &Path, nce: Option<f32>, activation: &str, instrument: &str) -> Self {
-        let file = if path.is_dir() { path.join("andes_ms2.ams2") } else { path.to_path_buf() };
-        let model = Ms2Model::load(&file).unwrap_or_else(|e| panic!("load {}: {e}", file.display()));
-        Self { model, nce, activation: activation.into(), instrument: instrument.into() }
+        let file = if path.is_dir() {
+            path.join("andes_ms2.ams2")
+        } else {
+            path.to_path_buf()
+        };
+        let model =
+            Ms2Model::load(&file).unwrap_or_else(|e| panic!("load {}: {e}", file.display()));
+        Self {
+            model,
+            nce,
+            activation: activation.into(),
+            instrument: instrument.into(),
+        }
     }
 
     /// The [`RtPeptide`] the form was parsed from (see [`parse_peptide`]).
     pub fn peptide(f: &Form) -> RtPeptide {
         let mut mods: Vec<(usize, u32)> = f.mods.iter().map(|(s, m)| (*s, m.unimod())).collect();
         mods.sort_unstable();
-        RtPeptide { sequence: f.seq.clone(), mods }
+        RtPeptide {
+            sequence: f.seq.clone(),
+            mods,
+        }
     }
 
     fn conditions(&self, z: u8) -> Ms2Conditions {
@@ -541,7 +590,9 @@ impl Predictor for AndesMs2 {
                     .model
                     .predict_with(&Self::peptide(f), &self.conditions(*z), &mut scratch)
                     .expect("supports_ms2 checked the encoding");
-                full.chunks_exact(N_ION).flat_map(|site| site[..N_BASE_ION].to_vec()).collect()
+                full.chunks_exact(N_ION)
+                    .flat_map(|site| site[..N_BASE_ION].to_vec())
+                    .collect()
             })
             .collect()
     }
@@ -554,7 +605,14 @@ pub struct Prosit {
     pub nce: f32,
 }
 
-const PROSIT_IONS: [Ion; 6] = [(true, 1), (true, 2), (true, 3), (false, 1), (false, 2), (false, 3)];
+const PROSIT_IONS: [Ion; 6] = [
+    (true, 1),
+    (true, 2),
+    (true, 3),
+    (false, 1),
+    (false, 2),
+    (false, 3),
+];
 
 impl Prosit {
     /// `None` when the peptidoform carries anything but CAM-C / oxidised M.
@@ -567,7 +625,10 @@ impl Prosit {
                 _ => return None,
             };
         }
-        let p = PrositPeptide { sequence: &f.seq, states };
+        let p = PrositPeptide {
+            sequence: &f.seq,
+            states,
+        };
         prosit::encode_sequence(p.sequence, &p.states).ok()?;
         Some(p)
     }
@@ -593,15 +654,24 @@ impl Predictor for Prosit {
         0
     }
     fn sessions(&self) -> Vec<OnnxSession> {
-        vec![load(&self.dir, "prosit_irt.json"), load(&self.dir, "prosit_intensity_hcd.json")]
+        vec![
+            load(&self.dir, "prosit_irt.json"),
+            load(&self.dir, "prosit_intensity_hcd.json"),
+        ]
     }
     fn rt(&self, s: &mut [OnnxSession], forms: &[&Form]) -> Vec<f32> {
-        let peps: Vec<PrositPeptide<'_>> = forms.iter().map(|f| Self::peptide(f).unwrap()).collect();
+        let peps: Vec<PrositPeptide<'_>> =
+            forms.iter().map(|f| Self::peptide(f).unwrap()).collect();
         let input = prosit::pack_irt_batch(&peps).unwrap();
-        s[0].run(std::slice::from_ref(&input)).expect("prosit irt")[0].data.clone()
+        s[0].run(std::slice::from_ref(&input)).expect("prosit irt")[0]
+            .data
+            .clone()
     }
     fn ms2(&self, s: &mut [OnnxSession], items: &[(&Form, u8)]) -> Vec<Vec<f32>> {
-        let peps: Vec<PrositPeptide<'_>> = items.iter().map(|(f, _)| Self::peptide(f).unwrap()).collect();
+        let peps: Vec<PrositPeptide<'_>> = items
+            .iter()
+            .map(|(f, _)| Self::peptide(f).unwrap())
+            .collect();
         let charges: Vec<u8> = items.iter().map(|(_, z)| *z).collect();
         let inputs = prosit::pack_intensity_batch(&peps, &charges, self.nce).unwrap();
         let out = &s[1].run(&inputs).expect("prosit intensity")[0];
@@ -639,10 +709,16 @@ mod tests {
     #[test]
     fn places_tmt_and_phospho() {
         let (f, m) = parse_peptide("K.K+229.16293+229.16293PEPTK+229.16293.D").unwrap();
-        assert_eq!(f.mods, vec![(0, Mod::Tmt6plex), (1, Mod::Tmt6plex), (6, Mod::Tmt6plex)]);
+        assert_eq!(
+            f.mods,
+            vec![(0, Mod::Tmt6plex), (1, Mod::Tmt6plex), (6, Mod::Tmt6plex)]
+        );
         assert!((m.nterm - 229.162932).abs() < 1e-9);
         let (f, _) = parse_peptide("K.A+229.16293PES+79.96633K+229.16293.D").unwrap();
-        assert_eq!(f.mods, vec![(0, Mod::Tmt6plex), (4, Mod::Phospho), (5, Mod::Tmt6plex)]);
+        assert_eq!(
+            f.mods,
+            vec![(0, Mod::Tmt6plex), (4, Mod::Phospho), (5, Mod::Tmt6plex)]
+        );
     }
 
     /// N-terminal mods sit at site 0, as in alphabase and in andes-rt / andes-ms2
@@ -651,7 +727,10 @@ mod tests {
     fn places_n_terminal_mods_at_site_zero() {
         let (f, m) = parse_peptide("K.Q-17.02655PEPTIDEK.D").unwrap();
         assert_eq!(f.mods, vec![(0, Mod::GlnPyroGlu)]);
-        assert_eq!(f.mods[0].1.alphabase(0, f.residue(0)), "Gln->pyro-Glu@Q^Any_N-term");
+        assert_eq!(
+            f.mods[0].1.alphabase(0, f.residue(0)),
+            "Gln->pyro-Glu@Q^Any_N-term"
+        );
         assert!((m.nterm + 17.026549).abs() < 1e-9);
         let (f, _) = parse_peptide("K.E-18.01056AGHY+79.96633LLR.A").unwrap();
         assert_eq!(f.mods, vec![(0, Mod::GluPyroGlu), (5, Mod::Phospho)]);
@@ -676,7 +755,11 @@ mod tests {
             "K.YCC+57.02146QWN+0.98402K.R",
         ] {
             let (f, _) = parse_peptide(s).unwrap();
-            assert_eq!(AndesMs2::peptide(&f), RtPeptide::from_andes(s).unwrap(), "{s}");
+            assert_eq!(
+                AndesMs2::peptide(&f),
+                RtPeptide::from_andes(s).unwrap(),
+                "{s}"
+            );
         }
     }
 

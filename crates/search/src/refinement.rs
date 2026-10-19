@@ -628,6 +628,7 @@ pub fn refinement_aa_set(
                 loss_class: 0,
                 annotated_site_mass: None,
                 blocks_cleavage: false,
+                diagnostic_ions: Vec::new(),
             };
             builder = builder.add_variable_mod(m);
         }
@@ -1148,6 +1149,7 @@ mod tests {
             features: PsmFeatures::default(),
             isotope_offset: 0,
             precursor_mz_override: None,
+            site_evidence: None,
         }
     }
 
@@ -1294,6 +1296,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         });
         let pep = Peptide::new(
             vec![
@@ -1704,6 +1707,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         let base = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
             .add_variable_mod(acetyl)
@@ -1748,6 +1752,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         let base = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
             .add_fixed_mod(tmt_k)
@@ -1786,6 +1791,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         let base = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
             .add_variable_mod(ox_m)
@@ -1823,6 +1829,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         let aa = AminoAcid::standard(residue).unwrap().with_mod(m);
         Peptide::new(vec![aa, AminoAcid::standard(b'G').unwrap()], b'_', b'-')
@@ -1880,6 +1887,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         let mut res = unmod_peptide(b"SAMPLER").residues;
         res[0] = res[0].clone().with_mod(acetyl);
@@ -1980,6 +1988,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         });
         let deam = AminoAcid::standard(b'N').unwrap().with_mod(Modification {
             name: "Deamidation".into(),
@@ -1992,6 +2001,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         });
         let pep = Peptide::new(vec![ox, deam], b'_', b'-');
         let (n, class) = mod_count_and_class(&pep, &cfg);

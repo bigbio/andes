@@ -20,6 +20,7 @@ fn build_set_and_peptide_via_public_api() {
         loss_class: 0,
         annotated_site_mass: None,
         blocks_cleavage: false,
+        diagnostic_ions: Vec::new(),
     };
     let set = AminoAcidSetBuilder::new_standard()
         .add_fixed_mod(cam)

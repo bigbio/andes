@@ -393,6 +393,10 @@ pub struct PsmMatch {
     /// from the secondary's own precursor mass; `None` (every ordinary PSM) falls
     /// back to the spectrum's `precursor_mz`.
     pub precursor_mz_override: Option<f64>,
+    /// Evidence on which modification each residue carries, for rows with a
+    /// variable modification (see [`crate::site_evidence`]). `None` for other
+    /// rows and for rows scored without their spectrum's other candidates.
+    pub site_evidence: Option<Box<crate::site_evidence::SiteEvidence>>,
 }
 
 impl PsmMatch {
@@ -782,6 +786,7 @@ mod tests {
             features: PsmFeatures::default(),
             isotope_offset: 0,
             precursor_mz_override: None,
+            site_evidence: None,
         }
     }
 
@@ -1108,6 +1113,7 @@ mod tests {
             },
             isotope_offset: 0,
             precursor_mz_override: None,
+            site_evidence: None,
         };
         let mut high = low.clone();
         high.candidate_idxs = vec![1];

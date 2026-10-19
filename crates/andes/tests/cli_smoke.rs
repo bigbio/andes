@@ -672,5 +672,8 @@ fn top_n_zero_is_rejected() {
     .expect("run andes");
     assert!(!out.status.success(), "--top-n 0 must be rejected");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("--top-n must be at least 1"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("--top-n must be at least 1"),
+        "stderr: {stderr}"
+    );
 }

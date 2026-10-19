@@ -497,9 +497,10 @@ impl<'a> PreparedSearch<'a> {
             return self.run_chunk_inner(spectra, spectrum_idx_offset, params);
         }
         let mass = crate::fragment_index::index_order_mass;
-        let (lo, hi) = spectra.iter().map(mass).fold((f64::MAX, f64::MIN), |(lo, hi), m| {
-            (lo.min(m), hi.max(m))
-        });
+        let (lo, hi) = spectra
+            .iter()
+            .map(mass)
+            .fold((f64::MAX, f64::MIN), |(lo, hi), m| (lo.min(m), hi.max(m)));
         let span_da = (hi - lo).max(1.0);
         let mut units: Vec<(usize, Spectrum)> = Vec::with_capacity(spectra.len());
         for (i, s) in spectra.iter().enumerate() {
@@ -520,7 +521,11 @@ impl<'a> PreparedSearch<'a> {
         while !units.is_empty() {
             let take = crate::fragment_index::index_chunk_len(&units, |u| mass(&u.1), span_da);
             let (owners, chunk): (Vec<usize>, Vec<Spectrum>) = units.drain(..take).unzip();
-            for (mut q, i) in self.run_chunk_inner(&chunk, 0, params).into_iter().zip(owners) {
+            for (mut q, i) in self
+                .run_chunk_inner(&chunk, 0, params)
+                .into_iter()
+                .zip(owners)
+            {
                 for mut psm in q.drain_into_vec() {
                     psm.spectrum_idx = spectrum_idx_offset + i;
                     merged[i].push(psm);
@@ -1145,6 +1150,7 @@ impl<'a> PreparedSearch<'a> {
                             features,
                             isotope_offset: err.isotope_offset,
                             precursor_mz_override: None,
+                            site_evidence: None,
                         };
                         per_charge_queues
                             .entry(z)
@@ -1313,6 +1319,47 @@ impl<'a> PreparedSearch<'a> {
                         psm.features = make_features(psm, true);
                         debug_assert_eq!(psm.features.strong_score.to_bits(), strong.to_bits());
                         psm.features.strong_score_cal = strong_cal;
+                    });
+                }
+
+                // Site evidence while the peaks are at hand: which modification
+                // each row's residues carry, judged against the spectrum's other rows.
+                {
+                    let psms: Vec<&PsmMatch> = queue.iter_psms().collect();
+                    let rows: Vec<crate::site_evidence::Row<'_>> = psms
+                        .iter()
+                        .map(|psm| {
+                            let cand = &cand_slice[psm.primary_candidate_idx() as usize];
+                            let z = psm.charge_used;
+                            let mz = psm.precursor_mz_override.unwrap_or(spec.precursor_mz);
+                            crate::site_evidence::Row {
+                                peptide: &cand.peptide,
+                                is_decoy: cand.is_decoy,
+                                charge: z,
+                                precursor_mass: (mz - model::mass::PROTON) * z as f64,
+                            }
+                        })
+                        .collect();
+                    let key = |p: &PsmMatch| {
+                        (
+                            p.primary_candidate_idx(),
+                            p.charge_used,
+                            p.rank_score.to_bits(),
+                        )
+                    };
+                    let mut evidence: FxHashMap<_, _> = psms
+                        .iter()
+                        .map(|p| key(p))
+                        .zip(crate::site_evidence::spectrum_evidence(
+                            &spec.peaks,
+                            &rows,
+                            fragment_tolerance_da,
+                        ))
+                        .collect();
+                    drop(rows);
+                    drop(psms);
+                    queue.update_in_place(|psm| {
+                        psm.site_evidence = evidence.remove(&key(psm)).flatten();
                     });
                 }
 
@@ -3456,6 +3503,7 @@ mod dedup_tests {
             features: Default::default(),
             isotope_offset: 0,
             precursor_mz_override: None,
+            site_evidence: None,
         }
     }
 
@@ -3506,6 +3554,7 @@ mod dedup_tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         }));
         let cands = vec![
             cand_with_peptide(seq_peptide(b"PEPMK")),

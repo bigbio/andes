@@ -35,6 +35,7 @@ pub fn aa_set() -> model::AminoAcidSet {
         loss_class: 0,
         annotated_site_mass: None,
         blocks_cleavage: false,
+        diagnostic_ions: Vec::new(),
     };
     let ox = Modification {
         name: "Oxidation".into(),
@@ -47,6 +48,7 @@ pub fn aa_set() -> model::AminoAcidSet {
         loss_class: 0,
         annotated_site_mass: None,
         blocks_cleavage: false,
+        diagnostic_ions: Vec::new(),
     };
     AminoAcidSetBuilder::new_standard()
         .add_fixed_mod(cam)

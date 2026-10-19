@@ -114,6 +114,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         residues[pos - 1] = residues[pos - 1].clone().with_mod(m);
         Peptide::new(residues, b'K', b'R')

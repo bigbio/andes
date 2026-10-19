@@ -398,6 +398,7 @@ mod tests {
             features: search::psm::PsmFeatures::default(),
             isotope_offset: 0,
             precursor_mz_override: None,
+            site_evidence: None,
         }
     }
 
@@ -607,6 +608,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         let m_ox = AminoAcid {
             residue: b'M',
@@ -629,6 +631,7 @@ mod tests {
             features: search::psm::PsmFeatures::default(),
             isotope_offset: 0,
             precursor_mz_override: None,
+            site_evidence: None,
         };
 
         let mut queue = TopNQueue::new(10);
@@ -782,6 +785,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         }
     }
 

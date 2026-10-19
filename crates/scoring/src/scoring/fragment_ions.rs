@@ -433,9 +433,9 @@ fn emit_loss_ions(
             // One ion per distinct (class, loss) on this fragment.
             let same = |&l: &f64| l.to_bits() == loss.to_bits();
             let earlier = losses[..k].iter().any(same)
-                || loss_residues[..j].iter().any(|&(i, c, ls)| {
-                    span.contains(&i) && c == loss_class && ls.iter().any(same)
-                });
+                || loss_residues[..j]
+                    .iter()
+                    .any(|&(i, c, ls)| span.contains(&i) && c == loss_class && ls.iter().any(same));
             if earlier {
                 continue;
             }
@@ -577,6 +577,7 @@ mod tests {
             loss_class,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         let arc = model::modification::leak_mod(m);
         let residues: Vec<AminoAcid> = b"PEPTIDE"
@@ -632,6 +633,7 @@ mod tests {
             loss_class: 2,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         });
         let residues: Vec<AminoAcid> = b"SSAK"
             .iter()

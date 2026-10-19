@@ -305,7 +305,10 @@ pub(crate) struct Tensor {
 
 /// Parse a tensor file: 8-byte `magic`, u32 tensor count, then per tensor u32
 /// name length, UTF-8 name, u32 ndim, u32 dims and little-endian f32 data.
-pub(crate) fn read_tensors(buf: &[u8], magic: &[u8; 8]) -> Result<HashMap<String, Tensor>, RtError> {
+pub(crate) fn read_tensors(
+    buf: &[u8],
+    magic: &[u8; 8],
+) -> Result<HashMap<String, Tensor>, RtError> {
     let bad = |m: &str| RtError::Format(m.to_string());
     if buf.len() < 12 || &buf[..8] != magic {
         return Err(RtError::Format(format!(

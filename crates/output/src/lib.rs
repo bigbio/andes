@@ -21,7 +21,7 @@ pub mod tsv;
 pub use tsv::{write_tsv, write_tsv_to};
 
 pub mod pin;
-pub use pin::{format_spec_id, write_pin, write_pin_to};
+pub use pin::{emitted_row_evidence, format_spec_id, write_pin, write_pin_to};
 
 pub mod stats;
 pub use stats::{write_statistics_log, RunStatistics};
@@ -43,6 +43,7 @@ pub use isobaric_sharing::share_isobaric_references;
 
 pub mod knockoff_fdr;
 pub mod site_fdr;
+pub mod site_identity;
 pub use knockoff_fdr::{apply_knockoff_fdr, KnockoffCount, KnockoffOutcome};
 pub use site_fdr::{site_claims, write_sites_tsv, SiteCount, SiteOutcome, SiteRow};
 

@@ -2284,13 +2284,44 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 line.join(", ")
             );
         }
-        // Site claims: annotated sites against their knockoff sites.
+        // Site claims: annotated sites against their knockoff sites; each
+        // accepted site also gets its occupancy and identity from the
+        // posterior of every row among its spectrum's rows.
+        let has_site_claims = pin_index.iter_target_proteins().any(|p| {
+            p.annotation
+                .as_deref()
+                .is_some_and(|a| !a.site_claims.is_empty())
+        });
+        let posteriors = has_site_claims.then(|| {
+            let rows: std::collections::HashMap<String, output::site_identity::RowEvidence> =
+                queues
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, q)| q.iter_psms().any(|p| p.site_evidence.is_some()))
+                    .flat_map(|(i, q)| {
+                        output::emitted_row_evidence(&spectra[i], q, &pin_candidates)
+                            .into_iter()
+                            .map(move |(id, isotope_offset, evidence)| {
+                                (
+                                    id,
+                                    output::site_identity::RowEvidence {
+                                        spectrum: i as u32,
+                                        isotope_offset,
+                                        evidence,
+                                    },
+                                )
+                            })
+                    })
+                    .collect();
+            output::site_identity::row_posteriors(map, &rescore_decoy_psms, &rows)
+        });
         let sites = output::site_claims(
             map,
             &pin_index,
             fdr_threshold,
             proteoform_fdr,
             &restricted_site_masses,
+            posteriors.as_ref(),
         );
         knockoff_rows.extend(sites.knockoff_rows.iter().cloned());
         if !sites.counts.is_empty() {

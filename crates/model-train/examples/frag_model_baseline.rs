@@ -54,7 +54,11 @@ const MODS: &[(&[u8], f64, &str)] = &[
 /// N-terminal deltas follow the first residue and are folded into it.
 fn parse(s: &str) -> Option<(Vec<u8>, Vec<f64>)> {
     let b = s.as_bytes();
-    let core = if b.len() > 4 && b[1] == b'.' && b[b.len() - 2] == b'.' { &s[2..s.len() - 2] } else { s };
+    let core = if b.len() > 4 && b[1] == b'.' && b[b.len() - 2] == b'.' {
+        &s[2..s.len() - 2]
+    } else {
+        s
+    };
     let c: Vec<char> = core.chars().collect();
     let (mut seq, mut dm) = (Vec::new(), Vec::new());
     let mut i = 0;
@@ -75,7 +79,14 @@ fn parse(s: &str) -> Option<(Vec<u8>, Vec<f64>)> {
                 return None;
             }
             let aa = seq[pos - 1];
-            MODS.iter().find(|(r, m, _)| (d - m).abs() < 2e-3 && if r.is_empty() { pos == 1 } else { r.contains(&aa) })?;
+            MODS.iter().find(|(r, m, _)| {
+                (d - m).abs() < 2e-3
+                    && if r.is_empty() {
+                        pos == 1
+                    } else {
+                        r.contains(&aa)
+                    }
+            })?;
             dm[pos - 1] += d;
         } else {
             return None;
@@ -84,7 +95,11 @@ fn parse(s: &str) -> Option<(Vec<u8>, Vec<f64>)> {
     (!seq.is_empty()).then_some((seq, dm))
 }
 
-fn peptide(seq: &[u8], dm: &[f64], cache: &mut HashMap<(u8, u64), &'static Modification>) -> Option<Peptide> {
+fn peptide(
+    seq: &[u8],
+    dm: &[f64],
+    cache: &mut HashMap<(u8, u64), &'static Modification>,
+) -> Option<Peptide> {
     let mut res = Vec::with_capacity(seq.len());
     for (&r, &d) in seq.iter().zip(dm) {
         let mut aa = AminoAcid::standard(r)?;
@@ -101,6 +116,7 @@ fn peptide(seq: &[u8], dm: &[f64], cache: &mut HashMap<(u8, u64), &'static Modif
                     loss_class: 0,
                     annotated_site_mass: None,
                     blocks_cleavage: false,
+                    diagnostic_ions: Vec::new(),
                 })
             });
             aa = aa.with_mod(m);
@@ -122,20 +138,38 @@ fn pearson(a: &[f64], b: &[f64]) -> f64 {
         saa += (x - ma) * (x - ma);
         sbb += (y - mb) * (y - mb);
     }
-    if saa <= 0.0 || sbb <= 0.0 { 0.0 } else { sab / (saa * sbb).sqrt() }
+    if saa <= 0.0 || sbb <= 0.0 {
+        0.0
+    } else {
+        sab / (saa * sbb).sqrt()
+    }
 }
 
 /// (spectral angle, cosine, Pearson) on sum-normalised vectors; identical to
 /// `rescore_pin.rs::ms2_features` for these three columns.
 fn sim(p: &[f64], o: &[f64]) -> [f64; 3] {
     let (sp, so) = (p.iter().sum::<f64>(), o.iter().sum::<f64>());
-    let pn: Vec<f64> = p.iter().map(|v| if sp > 0.0 { v / sp } else { 0.0 }).collect();
-    let on: Vec<f64> = o.iter().map(|v| if so > 0.0 { v / so } else { 0.0 }).collect();
+    let pn: Vec<f64> = p
+        .iter()
+        .map(|v| if sp > 0.0 { v / sp } else { 0.0 })
+        .collect();
+    let on: Vec<f64> = o
+        .iter()
+        .map(|v| if so > 0.0 { v / so } else { 0.0 })
+        .collect();
     let dot: f64 = pn.iter().zip(&on).map(|(a, b)| a * b).sum();
     let np = pn.iter().map(|v| v * v).sum::<f64>().sqrt();
     let no = on.iter().map(|v| v * v).sum::<f64>().sqrt();
-    let cos = if np > 0.0 && no > 0.0 { (dot / (np * no)).clamp(-1.0, 1.0) } else { 0.0 };
-    let sa = if np > 0.0 && no > 0.0 { 1.0 - 2.0 * cos.acos() / std::f64::consts::PI } else { 0.0 };
+    let cos = if np > 0.0 && no > 0.0 {
+        (dot / (np * no)).clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+    let sa = if np > 0.0 && no > 0.0 {
+        1.0 - 2.0 * cos.acos() / std::f64::consts::PI
+    } else {
+        0.0
+    };
     [sa, cos, pearson(&pn, &on)]
 }
 
@@ -154,20 +188,35 @@ fn main() {
 
     let st = ModelStore::open(&store).expect("open store");
     let param = st.load_param(&model_id).expect("load param");
-    let frag = param.frag_intensity_model.clone().expect("model has no frag-intensity GBDT");
+    let frag = param
+        .frag_intensity_model
+        .clone()
+        .expect("model has no frag-intensity GBDT");
     eprintln!("model {model_id}: frag GBDT {} trees", frag.trees.len());
     let rt_seed = RtIndexModel::seed();
 
     let (spectra, errs) = input::read_spectra_parallel(&mzml, 2, 2, threads).unwrap();
     assert!(errs.is_empty(), "mzML errors");
-    let by_scan: HashMap<i32, usize> =
-        spectra.iter().enumerate().map(|(i, s)| (s.scan.expect("scan"), i)).collect();
+    let by_scan: HashMap<i32, usize> = spectra
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.scan.expect("scan"), i))
+        .collect();
     eprintln!("mzML {} MS2 spectra", spectra.len());
 
     let f = BufReader::new(File::open(&psms).unwrap());
     let mut lines = f.lines();
-    let h: Vec<String> = lines.next().unwrap().unwrap().split('\t').map(String::from).collect();
-    let (ci, cp) = (h.iter().position(|x| x == "SpecId").unwrap(), h.iter().position(|x| x == "peptide").unwrap());
+    let h: Vec<String> = lines
+        .next()
+        .unwrap()
+        .unwrap()
+        .split('\t')
+        .map(String::from)
+        .collect();
+    let (ci, cp) = (
+        h.iter().position(|x| x == "SpecId").unwrap(),
+        h.iter().position(|x| x == "peptide").unwrap(),
+    );
     let mut w = BufWriter::new(File::create(&out).unwrap());
     writeln!(w, "SpecId\tcharge\tobs_rt_min\tn_ions\tgbdt_sa\tgbdt_cos\tgbdt_pearson\tflat_sa\tflat_cos\tflat_pearson\trt_seed_index\trt_features").unwrap();
     let mut cache = HashMap::new();
@@ -212,7 +261,11 @@ fn main() {
             }
             let wd = if ppm { ion.mz * tol * 1e-6 } else { tol };
             let lo = s.peaks.partition_point(|(mz, _)| *mz < ion.mz - wd);
-            let ob = s.peaks[lo..].iter().take_while(|(mz, _)| *mz <= ion.mz + wd).map(|(_, i)| *i as f64).fold(0.0, f64::max);
+            let ob = s.peaks[lo..]
+                .iter()
+                .take_while(|(mz, _)| *mz <= ion.mz + wd)
+                .map(|(_, i)| *i as f64)
+                .fold(0.0, f64::max);
             p.push(pv);
             o.push(ob);
         }
@@ -225,7 +278,12 @@ fn main() {
             w,
             "{id}\t{z}\t{rts:.4}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{}",
             p.len(),
-            g[0], g[1], g[2], fl[0], fl[1], fl[2],
+            g[0],
+            g[1],
+            g[2],
+            fl[0],
+            fl[1],
+            fl[2],
             rt_seed.predict_index(&rf),
             rfs.join(",")
         )

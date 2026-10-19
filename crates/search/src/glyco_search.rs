@@ -300,6 +300,7 @@ fn glyco_aware_peptide(
                 loss_class: 1,
                 annotated_site_mass: None,
                 blocks_cleavage: false,
+                diagnostic_ions: Vec::new(),
             },
         ));
     }
@@ -1967,6 +1968,7 @@ fn score_spectrum_glyco(
             // even when an M+1/M+2 offset produced the winning match).
             isotope_offset: w.isotope_offset,
             precursor_mz_override: None,
+            site_evidence: None,
         };
         // Use the annotated composition's theoretical mass when a known
         // glycan matched; otherwise fall back to the observed residual
@@ -2627,6 +2629,7 @@ mod tests {
             features: PsmFeatures::default(),
             isotope_offset: 0,
             precursor_mz_override: None,
+            site_evidence: None,
         };
         let key = GlycoPsmKey {
             spectrum_idx: 0,

@@ -55,6 +55,10 @@ pub struct Modification {
     /// protein's own terminus. True of most lysine acylations, GlyGly and di-
     /// and trimethylation under trypsin; not of labels added after digestion.
     pub blocks_cleavage: bool,
+    /// Singly charged ions this mod gives off when fragmented (Mods.txt
+    /// `diagnostic=`), such as the immonium ion of the modified residue.
+    /// Evidence for which modification a site carries; not used in scoring.
+    pub diagnostic_ions: Vec<f64>,
 }
 
 impl Modification {
@@ -113,6 +117,8 @@ pub enum ModParseError {
     BadSites { value: String },
     #[error("cleavage must be `blocked` or `kept`, got {value:?}")]
     BadCleavage { value: String },
+    #[error("invalid diagnostic ion {value:?} (expected positive m/z < 5000)")]
+    BadDiagnosticIon { value: String },
     #[error("sites=annotated needs a variable (`opt`) mod; a fixed mod applies everywhere")]
     AnnotatedSitesOnFixedMod,
     #[error("unknown Unimod accession {token:?}")]
@@ -182,6 +188,8 @@ impl Modification {
     /// - `cleavage=<blocked|kept>` — `blocked`: the enzyme does not cut at a
     ///   residue carrying this mod (see [`Modification::blocks_cleavage`]);
     ///   `kept` (default): it does.
+    /// - `diagnostic=<mz1;mz2;…>` — semicolon-separated m/z of singly charged
+    ///   ions the mod gives off (see [`Modification::diagnostic_ions`]).
     ///
     /// **Caveat:** the mod name must not contain a comma. A comma after the name
     /// is parsed as the start of attribute fields; a token there that is not
@@ -291,6 +299,7 @@ impl Modification {
         let mut loss_class: u8 = 0;
         let mut annotated_sites = false;
         let mut blocks_cleavage = false;
+        let mut diagnostic_ions: Vec<f64> = Vec::new();
         for attr in &parts[5..] {
             let attr = attr.trim();
             if attr.is_empty() {
@@ -328,6 +337,19 @@ impl Modification {
                     } else {
                         Some(a.to_string())
                     };
+                }
+                "diagnostic" => {
+                    for tok in value.split(';').map(str::trim).filter(|t| !t.is_empty()) {
+                        let v: f64 = tok.parse().map_err(|_| ModParseError::BadDiagnosticIon {
+                            value: tok.to_string(),
+                        })?;
+                        if !(v > 0.0 && v < 5000.0) {
+                            return Err(ModParseError::BadDiagnosticIon {
+                                value: tok.to_string(),
+                            });
+                        }
+                        diagnostic_ions.push(v);
+                    }
                 }
                 "class" => {
                     loss_class =
@@ -395,6 +417,7 @@ impl Modification {
             loss_class,
             annotated_site_mass: annotated_sites.then_some(mass_delta),
             blocks_cleavage,
+            diagnostic_ions,
         })
     }
 }
@@ -431,6 +454,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         }
     }
 
@@ -461,6 +485,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         // Wildcard matches any residue at the specified location only.
         assert!(m.applies_to(b'A', ModLocation::ProtNTerm));
@@ -483,6 +508,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         assert!(m.applies_to(b'K', ModLocation::Anywhere));
         assert!(!m.applies_to(b'R', ModLocation::Anywhere));
@@ -501,6 +527,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         assert!(m.applies_to(b'A', ModLocation::NTerm));
         assert!(!m.applies_to(b'A', ModLocation::Anywhere));
@@ -801,6 +828,25 @@ xref: spec_1_site "C"
         assert!(matches!(
             Modification::from_mods_txt_line("42.010565,K,opt,any,Acetyl,cleavage=maybe"),
             Err(ModParseError::BadCleavage { .. })
+        ));
+    }
+
+    #[test]
+    fn diagnostic_ions_parse() {
+        let m = Modification::from_mods_txt_line(
+            "42.04695,K,opt,any,Trimethyl,diagnostic=143.1543,loss=59.0735",
+        )
+        .unwrap();
+        assert_eq!(m.diagnostic_ions, vec![143.1543]);
+        assert_eq!(m.neutral_losses, vec![59.0735]);
+        let m = Modification::from_mods_txt_line(
+            "42.010565,K,opt,any,Acetyl,diagnostic=143.1179;126.0913",
+        )
+        .unwrap();
+        assert_eq!(m.diagnostic_ions, vec![143.1179, 126.0913]);
+        assert!(matches!(
+            Modification::from_mods_txt_line("42.010565,K,opt,any,Acetyl,diagnostic=-1"),
+            Err(ModParseError::BadDiagnosticIon { .. })
         ));
     }
 

@@ -216,6 +216,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         let m = AminoAcid::standard(b'M')
             .unwrap()
@@ -237,6 +238,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         let m = AminoAcid::standard(b'M').unwrap().with_mod(oxidation);
         // M (131) + Ox (16) = 147 nominal

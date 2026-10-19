@@ -148,12 +148,15 @@ impl ThermoRawReader {
         self
     }
 
-    /// The centroided peaks of the first `n` scans at MS level `level`, as
-    /// spectra with no precursor. For sampling reporter ions: unlike the
-    /// search path, a scan is kept whether or not it records a precursor m/z
-    /// (SPS-MS3 scans need not).
+    /// The centroided peaks of up to `n` scans at MS level `level`, spread
+    /// over the whole run (the first scans of a gradient carry little
+    /// signal), as spectra with no precursor. For sampling reporter ions:
+    /// unlike the search path, a scan is kept whether or not it records a
+    /// precursor m/z (SPS-MS3 scans need not).
     pub fn sample_level(&self, level: u8, n: usize) -> Vec<Spectrum> {
+        let stride = (self.len / n.max(1) / 4).max(1);
         (0..self.len)
+            .step_by(stride)
             .filter_map(|i| self.handle.get(i))
             .filter(|raw| raw.ms_level() == level)
             .take(n)

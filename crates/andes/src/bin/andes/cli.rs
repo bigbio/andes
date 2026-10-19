@@ -701,7 +701,7 @@ pub(crate) struct SearchArgs {
     /// Isobaric reporter-ion quantification of the confident PSMs with this
     /// labelling kit: tmt6, tmt10, tmt11, tmt16, tmt18, tmt32, tmt35, itraq4 or
     /// itraq8.
-    /// Writes `<stem>.tmt.tsv` and, with `--output-parquet`, the QPX
+    /// Writes `<stem>.tmt.parquet` and, with `--output-parquet`, the QPX
     /// `quantms.feature.parquet`. Combine with `--rescore` so only PSMs at
     /// q <= --fdr are quantified.
     #[arg(long = "tmt", value_name = "PLEX", value_parser = parse_plex)]
@@ -729,31 +729,33 @@ pub(crate) struct SearchArgs {
     #[arg(long = "tmt-correction", value_name = "FILE")]
     pub(crate) tmt_correction: Option<PathBuf>,
 
-    /// Quantification gate: leave PSMs whose precursor isolation purity (share
-    /// of the MS1 isolation window that belongs to the precursor) is below
-    /// this out of `tmt.tsv` and the feature parquet. They stay in the
-    /// identification output. 0 turns the criterion off.
+    /// Quantification gate: PSMs whose precursor isolation purity (share of
+    /// the MS1 isolation window that belongs to the precursor) is below this
+    /// fail the gate: `tmt.parquet` keeps them with `quant_gate_passed` false
+    /// and `quant_weight` 0, and the quantms feature parquet leaves them out.
+    /// 0 turns the criterion off.
     #[arg(long = "tmt-min-purity", default_value = "0.7", value_parser = parse_unit_fraction)]
     pub(crate) tmt_min_purity: f64,
 
-    /// Quantification gate: leave PSMs whose Percolator PEP is above this out
-    /// of `tmt.tsv` and the feature parquet (they stay in the identification
-    /// output). Needs `--rescore` or `--rescore-native`. 1 turns the criterion
-    /// off.
+    /// Quantification gate: PSMs whose Percolator PEP is above this fail the
+    /// gate (kept in `tmt.parquet` with `quant_gate_passed` false, left out of
+    /// the quantms feature parquet). Needs `--rescore` or `--rescore-native`.
+    /// 1 turns the criterion off.
     #[arg(long = "tmt-max-pep", default_value = "0.05", value_parser = parse_unit_fraction)]
     pub(crate) tmt_max_pep: f64,
 
-    /// Quantification gate: leave PSMs whose summed reporter signal-to-noise
-    /// is below this out of `tmt.tsv`. Applies only where the reporter scan
-    /// records noise (Thermo `.raw`, or mzML converted with noise arrays);
-    /// other PSMs are not held to it. 0 turns the criterion off.
+    /// Quantification gate: PSMs whose summed reporter signal-to-noise is
+    /// below this fail the gate (kept in `tmt.parquet` with `quant_weight`
+    /// 0). Applies only where the reporter scan records noise (Thermo `.raw`,
+    /// or mzML converted with noise arrays); other PSMs are not held to it. 0
+    /// turns the criterion off.
     #[arg(long = "tmt-min-sn", default_value = "0", value_parser = parse_non_negative)]
     pub(crate) tmt_min_sn: f64,
 
     /// Label-free MS1 quantification of the confident precursors: isotope
     /// chromatograms are extracted around each identified peptidoform's
-    /// retention time and integrated. Writes `<stem>.lfq.tsv`,
-    /// `<stem>.lfq_features.tsv` and, with `--output-parquet`, the QPX
+    /// retention time and integrated. Writes `<stem>.lfq.parquet` and, with
+    /// `--output-parquet`, the QPX
     /// `quantms.feature.parquet`. mzML and Thermo `.raw` input.
     #[arg(long = "lfq", default_value_t = false)]
     pub(crate) lfq: bool,
@@ -774,13 +776,14 @@ pub(crate) struct SearchArgs {
     pub(crate) lfq_gaussian_width: Option<f64>,
 
     /// Minimum cosine similarity between the observed and theoretical isotope
-    /// envelope for a feature to be reported in `lfq.tsv` (`lfq_features.tsv`
-    /// and the parquet keep it with its cosine). Default 0.7.
+    /// envelope for a feature to be `accepted` in `lfq.parquet` (which keeps
+    /// every feature with its cosine). Default 0.7.
     #[arg(long = "lfq-min-cosine", default_value = "0.7", value_parser = parse_unit_fraction)]
     pub(crate) lfq_min_cosine: f64,
 
-    /// Feature-level FDR for `lfq.tsv`, from a target/decoy competition of each
-    /// feature against a twin extracted 11 Th above it. Default 0.05.
+    /// Feature-level FDR for `accepted` in `lfq.parquet`, from a target/decoy
+    /// competition of each feature against a twin extracted 11 Th above it.
+    /// Default 0.05.
     #[arg(long = "lfq-feature-fdr", default_value = "0.05", value_parser = parse_unit_fraction)]
     pub(crate) lfq_feature_fdr: f64,
 
@@ -797,7 +800,7 @@ pub(crate) struct SearchArgs {
     /// more; needs `--lfq` and `--rescore` or `--rescore-native`). After the
     /// per-run quantification, builds the precursor library, aligns retention
     /// times across runs, measures every library precursor in every run and
-    /// writes `<base>.mbr.tsv` and `<base>.mbr_validation.tsv` (with
+    /// writes `<base>.mbr.parquet` and `<base>.mbr_validation.parquet` (with
     /// `--output-parquet`, `quantms.feature.parquet` holds these rows instead
     /// of the per-run features, without the below-threshold transfers). Uses
     /// `--quant-dir` for the per-run artifacts, or a temporary directory that
@@ -815,7 +818,7 @@ pub(crate) struct SearchArgs {
     pub(crate) mbr_library_fdr: f64,
 
     /// Transfer quality q-value: transfers at or below it are reported as
-    /// `transfer_ms1` in `<base>.mbr.tsv`. An internal quant-quality
+    /// `transfer_ms1` in `<base>.mbr.parquet`. An internal quant-quality
     /// q-value, not an identification FDR. Default 0.05.
     #[arg(long = "mbr-fdr", hide = true, default_value = "0.05", value_parser = parse_unit_fraction)]
     pub(crate) mbr_fdr: f64,
@@ -856,7 +859,8 @@ pub(crate) enum QuantCommand {
     /// `<stem>.extract.parquet`.
     Extract(QuantExtractArgs),
     /// Transfer q-values and the match-between-runs tables from every run's
-    /// extract table. Writes `<base>.mbr.tsv` and `<base>.mbr_validation.tsv`.
+    /// extract table. Writes `<base>.mbr.parquet` and
+    /// `<base>.mbr_validation.parquet`.
     Finalize(QuantFinalizeArgs),
 }
 
@@ -944,7 +948,8 @@ pub(crate) struct QuantFinalizeArgs {
     #[arg(long = "quant-dir", value_name = "DIR")]
     pub(crate) quant_dir: PathBuf,
 
-    /// Output base: writes `<base>.mbr.tsv` and `<base>.mbr_validation.tsv`.
+    /// Output base: writes `<base>.mbr.parquet` and
+    /// `<base>.mbr_validation.parquet`.
     #[arg(short = 'o', long = "output", value_name = "BASE")]
     pub(crate) output: PathBuf,
 

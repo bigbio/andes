@@ -1,12 +1,23 @@
-//! Quantification tables: the flat `tmt.tsv` / `lfq.tsv` files and the record
-//! type the QPX feature parquet is written from.
+//! Quantification tables `<stem>.tmt.parquet` and `<stem>.lfq.parquet`, and
+//! the record types the QPX feature parquet is written from.
 //!
-//! The TSVs keep a stable wide layout so notebooks written for `tmt.tsv` /
-//! `lfq.tsv` keep working: one row per quantified PSM with one column per
-//! channel, and one row per peptidoform-charge with one column per run.
+//! `tmt.parquet` has one row per PSM with reporter ions and one column per
+//! channel; `lfq.parquet` one row per quantified feature per run. Both carry
+//! their schema version in the key-value metadata (`andes.tmt.schema`,
+//! `andes.lfq.schema`; a reader rejects another major). Missing values are
+//! null.
 
-use std::io::{self, BufWriter, Write};
 use std::path::Path;
+use std::sync::Arc;
+
+use arrow::array::{
+    ArrayRef, BooleanBuilder, Float32Builder, Float64Builder, Int32Builder, ListBuilder,
+    StringBuilder, UInt32Builder, UInt8Builder,
+};
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::record_batch::RecordBatch;
+
+use crate::versioned_parquet::{read_table, write_table, ReadTable, TableVersion, BATCH_ROWS};
 
 use quant::isobaric::Plex;
 use quant::lfq::FeatureQuant;
@@ -63,6 +74,8 @@ pub struct TmtRow {
     /// Suggested weight of this PSM in a protein or peptide roll-up (0 for a
     /// PSM the quantification gate removed).
     pub quant_weight: f32,
+    /// The PSM passed the quantification gate.
+    pub quant_gate_passed: bool,
 }
 
 impl TmtRow {
@@ -88,214 +101,394 @@ pub struct LfqRow {
     pub decoy_score: Option<f32>,
 }
 
-fn fmt_opt<T: std::fmt::Display>(v: Option<T>) -> String {
-    v.map(|x| x.to_string()).unwrap_or_default()
-}
+const TMT_TABLE: TableVersion = TableVersion {
+    key: "andes.tmt.schema",
+    version: "1.0",
+    major: 1,
+    what: "isobaric quantification table",
+};
+const LFQ_TABLE: TableVersion = TableVersion {
+    key: "andes.lfq.schema",
+    version: "1.0",
+    major: 1,
+    what: "label-free quantification table",
+};
+/// `tmt.parquet` metadata: the plex name and whether a correction matrix was
+/// applied (`true` / `false`).
+pub const TMT_PLEX_KEY: &str = "andes.tmt.plex";
+pub const TMT_CORRECTED_KEY: &str = "andes.tmt.corrected";
+/// `lfq.parquet` metadata: the run stems in input order (newline-joined),
+/// and the feature q-value and cosine cuts of the `accepted` column.
+pub const LFQ_RUNS_KEY: &str = "andes.lfq.runs";
+pub const LFQ_FEATURE_FDR_KEY: &str = "andes.lfq.feature_fdr";
+pub const LFQ_MIN_COSINE_KEY: &str = "andes.lfq.min_cosine";
 
-fn fmt_f32(v: f32) -> String {
-    if v == 0.0 {
-        "0".to_string()
-    } else {
-        format!("{v:.6e}")
-    }
-}
-
-/// Write `tmt.tsv`: one row per quantified PSM, the corrected channel
-/// intensities in kit order (`tmt_126 … tmt_131`), the raw values in a
-/// `raw_` block when a correction matrix was applied, then the summed reporter
-/// intensity, summed signal-to-noise and roll-up weight, and a per-channel
-/// `sn_` block (empty cells when the reporter scan carries no noise).
-pub fn write_tmt_tsv(path: &Path, plex: Plex, rows: &[TmtRow], corrected: bool) -> io::Result<()> {
-    let tmp = crate::atomic::partial(path);
-    let mut w = BufWriter::new(std::fs::File::create(&tmp)?);
-    let prefix = if matches!(plex, Plex::Itraq4 | Plex::Itraq8) {
+/// The column-name prefix of a plex's channels (`tmt` or `itraq`).
+fn channel_prefix(plex: Plex) -> &'static str {
+    if matches!(plex, Plex::Itraq4 | Plex::Itraq8) {
         "itraq"
     } else {
         "tmt"
-    };
-    let mut header = vec![
-        "filename",
-        "scannr",
-        "spec_id",
-        "quant_scan",
-        "quant_ms_level",
-        "rt",
-        "peptide",
-        "charge",
-        "proteins",
-        "is_decoy",
-        "psm_q_value",
-        "psm_pep",
-        "purity",
-    ]
-    .into_iter()
-    .map(String::from)
-    .collect::<Vec<_>>();
+    }
+}
+
+fn tmt_schema(plex: Plex, corrected: bool) -> Schema {
+    let prefix = channel_prefix(plex);
+    let mut fields = vec![
+        Field::new("filename", DataType::Utf8, false),
+        Field::new("scannr", DataType::Int32, false),
+        Field::new("spec_id", DataType::Utf8, false),
+        Field::new("quant_scan", DataType::Utf8, false),
+        Field::new("quant_ms_level", DataType::UInt8, false),
+        Field::new("rt", DataType::Float64, true),
+        Field::new("peptide", DataType::Utf8, false),
+        Field::new("charge", DataType::UInt8, false),
+        Field::new("proteins", DataType::Utf8, false),
+        Field::new("is_decoy", DataType::Boolean, false),
+        Field::new("psm_q_value", DataType::Float64, true),
+        Field::new("psm_pep", DataType::Float64, true),
+        Field::new("purity", DataType::Float32, true),
+    ];
     for c in plex.channels() {
-        header.push(format!("{prefix}_{}", c.name));
+        fields.push(Field::new(
+            format!("{prefix}_{}", c.name),
+            DataType::Float32,
+            false,
+        ));
     }
     if corrected {
         for c in plex.channels() {
-            header.push(format!("raw_{prefix}_{}", c.name));
+            fields.push(Field::new(
+                format!("raw_{prefix}_{}", c.name),
+                DataType::Float32,
+                false,
+            ));
         }
     }
-    for name in ["reporter_intensity_sum", "reporter_sn_sum", "quant_weight"] {
-        header.push(name.to_string());
-    }
+    fields.extend([
+        Field::new("reporter_intensity_sum", DataType::Float32, false),
+        Field::new("reporter_sn_sum", DataType::Float32, true),
+        Field::new("quant_weight", DataType::Float32, false),
+        Field::new("quant_gate_passed", DataType::Boolean, false),
+    ]);
     for c in plex.channels() {
-        header.push(format!("sn_{prefix}_{}", c.name));
+        fields.push(Field::new(
+            format!("sn_{prefix}_{}", c.name),
+            DataType::Float32,
+            true,
+        ));
     }
-    writeln!(w, "{}", header.join("\t"))?;
+    Schema::new(fields)
+}
+
+fn tmt_batch(
+    schema: &Arc<Schema>,
+    n_channels: usize,
+    corrected: bool,
+    rows: &[TmtRow],
+) -> Result<RecordBatch, String> {
+    let mut filename = StringBuilder::new();
+    let mut scannr = Int32Builder::new();
+    let mut spec_id = StringBuilder::new();
+    let mut quant_scan = StringBuilder::new();
+    let mut level = UInt8Builder::new();
+    let mut rt = Float64Builder::new();
+    let mut peptide = StringBuilder::new();
+    let mut charge = UInt8Builder::new();
+    let mut proteins = StringBuilder::new();
+    let mut decoy = BooleanBuilder::new();
+    let mut q = Float64Builder::new();
+    let mut pep = Float64Builder::new();
+    let mut purity = Float32Builder::new();
+    let mut shown: Vec<Float32Builder> = (0..n_channels).map(|_| Float32Builder::new()).collect();
+    let mut raw: Vec<Float32Builder> = (0..n_channels).map(|_| Float32Builder::new()).collect();
+    let mut sum = Float32Builder::new();
+    let mut sn_sum = Float32Builder::new();
+    let mut weight = Float32Builder::new();
+    let mut passed = BooleanBuilder::new();
+    let mut sn: Vec<Float32Builder> = (0..n_channels).map(|_| Float32Builder::new()).collect();
     for r in rows {
         let id = &r.id;
-        let mut cols: Vec<String> = vec![
-            id.run.clone(),
-            id.scan.to_string(),
-            id.spec_id.clone(),
-            r.quant_scan_id.clone(),
-            r.quant_ms_level.to_string(),
-            fmt_opt(id.rt_seconds.map(|t| format!("{t:.3}"))),
-            id.peptidoform.clone(),
-            id.charge.to_string(),
-            id.proteins.join(";"),
-            (id.is_decoy as u8).to_string(),
-            fmt_opt(id.q_value),
-            fmt_opt(id.pep),
-            fmt_opt(r.purity.map(|p| format!("{p:.4}"))),
-        ];
-        let shown = if corrected { &r.corrected } else { &r.raw };
-        cols.extend(shown.iter().map(|&v| fmt_f32(v)));
-        if corrected {
-            cols.extend(r.raw.iter().map(|&v| fmt_f32(v)));
+        if r.raw.len() != n_channels
+            || r.corrected.len() != n_channels
+            || r.sn.as_ref().is_some_and(|v| v.len() != n_channels)
+        {
+            return Err(format!(
+                "{}: reporter values do not match the {n_channels} channels",
+                id.spec_id
+            ));
         }
-        cols.push(fmt_f32(r.intensity_sum()));
-        cols.push(fmt_opt(r.sn_sum().map(|v| format!("{v:.2}"))));
-        cols.push(format!("{:.4}", r.quant_weight));
-        match &r.sn {
-            Some(sn) => cols.extend(sn.iter().map(|v| format!("{v:.2}"))),
-            None => cols.extend(plex.channels().iter().map(|_| String::new())),
+        filename.append_value(&id.run);
+        scannr.append_value(id.scan);
+        spec_id.append_value(&id.spec_id);
+        quant_scan.append_value(&r.quant_scan_id);
+        level.append_value(r.quant_ms_level);
+        rt.append_option(id.rt_seconds);
+        peptide.append_value(&id.peptidoform);
+        charge.append_value(id.charge);
+        proteins.append_value(id.proteins.join(";"));
+        decoy.append_value(id.is_decoy);
+        q.append_option(id.q_value);
+        pep.append_option(id.pep);
+        purity.append_option(r.purity);
+        let values = if corrected { &r.corrected } else { &r.raw };
+        for (b, &v) in shown.iter_mut().zip(values) {
+            b.append_value(v);
         }
-        writeln!(w, "{}", cols.join("\t"))?;
+        for (b, &v) in raw.iter_mut().zip(&r.raw) {
+            b.append_value(v);
+        }
+        sum.append_value(r.intensity_sum());
+        sn_sum.append_option(r.sn_sum());
+        weight.append_value(r.quant_weight);
+        passed.append_value(r.quant_gate_passed);
+        for (i, b) in sn.iter_mut().enumerate() {
+            b.append_option(r.sn.as_ref().map(|v| v[i]));
+        }
     }
-    w.flush()?;
-    drop(w);
-    crate::atomic::commit(&tmp, path)
+    let mut cols: Vec<ArrayRef> = vec![
+        Arc::new(filename.finish()),
+        Arc::new(scannr.finish()),
+        Arc::new(spec_id.finish()),
+        Arc::new(quant_scan.finish()),
+        Arc::new(level.finish()),
+        Arc::new(rt.finish()),
+        Arc::new(peptide.finish()),
+        Arc::new(charge.finish()),
+        Arc::new(proteins.finish()),
+        Arc::new(decoy.finish()),
+        Arc::new(q.finish()),
+        Arc::new(pep.finish()),
+        Arc::new(purity.finish()),
+    ];
+    cols.extend(shown.iter_mut().map(|b| Arc::new(b.finish()) as ArrayRef));
+    if corrected {
+        cols.extend(raw.iter_mut().map(|b| Arc::new(b.finish()) as ArrayRef));
+    }
+    cols.push(Arc::new(sum.finish()));
+    cols.push(Arc::new(sn_sum.finish()));
+    cols.push(Arc::new(weight.finish()));
+    cols.push(Arc::new(passed.finish()));
+    cols.extend(sn.iter_mut().map(|b| Arc::new(b.finish()) as ArrayRef));
+    RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
 }
 
-/// Write `lfq.tsv` (wide): one row per (peptidoform, charge) with the feature
-/// area in every run (`runs` gives the column order), plus the best feature
-/// q-value and score across runs.
-pub fn write_lfq_tsv(path: &Path, runs: &[String], rows: &[LfqRow]) -> io::Result<()> {
-    use std::collections::BTreeMap;
-    // key → (proteins, per-run row)
-    // (peptidoform, charge) → (proteins, one slot per run)
-    type RunSlots<'a> = (Vec<String>, Vec<Option<&'a LfqRow>>);
-    let mut groups: BTreeMap<(String, u8), RunSlots<'_>> = BTreeMap::new();
-    for r in rows {
-        let e = groups
-            .entry((r.id.peptidoform.clone(), r.id.charge))
-            .or_insert_with(|| (r.id.proteins.clone(), vec![None; runs.len()]));
-        if r.id.file_idx < runs.len() {
-            // Keep the best-scoring feature per run (two PSM anchors can map to
-            // the same peptidoform-charge in one run only through the
-            // best-PSM selection upstream; this is a safety net).
-            let slot = &mut e.1[r.id.file_idx];
-            if slot.is_none_or(|s| r.score > s.score) {
-                *slot = Some(r);
-            }
-        }
-    }
-    let tmp = crate::atomic::partial(path);
-    let mut w = BufWriter::new(std::fs::File::create(&tmp)?);
-    let mut header = vec![
-        "peptide",
-        "charge",
-        "proteins",
-        "feature_q_value",
-        "score",
-        "cosine",
-    ]
-    .into_iter()
-    .map(String::from)
-    .collect::<Vec<_>>();
-    header.extend(runs.iter().cloned());
-    writeln!(w, "{}", header.join("\t"))?;
-    for ((pep, z), (proteins, per_run)) in groups {
-        let best = per_run.iter().flatten().max_by(|a, b| {
-            a.score
-                .partial_cmp(&b.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        let (q, score, cos) = match best {
-            Some(b) => (
-                fmt_opt(b.feature_q_value.map(|q| format!("{q:.5}"))),
-                format!("{:.4}", b.score),
-                format!("{:.4}", b.feature.cosine),
-            ),
-            None => (String::new(), String::new(), String::new()),
-        };
-        let mut cols = vec![pep, z.to_string(), proteins.join(";"), q, score, cos];
-        for slot in per_run {
-            cols.push(match slot {
-                Some(r) => format!("{:.6e}", r.feature.area),
-                None => String::new(),
-            });
-        }
-        writeln!(w, "{}", cols.join("\t"))?;
-    }
-    w.flush()?;
-    drop(w);
-    crate::atomic::commit(&tmp, path)
+/// Write `tmt.parquet`: one row per PSM with reporter ions, including the
+/// ones the quantification gate removed (`quant_gate_passed` false,
+/// `quant_weight` 0). Columns: the PSM (`filename scannr spec_id quant_scan
+/// quant_ms_level rt peptide charge proteins is_decoy psm_q_value psm_pep
+/// purity`), the channel intensities in kit order (`tmt_126 … tmt_131`,
+/// corrected when a correction matrix was applied), the raw values in a
+/// `raw_` block when one was, then the summed raw reporter intensity, summed
+/// signal-to-noise, roll-up weight and gate result, and a per-channel `sn_`
+/// block (null when the reporter scan carries no noise). `rt` is in seconds,
+/// `proteins` is `;`-joined.
+pub fn write_tmt_parquet(
+    path: &Path,
+    plex: Plex,
+    rows: &[TmtRow],
+    corrected: bool,
+) -> Result<(), String> {
+    let schema = Arc::new(tmt_schema(plex, corrected));
+    let n = plex.n_channels();
+    let batches = rows
+        .chunks(BATCH_ROWS)
+        .map(|c| tmt_batch(&schema, n, corrected, c));
+    write_table(
+        path,
+        &TMT_TABLE,
+        TMT_TABLE.version,
+        schema.clone(),
+        batches,
+        &[
+            (TMT_PLEX_KEY, plex.name().to_string()),
+            (TMT_CORRECTED_KEY, corrected.to_string()),
+        ],
+    )
 }
 
-/// Write `lfq_features.tsv` (long): one row per quantified feature in one run
-/// with its apex, boundaries, areas and the decoy-competition result.
-pub fn write_lfq_features_tsv(path: &Path, rows: &[LfqRow]) -> io::Result<()> {
-    let tmp = crate::atomic::partial(path);
-    let mut w = BufWriter::new(std::fs::File::create(&tmp)?);
-    writeln!(
-        w,
-        "filename\tpeptide\tcharge\tproteins\tscannr\tspec_id\tpsm_q_value\tcalc_mz\t\
-         rt_anchor\trt_apex\trt_start\trt_stop\tn_scans\tarea\tapex_intensity\t\
-         isotope_areas\tcosine\tn_isotopes\tscore\tdecoy_score\tfeature_q_value"
-    )?;
-    for r in rows {
+/// Read `tmt.parquet`: its record batches and key-value metadata. Rejects
+/// another major schema version; every error names the file.
+pub fn read_tmt_parquet(path: &Path) -> Result<ReadTable, String> {
+    read_table(path, &TMT_TABLE)
+}
+
+fn lfq_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("filename", DataType::Utf8, false),
+        Field::new("peptide", DataType::Utf8, false),
+        Field::new("charge", DataType::UInt8, false),
+        Field::new("proteins", DataType::Utf8, false),
+        Field::new("scannr", DataType::Int32, false),
+        Field::new("spec_id", DataType::Utf8, false),
+        Field::new("psm_q_value", DataType::Float64, true),
+        Field::new("calc_mz", DataType::Float64, false),
+        Field::new("rt_anchor", DataType::Float64, true),
+        Field::new("rt_apex", DataType::Float64, false),
+        Field::new("rt_start", DataType::Float64, false),
+        Field::new("rt_stop", DataType::Float64, false),
+        Field::new("n_scans", DataType::UInt32, false),
+        Field::new("area", DataType::Float64, false),
+        Field::new("apex_intensity", DataType::Float32, false),
+        Field::new(
+            "isotope_areas",
+            DataType::List(Arc::new(Field::new("item", DataType::Float64, true))),
+            false,
+        ),
+        Field::new("cosine", DataType::Float32, false),
+        Field::new("n_isotopes", DataType::UInt32, false),
+        Field::new("score", DataType::Float32, false),
+        Field::new("decoy_score", DataType::Float32, true),
+        Field::new("feature_q_value", DataType::Float64, true),
+        Field::new("accepted", DataType::Boolean, false),
+    ])
+}
+
+fn lfq_batch(
+    schema: &Arc<Schema>,
+    rows: &[LfqRow],
+    accepted: &[bool],
+) -> Result<RecordBatch, String> {
+    let mut filename = StringBuilder::new();
+    let mut peptide = StringBuilder::new();
+    let mut charge = UInt8Builder::new();
+    let mut proteins = StringBuilder::new();
+    let mut scannr = Int32Builder::new();
+    let mut spec_id = StringBuilder::new();
+    let mut psm_q = Float64Builder::new();
+    let mut calc_mz = Float64Builder::new();
+    let mut rt_anchor = Float64Builder::new();
+    let mut rt_apex = Float64Builder::new();
+    let mut rt_start = Float64Builder::new();
+    let mut rt_stop = Float64Builder::new();
+    let mut n_scans = UInt32Builder::new();
+    let mut area = Float64Builder::new();
+    let mut apex_intensity = Float32Builder::new();
+    let mut iso = ListBuilder::new(Float64Builder::new());
+    let mut cosine = Float32Builder::new();
+    let mut n_iso = UInt32Builder::new();
+    let mut score = Float32Builder::new();
+    let mut decoy_score = Float32Builder::new();
+    let mut feature_q = Float64Builder::new();
+    let mut acc = BooleanBuilder::new();
+    for (r, &ok) in rows.iter().zip(accepted) {
         let f = &r.feature;
-        let areas: Vec<String> = f.isotope_areas.iter().map(|a| format!("{a:.4e}")).collect();
-        writeln!(
-            w,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.5}\t{}\t{:.3}\t{:.3}\t{:.3}\t{}\t{:.6e}\t{}\t{}\t{:.4}\t{}\t{:.4}\t{}\t{}",
-            r.id.run,
-            r.id.peptidoform,
-            r.id.charge,
-            r.id.proteins.join(";"),
-            r.id.scan,
-            r.id.spec_id,
-            fmt_opt(r.id.q_value),
-            r.id.calculated_mz,
-            fmt_opt(r.id.rt_seconds.map(|t| format!("{t:.3}"))),
-            f.apex_rt,
-            f.rt_start,
-            f.rt_stop,
-            f.n_scans,
-            f.area,
-            fmt_f32(f.apex_intensity),
-            areas.join(";"),
-            f.cosine,
-            f.n_isotopes_found,
-            r.score,
-            fmt_opt(r.decoy_score.map(|s| format!("{s:.4}"))),
-            fmt_opt(r.feature_q_value.map(|q| format!("{q:.5}"))),
-        )?;
+        filename.append_value(&r.id.run);
+        peptide.append_value(&r.id.peptidoform);
+        charge.append_value(r.id.charge);
+        proteins.append_value(r.id.proteins.join(";"));
+        scannr.append_value(r.id.scan);
+        spec_id.append_value(&r.id.spec_id);
+        psm_q.append_option(r.id.q_value);
+        calc_mz.append_value(r.id.calculated_mz);
+        rt_anchor.append_option(r.id.rt_seconds);
+        rt_apex.append_value(f.apex_rt);
+        rt_start.append_value(f.rt_start);
+        rt_stop.append_value(f.rt_stop);
+        n_scans.append_value(f.n_scans);
+        area.append_value(f.area);
+        apex_intensity.append_value(f.apex_intensity);
+        iso.values().append_slice(&f.isotope_areas);
+        iso.append(true);
+        cosine.append_value(f.cosine);
+        n_iso.append_value(f.n_isotopes_found);
+        score.append_value(r.score);
+        decoy_score.append_option(r.decoy_score);
+        feature_q.append_option(r.feature_q_value);
+        acc.append_value(ok);
     }
-    w.flush()?;
-    drop(w);
-    crate::atomic::commit(&tmp, path)
+    let cols: Vec<ArrayRef> = vec![
+        Arc::new(filename.finish()),
+        Arc::new(peptide.finish()),
+        Arc::new(charge.finish()),
+        Arc::new(proteins.finish()),
+        Arc::new(scannr.finish()),
+        Arc::new(spec_id.finish()),
+        Arc::new(psm_q.finish()),
+        Arc::new(calc_mz.finish()),
+        Arc::new(rt_anchor.finish()),
+        Arc::new(rt_apex.finish()),
+        Arc::new(rt_start.finish()),
+        Arc::new(rt_stop.finish()),
+        Arc::new(n_scans.finish()),
+        Arc::new(area.finish()),
+        Arc::new(apex_intensity.finish()),
+        Arc::new(iso.finish()),
+        Arc::new(cosine.finish()),
+        Arc::new(n_iso.finish()),
+        Arc::new(score.finish()),
+        Arc::new(decoy_score.finish()),
+        Arc::new(feature_q.finish()),
+        Arc::new(acc.finish()),
+    ];
+    RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
+}
+
+/// What `lfq.parquet` records beside its rows.
+#[derive(Debug, Clone)]
+pub struct LfqTableMeta<'a> {
+    /// Run stems in input order, including runs without a feature.
+    pub runs: &'a [String],
+    /// Feature q-value cut of the `accepted` column.
+    pub feature_fdr: f64,
+    /// Envelope cosine cut of the `accepted` column.
+    pub min_cosine: f32,
+}
+
+/// Write `lfq.parquet` (long): one row per quantified feature in one run
+/// with its PSM anchor, apex, boundaries, areas (`isotope_areas` a list,
+/// monoisotope first), the decoy-competition result and `accepted`
+/// (`accepted[i]` for `rows[i]`: feature q-value and cosine within the run's
+/// cuts). The per-run wide view is the `accepted` rows pivoted on
+/// `(peptide, charge)` × `filename` over `area`, keeping the highest `score`
+/// when a run has more than one.
+pub fn write_lfq_parquet(
+    path: &Path,
+    rows: &[LfqRow],
+    accepted: &[bool],
+    meta: &LfqTableMeta<'_>,
+) -> Result<(), String> {
+    if accepted.len() != rows.len() {
+        return Err(format!(
+            "{}: {} accepted flags for {} rows",
+            path.display(),
+            accepted.len(),
+            rows.len()
+        ));
+    }
+    let schema = Arc::new(lfq_schema());
+    let batches = rows
+        .chunks(BATCH_ROWS)
+        .zip(accepted.chunks(BATCH_ROWS))
+        .map(|(r, a)| lfq_batch(&schema, r, a));
+    write_table(
+        path,
+        &LFQ_TABLE,
+        LFQ_TABLE.version,
+        schema.clone(),
+        batches,
+        &[
+            (LFQ_RUNS_KEY, meta.runs.join("\n")),
+            (LFQ_FEATURE_FDR_KEY, meta.feature_fdr.to_string()),
+            (LFQ_MIN_COSINE_KEY, meta.min_cosine.to_string()),
+        ],
+    )
+}
+
+/// Read `lfq.parquet`: its record batches and key-value metadata. Rejects
+/// another major schema version; every error names the file.
+pub fn read_lfq_parquet(path: &Path) -> Result<ReadTable, String> {
+    read_table(path, &LFQ_TABLE)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::versioned_parquet::{column, opt};
+    use arrow::array::{
+        Array, BooleanArray, Float32Array, Float64Array, Int32Array, ListArray, StringArray,
+        UInt32Array,
+    };
 
     fn id(run: &str, file_idx: usize, pep: &str, z: u8) -> QuantId {
         QuantId {
@@ -334,11 +527,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn tmt_tsv_has_one_column_per_channel_and_raw_block() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("tmt.tsv");
-        let rows = vec![TmtRow {
+    fn tmt_row() -> TmtRow {
+        TmtRow {
             id: id("run1", 0, "PEPTIDEK", 2),
             quant_scan_id: "scan=5".into(),
             quant_ms_level: 2,
@@ -347,109 +537,90 @@ mod tests {
             corrected: vec![1.1, 2.1, 3.1, 4.1],
             sn: Some(vec![11.0, 21.0, 31.0, 41.0]),
             quant_weight: 0.81,
-        }];
-        write_tmt_tsv(&p, Plex::Itraq4, &rows, true).unwrap();
-        let text = std::fs::read_to_string(&p).unwrap();
-        let mut lines = text.lines();
-        let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
-        assert_eq!(header.len(), 13 + 8 + 3 + 4);
+            quant_gate_passed: true,
+        }
+    }
+
+    fn names(t: &ReadTable) -> Vec<String> {
+        t.batches[0]
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect()
+    }
+
+    fn f32_at(b: &RecordBatch, name: &str, path: &Path) -> Vec<Option<f32>> {
+        let a = column::<Float32Array>(b, name, path).unwrap();
+        (0..a.len()).map(|i| opt(a, i)).collect()
+    }
+
+    #[test]
+    fn tmt_parquet_has_one_column_per_channel_raw_block_and_gated_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.tmt.parquet");
+        let mut gated = tmt_row();
+        gated.sn = None;
+        gated.purity = None;
+        gated.id.q_value = None;
+        gated.quant_weight = 0.0;
+        gated.quant_gate_passed = false;
+        write_tmt_parquet(&p, Plex::Itraq4, &[tmt_row(), gated], true).unwrap();
+        let t = read_tmt_parquet(&p).unwrap();
+        assert_eq!(
+            t.meta.get(TMT_PLEX_KEY).map(String::as_str),
+            Some("itraq4plex")
+        );
+        assert_eq!(
+            t.meta.get(TMT_CORRECTED_KEY).map(String::as_str),
+            Some("true")
+        );
+        let header = names(&t);
+        assert_eq!(header.len(), 13 + 8 + 4 + 4);
         assert_eq!(header[13], "itraq_114");
         assert_eq!(header[17], "raw_itraq_114");
         assert_eq!(
-            header[21..24],
-            ["reporter_intensity_sum", "reporter_sn_sum", "quant_weight"]
+            header[21..25],
+            [
+                "reporter_intensity_sum",
+                "reporter_sn_sum",
+                "quant_weight",
+                "quant_gate_passed"
+            ]
         );
-        assert_eq!(header[24], "sn_itraq_114");
-        let row: Vec<&str> = lines.next().unwrap().split('\t').collect();
-        assert_eq!(row[6], "PEPTIDEK");
-        assert_eq!(row[12], "0.9000");
-        assert_eq!(row[13], "1.100000e0");
-        assert_eq!(row[17], "1.000000e0");
-        assert_eq!(row[21], "1.000000e1");
-        assert_eq!(row[22], "104.00");
-        assert_eq!(row[23], "0.8100");
-        assert_eq!(row[27], "41.00");
-        // Without noise the S/N cells stay empty and the layout is unchanged.
-        let mut no_noise = rows[0].clone();
-        no_noise.sn = None;
-        write_tmt_tsv(&p, Plex::Itraq4, &[no_noise], false).unwrap();
-        let text = std::fs::read_to_string(&p).unwrap();
-        let mut lines = text.lines();
-        assert_eq!(lines.next().unwrap().split('\t').count(), 13 + 4 + 3 + 4);
-        let row: Vec<&str> = lines.next().unwrap().split('\t').collect();
-        assert_eq!(row[18], "");
-        assert_eq!(row[20..24], ["", "", "", ""]);
+        assert_eq!(header[25], "sn_itraq_114");
+        let b = &t.batches[0];
+        assert_eq!(b.num_rows(), 2);
+        let pep = column::<StringArray>(b, "peptide", &p).unwrap();
+        assert_eq!(pep.value(0), "PEPTIDEK");
+        assert_eq!(f32_at(b, "purity", &p), [Some(0.9), None]);
+        assert_eq!(f32_at(b, "itraq_114", &p), [Some(1.1), Some(1.1)]);
+        assert_eq!(f32_at(b, "raw_itraq_114", &p), [Some(1.0), Some(1.0)]);
+        assert_eq!(f32_at(b, "reporter_intensity_sum", &p), [Some(10.0); 2]);
+        assert_eq!(f32_at(b, "reporter_sn_sum", &p), [Some(104.0), None]);
+        assert_eq!(f32_at(b, "quant_weight", &p), [Some(0.81), Some(0.0)]);
+        assert_eq!(f32_at(b, "sn_itraq_117", &p), [Some(41.0), None]);
+        let q = column::<Float64Array>(b, "psm_q_value", &p).unwrap();
+        assert_eq!((opt(q, 0), opt(q, 1)), (Some(0.001), None));
+        let passed = column::<BooleanArray>(b, "quant_gate_passed", &p).unwrap();
+        assert_eq!((passed.value(0), passed.value(1)), (true, false));
+        let scan = column::<Int32Array>(b, "scannr", &p).unwrap();
+        assert_eq!(scan.value(0), 5);
+        // Without a correction matrix the channels hold the raw values and
+        // there is no raw block.
+        write_tmt_parquet(&p, Plex::Itraq4, &[tmt_row()], false).unwrap();
+        let t = read_tmt_parquet(&p).unwrap();
+        assert_eq!(names(&t).len(), 13 + 4 + 4 + 4);
+        assert_eq!(f32_at(&t.batches[0], "itraq_114", &p), [Some(1.0)]);
+        // A row whose channel count does not match the plex is refused.
+        let mut short = tmt_row();
+        short.raw.pop();
+        assert!(write_tmt_parquet(&p, Plex::Itraq4, &[short], false).is_err());
+        assert!(!dir.path().join("x.tmt.parquet.partial").exists());
     }
 
-    /// Assert every non-empty cell outside `text_cols` parses as `f64`
-    /// (`;`-joined lists cell by cell).
-    fn assert_numeric_cells_parse(path: &Path, text_cols: &[&str]) {
-        let text = std::fs::read_to_string(path).unwrap();
-        let mut lines = text.lines();
-        let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
-        let mut n = 0;
-        for line in lines {
-            for (name, cell) in header.iter().zip(line.split('\t')) {
-                if text_cols.contains(name) || cell.is_empty() {
-                    continue;
-                }
-                for v in cell.split(';') {
-                    assert!(
-                        v.parse::<f64>().is_ok(),
-                        "{}: column {name} holds {v:?}",
-                        path.display()
-                    );
-                    n += 1;
-                }
-            }
-        }
-        assert!(n > 0, "no numeric cells in {}", path.display());
-    }
-
-    /// Values in [1, 10) have exponent 0; every numeric cell of every quant
-    /// table must still be a valid float.
-    #[test]
-    fn every_numeric_cell_parses_as_a_float() {
-        let dir = tempfile::tempdir().unwrap();
-        let tmt = dir.path().join("tmt.tsv");
-        let tmt_rows = vec![TmtRow {
-            id: id("run1", 0, "PEPTIDEK", 2),
-            quant_scan_id: "scan=5".into(),
-            quant_ms_level: 2,
-            purity: Some(0.9),
-            raw: vec![3.4, 0.0, 12.5, 4.2e6],
-            corrected: vec![3.3, 0.0, 9.99, 4.1e6],
-            sn: Some(vec![0.5, 0.0, 2.0, 1.0e4]),
-            quant_weight: 1.0,
-        }];
-        write_tmt_tsv(&tmt, Plex::Itraq4, &tmt_rows, true).unwrap();
-        assert_numeric_cells_parse(
-            &tmt,
-            &["filename", "spec_id", "quant_scan", "peptide", "proteins"],
-        );
-
-        let mut f = feature(3.4);
-        f.apex_intensity = 5.5;
-        let lfq_rows = vec![LfqRow {
-            id: id("a", 0, "PEPTIDEK", 2),
-            feature: f,
-            score: 0.9,
-            feature_q_value: Some(0.001),
-            decoy_score: Some(0.1),
-        }];
-        let lfq = dir.path().join("lfq.tsv");
-        write_lfq_tsv(&lfq, &["a".into()], &lfq_rows).unwrap();
-        assert_numeric_cells_parse(&lfq, &["peptide", "proteins"]);
-        let features = dir.path().join("lfq_features.tsv");
-        write_lfq_features_tsv(&features, &lfq_rows).unwrap();
-        assert_numeric_cells_parse(&features, &["filename", "peptide", "proteins", "spec_id"]);
-    }
-
-    #[test]
-    fn lfq_tsv_is_wide_over_runs() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("lfq.tsv");
-        let rows = vec![
+    fn lfq_rows() -> Vec<LfqRow> {
+        vec![
             LfqRow {
                 id: id("a", 0, "PEPTIDEK", 2),
                 feature: feature(1e6),
@@ -471,24 +642,92 @@ mod tests {
                 feature_q_value: None,
                 decoy_score: Some(0.6),
             },
-        ];
-        write_lfq_tsv(&p, &["a".into(), "b".into()], &rows).unwrap();
-        let text = std::fs::read_to_string(&p).unwrap();
-        let lines: Vec<&str> = text.lines().collect();
+        ]
+    }
+
+    #[test]
+    fn lfq_parquet_is_long_with_the_accepted_flag_and_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.lfq.parquet");
+        let runs = ["a".to_string(), "b".to_string(), "empty".to_string()];
+        let meta = LfqTableMeta {
+            runs: &runs,
+            feature_fdr: 0.01,
+            min_cosine: 0.7,
+        };
+        let rows = lfq_rows();
+        write_lfq_parquet(&p, &rows, &[true, true, false], &meta).unwrap();
+        let t = read_lfq_parquet(&p).unwrap();
         assert_eq!(
-            lines[0],
-            "peptide\tcharge\tproteins\tfeature_q_value\tscore\tcosine\ta\tb"
+            t.meta.get(LFQ_RUNS_KEY).map(String::as_str),
+            Some("a\nb\nempty")
         );
-        assert_eq!(lines.len(), 3);
-        let other: Vec<&str> = lines[1].split('\t').collect();
-        assert_eq!(other[0], "OTHERK");
-        assert_eq!(other[6], "");
-        let pep: Vec<&str> = lines[2].split('\t').collect();
-        assert_eq!(pep[3], "0.00100");
-        assert!(pep[6].starts_with("1.000000e"), "{}", pep[6]);
-        assert!(pep[7].starts_with("2.000000e"), "{}", pep[7]);
-        let fp = dir.path().join("lfq_features.tsv");
-        write_lfq_features_tsv(&fp, &rows).unwrap();
-        assert_eq!(std::fs::read_to_string(&fp).unwrap().lines().count(), 4);
+        assert_eq!(
+            t.meta.get(LFQ_FEATURE_FDR_KEY).map(String::as_str),
+            Some("0.01")
+        );
+        assert_eq!(
+            t.meta.get(LFQ_MIN_COSINE_KEY).map(String::as_str),
+            Some("0.7")
+        );
+        assert_eq!(
+            names(&t),
+            [
+                "filename",
+                "peptide",
+                "charge",
+                "proteins",
+                "scannr",
+                "spec_id",
+                "psm_q_value",
+                "calc_mz",
+                "rt_anchor",
+                "rt_apex",
+                "rt_start",
+                "rt_stop",
+                "n_scans",
+                "area",
+                "apex_intensity",
+                "isotope_areas",
+                "cosine",
+                "n_isotopes",
+                "score",
+                "decoy_score",
+                "feature_q_value",
+                "accepted"
+            ]
+        );
+        let b = &t.batches[0];
+        assert_eq!(b.num_rows(), 3);
+        let area = column::<Float64Array>(b, "area", &p).unwrap();
+        assert_eq!(area.value(1), 2e6);
+        let fq = column::<Float64Array>(b, "feature_q_value", &p).unwrap();
+        assert_eq!((opt(fq, 0), opt(fq, 2)), (Some(0.001), None));
+        assert_eq!(f32_at(b, "decoy_score", &p), [None, Some(0.1), Some(0.6)]);
+        let iso = column::<ListArray>(b, "isotope_areas", &p).unwrap();
+        let first = iso.value(0);
+        let first = first.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(first.values().to_vec(), rows[0].feature.isotope_areas);
+        let acc = column::<BooleanArray>(b, "accepted", &p).unwrap();
+        assert_eq!(
+            (0..3).map(|i| acc.value(i)).collect::<Vec<_>>(),
+            [true, true, false]
+        );
+        let n = column::<UInt32Array>(b, "n_scans", &p).unwrap();
+        assert_eq!(n.value(0), 13);
+        assert!(write_lfq_parquet(&p, &rows, &[true], &meta).is_err());
+    }
+
+    #[test]
+    fn quant_readers_reject_other_majors_and_each_others_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.parquet");
+        let schema = Arc::new(tmt_schema(Plex::Itraq4, false));
+        let b = tmt_batch(&schema, 4, false, &[tmt_row()]);
+        write_table(&p, &TMT_TABLE, "2.1", schema, [b], &[]).unwrap();
+        let e = read_tmt_parquet(&p).err().unwrap();
+        assert!(e.contains("x.parquet") && e.contains("schema 2.1"), "{e}");
+        let e = read_lfq_parquet(&p).err().unwrap();
+        assert!(e.contains(LFQ_TABLE.key), "{e}");
     }
 }

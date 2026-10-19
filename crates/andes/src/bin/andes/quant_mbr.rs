@@ -1549,7 +1549,7 @@ pub(crate) fn finalize_stream(
                     cell_seq += 1;
                     cells.push(
                         cell_seq,
-                        r.precursor,
+                        u64::from(r.precursor),
                         NormCell {
                             precursor: r.precursor,
                             run: r.run,

@@ -246,7 +246,9 @@ fn tmt10_unmix_block_follows_the_existing_columns() {
                 .to_string_lossy()
                 .into_owned(),
             "--database".to_string(),
-            fixture("test-fixtures/BSA.fasta").to_string_lossy().into_owned(),
+            fixture("test-fixtures/BSA.fasta")
+                .to_string_lossy()
+                .into_owned(),
             "--mods".to_string(),
             fixture("test-fixtures/tmt10_mods.txt")
                 .to_string_lossy()

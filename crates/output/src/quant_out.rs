@@ -787,8 +787,8 @@ mod tests {
     fn quant_readers_reject_other_majors_and_each_others_files() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("x.parquet");
-        let schema = Arc::new(tmt_schema(Plex::Itraq4, false));
-        let b = tmt_batch(&schema, 4, false, &[tmt_row()]);
+        let schema = Arc::new(tmt_schema(Plex::Itraq4, false, false));
+        let b = tmt_batch(&schema, 4, false, false, &[tmt_row()]);
         write_table(&p, &TMT_TABLE, "2.1", schema, [b], &[]).unwrap();
         let e = read_tmt_parquet(&p).err().unwrap();
         assert!(e.contains("x.parquet") && e.contains("schema 2.1"), "{e}");

@@ -177,8 +177,7 @@ pub fn window_record(
         let (total, precursor) = window_sums(s.peaks, lo, hi, mono_mz, charge);
         rec.total += w * total;
         rec.precursor += w * precursor;
-        rec.hidden +=
-            w * s.detection_limit as f64 * centroid_density(s.peaks, centre) * (hi - lo);
+        rec.hidden += w * s.detection_limit as f64 * centroid_density(s.peaks, centre) * (hi - lo);
     }
     Some(rec)
 }
@@ -269,7 +268,8 @@ impl InterferenceModel {
                 .map(|i| (y[i] - dot(&rows[i], &beta)) / y[i])
                 .collect();
             let centre = median(resid.clone());
-            let mad = (1.4826 * median(resid.iter().map(|r| (r - centre).abs()).collect())).max(MIN_MAD);
+            let mad =
+                (1.4826 * median(resid.iter().map(|r| (r - centre).abs()).collect())).max(MIN_MAD);
             for (w, r) in weight.iter_mut().zip(&resid) {
                 let u = r / (BISQUARE_K * mad);
                 *w = if u.abs() < 1.0 { 1.0 - u * u } else { 0.0 };
@@ -291,7 +291,11 @@ impl InterferenceModel {
             co_isolated: beta[3],
             hidden: beta[4],
             n: m,
-            r2_log: if ss_tot > 0.0 { 1.0 - ss_res / ss_tot } else { 0.0 },
+            r2_log: if ss_tot > 0.0 {
+                1.0 - ss_res / ss_tot
+            } else {
+                0.0
+            },
         })
     }
 
@@ -391,7 +395,12 @@ mod tests {
     #[test]
     fn window_record_interpolates_between_the_bordering_scans() {
         // z = 2 precursor at 500.0; one co-isolated peak at 500.2.
-        let before = [(499.0, 5.0f32), (500.0, 100.0), (500.2, 50.0), (500.5017, 50.0)];
+        let before = [
+            (499.0, 5.0f32),
+            (500.0, 100.0),
+            (500.2, 50.0),
+            (500.5017, 50.0),
+        ];
         let after = [(500.0, 300.0f32), (500.2, 50.0), (500.5017, 150.0)];
         let rec = window_record(
             Some(survey(10.0, &before)),
@@ -418,7 +427,10 @@ mod tests {
     fn window_record_needs_a_bordering_scan_and_a_window() {
         assert_eq!(window_record(None, None, 1.0, 1.0, 2.0, 1.5, 2), None);
         let p = [(500.0, 1.0f32)];
-        assert_eq!(window_record(Some(survey(0.0, &p)), None, 1.0, 2.0, 2.0, 1.5, 2), None);
+        assert_eq!(
+            window_record(Some(survey(0.0, &p)), None, 1.0, 2.0, 2.0, 1.5, 2),
+            None
+        );
         let one = window_record(Some(survey(0.0, &p)), None, 1.0, 499.0, 501.0, 500.0, 1).unwrap();
         assert_eq!(one.precursor_fraction(), 1.0);
     }

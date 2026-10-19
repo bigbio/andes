@@ -1028,7 +1028,15 @@ fn isolation_window_record(
         Some(p) => next_survey(ms1, p, cv),
         None => (0..ms1.len().min(64)).find(|&i| cv.is_none() || ms1.scan(i).faims_cv == cv),
     };
-    window_record(prev.map(survey), next.map(survey), rt, lo, hi, mono_mz, charge)
+    window_record(
+        prev.map(survey),
+        next.map(survey),
+        rt,
+        lo,
+        hi,
+        mono_mz,
+        charge,
+    )
 }
 
 /// MS2 ion current above the plex's reporter region (`--tmt-unmix`).
@@ -1386,7 +1394,10 @@ pub(crate) fn run_quant(
                     unmix_inputs.push(ScanInput {
                         charge: z,
                         reporters: corrected.clone(),
-                        pic: collector.ms2_pic.get(hit.spec_idx).map_or(0.0, |&v| v as f64),
+                        pic: collector
+                            .ms2_pic
+                            .get(hit.spec_idx)
+                            .map_or(0.0, |&v| v as f64),
                         window,
                     });
                 }
@@ -2049,7 +2060,13 @@ mod tests {
 
     #[test]
     fn peptide_ion_current_skips_the_reporter_region() {
-        let peaks = [(126.13, 1e6f32), (134.15, 1e6), (135.5, 5.0), (300.0, 10.0), (800.0, 20.0)];
+        let peaks = [
+            (126.13, 1e6f32),
+            (134.15, 1e6),
+            (135.5, 5.0),
+            (300.0, 10.0),
+            (800.0, 20.0),
+        ];
         assert_eq!(peptide_ion_current(&peaks, Plex::Tmt16), 30.0);
     }
 

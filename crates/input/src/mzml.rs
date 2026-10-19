@@ -345,6 +345,9 @@ fn centroid_profile(profile: &[(f64, f32)]) -> Vec<(f64, f32)> {
 #[derive(Debug, Default)]
 struct SpectrumBuilder {
     id: String,
+    /// The `<spectrum index>` attribute: the scan number's fallback when the
+    /// native id names none.
+    index: Option<i32>,
     ms_level: Option<u32>,
     rt_seconds: Option<f64>,
     precursor_mz: Option<f64>,
@@ -663,7 +666,7 @@ impl<R: BufRead> MzMLReader<R> {
         }
 
         let peaks = Self::build_peaks(sb.mz_array, sb.intensity_array, sb.is_profile)?;
-        let scan = extract_scan_from_id(&sb.id);
+        let scan = scan_number(&sb.id, sb.index);
 
         // H6 EThcD/ETciD resolution happens per-`<activation>`-block (on the
         // block's closing tag), so `sb.activation_method` is already correct here.
@@ -981,8 +984,10 @@ impl<R: BufRead> MzMLReader<R> {
                     match tag.as_slice() {
                         b"spectrum" => {
                             let id = attr_str(e, b"id").unwrap_or_default();
+                            let index = attr_str(e, b"index").and_then(|v| v.parse().ok());
                             self.current = Some(SpectrumBuilder {
                                 id,
+                                index,
                                 ..Default::default()
                             });
                             self.state = State::Spectrum;
@@ -1158,7 +1163,7 @@ impl<R: BufRead> MzMLReader<R> {
                                         sb.is_profile,
                                     )?;
                                     self.product_scans.push(ProductScan {
-                                        scan: extract_scan_from_id(&sb.id),
+                                        scan: scan_number(&sb.id, sb.index),
                                         id: sb.id,
                                         rt_seconds: sb.rt_seconds,
                                         ms_level: level,
@@ -1460,8 +1465,10 @@ impl<R: BufRead> MzMLReader<R> {
                 }
                 Event::Start(ref e) if e.local_name().as_ref() == b"spectrum" => {
                     let id = attr_str(e, b"id").unwrap_or_default();
+                    let index = attr_str(e, b"index").and_then(|v| v.parse().ok());
                     self.current = Some(SpectrumBuilder {
                         id,
+                        index,
                         ..Default::default()
                     });
                     self.state = State::Spectrum;
@@ -2065,13 +2072,20 @@ fn attr_str(e: &quick_xml::events::BytesStart<'_>, name: &[u8]) -> Option<String
         })
 }
 
-/// Parse the scan number from a spectrum id attribute.
-///
-/// Handles ProteoWizard format: `"controllerType=0 controllerNumber=1 scan=1234"`
-/// and plain `"scan=1234"`.
+/// Parse the scan number from a spectrum id attribute: `scan=N` (Thermo,
+/// e.g. `"controllerType=0 controllerNumber=1 scan=1234"`), else `index=N`
+/// (e.g. timsTOF conversions), else `scanId=N` (Bruker).
 fn extract_scan_from_id(id: &str) -> Option<i32> {
-    id.split_whitespace()
-        .find_map(|tok| tok.strip_prefix("scan=")?.parse::<i32>().ok())
+    ["scan=", "index=", "scanId="].iter().find_map(|key| {
+        id.split_whitespace()
+            .find_map(|tok| tok.strip_prefix(key)?.parse::<i32>().ok())
+    })
+}
+
+/// The scan number of a spectrum: from its native id, else its 1-based
+/// position in the file, so no spectrum is left without one.
+fn scan_number(id: &str, index: Option<i32>) -> Option<i32> {
+    extract_scan_from_id(id).or_else(|| index.map(|i| i.saturating_add(1)))
 }
 
 /// Decode a `<binaryDataArray>` payload: base64 → optional zlib → f64 values.
@@ -2716,6 +2730,14 @@ mod tests {
     #[test]
     fn extract_scan_missing() {
         assert_eq!(extract_scan_from_id("spectrum=1"), None);
+        assert_eq!(extract_scan_from_id("index=101"), Some(101));
+        assert_eq!(extract_scan_from_id("scanId=7"), Some(7));
+        assert_eq!(
+            extract_scan_from_id("controllerType=0 controllerNumber=1 scan=42 index=9"),
+            Some(42)
+        );
+        assert_eq!(scan_number("sample=1 period=1 cycle=4 experiment=2", Some(16)), Some(17));
+        assert_eq!(scan_number("index=101", Some(0)), Some(101));
     }
 
     // ── Activation-method parsing ────────────────────────────────────────────

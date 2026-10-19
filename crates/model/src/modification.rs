@@ -48,6 +48,13 @@ pub struct Modification {
     /// stacked with a restricted terminal mod, `delta` is the restricted mod's
     /// own mass, not the stacked sum.
     pub annotated_site_mass: Option<f64>,
+    /// The enzyme does not cut at a residue carrying this mod (Mods.txt
+    /// `cleavage=blocked`), so the mod never sits on the residue a peptide was
+    /// cleaved at: its C-terminal residue for an enzyme that cuts after it (its
+    /// N-terminal residue for one that cuts before), unless that residue is the
+    /// protein's own terminus. True of most lysine acylations, GlyGly and di-
+    /// and trimethylation under trypsin; not of labels added after digestion.
+    pub blocks_cleavage: bool,
 }
 
 impl Modification {
@@ -104,6 +111,8 @@ pub enum ModParseError {
     UnknownLossClass { name: String },
     #[error("invalid sites value {value:?} (expected annotated|any)")]
     BadSites { value: String },
+    #[error("cleavage must be `blocked` or `kept`, got {value:?}")]
+    BadCleavage { value: String },
     #[error("sites=annotated needs a variable (`opt`) mod; a fixed mod applies everywhere")]
     AnnotatedSitesOnFixedMod,
     #[error("unknown Unimod accession {token:?}")]
@@ -170,6 +179,9 @@ impl Modification {
     ///   positions a UniProt XML database annotates with a modification of the
     ///   same mass (see [`Modification::annotated_site_mass`]); `any` (default)
     ///   applies it to every matching residue.
+    /// - `cleavage=<blocked|kept>` — `blocked`: the enzyme does not cut at a
+    ///   residue carrying this mod (see [`Modification::blocks_cleavage`]);
+    ///   `kept` (default): it does.
     ///
     /// **Caveat:** the mod name must not contain a comma. A comma after the name
     /// is parsed as the start of attribute fields; a token there that is not
@@ -278,6 +290,7 @@ impl Modification {
         let mut accession: Option<String> = None;
         let mut loss_class: u8 = 0;
         let mut annotated_sites = false;
+        let mut blocks_cleavage = false;
         for attr in &parts[5..] {
             let attr = attr.trim();
             if attr.is_empty() {
@@ -321,6 +334,17 @@ impl Modification {
                         loss_class_id(value).ok_or_else(|| ModParseError::UnknownLossClass {
                             name: value.trim().to_string(),
                         })?;
+                }
+                "cleavage" => {
+                    blocks_cleavage = match value.trim().to_ascii_lowercase().as_str() {
+                        "blocked" => true,
+                        "kept" => false,
+                        _ => {
+                            return Err(ModParseError::BadCleavage {
+                                value: value.trim().to_string(),
+                            })
+                        }
+                    };
                 }
                 "sites" => {
                     annotated_sites = match value.trim().to_ascii_lowercase().as_str() {
@@ -370,6 +394,7 @@ impl Modification {
             neutral_losses,
             loss_class,
             annotated_site_mass: annotated_sites.then_some(mass_delta),
+            blocks_cleavage,
         })
     }
 }
@@ -405,6 +430,7 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
         }
     }
 
@@ -434,6 +460,7 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
         };
         // Wildcard matches any residue at the specified location only.
         assert!(m.applies_to(b'A', ModLocation::ProtNTerm));
@@ -455,6 +482,7 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
         };
         assert!(m.applies_to(b'K', ModLocation::Anywhere));
         assert!(!m.applies_to(b'R', ModLocation::Anywhere));
@@ -472,6 +500,7 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
         };
         assert!(m.applies_to(b'A', ModLocation::NTerm));
         assert!(!m.applies_to(b'A', ModLocation::Anywhere));
@@ -756,6 +785,22 @@ xref: spec_1_site "C"
         assert!(matches!(
             Modification::from_mods_txt_line_with("Frobnicate,M,opt,any,X", &db),
             Err(ModParseError::UnresolvedMassField { .. })
+        ));
+    }
+
+    #[test]
+    fn cleavage_attribute_parses() {
+        let m = Modification::from_mods_txt_line("42.010565,K,opt,any,Acetyl,cleavage=blocked")
+            .unwrap();
+        assert!(m.blocks_cleavage);
+        let m =
+            Modification::from_mods_txt_line("42.010565,K,opt,any,Acetyl,cleavage=kept").unwrap();
+        assert!(!m.blocks_cleavage);
+        let m = Modification::from_mods_txt_line("42.010565,K,opt,any,Acetyl").unwrap();
+        assert!(!m.blocks_cleavage);
+        assert!(matches!(
+            Modification::from_mods_txt_line("42.010565,K,opt,any,Acetyl,cleavage=maybe"),
+            Err(ModParseError::BadCleavage { .. })
         ));
     }
 

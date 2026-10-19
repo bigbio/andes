@@ -70,6 +70,7 @@ fn standard_aa_set() -> model::AminoAcidSet {
         neutral_losses: Vec::new(),
         loss_class: 0,
         annotated_site_mass: None,
+        blocks_cleavage: false,
     };
     let ox = Modification {
         name: "Oxidation".into(),
@@ -81,6 +82,7 @@ fn standard_aa_set() -> model::AminoAcidSet {
         neutral_losses: Vec::new(),
         loss_class: 0,
         annotated_site_mass: None,
+        blocks_cleavage: false,
     };
     AminoAcidSetBuilder::new_standard()
         .add_fixed_mod(cam)

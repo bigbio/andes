@@ -65,6 +65,7 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
         };
         let aa = AminoAcid::standard(residue).unwrap().with_mod(m);
         Peptide::new(vec![aa, AminoAcid::standard(b'G').unwrap()], b'_', b'-')

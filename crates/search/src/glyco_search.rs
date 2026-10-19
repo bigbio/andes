@@ -299,6 +299,7 @@ fn glyco_aware_peptide(
                 neutral_losses: Vec::new(),
                 loss_class: 1,
                 annotated_site_mass: None,
+                blocks_cleavage: false,
             },
         ));
     }

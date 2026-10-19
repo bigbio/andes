@@ -100,6 +100,7 @@ fn peptide(seq: &[u8], dm: &[f64], cache: &mut HashMap<(u8, u64), &'static Modif
                     neutral_losses: Vec::new(),
                     loss_class: 0,
                     annotated_site_mass: None,
+                    blocks_cleavage: false,
                 })
             });
             aa = aa.with_mod(m);

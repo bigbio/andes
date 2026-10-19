@@ -362,6 +362,7 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
         };
         let m = AminoAcid::standard(b'M').unwrap().with_mod(oxidation);
         let g = AminoAcid::standard(b'G').unwrap();
@@ -422,6 +423,7 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
         };
         aa.with_mod(m)
     }
@@ -514,6 +516,7 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
         };
         let ox = Modification {
             name: "Oxidation".to_string(),
@@ -525,6 +528,7 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
         };
         AminoAcidSetBuilder::new_standard()
             .add_fixed_mod(cam)

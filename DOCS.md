@@ -577,6 +577,7 @@ Optional `key=value` attributes may follow the name, comma-separated:
 | `class=<glyco\|phospho\|sulfo\|generic>` | Pool the mod's loss ions with others of the class. |
 | `accession=<CURIE>` | Ontology accession reported in the outputs, e.g. `UNIMOD:21`. |
 | `sites=<annotated\|any>` | `annotated` restricts a **variable** mod to the residues a UniProt XML database annotates with a modification of the same mass ([§1a](#uniprot-xml-databases)). `any` (default) applies it to every matching residue. |
+| `cleavage=<blocked\|kept>` | `blocked`: the enzyme does not cut at a residue carrying this mod, so it is never placed on the residue a peptide was cleaved at (the C-terminal K/R under trypsin), except at the protein's own terminus. Use it for modifications present before digestion that block the protease: acetyl-, succinyl- and other lysine acylations, GlyGly, di- and trimethyl-K. Not for labels added after digestion (TMT, reductive dimethylation). `kept` (default): no restriction. |
 
 ### Example (a) — Carbamidomethyl C + Oxidation M
 

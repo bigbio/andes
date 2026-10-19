@@ -254,6 +254,7 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
         };
         let arc = model::modification::leak_mod(m);
         let residues: Vec<AminoAcid> = bytes
@@ -284,6 +285,7 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
         };
         let arc = model::modification::leak_mod(m);
         let residues: Vec<AminoAcid> = bytes

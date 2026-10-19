@@ -174,6 +174,7 @@ fn small_search_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
         neutral_losses: Vec::new(),
         loss_class: 0,
         annotated_site_mass: None,
+        blocks_cleavage: false,
     };
     let aa_set = AminoAcidSetBuilder::new_standard()
         .add_variable_mod(ox_m.clone())
@@ -238,6 +239,7 @@ fn asymmetric_cam_only_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
         neutral_losses: Vec::new(),
         loss_class: 0,
         annotated_site_mass: None,
+        blocks_cleavage: false,
     };
     let aa_set = AminoAcidSetBuilder::new_standard()
         .add_fixed_mod(cam)
@@ -275,6 +277,7 @@ fn asymmetric_cam_only_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
         };
         for aa in r.iter_mut() {
             if aa.residue == b'C' {
@@ -853,6 +856,7 @@ fn glyco_table_from_the_index_is_the_enumeration_sequon_subset_in_order() {
         neutral_losses: Vec::new(),
         loss_class: 0,
         annotated_site_mass: None,
+        blocks_cleavage: false,
     };
     let aa_set = AminoAcidSetBuilder::new_standard()
         .add_variable_mod(ox_m)

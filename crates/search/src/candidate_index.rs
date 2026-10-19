@@ -813,6 +813,7 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
         };
         let aa_set = AminoAcidSetBuilder::new_standard()
             .add_variable_mod(ox_m)

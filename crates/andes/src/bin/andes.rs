@@ -24,6 +24,8 @@ mod memlimit;
 mod model_select;
 #[path = "andes/mono.rs"]
 mod mono;
+#[path = "andes/predicted.rs"]
+mod predicted;
 #[path = "andes/quant_cmd.rs"]
 mod quant_cmd;
 #[path = "andes/quant_mbr.rs"]

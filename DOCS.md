@@ -487,6 +487,11 @@ when a pipeline (e.g. quantms) owns rescoring. `--fdr`/`--pep` alone are ignored
 | `--pep` | fraction | *(off)* | *(advanced)* PEP threshold, ANDed with `--fdr` (and with `--quant-fdr` for quantification targets and `--mbr` donors). |
 | `--percolator-bin` / `--percolator-docker` / `--percolator-image` / `--percolator-args` | — | auto | *(advanced)* Backend: `--percolator-bin`, else `$PATH`, else Docker; `--percolator-args` passes flags through. |
 | `--keep-pin` | bool | `true` | *(advanced)* With `--rescore`/`--rescore-native` and no `--output-pin`: `true` writes the PIN (and Percolator's result files) as `<base>.pin`, where `<base>` is `--output-tsv`, else `--output-parquet`, else `./andes`; `false` uses a temporary PIN deleted at exit. An explicit `--output-pin` is always kept. |
+| `--predict` | list | `rt` | Predicted-spectrum and retention-time features added to the PIN (§3a, predicted features): `rt` (bundled andes-rt model), `ms2` (AlphaPeptDeep fragment intensities), `peptdeep-rt`, `deeplc-rt`, comma-separated, or `none`. They are Percolator features; andes computes no FDR from them. |
+| `--predictor-models` | dir | *(none)* | Directory with the exported AlphaPeptDeep (`peptdeep_mods.json`, `peptdeep_{ms2,rt}_dynamic.{json,onnx}`) and DeepLC (`deeplc_rt.{json,onnx}`) models that `ms2`, `peptdeep-rt` and `deeplc-rt` load. A requested model that is missing stops the run before the search. |
+| `--predictor-backend` | `tract`\|`ort` | `tract` | *(advanced)* ONNX engine for those models: tract (pure Rust, built in) or ONNX Runtime (a build with `--features ort`; the runtime library is found through `ORT_DYLIB_PATH`). |
+| `--predictor-nce` / `--predictor-instrument` | — | auto | *(advanced)* Collision energy and instrument given to the AlphaPeptDeep MS2 model. Default NCE 28 on Q Exactive, 30 otherwise; instrument from the resolved one (Q Exactive → `QE`, timsTOF → `timsTOF`, TOF → `SciexTOF`, otherwise `Lumos`). |
+| `--predictor-batch` | int | `256` | *(advanced)* Peptides per predictor batch. |
 
 ### Glycopeptide search
 
@@ -724,6 +729,25 @@ the fused strong score Percolator weights most; historically `StrongScore`; it a
 
 Columns marked **0.0 unless/without** stay in the header and are zero when their condition
 does not hold.
+
+**Predicted features (`--predict`).** After the PIN is written, each requested predictor scores
+every row, targets and decoys alike, and its columns are inserted before `Peptide`
+(`<p>` = `andesrt` for `rt`, `pdeep` for `ms2` / `peptdeep-rt`, `deeplc` for `deeplc-rt`):
+
+| Column | Type | Description |
+|---|---|---|
+| `pdeep_spec_pearson_norm`, `pdeep_ionb_pearson_norm`, `pdeep_iony_pearson_norm` | float | Pearson correlation of predicted and observed b/y (z ≤ 2, ≤ precursor charge) intensities: all ions, b ions, y ions. Both vectors are normalised to unit sum; an ion's observed intensity is the most intense peak within the fragment tolerance (20 ppm high-res, 0.5 Da low-res, or `--fragment-tol-ppm`/`--fragment-tol-da`). |
+| `pdeep_spec_mse_norm`, `pdeep_dotprod_norm`, `pdeep_cos_norm`, `pdeep_spectral_angle` | float | Mean squared error, dot product, cosine and normalised spectral angle of the same vectors. |
+| `pdeep_pred_explained` | float | Predicted intensity share of the ions that matched a peak. |
+| `<p>_rt_diff` | float | \|observed − predicted RT\| (min). Predicted RT is mapped to minutes per input file by an isotonic fit (a line below 20 anchors) on anchor PSMs: per spectrum the row with the highest `RawScore`, kept when it is a target at target-decoy q ≤ 0.01 within its file. |
+| `<p>_predicted_rt` | float | Calibrated predicted RT (min). |
+| `<p>_missing` | 0/1 | 1 when the predictor could not score the row (a modification or length the model does not encode, no observed RT, no calibration); the row's other columns of that predictor hold the median over scored rows. |
+
+A predictor that scores no row (e.g. an input without retention times) adds no columns.
+`--glyco` writes its own `.glyco.pin` without predicted features.
+andes-rt encodes modifications by elemental composition (35 Unimod entries); AlphaPeptDeep
+encodes the modifications its `peptdeep_mods.json` lists; DeepLC encodes CAM, oxidation, acetyl,
+TMT, phospho, deamidation and pyro-Glu by composition.
 
 ### 3b. TSV columns
 

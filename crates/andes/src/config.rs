@@ -125,6 +125,12 @@ pub struct RescoringCfg {
     pub percolator_image: Option<String>,
     pub percolator_args: Option<String>,
     pub keep_pin: Option<bool>,
+    pub predict: Option<Vec<String>>,
+    pub predictor_models: Option<PathBuf>,
+    pub predictor_backend: Option<String>,
+    pub predictor_nce: Option<f32>,
+    pub predictor_instrument: Option<String>,
+    pub predictor_batch: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -406,6 +412,36 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         cfg.rescoring.percolator_args
     );
     set!("keep_pin", keep_pin, cfg.rescoring.keep_pin);
+    if let Some(list) = cfg.rescoring.predict {
+        if !cli_set(m, "predict") {
+            args.predict = list
+                .iter()
+                .map(|s| crate::cli::parse_predict_feature(s))
+                .collect::<Result<_, _>>()?;
+        }
+    }
+    set_opt!(
+        "predictor_models",
+        predictor_models,
+        cfg.rescoring.predictor_models
+    );
+    set_parsed!(
+        "predictor_backend",
+        predictor_backend,
+        cfg.rescoring.predictor_backend,
+        crate::cli::parse_predictor_backend
+    );
+    set_opt!("predictor_nce", predictor_nce, cfg.rescoring.predictor_nce);
+    set_opt!(
+        "predictor_instrument",
+        predictor_instrument,
+        cfg.rescoring.predictor_instrument
+    );
+    set!(
+        "predictor_batch",
+        predictor_batch,
+        cfg.rescoring.predictor_batch
+    );
 
     // ── quant ──
     if let Some(v) = cfg.quant.tmt {
@@ -745,6 +781,49 @@ glyco:
         let cfg = RunConfig::from_yaml_str("io:\n  uniprot_evidence: curated\n").unwrap();
         apply(cfg, &mut a, &cli).unwrap();
         assert_eq!(a.uniprot_evidence, input::EvidenceLevel::Any);
+    }
+
+    /// The predictor keys apply through the CLI's validators; an explicit
+    /// `--predict` still wins.
+    #[test]
+    fn predict_keys_apply_with_cli_precedence() {
+        use crate::cli::{PredictFeature, PredictorBackend};
+        use clap::{CommandFactory, FromArgMatches};
+        let base = [
+            "andes",
+            "--spectrum",
+            "x",
+            "--database",
+            "y.fasta",
+            "--output-pin",
+            "o",
+        ];
+        let matches = crate::TopCli::command()
+            .try_get_matches_from(base)
+            .expect("parse baseline args");
+        let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
+        let cfg = RunConfig::from_yaml_str(
+            "rescoring:\n  predict: [rt, ms2]\n  predictor_models: /m\n  \
+             predictor_backend: ort\n  predictor_nce: 27\n",
+        )
+        .unwrap();
+        apply(cfg, &mut a, &matches).unwrap();
+        assert_eq!(a.predict, vec![PredictFeature::Rt, PredictFeature::Ms2]);
+        assert_eq!(a.predictor_models, Some(PathBuf::from("/m")));
+        assert_eq!(a.predictor_backend, PredictorBackend::Ort);
+        assert_eq!(a.predictor_nce, Some(27.0));
+
+        let bad = RunConfig::from_yaml_str("rescoring:\n  predict: [ms3]\n").unwrap();
+        let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
+        assert!(apply(bad, &mut a, &matches).is_err());
+
+        let cli = crate::TopCli::command()
+            .try_get_matches_from(base.into_iter().chain(["--predict", "none"]))
+            .unwrap();
+        let mut a = crate::SearchArgs::from_arg_matches(&cli).unwrap();
+        let cfg = RunConfig::from_yaml_str("rescoring:\n  predict: [rt]\n").unwrap();
+        apply(cfg, &mut a, &cli).unwrap();
+        assert_eq!(a.predict, vec![PredictFeature::None]);
     }
 
     /// The shipped `config.example.yaml` must parse against the current schema, so

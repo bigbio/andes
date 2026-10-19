@@ -336,7 +336,11 @@ pub(crate) fn add_claims(
                 .or_default()
                 .push(i),
             None => {
-                existing.insert((o.family.clone(), o.kind, p.sequence.clone()), i);
+                // The first entry of a key keeps it; equal later ones stay
+                // separate entries.
+                existing
+                    .entry((o.family.clone(), o.kind, p.sequence.clone()))
+                    .or_insert(i);
                 members
                     .entry((o.family.clone(), o.feature.clone()))
                     .or_default()

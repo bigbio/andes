@@ -182,8 +182,10 @@ pub fn site_claims(
         if mods.is_empty() {
             continue;
         }
-        // Each with the modification's offset in the peptide.
-        let mut real: Vec<(Key, (usize, u32, u64), bool, usize)> = Vec::new();
+        // Each with the modification's offset in the peptide: (stratum, site,
+        // tested, offset) and (stratum, weight, restricted, offset).
+        type RealPlacement = (Key, (usize, u32, u64), bool, usize);
+        let mut real: Vec<RealPlacement> = Vec::new();
         let mut knock: Vec<(Key, f64, bool, usize)> = Vec::new();
         for acc in psm.proteins.split(';') {
             let Some(&i) = by_acc.get(acc) else {

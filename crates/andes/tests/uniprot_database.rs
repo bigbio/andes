@@ -318,7 +318,10 @@ fn knockoff_variants_are_searched_but_never_reported() {
         &["--uniprot-variants", "--uniprot-evidence", "any"],
     );
     let stderr = String::from_utf8_lossy(&external.stderr);
-    assert!(stderr.contains("no knockoff variants or sites are built"), "{stderr}");
+    assert!(
+        stderr.contains("no knockoff variants or sites are built"),
+        "{stderr}"
+    );
     let pin = std::fs::read_to_string(dir.path().join("external.pin")).unwrap();
     assert!(!pin.contains("_KO"));
 }

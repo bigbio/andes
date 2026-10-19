@@ -462,7 +462,10 @@ fn audit_rescore_join(
     // A decoy that lost its group's competition is left out like a losing
     // target, so the bundle holds the same competed set for both labels.
     if let Some(d) = decoys {
-        for r in rows.iter().filter(|r| r.is_decoy && !d.contains(&r.spec_id)) {
+        for r in rows
+            .iter()
+            .filter(|r| r.is_decoy && !d.contains(&r.spec_id))
+        {
             if winners.get(&r.group) == Some(&1) {
                 competed_away.insert(r.spec_id.clone());
             }
@@ -642,7 +645,11 @@ fn build_psms_batch(
                 None => rt.append_null(),
             }
             ion_mobility.append_null();
-            spectrum_reference.append_value(spectrum_ref(spec, scan_num, reference_files[spec_idx]));
+            spectrum_reference.append_value(spectrum_ref(
+                spec,
+                scan_num,
+                reference_files[spec_idx],
+            ));
             // Headline score = the rank/RawScore the PIN emits (psm.score, the
             // ranking signal; rounded in the PIN, kept full-precision here).
             score.append_value(psm.score as f64);

@@ -2736,7 +2736,10 @@ mod tests {
             extract_scan_from_id("controllerType=0 controllerNumber=1 scan=42 index=9"),
             Some(42)
         );
-        assert_eq!(scan_number("sample=1 period=1 cycle=4 experiment=2", Some(16)), Some(17));
+        assert_eq!(
+            scan_number("sample=1 period=1 cycle=4 experiment=2", Some(16)),
+            Some(17)
+        );
         assert_eq!(scan_number("index=101", Some(0)), Some(101));
     }
 

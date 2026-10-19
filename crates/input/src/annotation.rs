@@ -368,7 +368,9 @@ pub(crate) fn knockoff_positions(
             seq[q] == o
                 && next_ok(q)
                 && sequon(seq, q) == sequon(seq, p)
-                && listed.iter().all(|&r| r.abs_diff(q) >= KNOCKOFF_MIN_DISTANCE)
+                && listed
+                    .iter()
+                    .all(|&r| r.abs_diff(q) >= KNOCKOFF_MIN_DISTANCE)
                 && {
                     let (qa, qb) = enzymatic_span(seq, q, ko.enzyme);
                     qa != pa && (qb - qa).abs_diff(pb - pa) <= 3 && (6..=50).contains(&(qb - qa))

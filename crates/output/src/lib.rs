@@ -66,8 +66,8 @@ pub use glyco_pin::write_glyco_pin;
 
 pub mod quant_out;
 pub use quant_out::{
-    read_lfq_parquet, read_tmt_parquet, write_lfq_parquet, write_tmt_parquet, LfqRow,
-    LfqTableMeta, ModRecord, QuantId, TmtRow,
+    read_lfq_parquet, read_tmt_parquet, write_lfq_parquet, write_tmt_parquet, LfqRow, LfqTableMeta,
+    ModRecord, QuantId, TmtRow,
 };
 
 pub mod run_quant_table;
@@ -80,5 +80,5 @@ pub mod ms2_table;
 pub mod feature_parquet;
 pub mod mbr_out;
 pub mod versioned_parquet;
-pub use versioned_parquet::ReadTable;
 pub use feature_parquet::{write_feature_parquet, FeatureRecord, ProteinPosition};
+pub use versioned_parquet::ReadTable;

@@ -7,7 +7,7 @@
 //! proportional to the designed apex intensities.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use arrow::array::{Array, Float64Array, ListArray};
@@ -65,7 +65,7 @@ fn read_table(t: &output::ReadTable) -> (Vec<String>, Vec<Vec<String>>) {
 
 /// `tmt.parquet` as text, with only the PSMs that passed the quantification
 /// gate, and its row count with the gated ones.
-fn read_tmt(path: &PathBuf) -> (Vec<String>, Vec<Vec<String>>, usize) {
+fn read_tmt(path: &Path) -> (Vec<String>, Vec<Vec<String>>, usize) {
     let t = output::read_tmt_parquet(path).unwrap_or_else(|e| panic!("{e}"));
     let (header, rows) = read_table(&t);
     let all = rows.len();

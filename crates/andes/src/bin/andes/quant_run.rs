@@ -509,9 +509,11 @@ impl GateCounts {
     }
 }
 
-/// Suggested roll-up weight of a PSM that passed the quantification gate.
-fn quant_weight(purity: Option<f32>, _sn_sum: Option<f32>) -> f32 {
-    purity.unwrap_or(1.0).clamp(0.0, 1.0)
+/// Suggested roll-up weight of a PSM that passed the quantification gate:
+/// purity squared (1 without a purity), so the PSMs most exposed to
+/// co-isolated ions count less in a weighted protein or peptide sum.
+fn quant_weight(purity: Option<f32>) -> f32 {
+    purity.unwrap_or(1.0).clamp(0.0, 1.0).powi(2)
 }
 
 /// One MS2 spectrum reduced for its run's MS2 table: the
@@ -1287,7 +1289,7 @@ pub(crate) fn run_quant(
                     corrected,
                     sn,
                     quant_weight: if passes {
-                        quant_weight(purity, sn_sum)
+                        quant_weight(purity)
                     } else {
                         0.0
                     },
@@ -1802,6 +1804,37 @@ mod tests {
             e.contains("a/run1.mzML ") && e.contains("b/run1.mzML.gz") && e.contains("\"run1\""),
             "{e}"
         );
+    }
+
+    #[test]
+    fn quantification_gate_counts_the_first_failed_criterion() {
+        let mut s = settings(false, None);
+        s.min_purity = 0.7;
+        s.max_pep = 0.05;
+        s.min_sn = 100.0;
+        let mut g = GateCounts::default();
+        assert!(g.check(&s, Some(0.9), Some(500.0), Some(0.01)));
+        // Missing values do not fail their criterion.
+        assert!(g.check(&s, None, None, None));
+        assert!(!g.check(&s, Some(0.5), Some(50.0), Some(0.5)));
+        assert!(!g.check(&s, Some(0.8), Some(50.0), Some(0.5)));
+        assert!(!g.check(&s, Some(0.8), Some(50.0), Some(0.01)));
+        assert_eq!((g.purity, g.pep, g.sn), (1, 1, 1));
+        let text = g.describe(&s);
+        assert!(text.contains("1 below purity 0.7"), "{text}");
+        assert!(text.contains("1 above PEP 0.05"), "{text}");
+        assert!(text.contains("1 below summed S/N 100"), "{text}");
+        // The off values let everything through.
+        let off = settings(false, None);
+        assert!(GateCounts::default().check(&off, Some(0.0), Some(0.0), Some(1.0)));
+        assert!(GateCounts::default().describe(&off).is_empty());
+    }
+
+    #[test]
+    fn roll_up_weight_is_purity_squared() {
+        assert_eq!(quant_weight(None), 1.0);
+        assert!((quant_weight(Some(0.8)) - 0.64).abs() < 1e-6);
+        assert_eq!(quant_weight(Some(1.2)), 1.0);
     }
 
     #[test]

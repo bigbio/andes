@@ -3701,6 +3701,68 @@ mod tests {
     }
 
     #[test]
+    fn noise_capture_reads_the_sampled_noise_arrays() {
+        let noise_arrays = format!(
+            "{}{}",
+            bda_plain("MS:1002743", &encode_f64_b64(&[120.0, 130.0, 200.0, 900.0])),
+            bda_plain("MS:1002744", &encode_f64_b64(&[100.0, 200.0, 300.0, 50.0])),
+        );
+        let ms2 = format!(
+            r#"<spectrum index="0" id="scan=10" defaultArrayLength="1">
+              <cvParam accession="MS:1000511" name="ms level" value="2"/>
+              <scanList count="1"><scan/></scanList>
+              <precursorList count="1"><precursor>
+                <selectedIonList count="1"><selectedIon>
+                  <cvParam accession="MS:1000744" name="selected ion m/z" value="500.5"/>
+                  <cvParam accession="MS:1000041" name="charge state" value="2"/>
+                </selectedIon></selectedIonList>
+              </precursor></precursorList>
+              <binaryDataArrayList count="4">{mz}{int}{noise_arrays}</binaryDataArrayList>
+            </spectrum>"#,
+            mz = bda_plain("MS:1000514", &encode_f64_b64(&[126.1277])),
+            int = bda_plain("MS:1000515", &encode_f64_b64(&[1000.0])),
+        );
+        let ms3 = format!(
+            r#"<spectrum index="1" id="scan=11" defaultArrayLength="1">
+              <cvParam accession="MS:1000511" name="ms level" value="3"/>
+              <scanList count="1"><scan/></scanList>
+              <precursorList count="1"><precursor spectrumRef="scan=10">
+                <selectedIonList count="1"><selectedIon>
+                  <cvParam accession="MS:1000744" name="selected ion m/z" value="500.5"/>
+                </selectedIon></selectedIonList>
+              </precursor></precursorList>
+              <binaryDataArrayList count="4">{mz}{int}{noise_arrays}</binaryDataArrayList>
+            </spectrum>"#,
+            mz = bda_plain("MS:1000514", &encode_f64_b64(&[126.1277])),
+            int = bda_plain("MS:1000515", &encode_f64_b64(&[1000.0])),
+        );
+        let xml = wrap_spectra(&format!("{ms2}{ms3}"));
+        let mut reader = MzMLReader::new(Cursor::new(xml.clone()))
+            .with_product_scan_capture(true)
+            .with_scan_context_capture(true)
+            .with_noise_capture(true);
+        let spectra: Vec<Spectrum> = reader.by_ref().map(|r| r.expect("parse")).collect();
+        assert_eq!(spectra.len(), 1);
+        // The noise arrays never reach the peak list.
+        assert_eq!(spectra[0].peaks, vec![(126.1277, 1000.0)]);
+        let contexts = reader.take_scan_contexts();
+        let ms3s = reader.take_product_scans();
+        for noise in [&contexts[0].noise, &ms3s[0].noise] {
+            let noise = noise.as_ref().expect("noise captured");
+            // 120, 130 and the first point above 140 (200) are kept.
+            assert_eq!(noise.len(), 3);
+            assert!((noise.at(125.0) - 150.0).abs() < 1e-4);
+        }
+        // Capture off: no noise kept.
+        let mut plain = MzMLReader::new(Cursor::new(xml))
+            .with_product_scan_capture(true)
+            .with_scan_context_capture(true);
+        let _: Vec<Spectrum> = plain.by_ref().map(|r| r.expect("parse")).collect();
+        assert!(plain.take_scan_contexts()[0].noise.is_none());
+        assert!(plain.take_product_scans()[0].noise.is_none());
+    }
+
+    #[test]
     fn chunked_ms1_linkage_matches_batch_across_boundaries() {
         // Layout exercising both an MS1 carry-over across a chunk boundary and a
         // new MS1 mid-chunk:  MS1#a, MS2_1, MS2_2, MS2_3, MS1#b, MS2_4.

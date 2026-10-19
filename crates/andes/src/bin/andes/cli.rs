@@ -725,7 +725,7 @@ pub(crate) struct SearchArgs {
     /// Quantification gate: leave PSMs whose Percolator PEP is above this out
     /// of `tmt.tsv` (they stay in the identification output). Needs
     /// `--rescore`. 1 turns the criterion off.
-    #[arg(long = "tmt-max-pep", default_value = "1", value_parser = parse_unit_fraction)]
+    #[arg(long = "tmt-max-pep", default_value = "0.05", value_parser = parse_unit_fraction)]
     pub(crate) tmt_max_pep: f64,
 
     /// Quantification gate: leave PSMs whose summed reporter signal-to-noise

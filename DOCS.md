@@ -1433,7 +1433,8 @@ than `--shard-rows` extract rows (default 1,000,000) it splits them by precursor
 temporary extract tables next to its output and holds one shard at a time, over four passes
 (training rows, held-out scores, normalisation cells, outputs). The results do not depend on
 the shard size. Two caps bound the rest: each GBDT trains on at most `--max-train-rows` rows
-(default 3,000,000; above it, every row of a hashed sample of whole precursors, all rows still
+(default 3,000,000; above it, the rows of a hashed sample of (precursor, run) pairs, so every
+precursor still trains in some runs and a target stays with its decoys; all rows are still
 scored), and the run normalisation fits at most `--max-norm-cells` reference cells (default
 20,000,000, about 150 bytes each; above it, a hashed sample of whole precursors, which coarsens
 the RT-local offsets). Below the caps the outputs are byte-identical to an all-in-memory run.

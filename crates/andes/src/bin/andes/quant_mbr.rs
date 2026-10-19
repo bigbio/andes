@@ -94,7 +94,8 @@ use quant::normalize::{fit as fit_normalization, NormCell, NormParams};
 use rayon::prelude::*;
 
 use crate::transfer_fdr::{
-    train_folds, Estimate, FdrCounts, FdrRow, FoldModels, FoldScores, QValues, TrainingSample,
+    row_unit, train_folds, Estimate, FdrCounts, FdrRow, FoldModels, FoldScores, QValues,
+    TrainingSample,
     IDENTIFIED_FEATURES, IDENTITY, TRANSFER_FEATURES,
 };
 
@@ -1026,8 +1027,8 @@ pub(crate) struct StreamLimits {
     /// time; otherwise they are held in memory as one shard.
     pub shard_rows: usize,
     /// Training rows per classifier (transfers, identified rows). Above it
-    /// the classifier is trained on the rows of a hashed sample of whole
-    /// precursors (every row still scored by its fold's model).
+    /// the classifier is trained on the rows of a hashed sample of
+    /// (precursor, run) pairs (every row still scored by its fold's model).
     pub max_train_rows: usize,
     /// Reference cells of the run normalisation. Above it the fit uses a
     /// hashed sample of whole precursors (coarser RT-local offsets).
@@ -1472,8 +1473,8 @@ pub(crate) fn finalize_stream(
                     x,
                 };
                 match t {
-                    Table::Identified => i_sample.push(key, r.precursor, row),
-                    _ => t_sample.push(key, r.precursor, row),
+                    Table::Identified => i_sample.push(key, row_unit(r.precursor, r.run), row),
+                    _ => t_sample.push(key, row_unit(r.precursor, r.run), row),
                 }
             }
         }
@@ -1483,7 +1484,7 @@ pub(crate) fn finalize_stream(
         let (seen, kept, share) = s.stats();
         if kept < seen {
             eprintln!(
-                "[mbr] {name} classifier: trained on {kept} of {seen} rows (whole precursors, {share} of them; every row is scored)"
+                "[mbr] {name} classifier: trained on {kept} of {seen} rows ((precursor, run) pairs, {share} of them; every row is scored)"
             );
         }
     }

@@ -966,9 +966,9 @@ pub(crate) struct QuantFinalizeArgs {
     pub(crate) shard_rows: usize,
 
     /// Advanced: training rows per transfer or identified-quality
-    /// classifier. Above it the classifier is trained on a hashed sample of
-    /// whole precursors (every row is still scored); below it every row
-    /// trains. Default 3000000.
+    /// classifier. Above it the classifier is trained on the rows of a
+    /// hashed sample of (precursor, run) pairs (every row is still scored);
+    /// below it every row trains. Default 3000000.
     #[arg(long = "max-train-rows", hide = true, default_value_t = crate::quant_mbr::DEFAULT_MAX_TRAIN_ROWS)]
     pub(crate) max_train_rows: usize,
 

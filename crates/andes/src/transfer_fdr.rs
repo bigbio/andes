@@ -267,20 +267,20 @@ impl FoldModels {
     }
 }
 
-/// Rows of a classifier (or any per-precursor items) collected over a
-/// stream, at most `cap` of them, by whole precursors: a precursor's items
-/// are kept when the top `level` bits of a hash of its id are zero, and
-/// `level` rises by one each time the kept items exceed `cap`. The kept set
-/// is thus every item of the precursors at the final level, whatever the
-/// order the items came in, and all items when they never exceed `cap`.
-/// Items carry a sort key so that [`TrainingSample::into_items`] can return
-/// them in a fixed order.
+/// Items (training rows, normalisation cells) collected over a stream, at
+/// most `cap` of them, by sampling units: every item carries a unit id (a
+/// precursor, or a precursor in one run), a unit's items are kept when the
+/// top `level` bits of a hash of its id are zero, and `level` rises by one
+/// each time the kept items exceed `cap`. The kept set is thus every item of
+/// the units at the final level, whatever the order the items came in, and
+/// all items when they never exceed `cap`. Items carry a sort key so that
+/// [`TrainingSample::into_items`] can return them in a fixed order.
 pub struct TrainingSample<K, T = FdrRow> {
     cap: usize,
     seed: u64,
     level: u32,
     seen: usize,
-    items: Vec<(K, u32, T)>,
+    items: Vec<(K, u64, T)>,
 }
 
 impl<K: Ord, T> TrainingSample<K, T> {
@@ -294,25 +294,25 @@ impl<K: Ord, T> TrainingSample<K, T> {
         }
     }
 
-    fn kept(seed: u64, precursor: u32, level: u32) -> bool {
-        level == 0 || sample_hash(precursor, seed) >> (64 - level) == 0
+    fn kept(seed: u64, unit: u64, level: u32) -> bool {
+        level == 0 || sample_hash(unit, seed) >> (64 - level) == 0
     }
 
-    /// Offers `item` of `precursor`.
-    pub fn push(&mut self, key: K, precursor: u32, item: T) {
+    /// Offers `item` of sampling unit `unit`.
+    pub fn push(&mut self, key: K, unit: u64, item: T) {
         self.seen += 1;
-        if !Self::kept(self.seed, precursor, self.level) {
+        if !Self::kept(self.seed, unit, self.level) {
             return;
         }
-        self.items.push((key, precursor, item));
+        self.items.push((key, unit, item));
         while self.items.len() > self.cap && self.level < 63 {
             self.level += 1;
             let (seed, level) = (self.seed, self.level);
-            self.items.retain(|(_, p, _)| Self::kept(seed, *p, level));
+            self.items.retain(|(_, u, _)| Self::kept(seed, *u, level));
         }
     }
 
-    /// Items offered, items kept and the share of precursors kept.
+    /// Items offered, items kept and the share of units kept.
     pub fn stats(&self) -> (usize, usize, f64) {
         (self.seen, self.items.len(), 0.5f64.powi(self.level as i32))
     }
@@ -326,12 +326,19 @@ impl<K: Ord, T> TrainingSample<K, T> {
     }
 }
 
-/// The precursor hash of [`TrainingSample`] (splitmix64 of the id, on a seed
+/// The sampling unit of a training row: its precursor in its run, so that a
+/// sample keeps every precursor (in some runs) and a target stays with its
+/// decoys. Folds are by precursor, so a held-out precursor is never trained
+/// on.
+pub fn row_unit(precursor: u32, run: u16) -> u64 {
+    ((precursor as u64) << 16) | run as u64
+}
+
+/// The unit hash of [`TrainingSample`] (splitmix64 of the id, on a seed
 /// apart from the folds').
-pub fn sample_hash(precursor: u32, seed: u64) -> u64 {
-    let mut z =
-        (seed ^ 0x5bd1_e995_7a4f_3c21 ^ (precursor as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))
-            .wrapping_add(0x9e37_79b9_7f4a_7c15);
+pub fn sample_hash(unit: u64, seed: u64) -> u64 {
+    let mut z = (seed ^ 0x5bd1_e995_7a4f_3c21 ^ unit.wrapping_mul(0x9e37_79b9_7f4a_7c15))
+        .wrapping_add(0x9e37_79b9_7f4a_7c15);
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     z ^ (z >> 31)
@@ -1090,11 +1097,11 @@ mod tests {
         let rows = rows(3000, 1.0, &[1, 2], 5);
         let mut a: TrainingSample<usize> = TrainingSample::new(2500, 42);
         for (i, r) in rows.iter().enumerate() {
-            a.push(i, r.precursor, r.clone());
+            a.push(i, r.precursor as u64, r.clone());
         }
         let mut b: TrainingSample<usize> = TrainingSample::new(2500, 42);
         for (i, r) in rows.iter().enumerate().rev() {
-            b.push(i, r.precursor, r.clone());
+            b.push(i, r.precursor as u64, r.clone());
         }
         let (seen, kept, share) = a.stats();
         assert_eq!(seen, 9000);
@@ -1114,7 +1121,7 @@ mod tests {
         // Under the cap every row is kept, in key order.
         let mut all: TrainingSample<usize> = TrainingSample::new(10_000, 42);
         for (i, r) in rows.iter().enumerate() {
-            all.push(i, r.precursor, r.clone());
+            all.push(i, r.precursor as u64, r.clone());
         }
         assert_eq!(all.into_items(), rows);
     }

@@ -1288,11 +1288,7 @@ pub(crate) fn run_quant(
                     raw,
                     corrected,
                     sn,
-                    quant_weight: if passes {
-                        quant_weight(purity)
-                    } else {
-                        0.0
-                    },
+                    quant_weight: if passes { quant_weight(purity) } else { 0.0 },
                 });
             }
         }

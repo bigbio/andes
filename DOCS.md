@@ -320,7 +320,7 @@ of the matching FASTA gives the same entries and the same PIN.
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--annotations` | path, repeatable | *(none)* | A Parquet annotations file. Several files are merged: equal claims become one entry, and an `annotation_id` must name one claim across all files. |
+| `--annotations` | path, repeatable | *(none)* | A Parquet annotations file. Several files are merged: equal claims become one entry, and an `annotation_id` must name one claim of its reference across all files. |
 
 **File format.** Parquet with the key-value metadata `andes.annotations.schema = 1`. One row per
 claim. Integer fields may be of any integer type, and other columns are ignored.
@@ -334,6 +334,29 @@ claim. Integer fields may be of any integer type, and other columns are ignored.
 | `edits` | list<struct<start, end, ref: utf8, alt: utf8>> | no | Sequence edits on the reference, 0-based half-open, sorted and disjoint; `ref` must equal the reference residues, and an empty `alt` is a deletion. Edits on one row occur together (in cis). |
 | `mods` | list<struct<position, residue: utf8, mass: f64, anchor: utf8>> | no | Modification sites, in the coordinates of the entry (after the edits, or within the chain). `anchor`: `residue` (default), `protein_n_term` or `protein_c_term`. |
 | `processing` | struct<start, end> | no | A mature chain: reference residues `[start, end)`. It must make a new terminus. |
+| `genotype` | utf8 | no | The sample's own call (`0/1`, `1/1`, `1\|0`, …). |
+| `population_af` | float | no | Allele frequency in a reference population. |
+| `evidence` | utf8 | no | `experimental`, `curated` or `any`, as in `--uniprot-evidence`. |
+| `clinical_significance` | utf8 | no | Clinical class, e.g. `benign`, `likely benign`, `pathogenic`. |
+
+**Prior tiers.** Each claim gets a tier from what its source says. The first rule that holds wins:
+
+| Tier | Rule |
+|---|---|
+| `sample` | a `genotype` other than reference or missing (`0/0`, `./.`) |
+| `common` | `population_af` ≥ 0.01 |
+| `curated` | `evidence` `experimental` or `curated`, or a benign `clinical_significance` |
+| `catalogue` | anything else |
+
+UniProt XML variants are `curated`, or `catalogue` when only `--uniprot-evidence any` admits them.
+PEFF claims are `catalogue`. When equal claims are merged, the best tier is kept, `sample`
+first. An annotation claim equal to an entry the database already holds (a UniProt
+XML or PEFF variant or chain that reads the same) joins that entry instead of adding a second
+one, and the entry and its knockoffs take the better tier. The run log counts these merges. Knockoff q-values are estimated per substitution class within each tier, so claims of
+different reliability do not share one estimate. A class with fewer than 50 tested PSMs at the
+cutoff in a tier joins the class's other small tiers. Classes are never pooled with each other,
+and a run with one tier is stratified by class alone. The proteoform table reports each member's
+`source` and `prior_tier`.
 
 A row needs `edits`, `mods` or `processing`:
 - `edits` make a variant entry, with knockoffs for a single-residue substitution;
@@ -349,6 +372,26 @@ Edits together with processing are not supported yet. Rows are checked on load:
   reference.
 
 The run log counts every row left out, by reason.
+
+### PEFF databases
+
+`--database x.peff` (or `.peff.gz`) reads a PSI Extended FASTA Format file: FASTA whose headers
+carry `\Key=value` annotations. The accession is the header's first token (`sp:P04637`), whose
+primary accession (`P04637`) names the family; `\PName` is the description. The variant,
+modification and processing keys become claims about the entry, checked and built exactly like
+the rows of an annotation file. Positions are 1-based and inclusive.
+
+| Key | Value | Becomes |
+|---|---|---|
+| `\VariantSimple` | `(pos\|aa[\|tag])…` | a one-residue substitution, named by its tag or `VAR_<change>` |
+| `\VariantComplex` | `(start\|end\|seq[\|tag])…` | an edit; an empty `seq` is a deletion |
+| `\ModResUnimod` | `(pos\|UNIMOD:n\|name)…` | a site, with the mass of that UniMod accession |
+| `\ModRes`, `\ModResPsi` | `(pos\|accession\|name)…` | a site, when `name` is in UniProt's modification vocabulary |
+| `\Processed` | `(start\|end[\|accession]\|name)…` | a mature chain; signal peptides, transit peptides, propeptides and initiator Met are left out |
+
+PEFF keys are always used: the file was written to carry them. Other keys are ignored, as are
+sites with no known mass, which the log counts. `--knockoffs` applies to PEFF variants as to any
+other.
 
 ### Chimeric cascade
 
@@ -704,7 +747,7 @@ Written next to the PIN (or next to `--output-tsv`/`--output-parquet` under `--r
 | File | Rows | Columns |
 |---|---|---|
 | `<stem>.tmt.tsv` | one per PSM that passed the quantification gate (§10) | `filename scannr spec_id quant_scan quant_ms_level rt peptide charge proteins is_decoy psm_q_value psm_pep purity`, then one `tmt_<channel>` (or `itraq_<channel>`) per channel, then `raw_<...>` when a correction matrix was applied, then `reporter_intensity_sum reporter_sn_sum quant_weight`, then one `sn_<prefix>_<channel>` per channel (empty without noise values) |
-| `<stem>.proteoforms.tsv` (`--rescore`/`--rescore-native` with UniProt isoform, variant or chain entries) | one per family member with a target PSM at q ≤ `--fdr` (a specific one for isoform, variant and chain entries) | `family member kind feature confidence q_value evidence specific_peptides shared_peptides psms best_psm alternative_explanation`, then `quantity_<run or channel>` with `--lfq`/`--tmt` (§1a, proteoform table) |
+| `<stem>.proteoforms.tsv` (`--rescore`/`--rescore-native` with UniProt isoform, variant or chain entries) | one per family member with a target PSM at q ≤ `--fdr` (a specific one for isoform, variant and chain entries) | `family member kind feature confidence q_value evidence specific_peptides shared_peptides psms best_psm alternative_explanation source prior_tier`, then `quantity_<run or channel>` with `--lfq`/`--tmt` (§1a, proteoform table) |
 | `<stem>.lfq.tsv` | one per (peptidoform, charge) at feature q ≤ `--lfq-feature-fdr` and cosine ≥ `--lfq-min-cosine` | `peptide charge proteins feature_q_value score cosine`, then the integrated area per input file |
 | `<stem>.lfq_features.tsv` | one per feature per run (all, with their q-value) | apex RT, boundaries, scan count, area, apex height, per-isotope areas, cosine, score, decoy score, feature q-value |
 | `<stem>.mbr.tsv` (`--mbr`, `andes quant finalize -o <stem>`) | one per (precursor, run) identified in or transferred into the run | `precursor_key run evidence_type quantity quantity_se quantity_normalized transfer_q quant_q apex_rt_s library_q`; `quantity_normalized` is `quantity` with the run's level and RT-local offset removed (§10, `NA` when the run is not normalised); `evidence_type` is `identified` (the run has a target PSM of the precursor at PSM q ≤ `--quant-fdr` and, with `--pep`, PEP ≤ `--pep`), `identified_below_threshold` (identified, but `quant_q` above `--quant-feature-fdr` or missing; quantity kept, in this table only), `transfer_ms2` (transfer q ≤ `--mbr-fdr`, and an MS2 scan of the run matches the precursor's library spectrum: at least 4 fragments at a spectral angle of at least 0.6), `transfer_ms1` (transfer q ≤ `--mbr-fdr`, without that MS2 support) or `below_threshold` (quantity kept, as censored; in this table only); `quant_q` is the quality q-value of the row's MS1 feature against its decoys (the identified-row estimate for identified rows, equal to `transfer_q` for transfers); `transfer_q`, `quant_q` and `library_q` are internal quant-quality values, not identification FDR; `NA` for missing values. Precursors that fail the library entry gate have no rows |

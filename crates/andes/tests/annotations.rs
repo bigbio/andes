@@ -180,3 +180,72 @@ fn rows_that_do_not_fit_are_reported() {
         "{stderr}"
     );
 }
+
+/// A PIN's rows with the UniProt accession spelling `sp|P02769<x>|ALBU_BOVIN`
+/// turned into the PEFF one `sp:P02769<x>`, and each row's proteins sorted.
+fn normalised_rows(pin: &str) -> Vec<String> {
+    let header: Vec<&str> = pin.lines().next().unwrap().split('\t').collect();
+    let proteins = header.iter().position(|h| *h == "Proteins").unwrap();
+    let mut rows: Vec<String> = pin
+        .lines()
+        .skip(1)
+        .map(|l| {
+            let cols: Vec<&str> = l.split('\t').collect();
+            let mut prots: Vec<String> = cols[proteins..]
+                .iter()
+                .map(|p| p.replace("sp|", "sp:").replace("|ALBU_BOVIN", ""))
+                .collect();
+            prots.sort();
+            format!("{}\t{}", cols[..proteins].join("\t"), prots.join("\t"))
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+#[test]
+fn a_peff_database_searches_like_the_uniprot_xml() {
+    let dir = tempfile::tempdir().unwrap();
+    let fasta = input::FastaReader::load_all(std::io::BufReader::new(
+        std::fs::File::open(fixture("test-fixtures/BSA.fasta")).unwrap(),
+    ))
+    .unwrap();
+    let seq = String::from_utf8(fasta.proteins[0].sequence.clone()).unwrap();
+    let peff = dir.path().join("bsa.peff");
+    std::fs::write(
+        &peff,
+        format!(
+            "# PEFF 1.0\n# //\n>sp:P02769 \\PName=Serum albumin \\VariantSimple=(214|T)\n{seq}\n"
+        ),
+    )
+    .unwrap();
+    let xml_pin = dir.path().join("xml.pin");
+    search(
+        "test-fixtures/BSA.xml.gz",
+        &xml_pin,
+        &["--uniprot-variants", "--uniprot-evidence", "curated"],
+    );
+    let peff_pin = dir.path().join("peff.pin");
+    let out = Command::new(env!("CARGO_BIN_EXE_andes"))
+        .arg("--spectrum")
+        .arg(fixture("test-fixtures/test.mgf.gz"))
+        .arg("--database")
+        .arg(&peff)
+        .arg("--output-pin")
+        .arg(&peff_pin)
+        .args(["--decoy-prefix", "XXX_"])
+        .output()
+        .expect("run andes");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(stderr.contains("PEFF: 1 rows: 1 variant, "), "{stderr}");
+    let (xml, peff) = (
+        std::fs::read_to_string(&xml_pin).unwrap(),
+        std::fs::read_to_string(&peff_pin).unwrap(),
+    );
+    assert!(
+        peff.contains("sp:P02769_VAR_A214T"),
+        "the variant is searched"
+    );
+    assert_eq!(normalised_rows(&xml), normalised_rows(&peff));
+}

@@ -183,6 +183,10 @@ andes --spectrum spectra.mzML --database uniprot_sprot_human.xml.gz \
   --mods phospho_annotated_mods.txt --uniprot-variants --output-pin out.pin
 ```
 
+**PEFF databases.** `--database x.peff` reads a PSI Extended FASTA file. Its variant,
+modification and processing header keys become claims built like UniProt's
+([`DOCS.md` §1a](DOCS.md#peff-databases)).
+
 **Annotation files.** `--annotations claims.annotations.parquet` adds claims about the proteins
 of any database, FASTA included: sequence edits (variant entries), modification sites, mature
 chains. The claims can come from variant catalogues, a sample's own variant calls or site
@@ -342,6 +346,10 @@ same mistakes.
 
    A real PSM's knockoff q-value is the smallest FDP over the thresholds at or below its score. Its
    reported q-value is the largest of the global, class and knockoff q-values.
+   With claims from several sources, each substitution class is split further by prior tier
+   (`sample`, `common`, `curated`, `catalogue`; see
+   [`DOCS.md` §1a](DOCS.md#annotation-files---annotations)), so a sample's own variants and
+   catalogue variants do not share one estimate.
 3. **Untested variants.** A variant with no position that qualifies for a knockoff has no null, so
    its PSMs are not accepted. Measured against genotypes, those variants are false several times
    more often than the tested ones, so the tested variants' estimate cannot be lent to them.
@@ -388,6 +396,22 @@ true FDP below counts the labelled PSMs whose variant no donor haplotype carries
 | Knockoffs, `--proteoform-fdr 0.10` | 307 | 14 / 233 | **6.0%** | 126 (8.2%) |
 
 Only 0.55% of the knockoffs turned out to be a real donor variant, so the null is clean.
+
+*Prior tiers.* The same EN-TEx runs were searched against a FASTA of reviewed human UniProt plus
+an annotation file holding UniProt's 83,472 single-residue variants. In one arm, the variants a
+donor carries were given a sample genotype (tier `sample`), as a sample's own variant calls
+would be. In the other, every variant was in one tier. At `--proteoform-fdr 0.05`:
+
+| Setting | Carried variant PSMs (variants) | Donor-absent PSMs (variants) | True FDP, PSMs | True FDP, variants |
+|---|---|---|---|---|
+| One tier | 218 (83) | 13 (7) | 5.6% | 7.8% |
+| Tiers split | 329 (122) | 8 (3) | 2.4% | 2.4% |
+
+Separate tiers recover half again as many carried variants and stay below the 5% target, which
+one shared tier does not. A variant peptide that a reference protein holds once I and L are taken
+as equal (for example a V→L variant spelling a paralog's `…VIDEVR` as `…VLDEVR`) is reported for
+that reference, not as the variant. Without that step, one such tubulin peptide alone gave 42
+false variant PSMs here.
 
 *Cost on the rest of the search.* Knockoffs grow the variant entries by about 60%. PSMs at
 q ≤ 0.01 change by −0.43% on pooled Astral DDA (PXD070049, 21 runs: 1,003,367 → 999,103) and by

@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use crate::protein::{ChainEnds, EntryKind, ModSite};
+use crate::protein::{ChainEnds, EntryKind, ModSite, PriorTier};
 
 /// One claim about a reference protein: sequence edits, modification sites
 /// and processing that occur together on one molecule, or any one of them
@@ -30,6 +30,10 @@ pub struct Annotation {
     pub accession: Option<String>,
     /// The entry's description when the default does not fit.
     pub description: Option<String>,
+    /// The database the claim comes from.
+    pub source: Option<Arc<str>>,
+    /// How likely claims of its kind are to be real.
+    pub tier: PriorTier,
 }
 
 /// Reference residues `[start, end)` (0-based) replaced by `alt`; an empty
@@ -62,6 +66,8 @@ impl Annotation {
             knockoff_of: None,
             accession: None,
             description: None,
+            source: None,
+            tier: PriorTier::Catalogue,
         }
     }
 

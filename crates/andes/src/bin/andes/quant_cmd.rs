@@ -23,24 +23,25 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use model::Tolerance;
-use output::extract_table::{read_extract_table, read_extract_tags, write_extract_table_tagged};
+use output::extract_table::{read_extract_tags, write_extract_table_tagged};
 use output::feature_parquet::{FeatureRecord, MbrColumns};
 use output::library_table::{
     library_fingerprint, read_library, write_library, StoredLibrary, FINGERPRINT_KEY,
 };
 use output::mbr_out::EvidenceType;
 use output::ms2_table::read_ms2_table;
-use output::run_quant_table::{read_run_quant_mods, read_run_quant_table};
-use output::{ModRecord, PercolatorPsm, ProteinPosition};
+use output::run_quant_table::{open_run_quant_table, read_run_quant_mods};
+use output::{FeatureParquetWriter, ModRecord, PercolatorPsm, ProteinPosition};
 use quant::align::AlignParams;
 use quant::evidence::EvidenceParams;
-use quant::library::{build_library, Library, PrecursorMeta, PsmIn};
+use quant::library::{Library, LibraryBuilder, PrecursorMeta, PsmIn};
 use quant::ms2::{fragment_ladder, library_spectrum, residue_masses, LibrarySpectrum, Ms2RunIndex};
 use rayon::prelude::*;
 
 use crate::cli::{QuantCommand, QuantExtractArgs, QuantFinalizeArgs, QuantLibraryArgs};
 use crate::quant_mbr::{
-    attach_ms2, extract_run, finalize, mbr_paths, ExtractCounts, ExtractRow, MbrFeature, Ms2Counts,
+    attach_ms2, extract_run, finalize_stream, mbr_paths, ExtractCounts, ExtractFiles, ExtractRow,
+    ExtractSource, FinalizeParams, MbrFeature, Ms2Counts, StreamLimits,
 };
 
 /// Seed of the transfer FDR's folds and models, in every path.
@@ -201,12 +202,17 @@ fn read_percolator(path: &Path) -> Result<HashMap<String, PercolatorPsm>, String
     output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Rescorer scores by SpecId: one map for every run (SpecIds must then be
-/// distinct across runs), or one map per run stem.
-pub(crate) enum PsmScores {
-    Merged(ScoreSet),
-    PerRun(HashMap<String, ScoreSet>),
+/// Where the rescorer's scores come from: one set for every run (SpecIds
+/// must then be distinct across runs), loaded once; or one set per run stem,
+/// loaded when that run is joined and dropped after it, so only one run's
+/// scores are held at a time.
+pub(crate) enum ScoreLoader<'a> {
+    Merged(Box<dyn FnOnce() -> Result<ScoreSet, String> + 'a>),
+    PerRun(RunScores<'a>),
 }
+
+/// The score set of one run stem.
+pub(crate) type RunScores<'a> = Box<dyn Fn(&str) -> Result<ScoreSet, String> + 'a>;
 
 /// Where the Percolator results of `quant library` come from.
 #[derive(Debug, PartialEq)]
@@ -274,15 +280,17 @@ fn score_source(
     ))
 }
 
-fn load_scores(source: &ScoreSource) -> Result<PsmScores, String> {
-    Ok(match source {
-        ScoreSource::Merged(t, d) => PsmScores::Merged(percolator_scores(t, d)?),
-        ScoreSource::PerRun(m) => PsmScores::PerRun(
-            m.iter()
-                .map(|(stem, (t, d))| Ok((stem.clone(), percolator_scores(t, d)?)))
-                .collect::<Result<_, String>>()?,
-        ),
-    })
+/// The loader of `quant library`'s Percolator results.
+fn score_loader(source: &ScoreSource) -> ScoreLoader<'_> {
+    match source {
+        ScoreSource::Merged(t, d) => ScoreLoader::Merged(Box::new(move || percolator_scores(t, d))),
+        ScoreSource::PerRun(m) => ScoreLoader::PerRun(Box::new(move |stem: &str| {
+            let (t, d) = m
+                .get(stem)
+                .ok_or_else(|| format!("no rescoring scores for run {stem:?}"))?;
+            percolator_scores(t, d)
+        })),
+    }
 }
 
 /// Scores from Percolator's target and decoy PSM files.
@@ -305,17 +313,55 @@ fn percolator_scores(targets: &Path, decoys: &Path) -> Result<ScoreSet, String> 
     )
 }
 
+/// The columns of a run table that give a precursor's metadata.
+const META_COLUMNS: [&str; 6] = [
+    "precursor_key",
+    "is_decoy",
+    "mz",
+    "charge",
+    "envelope",
+    "proteins",
+];
+/// The columns of a run table that join its PSMs to the rescoring result.
+const JOIN_COLUMNS: [&str; 6] = [
+    "spec_id",
+    "precursor_key",
+    "peptidoform",
+    "is_decoy",
+    "rt_s",
+    "faims_cv",
+];
+
+/// A precursor key's metadata row: the key's first target row, else its first
+/// row, and the run it came from.
+struct KeyMeta {
+    has_target: bool,
+    run: usize,
+    mz: f64,
+    charge: u8,
+    envelope: Vec<f32>,
+    proteins: String,
+}
+
 /// Builds the library over the run tables of `stems` (sorted, as from
-/// [`library_runs`]) with the scores of `load_scores` joined on (run,
-/// SpecId), and writes it to `dir`. `max_q` is the entry gate, `donor_q` the
-/// PSM q-value and `donor_pep` the optional PSM PEP cap of the donor PSMs. A
-/// PSM whose rescoring result names another peptide or target/decoy label is
-/// skipped. The scores are loaded after the tables, so that merged scores over
-/// runs with a shared SpecId fail with the runs named.
+/// [`library_runs`]) with the rescorer's scores joined on (run, SpecId), and
+/// writes it to `dir`. `max_q` is the entry gate, `donor_q` the PSM q-value
+/// and `donor_pep` the optional PSM PEP cap of the donor PSMs. A PSM whose
+/// rescoring result names another peptide or target/decoy label is skipped.
+///
+/// The run tables are read twice, one run and one record batch at a time:
+/// first the precursor keys and their metadata (the union of keys numbers the
+/// precursors), then the PSMs, joined to their run's scores and folded into
+/// per-precursor aggregates ([`quant::library::LibraryBuilder`] and the
+/// donor scans). Memory follows the precursors and their donor runs, plus one
+/// run's scores; with merged scores the one score set (and, to name a SpecId
+/// shared by two runs, every SpecId) is held. Merged scores are loaded after
+/// the tables' SpecIds are checked, so that a SpecId shared by two runs fails
+/// with the runs named.
 pub(crate) fn build_and_write_library(
     dir: &Path,
     stems: &[String],
-    load_scores: impl FnOnce() -> Result<PsmScores, String>,
+    scores: ScoreLoader<'_>,
     max_q: f64,
     donor_q: f64,
     donor_pep: Option<f64>,
@@ -331,162 +377,212 @@ pub(crate) fn build_and_write_library(
     if let Some(c) = donor_pep.filter(|c| !(0.0..=1.0).contains(c)) {
         return Err(format!("donor PSM PEP cap {c} is outside [0, 1]"));
     }
-    // Every run's rows, and the first SpecId shared by two runs.
-    let mut tables = Vec::with_capacity(stems.len());
-    let mut seen: HashMap<String, usize> = HashMap::new();
-    let mut shared: Option<(String, usize, usize)> = None;
-    for (r, stem) in stems.iter().enumerate() {
-        let path = artifact(dir, stem, TABLE_SUFFIX);
-        let (run, rows) = read_run_quant_table(&path)?;
-        if run != *stem {
+    let paths: Vec<PathBuf> = stems
+        .iter()
+        .map(|s| artifact(dir, s, TABLE_SUFFIX))
+        .collect();
+    let open = |r: usize, columns: &[&str]| {
+        let batches = open_run_quant_table(&paths[r], columns)?;
+        if batches.run() != stems[r] {
             return Err(format!(
-                "{}: the table is of run {run:?}, not {stem:?}",
-                path.display()
+                "{}: the table is of run {:?}, not {:?}",
+                paths[r].display(),
+                batches.run(),
+                stems[r]
             ));
         }
-        for row in &rows {
-            if let Some(&other) = seen.get(&row.spec_id) {
-                if shared.is_none() && other != r {
-                    shared = Some((row.spec_id.clone(), other, r));
+        Ok(batches)
+    };
+    let merged = matches!(scores, ScoreLoader::Merged(_));
+    // Pass 1: every precursor key with its metadata row, and (merged scores
+    // only) the first SpecId shared by two runs.
+    let mut keys: BTreeMap<String, KeyMeta> = BTreeMap::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut shared: Option<(String, usize, usize)> = None;
+    let mut n_rows = 0usize;
+    for r in 0..stems.len() {
+        let columns: Vec<&str> = META_COLUMNS
+            .iter()
+            .copied()
+            .chain(merged.then_some("spec_id"))
+            .collect();
+        for batch in open(r, &columns)? {
+            for row in batch? {
+                n_rows += 1;
+                if merged {
+                    match seen.get(&row.spec_id) {
+                        Some(&other) => {
+                            if shared.is_none() && other != r {
+                                shared = Some((row.spec_id.clone(), other, r));
+                            }
+                        }
+                        None => {
+                            seen.insert(row.spec_id, r);
+                        }
+                    }
                 }
-                continue;
+                let target = !row.is_decoy;
+                match keys.get_mut(row.precursor_key.as_str()) {
+                    Some(m) => {
+                        if target && !m.has_target {
+                            *m = KeyMeta {
+                                has_target: true,
+                                run: r,
+                                mz: row.mz,
+                                charge: row.charge,
+                                envelope: row.envelope,
+                                proteins: row.proteins,
+                            };
+                        }
+                    }
+                    None => {
+                        keys.insert(
+                            row.precursor_key,
+                            KeyMeta {
+                                has_target: target,
+                                run: r,
+                                mz: row.mz,
+                                charge: row.charge,
+                                envelope: row.envelope,
+                                proteins: row.proteins,
+                            },
+                        );
+                    }
+                }
             }
-            seen.insert(row.spec_id.clone(), r);
         }
-        tables.push((path, rows));
     }
     drop(seen);
-    let scores = load_scores()?;
-    let run_scores: Vec<&ScoreSet> = match &scores {
-        PsmScores::Merged(m) => {
+    let (merged_scores, per_run) = match scores {
+        ScoreLoader::Merged(load) => {
+            let set = load()?;
             if let Some((id, a, b)) = &shared {
                 return Err(format!(
                     "SpecId {id:?} is in runs {} and {}, so one merged Percolator result cannot be joined; pass per-run results: --psms <stem>=<target.tsv> --decoy-psms <stem>=<decoy.tsv> for every run",
                     stems[*a], stems[*b]
                 ));
             }
-            vec![m; stems.len()]
+            (Some(set), None)
         }
-        PsmScores::PerRun(m) => stems
-            .iter()
-            .map(|s| {
-                m.get(s)
-                    .ok_or_else(|| format!("no rescoring scores for run {s:?}"))
-            })
-            .collect::<Result<_, _>>()?,
+        ScoreLoader::PerRun(load) => (None, Some(load)),
     };
     // Dense precursor ids over the sorted union of keys; the first target row
     // of a key (else its first row) gives its metadata. A decoy row whose key
     // is also a target's is dropped: a precursor is all-target or all-decoy.
-    let mut keys: BTreeMap<&str, (bool, &output::run_quant_table::RunPsmRow, &Path)> =
-        BTreeMap::new();
-    for (path, rows) in &tables {
-        for row in rows {
-            let e = keys
-                .entry(row.precursor_key.as_str())
-                .or_insert((false, row, path.as_path()));
-            if !row.is_decoy && !e.0 {
-                *e = (true, row, path.as_path());
-            }
-        }
-    }
     let mut meta = Vec::with_capacity(keys.len());
     let mut proteins = Vec::with_capacity(keys.len());
     let mut target_key = Vec::with_capacity(keys.len());
-    let mut id_of: HashMap<&str, u32> = HashMap::with_capacity(keys.len());
-    for (i, (&key, &(has_target, row, path))) in keys.iter().enumerate() {
-        let envelope: [f32; ENVELOPE_LEN] = row.envelope.as_slice().try_into().map_err(|_| {
+    for (key, m) in std::mem::take(&mut keys) {
+        let envelope: [f32; ENVELOPE_LEN] = m.envelope.as_slice().try_into().map_err(|_| {
             format!(
                 "{}: precursor {key:?} has an envelope of {} isotopes, expected {ENVELOPE_LEN}",
-                path.display(),
-                row.envelope.len()
+                paths[m.run].display(),
+                m.envelope.len()
             )
         })?;
         meta.push(PrecursorMeta {
-            key: key.to_string(),
-            mz: row.mz,
-            charge: row.charge,
+            key,
+            mz: m.mz,
+            charge: m.charge,
             envelope,
         });
-        proteins.push(row.proteins.clone());
-        target_key.push(has_target);
-        id_of.insert(key, i as u32);
+        proteins.push(m.proteins);
+        target_key.push(m.has_target);
     }
+    let id_of: HashMap<&str, u32> = meta
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (m.key.as_str(), i as u32))
+        .collect();
+    // Pass 2: the PSMs, joined to their run's scores.
+    let mut builder = LibraryBuilder::new(meta.len(), stems.len(), donor_q, donor_pep);
+    let mut donors = DonorPsms::new(meta.len());
     let (mut unscored_t, mut unscored_d, mut shadowed, mut mismatched) = (0usize, 0, 0, 0);
-    let mut psms = Vec::new();
-    // The SpecId of each PSM in `psms`.
-    let mut spec_ids: Vec<String> = Vec::new();
-    for (r, (_, rows)) in tables.iter().enumerate() {
+    let (mut n_psms, mut donor_psms) = (0usize, 0usize);
+    for r in 0..stems.len() {
+        let own;
+        let set = match (&merged_scores, &per_run) {
+            (Some(m), _) => m,
+            (None, Some(load)) => {
+                own = load(&stems[r])?;
+                &own
+            }
+            (None, None) => unreachable!("one score source"),
+        };
         let (mut run_joined, mut run_mismatched) = (0usize, 0usize);
-        for row in rows {
-            let id = id_of[row.precursor_key.as_str()];
-            if row.is_decoy && target_key[id as usize] {
-                shadowed += 1;
-                continue;
-            }
-            let Some(j) = run_scores[r].psms.get(&row.spec_id) else {
-                if row.is_decoy {
-                    unscored_d += 1;
-                } else {
-                    unscored_t += 1;
+        for batch in open(r, &JOIN_COLUMNS)? {
+            for row in batch? {
+                let id = *id_of.get(row.precursor_key.as_str()).ok_or_else(|| {
+                    format!(
+                        "{}: precursor {:?} changed between two reads of the table",
+                        paths[r].display(),
+                        row.precursor_key
+                    )
+                })?;
+                if row.is_decoy && target_key[id as usize] {
+                    shadowed += 1;
+                    continue;
                 }
-                continue;
-            };
-            run_joined += 1;
-            if j.is_decoy != row.is_decoy || residues(&j.peptide) != residues(&row.peptidoform) {
-                run_mismatched += 1;
-                continue;
+                let Some(j) = set.psms.get(&row.spec_id) else {
+                    if row.is_decoy {
+                        unscored_d += 1;
+                    } else {
+                        unscored_t += 1;
+                    }
+                    continue;
+                };
+                run_joined += 1;
+                if j.is_decoy != row.is_decoy || residues(&j.peptide) != residues(&row.peptidoform)
+                {
+                    run_mismatched += 1;
+                    continue;
+                }
+                let p = PsmIn {
+                    run: r as u16,
+                    precursor: id,
+                    rt: row.rt_s,
+                    score: j.score,
+                    q: j.q,
+                    pep: j.pep,
+                    is_decoy: row.is_decoy,
+                    faims_cv: row.faims_cv,
+                };
+                n_psms += 1;
+                let donor = builder.is_donor(&p);
+                donor_psms += usize::from(donor && !p.is_decoy);
+                builder.add(&p);
+                if donor {
+                    donors.add(&p, row.spec_id);
+                }
             }
-            psms.push(PsmIn {
-                run: r as u16,
-                precursor: id,
-                rt: row.rt_s,
-                score: j.score,
-                q: j.q,
-                pep: j.pep,
-                is_decoy: row.is_decoy,
-                faims_cv: row.faims_cv,
-            });
-            spec_ids.push(row.spec_id.clone());
         }
         if run_mismatched as f64 > MAX_JOIN_MISMATCH * run_joined as f64 {
             return Err(format!(
                 "run {}: {run_mismatched} of {run_joined} PSMs joined on SpecId disagree with {} on the peptide or the target/decoy label; are these the rescoring results of this run?",
-                stems[r], run_scores[r].source
+                stems[r], set.source
             ));
         }
         mismatched += run_mismatched;
     }
-    let n_rows: usize = tables.iter().map(|t| t.1.len()).sum();
-    if psms.is_empty() && n_rows > 0 {
+    if n_psms == 0 && n_rows > 0 {
         return Err(format!(
             "none of the {n_rows} PSMs of the run tables has a rescoring score; \
              the PSM files must come from the PINs of the same searches"
         ));
     }
     drop(id_of);
-    drop(keys);
-    drop(tables);
-    let donor_psms = psms
-        .iter()
-        .filter(|p| !p.is_decoy && p.q <= donor_q && donor_pep.is_none_or(|c| p.pep <= c))
-        .count();
+    drop(merged_scores);
     let donor_gate = match donor_pep {
         Some(c) => format!("PSM q<={donor_q} and PEP<={c}"),
         None => format!("PSM q<={donor_q}"),
     };
     let ap = AlignParams::default();
-    let library = build_library(&psms, meta, stems.len(), max_q, donor_q, donor_pep, &ap);
-    // A precursor is all-target or all-decoy: an identity decoy's donors
-    // are its decoy PSMs.
-    let is_donor = |p: &PsmIn| p.q <= donor_q && donor_pep.is_none_or(|c| p.pep <= c);
-    let (spectra, donor_scans, sc) =
-        entry_spectra(dir, stems, &library, &psms, &spec_ids, is_donor)?;
-    drop(spec_ids);
+    let library = builder.finish(meta, max_q, &ap);
+    let (spectra, donor_scans, sc) = donors.finish(dir, stems, &library)?;
     eprintln!(
         "[mbr] library: {} runs, {} PSMs scored, {donor_psms} target PSMs at {donor_gate} identify their precursor in their run; skipped: {} PSMs whose SpecId joins a rescoring PSM of another peptide or target/decoy label, {} target and {} decoy PSMs without a rescoring score, {} decoy PSMs sharing a target's key; {} precursors, {} entries at the internal entry gate q<={max_q} (precursor-level, not an identification FDR) with a PSM at {donor_gate}, {} of them identity decoys (decoy precursors with decoy PSMs at {donor_gate}, measured as targets and never reported)",
         stems.len(),
-        psms.len(),
+        n_psms,
         mismatched,
         unscored_t,
         unscored_d,
@@ -606,106 +702,132 @@ fn scan_of(by_key: &HashMap<&str, usize>, spec_id: &str) -> Option<usize> {
     None
 }
 
-/// Per precursor id of `lib`: the empirical fragment spectrum of an entry's
-/// best donor PSM (highest score; then earliest RT, lowest run), matched on
-/// its scan in the run's MS2 table at the table's fragment tolerance, and the
-/// `(run, RT)` of every donor PSM of the entry (`is_donor`), sorted.
-/// `spec_ids[i]` is the SpecId of `psms[i]`. Errors: an unreadable MS2 or PSM
-/// table (the message names it).
-pub(crate) fn entry_spectra(
-    dir: &Path,
-    stems: &[String],
-    lib: &Library,
-    psms: &[PsmIn],
-    spec_ids: &[String],
-    is_donor: impl Fn(&PsmIn) -> bool,
-) -> Result<EntrySpectra, String> {
-    let n = lib.meta.len();
-    let mut is_entry = vec![false; n];
-    for e in &lib.entries {
-        is_entry[e.precursor as usize] = true;
-    }
-    let mut donor_scans: Vec<Vec<(u16, f64)>> = vec![Vec::new(); n];
-    let mut best: Vec<Option<usize>> = vec![None; n];
-    for (i, p) in psms.iter().enumerate() {
-        let id = p.precursor as usize;
-        if id >= n || !is_entry[id] || !is_donor(p) {
-            continue;
+/// The donor PSMs of every precursor as the library's spectra need them,
+/// added one at a time in run order: per precursor id, the `(run, RT)` of
+/// each donor PSM and the best one (highest score; then earliest RT, lowest
+/// run) with its SpecId.
+pub(crate) struct DonorPsms {
+    scans: Vec<Vec<(u16, f64)>>,
+    best: Vec<Option<(PsmIn, String)>>,
+}
+
+impl DonorPsms {
+    pub(crate) fn new(n_precursors: usize) -> Self {
+        Self {
+            scans: vec![Vec::new(); n_precursors],
+            best: vec![None; n_precursors],
         }
-        donor_scans[id].push((p.run, p.rt));
-        let better = best[id].is_none_or(|j| {
-            let b = &psms[j];
+    }
+
+    /// Adds donor PSM `p` with SpecId `spec_id`; ignored when its id is out of
+    /// range.
+    pub(crate) fn add(&mut self, p: &PsmIn, spec_id: String) {
+        let id = p.precursor as usize;
+        if id >= self.scans.len() {
+            return;
+        }
+        self.scans[id].push((p.run, p.rt));
+        let better = self.best[id].as_ref().is_none_or(|(b, _)| {
             p.score > b.score
                 || (p.score == b.score && (p.rt.total_cmp(&b.rt).then(p.run.cmp(&b.run)).is_lt()))
         });
         if better {
-            best[id] = Some(i);
+            self.best[id] = Some((*p, spec_id));
         }
     }
-    for d in &mut donor_scans {
-        d.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
-    }
-    let mut spectra: Vec<Option<LibrarySpectrum>> = vec![None; n];
-    let mut c = SpectrumCounts::default();
-    for (r, stem) in stems.iter().enumerate() {
-        let wanted: Vec<(usize, &str)> = best
-            .iter()
-            .enumerate()
-            .filter_map(|(id, b)| {
-                b.filter(|&i| psms[i].run as usize == r)
-                    .map(|i| (id, spec_ids[i].as_str()))
-            })
-            .collect();
-        if wanted.is_empty() {
-            continue;
+
+    /// Per precursor id of `lib`: the empirical fragment spectrum of an
+    /// entry's best donor PSM, matched on its scan in the run's MS2 table at
+    /// the table's fragment tolerance, and the `(run, RT)` of every donor PSM
+    /// of the entry, sorted; empty for a precursor that is not an entry.
+    /// The MS2 tables are read one run at a time. Errors: an unreadable MS2
+    /// or PSM table (the message names it).
+    pub(crate) fn finish(
+        self,
+        dir: &Path,
+        stems: &[String],
+        lib: &Library,
+    ) -> Result<EntrySpectra, String> {
+        let n = lib.meta.len();
+        let mut is_entry = vec![false; n];
+        for e in &lib.entries {
+            is_entry[e.precursor as usize] = true;
         }
-        let ms2_path = artifact(dir, stem, MS2_SUFFIX);
-        let table = read_ms2_table(&ms2_path)?;
-        if table.run != *stem {
-            return Err(format!(
-                "{}: the table is of run {:?}, not {stem:?}",
-                ms2_path.display(),
-                table.run
-            ));
-        }
-        let mods = read_run_quant_mods(&artifact(dir, stem, TABLE_SUFFIX))?;
-        let by_key: HashMap<&str, usize> = table
-            .scans
-            .iter()
-            .enumerate()
-            .map(|(i, s)| (s.spec_key.as_str(), i))
-            .collect();
-        let made: Vec<(usize, Result<LibrarySpectrum, u8>)> = wanted
-            .par_iter()
-            .map(|&(id, spec_id)| {
-                let m = &lib.meta[id];
-                let Some(scan) = scan_of(&by_key, spec_id) else {
-                    return (id, Err(0));
-                };
-                let Ok(masses) = residue_masses(split_key(&m.key), &mods) else {
-                    return (id, Err(1));
-                };
-                let ladder = fragment_ladder(&masses, m.charge.max(1));
-                let peaks = &table.scans[scan].peaks;
-                (
-                    id,
-                    library_spectrum(&ladder, peaks, table.fragment_tol).ok_or(2),
-                )
-            })
-            .collect();
-        for (id, s) in made {
-            match s {
-                Ok(s) => {
-                    c.with_spectrum += 1;
-                    spectra[id] = Some(s);
-                }
-                Err(0) => c.no_scan += 1,
-                Err(1) => c.no_masses += 1,
-                Err(_) => c.too_few += 1,
+        let Self { mut scans, best } = self;
+        scans.resize(n, Vec::new());
+        let mut best: Vec<Option<(PsmIn, String)>> = best;
+        best.resize(n, None);
+        for (id, d) in scans.iter_mut().enumerate() {
+            if is_entry[id] {
+                d.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+            } else {
+                *d = Vec::new();
+                best[id] = None;
             }
         }
+        let mut spectra: Vec<Option<LibrarySpectrum>> = vec![None; n];
+        let mut c = SpectrumCounts::default();
+        for (r, stem) in stems.iter().enumerate() {
+            let wanted: Vec<(usize, &str)> = best
+                .iter()
+                .enumerate()
+                .filter_map(|(id, b)| {
+                    b.as_ref()
+                        .filter(|(p, _)| p.run as usize == r)
+                        .map(|(_, s)| (id, s.as_str()))
+                })
+                .collect();
+            if wanted.is_empty() {
+                continue;
+            }
+            let ms2_path = artifact(dir, stem, MS2_SUFFIX);
+            let table = read_ms2_table(&ms2_path)?;
+            if table.run != *stem {
+                return Err(format!(
+                    "{}: the table is of run {:?}, not {stem:?}",
+                    ms2_path.display(),
+                    table.run
+                ));
+            }
+            let mods = read_run_quant_mods(&artifact(dir, stem, TABLE_SUFFIX))?;
+            let by_key: HashMap<&str, usize> = table
+                .scans
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (s.spec_key.as_str(), i))
+                .collect();
+            let made: Vec<(usize, Result<LibrarySpectrum, u8>)> = wanted
+                .par_iter()
+                .map(|&(id, spec_id)| {
+                    let m = &lib.meta[id];
+                    let Some(scan) = scan_of(&by_key, spec_id) else {
+                        return (id, Err(0));
+                    };
+                    let Ok(masses) = residue_masses(split_key(&m.key), &mods) else {
+                        return (id, Err(1));
+                    };
+                    let ladder = fragment_ladder(&masses, m.charge.max(1));
+                    let peaks = &table.scans[scan].peaks;
+                    (
+                        id,
+                        library_spectrum(&ladder, peaks, table.fragment_tol).ok_or(2),
+                    )
+                })
+                .collect();
+            for (id, s) in made {
+                match s {
+                    Ok(s) => {
+                        c.with_spectrum += 1;
+                        spectra[id] = Some(s);
+                    }
+                    Err(0) => c.no_scan += 1,
+                    Err(1) => c.no_masses += 1,
+                    Err(_) => c.too_few += 1,
+                }
+            }
+        }
+        Ok((spectra, scans, c))
     }
-    Ok((spectra, donor_scans, c))
 }
 
 fn log_extract(stem: &str, rows: usize, c: &ExtractCounts) {
@@ -851,8 +973,12 @@ fn parse_peptidoform(peptidoform: &str) -> (String, Vec<ModRecord>) {
 
 /// The QPX feature rows of the MBR table: every row except the
 /// below-threshold transfers and identified rows, which stay in
-/// `<base>.mbr.parquet` only.
-fn feature_records(stored: &StoredLibrary, features: &[MbrFeature]) -> Vec<FeatureRecord> {
+/// `<base>.mbr.parquet` only. Feature ids continue from `last_id`.
+fn feature_records(
+    stored: &StoredLibrary,
+    features: &[MbrFeature],
+    last_id: &mut i64,
+) -> Vec<FeatureRecord> {
     features
         .iter()
         .filter(|f| {
@@ -861,8 +987,8 @@ fn feature_records(stored: &StoredLibrary, features: &[MbrFeature]) -> Vec<Featu
                 EvidenceType::BelowThreshold | EvidenceType::IdentifiedBelowThreshold
             )
         })
-        .enumerate()
-        .map(|(i, f)| {
+        .map(|f| {
+            *last_id += 1;
             let m = &stored.library.meta[f.precursor as usize];
             let peptidoform = split_key(&m.key).to_string();
             let (sequence, modifications) = parse_peptidoform(&peptidoform);
@@ -873,7 +999,7 @@ fn feature_records(stored: &StoredLibrary, features: &[MbrFeature]) -> Vec<Featu
                 .map(|a| (a.to_string(), None, None, None, None))
                 .collect();
             FeatureRecord {
-                feature_id: i as i64 + 1,
+                feature_id: *last_id,
                 sequence,
                 peptidoform,
                 modifications,
@@ -911,43 +1037,56 @@ fn feature_records(stored: &StoredLibrary, features: &[MbrFeature]) -> Vec<Featu
 }
 
 /// Transfer FDR, identified quality q-values and the MBR outputs over the
-/// extract rows of every run (in run order); with `parquet_dir`, also
-/// `<parquet_dir>/quantms.feature.parquet`.
+/// extract rows of `source` ([`finalize_stream`] within `limits`); with
+/// `parquet_dir`, also `<parquet_dir>/quantms.feature.parquet`, written as the
+/// rows come.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn finalize_and_write(
     stored: &StoredLibrary,
-    runs: &[Vec<ExtractRow>],
+    source: &dyn ExtractSource,
     mbr_fdr: f64,
     quant_feature_fdr: Option<f64>,
+    seed: u64,
+    limits: StreamLimits,
     base: &Path,
     parquet_dir: Option<&Path>,
 ) -> Result<(), String> {
     let (table, validation) = mbr_paths(base);
-    let summary = finalize(
-        &stored.runs,
-        &stored.library,
-        runs,
+    let mut feature_out = match parquet_dir {
+        Some(dir) => {
+            std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+            let path = dir.join("quantms.feature.parquet");
+            Some((FeatureParquetWriter::new(&path), path, 0i64))
+        }
+        None => None,
+    };
+    let params = FinalizeParams {
         mbr_fdr,
         quant_feature_fdr,
-        MBR_SEED,
-        &table,
-        &validation,
-    )?;
+        seed,
+        limits,
+        mbr_path: &table,
+        validation_path: &validation,
+    };
+    let summary = finalize_stream(&stored.runs, &stored.library, source, &params, &mut |f| {
+        if let Some((w, path, last_id)) = feature_out.as_mut() {
+            w.push(feature_records(stored, &f, last_id))
+                .map_err(|e| format!("write {}: {e}", path.display()))?;
+        }
+        Ok(())
+    })?;
     eprintln!(
         "[mbr] wrote {} ({} rows; transfer_q and quant_q are internal quant-quality q-values, not identification FDR) and {}",
         table.display(),
         summary.rows_written,
         validation.display()
     );
-    if let Some(dir) = parquet_dir {
-        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-        let path = dir.join("quantms.feature.parquet");
-        let records = feature_records(stored, &summary.features);
-        output::write_feature_parquet(&path, &records)
+    if let Some((w, path, n)) = feature_out {
+        w.finish()
             .map_err(|e| format!("write {}: {e}", path.display()))?;
         eprintln!(
-            "[mbr] wrote {} ({} feature rows with evidence type; below-threshold transfers and identified rows are in the mbr.parquet only)",
+            "[mbr] wrote {} ({n} feature rows with evidence type; below-threshold transfers and identified rows are in the mbr.parquet only)",
             path.display(),
-            records.len()
         );
     }
     Ok(())
@@ -974,22 +1113,30 @@ pub(crate) fn run_in_process(
     let stored = build_and_write_library(
         dir,
         &stems,
-        || Ok(PsmScores::Merged(scores)),
+        ScoreLoader::Merged(Box::new(move || Ok(scores))),
         max_q,
         donor_q,
         donor_pep,
     )?;
     let fingerprint = library_fingerprint(&stored);
     // One run at a time: each extraction is parallel over its precursors and
-    // holds that run's MS1.
-    let runs: Vec<Vec<ExtractRow>> = (0..stems.len())
-        .map(|r| extract_and_write(dir, &stored, &fingerprint, r as u16, ep))
-        .collect::<Result<_, _>>()?;
+    // holds that run's MS1; finalize reads the extract tables back.
+    for r in 0..stems.len() {
+        extract_and_write(dir, &stored, &fingerprint, r as u16, ep)?;
+    }
+    let files = ExtractFiles(
+        stems
+            .iter()
+            .map(|s| artifact(dir, s, EXTRACT_SUFFIX))
+            .collect(),
+    );
     finalize_and_write(
         &stored,
-        &runs,
+        &files,
         mbr_fdr,
         quant_feature_fdr,
+        MBR_SEED,
+        StreamLimits::default(),
         base,
         parquet_dir,
     )?;
@@ -1003,7 +1150,7 @@ fn run_library(a: QuantLibraryArgs) -> Result<(), String> {
     build_and_write_library(
         &a.quant_dir,
         &stems,
-        || load_scores(&source),
+        score_loader(&source),
         a.mbr_library_fdr,
         a.quant_fdr,
         a.pep,
@@ -1033,7 +1180,7 @@ fn run_extract(a: QuantExtractArgs) -> Result<(), String> {
 fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
     let stored = read_library(&a.quant_dir)?;
     let fingerprint = library_fingerprint(&stored);
-    let mut runs = Vec::with_capacity(stored.runs.len());
+    let mut paths = Vec::with_capacity(stored.runs.len());
     let mut tol: Option<(String, PathBuf)> = None;
     for stem in &stored.runs {
         let path = artifact(&a.quant_dir, stem, EXTRACT_SUFFIX);
@@ -1058,13 +1205,20 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
             }
             _ => {}
         }
-        runs.push(read_extract_table(&path)?);
+        paths.push(path);
     }
+    let limits = StreamLimits {
+        shard_rows: a.shard_rows,
+        max_train_rows: a.max_train_rows,
+        max_norm_cells: a.max_norm_cells,
+    };
     finalize_and_write(
         &stored,
-        &runs,
+        &ExtractFiles(paths),
         a.mbr_fdr,
         a.quant_feature_fdr.0,
+        a.seed,
+        limits,
         &a.output,
         a.output_parquet.as_deref(),
     )
@@ -1089,6 +1243,7 @@ pub(crate) fn run_quant_command(cmd: QuantCommand) -> Result<(), Box<dyn std::er
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quant::library::build_library;
 
     #[test]
     fn peptidoform_tags_become_modifications() {
@@ -1250,7 +1405,7 @@ mod tests {
             feature(1, 0, EvidenceType::TransferMs1, Some(0.004)),
             feature(1, 1, EvidenceType::IdentifiedBelowThreshold, None),
         ];
-        let records = feature_records(&stored, &features);
+        let records = feature_records(&stored, &features, &mut 0);
         let got: Vec<(i64, &str, &str)> = records
             .iter()
             .map(|r| {
@@ -1396,7 +1551,7 @@ mod tests {
             build_and_write_library(
                 dir.path(),
                 &stems,
-                || Ok(PsmScores::Merged(set)),
+                ScoreLoader::Merged(Box::new(move || Ok(set))),
                 0.01,
                 0.01,
                 pep,
@@ -1440,7 +1595,7 @@ mod tests {
         let stored = build_and_write_library(
             dir.path(),
             &stems,
-            || Ok(PsmScores::Merged(set)),
+            ScoreLoader::Merged(Box::new(move || Ok(set))),
             0.01,
             0.01,
             None,

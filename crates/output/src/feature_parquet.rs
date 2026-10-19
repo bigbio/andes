@@ -681,9 +681,15 @@ fn build_batch(records: &[FeatureRecord], mbr: bool) -> std::io::Result<RecordBa
     RecordBatch::try_new(schema, columns).map_err(|e| std::io::Error::other(e.to_string()))
 }
 
-/// Write `records` to `path` as a QPX feature file with the schema metadata
-/// QPX readers key on (`file_type = feature_file`).
-pub fn write_feature_parquet(path: &Path, records: &[FeatureRecord]) -> std::io::Result<()> {
+/// Rows per row group of a QPX feature file.
+const FEATURE_CHUNK: usize = 4096;
+
+/// Opens `path` as a QPX feature file, with the match-between-runs columns
+/// when `mbr`.
+fn open_feature_writer(
+    path: &Path,
+    mbr: bool,
+) -> std::io::Result<(ArrowWriter<std::fs::File>, Arc<Schema>)> {
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let mut meta = std::collections::HashMap::new();
     meta.insert("qpx_version".to_string(), FEATURE_QPX_VERSION.to_string());
@@ -698,7 +704,6 @@ pub fn write_feature_parquet(path: &Path, records: &[FeatureRecord]) -> std::io:
         "identity_composite".to_string(),
         FEATURE_IDENTITY_COMPOSITE.to_string(),
     );
-    let mbr = has_mbr(records);
     let fields = if mbr {
         feature_schema_mbr()
     } else {
@@ -709,23 +714,95 @@ pub fn write_feature_parquet(path: &Path, records: &[FeatureRecord]) -> std::io:
         .set_compression(Compression::SNAPPY)
         .build();
     let file = std::fs::File::create(path)?;
-    let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))
+    let writer = ArrowWriter::try_new(file, schema.clone(), Some(props))
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    for chunk in records.chunks(4096) {
-        let batch = build_batch(chunk, mbr)?;
-        let batch = RecordBatch::try_new(schema.clone(), batch.columns().to_vec())
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-        writer
-            .write(&batch)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-        writer
-            .flush()
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+    Ok((writer, schema))
+}
+
+/// Writes one row group of `chunk`.
+fn write_feature_chunk(
+    writer: &mut ArrowWriter<std::fs::File>,
+    schema: &Arc<Schema>,
+    chunk: &[FeatureRecord],
+    mbr: bool,
+) -> std::io::Result<()> {
+    let batch = build_batch(chunk, mbr)?;
+    let batch = RecordBatch::try_new(schema.clone(), batch.columns().to_vec())
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    writer
+        .write(&batch)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    writer
+        .flush()
+        .map_err(|e| std::io::Error::other(e.to_string()))
+}
+
+/// Write `records` to `path` as a QPX feature file with the schema metadata
+/// QPX readers key on (`file_type = feature_file`).
+pub fn write_feature_parquet(path: &Path, records: &[FeatureRecord]) -> std::io::Result<()> {
+    let mbr = has_mbr(records);
+    let (mut writer, schema) = open_feature_writer(path, mbr)?;
+    for chunk in records.chunks(FEATURE_CHUNK) {
+        write_feature_chunk(&mut writer, &schema, chunk, mbr)?;
     }
     writer
         .close()
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     Ok(())
+}
+
+/// [`write_feature_parquet`] over records given in pieces, in the same row
+/// groups. The match-between-runs columns are written when the first
+/// row group has them; with no records at all the file is
+/// [`write_feature_parquet`]'s of none.
+pub struct FeatureParquetWriter {
+    path: std::path::PathBuf,
+    buf: Vec<FeatureRecord>,
+    open: Option<(ArrowWriter<std::fs::File>, Arc<Schema>, bool)>,
+}
+
+impl FeatureParquetWriter {
+    pub fn new(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            buf: Vec::new(),
+            open: None,
+        }
+    }
+
+    pub fn push(&mut self, records: Vec<FeatureRecord>) -> std::io::Result<()> {
+        self.buf.extend(records);
+        while self.buf.len() >= FEATURE_CHUNK {
+            let rest = self.buf.split_off(FEATURE_CHUNK);
+            let chunk = std::mem::replace(&mut self.buf, rest);
+            self.write(&chunk)?;
+        }
+        Ok(())
+    }
+
+    fn write(&mut self, chunk: &[FeatureRecord]) -> std::io::Result<()> {
+        if self.open.is_none() {
+            let mbr = has_mbr(chunk);
+            let (w, s) = open_feature_writer(&self.path, mbr)?;
+            self.open = Some((w, s, mbr));
+        }
+        let (w, s, mbr) = self.open.as_mut().expect("opened above");
+        write_feature_chunk(w, s, chunk, *mbr)
+    }
+
+    pub fn finish(mut self) -> std::io::Result<()> {
+        let rest = std::mem::take(&mut self.buf);
+        if self.open.is_none() && rest.is_empty() {
+            return write_feature_parquet(&self.path, &[]);
+        }
+        if !rest.is_empty() {
+            self.write(&rest)?;
+        }
+        let (w, _, _) = self.open.take().expect("written above");
+        w.close()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

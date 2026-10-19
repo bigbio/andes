@@ -51,7 +51,9 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
-use crate::versioned_parquet::{column, opt, read_table, write_table, TableVersion, BATCH_ROWS};
+use crate::versioned_parquet::{
+    column, opt, read_table, write_table, TableVersion, TableWriter, BATCH_ROWS,
+};
 
 const MBR_TABLE: TableVersion = TableVersion {
     key: "andes.mbr.schema",
@@ -395,16 +397,32 @@ fn mbr_schema() -> Schema {
     ])
 }
 
-fn mbr_batch(schema: &Arc<Schema>, rows: &[MbrRow<'_>]) -> Result<RecordBatch, String> {
-    let mut key = StringBuilder::new();
-    let mut run = StringBuilder::new();
-    let mut ev = StringBuilder::new();
-    let mut floats: Vec<Float64Builder> = (0..6).map(|_| Float64Builder::new()).collect();
-    let mut library_q = Float64Builder::new();
-    for r in rows {
-        key.append_value(r.precursor_key);
-        run.append_value(r.run);
-        ev.append_value(r.evidence_type.as_str());
+/// The columns of `<base>.mbr.parquet` being filled row by row.
+struct MbrColumnsBuilder {
+    key: StringBuilder,
+    run: StringBuilder,
+    ev: StringBuilder,
+    floats: Vec<Float64Builder>,
+    library_q: Float64Builder,
+    rows: usize,
+}
+
+impl MbrColumnsBuilder {
+    fn new() -> Self {
+        Self {
+            key: StringBuilder::new(),
+            run: StringBuilder::new(),
+            ev: StringBuilder::new(),
+            floats: (0..6).map(|_| Float64Builder::new()).collect(),
+            library_q: Float64Builder::new(),
+            rows: 0,
+        }
+    }
+
+    fn push(&mut self, r: &MbrRow<'_>) {
+        self.key.append_value(r.precursor_key);
+        self.run.append_value(r.run);
+        self.ev.append_value(r.evidence_type.as_str());
         let values = [
             r.quantity,
             r.quantity_se,
@@ -413,19 +431,84 @@ fn mbr_batch(schema: &Arc<Schema>, rows: &[MbrRow<'_>]) -> Result<RecordBatch, S
             r.quant_q,
             r.apex_rt_s,
         ];
-        for (b, v) in floats.iter_mut().zip(values) {
+        for (b, v) in self.floats.iter_mut().zip(values) {
             b.append_option(v.filter(|v| v.is_finite()));
         }
-        library_q.append_value(r.library_q);
+        self.library_q.append_value(r.library_q);
+        self.rows += 1;
     }
-    let mut cols: Vec<ArrayRef> = vec![
-        Arc::new(key.finish()),
-        Arc::new(run.finish()),
-        Arc::new(ev.finish()),
-    ];
-    cols.extend(floats.iter_mut().map(|b| Arc::new(b.finish()) as ArrayRef));
-    cols.push(Arc::new(library_q.finish()));
-    RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
+
+    /// The batch of the rows pushed since the last call.
+    fn batch(&mut self, schema: &Arc<Schema>) -> Result<RecordBatch, String> {
+        self.rows = 0;
+        let mut cols: Vec<ArrayRef> = vec![
+            Arc::new(self.key.finish()),
+            Arc::new(self.run.finish()),
+            Arc::new(self.ev.finish()),
+        ];
+        cols.extend(
+            self.floats
+                .iter_mut()
+                .map(|b| Arc::new(b.finish()) as ArrayRef),
+        );
+        cols.push(Arc::new(self.library_q.finish()));
+        RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
+    }
+}
+
+fn mbr_batch(schema: &Arc<Schema>, rows: &[MbrRow<'_>]) -> Result<RecordBatch, String> {
+    let mut b = MbrColumnsBuilder::new();
+    for r in rows {
+        b.push(r);
+    }
+    b.batch(schema)
+}
+
+/// `<base>.mbr.parquet` written row by row, in batches of the same size as
+/// [`write_mbr_parquet`]'s (the same rows give the same file).
+pub struct MbrParquetWriter {
+    schema: Arc<Schema>,
+    columns: MbrColumnsBuilder,
+    table: TableWriter,
+    path: std::path::PathBuf,
+}
+
+impl MbrParquetWriter {
+    /// Creates `<path>.partial`; [`MbrParquetWriter::finish`] renames it into
+    /// place.
+    pub fn create(path: &Path) -> Result<Self, String> {
+        let schema = Arc::new(mbr_schema());
+        let table = TableWriter::create(path, &MBR_TABLE, MBR_TABLE.version, schema.clone(), &[])?;
+        Ok(Self {
+            schema,
+            columns: MbrColumnsBuilder::new(),
+            table,
+            path: path.to_path_buf(),
+        })
+    }
+
+    pub fn push(&mut self, row: &MbrRow<'_>) -> Result<(), String> {
+        self.columns.push(row);
+        if self.columns.rows == BATCH_ROWS {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), String> {
+        let b = self
+            .columns
+            .batch(&self.schema)
+            .map_err(|e| format!("{}: {e}", self.path.display()))?;
+        self.table.write(&b)
+    }
+
+    pub fn finish(mut self) -> Result<(), String> {
+        if self.columns.rows > 0 {
+            self.flush()?;
+        }
+        self.table.finish()
+    }
 }
 
 /// Writes `<base>.mbr.parquet` rows in the given order.
@@ -562,6 +645,39 @@ pub fn read_mbr_validation(path: &Path) -> Result<Vec<(String, ValidationCell)>,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn row_by_row_writer_gives_the_same_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = rows();
+        // More than one batch, with a partial last one.
+        let many: Vec<MbrRow<'static>> = (0..BATCH_ROWS + 1234)
+            .map(|i| MbrRow {
+                quantity: Some(i as f64),
+                ..base[i % base.len()].clone()
+            })
+            .collect();
+        for set in [&many[..0], &many[..3], &many[..BATCH_ROWS], &many[..]] {
+            let (a, b) = (dir.path().join("a.parquet"), dir.path().join("b.parquet"));
+            write_mbr_parquet(&a, set).unwrap();
+            let mut w = MbrParquetWriter::create(&b).unwrap();
+            for r in set {
+                w.push(r).unwrap();
+            }
+            w.finish().unwrap();
+            assert_eq!(
+                std::fs::read(&a).unwrap(),
+                std::fs::read(&b).unwrap(),
+                "{}",
+                set.len()
+            );
+            assert!(!dir.path().join("b.parquet.partial").exists());
+        }
+        // Dropped unfinished, no file is left.
+        let c = dir.path().join("c.parquet");
+        drop(MbrParquetWriter::create(&c).unwrap());
+        assert!(!c.exists() && !dir.path().join("c.parquet.partial").exists());
+    }
 
     fn rows() -> Vec<MbrRow<'static>> {
         vec![

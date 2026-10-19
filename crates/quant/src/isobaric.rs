@@ -11,6 +11,7 @@
 //! deuterated TMTpro 32/35-plex kits have no correction: the reference always
 //! applies the identity for them.
 
+use model::scan::NoiseProfile;
 use model::Tolerance;
 
 use crate::nnls::nnls;
@@ -471,6 +472,21 @@ pub fn extract_reporters(peaks: &[(f64, f32)], plex: Plex, tol: Tolerance) -> Ve
         .collect()
 }
 
+/// The instrument noise at each reporter m/z of `plex`, in kit order.
+pub fn reporter_noise(noise: &NoiseProfile, plex: Plex) -> Vec<f32> {
+    plex.channels().iter().map(|c| noise.at(c.mz)).collect()
+}
+
+/// Per-channel signal-to-noise: each reporter intensity over the noise at its
+/// m/z (`noise` from [`reporter_noise`]). A channel without signal is 0.
+pub fn signal_to_noise(values: &[f32], noise: &[f32]) -> Vec<f32> {
+    values
+        .iter()
+        .zip(noise)
+        .map(|(&v, &n)| if n > 0.0 { v.max(0.0) / n } else { 0.0 })
+        .collect()
+}
+
 /// Isotope impurity matrix `M` with `observed = M · true`: `m[target][source]`
 /// is the fraction of channel `source`'s signal that is read in channel
 /// `target`; the diagonal is what remains after every listed spill.
@@ -737,6 +753,23 @@ mod tests {
         let r2 = extract_reporters(&peaks, Plex::Tmt10, Tolerance::Da(0.3));
         assert_eq!(r2[1], 300.0);
         assert_eq!(r2[0], 900.0);
+    }
+
+    #[test]
+    fn signal_to_noise_divides_by_the_noise_at_each_reporter() {
+        let profile =
+            NoiseProfile::reporter_region([(125.0, 100.0), (127.0, 300.0), (132.0, 300.0)])
+                .unwrap();
+        let noise = reporter_noise(&profile, Plex::Tmt6);
+        assert_eq!(noise.len(), 6);
+        // 126.13 sits between 125 (100) and 127 (300).
+        assert!((noise[0] - (100.0 + 200.0 * 1.127725 / 2.0)).abs() < 0.1, "{noise:?}");
+        assert_eq!(noise[5], 300.0);
+        let sn = signal_to_noise(&[3000.0, 0.0, 600.0, -1.0, 300.0, 900.0], &noise);
+        assert!((sn[0] - 3000.0 / noise[0]).abs() < 1e-3);
+        assert_eq!(sn[1], 0.0);
+        assert_eq!(sn[3], 0.0);
+        assert_eq!(sn[5], 3.0);
     }
 
     #[test]

@@ -35,7 +35,7 @@ pub use protein::{
     Substitution, VariantRegion,
 };
 pub use protocol::Protocol;
-pub use scan::{Ms1Scan, ProductScan};
+pub use scan::{Ms1Scan, NoiseProfile, ProductScan};
 pub use spectrum::Spectrum;
 pub use tolerance::{PrecursorTolerance, Tolerance};
 pub use unimod::{UnimodDb, UnimodMod, UnimodResolveError};

@@ -741,7 +741,8 @@ residues and their multiset of modification masses (the same peptide with a modi
 another site), only the best-ranked row is written; a decoy never collapses into a target, and the
 kept row's `Proteins` lists the proteins of the rows collapsed into it. The TSV and QPX outputs
 carry the same rows. Rank is assigned after the collapse. The `chargeN`
-one-hots follow `--charge`; the default 2–5 gives the 66 columns below. Do not confuse
+one-hots follow `--charge` only, never the data, so separately searched runs share one header;
+the default 2–5 gives the 66 columns below. Do not confuse
 **`RankScore`** (col 7, orders candidates; historically `RawScore`) with **`RawScore`** (col 62,
 the fused strong score Percolator weights most; historically `StrongScore`; it also ranks under
 `--score strong`).
@@ -759,7 +760,7 @@ the fused strong score Percolator weights most; historically `StrongScore`; it a
 | 9 | `peplen` | int | ≥6 | Residue count **+ 2** (flanks). |
 | 10 | `dm` | float | signed | Precursor mass error (Da) after isotope correction. |
 | 11 | `absdm` | float | ≥0 | `\|dm\|`. |
-| 12–15 | `charge2`…`charge5` | 0/1 | one-hot | One-hot precursor charge. |
+| 12–15 | `charge2`…`charge5` | 0/1 | one-hot | One-hot precursor charge. A declared charge outside `--charge` sets the nearest edge column (a 6+ sets `charge5`). |
 | 16 | `enzN` | 0/1 | one-hot | N-terminus fits the enzyme rule. |
 | 17 | `enzC` | 0/1 | one-hot | C-terminus fits the enzyme rule. |
 | 18 | `enzInt` | int | ≥0 | Internal cleavage sites. |

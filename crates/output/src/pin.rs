@@ -364,7 +364,7 @@ pub fn write_pin_to<W: Write>(
     params: &SearchParams,
     search_index: &SearchIndex,
 ) -> io::Result<()> {
-    let (min_charge, max_charge) = pin_charge_columns(params, queues);
+    let (min_charge, max_charge) = pin_charge_columns(params);
 
     // FDR-join guard: the PIN `SpecId` (`{spec_id}_{scan}` base) is the key
     // Percolator joins q-values/PEPs back onto (its result map is keyed by
@@ -434,15 +434,12 @@ pub fn write_pin_to<W: Write>(
     Ok(())
 }
 
-/// The charge one-hot columns: the searched `--charge` range, widened to every
-/// charge a PSM carries. A declared precursor charge is searched even outside
-/// the range, and such a PSM needs its own column rather than an all-zero
-/// charge vector.
-fn pin_charge_columns(params: &SearchParams, queues: &[TopNQueue]) -> (u8, u8) {
-    queues.iter().flat_map(TopNQueue::iter_psms).fold(
-        (*params.charge_range.start(), *params.charge_range.end()),
-        |(lo, hi), psm| (lo.min(psm.charge_used), hi.max(psm.charge_used)),
-    )
+/// The charge one-hot columns: the searched `--charge` range. They depend on the
+/// parameters only, never on the PSMs, so the PINs of separately searched runs
+/// share one header and can be pooled into one Percolator run. A declared
+/// precursor charge outside the range sets the nearest edge column.
+fn pin_charge_columns(params: &SearchParams) -> (u8, u8) {
+    (*params.charge_range.start(), *params.charge_range.end())
 }
 
 /// Spectra whose PIN rows are formatted in parallel before being written out.
@@ -783,9 +780,10 @@ fn write_psm_row<W: Write>(
     writer.write_all(b"\t")?;
     write_double(writer, absdm)?;
 
-    // Charge one-hot
+    // Charge one-hot; a charge outside the columns sets the nearest edge.
+    let hot_charge = psm.charge_used.clamp(min_charge, max_charge);
     for c in min_charge..=max_charge {
-        let flag: u8 = if c == psm.charge_used { b'1' } else { b'0' };
+        let flag: u8 = if c == hot_charge { b'1' } else { b'0' };
         writer.write_all(&[b'\t', flag])?;
     }
 
@@ -1428,7 +1426,7 @@ mod tests {
     }
 
     #[test]
-    fn pin_charge_columns_cover_declared_charges_outside_range() {
+    fn pin_charge_columns_are_the_charge_range_for_any_psms() {
         let params = make_params(2..=3);
         let spectra = vec![
             make_spectrum("Scan 1", 1, 500.0),
@@ -1446,23 +1444,20 @@ mod tests {
         let mut buf = Vec::<u8>::new();
         write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
 
+        // Declared charges 1 and 6 lie outside --charge 2..3: the header stays
+        // at the range and they set the nearest edge column.
         let cols = parse_header(&buf);
         let charge_cols: Vec<&String> = cols.iter().filter(|c| c.starts_with("charge")).collect();
-        assert_eq!(
-            charge_cols,
-            ["charge1", "charge2", "charge3", "charge4", "charge5", "charge6"]
-        );
+        assert_eq!(charge_cols, ["charge2", "charge3"]);
         let rows = parse_rows(&buf);
         assert_eq!(rows.len(), 3);
-        let first = cols.iter().position(|c| c == "charge1").unwrap();
-        for (row, z) in rows.iter().zip([1usize, 2, 6]) {
-            let hot: Vec<&str> = row[first..first + 6].iter().map(String::as_str).collect();
-            let mut expected = ["0"; 6];
-            expected[z - 1] = "1";
-            assert_eq!(hot, expected, "charge {z}");
+        let first = cols.iter().position(|c| c == "charge2").unwrap();
+        for (row, expected) in rows.iter().zip([["1", "0"], ["1", "0"], ["0", "1"]]) {
+            let hot: Vec<&str> = row[first..first + 2].iter().map(String::as_str).collect();
+            assert_eq!(hot, expected);
         }
 
-        // PSMs inside the range leave the columns at the `--charge` range.
+        // The same header for PSMs inside the range.
         let mut buf = Vec::<u8>::new();
         write_pin_to(
             &mut buf,

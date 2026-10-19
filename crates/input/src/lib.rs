@@ -1,6 +1,8 @@
 //! Input readers: MGF, mzML, FASTA, UniProt XML, and (optional) Thermo `.raw` /
 //! Bruker timsTOF `.d`.
 
+pub mod annotation;
+pub mod annotations_file;
 pub mod database;
 pub mod fasta;
 pub mod isobaric;
@@ -13,6 +15,8 @@ pub mod timstof;
 pub mod uniprot;
 mod uniprot_ptm;
 
+pub use annotation::{build_entry, knockoff_annotations, KnockoffOptions};
+pub use annotations_file::{load_annotations, sequence_md5, AnnotationLoadStats, AnnotationsError};
 pub use database::{load_protein_database, DatabaseError, DatabaseFormat, LoadedDatabase};
 pub use fasta::{FastaParseError, FastaReader};
 pub use isobaric::{detect_isobaric, IsobaricLabel};
@@ -26,8 +30,8 @@ pub use thermo::{ThermoParseError, ThermoRawReader};
 #[cfg(feature = "timstof")]
 pub use timstof::{TimsTofParseError, TimsTofReader};
 pub use uniprot::{
-    load_uniprot_xml, EvidenceLevel, KnockoffOptions, UniProtLoadStats, UniProtOptions,
-    UniProtParseError, UniProtXmlReader,
+    load_uniprot_xml, EvidenceLevel, UniProtLoadStats, UniProtOptions, UniProtParseError,
+    UniProtXmlReader,
 };
 
 /// Open a spectrum/FASTA file for buffered reading, **transparently

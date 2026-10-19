@@ -150,7 +150,7 @@ or an XML file with no UniProt entries, is an error.
 | `--uniprot-isoforms` | bool | off | Add one target entry per described isoform, rebuilt from the canonical sequence and its splice variants. |
 | `--uniprot-chains` | bool | off | Add one target entry per mature chain or peptide with a terminus the precursor lacks. Only peptides at those new termini are enumerated from it. |
 | `--uniprot-evidence` | enum | `experimental` | Minimum UniProt evidence for a variant, an annotated site or a mature chain: `experimental`, `curated`, or `any` (see below). |
-| `--uniprot-knockoffs` | int | `4` | With `--uniprot-variants`: knockoff entries per single-residue variant of a canonical sequence (`0`: none). With rescoring they give variant PSMs a knockoff q-value, and variant PSMs whose variant has no knockoff are not accepted. See the README section on knockoff variants. |
+| `--knockoffs` | int | `4` | Knockoff entries per single-residue variant of a canonical sequence, from `--uniprot-variants` or `--annotations` (`0`: none). With rescoring they give variant PSMs a knockoff q-value, and variant PSMs whose variant has no knockoff are not accepted. See the README section on knockoff variants. |
 
 **Annotated modification sites.** `modified residue`, `lipid moiety-binding region` and
 `glycosylation site` features become sites with the monoisotopic mass of the named modification,
@@ -308,6 +308,47 @@ sequence, on isoforms not searched, or with no known mass).
 **Validation.** The variant, isoform and chain options grow the search space, which can raise
 identifications and error together. Measure them before relying on them: PSMs at 1% FDR on the standard datasets, plus an
 entrapment FDP.
+
+### Annotation files (`--annotations`)
+
+An annotation file adds claims about the reference proteins of any target database, FASTA or
+UniProt XML, from any source: variant catalogues, a sample's own variant calls, site databases.
+Each row is one claim, made of sequence edits, modification sites or a mature chain. andes builds
+it into entries exactly as it builds UniProt's own. Knockoffs, the class FDR, `--proteoform-fdr`
+and the proteoform table then treat both alike. A UniProt XML variant written as an annotation
+of the matching FASTA gives the same entries and the same PIN.
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--annotations` | path, repeatable | *(none)* | A Parquet annotations file. Several files are merged: equal claims become one entry, and an `annotation_id` must name one claim across all files. |
+
+**File format.** Parquet with the key-value metadata `andes.annotations.schema = 1`. One row per
+claim. Integer fields may be of any integer type, and other columns are ignored.
+
+| Column | Type | Required | Meaning |
+|---|---|---|---|
+| `annotation_id` | utf8 | yes | Stable id. The entry's accession is the reference accession with `_<id>` added to its middle field (`sp|P02769_VAR_A214T|ALBU_BOVIN`). |
+| `reference_accession` | utf8 | yes | Accession (first header token) of the reference protein. |
+| `reference_md5` | utf8 | yes | md5 (hex) of the reference sequence (uppercase residues) the claim was written against. A row whose reference differs is left out. |
+| `source_db` | utf8 | yes | Where the claim comes from, e.g. `COSMIC`, `dbSNP`, `sample_vcf`. |
+| `edits` | list<struct<start, end, ref: utf8, alt: utf8>> | no | Sequence edits on the reference, 0-based half-open, sorted and disjoint; `ref` must equal the reference residues, and an empty `alt` is a deletion. Edits on one row occur together (in cis). |
+| `mods` | list<struct<position, residue: utf8, mass: f64, anchor: utf8>> | no | Modification sites, in the coordinates of the entry (after the edits, or within the chain). `anchor`: `residue` (default), `protein_n_term` or `protein_c_term`. |
+| `processing` | struct<start, end> | no | A mature chain: reference residues `[start, end)`. It must make a new terminus. |
+
+A row needs `edits`, `mods` or `processing`:
+- `edits` make a variant entry, with knockoffs for a single-residue substitution;
+- `processing` makes a chain entry;
+- `mods` alone add sites to the reference protein itself (for `sites=annotated` mods), and every
+  entry built from that reference inherits them.
+
+Edits together with processing are not supported yet. Rows are checked on load:
+- the reference must exist and its md5 must match;
+- each edit's `ref` must match, and the edits must be sorted and disjoint;
+- each mod residue must match;
+- an edit set that only swaps I and L is left out, because no spectrum tells it from the
+  reference.
+
+The run log counts every row left out, by reason.
 
 ### Chimeric cascade
 

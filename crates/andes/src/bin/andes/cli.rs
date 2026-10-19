@@ -147,8 +147,17 @@ pub(crate) struct SearchArgs {
     )]
     pub(crate) uniprot_evidence: input::EvidenceLevel,
 
-    /// UniProt XML database, with `--uniprot-variants`: knockoff entries per
-    /// single-residue variant of a canonical sequence (0: none). A knockoff is
+    /// Annotation file(s) (`<name>.annotations.parquet`): claims about the
+    /// database's reference proteins (sequence edits, modification sites,
+    /// mature chains) from any source, one row per claim. Edits become variant
+    /// entries, chains become chain entries and sites are added to the
+    /// reference, as from a UniProt XML database. Repeat for several files;
+    /// they are merged by content. See DOCS.md for the columns.
+    #[arg(long = "annotations", value_name = "FILE")]
+    pub(crate) annotations: Vec<PathBuf>,
+
+    /// Knockoff entries per single-residue variant (0: none), for UniProt XML
+    /// variants (`--uniprot-variants`) and `--annotations` variants. A knockoff is
     /// the same substitution at another position holding the same residue, in a
     /// matched sequence context and at least 10 residues from every known
     /// variant, so it is almost certainly absent from the sample but fits a mass
@@ -158,8 +167,8 @@ pub(crate) struct SearchArgs {
     /// too (with --rescore). A variant PSM is accepted only when its variant has
     /// a knockoff; knockoff PSMs are never reported. 0 turns this off and
     /// leaves variant PSMs to the class FDR alone.
-    #[arg(long = "uniprot-knockoffs", default_value_t = 4)]
-    pub(crate) uniprot_knockoffs: usize,
+    #[arg(long = "knockoffs", default_value_t = 4)]
+    pub(crate) knockoffs: usize,
 
     /// Output Percolator PIN file path.
     #[arg(long)]

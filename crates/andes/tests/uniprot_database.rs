@@ -71,7 +71,7 @@ fn annotated_site_mods_and_variants_run_end_to_end() {
             "--uniprot-evidence",
             "curated",
             "--uniprot-variants",
-            "--uniprot-knockoffs",
+            "--knockoffs",
             "0",
             "--uniprot-chains",
             "--uniprot-isoforms",
@@ -298,7 +298,7 @@ fn knockoff_variants_are_searched_but_never_reported() {
     let off = search(
         "test-fixtures/BSA.xml.gz",
         &dir.path().join("off.pin"),
-        &["--uniprot-variants", "--uniprot-evidence", "any", "--uniprot-knockoffs", "0"],
+        &["--uniprot-variants", "--uniprot-evidence", "any", "--knockoffs", "0"],
     );
     assert!(!String::from_utf8_lossy(&off.stderr).contains("knockoff variant entries"));
     let pin = std::fs::read_to_string(dir.path().join("off.pin")).unwrap();

@@ -7,6 +7,7 @@
 pub mod aa_set;
 pub mod activation;
 pub mod amino_acid;
+pub mod annotation;
 pub mod enzyme;
 pub mod instrument;
 pub mod isotope;
@@ -23,6 +24,7 @@ pub mod unimod;
 pub use aa_set::{AaSetError, AminoAcidSet, AminoAcidSetBuilder, Terminus};
 pub use activation::ActivationMethod;
 pub use amino_acid::AminoAcid;
+pub use annotation::{Annotation, Edit, Processing};
 pub use enzyme::Enzyme;
 pub use instrument::InstrumentType;
 pub use mass::{nominal_from, H2O, PROTON};

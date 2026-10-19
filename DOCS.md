@@ -350,7 +350,9 @@ claim. Integer fields may be of any integer type, and other columns are ignored.
 
 UniProt XML variants are `curated`, or `catalogue` when only `--uniprot-evidence any` admits them.
 PEFF claims are `catalogue`. When equal claims are merged, the best tier is kept, `sample`
-first. Knockoff q-values are estimated per substitution class within each tier, so claims of
+first. An annotation claim equal to an entry the database already holds (a UniProt
+XML or PEFF variant or chain that reads the same) joins that entry instead of adding a second
+one, and the entry and its knockoffs take the better tier. The run log counts these merges. Knockoff q-values are estimated per substitution class within each tier, so claims of
 different reliability do not share one estimate. A class with fewer than 50 tested PSMs at the
 cutoff in a tier joins the class's other small tiers. Classes are never pooled with each other,
 and a run with one tier is stratified by class alone. The proteoform table reports each member's

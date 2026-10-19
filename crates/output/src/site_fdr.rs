@@ -11,9 +11,13 @@
 //! peptide is identified does not depend on which residue carries the
 //! modification. Only the site claim gets a q-value.
 //!
-//! Real unannotated sites exist, so some knockoff sites are really modified;
-//! counting them as false makes the estimate err towards rejecting true
-//! claims, never towards accepting false ones.
+//! The knockoff null models whether a residue carries the modification
+//! (occupancy), not which modification it carries (identity): a knockoff site
+//! lies in another peptide, so the right residue with a near-isobaric wrong
+//! modification is not estimated. On synthetic PTM pools, 38% of the sites
+//! accepted at site q 0.05 were false, almost all the right site with the
+//! wrong modification. Real unannotated sites also exist, which pushes the
+//! other way.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -178,8 +182,9 @@ pub fn site_claims(
         if mods.is_empty() {
             continue;
         }
-        let mut real: Vec<(Key, (usize, u32, u64), bool)> = Vec::new();
-        let mut knock: Vec<(Key, f64, bool)> = Vec::new();
+        // Each with the modification's offset in the peptide.
+        let mut real: Vec<(Key, (usize, u32, u64), bool, usize)> = Vec::new();
+        let mut knock: Vec<(Key, f64, bool, usize)> = Vec::new();
         for acc in psm.proteins.split(';') {
             let Some(&i) = by_acc.get(acc) else {
                 continue;
@@ -210,16 +215,19 @@ pub fn site_claims(
                             .unwrap_or(c.mass_delta.to_bits());
                         let k = per_site.get(&(i, of, real_bits)).copied().unwrap_or(1);
                         let restricted = restricted.iter().any(|&m| same(m, mass));
-                        knock.push((key, 1.0 / k as f64, restricted));
+                        knock.push((key, 1.0 / k as f64, restricted, at));
                     }
                     None => {
                         let site = (i, pos, c.mass_delta.to_bits());
-                        real.push((key, site, per_site.contains_key(&site)));
+                        real.push((key, site, per_site.contains_key(&site), at));
                     }
                 }
             }
         }
-        if let Some(&(key, weight, _)) = knock.first() {
+        // A placement that is a knockoff site in one protein and a real claim
+        // in another (a paralog annotated differently) supports that claim.
+        knock.retain(|k| !real.iter().any(|r| r.3 == k.3 && r.0 .0 == k.0 .0));
+        if let Some(&(key, weight, _, _)) = knock.first() {
             by_key
                 .entry(key)
                 .or_default()
@@ -228,7 +236,7 @@ pub fn site_claims(
                 knockoff_rows.insert(id.clone());
             }
         } else {
-            for (key, site, tested) in real {
+            for (key, site, tested, _) in real {
                 by_key.entry(key).or_default().push((
                     rank(psm),
                     id.clone(),
@@ -271,13 +279,17 @@ pub fn site_claims(
             knockoff_weighted: 0.0,
             accepted: 0,
         };
+        // A PSM counts once per stratum on the claim side, however many
+        // proteins hold its claim (a peptide shared across genes), as a
+        // knockoff PSM does on the knockoff side.
+        let (mut seen_claim, mut seen_tested) = (HashSet::new(), HashSet::new());
         for (_, id, part) in &parts {
             if targets[id].q_value <= fdr {
                 match part {
                     Part::Knockoff { weight } => count.knockoff_weighted += weight,
                     Part::Claim { tested, .. } => {
-                        count.claims += 1;
-                        count.tested += *tested as usize;
+                        count.claims += seen_claim.insert(id.as_str()) as usize;
+                        count.tested += (*tested && seen_tested.insert(id.as_str())) as usize;
                     }
                 }
             }
@@ -289,12 +301,16 @@ pub fn site_claims(
         });
         let mut fdp = Vec::with_capacity(parts.len());
         let (mut w, mut t) = (0.0f64, 0usize);
+        let mut counted = HashSet::new();
         for (_, id, part) in &parts {
-            // Only PSMs that pass the PSM cutoff count, on both sides.
+            // Only PSMs that pass the PSM cutoff count, on both sides; a PSM
+            // counts once however many proteins hold its claim.
             if targets[id].q_value <= fdr {
                 match part {
                     Part::Knockoff { weight } => w += weight,
-                    Part::Claim { tested, .. } => t += *tested as usize,
+                    Part::Claim { tested, .. } => {
+                        t += (*tested && counted.insert(id.as_str())) as usize
+                    }
                 }
             }
             fdp.push(((1.0 / k_max as f64 + w) / t.max(1) as f64).min(1.0));

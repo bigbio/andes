@@ -150,7 +150,8 @@ or an XML file with no UniProt entries, is an error.
 | `--uniprot-isoforms` | bool | off | Add one target entry per described isoform, rebuilt from the canonical sequence and its splice variants. |
 | `--uniprot-chains` | bool | off | Add one target entry per mature chain or peptide with a terminus the precursor lacks. Only peptides at those new termini are enumerated from it. |
 | `--uniprot-evidence` | enum | `experimental` | Minimum UniProt evidence for a variant, an annotated site or a mature chain: `experimental`, `curated`, or `any` (see below). |
-| `--knockoffs` | int | `4` | Knockoff entries per single-residue variant of a canonical sequence, from `--uniprot-variants` or `--annotations`, and knockoff sites per annotated modification site (`0`: none). With rescoring they give variant PSMs a knockoff q-value, and variant PSMs whose variant has no knockoff are not accepted. See the README section on knockoff variants. |
+| `--knockoffs` | int | `4` | Knockoff entries per single-residue variant of a canonical sequence, from `--uniprot-variants` or `--annotations`, and knockoff sites per annotated modification site with `--site-claims` (`0`: none). Built only with `--rescore` or `--rescore-native`. With rescoring they give variant PSMs a knockoff q-value, and variant PSMs whose variant has no knockoff are not accepted. See the README section on knockoff variants. |
+| `--site-claims` | flag | off | Experimental: knockoff sites for annotated modification sites, a site q-value per claim and `<stem>.sites.tsv` (§1a). Not calibrated. |
 
 **Annotated modification sites.** `modified residue`, `lipid moiety-binding region` and
 `glycosylation site` features become sites with the monoisotopic mass of the named modification,
@@ -378,7 +379,7 @@ The run log counts every row left out, by reason.
 
 An annotated modification site is a claim: residue r of protein P carries modification M. Sites
 come from UniProt XML (`modified residue` and similar features), annotation-file `mods` rows and
-PEFF `\ModRes*` keys. For each one, andes adds up to `--knockoffs` knockoff sites. A knockoff
+PEFF `\ModRes*` keys. With `--site-claims`, andes adds up to `--knockoffs` knockoff sites for each one. A knockoff
 site carries the same modification on a matched residue of the same protein that no annotation
 names. It must have:
 - the same residue;
@@ -408,10 +409,15 @@ Placements on knockoff sites are never reported for a `sites=annotated` mod, bec
 only for the estimate. For an unrestricted mod, which may sit anywhere anyway, they stay ordinary
 PSMs.
 
-Some knockoff sites are really modified, because annotation is incomplete. Counting them as false
-makes the estimate err towards rejecting true site claims, never towards accepting false ones.
+Some knockoff sites are really modified, because annotation is incomplete, which makes the estimate
+reject some true claims. In the other direction, a knockoff site lies in another peptide, so the
+estimate measures whether a residue carries the modification (occupancy), not which modification
+it carries (identity): the right residue with a near-isobaric wrong modification is not estimated.
 
-**Experimental.** How conservative the estimate is has not yet been measured against known sites.
+**Experimental, and not calibrated.** On synthetic PTM peptide pools (PXD009449), 580 of the 1,535
+sites accepted at site q ≤ 0.05 (38%) were false, almost all the right site with the wrong
+modification (for example trimethyl or methyl in the acetyl pool). Phospho-Y was clean (49 sites,
+0 false). Site claims are therefore off unless `--site-claims` is given.
 
 Measured on a mouse-liver phospho run (PXD007653, reviewed mouse UniProt, 51,906 annotated sites,
 42,985 knockoff sites):

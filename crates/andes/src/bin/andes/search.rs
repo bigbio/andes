@@ -313,9 +313,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             input::load_annotations(&cli.annotations, &mut target_db, uniprot_opts.knockoffs)?;
         log_claims("Annotations", &stats);
     }
-    // Knockoff sites for every annotated site, before decoys are built so they
-    // follow to the decoys like real sites.
-    if let Some(ko) = uniprot_opts.knockoffs {
+    // Knockoff sites for every annotated site (--site-claims), before decoys
+    // are built so they follow to the decoys like real sites.
+    if let Some(ko) = uniprot_opts.knockoffs.filter(|_| cli.site_claims) {
         let stats = input::add_site_knockoffs(&mut target_db, ko);
         if stats.knockoffs > 0 {
             eprintln!(
@@ -2310,44 +2310,47 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 line.join(", ")
             );
         }
-        // Site claims: annotated sites against their knockoff sites.
-        let sites = output::site_claims(
-            map,
-            &pin_index,
-            fdr_threshold,
-            proteoform_fdr,
-            &restricted_site_masses,
-        );
-        knockoff_rows.extend(sites.knockoff_rows.iter().cloned());
-        if !sites.counts.is_empty() {
-            let line: Vec<String> = sites
-                .counts
-                .iter()
-                .map(|c| {
-                    format!(
-                        "{} {} -> {} ({} tested; knockoffs {:.1})",
-                        c.stratum, c.claims, c.accepted, c.tested, c.knockoff_weighted
-                    )
-                })
-                .collect();
-            eprintln!(
-                "Rescore: site-claim PSMs at q<={fdr_threshold} per modification and residue, \
-                 before -> after site q<={proteoform_fdr}: {}",
-                line.join(", ")
+        // Site claims (opt-in, --site-claims): annotated sites against their
+        // knockoff sites.
+        if cli.site_claims {
+            let sites = output::site_claims(
+                map,
+                &pin_index,
+                fdr_threshold,
+                proteoform_fdr,
+                &restricted_site_masses,
             );
-            let stem = report_base
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "andes".to_string());
-            let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
-            let path = dir.join(format!("{stem}.sites.tsv"));
-            match output::write_sites_tsv(&path, &sites.rows) {
-                Ok(()) => eprintln!(
-                    "Wrote site claims: {} ({} sites)",
-                    path.display(),
-                    sites.rows.len()
-                ),
-                Err(e) => eprintln!("WARN: could not write {}: {e}", path.display()),
+            knockoff_rows.extend(sites.knockoff_rows.iter().cloned());
+            if !sites.counts.is_empty() {
+                let line: Vec<String> = sites
+                    .counts
+                    .iter()
+                    .map(|c| {
+                        format!(
+                            "{} {} -> {} ({} tested; knockoffs {:.1})",
+                            c.stratum, c.claims, c.accepted, c.tested, c.knockoff_weighted
+                        )
+                    })
+                    .collect();
+                eprintln!(
+                    "Rescore: site-claim PSMs at q<={fdr_threshold} per modification and residue, \
+                     before -> after site q<={proteoform_fdr}: {}",
+                    line.join(", ")
+                );
+                let stem = report_base
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "andes".to_string());
+                let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
+                let path = dir.join(format!("{stem}.sites.tsv"));
+                match output::write_sites_tsv(&path, &sites.rows) {
+                    Ok(()) => eprintln!(
+                        "Wrote site claims: {} ({} sites)",
+                        path.display(),
+                        sites.rows.len()
+                    ),
+                    Err(e) => eprintln!("WARN: could not write {}: {e}", path.display()),
+                }
             }
         }
     }

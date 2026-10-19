@@ -172,6 +172,16 @@ pub(crate) struct SearchArgs {
     #[arg(long = "knockoffs", default_value_t = 4)]
     pub(crate) knockoffs: usize,
 
+    /// Experimental: check annotated modification sites against knockoff
+    /// sites (the same modification on matched residues no annotation names)
+    /// and, with rescoring, write `<stem>.sites.tsv` with a site q-value per
+    /// claim. Not calibrated: the estimate measures whether a residue is
+    /// modified, not which modification it carries, and on synthetic PTM pools
+    /// 38% of the sites it accepted were false. Uses --knockoffs knockoff
+    /// sites per site.
+    #[arg(long = "site-claims", default_value_t = false)]
+    pub(crate) site_claims: bool,
+
     /// Output Percolator PIN file path.
     #[arg(long)]
     pub(crate) output_pin: Option<PathBuf>,

@@ -342,6 +342,7 @@ fn annotated_sites_get_knockoff_sites_and_a_site_table() {
             mods.to_str().unwrap(),
             "--uniprot-evidence",
             "curated",
+            "--site-claims",
             "--rescore-native",
             "--fdr",
             "1",
@@ -360,4 +361,21 @@ fn annotated_sites_get_knockoff_sites_and_a_site_table() {
     );
     let table = std::fs::read_to_string(dir.path().join("sites.sites.tsv")).unwrap();
     assert!(table.starts_with("family\taccession\tposition\tresidue\tmodification_mass"));
+
+    // Without --site-claims there are no knockoff sites and no site table.
+    let off = search(
+        "test-fixtures/BSA.xml.gz",
+        &dir.path().join("plain.pin"),
+        &[
+            "--mods",
+            mods.to_str().unwrap(),
+            "--uniprot-evidence",
+            "curated",
+            "--rescore-native",
+            "--fdr",
+            "1",
+        ],
+    );
+    assert!(!String::from_utf8_lossy(&off.stderr).contains("Site claims:"));
+    assert!(!dir.path().join("plain.sites.tsv").exists());
 }

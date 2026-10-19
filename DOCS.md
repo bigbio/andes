@@ -1032,7 +1032,7 @@ single input run's MS1 scans still need to fit in memory while it is processed.
   computed under `--chimeric`.
 * **Signal-to-noise.** Orbitrap reporter scans carry the instrument's noise estimate: per
   centroid in a Thermo `.raw`, and as the `sampled noise m/z array` / `sampled noise intensity
-  array` of an mzML converted with noise data (ThermoRawFileParser `-N`). The noise at each
+  array` of an mzML converted with noise data (the converter's noise-array option). The noise at each
   reporter m/z (linear between the sampled points) divides the reporter intensity (the corrected
   one when `--tmt-correction` is given) into a per-channel signal-to-noise, written as the `sn_`
   columns and their sum `reporter_sn_sum`. Both noise sources give the same values on the same

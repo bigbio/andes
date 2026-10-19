@@ -163,10 +163,18 @@ fn tmt10_ms2_reporters_purity_and_correction() {
         // Roll-up weight: purity squared. The fixture carries no noise arrays,
         // so the S/N cells stay empty.
         let w: f64 = r[weight].parse().unwrap();
-        assert!((w - p * p).abs() < 1e-3, "{}: weight {w} purity {p}", r[peptide]);
+        assert!(
+            (w - p * p).abs() < 1e-3,
+            "{}: weight {w} purity {p}",
+            r[peptide]
+        );
         assert!(r[sn_sum].is_empty());
         let total: f64 = r[intensity_sum].parse().unwrap();
-        assert!(total >= raw_a + raw_b, "{}: summed intensity {total}", r[peptide]);
+        assert!(
+            total >= raw_a + raw_b,
+            "{}: summed intensity {total}",
+            r[peptide]
+        );
         if bare(&r[peptide]) == "YLYEIAR" {
             // Envelope inside the ±0.7 Th window (M, M+1) ≈ 1.5 × mono against an
             // interferer of 0.5 × mono → purity ≈ 0.75 (plus a little background).

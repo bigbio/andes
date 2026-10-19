@@ -280,10 +280,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // PIN for an external Percolator must not carry knockoff targets.
     let rescoring = cli.rescore || cli.rescore_native;
     let knockoffs_per_variant = if rescoring { cli.knockoffs } else { 0 };
-    if !rescoring
-        && cli.knockoffs > 0
-        && (cli.uniprot_variants || !cli.annotations.is_empty())
-    {
+    if !rescoring && cli.knockoffs > 0 && (cli.uniprot_variants || !cli.annotations.is_empty()) {
         eprintln!(
             "Note: no knockoff variants are built without --rescore or --rescore-native; \
              variant PSMs in the PIN have no knockoff q-value"

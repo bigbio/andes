@@ -433,9 +433,9 @@ fn emit_loss_ions(
             // One ion per distinct (class, loss) on this fragment.
             let same = |&l: &f64| l.to_bits() == loss.to_bits();
             let earlier = losses[..k].iter().any(same)
-                || loss_residues[..j]
-                    .iter()
-                    .any(|&(i, c, ls)| span.contains(&i) && c == loss_class && ls.iter().any(same));
+                || loss_residues[..j].iter().any(|&(i, c, ls)| {
+                    span.contains(&i) && c == loss_class && ls.iter().any(same)
+                });
             if earlier {
                 continue;
             }

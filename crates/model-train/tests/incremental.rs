@@ -520,21 +520,12 @@ fn attach_to_model_keeps_existing_model_content() {
     )
     .unwrap();
     commit_update(&path, "m", &cand, &srcs).unwrap();
-    commit_update(
-        &path,
-        "other",
-        &other,
-        &[(make_ledger("o"), make_stats_s1())],
-    )
-    .unwrap();
+    commit_update(&path, "other", &other, &[(make_ledger("o"), make_stats_s1())]).unwrap();
     let before = ModelStore::open(&path).unwrap().load_param("m").unwrap();
 
     // A distinguishable replacement rich-ion model that still satisfies the
     // rich-ion feature contract: the stored one with its last tree dropped.
-    let stored = param
-        .rich_ion_model
-        .as_deref()
-        .expect("bundled rich-ion model");
+    let stored = param.rich_ion_model.as_deref().expect("bundled rich-ion model");
     assert!(stored.trees.len() > 1);
     let replacement = std::sync::Arc::new(scoring_crate::gbdt_eval::GbdtPeakModel {
         n_features: stored.n_features,

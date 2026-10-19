@@ -497,10 +497,9 @@ impl<'a> PreparedSearch<'a> {
             return self.run_chunk_inner(spectra, spectrum_idx_offset, params);
         }
         let mass = crate::fragment_index::index_order_mass;
-        let (lo, hi) = spectra
-            .iter()
-            .map(mass)
-            .fold((f64::MAX, f64::MIN), |(lo, hi), m| (lo.min(m), hi.max(m)));
+        let (lo, hi) = spectra.iter().map(mass).fold((f64::MAX, f64::MIN), |(lo, hi), m| {
+            (lo.min(m), hi.max(m))
+        });
         let span_da = (hi - lo).max(1.0);
         let mut units: Vec<(usize, Spectrum)> = Vec::with_capacity(spectra.len());
         for (i, s) in spectra.iter().enumerate() {
@@ -521,11 +520,7 @@ impl<'a> PreparedSearch<'a> {
         while !units.is_empty() {
             let take = crate::fragment_index::index_chunk_len(&units, |u| mass(&u.1), span_da);
             let (owners, chunk): (Vec<usize>, Vec<Spectrum>) = units.drain(..take).unzip();
-            for (mut q, i) in self
-                .run_chunk_inner(&chunk, 0, params)
-                .into_iter()
-                .zip(owners)
-            {
+            for (mut q, i) in self.run_chunk_inner(&chunk, 0, params).into_iter().zip(owners) {
                 for mut psm in q.drain_into_vec() {
                     psm.spectrum_idx = spectrum_idx_offset + i;
                     merged[i].push(psm);

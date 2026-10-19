@@ -34,18 +34,17 @@
 #[path = "common/models.rs"]
 mod models;
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use models::{
-    parse_peptide, AndesMs2, DeepLc, Form, Ion, Mass, Ms2pip, PeptDeep, Predictor, Prosit, H2O,
-    PROTON,
+    AndesMs2, DeepLc, Form, H2O, Ion, Mass, Ms2pip, PROTON, PeptDeep, Predictor, Prosit, parse_peptide,
 };
 use onnx_infer::{BackendKind, BackendOptions, OnnxSession};
 
@@ -99,13 +98,7 @@ fn parse_args() -> Args {
             "--frag-unit" => a.frag_ppm = val == "ppm",
             "--threads" => a.threads = val.parse().expect("--threads"),
             "--batch" => a.batch = val.parse().expect("--batch"),
-            "--nce" => {
-                a.nce = if val == "NA" {
-                    f32::NAN
-                } else {
-                    val.parse().expect("--nce")
-                }
-            }
+            "--nce" => a.nce = if val == "NA" { f32::NAN } else { val.parse().expect("--nce") },
             "--instrument" => a.instrument = val,
             "--activation" => a.activation = val,
             "--ms2pip-model" => a.ms2pip_model = val,
@@ -186,48 +179,20 @@ fn ms2_features(
         }
     }
     let (sp, so) = (p.iter().sum::<f64>(), o.iter().sum::<f64>());
-    let pn: Vec<f64> = p
-        .iter()
-        .map(|v| if sp > 0.0 { v / sp } else { 0.0 })
-        .collect();
-    let on: Vec<f64> = o
-        .iter()
-        .map(|v| if so > 0.0 { v / so } else { 0.0 })
-        .collect();
+    let pn: Vec<f64> = p.iter().map(|v| if sp > 0.0 { v / sp } else { 0.0 }).collect();
+    let on: Vec<f64> = o.iter().map(|v| if so > 0.0 { v / so } else { 0.0 }).collect();
     let sel = |want_b: bool, v: &[f64]| -> Vec<f64> {
-        v.iter()
-            .zip(&is_b)
-            .filter(|(_, b)| **b == want_b)
-            .map(|(x, _)| *x)
-            .collect()
+        v.iter().zip(&is_b).filter(|(_, b)| **b == want_b).map(|(x, _)| *x).collect()
     };
     let dot: f64 = pn.iter().zip(&on).map(|(a, b)| a * b).sum();
     let (np, no) = (
         pn.iter().map(|v| v * v).sum::<f64>().sqrt(),
         on.iter().map(|v| v * v).sum::<f64>().sqrt(),
     );
-    let cos = if np > 0.0 && no > 0.0 {
-        (dot / (np * no)).clamp(-1.0, 1.0)
-    } else {
-        0.0
-    };
-    let sa = if np > 0.0 && no > 0.0 {
-        1.0 - 2.0 * cos.acos() / std::f64::consts::PI
-    } else {
-        0.0
-    };
-    let mse = pn
-        .iter()
-        .zip(&on)
-        .map(|(a, b)| (a - b) * (a - b))
-        .sum::<f64>()
-        / pn.len().max(1) as f64;
-    let explained: f64 = pn
-        .iter()
-        .zip(&o)
-        .filter(|(_, ob)| **ob > 0.0)
-        .map(|(v, _)| *v)
-        .sum();
+    let cos = if np > 0.0 && no > 0.0 { (dot / (np * no)).clamp(-1.0, 1.0) } else { 0.0 };
+    let sa = if np > 0.0 && no > 0.0 { 1.0 - 2.0 * cos.acos() / std::f64::consts::PI } else { 0.0 };
+    let mse = pn.iter().zip(&on).map(|(a, b)| (a - b) * (a - b)).sum::<f64>() / pn.len().max(1) as f64;
+    let explained: f64 = pn.iter().zip(&o).filter(|(_, ob)| **ob > 0.0).map(|(v, _)| *v).sum();
     [
         pearson(&pn, &on),
         pearson(&sel(true, &pn), &sel(true, &on)),
@@ -267,12 +232,7 @@ fn rss_mb() -> f64 {
 
 /// Run `jobs` across worker threads, each with shared handles on `master`;
 /// returns (wall, process CPU) seconds.
-fn run_parallel<J: Sync, F>(
-    master: &[OnnxSession],
-    threads: usize,
-    jobs: &[J],
-    work: F,
-) -> (f64, f64)
+fn run_parallel<J: Sync, F>(master: &[OnnxSession], threads: usize, jobs: &[J], work: F) -> (f64, f64)
 where
     F: Fn(&mut [OnnxSession], &J) + Sync,
 {
@@ -280,22 +240,19 @@ where
     let t0 = Instant::now();
     let c0 = cpu_s();
     let handles: Vec<Vec<OnnxSession>> = (0..threads)
-        .map(|_| {
-            master
-                .iter()
-                .map(|s| s.share().expect("share session"))
-                .collect()
-        })
+        .map(|_| master.iter().map(|s| s.share().expect("share session")).collect())
         .collect();
     std::thread::scope(|sc| {
         for mut sessions in handles {
             let (next, work) = (&next, &work);
-            sc.spawn(move || loop {
-                let j = next.fetch_add(1, Ordering::Relaxed);
-                if j >= jobs.len() {
-                    break;
+            sc.spawn(move || {
+                loop {
+                    let j = next.fetch_add(1, Ordering::Relaxed);
+                    if j >= jobs.len() {
+                        break;
+                    }
+                    work(&mut sessions, &jobs[j]);
                 }
-                work(&mut sessions, &jobs[j]);
             });
         }
     });
@@ -318,25 +275,12 @@ fn batches(keys: impl Iterator<Item = usize>, batch: usize) -> Vec<Vec<usize>> {
 
 fn main() {
     let args = parse_args();
-    models::set_backend(
-        args.backend,
-        BackendOptions {
-            intra_threads: args.intra_threads,
-        },
-    );
+    models::set_backend(args.backend, BackendOptions { intra_threads: args.intra_threads });
     let pred: Box<dyn Predictor> = match args.model.as_str() {
         "peptdeep" => Box::new(PeptDeep::new(&args.models, args.nce, &args.instrument)),
-        "ms2pip" => Box::new(Ms2pip {
-            dir: args.models.clone(),
-            model: args.ms2pip_model.clone(),
-        }),
-        "deeplc" => Box::new(DeepLc {
-            dir: args.models.clone(),
-        }),
-        "prosit" => Box::new(Prosit {
-            dir: args.models.clone(),
-            nce: args.nce,
-        }),
+        "ms2pip" => Box::new(Ms2pip { dir: args.models.clone(), model: args.ms2pip_model.clone() }),
+        "deeplc" => Box::new(DeepLc { dir: args.models.clone() }),
+        "prosit" => Box::new(Prosit { dir: args.models.clone(), nce: args.nce }),
         "andes-ms2" => Box::new(AndesMs2::new(
             &args.models,
             Some(args.nce).filter(|v| v.is_finite()),
@@ -351,19 +295,8 @@ fn main() {
     let t_all = Instant::now();
     let f = BufReader::new(File::open(&args.pin).unwrap());
     let mut lines = f.lines();
-    let header: Vec<String> = lines
-        .next()
-        .unwrap()
-        .unwrap()
-        .split('\t')
-        .map(String::from)
-        .collect();
-    let hc = |n: &str| {
-        header
-            .iter()
-            .position(|h| h == n)
-            .unwrap_or_else(|| panic!("PIN column {n}"))
-    };
+    let header: Vec<String> = lines.next().unwrap().unwrap().split('\t').map(String::from).collect();
+    let hc = |n: &str| header.iter().position(|h| h == n).unwrap_or_else(|| panic!("PIN column {n}"));
     let (c_id, c_scan, c_pep) = (hc("SpecId"), hc("ScanNr"), hc("Peptide"));
     let charge_cols: Vec<(usize, u8)> = header
         .iter()
@@ -380,13 +313,7 @@ fn main() {
     let mut form_ix: HashMap<Form, usize> = HashMap::new();
     // Columns a row needs; shorter rows, blank lines and rows whose ScanNr is not
     // an integer (a `DefaultDirection` line, a truncated file) are skipped.
-    let n_cols = charge_cols
-        .iter()
-        .map(|(i, _)| *i)
-        .chain([c_id, c_scan, c_pep])
-        .max()
-        .unwrap()
-        + 1;
+    let n_cols = charge_cols.iter().map(|(i, _)| *i).chain([c_id, c_scan, c_pep]).max().unwrap() + 1;
     let mut rows = Vec::new();
     let mut skipped_rows = 0usize;
     for line in lines {
@@ -399,30 +326,19 @@ fn main() {
                 continue;
             }
         };
-        let charge = charge_cols
-            .iter()
-            .find(|(i, _)| x[*i] == "1")
-            .map_or(0, |(_, z)| *z);
+        let charge = charge_cols.iter().find(|(i, _)| x[*i] == "1").map_or(0, |(_, z)| *z);
         let form = parse_peptide(x[c_pep]).map(|(f, m)| {
             *form_ix.entry(f.clone()).or_insert_with(|| {
                 forms.push((f, m));
                 forms.len() - 1
             })
         });
-        rows.push(Row {
-            id: x[c_id].to_string(),
-            scan,
-            charge,
-            form,
-        });
+        rows.push(Row { id: x[c_id].to_string(), scan, charge, form });
     }
     if skipped_rows > 0 {
         eprintln!("warning: skipped {skipped_rows} PIN lines (blank, short or non-numeric ScanNr)");
     }
-    let unparsed = rows
-        .iter()
-        .filter(|r| r.form.is_none() || r.charge == 0)
-        .count();
+    let unparsed = rows.iter().filter(|r| r.form.is_none() || r.charge == 0).count();
     eprintln!(
         "model {} backend {:?} | PIN rows {} distinct peptidoforms {} unparsed rows {} ({:.1}s)",
         args.model,
@@ -436,11 +352,7 @@ fn main() {
     // Spectra.
     let t = Instant::now();
     let (spectra, errs) = input::read_spectra_parallel(&args.mzml, 2, 2, args.threads).unwrap();
-    assert!(
-        errs.is_empty(),
-        "mzML errors: {:?}",
-        &errs[..errs.len().min(3)]
-    );
+    assert!(errs.is_empty(), "mzML errors: {:?}", &errs[..errs.len().min(3)]);
     // Spectra without a scan number cannot be joined to a PIN row; of duplicate
     // scan numbers the first spectrum is kept. Both are counted, not fatal.
     let mut by_scan: HashMap<i32, usize> = HashMap::new();
@@ -461,30 +373,17 @@ fn main() {
             "warning: skipped {no_scan} spectra without a scan number and {dup_scan} with a duplicate scan number"
         );
     }
-    eprintln!(
-        "mzML {} MS2 spectra ({:.1}s)",
-        spectra.len(),
-        t.elapsed().as_secs_f64()
-    );
+    eprintln!("mzML {} MS2 spectra ({:.1}s)", spectra.len(), t.elapsed().as_secs_f64());
 
     let t = Instant::now();
     let master = pred.sessions();
-    eprintln!(
-        "model load {:.2}s, RSS {:.0} MB",
-        t.elapsed().as_secs_f64(),
-        rss_mb()
-    );
+    eprintln!("model load {:.2}s, RSS {:.0} MB", t.elapsed().as_secs_f64(), rss_mb());
 
     // RT over distinct supported forms.
     let mut rt_pred = vec![f32::NAN; forms.len()];
     if pred.has_rt() {
-        let rt_forms: Vec<usize> = (0..forms.len())
-            .filter(|&i| pred.supports_rt(&forms[i].0))
-            .collect();
-        let jobs = batches(
-            rt_forms.iter().map(|&i| pred.batch_key(&forms[i].0)),
-            args.batch,
-        );
+        let rt_forms: Vec<usize> = (0..forms.len()).filter(|&i| pred.supports_rt(&forms[i].0)).collect();
+        let jobs = batches(rt_forms.iter().map(|&i| pred.batch_key(&forms[i].0)), args.batch);
         let out = Mutex::new(&mut rt_pred);
         let (wall, cpu) = run_parallel(&master, args.threads, &jobs, |s, job| {
             let fs: Vec<&Form> = job.iter().map(|&j| &forms[rt_forms[j]].0).collect();
@@ -519,14 +418,10 @@ fn main() {
     }
     let mut ms2_pred: Vec<Vec<f32>> = vec![Vec::new(); fz.len()];
     if !fz.is_empty() {
-        let jobs = batches(
-            fz.iter().map(|(f, _)| pred.batch_key(&forms[*f].0)),
-            args.batch,
-        );
+        let jobs = batches(fz.iter().map(|(f, _)| pred.batch_key(&forms[*f].0)), args.batch);
         let out = Mutex::new(&mut ms2_pred);
         let (wall, cpu) = run_parallel(&master, args.threads, &jobs, |s, job| {
-            let items: Vec<(&Form, u8)> =
-                job.iter().map(|&i| (&forms[fz[i].0].0, fz[i].1)).collect();
+            let items: Vec<(&Form, u8)> = job.iter().map(|&i| (&forms[fz[i].0].0, fz[i].1)).collect();
             let v = pred.ms2(s, &items);
             let mut g = out.lock().unwrap();
             for (&i, x) in job.iter().zip(v) {
@@ -552,33 +447,19 @@ fn main() {
     let mut n_missing = 0usize;
     for r in &rows {
         let spec = by_scan.get(&r.scan).map(|&i| &spectra[i]);
-        let obs_rt = spec
-            .and_then(|s| s.rt_seconds)
-            .map_or(f64::NAN, |s| s / 60.0);
+        let obs_rt = spec.and_then(|s| s.rt_seconds).map_or(f64::NAN, |s| s / 60.0);
         // A non-finite prediction (overflow in a model) is missing, not a value.
         let irt = r.form.map_or(f32::NAN, |f| rt_pred[f]);
         let irt = if irt.is_finite() { irt } else { f32::NAN };
         let ms2 = match (r.form, spec) {
             (Some(f), Some(s)) => fz_ix.get(&(f, r.charge)).map(|&k| {
-                ms2_features(
-                    &ms2_pred[k],
-                    pred.ions(),
-                    &forms[f].1,
-                    r.charge,
-                    &s.peaks,
-                    args.frag_tol,
-                    args.frag_ppm,
-                )
+                ms2_features(&ms2_pred[k], pred.ions(), &forms[f].1, r.charge, &s.peaks, args.frag_tol, args.frag_ppm)
             }),
             _ => None,
         };
         let missing = (pred.has_rt() && irt.is_nan()) || (!pred.ions().is_empty() && ms2.is_none());
         n_missing += missing as usize;
-        let irt = if irt.is_nan() {
-            "NA".to_string()
-        } else {
-            format!("{irt:.6}")
-        };
+        let irt = if irt.is_nan() { "NA".to_string() } else { format!("{irt:.6}") };
         write!(w, "{}\t{obs_rt:.4}\t{irt}\t{}", r.id, missing as u8).unwrap();
         match ms2 {
             Some(fv) => fv.iter().for_each(|v| write!(w, "\t{v:.6}").unwrap()),

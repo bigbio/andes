@@ -199,11 +199,7 @@ fn enumerate_protein_from_offset(
             protein,
             met_cleaved_walk: has_met_cleaved_walk(protein),
         };
-        let starts_end = if n_term_only {
-            window.1.min(1)
-        } else {
-            window.1
-        };
+        let starts_end = if n_term_only { window.1.min(1) } else { window.1 };
         return enumerate_all_spans(&ctx, window.0..starts_end, n);
     }
 
@@ -2062,14 +2058,8 @@ mod tests {
                 .any(|c| !c.is_decoy && c.start_offset_in_protein == 4 && c.peptide.length() == 5);
             found
         };
-        assert!(
-            has_dagtr(false),
-            "without deamidation D is evidence for the variant"
-        );
-        assert!(
-            !has_dagtr(true),
-            "D+TMT is the canonical N deamidated + TMT"
-        );
+        assert!(has_dagtr(false), "without deamidation D is evidence for the variant");
+        assert!(!has_dagtr(true), "D+TMT is the canonical N deamidated + TMT");
     }
 
     /// A mature chain starting with M gets no Met-cleaved walk, so the full
@@ -2138,9 +2128,7 @@ mod tests {
             keys.dedup();
             assert_eq!(keys.len(), n, "ntt={ntt}: a span is enumerated twice");
             assert!(
-                cands
-                    .iter()
-                    .any(|c| c.start_offset_in_protein == 1 && c.is_protein_n_term),
+                cands.iter().any(|c| c.start_offset_in_protein == 1 && c.is_protein_n_term),
                 "ntt={ntt}: missing the Met-cleaved N-terminal peptide"
             );
             assert!(

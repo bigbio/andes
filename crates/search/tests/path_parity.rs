@@ -95,7 +95,10 @@ const EXCEPTIONS: &[(&str, &str)] = &[
          Reference tracker; a glyco search over such entries reports 0 here \
          (documented in DOCS §1a).",
     ),
-    ("ref_best_raw", "companion of ref_competitor, same reason."),
+    (
+        "ref_best_raw",
+        "companion of ref_competitor, same reason.",
+    ),
 ];
 
 #[test]

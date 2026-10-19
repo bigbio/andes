@@ -113,11 +113,7 @@ fn sequences(peptides: &[PrositPeptide<'_>]) -> Result<Vec<f32>> {
 
 /// iRT graph input `peptides_in`.
 pub fn pack_irt_batch(peptides: &[PrositPeptide<'_>]) -> Result<NamedTensor> {
-    NamedTensor::new(
-        "peptides_in",
-        vec![peptides.len(), SEQ_LEN],
-        sequences(peptides)?,
-    )
+    NamedTensor::new("peptides_in", vec![peptides.len(), SEQ_LEN], sequences(peptides)?)
 }
 
 /// Intensity graph inputs (`peptides_in`, `precursor_charge_in`, `collision_energy_in`).
@@ -128,17 +124,12 @@ pub fn pack_intensity_batch(
 ) -> Result<[NamedTensor; 3]> {
     let b = peptides.len();
     if charges.len() != b {
-        return Err(Error::InvalidArg(format!(
-            "charges len {} != peptides len {b}",
-            charges.len()
-        )));
+        return Err(Error::InvalidArg(format!("charges len {} != peptides len {b}", charges.len())));
     }
     let mut onehot = vec![0f32; b * MAX_CHARGE as usize];
     for (i, &z) in charges.iter().enumerate() {
         if !(1..=MAX_CHARGE).contains(&z) {
-            return Err(Error::InvalidArg(format!(
-                "charge {z} outside Prosit's 1..={MAX_CHARGE}"
-            )));
+            return Err(Error::InvalidArg(format!("charge {z} outside Prosit's 1..={MAX_CHARGE}")));
         }
         onehot[i * MAX_CHARGE as usize + z as usize - 1] = 1.0;
     }
@@ -161,11 +152,7 @@ pub fn decode_intensity(raw: &[f32], n: usize, charge: u8) -> Result<Vec<f32>> {
         )));
     }
     let v = |pos: usize, k: usize, z: usize| -> f32 {
-        if z as u8 > charge {
-            0.0
-        } else {
-            raw[pos * 6 + k * 3 + z - 1].max(0.0)
-        }
+        if z as u8 > charge { 0.0 } else { raw[pos * 6 + k * 3 + z - 1].max(0.0) }
     };
     let mut out = Vec::with_capacity((n - 1) * 6);
     for i in 0..n - 1 {
@@ -192,10 +179,7 @@ mod tests {
     fn encodes_alphabet_and_mods() {
         let s = encode_sequence("MCK", &[Oxidation, Carbamidomethyl, Plain]).unwrap();
         assert_eq!(&s[..4], &[21.0, 2.0, 9.0, 0.0]);
-        assert!(
-            encode_sequence("CK", &[Plain, Plain]).is_err(),
-            "free cysteine"
-        );
+        assert!(encode_sequence("CK", &[Plain, Plain]).is_err(), "free cysteine");
         assert!(encode_sequence("SK", &[Oxidation, Plain]).is_err());
         assert!(encode_sequence(&"A".repeat(31), &[Plain; 31]).is_err());
     }
@@ -217,22 +201,11 @@ mod tests {
 
     #[test]
     fn packs_charge_onehot_and_nce() {
-        let p = PrositPeptide {
-            sequence: "PEPTIDEK",
-            states: vec![Plain; 8],
-        };
+        let p = PrositPeptide { sequence: "PEPTIDEK", states: vec![Plain; 8] };
         let [s, z, ce] = pack_intensity_batch(&[p], &[3], 30.0).unwrap();
         assert_eq!(s.shape, vec![1, SEQ_LEN]);
         assert_eq!(z.data, vec![0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
         assert!((ce.data[0] - 0.3).abs() < 1e-7);
-        assert!(pack_intensity_batch(
-            &[PrositPeptide {
-                sequence: "PK",
-                states: vec![Plain; 2]
-            }],
-            &[7],
-            30.0
-        )
-        .is_err());
+        assert!(pack_intensity_batch(&[PrositPeptide { sequence: "PK", states: vec![Plain; 2] }], &[7], 30.0).is_err());
     }
 }

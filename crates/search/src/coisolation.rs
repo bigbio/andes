@@ -940,10 +940,7 @@ pub(crate) mod tests {
             .iter()
             .filter(|c| !c.is_decoy && c.peptide.residues == planted.residues)
             .count();
-        assert!(
-            occurrences >= 2,
-            "fixture must hold the winner twice, got {occurrences}"
-        );
+        assert!(occurrences >= 2, "fixture must hold the winner twice, got {occurrences}");
 
         let primary = peptide(b"WVTFISLLR", b'K', b'K');
         let (spec, co) = planted_secondary_spectrum(&planted, &primary);

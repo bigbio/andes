@@ -391,10 +391,7 @@ impl ChunkFragmentIndex {
                 );
                 lo = lo.min(w_lo);
                 hi = hi.max(w_hi);
-                exact.push((
-                    w_lo - PRECURSOR_GATE_MARGIN_DA,
-                    w_hi + PRECURSOR_GATE_MARGIN_DA,
-                ));
+                exact.push((w_lo - PRECURSOR_GATE_MARGIN_DA, w_hi + PRECURSOR_GATE_MARGIN_DA));
             }
         }
         if lo > hi {
@@ -437,8 +434,8 @@ impl ChunkFragmentIndex {
                 for bb in b.saturating_sub(1)..=(b + 1).min(n_bins - 1) {
                     let base = self.bin_start[bb] as usize;
                     let row = &self.block_off[bb * row_len..(bb + 1) * row_len];
-                    let seg =
-                        &self.entries[base + row[blk_lo] as usize..base + row[blk_hi + 1] as usize];
+                    let seg = &self.entries
+                        [base + row[blk_lo] as usize..base + row[blk_hi + 1] as usize];
                     for e in seg {
                         if e.0 < id_lo {
                             continue;
@@ -614,7 +611,8 @@ pub(crate) fn vote_intensity_floor(peaks: &[(f64, f32)], vote_peaks: usize) -> f
         return 0.0;
     }
     let mut intensities: Vec<f32> = peaks.iter().map(|p| p.1).collect();
-    let (_, nth, _) = intensities.select_nth_unstable_by(vote_peaks - 1, |a, b| b.total_cmp(a));
+    let (_, nth, _) =
+        intensities.select_nth_unstable_by(vote_peaks - 1, |a, b| b.total_cmp(a));
     *nth
 }
 
@@ -706,17 +704,10 @@ mod sort_bin_by_block_tests {
         want.sort_unstable();
         assert_eq!(got, want);
         for (k, &off) in offs.iter().enumerate().take(first.len() - 1) {
-            assert_eq!(
-                off as usize,
-                got.partition_point(|&id| id < first[k]),
-                "block {k}"
-            );
+            assert_eq!(off as usize, got.partition_point(|&id| id < first[k]), "block {k}");
         }
         assert_eq!(*offs.last().unwrap() as usize, ids.len());
-        assert!(
-            seg.iter().all(|e| e.1 == e.0 as f32),
-            "entries keep their m/z"
-        );
+        assert!(seg.iter().all(|e| e.1 == e.0 as f32), "entries keep their m/z");
     }
 
     #[test]

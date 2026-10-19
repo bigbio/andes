@@ -52,10 +52,7 @@ impl std::fmt::Display for GdbLoadError {
                 write!(f, "glycan .gdb contains no glycan trees (header-only?)")
             }
             GdbLoadError::UnknownSymbol { line, symbol } => {
-                write!(
-                    f,
-                    "glycan .gdb line {line}: unknown monosaccharide symbol {symbol:?}"
-                )
+                write!(f, "glycan .gdb line {line}: unknown monosaccharide symbol {symbol:?}")
             }
             GdbLoadError::MalformedTree { line, reason } => {
                 write!(f, "glycan .gdb line {line}: malformed tree ({reason})")
@@ -415,7 +412,12 @@ mod tests {
 
     #[test]
     fn bundled_species_databases_load() {
-        for sp in ["human", "mouse", "mouse-large", "high-mannose"] {
+        for sp in [
+            "human",
+            "mouse",
+            "mouse-large",
+            "high-mannose",
+        ] {
             let list = load_species_glycan_db(sp).unwrap();
             assert!(!list.is_empty(), "{sp}: empty glycan list");
         }

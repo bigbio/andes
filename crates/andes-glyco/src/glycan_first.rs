@@ -170,7 +170,8 @@ pub fn default_diagnostic_ions() -> Vec<DiagnosticIon> {
         (3.0 * HEX + 2.0 * HEXNAC + PROTON, 3, 2, 0, 0, 0),       // Hex3HexNAc2
         (3.0 * HEX + 2.0 * HEXNAC + FUC + PROTON, 3, 2, 1, 0, 0), // Hex3HexNAc2Fuc
     ];
-    IONS.iter()
+    IONS
+        .iter()
         .map(|&(mz, hex, hexnac, fuc, neuac, neugc)| DiagnosticIon {
             mz,
             hex,
@@ -268,11 +269,7 @@ fn generate_y_ions(glycan: &Glycan, core: GlycanCore) -> Vec<GlycanIon> {
     // Core fucose consumes at most one Fuc; the rest is antenna fucose. Read the
     // structural fact from the glycan (recorded by the .gdb loader) instead of
     // guessing "first Fuc is core"; the guess is wrong for antenna/Lewis fucose.
-    let core_fuc: u8 = if core.core_fucose() {
-        c.core_fuc.min(1)
-    } else {
-        0
-    };
+    let core_fuc: u8 = if core.core_fucose() { c.core_fuc.min(1) } else { 0 };
 
     let ant_hn = c.hexnac.saturating_sub(core_hn);
     let ant_h = c.hex.saturating_sub(core_h);
@@ -352,10 +349,7 @@ fn generate_y_ions(glycan: &Glycan, core: GlycanCore) -> Vec<GlycanIon> {
 /// bit. Glycan ids must fit in 31 bits (asserted at index build).
 #[inline]
 pub fn encode_glycan_record(glycan_id: u32, is_core: bool) -> u32 {
-    debug_assert!(
-        glycan_id < (1 << 31),
-        "glycan_id {glycan_id} exceeds 31 bits"
-    );
+    debug_assert!(glycan_id < (1 << 31), "glycan_id {glycan_id} exceeds 31 bits");
     (glycan_id << 1) | (is_core as u32)
 }
 
@@ -421,11 +415,7 @@ impl GlycanIonIndex {
 
     /// Add one glycan's Y-complementary ions to the index.
     pub fn add_glycan(&mut self, glycan: &Glycan) {
-        assert!(
-            glycan.id < (1 << 31),
-            "glycan id {} exceeds 31 bits",
-            glycan.id
-        );
+        assert!(glycan.id < (1 << 31), "glycan id {} exceeds 31 bits", glycan.id);
         for ion in generate_y_ions(glycan, self.core) {
             let key = mass_to_bin(ion.mass, self.bin_width);
             self.bins
@@ -866,10 +856,7 @@ mod tests {
         // and never appears as an antenna loss.
         for ion in &ions {
             if !ion.is_core {
-                assert!(
-                    (ion.mass - g.composition.mass).abs() < 1e-6,
-                    "only Y0 is non-core"
-                );
+                assert!((ion.mass - g.composition.mass).abs() < 1e-6, "only Y0 is non-core");
             }
         }
     }
@@ -891,9 +878,7 @@ mod tests {
         // complement (that is the core-fucose Y1 rung signature, present only
         // when the Fuc rides the core).
         assert!(
-            !ions
-                .iter()
-                .any(|i| (i.mass - (3.0 * HEX + HEXNAC)).abs() < 1e-6),
+            !ions.iter().any(|i| (i.mass - (3.0 * HEX + HEXNAC)).abs() < 1e-6),
             "no core-fucose Y1 signature expected for antenna fucose"
         );
     }
@@ -932,8 +917,8 @@ mod tests {
             (366.1395, 80.0),  // HexHexNAc oxonium
             (138.0550, 50.0),  // HexNAc fragment
             // Core Y ions (peptide + core fragments), m/z at charge 1.
-            (peptide + HEXNAC + PROTON, 60.0),       // Y1
-            (peptide + 2.0 * HEXNAC + PROTON, 50.0), // Y2
+            (peptide + HEXNAC + PROTON, 60.0),              // Y1
+            (peptide + 2.0 * HEXNAC + PROTON, 50.0),        // Y2
         ];
         peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         let comps: Vec<GlycanComp> = glycans.iter().map(|g| g.composition.clone()).collect();
@@ -978,10 +963,7 @@ mod tests {
         peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         let comps: Vec<GlycanComp> = glycans.iter().map(|g| g.composition.clone()).collect();
         let result = search_glycans(&idx, &cfg, &comps, precursor_mass, 3, &peaks);
-        assert!(
-            result.candidates.is_empty(),
-            "unsupported NeuAc must be filtered"
-        );
+        assert!(result.candidates.is_empty(), "unsupported NeuAc must be filtered");
     }
 
     /// Phase 8 benchmark: index construction + query cost. Query time must scale
@@ -995,8 +977,8 @@ mod tests {
     fn benchmark_index_construction_and_query() {
         let comps = match std::env::var("ANDES_GLYCO_GDB") {
             Ok(path) => {
-                let content =
-                    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+                let content = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("read {path}: {e}"));
                 crate::glycan_db::load_glycan_gdb(&content)
                     .unwrap_or_else(|e| panic!("parse {path}: {e}"))
             }

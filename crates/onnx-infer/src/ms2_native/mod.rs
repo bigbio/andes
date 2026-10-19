@@ -292,10 +292,7 @@ impl Ms2Model {
             )
         };
         let lin = |name: &str| {
-            Linear::from_torch(
-                get(&format!("{name}.weight"))?,
-                get(&format!("{name}.bias"))?,
-            )
+            Linear::from_torch(get(&format!("{name}.weight"))?, get(&format!("{name}.bias"))?)
         };
         let dil: Vec<usize> = get("dilations")?.data.iter().map(|&d| d as usize).collect();
         let heads = get("n_heads")?.data.first().copied().unwrap_or(0.0) as usize;
@@ -321,13 +318,7 @@ impl Ms2Model {
         for (i, &d) in dil.iter().enumerate() {
             let c = conv(&format!("convs.{i}"), d)?;
             let m = conv(&format!("mix.{i}"), 1)?;
-            if c.cin != ch
-                || c.cout != ch
-                || m.cin != ch
-                || m.cout != ch
-                || c.k % 2 != 1
-                || m.k != 1
-            {
+            if c.cin != ch || c.cout != ch || m.cin != ch || m.cout != ch || c.k % 2 != 1 || m.k != 1 {
                 return Err(bad("block shape"));
             }
             blocks.push((c, m));
@@ -341,12 +332,7 @@ impl Ms2Model {
         let attn = if heads > 0 {
             let qkv = conv("qkv", 1)?;
             let proj = conv("proj", 1)?;
-            if ch % heads != 0
-                || qkv.cin != ch
-                || qkv.cout != 3 * ch
-                || proj.cin != ch
-                || proj.cout != ch
-            {
+            if ch % heads != 0 || qkv.cin != ch || qkv.cout != 3 * ch || proj.cin != ch || proj.cout != ch {
                 return Err(bad("attention shapes"));
             }
             Some(Attention { heads, qkv, proj })
@@ -414,12 +400,7 @@ impl Ms2Model {
     }
 
     /// As [`predict`](Self::predict), reusing `scratch` across calls.
-    pub fn predict_with(
-        &self,
-        p: &RtPeptide,
-        c: &Ms2Conditions,
-        s: &mut Ms2Scratch,
-    ) -> Option<Vec<f32>> {
+    pub fn predict_with(&self, p: &RtPeptide, c: &Ms2Conditions, s: &mut Ms2Scratch) -> Option<Vec<f32>> {
         let mut out = self.predict_raw_with(p, c, s)?;
         for (v, ok) in out.iter_mut().zip(valid_mask(p, c.charge)) {
             *v = if ok { v.max(0.0) } else { 0.0 };
@@ -428,12 +409,7 @@ impl Ms2Model {
     }
 
     /// The unprocessed network output (same layout as [`predict`](Self::predict)).
-    pub fn predict_raw_with(
-        &self,
-        p: &RtPeptide,
-        c: &Ms2Conditions,
-        s: &mut Ms2Scratch,
-    ) -> Option<Vec<f32>> {
+    pub fn predict_raw_with(&self, p: &RtPeptide, c: &Ms2Conditions, s: &mut Ms2Scratch) -> Option<Vec<f32>> {
         if c.charge == 0 || p.sequence.len() < 2 {
             return None;
         }
@@ -449,10 +425,8 @@ impl Ms2Model {
         let ce = self.cond_emb;
         s.cond.clear();
         s.cond.extend_from_slice(&c.numeric());
-        s.cond
-            .extend_from_slice(&self.act_emb[c.activation * ce..(c.activation + 1) * ce]);
-        s.cond
-            .extend_from_slice(&self.instr_emb[c.instrument * ce..(c.instrument + 1) * ce]);
+        s.cond.extend_from_slice(&self.act_emb[c.activation * ce..(c.activation + 1) * ce]);
+        s.cond.extend_from_slice(&self.instr_emb[c.instrument * ce..(c.instrument + 1) * ce]);
         self.film1.apply(&s.cond, &mut s.film_h);
         for v in s.film_h.iter_mut() {
             *v = silu(*v);
@@ -534,8 +508,7 @@ impl Ms2Model {
         s.site.clear();
         for j in 0..n - 1 {
             let row = &s.h[(j + 2) * ch..(j + 3) * ch];
-            s.site
-                .extend(row.iter().zip(&s.hc).map(|(a, b)| silu(a + b)));
+            s.site.extend(row.iter().zip(&s.hc).map(|(a, b)| silu(a + b)));
         }
         let mut out = vec![0.0f32; (n - 1) * N_ION];
         self.head2.apply(&s.site, n - 1, &mut out);
@@ -609,25 +582,15 @@ mod tests {
             };
             let c = Ms2Conditions::new(x[cz].parse().unwrap(), x[cn].parse().ok(), x[ca], x[ci]);
             let got = p.as_ref().and_then(|p| model.predict_with(p, &c, &mut s));
-            let raw = p
-                .as_ref()
-                .and_then(|p| model.predict_raw_with(p, &c, &mut s));
+            let raw = p.as_ref().and_then(|p| model.predict_raw_with(p, &c, &mut s));
             if x[cv] == "NA" {
                 assert!(got.is_none(), "{} should not encode", x[cp]);
                 n_none += 1;
                 continue;
             }
-            let parse = |s: &str| {
-                s.split(',')
-                    .map(|v| v.parse::<f32>().unwrap())
-                    .collect::<Vec<_>>()
-            };
+            let parse = |s: &str| s.split(',').map(|v| v.parse::<f32>().unwrap()).collect::<Vec<_>>();
             let (got, raw) = (got.expect(x[cp]), raw.unwrap());
-            for (g, w) in got
-                .iter()
-                .zip(parse(x[cv]))
-                .chain(raw.iter().zip(parse(x[cr])))
-            {
+            for (g, w) in got.iter().zip(parse(x[cv])).chain(raw.iter().zip(parse(x[cr]))) {
                 max_err = max_err.max((g - w).abs() / (1.0 + w.abs()));
             }
             assert_eq!(got.len(), parse(x[cv]).len(), "{}", x[cp]);

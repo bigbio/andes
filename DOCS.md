@@ -748,7 +748,7 @@ the fused strong score Percolator weights most; historically `StrongScore`; it a
 
 | # | Column | Type | Range | Description |
 |---|---|---|---|---|
-| 1 | `SpecId` | string | — | `{specID}_{scan}_{rank}`; multi-row scans add `_{rowIdx}`. |
+| 1 | `SpecId` | string | — | `{stem}/{specID}_{scan}_{rank}`, where `{stem}` is the input file name without its extension; multi-row scans add `_{rowIdx}`. The stem keeps SpecIds unique when the PINs of separately searched runs are pooled. |
 | 2 | `Label` | int | {−1, +1} | `+1` target, `−1` decoy (by source protein). |
 | 3 | `ScanNr` | int | ≥0 | MS2 scan number. |
 | 4 | `ExpMass` | float | >0 | Experimental neutral precursor mass (Da). |
@@ -1379,10 +1379,10 @@ andes quant finalize --quant-dir q/ -o experiment [--mbr-fdr 0.05] [--quant-feat
 
 PSMs are joined to the run tables on (run, SpecId). Percolator results come either per run
 (`--psms <stem>=<file>` and `--decoy-psms <stem>=<file>` for every run) or as one merged pair
-of files (`--psms <file> --decoy-psms <file>`, e.g. Percolator over the PIN of one
-multi-input search, whose SpecIds carry the file name). Separately searched runs usually share
-SpecIds (the scan titles); a merged pair over such runs is rejected, naming the SpecId and the
-runs, because it cannot say which run a score belongs to. Where possible, prefer one
+of files (`--psms <file> --decoy-psms <file>`, e.g. Percolator over the concatenated PINs of
+all runs). Every SpecId starts with its input's file stem, so SpecIds of separately searched
+runs do not collide. Two inputs with the same stem do, and a merged pair over them is
+rejected, naming the SpecId and the runs. Where possible, prefer one
 Percolator run over the PINs of all runs (one merged pair, or split per run) to a separate
 Percolator run per input: the library ranks each precursor by its best score across runs, and
 scores from separately trained Percolator models are not on one scale.

@@ -1390,7 +1390,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("spectrum");
-        let title_prefix = title_prefix_for(spectrum_paths.len(), file_stem);
+        let title_prefix = title_prefix_for(file_stem);
 
         if spectrum_paths.len() > 1 {
             eprintln!(

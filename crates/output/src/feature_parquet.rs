@@ -718,7 +718,8 @@ fn write_features(path: &Path, records: &[FeatureRecord], mbr: bool) -> std::io:
     let props = WriterProperties::builder()
         .set_compression(Compression::SNAPPY)
         .build();
-    let file = std::fs::File::create(path)?;
+    let tmp = crate::atomic::partial(path);
+    let file = std::fs::File::create(&tmp)?;
     let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     for chunk in records.chunks(4096) {
@@ -735,7 +736,7 @@ fn write_features(path: &Path, records: &[FeatureRecord], mbr: bool) -> std::io:
     writer
         .close()
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    Ok(())
+    crate::atomic::commit(&tmp, path)
 }
 
 #[cfg(test)]

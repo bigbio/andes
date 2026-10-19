@@ -395,7 +395,8 @@ fn primary(accession: &str) -> &str {
 /// Write the site table: one row per accepted site claim.
 pub fn write_sites_tsv(path: &std::path::Path, rows: &[SiteRow]) -> std::io::Result<()> {
     use std::io::Write;
-    let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let tmp = crate::atomic::partial(path);
+    let mut w = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
     writeln!(
         w,
         "family\taccession\tposition\tresidue\tmodification_mass\tprior_tier\tpsms\tbest_psm\tsite_q\tconfidence"
@@ -416,7 +417,9 @@ pub fn write_sites_tsv(path: &std::path::Path, rows: &[SiteRow]) -> std::io::Res
             1.0 - r.site_q
         )?;
     }
-    w.flush()
+    w.flush()?;
+    drop(w);
+    crate::atomic::commit(&tmp, path)
 }
 
 #[cfg(test)]

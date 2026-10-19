@@ -266,7 +266,8 @@ pub fn write_proteoform_tsv(
     quant_columns: &[String],
 ) -> std::io::Result<()> {
     use std::io::Write;
-    let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let tmp = crate::atomic::partial(path);
+    let mut w = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
     write!(
         w,
         "family\tmember\tkind\tfeature\tconfidence\tq_value\tevidence\tspecific_peptides\tshared_peptides\tpsms\tbest_psm\talternative_explanation\tsource\tprior_tier"
@@ -303,7 +304,9 @@ pub fn write_proteoform_tsv(
         }
         writeln!(w)?;
     }
-    w.flush()
+    w.flush()?;
+    drop(w);
+    crate::atomic::commit(&tmp, path)
 }
 
 #[cfg(test)]

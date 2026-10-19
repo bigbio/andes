@@ -106,7 +106,8 @@ fn fmt_f32(v: f32) -> String {
 /// intensity, summed signal-to-noise and roll-up weight, and a per-channel
 /// `sn_` block (empty cells when the reporter scan carries no noise).
 pub fn write_tmt_tsv(path: &Path, plex: Plex, rows: &[TmtRow], corrected: bool) -> io::Result<()> {
-    let mut w = BufWriter::new(std::fs::File::create(path)?);
+    let tmp = crate::atomic::partial(path);
+    let mut w = BufWriter::new(std::fs::File::create(&tmp)?);
     let prefix = if matches!(plex, Plex::Itraq4 | Plex::Itraq8) {
         "itraq"
     } else {
@@ -176,7 +177,9 @@ pub fn write_tmt_tsv(path: &Path, plex: Plex, rows: &[TmtRow], corrected: bool) 
         }
         writeln!(w, "{}", cols.join("\t"))?;
     }
-    w.flush()
+    w.flush()?;
+    drop(w);
+    crate::atomic::commit(&tmp, path)
 }
 
 /// Write `lfq.tsv` (wide): one row per (peptidoform, charge) with the feature
@@ -202,7 +205,8 @@ pub fn write_lfq_tsv(path: &Path, runs: &[String], rows: &[LfqRow]) -> io::Resul
             }
         }
     }
-    let mut w = BufWriter::new(std::fs::File::create(path)?);
+    let tmp = crate::atomic::partial(path);
+    let mut w = BufWriter::new(std::fs::File::create(&tmp)?);
     let mut header = vec![
         "peptide",
         "charge",
@@ -239,13 +243,16 @@ pub fn write_lfq_tsv(path: &Path, runs: &[String], rows: &[LfqRow]) -> io::Resul
         }
         writeln!(w, "{}", cols.join("\t"))?;
     }
-    w.flush()
+    w.flush()?;
+    drop(w);
+    crate::atomic::commit(&tmp, path)
 }
 
 /// Write `lfq_features.tsv` (long): one row per quantified feature in one run
 /// with its apex, boundaries, areas and the decoy-competition result.
 pub fn write_lfq_features_tsv(path: &Path, rows: &[LfqRow]) -> io::Result<()> {
-    let mut w = BufWriter::new(std::fs::File::create(path)?);
+    let tmp = crate::atomic::partial(path);
+    let mut w = BufWriter::new(std::fs::File::create(&tmp)?);
     writeln!(
         w,
         "filename\tpeptide\tcharge\tproteins\tscannr\tspec_id\tpsm_q_value\tcalc_mz\t\
@@ -281,7 +288,9 @@ pub fn write_lfq_features_tsv(path: &Path, rows: &[LfqRow]) -> io::Result<()> {
             fmt_opt(r.feature_q_value.map(|q| format!("{q:.5}"))),
         )?;
     }
-    w.flush()
+    w.flush()?;
+    drop(w);
+    crate::atomic::commit(&tmp, path)
 }
 
 #[cfg(test)]

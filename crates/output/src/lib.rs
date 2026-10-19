@@ -17,6 +17,7 @@
 //! * **QValue / PepQValue**: Not emitted; TDA columns are not currently
 //!   produced.
 
+mod atomic;
 pub mod tsv;
 pub use tsv::{write_tsv, write_tsv_to};
 

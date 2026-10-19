@@ -213,7 +213,8 @@ fn write_parquet_batches(
         qpx_metadata(file_type),
     ));
     let props = WriterProperties::builder().build();
-    let file = std::fs::File::create(path)?;
+    let tmp = crate::atomic::partial(path);
+    let file = std::fs::File::create(&tmp)?;
     let mut writer =
         ArrowWriter::try_new(file, schema_with_meta.clone(), Some(props)).map_err(to_io)?;
     for batch in batches {
@@ -225,7 +226,7 @@ fn write_parquet_batches(
         writer.flush().map_err(to_io)?;
     }
     writer.close().map_err(to_io)?;
-    Ok(())
+    crate::atomic::commit(&tmp, path)
 }
 
 /// Build the QPX schema-metadata map for a file of the given `file_type`.

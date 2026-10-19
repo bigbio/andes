@@ -654,6 +654,31 @@ mod tests {
     }
 
     #[test]
+    fn posteriors_give_a_site_its_occupancy_and_identity() {
+        let idx = index();
+        let mut t = rows();
+        // Three rows place another mass on the site, and the unmodified row
+        // covers it: identity 60/63, occupancy 63/64.
+        for i in 0..3 {
+            let (id, p) = psm(&format!("x{i}"), 1.0, "K.AGGGS+42.01056PGGGK.C");
+            t.insert(id, p);
+        }
+        let post: HashMap<String, f64> = t
+            .keys()
+            .filter(|k| !k.starts_with('k'))
+            .map(|k| (k.clone(), 1.0))
+            .collect();
+        let out = site_claims(&mut t, &idx, 0.01, 0.05, &[PHOSPHO], Some(&post));
+        let r = &out.rows[0];
+        assert!((r.identity.unwrap() - 60.0 / 63.0).abs() < 1e-9);
+        assert!((r.occupancy.unwrap() - 63.0 / 64.0).abs() < 1e-9);
+        assert_eq!(r.alternatives, "+42.0106:0.05");
+        assert!((r.identity_spectra - 63.0).abs() < 1e-9);
+        let out = site_claims(&mut rows(), &idx, 0.01, 0.05, &[PHOSPHO], None);
+        assert_eq!((out.rows[0].occupancy, out.rows[0].identity), (None, None));
+    }
+
+    #[test]
     fn an_unrestricted_mod_keeps_its_knockoff_site_psms() {
         let idx = index();
         let mut t = rows();

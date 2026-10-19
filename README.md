@@ -191,7 +191,10 @@ modification and processing header keys become claims built like UniProt's
 sites: the same modification on matched residues no annotation names. With rescoring, each site
 gets a site q-value and `<stem>.sites.tsv` lists the accepted ones. The estimate errs towards
 rejecting true claims; it is most useful with freely placed mods
-([`DOCS.md` §1a](DOCS.md#site-claims-knockoff-sites-experimental)).
+([`DOCS.md` §1a](DOCS.md#site-claims-knockoff-sites-experimental)). Each site also gets its
+occupancy and the probability of each modification it may carry (acetyl 0.71, trimethyl 0.29),
+from the competing explanations of each spectrum, diagnostic ions and neutral losses
+([`DOCS.md`](DOCS.md#site-identity-occupancy-and-which-modification)).
 
 **Annotation files.** `--annotations claims.annotations.parquet` adds claims about the proteins
 of any database, FASTA included: sequence edits (variant entries), modification sites, mature

@@ -410,7 +410,11 @@ PSMs.
 Some knockoff sites are really modified, because annotation is incomplete. Counting them as false
 makes the estimate err towards rejecting true site claims, never towards accepting false ones.
 
-**Experimental.** How conservative the estimate is has not yet been measured against known sites.
+**Experimental.** The knockoff sites control whether a residue is modified, not which
+modification it carries: on synthetic peptides whose lysines each carry one known modification, a
+third of the site claims passing site q ≤ 0.05 name the wrong modification at the right site
+(acetyl for trimethyl, two methyls for one dimethyl). The [site identity](#site-identity-occupancy-and-which-modification)
+columns resolve these.
 
 Measured on a mouse-liver phospho run (PXD007653, reviewed mouse UniProt, 51,906 annotated sites,
 42,985 knockoff sites):
@@ -425,7 +429,44 @@ matching all their context rules, so no knockoff.
 
 With rescoring, `<stem>.sites.tsv` lists the accepted claims, one row per site whose best PSM
 passes `--fdr` and whose site q-value passes `--proteoform-fdr`. Its columns are `family
-accession position residue modification_mass prior_tier psms best_psm site_q confidence`.
+accession position residue modification_mass prior_tier psms best_psm site_q confidence occupancy
+identity identity_alternatives identity_spectra`.
+
+#### Site identity: occupancy and which modification
+
+Each accepted site also gets two probabilities:
+- **`occupancy`**: the share of the posterior on the site's peptides that places a modification
+  on the residue.
+- **`identity`**: given a modification there, the share of the row's one. `identity_alternatives`
+  lists the others as `mass:share` (for example `+42.0470:0.29` beside acetyl at 0.71), and
+  `identity_spectra` is the posterior mass placing a modification there, in spectra.
+
+The posterior is taken over every row of a spectrum, targets and decoys, so the explanations of
+one spectrum compete. A row's logit combines:
+- its rescored score;
+- its precursor isotope offset;
+- its fragment ions, and those no other form of the same peptide among the spectrum's rows has;
+- the `diagnostic=` ions and `loss=` neutral losses of its modifications.
+
+The weights of the first three are fixed. How much a diagnostic ion or a loss says is learned
+from the run: among the rows the other evidence already makes confident, how often it is present
+when the row carries the modification and when a competing row carries another. Declare the
+signatures in the mods file; a modification without them is told apart by its fragments only.
+
+Measured on synthetic peptide pools (PXD009449), one lysine modification per pool, six lysine
+modifications claimed at every site, on the half of the peptides the fixed weights were not fitted
+on:
+
+| Accepted sites | Claims | Wrong modification |
+|---|---|---|
+| site q ≤ 0.05 | 753 | 245 (33%) |
+| and identity ≥ 0.5 | 522 | 26 (5.0%; 28.5 expected) |
+| and identity ≥ 0.95 | 412 | 11 (2.7%) |
+| and identity ≥ 0.95, occupancy ≥ 0.5 | 404 | 3 (0.7%) |
+
+In the unmodified-lysine pool, every site that passed its site q-value had occupancy below 0.5
+(mean 0.01). The remaining wrong claims look like synthesis side products: one peptide is seen
+with another modification in three pools. PSMs at 1% FDR do not change.
 
 ### PEFF databases
 
@@ -578,6 +619,7 @@ Optional `key=value` attributes may follow the name, comma-separated:
 | `accession=<CURIE>` | Ontology accession reported in the outputs, e.g. `UNIMOD:21`. |
 | `sites=<annotated\|any>` | `annotated` restricts a **variable** mod to the residues a UniProt XML database annotates with a modification of the same mass ([§1a](#uniprot-xml-databases)). `any` (default) applies it to every matching residue. |
 | `cleavage=<blocked\|kept>` | `blocked`: the enzyme does not cut at a residue carrying this mod, so it is never placed on the residue a peptide was cleaved at (the C-terminal K/R under trypsin), except at the protein's own terminus. Use it for modifications present before digestion that block the protease: acetyl-, succinyl- and other lysine acylations, GlyGly, di- and trimethyl-K. Not for labels added after digestion (TMT, reductive dimethylation). `kept` (default): no restriction. |
+| `diagnostic=<mz1;mz2;…>` | Singly charged ions the mod gives off when fragmented, such as the immonium ion of the modified residue. Not used in scoring: evidence for which modification a site carries (see [site identity](#site-identity-occupancy-and-which-modification)). Examples (HCD): acetyl-K `143.1179;126.0913`, trimethyl-K `143.1543` (with `loss=59.0735`, trimethylamine), succinyl-K `201.1234;184.0968`, GlyGly-K `215.1502;198.1237`, phospho-Y `216.0426`. |
 
 ### Example (a) — Carbamidomethyl C + Oxidation M
 

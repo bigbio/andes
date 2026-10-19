@@ -22,9 +22,10 @@
 //! The schema (column names + Arrow types) is copied verbatim from the reference
 //! QPX PSM schema so a downstream reader can use one code path for reference-native and
 //! andes output. andes sources every field it can from the same per-PSM data
-//! the PIN writer uses ([`crate::pin`]); fields andes does not compute (PEP,
-//! predicted RT, ion mobility, cv params, metavalues) are written null/empty —
-//! see the module-level field-mapping note in the closing report.
+//! the PIN writer uses ([`crate::pin`]): every numeric PIN feature is a
+//! `psm_metavalues` entry (`andes:` prefix), and PEP and q-value are filled
+//! from rescoring when it ran. Fields andes does not compute (ion mobility, cv
+//! params) are written null or empty.
 //!
 //! Rows are emitted rank-1-first per spectrum (same ordering as the PIN: each
 //! queue is `into_rank_sorted_vec()`, positional isomers collapsed by

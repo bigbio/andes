@@ -191,7 +191,9 @@ pub(crate) struct SearchArgs {
     pub(crate) output_tsv: Option<PathBuf>,
 
     /// Output QPX `.idparquet/` bundle directory (optional; quantms-compatible).
-    /// Writes `psms.parquet` + `proteins.parquet` + `search_params.parquet`.
+    /// Writes `psms.parquet`, `proteins.parquet`, `protein_groups.parquet`
+    /// (empty) and `search_params.parquet`, and with `--tmt` or `--lfq`
+    /// `quantms.feature.parquet`.
     #[arg(long)]
     pub(crate) output_parquet: Option<PathBuf>,
 

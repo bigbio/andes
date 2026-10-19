@@ -784,15 +784,18 @@ per-modification tally to stderr and to `statistics.log` next to the PIN.
 
 ### 3e. QPX `.idparquet` bundle (`--output-parquet`)
 
-`--output-parquet <DIR>` writes a **QPX 1.0** bundle (`psms.parquet`,
-`proteins.parquet`, `search_params.parquet`) matching the reference QPX schema, for
+`--output-parquet <DIR>` writes a **QPX 1.0** bundle (`psms.parquet`, `proteins.parquet`, an
+empty `protein_groups.parquet`, `search_params.parquet`, and with `--tmt` or `--lfq`
+`quantms.feature.parquet`) matching the reference QPX schema, for
 [quantms](https://github.com/bigbio/quantms). `psms.parquet` carries the peptidoform,
 modifications, charge, m/z, `is_decoy`, scan/rt, proteins, the spectrum arrays, `score`
 (`andes:RawScore`) and the other features in `additional_scores`. PEP and q-value are null
 until rescoring; andes does no protein inference. With `--rescore`, every target row must join a
 Percolator result, except where target-decoy competition (`--percolator-args=-Y`) kept another
 PSM of its scan/`ExpMass` group: those target rows are left out of the bundle, as they are out
-of Percolator's output.
+of Percolator's output; so are the decoys that lost that competition, and knockoff PSMs, which
+are never reported. In the match-between-runs feature parquet (`andes quant finalize`),
+`posterior_error_probability` is null on every row: a row is a precursor in a run, not a PSM.
 
 ```bash
 andes --spectrum spectra.mzML --database db.fasta \

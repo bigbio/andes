@@ -922,8 +922,11 @@ glyco:
     fn every_search_flag_has_a_config_key() {
         use clap::CommandFactory;
         // `apply` reads a flag's config key through one of these macros, or tests
-        // `cli_set` itself for keys that need custom handling.
-        let source = include_str!("config.rs").replace("(\n        ", "(");
+        // `cli_set` itself for keys that need custom handling. A checkout with
+        // CRLF line endings (Windows) is normalised before joining the lines.
+        let source = include_str!("config.rs")
+            .replace("\r\n", "\n")
+            .replace("(\n        ", "(");
         let mapped = |id: &str| {
             ["set!", "set_opt!", "set_parsed!"]
                 .iter()

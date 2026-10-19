@@ -97,6 +97,7 @@ pub(crate) fn run_glyco(
         ),
     }
     let glyco_cfg = search::glyco_search::GlycoConfig {
+        core: cli.glyco_core.into(),
         gp_k: cli.glyco_gp_k,
         gp_j: cli.glyco_gp_j,
         gp_h: cli.glyco_gp_h,
@@ -218,6 +219,7 @@ pub(crate) fn run_glyco(
         idx,
         cli.debug_glyco,
         mono,
+        cli.glyco_core.into(),
     )?;
     eprintln!(
         "Wrote glyco PIN: {} ({} PSM rows) [PHASE TOTAL: {:.2}s]",

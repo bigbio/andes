@@ -178,6 +178,36 @@ pub fn default_diagnostic_ions() -> Vec<DiagnosticIon> {
         .collect()
 }
 
+/// The default O-glycan diagnostic-ion panel: the reducing-end GalNAc oxonium
+/// (204.09, shared with N-glycans' HexNAc) plus the O-glycan-specific core-1
+/// (Gal-GalNAc, 366.14), sialyl-Tn (NeuAc-GalNAc, 495.18) and sialyl-T
+/// (NeuAc-Gal-GalNAc, 657.23) oxonium ions, and the low-mass HexNAc fragments
+/// every GalNAc produces. `counts` are the monosaccharides each ion implies.
+/// Configurable via [`GlycanConfig::diagnostic_ions`].
+pub fn o_glycan_diagnostic_ions() -> Vec<DiagnosticIon> {
+    // (mz, hex, hexnac, fuc, neuac, neugc)
+    const IONS: [(f64, u8, u8, u8, u8, u8); 7] = [
+        (138.0550, 0, 1, 0, 0, 0), // HexNAc/GalNAc fragment
+        (168.0660, 0, 1, 0, 0, 0), // HexNAc/GalNAc fragment
+        (186.0760, 0, 1, 0, 0, 0), // HexNAc/GalNAc fragment
+        (204.0867, 0, 1, 0, 0, 0), // GalNAc (reducing-end)
+        (366.1395, 1, 1, 0, 0, 0), // Gal-GalNAc (core-1)
+        (495.1821, 0, 1, 0, 1, 0), // NeuAc-GalNAc (sialyl-Tn)
+        (657.2349, 1, 1, 0, 1, 0), // NeuAc-Gal-GalNAc (sialyl-T)
+    ];
+    IONS
+        .iter()
+        .map(|&(mz, hex, hexnac, fuc, neuac, neugc)| DiagnosticIon {
+            mz,
+            hex,
+            hexnac,
+            fuc,
+            neuac,
+            neugc,
+        })
+        .collect()
+}
+
 /// Core Y-ion ladder for N-glycans: `(hexnac, hex)` compositions that stay on the
 /// peptide, innermost (Y1) first. These are the trimannosyl-core ladder Y1..Y5.
 pub const N_CORE_Y_LADDER: [(u8, u8); 5] = [

@@ -79,6 +79,35 @@ pub fn all_nxst_sites(residues: &[u8]) -> Vec<usize> {
         .collect()
 }
 
+// ── O-glycosylation site helpers ─────────────────────────────────────────────
+//
+// O-glycans attach to Ser/Thr with NO sequon (unlike N-glycans' N-X-S/T). A
+// peptide is an O-glycan candidate iff it contains any S or T; every S/T is a
+// possible glycosite. There is no Pro exclusion and no boundary case (the site is
+// always internal to the peptide).
+
+/// Returns `true` iff `residues` contains at least one Ser or Thr — the O-glycan
+/// analogue of [`has_nxst_sequon`] (no motif, no Pro exclusion).
+pub fn has_ser_or_thr(residues: &[u8]) -> bool {
+    residues.iter().any(|&r| r == b'S' || r == b'T')
+}
+
+/// Returns the 0-based index of the FIRST Ser or Thr, or `None` if there is none.
+pub fn first_ser_thr_site(residues: &[u8]) -> Option<usize> {
+    residues.iter().position(|&r| r == b'S' || r == b'T')
+}
+
+/// Returns the 0-based indices of EVERY Ser/Thr, ascending. Every S/T is a candidate
+/// glycosite; the c/z hyperscore is maximised over them exactly as N-glycan does
+/// over its sequons.
+pub fn all_ser_thr_sites(residues: &[u8]) -> Vec<usize> {
+    residues
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &r)| (r == b'S' || r == b'T').then_some(i))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +171,20 @@ mod tests {
     #[test]
     fn empty_slice_no_sequon() {
         assert!(!has_nxst_sequon(b""));
+    }
+
+    #[test]
+    fn ser_thr_helpers() {
+        assert!(has_ser_or_thr(b"SVTK"));
+        assert!(has_ser_or_thr(b"AKLT")); // T counts
+        assert!(!has_ser_or_thr(b"AAAK")); // no S/T
+        assert!(!has_ser_or_thr(b""));
+
+        assert_eq!(first_ser_thr_site(b"AKST"), Some(2)); // first S
+        assert_eq!(first_ser_thr_site(b"AKTA"), Some(2)); // first T
+        assert_eq!(first_ser_thr_site(b"AAAA"), None);
+
+        assert_eq!(all_ser_thr_sites(b"ASKT"), vec![1, 3]); // S and T
+        assert_eq!(all_ser_thr_sites(b"AAAA"), Vec::<usize>::new());
     }
 }

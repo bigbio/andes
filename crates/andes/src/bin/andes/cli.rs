@@ -472,6 +472,13 @@ pub(crate) struct SearchArgs {
     #[arg(long = "glyco-glycan-gdb")]
     pub(crate) glyco_glycan_gdb: Option<PathBuf>,
 
+    /// Glycan core for `--glyco`: `n` (default, N-X-S/T + trimannosyl core) or `o`
+    /// (any Ser/Thr + single GalNAc core). Separate run modes; the `.gdb` loaded by
+    /// `--glyco-glycan-gdb` must match the selected core (e.g. pGlyco's O-glycan db
+    /// for `o`).
+    #[arg(long = "glyco-core", value_enum, default_value_t = GlycoCoreFlag::N)]
+    pub(crate) glyco_core: GlycoCoreFlag,
+
     /// Isotope-error range for `--glyco`. `default` uses 0..=2 — the -1 offset costs
     /// 0.29% of correct answers at a ~53:47 target:decoy ratio (pure FDR dilution),
     /// and dropping it measured +81 backbone-correct @1%. `negative` restores
@@ -874,6 +881,28 @@ pub(crate) enum GlycoIsotopeFlag {
     Negative,
     /// 0..=5 — reaches candidates far above the monoisotopic peak.
     Wide,
+}
+
+/// Glycan core for `--glyco`: selects the N- vs O-glycan search mode. They are
+/// separate runs (never combined), mirroring pGlyco3's separate N- and O-glycan
+/// databases.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum GlycoCoreFlag {
+    /// N-glycan: N-X-S/T sequon, trimannosyl (GlcNAc2Man3) core.
+    #[clap(name = "n")]
+    N,
+    /// O-glycan: any Ser/Thr site, single reducing-end GalNAc core.
+    #[clap(name = "o")]
+    O,
+}
+
+impl From<GlycoCoreFlag> for andes_glyco::glycan_first::GlycanCore {
+    fn from(f: GlycoCoreFlag) -> Self {
+        match f {
+            GlycoCoreFlag::N => andes_glyco::glycan_first::GlycanCore::NGlycan,
+            GlycoCoreFlag::O => andes_glyco::glycan_first::GlycanCore::OGlycan,
+        }
+    }
 }
 
 /// `--precursor-mono`: MS1 isotope-envelope precursor correction.

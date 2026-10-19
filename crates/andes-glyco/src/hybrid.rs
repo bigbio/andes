@@ -16,6 +16,7 @@ use crate::backbone::{
     core_y_intensity, solve_backbone_min, BackboneCandidate, SpectrumStats, H2O,
 };
 use crate::glycan_db::GlycanComp;
+use crate::glycan_first::GlycanCore;
 use crate::oxonium::oxonium_gate;
 
 /// Source of a backbone hit.
@@ -486,7 +487,14 @@ pub fn hybrid_candidates_presolved(
             .into_iter()
             .map(|h| {
                 (
-                    core_y_intensity(peaks, &stats, h.backbone_mass + H2O, tol_ppm, precursor_z),
+                    core_y_intensity(
+                        peaks,
+                        &stats,
+                        h.backbone_mass + H2O,
+                        tol_ppm,
+                        precursor_z,
+                        GlycanCore::NGlycan,
+                    ),
                     h,
                 )
             })

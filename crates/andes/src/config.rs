@@ -124,6 +124,7 @@ pub struct RescoringCfg {
 #[serde(default, deny_unknown_fields)]
 pub struct GlycoCfg {
     pub enabled: Option<bool>,
+    pub core: Option<String>,
     pub backbone_top_k: Option<usize>,
     pub elect_top_k: Option<usize>,
     pub gp_k: Option<f32>,
@@ -350,6 +351,12 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
 
     // ── glyco ──
     set!("glyco", glyco, cfg.glyco.enabled);
+    set_parsed!(
+        "glyco_core",
+        glyco_core,
+        cfg.glyco.core,
+        parse_value_enum::<crate::GlycoCoreFlag>
+    );
     set!(
         "glyco_backbone_top_k",
         glyco_backbone_top_k,

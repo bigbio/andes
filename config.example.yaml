@@ -66,6 +66,7 @@ rescoring:
 
 glyco:
   enabled: false                 # intact N-glycopeptide search
+  # core: n                      # n = N-glycan (default) | o = O-glycan
   # --- advanced tuning (validated defaults; see DOCS §9) ---
   # backbone_top_k: 150
   # gp_k: 10.0                   # glycan-Y ladder weight

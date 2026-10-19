@@ -1,4 +1,15 @@
-use crate::glycan_mass::{CORE_Y_STEPS, PROTON};
+use crate::glycan_first::GlycanCore;
+use crate::glycan_mass::{CORE_Y_STEPS, O_CORE_Y_STEPS, PROTON};
+
+/// Core Y-ion offsets above the peptide backbone for the given core type: the
+/// N-glycan trimannosyl ladder (Y1..Y5) or the O-glycan single GalNAc rung (Y1).
+#[inline]
+fn core_y_steps(core: GlycanCore) -> &'static [f64] {
+    match core {
+        GlycanCore::NGlycan => &CORE_Y_STEPS,
+        GlycanCore::OGlycan => &O_CORE_Y_STEPS,
+    }
+}
 
 /// Water molecule mass (monoisotopic).
 pub(crate) const H2O: f64 = 18.010565;
@@ -526,19 +537,15 @@ pub fn core_y_intensity(
     bb: f64,
     tol_ppm: f64,
     max_charge: u8,
+    core: GlycanCore,
 ) -> f64 {
-    // Core-Y ion NEUTRAL masses (Y0..Y5): Y0 = bb, rungs = bb + CORE_Y_STEPS[k].
-    let neutrals: [f64; 6] = [
-        bb,
-        bb + CORE_Y_STEPS[0],
-        bb + CORE_Y_STEPS[1],
-        bb + CORE_Y_STEPS[2],
-        bb + CORE_Y_STEPS[3],
-        bb + CORE_Y_STEPS[4],
-    ];
-    let mut score = 0.0f64;
-    for &neutral in &neutrals {
-        score += best_frag_intensity(peaks, stats.sorted, neutral, tol_ppm, max_charge) as f64
+    // Core-Y ion NEUTRAL masses: Y0 = bb, then one rung per core-Y step (the
+    // trimannosyl ladder Y1..Y5 for N, the single GalNAc Y1 for O).
+    let steps = core_y_steps(core);
+    let mut score =
+        best_frag_intensity(peaks, stats.sorted, bb, tol_ppm, max_charge) as f64 / stats.base;
+    for &step in steps {
+        score += best_frag_intensity(peaks, stats.sorted, bb + step, tol_ppm, max_charge) as f64
             / stats.base;
     }
     score
@@ -605,10 +612,17 @@ pub fn partial_glycan_by_intensity(
 /// fucose → sialic acids). Shared by [`glycan_y_intensity`] and its decoy so the
 /// target and decoy ladders walk the SAME add order — the decoy's discrimination
 /// relies on starting from an identical target ladder before shifting the interior.
-fn glycan_cumulative_adds(comp: &crate::glycan_db::GlycanComp) -> Vec<f64> {
+fn glycan_cumulative_adds(
+    comp: &crate::glycan_db::GlycanComp,
+    core: GlycanCore,
+) -> Vec<f64> {
     use crate::glycan_mass::{FUC, HEX, HEXNAC, NEUAC, NEUGC};
-    let core_hexnac = comp.hexnac.min(2);
-    let core_hex = comp.hex.min(3);
+    // Core split is core-type dependent: N keeps the trimannosyl chitobiose
+    // (min(2) HexNAc + min(3) Hex); O keeps only the reducing-end GalNAc
+    // (min(1) HexNAc), everything else is antenna.
+    let (core_hn, core_h) = core.core_composition();
+    let core_hexnac = comp.hexnac.min(core_hn);
+    let core_hex = comp.hex.min(core_h);
     let mut adds: Vec<f64> = Vec::new();
     adds.extend(std::iter::repeat_n(HEXNAC, core_hexnac as usize));
     adds.extend(std::iter::repeat_n(HEX, core_hex as usize));
@@ -630,9 +644,10 @@ pub fn glycan_y_intensity(
     comp: &crate::glycan_db::GlycanComp,
     tol_ppm: f64,
     max_charge: u8,
+    core: GlycanCore,
 ) -> f64 {
     // Cumulative monosaccharide additions in a canonical order (composition-specific).
-    let adds = glycan_cumulative_adds(comp);
+    let adds = glycan_cumulative_adds(comp, core);
 
     // Match at charges 1..=max_charge (multiply-charged Y-ions), by NEUTRAL mass.
     let match_int = |neutral: f64| -> f64 {
@@ -734,9 +749,10 @@ pub fn glycan_y_intensity_decoy(
     tol_ppm: f64,
     max_charge: u8,
     seed: u64,
+    core: GlycanCore,
 ) -> f64 {
     // Same canonical cumulative-adds order as glycan_y_intensity (shared helper).
-    let adds = glycan_cumulative_adds(comp);
+    let adds = glycan_cumulative_adds(comp, core);
 
     // EXCHANGEABLE null: match with the IDENTICAL routine and charge search as the
     // target ladder ([`best_frag_intensity`], NEUTRAL mass, charges 1..=max_charge),
@@ -793,8 +809,9 @@ pub fn glycan_y_hit_frac(
     tol_ppm: f64,
     max_charge: u8,
     decoy_seed: Option<u64>,
+    core: GlycanCore,
 ) -> f64 {
-    let adds = glycan_cumulative_adds(comp);
+    let adds = glycan_cumulative_adds(comp, core);
     let hit = |neutral: f64| -> bool {
         best_frag_intensity(peaks, stats.sorted, neutral, tol_ppm, max_charge) > 0.0
     };
@@ -880,20 +897,18 @@ pub fn count_core_y_hits(
     bb: f64,
     tol_ppm: f64,
     max_charge: u8,
+    core: GlycanCore,
 ) -> u8 {
-    // Core-Y NEUTRAL masses (Y0..Y5): Y0 = bb, rungs = bb + CORE_Y_STEPS[k].
-    let neutrals: [f64; 6] = [
-        bb,
-        bb + CORE_Y_STEPS[0],
-        bb + CORE_Y_STEPS[1],
-        bb + CORE_Y_STEPS[2],
-        bb + CORE_Y_STEPS[3],
-        bb + CORE_Y_STEPS[4],
-    ];
+    // Core-Y NEUTRAL masses: Y0 = bb, then one rung per core-Y step (trimannosyl
+    // Y1..Y5 for N, single GalNAc Y1 for O).
+    let steps = core_y_steps(core);
     let mut hits: u8 = 0;
-    for &neutral in &neutrals {
+    if best_frag_intensity(peaks, stats.sorted, bb, tol_ppm, max_charge) > 0.0 {
+        hits += 1;
+    }
+    for &step in steps {
         // A rung hits if a matching peak exists at ANY charge 1..=max_charge.
-        if best_frag_intensity(peaks, stats.sorted, neutral, tol_ppm, max_charge) > 0.0 {
+        if best_frag_intensity(peaks, stats.sorted, bb + step, tol_ppm, max_charge) > 0.0 {
             hits += 1;
         }
     }
@@ -915,15 +930,16 @@ pub fn acceptor_core_y_gate(
     tol_ppm: f64,
     max_charge: u8,
     min_hits: u8,
+    core: GlycanCore,
 ) -> bool {
-    if count_core_y_hits(peaks, stats, bb, tol_ppm, max_charge) < min_hits {
+    if count_core_y_hits(peaks, stats, bb, tol_ppm, max_charge, core) < min_hits {
         return false;
     }
-    // Y1 (peptide + innermost HexNAc) is mandatory among the matched rungs.
+    // Y1 (peptide + innermost HexNAc/GalNAc) is mandatory among the matched rungs.
     best_frag_intensity(
         peaks,
         stats.sorted,
-        bb + CORE_Y_STEPS[0],
+        bb + core_y_steps(core)[0],
         tol_ppm,
         max_charge,
     ) > 0.0
@@ -1021,17 +1037,17 @@ mod tests {
         let stats = SpectrumStats::new(&peaks);
         // +1-only matching misses all three 2+ ions.
         assert_eq!(
-            count_core_y_hits(&peaks, &stats, bb, 20.0, 1),
+            count_core_y_hits(&peaks, &stats, bb, 20.0, 1, GlycanCore::NGlycan),
             0,
             "z=1-only must miss 2+ Y-ions"
         );
         // Matching up to +2 recovers them.
         assert_eq!(
-            count_core_y_hits(&peaks, &stats, bb, 20.0, 2),
+            count_core_y_hits(&peaks, &stats, bb, 20.0, 2, GlycanCore::NGlycan),
             3,
             "z<=2 must match the 2+ Y-ions"
         );
-        assert!(core_y_intensity(&peaks, &stats, bb, 20.0, 2) > 0.0);
+        assert!(core_y_intensity(&peaks, &stats, bb, 20.0, 2, GlycanCore::NGlycan) > 0.0);
     }
 
     #[test]
@@ -1138,8 +1154,8 @@ mod tests {
             mass: 1.0 * HEXNAC + 4.0 * HEX,
         };
 
-        let s_true = glycan_y_intensity(&peaks, &stats, bb, &truth, 20.0, 3);
-        let s_decoy = glycan_y_intensity(&peaks, &stats, bb, &decoy, 20.0, 3);
+        let s_true = glycan_y_intensity(&peaks, &stats, bb, &truth, 20.0, 3, GlycanCore::NGlycan);
+        let s_decoy = glycan_y_intensity(&peaks, &stats, bb, &decoy, 20.0, 3, GlycanCore::NGlycan);
         assert!(
             s_true > s_decoy,
             "true composition Y-ladder ({s_true}) must beat the decoy ({s_decoy})"
@@ -1213,8 +1229,8 @@ mod tests {
         peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         let stats = SpectrumStats::new(&peaks);
 
-        let s_true = glycan_y_intensity(&peaks, &stats, bb, &truth, 20.0, 3);
-        let s_decoy = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 3, 12345);
+        let s_true = glycan_y_intensity(&peaks, &stats, bb, &truth, 20.0, 3, GlycanCore::NGlycan);
+        let s_decoy = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 3, 12345, GlycanCore::NGlycan);
         assert!(
             s_decoy < s_true,
             "decoy ladder ({s_decoy}) must score below the target ({s_true})"
@@ -1222,7 +1238,7 @@ mod tests {
         // Decoy still retains Y0 + Y1 (bb + first HexNAc), so it is > 0 but small.
         assert!(s_decoy > 0.0, "decoy keeps Y0/Y1 anchor, should be > 0");
         // Determinism: same seed → identical score.
-        let s_decoy2 = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 3, 12345);
+        let s_decoy2 = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 3, 12345, GlycanCore::NGlycan);
         assert!(
             (s_decoy - s_decoy2).abs() < 1e-12,
             "decoy must be deterministic"
@@ -1261,11 +1277,11 @@ mod tests {
         let stats = SpectrumStats::new(&peaks);
 
         // Target sees the z=2 ladder.
-        let s_true = glycan_y_intensity(&peaks, &stats, bb, &truth, 20.0, 3);
+        let s_true = glycan_y_intensity(&peaks, &stats, bb, &truth, 20.0, 3, GlycanCore::NGlycan);
         assert!(s_true > 0.0, "target must match the z=2 ladder");
         // Fixed decoy keeps Y0 (z=2) + Y1 (z=2) → strictly positive. The OLD +1-only
         // decoy would have scored 0.0 here (the bug this test guards against).
-        let s_decoy = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 3, 777);
+        let s_decoy = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 3, 777, GlycanCore::NGlycan);
         assert!(
             s_decoy > 0.0,
             "decoy must match multi-charge Y0/Y1 anchors (exchangeable null); got {s_decoy}"
@@ -1276,7 +1292,7 @@ mod tests {
         );
         // With max_charge=1 the z=2-only anchors vanish for BOTH → both ~0 (proves the
         // matcher, not a coincidence, drives the score).
-        let s_decoy_z1 = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 1, 777);
+        let s_decoy_z1 = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 1, 777, GlycanCore::NGlycan);
         assert!(
             s_decoy_z1 == 0.0,
             "z=1 matcher cannot see z=2 anchors; got {s_decoy_z1}"
@@ -1312,8 +1328,8 @@ mod tests {
         ];
         peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         let stats = SpectrumStats::new(&peaks);
-        let s_true = glycan_y_intensity(&peaks, &stats, bb, &truth, 20.0, 3);
-        let s_decoy = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 3, 42);
+        let s_true = glycan_y_intensity(&peaks, &stats, bb, &truth, 20.0, 3, GlycanCore::NGlycan);
+        let s_decoy = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 3, 42, GlycanCore::NGlycan);
         assert!(
             (s_true - s_decoy).abs() < 1e-12,
             "target ({s_true}) and decoy ({s_decoy}) must match when only kept rungs are present"
@@ -1340,11 +1356,11 @@ mod tests {
 
         // NEUTRAL input → full ladder (6 rungs), positive intensity.
         assert_eq!(
-            count_core_y_hits(&peaks, &stats, neutral, 20.0, 3),
+            count_core_y_hits(&peaks, &stats, neutral, 20.0, 3, GlycanCore::NGlycan),
             6,
             "neutral must match all 6 rungs"
         );
-        let inten = core_y_intensity(&peaks, &stats, neutral, 20.0, 3);
+        let inten = core_y_intensity(&peaks, &stats, neutral, 20.0, 3, GlycanCore::NGlycan);
         assert!(
             inten > 0.0,
             "core_y_intensity must be positive for a real ladder, got {inten}"
@@ -1358,7 +1374,7 @@ mod tests {
         // RESIDUE input (neutral − H2O) → the ladder is missed (wrong convention).
         let residue = neutral - H2O;
         assert!(
-            count_core_y_hits(&peaks, &stats, residue, 20.0, 3) < 6,
+            count_core_y_hits(&peaks, &stats, residue, 20.0, 3, GlycanCore::NGlycan) < 6,
             "residue mass (H2O too low) must NOT match the neutral-anchored ladder"
         );
     }
@@ -1389,16 +1405,16 @@ mod tests {
         full.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         let sf = SpectrumStats::new(&full);
         assert!(
-            (glycan_y_hit_frac(&full, &sf, bb, &g, 20.0, 3, None) - 1.0).abs() < 1e-9,
+            (glycan_y_hit_frac(&full, &sf, bb, &g, 20.0, 3, None, GlycanCore::NGlycan) - 1.0).abs() < 1e-9,
             "full ladder → 1.0"
         );
         // Only Y0 present → 1/6.
         let p0 = vec![(bb + PROTON, 1000.0)];
         let s0 = SpectrumStats::new(&p0);
-        let f0 = glycan_y_hit_frac(&p0, &s0, bb, &g, 20.0, 3, None);
+        let f0 = glycan_y_hit_frac(&p0, &s0, bb, &g, 20.0, 3, None, GlycanCore::NGlycan);
         assert!((f0 - 1.0 / 6.0).abs() < 1e-9, "Y0 only → 1/6, got {f0}");
         // Decoy shifts interior rungs → fewer of ITS rungs match the true ladder.
-        let dec = glycan_y_hit_frac(&full, &sf, bb, &g, 20.0, 3, Some(123));
+        let dec = glycan_y_hit_frac(&full, &sf, bb, &g, 20.0, 3, Some(123), GlycanCore::NGlycan);
         assert!(
             dec < 1.0,
             "decoy ladder must miss shifted interior rungs, got {dec}"
@@ -1425,21 +1441,21 @@ mod tests {
         let p = mk(&[0, 1, 2]);
         let s = SpectrumStats::new(&p);
         assert!(
-            acceptor_core_y_gate(&p, &s, bb, 20.0, 3, 3),
+            acceptor_core_y_gate(&p, &s, bb, 20.0, 3, 3, GlycanCore::NGlycan),
             "3 rungs incl Y1 must pass"
         );
         // Only Y0, Y1 (2 hits) → FAIL at min_hits=3.
         let p2 = mk(&[0, 1]);
         let s2 = SpectrumStats::new(&p2);
         assert!(
-            !acceptor_core_y_gate(&p2, &s2, bb, 20.0, 3, 3),
+            !acceptor_core_y_gate(&p2, &s2, bb, 20.0, 3, 3, GlycanCore::NGlycan),
             "<3 rungs must fail"
         );
         // Y0, Y2, Y3 (3 hits but NO Y1) → FAIL (Y1 mandatory).
         let p3 = mk(&[0, 2, 3]);
         let s3 = SpectrumStats::new(&p3);
         assert!(
-            !acceptor_core_y_gate(&p3, &s3, bb, 20.0, 3, 3),
+            !acceptor_core_y_gate(&p3, &s3, bb, 20.0, 3, 3, GlycanCore::NGlycan),
             "missing Y1 must fail even with 3 rungs"
         );
     }
@@ -1643,6 +1659,57 @@ mod tests {
             (out[0].backbone_mass - true_bb).abs() < 0.05,
             "expected true backbone first, got {}",
             out[0].backbone_mass
+        );
+    }
+
+    #[test]
+    fn o_glycan_cumulative_adds_use_single_galnac_core() {
+        use crate::glycan_mass::{HEX, HEXNAC, NEUAC};
+        let mk = |hexnac: u8, hex: u8, neuac: u8| crate::glycan_db::GlycanComp {
+            hexnac,
+            hex,
+            fuc: 0,
+            neuac,
+            neugc: 0,
+            core_fuc: 0,
+            mass: 0.0,
+        };
+        // core-1 = Gal-GalNAc (Hex1HexNAc1): the reducing-end GalNAc is the core, the
+        // Hex is antenna.
+        assert_eq!(
+            glycan_cumulative_adds(&mk(1, 1, 0), GlycanCore::OGlycan),
+            vec![HEXNAC, HEX]
+        );
+        // sialyl-Tn = NeuAc-GalNAc (HexNAc1NeuAc1): the NeuAc is antenna.
+        assert_eq!(
+            glycan_cumulative_adds(&mk(1, 0, 1), GlycanCore::OGlycan),
+            vec![HEXNAC, NEUAC]
+        );
+        // N-glycan keeps the trimannosyl core: HexNAc2Hex3 is all core (no antenna).
+        assert_eq!(
+            glycan_cumulative_adds(&mk(2, 3, 0), GlycanCore::NGlycan),
+            vec![HEXNAC, HEXNAC, HEX, HEX, HEX]
+        );
+    }
+
+    #[test]
+    fn o_core_y_intensity_matches_single_galnac_rung() {
+        use crate::glycan_mass::{HEXNAC, PROTON};
+        let bb = 1500.0_f64; // water-included neutral backbone
+        let mut peaks = vec![
+            (bb + PROTON, 1000.0f32),        // Y0
+            (bb + HEXNAC + PROTON, 900.0f32), // Y1 = the single-GalNAc core rung
+        ];
+        peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let stats = SpectrumStats::new(&peaks);
+        assert_eq!(
+            count_core_y_hits(&peaks, &stats, bb, 20.0, 1, GlycanCore::OGlycan),
+            2,
+            "O-glycan core-Y must count Y0 + the single GalNAc rung"
+        );
+        assert!(
+            core_y_intensity(&peaks, &stats, bb, 20.0, 1, GlycanCore::OGlycan) > 0.0,
+            "O-glycan core-Y intensity must be positive for the GalNAc rung"
         );
     }
 }

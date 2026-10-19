@@ -52,7 +52,8 @@ pub struct ProteoformRow {
     /// How likely claims like the member's are to be real (empty for a
     /// FASTA entry).
     pub tier: &'static str,
-    /// Summed abundance of the member's specific peptides, per quant column.
+    /// Summed abundance of the member's specific peptides, per quant column;
+    /// NaN (written `NA`) where none was measured.
     pub quantity: Vec<f64>,
 }
 
@@ -177,11 +178,13 @@ pub fn proteoform_table(
                 _ => String::new(),
             };
             let quantity = quant.map_or_else(Vec::new, |qs| {
-                let mut v = vec![0.0; qs.columns.len()];
+                // NaN where no specific peptide was measured in that column:
+                // missing, written as NA, not a measured 0.
+                let mut v = vec![f64::NAN; qs.columns.len()];
                 for (seq, prots, col, value) in &qs.values {
                     if a.specific.contains(seq) && prots.iter().any(|x| x == acc) {
                         if let Some(slot) = v.get_mut(*col) {
-                            *slot += value;
+                            *slot = if slot.is_nan() { *value } else { *slot + value };
                         }
                     }
                 }
@@ -292,7 +295,11 @@ pub fn write_proteoform_tsv(
             r.tier
         )?;
         for v in &r.quantity {
-            write!(w, "\t{v}")?;
+            if v.is_finite() {
+                write!(w, "\t{v}")?;
+            } else {
+                write!(w, "\tNA")?;
+            }
         }
         writeln!(w)?;
     }
@@ -493,6 +500,8 @@ mod tests {
             vec![15.0, 7.0],
             "shared AAAK is not counted"
         );
-        assert_eq!(m["sp|P1-2|A"].quantity, vec![0.0, 3.0]);
+        let iso = &m["sp|P1-2|A"].quantity;
+        assert!(iso[0].is_nan(), "not measured in column 0: missing, not 0");
+        assert_eq!(iso[1], 3.0);
     }
 }

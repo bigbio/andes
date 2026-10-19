@@ -275,7 +275,7 @@ q-value above (`evidence` `specific`), or of its best shared PSM when it has no 
 weighs the same as deamidation, methylation or oxidation, and whether the canonical counterpart
 peptide (the substitution reverted) was identified: decoys cannot measure that error, so these
 rows are candidates rather than claims. With `--lfq` or `--tmt`, `quantity_<run or channel>` is
-the summed abundance of the member's specific peptides.
+the summed abundance of the member's specific peptides (`NA` where none was measured).
 
 `--decoy-strategy shuffle` is refused when the database holds isoform or mature-chain entries:
 shuffled decoys do not keep the peptides those entries share with their canonical entry.

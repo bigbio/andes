@@ -265,6 +265,9 @@ pub fn infer_protein_groups(
             None => acc.to_string(),
         }
     };
+    // Knockoff entries exist only to estimate false variant claims: their
+    // peptides are evidence for no protein, on either side.
+    let knockoff = |acc: &str| proteins.get(acc).is_some_and(|p| p.is_knockoff());
     let rows = |map: &HashMap<String, PercolatorPsm>, decoy: bool| {
         let mut out: Vec<(String, f64, BTreeSet<String>)> = map
             .values()
@@ -274,13 +277,9 @@ pub fn infer_protein_groups(
                     .proteins
                     .split(';')
                     .filter(|a| !a.is_empty())
-                    .map(|a| {
-                        if decoy {
-                            family_of(&target_of(a))
-                        } else {
-                            family_of(a)
-                        }
-                    })
+                    .map(|a| if decoy { target_of(a) } else { a.to_string() })
+                    .filter(|a| !knockoff(a))
+                    .map(|a| family_of(&a))
                     .collect();
                 (!fams.is_empty()).then(|| (bare_sequence(&p.peptide), score, fams))
             })
@@ -375,7 +374,11 @@ pub fn infer_protein_groups(
             psms[g] += 1;
             accepted_peps.insert(pep_index[bare_sequence(&p.peptide).as_str()]);
         }
-        for a in p.proteins.split(';').filter(|a| !a.is_empty()) {
+        for a in p
+            .proteins
+            .split(';')
+            .filter(|a| !a.is_empty() && !knockoff(a))
+        {
             if target.groups[g].families.contains(&family_of(a)) {
                 named[g].insert(a.to_string());
             }
@@ -541,6 +544,51 @@ mod tests {
         let inf = infer_protein_groups(&targets, &HashMap::new(), &index(), |id| id != "6");
         let e = &inf.groups[2];
         assert_eq!((e.peptides, e.unique, e.psms, e.score), (0, 0, 0, 0.5));
+    }
+
+    #[test]
+    fn knockoff_entries_are_evidence_for_no_protein() {
+        use model::protein::{EntryOrigin, ProteinAnnotation};
+        use std::sync::Arc;
+        let mut db = ProteinDb {
+            proteins: vec![model::Protein {
+                accession: "A".into(),
+                description: String::new(),
+                sequence: b"PEPTIDEK".to_vec(),
+                annotation: None,
+            }],
+        };
+        let origin = EntryOrigin {
+            kind: EntryKind::Variant,
+            family: Arc::from("A"),
+            feature: Arc::from("VAR_KO"),
+            variant_delta_da: 0.0,
+            knockoff_of: Some(Arc::from("VAR_1")),
+            source: None,
+            tier: Default::default(),
+        };
+        db.proteins.push(model::Protein {
+            accession: "A-KO".into(),
+            description: String::new(),
+            sequence: b"PEPTLDEK".to_vec(),
+            annotation: Some(Arc::new(
+                ProteinAnnotation::new(Vec::new(), None).with_origin(Some(origin)),
+            )),
+        });
+        let idx = SearchIndex::from_target_db(&db, "XXX");
+        let targets: HashMap<String, PercolatorPsm> = [
+            psm("1", 2.0, "K.AAAK.R", "A"),
+            // A knockoff-only peptide scores higher than A's own.
+            psm("2", 9.0, "K.KKKK.R", "A-KO"),
+        ]
+        .into_iter()
+        .collect();
+        let inf = infer_protein_groups(&targets, &HashMap::new(), &idx, |_| true);
+        assert_eq!(inf.groups.len(), 1);
+        let g = &inf.groups[0];
+        assert_eq!((g.peptides, g.score), (1, 2.0));
+        assert_eq!(g.accessions, vec!["A"]);
+        assert!(inf.group_of(&targets["2"]).is_none());
     }
 
     #[test]

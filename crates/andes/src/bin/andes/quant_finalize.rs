@@ -139,7 +139,7 @@ pub(crate) const DEFAULT_MAX_TRAIN_ROWS: usize = 3_000_000;
 /// Default of [`FinalizeLimits::max_norm_cells`].
 pub(crate) const DEFAULT_MAX_NORM_CELLS: usize = 20_000_000;
 /// Default of [`FinalizeLimits::max_donor_fits`].
-pub(crate) const DEFAULT_MAX_DONOR_FITS: usize = 5_000_000;
+pub(crate) const DEFAULT_MAX_DONOR_FITS: usize = 12_000_000;
 /// Default of [`FinalizeLimits::max_held_scores`].
 pub(crate) const DEFAULT_MAX_HELD_SCORES: usize = 64_000_000;
 
@@ -163,7 +163,7 @@ const READ_BATCH_ROWS: usize = 65_536;
 const SCORE_GROUP_ROWS: usize = 65_536;
 /// Rows per row group of a temporary output-row table, per batch read back
 /// and per merged batch: small, as the merge reads every run's table at once.
-const OUT_GROUP_ROWS: usize = 8_192;
+const OUT_GROUP_ROWS: usize = 4_096;
 /// Temporary tables merged at once; more are merged in groups first.
 const MAX_OPEN_PARTS: usize = 512;
 
@@ -1292,7 +1292,7 @@ pub(crate) fn finalize_stream(
     let t0 = Instant::now();
     let upper: usize = lib.entries.iter().map(|e| e.donors.len()).sum();
     let groups = upper.div_ceil(limits.max_donor_fits.max(1)).max(1);
-    let mut summaries = Summaries::new();
+    let mut all_summaries = Summaries::new();
     for g in 0..groups {
         let items = Mutex::new(Vec::new());
         for_each_block(
@@ -1321,17 +1321,17 @@ pub(crate) fn finalize_stream(
         while let Some(v) = runs.pop() {
             all.extend(v);
         }
-        summaries.extend(summarise(all));
+        all_summaries.extend(summarise(all));
     }
     eprintln!(
         "[mbr] finalize: {} extract tables, {} threads, temporary tables in {}; donor summaries of {} precursors in {groups} pass(es), {:.1} s",
         source.chunks(),
         rayon::current_num_threads(),
         dir.display(),
-        summaries.len(),
+        all_summaries.len(),
         secs(t0)
     );
-    let summaries = &summaries;
+    let summaries = &all_summaries;
 
     // Pass 2: the training rows of both classifiers, keyed by table and row
     // so that they enter training in table order.
@@ -1768,6 +1768,20 @@ pub(crate) fn finalize_stream(
     parts.sort_unstable();
     let paths: Vec<PathBuf> = parts.into_iter().map(|(_, p)| p).collect();
     let t1 = Instant::now();
+    log_summary(
+        stems,
+        &v,
+        &summary,
+        &fdr,
+        &id_fdr,
+        &norm,
+        mbr_fdr,
+        quant_feature_fdr,
+    );
+    summary.fdr = fdr.counts.clone();
+    summary.identified_fdr = id_fdr.counts.clone();
+    // Only the output tables are left to read.
+    drop((all_summaries, t_models, i_models, norm, fdr, id_fdr));
 
     // The per-run tables merged into the outputs: one thread merges, one
     // writes `<base>.mbr.parquet`, and this one hands the rows on.
@@ -1779,19 +1793,7 @@ pub(crate) fn finalize_stream(
         (t1 - t0).as_secs_f64(),
         secs(t1)
     );
-    log_summary(
-        stems,
-        &v,
-        &summary,
-        &fdr,
-        &id_fdr,
-        &norm,
-        mbr_fdr,
-        quant_feature_fdr,
-    );
     summary.validation = v;
-    summary.fdr = fdr.counts;
-    summary.identified_fdr = id_fdr.counts;
     Ok(summary)
 }
 

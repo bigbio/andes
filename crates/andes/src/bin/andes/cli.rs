@@ -702,6 +702,15 @@ pub(crate) struct SearchArgs {
     #[arg(long = "proteoform-fdr", value_parser = parse_unit_fraction)]
     pub(crate) proteoform_fdr: Option<f64>,
 
+    /// Protein-group q-value cutoff, with rescoring. Protein groups and their
+    /// q-values (`<stem>.protein_groups.tsv`, picked target-decoy competition
+    /// per protein family) are written either way; with this cutoff the
+    /// filtered TSV keeps only PSMs whose peptide counts for a group at or
+    /// below it, and the proteoform table only families of such groups.
+    /// Default: no protein filter.
+    #[arg(long = "protein-fdr", value_parser = parse_unit_fraction)]
+    pub(crate) protein_fdr: Option<f64>,
+
     /// Optional per-PSM PEP (posterior error probability / local FDR) cap,
     /// applied IN ADDITION to `--fdr` (a PSM must pass both q ≤ `--fdr` AND
     /// PEP ≤ `--pep`). The q-value stays the primary set-level FDR control;

@@ -484,6 +484,7 @@ when a pipeline (e.g. quantms) owns rescoring. `--fdr`/`--pep` alone are ignored
 | `--rescore-native` | flag | *(off)* | *(advanced)* Built-in GBDT rescorer (3-fold CV folded by spectrum); non-production fallback. |
 | `--fdr` | fraction | `0.01` | q-value threshold applied by a rescoring run. With UniProt isoform, variant or chain entries, a PSM must also pass it within its class (§1a, provenance). |
 | `--proteoform-fdr` | fraction | max(`--fdr`, 0.05) | q-value threshold for proteoform claims: variant-class PSMs (every protein a UniProt variant entry) in the filtered TSV, the proteoform table and quantification; every other PSM keeps `--fdr`. |
+| `--protein-fdr` | fraction | *(off)* | Protein-group q-value cutoff: the filtered TSV keeps only PSMs whose peptide counts for a group at or below it, and the proteoform table only families of such groups. `<stem>.protein_groups.tsv` is written either way ([protein groups](#protein-groups-and-protein-fdr)). |
 | `--pep` | fraction | *(off)* | *(advanced)* PEP threshold, ANDed with `--fdr` (and with `--quant-fdr` for quantification targets and `--mbr` donors). |
 | `--percolator-bin` / `--percolator-docker` / `--percolator-image` / `--percolator-args` | — | auto | *(advanced)* Backend: `--percolator-bin`, else `$PATH`, else Docker; `--percolator-args` passes flags through. |
 | `--keep-pin` | bool | `true` | *(advanced)* With `--rescore`/`--rescore-native` and no `--output-pin`: `true` writes the PIN (and Percolator's result files) as `<base>.pin`, where `<base>` is `--output-tsv`, else `--output-parquet`, else `./andes`; `false` uses a temporary PIN deleted at exit. An explicit `--output-pin` is always kept. |
@@ -492,6 +493,47 @@ when a pipeline (e.g. quantms) owns rescoring. `--fdr`/`--pep` alone are ignored
 | `--predictor-backend` | `tract`\|`ort` | `tract` | *(advanced)* ONNX engine for those models: tract (pure Rust, built in) or ONNX Runtime (a build with `--features ort`; the runtime library is found through `ORT_DYLIB_PATH`). |
 | `--predictor-nce` / `--predictor-instrument` | — | auto | *(advanced)* Collision energy and instrument given to the AlphaPeptDeep MS2 model. Default NCE 28 on Q Exactive, 30 otherwise; instrument from the resolved one (Q Exactive → `QE`, timsTOF → `timsTOF`, TOF → `SciexTOF`, otherwise `Lumos`). |
 | `--predictor-batch` | int | `256` | *(advanced)* Peptides per predictor batch. |
+
+### Protein groups and protein FDR
+
+Every rescored run writes `<stem>.protein_groups.tsv`, independent of quantification. Inference
+works on protein families: a canonical entry with its isoform, variant and chain entries is one
+family (with a FASTA database, each entry is its own family), so alternative entries never split
+a protein's evidence. Targets and decoys are treated alike:
+1. every peptide gets the best rescored score among its PSMs;
+2. families with the same peptides form one group;
+3. a group whose peptides are a strict subset of another group's is subsumed: listed in that
+   group's `subsumed` column, not scored;
+4. a peptide still shared between groups counts for the group with the most peptides (razor),
+   ties to the better best score, then the name;
+5. a group scores its best unique or razor peptide.
+
+The protein q-value comes from picked target-decoy competition: each target family competes with
+the decoy of the same family (`<decoy prefix>_<accession>`), and only the better of the two
+counts; q = decoys / targets at or above a group's score, with a running minimum. A target that
+loses to its own decoy gets q = 1.
+
+Columns: `protein_group lead accessions families peptides unique_peptides razor_peptides psms
+best_score protein_q subsumed`. `lead` is the group's reference entry; `peptides`,
+`unique_peptides` and `razor_peptides` count the peptides with a PSM at its cutoff (`--fdr`, or
+`--proteoform-fdr` for variant-class PSMs), and `psms` those PSMs. The filtered TSV gains
+`protein_group` and `protein_q`. With `--protein-fdr`, the filtered TSV and the proteoform table
+keep only groups at or below it. The proteoform table's members are then claims inside an
+accepted protein: each still needs its own specific evidence at its class-aware cutoff.
+
+Measured with entrapment databases (a group is false when every accession in it is an
+entrapment entry; true FDP = entrapment groups / accepted × (1 + target : entrapment proteins)):
+
+| Run | PSMs at 1% | Groups at protein q ≤ 0.01 | True FDP | At q ≤ 0.05 | True FDP |
+|---|---|---|---|---|---|
+| Astral, shuffled entrapment (1 : 1) | 42,605 | 4,332 | 1.3% | 4,929 | 5.6% |
+| UPS1 in yeast, E. coli entrapment (1.49 : 1) | 16,147 | 852 | 5.0% | 924 | 8.1% |
+
+The UPS1 entrapment proteins at 1% are led by EF-Tu (36 PSMs), DnaK and ornithine
+carbamoyltransferase: proteins that co-purify with recombinant proteins expressed in E. coli,
+so most are likely present, and the shuffled-entrapment run is the better measure. Taking only
+the best row of each spectrum, or only rows at PSM q ≤ 0.01, gives 1.1–1.4% at 1% on Astral:
+within the entrapment's counting noise.
 
 ### Glycopeptide search
 
@@ -814,7 +856,8 @@ PIN's name without its extension, so per-run searches into one directory keep on
 [quantms](https://github.com/bigbio/quantms). `psms.parquet` carries the peptidoform,
 modifications, charge, m/z, `is_decoy`, scan/rt, proteins, the spectrum arrays, `score`
 (`andes:RawScore`) and the other features in `additional_scores`. PEP and q-value are null
-until rescoring; andes does no protein inference. With `--rescore`, every target row must join a
+until rescoring; `protein_groups.parquet` is empty (protein groups are in
+`<stem>.protein_groups.tsv`, [§1](#protein-groups-and-protein-fdr)). With `--rescore`, every target row must join a
 Percolator result, except where target-decoy competition (`--percolator-args=-Y`) kept another
 PSM of its scan/`ExpMass` group: those target rows are left out of the bundle, as they are out
 of Percolator's output.
@@ -839,6 +882,7 @@ major version marks an incompatible layout, a new minor version only adds column
 | File | Rows | Columns |
 |---|---|---|
 | `<stem>.tmt.parquet` | one per PSM with reporter ions, including the PSMs the quantification gate (§10) failed | `filename scannr spec_id quant_scan quant_ms_level rt peptide charge proteins is_decoy psm_q_value psm_pep purity`, then one `tmt_<channel>` (or `itraq_<channel>`) per channel (float32, corrected when a correction matrix was applied), then `raw_<...>` when one was, then `reporter_intensity_sum reporter_sn_sum quant_weight quant_gate_passed`, then one `sn_<prefix>_<channel>` per channel (null without noise values). A gated PSM has `quant_gate_passed` false and `quant_weight` 0. Metadata `andes.tmt.plex` (kit) and `andes.tmt.corrected` |
+| `<stem>.protein_groups.tsv` (`--rescore`/`--rescore-native`) | one per target protein group, best score first | `protein_group lead accessions families peptides unique_peptides razor_peptides psms best_score protein_q subsumed` ([protein groups](#protein-groups-and-protein-fdr)) |
 | `<stem>.proteoforms.tsv` (`--rescore`/`--rescore-native` with UniProt isoform, variant or chain entries) | one per family member with a target PSM at q ≤ `--fdr` (a specific one for isoform, variant and chain entries) | `family member kind feature confidence q_value evidence specific_peptides shared_peptides psms best_psm alternative_explanation source prior_tier`, then `quantity_<run or channel>` with `--lfq`/`--tmt` (§1a, proteoform table) |
 | `<stem>.lfq.parquet` | one per feature per run (all target features, with their q-value) | `filename peptide charge proteins scannr spec_id psm_q_value calc_mz rt_anchor rt_apex rt_start rt_stop n_scans area apex_intensity isotope_areas cosine n_isotopes score decoy_score feature_q_value accepted`; `isotope_areas` is a list (monoisotope first); `accepted` is feature q ≤ `--lfq-feature-fdr` and cosine ≥ `--lfq-min-cosine`. The per-run wide view is the `accepted` rows pivoted on (`peptide`, `charge`) × `filename` over `area` (the highest `score` if a run has two). Metadata `andes.lfq.runs` (input stems, newline-joined, including runs without features), `andes.lfq.feature_fdr`, `andes.lfq.min_cosine` |
 | `<stem>.mbr.parquet` (`--mbr`, `andes quant finalize -o <stem>`) | one per (precursor, run) identified in or transferred into the run, every evidence type | `precursor_key run evidence_type quantity quantity_se quantity_normalized transfer_q quant_q apex_rt_s library_q`; `quantity_normalized` is `quantity` with the run's level and RT-local offset removed (§10, null when the run is not normalised); `evidence_type` is `identified` (the run has a target PSM of the precursor at PSM q ≤ `--quant-fdr` and, with `--pep`, PEP ≤ `--pep`), `identified_below_threshold` (identified, but `quant_q` above `--quant-feature-fdr` or missing; quantity kept, in this table only), `transfer_ms2` (transfer q ≤ `--mbr-fdr`, and an MS2 scan of the run matches the precursor's library spectrum: at least 4 fragments at a spectral angle of at least 0.6), `transfer_ms1` (transfer q ≤ `--mbr-fdr`, without that MS2 support) or `below_threshold` (quantity kept, as censored; in this table only); `quant_q` is the quality q-value of the row's MS1 feature against its decoys (the identified-row estimate for identified rows, equal to `transfer_q` for transfers); `transfer_q`, `quant_q` and `library_q` are internal quant-quality values, not identification FDR; text columns are strings, the others float64, null for missing values. Precursors that fail the library entry gate have no rows |

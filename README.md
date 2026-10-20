@@ -221,6 +221,13 @@ fallback. Both add a q-value and PEP to the outputs and write `<stem>.q<fdr>.tsv
 q ≤ `--fdr`, default 0.01, e.g. `--rescore --fdr 0.01`). `--fdr` and `--pep` do nothing
 without one of them.
 
+**Protein groups.** Every rescored run also writes `<stem>.protein_groups.tsv`: protein groups
+by parsimony over protein families (a canonical entry with its isoform, variant and chain
+entries is one family), each with a protein q-value from picked target-decoy competition.
+`--protein-fdr 0.01` keeps only PSMs of groups at that level in the filtered TSV, and only their
+families in the proteoform table; no quantification is needed
+([`DOCS.md`](DOCS.md#protein-groups-and-protein-fdr)).
+
 **Quantification (`--tmt`, `--lfq`).** andes quantifies the confident PSMs in the same run:
 `--tmt tmt10` reads the reporter ions of every identified MS2 (or its SPS-MS3 with
 `--tmt-level 3`), applies the kit's impurity matrix (`--tmt-correction`) and reports the

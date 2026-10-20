@@ -46,6 +46,10 @@ pub mod site_fdr;
 pub use knockoff_fdr::{apply_knockoff_fdr, KnockoffCount, KnockoffOutcome};
 pub use site_fdr::{site_claims, write_sites_tsv, SiteCount, SiteOutcome, SiteRow};
 
+pub mod protein_inference;
+pub use protein_inference::{
+    infer_protein_groups, write_protein_groups_tsv, Inference, ProteinGroup,
+};
 pub mod proteoform_table;
 pub use proteoform_table::{proteoform_table, write_proteoform_tsv, QuantSummary};
 

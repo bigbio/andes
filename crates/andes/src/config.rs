@@ -135,6 +135,7 @@ pub struct RescoringCfg {
     pub native: Option<bool>,
     pub fdr: Option<f64>,
     pub proteoform_fdr: Option<f64>,
+    pub protein_fdr: Option<f64>,
     pub pep: Option<f64>,
     pub percolator_bin: Option<PathBuf>,
     pub percolator_docker: Option<bool>,
@@ -442,6 +443,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         proteoform_fdr,
         cfg.rescoring.proteoform_fdr
     );
+    set_opt!("protein_fdr", protein_fdr, cfg.rescoring.protein_fdr);
     set_opt!("pep", pep, cfg.rescoring.pep);
     set_opt!(
         "percolator_bin",
@@ -608,6 +610,9 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     }
     if let Some(v) = args.proteoform_fdr {
         check_unit_fraction("proteoform_fdr", v)?;
+    }
+    if let Some(v) = args.protein_fdr {
+        check_unit_fraction("protein_fdr", v)?;
     }
     if let Some(v) = args.pep {
         check_unit_fraction("pep", v)?;

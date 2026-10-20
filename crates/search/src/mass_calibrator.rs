@@ -293,18 +293,14 @@ fn extract_residuals(
     let mut best_by_spec: std::collections::BTreeMap<usize, crate::PsmMatch> =
         std::collections::BTreeMap::new();
     for (key, queue) in sampled.iter().zip(queues.iter()) {
-        let Some(psm) = queue.iter_psms().max_by(|a, b| {
-            a.rank_score
-                .partial_cmp(&b.rank_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        }) else {
+        let Some(psm) = queue.peek_top() else {
             continue;
         };
         filter.queues_with_psm += 1;
         best_by_spec
             .entry(key.spectrum_idx)
             .and_modify(|best| {
-                if psm.rank_score > best.rank_score {
+                if *psm > *best {
                     *best = psm.clone();
                 }
             })

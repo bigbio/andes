@@ -559,11 +559,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Glyco keeps the full ensembles: the glyco path is candidate-generation bound
     // (the ensembles profile at ~0.3% of its wall time), so truncating there would
     // give up prediction fidelity for no speed. An explicit flag still applies.
-    let gbdt_k = if cli.glyco && !arg_present("--gbdt-max-trees") {
+    let gbdt_k = cli.gbdt_max_trees.unwrap_or(if cli.glyco {
         0
     } else {
-        cli.gbdt_max_trees
-    };
+        crate::cli::DEFAULT_GBDT_MAX_TREES
+    });
     if gbdt_k > 0 {
         let k = gbdt_k;
         let truncate = |slot: &mut Option<Arc<scoring_crate::gbdt_eval::GbdtPeakModel>>,

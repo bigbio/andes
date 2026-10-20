@@ -148,7 +148,7 @@ pub struct SearchParams {
 impl SearchParams {
     /// Defaults for a standard tryptic search (Kim et al., Nat Commun 5:5277, 2014):
     /// - enzyme: Trypsin
-    /// - length: 6-40
+    /// - length: 6-50
     /// - missed cleavages: 1
     /// - variable mods per peptide: 3
     /// - precursor tolerance: 20 ppm symmetric

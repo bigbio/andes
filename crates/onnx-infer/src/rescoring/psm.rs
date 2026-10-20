@@ -94,6 +94,10 @@ pub struct RescoringBatch {
 
 impl RescoringBatch {
     /// Pack rows into a single `[n, f]` tensor named `features` by default.
+    ///
+    /// Every row must carry every name in `feature_names`: a missing column is
+    /// an error, not a zero, because a model fed zeros for a feature it was
+    /// trained on scores silently wrong.
     pub fn from_rows(
         rows: Vec<FeatureRow>,
         feature_names: &[&str],
@@ -101,10 +105,16 @@ impl RescoringBatch {
     ) -> Result<Self> {
         let n = rows.len();
         let f = feature_names.len();
-        let mut data = vec![0f32; n * f];
+        let mut data =
+            vec![0f32; crate::tensor::checked_element_count(&[n, f], "rescoring batch")?];
         for (i, row) in rows.iter().enumerate() {
             for (j, name) in feature_names.iter().enumerate() {
-                let v = row.values.get(*name).copied().unwrap_or(0.0) as f32;
+                let v = row.values.get(*name).copied().ok_or_else(|| {
+                    Error::InvalidArg(format!(
+                        "row {i} ({}) has no feature `{name}`",
+                        row.key.spectrum_ref
+                    ))
+                })? as f32;
                 if !v.is_finite() {
                     return Err(Error::InvalidArg(format!(
                         "feature `{name}` of row {i} is not a finite f32 ({v}); \
@@ -146,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_packs_missing_as_zero() {
+    fn batch_rejects_a_missing_feature() {
         let rows = vec![FeatureRow {
             key: CandidateKey {
                 spectrum_ref: "scan=1".into(),
@@ -156,10 +166,13 @@ mod tests {
             },
             values: BTreeMap::from([("spec_pearson_norm".into(), 0.9)]),
         }];
-        let batch =
-            RescoringBatch::from_rows(rows, &["spec_pearson_norm", "rt_diff"], "features").unwrap();
-        assert_eq!(batch.features.shape, vec![1, 2]);
-        assert_eq!(batch.features.data, vec![0.9, 0.0]);
+        let err =
+            RescoringBatch::from_rows(rows.clone(), &["spec_pearson_norm", "rt_diff"], "features")
+                .unwrap_err();
+        assert!(err.to_string().contains("rt_diff"), "{err}");
+        let batch = RescoringBatch::from_rows(rows, &["spec_pearson_norm"], "features").unwrap();
+        assert_eq!(batch.features.shape, vec![1, 1]);
+        assert_eq!(batch.features.data, vec![0.9]);
     }
 
     #[test]

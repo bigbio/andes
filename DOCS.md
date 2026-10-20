@@ -534,6 +534,14 @@ built-in default`**; unknown keys are a hard error. The UniProt XML options are 
 (`uniprot_variants: true`, `uniprot_isoforms: true`, `uniprot_chains: true`,
 `uniprot_evidence: curated`). Values use the CLI strings
 (`precursor_tol: 20ppm`, `charge: "2..5"`, `isotope_error: "-1..2"`, `enzyme: gluc,trypsin`).
+Every search flag has a key; a key is the flag name without its section prefix
+(`--glyco-species` is `glyco.species`, `--glyco-glycan-gdb` is `glyco.glycan_gdb`,
+`--fragment-index` is `search.fragment_index`, `--gbdt-max-trees` is
+`scoring.gbdt_max_trees`, `--lfq-gaussian-width` is `quant.lfq_gaussian_width`). Four flags
+are CLI-only: `--config`, and the diagnostics `--cal-min-spec-keys`, `--precursor-mono-dump`
+and `--glyco-scans`. `glyco.enabled: true` needs `glyco.glycan_gdb` or `glyco.species` (or the
+CLI flag), checked after the merge; setting either glycan source on the command line replaces
+the config's choice.
 
 ```yaml
 # run.yaml (minimal)
@@ -919,19 +927,9 @@ Tests:
 cargo test --release --workspace
 ```
 
-CI skips seven tests: three hit a `min_peaks` filter regression, three need Maven fixtures
-under `target/test-classes/`, and one hits Rayon tie-breaking nondeterminism:
-
-```bash
-cargo test --release --workspace -- \
-  --skip charge_missing_spectrum_uses_per_charge_scored_spec \
-  --skip spectrum_without_charge_tries_charge_range \
-  --skip known_peptide_appears_in_top_n \
-  --skip read_bsa_canno_text_format \
-  --skip read_tryp_pig_bov_revcat_csarr_cnlcp \
-  --skip tryp_pig_bov_revcat_full_set_loads \
-  --skip match_spectra_output_invariant_across_thread_counts
-```
+CI runs the whole workspace suite with no skips; the out-of-core PIN goldens
+(`cargo test -p andes --release --test out_of_core_pin_goldens -- --ignored`) and
+`cargo test -p onnx-infer --release --features tract` run as separate steps.
 
 ---
 

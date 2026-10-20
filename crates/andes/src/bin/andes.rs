@@ -156,6 +156,10 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             }
+            if let Err(e) = config::check_resolved(&top.search) {
+                eprintln!("error: {e}");
+                return ExitCode::from(2);
+            }
             // Record whether the user set max missed cleavages, on the CLI or in
             // the --config file. `--glyco` raises the floor to 3, which costs real
             // memory (measured +4.4 GB on a 20k-protein human FASTA), so an
@@ -240,8 +244,7 @@ fn configure_bundled_dotnet() {
 }
 
 /// True when `flag` appears literally in the process arguments. Used to tell a
-/// user-supplied value from a clap default, where the default itself is
-/// context-dependent (see `--gbdt-max-trees`, which is exempt under `--glyco`).
+/// user-supplied value from a clap default.
 fn arg_present(flag: &str) -> bool {
     std::env::args().any(|a| a == flag || a.starts_with(&format!("{flag}=")))
 }

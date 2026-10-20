@@ -168,7 +168,8 @@ impl ThermoRawReader {
         // A precursor record with a positive m/z is required to search an MS2.
         let p = raw.precursor()?;
         let precursor_mz = p.mz();
-        if !(precursor_mz > 0.0) {
+        // `<= 0.0` alone would let a NaN m/z through.
+        if precursor_mz.is_nan() || precursor_mz <= 0.0 {
             return None;
         }
         let precursor_charge = match p.charge() {
@@ -509,7 +510,7 @@ fn filter_has_supplemental_collision(filter: &str) -> bool {
     }) {
         return false;
     }
-    let Some(last_stage) = tokens.filter(|t| t.contains('@')).last() else {
+    let Some(last_stage) = tokens.filter(|t| t.contains('@')).next_back() else {
         return false;
     };
     let methods: Vec<String> = last_stage
@@ -612,7 +613,7 @@ pub fn detect_activation_instrument<P: AsRef<Path>>(
     // Deterministic tie-break (HashMap order is randomised per process).
     let dominant_act = act
         .into_iter()
-        .max_by_key(|&(k, n)| (n, std::cmp::Reverse(k as u8)))
+        .max_by_key(|&(k, n)| (n, std::cmp::Reverse(k)))
         .map(|(k, _)| k)?;
     let activation = match dominant_act {
         x if x == ActivationMethod::CID as u8 => ActivationMethod::CID,
@@ -628,7 +629,7 @@ pub fn detect_activation_instrument<P: AsRef<Path>>(
     let instrument = inst
         .into_iter()
         // Deterministic tie-break (HashMap order is randomised per process).
-        .max_by_key(|&(k, n)| (n, std::cmp::Reverse(k as u8)))
+        .max_by_key(|&(k, n)| (n, std::cmp::Reverse(k)))
         .map(|(k, _)| match k {
             x if x == InstrumentType::LowRes as u8 => InstrumentType::LowRes,
             x if x == InstrumentType::TOF as u8 => InstrumentType::TOF,

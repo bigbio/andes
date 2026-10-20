@@ -126,20 +126,19 @@ impl ModelManifest {
         if self.onnx.as_os_str().is_empty() {
             return Err(Error::ManifestInvalid("onnx path must be non-empty".into()));
         }
-        let mut seen = std::collections::HashSet::new();
-        for spec in self.inputs.iter().chain(self.outputs.iter()) {
-            if spec.name.trim().is_empty() {
-                return Err(Error::ManifestInvalid(
-                    "tensor spec name must be non-empty".into(),
-                ));
-            }
-            if !seen.insert(spec.name.clone()) {
-                // Allow the same name on input and output (rare); only flag
-                // duplicates within the combined list when both sides share
-                // a name *and* we already saw it — actually ONNX can reuse
-                // names across in/out. Restrict to per-side uniqueness.
-            }
+        if let Some(spec) = self
+            .inputs
+            .iter()
+            .chain(self.outputs.iter())
+            .find(|spec| spec.name.trim().is_empty())
+        {
+            return Err(Error::ManifestInvalid(format!(
+                "tensor spec name must be non-empty (got {:?})",
+                spec.name
+            )));
         }
+        // Names must be unique within the inputs and within the outputs; ONNX
+        // allows one name on both sides (a graph input passed straight through).
         let mut in_names = std::collections::HashSet::new();
         for spec in &self.inputs {
             if !in_names.insert(&spec.name) {
@@ -195,5 +194,31 @@ mod tests {
         assert_eq!(m.id, "demo");
         assert_eq!(m.task, ModelTask::Ms2Intensity);
         assert_eq!(m.onnx_path(), onnx.as_path());
+    }
+
+    fn manifest(inputs: &[&str], outputs: &[&str]) -> ModelManifest {
+        let spec = |n: &&str| TensorSpec {
+            name: (*n).to_string(),
+            description: None,
+            shape: None,
+        };
+        ModelManifest {
+            id: "m".into(),
+            description: None,
+            onnx: PathBuf::from("m.onnx"),
+            inputs: inputs.iter().map(spec).collect(),
+            outputs: outputs.iter().map(spec).collect(),
+            task: ModelTask::Generic,
+            provenance: Provenance::default(),
+            extras: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn names_are_unique_per_side_only() {
+        assert!(manifest(&["x"], &["x"]).validate().is_ok());
+        assert!(manifest(&["x", "x"], &["y"]).validate().is_err());
+        assert!(manifest(&["x"], &["y", "y"]).validate().is_err());
+        assert!(manifest(&[" "], &["y"]).validate().is_err());
     }
 }

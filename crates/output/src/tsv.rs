@@ -398,6 +398,7 @@ mod tests {
             features: search::psm::PsmFeatures::default(),
             isotope_offset: 0,
             precursor_mz_override: None,
+            tie_key: 0,
         }
     }
 
@@ -628,6 +629,7 @@ mod tests {
             features: search::psm::PsmFeatures::default(),
             isotope_offset: 0,
             precursor_mz_override: None,
+            tie_key: 0,
         };
 
         let mut queue = TopNQueue::new(10);

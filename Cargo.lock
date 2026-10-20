@@ -69,6 +69,7 @@ dependencies = [
  "model",
  "model-train",
  "num_cpus",
+ "onnx-infer",
  "output",
  "parquet",
  "quant",

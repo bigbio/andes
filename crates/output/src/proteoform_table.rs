@@ -2,8 +2,11 @@
 //! isoform, variant and chain entry with accepted evidence, its confidence and
 //! its quantity.
 //!
-//! A peptide is *specific* to a member when, within its family, no other
-//! member explains it; otherwise it is *shared*. An isoform, variant or chain
+//! A peptide is *specific* to a member when no other entry explains it, in
+//! its family or in another; otherwise it is *shared*. A variant peptide that
+//! another family's canonical protein also contains (a paralog, or an equal
+//! sequence once I and L are taken as equal) is therefore shared: it shows the
+//! other protein as well as it shows the variant. An isoform, variant or chain
 //! entry is listed only with specific evidence. A member's confidence is
 //! `1 - q` of its best specific PSM (the class-aware q-value of
 //! [`crate::class_fdr`]), or of its best shared PSM when it has no specific one
@@ -118,8 +121,9 @@ pub fn proteoform_table(
                 by_family.entry(family_of(p)).or_default().insert(acc);
             }
         }
+        let families = by_family.len();
         for (family, accs) in by_family {
-            let specific = accs.len() == 1;
+            let specific = families == 1 && accs.len() == 1;
             for acc in accs {
                 let a = members
                     .entry((family.clone(), acc.to_string()))
@@ -329,7 +333,12 @@ mod tests {
     /// Canonical P1, isoform P1-2 (shares AAAK, has its own CCCK), and
     /// variant N10D of P1 (VLDGSTR from canonical VLNGSTR).
     fn index() -> SearchIndex {
-        let target = ProteinDb {
+        index_with(Vec::new())
+    }
+
+    /// [`index`] with `extra` target proteins.
+    fn index_with(extra: Vec<Protein>) -> SearchIndex {
+        let mut target = ProteinDb {
             proteins: vec![
                 entry(
                     "sp|P1|A",
@@ -360,6 +369,7 @@ mod tests {
                 ),
             ],
         };
+        target.proteins.extend(extra);
         SearchIndex::from_target_db(&target, "XXX")
     }
 
@@ -426,6 +436,32 @@ mod tests {
         let members: Vec<&str> = rows.iter().map(|r| r.member.as_str()).collect();
         assert_eq!(members, ["sp|P1|A"]);
         assert_eq!(rows[0].evidence, "shared");
+    }
+
+    #[test]
+    fn a_variant_peptide_another_family_contains_is_not_specific() {
+        // P9 (another family) holds VLDGSTR as reference sequence: the variant
+        // of P1 is not listed on it, and P9 shows it as shared.
+        let paralog = Protein {
+            accession: "sp|P9|B".into(),
+            description: String::new(),
+            sequence: b"MKVLDGSTR".to_vec(),
+            annotation: None,
+        };
+        let idx = index_with(vec![paralog]);
+        let mut t = targets();
+        let (id, row) = psm("s4", 0.003, "VLDGSTR", "sp|P1_VAR_1_N10D|A;sp|P9|B");
+        t.insert(id, row);
+        let rows = proteoform_table(&t, &idx, &Cutoffs::uniform(0.01), None);
+        assert!(rows.iter().all(|r| r.kind != EntryKind::Variant), "{rows:?}");
+        let p9 = rows.iter().find(|r| r.member == "sp|P9|B").unwrap();
+        assert_eq!(
+            (p9.evidence, p9.specific_peptides, p9.shared_peptides),
+            ("shared", 0, 1)
+        );
+        // The P1 family members keep their own specific evidence.
+        let can = rows.iter().find(|r| r.member == "sp|P1|A").unwrap();
+        assert_eq!(can.specific_peptides, 2);
     }
 
     #[test]

@@ -576,6 +576,8 @@ mod tests {
             neutral_losses: losses,
             loss_class,
             annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         let arc = model::modification::leak_mod(m);
         let residues: Vec<AminoAcid> = b"PEPTIDE"
@@ -630,6 +632,8 @@ mod tests {
             neutral_losses: vec![97.97690],
             loss_class: 2,
             annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         });
         let residues: Vec<AminoAcid> = b"SSAK"
             .iter()

@@ -174,6 +174,8 @@ fn small_search_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
         neutral_losses: Vec::new(),
         loss_class: 0,
         annotated_site_mass: None,
+        blocks_cleavage: false,
+        diagnostic_ions: Vec::new(),
     };
     let aa_set = AminoAcidSetBuilder::new_standard()
         .add_variable_mod(ox_m.clone())
@@ -238,6 +240,8 @@ fn asymmetric_cam_only_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
         neutral_losses: Vec::new(),
         loss_class: 0,
         annotated_site_mass: None,
+        blocks_cleavage: false,
+        diagnostic_ions: Vec::new(),
     };
     let aa_set = AminoAcidSetBuilder::new_standard()
         .add_fixed_mod(cam)
@@ -275,6 +279,8 @@ fn asymmetric_cam_only_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         for aa in r.iter_mut() {
             if aa.residue == b'C' {
@@ -853,6 +859,8 @@ fn glyco_table_from_the_index_is_the_enumeration_sequon_subset_in_order() {
         neutral_losses: Vec::new(),
         loss_class: 0,
         annotated_site_mass: None,
+        blocks_cleavage: false,
+        diagnostic_ions: Vec::new(),
     };
     let aa_set = AminoAcidSetBuilder::new_standard()
         .add_variable_mod(ox_m)
@@ -872,7 +880,8 @@ fn glyco_table_from_the_index_is_the_enumeration_sequon_subset_in_order() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let mmap = PreparedSearch::prepare_mmap(&idx, &params, &scorer, 0.05, "XXX", tmp.path())
         .expect("prepare_mmap");
-    let table = GlycoCandidates::from_out_of_core(&mmap);
+    let table =
+        GlycoCandidates::from_out_of_core(&mmap, andes_glyco::glycan_first::GlycanCore::NGlycan);
 
     type Sig = (usize, usize, Vec<(u8, i64)>, u8, u8, bool, bool, bool);
     let sig = |c: &Candidate| -> Sig {

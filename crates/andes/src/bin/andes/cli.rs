@@ -574,6 +574,14 @@ pub(crate) struct SearchArgs {
     #[arg(long = "glyco-species", value_enum)]
     pub(crate) glyco_species: Option<GlycoSpeciesFlag>,
 
+    /// Glycan core type for `--glyco`: `n` searches N-glycans (N-X-S/T sequons,
+    /// trimannosyl core, default), `o` searches O-glycans (any S/T glycosite,
+    /// single reducing-end GalNAc core). O-glycans attach with no sequon, so an O
+    /// run's candidate gate is "has Ser or Thr" and its glycan database must be an
+    /// O-glycan `.gdb`.
+    #[arg(long = "glyco-core", value_enum, default_value_t = GlycoCoreFlag::N)]
+    pub(crate) glyco_core: GlycoCoreFlag,
+
     /// Correct each precursor to its monoisotopic peak from the preceding MS1
     /// isotope envelope BEFORE searching (`--glyco`; needs MS1, so mzML or Thermo
     /// `.raw`). `auto` fits the observed envelope at the reported charge against a
@@ -620,6 +628,8 @@ pub(crate) struct SearchArgs {
     /// same value cost 161 of 707 identifications. Set it for collision-dominant data;
     /// leave it off for electron-transfer data. Exempting ETD scans automatically was
     /// tried and made both regimes worse, because real files are mixed.
+    /// Under `--glyco-core o` the core ladder is only Y0 and Y1, so a value above 2
+    /// rejects every O-glycopeptide.
     #[arg(long = "glyco-min-core-y", default_value_t = 0u32)]
     pub(crate) glyco_min_core_y: u32,
 
@@ -835,6 +845,17 @@ pub(crate) struct SearchArgs {
     /// turns the criterion off.
     #[arg(long = "tmt-min-sn", default_value = "0", value_parser = parse_non_negative)]
     pub(crate) tmt_min_sn: f64,
+
+    /// Estimate each MS2 scan's co-isolation interference and write the
+    /// reporter intensities with it removed, as an extra `unmix_` channel
+    /// block and an `interference` column in `tmt.parquet` (the existing
+    /// columns are unchanged). A per-run regression explains each scan's
+    /// summed reporter signal by the precursor's, the co-isolated ions' and
+    /// the sub-threshold ion current in the isolation window of the bordering
+    /// MS1 scans; the interference is removed with the run's mean reporter
+    /// profile. High-resolution MS2 reporters only (`--tmt-level 2`).
+    #[arg(long = "tmt-unmix", default_value_t = false)]
+    pub(crate) tmt_unmix: bool,
 
     /// Label-free MS1 quantification of the confident precursors: isotope
     /// chromatograms are extracted around each identified peptidoform's
@@ -1170,6 +1191,24 @@ impl GlycoSpeciesFlag {
             GlycoSpeciesFlag::Mouse => "mouse",
             GlycoSpeciesFlag::MouseLarge => "mouse-large",
             GlycoSpeciesFlag::HighMannose => "high-mannose",
+        }
+    }
+}
+
+/// Glycan core type for `--glyco-core`: N- vs O-glycan search mode.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum GlycoCoreFlag {
+    /// N-glycan: N-X-S/T sequon gate, trimannosyl core.
+    N,
+    /// O-glycan: Ser/Thr gate, single reducing-end GalNAc core.
+    O,
+}
+
+impl From<GlycoCoreFlag> for andes_glyco::glycan_first::GlycanCore {
+    fn from(value: GlycoCoreFlag) -> Self {
+        match value {
+            GlycoCoreFlag::N => andes_glyco::glycan_first::GlycanCore::NGlycan,
+            GlycoCoreFlag::O => andes_glyco::glycan_first::GlycanCore::OGlycan,
         }
     }
 }

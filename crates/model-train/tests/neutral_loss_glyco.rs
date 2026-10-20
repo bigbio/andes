@@ -134,6 +134,8 @@ fn glyco_peptide(declare_losses: bool) -> Peptide {
         },
         loss_class: if declare_losses { 1 } else { 0 },
         annotated_site_mass: None,
+        blocks_cleavage: false,
+        diagnostic_ions: Vec::new(),
     };
     let arc = model::modification::leak_mod(m);
     let residues: Vec<AminoAcid> = b"AAATAAA"

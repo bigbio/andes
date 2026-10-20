@@ -92,6 +92,22 @@ pub fn span_has_nxst_sequon(residues: &[u8], post: u8) -> bool {
     has_nxst_sequon(residues) || boundary_nxst_site(residues, post).is_some()
 }
 
+/// The O-glycan path's candidate membership test: any Ser/Thr in the span. Unlike
+/// N-glycan there is no sequon and no boundary case — a bare S/T is the motif.
+pub fn candidate_has_ser_or_thr(c: &Candidate) -> bool {
+    use andes_glyco::sequon::has_ser_or_thr;
+    let res: Vec<u8> = c.peptide.residues.iter().map(|aa| aa.residue).collect();
+    has_ser_or_thr(&res)
+}
+
+/// [`candidate_has_ser_or_thr`] on a bare residue span. The `post` residue is
+/// unused (no boundary case for O-glycans) but the signature matches
+/// [`span_has_nxst_sequon`] so both slot into `out_of_core_candidates_where`.
+pub fn span_has_ser_or_thr(residues: &[u8], _post: u8) -> bool {
+    use andes_glyco::sequon::has_ser_or_thr;
+    has_ser_or_thr(residues)
+}
+
 fn enumerate_protein(
     protein: &Protein,
     protein_index: usize,
@@ -445,12 +461,15 @@ pub(crate) struct SpanSites<'a> {
     substitutions: &'a [Substitution],
     start: u32,
     /// The search's residue forms and the span's length and protein-terminal
-    /// flags; set by [`SpanSites::with_forms`] before a walk, needed only for
-    /// a span with substitutions.
+    /// flags; set by [`SpanSites::with_forms`] before a walk. The forms are
+    /// needed for a span with substitutions, the rest also for mods that
+    /// block cleavage.
     forms: Option<&'a AminoAcidSet>,
     len: usize,
     protein_n_term: bool,
     protein_c_term: bool,
+    /// The search's enzyme, for mods that block cleavage.
+    enzyme: Option<Enzyme>,
 }
 
 impl<'a> SpanSites<'a> {
@@ -463,19 +482,22 @@ impl<'a> SpanSites<'a> {
             len: 0,
             protein_n_term: false,
             protein_c_term: false,
+            enzyme: None,
         }
     }
 
     /// These sites, judging substitutions against the residue forms of `aa`
     /// for a span of `len` residues with the given protein-terminal flags: a
     /// substituted position is compared with the forms the replaced residue
-    /// takes in the same terminal context.
+    /// takes in the same terminal context. `enzyme` decides where a mod that
+    /// blocks cleavage may not sit.
     pub(crate) fn with_forms<'b>(
         self,
         aa: &'b AminoAcidSet,
         len: usize,
         protein_n_term: bool,
         protein_c_term: bool,
+        enzyme: Enzyme,
     ) -> SpanSites<'b>
     where
         'a: 'b,
@@ -485,7 +507,23 @@ impl<'a> SpanSites<'a> {
             len,
             protein_n_term,
             protein_c_term,
+            enzyme: Some(enzyme),
             ..self
+        }
+    }
+
+    /// Whether the span was cleaved at its residue `i` (`residue`): its last
+    /// residue for an enzyme that cuts after it, its first for one that cuts
+    /// before, unless that end is the protein's own terminus.
+    #[inline]
+    fn cut_at(&self, i: usize, residue: u8) -> bool {
+        let Some(enzyme) = self.enzyme else {
+            return false;
+        };
+        if enzyme.is_n_term() {
+            i == 0 && !self.protein_n_term && enzyme.is_cleavable_before(residue)
+        } else {
+            i + 1 == self.len && !self.protein_c_term && enzyme.is_cleavable_after(residue)
         }
     }
 
@@ -497,6 +535,9 @@ impl<'a> SpanSites<'a> {
             .mod_
             .is_none_or(|m| m.allowed_at(self.sites, position))
         {
+            return false;
+        }
+        if variant.mod_.is_some_and(|m| m.blocks_cleavage) && self.cut_at(i, variant.residue) {
             return false;
         }
         let Some(aa) = self.forms else {
@@ -556,7 +597,13 @@ pub(crate) fn expand_mod_combinations(
         &mut current,
         0,
         params.max_variable_mods_per_peptide,
-        sites.with_forms(&params.aa_set, n, is_protein_n_term, is_protein_c_term),
+        sites.with_forms(
+            &params.aa_set,
+            n,
+            is_protein_n_term,
+            is_protein_c_term,
+            params.enzyme,
+        ),
         &mut out,
     );
     out
@@ -869,7 +916,13 @@ fn walk_forms_bounded(
         &mut chosen,
         0,
         params.max_variable_mods_per_peptide,
-        sites.with_forms(&params.aa_set, n, is_protein_n_term, is_protein_c_term),
+        sites.with_forms(
+            &params.aa_set,
+            n,
+            is_protein_n_term,
+            is_protein_c_term,
+            params.enzyme,
+        ),
         &min_rest,
         &max_rest,
         mass_lo,
@@ -1779,6 +1832,8 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         }
     }
 
@@ -1793,6 +1848,8 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         }
     }
 
@@ -1835,6 +1892,8 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         let acetyl = Modification {
             name: "Acetyl".into(),
@@ -1846,6 +1905,8 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         // First tryptic peptide AAAPEPTIDEK sits at the protein N-terminus (offset 0).
         let target = ProteinDb {
@@ -1891,6 +1952,84 @@ mod tests {
     /// forms the replaced residue takes there: with a fixed N-term tag and
     /// deamidation searched, D+tag at the start of a peptide weighs the same as
     /// the canonical N deamidated + tag, so the variant form is left out.
+    /// Acetyl-K that blocks cleavage: never on the K a peptide was cleaved
+    /// after, but on an internal K (a missed cleavage) and on the protein's
+    /// own C-terminal K.
+    #[test]
+    fn a_mod_that_blocks_cleavage_never_sits_on_the_cleaved_residue() {
+        let seq = b"AAAAKGGGGKCCCCK".to_vec();
+        let target = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: String::new(),
+                sequence: seq.clone(),
+                annotation: None,
+            }],
+        };
+        let db = SearchIndex::from_target_db(&target, "XXX");
+        let run = |blocks: bool| {
+            let acetyl = Modification {
+                name: "Acetyl".into(),
+                mass_delta: 42.010565,
+                residue: ResidueSpec::Specific(b'K'),
+                location: ModLocation::Anywhere,
+                fixed: false,
+                accession: None,
+                neutral_losses: Vec::new(),
+                loss_class: 0,
+                annotated_site_mass: None,
+                blocks_cleavage: blocks,
+                diagnostic_ions: Vec::new(),
+            };
+            let aa = AminoAcidSetBuilder::new_standard()
+                .add_variable_mod(acetyl)
+                .build()
+                .unwrap();
+            let mut params = SearchParams::default_tryptic(aa);
+            params.min_length = 3;
+            params.max_variable_mods_per_peptide = 2;
+            // (start, length, modified positions) of every target candidate.
+            enumerate_candidates(&db, &params, "XXX")
+                .filter(|c| !c.is_decoy)
+                .map(|c| {
+                    let mods: Vec<usize> = c
+                        .peptide
+                        .residues
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, a)| a.mod_.is_some())
+                        .map(|(i, _)| i)
+                        .collect();
+                    (c.start_offset_in_protein, c.peptide.length(), mods)
+                })
+                .collect::<Vec<_>>()
+        };
+        let blocked = run(true);
+        for (start, len, mods) in &blocked {
+            let protein_end = start + len == seq.len();
+            assert!(
+                protein_end || !mods.contains(&(len - 1)),
+                "acetyl on the cleaved K of {start}+{len}"
+            );
+        }
+        assert!(
+            blocked
+                .iter()
+                .any(|(s, l, m)| *s == 0 && *l == 10 && m == &vec![4]),
+            "acetyl on the internal K of a missed cleavage"
+        );
+        assert!(
+            blocked
+                .iter()
+                .any(|(s, l, m)| *s == 10 && *l == 5 && m == &vec![4]),
+            "acetyl on the protein's own C-terminal K"
+        );
+        // Without the attribute the cleaved K may carry it.
+        assert!(run(false)
+            .iter()
+            .any(|(s, l, m)| *s == 0 && *l == 5 && m == &vec![4]));
+    }
+
     #[test]
     fn substitution_at_a_peptide_terminus_uses_the_terminal_forms() {
         use model::protein::{ProteinAnnotation, Substitution, VariantRegion};
@@ -1922,6 +2061,8 @@ mod tests {
                 neutral_losses: Vec::new(),
                 loss_class: 0,
                 annotated_site_mass: None,
+                blocks_cleavage: false,
+                diagnostic_ions: Vec::new(),
             });
             if deamidation {
                 b = b.add_variable_mod(deamidation_n());

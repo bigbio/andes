@@ -27,6 +27,7 @@ use quant::lfq::{
 use quant::ms1_index::Ms1RunIndex;
 use quant::ms2::Ms2Scan;
 use quant::tdc::{picked_qvalues, Pair};
+use quant::unmix::{unmix_run, window_record, ScanInput, Survey, WindowRecord};
 use rayon::prelude::*;
 use search::candidate_gen::Candidate;
 use search::psm::{PsmMatch, TopNQueue};
@@ -52,6 +53,10 @@ const MS1_MIN_ISOTOPE_PARTNER_FRACTION: f64 = 0.5;
 /// Centroids kept per MS2 scan in `<stem>.ms2.parquet` (the most intense).
 const MS2_TOP_PEAKS: usize = 100;
 
+/// The peptide ion current of an MS2 scan (`--tmt-unmix`) counts centroids
+/// this far (Th) above the plex's heaviest reporter ion.
+const REPORTER_REGION_MARGIN: f64 = 1.0;
+
 /// Resolved quantification settings for a run.
 #[derive(Debug, Clone)]
 pub(crate) struct QuantSettings {
@@ -75,12 +80,27 @@ pub(crate) struct QuantSettings {
     pub quant_dir: Option<PathBuf>,
     /// The search's fragment tolerance, recorded in each run's MS2 table.
     pub fragment_tol: Option<Tolerance>,
+    /// `--tmt-unmix` on high-resolution MS2 reporters.
+    pub unmix: bool,
 }
 
 impl QuantSettings {
     /// The checks that need only the command line, so `run` makes them before
     /// the database is loaded and the index built; `from_cli` repeats them.
     pub(crate) fn check_args(cli: &Cli) -> Result<(), String> {
+        if cli.tmt_unmix && cli.tmt.is_none() {
+            return Err("--tmt-unmix needs --tmt <plex>".into());
+        }
+        // An explicit --tmt-level 3. When the level is resolved from the data,
+        // MS3 reporters are only picked for low-resolution MS2, where unmixing
+        // is skipped with a warning (`from_cli`).
+        if cli.tmt_unmix && cli.tmt_level.is_some_and(|level| level >= 3) {
+            return Err(
+                "--tmt-unmix models the co-isolation interference of MS2 reporter ions; it does \
+                 not apply at --tmt-level 3"
+                    .into(),
+            );
+        }
         if cli.tmt.is_none() && !cli.lfq && cli.quant_dir.is_none() {
             return Ok(());
         }
@@ -171,6 +191,12 @@ impl QuantSettings {
         // does not describe: Velos/Elite/Fusion/Lumos high-low methods pair an
         // ion-trap MS2 with Orbitrap survey scans. Each run's MS1 is checked
         // once it is captured (`finish_file`).
+        if cli.tmt_unmix && !high_res {
+            eprintln!(
+                "WARN: --tmt-unmix: the MS2 scans are low-resolution; interference unmixing \
+                 needs high-resolution MS2 reporter ions and is not applied"
+            );
+        }
         if cli.lfq && !high_res {
             eprintln!(
                 "WARN: --lfq: the MS2 scans are low-resolution; label-free quantification \
@@ -192,6 +218,7 @@ impl QuantSettings {
             pep_cap: cli.pep,
             quant_dir: cli.quant_dir.clone(),
             fragment_tol: None,
+            unmix: cli.tmt_unmix && high_res && cli.tmt.is_some(),
         }))
     }
 
@@ -232,6 +259,9 @@ impl QuantSettings {
                 self.min_sn,
                 self.max_pep
             ));
+            if self.unmix {
+                parts.push("interference unmixing of the MS2 reporter ions".into());
+            }
         }
         if self.lfq {
             parts.push(format!(
@@ -297,6 +327,9 @@ pub(crate) struct QuantCollector {
     pub settings: QuantSettings,
     /// Raw MS2 reporter vectors, one per pushed spectrum (isobaric only).
     ms2_reporters: Vec<Vec<f32>>,
+    /// `--tmt-unmix`: each pushed spectrum's ion current above the reporter
+    /// region.
+    ms2_pic: Vec<f32>,
     runs: Vec<RunCapture>,
     next_span_start: usize,
     /// The current file's reduced MS2 scans (`--quant-dir`), written to its
@@ -309,6 +342,7 @@ impl QuantCollector {
         Self {
             settings,
             ms2_reporters: Vec::new(),
+            ms2_pic: Vec::new(),
             runs: Vec::new(),
             next_span_start: 0,
             ms2: Vec::new(),
@@ -321,6 +355,9 @@ impl QuantCollector {
         if let Some(plex) = self.settings.plex {
             self.ms2_reporters
                 .push(extract_reporters(&spec.peaks, plex, self.settings.tmt_tol));
+            if self.settings.unmix {
+                self.ms2_pic.push(peptide_ion_current(&spec.peaks, plex));
+            }
         }
         if self.settings.quant_dir.is_some() {
             self.ms2.push(reduced_ms2(spec));
@@ -968,6 +1005,72 @@ fn covers_reporters(scan_window: Option<(f64, f64)>, plex: Plex, tol: Tolerance)
     lo <= first - tol.as_da(first) && hi >= last + tol.as_da(last)
 }
 
+/// The MS1 scan after `after` in the same FAIMS series (the next survey scan
+/// of an MS2 whose survey scan is `after`).
+fn next_survey(ms1: &Ms1RunIndex, after: usize, faims_cv: Option<f32>) -> Option<usize> {
+    const MAX_FORWARD: usize = 64;
+    (after + 1..ms1.len().min(after + 1 + MAX_FORWARD))
+        .find(|&i| faims_cv.is_none() || ms1.scan(i).faims_cv == faims_cv)
+}
+
+/// The isolation-window record of an MS2 scan from the MS1 scans around it
+/// (`--tmt-unmix`); `None` without a retention time or isolation window.
+fn isolation_window_record(
+    ms1: &Ms1RunIndex,
+    context: Option<&ScanContext>,
+    spec: &Spectrum,
+    mono_mz: f64,
+    charge: u8,
+) -> Option<WindowRecord> {
+    let rt = spec.rt_seconds?;
+    let centre = spec.isolation_target_mz.unwrap_or(spec.precursor_mz);
+    let lo = centre - spec.isolation_lower_offset?;
+    let hi = centre + spec.isolation_upper_offset?;
+    let survey = |i: usize| Survey {
+        rt: ms1.rt(i),
+        peaks: ms1.peaks(i),
+        detection_limit: ms1.detection_limit(i),
+    };
+    let prev = survey_scan(ms1, context, rt);
+    let cv = context.and_then(|c| c.faims_cv);
+    let next = match prev {
+        Some(p) => next_survey(ms1, p, cv),
+        None => (0..ms1.len().min(64)).find(|&i| cv.is_none() || ms1.scan(i).faims_cv == cv),
+    };
+    window_record(
+        prev.map(survey),
+        next.map(survey),
+        rt,
+        lo,
+        hi,
+        mono_mz,
+        charge,
+    )
+}
+
+/// MS2 ion current above the plex's reporter region (`--tmt-unmix`).
+fn peptide_ion_current(peaks: &[(f64, f32)], plex: Plex) -> f32 {
+    let top = plex
+        .channels()
+        .iter()
+        .fold(f64::NEG_INFINITY, |a, c| a.max(c.mz))
+        + REPORTER_REGION_MARGIN;
+    peaks
+        .iter()
+        .filter(|p| p.0 > top && p.1.is_finite())
+        .map(|p| p.1.max(0.0))
+        .sum()
+}
+
+fn median_f32(v: &[f32]) -> f32 {
+    if v.is_empty() {
+        return f32::NAN;
+    }
+    let mut v = v.to_vec();
+    let mid = v.len() / 2;
+    *v.select_nth_unstable_by(mid, f32::total_cmp).1
+}
+
 /// A target, its feature and its decoy twin's feature.
 type Quantified = (usize, Option<FeatureQuant>, Option<FeatureQuant>);
 
@@ -1224,6 +1327,8 @@ pub(crate) fn run_quant(
                 .map(Ms1Cache::load)
                 .transpose()
                 .map_err(|e| format!("load MS1 scans for {}: {e}", run.stem))?;
+            let run_start = rows.len();
+            let mut unmix_inputs: Vec<ScanInput> = Vec::new();
             // The reporter ions of a scan measure its selected precursor; a
             // co-isolated PSM has none of its own.
             for hit in hits
@@ -1284,6 +1389,27 @@ pub(crate) fn run_quant(
                 with_noise += usize::from(sn.is_some());
                 let sn_sum = sn.as_ref().map(|v| v.iter().sum::<f32>());
                 let passes = gated.check(s, purity, sn_sum, hit.pep);
+                if s.unmix {
+                    let z = hit.psm.charge_used.max(1);
+                    let window = ms1.as_ref().and_then(|ms1| {
+                        isolation_window_record(
+                            ms1,
+                            context,
+                            spec,
+                            hit.cand.peptide.mass() / z as f64 + PROTON,
+                            z,
+                        )
+                    });
+                    unmix_inputs.push(ScanInput {
+                        charge: z,
+                        reporters: corrected.clone(),
+                        pic: collector
+                            .ms2_pic
+                            .get(hit.spec_idx)
+                            .map_or(0.0, |&v| v as f64),
+                        window,
+                    });
+                }
                 rows.push(TmtRow {
                     id: quant_id(hit, run, spec, candidates, index),
                     quant_scan_id,
@@ -1294,7 +1420,47 @@ pub(crate) fn run_quant(
                     sn,
                     quant_weight: if passes { quant_weight(purity) } else { 0.0 },
                     quant_gate_passed: passes,
+                    interference: None,
+                    unmixed: None,
                 });
+            }
+            if s.unmix {
+                let (model, unmixed) = unmix_run(&unmix_inputs);
+                match &model {
+                    Some(m) => {
+                        let fractions: Vec<f32> =
+                            unmixed.iter().flatten().map(|u| u.interference).collect();
+                        eprintln!(
+                            "quant: {}: interference model on {} scans (precursor yield {:.3}/{:.3}/{:.3} \
+                             at charge <=2/3/>=4, co-isolated {:.3}, hidden {:.3}, R2(log) {:.2}); \
+                             {} scans unmixed, median interference {:.2}",
+                            run.stem,
+                            m.n,
+                            m.precursor[0],
+                            m.precursor[1],
+                            m.precursor[2],
+                            m.co_isolated,
+                            m.hidden,
+                            m.r2_log,
+                            fractions.len(),
+                            median_f32(&fractions)
+                        );
+                    }
+                    None => eprintln!(
+                        "WARN: quant: {}: too few scans with an isolation-window record and \
+                         reporter ions to fit the interference model ({} scans, {} needed); \
+                         its unmix_ columns are empty",
+                        run.stem,
+                        unmix_inputs.len(),
+                        quant::unmix::MIN_FIT_SCANS
+                    ),
+                }
+                for (row, u) in rows[run_start..].iter_mut().zip(unmixed) {
+                    if let Some(u) = u {
+                        row.interference = Some(u.interference);
+                        row.unmixed = Some(u.reporters);
+                    }
+                }
             }
         }
         summary.columns = plex.channels().iter().map(|c| c.name.to_string()).collect();
@@ -1306,7 +1472,7 @@ pub(crate) fn run_quant(
             }
         }
         let tmt_path = dir.join(format!("{stem}.tmt.parquet"));
-        output::write_tmt_parquet(&tmt_path, plex, &rows, s.correction.is_some())?;
+        output::write_tmt_parquet(&tmt_path, plex, &rows, s.correction.is_some(), s.unmix)?;
         eprintln!(
             "quant: wrote {} ({} PSMs with reporter ions passing the quantification gate{}{}{})",
             tmt_path.display(),
@@ -1348,7 +1514,7 @@ pub(crate) fn run_quant(
                 .cloned()
                 .zip(r.corrected.iter().copied())
                 .collect();
-            if s.correction.is_some() || r.sn.is_some() {
+            if s.correction.is_some() || r.sn.is_some() || r.unmixed.is_some() {
                 rec.additional_intensities = labels
                     .iter()
                     .enumerate()
@@ -1359,6 +1525,9 @@ pub(crate) fn run_quant(
                         }
                         if let Some(sn) = &r.sn {
                             extra.push(("sn".to_string(), sn[i]));
+                        }
+                        if let Some(u) = &r.unmixed {
+                            extra.push(("unmixed".to_string(), u[i]));
                         }
                         (l.clone(), extra)
                     })
@@ -1371,6 +1540,10 @@ pub(crate) fn run_quant(
             if let Some(v) = r.sn_sum() {
                 rec.additional_scores
                     .push(("reporter_sn_sum".into(), v as f64, true));
+            }
+            if let Some(v) = r.interference {
+                rec.additional_scores
+                    .push(("interference".into(), v as f64, false));
             }
             rec.additional_scores
                 .push(("quant_weight".into(), r.quant_weight as f64, true));
@@ -1641,6 +1814,7 @@ mod tests {
             features: search::psm::PsmFeatures::default(),
             isotope_offset: 0,
             precursor_mz_override: co_isolated_mz,
+            site_evidence: None,
             tie_key: 0,
         }
     }
@@ -1771,6 +1945,7 @@ mod tests {
             pep_cap: None,
             quant_dir: quant_dir.map(PathBuf::from),
             fragment_tol: Some(Tolerance::Ppm(20.0)),
+            unmix: false,
         }
     }
 
@@ -1887,5 +2062,31 @@ mod tests {
         assert!(e.contains("needs --tmt"), "{e}");
         let e = ok(&["--tmt", "tmt10", "--tmt-level", "4"]).unwrap_err();
         assert!(e.contains("--tmt-level"), "{e}");
+        assert!(ok(&["--tmt", "tmt16", "--tmt-unmix"]).is_ok());
+        let e = ok(&["--tmt-unmix"]).unwrap_err();
+        assert!(e.contains("needs --tmt"), "{e}");
+        let e = ok(&["--tmt", "tmt16", "--tmt-level", "3", "--tmt-unmix"]).unwrap_err();
+        assert!(e.contains("--tmt-level 3"), "{e}");
+    }
+
+    #[test]
+    fn peptide_ion_current_skips_the_reporter_region() {
+        let peaks = [
+            (126.13, 1e6f32),
+            (134.15, 1e6),
+            (135.1, 5.0),
+            (300.0, 10.0),
+            (800.0, 20.0),
+        ];
+        assert_eq!(peptide_ion_current(&peaks, Plex::Tmt16), 30.0);
+    }
+
+    #[test]
+    fn next_survey_stays_in_the_faims_series() {
+        let idx = faims_run();
+        let cv0 = idx.scan(0).faims_cv;
+        assert_eq!(next_survey(&idx, 0, cv0), Some(2));
+        assert_eq!(next_survey(&idx, 0, None), Some(1));
+        assert_eq!(next_survey(&idx, 5, cv0), None);
     }
 }

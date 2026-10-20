@@ -38,6 +38,8 @@ fn bsa_aa_set() -> model::AminoAcidSet {
         neutral_losses: Vec::new(),
         loss_class: 0,
         annotated_site_mass: None,
+        blocks_cleavage: false,
+        diagnostic_ions: Vec::new(),
     };
     let ox = Modification {
         name: "Oxidation".into(),
@@ -49,6 +51,8 @@ fn bsa_aa_set() -> model::AminoAcidSet {
         neutral_losses: Vec::new(),
         loss_class: 0,
         annotated_site_mass: None,
+        blocks_cleavage: false,
+        diagnostic_ions: Vec::new(),
     };
     AminoAcidSetBuilder::new_standard()
         .add_fixed_mod(cam)

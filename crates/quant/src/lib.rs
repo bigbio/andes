@@ -8,6 +8,8 @@
 //!
 //! * [`isobaric`]: plex tables, reporter extraction, impurity correction (NNLS).
 //! * [`purity`]: precursor isolation purity from the preceding MS1 scan.
+//! * [`unmix`]: co-isolation interference of MS2 reporter ions, modelled per
+//!   run from the isolation-window MS1 contents, and its removal.
 //! * [`ms1_index`]: a run's MS1 scans indexed for chromatogram extraction.
 //! * [`xic`]: extracted-ion chromatograms, apex/boundary detection, integration.
 //! * [`formula`]: peptide elemental formula → theoretical isotope envelope.
@@ -38,6 +40,7 @@ pub mod nnls;
 pub mod normalize;
 pub mod purity;
 pub mod tdc;
+pub mod unmix;
 pub mod xic;
 
 pub use isobaric::{extract_reporters, Channel, CorrectionMatrix, Plex};

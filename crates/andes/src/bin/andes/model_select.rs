@@ -72,6 +72,8 @@ pub(crate) fn build_aa_set(
                 neutral_losses: Vec::new(),
                 loss_class: 0,
                 annotated_site_mass: None,
+                blocks_cleavage: false,
+                diagnostic_ions: Vec::new(),
             };
             let ox = Modification {
                 name: "Oxidation".into(),
@@ -83,6 +85,8 @@ pub(crate) fn build_aa_set(
                 neutral_losses: Vec::new(),
                 loss_class: 0,
                 annotated_site_mass: None,
+                blocks_cleavage: false,
+                diagnostic_ions: Vec::new(),
             };
             Ok(AminoAcidSetBuilder::new_standard()
                 .add_fixed_mod(cam)
@@ -111,6 +115,8 @@ pub(crate) fn default_aa_set_with_tag(
         neutral_losses: Vec::new(),
         loss_class: 0,
         annotated_site_mass: None,
+        blocks_cleavage: false,
+        diagnostic_ions: Vec::new(),
     };
     let ox = Modification {
         name: "Oxidation".into(),
@@ -122,6 +128,8 @@ pub(crate) fn default_aa_set_with_tag(
         neutral_losses: Vec::new(),
         loss_class: 0,
         annotated_site_mass: None,
+        blocks_cleavage: false,
+        diagnostic_ions: Vec::new(),
     };
     // Protein N-terminal acetylation (+42.010565) — a near-universal default in
     // the field (the reference engine / a comparison engine / a quantitation tool). Restricted to the PROTEIN N-term
@@ -137,6 +145,8 @@ pub(crate) fn default_aa_set_with_tag(
         neutral_losses: Vec::new(),
         loss_class: 0,
         annotated_site_mass: None,
+        blocks_cleavage: false,
+        diagnostic_ions: Vec::new(),
     };
     let mut b = AminoAcidSetBuilder::new_standard()
         .add_fixed_mod(cam)
@@ -153,6 +163,8 @@ pub(crate) fn default_aa_set_with_tag(
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         let tag_nterm = Modification {
             name: name.into(),
@@ -164,6 +176,8 @@ pub(crate) fn default_aa_set_with_tag(
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         b = b.add_fixed_mod(tag_k).add_fixed_mod(tag_nterm);
     }

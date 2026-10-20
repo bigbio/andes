@@ -410,7 +410,11 @@ PSMs.
 Some knockoff sites are really modified, because annotation is incomplete. Counting them as false
 makes the estimate err towards rejecting true site claims, never towards accepting false ones.
 
-**Experimental.** How conservative the estimate is has not yet been measured against known sites.
+**Experimental.** The knockoff sites control whether a residue is modified, not which
+modification it carries: on synthetic peptides whose lysines each carry one known modification, a
+third of the site claims passing site q ≤ 0.05 name the wrong modification at the right site
+(acetyl for trimethyl, two methyls for one dimethyl). The [site identity](#site-identity-occupancy-and-which-modification)
+columns resolve these.
 
 Measured on a mouse-liver phospho run (PXD007653, reviewed mouse UniProt, 51,906 annotated sites,
 42,985 knockoff sites):
@@ -425,7 +429,44 @@ matching all their context rules, so no knockoff.
 
 With rescoring, `<stem>.sites.tsv` lists the accepted claims, one row per site whose best PSM
 passes `--fdr` and whose site q-value passes `--proteoform-fdr`. Its columns are `family
-accession position residue modification_mass prior_tier psms best_psm site_q confidence`.
+accession position residue modification_mass prior_tier psms best_psm site_q confidence occupancy
+identity identity_alternatives identity_spectra`.
+
+#### Site identity: occupancy and which modification
+
+Each accepted site also gets two probabilities:
+- **`occupancy`**: the share of the posterior on the site's peptides that places a modification
+  on the residue.
+- **`identity`**: given a modification there, the share of the row's one. `identity_alternatives`
+  lists the others as `mass:share` (for example `+42.0470:0.29` beside acetyl at 0.71), and
+  `identity_spectra` is the posterior mass placing a modification there, in spectra.
+
+The posterior is taken over every row of a spectrum, targets and decoys, so the explanations of
+one spectrum compete. A row's logit combines:
+- its rescored score;
+- its precursor isotope offset;
+- its fragment ions, and those no other form of the same peptide among the spectrum's rows has;
+- the `diagnostic=` ions and `loss=` neutral losses of its modifications.
+
+The weights of the first three are fixed. How much a diagnostic ion or a loss says is learned
+from the run: among the rows the other evidence already makes confident, how often it is present
+when the row carries the modification and when a competing row carries another. Declare the
+signatures in the mods file; a modification without them is told apart by its fragments only.
+
+Measured on synthetic peptide pools (PXD009449), one lysine modification per pool, six lysine
+modifications claimed at every site, on the half of the peptides the fixed weights were not fitted
+on:
+
+| Accepted sites | Claims | Wrong modification |
+|---|---|---|
+| site q ≤ 0.05 | 753 | 245 (33%) |
+| and identity ≥ 0.5 | 522 | 26 (5.0%; 28.5 expected) |
+| and identity ≥ 0.95 | 412 | 11 (2.7%) |
+| and identity ≥ 0.95, occupancy ≥ 0.5 | 404 | 3 (0.7%) |
+
+In the unmodified-lysine pool, every site that passed its site q-value had occupancy below 0.5
+(mean 0.01). The remaining wrong claims look like synthesis side products: one peptide is seen
+with another modification in three pools. PSMs at 1% FDR do not change.
 
 ### PEFF databases
 
@@ -555,6 +596,7 @@ See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model)
 | `--tmt-min-purity` | 0..1 | `0.7` | Quantification gate (§10): PSMs below this precursor isolation purity fail the gate (`quant_gate_passed` false, `quant_weight` 0 in `tmt.parquet`). `0` turns it off. |
 | `--tmt-max-pep` | 0..1 | `0.05` | Quantification gate: PSMs whose Percolator PEP is above this fail the gate. Needs `--rescore`; `1` turns it off. |
 | `--tmt-min-sn` | ≥ 0 | `0` (off) | Quantification gate: PSMs whose summed reporter signal-to-noise is below this fail the gate. Applies only where the reporter scan records noise (Thermo `.raw`, mzML with noise arrays). |
+| `--tmt-unmix` | flag | off | Estimate each MS2 scan's co-isolation interference and write the reporter intensities with it removed (`interference` and an `unmix_` channel block in `tmt.parquet`; `unmixed` in the quantms feature parquet). High-resolution MS2 reporters only; refused at `--tmt-level 3`. |
 | `--lfq` | flag | off | Label-free MS1 quantification of the confident precursors (§10). Writes `<stem>.lfq.parquet`. mzML / `.raw` with high-resolution MS1; the MS2 may be ion-trap. |
 | `--quant-dir` | dir | *(none)* | Per input file writes `<stem>.ms1.parquet` (the run's MS1 scans, every FAIMS voltage), `<stem>.ms2.parquet` (every MS2 scan reduced to its 100 most intense centroids, with its precursor and isolation window) and `<stem>.quant.parquet` (every rank-1 PSM, targets and decoys, no FDR filter; `spec_id` is the PIN SpecId, `search_score` the PIN `RawScore`) for the multi-run quantification stages. Implies MS1 capture; same inputs as `--lfq`. Two inputs with the same stem, or an input without MS1 scans, are an error. Other outputs are unchanged. |
 | `--lfq-tol` | tolerance | `10ppm` | MS1 tolerance of the isotope chromatograms, and of the `--mbr` template fit (ppm only there). |
@@ -632,6 +674,8 @@ Optional `key=value` attributes may follow the name, comma-separated:
 | `class=<glyco\|phospho\|sulfo\|generic>` | Pool the mod's loss ions with others of the class. |
 | `accession=<CURIE>` | Ontology accession reported in the outputs, e.g. `UNIMOD:21`. |
 | `sites=<annotated\|any>` | `annotated` restricts a **variable** mod to the residues a UniProt XML database annotates with a modification of the same mass ([§1a](#uniprot-xml-databases)). `any` (default) applies it to every matching residue. |
+| `cleavage=<blocked\|kept>` | `blocked`: the enzyme does not cut at a residue carrying this mod, so it is never placed on the residue a peptide was cleaved at (the C-terminal K/R under trypsin), except at the protein's own terminus. Use it for modifications present before digestion that block the protease: acetyl-, succinyl- and other lysine acylations, GlyGly, di- and trimethyl-K. Not for labels added after digestion (TMT, reductive dimethylation). `kept` (default): no restriction. |
+| `diagnostic=<mz1;mz2;…>` | Singly charged ions the mod gives off when fragmented, such as the immonium ion of the modified residue. Not used in scoring: evidence for which modification a site carries (see [site identity](#site-identity-occupancy-and-which-modification)). Examples (HCD): acetyl-K `143.1179;126.0913`, trimethyl-K `143.1543` (with `loss=59.0735`, trimethylamine), succinyl-K `201.1234;184.0968`, GlyGly-K `215.1502;198.1237`, phospho-Y `216.0426`. |
 
 ### Example (a) — Carbamidomethyl C + Oxidation M
 
@@ -881,7 +925,7 @@ major version marks an incompatible layout, a new minor version only adds column
 
 | File | Rows | Columns |
 |---|---|---|
-| `<stem>.tmt.parquet` | one per PSM with reporter ions, including the PSMs the quantification gate (§10) failed | `filename scannr spec_id quant_scan quant_ms_level rt peptide charge proteins is_decoy psm_q_value psm_pep purity`, then one `tmt_<channel>` (or `itraq_<channel>`) per channel (float32, corrected when a correction matrix was applied), then `raw_<...>` when one was, then `reporter_intensity_sum reporter_sn_sum quant_weight quant_gate_passed`, then one `sn_<prefix>_<channel>` per channel (null without noise values). A gated PSM has `quant_gate_passed` false and `quant_weight` 0. Metadata `andes.tmt.plex` (kit) and `andes.tmt.corrected` |
+| `<stem>.tmt.parquet` | one per PSM with reporter ions, including the PSMs the quantification gate (§10) failed | `filename scannr spec_id quant_scan quant_ms_level rt peptide charge proteins is_decoy psm_q_value psm_pep purity`, then one `tmt_<channel>` (or `itraq_<channel>`) per channel (float32, corrected when a correction matrix was applied), then `raw_<...>` when one was, then `reporter_intensity_sum reporter_sn_sum quant_weight quant_gate_passed`, then one `sn_<prefix>_<channel>` per channel (null without noise values), then with `--tmt-unmix` `interference` and one `unmix_<prefix>_<channel>` per channel (null for a scan the interference model could not cover; §10). A gated PSM has `quant_gate_passed` false and `quant_weight` 0. Metadata `andes.tmt.plex` (kit), `andes.tmt.corrected` and `andes.tmt.unmix` |
 | `<stem>.protein_groups.tsv` (`--rescore`/`--rescore-native`) | one per target protein group, best score first | `protein_group lead accessions families peptides unique_peptides razor_peptides psms best_score protein_q subsumed` ([protein groups](#protein-groups-and-protein-fdr)) |
 | `<stem>.proteoforms.tsv` (`--rescore`/`--rescore-native` with UniProt isoform, variant or chain entries) | one per family member with a target PSM at q ≤ `--fdr` (a specific one for isoform, variant and chain entries) | `family member kind feature confidence q_value evidence specific_peptides shared_peptides psms best_psm alternative_explanation source prior_tier`, then `quantity_<run or channel>` with `--lfq`/`--tmt` (§1a, proteoform table) |
 | `<stem>.lfq.parquet` | one per feature per run (all target features, with their q-value) | `filename peptide charge proteins scannr spec_id psm_q_value calc_mz rt_anchor rt_apex rt_start rt_stop n_scans area apex_intensity isotope_areas cosine n_isotopes score decoy_score feature_q_value accepted`; `isotope_areas` is a list (monoisotope first); `accepted` is feature q ≤ `--lfq-feature-fdr` and cosine ≥ `--lfq-min-cosine`. The per-run wide view is the `accepted` rows pivoted on (`peptide`, `charge`) × `filename` over `area` (the highest `score` if a run has two). Metadata `andes.lfq.runs` (input stems, newline-joined, including runs without features), `andes.lfq.feature_fdr`, `andes.lfq.min_cosine` |
@@ -1070,8 +1114,12 @@ accepted**; use the names (case-insensitive, `--fragmentation hcd` ≡ `HCD`). T
 
 ## 9. Glycopeptide search (experimental) & advanced knobs
 
-`--glyco` searches intact N-glycopeptides (N-X-S/T sequon backbones) and writes a
-`.glyco.pin`. The defaults are validated; most knobs are hidden.
+`--glyco` searches intact glycopeptides and writes a `.glyco.pin`. By default it
+searches **N**-glycopeptides (N-X-S/T sequon backbones, trimannosyl core). With
+`--glyco-core o` it searches **O**-glycopeptides instead: any Ser/Thr is a
+glycosite (no sequon), the core is a single reducing-end GalNAc, and the glycan
+database must be an O-glycan `.gdb` (e.g. a published O-glycan database). The
+defaults are validated; most knobs are hidden.
 
 **Main flags:**
 
@@ -1080,6 +1128,7 @@ accepted**; use the names (case-insensitive, `--fragmentation hcd` ≡ `HCD`). T
 | `--glyco-tol-ppm` | 20 | Fragment tolerance for glyco matching (oxonium, core-Y, backbone mass, c/z). **Raise it on ion-trap MS2** or the oxonium gate never fires. |
 | `--glyco-glycan-gdb <FILE>` | — | `.gdb` glycan database (canonical-string trees, the format of the bundled databases); structure (core- vs antenna-fucose) is kept. Wins over `--glyco-species`. |
 | `--glyco-species <NAME>` | — | Bundled database: `human`, `mouse`, `mouse-large`, `high-mannose`. One of the two is required. |
+| `--glyco-core <n\|o>` | `n` | Glycan core: `n` = N-glycan (N-X-S/T sequon gate, trimannosyl core), `o` = O-glycan (any S/T gate, single GalNAc core). An `o` run needs an O-glycan `.gdb`. |
 | `--precursor-mono` | `auto` | Correct each precursor to the monoisotope its MS1 envelope supports (mzML or `.raw`): tests "recorded = M+k", k = 0..6, and moves down k−1 isotopes when k > 0 clearly wins. On the engine L mouse-liver reference (PXD005553) 88 of 3,824 scans were recorded exactly +4 high (issue #64). Fitted spectra are searched with a `0..1` isotope window instead of `0..2`. Adds `MonoShift`/`MonoFit`/`MonoFitGain`/`MonoSNR`. An explicit `--isotope-error` is honoured; without MS1 output is byte-identical to `off`. Under `--glyco` the isotope-error window defaults to 0..=2 (dropping −1 measured +81 backbone-correct @1%). |
 | `--glyco-max-peaks` | 0 (no cap) | Peaks the **generation** stage considers; 300–500 helps very dense scans. |
 | `--glyco-retrieval-tol-ppm` | tol-ppm on high-res, the model's Da window on low-res | Retrieval window only; 20 ppm on high-res measured 6.9x faster at no identification cost. |
@@ -1104,7 +1153,10 @@ on ETD the rank/edge/hyperscore path scores the backbone with its intact glycan 
 backbone-correct @1%); the best enumerated candidate is promoted over a de-novo winner;
 peptide-first index at fragment charges 1..=2 with at most 1,024 candidates per spectrum;
 `--precursor-mono` uses max shift 6, minimum fit 0.90, minimum gain 0.15, minimum SNR 3.0,
-10 ppm MS1 tolerance and holds back 1 isotope.
+10 ppm MS1 tolerance and holds back 1 isotope; `--glyco-core o` additionally gates Hex>0
+(galactose) candidates on a Hex diagnostic ion (163.060 or 366.139) in the HCD spectrum —
+the GalNAc oxonium every O-glycopeptide carries cannot justify adding galactose (N-glycan is
+unaffected).
 
 Deleted after A/B tests (2026-09-05): `--glyco-split-election`, `--glyco-gp-g`,
 `--glyco-gp-m`, `--glyco-isobar-rep`, `--glyco-y-index`, `--glyco-decorated-features`,
@@ -1217,6 +1269,23 @@ single input run's MS1 scans still need to fit in memory while it is processed.
   ratio compression of the PSMs a deep search adds; purity barely matters for high-resolution
   MS2 reporters, where the remaining interference is co-isolation inside a pure-looking window.
   Set all three to their off values to quantify every confident PSM.
+* **Interference unmixing** (`--tmt-unmix`, off by default). The reporter ions of a high-resolution
+  MS2 scan come from everything the quadrupole isolated, and purity misses most of it: much of
+  the co-isolated ion current is below the MS1 detection limit. Each quantified scan gets an
+  isolation-window record from the MS1 scans before and after it (same FAIMS voltage), linearly
+  interpolated to the MS2 retention time: the window's ion current, the part of it on the
+  identified precursor's isotope envelope (calculated m/z, 10 ppm), and an estimate of the ion
+  current hidden below the detection limit (the scans' 5th-percentile centroid intensity × the
+  centroid density within ±5 Th × the window width). Per run, a robust non-negative regression
+  explains each scan's summed reporter intensity by the precursor's share of the MS2 peptide ion
+  current (one yield per charge class: ≤ 2, 3, ≥ 4), the co-isolated share and the hidden ion
+  current. The coefficients are the run's scale factors; no ground truth or reference channel is
+  used. A scan's `interference` is the predicted reporter share that is not the precursor's
+  (capped at 0.8), and `unmix_<channel>` = intensity − interference × summed intensity × the run's
+  mean channel profile (floored at 0). A run with fewer than 100 modelled scans gets empty
+  `unmix_` cells and a WARN. The existing channel columns are unchanged. Removing interference
+  decompresses ratios at the price of a higher CV (the remaining signal is smaller and keeps its
+  noise). SPS-MS3 reporters (`--tmt-level 3`) are not modelled.
 * **Roll-up weight** (`quant_weight`). For a PSM that passed the gate, purity² (1 without a
   purity); 0 for a gated PSM. A protein or peptide sum weighted by it lowers the influence of
   the PSMs most exposed to co-isolation. The corrected intensities are never rescaled by it.

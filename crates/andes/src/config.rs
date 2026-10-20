@@ -160,6 +160,7 @@ pub struct QuantCfg {
     pub tmt_min_purity: Option<f64>,
     pub tmt_max_pep: Option<f64>,
     pub tmt_min_sn: Option<f64>,
+    pub tmt_unmix: Option<bool>,
     pub lfq: Option<bool>,
     pub lfq_tol: Option<String>,
     pub lfq_rt_window: Option<f64>,
@@ -189,6 +190,11 @@ fn parse_quant_feature_fdr(s: &str) -> Result<crate::cli::FractionOrOff, String>
     crate::cli::parse_fraction_or_off(s).map_err(|e| format!("quant_feature_fdr: {e}"))
 }
 
+fn parse_glyco_core(s: &str) -> Result<crate::cli::GlycoCoreFlag, String> {
+    <crate::cli::GlycoCoreFlag as clap::ValueEnum>::from_str(s, true)
+        .map_err(|_| format!("glyco.core: invalid `{s}`: expected n|o"))
+}
+
 impl NumberOrString {
     fn text(&self) -> String {
         match self {
@@ -202,6 +208,7 @@ impl NumberOrString {
 #[serde(default, deny_unknown_fields)]
 pub struct GlycoCfg {
     pub enabled: Option<bool>,
+    pub core: Option<String>,
     pub tol_ppm: Option<f64>,
     pub max_peaks: Option<usize>,
     pub debug: Option<bool>,
@@ -513,6 +520,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set!("tmt_min_purity", tmt_min_purity, cfg.quant.tmt_min_purity);
     set!("tmt_max_pep", tmt_max_pep, cfg.quant.tmt_max_pep);
     set!("tmt_min_sn", tmt_min_sn, cfg.quant.tmt_min_sn);
+    set!("tmt_unmix", tmt_unmix, cfg.quant.tmt_unmix);
     set!("lfq", lfq, cfg.quant.lfq);
     if let Some(v) = cfg.quant.lfq_tol {
         if !cli_set(m, "lfq_tol") {
@@ -549,6 +557,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
 
     // ── glyco ──
     set!("glyco", glyco, cfg.glyco.enabled);
+    set_parsed!("glyco_core", glyco_core, cfg.glyco.core, parse_glyco_core);
     set!("glyco_tol_ppm", glyco_tol_ppm, cfg.glyco.tol_ppm);
     set!("glyco_max_peaks", glyco_max_peaks, cfg.glyco.max_peaks);
     set!("debug_glyco", debug_glyco, cfg.glyco.debug);

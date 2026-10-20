@@ -1,10 +1,18 @@
 use crate::glycan_db::GlycanComp;
+use crate::glycan_first::PPM_FLOOR_DA;
 use crate::glycan_mass::CORE_OXONIUM_MZ;
 
 /// Neu5Ac (NeuAc / sialic) oxonium ions: 274.0921 (Neu5Ac−H2O), 292.1027 (Neu5Ac).
 pub const NEUAC_OXONIUM_MZ: [f64; 2] = [274.09211, 292.10267];
 /// Neu5Gc (NeuGc) oxonium ions: 290.0870 (−H2O), 308.0976.
 pub const NEUGC_OXONIUM_MZ: [f64; 2] = [290.08702, 308.09759];
+
+/// Hex (galactose) diagnostic oxonium ions, the IHMO benchmark's validation ions:
+/// 163.060 (Hex−H2O) and 366.139 (Hex-HexNAc, the core-1 Gal-GalNAc oxonium).
+/// Used to gate Hex>0 O-glycan candidates: the GalNAc oxonium (204.09) is shared
+/// by every O-glycan and cannot justify adding galactose, so a Hex claim without
+/// one of these is unsupported.
+pub const HEX_DIAGNOSTIC_MZ: [f64; 2] = [163.0604, 366.1395];
 
 /// Composition-conditioned SIALIC consistency feature (GI-2).
 ///
@@ -99,6 +107,20 @@ pub fn oxonium_gate(peaks: &[(f64, f32)], min_frac: f32, tol_ppm: f64) -> Oxoniu
     }
 }
 
+/// Whether the spectrum shows any Hex diagnostic ion ([`HEX_DIAGNOSTIC_MZ`]).
+///
+/// The O-glycan Hex gate: an O-glycan candidate whose composition claims Hex
+/// (galactose) must have this evidence in its HCD spectrum. Presence-only (no
+/// intensity floor), matching the diagnostic-ion precheck — the intensity floor
+/// belongs to the oxonium gate's "is this a glycopeptide at all" question, not
+/// to "is this residue supported".
+pub fn hex_diagnostic_evidence(peaks: &[(f64, f32)], tol_ppm: f64) -> bool {
+    HEX_DIAGNOSTIC_MZ.iter().any(|&mz| {
+        let tol = (mz * tol_ppm / 1e6).max(PPM_FLOOR_DA);
+        peaks.iter().any(|&(pmz, _)| (pmz - mz).abs() <= tol)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,5 +188,18 @@ mod tests {
     fn oxonium_gate_silent_on_nonglyco() {
         let peaks = vec![(500.0, 100.0), (700.0, 5.0), (204.5, 30.0)]; // 204.5 not within tol of 204.0867
         assert!(!oxonium_gate(&peaks, 0.10, 20.0).fired);
+    }
+
+    #[test]
+    fn hex_diagnostic_evidence_requires_a_hex_ion() {
+        // GalNAc oxonium alone (204.087, 186.076) is NOT Hex evidence.
+        let galnac_only = vec![(500.0, 100.0), (204.0867, 30.0), (186.0760, 20.0)];
+        assert!(!hex_diagnostic_evidence(&galnac_only, 20.0));
+        // Hex-HexNAc (core-1) oxonium IS Hex evidence.
+        let core1 = vec![(500.0, 100.0), (366.1395, 20.0)];
+        assert!(hex_diagnostic_evidence(&core1, 20.0));
+        // The bare Hex oxonium (163.060) is also Hex evidence.
+        let hex_ox = vec![(500.0, 100.0), (163.0604, 20.0)];
+        assert!(hex_diagnostic_evidence(&hex_ox, 20.0));
     }
 }

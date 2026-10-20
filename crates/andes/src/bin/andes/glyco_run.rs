@@ -130,6 +130,7 @@ pub(crate) fn run_glyco(
         ),
     }
     let glyco_cfg = search::glyco_search::GlycoConfig {
+        core: cli.glyco_core.into(),
         min_core_y: cli.glyco_min_core_y,
         max_gen_peaks: cli.glyco_max_peaks,
         scan_filter_path: cli.glyco_scans.clone(),
@@ -152,11 +153,15 @@ pub(crate) fn run_glyco(
         hcd_pair: cli.glyco_hcd_pair && spectrum_paths.len() == 1,
     };
     let t_table = std::time::Instant::now();
-    let table = search::glyco_search::GlycoCandidates::from_out_of_core(prepared);
+    let table = search::glyco_search::GlycoCandidates::from_out_of_core(prepared, cli.glyco_core.into());
     eprintln!(
-        "[glyco] candidate table: {} N-X-S/T-bearing candidates from the out-of-core index \
+        "[glyco] candidate table: {} {}-bearing candidates from the out-of-core index \
          ({} base peptides) [{:.2}s]",
         table.candidates().len(),
+        match cli.glyco_core {
+            crate::cli::GlycoCoreFlag::N => "N-X-S/T",
+            crate::cli::GlycoCoreFlag::O => "S/T",
+        },
         prepared.mmap_index.len(),
         t_table.elapsed().as_secs_f64()
     );
@@ -222,6 +227,7 @@ pub(crate) fn run_glyco(
         idx,
         cli.debug_glyco,
         mono,
+        cli.glyco_core.into(),
     )?;
     eprintln!(
         "Wrote glyco PIN: {} ({} PSM rows) [PHASE TOTAL: {:.2}s]",

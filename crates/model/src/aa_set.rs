@@ -372,6 +372,8 @@ impl AminoAcidSetBuilder {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         Self {
             fixed_mods: vec![cam],
@@ -762,6 +764,10 @@ fn stack_mods(r: u8, parts: &[&'static Modification], slots: u8) -> Modification
             .unwrap_or(0),
         // The restricted part's own mass: the other parts apply everywhere.
         annotated_site_mass: parts.iter().find_map(|m| m.annotated_site_mass),
+        blocks_cleavage: parts.iter().any(|m| m.blocks_cleavage),
+        // A residue carrying several mods gives off none of their single
+        // ions (an immonium ion carries every mod of its residue).
+        diagnostic_ions: Vec::new(),
     }
 }
 
@@ -823,6 +829,8 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         }
     }
 
@@ -837,6 +845,8 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         }
     }
 
@@ -913,6 +923,8 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         let err = AminoAcidSetBuilder::new_standard()
             .add_fixed_mod(bad)
@@ -968,6 +980,8 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         let set = AminoAcidSetBuilder::new_standard()
             .add_variable_mod(cterm_mod)
@@ -1028,6 +1042,8 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         let set = AminoAcidSetBuilder::new_standard()
             .add_fixed_mod(carbamidomethyl_c())
@@ -1061,6 +1077,8 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         let anywhere = AminoAcidSetBuilder::new_standard()
             .add_fixed_mod(mk(ModLocation::Anywhere))
@@ -1163,6 +1181,8 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         let set = AminoAcidSetBuilder::new_standard()
             .add_variable_mod(nterm_mod)
@@ -1298,6 +1318,8 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         let set = AminoAcidSetBuilder::new_standard()
             .add_fixed_mod(carbamidomethyl_c())

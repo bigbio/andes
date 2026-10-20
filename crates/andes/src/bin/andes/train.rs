@@ -540,6 +540,8 @@ pub(crate) fn load_labels_from_tsv(
                         neutral_losses: Vec::new(),
                         loss_class: 1,
                         annotated_site_mass: None,
+                        blocks_cleavage: false,
+                        diagnostic_ions: Vec::new(),
                     },
                 ));
             }
@@ -879,6 +881,8 @@ pub(crate) fn build_msnet_peptide(
                 neutral_losses: Vec::new(),
                 loss_class: 0,
                 annotated_site_mass: None,
+                blocks_cleavage: false,
+                diagnostic_ions: Vec::new(),
             };
             residues.push(aa.with_mod(m));
         } else {

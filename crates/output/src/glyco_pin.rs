@@ -25,6 +25,7 @@ use search::candidate_gen::Candidate;
 use search::search_index::SearchIndex;
 use search::search_params::SearchParams;
 
+use andes_glyco::glycan_first::GlycanCore;
 use andes_glyco::glyco_psm::{
     glyco_gp_fused_score_iso, GLYCO_GP_ISO_DEFAULT, GLYCO_GP_J_DEFAULT, GLYCO_GP_K_DEFAULT,
 };
@@ -195,6 +196,7 @@ fn write_glyco_psm_row<W: Write>(
     // `Some(..)` when the run carried `--precursor-mono` (outer), and the
     // scan's own correction when it had a linked MS1 (inner).
     mono: Option<Option<&MonoCorrection>>,
+    core: GlycanCore,
 ) -> io::Result<()> {
     let psm = &hit.psm;
     let key = &hit.glycan_key;
@@ -390,7 +392,7 @@ fn write_glyco_psm_row<W: Write>(
     // Target and glycan-decoy rows are tagged identically, so this is symmetric
     // on the FDR axis; and PSM-level q-values do not depend on the Peptide string.
     let glycan_tag = match &key.glycan {
-        Some(g) => glycan_tag_with_site(g, &residues, cand.peptide.post),
+        Some(g) => glycan_tag_with_site(g, &residues, cand.peptide.post, core),
         None => String::new(),
     };
     write!(writer, "\t{}{}", cand.peptide, glycan_tag)?;
@@ -411,10 +413,20 @@ fn glycan_tag_with_site(
     g: &andes_glyco::glycan_db::GlycanComp,
     residues: &[u8],
     post: u8,
+    core: GlycanCore,
 ) -> String {
-    let site = match andes_glyco::sequon::glycosites(residues, post).as_slice() {
-        [only] => format!("@N{}", only + 1),
-        _ => "@N?".to_string(),
+    let site = match core {
+        GlycanCore::NGlycan => match andes_glyco::sequon::glycosites(residues, post).as_slice() {
+            [only] => format!("@N{}", only + 1),
+            _ => "@N?".to_string(),
+        },
+        GlycanCore::OGlycan => match andes_glyco::sequon::all_ser_thr_sites(residues).as_slice() {
+            [only] => {
+                let aa = residues[*only] as char;
+                format!("@{}{}", aa, only + 1)
+            }
+            _ => "@S/T?".to_string(),
+        },
     };
     format!(
         "[HexNAc{}Hex{}Fuc{}NeuAc{}NeuGc{}{}]",
@@ -493,6 +505,7 @@ pub fn write_glyco_pin(
     search_index: &SearchIndex,
     debug: bool,
     mono: Option<&[Option<MonoCorrection>]>,
+    core: GlycanCore,
 ) -> io::Result<()> {
     let file = std::fs::File::create(path)?;
     let mut writer = BufWriter::new(file);
@@ -505,6 +518,7 @@ pub fn write_glyco_pin(
         search_index,
         debug,
         mono,
+        core,
     )
 }
 
@@ -607,6 +621,7 @@ pub fn write_glyco_pin_to<W: Write>(
     debug: bool,
     // `--precursor-mono` corrections aligned with `spectra`; `None` = flag off.
     mono: Option<&[Option<MonoCorrection>]>,
+    core: GlycanCore,
 ) -> io::Result<()> {
     let min_charge = *params.charge_range.start();
     let max_charge = *params.charge_range.end();
@@ -647,6 +662,7 @@ pub fn write_glyco_pin_to<W: Write>(
                 params,
                 &result.hits,
                 mono.map(|m| m.get(spec_idx).and_then(|c| c.as_ref())),
+                core,
             )?;
             row_count += 1;
         }
@@ -780,6 +796,7 @@ mod tests {
             features: PsmFeatures::default(),
             isotope_offset: 0,
             precursor_mz_override: None,
+            site_evidence: None,
             tie_key: 0,
         }
     }
@@ -831,20 +848,23 @@ mod tests {
             mass: 0.0,
         };
         // exactly one N-X-S/T: the site is a fact about the sequence.
-        assert!(glycan_tag_with_site(&g, b"AANLTK", b'A').ends_with("@N3]"));
+        assert!(glycan_tag_with_site(&g, b"AANLTK", b'A', GlycanCore::NGlycan).ends_with("@N3]"));
         // the sequon may sit at the very start; positions are 1-based.
-        assert!(glycan_tag_with_site(&g, b"NLTAAK", b'A').ends_with("@N1]"));
+        assert!(glycan_tag_with_site(&g, b"NLTAAK", b'A', GlycanCore::NGlycan).ends_with("@N1]"));
         // two sequons: andes does not localize by default, so it must not pick.
-        assert!(glycan_tag_with_site(&g, b"ANLTANCSK", b'A').ends_with("@N?]"));
+        assert!(
+            glycan_tag_with_site(&g, b"ANLTANCSK", b'A', GlycanCore::NGlycan).ends_with("@N?]")
+        );
         // no sequon at all is also "not a site andes assigned".
-        assert!(glycan_tag_with_site(&g, b"AAAAK", b'A').ends_with("@N?]"));
+        assert!(glycan_tag_with_site(&g, b"AAAAK", b'A', GlycanCore::NGlycan).ends_with("@N?]"));
         // a boundary sequon (…N-K | S-…) is the peptide's only glycosite.
-        assert!(glycan_tag_with_site(&g, b"AAANK", b'S').ends_with("@N4]"));
+        assert!(glycan_tag_with_site(&g, b"AAANK", b'S', GlycanCore::NGlycan).ends_with("@N4]"));
         // an internal sequon plus a boundary one is two sites, not one.
-        assert!(glycan_tag_with_site(&g, b"ANLTANK", b'T').ends_with("@N?]"));
+        assert!(glycan_tag_with_site(&g, b"ANLTANK", b'T', GlycanCore::NGlycan).ends_with("@N?]"));
         // the composition itself is unchanged by the site suffix.
         assert!(
-            glycan_tag_with_site(&g, b"AANLTK", b'A').starts_with("[HexNAc2Hex5Fuc0NeuAc0NeuGc0")
+            glycan_tag_with_site(&g, b"AANLTK", b'A', GlycanCore::NGlycan)
+                .starts_with("[HexNAc2Hex5Fuc0NeuAc0NeuGc0")
         );
     }
 
@@ -1110,6 +1130,7 @@ mod tests {
             &search_index,
             false,
             None,
+            GlycanCore::NGlycan,
         )
         .expect("write_glyco_pin_to must succeed");
         let text = String::from_utf8(buf).unwrap();
@@ -1336,6 +1357,7 @@ mod tests {
                 &search_index,
                 false,
                 None,
+                GlycanCore::NGlycan,
             )
             .expect("write must succeed");
             let text = String::from_utf8(buf).unwrap();

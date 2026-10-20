@@ -193,6 +193,7 @@ impl ScoreSet {
     /// Adds a PSM. Errors (the message names [`Self::source`]): a PSM without
     /// a score, or a SpecId already added; `file` names where the PSM is read
     /// from, for a SpecId repeated within one label.
+    #[allow(clippy::too_many_arguments)]
     fn insert(
         &mut self,
         file: &str,

@@ -398,6 +398,7 @@ mod tests {
             features: search::psm::PsmFeatures::default(),
             isotope_offset: 0,
             precursor_mz_override: None,
+            site_evidence: None,
             tie_key: 0,
         }
     }
@@ -607,6 +608,8 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         };
         let m_ox = AminoAcid {
             residue: b'M',
@@ -629,6 +632,7 @@ mod tests {
             features: search::psm::PsmFeatures::default(),
             isotope_offset: 0,
             precursor_mz_override: None,
+            site_evidence: None,
             tie_key: 0,
         };
 
@@ -782,6 +786,8 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         }
     }
 

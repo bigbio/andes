@@ -361,6 +361,7 @@ pub(crate) fn search_secondary(
                 isotope_offset: 0,
                 // Set to co.mono_mz once the winner is chosen (end of fn).
                 precursor_mz_override: None,
+                site_evidence: None,
                 tie_key: crate::psm::tie_key_of(cand),
             };
             distinct

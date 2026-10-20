@@ -112,6 +112,8 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         }));
         a
     }
@@ -144,6 +146,7 @@ mod tests {
             features: Default::default(),
             isotope_offset: 0,
             precursor_mz_override: None,
+            site_evidence: None,
             tie_key: 0,
         }
     }

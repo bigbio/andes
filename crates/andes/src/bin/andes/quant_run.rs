@@ -1641,6 +1641,7 @@ mod tests {
             features: search::psm::PsmFeatures::default(),
             isotope_offset: 0,
             precursor_mz_override: co_isolated_mz,
+            site_evidence: None,
             tie_key: 0,
         }
     }

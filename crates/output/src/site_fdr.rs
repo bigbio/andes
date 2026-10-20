@@ -40,6 +40,15 @@ pub struct SiteRow {
     pub psms: usize,
     pub best_psm: String,
     pub site_q: f64,
+    /// Share of the posterior on the peptides covering the site that places
+    /// a modification there; `None` without row posteriors.
+    pub occupancy: Option<f64>,
+    /// Given a modification there, the share of this one.
+    pub identity: Option<f64>,
+    /// The other modifications placed there, as `mass:share`, largest first.
+    pub alternatives: String,
+    /// Posterior mass placing a modification there, in spectra.
+    pub identity_spectra: f64,
 }
 
 /// One stratum, as counted for the run log.
@@ -116,12 +125,15 @@ enum Part {
 /// claims: a site whose best PSM passes `fdr` and whose site q-value passes
 /// `claim_fdr`. `restricted` lists the masses of the `sites=annotated` mods,
 /// whose knockoff-site placements are not reported (their rows get q = 1).
+/// `posteriors` (each target row's posterior among its spectrum's rows, see
+/// [`crate::site_identity`]) give each site its occupancy and identity.
 pub fn site_claims(
     targets: &mut HashMap<String, PercolatorPsm>,
     idx: &SearchIndex,
     fdr: f64,
     claim_fdr: f64,
     restricted: &[f64],
+    posteriors: Option<&HashMap<String, f64>>,
 ) -> SiteOutcome {
     let same = |a: f64, b: f64| (a - b).abs() <= model::protein::SITE_MASS_TOLERANCE;
     let proteins: Vec<&Protein> = idx
@@ -339,11 +351,18 @@ pub fn site_claims(
             p.pep = 1.0;
         }
     }
+    let identity = posteriors.map(|post| site_posteriors(targets, &proteins, &by_acc, post));
     let rows = best
         .into_iter()
         .filter(|(_, (q, ..))| *q <= claim_fdr)
         .map(|((i, pos, bits), (q, psm, n, tier))| {
             let p = proteins[i];
+            let (occupancy, share, alternatives, spectra) = identity
+                .as_ref()
+                .and_then(|m| m.get(&(i, pos)))
+                .map_or((None, None, String::new(), 0.0), |s| {
+                    s.describe(f64::from_bits(bits), &same)
+                });
             SiteRow {
                 family: p.origin().map_or_else(
                     || primary(&p.accession).to_string(),
@@ -357,6 +376,10 @@ pub fn site_claims(
                 psms: n,
                 best_psm: psm,
                 site_q: q,
+                occupancy,
+                identity: share,
+                alternatives,
+                identity_spectra: spectra,
             }
         })
         .collect();
@@ -365,6 +388,105 @@ pub fn site_claims(
         counts,
         knockoff_rows,
     }
+}
+
+/// Posterior mass at one site: per modification mass placed there, and on
+/// every row whose peptide covers it.
+#[derive(Debug, Default)]
+struct SitePosterior {
+    mods: Vec<(f64, f64)>,
+    covering: f64,
+}
+
+impl SitePosterior {
+    /// (occupancy, identity of `mass`, the other mods as `mass:share`,
+    /// posterior mass placing a mod).
+    fn describe(
+        &self,
+        mass: f64,
+        same: &dyn Fn(f64, f64) -> bool,
+    ) -> (Option<f64>, Option<f64>, String, f64) {
+        let placed: f64 = self.mods.iter().map(|m| m.1).sum();
+        if placed <= 0.0 {
+            return (None, None, String::new(), 0.0);
+        }
+        let mut merged: Vec<(f64, f64)> = Vec::new();
+        for &(m, w) in &self.mods {
+            match merged.iter_mut().find(|x| same(x.0, m)) {
+                Some(x) => x.1 += w,
+                None => merged.push((m, w)),
+            }
+        }
+        merged.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.total_cmp(&b.0)));
+        let own = merged.iter().find(|x| same(x.0, mass)).map_or(0.0, |x| x.1);
+        let alternatives = merged
+            .iter()
+            .filter(|x| !same(x.0, mass) && x.1 / placed >= 0.01)
+            .map(|x| format!("{:+.4}:{:.2}", x.0, x.1 / placed))
+            .collect::<Vec<_>>()
+            .join(";");
+        (
+            Some((placed / self.covering.max(placed)).min(1.0)),
+            Some(own / placed),
+            alternatives,
+            placed,
+        )
+    }
+}
+
+/// Posterior mass at every real claim site of `proteins`.
+fn site_posteriors(
+    targets: &HashMap<String, PercolatorPsm>,
+    proteins: &[&Protein],
+    by_acc: &HashMap<&str, usize>,
+    posteriors: &HashMap<String, f64>,
+) -> HashMap<(usize, u32), SitePosterior> {
+    let sites: Vec<Vec<u32>> = proteins
+        .iter()
+        .map(|p| {
+            let mut v: Vec<u32> = p
+                .annotation
+                .as_deref()
+                .map(|a| {
+                    a.site_claims
+                        .iter()
+                        .filter(|c| c.knockoff_of.is_none())
+                        .map(|c| c.position)
+                        .collect()
+                })
+                .unwrap_or_default();
+            v.sort_unstable();
+            v.dedup();
+            v
+        })
+        .collect();
+    let mut out: HashMap<(usize, u32), SitePosterior> = HashMap::new();
+    for (id, psm) in targets {
+        let Some(&w) = posteriors.get(id) else {
+            continue;
+        };
+        let (residues, mods) = peptide_mods(&psm.peptide);
+        for acc in psm.proteins.split(';') {
+            let Some(&i) = by_acc.get(acc) else {
+                continue;
+            };
+            let Some(start) = memchr::memmem::find(&proteins[i].sequence, &residues) else {
+                continue;
+            };
+            let (lo, hi) = (start as u32, (start + residues.len()) as u32);
+            let from = sites[i].partition_point(|&p| p < lo);
+            for &pos in sites[i][from..].iter().take_while(|&&p| p < hi) {
+                let s = out.entry((i, pos)).or_default();
+                s.covering += w;
+                for &(at, mass) in &mods {
+                    if start as u32 + at as u32 == pos {
+                        s.mods.push((mass, w));
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 fn primary(accession: &str) -> &str {
@@ -382,12 +504,13 @@ pub fn write_sites_tsv(path: &std::path::Path, rows: &[SiteRow]) -> std::io::Res
     let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
     writeln!(
         w,
-        "family\taccession\tposition\tresidue\tmodification_mass\tprior_tier\tpsms\tbest_psm\tsite_q\tconfidence"
+        "family\taccession\tposition\tresidue\tmodification_mass\tprior_tier\tpsms\tbest_psm\tsite_q\tconfidence\toccupancy\tidentity\tidentity_alternatives\tidentity_spectra"
     )?;
+    let opt = |v: Option<f64>| v.map_or_else(|| "NA".to_string(), |v| format!("{v:.4}"));
     for r in rows {
         writeln!(
             w,
-            "{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{:.6}",
+            "{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{:.2}",
             r.family,
             r.accession,
             r.position,
@@ -397,7 +520,11 @@ pub fn write_sites_tsv(path: &std::path::Path, rows: &[SiteRow]) -> std::io::Res
             r.psms,
             r.best_psm,
             r.site_q,
-            1.0 - r.site_q
+            1.0 - r.site_q,
+            opt(r.occupancy),
+            opt(r.identity),
+            r.alternatives,
+            r.identity_spectra
         )?;
     }
     w.flush()
@@ -499,7 +626,7 @@ mod tests {
     fn a_site_claim_gets_its_knockoff_q_value() {
         let idx = index();
         let mut t = rows();
-        let out = site_claims(&mut t, &idx, 0.01, 0.05, &[PHOSPHO]);
+        let out = site_claims(&mut t, &idx, 0.01, 0.05, &[PHOSPHO], None);
         // Two knockoff PSMs of a site with two knockoffs weigh 1/2 each. The
         // threshold just above the second one (50 claims, one knockoff) gives
         // (1/2 + 1/2) / 50 = 0.02, the least FDP any claim reaches.
@@ -521,16 +648,41 @@ mod tests {
         assert_eq!(t["c0"].q_value, 0.001, "a PSM's own q-value is unchanged");
         // A stricter claim cutoff accepts no site.
         let mut t = rows();
-        assert!(site_claims(&mut t, &idx, 0.01, 0.015, &[PHOSPHO])
+        assert!(site_claims(&mut t, &idx, 0.01, 0.015, &[PHOSPHO], None)
             .rows
             .is_empty());
+    }
+
+    #[test]
+    fn posteriors_give_a_site_its_occupancy_and_identity() {
+        let idx = index();
+        let mut t = rows();
+        // Three rows place another mass on the site, and the unmodified row
+        // covers it: identity 60/63, occupancy 63/64.
+        for i in 0..3 {
+            let (id, p) = psm(&format!("x{i}"), 1.0, "K.AGGGS+42.01056PGGGK.C");
+            t.insert(id, p);
+        }
+        let post: HashMap<String, f64> = t
+            .keys()
+            .filter(|k| !k.starts_with('k'))
+            .map(|k| (k.clone(), 1.0))
+            .collect();
+        let out = site_claims(&mut t, &idx, 0.01, 0.05, &[PHOSPHO], Some(&post));
+        let r = &out.rows[0];
+        assert!((r.identity.unwrap() - 60.0 / 63.0).abs() < 1e-9);
+        assert!((r.occupancy.unwrap() - 63.0 / 64.0).abs() < 1e-9);
+        assert_eq!(r.alternatives, "+42.0106:0.05");
+        assert!((r.identity_spectra - 63.0).abs() < 1e-9);
+        let out = site_claims(&mut rows(), &idx, 0.01, 0.05, &[PHOSPHO], None);
+        assert_eq!((out.rows[0].occupancy, out.rows[0].identity), (None, None));
     }
 
     #[test]
     fn an_unrestricted_mod_keeps_its_knockoff_site_psms() {
         let idx = index();
         let mut t = rows();
-        let out = site_claims(&mut t, &idx, 0.01, 0.05, &[]);
+        let out = site_claims(&mut t, &idx, 0.01, 0.05, &[], None);
         assert!(out.knockoff_rows.is_empty());
         assert_eq!(t["k1"].q_value, 0.001);
         assert_eq!(out.rows.len(), 1, "the site claim is still controlled");

@@ -1150,6 +1150,7 @@ impl<'a> PreparedSearch<'a> {
                             features,
                             isotope_offset: err.isotope_offset,
                             precursor_mz_override: None,
+                            site_evidence: None,
                             tie_key: crate::psm::tie_key_of(cand),
                         };
                         per_charge_queues
@@ -1325,6 +1326,47 @@ impl<'a> PreparedSearch<'a> {
                         psm.features = make_features(psm, true);
                         debug_assert_eq!(psm.features.strong_score.to_bits(), strong.to_bits());
                         psm.features.strong_score_cal = strong_cal;
+                    });
+                }
+
+                // Site evidence while the peaks are at hand: which modification
+                // each row's residues carry, judged against the spectrum's other rows.
+                {
+                    let psms: Vec<&PsmMatch> = queue.iter_psms().collect();
+                    let rows: Vec<crate::site_evidence::Row<'_>> = psms
+                        .iter()
+                        .map(|psm| {
+                            let cand = &cand_slice[psm.primary_candidate_idx() as usize];
+                            let z = psm.charge_used;
+                            let mz = psm.precursor_mz_override.unwrap_or(spec.precursor_mz);
+                            crate::site_evidence::Row {
+                                peptide: &cand.peptide,
+                                is_decoy: cand.is_decoy,
+                                charge: z,
+                                precursor_mass: (mz - model::mass::PROTON) * z as f64,
+                            }
+                        })
+                        .collect();
+                    let key = |p: &PsmMatch| {
+                        (
+                            p.primary_candidate_idx(),
+                            p.charge_used,
+                            p.rank_score.to_bits(),
+                        )
+                    };
+                    let mut evidence: FxHashMap<_, _> = psms
+                        .iter()
+                        .map(|p| key(p))
+                        .zip(crate::site_evidence::spectrum_evidence(
+                            &spec.peaks,
+                            &rows,
+                            fragment_tolerance_da,
+                        ))
+                        .collect();
+                    drop(rows);
+                    drop(psms);
+                    queue.update_in_place(|psm| {
+                        psm.site_evidence = evidence.remove(&key(psm)).flatten();
                     });
                 }
 
@@ -3473,6 +3515,7 @@ mod dedup_tests {
             features: Default::default(),
             isotope_offset: 0,
             precursor_mz_override: None,
+            site_evidence: None,
             tie_key: 0,
         }
     }
@@ -3523,6 +3566,8 @@ mod dedup_tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
             annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
         }));
         let cands = vec![
             cand_with_peptide(seq_peptide(b"PEPMK")),

@@ -393,6 +393,10 @@ pub struct PsmMatch {
     /// from the secondary's own precursor mass; `None` (every ordinary PSM) falls
     /// back to the spectrum's `precursor_mz`.
     pub precursor_mz_override: Option<f64>,
+    /// Evidence on which modification each residue carries, for rows with a
+    /// variable modification (see [`crate::site_evidence`]). `None` for other
+    /// rows and for rows scored without their spectrum's other candidates.
+    pub site_evidence: Option<Box<crate::site_evidence::SiteEvidence>>,
     /// Content identity of the candidate, used only to break exact `rank_score`
     /// ties: [`tie_key_of`] of the primary candidate. It depends on the peptide
     /// alone, never on where or when the candidate was enumerated, so every
@@ -738,6 +742,7 @@ mod tests {
             features: PsmFeatures::default(),
             isotope_offset: 0,
             precursor_mz_override: None,
+            site_evidence: None,
             tie_key: 0,
         }
     }
@@ -1066,6 +1071,7 @@ mod tests {
             },
             isotope_offset: 0,
             precursor_mz_override: None,
+            site_evidence: None,
             tie_key: 0,
         };
         let mut high = low.clone();

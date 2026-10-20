@@ -25,6 +25,7 @@ pub mod refine_config;
 pub mod refinement;
 pub mod search_index;
 pub mod search_params;
+pub mod site_evidence;
 pub mod tdc;
 
 // Convenience re-exports.

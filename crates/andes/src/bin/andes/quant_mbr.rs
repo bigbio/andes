@@ -176,8 +176,9 @@ pub(crate) struct TransferSelection {
     pub min_donor_fraction: f64,
 }
 
-/// Default of [`TransferSelection::min_donor_fraction`].
-pub(crate) const DEFAULT_MIN_DONOR_FRACTION: f64 = 0.004;
+/// Default of [`TransferSelection::min_donor_fraction`]: every pair whose
+/// entry finalize can transfer is measured.
+pub(crate) const DEFAULT_MIN_DONOR_FRACTION: f64 = 0.0;
 
 impl TransferSelection {
     /// Every pair with a prediction is measured.

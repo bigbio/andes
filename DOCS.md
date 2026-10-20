@@ -1564,20 +1564,31 @@ searching a run again, run `quant library`, every `quant extract` and `quant fin
 batch at a time, twice (the precursor keys first, then the PSMs joined to that run's scores),
 and keeps per-precursor aggregates only: its memory follows the precursors and their donor runs
 plus one run's scores, not the PSMs of every run. With one merged pair of Percolator files the
-whole pair, and every SpecId, is held. `quant finalize` works in precursor shards: with more
-than `--shard-rows` extract rows (default 1,000,000) it splits them by precursor id into
-temporary extract tables next to its output and holds one shard at a time, over four passes
-(training rows, held-out scores, normalisation cells, outputs). The results do not depend on
-the shard size. Two caps bound the rest: each GBDT trains on at most `--max-train-rows` rows
-(default 3,000,000; above it, the rows of a hashed sample of (precursor, run) pairs, so every
-precursor still trains in some runs and a target stays with its decoys; all rows are still
-scored), and the run normalisation fits at most `--max-norm-cells` reference cells (default
-20,000,000, about 150 bytes each; above it, a hashed sample of whole precursors, which coarsens
-the RT-local offsets). Below the caps the outputs are byte-identical to an all-in-memory run.
-`--seed` (default 42) sets the folds, the models and the samples. On a 6-run Orbitrap set
-(1.7 million extract rows) finalize peaks at about 1 GB; on synthetic sets of replicated runs
-it grew by about 7 MB per run (480 runs: 4.4 GB), where the previous all-in-memory finalize grew
-by about 160 MB per run.
+whole pair, and every SpecId, is held. `quant finalize` is a map-reduce over the runs: each
+run's extract table is read on its own, in record batches cut at precursor boundaries, and the
+runs are processed in parallel (`--threads`). What a row needs from other runs is either a
+per-precursor summary (the consensus width, and the sorted donor fits around their median,
+which give the shape features' median over the other runs) or a global model, so every
+reduction is exact: training rows, held-out scores (merged run by run; the K-decoy q-values are
+built from the sorted scores), normalisation cells and validation counts. Each run's output
+rows go to a temporary table, and the tables are merged by (precursor, run) into
+`<base>.mbr.parquet`. Temporary tables go next to the output, or to `--temp-dir` (for example
+a local disk); they are removed at the end. Two caps bound the models: each GBDT trains on at
+most `--max-train-rows` rows (default 3,000,000; above it, the rows of a hashed sample of
+(precursor, run) pairs, so every precursor still trains in some runs and a target stays with
+its decoys; all rows are still scored), and the run normalisation fits at most
+`--max-norm-cells` reference cells (default 20,000,000, about 150 bytes each; above it, a
+hashed sample of whole precursors, which coarsens the RT-local offsets). Below the caps the
+outputs are byte-identical to an all-in-memory run, whatever the number of threads. Two more
+limits only trade memory for passes over the tables: `--max-donor-fits` (identified rows
+summarised per pass, default 12,000,000) and `--max-held-scores` (held-out scores in memory
+per classifier, default 64,000,000; above it they are sorted into temporary tables). `--seed`
+(default 42) sets the folds, the models and the samples. Memory follows the library, these
+limits and one run's output rows per thread; the term that grows with the data is the pooled
+q-value step function of each classifier, 12 bytes per step (74 million steps, 0.9 GB, on 500
+Orbitrap runs with 464 million extract rows). On those 500 runs with 16 threads finalize took
+10.5 minutes at 7.3 GB peak (about 3.5 GB of it the library), against 1.9 to 2.7 hours at
+10.3 GB for the previous precursor-shard version, with the same outputs.
 
 `--mbr` without `--quant-dir` writes the per-run artifacts to a temporary directory (under
 `TMPDIR`): each run's `<stem>.ms1.parquet` (about 5–6 bytes per centroid; about 200 MB for an

@@ -596,6 +596,7 @@ See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model)
 | `--tmt-min-purity` | 0..1 | `0.7` | Quantification gate (§10): PSMs below this precursor isolation purity fail the gate (`quant_gate_passed` false, `quant_weight` 0 in `tmt.parquet`). `0` turns it off. |
 | `--tmt-max-pep` | 0..1 | `0.05` | Quantification gate: PSMs whose Percolator PEP is above this fail the gate. Needs `--rescore`; `1` turns it off. |
 | `--tmt-min-sn` | ≥ 0 | `0` (off) | Quantification gate: PSMs whose summed reporter signal-to-noise is below this fail the gate. Applies only where the reporter scan records noise (Thermo `.raw`, mzML with noise arrays). |
+| `--tmt-unmix` | flag | off | Estimate each MS2 scan's co-isolation interference and write the reporter intensities with it removed (`interference` and an `unmix_` channel block in `tmt.parquet`; `unmixed` in the quantms feature parquet). High-resolution MS2 reporters only; refused at `--tmt-level 3`. |
 | `--lfq` | flag | off | Label-free MS1 quantification of the confident precursors (§10). Writes `<stem>.lfq.parquet`. mzML / `.raw` with high-resolution MS1; the MS2 may be ion-trap. |
 | `--quant-dir` | dir | *(none)* | Per input file writes `<stem>.ms1.parquet` (the run's MS1 scans, every FAIMS voltage), `<stem>.ms2.parquet` (every MS2 scan reduced to its 100 most intense centroids, with its precursor and isolation window) and `<stem>.quant.parquet` (every rank-1 PSM, targets and decoys, no FDR filter; `spec_id` is the PIN SpecId, `search_score` the PIN `RawScore`) for the multi-run quantification stages. Implies MS1 capture; same inputs as `--lfq`. Two inputs with the same stem, or an input without MS1 scans, are an error. Other outputs are unchanged. |
 | `--lfq-tol` | tolerance | `10ppm` | MS1 tolerance of the isotope chromatograms, and of the `--mbr` template fit (ppm only there). |
@@ -924,7 +925,7 @@ major version marks an incompatible layout, a new minor version only adds column
 
 | File | Rows | Columns |
 |---|---|---|
-| `<stem>.tmt.parquet` | one per PSM with reporter ions, including the PSMs the quantification gate (§10) failed | `filename scannr spec_id quant_scan quant_ms_level rt peptide charge proteins is_decoy psm_q_value psm_pep purity`, then one `tmt_<channel>` (or `itraq_<channel>`) per channel (float32, corrected when a correction matrix was applied), then `raw_<...>` when one was, then `reporter_intensity_sum reporter_sn_sum quant_weight quant_gate_passed`, then one `sn_<prefix>_<channel>` per channel (null without noise values). A gated PSM has `quant_gate_passed` false and `quant_weight` 0. Metadata `andes.tmt.plex` (kit) and `andes.tmt.corrected` |
+| `<stem>.tmt.parquet` | one per PSM with reporter ions, including the PSMs the quantification gate (§10) failed | `filename scannr spec_id quant_scan quant_ms_level rt peptide charge proteins is_decoy psm_q_value psm_pep purity`, then one `tmt_<channel>` (or `itraq_<channel>`) per channel (float32, corrected when a correction matrix was applied), then `raw_<...>` when one was, then `reporter_intensity_sum reporter_sn_sum quant_weight quant_gate_passed`, then one `sn_<prefix>_<channel>` per channel (null without noise values), then with `--tmt-unmix` `interference` and one `unmix_<prefix>_<channel>` per channel (null for a scan the interference model could not cover; §10). A gated PSM has `quant_gate_passed` false and `quant_weight` 0. Metadata `andes.tmt.plex` (kit), `andes.tmt.corrected` and `andes.tmt.unmix` |
 | `<stem>.protein_groups.tsv` (`--rescore`/`--rescore-native`) | one per target protein group, best score first | `protein_group lead accessions families peptides unique_peptides razor_peptides psms best_score protein_q subsumed` ([protein groups](#protein-groups-and-protein-fdr)) |
 | `<stem>.proteoforms.tsv` (`--rescore`/`--rescore-native` with UniProt isoform, variant or chain entries) | one per family member with a target PSM at q ≤ `--fdr` (a specific one for isoform, variant and chain entries) | `family member kind feature confidence q_value evidence specific_peptides shared_peptides psms best_psm alternative_explanation source prior_tier`, then `quantity_<run or channel>` with `--lfq`/`--tmt` (§1a, proteoform table) |
 | `<stem>.lfq.parquet` | one per feature per run (all target features, with their q-value) | `filename peptide charge proteins scannr spec_id psm_q_value calc_mz rt_anchor rt_apex rt_start rt_stop n_scans area apex_intensity isotope_areas cosine n_isotopes score decoy_score feature_q_value accepted`; `isotope_areas` is a list (monoisotope first); `accepted` is feature q ≤ `--lfq-feature-fdr` and cosine ≥ `--lfq-min-cosine`. The per-run wide view is the `accepted` rows pivoted on (`peptide`, `charge`) × `filename` over `area` (the highest `score` if a run has two). Metadata `andes.lfq.runs` (input stems, newline-joined, including runs without features), `andes.lfq.feature_fdr`, `andes.lfq.min_cosine` |
@@ -1260,6 +1261,23 @@ single input run's MS1 scans still need to fit in memory while it is processed.
   ratio compression of the PSMs a deep search adds; purity barely matters for high-resolution
   MS2 reporters, where the remaining interference is co-isolation inside a pure-looking window.
   Set all three to their off values to quantify every confident PSM.
+* **Interference unmixing** (`--tmt-unmix`, off by default). The reporter ions of a high-resolution
+  MS2 scan come from everything the quadrupole isolated, and purity misses most of it: much of
+  the co-isolated ion current is below the MS1 detection limit. Each quantified scan gets an
+  isolation-window record from the MS1 scans before and after it (same FAIMS voltage), linearly
+  interpolated to the MS2 retention time: the window's ion current, the part of it on the
+  identified precursor's isotope envelope (calculated m/z, 10 ppm), and an estimate of the ion
+  current hidden below the detection limit (the scans' 5th-percentile centroid intensity × the
+  centroid density within ±5 Th × the window width). Per run, a robust non-negative regression
+  explains each scan's summed reporter intensity by the precursor's share of the MS2 peptide ion
+  current (one yield per charge class: ≤ 2, 3, ≥ 4), the co-isolated share and the hidden ion
+  current. The coefficients are the run's scale factors; no ground truth or reference channel is
+  used. A scan's `interference` is the predicted reporter share that is not the precursor's
+  (capped at 0.8), and `unmix_<channel>` = intensity − interference × summed intensity × the run's
+  mean channel profile (floored at 0). A run with fewer than 100 modelled scans gets empty
+  `unmix_` cells and a WARN. The existing channel columns are unchanged. Removing interference
+  decompresses ratios at the price of a higher CV (the remaining signal is smaller and keeps its
+  noise). SPS-MS3 reporters (`--tmt-level 3`) are not modelled.
 * **Roll-up weight** (`quant_weight`). For a PSM that passed the gate, purity² (1 without a
   purity); 0 for a gated PSM. A protein or peptide sum weighted by it lowers the influence of
   the PSMs most exposed to co-isolation. The corrected intensities are never rescaled by it.

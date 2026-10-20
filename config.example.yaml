@@ -102,6 +102,7 @@ quant:
   # tmt_min_purity: 0.7          # quantification gate: precursor purity floor (0 = off)
   # tmt_max_pep: 0.05            # quantification gate: Percolator PEP cap (1 = off; needs rescoring)
   # tmt_min_sn: 0                # quantification gate: summed reporter S/N floor (0 = off; needs noise values)
+  # tmt_unmix: false             # model and remove co-isolation interference of high-res MS2 reporters
   # lfq: false                   # label-free MS1 feature quantification
   # lfq_tol: 10ppm
   # lfq_rt_window: 60            # seconds around the identifying PSM

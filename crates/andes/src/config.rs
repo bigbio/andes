@@ -160,6 +160,7 @@ pub struct QuantCfg {
     pub tmt_min_purity: Option<f64>,
     pub tmt_max_pep: Option<f64>,
     pub tmt_min_sn: Option<f64>,
+    pub tmt_unmix: Option<bool>,
     pub lfq: Option<bool>,
     pub lfq_tol: Option<String>,
     pub lfq_rt_window: Option<f64>,
@@ -513,6 +514,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set!("tmt_min_purity", tmt_min_purity, cfg.quant.tmt_min_purity);
     set!("tmt_max_pep", tmt_max_pep, cfg.quant.tmt_max_pep);
     set!("tmt_min_sn", tmt_min_sn, cfg.quant.tmt_min_sn);
+    set!("tmt_unmix", tmt_unmix, cfg.quant.tmt_unmix);
     set!("lfq", lfq, cfg.quant.lfq);
     if let Some(v) = cfg.quant.lfq_tol {
         if !cli_set(m, "lfq_tol") {

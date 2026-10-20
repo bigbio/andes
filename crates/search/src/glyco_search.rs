@@ -880,7 +880,7 @@ fn has_backbone_evidence(hit: &BackboneHit, core_y_hits: u8) -> bool {
 /// conditions its O-glycan search space on Hex diagnostic-ion intensity.
 fn hex_gate_passes(core: GlycanCore, glycan: Option<&GlycanComp>, hex_evidence: bool) -> bool {
     core != GlycanCore::OGlycan
-        || glycan.map_or(true, |g| g.hex == 0)
+        || glycan.is_none_or(|g| g.hex == 0)
         || hex_evidence
 }
 

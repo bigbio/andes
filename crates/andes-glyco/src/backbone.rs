@@ -732,6 +732,7 @@ fn splitmix64(mut x: u64) -> u64 {
 /// ([`best_frag_intensity`] over 1..=`max_charge`, NEUTRAL mass, /`stats.base`),
 /// so the ONLY target/decoy difference is the interior-rung shift (exchangeable
 /// null). `seed` (e.g. the glycan index) makes the decoy reproducible.
+#[allow(clippy::too_many_arguments)]
 pub fn glycan_y_intensity_decoy(
     peaks: &[(f64, f32)],
     stats: &SpectrumStats,
@@ -792,6 +793,7 @@ pub fn glycan_y_intensity_decoy(
 /// [`glycan_y_intensity_decoy`] does (same shift, Y0/Y1/top kept), giving an
 /// exchangeable decoy counterpart so the feature can be emitted symmetrically for
 /// glycan-decoy PIN rows. Returns hits/total in `[0, 1]`.
+#[allow(clippy::too_many_arguments)]
 pub fn glycan_y_hit_frac(
     peaks: &[(f64, f32)],
     stats: &SpectrumStats,

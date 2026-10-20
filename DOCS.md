@@ -1601,8 +1601,9 @@ pass and the output pass, so the members score every row once. Memory follows th
 limits and one run's output rows per thread; the term that grows with the data is the pooled
 q-value step function of each classifier, 12 bytes per step (74 million steps, 0.9 GB, on 500
 Orbitrap runs with 464 million extract rows). On those 500 runs with 16 threads finalize took
-10.5 minutes at 7.3 GB peak (about 3.5 GB of it the library), against 1.9 to 2.7 hours at
-10.3 GB for the previous precursor-shard version, with the same outputs.
+18.3 minutes at 12.2 GB peak with 8 transfer classifier members (about 3.5 GB of it the
+library; the members' training samples add about 4.7 GB), against 9.7 minutes at 7.5 GB with
+one, and 1.9 to 2.7 hours at 10.3 GB for the earlier precursor-shard version.
 
 `--mbr` without `--quant-dir` writes the per-run artifacts to a temporary directory (under
 `TMPDIR`): each run's `<stem>.ms1.parquet` (about 5–6 bytes per centroid; about 200 MB for an

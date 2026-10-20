@@ -121,7 +121,9 @@ pub struct GlycoConfig {
 }
 
 use andes_glyco::hybrid::{db_branch, BackboneHit, Source};
-use andes_glyco::oxonium::{oxonium_gate, sialic_consistency, OXONIUM_GATE_MIN_FRAC};
+use andes_glyco::oxonium::{
+    hex_diagnostic_evidence, oxonium_gate, sialic_consistency, OXONIUM_GATE_MIN_FRAC,
+};
 
 use crate::glyco_fragment_index::FragmentIndex;
 
@@ -866,6 +868,20 @@ fn has_backbone_evidence(hit: &BackboneHit, core_y_hits: u8) -> bool {
     hit.source != Source::Db || hit.peptide_first || core_y_hits > 0
 }
 
+/// The O-glycan Hex gate: a candidate whose glycan claims Hex (galactose) is
+/// kept only when the spectrum shows a Hex diagnostic ion. N-glycans are never
+/// gated (Hex is in the trimannosyl core), and Hex-free / de-novo candidates pass.
+///
+/// This closes the gap pGlyco3's Fig. 3b metric measures on IHMO data: the GalNAc
+/// oxonium alone passes the O-glycan diagnostic gate and then lets the scorer add
+/// galactose to a composition with no galactose evidence. pGlyco3 instead
+/// conditions its O-glycan search space on Hex diagnostic-ion intensity.
+fn hex_gate_passes(core: GlycanCore, glycan: Option<&GlycanComp>, hex_evidence: bool) -> bool {
+    core != GlycanCore::OGlycan
+        || glycan.map_or(true, |g| g.hex == 0)
+        || hex_evidence
+}
+
 /// Indices of the candidates whose residue mass is within `tol_da` of
 /// `bb_residue` (plus a 1e-6 Da slack; the caller re-checks exactly), ordered by
 /// (nominal residue mass, index), which is the nominal-bucket walk's order.
@@ -1192,6 +1208,14 @@ fn score_spectrum_glyco(
     // Dedup cross-charge/cross-isotope backbone hits, merging only hits
     // that represent the SAME (backbone, glycan-hypothesis) candidate.
     let deduped_backbone = dedup_backbone_hits(all_backbone, tol_ppm);
+    // O-glycan Hex gate: drop Hex-containing glycan hypotheses whose HCD spectrum
+    // lacks a Hex diagnostic ion (galactose without galactose evidence). Read once
+    // per spectrum — the evidence is a property of `gen_peaks`, not of the hit.
+    let hex_evidence = hex_diagnostic_evidence(gen_peaks, tol_ppm);
+    let deduped_backbone: Vec<BackboneHit> = deduped_backbone
+        .into_iter()
+        .filter(|h| hex_gate_passes(ctx.core, h.glycan.as_ref(), hex_evidence))
+        .collect();
 
     // --- b/y-ranked backbone selection (replaces Y-ladder pre-filter) ---
     //
@@ -2316,6 +2340,32 @@ mod glycan_source_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn o_glycan_hex_gate_drops_hex_without_evidence() {
+        use super::{hex_gate_passes, GlycanComp, GlycanCore};
+        let hex_glycan = GlycanComp {
+            hexnac: 1,
+            hex: 1,
+            fuc: 0,
+            neuac: 0,
+            neugc: 0,
+            core_fuc: 0,
+            mass: 0.0,
+        };
+        let no_hex = GlycanComp {
+            hex: 0,
+            ..hex_glycan.clone()
+        };
+        // N-glycan: Hex is in the trimannosyl core, never gated.
+        assert!(hex_gate_passes(GlycanCore::NGlycan, Some(&hex_glycan), false));
+        // O-glycan Hex-free and de-novo (no glycan) candidates always pass.
+        assert!(hex_gate_passes(GlycanCore::OGlycan, Some(&no_hex), false));
+        assert!(hex_gate_passes(GlycanCore::OGlycan, None, false));
+        // O-glycan with Hex passes only with Hex diagnostic evidence.
+        assert!(!hex_gate_passes(GlycanCore::OGlycan, Some(&hex_glycan), false));
+        assert!(hex_gate_passes(GlycanCore::OGlycan, Some(&hex_glycan), true));
+    }
+
     #[test]
     fn peptide_first_backbones_are_exempt_from_the_core_y_prefilter() {
         use super::{dedup_backbone_hits, has_backbone_evidence, BackboneHit, Source};

@@ -29,9 +29,15 @@ sequon-corrected FDP was ~4.3%.
 Pass the search FASTA to get the corrected number. Without it the raw fraction is printed
 with a loud warning and NO verdict, because a verdict on the raw fraction is misleading.
 
+Isoleucine and leucine are isobaric, so an entrapment peptide that differs from a sample
+peptide only by I<->L is indistinguishable from it in the spectrum and is counted as target,
+not entrapment. This rescue needs the search FASTA (argv[4]) -- the same file that sizes the
+S/E correction.
+
 Usage:
     eval_entrap.py <pooled.pin> <percolator.psms> [q-threshold] [search.fasta]
 """
+import re
 import sys
 from collections import defaultdict
 
@@ -84,7 +90,6 @@ def space_ratio(path):
     reported at an N-X-S/T site, so a proteome with few sequons contributes little to the
     space in which a FALSE glyco ID can be made, regardless of its protein count.
     """
-    import re
     pat = re.compile(r"N[^P][ST]")
     s_seq = e_seq = s_prot = e_prot = 0
     hdr, buf = None, []
@@ -127,8 +132,75 @@ def space_ratio(path):
     flush(hdr, "".join(buf))
     return s_seq, e_seq, s_prot, e_prot
 
-# SpecId -> accessions. Proteins occupy every column after "Peptide".
+
+def fold_il(seq):
+    """Fold I to L: the two are isobaric (same precursor and fragment masses), so a
+    spectrum cannot tell an I variant from an L variant."""
+    return seq.replace("I", "L")
+
+
+def bare_peptide(pep):
+    """Bare backbone from a PIN `Peptide` cell.
+
+    The cell is `pre.SEQ_WITH_MODS.post[GlycanComp@site]` (glycan tag optional). Strip the
+    tag, the flanking residues and the inline mod masses (`+57.02146`), leaving only the
+    amino-acid sequence.
+    """
+    p = pep.split("[", 1)[0]  # drop the trailing [HexNAc..@site] tag
+    if "." in p:
+        p = p.split(".", 1)[1]
+        p = p.rsplit(".", 1)[0]
+    return re.sub(r"[+-][0-9.]+", "", p)
+
+
+def digest(s):
+    """Tryptic peptides, andes defaults: <= 1 missed cleavage, 6..50 residues, I/L folded.
+
+    Mirrors docs/benchmarks/reproduce/build_databases.sh (the script that builds the search
+    database), so the sample-peptide set matches the peptides the search space contains.
+    """
+    s = s.replace("I", "L")
+    sites = [0] + [i + 1 for i in range(len(s) - 1) if s[i] in "KR"] + [len(s)]
+    sites = sorted(set(sites))
+    out = set()
+    for i in range(len(sites) - 1):
+        for j in range(i + 1, min(i + 3, len(sites))):
+            p = s[sites[i]:sites[j]]
+            if 6 <= len(p) <= 50:
+                out.add(p)
+    return out
+
+
+def sample_peptides(path):
+    """I/L-folded tryptic sample peptides for the I/L-equivalence rescue.
+
+    Only non-ENTRAP_, non-decoy proteins contribute -- the same exclusion, in the same
+    order, as `space_ratio` (decoys first, then the ENTRAP_ substring).
+    """
+    peps = set()
+    hdr, buf = None, []
+
+    def flush(hdr, seq):
+        if hdr is None or hdr.startswith(">XXX_") or hdr.startswith(">DECOY"):
+            return
+        if "ENTRAP_" in hdr:
+            return
+        peps.update(digest(seq))
+
+    with open(path) as fh:
+        for line in fh:
+            if line.startswith(">"):
+                flush(hdr, "".join(buf))
+                hdr, buf = line.strip(), []
+            else:
+                buf.append(line.strip())
+    flush(hdr, "".join(buf))
+    return peps
+
+# SpecId -> accessions. Proteins occupy every column after "Peptide". The bare, I/L-folded
+# backbone is kept per SpecId for the I/L-equivalence rescue in the counting pass.
 prot_of = {}
+pep_of = {}
 header = None
 with open(pin) as fh:
     for line in fh:
@@ -138,8 +210,11 @@ with open(pin) as fh:
             i_pep = header.index("Peptide")
             continue
         prot_of[f[0]] = f[i_pep + 1:]
+        pep_of[f[0]] = fold_il(bare_peptide(f[i_pep]))
 
-n_entrap = n_sample = 0
+sample_set = sample_peptides(fasta) if fasta is not None else None
+
+n_entrap = n_sample = n_il = 0
 per_charge = defaultdict(lambda: [0, 0])
 with open(psms) as fh:
     for line in fh:
@@ -157,7 +232,13 @@ with open(psms) as fh:
         # An ID is entrapment only if EVERY accession is an entrapment protein. A
         # peptide shared with a real sample protein is not evidence of an error.
         if all("ENTRAP_" in a for a in accs):
-            n_entrap += 1
+            # ...and only if it is not an I/L variant of a sample peptide: isobaric
+            # peptides explain the sample equally well, so they count as target.
+            if sample_set is not None and pep_of.get(f[0]) in sample_set:
+                n_il += 1
+                n_sample += 1
+            else:
+                n_entrap += 1
         else:
             n_sample += 1
 
@@ -166,6 +247,8 @@ raw = (n_entrap / total) if total else 0.0
 print(f"q threshold      : {qmax:.4f}")
 print(f"sample glycoPSMs : {n_sample}")
 print(f"entrapment hits  : {n_entrap}")
+if n_il:
+    print(f"I/L-equivalent   : {n_il} entrapment PSMs rescued as target (isobaric with a sample peptide)")
 print(f"raw entrap frac  : {raw * 100:.2f}%   (entrap / accepted -- NOT the FDP)")
 
 if total == 0:

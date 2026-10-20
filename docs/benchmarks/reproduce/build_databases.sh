@@ -60,6 +60,7 @@ import sys, re
 tgt = ent = 0
 hdr = None; seq = []
 def digest(s):
+    s = s.replace("I", "L")  # I/L isobaric: fold so E -= T and T/E count I/L variants once
     sites = [0] + [i+1 for i in range(len(s)-1) if s[i] in "KR"] + [len(s)]
     sites = sorted(set(sites)); out = set()
     for i in range(len(sites)-1):

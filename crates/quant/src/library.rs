@@ -164,6 +164,8 @@ pub struct Library {
 /// ([`Alignment::add_observations`]), so they never move a run map but give
 /// the decoy its consensus RT and predictions as a target's would. PSMs with
 /// an id outside `0..meta.len()` or a run outside `0..n_runs` are ignored.
+/// The PSMs are added to a [`LibraryBuilder`] in run order, each run's in
+/// slice order.
 pub fn build_library(
     psms: &[PsmIn],
     meta: Vec<PrecursorMeta>,
@@ -174,35 +176,104 @@ pub fn build_library(
     ap: &AlignParams,
 ) -> Library {
     let mut b = LibraryBuilder::new(meta.len(), n_runs, donor_q, donor_pep);
-    for p in psms {
+    let mut order: Vec<&PsmIn> = psms.iter().collect();
+    order.sort_by_key(|p| p.run);
+    for p in order {
         b.add(p);
     }
     b.finish(meta, max_q, ap)
 }
 
 /// NaN scores rank worst, as in the confidence gate.
-fn score_of(p: &PsmIn) -> f64 {
-    if p.score.is_nan() {
+fn score_of(score: f64) -> f64 {
+    if score.is_nan() {
         f64::NEG_INFINITY
     } else {
-        p.score
+        score
     }
 }
 
-/// The donor PSMs of one precursor, reduced to what an entry needs: per run
-/// (in arrival order of the runs) its best donor PSM, and the count of each
-/// FAIMS voltage over all its donor PSMs.
-#[derive(Debug, Clone, Default)]
+/// A donor PSM reduced to what an entry keeps of it.
+#[derive(Debug, Clone, Copy)]
+struct Donor {
+    score: f64,
+    rt: f64,
+    q: f64,
+    pep: f64,
+    run: u16,
+    is_decoy: bool,
+}
+
+impl Donor {
+    fn of(p: &PsmIn) -> Self {
+        Self {
+            score: p.score,
+            rt: p.rt,
+            q: p.q,
+            pep: p.pep,
+            run: p.run,
+            is_decoy: p.is_decoy,
+        }
+    }
+
+    /// Whether `self` replaces `best`: a higher score (NaN as the worst),
+    /// or an equal score and an earlier RT.
+    fn beats(&self, best: &Donor) -> bool {
+        let (a, b) = (score_of(self.score), score_of(best.score));
+        a > b || (a == b && self.rt < best.rt)
+    }
+}
+
+/// The donor PSMs of one precursor, reduced to what an entry needs. Runs
+/// arrive in ascending order: `current` is the best donor PSM of the latest
+/// run; each earlier run left its best donor PSM's `(run, RT)` in `best_rt`
+/// and was folded into `best`, the precursor's best donor PSM over those
+/// runs. `cvs` counts each FAIMS voltage over all its donor PSMs.
+#[derive(Debug, Clone)]
 struct DonorRuns {
-    best: Vec<PsmIn>,
+    current: Donor,
+    best: Option<Donor>,
+    /// The label of the best donor PSM of the lowest donor run.
+    first_is_decoy: bool,
+    best_rt: Vec<(u16, f64)>,
     cvs: Vec<(f32, u32)>,
 }
 
+impl DonorRuns {
+    fn new(d: Donor) -> Self {
+        Self {
+            current: d,
+            best: None,
+            first_is_decoy: false,
+            best_rt: Vec::new(),
+            cvs: Vec::new(),
+        }
+    }
+
+    /// Ends the run of `current`: its best donor PSM is final.
+    fn close_run(&mut self) {
+        let c = self.current;
+        if self.best_rt.is_empty() {
+            self.first_is_decoy = c.is_decoy;
+        }
+        self.best_rt.push((c.run, c.rt));
+        // Runs ascend, so a tie on score and RT keeps the lowest run.
+        if self.best.is_none_or(|b| c.beats(&b)) {
+            self.best = Some(c);
+        }
+    }
+}
+
+/// No donor slot.
+const NO_SLOT: u32 = u32::MAX;
+
 /// [`build_library`] over a stream of PSMs: [`LibraryBuilder::add`] takes
-/// them one at a time and keeps, per precursor, its best score and its donor
-/// PSMs' per-run best and voltage counts, so memory follows the precursors
-/// and their donor runs rather than the PSMs. Adding the PSMs of
-/// [`build_library`]'s slice in slice order gives the same library.
+/// them one at a time and keeps, per precursor, its best score and, per
+/// donor run, the RT of its best donor PSM, plus its best donor PSM and
+/// voltage counts. Memory follows the precursors and their donor runs (16
+/// bytes per donor run) rather than the PSMs. Each precursor's PSMs must
+/// arrive in ascending run order; adding the PSMs of [`build_library`]'s
+/// slice sorted by run (stably) gives the same library.
 #[derive(Debug, Clone)]
 pub struct LibraryBuilder {
     n_runs: usize,
@@ -211,8 +282,10 @@ pub struct LibraryBuilder {
     /// Per precursor id: the label of its first PSM and its best score (NaN
     /// as the worst), over every PSM.
     best: Vec<Option<(bool, f64)>>,
-    /// Per precursor id: its donor PSMs.
-    donors: Vec<Option<Box<DonorRuns>>>,
+    /// Per precursor id: its index in `donors`, or [`NO_SLOT`].
+    slot: Vec<u32>,
+    /// The donor PSMs of the precursors with one, in order of their first.
+    donors: Vec<DonorRuns>,
 }
 
 impl LibraryBuilder {
@@ -223,7 +296,8 @@ impl LibraryBuilder {
             donor_q,
             donor_pep,
             best: vec![None; n_precursors],
-            donors: vec![None; n_precursors],
+            slot: vec![NO_SLOT; n_precursors],
+            donors: Vec::new(),
         }
     }
 
@@ -234,16 +308,16 @@ impl LibraryBuilder {
     }
 
     /// Adds one PSM; ignored when its id or run is out of range.
+    ///
+    /// # Panics
+    /// When a donor PSM's run is lower than that of an earlier donor PSM of
+    /// the same precursor.
     pub fn add(&mut self, p: &PsmIn) {
         let id = p.precursor as usize;
         if id >= self.best.len() || p.run as usize >= self.n_runs {
             return;
         }
-        let score = if p.score.is_nan() {
-            f64::NEG_INFINITY
-        } else {
-            p.score
-        };
+        let score = score_of(p.score);
         match &mut self.best[id] {
             Some((d, s)) => {
                 debug_assert_eq!(
@@ -259,15 +333,33 @@ impl LibraryBuilder {
         if !self.is_donor(p) {
             return;
         }
-        let d = self.donors[id].get_or_insert_with(Default::default);
-        match d.best.iter_mut().rev().find(|b| b.run == p.run) {
-            Some(b) => {
-                if score_of(p) > score_of(b) || (score_of(p) == score_of(b) && p.rt < b.rt) {
-                    *b = *p;
-                }
+        let new = Donor::of(p);
+        let d = match self.slot[id] {
+            NO_SLOT => {
+                self.slot[id] = u32::try_from(self.donors.len())
+                    .ok()
+                    .filter(|&i| i != NO_SLOT)
+                    .expect("fewer than 2^32 - 1 donor precursors");
+                self.donors.push(DonorRuns::new(new));
+                self.donors.last_mut().expect("just pushed")
             }
-            None => d.best.push(*p),
-        }
+            i => {
+                let d = &mut self.donors[i as usize];
+                let run = d.current.run;
+                assert!(
+                    p.run >= run,
+                    "precursor {id}: a donor PSM of run {} after one of run {run}; add the PSMs in run order",
+                    p.run
+                );
+                if p.run > run {
+                    d.close_run();
+                    d.current = new;
+                } else if new.beats(&d.current) {
+                    d.current = new;
+                }
+                d
+            }
+        };
         if let Some(cv) = p.faims_cv {
             // Voltages equal under `==` count together, under the smallest.
             match d.cvs.iter_mut().find(|c| c.0 == cv) {
@@ -295,39 +387,31 @@ impl LibraryBuilder {
         let qs = precursor_qvalues(&rows);
         drop(rows);
 
+        let Self {
+            slot, mut donors, ..
+        } = self;
         let mut entries: Vec<LibraryEntry> = Vec::new();
         let mut obs: Vec<Observation> = Vec::new();
         let mut decoy_obs: Vec<Observation> = Vec::new();
-        for (id, d) in self.donors.into_iter().enumerate() {
-            let Some(mut d) = d else { continue };
+        for (id, &i) in slot.iter().enumerate() {
+            if i == NO_SLOT {
+                continue;
+            }
             let Some(q) = qs.get(id).copied().flatten().filter(|&q| q <= max_q) else {
                 continue;
             };
             let id = id as u32;
-            // Runs ascending; a stable sort keeps one run's PSM where it was.
-            d.best.sort_by_key(|p| p.run);
-            let identity_decoy = d.best[0].is_decoy;
-            debug_assert!(
-                d.best.iter().all(|p| p.is_decoy == identity_decoy),
-                "precursor {id} mixes target and decoy PSMs"
-            );
-            let mut best_psm: Option<&PsmIn> = None;
-            let mut donors: Vec<u16> = Vec::with_capacity(d.best.len());
-            let mut best_rt: Vec<(u16, f64)> = Vec::with_capacity(d.best.len());
-            for b in &d.best {
-                // Runs ascend, so a tie on score and RT keeps the lowest run.
-                if best_psm.is_none_or(|a| {
-                    score_of(b) > score_of(a) || (score_of(b) == score_of(a) && b.rt < a.rt)
-                }) {
-                    best_psm = Some(b);
-                }
-                donors.push(b.run);
-                best_rt.push((b.run, b.rt));
-                if b.rt.is_finite() {
+            let d = &mut donors[i as usize];
+            d.close_run();
+            let identity_decoy = d.first_is_decoy;
+            let best_rt = std::mem::take(&mut d.best_rt);
+            let donor_runs: Vec<u16> = best_rt.iter().map(|&(r, _)| r).collect();
+            for &(run, rt) in &best_rt {
+                if rt.is_finite() {
                     let o = Observation {
                         precursor: id,
-                        run: b.run,
-                        rt: b.rt,
+                        run,
+                        rt,
                     };
                     if identity_decoy {
                         decoy_obs.push(o);
@@ -346,25 +430,27 @@ impl LibraryBuilder {
                     faims_cv = Some(cv);
                 }
             }
+            let b = d.best.expect("an entry has a donor PSM");
             entries.push(LibraryEntry {
                 precursor: id,
                 identity_decoy,
                 q,
-                donor_psm: best_psm
-                    .map(|b| DonorPsm {
-                        score: b.score,
-                        q: b.q,
-                        pep: b.pep,
-                    })
-                    .expect("an entry has a donor PSM"),
+                donor_psm: DonorPsm {
+                    score: b.score,
+                    q: b.q,
+                    pep: b.pep,
+                },
                 consensus_rt: f64::NAN,
                 faims_cv,
-                donors,
+                donors: donor_runs,
                 best_rt,
             });
         }
+        drop(donors);
+        drop(slot);
 
         let mut alignment = align(&obs, n_prec, n_runs, ap);
+        drop(obs);
         alignment
             .add_observations(&decoy_obs)
             .expect("one observation per identity decoy and run");
@@ -778,6 +864,30 @@ mod tests {
         assert_eq!(ta, tb);
     }
 
+    #[test]
+    #[should_panic(expected = "add the PSMs in run order")]
+    fn builder_needs_donor_psms_in_run_order() {
+        let mut b = LibraryBuilder::new(1, 3, 1.0, None);
+        b.add(&psm(2, 0, 10.0, 5.0, false));
+        b.add(&psm(1, 0, 10.0, 5.0, false));
+    }
+
+    #[test]
+    fn identity_label_is_the_lowest_runs_best_donor() {
+        // Precursor 0 mixes labels (a violated precondition, so release
+        // builds only): its label is that of run 0's best donor PSM.
+        if cfg!(debug_assertions) {
+            return;
+        }
+        let mut b = LibraryBuilder::new(1, 2, 1.0, None);
+        b.add(&psm(0, 0, 10.0, 1.0, false));
+        b.add(&psm(0, 0, 11.0, 9.0, true));
+        b.add(&psm(1, 0, 12.0, 5.0, false));
+        let lib = b.finish(meta(1), 1.0, &AlignParams::default());
+        assert!(lib.entries[0].identity_decoy);
+        assert_eq!(lib.entries[0].best_rt, vec![(0, 11.0), (1, 12.0)]);
+    }
+
     /// The pre-streaming `build_library`, kept to check [`LibraryBuilder`].
     fn reference_library(
         psms: &[PsmIn],
@@ -981,16 +1091,23 @@ mod tests {
                 },
             });
         }
-        // Runs in order, PSMs of one run in slice order (the stream order).
+        // Interleaved runs (build_library adds them in run order), and runs
+        // in order with the PSMs of one run in slice order (the stream order).
+        let interleaved = psms.clone();
         psms.sort_by_key(|p| p.run);
         let ap = AlignParams {
             min_anchors: 5,
             ..AlignParams::default()
         };
-        for (max_q, donor_q, pep) in [(1.0, 1.0, None), (0.3, 0.02, Some(0.1)), (0.05, 0.01, None)]
-        {
-            let a = reference_library(&psms, meta(n_prec as usize), 5, max_q, donor_q, pep, &ap);
-            let b = build_library(&psms, meta(n_prec as usize), 5, max_q, donor_q, pep, &ap);
+        for (max_q, donor_q, pep, psms) in [
+            (1.0, 1.0, None, &psms),
+            (0.3, 0.02, Some(0.1), &psms),
+            (0.05, 0.01, None, &psms),
+            (1.0, 1.0, None, &interleaved),
+            (0.3, 0.02, Some(0.1), &interleaved),
+        ] {
+            let a = reference_library(psms, meta(n_prec as usize), 5, max_q, donor_q, pep, &ap);
+            let b = build_library(psms, meta(n_prec as usize), 5, max_q, donor_q, pep, &ap);
             if max_q == 1.0 {
                 assert!(!a.entries.is_empty());
             }

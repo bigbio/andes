@@ -16,7 +16,7 @@ leaderboard. Section 2 gives the date and the andes commit behind each row.
 |---|---|---:|---|---|---:|
 | Standard, high-res | Astral HCD LFQ, PXD070049 (1 file) | **47,080** PSMs | engine K 31,435 (217 s) | 0.95–1.03% | 160 s |
 | TMT-labelled, low-res | a05058, PXD007683 (1 file, ion-trap CID) | **12,347** PSMs | engine K 10,504 (77 s) | not measurable | 28 s |
-| Low-res LFQ | UPS1, PXD001819 (1 file, ion-trap CID) | **15,848** PSMs | engine K 14,734 (42 s); the Java predecessor 15,904 | **2.6%** (above nominal) | 18 s |
+| Low-res LFQ | UPS1, PXD001819 (1 file, ion-trap CID) | **15,848** PSMs | engine K 14,734 (42 s); the Java predecessor 15,904 | **2.3–2.5%** (above nominal; 2026-10-20, see below) | 18 s |
 | Phospho-enriched | mouse liver, PXD007653 (1 file, Q Exactive) | **37,190** PSMs, ~26,800 phospho-bearing | engine K 33,984 at 1.77% FDP (1,096 s) | 0.97–1.08% | 637 s |
 | Glyco, quick tier | mouse liver, PXD005553 (1 fraction) | **6,922–6,959** glycoPSMs | 89.0% of engine L's and 89.6% of engine A's identifications confirmed | 0.85–1.36% | 6 min |
 | Glyco, deep tier | mouse liver, PXD005553 (5 fractions) | **31,666 ± 9** glycoPSMs | 78.9% (engine L) and 88.0% (engine A) confirmed | 1.11% ± 0.03 | 23–29 min per fraction, 16 threads |
@@ -47,9 +47,12 @@ reviewed proteins (26,483 sequences), measured 2026-10-10 at `6a61f61`. The data
 entrapment component, so only Percolator's own q-value is available.
 
 **Low-res LFQ (UPS1).** One run of the UPS1 standard in yeast, searched against yeast plus an
-E. coli entrapment proteome (2026-10-10, `6a61f61`; error 2026-10-13). The nominal 1% is
-**2.6% true FDP** (2.58–2.65% over three Percolator seeds); at a true FDP of 1% andes keeps
-13,045–13,269 PSMs. This is the regime where the Java predecessor is strongest, and andes trails
+E. coli entrapment proteome (PSM count 2026-10-10, `6a61f61`). Error re-measured 2026-10-20 at
+`8c587fd` from the mzML file, Percolator seeds 42, 1 and 2: 16,446–16,491 PSMs at `q ≤ 0.01`,
+and the nominal 1% is **2.30–2.50% true FDP** (T/E 2.351); at a true FDP of 1% andes keeps
+14,142–14,420 PSMs. Ten or eleven accepted PSMs map only to entrapment proteins but match a
+yeast sequence once I is folded to L; they count as target. Without that rule the same runs
+read 2.49–2.67% and 13,754–13,854. This is the regime where the Java predecessor is strongest, and andes trails
 it by 56 PSMs.
 
 **Phospho-enriched.** One single-shot EasyPhos mouse liver file
@@ -269,7 +272,7 @@ with `purity ≥ 0.9`.
   use andes's own normalisation (`quantity_normalized`; the raw `quantity` is the quantms
   contract). The TMT figures are from 2026-10-10.
 - **Only some identification sets measure error.** TMT has no entrapment component. UPS1's
-  entrapment is not 1:1, and its nominal 1% is 2.6% true FDP.
+  entrapment is not 1:1, and its nominal 1% is 2.3–2.5% true FDP.
 - **Single files.** Phospho is one file, peptide-level only; `--refine` is measured on Astral
   only.
 - **Glyco composition on fucose-rich tissue.** On heart and lung the backbone agrees with

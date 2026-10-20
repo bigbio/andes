@@ -399,6 +399,7 @@ mod tests {
             isotope_offset: 0,
             precursor_mz_override: None,
             site_evidence: None,
+            tie_key: 0,
         }
     }
 
@@ -632,6 +633,7 @@ mod tests {
             isotope_offset: 0,
             precursor_mz_override: None,
             site_evidence: None,
+            tie_key: 0,
         };
 
         let mut queue = TopNQueue::new(10);

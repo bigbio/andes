@@ -144,8 +144,8 @@ Percolator for q-values.
 
 Each PIN row is one PSM. `RankScore` orders candidates within a spectrum; `RawScore` is the
 score Percolator weights most. All 66 columns are in [`DOCS.md` §3a](DOCS.md#3a-pin-columns).
-The final tolerances and a per-modification PSM tally go to stderr and `statistics.log`
-([`DOCS.md` §3d](DOCS.md#3d-run-summary-statisticslog)).
+The final tolerances and a per-modification PSM tally go to stderr and `<stem>.statistics.log`
+([`DOCS.md` §3d](DOCS.md#3d-run-summary-stemstatisticslog)).
 
 ## Common workflows
 
@@ -224,16 +224,23 @@ fallback. Both add a q-value and PEP to the outputs and write `<stem>.q<fdr>.tsv
 q ≤ `--fdr`, default 0.01, e.g. `--rescore --fdr 0.01`). `--fdr` and `--pep` do nothing
 without one of them.
 
+**Protein groups.** Every rescored run also writes `<stem>.protein_groups.tsv`: protein groups
+by parsimony over protein families (a canonical entry with its isoform, variant and chain
+entries is one family), each with a protein q-value from picked target-decoy competition.
+`--protein-fdr 0.01` keeps only PSMs of groups at that level in the filtered TSV, and only their
+families in the proteoform table; no quantification is needed
+([`DOCS.md`](DOCS.md#protein-groups-and-protein-fdr)).
+
 **Quantification (`--tmt`, `--lfq`).** andes quantifies the confident PSMs in the same run:
 `--tmt tmt10` reads the reporter ions of every identified MS2 (or its SPS-MS3 with
 `--tmt-level 3`), applies the kit's impurity matrix (`--tmt-correction`) and reports the
 precursor isolation purity; `--lfq` integrates the isotope chromatograms of every identified
-precursor from the MS1 scans with an experimental decoy-based feature q-value estimate. Both write plain
-tables (`<stem>.tmt.tsv`, `<stem>.lfq.tsv`) and, with `--output-parquet`, the QPX
+precursor from the MS1 scans with an experimental decoy-based feature q-value estimate. Both write
+versioned Parquet tables (`<stem>.tmt.parquet`, `<stem>.lfq.parquet`) and, with `--output-parquet`, the QPX
 `quantms.feature.parquet` that quantms consumes. Normalization and protein roll-up stay
 downstream ([`DOCS.md` §10](DOCS.md#10-quantification)). `--lfq --mbr` adds match between runs
 over two or more inputs: every confident precursor is measured in every run, and transfers carry
-an internal quant-quality q-value (`<stem>.mbr.tsv`). The same stages run one at a time with
+an internal quant-quality q-value (`<stem>.mbr.parquet`). The same stages run one at a time with
 `andes quant library|extract|finalize` over a `--quant-dir`, for pipelines that spread runs
 over machines. On the ProteoBench label-free DDA module (PXD028735, six runs; measured at
 `47d2844`, before #166 and #167), andes quantified 54,932 precursors in at least 3 runs at

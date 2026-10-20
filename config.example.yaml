@@ -34,6 +34,8 @@ search:
   # max_mods: 3
   # min_peaks: 10                # advanced
   # top_n: 10                    # advanced
+  # fragment_index: auto         # advanced: auto | on | off (off = per-spectrum enumeration)
+  # fragment_index_slice_da: 80  # advanced: precursor-mass width of one index slice (Da)
 
 # ── Scoring / model / runtime ───────────────────────────────────────────────
 scoring:
@@ -45,6 +47,10 @@ scoring:
   # fragment_tol_ppm: 20         # MGF only, mutually exclusive with fragment_tol_da
   # model_store: models.parquet  # custom / trained model store
   # model: hcd_qexactive_tryp    # force a specific model id
+  # gbdt_max_trees: 100          # advanced: trees per GBDT ensemble (0 = all; unset = 100, all under glyco)
+  # precursor_mono: auto         # auto | off: MS1 monoisotope correction (glyco)
+  # ethcd_activation: hcd        # advanced: hcd | etd label for EThcD/ETciD scans
+  # peak_filter: "100:20"        # advanced: WINDOW_DA:PEAKS (default: on for isobaric labels)
 
 # ── Decoys & FDR strategy ───────────────────────────────────────────────────
 decoys:
@@ -66,30 +72,41 @@ refine:
 rescoring:
   enabled: false                 # run Percolator in-process (else feed out.pin to Percolator)
   # fdr: 0.01                    # q-value threshold for filtered output
+  # protein_fdr: 0.01            # protein-group q cutoff on the filtered output (default: none)
   # native: false                # non-production built-in GBDT rescorer
+  # predict: [rt]                # PIN features from predictors: rt (bundled andes-rt), ms2 (AlphaPeptDeep),
+  #                              #   peptdeep-rt, deeplc-rt; e.g. [rt, ms2]
+  # predictor_models: /models    # exported AlphaPeptDeep / DeepLC ONNX models (ms2, peptdeep-rt, deeplc-rt)
+  # predictor_backend: tract     # tract | ort (ONNX Runtime; build with --features ort)
 
 glyco:
   enabled: false                 # intact N-glycopeptide search
+  # species: human               # bundled glycan database: human | mouse | mouse-large | high-mannose
+  # glycan_gdb: glycans.gdb      # or an external .gdb file (one of the two is required)
   # --- advanced (validated defaults; see DOCS §9) ---
   # tol_ppm: 20                  # glyco fragment tolerance (raise for ion-trap MS2)
   # max_peaks: 0                 # cap peaks for candidate generation (0 = no cap)
   # hcd_pair: true               # DEFAULT ON: generate from the paired HCD scan, score c/z on ETD
-  #
-  # The remaining glyco flags (glycan database, species, core-Y gate, retrieval
-  # tolerance, ...) are CLI-only; see DOCS.md §9 for the full table.
+  # min_core_y: 0                # core-Y ions required to report a PSM (0 = off; 2 for collision data)
+  # retrieval_tol_ppm: 20        # peptide-first retrieval tolerance (default: tol_ppm on high-res)
+  # peptide_first: false         # b/y fragment-index fallback (slower, ~2% more)
+  # index_sequon_only: false     # index only N-X-S/T peptides (~10x smaller index)
+  # cz_max_charge: 1             # c/z fragment charge cap (unset: from deconvolution)
+  # y_max_charge: 3              # glycan-Y fragment charge cap
 
 quant:
   # tmt: tmt10                  # reporter-ion quantification: tmt6|tmt10|tmt11|tmt16|tmt18|tmt32|tmt35|itraq4|itraq8
   # tmt_level: 2                 # 2 = identified MS2, 3 = its SPS-MS3 scan
   # tmt_tol: 20ppm               # reporter m/z window (default 20ppm (10ppm tmt32/tmt35) high-res MS2 or tmt_level 3, 0.3da ion-trap MS2)
   # tmt_correction: lot.txt      # kit impurity sheet (quantms text form); default none
-  # tmt_min_purity: 0.7          # quantification gate: precursor purity floor for tmt.tsv (0 = off)
-  # tmt_max_pep: 0.05            # quantification gate: Percolator PEP cap for tmt.tsv (1 = off; needs rescoring)
+  # tmt_min_purity: 0.7          # quantification gate: precursor purity floor (0 = off)
+  # tmt_max_pep: 0.05            # quantification gate: Percolator PEP cap (1 = off; needs rescoring)
   # tmt_min_sn: 0                # quantification gate: summed reporter S/N floor (0 = off; needs noise values)
   # lfq: false                   # label-free MS1 feature quantification
   # lfq_tol: 10ppm
   # lfq_rt_window: 60            # seconds around the identifying PSM
-  # lfq_min_cosine: 0.7          # envelope cosine below which a feature is left out of lfq.tsv
+  # lfq_gaussian_width: 12       # experimental Gaussian peak width (s); unset = Savitzky-Golay
+  # lfq_min_cosine: 0.7          # envelope cosine below which a feature is not accepted in lfq.parquet
   # lfq_feature_fdr: 0.05
   # dir: quant_out              # per-run <stem>.ms1.parquet + <stem>.quant.parquet for multi-run quantification
   # quant_fdr: 0.01              # PSM q-value cut for quant targets (default: rescoring fdr)

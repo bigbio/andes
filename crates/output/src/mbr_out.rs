@@ -1,7 +1,8 @@
 //! Match-between-runs outputs.
 //!
-//! `<base>.mbr.tsv`: long format, one row per (precursor, run) target that was
-//! identified in the run or transferred into it:
+//! `<base>.mbr.parquet`: long format, one row per (precursor, run) target that
+//! was identified in the run or transferred into it, every evidence type
+//! included:
 //!
 //! | column | content |
 //! |---|---|
@@ -9,22 +10,23 @@
 //! | `run` | run stem |
 //! | `evidence_type` | `identified`, `identified_below_threshold` (identified, quality q-value above the identified threshold or missing), `transfer_ms2` (transfer q-value at or below the threshold, and an MS2 scan of the run supports the transfer), `transfer_ms1` (transfer q-value at or below the threshold, without that MS2 support) or `below_threshold` |
 //! | `quantity`, `quantity_se` | fitted MS1 quantity and its standard error |
-//! | `quantity_normalized` | `quantity` with the run's normalisation offset at the row's apex RT removed (a level per run and an RT-local term fitted across runs); `NA` when the run is not normalised. `quantity` stays the raw measurement |
-//! | `transfer_q` | internal transfer quant-quality q-value (not an identification FDR); `NA` for identified rows |
+//! | `quantity_normalized` | `quantity` with the run's normalisation offset at the row's apex RT removed (a level per run and an RT-local term fitted across runs); null when the run is not normalised. `quantity` stays the raw measurement |
+//! | `transfer_q` | internal transfer quant-quality q-value (not an identification FDR); null for identified rows |
 //! | `quant_q` | internal quality q-value of the row's MS1 feature against its decoys (not an identification FDR): the identified-row estimate for identified rows, `transfer_q` for transfers |
 //! | `apex_rt_s` | fitted apex, seconds |
 //! | `library_q` | internal library entry gate (not an identification FDR) |
 //!
-//! Missing values are `NA`. A `below_threshold` or `identified_below_threshold`
-//! row keeps its quantity so a downstream tool can treat it as censored rather
-//! than missing.
+//! The three text columns are UTF-8, the others float64; missing or
+//! non-finite values are null (`library_q` is never null). A
+//! `below_threshold` or `identified_below_threshold` row keeps its quantity
+//! so a downstream tool can treat it as censored rather than missing.
 //!
-//! `<base>.mbr_validation.tsv`: a header and one line with the pseudo-transfer
+//! `<base>.mbr_validation.parquet`: one row with the pseudo-transfer
 //! validation (acceptance rate, wrong-peak rate) and the accepted
 //! transfer counts of the pooled and per-family decoy estimates, always at
 //! q <= 0.01 (columns ending `_q01`) and at the run's transfer q-value
 //! threshold (columns ending `_at_threshold`, equal to the `_q01` ones when the
-//! threshold is 0.01), then the identified quality threshold (`NA` when none)
+//! threshold is 0.01), then the identified quality threshold (null when none)
 //! and the identified row counts: all, with a quality q-value, at
 //! `quant_q <= 0.01`, and reported as `identified_below_threshold`; then the
 //! MS2 evidence of the transfer rows: per hypothesis (target, mass-shift
@@ -32,10 +34,39 @@
 //! MS2 scan supports, the pseudo-transfers likewise, and the accepted
 //! transfers reported as `transfer_ms2`.
 //!
-//! Both files are written to `<path>.partial` and renamed into place.
+//! Counts are uint64, thresholds and rates float64 (null when undefined).
+//! It is a separate file because its one row of run-level counts shares no
+//! column with the per-(precursor, run) rows.
+//!
+//! Both files carry their schema version in the key-value metadata
+//! (`andes.mbr.schema`, `andes.mbr_validation.schema`; a reader rejects
+//! another major) and are written to `<path>.partial` and renamed into place.
 
-use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::sync::Arc;
+
+use arrow::array::{
+    ArrayRef, Float64Array, Float64Builder, StringArray, StringBuilder, UInt64Array,
+};
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::record_batch::RecordBatch;
+
+use crate::versioned_parquet::{
+    column, opt, read_table, write_table, TableVersion, TableWriter, BATCH_ROWS,
+};
+
+const MBR_TABLE: TableVersion = TableVersion {
+    key: "andes.mbr.schema",
+    version: "1.0",
+    major: 1,
+    what: "MBR table",
+};
+const VALIDATION_TABLE: TableVersion = TableVersion {
+    key: "andes.mbr_validation.schema",
+    version: "1.0",
+    major: 1,
+    what: "MBR validation table",
+};
 
 /// Why a quantity is reported for a (precursor, run).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,7 +93,7 @@ impl EvidenceType {
     }
 }
 
-/// One row of `<base>.mbr.tsv`.
+/// One row of `<base>.mbr.parquet`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MbrRow<'a> {
     pub precursor_key: &'a str,
@@ -193,7 +224,7 @@ const ACCEPTED_COLUMNS: [&str; 8] = [
     "accepted_rt_only",
 ];
 
-/// The header of `<base>.mbr_validation.tsv`.
+/// The columns of `<base>.mbr_validation.parquet`, in order.
 pub fn validation_columns() -> Vec<String> {
     let mut c: Vec<String> = [
         "q_threshold",
@@ -257,13 +288,13 @@ fn ratio(num: usize, den: usize) -> Option<f64> {
     (den > 0).then(|| num as f64 / den as f64)
 }
 
-fn push_opt(line: &mut String, v: Option<f64>) {
-    match v {
-        Some(v) if v.is_finite() => {
-            let _ = write!(line, "\t{v}");
-        }
-        _ => line.push_str("\tNA"),
-    }
+/// One cell of the validation table.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ValidationCell {
+    /// A count (uint64).
+    Count(u64),
+    /// A threshold or rate (float64, null when undefined).
+    Value(Option<f64>),
 }
 
 impl MbrValidation {
@@ -277,6 +308,71 @@ impl MbrValidation {
     pub fn wrong_peak_rate(&self) -> Option<f64> {
         ratio(self.wrong_peak, self.wrong_peak_pairs)
     }
+
+    /// The validation row, one cell per [`validation_columns`] entry.
+    pub fn cells(&self) -> Vec<ValidationCell> {
+        use ValidationCell::{Count, Value};
+        let n = |v: usize| Count(v as u64);
+        let mut c = vec![
+            Value(Some(self.q_threshold)),
+            n(self.pseudo_transfers),
+            n(self.pseudo_scored),
+            n(self.wrong_peak_pairs),
+            n(self.wrong_peak),
+            Value(self.wrong_peak_rate()),
+            n(self.transfers),
+            n(self.transfers_scored),
+        ];
+        for a in [&self.at_q01, &self.at_threshold] {
+            c.extend([
+                n(a.pseudo),
+                Value(self.pseudo_acceptance(a)),
+                n(a.pairs),
+                n(a.wrong_peak),
+                Value(a.wrong_peak_rate()),
+                n(a.pooled),
+                n(a.mass_only),
+                n(a.rt_only),
+            ]);
+        }
+        c.push(Value(self.quant_feature_threshold));
+        c.extend([
+            n(self.identified),
+            n(self.identified_scored),
+            n(self.identified_q01),
+            n(self.identified_below_threshold),
+        ]);
+        for f in 0..3 {
+            c.extend([n(self.ms2_rows[f]), n(self.ms2_supported[f])]);
+        }
+        c.extend([
+            n(self.ms2_pseudo_rows),
+            n(self.ms2_pseudo_supported),
+            n(self.transfer_ms2),
+        ]);
+        for a in [&self.at_q01, &self.at_threshold] {
+            c.extend([
+                n(a.wrong_peak_only),
+                n(a.decoys[0]),
+                n(a.decoys[1]),
+                n(a.decoys[2]),
+            ]);
+        }
+        c.extend([
+            n(self.target_entries),
+            n(self.identity_entries),
+            n(self.decoy_transfers[0]),
+            n(self.decoy_transfers[1]),
+            n(self.decoy_transfers[2]),
+            n(self.donor_gated),
+        ]);
+        c.iter()
+            .map(|v| match *v {
+                Value(x) => Value(x.filter(|x| x.is_finite())),
+                count => count,
+            })
+            .collect()
+    }
 }
 
 impl Accepted {
@@ -285,96 +381,265 @@ impl Accepted {
     }
 }
 
-fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
-    let mut partial = path.as_os_str().to_owned();
-    partial.push(".partial");
-    let partial = PathBuf::from(partial);
-    let written = std::fs::write(&partial, text)
-        .map_err(|e| format!("{}: {e}", partial.display()))
-        .and_then(|()| {
-            std::fs::rename(&partial, path).map_err(|e| format!("{}: {e}", path.display()))
-        });
-    if written.is_err() {
-        let _ = std::fs::remove_file(&partial);
-    }
-    written
+fn mbr_schema() -> Schema {
+    let f = |name: &str| Field::new(name, DataType::Float64, true);
+    Schema::new(vec![
+        Field::new("precursor_key", DataType::Utf8, false),
+        Field::new("run", DataType::Utf8, false),
+        Field::new("evidence_type", DataType::Utf8, false),
+        f("quantity"),
+        f("quantity_se"),
+        f("quantity_normalized"),
+        f("transfer_q"),
+        f("quant_q"),
+        f("apex_rt_s"),
+        Field::new("library_q", DataType::Float64, false),
+    ])
 }
 
-/// Writes `<base>.mbr.tsv` rows in the given order.
-pub fn write_mbr_tsv(path: &Path, rows: &[MbrRow<'_>]) -> Result<(), String> {
-    let mut text = MBR_COLUMNS.join("\t");
-    text.push('\n');
-    for r in rows {
-        text.push_str(r.precursor_key);
-        text.push('\t');
-        text.push_str(r.run);
-        text.push('\t');
-        text.push_str(r.evidence_type.as_str());
-        push_opt(&mut text, r.quantity);
-        push_opt(&mut text, r.quantity_se);
-        push_opt(&mut text, r.quantity_normalized);
-        push_opt(&mut text, r.transfer_q);
-        push_opt(&mut text, r.quant_q);
-        push_opt(&mut text, r.apex_rt_s);
-        push_opt(&mut text, Some(r.library_q));
-        text.push('\n');
-    }
-    write_atomic(path, &text)
+/// The columns of `<base>.mbr.parquet` being filled row by row.
+struct MbrColumnsBuilder {
+    key: StringBuilder,
+    run: StringBuilder,
+    ev: StringBuilder,
+    floats: Vec<Float64Builder>,
+    library_q: Float64Builder,
+    rows: usize,
 }
 
-/// Writes the two-line `<base>.mbr_validation.tsv`.
-pub fn write_mbr_validation(path: &Path, v: &MbrValidation) -> Result<(), String> {
-    let mut text = validation_columns().join("\t");
-    text.push('\n');
-    let mut line = String::new();
-    let _ = write!(
-        line,
-        "{}\t{}\t{}\t{}\t{}",
-        v.q_threshold, v.pseudo_transfers, v.pseudo_scored, v.wrong_peak_pairs, v.wrong_peak
-    );
-    push_opt(&mut line, v.wrong_peak_rate());
-    let _ = write!(line, "\t{}\t{}", v.transfers, v.transfers_scored);
-    for a in [&v.at_q01, &v.at_threshold] {
-        let _ = write!(line, "\t{}", a.pseudo);
-        push_opt(&mut line, v.pseudo_acceptance(a));
-        let _ = write!(line, "\t{}\t{}", a.pairs, a.wrong_peak);
-        push_opt(&mut line, a.wrong_peak_rate());
-        let _ = write!(line, "\t{}\t{}\t{}", a.pooled, a.mass_only, a.rt_only);
+impl MbrColumnsBuilder {
+    fn new() -> Self {
+        Self {
+            key: StringBuilder::new(),
+            run: StringBuilder::new(),
+            ev: StringBuilder::new(),
+            floats: (0..6).map(|_| Float64Builder::new()).collect(),
+            library_q: Float64Builder::new(),
+            rows: 0,
+        }
     }
-    push_opt(&mut line, v.quant_feature_threshold);
-    let _ = write!(
-        line,
-        "\t{}\t{}\t{}\t{}",
-        v.identified, v.identified_scored, v.identified_q01, v.identified_below_threshold
-    );
-    for f in 0..3 {
-        let _ = write!(line, "\t{}\t{}", v.ms2_rows[f], v.ms2_supported[f]);
+
+    fn push(&mut self, r: &MbrRow<'_>) {
+        self.key.append_value(r.precursor_key);
+        self.run.append_value(r.run);
+        self.ev.append_value(r.evidence_type.as_str());
+        let values = [
+            r.quantity,
+            r.quantity_se,
+            r.quantity_normalized,
+            r.transfer_q,
+            r.quant_q,
+            r.apex_rt_s,
+        ];
+        for (b, v) in self.floats.iter_mut().zip(values) {
+            b.append_option(v.filter(|v| v.is_finite()));
+        }
+        self.library_q.append_value(r.library_q);
+        self.rows += 1;
     }
-    let _ = write!(
-        line,
-        "\t{}\t{}\t{}",
-        v.ms2_pseudo_rows, v.ms2_pseudo_supported, v.transfer_ms2
-    );
-    for a in [&v.at_q01, &v.at_threshold] {
-        let _ = write!(
-            line,
-            "\t{}\t{}\t{}\t{}",
-            a.wrong_peak_only, a.decoys[0], a.decoys[1], a.decoys[2]
+
+    /// The batch of the rows pushed since the last call.
+    fn batch(&mut self, schema: &Arc<Schema>) -> Result<RecordBatch, String> {
+        self.rows = 0;
+        let mut cols: Vec<ArrayRef> = vec![
+            Arc::new(self.key.finish()),
+            Arc::new(self.run.finish()),
+            Arc::new(self.ev.finish()),
+        ];
+        cols.extend(
+            self.floats
+                .iter_mut()
+                .map(|b| Arc::new(b.finish()) as ArrayRef),
         );
+        cols.push(Arc::new(self.library_q.finish()));
+        RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
     }
-    let _ = write!(
-        line,
-        "\t{}\t{}\t{}\t{}\t{}\t{}",
-        v.target_entries,
-        v.identity_entries,
-        v.decoy_transfers[0],
-        v.decoy_transfers[1],
-        v.decoy_transfers[2],
-        v.donor_gated
-    );
-    text.push_str(&line);
-    text.push('\n');
-    write_atomic(path, &text)
+}
+
+fn mbr_batch(schema: &Arc<Schema>, rows: &[MbrRow<'_>]) -> Result<RecordBatch, String> {
+    let mut b = MbrColumnsBuilder::new();
+    for r in rows {
+        b.push(r);
+    }
+    b.batch(schema)
+}
+
+/// `<base>.mbr.parquet` written row by row, in batches of the same size as
+/// [`write_mbr_parquet`]'s (the same rows give the same file).
+pub struct MbrParquetWriter {
+    schema: Arc<Schema>,
+    columns: MbrColumnsBuilder,
+    table: TableWriter,
+    path: std::path::PathBuf,
+}
+
+impl MbrParquetWriter {
+    /// Creates `<path>.partial`; [`MbrParquetWriter::finish`] renames it into
+    /// place.
+    pub fn create(path: &Path) -> Result<Self, String> {
+        let schema = Arc::new(mbr_schema());
+        let table = TableWriter::create(path, &MBR_TABLE, MBR_TABLE.version, schema.clone(), &[])?;
+        Ok(Self {
+            schema,
+            columns: MbrColumnsBuilder::new(),
+            table,
+            path: path.to_path_buf(),
+        })
+    }
+
+    pub fn push(&mut self, row: &MbrRow<'_>) -> Result<(), String> {
+        self.columns.push(row);
+        if self.columns.rows == BATCH_ROWS {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), String> {
+        let b = self
+            .columns
+            .batch(&self.schema)
+            .map_err(|e| format!("{}: {e}", self.path.display()))?;
+        self.table.write(&b)
+    }
+
+    pub fn finish(mut self) -> Result<(), String> {
+        if self.columns.rows > 0 {
+            self.flush()?;
+        }
+        self.table.finish()
+    }
+}
+
+/// Writes `<base>.mbr.parquet` rows in the given order.
+pub fn write_mbr_parquet(path: &Path, rows: &[MbrRow<'_>]) -> Result<(), String> {
+    let schema = Arc::new(mbr_schema());
+    let batches = rows.chunks(BATCH_ROWS).map(|c| mbr_batch(&schema, c));
+    write_table(
+        path,
+        &MBR_TABLE,
+        MBR_TABLE.version,
+        schema.clone(),
+        batches,
+        &[],
+    )
+}
+
+/// One row of `<base>.mbr.parquet` read back.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MbrRecord {
+    pub precursor_key: String,
+    pub run: String,
+    /// One of the [`EvidenceType::as_str`] names.
+    pub evidence_type: String,
+    pub quantity: Option<f64>,
+    pub quantity_se: Option<f64>,
+    pub quantity_normalized: Option<f64>,
+    pub transfer_q: Option<f64>,
+    pub quant_q: Option<f64>,
+    pub apex_rt_s: Option<f64>,
+    pub library_q: f64,
+}
+
+/// Reads `<base>.mbr.parquet`, in file order. Rejects another major schema
+/// version; every error names the file.
+pub fn read_mbr_parquet(path: &Path) -> Result<Vec<MbrRecord>, String> {
+    let t = read_table(path, &MBR_TABLE)?;
+    let mut out = Vec::new();
+    for b in &t.batches {
+        let text = |name: &str| column::<StringArray>(b, name, path);
+        let float = |name: &str| column::<Float64Array>(b, name, path);
+        let (key, run, ev) = (text("precursor_key")?, text("run")?, text("evidence_type")?);
+        let [q, se, norm, tq, qq, rt] = [
+            "quantity",
+            "quantity_se",
+            "quantity_normalized",
+            "transfer_q",
+            "quant_q",
+            "apex_rt_s",
+        ]
+        .map(float);
+        let (q, se, norm, tq, qq, rt) = (q?, se?, norm?, tq?, qq?, rt?);
+        let lib = float("library_q")?;
+        for i in 0..b.num_rows() {
+            out.push(MbrRecord {
+                precursor_key: key.value(i).to_string(),
+                run: run.value(i).to_string(),
+                evidence_type: ev.value(i).to_string(),
+                quantity: opt(q, i),
+                quantity_se: opt(se, i),
+                quantity_normalized: opt(norm, i),
+                transfer_q: opt(tq, i),
+                quant_q: opt(qq, i),
+                apex_rt_s: opt(rt, i),
+                library_q: lib.value(i),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Writes the one-row `<base>.mbr_validation.parquet`.
+pub fn write_mbr_validation(path: &Path, v: &MbrValidation) -> Result<(), String> {
+    let names = validation_columns();
+    let cells = v.cells();
+    debug_assert_eq!(names.len(), cells.len());
+    let mut fields = Vec::with_capacity(names.len());
+    let mut cols: Vec<ArrayRef> = Vec::with_capacity(names.len());
+    for (name, cell) in names.iter().zip(&cells) {
+        match *cell {
+            ValidationCell::Count(n) => {
+                fields.push(Field::new(name, DataType::UInt64, false));
+                cols.push(Arc::new(UInt64Array::from(vec![n])));
+            }
+            ValidationCell::Value(x) => {
+                fields.push(Field::new(name, DataType::Float64, true));
+                cols.push(Arc::new(Float64Array::from(vec![x])));
+            }
+        }
+    }
+    let schema = Arc::new(Schema::new(fields));
+    let batch = RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string());
+    write_table(
+        path,
+        &VALIDATION_TABLE,
+        VALIDATION_TABLE.version,
+        schema,
+        [batch],
+        &[],
+    )
+}
+
+/// Reads `<base>.mbr_validation.parquet`: every column with its value, in
+/// file order. Rejects another major schema version; every error names the
+/// file.
+pub fn read_mbr_validation(path: &Path) -> Result<Vec<(String, ValidationCell)>, String> {
+    let t = read_table(path, &VALIDATION_TABLE)?;
+    let b = match t.batches.as_slice() {
+        [b] if b.num_rows() == 1 => b,
+        _ => return Err(format!("{}: expected one validation row", path.display())),
+    };
+    let schema = b.schema();
+    let mut out = Vec::with_capacity(b.num_columns());
+    for f in schema.fields() {
+        let name = f.name();
+        let cell = match f.data_type() {
+            DataType::UInt64 => {
+                ValidationCell::Count(column::<UInt64Array>(b, name, path)?.value(0))
+            }
+            DataType::Float64 => {
+                ValidationCell::Value(opt(column::<Float64Array>(b, name, path)?, 0))
+            }
+            other => {
+                return Err(format!(
+                    "{}: column {name} has unexpected type {other}",
+                    path.display()
+                ))
+            }
+        };
+        out.push((name.clone(), cell));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -382,10 +647,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mbr_tsv_writes_na_for_missing_values() {
+    fn row_by_row_writer_gives_the_same_file() {
         let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("x.mbr.tsv");
-        let rows = [
+        let base = rows();
+        // More than one batch, with a partial last one.
+        let many: Vec<MbrRow<'static>> = (0..BATCH_ROWS + 1234)
+            .map(|i| MbrRow {
+                quantity: Some(i as f64),
+                ..base[i % base.len()].clone()
+            })
+            .collect();
+        for set in [&many[..0], &many[..3], &many[..BATCH_ROWS], &many[..]] {
+            let (a, b) = (dir.path().join("a.parquet"), dir.path().join("b.parquet"));
+            write_mbr_parquet(&a, set).unwrap();
+            let mut w = MbrParquetWriter::create(&b).unwrap();
+            for r in set {
+                w.push(r).unwrap();
+            }
+            w.finish().unwrap();
+            assert_eq!(
+                std::fs::read(&a).unwrap(),
+                std::fs::read(&b).unwrap(),
+                "{}",
+                set.len()
+            );
+            assert!(!dir.path().join("b.parquet.partial").exists());
+        }
+        // Dropped unfinished, no file is left.
+        let c = dir.path().join("c.parquet");
+        drop(MbrParquetWriter::create(&c).unwrap());
+        assert!(!c.exists() && !dir.path().join("c.parquet.partial").exists());
+    }
+
+    fn rows() -> Vec<MbrRow<'static>> {
+        vec![
             MbrRow {
                 precursor_key: "PEPTIDEK/2",
                 run: "a",
@@ -402,7 +697,7 @@ mod tests {
                 precursor_key: "PEPTIDEK/2",
                 run: "b",
                 evidence_type: EvidenceType::BelowThreshold,
-                quantity: None,
+                quantity: Some(f64::NAN),
                 quantity_se: None,
                 quantity_normalized: None,
                 transfer_q: Some(0.2),
@@ -410,29 +705,69 @@ mod tests {
                 apex_rt_s: None,
                 library_q: 0.001,
             },
-        ];
-        write_mbr_tsv(&p, &rows).unwrap();
-        let text = std::fs::read_to_string(&p).unwrap();
-        let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(
-            lines[0],
-            "precursor_key\trun\tevidence_type\tquantity\tquantity_se\tquantity_normalized\ttransfer_q\tquant_q\tapex_rt_s\tlibrary_q"
-        );
-        assert_eq!(
-            lines[1],
-            "PEPTIDEK/2\ta\tidentified\t1500000\t20000\t1250000\tNA\t0.003\t612.25\t0.001"
-        );
-        assert_eq!(
-            lines[2],
-            "PEPTIDEK/2\tb\tbelow_threshold\tNA\tNA\tNA\t0.2\t0.2\tNA\t0.001"
-        );
-        assert!(!dir.path().join("x.mbr.tsv.partial").exists());
+        ]
     }
 
     #[test]
-    fn validation_is_two_lines_with_rates_at_both_thresholds() {
+    fn mbr_parquet_round_trips_with_nulls_for_missing_values() {
         let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("x.mbr_validation.tsv");
+        let p = dir.path().join("x.mbr.parquet");
+        write_mbr_parquet(&p, &rows()).unwrap();
+        assert!(!dir.path().join("x.mbr.parquet.partial").exists());
+        let back = read_mbr_parquet(&p).unwrap();
+        let want: Vec<MbrRecord> = rows()
+            .iter()
+            .map(|r| MbrRecord {
+                precursor_key: r.precursor_key.into(),
+                run: r.run.into(),
+                evidence_type: r.evidence_type.as_str().into(),
+                quantity: r.quantity.filter(|v| v.is_finite()),
+                quantity_se: r.quantity_se,
+                quantity_normalized: r.quantity_normalized,
+                transfer_q: r.transfer_q,
+                quant_q: r.quant_q,
+                apex_rt_s: r.apex_rt_s,
+                library_q: r.library_q,
+            })
+            .collect();
+        assert_eq!(back, want);
+        assert_eq!(back[1].quantity, None);
+        // The column names and order are the documented ones.
+        let t = read_table(&p, &MBR_TABLE).unwrap();
+        let names: Vec<String> = t.batches[0]
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
+        assert_eq!(names, MBR_COLUMNS);
+        assert_eq!(t.meta.get(MBR_TABLE.key).map(String::as_str), Some("1.0"));
+        // An empty table is still a valid file.
+        write_mbr_parquet(&p, &[]).unwrap();
+        assert!(read_mbr_parquet(&p).unwrap().is_empty());
+    }
+
+    #[test]
+    fn mbr_readers_reject_other_majors_and_each_others_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.mbr.parquet");
+        let schema = Arc::new(mbr_schema());
+        let b = mbr_batch(&schema, &rows());
+        write_table(&p, &MBR_TABLE, "2.0", schema, [b], &[]).unwrap();
+        let e = read_mbr_parquet(&p).unwrap_err();
+        assert!(
+            e.contains("x.mbr.parquet") && e.contains("schema 2.0"),
+            "{e}"
+        );
+        write_mbr_parquet(&p, &rows()).unwrap();
+        let e = read_mbr_validation(&p).unwrap_err();
+        assert!(e.contains(VALIDATION_TABLE.key), "{e}");
+    }
+
+    #[test]
+    fn validation_is_one_typed_row_with_rates_at_both_thresholds() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.mbr_validation.parquet");
         let v = MbrValidation {
             q_threshold: 0.05,
             pseudo_transfers: 10,
@@ -477,36 +812,37 @@ mod tests {
             donor_gated: 3,
         };
         write_mbr_validation(&p, &v).unwrap();
-        let text = std::fs::read_to_string(&p).unwrap();
-        let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 2);
-        let header: Vec<&str> = lines[0].split('\t').collect();
-        let values: Vec<&str> = lines[1].split('\t').collect();
-        assert_eq!(header, validation_columns());
-        assert_eq!(values.len(), header.len());
-        let get = |name: &str| values[header.iter().position(|h| *h == name).unwrap()];
-        assert_eq!(get("q_threshold"), "0.05");
-        assert_eq!(get("wrong_peak_rate"), "0.125");
-        assert_eq!(get("pseudo_acceptance_q01"), "0.8");
-        assert_eq!(get("pseudo_acceptance_at_threshold"), "0.9");
-        assert_eq!(get("accepted_wrong_peak_rate_q01"), "NA");
-        assert_eq!(get("accepted_wrong_peak_rate_at_threshold"), "0.25");
-        assert_eq!(get("accepted_rt_only_q01"), "39");
-        assert_eq!(get("accepted_pooled_at_threshold"), "60");
-        assert_eq!(get("quant_feature_threshold"), "NA");
-        assert_eq!(get("identified_scored"), "48");
-        assert_eq!(get("identified_accepted_q01"), "45");
-        assert_eq!(get("identified_below_threshold"), "0");
-        assert_eq!(get("ms2_target_rows"), "100");
-        assert_eq!(get("ms2_mass_decoy_supported"), "1");
-        assert_eq!(get("ms2_rt_decoy_rows"), "80");
-        assert_eq!(get("ms2_pseudo_supported"), "4");
-        assert_eq!(get("transfer_ms2"), "25");
-        assert_eq!(get("accepted_wrong_peak_only_q01"), "44");
-        assert_eq!(get("accepted_identity_decoys_q01"), "3");
-        assert_eq!(get("accepted_mass_decoys_at_threshold"), "4");
-        assert_eq!(get("identity_entries"), "2");
-        assert_eq!(get("identity_decoy_transfers"), "7");
-        assert_eq!(get("donor_gated"), "3");
+        let cells = read_mbr_validation(&p).unwrap();
+        let names: Vec<&str> = cells.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, validation_columns());
+        assert_eq!(cells.iter().map(|(_, c)| *c).collect::<Vec<_>>(), v.cells());
+        let get = |name: &str| cells.iter().find(|(n, _)| n == name).unwrap().1;
+        use ValidationCell::{Count, Value};
+        assert_eq!(get("q_threshold"), Value(Some(0.05)));
+        assert_eq!(get("wrong_peak_rate"), Value(Some(0.125)));
+        assert_eq!(get("pseudo_acceptance_q01"), Value(Some(0.8)));
+        assert_eq!(get("pseudo_acceptance_at_threshold"), Value(Some(0.9)));
+        assert_eq!(get("accepted_wrong_peak_rate_q01"), Value(None));
+        assert_eq!(
+            get("accepted_wrong_peak_rate_at_threshold"),
+            Value(Some(0.25))
+        );
+        assert_eq!(get("accepted_rt_only_q01"), Count(39));
+        assert_eq!(get("accepted_pooled_at_threshold"), Count(60));
+        assert_eq!(get("quant_feature_threshold"), Value(None));
+        assert_eq!(get("identified_scored"), Count(48));
+        assert_eq!(get("identified_accepted_q01"), Count(45));
+        assert_eq!(get("identified_below_threshold"), Count(0));
+        assert_eq!(get("ms2_target_rows"), Count(100));
+        assert_eq!(get("ms2_mass_decoy_supported"), Count(1));
+        assert_eq!(get("ms2_rt_decoy_rows"), Count(80));
+        assert_eq!(get("ms2_pseudo_supported"), Count(4));
+        assert_eq!(get("transfer_ms2"), Count(25));
+        assert_eq!(get("accepted_wrong_peak_only_q01"), Count(44));
+        assert_eq!(get("accepted_identity_decoys_q01"), Count(3));
+        assert_eq!(get("accepted_mass_decoys_at_threshold"), Count(4));
+        assert_eq!(get("identity_entries"), Count(2));
+        assert_eq!(get("identity_decoy_transfers"), Count(7));
+        assert_eq!(get("donor_gated"), Count(3));
     }
 }

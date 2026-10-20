@@ -79,12 +79,19 @@ fn ort_err(what: &str) -> impl Fn(ort::Error) -> Error + '_ {
     move |e| Error::Inference(format!("ort {what}: {e}"))
 }
 
+/// Axis sizes as ONNX Runtime reports them: a negative size is a dynamic axis.
+fn axes(shape: &[i64]) -> Vec<Option<usize>> {
+    shape.iter().map(|&d| usize::try_from(d).ok()).collect()
+}
+
 /// One loaded graph, shared by every handle.
 struct Model {
     inner: Arc<SharedSessionInner>,
     input_names: Vec<String>,
     input_types: Vec<TensorElementType>,
+    input_shapes: Vec<Option<Vec<Option<usize>>>>,
     output_names: Vec<String>,
+    output_shapes: Vec<Option<Vec<Option<usize>>>>,
     c_inputs: Vec<CString>,
     c_outputs: Vec<CString>,
 }
@@ -115,11 +122,13 @@ impl OrtSession {
 
         let mut input_names = Vec::new();
         let mut input_types = Vec::new();
+        let mut input_shapes = Vec::new();
         for input in &session.inputs {
             match &input.input_type {
-                ValueType::Tensor { ty, .. } => {
+                ValueType::Tensor { ty, shape, .. } => {
                     input_names.push(input.name.clone());
                     input_types.push(*ty);
+                    input_shapes.push(Some(axes(shape)));
                 }
                 other => {
                     return Err(Error::Inference(format!(
@@ -130,12 +139,14 @@ impl OrtSession {
             }
         }
         // Non-tensor outputs (ZipMap sequences of maps) are not requested.
-        let output_names: Vec<String> = session
+        let (output_names, output_shapes): (Vec<String>, Vec<_>) = session
             .outputs
             .iter()
-            .filter(|o| matches!(o.output_type, ValueType::Tensor { .. }))
-            .map(|o| o.name.clone())
-            .collect();
+            .filter_map(|o| match &o.output_type {
+                ValueType::Tensor { shape, .. } => Some((o.name.clone(), Some(axes(shape)))),
+                _ => None,
+            })
+            .unzip();
         if output_names.is_empty() {
             return Err(Error::Inference(format!(
                 "ort: {} has no tensor outputs",
@@ -154,7 +165,9 @@ impl OrtSession {
                 inner,
                 input_names,
                 input_types,
+                input_shapes,
                 output_names,
+                output_shapes,
                 c_inputs,
                 c_outputs,
             }),
@@ -280,6 +293,14 @@ impl InferenceBackend for OrtSession {
 
     fn output_names(&self) -> &[String] {
         &self.model.output_names
+    }
+
+    fn input_shapes(&self) -> Vec<Option<Vec<Option<usize>>>> {
+        self.model.input_shapes.clone()
+    }
+
+    fn output_shapes(&self) -> Vec<Option<Vec<Option<usize>>>> {
+        self.model.output_shapes.clone()
     }
 
     fn run(&mut self, inputs: &[NamedTensor]) -> Result<Vec<NamedTensor>> {

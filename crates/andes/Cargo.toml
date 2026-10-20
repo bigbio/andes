@@ -18,6 +18,8 @@ output = { path = "../output" }
 input = { path = "../input" }
 quant = { path = "../quant" }
 model-train = { path = "../model-train" }
+# Predicted-spectrum / RT features for the PIN (`--predict`).
+onnx-infer = { path = "../onnx-infer" }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
@@ -31,6 +33,13 @@ parquet = "53"
 tempfile = "3.10"
 
 [features]
+default = ["tract"]
+# ONNX engine for the third-party predictors of `--predict` (AlphaPeptDeep,
+# DeepLC): tract, pure Rust. The bundled andes-rt model needs no engine.
+tract = ["onnx-infer/tract"]
+# ONNX Runtime engine for those predictors (`--predictor-backend ort`), loaded
+# from a shared library at run time (see crates/onnx-infer/README.md).
+ort = ["onnx-infer/ort"]
 # Native Thermo .raw input (delegates to the input crate's `thermo` feature).
 # Not enabled by default: turn on for release builds (`--features thermo`) on a
 # toolchain with rustc >= 1.88; opening a `.raw` then needs the .NET 8 runtime

@@ -781,6 +781,7 @@ mod tests {
             isotope_offset: 0,
             precursor_mz_override: None,
             site_evidence: None,
+            tie_key: 0,
         }
     }
 

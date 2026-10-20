@@ -1406,8 +1406,13 @@ pub(crate) fn finalize_stream(
         }
     }
     let t1 = Instant::now();
-    let t_models = train_folds(&t_sample.into_items(), seed);
-    let i_models = train_folds(&i_sample.into_items(), seed);
+    // Both classifiers' folds train at once.
+    let (t_rows, i_rows) = (t_sample.into_items(), i_sample.into_items());
+    let (t_models, i_models) = rayon::join(
+        || train_folds(&t_rows, seed),
+        || train_folds(&i_rows, seed),
+    );
+    drop((t_rows, i_rows));
     eprintln!(
         "[mbr] finalize: training rows of {} extract rows {:.1} s, fold models {:.1} s",
         rows_read.into_inner(),
@@ -1459,8 +1464,11 @@ pub(crate) fn finalize_stream(
     // the identified rows use the pooled estimate only.
     let thresholds = [VALIDATION_Q, mbr_fdr];
     let t1 = Instant::now();
-    let (fdr, t_spills) = t_store.finish(&t_models.failed_folds, &thresholds)?;
-    let (id_fdr, i_spills) = i_store.finish(&i_models.failed_folds, &[])?;
+    let (t_done, i_done) = rayon::join(
+        || t_store.finish(&t_models.failed_folds, &thresholds),
+        || i_store.finish(&i_models.failed_folds, &[]),
+    );
+    let ((fdr, t_spills), (id_fdr, i_spills)) = (t_done?, i_done?);
     eprintln!(
         "[mbr] finalize: held-out scores {:.1} s, step functions {:.1} s ({} and {} steps, {} and {} pooled; {t_spills} and {i_spills} score spills)",
         (t1 - t0).as_secs_f64(),

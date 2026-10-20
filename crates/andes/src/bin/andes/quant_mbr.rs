@@ -194,7 +194,9 @@ impl TransferSelection {
     /// `aligned_runs` aligned runs.
     fn min_donors(&self, aligned_runs: usize) -> u16 {
         let others = aligned_runs.saturating_sub(1) as f64;
-        (self.min_donor_fraction * others).ceil().clamp(0.0, u16::MAX as f64) as u16
+        (self.min_donor_fraction * others)
+            .ceil()
+            .clamp(0.0, u16::MAX as f64) as u16
     }
 
     /// One line for the extract table metadata and the log.
@@ -2260,7 +2262,8 @@ mod tests {
         let ms1 = Ms1RunIndex::new(run_scans(1, false, &|_| false));
         let wp = WidthPrior::from_fits(Vec::new());
         let entry = fx.lib.entries.iter().find(|e| e.precursor == 4).unwrap();
-        let (rows, _) = entry_rows(entry, 1, true, &fx.lib, &ms1, &wp);
+        let off = PairGate::new(&TransferSelection::OFF, &fx.lib);
+        let (rows, _) = entry_rows(entry, 1, true, &fx.lib, &off, &ms1, &wp);
         let id: Vec<&(ExtractRow, Probe)> = rows
             .iter()
             .filter(|(r, _)| r.role == Role::Identified)
@@ -2444,13 +2447,17 @@ mod tests {
         assert_eq!(sel.rows, without(&all.rows, &[(ONLY_RUN1, 0)]));
         assert_eq!(sel.counts.not_selected, 1);
         // The identified rows and pseudo-transfers of every precursor stay.
-        let roles = |rows: &[ExtractRow], role: Role| rows.iter().filter(|r| r.role == role).count();
+        let roles =
+            |rows: &[ExtractRow], role: Role| rows.iter().filter(|r| r.role == role).count();
         for role in [Role::Identified, Role::PseudoTransfer] {
             assert_eq!(roles(&sel.rows, role), roles(&all.rows, role));
         }
         // The fixture's own transfers have one donor run each: kept.
         let sel = extract_run(0, &fx.ms1_tables[0], &fx.lib, &params(), &SELECT).unwrap();
-        assert_eq!(sel, extract_all(0, &fx.ms1_tables[0], &fx.lib, &params()).unwrap());
+        assert_eq!(
+            sel,
+            extract_all(0, &fx.ms1_tables[0], &fx.lib, &params()).unwrap()
+        );
     }
 
     #[test]

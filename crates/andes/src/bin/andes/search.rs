@@ -21,8 +21,9 @@ use crate::quant_run::{QuantCollector, QuantSettings, RunScans};
 use crate::rescore;
 use crate::spectra::{
     add_mzml_skipped, detect_dominant_activation, detect_instrument_type_for_path,
-    detect_isobaric_sampled, input_format_flags, merge_parse_stats, prefix_spectrum_titles,
-    run_precursor_calibration, send_chunks, title_prefix_for, tolerance_ppm_display, ParseStats,
+    detect_isobaric_sampled, input_format_flags, merge_parse_stats, ms3_carries_reporters,
+    prefix_spectrum_titles, run_precursor_calibration, send_chunks, title_prefix_for,
+    tolerance_ppm_display, ParseStats,
 };
 use crate::{arg_present, report_search_progress, EXPLICIT_MISSED_CLEAVAGES};
 use input::{MgfReader, Ms1Link, MzMLReader};
@@ -182,7 +183,7 @@ fn score_mass_ordered(
 }
 
 /// Resolve the PIN path and the durable report base (the filtered q-value
-/// TSV and `statistics.log` are named from it).
+/// TSV and `<stem>.statistics.log` are named from it).
 ///
 /// An explicit `--output-pin` is both. Otherwise the base is `--output-tsv`,
 /// else `--output-parquet`, else `./andes.pin`; with `keep_pin` the PIN is
@@ -771,15 +772,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // and each chunk's precursors are corrected BEFORE they reach the search.
     let mono_active =
         cli.precursor_mono == PrecursorMonoFlag::Auto && cli.glyco && (is_mzml || is_raw);
-    if cli.precursor_mono == PrecursorMonoFlag::Auto && !mono_active {
+    // `auto` is the default and the correction is glyco-only, so a search
+    // without --glyco is not told about it; a glyco search without MS1 is.
+    if cli.precursor_mono == PrecursorMonoFlag::Auto && cli.glyco && !mono_active {
         eprintln!(
-            "WARN: --precursor-mono auto needs --glyco and an input with MS1 (mzML or Thermo \
-             .raw); the input is {} — precursors are left as recorded.",
-            if !cli.glyco {
-                "searched without --glyco".to_string()
-            } else {
-                spectrum_path.display().to_string()
-            }
+            "WARN: --precursor-mono auto needs an input with MS1 (mzML or Thermo .raw); \
+             {} has none — precursors are left as recorded.",
+            spectrum_path.display()
         );
     }
     let mono_params = MonoParams::default();
@@ -1248,15 +1247,34 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // MS1 scans (purity, label-free chromatograms) and MS3 scans (SPS-MS3
     // reporters) are captured by the readers next to the MS2 stream and handed
     // to the collector per file. Quantification itself runs after rescoring.
-    let mut quant: Option<QuantCollector> =
-        QuantSettings::from_cli(&cli, param.data_type.instrument.is_high_resolution())?.map(
-            |mut settings| {
-                // Recorded in each run's MS2 table, where the library matches
-                // its fragment spectra and extract scores transfers.
-                settings.fragment_tol = Some(scorer.feature_match_tolerance());
-                QuantCollector::new(settings)
-            },
-        );
+    let high_res = param.data_type.instrument.is_high_resolution();
+    // Without --tmt-level, SPS-MS3 reporters are read from the MS3 when the
+    // low-resolution MS2 cannot separate the plex's channels.
+    let tmt_level = match (cli.tmt_level, cli.tmt) {
+        (Some(level), _) => level,
+        (None, Some(plex))
+            if !high_res
+                && plex
+                    .check_tolerance(model::tolerance::Tolerance::Da(0.3))
+                    .is_err()
+                && ms3_carries_reporters(&spectrum_path, is_mzml, is_raw) =>
+        {
+            eprintln!(
+                "Protocol resolver: --tmt {}: the MS2 is low-resolution and the MS3 scans carry \
+                 reporters (SPS-MS3); reading reporters from the MS3 (--tmt-level 3)",
+                plex.name()
+            );
+            3
+        }
+        _ => 2,
+    };
+    let mut quant: Option<QuantCollector> = QuantSettings::from_cli(&cli, high_res, tmt_level)?
+        .map(|mut settings| {
+            // Recorded in each run's MS2 table, where the library matches
+            // its fragment spectra and extract scores transfers.
+            settings.fragment_tol = Some(scorer.feature_match_tolerance());
+            QuantCollector::new(settings)
+        });
     if let Some(q) = &quant {
         let s = &q.settings;
         if is_mgf && (s.needs_ms1_series() || s.needs_ms3()) {
@@ -2385,14 +2403,20 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // andes auto-resolves the scoring model and the precursor/fragment
     // tolerances from the data, so the FINAL search parameters differ from
     // whatever the user passed on the CLI. Emit a summary to stderr and write a
-    // `statistics.log` next to the PIN so a run's true parameters (and which
+    // `<stem>.statistics.log` next to the PIN so a run's true parameters (and which
     // PTMs were identified, with PSM counts) are always recoverable.
     let run_stats = output::RunStatistics::compute(&queues, &pin_candidates, &params, &param.mme);
     eprint!("{}", run_stats.render());
-    let stats_path = report_base
-        .parent()
-        .map(|d| d.join("statistics.log"))
-        .unwrap_or_else(|| std::path::PathBuf::from("statistics.log"));
+    // Named after the run like the other reports, so searches writing into
+    // one directory do not overwrite each other's summary.
+    let stats_path = {
+        let stem = report_base
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "andes".to_string());
+        let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
+        dir.join(format!("{stem}.statistics.log"))
+    };
     match output::write_statistics_log(&run_stats, &stats_path) {
         Ok(()) => eprintln!("Wrote statistics: {}", stats_path.display()),
         Err(e) => eprintln!("WARN: could not write {}: {e}", stats_path.display()),

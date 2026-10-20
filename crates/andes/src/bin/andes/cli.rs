@@ -700,9 +700,10 @@ pub(crate) struct SearchArgs {
 
     /// MS level the reporter ions are read from: 2 (the identified MS2) or 3
     /// (the SPS-MS3 scan whose precursor references that MS2; mzML and Thermo
-    /// `.raw`).
-    #[arg(long = "tmt-level", default_value = "2")]
-    pub(crate) tmt_level: u8,
+    /// `.raw`). Default: 3 when the MS2 is low-resolution, cannot separate the
+    /// plex's channels and the MS3 scans carry reporters (SPS-MS3); else 2.
+    #[arg(long = "tmt-level")]
+    pub(crate) tmt_level: Option<u8>,
 
     /// Reporter-ion m/z tolerance, e.g. `20ppm` or `0.003da`. Default: 20 ppm
     /// (10 ppm for tmt32/tmt35) on high-resolution MS2 and at `--tmt-level 3`

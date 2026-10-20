@@ -302,6 +302,25 @@ pub(crate) fn detect_isobaric_sampled(
     label
 }
 
+/// Whether the MS3 scans of an mzML or Thermo `.raw` carry isobaric reporter
+/// ions (an SPS-MS3 run).
+pub(crate) fn ms3_carries_reporters(path: &Path, is_mzml: bool, is_raw: bool) -> bool {
+    if !(is_mzml || is_raw) {
+        return false;
+    }
+    let Some(ms3) = sample_spectra(path, is_mzml, false, is_raw, 3) else {
+        return false;
+    };
+    let found = input::detect_isobaric(&ms3, true).is_some();
+    if !found {
+        eprintln!(
+            "Protocol resolver: no isobaric reporters in a sample of {} MS3 scans",
+            ms3.len()
+        );
+    }
+    found
+}
+
 /// The first spectra at `ms_level` of an mzML, MGF or Thermo `.raw`.
 fn sample_spectra(
     path: &Path,
@@ -314,9 +333,14 @@ fn sample_spectra(
     if is_raw {
         #[cfg(feature = "thermo")]
         {
-            let reader = input::ThermoRawReader::open(path)
-                .ok()?
-                .with_ms_level(Some(u8::try_from(ms_level).ok()?));
+            let level = u8::try_from(ms_level).ok()?;
+            let reader = input::ThermoRawReader::open(path).ok()?;
+            // MS3 scans are sampled for their reporter ions only, so they are
+            // kept without a precursor m/z; MS2 goes through the search path.
+            if level >= 3 {
+                return Some(reader.sample_level(level, SAMPLE_N));
+            }
+            let reader = reader.with_ms_level(Some(level));
             return Some(reader.filter_map(Result::ok).take(SAMPLE_N).collect());
         }
         #[cfg(not(feature = "thermo"))]

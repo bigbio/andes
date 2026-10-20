@@ -48,6 +48,12 @@ pub const CORE_Y_STEPS: [f64; 5] = [
     2.0 * HEXNAC + 3.0 * HEX, // Y5: +2HexNAc+3Hex
 ];
 
+/// Y-ion offset above the peptide backbone for the O-glycan core ladder (Y1 only).
+/// O-glycans (cores 1–4 and beyond) all share the reducing-end GalNAc → Ser/Thr
+/// linkage, so the sole core rung is Y1 = +HexNAc (GalNAc); every other residue is
+/// antenna. See `GlycanCore::OGlycan` / `O_CORE_Y_LADDER`.
+pub const O_CORE_Y_STEPS: [f64; 1] = [HEXNAC];
+
 /// Single-monosaccharide + common combo steps for the Y-ladder walk. Combos are
 /// computed from the residue masses so they cannot drift from the standard.
 pub const MONO_STEPS: [f64; 5] = [
@@ -96,5 +102,11 @@ mod tests {
         assert!((CORE_Y_STEPS[2] - (CORE_Y_STEPS[1] + HEX)).abs() < 1e-4);
         assert!((CORE_Y_STEPS[3] - (CORE_Y_STEPS[2] + HEX)).abs() < 1e-4);
         assert!((CORE_Y_STEPS[4] - (CORE_Y_STEPS[3] + HEX)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn o_core_y_steps_is_single_galnac() {
+        // O-glycan core ladder is the single reducing-end GalNAc rung (Y1).
+        assert_eq!(O_CORE_Y_STEPS, [HEXNAC]);
     }
 }

@@ -29,8 +29,11 @@ sequon-corrected FDP was ~4.3%.
 Pass the search FASTA to get the corrected number. Without it the raw fraction is printed
 with a loud warning and NO verdict, because a verdict on the raw fraction is misleading.
 
+The search-space denominator is core-dependent: N-glycan reports only at N-X-S/T sequons,
+O-glycan at any Ser/Thr residue. Pass `--core o` for an O-glycan search (`--glyco-core o`).
+
 Usage:
-    eval_entrap.py <pooled.pin> <percolator.psms> [q-threshold] [search.fasta]
+    eval_entrap.py [--core n|o] <pooled.pin> <percolator.psms> [q-threshold] [search.fasta]
 """
 import sys
 from collections import defaultdict
@@ -72,20 +75,29 @@ def _chi2_ppf(p, k):
 
 if len(sys.argv) < 3:
     sys.exit(__doc__)
-pin, psms = sys.argv[1], sys.argv[2]
-qmax = float(sys.argv[3]) if len(sys.argv) > 3 else 0.01
-fasta = sys.argv[4] if len(sys.argv) > 4 else None
+core = "n"
+args = sys.argv[1:]
+if args and args[0] == "--core":
+    core = args[1]
+    args = args[2:]
+if len(args) < 2:
+    sys.exit(__doc__)
+pin, psms = args[0], args[1]
+qmax = float(args[2]) if len(args) > 2 else 0.01
+fasta = args[3] if len(args) > 3 else None
 
 
-def space_ratio(path):
-    """(sample, entrap) sequon counts, and the protein counts as a fallback.
+def space_ratio(path, core="n"):
+    """(sample, entrap) site counts, and the protein counts as a fallback.
 
-    Sequons are the correct denominator for a glyco search: a glycopeptide can only be
-    reported at an N-X-S/T site, so a proteome with few sequons contributes little to the
-    space in which a FALSE glyco ID can be made, regardless of its protein count.
+    The site count is the correct denominator for a glyco search: a glycopeptide can only
+    be reported at an N-X-S/T sequon (N-glycan) or a Ser/Thr residue (O-glycan), so a
+    proteome with few sites contributes little to the space in which a FALSE glyco ID can
+    be made, regardless of its protein count.
     """
     import re
-    pat = re.compile(r"N[^P][ST]")
+    # N-glycan: N-X-S/T sequons. O-glycan: every Ser/Thr is a potential glycosite.
+    pat = re.compile(r"[ST]" if core == "o" else r"N[^P][ST]")
     s_seq = e_seq = s_prot = e_prot = 0
     hdr, buf = None, []
 
@@ -175,7 +187,7 @@ elif fasta is None:
     print("verdict          : NO VERDICT — the raw fraction understates FDP by (1 + S/E);")
     print("                   on the plasma benchmark that factor is ~10x by sequon count.")
 else:
-    s_seq, e_seq, s_prot, e_prot = space_ratio(fasta)
+    s_seq, e_seq, s_prot, e_prot = space_ratio(fasta, core)
     if e_seq == 0 or e_prot == 0:
         print(f"entrapment FDP   : UNKNOWN — no ENTRAP_ proteins found in {fasta}")
         print("verdict          : NO VERDICT")
@@ -183,9 +195,9 @@ else:
         f_seq = 1.0 + s_seq / e_seq
         f_prot = 1.0 + s_prot / e_prot
         fdp = raw * f_seq
-        print(f"space (sequons)  : sample {s_seq} / entrap {e_seq}  -> correction {f_seq:.2f}x")
+        print(f"space (sites)    : sample {s_seq} / entrap {e_seq}  -> correction {f_seq:.2f}x")
         print(f"space (proteins) : sample {s_prot} / entrap {e_prot}  -> correction {f_prot:.2f}x")
-        print(f"entrapment FDP   : {fdp * 100:.2f}%   (sequon-corrected)")
+        print(f"entrapment FDP   : {fdp * 100:.2f}%   (site-corrected)")
         # Poisson 95% CI on the observed count: with a handful of hits the point
         # estimate is far less certain than its two decimal places suggest.
         if n_entrap == 0:

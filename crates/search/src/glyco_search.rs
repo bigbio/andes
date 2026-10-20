@@ -1,9 +1,11 @@
 // Glycopeptide scoring driver for andes.
 //
 // Implements bare-backbone glyco-PSM scoring: given a set of spectra and a
-// PreparedSearch (standard tryptic candidate pool), enumerates hybrid
-// backbone candidates (DB-branch glycan list + de-novo Y-ladder), filters
-// peptide candidates by backbone mass and N-X-S/T sequon, and scores each
+// PreparedSearch (standard tryptic candidate pool), enumerates backbone
+// candidates glycan-first (DB branch: glycan → peptide by mass) plus a
+// peptide-first b/y recall pass, filters candidates by backbone mass and the
+// selected core's glycosite motif (N-X-S/T for N-glycan, any Ser/Thr for
+// O-glycan), and scores each
 // (backbone peptide, glycan) pair using the standard rank-LLR scorer.
 //
 // The glycan mass is NOT added to the peptide's Asn — this is the
@@ -42,7 +44,7 @@ use andes_glyco::glyco_psm::{
 };
 
 /// Maximum backbone candidates kept per spectrum after Phase-1 truncation (DB +
-/// de-novo combined, after union-dedup), per truncation axis.
+/// peptide-first combined, after union-dedup), per truncation axis.
 pub const GLYCO_BACKBONE_TOP_K: usize = 150;
 
 /// Peptide-first fragment-index charge states: b/y are indexed at
@@ -63,6 +65,11 @@ pub const GLYCO_MAX_PF: usize = 1024;
 /// configuration; the `andes` binary sets every field explicitly.
 #[derive(Clone, Debug, Default)]
 pub struct GlycoConfig {
+    /// Glycan core type: `NGlycan` (trimannosyl, N-X-S/T) or `OGlycan` (single
+    /// GalNAc, Ser/Thr). Selects the ion-index core, the candidate membership
+    /// predicate, the site resolver, the diagnostic-ion panel, the small-glycan
+    /// floor and the PIN site tag.
+    pub core: GlycanCore,
     /// Minimum trimannosyl-core Y ions required to emit a glyco PSM. 0 = no requirement
     /// (previous behaviour). The field standard is 2.
     pub min_core_y: u32,
@@ -115,7 +122,9 @@ pub struct GlycoConfig {
 }
 
 use andes_glyco::hybrid::{db_branch, BackboneHit, Source};
-use andes_glyco::oxonium::{oxonium_gate, sialic_consistency, OXONIUM_GATE_MIN_FRAC};
+use andes_glyco::oxonium::{
+    hex_diagnostic_evidence, oxonium_gate, sialic_consistency, OXONIUM_GATE_MIN_FRAC,
+};
 
 use crate::glyco_fragment_index::FragmentIndex;
 
@@ -175,7 +184,22 @@ pub struct GlycoSpectrumResult {
 
 /// Minimum implied N-glycan mass (2×HexNAc core) for the peptide-first path's
 /// glycan-by-subtraction filter. Mirrors the solver's `MIN_GLYCAN`.
-const MIN_GLYCAN: f64 = 406.0;
+const MIN_GLYCAN_N: f64 = 406.0;
+
+/// Minimum implied O-glycan mass (one HexNAc, the Tn antigen = 203.079) for the
+/// same filter. Like [`MIN_GLYCAN_N`] it sits below the exact core mass, so a Tn
+/// precursor measured slightly light still reaches the tolerance-aware glycan
+/// match instead of being cut here.
+const MIN_GLYCAN_O: f64 = 203.0;
+
+/// Core-dependent glycan-by-subtraction floor for the peptide-first path. Tn
+/// (HexNAc = 203.08) and core-1 (HexHexNAc = 365.13) only pass under O-glycan.
+fn min_glycan_floor(core: GlycanCore) -> f64 {
+    match core {
+        GlycanCore::NGlycan => MIN_GLYCAN_N,
+        GlycanCore::OGlycan => MIN_GLYCAN_O,
+    }
+}
 
 /// Find the known glycan nearest `target` mass within tolerance, using a sorted
 /// `(mass, glycan_index)` view for a binary-search start. Returns the matched
@@ -309,10 +333,15 @@ fn glyco_aware_peptide(
 
 /// First glycosite of `pep` ([`andes_glyco::sequon::glycosites`]: internal
 /// sequons first, then the boundary sequon completed by `pep.post`), defaulting
-/// to 0 when there is none. Shared by every c/z and rank-glycan scorer so they
-/// place the glycan on the same residue.
-fn glyco_site_for(pep: &model::peptide::Peptide) -> usize {
+/// to 0 when there is none. For O-glycan it is the first Ser/Thr (no motif, no
+/// boundary case); the site is not localized, so on a peptide with several S/T
+/// the c/z features describe this first site only. Shared by every c/z and
+/// rank-glycan scorer so they place the glycan on the same residue.
+fn glyco_site_for(pep: &model::peptide::Peptide, core: GlycanCore) -> usize {
     let res: Vec<u8> = pep.residues.iter().map(|aa| aa.residue).collect();
+    if core == GlycanCore::OGlycan {
+        return andes_glyco::sequon::first_ser_thr_site(&res).unwrap_or(0);
+    }
     andes_glyco::sequon::glycosites(&res, pep.post)
         .first()
         .copied()
@@ -327,12 +356,13 @@ fn cz_score_at_site(
     gmass: f64,
     max_frag_charge: u8,
     tol_ppm: f64,
+    core: GlycanCore,
 ) -> f32 {
     cz_hyperscore_psm(
         ss,
         pep,
         gmass,
-        glyco_site_for(pep),
+        glyco_site_for(pep, core),
         max_frag_charge,
         tol_ppm,
     )
@@ -407,18 +437,28 @@ pub struct GlycoCandidates {
 }
 
 impl GlycoCandidates {
-    /// Materialise the table from the out-of-core candidate index of `prepared`.
-    pub fn from_out_of_core(prepared: &PreparedSearch<'_>) -> Self {
+    /// Materialise the table from the out-of-core candidate index of `prepared`,
+    /// keeping every span that carries the selected core's glycosite motif
+    /// (N-X-S/T for N, any Ser/Thr for O).
+    pub fn from_out_of_core(prepared: &PreparedSearch<'_>, core: GlycanCore) -> Self {
         Self::from_candidates(
-            prepared.out_of_core_candidates_where(crate::candidate_gen::span_has_nxst_sequon),
+            prepared.out_of_core_candidates_where(move |residues, post| match core {
+                GlycanCore::NGlycan => crate::candidate_gen::span_has_nxst_sequon(residues, post),
+                GlycanCore::OGlycan => crate::candidate_gen::span_has_ser_or_thr(residues, post),
+            }),
+            core,
         )
     }
 
-    /// The table over `candidates`, which must all carry a sequon.
-    pub fn from_candidates(candidates: Vec<crate::candidate_gen::Candidate>) -> Self {
-        debug_assert!(candidates
-            .iter()
-            .all(crate::candidate_gen::candidate_has_nxst_sequon));
+    /// The table over `candidates`, which must all carry the selected core's motif.
+    pub fn from_candidates(
+        candidates: Vec<crate::candidate_gen::Candidate>,
+        core: GlycanCore,
+    ) -> Self {
+        debug_assert!(candidates.iter().all(match core {
+            GlycanCore::NGlycan => crate::candidate_gen::candidate_has_nxst_sequon,
+            GlycanCore::OGlycan => crate::candidate_gen::candidate_has_ser_or_thr,
+        }));
         let mass_order = crate::match_engine::build_mass_order(&candidates);
         Self {
             candidates,
@@ -438,7 +478,11 @@ impl GlycoCandidates {
 pub struct GlycoScoreCtx<'a> {
     pub params: &'a crate::search_params::SearchParams,
     pub scorer: &'a scoring_crate::scoring::RankScorer,
-    /// The run's [`GlycoCandidates`]: every candidate carries an N-X-S/T sequon.
+    /// Glycan core type (`NGlycan`/`OGlycan`) — selects the glycosite resolver and
+    /// the small-glycan floor in the scoring path.
+    pub core: GlycanCore,
+    /// The run's [`GlycoCandidates`]: every candidate carries the selected core's
+    /// glycosite motif (N-X-S/T or any Ser/Thr).
     pub candidates: &'a [crate::candidate_gen::Candidate],
     /// [`GlycoCandidates::mass_order`]: candidate indices by exact mass.
     pub mass_order: &'a [u32],
@@ -482,6 +526,8 @@ pub struct GlycoScoreCtx<'a> {
 pub struct GlycoCtxOwned {
     frag_index: FragmentIndex,
     glycan_sorted: Vec<(f64, usize)>,
+    /// Glycan core type (`NGlycan`/`OGlycan`), copied from `GlycoConfig::core`.
+    core: GlycanCore,
     /// Glycan-first ion index (diagnostic + complementary fragment ions), built
     /// once from the glycan list and used per-spectrum to narrow the DB-branch
     /// from the full list to the top candidate glycans.
@@ -561,7 +607,7 @@ impl GlycoCtxOwned {
         let min_core_y_cfg = cfg.min_core_y;
         let max_gen_peaks = cfg.max_gen_peaks;
 
-        // PEPTIDE-FIRST index (combines with the backbone-first hybrid below). Build a
+        // PEPTIDE-FIRST index (the b/y recall pass alongside the glycan-first DB branch). Build a
         // fragment-ion index over the SEQUON candidate peptides ONCE. Per spectrum we
         // query it for peptides with real b/y support, then keep those whose
         // glycan-by-subtraction (`precursor − peptide`) hits a known glycan. This
@@ -635,20 +681,24 @@ impl GlycoCtxOwned {
             // 0.02 Da is the fixed bucket granularity (index resolution), not a
             // tolerance; the acceptance window is `tol_ppm` at query time, derived
             // from `--glyco-tol-ppm` rather than hardcoded.
-            GlycanIonIndex::build(&glycans, 0.02, Some(tol_ppm), GlycanCore::NGlycan)
+            GlycanIonIndex::build(&glycans, 0.02, Some(tol_ppm), cfg.core)
         };
         let glycan_first_cfg = GlycanConfig {
             tol_ppm,
             min_diagnostic_ions: 2,
-            min_core_ions: 1, // permissive: this is a pre-filter, not a gate
+            min_core_ions: 1, // permissive: this is a pre-filter, not a gate (single GalNAc for O)
             top_k: 100,       // field standard: top 100 glycan compositions per peptide search
-            diagnostic_ions: andes_glyco::glycan_first::default_diagnostic_ions(),
+            diagnostic_ions: match cfg.core {
+                GlycanCore::NGlycan => andes_glyco::glycan_first::default_diagnostic_ions(),
+                GlycanCore::OGlycan => andes_glyco::glycan_first::o_glycan_diagnostic_ions(),
+            },
             diagnostic_filter: true,
             score_weights: (1.0, 1.0, 0.5),
         };
         GlycoCtxOwned {
             frag_index,
             glycan_sorted,
+            core: cfg.core,
             glycan_ion_index,
             glycan_first_cfg,
             scan_filter,
@@ -680,6 +730,7 @@ impl GlycoCtxOwned {
         GlycoScoreCtx {
             params: prepared.params,
             scorer: prepared.scorer,
+            core: self.core,
             candidates: &table.candidates,
             mass_order: &table.mass_order,
             fragment_tolerance_da: prepared.fragment_tolerance_da,
@@ -765,8 +816,8 @@ fn glyco_charges_to_try(
 }
 
 /// Score one spectrum's glyco backbone candidates end to end: candidate
-/// generation (backbone-first hybrid DB/de-novo, peptide-first fragment-index,
-/// and glycan-Y-first, per the `ctx` toggles), dedup, b/y-ranked truncation, and
+/// generation (glycan-first DB branch — glycan list → peptide by mass, full or
+/// ion-index-narrowed — plus a peptide-first b/y recall pass), dedup, b/y-ranked truncation, and
 /// phase-2 feature extraction for the surviving winners.
 /// The isotope-error window one spectrum searches. `override_range` replaces
 /// `default` for spectrum `spec_idx` when `mask` is `None` or flags that index;
@@ -825,6 +876,17 @@ pub fn glycan_source(full_glycan_db: bool, oxonium_fired: bool, is_etd: bool) ->
 /// backbone with at least one core-Y ion.
 fn has_backbone_evidence(hit: &BackboneHit, core_y_hits: u8) -> bool {
     hit.source != Source::Db || hit.peptide_first || core_y_hits > 0
+}
+
+/// The O-glycan Hex gate: a candidate whose glycan claims Hex (galactose) is
+/// kept only when the spectrum shows a Hex diagnostic ion. N-glycans are never
+/// gated (Hex is in the trimannosyl core), and Hex-free / de-novo candidates pass.
+///
+/// The GalNAc oxonium alone passes the O-glycan diagnostic gate, so without this
+/// the scorer can add galactose to a composition with no galactose evidence (the
+/// Hex-suggested error the IHMO benchmark measures).
+fn hex_gate_passes(core: GlycanCore, glycan: Option<&GlycanComp>, hex_evidence: bool) -> bool {
+    core != GlycanCore::OGlycan || glycan.is_none_or(|g| g.hex == 0) || hex_evidence
 }
 
 /// Indices of the candidates whose residue mass is within `tol_da` of
@@ -920,7 +982,7 @@ fn score_spectrum_glyco(
     // partner (same precursor), GENERATE candidate backbones from the HCD
     // scan's peaks — it carries the oxonium / core-Y / b/y evidence the ETD
     // scan lacks. `gen_peaks`/`gen_stats` drive every generation call
-    // (oxonium gate, de-novo solver, db_branch, peptide-first, glycan-Y
+    // (oxonium gate, db_branch, peptide-first, glycan-Y
     // index, core-Y counts). The c/z LADDER scoring (hyperscore, rank) is
     // always measured on THIS ETD scan (`spec.peaks`/`stats`).
     // NOTE ON PROVENANCE: the glycan-level evidence derived during
@@ -1112,7 +1174,7 @@ fn score_spectrum_glyco(
                 for iso in iso_min..=iso_max {
                     let precursor_neutral = observed_neutral - iso as f64 * ISOTOPE;
                     let glycan_mass = precursor_neutral - pep_residue;
-                    if glycan_mass < MIN_GLYCAN {
+                    if glycan_mass < min_glycan_floor(ctx.core) {
                         continue;
                     }
                     // Tolerance is set by the PRECURSOR mass error (the
@@ -1153,6 +1215,14 @@ fn score_spectrum_glyco(
     // Dedup cross-charge/cross-isotope backbone hits, merging only hits
     // that represent the SAME (backbone, glycan-hypothesis) candidate.
     let deduped_backbone = dedup_backbone_hits(all_backbone, tol_ppm);
+    // O-glycan Hex gate: drop Hex-containing glycan hypotheses whose HCD spectrum
+    // lacks a Hex diagnostic ion (galactose without galactose evidence). Read once
+    // per spectrum — the evidence is a property of `gen_peaks`, not of the hit.
+    let hex_evidence = hex_diagnostic_evidence(gen_peaks, tol_ppm);
+    let deduped_backbone: Vec<BackboneHit> = deduped_backbone
+        .into_iter()
+        .filter(|h| hex_gate_passes(ctx.core, h.glycan.as_ref(), hex_evidence))
+        .collect();
 
     // --- b/y-ranked backbone selection (replaces Y-ladder pre-filter) ---
     //
@@ -1228,6 +1298,7 @@ fn score_spectrum_glyco(
                 h.backbone_mass + H2O,
                 tol_ppm,
                 max_frag_charge,
+                ctx.core,
             )
         })
         .collect();
@@ -1303,7 +1374,7 @@ fn score_spectrum_glyco(
         }
         let bb_residue = bb_hit.backbone_mass;
         // The charge (and isotope offset) that produced this backbone
-        // via `hybrid_candidates_with_isotope`. Scoring MUST use this
+        // (db_branch or the peptide-first recall). Scoring MUST use this
         // exact charge — re-deriving/re-picking a charge independently
         // here would score against a precursor mass inconsistent with
         // the one that actually matched this backbone (BUG: precursor
@@ -1317,9 +1388,8 @@ fn score_spectrum_glyco(
         let ss = match scored_for_charge(phase1_scored, z) {
             Some(s) => s,
             // The backbone's charge fell outside `charges_to_try`
-            // (shouldn't happen since `hybrid_candidates_with_isotope`
-            // is only called for charges in that set, but guard
-            // defensively rather than panic).
+            // (shouldn't happen since generation only runs for charges in
+            // that set, but guard defensively rather than panic).
             None => continue,
         };
 
@@ -1359,7 +1429,7 @@ fn score_spectrum_glyco(
                     .map(|g| g.mass)
                     .unwrap_or(bb_hit.glycan_mass_residual);
                 if gmass > 0.0 {
-                    let gsite = glyco_site_for(&cand.peptide);
+                    let gsite = glyco_site_for(&cand.peptide, ctx.core);
                     std::borrow::Cow::Owned(glyco_aware_peptide(&cand.peptide, gsite, gmass))
                 } else {
                     std::borrow::Cow::Borrowed(&cand.peptide)
@@ -1400,6 +1470,7 @@ fn score_spectrum_glyco(
                             gmass,
                             max_frag_charge,
                             tol_ppm,
+                            ctx.core,
                         );
                         if czs > backbone_best_cz[bb_idx] {
                             backbone_best_cz[bb_idx] = czs;
@@ -1571,9 +1642,12 @@ fn score_spectrum_glyco(
         // y_peaks/y_stats = the scored spectrum.
         match &bb.glycan {
             Some(g) => {
-                glycan_y_intensity(y_peaks, y_stats, bbn, g, tol_ppm, max_frag_charge) as f32
+                glycan_y_intensity(y_peaks, y_stats, bbn, g, tol_ppm, max_frag_charge, ctx.core)
+                    as f32
             }
-            None => core_y_intensity(y_peaks, y_stats, bbn, tol_ppm, max_frag_charge) as f32,
+            None => {
+                core_y_intensity(y_peaks, y_stats, bbn, tol_ppm, max_frag_charge, ctx.core) as f32
+            }
         }
     };
     // Memoised per backbone: the ladder is a pure function of the backbone
@@ -1608,7 +1682,7 @@ fn score_spectrum_glyco(
                         .map(|g| g.mass)
                         .unwrap_or(bb.glycan_mass_residual);
                     if gmass > 0.0 {
-                        let gsite = glyco_site_for(pep);
+                        let gsite = glyco_site_for(pep, ctx.core);
                         let modified = glyco_aware_peptide(pep, gsite, gmass);
                         hyperscore_psm_with_matches(ss, &modified, spec_scorer)
                     } else {
@@ -1661,7 +1735,7 @@ fn score_spectrum_glyco(
             .map(|g| g.mass)
             .unwrap_or(bb.glycan_mass_residual);
         let pep = &candidates[w.cand_slot].peptide;
-        cz_score_at_site(ss, pep, gmass, max_frag_charge, tol_ppm)
+        cz_score_at_site(ss, pep, gmass, max_frag_charge, tol_ppm, ctx.core)
     };
 
     // INTENSITY companion to `cz` (additive PIN feature `CzIntensity`): the
@@ -1684,7 +1758,7 @@ fn score_spectrum_glyco(
         let pep = &candidates[w.cand_slot].peptide;
         // Same glycosite the selector's `cz` term scored, so every c/z column on
         // this row describes ONE localization.
-        let gsite = glyco_site_for(pep);
+        let gsite = glyco_site_for(pep, ctx.core);
         cz_matched_intensity_frac(ss, pep, gmass, gsite, max_frag_charge, tol_ppm)
     };
 
@@ -1711,7 +1785,7 @@ fn score_spectrum_glyco(
         let pep = &candidates[w.cand_slot].peptide;
         // Same glycosite the selector's `cz` term scored, so every c/z column on
         // this row describes ONE localization.
-        let gsite = glyco_site_for(pep);
+        let gsite = glyco_site_for(pep, ctx.core);
         cz_structure_features(ss, pep, gmass, gsite, max_frag_charge, tol_ppm)
     };
 
@@ -1753,7 +1827,7 @@ fn score_spectrum_glyco(
                         .map(|g| g.mass)
                         .unwrap_or(bb.glycan_mass_residual);
                     if gmass > 0.0 {
-                        let gsite = glyco_site_for(pep);
+                        let gsite = glyco_site_for(pep, ctx.core);
                         std::borrow::Cow::Owned(glyco_aware_peptide(pep, gsite, gmass))
                     } else {
                         std::borrow::Cow::Borrowed(pep)
@@ -1925,7 +1999,7 @@ fn score_spectrum_glyco(
                 .map(|g| g.mass)
                 .unwrap_or(bb_hit.glycan_mass_residual);
             if gmass > 0.0 {
-                let gsite = glyco_site_for(&cand.peptide);
+                let gsite = glyco_site_for(&cand.peptide, ctx.core);
                 std::borrow::Cow::Owned(glyco_aware_peptide(&cand.peptide, gsite, gmass))
             } else {
                 std::borrow::Cow::Borrowed(&cand.peptide)
@@ -1994,13 +2068,23 @@ fn score_spectrum_glyco(
             // glycan fall back to the composition-independent core-Y
             // ladder. (Was hardcoded 0.0 = dead before Phase 1.)
             y_ladder_intensity_score: match &bb_hit.glycan {
-                Some(g) => {
-                    glycan_y_intensity(y_peaks, y_stats, bb_neutral, g, tol_ppm, max_frag_charge)
-                        as f32
-                }
-                None => {
-                    core_y_intensity(y_peaks, y_stats, bb_neutral, tol_ppm, max_frag_charge) as f32
-                }
+                Some(g) => glycan_y_intensity(
+                    y_peaks,
+                    y_stats,
+                    bb_neutral,
+                    g,
+                    tol_ppm,
+                    max_frag_charge,
+                    ctx.core,
+                ) as f32,
+                None => core_y_intensity(
+                    y_peaks,
+                    y_stats,
+                    bb_neutral,
+                    tol_ppm,
+                    max_frag_charge,
+                    ctx.core,
+                ) as f32,
             },
             // COMPLETENESS of the assigned composition's own Y ladder: the
             // fraction of the rungs it PREDICTS that were matched, in [0,1].
@@ -2023,6 +2107,7 @@ fn score_spectrum_glyco(
                     tol_ppm,
                     max_frag_charge,
                     None,
+                    ctx.core,
                 ) as f32,
                 None => 0.0,
             },
@@ -2134,12 +2219,13 @@ fn score_spectrum_glyco(
 ///
 /// For each spectrum:
 /// 1. Run `oxonium_gate` to gather oxonium evidence.
-/// 2. For each charge in the params charge range, call `hybrid_candidates`
-///    to enumerate backbone hits (DB + de-novo).
+/// 2. For each charge in the params charge range, generate backbone hits
+///    glycan-first (DB branch, full or ion-index-narrowed list) plus a
+///    peptide-first b/y recall pass.
 /// 3. Union and dedup backbone hits within 0.02 Da, capping at
 ///    [`GLYCO_BACKBONE_TOP_K`].
 /// 4. For each backbone hit, find candidates in the mass bucket whose peptide
-///    mass matches the backbone and has a N-X-S/T sequon.
+///    mass matches the backbone and carries the selected core's glycosite motif.
 /// 5. Score each (peptide, glycan) pair and emit a `FullGlycoPsm`.
 ///
 /// B1 paired-scan generation map. For each ETD/AI-ETD spectrum, find its paired
@@ -2274,6 +2360,54 @@ mod glycan_source_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn o_glycan_floor_admits_a_light_tn_precursor() {
+        use super::{min_glycan_floor, GlycanCore};
+        use andes_glyco::glycan_mass::HEXNAC;
+        // A Tn glycan measured 0.01 Da light must still reach the glycan match.
+        assert!(HEXNAC - 0.01 >= min_glycan_floor(GlycanCore::OGlycan));
+        // The N floor is unchanged and still excludes a single HexNAc.
+        assert!(HEXNAC < min_glycan_floor(GlycanCore::NGlycan));
+    }
+
+    #[test]
+    fn o_glycan_hex_gate_drops_hex_without_evidence() {
+        use super::{hex_gate_passes, GlycanComp, GlycanCore};
+        let hex_glycan = GlycanComp {
+            hexnac: 1,
+            hex: 1,
+            fuc: 0,
+            neuac: 0,
+            neugc: 0,
+            core_fuc: 0,
+            mass: 0.0,
+        };
+        let no_hex = GlycanComp {
+            hex: 0,
+            ..hex_glycan.clone()
+        };
+        // N-glycan: Hex is in the trimannosyl core, never gated.
+        assert!(hex_gate_passes(
+            GlycanCore::NGlycan,
+            Some(&hex_glycan),
+            false
+        ));
+        // O-glycan Hex-free and de-novo (no glycan) candidates always pass.
+        assert!(hex_gate_passes(GlycanCore::OGlycan, Some(&no_hex), false));
+        assert!(hex_gate_passes(GlycanCore::OGlycan, None, false));
+        // O-glycan with Hex passes only with Hex diagnostic evidence.
+        assert!(!hex_gate_passes(
+            GlycanCore::OGlycan,
+            Some(&hex_glycan),
+            false
+        ));
+        assert!(hex_gate_passes(
+            GlycanCore::OGlycan,
+            Some(&hex_glycan),
+            true
+        ));
+    }
+
     #[test]
     fn peptide_first_backbones_are_exempt_from_the_core_y_prefilter() {
         use super::{dedup_backbone_hits, has_backbone_evidence, BackboneHit, Source};
@@ -2714,8 +2848,9 @@ mod tests {
 
         // Verify counts directly.
         let stats = SpectrumStats::new(&peaks);
-        let true_hits = count_core_y_hits(&peaks, &stats, true_bb, tol_ppm, 3);
-        let noise_hits = count_core_y_hits(&peaks, &stats, noise_bb, tol_ppm, 3);
+        let true_hits = count_core_y_hits(&peaks, &stats, true_bb, tol_ppm, 3, GlycanCore::NGlycan);
+        let noise_hits =
+            count_core_y_hits(&peaks, &stats, noise_bb, tol_ppm, 3, GlycanCore::NGlycan);
 
         assert_eq!(
             true_hits, 6,

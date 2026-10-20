@@ -1114,8 +1114,12 @@ accepted**; use the names (case-insensitive, `--fragmentation hcd` ≡ `HCD`). T
 
 ## 9. Glycopeptide search (experimental) & advanced knobs
 
-`--glyco` searches intact N-glycopeptides (N-X-S/T sequon backbones) and writes a
-`.glyco.pin`. The defaults are validated; most knobs are hidden.
+`--glyco` searches intact glycopeptides and writes a `.glyco.pin`. By default it
+searches **N**-glycopeptides (N-X-S/T sequon backbones, trimannosyl core). With
+`--glyco-core o` it searches **O**-glycopeptides instead: any Ser/Thr is a
+glycosite (no sequon), the core is a single reducing-end GalNAc, and the glycan
+database must be an O-glycan `.gdb` (e.g. a published O-glycan database). The
+defaults are validated; most knobs are hidden.
 
 **Main flags:**
 
@@ -1124,6 +1128,7 @@ accepted**; use the names (case-insensitive, `--fragmentation hcd` ≡ `HCD`). T
 | `--glyco-tol-ppm` | 20 | Fragment tolerance for glyco matching (oxonium, core-Y, backbone mass, c/z). **Raise it on ion-trap MS2** or the oxonium gate never fires. |
 | `--glyco-glycan-gdb <FILE>` | — | `.gdb` glycan database (canonical-string trees, the format of the bundled databases); structure (core- vs antenna-fucose) is kept. Wins over `--glyco-species`. |
 | `--glyco-species <NAME>` | — | Bundled database: `human`, `mouse`, `mouse-large`, `high-mannose`. One of the two is required. |
+| `--glyco-core <n\|o>` | `n` | Glycan core: `n` = N-glycan (N-X-S/T sequon gate, trimannosyl core), `o` = O-glycan (any S/T gate, single GalNAc core). An `o` run needs an O-glycan `.gdb`. |
 | `--precursor-mono` | `auto` | Correct each precursor to the monoisotope its MS1 envelope supports (mzML or `.raw`): tests "recorded = M+k", k = 0..6, and moves down k−1 isotopes when k > 0 clearly wins. On the engine L mouse-liver reference (PXD005553) 88 of 3,824 scans were recorded exactly +4 high (issue #64). Fitted spectra are searched with a `0..1` isotope window instead of `0..2`. Adds `MonoShift`/`MonoFit`/`MonoFitGain`/`MonoSNR`. An explicit `--isotope-error` is honoured; without MS1 output is byte-identical to `off`. Under `--glyco` the isotope-error window defaults to 0..=2 (dropping −1 measured +81 backbone-correct @1%). |
 | `--glyco-max-peaks` | 0 (no cap) | Peaks the **generation** stage considers; 300–500 helps very dense scans. |
 | `--glyco-retrieval-tol-ppm` | tol-ppm on high-res, the model's Da window on low-res | Retrieval window only; 20 ppm on high-res measured 6.9x faster at no identification cost. |
@@ -1148,7 +1153,10 @@ on ETD the rank/edge/hyperscore path scores the backbone with its intact glycan 
 backbone-correct @1%); the best enumerated candidate is promoted over a de-novo winner;
 peptide-first index at fragment charges 1..=2 with at most 1,024 candidates per spectrum;
 `--precursor-mono` uses max shift 6, minimum fit 0.90, minimum gain 0.15, minimum SNR 3.0,
-10 ppm MS1 tolerance and holds back 1 isotope.
+10 ppm MS1 tolerance and holds back 1 isotope; `--glyco-core o` additionally gates Hex>0
+(galactose) candidates on a Hex diagnostic ion (163.060 or 366.139) in the HCD spectrum —
+the GalNAc oxonium every O-glycopeptide carries cannot justify adding galactose (N-glycan is
+unaffected).
 
 Deleted after A/B tests (2026-09-05): `--glyco-split-election`, `--glyco-gp-g`,
 `--glyco-gp-m`, `--glyco-isobar-rep`, `--glyco-y-index`, `--glyco-decorated-features`,

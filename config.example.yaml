@@ -80,7 +80,8 @@ rescoring:
   # predictor_backend: tract     # tract | ort (ONNX Runtime; build with --features ort)
 
 glyco:
-  enabled: false                 # intact N-glycopeptide search
+  enabled: false                 # intact glycopeptide search
+  # core: n                      # glycan core: n (N-glycan, default) | o (O-glycan)
   # species: human               # bundled glycan database: human | mouse | mouse-large | high-mannose
   # glycan_gdb: glycans.gdb      # or an external .gdb file (one of the two is required)
   # --- advanced (validated defaults; see DOCS §9) ---

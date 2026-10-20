@@ -15,7 +15,9 @@
 //!   `PseudoTransfer` target fit with the alignment prior computed without
 //!   this run's own observation;
 //! * not identified: a `Transfer` target and its decoy probes, with the
-//!   alignment prior;
+//!   alignment prior, when the [`TransferSelection`] keeps the pair (it
+//!   decides from the library alone, before any fit, and skips the target
+//!   and its decoy probes together);
 //! * an unaligned run gets its `Identified` rows (target and decoys) only (no
 //!   pseudo-transfers, no transfers); pairs without a prediction, and identified pairs whose
 //!   best PSM RT is not finite, are skipped and counted.
@@ -135,6 +137,9 @@ pub(crate) struct ExtractCounts {
     /// Unidentified pairs whose donor runs are all in other alignment
     /// components (no transfer rows; not in `no_prediction`).
     pub other_component: usize,
+    /// Unidentified pairs with a prediction that the transfer selection
+    /// skips (no transfer rows).
+    pub not_selected: usize,
     /// Identified fits that set the run's width prior.
     pub width_fits: usize,
     /// Fewer than the needed identified fits: the width prior is the default.
@@ -149,6 +154,91 @@ impl ExtractCounts {
         self.no_prediction += o.no_prediction;
         self.pseudo_other_component += o.pseudo_other_component;
         self.other_component += o.other_component;
+        self.not_selected += o.not_selected;
+    }
+}
+
+/// Which unidentified (precursor, run) pairs of an aligned run extract
+/// measures as transfers. It decides from the library alone, before any fit,
+/// and a skipped pair gets no rows at all: neither its target nor its decoy
+/// probes. The transfer FDR therefore sees the kept pairs exactly as without
+/// a selection (each with its full set of decoys), and an identity-decoy
+/// entry is selected by the same rule as a target entry, from its own donor
+/// runs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct TransferSelection {
+    /// Skip the transfers of an entry whose best donor PSM is above
+    /// [`TRANSFER_DONOR_Q`]: finalize never transfers such an entry.
+    pub donor_gate: bool,
+    /// Skip a pair with fewer other aligned donor runs than this fraction of
+    /// the library's aligned runs other than the acceptor, rounded up; 0
+    /// keeps every pair.
+    pub min_donor_fraction: f64,
+}
+
+/// Default of [`TransferSelection::min_donor_fraction`].
+pub(crate) const DEFAULT_MIN_DONOR_FRACTION: f64 = 0.004;
+
+impl TransferSelection {
+    /// Every pair with a prediction is measured.
+    pub(crate) const OFF: TransferSelection = TransferSelection {
+        donor_gate: false,
+        min_donor_fraction: 0.0,
+    };
+
+    pub(crate) fn is_off(&self) -> bool {
+        !self.donor_gate && self.min_donor_fraction <= 0.0
+    }
+
+    /// The fewest other aligned donor runs a pair needs in a library of
+    /// `aligned_runs` aligned runs.
+    fn min_donors(&self, aligned_runs: usize) -> u16 {
+        let others = aligned_runs.saturating_sub(1) as f64;
+        (self.min_donor_fraction * others).ceil().clamp(0.0, u16::MAX as f64) as u16
+    }
+
+    /// One line for the extract table metadata and the log.
+    pub(crate) fn describe(&self, aligned_runs: usize) -> String {
+        format!(
+            "donor_gate={} (best donor PSM q <= {TRANSFER_DONOR_Q}), min_donor_fraction={} ({} of {} other aligned runs)",
+            self.donor_gate,
+            self.min_donor_fraction,
+            self.min_donors(aligned_runs),
+            aligned_runs.saturating_sub(1)
+        )
+    }
+}
+
+impl Default for TransferSelection {
+    fn default() -> Self {
+        TransferSelection {
+            donor_gate: true,
+            min_donor_fraction: DEFAULT_MIN_DONOR_FRACTION,
+        }
+    }
+}
+
+/// [`TransferSelection`] resolved for one library.
+#[derive(Debug, Clone, Copy)]
+struct PairGate {
+    donor_gate: bool,
+    min_donors: u16,
+}
+
+impl PairGate {
+    fn new(sel: &TransferSelection, lib: &Library) -> Self {
+        let aligned = lib.alignment.maps.iter().filter(|m| m.is_some()).count();
+        PairGate {
+            donor_gate: sel.donor_gate,
+            min_donors: sel.min_donors(aligned),
+        }
+    }
+
+    /// True when the transfer of `e` with `other_donors` other aligned donor
+    /// runs is measured.
+    fn keeps(&self, e: &LibraryEntry, other_donors: u16) -> bool {
+        let donor_ok = !self.donor_gate || e.donor_psm.q <= TRANSFER_DONOR_Q;
+        donor_ok && other_donors >= self.min_donors
     }
 }
 
@@ -404,6 +494,7 @@ fn rows_into<F>(
     run: u16,
     aligned: bool,
     lib: &Library,
+    gate: &PairGate,
     wp: &WidthPrior,
     ep: &EvidenceParams,
     series: &[&Ms1RunIndex],
@@ -413,7 +504,10 @@ fn rows_into<F>(
 {
     let planned: Vec<(Vec<(ExtractRow, Probe)>, ExtractCounts)> = ids
         .par_iter()
-        .map(|&i| entry_rows(&lib.entries[i], run, aligned, lib, series[series_of(i)], wp))
+        .map(|&i| {
+            let e = &lib.entries[i];
+            entry_rows(e, run, aligned, lib, gate, series[series_of(i)], wp)
+        })
         .collect();
     let mut jobs = Vec::new();
     for (&i, (rows, _)) in ids.iter().zip(&planned) {
@@ -442,12 +536,14 @@ fn rows_into<F>(
 }
 
 /// The rows of one library entry in `run`, each with the probe to fit on
-/// `ms1` and no evidence yet. An unaligned run gets the identified row only.
+/// `ms1` and no evidence yet. An unaligned run gets the identified row only;
+/// a transfer that `gate` skips gets no rows.
 fn entry_rows(
     e: &LibraryEntry,
     run: u16,
     run_aligned: bool,
     lib: &Library,
+    gate: &PairGate,
     ms1: &Ms1RunIndex,
     wp: &WidthPrior,
 ) -> (Vec<(ExtractRow, Probe)>, ExtractCounts) {
@@ -516,6 +612,7 @@ fn entry_rows(
         }
         None if !run_aligned => {}
         None => match lib.alignment.predict(e.precursor, run) {
+            Some(_) if !gate.keeps(e, other_donors) => counts.not_selected += 1,
             Some((t_hat, s)) => {
                 for probe in probes(
                     e.precursor,
@@ -539,7 +636,8 @@ fn entry_rows(
     (rows, counts)
 }
 
-/// Measures every library precursor in run `run` from its MS1 table.
+/// Measures every library precursor in run `run` from its MS1 table: its
+/// identified pairs, and the transfers that `selection` keeps.
 ///
 /// An unaligned run yields its identified rows only and `counts.unaligned`.
 /// Errors: `run` outside the library's runs, an entry whose precursor has no
@@ -549,6 +647,7 @@ pub(crate) fn extract_run(
     ms1_table: &Path,
     lib: &Library,
     ep: &EvidenceParams,
+    selection: &TransferSelection,
 ) -> Result<RunExtract, String> {
     let maps = &lib.alignment.maps;
     let Some(map) = maps.get(run as usize) else {
@@ -569,6 +668,7 @@ pub(crate) fn extract_run(
         ));
     }
     let aligned = map.is_some();
+    let gate = PairGate::new(selection, lib);
     let load = || {
         #[cfg(test)]
         tracking::loaded();
@@ -602,6 +702,7 @@ pub(crate) fn extract_run(
             run,
             aligned,
             lib,
+            &gate,
             &wp,
             ep,
             &[&ms1],
@@ -624,7 +725,7 @@ pub(crate) fn extract_run(
     width_fit_count = fits.len();
     let wp = WidthPrior::from_fits(fits);
     rows_into(
-        &mut slots, &cv_ids, run, aligned, lib, &wp, ep, &series, series_of,
+        &mut slots, &cv_ids, run, aligned, lib, &gate, &wp, ep, &series, series_of,
     );
     drop(series);
     drop(split);
@@ -639,6 +740,7 @@ pub(crate) fn extract_run(
             run,
             aligned,
             lib,
+            &gate,
             &wp,
             ep,
             &[&ms1],
@@ -2086,6 +2188,16 @@ mod tests {
         EvidenceParams::default()
     }
 
+    /// [`extract_run`] measuring every transfer pair.
+    fn extract_all(
+        run: u16,
+        ms1_table: &Path,
+        lib: &Library,
+        ep: &EvidenceParams,
+    ) -> Result<RunExtract, String> {
+        extract_run(run, ms1_table, lib, ep, &TransferSelection::OFF)
+    }
+
     fn rows_of(rows: &[ExtractRow], p: u32) -> Vec<&ExtractRow> {
         rows.iter().filter(|r| r.precursor == p).collect()
     }
@@ -2098,7 +2210,7 @@ mod tests {
     fn identified_pairs_get_identified_and_pseudo_rows() {
         let fx = fixture(false);
         assert!(fx.lib.alignment.maps[1].is_some());
-        let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
+        let out = extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         for p in 0..BOTH {
             let rows = rows_of(&out.rows, p);
             assert_eq!(rows.len(), 4, "precursor {p}: {rows:?}");
@@ -2213,7 +2325,7 @@ mod tests {
                 .collect()
         };
         for run in [0u16, 1] {
-            let a = extract_run(
+            let a = extract_all(
                 run,
                 &target.ms1_tables[run as usize],
                 &target.lib,
@@ -2221,7 +2333,7 @@ mod tests {
             )
             .unwrap();
             let b =
-                extract_run(run, &decoy.ms1_tables[run as usize], &decoy.lib, &params()).unwrap();
+                extract_all(run, &decoy.ms1_tables[run as usize], &decoy.lib, &params()).unwrap();
             let rows = rows_of(&b.rows, ONLY_RUN0);
             // Identified in run 0 (target and decoy probes), a transfer with
             // its decoys in run 1: the target entry's rows, fitted alike.
@@ -2247,7 +2359,7 @@ mod tests {
     #[test]
     fn missing_pairs_get_target_and_decoys() {
         let fx = fixture(false);
-        let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
+        let out = extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         let rows = rows_of(&out.rows, ONLY_RUN0);
         assert_eq!(rows.len(), 3, "{rows:?}");
         assert!(rows
@@ -2264,7 +2376,7 @@ mod tests {
             assert!(e.llr < target.llr / 10.0, "{d:?}");
         }
         // The run-1-only precursor is a transfer into run 0.
-        let out0 = extract_run(0, &fx.ms1_tables[0], &fx.lib, &params()).unwrap();
+        let out0 = extract_all(0, &fx.ms1_tables[0], &fx.lib, &params()).unwrap();
         let rows = rows_of(&out0.rows, ONLY_RUN1);
         assert_eq!(rows.len(), 3);
         assert!(rows.iter().all(|r| r.role == Role::Transfer));
@@ -2276,6 +2388,85 @@ mod tests {
             .unwrap()
             .q;
         assert!(rows.iter().all(|r| r.library_q == lq));
+    }
+
+    /// `lib` with the entry of precursor `p` changed by `f`.
+    fn with_entry(lib: &Library, p: u32, f: impl Fn(&mut LibraryEntry)) -> Library {
+        let mut lib = lib.clone();
+        f(lib.entries.iter_mut().find(|e| e.precursor == p).unwrap());
+        lib
+    }
+
+    /// The rows of `all` without the transfer rows of the pairs in `skipped`.
+    fn without(all: &[ExtractRow], skipped: &[(u32, u16)]) -> Vec<ExtractRow> {
+        all.iter()
+            .filter(|r| !(r.role == Role::Transfer && skipped.contains(&(r.precursor, r.run))))
+            .cloned()
+            .collect()
+    }
+
+    const SELECT: TransferSelection = TransferSelection {
+        donor_gate: true,
+        min_donor_fraction: 0.5,
+    };
+
+    #[test]
+    fn selection_skips_transfers_finalize_cannot_accept() {
+        let fx = fixture(false);
+        // The best donor PSM of precursor ONLY_RUN0 misses the transfer donor
+        // threshold: its transfer into run 1 (target and decoys) is not
+        // measured; everything else is measured as without a selection.
+        let lib = with_entry(&fx.lib, ONLY_RUN0, |e| e.donor_psm.q = 0.002);
+        let all = extract_all(1, &fx.ms1_tables[1], &lib, &params()).unwrap();
+        let sel = extract_run(1, &fx.ms1_tables[1], &lib, &params(), &SELECT).unwrap();
+        assert_eq!(rows_of(&all.rows, ONLY_RUN0).len(), 3);
+        assert!(rows_of(&sel.rows, ONLY_RUN0).is_empty());
+        assert_eq!(sel.rows, without(&all.rows, &[(ONLY_RUN0, 1)]));
+        assert_eq!((all.counts.not_selected, sel.counts.not_selected), (0, 1));
+        // Without the donor gate the pair is measured.
+        let no_gate = TransferSelection {
+            donor_gate: false,
+            ..SELECT
+        };
+        let kept = extract_run(1, &fx.ms1_tables[1], &lib, &params(), &no_gate).unwrap();
+        assert_eq!(kept.rows, all.rows);
+    }
+
+    #[test]
+    fn selection_skips_transfers_with_too_few_donor_runs() {
+        let fx = fixture(false);
+        // Precursor ONLY_RUN1 keeps its alignment observation in run 1 (so
+        // run 0 still has a prediction) but has no donor run left.
+        let lib = with_entry(&fx.lib, ONLY_RUN1, |e| e.donors.clear());
+        let all = extract_all(0, &fx.ms1_tables[0], &lib, &params()).unwrap();
+        assert_eq!(rows_of(&all.rows, ONLY_RUN1).len(), 3);
+        let sel = extract_run(0, &fx.ms1_tables[0], &lib, &params(), &SELECT).unwrap();
+        assert_eq!(sel.rows, without(&all.rows, &[(ONLY_RUN1, 0)]));
+        assert_eq!(sel.counts.not_selected, 1);
+        // The identified rows and pseudo-transfers of every precursor stay.
+        let roles = |rows: &[ExtractRow], role: Role| rows.iter().filter(|r| r.role == role).count();
+        for role in [Role::Identified, Role::PseudoTransfer] {
+            assert_eq!(roles(&sel.rows, role), roles(&all.rows, role));
+        }
+        // The fixture's own transfers have one donor run each: kept.
+        let sel = extract_run(0, &fx.ms1_tables[0], &fx.lib, &params(), &SELECT).unwrap();
+        assert_eq!(sel, extract_all(0, &fx.ms1_tables[0], &fx.lib, &params()).unwrap());
+    }
+
+    #[test]
+    fn min_donors_scale_with_the_aligned_runs() {
+        let sel = |f: f64| TransferSelection {
+            donor_gate: false,
+            min_donor_fraction: f,
+        };
+        assert_eq!(sel(0.0).min_donors(500), 0);
+        assert_eq!(sel(0.004).min_donors(6), 1);
+        assert_eq!(sel(0.004).min_donors(250), 1);
+        assert_eq!(sel(0.004).min_donors(500), 2);
+        assert_eq!(sel(0.004).min_donors(1000), 4);
+        assert_eq!(sel(1.0).min_donors(1), 0);
+        assert!(TransferSelection::OFF.is_off());
+        assert!(!TransferSelection::default().is_off());
     }
 
     #[test]
@@ -2321,7 +2512,7 @@ mod tests {
         let path = dir.path().join("run3.ms1.parquet");
         let index = Ms1RunIndex::new(run_scans(3, false, &|_| false));
         write_ms1_table(&path, "run3", &index).unwrap();
-        let out = extract_run(3, &path, &lib, &params()).unwrap();
+        let out = extract_all(3, &path, &lib, &params()).unwrap();
         // 0..60 and 120 come from the other component: no rows, counted.
         assert_eq!(out.counts.other_component, 61);
         assert_eq!(out.counts.no_prediction, 0);
@@ -2338,7 +2529,7 @@ mod tests {
         let path = dir.path().join("run2.ms1.parquet");
         let index = Ms1RunIndex::new(run_scans(2, false, &|_| false));
         write_ms1_table(&path, "run2", &index).unwrap();
-        let out = extract_run(2, &path, &lib, &params()).unwrap();
+        let out = extract_all(2, &path, &lib, &params()).unwrap();
         assert_eq!(out.counts.pseudo_other_component, 1);
         let rows = rows_of(&out.rows, 121);
         assert!(rows.iter().all(|r| r.role == Role::Identified), "{rows:?}");
@@ -2349,7 +2540,7 @@ mod tests {
     fn unaligned_run_keeps_its_identified_rows() {
         let fx = fixture(false);
         assert!(fx.lib.alignment.maps[2].is_none());
-        let out = extract_run(2, &fx.ms1_tables[2], &fx.lib, &params()).unwrap();
+        let out = extract_all(2, &fx.ms1_tables[2], &fx.lib, &params()).unwrap();
         assert!(out.counts.unaligned);
         // Run 2 identifies precursor 0 only: its identified row and decoys,
         // and no pseudo-transfer or transfer rows.
@@ -2367,12 +2558,12 @@ mod tests {
             (out.counts.no_prediction, out.counts.no_pseudo_prediction),
             (0, 0)
         );
-        assert!(extract_run(N_RUNS as u16, &fx.ms1_tables[2], &fx.lib, &params()).is_err());
+        assert!(extract_all(N_RUNS as u16, &fx.ms1_tables[2], &fx.lib, &params()).is_err());
 
         // The identified row reaches the mbr.parquet.
         let runs: Vec<Vec<ExtractRow>> = (0..N_RUNS)
             .map(|r| {
-                extract_run(r as u16, &fx.ms1_tables[r], &fx.lib, &params())
+                extract_all(r as u16, &fx.ms1_tables[r], &fx.lib, &params())
                     .unwrap()
                     .rows
             })
@@ -2404,7 +2595,7 @@ mod tests {
         let fx = fixture_with(false, &|_| false, &|p| p == 7);
         let e = fx.lib.entries.iter().find(|e| e.precursor == 7).unwrap();
         assert_eq!(e.donors, vec![0]);
-        let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
+        let out = extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         let rows = rows_of(&out.rows, 7);
         assert_eq!(rows.len(), 3, "{rows:?}");
         assert!(rows.iter().all(|r| r.role == Role::Transfer), "{rows:?}");
@@ -2425,13 +2616,13 @@ mod tests {
                 e.faims_cv = Some(-30.0);
             }
         }
-        let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
+        let out = extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         assert!(rows_of(&out.rows, ONLY_RUN0).is_empty());
         assert!(rows_of(&out.rows, 3).is_empty());
         assert_eq!(out.counts.foreign_cv, 2);
         assert!(!rows_of(&out.rows, 4).is_empty());
         // A run without FAIMS fits them on the whole run.
-        let out0 = extract_run(0, &fx.ms1_tables[0], &fx.lib, &params()).unwrap();
+        let out0 = extract_all(0, &fx.ms1_tables[0], &fx.lib, &params()).unwrap();
         assert_eq!(out0.counts.foreign_cv, 0);
         assert_eq!(rows_of(&out0.rows, ONLY_RUN0)[0].role, Role::Identified);
         assert_eq!(rows_of(&out0.rows, 3)[0].role, Role::Identified);
@@ -2440,8 +2631,8 @@ mod tests {
     #[test]
     fn output_order_is_deterministic() {
         let fx = fixture(false);
-        let a = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
-        let b = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
+        let a = extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
+        let b = extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         assert_eq!(a, b);
         // Library order: each entry's rows are contiguous and in entry order.
         let order: Vec<u32> = fx.lib.entries.iter().map(|e| e.precursor).collect();
@@ -2466,7 +2657,7 @@ mod tests {
                 *rt = f64::NAN;
             }
         }
-        let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
+        let out = extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         assert!(rows_of(&out.rows, 5).is_empty());
         assert_eq!(out.counts.nonfinite_best_rt, 1);
     }
@@ -2474,7 +2665,7 @@ mod tests {
     #[test]
     fn width_prior_follows_identified_fits() {
         let fx = fixture(false);
-        let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
+        let out = extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         assert!(out.counts.width_fits >= 20, "{:?}", out.counts);
         assert!(!out.counts.width_prior_fallback);
         for r in out.rows.iter().filter(|r| is_identified_target(r)) {
@@ -2490,7 +2681,7 @@ mod tests {
     #[test]
     fn faims_entry_is_fitted_on_its_voltage_series() {
         let fx = fixture(true);
-        let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
+        let out = extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         for r in out.rows.iter().filter(|r| is_identified_target(r)) {
             let e = r.evidence.as_ref().unwrap();
             assert!(
@@ -2504,7 +2695,7 @@ mod tests {
     #[test]
     fn rows_round_trip_through_the_extract_table() {
         let fx = fixture(false);
-        let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
+        let out = extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         let path = fx._dir.path().join("run1.extract.parquet");
         write_extract_table(&path, &out.rows).unwrap();
         assert_eq!(read_extract_table(&path).unwrap(), out.rows);
@@ -2521,7 +2712,7 @@ mod tests {
             .unwrap();
         assert_eq!(whole.faims_cv, None);
         tracking::reset();
-        let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
+        let out = extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         let (peak, loads) = tracking::stats();
         assert_eq!(peak, 1, "at most one MS1 copy is live");
         assert_eq!(loads, 2, "the whole run is read again for its entries");
@@ -2535,7 +2726,7 @@ mod tests {
         // Without FAIMS the MS1 table is read once.
         let fx = fixture(false);
         tracking::reset();
-        extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
+        extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         assert_eq!(tracking::stats(), (1, 1));
     }
 
@@ -2544,7 +2735,7 @@ mod tests {
         // About 30% of run 1's identified pairs have no MS1 signal.
         let silent = |p: u32| p % 10 < 3;
         let fx = fixture_with(false, &silent, &|_| false);
-        let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
+        let out = extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         assert!(out.counts.width_fits >= 20, "{:?}", out.counts);
         assert!(!out.counts.width_prior_fallback);
         for r in out.rows.iter().filter(|r| is_identified_target(r)) {
@@ -2570,7 +2761,7 @@ mod tests {
             .find(|e| e.precursor == ONLY_RUN0)
             .unwrap();
         e.faims_cv = Some(FAIMS_CVS[ONLY_RUN0 as usize % 2]);
-        let out = extract_run(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
+        let out = extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         let rows = rows_of(&out.rows, ONLY_RUN0);
         assert_eq!(rows.len(), 3);
         let target = rows[0].evidence.as_ref().unwrap();

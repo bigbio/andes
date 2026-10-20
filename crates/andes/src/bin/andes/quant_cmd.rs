@@ -41,6 +41,7 @@ use rayon::prelude::*;
 use crate::cli::{QuantCommand, QuantExtractArgs, QuantFinalizeArgs, QuantLibraryArgs};
 use crate::quant_mbr::{
     attach_ms2, extract_run, finalize_stream, mbr_paths, ExtractCounts, ExtractFiles, ExtractRow,
+    TransferSelection,
     ExtractSource, FinalizeParams, MbrFeature, Ms2Counts, StreamLimits,
 };
 
@@ -53,6 +54,9 @@ const MS2_SUFFIX: &str = ".ms2.parquet";
 const EXTRACT_SUFFIX: &str = ".extract.parquet";
 /// Extract-table metadata key of the template-fit m/z tolerance, ppm.
 const TOL_KEY: &str = "andes.extract.tol_ppm";
+/// Extract table metadata key of the transfer selection (absent when every
+/// transfer pair was measured).
+const SELECTION_KEY: &str = "andes.extract.transfer_selection";
 /// Isotopes per precursor envelope in the run tables and the library.
 const ENVELOPE_LEN: usize = 4;
 
@@ -832,7 +836,7 @@ impl DonorPsms {
 
 fn log_extract(stem: &str, rows: usize, c: &ExtractCounts) {
     eprintln!(
-        "[mbr] extract {stem}: {rows} rows{}; skipped: {} entries at a FAIMS voltage the run lacks, {} identified pairs with a non-finite best PSM RT, {} identified pairs without a prediction from other runs (no pseudo-transfer), {} transfers without a prediction, {} pseudo-transfers and {} transfers whose donor runs are all in other alignment components; width prior from {} fits{}",
+        "[mbr] extract {stem}: {rows} rows{}; skipped: {} entries at a FAIMS voltage the run lacks, {} identified pairs with a non-finite best PSM RT, {} identified pairs without a prediction from other runs (no pseudo-transfer), {} transfers without a prediction, {} pseudo-transfers and {} transfers whose donor runs are all in other alignment components, {} transfers left out by the transfer selection; width prior from {} fits{}",
         if c.unaligned {
             " (unaligned run: identified rows only)"
         } else {
@@ -844,6 +848,7 @@ fn log_extract(stem: &str, rows: usize, c: &ExtractCounts) {
         c.no_prediction,
         c.pseudo_other_component,
         c.other_component,
+        c.not_selected,
         c.width_fits,
         if c.width_prior_fallback {
             " (too few: the default width is used)"
@@ -879,19 +884,20 @@ fn log_ms2(stem: &str, c: &Ms2Counts, secs: f64) {
     );
 }
 
-/// Measures run `run` of the library on its MS1 table, checks its transfer
-/// and pseudo-transfer rows against its MS2 table, and writes
-/// `<stem>.extract.parquet`.
+/// Measures run `run` of the library on its MS1 table (the transfers that
+/// `selection` keeps), checks its transfer and pseudo-transfer rows against
+/// its MS2 table, and writes `<stem>.extract.parquet`.
 pub(crate) fn extract_and_write(
     dir: &Path,
     stored: &StoredLibrary,
     fingerprint: &str,
     run: u16,
     ep: &EvidenceParams,
+    selection: &TransferSelection,
 ) -> Result<Vec<ExtractRow>, String> {
     let stem = &stored.runs[run as usize];
     let ms1 = artifact(dir, stem, MS1_SUFFIX);
-    let mut ex = extract_run(run, &ms1, &stored.library, ep)?;
+    let mut ex = extract_run(run, &ms1, &stored.library, ep, selection)?;
     log_extract(stem, ex.rows.len(), &ex.counts);
     let t = std::time::Instant::now();
     let ms2_path = artifact(dir, stem, MS2_SUFFIX);
@@ -916,14 +922,15 @@ pub(crate) fn extract_and_write(
     drop(index);
     log_ms2(stem, &c, t.elapsed().as_secs_f64());
     let path = artifact(dir, stem, EXTRACT_SUFFIX);
-    write_extract_table_tagged(
-        &path,
-        &ex.rows,
-        &[
-            (FINGERPRINT_KEY.to_string(), fingerprint.to_string()),
-            (TOL_KEY.to_string(), ep.tol_ppm.to_string()),
-        ],
-    )?;
+    let mut tags = vec![
+        (FINGERPRINT_KEY.to_string(), fingerprint.to_string()),
+        (TOL_KEY.to_string(), ep.tol_ppm.to_string()),
+    ];
+    if !selection.is_off() {
+        let aligned = stored.library.alignment.maps.iter().flatten().count();
+        tags.push((SELECTION_KEY.to_string(), selection.describe(aligned)));
+    }
+    write_extract_table_tagged(&path, &ex.rows, &tags)?;
     Ok(ex.rows)
 }
 
@@ -1122,7 +1129,14 @@ pub(crate) fn run_in_process(
     // One run at a time: each extraction is parallel over its precursors and
     // holds that run's MS1; finalize reads the extract tables back.
     for r in 0..stems.len() {
-        extract_and_write(dir, &stored, &fingerprint, r as u16, ep)?;
+        extract_and_write(
+            dir,
+            &stored,
+            &fingerprint,
+            r as u16,
+            ep,
+            &TransferSelection::default(),
+        )?;
     }
     let files = ExtractFiles(
         stems
@@ -1174,7 +1188,23 @@ fn run_extract(a: QuantExtractArgs) -> Result<(), String> {
             )
         })?;
     let fingerprint = library_fingerprint(&stored);
-    extract_and_write(&a.quant_dir, &stored, &fingerprint, run as u16, &ep).map(|_| ())
+    let selection = if a.mbr_preselect {
+        TransferSelection {
+            donor_gate: true,
+            min_donor_fraction: a.mbr_min_donor_fraction,
+        }
+    } else {
+        TransferSelection::OFF
+    };
+    extract_and_write(
+        &a.quant_dir,
+        &stored,
+        &fingerprint,
+        run as u16,
+        &ep,
+        &selection,
+    )
+    .map(|_| ())
 }
 
 fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {

@@ -898,7 +898,10 @@ on ETD the rank/edge/hyperscore path scores the backbone with its intact glycan 
 backbone-correct @1%); the best enumerated candidate is promoted over a de-novo winner;
 peptide-first index at fragment charges 1..=2 with at most 1,024 candidates per spectrum;
 `--precursor-mono` uses max shift 6, minimum fit 0.90, minimum gain 0.15, minimum SNR 3.0,
-10 ppm MS1 tolerance and holds back 1 isotope.
+10 ppm MS1 tolerance and holds back 1 isotope; `--glyco-core o` additionally gates Hex>0
+(galactose) candidates on a Hex diagnostic ion (163.060 or 366.139) in the HCD spectrum —
+the GalNAc oxonium every O-glycopeptide carries cannot justify adding galactose (N-glycan is
+unaffected).
 
 Deleted after A/B tests (2026-09-05): `--glyco-split-election`, `--glyco-gp-g`,
 `--glyco-gp-m`, `--glyco-isobar-rep`, `--glyco-y-index`, `--glyco-decorated-features`,

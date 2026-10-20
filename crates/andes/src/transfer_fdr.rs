@@ -501,16 +501,21 @@ impl FoldScores {
     /// model (for the counts).
     #[cfg(test)]
     pub fn finish(self, failed_folds: &[String]) -> QValues {
-        self.finish_with(failed_folds, |_, _| Vec::new())
+        self.finish_with(failed_folds, None, |_, _| Vec::new())
     }
 
     /// [`FoldScores::finish`] with, for each fold and family, the scores
     /// taken out by [`FoldScores::take_held`] given back by `taken(fold,
     /// family)` as ascending streams (any number of them). The result is the
-    /// one of every score held in memory.
+    /// one of every score held in memory. With `thresholds`, only the pooled
+    /// estimate keeps its whole step function; the others keep the steps
+    /// where q first reaches each threshold, which answer
+    /// [`QValues::accepts`] at those thresholds exactly (about a quarter of
+    /// the memory).
     pub fn finish_with<'a>(
         self,
         failed_folds: &[String],
+        thresholds: Option<&[f64]>,
         mut taken: impl FnMut(usize, usize) -> Vec<Box<dyn Iterator<Item = f32> + 'a>>,
     ) -> QValues {
         let mut steps: Vec<[Option<Steps>; 4]> = Vec::with_capacity(N_FOLDS);
@@ -525,7 +530,7 @@ impl FoldScores {
                 SortedMerge::new(runs)
             });
             let totals = self.counts[fold];
-            let mut builder = StepsBuilder::new(totals);
+            let mut builder = StepsBuilder::new(totals, thresholds);
             walk_scores(streams, |c, at| builder.visit(c, at));
             let fold_steps = builder.finish();
             let with_q = if fold_steps[Estimate::Pooled as usize].is_some() {
@@ -539,6 +544,8 @@ impl FoldScores {
         QValues {
             seed: self.seed,
             steps,
+            whole: ESTIMATES.map(|e| thresholds.is_none() || e == Estimate::Pooled),
+            thresholds: thresholds.map(<[f64]>::to_vec).unwrap_or_default(),
             counts: FdrCounts {
                 failed_folds: failed_folds.to_vec(),
                 unscored: self.unscored,
@@ -614,12 +621,17 @@ struct KdecoyWalk {
     d_id: usize,
     running: f64,
     steps: Steps,
+    /// Keep only the first step and those where q first reaches one of
+    /// these; `None` keeps every step.
+    only_at: Option<Vec<f64>>,
 }
 
 impl StepsBuilder {
     /// The walks over a fold whose finite scores number `totals[f]` per
-    /// family.
-    pub fn new(totals: [usize; 4]) -> Self {
+    /// family. With `thresholds`, the estimates other than the pooled one
+    /// keep only their first step and the steps where q first reaches each
+    /// threshold.
+    pub fn new(totals: [usize; 4], thresholds: Option<&[f64]>) -> Self {
         Self {
             walks: ESTIMATES.map(|e| {
                 let total = |f: u8| if e.keeps(f) { totals[f as usize] } else { 0 };
@@ -633,6 +645,9 @@ impl StepsBuilder {
                     d_id: total(IDENTITY),
                     running: 1.0,
                     steps: Steps::default(),
+                    only_at: thresholds
+                        .filter(|_| e != Estimate::Pooled)
+                        .map(<[f64]>::to_vec),
                 })
             }),
         }
@@ -649,9 +664,18 @@ impl StepsBuilder {
             let tf = w.t.max(1) as f64;
             let v = ((w.d + 1) as f64 / (w.k * tf) + w.d_id as f64 / tf).min(1.0);
             if v < w.running || w.steps.at.is_empty() {
+                let before = w.running;
                 w.running = w.running.min(v);
-                w.steps.at.push(c);
-                w.steps.q.push(w.running);
+                let kept = match &w.only_at {
+                    None => true,
+                    Some(ts) => {
+                        w.steps.at.is_empty() || ts.iter().any(|&t| w.running <= t && before > t)
+                    }
+                };
+                if kept {
+                    w.steps.at.push(c);
+                    w.steps.q.push(w.running);
+                }
             }
             for (f, &n) in at.iter().enumerate() {
                 if !kept(f) {
@@ -680,7 +704,7 @@ impl StepsBuilder {
 /// rows below, and q is the running minimum of the FDR from the bottom.
 #[cfg(test)]
 fn kdecoy_steps(by_family: &[Vec<f32>; 4], e: Estimate) -> Option<Steps> {
-    let mut builder = StepsBuilder::new([0, 1, 2, 3].map(|f| by_family[f].len()));
+    let mut builder = StepsBuilder::new([0, 1, 2, 3].map(|f| by_family[f].len()), None);
     let streams = [0, 1, 2, 3].map(|f| {
         SortedMerge::new(vec![
             Box::new(by_family[f].iter().copied()) as Box<dyn Iterator<Item = f32>>
@@ -696,6 +720,10 @@ fn kdecoy_steps(by_family: &[Vec<f32>; 4], e: Estimate) -> Option<Steps> {
 pub struct QValues {
     seed: u64,
     steps: Vec<[Option<Steps>; 4]>,
+    /// Per [`Estimate`], whether its step functions are whole (else they
+    /// answer [`QValues::accepts`] at `thresholds` only).
+    whole: [bool; 4],
+    thresholds: Vec<f64>,
     pub counts: FdrCounts,
 }
 
@@ -710,10 +738,52 @@ impl QValues {
             .sum()
     }
 
+    /// Steps of the pooled estimate's step functions.
+    pub fn pooled_steps(&self) -> usize {
+        self.steps
+            .iter()
+            .filter_map(|f| f[Estimate::Pooled as usize].as_ref())
+            .map(|s| s.at.len())
+            .sum()
+    }
+
     /// The q-value under estimate `e` of a row of `precursor` and `family`
     /// scoring `score`; `None` when it has no score, its family takes no part
     /// in `e`, or its fold lacks targets or decoys.
+    ///
+    /// # Panics
+    /// When the step functions of `e` were kept at thresholds only.
     pub fn q(&self, e: Estimate, precursor: u32, family: u8, score: Option<f32>) -> Option<f64> {
+        assert!(
+            self.whole[e as usize],
+            "{e:?} q-values were kept at thresholds only"
+        );
+        self.step_q(e, precursor, family, score)
+    }
+
+    /// Whether the row's q-value under `e` (see [`QValues::q`]) is at most
+    /// `t`; `false` without one.
+    ///
+    /// # Panics
+    /// When the step functions of `e` were kept at thresholds only and `t`
+    /// is not one of them.
+    pub fn accepts(
+        &self,
+        e: Estimate,
+        precursor: u32,
+        family: u8,
+        score: Option<f32>,
+        t: f64,
+    ) -> bool {
+        assert!(
+            self.whole[e as usize] || self.thresholds.contains(&t),
+            "{e:?} q-values were not kept at threshold {t}"
+        );
+        self.step_q(e, precursor, family, score)
+            .is_some_and(|q| q <= t)
+    }
+
+    fn step_q(&self, e: Estimate, precursor: u32, family: u8, score: Option<f32>) -> Option<f64> {
         let s = score.filter(|s| s.is_finite())?;
         if !e.keeps(family) {
             return None;
@@ -1263,6 +1333,43 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn threshold_steps_accept_as_the_whole_ones() {
+        let mut g = Normal(7);
+        let (mut whole, mut cut) = (FoldScores::new(3), FoldScores::new(3));
+        let mut items = Vec::new();
+        for i in 0..6000u32 {
+            let fam = match i % 7 {
+                0..=2 => TARGET,
+                3 | 4 => MASS_SHIFT,
+                5 => RT_SHIFT,
+                _ => IDENTITY,
+            };
+            let shift = if fam == TARGET { 1.5 } else { 0.0 };
+            let s = Some(((g.draw() + shift) * 8.0).round() / 8.0);
+            items.push((i % 800, fam, s));
+            whole.add(i % 800, fam, s);
+            cut.add(i % 800, fam, s);
+        }
+        let ts = [0.01, 0.05, 0.3];
+        let whole = whole.finish(&[]);
+        let cut = cut.finish_with(&[], Some(&ts), |_, _| Vec::new());
+        assert!(cut.steps() < whole.steps());
+        assert_eq!(cut.pooled_steps(), whole.pooled_steps());
+        for &(p, f, s) in &items {
+            for e in ESTIMATES {
+                for t in ts {
+                    assert_eq!(whole.accepts(e, p, f, s, t), cut.accepts(e, p, f, s, t));
+                }
+            }
+            assert_eq!(
+                whole.q(Estimate::Pooled, p, f, s),
+                cut.q(Estimate::Pooled, p, f, s)
+            );
+            assert_eq!(whole.pseudo_q(p, s), cut.pseudo_q(p, s));
         }
     }
 

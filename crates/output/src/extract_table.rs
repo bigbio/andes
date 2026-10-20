@@ -472,11 +472,37 @@ pub fn read_extract_table(path: &Path) -> Result<Vec<ExtractRow>, String> {
 pub struct ExtractTableReader {
     path: std::path::PathBuf,
     reader: parquet::arrow::arrow_reader::ParquetRecordBatchReader,
+    /// Read by [`ExtractTableReader::open_identified_fits`].
+    fits_only: bool,
 }
+
+/// The evidence columns of [`ExtractTableReader::open_identified_fits`].
+const FIT_EVIDENCE: [&str; 8] = [
+    "amplitude",
+    "t0",
+    "w",
+    "iso_h0",
+    "iso_h1",
+    "iso_h2",
+    "iso_h3",
+    "tailing",
+];
 
 impl ExtractTableReader {
     /// Opens `path` and checks its schema version.
     pub fn open(path: &Path, batch_rows: usize) -> Result<Self, String> {
+        Self::open_with(path, batch_rows, false)
+    }
+
+    /// Opens `path` to read its identified target rows only, with the
+    /// columns of their peak shape: the keys, and of the evidence the
+    /// amplitude, apex, width, isotope heights and tailing. The other
+    /// evidence values are NaN (counts 0) and the MS2 evidence is `None`.
+    pub fn open_identified_fits(path: &Path, batch_rows: usize) -> Result<Self, String> {
+        Self::open_with(path, batch_rows, true)
+    }
+
+    fn open_with(path: &Path, batch_rows: usize, fits_only: bool) -> Result<Self, String> {
         let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
         let file = File::open(path).map_err(|e| err(&e))?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| err(&e))?;
@@ -501,13 +527,37 @@ impl ExtractTableReader {
                 "unsupported extract table schema {version} (this build reads major {EXTRACT_SCHEMA_MAJOR}); run `andes quant extract` again"
             )));
         }
-        let reader = builder
-            .with_batch_size(batch_rows.max(1))
-            .build()
-            .map_err(|e| err(&e))?;
+        let builder = builder.with_batch_size(batch_rows.max(1));
+        let builder = if fits_only {
+            let names: Vec<String> = schema()
+                .fields()
+                .iter()
+                .take(N_KEY_COLUMNS)
+                .map(|f| f.name().clone())
+                .chain(FIT_EVIDENCE.iter().map(|n| n.to_string()))
+                .collect();
+            let leaves: Vec<usize> = names
+                .iter()
+                .map(|n| {
+                    builder
+                        .parquet_schema()
+                        .columns()
+                        .iter()
+                        .position(|c| c.name() == n)
+                        .ok_or_else(|| err(&format!("no column {n:?}")))
+                })
+                .collect::<Result<_, _>>()?;
+            let mask =
+                parquet::arrow::ProjectionMask::leaves(builder.parquet_schema(), leaves);
+            builder.with_projection(mask)
+        } else {
+            builder
+        };
+        let reader = builder.build().map_err(|e| err(&e))?;
         Ok(Self {
             path: path.to_path_buf(),
             reader,
+            fits_only,
         })
     }
 }
@@ -519,8 +569,85 @@ impl Iterator for ExtractTableReader {
         let b = self.reader.next()?;
         let path = self.path.as_path();
         let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
-        Some(b.map_err(|e| err(&e)).and_then(|b| decode_batch(&b, path)))
+        let fits_only = self.fits_only;
+        Some(b.map_err(|e| err(&e)).and_then(|b| {
+            if fits_only {
+                decode_fit_batch(&b, path)
+            } else {
+                decode_batch(&b, path)
+            }
+        }))
     }
+}
+
+/// The identified target rows of one record batch read by
+/// [`ExtractTableReader::open_identified_fits`].
+fn decode_fit_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, String> {
+    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    let at = |name: &str| {
+        b.schema()
+            .index_of(name)
+            .map_err(|_| err(&format!("no column {name:?}")))
+    };
+    let precursor = column::<UInt32Array>(b, at("precursor")?, path)?;
+    let run = column::<UInt16Array>(b, at("run")?, path)?;
+    let kind = column::<UInt8Array>(b, at("kind")?, path)?;
+    let shift = column::<Int8Array>(b, at("mass_shift")?, path)?;
+    let role = column::<UInt8Array>(b, at("role")?, path)?;
+    let donors = column::<UInt16Array>(b, at("n_donor_runs")?, path)?;
+    let library_q = column::<Float64Array>(b, at("library_q")?, path)?;
+    let ev: Vec<&Float64Array> = FIT_EVIDENCE
+        .iter()
+        .map(|n| column::<Float64Array>(b, at(n)?, path))
+        .collect::<Result<_, _>>()?;
+    let mut rows = Vec::new();
+    for i in 0..b.num_rows() {
+        let kind = decode_kind(kind.value(i), shift.value(i)).ok_or_else(|| {
+            err(&format!(
+                "corrupt row: kind {} with mass_shift {}",
+                kind.value(i),
+                shift.value(i)
+            ))
+        })?;
+        let role = decode_role(role.value(i))
+            .ok_or_else(|| err(&format!("unknown role code {}", role.value(i))))?;
+        if (role, kind) != (ExtractRole::Identified, Hypothesis::Target) {
+            continue;
+        }
+        let evidence = (!ev[0].is_null(i)).then(|| {
+            let v = |k: usize| ev[k].value(i);
+            Evidence {
+                amplitude: v(0),
+                amplitude_se: f64::NAN,
+                quantity: f64::NAN,
+                quantity_se: f64::NAN,
+                llr: f64::NAN,
+                rt_z: f64::NAN,
+                width_ratio: f64::NAN,
+                envelope_cos: f64::NAN,
+                coherence: f64::NAN,
+                m1_ratio: f64::NAN,
+                mass_err_ppm: f64::NAN,
+                n_points: 0,
+                isotopes_used: 0,
+                t0: v(1),
+                w: v(2),
+                iso_heights: [v(3), v(4), v(5), v(6)],
+                tailing: v(7),
+            }
+        });
+        rows.push(ExtractRow {
+            precursor: precursor.value(i),
+            run: run.value(i),
+            kind,
+            role,
+            evidence,
+            n_donor_runs: donors.value(i),
+            library_q: library_q.value(i),
+            ms2: None,
+        });
+    }
+    Ok(rows)
 }
 
 /// The rows of one record batch of an extraction table at `path`.
@@ -695,6 +822,47 @@ mod tests {
         let e = dir.path().join("e.extract.parquet");
         write_extract_table(&e, &[]).unwrap();
         assert_eq!(read_extract_table(&e).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn identified_fits_reader_keeps_the_identified_targets_shape_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("f.extract.parquet");
+        let mut rows = rows();
+        for (i, r) in rows.iter_mut().enumerate() {
+            if i % 3 == 0 {
+                (r.kind, r.role) = (Hypothesis::Target, ExtractRole::Identified);
+            }
+        }
+        write_extract_table(&p, &rows).unwrap();
+        let mut got = Vec::new();
+        for b in ExtractTableReader::open_identified_fits(&p, 2).unwrap() {
+            got.extend(b.unwrap());
+        }
+        let want: Vec<&ExtractRow> = rows
+            .iter()
+            .filter(|r| (r.role, r.kind) == (ExtractRole::Identified, Hypothesis::Target))
+            .collect();
+        assert_eq!(got.len(), want.len());
+        assert!(want.iter().any(|r| r.evidence.is_none()));
+        for (g, w) in got.iter().zip(want) {
+            assert_eq!(
+                (g.precursor, g.run, g.kind, g.role, g.n_donor_runs, g.library_q),
+                (w.precursor, w.run, w.kind, w.role, w.n_donor_runs, w.library_q)
+            );
+            assert_eq!(g.ms2, None);
+            match (&g.evidence, &w.evidence) {
+                (None, None) => {}
+                (Some(a), Some(b)) => {
+                    assert_eq!(
+                        (a.amplitude, a.t0, a.w, a.iso_heights, a.tailing),
+                        (b.amplitude, b.t0, b.w, b.iso_heights, b.tailing)
+                    );
+                    assert!(a.llr.is_nan() && a.quantity.is_nan());
+                }
+                other => panic!("{other:?}"),
+            }
+        }
     }
 
     #[test]

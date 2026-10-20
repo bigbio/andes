@@ -139,7 +139,7 @@ pub(crate) const DEFAULT_MAX_TRAIN_ROWS: usize = 3_000_000;
 /// Default of [`FinalizeLimits::max_norm_cells`].
 pub(crate) const DEFAULT_MAX_NORM_CELLS: usize = 20_000_000;
 /// Default of [`FinalizeLimits::max_donor_fits`].
-pub(crate) const DEFAULT_MAX_DONOR_FITS: usize = 10_000_000;
+pub(crate) const DEFAULT_MAX_DONOR_FITS: usize = 5_000_000;
 /// Default of [`FinalizeLimits::max_held_scores`].
 pub(crate) const DEFAULT_MAX_HELD_SCORES: usize = 64_000_000;
 
@@ -159,10 +159,13 @@ impl Default for FinalizeLimits {
 pub(crate) const SCORE_CHUNK: usize = 65_536;
 /// Rows per record batch read from an extract table.
 const READ_BATCH_ROWS: usize = 65_536;
-/// Rows per row group of a temporary table, and per merged output batch.
-const PART_GROUP_ROWS: usize = 65_536;
+/// Rows per row group of a temporary score table.
+const SCORE_GROUP_ROWS: usize = 65_536;
+/// Rows per row group of a temporary output-row table, per batch read back
+/// and per merged batch: small, as the merge reads every run's table at once.
+const OUT_GROUP_ROWS: usize = 8_192;
 /// Temporary tables merged at once; more are merged in groups first.
-const MAX_OPEN_PARTS: usize = 256;
+const MAX_OPEN_PARTS: usize = 512;
 
 /// The extract rows of every run, as tables ("chunks") read in batches. A
 /// precursor's rows of one run are contiguous and in one chunk, as `andes
@@ -178,6 +181,22 @@ pub(crate) trait ExtractSource: Sync {
         chunk: usize,
         f: &mut dyn FnMut(Vec<ExtractRow>) -> Result<(), String>,
     ) -> Result<(), String>;
+
+    /// [`ExtractSource::for_each_batch`] over the identified targets only,
+    /// of which only the keys and the peak shape (see [`donor_fit`] and
+    /// [`consensus_scale_width`]) are read.
+    fn for_each_fit_batch(
+        &self,
+        chunk: usize,
+        f: &mut dyn FnMut(Vec<ExtractRow>) -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.for_each_batch(chunk, &mut |rows| {
+            f(rows
+                .into_iter()
+                .filter(|r| (r.role, r.kind) == (Role::Identified, Hypothesis::Target))
+                .collect())
+        })
+    }
 }
 
 /// Extract rows in memory, one vector per run, handed out in batches of
@@ -231,6 +250,17 @@ impl ExtractSource for ExtractFiles {
         }
         Ok(())
     }
+
+    fn for_each_fit_batch(
+        &self,
+        chunk: usize,
+        f: &mut dyn FnMut(Vec<ExtractRow>) -> Result<(), String>,
+    ) -> Result<(), String> {
+        for b in ExtractTableReader::open_identified_fits(&self.0[chunk], READ_BATCH_ROWS)? {
+            f(b?)?;
+        }
+        Ok(())
+    }
 }
 
 /// The runs and precursors extract rows may index.
@@ -243,12 +273,15 @@ struct Bounds {
 /// Calls `f(state, chunk, first, block)` on the rows of every table of
 /// `source` in blocks of whole precursors (`first` is the index of the
 /// block's first row in its table), tables in parallel, each table with its
-/// own `state` from `init`, handed to `done` after its last block.
+/// own `state` from `init`, handed to `done` after its last block. With
+/// `fits_only`, the identified targets only
+/// ([`ExtractSource::for_each_fit_batch`]).
 ///
 /// Errors: a row outside `bounds`, a precursor whose rows are not contiguous
 /// in its table, and any error of `source`, `f` or `done`.
 fn for_each_block<S>(
     source: &dyn ExtractSource,
+    fits_only: bool,
     bounds: Bounds,
     init: impl Fn(usize) -> S + Sync,
     f: impl Fn(&mut S, usize, u64, &[ExtractRow]) -> Result<(), String> + Sync,
@@ -280,7 +313,7 @@ fn for_each_block<S>(
         };
         let mut buf: Vec<ExtractRow> = Vec::new();
         let mut first = 0u64;
-        source.for_each_batch(chunk, &mut |batch| {
+        let mut each = |batch: Vec<ExtractRow>| {
             buf.extend(batch);
             let Some(last) = buf.last().map(|r| r.precursor) else {
                 return Ok(());
@@ -293,7 +326,12 @@ fn for_each_block<S>(
                 buf.drain(..cut);
             }
             Ok(())
-        })?;
+        };
+        if fits_only {
+            source.for_each_fit_batch(chunk, &mut each)?;
+        } else {
+            source.for_each_batch(chunk, &mut each)?;
+        }
         if !buf.is_empty() {
             emit(&mut state, &buf, first)?;
         }
@@ -639,11 +677,12 @@ fn temp_writer(
     key: &str,
     schema: Arc<Schema>,
     compression: Compression,
+    group_rows: usize,
 ) -> Result<ArrowWriter<File>, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let props = WriterProperties::builder()
         .set_compression(compression)
-        .set_max_row_group_size(PART_GROUP_ROWS)
+        .set_max_row_group_size(group_rows)
         .set_key_value_metadata(Some(vec![KeyValue::new(
             key.to_string(),
             TEMP_VERSION.to_string(),
@@ -654,7 +693,11 @@ fn temp_writer(
 }
 
 /// A reader of a temporary table with schema version `key` (major 1).
-fn temp_reader(path: &Path, key: &str) -> Result<ParquetRecordBatchReader, String> {
+fn temp_reader(
+    path: &Path,
+    key: &str,
+    batch_rows: usize,
+) -> Result<ParquetRecordBatchReader, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let file = File::open(path).map_err(|e| err(&e))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| err(&e))?;
@@ -670,7 +713,7 @@ fn temp_reader(path: &Path, key: &str) -> Result<ParquetRecordBatchReader, Strin
         )));
     }
     builder
-        .with_batch_size(PART_GROUP_ROWS)
+        .with_batch_size(batch_rows)
         .build()
         .map_err(|e| err(&e))
 }
@@ -690,8 +733,14 @@ fn write_scores(path: &Path, scores: &[f32]) -> Result<(), String> {
         DataType::Float32,
         false,
     )]));
-    let mut w = temp_writer(path, SCORES_KEY, schema.clone(), Compression::UNCOMPRESSED)?;
-    for c in scores.chunks(PART_GROUP_ROWS) {
+    let mut w = temp_writer(
+        path,
+        SCORES_KEY,
+        schema.clone(),
+        Compression::UNCOMPRESSED,
+        SCORE_GROUP_ROWS,
+    )?;
+    for c in scores.chunks(SCORE_GROUP_ROWS) {
         let col: ArrayRef = Arc::new(Float32Array::from(c.to_vec()));
         let b = RecordBatch::try_new(schema.clone(), vec![col]).map_err(|e| err(&e))?;
         w.write(&b).map_err(|e| err(&e))?;
@@ -712,7 +761,7 @@ struct ScoreFile<'a> {
 
 impl<'a> ScoreFile<'a> {
     fn new(path: &Path, error: &'a RefCell<Option<String>>) -> Self {
-        let reader = match temp_reader(path, SCORES_KEY) {
+        let reader = match temp_reader(path, SCORES_KEY, SCORE_GROUP_ROWS) {
             Ok(r) => Some(r),
             Err(e) => {
                 error.borrow_mut().get_or_insert(e);
@@ -815,12 +864,17 @@ impl<'d> ScoreStore<'d> {
         Ok(())
     }
 
-    /// The q-values over every score added, and the number of spills.
-    fn finish(self, failed_folds: &[String]) -> Result<(QValues, usize), String> {
+    /// The q-values over every score added (the estimates other than the
+    /// pooled one kept at `thresholds`), and the number of spills.
+    fn finish(
+        self,
+        failed_folds: &[String],
+        thresholds: &[f64],
+    ) -> Result<(QValues, usize), String> {
         let spills = self.spills.into_inner().expect("score store lock");
         let scores = self.scores.into_inner().expect("score store lock");
         let error = RefCell::new(None);
-        let q = scores.finish_with(failed_folds, |fold, f| {
+        let q = scores.finish_with(failed_folds, Some(thresholds), |fold, f| {
             spills
                 .iter()
                 .map(|s| {
@@ -932,6 +986,7 @@ impl OutWriter {
             ROWS_KEY,
             schema.clone(),
             Compression::ZSTD(ZstdLevel::try_new(1).map_err(|e| e.to_string())?),
+            OUT_GROUP_ROWS,
         )?;
         Ok(Self {
             path: path.to_path_buf(),
@@ -942,7 +997,7 @@ impl OutWriter {
 
     fn write(&mut self, rows: &[OutRow]) -> Result<(), String> {
         let err = |e: &dyn std::fmt::Display| format!("{}: {e}", self.path.display());
-        for c in rows.chunks(PART_GROUP_ROWS) {
+        for c in rows.chunks(OUT_GROUP_ROWS) {
             let mut precursor = UInt32Builder::with_capacity(c.len());
             let mut run = UInt16Builder::with_capacity(c.len());
             let mut ev = UInt8Builder::with_capacity(c.len());
@@ -999,7 +1054,7 @@ impl OutReader {
     fn open(path: &Path) -> Result<Self, String> {
         Ok(Self {
             path: path.to_path_buf(),
-            reader: temp_reader(path, ROWS_KEY)?,
+            reader: temp_reader(path, ROWS_KEY, OUT_GROUP_ROWS)?,
             rows: Vec::new().into_iter(),
         })
     }
@@ -1094,14 +1149,14 @@ fn merge_out(
         }
         heads.push(head);
     }
-    let mut out = Vec::with_capacity(PART_GROUP_ROWS);
+    let mut out = Vec::with_capacity(OUT_GROUP_ROWS);
     while let Some(std::cmp::Reverse((_, _, i))) = heap.pop() {
         out.push(heads[i].take().expect("a queued table has a head row"));
         if let Some(h) = readers[i].next_row()? {
             heap.push(std::cmp::Reverse((h.precursor, h.run, i)));
             heads[i] = Some(h);
         }
-        if out.len() == PART_GROUP_ROWS {
+        if out.len() == OUT_GROUP_ROWS {
             sink(&out)?;
             out.clear();
         }
@@ -1237,18 +1292,15 @@ pub(crate) fn finalize_stream(
     let t0 = Instant::now();
     let upper: usize = lib.entries.iter().map(|e| e.donors.len()).sum();
     let groups = upper.div_ceil(limits.max_donor_fits.max(1)).max(1);
-    let rows_read = AtomicUsize::new(0);
     let mut summaries = Summaries::new();
     for g in 0..groups {
         let items = Mutex::new(Vec::new());
         for_each_block(
             source,
+            true,
             bounds,
             |_| Vec::new(),
             |local, _, _, rows| {
-                if g == 0 {
-                    rows_read.fetch_add(rows.len(), Ordering::Relaxed);
-                }
                 for r in rows.iter().filter(|r| r.precursor as usize % groups == g) {
                     let w = consensus_scale_width(r, maps);
                     let f = donor_fit(r, maps);
@@ -1259,15 +1311,20 @@ pub(crate) fn finalize_stream(
                 Ok(())
             },
             |_, local| {
-                items.lock().expect("summary lock").extend(local);
+                items.lock().expect("summary lock").push(local);
                 Ok(())
             },
         )?;
-        summaries.extend(summarise(items.into_inner().expect("summary lock")));
+        // One allocation of the exact size, the run vectors freed as they go.
+        let mut runs: Vec<Vec<_>> = items.into_inner().expect("summary lock");
+        let mut all = Vec::with_capacity(runs.iter().map(Vec::len).sum());
+        while let Some(v) = runs.pop() {
+            all.extend(v);
+        }
+        summaries.extend(summarise(all));
     }
     eprintln!(
-        "[mbr] finalize: {} extract rows in {} tables, {} threads, temporary tables in {}; donor summaries of {} precursors in {groups} pass(es), {:.1} s",
-        rows_read.load(Ordering::Relaxed),
+        "[mbr] finalize: {} extract tables, {} threads, temporary tables in {}; donor summaries of {} precursors in {groups} pass(es), {:.1} s",
         source.chunks(),
         rayon::current_num_threads(),
         dir.display(),
@@ -1286,11 +1343,14 @@ pub(crate) fn finalize_stream(
         Mutex::new(TrainingSample::new(limits.max_train_rows, seed));
     let no_features = AtomicUsize::new(0);
     let identified_no_features = AtomicUsize::new(0);
+    let rows_read = AtomicUsize::new(0);
     for_each_block(
         source,
+        false,
         bounds,
         |_| (),
         |_, chunk, first, rows| {
+            rows_read.fetch_add(rows.len(), Ordering::Relaxed);
             let ctx = BlockContext::new(rows, maps)?;
             let shapes = BlockShapes {
                 summaries,
@@ -1349,7 +1409,8 @@ pub(crate) fn finalize_stream(
     let t_models = train_folds(&t_sample.into_items(), seed);
     let i_models = train_folds(&i_sample.into_items(), seed);
     eprintln!(
-        "[mbr] finalize: training rows {:.1} s, fold models {:.1} s",
+        "[mbr] finalize: training rows of {} extract rows {:.1} s, fold models {:.1} s",
+        rows_read.into_inner(),
         (t1 - t0).as_secs_f64(),
         secs(t1)
     );
@@ -1360,6 +1421,7 @@ pub(crate) fn finalize_stream(
     let i_store = ScoreStore::new("identified", dir, limits.max_held_scores, seed);
     for_each_block(
         source,
+        false,
         bounds,
         |_| (FoldScores::new(seed), FoldScores::new(seed)),
         |(ts, is), _, _, rows| {
@@ -1392,15 +1454,21 @@ pub(crate) fn finalize_stream(
             i_store.add(is)
         },
     )?;
+    // The validation thresholds, VALIDATION_Q then mbr_fdr: the transfer
+    // estimates other than the pooled one are only counted at them, and
+    // the identified rows use the pooled estimate only.
+    let thresholds = [VALIDATION_Q, mbr_fdr];
     let t1 = Instant::now();
-    let (fdr, t_spills) = t_store.finish(&t_models.failed_folds)?;
-    let (id_fdr, i_spills) = i_store.finish(&i_models.failed_folds)?;
+    let (fdr, t_spills) = t_store.finish(&t_models.failed_folds, &thresholds)?;
+    let (id_fdr, i_spills) = i_store.finish(&i_models.failed_folds, &[])?;
     eprintln!(
-        "[mbr] finalize: held-out scores {:.1} s, step functions {:.1} s ({} and {} steps; {t_spills} and {i_spills} score spills)",
+        "[mbr] finalize: held-out scores {:.1} s, step functions {:.1} s ({} and {} steps, {} and {} pooled; {t_spills} and {i_spills} score spills)",
         (t1 - t0).as_secs_f64(),
         secs(t1),
         fdr.steps(),
-        id_fdr.steps()
+        id_fdr.steps(),
+        fdr.pooled_steps(),
+        id_fdr.pooled_steps()
     );
 
     // Pass 4: the reference cells of the run normalisation.
@@ -1409,6 +1477,7 @@ pub(crate) fn finalize_stream(
         Mutex::new(TrainingSample::new(limits.max_norm_cells, seed));
     for_each_block(
         source,
+        false,
         bounds,
         |_| (),
         |_, chunk, first, rows| {
@@ -1475,8 +1544,6 @@ pub(crate) fn finalize_stream(
     // validation counts.
     let t0 = Instant::now();
     let accepted = |q: Option<f64>| q.is_some_and(|q| q <= mbr_fdr);
-    // The validation thresholds, VALIDATION_Q then mbr_fdr.
-    let thresholds = [VALIDATION_Q, mbr_fdr];
     // Decoy transfer rows with a q-value, and their acceptance, by family:
     // mass shift, RT shift, identity decoy.
     let count_decoy = |v: &mut MbrValidation, q: Option<f64>, f: usize| {
@@ -1493,6 +1560,7 @@ pub(crate) fn finalize_stream(
     let totals: Mutex<MbrValidation> = Mutex::new(MbrValidation::default());
     for_each_block(
         source,
+        false,
         bounds,
         |_| RunOutput::default(),
         |out, _, _, rows| {
@@ -1574,20 +1642,19 @@ pub(crate) fn finalize_stream(
                         let q = q_of(&fdr, Estimate::Pooled, i);
                         v.transfers += 1;
                         v.transfers_scored += usize::from(q.is_some());
-                        let (mass, rt, wrong) = (
-                            q_of(&fdr, Estimate::MassOnly, i),
-                            q_of(&fdr, Estimate::RtOnly, i),
-                            q_of(&fdr, Estimate::WrongPeak, i),
-                        );
                         for (a, &t) in [&mut v.at_q01, &mut v.at_threshold]
                             .into_iter()
                             .zip(&thresholds)
                         {
-                            let ok = |q: Option<f64>| usize::from(q.is_some_and(|q| q <= t));
-                            a.pooled += ok(q);
-                            a.mass_only += ok(mass);
-                            a.rt_only += ok(rt);
-                            a.wrong_peak_only += ok(wrong);
+                            let ok = |e: Estimate| {
+                                usize::from(scored[i].is_some_and(|(fam, s)| {
+                                    fdr.accepts(e, r.precursor, fam, s, t)
+                                }))
+                            };
+                            a.pooled += usize::from(q.is_some_and(|q| q <= t));
+                            a.mass_only += ok(Estimate::MassOnly);
+                            a.rt_only += ok(Estimate::RtOnly);
+                            a.wrong_peak_only += ok(Estimate::WrongPeak);
                         }
                         let supported = r.ms2.is_some_and(|m| m.supports());
                         if let Some(m) = &r.ms2 {
@@ -1695,27 +1762,9 @@ pub(crate) fn finalize_stream(
     let paths: Vec<PathBuf> = parts.into_iter().map(|(_, p)| p).collect();
     let t1 = Instant::now();
 
-    // The per-run tables merged into the outputs.
-    let mut writer = MbrParquetWriter::create(params.mbr_path)?;
-    merge_out(&paths, dir, 0, &mut |rows| {
-        for r in rows {
-            writer.push(&MbrRow {
-                precursor_key: &lib.meta[r.precursor as usize].key,
-                run: &stems[r.run as usize],
-                evidence_type: r.evidence_type,
-                quantity: r.quantity,
-                quantity_se: r.quantity_se,
-                quantity_normalized: r.quantity_normalized,
-                transfer_q: r.transfer_q,
-                quant_q: r.quant_q,
-                apex_rt_s: r.apex_rt_s,
-                library_q: r.library_q,
-            })?;
-        }
-        summary.rows_written += rows.len();
-        on_features(rows.iter().map(OutRow::feature).collect())
-    })?;
-    writer.finish()?;
+    // The per-run tables merged into the outputs: one thread merges, one
+    // writes `<base>.mbr.parquet`, and this one hands the rows on.
+    summary.rows_written = write_merged(&paths, dir, lib, stems, params.mbr_path, on_features)?;
     write_mbr_validation(params.validation_path, &v)?;
     drop(tmp);
     eprintln!(
@@ -1737,6 +1786,74 @@ pub(crate) fn finalize_stream(
     summary.fdr = fdr.counts;
     summary.identified_fdr = id_fdr.counts;
     Ok(summary)
+}
+
+/// Merges the per-run output tables `paths` into `<base>.mbr.parquet` at
+/// `mbr_path` and hands the rows to `on_features`, both in (precursor, run)
+/// order; the merge, the table writer and `on_features` run in three
+/// threads. Returns the rows written.
+fn write_merged(
+    paths: &[PathBuf],
+    dir: &Path,
+    lib: &Library,
+    stems: &[String],
+    mbr_path: &Path,
+    on_features: &mut dyn FnMut(Vec<MbrFeature>) -> Result<(), String>,
+) -> Result<usize, String> {
+    use std::sync::mpsc::sync_channel;
+    let stopped = || "the output merge stopped early".to_string();
+    let (to_table, table_rows) = sync_channel::<Arc<Vec<OutRow>>>(4);
+    let (to_features, feature_rows) = sync_channel::<Arc<Vec<OutRow>>>(4);
+    std::thread::scope(|scope| {
+        let merger = scope.spawn(move || {
+            merge_out(paths, dir, 0, &mut |rows| {
+                let b = Arc::new(rows.to_vec());
+                to_table.send(b.clone()).map_err(|_| stopped())?;
+                to_features.send(b).map_err(|_| stopped())
+            })
+        });
+        let table = scope.spawn(move || -> Result<(MbrParquetWriter, usize), String> {
+            let mut writer = MbrParquetWriter::create(mbr_path)?;
+            let mut n = 0;
+            for rows in table_rows {
+                for r in rows.iter() {
+                    writer.push(&MbrRow {
+                        precursor_key: &lib.meta[r.precursor as usize].key,
+                        run: &stems[r.run as usize],
+                        evidence_type: r.evidence_type,
+                        quantity: r.quantity,
+                        quantity_se: r.quantity_se,
+                        quantity_normalized: r.quantity_normalized,
+                        transfer_q: r.transfer_q,
+                        quant_q: r.quant_q,
+                        apex_rt_s: r.apex_rt_s,
+                        library_q: r.library_q,
+                    })?;
+                }
+                n += rows.len();
+            }
+            Ok((writer, n))
+        });
+        let mut handed = Ok(());
+        for rows in feature_rows.iter() {
+            handed = on_features(rows.iter().map(OutRow::feature).collect());
+            if handed.is_err() {
+                break;
+            }
+        }
+        // Unblocks the merge when the rows were not all taken.
+        drop(feature_rows);
+        let merged = merger.join().expect("output merge thread");
+        let written = table.join().expect("output table thread");
+        // The first error by cause: a failed writer or hand-off stops the
+        // merge, which then reports the stop. The table is only finished
+        // (renamed into place) when every row reached it.
+        let (writer, n) = written?;
+        handed?;
+        merged?;
+        writer.finish()?;
+        Ok(n)
+    })
 }
 
 /// Logs what finalize did.
@@ -2001,10 +2118,10 @@ mod tests {
             store.add(s).unwrap();
         }
         let a = one.finish(&[]);
-        let (b, spills) = store.finish(&[]).unwrap();
+        let (b, spills) = store.finish(&[], &[0.05]).unwrap();
         assert!(spills > 3, "{spills}");
         assert_eq!(a.counts, b.counts);
-        assert_eq!(a.steps(), b.steps());
+        assert_eq!(a.pooled_steps(), b.pooled_steps());
         for &(p, f, s) in &rows {
             for e in [
                 Estimate::Pooled,
@@ -2012,11 +2129,12 @@ mod tests {
                 Estimate::MassOnly,
                 Estimate::RtOnly,
             ] {
-                assert_eq!(
-                    a.q(e, p, f, s).map(f64::to_bits),
-                    b.q(e, p, f, s).map(f64::to_bits)
-                );
+                assert_eq!(a.accepts(e, p, f, s, 0.05), b.accepts(e, p, f, s, 0.05));
             }
+            assert_eq!(
+                a.q(Estimate::Pooled, p, f, s).map(f64::to_bits),
+                b.q(Estimate::Pooled, p, f, s).map(f64::to_bits)
+            );
             assert_eq!(
                 a.pseudo_q(p, s).map(f64::to_bits),
                 b.pseudo_q(p, s).map(f64::to_bits)

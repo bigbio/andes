@@ -1096,7 +1096,7 @@ pub(crate) struct QuantFinalizeArgs {
     /// Advanced: donor fits (identified rows) summarised in one pass over
     /// the extract tables; with more, the precursors are summarised in
     /// groups, one pass each (about 64 bytes per fit). The results do not
-    /// depend on it. Default 10000000.
+    /// depend on it. Default 5000000.
     #[arg(long = "max-donor-fits", hide = true, default_value_t = crate::quant_finalize::DEFAULT_MAX_DONOR_FITS)]
     pub(crate) max_donor_fits: usize,
 

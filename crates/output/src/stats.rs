@@ -6,7 +6,7 @@
 //! CLI (e.g. precursor calibration tightens the window; a high-res model carries
 //! a 20 ppm fragment tolerance even when the input named none). This module
 //! reports those final, effective values together with a per-modification PSM
-//! count, and writes them both to stderr and to a `statistics.log` next to the
+//! count, and writes them both to stderr and to a `<stem>.statistics.log` next to the
 //! PIN output so a run's true parameters are always recoverable.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -108,7 +108,7 @@ impl RunStatistics {
         }
     }
 
-    /// Render the human-readable report (shared by stderr and `statistics.log`).
+    /// Render the human-readable report (shared by stderr and `<stem>.statistics.log`).
     pub fn render(&self) -> String {
         // Width for the PTM name column (incl. the "(unmodified)" sentinel).
         let label_w = self
@@ -154,7 +154,7 @@ impl RunStatistics {
     }
 }
 
-/// Write the rendered report to `path` (the run's `statistics.log`).
+/// Write the rendered report to `path` (the run's `<stem>.statistics.log`).
 pub fn write_statistics_log(stats: &RunStatistics, path: &Path) -> io::Result<()> {
     let mut f = File::create(path)?;
     f.write_all(stats.render().as_bytes())

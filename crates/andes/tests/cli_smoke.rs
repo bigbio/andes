@@ -672,5 +672,56 @@ fn top_n_zero_is_rejected() {
     .expect("run andes");
     assert!(!out.status.success(), "--top-n 0 must be rejected");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("--top-n must be at least 1"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("--top-n must be at least 1"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn predict_ms2_without_a_model_directory_fails_before_the_search() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pin = dir.path().join("out.pin");
+    let out = base_cmd("test-fixtures/test.mgf.gz", "test-fixtures/BSA.fasta", &pin)
+        .args(["--predict", "rt,ms2"])
+        .output()
+        .expect("run andes");
+    assert!(
+        !out.status.success(),
+        "--predict ms2 without models must fail"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--predictor-models"), "{err}");
+    assert!(!pin.exists(), "no PIN is written when a model is missing");
+
+    let out = base_cmd("test-fixtures/test.mgf.gz", "test-fixtures/BSA.fasta", &pin)
+        .args(["--predict", "deeplc-rt", "--predictor-models"])
+        .arg(dir.path())
+        .output()
+        .expect("run andes");
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("deeplc_rt.json"), "{err}");
+}
+
+#[test]
+fn predict_rt_keeps_the_pin_well_formed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pin = dir.path().join("out.pin");
+    let status = base_cmd("test-fixtures/test.mgf.gz", "test-fixtures/BSA.fasta", &pin)
+        .args(["--predict", "rt"])
+        .status()
+        .expect("run andes");
+    assert!(status.success());
+    let text = std::fs::read_to_string(&pin).unwrap();
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+    let pep = header.iter().position(|h| *h == "Peptide").unwrap();
+    if let Some(i) = header.iter().position(|h| *h == "andesrt_rt_diff") {
+        assert!(i < pep, "predicted columns go before Peptide");
+        assert!(header.contains(&"andesrt_missing"));
+    }
+    for l in lines {
+        assert!(l.split('\t').count() >= pep + 2, "short row: {l}");
+    }
 }

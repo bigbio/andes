@@ -82,11 +82,15 @@ fn rescoring_batch_column_order_matches_feature_names() {
         },
         values: BTreeMap::from([("spec_pearson_norm".into(), 0.91), ("rt_diff".into(), -1.5)]),
     }];
-    let names = ["spec_pearson_norm", "missing_col", "rt_diff"];
-    let batch = RescoringBatch::from_rows(rows, &names, "features").unwrap();
+    let names = ["rt_diff", "spec_pearson_norm"];
+    let batch = RescoringBatch::from_rows(rows.clone(), &names, "features").unwrap();
     assert_eq!(batch.feature_names, names);
-    assert_eq!(batch.features.shape, vec![1, 3]);
-    assert_eq!(batch.features.data, vec![0.91, 0.0, -1.5]);
+    assert_eq!(batch.features.shape, vec![1, 2]);
+    assert_eq!(batch.features.data, vec![-1.5, 0.91]);
+    // A column the rows do not carry is an error, never a silent zero.
+    assert!(
+        RescoringBatch::from_rows(rows, &["spec_pearson_norm", "missing_col"], "features").is_err()
+    );
     assert_eq!(batch.keys[0].spectrum_ref, "scan=9");
 }
 

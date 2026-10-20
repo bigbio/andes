@@ -62,6 +62,9 @@ pub(crate) enum ScoreFlag {
     Strong,
 }
 
+/// Trees kept per GBDT ensemble when `--gbdt-max-trees` is unset (standard search).
+pub(crate) const DEFAULT_GBDT_MAX_TREES: usize = 100;
+
 /// Candidate retrieval from the out-of-core index.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub(crate) enum FragmentIndexFlag {
@@ -73,6 +76,48 @@ pub(crate) enum FragmentIndexFlag {
     On,
     /// Per-spectrum enumeration of every candidate in the precursor window.
     Off,
+}
+
+/// One `--predict` entry: a predicted-feature block added to the PIN.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ValueEnum)]
+pub(crate) enum PredictFeature {
+    /// Retention-time deviation from the bundled andes-rt model.
+    #[clap(name = "rt")]
+    Rt,
+    /// Spectral similarity to AlphaPeptDeep's predicted fragment intensities.
+    #[clap(name = "ms2")]
+    Ms2,
+    /// Retention-time deviation from AlphaPeptDeep.
+    #[clap(name = "peptdeep-rt")]
+    PeptDeepRt,
+    /// Retention-time deviation from DeepLC.
+    #[clap(name = "deeplc-rt")]
+    DeepLcRt,
+    /// No predicted features.
+    #[clap(name = "none")]
+    None,
+}
+
+/// ONNX engine for the third-party predictors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum PredictorBackend {
+    /// tract (pure Rust).
+    Tract,
+    /// ONNX Runtime.
+    Ort,
+}
+
+/// Parse one `--predict` value (used by the YAML config).
+pub(crate) fn parse_predict_feature(s: &str) -> Result<PredictFeature, String> {
+    <PredictFeature as ValueEnum>::from_str(s, true).map_err(|_| {
+        format!("invalid predict entry `{s}`: expected rt|ms2|peptdeep-rt|deeplc-rt|none")
+    })
+}
+
+/// Parse `--predictor-backend` (used by the YAML config).
+pub(crate) fn parse_predictor_backend(s: &str) -> Result<PredictorBackend, String> {
+    <PredictorBackend as ValueEnum>::from_str(s, true)
+        .map_err(|_| format!("invalid predictor_backend `{s}`: expected tract|ort"))
 }
 
 /// Search arguments (shared by the default search path and exposed as a
@@ -437,13 +482,14 @@ pub(crate) struct SearchArgs {
     /// whole ensemble is worth ~2% of identifications for 77% of the runtime.)
     ///
     /// GLYCO IS EXEMPT: under `--glyco` the ensembles are ~0.3% of wall time, so
-    /// truncation would trade identification fidelity for nothing. Pass the flag
-    /// explicitly to truncate there anyway.
+    /// truncation would trade identification fidelity for nothing. Set the flag
+    /// (or `scoring.gbdt_max_trees` in `--config`) to truncate there anyway.
     ///
     /// This CHANGES predicted intensities and therefore the emitted PIN feature
-    /// values; `--gbdt-max-trees 0` restores the full ensembles.
-    #[arg(long = "gbdt-max-trees", hide = true, default_value_t = 100usize)]
-    pub(crate) gbdt_max_trees: usize,
+    /// values; `--gbdt-max-trees 0` restores the full ensembles. Unset:
+    /// [`DEFAULT_GBDT_MAX_TREES`], or every tree under `--glyco`.
+    #[arg(long = "gbdt-max-trees", hide = true)]
+    pub(crate) gbdt_max_trees: Option<usize>,
 
     /// Ranking / PIN RawScore source: `auto` (default — `strong` for high-res
     /// instruments, `rank` for low-res), `rank`, or `strong` (fused intensity +
@@ -456,10 +502,11 @@ pub(crate) struct SearchArgs {
     /// `.glyco.pin` file instead of the standard PIN. Default off.
     ///
     /// Requires a glycan database: `--glyco-species` for a bundled one, or
-    /// `--glyco-glycan-gdb` for your own file. The requirement is enforced at
-    /// argument-parsing time, so a missing database fails immediately rather than
-    /// after the digest, index build and spectrum load.
-    #[arg(long = "glyco", default_value_t = false, requires = "glycan_db")]
+    /// `--glyco-glycan-gdb` for your own file (or `glyco.species` /
+    /// `glyco.glycan_gdb` in `--config`). The requirement is checked as soon as the
+    /// command line and the config file are merged, so a missing database fails
+    /// immediately rather than after the digest, index build and spectrum load.
+    #[arg(long = "glyco", default_value_t = false)]
     pub(crate) glyco: bool,
 
     /// Cap the peaks the glyco GENERATION stage considers, keeping the most
@@ -663,6 +710,15 @@ pub(crate) struct SearchArgs {
     #[arg(long = "proteoform-fdr", value_parser = parse_unit_fraction)]
     pub(crate) proteoform_fdr: Option<f64>,
 
+    /// Protein-group q-value cutoff, with rescoring. Protein groups and their
+    /// q-values (`<stem>.protein_groups.tsv`, picked target-decoy competition
+    /// per protein family) are written either way; with this cutoff the
+    /// filtered TSV keeps only PSMs whose peptide counts for a group at or
+    /// below it, and the proteoform table only families of such groups.
+    /// Default: no protein filter.
+    #[arg(long = "protein-fdr", value_parser = parse_unit_fraction)]
+    pub(crate) protein_fdr: Option<f64>,
+
     /// Optional per-PSM PEP (posterior error probability / local FDR) cap,
     /// applied IN ADDITION to `--fdr` (a PSM must pass both q ≤ `--fdr` AND
     /// PEP ≤ `--pep`). The q-value stays the primary set-level FDR control;
@@ -691,6 +747,48 @@ pub(crate) struct SearchArgs {
     #[arg(long = "percolator-args", hide = true, default_value = "")]
     pub(crate) percolator_args: String,
 
+    /// Predicted-spectrum and retention-time features added to the PIN for
+    /// Percolator, as a comma-separated list:
+    /// `rt` = retention-time deviation from the bundled andes-rt model;
+    /// `ms2` = similarity of the observed spectrum to AlphaPeptDeep's predicted
+    /// fragment intensities; `peptdeep-rt` / `deeplc-rt` = retention-time
+    /// deviation from AlphaPeptDeep / DeepLC; `none` = no predicted features.
+    /// Predicted RT is calibrated to observed RT per input file. `ms2`,
+    /// `peptdeep-rt` and `deeplc-rt` load exported ONNX models from
+    /// `--predictor-models` and fail at start-up when a model file is missing.
+    /// Default `rt`.
+    #[arg(long = "predict", value_delimiter = ',', default_value = "rt")]
+    pub(crate) predict: Vec<PredictFeature>,
+
+    /// Directory with the exported third-party predictor models that
+    /// `--predict ms2 / peptdeep-rt / deeplc-rt` load: `peptdeep_mods.json`,
+    /// `peptdeep_{ms2,rt}_dynamic.{json,onnx}` and `deeplc_rt.{json,onnx}`
+    /// (written by the onnx-infer export scripts).
+    #[arg(long = "predictor-models")]
+    pub(crate) predictor_models: Option<std::path::PathBuf>,
+
+    /// ONNX engine for the third-party predictors: `tract` (pure Rust, built
+    /// in) or `ort` (ONNX Runtime, a build with `--features ort` plus the
+    /// runtime library; several times faster).
+    #[arg(long = "predictor-backend", hide = true, default_value = "tract")]
+    pub(crate) predictor_backend: PredictorBackend,
+
+    /// Collision energy given to the AlphaPeptDeep MS2 model. Default: 28 on
+    /// Q Exactive instruments, 30 otherwise.
+    #[arg(long = "predictor-nce", hide = true)]
+    pub(crate) predictor_nce: Option<f32>,
+
+    /// Instrument given to the AlphaPeptDeep MS2 model (one of the model's
+    /// instrument names, e.g. QE, Lumos, timsTOF). Default: from the resolved
+    /// instrument (Q Exactive → QE, timsTOF → timsTOF, TOF → SciexTOF,
+    /// otherwise Lumos).
+    #[arg(long = "predictor-instrument", hide = true)]
+    pub(crate) predictor_instrument: Option<String>,
+
+    /// Peptides per predictor batch.
+    #[arg(long = "predictor-batch", hide = true, default_value_t = 256)]
+    pub(crate) predictor_batch: usize,
+
     // ── Quantification ─────────────────────────────────────────────────────
     /// Isobaric reporter-ion quantification of the confident PSMs with this
     /// labelling kit: tmt6, tmt10, tmt11, tmt16, tmt18, tmt32, tmt35, itraq4 or
@@ -703,9 +801,10 @@ pub(crate) struct SearchArgs {
 
     /// MS level the reporter ions are read from: 2 (the identified MS2) or 3
     /// (the SPS-MS3 scan whose precursor references that MS2; mzML and Thermo
-    /// `.raw`).
-    #[arg(long = "tmt-level", default_value = "2")]
-    pub(crate) tmt_level: u8,
+    /// `.raw`). Default: 3 when the MS2 is low-resolution, cannot separate the
+    /// plex's channels and the MS3 scans carry reporters (SPS-MS3); else 2.
+    #[arg(long = "tmt-level")]
+    pub(crate) tmt_level: Option<u8>,
 
     /// Reporter-ion m/z tolerance, e.g. `20ppm` or `0.003da`. Default: 20 ppm
     /// (10 ppm for tmt32/tmt35) on high-resolution MS2 and at `--tmt-level 3`
@@ -965,6 +1064,35 @@ pub(crate) struct QuantFinalizeArgs {
     #[arg(long = "output-parquet", value_name = "DIR")]
     pub(crate) output_parquet: Option<PathBuf>,
 
+    /// Advanced: extract rows per precursor shard. With more extract rows
+    /// than this over all runs, finalize splits them by precursor into shards
+    /// of about this many rows (temporary Parquet tables next to the output)
+    /// and holds one shard at a time. The results do not depend on it.
+    /// Default 1000000.
+    #[arg(long = "shard-rows", hide = true, default_value_t = crate::quant_mbr::DEFAULT_SHARD_ROWS)]
+    pub(crate) shard_rows: usize,
+
+    /// Advanced: training rows per transfer or identified-quality
+    /// classifier. Above it the classifier is trained on the rows of a
+    /// hashed sample of (precursor, run) pairs (every row is still scored);
+    /// below it every row trains. Default 3000000.
+    #[arg(long = "max-train-rows", hide = true, default_value_t = crate::quant_mbr::DEFAULT_MAX_TRAIN_ROWS)]
+    pub(crate) max_train_rows: usize,
+
+    /// Advanced: reference cells of the run normalisation. Above it the fit
+    /// uses a hashed sample of whole precursors, which coarsens the RT-local
+    /// offsets (on a 6-run benchmark, half the cells raised the median
+    /// absolute log2 ratio error from 0.162 to 0.173), so keep it above the
+    /// cells of the study
+    /// when memory allows (about 150 bytes per cell). Default 20000000.
+    #[arg(long = "max-norm-cells", hide = true, default_value_t = crate::quant_mbr::DEFAULT_MAX_NORM_CELLS)]
+    pub(crate) max_norm_cells: usize,
+
+    /// Advanced: seed of the transfer FDR folds and models and of the
+    /// samples. Default 42.
+    #[arg(long = "seed", hide = true, default_value_t = crate::quant_cmd::MBR_SEED)]
+    pub(crate) seed: u64,
+
     /// Worker threads. Default: logical CPU count.
     #[arg(long)]
     pub(crate) threads: Option<usize>,
@@ -1075,9 +1203,9 @@ impl From<GlycoCoreFlag> for andes_glyco::glycan_first::GlycanCore {
 /// `--precursor-mono`: MS1 isotope-envelope precursor correction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub(crate) enum PrecursorMonoFlag {
-    /// Leave every precursor m/z as recorded (default).
+    /// Leave every precursor m/z as recorded.
     Off,
-    /// Move a precursor down to the monoisotope its MS1 envelope supports.
+    /// Move a precursor down to the monoisotope its MS1 envelope supports (default).
     Auto,
 }
 

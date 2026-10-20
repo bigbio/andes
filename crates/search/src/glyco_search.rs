@@ -2036,6 +2036,7 @@ fn score_spectrum_glyco(
             // even when an M+1/M+2 offset produced the winning match).
             isotope_offset: w.isotope_offset,
             precursor_mz_override: None,
+            tie_key: crate::psm::tie_key_of(cand),
         };
         // Use the annotated composition's theoretical mass when a known
         // glycan matched; otherwise fall back to the observed residual
@@ -2724,6 +2725,7 @@ mod tests {
             features: PsmFeatures::default(),
             isotope_offset: 0,
             precursor_mz_override: None,
+            tie_key: 0,
         };
         let key = GlycoPsmKey {
             spectrum_idx: 0,

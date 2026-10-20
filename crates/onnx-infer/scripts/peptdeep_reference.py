@@ -17,9 +17,11 @@ the Rust example uses and reports the largest deviation from peptdeep.
 
 Usage::
 
-  python peptdeep_reference.py --pretrained-dir .../generic --onnx-dir .../onnx \
-      --mods Carbamidomethyl@C Oxidation@M Acetyl@Protein_N-term \
-      Gln->pyro-Glu@Q^Any_N-term Glu->pyro-Glu@E^Any_N-term TMT6plex@Any_N-term
+  python peptdeep_reference.py --pretrained-dir .../generic --onnx-dir .../onnx
+
+``--mods`` defaults to every modification andes encodes for AlphaPeptDeep
+(``ANDES_MODS``); a modification missing from ``peptdeep_mods.json`` makes every
+peptide that carries it a missing row in ``andes --predict ms2``.
 """
 from __future__ import annotations
 
@@ -52,11 +54,19 @@ PEPTIDES = [
 ]
 
 
+# The alphabase names of the modifications andes parses (onnx_infer::predictors::form::Mod).
+ANDES_MODS = [
+    "Carbamidomethyl@C", "Oxidation@M", "Acetyl@Protein_N-term", "Phospho@S", "Phospho@T", "Phospho@Y",
+    "TMT6plex@K", "TMT6plex@Any_N-term", "Deamidated@N", "Deamidated@Q",
+    "Gln->pyro-Glu@Q^Any_N-term", "Glu->pyro-Glu@E^Any_N-term",
+]
+
+
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--pretrained-dir", type=Path, required=True)
     p.add_argument("--onnx-dir", type=Path, required=True)
-    p.add_argument("--mods", nargs="+", required=True)
+    p.add_argument("--mods", nargs="+", default=ANDES_MODS)
     p.add_argument("--out-dir", type=Path, default=None, help="default: --onnx-dir")
     p.add_argument("--nce", type=float, default=30.0)
     p.add_argument("--instrument", default="Lumos")

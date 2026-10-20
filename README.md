@@ -144,8 +144,8 @@ Percolator for q-values.
 
 Each PIN row is one PSM. `RankScore` orders candidates within a spectrum; `RawScore` is the
 score Percolator weights most. All 66 columns are in [`DOCS.md` §3a](DOCS.md#3a-pin-columns).
-The final tolerances and a per-modification PSM tally go to stderr and `statistics.log`
-([`DOCS.md` §3d](DOCS.md#3d-run-summary-statisticslog)).
+The final tolerances and a per-modification PSM tally go to stderr and `<stem>.statistics.log`
+([`DOCS.md` §3d](DOCS.md#3d-run-summary-stemstatisticslog)).
 
 ## Common workflows
 
@@ -220,6 +220,13 @@ andes --spectrum spectra.mzML --database db.fasta \
 fallback. Both add a q-value and PEP to the outputs and write `<stem>.q<fdr>.tsv` (targets at
 q ≤ `--fdr`, default 0.01, e.g. `--rescore --fdr 0.01`). `--fdr` and `--pep` do nothing
 without one of them.
+
+**Protein groups.** Every rescored run also writes `<stem>.protein_groups.tsv`: protein groups
+by parsimony over protein families (a canonical entry with its isoform, variant and chain
+entries is one family), each with a protein q-value from picked target-decoy competition.
+`--protein-fdr 0.01` keeps only PSMs of groups at that level in the filtered TSV, and only their
+families in the proteoform table; no quantification is needed
+([`DOCS.md`](DOCS.md#protein-groups-and-protein-fdr)).
 
 **Quantification (`--tmt`, `--lfq`).** andes quantifies the confident PSMs in the same run:
 `--tmt tmt10` reads the reporter ions of every identified MS2 (or its SPS-MS3 with

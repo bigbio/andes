@@ -84,8 +84,8 @@ impl QuantSettings {
         if cli.tmt.is_none() && !cli.lfq && cli.quant_dir.is_none() {
             return Ok(());
         }
-        if !(2..=3).contains(&cli.tmt_level) {
-            return Err(format!("--tmt-level must be 2 or 3, got {}", cli.tmt_level));
+        if let Some(level) = cli.tmt_level.filter(|l| !(2..=3).contains(l)) {
+            return Err(format!("--tmt-level must be 2 or 3, got {level}"));
         }
         let Some(plex) = cli.tmt else {
             if cli.tmt_correction.is_some() {
@@ -110,7 +110,13 @@ impl QuantSettings {
     }
 
     /// `None` when none of `--tmt`, `--lfq` and `--quant-dir` is set.
-    pub(crate) fn from_cli(cli: &Cli, high_res: bool) -> Result<Option<Self>, String> {
+    /// `tmt_level` is `--tmt-level`, or the level resolved from the data when
+    /// it is not given.
+    pub(crate) fn from_cli(
+        cli: &Cli,
+        high_res: bool,
+        tmt_level: u8,
+    ) -> Result<Option<Self>, String> {
         if cli.tmt.is_none() && !cli.lfq && cli.quant_dir.is_none() {
             return Ok(None);
         }
@@ -119,7 +125,7 @@ impl QuantSettings {
         // reporters are read in the Orbitrap even when the identifying MS2 is
         // an ion-trap scan (Fusion/Lumos SPS methods), so the MS2 resolution
         // says nothing about them.
-        let tmt_tol = cli.tmt_tol.unwrap_or(if high_res || cli.tmt_level >= 3 {
+        let tmt_tol = cli.tmt_tol.unwrap_or(if high_res || tmt_level >= 3 {
             Tolerance::Ppm(cli.tmt.map_or(20.0, |p| p.default_reporter_ppm()))
         } else {
             Tolerance::Da(0.3)
@@ -173,7 +179,7 @@ impl QuantSettings {
         }
         Ok(Some(Self {
             plex: cli.tmt,
-            tmt_level: cli.tmt_level,
+            tmt_level,
             tmt_tol,
             correction,
             min_purity: cli.tmt_min_purity as f32,
@@ -1635,6 +1641,7 @@ mod tests {
             features: search::psm::PsmFeatures::default(),
             isotope_offset: 0,
             precursor_mz_override: co_isolated_mz,
+            tie_key: 0,
         }
     }
 

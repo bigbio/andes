@@ -33,6 +33,13 @@ python scripts/export_peptdeep_to_onnx.py \
 
 Then optionally: `cargo test -p onnx-infer -- --ignored`
 
+For `andes --predict ms2 / peptdeep-rt`, the model directory also needs
+`peptdeep_mods.json`, written by
+[`peptdeep_reference.py`](scripts/peptdeep_reference.py) next to the graphs. By
+default it carries every modification andes parses (carbamidomethyl, oxidation,
+acetyl, phospho S/T/Y, TMT6plex, deamidation N/Q, pyro-Glu); a peptide with a
+modification missing from the file is a missing row for AlphaPeptDeep.
+
 ## Andes production AGBD
 
 In-search peak GBDT stays native `AGBD` (`scoring::gbdt_eval`). Convert for quantms / ort:

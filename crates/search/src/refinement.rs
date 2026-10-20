@@ -1147,6 +1147,7 @@ mod tests {
             features: PsmFeatures::default(),
             isotope_offset: 0,
             precursor_mz_override: None,
+            tie_key: 0,
         }
     }
 

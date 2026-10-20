@@ -648,7 +648,10 @@ mod tests {
                     b_1_1\t1.0\t0.02\t0.03\tK.ANOTHERK.R";
         let mut r = PsmResultReader::new(text.as_bytes()).unwrap();
         let a = r.next_row().unwrap().unwrap();
-        assert_eq!((a.psm_id, a.score, a.peptide), ("a_1_1", Some(2.5), "R.PEPTIDEK.A"));
+        assert_eq!(
+            (a.psm_id, a.score, a.peptide),
+            ("a_1_1", Some(2.5), "R.PEPTIDEK.A")
+        );
         assert_eq!(a.proteins(), "sp|P1;sp|P2");
         let b = r.next_row().unwrap().unwrap();
         assert_eq!((b.psm_id, b.q_value, b.pep), ("b_1_1", 0.02, 0.03));

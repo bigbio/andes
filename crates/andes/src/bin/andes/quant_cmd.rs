@@ -210,12 +210,7 @@ impl ScoreSet {
             )
         })?;
         let tag = (self.keys.residues(peptide, &mut self.buf) << 1) | u64::from(is_decoy);
-        let scored = Scored {
-            score,
-            q,
-            pep,
-            tag,
-        };
+        let scored = Scored { score, q, pep, tag };
         match self.psms.entry(self.keys.key(spec_id)) {
             std::collections::hash_map::Entry::Occupied(o) => {
                 if o.get().is_decoy() == is_decoy {
@@ -252,7 +247,8 @@ impl ScoreSet {
     /// Whether `s` has label `is_decoy` and names the residues of
     /// `peptidoform`; `buf` is scratch space.
     fn agrees(&self, s: &Scored, is_decoy: bool, peptidoform: &str, buf: &mut String) -> bool {
-        s.is_decoy() == is_decoy && s.tag >> 1 == self.keys.residues(peptidoform, buf) & (u64::MAX >> 1)
+        s.is_decoy() == is_decoy
+            && s.tag >> 1 == self.keys.residues(peptidoform, buf) & (u64::MAX >> 1)
     }
 }
 
@@ -388,7 +384,9 @@ fn score_source(
 /// The loader of `quant library`'s Percolator results.
 fn score_loader(source: &ScoreSource) -> ScoreLoader<'_> {
     match source {
-        ScoreSource::Merged(t, d) => ScoreLoader::Merged(Box::new(move |n: usize| percolator_scores(t, d, n))),
+        ScoreSource::Merged(t, d) => {
+            ScoreLoader::Merged(Box::new(move |n: usize| percolator_scores(t, d, n)))
+        }
         ScoreSource::PerRun(m) => ScoreLoader::PerRun(Box::new(move |stem: &str| {
             let (t, d) = m
                 .get(stem)
@@ -1529,7 +1527,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let write = |name: &str, rows: &[&str]| {
             let path = dir.path().join(name);
-            let mut text = "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\r\n".to_string();
+            let mut text =
+                "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\r\n".to_string();
             for r in rows {
                 text.push_str(r);
                 text.push_str("\r\n");
@@ -1539,13 +1538,20 @@ mod tests {
         };
         let t = write(
             "t.tsv",
-            &["a_1_1\t2.5\t0.001\t0.01\tK.PEPC+57.02146TIDEK.A\tP1\tP2", "", "b_2_1\t1.5\t0.002\t0.02\t-.PEPM[+15.99491]K.-\tP3"],
+            &[
+                "a_1_1\t2.5\t0.001\t0.01\tK.PEPC+57.02146TIDEK.A\tP1\tP2",
+                "",
+                "b_2_1\t1.5\t0.002\t0.02\t-.PEPM[+15.99491]K.-\tP3",
+            ],
         );
         let d = write("d.tsv", &["c_3_1\t-1.0\t0.5\t0.9\tK.KEDITPEP.A\tDECOY_P1"]);
         let set = percolator_scores(&t, &d, 0).unwrap();
         assert_eq!(set.len(), 3);
         let a = *set.get("a_1_1").unwrap();
-        assert_eq!((a.score, a.q, a.pep, a.is_decoy()), (2.5, 0.001, 0.01, false));
+        assert_eq!(
+            (a.score, a.q, a.pep, a.is_decoy()),
+            (2.5, 0.001, 0.01, false)
+        );
         let c = *set.get("c_3_1").unwrap();
         assert!(c.is_decoy() && c.score == -1.0);
         assert!(set.get("a_1").is_none());
@@ -1557,7 +1563,13 @@ mod tests {
         let b = *set.get("b_2_1").unwrap();
         assert!(set.agrees(&b, false, "PEPMK", &mut buf));
 
-        let dup = write("dup.tsv", &["a_1_1\t2.5\t0.001\t0.01\tK.PEPTIDEK.A\tP1", "a_1_1\t2.0\t0.001\t0.01\tK.PEPTIDEK.A\tP1"]);
+        let dup = write(
+            "dup.tsv",
+            &[
+                "a_1_1\t2.5\t0.001\t0.01\tK.PEPTIDEK.A\tP1",
+                "a_1_1\t2.0\t0.001\t0.01\tK.PEPTIDEK.A\tP1",
+            ],
+        );
         let e = percolator_scores(&dup, &d, 0).err().unwrap();
         assert!(e.contains("dup.tsv") && e.contains("a_1_1"), "{e}");
         let e = percolator_scores(&t, &t, 0).err().unwrap();
@@ -1568,7 +1580,9 @@ mod tests {
         let bad = write("bad.tsv", &["a_1_1\t2.5\tx\t0.01\tK.PEPTIDEK.A\tP1"]);
         let e = percolator_scores(&bad, &d, 0).err().unwrap();
         assert!(e.contains("bad.tsv") && e.contains("q-value"), "{e}");
-        let e = percolator_scores(&dir.path().join("missing.tsv"), &d, 0).err().unwrap();
+        let e = percolator_scores(&dir.path().join("missing.tsv"), &d, 0)
+            .err()
+            .unwrap();
         assert!(e.contains("missing.tsv"), "{e}");
     }
 

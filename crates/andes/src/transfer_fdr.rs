@@ -243,6 +243,10 @@ pub fn train_folds(rows: &[FdrRow], seed: u64) -> FoldModels {
     }
 }
 
+/// Rows per call of the batched GBDT evaluation; the batches of one fold
+/// are scored in parallel (each row's margin does not depend on the batch).
+const PREDICT_BATCH: usize = 4096;
+
 impl FoldModels {
     /// The held-out raw margins of `xs` (rows of precursor `precursors[i]`)
     /// into `out`: `None` for a row whose fold has no model.
@@ -259,7 +263,10 @@ impl FoldModels {
             }
             let batch: Vec<&[f32]> = at.iter().map(|&i| xs[i]).collect();
             let mut s = vec![0.0f32; at.len()];
-            model.predict_value_batch(&batch, &mut s);
+            batch
+                .par_chunks(PREDICT_BATCH)
+                .zip(s.par_chunks_mut(PREDICT_BATCH))
+                .for_each(|(b, o)| model.predict_value_batch(b, o));
             for (&i, v) in at.iter().zip(s) {
                 out[i] = Some(v);
             }
@@ -388,7 +395,7 @@ fn canonical(s: f32) -> f32 {
 /// A fold's q-value as a step function of the score: the ascending scores at
 /// which q drops, with the q from each up to the next.
 #[derive(Debug, Clone, Default)]
-struct Steps {
+pub(crate) struct Steps {
     at: Vec<f32>,
     q: Vec<f64>,
 }
@@ -410,10 +417,19 @@ impl Steps {
 }
 
 /// The held-out scores of one classifier's rows, per fold and family, kept
-/// to turn them into q-values: 4 bytes per scored row.
+/// to turn them into q-values: 4 bytes per scored row held.
+///
+/// A mergeable summary: [`FoldScores::merge`] of the scores of disjoint row
+/// sets gives the scores of their union, whatever the order, so the rows can
+/// be scored in parallel pieces. The scores held can be taken out
+/// ([`FoldScores::take_held`], to be sorted and written elsewhere) and given
+/// back to [`FoldScores::finish_with`] as ascending streams: the step
+/// functions only need each fold's scores in ascending order.
 pub struct FoldScores {
     seed: u64,
     scores: Vec<[Vec<f32>; 4]>,
+    /// Rows with a finite score, per fold and family, held or taken out.
+    counts: Vec<[usize; 4]>,
     members: Vec<usize>,
     unscored: usize,
 }
@@ -423,6 +439,7 @@ impl FoldScores {
         Self {
             seed,
             scores: (0..N_FOLDS).map(|_| Default::default()).collect(),
+            counts: vec![[0; 4]; N_FOLDS],
             members: vec![0; N_FOLDS],
             unscored: 0,
         }
@@ -437,24 +454,82 @@ impl FoldScores {
             Some(s) => {
                 self.members[fold] += 1;
                 if s.is_finite() {
-                    self.scores[fold][family.min(3) as usize].push(canonical(s));
+                    let f = family.min(3) as usize;
+                    self.scores[fold][f].push(canonical(s));
+                    self.counts[fold][f] += 1;
                 }
             }
         }
     }
 
+    /// Adds the rows of `other` (scored with the same seed's folds).
+    ///
+    /// # Panics
+    /// When `other` has another seed.
+    pub fn merge(&mut self, other: FoldScores) {
+        assert_eq!(self.seed, other.seed, "fold scores of different seeds");
+        for (fold, by_family) in other.scores.into_iter().enumerate() {
+            for (f, v) in by_family.into_iter().enumerate() {
+                let mine = &mut self.scores[fold][f];
+                if mine.is_empty() {
+                    *mine = v;
+                } else {
+                    mine.extend(v);
+                }
+                self.counts[fold][f] += other.counts[fold][f];
+            }
+            self.members[fold] += other.members[fold];
+        }
+        self.unscored += other.unscored;
+    }
+
+    /// Scores held in memory.
+    pub fn held(&self) -> usize {
+        self.scores.iter().flatten().map(Vec::len).sum()
+    }
+
+    /// The scores held, per fold and family, in arrival order, taken out (the
+    /// counts stay).
+    pub fn take_held(&mut self) -> Vec<[Vec<f32>; 4]> {
+        self.scores
+            .iter_mut()
+            .map(|by_family| by_family.each_mut().map(std::mem::take))
+            .collect()
+    }
+
     /// The q-value step functions; `failed_folds` are the folds without a
     /// model (for the counts).
+    #[cfg(test)]
     pub fn finish(self, failed_folds: &[String]) -> QValues {
+        self.finish_with(failed_folds, |_, _| Vec::new())
+    }
+
+    /// [`FoldScores::finish`] with, for each fold and family, the scores
+    /// taken out by [`FoldScores::take_held`] given back by `taken(fold,
+    /// family)` as ascending streams (any number of them). The result is the
+    /// one of every score held in memory.
+    pub fn finish_with<'a>(
+        self,
+        failed_folds: &[String],
+        mut taken: impl FnMut(usize, usize) -> Vec<Box<dyn Iterator<Item = f32> + 'a>>,
+    ) -> QValues {
         let mut steps: Vec<[Option<Steps>; 4]> = Vec::with_capacity(N_FOLDS);
         let mut no_q = 0usize;
-        for (fold, mut by_family) in self.scores.into_iter().enumerate() {
-            for v in &mut by_family {
-                v.sort_by(f32::total_cmp);
-            }
-            let fold_steps = ESTIMATES.map(|e| kdecoy_steps(&by_family, e));
+        for (fold, by_family) in self.scores.into_iter().enumerate() {
+            let mut k = 0usize;
+            let streams: [SortedMerge<'a>; 4] = by_family.map(|mut v| {
+                v.sort_unstable_by(f32::total_cmp);
+                let mut runs = taken(fold, k);
+                k += 1;
+                runs.push(Box::new(v.into_iter()));
+                SortedMerge::new(runs)
+            });
+            let totals = self.counts[fold];
+            let mut builder = StepsBuilder::new(totals);
+            walk_scores(streams, |c, at| builder.visit(c, at));
+            let fold_steps = builder.finish();
             let with_q = if fold_steps[Estimate::Pooled as usize].is_some() {
-                by_family.iter().map(Vec::len).sum()
+                totals.iter().sum()
             } else {
                 0
             };
@@ -473,58 +548,147 @@ impl FoldScores {
     }
 }
 
+/// Ascending streams of scores merged into one ascending stream.
+struct SortedMerge<'a> {
+    runs: Vec<Box<dyn Iterator<Item = f32> + 'a>>,
+    heads: Vec<Option<f32>>,
+}
+
+impl<'a> SortedMerge<'a> {
+    fn new(mut runs: Vec<Box<dyn Iterator<Item = f32> + 'a>>) -> Self {
+        let heads = runs.iter_mut().map(|r| r.next()).collect();
+        Self { runs, heads }
+    }
+
+    /// The lowest score left.
+    fn peek(&self) -> Option<f32> {
+        self.heads.iter().flatten().copied().min_by(f32::total_cmp)
+    }
+
+    /// Takes every score equal to `c` (the lowest left) and counts them.
+    fn take_equal(&mut self, c: f32) -> usize {
+        let mut n = 0;
+        for (head, run) in self.heads.iter_mut().zip(&mut self.runs) {
+            while *head == Some(c) {
+                n += 1;
+                *head = run.next();
+            }
+        }
+        n
+    }
+}
+
+/// Calls `visit(c, at)` for each distinct score `c` of the four families'
+/// ascending streams, lowest first, with `at[f]` the scores of family `f`
+/// equal to `c`.
+fn walk_scores(mut by_family: [SortedMerge<'_>; 4], mut visit: impl FnMut(f32, [usize; 4])) {
+    loop {
+        let low = by_family
+            .iter()
+            .filter_map(SortedMerge::peek)
+            .min_by(f32::total_cmp);
+        let Some(c) = low else { break };
+        let mut at = [0usize; 4];
+        for (n, s) in at.iter_mut().zip(&mut by_family) {
+            *n = s.take_equal(c);
+        }
+        visit(c, at);
+    }
+}
+
+/// The K-decoy step functions of one fold, every [`Estimate`] at once, built
+/// from the fold's distinct scores visited in ascending order (see
+/// [`kdecoy_steps`] for the estimate).
+pub(crate) struct StepsBuilder {
+    walks: [Option<KdecoyWalk>; 4],
+}
+
+/// The state of one estimate's walk up the scores.
+struct KdecoyWalk {
+    e: Estimate,
+    k: f64,
+    /// Targets, wrong-peak decoys and identity decoys at or above the
+    /// current score.
+    t: usize,
+    d: usize,
+    d_id: usize,
+    running: f64,
+    steps: Steps,
+}
+
+impl StepsBuilder {
+    /// The walks over a fold whose finite scores number `totals[f]` per
+    /// family.
+    pub fn new(totals: [usize; 4]) -> Self {
+        Self {
+            walks: ESTIMATES.map(|e| {
+                let total = |f: u8| if e.keeps(f) { totals[f as usize] } else { 0 };
+                let targets = total(TARGET);
+                let decoys = total(MASS_SHIFT) + total(RT_SHIFT);
+                (targets > 0 && decoys > 0).then(|| KdecoyWalk {
+                    e,
+                    k: decoys as f64 / targets as f64,
+                    t: targets,
+                    d: decoys,
+                    d_id: total(IDENTITY),
+                    running: 1.0,
+                    steps: Steps::default(),
+                })
+            }),
+        }
+    }
+
+    /// The next distinct score `c` (ascending, canonical) with `at[f]` rows of
+    /// family `f` scoring it.
+    pub(crate) fn visit(&mut self, c: f32, at: [usize; 4]) {
+        for w in self.walks.iter_mut().flatten() {
+            let kept = |f: usize| w.e.keeps(f as u8);
+            if !(0..4).any(|f| kept(f) && at[f] > 0) {
+                continue;
+            }
+            let tf = w.t.max(1) as f64;
+            let v = ((w.d + 1) as f64 / (w.k * tf) + w.d_id as f64 / tf).min(1.0);
+            if v < w.running || w.steps.at.is_empty() {
+                w.running = w.running.min(v);
+                w.steps.at.push(c);
+                w.steps.q.push(w.running);
+            }
+            for (f, &n) in at.iter().enumerate() {
+                if !kept(f) {
+                    continue;
+                }
+                match f as u8 {
+                    TARGET => w.t -= n,
+                    IDENTITY => w.d_id -= n,
+                    _ => w.d -= n,
+                }
+            }
+        }
+    }
+
+    /// The step functions by [`Estimate`]; `None` for an estimate without
+    /// targets or wrong-peak decoys.
+    pub fn finish(self) -> [Option<Steps>; 4] {
+        self.walks.map(|w| w.map(|w| w.steps))
+    }
+}
+
 /// The K-decoy q-values (`FDR = (D + 1) / (K * max(T, 1)) + D_id / max(T, 1)`) over one fold's sorted scores by
 /// family, as a step function; `None` without targets or wrong-peak decoys
 /// among the estimate's rows. Walks the scores upwards: at each distinct
 /// score `c`, `T`, `D` and `D_id` at or above it are the totals minus the
 /// rows below, and q is the running minimum of the FDR from the bottom.
+#[cfg(test)]
 fn kdecoy_steps(by_family: &[Vec<f32>; 4], e: Estimate) -> Option<Steps> {
-    let keep = |f: usize| e.keeps(f as u8);
-    let total = |f: usize| if keep(f) { by_family[f].len() } else { 0 };
-    let targets = total(TARGET as usize);
-    let decoys = total(MASS_SHIFT as usize) + total(RT_SHIFT as usize);
-    if targets == 0 || decoys == 0 {
-        return None;
-    }
-    let k = decoys as f64 / targets as f64;
-    let (mut t, mut d, mut d_id) = (targets, decoys, total(IDENTITY as usize));
-    let mut pos = [0usize; 4];
-    let mut steps = Steps::default();
-    let mut running = 1.0f64;
-    loop {
-        // The lowest remaining score among the kept families.
-        let mut low: Option<f32> = None;
-        for f in 0..4 {
-            if let Some(&s) = keep(f).then(|| by_family[f].get(pos[f])).flatten() {
-                if low.is_none_or(|l| s.total_cmp(&l).is_lt()) {
-                    low = Some(s);
-                }
-            }
-        }
-        let Some(c) = low else { break };
-        let tf = t.max(1) as f64;
-        let v = ((d + 1) as f64 / (k * tf) + d_id as f64 / tf).min(1.0);
-        if v < running || steps.at.is_empty() {
-            running = running.min(v);
-            steps.at.push(c);
-            steps.q.push(running);
-        }
-        for f in 0..4 {
-            if !keep(f) {
-                continue;
-            }
-            let v = &by_family[f];
-            while pos[f] < v.len() && v[pos[f]] == c {
-                pos[f] += 1;
-                match f as u8 {
-                    TARGET => t -= 1,
-                    IDENTITY => d_id -= 1,
-                    _ => d -= 1,
-                }
-            }
-        }
-    }
-    Some(steps)
+    let mut builder = StepsBuilder::new([0, 1, 2, 3].map(|f| by_family[f].len()));
+    let streams = [0, 1, 2, 3].map(|f| {
+        SortedMerge::new(vec![
+            Box::new(by_family[f].iter().copied()) as Box<dyn Iterator<Item = f32>>
+        ])
+    });
+    walk_scores(streams, |c, at| builder.visit(c, at));
+    let [a, b, c, d] = builder.finish();
+    [a, b, c, d].into_iter().nth(e as usize).flatten()
 }
 
 /// The q-values of one classifier's rows: per fold and [`Estimate`], a step
@@ -536,6 +700,16 @@ pub struct QValues {
 }
 
 impl QValues {
+    /// Steps of every step function, held in memory (12 bytes each).
+    pub fn steps(&self) -> usize {
+        self.steps
+            .iter()
+            .flatten()
+            .flatten()
+            .map(|s| s.at.len())
+            .sum()
+    }
+
     /// The q-value under estimate `e` of a row of `precursor` and `family`
     /// scoring `score`; `None` when it has no score, its family takes no part
     /// in `e`, or its fold lacks targets or decoys.

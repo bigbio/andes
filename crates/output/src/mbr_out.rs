@@ -202,6 +202,87 @@ pub struct MbrValidation {
     pub donor_gated: usize,
 }
 
+fn add_counts<const N: usize>(a: &mut [usize; N], b: &[usize; N]) {
+    for (x, y) in a.iter_mut().zip(b) {
+        *x += y;
+    }
+}
+
+impl Accepted {
+    /// Adds the counts of `o` (of disjoint rows).
+    pub fn add(&mut self, o: &Accepted) {
+        let Accepted {
+            pseudo,
+            pairs,
+            wrong_peak,
+            pooled,
+            mass_only,
+            rt_only,
+            wrong_peak_only,
+            decoys,
+        } = o;
+        self.pseudo += pseudo;
+        self.pairs += pairs;
+        self.wrong_peak += wrong_peak;
+        self.pooled += pooled;
+        self.mass_only += mass_only;
+        self.rt_only += rt_only;
+        self.wrong_peak_only += wrong_peak_only;
+        add_counts(&mut self.decoys, decoys);
+    }
+}
+
+impl MbrValidation {
+    /// Adds the row counts of `o` (of disjoint rows); the thresholds and the
+    /// library entry counts stay.
+    pub fn add_counts(&mut self, o: &MbrValidation) {
+        let MbrValidation {
+            q_threshold: _,
+            pseudo_transfers,
+            pseudo_scored,
+            wrong_peak_pairs,
+            wrong_peak,
+            transfers,
+            transfers_scored,
+            at_q01,
+            at_threshold,
+            quant_feature_threshold: _,
+            identified,
+            identified_scored,
+            identified_q01,
+            identified_below_threshold,
+            ms2_rows,
+            ms2_supported,
+            ms2_pseudo_rows,
+            ms2_pseudo_supported,
+            transfer_ms2,
+            target_entries: _,
+            identity_entries: _,
+            decoy_transfers,
+            donor_gated,
+        } = o;
+        self.pseudo_transfers += pseudo_transfers;
+        self.pseudo_scored += pseudo_scored;
+        self.wrong_peak_pairs += wrong_peak_pairs;
+        self.wrong_peak += wrong_peak;
+        self.transfers += transfers;
+        self.transfers_scored += transfers_scored;
+        self.at_q01.add(at_q01);
+        self.at_threshold.add(at_threshold);
+        self.identified += identified;
+        self.identified_scored += identified_scored;
+        self.identified_q01 += identified_q01;
+        self.identified_below_threshold += identified_below_threshold;
+        add_counts(&mut self.ms2_rows, ms2_rows);
+        add_counts(&mut self.ms2_supported, ms2_supported);
+        self.ms2_pseudo_rows += ms2_pseudo_rows;
+        self.ms2_pseudo_supported += ms2_pseudo_supported;
+        self.transfer_ms2 += transfer_ms2;
+        add_counts(&mut self.decoy_transfers, decoy_transfers);
+        self.donor_gated += donor_gated;
+    }
+}
+
 /// Columns of the decoy acceptance, each followed by `_q01` and by
 /// `_at_threshold`, after the MS2 columns.
 const DECOY_ACCEPTED_COLUMNS: [&str; 4] = [

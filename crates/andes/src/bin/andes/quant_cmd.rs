@@ -39,10 +39,10 @@ use quant::ms2::{fragment_ladder, library_spectrum, residue_masses, LibrarySpect
 use rayon::prelude::*;
 
 use crate::cli::{QuantCommand, QuantExtractArgs, QuantFinalizeArgs, QuantLibraryArgs};
-use crate::quant_mbr::{
-    attach_ms2, extract_run, finalize_stream, mbr_paths, ExtractCounts, ExtractFiles, ExtractRow,
-    ExtractSource, FinalizeParams, MbrFeature, Ms2Counts, StreamLimits,
+use crate::quant_finalize::{
+    finalize_stream, ExtractFiles, ExtractSource, FinalizeLimits, FinalizeParams, MbrFeature,
 };
+use crate::quant_mbr::{attach_ms2, extract_run, mbr_paths, ExtractCounts, ExtractRow, Ms2Counts};
 
 /// Seed of the transfer FDR's folds and models, in every path.
 pub(crate) const MBR_SEED: u64 = 42;
@@ -1047,7 +1047,7 @@ pub(crate) fn finalize_and_write(
     mbr_fdr: f64,
     quant_feature_fdr: Option<f64>,
     seed: u64,
-    limits: StreamLimits,
+    limits: FinalizeLimits,
     base: &Path,
     parquet_dir: Option<&Path>,
 ) -> Result<(), String> {
@@ -1136,7 +1136,7 @@ pub(crate) fn run_in_process(
         mbr_fdr,
         quant_feature_fdr,
         MBR_SEED,
-        StreamLimits::default(),
+        FinalizeLimits::default(),
         base,
         parquet_dir,
     )?;
@@ -1207,10 +1207,12 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
         }
         paths.push(path);
     }
-    let limits = StreamLimits {
-        shard_rows: a.shard_rows,
+    let limits = FinalizeLimits {
         max_train_rows: a.max_train_rows,
         max_norm_cells: a.max_norm_cells,
+        max_donor_fits: a.max_donor_fits,
+        max_held_scores: a.max_held_scores,
+        temp_dir: a.temp_dir,
     };
     finalize_and_write(
         &stored,

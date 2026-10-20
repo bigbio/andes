@@ -73,6 +73,10 @@ rescoring:
   enabled: false                 # run Percolator in-process (else feed out.pin to Percolator)
   # fdr: 0.01                    # q-value threshold for filtered output
   # native: false                # non-production built-in GBDT rescorer
+  # predict: [rt]                # PIN features from predictors: rt (bundled andes-rt), ms2 (AlphaPeptDeep),
+  #                              #   peptdeep-rt, deeplc-rt; e.g. [rt, ms2]
+  # predictor_models: /models    # exported AlphaPeptDeep / DeepLC ONNX models (ms2, peptdeep-rt, deeplc-rt)
+  # predictor_backend: tract     # tract | ort (ONNX Runtime; build with --features ort)
 
 glyco:
   enabled: false                 # intact N-glycopeptide search

@@ -94,7 +94,9 @@ fn precursor_cal_off_pin_tsv_match_golden_after_sort() {
         .arg(&actual_pin)
         .arg("--output-tsv")
         .arg(&actual_tsv)
-        // No --precursor-cal flag → default 'off'.
+        // No --precursor-cal flag → default 'off'. The golden pins the search's
+        // own columns; predicted features are covered by their own tests.
+        .args(["--predict", "none"])
         .status()
         .expect("run andes");
     assert!(status.success(), "andes exited {status}");

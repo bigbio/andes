@@ -355,6 +355,9 @@ fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_andes"))
         .current_dir(workspace_root())
         .args(args)
+        // The goldens pin the search's own columns; predicted features are
+        // covered by their own tests.
+        .args(["--predict", "none"])
         .arg("--output-pin")
         .arg(out)
         .output()

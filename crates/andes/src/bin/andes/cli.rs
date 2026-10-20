@@ -78,6 +78,48 @@ pub(crate) enum FragmentIndexFlag {
     Off,
 }
 
+/// One `--predict` entry: a predicted-feature block added to the PIN.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ValueEnum)]
+pub(crate) enum PredictFeature {
+    /// Retention-time deviation from the bundled andes-rt model.
+    #[clap(name = "rt")]
+    Rt,
+    /// Spectral similarity to AlphaPeptDeep's predicted fragment intensities.
+    #[clap(name = "ms2")]
+    Ms2,
+    /// Retention-time deviation from AlphaPeptDeep.
+    #[clap(name = "peptdeep-rt")]
+    PeptDeepRt,
+    /// Retention-time deviation from DeepLC.
+    #[clap(name = "deeplc-rt")]
+    DeepLcRt,
+    /// No predicted features.
+    #[clap(name = "none")]
+    None,
+}
+
+/// ONNX engine for the third-party predictors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum PredictorBackend {
+    /// tract (pure Rust).
+    Tract,
+    /// ONNX Runtime.
+    Ort,
+}
+
+/// Parse one `--predict` value (used by the YAML config).
+pub(crate) fn parse_predict_feature(s: &str) -> Result<PredictFeature, String> {
+    <PredictFeature as ValueEnum>::from_str(s, true).map_err(|_| {
+        format!("invalid predict entry `{s}`: expected rt|ms2|peptdeep-rt|deeplc-rt|none")
+    })
+}
+
+/// Parse `--predictor-backend` (used by the YAML config).
+pub(crate) fn parse_predictor_backend(s: &str) -> Result<PredictorBackend, String> {
+    <PredictorBackend as ValueEnum>::from_str(s, true)
+        .map_err(|_| format!("invalid predictor_backend `{s}`: expected tract|ort"))
+}
+
 /// Search arguments (shared by the default search path and exposed as a
 /// flat arg group so that `andes --spectrum X --database Y --output-pin Z`
 /// keeps working unchanged).
@@ -687,6 +729,48 @@ pub(crate) struct SearchArgs {
     /// before the PIN path). e.g. `--percolator-args "--testFDR 0.05"`.
     #[arg(long = "percolator-args", hide = true, default_value = "")]
     pub(crate) percolator_args: String,
+
+    /// Predicted-spectrum and retention-time features added to the PIN for
+    /// Percolator, as a comma-separated list:
+    /// `rt` = retention-time deviation from the bundled andes-rt model;
+    /// `ms2` = similarity of the observed spectrum to AlphaPeptDeep's predicted
+    /// fragment intensities; `peptdeep-rt` / `deeplc-rt` = retention-time
+    /// deviation from AlphaPeptDeep / DeepLC; `none` = no predicted features.
+    /// Predicted RT is calibrated to observed RT per input file. `ms2`,
+    /// `peptdeep-rt` and `deeplc-rt` load exported ONNX models from
+    /// `--predictor-models` and fail at start-up when a model file is missing.
+    /// Default `rt`.
+    #[arg(long = "predict", value_delimiter = ',', default_value = "rt")]
+    pub(crate) predict: Vec<PredictFeature>,
+
+    /// Directory with the exported third-party predictor models that
+    /// `--predict ms2 / peptdeep-rt / deeplc-rt` load: `peptdeep_mods.json`,
+    /// `peptdeep_{ms2,rt}_dynamic.{json,onnx}` and `deeplc_rt.{json,onnx}`
+    /// (written by the onnx-infer export scripts).
+    #[arg(long = "predictor-models")]
+    pub(crate) predictor_models: Option<std::path::PathBuf>,
+
+    /// ONNX engine for the third-party predictors: `tract` (pure Rust, built
+    /// in) or `ort` (ONNX Runtime, a build with `--features ort` plus the
+    /// runtime library; several times faster).
+    #[arg(long = "predictor-backend", hide = true, default_value = "tract")]
+    pub(crate) predictor_backend: PredictorBackend,
+
+    /// Collision energy given to the AlphaPeptDeep MS2 model. Default: 28 on
+    /// Q Exactive instruments, 30 otherwise.
+    #[arg(long = "predictor-nce", hide = true)]
+    pub(crate) predictor_nce: Option<f32>,
+
+    /// Instrument given to the AlphaPeptDeep MS2 model (one of the model's
+    /// instrument names, e.g. QE, Lumos, timsTOF). Default: from the resolved
+    /// instrument (Q Exactive → QE, timsTOF → timsTOF, TOF → SciexTOF,
+    /// otherwise Lumos).
+    #[arg(long = "predictor-instrument", hide = true)]
+    pub(crate) predictor_instrument: Option<String>,
+
+    /// Peptides per predictor batch.
+    #[arg(long = "predictor-batch", hide = true, default_value_t = 256)]
+    pub(crate) predictor_batch: usize,
 
     // ── Quantification ─────────────────────────────────────────────────────
     /// Isobaric reporter-ion quantification of the confident PSMs with this

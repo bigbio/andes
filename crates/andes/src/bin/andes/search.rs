@@ -1306,6 +1306,19 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         eprintln!("Quantification: {}", s.describe());
     }
+    // `--predict`: load the predictors now so a missing model fails before the
+    // search. Glyco mode writes its own `.glyco.pin` and takes none.
+    let predictors = if cli.glyco {
+        None
+    } else {
+        crate::predicted::Predictors::from_cli(&cli, param.data_type.instrument)?
+    };
+    if let Some(p) = &predictors {
+        eprintln!("Predict: {}", p.describe());
+    }
+    // Peaks normally go once a spectrum is scored; `--refine` re-scores in its
+    // Pass 2 and `--predict ms2` compares them with predicted spectra.
+    let keep_peaks = cli.refine || predictors.as_ref().is_some_and(|p| p.needs_peaks());
     let mut all_spectra: Vec<Spectrum> = Vec::new();
     let mut all_queues: Vec<TopNQueue> = Vec::new();
     // Exclusive end index in `all_spectra` of each input, in input order.
@@ -1543,7 +1556,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(q) = quant.as_mut() {
                         q.on_spectrum(&spec);
                     }
-                    if !cli.refine && !cli.glyco {
+                    if !keep_peaks && !cli.glyco {
                         spec.peaks = Vec::new();
                     }
                     all_spectra.push(spec);
@@ -1597,7 +1610,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(q) = quant.as_mut() {
                         q.on_spectrum(&spec);
                     }
-                    if !cli.refine {
+                    if !keep_peaks {
                         spec.peaks = Vec::new();
                     }
                     all_spectra.push(spec);
@@ -1646,7 +1659,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 &mut all_spectra,
                 &mut all_queues,
                 t_search_start,
-                cli.refine,
+                keep_peaks,
                 quant.as_mut(),
             );
             ParseStats {
@@ -1774,7 +1787,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(q) = quant.as_mut() {
                         q.on_spectrum(&spec);
                     }
-                    if !cli.refine && !cli.glyco {
+                    if !keep_peaks && !cli.glyco {
                         spec.peaks = Vec::new();
                     }
                     all_spectra.push(spec);
@@ -1789,7 +1802,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     &mut all_spectra,
                     &mut all_queues,
                     t_search_start,
-                    cli.refine,
+                    keep_peaks,
                     quant.as_mut(),
                 );
             }
@@ -2120,6 +2133,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         t_phase.elapsed().as_secs_f64(),
         t_total.elapsed().as_secs_f64()
     );
+    if let Some(p) = &predictors {
+        p.add_to_pin(&output_pin_path, &spectra, &run_ends)?;
+    }
     if cli.refine {
         if refine_merged {
             eprintln!("Refinement PSMs merged into unified PIN (Pass-1 ⊕ Pass-2).");

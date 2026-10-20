@@ -28,3 +28,11 @@ under the Apache License, Version 2.0. Their origin is acknowledged here to
 satisfy Apache-2.0 §4's notice requirement:
 
   - pGlyco  (Liu et al., Nat. Commun. 2017;8:15473)
+
+The andes-rt retention-time model weights (`resources/predictors/andes_rt.artn`)
+were trained by the andes authors on retention times from publicly available
+reanalysed proteomics datasets and are distributed under the Apache License,
+Version 2.0, with andes. The third-party predictor models that `--predict ms2`,
+`peptdeep-rt` and `deeplc-rt` load (AlphaPeptDeep, DeepLC) are not distributed
+with andes; users export or obtain them under their own terms (see
+`crates/onnx-infer/MODELS.md`).

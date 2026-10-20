@@ -34,6 +34,89 @@ pub(crate) struct TableVersion {
     pub what: &'static str,
 }
 
+/// A versioned table being written batch by batch to `<path>.partial`,
+/// renamed to `path` by [`TableWriter::finish`]; dropped unfinished, the
+/// partial file is removed. Every error names the file.
+pub(crate) struct TableWriter {
+    path: PathBuf,
+    partial: PathBuf,
+    writer: Option<ArrowWriter<File>>,
+}
+
+impl TableWriter {
+    /// Creates `<path>.partial` with the table's schema version and `extra` as
+    /// key-value metadata.
+    pub(crate) fn create(
+        path: &Path,
+        table: &TableVersion,
+        version: &str,
+        schema: Arc<Schema>,
+        extra: &[(&str, String)],
+    ) -> Result<Self, String> {
+        let mut partial = path.as_os_str().to_owned();
+        partial.push(".partial");
+        let partial = PathBuf::from(partial);
+        let meta: Vec<KeyValue> =
+            std::iter::once(KeyValue::new(table.key.to_string(), version.to_string()))
+                .chain(
+                    extra
+                        .iter()
+                        .map(|(k, v)| KeyValue::new(k.to_string(), v.clone())),
+                )
+                .collect();
+        let props = WriterProperties::builder()
+            .set_compression(Compression::ZSTD(ZstdLevel::default()))
+            .set_max_row_group_size(BATCH_ROWS)
+            .set_key_value_metadata(Some(meta))
+            .build();
+        let err = |e: &dyn std::fmt::Display| format!("{}: {e}", partial.display());
+        let file = File::create(&partial).map_err(|e| err(&e))?;
+        let writer = ArrowWriter::try_new(file, schema, Some(props));
+        let writer = match writer {
+            Ok(w) => w,
+            Err(e) => {
+                let _ = std::fs::remove_file(&partial);
+                return Err(err(&e));
+            }
+        };
+        Ok(Self {
+            path: path.to_path_buf(),
+            partial,
+            writer: Some(writer),
+        })
+    }
+
+    pub(crate) fn write(&mut self, b: &RecordBatch) -> Result<(), String> {
+        let w = self.writer.as_mut().expect("writer is open until finish");
+        w.write(b)
+            .map_err(|e| format!("{}: {e}", self.partial.display()))
+    }
+
+    /// Closes the file and renames it into place.
+    pub(crate) fn finish(mut self) -> Result<(), String> {
+        let w = self.writer.take().expect("writer is open until finish");
+        let done = w
+            .close()
+            .map_err(|e| format!("{}: {e}", self.partial.display()))
+            .and_then(|_| {
+                std::fs::rename(&self.partial, &self.path)
+                    .map_err(|e| format!("{}: {e}", self.path.display()))
+            });
+        if done.is_err() {
+            let _ = std::fs::remove_file(&self.partial);
+        }
+        done
+    }
+}
+
+impl Drop for TableWriter {
+    fn drop(&mut self) {
+        if self.writer.take().is_some() {
+            let _ = std::fs::remove_file(&self.partial);
+        }
+    }
+}
+
 /// Writes `batches` (all with `schema`) to `path` through `<path>.partial`,
 /// with the table's schema version and `extra` as key-value metadata. Every
 /// error names the file.
@@ -45,38 +128,12 @@ pub(crate) fn write_table(
     batches: impl IntoIterator<Item = Result<RecordBatch, String>>,
     extra: &[(&str, String)],
 ) -> Result<(), String> {
-    let mut partial = path.as_os_str().to_owned();
-    partial.push(".partial");
-    let partial = PathBuf::from(partial);
-    let err = |p: &Path, e: &dyn std::fmt::Display| format!("{}: {e}", p.display());
-    let meta: Vec<KeyValue> =
-        std::iter::once(KeyValue::new(table.key.to_string(), version.to_string()))
-            .chain(
-                extra
-                    .iter()
-                    .map(|(k, v)| KeyValue::new(k.to_string(), v.clone())),
-            )
-            .collect();
-    let props = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(ZstdLevel::default()))
-        .set_max_row_group_size(BATCH_ROWS)
-        .set_key_value_metadata(Some(meta))
-        .build();
-    let written = (|| {
-        let file = File::create(&partial).map_err(|e| err(&partial, &e))?;
-        let mut writer =
-            ArrowWriter::try_new(file, schema, Some(props)).map_err(|e| err(&partial, &e))?;
-        for b in batches {
-            let b = b.map_err(|e| err(path, &e))?;
-            writer.write(&b).map_err(|e| err(&partial, &e))?;
-        }
-        writer.close().map_err(|e| err(&partial, &e))?;
-        std::fs::rename(&partial, path).map_err(|e| err(path, &e))
-    })();
-    if written.is_err() {
-        let _ = std::fs::remove_file(&partial);
+    let mut w = TableWriter::create(path, table, version, schema, extra)?;
+    for b in batches {
+        let b = b.map_err(|e| format!("{}: {e}", path.display()))?;
+        w.write(&b)?;
     }
-    written
+    w.finish()
 }
 
 /// A table read back: its record batches and key-value metadata.

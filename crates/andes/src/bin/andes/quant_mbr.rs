@@ -78,8 +78,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use output::extract_table::{extract_table_rows, read_extract_table, ExtractTableWriter};
 use output::mbr_out::{
-    write_mbr_parquet, write_mbr_validation, Accepted, EvidenceType, MbrRow, MbrValidation,
+    write_mbr_validation, Accepted, EvidenceType, MbrParquetWriter, MbrRow, MbrValidation,
     VALIDATION_Q,
 };
 use output::ms1_table::read_ms1_table;
@@ -89,11 +90,13 @@ use quant::evidence::{fit_many, Evidence, EvidenceParams, FitJob, WIDTH_GRID};
 use quant::library::{Library, LibraryEntry};
 use quant::ms1_index::Ms1RunIndex;
 use quant::ms2::{elution_window, LibrarySpectrum, Ms2RunIndex};
-use quant::normalize::{fit as fit_normalization, NormCell, NormParams, RunNormalization};
+use quant::normalize::{fit as fit_normalization, NormCell, NormParams};
 use rayon::prelude::*;
 
 use crate::transfer_fdr::{
-    transfer_fdr, FdrCounts, FdrRow, IDENTIFIED_FEATURES, IDENTITY, TRANSFER_FEATURES,
+    row_unit, train_folds, Estimate, FdrCounts, FdrRow, FoldModels, FoldScores, QValues,
+    TrainingSample,
+    IDENTIFIED_FEATURES, IDENTITY, TRANSFER_FEATURES,
 };
 
 pub(crate) use output::extract_table::{ExtractRole as Role, ExtractRow};
@@ -787,37 +790,6 @@ fn reported_quantity(
     }
 }
 
-/// The run normalisation of the reported quantities ([`quant::normalize`]),
-/// fitted on the identified targets with a quality q-value at or below
-/// [`VALIDATION_Q`] (`id_q(i)` for row `i`) and a positive reported quantity
-/// (`quantity(row)`).
-fn run_normalization(
-    rows: &[&ExtractRow],
-    id_q: impl Fn(usize) -> Option<f64>,
-    quantity: impl Fn(&ExtractRow) -> Option<f64>,
-    n_runs: usize,
-) -> RunNormalization {
-    let cells: Vec<NormCell> = rows
-        .iter()
-        .enumerate()
-        .filter(|(i, r)| {
-            (r.role, r.kind) == (Role::Identified, Hypothesis::Target)
-                && id_q(*i).is_some_and(|q| q <= VALIDATION_Q)
-        })
-        .filter_map(|(_, r)| {
-            let e = r.evidence.as_ref()?;
-            let q = quantity(r).filter(|q| *q > 0.0 && q.is_finite())?;
-            Some(NormCell {
-                precursor: r.precursor,
-                run: r.run,
-                log2_quantity: q.log2(),
-                rt: e.t0,
-            })
-        })
-        .collect();
-    fit_normalization(&cells, n_runs, &NormParams::default())
-}
-
 /// Floor of `amplitude_se` in the amplitude signal-to-noise feature.
 const MIN_AMPLITUDE_SE: f64 = 1e-12;
 
@@ -1024,6 +996,7 @@ pub(crate) struct FinalizeSummary {
     pub identified_no_features: usize,
     pub identified_fdr: FdrCounts,
     /// The rows of `<base>.mbr.parquet`, in file order.
+    #[cfg(test)]
     pub features: Vec<MbrFeature>,
 }
 
@@ -1044,15 +1017,324 @@ pub(crate) struct MbrFeature {
     pub mass_err_ppm: Option<f64>,
 }
 
+/// Limits of the streamed finalize: memory follows the library and these
+/// limits rather than the number of runs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct StreamLimits {
+    /// Extract rows per precursor shard. With more rows than this in all,
+    /// the rows are split by precursor id into shards of about this many
+    /// rows, written to temporary Parquet files and processed one shard at a
+    /// time; otherwise they are held in memory as one shard.
+    pub shard_rows: usize,
+    /// Training rows per classifier (transfers, identified rows). Above it
+    /// the classifier is trained on the rows of a hashed sample of
+    /// (precursor, run) pairs (every row still scored by its fold's model).
+    pub max_train_rows: usize,
+    /// Reference cells of the run normalisation. Above it the fit uses a
+    /// hashed sample of whole precursors (coarser RT-local offsets).
+    pub max_norm_cells: usize,
+}
+
+/// Default of [`StreamLimits::shard_rows`].
+pub(crate) const DEFAULT_SHARD_ROWS: usize = 1_000_000;
+/// Default of [`StreamLimits::max_train_rows`].
+pub(crate) const DEFAULT_MAX_TRAIN_ROWS: usize = 3_000_000;
+/// Default of [`StreamLimits::max_norm_cells`].
+pub(crate) const DEFAULT_MAX_NORM_CELLS: usize = 20_000_000;
+
+impl Default for StreamLimits {
+    fn default() -> Self {
+        Self {
+            shard_rows: DEFAULT_SHARD_ROWS,
+            max_train_rows: DEFAULT_MAX_TRAIN_ROWS,
+            max_norm_cells: DEFAULT_MAX_NORM_CELLS,
+        }
+    }
+}
+
+/// Rows per row group of a spilled shard, and per buffered write.
+const SPILL_GROUP_ROWS: usize = 8192;
+/// Rows whose features are built and scored together.
+const SCORE_CHUNK: usize = 65_536;
+
+/// The extract rows of every run, handed to finalize one run at a time.
+pub(crate) trait ExtractSource {
+    /// Rows over all runs.
+    fn total_rows(&self) -> Result<usize, String>;
+    /// Calls `f` with each run's rows, in run order.
+    fn for_each_run(
+        &self,
+        f: &mut dyn FnMut(Vec<ExtractRow>) -> Result<(), String>,
+    ) -> Result<(), String>;
+}
+
+/// Extract rows in memory, one vector per run (or any grouping), handed out
+/// as copies.
+#[cfg(test)]
+pub(crate) struct ExtractRuns<'a>(pub &'a [Vec<ExtractRow>]);
+
+#[cfg(test)]
+impl ExtractSource for ExtractRuns<'_> {
+    fn total_rows(&self) -> Result<usize, String> {
+        Ok(self.0.iter().map(Vec::len).sum())
+    }
+
+    fn for_each_run(
+        &self,
+        f: &mut dyn FnMut(Vec<ExtractRow>) -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.0.iter().try_for_each(|r| f(r.clone()))
+    }
+}
+
+/// The `<stem>.extract.parquet` files of every run, in run order, read one
+/// at a time.
+pub(crate) struct ExtractFiles(pub Vec<PathBuf>);
+
+impl ExtractSource for ExtractFiles {
+    fn total_rows(&self) -> Result<usize, String> {
+        self.0.iter().map(|p| extract_table_rows(p)).sum()
+    }
+
+    fn for_each_run(
+        &self,
+        f: &mut dyn FnMut(Vec<ExtractRow>) -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.0.iter().try_for_each(|p| f(read_extract_table(p)?))
+    }
+}
+
+/// The extract rows as precursor shards: every row of a precursor, in all
+/// runs, is in one shard, and a shard holds its rows in source order.
+enum Shards {
+    /// One shard in memory.
+    One(Vec<ExtractRow>),
+    /// Precursor-id ranges spilled to temporary extract tables (removed with
+    /// the directory).
+    Spilled {
+        _dir: tempfile::TempDir,
+        paths: Vec<PathBuf>,
+    },
+}
+
+impl Shards {
+    fn len(&self) -> usize {
+        match self {
+            Shards::One(_) => 1,
+            Shards::Spilled { paths, .. } => paths.len(),
+        }
+    }
+
+    /// Calls `f` with each shard's rows, shards in precursor-id order.
+    fn for_each(
+        &self,
+        mut f: impl FnMut(&[ExtractRow]) -> Result<(), String>,
+    ) -> Result<(), String> {
+        match self {
+            Shards::One(rows) => f(rows),
+            Shards::Spilled { paths, .. } => {
+                paths.iter().try_for_each(|p| f(&read_extract_table(p)?))
+            }
+        }
+    }
+}
+
+/// Splits `source` into shards of about `shard_rows` rows by ranges of
+/// precursor id with equal numbers of library entries; a single shard is
+/// kept in memory, more are written to a temporary directory in
+/// `tmp_parent`.
+fn plan_shards(
+    source: &dyn ExtractSource,
+    lib: &Library,
+    shard_rows: usize,
+    tmp_parent: &Path,
+) -> Result<Shards, String> {
+    let total = source.total_rows()?;
+    let mut ids: Vec<u32> = lib.entries.iter().map(|e| e.precursor).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let n = total.div_ceil(shard_rows.max(1)).clamp(1, ids.len().max(1));
+    if n == 1 {
+        let mut rows = Vec::with_capacity(total);
+        source.for_each_run(&mut |r| {
+            rows.extend(r);
+            Ok(())
+        })?;
+        return Ok(Shards::One(rows));
+    }
+    // Shard k holds the ids from bounds[k - 1] up to below bounds[k].
+    let bounds: Vec<u32> = (1..n).map(|k| ids[k * ids.len() / n]).collect();
+    let dir = tempfile::Builder::new()
+        .prefix(".andes-finalize-")
+        .tempdir_in(tmp_parent)
+        .map_err(|e| format!("temporary directory in {}: {e}", tmp_parent.display()))?;
+    let paths: Vec<PathBuf> = (0..n)
+        .map(|k| dir.path().join(format!("shard-{k:05}.extract.parquet")))
+        .collect();
+    let mut writers = paths
+        .iter()
+        .map(|p| ExtractTableWriter::create(p, &[], SPILL_GROUP_ROWS))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut bufs: Vec<Vec<ExtractRow>> = vec![Vec::new(); n];
+    source.for_each_run(&mut |rows| {
+        for r in rows {
+            let k = bounds.partition_point(|&b| b <= r.precursor);
+            bufs[k].push(r);
+            if bufs[k].len() >= SPILL_GROUP_ROWS {
+                writers[k].write(&bufs[k])?;
+                bufs[k].clear();
+            }
+        }
+        Ok(())
+    })?;
+    for (w, b) in writers.iter_mut().zip(&bufs) {
+        if !b.is_empty() {
+            w.write(b)?;
+        }
+    }
+    drop(bufs);
+    for w in writers {
+        w.finish()?;
+    }
+    eprintln!(
+        "[mbr] finalize: {total} extract rows in {n} precursor shards of about {} rows (temporary tables in {})",
+        total.div_ceil(n),
+        dir.path().display()
+    );
+    Ok(Shards::Spilled { _dir: dir, paths })
+}
+
+/// The classifier a row belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Table {
+    Transfer,
+    Identified,
+    /// A pseudo-transfer: scored by the transfer models, outside their fit.
+    Pseudo,
+}
+
+/// Library lookups of finalize: per precursor id, its entry and the entry's
+/// position in library order.
+struct EntryIndex<'a> {
+    entry_of: Vec<Option<&'a LibraryEntry>>,
+    position: Vec<u32>,
+}
+
+impl<'a> EntryIndex<'a> {
+    fn new(lib: &'a Library) -> Self {
+        let mut entry_of: Vec<Option<&LibraryEntry>> = vec![None; lib.meta.len()];
+        let mut position = vec![u32::MAX; lib.meta.len()];
+        for (k, e) in lib.entries.iter().enumerate() {
+            if let Some(slot) = entry_of.get_mut(e.precursor as usize) {
+                *slot = Some(e);
+                position[e.precursor as usize] = k as u32;
+            }
+        }
+        Self { entry_of, position }
+    }
+
+    fn is_identity(&self, p: u32) -> bool {
+        self.entry_of[p as usize].is_some_and(|e| e.identity_decoy)
+    }
+
+    /// Not transferred: the entry's best donor PSM is above TRANSFER_DONOR_Q.
+    fn gated(&self, p: u32) -> bool {
+        self.entry_of[p as usize]
+            .is_some_and(|e| e.donor_psm.q.is_nan() || e.donor_psm.q > TRANSFER_DONOR_Q)
+    }
+
+    /// The classifier of `r` and its family; `None` for a row that takes no
+    /// part in any.
+    fn table(&self, r: &ExtractRow) -> Option<(Table, u8)> {
+        // An identity decoy's rows take part only through its transfer
+        // targets, as the identity-decoy family.
+        let identity = self.is_identity(r.precursor);
+        let t = match r.role {
+            Role::Identified if identity => return None,
+            Role::Identified => Table::Identified,
+            Role::Transfer if identity && r.kind != Hypothesis::Target => return None,
+            Role::Transfer if self.gated(r.precursor) => return None,
+            Role::Transfer => Table::Transfer,
+            Role::PseudoTransfer => Table::Pseudo,
+        };
+        Some((t, if identity { IDENTITY } else { family(r.kind) }))
+    }
+}
+
+/// The features of the rows of `rows` whose table passes `want`, built in
+/// parallel (in row order): `(index in rows, table, family, features)`.
+fn table_features(
+    rows: &[ExtractRow],
+    idx: &EntryIndex<'_>,
+    shapes: &DonorShapes,
+    maps: &[Option<RunMap>],
+    want: impl Fn(Table) -> bool + Sync,
+) -> Vec<(usize, Table, u8, Option<Vec<f32>>)> {
+    rows.par_iter()
+        .enumerate()
+        .filter_map(|(i, r)| {
+            let (t, fam) = idx.table(r).filter(|(t, _)| want(*t))?;
+            let x = match t {
+                Table::Identified => identified_features(r),
+                Table::Transfer | Table::Pseudo => transfer_features(r, shapes, maps),
+            };
+            Some((i, t, fam, x))
+        })
+        .collect()
+}
+
+/// Calls `f(index in rows, table, family, score)` for every row of `rows`
+/// with features whose table passes `want`, in row order: `score` is the
+/// held-out raw margin of its classifier's fold model (`None` for a fold
+/// without a model). Rows are scored [`SCORE_CHUNK`] at a time.
+#[allow(clippy::too_many_arguments)]
+fn for_each_scored(
+    rows: &[ExtractRow],
+    idx: &EntryIndex<'_>,
+    shapes: &DonorShapes,
+    maps: &[Option<RunMap>],
+    transfer: &FoldModels,
+    identified: &FoldModels,
+    want: impl Fn(Table) -> bool + Sync + Copy,
+    mut f: impl FnMut(usize, Table, u8, Option<f32>),
+) {
+    let mut out = Vec::new();
+    for (c, chunk) in rows.chunks(SCORE_CHUNK).enumerate() {
+        let base = c * SCORE_CHUNK;
+        let feats = table_features(chunk, idx, shapes, maps, want);
+        let mut scores: Vec<Option<f32>> = vec![None; feats.len()];
+        for (models, is_id) in [(transfer, false), (identified, true)] {
+            let at: Vec<usize> = (0..feats.len())
+                .filter(|&k| feats[k].3.is_some() && ((feats[k].1 == Table::Identified) == is_id))
+                .collect();
+            if at.is_empty() {
+                continue;
+            }
+            let precursors: Vec<u32> = at.iter().map(|&k| chunk[feats[k].0].precursor).collect();
+            let xs: Vec<&[f32]> = at
+                .iter()
+                .map(|&k| feats[k].3.as_deref().expect("filtered on features"))
+                .collect();
+            models.score(&precursors, &xs, &mut out);
+            for (&k, s) in at.iter().zip(&out) {
+                scores[k] = *s;
+            }
+        }
+        for ((i, t, fam, x), s) in feats.iter().zip(scores) {
+            if x.is_some() {
+                f(base + i, *t, *fam, s);
+            }
+        }
+    }
+}
+
 /// Transfer FDR, identified-row quality q-values, pseudo-transfer validation
 /// and the MBR outputs over the extract rows of every run (`runs[i]` holds
 /// rows of any runs; a row's `run` indexes `stems`, its `precursor` indexes
-/// `lib.meta`). With `quant_feature_fdr`, identified rows whose quality
-/// q-value is above it, or missing, are `identified_below_threshold`.
-///
-/// Errors: `mbr_fdr` or `quant_feature_fdr` outside `(0, 1]`, a row whose run
-/// or precursor is out of range, or an unwritable output (the message names
-/// the file).
+/// `lib.meta`), with every row in memory as one shard;
+/// [`FinalizeSummary::features`] gets the rows of `<base>.mbr.parquet`. See
+/// [`finalize_stream`].
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn finalize(
     stems: &[String],
@@ -1064,6 +1346,67 @@ pub(crate) fn finalize(
     mbr_path: &Path,
     validation_path: &Path,
 ) -> Result<FinalizeSummary, String> {
+    let params = FinalizeParams {
+        mbr_fdr,
+        quant_feature_fdr,
+        seed,
+        limits: StreamLimits {
+            shard_rows: usize::MAX,
+            max_train_rows: usize::MAX,
+            max_norm_cells: usize::MAX,
+        },
+        mbr_path,
+        validation_path,
+    };
+    let mut features = Vec::new();
+    let mut summary = finalize_stream(stems, lib, &ExtractRuns(runs), &params, &mut |f| {
+        features.extend(f);
+        Ok(())
+    })?;
+    summary.features = features;
+    Ok(summary)
+}
+
+/// What [`finalize_stream`] computes and where it writes.
+pub(crate) struct FinalizeParams<'a> {
+    /// Transfer q-value threshold of the reported transfers.
+    pub mbr_fdr: f64,
+    /// Identified-row quality threshold (`identified_below_threshold`).
+    pub quant_feature_fdr: Option<f64>,
+    /// Seed of the folds, the models and the samples.
+    pub seed: u64,
+    pub limits: StreamLimits,
+    pub mbr_path: &'a Path,
+    pub validation_path: &'a Path,
+}
+
+/// Transfer FDR, identified-row quality q-values, pseudo-transfer validation
+/// and the MBR outputs over the extract rows of `source`, in precursor
+/// shards ([`StreamLimits`]): every quantity a row needs from other rows
+/// comes from its own precursor's rows (donor shapes, consensus width,
+/// identified fit), which share its shard, and the rest are global models fitted
+/// in earlier passes over the shards: (1) the training rows of both
+/// classifiers, (2) their fold models score every row, giving the q-value
+/// step functions, (3) the reference cells of the run normalisation, (4) the
+/// output rows, written shard by shard in `(precursor, run)` order to
+/// `<base>.mbr.parquet` and handed to `on_features`. Rows enter the
+/// training in their source order (shard rows are put back into it), so
+/// with every row within the limits the result is the in-memory one, byte
+/// for byte. With `quant_feature_fdr`, identified rows whose quality
+/// q-value is above it, or missing, are `identified_below_threshold`.
+///
+/// Errors: `mbr_fdr` or `quant_feature_fdr` outside `(0, 1]`, a row whose run
+/// or precursor is out of range, or an unreadable or unwritable file (the
+/// message names it).
+pub(crate) fn finalize_stream(
+    stems: &[String],
+    lib: &Library,
+    source: &dyn ExtractSource,
+    params: &FinalizeParams<'_>,
+    on_features: &mut dyn FnMut(Vec<MbrFeature>) -> Result<(), String>,
+) -> Result<FinalizeSummary, String> {
+    let (mbr_fdr, quant_feature_fdr, seed) =
+        (params.mbr_fdr, params.quant_feature_fdr, params.seed);
     if !(mbr_fdr > 0.0 && mbr_fdr <= 1.0) {
         return Err(format!(
             "transfer q-value threshold {mbr_fdr} is outside (0, 1]"
@@ -1074,104 +1417,164 @@ pub(crate) fn finalize(
             "identified quality q-value threshold {t} is outside (0, 1]"
         ));
     }
-    let rows: Vec<&ExtractRow> = runs.iter().flatten().collect();
-    if let Some(r) = rows
-        .iter()
-        .find(|r| r.run as usize >= stems.len() || r.precursor as usize >= lib.meta.len())
-    {
-        return Err(format!(
-            "extract row of precursor {} in run {} is outside the {} precursors and {} runs",
-            r.precursor,
-            r.run,
-            lib.meta.len(),
-            stems.len()
-        ));
-    }
-
-    // Per precursor id, its library entry.
-    let mut entry_of: Vec<Option<&LibraryEntry>> = vec![None; lib.meta.len()];
-    for e in &lib.entries {
-        if let Some(slot) = entry_of.get_mut(e.precursor as usize) {
-            *slot = Some(e);
-        }
-    }
-    let is_identity = |p: u32| entry_of[p as usize].is_some_and(|e| e.identity_decoy);
-    // Not transferred: the entry's best donor PSM is above TRANSFER_DONOR_Q.
-    let gated = |p: u32| {
-        entry_of[p as usize]
-            .is_some_and(|e| e.donor_psm.q.is_nan() || e.donor_psm.q > TRANSFER_DONOR_Q)
-    };
-
-    let mut summary = FinalizeSummary::default();
-    let mut fdr_rows = Vec::new();
-    let mut id_rows = Vec::new();
-    // Per row: the index of its FdrRow among `fdr_rows` (transfer targets and
-    // decoys) or `id_rows` (identified targets and decoys).
-    let mut fdr_index: Vec<Option<usize>> = vec![None; rows.len()];
     let maps = &lib.alignment.maps;
-    let shapes = DonorShapes::from_rows(rows.iter().copied(), maps);
-    let mut identified: HashMap<(u32, u16), &Evidence> = HashMap::new();
-    for (i, r) in rows.iter().enumerate() {
-        if let (Role::Identified, Hypothesis::Target, Some(e)) = (r.role, r.kind, &r.evidence) {
-            let previous = identified.insert((r.precursor, r.run), e);
-            debug_assert!(
-                previous.is_none(),
-                "two identified rows of precursor {} in run {}",
+    let idx = EntryIndex::new(lib);
+    let tmp_parent = params
+        .mbr_path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let shards = plan_shards(source, lib, params.limits.shard_rows, tmp_parent)?;
+    let sharded = shards.len() > 1;
+    let mut summary = FinalizeSummary::default();
+
+    // Pass 1: the training rows of both classifiers. Spilled shards hold a
+    // precursor's rows of every run, so the source order (run, then library
+    // order, then the order within an entry) is restored by key.
+    type Key = (u16, u32, u64);
+    let mut t_sample: TrainingSample<Key> = TrainingSample::new(params.limits.max_train_rows, seed);
+    let mut i_sample: TrainingSample<Key> = TrainingSample::new(params.limits.max_train_rows, seed);
+    let mut seq = 0u64;
+    shards.for_each(|rows| {
+        if let Some(r) = rows
+            .iter()
+            .find(|r| r.run as usize >= stems.len() || r.precursor as usize >= lib.meta.len())
+        {
+            return Err(format!(
+                "extract row of precursor {} in run {} is outside the {} precursors and {} runs",
                 r.precursor,
-                r.run
+                r.run,
+                lib.meta.len(),
+                stems.len()
+            ));
+        }
+        let shapes = DonorShapes::from_rows(rows.iter(), maps);
+        for (c, chunk) in rows.chunks(SCORE_CHUNK).enumerate() {
+            let feats = table_features(chunk, &idx, &shapes, maps, |t: Table| t != Table::Pseudo);
+            for (i, t, fam, x) in feats {
+                seq += 1;
+                let r = &rows[c * SCORE_CHUNK + i];
+                let Some(x) = x else {
+                    match t {
+                        Table::Identified => summary.identified_no_features += 1,
+                        _ => summary.no_features += 1,
+                    }
+                    continue;
+                };
+                let key = if sharded {
+                    (r.run, idx.position[r.precursor as usize], seq)
+                } else {
+                    (0, 0, seq)
+                };
+                let row = FdrRow {
+                    precursor: r.precursor,
+                    is_decoy: fam != 0,
+                    family: fam,
+                    x,
+                };
+                match t {
+                    Table::Identified => i_sample.push(key, row_unit(r.precursor, r.run), row),
+                    _ => t_sample.push(key, row_unit(r.precursor, r.run), row),
+                }
+            }
+        }
+        Ok(())
+    })?;
+    for (name, s) in [("transfer", &t_sample), ("identified quality", &i_sample)] {
+        let (seen, kept, share) = s.stats();
+        if kept < seen {
+            eprintln!(
+                "[mbr] {name} classifier: trained on {kept} of {seen} rows ((precursor, run) pairs, {share} of them; every row is scored)"
             );
         }
-        // An identity decoy's rows take part only through its transfer
-        // targets, as the identity-decoy family.
-        let identity = is_identity(r.precursor);
-        let (features, table, missing) = match r.role {
-            Role::Identified if identity => continue,
-            Role::Identified => (
-                identified_features(r),
-                &mut id_rows,
-                &mut summary.identified_no_features,
-            ),
-            Role::Transfer if identity && r.kind != Hypothesis::Target => continue,
-            Role::Transfer if gated(r.precursor) => continue,
-            Role::Transfer => (
-                transfer_features(r, &shapes, maps),
-                &mut fdr_rows,
-                &mut summary.no_features,
-            ),
-            Role::PseudoTransfer => continue,
-        };
-        let Some(x) = features else {
-            *missing += 1;
-            continue;
-        };
-        let family = if identity { IDENTITY } else { family(r.kind) };
-        fdr_index[i] = Some(table.len());
-        table.push(FdrRow {
-            precursor: r.precursor,
-            is_decoy: family != 0,
-            family,
-            x,
-        });
     }
-    let fdr = transfer_fdr(&fdr_rows, seed);
-    let id_fdr = transfer_fdr(&id_rows, seed);
-    let w_c = consensus_widths(rows.iter().copied(), maps);
-    let reported = |r: &ExtractRow| {
-        r.evidence
-            .as_ref()
-            .map(|e| reported_quantity(e, r.run, w_c.get(&r.precursor).copied(), maps))
-    };
-    let norm = run_normalization(
-        &rows,
-        |i| fdr_index[i].and_then(|k| id_fdr.result.q[k]),
-        |r| reported(r).map(|q| q.0),
-        stems.len(),
-    );
+    let t_models = train_folds(&t_sample.into_items(), seed);
+    let i_models = train_folds(&i_sample.into_items(), seed);
+
+    // Pass 2: every row's held-out score, into the q-value step functions.
+    let mut t_scores = FoldScores::new(seed);
+    let mut i_scores = FoldScores::new(seed);
+    shards.for_each(|rows| {
+        let shapes = DonorShapes::from_rows(rows.iter(), maps);
+        let want = |t: Table| t != Table::Pseudo;
+        for_each_scored(
+            rows,
+            &idx,
+            &shapes,
+            maps,
+            &t_models,
+            &i_models,
+            want,
+            |i, t, fam, s| {
+                let p = rows[i].precursor;
+                match t {
+                    Table::Identified => i_scores.add(p, fam, s),
+                    _ => t_scores.add(p, fam, s),
+                }
+            },
+        );
+        Ok(())
+    })?;
+    let fdr = t_scores.finish(&t_models.failed_folds);
+    let id_fdr = i_scores.finish(&i_models.failed_folds);
+
+    // Pass 3: the reference cells of the run normalisation.
+    let mut cells: TrainingSample<u64, NormCell> =
+        TrainingSample::new(params.limits.max_norm_cells, seed);
+    let mut cell_seq = 0u64;
+    let empty_shapes = DonorShapes::default();
+    shards.for_each(|rows| {
+        let w_c = consensus_widths(rows.iter(), maps);
+        let want = |t: Table| t == Table::Identified;
+        for_each_scored(
+            rows,
+            &idx,
+            &empty_shapes,
+            maps,
+            &t_models,
+            &i_models,
+            want,
+            |i, _, fam, s| {
+                let r = &rows[i];
+                if r.kind != Hypothesis::Target
+                    || !id_fdr
+                        .q(Estimate::Pooled, r.precursor, fam, s)
+                        .is_some_and(|q| q <= VALIDATION_Q)
+                {
+                    return;
+                }
+                let Some(e) = r.evidence.as_ref() else { return };
+                let q = reported_quantity(e, r.run, w_c.get(&r.precursor).copied(), maps).0;
+                if q > 0.0 && q.is_finite() {
+                    cell_seq += 1;
+                    cells.push(
+                        cell_seq,
+                        u64::from(r.precursor),
+                        NormCell {
+                            precursor: r.precursor,
+                            run: r.run,
+                            log2_quantity: q.log2(),
+                            rt: e.t0,
+                        },
+                    );
+                }
+            },
+        );
+        Ok(())
+    })?;
+    let (seen, kept, share) = cells.stats();
+    if kept < seen {
+        eprintln!(
+            "[mbr] run normalisation: fitted on {kept} of {seen} reference cells (whole precursors, {share} of them)"
+        );
+    }
+    let norm = fit_normalization(&cells.into_items(), stems.len(), &NormParams::default());
+
+    // Pass 4: the outputs.
     let accepted = |q: Option<f64>| q.is_some_and(|q| q <= mbr_fdr);
     // The validation thresholds, VALIDATION_Q then mbr_fdr, and their counts.
     let thresholds = [VALIDATION_Q, mbr_fdr];
     let mut at = [Accepted::default(), Accepted::default()];
-
     let identity_entries = lib.entries.iter().filter(|e| e.identity_decoy).count();
     let mut v = MbrValidation {
         q_threshold: mbr_fdr,
@@ -1182,158 +1585,198 @@ pub(crate) fn finalize(
     };
     // Decoy transfer rows with a q-value, and their acceptance, by family:
     // mass shift, RT shift, identity decoy.
-    let count_decoy = |v: &mut MbrValidation, at: &mut [Accepted; 2], i: usize, f: usize| {
-        let Some(q) = fdr_index[i].and_then(|k| fdr.result.q[k]) else {
-            return;
-        };
+    let count_decoy = |v: &mut MbrValidation, at: &mut [Accepted; 2], q: Option<f64>, f: usize| {
+        let Some(q) = q else { return };
         v.decoy_transfers[f] += 1;
         for (a, &t) in at.iter_mut().zip(&thresholds) {
             a.decoys[f] += usize::from(q <= t);
         }
     };
-    let mut out: Vec<(u32, u16, MbrRow<'_>, Option<f64>)> = Vec::new();
-    for (i, r) in rows.iter().enumerate() {
-        if is_identity(r.precursor) {
-            // Never reported: only the identity-decoy family's counts.
-            if (r.role, r.kind) == (Role::Transfer, Hypothesis::Target) {
-                count_decoy(&mut v, &mut at, i, 2);
+    let mut writer = MbrParquetWriter::create(params.mbr_path)?;
+    shards.for_each(|rows| {
+        let shapes = DonorShapes::from_rows(rows.iter(), maps);
+        let w_c = consensus_widths(rows.iter(), maps);
+        let mut identified: HashMap<(u32, u16), &Evidence> = HashMap::new();
+        for r in rows {
+            if let (Role::Identified, Hypothesis::Target, Some(e)) = (r.role, r.kind, &r.evidence) {
+                let previous = identified.insert((r.precursor, r.run), e);
+                debug_assert!(
+                    previous.is_none(),
+                    "two identified rows of precursor {} in run {}",
+                    r.precursor,
+                    r.run
+                );
             }
-            continue;
         }
-        if r.role == Role::Transfer && r.kind == Hypothesis::Target && gated(r.precursor) {
-            v.donor_gated += 1;
-        }
-        if r.kind != Hypothesis::Target {
-            if r.role == Role::Transfer {
-                let f = family(r.kind) as usize;
-                count_decoy(&mut v, &mut at, i, f - 1);
-                if let Some(m) = &r.ms2 {
-                    v.ms2_rows[f] += 1;
-                    v.ms2_supported[f] += usize::from(m.supports());
+        // Per row with features: its family and held-out score.
+        let mut scored: Vec<Option<(u8, Option<f32>)>> = vec![None; rows.len()];
+        for_each_scored(
+            rows,
+            &idx,
+            &shapes,
+            maps,
+            &t_models,
+            &i_models,
+            |_: Table| true,
+            |i, _, fam, s| {
+                scored[i] = Some((fam, s));
+            },
+        );
+        let q_of = |q: &QValues, e: Estimate, i: usize| {
+            scored[i].and_then(|(fam, s)| q.q(e, rows[i].precursor, fam, s))
+        };
+        let reported = |r: &ExtractRow| {
+            r.evidence
+                .as_ref()
+                .map(|e| reported_quantity(e, r.run, w_c.get(&r.precursor).copied(), maps))
+        };
+        let mut out: Vec<(u32, u16, MbrRow<'_>, Option<f64>)> = Vec::new();
+        for (i, r) in rows.iter().enumerate() {
+            if idx.is_identity(r.precursor) {
+                // Never reported: only the identity-decoy family's counts.
+                if (r.role, r.kind) == (Role::Transfer, Hypothesis::Target) {
+                    count_decoy(&mut v, &mut at, q_of(&fdr, Estimate::Pooled, i), 2);
                 }
+                continue;
             }
-            continue;
-        }
-        let e = r.evidence.as_ref();
-        let quantity = reported(r);
-        let quantity_normalized = quantity
-            .zip(e)
-            .and_then(|((q, _), e)| norm.normalize(r.run, r.precursor, e.t0, q));
-        let (evidence_type, transfer_q, quant_q) = match r.role {
-            Role::Identified => {
-                let q = fdr_index[i].and_then(|k| id_fdr.result.q[k]);
-                v.identified += 1;
-                v.identified_scored += usize::from(q.is_some());
-                v.identified_q01 += usize::from(q.is_some_and(|q| q <= VALIDATION_Q));
-                let t = match quant_feature_fdr {
-                    Some(t) if !q.is_some_and(|q| q <= t) => {
-                        v.identified_below_threshold += 1;
-                        EvidenceType::IdentifiedBelowThreshold
-                    }
-                    _ => EvidenceType::Identified,
-                };
-                (t, None, q)
+            if r.role == Role::Transfer && r.kind == Hypothesis::Target && idx.gated(r.precursor) {
+                v.donor_gated += 1;
             }
-            Role::Transfer => {
-                let q = fdr_index[i].and_then(|k| fdr.result.q[k]);
-                v.transfers += 1;
-                v.transfers_scored += usize::from(q.is_some());
-                for (a, &t) in at.iter_mut().zip(&thresholds) {
-                    let ok = |q: Option<f64>| usize::from(q.is_some_and(|q| q <= t));
-                    a.pooled += ok(q);
-                    if let Some(k) = fdr_index[i] {
-                        a.mass_only += ok(fdr.result.q_mass_only[k]);
-                        a.rt_only += ok(fdr.result.q_rt_only[k]);
-                        a.wrong_peak_only += ok(fdr.result.q_wrong_peak[k]);
-                    }
-                }
-                let supported = r.ms2.is_some_and(|m| m.supports());
-                if let Some(m) = &r.ms2 {
-                    v.ms2_rows[0] += 1;
-                    v.ms2_supported[0] += usize::from(m.supports());
-                }
-                let t = match (accepted(q), supported) {
-                    (true, true) => {
-                        v.transfer_ms2 += 1;
-                        EvidenceType::TransferMs2
-                    }
-                    (true, false) => EvidenceType::TransferMs1,
-                    (false, _) => EvidenceType::BelowThreshold,
-                };
-                (t, q, q)
-            }
-            Role::PseudoTransfer => {
-                let q =
-                    transfer_features(r, &shapes, maps).and_then(|x| fdr.pseudo_q(r.precursor, &x));
-                v.pseudo_transfers += 1;
-                if let Some(m) = &r.ms2 {
-                    v.ms2_pseudo_rows += 1;
-                    v.ms2_pseudo_supported += usize::from(m.supports());
-                }
-                v.pseudo_scored += usize::from(q.is_some());
-                let wrong = match (e, identified.get(&(r.precursor, r.run))) {
-                    (Some(p), Some(id)) => Some((p.t0 - id.t0).abs() > id.w),
-                    _ => None,
-                };
-                if let Some(w) = wrong {
-                    v.wrong_peak_pairs += 1;
-                    v.wrong_peak += usize::from(w);
-                }
-                for (a, &t) in at.iter_mut().zip(&thresholds) {
-                    if !q.is_some_and(|q| q <= t) {
-                        continue;
-                    }
-                    a.pseudo += 1;
-                    if let Some(w) = wrong {
-                        a.pairs += 1;
-                        a.wrong_peak += usize::from(w);
+            if r.kind != Hypothesis::Target {
+                if r.role == Role::Transfer {
+                    let f = family(r.kind) as usize;
+                    count_decoy(&mut v, &mut at, q_of(&fdr, Estimate::Pooled, i), f - 1);
+                    if let Some(m) = &r.ms2 {
+                        v.ms2_rows[f] += 1;
+                        v.ms2_supported[f] += usize::from(m.supports());
                     }
                 }
                 continue;
             }
-        };
-        out.push((
-            r.precursor,
-            r.run,
-            MbrRow {
-                precursor_key: &lib.meta[r.precursor as usize].key,
-                run: &stems[r.run as usize],
-                evidence_type,
-                quantity: quantity.map(|q| q.0),
-                quantity_se: quantity.map(|q| q.1),
-                quantity_normalized,
-                transfer_q,
-                quant_q,
-                apex_rt_s: e.map(|e| e.t0),
+            let e = r.evidence.as_ref();
+            let quantity = reported(r);
+            let quantity_normalized = quantity
+                .zip(e)
+                .and_then(|((q, _), e)| norm.normalize(r.run, r.precursor, e.t0, q));
+            let (evidence_type, transfer_q, quant_q) = match r.role {
+                Role::Identified => {
+                    let q = q_of(&id_fdr, Estimate::Pooled, i);
+                    v.identified += 1;
+                    v.identified_scored += usize::from(q.is_some());
+                    v.identified_q01 += usize::from(q.is_some_and(|q| q <= VALIDATION_Q));
+                    let t = match quant_feature_fdr {
+                        Some(t) if !q.is_some_and(|q| q <= t) => {
+                            v.identified_below_threshold += 1;
+                            EvidenceType::IdentifiedBelowThreshold
+                        }
+                        _ => EvidenceType::Identified,
+                    };
+                    (t, None, q)
+                }
+                Role::Transfer => {
+                    let q = q_of(&fdr, Estimate::Pooled, i);
+                    v.transfers += 1;
+                    v.transfers_scored += usize::from(q.is_some());
+                    let (mass, rt, wrong) = (
+                        q_of(&fdr, Estimate::MassOnly, i),
+                        q_of(&fdr, Estimate::RtOnly, i),
+                        q_of(&fdr, Estimate::WrongPeak, i),
+                    );
+                    for (a, &t) in at.iter_mut().zip(&thresholds) {
+                        let ok = |q: Option<f64>| usize::from(q.is_some_and(|q| q <= t));
+                        a.pooled += ok(q);
+                        a.mass_only += ok(mass);
+                        a.rt_only += ok(rt);
+                        a.wrong_peak_only += ok(wrong);
+                    }
+                    let supported = r.ms2.is_some_and(|m| m.supports());
+                    if let Some(m) = &r.ms2 {
+                        v.ms2_rows[0] += 1;
+                        v.ms2_supported[0] += usize::from(m.supports());
+                    }
+                    let t = match (accepted(q), supported) {
+                        (true, true) => {
+                            v.transfer_ms2 += 1;
+                            EvidenceType::TransferMs2
+                        }
+                        (true, false) => EvidenceType::TransferMs1,
+                        (false, _) => EvidenceType::BelowThreshold,
+                    };
+                    (t, q, q)
+                }
+                Role::PseudoTransfer => {
+                    let q = scored[i].and_then(|(_, s)| fdr.pseudo_q(r.precursor, s));
+                    v.pseudo_transfers += 1;
+                    if let Some(m) = &r.ms2 {
+                        v.ms2_pseudo_rows += 1;
+                        v.ms2_pseudo_supported += usize::from(m.supports());
+                    }
+                    v.pseudo_scored += usize::from(q.is_some());
+                    let wrong = match (e, identified.get(&(r.precursor, r.run))) {
+                        (Some(p), Some(id)) => Some((p.t0 - id.t0).abs() > id.w),
+                        _ => None,
+                    };
+                    if let Some(w) = wrong {
+                        v.wrong_peak_pairs += 1;
+                        v.wrong_peak += usize::from(w);
+                    }
+                    for (a, &t) in at.iter_mut().zip(&thresholds) {
+                        if !q.is_some_and(|q| q <= t) {
+                            continue;
+                        }
+                        a.pseudo += 1;
+                        if let Some(w) = wrong {
+                            a.pairs += 1;
+                            a.wrong_peak += usize::from(w);
+                        }
+                    }
+                    continue;
+                }
+            };
+            out.push((
+                r.precursor,
+                r.run,
+                MbrRow {
+                    precursor_key: &lib.meta[r.precursor as usize].key,
+                    run: &stems[r.run as usize],
+                    evidence_type,
+                    quantity: quantity.map(|q| q.0),
+                    quantity_se: quantity.map(|q| q.1),
+                    quantity_normalized,
+                    transfer_q,
+                    quant_q,
+                    apex_rt_s: e.map(|e| e.t0),
+                    library_q: r.library_q,
+                },
+                e.map(|e| e.mass_err_ppm),
+            ));
+        }
+        out.sort_by_key(|&(p, run, ..)| (p, run));
+        let mut features = Vec::with_capacity(out.len());
+        for (p, run, r, mass_err) in &out {
+            writer.push(r)?;
+            features.push(MbrFeature {
+                precursor: *p,
+                run: *run,
+                evidence_type: r.evidence_type,
+                quantity: r.quantity,
+                quantity_se: r.quantity_se,
+                quantity_normalized: r.quantity_normalized,
+                transfer_q: r.transfer_q,
+                quant_q: r.quant_q,
+                apex_rt_s: r.apex_rt_s,
                 library_q: r.library_q,
-            },
-            e.map(|e| e.mass_err_ppm),
-        ));
-    }
+                mass_err_ppm: *mass_err,
+            });
+        }
+        summary.rows_written += out.len();
+        on_features(features)
+    })?;
     let [at_q01, at_threshold] = at;
     v.at_q01 = at_q01;
     v.at_threshold = at_threshold;
-    out.sort_by_key(|&(p, run, ..)| (p, run));
-    summary.features = out
-        .iter()
-        .map(|(p, run, r, mass_err)| MbrFeature {
-            precursor: *p,
-            run: *run,
-            evidence_type: r.evidence_type,
-            quantity: r.quantity,
-            quantity_se: r.quantity_se,
-            quantity_normalized: r.quantity_normalized,
-            transfer_q: r.transfer_q,
-            quant_q: r.quant_q,
-            apex_rt_s: r.apex_rt_s,
-            library_q: r.library_q,
-            mass_err_ppm: *mass_err,
-        })
-        .collect();
-    let out: Vec<MbrRow<'_>> = out.into_iter().map(|(_, _, row, _)| row).collect();
-    write_mbr_parquet(mbr_path, &out)?;
-    write_mbr_validation(validation_path, &v)?;
-
+    writer.finish()?;
+    write_mbr_validation(params.validation_path, &v)?;
     eprintln!(
         "[mbr] transfer FDR (internal quant-quality score) features: {}",
         TRANSFER_FEATURES.join(",")
@@ -1439,7 +1882,6 @@ pub(crate) fn finalize(
             a.pairs
         );
     }
-    summary.rows_written = out.len();
     summary.validation = v;
     summary.fdr = fdr.counts;
     summary.identified_fdr = id_fdr.counts;
@@ -2152,7 +2594,7 @@ mod tests {
 #[cfg(test)]
 mod finalize_tests {
     use quant::align::AlignParams;
-    use quant::library::{build_library, PrecursorMeta};
+    use quant::library::{build_library, PrecursorMeta, PsmIn};
 
     use super::*;
 
@@ -2533,6 +2975,133 @@ mod finalize_tests {
         finalize(&stems(), &library(), &runs, 0.01, None, 3, &m2, &v2).unwrap();
         assert_eq!(std::fs::read(&m1).unwrap(), std::fs::read(&m2).unwrap());
         assert_eq!(std::fs::read(&v1).unwrap(), std::fs::read(&v2).unwrap());
+    }
+
+    /// [`library`]'s precursors as entries, each identified in run 0.
+    fn library_with_entries() -> Library {
+        let psms: Vec<PsmIn> = (0..N)
+            .map(|p| PsmIn {
+                run: 0,
+                precursor: p,
+                rt: 100.0 + p as f64,
+                score: 10.0 + p as f64,
+                q: 0.0001,
+                pep: 0.0001,
+                is_decoy: false,
+                faims_cv: None,
+            })
+            .collect();
+        build_library(
+            &psms,
+            library().meta,
+            2,
+            1.0,
+            0.01,
+            None,
+            &AlignParams::default(),
+        )
+    }
+
+    fn stream(
+        lib: &Library,
+        runs: &[Vec<ExtractRow>],
+        limits: StreamLimits,
+        base: &Path,
+    ) -> (FinalizeSummary, Vec<MbrFeature>) {
+        let (mbr, val) = mbr_paths(base);
+        let params = FinalizeParams {
+            mbr_fdr: 0.01,
+            quant_feature_fdr: None,
+            seed: 3,
+            limits,
+            mbr_path: &mbr,
+            validation_path: &val,
+        };
+        let mut features = Vec::new();
+        let s = finalize_stream(&stems(), lib, &ExtractRuns(runs), &params, &mut |f| {
+            features.extend(f);
+            Ok(())
+        })
+        .unwrap();
+        (s, features)
+    }
+
+    #[test]
+    fn sharded_finalize_matches_the_in_memory_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs = extract();
+        let lib = library_with_entries();
+        assert_eq!(lib.entries.len(), N as usize);
+        let (m1, v1) = mbr_paths(&dir.path().join("one"));
+        let one = finalize(&stems(), &lib, &runs, 0.01, None, 3, &m1, &v1).unwrap();
+        assert!(one.rows_written > 0 && one.validation.transfers_scored > 0);
+        for shard_rows in [97usize, 1000, 4 * N as usize] {
+            let base = dir.path().join(format!("s{shard_rows}"));
+            let limits = StreamLimits {
+                shard_rows,
+                ..StreamLimits::default()
+            };
+            let (s, features) = stream(&lib, &runs, limits, &base);
+            let (m2, v2) = mbr_paths(&base);
+            assert_eq!(
+                std::fs::read(&m1).unwrap(),
+                std::fs::read(&m2).unwrap(),
+                "{shard_rows}"
+            );
+            assert_eq!(
+                std::fs::read(&v1).unwrap(),
+                std::fs::read(&v2).unwrap(),
+                "{shard_rows}"
+            );
+            assert_eq!(features, one.features);
+            assert_eq!(s.fdr, one.fdr);
+            assert_eq!(s.identified_fdr, one.identified_fdr);
+            assert_eq!(
+                (s.no_features, s.identified_no_features, s.rows_written),
+                (
+                    one.no_features,
+                    one.identified_no_features,
+                    one.rows_written
+                )
+            );
+        }
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(".andes-finalize-")
+            })
+            .collect();
+        assert!(left.is_empty(), "temporary shards are removed");
+    }
+
+    #[test]
+    fn sampled_training_reports_every_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs = extract();
+        let lib = library_with_entries();
+        let (m1, v1) = mbr_paths(&dir.path().join("one"));
+        let one = finalize(&stems(), &lib, &runs, 0.01, None, 3, &m1, &v1).unwrap();
+        let limits = StreamLimits {
+            shard_rows: 1000,
+            max_train_rows: 600,
+            max_norm_cells: 100,
+        };
+        let (s, features) = stream(&lib, &runs, limits, &dir.path().join("sampled"));
+        assert_eq!(s.rows_written, one.rows_written);
+        assert_eq!(s.validation.transfers, one.validation.transfers);
+        assert_eq!(s.validation.identified, one.validation.identified);
+        let keys = |f: &[MbrFeature]| f.iter().map(|f| (f.precursor, f.run)).collect::<Vec<_>>();
+        assert_eq!(keys(&features), keys(&one.features));
+        // Sampled models still separate the present targets from the decoys.
+        assert!(s.validation.transfers_scored > 0);
+        let accepted = features
+            .iter()
+            .filter(|f| f.evidence_type == EvidenceType::TransferMs1)
+            .count();
+        assert!(accepted > 0, "{accepted}");
     }
 
     #[test]

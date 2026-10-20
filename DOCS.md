@@ -1423,6 +1423,25 @@ naming the file, on an extract made from another library (stale) or at another t
 the other runs. The fingerprint covers the library, not the MS1 tables or the run tables: after
 searching a run again, run `quant library`, every `quant extract` and `quant finalize` again.
 
+**Memory of the global stages.** `quant library` reads the run tables one run and one record
+batch at a time, twice (the precursor keys first, then the PSMs joined to that run's scores),
+and keeps per-precursor aggregates only: its memory follows the precursors and their donor runs
+plus one run's scores, not the PSMs of every run. With one merged pair of Percolator files the
+whole pair, and every SpecId, is held. `quant finalize` works in precursor shards: with more
+than `--shard-rows` extract rows (default 1,000,000) it splits them by precursor id into
+temporary extract tables next to its output and holds one shard at a time, over four passes
+(training rows, held-out scores, normalisation cells, outputs). The results do not depend on
+the shard size. Two caps bound the rest: each GBDT trains on at most `--max-train-rows` rows
+(default 3,000,000; above it, the rows of a hashed sample of (precursor, run) pairs, so every
+precursor still trains in some runs and a target stays with its decoys; all rows are still
+scored), and the run normalisation fits at most `--max-norm-cells` reference cells (default
+20,000,000, about 150 bytes each; above it, a hashed sample of whole precursors, which coarsens
+the RT-local offsets). Below the caps the outputs are byte-identical to an all-in-memory run.
+`--seed` (default 42) sets the folds, the models and the samples. On a 6-run Orbitrap set
+(1.7 million extract rows) finalize peaks at about 1 GB; on synthetic sets of replicated runs
+it grew by about 7 MB per run (480 runs: 4.4 GB), where the previous all-in-memory finalize grew
+by about 160 MB per run.
+
 `--mbr` without `--quant-dir` writes the per-run artifacts to a temporary directory (under
 `TMPDIR`): each run's `<stem>.ms1.parquet` (about 5–6 bytes per centroid; about 200 MB for an
 Orbitrap run with 38 million MS1 centroids) and `<stem>.ms2.parquet` (at most 100 centroids

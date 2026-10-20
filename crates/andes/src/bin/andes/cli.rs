@@ -963,6 +963,35 @@ pub(crate) struct QuantFinalizeArgs {
     #[arg(long = "output-parquet", value_name = "DIR")]
     pub(crate) output_parquet: Option<PathBuf>,
 
+    /// Advanced: extract rows per precursor shard. With more extract rows
+    /// than this over all runs, finalize splits them by precursor into shards
+    /// of about this many rows (temporary Parquet tables next to the output)
+    /// and holds one shard at a time. The results do not depend on it.
+    /// Default 1000000.
+    #[arg(long = "shard-rows", hide = true, default_value_t = crate::quant_mbr::DEFAULT_SHARD_ROWS)]
+    pub(crate) shard_rows: usize,
+
+    /// Advanced: training rows per transfer or identified-quality
+    /// classifier. Above it the classifier is trained on the rows of a
+    /// hashed sample of (precursor, run) pairs (every row is still scored);
+    /// below it every row trains. Default 3000000.
+    #[arg(long = "max-train-rows", hide = true, default_value_t = crate::quant_mbr::DEFAULT_MAX_TRAIN_ROWS)]
+    pub(crate) max_train_rows: usize,
+
+    /// Advanced: reference cells of the run normalisation. Above it the fit
+    /// uses a hashed sample of whole precursors, which coarsens the RT-local
+    /// offsets (on a 6-run benchmark, half the cells raised the median
+    /// absolute log2 ratio error from 0.162 to 0.173), so keep it above the
+    /// cells of the study
+    /// when memory allows (about 150 bytes per cell). Default 20000000.
+    #[arg(long = "max-norm-cells", hide = true, default_value_t = crate::quant_mbr::DEFAULT_MAX_NORM_CELLS)]
+    pub(crate) max_norm_cells: usize,
+
+    /// Advanced: seed of the transfer FDR folds and models and of the
+    /// samples. Default 42.
+    #[arg(long = "seed", hide = true, default_value_t = crate::quant_cmd::MBR_SEED)]
+    pub(crate) seed: u64,
+
     /// Worker threads. Default: logical CPU count.
     #[arg(long)]
     pub(crate) threads: Option<usize>,

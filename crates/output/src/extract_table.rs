@@ -321,6 +321,106 @@ pub fn write_extract_table_tagged(
     write_versioned(path, rows, SCHEMA_VERSION, schema(), tags)
 }
 
+/// An extraction table written in pieces (e.g. a shard of several runs'
+/// rows), with row groups of at most `row_group_rows` rows, to
+/// `<path>.partial` and renamed into place by [`ExtractTableWriter::finish`].
+/// Read back by [`read_extract_table`]. Dropped unfinished, the partial file
+/// is removed.
+pub struct ExtractTableWriter {
+    path: std::path::PathBuf,
+    partial: std::path::PathBuf,
+    schema: Arc<Schema>,
+    rows_per_group: usize,
+    writer: Option<ArrowWriter<File>>,
+}
+
+impl ExtractTableWriter {
+    pub fn create(
+        path: &Path,
+        tags: &[(String, String)],
+        row_group_rows: usize,
+    ) -> Result<Self, String> {
+        let mut partial = path.as_os_str().to_owned();
+        partial.push(".partial");
+        let partial = std::path::PathBuf::from(partial);
+        let err = |e: &dyn std::fmt::Display| format!("{}: {e}", partial.display());
+        let rows_per_group = row_group_rows.max(1);
+        let props = WriterProperties::builder()
+            .set_compression(Compression::ZSTD(ZstdLevel::default()))
+            .set_max_row_group_size(rows_per_group)
+            .set_key_value_metadata(Some(
+                std::iter::once(KeyValue::new(
+                    SCHEMA_KEY.to_string(),
+                    SCHEMA_VERSION.to_string(),
+                ))
+                .chain(
+                    tags.iter()
+                        .map(|(k, v)| KeyValue::new(k.clone(), v.clone())),
+                )
+                .collect(),
+            ))
+            .build();
+        let schema = Arc::new(schema());
+        let file = File::create(&partial).map_err(|e| err(&e))?;
+        let writer = match ArrowWriter::try_new(file, schema.clone(), Some(props)) {
+            Ok(w) => w,
+            Err(e) => {
+                let _ = std::fs::remove_file(&partial);
+                return Err(err(&e));
+            }
+        };
+        Ok(Self {
+            path: path.to_path_buf(),
+            partial,
+            schema,
+            rows_per_group,
+            writer: Some(writer),
+        })
+    }
+
+    pub fn write(&mut self, rows: &[ExtractRow]) -> Result<(), String> {
+        let err = |e: &dyn std::fmt::Display| format!("{}: {e}", self.partial.display());
+        let w = self.writer.as_mut().expect("writer is open until finish");
+        for chunk in rows.chunks(self.rows_per_group) {
+            let b = batch(&self.schema, chunk).map_err(|e| err(&e))?;
+            w.write(&b).map_err(|e| err(&e))?;
+        }
+        Ok(())
+    }
+
+    pub fn finish(mut self) -> Result<(), String> {
+        let w = self.writer.take().expect("writer is open until finish");
+        let done = w
+            .close()
+            .map_err(|e| format!("{}: {e}", self.partial.display()))
+            .and_then(|_| {
+                std::fs::rename(&self.partial, &self.path)
+                    .map_err(|e| format!("{}: {e}", self.path.display()))
+            });
+        if done.is_err() {
+            let _ = std::fs::remove_file(&self.partial);
+        }
+        done
+    }
+}
+
+impl Drop for ExtractTableWriter {
+    fn drop(&mut self) {
+        if self.writer.take().is_some() {
+            let _ = std::fs::remove_file(&self.partial);
+        }
+    }
+}
+
+/// The number of rows of an extraction table, from its footer. Every error
+/// names `path`.
+pub fn extract_table_rows(path: &Path) -> Result<usize, String> {
+    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    let file = File::open(path).map_err(|e| err(&e))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| err(&e))?;
+    Ok(builder.metadata().file_metadata().num_rows().max(0) as usize)
+}
+
 /// The key-value metadata of an extraction table, without reading its rows.
 /// Every error names `path`.
 pub fn read_extract_tags(path: &Path) -> Result<Vec<(String, String)>, String> {

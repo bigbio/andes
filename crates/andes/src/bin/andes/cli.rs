@@ -840,6 +840,69 @@ pub(crate) struct SearchArgs {
     pub(crate) keep_pin: bool,
 }
 
+/// `andes inference`: protein groups over the rescored PSMs of one or more runs.
+#[derive(Args, Debug)]
+pub(crate) struct InferenceArgs {
+    /// Percolator target PSM results (`--results-psms`), one or more files.
+    /// Their scores must be on one scale: one Percolator run over all the
+    /// runs (one file, or one file per run from that run).
+    #[arg(long = "psms", value_name = "TSV", num_args = 1.., required = true)]
+    pub(crate) psms: Vec<PathBuf>,
+
+    /// Percolator decoy PSM results (`--decoy-results-psms`) of the same
+    /// Percolator run(s).
+    #[arg(long = "decoy-psms", value_name = "TSV", num_args = 1.., required = true)]
+    pub(crate) decoy_psms: Vec<PathBuf>,
+
+    /// The protein database the PSMs were searched against, with the same
+    /// options as the search (`--annotations`, `--uniprot-*`, `--knockoffs`,
+    /// `--enzyme`, decoy affixes), so protein families, knockoff entries and
+    /// decoy pairs are the search's.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) database: PathBuf,
+
+    #[arg(long = "uniprot-variants")]
+    pub(crate) uniprot_variants: bool,
+    #[arg(long = "uniprot-isoforms")]
+    pub(crate) uniprot_isoforms: bool,
+    #[arg(long = "uniprot-chains")]
+    pub(crate) uniprot_chains: bool,
+    #[arg(
+        long = "uniprot-evidence",
+        default_value = "experimental",
+        value_parser = parse_uniprot_evidence
+    )]
+    pub(crate) uniprot_evidence: input::EvidenceLevel,
+    #[arg(long = "annotations", value_name = "FILE")]
+    pub(crate) annotations: Vec<PathBuf>,
+    #[arg(long = "knockoffs", default_value_t = 4)]
+    pub(crate) knockoffs: usize,
+    #[arg(long, default_value = "trypsin")]
+    pub(crate) enzyme: String,
+    #[arg(long, default_value = "XXX_")]
+    pub(crate) decoy_prefix: String,
+    #[arg(long = "decoy-suffix")]
+    pub(crate) decoy_suffix: Option<String>,
+
+    /// PSM q-value cutoff for the PSMs and peptides counted per group.
+    #[arg(long = "fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
+    pub(crate) fdr: f64,
+
+    /// PSM q-value cutoff for proteoform claims (variant-class PSMs).
+    /// Default: the larger of `--fdr` and 0.05.
+    #[arg(long = "proteoform-fdr", value_parser = parse_unit_fraction)]
+    pub(crate) proteoform_fdr: Option<f64>,
+
+    /// Run names for the groups' `grouped_runs`. Default: one per `--psms`
+    /// file, named after the file.
+    #[arg(long = "runs", value_name = "NAME", num_args = 1..)]
+    pub(crate) runs: Vec<String>,
+
+    /// Output prefix: writes `<PREFIX>.pg.parquet` (the QPX protein-group view).
+    #[arg(short = 'o', long = "output", value_name = "PREFIX")]
+    pub(crate) output: PathBuf,
+}
+
 /// `andes quant`: the match-between-runs stages over a quant directory
 /// written by `andes search --quant-dir`.
 #[derive(clap::Subcommand, Debug)]

@@ -530,6 +530,32 @@ so most are likely present, and the shuffled-entrapment run is the better measur
 the best row of each spectrum, or only rows at PSM q ≤ 0.01, gives 1.1–1.4% at 1% on Astral:
 within the entrapment's counting noise.
 
+#### Several runs: `andes inference`
+
+`andes inference` runs the same inference once over the PSMs of several runs and writes the QPX
+protein-group view, so the groups and their q-values are dataset-level:
+
+```bash
+andes inference \
+  --psms run1.percolator.target.psms.txt run2.percolator.target.psms.txt \
+  --decoy-psms run1.percolator.decoy.psms.txt run2.percolator.decoy.psms.txt \
+  --database db.fasta -o out/PXD000001
+# writes out/PXD000001.pg.parquet
+```
+
+- The scores must be on one scale: give the results of one Percolator run over all the runs (one
+  file, or one file per run from that run). Separate Percolator runs are not comparable.
+- Give the search's database options (`--annotations`, `--uniprot-*`, `--knockoffs`,
+  `--enzyme`, `--decoy-prefix`/`--decoy-suffix`), so families, knockoff entries and decoy pairs
+  are the search's. Knockoff entries are evidence for no protein.
+- The class and knockoff q-values are applied as in a search; `--fdr` and `--proteoform-fdr` set
+  the PSM cutoffs for the counts.
+- `pg.parquet`: one row per target group and per decoy group that won its family's competition
+  (`is_decoy`), with `pg_accessions`, `anchor_protein`, `grouped_runs` (`--runs`, else one name
+  per `--psms` file), `global_qvalue` (the protein q-value), `pg_qvalue` (only for one run),
+  `peptides` (peptides per accession), `peptide_counts`, the best peptide score in
+  `additional_scores` and families, PSMs, razor peptides and subsumed families in `cv_params`.
+
 ### Glycopeptide search
 
 See [§9](#9-glycopeptide-search-experimental--advanced-knobs).

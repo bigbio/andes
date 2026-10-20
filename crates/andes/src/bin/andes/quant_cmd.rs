@@ -118,23 +118,141 @@ pub(crate) fn library_runs(dir: &Path, runs: &[String]) -> Result<Vec<String>, S
     Ok(stems)
 }
 
-/// One rescored PSM as the library joins it.
-pub(crate) struct Joined {
+/// Hashes SpecIds and residue strings under one random key (SipHash, the
+/// standard library's keyed hash). A SpecId becomes 128 bits: two 64-bit
+/// hashes of it, under distinct one-byte prefixes. Two distinct SpecIds of a
+/// set of `n` share a key with probability about `n^2 / 2^129` (below
+/// `1e-22` for 100 million SpecIds), so a map keyed by the hash joins as a
+/// map keyed by the SpecId does, without holding the SpecId strings.
+#[derive(Clone, Default)]
+struct SpecIdKeys(std::collections::hash_map::RandomState);
+
+impl SpecIdKeys {
+    fn hash(&self, tag: u8, bytes: &[u8]) -> u64 {
+        use std::hash::{BuildHasher, Hasher};
+        let mut h = self.0.build_hasher();
+        h.write_u8(tag);
+        h.write(bytes);
+        h.finish()
+    }
+
+    /// The 128-bit key of a SpecId.
+    fn key(&self, spec_id: &str) -> u128 {
+        (u128::from(self.hash(0, spec_id.as_bytes())) << 64)
+            | u128::from(self.hash(1, spec_id.as_bytes()))
+    }
+
+    /// A 64-bit hash of a peptide's [`residues`]; `buf` is scratch space.
+    fn residues(&self, peptide: &str, buf: &mut String) -> u64 {
+        residues_into(peptide, buf);
+        self.hash(2, buf.as_bytes())
+    }
+}
+
+/// One rescored PSM as the library joins it: the rescorer's score, PSM
+/// q-value and PEP, the label (from the decoy result file or not) and a hash
+/// of the residues of the rescorer's peptide string.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Scored {
     pub score: f64,
     /// The rescorer's PSM q-value.
     pub q: f64,
     /// The rescorer's PSM posterior error probability.
     pub pep: f64,
-    /// From the decoy result file.
-    pub is_decoy: bool,
-    /// The rescorer's peptide string (flanks and modification tags allowed).
-    pub peptide: String,
+    /// The residue hash shifted left by one; the low bit is the decoy label.
+    tag: u64,
 }
 
-/// Rescored PSMs by SpecId and the file(s) they came from.
+impl Scored {
+    /// From the decoy result file.
+    pub(crate) fn is_decoy(&self) -> bool {
+        self.tag & 1 == 1
+    }
+}
+
+/// Rescored PSMs by SpecId and the file(s) they came from. A SpecId is held
+/// as its 128-bit hash ([`SpecIdKeys`]): 48 bytes per PSM in the map.
 pub(crate) struct ScoreSet {
     pub source: String,
-    pub psms: HashMap<String, Joined>,
+    keys: SpecIdKeys,
+    psms: HashMap<u128, Scored, rustc_hash::FxBuildHasher>,
+    /// Scratch space of the residue hash.
+    buf: String,
+}
+
+impl ScoreSet {
+    fn with_capacity(source: String, n: usize) -> Self {
+        Self {
+            source,
+            keys: SpecIdKeys::default(),
+            psms: HashMap::with_capacity_and_hasher(n, rustc_hash::FxBuildHasher),
+            buf: String::new(),
+        }
+    }
+
+    /// Adds a PSM. Errors (the message names [`Self::source`]): a PSM without
+    /// a score, or a SpecId already added; `file` names where the PSM is read
+    /// from, for a SpecId repeated within one label.
+    fn insert(
+        &mut self,
+        file: &str,
+        spec_id: &str,
+        score: Option<f64>,
+        q: f64,
+        pep: f64,
+        peptide: &str,
+        is_decoy: bool,
+    ) -> Result<(), String> {
+        let score = score.ok_or_else(|| {
+            format!(
+                "{file}: PSM {spec_id:?} has no finite `score` (missing column or value); the library ranks precursors by the rescorer's PSM score"
+            )
+        })?;
+        let tag = (self.keys.residues(peptide, &mut self.buf) << 1) | u64::from(is_decoy);
+        let scored = Scored {
+            score,
+            q,
+            pep,
+            tag,
+        };
+        match self.psms.entry(self.keys.key(spec_id)) {
+            std::collections::hash_map::Entry::Occupied(o) => {
+                if o.get().is_decoy() == is_decoy {
+                    Err(format!(
+                        "{file}: {}",
+                        output::PercolatorError::DuplicatePsmId {
+                            psm_id: spec_id.to_string()
+                        }
+                    ))
+                } else {
+                    Err(format!(
+                        "{}: PSM {spec_id:?} is both a target and a decoy",
+                        self.source
+                    ))
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(scored);
+                Ok(())
+            }
+        }
+    }
+
+    /// The rescored PSM of a SpecId.
+    pub(crate) fn get(&self, spec_id: &str) -> Option<&Scored> {
+        self.psms.get(&self.keys.key(spec_id))
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.psms.len()
+    }
+
+    /// Whether `s` has label `is_decoy` and names the residues of
+    /// `peptidoform`; `buf` is scratch space.
+    fn agrees(&self, s: &Scored, is_decoy: bool, peptidoform: &str, buf: &mut String) -> bool {
+        s.is_decoy() == is_decoy && s.tag >> 1 == self.keys.residues(peptidoform, buf) & (u64::MAX >> 1)
+    }
 }
 
 /// The target and decoy PSMs of one rescoring result. Errors: a PSM without
@@ -144,42 +262,33 @@ pub(crate) fn rescore_scores(
     decoys: &HashMap<String, PercolatorPsm>,
     source: &str,
 ) -> Result<ScoreSet, String> {
-    let mut psms = HashMap::with_capacity(targets.len() + decoys.len());
+    let mut set = ScoreSet::with_capacity(source.to_string(), targets.len() + decoys.len());
     for (map, is_decoy) in [(targets, false), (decoys, true)] {
         for (id, p) in map {
-            let score = p.score.ok_or_else(|| {
-                format!(
-                    "{source}: PSM {id:?} has no finite `score`; the library ranks precursors by the rescorer's PSM score"
-                )
-            })?;
-            let joined = Joined {
-                score,
-                q: p.q_value,
-                pep: p.pep,
-                is_decoy,
-                peptide: p.peptide.clone(),
-            };
-            if psms.insert(id.clone(), joined).is_some() {
-                return Err(format!("{source}: PSM {id:?} is both a target and a decoy"));
-            }
+            set.insert(source, id, p.score, p.q_value, p.pep, &p.peptide, is_decoy)?;
         }
     }
-    Ok(ScoreSet {
-        source: source.to_string(),
-        psms,
-    })
+    Ok(set)
 }
 
 /// Residue letters of a peptide string: Percolator-style flanks (`K.` and
 /// `.R`) removed, bracketed tags removed, then every character that is not
 /// an uppercase letter dropped (mass deltas such as `+57.02146`).
+#[cfg(test)]
 fn residues(peptide: &str) -> String {
+    let mut out = String::new();
+    residues_into(peptide, &mut out);
+    out
+}
+
+/// [`residues`] into `out` (cleared first).
+fn residues_into(peptide: &str, out: &mut String) {
+    out.clear();
     let b = peptide.as_bytes();
     let mut p = peptide;
     if b.len() >= 4 && b[1] == b'.' && b[b.len() - 2] == b'.' {
         p = &peptide[2..peptide.len() - 2];
     }
-    let mut out = String::with_capacity(p.len());
     let mut depth = 0usize;
     for c in p.chars() {
         match c {
@@ -189,25 +298,20 @@ fn residues(peptide: &str) -> String {
             _ => {}
         }
     }
-    out
 }
 
 /// Largest share of a run's joined PSMs that may disagree with the rescoring
 /// result on peptide or target/decoy label.
 const MAX_JOIN_MISMATCH: f64 = 0.01;
 
-/// Reads a Percolator PSM result file; the error names it.
-fn read_percolator(path: &Path) -> Result<HashMap<String, PercolatorPsm>, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", path.display()))
-}
-
 /// Where the rescorer's scores come from: one set for every run (SpecIds
 /// must then be distinct across runs), loaded once; or one set per run stem,
 /// loaded when that run is joined and dropped after it, so only one run's
 /// scores are held at a time.
 pub(crate) enum ScoreLoader<'a> {
-    Merged(Box<dyn FnOnce() -> Result<ScoreSet, String> + 'a>),
+    /// Called with the number of distinct SpecIds of the run tables, to size
+    /// the set.
+    Merged(Box<dyn FnOnce(usize) -> Result<ScoreSet, String> + 'a>),
     PerRun(RunScores<'a>),
 }
 
@@ -283,34 +387,43 @@ fn score_source(
 /// The loader of `quant library`'s Percolator results.
 fn score_loader(source: &ScoreSource) -> ScoreLoader<'_> {
     match source {
-        ScoreSource::Merged(t, d) => ScoreLoader::Merged(Box::new(move || percolator_scores(t, d))),
+        ScoreSource::Merged(t, d) => ScoreLoader::Merged(Box::new(move |n: usize| percolator_scores(t, d, n))),
         ScoreSource::PerRun(m) => ScoreLoader::PerRun(Box::new(move |stem: &str| {
             let (t, d) = m
                 .get(stem)
                 .ok_or_else(|| format!("no rescoring scores for run {stem:?}"))?;
-            percolator_scores(t, d)
+            percolator_scores(t, d, 0)
         })),
     }
 }
 
-/// Scores from Percolator's target and decoy PSM files.
-fn percolator_scores(targets: &Path, decoys: &Path) -> Result<ScoreSet, String> {
-    let t = read_percolator(targets)?;
-    let d = read_percolator(decoys)?;
-    for (path, m) in [(targets, &t), (decoys, &d)] {
-        if let Some(p) = m.values().find(|p| p.score.is_none()) {
-            return Err(format!(
-                "{}: PSM {:?} has no finite `score` (missing column or value); the library ranks precursors by the rescorer's PSM score",
-                path.display(),
-                p.psm_id
-            ));
+/// Scores from Percolator's target and decoy PSM files, read one line at a
+/// time; `capacity` sizes the map (the expected number of PSMs).
+fn percolator_scores(targets: &Path, decoys: &Path, capacity: usize) -> Result<ScoreSet, String> {
+    let mut set = ScoreSet::with_capacity(
+        format!("{} and {}", targets.display(), decoys.display()),
+        capacity,
+    );
+    for (path, is_decoy) in [(targets, false), (decoys, true)] {
+        let file = path.display().to_string();
+        let err = |e: output::PercolatorError| format!("{file}: {e}");
+        let f = std::fs::File::open(path).map_err(|e| format!("{file}: {e}"))?;
+        let mut reader =
+            output::PsmResultReader::new(std::io::BufReader::with_capacity(1 << 20, f))
+                .map_err(err)?;
+        while let Some(row) = reader.next_row().map_err(err)? {
+            set.insert(
+                &file,
+                row.psm_id,
+                row.score,
+                row.q_value,
+                row.pep,
+                row.peptide,
+                is_decoy,
+            )?;
         }
     }
-    rescore_scores(
-        &t,
-        &d,
-        &format!("{} and {}", targets.display(), decoys.display()),
-    )
+    Ok(set)
 }
 
 /// The columns of a run table that give a precursor's metadata.
@@ -339,8 +452,14 @@ struct KeyMeta {
     run: usize,
     mz: f64,
     charge: u8,
-    envelope: Vec<f32>,
+    /// The isotope fractions, or the number of them when it is not
+    /// [`ENVELOPE_LEN`].
+    envelope: Result<[f32; ENVELOPE_LEN], usize>,
     proteins: String,
+}
+
+fn envelope_of(v: &[f32]) -> Result<[f32; ENVELOPE_LEN], usize> {
+    v.try_into().map_err(|_| v.len())
 }
 
 /// Builds the library over the run tables of `stems` (sorted, as from
@@ -354,10 +473,12 @@ struct KeyMeta {
 /// precursors), then the PSMs, joined to their run's scores and folded into
 /// per-precursor aggregates ([`quant::library::LibraryBuilder`] and the
 /// donor scans). Memory follows the precursors and their donor runs, plus one
-/// run's scores; with merged scores the one score set (and, to name a SpecId
-/// shared by two runs, every SpecId) is held. Merged scores are loaded after
-/// the tables' SpecIds are checked, so that a SpecId shared by two runs fails
-/// with the runs named.
+/// run's scores; with merged scores, the one score set (48 bytes per PSM: a
+/// SpecId is held as its 128-bit hash, see [`ScoreSet`]) and, before it is
+/// read, every SpecId's hash and first run, to name a SpecId shared by two
+/// runs. The Percolator files are read one line at a time. Merged scores are
+/// loaded after the tables' SpecIds are checked, so that a SpecId shared by
+/// two runs fails with the runs named.
 pub(crate) fn build_and_write_library(
     dir: &Path,
     stems: &[String],
@@ -397,7 +518,9 @@ pub(crate) fn build_and_write_library(
     // Pass 1: every precursor key with its metadata row, and (merged scores
     // only) the first SpecId shared by two runs.
     let mut keys: BTreeMap<String, KeyMeta> = BTreeMap::new();
-    let mut seen: HashMap<String, usize> = HashMap::new();
+    // SpecId (as its 128-bit hash, see `SpecIdKeys`) -> first run.
+    let spec_keys = SpecIdKeys::default();
+    let mut seen: HashMap<u128, u32, rustc_hash::FxBuildHasher> = HashMap::default();
     let mut shared: Option<(String, usize, usize)> = None;
     let mut n_rows = 0usize;
     for r in 0..stems.len() {
@@ -410,15 +533,9 @@ pub(crate) fn build_and_write_library(
             for row in batch? {
                 n_rows += 1;
                 if merged {
-                    match seen.get(&row.spec_id) {
-                        Some(&other) => {
-                            if shared.is_none() && other != r {
-                                shared = Some((row.spec_id.clone(), other, r));
-                            }
-                        }
-                        None => {
-                            seen.insert(row.spec_id, r);
-                        }
+                    let other = *seen.entry(spec_keys.key(&row.spec_id)).or_insert(r as u32);
+                    if shared.is_none() && other as usize != r {
+                        shared = Some((row.spec_id.clone(), other as usize, r));
                     }
                 }
                 let target = !row.is_decoy;
@@ -430,7 +547,7 @@ pub(crate) fn build_and_write_library(
                                 run: r,
                                 mz: row.mz,
                                 charge: row.charge,
-                                envelope: row.envelope,
+                                envelope: envelope_of(&row.envelope),
                                 proteins: row.proteins,
                             };
                         }
@@ -443,7 +560,7 @@ pub(crate) fn build_and_write_library(
                                 run: r,
                                 mz: row.mz,
                                 charge: row.charge,
-                                envelope: row.envelope,
+                                envelope: envelope_of(&row.envelope),
                                 proteins: row.proteins,
                             },
                         );
@@ -452,10 +569,11 @@ pub(crate) fn build_and_write_library(
             }
         }
     }
+    let n_spec_ids = seen.len();
     drop(seen);
     let (merged_scores, per_run) = match scores {
         ScoreLoader::Merged(load) => {
-            let set = load()?;
+            let set = load(n_spec_ids)?;
             if let Some((id, a, b)) = &shared {
                 return Err(format!(
                     "SpecId {id:?} is in runs {} and {}, so one merged Percolator result cannot be joined; pass per-run results: --psms <stem>=<target.tsv> --decoy-psms <stem>=<decoy.tsv> for every run",
@@ -473,11 +591,10 @@ pub(crate) fn build_and_write_library(
     let mut proteins = Vec::with_capacity(keys.len());
     let mut target_key = Vec::with_capacity(keys.len());
     for (key, m) in std::mem::take(&mut keys) {
-        let envelope: [f32; ENVELOPE_LEN] = m.envelope.as_slice().try_into().map_err(|_| {
+        let envelope = m.envelope.map_err(|len| {
             format!(
-                "{}: precursor {key:?} has an envelope of {} isotopes, expected {ENVELOPE_LEN}",
-                paths[m.run].display(),
-                m.envelope.len()
+                "{}: precursor {key:?} has an envelope of {len} isotopes, expected {ENVELOPE_LEN}",
+                paths[m.run].display()
             )
         })?;
         meta.push(PrecursorMeta {
@@ -499,6 +616,7 @@ pub(crate) fn build_and_write_library(
     let mut donors = DonorPsms::new(meta.len());
     let (mut unscored_t, mut unscored_d, mut shadowed, mut mismatched) = (0usize, 0, 0, 0);
     let (mut n_psms, mut donor_psms) = (0usize, 0usize);
+    let mut buf = String::new();
     for r in 0..stems.len() {
         let own;
         let set = match (&merged_scores, &per_run) {
@@ -523,7 +641,7 @@ pub(crate) fn build_and_write_library(
                     shadowed += 1;
                     continue;
                 }
-                let Some(j) = set.psms.get(&row.spec_id) else {
+                let Some(&j) = set.get(&row.spec_id) else {
                     if row.is_decoy {
                         unscored_d += 1;
                     } else {
@@ -532,8 +650,7 @@ pub(crate) fn build_and_write_library(
                     continue;
                 };
                 run_joined += 1;
-                if j.is_decoy != row.is_decoy || residues(&j.peptide) != residues(&row.peptidoform)
-                {
+                if !set.agrees(&j, row.is_decoy, &row.peptidoform, &mut buf) {
                     run_mismatched += 1;
                     continue;
                 }
@@ -552,7 +669,7 @@ pub(crate) fn build_and_write_library(
                 donor_psms += usize::from(donor && !p.is_decoy);
                 builder.add(&p);
                 if donor {
-                    donors.add(&p, row.spec_id);
+                    donors.add(&p, &row.spec_id);
                 }
             }
         }
@@ -703,37 +820,69 @@ fn scan_of(by_key: &HashMap<&str, usize>, spec_id: &str) -> Option<usize> {
 }
 
 /// The donor PSMs of every precursor as the library's spectra need them,
-/// added one at a time in run order: per precursor id, the `(run, RT)` of
-/// each donor PSM and the best one (highest score; then earliest RT, lowest
-/// run) with its SpecId.
+/// added one at a time in run order: per precursor id with a donor PSM, the
+/// `(run, RT)` of each donor PSM and the best one (highest score; then
+/// earliest RT, lowest run) with its SpecId.
 pub(crate) struct DonorPsms {
+    /// Per precursor id: its index in `scans` and `best`, or `u32::MAX`.
+    slot: Vec<u32>,
     scans: Vec<Vec<(u16, f64)>>,
-    best: Vec<Option<(PsmIn, String)>>,
+    best: Vec<(BestDonor, Box<str>)>,
+}
+
+/// What [`DonorPsms`] compares of a donor PSM.
+#[derive(Clone, Copy)]
+struct BestDonor {
+    score: f64,
+    rt: f64,
+    run: u16,
 }
 
 impl DonorPsms {
     pub(crate) fn new(n_precursors: usize) -> Self {
         Self {
-            scans: vec![Vec::new(); n_precursors],
-            best: vec![None; n_precursors],
+            slot: vec![u32::MAX; n_precursors],
+            scans: Vec::new(),
+            best: Vec::new(),
         }
     }
 
     /// Adds donor PSM `p` with SpecId `spec_id`; ignored when its id is out of
     /// range.
-    pub(crate) fn add(&mut self, p: &PsmIn, spec_id: String) {
+    pub(crate) fn add(&mut self, p: &PsmIn, spec_id: &str) {
         let id = p.precursor as usize;
-        if id >= self.scans.len() {
+        if id >= self.slot.len() {
             return;
         }
-        self.scans[id].push((p.run, p.rt));
-        let better = self.best[id].as_ref().is_none_or(|(b, _)| {
-            p.score > b.score
-                || (p.score == b.score && (p.rt.total_cmp(&b.rt).then(p.run.cmp(&b.run)).is_lt()))
-        });
-        if better {
-            self.best[id] = Some((*p, spec_id));
-        }
+        let new = BestDonor {
+            score: p.score,
+            rt: p.rt,
+            run: p.run,
+        };
+        let i = match self.slot[id] {
+            u32::MAX => {
+                self.slot[id] = u32::try_from(self.scans.len())
+                    .ok()
+                    .filter(|&i| i != u32::MAX)
+                    .expect("fewer than 2^32 - 1 donor precursors");
+                self.scans.push(Vec::new());
+                self.best.push((new, spec_id.into()));
+                self.scans.len() - 1
+            }
+            i => {
+                let i = i as usize;
+                let (b, s) = &mut self.best[i];
+                if p.score > b.score
+                    || (p.score == b.score
+                        && (p.rt.total_cmp(&b.rt).then(p.run.cmp(&b.run))).is_lt())
+                {
+                    *b = new;
+                    *s = spec_id.into();
+                }
+                i
+            }
+        };
+        self.scans[i].push((p.run, p.rt));
     }
 
     /// Per precursor id of `lib`: the empirical fragment spectrum of an
@@ -749,22 +898,30 @@ impl DonorPsms {
         lib: &Library,
     ) -> Result<EntrySpectra, String> {
         let n = lib.meta.len();
-        let mut is_entry = vec![false; n];
+        let Self {
+            slot,
+            mut scans,
+            best: donor_best,
+        } = self;
+        // Per precursor id of an entry: its donor scans, sorted, and its best
+        // donor PSM's run and SpecId.
+        let mut entry_scans: Vec<Vec<(u16, f64)>> = vec![Vec::new(); n];
+        let mut best: Vec<Option<(u16, Box<str>)>> = vec![None; n];
+        let mut donor_best: Vec<Option<(BestDonor, Box<str>)>> =
+            donor_best.into_iter().map(Some).collect();
         for e in &lib.entries {
-            is_entry[e.precursor as usize] = true;
+            let id = e.precursor as usize;
+            let Some(&i) = slot.get(id).filter(|&&i| i != u32::MAX) else {
+                continue;
+            };
+            let mut d = std::mem::take(&mut scans[i as usize]);
+            d.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+            entry_scans[id] = d;
+            best[id] = donor_best[i as usize].take().map(|(b, s)| (b.run, s));
         }
-        let Self { mut scans, best } = self;
-        scans.resize(n, Vec::new());
-        let mut best: Vec<Option<(PsmIn, String)>> = best;
-        best.resize(n, None);
-        for (id, d) in scans.iter_mut().enumerate() {
-            if is_entry[id] {
-                d.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
-            } else {
-                *d = Vec::new();
-                best[id] = None;
-            }
-        }
+        drop(scans);
+        drop(donor_best);
+        drop(slot);
         let mut spectra: Vec<Option<LibrarySpectrum>> = vec![None; n];
         let mut c = SpectrumCounts::default();
         for (r, stem) in stems.iter().enumerate() {
@@ -773,8 +930,8 @@ impl DonorPsms {
                 .enumerate()
                 .filter_map(|(id, b)| {
                     b.as_ref()
-                        .filter(|(p, _)| p.run as usize == r)
-                        .map(|(_, s)| (id, s.as_str()))
+                        .filter(|(run, _)| *run as usize == r)
+                        .map(|(_, s)| (id, &**s))
                 })
                 .collect();
             if wanted.is_empty() {
@@ -826,7 +983,7 @@ impl DonorPsms {
                 }
             }
         }
-        Ok((spectra, scans, c))
+        Ok((spectra, entry_scans, c))
     }
 }
 
@@ -1113,7 +1270,7 @@ pub(crate) fn run_in_process(
     let stored = build_and_write_library(
         dir,
         &stems,
-        ScoreLoader::Merged(Box::new(move || Ok(scores))),
+        ScoreLoader::Merged(Box::new(move |_| Ok(scores))),
         max_q,
         donor_q,
         donor_pep,
@@ -1363,8 +1520,57 @@ mod tests {
             },
         );
         let m = rescore_scores(&t, &d, "t.tsv").unwrap();
-        assert_eq!(m.psms.len(), 2);
-        assert!(!m.psms["s1"].is_decoy && m.psms["s2"].is_decoy);
+        assert_eq!(m.len(), 2);
+        assert!(!m.get("s1").unwrap().is_decoy() && m.get("s2").unwrap().is_decoy());
+        assert!(m.get("s3").is_none());
+    }
+
+    #[test]
+    fn percolator_files_are_read_line_by_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, rows: &[&str]| {
+            let path = dir.path().join(name);
+            let mut text = "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\r\n".to_string();
+            for r in rows {
+                text.push_str(r);
+                text.push_str("\r\n");
+            }
+            std::fs::write(&path, text).unwrap();
+            path
+        };
+        let t = write(
+            "t.tsv",
+            &["a_1_1\t2.5\t0.001\t0.01\tK.PEPC+57.02146TIDEK.A\tP1\tP2", "", "b_2_1\t1.5\t0.002\t0.02\t-.PEPM[+15.99491]K.-\tP3"],
+        );
+        let d = write("d.tsv", &["c_3_1\t-1.0\t0.5\t0.9\tK.KEDITPEP.A\tDECOY_P1"]);
+        let set = percolator_scores(&t, &d, 0).unwrap();
+        assert_eq!(set.len(), 3);
+        let a = *set.get("a_1_1").unwrap();
+        assert_eq!((a.score, a.q, a.pep, a.is_decoy()), (2.5, 0.001, 0.01, false));
+        let c = *set.get("c_3_1").unwrap();
+        assert!(c.is_decoy() && c.score == -1.0);
+        assert!(set.get("a_1").is_none());
+        let mut buf = String::new();
+        assert!(set.agrees(&a, false, "PEPCTIDEK", &mut buf));
+        assert!(set.agrees(&a, false, "PEPC[UNIMOD:4]TIDEK", &mut buf));
+        assert!(!set.agrees(&a, true, "PEPCTIDEK", &mut buf));
+        assert!(!set.agrees(&a, false, "PEPCTIDEKK", &mut buf));
+        let b = *set.get("b_2_1").unwrap();
+        assert!(set.agrees(&b, false, "PEPMK", &mut buf));
+
+        let dup = write("dup.tsv", &["a_1_1\t2.5\t0.001\t0.01\tK.PEPTIDEK.A\tP1", "a_1_1\t2.0\t0.001\t0.01\tK.PEPTIDEK.A\tP1"]);
+        let e = percolator_scores(&dup, &d, 0).err().unwrap();
+        assert!(e.contains("dup.tsv") && e.contains("a_1_1"), "{e}");
+        let e = percolator_scores(&t, &t, 0).err().unwrap();
+        assert!(e.contains("both a target and a decoy"), "{e}");
+        let no_score = write("ns.tsv", &["a_1_1\tnan\t0.001\t0.01\tK.PEPTIDEK.A\tP1"]);
+        let e = percolator_scores(&no_score, &d, 0).err().unwrap();
+        assert!(e.contains("ns.tsv") && e.contains("score"), "{e}");
+        let bad = write("bad.tsv", &["a_1_1\t2.5\tx\t0.01\tK.PEPTIDEK.A\tP1"]);
+        let e = percolator_scores(&bad, &d, 0).err().unwrap();
+        assert!(e.contains("bad.tsv") && e.contains("q-value"), "{e}");
+        let e = percolator_scores(&dir.path().join("missing.tsv"), &d, 0).err().unwrap();
+        assert!(e.contains("missing.tsv"), "{e}");
     }
 
     #[test]
@@ -1553,7 +1759,7 @@ mod tests {
             build_and_write_library(
                 dir.path(),
                 &stems,
-                ScoreLoader::Merged(Box::new(move || Ok(set))),
+                ScoreLoader::Merged(Box::new(move |_| Ok(set))),
                 0.01,
                 0.01,
                 pep,
@@ -1597,7 +1803,7 @@ mod tests {
         let stored = build_and_write_library(
             dir.path(),
             &stems,
-            ScoreLoader::Merged(Box::new(move || Ok(set))),
+            ScoreLoader::Merged(Box::new(move |_| Ok(set))),
             0.01,
             0.01,
             None,

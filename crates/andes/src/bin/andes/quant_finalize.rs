@@ -1408,10 +1408,8 @@ pub(crate) fn finalize_stream(
     let t1 = Instant::now();
     // Both classifiers' folds train at once.
     let (t_rows, i_rows) = (t_sample.into_items(), i_sample.into_items());
-    let (t_models, i_models) = rayon::join(
-        || train_folds(&t_rows, seed),
-        || train_folds(&i_rows, seed),
-    );
+    let (t_models, i_models) =
+        rayon::join(|| train_folds(&t_rows, seed), || train_folds(&i_rows, seed));
     drop((t_rows, i_rows));
     eprintln!(
         "[mbr] finalize: training rows of {} extract rows {:.1} s, fold models {:.1} s",
@@ -1650,19 +1648,20 @@ pub(crate) fn finalize_stream(
                         let q = q_of(&fdr, Estimate::Pooled, i);
                         v.transfers += 1;
                         v.transfers_scored += usize::from(q.is_some());
+                        let ok = |e: Estimate, t: f64| {
+                            usize::from(
+                                scored[i]
+                                    .is_some_and(|(fam, s)| fdr.accepts(e, r.precursor, fam, s, t)),
+                            )
+                        };
                         for (a, &t) in [&mut v.at_q01, &mut v.at_threshold]
                             .into_iter()
                             .zip(&thresholds)
                         {
-                            let ok = |e: Estimate| {
-                                usize::from(scored[i].is_some_and(|(fam, s)| {
-                                    fdr.accepts(e, r.precursor, fam, s, t)
-                                }))
-                            };
                             a.pooled += usize::from(q.is_some_and(|q| q <= t));
-                            a.mass_only += ok(Estimate::MassOnly);
-                            a.rt_only += ok(Estimate::RtOnly);
-                            a.wrong_peak_only += ok(Estimate::WrongPeak);
+                            a.mass_only += ok(Estimate::MassOnly, t);
+                            a.rt_only += ok(Estimate::RtOnly, t);
+                            a.wrong_peak_only += ok(Estimate::WrongPeak, t);
                         }
                         let supported = r.ms2.is_some_and(|m| m.supports());
                         if let Some(m) = &r.ms2 {

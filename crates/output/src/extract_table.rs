@@ -547,8 +547,7 @@ impl ExtractTableReader {
                         .ok_or_else(|| err(&format!("no column {n:?}")))
                 })
                 .collect::<Result<_, _>>()?;
-            let mask =
-                parquet::arrow::ProjectionMask::leaves(builder.parquet_schema(), leaves);
+            let mask = parquet::arrow::ProjectionMask::leaves(builder.parquet_schema(), leaves);
             builder.with_projection(mask)
         } else {
             builder
@@ -845,11 +844,10 @@ mod tests {
             .collect();
         assert_eq!(got.len(), want.len());
         assert!(want.iter().any(|r| r.evidence.is_none()));
+        let keys = |r: &ExtractRow| (r.precursor, r.run, r.kind, r.role, r.n_donor_runs);
         for (g, w) in got.iter().zip(want) {
-            assert_eq!(
-                (g.precursor, g.run, g.kind, g.role, g.n_donor_runs, g.library_q),
-                (w.precursor, w.run, w.kind, w.role, w.n_donor_runs, w.library_q)
-            );
+            assert_eq!(keys(g), keys(w));
+            assert_eq!(g.library_q, w.library_q);
             assert_eq!(g.ms2, None);
             match (&g.evidence, &w.evidence) {
                 (None, None) => {}

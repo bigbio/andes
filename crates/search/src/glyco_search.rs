@@ -1,9 +1,11 @@
 // Glycopeptide scoring driver for andes.
 //
 // Implements bare-backbone glyco-PSM scoring: given a set of spectra and a
-// PreparedSearch (standard tryptic candidate pool), enumerates hybrid
-// backbone candidates (DB-branch glycan list + de-novo Y-ladder), filters
-// peptide candidates by backbone mass and N-X-S/T sequon, and scores each
+// PreparedSearch (standard tryptic candidate pool), enumerates backbone
+// candidates glycan-first (DB branch: glycan → peptide by mass) plus a
+// peptide-first b/y recall pass, filters candidates by backbone mass and the
+// selected core's glycosite motif (N-X-S/T for N-glycan, any Ser/Thr for
+// O-glycan), and scores each
 // (backbone peptide, glycan) pair using the standard rank-LLR scorer.
 //
 // The glycan mass is NOT added to the peptide's Asn — this is the
@@ -43,7 +45,7 @@ use andes_glyco::glyco_psm::{
 };
 
 /// Maximum backbone candidates kept per spectrum after Phase-1 truncation (DB +
-/// de-novo combined, after union-dedup), per truncation axis.
+/// peptide-first combined, after union-dedup), per truncation axis.
 pub const GLYCO_BACKBONE_TOP_K: usize = 150;
 
 /// Peptide-first fragment-index charge states: b/y are indexed at
@@ -597,7 +599,7 @@ impl GlycoCtxOwned {
         let min_core_y_cfg = cfg.min_core_y;
         let max_gen_peaks = cfg.max_gen_peaks;
 
-        // PEPTIDE-FIRST index (combines with the backbone-first hybrid below). Build a
+        // PEPTIDE-FIRST index (the b/y recall pass alongside the glycan-first DB branch). Build a
         // fragment-ion index over the SEQUON candidate peptides ONCE. Per spectrum we
         // query it for peptides with real b/y support, then keep those whose
         // glycan-by-subtraction (`precursor − peptide`) hits a known glycan. This
@@ -806,8 +808,8 @@ fn glyco_charges_to_try(
 }
 
 /// Score one spectrum's glyco backbone candidates end to end: candidate
-/// generation (backbone-first hybrid DB/de-novo, peptide-first fragment-index,
-/// and glycan-Y-first, per the `ctx` toggles), dedup, b/y-ranked truncation, and
+/// generation (glycan-first DB branch — glycan list → peptide by mass, full or
+/// ion-index-narrowed — plus a peptide-first b/y recall pass), dedup, b/y-ranked truncation, and
 /// phase-2 feature extraction for the surviving winners.
 /// The isotope-error window one spectrum searches. `override_range` replaces
 /// `default` for spectrum `spec_idx` when `mask` is `None` or flags that index;
@@ -975,7 +977,7 @@ fn score_spectrum_glyco(
     // partner (same precursor), GENERATE candidate backbones from the HCD
     // scan's peaks — it carries the oxonium / core-Y / b/y evidence the ETD
     // scan lacks. `gen_peaks`/`gen_stats` drive every generation call
-    // (oxonium gate, de-novo solver, db_branch, peptide-first, glycan-Y
+    // (oxonium gate, db_branch, peptide-first, glycan-Y
     // index, core-Y counts). The c/z LADDER scoring (hyperscore, rank) is
     // always measured on THIS ETD scan (`spec.peaks`/`stats`).
     // NOTE ON PROVENANCE: the glycan-level evidence derived during
@@ -1367,7 +1369,7 @@ fn score_spectrum_glyco(
         }
         let bb_residue = bb_hit.backbone_mass;
         // The charge (and isotope offset) that produced this backbone
-        // via `hybrid_candidates_with_isotope`. Scoring MUST use this
+        // (db_branch or the peptide-first recall). Scoring MUST use this
         // exact charge — re-deriving/re-picking a charge independently
         // here would score against a precursor mass inconsistent with
         // the one that actually matched this backbone (BUG: precursor
@@ -1381,9 +1383,8 @@ fn score_spectrum_glyco(
         let ss = match scored_for_charge(phase1_scored, z) {
             Some(s) => s,
             // The backbone's charge fell outside `charges_to_try`
-            // (shouldn't happen since `hybrid_candidates_with_isotope`
-            // is only called for charges in that set, but guard
-            // defensively rather than panic).
+            // (shouldn't happen since generation only runs for charges in
+            // that set, but guard defensively rather than panic).
             None => continue,
         };
 
@@ -2200,12 +2201,13 @@ fn score_spectrum_glyco(
 ///
 /// For each spectrum:
 /// 1. Run `oxonium_gate` to gather oxonium evidence.
-/// 2. For each charge in the params charge range, call `hybrid_candidates`
-///    to enumerate backbone hits (DB + de-novo).
+/// 2. For each charge in the params charge range, generate backbone hits
+///    glycan-first (DB branch, full or ion-index-narrowed list) plus a
+///    peptide-first b/y recall pass.
 /// 3. Union and dedup backbone hits within 0.02 Da, capping at
 ///    [`GLYCO_BACKBONE_TOP_K`].
 /// 4. For each backbone hit, find candidates in the mass bucket whose peptide
-///    mass matches the backbone and has a N-X-S/T sequon.
+///    mass matches the backbone and carries the selected core's glycosite motif.
 /// 5. Score each (peptide, glycan) pair and emit a `FullGlycoPsm`.
 ///
 /// B1 paired-scan generation map. For each ETD/AI-ETD spectrum, find its paired

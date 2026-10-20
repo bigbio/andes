@@ -94,11 +94,11 @@ fn train_writes_model_and_search_uses_it() {
     );
     assert!(pin_path.exists(), "PIN file should be written");
 
-    // The run summary is written next to the PIN as `statistics.log`.
-    let stats_path = dir.path().join("statistics.log");
+    // The run summary is written next to the PIN as `<stem>.statistics.log`.
+    let stats_path = dir.path().join("out.statistics.log");
     assert!(
         stats_path.exists(),
-        "statistics.log should be written next to the PIN"
+        "out.statistics.log should be written next to the PIN"
     );
     let stats = std::fs::read_to_string(&stats_path).expect("read statistics.log");
     assert!(

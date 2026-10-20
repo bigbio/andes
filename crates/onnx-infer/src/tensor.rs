@@ -19,7 +19,9 @@ impl NamedTensor {
     /// Build a tensor; `data.len()` must equal the product of `shape`.
     pub fn new(name: impl Into<String>, shape: Vec<usize>, data: Vec<f32>) -> Result<Self> {
         let name = name.into();
-        let expected = shape.iter().copied().product::<usize>();
+        let expected = element_count(&shape).ok_or_else(|| {
+            Error::InvalidArg(format!("tensor `{name}`: shape {shape:?} overflows usize"))
+        })?;
         if data.len() != expected {
             return Err(Error::ShapeMismatch {
                 name,
@@ -78,9 +80,30 @@ impl NamedTensor {
     }
 }
 
+/// Number of elements of a row-major tensor of shape `dims` (1 for an empty
+/// shape), or `None` when the product overflows `usize`.
+pub fn element_count(dims: &[usize]) -> Option<usize> {
+    dims.iter().try_fold(1usize, |acc, &d| acc.checked_mul(d))
+}
+
+/// [`element_count`] as a `Result`, naming `what` in the overflow error.
+pub(crate) fn checked_element_count(dims: &[usize], what: &str) -> Result<usize> {
+    element_count(dims)
+        .ok_or_else(|| Error::InvalidArg(format!("{what}: shape {dims:?} overflows usize")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_overflowing_shape() {
+        let err = NamedTensor::new("x", vec![usize::MAX, 2], Vec::new()).unwrap_err();
+        assert!(matches!(err, Error::InvalidArg(_)), "{err:?}");
+        assert_eq!(element_count(&[]), Some(1));
+        assert_eq!(element_count(&[3, 0, usize::MAX]), Some(0));
+        assert_eq!(element_count(&[usize::MAX, 2]), None);
+    }
 
     #[test]
     fn rejects_mismatched_nelem() {

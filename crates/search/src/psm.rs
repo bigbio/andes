@@ -393,9 +393,39 @@ pub struct PsmMatch {
     /// from the secondary's own precursor mass; `None` (every ordinary PSM) falls
     /// back to the spectrum's `precursor_mz`.
     pub precursor_mz_override: Option<f64>,
+    /// Content identity of the candidate, used only to break exact `rank_score`
+    /// ties: [`tie_key_of`] of the primary candidate. It depends on the peptide
+    /// alone, never on where or when the candidate was enumerated, so every
+    /// retrieval path and thread count breaks a tie the same way. Test fixtures
+    /// that do not care set 0.
+    pub tie_key: u64,
+}
+
+/// Tie-break key of a candidate: a hash of its residues and per-residue
+/// modification deltas (1e-5 Da units, as [`crate::match_engine::peptidoform_key`])
+/// with the target/decoy flag in the lowest bit.
+pub fn tie_key_of(cand: &crate::candidate_gen::Candidate) -> u64 {
+    (crate::match_engine::peptidoform_key(&cand.peptide) << 1) | u64::from(cand.is_decoy)
+}
+
+/// A score as an ordering key: NaN ranks below every number and `-0.0` equals
+/// `0.0`, so `f32::total_cmp` on the result orders like `<` on real scores.
+#[inline]
+fn score_key(x: f32) -> f32 {
+    if x.is_nan() {
+        f32::NEG_INFINITY
+    } else {
+        x + 0.0
+    }
 }
 
 impl PsmMatch {
+    /// Compare on `rank_score` alone (NaN worst). Equal here means tied for
+    /// retention: [`TopNQueue::push`] keeps such ties past capacity.
+    pub fn rank_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        score_key(self.rank_score).total_cmp(&score_key(other.rank_score))
+    }
+
     /// Returns the first (primary) candidate index. Callers that need to
     /// resolve back to a single Candidate use this; PIN writer iterates
     /// `candidate_idxs` directly to emit the multi-protein `Proteins` column.
@@ -406,16 +436,8 @@ impl PsmMatch {
 
 impl PartialEq for PsmMatch {
     fn eq(&self, other: &Self) -> bool {
-        // PartialEq MUST agree with `Ord::cmp` (Rust contract
-        // a == b ⇒ a.cmp(b) == Equal). Ord ranks by `rank_score` alone,
-        // so PartialEq compares the same field. Comparing `score`
-        // (= node + cleavage) would violate the contract for any pair of
-        // PSMs with equal `score` but different `rank_score`
-        // (= `score + edge`), leaving BinaryHeap behavior undefined for
-        // those pairs. Delegate to `cmp` (rather than a raw `==`) so the two
-        // agree on NaN: `cmp` maps NaN `rank_score` to NEG_INFINITY, making
-        // two NaN-ranked PSMs compare Equal — a raw float `==` would report
-        // them unequal and break the Eq/Ord contract.
+        // Delegates to `cmp` so equality and ordering agree (a == b exactly when
+        // a.cmp(b) is Equal), NaN scores included.
         self.cmp(other) == std::cmp::Ordering::Equal
     }
 }
@@ -428,65 +450,50 @@ impl PartialOrd for PsmMatch {
     }
 }
 
-/// `rank_score` descending (higher = better).
+/// A TOTAL order, "greater" = better PSM.
 ///
-/// `rank_score` = `node + cleavage + edge` (Kim et al., Nat Commun 5:5277,
-/// 2014) is the sole ranking signal for queue retention and output ordering.
-/// Pin RawScore (`node + cleavage`) is unchanged for Percolator compatibility.
+/// 1. `rank_score` (= `node + cleavage + edge`, Kim et al., Nat Commun 5:5277,
+///    2014), the ranking signal; NaN is worst.
+/// 2. `score` (the PIN RawScore, `node + cleavage`), larger first.
+/// 3. Then, so that exact ties never depend on the order PSMs were pushed (which
+///    follows candidate enumeration, retrieval path and thread scheduling):
+///    smaller `tie_key` (peptide content), smaller charge, smaller |isotope
+///    offset|, smaller |mass error|, the spectrum, the co-isolated precursor and
+///    finally the candidate indices.
 ///
-/// For callers / test fixtures that never set `rank_score`, the
-/// default of 0.0 means an unset `rank_score` would lose to a set one. The
-/// `match_engine` candidate loop always sets both `score` and `rank_score`;
-/// fixtures that build PsmMatch manually should set `rank_score = score`
-/// to preserve old behavior.
-///
-/// This ordering is used by `TopNQueue`'s min-heap (via `Reverse<PsmMatch>`):
-/// the heap's "minimum" element is the one with the *smallest* rank_score
-/// (worst), so `push` evicts it when over capacity.
+/// `TopNQueue` keeps its min-heap on this order (via `Reverse<PsmMatch>`), so the
+/// worst PSM is evicted first; ties for retention are decided by
+/// [`PsmMatch::rank_cmp`] alone.
 impl Ord for PsmMatch {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        use std::cmp::Ordering;
-        // "Better" PSM = larger rank_score.
-        // NaN values are treated as worst (sort last / lose to finite).
-        let self_rank = if self.rank_score.is_nan() {
-            f32::NEG_INFINITY
-        } else {
-            self.rank_score
-        };
-        let other_rank = if other.rank_score.is_nan() {
-            f32::NEG_INFINITY
-        } else {
-            other.rank_score
-        };
-        self_rank
-            .partial_cmp(&other_rank)
-            .unwrap_or(Ordering::Equal)
+        self.rank_cmp(other)
+            .then_with(|| score_key(self.score).total_cmp(&score_key(other.score)))
+            .then_with(|| other.tie_key.cmp(&self.tie_key))
+            .then_with(|| other.charge_used.cmp(&self.charge_used))
+            .then_with(|| {
+                (other.isotope_offset.unsigned_abs(), other.isotope_offset)
+                    .cmp(&(self.isotope_offset.unsigned_abs(), self.isotope_offset))
+            })
+            .then_with(|| {
+                other
+                    .mass_error_ppm
+                    .abs()
+                    .total_cmp(&self.mass_error_ppm.abs())
+                    .then_with(|| other.mass_error_ppm.total_cmp(&self.mass_error_ppm))
+            })
+            .then_with(|| other.spectrum_idx.cmp(&self.spectrum_idx))
+            .then_with(|| {
+                let mz = |p: &Self| p.precursor_mz_override.map(f64::to_bits);
+                mz(other).cmp(&mz(self))
+            })
+            .then_with(|| other.candidate_idxs.cmp(&self.candidate_idxs))
     }
 }
 
-/// `rank_score`-DESCENDING comparator for sorting a `Vec<PsmMatch>` best-first —
-/// identical semantics to `b.cmp(a)` (NaN → worst), but written as an explicit
-/// inline float compare. The argument-swapped `sort_by(|a, b| b.cmp(a))` form
-/// produced an UNSORTED result under release optimisation on the pinned
-/// toolchain (regression caught by `queue_below_capacity_keeps_everything`);
-/// the direct `cmp` used by the heap (push/peek) is unaffected. Mirrors the
-/// working comparator already used by `into_rank_sorted_vec`.
+/// Best-first comparator for sorting a `Vec<PsmMatch>`: the [`PsmMatch`] total
+/// order, descending.
 fn rank_score_desc(a: &PsmMatch, b: &PsmMatch) -> std::cmp::Ordering {
-    // NaN → worst (map to NEG_INFINITY), then `f32::total_cmp` — a well-defined
-    // TOTAL order. A `partial_cmp(..).unwrap_or(Equal)` comparator misbehaved
-    // under release-mode `sort_by` on the pinned toolchain (left the vec
-    // unsorted); total_cmp is codegen-robust and order-equivalent for finite values.
-    let ar = if a.rank_score.is_nan() {
-        f32::NEG_INFINITY
-    } else {
-        a.rank_score
-    };
-    let br = if b.rank_score.is_nan() {
-        f32::NEG_INFINITY
-    } else {
-        b.rank_score
-    };
-    br.total_cmp(&ar)
+    b.cmp(a)
 }
 
 #[derive(Debug, Clone)]
@@ -512,8 +519,8 @@ impl TopNQueue {
     /// `Reverse<PsmMatch>`) puts the *worst* PSM at the top so it can be
     /// evicted when a strictly-better PSM arrives.
     ///
-    /// Tie handling: when at capacity and a new PSM is Equal to the worst
-    /// retained PSM, insert without evicting (Kim et al., Nat Commun 5:5277,
+    /// Tie handling: when at capacity and a new PSM ties the worst retained PSM
+    /// on `rank_score` ([`PsmMatch::rank_cmp`]), insert without evicting (Kim et al., Nat Commun 5:5277,
     /// 2014: `size < n OR score == worst → add`).
     /// As a result, the queue can grow beyond `capacity` when ties exist;
     /// `capacity` becomes a *minimum* top-N, not a hard cap.
@@ -521,7 +528,7 @@ impl TopNQueue {
         if self.heap.len() < self.capacity as usize {
             self.heap.push(Reverse(m));
         } else if let Some(Reverse(top)) = self.heap.peek() {
-            match m.cmp(top) {
+            match m.rank_cmp(top) {
                 std::cmp::Ordering::Greater => {
                     // m is strictly better than the worst retained PSM: evict
                     // the worst, insert m.
@@ -593,35 +600,16 @@ impl TopNQueue {
         self.heap.drain().map(|Reverse(m)| m).collect()
     }
 
-    /// Apply `f` to each retained PSM in-place. Used for filling in
-    /// post-finalization fields (e.g. `features`) that are NOT part of
-    /// `PsmMatch::cmp` and therefore do not affect heap ordering.
-    ///
-    /// Implementation drains the heap, applies `f`, and re-pushes — this is
-    /// O(N log N) on a small `N` (top-N, typically 1-10) and avoids the
-    /// std-library restriction that `BinaryHeap::iter_mut()` is not exposed
-    /// (it would let callers break the heap invariant). Since features do
-    /// not participate in ordering, the re-push is logically a no-op for
-    /// retention.
-    /// Apply `f` to every retained PSM without changing the heap layout, so
-    /// PSMs tied on every sort key keep their relative order in the output.
-    /// `f` must not change `rank_score` (the heap's ordering key). The elements
-    /// are pushed back in the order of the heap's own array; each one is then
-    /// no greater than its parent, so no push moves anything and the layout is
-    /// rebuilt exactly. (`BinaryHeap::from` does not preserve the layout of ties.)
+    /// Apply `f` to every retained PSM in place (e.g. to fill post-finalization
+    /// fields such as `features`). The heap is rebuilt afterwards, so `f` may
+    /// change any field; output order comes from the [`PsmMatch`] total order,
+    /// never from the heap layout.
     pub fn update_in_place<F: FnMut(&mut PsmMatch)>(&mut self, mut f: F) {
-        let v = std::mem::take(&mut self.heap).into_vec();
-        self.heap.reserve(v.len());
-        for Reverse(mut m) in v {
-            let key = m.rank_score.to_bits();
-            f(&mut m);
-            debug_assert_eq!(
-                key,
-                m.rank_score.to_bits(),
-                "update_in_place changed rank_score"
-            );
-            self.heap.push(Reverse(m));
+        let mut v = std::mem::take(&mut self.heap).into_vec();
+        for Reverse(m) in &mut v {
+            f(m);
         }
+        self.heap = BinaryHeap::from(v);
     }
 
     pub fn fill_post_topn<F: FnMut(&mut PsmMatch)>(&mut self, mut f: F) {
@@ -638,8 +626,8 @@ impl TopNQueue {
     /// per-PSM order. Used by the out-of-core (`Mmap`) candidate backing to turn
     /// per-spectrum LOCAL candidate-slot indices into the GLOBAL indices the
     /// PIN/TSV writers resolve against the materialized `candidates` slice. The
-    /// queue ordering keys (`score` / `rank_score`) are untouched, so this never
-    /// reorders the queue.
+    /// candidate indices are only the last tie-break of the [`PsmMatch`] order,
+    /// after the content key, so this reorders nothing but exact duplicates.
     pub fn remap_candidate_idxs<F: FnMut(u32) -> u32>(&mut self, mut remap: F) {
         let mut psms: Vec<PsmMatch> = self.heap.drain().map(|Reverse(m)| m).collect();
         for psm in &mut psms {
@@ -686,7 +674,7 @@ impl TopNQueue {
             return;
         }
         let cutoff = psms[cap - 1].clone();
-        psms.retain(|p| p.cmp(&cutoff) != std::cmp::Ordering::Less);
+        psms.retain(|p| p.rank_cmp(&cutoff) != std::cmp::Ordering::Less);
     }
 
     /// Trim to at most `cap` best PSMs (plus ties at the cutoff). Used after
@@ -704,7 +692,7 @@ impl TopNQueue {
         }
     }
 
-    /// Return the best PSM (largest `rank_score`) without removing it.
+    /// Return the best PSM (the maximum of the [`PsmMatch`] total order) without removing it.
     /// Returns `None` if the queue is empty.
     ///
     /// The heap is a min-heap on `Reverse<PsmMatch>` so the *worst* entry sits
@@ -722,43 +710,11 @@ impl TopNQueue {
         v
     }
 
-    /// Drain into a Vec sorted best-first by `rank_score` DESCENDING (the
-    /// larger RawScore = better), then by `score` descending as a stable
-    /// tiebreak. This is the canonical output ordering: `rank_score` is the
-    /// sole ranking signal now that the generating function is removed.
+    /// Drain into a Vec sorted best-first in the [`PsmMatch`] total order
+    /// (`rank_score`, then `score`, then the content tie-break). This is the
+    /// canonical output ordering: the PIN winner is the first element.
     pub fn into_rank_sorted_vec(self) -> Vec<PsmMatch> {
-        let mut v: Vec<PsmMatch> = self.heap.into_iter().map(|Reverse(m)| m).collect();
-        v.sort_by(|a, b| {
-            // `total_cmp` (a TOTAL order), NOT `partial_cmp(..).unwrap_or(Equal)`:
-            // the latter left this sort UNORDERED under release optimisation on
-            // the pinned toolchain, so the PIN winner (the first element — see
-            // output/pin.rs) became wrong AND environment-dependent (a target vs
-            // decoy tie flipped between CI runners). NaN → worst (NEG_INFINITY).
-            let ar = if a.rank_score.is_nan() {
-                f32::NEG_INFINITY
-            } else {
-                a.rank_score
-            };
-            let br = if b.rank_score.is_nan() {
-                f32::NEG_INFINITY
-            } else {
-                b.rank_score
-            };
-            br.total_cmp(&ar).then_with(|| {
-                let asc = if a.score.is_nan() {
-                    f32::NEG_INFINITY
-                } else {
-                    a.score
-                };
-                let bsc = if b.score.is_nan() {
-                    f32::NEG_INFINITY
-                } else {
-                    b.score
-                };
-                bsc.total_cmp(&asc)
-            })
-        });
-        v
+        self.into_sorted_vec()
     }
 }
 
@@ -782,14 +738,15 @@ mod tests {
             features: PsmFeatures::default(),
             isotope_offset: 0,
             precursor_mz_override: None,
+            tie_key: 0,
         }
     }
 
-    /// Build a fixture PSM whose `rank_score` is set independently of `score`.
     #[test]
     fn update_in_place_keeps_the_output_order_of_ties() {
         // Many PSMs tied on rank_score and score: their output order comes from the
-        // heap layout alone, so an in-place update must not move anything.
+        // last tie-break (candidate indices), so an in-place update of a field
+        // outside the order must not move anything.
         let mut q = TopNQueue::new(32);
         for i in 0..20usize {
             let mut m = make_match(i, (i % 3) as f32);
@@ -809,6 +766,7 @@ mod tests {
         assert!(q.iter_psms().all(|m| m.features.strong_score == 1.0));
     }
 
+    /// Build a fixture PSM whose `rank_score` is set independently of `score`.
     fn make_match_with_rank(spectrum_idx: usize, score: f32, rank_score: f32) -> PsmMatch {
         let mut m = make_match(spectrum_idx, score);
         m.rank_score = rank_score;
@@ -1108,6 +1066,7 @@ mod tests {
             },
             isotope_offset: 0,
             precursor_mz_override: None,
+            tie_key: 0,
         };
         let mut high = low.clone();
         high.candidate_idxs = vec![1];
@@ -1283,5 +1242,85 @@ mod tests {
             std::cmp::Ordering::Equal,
             "Two PSMs with NaN rank_score should compare Equal"
         );
+    }
+
+    /// A tie on `rank_score` and `score`, told apart only by `tie_key`.
+    fn tied(tie_key: u64, cand: u32) -> PsmMatch {
+        let mut m = make_match(0, 10.0);
+        m.tie_key = tie_key;
+        m.candidate_idxs = vec![cand];
+        m
+    }
+
+    fn keys(v: &[PsmMatch]) -> Vec<u64> {
+        v.iter().map(|m| m.tie_key).collect()
+    }
+
+    #[test]
+    fn exact_ties_order_by_content_not_by_push_order() {
+        // Candidate indices deliberately disagree with the content order: the
+        // candidate store numbers candidates in completion order.
+        let psms: Vec<PsmMatch> = [(30, 0), (10, 2), (20, 1), (40, 3)]
+            .into_iter()
+            .map(|(k, c)| tied(k, c))
+            .collect();
+        let mut outputs = Vec::new();
+        for rotation in 0..psms.len() {
+            let mut q = TopNQueue::new(10);
+            for m in psms.iter().cycle().skip(rotation).take(psms.len()) {
+                q.push(m.clone());
+            }
+            assert_eq!(q.peek_top().unwrap().tie_key, 10);
+            outputs.push(keys(&q.into_rank_sorted_vec()));
+        }
+        assert!(
+            outputs.iter().all(|o| *o == vec![10, 20, 30, 40]),
+            "{outputs:?}"
+        );
+    }
+
+    #[test]
+    fn rank_ties_are_still_retained_past_capacity() {
+        let mut q = TopNQueue::new(1);
+        q.push(tied(2, 0));
+        q.push(tied(1, 1));
+        assert_eq!(q.len(), 2, "a rank_score tie at capacity is kept");
+        let mut better = tied(3, 2);
+        better.rank_score = 11.0;
+        q.push(better);
+        // The strictly better PSM evicts the worst in the total order (key 2),
+        // whichever order the ties came in.
+        assert_eq!(keys(&q.into_rank_sorted_vec()), vec![3, 1]);
+    }
+
+    #[test]
+    fn total_order_breaks_ties_in_the_documented_order() {
+        use std::cmp::Ordering::*;
+        let base = tied(5, 0);
+        let mut higher_score = base.clone();
+        higher_score.score = 11.0;
+        assert_eq!(higher_score.cmp(&base), Greater, "score breaks a rank tie");
+        let mut lower_charge = base.clone();
+        lower_charge.charge_used = 1;
+        assert_eq!(lower_charge.cmp(&base), Greater);
+        let mut iso = base.clone();
+        iso.isotope_offset = 1;
+        assert_eq!(base.cmp(&iso), Greater, "isotope offset 0 beats 1");
+        let mut err = base.clone();
+        err.mass_error_ppm = 3.0;
+        assert_eq!(base.cmp(&err), Greater, "smaller |mass error| wins");
+        assert_eq!(
+            tied(4, 9).cmp(&base),
+            Greater,
+            "smaller tie_key wins over candidate index"
+        );
+        let mut neg_zero = base.clone();
+        neg_zero.rank_score = -0.0;
+        let mut pos_zero = base.clone();
+        pos_zero.rank_score = 0.0;
+        assert_eq!(neg_zero.rank_cmp(&pos_zero), Equal);
+        let mut nan = base.clone();
+        nan.rank_score = f32::NAN;
+        assert_eq!(nan.rank_cmp(&neg_zero), Less, "NaN ranks worst");
     }
 }

@@ -43,9 +43,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use models::{
-    AndesMs2, DeepLc, Form, H2O, Ion, Mass, Ms2pip, PROTON, PeptDeep, Predictor, Prosit, parse_peptide,
-};
+use models::{AndesMs2, DeepLc, Form, Mass, Ms2pip, PeptDeep, Predictor, Prosit, parse_peptide};
+use onnx_infer::predictors::spectral::{FragmentTolerance, MS2_FEATURES, ms2_features};
 use onnx_infer::{BackendKind, BackendOptions, OnnxSession};
 
 struct Args {
@@ -109,100 +108,6 @@ fn parse_args() -> Args {
         i += 2;
     }
     a
-}
-
-fn pearson(a: &[f64], b: &[f64]) -> f64 {
-    let n = a.len() as f64;
-    if a.len() < 2 {
-        return 0.0;
-    }
-    let (ma, mb) = (a.iter().sum::<f64>() / n, b.iter().sum::<f64>() / n);
-    let (mut sab, mut saa, mut sbb) = (0.0, 0.0, 0.0);
-    for (x, y) in a.iter().zip(b) {
-        sab += (x - ma) * (y - mb);
-        saa += (x - ma) * (x - ma);
-        sbb += (y - mb) * (y - mb);
-    }
-    if saa <= 0.0 || sbb <= 0.0 {
-        0.0
-    } else {
-        sab / (saa * sbb).sqrt()
-    }
-}
-
-const MS2_FEATURES: &[&str] = &[
-    "spec_pearson_norm",
-    "ionb_pearson_norm",
-    "iony_pearson_norm",
-    "spec_mse_norm",
-    "dotprod_norm",
-    "cos_norm",
-    "spectral_angle",
-    "pred_explained",
-];
-
-/// Spectral-match features between predicted and observed fragment intensities.
-/// `pred` holds `ions.len()` values per cleavage site.
-fn ms2_features(
-    pred: &[f32],
-    ions: &[Ion],
-    mass: &Mass,
-    charge: u8,
-    peaks: &[(f64, f32)],
-    tol: f64,
-    ppm: bool,
-) -> [f64; 8] {
-    let n = mass.res.len();
-    let total: f64 = mass.res.iter().sum::<f64>() + mass.nterm;
-    let mut p = Vec::new();
-    let mut o = Vec::new();
-    let mut is_b = Vec::new();
-    let mut prefix = mass.nterm;
-    for i in 0..n - 1 {
-        prefix += mass.res[i];
-        for (k, &(bion, z)) in ions.iter().enumerate() {
-            if z > charge {
-                continue;
-            }
-            let neutral = if bion { prefix } else { total - prefix + H2O };
-            let mz = (neutral + z as f64 * PROTON) / z as f64;
-            let w = if ppm { mz * tol * 1e-6 } else { tol };
-            let lo = peaks.partition_point(|(m, _)| *m < mz - w);
-            let obs = peaks[lo..]
-                .iter()
-                .take_while(|(m, _)| *m <= mz + w)
-                .map(|(_, i)| *i as f64)
-                .fold(0.0, f64::max);
-            p.push(pred[i * ions.len() + k] as f64);
-            o.push(obs);
-            is_b.push(bion);
-        }
-    }
-    let (sp, so) = (p.iter().sum::<f64>(), o.iter().sum::<f64>());
-    let pn: Vec<f64> = p.iter().map(|v| if sp > 0.0 { v / sp } else { 0.0 }).collect();
-    let on: Vec<f64> = o.iter().map(|v| if so > 0.0 { v / so } else { 0.0 }).collect();
-    let sel = |want_b: bool, v: &[f64]| -> Vec<f64> {
-        v.iter().zip(&is_b).filter(|(_, b)| **b == want_b).map(|(x, _)| *x).collect()
-    };
-    let dot: f64 = pn.iter().zip(&on).map(|(a, b)| a * b).sum();
-    let (np, no) = (
-        pn.iter().map(|v| v * v).sum::<f64>().sqrt(),
-        on.iter().map(|v| v * v).sum::<f64>().sqrt(),
-    );
-    let cos = if np > 0.0 && no > 0.0 { (dot / (np * no)).clamp(-1.0, 1.0) } else { 0.0 };
-    let sa = if np > 0.0 && no > 0.0 { 1.0 - 2.0 * cos.acos() / std::f64::consts::PI } else { 0.0 };
-    let mse = pn.iter().zip(&on).map(|(a, b)| (a - b) * (a - b)).sum::<f64>() / pn.len().max(1) as f64;
-    let explained: f64 = pn.iter().zip(&o).filter(|(_, ob)| **ob > 0.0).map(|(v, _)| *v).sum();
-    [
-        pearson(&pn, &on),
-        pearson(&sel(true, &pn), &sel(true, &on)),
-        pearson(&sel(false, &pn), &sel(false, &on)),
-        mse,
-        dot,
-        cos,
-        sa,
-        explained,
-    ]
 }
 
 /// Process CPU time (user + system) in seconds; 0 where `/proc` is absent.
@@ -277,9 +182,12 @@ fn main() {
     let args = parse_args();
     models::set_backend(args.backend, BackendOptions { intra_threads: args.intra_threads });
     let pred: Box<dyn Predictor> = match args.model.as_str() {
-        "peptdeep" => Box::new(PeptDeep::new(&args.models, args.nce, &args.instrument)),
+        "peptdeep" => Box::new(
+            PeptDeep::new(&args.models, args.nce, &args.instrument, models::engine(), true, true)
+                .unwrap_or_else(|e| panic!("{e}")),
+        ),
         "ms2pip" => Box::new(Ms2pip { dir: args.models.clone(), model: args.ms2pip_model.clone() }),
-        "deeplc" => Box::new(DeepLc { dir: args.models.clone() }),
+        "deeplc" => Box::new(DeepLc::new(&args.models, models::engine()).unwrap_or_else(|e| panic!("{e}"))),
         "prosit" => Box::new(Prosit { dir: args.models.clone(), nce: args.nce }),
         "andes-ms2" => Box::new(AndesMs2::new(
             &args.models,
@@ -376,7 +284,7 @@ fn main() {
     eprintln!("mzML {} MS2 spectra ({:.1}s)", spectra.len(), t.elapsed().as_secs_f64());
 
     let t = Instant::now();
-    let master = pred.sessions();
+    let master = pred.sessions().unwrap_or_else(|e| panic!("{e}"));
     eprintln!("model load {:.2}s, RSS {:.0} MB", t.elapsed().as_secs_f64(), rss_mb());
 
     // RT over distinct supported forms.
@@ -387,7 +295,7 @@ fn main() {
         let out = Mutex::new(&mut rt_pred);
         let (wall, cpu) = run_parallel(&master, args.threads, &jobs, |s, job| {
             let fs: Vec<&Form> = job.iter().map(|&j| &forms[rt_forms[j]].0).collect();
-            let v = pred.rt(s, &fs);
+            let v = pred.rt(s, &fs).expect("RT prediction");
             let mut g = out.lock().unwrap();
             for (&j, x) in job.iter().zip(v) {
                 g[rt_forms[j]] = x;
@@ -422,7 +330,7 @@ fn main() {
         let out = Mutex::new(&mut ms2_pred);
         let (wall, cpu) = run_parallel(&master, args.threads, &jobs, |s, job| {
             let items: Vec<(&Form, u8)> = job.iter().map(|&i| (&forms[fz[i].0].0, fz[i].1)).collect();
-            let v = pred.ms2(s, &items);
+            let v = pred.ms2(s, &items).expect("MS2 prediction");
             let mut g = out.lock().unwrap();
             for (&i, x) in job.iter().zip(v) {
                 g[i] = x;
@@ -438,6 +346,7 @@ fn main() {
 
     // Features per PIN row.
     let p = pred.prefix();
+    let tol = if args.frag_ppm { FragmentTolerance::Ppm(args.frag_tol) } else { FragmentTolerance::Da(args.frag_tol) };
     let mut w = BufWriter::new(File::create(&args.out).unwrap());
     write!(w, "SpecId\tobserved_retention_time\t{p}_irt\t{p}_missing").unwrap();
     for n in MS2_FEATURES {
@@ -453,7 +362,7 @@ fn main() {
         let irt = if irt.is_finite() { irt } else { f32::NAN };
         let ms2 = match (r.form, spec) {
             (Some(f), Some(s)) => fz_ix.get(&(f, r.charge)).map(|&k| {
-                ms2_features(&ms2_pred[k], pred.ions(), &forms[f].1, r.charge, &s.peaks, args.frag_tol, args.frag_ppm)
+                ms2_features(&ms2_pred[k], pred.ions(), &forms[f].1, r.charge, &s.peaks, tol)
             }),
             _ => None,
         };

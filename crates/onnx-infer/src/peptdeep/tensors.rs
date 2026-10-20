@@ -8,7 +8,7 @@
 
 use crate::error::{Error, Result};
 use crate::peptdeep::encode::{encode_aa_sequence, MOD_ELEMENT_COUNT};
-use crate::tensor::NamedTensor;
+use crate::tensor::{checked_element_count, NamedTensor};
 
 /// Default NCE when the search engine does not supply one (PeptDeep generic).
 pub const NCE_DEFAULT: f32 = 30.0;
@@ -89,9 +89,13 @@ fn pack_sequences(
     if peptides.is_empty() {
         return Err(Error::InvalidArg("empty peptide batch".into()));
     }
-    let width = seq_len + 2;
-    let mut aa = Vec::with_capacity(peptides.len() * width);
-    let mut mod_x = vec![0f32; peptides.len() * width * mod_dim];
+    let width = seq_len
+        .checked_add(2)
+        .ok_or_else(|| Error::InvalidArg(format!("seq_len {seq_len} overflows usize")))?;
+    let aa_len = checked_element_count(&[peptides.len(), width], "peptdeep aa_indices")?;
+    let mod_len = checked_element_count(&[peptides.len(), width, mod_dim], "peptdeep mod_x")?;
+    let mut aa = Vec::with_capacity(aa_len);
+    let mut mod_x = vec![0f32; mod_len];
     for (b, p) in peptides.iter().enumerate() {
         let idx = encode_aa_sequence(p.sequence, seq_len)?;
         aa.extend(idx.into_iter().map(|v| v as f32));

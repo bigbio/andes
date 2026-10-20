@@ -258,7 +258,7 @@ fn glyco_precursor_mono_on_mgf_is_identical_to_off() {
         "--precursor-mono auto on MGF must be byte-identical to off"
     );
     assert!(
-        log.contains("--precursor-mono auto needs --glyco and an input with MS1"),
+        log.contains("--precursor-mono auto needs an input with MS1"),
         "expected the no-MS1 warning, got:\n{log}"
     );
 }

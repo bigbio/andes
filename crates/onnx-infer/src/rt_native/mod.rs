@@ -305,7 +305,10 @@ pub(crate) struct Tensor {
 
 /// Parse a tensor file: 8-byte `magic`, u32 tensor count, then per tensor u32
 /// name length, UTF-8 name, u32 ndim, u32 dims and little-endian f32 data.
-pub(crate) fn read_tensors(buf: &[u8], magic: &[u8; 8]) -> Result<HashMap<String, Tensor>, RtError> {
+pub(crate) fn read_tensors(
+    buf: &[u8],
+    magic: &[u8; 8],
+) -> Result<HashMap<String, Tensor>, RtError> {
     let bad = |m: &str| RtError::Format(m.to_string());
     if buf.len() < 12 || &buf[..8] != magic {
         return Err(RtError::Format(format!(
@@ -335,11 +338,13 @@ pub(crate) fn read_tensors(buf: &[u8], magic: &[u8; 8]) -> Result<HashMap<String
         for _ in 0..nd {
             dims.push(u32_at(&mut off)?);
         }
-        let count: usize = dims.iter().product();
+        let bytes = crate::tensor::element_count(&dims)
+            .and_then(|count| count.checked_mul(4))
+            .ok_or_else(|| bad("tensor size overflows usize"))?;
         let raw = buf
-            .get(off..off + 4 * count)
+            .get(off..off.saturating_add(bytes))
             .ok_or_else(|| bad("truncated data"))?;
-        off += 4 * count;
+        off += bytes;
         let data = raw
             .chunks_exact(4)
             .map(|c| f32::from_le_bytes(c.try_into().unwrap()))

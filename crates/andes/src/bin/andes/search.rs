@@ -21,8 +21,9 @@ use crate::quant_run::{QuantCollector, QuantSettings, RunScans};
 use crate::rescore;
 use crate::spectra::{
     add_mzml_skipped, detect_dominant_activation, detect_instrument_type_for_path,
-    detect_isobaric_sampled, input_format_flags, merge_parse_stats, prefix_spectrum_titles,
-    run_precursor_calibration, send_chunks, title_prefix_for, tolerance_ppm_display, ParseStats,
+    detect_isobaric_sampled, input_format_flags, merge_parse_stats, ms3_carries_reporters,
+    prefix_spectrum_titles, run_precursor_calibration, send_chunks, title_prefix_for,
+    tolerance_ppm_display, ParseStats,
 };
 use crate::{arg_present, report_search_progress, EXPLICIT_MISSED_CLEAVAGES};
 use input::{MgfReader, Ms1Link, MzMLReader};
@@ -182,7 +183,7 @@ fn score_mass_ordered(
 }
 
 /// Resolve the PIN path and the durable report base (the filtered q-value
-/// TSV and `statistics.log` are named from it).
+/// TSV and `<stem>.statistics.log` are named from it).
 ///
 /// An explicit `--output-pin` is both. Otherwise the base is `--output-tsv`,
 /// else `--output-parquet`, else `./andes.pin`; with `keep_pin` the PIN is
@@ -559,11 +560,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Glyco keeps the full ensembles: the glyco path is candidate-generation bound
     // (the ensembles profile at ~0.3% of its wall time), so truncating there would
     // give up prediction fidelity for no speed. An explicit flag still applies.
-    let gbdt_k = if cli.glyco && !arg_present("--gbdt-max-trees") {
+    let gbdt_k = cli.gbdt_max_trees.unwrap_or(if cli.glyco {
         0
     } else {
-        cli.gbdt_max_trees
-    };
+        crate::cli::DEFAULT_GBDT_MAX_TREES
+    });
     if gbdt_k > 0 {
         let k = gbdt_k;
         let truncate = |slot: &mut Option<Arc<scoring_crate::gbdt_eval::GbdtPeakModel>>,
@@ -771,15 +772,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // and each chunk's precursors are corrected BEFORE they reach the search.
     let mono_active =
         cli.precursor_mono == PrecursorMonoFlag::Auto && cli.glyco && (is_mzml || is_raw);
-    if cli.precursor_mono == PrecursorMonoFlag::Auto && !mono_active {
+    // `auto` is the default and the correction is glyco-only, so a search
+    // without --glyco is not told about it; a glyco search without MS1 is.
+    if cli.precursor_mono == PrecursorMonoFlag::Auto && cli.glyco && !mono_active {
         eprintln!(
-            "WARN: --precursor-mono auto needs --glyco and an input with MS1 (mzML or Thermo \
-             .raw); the input is {} — precursors are left as recorded.",
-            if !cli.glyco {
-                "searched without --glyco".to_string()
-            } else {
-                spectrum_path.display().to_string()
-            }
+            "WARN: --precursor-mono auto needs an input with MS1 (mzML or Thermo .raw); \
+             {} has none — precursors are left as recorded.",
+            spectrum_path.display()
         );
     }
     let mono_params = MonoParams::default();
@@ -1248,15 +1247,34 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // MS1 scans (purity, label-free chromatograms) and MS3 scans (SPS-MS3
     // reporters) are captured by the readers next to the MS2 stream and handed
     // to the collector per file. Quantification itself runs after rescoring.
-    let mut quant: Option<QuantCollector> =
-        QuantSettings::from_cli(&cli, param.data_type.instrument.is_high_resolution())?.map(
-            |mut settings| {
-                // Recorded in each run's MS2 table, where the library matches
-                // its fragment spectra and extract scores transfers.
-                settings.fragment_tol = Some(scorer.feature_match_tolerance());
-                QuantCollector::new(settings)
-            },
-        );
+    let high_res = param.data_type.instrument.is_high_resolution();
+    // Without --tmt-level, SPS-MS3 reporters are read from the MS3 when the
+    // low-resolution MS2 cannot separate the plex's channels.
+    let tmt_level = match (cli.tmt_level, cli.tmt) {
+        (Some(level), _) => level,
+        (None, Some(plex))
+            if !high_res
+                && plex
+                    .check_tolerance(model::tolerance::Tolerance::Da(0.3))
+                    .is_err()
+                && ms3_carries_reporters(&spectrum_path, is_mzml, is_raw) =>
+        {
+            eprintln!(
+                "Protocol resolver: --tmt {}: the MS2 is low-resolution and the MS3 scans carry \
+                 reporters (SPS-MS3); reading reporters from the MS3 (--tmt-level 3)",
+                plex.name()
+            );
+            3
+        }
+        _ => 2,
+    };
+    let mut quant: Option<QuantCollector> = QuantSettings::from_cli(&cli, high_res, tmt_level)?
+        .map(|mut settings| {
+            // Recorded in each run's MS2 table, where the library matches
+            // its fragment spectra and extract scores transfers.
+            settings.fragment_tol = Some(scorer.feature_match_tolerance());
+            QuantCollector::new(settings)
+        });
     if let Some(q) = &quant {
         let s = &q.settings;
         if is_mgf && (s.needs_ms1_series() || s.needs_ms3()) {
@@ -1288,6 +1306,19 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         eprintln!("Quantification: {}", s.describe());
     }
+    // `--predict`: load the predictors now so a missing model fails before the
+    // search. Glyco mode writes its own `.glyco.pin` and takes none.
+    let predictors = if cli.glyco {
+        None
+    } else {
+        crate::predicted::Predictors::from_cli(&cli, param.data_type.instrument)?
+    };
+    if let Some(p) = &predictors {
+        eprintln!("Predict: {}", p.describe());
+    }
+    // Peaks normally go once a spectrum is scored; `--refine` re-scores in its
+    // Pass 2 and `--predict ms2` compares them with predicted spectra.
+    let keep_peaks = cli.refine || predictors.as_ref().is_some_and(|p| p.needs_peaks());
     let mut all_spectra: Vec<Spectrum> = Vec::new();
     let mut all_queues: Vec<TopNQueue> = Vec::new();
     // Exclusive end index in `all_spectra` of each input, in input order.
@@ -1525,7 +1556,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(q) = quant.as_mut() {
                         q.on_spectrum(&spec);
                     }
-                    if !cli.refine && !cli.glyco {
+                    if !keep_peaks && !cli.glyco {
                         spec.peaks = Vec::new();
                     }
                     all_spectra.push(spec);
@@ -1579,7 +1610,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(q) = quant.as_mut() {
                         q.on_spectrum(&spec);
                     }
-                    if !cli.refine {
+                    if !keep_peaks {
                         spec.peaks = Vec::new();
                     }
                     all_spectra.push(spec);
@@ -1628,7 +1659,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 &mut all_spectra,
                 &mut all_queues,
                 t_search_start,
-                cli.refine,
+                keep_peaks,
                 quant.as_mut(),
             );
             ParseStats {
@@ -1756,7 +1787,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(q) = quant.as_mut() {
                         q.on_spectrum(&spec);
                     }
-                    if !cli.refine && !cli.glyco {
+                    if !keep_peaks && !cli.glyco {
                         spec.peaks = Vec::new();
                     }
                     all_spectra.push(spec);
@@ -1771,7 +1802,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     &mut all_spectra,
                     &mut all_queues,
                     t_search_start,
-                    cli.refine,
+                    keep_peaks,
                     quant.as_mut(),
                 );
             }
@@ -2102,6 +2133,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         t_phase.elapsed().as_secs_f64(),
         t_total.elapsed().as_secs_f64()
     );
+    if let Some(p) = &predictors {
+        p.add_to_pin(&output_pin_path, &spectra, &run_ends)?;
+    }
     if cli.refine {
         if refine_merged {
             eprintln!("Refinement PSMs merged into unified PIN (Pass-1 ⊕ Pass-2).");
@@ -2325,6 +2359,32 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    // Protein groups: parsimony per protein family and picked target-decoy
+    // q-values, from every rescored row. Independent of quantification.
+    let protein_groups = rescore_map.as_ref().map(|map| {
+        let cutoffs = output::Cutoffs::new(map, &pin_index, fdr_threshold, proteoform_fdr);
+        let inf = output::infer_protein_groups(map, &rescore_decoy_psms, &pin_index, |id| {
+            map[id].q_value <= cutoffs.of(id) && !knockoff_rows.contains(id)
+        });
+        let stem = report_base
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "andes".to_string());
+        let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
+        let path = dir.join(format!("{stem}.protein_groups.tsv"));
+        let at = |q: f64| inf.groups.iter().filter(|g| g.q_value <= q).count();
+        match output::write_protein_groups_tsv(&path, &inf) {
+            Ok(()) => eprintln!(
+                "Wrote protein groups: {} ({} groups; {} at protein q<=0.01, {} at q<=0.05)",
+                path.display(),
+                inf.groups.len(),
+                at(0.01),
+                at(0.05)
+            ),
+            Err(e) => eprintln!("WARN: could not write {}: {e}", path.display()),
+        }
+        inf
+    });
     if cli.mbr {
         mbr_decoys = std::mem::take(&mut rescore_decoy_psms);
     }
@@ -2355,6 +2415,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 p.q_value <= cutoffs.of(id)
                     && pep_cap.is_none_or(|t| p.pep <= t)
                     && !knockoff_rows.contains(*id)
+                    && cli.protein_fdr.is_none_or(|t| {
+                        protein_groups
+                            .as_ref()
+                            .and_then(|inf| inf.group_of(p))
+                            .is_some_and(|g| g.q_value <= t)
+                    })
             })
             .map(|(_, p)| p)
             .collect();
@@ -2369,7 +2435,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if pin_index.has_alternative_entries && proteoform_fdr != fdr {
             pep_note.push_str(&format!(", proteoform claims at q<={proteoform_fdr}"));
         }
-        match write_filtered_tsv(&filtered_path, &accepted) {
+        if let Some(t) = cli.protein_fdr {
+            pep_note.push_str(&format!(", protein groups at q<={t}"));
+        }
+        match write_filtered_tsv(&filtered_path, &accepted, protein_groups.as_ref()) {
             Ok(()) => eprintln!(
                 "Wrote filtered TSV: {} ({} PSMs at q<={}{})",
                 filtered_path.display(),
@@ -2385,14 +2454,20 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // andes auto-resolves the scoring model and the precursor/fragment
     // tolerances from the data, so the FINAL search parameters differ from
     // whatever the user passed on the CLI. Emit a summary to stderr and write a
-    // `statistics.log` next to the PIN so a run's true parameters (and which
+    // `<stem>.statistics.log` next to the PIN so a run's true parameters (and which
     // PTMs were identified, with PSM counts) are always recoverable.
     let run_stats = output::RunStatistics::compute(&queues, &pin_candidates, &params, &param.mme);
     eprint!("{}", run_stats.render());
-    let stats_path = report_base
-        .parent()
-        .map(|d| d.join("statistics.log"))
-        .unwrap_or_else(|| std::path::PathBuf::from("statistics.log"));
+    // Named after the run like the other reports, so searches writing into
+    // one directory do not overwrite each other's summary.
+    let stats_path = {
+        let stem = report_base
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "andes".to_string());
+        let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
+        dir.join(format!("{stem}.statistics.log"))
+    };
     match output::write_statistics_log(&run_stats, &stats_path) {
         Ok(()) => eprintln!("Wrote statistics: {}", stats_path.display()),
         Err(e) => eprintln!("WARN: could not write {}: {e}", stats_path.display()),
@@ -2472,7 +2547,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         cutoffs.as_ref(),
         pin_index.has_alternative_entries,
     ) {
-        let rows = output::proteoform_table(map, &pin_index, cutoffs, quant_summary.as_ref());
+        let mut rows = output::proteoform_table(map, &pin_index, cutoffs, quant_summary.as_ref());
+        if let (Some(t), Some(inf)) = (cli.protein_fdr, protein_groups.as_ref()) {
+            let fq = inf.family_q();
+            rows.retain(|r| fq.get(r.family.as_str()).is_some_and(|&q| q <= t));
+        }
         let stem = report_base
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
@@ -2786,18 +2865,24 @@ fn release_at_exit(candidates: Vec<search::candidate_gen::Candidate>) {
 pub(crate) fn write_filtered_tsv(
     path: &Path,
     psms: &[&output::PercolatorPsm],
+    groups: Option<&output::Inference>,
 ) -> std::io::Result<()> {
     use std::io::Write;
     let mut w = std::io::BufWriter::new(File::create(path)?);
     writeln!(
         w,
-        "PSMId\tq-value\tposterior_error_probability\tpeptide\tproteinIds"
+        "PSMId\tq-value\tposterior_error_probability\tpeptide\tproteinIds\tprotein_group\tprotein_q"
     )?;
     for p in psms {
+        let (group, q) = groups
+            .and_then(|g| g.group_of(p))
+            .map_or(("NA".to_string(), "NA".to_string()), |g| {
+                (g.id.to_string(), g.q_value.to_string())
+            });
         writeln!(
             w,
-            "{}\t{}\t{}\t{}\t{}",
-            p.psm_id, p.q_value, p.pep, p.peptide, p.proteins
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            p.psm_id, p.q_value, p.pep, p.peptide, p.proteins, group, q
         )?;
     }
     w.flush()

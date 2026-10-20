@@ -497,9 +497,10 @@ impl<'a> PreparedSearch<'a> {
             return self.run_chunk_inner(spectra, spectrum_idx_offset, params);
         }
         let mass = crate::fragment_index::index_order_mass;
-        let (lo, hi) = spectra.iter().map(mass).fold((f64::MAX, f64::MIN), |(lo, hi), m| {
-            (lo.min(m), hi.max(m))
-        });
+        let (lo, hi) = spectra
+            .iter()
+            .map(mass)
+            .fold((f64::MAX, f64::MIN), |(lo, hi), m| (lo.min(m), hi.max(m)));
         let span_da = (hi - lo).max(1.0);
         let mut units: Vec<(usize, Spectrum)> = Vec::with_capacity(spectra.len());
         for (i, s) in spectra.iter().enumerate() {
@@ -520,7 +521,11 @@ impl<'a> PreparedSearch<'a> {
         while !units.is_empty() {
             let take = crate::fragment_index::index_chunk_len(&units, |u| mass(&u.1), span_da);
             let (owners, chunk): (Vec<usize>, Vec<Spectrum>) = units.drain(..take).unzip();
-            for (mut q, i) in self.run_chunk_inner(&chunk, 0, params).into_iter().zip(owners) {
+            for (mut q, i) in self
+                .run_chunk_inner(&chunk, 0, params)
+                .into_iter()
+                .zip(owners)
+            {
                 for mut psm in q.drain_into_vec() {
                     psm.spectrum_idx = spectrum_idx_offset + i;
                     merged[i].push(psm);
@@ -1145,6 +1150,7 @@ impl<'a> PreparedSearch<'a> {
                             features,
                             isotope_offset: err.isotope_offset,
                             precursor_mz_override: None,
+                            tie_key: crate::psm::tie_key_of(cand),
                         };
                         per_charge_queues
                             .entry(z)
@@ -1159,7 +1165,8 @@ impl<'a> PreparedSearch<'a> {
                 for queue in per_charge_queues.values_mut() {
                     if queue.len() > 1 {
                         let drained = queue.drain_into_vec();
-                        let deduped = dedup_pepseq_score(drained, cand_slice);
+                        let mut deduped = dedup_pepseq_score(drained, cand_slice);
+                        deduped.sort_by(|a, b| b.cmp(a));
                         for psm in deduped {
                             queue.push(psm);
                         }
@@ -1172,11 +1179,16 @@ impl<'a> PreparedSearch<'a> {
                 // per-charge queues are merged directly into the spectrum queue.
                 // Spectrum-level merge. The TopNQueue::push (Ordering::Equal arm)
                 // keeps rank_score ties at capacity, matching Kim et al. (Nat Commun
-                // 5:5277, 2014) tie-retention on the spectrum-level merge.
-                for (_charge, mut per_charge) in per_charge_queues.drain() {
-                    for psm in per_charge.drain_into_vec() {
-                        queue.push(psm);
-                    }
+                // 5:5277, 2014) tie-retention on the spectrum-level merge. Pushed
+                // best first, so the queue keeps the top N plus the ties at the N-th
+                // whatever order the charge states were searched in.
+                let mut merged: Vec<PsmMatch> = per_charge_queues
+                    .drain()
+                    .flat_map(|(_charge, mut per_charge)| per_charge.drain_into_vec())
+                    .collect();
+                merged.sort_by(|a, b| b.cmp(a));
+                for psm in merged {
+                    queue.push(psm);
                 }
 
                 // Feature extraction (unchanged from baseline): post-merge, after
@@ -3196,6 +3208,11 @@ pub(crate) fn dedup_pepseq_score(psms: Vec<PsmMatch>, candidates: &[Candidate]) 
     let mut pep_key_cache: FxHashMap<u32, Arc<PepDedupKey>> = FxHashMap::default();
     let mut groups: BTreeMap<DedupMapKey, PsmMatch> = BTreeMap::new();
 
+    // Best first in the `PsmMatch` total order, so each group's survivor and the
+    // order its candidates (proteins) are listed in never depend on the order the
+    // queue handed the PSMs over.
+    let mut psms = psms;
+    psms.sort_by(|a, b| b.cmp(a));
     for psm in psms {
         let primary = psm.primary_candidate_idx();
         let pep_key = pep_key_cache
@@ -3456,6 +3473,7 @@ mod dedup_tests {
             features: Default::default(),
             isotope_offset: 0,
             precursor_mz_override: None,
+            tie_key: 0,
         }
     }
 

@@ -173,159 +173,219 @@ pub fn build_library(
     donor_pep: Option<f64>,
     ap: &AlignParams,
 ) -> Library {
-    let n_prec = meta.len();
-    let valid: Vec<&PsmIn> = psms
-        .iter()
-        .filter(|p| (p.precursor as usize) < n_prec && (p.run as usize) < n_runs)
-        .collect();
-    let rows: Vec<(u32, bool, f64)> = valid
-        .iter()
-        .map(|p| (p.precursor, p.is_decoy, p.score))
-        .collect();
-    let qs = precursor_qvalues(&rows);
+    let mut b = LibraryBuilder::new(meta.len(), n_runs, donor_q, donor_pep);
+    for p in psms {
+        b.add(p);
+    }
+    b.finish(meta, max_q, ap)
+}
 
-    // Group the donor PSMs of confident precursors by precursor id.
-    let mut by_prec: Vec<&PsmIn> = valid
-        .iter()
-        .copied()
-        .filter(|p| {
-            p.q <= donor_q
-                && donor_pep.is_none_or(|c| p.pep <= c)
-                && qs
-                    .get(p.precursor as usize)
-                    .copied()
-                    .flatten()
-                    .is_some_and(|q| q <= max_q)
-        })
-        .collect();
-    by_prec.sort_by_key(|p| (p.precursor, p.run));
+/// NaN scores rank worst, as in the confidence gate.
+fn score_of(p: &PsmIn) -> f64 {
+    if p.score.is_nan() {
+        f64::NEG_INFINITY
+    } else {
+        p.score
+    }
+}
 
-    let mut entries: Vec<LibraryEntry> = Vec::new();
-    let mut obs: Vec<Observation> = Vec::new();
-    let mut decoy_obs: Vec<Observation> = Vec::new();
-    // NaN scores rank worst, as in the confidence gate.
-    let score_of = |p: &PsmIn| {
-        if p.score.is_nan() {
+/// The donor PSMs of one precursor, reduced to what an entry needs: per run
+/// (in arrival order of the runs) its best donor PSM, and the count of each
+/// FAIMS voltage over all its donor PSMs.
+#[derive(Debug, Clone, Default)]
+struct DonorRuns {
+    best: Vec<PsmIn>,
+    cvs: Vec<(f32, u32)>,
+}
+
+/// [`build_library`] over a stream of PSMs: [`LibraryBuilder::add`] takes
+/// them one at a time and keeps, per precursor, its best score and its donor
+/// PSMs' per-run best and voltage counts, so memory follows the precursors
+/// and their donor runs rather than the PSMs. Adding the PSMs of
+/// [`build_library`]'s slice in slice order gives the same library.
+#[derive(Debug, Clone)]
+pub struct LibraryBuilder {
+    n_runs: usize,
+    donor_q: f64,
+    donor_pep: Option<f64>,
+    /// Per precursor id: the label of its first PSM and its best score (NaN
+    /// as the worst), over every PSM.
+    best: Vec<Option<(bool, f64)>>,
+    /// Per precursor id: its donor PSMs.
+    donors: Vec<Option<Box<DonorRuns>>>,
+}
+
+impl LibraryBuilder {
+    /// A builder for `n_precursors` precursor ids and `n_runs` runs.
+    pub fn new(n_precursors: usize, n_runs: usize, donor_q: f64, donor_pep: Option<f64>) -> Self {
+        Self {
+            n_runs,
+            donor_q,
+            donor_pep,
+            best: vec![None; n_precursors],
+            donors: vec![None; n_precursors],
+        }
+    }
+
+    /// Whether `p` is a donor PSM: PSM q-value and PEP within the donor
+    /// thresholds.
+    pub fn is_donor(&self, p: &PsmIn) -> bool {
+        p.q <= self.donor_q && self.donor_pep.is_none_or(|c| p.pep <= c)
+    }
+
+    /// Adds one PSM; ignored when its id or run is out of range.
+    pub fn add(&mut self, p: &PsmIn) {
+        let id = p.precursor as usize;
+        if id >= self.best.len() || p.run as usize >= self.n_runs {
+            return;
+        }
+        let score = if p.score.is_nan() {
             f64::NEG_INFINITY
         } else {
             p.score
+        };
+        match &mut self.best[id] {
+            Some((d, s)) => {
+                debug_assert_eq!(
+                    *d, p.is_decoy,
+                    "precursor id {id} mixes target and decoy rows"
+                );
+                if score > *s {
+                    *s = score;
+                }
+            }
+            slot @ None => *slot = Some((p.is_decoy, score)),
         }
-    };
-    let mut i = 0;
-    while i < by_prec.len() {
-        let id = by_prec[i].precursor;
-        let mut j = i;
-        while j < by_prec.len() && by_prec[j].precursor == id {
-            j += 1;
+        if !self.is_donor(p) {
+            return;
         }
-        let group = &by_prec[i..j];
-        i = j;
-        let identity_decoy = group[0].is_decoy;
-        debug_assert!(
-            group.iter().all(|p| p.is_decoy == identity_decoy),
-            "precursor {id} mixes target and decoy PSMs"
-        );
-        let mut best_psm: Option<&PsmIn> = None;
-
-        let mut donors: Vec<u16> = Vec::new();
-        let mut best_rt: Vec<(u16, f64)> = Vec::new();
-        let mut k = 0;
-        while k < group.len() {
-            let run = group[k].run;
-            let mut best: Option<&PsmIn> = None;
-            while k < group.len() && group[k].run == run {
-                let c = group[k];
-                let better = match best {
-                    None => true,
-                    Some(b) => {
-                        score_of(c) > score_of(b) || (score_of(c) == score_of(b) && c.rt < b.rt)
+        let d = self.donors[id].get_or_insert_with(Default::default);
+        match d.best.iter_mut().rev().find(|b| b.run == p.run) {
+            Some(b) => {
+                if score_of(p) > score_of(b) || (score_of(p) == score_of(b) && p.rt < b.rt) {
+                    *b = *p;
+                }
+            }
+            None => d.best.push(*p),
+        }
+        if let Some(cv) = p.faims_cv {
+            // Voltages equal under `==` count together, under the smallest.
+            match d.cvs.iter_mut().find(|c| c.0 == cv) {
+                Some(c) => {
+                    c.1 += 1;
+                    if cv.total_cmp(&c.0).is_lt() {
+                        c.0 = cv;
                     }
-                };
-                if better {
-                    best = Some(c);
                 }
-                k += 1;
-            }
-            let b = best.expect("run group is non-empty");
-            // Runs ascend, so a tie on score and RT keeps the lowest run.
-            if best_psm.is_none_or(|a| {
-                score_of(b) > score_of(a) || (score_of(b) == score_of(a) && b.rt < a.rt)
-            }) {
-                best_psm = Some(b);
-            }
-            donors.push(run);
-            best_rt.push((run, b.rt));
-            if b.rt.is_finite() {
-                let o = Observation {
-                    precursor: id,
-                    run,
-                    rt: b.rt,
-                };
-                if identity_decoy {
-                    decoy_obs.push(o);
-                } else {
-                    obs.push(o);
-                }
+                None => d.cvs.push((cv, 1)),
             }
         }
+    }
 
-        // Majority CV over all PSMs of the precursor; smallest value on ties.
-        let mut cvs: Vec<f32> = group.iter().filter_map(|p| p.faims_cv).collect();
-        cvs.sort_by(f32::total_cmp);
-        let mut faims_cv: Option<f32> = None;
-        let mut best_n = 0usize;
-        let mut a = 0;
-        while a < cvs.len() {
-            let mut b = a;
-            while b < cvs.len() && cvs[b] == cvs[a] {
-                b += 1;
+    /// The library over the PSMs added: see [`build_library`].
+    pub fn finish(self, meta: Vec<PrecursorMeta>, max_q: f64, ap: &AlignParams) -> Library {
+        let n_prec = meta.len();
+        let n_runs = self.n_runs;
+        let rows: Vec<(u32, bool, f64)> = self
+            .best
+            .iter()
+            .enumerate()
+            .filter_map(|(id, b)| b.map(|(d, s)| (id as u32, d, s)))
+            .collect();
+        let qs = precursor_qvalues(&rows);
+        drop(rows);
+
+        let mut entries: Vec<LibraryEntry> = Vec::new();
+        let mut obs: Vec<Observation> = Vec::new();
+        let mut decoy_obs: Vec<Observation> = Vec::new();
+        for (id, d) in self.donors.into_iter().enumerate() {
+            let Some(mut d) = d else { continue };
+            let Some(q) = qs.get(id).copied().flatten().filter(|&q| q <= max_q) else {
+                continue;
+            };
+            let id = id as u32;
+            // Runs ascending; a stable sort keeps one run's PSM where it was.
+            d.best.sort_by_key(|p| p.run);
+            let identity_decoy = d.best[0].is_decoy;
+            debug_assert!(
+                d.best.iter().all(|p| p.is_decoy == identity_decoy),
+                "precursor {id} mixes target and decoy PSMs"
+            );
+            let mut best_psm: Option<&PsmIn> = None;
+            let mut donors: Vec<u16> = Vec::with_capacity(d.best.len());
+            let mut best_rt: Vec<(u16, f64)> = Vec::with_capacity(d.best.len());
+            for b in &d.best {
+                // Runs ascend, so a tie on score and RT keeps the lowest run.
+                if best_psm.is_none_or(|a| {
+                    score_of(b) > score_of(a) || (score_of(b) == score_of(a) && b.rt < a.rt)
+                }) {
+                    best_psm = Some(b);
+                }
+                donors.push(b.run);
+                best_rt.push((b.run, b.rt));
+                if b.rt.is_finite() {
+                    let o = Observation {
+                        precursor: id,
+                        run: b.run,
+                        rt: b.rt,
+                    };
+                    if identity_decoy {
+                        decoy_obs.push(o);
+                    } else {
+                        obs.push(o);
+                    }
+                }
             }
-            if b - a > best_n {
-                best_n = b - a;
-                faims_cv = Some(cvs[a]);
+            // Majority CV over all donor PSMs; smallest value on ties.
+            d.cvs.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut faims_cv: Option<f32> = None;
+            let mut best_n = 0u32;
+            for &(cv, n) in &d.cvs {
+                if n > best_n {
+                    best_n = n;
+                    faims_cv = Some(cv);
+                }
             }
-            a = b;
+            entries.push(LibraryEntry {
+                precursor: id,
+                identity_decoy,
+                q,
+                donor_psm: best_psm
+                    .map(|b| DonorPsm {
+                        score: b.score,
+                        q: b.q,
+                        pep: b.pep,
+                    })
+                    .expect("an entry has a donor PSM"),
+                consensus_rt: f64::NAN,
+                faims_cv,
+                donors,
+                best_rt,
+            });
         }
 
-        entries.push(LibraryEntry {
-            precursor: id,
-            identity_decoy,
-            q: qs[id as usize].expect("entry has a q-value"),
-            donor_psm: best_psm
-                .map(|b| DonorPsm {
-                    score: b.score,
-                    q: b.q,
-                    pep: b.pep,
-                })
-                .expect("an entry has a donor PSM"),
-            consensus_rt: f64::NAN,
-            faims_cv,
-            donors,
-            best_rt,
+        let mut alignment = align(&obs, n_prec, n_runs, ap);
+        alignment
+            .add_observations(&decoy_obs)
+            .expect("one observation per identity decoy and run");
+        for e in &mut entries {
+            e.consensus_rt = alignment
+                .consensus
+                .get(e.precursor as usize)
+                .copied()
+                .unwrap_or(f64::NAN);
+        }
+        entries.sort_by(|a, b| {
+            meta[a.precursor as usize]
+                .mz
+                .total_cmp(&meta[b.precursor as usize].mz)
+                .then(a.precursor.cmp(&b.precursor))
         });
-    }
-
-    let mut alignment = align(&obs, n_prec, n_runs, ap);
-    alignment
-        .add_observations(&decoy_obs)
-        .expect("one observation per identity decoy and run");
-    for e in &mut entries {
-        e.consensus_rt = alignment
-            .consensus
-            .get(e.precursor as usize)
-            .copied()
-            .unwrap_or(f64::NAN);
-    }
-    entries.sort_by(|a, b| {
-        meta[a.precursor as usize]
-            .mz
-            .total_cmp(&meta[b.precursor as usize].mz)
-            .then(a.precursor.cmp(&b.precursor))
-    });
-    Library {
-        entries,
-        alignment,
-        meta,
+        Library {
+            entries,
+            alignment,
+            meta,
+        }
     }
 }
 
@@ -716,5 +776,234 @@ mod tests {
         let tb = precursor_qvalues(&b)[10].unwrap();
         assert!((ta - 0.2).abs() < 1e-12, "{ta}");
         assert_eq!(ta, tb);
+    }
+
+    /// The pre-streaming `build_library`, kept to check [`LibraryBuilder`].
+    fn reference_library(
+        psms: &[PsmIn],
+        meta: Vec<PrecursorMeta>,
+        n_runs: usize,
+        max_q: f64,
+        donor_q: f64,
+        donor_pep: Option<f64>,
+        ap: &AlignParams,
+    ) -> Library {
+        let n_prec = meta.len();
+        let valid: Vec<&PsmIn> = psms
+            .iter()
+            .filter(|p| (p.precursor as usize) < n_prec && (p.run as usize) < n_runs)
+            .collect();
+        let rows: Vec<(u32, bool, f64)> = valid
+            .iter()
+            .map(|p| (p.precursor, p.is_decoy, p.score))
+            .collect();
+        let qs = precursor_qvalues(&rows);
+
+        // Group the donor PSMs of confident precursors by precursor id.
+        let mut by_prec: Vec<&PsmIn> = valid
+            .iter()
+            .copied()
+            .filter(|p| {
+                p.q <= donor_q
+                    && donor_pep.is_none_or(|c| p.pep <= c)
+                    && qs
+                        .get(p.precursor as usize)
+                        .copied()
+                        .flatten()
+                        .is_some_and(|q| q <= max_q)
+            })
+            .collect();
+        by_prec.sort_by_key(|p| (p.precursor, p.run));
+
+        let mut entries: Vec<LibraryEntry> = Vec::new();
+        let mut obs: Vec<Observation> = Vec::new();
+        let mut decoy_obs: Vec<Observation> = Vec::new();
+        // NaN scores rank worst, as in the confidence gate.
+        let score_of = |p: &PsmIn| {
+            if p.score.is_nan() {
+                f64::NEG_INFINITY
+            } else {
+                p.score
+            }
+        };
+        let mut i = 0;
+        while i < by_prec.len() {
+            let id = by_prec[i].precursor;
+            let mut j = i;
+            while j < by_prec.len() && by_prec[j].precursor == id {
+                j += 1;
+            }
+            let group = &by_prec[i..j];
+            i = j;
+            let identity_decoy = group[0].is_decoy;
+            debug_assert!(
+                group.iter().all(|p| p.is_decoy == identity_decoy),
+                "precursor {id} mixes target and decoy PSMs"
+            );
+            let mut best_psm: Option<&PsmIn> = None;
+
+            let mut donors: Vec<u16> = Vec::new();
+            let mut best_rt: Vec<(u16, f64)> = Vec::new();
+            let mut k = 0;
+            while k < group.len() {
+                let run = group[k].run;
+                let mut best: Option<&PsmIn> = None;
+                while k < group.len() && group[k].run == run {
+                    let c = group[k];
+                    let better = match best {
+                        None => true,
+                        Some(b) => {
+                            score_of(c) > score_of(b) || (score_of(c) == score_of(b) && c.rt < b.rt)
+                        }
+                    };
+                    if better {
+                        best = Some(c);
+                    }
+                    k += 1;
+                }
+                let b = best.expect("run group is non-empty");
+                // Runs ascend, so a tie on score and RT keeps the lowest run.
+                if best_psm.is_none_or(|a| {
+                    score_of(b) > score_of(a) || (score_of(b) == score_of(a) && b.rt < a.rt)
+                }) {
+                    best_psm = Some(b);
+                }
+                donors.push(run);
+                best_rt.push((run, b.rt));
+                if b.rt.is_finite() {
+                    let o = Observation {
+                        precursor: id,
+                        run,
+                        rt: b.rt,
+                    };
+                    if identity_decoy {
+                        decoy_obs.push(o);
+                    } else {
+                        obs.push(o);
+                    }
+                }
+            }
+
+            // Majority CV over all PSMs of the precursor; smallest value on ties.
+            let mut cvs: Vec<f32> = group.iter().filter_map(|p| p.faims_cv).collect();
+            cvs.sort_by(f32::total_cmp);
+            let mut faims_cv: Option<f32> = None;
+            let mut best_n = 0usize;
+            let mut a = 0;
+            while a < cvs.len() {
+                let mut b = a;
+                while b < cvs.len() && cvs[b] == cvs[a] {
+                    b += 1;
+                }
+                if b - a > best_n {
+                    best_n = b - a;
+                    faims_cv = Some(cvs[a]);
+                }
+                a = b;
+            }
+
+            entries.push(LibraryEntry {
+                precursor: id,
+                identity_decoy,
+                q: qs[id as usize].expect("entry has a q-value"),
+                donor_psm: best_psm
+                    .map(|b| DonorPsm {
+                        score: b.score,
+                        q: b.q,
+                        pep: b.pep,
+                    })
+                    .expect("an entry has a donor PSM"),
+                consensus_rt: f64::NAN,
+                faims_cv,
+                donors,
+                best_rt,
+            });
+        }
+
+        let mut alignment = align(&obs, n_prec, n_runs, ap);
+        alignment
+            .add_observations(&decoy_obs)
+            .expect("one observation per identity decoy and run");
+        for e in &mut entries {
+            e.consensus_rt = alignment
+                .consensus
+                .get(e.precursor as usize)
+                .copied()
+                .unwrap_or(f64::NAN);
+        }
+        entries.sort_by(|a, b| {
+            meta[a.precursor as usize]
+                .mz
+                .total_cmp(&meta[b.precursor as usize].mz)
+                .then(a.precursor.cmp(&b.precursor))
+        });
+        Library {
+            entries,
+            alignment,
+            meta,
+        }
+    }
+
+    #[test]
+    fn streaming_builder_matches_the_slice_build() {
+        // Deterministic pseudo-random PSMs over 5 runs: targets and decoys,
+        // tied scores and RTs, NaN scores, FAIMS voltages and PSMs above the
+        // donor thresholds.
+        let mut x = 0x1234_5678_u64;
+        let mut next = || {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (x >> 33) as u32
+        };
+        let n_prec = 400u32;
+        let mut psms = Vec::new();
+        for _ in 0..6000 {
+            let precursor = next() % n_prec;
+            let run = (next() % 5) as u16;
+            let score = match next() % 50 {
+                0 => f64::NAN,
+                k => (k % 25) as f64 + (precursor % 7) as f64,
+            };
+            psms.push(PsmIn {
+                run,
+                precursor,
+                rt: 100.0 + precursor as f64 + (next() % 3) as f64 + run as f64,
+                score,
+                q: (next() % 4) as f64 * 0.01,
+                pep: (next() % 5) as f64 * 0.05,
+                is_decoy: precursor % 9 == 0,
+                faims_cv: match next() % 4 {
+                    0 => None,
+                    1 => Some(-0.0),
+                    2 => Some(0.0),
+                    _ => Some(-45.0),
+                },
+            });
+        }
+        // Runs in order, PSMs of one run in slice order (the stream order).
+        psms.sort_by_key(|p| p.run);
+        let ap = AlignParams {
+            min_anchors: 5,
+            ..AlignParams::default()
+        };
+        for (max_q, donor_q, pep) in [(1.0, 1.0, None), (0.3, 0.02, Some(0.1)), (0.05, 0.01, None)]
+        {
+            let a = reference_library(&psms, meta(n_prec as usize), 5, max_q, donor_q, pep, &ap);
+            let b = build_library(&psms, meta(n_prec as usize), 5, max_q, donor_q, pep, &ap);
+            if max_q == 1.0 {
+                assert!(!a.entries.is_empty());
+            }
+            assert_eq!(format!("{:?}", a.entries), format!("{:?}", b.entries));
+            assert_eq!(a.alignment.anchors, b.alignment.anchors);
+            for p in 0..n_prec {
+                for r in 0..5u16 {
+                    assert_eq!(
+                        format!("{:?}", a.alignment.predict(p, r)),
+                        format!("{:?}", b.alignment.predict(p, r))
+                    );
+                }
+            }
+        }
     }
 }

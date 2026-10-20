@@ -220,10 +220,39 @@ fn column<'a, T: 'static>(b: &'a RecordBatch, i: usize, path: &Path) -> Result<&
     })
 }
 
-/// Read a per-run PSM table; returns `(run_stem, rows)`. Every error names
-/// `path`.
-pub fn read_run_quant_table(path: &Path) -> Result<(String, Vec<RunPsmRow>), String> {
+/// The columns of a per-run PSM table, in file order.
+pub const RUN_QUANT_COLUMNS: [&str; 11] = [
+    "spec_id",
+    "rt_s",
+    "precursor_key",
+    "peptidoform",
+    "charge",
+    "mz",
+    "is_decoy",
+    "search_score",
+    "faims_cv",
+    "envelope",
+    "proteins",
+];
+
+/// A per-run PSM table opened for reading one record batch at a time, with
+/// only the requested columns decoded. A column left out reads as its empty
+/// value (empty string or list, 0, `false`, `None`).
+pub struct RunQuantBatches {
+    path: std::path::PathBuf,
+    run: String,
+    wanted: [bool; 11],
+    reader: parquet::arrow::arrow_reader::ParquetRecordBatchReader,
+}
+
+/// Opens a per-run PSM table for [`RunQuantBatches`], decoding only
+/// `columns` (names of [`RUN_QUANT_COLUMNS`]; all of them when empty). Every
+/// error names `path`.
+pub fn open_run_quant_table(path: &Path, columns: &[&str]) -> Result<RunQuantBatches, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    if let Some(c) = columns.iter().find(|c| !RUN_QUANT_COLUMNS.contains(c)) {
+        return Err(err(&format!("unknown run-quant column {c:?}")));
+    }
     let file = File::open(path).map_err(|e| err(&e))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| err(&e))?;
     let meta = builder
@@ -250,48 +279,146 @@ pub fn read_run_quant_table(path: &Path) -> Result<(String, Vec<RunPsmRow>), Str
         )));
     }
     let run = get(RUN_KEY).ok_or_else(|| err(&format!("missing metadata key {RUN_KEY}")))?;
-
-    let reader = builder.build().map_err(|e| err(&e))?;
-    let mut rows = Vec::new();
-    for b in reader {
-        let b = b.map_err(|e| err(&e))?;
-        if b.num_columns() != 11 {
+    let fields = builder.schema().fields().clone();
+    if fields.len() != RUN_QUANT_COLUMNS.len() {
+        return Err(err(&format!(
+            "expected {} columns, found {}",
+            RUN_QUANT_COLUMNS.len(),
+            fields.len()
+        )));
+    }
+    let mut wanted = [false; 11];
+    for (i, name) in RUN_QUANT_COLUMNS.iter().enumerate() {
+        if fields[i].name() != name {
             return Err(err(&format!(
-                "expected 11 columns, found {}",
+                "column {:?} where {name:?} was expected",
+                fields[i].name()
+            )));
+        }
+        wanted[i] = columns.is_empty() || columns.contains(name);
+    }
+    let mask = parquet::arrow::ProjectionMask::roots(
+        builder.parquet_schema(),
+        (0..wanted.len()).filter(|&i| wanted[i]),
+    );
+    let reader = builder
+        .with_projection(mask)
+        .with_batch_size(BATCH_ROWS)
+        .build()
+        .map_err(|e| err(&e))?;
+    Ok(RunQuantBatches {
+        path: path.to_path_buf(),
+        run,
+        wanted,
+        reader,
+    })
+}
+
+impl RunQuantBatches {
+    /// The run stem recorded in the table.
+    pub fn run(&self) -> &str {
+        &self.run
+    }
+
+    fn rows(&self, b: &RecordBatch) -> Result<Vec<RunPsmRow>, String> {
+        let path = self.path.as_path();
+        let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+        // Projected batches hold the wanted columns in file order.
+        let mut at = [usize::MAX; 11];
+        let mut k = 0;
+        for (i, w) in self.wanted.iter().enumerate() {
+            if *w {
+                at[i] = k;
+                k += 1;
+            }
+        }
+        if b.num_columns() != k {
+            return Err(err(&format!(
+                "expected {k} columns, found {}",
                 b.num_columns()
             )));
         }
-        let spec_id = column::<StringArray>(&b, 0, path)?;
-        let rt_s = column::<Float64Array>(&b, 1, path)?;
-        let key = column::<StringArray>(&b, 2, path)?;
-        let pepf = column::<StringArray>(&b, 3, path)?;
-        let charge = column::<UInt8Array>(&b, 4, path)?;
-        let mz = column::<Float64Array>(&b, 5, path)?;
-        let decoy = column::<BooleanArray>(&b, 6, path)?;
-        let score = column::<Float32Array>(&b, 7, path)?;
-        let cv = column::<Float32Array>(&b, 8, path)?;
-        let env = column::<ListArray>(&b, 9, path)?;
-        let prot = column::<StringArray>(&b, 10, path)?;
+        let col = |i: usize| (at[i] != usize::MAX).then_some(at[i]);
+        let string = |i: usize| {
+            col(i)
+                .map(|c| column::<StringArray>(b, c, path))
+                .transpose()
+        };
+        let (spec_id, key, pepf, prot) = (string(0)?, string(2)?, string(3)?, string(10)?);
+        let rt_s = col(1)
+            .map(|c| column::<Float64Array>(b, c, path))
+            .transpose()?;
+        let charge = col(4)
+            .map(|c| column::<UInt8Array>(b, c, path))
+            .transpose()?;
+        let mz = col(5)
+            .map(|c| column::<Float64Array>(b, c, path))
+            .transpose()?;
+        let decoy = col(6)
+            .map(|c| column::<BooleanArray>(b, c, path))
+            .transpose()?;
+        let score = col(7)
+            .map(|c| column::<Float32Array>(b, c, path))
+            .transpose()?;
+        let cv = col(8)
+            .map(|c| column::<Float32Array>(b, c, path))
+            .transpose()?;
+        let env = col(9)
+            .map(|c| column::<ListArray>(b, c, path))
+            .transpose()?;
+        let text =
+            |a: Option<&StringArray>, i: usize| a.map_or(String::new(), |a| a.value(i).to_string());
+        let mut rows = Vec::with_capacity(b.num_rows());
         for i in 0..b.num_rows() {
-            let e = env.value(i);
-            let e = e
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .ok_or_else(|| err(&"envelope items are not Float32"))?;
+            let envelope = match env {
+                Some(env) => {
+                    let e = env.value(i);
+                    e.as_any()
+                        .downcast_ref::<Float32Array>()
+                        .ok_or_else(|| err(&"envelope items are not Float32"))?
+                        .values()
+                        .to_vec()
+                }
+                None => Vec::new(),
+            };
             rows.push(RunPsmRow {
-                spec_id: spec_id.value(i).to_string(),
-                rt_s: rt_s.value(i),
-                precursor_key: key.value(i).to_string(),
-                peptidoform: pepf.value(i).to_string(),
-                charge: charge.value(i),
-                mz: mz.value(i),
-                is_decoy: decoy.value(i),
-                search_score: score.value(i),
-                faims_cv: (!cv.is_null(i)).then(|| cv.value(i)),
-                envelope: e.values().to_vec(),
-                proteins: prot.value(i).to_string(),
+                spec_id: text(spec_id, i),
+                rt_s: rt_s.map_or(0.0, |a| a.value(i)),
+                precursor_key: text(key, i),
+                peptidoform: text(pepf, i),
+                charge: charge.map_or(0, |a| a.value(i)),
+                mz: mz.map_or(0.0, |a| a.value(i)),
+                is_decoy: decoy.is_some_and(|a| a.value(i)),
+                search_score: score.map_or(0.0, |a| a.value(i)),
+                faims_cv: cv.and_then(|a| (!a.is_null(i)).then(|| a.value(i))),
+                envelope,
+                proteins: text(prot, i),
             });
         }
+        Ok(rows)
+    }
+}
+
+impl Iterator for RunQuantBatches {
+    type Item = Result<Vec<RunPsmRow>, String>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let b = self.reader.next()?;
+        Some(
+            b.map_err(|e| format!("{}: {e}", self.path.display()))
+                .and_then(|b| self.rows(&b)),
+        )
+    }
+}
+
+/// Read a per-run PSM table; returns `(run_stem, rows)`. Every error names
+/// `path`.
+pub fn read_run_quant_table(path: &Path) -> Result<(String, Vec<RunPsmRow>), String> {
+    let mut batches = open_run_quant_table(path, &[])?;
+    let run = batches.run().to_string();
+    let mut rows = Vec::new();
+    for b in batches.by_ref() {
+        rows.extend(b?);
     }
     Ok((run, rows))
 }
@@ -361,6 +488,40 @@ mod tests {
         let e = dir.path().join("e.quant.parquet");
         write_run_quant_table(&e, "e", &[], &[]).unwrap();
         assert_eq!(read_run_quant_table(&e).unwrap(), ("e".to_string(), vec![]));
+    }
+
+    #[test]
+    fn projected_batches_read_only_the_requested_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("m.quant.parquet");
+        let rows: Vec<RunPsmRow> = (0..7).map(row).collect();
+        write_run_quant_table(&p, "m", &rows, &[]).unwrap();
+        let mut b = open_run_quant_table(&p, &["precursor_key", "is_decoy", "faims_cv"]).unwrap();
+        assert_eq!(b.run(), "m");
+        let got: Vec<RunPsmRow> = b.by_ref().flat_map(|b| b.unwrap()).collect();
+        let want: Vec<RunPsmRow> = rows
+            .iter()
+            .map(|r| RunPsmRow {
+                spec_id: String::new(),
+                rt_s: 0.0,
+                precursor_key: r.precursor_key.clone(),
+                peptidoform: String::new(),
+                charge: 0,
+                mz: 0.0,
+                is_decoy: r.is_decoy,
+                search_score: 0.0,
+                faims_cv: r.faims_cv,
+                envelope: Vec::new(),
+                proteins: String::new(),
+            })
+            .collect();
+        assert_eq!(got, want);
+        let all: Vec<RunPsmRow> = open_run_quant_table(&p, &[])
+            .unwrap()
+            .flat_map(|b| b.unwrap())
+            .collect();
+        assert_eq!(all, rows);
+        assert!(open_run_quant_table(&p, &["nope"]).is_err());
     }
 
     #[test]

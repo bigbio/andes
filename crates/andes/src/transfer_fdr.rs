@@ -118,6 +118,7 @@ pub struct FdrRow {
 }
 
 /// Per-row output of [`transfer_qvalues`], in input order.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct FdrResult {
     /// The wrong-peak families and the identity decoys.
@@ -143,17 +144,6 @@ pub struct FdrCounts {
     pub no_q: usize,
 }
 
-/// The fitted fold models with their q-values, kept to score rows that took
-/// no part in the fit.
-pub struct TransferFdr {
-    pub result: FdrResult,
-    pub counts: FdrCounts,
-    seed: u64,
-    models: Vec<Option<GbdtPeakModel>>,
-    /// Per fold, `(score, pooled q)` of its scored rows, ascending by score.
-    tables: Vec<Vec<(f32, f64)>>,
-}
-
 /// The fold of a precursor (splitmix64 of its id).
 pub fn fold_of(precursor: u32, seed: u64) -> usize {
     let mut z = (seed ^ (precursor as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))
@@ -165,7 +155,7 @@ pub fn fold_of(precursor: u32, seed: u64) -> usize {
 }
 
 /// Cross-validated q-values of transfer targets and decoys.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn transfer_qvalues(rows: &[FdrRow], seed: u64) -> FdrResult {
     transfer_fdr(rows, seed).result
 }
@@ -210,95 +200,423 @@ fn train_fold(
     .map_err(|e| format!("fold {fold}: {e:?}"))
 }
 
-/// [`transfer_qvalues`] keeping the fold models.
+/// The fold models of one classifier: fold `f`'s model is trained on the
+/// rows of the other folds and scores the rows of fold `f`.
+pub struct FoldModels {
+    seed: u64,
+    models: Vec<Option<GbdtPeakModel>>,
+    /// One message per fold without a model.
+    pub failed_folds: Vec<String>,
+}
+
+/// Trains the fold models on `rows` (all the rows, or a sample of whole
+/// precursors: see [`TrainingSample`]).
 ///
 /// # Panics
 /// When the rows do not all have the same number of features.
-pub fn transfer_fdr(rows: &[FdrRow], seed: u64) -> TransferFdr {
-    let n = rows.len();
+pub fn train_folds(rows: &[FdrRow], seed: u64) -> FoldModels {
     let nf = rows.first().map_or(0, |r| r.x.len());
     assert!(
         rows.iter().all(|r| r.x.len() == nf),
         "transfer FDR rows have different feature counts"
     );
     let folds: Vec<usize> = rows.iter().map(|r| fold_of(r.precursor, seed)).collect();
-    let mut result = FdrResult {
-        q: vec![None; n],
-        q_wrong_peak: vec![None; n],
-        q_mass_only: vec![None; n],
-        q_rt_only: vec![None; n],
-        score: vec![f32::NAN; n],
-    };
-    let mut counts = FdrCounts::default();
     let fitted: Vec<Result<GbdtPeakModel, String>> = (0..N_FOLDS)
         .into_par_iter()
         .map(|f| train_fold(rows, &folds, nf, f, seed))
         .collect();
     let mut models = Vec::with_capacity(N_FOLDS);
-    let mut tables = Vec::with_capacity(N_FOLDS);
-    for (fold, fit) in fitted.into_iter().enumerate() {
-        let members: Vec<usize> = (0..n).filter(|&i| folds[i] == fold).collect();
-        let model = match fit {
-            Ok(m) => m,
+    let mut failed_folds = Vec::new();
+    for fit in fitted {
+        match fit {
+            Ok(m) => models.push(Some(m)),
             Err(e) => {
-                counts.failed_folds.push(e);
-                counts.unscored += members.len();
+                failed_folds.push(e);
                 models.push(None);
-                tables.push(Vec::new());
-                continue;
             }
-        };
-        let xs: Vec<&[f32]> = members.iter().map(|&i| rows[i].x.as_slice()).collect();
-        let mut scores = vec![0.0f32; members.len()];
-        model.predict_value_batch(&xs, &mut scores);
-        for (&i, &s) in members.iter().zip(&scores) {
-            result.score[i] = s;
         }
-        let estimate = |keep: &dyn Fn(u8) -> bool, q: &mut [Option<f64>]| {
-            let items: Vec<(usize, f32, u8)> = members
-                .iter()
-                .filter(|&&i| result.score[i].is_finite() && keep(rows[i].family))
-                .map(|&i| (i, result.score[i], rows[i].family))
-                .collect();
-            kdecoy_q(&items, q);
-        };
-        estimate(&|_| true, &mut result.q);
-        estimate(&|f| f != IDENTITY, &mut result.q_wrong_peak);
-        estimate(&|f| f == TARGET || f == MASS_SHIFT, &mut result.q_mass_only);
-        estimate(&|f| f == TARGET || f == RT_SHIFT, &mut result.q_rt_only);
-        let mut table: Vec<(f32, f64)> = members
-            .iter()
-            .filter_map(|&i| result.q[i].map(|q| (result.score[i], q)))
-            .collect();
-        table.sort_by(|a, b| a.0.total_cmp(&b.0).then(b.1.total_cmp(&a.1)));
-        counts.no_q += members.len() - table.len();
-        tables.push(table);
-        models.push(Some(model));
     }
-    TransferFdr {
-        result,
-        counts,
+    FoldModels {
         seed,
         models,
-        tables,
+        failed_folds,
     }
 }
 
+impl FoldModels {
+    /// The held-out raw margins of `xs` (rows of precursor `precursors[i]`)
+    /// into `out`: `None` for a row whose fold has no model.
+    pub fn score(&self, precursors: &[u32], xs: &[&[f32]], out: &mut Vec<Option<f32>>) {
+        out.clear();
+        out.resize(xs.len(), None);
+        for (fold, model) in self.models.iter().enumerate() {
+            let Some(model) = model else { continue };
+            let at: Vec<usize> = (0..xs.len())
+                .filter(|&i| fold_of(precursors[i], self.seed) == fold)
+                .collect();
+            if at.is_empty() {
+                continue;
+            }
+            let batch: Vec<&[f32]> = at.iter().map(|&i| xs[i]).collect();
+            let mut s = vec![0.0f32; at.len()];
+            model.predict_value_batch(&batch, &mut s);
+            for (&i, v) in at.iter().zip(s) {
+                out[i] = Some(v);
+            }
+        }
+    }
+}
+
+/// Items (training rows, normalisation cells) collected over a stream, at
+/// most `cap` of them, by sampling units: every item carries a unit id (a
+/// precursor, or a precursor in one run), a unit's items are kept when the
+/// top `level` bits of a hash of its id are zero, and `level` rises by one
+/// each time the kept items exceed `cap`. The kept set is thus every item of
+/// the units at the final level, whatever the order the items came in, and
+/// all items when they never exceed `cap`. Items carry a sort key so that
+/// [`TrainingSample::into_items`] can return them in a fixed order.
+pub struct TrainingSample<K, T = FdrRow> {
+    cap: usize,
+    seed: u64,
+    level: u32,
+    seen: usize,
+    items: Vec<(K, u64, T)>,
+}
+
+impl<K: Ord, T> TrainingSample<K, T> {
+    pub fn new(cap: usize, seed: u64) -> Self {
+        Self {
+            cap: cap.max(1),
+            seed,
+            level: 0,
+            seen: 0,
+            items: Vec::new(),
+        }
+    }
+
+    fn kept(seed: u64, unit: u64, level: u32) -> bool {
+        level == 0 || sample_hash(unit, seed) >> (64 - level) == 0
+    }
+
+    /// Offers `item` of sampling unit `unit`.
+    pub fn push(&mut self, key: K, unit: u64, item: T) {
+        self.seen += 1;
+        if !Self::kept(self.seed, unit, self.level) {
+            return;
+        }
+        self.items.push((key, unit, item));
+        while self.items.len() > self.cap && self.level < 63 {
+            self.level += 1;
+            let (seed, level) = (self.seed, self.level);
+            self.items.retain(|(_, u, _)| Self::kept(seed, *u, level));
+        }
+    }
+
+    /// Items offered, items kept and the share of units kept.
+    pub fn stats(&self) -> (usize, usize, f64) {
+        (self.seen, self.items.len(), 0.5f64.powi(self.level as i32))
+    }
+
+    /// The kept items, sorted by key (a stable sort: items of equal keys keep
+    /// their order of arrival).
+    pub fn into_items(self) -> Vec<T> {
+        let mut items = self.items;
+        items.sort_by(|a, b| a.0.cmp(&b.0));
+        items.into_iter().map(|(_, _, t)| t).collect()
+    }
+}
+
+/// The sampling unit of a training row: its precursor in its run, so that a
+/// sample keeps every precursor (in some runs) and a target stays with its
+/// decoys. Folds are by precursor, so a held-out precursor is never trained
+/// on.
+pub fn row_unit(precursor: u32, run: u16) -> u64 {
+    ((precursor as u64) << 16) | run as u64
+}
+
+/// The unit hash of [`TrainingSample`] (splitmix64 of the id, on a seed
+/// apart from the folds').
+pub fn sample_hash(unit: u64, seed: u64) -> u64 {
+    let mut z = (seed ^ 0x5bd1_e995_7a4f_3c21 ^ unit.wrapping_mul(0x9e37_79b9_7f4a_7c15))
+        .wrapping_add(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+/// The q-value estimates of a classifier's rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Estimate {
+    /// The wrong-peak families and the identity decoys.
+    Pooled = 0,
+    /// Both wrong-peak families.
+    WrongPeak = 1,
+    /// Mass-shift decoys only.
+    MassOnly = 2,
+    /// RT-shift decoys only.
+    RtOnly = 3,
+}
+
+const ESTIMATES: [Estimate; 4] = [
+    Estimate::Pooled,
+    Estimate::WrongPeak,
+    Estimate::MassOnly,
+    Estimate::RtOnly,
+];
+
+impl Estimate {
+    /// Whether rows of `family` take part in this estimate.
+    fn keeps(self, family: u8) -> bool {
+        match self {
+            Estimate::Pooled => true,
+            Estimate::WrongPeak => family != IDENTITY,
+            Estimate::MassOnly => family == TARGET || family == MASS_SHIFT,
+            Estimate::RtOnly => family == TARGET || family == RT_SHIFT,
+        }
+    }
+}
+
+/// `0.0` for `-0.0`: scores equal under `==` are one value.
+fn canonical(s: f32) -> f32 {
+    if s == 0.0 {
+        0.0
+    } else {
+        s
+    }
+}
+
+/// A fold's q-value as a step function of the score: the ascending scores at
+/// which q drops, with the q from each up to the next.
+#[derive(Debug, Clone, Default)]
+struct Steps {
+    at: Vec<f32>,
+    q: Vec<f64>,
+}
+
+impl Steps {
+    /// The q of a row of the estimate scoring `s` (a score that took part).
+    fn of_member(&self, s: f32) -> f64 {
+        let s = canonical(s);
+        let k = self.at.partition_point(|&a| a.total_cmp(&s).is_le());
+        self.q[k.max(1) - 1]
+    }
+
+    /// The q of the highest fitted score at or below `s`, or of the lowest
+    /// when `s` is below them all ([`TransferFdr::pseudo_q`]).
+    fn at_or_below(&self, s: f32) -> f64 {
+        let k = self.at.partition_point(|&a| a <= s);
+        self.q[k.max(1) - 1]
+    }
+}
+
+/// The held-out scores of one classifier's rows, per fold and family, kept
+/// to turn them into q-values: 4 bytes per scored row.
+pub struct FoldScores {
+    seed: u64,
+    scores: Vec<[Vec<f32>; 4]>,
+    members: Vec<usize>,
+    unscored: usize,
+}
+
+impl FoldScores {
+    pub fn new(seed: u64) -> Self {
+        Self {
+            seed,
+            scores: (0..N_FOLDS).map(|_| Default::default()).collect(),
+            members: vec![0; N_FOLDS],
+            unscored: 0,
+        }
+    }
+
+    /// One row of `precursor` and `family` with its held-out score (`None`
+    /// when its fold has no model).
+    pub fn add(&mut self, precursor: u32, family: u8, score: Option<f32>) {
+        let fold = fold_of(precursor, self.seed);
+        match score {
+            None => self.unscored += 1,
+            Some(s) => {
+                self.members[fold] += 1;
+                if s.is_finite() {
+                    self.scores[fold][family.min(3) as usize].push(canonical(s));
+                }
+            }
+        }
+    }
+
+    /// The q-value step functions; `failed_folds` are the folds without a
+    /// model (for the counts).
+    pub fn finish(self, failed_folds: &[String]) -> QValues {
+        let mut steps: Vec<[Option<Steps>; 4]> = Vec::with_capacity(N_FOLDS);
+        let mut no_q = 0usize;
+        for (fold, mut by_family) in self.scores.into_iter().enumerate() {
+            for v in &mut by_family {
+                v.sort_by(f32::total_cmp);
+            }
+            let fold_steps = ESTIMATES.map(|e| kdecoy_steps(&by_family, e));
+            let with_q = if fold_steps[Estimate::Pooled as usize].is_some() {
+                by_family.iter().map(Vec::len).sum()
+            } else {
+                0
+            };
+            no_q += self.members[fold] - with_q;
+            steps.push(fold_steps);
+        }
+        QValues {
+            seed: self.seed,
+            steps,
+            counts: FdrCounts {
+                failed_folds: failed_folds.to_vec(),
+                unscored: self.unscored,
+                no_q,
+            },
+        }
+    }
+}
+
+/// The K-decoy q-values (`FDR = (D + 1) / (K * max(T, 1)) + D_id / max(T, 1)`) over one fold's sorted scores by
+/// family, as a step function; `None` without targets or wrong-peak decoys
+/// among the estimate's rows. Walks the scores upwards: at each distinct
+/// score `c`, `T`, `D` and `D_id` at or above it are the totals minus the
+/// rows below, and q is the running minimum of the FDR from the bottom.
+fn kdecoy_steps(by_family: &[Vec<f32>; 4], e: Estimate) -> Option<Steps> {
+    let keep = |f: usize| e.keeps(f as u8);
+    let total = |f: usize| if keep(f) { by_family[f].len() } else { 0 };
+    let targets = total(TARGET as usize);
+    let decoys = total(MASS_SHIFT as usize) + total(RT_SHIFT as usize);
+    if targets == 0 || decoys == 0 {
+        return None;
+    }
+    let k = decoys as f64 / targets as f64;
+    let (mut t, mut d, mut d_id) = (targets, decoys, total(IDENTITY as usize));
+    let mut pos = [0usize; 4];
+    let mut steps = Steps::default();
+    let mut running = 1.0f64;
+    loop {
+        // The lowest remaining score among the kept families.
+        let mut low: Option<f32> = None;
+        for f in 0..4 {
+            if let Some(&s) = keep(f).then(|| by_family[f].get(pos[f])).flatten() {
+                if low.is_none_or(|l| s.total_cmp(&l).is_lt()) {
+                    low = Some(s);
+                }
+            }
+        }
+        let Some(c) = low else { break };
+        let tf = t.max(1) as f64;
+        let v = ((d + 1) as f64 / (k * tf) + d_id as f64 / tf).min(1.0);
+        if v < running || steps.at.is_empty() {
+            running = running.min(v);
+            steps.at.push(c);
+            steps.q.push(running);
+        }
+        for f in 0..4 {
+            if !keep(f) {
+                continue;
+            }
+            let v = &by_family[f];
+            while pos[f] < v.len() && v[pos[f]] == c {
+                pos[f] += 1;
+                match f as u8 {
+                    TARGET => t -= 1,
+                    IDENTITY => d_id -= 1,
+                    _ => d -= 1,
+                }
+            }
+        }
+    }
+    Some(steps)
+}
+
+/// The q-values of one classifier's rows: per fold and [`Estimate`], a step
+/// function of the held-out score.
+pub struct QValues {
+    seed: u64,
+    steps: Vec<[Option<Steps>; 4]>,
+    pub counts: FdrCounts,
+}
+
+impl QValues {
+    /// The q-value under estimate `e` of a row of `precursor` and `family`
+    /// scoring `score`; `None` when it has no score, its family takes no part
+    /// in `e`, or its fold lacks targets or decoys.
+    pub fn q(&self, e: Estimate, precursor: u32, family: u8, score: Option<f32>) -> Option<f64> {
+        let s = score.filter(|s| s.is_finite())?;
+        if !e.keeps(family) {
+            return None;
+        }
+        let steps = self.steps[fold_of(precursor, self.seed)][e as usize].as_ref()?;
+        Some(steps.of_member(s))
+    }
+
+    /// The pooled q of a row outside the fit (a pseudo-transfer) scoring
+    /// `score` under its fold's model: the q of the fold's scored row with the
+    /// highest score at or below it, or of the fold's lowest row when it
+    /// scores below all of them. `None` without a score or without q-values
+    /// in the fold.
+    pub fn pseudo_q(&self, precursor: u32, score: Option<f32>) -> Option<f64> {
+        let s = score?;
+        let steps =
+            self.steps[fold_of(precursor, self.seed)][Estimate::Pooled as usize].as_ref()?;
+        Some(steps.at_or_below(s))
+    }
+}
+
+/// The fitted fold models with their q-values over a slice of rows, kept to
+/// score rows that took no part in the fit.
+#[cfg(test)]
+pub struct TransferFdr {
+    pub result: FdrResult,
+    pub counts: FdrCounts,
+    models: FoldModels,
+    q: QValues,
+}
+
+/// [`transfer_qvalues`] keeping the fold models: [`train_folds`] on every
+/// row, then each row scored by its fold's model and given its q-values.
+///
+/// # Panics
+/// When the rows do not all have the same number of features.
+#[cfg(test)]
+pub fn transfer_fdr(rows: &[FdrRow], seed: u64) -> TransferFdr {
+    let models = train_folds(rows, seed);
+    let precursors: Vec<u32> = rows.iter().map(|r| r.precursor).collect();
+    let xs: Vec<&[f32]> = rows.iter().map(|r| r.x.as_slice()).collect();
+    let mut scores = Vec::new();
+    models.score(&precursors, &xs, &mut scores);
+    let mut fs = FoldScores::new(seed);
+    for (r, s) in rows.iter().zip(&scores) {
+        fs.add(r.precursor, r.family, *s);
+    }
+    let q = fs.finish(&models.failed_folds);
+    let each = |e: Estimate| -> Vec<Option<f64>> {
+        rows.iter()
+            .zip(&scores)
+            .map(|(r, s)| q.q(e, r.precursor, r.family, *s))
+            .collect()
+    };
+    let result = FdrResult {
+        q: each(Estimate::Pooled),
+        q_wrong_peak: each(Estimate::WrongPeak),
+        q_mass_only: each(Estimate::MassOnly),
+        q_rt_only: each(Estimate::RtOnly),
+        score: scores.iter().map(|s| s.unwrap_or(f32::NAN)).collect(),
+    };
+    TransferFdr {
+        result,
+        counts: q.counts.clone(),
+        models,
+        q,
+    }
+}
+
+#[cfg(test)]
 impl TransferFdr {
     /// The q-value of a row outside the fit (a pseudo-transfer), scored by
-    /// the model of its precursor's fold: the pooled q of the fold's scored
-    /// row with the highest score at or below it, or of the fold's lowest row
-    /// when it scores below all of them. `None` when the fold has no model or
-    /// no q-values.
+    /// the model of its precursor's fold: see [`QValues::pseudo_q`].
     pub fn pseudo_q(&self, precursor: u32, x: &[f32]) -> Option<f64> {
-        let fold = fold_of(precursor, self.seed);
-        let model = self.models.get(fold)?.as_ref()?;
-        let table = &self.tables[fold];
-        let first = table.first()?;
-        let mut score = [0.0f32];
-        model.predict_value_batch(&[x], &mut score);
-        let at = table.partition_point(|&(s, _)| s <= score[0]);
-        Some(if at == 0 { first.1 } else { table[at - 1].1 })
+        let mut s = Vec::new();
+        self.models.score(&[precursor], &[x], &mut s);
+        self.q.pseudo_q(precursor, s[0])
     }
 }
 
@@ -306,7 +624,9 @@ impl TransferFdr {
 /// wrong-peak-decoy-to-target ratio of `items` and
 /// `FDR = (D + 1) / (K * max(T, 1)) + D_id / max(T, 1)` (`D` wrong-peak
 /// decoys, `D_id` identity decoys at or above the score). Leaves `q`
-/// untouched when `items` has no targets or no wrong-peak decoys.
+/// untouched when `items` has no targets or no wrong-peak decoys. The
+/// reference of [`kdecoy_steps`].
+#[cfg(test)]
 fn kdecoy_q(items: &[(usize, f32, u8)], q: &mut [Option<f64>]) {
     let targets = items.iter().filter(|it| it.2 == TARGET).count();
     let decoys = items
@@ -710,5 +1030,99 @@ mod tests {
     fn results_are_deterministic_for_a_seed() {
         let rows = rows(300, 1.5, &[1, 2], 13);
         assert_eq!(transfer_qvalues(&rows, 9), transfer_qvalues(&rows, 9));
+    }
+
+    #[test]
+    fn step_functions_match_the_per_row_estimate() {
+        // Coarse scores (many ties, both zeros) over every family.
+        let mut g = Normal(99);
+        for trial in 0..20u64 {
+            let n = 50 + 37 * trial as usize;
+            let items: Vec<(usize, f32, u8)> = (0..n)
+                .map(|i| {
+                    let fam = match i % 7 {
+                        0..=2 => TARGET,
+                        3 | 4 => MASS_SHIFT,
+                        5 => RT_SHIFT,
+                        _ => IDENTITY,
+                    };
+                    let shift = if fam == TARGET { 1.0 } else { 0.0 };
+                    let mut s = ((g.draw() + shift) * 4.0).round() / 4.0;
+                    if s == 0.0 && i % 2 == 0 {
+                        s = -0.0;
+                    }
+                    (i, s, fam)
+                })
+                .collect();
+            let mut by_family: [Vec<f32>; 4] = Default::default();
+            for &(_, s, f) in &items {
+                by_family[f as usize].push(canonical(s));
+            }
+            for v in &mut by_family {
+                v.sort_by(f32::total_cmp);
+            }
+            for e in ESTIMATES {
+                let kept: Vec<(usize, f32, u8)> =
+                    items.iter().copied().filter(|it| e.keeps(it.2)).collect();
+                let mut want = vec![None; n];
+                kdecoy_q(&kept, &mut want);
+                let steps = kdecoy_steps(&by_family, e);
+                for &(i, s, f) in &items {
+                    let got = steps
+                        .as_ref()
+                        .filter(|_| e.keeps(f))
+                        .map(|st| st.of_member(s));
+                    assert_eq!(got, want[i], "trial {trial} {e:?} row {i} score {s}");
+                }
+                // A row outside the fit takes the q of the highest score at
+                // or below it, or the lowest row's.
+                if let (Some(st), Estimate::Pooled) = (&steps, e) {
+                    let mut table: Vec<(f32, f64)> = kept
+                        .iter()
+                        .filter_map(|it| want[it.0].map(|q| (it.1, q)))
+                        .collect();
+                    table.sort_by(|a, b| a.0.total_cmp(&b.0).then(b.1.total_cmp(&a.1)));
+                    for probe in [-9.0f32, -0.3, -0.0, 0.0, 0.1, 0.25, 1.3, 9.0, f32::NAN] {
+                        let at = table.partition_point(|&(s, _)| s <= probe);
+                        let old = if at == 0 { table[0].1 } else { table[at - 1].1 };
+                        assert_eq!(st.at_or_below(probe), old, "probe {probe}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn training_sample_keeps_whole_precursors_whatever_the_order() {
+        let rows = rows(3000, 1.0, &[1, 2], 5);
+        let mut a: TrainingSample<usize> = TrainingSample::new(2500, 42);
+        for (i, r) in rows.iter().enumerate() {
+            a.push(i, r.precursor as u64, r.clone());
+        }
+        let mut b: TrainingSample<usize> = TrainingSample::new(2500, 42);
+        for (i, r) in rows.iter().enumerate().rev() {
+            b.push(i, r.precursor as u64, r.clone());
+        }
+        let (seen, kept, share) = a.stats();
+        assert_eq!(seen, 9000);
+        assert!(kept <= 2500 && kept > 1000, "{kept}");
+        assert!(share < 1.0);
+        let (ra, rb) = (a.into_items(), b.into_items());
+        assert_eq!(
+            ra, rb,
+            "the kept set and its order do not depend on arrival"
+        );
+        // Whole precursors: three rows each.
+        let mut per: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+        for r in &ra {
+            *per.entry(r.precursor).or_default() += 1;
+        }
+        assert!(per.values().all(|&c| c == 3));
+        // Under the cap every row is kept, in key order.
+        let mut all: TrainingSample<usize> = TrainingSample::new(10_000, 42);
+        for (i, r) in rows.iter().enumerate() {
+            all.push(i, r.precursor as u64, r.clone());
+        }
+        assert_eq!(all.into_items(), rows);
     }
 }

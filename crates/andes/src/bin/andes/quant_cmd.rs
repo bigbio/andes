@@ -1209,6 +1209,7 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
     }
     let limits = FinalizeLimits {
         max_train_rows: a.max_train_rows,
+        transfer_models: a.transfer_models,
         max_norm_cells: a.max_norm_cells,
         max_donor_fits: a.max_donor_fits,
         max_held_scores: a.max_held_scores,

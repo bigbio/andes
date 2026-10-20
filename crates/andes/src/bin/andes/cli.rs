@@ -1084,6 +1084,14 @@ pub(crate) struct QuantFinalizeArgs {
     #[arg(long = "max-train-rows", hide = true, default_value_t = crate::quant_finalize::DEFAULT_MAX_TRAIN_ROWS)]
     pub(crate) max_train_rows: usize,
 
+    /// Advanced: members of the bagged transfer classifier. Each fold's
+    /// transfer score is the mean of this many models, each trained on its
+    /// own sample of the training rows with its own seed, which keeps the
+    /// accepted transfers stable across seeds at hundreds of runs; training
+    /// and scoring time grow with it. 1 is a single model. Default 8.
+    #[arg(long = "transfer-models", hide = true, default_value_t = crate::quant_finalize::DEFAULT_TRANSFER_MODELS, value_parser = parse_transfer_models)]
+    pub(crate) transfer_models: usize,
+
     /// Advanced: reference cells of the run normalisation. Above it the fit
     /// uses a hashed sample of whole precursors, which coarsens the RT-local
     /// offsets (on a 6-run benchmark, half the cells raised the median
@@ -1434,6 +1442,14 @@ pub(crate) fn parse_uniprot_evidence(s: &str) -> Result<input::EvidenceLevel, St
 pub(crate) fn parse_enzyme_specificity(s: &str) -> Result<EnzymeSpecificity, String> {
     <EnzymeSpecificity as ValueEnum>::from_str(s, true)
         .map_err(|_| format!("invalid enzyme specificity `{s}`: expected non-specific|semi|fully"))
+}
+
+/// `--transfer-models`: 1 to 64 members.
+fn parse_transfer_models(s: &str) -> Result<usize, String> {
+    match s.parse::<usize>() {
+        Ok(n) if (1..=64).contains(&n) => Ok(n),
+        _ => Err(format!("{s}: expected 1 to 64 transfer classifier members")),
+    }
 }
 
 #[cfg(test)]

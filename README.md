@@ -244,7 +244,7 @@ an internal quant-quality q-value (`<stem>.mbr.parquet`). The same stages run on
 `andes quant library|extract|finalize` over a `--quant-dir`, for pipelines that spread runs
 over machines. On the ProteoBench label-free DDA module (PXD028735, six runs; measured at
 `47d2844`, before #166 and #167), andes quantified 54,932 precursors in at least 3 runs at
-transfer q 0.01 (67,035 at the default 0.05), with a median |ε| of 0.155 and a CV of 0.110 using
+transfer q 0.01 (67,035 at 0.05; the default is 0.01), with a median |ε| of 0.155 and a CV of 0.110 using
 `quantity_normalized`: lower on both than every match-between-runs submission on the public
 leaderboard. One dataset, one seed ([benchmarks](docs/benchmarks/README.md#2-the-benchmarks)).
 

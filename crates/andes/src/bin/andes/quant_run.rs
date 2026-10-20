@@ -91,7 +91,10 @@ impl QuantSettings {
         if cli.tmt_unmix && cli.tmt.is_none() {
             return Err("--tmt-unmix needs --tmt <plex>".into());
         }
-        if cli.tmt_unmix && cli.tmt_level >= 3 {
+        // An explicit --tmt-level 3. When the level is resolved from the data,
+        // MS3 reporters are only picked for low-resolution MS2, where unmixing
+        // is skipped with a warning (`from_cli`).
+        if cli.tmt_unmix && cli.tmt_level.is_some_and(|level| level >= 3) {
             return Err(
                 "--tmt-unmix models the co-isolation interference of MS2 reporter ions; it does \
                  not apply at --tmt-level 3"

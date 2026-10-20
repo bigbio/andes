@@ -52,8 +52,8 @@ E. coli entrapment proteome (PSM count 2026-10-10, `6a61f61`). Error re-measured
 and the nominal 1% is **2.30–2.50% true FDP** (T/E 2.351); at a true FDP of 1% andes keeps
 14,142–14,420 PSMs. Ten or eleven accepted PSMs map only to entrapment proteins but match a
 yeast sequence once I is folded to L; they count as target. Without that rule the same runs
-read 2.49–2.67% and 13,754–13,854. This is the regime where the Java predecessor is strongest, and andes trails
-it by 56 PSMs.
+read 2.49–2.67% and 13,754–13,854. This is the regime where the Java predecessor is
+strongest; on the 2026-10-10 count andes trails it by 56 PSMs.
 
 **Phospho-enriched.** One single-shot EasyPhos mouse liver file
 (`20151014_QEp6_NaKr_SA_totalliver_control2_phospho.raw`), not in any model's training data,

@@ -1074,7 +1074,7 @@ accepted**; use the names (case-insensitive, `--fragmentation hcd` ≡ `HCD`). T
 searches **N**-glycopeptides (N-X-S/T sequon backbones, trimannosyl core). With
 `--glyco-core o` it searches **O**-glycopeptides instead: any Ser/Thr is a
 glycosite (no sequon), the core is a single reducing-end GalNAc, and the glycan
-database must be an O-glycan `.gdb` (e.g. a pGlyco O-glycan database). The
+database must be an O-glycan `.gdb` (e.g. a published O-glycan database). The
 defaults are validated; most knobs are hidden.
 
 **Main flags:**

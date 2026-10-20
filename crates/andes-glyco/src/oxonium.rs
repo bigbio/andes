@@ -7,7 +7,7 @@ pub const NEUAC_OXONIUM_MZ: [f64; 2] = [274.09211, 292.10267];
 /// Neu5Gc (NeuGc) oxonium ions: 290.0870 (−H2O), 308.0976.
 pub const NEUGC_OXONIUM_MZ: [f64; 2] = [290.08702, 308.09759];
 
-/// Hex (galactose) diagnostic oxonium ions — pGlyco3's Fig. 3b validation ions:
+/// Hex (galactose) diagnostic oxonium ions, the IHMO benchmark's validation ions:
 /// 163.060 (Hex−H2O) and 366.139 (Hex-HexNAc, the core-1 Gal-GalNAc oxonium).
 /// Used to gate Hex>0 O-glycan candidates: the GalNAc oxonium (204.09) is shared
 /// by every O-glycan and cannot justify adding galactose, so a Hex claim without

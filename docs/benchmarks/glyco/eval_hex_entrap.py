@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Hex-containing O-glycan rate — the pGlyco3 Fig. 3b accuracy metric, for andes.
+"""Hex-containing O-glycan rate — the IHMO glycan-level accuracy metric, for andes.
 
-pGlyco3's O-glycan benchmark (IHMO HEK-293, Nat. Methods 2021, Fig. 3b) validates
+The published IHMO HEK-293 O-glycan benchmark (reference engine P) validates
 O-glycopeptides with "Hex-suggested" glycan-level error rates: the IHMO inhibitor
 (GalNAc-O-bn) truncates O-glycans to GalNAc (Tn) and sialyl-Tn, so any accepted
 O-glycopeptide whose glycan still contains Hex (galactose) is a false positive unless
-its Hex diagnostic ions (m/z 163.060 / 366.139) are present. pGlyco3 scored 2/484 =
-~0.4%; MetaMorpheus 8/273 = 2.9%, Byonic 48/488 = 10%, MSFragger 64/320 = 20%.
+its Hex diagnostic ions (m/z 163.060 / 366.139) are present. Engine P scored 2/484 =
+~0.4%; three other published engines scored 2.9%, 10% and 20%.
 
 This script computes the same denominator for andes: the fraction of accepted target
 O-GPSMs (@1% q-value) whose glycan composition carries Hex > 0. It is an UPPER bound on
 the error (it counts every Hex-containing ID as wrong, without the diagnostic-ion
-rescue pGlyco3 applies), so andes only has to clear ~0.4% to match pGlyco3.
+rescue engine P applies), so andes only has to clear ~0.4% to match engine P.
 
 Usage:
     eval_hex_entrap.py <pooled.glyco.pin> <percolator.psms>
@@ -85,7 +85,7 @@ print(f"  Fuc-containing            : {fuc_pos}  ({100 * fuc_pos / total:.2f}%)"
       f"  Fuc-containing            : {fuc_pos}")
 print(f"  NeuGc-containing          : {neugc_pos}  ({100 * neugc_pos / total:.2f}%)" if total else
       f"  NeuGc-containing          : {neugc_pos}")
-print(f"  pGlyco3 Hex error (Fig 3b): 2/484 = 0.41%   (MetaMorpheus 2.9%, Byonic 10%, MSFragger 20%)")
+print("  engine P Hex error        : 2/484 = 0.41%   (other published engines 2.9%, 10%, 20%)")
 print("\n  top accepted compositions:")
 for c, n in sorted(comps.items(), key=lambda kv: -kv[1])[:12]:
     print(f"    HexNAc{c[0]}Hex{c[1]}Fuc{c[2]}NeuAc{c[3]}NeuGc{c[4]}  x{n}")

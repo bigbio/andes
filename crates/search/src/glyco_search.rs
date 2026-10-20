@@ -38,7 +38,6 @@ use andes_glyco::backbone::{
 };
 use andes_glyco::glycan_db::GlycanComp;
 use andes_glyco::glycan_first::{search_glycans, Glycan, GlycanConfig, GlycanCore, GlycanIonIndex};
-use andes_glyco::glycan_mass::HEXNAC;
 use andes_glyco::glyco_psm::{
     glyco_gp_fused_score_iso, GlycoPsmKey, GLYCO_GP_CZ_DEFAULT, GLYCO_GP_H_DEFAULT,
     GLYCO_GP_ISO_DEFAULT, GLYCO_GP_J_DEFAULT, GLYCO_GP_K_DEFAULT,
@@ -187,12 +186,18 @@ pub struct GlycoSpectrumResult {
 /// glycan-by-subtraction filter. Mirrors the solver's `MIN_GLYCAN`.
 const MIN_GLYCAN_N: f64 = 406.0;
 
+/// Minimum implied O-glycan mass (one HexNAc, the Tn antigen = 203.079) for the
+/// same filter. Like [`MIN_GLYCAN_N`] it sits below the exact core mass, so a Tn
+/// precursor measured slightly light still reaches the tolerance-aware glycan
+/// match instead of being cut here.
+const MIN_GLYCAN_O: f64 = 203.0;
+
 /// Core-dependent glycan-by-subtraction floor for the peptide-first path. Tn
 /// (HexNAc = 203.08) and core-1 (HexHexNAc = 365.13) only pass under O-glycan.
 fn min_glycan_floor(core: GlycanCore) -> f64 {
     match core {
         GlycanCore::NGlycan => MIN_GLYCAN_N,
-        GlycanCore::OGlycan => HEXNAC,
+        GlycanCore::OGlycan => MIN_GLYCAN_O,
     }
 }
 
@@ -327,8 +332,9 @@ fn glyco_aware_peptide(
 /// First glycosite of `pep` ([`andes_glyco::sequon::glycosites`]: internal
 /// sequons first, then the boundary sequon completed by `pep.post`), defaulting
 /// to 0 when there is none. For O-glycan it is the first Ser/Thr (no motif, no
-/// boundary case). Shared by every c/z and rank-glycan scorer so they place the
-/// glycan on the same residue.
+/// boundary case); the site is not localized, so on a peptide with several S/T
+/// the c/z features describe this first site only. Shared by every c/z and
+/// rank-glycan scorer so they place the glycan on the same residue.
 fn glyco_site_for(pep: &model::peptide::Peptide, core: GlycanCore) -> usize {
     let res: Vec<u8> = pep.residues.iter().map(|aa| aa.residue).collect();
     if core == GlycanCore::OGlycan {
@@ -874,14 +880,11 @@ fn has_backbone_evidence(hit: &BackboneHit, core_y_hits: u8) -> bool {
 /// kept only when the spectrum shows a Hex diagnostic ion. N-glycans are never
 /// gated (Hex is in the trimannosyl core), and Hex-free / de-novo candidates pass.
 ///
-/// This closes the gap pGlyco3's Fig. 3b metric measures on IHMO data: the GalNAc
-/// oxonium alone passes the O-glycan diagnostic gate and then lets the scorer add
-/// galactose to a composition with no galactose evidence. pGlyco3 instead
-/// conditions its O-glycan search space on Hex diagnostic-ion intensity.
+/// The GalNAc oxonium alone passes the O-glycan diagnostic gate, so without this
+/// the scorer can add galactose to a composition with no galactose evidence (the
+/// Hex-suggested error the IHMO benchmark measures).
 fn hex_gate_passes(core: GlycanCore, glycan: Option<&GlycanComp>, hex_evidence: bool) -> bool {
-    core != GlycanCore::OGlycan
-        || glycan.is_none_or(|g| g.hex == 0)
-        || hex_evidence
+    core != GlycanCore::OGlycan || glycan.is_none_or(|g| g.hex == 0) || hex_evidence
 }
 
 /// Indices of the candidates whose residue mass is within `tol_da` of
@@ -1640,8 +1643,9 @@ fn score_spectrum_glyco(
                 glycan_y_intensity(y_peaks, y_stats, bbn, g, tol_ppm, max_frag_charge, ctx.core)
                     as f32
             }
-            None => core_y_intensity(y_peaks, y_stats, bbn, tol_ppm, max_frag_charge, ctx.core)
-                as f32,
+            None => {
+                core_y_intensity(y_peaks, y_stats, bbn, tol_ppm, max_frag_charge, ctx.core) as f32
+            }
         }
     };
     // Memoised per backbone: the ladder is a pure function of the backbone
@@ -2061,13 +2065,23 @@ fn score_spectrum_glyco(
             // glycan fall back to the composition-independent core-Y
             // ladder. (Was hardcoded 0.0 = dead before Phase 1.)
             y_ladder_intensity_score: match &bb_hit.glycan {
-                Some(g) => {
-                    glycan_y_intensity(y_peaks, y_stats, bb_neutral, g, tol_ppm, max_frag_charge, ctx.core)
-                        as f32
-                }
-                None => {
-                    core_y_intensity(y_peaks, y_stats, bb_neutral, tol_ppm, max_frag_charge, ctx.core) as f32
-                }
+                Some(g) => glycan_y_intensity(
+                    y_peaks,
+                    y_stats,
+                    bb_neutral,
+                    g,
+                    tol_ppm,
+                    max_frag_charge,
+                    ctx.core,
+                ) as f32,
+                None => core_y_intensity(
+                    y_peaks,
+                    y_stats,
+                    bb_neutral,
+                    tol_ppm,
+                    max_frag_charge,
+                    ctx.core,
+                ) as f32,
             },
             // COMPLETENESS of the assigned composition's own Y ladder: the
             // fraction of the rungs it PREDICTS that were matched, in [0,1].
@@ -2344,6 +2358,16 @@ mod glycan_source_tests {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn o_glycan_floor_admits_a_light_tn_precursor() {
+        use super::{min_glycan_floor, GlycanCore};
+        use andes_glyco::glycan_mass::HEXNAC;
+        // A Tn glycan measured 0.01 Da light must still reach the glycan match.
+        assert!(HEXNAC - 0.01 >= min_glycan_floor(GlycanCore::OGlycan));
+        // The N floor is unchanged and still excludes a single HexNAc.
+        assert!(HEXNAC < min_glycan_floor(GlycanCore::NGlycan));
+    }
+
+    #[test]
     fn o_glycan_hex_gate_drops_hex_without_evidence() {
         use super::{hex_gate_passes, GlycanComp, GlycanCore};
         let hex_glycan = GlycanComp {
@@ -2360,13 +2384,25 @@ mod tests {
             ..hex_glycan.clone()
         };
         // N-glycan: Hex is in the trimannosyl core, never gated.
-        assert!(hex_gate_passes(GlycanCore::NGlycan, Some(&hex_glycan), false));
+        assert!(hex_gate_passes(
+            GlycanCore::NGlycan,
+            Some(&hex_glycan),
+            false
+        ));
         // O-glycan Hex-free and de-novo (no glycan) candidates always pass.
         assert!(hex_gate_passes(GlycanCore::OGlycan, Some(&no_hex), false));
         assert!(hex_gate_passes(GlycanCore::OGlycan, None, false));
         // O-glycan with Hex passes only with Hex diagnostic evidence.
-        assert!(!hex_gate_passes(GlycanCore::OGlycan, Some(&hex_glycan), false));
-        assert!(hex_gate_passes(GlycanCore::OGlycan, Some(&hex_glycan), true));
+        assert!(!hex_gate_passes(
+            GlycanCore::OGlycan,
+            Some(&hex_glycan),
+            false
+        ));
+        assert!(hex_gate_passes(
+            GlycanCore::OGlycan,
+            Some(&hex_glycan),
+            true
+        ));
     }
 
     #[test]
@@ -2809,7 +2845,8 @@ mod tests {
         // Verify counts directly.
         let stats = SpectrumStats::new(&peaks);
         let true_hits = count_core_y_hits(&peaks, &stats, true_bb, tol_ppm, 3, GlycanCore::NGlycan);
-        let noise_hits = count_core_y_hits(&peaks, &stats, noise_bb, tol_ppm, 3, GlycanCore::NGlycan);
+        let noise_hits =
+            count_core_y_hits(&peaks, &stats, noise_bb, tol_ppm, 3, GlycanCore::NGlycan);
 
         assert_eq!(
             true_hits, 6,

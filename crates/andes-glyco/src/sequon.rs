@@ -109,8 +109,7 @@ pub fn first_ser_thr_site(residues: &[u8]) -> Option<usize> {
 }
 
 /// Returns the 0-based indices of EVERY Ser/Thr, ascending. Every S/T is a candidate
-/// glycosite; the c/z hyperscore is maximised over them exactly as N-glycan does
-/// over its sequons.
+/// glycosite; the glyco PIN uses this to name the site only when there is exactly one.
 pub fn all_ser_thr_sites(residues: &[u8]) -> Vec<usize> {
     residues
         .iter()

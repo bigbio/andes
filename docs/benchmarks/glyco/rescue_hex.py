@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""pGlyco3's Hex diagnostic-ion rescue, applied to andes's Hex-containing GPSMs.
+"""The reference Hex diagnostic-ion rescue, applied to andes's Hex-containing GPSMs.
 
 `eval_hex_entrap.py` reports the raw Hex-containing rate — an UPPER bound on the
 error, because it counts every Hex-containing O-GPSM as wrong without the
-diagnostic-ion rescue pGlyco3 applies. This script applies that rescue so the two
+diagnostic-ion rescue reference engine P applies. This script applies that rescue so the two
 numbers are directly comparable.
 
-pGlyco3 (Nat. Methods 2021, Fig. 3b) counts a Hex-containing O-glycopeptide as an
-error ONLY if its Hex diagnostic ions fail validation. The exact criterion
-(Zeng et al. 2021): the summed intensity of the two Hex diagnostic ions
+Engine P counts a Hex-containing O-glycopeptide as an error ONLY if its Hex
+diagnostic ions fail validation. The exact criterion: the summed intensity of the two Hex diagnostic ions
   m/z 163.060  (Hex oxonium, [Hex+H-H2O]+)
   m/z 366.139  (Hex-HexNAc oxonium, [HexHexNAc+H]+)
 must reach >= 10% of the base-peak intensity.
@@ -31,7 +30,7 @@ pin, psms, mgfdir = sys.argv[1], sys.argv[2], sys.argv[3]
 COMP = re.compile(r"HexNAc(\d+)Hex(\d+)Fuc(\d+)NeuAc(\d+)NeuGc(\d+)")
 HEX_IONS = (163.0604, 366.1395)
 TOL_PPM = 20.0
-THRESH = 0.10  # pGlyco3: sum(Hex ion intensities) >= 10% of base peak
+THRESH = 0.10  # engine P: sum(Hex ion intensities) >= 10% of base peak
 
 
 def comp_of(pep):
@@ -150,13 +149,13 @@ total = len(accepted)
 print(f"accepted O-GPSMs @1%          : {total_accepted}")
 print(f"Hex-containing accepted GPSMs : {total}")
 print(f"  ion present (any of 163/366) : {presence}")
-print(f"  pGlyco3-rescued (>=10% base) : {rescued}")
+print(f"  rescued (>=10% of base peak) : {rescued}")
 print(f"  unresolved (Hex error)       : {total - rescued}")
 print(
-    f"  andes Hex-error (pGlyco3 rule): {total - rescued}/{total_accepted} "
+    f"  andes Hex-error (engine P rule): {total - rescued}/{total_accepted} "
     f"= {100 * (total - rescued) / total_accepted:.2f}%"
 )
-print(f"  pGlyco3: 2/484 = 0.41%; MetaMorpheus 2.9%; Byonic 10%; MSFragger 20%")
+print("  engine P: 2/484 = 0.41%; other published engines 2.9%, 10%, 20%")
 print()
 for frac, scan, c, v, fr in detail:
     print(f"  {frac} scan={scan} {c} -> {v}  (Hex-ion sum/base = {100 * fr:.1f}%)")

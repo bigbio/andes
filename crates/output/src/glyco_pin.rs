@@ -851,7 +851,9 @@ mod tests {
         // the sequon may sit at the very start; positions are 1-based.
         assert!(glycan_tag_with_site(&g, b"NLTAAK", b'A', GlycanCore::NGlycan).ends_with("@N1]"));
         // two sequons: andes does not localize by default, so it must not pick.
-        assert!(glycan_tag_with_site(&g, b"ANLTANCSK", b'A', GlycanCore::NGlycan).ends_with("@N?]"));
+        assert!(
+            glycan_tag_with_site(&g, b"ANLTANCSK", b'A', GlycanCore::NGlycan).ends_with("@N?]")
+        );
         // no sequon at all is also "not a site andes assigned".
         assert!(glycan_tag_with_site(&g, b"AAAAK", b'A', GlycanCore::NGlycan).ends_with("@N?]"));
         // a boundary sequon (…N-K | S-…) is the peptide's only glycosite.
@@ -860,7 +862,8 @@ mod tests {
         assert!(glycan_tag_with_site(&g, b"ANLTANK", b'T', GlycanCore::NGlycan).ends_with("@N?]"));
         // the composition itself is unchanged by the site suffix.
         assert!(
-            glycan_tag_with_site(&g, b"AANLTK", b'A', GlycanCore::NGlycan).starts_with("[HexNAc2Hex5Fuc0NeuAc0NeuGc0")
+            glycan_tag_with_site(&g, b"AANLTK", b'A', GlycanCore::NGlycan)
+                .starts_with("[HexNAc2Hex5Fuc0NeuAc0NeuGc0")
         );
     }
 

@@ -628,6 +628,8 @@ pub(crate) struct SearchArgs {
     /// same value cost 161 of 707 identifications. Set it for collision-dominant data;
     /// leave it off for electron-transfer data. Exempting ETD scans automatically was
     /// tried and made both regimes worse, because real files are mixed.
+    /// Under `--glyco-core o` the core ladder is only Y0 and Y1, so a value above 2
+    /// rejects every O-glycopeptide.
     #[arg(long = "glyco-min-core-y", default_value_t = 0u32)]
     pub(crate) glyco_min_core_y: u32,
 

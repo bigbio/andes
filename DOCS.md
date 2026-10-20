@@ -1497,8 +1497,11 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
   54.9k before the peak-shape features).
   The validation file and the finalize log count the decoys accepted per family (mass shift,
   RT shift, identity) and the transfers the wrong-peak decoys alone would accept. The
-  transfer features are the fit evidence, the donor-run count, the library q-value and the
-  agreement of the row's peak shape with the precursor's identified fits in the other runs
+  transfer features are the fit evidence, the donor-run count, the library q-value, the
+  neighbour donor rate (the share of the 50 runs most like the transfer's run, by the Jaccard
+  index of the target entries each run identified, that identified the precursor; computed from
+  the donor runs alone, the same way for target and decoy precursors, and never counting the
+  row's own run) and the agreement of the row's peak shape with the precursor's identified fits in the other runs
   (the median over those runs, leaving out the row's own run so a pseudo-transfer is not
   compared with its own identification): the log ratio of the fitted width carried onto the
   consensus RT scale, the difference in tailing (the isotope-0 residual after the apex minus
@@ -1583,7 +1586,18 @@ outputs are byte-identical to an all-in-memory run, whatever the number of threa
 limits only trade memory for passes over the tables: `--max-donor-fits` (identified rows
 summarised per pass, default 12,000,000) and `--max-held-scores` (held-out scores in memory
 per classifier, default 64,000,000; above it they are sorted into temporary tables). `--seed`
-(default 42) sets the folds, the models and the samples. Memory follows the library, these
+(default 42) sets the folds, the models and the samples. The transfer classifier is bagged:
+each fold's score is the mean margin of `--transfer-models` GBDTs (default 8), each trained on
+its own hashed sample of at most `--max-train-rows` rows with its own seed (`--transfer-models
+1` is the single model of earlier versions). One model trained on a sample of a few million of
+hundreds of millions of rows moves the scores near the threshold more than their evidence
+does: on 500 runs, two seeds of one model shared 49 % of the transfers accepted at transfer q
+0.01 (82 % at 0.05), and more training rows did not help (4 and 16 times the rows: 64 % at
+0.01, 86–87 % at 0.05). With the neighbour donor rate and 8 members they share 79 % (94 % at
+0.05), with 16 members 84 % (96 %); the neighbour donor rate alone shares 57 % (86 %) and
+accepts 2.9 times the transfers at 0.01 (1.5 times at 0.05), with the pseudo-transfers accepted
+at 0.05 rising from 26.5 % to 38.3 % at a wrong-peak rate of 4.3 % (4.0 % before). Each run's held-out transfer scores are kept in a temporary table between the scoring
+pass and the output pass, so the members score every row once. Memory follows the library, these
 limits and one run's output rows per thread; the term that grows with the data is the pooled
 q-value step function of each classifier, 12 bytes per step (74 million steps, 0.9 GB, on 500
 Orbitrap runs with 464 million extract rows). On those 500 runs with 16 threads finalize took

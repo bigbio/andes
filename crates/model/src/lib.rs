@@ -7,6 +7,7 @@
 pub mod aa_set;
 pub mod activation;
 pub mod amino_acid;
+pub mod annotation;
 pub mod enzyme;
 pub mod instrument;
 pub mod isotope;
@@ -23,17 +24,18 @@ pub mod unimod;
 pub use aa_set::{AaSetError, AminoAcidSet, AminoAcidSetBuilder, Terminus};
 pub use activation::ActivationMethod;
 pub use amino_acid::AminoAcid;
+pub use annotation::{Annotation, Edit, Processing};
 pub use enzyme::Enzyme;
 pub use instrument::InstrumentType;
 pub use mass::{nominal_from, H2O, PROTON};
 pub use modification::{ModLocation, ModParseError, Modification, ResidueSpec};
 pub use peptide::Peptide;
 pub use protein::{
-    ChainEnds, EntryKind, EntryOrigin, ModSite, Protein, ProteinAnnotation, ProteinDb, SiteAnchor,
-    Substitution, VariantRegion,
+    ChainEnds, EntryKind, EntryOrigin, ModSite, PriorTier, Protein, ProteinAnnotation, ProteinDb,
+    SiteAnchor, SiteClaim, Substitution, VariantRegion,
 };
 pub use protocol::Protocol;
-pub use scan::{Ms1Scan, ProductScan};
+pub use scan::{Ms1Scan, NoiseProfile, ProductScan};
 pub use spectrum::Spectrum;
 pub use tolerance::{PrecursorTolerance, Tolerance};
 pub use unimod::{UnimodDb, UnimodMod, UnimodResolveError};

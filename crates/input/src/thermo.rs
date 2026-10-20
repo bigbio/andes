@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use thermorawfilereader::schema::{DissociationMethod, MassAnalyzer};
 use thermorawfilereader::{RawFileReader, RawSpectrum};
 
-use model::scan::{Ms1Scan, ProductScan, ScanContext};
+use model::scan::{Ms1Scan, NoiseProfile, ProductScan, ScanContext};
 use model::{ActivationMethod, InstrumentType};
 
 use crate::{Ms1Link, Spectrum};
@@ -55,6 +55,9 @@ pub struct ThermoRawReader {
     /// range, FAIMS voltage).
     capture_scan_context: bool,
     scan_contexts: Vec<ScanContext>,
+    /// Read the per-centroid noise of captured product scans and scan
+    /// contexts (reporter signal-to-noise).
+    capture_noise: bool,
 }
 
 impl ThermoRawReader {
@@ -79,6 +82,7 @@ impl ThermoRawReader {
             product_scans: Vec::new(),
             capture_scan_context: false,
             scan_contexts: Vec::new(),
+            capture_noise: false,
         })
     }
 
@@ -101,6 +105,23 @@ impl ThermoRawReader {
     pub fn with_scan_context_capture(mut self, capture: bool) -> Self {
         self.capture_scan_context = capture;
         self
+    }
+
+    /// Read the reporter-region noise (the Orbitrap noise of each centroid)
+    /// of captured product scans and scan contexts, for reporter
+    /// signal-to-noise. Ion-trap scans carry none.
+    pub fn with_noise_capture(mut self, capture: bool) -> Self {
+        self.capture_noise = capture;
+        self
+    }
+
+    /// The reporter-region noise of scan `index`, when noise capture is on
+    /// and the scan has centroid noise values.
+    fn noise_of(&self, index: usize) -> Option<NoiseProfile> {
+        if !self.capture_noise {
+            return None;
+        }
+        reporter_noise(&self.handle, index)
     }
 
     pub fn take_scan_contexts(&mut self) -> Vec<ScanContext> {
@@ -270,6 +291,7 @@ impl ThermoRawReader {
                                 .map(|scan| with_scan_number(&spec.title, scan)),
                             scan_window: scan_window(&raw),
                             faims_cv: faims_cv(&raw),
+                            noise: self.noise_of(i),
                         });
                     }
                     chunk.push(spec);
@@ -392,6 +414,18 @@ fn with_scan_number(native_id: &str, scan: usize) -> String {
         }
         None => format!("controllerType=0 controllerNumber=1 scan={scan}"),
     }
+}
+
+/// The reporter-region noise of scan `index` from its centroid (label) data:
+/// RawFileReader's advanced packet holds each centroid's mass and noise, so
+/// the pairs need no alignment with the peak list. `None` for scans without
+/// centroid noise (ion-trap scans).
+fn reporter_noise(handle: &RawFileReader, index: usize) -> Option<NoiseProfile> {
+    let data = handle.get_extended_spectrum_data(index, false)?;
+    let view = data.view();
+    let (mass, noise) = (view.mass()?, view.noise()?);
+    let n = mass.len().min(noise.len());
+    NoiseProfile::reporter_region((0..n).map(|j| (mass.get(j), noise.get(j))))
 }
 
 /// Extract centroided peaks `(m/z, intensity)` from a raw spectrum, ascending
@@ -644,6 +678,7 @@ impl Iterator for ThermoRawReader {
                     precursor_mz: raw.precursor().map(|p| p.mz()).unwrap_or(0.0),
                     scan_window: scan_window(&raw),
                     peaks: extract_peaks(&raw),
+                    noise: self.noise_of(i),
                 });
                 continue;
             }
@@ -664,6 +699,7 @@ impl Iterator for ThermoRawReader {
                                 .map(|scan| with_scan_number(&spec.title, scan)),
                             scan_window: scan_window(&raw),
                             faims_cv: faims_cv(&raw),
+                            noise: self.noise_of(i),
                         });
                     }
                     return Some(Ok(spec));

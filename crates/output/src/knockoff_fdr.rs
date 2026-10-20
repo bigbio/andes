@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use model::EntryKind;
+use model::{EntryKind, PriorTier};
 use search::SearchIndex;
 
 use crate::percolator::PercolatorPsm;
@@ -25,6 +25,11 @@ const STRATA: [(&str, f64); 3] = [
 ];
 const OTHER: &str = "other";
 const STRATUM_TOL_DA: f64 = 0.02;
+/// Tested real PSMs at the cutoff a substitution class needs within one prior
+/// tier to get its own stratum; with fewer, the class's rows of that tier
+/// join the class's rows of every other small tier. Classes are never pooled
+/// with each other: their error rates differ several-fold.
+const MIN_STRATUM_TESTED: usize = 50;
 
 fn stratum(delta_da: f64) -> &'static str {
     STRATA
@@ -36,7 +41,9 @@ fn stratum(delta_da: f64) -> &'static str {
 /// One substitution class, as counted for the run log.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnockoffCount {
-    pub stratum: &'static str,
+    /// The substitution class, with the prior tier when the run has several
+    /// (`deamidation-like/sample`; `…/pooled` for the class's small tiers).
+    pub stratum: String,
     /// Real variant PSMs at q ≤ the cutoff before the knockoff q-values.
     pub real_before: usize,
     /// Of them, the ones whose variant has knockoffs.
@@ -68,6 +75,9 @@ pub struct KnockoffOutcome {
     pub knockoff_rows: HashSet<String>,
 }
 
+/// A row's rank, id and kind.
+type RankedRow = (f64, String, Row);
+
 /// How a variant-class target row relates to the knockoffs.
 enum Row {
     /// Every protein is a knockoff entry; `weight` is 1/k of the variant it
@@ -84,7 +94,10 @@ enum Row {
 /// keeps out of every reported output.
 ///
 /// Rows of the variant class only (no Reference, isoform or chain protein).
-/// Within a substitution class, at score `t`:
+/// A stratum is a substitution class within one prior tier (a class with
+/// fewer than [`MIN_STRATUM_TESTED`] tested real PSMs at the cutoff in a tier
+/// joins the class's other small tiers), so claims of different reliability
+/// do not share one estimate. Within a stratum, at score `t`:
 /// FDP(t) = (1/K + Σ 1/k over knockoff rows ≥ t) / #(tested real rows ≥ t),
 /// with K the most knockoffs of any variant; a real row's knockoff q-value is
 /// the least FDP(t) over t at or below its score. An untested real row (no
@@ -122,11 +135,12 @@ pub fn apply_knockoff_fdr(
         .collect();
 
     let rank = |p: &PercolatorPsm| p.score.unwrap_or(-p.q_value);
-    // Per stratum: (rank, row id, row kind).
-    let mut by_stratum: HashMap<&'static str, Vec<(f64, String, Row)>> = HashMap::new();
+    // Per (substitution class, tier): (rank, row id, row kind).
+    let mut by_class_tier: HashMap<(&'static str, PriorTier), Vec<RankedRow>> = HashMap::new();
     for (id, psm) in targets.iter() {
         let mut real_delta: Option<f64> = None;
-        let mut knockoff: Option<(f64, f64)> = None;
+        let mut real_tier: Option<PriorTier> = None;
+        let mut knockoff: Option<(f64, f64, PriorTier)> = None;
         let mut tested = false;
         let mut variant_only = true;
         let mut all_knockoff = true;
@@ -145,13 +159,15 @@ pub fn apply_knockoff_fdr(
                     let k = per_variant[&(&*o.family, of)] as f64;
                     let w = 1.0 / k;
                     knockoff = Some(match knockoff {
-                        Some((d, prev)) => (d, prev.min(w)),
-                        None => (o.variant_delta_da, w),
+                        Some((d, prev, t)) => (d, prev.min(w), t),
+                        None => (o.variant_delta_da, w, o.tier),
                     });
                 }
                 None => {
                     all_knockoff = false;
                     real_delta.get_or_insert(o.variant_delta_da);
+                    // A peptide several real variants share takes the best tier.
+                    real_tier = Some(real_tier.map_or(o.tier, |t| t.min(o.tier)));
                     tested |= per_variant.contains_key(&(&*o.family, &*o.feature));
                 }
             }
@@ -159,15 +175,38 @@ pub fn apply_knockoff_fdr(
         if !variant_only {
             continue;
         }
-        let (delta, row) = match (all_knockoff, knockoff, real_delta) {
-            (true, Some((d, w)), _) => (d, Row::Knockoff { weight: w }),
-            (false, _, Some(d)) => (d, Row::Real { tested }),
+        let (delta, tier, row) = match (all_knockoff, knockoff, real_delta) {
+            (true, Some((d, w, t)), _) => (d, t, Row::Knockoff { weight: w }),
+            (false, _, Some(d)) => (d, real_tier.unwrap_or_default(), Row::Real { tested }),
             _ => continue,
         };
-        by_stratum
-            .entry(stratum(delta))
+        by_class_tier
+            .entry((stratum(delta), tier))
             .or_default()
             .push((rank(psm), id.clone(), row));
+    }
+
+    // Strata: a class within a tier when it has enough tested real PSMs at
+    // the cutoff, else the class across its small tiers. With one tier, a
+    // stratum is a class.
+    let tested_at_cutoff = |rows: &[RankedRow]| {
+        rows.iter()
+            .filter(|(_, id, row)| {
+                matches!(row, Row::Real { tested: true }) && targets[id].q_value <= fdr
+            })
+            .count()
+    };
+    let tiers: std::collections::BTreeSet<PriorTier> = by_class_tier.keys().map(|k| k.1).collect();
+    let mut by_stratum: HashMap<String, Vec<RankedRow>> = HashMap::new();
+    for ((class, tier), rows) in by_class_tier {
+        let name = if tiers.len() < 2 {
+            class.to_string()
+        } else if tested_at_cutoff(&rows) >= MIN_STRATUM_TESTED {
+            format!("{class}/{}", tier.name())
+        } else {
+            format!("{class}/pooled")
+        };
+        by_stratum.entry(name).or_default().extend(rows);
     }
 
     let mut counts = Vec::new();
@@ -245,10 +284,12 @@ pub fn apply_knockoff_fdr(
         }
     }
     counts.sort_by_key(|c| {
-        STRATA
+        let class = c.stratum.split('/').next().unwrap_or_default().to_string();
+        let order = STRATA
             .iter()
-            .position(|(n, _)| *n == c.stratum)
-            .unwrap_or(STRATA.len())
+            .position(|(n, _)| *n == class)
+            .unwrap_or(STRATA.len());
+        (order, c.stratum.clone())
     });
     KnockoffOutcome {
         counts,
@@ -263,6 +304,17 @@ mod tests {
     use std::sync::Arc;
 
     fn protein(acc: &str, kind: EntryKind, feature: &str, delta: f64, of: Option<&str>) -> Protein {
+        tiered(acc, kind, feature, delta, of, PriorTier::Catalogue)
+    }
+
+    fn tiered(
+        acc: &str,
+        kind: EntryKind,
+        feature: &str,
+        delta: f64,
+        of: Option<&str>,
+        tier: PriorTier,
+    ) -> Protein {
         let annotation = (kind != EntryKind::Reference).then(|| {
             Arc::new(
                 ProteinAnnotation::new(Vec::new(), None).with_origin(Some(EntryOrigin {
@@ -271,6 +323,8 @@ mod tests {
                     feature: Arc::from(feature),
                     variant_delta_da: delta,
                     knockoff_of: of.map(Arc::from),
+                    source: None,
+                    tier,
                 })),
             )
         });
@@ -412,5 +466,85 @@ mod tests {
         assert!(!apply_knockoff_fdr(&mut t, &idx, 0.01)
             .knockoff_rows
             .contains("v2"));
+    }
+
+    /// Deamidation-like variants in three tiers, each with two knockoffs:
+    /// S (sample), C (catalogue) and M (common).
+    fn tiered_index() -> SearchIndex {
+        let mut proteins = vec![protein("sp|P1|A", EntryKind::Reference, "", 0.0, None)];
+        for (v, tier) in [
+            ("S", PriorTier::Sample),
+            ("C", PriorTier::Catalogue),
+            ("M", PriorTier::Common),
+        ] {
+            proteins.push(tiered(
+                &format!("sp|P1_{v}|A"),
+                EntryKind::Variant,
+                v,
+                0.984016,
+                None,
+                tier,
+            ));
+            for k in 1..=2 {
+                let f = format!("KO{k}_{v}");
+                proteins.push(tiered(
+                    &format!("sp|P1_{f}|A"),
+                    EntryKind::Variant,
+                    &f,
+                    0.984016,
+                    Some(v),
+                    tier,
+                ));
+            }
+        }
+        SearchIndex::from_target_db(&ProteinDb { proteins }, "XXX")
+    }
+
+    #[test]
+    fn tiers_with_enough_claims_get_their_own_estimate() {
+        let idx = tiered_index();
+        // 60 sample PSMs and no sample knockoff; 60 catalogue PSMs with 30
+        // catalogue knockoff PSMs among them; 5 common PSMs.
+        let mut t: HashMap<_, _> = (0..60)
+            .map(|i| psm(&format!("s{i}"), 100.0 - i as f64, 0.001, "sp|P1_S|A"))
+            .chain((0..60).map(|i| psm(&format!("c{i}"), 100.0 - i as f64, 0.001, "sp|P1_C|A")))
+            .chain((0..30).map(|i| {
+                psm(
+                    &format!("k{i}"),
+                    99.5 - 2.0 * i as f64,
+                    0.001,
+                    "sp|P1_KO1_C|A",
+                )
+            }))
+            .chain((0..5).map(|i| psm(&format!("m{i}"), 100.0 - i as f64, 0.001, "sp|P1_M|A")))
+            .collect();
+        let counts = apply_knockoff_fdr(&mut t, &idx, 0.05).counts;
+        let names: Vec<&str> = counts.iter().map(|c| c.stratum.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "deamidation-like/catalogue",
+                "deamidation-like/pooled",
+                "deamidation-like/sample"
+            ]
+        );
+        // Sample: (1/2) / 60 at the bottom row. Catalogue: about half its
+        // rows are matched by a knockoff row weighing 1/2.
+        assert!(t["s59"].q_value < 0.01, "{}", t["s59"].q_value);
+        assert!(t["c59"].q_value > 0.2, "{}", t["c59"].q_value);
+        // The common tier is too small: it is pooled within its class.
+        let pooled = counts
+            .iter()
+            .find(|c| c.stratum.ends_with("pooled"))
+            .unwrap();
+        assert_eq!(pooled.tested_before, 5);
+    }
+
+    #[test]
+    fn one_tier_keeps_class_strata() {
+        let idx = index();
+        let mut t: HashMap<_, _> = [psm("r", 5.0, 0.001, "sp|P1_V1|A")].into_iter().collect();
+        let counts = apply_knockoff_fdr(&mut t, &idx, 0.01).counts;
+        assert_eq!(counts[0].stratum, "deamidation-like");
     }
 }

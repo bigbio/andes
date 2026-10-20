@@ -59,7 +59,7 @@ dependencies = [
 
 [[package]]
 name = "andes"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "andes-glyco",
  "arrow",
@@ -83,7 +83,7 @@ dependencies = [
 
 [[package]]
 name = "andes-glyco"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "android-tzdata"
@@ -1436,7 +1436,7 @@ dependencies = [
 
 [[package]]
 name = "input"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64",
  "byteorder",
@@ -1801,7 +1801,7 @@ dependencies = [
 
 [[package]]
 name = "model"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "rustc-hash",
  "tempfile",
@@ -1810,7 +1810,7 @@ dependencies = [
 
 [[package]]
 name = "model-train"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "input",
@@ -2009,7 +2009,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "onnx-infer"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "input",
  "model",
@@ -2056,7 +2056,7 @@ dependencies = [
 
 [[package]]
 name = "output"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "andes-glyco",
  "arrow",
@@ -2314,7 +2314,7 @@ dependencies = [
 
 [[package]]
 name = "quant"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "model",
  "rayon",
@@ -2599,7 +2599,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "scoring"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "byteorder",
  "input",
@@ -2610,7 +2610,7 @@ dependencies = [
 
 [[package]]
 name = "search"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "andes-glyco",
  "input",

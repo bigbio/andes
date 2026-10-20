@@ -73,15 +73,15 @@ pub fn class_of(proteins: &str, kinds: &HashMap<&str, EntryKind>) -> String {
     }
 }
 
-/// The q-value cutoff each target row is accepted at: `variant_fdr` for a
-/// row of the variant class (every protein a variant entry), `fdr` for every
-/// other row. A variant claim and a canonical identification are different
-/// claims, and the variant class's error is estimated on its own (class FDR,
-/// knockoffs), so it can be reported at its own level.
+/// The q-value cutoff each target row is accepted at: `proteoform_fdr` for a
+/// proteoform claim (a row of the variant class: every protein a variant
+/// entry), `fdr` for every other row. A proteoform claim and a canonical
+/// identification are different claims, and the claim's error is estimated
+/// on its own (class FDR, knockoffs), so it can be reported at its own level.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Cutoffs {
     pub fdr: f64,
-    pub variant_fdr: f64,
+    pub proteoform_fdr: f64,
     variant_rows: HashSet<String>,
 }
 
@@ -90,17 +90,17 @@ impl Cutoffs {
     pub fn uniform(fdr: f64) -> Self {
         Cutoffs {
             fdr,
-            variant_fdr: fdr,
+            proteoform_fdr: fdr,
             variant_rows: HashSet::new(),
         }
     }
 
-    /// Cutoffs for `targets`, whose variant-class rows take `variant_fdr`.
+    /// Cutoffs for `targets`, whose proteoform-claim rows take `proteoform_fdr`.
     pub fn new(
         targets: &HashMap<String, PercolatorPsm>,
         idx: &SearchIndex,
         fdr: f64,
-        variant_fdr: f64,
+        proteoform_fdr: f64,
     ) -> Self {
         let kinds: HashMap<&str, EntryKind> = idx
             .db
@@ -115,7 +115,7 @@ impl Cutoffs {
             .collect();
         Cutoffs {
             fdr,
-            variant_fdr,
+            proteoform_fdr,
             variant_rows,
         }
     }
@@ -125,11 +125,11 @@ impl Cutoffs {
         self.or(id, self.fdr)
     }
 
-    /// `variant_fdr` for a variant-class row, else `base` (a stage with its
+    /// `proteoform_fdr` for a proteoform-claim row, else `base` (a stage with its
     /// own cutoff for the other rows, such as quantification).
     pub fn or(&self, id: &str, base: f64) -> f64 {
         if self.variant_rows.contains(id) {
-            self.variant_fdr
+            self.proteoform_fdr
         } else {
             base
         }
@@ -305,6 +305,8 @@ mod tests {
                     feature: Arc::from("F"),
                     variant_delta_da: 0.0,
                     knockoff_of: None,
+                    source: None,
+                    tier: model::PriorTier::Catalogue,
                 })),
             )
         });

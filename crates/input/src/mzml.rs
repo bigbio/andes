@@ -13,7 +13,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use flate2::read::ZlibDecoder;
 use quick_xml::{events::Event, Reader};
 
-use model::scan::{Ms1Scan, ProductScan, ScanContext};
+use model::scan::{Ms1Scan, NoiseProfile, ProductScan, ScanContext};
 use model::{ActivationMethod, InstrumentType, Spectrum};
 
 // ── CV accessions we care about ─────────────────────────────────────────────
@@ -73,6 +73,10 @@ const CV_CHARGE_STATE: &str = "MS:1000041";
 const CV_PEAK_INTENSITY: &str = "MS:1000042";
 const CV_MZ_ARRAY: &str = "MS:1000514";
 const CV_INTENSITY_ARRAY: &str = "MS:1000515";
+/// `sampled noise m/z array` / `sampled noise intensity array`: the
+/// instrument's noise estimate along m/z (ThermoRawFileParser `--noiseData`).
+const CV_NOISE_MZ_ARRAY: &str = "MS:1002743";
+const CV_NOISE_ARRAY: &str = "MS:1002744";
 const CV_64BIT: &str = "MS:1000523";
 const CV_32BIT: &str = "MS:1000521";
 const CV_ZLIB: &str = "MS:1000574";
@@ -217,6 +221,8 @@ enum State {
 struct BinaryArrayCtx {
     is_mz: bool,
     is_intensity: bool,
+    is_noise_mz: bool,
+    is_noise: bool,
     /// 32 or 64 bits.
     precision_bits: u8,
     zlib: bool,
@@ -230,6 +236,8 @@ impl BinaryArrayCtx {
         BinaryArrayCtx {
             is_mz: false,
             is_intensity: false,
+            is_noise_mz: false,
+            is_noise: false,
             precision_bits: 64,
             zlib: false,
             unsupported: None,
@@ -385,6 +393,21 @@ struct SpectrumBuilder {
     faims_cv: Option<f32>,
     mz_array: Option<Vec<f64>>,
     intensity_array: Option<Vec<f64>>,
+    /// Sampled noise arrays, kept only under noise capture.
+    noise_mz_array: Option<Vec<f64>>,
+    noise_array: Option<Vec<f64>>,
+}
+
+impl SpectrumBuilder {
+    /// The reporter-region noise of this scan from its sampled noise arrays.
+    fn take_noise(&mut self) -> Option<NoiseProfile> {
+        let mz = self.noise_mz_array.take()?;
+        let noise = self.noise_array.take()?;
+        if mz.len() != noise.len() {
+            return None;
+        }
+        NoiseProfile::reporter_region(mz.into_iter().zip(noise.into_iter().map(|n| n as f32)))
+    }
 }
 
 // ── Extracted cv-param info (avoids borrow-checker conflicts) ────────────────
@@ -472,6 +495,9 @@ pub struct MzMLReader<R: BufRead> {
     /// acquired m/z range, FAIMS voltage) of every emitted MS2.
     capture_scan_context: bool,
     scan_contexts: Vec<ScanContext>,
+    /// Quantification capture: the reporter-region noise of captured MS3+
+    /// scans and scan contexts, from the sampled noise arrays when present.
+    capture_noise: bool,
     /// Strict mode (finding 4.1). When `true`, the default [`Iterator`] yields
     /// the parse `Err` for a malformed spectrum (then stops) instead of
     /// silently resyncing past it. Default `false` (tolerant resync) preserves
@@ -507,6 +533,7 @@ impl<R: BufRead> MzMLReader<R> {
             product_scans: Vec::new(),
             capture_scan_context: false,
             scan_contexts: Vec::new(),
+            capture_noise: false,
             strict: false,
             skipped: 0,
             skipped_errors: Vec::new(),
@@ -572,6 +599,14 @@ impl<R: BufRead> MzMLReader<R> {
     /// quantification. Take them with [`Self::take_scan_contexts`].
     pub fn with_scan_context_capture(mut self, capture: bool) -> Self {
         self.capture_scan_context = capture;
+        self
+    }
+
+    /// Keep the reporter-region noise (`sampled noise m/z array` and `sampled
+    /// noise intensity array`) of captured product scans and scan contexts,
+    /// for reporter signal-to-noise. Files without these arrays give `None`.
+    pub fn with_noise_capture(mut self, capture: bool) -> Self {
+        self.capture_noise = capture;
         self
     }
 
@@ -887,6 +922,16 @@ impl<R: BufRead> MzMLReader<R> {
                     ctx.is_intensity = true;
                 }
             }
+            CV_NOISE_MZ_ARRAY if self.state == State::BinaryDataArray => {
+                if let Some(ctx) = self.binary_ctx.as_mut() {
+                    ctx.is_noise_mz = true;
+                }
+            }
+            CV_NOISE_ARRAY if self.state == State::BinaryDataArray => {
+                if let Some(ctx) = self.binary_ctx.as_mut() {
+                    ctx.is_noise = true;
+                }
+            }
             CV_64BIT if self.state == State::BinaryDataArray => {
                 if let Some(ctx) = self.binary_ctx.as_mut() {
                     ctx.precision_bits = 64;
@@ -1106,6 +1151,7 @@ impl<R: BufRead> MzMLReader<R> {
                                 // MS3+: keep for reporter quantification, never emit.
                                 if self.capture_product_scans && sb.ms_level.unwrap_or(0) >= 3 {
                                     let level = sb.ms_level.unwrap_or(3) as u8;
+                                    let noise = sb.take_noise();
                                     let peaks = Self::build_peaks(
                                         sb.mz_array.take(),
                                         sb.intensity_array.take(),
@@ -1123,6 +1169,7 @@ impl<R: BufRead> MzMLReader<R> {
                                             .unwrap_or(0.0),
                                         scan_window: sb.scan_window_lower.zip(sb.scan_window_upper),
                                         peaks,
+                                        noise,
                                     });
                                     continue;
                                 }
@@ -1143,11 +1190,13 @@ impl<R: BufRead> MzMLReader<R> {
                                     self.latest_ms1_idx = Some(self.captured_ms1.len() - 1);
                                     continue;
                                 }
+                                let noise = sb.take_noise();
                                 let context = self.capture_scan_context.then(|| ScanContext {
                                     id: sb.id.clone(),
                                     parent_id: sb.parent_ref.clone(),
                                     scan_window: sb.scan_window_lower.zip(sb.scan_window_upper),
                                     faims_cv: sb.faims_cv,
+                                    noise,
                                 });
                                 if let Some(s) = self.finish_spectrum(sb)? {
                                     if let Some(c) = context {
@@ -1198,12 +1247,21 @@ impl<R: BufRead> MzMLReader<R> {
                         }
                         b"binaryDataArray" if self.state == State::BinaryDataArray => {
                             if let Some(ctx) = self.binary_ctx.take() {
-                                let vals = decode_binary_array(&ctx)?;
-                                if let Some(sb) = self.current.as_mut() {
-                                    if ctx.is_mz {
-                                        sb.mz_array = Some(vals);
-                                    } else if ctx.is_intensity {
-                                        sb.intensity_array = Some(vals);
+                                let wanted = ctx.is_mz
+                                    || ctx.is_intensity
+                                    || (self.capture_noise && (ctx.is_noise_mz || ctx.is_noise));
+                                if wanted {
+                                    let vals = decode_binary_array(&ctx)?;
+                                    if let Some(sb) = self.current.as_mut() {
+                                        if ctx.is_mz {
+                                            sb.mz_array = Some(vals);
+                                        } else if ctx.is_intensity {
+                                            sb.intensity_array = Some(vals);
+                                        } else if ctx.is_noise_mz {
+                                            sb.noise_mz_array = Some(vals);
+                                        } else {
+                                            sb.noise_array = Some(vals);
+                                        }
                                     }
                                 }
                             }
@@ -1585,7 +1643,10 @@ fn read_spectra_in_pieces(
         let kept = reader.skipped_errors().to_vec();
         let unlisted = reader.skipped_count() - kept.len();
         errors.extend(kept);
-        errors.extend(std::iter::repeat_n("malformed spectrum skipped".to_string(), unlisted));
+        errors.extend(std::iter::repeat_n(
+            "malformed spectrum skipped".to_string(),
+            unlisted,
+        ));
         Ok((spectra, errors))
     };
     let mut results: Vec<(usize, PieceResult)> = std::thread::scope(|scope| {
@@ -3563,6 +3624,7 @@ mod tests {
                 parent_id: Some("scan=1".into()),
                 scan_window: Some((148.0, 1866.0)),
                 faims_cv: Some(-45.0),
+                noise: None,
             }]
         );
         // Off by default.
@@ -3636,6 +3698,68 @@ mod tests {
         );
         assert_eq!(p.peaks.len(), 2);
         assert_eq!(p.peaks[1], (127.1248, 2000.0));
+    }
+
+    #[test]
+    fn noise_capture_reads_the_sampled_noise_arrays() {
+        let noise_arrays = format!(
+            "{}{}",
+            bda_plain("MS:1002743", &encode_f64_b64(&[120.0, 130.0, 200.0, 900.0])),
+            bda_plain("MS:1002744", &encode_f64_b64(&[100.0, 200.0, 300.0, 50.0])),
+        );
+        let ms2 = format!(
+            r#"<spectrum index="0" id="scan=10" defaultArrayLength="1">
+              <cvParam accession="MS:1000511" name="ms level" value="2"/>
+              <scanList count="1"><scan/></scanList>
+              <precursorList count="1"><precursor>
+                <selectedIonList count="1"><selectedIon>
+                  <cvParam accession="MS:1000744" name="selected ion m/z" value="500.5"/>
+                  <cvParam accession="MS:1000041" name="charge state" value="2"/>
+                </selectedIon></selectedIonList>
+              </precursor></precursorList>
+              <binaryDataArrayList count="4">{mz}{int}{noise_arrays}</binaryDataArrayList>
+            </spectrum>"#,
+            mz = bda_plain("MS:1000514", &encode_f64_b64(&[126.1277])),
+            int = bda_plain("MS:1000515", &encode_f64_b64(&[1000.0])),
+        );
+        let ms3 = format!(
+            r#"<spectrum index="1" id="scan=11" defaultArrayLength="1">
+              <cvParam accession="MS:1000511" name="ms level" value="3"/>
+              <scanList count="1"><scan/></scanList>
+              <precursorList count="1"><precursor spectrumRef="scan=10">
+                <selectedIonList count="1"><selectedIon>
+                  <cvParam accession="MS:1000744" name="selected ion m/z" value="500.5"/>
+                </selectedIon></selectedIonList>
+              </precursor></precursorList>
+              <binaryDataArrayList count="4">{mz}{int}{noise_arrays}</binaryDataArrayList>
+            </spectrum>"#,
+            mz = bda_plain("MS:1000514", &encode_f64_b64(&[126.1277])),
+            int = bda_plain("MS:1000515", &encode_f64_b64(&[1000.0])),
+        );
+        let xml = wrap_spectra(&format!("{ms2}{ms3}"));
+        let mut reader = MzMLReader::new(Cursor::new(xml.clone()))
+            .with_product_scan_capture(true)
+            .with_scan_context_capture(true)
+            .with_noise_capture(true);
+        let spectra: Vec<Spectrum> = reader.by_ref().map(|r| r.expect("parse")).collect();
+        assert_eq!(spectra.len(), 1);
+        // The noise arrays never reach the peak list.
+        assert_eq!(spectra[0].peaks, vec![(126.1277, 1000.0)]);
+        let contexts = reader.take_scan_contexts();
+        let ms3s = reader.take_product_scans();
+        for noise in [&contexts[0].noise, &ms3s[0].noise] {
+            let noise = noise.as_ref().expect("noise captured");
+            // 120, 130 and the first point above 140 (200) are kept.
+            assert_eq!(noise.len(), 3);
+            assert!((noise.at(125.0) - 150.0).abs() < 1e-4);
+        }
+        // Capture off: no noise kept.
+        let mut plain = MzMLReader::new(Cursor::new(xml))
+            .with_product_scan_capture(true)
+            .with_scan_context_capture(true);
+        let _: Vec<Spectrum> = plain.by_ref().map(|r| r.expect("parse")).collect();
+        assert!(plain.take_scan_contexts()[0].noise.is_none());
+        assert!(plain.take_product_scans()[0].noise.is_none());
     }
 
     #[test]

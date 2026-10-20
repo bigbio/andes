@@ -1495,6 +1495,8 @@ mod tests {
             feature: std::sync::Arc::from("VAR_1"),
             variant_delta_da: 0.984016,
             knockoff_of: None,
+            source: None,
+            tier: model::PriorTier::Catalogue,
         };
         let base_seqs = vec![b"PEPTIDK".to_vec(), b"SAMPLER".to_vec()];
         let idx = build_peptide_anchored_index(

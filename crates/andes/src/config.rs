@@ -47,7 +47,8 @@ pub struct IoCfg {
     pub uniprot_isoforms: Option<bool>,
     pub uniprot_chains: Option<bool>,
     pub uniprot_evidence: Option<String>,
-    pub uniprot_knockoffs: Option<usize>,
+    pub annotations: Option<Vec<PathBuf>>,
+    pub knockoffs: Option<usize>,
     pub output_pin: Option<PathBuf>,
     pub output_tsv: Option<PathBuf>,
     pub output_parquet: Option<PathBuf>,
@@ -117,7 +118,7 @@ pub struct RescoringCfg {
     pub enabled: Option<bool>,
     pub native: Option<bool>,
     pub fdr: Option<f64>,
-    pub variant_fdr: Option<f64>,
+    pub proteoform_fdr: Option<f64>,
     pub pep: Option<f64>,
     pub percolator_bin: Option<PathBuf>,
     pub percolator_docker: Option<bool>,
@@ -134,6 +135,8 @@ pub struct QuantCfg {
     pub tmt_tol: Option<String>,
     pub tmt_correction: Option<PathBuf>,
     pub tmt_min_purity: Option<f64>,
+    pub tmt_max_pep: Option<f64>,
+    pub tmt_min_sn: Option<f64>,
     pub lfq: Option<bool>,
     pub lfq_tol: Option<String>,
     pub lfq_rt_window: Option<f64>,
@@ -261,11 +264,8 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         cfg.io.uniprot_isoforms
     );
     set!("uniprot_chains", uniprot_chains, cfg.io.uniprot_chains);
-    set!(
-        "uniprot_knockoffs",
-        uniprot_knockoffs,
-        cfg.io.uniprot_knockoffs
-    );
+    set!("annotations", annotations, cfg.io.annotations);
+    set!("knockoffs", knockoffs, cfg.io.knockoffs);
     set_parsed!(
         "uniprot_evidence",
         uniprot_evidence,
@@ -385,7 +385,11 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set!("rescore", rescore, cfg.rescoring.enabled);
     set!("rescore_native", rescore_native, cfg.rescoring.native);
     set_opt!("fdr", fdr, cfg.rescoring.fdr);
-    set_opt!("variant_fdr", variant_fdr, cfg.rescoring.variant_fdr);
+    set_opt!(
+        "proteoform_fdr",
+        proteoform_fdr,
+        cfg.rescoring.proteoform_fdr
+    );
     set_opt!("pep", pep, cfg.rescoring.pep);
     set_opt!(
         "percolator_bin",
@@ -423,6 +427,8 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     }
     set_opt!("tmt_correction", tmt_correction, cfg.quant.tmt_correction);
     set!("tmt_min_purity", tmt_min_purity, cfg.quant.tmt_min_purity);
+    set!("tmt_max_pep", tmt_max_pep, cfg.quant.tmt_max_pep);
+    set!("tmt_min_sn", tmt_min_sn, cfg.quant.tmt_min_sn);
     set!("lfq", lfq, cfg.quant.lfq);
     if let Some(v) = cfg.quant.lfq_tol {
         if !cli_set(m, "lfq_tol") {
@@ -467,8 +473,8 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     if let Some(v) = args.fdr {
         check_unit_fraction("fdr", v)?;
     }
-    if let Some(v) = args.variant_fdr {
-        check_unit_fraction("variant_fdr", v)?;
+    if let Some(v) = args.proteoform_fdr {
+        check_unit_fraction("proteoform_fdr", v)?;
     }
     if let Some(v) = args.pep {
         check_unit_fraction("pep", v)?;
@@ -477,6 +483,13 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     check_unit_fraction("mbr_library_fdr", args.mbr_library_fdr)?;
     check_unit_fraction("mbr_fdr", args.mbr_fdr)?;
     check_unit_fraction("tmt_min_purity", args.tmt_min_purity)?;
+    check_unit_fraction("tmt_max_pep", args.tmt_max_pep)?;
+    if !args.tmt_min_sn.is_finite() || args.tmt_min_sn < 0.0 {
+        return Err(format!(
+            "config: tmt_min_sn must be >= 0, got {}",
+            args.tmt_min_sn
+        ));
+    }
     check_unit_fraction("lfq_min_cosine", args.lfq_min_cosine)?;
     check_unit_fraction("lfq_feature_fdr", args.lfq_feature_fdr)?;
     if let Some(v) = args.quant_fdr {

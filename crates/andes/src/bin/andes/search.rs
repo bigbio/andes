@@ -281,12 +281,39 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         chains: cli.uniprot_chains,
         evidence: cli.uniprot_evidence,
         knockoffs: Some(input::KnockoffOptions {
-            per_variant: cli.uniprot_knockoffs,
+            per_variant: cli.knockoffs,
             enzyme: search_enzyme,
         }),
     };
     let loaded = input::load_protein_database(&database_path, &uniprot_opts)?;
-    let target_db = loaded.db;
+    let mut target_db = loaded.db;
+    if let Some(peff) = &loaded.peff {
+        log_claims("PEFF", &peff.claims);
+        if peff.sites_without_mass + peff.processing_not_chain > 0 {
+            eprintln!(
+                "PEFF: {} entries; left out {} sites with no known mass and {} processed spans \
+                 that are not mature chains",
+                peff.entries, peff.sites_without_mass, peff.processing_not_chain
+            );
+        }
+    }
+    if !cli.annotations.is_empty() {
+        let stats =
+            input::load_annotations(&cli.annotations, &mut target_db, uniprot_opts.knockoffs)?;
+        log_claims("Annotations", &stats);
+    }
+    // Knockoff sites for every annotated site, before decoys are built so they
+    // follow to the decoys like real sites.
+    if let Some(ko) = uniprot_opts.knockoffs {
+        let stats = input::add_site_knockoffs(&mut target_db, ko);
+        if stats.knockoffs > 0 {
+            eprintln!(
+                "Site claims: {} annotated sites, {} knockoff sites ({} sites with no position \
+                 for one)",
+                stats.sites, stats.knockoffs, stats.untested
+            );
+        }
+    }
     eprintln!(
         "Loaded {} target proteins from {} [PHASE fasta_load: {:.2}s]",
         target_db.proteins.len(),
@@ -674,6 +701,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     warn_restricted_artefacts(&aa, cli.uniprot_variants);
 
     // ── 5. Build SearchParams ─────────────────────────────────────────────────
+    // The `sites=annotated` mods, whose knockoff-site placements exist only for
+    // the site claims and are not reported.
+    let restricted_site_masses: Vec<f64> = aa
+        .distinct_mods()
+        .iter()
+        .filter_map(|m| m.annotated_site_mass)
+        .collect();
     let mut params = SearchParams::default_tryptic(aa);
     params.precursor_tolerance = PrecursorTolerance::symmetric(cli.precursor_tol);
     // Ranges are validated (min <= max) by the clap value parsers.
@@ -1363,6 +1397,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // per-chunk co-isolation link).
             let capture_ms1 = quant.as_ref().is_some_and(|q| q.settings.needs_ms1());
             let capture_context = quant.is_some();
+            let capture_noise = quant.as_ref().is_some_and(|q| q.settings.plex.is_some());
             type Ms1Parsed = (usize, Vec<String>, RunScans);
             let parser_handle = thread::spawn(move || -> Result<Ms1Parsed, String> {
                 if file_is_mzml {
@@ -1373,7 +1408,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     .with_ms_level_range(mslevel, mslevel)
                     .with_ms1_capture(true)
                     .with_run_ms1_capture(capture_ms1)
-                    .with_scan_context_capture(capture_context);
+                    .with_scan_context_capture(capture_context)
+                    .with_noise_capture(capture_noise);
                     let (errc, errs) =
                         reader.read_with_ms1_chunked(CHUNK_SIZE, cap, |chunk, link| {
                             let _ = tx.send((chunk, link));
@@ -1390,7 +1426,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         let mut reader = input::ThermoRawReader::open(&spectrum_path)
                             .map_err(|e| format!("open Thermo .raw: {e}"))?
                             .with_run_ms1_capture(capture_ms1)
-                            .with_scan_context_capture(capture_context);
+                            .with_scan_context_capture(capture_context)
+                            .with_noise_capture(capture_noise);
                         let (errc, errs) =
                             reader.read_with_ms1_chunked(CHUNK_SIZE, cap, |chunk, link| {
                                 let _ = tx.send((chunk, link));
@@ -1604,6 +1641,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let capture_ms1 = quant.as_ref().is_some_and(|q| q.settings.needs_ms1());
             let capture_ms3 = quant.as_ref().is_some_and(|q| q.settings.needs_ms3());
             let capture_context = quant.is_some();
+            let capture_noise = quant.as_ref().is_some_and(|q| q.settings.plex.is_some());
             let parser_handle = thread::spawn(
                 move || -> Result<(ParseStats, RunScans), Box<dyn std::error::Error + Send + Sync>> {
                     if file_is_mzml {
@@ -1614,7 +1652,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         .with_ms_level_range(ms_level_u32, ms_level_u32)
                         .with_run_ms1_capture(capture_ms1)
                         .with_product_scan_capture(capture_ms3)
-                        .with_scan_context_capture(capture_context);
+                        .with_scan_context_capture(capture_context)
+                        .with_noise_capture(capture_noise);
                         let mut stats =
                             send_chunks(reader.by_ref(), CHUNK_SIZE, remaining_cap, tx);
                         add_mzml_skipped(&mut stats, &reader);
@@ -1632,7 +1671,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                                 .with_ms_level(Some(2))
                                 .with_run_ms1_capture(capture_ms1)
                                 .with_product_scan_capture(capture_ms3)
-                                .with_scan_context_capture(capture_context);
+                                .with_scan_context_capture(capture_context)
+                                .with_noise_capture(capture_noise);
                             let stats =
                                 send_chunks(reader.by_ref(), CHUNK_SIZE, remaining_cap, tx);
                             let scans = RunScans {
@@ -2081,7 +2121,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `--pep` are thresholds applied by such a run; they never start one on their
     // own (that would silently launch a backend / the non-production native path).
     let fdr_threshold = cli.fdr.unwrap_or(0.01);
-    let variant_fdr = cli.variant_fdr.unwrap_or(fdr_threshold.max(0.05));
+    let proteoform_fdr = cli.proteoform_fdr.unwrap_or(fdr_threshold.max(0.05));
     let (use_percolator, use_native) = if cli.rescore {
         (true, false)
     } else if cli.rescore_native {
@@ -2182,6 +2222,22 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // no other output.
     let mut knockoff_rows: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Some(ref mut map) = rescore_map {
+        // A variant peptide a reference protein holds once I and L are taken
+        // as equal identifies that reference too: share it before classes are
+        // assigned. Only rows that could be reported are checked.
+        if pin_index.has_alternative_entries {
+            let shared = output::share_isobaric_references(
+                map,
+                &pin_index,
+                fdr_threshold.max(proteoform_fdr),
+            );
+            if shared > 0 {
+                eprintln!(
+                    "Rescore: {shared} variant-class PSMs share their peptide with a reference \
+                     protein once I and L are taken as equal; they now name it"
+                );
+            }
+        }
         let counts = output::apply_class_fdr(map, &rescore_decoy_psms, &pin_index);
         if counts.len() > 1 {
             let line: Vec<String> = counts
@@ -2204,7 +2260,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         // Knockoff variants: the knockoff PSMs accepted per substitution class
         // estimate the false real variant PSMs, and give them a q-value too.
-        let outcome = output::apply_knockoff_fdr(map, &pin_index, variant_fdr);
+        let outcome = output::apply_knockoff_fdr(map, &pin_index, proteoform_fdr);
         knockoff_rows = outcome.knockoff_rows;
         if !outcome.counts.is_empty() {
             let line: Vec<String> = outcome
@@ -2223,20 +2279,60 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .collect();
             eprintln!(
-                "Rescore: variant PSMs at q<={variant_fdr} per substitution class, before -> \
+                "Rescore: variant PSMs at q<={proteoform_fdr} per substitution class, before -> \
                  after knockoff q-values: {}",
                 line.join(", ")
             );
+        }
+        // Site claims: annotated sites against their knockoff sites.
+        let sites = output::site_claims(
+            map,
+            &pin_index,
+            fdr_threshold,
+            proteoform_fdr,
+            &restricted_site_masses,
+        );
+        knockoff_rows.extend(sites.knockoff_rows.iter().cloned());
+        if !sites.counts.is_empty() {
+            let line: Vec<String> = sites
+                .counts
+                .iter()
+                .map(|c| {
+                    format!(
+                        "{} {} -> {} ({} tested; knockoffs {:.1})",
+                        c.stratum, c.claims, c.accepted, c.tested, c.knockoff_weighted
+                    )
+                })
+                .collect();
+            eprintln!(
+                "Rescore: site-claim PSMs at q<={fdr_threshold} per modification and residue, \
+                 before -> after site q<={proteoform_fdr}: {}",
+                line.join(", ")
+            );
+            let stem = report_base
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "andes".to_string());
+            let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
+            let path = dir.join(format!("{stem}.sites.tsv"));
+            match output::write_sites_tsv(&path, &sites.rows) {
+                Ok(()) => eprintln!(
+                    "Wrote site claims: {} ({} sites)",
+                    path.display(),
+                    sites.rows.len()
+                ),
+                Err(e) => eprintln!("WARN: could not write {}: {e}", path.display()),
+            }
         }
     }
     if cli.mbr {
         mbr_decoys = std::mem::take(&mut rescore_decoy_psms);
     }
-    // The cutoff each row is accepted at: --variant-fdr for variant-class rows,
-    // --fdr for the rest.
+    // The cutoff each row is accepted at: --proteoform-fdr for proteoform
+    // claims (variant-class rows), --fdr for the rest.
     let cutoffs = rescore_map
         .as_ref()
-        .map(|m| output::Cutoffs::new(m, &pin_index, fdr_threshold, variant_fdr));
+        .map(|m| output::Cutoffs::new(m, &pin_index, fdr_threshold, proteoform_fdr));
 
     // Filtered TSV: target PSMs whose q-value passes their cutoff. Written next
     // to the PIN as `<stem>.q<fdr>.tsv` (rescore only). One row per accepted PSM
@@ -2270,8 +2366,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let mut pep_note = pep_cap
             .map(|t| format!(" and PEP<={t}"))
             .unwrap_or_default();
-        if pin_index.has_alternative_entries && variant_fdr != fdr {
-            pep_note.push_str(&format!(", variant-class PSMs at q<={variant_fdr}"));
+        if pin_index.has_alternative_entries && proteoform_fdr != fdr {
+            pep_note.push_str(&format!(", proteoform claims at q<={proteoform_fdr}"));
         }
         match write_filtered_tsv(&filtered_path, &accepted) {
             Ok(()) => eprintln!(
@@ -2488,6 +2584,45 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Log what a UniProt XML load kept: annotated sites, variant entries, and
 /// the features the evidence level or the canonical sequence ruled out.
+/// Log what an annotation source (`--annotations` files or a PEFF header)
+/// added to the database.
+fn log_claims(source: &str, stats: &input::AnnotationLoadStats) {
+    let dropped: Vec<String> = stats
+        .dropped
+        .iter()
+        .map(|(reason, n)| format!("{reason} ({n})"))
+        .collect();
+    let files = if stats.files > 0 {
+        format!(" from {} files", stats.files)
+    } else {
+        String::new()
+    };
+    eprintln!(
+        "{source}: {} rows{files}: {} variant, {} knockoff and {} chain entries, {} sites on \
+         reference proteins, {} rows merged into an equal claim, {} into an equal database \
+         entry{}{}",
+        stats.rows,
+        stats.variant_entries,
+        stats.knockoff_entries,
+        stats.chain_entries,
+        stats.sites,
+        stats.merged,
+        stats.merged_into_database,
+        if dropped.is_empty() {
+            ""
+        } else {
+            "; left out: "
+        },
+        dropped.join(", "),
+    );
+    if stats.knockoff_entries > 0 {
+        eprintln!(
+            "{source}: {} single-residue variants with no position for a knockoff",
+            stats.variants_without_knockoff
+        );
+    }
+}
+
 fn log_uniprot_load(stats: &input::UniProtLoadStats, opts: &input::UniProtOptions) {
     eprintln!(
         "UniProt XML: {} entries, {} annotated modification sites, {} variant entries \
@@ -2571,11 +2706,24 @@ fn report_annotated_site_mods(aa: &model::AminoAcidSet, target_db: &model::Prote
     mods.dedup_by(|b, a| a.0 == b.0 && a.1.to_bits() == b.1.to_bits());
     for (name, mass) in mods {
         let (mut sites, mut proteins) = (0usize, 0usize);
+        let same = |m: f64| (m - mass).abs() <= model::protein::SITE_MASS_TOLERANCE;
         for p in &target_db.proteins {
+            // Annotated sites only, not the knockoff sites added for them.
+            let knockoffs: Vec<u32> = p
+                .annotation
+                .as_deref()
+                .map(|a| {
+                    a.site_claims
+                        .iter()
+                        .filter(|c| c.knockoff_of.is_some() && same(c.mass_delta))
+                        .map(|c| c.position)
+                        .collect()
+                })
+                .unwrap_or_default();
             let n = p
                 .mod_sites()
                 .iter()
-                .filter(|s| (s.mass_delta - mass).abs() <= model::protein::SITE_MASS_TOLERANCE)
+                .filter(|s| same(s.mass_delta) && !knockoffs.contains(&s.position))
                 .count();
             if n > 0 {
                 sites += n;

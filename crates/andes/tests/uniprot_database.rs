@@ -71,7 +71,7 @@ fn annotated_site_mods_and_variants_run_end_to_end() {
             "--uniprot-evidence",
             "curated",
             "--uniprot-variants",
-            "--uniprot-knockoffs",
+            "--knockoffs",
             "0",
             "--uniprot-chains",
             "--uniprot-isoforms",
@@ -298,9 +298,54 @@ fn knockoff_variants_are_searched_but_never_reported() {
     let off = search(
         "test-fixtures/BSA.xml.gz",
         &dir.path().join("off.pin"),
-        &["--uniprot-variants", "--uniprot-evidence", "any", "--uniprot-knockoffs", "0"],
+        &[
+            "--uniprot-variants",
+            "--uniprot-evidence",
+            "any",
+            "--knockoffs",
+            "0",
+        ],
     );
     assert!(!String::from_utf8_lossy(&off.stderr).contains("knockoff variant entries"));
     let pin = std::fs::read_to_string(dir.path().join("off.pin")).unwrap();
     assert!(!pin.contains("_KO"));
+}
+
+#[test]
+fn annotated_sites_get_knockoff_sites_and_a_site_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let mods = dir.path().join("mods.txt");
+    std::fs::write(
+        &mods,
+        "57.021464,C,fix,any,Carbamidomethyl\n\
+         79.966331,S,opt,any,Phospho,sites=annotated\n\
+         79.966331,T,opt,any,Phospho,sites=annotated\n",
+    )
+    .unwrap();
+    let out = search(
+        "test-fixtures/BSA.xml.gz",
+        &dir.path().join("sites.pin"),
+        &[
+            "--mods",
+            mods.to_str().unwrap(),
+            "--uniprot-evidence",
+            "curated",
+            "--rescore-native",
+            "--fdr",
+            "1",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let line = stderr
+        .lines()
+        .find(|l| l.starts_with("Site claims:"))
+        .unwrap_or_else(|| panic!("{stderr}"));
+    assert!(!line.contains(" 0 knockoff sites"), "{line}");
+    // The real sites are counted without their knockoffs.
+    assert!(
+        stderr.contains("Annotated-site mod Phospho (+79.9663 Da): 10 sites on 1 target proteins"),
+        "{stderr}"
+    );
+    let table = std::fs::read_to_string(dir.path().join("sites.sites.tsv")).unwrap();
+    assert!(table.starts_with("family\taccession\tposition\tresidue\tmodification_mass"));
 }

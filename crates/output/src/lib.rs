@@ -38,8 +38,13 @@ pub use provenance::populate_provenance_features;
 pub mod class_fdr;
 pub use class_fdr::{apply_class_fdr, ClassCount, Cutoffs};
 
+pub mod isobaric_sharing;
+pub use isobaric_sharing::share_isobaric_references;
+
 pub mod knockoff_fdr;
+pub mod site_fdr;
 pub use knockoff_fdr::{apply_knockoff_fdr, KnockoffCount, KnockoffOutcome};
+pub use site_fdr::{site_claims, write_sites_tsv, SiteCount, SiteOutcome, SiteRow};
 
 pub mod proteoform_table;
 pub use proteoform_table::{proteoform_table, write_proteoform_tsv, QuantSummary};
@@ -63,7 +68,8 @@ pub use glyco_pin::write_glyco_pin;
 
 pub mod quant_out;
 pub use quant_out::{
-    write_lfq_features_tsv, write_lfq_tsv, write_tmt_tsv, LfqRow, ModRecord, QuantId, TmtRow,
+    read_lfq_parquet, read_tmt_parquet, write_lfq_parquet, write_tmt_parquet, LfqRow, LfqTableMeta,
+    ModRecord, QuantId, TmtRow,
 };
 
 pub mod run_quant_table;
@@ -75,4 +81,6 @@ pub mod ms2_table;
 
 pub mod feature_parquet;
 pub mod mbr_out;
+pub mod versioned_parquet;
 pub use feature_parquet::{write_feature_parquet, FeatureRecord, ProteinPosition};
+pub use versioned_parquet::ReadTable;

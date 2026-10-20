@@ -6,6 +6,7 @@ use std::path::Path;
 use model::ProteinDb;
 
 use crate::fasta::{FastaParseError, FastaReader};
+use crate::peff::{load_peff, PeffError, PeffLoadStats};
 use crate::uniprot::{load_uniprot_xml, UniProtLoadStats, UniProtOptions, UniProtParseError};
 
 /// Format of a protein database file.
@@ -13,11 +14,12 @@ use crate::uniprot::{load_uniprot_xml, UniProtLoadStats, UniProtOptions, UniProt
 pub enum DatabaseFormat {
     Fasta,
     UniProtXml,
+    Peff,
 }
 
 impl DatabaseFormat {
-    /// `.xml` (or `.xml.gz`, case-insensitive) is UniProt XML; anything else
-    /// is read as FASTA.
+    /// `.xml` (or `.xml.gz`, case-insensitive) is UniProt XML, `.peff` PEFF;
+    /// anything else is read as FASTA.
     pub fn of_path(path: &Path) -> Self {
         let name = path
             .file_name()
@@ -27,6 +29,8 @@ impl DatabaseFormat {
         let name = name.strip_suffix(".gz").unwrap_or(&name);
         if name.ends_with(".xml") {
             Self::UniProtXml
+        } else if name.ends_with(".peff") {
+            Self::Peff
         } else {
             Self::Fasta
         }
@@ -40,6 +44,8 @@ pub struct LoadedDatabase {
     pub format: DatabaseFormat,
     /// Present for a UniProt XML database.
     pub uniprot: Option<UniProtLoadStats>,
+    /// Present for a PEFF database.
+    pub peff: Option<PeffLoadStats>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -54,10 +60,13 @@ pub enum DatabaseError {
     Fasta(#[from] FastaParseError),
     #[error(transparent)]
     UniProt(#[from] UniProtParseError),
+    #[error(transparent)]
+    Peff(#[from] PeffError),
 }
 
 /// Load the target database at `path` (gzip is decompressed transparently).
-/// `uniprot` only applies to a UniProt XML database.
+/// `uniprot` applies to a UniProt XML database; its knockoff options also
+/// apply to a PEFF database's variants.
 pub fn load_protein_database(
     path: &Path,
     uniprot: &UniProtOptions,
@@ -72,13 +81,24 @@ pub fn load_protein_database(
             db: FastaReader::load_all(reader)?,
             format,
             uniprot: None,
+            peff: None,
         },
+        DatabaseFormat::Peff => {
+            let (db, stats) = load_peff(reader, uniprot.knockoffs)?;
+            LoadedDatabase {
+                db,
+                format,
+                uniprot: None,
+                peff: Some(stats),
+            }
+        }
         DatabaseFormat::UniProtXml => {
             let (db, stats) = load_uniprot_xml(reader, uniprot)?;
             LoadedDatabase {
                 db,
                 format,
                 uniprot: Some(stats),
+                peff: None,
             }
         }
     })

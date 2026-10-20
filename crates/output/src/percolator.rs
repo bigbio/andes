@@ -416,14 +416,6 @@ fn tail_lines(s: &str, n: usize) -> String {
     lines[start..].join("\n")
 }
 
-/// Parse a Percolator PSM result TSV into a `PSMId → PercolatorPsm` map.
-///
-/// HEADER-NAME-DRIVEN: the column positions of `PSMId`, `q-value`,
-/// `posterior_error_probability`, `peptide`, and `proteinIds` are located by
-/// matching the header row, so a leading/extra column (e.g. a comparison search engine's `FileName`)
-/// does not shift the parse. `proteinIds` is the LAST logical column; every tab
-/// after it is a separate protein id, so the rest of the line is captured and
-/// re-joined with `;`.
 /// Parse a Percolator score field, rejecting anything that is not a finite
 /// number (empty, non-numeric, NaN, or ±inf) — such a value must not flow into
 /// FDR filtering as a silent NaN.
@@ -437,86 +429,190 @@ fn parse_finite(s: &str, column: &'static str) -> Result<f64, PercolatorError> {
     }
 }
 
+/// Parse a Percolator PSM result TSV into a `PSMId → PercolatorPsm` map.
+///
+/// HEADER-NAME-DRIVEN: the column positions of `PSMId`, `q-value`,
+/// `posterior_error_probability`, `peptide`, and `proteinIds` are located by
+/// matching the header row, so a leading/extra column (e.g. a comparison search engine's `FileName`)
+/// does not shift the parse. `proteinIds` is the LAST logical column; every tab
+/// after it is a separate protein id, so the rest of the line is captured and
+/// re-joined with `;`.
 pub fn parse_psm_results(text: &str) -> Result<HashMap<String, PercolatorPsm>, PercolatorError> {
-    let mut lines = text.lines();
-    let header = lines.next().unwrap_or("");
-    let cols: Vec<&str> = header.split('\t').collect();
-    let find = |name: &'static str| -> Result<usize, PercolatorError> {
-        cols.iter()
-            .position(|c| *c == name)
-            .ok_or(PercolatorError::MissingColumn {
-                column: name,
-                header: header.to_string(),
-            })
-    };
-    // Match a column by name-prefix. Percolator 3.7.x emits the PEP column as
-    // `posterior_error_prob`; other builds/tools use the full
-    // `posterior_error_probability`. A prefix match accepts both.
-    let find_prefix = |prefix: &'static str| -> Result<usize, PercolatorError> {
-        cols.iter()
-            .position(|c| c.starts_with(prefix))
-            .ok_or(PercolatorError::MissingColumn {
-                column: prefix,
-                header: header.to_string(),
-            })
-    };
-    let id_col = find("PSMId")?;
-    let q_col = find("q-value")?;
-    let pep_col = find_prefix("posterior_error_prob")?;
-    let pep_seq_col = find("peptide")?;
-    let prot_col = find("proteinIds")?;
-    let score_col = cols.iter().position(|c| *c == "score");
-
+    let mut reader = PsmResultReader::new(text.as_bytes())?;
     let mut map = HashMap::new();
-    for line in lines {
-        if line.is_empty() {
-            continue;
+    while let Some(row) = reader.next_row()? {
+        let psm_id = row.psm_id.to_string();
+        let psm = PercolatorPsm {
+            psm_id: psm_id.clone(),
+            q_value: row.q_value,
+            pep: row.pep,
+            score: row.score,
+            peptide: row.peptide.to_string(),
+            proteins: row.proteins(),
+        };
+        if map.insert(psm_id.clone(), psm).is_some() {
+            return Err(PercolatorError::DuplicatePsmId { psm_id });
         }
+    }
+    Ok(map)
+}
+
+/// One row of a Percolator PSM result file, borrowed from its line.
+#[derive(Debug)]
+pub struct PsmResultRow<'a> {
+    /// `PSMId` column.
+    pub psm_id: &'a str,
+    /// `q-value` column.
+    pub q_value: f64,
+    /// `posterior_error_prob` column.
+    pub pep: f64,
+    /// `score` column; `None` when absent, unparseable or not finite.
+    pub score: Option<f64>,
+    /// `peptide` column.
+    pub peptide: &'a str,
+    /// `proteinIds` and every field after it.
+    protein_fields: Vec<&'a str>,
+}
+
+impl PsmResultRow<'_> {
+    /// The protein fields joined by `;`.
+    pub fn proteins(&self) -> String {
+        self.protein_fields.join(";")
+    }
+}
+
+/// Column positions of a Percolator PSM result header.
+#[derive(Debug, Clone, Copy)]
+struct ResultColumns {
+    id: usize,
+    q: usize,
+    pep: usize,
+    peptide: usize,
+    proteins: usize,
+    score: Option<usize>,
+}
+
+impl ResultColumns {
+    fn from_header(header: &str) -> Result<Self, PercolatorError> {
+        let cols: Vec<&str> = header.split('\t').collect();
+        let find = |name: &'static str| -> Result<usize, PercolatorError> {
+            cols.iter()
+                .position(|c| *c == name)
+                .ok_or(PercolatorError::MissingColumn {
+                    column: name,
+                    header: header.to_string(),
+                })
+        };
+        // Match a column by name-prefix. Percolator 3.7.x emits the PEP column as
+        // `posterior_error_prob`; other builds/tools use the full
+        // `posterior_error_probability`. A prefix match accepts both.
+        let find_prefix = |prefix: &'static str| -> Result<usize, PercolatorError> {
+            cols.iter()
+                .position(|c| c.starts_with(prefix))
+                .ok_or(PercolatorError::MissingColumn {
+                    column: prefix,
+                    header: header.to_string(),
+                })
+        };
+        Ok(Self {
+            id: find("PSMId")?,
+            q: find("q-value")?,
+            pep: find_prefix("posterior_error_prob")?,
+            peptide: find("peptide")?,
+            proteins: find("proteinIds")?,
+            score: cols.iter().position(|c| *c == "score"),
+        })
+    }
+
+    fn row<'a>(&self, line: &'a str) -> Result<PsmResultRow<'a>, PercolatorError> {
         let fields: Vec<&str> = line.split('\t').collect();
         // Fail loud on a row shorter than the highest non-protein index we read
         // (truncated/corrupt) — silently skipping it would drop a PSM and bias FDR.
-        let max_scalar = id_col.max(q_col).max(pep_col).max(pep_seq_col);
+        let max_scalar = self.id.max(self.q).max(self.pep).max(self.peptide);
         if fields.len() <= max_scalar {
             return Err(PercolatorError::MalformedRow {
                 line: line.to_string(),
             });
         }
-        let psm_id = fields[id_col].to_string();
         // A non-finite or unparseable q-value/PEP must be an error, never a
         // silent NaN — NaN compares false in every FDR threshold check.
-        let q_value = parse_finite(fields[q_col], "q-value")?;
-        let pep = parse_finite(fields[pep_col], "posterior_error_prob")?;
+        let q_value = parse_finite(fields[self.q], "q-value")?;
+        let pep = parse_finite(fields[self.pep], "posterior_error_prob")?;
         // The score is optional: a missing, unparseable or non-finite value is
         // no score. Callers that rank by it reject such PSMs themselves.
-        let score = score_col
+        let score = self
+            .score
             .and_then(|c| fields.get(c))
             .and_then(|v| v.parse::<f64>().ok())
             .filter(|v| v.is_finite());
-        let peptide = fields[pep_seq_col].to_string();
-        // proteinIds is the trailing column: re-join everything from prot_col on.
-        let proteins = if fields.len() > prot_col {
-            fields[prot_col..].join(";")
-        } else {
-            String::new()
-        };
-        if map
-            .insert(
-                psm_id.clone(),
-                PercolatorPsm {
-                    psm_id: psm_id.clone(),
-                    q_value,
-                    pep,
-                    score,
-                    peptide,
-                    proteins,
-                },
-            )
-            .is_some()
-        {
-            return Err(PercolatorError::DuplicatePsmId { psm_id });
+        // proteinIds is the trailing column: every field from it on.
+        let protein_fields = fields.get(self.proteins..).unwrap_or(&[]).to_vec();
+        Ok(PsmResultRow {
+            psm_id: fields[self.id],
+            q_value,
+            pep,
+            score,
+            peptide: fields[self.peptide],
+            protein_fields,
+        })
+    }
+}
+
+/// Reads a Percolator PSM result file one row at a time, so a file of any
+/// size is parsed with one line in memory. Lines are split as
+/// [`str::lines`] splits them and empty lines are skipped; the columns are
+/// found by header name as in [`parse_psm_results`].
+pub struct PsmResultReader<R> {
+    reader: R,
+    line: String,
+    columns: ResultColumns,
+}
+
+impl<R: std::io::BufRead> PsmResultReader<R> {
+    /// Reads the header. Errors: a missing required column, or I/O.
+    pub fn new(mut reader: R) -> Result<Self, PercolatorError> {
+        let mut line = String::new();
+        read_line(&mut reader, &mut line)?;
+        let columns = ResultColumns::from_header(&line)?;
+        Ok(Self {
+            reader,
+            line,
+            columns,
+        })
+    }
+
+    /// The next row, `None` at the end of the file. Errors: a malformed row,
+    /// a non-finite q-value or PEP, or I/O.
+    pub fn next_row(&mut self) -> Result<Option<PsmResultRow<'_>>, PercolatorError> {
+        loop {
+            if !read_line(&mut self.reader, &mut self.line)? {
+                return Ok(None);
+            }
+            if !self.line.is_empty() {
+                break;
+            }
+        }
+        self.columns.row(&self.line).map(Some)
+    }
+}
+
+/// Reads one line into `line` without its `\n` (and then `\r`) ending;
+/// false at the end of the input.
+fn read_line<R: std::io::BufRead>(
+    reader: &mut R,
+    line: &mut String,
+) -> Result<bool, PercolatorError> {
+    line.clear();
+    if reader.read_line(line).map_err(PercolatorError::Io)? == 0 {
+        return Ok(false);
+    }
+    if line.ends_with('\n') {
+        line.pop();
+        if line.ends_with('\r') {
+            line.pop();
         }
     }
-    Ok(map)
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -541,6 +637,33 @@ mod tests {
         assert_eq!(m["title_101_1"].proteins, "sp|P3");
         assert_eq!(a.score, Some(2.5));
         assert_eq!(m["title_101_1"].score, Some(1.0));
+    }
+
+    #[test]
+    fn reader_splits_lines_as_str_lines() {
+        // CRLF endings, an empty line, and a last line without an ending.
+        let text = "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\r\n\
+                    a_1_1\t2.5\t0.001\t0.0005\tR.PEPTIDEK.A\tsp|P1\tsp|P2\r\n\
+                    \r\n\
+                    b_1_1\t1.0\t0.02\t0.03\tK.ANOTHERK.R";
+        let mut r = PsmResultReader::new(text.as_bytes()).unwrap();
+        let a = r.next_row().unwrap().unwrap();
+        assert_eq!(
+            (a.psm_id, a.score, a.peptide),
+            ("a_1_1", Some(2.5), "R.PEPTIDEK.A")
+        );
+        assert_eq!(a.proteins(), "sp|P1;sp|P2");
+        let b = r.next_row().unwrap().unwrap();
+        assert_eq!((b.psm_id, b.q_value, b.pep), ("b_1_1", 0.02, 0.03));
+        assert_eq!(b.proteins(), "");
+        assert!(r.next_row().unwrap().is_none());
+        let m = parse_psm_results(text).unwrap();
+        assert_eq!(m.len(), 2);
+        assert_eq!(m["a_1_1"].proteins, "sp|P1;sp|P2");
+        assert!(matches!(
+            PsmResultReader::new(&b""[..]),
+            Err(PercolatorError::MissingColumn { .. })
+        ));
     }
 
     #[test]

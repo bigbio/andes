@@ -243,7 +243,9 @@ with `purity ≥ 0.9`.
   construction: FDP = (entrapment hits / accepted) × (1 + T/E), where T/E is the ratio of
   searchable target to entrapment peptides, measured for each database and never assumed to be
   1. A PSM whose peptide also occurs in a target protein counts as a target: it is entrapment
-  only when **all** its proteins are (`run.sh` and `eval_entrap.py` apply this rule).
+  only when **all** its proteins are entrapment and its peptide, with I folded to L (the two
+  are isobaric), occurs in no target protein sequence. `entrap_common.py` holds this rule
+  for `run.sh`, `build_databases.sh` (the T/E factor) and the glyco evaluators.
 - **Percolator.** Version 3.7.1, `--seed 42 -Y`, on plain FASTA with andes's `XXX_` decoys, for
   every engine compared on the same host. Percolator's q-value has a floor of 1 / (number of
   top targets), so small or sparse runs return few or no identifications at 1%; pool glyco
@@ -282,5 +284,7 @@ with `purity ≥ 0.9`.
       reproduce/     database, download and run scripts (no hardcoded paths)
       glyco/         glyco harness: pooling, yield, entrapment, reference scoring
       configs/       mods files and per-engine parameter files
+      entrap_common.py  shared entrapment rules (ALL-ENTRAP_, I/L rescue, T/E)
+      tests/         stdlib tests for those rules: python3 -I tests/test_entrap.py
 
 Bulk spectra and third-party engine binaries stay outside git.

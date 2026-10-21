@@ -134,8 +134,9 @@ class SampleSequences:
     def contains_many(self, peptides, k=6):
         """Subset of `peptides` (already folded, length >= k) found in the sample text.
 
-        For large inputs (the T/E digest) a set of sample k-mers screens out most
-        candidates before the exact substring test.
+        For large inputs (the T/E digest) a set of sample k-mers screens the candidates:
+        every k-mer of a peptide must occur in the sample text before the exact substring
+        test runs. A peptide of length k needs no further test.
         """
         text = self._load()
         if self._kmers is None:
@@ -147,8 +148,7 @@ class SampleSequences:
                 if p in text:
                     found.add(p)
                 continue
-            mid = (len(p) - k) // 2
-            if p[:k] in km and p[-k:] in km and p[mid:mid + k] in km and p in text:
+            if all(p[i:i + k] in km for i in range(len(p) - k + 1)) and (len(p) == k or p in text):
                 found.add(p)
         return found
 

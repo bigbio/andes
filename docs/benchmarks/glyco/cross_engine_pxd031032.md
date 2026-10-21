@@ -71,8 +71,8 @@ divergence.
 ## Timing — A/B against `main`
 
 `MouseLiver-Z-T-1` (45,905 MS2 spectra; the `.mgf` and native `.raw` read the same
-45,905 scans), 112 threads, `sequon-reverse` decoy, `mouse_entrap.fasta` (1:1
-shuffled-self entrapment). Three arms, all on the same host and thread count, so
+45,905 scans), 112 threads, `sequon-reverse` decoy, `mouse_entrap.fasta` (the
+whole-protein shuffled entrapment used before #225). Three arms, all on the same host and thread count, so
 the comparison is apples-to-apples:
 
 1. **`main`** — the pre-PR code (`bb1ccdf`), built-in composition enumerator,

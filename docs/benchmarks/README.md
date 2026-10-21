@@ -130,7 +130,7 @@ slightly from the table; the scripts print a sha256 and sequence count for each 
 ### Phospho (commands)
 
 ```bash
-GLYCO=1 ./build_databases.sh "$DATA"          # also writes databases/mouse_entrap.fasta (1:1 shuffled)
+GLYCO=1 ./build_databases.sh "$DATA"          # also writes databases/mouse_entrap.fasta and prints its T/E
 ./fetch_spectra.sh "$DATA" phospho            # 3.7 GB
 andes --spectrum "$DATA"/phospho/20151014_QEp6_NaKr_SA_totalliver_control2_phospho.raw \
       --database "$DATA"/databases/mouse_entrap.fasta \
@@ -140,8 +140,9 @@ docker run --rm -v "$PWD":/r quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2 
       --seed 42 -Y --results-psms /r/phospho.t.psms --decoy-results-psms /r/phospho.d.psms /r/phospho.pin
 ```
 
-Count rows at `q-value ≤ 0.01`, rows whose proteins are all `ENTRAP_` (FDP = 2 × hits / PSMs on
-this 1:1 database), and peptides carrying `79.96`. Expect about 11 minutes on 8 threads.
+Count rows at `q-value ≤ 0.01` and their entrapment hits with `python3 ../entrap_common.py count
+phospho.t.psms "$DATA"/databases/mouse_entrap.fasta 0.01` (FDP = hits / PSMs × (1 + T/E), with the
+T/E that `build_databases.sh` printed), and peptides carrying `79.96`. Expect about 11 minutes on 8 threads.
 The slice width is pinned because it sets peak memory (13.7 GB at 80 Da).
 
 ### Glyco (commands; scripts in [`glyco/`](glyco/))

@@ -11,7 +11,10 @@ pub mod select;
 pub mod store;
 
 // Re-export the most commonly used types at the crate root.
-pub use select::{parse_experiment_class, select, select_nearest, SelectionEntry, SelectionKey};
+pub use select::{
+    parse_experiment_class, select, select_nearest, select_nearest_for, SelectionEntry,
+    SelectionKey,
+};
 pub use store::{protocol_to_experiment_class, ModelStore, RawManifestEntry};
 
 #[derive(thiserror::Error, Debug)]

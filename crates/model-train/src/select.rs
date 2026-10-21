@@ -26,6 +26,8 @@
 
 use std::collections::BTreeSet;
 
+use model::enzyme::Enzyme;
+
 /// A row from the manifest representing one stored model.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelectionEntry {
@@ -34,7 +36,7 @@ pub struct SelectionEntry {
     pub activation: String,
     /// e.g. `"QExactive"`, `"OrbitrapAstral"`, `"TimsTOF"`, `"TOF"`, `"LowRes"`, `"HighRes"`
     pub instrument: String,
-    /// e.g. `"Tryp"`
+    /// The enzyme's `Enzyme::name()`, e.g. `"Trypsin"`, `"LysC"`
     pub enzyme: String,
     /// Parsed from the manifest's `"phospho+tmt"` string.
     pub experiment_class: BTreeSet<String>,
@@ -48,6 +50,10 @@ pub struct SelectionKey {
     pub enzyme: String,
     pub experiment_class: BTreeSet<String>,
 }
+
+/// The enzyme [`select_nearest`] relaxes a non-tryptic query to: the store's
+/// name for trypsin, the enzyme of the dominant models.
+pub const RELAXED_ENZYME: &str = Enzyme::Trypsin.name();
 
 /// Labeling tags that receive priority in subset tie-breaking.
 const LABELING_TAGS: &[&str] = &["tmt", "itraq"];
@@ -237,58 +243,79 @@ pub fn select<'a>(
 }
 
 /// Like [`select`] but it NEVER fails: when the exact backoff ladder misses, it
-/// relaxes the digest ENZYME (→ `Tryp`, which barely affects the fragmentation
-/// tables) while keeping the activation and instrument — the dominant scoring
-/// axes — and only then resolves to `standard_id`. This is what lets an own-only
-/// store route a requested protocol it doesn't carry to the CLOSEST available
-/// model, or to a standard base.
+/// tries the same enzyme at another instrument of the same resolution class,
+/// then relaxes the digest ENZYME to trypsin ([`RELAXED_ENZYME`], which barely
+/// affects the fragmentation tables) while keeping the activation and
+/// instrument — the dominant scoring axes — and only then resolves to
+/// `standard_id`. This is what lets an own-only store route a requested
+/// protocol it doesn't carry to the CLOSEST available model, or to a standard
+/// base.
 ///
 /// The activation (ion chemistry: b/y vs c/z) and instrument resolution matter
 /// far more to the scoring tables than the enzyme, so we deliberately do NOT
 /// cross activation here — a same-activation standard base (`hcd_qexactive_tryp`,
 /// b/y) is a better fallback for an HCD/CID query than an ETD (c/z) model at a
 /// matching instrument would be. Activation-aware nearest-matching across
-/// resolutions IS now done: see step 3, which relaxes the instrument before
-/// giving up and crossing activation.
+/// resolutions IS done: see step 4, which relaxes the instrument before giving
+/// up and crossing activation.
 ///
 /// Returns `(model_id, substituted)` — `substituted` is `true` when an inexact
 /// (nearest or standard) model was chosen, so the caller can WARN which model
 /// was actually used. The exact ladder ([`select`]) is consulted FIRST and
-/// unchanged, so any selection that already resolved is byte-identical; and an
-/// all-`Tryp` query never triggers the enzyme relaxation, so tryptic selection
-/// (the equivalence gate) is unchanged.
+/// unchanged, so any selection that already resolved is byte-identical; and a
+/// tryptic query never triggers the enzyme relaxation.
 pub fn select_nearest<'a>(
     entries: &'a [SelectionEntry],
     key: &SelectionKey,
     instrument_family: impl Fn(&str) -> String + Copy,
     standard_id: &'a str,
 ) -> (&'a str, bool) {
+    select_nearest_for(entries, key, None, instrument_family, standard_id)
+}
+
+/// [`select_nearest`] for a key whose instrument was collapsed to its family
+/// (`OrbitrapAstral` → `QExactive`, `TimsTOF` → `TOF`) from the instrument the
+/// data was acquired on, `detected_instrument`. A model keyed for the detected
+/// instrument is an exact hit and comes first; the enzyme relaxation tries the
+/// detected instrument before the family. `None` (or no collapse) is
+/// [`select_nearest`].
+pub fn select_nearest_for<'a>(
+    entries: &'a [SelectionEntry],
+    key: &SelectionKey,
+    detected_instrument: Option<&str>,
+    instrument_family: impl Fn(&str) -> String + Copy,
+    standard_id: &'a str,
+) -> (&'a str, bool) {
+    let detected = detected_instrument.filter(|d| *d != key.instrument);
+    // 0. A model trained for the detected instrument (e.g. a user-trained
+    //    OrbitrapAstral model) beats the family's models.
+    if let Some(d) = detected {
+        let k = SelectionKey {
+            instrument: d.to_string(),
+            ..key.clone()
+        };
+        if let Some(id) = select(entries, &k, instrument_family, None) {
+            return (id, false);
+        }
+    }
     // 1. Exact ladder (instrument + mods, with family fallback) — unchanged.
     if let Some(id) = select(entries, key, instrument_family, None) {
         return (id, false);
     }
-    // 2. Relax the enzyme to the dominant tryptic models, KEEPING the activation
-    //    and instrument.
-    if key.enzyme != "Tryp" {
-        let k = SelectionKey {
-            enzyme: "Tryp".to_string(),
-            ..key.clone()
-        };
-        if let Some(id) = select(entries, &k, instrument_family, None) {
-            return (id, true);
-        }
-    }
-    // 2b. Same RESOLUTION CLASS, keeping activation, enzyme and class. A model
-    //    trained at the same fragment resolution is tried before step 3 relaxes
-    //    the instrument arbitrarily, because step 3 can cross the resolution
+    // 2. Same RESOLUTION CLASS, keeping activation, enzyme and class. A model
+    //    trained at the same fragment resolution is tried before step 4 relaxes
+    //    the instrument arbitrarily, because step 4 can cross the resolution
     //    class: a high-res query landing on a 0.5-Da ion-trap model loses the
     //    high-res fragment tolerance and ion statistics. The siblings are the
     //    generic high-res models (`QExactive`, then `HighRes`), so a high-res
     //    instrument without its own model (generic `HighRes`, `TOF`, `TimsTOF`)
     //    lands on the general high-res b/y model rather than on whichever
     //    same-activation model sorts first by id (an Astral-specific model, or
-    //    a low-res one).
-    for inst in resolution_class_siblings(&key.instrument) {
+    //    a low-res one). A sibling with the query's own enzyme comes before the
+    //    enzyme relaxation, so a non-tryptic digest keeps a model trained on that
+    //    digest when one exists in its resolution class.
+    let siblings = resolution_class_siblings(&key.instrument);
+    for inst in siblings {
         let k = SelectionKey {
             instrument: (*inst).to_string(),
             ..key.clone()
@@ -296,17 +323,38 @@ pub fn select_nearest<'a>(
         if let Some(id) = select(entries, &k, instrument_family, None) {
             return (id, true);
         }
-        if key.enzyme != "Tryp" {
-            let k2 = SelectionKey {
-                enzyme: "Tryp".to_string(),
-                ..k
+    }
+    // 3. Relax the enzyme to trypsin, the enzyme of the dominant models, KEEPING
+    //    the activation and instrument (the detected one first); then the same
+    //    over the resolution-class siblings.
+    if key.enzyme != RELAXED_ENZYME {
+        let tryptic = SelectionKey {
+            enzyme: RELAXED_ENZYME.to_string(),
+            ..key.clone()
+        };
+        if let Some(d) = detected {
+            let k = SelectionKey {
+                instrument: d.to_string(),
+                ..tryptic.clone()
             };
-            if let Some(id) = select(entries, &k2, instrument_family, None) {
+            if let Some(id) = select(entries, &k, instrument_family, None) {
+                return (id, true);
+            }
+        }
+        if let Some(id) = select(entries, &tryptic, instrument_family, None) {
+            return (id, true);
+        }
+        for inst in siblings {
+            let k = SelectionKey {
+                instrument: (*inst).to_string(),
+                ..tryptic.clone()
+            };
+            if let Some(id) = select(entries, &k, instrument_family, None) {
                 return (id, true);
             }
         }
     }
-    // 3. Relax the INSTRUMENT, keeping the ACTIVATION. Activation is the ion
+    // 4. Relax the INSTRUMENT, keeping the ACTIVATION. Activation is the ion
     //    chemistry (b/y vs c/z) and is the axis that must not be crossed; the
     //    instrument only sets resolution. Without this step an ETD query with no
     //    matching-resolution ETD model fell straight through to the HCD standard
@@ -316,7 +364,7 @@ pub fn select_nearest<'a>(
     //    (activation=ETD, instrument=LowRes) resolved to `hcd_qexactive_tryp`
     //    while `etd_highres_tryp` sat unused in the store.
     //
-    //    Only fires where step 4 would otherwise return the standard base, so no
+    //    Only fires where step 5 would otherwise return the standard base, so no
     //    selection that already resolved can change. The candidate set is sorted
     //    by model_id so the choice is deterministic across runs and platforms.
     {
@@ -335,7 +383,7 @@ pub fn select_nearest<'a>(
             return (pick.model_id.as_str(), true);
         }
     }
-    // 4. Standard base — guaranteed present in the bundled store.
+    // 5. Standard base — guaranteed present in the bundled store.
     (standard_id, true)
 }
 
@@ -380,10 +428,10 @@ mod tests {
         // but an ETD model at another resolution exists in the store. Scoring c/z
         // spectra with the b/y standard base is the failure this guards.
         let entries = vec![
-            e("hcd_qexactive_tryp", "HCD", "QExactive", "Tryp", &[]),
-            e("etd_highres_tryp", "ETD", "QExactive", "Tryp", &[]),
+            e("hcd_qexactive_tryp", "HCD", "QExactive", "Trypsin", &[]),
+            e("etd_highres_tryp", "ETD", "QExactive", "Trypsin", &[]),
         ];
-        let k = key("ETD", "LowRes", "Tryp", &[]);
+        let k = key("ETD", "LowRes", "Trypsin", &[]);
         let (id, substituted) = select_nearest(&entries, &k, fam, "hcd_qexactive_tryp");
         assert_eq!(
             id, "etd_highres_tryp",
@@ -395,10 +443,10 @@ mod tests {
     #[test]
     fn instrument_relaxation_does_not_disturb_a_query_that_already_resolves() {
         let entries = vec![
-            e("hcd_qexactive_tryp", "HCD", "QExactive", "Tryp", &[]),
-            e("etd_highres_tryp", "ETD", "QExactive", "Tryp", &[]),
+            e("hcd_qexactive_tryp", "HCD", "QExactive", "Trypsin", &[]),
+            e("etd_highres_tryp", "ETD", "QExactive", "Trypsin", &[]),
         ];
-        let k = key("HCD", "QExactive", "Tryp", &[]);
+        let k = key("HCD", "QExactive", "Trypsin", &[]);
         let (id, substituted) = select_nearest(&entries, &k, fam, "hcd_qexactive_tryp");
         assert_eq!(id, "hcd_qexactive_tryp");
         assert!(
@@ -409,8 +457,8 @@ mod tests {
 
     #[test]
     fn falls_back_to_the_standard_base_when_no_model_shares_the_activation() {
-        let entries = vec![e("hcd_qexactive_tryp", "HCD", "QExactive", "Tryp", &[])];
-        let k = key("UVPD", "LowRes", "Tryp", &[]);
+        let entries = vec![e("hcd_qexactive_tryp", "HCD", "QExactive", "Trypsin", &[])];
+        let k = key("UVPD", "LowRes", "Trypsin", &[]);
         let (id, substituted) = select_nearest(&entries, &k, fam, "hcd_qexactive_tryp");
         assert_eq!(id, "hcd_qexactive_tryp");
         assert!(substituted);
@@ -450,10 +498,10 @@ mod tests {
 
     fn manifest() -> Vec<SelectionEntry> {
         vec![
-            e("astral", "HCD", "OrbitrapAstral", "Tryp", &[]),
-            e("qe_tmt", "HCD", "QExactive", "Tryp", &["tmt"]),
-            e("qe", "HCD", "QExactive", "Tryp", &[]),
-            e("generic", "HCD", "QExactive", "Tryp", &[]),
+            e("astral", "HCD", "OrbitrapAstral", "Trypsin", &[]),
+            e("qe_tmt", "HCD", "QExactive", "Trypsin", &["tmt"]),
+            e("qe", "HCD", "QExactive", "Trypsin", &[]),
+            e("generic", "HCD", "QExactive", "Trypsin", &[]),
         ]
     }
 
@@ -464,12 +512,12 @@ mod tests {
         // selection must be independent of row order: lexicographically smallest
         // model_id wins regardless of which appears first in the manifest.
         let a = vec![
-            e("zzz_model", "HCD", "QExactive", "Tryp", &[]),
-            e("aaa_model", "HCD", "QExactive", "Tryp", &[]),
+            e("zzz_model", "HCD", "QExactive", "Trypsin", &[]),
+            e("aaa_model", "HCD", "QExactive", "Trypsin", &[]),
         ];
         let mut b = a.clone();
         b.reverse();
-        let k = key("HCD", "QExactive", "Tryp", &[]);
+        let k = key("HCD", "QExactive", "Trypsin", &[]);
         assert_eq!(select(&a, &k, fam, None), Some("aaa_model"));
         assert_eq!(
             select(&a, &k, fam, None),
@@ -484,7 +532,7 @@ mod tests {
         assert_eq!(
             select(
                 &manifest(),
-                &key("HCD", "OrbitrapAstral", "Tryp", &[]),
+                &key("HCD", "OrbitrapAstral", "Trypsin", &[]),
                 fam,
                 Some("generic")
             ),
@@ -498,7 +546,7 @@ mod tests {
         assert_eq!(
             select(
                 &manifest(),
-                &key("HCD", "OrbitrapAstral", "Tryp", &["tmt"]),
+                &key("HCD", "OrbitrapAstral", "Trypsin", &["tmt"]),
                 fam,
                 Some("generic")
             ),
@@ -512,7 +560,7 @@ mod tests {
         assert_eq!(
             select(
                 &manifest(),
-                &key("ETD", "LowRes", "Tryp", &[]),
+                &key("ETD", "LowRes", "Trypsin", &[]),
                 fam,
                 Some("generic")
             ),
@@ -523,14 +571,14 @@ mod tests {
     #[test]
     fn largest_subset_when_no_exact_combo() {
         let mut m = manifest();
-        m.push(e("qe_phos", "HCD", "QExactive", "Tryp", &["phospho"]));
+        m.push(e("qe_phos", "HCD", "QExactive", "Trypsin", &["phospho"]));
         // key {phospho, tmt}: no combo model -> largest subset.
         // Both {phospho} (qe_phos) and {tmt} (qe_tmt) are size-1 subsets.
         // Tie-break: prefer the labeling tag (tmt) -> qe_tmt.
         assert_eq!(
             select(
                 &m,
-                &key("HCD", "QExactive", "Tryp", &["phospho", "tmt"]),
+                &key("HCD", "QExactive", "Trypsin", &["phospho", "tmt"]),
                 fam,
                 Some("generic")
             ),
@@ -543,7 +591,12 @@ mod tests {
     #[test]
     fn no_generic_id_returns_none() {
         assert_eq!(
-            select(&manifest(), &key("ETD", "LowRes", "Tryp", &[]), fam, None),
+            select(
+                &manifest(),
+                &key("ETD", "LowRes", "Trypsin", &[]),
+                fam,
+                None
+            ),
             None
         );
     }
@@ -554,7 +607,7 @@ mod tests {
         assert_eq!(
             select(
                 &manifest(),
-                &key("HCD", "TimsTOF", "Tryp", &[]),
+                &key("HCD", "TimsTOF", "Trypsin", &[]),
                 fam,
                 Some("generic")
             ),
@@ -569,13 +622,13 @@ mod tests {
         // (This mirrors the backs_off_instrument_family_then_experiment test but with
         //  an extra phospho class that has no dedicated model.)
         let m = vec![
-            e("qe_tmt", "HCD", "QExactive", "Tryp", &["tmt"]),
-            e("qe", "HCD", "QExactive", "Tryp", &[]),
+            e("qe_tmt", "HCD", "QExactive", "Trypsin", &["tmt"]),
+            e("qe", "HCD", "QExactive", "Trypsin", &[]),
         ];
         assert_eq!(
             select(
                 &m,
-                &key("HCD", "QExactive", "Tryp", &["phospho", "tmt"]),
+                &key("HCD", "QExactive", "Trypsin", &["phospho", "tmt"]),
                 fam,
                 Some("generic")
             ),
@@ -586,11 +639,11 @@ mod tests {
     #[test]
     fn step4_empty_class_fallback() {
         // key has {phospho} but no phospho entry; step 4 -> empty-class entry.
-        let m = vec![e("qe", "HCD", "QExactive", "Tryp", &[])];
+        let m = vec![e("qe", "HCD", "QExactive", "Trypsin", &[])];
         assert_eq!(
             select(
                 &m,
-                &key("HCD", "QExactive", "Tryp", &["phospho"]),
+                &key("HCD", "QExactive", "Trypsin", &["phospho"]),
                 fam,
                 Some("generic")
             ),
@@ -600,7 +653,7 @@ mod tests {
 
     // ---- select_nearest (own-only store fallback) ----
 
-    /// Step 2b: a generic high-res HCD query (auto-detected `HighRes`, the name
+    /// Step 2: a generic high-res HCD query (auto-detected `HighRes`, the name
     /// no bundled HCD tryptic model carries) must resolve to the high-res
     /// Orbitrap model `hcd_qexactive_tryp`, not to whichever same-activation
     /// model sorts first by id (`hcd_astral_tryp`, an Astral-specific model).
@@ -608,7 +661,7 @@ mod tests {
     #[test]
     fn generic_highres_hcd_prefers_qexactive_over_alphabetical_astral() {
         let m = vec![
-            e("hcd_astral_tryp", "HCD", "OrbitrapAstral", "Tryp", &[]),
+            e("hcd_astral_tryp", "HCD", "OrbitrapAstral", "Trypsin", &[]),
             e(
                 "hcd_highres_nocleavage",
                 "HCD",
@@ -616,12 +669,12 @@ mod tests {
                 "NoCleavage",
                 &[],
             ),
-            e("hcd_qexactive_tryp", "HCD", "QExactive", "Tryp", &[]),
-            e("cid_lowres_tryp", "CID", "LowRes", "Tryp", &[]),
+            e("hcd_qexactive_tryp", "HCD", "QExactive", "Trypsin", &[]),
+            e("cid_lowres_tryp", "CID", "LowRes", "Trypsin", &[]),
         ];
         let (id, sub) = select_nearest(
             &m,
-            &key("HCD", "HighRes", "Tryp", &[]),
+            &key("HCD", "HighRes", "Trypsin", &[]),
             fam,
             "hcd_qexactive_tryp",
         );
@@ -631,17 +684,17 @@ mod tests {
             "a resolution-class swap is still a substitution and must WARN"
         );
         // The reverse swap holds too, and the exact ladder still wins when present.
-        let m2 = vec![e("hcd_highres_tryp_x", "HCD", "HighRes", "Tryp", &[])];
+        let m2 = vec![e("hcd_highres_tryp_x", "HCD", "HighRes", "Trypsin", &[])];
         let (id2, _) = select_nearest(
             &m2,
-            &key("HCD", "QExactive", "Tryp", &[]),
+            &key("HCD", "QExactive", "Trypsin", &[]),
             fam,
             "hcd_qexactive_tryp",
         );
         assert_eq!(id2, "hcd_highres_tryp_x");
         let (id3, sub3) = select_nearest(
             &m,
-            &key("HCD", "QExactive", "Tryp", &[]),
+            &key("HCD", "QExactive", "Trypsin", &[]),
             fam,
             "hcd_qexactive_tryp",
         );
@@ -656,12 +709,12 @@ mod tests {
     #[test]
     fn dropped_cid_phospho_routes_to_cid_tryp() {
         let m = vec![
-            e("cid_lowres_tryp", "CID", "LowRes", "Tryp", &[]),
-            e("hcd_qexactive_tryp", "HCD", "QExactive", "Tryp", &[]),
+            e("cid_lowres_tryp", "CID", "LowRes", "Trypsin", &[]),
+            e("hcd_qexactive_tryp", "HCD", "QExactive", "Trypsin", &[]),
         ];
         let (id, sub) = select_nearest(
             &m,
-            &key("CID", "LowRes", "Tryp", &["phospho"]),
+            &key("CID", "LowRes", "Trypsin", &["phospho"]),
             fam,
             "hcd_qexactive_tryp",
         );
@@ -672,11 +725,11 @@ mod tests {
         );
     }
 
-    /// Enzyme backoff: a GluC query with no GluC model falls to the Tryp model of
-    /// the SAME activation+instrument.
+    /// Enzyme backoff: a GluC query with no GluC model falls to the trypsin
+    /// model of the SAME activation+instrument.
     #[test]
     fn enzyme_backoff_to_tryp() {
-        let m = vec![e("cid_lowres_tryp", "CID", "LowRes", "Tryp", &[])];
+        let m = vec![e("cid_lowres_tryp", "CID", "LowRes", "Trypsin", &[])];
         let (id, sub) = select_nearest(
             &m,
             &key("CID", "LowRes", "GluC", &[]),
@@ -687,20 +740,115 @@ mod tests {
         assert!(sub);
     }
 
+    /// The enzyme relaxation retries with the store's name for trypsin, so a
+    /// non-tryptic query lands on the tryptic model of its own activation and
+    /// instrument, not on the same-activation model that sorts first by id
+    /// (another enzyme's model, or another instrument's).
+    #[test]
+    fn non_tryptic_query_relaxes_to_the_tryptic_model_of_its_activation_and_instrument() {
+        let m = vec![
+            e("cid_lowres_argc", "CID", "LowRes", "ArgC", &[]),
+            e("cid_lowres_tryp", "CID", "LowRes", "Trypsin", &[]),
+            e("hcd_astral_tryp", "HCD", "OrbitrapAstral", "Trypsin", &[]),
+            e("hcd_qexactive_tryp", "HCD", "QExactive", "Trypsin", &[]),
+            e(
+                "hcd_qexactive_tryp_tmt",
+                "HCD",
+                "QExactive",
+                "Trypsin",
+                &["tmt"],
+            ),
+        ];
+        let cases = [
+            (key("CID", "LowRes", "Chymotrypsin", &[]), "cid_lowres_tryp"),
+            (key("HCD", "QExactive", "LysC", &[]), "hcd_qexactive_tryp"),
+            (
+                key("HCD", "QExactive", "LysC", &["tmt"]),
+                "hcd_qexactive_tryp_tmt",
+            ),
+            (key("HCD", "TOF", "NonSpecific", &[]), "hcd_qexactive_tryp"),
+        ];
+        for (k, want) in cases {
+            let (id, sub) = select_nearest(&m, &k, fam, "hcd_qexactive_tryp");
+            assert_eq!(id, want, "{k:?}");
+            assert!(sub, "{k:?}");
+        }
+        assert_eq!(RELAXED_ENZYME, Enzyme::Trypsin.name());
+    }
+
+    /// With the key collapsed to the instrument family, a model for the detected
+    /// instrument is an exact hit, and a non-tryptic query relaxes to the
+    /// detected instrument's tryptic model before the family's.
+    #[test]
+    fn detected_instrument_comes_before_its_family() {
+        let m = vec![
+            e("hcd_astral_tryp", "HCD", "OrbitrapAstral", "Trypsin", &[]),
+            e("hcd_qexactive_tryp", "HCD", "QExactive", "Trypsin", &[]),
+        ];
+        let tryptic = key("HCD", "QExactive", "Trypsin", &[]);
+        assert_eq!(
+            select_nearest_for(
+                &m,
+                &tryptic,
+                Some("OrbitrapAstral"),
+                fam,
+                "hcd_qexactive_tryp"
+            ),
+            ("hcd_astral_tryp", false)
+        );
+        assert_eq!(
+            select_nearest(&m, &tryptic, fam, "hcd_qexactive_tryp"),
+            ("hcd_qexactive_tryp", false)
+        );
+        let lysc = key("HCD", "QExactive", "LysC", &[]);
+        assert_eq!(
+            select_nearest_for(&m, &lysc, Some("OrbitrapAstral"), fam, "hcd_qexactive_tryp"),
+            ("hcd_astral_tryp", true)
+        );
+        assert_eq!(
+            select_nearest_for(&m, &lysc, Some("TimsTOF"), fam, "hcd_qexactive_tryp"),
+            ("hcd_qexactive_tryp", true)
+        );
+    }
+
+    /// A model for the query's own enzyme in the same resolution class is kept
+    /// ahead of the enzyme relaxation.
+    #[test]
+    fn same_enzyme_in_the_resolution_class_beats_the_tryptic_model() {
+        let m = vec![
+            e(
+                "hcd_highres_nocleavage",
+                "HCD",
+                "HighRes",
+                "NoCleavage",
+                &[],
+            ),
+            e("hcd_qexactive_tryp", "HCD", "QExactive", "Trypsin", &[]),
+        ];
+        let (id, sub) = select_nearest(
+            &m,
+            &key("HCD", "QExactive", "NoCleavage", &[]),
+            fam,
+            "hcd_qexactive_tryp",
+        );
+        assert_eq!(id, "hcd_highres_nocleavage");
+        assert!(sub);
+    }
+
     /// No same-activation/instrument tryptic model at all → standard base. We do
     /// NOT cross activation, so an ETD model present at a different instrument is
     /// deliberately NOT chosen for an HCD query (a b/y standard beats a c/z model).
     #[test]
     fn no_enzyme_match_falls_back_to_standard_not_other_activation() {
         let m = vec![
-            e("etd_highres_tryp", "ETD", "HighRes", "Tryp", &[]),
-            e("hcd_qexactive_tryp", "HCD", "QExactive", "Tryp", &[]),
+            e("etd_highres_tryp", "ETD", "HighRes", "Trypsin", &[]),
+            e("hcd_qexactive_tryp", "HCD", "QExactive", "Trypsin", &[]),
         ];
         // HCD/HighRes/Tryp (no exact, no HCD/HighRes model) → standard HCD, NOT the
         // ETD model (which only happens to share the HighRes instrument).
         let (id, sub) = select_nearest(
             &m,
-            &key("HCD", "HighRes", "Tryp", &[]),
+            &key("HCD", "HighRes", "Trypsin", &[]),
             fam,
             "hcd_qexactive_tryp",
         );
@@ -711,7 +859,7 @@ mod tests {
     /// Standard fallback: nothing close at all → the standard base, substituted.
     #[test]
     fn falls_back_to_standard_base() {
-        let m = vec![e("etd_highres_tryp", "ETD", "HighRes", "Tryp", &[])];
+        let m = vec![e("etd_highres_tryp", "ETD", "HighRes", "Trypsin", &[])];
         let (id, sub) = select_nearest(
             &m,
             &key("UVPD", "TimsTOF", "ArgC", &[]),
@@ -728,22 +876,22 @@ mod tests {
     #[test]
     fn tof_without_a_tof_model_stays_high_res() {
         let m = vec![
-            e("astral", "HCD", "OrbitrapAstral", "Tryp", &[]),
-            e("cid_lowres_tryp", "CID", "LowRes", "Tryp", &[]),
-            e("hcd_lowres_like", "HCD", "LowRes", "Tryp", &[]),
-            e("hcd_qexactive_tryp", "HCD", "QExactive", "Tryp", &[]),
+            e("astral", "HCD", "OrbitrapAstral", "Trypsin", &[]),
+            e("cid_lowres_tryp", "CID", "LowRes", "Trypsin", &[]),
+            e("hcd_lowres_like", "HCD", "LowRes", "Trypsin", &[]),
+            e("hcd_qexactive_tryp", "HCD", "QExactive", "Trypsin", &[]),
             e(
                 "hcd_qexactive_tryp_tmt",
                 "HCD",
                 "QExactive",
-                "Tryp",
+                "Trypsin",
                 &["tmt"],
             ),
         ];
         for inst in ["TOF", "TimsTOF"] {
             let (id, sub) = select_nearest(
                 &m,
-                &key("HCD", inst, "Tryp", &[]),
+                &key("HCD", inst, "Trypsin", &[]),
                 fam,
                 "hcd_qexactive_tryp",
             );
@@ -751,7 +899,7 @@ mod tests {
             assert!(sub);
             let (id, sub) = select_nearest(
                 &m,
-                &key("HCD", inst, "Tryp", &["tmt"]),
+                &key("HCD", inst, "Trypsin", &["tmt"]),
                 fam,
                 "hcd_qexactive_tryp",
             );
@@ -764,12 +912,12 @@ mod tests {
     #[test]
     fn timstof_model_is_an_exact_hit() {
         let m = vec![
-            e("hcd_qexactive_tryp", "HCD", "QExactive", "Tryp", &[]),
-            e("hcd_timstof_tryp", "HCD", "TimsTOF", "Tryp", &[]),
+            e("hcd_qexactive_tryp", "HCD", "QExactive", "Trypsin", &[]),
+            e("hcd_timstof_tryp", "HCD", "TimsTOF", "Trypsin", &[]),
         ];
         let (id, sub) = select_nearest(
             &m,
-            &key("HCD", "TimsTOF", "Tryp", &[]),
+            &key("HCD", "TimsTOF", "Trypsin", &[]),
             fam,
             "hcd_qexactive_tryp",
         );
@@ -794,7 +942,7 @@ mod tests {
         let m = manifest();
         let (id, sub) = select_nearest(
             &m,
-            &key("HCD", "OrbitrapAstral", "Tryp", &[]),
+            &key("HCD", "OrbitrapAstral", "Trypsin", &[]),
             fam,
             "generic",
         );

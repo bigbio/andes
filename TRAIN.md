@@ -46,18 +46,26 @@ andes --spectrum mydata.mzML --database mydb.fasta --output-pin out.pin \
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `--spectra` | training spectra (mzML/MGF; `.raw`/`.d` with the native features) | *(required)* |
+| `--spectra` | training spectra (mzML/MGF; `.raw`/`.d` with the native features); repeat for several runs | *(required)* |
 | `--database` | target FASTA (decoys auto-generated) | *(required)* |
 | `--out-store` | Parquet store to create/append | *(required)* |
 | `--seed-model` | seed slug or `.param` path for the first-pass search | `hcd_qexactive_tryp` |
 | `--train-fdr` | q-value threshold for confident labels | `0.01` |
-| `--instrument` | instrument tag for the model | `QExactive` |
+| `--instrument` | instrument of the model, part of its selection key (`QExactive`, `OrbitrapAstral`, `TimsTOF`, …) | the seed's |
 | `--protocol` | experiment-class tag(s) (§4) | `Automatic` |
 | `--model-id` | id written to the store | `trained_<instrument>_<protocol>` |
 | `--mods` | mods.txt (same format as search) | Cam-C + Ox-M |
 | `--date` | ISO-8601 date in the source ledger | today |
+| `--fragment-tol-ppm` / `--fragment-tol-da` | replace the seed's fragment tolerance (`mme`) | the seed's |
 
 Use a lenient `--train-fdr` (e.g. `0.1`) on small datasets and `0.01` on full runs.
+
+With several `--spectra`, each run is searched and labelled on its own (its own target-decoy
+q-values) and only its labelled spectra stay in memory. Each run becomes one source in the
+ledger, named by its file stem, so it can be removed or reweighted later (§5).
+
+Keep the seed's fragment tolerance unless you are comparing tolerances. Training rebuilds
+fragment m/z from nominal masses, so a ppm window marks most fragments as missing.
 
 ## 3. Training-data sources
 

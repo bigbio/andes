@@ -10,36 +10,35 @@ glycan tag stripped). A "glycopeptide" is the distinct `(peptide, composition)`
 pair; PSM rows are the accepted spectra behind those pairs.
 
 Reproduce with `docs/benchmarks/glyco/compare_engines.py` (`--help` lists the inputs). The
-reference engines are anonymised (engine A, L, M, N, O); the result files are the ones
-deposited in PXD031032 and PXD005553.
+result files are the ones deposited in PXD031032 and PXD005553.
 
 ## Engines and filters
 
 | Engine | Result file | Filter |
 |---|---|---|
 | andes | `<stem>.glyco.pin` + native-rescore `.psms` | q ≤ 0.01, seed 42, full glycan list (the `--glyco` default since 2026-10-07; `--glyco-full-glycan-db` before), bundled mouse `.gdb` (1833 comps) |
-| engine M | result workbook (`.xlsx`), PXD031032 | Score ≥ 300 |
-| engine N | GPSM text export, PXD031032 | PeptideFDR ≤ 0.01 |
-| engine O | result workbook (`.xlsx`), PXD031032 | all rows |
-| engine L | `MouseLiver-Z-T-1-FDR.txt` (PXD005553) | TotalFDR ≤ 0.01, target only |
-| engine A | glyco `psm.tsv`, PXD031032 | Expectation ≤ 0.01, Delta Mass → composition |
+| Byonic | result workbook (`.xlsx`), PXD031032 | Score ≥ 300 |
+| Glyco-Decipher | GPSM text export, PXD031032 | PeptideFDR ≤ 0.01 |
+| StrucGP | result workbook (`.xlsx`), PXD031032 | all rows |
+| pGlyco2 | `MouseLiver-Z-T-1-FDR.txt` (PXD005553) | TotalFDR ≤ 0.01, target only |
+| MSFragger-Glyco | glyco `psm.tsv`, PXD031032 | Expectation ≤ 0.01, Delta Mass → composition |
 
 ## Identifications
 
 | Engine | glycopeptides | PSM rows | proteins |
 |---|---|---|---|
-| **andes** | **2868** | 6913 | 479 (459 excl. entrapment) |
-| engine M | 2509 | 5997 | 401 |
-| engine A | 2507 | 6229 | 422 |
-| engine N | 2301 | 5947 | 388 |
-| engine O | 1789 | 3803 | 430 |
-| engine L | 1761 | 3995 | 340 |
+| andes | 2868 | 6913 | 479 (459 excl. entrapment) |
+| Byonic | 2509 | 5997 | 401 |
+| MSFragger-Glyco | 2507 | 6229 | 422 |
+| Glyco-Decipher | 2301 | 5947 | 388 |
+| StrucGP | 1789 | 3803 | 430 |
+| pGlyco2 | 1761 | 3995 | 340 |
 
 ⚠ **The andes row still counts entrapment hits.** 24 of its 6,913 accepted rows map to
 entrapment proteins, which cannot be present in the sample and are therefore known-false.
 No other engine here searched an entrapment database, so andes is the only row carrying
 them. The corrected glycopeptide count is between 2,844 and 2,868 — at most 24 pairs lower,
-and the ranking against engine M (2,509) does not change. `compare_engines.py` now excludes
+and still above Byonic's 2,509. `compare_engines.py` now excludes
 entrapment from the headline and prints the inclusive figure on a second line; this table
 will be exact on the next run of the script.
 
@@ -48,25 +47,25 @@ cost of the 1% threshold, not a red flag.
 
 ## Pairwise overlap on (peptide, glycan composition)
 
-| | engine N | engine O | engine M | engine L | engine A | andes |
+| | Glyco-Decipher | StrucGP | Byonic | pGlyco2 | MSFragger-Glyco | andes |
 |---|---|---|---|---|---|---|
-| engine N | — | 0.372 | 0.538 | 0.378 | 0.527 | **0.545** |
-| engine O | | — | 0.335 | 0.272 | 0.313 | 0.326 |
-| engine M | | | — | 0.352 | 0.551 | **0.551** |
-| engine L | | | | — | 0.314 | 0.322 |
-| engine A | | | | | — | **0.558** |
+| Glyco-Decipher | — | 0.372 | 0.538 | 0.378 | 0.527 | 0.545 |
+| StrucGP | | — | 0.335 | 0.272 | 0.313 | 0.326 |
+| Byonic | | | — | 0.352 | 0.551 | 0.551 |
+| pGlyco2 | | | | — | 0.314 | 0.322 |
+| MSFragger-Glyco | | | | | — | 0.558 |
 
-Shared counts: andes–engine A 1924, andes–engine M 1911, andes–engine N
-1823, andes–engine O 1145, andes–engine L 1128. Protein-level: andes shares
-371 / 366 / 357 / 327 / 274 with engines A / N / M / L / O respectively.
+Shared counts: andes–MSFragger-Glyco 1924, andes–Byonic 1911, andes–Glyco-Decipher
+1823, andes–StrucGP 1145, andes–pGlyco2 1128. Protein-level: andes shares
+371 / 366 / 357 / 327 / 274 with MSFragger-Glyco / Glyco-Decipher / Byonic / pGlyco2 / StrucGP respectively.
 
-**Read:** andes identifies the most glycopeptides (2868), and its highest
-agreement is with engine A (0.558) and engine M (0.551), followed closely
-by engine N (0.545) — it covers 1924 of engine A's 2507 (77%), 1911 of
-engine M's 2509 (76%) and 1823 of engine N's 2301 (79%). Engine L (2017)
-and engine O are the outliers at the low end on every row (0.27–0.38), consistent
-with their smaller glycan databases and older scoring, not an andes-specific
-divergence.
+**Read:** andes reports 2868 glycopeptides (entrapment included), and its highest
+agreement is with MSFragger-Glyco (0.558) and Byonic (0.551), followed closely
+by Glyco-Decipher (0.545) — it covers 1924 of MSFragger-Glyco's 2507 (77%), 1911 of
+Byonic's 2509 (76%) and 1823 of Glyco-Decipher's 2301 (79%). pGlyco2 (2017)
+and StrucGP have the lowest pairwise overlaps on every row (0.27–0.38), including
+with each other; this may reflect their smaller glycan databases and different scoring rather
+than an andes-specific difference. Each engine's filter is its own convention (see below).
 
 ## Timing — A/B against `main`
 
@@ -126,21 +125,21 @@ recorded here rather than left for someone to rediscover.
 
 ## Notes and caveats
 
-- Filter thresholds are each engine's own convention (engine M Score, engine N
-  PeptideFDR, engine L TotalFDR, engine A Expectation, andes native q-value); they
+- Filter thresholds are each engine's own convention (Byonic Score, Glyco-Decipher
+  PeptideFDR, pGlyco2 TotalFDR, MSFragger-Glyco Expectation, andes native q-value); they
   are not directly calibrated to one another.
-- Engine A's export carries the glycan only as a "Delta Mass" (residue-sum
+- MSFragger-Glyco's export carries the glycan only as a "Delta Mass" (residue-sum
   mass, no water subtracted), so the script maps it back to a composition via
   the bundled mouse `.gdb` within 0.02 Da (with ^13C M+1/M+2 precursor recovery).
   The peptide-level Expectation ≤ 0.01 is the FDR proxy — the file has no glycan
   q-value and no decoys. The Hex+NeuAc ↔ Fuc+NeuGc isobar (0.27 mDa) is resolved
-  to the nearer mass; 3.1% of engine A rows sit on that isobar.
-- andes uses the bundled mouse `.gdb` (1833 compositions). Engine M searched a wider
+  to the nearer mass; 3.1% of MSFragger-Glyco rows sit on that isobar.
+- andes uses the bundled mouse `.gdb` (1833 compositions). Byonic searched a wider
   glycan space (its 698 distinct compositions include antenna variants), so exact
   composition matches are the conservative subset.
-- Engine L encodes the glycosylated Asn as `J` in its peptide column
+- pGlyco2 encodes the glycosylated Asn as `J` in its peptide column
   (`VSQVLHEGGHJVTK` → `…HNVTK`); the script maps `J→N`.
-- Engine M peptide cells carry flanking residues **and** decimal masses
+- Byonic peptide cells carry flanking residues **and** decimal masses
   (`K.HLLEN[+1864.634]ATASVSEAER.K`); the script strips flanks by first/last dot,
   not a full split, because the mass annotation contains a decimal point.
 - Protein accessions are normalised to the canonical UniProt form (isoform suffix

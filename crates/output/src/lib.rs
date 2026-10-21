@@ -18,6 +18,7 @@
 //!   produced.
 
 mod atomic;
+pub use atomic::write_atomic;
 pub mod tsv;
 pub use tsv::{write_tsv, write_tsv_to};
 

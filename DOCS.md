@@ -56,7 +56,7 @@ Native `.raw`/`.d` search MS2 only (MS3 reporter scans are filtered at load).
 
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
-| `--mods` | path | *(off)* | Java-format `mods.txt` (§2). Without it: Carbamidomethyl C (fixed), Oxidation M (variable, max 3 per peptide). Numeric Da masses only. | Java `-mod <FILE>` |
+| `--mods` | path | *(off)* | Java-format `mods.txt` (§2). Without it: Carbamidomethyl C (fixed), Oxidation M (variable) and Acetyl on the protein N-terminus (variable), max 3 variable mods per peptide. Numeric Da masses only. | Java `-mod <FILE>` |
 
 ### Scoring
 
@@ -641,7 +641,7 @@ See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model)
 | `--quant-fdr` | 0..1 | `--fdr` | PSM q-value cut for quantification targets when `--rescore`/`--rescore-native` ran. With `--mbr`, also the PSM q-value at which a run identifies a precursor (§10). |
 | `--mbr` | flag | off | Match-between-runs label-free quantification across two or more inputs (§10). Needs `--lfq` and `--rescore` (or `--rescore-native`); not with `--tmt`. Writes `<stem>.mbr.parquet` and `<stem>.mbr_validation.parquet`; with `--output-parquet`, `quantms.feature.parquet` holds these rows (without the below-threshold transfers) instead of the per-run features. Uses `--quant-dir`, or a temporary directory removed at exit. With `--rescore` (Percolator), same result as `andes quant library`, `extract` and `finalize` on the same Percolator results. |
 | `--mbr-library-fdr` | 0..1 | `0.01` | Internal library entry gate (precursor-level), not a reported identification FDR: best-PSM-per-precursor target/decoy q-value over the rescored PSM scores of all runs. |
-| `--mbr-fdr` | 0..1 | `0.01` | *(advanced)* Transfer quality q-value: transfers at or below it are `transfer_ms2` (an MS2 scan of the run supports them) or `transfer_ms1`. An internal quant-quality q-value, not an identification FDR. It counts both wrong peaks and the transfers of false donor identifications (identity decoys, §10). On a public label-free benchmark, `0.05` adds about 5k precursors quantified in at least 3 runs to 0.01 (62.8k to 68.0k) at an accuracy cost (median \|eps\| 0.162 to 0.173, E. coli 0.27 to 0.43, CV 0.118 to 0.132, wrong-peak rate 1.7% to 2.7%); use `0.05` for a deeper, less accurate set. |
+| `--mbr-fdr` | 0..1 | `0.01` | *(advanced)* Transfer quality q-value: transfers at or below it are `transfer_ms2` (an MS2 scan of the run supports them) or `transfer_ms1`. An internal quant-quality q-value, not an identification FDR. It counts both wrong peaks and the transfers of false donor identifications (identity decoys, §10). On the ProteoBench QExactive module (2026-10-21, defaults), `0.05` adds about 6k precursors quantified in at least 3 runs to 0.01 (65.4k to 71.6k) at an accuracy cost (median \|eps\| 0.164 to 0.177, E. coli 0.28 to 0.44, CV 0.120 to 0.134); in an earlier measurement the wrong-peak rate rose from 1.7% to 2.7%. Use `0.05` for a deeper, less accurate set. |
 | `--quant-feature-fdr` | 0..1 or `off` | `off` | Identified-row quality q-value (`quant_q`): with a value, an identified row whose MS1 feature has a `quant_q` above it (or none) is `identified_below_threshold` and left out of `quantms.feature.parquet` (§10); `off` reports every identified row and keeps `quant_q` as an annotation. An internal quant-quality q-value, not an identification FDR. |
 
 With `--output-parquet`, both modules add `quantms.feature.parquet` (the QPX feature view) to the bundle.
@@ -719,7 +719,9 @@ NumMods=3
 15.99491,M,opt,any,Oxidation
 ```
 
-These two are the built-in defaults when `--mods` is omitted.
+The built-in defaults when `--mods` is omitted are these two plus a variable Acetyl
+(+42.010565) on the protein N-terminus, i.e. the equivalent of adding
+`42.010565,*,opt,Prot-N-term,Acetyl`. Pass a `--mods` file to search without it.
 
 ### Example (b) — TMT 10-plex on K and peptide N-term
 
@@ -1015,8 +1017,9 @@ every modification accession its peptidoforms use (`andes.run_quant.mods`).
 
 With `--fragmentation auto`, andes takes the dominant `<activation>` cvParam over the first 64
 MS2 spectra of an mzML (mixed methods warn) and the dominant analyser (none → `low-res`).
-`.raw` carries both in vendor metadata (HCD on an Orbitrap → `hcd_qexactive_tryp`); `.d` routes
-to `cid_tof_tryp`. **MGF** has none: andes assumes CID / low-res / 0.5 Da (`cid_lowres_tryp`)
+`.raw` carries both in vendor metadata (HCD on an Orbitrap → `hcd_qexactive_tryp`); `.d`
+(timsTOF, beam-type CID) routes to the high-res HCD model `hcd_qexactive_tryp` (or its protocol
+variant) with a 20 ppm feature tolerance, as in §1. **MGF** has none: andes assumes CID / low-res / 0.5 Da (`cid_lowres_tryp`)
 and warns; `--fragment-tol-ppm` implies a high-res instrument, `--fragment-tol-da` a low-res
 one. `--protocol` applies on top.
 
@@ -1162,6 +1165,13 @@ glycosite (no sequon), the core is a single reducing-end GalNAc, and the glycan
 database must be an O-glycan `.gdb` (e.g. a published O-glycan database). The
 defaults are validated; most knobs are hidden.
 
+`--glyco` raises `--max-missed-cleavages` to at least 3: sequon-bearing tryptic
+peptides often need a third missed cleavage to reach a scoreable length. An explicit
+`--max-missed-cleavages` below 3 is honoured (with a note), because the floor of 3 grows
+the candidate index by about 40% (13.2M to 18.8M candidates on a 20k-protein human FASTA,
+about +4.4 GB resident), the difference between running and being killed for memory on a
+16 GB machine. A value of 3 or more is used as given.
+
 **Main flags:**
 
 | Flag | Default | Purpose |
@@ -1170,7 +1180,7 @@ defaults are validated; most knobs are hidden.
 | `--glyco-glycan-gdb <FILE>` | — | `.gdb` glycan database (canonical-string trees, the format of the bundled databases); structure (core- vs antenna-fucose) is kept. Wins over `--glyco-species`. |
 | `--glyco-species <NAME>` | — | Bundled database: `human`, `mouse`, `mouse-large`, `high-mannose`. One of the two is required. |
 | `--glyco-core <n\|o>` | `n` | Glycan core: `n` = N-glycan (N-X-S/T sequon gate, trimannosyl core), `o` = O-glycan (any S/T gate, single GalNAc core). An `o` run needs an O-glycan `.gdb`. |
-| `--precursor-mono` | `auto` | Correct each precursor to the monoisotope its MS1 envelope supports (mzML or `.raw`): tests "recorded = M+k", k = 0..6, and moves down k−1 isotopes when k > 0 clearly wins. On the engine L mouse-liver reference (PXD005553) 88 of 3,824 scans were recorded exactly +4 high (issue #64). Fitted spectra are searched with a `0..1` isotope window instead of `0..2`. Adds `MonoShift`/`MonoFit`/`MonoFitGain`/`MonoSNR`. An explicit `--isotope-error` is honoured; without MS1 the search is as with `off` and the Mono columns are 0. The Mono columns follow the flag and the input format only (mzML or `.raw` under `--glyco`), so separately searched runs share one PIN header. Under `--glyco` the isotope-error window defaults to 0..=2 (dropping −1 measured +81 backbone-correct @1%). |
+| `--precursor-mono` | `auto` | Correct each precursor to the monoisotope its MS1 envelope supports (mzML or `.raw`): tests "recorded = M+k", k = 0..6, and moves down k−1 isotopes when k > 0 clearly wins. On the pGlyco2 mouse-liver reference (PXD005553) 88 of 3,824 scans were recorded exactly +4 high (issue #64). Fitted spectra are searched with a `0..1` isotope window instead of `0..2`. Adds `MonoShift`/`MonoFit`/`MonoFitGain`/`MonoSNR`. An explicit `--isotope-error` is honoured; without MS1 the search is as with `off` and the Mono columns are 0. The Mono columns follow the flag and the input format only (mzML or `.raw` under `--glyco`), so separately searched runs share one PIN header. Under `--glyco` the isotope-error window defaults to 0..=2 (dropping −1 measured +81 backbone-correct @1%). |
 | `--glyco-max-peaks` | 0 (no cap) | Peaks the **generation** stage considers; 300–500 helps very dense scans. |
 | `--glyco-retrieval-tol-ppm` | tol-ppm on high-res, the model's Da window on low-res | Retrieval window only; 20 ppm on high-res measured 6.9x faster at no identification cost. |
 | `--glyco-y-max-charge` | 3 | Maximum glycan-Y fragment charge. |
@@ -1263,14 +1273,14 @@ single input run's MS1 scans still need to fit in memory while it is processed.
   `-2C13/-N15-C13/-C13/-N15/+N15/+C13/+N15+C13/+2C13` for TMTpro 16/18), optional `<channel>:`
   prefix, `#` comments, `NA`/`-1` for no spill. Labels must match kit order; rows whose percentages
   sum to more than 100 are rejected. The observed vector is solved as `observed = M · true`
-  by non-negative least squares, so corrected intensities agree with a reference isobaric
-  implementation for the same matrix. Without a sheet, no correction. The raw values are always kept (`raw_` columns, parquet
+  by non-negative least squares, so corrected intensities agree with OpenMS IsobaricAnalyzer
+  for the same matrix. Without a sheet, no correction. The raw values are always kept (`raw_` columns, parquet
   `additional_intensities`).
 * **TMTpro 32/35-plex** (`tmt32`, `tmt35`). The deuterated reagents put a 2H in place of a 13C in
   the reporter, so each `D` channel sits 2.9 mDa above its non-deuterated twin; the default
   `--tmt-tol` is 10 ppm instead of 20 ppm (a window must stay below 10.8 ppm at 135 Th). Channels
-  are reported in the reference kit order (`128N`, `128C`, `128ND`, `128CD`, ...), not by m/z. There is
-  no impurity correction: the reference implementation ignores a sheet for these kits and applies the identity, and
+  are reported in OpenMS's kit order (`128N`, `128C`, `128ND`, `128CD`, ...), not by m/z. There is
+  no impurity correction: OpenMS ignores a sheet for these kits and applies the identity, and
   `--tmt-correction` is refused before the database is loaded. Peptides are searched with the
   TMTpro tag mass (304.2071 Da); each deuterated tag is 2.9 mDa heavier, which the default 20 ppm
   precursor window absorbs. Below 8.8 ppm (three deuterated tags on a 1000 Da peptide) andes
@@ -1286,14 +1296,14 @@ single input run's MS1 scans still need to fit in memory while it is processed.
   precursor m/z: when the instrument isolated a heavier isotope than the monoisotopic m/z it
   assigned, the window covers what was actually isolated. Without a recorded target the window
   is centred on the precursor m/z. The native `.raw` reader reports the window around the
-  monoisotopic m/z, so on `.raw` input the window stays centred there. This is the ladder of a reference
-  purity filter without its fuzzy window border and next-scan interpolation, and with ¹³C
+  monoisotopic m/z, so on `.raw` input the window stays centred there. This is the ladder of OpenMS's precursor
+  purity without its fuzzy window border and next-scan interpolation, and with ¹³C
   spacing and a two-sided nearest-peak match (stepping by the neutron mass misses the upper
   isotopes). Reported per PSM. Needs the isolation window offsets in the file, and is not
   computed under `--chimeric`.
 * **Signal-to-noise.** Orbitrap reporter scans carry the instrument's noise estimate: per
   centroid in a Thermo `.raw`, and as the `sampled noise m/z array` / `sampled noise intensity
-  array` of an mzML converted with noise data (the converter's noise-array option). The noise at each
+  array` of an mzML converted with noise data (ThermoRawFileParser's noise-array option). The noise at each
   reporter m/z (linear between the sampled points) divides the reporter intensity (the corrected
   one when `--tmt-correction` is given) into a per-channel signal-to-noise, written as the `sn_`
   columns and their sum `reporter_sn_sum`. Both noise sources give the same values on the same
@@ -1714,19 +1724,17 @@ stages is planned.
 
 ### Relation to other quantifiers
 
-Other tools are anonymised with the engine labels of [`docs/benchmarks/`](docs/benchmarks/README.md).
-
-* Engine A's quantification module estimates **match-between-runs** error using multiple
+* IonQuant (FragPipe) estimates **match-between-runs** error using multiple
   scores and a semiparametric mixture model. Its shifted decoy search starts at
   +11 × 1.0005 Th and tries smaller shifts when no peak can be traced. Andes `--mbr` uses its
   own estimator (above): a classifier over template-fit features with mass-shift and RT-shift
   decoys.
-* Engine E uses aligned RT grids, a normalized spectral-angle score, and +11.06 Th /
+* Sage uses aligned RT grids, a normalized spectral-angle score, and +11.06 Th /
   shifted-RT decoys. Its hybrid score inspired the powers above; Andes uses cosine, a run-wide
   height scale and independent within-run extraction, so the scores and thresholds are not
-  interchangeable. Engine E applies its envelope threshold during peak selection, before
+  interchangeable. Sage applies its envelope threshold during peak selection, before
   estimating precursor q-values.
-* A reference identification-guided feature finder combines extraction with chromatographic
+* OpenMS FeatureFinderIdentification combines extraction with chromatographic
   coelution/shape and mass-error scores, and supports elution-model fitting. Those checks are
   useful next steps for Andes; matching integrated isotope areas alone does not establish
   coelution.

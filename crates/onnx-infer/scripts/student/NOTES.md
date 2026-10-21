@@ -188,8 +188,8 @@ Calibration on half the peptides, error on the other half. MAE in min; phospho p
 | Phospho PXD007653 (span 249) | **8.67** (8.73) | 9.98 (10.2 zero-shot) | 8.22 (8.32) | 11.2 (11.5) | 9.32 (9.47) | 52.5 / 16.3 |
 
 Zero-shot through composition:
-- **Phospho:** the no-phospho model scores 10.2 min on phospho peptides. That beats PeptDeep generic (11.5), but DeepLC is better (9.5) and the full model better still (8.7).
-- **TMT:** the no-TMT model scores 10.1 min. That beats PeptDeep (27.6, which has no TMT), but trails DeepLC (4.75) and the full model (4.9).
+- **Phospho:** the no-phospho model scores 10.2 min on phospho peptides; PeptDeep generic 11.5, DeepLC 9.5 and the full model 8.7.
+- **TMT:** the no-TMT model scores 10.1 min; PeptDeep 27.6 (it has no TMT), DeepLC 4.75 and the full model 4.9.
 - **Composition alone gets roughly half-way;** a few hundred labelled peptides are needed to close the gap.
 
 ### Rescoring, RT feature only

@@ -7,8 +7,9 @@ use std::path::Path;
 pub(crate) use crate::ms1_table::partial_path as partial;
 
 /// Run `write` on `<path>.partial` and rename that file to `path` when it
-/// succeeds; on an error the partial file is removed.
-pub(crate) fn write_atomic<T>(
+/// succeeds; on an error the partial file is removed. `write` must flush what
+/// it buffers before it returns.
+pub fn write_atomic<T>(
     path: &Path,
     write: impl FnOnce(&Path) -> std::io::Result<T>,
 ) -> std::io::Result<T> {

@@ -118,9 +118,13 @@ enum Part {
     Claim {
         site: (usize, u32, u64),
         tested: bool,
+        /// Knockoff sites of the claimed site (`usize::MAX` untested).
+        k: usize,
     },
     Knockoff {
         weight: f64,
+        /// Knockoff sites of the real site this one copies.
+        k: usize,
     },
 }
 
@@ -165,7 +169,6 @@ pub fn site_claims(
     };
     // Knockoffs per real site, keyed by (protein, position, mass bits).
     let mut per_site: HashMap<(usize, u32, u64), usize> = HashMap::new();
-    let mut k_max = 1usize;
     for i in 0..proteins.len() {
         for c in claims_of(i) {
             if let Some(of) = c.knockoff_of {
@@ -173,11 +176,9 @@ pub fn site_claims(
                     r.knockoff_of.is_none() && r.position == of && same(r.mass_delta, c.mass_delta)
                 });
                 if let Some(r) = real {
-                    let n = per_site
+                    *per_site
                         .entry((i, r.position, r.mass_delta.to_bits()))
-                        .or_insert(0);
-                    *n += 1;
-                    k_max = k_max.max(*n);
+                        .or_insert(0) += 1;
                 }
             }
         }
@@ -195,9 +196,9 @@ pub fn site_claims(
         }
         // Each with the modification's offset in the peptide: (stratum, site,
         // tested, offset) and (stratum, weight, restricted, offset).
-        type RealPlacement = (Key, (usize, u32, u64), bool, usize);
+        type RealPlacement = (Key, (usize, u32, u64), Option<usize>, usize);
         let mut real: Vec<RealPlacement> = Vec::new();
-        let mut knock: Vec<(Key, f64, bool, usize)> = Vec::new();
+        let mut knock: Vec<(Key, usize, bool, usize)> = Vec::new();
         for acc in psm.proteins.split(';') {
             let Some(&i) = by_acc.get(acc) else {
                 continue;
@@ -228,11 +229,11 @@ pub fn site_claims(
                             .unwrap_or(c.mass_delta.to_bits());
                         let k = per_site.get(&(i, of, real_bits)).copied().unwrap_or(1);
                         let restricted = restricted.iter().any(|&m| same(m, mass));
-                        knock.push((key, 1.0 / k as f64, restricted, at));
+                        knock.push((key, k, restricted, at));
                     }
                     None => {
                         let site = (i, pos, c.mass_delta.to_bits());
-                        real.push((key, site, per_site.contains_key(&site), at));
+                        real.push((key, site, per_site.get(&site).copied(), at));
                     }
                 }
             }
@@ -240,20 +241,28 @@ pub fn site_claims(
         // A placement that is a knockoff site in one protein and a real claim
         // in another (a paralog annotated differently) supports that claim.
         knock.retain(|k| !real.iter().any(|r| r.3 == k.3 && r.0 .0 == k.0 .0));
-        if let Some(&(key, weight, _, _)) = knock.first() {
-            by_key
-                .entry(key)
-                .or_default()
-                .push((rank(psm), id.clone(), Part::Knockoff { weight }));
+        if let Some(&(key, k, _, _)) = knock.first() {
+            by_key.entry(key).or_default().push((
+                rank(psm),
+                id.clone(),
+                Part::Knockoff {
+                    weight: 1.0 / k as f64,
+                    k,
+                },
+            ));
             if knock.iter().any(|k| k.2) {
                 knockoff_rows.insert(id.clone());
             }
         } else {
-            for (key, site, tested, _) in real {
+            for (key, site, k, _) in real {
                 by_key.entry(key).or_default().push((
                     rank(psm),
                     id.clone(),
-                    Part::Claim { site, tested },
+                    Part::Claim {
+                        site,
+                        tested: k.is_some(),
+                        k: k.unwrap_or(usize::MAX),
+                    },
                 ));
             }
         }
@@ -299,7 +308,7 @@ pub fn site_claims(
         for (_, id, part) in &parts {
             if targets[id].q_value <= fdr {
                 match part {
-                    Part::Knockoff { weight } => count.knockoff_weighted += weight,
+                    Part::Knockoff { weight, .. } => count.knockoff_weighted += weight,
                     Part::Claim { tested, .. } => {
                         count.claims += seen_claim.insert(id.as_str()) as usize;
                         count.tested += (*tested && seen_tested.insert(id.as_str())) as usize;
@@ -312,6 +321,10 @@ pub fn site_claims(
                 matches!(b.2, Part::Knockoff { .. }).cmp(&matches!(a.2, Part::Knockoff { .. })),
             )
         });
+        let offset =
+            crate::knockoff_fdr::finite_sample_term(parts.iter().map(|(_, _, part)| match *part {
+                Part::Claim { k, .. } | Part::Knockoff { k, .. } => k,
+            }));
         let mut fdp = Vec::with_capacity(parts.len());
         let (mut w, mut t) = (0.0f64, 0usize);
         let mut counted = HashSet::new();
@@ -320,19 +333,19 @@ pub fn site_claims(
             // counts once however many proteins hold its claim.
             if targets[id].q_value <= fdr {
                 match part {
-                    Part::Knockoff { weight } => w += weight,
+                    Part::Knockoff { weight, .. } => w += weight,
                     Part::Claim { tested, .. } => {
                         t += (*tested && counted.insert(id.as_str())) as usize
                     }
                 }
             }
-            fdp.push(((1.0 / k_max as f64 + w) / t.max(1) as f64).min(1.0));
+            fdp.push(((offset + w) / t.max(1) as f64).min(1.0));
         }
         for i in (0..fdp.len().saturating_sub(1)).rev() {
             fdp[i] = fdp[i].min(fdp[i + 1]);
         }
         for ((_, id, part), q) in parts.iter().zip(fdp) {
-            let Part::Claim { site, tested } = part else {
+            let Part::Claim { site, tested, .. } = part else {
                 continue;
             };
             let psm_q = targets[id].q_value;
@@ -677,6 +690,46 @@ mod tests {
         assert!(site_claims(&mut t, &idx, 0.01, 0.015, &[PHOSPHO], None)
             .rows
             .is_empty());
+    }
+
+    /// The finite-sample term is the stratum's own: 1/k for the fewest
+    /// knockoffs of a site it holds (here P1's two), not 1/k of the site with
+    /// the most knockoffs in the database (P2's four).
+    #[test]
+    fn the_finite_sample_term_uses_the_strata_fewest_knockoffs() {
+        let idx = SearchIndex::from_target_db(
+            &ProteinDb {
+                proteins: vec![
+                    protein("sp|P1|A", &[(4, None), (14, Some(4)), (24, Some(4))]),
+                    protein(
+                        "sp|P2|A",
+                        &[
+                            (4, None),
+                            (14, Some(4)),
+                            (24, Some(4)),
+                            (34, Some(4)),
+                            (44, Some(4)),
+                        ],
+                    ),
+                ],
+            },
+            "XXX",
+        );
+        let mut t: HashMap<_, _> = (0..100)
+            .map(|i| {
+                psm(
+                    &format!("c{i}"),
+                    100.0 - i as f64,
+                    "K.AGGGS+79.96633PGGGK.C",
+                )
+            })
+            .collect();
+        let (id, mut p2) = psm("p2", 1.0, "K.AGGGS+79.96633PGGGK.C");
+        p2.proteins = "sp|P2|A".into();
+        t.insert(id, p2);
+        let out = site_claims(&mut t, &idx, 0.01, 0.05, &[PHOSPHO], None);
+        let p1 = out.rows.iter().find(|r| r.accession == "sp|P1|A").unwrap();
+        assert!((p1.site_q - 0.5 / 101.0).abs() < 1e-12, "{}", p1.site_q);
     }
 
     #[test]

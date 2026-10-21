@@ -463,7 +463,10 @@ fn audit_rescore_join(
     // A decoy that lost its group's competition is left out like a losing
     // target, so the bundle holds the same competed set for both labels.
     if let Some(d) = decoys {
-        for r in rows.iter().filter(|r| r.is_decoy && !d.contains(&r.spec_id)) {
+        for r in rows
+            .iter()
+            .filter(|r| r.is_decoy && !d.contains(&r.spec_id))
+        {
             if winners.get(&r.group) == Some(&1) {
                 competed_away.insert(r.spec_id.clone());
             }

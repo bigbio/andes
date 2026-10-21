@@ -273,8 +273,10 @@ pub(crate) fn add_claims(
 
     // The family of each reference, as its entries carry it.
     let family_of = |p: &Protein| -> Arc<str> {
-        p.origin()
-            .map_or_else(|| Arc::from(primary_accession(&p.accession)), |o| o.family.clone())
+        p.origin().map_or_else(
+            || Arc::from(primary_accession(&p.accession)),
+            |o| o.family.clone(),
+        )
     };
     // Every source's variants must keep knockoffs clear: the positions of the
     // database's own variant entries (from an earlier source) per family, and
@@ -458,7 +460,11 @@ fn promote(db: &mut ProteinDb, indices: &[usize], tier: PriorTier, source: Optio
 fn claim_of(row: &Row, reference: &Protein) -> Result<Annotation, &'static str> {
     // The id becomes part of the entry's accession, which protein lists split
     // on ';' (and the PIN on whitespace).
-    if row.id.is_empty() || row.id.contains(|c: char| c == ';' || c == '|' || c.is_whitespace()) {
+    if row.id.is_empty()
+        || row
+            .id
+            .contains(|c: char| c == ';' || c == '|' || c.is_whitespace())
+    {
         return Err("id is empty or holds ';', '|' or whitespace");
     }
     let seq = &reference.sequence;

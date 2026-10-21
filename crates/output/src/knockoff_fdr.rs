@@ -126,7 +126,10 @@ pub fn apply_knockoff_fdr(
     {
         if let Some(o) = p.origin() {
             if let Some(of) = o.knockoff_of.as_deref() {
-                features.entry((&o.family, of)).or_default().insert(&o.feature);
+                features
+                    .entry((&o.family, of))
+                    .or_default()
+                    .insert(&o.feature);
             }
         }
     }
@@ -185,10 +188,7 @@ pub fn apply_knockoff_fdr(
         }
         let (delta, tier, row) = match (all_knockoff, knockoff, real_delta) {
             (true, Some((d, t)), _) => {
-                let w = copied
-                    .iter()
-                    .map(|v| 1.0 / per_variant[v] as f64)
-                    .sum();
+                let w = copied.iter().map(|v| 1.0 / per_variant[v] as f64).sum();
                 (d, t, Row::Knockoff { weight: w })
             }
             (false, _, Some(d)) => (d, real_tier.unwrap_or_default(), Row::Real { tested }),
@@ -438,7 +438,13 @@ mod tests {
             0.984016,
             Some("V1"),
         ));
-        proteins.push(protein("sp|P1_V3|A", EntryKind::Variant, "V3", 0.984016, None));
+        proteins.push(protein(
+            "sp|P1_V3|A",
+            EntryKind::Variant,
+            "V3",
+            0.984016,
+            None,
+        ));
         proteins.push(protein(
             "sp|P1_KO1_V3|A",
             EntryKind::Variant,

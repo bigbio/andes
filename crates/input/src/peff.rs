@@ -246,7 +246,8 @@ fn entry_rows(
                                 .by_accession(acc)
                                 .map(|m| (m.mono_mass, SiteAnchor::Residue))
                         } else {
-                            ptm_mass(clean_description(name)).map(|(_, mass, anchor)| (mass, anchor))
+                            ptm_mass(clean_description(name))
+                                .map(|(_, mass, anchor)| (mass, anchor))
                         };
                         let Some((mass, anchor)) = site else {
                             stats.sites_without_mass += 1;
@@ -354,7 +355,11 @@ mod tests {
         );
         let (db, stats) = load_peff(text.as_bytes(), Some(KO)).unwrap();
         assert_eq!(stats.claims.sites, 2);
-        let positions: Vec<u32> = db.proteins[0].mod_sites().iter().map(|m| m.position).collect();
+        let positions: Vec<u32> = db.proteins[0]
+            .mod_sites()
+            .iter()
+            .map(|m| m.position)
+            .collect();
         assert_eq!(positions, [9, 19]);
     }
 

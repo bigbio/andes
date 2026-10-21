@@ -1105,6 +1105,25 @@ pub(crate) struct QuantExtractArgs {
     #[arg(long = "lfq-tol", value_parser = parse_precursor_tol)]
     pub(crate) lfq_tol: Option<Tolerance>,
 
+    /// Advanced: transfer pre-selection. `true` (the default, as `--mbr`)
+    /// measures a transfer only when finalize can accept it (the entry's best
+    /// donor PSM passes the transfer donor threshold) and when it has at
+    /// least `--mbr-min-donor-fraction` of the other aligned runs as donors;
+    /// a skipped pair gets neither its target nor its decoy rows. `false`
+    /// measures every transfer pair.
+    #[arg(long = "mbr-preselect", hide = true, default_value_t = true, action = clap::ArgAction::Set)]
+    pub(crate) mbr_preselect: bool,
+
+    /// Advanced: with `--mbr-preselect on`, the fewest other aligned donor
+    /// runs of a measured transfer, as a fraction of the library's aligned
+    /// runs other than the acceptor, rounded up (0 keeps every pair). On a
+    /// 500-run study 0.004 (2 donor runs) left out 13% of the transfer fits
+    /// (12% of the extract CPU time); the accepted transfers changed less
+    /// than between two finalize seeds, but 1.1% of the transfers accepted
+    /// at q 0.05 without it were not measured. Default 0.
+    #[arg(long = "mbr-min-donor-fraction", hide = true, default_value_t = crate::quant_mbr::DEFAULT_MIN_DONOR_FRACTION, value_parser = parse_unit_fraction)]
+    pub(crate) mbr_min_donor_fraction: f64,
+
     /// Worker threads. Default: logical CPU count.
     #[arg(long)]
     pub(crate) threads: Option<usize>,

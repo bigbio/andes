@@ -111,8 +111,33 @@ def export_and_check(model, args, out_path, input_names, output_names, dynamic_a
     return sess
 
 
-def write_manifest(out_dir: Path, task: str, onnx_name: str, inputs, outputs):
+def graph_io(onnx_path: Path):
+    """Inputs and outputs of the exported graph as manifest tensor specs.
+
+    Each shape is the one the graph declares: a fixed axis as its size, a
+    dynamic (symbolic or unknown) axis as None. A tensor without a declared
+    shape gets no "shape" entry. andes checks these against the loaded graph.
+    """
+    graph = onnx.load(str(onnx_path)).graph
+    initializers = {t.name for t in graph.initializer}
+
+    def spec(value):
+        out = {"name": value.name}
+        tensor = value.type.tensor_type
+        if tensor.HasField("shape"):
+            out["shape"] = [
+                d.dim_value if d.HasField("dim_value") else None
+                for d in tensor.shape.dim
+            ]
+        return out
+
+    inputs = [spec(v) for v in graph.input if v.name not in initializers]
+    return inputs, [spec(v) for v in graph.output]
+
+
+def write_manifest(out_dir: Path, task: str, onnx_name: str):
     task_map = {"rt": "retention_time", "ms2": "ms2_intensity", "ccs": "ccs"}
+    inputs, outputs = graph_io(out_dir / onnx_name)
     man = {
         "id": f"peptdeep-{task}-onnx",
         "description": f"PeptDeep {task} ONNX (quantms-rescoring contract)",
@@ -151,16 +176,7 @@ def export_rt(pretrained_dir, out_dir):
             "rt_pred": {0: "batch_size"},
         },
     )
-    write_manifest(
-        out_dir,
-        "rt",
-        name,
-        [
-            {"name": "input_sequences", "shape": [None, None]},
-            {"name": "mod_x", "shape": [None, None, MOD_HIDDEN]},
-        ],
-        [{"name": "rt_pred", "shape": [None]}],
-    )
+    write_manifest(out_dir, "rt", name)
 
 
 def export_ms2(pretrained_dir, out_dir):
@@ -184,19 +200,7 @@ def export_ms2(pretrained_dir, out_dir):
             "ms2_intensities": {0: "batch_size", 1: "frag_position"},
         },
     )
-    write_manifest(
-        out_dir,
-        "ms2",
-        name,
-        [
-            {"name": "aa_indices", "shape": [None, None]},
-            {"name": "mod_x", "shape": [None, None, MOD_HIDDEN]},
-            {"name": "charges", "shape": [None, 1]},
-            {"name": "nce", "shape": [None, 1]},
-            {"name": "instrument_indices", "shape": [None]},
-        ],
-        [{"name": "ms2_intensities", "shape": [None, None]}],
-    )
+    write_manifest(out_dir, "ms2", name)
 
 
 def export_ccs(pretrained_dir, out_dir):
@@ -216,17 +220,7 @@ def export_ccs(pretrained_dir, out_dir):
             "ccs_pred": {0: "batch_size"},
         },
     )
-    write_manifest(
-        out_dir,
-        "ccs",
-        name,
-        [
-            {"name": "aa_indices", "shape": [None, None]},
-            {"name": "mod_x", "shape": [None, None, MOD_HIDDEN]},
-            {"name": "charges", "shape": [None, 1]},
-        ],
-        [{"name": "ccs_pred", "shape": [None]}],
-    )
+    write_manifest(out_dir, "ccs", name)
 
 
 def main():

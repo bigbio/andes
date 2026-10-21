@@ -169,7 +169,8 @@ enum Side {
 /// Check one side of a manifest against the loaded graph. An empty list in the
 /// manifest declares nothing and is not checked. Otherwise the declared names
 /// must be exactly the graph's names (order free), and where both the manifest
-/// and the graph state a shape, the ranks and every axis both fix must agree.
+/// and the graph state a shape, the ranks must agree and so must every axis
+/// both fix. A dynamic axis on either side matches any size.
 fn check_manifest_io(
     manifest: &ModelManifest,
     side: Side,
@@ -219,12 +220,25 @@ fn check_manifest_io(
         });
         if declared.len() != graph.len() || !axes_agree {
             return Err(Error::ManifestInvalid(format!(
-                "manifest `{}` {what} `{}` declares shape {declared:?}, the graph has {graph:?}",
-                manifest.id, spec.name
+                "manifest `{}` {what} `{}` declares shape {}, the graph has {} \
+                 (`?` is a dynamic axis); write the graph's shape in the manifest",
+                manifest.id,
+                spec.name,
+                fmt_shape(declared),
+                fmt_shape(graph)
             )));
         }
     }
     Ok(())
+}
+
+/// `[?, ?, 8]`: one entry per axis, `?` for a dynamic one.
+fn fmt_shape(shape: &[Option<usize>]) -> String {
+    let axes: Vec<String> = shape
+        .iter()
+        .map(|a| a.map_or_else(|| "?".to_string(), |n| n.to_string()))
+        .collect();
+    format!("[{}]", axes.join(", "))
 }
 
 fn load_backend(
@@ -310,5 +324,44 @@ mod tests {
         assert!(check_manifest_io(&m(Some(vec![None])), Side::Input, &graph, &shapes).is_err());
         // Unknown graph rank: names are still checked, shapes are not.
         assert!(check_manifest_io(&m(Some(vec![None])), Side::Input, &graph, &[None]).is_ok());
+    }
+
+    /// The MS2 output an AlphaPeptDeep export produces: `[batch, sites, 8]`
+    /// with the first two axes dynamic.
+    #[test]
+    fn dynamic_axes_match_any_size_on_either_side() {
+        let graph = ["ms2_intensities".to_string()];
+        let check = |declared: Vec<Option<usize>>, graph_shape: Vec<Option<usize>>| {
+            let m = ModelManifest {
+                outputs: vec![spec("ms2_intensities", Some(declared))],
+                ..manifest(Vec::new())
+            };
+            check_manifest_io(&m, Side::Output, &graph, &[Some(graph_shape)])
+        };
+        let ms2 = vec![None, None, Some(8)];
+        // Dynamic in the manifest, static in the graph.
+        assert!(check(vec![None, None, None], ms2.clone()).is_ok());
+        assert!(check(vec![None, None, Some(8)], ms2.clone()).is_ok());
+        // Static in the manifest, dynamic in the graph.
+        assert!(check(vec![Some(4), Some(29), Some(8)], ms2.clone()).is_ok());
+        // Rank mismatch: the shape the export once wrote.
+        let err = check(vec![None, None], ms2.clone()).unwrap_err();
+        assert!(err.to_string().contains("[?, ?]"), "{err}");
+        assert!(err.to_string().contains("[?, ?, 8]"), "{err}");
+        assert!(check(vec![None, None, Some(8), None], ms2.clone()).is_err());
+        // Two static axes that differ.
+        assert!(check(vec![None, None, Some(4)], ms2).is_err());
+    }
+
+    #[test]
+    fn names_are_checked_even_when_shapes_match() {
+        let graph = ["ms2_intensities".to_string()];
+        let shapes = [Some(vec![None, None, Some(8)])];
+        let m = ModelManifest {
+            outputs: vec![spec("intensities", Some(vec![None, None, Some(8)]))],
+            ..manifest(Vec::new())
+        };
+        let err = check_manifest_io(&m, Side::Output, &graph, &shapes).unwrap_err();
+        assert!(err.to_string().contains("intensities"), "{err}");
     }
 }

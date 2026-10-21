@@ -16,10 +16,53 @@ pub struct TensorSpec {
     /// Optional human description (e.g. "peptide embedding", "NCE").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Optional static shape hint. Use `null` / omit for fully dynamic axes.
-    /// A `null` entry inside the vec means a dynamic dimension (usually batch).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Optional shape hint, one entry per axis. Omit it (or `null`) to leave
+    /// the shape unchecked. An axis of `null`, a negative number (`-1`) or a
+    /// symbol name (`"batch"`) is dynamic and matches any size.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_shape",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub shape: Option<Vec<Option<usize>>>,
+}
+
+/// Reads a manifest shape: `null` for no shape, else a list whose entries are
+/// a fixed size (non-negative integer) or a dynamic axis (`null`, a negative
+/// integer or a symbol name), written the ways ONNX tools print dynamic axes.
+fn deserialize_shape<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<Option<usize>>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    use serde_json::Value;
+
+    let axes: Option<Vec<Value>> = Option::deserialize(deserializer)?;
+    let Some(axes) = axes else {
+        return Ok(None);
+    };
+    axes.into_iter()
+        .map(|axis| match axis {
+            Value::Null | Value::String(_) => Ok(None),
+            Value::Number(n) => {
+                if let Some(size) = n.as_u64() {
+                    usize::try_from(size).map(Some).map_err(|_| {
+                        D::Error::custom(format!("shape axis {size} is too large"))
+                    })
+                } else if n.as_i64().is_some_and(|i| i < 0) {
+                    Ok(None)
+                } else {
+                    Err(D::Error::custom(format!("shape axis {n} is not an integer")))
+                }
+            }
+            other => Err(D::Error::custom(format!(
+                "shape axis {other} must be an integer, null or a symbol name"
+            ))),
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map(Some)
 }
 
 /// Where the weights came from (licensing / independence paperwork).
@@ -194,6 +237,28 @@ mod tests {
         assert_eq!(m.id, "demo");
         assert_eq!(m.task, ModelTask::Ms2Intensity);
         assert_eq!(m.onnx_path(), onnx.as_path());
+    }
+
+    #[test]
+    fn shape_axes_accept_every_dynamic_spelling() {
+        let parse = |shape: &str| -> serde_json::Result<TensorSpec> {
+            serde_json::from_str(&format!(r#"{{"name": "x", "shape": {shape}}}"#))
+        };
+        assert_eq!(
+            parse(r#"[null, -1, "seq_length", 8]"#).unwrap().shape,
+            Some(vec![None, None, None, Some(8)])
+        );
+        assert_eq!(parse("null").unwrap().shape, None);
+        let no_shape: TensorSpec = serde_json::from_str(r#"{"name": "x"}"#).unwrap();
+        assert_eq!(no_shape.shape, None);
+        assert!(parse("[1.5]").is_err());
+        assert!(parse("[true]").is_err());
+        // Dynamic axes are written back as `null`.
+        let spec = parse(r#"[-1, 8]"#).unwrap();
+        assert_eq!(
+            serde_json::to_string(&spec).unwrap(),
+            r#"{"name":"x","shape":[null,8]}"#
+        );
     }
 
     fn manifest(inputs: &[&str], outputs: &[&str]) -> ModelManifest {

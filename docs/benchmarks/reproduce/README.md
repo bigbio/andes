@@ -35,14 +35,14 @@ reading uses Thermo's own RawFileReader, so it is the reference for what a file 
 | `MouseLiver-Z-T-1.raw` | MS2 | glyco rows |
 |---|---:|---:|
 | **native (reference)** | **45,905** | **41,929** |
-| converter 1.4.3 | 45,905 | 41,929 |
-| converter 2.0.0 | 33,892 | 31,279 |
+| ThermoRawFileParser 1.4.3 | 45,905 | 41,929 |
+| ThermoRawFileParser 2.0.0 | 33,892 | 31,279 |
 
-"converter" is a widely used open-source raw-to-mzML converter. Its 2.0.0 release dropped 26%
+ThermoRawFileParser (an open-source raw-to-mzML converter) 2.0.0 omitted 26%
 of the MS2 scans on this file, and 30% of the identifications with them. On another file (a
 human-plasma glyco file, since retired) both versions agreed exactly, so the effect is
-file-dependent and no converter can be assumed safe. If you must convert with it, use **1.4.3**
-and state the converter and version with any number you publish.
+file-dependent; check the MS2 count after any conversion. Version 1.4.3 read this file
+completely. State the converter and version with any number you publish.
 
 ## What will not reproduce byte-for-byte
 
@@ -66,7 +66,7 @@ script pages through the whole listing (PXD070049 has 2,173 files). Every file r
 | astral | PXD070049 | `LFQ_Astral_DDA_15min_50ng_Condition_A_REP1.raw` | 2.58 GB |
 | tmt | PXD007683 | `a05058.raw` | 0.54 GB |
 | ups1 | PXD001819 | `UPS1_5000amol_R1.raw` | 1.70 GB |
-| glyco-mouse | PXD005553 | `MouseLiver-Z-T-{1..5}.raw` (engine L liver set) | 12.6 GB |
+| glyco-mouse | PXD005553 | `MouseLiver-Z-T-{1..5}.raw` (the liver set of the depositors' pGlyco2 results) | 12.6 GB |
 
 ## Reading the output
 

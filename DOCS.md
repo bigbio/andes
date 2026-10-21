@@ -1178,7 +1178,7 @@ about +4.4 GB resident), the difference between running and being killed for mem
 | `--glyco-glycan-gdb <FILE>` | — | `.gdb` glycan database (canonical-string trees, the format of the bundled databases); structure (core- vs antenna-fucose) is kept. Wins over `--glyco-species`. |
 | `--glyco-species <NAME>` | — | Bundled database: `human`, `mouse`, `mouse-large`, `high-mannose`. One of the two is required. |
 | `--glyco-core <n\|o>` | `n` | Glycan core: `n` = N-glycan (N-X-S/T sequon gate, trimannosyl core), `o` = O-glycan (any S/T gate, single GalNAc core). An `o` run needs an O-glycan `.gdb`. |
-| `--precursor-mono` | `auto` | Correct each precursor to the monoisotope its MS1 envelope supports (mzML or `.raw`): tests "recorded = M+k", k = 0..6, and moves down k−1 isotopes when k > 0 clearly wins. On the engine L mouse-liver reference (PXD005553) 88 of 3,824 scans were recorded exactly +4 high (issue #64). Fitted spectra are searched with a `0..1` isotope window instead of `0..2`. Adds `MonoShift`/`MonoFit`/`MonoFitGain`/`MonoSNR`. An explicit `--isotope-error` is honoured; without MS1 the search is as with `off` and the Mono columns are 0. The Mono columns follow the flag and the input format only (mzML or `.raw` under `--glyco`), so separately searched runs share one PIN header. Under `--glyco` the isotope-error window defaults to 0..=2 (dropping −1 measured +81 backbone-correct @1%). |
+| `--precursor-mono` | `auto` | Correct each precursor to the monoisotope its MS1 envelope supports (mzML or `.raw`): tests "recorded = M+k", k = 0..6, and moves down k−1 isotopes when k > 0 clearly wins. On the pGlyco2 mouse-liver reference (PXD005553) 88 of 3,824 scans were recorded exactly +4 high (issue #64). Fitted spectra are searched with a `0..1` isotope window instead of `0..2`. Adds `MonoShift`/`MonoFit`/`MonoFitGain`/`MonoSNR`. An explicit `--isotope-error` is honoured; without MS1 the search is as with `off` and the Mono columns are 0. The Mono columns follow the flag and the input format only (mzML or `.raw` under `--glyco`), so separately searched runs share one PIN header. Under `--glyco` the isotope-error window defaults to 0..=2 (dropping −1 measured +81 backbone-correct @1%). |
 | `--glyco-max-peaks` | 0 (no cap) | Peaks the **generation** stage considers; 300–500 helps very dense scans. |
 | `--glyco-retrieval-tol-ppm` | tol-ppm on high-res, the model's Da window on low-res | Retrieval window only; 20 ppm on high-res measured 6.9x faster at no identification cost. |
 | `--glyco-y-max-charge` | 3 | Maximum glycan-Y fragment charge. |
@@ -1271,14 +1271,14 @@ single input run's MS1 scans still need to fit in memory while it is processed.
   `-2C13/-N15-C13/-C13/-N15/+N15/+C13/+N15+C13/+2C13` for TMTpro 16/18), optional `<channel>:`
   prefix, `#` comments, `NA`/`-1` for no spill. Labels must match kit order; rows whose percentages
   sum to more than 100 are rejected. The observed vector is solved as `observed = M · true`
-  by non-negative least squares, so corrected intensities agree with a reference isobaric
-  implementation for the same matrix. Without a sheet, no correction. The raw values are always kept (`raw_` columns, parquet
+  by non-negative least squares, so corrected intensities agree with OpenMS IsobaricAnalyzer
+  for the same matrix. Without a sheet, no correction. The raw values are always kept (`raw_` columns, parquet
   `additional_intensities`).
 * **TMTpro 32/35-plex** (`tmt32`, `tmt35`). The deuterated reagents put a 2H in place of a 13C in
   the reporter, so each `D` channel sits 2.9 mDa above its non-deuterated twin; the default
   `--tmt-tol` is 10 ppm instead of 20 ppm (a window must stay below 10.8 ppm at 135 Th). Channels
-  are reported in the reference kit order (`128N`, `128C`, `128ND`, `128CD`, ...), not by m/z. There is
-  no impurity correction: the reference implementation ignores a sheet for these kits and applies the identity, and
+  are reported in OpenMS's kit order (`128N`, `128C`, `128ND`, `128CD`, ...), not by m/z. There is
+  no impurity correction: OpenMS ignores a sheet for these kits and applies the identity, and
   `--tmt-correction` is refused before the database is loaded. Peptides are searched with the
   TMTpro tag mass (304.2071 Da); each deuterated tag is 2.9 mDa heavier, which the default 20 ppm
   precursor window absorbs. Below 8.8 ppm (three deuterated tags on a 1000 Da peptide) andes
@@ -1294,14 +1294,14 @@ single input run's MS1 scans still need to fit in memory while it is processed.
   precursor m/z: when the instrument isolated a heavier isotope than the monoisotopic m/z it
   assigned, the window covers what was actually isolated. Without a recorded target the window
   is centred on the precursor m/z. The native `.raw` reader reports the window around the
-  monoisotopic m/z, so on `.raw` input the window stays centred there. This is the ladder of a reference
-  purity filter without its fuzzy window border and next-scan interpolation, and with ¹³C
+  monoisotopic m/z, so on `.raw` input the window stays centred there. This is the ladder of OpenMS's precursor
+  purity without its fuzzy window border and next-scan interpolation, and with ¹³C
   spacing and a two-sided nearest-peak match (stepping by the neutron mass misses the upper
   isotopes). Reported per PSM. Needs the isolation window offsets in the file, and is not
   computed under `--chimeric`.
 * **Signal-to-noise.** Orbitrap reporter scans carry the instrument's noise estimate: per
   centroid in a Thermo `.raw`, and as the `sampled noise m/z array` / `sampled noise intensity
-  array` of an mzML converted with noise data (the converter's noise-array option). The noise at each
+  array` of an mzML converted with noise data (ThermoRawFileParser's noise-array option). The noise at each
   reporter m/z (linear between the sampled points) divides the reporter intensity (the corrected
   one when `--tmt-correction` is given) into a per-channel signal-to-noise, written as the `sn_`
   columns and their sum `reporter_sn_sum`. Both noise sources give the same values on the same
@@ -1719,19 +1719,17 @@ stages is planned.
 
 ### Relation to other quantifiers
 
-Other tools are anonymised with the engine labels of [`docs/benchmarks/`](docs/benchmarks/README.md).
-
-* Engine A's quantification module estimates **match-between-runs** error using multiple
+* IonQuant (FragPipe) estimates **match-between-runs** error using multiple
   scores and a semiparametric mixture model. Its shifted decoy search starts at
   +11 × 1.0005 Th and tries smaller shifts when no peak can be traced. Andes `--mbr` uses its
   own estimator (above): a classifier over template-fit features with mass-shift and RT-shift
   decoys.
-* Engine E uses aligned RT grids, a normalized spectral-angle score, and +11.06 Th /
+* Sage uses aligned RT grids, a normalized spectral-angle score, and +11.06 Th /
   shifted-RT decoys. Its hybrid score inspired the powers above; Andes uses cosine, a run-wide
   height scale and independent within-run extraction, so the scores and thresholds are not
-  interchangeable. Engine E applies its envelope threshold during peak selection, before
+  interchangeable. Sage applies its envelope threshold during peak selection, before
   estimating precursor q-values.
-* A reference identification-guided feature finder combines extraction with chromatographic
+* OpenMS FeatureFinderIdentification combines extraction with chromatographic
   coelution/shape and mass-error scores, and supports elution-model fitting. Those checks are
   useful next steps for Andes; matching integrated isotope areas alone does not establish
   coelution.

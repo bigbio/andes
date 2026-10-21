@@ -493,8 +493,8 @@ mod tests {
             "a labelled query keeps its label"
         );
         // Another label is worse than none: an iTRAQ query is not scored with
-        // a TMT model while an unlabelled one exists.
-        assert_eq!(pick(&["itraq"]), ("etd_c", true));
+        // a TMT model while an unlabelled one exists (here the tryptic one).
+        assert_eq!(pick(&["itraq"]), ("etd_b_phospho", true));
 
         // Only a labelled model of this activation: still preferred to crossing
         // the activation.

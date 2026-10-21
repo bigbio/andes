@@ -807,8 +807,9 @@ impl<R: BufRead> MzMLReader<R> {
                     if let Some(sb) = self.current.as_mut() {
                         // A charge state of 0 means "unknown" — store it as
                         // absent (None) rather than Some(0), which would later
-                        // be treated as a real charge.
-                        sb.precursor_charge = (z != 0).then_some(z);
+                        // be treated as a real charge; so does a negative or
+                        // out-of-range value.
+                        sb.precursor_charge = model::spectrum::known_precursor_charge(i64::from(z));
                     }
                 }
             }
@@ -2519,6 +2520,24 @@ mod tests {
             assert!((spectra[0].precursor_mz - 500.25).abs() < 1e-9, "{second}");
             assert_eq!(spectra[0].precursor_charge, Some(2), "{second}");
             assert_eq!(spectra[0].precursor_intensity, Some(1000.0), "{second}");
+        }
+    }
+
+    /// A charge state too large for the search (held as `u8`) is unknown.
+    #[test]
+    fn out_of_range_charge_state_is_treated_as_absent() {
+        let mz_b64 = encode_f64_b64(&[100.0]);
+        let int_b64 = encode_f64_b64(&[1000.0]);
+        for z in [300, -2] {
+            let spec = ms2_spectrum_xml(
+                "scan=10",
+                &bda_plain("MS:1000514", &mz_b64),
+                &bda_plain("MS:1000515", &int_b64),
+                500.5,
+                Some(z),
+            );
+            let spectra = collect_ok(&wrap_spectra(&spec));
+            assert_eq!(spectra[0].precursor_charge, None, "charge {z}");
         }
     }
 

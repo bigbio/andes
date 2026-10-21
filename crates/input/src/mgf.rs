@@ -111,8 +111,11 @@ impl<R: BufRead> Iterator for MgfReader<R> {
                     },
                     "CHARGE" => match parse_charge(&value) {
                         // `CHARGE=0` means "unknown", as in mzML: leave it absent
-                        // so the search enumerates the charge range.
-                        Ok(z) => precursor_charge = (z != 0).then_some(z),
+                        // so the search enumerates the charge range; so does an
+                        // out-of-range value.
+                        Ok(z) => {
+                            precursor_charge = model::spectrum::known_precursor_charge(i64::from(z))
+                        }
                         Err(()) => {
                             return Some(Err(MgfParseError::BadCharge {
                                 line: self.line_no,
@@ -358,6 +361,12 @@ mod tests {
         assert_eq!(s[0].precursor_charge, None);
         let s = read_all("BEGIN IONS\nPEPMASS=500.5\nCHARGE=2+\n100 1\nEND IONS\n");
         assert_eq!(s[0].precursor_charge, Some(2));
+    }
+
+    #[test]
+    fn out_of_range_charge_is_unknown() {
+        let s = read_all("BEGIN IONS\nPEPMASS=500.5\nCHARGE=300+\n100 1\nEND IONS\n");
+        assert_eq!(s[0].precursor_charge, None);
     }
 
     #[test]

@@ -288,10 +288,11 @@ pub(crate) fn candidate_nominal_bounds(
 }
 
 /// The charge states a spectrum is searched at: the reported precursor charge is
-/// trusted as the ONLY charge, else the configured range.
+/// trusted as the ONLY charge, else the configured range. A charge that does not
+/// fit a `u8` (or is not positive) counts as unknown.
 fn charges_to_try(spec: &Spectrum, params: &SearchParams) -> SmallVec<[u8; 4]> {
-    match spec.precursor_charge {
-        Some(z) if z > 0 => smallvec![z as u8],
+    match spec.precursor_charge.and_then(|z| u8::try_from(z).ok()) {
+        Some(z) if z > 0 => smallvec![z],
         _ => params.charge_range.clone().collect(),
     }
 }
@@ -2554,6 +2555,16 @@ mod charges_to_try_tests {
     fn reported_charge_is_searched_alone() {
         let p = params();
         assert_eq!(charges_to_try(&spec(Some(5)), &p).as_slice(), &[5]);
+    }
+
+    /// A charge that does not fit a `u8` is unknown, not truncated (300 as u8
+    /// would be 44).
+    #[test]
+    fn out_of_range_charge_falls_back_to_the_range() {
+        let p = params();
+        assert_eq!(charges_to_try(&spec(Some(300)), &p).as_slice(), &[2, 3]);
+        assert_eq!(charges_to_try(&spec(Some(-2)), &p).as_slice(), &[2, 3]);
+        assert_eq!(charges_to_try(&spec(Some(255)), &p).as_slice(), &[255]);
     }
 
     #[test]

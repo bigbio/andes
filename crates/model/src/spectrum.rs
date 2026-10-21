@@ -2,6 +2,19 @@
 
 use crate::activation::ActivationMethod;
 
+/// Largest precursor charge the search uses: charges are held as `u8` from
+/// candidate generation on.
+pub const MAX_PRECURSOR_CHARGE: i32 = u8::MAX as i32;
+
+/// A reported precursor charge as the readers store it: `Some(z)` for
+/// `1..=MAX_PRECURSOR_CHARGE`, `None` ("unknown", so the configured charge
+/// range is searched) for 0, a negative value or one too large for a `u8`.
+pub fn known_precursor_charge(z: i64) -> Option<i32> {
+    (1..=i64::from(MAX_PRECURSOR_CHARGE))
+        .contains(&z)
+        .then_some(z as i32)
+}
+
 #[derive(Debug, Clone)]
 pub struct Spectrum {
     /// MGF `TITLE=` value (or `<spectrumRef>` for mzML).
@@ -11,7 +24,8 @@ pub struct Spectrum {
     pub precursor_mz: f64,
     /// `PEPMASS=` second value (optional): precursor intensity.
     pub precursor_intensity: Option<f32>,
-    /// `CHARGE=` value, e.g. `2+`. None when absent.
+    /// `CHARGE=` value, e.g. `2+`. None when absent or not a usable charge
+    /// (see [`known_precursor_charge`]).
     pub precursor_charge: Option<i32>,
     /// `RTINSECONDS=` value. None when absent.
     pub rt_seconds: Option<f64>,
@@ -69,6 +83,17 @@ impl Default for Spectrum {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn known_precursor_charge_bounds() {
+        assert_eq!(known_precursor_charge(2), Some(2));
+        assert_eq!(known_precursor_charge(255), Some(255));
+        assert_eq!(known_precursor_charge(256), None);
+        assert_eq!(known_precursor_charge(300), None);
+        assert_eq!(known_precursor_charge(0), None);
+        assert_eq!(known_precursor_charge(-2), None);
+        assert_eq!(known_precursor_charge(i64::MAX), None);
+    }
 
     fn make_spectrum() -> Spectrum {
         Spectrum {

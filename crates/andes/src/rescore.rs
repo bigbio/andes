@@ -53,6 +53,8 @@ const MIN_TRAIN_CLASS: usize = 10;
 /// PIN columns between `ScanNr` and `Peptide` that are not features.
 const NON_FEATURES: [&str; 2] = ["ExpMass", "CalcMass"];
 const PROB_EPS: f64 = 1e-6;
+/// Rows per partial sum in the logistic fit.
+const CHUNK: usize = 4096;
 
 /// Numeric feature matrix + labels parsed from a Percolator PIN.
 struct PinData {
@@ -282,33 +284,42 @@ impl LinearModel {
 fn fit_logistic(z: &[f64], y: &[bool], nf: usize, w: &mut [f64], b: &mut f64) {
     let p = nf + 1;
     let n = y.len();
+    // Partial sums over fixed row chunks, added in chunk order: the result
+    // does not depend on the thread count or scheduling.
+    let n_chunks = n.div_ceil(CHUNK);
     let objective = |w: &[f64], b: f64| -> f64 {
-        let loss: f64 = (0..n)
+        let parts: Vec<f64> = (0..n_chunks)
             .into_par_iter()
-            .map(|i| {
-                let row = &z[i * nf..(i + 1) * nf];
-                let f = b + row.iter().zip(w).map(|(a, c)| a * c).sum::<f64>();
-                let m = if y[i] { f } else { -f };
-                // log(1 + e^{-m}), stable for large |m|
-                if m > 0.0 {
-                    (-m).exp().ln_1p()
-                } else {
-                    -m + m.exp().ln_1p()
+            .map(|ch| {
+                let mut loss = 0.0f64;
+                for i in ch * CHUNK..((ch + 1) * CHUNK).min(n) {
+                    let row = &z[i * nf..(i + 1) * nf];
+                    let f = b + row.iter().zip(w).map(|(a, c)| a * c).sum::<f64>();
+                    let m = if y[i] { f } else { -f };
+                    // log(1 + e^{-m}), stable for large |m|
+                    loss += if m > 0.0 {
+                        (-m).exp().ln_1p()
+                    } else {
+                        -m + m.exp().ln_1p()
+                    };
                 }
+                loss
             })
-            .sum();
-        L2_C * loss + 0.5 * w.iter().map(|v| v * v).sum::<f64>()
+            .collect();
+        L2_C * parts.iter().sum::<f64>() + 0.5 * w.iter().map(|v| v * v).sum::<f64>()
     };
     let mut obj = objective(w, *b);
     for _ in 0..50 {
         // Gradient and Hessian over [w, b]; partial sums per chunk.
-        let (mut g, mut h) = (0..n)
+        let (wr, br) = (&*w, *b);
+        let parts: Vec<(Vec<f64>, Vec<f64>)> = (0..n_chunks)
             .into_par_iter()
-            .fold(
-                || (vec![0.0f64; p], vec![0.0f64; p * p]),
-                |(mut g, mut h), i| {
+            .map(|ch| {
+                let mut g = vec![0.0f64; p];
+                let mut h = vec![0.0f64; p * p];
+                for i in ch * CHUNK..((ch + 1) * CHUNK).min(n) {
                     let row = &z[i * nf..(i + 1) * nf];
-                    let f = *b + row.iter().zip(w.iter()).map(|(a, c)| a * c).sum::<f64>();
+                    let f = br + row.iter().zip(wr).map(|(a, c)| a * c).sum::<f64>();
                     let pr = 1.0 / (1.0 + (-f).exp());
                     let r = pr - if y[i] { 1.0 } else { 0.0 };
                     let s = pr * (1.0 - pr);
@@ -324,17 +335,16 @@ fn fit_logistic(z: &[f64], y: &[bool], nf: usize, w: &mut [f64], b: &mut f64) {
                         h[nf * p + c] += s * row[c];
                     }
                     h[nf * p + nf] += s;
-                    (g, h)
-                },
-            )
-            .reduce(
-                || (vec![0.0f64; p], vec![0.0f64; p * p]),
-                |(mut g1, mut h1), (g2, h2)| {
-                    g1.iter_mut().zip(&g2).for_each(|(a, c)| *a += c);
-                    h1.iter_mut().zip(&h2).for_each(|(a, c)| *a += c);
-                    (g1, h1)
-                },
-            );
+                }
+                (g, h)
+            })
+            .collect();
+        let mut g = vec![0.0f64; p];
+        let mut h = vec![0.0f64; p * p];
+        for (pg, ph) in &parts {
+            g.iter_mut().zip(pg).for_each(|(a, c)| *a += c);
+            h.iter_mut().zip(ph).for_each(|(a, c)| *a += c);
+        }
         for a in 0..p {
             g[a] *= L2_C;
             for c in 0..=a {
@@ -554,12 +564,7 @@ fn train_fold(d: &PinData, rows: &[usize]) -> FoldModel {
         _ => (0.0, 1.0),
     };
     FoldModel {
-        model: LinearModel {
-            w,
-            b,
-            mean,
-            inv_sd,
-        },
+        model: LinearModel { w, b, mean, inv_sd },
         shift,
         scale,
         trained,
@@ -888,8 +893,7 @@ mod tests {
     fn one_psm_per_scan_and_precursor_mass() {
         // Every spectrum has a target and a decoy row at one ExpMass and a
         // second target at another ExpMass (another charge).
-        let mut s =
-            String::from("SpecId\tLabel\tScanNr\tExpMass\tf1\tf2\tPeptide\tProteins\n");
+        let mut s = String::from("SpecId\tLabel\tScanNr\tExpMass\tf1\tf2\tPeptide\tProteins\n");
         for i in 0..400u64 {
             let good = i % 2 == 0;
             let t1 = if good { 2.0 + noise(i, 1) } else { noise(i, 1) };
@@ -916,7 +920,10 @@ mod tests {
             let a = format!("s{i}_{i}_1_0");
             let d = format!("s{i}_{i}_2_1");
             let n = r.targets.contains_key(&a) as u8 + r.decoys.contains_key(&d) as u8;
-            assert_eq!(n, 1, "scan {i}: the 1000.5 group must report exactly one PSM");
+            assert_eq!(
+                n, 1,
+                "scan {i}: the 1000.5 group must report exactly one PSM"
+            );
             assert!(r.targets.contains_key(&format!("s{i}_{i}_1_2")));
         }
         // PEP: within [0, 1], never above 1, and falls as the score rises.
@@ -955,11 +962,28 @@ mod tests {
         let map = native_rescore_pin(&s, 42).unwrap();
         for q in [0.01, 0.05] {
             let acc: Vec<&PercolatorPsm> = map.values().filter(|p| p.q_value <= q).collect();
-            let false_hits = acc.iter().filter(|p| p.proteins.starts_with("FALSE")).count();
+            let false_hits = acc
+                .iter()
+                .filter(|p| p.proteins.starts_with("FALSE"))
+                .count();
             assert!(acc.len() > 300, "q {q}: {} accepted", acc.len());
             let fdp = false_hits as f64 / acc.len() as f64;
-            assert!(fdp <= 2.0 * q + 0.01, "q {q}: FDP {fdp:.3} ({false_hits}/{})", acc.len());
+            assert!(
+                fdp <= 2.0 * q + 0.01,
+                "q {q}: FDP {fdp:.3} ({false_hits}/{})",
+                acc.len()
+            );
         }
+    }
+
+    #[test]
+    fn rescoring_is_deterministic_across_thread_counts() {
+        let pin = synth_pin(20_000, true);
+        let one = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let four = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+        let a = one.install(|| native_rescore_pin(&pin, 3).unwrap());
+        let b = four.install(|| native_rescore_pin(&pin, 3).unwrap());
+        assert_eq!(a, b);
     }
 
     #[test]

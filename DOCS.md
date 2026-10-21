@@ -933,7 +933,8 @@ until rescoring; `protein_groups.parquet` is empty (protein groups are in
 `<stem>.protein_groups.tsv`, [§1](#protein-groups-and-protein-fdr)). With `--rescore`, every target row must join a
 Percolator result, except where target-decoy competition (`-Y`, which andes always passes)
 kept another PSM of its scan/`ExpMass` group: those target rows are left out of the bundle, as
-they are out of Percolator's output.
+they are out of Percolator's output. `--rescore-native` competes in the same groups, with the
+same result for the bundle.
 
 ```bash
 andes --spectrum spectra.mzML --database db.fasta \

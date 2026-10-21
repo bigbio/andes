@@ -751,7 +751,10 @@ impl<R: BufRead> MzMLReader<R> {
     /// and intensity are the precursor's.
     fn in_first_selected_ion(&self) -> bool {
         self.state == State::SelectedIon
-            && self.current.as_ref().is_some_and(|sb| sb.selected_ions == 1)
+            && self
+                .current
+                .as_ref()
+                .is_some_and(|sb| sb.selected_ions == 1)
     }
 
     fn apply_cv_param(&mut self, cv: CvParamInfo) {
@@ -3903,8 +3906,9 @@ mod tests {
         );
         assert_eq!(p.rt_seconds, Some(120.0));
         assert_eq!(
-            p.precursor_mz, 612.2,
-            "selected ion m/z is last-wins across SPS notches"
+            p.precursor_mz, 500.5,
+            "the first selected ion gives the precursor m/z, as the first \
+             precursor gives the parent reference"
         );
         assert_eq!(p.peaks.len(), 2);
         assert_eq!(p.peaks[1], (127.1248, 2000.0));

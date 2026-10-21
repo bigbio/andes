@@ -804,7 +804,10 @@ glyco:
             "chimeric:\n  max_kl: .nan\n",
         ] {
             let e = applied(bad, &[]).unwrap_err();
-            assert!(e.contains("glyco_tol_ppm") || e.contains("chimeric_max_kl"), "{bad}: {e}");
+            assert!(
+                e.contains("glyco_tol_ppm") || e.contains("chimeric_max_kl"),
+                "{bad}: {e}"
+            );
         }
         let a = applied("glyco:\n  tol_ppm: 30\nchimeric:\n  max_kl: 0\n", &[]).unwrap();
         assert_eq!(a.glyco_tol_ppm, 30.0);
@@ -1132,7 +1135,10 @@ glyco:
     #[test]
     fn cli_rescore_backend_wins_over_yaml() {
         let a = applied("rescoring:\n  enabled: true\n", &["--rescore-native"]).unwrap();
-        assert!(a.rescore_native && !a.rescore, "CLI --rescore-native must win");
+        assert!(
+            a.rescore_native && !a.rescore,
+            "CLI --rescore-native must win"
+        );
         let a = applied("rescoring:\n  native: true\n", &["--rescore"]).unwrap();
         assert!(a.rescore && !a.rescore_native);
         let a = applied("rescoring:\n  enabled: true\n", &[]).unwrap();
@@ -1145,10 +1151,18 @@ glyco:
     /// CLI ppm value and a config Da value never conflict.
     #[test]
     fn cli_fragment_tol_wins_over_yaml_without_conflict() {
-        let a = applied("scoring:\n  fragment_tol_da: 0.5\n", &["--fragment-tol-ppm", "20"]).unwrap();
+        let a = applied(
+            "scoring:\n  fragment_tol_da: 0.5\n",
+            &["--fragment-tol-ppm", "20"],
+        )
+        .unwrap();
         assert_eq!(a.fragment_tol_ppm, Some(20.0));
         assert_eq!(a.fragment_tol_da, None);
-        let a = applied("scoring:\n  fragment_tol_ppm: 20\n", &["--fragment-tol-da", "0.5"]).unwrap();
+        let a = applied(
+            "scoring:\n  fragment_tol_ppm: 20\n",
+            &["--fragment-tol-da", "0.5"],
+        )
+        .unwrap();
         assert_eq!(a.fragment_tol_da, Some(0.5));
         assert_eq!(a.fragment_tol_ppm, None);
         let a = applied("scoring:\n  fragment_tol_da: 0.5\n", &[]).unwrap();

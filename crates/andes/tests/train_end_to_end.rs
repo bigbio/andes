@@ -142,6 +142,8 @@ fn train_from_several_runs_records_one_source_per_run() {
         .arg("0.9")
         .arg("--fragment-tol-da")
         .arg("0.5")
+        .arg("--instrument")
+        .arg("TimsTOF")
         .arg("--model-id")
         .arg("bsa_two_runs")
         .status()
@@ -156,4 +158,12 @@ fn train_from_several_runs_records_one_source_per_run() {
     assert_eq!(sources[0].n_psms, sources[1].n_psms);
     assert!(sources[0].n_psms > 0);
     assert!(sources.iter().all(|l| l.dataset == "test.mgf.gz"));
+    assert!(sources.iter().all(|l| l.instrument == "TimsTOF"));
+
+    // --instrument is part of the selection key; the seed's activation and
+    // enzyme are kept; --fragment-tol-da is stored as the model tolerance.
+    let param = store.load_param("bsa_two_runs").expect("load param");
+    assert_eq!(param.data_type.instrument.name(), "TimsTOF");
+    assert_eq!(param.data_type.activation.name(), "HCD");
+    assert_eq!(format!("{:?}", param.mme), "Da(0.5)");
 }

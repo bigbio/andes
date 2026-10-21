@@ -83,9 +83,12 @@ pub(crate) struct TrainFromSearchArgs {
     #[arg(long = "train-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
     pub(crate) train_fdr: f64,
 
-    /// Instrument tag to embed in the trained model's metadata. Default: `QExactive`.
-    #[arg(long, default_value = "QExactive")]
-    pub(crate) instrument: String,
+    /// Instrument of the trained model (`LowRes`, `HighRes`, `QExactive`,
+    /// `OrbitrapAstral`, `TOF`, `TimsTOF`). It is part of the model's selection
+    /// key, so a search on data from this instrument picks the model. Default:
+    /// the seed model's instrument (`QExactive` for the default seed).
+    #[arg(long)]
+    pub(crate) instrument: Option<String>,
 
     /// Experiment-class / protocol tag (e.g. `Automatic`, `TMT`). Default: `Automatic`.
     #[arg(long, default_value = "Automatic")]
@@ -802,7 +805,34 @@ pub(crate) fn run_train_from_search(
     eprintln!("train: estimating model parameters ...");
     let cfg = EstimatorConfig::default();
     let estimator = Estimator::new(cfg);
-    let trained_param = estimator.estimate(&stats, &template);
+    let mut trained_param = estimator.estimate(&stats, &template);
+    // The instrument is a selection-key column: without this the model would
+    // keep the seed's instrument and searches on `--instrument` data would
+    // never select it.
+    let instrument = match &args.instrument {
+        Some(name) => {
+            trained_param.data_type.instrument =
+                InstrumentType::from_name(name).ok_or_else(|| {
+                    format!(
+                        "unknown --instrument '{name}' \
+                         (expected LowRes/HighRes/QExactive/OrbitrapAstral/TOF/TimsTOF)"
+                    )
+                })?;
+            name.clone()
+        }
+        None => trained_param.data_type.instrument.name().to_string(),
+    };
+    eprintln!(
+        "train: model key = ({}, {}, {}, {})",
+        trained_param.data_type.activation.name(),
+        trained_param.data_type.instrument.name(),
+        trained_param
+            .data_type
+            .enzyme
+            .as_ref()
+            .map_or("any", |e| e.name()),
+        trained_param.data_type.protocol.name(),
+    );
     let n_partitions = trained_param.partitions.len();
     eprintln!("train: trained model has {} partitions", n_partitions);
 
@@ -810,7 +840,7 @@ pub(crate) fn run_train_from_search(
     let model_id = args
         .model_id
         .clone()
-        .unwrap_or_else(|| format!("trained_{}_{}", args.instrument, args.protocol));
+        .unwrap_or_else(|| format!("trained_{}_{}", instrument, args.protocol));
     eprintln!("train: model ID = {model_id}");
 
     // ── 9. Build source ledger (Part A) ───────────────────────────────────────
@@ -843,7 +873,7 @@ pub(crate) fn run_train_from_search(
             weight: 1.0,
             train_fdr: args.train_fdr as f32,
             decay_half_life_days: None,
-            instrument: args.instrument.clone(),
+            instrument: instrument.clone(),
             experiment_class: args.protocol.clone(),
         };
         sources.push((ledger, run_stats));
@@ -1582,7 +1612,10 @@ pub(crate) fn run_train_update(
             weight: 1.0,
             train_fdr: args.train_fdr as f32,
             decay_half_life_days: None,
-            instrument: args.instrument.clone(),
+            instrument: args
+                .instrument
+                .clone()
+                .unwrap_or_else(|| current_param.data_type.instrument.name().to_string()),
             experiment_class: args.protocol.clone(),
         };
 

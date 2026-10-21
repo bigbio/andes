@@ -219,8 +219,9 @@ andes --spectrum spectra.mzML --database db.fasta \
 ```
 
 **In-process rescoring.** `--rescore` runs Percolator (`--percolator-bin`, else `percolator` on
-`$PATH`, else the pinned Docker image). `--rescore-native` is a built-in cross-validated GBDT
-fallback. Both add a q-value and PEP to the outputs and write `<stem>.q<fdr>.tsv` (targets at
+`$PATH`, else the pinned Docker image). `--rescore-native` is a built-in
+cross-validated semi-supervised linear rescorer with target-decoy competition (Percolator's
+algorithm, as `-Y`), a fallback when Percolator is not available. Both add a q-value and PEP to the outputs and write `<stem>.q<fdr>.tsv` (targets at
 q ≤ `--fdr`, default 0.01, e.g. `--rescore --fdr 0.01`). `--fdr` and `--pep` do nothing
 without one of them.
 

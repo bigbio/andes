@@ -646,8 +646,15 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     if let Some(v) = args.lfq_gaussian_width {
         check_positive("lfq_gaussian_width", v)?;
     }
+    check_positive("glyco_tol_ppm", args.glyco_tol_ppm)?;
     if let Some(v) = args.glyco_retrieval_tol_ppm {
         check_positive("glyco_retrieval_tol_ppm", v)?;
+    }
+    if !args.chimeric_max_kl.is_finite() || args.chimeric_max_kl < 0.0 {
+        return Err(format!(
+            "config: `chimeric_max_kl` must be finite and >= 0 (got {})",
+            args.chimeric_max_kl
+        ));
     }
     if let Some(v) = args.fragment_index_slice_da {
         check_positive("fragment_index_slice_da", v)?;
@@ -771,6 +778,25 @@ glyco:
         assert!(check_positive("frag", 20.0).is_ok());
         assert!(check_positive("frag", 0.0).is_err(), "tol=0 must reject");
         assert!(check_positive("frag", -1.0).is_err());
+    }
+
+    /// YAML glyco and chimeric numbers go through the CLI's bounds.
+    #[test]
+    fn yaml_glyco_tol_and_chimeric_kl_are_validated() {
+        for bad in [
+            "glyco:\n  tol_ppm: 0\n",
+            "glyco:\n  tol_ppm: -5\n",
+            "glyco:\n  tol_ppm: .nan\n",
+            "glyco:\n  tol_ppm: .inf\n",
+            "chimeric:\n  max_kl: -0.1\n",
+            "chimeric:\n  max_kl: .nan\n",
+        ] {
+            let e = applied(bad, &[]).unwrap_err();
+            assert!(e.contains("glyco_tol_ppm") || e.contains("chimeric_max_kl"), "{bad}: {e}");
+        }
+        let a = applied("glyco:\n  tol_ppm: 30\nchimeric:\n  max_kl: 0\n", &[]).unwrap();
+        assert_eq!(a.glyco_tol_ppm, 30.0);
+        assert_eq!(a.chimeric_max_kl, 0.0);
     }
 
     /// The YAML path must reject values the CLI would reject via `value_parser`.

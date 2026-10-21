@@ -430,7 +430,7 @@ pub(crate) struct SearchArgs {
 
     /// Chimeric mode: averagine-envelope KL gate for accepting a co-isolated MS1
     /// envelope (lower = stricter/cleaner; fewer spurious secondaries).
-    #[arg(long = "chimeric-max-kl", hide = true, default_value = "0.3")]
+    #[arg(long = "chimeric-max-kl", hide = true, default_value = "0.3", value_parser = parse_non_negative_f32)]
     pub(crate) chimeric_max_kl: f32,
 
     /// Path to a Parquet model store (a single file or a partitioned directory)
@@ -1528,6 +1528,16 @@ pub(crate) fn parse_non_negative(s: &str) -> Result<f64, String> {
     Ok(v)
 }
 
+/// A finite `f32 >= 0` (`--chimeric-max-kl`: a KL divergence bound, where 0
+/// accepts only exact averagine matches and a negative value would accept none).
+pub(crate) fn parse_non_negative_f32(s: &str) -> Result<f32, String> {
+    let v = parse_non_negative(s)?;
+    if v > f32::MAX as f64 {
+        return Err(format!("invalid value `{s}`: out of range"));
+    }
+    Ok(v as f32)
+}
+
 /// Parse a fragment-tolerance scalar (`--fragment-tol-ppm` / `--fragment-tol-da`)
 /// — must be a finite, strictly-positive width (finding 3.8).
 pub(crate) fn parse_positive_tol(s: &str) -> Result<f64, String> {
@@ -1618,6 +1628,16 @@ mod cli_domain_validator_tests {
         assert!(parse_unit_fraction("1.5").is_err());
         assert!(parse_unit_fraction("nan").is_err());
         assert!(parse_unit_fraction("inf").is_err());
+    }
+
+    #[test]
+    fn non_negative_f32_rejects_negative_and_nonfinite() {
+        assert_eq!(parse_non_negative_f32("0.3").unwrap(), 0.3);
+        assert_eq!(parse_non_negative_f32("0").unwrap(), 0.0);
+        assert!(parse_non_negative_f32("-0.1").is_err());
+        assert!(parse_non_negative_f32("nan").is_err());
+        assert!(parse_non_negative_f32("inf").is_err());
+        assert!(parse_non_negative_f32("1e300").is_err());
     }
 
     #[test]

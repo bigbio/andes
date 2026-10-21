@@ -10,7 +10,7 @@ use model::{
 use model_train::{
     counts::CountStats,
     protocol_to_experiment_class as store_protocol_to_experiment_class,
-    select::{select, select_nearest, SelectionEntry, SelectionKey},
+    select::{select_nearest_for, SelectionEntry, SelectionKey},
     store::SourceLedger,
     ModelStore,
 };
@@ -442,13 +442,13 @@ pub(crate) struct ModelChoice {
 }
 
 /// Pick the model for `(activation, instrument, protocol, enzyme)` from the
-/// store's selection `entries`: [`build_selection_key`], an exact pass on the
-/// detected instrument when the key collapsed it to its family, then
-/// [`select_nearest`]. `build_selection_key` already applies the family
-/// fallback and every normalization, so the family function is the identity.
-/// When the exact ladder misses (e.g. a protocol the own-only store doesn't
-/// carry), `select_nearest` routes to the CLOSEST own model and only resolves
-/// to the standard base as a last resort. This is the selection the search and
+/// store's selection `entries`: [`build_selection_key`], then
+/// [`select_nearest_for`] with the detected instrument when the key collapsed
+/// it to its family. `build_selection_key` already applies the family fallback
+/// and every normalization, so the family function is the identity. When the
+/// exact ladder misses (e.g. a protocol the own-only store doesn't carry),
+/// `select_nearest_for` routes to the CLOSEST own model and only resolves to
+/// the standard base as a last resort. This is the selection the search and
 /// the training paths run, and the one the bundled-store grid test pins.
 pub(crate) fn choose_model(
     entries: &[SelectionEntry],
@@ -459,22 +459,18 @@ pub(crate) fn choose_model(
 ) -> ModelChoice {
     let key = build_selection_key(activation, instrument, protocol, enzyme);
     // A model trained for the EXACT detected instrument (e.g. a user-trained
-    // OrbitrapAstral model) is hidden by the family collapse, so it is tried
-    // first when the collapse changed the instrument.
+    // OrbitrapAstral model) is hidden by the family collapse, so the detected
+    // instrument is passed along when the collapse changed it.
     let detected: Option<&str> = instrument
         .filter(|i| i.family_fallback() != *i)
         .map(|i| i.name());
-    let exact = detected.and_then(|d| {
-        let raw_key = SelectionKey {
-            instrument: d.to_string(),
-            ..key.clone()
-        };
-        select(entries, &raw_key, |s| s.to_string(), None)
-    });
-    let (id, substituted) = match exact {
-        Some(id) => (id, false),
-        None => select_nearest(entries, &key, |i| i.to_string(), "hcd_qexactive_tryp"),
-    };
+    let (id, substituted) = select_nearest_for(
+        entries,
+        &key,
+        detected,
+        |i| i.to_string(),
+        "hcd_qexactive_tryp",
+    );
     ModelChoice {
         model_id: id.to_string(),
         key,
@@ -604,7 +600,7 @@ mod param_resolver_tests {
     }
     /// The bundled-store selection, as the search and training paths run it
     /// (`choose_model`: `build_selection_key`, the detected-instrument pre-pass
-    /// and `select_nearest`), over every activation × detected instrument
+    /// and `select_nearest_for`), over every activation × detected instrument
     /// (or none) × protocol × enzyme, pinned in
     /// `test-fixtures/model_selection_grid.tsv`. One row per (activation,
     /// instrument, enzyme), one column per protocol; `*` marks a nearest-model

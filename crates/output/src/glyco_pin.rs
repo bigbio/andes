@@ -508,19 +508,21 @@ pub fn write_glyco_pin(
     mono: Option<&[Option<MonoCorrection>]>,
     core: GlycanCore,
 ) -> io::Result<()> {
-    let file = std::fs::File::create(path)?;
-    let mut writer = BufWriter::new(file);
-    write_glyco_pin_to(
-        &mut writer,
-        spectra,
-        results,
-        candidates,
-        params,
-        search_index,
-        debug,
-        mono,
-        core,
-    )
+    crate::atomic::write_atomic(path, |path| {
+        let mut writer = BufWriter::new(std::fs::File::create(path)?);
+        write_glyco_pin_to(
+            &mut writer,
+            spectra,
+            results,
+            candidates,
+            params,
+            search_index,
+            debug,
+            mono,
+            core,
+        )?;
+        writer.flush()
+    })
 }
 
 /// Select which hits of ONE scan to emit into the FDR PIN.

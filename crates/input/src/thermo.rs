@@ -200,10 +200,7 @@ impl ThermoRawReader {
         if precursor_mz.is_nan() || precursor_mz <= 0.0 {
             return None;
         }
-        let precursor_charge = match p.charge() {
-            0 => None,
-            z => Some(z),
-        };
+        let precursor_charge = model::spectrum::known_precursor_charge(i64::from(p.charge()));
         let inten = p.intensity();
         let precursor_intensity = if inten > 0.0 { Some(inten) } else { None };
 

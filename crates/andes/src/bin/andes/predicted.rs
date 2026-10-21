@@ -576,6 +576,43 @@ fn locate(bases: &HashMap<String, u32>, spectra: &[Spectrum], spec_id: &str, sca
     NONE
 }
 
+/// A PIN row's precursor charge. The charge one-hot is clamped to the searched
+/// `--charge` range (`edges`), so a hot edge column can stand for a charge
+/// beyond it. There the charge comes from `ExpMass` and the spectrum's
+/// precursor m/z (`ExpMass = z · (m/z − proton)`) when they agree on a whole
+/// charge beyond that edge; a co-isolated precursor's row (another m/z) does
+/// not agree and keeps the column's charge. 0 when no column is hot.
+fn row_charge(
+    hot: Option<u8>,
+    edges: (u8, u8),
+    exp_mass: Option<f64>,
+    precursor_mz: Option<f64>,
+) -> u8 {
+    let Some(z) = hot else {
+        return 0;
+    };
+    if z != edges.0 && z != edges.1 {
+        return z;
+    }
+    let (Some(m), Some(mz)) = (exp_mass, precursor_mz) else {
+        return z;
+    };
+    let per_charge = mz - model::PROTON;
+    if !(m.is_finite() && per_charge > 0.0) {
+        return z;
+    }
+    let whole = (m / per_charge).round();
+    if !(1.0..=f64::from(u8::MAX)).contains(&whole) || (m - whole * per_charge).abs() > 0.01 {
+        return z;
+    }
+    let derived = whole as u8;
+    if (z == edges.1 && derived > z) || (z == edges.0 && derived < z) {
+        derived
+    } else {
+        z
+    }
+}
+
 fn read_pin(pin: &Path, spectra: &[Spectrum], new_cols: &[String]) -> Result<PinTable, String> {
     let f = File::open(pin).map_err(|e| format!("{}: {e}", pin.display()))?;
     let mut lines = BufReader::new(f).lines();
@@ -606,10 +643,16 @@ fn read_pin(pin: &Path, spectra: &[Spectrum], new_cols: &[String]) -> Result<Pin
         .enumerate()
         .filter_map(|(i, c)| Some((i, c.strip_prefix("charge")?.parse().ok()?)))
         .collect();
+    let charge_edges = (
+        charge_cols.iter().map(|c| c.1).min().unwrap_or(0),
+        charge_cols.iter().map(|c| c.1).max().unwrap_or(0),
+    );
+    let c_exp_mass = h.iter().position(|c| *c == "ExpMass");
     let need = charge_cols
         .iter()
         .map(|(i, _)| *i)
         .chain([c_id, c_label, c_scan, c_pep, c_score])
+        .chain(c_exp_mass)
         .max()
         .unwrap_or(0);
     let bases = spectrum_bases(spectra);
@@ -655,13 +698,20 @@ fn read_pin(pin: &Path, spectra: &[Spectrum], new_cols: &[String]) -> Result<Pin
                 f
             }
         };
+        let hot = charge_cols
+            .iter()
+            .find(|(i, _)| x[*i] == "1")
+            .map(|(_, z)| *z);
+        let charge = row_charge(
+            hot,
+            charge_edges,
+            c_exp_mass.and_then(|i| x[i].trim().parse().ok()),
+            (spec != NONE).then(|| spectra[spec as usize].precursor_mz),
+        );
         rows.push(PinRow {
             spec,
             form,
-            charge: charge_cols
-                .iter()
-                .find(|(i, _)| x[*i] == "1")
-                .map_or(0, |(_, z)| *z),
+            charge,
             decoy: x[c_label].trim() == "-1",
             score: x[c_score].trim().parse().unwrap_or(f64::NEG_INFINITY),
         });
@@ -939,6 +989,28 @@ mod tests {
         // ScanNr must agree with the spectrum.
         assert_eq!(locate(&b, &spectra, "run.10.10.2_10_1", 9), NONE);
         assert_eq!(locate(&b, &spectra, "other_5_1", 5), NONE);
+    }
+
+    /// The one-hot is clamped to the `--charge` columns; the predictor gets the
+    /// PSM's true charge from ExpMass and the precursor m/z at an edge.
+    #[test]
+    fn row_charge_recovers_a_charge_beyond_the_columns() {
+        let mz = 500.0;
+        let exp = |z: f64| Some(z * (mz - model::PROTON));
+        // Interior column: exact.
+        assert_eq!(row_charge(Some(3), (2, 4), exp(3.0), Some(mz)), 3);
+        // A 6+ precursor written into the charge4 column.
+        assert_eq!(row_charge(Some(4), (2, 4), exp(6.0), Some(mz)), 6);
+        // A 1+ precursor written into the charge2 column.
+        assert_eq!(row_charge(Some(2), (2, 4), exp(1.0), Some(mz)), 1);
+        // A real 4+ at the edge stays 4.
+        assert_eq!(row_charge(Some(4), (2, 4), exp(4.0), Some(mz)), 4);
+        // A co-isolated precursor (ExpMass from another m/z) keeps the column.
+        assert_eq!(row_charge(Some(4), (2, 4), Some(3456.789), Some(mz)), 4);
+        // No ExpMass column or no located spectrum: the column.
+        assert_eq!(row_charge(Some(4), (2, 4), None, Some(mz)), 4);
+        assert_eq!(row_charge(Some(4), (2, 4), exp(6.0), None), 4);
+        assert_eq!(row_charge(None, (2, 4), exp(6.0), Some(mz)), 0);
     }
 
     #[test]

@@ -150,15 +150,12 @@ impl TimsTofReader {
             return None;
         }
 
-        let precursor_charge = precursor.charge.and_then(|z| {
-            // 0 (or an absurd value) means "unknown"; let the engine sweep the
-            // configured charge range instead of trusting a bogus state.
-            if z == 0 {
-                None
-            } else {
-                Some(z as i32)
-            }
-        });
+        // 0 (or an absurd value) means "unknown"; let the engine sweep the
+        // configured charge range instead of trusting a bogus state.
+        let precursor_charge = precursor
+            .charge
+            .and_then(|z| i64::try_from(z).ok())
+            .and_then(model::spectrum::known_precursor_charge);
 
         let precursor_intensity =
             precursor

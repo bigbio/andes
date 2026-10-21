@@ -979,8 +979,14 @@ mod tests {
     #[test]
     fn rescoring_is_deterministic_across_thread_counts() {
         let pin = synth_pin(20_000, true);
-        let one = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
-        let four = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+        let one = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        let four = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
         let a = one.install(|| native_rescore_pin(&pin, 3).unwrap());
         let b = four.install(|| native_rescore_pin(&pin, 3).unwrap());
         assert_eq!(a, b);

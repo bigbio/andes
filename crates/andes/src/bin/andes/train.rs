@@ -70,8 +70,10 @@ pub(crate) struct TrainFromSearchArgs {
     /// AminoAcidSet. Rows whose scan is absent from `--spectra` or whose peptide
     /// fails to parse are skipped. Use to train a glyco-regime rank model from
     /// the reference engine/a glyco search engine backbone IDs.
+    ///
+    /// With several `--spectra`, give one `--labels` per run, in the same order.
     #[arg(long = "labels")]
-    pub(crate) labels: Option<PathBuf>,
+    pub(crate) labels: Vec<PathBuf>,
 
     /// Seed model: slug from the bundled store (e.g. `hcd_qexactive_tryp`).
     /// When omitted, the bundled `hcd_qexactive_tryp` model is used as the seed.
@@ -693,8 +695,13 @@ pub(crate) fn run_train_from_search(
     if args.spectra.is_empty() {
         return Err("--spectra is required for initial training".into());
     }
-    if args.labels.is_some() && args.spectra.len() > 1 {
-        return Err("--labels takes a single --spectra file".into());
+    if !args.labels.is_empty() && args.labels.len() != args.spectra.len() {
+        return Err(format!(
+            "--labels must be given once per --spectra ({} labels, {} spectra)",
+            args.labels.len(),
+            args.spectra.len()
+        )
+        .into());
     }
 
     // ── 3. Load seed Param + RankScorer ──────────────────────────────────────
@@ -706,11 +713,11 @@ pub(crate) fn run_train_from_search(
     // Each run is labelled on its own and keeps only its labelled spectra, so
     // memory holds one full run at a time.
     let mut runs: Vec<TrainRun> = Vec::with_capacity(args.spectra.len());
-    for spectra_path in &args.spectra {
+    for (i, spectra_path) in args.spectra.iter().enumerate() {
         eprintln!("train: loading spectra from {} ...", spectra_path.display());
         let spectra = load_spectra_for_train(spectra_path)?;
         eprintln!("train: loaded {} spectra", spectra.len());
-        let labels = if let Some(ref labels_path) = args.labels {
+        let labels = if let Some(labels_path) = args.labels.get(i) {
             // SP-B glyco path: labels come from an external engine's backbone IDs.
             // No seed search / database needed — the peptides are given directly.
             let aa_set = build_aa_set(&args.mods)?;
@@ -786,7 +793,10 @@ pub(crate) fn run_train_from_search(
         template.mme = Tolerance::Da(da);
         eprintln!("train: training fragment tolerance overridden to {da} Da");
     } else {
-        eprintln!("train: training at the seed fragment tolerance {:?}", template.mme);
+        eprintln!(
+            "train: training at the seed fragment tolerance {:?}",
+            template.mme
+        );
     }
     let accum_scorer = RankScorer::new(&template);
 

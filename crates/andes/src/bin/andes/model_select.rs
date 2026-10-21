@@ -720,7 +720,10 @@ mod param_resolver_tests {
             Protocol::Auto,
             model::enzyme::Enzyme::Trypsin,
         );
-        assert_eq!((c.model_id.as_str(), c.substituted), ("cid_lowres_tryp", false));
+        assert_eq!(
+            (c.model_id.as_str(), c.substituted),
+            ("cid_lowres_tryp", false)
+        );
     }
 
     use crate::cli::{

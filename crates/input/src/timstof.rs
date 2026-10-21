@@ -272,7 +272,10 @@ mod tests {
             .err()
             .expect("the outer folder is not a run");
         assert!(matches!(err, TimsTofParseError::Nested { .. }), "{err}");
-        assert!(err.to_string().contains(&inner.display().to_string()), "{err}");
+        assert!(
+            err.to_string().contains(&inner.display().to_string()),
+            "{err}"
+        );
     }
 
     /// Build a minimal `timsrust::Spectrum` for the conversion tests.

@@ -591,7 +591,12 @@ mod tests {
     #[test]
     fn no_generic_id_returns_none() {
         assert_eq!(
-            select(&manifest(), &key("ETD", "LowRes", "Trypsin", &[]), fam, None),
+            select(
+                &manifest(),
+                &key("ETD", "LowRes", "Trypsin", &[]),
+                fam,
+                None
+            ),
             None
         );
     }
@@ -782,7 +787,13 @@ mod tests {
         ];
         let tryptic = key("HCD", "QExactive", "Trypsin", &[]);
         assert_eq!(
-            select_nearest_for(&m, &tryptic, Some("OrbitrapAstral"), fam, "hcd_qexactive_tryp"),
+            select_nearest_for(
+                &m,
+                &tryptic,
+                Some("OrbitrapAstral"),
+                fam,
+                "hcd_qexactive_tryp"
+            ),
             ("hcd_astral_tryp", false)
         );
         assert_eq!(

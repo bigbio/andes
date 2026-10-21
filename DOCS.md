@@ -56,7 +56,7 @@ Native `.raw`/`.d` search MS2 only (MS3 reporter scans are filtered at load).
 
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
-| `--mods` | path | *(off)* | Java-format `mods.txt` (§2). Without it: Carbamidomethyl C (fixed), Oxidation M (variable, max 3 per peptide). Numeric Da masses only. | Java `-mod <FILE>` |
+| `--mods` | path | *(off)* | Java-format `mods.txt` (§2). Without it: Carbamidomethyl C (fixed), Oxidation M (variable) and Acetyl on the protein N-terminus (variable), max 3 variable mods per peptide. Numeric Da masses only. | Java `-mod <FILE>` |
 
 ### Scoring
 
@@ -717,7 +717,9 @@ NumMods=3
 15.99491,M,opt,any,Oxidation
 ```
 
-These two are the built-in defaults when `--mods` is omitted.
+The built-in defaults when `--mods` is omitted are these two plus a variable Acetyl
+(+42.010565) on the protein N-terminus, i.e. the equivalent of adding
+`42.010565,*,opt,Prot-N-term,Acetyl`. Pass a `--mods` file to search without it.
 
 ### Example (b) — TMT 10-plex on K and peptide N-term
 
@@ -1013,8 +1015,9 @@ every modification accession its peptidoforms use (`andes.run_quant.mods`).
 
 With `--fragmentation auto`, andes takes the dominant `<activation>` cvParam over the first 64
 MS2 spectra of an mzML (mixed methods warn) and the dominant analyser (none → `low-res`).
-`.raw` carries both in vendor metadata (HCD on an Orbitrap → `hcd_qexactive_tryp`); `.d` routes
-to `cid_tof_tryp`. **MGF** has none: andes assumes CID / low-res / 0.5 Da (`cid_lowres_tryp`)
+`.raw` carries both in vendor metadata (HCD on an Orbitrap → `hcd_qexactive_tryp`); `.d`
+(timsTOF, beam-type CID) routes to the high-res HCD model `hcd_qexactive_tryp` (or its protocol
+variant) with a 20 ppm feature tolerance, as in §1. **MGF** has none: andes assumes CID / low-res / 0.5 Da (`cid_lowres_tryp`)
 and warns; `--fragment-tol-ppm` implies a high-res instrument, `--fragment-tol-da` a low-res
 one. `--protocol` applies on top.
 
@@ -1159,6 +1162,13 @@ searches **N**-glycopeptides (N-X-S/T sequon backbones, trimannosyl core). With
 glycosite (no sequon), the core is a single reducing-end GalNAc, and the glycan
 database must be an O-glycan `.gdb` (e.g. a published O-glycan database). The
 defaults are validated; most knobs are hidden.
+
+`--glyco` raises `--max-missed-cleavages` to at least 3: sequon-bearing tryptic
+peptides often need a third missed cleavage to reach a scoreable length. An explicit
+`--max-missed-cleavages` below 3 is honoured (with a note), because the floor of 3 grows
+the candidate index by about 40% (13.2M to 18.8M candidates on a 20k-protein human FASTA,
+about +4.4 GB resident), the difference between running and being killed for memory on a
+16 GB machine. A value of 3 or more is used as given.
 
 **Main flags:**
 

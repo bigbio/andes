@@ -83,7 +83,8 @@ pub(crate) fn run_glyco(
         source_desc
     );
     let glyco_tol_ppm = cli.glyco_tol_ppm;
-    // Finite and > 0 is enforced by clap (`parse_positive_tol`), so NaN and
+    // Finite and > 0 is enforced by clap (`parse_positive_tol`) for the flag and
+    // by the config validation (`config::apply`) for `glyco.tol_ppm`, so NaN and
     // non-positive values never reach here.
     if glyco_tol_ppm < 20.0 {
         eprintln!(

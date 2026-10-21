@@ -468,7 +468,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(false);
 
     let t_phase = std::time::Instant::now();
-    let mut param = {
+    // The block also returns the (activation, instrument) it routed on and the
+    // chosen model id, so the resolved-parameter banner can report what was
+    // detected separately from what the substituted model was trained on.
+    let (mut param, routed_activation, routed_instrument, resolved_model_id) = {
         // ── Resolve (activation, instrument) for the Parquet model store. ─────
         //
         // Metadata-first precedence: a fully detected (activation, instrument)
@@ -548,7 +551,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        p
+        (p, activation, instrument_opt, model_id)
     };
     // Optional GBDT truncation (`--gbdt-max-trees`). Applied to the loaded model
     // before any scoring so every code path sees the same ensemble.
@@ -1067,14 +1070,39 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // were auto-detected from the data/store are tagged [detected].
     eprintln!("──────── andes resolved parameters ────────");
     eprintln!("  spectra        : {}", spectrum_path.display());
-    eprintln!("  model          : (see 'Param model:' line above) [detected]");
+    // The activation/instrument lines report what the RUN was routed on and say
+    // where each value came from; the model's own training regime is shown next
+    // to it, so a substituted model (e.g. a high-res HCD model serving a TOF
+    // run) is never presented as the detected instrument.
+    let model_source = if cli.model_id_override.is_some() {
+        "--model"
+    } else {
+        "selected from store"
+    };
+    eprintln!("  model          : {resolved_model_id} [{model_source}]");
+    let activation_source = if cli.fragmentation != Fragmentation::Auto {
+        "--fragmentation"
+    } else if detected_activation_instrument.is_some() {
+        "detected"
+    } else {
+        "default"
+    };
     eprintln!(
-        "  activation     : {:?} [detected]",
-        param.data_type.activation
+        "  activation     : {} [{activation_source}] (model trained on {})",
+        routed_activation.name(),
+        param.data_type.activation.name()
     );
+    let instrument_source = if instrument_was_detected {
+        "detected"
+    } else if cli.fragment_tol_ppm.is_some() || cli.fragment_tol_da.is_some() {
+        "from --fragment-tol-*"
+    } else {
+        "default"
+    };
     eprintln!(
-        "  instrument     : {:?} [detected]",
-        param.data_type.instrument
+        "  instrument     : {} [{instrument_source}] (model trained on {})",
+        routed_instrument.map_or("LowRes", |i| i.name()),
+        param.data_type.instrument.name()
     );
     eprintln!("  protocol       : {:?}", param.data_type.protocol);
     if extra_enzymes.is_empty() {

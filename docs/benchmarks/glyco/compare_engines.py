@@ -15,8 +15,15 @@ produced by andes except the andes PIN + native-rescore PSMs:
   * engine A   psm.tsv, PXD031032               (Expectation <= 0.01, Delta
                  Mass -> gdb composition within 0.02 Da)
   * andes      <stem>.glyco.pin + native-rescore .psms (q <= 0.01)
+
+An andes row is entrapment only if every protein it maps to is an ENTRAP_ protein. Pass
+`--fasta` (the search database) to also rescue entrapment-only rows whose I/L-folded bare
+peptide occurs in a sample protein (isobaric, therefore not really entrapment). Both rules
+are shared with eval_entrap.py and reproduce/run.sh via ../entrap_common.py.
 """
-import argparse, csv, re, json, collections
+import argparse, csv, re, json, collections, os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from entrap_common import SampleSequences, bare_peptide, classify  # noqa: E402
 from xml.etree import ElementTree as ET
 M='{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
 
@@ -30,6 +37,7 @@ _ap.add_argument('--engine-a', required=True, help='engine A psm.tsv')
 _ap.add_argument('--gdb', required=True, help='glycan .gdb used to map engine A delta masses')
 _ap.add_argument('--andes-pin', required=True)
 _ap.add_argument('--andes-psms', required=True)
+_ap.add_argument('--fasta', default=None, help='search FASTA; enables I/L-equivalent entrapment rescue')
 _ap.add_argument('--out', default='final_comparison.json')
 _args = _ap.parse_args()
 CONFIG = {
@@ -41,6 +49,7 @@ CONFIG = {
     'gdb':        _args.gdb,
     'andes_pin':  _args.andes_pin,
     'andes_psms': _args.andes_psms,
+    'fasta':      _args.fasta,
     'out':        _args.out,
 }
 
@@ -154,13 +163,13 @@ with open(CONFIG['engine L']) as f:
 ref['engine L']={'gps':set((p,g) for p,g,_ in pg),'prots':set(x[2] for x in pg),'n':len(pg)}
 
 # 4. andes: read pin + psms q-values
-def is_entrapment(accession):
-    """Entrapment proteins cannot be present in the sample, so anything mapping to one
-    is known-false. One predicate, used for both the count and the exclusions."""
-    return accession.startswith('ENTRAP_') or 'ENTRAP' in accession
+def load_andes(pin_path, psms_path, qmax=0.01, sample=None):
+    """Accepted andes glyco rows as (peptide, composition, accession, is_entrapment).
 
-
-def load_andes(pin_path, psms_path, qmax=0.01):
+    A row is entrapment by the shared rule in ../entrap_common.py: every protein column is an
+    ENTRAP_ protein and, when `sample` (a SampleSequences) is given, its I/L-folded bare
+    peptide does not occur in a sample protein.
+    """
     # q-values by SpecId
     q={}
     with open(psms_path) as f:
@@ -174,29 +183,25 @@ def load_andes(pin_path, psms_path, qmax=0.01):
     with open(pin_path) as f:
         r=csv.reader(f,delimiter='\t'); hdr=next(r)
         ci={h:i for i,h in enumerate(hdr)}
+        i_pep=ci['Peptide']
         for line in r:
-            if len(line)<76: continue
+            if len(line)<=i_pep+1: continue  # no protein column
             spec=line[ci['SpecId']]; label=line[ci['Label']]
             if label!='1': continue
             if spec not in q: continue
-            pep=line[ci['Peptide']]; prot=line[ci['Proteins']]
-            # parse "K.TAANGTR.K[HexNAc2Hex8Fuc0NeuAc0NeuGc0@N4]"
-            m=re.match(r'^(.*?)\[([^\]]*)\]$', pep)
+            pep=line[i_pep]; prots=line[i_pep+1:]
+            # "K.TAANGTR.K[HexNAc2Hex8Fuc0NeuAc0NeuGc0@N4]": the glycan tag is the trailing
+            # bracket after the C-terminal flank.
+            m=re.search(r'\.[^.]\[([^\[\]]*)\]$', pep)
             if not m: continue
-            pseq, gann = m.group(1), m.group(2)
-            # strip flanks "K.X.K" -> "X" (mods like +15.99491 also contain dots)
-            if '.' in pseq:
-                pseq=pseq.split('.', 1)[1]
-                pseq=pseq.rsplit('.', 1)[0]
-            pseq=re.sub(r'\+[\d.]+','',pseq)  # strip mods like +15.99491
-            # glycan comp
-            gm=re.match(r'(HexNAc\d+Hex\d+Fuc\d+NeuAc\d+NeuGc\d+)', gann)
+            gm=re.match(r'(HexNAc\d+Hex\d+Fuc\d+NeuAc\d+NeuGc\d+)', m.group(1))
             if not gm: continue
             gc=parse_comp_andes(gm.group(1))
-            a=acc(prot)
-            is_entrap = is_entrapment(a)
+            pseq=bare_peptide(pep)
+            a=acc(prots[0])
+            is_entrap = classify(prots, pep, sample) == 'entrap'
             if is_entrap: n_entrap+=1
-            andes.append((pseq, gc, a))
+            andes.append((pseq, gc, a, is_entrap))
     return andes, n_entrap
 
 # 5. engine A: the export carries the glycan ONLY as a "Delta Mass"
@@ -245,15 +250,16 @@ def load_engine_a(tsv, gdb, tissue='MouseLiver-Z-T-1', emax=1e-2, tol=0.02):
             rows.append((row[pi].strip(), comp, acc(row[pri]))); prots.add(acc(row[pri]))
     return rows, prots
 
-andes_rows, n_entrap = load_andes(CONFIG['andes_pin'],CONFIG['andes_psms'],0.01)
+_sample = SampleSequences(CONFIG['fasta']) if CONFIG['fasta'] else None
+andes_rows, n_entrap = load_andes(CONFIG['andes_pin'],CONFIG['andes_psms'],0.01,_sample)
 ms_rows, ms_prots = load_engine_a(CONFIG['engine A'], CONFIG['gdb'])
 ref['engine A']={'gps':set((p,g) for p,g,_ in ms_rows),'prots':ms_prots,'n':len(ms_rows)}
 # Entrapment hits are known-false by construction and no other engine searched an
 # entrapment database, so they must not inflate the headline count.
-andes_gps=set((p,g) for p,g,a in andes_rows if not is_entrapment(a))
-andes_gps_with_entrap=set((p,g) for p,g,_ in andes_rows)
-andes_prots=set(a for _,_,a in andes_rows)
-andes_prots_noentrap=set(a for _,_,a in andes_rows if not is_entrapment(a))
+andes_gps=set((p,g) for p,g,a,e in andes_rows if not e)
+andes_gps_with_entrap=set((p,g) for p,g,a,e in andes_rows)
+andes_prots=set(a for _,_,a,_ in andes_rows)
+andes_prots_noentrap=set(a for _,_,a,e in andes_rows if not e)
 
 print("="*72)
 print("MouseLiver-Z-T-1  |  unique intact glycopeptides (peptide + glycan composition)")

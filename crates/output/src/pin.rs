@@ -10,7 +10,9 @@
 //! ```text
 //! SpecId  Label  ScanNr  ExpMass  CalcMass  mass  RawScore  DeNovoScore
 //! lnSpecEValue  lnEValue  isotope_error  peplen  dm  absdm
-//! charge<min>  charge<min+1>  ...  charge<max>   (--charge range ∪ PSM charges)
+//! charge<min>  charge<min+1>  ...  charge<max>   (the --charge range; a PSM
+//!                                                 charge outside it sets the
+//!                                                 nearest edge column)
 //! enzN  enzC  enzInt
 //! NumMatchedMainIons  longest_b  longest_y  longest_y_pct
 //! ExplainedIonCurrentRatio  NTermIonCurrentRatio  CTermIonCurrentRatio

@@ -28,10 +28,12 @@ use crate::Spectrum;
 /// Error opening or reading a Bruker timsTOF `.d` directory.
 #[derive(Debug, thiserror::Error)]
 pub enum TimsTofParseError {
-    #[error("failed to open Bruker .d '{path}': {source}")]
+    #[error("failed to open Bruker .d '{path}': {source}{hint}")]
     Open {
         path: String,
         source: SpectrumReaderError,
+        /// Extra guidance for a known unsupported layout (empty otherwise).
+        hint: &'static str,
     },
     #[error("failed to read spectrum {index} from Bruker .d: {source}")]
     Read {
@@ -47,6 +49,19 @@ pub enum TimsTofParseError {
 /// owns the underlying handle without a self-referential borrow — matching the
 /// `ThermoRawReader` structure. Every emitted spectrum is MS2 by construction
 /// (the reader only produces fragment spectra), so there is no MS-level filter.
+/// Guidance appended to an open error whose cause is a known unsupported `.d`
+/// layout. Frame compression type 1 is the scheme written by early timsTOF
+/// acquisition software (data from about 2018 and before); the reader only
+/// decodes the later type 2.
+fn open_error_hint(message: &str) -> &'static str {
+    if message.contains("Compression type 1") {
+        " (this .d uses the frame compression of early timsTOF acquisition software, \
+         which the native reader does not decode; convert the run to mzML and search that)"
+    } else {
+        ""
+    }
+}
+
 pub struct TimsTofReader {
     reader: SpectrumReader,
     next: usize,
@@ -58,9 +73,13 @@ impl TimsTofReader {
     /// `analysis.tdf` + `analysis.tdf_bin`), not a file inside it.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, TimsTofParseError> {
         let p = path.as_ref();
-        let reader = SpectrumReader::new(p).map_err(|source| TimsTofParseError::Open {
-            path: p.display().to_string(),
-            source,
+        let reader = SpectrumReader::new(p).map_err(|source| {
+            let hint = open_error_hint(&source.to_string());
+            TimsTofParseError::Open {
+                path: p.display().to_string(),
+                source,
+                hint,
+            }
         })?;
         let len = reader.len();
         Ok(Self {
@@ -201,6 +220,12 @@ impl Iterator for TimsTofReader {
 mod tests {
     use super::*;
     use timsrust::Precursor;
+
+    #[test]
+    fn compression_type_1_gets_a_conversion_hint() {
+        assert!(open_error_hint("Compression type 1 not understood").contains("mzML"));
+        assert_eq!(open_error_hint("No such file or directory"), "");
+    }
 
     /// Build a minimal `timsrust::Spectrum` for the conversion tests.
     fn spectrum(

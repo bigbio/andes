@@ -24,7 +24,7 @@ Flags are kebab-case long options, defined in `crates/andes/src/bin/andes/cli.rs
 |---|---|---|---|---|
 | `.mzML` / `.mzml` | mzML (streaming) | always built | none | Full activation + instrument auto-detection (§4). |
 | `.raw` | Thermo RawFileReader | `--features thermo` | .NET 8 (bundled in release archives) | Same results as the equivalent mzML. Supports `--chimeric`. |
-| `.d` | Bruker timsTOF (`timsrust`) | `--features timstof` | none | DDA-PASEF, MS2 only; TOF fragmentation is beam-type CID, so it routes to a high-res HCD model (`hcd_qexactive_tryp` or its protocol variant until a TOF model ships), 20 ppm feature tolerance. `--chimeric` / `--precursor-cal` degrade to a normal search. |
+| `.d` | Bruker timsTOF (`timsrust`) | `--features timstof` | none | DDA-PASEF, MS2 only; runs from early acquisition software (frame compression type 1, about 2018 and older) are not readable, convert those to mzML. TOF fragmentation is beam-type CID, so it routes to a high-res HCD model (`hcd_qexactive_tryp` or its protocol variant until a TOF model ships), 20 ppm feature tolerance. `--chimeric` / `--precursor-cal` degrade to a normal search. |
 | any other (e.g. `.mgf`) | MGF | always built | none | No metadata; MS2, model from flags. |
 
 Native `.raw`/`.d` search MS2 only (MS3 reporter scans are filtered at load).

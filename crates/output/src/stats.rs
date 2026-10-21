@@ -156,13 +156,34 @@ impl RunStatistics {
 
 /// Write the rendered report to `path` (the run's `<stem>.statistics.log`).
 pub fn write_statistics_log(stats: &RunStatistics, path: &Path) -> io::Result<()> {
-    let mut f = File::create(path)?;
-    f.write_all(stats.render().as_bytes())
+    crate::atomic::write_atomic(path, |path| {
+        let mut f = File::create(path)?;
+        f.write_all(stats.render().as_bytes())
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn statistics_log_is_written_through_a_partial_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.statistics.log");
+        let stats = RunStatistics {
+            precursor_tolerance: "10 ppm".to_string(),
+            precursor_calibration: "Auto".to_string(),
+            fragment_tolerance: "0.02 Da".to_string(),
+            spectra_with_match: 3,
+            target_psms: 2,
+            decoy_psms: 1,
+            unmodified_target_psms: 2,
+            ptm_counts: Vec::new(),
+        };
+        write_statistics_log(&stats, &path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), stats.render());
+        assert!(!crate::atomic::partial(&path).exists());
+    }
 
     #[test]
     fn render_lists_ptms_desc_and_unmodified() {

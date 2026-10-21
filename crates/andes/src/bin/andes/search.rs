@@ -2984,24 +2984,26 @@ pub(crate) fn write_filtered_tsv(
     groups: Option<&output::Inference>,
 ) -> std::io::Result<()> {
     use std::io::Write;
-    let mut w = std::io::BufWriter::new(File::create(path)?);
-    writeln!(
-        w,
-        "PSMId\tq-value\tposterior_error_probability\tpeptide\tproteinIds\tprotein_group\tprotein_q"
-    )?;
-    for p in psms {
-        let (group, q) = groups
-            .and_then(|g| g.group_of(p))
-            .map_or(("NA".to_string(), "NA".to_string()), |g| {
-                (g.id.to_string(), g.q_value.to_string())
-            });
+    output::write_atomic(path, |path| {
+        let mut w = std::io::BufWriter::new(File::create(path)?);
         writeln!(
             w,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            p.psm_id, p.q_value, p.pep, p.peptide, p.proteins, group, q
+            "PSMId\tq-value\tposterior_error_probability\tpeptide\tproteinIds\tprotein_group\tprotein_q"
         )?;
-    }
-    w.flush()
+        for p in psms {
+            let (group, q) = groups
+                .and_then(|g| g.group_of(p))
+                .map_or(("NA".to_string(), "NA".to_string()), |g| {
+                    (g.id.to_string(), g.q_value.to_string())
+                });
+            writeln!(
+                w,
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                p.psm_id, p.q_value, p.pep, p.peptide, p.proteins, group, q
+            )?;
+        }
+        w.flush()
+    })
 }
 
 /// TMTpro 32/35-plex peptides are searched with the TMTpro tag mass, but each
@@ -3201,5 +3203,31 @@ mod rescore_pin_destination_tests {
         let dir = tmp.as_ref().expect("temp dir held").path().to_path_buf();
         assert!(pin.starts_with(&dir));
         assert_eq!(base, PathBuf::from("out.tsv"));
+    }
+}
+
+#[cfg(test)]
+mod filtered_tsv_tests {
+    use super::*;
+
+    /// The filtered TSV is written through `<path>.partial` and renamed, so a
+    /// run that dies mid-write never leaves a truncated table under the name.
+    #[test]
+    fn filtered_tsv_is_written_through_a_partial_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.q0p01.tsv");
+        let psm = output::PercolatorPsm {
+            psm_id: "run/scan=1_1_1".into(),
+            q_value: 0.001,
+            pep: 0.01,
+            score: Some(2.0),
+            peptide: "K.PEPTIDEK.A".into(),
+            proteins: "P1".into(),
+        };
+        write_filtered_tsv(&path, &[&psm], None).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("PSMId\tq-value\t"));
+        assert!(text.contains("run/scan=1_1_1\t0.001\t0.01\tK.PEPTIDEK.A\tP1\tNA\tNA"));
+        assert!(!output::ms1_table::partial_path(&path).exists());
     }
 }

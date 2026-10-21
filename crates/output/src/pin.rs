@@ -343,16 +343,18 @@ pub fn write_pin(
     params: &SearchParams,
     search_index: &SearchIndex,
 ) -> io::Result<()> {
-    let file = std::fs::File::create(output_path)?;
-    let mut writer = BufWriter::new(file);
-    write_pin_to(
-        &mut writer,
-        spectra,
-        queues,
-        candidates,
-        params,
-        search_index,
-    )
+    crate::atomic::write_atomic(output_path, |path| {
+        let mut writer = BufWriter::new(std::fs::File::create(path)?);
+        write_pin_to(
+            &mut writer,
+            spectra,
+            queues,
+            candidates,
+            params,
+            search_index,
+        )?;
+        writer.flush()
+    })
 }
 
 /// Write all PSMs to an arbitrary writer — useful for testing without temp files.
@@ -1360,6 +1362,34 @@ mod tests {
             err.to_string().contains("duplicate PIN SpecId"),
             "got: {err}"
         );
+    }
+
+    /// A PIN write that fails leaves the previous file as it was and no
+    /// `.partial`; a successful one replaces it.
+    #[test]
+    fn write_pin_is_atomic() {
+        let params = make_params(2..=3);
+        let idx = make_empty_search_index();
+        let cands = vec![make_candidate(0, false)];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.pin");
+        std::fs::write(&path, "previous").unwrap();
+
+        let dup = vec![make_spectrum("dup", 7, 500.0), make_spectrum("dup", 7, 600.0)];
+        let mut q0 = TopNQueue::new(10);
+        q0.push(make_psm(0, 10.0, 10.0, 0, 2));
+        let mut q1 = TopNQueue::new(10);
+        q1.push(make_psm(1, 9.0, 9.0, 0, 2));
+        assert!(write_pin(&path, &dup, &[q0, q1], &cands, &params, &idx).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "previous");
+        assert!(!crate::atomic::partial(&path).exists());
+
+        let one = vec![make_spectrum("Scan 1", 1, 500.0)];
+        let mut q = TopNQueue::new(10);
+        q.push(make_psm(0, 10.0, 10.0, 0, 2));
+        write_pin(&path, &one, &[q], &cands, &params, &idx).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().starts_with("SpecId\t"));
+        assert!(!crate::atomic::partial(&path).exists());
     }
 
     // ── Test 3: charge one-hot encoding ────────────────────────────────────

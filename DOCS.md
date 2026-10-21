@@ -407,8 +407,11 @@ Placements on knockoff sites are never reported for a `sites=annotated` mod, bec
 only for the estimate. For an unrestricted mod, which may sit anywhere anyway, they stay ordinary
 PSMs.
 
-Some knockoff sites are really modified, because annotation is incomplete. Counting them as false
-makes the estimate err towards rejecting true site claims, never towards accepting false ones.
+Some knockoff sites are really modified, because annotation is incomplete, which makes the
+estimate reject some true site claims. It does not err only that way: see the next paragraph. A
+PSM whose peptide several genes hold counts once in its stratum, as a knockoff PSM does, and a
+placement that is a knockoff site in one protein but an annotated site in another (a paralog
+annotated differently) supports that claim.
 
 **Experimental.** The knockoff sites control whether a residue is modified, not which
 modification it carries: on synthetic peptides whose lysines each carry one known modification, a

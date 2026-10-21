@@ -1593,10 +1593,14 @@ pub(crate) fn finalize_stream(
             let q_of = |q: &QValues, e: Estimate, i: usize| {
                 scored[i].and_then(|(fam, s)| q.q(e, rows[i].precursor, fam, s))
             };
+            // A fit whose amplitude is clamped to 0 found no signal: its
+            // quantity is missing, not zero, in the MBR table and the
+            // feature parquet.
             let reported = |r: &ExtractRow| {
                 let w_c = summaries.get(&r.precursor).and_then(|s| s.w_c);
                 r.evidence
                     .as_ref()
+                    .filter(|e| e.amplitude > 0.0)
                     .map(|e| reported_quantity(e, r.run, w_c, maps))
             };
             for (i, r) in rows.iter().enumerate() {

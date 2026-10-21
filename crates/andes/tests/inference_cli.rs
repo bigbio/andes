@@ -57,6 +57,8 @@ fn inference_writes_one_dataset_level_pg_view() {
         .arg(d.join("r2.percolator.decoy.psms.txt"))
         .arg("--database")
         .arg(d.join("db.fasta"))
+        .arg("--protein-fdr")
+        .arg("1")
         .arg("-o")
         .arg(d.join("qpx/exp"))
         .output()

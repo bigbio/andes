@@ -2564,6 +2564,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // ── Quantification (`--tmt` / `--lfq`) ────────────────────────────────────
     // After rescoring so the targets are the confident PSMs; after the QPX
     // write so the feature parquet joins a bundle that already exists.
+    // The QPX views keep the protein groups at `--protein-fdr`, 0.01 unless
+    // given.
+    let qpx_groups = protein_groups
+        .as_ref()
+        .map(|inf| crate::quant_cmd::ProteinGroups {
+            inf,
+            max_q: cli.protein_fdr.unwrap_or(0.01),
+        });
     let quant_summary = match &quant {
         Some(q) => Some(crate::quant_run::run_quant(
             q,
@@ -2575,6 +2583,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             cutoffs.as_ref(),
             &report_base,
             cli.output_parquet.as_deref(),
+            qpx_groups.as_ref(),
         )?),
         None => None,
     };
@@ -2697,6 +2706,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         cli.quant_feature_fdr.0,
         &report_base.with_extension(""),
         cli.output_parquet.as_deref(),
+        qpx_groups.as_ref(),
     )?;
     Ok(())
 }

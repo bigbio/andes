@@ -483,6 +483,106 @@ fn envelope_of(v: &[f32]) -> Result<[f32; ENVELOPE_LEN], usize> {
 /// runs. The Percolator files are read one line at a time. Merged scores are
 /// loaded after the tables' SpecIds are checked, so that a SpecId shared by
 /// two runs fails with the runs named.
+/// Alignment settings with each run's residual-width floor: half the median
+/// spacing of its MS1 scans of one FAIMS voltage, read from
+/// `<stem>.ms1.parquet`. A run without a readable table, or with fewer than two
+/// MS1 scans, keeps the default floor.
+fn align_params(dir: &Path, stems: &[String]) -> AlignParams {
+    let mut ap = AlignParams::default();
+    ap.run_min_spacing_s = stems
+        .iter()
+        .map(|stem| {
+            let path = artifact(dir, stem, MS1_SUFFIX);
+            let spacing = output::ms1_table::read_ms1_scan_spacing(&path)
+                .ok()
+                .flatten();
+            let floor = spacing.map_or(ap.min_spacing_s, |s| s / 2.0);
+            match spacing {
+                Some(s) => eprintln!(
+                    "[mbr] run {stem}: MS1 scan spacing {s:.2} s, RT residual-width floor {floor:.2} s"
+                ),
+                None => eprintln!(
+                    "[mbr] run {stem}: MS1 scan spacing unknown, RT residual-width floor {floor:.2} s"
+                ),
+            }
+            floor
+        })
+        .collect();
+    ap
+}
+
+/// Log, per aligned run, how many residual-width knots sit at the run's floor:
+/// where the floor binds, the MS1 sampling and not the observed scatter sets
+/// the transfer RT uncertainty.
+fn log_floor_hits(library: &Library, ap: &AlignParams, stems: &[String]) {
+    for (r, knots) in library.alignment.residual_sd.iter().enumerate() {
+        let Some(knots) = knots else { continue };
+        let floor = ap.floor_s(r);
+        let at_floor = knots.iter().filter(|k| k.1 <= floor * (1.0 + 1e-9)).count();
+        eprintln!(
+            "[mbr] run {}: {at_floor} of {} RT residual-width knots at the {floor:.2} s floor",
+            stems.get(r).map_or("?", String::as_str),
+            knots.len()
+        );
+    }
+}
+
+/// The positional-isomer class of a precursor key (`<peptidoform>/<charge>`):
+/// its residues, its sorted modification tokens and its charge. Two keys of
+/// one class are the same peptide with the same modifications on other sites.
+fn isomer_class(key: &str) -> String {
+    let (peptidoform, charge) = key.rsplit_once('/').unwrap_or((key, ""));
+    let mut residues = String::new();
+    let mut mods: Vec<&str> = Vec::new();
+    let mut rest = peptidoform;
+    while let Some(c) = rest.chars().next() {
+        if c == '[' {
+            let end = rest.find(']').map_or(rest.len(), |i| i + 1);
+            mods.push(&rest[..end]);
+            rest = &rest[end..];
+        } else {
+            residues.push(c);
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    mods.sort_unstable();
+    format!("{residues}|{}/{charge}", mods.concat())
+}
+
+/// Log the library's positional-isomer classes with more than one site form
+/// (target entries) and how far apart the forms' consensus RTs are: forms
+/// that co-elute are one MS1 signal measured twice, forms that do not are
+/// different analytes.
+fn log_isomer_classes(library: &Library) {
+    let mut classes: HashMap<String, Vec<f64>> = HashMap::new();
+    for e in library.entries.iter().filter(|e| !e.identity_decoy) {
+        let key = &library.meta[e.precursor as usize].key;
+        classes.entry(isomer_class(key)).or_default().push(e.consensus_rt);
+    }
+    let multi: Vec<&Vec<f64>> = classes.values().filter(|v| v.len() > 1).collect();
+    // Bins of the RT gap between the closest two forms of a class, seconds.
+    let edges = [10.0, 30.0, 120.0];
+    let mut bins = [0usize; 4];
+    for rts in &multi {
+        let mut t: Vec<f64> = rts.iter().copied().filter(|x| x.is_finite()).collect();
+        t.sort_by(f64::total_cmp);
+        let Some(gap) = t.windows(2).map(|w| w[1] - w[0]).min_by(f64::total_cmp) else {
+            continue;
+        };
+        bins[edges.iter().position(|&e| gap < e).unwrap_or(3)] += 1;
+    }
+    eprintln!(
+        "[mbr] positional isomers: {} of {} target classes have several site forms ({} entries); closest forms' consensus RT gap <10 s {}, 10-30 s {}, 30-120 s {}, >=120 s {}",
+        multi.len(),
+        classes.len(),
+        multi.iter().map(|v| v.len()).sum::<usize>(),
+        bins[0],
+        bins[1],
+        bins[2],
+        bins[3]
+    );
+}
+
 pub(crate) fn build_and_write_library(
     dir: &Path,
     stems: &[String],
@@ -708,8 +808,10 @@ pub(crate) fn build_and_write_library(
         Some(c) => format!("PSM q<={donor_q} and PEP<={c}"),
         None => format!("PSM q<={donor_q}"),
     };
-    let ap = AlignParams::default();
+    let ap = align_params(dir, stems);
     let library = builder.finish(meta, max_q, &ap);
+    log_floor_hits(&library, &ap, stems);
+    log_isomer_classes(&library);
     let (spectra, donor_scans, sc) = donors.finish(dir, stems, &library)?;
     eprintln!(
         "[mbr] library: {} runs, {} PSMs scored, {donor_psms} target PSMs at {donor_gate} identify their precursor in their run; skipped: {} PSMs whose SpecId joins a rescoring PSM of another peptide or target/decoy label, {} target and {} decoy PSMs without a rescoring score, {} decoy PSMs sharing a target's key; {} precursors, {} entries at the internal entry gate q<={max_q} (precursor-level, not an identification FDR) with a PSM at {donor_gate}, {} of them identity decoys (decoy precursors with decoy PSMs at {donor_gate}, measured as targets and never reported)",
@@ -1879,6 +1981,18 @@ mod tests {
         assert!(
             !keys.iter().any(|k| k == "PEPTIDEIAK/2"),
             "the mismatched PSM is a donor"
+        );
+    }
+
+    #[test]
+    fn isomer_class_ignores_the_modification_sites() {
+        let s = isomer_class("PEPS[UNIMOD:21]TK/2");
+        assert_eq!(s, isomer_class("PEPST[UNIMOD:21]K/2"));
+        assert_ne!(s, isomer_class("PEPS[UNIMOD:21]TK/3"), "charge differs");
+        assert_ne!(s, isomer_class("PEPSTK/2"), "modifications differ");
+        assert_eq!(
+            isomer_class("M[UNIMOD:35]PEM[+15.99492]K/2"),
+            isomer_class("M[+15.99492]PEM[UNIMOD:35]K/2")
         );
     }
 

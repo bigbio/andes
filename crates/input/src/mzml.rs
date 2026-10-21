@@ -417,6 +417,19 @@ impl SpectrumBuilder {
 
 /// What we extract from a `<cvParam>` element without holding a reference
 /// into the event buffer.
+/// PSI-MS accession for an activation `userParam` name, matched exactly
+/// (case-insensitive) against the method's PSI-MS name or its abbreviation.
+/// Anything else returns `None`, so an unrelated userParam never sets the
+/// activation.
+fn activation_user_param_accession(name: &str) -> Option<&'static str> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "cid" | "collision-induced dissociation" => Some(CV_CID),
+        "hcd" | "beam-type collision-induced dissociation" => Some(CV_HCD),
+        "etd" | "electron transfer dissociation" => Some(CV_ETD),
+        _ => None,
+    }
+}
+
 struct CvParamInfo {
     accession: String,
     value: String,
@@ -1071,6 +1084,21 @@ impl<R: BufRead> MzMLReader<R> {
                         // Extract info before any &mut self call.
                         if let Some(cv) = CvParamInfo::from_bytes_start(e) {
                             self.apply_cv_param(cv);
+                        }
+                    } else if tag == b"userParam" && self.state == State::Activation {
+                        // Some converters (Bruker timsTOF exports among them)
+                        // name the dissociation method in a userParam instead of
+                        // a PSI-MS cvParam. Map the unambiguous names onto their
+                        // accession so they follow the cvParam selection rule.
+                        if let Some(accession) =
+                            attr_str(e, b"name").and_then(|n| activation_user_param_accession(&n))
+                        {
+                            self.apply_cv_param(CvParamInfo {
+                                accession: accession.to_string(),
+                                value: String::new(),
+                                unit_accession: String::new(),
+                                unit_name: String::new(),
+                            });
                         }
                     } else if tag == b"userParam"
                         && matches!(self.state, State::Scan | State::Spectrum)
@@ -3077,6 +3105,75 @@ mod tests {
             .collect();
         assert_eq!(spectra.len(), 1);
         assert_eq!(spectra[0].activation_method, Some(ActivationMethod::CID));
+    }
+
+    fn activation_of(activation_xml: &str) -> Option<ActivationMethod> {
+        let mz_b64 = encode_f64_b64(&[100.0]);
+        let int_b64 = encode_f64_b64(&[1000.0]);
+        let xml = format!(
+            r#"<spectrum index="0" id="scan=1" defaultArrayLength="1">
+              <cvParam accession="MS:1000511" name="ms level" value="2"/>
+              <scanList count="1"><scan/></scanList>
+              <precursorList count="1">
+                <precursor>
+                  <selectedIonList count="1"><selectedIon>
+                    <cvParam accession="MS:1000744" name="selected ion m/z" value="500.5"/>
+                  </selectedIon></selectedIonList>
+                  <activation>{activation_xml}</activation>
+                </precursor>
+              </precursorList>
+              <binaryDataArrayList count="2">
+                {mz}
+                {int}
+              </binaryDataArrayList>
+            </spectrum>"#,
+            mz = bda_plain("MS:1000514", &mz_b64),
+            int = bda_plain("MS:1000515", &int_b64),
+        );
+        let wrapped = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<mzML xmlns="http://psi.hupo.org/ms/mzml">
+  <run><spectrumList count="1" defaultDataProcessingRef="dp">
+      {xml}
+  </spectrumList></run>
+</mzML>"#
+        );
+        let spectra: Vec<Spectrum> = MzMLReader::new(Cursor::new(wrapped))
+            .map(|r| r.expect("parse error"))
+            .collect();
+        assert_eq!(spectra.len(), 1);
+        spectra[0].activation_method
+    }
+
+    /// Bruker timsTOF mzML exports name the method in a userParam
+    /// (`<userParam name="CID"/>`) with no PSI-MS cvParam; it must still set
+    /// the activation.
+    #[test]
+    fn activation_user_param_sets_activation() {
+        assert_eq!(
+            activation_of(r#"<userParam name="CID" value=""/>"#),
+            Some(ActivationMethod::CID)
+        );
+        assert_eq!(
+            activation_of(r#"<userParam name="beam-type collision-induced dissociation"/>"#),
+            Some(ActivationMethod::HCD)
+        );
+        assert_eq!(
+            activation_of(r#"<userParam name="ETD"/>"#),
+            Some(ActivationMethod::ETD)
+        );
+        // Unrelated userParams leave the activation unset.
+        assert_eq!(
+            activation_of(r#"<userParam name="collision energy" value="35"/>"#),
+            None
+        );
+        // A cvParam in the same block keeps its first-wins precedence.
+        assert_eq!(
+            activation_of(
+                r#"<cvParam accession="MS:1000422" name="HCD" value=""/><userParam name="CID"/>"#
+            ),
+            Some(ActivationMethod::HCD)
+        );
     }
 
     /// H6 regression: an electron term and a collisional term in SEPARATE

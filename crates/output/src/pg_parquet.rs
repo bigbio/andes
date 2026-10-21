@@ -1,9 +1,11 @@
 //! The QPX protein-group view (`<prefix>.pg.parquet`) from protein inference.
 //!
-//! One row per group, targets and the decoy groups that won their family's
-//! competition (`is_decoy`), so a reader can recompute the protein FDR. The
-//! view is identification-only here: `label` and `intensity` are null.
+//! One row per group at or below the protein q-value cut, targets and the
+//! decoy groups that won their family's competition (`is_decoy`), so a reader
+//! can check the protein FDR. `label` and `intensity` are null: protein
+//! quantities are computed downstream from the feature view.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -21,6 +23,16 @@ use crate::feature_parquet::{
     cv_fields, cv_list_builder, list_type, score_fields, score_list_builder, struct_list,
 };
 use crate::protein_inference::{Inference, ProteinGroup};
+
+/// Accession prefix of the contaminant entries of a search database.
+const CONTAMINANT_PREFIX: &str = "CONTAMINANT_";
+
+/// Features of one group: of its unique peptides, and all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FeatureCounts {
+    pub unique: usize,
+    pub total: usize,
+}
 
 /// QPX version of the pg view written here.
 const PG_QPX_VERSION: &str = "1.1";
@@ -108,6 +120,7 @@ fn build_batch(
     rows: &[&ProteinGroup],
     runs: &[String],
     run_level: bool,
+    features: Option<&HashMap<usize, FeatureCounts>>,
 ) -> std::io::Result<RecordBatch> {
     let n = rows.len();
     let mut pg_id = Int64Builder::new();
@@ -125,6 +138,11 @@ fn build_batch(
     let mut global_q = Float64Builder::new();
     let mut pg_q = Float64Builder::new();
     let mut is_decoy = BooleanBuilder::new();
+    let mut contaminant = BooleanBuilder::new();
+    let mut feature_counts = StructBuilder::new(
+        feature_counts_fields(),
+        vec![Box::new(Int32Builder::new()), Box::new(Int32Builder::new())],
+    );
     let mut peptides = struct_list(
         peptide_per_protein_fields(),
         vec![
@@ -156,6 +174,36 @@ fn build_batch(
             pg_q.append_null();
         }
         is_decoy.append_value(g.is_decoy);
+        contaminant.append_value(
+            g.accessions
+                .iter()
+                .any(|a| a.starts_with(CONTAMINANT_PREFIX)),
+        );
+        match features {
+            Some(f) => {
+                let c = f.get(&g.id).copied().unwrap_or_default();
+                feature_counts
+                    .field_builder::<Int32Builder>(0)
+                    .expect("unique_features")
+                    .append_value(c.unique as i32);
+                feature_counts
+                    .field_builder::<Int32Builder>(1)
+                    .expect("total_features")
+                    .append_value(c.total as i32);
+                feature_counts.append(true);
+            }
+            None => {
+                feature_counts
+                    .field_builder::<Int32Builder>(0)
+                    .expect("unique_features")
+                    .append_null();
+                feature_counts
+                    .field_builder::<Int32Builder>(1)
+                    .expect("total_features")
+                    .append_null();
+                feature_counts.append(false);
+            }
+        }
         {
             let sb = peptides.values();
             for (acc, count) in &g.peptides_per_accession {
@@ -231,10 +279,10 @@ fn build_batch(
         null("intensity"),
         null("additional_intensities"),
         Arc::new(is_decoy.finish()),
-        null("contaminant"),
+        Arc::new(contaminant.finish()),
         Arc::new(peptides.finish()),
         Arc::new(counts.finish()),
-        null("feature_counts"),
+        Arc::new(feature_counts.finish()),
         null("sequence_coverage"),
         null("molecular_weight"),
         Arc::new(scores.finish()),
@@ -243,18 +291,22 @@ fn build_batch(
     RecordBatch::try_new(schema.clone(), columns).map_err(|e| std::io::Error::other(e.to_string()))
 }
 
-/// Write `inf`'s groups as the QPX pg view. `runs` are the run names the
-/// groups were inferred over (`grouped_runs`). `global_qvalue` is the group's
-/// q-value; `pg_qvalue` (run level) is set only when `run_level`, i.e. when
-/// the inference covered one run.
+/// Write `inf`'s groups at protein q-value `max_q` or below as the QPX pg
+/// view. `runs` are the run names the groups were inferred over
+/// (`grouped_runs`). `global_qvalue` is the group's q-value; `pg_qvalue` (run
+/// level) is set only when `run_level`, i.e. when the inference covered one
+/// run. `features`, by group id, fills `feature_counts`; without it the
+/// column is null.
 pub fn write_pg_parquet(
     path: &Path,
     inf: &Inference,
     runs: &[String],
     run_level: bool,
+    max_q: f64,
+    features: Option<&HashMap<usize, FeatureCounts>>,
 ) -> std::io::Result<()> {
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let mut meta = std::collections::HashMap::new();
+    let mut meta = HashMap::new();
     meta.insert("qpx_version".to_string(), PG_QPX_VERSION.to_string());
     meta.insert("file_type".to_string(), "pg_file".to_string());
     meta.insert("creator".to_string(), "andes".to_string());
@@ -278,9 +330,14 @@ pub fn write_pg_parquet(
         let file = std::fs::File::create(path)?;
         let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))
             .map_err(|e| std::io::Error::other(e.to_string()))?;
-        let rows: Vec<&ProteinGroup> = inf.groups.iter().chain(&inf.decoy_groups).collect();
+        let rows: Vec<&ProteinGroup> = inf
+            .groups
+            .iter()
+            .chain(&inf.decoy_groups)
+            .filter(|g| g.q_value <= max_q)
+            .collect();
         for chunk in rows.chunks(4096) {
-            let batch = build_batch(&schema, chunk, runs, run_level)?;
+            let batch = build_batch(&schema, chunk, runs, run_level, features)?;
             writer
                 .write(&batch)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -295,7 +352,10 @@ pub fn write_pg_parquet(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Array, BooleanArray, Float64Array, Int64Array, ListArray, StringArray};
+    use arrow::array::{
+        Array, BooleanArray, Float64Array, Int32Array, Int64Array, ListArray, StringArray,
+        StructArray,
+    };
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
     fn group(id: usize, lead: &str, q: f64, decoy: bool) -> ProteinGroup {
@@ -321,11 +381,20 @@ mod tests {
         let inf = Inference {
             groups: vec![group(1, "P1", 0.0, false), group(2, "P2", 0.02, false)],
             peptide_group: Default::default(),
+            shared_peptides: Default::default(),
             decoy_groups: vec![group(3, "XXX_P9", 0.02, true)],
         };
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("exp.pg.parquet");
-        write_pg_parquet(&path, &inf, &["run_a".into(), "run_b".into()], false).unwrap();
+        write_pg_parquet(
+            &path,
+            &inf,
+            &["run_a".into(), "run_b".into()],
+            false,
+            1.0,
+            None,
+        )
+        .unwrap();
 
         let file = std::fs::File::open(&path).unwrap();
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
@@ -365,5 +434,51 @@ mod tests {
         let runs = runs.as_any().downcast_ref::<ListArray>().unwrap();
         assert_eq!(runs.value(0).len(), 2);
         assert_eq!(col("label").null_count(), 3);
+        assert_eq!(col("feature_counts").null_count(), 3);
+    }
+
+    #[test]
+    fn keeps_the_groups_at_the_cut_with_their_feature_counts() {
+        let mut con = group(2, "CONTAMINANT_P7", 0.005, false);
+        con.accessions = vec!["CONTAMINANT_P7".into()];
+        let inf = Inference {
+            groups: vec![group(1, "P1", 0.0, false), con, group(3, "P3", 0.2, false)],
+            peptide_group: Default::default(),
+            shared_peptides: Default::default(),
+            decoy_groups: vec![
+                group(4, "XXX_P8", 0.005, true),
+                group(5, "XXX_P9", 0.3, true),
+            ],
+        };
+        let counts: HashMap<usize, FeatureCounts> = [(
+            1,
+            FeatureCounts {
+                unique: 4,
+                total: 6,
+            },
+        )]
+        .into();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exp.pg.parquet");
+        write_pg_parquet(&path, &inf, &["r".into()], false, 0.01, Some(&counts)).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let batch = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        let col = |n: &str| batch.column(batch.schema().index_of(n).unwrap()).clone();
+        let ids = col("pg_id");
+        let ids = ids.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(ids.values(), &[1, 2, 4], "groups above q 0.01 are left out");
+        let con = col("contaminant");
+        let con = con.as_any().downcast_ref::<BooleanArray>().unwrap();
+        assert_eq!((con.value(0), con.value(1)), (false, true));
+        let fc = col("feature_counts");
+        let fc = fc.as_any().downcast_ref::<StructArray>().unwrap();
+        let total = fc.column(1).as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!((total.value(0), total.value(1)), (6, 0));
     }
 }

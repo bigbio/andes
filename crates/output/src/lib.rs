@@ -49,10 +49,10 @@ pub use knockoff_fdr::{apply_knockoff_fdr, KnockoffCount, KnockoffOutcome};
 pub use site_fdr::{site_claims, write_sites_tsv, SiteCount, SiteOutcome, SiteRow};
 
 pub mod pg_parquet;
-pub use pg_parquet::write_pg_parquet;
+pub use pg_parquet::{write_pg_parquet, FeatureCounts};
 pub mod protein_inference;
 pub use protein_inference::{
-    infer_protein_groups, write_protein_groups_tsv, Inference, ProteinGroup,
+    infer_protein_groups, write_protein_groups_tsv, GroupAt, Inference, ProteinGroup,
 };
 pub mod proteoform_table;
 pub use proteoform_table::{proteoform_table, write_proteoform_tsv, QuantSummary};
@@ -91,6 +91,6 @@ pub mod feature_parquet;
 pub mod mbr_out;
 pub mod versioned_parquet;
 pub use feature_parquet::{
-    write_feature_parquet, FeatureParquetWriter, FeatureRecord, ProteinPosition,
+    write_feature_parquet, FeatureGroup, FeatureParquetWriter, FeatureRecord, ProteinPosition,
 };
 pub use versioned_parquet::ReadTable;

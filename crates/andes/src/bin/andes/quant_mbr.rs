@@ -1016,7 +1016,9 @@ impl ShapeReference for DonorShapes {
 /// cannot tell from a true one.
 pub(crate) const TRANSFER_DONOR_Q: f64 = 0.001;
 
-/// The transfer FDR features of a row, in [`TRANSFER_FEATURES`] order;
+/// The transfer FDR features of a row, in [`TRANSFER_FEATURES`] order, with
+/// `neighbour_rate` the share of the run's most similar runs that identified
+/// the precursor ([`crate::quant_finalize::EntryIndex::neighbour_rate`]);
 /// `None` without evidence or with a non-finite value. The last three
 /// compare the row's peak shape with its precursor's identified fits in the
 /// other runs ([`DonorShapes::features`]): width, tailing and isotope
@@ -1030,6 +1032,7 @@ pub(crate) fn transfer_features(
     row: &ExtractRow,
     shapes: &impl ShapeReference,
     maps: &[Option<RunMap>],
+    neighbour_rate: f64,
 ) -> Option<Vec<f32>> {
     let e = row.evidence.as_ref()?;
     let snr = e.amplitude / e.amplitude_se.max(MIN_AMPLITUDE_SE);
@@ -1048,6 +1051,7 @@ pub(crate) fn transfer_features(
         (snr + 1.0).log10(),
         row.n_donor_runs as f64,
         row.library_q,
+        neighbour_rate,
         shape_width,
         shape_tailing,
         shape_iso,
@@ -2362,7 +2366,7 @@ mod finalize_tests {
             ));
         }
         let maps = &lib.alignment.maps;
-        let idx = EntryIndex::new(lib);
+        let idx = EntryIndex::new(lib, stems.len());
         let all: Vec<ExtractRow> = runs.concat();
         let shards = One(&all);
         let mut summary = FinalizeSummary::default();
@@ -2718,6 +2722,7 @@ mod finalize_tests {
     fn unlimited() -> FinalizeLimits {
         FinalizeLimits {
             max_train_rows: usize::MAX,
+            transfer_models: 1,
             max_norm_cells: usize::MAX,
             max_donor_fits: usize::MAX,
             max_held_scores: usize::MAX,
@@ -2885,6 +2890,53 @@ mod finalize_tests {
             .filter(|f| f.evidence_type == EvidenceType::TransferMs1)
             .count();
         assert!(accepted > 0, "{accepted}");
+    }
+
+    #[test]
+    fn bagged_transfer_classifier_reports_every_row_and_is_reproducible() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs = extract_with_identified_decoys();
+        let lib = library_with_entries();
+        let run = |name: &str, members: usize, batch_rows: usize| {
+            let limits = FinalizeLimits {
+                transfer_models: members,
+                max_train_rows: 900,
+                ..unlimited()
+            };
+            let base = dir.path().join(name);
+            let (s, features) = stream(&lib, &runs, limits, batch_rows, &base, 0.05, None);
+            let (m, v) = mbr_paths(&base);
+            (
+                s,
+                features,
+                std::fs::read(m).unwrap(),
+                std::fs::read(v).unwrap(),
+            )
+        };
+        let (one, one_f, _, _) = run("one", 1, 1000);
+        let (a, a_f, a_m, a_v) = run("a", 3, 1000);
+        let (_, _, b_m, b_v) = run("b", 3, 7);
+        // Same seed, other batches: the same bytes.
+        assert_eq!((a_m, a_v), (b_m, b_v));
+        assert_eq!(a.rows_written, one.rows_written);
+        assert_eq!(a.validation.transfers, one.validation.transfers);
+        assert_eq!(
+            a.validation.transfers_scored,
+            one.validation.transfers_scored
+        );
+        let keys = |f: &[MbrFeature]| f.iter().map(|f| (f.precursor, f.run)).collect::<Vec<_>>();
+        assert_eq!(keys(&a_f), keys(&one_f));
+        assert!(a.fdr.failed_folds.is_empty(), "{:?}", a.fdr.failed_folds);
+        let accepted = a_f
+            .iter()
+            .filter(|f| f.evidence_type == EvidenceType::TransferMs1)
+            .count();
+        assert!(accepted > 0, "{accepted}");
+        // The members change the scores, so some q-value differs.
+        assert!(a_f
+            .iter()
+            .zip(&one_f)
+            .any(|(x, y)| x.transfer_q != y.transfer_q));
     }
 
     #[test]
@@ -3343,7 +3395,7 @@ mod finalize_tests {
         );
         r.n_donor_runs = 3;
         let e = r.evidence.clone().unwrap();
-        let x = transfer_features(&r, &DonorShapes::default(), &[]).unwrap();
+        let x = transfer_features(&r, &DonorShapes::default(), &[], 0.0).unwrap();
         assert_eq!(x.len(), TRANSFER_FEATURES.len());
         let at = |name: &str| x[TRANSFER_FEATURES.iter().position(|n| *n == name).unwrap()];
         assert_eq!(at("abs_rt_z"), e.rt_z.abs() as f32);
@@ -3354,14 +3406,14 @@ mod finalize_tests {
             (1e6f64 / 1e4 + 1.0).log10() as f32
         );
         r.evidence.as_mut().unwrap().amplitude_se = 0.0;
-        assert!(transfer_features(&r, &DonorShapes::default(), &[])
+        assert!(transfer_features(&r, &DonorShapes::default(), &[], 0.0)
             .unwrap()
             .iter()
             .all(|v| v.is_finite()));
         r.evidence.as_mut().unwrap().llr = f64::NAN;
-        assert!(transfer_features(&r, &DonorShapes::default(), &[]).is_none());
+        assert!(transfer_features(&r, &DonorShapes::default(), &[], 0.0).is_none());
         r.evidence = None;
-        assert!(transfer_features(&r, &DonorShapes::default(), &[]).is_none());
+        assert!(transfer_features(&r, &DonorShapes::default(), &[], 0.0).is_none());
     }
 
     use quant::ms2::Ms2Evidence;
@@ -3445,7 +3497,7 @@ mod finalize_tests {
         assert!((g[1] + 0.4).abs() < 1e-12, "{g:?}");
         assert!(g[2] < f[2] - 0.1, "{g:?}");
         // The same numbers end the transfer feature vector.
-        let x = transfer_features(&other, &shapes, &maps).unwrap();
+        let x = transfer_features(&other, &shapes, &maps, 0.0).unwrap();
         let n = TRANSFER_FEATURES.len();
         assert_eq!(x.len(), n);
         assert_eq!(
@@ -3518,10 +3570,10 @@ mod finalize_tests {
             Role::Transfer,
             Some(evidence(&mut g, true, 100.0)),
         );
-        let x = transfer_features(&r, &DonorShapes::default(), &[]).unwrap();
+        let x = transfer_features(&r, &DonorShapes::default(), &[], 0.0).unwrap();
         r.ms2 = Some(supporting());
         assert_eq!(
-            transfer_features(&r, &DonorShapes::default(), &[]).unwrap(),
+            transfer_features(&r, &DonorShapes::default(), &[], 0.0).unwrap(),
             x
         );
         assert!(TRANSFER_FEATURES.iter().all(|f| !f.starts_with("ms2")));

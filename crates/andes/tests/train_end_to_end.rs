@@ -119,3 +119,58 @@ fn train_writes_model_and_search_uses_it() {
         "unexpected PIN header: {header}"
     );
 }
+
+#[test]
+fn train_from_several_runs_records_one_source_per_run() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store_path = dir.path().join("m.parquet");
+    let bsa_mgf = fixture("test-fixtures/test.mgf.gz");
+    let bsa_fasta = fixture("test-fixtures/BSA.fasta");
+
+    // The same file twice: two runs with colliding stems, identical labels.
+    let status = Command::new(env!("CARGO_BIN_EXE_andes"))
+        .arg("train-from-search")
+        .arg("--spectra")
+        .arg(&bsa_mgf)
+        .arg("--spectra")
+        .arg(&bsa_mgf)
+        .arg("--database")
+        .arg(&bsa_fasta)
+        .arg("--out-store")
+        .arg(&store_path)
+        .arg("--train-fdr")
+        .arg("0.9")
+        .arg("--fragment-tol-da")
+        .arg("0.5")
+        .arg("--instrument")
+        .arg("TimsTOF")
+        .arg("--model-id")
+        .arg("bsa_two_runs")
+        .status()
+        .expect("run andes train-from-search");
+    assert!(
+        status.success(),
+        "train-from-search should exit 0, got: {status}"
+    );
+
+    let store = ModelStore::open(&store_path).expect("open trained model store");
+    let sources = store.load_sources("bsa_two_runs").expect("load sources");
+    let mut ids: Vec<&str> = sources.iter().map(|l| l.source_id.as_str()).collect();
+    ids.sort_unstable();
+    assert_eq!(
+        ids,
+        ["test", "test_2"],
+        "one source per run, stems made unique"
+    );
+    assert_eq!(sources[0].n_psms, sources[1].n_psms);
+    assert!(sources[0].n_psms > 0);
+    assert!(sources.iter().all(|l| l.dataset == "test.mgf.gz"));
+    assert!(sources.iter().all(|l| l.instrument == "TimsTOF"));
+
+    // --instrument is part of the selection key; the seed's activation and
+    // enzyme are kept; --fragment-tol-da is stored as the model tolerance.
+    let param = store.load_param("bsa_two_runs").expect("load param");
+    assert_eq!(param.data_type.instrument.name(), "TimsTOF");
+    assert_eq!(param.data_type.activation.name(), "HCD");
+    assert_eq!(format!("{:?}", param.mme), "Da(0.5)");
+}

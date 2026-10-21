@@ -256,12 +256,19 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
         s(&base),
         "--output-parquet",
         s(&qpx),
+        "--database",
+        s(&fixture("test-fixtures/BSA.fasta")),
+        "--psms",
+        s(&targets),
+        "--decoy-psms",
+        s(&decoys),
         "--mbr-fdr",
         FIXTURE_MBR_FDR,
         "--quant-feature-fdr",
         "0.05",
     ]);
     assert!(qpx.join("quantms.feature.parquet").is_file());
+    assert!(qpx.join("quantms.pg.parquet").is_file());
 
     // All-in-one path, with a temporary quant directory.
     let aio = tmp.path().join("aio");
@@ -304,6 +311,33 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
             == parquet_column_data(&aio_qpx.join("quantms.feature.parquet")),
         "quantms.feature.parquet differs between the stage path and the all-in-one run"
     );
+    // Both paths infer the same protein groups from the same PSMs.
+    assert!(
+        parquet_column_data(&qpx.join("quantms.pg.parquet"))
+            == parquet_column_data(&aio_qpx.join("quantms.pg.parquet")),
+        "quantms.pg.parquet differs between the stage path and the all-in-one run"
+    );
+    // Every feature carries the one BSA group, which passes the protein cut.
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(File::open(&staged_parquet).unwrap()).unwrap();
+    for b in builder.build().unwrap() {
+        let b = b.unwrap();
+        let anchor = b.column_by_name("anchor_protein").unwrap();
+        let anchor = anchor.as_any().downcast_ref::<StringArray>().unwrap();
+        let q = b.column_by_name("pg_global_qvalue").unwrap();
+        let q = q
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .unwrap();
+        for i in 0..b.num_rows() {
+            assert!(
+                anchor.value(i).contains("ALBU_BOVIN"),
+                "{}",
+                anchor.value(i)
+            );
+            assert!(q.value(i) <= 0.01, "group q {}", q.value(i));
+        }
+    }
 
     let (header, rows) = read_mbr(&aio.join("a.mbr.parquet"));
     let col = |name: &str| header.iter().position(|h| h == name).unwrap();

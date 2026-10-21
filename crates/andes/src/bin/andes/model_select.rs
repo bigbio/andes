@@ -10,7 +10,7 @@ use model::{
 use model_train::{
     counts::CountStats,
     protocol_to_experiment_class as store_protocol_to_experiment_class,
-    select::{select, select_nearest, SelectionKey},
+    select::{select_nearest_for, SelectionEntry, SelectionKey},
     store::SourceLedger,
     ModelStore,
 };
@@ -382,7 +382,7 @@ pub(crate) fn build_selection_key(
             // QExactive model would match 0.5-Da peaks at 20 ppm and lose
             // ~18% of PSMs silently. No hcd_lowres model exists, so route to the
             // low-res b/y model (cid_lowres_tryp) instead — correct fragment
-            // tolerance and ion series. Pinned by store_selection_equivalence.rs.
+            // tolerance and ion series. Pinned by the selection grid test.
             ("HCD", "LowRes") => {
                 eprintln!(
                     "WARN: low-res (ion-trap) HCD detected — no hcd_lowres model exists; \
@@ -391,7 +391,16 @@ pub(crate) fn build_selection_key(
                 );
                 ("CID", "LowRes", true)
             }
-            ("HCD", "TOF") => ("CID", "TOF", true),
+            // TOF analyzers (QTOF, timsTOF) fragment by beam-type collisional
+            // activation: the b/y chemistry of HCD, measured at high resolution.
+            // Vendors label it "CID" (the timsTOF `.d` reader and Bruker mzML
+            // exports both do), so CID/PQD and HCD on TOF share one key, routed
+            // to an HCD model. With no TOF-keyed model in the store,
+            // `select_nearest` then substitutes the same-resolution high-res HCD
+            // model, never the 0.5-Da ion-trap model that the activation alone
+            // would pick. The protocol is kept: a TMT/phospho TOF run gets the
+            // matching high-res protocol model.
+            ("HCD" | "CID", "TOF") => ("HCD", "TOF", false),
             ("CID", "QExactive") => ("CID", "LowRes", true),
             ("ETD", i) if !matches!(i, "LowRes" | "HighRes") => ("ETD", "LowRes", true),
             ("UVPD", i) if i != "QExactive" => ("CID", "LowRes", true),
@@ -422,12 +431,59 @@ pub(crate) fn build_selection_key(
     }
 }
 
+/// The model [`load_param_from_store`] picks when no `--model` is given.
+pub(crate) struct ModelChoice {
+    pub(crate) model_id: String,
+    /// The key the store was searched with (after the family fallback and the
+    /// activation/instrument normalizations of [`build_selection_key`]).
+    pub(crate) key: SelectionKey,
+    /// `true` when no model matched the key and the nearest one was taken.
+    pub(crate) substituted: bool,
+}
+
+/// Pick the model for `(activation, instrument, protocol, enzyme)` from the
+/// store's selection `entries`: [`build_selection_key`], then
+/// [`select_nearest_for`] with the detected instrument when the key collapsed
+/// it to its family. `build_selection_key` already applies the family fallback
+/// and every normalization, so the family function is the identity. When the
+/// exact ladder misses (e.g. a protocol the own-only store doesn't carry),
+/// `select_nearest_for` routes to the CLOSEST own model and only resolves to
+/// the standard base as a last resort. This is the selection the search and
+/// the training paths run, and the one the bundled-store grid test pins.
+pub(crate) fn choose_model(
+    entries: &[SelectionEntry],
+    activation: ActivationMethod,
+    instrument: Option<InstrumentType>,
+    protocol: Protocol,
+    enzyme: model::enzyme::Enzyme,
+) -> ModelChoice {
+    let key = build_selection_key(activation, instrument, protocol, enzyme);
+    // A model trained for the EXACT detected instrument (e.g. a user-trained
+    // OrbitrapAstral model) is hidden by the family collapse, so the detected
+    // instrument is passed along when the collapse changed it.
+    let detected: Option<&str> = instrument
+        .filter(|i| i.family_fallback() != *i)
+        .map(|i| i.name());
+    let (id, substituted) = select_nearest_for(
+        entries,
+        &key,
+        detected,
+        |i| i.to_string(),
+        "hcd_qexactive_tryp",
+    );
+    ModelChoice {
+        model_id: id.to_string(),
+        key,
+        substituted,
+    }
+}
+
 /// Load the scoring [`Param`] from the bundled Parquet store for the given
 /// `(activation, instrument, protocol)` combination.
 ///
-/// The `model_id` selected from the store is guaranteed to match the
-/// reference resolution ladder by the equivalence gate test
-/// `store_selection_matches_old_ladder_for_all_combos`.
+/// The `model_id` is chosen by [`choose_model`]; the bundled-store selection
+/// grid test pins its result for every activation × instrument × protocol ×
+/// enzyme combination.
 ///
 /// `custom_store_path`: when `Some`, use that Parquet store instead of the
 /// bundled `resources/models/` (honours `--model-store`).
@@ -452,46 +508,17 @@ pub(crate) fn load_param_from_store(
         id.to_string()
     } else {
         let entries = store.selection_entries();
-        let key = build_selection_key(activation, instrument, protocol, enzyme);
-
-        // Forward-compat: `build_selection_key` collapses instruments with a real
-        // family fallback (OrbitrapAstral → QExactive, TimsTOF → TOF) so the
-        // bundled models resolve correctly. But that also hides a model trained
-        // for the EXACT instrument (e.g. a user-trained OrbitrapAstral model).
-        // Try the exact detected instrument FIRST; only when no such model exists
-        // (the bundled case) do we fall through to the normalized family ladder —
-        // so bundled selection (and the equivalence gate) is unchanged.
-        let exact_id: Option<String> = match instrument {
-            Some(i) if i.family_fallback().name() != i.name() => {
-                let raw_key = SelectionKey {
-                    instrument: i.name().to_string(),
-                    ..key.clone()
-                };
-                select(&entries, &raw_key, |s| s.to_string(), None).map(|s| s.to_string())
-            }
-            _ => None,
-        };
-
-        exact_id.unwrap_or_else(|| {
-            // `build_selection_key` already applies family fallback + all
-            // normalizations, so the family_fn here is the identity. When the
-            // exact ladder misses (e.g. a protocol the own-only store doesn't
-            // carry), select_nearest routes to the CLOSEST own model — relaxing
-            // the enzyme (keeping the activation and instrument) — and only
-            // resolves to the standard base as a last resort, WARNing which model
-            // it substituted so the user can pin one with --model.
-            let (id, substituted) =
-                select_nearest(&entries, &key, |i| i.to_string(), "hcd_qexactive_tryp");
-            if substituted {
-                eprintln!(
-                    "WARN: no model matched (activation={}, instrument={}, enzyme={}, class={:?}) \
-                     — using the nearest available model '{}'; scores may be mis-calibrated for \
-                     this data. Pin a model with --model if this is wrong.",
-                    key.activation, key.instrument, key.enzyme, key.experiment_class, id
-                );
-            }
-            id.to_string()
-        })
+        let choice = choose_model(&entries, activation, instrument, protocol, enzyme);
+        if choice.substituted {
+            let key = &choice.key;
+            eprintln!(
+                "WARN: no model matched (activation={}, instrument={}, enzyme={}, class={:?}) \
+                 — using the nearest available model '{}'; scores may be mis-calibrated for \
+                 this data. Pin a model with --model if this is wrong.",
+                key.activation, key.instrument, key.enzyme, key.experiment_class, choice.model_id
+            );
+        }
+        choice.model_id
     };
 
     let param = store
@@ -522,6 +549,183 @@ mod param_resolver_tests {
         );
         assert_eq!(act, ActivationMethod::HCD);
     }
+
+    /// TOF and timsTOF runs fragment by beam-type CID, whether the input labels
+    /// it CID (the `.d` reader, Bruker mzML) or HCD. With no TOF model in the
+    /// bundled store every combination resolves to a high-resolution HCD model
+    /// for the requested protocol, never to the 0.5-Da ion-trap model.
+    #[test]
+    fn tof_runs_resolve_to_a_high_res_hcd_model() {
+        let cases = [
+            (Protocol::Auto, "hcd_qexactive_tryp"),
+            (Protocol::Standard, "hcd_qexactive_tryp"),
+            (Protocol::Tmt, "hcd_qexactive_tryp_tmt"),
+            (Protocol::Phospho, "hcd_qexactive_tryp_phosphorylation"),
+            (Protocol::Itraq, "hcd_qexactive_tryp_itraq"),
+        ];
+        for inst in [InstrumentType::TOF, InstrumentType::TimsTOF] {
+            for act in [
+                ActivationMethod::CID,
+                ActivationMethod::HCD,
+                ActivationMethod::PQD,
+            ] {
+                let key = build_selection_key(
+                    act,
+                    Some(inst),
+                    Protocol::Auto,
+                    model::enzyme::Enzyme::Trypsin,
+                );
+                assert_eq!(
+                    (key.activation.as_str(), key.instrument.as_str()),
+                    ("HCD", "TOF")
+                );
+                for (protocol, expected) in cases {
+                    let (id, param) = load_param_from_store(
+                        act,
+                        Some(inst),
+                        protocol,
+                        model::enzyme::Enzyme::Trypsin,
+                        None,
+                        None,
+                    )
+                    .expect("bundled store");
+                    assert_eq!(id, expected, "{act:?}/{inst:?}/{protocol:?}");
+                    assert!(
+                        param.data_type.instrument.is_high_resolution(),
+                        "{act:?}/{inst:?}/{protocol:?} -> {id} is not high-res"
+                    );
+                }
+            }
+        }
+    }
+    /// The bundled-store selection, as the search and training paths run it
+    /// (`choose_model`: `build_selection_key`, the detected-instrument pre-pass
+    /// and `select_nearest_for`), over every activation × detected instrument
+    /// (or none) × protocol × enzyme, pinned in
+    /// `test-fixtures/model_selection_grid.tsv`. One row per (activation,
+    /// instrument, enzyme), one column per protocol; `*` marks a nearest-model
+    /// substitution (the run WARNs). PQD must resolve as CID and `standard` as
+    /// `auto`, so neither has its own row or column. A change to the store, the
+    /// key or the ladder that moves any selection fails here with the new
+    /// table; update the fixture only when every moved cell is intended.
+    #[test]
+    fn bundled_store_selection_grid_is_pinned() {
+        use model::enzyme::Enzyme;
+        let store = ModelStore::open(&bundled_store_path()).expect("bundled store");
+        let entries = store.selection_entries();
+        let activations = [
+            ActivationMethod::CID,
+            ActivationMethod::ETD,
+            ActivationMethod::HCD,
+            ActivationMethod::UVPD,
+        ];
+        let instruments = [
+            None,
+            Some(InstrumentType::LowRes),
+            Some(InstrumentType::HighRes),
+            Some(InstrumentType::TOF),
+            Some(InstrumentType::QExactive),
+            Some(InstrumentType::OrbitrapAstral),
+            Some(InstrumentType::TimsTOF),
+        ];
+        let protocols = [
+            ("auto", Protocol::Auto),
+            ("phospho", Protocol::Phospho),
+            ("iTRAQ", Protocol::Itraq),
+            ("iTRAQ-phospho", Protocol::ItraqPhospho),
+            ("TMT", Protocol::Tmt),
+        ];
+        let enzymes = [
+            Enzyme::Trypsin,
+            Enzyme::Chymotrypsin,
+            Enzyme::LysC,
+            Enzyme::AspN,
+            Enzyme::GluC,
+            Enzyme::LysN,
+            Enzyme::ArgC,
+            Enzyme::AlphaLP,
+            Enzyme::NoCleavage,
+            Enzyme::NonSpecific,
+        ];
+        let cell = |a, i, p, e| {
+            let c = choose_model(&entries, a, i, p, e);
+            format!("{}{}", c.model_id, if c.substituted { "*" } else { "" })
+        };
+        let mut table = String::from("activation\tinstrument\tenzyme");
+        for (name, _) in protocols {
+            table.push('\t');
+            table.push_str(name);
+        }
+        table.push('\n');
+        for act in activations {
+            for inst in instruments {
+                for enz in enzymes {
+                    table.push_str(&format!(
+                        "{}\t{}\t{}",
+                        act.name(),
+                        inst.map_or("none", |i| i.name()),
+                        enz.name()
+                    ));
+                    for (_, prot) in protocols {
+                        let got = cell(act, inst, prot, enz);
+                        if act == ActivationMethod::CID {
+                            assert_eq!(
+                                cell(ActivationMethod::PQD, inst, prot, enz),
+                                got,
+                                "PQD/{inst:?}/{prot:?}/{enz:?} must resolve as CID"
+                            );
+                        }
+                        if prot == Protocol::Auto {
+                            assert_eq!(
+                                cell(act, inst, Protocol::Standard, enz),
+                                got,
+                                "{act:?}/{inst:?}/standard/{enz:?} must resolve as auto"
+                            );
+                        }
+                        table.push('\t');
+                        table.push_str(&got);
+                    }
+                    table.push('\n');
+                }
+            }
+        }
+        let pinned = include_str!("../../../../../test-fixtures/model_selection_grid.tsv");
+        if table != pinned {
+            let moved: Vec<String> = table
+                .lines()
+                .zip(pinned.lines())
+                .filter(|(got, want)| got != want)
+                .map(|(got, want)| format!("  pinned: {want}\n  now:    {got}"))
+                .collect();
+            panic!(
+                "bundled-store selection differs from test-fixtures/model_selection_grid.tsv \
+                 ({} row(s) moved):\n{}\n--- full table ---\n{table}",
+                moved.len(),
+                moved.join("\n")
+            );
+        }
+    }
+
+    /// With no analyzer metadata and no `--fragmentation`/`--fragment-tol-*`,
+    /// the resolver yields `(CID, None)`, which selects the low-res b/y model.
+    #[test]
+    fn metadataless_no_flags_default_selects_cid_lowres() {
+        let store = ModelStore::open(&bundled_store_path()).expect("bundled store");
+        let entries = store.selection_entries();
+        let (act, inst) = resolve_metadataless_selection(None, Fragmentation::Auto, None, None);
+        let c = choose_model(
+            &entries,
+            act,
+            inst,
+            Protocol::Auto,
+            model::enzyme::Enzyme::Trypsin,
+        );
+        assert_eq!(
+            (c.model_id.as_str(), c.substituted),
+            ("cid_lowres_tryp", false)
+        );
+    }
+
     use crate::cli::{
         parse_charge_range, parse_enzyme_specificity, parse_fragmentation,
         parse_isotope_error_range, parse_precursor_cal, parse_precursor_tol, parse_protocol,
@@ -533,8 +737,8 @@ mod param_resolver_tests {
 
     // ── Model resolution is store-based: all bundled models live in
     //    resources/models/ and are selected by `model_id`.
-    //    The store_selection_equivalence integration test covers the
-    //    activation/instrument/protocol → model_id selection invariant.
+    //    `bundled_store_selection_grid_is_pinned` covers the
+    //    activation/instrument/protocol/enzyme → model_id selection.
 
     #[test]
     fn parse_fragmentation_accepts_named_rejects_numeric() {

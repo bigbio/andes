@@ -25,7 +25,9 @@
 //!    per-observation noise (an in-sample residual against a median over few
 //!    runs collapses towards 0). Each run's residual width `sigma_r(t)` is
 //!    `1.4826 * MAD` of the anchors' `e` in the same bins as the map, smoothed
-//!    by a running median of 3 and floored at [`AlignParams::min_spacing_s`].
+//!    by a running median of 3 and floored at the run's MS1 sampling limit
+//!    ([`AlignParams::floor_s`]): an apex is not located more precisely than
+//!    half the time between two MS1 scans of its precursor.
 //!    Each precursor's extra dispersion is
 //!    `tau_p^2 = max(0, mean_r e^2 - mean_r sigma_r^2) * n_p / (n_p + 3)`
 //!    over the same residuals (0 when `n_p = 1`).
@@ -89,12 +91,27 @@ pub struct AlignParams {
     /// A run whose anchors span less than this fraction of the consensus RT
     /// range is unaligned.
     pub min_coverage: f64,
-    /// Floor of the residual width `sigma_r(t)`, in seconds; the caller sets it
-    /// to half the median MS1 scan spacing.
+    /// Floor of the residual width `sigma_r(t)`, in seconds, for a run without
+    /// its own entry in [`AlignParams::run_min_spacing_s`].
     pub min_spacing_s: f64,
+    /// Per run, the floor of its residual width in seconds: half its median
+    /// MS1 scan spacing (between scans of one FAIMS voltage). Empty, or a
+    /// missing or non-positive entry, falls back to `min_spacing_s`.
+    pub run_min_spacing_s: Vec<f64>,
     /// Two aligned runs that share at least this many precursors are in one
     /// alignment component; transfers never cross components.
     pub min_shared: usize,
+}
+
+impl AlignParams {
+    /// The residual-width floor of run `run`, in seconds.
+    pub fn floor_s(&self, run: usize) -> f64 {
+        self.run_min_spacing_s
+            .get(run)
+            .copied()
+            .filter(|f| f.is_finite() && *f > 0.0)
+            .unwrap_or(self.min_spacing_s)
+    }
 }
 
 impl Default for AlignParams {
@@ -104,6 +121,7 @@ impl Default for AlignParams {
             min_anchors: 50,
             min_coverage: 0.30,
             min_spacing_s: 0.5,
+            run_min_spacing_s: Vec::new(),
             min_shared: 20,
         }
     }
@@ -803,7 +821,7 @@ pub fn align(
             maps[r].as_ref().map(|_| {
                 let v = &mut run_res[r];
                 v.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
-                residual_width(v, p.min_spacing_s)
+                residual_width(v, p.floor_s(r))
             })
         })
         .collect();
@@ -1793,6 +1811,34 @@ mod tests {
         // Without run 2, the second pair has no donor.
         assert!(a.predict_excluding(1200, 2).is_none());
         assert!(a.blocked_by_component(1200, 2, Some(2)));
+    }
+
+    #[test]
+    fn each_run_gets_its_own_residual_width_floor() {
+        // Three runs, 0.2 s noise: run 1 samples MS1 slowly (floor 1.5 s), the
+        // others keep the default floor.
+        let mut rng = Rng(7);
+        let mut obs = Vec::new();
+        for p in 0..300u32 {
+            let t = 600.0 + 3000.0 * rng.uniform();
+            for r in 0..3u16 {
+                obs.push(Observation {
+                    precursor: p,
+                    run: r,
+                    rt: t + 0.2 * rng.normal(),
+                });
+            }
+        }
+        let ap = AlignParams {
+            run_min_spacing_s: vec![0.0, 1.5],
+            ..AlignParams::default()
+        };
+        assert_eq!((ap.floor_s(0), ap.floor_s(1), ap.floor_s(2)), (0.5, 1.5, 0.5));
+        let a = align(&obs, 300, 3, &ap);
+        let widths = |r: usize| a.residual_sd[r].as_ref().unwrap().iter().map(|k| k.1);
+        assert!(widths(1).all(|w| w >= 1.5), "run 1 is floored at its own spacing");
+        assert!(widths(0).all(|w| (0.5..1.5).contains(&w)), "run 0 keeps the default floor");
+        assert!(widths(2).all(|w| (0.5..1.5).contains(&w)));
     }
 
     #[test]

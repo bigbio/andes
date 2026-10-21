@@ -82,6 +82,21 @@ pub struct FeatureRecord {
     pub psm_ids: Vec<i64>,
     /// Match-between-runs columns; `None` outside match-between-runs.
     pub mbr: Option<MbrColumns>,
+    /// The inferred protein group the peptide counts for; `None` without
+    /// protein inference, when `anchor_protein` is the first of `proteins`
+    /// and `unique` says whether there is one.
+    pub group: Option<FeatureGroup>,
+}
+
+/// A feature's protein group from protein inference.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FeatureGroup {
+    /// The group's lead accession.
+    pub anchor: String,
+    /// Whether the peptide is in no other group (otherwise razor-assigned).
+    pub unique: bool,
+    /// The group's dataset-level protein q-value.
+    pub global_q: f64,
 }
 
 /// The optional match-between-runs columns of one feature.
@@ -579,16 +594,23 @@ fn build_batch(records: &[FeatureRecord], mbr: bool) -> std::io::Result<RecordBa
             }
             pg_accessions.append(true);
         }
-        match r.proteins.first() {
-            Some((acc, ..)) => anchor_protein.append_value(acc),
-            None => anchor_protein.append_null(),
+        match (&r.group, r.proteins.first()) {
+            (Some(g), _) => {
+                anchor_protein.append_value(&g.anchor);
+                unique.append_value(g.unique);
+                pg_global_qvalue.append_value(g.global_q);
+            }
+            (None, Some((acc, ..))) => {
+                anchor_protein.append_value(acc);
+                unique.append_value(r.proteins.len() == 1);
+                pg_global_qvalue.append_null();
+            }
+            (None, None) => {
+                anchor_protein.append_null();
+                unique.append_null();
+                pg_global_qvalue.append_null();
+            }
         }
-        if r.proteins.is_empty() {
-            unique.append_null();
-        } else {
-            unique.append_value(r.proteins.len() == 1);
-        }
-        pg_global_qvalue.append_null();
         {
             let sb = pg_positions.values();
             for (acc, start, end, _, _) in &r.proteins {
@@ -868,6 +890,7 @@ mod tests {
             rt_stop: None,
             psm_ids: vec![42],
             mbr: None,
+            group: None,
         }
     }
 

@@ -40,11 +40,18 @@ pub(crate) struct TrainFromSearchArgs {
     /// Input spectrum file (training data). Same format dispatch as for search:
     /// `.mzML`/`.mzml` → mzML reader; anything else → MGF reader.
     ///
+    /// Repeat the flag to train one model from several runs. Each run is
+    /// searched and labelled on its own (its own target-decoy q-values), keeps
+    /// only its labelled spectra in memory, and becomes its own source in the
+    /// store ledger (source id = file stem), so it can later be removed or
+    /// reweighted with `--update`. `--labels` and `--update --add` take a
+    /// single file.
+    ///
     /// Required for initial training.  In `--update` mode with `--remove-source`
     /// or `--reweight` / `--decay`, `--spectra` is only required when
     /// `--validate` is also given (to run the acceptance gate).
     #[arg(long)]
-    pub(crate) spectra: Option<PathBuf>,
+    pub(crate) spectra: Vec<PathBuf>,
 
     /// Input FASTA target database (decoys are generated automatically).
     ///
@@ -63,8 +70,10 @@ pub(crate) struct TrainFromSearchArgs {
     /// AminoAcidSet. Rows whose scan is absent from `--spectra` or whose peptide
     /// fails to parse are skipped. Use to train a glyco-regime rank model from
     /// the reference engine/a glyco search engine backbone IDs.
+    ///
+    /// With several `--spectra`, give one `--labels` per run, in the same order.
     #[arg(long = "labels")]
-    pub(crate) labels: Option<PathBuf>,
+    pub(crate) labels: Vec<PathBuf>,
 
     /// Seed model: slug from the bundled store (e.g. `hcd_qexactive_tryp`).
     /// When omitted, the bundled `hcd_qexactive_tryp` model is used as the seed.
@@ -76,9 +85,12 @@ pub(crate) struct TrainFromSearchArgs {
     #[arg(long = "train-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
     pub(crate) train_fdr: f64,
 
-    /// Instrument tag to embed in the trained model's metadata. Default: `QExactive`.
-    #[arg(long, default_value = "QExactive")]
-    pub(crate) instrument: String,
+    /// Instrument of the trained model (`LowRes`, `HighRes`, `QExactive`,
+    /// `OrbitrapAstral`, `TOF`, `TimsTOF`). It is part of the model's selection
+    /// key, so a search on data from this instrument picks the model. Default:
+    /// the seed model's instrument (`QExactive` for the default seed).
+    #[arg(long)]
+    pub(crate) instrument: Option<String>,
 
     /// Experiment-class / protocol tag (e.g. `Automatic`, `TMT`). Default: `Automatic`.
     #[arg(long, default_value = "Automatic")]
@@ -108,6 +120,21 @@ pub(crate) struct TrainFromSearchArgs {
     /// is stored when `--date ""` is explicitly passed.
     #[arg(long)]
     pub(crate) date: Option<String>,
+
+    /// Fragment match tolerance in ppm for initial training: the window in
+    /// which training matches fragments, stored as the trained model's `mme`.
+    /// The seed search that labels the PSMs keeps the seed's `mme`. When
+    /// neither this nor `--fragment-tol-da` is given, the seed's `mme` is
+    /// kept. Training reconstructs fragment m/z from nominal masses, so a ppm
+    /// window this narrow marks most fragments as missing; keep the seed `mme`
+    /// unless the comparison is the point.
+    #[arg(long = "fragment-tol-ppm", conflicts_with = "fragment_tol_da")]
+    pub(crate) fragment_tol_ppm: Option<f64>,
+
+    /// Fragment match tolerance in Da for initial training. Overwrites the seed
+    /// model's `mme` (see `--fragment-tol-ppm`).
+    #[arg(long = "fragment-tol-da")]
+    pub(crate) fragment_tol_da: Option<f64>,
 
     // ── Update mode ──────────────────────────────────────────────────────────
     /// Switch to incremental update mode for this model ID.
@@ -588,6 +615,62 @@ pub(crate) fn load_labels_from_tsv(
     Ok(labels)
 }
 
+/// One training run of `train-from-search`: its labels and only the spectra
+/// they point at (`labels[i].spectrum_index` indexes `spectra`).
+struct TrainRun {
+    /// File name recorded as the ledger `dataset`.
+    dataset: String,
+    /// File stem, the ledger `source_id` when several runs are trained.
+    stem: String,
+    spectra: Vec<Spectrum>,
+    labels: Vec<model_train::labeled::LabeledMatch>,
+}
+
+impl TrainRun {
+    /// Keep the labelled spectra of a run and drop the rest, re-pointing each
+    /// label at its spectrum in the reduced list.
+    fn keep_labelled(
+        path: &Path,
+        spectra: Vec<Spectrum>,
+        mut labels: Vec<model_train::labeled::LabeledMatch>,
+    ) -> Self {
+        let mut kept = Vec::with_capacity(labels.len());
+        let mut new_index = std::collections::HashMap::new();
+        for label in &mut labels {
+            let idx = *new_index.entry(label.spectrum_index).or_insert_with(|| {
+                kept.push(spectra[label.spectrum_index].clone());
+                kept.len() - 1
+            });
+            label.spectrum_index = idx;
+        }
+        let dataset = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let stem = run_stem(path);
+        TrainRun {
+            dataset,
+            stem,
+            spectra: kept,
+            labels,
+        }
+    }
+}
+
+/// File name without its spectrum extensions (`a.mzML.gz` → `a`, `b.d` → `b`).
+fn run_stem(path: &Path) -> String {
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    for ext in [".gz", ".mzml", ".mgf", ".d", ".raw"] {
+        if name.len() > ext.len() && name.to_ascii_lowercase().ends_with(ext) {
+            name.truncate(name.len() - ext.len());
+        }
+    }
+    name
+}
+
 pub(crate) fn run_train_from_search(
     args: TrainFromSearchArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -608,48 +691,70 @@ pub(crate) fn run_train_from_search(
 
     // ── Standard training path ────────────────────────────────────────────────
 
-    // ── 2. Load spectra ───────────────────────────────────────────────────────
-    let spectra_path = args
-        .spectra
-        .clone()
-        .ok_or("--spectra is required for initial training")?;
-    eprintln!("train: loading spectra from {} ...", spectra_path.display());
-    let spectra = load_spectra_for_train(&spectra_path)?;
-    eprintln!("train: loaded {} spectra", spectra.len());
+    // ── 2. Check inputs ───────────────────────────────────────────────────────
+    if args.spectra.is_empty() {
+        return Err("--spectra is required for initial training".into());
+    }
+    if !args.labels.is_empty() && args.labels.len() != args.spectra.len() {
+        return Err(format!(
+            "--labels must be given once per --spectra ({} labels, {} spectra)",
+            args.labels.len(),
+            args.spectra.len()
+        )
+        .into());
+    }
 
     // ── 3. Load seed Param + RankScorer ──────────────────────────────────────
     let (seed_model_id, seed_param): (String, Param) = load_seed_param(&args.seed_model)?;
     eprintln!("train: seed model = {seed_model_id}");
     let seed_scorer = RankScorer::new(&seed_param);
 
-    // ── 4-5. Labels: external TSV (SP-B) OR a seed search (bootstrap) ──────────
-    let labels = if let Some(ref labels_path) = args.labels {
-        // SP-B glyco path: labels come from an external engine's backbone IDs.
-        // No seed search / database needed — the peptides are given directly.
-        let aa_set = build_aa_set(&args.mods)?;
-        load_labels_from_tsv(labels_path, &spectra, &aa_set)?
-    } else {
-        let database = args
-            .database
-            .clone()
-            .ok_or("--database is required for initial training (or pass --labels)")?;
-        let search_params = build_train_search_params(&args.mods)?;
+    // ── 4-5. Labels per run: external TSV (SP-B) OR a seed search (bootstrap) ──
+    // Each run is labelled on its own and keeps only its labelled spectra, so
+    // memory holds one full run at a time.
+    let mut runs: Vec<TrainRun> = Vec::with_capacity(args.spectra.len());
+    for (i, spectra_path) in args.spectra.iter().enumerate() {
+        eprintln!("train: loading spectra from {} ...", spectra_path.display());
+        let spectra = load_spectra_for_train(spectra_path)?;
+        eprintln!("train: loaded {} spectra", spectra.len());
+        let labels = if let Some(labels_path) = args.labels.get(i) {
+            // SP-B glyco path: labels come from an external engine's backbone IDs.
+            // No seed search / database needed — the peptides are given directly.
+            let aa_set = build_aa_set(&args.mods)?;
+            load_labels_from_tsv(labels_path, &spectra, &aa_set)?
+        } else {
+            let database = args
+                .database
+                .clone()
+                .ok_or("--database is required for initial training (or pass --labels)")?;
+            let search_params = build_train_search_params(&args.mods)?;
+            eprintln!(
+                "train: running seed search (train-fdr = {}) ...",
+                args.train_fdr
+            );
+            bootstrap_labels(
+                &spectra,
+                &database,
+                &seed_scorer,
+                &search_params,
+                args.train_fdr,
+            )
+            .map_err(|e| format!("bootstrap_labels: {e}"))?
+        };
         eprintln!(
-            "train: running seed search (train-fdr = {}) ...",
-            args.train_fdr
+            "train: {} confident labels from {}",
+            labels.len(),
+            spectra_path.display()
         );
-        bootstrap_labels(
-            &spectra,
-            &database,
-            &seed_scorer,
-            &search_params,
-            args.train_fdr,
-        )
-        .map_err(|e| format!("bootstrap_labels: {e}"))?
-    };
-    eprintln!("train: {} confident labels", labels.len());
+        runs.push(TrainRun::keep_labelled(spectra_path, spectra, labels));
+    }
+    let n_labels: usize = runs.iter().map(|r| r.labels.len()).sum();
+    eprintln!(
+        "train: {n_labels} confident labels from {} run(s)",
+        runs.len()
+    );
 
-    if labels.is_empty() {
+    if n_labels == 0 {
         return Err(format!(
             "no confident labels found at train-fdr={} — try a higher --train-fdr",
             args.train_fdr
@@ -665,35 +770,84 @@ pub(crate) fn run_train_from_search(
     // entrapment-FDP-validated to beat seed geometry on honest PSMs AND speed
     // across Astral (+57%), UPS1 (+15%) and TMT (+50%).
     let use_seed_geometry = args.seed_geometry;
-    let template: Param = if !use_seed_geometry {
+    let mut template: Param = if !use_seed_geometry {
         eprintln!(
-            "train: deriving own partition geometry from {} PSMs (pass --seed-geometry to reuse the seed geometry)",
-            labels.len()
+            "train: deriving own partition geometry from {n_labels} PSMs (pass --seed-geometry to reuse the seed geometry)"
         );
-        let corpus = corpus_charge_masses(&labels);
+        let corpus: Vec<(i32, f32)> = runs
+            .iter()
+            .flat_map(|r| corpus_charge_masses(&r.labels))
+            .collect();
         let geo_cfg = GeometryArgs::default().to_config();
         derive_geometry(&corpus, &seed_param, &geo_cfg)
     } else {
         eprintln!("train: --seed-geometry set — reusing seed partition geometry");
         seed_param.clone()
     };
+    // The tolerance switch changes the training window (and the stored `mme`)
+    // only; the labels above come from the unchanged seed search.
+    if let Some(ppm) = args.fragment_tol_ppm {
+        template.mme = Tolerance::Ppm(ppm);
+        eprintln!("train: training fragment tolerance overridden to {ppm} ppm");
+    } else if let Some(da) = args.fragment_tol_da {
+        template.mme = Tolerance::Da(da);
+        eprintln!("train: training fragment tolerance overridden to {da} Da");
+    } else {
+        eprintln!(
+            "train: training at the seed fragment tolerance {:?}",
+            template.mme
+        );
+    }
     let accum_scorer = RankScorer::new(&template);
 
-    // ── 6. Accumulate stats ───────────────────────────────────────────────────
+    // ── 6. Accumulate stats, one CountStats per run ───────────────────────────
     eprintln!("train: accumulating ion-match statistics ...");
     let accumulator = StatsAccumulator::new(&accum_scorer);
-    let mut stats = CountStats::new();
-    for label in &labels {
-        let spec = &spectra[label.spectrum_index];
-        accumulator.accumulate(&mut stats, spec, &label.peptide, label.charge);
-    }
-    let stats = merge(vec![stats]);
+    let run_stats: Vec<CountStats> = runs
+        .iter()
+        .map(|run| {
+            let mut stats = CountStats::new();
+            for label in &run.labels {
+                let spec = &run.spectra[label.spectrum_index];
+                accumulator.accumulate(&mut stats, spec, &label.peptide, label.charge);
+            }
+            stats
+        })
+        .collect();
+    let stats = merge(run_stats.clone());
 
     // ── 7. Estimate model ─────────────────────────────────────────────────────
     eprintln!("train: estimating model parameters ...");
     let cfg = EstimatorConfig::default();
     let estimator = Estimator::new(cfg);
-    let trained_param = estimator.estimate(&stats, &template);
+    let mut trained_param = estimator.estimate(&stats, &template);
+    // The instrument is a selection-key column: without this the model would
+    // keep the seed's instrument and searches on `--instrument` data would
+    // never select it.
+    let instrument = match &args.instrument {
+        Some(name) => {
+            trained_param.data_type.instrument =
+                InstrumentType::from_name(name).ok_or_else(|| {
+                    format!(
+                        "unknown --instrument '{name}' \
+                         (expected LowRes/HighRes/QExactive/OrbitrapAstral/TOF/TimsTOF)"
+                    )
+                })?;
+            name.clone()
+        }
+        None => trained_param.data_type.instrument.name().to_string(),
+    };
+    eprintln!(
+        "train: model key = ({}, {}, {}, {})",
+        trained_param.data_type.activation.name(),
+        trained_param.data_type.instrument.name(),
+        trained_param
+            .data_type
+            .enzyme
+            .as_ref()
+            .map_or("any", |e| e.name()),
+        trained_param.data_type.protocol.name(),
+    );
     let n_partitions = trained_param.partitions.len();
     eprintln!("train: trained model has {} partitions", n_partitions);
 
@@ -701,7 +855,7 @@ pub(crate) fn run_train_from_search(
     let model_id = args
         .model_id
         .clone()
-        .unwrap_or_else(|| format!("trained_{}_{}", args.instrument, args.protocol));
+        .unwrap_or_else(|| format!("trained_{}_{}", instrument, args.protocol));
     eprintln!("train: model ID = {model_id}");
 
     // ── 9. Build source ledger (Part A) ───────────────────────────────────────
@@ -710,22 +864,40 @@ pub(crate) fn run_train_from_search(
         // Format today as YYYY-MM-DD using std::time.
         format_today_iso8601()
     });
-    let spectra_filename = spectra_path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| spectra_path.display().to_string());
-    let source_id = format!("bootstrap_{model_id}");
-    let ledger = SourceLedger {
-        source_id: source_id.clone(),
-        dataset: spectra_filename,
-        n_psms: labels.len() as i64,
-        date: date_str,
-        weight: 1.0,
-        train_fdr: args.train_fdr as f32,
-        decay_half_life_days: None,
-        instrument: args.instrument.clone(),
-        experiment_class: args.protocol.clone(),
-    };
+    // One source per run. A single run keeps the historical id
+    // `bootstrap_<model_id>`; several runs are named by file stem (made unique
+    // with a numeric suffix when two stems collide).
+    let mut sources: Vec<(SourceLedger, CountStats)> = Vec::with_capacity(runs.len());
+    let mut seen_ids = std::collections::HashSet::new();
+    for (run, run_stats) in runs.iter().zip(run_stats) {
+        let mut source_id = if runs.len() == 1 {
+            format!("bootstrap_{model_id}")
+        } else {
+            run.stem.clone()
+        };
+        let mut k = 2;
+        while !seen_ids.insert(source_id.clone()) {
+            source_id = format!("{}_{k}", run.stem);
+            k += 1;
+        }
+        let ledger = SourceLedger {
+            source_id,
+            dataset: run.dataset.clone(),
+            n_psms: run.labels.len() as i64,
+            date: date_str.clone(),
+            weight: 1.0,
+            train_fdr: args.train_fdr as f32,
+            decay_half_life_days: None,
+            instrument: instrument.clone(),
+            experiment_class: args.protocol.clone(),
+        };
+        sources.push((ledger, run_stats));
+    }
+    let source_list = sources
+        .iter()
+        .map(|(l, _)| l.source_id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
 
     // ── 10. Write to store with source tracking ────────────────────────────────
     // Read existing OTHER models from the store (preserve them on append).
@@ -755,11 +927,7 @@ pub(crate) fn run_train_from_search(
 
     // Combine all models: write the trained model + existing others together.
     let mut all_entries: Vec<ModelEntryOwned> = Vec::new();
-    all_entries.push((
-        model_id.clone(),
-        trained_param.clone(),
-        vec![(ledger, stats)],
-    ));
+    all_entries.push((model_id.clone(), trained_param.clone(), sources));
     for (id, p, src) in existing_other {
         all_entries.push((id, p, src));
     }
@@ -774,13 +942,13 @@ pub(crate) fn run_train_from_search(
     .map_err(|e| format!("writing model store {}: {e}", store_path.display()))?;
 
     eprintln!(
-        "train: wrote model '{model_id}' to {} (source '{source_id}') [{:.2}s]",
+        "train: wrote model '{model_id}' to {} (sources: {source_list}) [{:.2}s]",
         store_path.display(),
         t0.elapsed().as_secs_f64(),
     );
     eprintln!(
         "train: summary — labels={}, partitions={}, store={}",
-        labels.len(),
+        n_labels,
         n_partitions,
         store_path.display(),
     );
@@ -1362,6 +1530,13 @@ pub(crate) fn run_train_update(
     model_id: &str,
     t0: std::time::Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if args.fragment_tol_ppm.is_some() || args.fragment_tol_da.is_some() {
+        return Err(
+            "--fragment-tol-ppm/--fragment-tol-da apply to initial training only; \
+             an update keeps the stored model's tolerance"
+                .into(),
+        );
+    }
     let store_path = &args.out_store;
     let cfg = EstimatorConfig::default();
     // Fail before the seed search / acceptance gate, not at commit time.
@@ -1370,10 +1545,11 @@ pub(crate) fn run_train_update(
     // ── Dispatch to the right update operation ────────────────────────────────
     let (candidate, new_sources) = if args.add {
         // --add mode: search spectra, accumulate stats, call update_add.
-        let spectra_path = args
-            .spectra
-            .clone()
-            .ok_or("--spectra is required with --add")?;
+        let spectra_path = match args.spectra.as_slice() {
+            [one] => one.clone(),
+            [] => return Err("--spectra is required with --add".into()),
+            _ => return Err("--update --add takes a single --spectra file".into()),
+        };
         let database = args
             .database
             .clone()
@@ -1447,7 +1623,10 @@ pub(crate) fn run_train_update(
             weight: 1.0,
             train_fdr: args.train_fdr as f32,
             decay_half_life_days: None,
-            instrument: args.instrument.clone(),
+            instrument: args
+                .instrument
+                .clone()
+                .unwrap_or_else(|| current_param.data_type.instrument.name().to_string()),
             experiment_class: args.protocol.clone(),
         };
 
@@ -1586,6 +1765,16 @@ pub(crate) fn unix_days_to_iso8601(days: u64) -> String {
 mod train_from_msnet_tests {
     use super::*;
     use model::mass::H2O;
+
+    #[test]
+    fn run_stem_strips_spectrum_extensions() {
+        assert_eq!(run_stem(Path::new("/x/a.mzML.gz")), "a");
+        assert_eq!(run_stem(Path::new("/x/PXD1_run.d")), "PXD1_run");
+        assert_eq!(run_stem(Path::new("/x/PXD1_run.d/")), "PXD1_run");
+        assert_eq!(run_stem(Path::new("b.MGF")), "b");
+        assert_eq!(run_stem(Path::new("c.raw")), "c");
+        assert_eq!(run_stem(Path::new(".d")), ".d");
+    }
 
     /// Reference: unmodified peptide mass = sum of residue masses + H2O.
     fn unmod_mass(seq: &[u8]) -> f64 {

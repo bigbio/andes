@@ -83,7 +83,7 @@ impl Enzyme {
         }
     }
 
-    pub fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         match self {
             Enzyme::Trypsin => "Trypsin",
             Enzyme::Chymotrypsin => "Chymotrypsin",

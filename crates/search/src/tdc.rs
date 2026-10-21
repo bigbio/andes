@@ -1,5 +1,9 @@
 //! Target-decoy competition q-values over scored PSMs. Single source of truth
 //! for the calibration pre-pass and the refinement confident-protein gate.
+//!
+//! The PSM q-value is decoys / targets without the `+1` of the finite-sample
+//! correction, deliberately: it is the estimate Percolator reports, so the two
+//! rescoring backends and the internal gates agree.
 
 /// Per-item input to the TDC q-walk: a discriminating score (higher = better)
 /// and whether the item is a decoy.

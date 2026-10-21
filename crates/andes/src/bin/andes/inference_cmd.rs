@@ -98,9 +98,8 @@ pub(crate) fn run_inference(a: InferenceArgs) -> Result<(), Box<dyn std::error::
         output::share_isobaric_references(&mut targets, &idx, a.fdr.max(proteoform_fdr));
     }
     output::apply_class_fdr(&mut targets, &decoys, &idx);
-    let knockoffs =
-        output::apply_knockoff_fdr(&mut targets, &idx, proteoform_fdr, a.knockoffs > 0)
-            .knockoff_rows;
+    let knockoffs = output::apply_knockoff_fdr(&mut targets, &idx, proteoform_fdr, a.knockoffs > 0)
+        .knockoff_rows;
     let cutoffs = output::Cutoffs::new(&targets, &idx, a.fdr, proteoform_fdr);
     let inf = output::infer_protein_groups(&targets, &decoys, &idx, |id| {
         targets[id].q_value <= cutoffs.of(id) && !knockoffs.contains(id)

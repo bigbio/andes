@@ -1375,7 +1375,10 @@ mod tests {
         let path = dir.path().join("run.pin");
         std::fs::write(&path, "previous").unwrap();
 
-        let dup = vec![make_spectrum("dup", 7, 500.0), make_spectrum("dup", 7, 600.0)];
+        let dup = vec![
+            make_spectrum("dup", 7, 500.0),
+            make_spectrum("dup", 7, 600.0),
+        ];
         let mut q0 = TopNQueue::new(10);
         q0.push(make_psm(0, 10.0, 10.0, 0, 2));
         let mut q1 = TopNQueue::new(10);
@@ -1388,7 +1391,9 @@ mod tests {
         let mut q = TopNQueue::new(10);
         q.push(make_psm(0, 10.0, 10.0, 0, 2));
         write_pin(&path, &one, &[q], &cands, &params, &idx).unwrap();
-        assert!(std::fs::read_to_string(&path).unwrap().starts_with("SpecId\t"));
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .starts_with("SpecId\t"));
         assert!(!crate::atomic::partial(&path).exists());
     }
 

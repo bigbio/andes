@@ -1015,8 +1015,9 @@ every modification accession its peptidoforms use (`andes.run_quant.mods`).
 
 With `--fragmentation auto`, andes takes the dominant `<activation>` cvParam over the first 64
 MS2 spectra of an mzML (mixed methods warn) and the dominant analyser (none → `low-res`).
-`.raw` carries both in vendor metadata (HCD on an Orbitrap → `hcd_qexactive_tryp`); `.d` routes
-to `cid_tof_tryp`. **MGF** has none: andes assumes CID / low-res / 0.5 Da (`cid_lowres_tryp`)
+`.raw` carries both in vendor metadata (HCD on an Orbitrap → `hcd_qexactive_tryp`); `.d`
+(timsTOF, beam-type CID) routes to the high-res HCD model `hcd_qexactive_tryp` (or its protocol
+variant) with a 20 ppm feature tolerance, as in §1. **MGF** has none: andes assumes CID / low-res / 0.5 Da (`cid_lowres_tryp`)
 and warns; `--fragment-tol-ppm` implies a high-res instrument, `--fragment-tol-da` a low-res
 one. `--protocol` applies on top.
 

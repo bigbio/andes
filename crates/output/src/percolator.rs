@@ -247,6 +247,19 @@ impl ResultPaths {
     }
 }
 
+/// The user's extra Percolator arguments with `--num-threads <threads>` added
+/// in front, unless they already set it. Percolator trains one SVM per
+/// cross-validation fold and by default uses three threads; on more cores it
+/// runs about twice as fast with the same result (measured on a 1M-row PIN).
+pub fn percolator_args_with_threads(extra: &[String], threads: usize) -> Vec<String> {
+    if extra.iter().any(|a| a == "--num-threads" || a.starts_with("--num-threads=")) {
+        return extra.to_vec();
+    }
+    let mut args = vec!["--num-threads".to_string(), threads.max(1).to_string()];
+    args.extend(extra.iter().cloned());
+    args
+}
+
 /// Target-decoy competition (`-Y`): Percolator keeps the best PSM of each
 /// spectrum (scan and precursor mass) and estimates q-values from the winners,
 /// instead of choosing a mode from the data. Every benchmark and calibration
@@ -632,6 +645,20 @@ fn read_line<R: std::io::BufRead>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn percolator_gets_the_thread_count_unless_the_user_set_it() {
+        let user = vec!["--testFDR".to_string(), "0.05".to_string()];
+        assert_eq!(
+            percolator_args_with_threads(&user, 16),
+            ["--num-threads", "16", "--testFDR", "0.05"]
+        );
+        let set = vec!["--num-threads".to_string(), "4".to_string()];
+        assert_eq!(percolator_args_with_threads(&set, 16), set);
+        let set_eq = vec!["--num-threads=4".to_string()];
+        assert_eq!(percolator_args_with_threads(&set_eq, 16), set_eq);
+        assert_eq!(percolator_args_with_threads(&[], 0), ["--num-threads", "1"]);
+    }
 
     #[test]
     fn parse_pin_header() {

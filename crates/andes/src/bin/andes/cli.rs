@@ -924,8 +924,8 @@ pub(crate) struct SearchArgs {
 
     /// Transfer quality q-value: transfers at or below it are reported as
     /// `transfer_ms1` in `<base>.mbr.parquet`. An internal quant-quality
-    /// q-value, not an identification FDR. Default 0.05.
-    #[arg(long = "mbr-fdr", hide = true, default_value = "0.05", value_parser = parse_unit_fraction)]
+    /// q-value, not an identification FDR. Default 0.01.
+    #[arg(long = "mbr-fdr", hide = true, default_value = "0.01", value_parser = parse_unit_fraction)]
     pub(crate) mbr_fdr: f64,
 
     /// Identified-row quality q-value: an identified (precursor, run) whose
@@ -949,6 +949,69 @@ pub(crate) struct SearchArgs {
     /// deleted at exit. An explicit `--output-pin` is always kept. Default true.
     #[arg(long = "keep-pin", hide = true, default_value_t = true, action = clap::ArgAction::Set)]
     pub(crate) keep_pin: bool,
+}
+
+/// `andes inference`: protein groups over the rescored PSMs of one or more runs.
+#[derive(Args, Debug)]
+pub(crate) struct InferenceArgs {
+    /// Percolator target PSM results (`--results-psms`), one or more files.
+    /// Their scores must be on one scale: one Percolator run over all the
+    /// runs (one file, or one file per run from that run).
+    #[arg(long = "psms", value_name = "TSV", num_args = 1.., required = true)]
+    pub(crate) psms: Vec<PathBuf>,
+
+    /// Percolator decoy PSM results (`--decoy-results-psms`) of the same
+    /// Percolator run(s).
+    #[arg(long = "decoy-psms", value_name = "TSV", num_args = 1.., required = true)]
+    pub(crate) decoy_psms: Vec<PathBuf>,
+
+    /// The protein database the PSMs were searched against, with the same
+    /// options as the search (`--annotations`, `--uniprot-*`, `--knockoffs`,
+    /// `--enzyme`, decoy affixes), so protein families, knockoff entries and
+    /// decoy pairs are the search's.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) database: PathBuf,
+
+    #[arg(long = "uniprot-variants")]
+    pub(crate) uniprot_variants: bool,
+    #[arg(long = "uniprot-isoforms")]
+    pub(crate) uniprot_isoforms: bool,
+    #[arg(long = "uniprot-chains")]
+    pub(crate) uniprot_chains: bool,
+    #[arg(
+        long = "uniprot-evidence",
+        default_value = "experimental",
+        value_parser = parse_uniprot_evidence
+    )]
+    pub(crate) uniprot_evidence: input::EvidenceLevel,
+    #[arg(long = "annotations", value_name = "FILE")]
+    pub(crate) annotations: Vec<PathBuf>,
+    #[arg(long = "knockoffs", default_value_t = 4)]
+    pub(crate) knockoffs: usize,
+    #[arg(long, default_value = "trypsin")]
+    pub(crate) enzyme: String,
+    #[arg(long, default_value = "XXX_")]
+    pub(crate) decoy_prefix: String,
+    #[arg(long = "decoy-suffix")]
+    pub(crate) decoy_suffix: Option<String>,
+
+    /// PSM q-value cutoff for the PSMs and peptides counted per group.
+    #[arg(long = "fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
+    pub(crate) fdr: f64,
+
+    /// PSM q-value cutoff for proteoform claims (variant-class PSMs).
+    /// Default: the larger of `--fdr` and 0.05.
+    #[arg(long = "proteoform-fdr", value_parser = parse_unit_fraction)]
+    pub(crate) proteoform_fdr: Option<f64>,
+
+    /// Run names for the groups' `grouped_runs`. Default: one per `--psms`
+    /// file, named after the file.
+    #[arg(long = "runs", value_name = "NAME", num_args = 1..)]
+    pub(crate) runs: Vec<String>,
+
+    /// Output prefix: writes `<PREFIX>.pg.parquet` (the QPX protein-group view).
+    #[arg(short = 'o', long = "output", value_name = "PREFIX")]
+    pub(crate) output: PathBuf,
 }
 
 /// `andes quant`: the match-between-runs stages over a quant directory
@@ -1060,8 +1123,8 @@ pub(crate) struct QuantFinalizeArgs {
 
     /// Transfer quality q-value: transfers at or below it are reported as
     /// `transfer_ms1`. An internal quant-quality q-value, not an
-    /// identification FDR. Default 0.05.
-    #[arg(long = "mbr-fdr", hide = true, default_value = "0.05", value_parser = parse_unit_fraction)]
+    /// identification FDR. Default 0.01.
+    #[arg(long = "mbr-fdr", hide = true, default_value = "0.01", value_parser = parse_unit_fraction)]
     pub(crate) mbr_fdr: f64,
 
     /// Identified-row quality q-value: an identified (precursor, run) whose
@@ -1077,19 +1140,11 @@ pub(crate) struct QuantFinalizeArgs {
     #[arg(long = "output-parquet", value_name = "DIR")]
     pub(crate) output_parquet: Option<PathBuf>,
 
-    /// Advanced: extract rows per precursor shard. With more extract rows
-    /// than this over all runs, finalize splits them by precursor into shards
-    /// of about this many rows (temporary Parquet tables next to the output)
-    /// and holds one shard at a time. The results do not depend on it.
-    /// Default 1000000.
-    #[arg(long = "shard-rows", hide = true, default_value_t = crate::quant_mbr::DEFAULT_SHARD_ROWS)]
-    pub(crate) shard_rows: usize,
-
     /// Advanced: training rows per transfer or identified-quality
     /// classifier. Above it the classifier is trained on the rows of a
     /// hashed sample of (precursor, run) pairs (every row is still scored);
     /// below it every row trains. Default 3000000.
-    #[arg(long = "max-train-rows", hide = true, default_value_t = crate::quant_mbr::DEFAULT_MAX_TRAIN_ROWS)]
+    #[arg(long = "max-train-rows", hide = true, default_value_t = crate::quant_finalize::DEFAULT_MAX_TRAIN_ROWS)]
     pub(crate) max_train_rows: usize,
 
     /// Advanced: reference cells of the run normalisation. Above it the fit
@@ -1098,8 +1153,26 @@ pub(crate) struct QuantFinalizeArgs {
     /// absolute log2 ratio error from 0.162 to 0.173), so keep it above the
     /// cells of the study
     /// when memory allows (about 150 bytes per cell). Default 20000000.
-    #[arg(long = "max-norm-cells", hide = true, default_value_t = crate::quant_mbr::DEFAULT_MAX_NORM_CELLS)]
+    #[arg(long = "max-norm-cells", hide = true, default_value_t = crate::quant_finalize::DEFAULT_MAX_NORM_CELLS)]
     pub(crate) max_norm_cells: usize,
+
+    /// Advanced: donor fits (identified rows) summarised in one pass over
+    /// the extract tables; with more, the precursors are summarised in
+    /// groups, one pass each (about 90 bytes per fit). The results do not
+    /// depend on it. Default 12000000.
+    #[arg(long = "max-donor-fits", hide = true, default_value_t = crate::quant_finalize::DEFAULT_MAX_DONOR_FITS)]
+    pub(crate) max_donor_fits: usize,
+
+    /// Advanced: held-out classifier scores kept in memory (4 bytes each);
+    /// above it they are sorted and written to temporary tables. The
+    /// results do not depend on it. Default 64000000.
+    #[arg(long = "max-held-scores", hide = true, default_value_t = crate::quant_finalize::DEFAULT_MAX_HELD_SCORES)]
+    pub(crate) max_held_scores: usize,
+
+    /// Directory of the temporary tables (removed at the end), e.g. a local
+    /// disk. Default: the directory of the output base.
+    #[arg(long = "temp-dir", value_name = "DIR")]
+    pub(crate) temp_dir: Option<PathBuf>,
 
     /// Advanced: seed of the transfer FDR folds and models and of the
     /// samples. Default 42.
@@ -1563,16 +1636,16 @@ mod mbr_fdr_default_tests {
     }
 
     #[test]
-    fn mbr_fdr_defaults_to_0_05_when_absent() {
+    fn mbr_fdr_defaults_to_0_01_when_absent() {
         let s = SearchWrap::try_parse_from(["andes"]).unwrap();
-        assert_eq!(s.args.mbr_fdr, 0.05);
+        assert_eq!(s.args.mbr_fdr, 0.01);
         let f = FinalizeWrap::try_parse_from(["andes", "--quant-dir", "q", "-o", "x"]).unwrap();
-        assert_eq!(f.args.mbr_fdr, 0.05);
+        assert_eq!(f.args.mbr_fdr, 0.01);
     }
 
     #[test]
     fn mbr_fdr_explicit_value_overrides_default() {
-        let s = SearchWrap::try_parse_from(["andes", "--mbr-fdr", "0.01"]).unwrap();
-        assert_eq!(s.args.mbr_fdr, 0.01);
+        let s = SearchWrap::try_parse_from(["andes", "--mbr-fdr", "0.05"]).unwrap();
+        assert_eq!(s.args.mbr_fdr, 0.05);
     }
 }

@@ -32,11 +32,22 @@ with a loud warning and NO verdict, because a verdict on the raw fraction is mis
 The search-space denominator is core-dependent: N-glycan reports only at N-X-S/T sequons,
 O-glycan at any Ser/Thr residue. Pass `--core o` for an O-glycan search (`--glyco-core o`).
 
+Isoleucine and leucine are isobaric, so an entrapment-only PSM whose bare peptide, with I
+folded to L, occurs anywhere in a folded sample protein is indistinguishable from a sample
+peptide and is counted as target, not entrapment (the rule lives in ../entrap_common.py and
+is shared with reproduce/run.sh). This rescue needs the search FASTA (argv[4]) -- the same
+file that sizes the S/E correction.
+
 Usage:
     eval_entrap.py [--core n|o] <pooled.pin> <percolator.psms> [q-threshold] [search.fasta]
 """
+import os
+import re
 import sys
 from collections import defaultdict
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from entrap_common import SampleSequences, classify  # noqa: E402
 
 
 def _chi2_ppf(p, k):
@@ -94,8 +105,9 @@ def space_ratio(path, core="n"):
     be reported at an N-X-S/T sequon (N-glycan) or a Ser/Thr residue (O-glycan), so a
     proteome with few sites contributes little to the space in which a FALSE glyco ID can
     be made, regardless of its protein count.
+
+    The counts are unaffected by I/L folding: neither site pattern tests I or L.
     """
-    import re
     # N-glycan: N-X-S/T sequons. O-glycan: every Ser/Thr is a potential glycosite.
     pat = re.compile(r"[ST]" if core == "o" else r"N[^P][ST]")
     s_seq = e_seq = s_prot = e_prot = 0
@@ -139,8 +151,11 @@ def space_ratio(path, core="n"):
     flush(hdr, "".join(buf))
     return s_seq, e_seq, s_prot, e_prot
 
-# SpecId -> accessions. Proteins occupy every column after "Peptide".
+
+# SpecId -> accessions. Proteins occupy every column after "Peptide". The Peptide cell is
+# kept per SpecId for the I/L-equivalence rescue in the counting pass.
 prot_of = {}
+pep_of = {}
 header = None
 with open(pin) as fh:
     for line in fh:
@@ -150,8 +165,11 @@ with open(pin) as fh:
             i_pep = header.index("Peptide")
             continue
         prot_of[f[0]] = f[i_pep + 1:]
+        pep_of[f[0]] = f[i_pep]
 
-n_entrap = n_sample = 0
+sample = SampleSequences(fasta) if fasta is not None else None
+
+n_entrap = n_sample = n_il = 0
 per_charge = defaultdict(lambda: [0, 0])
 with open(psms) as fh:
     for line in fh:
@@ -166,18 +184,23 @@ with open(psms) as fh:
         accs = prot_of.get(f[0])
         if accs is None:
             continue
-        # An ID is entrapment only if EVERY accession is an entrapment protein. A
-        # peptide shared with a real sample protein is not evidence of an error.
-        if all("ENTRAP_" in a for a in accs):
+        # Entrapment only if EVERY accession is an entrapment protein and the peptide is not
+        # an I/L variant of a sequence in a sample protein (see entrap_common.classify).
+        c = classify(accs, pep_of[f[0]], sample)
+        if c == "entrap":
             n_entrap += 1
         else:
             n_sample += 1
+            if c == "rescued":
+                n_il += 1
 
 total = n_entrap + n_sample
 raw = (n_entrap / total) if total else 0.0
 print(f"q threshold      : {qmax:.4f}")
 print(f"sample glycoPSMs : {n_sample}")
 print(f"entrapment hits  : {n_entrap}")
+if n_il:
+    print(f"I/L-equivalent   : {n_il} entrapment PSMs rescued as target (I/L-folded peptide occurs in a sample protein)")
 print(f"raw entrap frac  : {raw * 100:.2f}%   (entrap / accepted -- NOT the FDP)")
 
 if total == 0:

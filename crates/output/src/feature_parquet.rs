@@ -107,7 +107,7 @@ fn has_mbr(records: &[FeatureRecord]) -> bool {
 
 // ── nested types (QPXPSMSchema / QPXFeatureSchema) ────────────────────────────
 
-fn score_fields() -> Fields {
+pub(crate) fn score_fields() -> Fields {
     Fields::from(vec![
         Field::new("score_name", DataType::Utf8, false),
         Field::new("score_value", DataType::Float64, false),
@@ -115,7 +115,7 @@ fn score_fields() -> Fields {
     ])
 }
 
-fn list_type(item: DataType) -> DataType {
+pub(crate) fn list_type(item: DataType) -> DataType {
     DataType::List(Arc::new(Field::new("element", item, true)))
 }
 
@@ -139,7 +139,7 @@ fn modification_fields() -> Fields {
     ])
 }
 
-fn cv_fields() -> Fields {
+pub(crate) fn cv_fields() -> Fields {
     Fields::from(vec![
         Field::new("cv_name", DataType::Utf8, false),
         Field::new("cv_value", DataType::Utf8, false),
@@ -269,7 +269,7 @@ fn qpx_fields() -> Vec<Field> {
 
 // ── builders ──────────────────────────────────────────────────────────────────
 
-fn struct_list(fields: Fields, children: Vec<Box<dyn ArrayBuilder>>) -> ListBuilder<StructBuilder> {
+pub(crate) fn struct_list(fields: Fields, children: Vec<Box<dyn ArrayBuilder>>) -> ListBuilder<StructBuilder> {
     let element = Arc::new(Field::new(
         "element",
         DataType::Struct(fields.clone()),
@@ -278,7 +278,7 @@ fn struct_list(fields: Fields, children: Vec<Box<dyn ArrayBuilder>>) -> ListBuil
     ListBuilder::new(StructBuilder::new(fields, children)).with_field(element)
 }
 
-fn score_list_builder() -> ListBuilder<StructBuilder> {
+pub(crate) fn score_list_builder() -> ListBuilder<StructBuilder> {
     struct_list(
         score_fields(),
         vec![
@@ -311,7 +311,7 @@ fn modification_list_builder() -> ListBuilder<StructBuilder> {
     )
 }
 
-fn cv_list_builder() -> ListBuilder<StructBuilder> {
+pub(crate) fn cv_list_builder() -> ListBuilder<StructBuilder> {
     struct_list(
         cv_fields(),
         vec![

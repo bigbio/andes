@@ -55,33 +55,10 @@ echo "==> UPS1 entrapment database (yeast targets + E. coli entrapment)"
 report "$DB/yeast_entrap.fasta"
 
 echo "==> entrapment scaling factor (needed to compute a true FDP)"
-python3 - "$DB/yeast_entrap.fasta" <<'PY'
-import sys, re
-tgt = ent = 0
-hdr = None; seq = []
-def digest(s):
-    sites = [0] + [i+1 for i in range(len(s)-1) if s[i] in "KR"] + [len(s)]
-    sites = sorted(set(sites)); out = set()
-    for i in range(len(sites)-1):
-        for j in range(i+1, min(i+3, len(sites))):  # andes default: <= 1 missed cleavage
-            p = s[sites[i]:sites[j]]
-            if 6 <= len(p) <= 50: out.add(p)
-    return out
-T, E = set(), set()
-for line in open(sys.argv[1]):
-    if line.startswith(">"):
-        if hdr is not None:
-            (E if hdr.startswith(">ENTRAP_") else T).update(digest("".join(seq)))
-        hdr = line; seq = []
-    else: seq.append(line.strip())
-if hdr is not None:
-    (E if hdr.startswith(">ENTRAP_") else T).update(digest("".join(seq)))
-E -= T  # a peptide also in a target protein is a target identification
-r = len(T)/max(len(E),1)
-print(f"    target peptides {len(T)}  entrapment-only peptides {len(E)}")
-print(f"    T/E = {r:.3f}  ->  FDP = (hits/total) x {1+r:.3f}")
-print(f"    NOTE: this factor is a property of YOUR build. Never assume 1:1 (factor 2).")
-PY
+# T/E is a peptide-space ratio, so it uses a digest at the andes defaults (<= 1 missed
+# cleavage, 6..50 residues), I/L folded. Entrapment peptides found in a sample protein are
+# counted as target, matching how run.sh counts hits (../entrap_common.py).
+python3 "$(dirname "$0")/../entrap_common.py" te "$DB/yeast_entrap.fasta"
 # ---------------------------------------------------------------- glyco databases
 # These were MISSING: the glyco recipe referenced mouse_entrap.fasta, which no script in
 # this repository produced. An independent reproduction therefore had to invent one, built

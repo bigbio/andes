@@ -557,7 +557,13 @@ mod tests {
     fn the_finite_sample_term_is_per_stratum() {
         let mut proteins = index().db.proteins.clone();
         proteins.retain(|p| !p.accession.starts_with("XXX"));
-        proteins.push(protein("sp|P1_V5|A", EntryKind::Variant, "V5", 14.01565, None));
+        proteins.push(protein(
+            "sp|P1_V5|A",
+            EntryKind::Variant,
+            "V5",
+            14.01565,
+            None,
+        ));
         for k in 1..=4 {
             let f = format!("KO{k}_V5");
             proteins.push(protein(
@@ -574,8 +580,16 @@ mod tests {
             .chain((0..100).map(|i| psm(&format!("m{i}"), 100.0 - i as f64, 0.001, "sp|P1_V5|A")))
             .collect();
         apply_knockoff_fdr(&mut t, &idx, 0.01, true);
-        assert!((t["d0"].q_value - 0.5 / 100.0).abs() < 1e-12, "{}", t["d0"].q_value);
-        assert!((t["m0"].q_value - 0.25 / 100.0).abs() < 1e-12, "{}", t["m0"].q_value);
+        assert!(
+            (t["d0"].q_value - 0.5 / 100.0).abs() < 1e-12,
+            "{}",
+            t["d0"].q_value
+        );
+        assert!(
+            (t["m0"].q_value - 0.25 / 100.0).abs() < 1e-12,
+            "{}",
+            t["m0"].q_value
+        );
         assert_eq!(finite_sample_term([4, 2, usize::MAX].into_iter()), 0.5);
         assert_eq!(finite_sample_term([usize::MAX].into_iter()), 1.0);
         assert_eq!(finite_sample_term(std::iter::empty()), 1.0);

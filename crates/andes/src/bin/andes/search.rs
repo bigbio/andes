@@ -2219,9 +2219,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut mbr_decoys: std::collections::HashMap<String, output::PercolatorPsm> =
         std::collections::HashMap::new();
     let mut mbr_source = String::new();
-    // Percolator's decoy-result ids: with target-decoy competition (`-Y`) they
-    // let the QPX join tell a target that lost its scan/ExpMass group from one
-    // whose join drifted. `None` for the native rescorer.
+    // The rescorer's decoy-result ids: with target-decoy competition (Percolator
+    // `-Y`, and the native rescorer) they let the QPX join tell a target that
+    // lost its scan/ExpMass group from one whose join drifted.
     let mut rescore_decoys: Option<std::collections::HashSet<String>> = None;
     // The rescorer's decoy PSMs with their scores, for FDR within each class.
     let mut rescore_decoy_psms: std::collections::HashMap<String, output::PercolatorPsm> =
@@ -2262,22 +2262,36 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             Some(map)
         } else if use_native {
             eprintln!(
-                "Rescore: NATIVE GBDT rescorer (no Percolator; leakage-safe 3-fold target-decoy CV). \
-                 Fallback — use --rescore (Percolator) for production-grade FDR."
+                "Rescore: native rescorer (no Percolator; 3-fold cross-validated semi-supervised \
+                 linear model, target-decoy competition per scan and precursor mass). \
+                 Use --rescore (Percolator) for production FDR."
             );
             let t_resc = std::time::Instant::now();
             let pin_text = std::fs::read_to_string(&output_pin_path)
                 .map_err(|e| format!("reading PIN for native rescore: {e}"))?;
             let all = rescore::native_rescore_pin_all(&pin_text, 42)
                 .map_err(|e| format!("native rescore: {e}"))?;
+            if all.untrained_folds > 0 {
+                eprintln!(
+                    "WARN: native rescore: {} of 3 cross-validation folds had too few confident \
+                     targets or decoys to train on and ranked by the best single PIN feature. \
+                     The q-values stay valid but identify fewer PSMs.",
+                    all.untrained_folds
+                );
+            }
+            // Like Percolator with -Y: the winning decoys tell the QPX join
+            // which target rows lost their scan/ExpMass group.
+            rescore_decoys = Some(all.decoys.keys().cloned().collect());
             rescore_decoy_psms = all.decoys;
             if cli.mbr {
                 mbr_source = "the native rescoring result".to_string();
             }
             let map = all.targets;
             eprintln!(
-                "Rescore: native produced {} PSMs (q-value+PEP) [{:.2}s]",
+                "Rescore: native produced {} target PSMs (q-value+PEP; {} rows lost \
+                 target-decoy competition) [{:.2}s]",
                 map.len(),
+                all.competed_away,
                 t_resc.elapsed().as_secs_f64()
             );
             Some(map)

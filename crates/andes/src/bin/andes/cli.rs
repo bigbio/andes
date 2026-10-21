@@ -683,12 +683,13 @@ pub(crate) struct SearchArgs {
     #[arg(long = "rescore", default_value_t = false)]
     pub(crate) rescore: bool,
 
-    /// Rescore with the built-in NATIVE GBDT rescorer instead of Percolator (no
-    /// Percolator backend needed). Leakage-safe 3-fold target-decoy cross-
-    /// validation over the PIN features → q-value + PEP. A self-contained
-    /// FALLBACK for benchmarking / offline use — NOT production-grade FDR; prefer
-    /// `--rescore` (Percolator) for production. Writes the same QPX q-value/PEP +
-    /// filtered `<stem>.q<fdr>.tsv` outputs. Ignored if `--rescore` is also set.
+    /// Rescore with the built-in native rescorer instead of Percolator (no
+    /// Percolator backend needed): Percolator's algorithm in process, a 3-fold
+    /// cross-validated semi-supervised linear model over the PIN features with
+    /// target-decoy competition per scan and precursor mass (as `-Y`) →
+    /// q-value + PEP. A fallback for offline use; prefer `--rescore`
+    /// (Percolator) for production. Writes the same QPX q-value/PEP + filtered
+    /// `<stem>.q<fdr>.tsv` outputs. Ignored if `--rescore` is also set.
     #[arg(long = "rescore-native", hide = true, default_value_t = false)]
     pub(crate) rescore_native: bool,
 

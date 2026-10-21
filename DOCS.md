@@ -522,7 +522,7 @@ when a pipeline (e.g. quantms) owns rescoring. `--fdr`/`--pep` alone are ignored
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--rescore` | flag | *(off)* | Run Percolator and write rescored, filtered output. |
-| `--rescore-native` | flag | *(off)* | *(advanced)* Built-in GBDT rescorer (3-fold CV folded by spectrum); non-production fallback. |
+| `--rescore-native` | flag | *(off)* | *(advanced)* Built-in rescorer: Percolator's semi-supervised linear algorithm in process (3-fold CV folded by spectrum, target-decoy competition per scan and precursor mass as `-Y`); fallback when Percolator is not available. |
 | `--fdr` | fraction | `0.01` | q-value threshold applied by a rescoring run. With UniProt isoform, variant or chain entries, a PSM must also pass it within its class (§1a, provenance). |
 | `--proteoform-fdr` | fraction | max(`--fdr`, 0.05) | q-value threshold for proteoform claims: variant-class PSMs (every protein a UniProt variant entry) in the filtered TSV, the proteoform table and quantification; every other PSM keeps `--fdr`. |
 | `--protein-fdr` | fraction | *(off)* | Protein-group q-value cutoff: the filtered TSV keeps only PSMs whose peptide counts for a group at or below it, and the proteoform table only families of such groups. `<stem>.protein_groups.tsv` is written either way ([protein groups](#protein-groups-and-protein-fdr)). With `--mbr --output-parquet`, the QPX pg and feature views keep the groups at or below it, 0.01 unless given. |
@@ -936,7 +936,8 @@ until rescoring; `protein_groups.parquet` is empty (protein groups are in
 `<stem>.protein_groups.tsv`, [§1](#protein-groups-and-protein-fdr)). With `--rescore`, every target row must join a
 Percolator result, except where target-decoy competition (`-Y`, which andes always passes)
 kept another PSM of its scan/`ExpMass` group: those target rows are left out of the bundle, as
-they are out of Percolator's output.
+they are out of Percolator's output. `--rescore-native` competes in the same groups, with the
+same result for the bundle.
 
 ```bash
 andes --spectrum spectra.mzML --database db.fasta \

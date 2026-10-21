@@ -626,7 +626,11 @@ fn build_psms_batch(
                 None => rt.append_null(),
             }
             ion_mobility.append_null();
-            spectrum_reference.append_value(spectrum_ref(spec, scan_num, reference_files[spec_idx]));
+            spectrum_reference.append_value(spectrum_ref(
+                spec,
+                scan_num,
+                reference_files[spec_idx],
+            ));
             // Headline score = the rank/RawScore the PIN emits (psm.score, the
             // ranking signal; rounded in the PIN, kept full-precision here).
             score.append_value(psm.score as f64);

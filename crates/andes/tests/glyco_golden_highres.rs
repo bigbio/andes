@@ -302,7 +302,11 @@ fn glyco_highres_precursor_mono_without_ms1_is_identical_to_golden() {
     let first = hdr.iter().position(|c| *c == "MonoShift").unwrap();
     for row in actual.lines().skip(1) {
         let v: Vec<&str> = row.split('\t').collect();
-        assert_eq!(&v[first..first + 4], ["0", "0", "0", "0"], "unfitted Mono values");
+        assert_eq!(
+            &v[first..first + 4],
+            ["0", "0", "0", "0"],
+            "unfitted Mono values"
+        );
     }
     // Same rows as the golden (order-insensitive, like the golden test above).
     let mut a_rows: Vec<&str> = actual.lines().skip(1).collect();

@@ -243,11 +243,13 @@ downstream ([`DOCS.md` §10](DOCS.md#10-quantification)). `--lfq --mbr` adds mat
 over two or more inputs: every confident precursor is measured in every run, and transfers carry
 an internal quant-quality q-value (`<stem>.mbr.parquet`). The same stages run one at a time with
 `andes quant library|extract|finalize` over a `--quant-dir`, for pipelines that spread runs
-over machines. On the ProteoBench label-free DDA module (PXD028735, six runs; measured at
-`47d2844`, before #166 and #167), andes quantified 54,932 precursors in at least 3 runs at
-transfer q 0.01 (67,035 at 0.05; the default is 0.01), with a median |ε| of 0.155 and a CV of 0.110 using
-`quantity_normalized`: lower on both than every match-between-runs submission on the public
-leaderboard. One dataset, one seed ([benchmarks](docs/benchmarks/README.md#2-the-benchmarks)).
+over machines. On the ProteoBench label-free DDA modules (six runs each; measured 2026-10-21 at
+`a27a72c` with default settings), andes quantified 65,391 precursors in at least 3 runs on
+QExactive (PXD028735) at transfer q 0.01, with a median |ε| of 0.164 and a CV of 0.120 using
+`quantity_normalized` (71,649 at q 0.05; the default is 0.01): a lower median |ε| than every
+submission on the public leaderboard. On Astral (PXD070049) it quantified 33,876 at |ε| 0.186
+and CV 0.096, in the middle of that leaderboard. One seed
+([benchmarks](docs/benchmarks/README.md#2-the-benchmarks)).
 
 ```bash
 andes --spectrum tmt_run.mzML --database human.fasta --mods tmt10_mods.txt \

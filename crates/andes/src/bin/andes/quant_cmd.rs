@@ -483,6 +483,50 @@ fn envelope_of(v: &[f32]) -> Result<[f32; ENVELOPE_LEN], usize> {
 /// runs. The Percolator files are read one line at a time. Merged scores are
 /// loaded after the tables' SpecIds are checked, so that a SpecId shared by
 /// two runs fails with the runs named.
+/// Alignment settings with each run's residual-width floor: half the median
+/// spacing of its MS1 scans of one FAIMS voltage, read from
+/// `<stem>.ms1.parquet`. A run without a readable table, or with fewer than two
+/// MS1 scans, keeps the default floor.
+fn align_params(dir: &Path, stems: &[String]) -> AlignParams {
+    let mut ap = AlignParams::default();
+    ap.run_min_spacing_s = stems
+        .iter()
+        .map(|stem| {
+            let path = artifact(dir, stem, MS1_SUFFIX);
+            let spacing = output::ms1_table::read_ms1_scan_spacing(&path)
+                .ok()
+                .flatten();
+            let floor = spacing.map_or(ap.min_spacing_s, |s| s / 2.0);
+            match spacing {
+                Some(s) => eprintln!(
+                    "[mbr] run {stem}: MS1 scan spacing {s:.2} s, RT residual-width floor {floor:.2} s"
+                ),
+                None => eprintln!(
+                    "[mbr] run {stem}: MS1 scan spacing unknown, RT residual-width floor {floor:.2} s"
+                ),
+            }
+            floor
+        })
+        .collect();
+    ap
+}
+
+/// Log, per aligned run, how many residual-width knots sit at the run's floor:
+/// where the floor binds, the MS1 sampling and not the observed scatter sets
+/// the transfer RT uncertainty.
+fn log_floor_hits(library: &Library, ap: &AlignParams, stems: &[String]) {
+    for (r, knots) in library.alignment.residual_sd.iter().enumerate() {
+        let Some(knots) = knots else { continue };
+        let floor = ap.floor_s(r);
+        let at_floor = knots.iter().filter(|k| k.1 <= floor * (1.0 + 1e-9)).count();
+        eprintln!(
+            "[mbr] run {}: {at_floor} of {} RT residual-width knots at the {floor:.2} s floor",
+            stems.get(r).map_or("?", String::as_str),
+            knots.len()
+        );
+    }
+}
+
 pub(crate) fn build_and_write_library(
     dir: &Path,
     stems: &[String],
@@ -708,8 +752,9 @@ pub(crate) fn build_and_write_library(
         Some(c) => format!("PSM q<={donor_q} and PEP<={c}"),
         None => format!("PSM q<={donor_q}"),
     };
-    let ap = AlignParams::default();
+    let ap = align_params(dir, stems);
     let library = builder.finish(meta, max_q, &ap);
+    log_floor_hits(&library, &ap, stems);
     let (spectra, donor_scans, sc) = donors.finish(dir, stems, &library)?;
     eprintln!(
         "[mbr] library: {} runs, {} PSMs scored, {donor_psms} target PSMs at {donor_gate} identify their precursor in their run; skipped: {} PSMs whose SpecId joins a rescoring PSM of another peptide or target/decoy label, {} target and {} decoy PSMs without a rescoring score, {} decoy PSMs sharing a target's key; {} precursors, {} entries at the internal entry gate q<={max_q} (precursor-level, not an identification FDR) with a PSM at {donor_gate}, {} of them identity decoys (decoy precursors with decoy PSMs at {donor_gate}, measured as targets and never reported)",

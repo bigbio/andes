@@ -22,7 +22,7 @@ use arrow::buffer::{OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field, FieldRef, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use parquet::arrow::ArrowWriter;
+use parquet::arrow::{ArrowWriter, ProjectionMask};
 use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use parquet::format::KeyValue;
@@ -278,6 +278,51 @@ pub fn read_ms1(file: File, path: &Path) -> Result<Ms1RunIndex, String> {
     read(file).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// Median spacing in seconds between consecutive MS1 scans of the same FAIMS
+/// compensation voltage (all scans when there is none), read from the `rt_s`
+/// and `faims_cv` columns only. A precursor is sampled at its own voltage, so
+/// this is the time between two of its MS1 points. `None` with fewer than two
+/// scans of any voltage. Every error names `path`.
+pub fn read_ms1_scan_spacing(path: &Path) -> Result<Option<f64>, String> {
+    let named = |e: String| format!("{}: {e}", path.display());
+    let file = File::open(path).map_err(|e| named(e.to_string()))?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| named(e.to_string()))?;
+    let mask = ProjectionMask::roots(builder.parquet_schema(), [1, 2]);
+    let reader = builder
+        .with_projection(mask)
+        .build()
+        .map_err(|e| named(e.to_string()))?;
+    // Scans are stored in retention-time order; the last RT per voltage.
+    let mut last: std::collections::HashMap<Option<u32>, f64> = std::collections::HashMap::new();
+    let mut gaps: Vec<f64> = Vec::new();
+    for b in reader {
+        let b = b.map_err(|e| named(e.to_string()))?;
+        let rt = b
+            .column_by_name(COLUMNS[1])
+            .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
+            .ok_or_else(|| named(format!("column {} is not float64", COLUMNS[1])))?;
+        let cv = b
+            .column_by_name(COLUMNS[2])
+            .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
+            .ok_or_else(|| named(format!("column {} is not float32", COLUMNS[2])))?;
+        for i in 0..b.num_rows() {
+            let key = cv.is_valid(i).then(|| cv.value(i).to_bits());
+            let t = rt.value(i);
+            if let Some(prev) = last.insert(key, t) {
+                if t > prev {
+                    gaps.push(t - prev);
+                }
+            }
+        }
+    }
+    if gaps.is_empty() {
+        return Ok(None);
+    }
+    gaps.sort_by(f64::total_cmp);
+    Ok(Some(gaps[gaps.len() / 2]))
+}
+
 /// Read the MS1 table at `path`. Every error names `path`.
 pub fn read_ms1_table(path: &Path) -> Result<Ms1RunIndex, String> {
     let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -334,6 +379,33 @@ mod tests {
             scan(1.0, vec![(-0.0, 5.0)], "scan=9", Some(-0.0)),
             scan(2.5, vec![(500.0, 1.0)], "contr\u{e9}l\u{e9}=3", Some(nan)),
         ])
+    }
+
+    #[test]
+    fn scan_spacing_is_per_faims_voltage() {
+        let dir = tempfile::tempdir().unwrap();
+        // Two voltages alternating every 1 s: each voltage is sampled every 2 s.
+        let faims: Vec<Ms1Scan> = (0..10)
+            .map(|i| {
+                let cv = if i % 2 == 0 { -45.0 } else { -60.0 };
+                scan(i as f64, vec![(500.0, 1.0)], "", Some(cv))
+            })
+            .collect();
+        let p = dir.path().join("faims.ms1.parquet");
+        write_ms1_table(&p, "faims", &Ms1RunIndex::new(faims)).unwrap();
+        assert_eq!(read_ms1_scan_spacing(&p).unwrap(), Some(2.0));
+        // No FAIMS: every MS1 scan, 1.5 s apart.
+        let plain: Vec<Ms1Scan> = (0..5)
+            .map(|i| scan(1.5 * i as f64, vec![(500.0, 1.0)], "", None))
+            .collect();
+        let p = dir.path().join("plain.ms1.parquet");
+        write_ms1_table(&p, "plain", &Ms1RunIndex::new(plain)).unwrap();
+        assert_eq!(read_ms1_scan_spacing(&p).unwrap(), Some(1.5));
+        // One scan: no spacing.
+        let p = dir.path().join("one.ms1.parquet");
+        let one = Ms1RunIndex::new(vec![scan(3.0, vec![], "", None)]);
+        write_ms1_table(&p, "one", &one).unwrap();
+        assert_eq!(read_ms1_scan_spacing(&p).unwrap(), None);
     }
 
     #[test]

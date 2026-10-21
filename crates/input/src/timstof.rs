@@ -19,7 +19,7 @@
 //! stream here, so `--chimeric` on `.d` degrades gracefully to a normal search
 //! (handled by the binary, like MGF).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use timsrust::readers::{SpectrumReader, SpectrumReaderError};
 
@@ -35,6 +35,11 @@ pub enum TimsTofParseError {
         /// Extra guidance for a known unsupported layout (empty otherwise).
         hint: &'static str,
     },
+    #[error(
+        "'{path}' is not a Bruker .d run folder: it has no analysis.tdf, but the folder \
+         '{nested}' inside it has one; pass that folder"
+    )]
+    Nested { path: String, nested: String },
     #[error("failed to read spectrum {index} from Bruker .d: {source}")]
     Read {
         index: usize,
@@ -42,13 +47,6 @@ pub enum TimsTofParseError {
     },
 }
 
-/// Reader over a Bruker timsTOF `.d` directory, yielding [`Spectrum`] values.
-///
-/// `timsrust`'s [`SpectrumReader`] exposes a flat, index-addressed list of
-/// centroided MS2 spectra (`len` / `get`), so this reader iterates by index and
-/// owns the underlying handle without a self-referential borrow — matching the
-/// `ThermoRawReader` structure. Every emitted spectrum is MS2 by construction
-/// (the reader only produces fragment spectra), so there is no MS-level filter.
 /// Guidance appended to an open error whose cause is a known unsupported `.d`
 /// layout. Frame compression type 1 is the scheme written by early timsTOF
 /// acquisition software (data from about 2018 and before); the reader only
@@ -62,6 +60,34 @@ fn open_error_hint(message: &str) -> &'static str {
     }
 }
 
+/// The run folder inside `dir` when `dir` has no `analysis.tdf` of its own but
+/// a `.d` folder inside it has one: archives that wrap the run in a folder of
+/// the same name unpack to `X.d/X.d/`. The reader panics on the outer folder,
+/// so it is caught here first.
+fn nested_run_folder(dir: &Path) -> Option<PathBuf> {
+    if !dir.is_dir() || dir.join("analysis.tdf").exists() {
+        return None;
+    }
+    let mut nested: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.is_dir()
+                && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("d"))
+                && p.join("analysis.tdf").exists()
+        })
+        .collect();
+    nested.sort();
+    nested.into_iter().next()
+}
+
+/// Reader over a Bruker timsTOF `.d` directory, yielding [`Spectrum`] values.
+///
+/// `timsrust`'s [`SpectrumReader`] exposes a flat, index-addressed list of
+/// centroided MS2 spectra (`len` / `get`), so this reader iterates by index and
+/// owns the underlying handle without a self-referential borrow — matching the
+/// `ThermoRawReader` structure. Every emitted spectrum is MS2 by construction
+/// (the reader only produces fragment spectra), so there is no MS-level filter.
 pub struct TimsTofReader {
     reader: SpectrumReader,
     next: usize,
@@ -73,6 +99,12 @@ impl TimsTofReader {
     /// `analysis.tdf` + `analysis.tdf_bin`), not a file inside it.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, TimsTofParseError> {
         let p = path.as_ref();
+        if let Some(nested) = nested_run_folder(p) {
+            return Err(TimsTofParseError::Nested {
+                path: p.display().to_string(),
+                nested: nested.display().to_string(),
+            });
+        }
         let reader = SpectrumReader::new(p).map_err(|source| {
             let hint = open_error_hint(&source.to_string());
             TimsTofParseError::Open {
@@ -225,6 +257,22 @@ mod tests {
     fn compression_type_1_gets_a_conversion_hint() {
         assert!(open_error_hint("Compression type 1 not understood").contains("mzML"));
         assert_eq!(open_error_hint("No such file or directory"), "");
+    }
+
+    #[test]
+    fn a_run_folder_nested_in_its_own_name_is_an_error_naming_the_inner_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outer = tmp.path().join("run.d");
+        let inner = outer.join("run.d");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(inner.join("analysis.tdf"), b"").unwrap();
+        assert_eq!(nested_run_folder(&outer), Some(inner.clone()));
+        assert_eq!(nested_run_folder(&inner), None);
+        let err = TimsTofReader::open(&outer)
+            .err()
+            .expect("the outer folder is not a run");
+        assert!(matches!(err, TimsTofParseError::Nested { .. }), "{err}");
+        assert!(err.to_string().contains(&inner.display().to_string()), "{err}");
     }
 
     /// Build a minimal `timsrust::Spectrum` for the conversion tests.

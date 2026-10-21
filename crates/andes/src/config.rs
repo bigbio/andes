@@ -388,16 +388,21 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         cfg.scoring.protocol,
         crate::parse_protocol
     );
-    set_opt!(
-        "fragment_tol_ppm",
-        fragment_tol_ppm,
-        cfg.scoring.fragment_tol_ppm
-    );
-    set_opt!(
-        "fragment_tol_da",
-        fragment_tol_da,
-        cfg.scoring.fragment_tol_da
-    );
+    // The fragment tolerance is one choice: a `--fragment-tol-ppm` or
+    // `--fragment-tol-da` on the command line replaces both config keys, so a
+    // CLI ppm value never meets a config Da value (or the reverse).
+    if !cli_set(m, "fragment_tol_ppm") && !cli_set(m, "fragment_tol_da") {
+        set_opt!(
+            "fragment_tol_ppm",
+            fragment_tol_ppm,
+            cfg.scoring.fragment_tol_ppm
+        );
+        set_opt!(
+            "fragment_tol_da",
+            fragment_tol_da,
+            cfg.scoring.fragment_tol_da
+        );
+    }
     set_opt!("model_store", model_store, cfg.scoring.model_store);
     set_opt!("model_id_override", model_id_override, cfg.scoring.model);
     set!("ms_level", ms_level, cfg.scoring.ms_level);
@@ -442,8 +447,14 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     );
 
     // ── rescoring ──
-    set!("rescore", rescore, cfg.rescoring.enabled);
-    set!("rescore_native", rescore_native, cfg.rescoring.native);
+    // The rescoring backend is one choice: `--rescore` or `--rescore-native` on the
+    // command line replaces the config's `rescoring.enabled` / `rescoring.native`
+    // entirely, so a CLI `--rescore-native` is not overridden by a config that
+    // enables Percolator (which wins when both are set).
+    if !cli_set(m, "rescore") && !cli_set(m, "rescore_native") {
+        set!("rescore", rescore, cfg.rescoring.enabled);
+        set!("rescore_native", rescore_native, cfg.rescoring.native);
+    }
     set_opt!("fdr", fdr, cfg.rescoring.fdr);
     set_opt!(
         "proteoform_fdr",
@@ -666,7 +677,8 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         check_positive("fragment_tol_da", v)?;
     }
     // `--fragment-tol-ppm` / `--fragment-tol-da` are mutually exclusive on the CLI
-    // (clap `conflicts_with`); the config could set both, which is ambiguous.
+    // (clap `conflicts_with`); a config that sets both, with neither on the
+    // command line, is ambiguous.
     if args.fragment_tol_ppm.is_some() && args.fragment_tol_da.is_some() {
         return Err(
             "config: `scoring.fragment_tol_ppm` and `scoring.fragment_tol_da` are mutually \
@@ -1114,6 +1126,33 @@ glyco:
         )
         .unwrap();
         assert_eq!(a.gbdt_max_trees, Some(50));
+    }
+
+    /// A rescoring backend on the command line wins over the config's choice.
+    #[test]
+    fn cli_rescore_backend_wins_over_yaml() {
+        let a = applied("rescoring:\n  enabled: true\n", &["--rescore-native"]).unwrap();
+        assert!(a.rescore_native && !a.rescore, "CLI --rescore-native must win");
+        let a = applied("rescoring:\n  native: true\n", &["--rescore"]).unwrap();
+        assert!(a.rescore && !a.rescore_native);
+        let a = applied("rescoring:\n  enabled: true\n", &[]).unwrap();
+        assert!(a.rescore && !a.rescore_native);
+        let a = applied("rescoring:\n  native: true\n", &[]).unwrap();
+        assert!(a.rescore_native && !a.rescore);
+    }
+
+    /// A fragment tolerance on the command line replaces both config keys, so a
+    /// CLI ppm value and a config Da value never conflict.
+    #[test]
+    fn cli_fragment_tol_wins_over_yaml_without_conflict() {
+        let a = applied("scoring:\n  fragment_tol_da: 0.5\n", &["--fragment-tol-ppm", "20"]).unwrap();
+        assert_eq!(a.fragment_tol_ppm, Some(20.0));
+        assert_eq!(a.fragment_tol_da, None);
+        let a = applied("scoring:\n  fragment_tol_ppm: 20\n", &["--fragment-tol-da", "0.5"]).unwrap();
+        assert_eq!(a.fragment_tol_da, Some(0.5));
+        assert_eq!(a.fragment_tol_ppm, None);
+        let a = applied("scoring:\n  fragment_tol_da: 0.5\n", &[]).unwrap();
+        assert_eq!(a.fragment_tol_da, Some(0.5));
     }
 
     /// `--glyco` needs a glycan database whichever way it was switched on.

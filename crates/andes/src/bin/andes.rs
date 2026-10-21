@@ -18,6 +18,8 @@ mod cli;
 mod config;
 #[path = "andes/glyco_run.rs"]
 mod glyco_run;
+#[path = "andes/inference_cmd.rs"]
+mod inference_cmd;
 #[path = "andes/memlimit.rs"]
 mod memlimit;
 #[path = "andes/model_select.rs"]
@@ -111,6 +113,10 @@ enum Command {
     /// result as `andes search --lfq --mbr` on the same inputs.
     #[command(subcommand)]
     Quant(cli::QuantCommand),
+
+    /// Protein groups with picked protein-level q-values over the rescored
+    /// PSMs of one or more runs. Writes the QPX protein-group view.
+    Inference(Box<cli::InferenceArgs>),
 }
 
 /// Top-level CLI.  When no subcommand is given, the flattened `SearchArgs`
@@ -148,6 +154,7 @@ fn main() -> ExitCode {
         Some(Command::TrainIntensityGbdt(args)) => run_train_intensity_gbdt(*args),
         Some(Command::TrainRichIonLlr(args)) => run_train_rich_ion_llr(*args),
         Some(Command::Quant(cmd)) => quant_cmd::run_quant_command(cmd),
+        Some(Command::Inference(args)) => inference_cmd::run_inference(*args),
         None => {
             // --config: fill any parameter the user did not type on the CLI.
             let mut cfg_missed_cleavages = false;

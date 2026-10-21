@@ -27,7 +27,7 @@ use search::SearchIndex;
 use crate::percolator::PercolatorPsm;
 use crate::proteoform_table::bare_sequence;
 
-/// One target protein group.
+/// One protein group.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProteinGroup {
     /// 1-based, in order of score.
@@ -49,6 +49,9 @@ pub struct ProteinGroup {
     pub q_value: f64,
     /// Families whose peptides are all in this group.
     pub subsumed: Vec<String>,
+    /// Peptides (with a PSM at its cutoff) that name each accession.
+    pub peptides_per_accession: Vec<(String, usize)>,
+    pub is_decoy: bool,
 }
 
 /// What [`infer_protein_groups`] found.
@@ -59,6 +62,9 @@ pub struct Inference {
     /// Each target peptide (bare sequence) and the index into `groups` it
     /// counts for.
     pub peptide_group: HashMap<String, usize>,
+    /// Decoy groups that won their family's competition, with the q-value at
+    /// their score; their peptide counts include every assigned peptide.
+    pub decoy_groups: Vec<ProteinGroup>,
 }
 
 impl Inference {
@@ -265,6 +271,9 @@ pub fn infer_protein_groups(
             None => acc.to_string(),
         }
     };
+    // Knockoff entries exist only to estimate false variant claims: their
+    // peptides are evidence for no protein, on either side.
+    let knockoff = |acc: &str| proteins.get(acc).is_some_and(|p| p.is_knockoff());
     let rows = |map: &HashMap<String, PercolatorPsm>, decoy: bool| {
         let mut out: Vec<(String, f64, BTreeSet<String>)> = map
             .values()
@@ -274,13 +283,9 @@ pub fn infer_protein_groups(
                     .proteins
                     .split(';')
                     .filter(|a| !a.is_empty())
-                    .map(|a| {
-                        if decoy {
-                            family_of(&target_of(a))
-                        } else {
-                            family_of(a)
-                        }
-                    })
+                    .map(|a| if decoy { target_of(a) } else { a.to_string() })
+                    .filter(|a| !knockoff(a))
+                    .map(|a| family_of(&a))
                     .collect();
                 (!fams.is_empty()).then(|| (bare_sequence(&p.peptide), score, fams))
             })
@@ -342,8 +347,11 @@ pub fn infer_protein_groups(
         fdp[i] = fdp[i].min(fdp[i + 1]);
     }
     let mut q_of: HashMap<usize, f64> = HashMap::new();
+    let mut decoy_q: Vec<(usize, f64)> = Vec::new();
     for (&(_, is_decoy, g), &q) in ranked.iter().zip(&fdp) {
-        if !is_decoy {
+        if is_decoy {
+            decoy_q.push((g, q));
+        } else {
             q_of.insert(g, q);
         }
     }
@@ -352,6 +360,8 @@ pub fn infer_protein_groups(
     let mut psms = vec![0usize; target.groups.len()];
     let mut accepted_peps: BTreeSet<usize> = BTreeSet::new();
     let mut named: Vec<BTreeSet<String>> = vec![BTreeSet::new(); target.groups.len()];
+    let mut per_accession: Vec<BTreeMap<String, BTreeSet<usize>>> =
+        vec![BTreeMap::new(); target.groups.len()];
     let pep_index: HashMap<&str, usize> = target
         .peptides
         .iter()
@@ -371,13 +381,25 @@ pub fn infer_protein_groups(
         else {
             continue;
         };
-        if accepted(id) {
+        let pep = pep_index[bare_sequence(&p.peptide).as_str()];
+        let ok = accepted(id);
+        if ok {
             psms[g] += 1;
-            accepted_peps.insert(pep_index[bare_sequence(&p.peptide).as_str()]);
+            accepted_peps.insert(pep);
         }
-        for a in p.proteins.split(';').filter(|a| !a.is_empty()) {
+        for a in p
+            .proteins
+            .split(';')
+            .filter(|a| !a.is_empty() && !knockoff(a))
+        {
             if target.groups[g].families.contains(&family_of(a)) {
                 named[g].insert(a.to_string());
+                if ok {
+                    per_accession[g]
+                        .entry(a.to_string())
+                        .or_default()
+                        .insert(pep);
+                }
             }
         }
     }
@@ -431,6 +453,11 @@ pub fn infer_protein_groups(
                     v.dedup();
                     v
                 },
+                peptides_per_accession: per_accession[g]
+                    .iter()
+                    .map(|(a, peps)| (a.clone(), peps.len()))
+                    .collect(),
+                is_decoy: false,
             }
         })
         .collect();
@@ -438,9 +465,45 @@ pub fn infer_protein_groups(
         .into_iter()
         .map(|(p, g)| (target.peptides[p].clone(), new_index[g]))
         .collect();
+    // A decoy family `F` stands for the accession `<prefix>_F`.
+    let decoy_accession = |f: &str| format!("{prefix}{f}");
+    let mut decoy_groups: Vec<ProteinGroup> = decoy_q
+        .into_iter()
+        .map(|(g, q)| {
+            let s = &decoy.groups[g];
+            let accessions: Vec<String> = s.families.iter().map(|f| decoy_accession(f)).collect();
+            ProteinGroup {
+                id: 0,
+                lead: accessions[0].clone(),
+                families: s.families.clone(),
+                peptides_per_accession: accessions
+                    .iter()
+                    .map(|a| (a.clone(), s.peptides.len()))
+                    .collect(),
+                accessions,
+                peptides: s.peptides.len(),
+                unique: s.peptides.len() - s.shared.len(),
+                razor: s.shared.len(),
+                psms: 0,
+                score: s.score,
+                q_value: q,
+                subsumed: Vec::new(),
+                is_decoy: true,
+            }
+        })
+        .collect();
+    decoy_groups.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.lead.cmp(&b.lead))
+    });
+    for (i, g) in decoy_groups.iter_mut().enumerate() {
+        g.id = groups.len() + i + 1;
+    }
     Inference {
         groups,
         peptide_group,
+        decoy_groups,
     }
 }
 
@@ -544,6 +607,51 @@ mod tests {
     }
 
     #[test]
+    fn knockoff_entries_are_evidence_for_no_protein() {
+        use model::protein::{EntryOrigin, ProteinAnnotation};
+        use std::sync::Arc;
+        let mut db = ProteinDb {
+            proteins: vec![model::Protein {
+                accession: "A".into(),
+                description: String::new(),
+                sequence: b"PEPTIDEK".to_vec(),
+                annotation: None,
+            }],
+        };
+        let origin = EntryOrigin {
+            kind: EntryKind::Variant,
+            family: Arc::from("A"),
+            feature: Arc::from("VAR_KO"),
+            variant_delta_da: 0.0,
+            knockoff_of: Some(Arc::from("VAR_1")),
+            source: None,
+            tier: Default::default(),
+        };
+        db.proteins.push(model::Protein {
+            accession: "A-KO".into(),
+            description: String::new(),
+            sequence: b"PEPTLDEK".to_vec(),
+            annotation: Some(Arc::new(
+                ProteinAnnotation::new(Vec::new(), None).with_origin(Some(origin)),
+            )),
+        });
+        let idx = SearchIndex::from_target_db(&db, "XXX");
+        let targets: HashMap<String, PercolatorPsm> = [
+            psm("1", 2.0, "K.AAAK.R", "A"),
+            // A knockoff-only peptide scores higher than A's own.
+            psm("2", 9.0, "K.KKKK.R", "A-KO"),
+        ]
+        .into_iter()
+        .collect();
+        let inf = infer_protein_groups(&targets, &HashMap::new(), &idx, |_| true);
+        assert_eq!(inf.groups.len(), 1);
+        let g = &inf.groups[0];
+        assert_eq!((g.peptides, g.score), (1, 2.0));
+        assert_eq!(g.accessions, vec!["A"]);
+        assert!(inf.group_of(&targets["2"]).is_none());
+    }
+
+    #[test]
     fn picked_competition_pairs_a_family_with_its_own_decoy() {
         let targets: HashMap<String, PercolatorPsm> = [
             psm("a", 5.0, "K.AAAK.R", "A"),
@@ -572,5 +680,10 @@ mod tests {
         assert_eq!(q["B"], 0.0);
         assert_eq!(q["C"], 1.0, "a target that lost to its decoy");
         assert!((q["D"] - 1.0 / 3.0).abs() < 1e-12);
+        // The decoy of C won its competition and is reported as a decoy group.
+        assert_eq!(inf.decoy_groups.len(), 1);
+        let d = &inf.decoy_groups[0];
+        assert_eq!((d.lead.as_str(), d.is_decoy, d.id), ("XXX_C", true, 5));
+        assert!((d.q_value - 1.0 / 3.0).abs() < 1e-12);
     }
 }

@@ -689,7 +689,9 @@ mod param_resolver_tests {
                 }
             }
         }
-        let pinned = include_str!("../../../../../test-fixtures/model_selection_grid.tsv");
+        // A Windows checkout may give the fixture CRLF line endings.
+        let pinned = include_str!("../../../../../test-fixtures/model_selection_grid.tsv")
+            .replace("\r\n", "\n");
         if table != pinned {
             let moved: Vec<String> = table
                 .lines()

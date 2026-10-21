@@ -1877,15 +1877,18 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `candidate_idxs` against a real candidate slice.
     prepared.sync_materialized_candidates();
 
+    // The glyco PIN carries the Mono columns whenever the correction ran, fitted or
+    // not, so its header follows the command line and the input format, never the
+    // data: the PINs of separately searched runs share one header.
+    let mono_columns = mono_active;
     // No MS1 reached the correction (an MS2-only mzML, or no charges): nothing was
-    // fitted, so the PIN keeps its flag-off schema — "byte-identical when no MS1 is
-    // available" (bigbio/andes#64) holds for the file, not just the format.
+    // fitted, so the search runs as with the flag off and the Mono columns are 0.
     let mono_active = mono_active && {
         if mono_stats.fitted == 0 {
             eprintln!(
                 "WARN: --precursor-mono auto: no MS2 could be fitted ({} MS2 seen, none with \
                  a linked MS1 and a known charge); precursors are left as recorded and the \
-                 glyco PIN carries no Mono columns.",
+                 glyco PIN Mono columns are 0.",
                 mono_stats.seen
             );
             if let Some(d) = mono_dump.take() {
@@ -1990,6 +1993,15 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // accumulated spectra (candidates from a sequon-only table built from the
     // out-of-core index) and write a separate `.glyco.pin` file.  The standard PIN is skipped.
     if cli.glyco {
+        let unfitted: Vec<Option<MonoCorrection>>;
+        let mono_for_pin = if mono_active {
+            Some(mono_table.as_slice())
+        } else if mono_columns {
+            unfitted = vec![None; spectra.len()];
+            Some(unfitted.as_slice())
+        } else {
+            None
+        };
         run_glyco(
             &cli,
             &spectra,
@@ -1999,11 +2011,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &output_pin_path,
             spectrum_paths,
             detected_activation_instrument,
-            if mono_active {
-                Some(mono_table.as_slice())
-            } else {
-                None
-            },
+            mono_for_pin,
             glyco_isotope_override,
             t_total,
         )?;

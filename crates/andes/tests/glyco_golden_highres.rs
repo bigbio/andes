@@ -246,8 +246,8 @@ fn glyco_highres_pin_matches_golden() {
 
 /// `--precursor-mono auto` on an mzML with NO MS1 scans (this fixture declares
 /// "MS1 spectrum" only in its file-content header): the run streams with the MS1
-/// link, fits nothing, says so, and writes a `.glyco.pin` byte-identical to the
-/// golden — no Mono columns — while the diagnostic dump still has one NA row
+/// link, fits nothing, says so, and writes a `.glyco.pin` identical to the
+/// golden — Mono columns present and 0 on every row — while the diagnostic dump still has one NA row
 /// per MS2. (The linked case is covered by the `mono` unit tests and the
 /// measured engine L liver run in docs/benchmarks/README.md.)
 #[test]
@@ -293,10 +293,17 @@ fn glyco_highres_precursor_mono_without_ms1_is_identical_to_golden() {
     let actual = std::fs::read_to_string(tmpdir.path().join("out.glyco.pin")).expect("read pin");
     let golden_txt = std::fs::read_to_string(&golden).expect("read golden");
     let a_hdr = actual.lines().next().unwrap();
+    // The Mono columns follow the flag and the input format, not the fits.
     assert!(
-        !a_hdr.contains("MonoShift"),
-        "no Mono columns without a fitted MS2: {a_hdr}"
+        a_hdr.contains("MonoShift"),
+        "Mono columns are written without a fitted MS2: {a_hdr}"
     );
+    let hdr: Vec<&str> = a_hdr.split('\t').collect();
+    let first = hdr.iter().position(|c| *c == "MonoShift").unwrap();
+    for row in actual.lines().skip(1) {
+        let v: Vec<&str> = row.split('\t').collect();
+        assert_eq!(&v[first..first + 4], ["0", "0", "0", "0"], "unfitted Mono values");
+    }
     // Same rows as the golden (order-insensitive, like the golden test above).
     let mut a_rows: Vec<&str> = actual.lines().skip(1).collect();
     let mut g_rows: Vec<&str> = golden_txt.lines().skip(1).collect();

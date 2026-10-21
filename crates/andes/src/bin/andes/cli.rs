@@ -924,8 +924,8 @@ pub(crate) struct SearchArgs {
 
     /// Transfer quality q-value: transfers at or below it are reported as
     /// `transfer_ms1` in `<base>.mbr.parquet`. An internal quant-quality
-    /// q-value, not an identification FDR. Default 0.05.
-    #[arg(long = "mbr-fdr", hide = true, default_value = "0.05", value_parser = parse_unit_fraction)]
+    /// q-value, not an identification FDR. Default 0.01.
+    #[arg(long = "mbr-fdr", hide = true, default_value = "0.01", value_parser = parse_unit_fraction)]
     pub(crate) mbr_fdr: f64,
 
     /// Identified-row quality q-value: an identified (precursor, run) whose
@@ -1060,8 +1060,8 @@ pub(crate) struct QuantFinalizeArgs {
 
     /// Transfer quality q-value: transfers at or below it are reported as
     /// `transfer_ms1`. An internal quant-quality q-value, not an
-    /// identification FDR. Default 0.05.
-    #[arg(long = "mbr-fdr", hide = true, default_value = "0.05", value_parser = parse_unit_fraction)]
+    /// identification FDR. Default 0.01.
+    #[arg(long = "mbr-fdr", hide = true, default_value = "0.01", value_parser = parse_unit_fraction)]
     pub(crate) mbr_fdr: f64,
 
     /// Identified-row quality q-value: an identified (precursor, run) whose
@@ -1573,16 +1573,16 @@ mod mbr_fdr_default_tests {
     }
 
     #[test]
-    fn mbr_fdr_defaults_to_0_05_when_absent() {
+    fn mbr_fdr_defaults_to_0_01_when_absent() {
         let s = SearchWrap::try_parse_from(["andes"]).unwrap();
-        assert_eq!(s.args.mbr_fdr, 0.05);
+        assert_eq!(s.args.mbr_fdr, 0.01);
         let f = FinalizeWrap::try_parse_from(["andes", "--quant-dir", "q", "-o", "x"]).unwrap();
-        assert_eq!(f.args.mbr_fdr, 0.05);
+        assert_eq!(f.args.mbr_fdr, 0.01);
     }
 
     #[test]
     fn mbr_fdr_explicit_value_overrides_default() {
-        let s = SearchWrap::try_parse_from(["andes", "--mbr-fdr", "0.01"]).unwrap();
-        assert_eq!(s.args.mbr_fdr, 0.01);
+        let s = SearchWrap::try_parse_from(["andes", "--mbr-fdr", "0.05"]).unwrap();
+        assert_eq!(s.args.mbr_fdr, 0.05);
     }
 }

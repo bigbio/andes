@@ -84,7 +84,7 @@ reference's spectra that andes identifies with the same peptide.
 - *Which quantity is scored:* the `quantity_normalized` column of the MBR table, which removes each
   run's loading level and its drift along the gradient. The raw `quantity` column, which is what
   andes hands to quantms, scores median |ε| 0.225 and CV 0.240 on the same precursors.
-- *Transfer threshold:* at the default `--mbr-fdr 0.05`, andes quantifies 67,035 precursors in
+- *Transfer threshold:* at `--mbr-fdr 0.05` (the default is 0.01), andes quantifies 67,035 precursors in
   at least 3 runs, at median |ε| 0.164, E. coli |ε| 0.317 and CV 0.124.
 - *Where andes stands:* its median |ε| and CV are lower than those of every match-between-runs
   submission on the leaderboard (snapshot 2026-07-16), and that also holds on the precursors

@@ -224,7 +224,9 @@ pub(crate) struct SearchArgs {
     pub(crate) output_tsv: Option<PathBuf>,
 
     /// Output QPX `.idparquet/` bundle directory (optional; quantms-compatible).
-    /// Writes `psms.parquet` + `proteins.parquet` + `search_params.parquet`.
+    /// Writes `psms.parquet`, `proteins.parquet`, `protein_groups.parquet`
+    /// (empty) and `search_params.parquet`, and with `--tmt` or `--lfq`
+    /// `quantms.feature.parquet`.
     #[arg(long)]
     pub(crate) output_parquet: Option<PathBuf>,
 
@@ -833,8 +835,8 @@ pub(crate) struct SearchArgs {
     pub(crate) tmt_min_purity: f64,
 
     /// Quantification gate: PSMs whose Percolator PEP is above this fail the
-    /// gate (kept in `tmt.parquet` with `quant_weight` 0). Needs `--rescore`.
-    /// 1 turns the criterion off.
+    /// gate (kept in `tmt.parquet` with `quant_weight` 0). Needs `--rescore`
+    /// or `--rescore-native`. 1 turns the criterion off.
     #[arg(long = "tmt-max-pep", default_value = "0.05", value_parser = parse_unit_fraction)]
     pub(crate) tmt_max_pep: f64,
 

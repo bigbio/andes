@@ -8,7 +8,8 @@
 //!
 //! When any record carries match-between-runs columns ([`MbrColumns`]), four
 //! nullable columns follow the QPX ones: `evidence_type` (`identified`,
-//! `transfer_ms1` or `below_threshold`), `transfer_q` (the internal transfer
+//! `transfer_ms2` or `transfer_ms1`; below-threshold rows are not written),
+//! `transfer_q` (the internal transfer
 //! quant-quality q-value, not an identification FDR), `quant_q` (the internal
 //! quality q-value of the row's MS1 feature: the identified-row estimate, or
 //! `transfer_q` for a transfer) and `quantity_se`.

@@ -927,8 +927,9 @@ PIN's name without its extension, so per-run searches into one directory keep on
 
 ### 3e. QPX `.idparquet` bundle (`--output-parquet`)
 
-`--output-parquet <DIR>` writes a **QPX 1.0** bundle (`psms.parquet`,
-`proteins.parquet`, `search_params.parquet`) matching the reference QPX schema, for
+`--output-parquet <DIR>` writes a **QPX 1.0** bundle (`psms.parquet`, `proteins.parquet`,
+`protein_groups.parquet`, `search_params.parquet`, and with `--tmt` or `--lfq`
+`quantms.feature.parquet`) matching the reference QPX schema, for
 [quantms](https://github.com/bigbio/quantms). `psms.parquet` carries the peptidoform,
 modifications, charge, m/z, `is_decoy`, scan/rt, proteins, the spectrum arrays, `score`
 (`andes:RawScore`) and the other features in `additional_scores`. PEP and q-value are null
@@ -936,7 +937,10 @@ until rescoring; `protein_groups.parquet` is empty (protein groups are in
 `<stem>.protein_groups.tsv`, [§1](#protein-groups-and-protein-fdr)). With `--rescore`, every target row must join a
 Percolator result, except where target-decoy competition (`-Y`, which andes always passes)
 kept another PSM of its scan/`ExpMass` group: those target rows are left out of the bundle, as
-they are out of Percolator's output.
+they are out of Percolator's output; so are the decoys that lost that competition, and knockoff
+PSMs, which are never reported. In the match-between-runs feature parquet (`andes quant
+finalize`), `posterior_error_probability` is null on every row: a row is a precursor in a run,
+not a PSM.
 
 ```bash
 andes --spectrum spectra.mzML --database db.fasta \
@@ -1293,7 +1297,8 @@ single input run's MS1 scans still need to fit in memory while it is processed.
 * **Quantification gate.** A PSM passes the gate (`quant_gate_passed` in `tmt.parquet`) only if its precursor purity is at least
   `--tmt-min-purity` (0.7), its Percolator PEP is at most `--tmt-max-pep` (0.05) and its summed
   reporter signal-to-noise is at least `--tmt-min-sn` (off). A PSM without the value a criterion
-  needs (no MS1 or isolation window for purity, no `--rescore` for PEP, no noise for S/N) is not
+  needs (no MS1 or isolation window for purity, no `--rescore` or `--rescore-native` for PEP, no
+  noise for S/N) is not
   held to that criterion. The gate only chooses which PSMs are quantified: every PSM stays in the
   identification output (PIN, TSV, `psms.parquet`), and `tmt.parquet` and the quantms feature
   parquet keep every quantified PSM with `quant_weight` 0 for the gated ones. The log counts the PSMs each criterion

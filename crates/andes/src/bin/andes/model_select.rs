@@ -391,7 +391,16 @@ pub(crate) fn build_selection_key(
                 );
                 ("CID", "LowRes", true)
             }
-            ("HCD", "TOF") => ("CID", "TOF", true),
+            // TOF analyzers (QTOF, timsTOF) fragment by beam-type collisional
+            // activation: the b/y chemistry of HCD, measured at high resolution.
+            // Vendors label it "CID" (the timsTOF `.d` reader and Bruker mzML
+            // exports both do), so CID/PQD and HCD on TOF share one key, routed
+            // to an HCD model. With no TOF-keyed model in the store,
+            // `select_nearest` then substitutes the same-resolution high-res HCD
+            // model, never the 0.5-Da ion-trap model that the activation alone
+            // would pick. The protocol is kept: a TMT/phospho TOF run gets the
+            // matching high-res protocol model.
+            ("HCD" | "CID", "TOF") => ("HCD", "TOF", false),
             ("CID", "QExactive") => ("CID", "LowRes", true),
             ("ETD", i) if !matches!(i, "LowRes" | "HighRes") => ("ETD", "LowRes", true),
             ("UVPD", i) if i != "QExactive" => ("CID", "LowRes", true),
@@ -521,6 +530,55 @@ mod param_resolver_tests {
             None,
         );
         assert_eq!(act, ActivationMethod::HCD);
+    }
+
+    /// TOF and timsTOF runs fragment by beam-type CID, whether the input labels
+    /// it CID (the `.d` reader, Bruker mzML) or HCD. With no TOF model in the
+    /// bundled store every combination resolves to a high-resolution HCD model
+    /// for the requested protocol, never to the 0.5-Da ion-trap model.
+    #[test]
+    fn tof_runs_resolve_to_a_high_res_hcd_model() {
+        let cases = [
+            (Protocol::Auto, "hcd_qexactive_tryp"),
+            (Protocol::Standard, "hcd_qexactive_tryp"),
+            (Protocol::Tmt, "hcd_qexactive_tryp_tmt"),
+            (Protocol::Phospho, "hcd_qexactive_tryp_phosphorylation"),
+            (Protocol::Itraq, "hcd_qexactive_tryp_itraq"),
+        ];
+        for inst in [InstrumentType::TOF, InstrumentType::TimsTOF] {
+            for act in [
+                ActivationMethod::CID,
+                ActivationMethod::HCD,
+                ActivationMethod::PQD,
+            ] {
+                let key = build_selection_key(
+                    act,
+                    Some(inst),
+                    Protocol::Auto,
+                    model::enzyme::Enzyme::Trypsin,
+                );
+                assert_eq!(
+                    (key.activation.as_str(), key.instrument.as_str()),
+                    ("HCD", "TOF")
+                );
+                for (protocol, expected) in cases {
+                    let (id, param) = load_param_from_store(
+                        act,
+                        Some(inst),
+                        protocol,
+                        model::enzyme::Enzyme::Trypsin,
+                        None,
+                        None,
+                    )
+                    .expect("bundled store");
+                    assert_eq!(id, expected, "{act:?}/{inst:?}/{protocol:?}");
+                    assert!(
+                        param.data_type.instrument.is_high_resolution(),
+                        "{act:?}/{inst:?}/{protocol:?} -> {id} is not high-res"
+                    );
+                }
+            }
+        }
     }
     use crate::cli::{
         parse_charge_range, parse_enzyme_specificity, parse_fragmentation,

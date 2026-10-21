@@ -119,7 +119,7 @@ fn resolve_model_id_old(
     // IMPORTANT: this mirror must match the binary's `build_selection_key`
     // *normalization*, not just bundle membership. The binary only rewrites
     // `(HCD,LowRes)`, `(CID,QExactive)`, `(UVPD,non-QE)`, `(ETD,non-LowRes/HighRes)`
-    // and `(HCD,TOF)`; for every other unmatched `(frag,inst)` it keeps the
+    // and `(CID|HCD,TOF)`; for every other unmatched `(frag,inst)` it keeps the
     // instrument verbatim, so a TOF instrument with no `*_tof_*` model bundled
     // (the v1 case) falls straight through to the global default rather than to
     // `cid_lowres_tryp`. Encode that here so the reference tracks the binary.
@@ -269,10 +269,12 @@ fn normalize_activation_instrument(act: &str, inst: &str) -> (String, String, bo
         // low-res b/y model (cid_lowres_tryp). Protocol dropped (final-fallback
         // base model). Mirrored in build_selection_key.
         ("HCD", "LowRes") => ("CID".into(), "LowRes".into(), true),
-        // HCD + TOF → CID + TOF (no hcd_tof model bundled; final fallback
-        // maps (HCD, TOF|HighRes) → cid_tof_tryp).
-        // Protocol dropped: final fallback returns base model only.
-        ("HCD", "TOF") => ("CID".into(), "TOF".into(), true),
+        // CID/HCD + TOF → HCD + TOF: TOF fragmentation is beam-type CID (b/y,
+        // high-res), whatever the input calls it. Protocol kept. `select` has
+        // no TOF model to find and returns the generic default, as the
+        // reference does; the binary's `select_nearest` refines that to the
+        // protocol's high-res HCD model (pinned in model_select.rs tests).
+        ("HCD" | "CID", "TOF") => ("HCD".into(), "TOF".into(), false),
         // CID + QExactive → CID + LowRes (no cid_qexactive model bundled;
         // final fallback default arm → cid_lowres_tryp).
         // Protocol dropped.

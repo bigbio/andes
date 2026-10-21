@@ -278,38 +278,31 @@ pub fn select_nearest<'a>(
             return (id, true);
         }
     }
-    // 2b. Same RESOLUTION CLASS, keeping activation, enzyme and class. The
-    //    auto-detected generic `HighRes` instrument is not a store instrument
-    //    name for most models (the bundled high-res HCD tryptic model is keyed
-    //    `QExactive`), so a high-res Orbitrap run that is not a recognised family
-    //    fell through to step 3 below, which picks the alphabetically-FIRST
-    //    same-activation model — `hcd_astral_tryp`, an Astral-specific model —
-    //    for every generic high-res HCD file. Measured 2026-09-02: every run of
-    //    the glyco benchmark, both regimes, all arms, scored with that fallback
-    //    and warned "scores may be mis-calibrated". Swap within the high-res
-    //    class first; only then relax the instrument arbitrarily.
-    {
-        let sibling: Option<&str> = match key.instrument.as_str() {
-            "HighRes" => Some("QExactive"),
-            "QExactive" => Some("HighRes"),
-            _ => None,
+    // 2b. Same RESOLUTION CLASS, keeping activation, enzyme and class. A model
+    //    trained at the same fragment resolution is tried before step 3 relaxes
+    //    the instrument arbitrarily, because step 3 can cross the resolution
+    //    class: a high-res query landing on a 0.5-Da ion-trap model loses the
+    //    high-res fragment tolerance and ion statistics. The siblings are the
+    //    generic high-res models (`QExactive`, then `HighRes`), so a high-res
+    //    instrument without its own model (generic `HighRes`, `TOF`, `TimsTOF`)
+    //    lands on the general high-res b/y model rather than on whichever
+    //    same-activation model sorts first by id (an Astral-specific model, or
+    //    a low-res one).
+    for inst in resolution_class_siblings(&key.instrument) {
+        let k = SelectionKey {
+            instrument: (*inst).to_string(),
+            ..key.clone()
         };
-        if let Some(inst) = sibling {
-            let k = SelectionKey {
-                instrument: inst.to_string(),
-                ..key.clone()
+        if let Some(id) = select(entries, &k, instrument_family, None) {
+            return (id, true);
+        }
+        if key.enzyme != "Tryp" {
+            let k2 = SelectionKey {
+                enzyme: "Tryp".to_string(),
+                ..k
             };
-            if let Some(id) = select(entries, &k, instrument_family, None) {
+            if let Some(id) = select(entries, &k2, instrument_family, None) {
                 return (id, true);
-            }
-            if key.enzyme != "Tryp" {
-                let k2 = SelectionKey {
-                    enzyme: "Tryp".to_string(),
-                    ..k
-                };
-                if let Some(id) = select(entries, &k2, instrument_family, None) {
-                    return (id, true);
-                }
             }
         }
     }
@@ -344,6 +337,20 @@ pub fn select_nearest<'a>(
     }
     // 4. Standard base — guaranteed present in the bundled store.
     (standard_id, true)
+}
+
+/// Store instrument names in the same fragment-resolution class as
+/// `instrument`, in the order [`select_nearest`] tries them before relaxing the
+/// instrument across classes. Only the generic high-res models are siblings:
+/// an instrument-specific model (e.g. `OrbitrapAstral`) is never a stand-in for
+/// another instrument. The ion-trap class (`LowRes`) has no siblings.
+pub fn resolution_class_siblings(instrument: &str) -> &'static [&'static str] {
+    match instrument {
+        "QExactive" => &["HighRes"],
+        "HighRes" => &["QExactive"],
+        "TOF" | "TimsTOF" | "OrbitrapAstral" => &["QExactive", "HighRes"],
+        _ => &[],
+    }
 }
 
 /// Parse a manifest experiment-class string (e.g. `"phospho+tmt"`) into a `BTreeSet<String>`.
@@ -713,6 +720,72 @@ mod tests {
         );
         assert_eq!(id, "hcd_qexactive_tryp");
         assert!(sub);
+    }
+
+    /// A TOF-class query with no TOF model stays in the high-res class: it
+    /// lands on the generic high-res HCD model, never on the low-res model that
+    /// sorts first among same-activation models, and keeps its protocol.
+    #[test]
+    fn tof_without_a_tof_model_stays_high_res() {
+        let m = vec![
+            e("astral", "HCD", "OrbitrapAstral", "Tryp", &[]),
+            e("cid_lowres_tryp", "CID", "LowRes", "Tryp", &[]),
+            e("hcd_lowres_like", "HCD", "LowRes", "Tryp", &[]),
+            e("hcd_qexactive_tryp", "HCD", "QExactive", "Tryp", &[]),
+            e(
+                "hcd_qexactive_tryp_tmt",
+                "HCD",
+                "QExactive",
+                "Tryp",
+                &["tmt"],
+            ),
+        ];
+        for inst in ["TOF", "TimsTOF"] {
+            let (id, sub) = select_nearest(
+                &m,
+                &key("HCD", inst, "Tryp", &[]),
+                fam,
+                "hcd_qexactive_tryp",
+            );
+            assert_eq!(id, "hcd_qexactive_tryp", "{inst}");
+            assert!(sub);
+            let (id, sub) = select_nearest(
+                &m,
+                &key("HCD", inst, "Tryp", &["tmt"]),
+                fam,
+                "hcd_qexactive_tryp",
+            );
+            assert_eq!(id, "hcd_qexactive_tryp_tmt", "{inst} TMT");
+            assert!(sub);
+        }
+    }
+
+    /// A TimsTOF-keyed model, once in the store, is an exact hit.
+    #[test]
+    fn timstof_model_is_an_exact_hit() {
+        let m = vec![
+            e("hcd_qexactive_tryp", "HCD", "QExactive", "Tryp", &[]),
+            e("hcd_timstof_tryp", "HCD", "TimsTOF", "Tryp", &[]),
+        ];
+        let (id, sub) = select_nearest(
+            &m,
+            &key("HCD", "TimsTOF", "Tryp", &[]),
+            fam,
+            "hcd_qexactive_tryp",
+        );
+        assert_eq!(id, "hcd_timstof_tryp");
+        assert!(!sub);
+    }
+
+    #[test]
+    fn resolution_class_siblings_never_cross_to_low_res() {
+        for inst in ["QExactive", "HighRes", "TOF", "TimsTOF", "OrbitrapAstral"] {
+            assert!(
+                !resolution_class_siblings(inst).contains(&"LowRes"),
+                "{inst}"
+            );
+        }
+        assert!(resolution_class_siblings("LowRes").is_empty());
     }
 
     /// An exact hit is NOT flagged as substituted (byte-identical to `select`).

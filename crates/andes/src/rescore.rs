@@ -173,8 +173,8 @@ fn fnv1a(s: &str) -> u64 {
 
 /// Deterministic fold assignment by spectrum (splitmix64 of its key hash).
 fn fold_of(spectrum: u64, seed: u64) -> usize {
-    let mut z = (seed ^ spectrum.wrapping_mul(0x9e37_79b9_7f4a_7c15))
-        .wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut z =
+        (seed ^ spectrum.wrapping_mul(0x9e37_79b9_7f4a_7c15)).wrapping_add(0x9e37_79b9_7f4a_7c15);
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     z ^= z >> 31;
@@ -407,7 +407,10 @@ mod tests {
     fn spectrum_key_drops_scan_rank_and_row() {
         assert_eq!(spectrum_key("run/index=101_101_1", 101), "run/index=101");
         assert_eq!(spectrum_key("run/index=101_101_2_1", 101), "run/index=101");
-        assert_eq!(spectrum_key("run/cycle=4 experiment=2_0_1", 0), "run/cycle=4 experiment=2");
+        assert_eq!(
+            spectrum_key("run/cycle=4 experiment=2_0_1", 0),
+            "run/cycle=4 experiment=2"
+        );
         // Rank or row equal to the scan number: every row of the spectrum
         // keeps the same key.
         for id in ["run/x_1_1", "run/x_1_1_1", "run/x_1_2_1", "run/x_1_1_0"] {

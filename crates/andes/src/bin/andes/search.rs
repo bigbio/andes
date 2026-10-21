@@ -2306,8 +2306,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // target's q-value becomes the larger of the global and its class q-value,
     // so the filtered TSV, the QPX and quantification accept a PSM only if it
     // passes both. A search with one class (any FASTA) is left unchanged.
-    // Knockoff rows: in the PIN and the QPX bundle as targets with q = 1, in
-    // no other output.
+    // Knockoff rows: in the PIN as targets; left out of the QPX bundle, the
+    // filtered TSV, quantification and every other output.
     let mut knockoff_rows: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Some(ref mut map) = rescore_map {
         // A variant peptide a reference protein holds once I and L are taken

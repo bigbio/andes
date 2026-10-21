@@ -652,7 +652,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         _ => {}
     }
     // C1: parameter-free path only (no explicit --mods). When the protocol
-    // resolves to TMT/iTRAQ, inject the tag as a fixed mod on K + peptide
+    // resolves to TMT/iTRAQ, or `--tmt` names the kit, inject the tag as a fixed mod on K + peptide
     // N-term so labeled peptides match their precursor mass — otherwise the
     // reporter filter engages but every labeled candidate is +tag Da off and
     // misses. The kit comes from `label` when known, else the protocol's
@@ -672,6 +672,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             (model::protocol::Protocol::ITRAQ | model::protocol::Protocol::ITRAQPhospho, _) => {
                 Some(input::IsobaricLabel::Itraq.tag())
             }
+            // `--tmt PLEX` names the kit whatever the protocol (e.g. phospho).
+            (_, Some(l)) if cli.tmt.is_some() => Some(l.tag()),
             _ => None,
         };
         if let Some((name, mass)) = tag {

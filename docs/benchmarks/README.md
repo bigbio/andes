@@ -14,18 +14,18 @@ leaderboard. Section 2 gives the date and the andes commit behind each row.
 
 | benchmark | dataset | andes | best comparison | true FDP at nominal 1% | andes wall |
 |---|---|---:|---|---|---:|
-| Standard, high-res | Astral HCD LFQ, PXD070049 (1 file) | **47,080** PSMs | engine K 31,435 (217 s) | 0.95–1.03% | 160 s |
+| Standard, high-res | Astral HCD LFQ, PXD070049 (1 file) | **47,080** PSMs | engine K 31,435 (217 s) | 0.89–1.04% | 160 s |
 | TMT-labelled, low-res | a05058, PXD007683 (1 file, ion-trap CID) | **12,347** PSMs | engine K 10,504 (77 s) | not measurable | 28 s |
 | Low-res LFQ | UPS1, PXD001819 (1 file, ion-trap CID) | **15,848** PSMs | engine K 14,734 (42 s); the Java predecessor 15,904 | **2.3–2.5%** (above nominal; 2026-10-20, see below) | 18 s |
-| Phospho-enriched | mouse liver, PXD007653 (1 file, Q Exactive) | **37,190** PSMs, ~26,800 phospho-bearing | engine K 33,984 at 1.77% FDP (1,096 s) | 0.97–1.08% | 637 s |
-| Glyco, quick tier | mouse liver, PXD005553 (1 fraction) | **6,922–6,959** glycoPSMs | 89.0% of engine L's and 89.6% of engine A's identifications confirmed | 0.85–1.36% | 6 min |
-| Glyco, deep tier | mouse liver, PXD005553 (5 fractions) | **31,666 ± 9** glycoPSMs | 78.9% (engine L) and 88.0% (engine A) confirmed | 1.11% ± 0.03 | 23–29 min per fraction, 16 threads |
+| Phospho-enriched | mouse liver, PXD007653 (1 file, Q Exactive) | **37,190** PSMs, ~26,800 phospho-bearing | engine K 33,984 at 1.77% FDP (1,096 s; whole-protein shuffle) | 0.94–1.08% | 637 s |
+| Glyco, quick tier | mouse liver, PXD005553 (1 fraction) | **6,922–6,959** glycoPSMs | 89.0% of engine L's and 89.6% of engine A's identifications confirmed | 0.45–1.45% | 6 min |
+| Glyco, deep tier | mouse liver, PXD005553 (5 fractions) | **31,666 ± 9** glycoPSMs | 78.9% (engine L) and 88.0% (engine A) confirmed | 1.11% ± 0.03 (whole-protein shuffle) | 23–29 min per fraction, 16 threads |
 
 **Quantification:**
 
 | benchmark | dataset | andes | best comparison | error control | andes cost |
 |---|---|---|---|---|---|
-| Label-free, match between runs (ProteoBench "Quant LFQ DDA ion") | PXD028735, 6 runs, Q Exactive HF-X, human/yeast/E. coli mix | **54,932** precursors in ≥ 3 runs; median \|ε\| **0.155**, CV **0.110** (transfer q 0.01) | median \|ε\| 0.190 (engine A, submission 2); CV 0.127 (engine C, submission 7); most precursors 81,933 (engine E, median \|ε\| 0.388) | PSM FDP 0.97%; entrapment-only quantified precursors 0.26% | 8.6k CPU-s for 6 runs |
+| Label-free, match between runs (ProteoBench "Quant LFQ DDA ion") | PXD028735, 6 runs, Q Exactive HF-X, human/yeast/E. coli mix | **54,932** precursors in ≥ 3 runs; median \|ε\| **0.155**, CV **0.110** (transfer q 0.01) | median \|ε\| 0.190 (engine A, submission 2); CV 0.127 (engine C, submission 7); most precursors 81,933 (engine E, median \|ε\| 0.388) | PSM FDP 0.93–0.95%; entrapment-only quantified precursors 0.26% | 8.6k CPU-s for 6 runs |
 | TMT reporter ions | yeast triple knockout, TMTpro 16-plex, PXD017803 | knockout-channel interference **0.127** (SPS-MS3), **0.040** at purity ≥ 0.9 | 0.139 with a reference purity filter at ≥ 0.9 | — | — |
 
 **Opt-in modes** (Astral, PSMs / distinct peptides, Percolator seeds 42, 1 and 2):
@@ -39,7 +39,9 @@ leaderboard. Section 2 gives the date and the andes commit behind each row.
 
 **Standard, high-res (Astral).** One 15-minute DDA run of the ProteoBench human/yeast/E. coli
 sample against the 31,889-entry HYE FASTA, measured 2026-10-07 at `40774aca`. The true FDP comes
-from a 1:1 shuffled entrapment version of the same database. Engine K was run on the same host
+from the same database plus a peptide-level shuffled entrapment (`build_shuffled_entrap.py`, T/E
+1.075), re-measured 2026-10-21 at `0629cd8` over three database realisations and Percolator seeds
+42, 1 and 2 (see "True FDP by entrapment" below). Engine K was run on the same host
 with matched parameters and the same Percolator rescoring.
 
 **TMT-labelled, low-res.** One ion-trap CID run of a TMT 10-plex sample against human + yeast
@@ -57,19 +59,24 @@ strongest; on the 2026-10-10 count andes trails it by 56 PSMs.
 
 **Phospho-enriched.** One single-shot EasyPhos mouse liver file
 (`20151014_QEp6_NaKr_SA_totalliver_control2_phospho.raw`), not in any model's training data,
-against the 1:1 shuffled mouse entrapment database, 80 Da index slices, 2026-10-07 at
-`40774aca`. andes finds 9.6% more PSMs than engine K at a lower measured error. Against the
+against mouse reviewed proteins plus a shuffled entrapment, 80 Da index slices, 2026-10-07 at
+`40774aca`. andes finds 9.6% more PSMs than engine K at a lower measured error (both measured on
+the earlier whole-protein shuffle). The true FDP in the table was re-measured 2026-10-21 at
+`0629cd8` on a peptide-level shuffle (T/E 1.061), three realisations, Percolator seeds 42, 1 and 2. Against the
 depositors' engine B identifications (PEP ≤ 0.01, 23,563 scans) andes covers 82.4%, with 95.3%
 same-scan backbone agreement. Phosphosite localisation is **not** scored.
 
-**Glyco.** Mouse liver glycoproteome data (PXD005553), against the 1:1 shuffled mouse entrapment database with
+**Glyco.** Mouse liver glycoproteome data (PXD005553), against mouse proteins plus a shuffled entrapment with
 `--glyco --glyco-species mouse --decoy-strategy sequon-reverse`. Two published reference
 identification sets for the same spectra ship in [`glyco/truth/`](glyco/truth/): engine L (the
 depositors') and engine A (a later reanalysis, PXD031032). "Confirmed" is the share of a
 reference's spectra that andes identifies with the same peptide.
 - *Quick tier:* the `MouseLiver-Z-T-1` fraction as converted mzML, measured 2026-10-07; the
   range is over three Percolator seeds; 19.9 GB peak memory. Reading the `.raw` natively, as
-  the commands below do, can give somewhat different counts.
+  the commands below do, can give somewhat different counts. The true FDP was re-measured
+  2026-10-21 at `0629cd8` on three peptide-level shuffled databases (Percolator seeds 42, 1 and
+  2): 0.92–0.96%, 0.45–0.57% and 1.13–1.45%. Each run has only 15–49 entrapment hits, so the
+  spread between databases is counting noise, not a property of the database design.
 - *Deep tier:* all five fractions, pooled before Percolator, five seeds. Measured 2026-09-05 at
   `14818d3e` on an older, smaller glycan list and converted mzML; not re-measured since.
 - The open problem is selection, not generation: almost every reference spectrum produces a
@@ -91,8 +98,13 @@ reference's spectra that andes identifies with the same peptide.
   andes shares with engine A's and engine C's largest submissions. Its precursor count is not
   the highest: 12 of the 30 submissions report more at transfer q 0.01. Engine labels follow
   #155.
-- *Error control* is measured on the same runs with a shuffled entrapment database. Wrong-peak
-  transfers are 1.02% of accepted transfers at transfer q 0.01 and 1.85% at 0.05.
+- *Error control* is measured on the same runs with the HYE database plus a peptide-level
+  shuffled entrapment (T/E 1.075), 2026-10-21 at `0629cd8`, Percolator seeds 42, 1 and 2. PSM FDP
+  at q 0.01 is 0.93–0.95%; precursors quantified in at least 3 runs at transfer q 0.01 are
+  0.26% entrapment-only. Of the accepted transfers, the entrapment measures a false-donor share
+  of 0.30–0.38% at transfer q 0.01 and 0.52–0.58% at 0.05; the identity-decoy estimate is
+  0.28–0.31% and 0.44–0.45%. So the estimate tracks the false-donor share to within about 25%,
+  but it is not an upper bound. The wrong-peak part has no entrapment check.
 
 **TMT quantification (yeast triple knockout).**
 - *Data and measurement:* the hrMS2 and SPS-MS3 runs of PXD017803 (TMTpro 16-plex). Three
@@ -250,6 +262,16 @@ with `purity ≥ 0.9`.
   only when **all** its proteins are entrapment and its peptide, with I folded to L (the two
   are isobaric), occurs in no target protein sequence. `entrap_common.py` holds this rule
   for `run.sh`, `build_databases.sh` (the T/E factor) and the glyco evaluators.
+- **Entrapment design.** Shuffled entrapment is built peptide by peptide
+  ([`build_shuffled_entrap.py`](build_shuffled_entrap.py)): each tryptic peptide of each target
+  protein is shuffled with its C-terminal residue fixed, as in the peptide-level entrapment
+  construction of Wen et al., Nat. Methods 2025. Every entrapment peptide then has a target of
+  the same composition and mass. The earlier builder shuffled whole proteins: 89.6% of its
+  entrapment peptides on the HYE database had no same-composition target peptide, and on the
+  same Astral search it read 0.81% where the peptide-level databases read 0.92–1.02% and a
+  foreign proteome (reviewed *Arabidopsis*, T/E 2.228) 0.99% (#225). On phospho it agreed with
+  the peptide-level databases (1.05% against 0.95–1.04%). FDPs marked "whole-protein shuffle"
+  were measured that way and may read low.
 - **Percolator.** Version 3.7.1, `--seed 42 -Y`, on plain FASTA with andes's `XXX_` decoys, for
   every engine compared on the same host. Percolator's q-value has a floor of 1 / (number of
   top targets), so small or sparse runs return few or no identifications at 1%; pool glyco
@@ -274,6 +296,8 @@ with `purity ≥ 0.9`.
   contract). The TMT figures are from 2026-10-10.
 - **Only some identification sets measure error.** TMT has no entrapment component. UPS1's
   entrapment is not 1:1, and its nominal 1% is 2.3–2.5% true FDP.
+- **Not re-measured on the peptide-level entrapment:** the glyco deep tier, the engine K
+  phospho FDP, and the `--chimeric` and `--refine` FDPs in the opt-in table.
 - **Single files.** Phospho is one file, peptide-level only; `--refine` is measured on Astral
   only.
 - **Glyco composition on fucose-rich tissue.** On heart and lung the backbone agrees with

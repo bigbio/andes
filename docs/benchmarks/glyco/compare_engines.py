@@ -8,13 +8,13 @@ masses and the glycan tag stripped), then reports (a) the distinct
 
 Inputs (command-line paths) are the published result files, none of which is
 produced by andes except the andes PIN + native-rescore PSMs:
-  * engine N   GPSM text export                 (PeptideFDR <= 0.01)
-  * engine O   result workbook (.xlsx)          (all rows)
-  * engine M   result workbook (.xlsx)          (Score >= 300)
-  * engine L   *-FDR.txt, PXD005553             (TotalFDR <= 0.01, target only)
-  * engine A   psm.tsv, PXD031032               (Expectation <= 0.01, Delta
-                 Mass -> gdb composition within 0.02 Da)
-  * andes      <stem>.glyco.pin + native-rescore .psms (q <= 0.01)
+  * Glyco-Decipher   GPSM text export                 (PeptideFDR <= 0.01)
+  * StrucGP          result workbook (.xlsx)          (all rows)
+  * Byonic           result workbook (.xlsx)          (Score >= 300)
+  * pGlyco2          *-FDR.txt, PXD005553             (TotalFDR <= 0.01, target only)
+  * MSFragger-Glyco  psm.tsv, PXD031032               (Expectation <= 0.01, Delta
+                     Mass -> gdb composition within 0.02 Da)
+  * andes            <stem>.glyco.pin + native-rescore .psms (q <= 0.01)
 
 An andes row is entrapment only if every protein it maps to is an ENTRAP_ protein. Pass
 `--fasta` (the search database) to also rescue entrapment-only rows whose I/L-folded bare
@@ -29,28 +29,28 @@ M='{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
 
 # ---------- input files ----------
 _ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-_ap.add_argument('--engine-n', required=True, help='engine N GPSM text export')
-_ap.add_argument('--engine-o', required=True, help='engine O result workbook (.xlsx)')
-_ap.add_argument('--engine-m', required=True, help='engine M result workbook (.xlsx)')
-_ap.add_argument('--engine-l', required=True, help='engine L *-FDR.txt')
-_ap.add_argument('--engine-a', required=True, help='engine A psm.tsv')
-_ap.add_argument('--gdb', required=True, help='glycan .gdb used to map engine A delta masses')
+_ap.add_argument('--glyco-decipher', required=True, help='Glyco-Decipher GPSM text export')
+_ap.add_argument('--strucgp', required=True, help='StrucGP result workbook (.xlsx)')
+_ap.add_argument('--byonic', required=True, help='Byonic result workbook (.xlsx)')
+_ap.add_argument('--pglyco2', required=True, help='pGlyco2 *-FDR.txt')
+_ap.add_argument('--msfragger-glyco', required=True, help='MSFragger-Glyco psm.tsv')
+_ap.add_argument('--gdb', required=True, help='glycan .gdb used to map MSFragger-Glyco delta masses')
 _ap.add_argument('--andes-pin', required=True)
 _ap.add_argument('--andes-psms', required=True)
 _ap.add_argument('--fasta', default=None, help='search FASTA; enables I/L-equivalent entrapment rescue')
 _ap.add_argument('--out', default='final_comparison.json')
 _args = _ap.parse_args()
 CONFIG = {
-    'engine N':   _args.engine_n,
-    'engine O':   _args.engine_o,
-    'engine M':   _args.engine_m,
-    'engine L':   _args.engine_l,
-    'engine A':   _args.engine_a,
-    'gdb':        _args.gdb,
-    'andes_pin':  _args.andes_pin,
-    'andes_psms': _args.andes_psms,
-    'fasta':      _args.fasta,
-    'out':        _args.out,
+    'Glyco-Decipher':  _args.glyco_decipher,
+    'StrucGP':         _args.strucgp,
+    'Byonic':          _args.byonic,
+    'pGlyco2':         _args.pglyco2,
+    'MSFragger-Glyco': _args.msfragger_glyco,
+    'gdb':             _args.gdb,
+    'andes_pin':       _args.andes_pin,
+    'andes_psms':      _args.andes_psms,
+    'fasta':           _args.fasta,
+    'out':             _args.out,
 }
 
 # ---------- glycan comp normalization: all -> (HexNAc,Hex,Fuc,NeuAc,NeuGc) ----------
@@ -62,7 +62,7 @@ def parse_comp_simple(s):
     d['NeuAc']+=d.get('Neu5Ac',0)+d.get('Sia',0); d['NeuGc']+=d.get('Neu5Gc',0)
     return (d['HexNAc'],d['Hex'],d['Fuc'],d['NeuAc'],d['NeuGc'])
 
-def parse_comp_engine_o(s):
+def parse_comp_strucgp(s):
     d={'N':0,'H':0,'F':0,'A':0,'G':0,'S':0}
     for m in re.finditer(r'([NHFAGS])(\d+)', s): d[m.group(1)]+=int(m.group(2))
     return (d['N'],d['H'],d['F'],d['A']+d['S'],d['G'])
@@ -74,8 +74,8 @@ def parse_comp_andes(s):
         d[m.group(1)]+=int(m.group(2))
     return (d['HexNAc'],d['Hex'],d['Fuc'],d['NeuAc'],d['NeuGc'])
 
-def parse_comp_engine_l(s):
-    # engine L "Hex HexNAc Fuc NeuAc NeuGc" e.g. "6 2 0 0 0" (order confirmed by GlyMass)
+def parse_comp_pglyco2(s):
+    # pGlyco2 "Hex HexNAc Fuc NeuAc NeuGc" e.g. "6 2 0 0 0" (order confirmed by GlyMass)
     t=s.split()
     t=t+[0]*5
     hex_,hn,f,a,g=[int(float(x)) for x in t[:5]]
@@ -86,9 +86,9 @@ def acc(prot):
     a=m.group(1) if m else prot
     return re.sub(r'-\d+$', '', a)  # UniProt isoform -> canonical accession
 
-def acc_engine_o(prot): return prot  # already accession
+def acc_strucgp(prot): return prot  # already accession
 
-def strip_engine_m_pep(p):
+def strip_byonic_pep(p):
     # "K.HLLEN[+1864.634]ATASVSEAER.K" -> strip the single-AA flanks by first/last
     # dot, NOT a full split (the glycan/mod masses contain decimal points).
     p=p.strip()
@@ -121,46 +121,46 @@ def load_sheet(path, sheetfile):
 
 ref={}
 
-# 1. engine N (PeptideFDR<=0.01)
+# 1. Glyco-Decipher (PeptideFDR<=0.01)
 gd=[]
-with open(CONFIG['engine N']) as f:
+with open(CONFIG['Glyco-Decipher']) as f:
     r=csv.reader(f,delimiter='\t'); next(r)
     for line in r:
         if len(line)<19 or float(line[11])>0.01: continue
         gd.append((line[5], parse_comp_simple(line[17]), acc(line[8])))
-ref['engine N']={'gps':set((p,g) for p,g,_ in gd),'prots':set(x[2] for x in gd),'n':len(gd)}
+ref['Glyco-Decipher']={'gps':set((p,g) for p,g,_ in gd),'prots':set(x[2] for x in gd),'n':len(gd)}
 
-# 2. engine O
-sg=load_sheet(CONFIG['engine O'],'xl/worksheets/sheet1.xml')
+# 2. StrucGP
+sg=load_sheet(CONFIG['StrucGP'],'xl/worksheets/sheet1.xml')
 sgd=[]
 for r in sg[1:]:
     p=r.get(12,'').strip(); pr=r.get(15,'').strip(); gc=r.get(20,'').strip()
     if not p: continue
-    sgd.append((p, parse_comp_engine_o(gc), pr))
-ref['engine O']={'gps':set((p,g) for p,g,_ in sgd),'prots':set(x[2] for x in sgd),'n':len(sgd)}
+    sgd.append((p, parse_comp_strucgp(gc), pr))
+ref['StrucGP']={'gps':set((p,g) for p,g,_ in sgd),'prots':set(x[2] for x in sgd),'n':len(sgd)}
 
-# 3. engine M (Score>=300)
-by=load_sheet(CONFIG['engine M'],'xl/worksheets/sheet2.xml')
+# 3. Byonic (Score>=300)
+by=load_sheet(CONFIG['Byonic'],'xl/worksheets/sheet2.xml')
 byd=[]
 for r in by[1:]:
     gly=r.get(4,'').strip(); pep=r.get(3,'').strip(); pr=r.get(19,'').strip()
     if not gly: continue
     if float(r.get(14,0) or 0)<300: continue
-    byd.append((strip_engine_m_pep(pep), parse_comp_simple(gly), acc(pr)))
-ref['engine M']={'gps':set((p,g) for p,g,_ in byd),'prots':set(x[2] for x in byd),'n':len(byd)}
+    byd.append((strip_byonic_pep(pep), parse_comp_simple(gly), acc(pr)))
+ref['Byonic']={'gps':set((p,g) for p,g,_ in byd),'prots':set(x[2] for x in byd),'n':len(byd)}
 
-# 3b. engine L (PXD005553, same raw files; TotalFDR<=0.01, target only)
+# 3b. pGlyco2 (PXD005553, same raw files; TotalFDR<=0.01, target only)
 pg=[]
-with open(CONFIG['engine L']) as f:
+with open(CONFIG['pGlyco2']) as f:
     r=csv.reader(f,delimiter='\t'); next(r)
     for line in r:
         if len(line)<25: continue
         if line[19].strip()!='0' or line[20].strip()!='0': continue  # GlyDecoy/PepDecoy
         if float(line[23])>0.01: continue  # TotalFDR
         pep=line[5].replace('J','N')          # J = glycosylated Asn
-        g=parse_comp_engine_l(line[8])
+        g=parse_comp_pglyco2(line[8])
         pg.append((pep, g, acc(line[24])))
-ref['engine L']={'gps':set((p,g) for p,g,_ in pg),'prots':set(x[2] for x in pg),'n':len(pg)}
+ref['pGlyco2']={'gps':set((p,g) for p,g,_ in pg),'prots':set(x[2] for x in pg),'n':len(pg)}
 
 # 4. andes: read pin + psms q-values
 def load_andes(pin_path, psms_path, qmax=0.01, sample=None):
@@ -204,7 +204,7 @@ def load_andes(pin_path, psms_path, qmax=0.01, sample=None):
             andes.append((pseq, gc, a, is_entrap))
     return andes, n_entrap
 
-# 5. engine A: the export carries the glycan ONLY as a "Delta Mass"
+# 5. MSFragger-Glyco: the export carries the glycan ONLY as a "Delta Mass"
 #    (residue-sum mass, no water subtracted), so we map it back to a canonical
 #    composition via the --gdb composition space. Expectation is
 #    the FDR proxy (the file has no glycan q-value / no decoys).
@@ -219,10 +219,10 @@ def _gdb_comp_masses(gdb):
     items=sorted((round(M['N']*t[0]+M['H']*t[1]+M['F']*t[2]+M['A']*t[3]+M['G']*t[4],5),t) for t in comps)
     return [m for m,_ in items], items
 
-def load_engine_a(tsv, gdb, tissue='MouseLiver-Z-T-1', emax=1e-2, tol=0.02):
+def load_msfragger_glyco(tsv, gdb, tissue='MouseLiver-Z-T-1', emax=1e-2, tol=0.02):
     import bisect
     masses, items = _gdb_comp_masses(gdb)
-    C13=1.003355  # one ^13C: engine A reports M+1/M+2 precursors as their own rows
+    C13=1.003355  # one ^13C: MSFragger-Glyco reports M+1/M+2 precursors as their own rows
     def lookup(dm):
         lo=bisect.bisect_left(masses, dm-tol); hi=bisect.bisect_right(masses, dm+tol)
         cand=items[lo:hi]
@@ -252,8 +252,8 @@ def load_engine_a(tsv, gdb, tissue='MouseLiver-Z-T-1', emax=1e-2, tol=0.02):
 
 _sample = SampleSequences(CONFIG['fasta']) if CONFIG['fasta'] else None
 andes_rows, n_entrap = load_andes(CONFIG['andes_pin'],CONFIG['andes_psms'],0.01,_sample)
-ms_rows, ms_prots = load_engine_a(CONFIG['engine A'], CONFIG['gdb'])
-ref['engine A']={'gps':set((p,g) for p,g,_ in ms_rows),'prots':ms_prots,'n':len(ms_rows)}
+ms_rows, ms_prots = load_msfragger_glyco(CONFIG['MSFragger-Glyco'], CONFIG['gdb'])
+ref['MSFragger-Glyco']={'gps':set((p,g) for p,g,_ in ms_rows),'prots':ms_prots,'n':len(ms_rows)}
 # Entrapment hits are known-false by construction and no other engine searched an
 # entrapment database, so they must not inflate the headline count.
 andes_gps=set((p,g) for p,g,a,e in andes_rows if not e)
@@ -264,8 +264,8 @@ andes_prots_noentrap=set(a for _,_,a,e in andes_rows if not e)
 print("="*72)
 print("MouseLiver-Z-T-1  |  unique intact glycopeptides (peptide + glycan composition)")
 print("="*72)
-allnames=['engine N','engine O','engine M','engine L','engine A','andes']
-for nm in ['engine N','engine O','engine M','engine L','engine A']:
+allnames=['Glyco-Decipher','StrucGP','Byonic','pGlyco2','MSFragger-Glyco','andes']
+for nm in ['Glyco-Decipher','StrucGP','Byonic','pGlyco2','MSFragger-Glyco']:
     print(f"  {nm:16s}  {len(ref[nm]['gps']):5d}  glycopeptides   (PSM rows: {ref[nm]['n']})   proteins: {len(ref[nm]['prots'])}")
 print(f"  {'andes (1% FDR)':16s}  {len(andes_gps):5d}  glycopeptides   (PSM rows: {len(andes_rows)-n_entrap})   proteins: {len(andes_prots_noentrap)}")
 print(f"  {'':16s}  {len(andes_gps_with_entrap):5d}  including entrapment   (PSM rows: {len(andes_rows)})   proteins: {len(andes_prots)})")
@@ -273,7 +273,7 @@ print(f"\n  [andes entrapment-mapped rows at 1% FDR: {n_entrap}]")
 
 # overlap (peptide,glycan)
 print("\n=== pairwise overlap on (peptide, glycan comp) ===")
-sets={'engine N':ref['engine N']['gps'],'engine O':ref['engine O']['gps'],'engine M':ref['engine M']['gps'],'engine L':ref['engine L']['gps'],'engine A':ref['engine A']['gps'],'andes':andes_gps}
+sets={'Glyco-Decipher':ref['Glyco-Decipher']['gps'],'StrucGP':ref['StrucGP']['gps'],'Byonic':ref['Byonic']['gps'],'pGlyco2':ref['pGlyco2']['gps'],'MSFragger-Glyco':ref['MSFragger-Glyco']['gps'],'andes':andes_gps}
 for i in range(len(allnames)):
     for j in range(i+1,len(allnames)):
         a=allnames[i]; b=allnames[j]
@@ -282,7 +282,7 @@ for i in range(len(allnames)):
 
 # protein overlap
 print("\n=== protein overlap ===")
-psets={'engine N':ref['engine N']['prots'],'engine O':ref['engine O']['prots'],'engine M':ref['engine M']['prots'],'engine L':ref['engine L']['prots'],'engine A':ref['engine A']['prots'],'andes':andes_prots_noentrap}
+psets={'Glyco-Decipher':ref['Glyco-Decipher']['prots'],'StrucGP':ref['StrucGP']['prots'],'Byonic':ref['Byonic']['prots'],'pGlyco2':ref['pGlyco2']['prots'],'MSFragger-Glyco':ref['MSFragger-Glyco']['prots'],'andes':andes_prots_noentrap}
 for i in range(len(allnames)):
     for j in range(i+1,len(allnames)):
         a=allnames[i]; b=allnames[j]

@@ -1,5 +1,5 @@
-# engine A 4.2 — timsTOF .d (plain DDA, non-chimeric) — key parameters.
-# Only the benchmark-defining settings are listed; everything else is engine A
+# MSFragger 4.2 — timsTOF .d (plain DDA, non-chimeric) — key parameters.
+# Only the benchmark-defining settings are listed; everything else is MSFragger
 # 4.2 default. database_name must be a target+decoy (rev_) FASTA.
 
 database_name = human_yeast_reviewed.td.fasta   # target + rev_ decoys

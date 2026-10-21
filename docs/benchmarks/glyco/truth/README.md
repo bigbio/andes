@@ -6,10 +6,10 @@ formats.
 
 | file | source | spectra | regime |
 |---|---|---|---|
-| `engineL_mouse_liver.tsv.gz` | pGlyco2 (the depositors'), PRIDE PXD005553 | 17,855 | mouse liver, HCD |
-| `engineA_mouse_liver.tsv.gz` | MSFragger-Glyco (FDR-filtered `psm.tsv` deposited in PRIDE PXD031032, a re-analysis of the PXD005553 raws) | 14,626 | the same five liver fractions, so andes can be scored against two independent engines on identical spectra |
-| `engineL_mouse_lung.tsv.gz` | pGlyco2, PRIDE PXD005555 | 15,016 | mouse lung, HCD |
-| `engineL_mouse_heart.tsv.gz` | pGlyco2, PRIDE PXD005413 | 5,383 | mouse heart, HCD |
+| `pglyco2_mouse_liver.tsv.gz` | pGlyco2 (the depositors'), PRIDE PXD005553 | 17,855 | mouse liver, HCD |
+| `msfragger_glyco_mouse_liver.tsv.gz` | MSFragger-Glyco (FDR-filtered `psm.tsv` deposited in PRIDE PXD031032, a re-analysis of the PXD005553 raws) | 14,626 | the same five liver fractions, so andes can be scored against two independent engines on identical spectra |
+| `pglyco2_mouse_lung.tsv.gz` | pGlyco2, PRIDE PXD005555 | 15,016 | mouse lung, HCD |
+| `pglyco2_mouse_heart.tsv.gz` | pGlyco2, PRIDE PXD005413 | 5,383 | mouse heart, HCD |
 
 Columns: `run, scan, charge, peptide, glycan, glycosite`; `peptide` is the bare uppercase
 backbone. Each file is **one row per (run, scan)**, decoy- and FDR-filtered, and its header
@@ -21,17 +21,17 @@ only rows parsing purely as HexNAc/Hex/dHex/NeuAc/NeuGc are kept, first candidat
 ## Regenerating
 
 ```bash
-python3 ../make_truth.py engine_l MouseLiver-Z-T-*-FDR.txt | gzip -9 > engineL_mouse_liver.tsv.gz
-python3 ../make_truth.py engine_o *_result.xlsx           | gzip -9 > engineO_*.tsv.gz
+python3 ../make_truth.py pglyco2 MouseLiver-Z-T-*-FDR.txt | gzip -9 > pglyco2_mouse_liver.tsv.gz
+python3 ../make_truth.py strucgp *_result.xlsx           | gzip -9 > strucgp_*.tsv.gz
 # PXD031032/Mouse_OpenSearch_6000Da_N-GlycanMode_psm.tsv (109 MB) covers five tissues; keep one
-python3 ../make_truth.py engine_a Mouse_OpenSearch_6000Da_N-GlycanMode_psm.tsv MouseLiver | gzip -9 > engineA_mouse_liver.tsv.gz
+python3 ../make_truth.py msfragger_glyco Mouse_OpenSearch_6000Da_N-GlycanMode_psm.tsv MouseLiver | gzip -9 > msfragger_glyco_mouse_liver.tsv.gz
 ```
 
 ## Reading one
 
 ```python
 import csv, gzip
-with gzip.open("engineL_mouse_liver.tsv.gz", "rt") as fh:
+with gzip.open("pglyco2_mouse_liver.tsv.gz", "rt") as fh:
     rows = [r for r in csv.DictReader((l for l in fh if not l.startswith("#")), delimiter="\t")]
 ```
 

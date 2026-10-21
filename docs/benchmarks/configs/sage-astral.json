@@ -26,5 +26,5 @@
   "max_peaks": 150,
   "min_matched_peaks": 4,
   "report_psms": 5,
-  "output_directory": "a comparison search engine-astral-out"
+  "output_directory": "sage-astral-out"
 }

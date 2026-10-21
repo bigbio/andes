@@ -28,6 +28,8 @@ mod mono;
 mod predicted;
 #[path = "andes/quant_cmd.rs"]
 mod quant_cmd;
+#[path = "andes/quant_finalize.rs"]
+mod quant_finalize;
 #[path = "andes/quant_mbr.rs"]
 mod quant_mbr;
 #[path = "andes/quant_run.rs"]

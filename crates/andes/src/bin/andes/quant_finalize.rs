@@ -16,14 +16,18 @@
 //!    donor fits than [`FinalizeLimits::max_donor_fits`] the precursors are
 //!    summarised in groups, one pass each;
 //! 2. the training rows of both classifiers, a [`TrainingSample`] keyed by
-//!    run and row, so that the kept rows enter training in table order;
+//!    run and row, so that the kept rows enter training in table order (one
+//!    sample per member of the bagged transfer classifier, see
+//!    [`FinalizeLimits::transfer_models`]);
 //! 3. every row's held-out score, into [`FoldScores`] merged run by run;
 //!    above [`FinalizeLimits::max_held_scores`] scores in memory they are
 //!    sorted and written to temporary tables, and read back in order when
-//!    the q-value step functions are built;
+//!    the q-value step functions are built. Each run's transfer scores are
+//!    also written, in row order, to a temporary table;
 //! 4. the reference cells of the run normalisation;
 //! 5. per run, the output rows, sorted by precursor, into a temporary table,
-//!    and the validation counts;
+//!    and the validation counts; the transfer rows take their scores from
+//!    pass 3's table instead of being scored again;
 //!
 //! then the per-run tables are merged by (precursor, run) into
 //! `<base>.mbr.parquet` and handed to the caller.
@@ -71,8 +75,8 @@ use crate::quant_mbr::{
     ShapeReference, NO_SHAPE, TRANSFER_DONOR_Q,
 };
 use crate::transfer_fdr::{
-    row_unit, train_folds, Estimate, FdrCounts, FdrRow, FoldModels, FoldScores, QValues,
-    TrainingSample, IDENTITY, N_FOLDS, TRANSFER_FEATURES,
+    member_seed, row_unit, train_bagged_folds, train_folds, Estimate, FdrCounts, FdrRow,
+    FoldModels, FoldScores, QValues, TrainingSample, IDENTITY, N_FOLDS, TRANSFER_FEATURES,
 };
 
 /// What one finalize did, for the caller to log.
@@ -113,13 +117,20 @@ pub(crate) struct MbrFeature {
 
 /// Limits of finalize: memory follows the library and these limits rather
 /// than the number of runs or rows. None of them changes the outputs except
-/// the two sample caps.
+/// the two sample caps and the transfer classifier's members.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct FinalizeLimits {
-    /// Training rows per classifier (transfers, identified rows). Above it
-    /// the classifier is trained on the rows of a hashed sample of
-    /// (precursor, run) pairs (every row still scored by its fold's model).
+    /// Training rows per classifier (transfers, identified rows), and per
+    /// member of the transfer classifier. Above it the classifier is trained
+    /// on the rows of a hashed sample of (precursor, run) pairs (every row
+    /// still scored by its fold's model).
     pub max_train_rows: usize,
+    /// Members of the bagged transfer classifier: each fold's score is the
+    /// mean margin of this many models, each trained on its own sample of
+    /// the training rows (the same rows when they are all kept) with its
+    /// own seed. Training and scoring time grow with it; one member is the
+    /// single model.
+    pub transfer_models: usize,
     /// Reference cells of the run normalisation. Above it the fit uses a
     /// hashed sample of whole precursors (coarser RT-local offsets).
     pub max_norm_cells: usize,
@@ -136,6 +147,8 @@ pub(crate) struct FinalizeLimits {
 
 /// Default of [`FinalizeLimits::max_train_rows`].
 pub(crate) const DEFAULT_MAX_TRAIN_ROWS: usize = 3_000_000;
+/// Default of [`FinalizeLimits::transfer_models`].
+pub(crate) const DEFAULT_TRANSFER_MODELS: usize = 8;
 /// Default of [`FinalizeLimits::max_norm_cells`].
 pub(crate) const DEFAULT_MAX_NORM_CELLS: usize = 20_000_000;
 /// Default of [`FinalizeLimits::max_donor_fits`].
@@ -147,6 +160,7 @@ impl Default for FinalizeLimits {
     fn default() -> Self {
         Self {
             max_train_rows: DEFAULT_MAX_TRAIN_ROWS,
+            transfer_models: DEFAULT_TRANSFER_MODELS,
             max_norm_cells: DEFAULT_MAX_NORM_CELLS,
             max_donor_fits: DEFAULT_MAX_DONOR_FITS,
             max_held_scores: DEFAULT_MAX_HELD_SCORES,
@@ -553,20 +567,55 @@ pub(crate) enum Table {
     Pseudo,
 }
 
-/// Library lookups of finalize: per precursor id, its entry.
+/// Runs compared with a transfer's run for the `neighbour_donor_rate`
+/// feature: its most similar runs, at most this many.
+pub(crate) const NEIGHBOUR_RUNS: usize = 50;
+
+/// Library lookups of finalize: per precursor id, its entry; per run, its
+/// most similar runs.
 pub(crate) struct EntryIndex<'a> {
     entry_of: Vec<Option<&'a LibraryEntry>>,
+    /// Per run, the [`NEIGHBOUR_RUNS`] other runs whose target entries'
+    /// donor sets are most similar to its own (Jaccard index, ties by run
+    /// index).
+    neighbours: Vec<Vec<u16>>,
 }
 
 impl<'a> EntryIndex<'a> {
-    pub(crate) fn new(lib: &'a Library) -> Self {
+    /// The index of `lib`'s entries for `runs` runs.
+    pub(crate) fn new(lib: &'a Library, runs: usize) -> Self {
         let mut entry_of: Vec<Option<&LibraryEntry>> = vec![None; lib.meta.len()];
         for e in &lib.entries {
             if let Some(slot) = entry_of.get_mut(e.precursor as usize) {
                 *slot = Some(e);
             }
         }
-        Self { entry_of }
+        Self {
+            entry_of,
+            neighbours: run_neighbours(lib, runs, NEIGHBOUR_RUNS),
+        }
+    }
+
+    /// The share of the row's run's neighbours ([`run_neighbours`]) that
+    /// are donor runs of its precursor's entry: how often the runs most
+    /// like this one identified the precursor. 0 without an entry or
+    /// neighbours. The row's own run is never its neighbour, so a
+    /// pseudo-transfer does not see its own identification.
+    pub(crate) fn neighbour_rate(&self, r: &ExtractRow) -> f64 {
+        let (Some(Some(e)), Some(nn)) = (
+            self.entry_of.get(r.precursor as usize),
+            self.neighbours.get(r.run as usize),
+        ) else {
+            return 0.0;
+        };
+        if nn.is_empty() {
+            return 0.0;
+        }
+        let hits = nn
+            .iter()
+            .filter(|n| e.donors.binary_search(n).is_ok())
+            .count();
+        hits as f64 / nn.len() as f64
     }
 
     pub(crate) fn is_identity(&self, p: u32) -> bool {
@@ -597,6 +646,52 @@ impl<'a> EntryIndex<'a> {
     }
 }
 
+/// Per run of `runs`, the `k` other runs most similar to it, most similar
+/// first: the Jaccard index of the sets of target entries they are donors
+/// of (identity decoys are left out), ties by run index. Computed from the
+/// donor runs only, the same for targets and decoys.
+pub(crate) fn run_neighbours(lib: &Library, runs: usize, k: usize) -> Vec<Vec<u16>> {
+    let words = lib.entries.len().div_ceil(64);
+    let mut bits = vec![vec![0u64; words]; runs];
+    for (i, e) in lib.entries.iter().enumerate() {
+        if e.identity_decoy {
+            continue;
+        }
+        for &r in &e.donors {
+            if let Some(b) = bits.get_mut(r as usize) {
+                b[i / 64] |= 1u64 << (i % 64);
+            }
+        }
+    }
+    let ones = |b: &[u64]| -> u64 { b.iter().map(|w| u64::from(w.count_ones())).sum() };
+    let count: Vec<u64> = bits.iter().map(|b| ones(b)).collect();
+    (0..runs)
+        .into_par_iter()
+        .map(|a| {
+            let mut sim: Vec<(f64, u16)> = (0..runs)
+                .filter(|&b| b != a)
+                .map(|b| {
+                    let inter: u64 = bits[a]
+                        .iter()
+                        .zip(&bits[b])
+                        .map(|(x, y)| u64::from((x & y).count_ones()))
+                        .sum();
+                    let union = count[a] + count[b] - inter;
+                    let j = if union == 0 {
+                        0.0
+                    } else {
+                        inter as f64 / union as f64
+                    };
+                    (j, b as u16)
+                })
+                .collect();
+            sim.sort_by(|x, y| y.0.total_cmp(&x.0).then(x.1.cmp(&y.1)));
+            sim.truncate(k);
+            sim.into_iter().map(|(_, b)| b).collect()
+        })
+        .collect()
+}
+
 /// The features of the rows of `rows` whose table passes `want`, built in
 /// parallel (in row order): `(index in rows, table, family, features)`.
 pub(crate) fn table_features(
@@ -612,7 +707,9 @@ pub(crate) fn table_features(
             let (t, fam) = idx.table(r).filter(|(t, _)| want(*t))?;
             let x = match t {
                 Table::Identified => identified_features(r),
-                Table::Transfer | Table::Pseudo => transfer_features(r, shapes, maps),
+                Table::Transfer | Table::Pseudo => {
+                    transfer_features(r, shapes, maps, idx.neighbour_rate(r))
+                }
             };
             Some((i, t, fam, x))
         })
@@ -725,7 +822,7 @@ fn column<'a, T: 'static>(b: &'a RecordBatch, i: usize, path: &Path) -> Result<&
         .ok_or_else(|| format!("{}: column {i} has an unexpected type", path.display()))
 }
 
-/// Writes ascending scores as a temporary score table.
+/// Writes scores, in the order given, as a temporary score table.
 fn write_scores(path: &Path, scores: &[f32]) -> Result<(), String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let schema = Arc::new(Schema::new(vec![Field::new(
@@ -747,6 +844,26 @@ fn write_scores(path: &Path, scores: &[f32]) -> Result<(), String> {
     }
     w.close().map_err(|e| err(&e))?;
     Ok(())
+}
+
+/// Whether `r` is a transfer row (target or decoy) of the classifier.
+fn is_transfer(idx: &EntryIndex<'_>, r: &ExtractRow) -> bool {
+    matches!(idx.table(r), Some((Table::Transfer, _)))
+}
+
+/// The temporary table of the held-out transfer scores of table `chunk`.
+fn cached_scores_path(dir: &Path, chunk: usize) -> PathBuf {
+    dir.join(format!("transfer-scores-{chunk:06}.parquet"))
+}
+
+/// The scores of a table written by [`write_scores`], in order.
+fn read_cached_scores(path: &Path) -> Result<Vec<f32>, String> {
+    let error = RefCell::new(None);
+    let scores: Vec<f32> = ScoreFile::new(path, &error).collect();
+    match error.into_inner() {
+        Some(e) => Err(e),
+        None => Ok(scores),
+    }
 }
 
 /// The scores of a temporary score table, in order. A read error ends the
@@ -1190,6 +1307,7 @@ pub(crate) fn finalize(
         seed,
         limits: FinalizeLimits {
             max_train_rows: usize::MAX,
+            transfer_models: 1,
             max_norm_cells: usize::MAX,
             max_donor_fits: usize::MAX,
             max_held_scores: usize::MAX,
@@ -1268,7 +1386,7 @@ pub(crate) fn finalize_stream(
         ));
     }
     let maps = &lib.alignment.maps;
-    let idx = EntryIndex::new(lib);
+    let idx = EntryIndex::new(lib, stems.len());
     let bounds = Bounds {
         runs: stems.len(),
         precursors: lib.meta.len(),
@@ -1333,12 +1451,20 @@ pub(crate) fn finalize_stream(
     );
     let summaries = &all_summaries;
 
-    // Pass 2: the training rows of both classifiers, keyed by table and row
-    // so that they enter training in table order.
+    // Pass 2: the training rows of both classifiers (one sample per member
+    // of the transfer classifier), keyed by table and row so that they enter
+    // training in table order.
     let t0 = Instant::now();
     type Key = (u32, u64);
-    let t_sample: Mutex<TrainingSample<Key>> =
-        Mutex::new(TrainingSample::new(limits.max_train_rows, seed));
+    let members = limits.transfer_models.max(1);
+    let t_samples: Vec<Mutex<TrainingSample<Key>>> = (0..members)
+        .map(|m| {
+            Mutex::new(TrainingSample::new(
+                limits.max_train_rows,
+                member_seed(seed, m),
+            ))
+        })
+        .collect();
     let i_sample: Mutex<TrainingSample<Key>> =
         Mutex::new(TrainingSample::new(limits.max_train_rows, seed));
     let no_features = AtomicUsize::new(0);
@@ -1383,11 +1509,19 @@ pub(crate) fn finalize_stream(
                     _ => t_rows.push(item),
                 }
             }
-            for (sample, items) in [(&t_sample, t_rows), (&i_sample, i_rows)] {
+            for sample in &t_samples {
                 let mut s = sample.lock().expect("training sample lock");
-                for (k, u, row) in items {
-                    s.push(k, u, row);
+                for (k, u, row) in &t_rows {
+                    if s.wants(*u) {
+                        s.push(*k, *u, row.clone());
+                    } else {
+                        s.skip();
+                    }
                 }
+            }
+            let mut s = i_sample.lock().expect("training sample lock");
+            for (k, u, row) in i_rows {
+                s.push(k, u, row);
             }
             Ok(())
         },
@@ -1395,9 +1529,15 @@ pub(crate) fn finalize_stream(
     )?;
     summary.no_features = no_features.into_inner();
     summary.identified_no_features = identified_no_features.into_inner();
-    let t_sample = t_sample.into_inner().expect("training sample lock");
+    let t_samples: Vec<TrainingSample<Key>> = t_samples
+        .into_iter()
+        .map(|s| s.into_inner().expect("training sample lock"))
+        .collect();
     let i_sample = i_sample.into_inner().expect("training sample lock");
-    for (name, s) in [("transfer", &t_sample), ("identified quality", &i_sample)] {
+    for (name, s) in [
+        ("transfer", &t_samples[0]),
+        ("identified quality", &i_sample),
+    ] {
         let (seen, kept, share) = s.stats();
         if kept < seen {
             eprintln!(
@@ -1407,18 +1547,29 @@ pub(crate) fn finalize_stream(
     }
     let t1 = Instant::now();
     // Both classifiers' folds train at once.
-    let (t_rows, i_rows) = (t_sample.into_items(), i_sample.into_items());
-    let (t_models, i_models) =
-        rayon::join(|| train_folds(&t_rows, seed), || train_folds(&i_rows, seed));
-    drop((t_rows, i_rows));
+    let t_sets: Vec<Vec<FdrRow>> = t_samples
+        .into_iter()
+        .map(TrainingSample::into_items)
+        .collect();
+    let i_rows = i_sample.into_items();
+    let t_refs: Vec<&[FdrRow]> = t_sets.iter().map(Vec::as_slice).collect();
+    let (t_models, i_models) = rayon::join(
+        || train_bagged_folds(&t_refs, seed),
+        || train_folds(&i_rows, seed),
+    );
+    drop(t_refs);
+    drop((t_sets, i_rows));
     eprintln!(
-        "[mbr] finalize: training rows of {} extract rows {:.1} s, fold models {:.1} s",
+        "[mbr] finalize: training rows of {} extract rows {:.1} s, fold models {:.1} s ({} transfer classifier members per fold)",
         rows_read.into_inner(),
         (t1 - t0).as_secs_f64(),
-        secs(t1)
+        secs(t1),
+        t_models.members()
     );
 
-    // Pass 3: every row's held-out score, into the q-value step functions.
+    // Pass 3: every row's held-out score, into the q-value step functions;
+    // each run's transfer scores are also kept in a temporary table for
+    // pass 5.
     let t0 = Instant::now();
     let t_store = ScoreStore::new("transfer", dir, limits.max_held_scores, seed);
     let i_store = ScoreStore::new("identified", dir, limits.max_held_scores, seed);
@@ -1426,14 +1577,15 @@ pub(crate) fn finalize_stream(
         source,
         false,
         bounds,
-        |_| (FoldScores::new(seed), FoldScores::new(seed)),
-        |(ts, is), _, _, rows| {
+        |_| (FoldScores::new(seed), FoldScores::new(seed), Vec::new()),
+        |(ts, is, cache), _, _, rows| {
             let ctx = BlockContext::new(rows, maps)?;
             let shapes = BlockShapes {
                 summaries,
                 own: &ctx.own,
             };
             let want = |t: Table| t != Table::Pseudo;
+            let mut block = vec![f32::NAN; rows.len()];
             for_each_scored(
                 rows,
                 &idx,
@@ -1446,13 +1598,24 @@ pub(crate) fn finalize_stream(
                     let p = rows[i].precursor;
                     match t {
                         Table::Identified => is.add(p, fam, s),
-                        _ => ts.add(p, fam, s),
+                        _ => {
+                            ts.add(p, fam, s);
+                            block[i] = s.unwrap_or(f32::NAN);
+                        }
                     }
                 },
             );
+            cache.extend(
+                rows.iter()
+                    .zip(block)
+                    .filter(|(r, _)| is_transfer(&idx, r))
+                    .map(|(_, s)| s),
+            );
             Ok(())
         },
-        |_, (ts, is)| {
+        |chunk, (ts, is, cache)| {
+            // One table's transfer scores in row order (NaN without a score).
+            write_scores(&cached_scores_path(dir, chunk), &cache)?;
             t_store.add(ts)?;
             i_store.add(is)
         },
@@ -1568,16 +1731,38 @@ pub(crate) fn finalize_stream(
         source,
         false,
         bounds,
-        |_| RunOutput::default(),
-        |out, _, _, rows| {
+        |_| (RunOutput::default(), None, 0usize),
+        |(out, cache, at), chunk, _, rows| {
+            if cache.is_none() {
+                *cache = Some(read_cached_scores(&cached_scores_path(dir, chunk))?);
+            }
+            let cache = cache.as_deref().unwrap_or_default();
             let ctx = BlockContext::new(rows, maps)?;
             let shapes = BlockShapes {
                 summaries,
                 own: &ctx.own,
             };
             let v = &mut out.validation;
-            // Per row with features: its family and held-out score.
+            // Per row with a score: its family and held-out score. The
+            // transfer rows' scores are those of pass 3 (a row without
+            // features or without a fold model has none); the other rows
+            // are scored here.
             let mut scored: Vec<Option<(u8, Option<f32>)>> = vec![None; rows.len()];
+            for (i, r) in rows.iter().enumerate() {
+                let Some((Table::Transfer, fam)) = idx.table(r) else {
+                    continue;
+                };
+                let s = *cache.get(*at).ok_or_else(|| {
+                    format!(
+                        "{}: fewer cached transfer scores than rows",
+                        source.name(chunk)
+                    )
+                })?;
+                *at += 1;
+                if s.is_finite() {
+                    scored[i] = Some((fam, Some(s)));
+                }
+            }
             for_each_scored(
                 rows,
                 &idx,
@@ -1585,7 +1770,7 @@ pub(crate) fn finalize_stream(
                 maps,
                 &t_models,
                 &i_models,
-                |_: Table| true,
+                |t: Table| t != Table::Transfer,
                 |i, _, fam, s| {
                     scored[i] = Some((fam, s));
                 },
@@ -1726,7 +1911,13 @@ pub(crate) fn finalize_stream(
             }
             Ok(())
         },
-        |chunk, mut out| {
+        |chunk, (mut out, cache, at)| {
+            if cache.is_some_and(|c| c.len() != at) {
+                return Err(format!(
+                    "{}: more cached transfer scores than rows",
+                    source.name(chunk)
+                ));
+            }
             totals
                 .lock()
                 .expect("validation lock")

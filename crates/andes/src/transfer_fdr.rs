@@ -14,6 +14,15 @@
 //! precursor) is trained on the other two folds and scores the held-out fold.
 //! Scores are the raw boosted margins and are compared within a fold only.
 //!
+//! Bagging: a fold's classifier can be the mean of several members, each
+//! trained on its own row set (a [`TrainingSample`] of its own seed) with its
+//! own trainer seed ([`member_seed`]); a row's score is the mean of the
+//! members' margins. Every member of a fold is trained on the other folds
+//! only, so the mean is held out like a single model's. The members average
+//! out the variance of one boosted model trained on a sample of the rows,
+//! which at hundreds of runs moves the scores of the transfers near the
+//! threshold more than their evidence does.
+//!
 //! q-values, per fold: rank the fold's scored rows by score; at threshold `c`,
 //! `FDR(c) = (D(c) + 1) / (K * max(T(c), 1))`, capped at 1, with `D`/`T` the
 //! decoys/targets at or above `c` and `K` the fold's decoy-to-target row
@@ -74,15 +83,17 @@ pub const TRANSFER_FEATURES: &[&str] = &[
     "log10_amplitude_snr",
     "n_donor_runs",
     "library_q",
+    "neighbour_donor_rate",
     "shape_log_width",
     "shape_tailing_diff",
     "shape_iso_cos",
 ];
 
 /// Feature names of the identified-row quality classifier: the template-fit
-/// evidence of [`TRANSFER_FEATURES`] without `n_donor_runs` and `library_q`,
-/// which are the same for an identified target and its decoys, and without
-/// the donor shape comparison (an identified row is itself a donor).
+/// evidence of [`TRANSFER_FEATURES`] without `n_donor_runs`, `library_q` and
+/// `neighbour_donor_rate`, which are the same for an identified target and
+/// its decoys, and without the donor shape comparison (an identified row is
+/// itself a donor).
 pub const IDENTIFIED_FEATURES: &[&str] = &[
     "llr",
     "rt_z",
@@ -200,13 +211,25 @@ fn train_fold(
     .map_err(|e| format!("fold {fold}: {e:?}"))
 }
 
-/// The fold models of one classifier: fold `f`'s model is trained on the
-/// rows of the other folds and scores the rows of fold `f`.
+/// The fold models of one classifier: fold `f`'s members are trained on the
+/// rows of the other folds and score the rows of fold `f`.
 pub struct FoldModels {
     seed: u64,
-    models: Vec<Option<GbdtPeakModel>>,
+    /// Per fold, the members that trained (empty when none did).
+    models: Vec<Vec<GbdtPeakModel>>,
     /// One message per fold without a model.
     pub failed_folds: Vec<String>,
+}
+
+/// The seed of bagging member `m` (its training sample and its trainer):
+/// `seed` itself for the first member, so that one member is the classifier
+/// of a single model.
+pub fn member_seed(seed: u64, m: usize) -> u64 {
+    if m == 0 {
+        seed
+    } else {
+        sample_hash(m as u64, seed ^ 0x6d65_6d62_6572_7321)
+    }
 }
 
 /// Trains the fold models on `rows` (all the rows, or a sample of whole
@@ -215,25 +238,64 @@ pub struct FoldModels {
 /// # Panics
 /// When the rows do not all have the same number of features.
 pub fn train_folds(rows: &[FdrRow], seed: u64) -> FoldModels {
-    let nf = rows.first().map_or(0, |r| r.x.len());
+    train_bagged_folds(&[rows], seed)
+}
+
+/// Trains the fold models of a bagged classifier: member `m` is trained on
+/// `sets[m]` with the trainer seed of [`member_seed`]`(seed, m)`; the folds
+/// are those of `seed` for every member. A fold whose members all fail has
+/// no model; a fold with some members left averages those (the others are
+/// logged).
+///
+/// # Panics
+/// When `sets` is empty or the rows do not all have the same number of
+/// features.
+pub fn train_bagged_folds(sets: &[&[FdrRow]], seed: u64) -> FoldModels {
+    assert!(!sets.is_empty(), "a classifier needs at least one member");
+    let nf = sets
+        .iter()
+        .find_map(|rows| rows.first())
+        .map_or(0, |r| r.x.len());
     assert!(
-        rows.iter().all(|r| r.x.len() == nf),
+        sets.iter()
+            .flat_map(|rows| rows.iter())
+            .all(|r| r.x.len() == nf),
         "transfer FDR rows have different feature counts"
     );
-    let folds: Vec<usize> = rows.iter().map(|r| fold_of(r.precursor, seed)).collect();
-    let fitted: Vec<Result<GbdtPeakModel, String>> = (0..N_FOLDS)
-        .into_par_iter()
-        .map(|f| train_fold(rows, &folds, nf, f, seed))
+    let folds: Vec<Vec<usize>> = sets
+        .iter()
+        .map(|rows| rows.iter().map(|r| fold_of(r.precursor, seed)).collect())
         .collect();
-    let mut models = Vec::with_capacity(N_FOLDS);
-    let mut failed_folds = Vec::new();
-    for fit in fitted {
+    let jobs: Vec<(usize, usize)> = (0..N_FOLDS)
+        .flat_map(|f| (0..sets.len()).map(move |m| (f, m)))
+        .collect();
+    let fitted: Vec<Result<GbdtPeakModel, String>> = jobs
+        .par_iter()
+        .map(|&(f, m)| train_fold(sets[m], &folds[m], nf, f, member_seed(seed, m)))
+        .collect();
+    let mut models: Vec<Vec<GbdtPeakModel>> = (0..N_FOLDS).map(|_| Vec::new()).collect();
+    let mut errors: Vec<Vec<String>> = vec![Vec::new(); N_FOLDS];
+    for (&(f, m), fit) in jobs.iter().zip(fitted) {
         match fit {
-            Ok(m) => models.push(Some(m)),
-            Err(e) => {
-                failed_folds.push(e);
-                models.push(None);
-            }
+            Ok(model) => models[f].push(model),
+            Err(e) if sets.len() == 1 => errors[f].push(e),
+            Err(e) => errors[f].push(format!("member {m}: {e}")),
+        }
+    }
+    let mut failed_folds = Vec::new();
+    for (f, e) in errors.into_iter().enumerate() {
+        if e.is_empty() {
+            continue;
+        }
+        if models[f].is_empty() {
+            failed_folds.push(e.join("; "));
+        } else {
+            eprintln!(
+                "[mbr] fold {f}: {} of {} classifier members failed, the fold averages the others ({})",
+                e.len(),
+                sets.len(),
+                e.join("; ")
+            );
         }
     }
     FoldModels {
@@ -249,12 +311,15 @@ const PREDICT_BATCH: usize = 4096;
 
 impl FoldModels {
     /// The held-out raw margins of `xs` (rows of precursor `precursors[i]`)
-    /// into `out`: `None` for a row whose fold has no model.
+    /// into `out`: `None` for a row whose fold has no model. A bagged fold
+    /// scores the mean of its members' margins (summed in member order).
     pub fn score(&self, precursors: &[u32], xs: &[&[f32]], out: &mut Vec<Option<f32>>) {
         out.clear();
         out.resize(xs.len(), None);
-        for (fold, model) in self.models.iter().enumerate() {
-            let Some(model) = model else { continue };
+        for (fold, members) in self.models.iter().enumerate() {
+            if members.is_empty() {
+                continue;
+            }
             let at: Vec<usize> = (0..xs.len())
                 .filter(|&i| fold_of(precursors[i], self.seed) == fold)
                 .collect();
@@ -266,11 +331,39 @@ impl FoldModels {
             batch
                 .par_chunks(PREDICT_BATCH)
                 .zip(s.par_chunks_mut(PREDICT_BATCH))
-                .for_each(|(b, o)| model.predict_value_batch(b, o));
+                .for_each(|(b, o)| predict_mean(members, b, o));
             for (&i, v) in at.iter().zip(s) {
                 out[i] = Some(v);
             }
         }
+    }
+
+    /// Members per fold (the most of any fold).
+    pub fn members(&self) -> usize {
+        self.models.iter().map(Vec::len).max().unwrap_or(0)
+    }
+}
+
+/// The mean margin of `members` on `rows` into `out`; one member's margin
+/// as it is.
+fn predict_mean(members: &[GbdtPeakModel], rows: &[&[f32]], out: &mut [f32]) {
+    let Some((first, rest)) = members.split_first() else {
+        return;
+    };
+    first.predict_value_batch(rows, out);
+    if rest.is_empty() {
+        return;
+    }
+    let mut tmp = vec![0.0f32; out.len()];
+    for m in rest {
+        m.predict_value_batch(rows, &mut tmp);
+        for (o, v) in out.iter_mut().zip(&tmp) {
+            *o += v;
+        }
+    }
+    let n = members.len() as f32;
+    for o in out.iter_mut() {
+        *o /= n;
     }
 }
 
@@ -303,6 +396,18 @@ impl<K: Ord, T> TrainingSample<K, T> {
 
     fn kept(seed: u64, unit: u64, level: u32) -> bool {
         level == 0 || sample_hash(unit, seed) >> (64 - level) == 0
+    }
+
+    /// Whether an item of sampling unit `unit` offered now would be kept
+    /// (so that an item need only be built when it is).
+    pub fn wants(&self, unit: u64) -> bool {
+        Self::kept(self.seed, unit, self.level)
+    }
+
+    /// An item of unit `unit` that [`TrainingSample::wants`] declined:
+    /// counted as offered.
+    pub fn skip(&mut self) {
+        self.seen += 1;
     }
 
     /// Offers `item` of sampling unit `unit`.
@@ -1371,6 +1476,146 @@ mod tests {
             );
             assert_eq!(whole.pseudo_q(p, s), cut.pseudo_q(p, s));
         }
+    }
+
+    /// Pooled q-values of `rows` under a classifier of `members` members,
+    /// each trained on all the rows.
+    fn bagged_q(rows: &[FdrRow], members: usize, seed: u64) -> Vec<Option<f64>> {
+        let sets: Vec<&[FdrRow]> = (0..members).map(|_| rows).collect();
+        let models = train_bagged_folds(&sets, seed);
+        assert_eq!(models.members(), members);
+        let precursors: Vec<u32> = rows.iter().map(|r| r.precursor).collect();
+        let xs: Vec<&[f32]> = rows.iter().map(|r| r.x.as_slice()).collect();
+        let mut scores = Vec::new();
+        models.score(&precursors, &xs, &mut scores);
+        let mut fs = FoldScores::new(seed);
+        for (r, s) in rows.iter().zip(&scores) {
+            fs.add(r.precursor, r.family, *s);
+        }
+        let q = fs.finish(&models.failed_folds);
+        rows.iter()
+            .zip(&scores)
+            .map(|(r, s)| q.q(Estimate::Pooled, r.precursor, r.family, *s))
+            .collect()
+    }
+
+    #[test]
+    fn one_member_is_the_single_model() {
+        let rows = rows(400, 1.0, &[1, 2], 23);
+        assert_eq!(bagged_q(&rows, 1, 6), transfer_qvalues(&rows, 6).q);
+    }
+
+    #[test]
+    fn bagged_scores_are_the_mean_of_the_members() {
+        let rows = rows(300, 1.0, &[1, 2], 29);
+        let sets: Vec<&[FdrRow]> = vec![&rows; 3];
+        let bagged = train_bagged_folds(&sets, 4);
+        let xs: Vec<&[f32]> = rows.iter().map(|r| r.x.as_slice()).collect();
+        let precursors: Vec<u32> = rows.iter().map(|r| r.precursor).collect();
+        let mut got = Vec::new();
+        bagged.score(&precursors, &xs, &mut got);
+        for (fold, members) in bagged.models.iter().enumerate() {
+            assert_eq!(members.len(), 3);
+            for (i, r) in rows.iter().enumerate() {
+                if fold_of(r.precursor, 4) != fold {
+                    continue;
+                }
+                let sum: f32 = members.iter().map(|m| m.predict_value(&r.x)).sum();
+                let want = sum / 3.0;
+                let g = got[i].unwrap();
+                assert!(
+                    (g - want).abs() <= 1e-5 * want.abs().max(1.0),
+                    "{g} vs {want}"
+                );
+            }
+        }
+        // Members differ (their trainer seeds), so the mean is not one of them.
+        let m = &bagged.models[0];
+        assert_ne!(
+            m[0].predict_value(&rows[0].x),
+            m[1].predict_value(&rows[0].x)
+        );
+    }
+
+    #[test]
+    fn bagging_keeps_the_mixture_calibrated_and_steadier_across_seeds() {
+        // As mixture_fdp_stays_near_the_estimate, with weaker targets: the
+        // accepted sets of two seeds overlap more with 8 members than with 1.
+        let mut g = Normal(41);
+        let mut rows = Vec::new();
+        let mut present = Vec::new();
+        for p in 0..3000u32 {
+            let real = p % 10 < 3;
+            let mut x = g.vector(0.0);
+            if real {
+                for v in &mut x[..4] {
+                    *v += 1.2;
+                }
+            }
+            rows.push(FdrRow {
+                precursor: p,
+                is_decoy: false,
+                family: 0,
+                x,
+            });
+            present.push(real);
+            for f in [1, 2] {
+                rows.push(FdrRow {
+                    precursor: p,
+                    is_decoy: true,
+                    family: f,
+                    x: g.vector(0.0),
+                });
+                present.push(false);
+            }
+        }
+        let accepted = |q: &[Option<f64>]| -> std::collections::BTreeSet<usize> {
+            (0..rows.len())
+                .filter(|&i| !rows[i].is_decoy && q[i].is_some_and(|q| q <= 0.05))
+                .collect()
+        };
+        let jaccard = |a: &std::collections::BTreeSet<usize>,
+                       b: &std::collections::BTreeSet<usize>| {
+            a.intersection(b).count() as f64 / a.union(b).count().max(1) as f64
+        };
+        let mut overlap = Vec::new();
+        for members in [1, 8] {
+            let (a, b) = (
+                accepted(&bagged_q(&rows, members, 1)),
+                accepted(&bagged_q(&rows, members, 2)),
+            );
+            for set in [&a, &b] {
+                let false_acc = set.iter().filter(|&&i| !present[i]).count();
+                let fdp = false_acc as f64 / set.len().max(1) as f64;
+                assert!(set.len() > 100, "{members} members: {} accepted", set.len());
+                assert!(fdp <= 0.11, "{members} members: FDP {fdp}");
+            }
+            let j = jaccard(&a, &b);
+            eprintln!(
+                "{members} members: accepted {} and {}, Jaccard {j:.4}",
+                a.len(),
+                b.len()
+            );
+            overlap.push(j);
+        }
+        assert!(overlap[1] > overlap[0], "{overlap:?}");
+    }
+
+    #[test]
+    fn training_sample_wants_what_push_keeps() {
+        let mut a: TrainingSample<usize, u32> = TrainingSample::new(500, 9);
+        let mut b: TrainingSample<usize, u32> = TrainingSample::new(500, 9);
+        for i in 0..5000usize {
+            let unit = (i / 3) as u64;
+            a.push(i, unit, i as u32);
+            if b.wants(unit) {
+                b.push(i, unit, i as u32);
+            } else {
+                b.skip();
+            }
+        }
+        assert_eq!(a.stats(), b.stats());
+        assert_eq!(a.into_items(), b.into_items());
     }
 
     #[test]

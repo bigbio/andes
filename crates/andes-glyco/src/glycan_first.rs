@@ -130,7 +130,7 @@ impl DiagnosticIon {
 }
 
 /// The default N-glycan diagnostic-ion panel: the 28 oxonium (B-fragment) ions
-/// of a published glyco engine's oxonium panel. `counts` are the monosaccharides each
+/// of Glyco-Decipher's `OxoniumIonEnum`. `counts` are the monosaccharides each
 /// ion implies (a fragment implies ≥ that many of each monosaccharide).
 /// Configurable via [`GlycanConfig::diagnostic_ions`].
 ///
@@ -519,10 +519,10 @@ pub struct GlycanConfig {
     /// as a glycopeptide at all.
     pub min_diagnostic_ions: u32,
     /// Minimum matched core ions a candidate must have to survive core filtering.
-    /// The field standard is 2 for N-glycans and 1 for O-glycans.
+    /// pGlyco3 uses 2 for N-glycans and 1 for O-glycans.
     pub min_core_ions: u32,
-    /// Number of top candidates to return per spectrum. The field standard keeps the
-    /// top 100 candidate glycan compositions for the peptide search.
+    /// Number of top candidates to return per spectrum. pGlyco3 keeps the top 100
+    /// candidate glycan compositions for the peptide search.
     pub top_k: usize,
     /// Diagnostic-ion panel (defaults to [`default_diagnostic_ions`]).
     pub diagnostic_ions: Vec<DiagnosticIon>,

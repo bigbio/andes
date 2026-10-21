@@ -1,5 +1,5 @@
 //! `--refine-config` YAML -> refinement modification spec. A built-in DEFAULT
-//! tier (5 mods, the classic hyperscore engine always-on chemistry) is used when no config is given.
+//! tier (5 mods, X!Tandem always-on chemistry) is used when no config is given.
 
 use serde::Deserialize;
 
@@ -38,7 +38,7 @@ fn default_high_res_only() -> bool {
 }
 
 impl RefineConfig {
-    /// The built-in DEFAULT tier: the the classic hyperscore engine always-on chemistry. Used when
+    /// The built-in DEFAULT tier: the X!Tandem always-on chemistry. Used when
     /// `--refine` is given without `--refine-config`.
     pub fn default_tier() -> Self {
         let m = |name: &str, delta: f64, res: &[&str], loc: &str, class: &str| RefineMod {

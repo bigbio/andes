@@ -28,7 +28,7 @@ tempfile = "3.10"
 # (assemblies are vendored); only opening a `.raw` needs the .NET 8 runtime.
 thermo = ["dep:thermorawfilereader"]
 # Native Bruker timsTOF `.d` reading via the pure-Rust `timsrust` crate (the
-# same reader a comparison search engine uses). Optional + off-by-default. NO vendor runtime and NO
+# same reader Sage uses). Optional + off-by-default. NO vendor runtime and NO
 # bundling — a `.d` is read natively (TDF SQLite + binary blob). Default builds
 # stay pure and read mzML/MGF only; the optional dep tree only compiles under
 # this feature.

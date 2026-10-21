@@ -1,7 +1,7 @@
 //! PIN output writer.
 //!
 //! Produces a Percolator-consumable `.pin` file with the column layout used
-//! by Kim et al. (Nat Commun 5:5277, 2014) and common PIN writers so
+//! by Kim et al. (Nat Commun 5:5277, 2014) and OpenMS PercolatorAdapter so
 //! that downstream tools (Percolator, MS²Rescore, Mokapot) can consume the
 //! output interchangeably.
 //!
@@ -33,7 +33,7 @@
 //!   `match_engine.rs` from `MassError::isotope_offset`.
 //!
 //! * **enzN / enzC / enzInt**: computed via `crate::percolator_enz`
-//!   (common PIN-writer enzymatic-boundary rules; Kim et al., Nat Commun
+//!   (OpenMS PercolatorInfile enzymatic-boundary rules; Kim et al., Nat Commun
 //!   5:5277, 2014 Percolator features).
 //!
 //! * **Proteins**: single column with the real protein accession resolved from
@@ -176,7 +176,7 @@ pub type Feature = (&'static str, f64, FeatureFmt);
 /// writer (`crate::qpx::build_psms_batch`, into the `psm_metavalues` column) so
 /// the discriminative power of the PIN and the idparquet never diverge.
 ///
-/// The list intentionally EXCLUDES the columns a downstream Percolator adapter adds
+/// The list intentionally EXCLUDES the columns OpenMS' PercolatorAdapter adds
 /// generically (SpecId / Label / ScanNr / ExpMass / CalcMass / mass / peplen /
 /// dm / absdm / the charge one-hots / enzN / enzC / enzInt) and the
 /// non-numeric Peptide / Proteins columns. It DOES include `RankScore` and

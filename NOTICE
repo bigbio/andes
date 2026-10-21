@@ -18,9 +18,9 @@ We gratefully acknowledge MS-GF+ and the open-source proteomics search engines
 whose work has informed the field and ours:
 
   - MS-GF+    (Kim & Pevzner, Nat Commun 2014;5:5277)
-  - a comparison engine     (Eng, Jahan & Hoopmann, Proteomics 2013)
-  - a comparison search engine      (Lazear, J. Proteome Res. 2023)
-  - the classic hyperscore engine  (Craig & Beavis, Bioinformatics 2004)
+  - Comet     (Eng, Jahan & Hoopmann, Proteomics 2013)
+  - Sage      (Lazear, J. Proteome Res. 2023)
+  - X!Tandem  (Craig & Beavis, Bioinformatics 2004)
 
 The bundled N-glycan structure databases under `crates/andes-glyco/glycan-db/`
 are redistributed from pGlyco3 (https://github.com/pFindStudio/pGlyco3), licensed

@@ -720,7 +720,7 @@ fn splitmix64(mut x: u64) -> u64 {
 /// plausible glycopeptide), and the TOP rung (bb + full glycan = precursor mass,
 /// which a mass-preserving decoy also matches), but every INTERMEDIATE Y-rung
 /// (Y2..Y_{n-1}) is shifted by a deterministic pseudo-random offset in [1, 30) Da
-/// (a glyco search engine/an open-search PTM tool decoy-glycan recipe). On a
+/// (pGlyco/PTM-Shepherd decoy-glycan recipe). On a
 /// real-glycan spectrum the shifted rungs miss the true Y-ions, so the decoy sums
 /// far less matched intensity than the target ladder — that target−decoy gap is
 /// the glycan-axis signal Percolator turns into 2D FDR.

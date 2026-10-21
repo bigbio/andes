@@ -509,7 +509,7 @@ fn ecoli_pin_matches_golden_with_precursor_calibration_on() {
 // Fixture: `test-fixtures/astral_pxd070049_slice.mzML.gz`, 150 consecutive MS2
 // scans with their two linked MS1 scans, cut unmodified from the middle of the
 // PRIDE PXD070049 run `LFQ_Astral_DDA_15min_50ng_Condition_A_REP1.raw`
-// (Orbitrap Astral DDA, human/yeast/E. coli; converted with an open-source raw-to-mzML converter).
+// (Orbitrap Astral DDA, human/yeast/E. coli; converted with ThermoRawFileParser).
 // The chimeric Pass 2 needs the MS1 scans, which `test.mgf.gz` lacks.
 
 const CHIMERIC_MZML: &str = "test-fixtures/astral_pxd070049_slice.mzML.gz";

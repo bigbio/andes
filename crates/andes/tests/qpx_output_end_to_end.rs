@@ -2,7 +2,7 @@
 //!
 //! Runs a default search over the BSA fixture with `--output-parquet`, then
 //! opens `psms.parquet` with the `arrow`/`parquet` reader and asserts the
-//! column names + Arrow types match the reference QPX 1.0 PSM schema and that at
+//! column names + Arrow types match the OpenMS QPX 1.0 PSM schema and that at
 //! least one row was written. Also checks the QPX schema metadata is present and
 //! that the sibling `search_params.parquet` was produced.
 
@@ -131,7 +131,7 @@ fn search_writes_qpx_idparquet_bundle() {
         };
         // QPX/Parquet LIST convention: the list element field must be named
         // `element` (arrow-rs defaults to `item`; regression guard for the
-        // QPX reader interop fix).
+        // OpenMS interop fix).
         assert_eq!(
             elem.name(),
             "element",

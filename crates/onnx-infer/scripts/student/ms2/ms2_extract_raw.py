@@ -4,7 +4,7 @@
 For each run of the task (``ms2_select.py`` ``tasks.tsv``):
 1. find ``<run>.raw`` under the dataset's raw directory (or ``<run>.mzML[.gz]``
    under --mzml-dir, which skips conversion);
-2. convert it with a raw-to-mzML converter (``--converter``: the command prefix,
+2. convert it with ThermoRawFileParser (``--converter``: the command prefix,
    e.g. a container exec; ``--converter-args``: the argument template) into
    --work-dir;
 3. stream the mzML, keeping only the selected scans; read NCE and activation

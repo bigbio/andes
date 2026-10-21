@@ -1,6 +1,6 @@
 //! MS1 isotope-envelope precursor correction (`--precursor-mono`).
 //!
-//! WHY. On the engine L mouse-liver reference (`MouseLiver-Z-T-1`), 84 of the 515 reference
+//! WHY. On pGlyco2 mouse liver (`MouseLiver-Z-T-1`), 84 of the 515 reference
 //! spectra andes misses have the true backbone in the candidate set, but the
 //! precursor m/z the instrument recorded sits 3–6 Da (70 of them exactly
 //! +4.01 Da) ABOVE the glycopeptide's monoisotopic mass: the firmware's
@@ -56,7 +56,7 @@ use model::mass::{ISOTOPE, PROTON};
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MonoParams {
     /// Largest number of isotopes the recorded precursor may be moved DOWN by.
-    /// The engine L liver misses reach +6 (bigbio/andes#64 test set).
+    /// The pGlyco2 liver misses reach +6 (bigbio/andes#64 test set).
     pub max_shift: u8,
     /// MS1 peak-matching tolerance, ppm of the target m/z.
     pub tol_ppm: f64,

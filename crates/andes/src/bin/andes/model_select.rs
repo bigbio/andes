@@ -132,7 +132,7 @@ pub(crate) fn default_aa_set_with_tag(
         diagnostic_ions: Vec::new(),
     };
     // Protein N-terminal acetylation (+42.010565) — a near-universal default in
-    // the field (the reference engine / a comparison engine / a quantitation tool). Restricted to the PROTEIN N-term
+    // the field (MSFragger / Comet / MaxQuant). Restricted to the PROTEIN N-term
     // (one site per protein, after Met cleavage), so it is combinatorially cheap
     // (not every peptide N-term) and biologically correct.
     let acetyl = Modification {
@@ -214,7 +214,7 @@ pub(crate) fn cli_fragment_tol_override(
 
 /// Parse the `--enzyme` value into `(primary, extras)`.
 ///
-/// Accepts `,` or `+` separators (the latter matching a quantitation tool/the reference engine
+/// Accepts `,` or `+` separators (the latter matching MaxQuant/MSFragger
 /// docs), trims whitespace, drops empty tokens, and de-duplicates by enzyme
 /// while preserving order. The first surviving entry is the primary (drives
 /// model selection and the cleavage-credit PIN feature); the rest only widen

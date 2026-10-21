@@ -1827,7 +1827,7 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
     // referenceableParamGroup id → instrument-model InstrumentType. mzML emits
     // the `<referenceableParamGroupList>` BEFORE `<instrumentConfigurationList>`,
     // so this map is fully built by the time an `<instrumentConfiguration>`
-    // resolves a `<referenceableParamGroupRef>`. A common converter (2.0) puts
+    // resolves a `<referenceableParamGroupRef>`. ThermoRawFileParser 2.0 puts
     // the instrument-model cvParam (e.g. Orbitrap Astral MS:1003378) in such a
     // group rather than inline in the IC — without following the ref, Astral
     // mzMLs misdetect as the generic QExactive (orbitrap-analyzer) fallback.
@@ -4352,7 +4352,7 @@ mod tests {
 
     #[test]
     fn detect_instrument_astral_model_in_referenceable_param_group() {
-        // Common-converter 2.0 layout: the Orbitrap Astral instrument-model
+        // ThermoRawFileParser-2.0 layout: the Orbitrap Astral instrument-model
         // cvParam (MS:1003378) lives in a <referenceableParamGroup>, and the IC
         // pulls it in via <referenceableParamGroupRef>. The IC's own <analyzer>
         // carries the generic orbitrap term (which ALONE maps to QExactive), so

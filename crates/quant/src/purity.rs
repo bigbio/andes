@@ -1,7 +1,7 @@
 //! Precursor isolation purity: the share of the MS1 ion current inside the
 //! isolation window that belongs to the selected precursor's isotope envelope.
 //!
-//! Follows the reference purity-filter rule:
+//! Follows the OpenMS `PrecursorPurity` / `IsobaricChannelExtractor` rule:
 //! from the MS1 peak nearest the precursor m/z, walk the isotope ladder
 //! (`ISOTOPE / z`) outward in both directions, matching each expected position
 //! to the most intense peak within a ppm tolerance, and divide the summed
@@ -29,7 +29,7 @@ const MAX_LADDER_STEPS: usize = 64;
 /// the source records no target, `precursor_mz`. `lower_off` / `upper_off` are
 /// the mzML `isolation window lower/upper offset`. The isotope ladder is
 /// anchored on `precursor_mz`. `charge` 0 is treated as 1. `iso_tol_ppm`
-/// matches isotope peaks (reference default 10 ppm).
+/// matches isotope peaks (OpenMS default 10 ppm).
 pub fn precursor_purity(
     ms1: &[(f64, f32)],
     precursor_mz: f64,

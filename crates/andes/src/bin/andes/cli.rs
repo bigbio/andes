@@ -350,7 +350,7 @@ pub(crate) struct SearchArgs {
     #[arg(long, hide = true, default_value = "6")]
     pub(crate) min_length: u32,
 
-    /// Maximum peptide length, in residues. (50 matches the reference engine/a comparison engine defaults;
+    /// Maximum peptide length, in residues. (50 matches MSFragger/Comet defaults;
     /// 40 dropped long tryptic peptides.)
     #[arg(long, hide = true, default_value = "50")]
     pub(crate) max_length: u32,
@@ -480,7 +480,7 @@ pub(crate) struct SearchArgs {
     ///     because the scale factor is common to all three.)
     /// So the last 200 trees buy nothing on either resolution class while costing
     /// 33–41% of wall time, and true error is unchanged. Below ~50 the loss becomes
-    /// real. (For scale: even ONE tree still beats engine K by ~19% on Astral, so the
+    /// real. (For scale: even ONE tree still reports ~19% more PSMs than Comet on Astral, so the
     /// whole ensemble is worth ~2% of identifications for 77% of the runtime.)
     ///
     /// GLYCO IS EXEMPT: under `--glyco` the ensembles are ~0.3% of wall time, so
@@ -594,8 +594,8 @@ pub(crate) struct SearchArgs {
     /// only carries the Hex+Fuc/NeuGc composition degeneracy once the monoisotope
     /// is verified; bigbio/andes#64 arm F), while spectra with no linked MS1 or
     /// charge keep the default window. An explicit `--isotope-error` is honoured.
-    /// `auto` is the default; `off` leaves every precursor as recorded. Motivation: on the engine L
-    /// mouse-liver reference the firmware records 3-6 Da above the monoisotope on a class of
+    /// `auto` is the default; `off` leaves every precursor as recorded. Motivation: on pGlyco2
+    /// mouse liver the firmware records 3-6 Da above the monoisotope on a class of
     /// wide, high-mass glycopeptide envelopes, and widening the isotope window to
     /// reach them is mass-degenerate with a glycan composition change
     /// (bigbio/andes#64). Byte-identical output with `off`, or without MS1.

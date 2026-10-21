@@ -1,4 +1,4 @@
-//! Percolator-style enzymatic-boundary helpers (the common PIN-writer rules).
+//! Percolator-style enzymatic-boundary helpers (OpenMS PercolatorInfile rules).
 //! These compute the `enzN`, `enzC`, and `enzInt` PIN columns that feed
 //! Percolator as enzymatic-cleavage consistency features (Kim et al., Nat
 //! Commun 5:5277, 2014).
@@ -14,7 +14,7 @@
 //!   C-terminal boundary, so both bytes are normalised to the same "boundary"
 //!   semantics here.
 //! - Unknown / non-builtin enzymes return `true` for any boundary —
-//!   matching the common PIN writers' default branch and Percolator's
+//!   matching OpenMS's default "else" branch and Percolator's
 //!   unspecific-cleavage semantics.
 
 use model::enzyme::Enzyme;
@@ -25,7 +25,7 @@ fn is_protein_boundary(c: u8) -> bool {
 }
 
 /// Returns `true` when the boundary between residues `n` and `c` is
-/// consistent with the enzyme's cleavage rule (common PIN-writer rule).
+/// consistent with the enzyme's cleavage rule (OpenMS PercolatorInfile).
 pub(crate) fn is_enzymatic_boundary(n: u8, c: u8, enzyme: Enzyme) -> bool {
     // Protein boundaries are always enzymatic (usual short-circuit),
     // generalised to Rust's `_`/`-` boundary-byte convention.
@@ -57,7 +57,7 @@ pub(crate) fn is_enzymatic_boundary_any(n: u8, c: u8, primary: Enzyme, extra: &[
 }
 
 /// Count internal boundaries consistent with the cleavage rule of any of the
-/// digest's enzymes (common PIN-writer rule, per enzyme).
+/// digest's enzymes (OpenMS PercolatorInfile, per enzyme).
 ///
 /// For an empty / single-residue peptide returns `0` (no internal
 /// boundaries to evaluate). For an "unknown" enzyme (universal-true

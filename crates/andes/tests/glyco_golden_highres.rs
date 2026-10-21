@@ -249,7 +249,7 @@ fn glyco_highres_pin_matches_golden() {
 /// link, fits nothing, says so, and writes a `.glyco.pin` identical to the
 /// golden — Mono columns present and 0 on every row — while the diagnostic dump still has one NA row
 /// per MS2. (The linked case is covered by the `mono` unit tests and the
-/// measured engine L liver run in docs/benchmarks/README.md.)
+/// measured pGlyco2 liver run in docs/benchmarks/README.md.)
 #[test]
 fn glyco_highres_precursor_mono_without_ms1_is_identical_to_golden() {
     let root = repo_root();

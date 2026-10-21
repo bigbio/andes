@@ -23,10 +23,10 @@ use std::cmp::Ordering;
 pub const GLYCO_GP_K_DEFAULT: f32 = 10.0;
 
 /// Default weight for the core-Y HIT-COUNT term (gp2, leg 2b). Scales the integer
-/// `core_y_hits` against rank/ladder. The the reference engine-gap audit found the residual
+/// `core_y_hits` against rank/ladder. The MSFragger-gap audit found the residual
 /// gp-outranked truth backbones have MORE matched-fragment coverage (core-Y hits,
 /// matched b/y count) than the wrong winner but a LOWER intensity-weighted
-/// RankScore — i.e. andes' rank under-rewards COUNT, exactly what the reference engine's
+/// RankScore — i.e. andes' rank under-rewards COUNT, exactly what MSFragger's
 /// hyperscore (∝ Nb!·Ny!) rewards. Adding this count term recovers them.
 /// Offline top1-by-mass: 318 -> 334 at J=5.
 pub const GLYCO_GP_J_DEFAULT: f32 = 5.0;
@@ -57,7 +57,7 @@ pub const GLYCO_GP_H_DEFAULT: f32 = 1.0;
 /// An M+1 assignment costs an extra assumption — that the instrument selected a
 /// non-monoisotopic peak — so when two candidates explain the same precursor with
 /// equal fragment evidence, the one needing no correction should win. Measured on
-/// the engine L mouse-heart reference (issue #79): of 237 scans where andes called NeuGc and the
+/// pGlyco2 mouse heart (issue #79): of 237 scans where andes called NeuGc and the
 /// reference called Hex+Fuc, 235 sat on isotope offset 1, while the reference
 /// composition was present in the candidate pool at offset 0 on 163 of 163
 /// recoverable scans with a seven-fold better precursor residual. The two
@@ -85,7 +85,7 @@ pub const GLYCO_GP_CZ_DEFAULT: f32 = 15.0;
 /// fires), this lets a real b/y-rank advantage rescue the true backbone while a
 /// *large* ladder difference still wins; the `j·core_y_hits` count term additionally
 /// rescues the residual coverage-strong / rank-weak truth backbones the intensity-
-/// weighted rank misses (the axis the reference engine's hyperscore rewards). Offline on
+/// weighted rank misses (the axis MSFragger's hyperscore rewards). Offline on
 /// PXD025455 Fc3_r1 top1-by-mass (present ceiling 375): rank+50·ladder = 318;
 /// +5·core_y_hits = 334. Deterministic — fixed K/J, no per-scan normalization,
 /// uses only values already available at the collapse. Both collapse sites
@@ -369,7 +369,7 @@ mod tests {
     #[test]
     fn gp2_core_y_hit_count_term_rescues_coverage_strong_truth() {
         // gp2 (leg 2b): truth loses on rank+ladder alone but has MORE core-Y hits;
-        // the j·core_y_hits count term flips it (the the reference engine-hyperscore axis).
+        // the j·core_y_hits count term flips it (the MSFragger hyperscore axis).
         let (k, j, h) = (GLYCO_GP_K_DEFAULT, GLYCO_GP_J_DEFAULT, 0.0); // 50, 5, no hyperscore
                                                                        // truth: rank 8, ladder 0.1, core-Y 6 ; winner: rank 12, ladder 0.1, core-Y 2
         let truth = glyco_gp_fused_score(8.0, 0.1, 6.0, 0.0, k, j, h); // 8 + 5 + 30 = 43

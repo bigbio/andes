@@ -1,6 +1,6 @@
 //! PTM-refinement cascade (Pass-2). After the Pass-1 search, this module:
 //!   1. extracts the UNMODIFIED backbone sequences of the confident Pass-1 target
-//!      PEPTIDES (`confident_base_peptides`; a quantitation tool dependent-peptide-style
+//!      PEPTIDES (`confident_base_peptides`; MaxQuant dependent-peptide-style
 //!      anchoring),
 //!   2. finds the spectra still without any target PSM
 //!      (`unidentified_spectrum_indices`),
@@ -92,7 +92,7 @@ pub fn confident_protein_indices(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// The UNMODIFIED backbone sequences of the confident Pass-1 target peptides,
-/// deduped and sorted (a quantitation tool dependent-peptide-style anchoring).
+/// deduped and sorted (MaxQuant dependent-peptide-style anchoring).
 ///
 /// Mirrors [`confident_protein_indices`]'s best-per-spectrum TDC walk, but
 /// instead of mapping each confident TARGET to its `protein_index`, it extracts
@@ -262,7 +262,7 @@ pub fn build_refinement_index(
 /// mini-protein (matching the Pass-1 `decoy_strategy`) so the scoped search has
 /// its own decoys for TDC.
 ///
-/// This is the a quantitation tool dependent-peptide-style anchoring that replaces the
+/// This is the MaxQuant dependent-peptide-style anchoring that replaces the
 /// protein-subset path ([`build_refinement_index`]): the candidate+decoy pool is
 /// "confident peptides × refinement mods" + reversed-peptide decoys, NOT "all
 /// tryptic peptides of confident proteins × mods". Each mini-protein digests to

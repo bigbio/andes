@@ -1578,7 +1578,11 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
   false-donor share of accepted transfers was 0.28–0.31 % at transfer q 0.01 where the
   entrapment gave 0.30–0.38 %, and 0.44–0.45 % against 0.52–0.58 % at 0.05: it tracks the
   false-donor share but is not an upper bound. With a reviewed *Arabidopsis* entrapment the
-  entrapment gave 0.24–0.30 % and 0.46–0.54 %. On the earlier whole-protein shuffled
+  entrapment gave 0.24–0.30 % and 0.46–0.54 %. On 500 runs (PXD042233, peptide-level shuffled
+  entrapment, one seed) the entrapment gave 0.40 % at transfer q 0.05 against an estimate of
+  0.26 % (5.07 million accepted transfers); at 0.01 both are near zero (3 and 2 of 240,000
+  transfers). The identity term alone can therefore read low; the transfer q-value it is part
+  of also carries the wrong-peak term, which is about ten times larger at 0.05. On the earlier whole-protein shuffled
   entrapment, the identity decoys and the donor gate (#172) cut the transfers of entrapment
   donors from 728 to 88 at 0.01 (48 before the peak-shape features), with 62.8k precursors quantified in at least 3 runs (67.6k, and
   54.9k before the peak-shape features).

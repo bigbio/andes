@@ -753,12 +753,14 @@ pub fn write_feature_parquet(path: &Path, records: &[FeatureRecord]) -> std::io:
 
 /// [`write_feature_parquet`] over records given in pieces, in the same row
 /// groups. The match-between-runs columns are written when the first
-/// row group has them; with no records at all the file is
-/// [`write_feature_parquet`]'s of none.
+/// row group has them, or always with [`FeatureParquetWriter::new_mbr`]; with
+/// no records at all the file is [`write_feature_parquet`]'s of none, with
+/// those columns for `new_mbr`.
 pub struct FeatureParquetWriter {
     path: std::path::PathBuf,
     buf: Vec<FeatureRecord>,
     open: Option<(ArrowWriter<std::fs::File>, Arc<Schema>, bool)>,
+    mbr: bool,
 }
 
 impl FeatureParquetWriter {
@@ -767,6 +769,16 @@ impl FeatureParquetWriter {
             path: path.to_path_buf(),
             buf: Vec::new(),
             open: None,
+            mbr: false,
+        }
+    }
+
+    /// A writer that always writes the match-between-runs columns, so a table
+    /// with no rows still has the schema its readers select from.
+    pub fn new_mbr(path: &Path) -> Self {
+        Self {
+            mbr: true,
+            ..Self::new(path)
         }
     }
 
@@ -782,7 +794,7 @@ impl FeatureParquetWriter {
 
     fn write(&mut self, chunk: &[FeatureRecord]) -> std::io::Result<()> {
         if self.open.is_none() {
-            let mbr = has_mbr(chunk);
+            let mbr = self.mbr || has_mbr(chunk);
             let (w, s) = open_feature_writer(&self.path, mbr)?;
             self.open = Some((w, s, mbr));
         }
@@ -793,7 +805,10 @@ impl FeatureParquetWriter {
     pub fn finish(mut self) -> std::io::Result<()> {
         let rest = std::mem::take(&mut self.buf);
         if self.open.is_none() && rest.is_empty() {
-            return write_feature_parquet(&self.path, &[]);
+            let (w, _) = open_feature_writer(&self.path, self.mbr)?;
+            w.close()
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            return Ok(());
         }
         if !rest.is_empty() {
             self.write(&rest)?;
@@ -997,6 +1012,17 @@ mod tests {
         let file = std::fs::File::open(&p).unwrap();
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
         assert_eq!(builder.schema().fields().len(), 33);
+        // An empty MBR table keeps the MBR columns.
+        FeatureParquetWriter::new_mbr(&p).finish().unwrap();
+        let file = std::fs::File::open(&p).unwrap();
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        let names: Vec<&str> = builder
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect();
+        assert!(names.contains(&"evidence_type") && names.contains(&"quantity_se"));
     }
 
     #[test]

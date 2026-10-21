@@ -1231,7 +1231,7 @@ pub(crate) fn finalize_and_write(
         Some(dir) => {
             std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
             let path = dir.join("quantms.feature.parquet");
-            Some((FeatureParquetWriter::new(&path), path, 0i64))
+            Some((FeatureParquetWriter::new_mbr(&path), path, 0i64))
         }
         None => None,
     };

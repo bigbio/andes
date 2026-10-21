@@ -880,7 +880,8 @@ fn glyco_table_from_the_index_is_the_enumeration_sequon_subset_in_order() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let mmap = PreparedSearch::prepare_mmap(&idx, &params, &scorer, 0.05, "XXX", tmp.path())
         .expect("prepare_mmap");
-    let table = GlycoCandidates::from_out_of_core(&mmap);
+    let table =
+        GlycoCandidates::from_out_of_core(&mmap, andes_glyco::glycan_first::GlycanCore::NGlycan);
 
     type Sig = (usize, usize, Vec<(u8, i64)>, u8, u8, bool, bool, bool);
     let sig = |c: &Candidate| -> Sig {

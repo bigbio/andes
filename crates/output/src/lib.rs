@@ -47,6 +47,8 @@ pub mod site_identity;
 pub use knockoff_fdr::{apply_knockoff_fdr, KnockoffCount, KnockoffOutcome};
 pub use site_fdr::{site_claims, write_sites_tsv, SiteCount, SiteOutcome, SiteRow};
 
+pub mod pg_parquet;
+pub use pg_parquet::write_pg_parquet;
 pub mod protein_inference;
 pub use protein_inference::{
     infer_protein_groups, write_protein_groups_tsv, Inference, ProteinGroup,
@@ -59,9 +61,9 @@ pub use glyco_rt::populate_glyco_rt_features;
 
 pub mod percolator;
 pub use percolator::{
-    decoy_results_path, parse_psm_results, resolve_backend, run_percolator,
-    run_percolator_with_decoys, PercolatorBackend, PercolatorError, PercolatorPsm,
-    DEFAULT_PERCOLATOR_IMAGE,
+    decoy_results_path, parse_psm_results, percolator_args_with_threads, resolve_backend,
+    run_percolator, run_percolator_with_decoys, PercolatorBackend, PercolatorError, PercolatorPsm,
+    PsmResultReader, PsmResultRow, DEFAULT_PERCOLATOR_IMAGE,
 };
 
 pub(crate) mod percolator_enz;

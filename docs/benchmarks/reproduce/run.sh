@@ -3,7 +3,7 @@
 #
 #   ./run.sh <data-dir> [dataset ...]      # astral tmt ups1  (default: all three)
 #
-# Needs: an `andes` binary on PATH (or $ANDES), Docker for Percolator. No absolute paths,
+# Needs: an `andes` binary on PATH (or $ANDES), Docker for Percolator, python3. No absolute paths,
 # nothing specific to our hosts. Every number it prints carries its own provenance line.
 set -euo pipefail
 
@@ -22,7 +22,7 @@ command -v "$ANDES" >/dev/null || { echo "andes not found (set \$ANDES)" >&2; ex
 command -v docker  >/dev/null || { echo "docker not found (needed for Percolator)" >&2; exit 1; }
 
 echo "provenance: andes $("$ANDES" --version 2>&1 | head -1) | $(uname -srm) | ${THREADS} threads | $(date -u +%FT%TZ)"
-printf '\n%-8s %10s %12s %14s\n' dataset wall "PSMs@q0.01" "entrap hits"
+printf '\n%-8s %10s %12s %14s %12s\n' dataset wall "PSMs@q0.01" "entrap hits" "I/L rescued"
 
 # `ls a.raw b.mzML` SORTS its operands, so a combined glob returns the .mzML first and the
 # "prefer native" intent is lost. Pick the extensions in order instead.
@@ -55,11 +55,10 @@ for ds in "${SETS[@]}"; do
   docker run --rm -v "$OUT":/r $PIMG percolator --seed 42 -Y --only-psms=false \
     --results-psms "/r/$ds.t.psms" --decoy-results-psms "/r/$ds.d.psms" "/r/$ds.pin" \
     > "$OUT/$ds.perc.log" 2>&1
-  read -r n ent < <(awk -F'\t' '
-    NR==1{for(i=1;i<=NF;i++) if($i=="q-value") q=i; p=NF; next}
-    $q<=0.01{c++; all=1; for(i=p;i<=NF;i++) if($i !~ /ENTRAP_/){all=0; break}; e+=all}
-    END{print c+0, e+0}' "$OUT/$ds.t.psms")
-  printf '%-8s %9ss %12s %14s\n' "$ds" "$((e-s))" "$n" "$ent"
+  # Entrapment = every protein ENTRAP_ and the I/L-folded peptide in no sample protein
+  # (../entrap_common.py, shared with build_databases.sh and the glyco evaluators).
+  read -r n ent res < <(python3 "$HERE/../entrap_common.py" count "$OUT/$ds.t.psms" "$fa" 0.01)
+  printf '%-8s %9ss %12s %14s %12s\n' "$ds" "$((e-s))" "$n" "$ent" "$res"
 done
 
 cat <<'NOTE'
@@ -71,6 +70,10 @@ Reading these numbers
         FDP = (entrap hits / total) x (1 + T/E)
     build_databases.sh prints T/E for YOUR build. Never assume 1:1 (factor 2) -- doing so
     has understated the true error in this project twice.
+  * An entrapment hit is a PSM whose proteins are ALL ENTRAP_ and whose I/L-folded
+    peptide occurs in no sample protein. "I/L rescued" PSMs map only to ENTRAP_ proteins,
+    but their I/L-folded peptide occurs in a sample protein (I and L are isobaric), so
+    they count as target, not as hits.
   * Only ups1 has an entrapment component here, so only it yields a true FDP.
   * Wall times compare only within one host and one session. Counts are portable.
 NOTE

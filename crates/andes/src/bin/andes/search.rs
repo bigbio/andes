@@ -2199,11 +2199,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             )
             .map_err(|e| format!("{e}"))?;
             eprintln!("Rescore: Percolator backend = {}", backend.describe());
-            let extra: Vec<String> = cli
+            let user_args: Vec<String> = cli
                 .percolator_args
                 .split_whitespace()
                 .map(|s| s.to_string())
                 .collect();
+            let extra = output::percolator_args_with_threads(&user_args, cli.threads);
             let t_resc = std::time::Instant::now();
             let (map, decoys) =
                 output::run_percolator_with_decoys(&backend, &output_pin_path, &extra)

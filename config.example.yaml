@@ -80,7 +80,8 @@ rescoring:
   # predictor_backend: tract     # tract | ort (ONNX Runtime; build with --features ort)
 
 glyco:
-  enabled: false                 # intact N-glycopeptide search
+  enabled: false                 # intact glycopeptide search
+  # core: n                      # glycan core: n (N-glycan, default) | o (O-glycan)
   # species: human               # bundled glycan database: human | mouse | mouse-large | high-mannose
   # glycan_gdb: glycans.gdb      # or an external .gdb file (one of the two is required)
   # --- advanced (validated defaults; see DOCS §9) ---
@@ -113,5 +114,5 @@ quant:
   # quant_fdr: 0.01              # PSM q-value cut for quant targets (default: rescoring fdr)
   # mbr: false                   # match-between-runs across the inputs (needs lfq and rescoring, 2+ inputs)
   # mbr_library_fdr: 0.01        # internal library entry gate (precursor-level), not a reported identification FDR
-  # mbr_fdr: 0.05                # transfer quality q-value for transfer_ms1 (internal, not an identification FDR)
+  # mbr_fdr: 0.01                # transfer quality q-value for transfer_ms1 (internal, not an identification FDR)
   # quant_feature_fdr: off       # identified-row quality q-value; above it: identified_below_threshold (internal); off (default) reports all

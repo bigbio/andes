@@ -527,7 +527,7 @@ when a pipeline (e.g. quantms) owns rescoring. `--fdr`/`--pep` alone are ignored
 | `--proteoform-fdr` | fraction | max(`--fdr`, 0.05) | q-value threshold for proteoform claims: variant-class PSMs (every protein a UniProt variant entry) in the filtered TSV, the proteoform table and quantification; every other PSM keeps `--fdr`. |
 | `--protein-fdr` | fraction | *(off)* | Protein-group q-value cutoff: the filtered TSV keeps only PSMs whose peptide counts for a group at or below it, and the proteoform table only families of such groups. `<stem>.protein_groups.tsv` is written either way ([protein groups](#protein-groups-and-protein-fdr)). |
 | `--pep` | fraction | *(off)* | *(advanced)* PEP threshold, ANDed with `--fdr` (and with `--quant-fdr` for quantification targets and `--mbr` donors). |
-| `--percolator-bin` / `--percolator-docker` / `--percolator-image` / `--percolator-args` | — | auto | *(advanced)* Backend: `--percolator-bin`, else `$PATH`, else Docker; `--percolator-args` passes flags through. |
+| `--percolator-bin` / `--percolator-docker` / `--percolator-image` / `--percolator-args` | — | auto | *(advanced)* Backend: `--percolator-bin`, else `$PATH`, else Docker; `--percolator-args` passes flags through. Percolator runs with `--num-threads` set to `--threads` unless `--percolator-args` sets it: about twice as fast as its default of three threads on a 16-core node, with the same result (the PSM count can differ by about 0.2% between thread counts). `--subset-max-train <N>` trains on N PSMs and is 5–10 times faster, but on an entrapment benchmark it raised the true FDP at q ≤ 0.01 from 1.00% to 1.09–1.16%, so it is not the default. |
 | `--keep-pin` | bool | `true` | *(advanced)* With `--rescore`/`--rescore-native` and no `--output-pin`: `true` writes the PIN (and Percolator's result files) as `<base>.pin`, where `<base>` is `--output-tsv`, else `--output-parquet`, else `./andes`; `false` uses a temporary PIN deleted at exit. An explicit `--output-pin` is always kept. |
 | `--predict` | list | `rt` | Predicted-spectrum and retention-time features added to the PIN (§3a, predicted features): `rt` (bundled andes-rt model), `ms2` (AlphaPeptDeep fragment intensities), `peptdeep-rt`, `deeplc-rt`, comma-separated, or `none`. They are Percolator features; andes computes no FDR from them. |
 | `--predictor-models` | dir | *(none)* | Directory with the exported AlphaPeptDeep (`peptdeep_mods.json`, `peptdeep_{ms2,rt}_dynamic.{json,onnx}`) and DeepLC (`deeplc_rt.{json,onnx}`) models that `ms2`, `peptdeep-rt` and `deeplc-rt` load. A requested model that is missing stops the run before the search. |
@@ -576,6 +576,32 @@ so most are likely present, and the shuffled-entrapment run is the better measur
 the best row of each spectrum, or only rows at PSM q ≤ 0.01, gives 1.1–1.4% at 1% on Astral:
 within the entrapment's counting noise.
 
+#### Several runs: `andes inference`
+
+`andes inference` runs the same inference once over the PSMs of several runs and writes the QPX
+protein-group view, so the groups and their q-values are dataset-level:
+
+```bash
+andes inference \
+  --psms run1.percolator.target.psms.txt run2.percolator.target.psms.txt \
+  --decoy-psms run1.percolator.decoy.psms.txt run2.percolator.decoy.psms.txt \
+  --database db.fasta -o out/PXD000001
+# writes out/PXD000001.pg.parquet
+```
+
+- The scores must be on one scale: give the results of one Percolator run over all the runs (one
+  file, or one file per run from that run). Separate Percolator runs are not comparable.
+- Give the search's database options (`--annotations`, `--uniprot-*`, `--knockoffs`,
+  `--enzyme`, `--decoy-prefix`/`--decoy-suffix`), so families, knockoff entries and decoy pairs
+  are the search's. Knockoff entries are evidence for no protein.
+- The class and knockoff q-values are applied as in a search; `--fdr` and `--proteoform-fdr` set
+  the PSM cutoffs for the counts.
+- `pg.parquet`: one row per target group and per decoy group that won its family's competition
+  (`is_decoy`), with `pg_accessions`, `anchor_protein`, `grouped_runs` (`--runs`, else one name
+  per `--psms` file), `global_qvalue` (the protein q-value), `pg_qvalue` (only for one run),
+  `peptides` (peptides per accession), `peptide_counts`, the best peptide score in
+  `additional_scores` and families, PSMs, razor peptides and subsumed families in `cv_params`.
+
 ### Glycopeptide search
 
 See [§9](#9-glycopeptide-search-experimental--advanced-knobs).
@@ -607,7 +633,7 @@ See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model)
 | `--quant-fdr` | 0..1 | `--fdr` | PSM q-value cut for quantification targets when `--rescore`/`--rescore-native` ran. With `--mbr`, also the PSM q-value at which a run identifies a precursor (§10). |
 | `--mbr` | flag | off | Match-between-runs label-free quantification across two or more inputs (§10). Needs `--lfq` and `--rescore` (or `--rescore-native`); not with `--tmt`. Writes `<stem>.mbr.parquet` and `<stem>.mbr_validation.parquet`; with `--output-parquet`, `quantms.feature.parquet` holds these rows (without the below-threshold transfers) instead of the per-run features. Uses `--quant-dir`, or a temporary directory removed at exit. With `--rescore` (Percolator), same result as `andes quant library`, `extract` and `finalize` on the same Percolator results. |
 | `--mbr-library-fdr` | 0..1 | `0.01` | Internal library entry gate (precursor-level), not a reported identification FDR: best-PSM-per-precursor target/decoy q-value over the rescored PSM scores of all runs. |
-| `--mbr-fdr` | 0..1 | `0.05` | *(advanced)* Transfer quality q-value: transfers at or below it are `transfer_ms2` (an MS2 scan of the run supports them) or `transfer_ms1`. An internal quant-quality q-value, not an identification FDR. It counts both wrong peaks and the transfers of false donor identifications (identity decoys, §10). On a public label-free benchmark, 0.05 adds about 5k precursors quantified in at least 3 runs to 0.01 (62.8k to 68.0k) at an accuracy cost (median \|eps\| 0.162 to 0.173, E. coli 0.27 to 0.43, CV 0.118 to 0.132, wrong-peak rate 1.7% to 2.7%); use `0.01` for a stricter set. |
+| `--mbr-fdr` | 0..1 | `0.01` | *(advanced)* Transfer quality q-value: transfers at or below it are `transfer_ms2` (an MS2 scan of the run supports them) or `transfer_ms1`. An internal quant-quality q-value, not an identification FDR. It counts both wrong peaks and the transfers of false donor identifications (identity decoys, §10). On a public label-free benchmark, `0.05` adds about 5k precursors quantified in at least 3 runs to 0.01 (62.8k to 68.0k) at an accuracy cost (median \|eps\| 0.162 to 0.173, E. coli 0.27 to 0.43, CV 0.118 to 0.132, wrong-peak rate 1.7% to 2.7%); use `0.05` for a deeper, less accurate set. |
 | `--quant-feature-fdr` | 0..1 or `off` | `off` | Identified-row quality q-value (`quant_q`): with a value, an identified row whose MS1 feature has a `quant_q` above it (or none) is `identified_below_threshold` and left out of `quantms.feature.parquet` (§10); `off` reports every identified row and keeps `quant_q` as an annotation. An internal quant-quality q-value, not an identification FDR. |
 
 With `--output-parquet`, both modules add `quantms.feature.parquet` (the QPX feature view) to the bundle.
@@ -1114,8 +1140,12 @@ accepted**; use the names (case-insensitive, `--fragmentation hcd` ≡ `HCD`). T
 
 ## 9. Glycopeptide search (experimental) & advanced knobs
 
-`--glyco` searches intact N-glycopeptides (N-X-S/T sequon backbones) and writes a
-`.glyco.pin`. The defaults are validated; most knobs are hidden.
+`--glyco` searches intact glycopeptides and writes a `.glyco.pin`. By default it
+searches **N**-glycopeptides (N-X-S/T sequon backbones, trimannosyl core). With
+`--glyco-core o` it searches **O**-glycopeptides instead: any Ser/Thr is a
+glycosite (no sequon), the core is a single reducing-end GalNAc, and the glycan
+database must be an O-glycan `.gdb` (e.g. a published O-glycan database). The
+defaults are validated; most knobs are hidden.
 
 **Main flags:**
 
@@ -1124,6 +1154,7 @@ accepted**; use the names (case-insensitive, `--fragmentation hcd` ≡ `HCD`). T
 | `--glyco-tol-ppm` | 20 | Fragment tolerance for glyco matching (oxonium, core-Y, backbone mass, c/z). **Raise it on ion-trap MS2** or the oxonium gate never fires. |
 | `--glyco-glycan-gdb <FILE>` | — | `.gdb` glycan database (canonical-string trees, the format of the bundled databases); structure (core- vs antenna-fucose) is kept. Wins over `--glyco-species`. |
 | `--glyco-species <NAME>` | — | Bundled database: `human`, `mouse`, `mouse-large`, `high-mannose`. One of the two is required. |
+| `--glyco-core <n\|o>` | `n` | Glycan core: `n` = N-glycan (N-X-S/T sequon gate, trimannosyl core), `o` = O-glycan (any S/T gate, single GalNAc core). An `o` run needs an O-glycan `.gdb`. |
 | `--precursor-mono` | `auto` | Correct each precursor to the monoisotope its MS1 envelope supports (mzML or `.raw`): tests "recorded = M+k", k = 0..6, and moves down k−1 isotopes when k > 0 clearly wins. On the engine L mouse-liver reference (PXD005553) 88 of 3,824 scans were recorded exactly +4 high (issue #64). Fitted spectra are searched with a `0..1` isotope window instead of `0..2`. Adds `MonoShift`/`MonoFit`/`MonoFitGain`/`MonoSNR`. An explicit `--isotope-error` is honoured; without MS1 output is byte-identical to `off`. Under `--glyco` the isotope-error window defaults to 0..=2 (dropping −1 measured +81 backbone-correct @1%). |
 | `--glyco-max-peaks` | 0 (no cap) | Peaks the **generation** stage considers; 300–500 helps very dense scans. |
 | `--glyco-retrieval-tol-ppm` | tol-ppm on high-res, the model's Da window on low-res | Retrieval window only; 20 ppm on high-res measured 6.9x faster at no identification cost. |
@@ -1148,7 +1179,10 @@ on ETD the rank/edge/hyperscore path scores the backbone with its intact glycan 
 backbone-correct @1%); the best enumerated candidate is promoted over a de-novo winner;
 peptide-first index at fragment charges 1..=2 with at most 1,024 candidates per spectrum;
 `--precursor-mono` uses max shift 6, minimum fit 0.90, minimum gain 0.15, minimum SNR 3.0,
-10 ppm MS1 tolerance and holds back 1 isotope.
+10 ppm MS1 tolerance and holds back 1 isotope; `--glyco-core o` additionally gates Hex>0
+(galactose) candidates on a Hex diagnostic ion (163.060 or 366.139) in the HCD spectrum —
+the GalNAc oxonium every O-glycopeptide carries cannot justify adding galactose (N-glycan is
+unaffected).
 
 Deleted after A/B tests (2026-09-05): `--glyco-split-election`, `--glyco-gp-g`,
 `--glyco-gp-m`, `--glyco-isobar-rep`, `--glyco-y-index`, `--glyco-decorated-features`,
@@ -1365,7 +1399,7 @@ andes quant library  --quant-dir q/ [--quant-fdr 0.01] [--pep 0.05] \
 andes quant extract  --quant-dir q/ --run a [--lfq-tol 10ppm]
 andes quant extract  --quant-dir q/ --run b [--lfq-tol 10ppm]
 # once
-andes quant finalize --quant-dir q/ -o experiment [--mbr-fdr 0.05] [--quant-feature-fdr off] \
+andes quant finalize --quant-dir q/ -o experiment [--mbr-fdr 0.01] [--quant-feature-fdr off] \
       [--output-parquet dir]
 ```
 
@@ -1570,20 +1604,31 @@ searching a run again, run `quant library`, every `quant extract` and `quant fin
 batch at a time, twice (the precursor keys first, then the PSMs joined to that run's scores),
 and keeps per-precursor aggregates only: its memory follows the precursors and their donor runs
 plus one run's scores, not the PSMs of every run. With one merged pair of Percolator files the
-whole pair, and every SpecId, is held. `quant finalize` works in precursor shards: with more
-than `--shard-rows` extract rows (default 1,000,000) it splits them by precursor id into
-temporary extract tables next to its output and holds one shard at a time, over four passes
-(training rows, held-out scores, normalisation cells, outputs). The results do not depend on
-the shard size. Two caps bound the rest: each GBDT trains on at most `--max-train-rows` rows
-(default 3,000,000; above it, the rows of a hashed sample of (precursor, run) pairs, so every
-precursor still trains in some runs and a target stays with its decoys; all rows are still
-scored), and the run normalisation fits at most `--max-norm-cells` reference cells (default
-20,000,000, about 150 bytes each; above it, a hashed sample of whole precursors, which coarsens
-the RT-local offsets). Below the caps the outputs are byte-identical to an all-in-memory run.
-`--seed` (default 42) sets the folds, the models and the samples. On a 6-run Orbitrap set
-(1.7 million extract rows) finalize peaks at about 1 GB; on synthetic sets of replicated runs
-it grew by about 7 MB per run (480 runs: 4.4 GB), where the previous all-in-memory finalize grew
-by about 160 MB per run.
+whole pair, and every SpecId, is held. `quant finalize` is a map-reduce over the runs: each
+run's extract table is read on its own, in record batches cut at precursor boundaries, and the
+runs are processed in parallel (`--threads`). What a row needs from other runs is either a
+per-precursor summary (the consensus width, and the sorted donor fits around their median,
+which give the shape features' median over the other runs) or a global model, so every
+reduction is exact: training rows, held-out scores (merged run by run; the K-decoy q-values are
+built from the sorted scores), normalisation cells and validation counts. Each run's output
+rows go to a temporary table, and the tables are merged by (precursor, run) into
+`<base>.mbr.parquet`. Temporary tables go next to the output, or to `--temp-dir` (for example
+a local disk); they are removed at the end. Two caps bound the models: each GBDT trains on at
+most `--max-train-rows` rows (default 3,000,000; above it, the rows of a hashed sample of
+(precursor, run) pairs, so every precursor still trains in some runs and a target stays with
+its decoys; all rows are still scored), and the run normalisation fits at most
+`--max-norm-cells` reference cells (default 20,000,000, about 150 bytes each; above it, a
+hashed sample of whole precursors, which coarsens the RT-local offsets). Below the caps the
+outputs are byte-identical to an all-in-memory run, whatever the number of threads. Two more
+limits only trade memory for passes over the tables: `--max-donor-fits` (identified rows
+summarised per pass, default 12,000,000) and `--max-held-scores` (held-out scores in memory
+per classifier, default 64,000,000; above it they are sorted into temporary tables). `--seed`
+(default 42) sets the folds, the models and the samples. Memory follows the library, these
+limits and one run's output rows per thread; the term that grows with the data is the pooled
+q-value step function of each classifier, 12 bytes per step (74 million steps, 0.9 GB, on 500
+Orbitrap runs with 464 million extract rows). On those 500 runs with 16 threads finalize took
+10.5 minutes at 7.3 GB peak (about 3.5 GB of it the library), against 1.9 to 2.7 hours at
+10.3 GB for the previous precursor-shard version, with the same outputs.
 
 `--mbr` without `--quant-dir` writes the per-run artifacts to a temporary directory (under
 `TMPDIR`): each run's `<stem>.ms1.parquet` (about 5–6 bytes per centroid; about 200 MB for an

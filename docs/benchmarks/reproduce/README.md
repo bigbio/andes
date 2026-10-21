@@ -24,8 +24,8 @@ than `run.sh`: the deep tier pools the five fractions before Percolator, the qui
 - **`fetch_spectra.sh`** resolves download URLs through the PRIDE API, skips files already
   present, and prints a sha256 for each.
 - **`run.sh`** searches, rescores through the pinned Percolator container, and prints wall
-  time, PSMs at `q ≤ 0.01` and entrapment hits, with a provenance line (binary, platform,
-  threads, date).
+  time, PSMs at `q ≤ 0.01`, entrapment hits and I/L-rescued PSMs, with a provenance line
+  (binary, platform, threads, date).
 
 ## Read `.raw` natively — do not convert
 
@@ -77,6 +77,12 @@ measured error rate needs an entrapment database:
 FDP = (entrapment hits / total accepted) x (1 + T/E)
 ```
 
-with `T/E` from `build_databases.sh`; **never assume 1:1**. Of the standard databases only
+with `T/E` from `build_databases.sh`; **never assume 1:1**. An entrapment hit is a PSM whose
+proteins are **all** `ENTRAP_` and whose peptide, with I folded to L, occurs in no sample
+protein: I and L are isobaric, so a peptide that matches a sample sequence after folding
+explains the spectrum as well as the sample does and counts as target ("I/L rescued"). The
+rule is a substring test, independent of the enzyme; `T/E` counts entrapment peptides the
+same way. Both scripts take it from [`../entrap_common.py`](../entrap_common.py), as do the
+glyco evaluators. Of the standard databases only
 UPS1 has an entrapment component; the glyco mouse database is 1:1 by construction (factor
 exactly 2).

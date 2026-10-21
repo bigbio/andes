@@ -366,11 +366,11 @@ pub fn select_nearest_for<'a>(
     //
     //    Only fires where step 5 would otherwise return the standard base, so no
     //    selection that already resolved can change. Among the same-activation
-    //    models the pick is, in order: one whose labelling (TMT/iTRAQ or none)
-    //    agrees with the key's, so an unlabelled query never gets a labelled
-    //    model while an unlabelled one exists (and the reverse); one whose
-    //    experiment_class equals the key's; one with the key's enzyme; the
-    //    smallest model_id, so the choice is deterministic.
+    //    models the pick is, in order: one with the key's labelling (TMT,
+    //    iTRAQ or none), else an unlabelled one, before one with another label,
+    //    so an unlabelled query never gets a labelled model while an unlabelled
+    //    one exists; one whose experiment_class equals the key's; one with the
+    //    key's enzyme; the smallest model_id, so the choice is deterministic.
     if let Some(pick) = entries
         .iter()
         .filter(|e| e.activation == key.activation)
@@ -387,11 +387,23 @@ pub fn select_nearest_for<'a>(
 }
 
 /// Preference of a same-activation model when [`select_nearest_for`] relaxes
-/// the instrument (step 4); lower is better: labelling agreement, then exact
-/// experiment_class, then enzyme.
-fn relaxed_instrument_rank(e: &SelectionEntry, key: &SelectionKey) -> (bool, bool, bool) {
+/// the instrument (step 4); lower is better: labelling (0 the key's own
+/// labelling, 1 unlabelled, 2 another label), then exact experiment_class,
+/// then enzyme.
+fn relaxed_instrument_rank(e: &SelectionEntry, key: &SelectionKey) -> (u8, bool, bool) {
+    let labels = |set: &BTreeSet<String>| -> BTreeSet<String> {
+        set.iter().filter(|s| is_labeling_tag(s)).cloned().collect()
+    };
+    let entry_labels = labels(&e.experiment_class);
+    let labelling = if entry_labels == labels(&key.experiment_class) {
+        0
+    } else if entry_labels.is_empty() {
+        1
+    } else {
+        2
+    };
     (
-        contains_labeling_tag(&e.experiment_class) != contains_labeling_tag(&key.experiment_class),
+        labelling,
         e.experiment_class != key.experiment_class,
         e.enzyme != key.enzyme,
     )
@@ -462,11 +474,27 @@ mod tests {
             e("hcd_qexactive_tryp", "HCD", "QExactive", "Trypsin", &[]),
         ];
         let pick = |ec: &[&str]| {
-            select_nearest(&entries, &key("ETD", "LowRes", "Trypsin", ec), fam, "hcd_qexactive_tryp")
+            select_nearest(
+                &entries,
+                &key("ETD", "LowRes", "Trypsin", ec),
+                fam,
+                "hcd_qexactive_tryp",
+            )
         };
-        assert_eq!(pick(&[]), ("etd_c", true), "unlabelled, standard class first");
+        assert_eq!(
+            pick(&[]),
+            ("etd_c", true),
+            "unlabelled, standard class first"
+        );
         assert_eq!(pick(&["phospho"]), ("etd_b_phospho", true));
-        assert_eq!(pick(&["tmt"]), ("etd_a_tmt", true), "a labelled query keeps its label");
+        assert_eq!(
+            pick(&["tmt"]),
+            ("etd_a_tmt", true),
+            "a labelled query keeps its label"
+        );
+        // Another label is worse than none: an iTRAQ query is not scored with
+        // a TMT model while an unlabelled one exists.
+        assert_eq!(pick(&["itraq"]), ("etd_c", true));
 
         // Only a labelled model of this activation: still preferred to crossing
         // the activation.

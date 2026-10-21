@@ -96,8 +96,8 @@ pub(crate) fn build_aa_set(
     }
 }
 
-/// Build the default `AminoAcidSet` (CAM-C fixed + Ox-M variable), optionally
-/// with an isobaric tag (TMT/iTRAQ) as a FIXED mod on K + peptide N-term.
+/// Build the default `AminoAcidSet` (CAM-C fixed, Ox-M variable, protein-N-term
+/// Acetyl variable), optionally with an isobaric tag (TMT/iTRAQ) as a FIXED mod on K + peptide N-term.
 ///
 /// Used by the no-`--mods` (parameter-free) path: when the protocol resolves to
 /// TMT/iTRAQ the tag MUST be in the candidate set, or every labeled peptide is

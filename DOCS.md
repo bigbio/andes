@@ -56,7 +56,7 @@ Native `.raw`/`.d` search MS2 only (MS3 reporter scans are filtered at load).
 
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
-| `--mods` | path | *(off)* | Java-format `mods.txt` (§2). Without it: Carbamidomethyl C (fixed), Oxidation M (variable, max 3 per peptide). Numeric Da masses only. | Java `-mod <FILE>` |
+| `--mods` | path | *(off)* | Java-format `mods.txt` (§2). Without it: Carbamidomethyl C (fixed), Oxidation M (variable) and Acetyl on the protein N-terminus (variable), max 3 variable mods per peptide. Numeric Da masses only. | Java `-mod <FILE>` |
 
 ### Scoring
 
@@ -717,7 +717,9 @@ NumMods=3
 15.99491,M,opt,any,Oxidation
 ```
 
-These two are the built-in defaults when `--mods` is omitted.
+The built-in defaults when `--mods` is omitted are these two plus a variable Acetyl
+(+42.010565) on the protein N-terminus, i.e. the equivalent of adding
+`42.010565,*,opt,Prot-N-term,Acetyl`. Pass a `--mods` file to search without it.
 
 ### Example (b) — TMT 10-plex on K and peptide N-term
 

@@ -387,11 +387,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 3. Build AminoAcidSet ────────────────────────────────────────────────
     //
-    // If --mod is given, parse the mods.txt file. Otherwise
-    // fall back to andes's historical defaults (CAM fixed on C,
-    // Oxidation variable on M + protein-N-term Acetyl variable).
+    // If --mods is given, parse the mods.txt file. Otherwise use the
+    // defaults: CAM fixed on C, Oxidation variable on M and Acetyl
+    // variable on the protein N-term.
     //
-    // `num_mods_from_file` is populated only when --mod is given and the
+    // `num_mods_from_file` is populated only when --mods is given and the
     // file contains a `NumMods=N` line; it overrides the default
     // `max_variable_mods_per_peptide` (3) below.
     let (mut aa, num_mods_from_file) = match &cli.mods {
@@ -410,7 +410,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
             (set, n)
         }
-        // No --mods: andes defaults (CAM-C fixed, Ox-M variable). The isobaric
+        // No --mods: andes defaults (CAM-C fixed, Ox-M variable, protein-N-term
+        // Acetyl variable). The isobaric
         // tag (TMT/iTRAQ) is injected later, after protocol detection (C1).
         None => (default_aa_set_with_tag(None)?, None),
     };

@@ -612,17 +612,32 @@ fn cv_scores(d: &PinData, seed: u64) -> (Vec<f64>, usize) {
 
 /// PEP of each winner (in `idx` order, `score` descending not required):
 /// decoys / targets at that score from an isotonic fit of the decoy share,
-/// capped at 1.
+/// capped at 1. Winners with exactly equal scores start as one block, so they
+/// share one PEP whatever their order in `idx`.
 fn winner_pep(d: &PinData, idx: &[usize], score: &[f64]) -> Vec<f64> {
     let mut order: Vec<usize> = (0..idx.len()).collect();
     order.sort_by(|&a, &b| score[idx[b]].total_cmp(&score[idx[a]]));
     // Pool adjacent violators: the decoy share must not fall as the score
-    // falls. Blocks of (sum, count) in descending-score order.
+    // falls. Blocks of (sum, count) in descending-score order; a run of tied
+    // scores enters as one block.
     let mut sums: Vec<f64> = Vec::new();
     let mut counts: Vec<f64> = Vec::new();
-    for &o in &order {
-        sums.push(if d.is_decoy[idx[o]] { 1.0 } else { 0.0 });
-        counts.push(1.0);
+    let mut start = 0usize;
+    while start < order.len() {
+        let tied = score[idx[order[start]]];
+        let end = start
+            + order[start..]
+                .iter()
+                .take_while(|&&o| score[idx[o]].total_cmp(&tied).is_eq())
+                .count();
+        sums.push(
+            order[start..end]
+                .iter()
+                .filter(|&&o| d.is_decoy[idx[o]])
+                .count() as f64,
+        );
+        counts.push((end - start) as f64);
+        start = end;
         while sums.len() > 1 {
             let k = sums.len();
             if sums[k - 2] / counts[k - 2] <= sums[k - 1] / counts[k - 1] {
@@ -1045,6 +1060,36 @@ mod tests {
         let x = cholesky_solve(&[4.0, 2.0, 2.0, 3.0], &[2.0, 1.0], 2).unwrap();
         assert!((x[0] - 0.5).abs() < 1e-12 && x[1].abs() < 1e-12, "{x:?}");
         assert!(cholesky_solve(&[0.0, 0.0, 0.0, 1.0], &[1.0, 1.0], 2).is_none());
+    }
+
+    fn pin_data(is_decoy: &[bool]) -> PinData {
+        let n = is_decoy.len();
+        PinData {
+            spec_ids: (0..n).map(|i| format!("r{i}")).collect(),
+            peptides: vec![String::new(); n],
+            proteins: vec![String::new(); n],
+            is_decoy: is_decoy.to_vec(),
+            spectrum_hashes: vec![0; n],
+            groups: (0..n as u32).collect(),
+            first_in_group: vec![true; n],
+            x: Vec::new(),
+            n_features: 0,
+        }
+    }
+
+    /// A target and a decoy with exactly equal scores get one PEP, the same
+    /// whichever comes first.
+    #[test]
+    fn tied_scores_share_one_pep_in_any_order() {
+        let score = [3.0, 2.0, 2.0, 1.0];
+        let idx = [0, 1, 2, 3];
+        // Order A: the tied target comes first; order B: the tied decoy does.
+        let a = winner_pep(&pin_data(&[false, false, true, false]), &idx, &score);
+        let b = winner_pep(&pin_data(&[false, true, false, false]), &idx, &score);
+        assert_eq!(a[1], a[2], "tied rows share a PEP");
+        assert_eq!(b[1], b[2]);
+        assert_eq!(a, b, "the PEPs do not depend on the order of tied rows");
+        assert!(a[0] <= a[1] && a[1] <= a[3]);
     }
 
     #[test]

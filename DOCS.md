@@ -1163,6 +1163,13 @@ glycosite (no sequon), the core is a single reducing-end GalNAc, and the glycan
 database must be an O-glycan `.gdb` (e.g. a published O-glycan database). The
 defaults are validated; most knobs are hidden.
 
+`--glyco` raises `--max-missed-cleavages` to at least 3: sequon-bearing tryptic
+peptides often need a third missed cleavage to reach a scoreable length. An explicit
+`--max-missed-cleavages` below 3 is honoured (with a note), because the floor of 3 grows
+the candidate index by about 40% (13.2M to 18.8M candidates on a 20k-protein human FASTA,
+about +4.4 GB resident), the difference between running and being killed for memory on a
+16 GB machine. A value of 3 or more is used as given.
+
 **Main flags:**
 
 | Flag | Default | Purpose |

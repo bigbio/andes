@@ -321,11 +321,10 @@ pub fn site_claims(
                 matches!(b.2, Part::Knockoff { .. }).cmp(&matches!(a.2, Part::Knockoff { .. })),
             )
         });
-        let offset = crate::knockoff_fdr::finite_sample_term(parts.iter().map(|(_, _, part)| {
-            match *part {
+        let offset =
+            crate::knockoff_fdr::finite_sample_term(parts.iter().map(|(_, _, part)| match *part {
                 Part::Claim { k, .. } | Part::Knockoff { k, .. } => k,
-            }
-        }));
+            }));
         let mut fdp = Vec::with_capacity(parts.len());
         let (mut w, mut t) = (0.0f64, 0usize);
         let mut counted = HashSet::new();
@@ -704,14 +703,26 @@ mod tests {
                     protein("sp|P1|A", &[(4, None), (14, Some(4)), (24, Some(4))]),
                     protein(
                         "sp|P2|A",
-                        &[(4, None), (14, Some(4)), (24, Some(4)), (34, Some(4)), (44, Some(4))],
+                        &[
+                            (4, None),
+                            (14, Some(4)),
+                            (24, Some(4)),
+                            (34, Some(4)),
+                            (44, Some(4)),
+                        ],
                     ),
                 ],
             },
             "XXX",
         );
         let mut t: HashMap<_, _> = (0..100)
-            .map(|i| psm(&format!("c{i}"), 100.0 - i as f64, "K.AGGGS+79.96633PGGGK.C"))
+            .map(|i| {
+                psm(
+                    &format!("c{i}"),
+                    100.0 - i as f64,
+                    "K.AGGGS+79.96633PGGGK.C",
+                )
+            })
             .collect();
         let (id, mut p2) = psm("p2", 1.0, "K.AGGGS+79.96633PGGGK.C");
         p2.proteins = "sp|P2|A".into();

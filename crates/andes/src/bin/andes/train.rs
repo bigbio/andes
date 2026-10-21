@@ -119,10 +119,10 @@ pub(crate) struct TrainFromSearchArgs {
     #[arg(long)]
     pub(crate) date: Option<String>,
 
-    /// Fragment match tolerance in ppm for initial training. Overwrites the seed
-    /// model's `mme`, which sets both the seed search and the window in which
-    /// training matches fragments, and is stored as the trained model's `mme`.
-    /// When neither this nor `--fragment-tol-da` is given, the seed's `mme` is
+    /// Fragment match tolerance in ppm for initial training: the window in
+    /// which training matches fragments, stored as the trained model's `mme`.
+    /// The seed search that labels the PSMs keeps the seed's `mme`. When
+    /// neither this nor `--fragment-tol-da` is given, the seed's `mme` is
     /// kept. Training reconstructs fragment m/z from nominal masses, so a ppm
     /// window this narrow marks most fragments as missing; keep the seed `mme`
     /// unless the comparison is the point.
@@ -697,18 +697,9 @@ pub(crate) fn run_train_from_search(
         return Err("--labels takes a single --spectra file".into());
     }
 
-    // ── 3. Load seed Param (+ fragment-tolerance override) + RankScorer ───────
-    let (seed_model_id, mut seed_param): (String, Param) = load_seed_param(&args.seed_model)?;
+    // ── 3. Load seed Param + RankScorer ──────────────────────────────────────
+    let (seed_model_id, seed_param): (String, Param) = load_seed_param(&args.seed_model)?;
     eprintln!("train: seed model = {seed_model_id}");
-    if let Some(ppm) = args.fragment_tol_ppm {
-        seed_param.mme = Tolerance::Ppm(ppm);
-        eprintln!("train: fragment tolerance overridden to {ppm} ppm");
-    } else if let Some(da) = args.fragment_tol_da {
-        seed_param.mme = Tolerance::Da(da);
-        eprintln!("train: fragment tolerance overridden to {da} Da");
-    } else {
-        eprintln!("train: using seed fragment tolerance {:?}", seed_param.mme);
-    }
     let seed_scorer = RankScorer::new(&seed_param);
 
     // ── 4-5. Labels per run: external TSV (SP-B) OR a seed search (bootstrap) ──
@@ -772,7 +763,7 @@ pub(crate) fn run_train_from_search(
     // entrapment-FDP-validated to beat seed geometry on honest PSMs AND speed
     // across Astral (+57%), UPS1 (+15%) and TMT (+50%).
     let use_seed_geometry = args.seed_geometry;
-    let template: Param = if !use_seed_geometry {
+    let mut template: Param = if !use_seed_geometry {
         eprintln!(
             "train: deriving own partition geometry from {n_labels} PSMs (pass --seed-geometry to reuse the seed geometry)"
         );
@@ -786,6 +777,17 @@ pub(crate) fn run_train_from_search(
         eprintln!("train: --seed-geometry set — reusing seed partition geometry");
         seed_param.clone()
     };
+    // The tolerance switch changes the training window (and the stored `mme`)
+    // only; the labels above come from the unchanged seed search.
+    if let Some(ppm) = args.fragment_tol_ppm {
+        template.mme = Tolerance::Ppm(ppm);
+        eprintln!("train: training fragment tolerance overridden to {ppm} ppm");
+    } else if let Some(da) = args.fragment_tol_da {
+        template.mme = Tolerance::Da(da);
+        eprintln!("train: training fragment tolerance overridden to {da} Da");
+    } else {
+        eprintln!("train: training at the seed fragment tolerance {:?}", template.mme);
+    }
     let accum_scorer = RankScorer::new(&template);
 
     // ── 6. Accumulate stats, one CountStats per run ───────────────────────────

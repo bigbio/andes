@@ -362,6 +362,10 @@ struct SpectrumBuilder {
     monoisotopic_mz_override: Option<f64>,
     precursor_charge: Option<i32>,
     precursor_intensity: Option<f32>,
+    /// `<selectedIon>` elements opened so far in this spectrum. Only the first
+    /// one sets the precursor m/z, charge and intensity, so a spectrum listing
+    /// several ions never combines the m/z of one with the charge of another.
+    selected_ions: u32,
     /// Activation method recorded under `<precursor><activation>` — set
     /// when we see a known cvParam (CID/HCD/ETD/PQD/UVPD/ECD). Stays
     /// `None` when no `<activation>` block is present or the term is
@@ -743,6 +747,16 @@ impl<R: BufRead> MzMLReader<R> {
 
     // ── Apply a CvParamInfo to current parse state ───────────────────────────
 
+    /// Inside the spectrum's first `<selectedIon>`, the one whose m/z, charge
+    /// and intensity are the precursor's.
+    fn in_first_selected_ion(&self) -> bool {
+        self.state == State::SelectedIon
+            && self
+                .current
+                .as_ref()
+                .is_some_and(|sb| sb.selected_ions == 1)
+    }
+
     fn apply_cv_param(&mut self, cv: CvParamInfo) {
         match cv.accession.as_str() {
             CV_MS_LEVEL => {
@@ -773,7 +787,7 @@ impl<R: BufRead> MzMLReader<R> {
                 }
             }
 
-            CV_SELECTED_ION_MZ if self.state == State::SelectedIon => {
+            CV_SELECTED_ION_MZ if self.in_first_selected_ion() => {
                 if let Ok(mz) = cv.value.parse::<f64>() {
                     if let Some(sb) = self.current.as_mut() {
                         sb.precursor_mz = Some(mz);
@@ -781,7 +795,7 @@ impl<R: BufRead> MzMLReader<R> {
                 }
             }
 
-            CV_MZ_PLAIN if self.state == State::SelectedIon => {
+            CV_MZ_PLAIN if self.in_first_selected_ion() => {
                 if let Ok(mz) = cv.value.parse::<f64>() {
                     if let Some(sb) = self.current.as_mut() {
                         if sb.precursor_mz.is_none() {
@@ -791,18 +805,19 @@ impl<R: BufRead> MzMLReader<R> {
                 }
             }
 
-            CV_CHARGE_STATE if self.state == State::SelectedIon => {
+            CV_CHARGE_STATE if self.in_first_selected_ion() => {
                 if let Ok(z) = cv.value.parse::<i32>() {
                     if let Some(sb) = self.current.as_mut() {
                         // A charge state of 0 means "unknown" — store it as
                         // absent (None) rather than Some(0), which would later
-                        // be treated as a real charge.
-                        sb.precursor_charge = (z != 0).then_some(z);
+                        // be treated as a real charge; so does a negative or
+                        // out-of-range value.
+                        sb.precursor_charge = model::spectrum::known_precursor_charge(i64::from(z));
                     }
                 }
             }
 
-            CV_PEAK_INTENSITY if self.state == State::SelectedIon => {
+            CV_PEAK_INTENSITY if self.in_first_selected_ion() => {
                 if let Ok(inten) = cv.value.parse::<f32>() {
                     if let Some(sb) = self.current.as_mut() {
                         sb.precursor_intensity = Some(inten);
@@ -1010,6 +1025,9 @@ impl<R: BufRead> MzMLReader<R> {
                         }
                         b"selectedIon" if self.state == State::Spectrum => {
                             self.state = State::SelectedIon;
+                            if let Some(sb) = self.current.as_mut() {
+                                sb.selected_ions += 1;
+                            }
                         }
                         b"precursor" if self.state == State::Spectrum => {
                             // `<precursor spectrumRef="...">` names the scan this
@@ -2453,6 +2471,79 @@ mod tests {
         assert_eq!(spectra[0].precursor_charge, Some(2));
     }
 
+    /// Several `<selectedIon>` entries: the precursor is the first ion's m/z and
+    /// charge together, never the m/z of one and the charge of another.
+    #[test]
+    fn first_selected_ion_gives_mz_and_charge_together() {
+        let mz_b64 = encode_f64_b64(&[100.0]);
+        let int_b64 = encode_f64_b64(&[1000.0]);
+        let ions = |second: &str| {
+            format!(
+                r#"<spectrum index="0" id="scan=7" defaultArrayLength="1">
+              <cvParam accession="MS:1000511" name="ms level" value="2"/>
+              <scanList count="1">
+                <scan>
+                  <cvParam accession="MS:1000016" name="scan start time" value="1.5"
+                           unitAccession="UO:0000031" unitName="minute"/>
+                </scan>
+              </scanList>
+              <precursorList count="1">
+                <precursor>
+                  <selectedIonList count="2">
+                    <selectedIon>
+                      <cvParam accession="MS:1000744" name="selected ion m/z" value="500.25"/>
+                      <cvParam accession="MS:1000041" name="charge state" value="2"/>
+                      <cvParam accession="MS:1000042" name="peak intensity" value="1000"/>
+                    </selectedIon>
+                    <selectedIon>{second}</selectedIon>
+                  </selectedIonList>
+                </precursor>
+              </precursorList>
+              <binaryDataArrayList count="2">
+                {}
+                {}
+              </binaryDataArrayList>
+            </spectrum>"#,
+                bda_plain("MS:1000514", &mz_b64),
+                bda_plain("MS:1000515", &int_b64),
+            )
+        };
+        for second in [
+            // m/z only: must not replace the first ion's m/z under its charge
+            r#"<cvParam accession="MS:1000744" name="selected ion m/z" value="733.70"/>"#,
+            // m/z and charge
+            r#"<cvParam accession="MS:1000744" name="selected ion m/z" value="733.70"/>
+               <cvParam accession="MS:1000041" name="charge state" value="3"/>
+               <cvParam accession="MS:1000042" name="peak intensity" value="50"/>"#,
+            // charge only
+            r#"<cvParam accession="MS:1000041" name="charge state" value="4"/>"#,
+        ] {
+            let spectra = collect_ok(&wrap_spectra(&ions(second)));
+            assert_eq!(spectra.len(), 1);
+            assert!((spectra[0].precursor_mz - 500.25).abs() < 1e-9, "{second}");
+            assert_eq!(spectra[0].precursor_charge, Some(2), "{second}");
+            assert_eq!(spectra[0].precursor_intensity, Some(1000.0), "{second}");
+        }
+    }
+
+    /// A charge state too large for the search (held as `u8`) is unknown.
+    #[test]
+    fn out_of_range_charge_state_is_treated_as_absent() {
+        let mz_b64 = encode_f64_b64(&[100.0]);
+        let int_b64 = encode_f64_b64(&[1000.0]);
+        for z in [300, -2] {
+            let spec = ms2_spectrum_xml(
+                "scan=10",
+                &bda_plain("MS:1000514", &mz_b64),
+                &bda_plain("MS:1000515", &int_b64),
+                500.5,
+                Some(z),
+            );
+            let spectra = collect_ok(&wrap_spectra(&spec));
+            assert_eq!(spectra[0].precursor_charge, None, "charge {z}");
+        }
+    }
+
     #[test]
     fn charge_state_zero_is_treated_as_absent() {
         // A `charge state` of 0 means "unknown" and must be stored as None, not
@@ -3815,8 +3906,9 @@ mod tests {
         );
         assert_eq!(p.rt_seconds, Some(120.0));
         assert_eq!(
-            p.precursor_mz, 612.2,
-            "selected ion m/z is last-wins across SPS notches"
+            p.precursor_mz, 500.5,
+            "the first selected ion gives the precursor m/z, as the first \
+             precursor gives the parent reference"
         );
         assert_eq!(p.peaks.len(), 2);
         assert_eq!(p.peaks[1], (127.1248, 2000.0));

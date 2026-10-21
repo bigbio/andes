@@ -150,15 +150,19 @@ fn write_versioned(
             ),
         ]))
         .build();
-    let file = File::create(path).map_err(|e| err(&e))?;
-    let mut writer =
-        ArrowWriter::try_new(file, schema.clone(), Some(props)).map_err(|e| err(&e))?;
-    for chunk in rows.chunks(BATCH_ROWS) {
-        let b = batch(&schema, chunk).map_err(|e| err(&e))?;
-        writer.write(&b).map_err(|e| err(&e))?;
-    }
-    writer.close().map_err(|e| err(&e))?;
-    Ok(())
+    crate::atomic::write_atomic(path, |partial| {
+        let io = |e: &dyn std::fmt::Display| std::io::Error::other(e.to_string());
+        let file = File::create(partial)?;
+        let mut writer =
+            ArrowWriter::try_new(file, schema.clone(), Some(props)).map_err(|e| io(&e))?;
+        for chunk in rows.chunks(BATCH_ROWS) {
+            let b = batch(&schema, chunk).map_err(|e| io(&e))?;
+            writer.write(&b).map_err(|e| io(&e))?;
+        }
+        writer.close().map_err(|e| io(&e))?;
+        Ok(())
+    })
+    .map_err(|e| err(&e))
 }
 
 /// Write the per-run PSM table for run `run_stem`, with the mass delta of
@@ -482,6 +486,10 @@ mod tests {
         let p = dir.path().join("m.quant.parquet");
         let rows: Vec<RunPsmRow> = (0..5).map(row).collect();
         write_run_quant_table(&p, "m", &rows, &[]).unwrap();
+        assert!(
+            !crate::atomic::partial(&p).exists(),
+            "written through <path>.partial and renamed"
+        );
         assert!(read_run_quant_mods(&p).unwrap().is_empty());
         assert_eq!(read_run_quant_table(&p).unwrap(), ("m".to_string(), rows));
 

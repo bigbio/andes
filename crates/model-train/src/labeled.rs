@@ -187,7 +187,8 @@ pub fn bootstrap_labels(
 
     // ── 5. Compute running q-values via TDC ──────────────────────────────────
     // Walk from best to worst, accumulating target/decoy counts.
-    // q-value at position i = running_decoys / max(running_targets, 1).
+    // q-value at position i = running_decoys / max(running_targets, 1); no `+1`
+    // on the decoys, deliberately, as in Percolator's PSM q-values.
     let n = best_psms.len();
     let mut raw_q = vec![1.0_f64; n];
     let mut n_targets = 0u64;

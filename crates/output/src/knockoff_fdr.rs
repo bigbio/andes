@@ -81,10 +81,30 @@ type RankedRow = (f64, String, Row);
 /// How a variant-class target row relates to the knockoffs.
 enum Row {
     /// Every protein is a knockoff entry; `weight` is 1/k of the variant it
-    /// copies.
-    Knockoff { weight: f64 },
-    /// A real variant row; `tested` when one of its variants has knockoffs.
-    Real { tested: bool },
+    /// copies; `k` the fewest knockoffs of the variants it copies.
+    Knockoff { weight: f64, k: usize },
+    /// A real variant row; `tested` when one of its variants has knockoffs,
+    /// `k` the fewest knockoffs of its tested variants (`usize::MAX` untested).
+    Real { tested: bool, k: usize },
+}
+
+impl Row {
+    /// The fewest knockoffs of the variants this row tests or copies.
+    fn k(&self) -> usize {
+        match *self {
+            Row::Knockoff { k, .. } | Row::Real { k, .. } => k,
+        }
+    }
+}
+
+/// The finite-sample term of a stratum's FDP estimate: 1/k for the fewest
+/// knockoffs `k` of any variant its rows test or copy (1 when none has a
+/// knockoff). It is the largest weight one knockoff PSM of the stratum can
+/// carry, so the term never undercounts a single false discovery; with the
+/// same K knockoffs for every variant it is the usual 1/K.
+pub(crate) fn finite_sample_term(ks: impl Iterator<Item = usize>) -> f64 {
+    let k_min = ks.filter(|&k| k != usize::MAX).min().unwrap_or(1).max(1);
+    1.0 / k_min as f64
 }
 
 /// Raise each real variant target's q-value to its knockoff q-value, give
@@ -103,7 +123,8 @@ enum Row {
 /// do not share one estimate. Within a stratum, at score `t`:
 /// FDP(t) = (1/K + Σ 1/k over knockoff rows ≥ t) / #(tested real rows ≥ t)
 /// (a knockoff row whose peptide copies several variants counts 1/k for each),
-/// with K the most knockoffs of any variant; a real row's knockoff q-value is
+/// with K the fewest knockoffs of any variant the stratum's rows test or copy
+/// (see [`finite_sample_term`]); a real row's knockoff q-value is
 /// the least FDP(t) over t at or below its score. An untested real row (no
 /// variant of it has a knockoff) gets q = 1: no null covers it, and variants
 /// that no knockoff can match are false far more often than those that can,
@@ -138,7 +159,6 @@ pub fn apply_knockoff_fdr(
     if per_variant.is_empty() && !knockoffs_requested {
         return KnockoffOutcome::default();
     }
-    let k_max = per_variant.values().copied().max().unwrap_or(1) as f64;
     let proteins: HashMap<&str, &model::Protein> = idx
         .db
         .proteins
@@ -157,6 +177,7 @@ pub fn apply_knockoff_fdr(
         // shared by several knockoffs stands in for a false hit of each.
         let mut copied: HashSet<(&str, &str)> = HashSet::new();
         let mut tested = false;
+        let mut k_real = usize::MAX;
         let mut variant_only = true;
         let mut all_knockoff = true;
         for acc in psm.proteins.split(';').filter(|a| !a.is_empty()) {
@@ -179,7 +200,10 @@ pub fn apply_knockoff_fdr(
                     real_delta.get_or_insert(o.variant_delta_da);
                     // A peptide several real variants share takes the best tier.
                     real_tier = Some(real_tier.map_or(o.tier, |t| t.min(o.tier)));
-                    tested |= per_variant.contains_key(&(&*o.family, &*o.feature));
+                    if let Some(&k) = per_variant.get(&(&*o.family, &*o.feature)) {
+                        tested = true;
+                        k_real = k_real.min(k);
+                    }
                 }
             }
         }
@@ -189,9 +213,14 @@ pub fn apply_knockoff_fdr(
         let (delta, tier, row) = match (all_knockoff, knockoff, real_delta) {
             (true, Some((d, t)), _) => {
                 let w = copied.iter().map(|v| 1.0 / per_variant[v] as f64).sum();
-                (d, t, Row::Knockoff { weight: w })
+                let k = copied.iter().map(|v| per_variant[v]).min().unwrap_or(1);
+                (d, t, Row::Knockoff { weight: w, k })
             }
-            (false, _, Some(d)) => (d, real_tier.unwrap_or_default(), Row::Real { tested }),
+            (false, _, Some(d)) => (
+                d,
+                real_tier.unwrap_or_default(),
+                Row::Real { tested, k: k_real },
+            ),
             _ => continue,
         };
         by_class_tier
@@ -206,7 +235,7 @@ pub fn apply_knockoff_fdr(
     let tested_at_cutoff = |rows: &[RankedRow]| {
         rows.iter()
             .filter(|(_, id, row)| {
-                matches!(row, Row::Real { tested: true }) && targets[id].q_value <= fdr
+                matches!(row, Row::Real { tested: true, .. }) && targets[id].q_value <= fdr
             })
             .count()
     };
@@ -236,8 +265,8 @@ pub fn apply_knockoff_fdr(
         for (_, id, row) in &rows {
             if targets[id].q_value <= fdr {
                 match row {
-                    Row::Knockoff { weight } => count.knockoff_weighted += weight,
-                    Row::Real { tested } => {
+                    Row::Knockoff { weight, .. } => count.knockoff_weighted += weight,
+                    Row::Real { tested, .. } => {
                         count.real_before += 1;
                         count.tested_before += *tested as usize;
                     }
@@ -249,14 +278,15 @@ pub fn apply_knockoff_fdr(
             b.0.total_cmp(&a.0)
                 .then(matches!(b.2, Row::Knockoff { .. }).cmp(&matches!(a.2, Row::Knockoff { .. })))
         });
+        let offset = finite_sample_term(rows.iter().map(|(_, _, row)| row.k()));
         let mut fdp = Vec::with_capacity(rows.len());
         let (mut w, mut t) = (0.0f64, 0usize);
         for (_, _, row) in &rows {
             match row {
-                Row::Knockoff { weight } => w += weight,
-                Row::Real { tested } => t += *tested as usize,
+                Row::Knockoff { weight, .. } => w += weight,
+                Row::Real { tested, .. } => t += *tested as usize,
             }
-            fdp.push(((1.0 / k_max + w) / t.max(1) as f64).min(1.0));
+            fdp.push(((offset + w) / t.max(1) as f64).min(1.0));
         }
         // q at a row: the least FDP over thresholds at or below its rank.
         for i in (0..fdp.len().saturating_sub(1)).rev() {
@@ -270,11 +300,11 @@ pub fn apply_knockoff_fdr(
                     p.pep = 1.0;
                     knockoff_rows.insert(id.clone());
                 }
-                Row::Real { tested: true } => {
+                Row::Real { tested: true, .. } => {
                     p.q_value = p.q_value.max(q);
                     count.real_after += (p.q_value <= fdr) as usize;
                 }
-                Row::Real { tested: false } => p.q_value = 1.0,
+                Row::Real { tested: false, .. } => p.q_value = 1.0,
             }
         }
         counts.push(count);
@@ -518,6 +548,51 @@ mod tests {
         // (1/2) / 100 at the bottom real row, the floor of the estimate.
         assert!((t["r99"].q_value - 0.005).abs() < 1e-9);
         assert!((t["r0"].q_value - 0.005).abs() < 1e-9);
+    }
+
+    /// Each stratum's finite-sample term is 1/k for its own fewest knockoffs:
+    /// a variant with four knockoffs in another class does not shrink the
+    /// deamidation-like stratum's term (two knockoffs) to 1/4.
+    #[test]
+    fn the_finite_sample_term_is_per_stratum() {
+        let mut proteins = index().db.proteins.clone();
+        proteins.retain(|p| !p.accession.starts_with("XXX"));
+        proteins.push(protein(
+            "sp|P1_V5|A",
+            EntryKind::Variant,
+            "V5",
+            14.01565,
+            None,
+        ));
+        for k in 1..=4 {
+            let f = format!("KO{k}_V5");
+            proteins.push(protein(
+                &format!("sp|P1_{f}|A"),
+                EntryKind::Variant,
+                &f,
+                14.01565,
+                Some("V5"),
+            ));
+        }
+        let idx = SearchIndex::from_target_db(&ProteinDb { proteins }, "XXX");
+        let mut t: HashMap<_, _> = (0..100)
+            .map(|i| psm(&format!("d{i}"), 100.0 - i as f64, 0.001, "sp|P1_V1|A"))
+            .chain((0..100).map(|i| psm(&format!("m{i}"), 100.0 - i as f64, 0.001, "sp|P1_V5|A")))
+            .collect();
+        apply_knockoff_fdr(&mut t, &idx, 0.01, true);
+        assert!(
+            (t["d0"].q_value - 0.5 / 100.0).abs() < 1e-12,
+            "{}",
+            t["d0"].q_value
+        );
+        assert!(
+            (t["m0"].q_value - 0.25 / 100.0).abs() < 1e-12,
+            "{}",
+            t["m0"].q_value
+        );
+        assert_eq!(finite_sample_term([4, 2, usize::MAX].into_iter()), 0.5);
+        assert_eq!(finite_sample_term([usize::MAX].into_iter()), 1.0);
+        assert_eq!(finite_sample_term(std::iter::empty()), 1.0);
     }
 
     #[test]

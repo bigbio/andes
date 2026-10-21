@@ -916,7 +916,11 @@ mod tests {
     fn spectra_of_different_files_never_compete() {
         let mut s = String::from("SpecId\tLabel\tScanNr\tExpMass\tf1\tPeptide\tProteins\n");
         for i in 0..200u64 {
-            let f1 = if i % 2 == 0 { 2.0 + noise(i, 1) } else { noise(i, 1) };
+            let f1 = if i % 2 == 0 {
+                2.0 + noise(i, 1)
+            } else {
+                noise(i, 1)
+            };
             s.push_str(&format!(
                 "a/scan={i}_{i}_1\t1\t{i}\t1000.5\t{f1}\tK.AAA{i}K.R\tP{i}\n"
             ));
@@ -926,7 +930,10 @@ mod tests {
             ));
         }
         let r = native_rescore_pin_all(&s, 42).unwrap();
-        assert_eq!(r.competed_away, 0, "no row of one file may beat a row of another");
+        assert_eq!(
+            r.competed_away, 0,
+            "no row of one file may beat a row of another"
+        );
         assert_eq!(r.targets.len(), 200);
         assert_eq!(r.decoys.len(), 200);
         assert_eq!(run_of("a/scan=1_1_1"), "a");

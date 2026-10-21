@@ -65,8 +65,8 @@ struct PinData {
     /// Hash of each row's spectrum key, for the fold assignment: the rows of
     /// one spectrum (its ranks and co-isolated peptides) share a fold.
     spectrum_hashes: Vec<u64>,
-    /// Competition group of each row (`ScanNr` + `ExpMass` text), densely
-    /// numbered.
+    /// Competition group of each row (input file + `ScanNr` + `ExpMass` text),
+    /// densely numbered.
     groups: Vec<u32>,
     /// The first row of its group in PIN order: the search's rank-1 PSM there.
     first_in_group: Vec<bool>,
@@ -157,9 +157,12 @@ fn parse_pin(text: &str) -> Result<PinData, String> {
         })?;
         let key = spectrum_key(f[id_i], scan);
         d.spectrum_hashes.push(fnv1a(key));
-        // Without an ExpMass column the spectrum is the group.
+        // Without an ExpMass column the spectrum is the group. With one, the
+        // group is the input file, ScanNr and ExpMass: scan numbers repeat
+        // across the files of one search, and spectra of different files must
+        // never compete.
         let group_key = match exp_mass_i {
-            Some(i) => format!("{scan}\t{}", f[i].trim()),
+            Some(i) => format!("{}\t{scan}\t{}", run_of(f[id_i]), f[i].trim()),
             None => format!("{key}\t{scan}"),
         };
         let next = group_ids.len() as u32;
@@ -212,6 +215,13 @@ fn spectrum_key(spec_id: &str, scan: u32) -> &str {
         .map(|(i, _)| i)
         .find(|&i| numbers(&spec_id[i + sep.len()..]))
         .map_or(spec_id, |i| &spec_id[..i])
+}
+
+/// The input file a row's SpecId names: the `<stem>/` prefix every search puts
+/// on spectrum titles (empty when the SpecId has none, e.g. a PIN written by
+/// another tool, where ScanNr and ExpMass alone form the group).
+fn run_of(spec_id: &str) -> &str {
+    spec_id.split_once('/').map_or("", |(run, _)| run)
 }
 
 fn fnv1a(s: &str) -> u64 {
@@ -885,6 +895,29 @@ mod tests {
     }
 
     /// Deterministic pseudo-noise in [0, 1).
+    /// Rows of two files with the same ScanNr and ExpMass are different
+    /// spectra: each file's rows compete only among themselves.
+    #[test]
+    fn spectra_of_different_files_never_compete() {
+        let mut s = String::from("SpecId\tLabel\tScanNr\tExpMass\tf1\tPeptide\tProteins\n");
+        for i in 0..200u64 {
+            let f1 = if i % 2 == 0 { 2.0 + noise(i, 1) } else { noise(i, 1) };
+            s.push_str(&format!(
+                "a/scan={i}_{i}_1\t1\t{i}\t1000.5\t{f1}\tK.AAA{i}K.R\tP{i}\n"
+            ));
+            s.push_str(&format!(
+                "b/scan={i}_{i}_1\t-1\t{i}\t1000.5\t{}\tK.DDD{i}K.R\tXXX_P{i}\n",
+                noise(i, 3)
+            ));
+        }
+        let r = native_rescore_pin_all(&s, 42).unwrap();
+        assert_eq!(r.competed_away, 0, "no row of one file may beat a row of another");
+        assert_eq!(r.targets.len(), 200);
+        assert_eq!(r.decoys.len(), 200);
+        assert_eq!(run_of("a/scan=1_1_1"), "a");
+        assert_eq!(run_of("scan=1_1_1"), "");
+    }
+
     fn noise(i: u64, salt: u64) -> f32 {
         ((i.wrapping_add(salt).wrapping_mul(2654435761) >> 7) % 1000) as f32 / 1000.0
     }

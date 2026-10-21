@@ -148,13 +148,20 @@ fn train_from_several_runs_records_one_source_per_run() {
         .arg("bsa_two_runs")
         .status()
         .expect("run andes train-from-search");
-    assert!(status.success(), "train-from-search should exit 0, got: {status}");
+    assert!(
+        status.success(),
+        "train-from-search should exit 0, got: {status}"
+    );
 
     let store = ModelStore::open(&store_path).expect("open trained model store");
     let sources = store.load_sources("bsa_two_runs").expect("load sources");
     let mut ids: Vec<&str> = sources.iter().map(|l| l.source_id.as_str()).collect();
     ids.sort_unstable();
-    assert_eq!(ids, ["test", "test_2"], "one source per run, stems made unique");
+    assert_eq!(
+        ids,
+        ["test", "test_2"],
+        "one source per run, stems made unique"
+    );
     assert_eq!(sources[0].n_psms, sources[1].n_psms);
     assert!(sources[0].n_psms > 0);
     assert!(sources.iter().all(|l| l.dataset == "test.mgf.gz"));

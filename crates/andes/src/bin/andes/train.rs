@@ -751,7 +751,10 @@ pub(crate) fn run_train_from_search(
         runs.push(TrainRun::keep_labelled(spectra_path, spectra, labels));
     }
     let n_labels: usize = runs.iter().map(|r| r.labels.len()).sum();
-    eprintln!("train: {n_labels} confident labels from {} run(s)", runs.len());
+    eprintln!(
+        "train: {n_labels} confident labels from {} run(s)",
+        runs.len()
+    );
 
     if n_labels == 0 {
         return Err(format!(
@@ -912,11 +915,7 @@ pub(crate) fn run_train_from_search(
 
     // Combine all models: write the trained model + existing others together.
     let mut all_entries: Vec<ModelEntryOwned> = Vec::new();
-    all_entries.push((
-        model_id.clone(),
-        trained_param.clone(),
-        sources,
-    ));
+    all_entries.push((model_id.clone(), trained_param.clone(), sources));
     for (id, p, src) in existing_other {
         all_entries.push((id, p, src));
     }

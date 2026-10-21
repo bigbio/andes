@@ -7,7 +7,7 @@
 //! the pinned biocontainers docker image) with
 //! `--seed 42 --results-psms … --decoy-results-psms … --weights … --only-psms <PIN>`.
 //! The result TSV is parsed by HEADER NAME (not column index) so it survives the
-//! column-offset differences between engines (e.g. a a comparison search engine-style extra `FileName`
+//! column-offset differences between engines (e.g. a Sage-style extra `FileName`
 //! column).
 
 use std::collections::{HashMap, HashSet};
@@ -460,7 +460,7 @@ fn parse_finite(s: &str, column: &'static str) -> Result<f64, PercolatorError> {
 ///
 /// HEADER-NAME-DRIVEN: the column positions of `PSMId`, `q-value`,
 /// `posterior_error_probability`, `peptide`, and `proteinIds` are located by
-/// matching the header row, so a leading/extra column (e.g. a comparison search engine's `FileName`)
+/// matching the header row, so a leading/extra column (e.g. Sage's `FileName`)
 /// does not shift the parse. `proteinIds` is the LAST logical column; every tab
 /// after it is a separate protein id, so the rest of the line is captured and
 /// re-joined with `;`.
@@ -738,7 +738,7 @@ mod tests {
 
     #[test]
     fn parse_leading_filename_column() {
-        // a comparison search engine adds a leading FileName column, shifting q-value to col 4. The
+        // Sage adds a leading FileName column, shifting q-value to col 4. The
         // by-NAME lookup must still find every field correctly.
         let text =
             "PSMId\tFileName\tscore\tq-value\tposterior_error_probability\tpeptide\tproteinIds\n\

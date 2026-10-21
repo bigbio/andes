@@ -5,7 +5,7 @@
 //! twin is intended to model a spurious match to the requested ion. The
 //! competition keeps the better of the pair, and the usual
 //! `(decoys + 1) / targets` running ratio over the winners gives each surviving
-//! target an estimated q-value. This is not engine A's mixture-model MBR
+//! target an estimated q-value. This is not IonQuant's mixture-model MBR
 //! estimator, nor a substitute for validating the decoy model on real data.
 //! Apply any feature eligibility filters identically to both sides BEFORE
 //! competition; filtering only the reported targets changes the tested set.

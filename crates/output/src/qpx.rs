@@ -1,8 +1,8 @@
 //! QPX `.idparquet` output writer (QPX 1.0 compatible).
 //!
 //! Writes a parquet PSM bundle DIRECTORY alongside the existing `.pin`/`.tsv`
-//! so that quantms tooling can consume andes results natively. The
-//! directory mirrors the layout produced by the reference QPX writer:
+//! so that OpenMS / quantms tooling can consume andes results natively. The
+//! directory mirrors the layout produced by OpenMS `QPXFile::store`:
 //!
 //! ```text
 //! <name>.idparquet/
@@ -13,14 +13,14 @@
 //!
 //! Each file carries the QPX schema metadata key-value pairs
 //! (`qpx_version`, `creator`, `software_provider`, `file_type`,
-//! `creation_date`, `uuid`) on its Arrow schema, exactly as the reference writer
-//! writes them (verified against a real reference-emitted bundle).
-//! `creator`/`software_provider` are `"andes"` (this engine).
+//! `creation_date`, `uuid`) on its Arrow schema, exactly as OpenMS writes them
+//! (verified against a real OpenMS-emitted bundle). `creator`/`software_provider`
+//! are `"andes"` (this engine) rather than `"OpenMS"`.
 //!
 //! # Column semantics (psms.parquet)
 //!
-//! The schema (column names + Arrow types) is copied verbatim from the reference
-//! QPX PSM schema so a downstream reader can use one code path for reference-native and
+//! The schema (column names + Arrow types) is copied verbatim from the OpenMS
+//! `QPXPSMSchema` so a downstream reader can use one code path for OpenMS-native and
 //! andes output. andes sources every field it can from the same per-PSM data
 //! the PIN writer uses ([`crate::pin`]): every numeric PIN feature is a
 //! `psm_metavalues` entry (`andes:` prefix), PEP and q-value are filled from
@@ -181,10 +181,10 @@ pub fn write_qpx(
         sp_batch,
     )?;
 
-    // The reference QPX reader requires a protein_groups member to load the
-    // bundle, even though andes does not run protein inference (that is the
-    // downstream protein-inference/Percolator step). Emit a valid zero-row file
-    // so downstream tools can read the idparquet.
+    // OpenMS' QPX reader (PSMArrowIO::importFromParquet) requires a
+    // protein_groups member to load the bundle, even though andes does not run
+    // protein inference (that is the downstream ProteinInference/Percolator
+    // step). Emit a valid zero-row file so OpenMS tools can read the idparquet.
     let pg_batch = build_protein_groups_batch();
     write_parquet(
         &out_dir.join("protein_groups.parquet"),
@@ -570,7 +570,7 @@ fn build_psms_batch(
     let mut charge_array = primitive_list_builder(Int32Builder::new(), DataType::Int32);
     let mut ion_type_array = primitive_list_builder(StringBuilder::new(), DataType::Utf8);
 
-    // Per-spectrum identification index (matches the reference writer, which gives each
+    // Per-spectrum identification index (matches OpenMS, which gives each
     // spectrum's hit-list a stable index). Incremented once per emitted PSM.
     let mut pep_id_index = row_offset;
 
@@ -676,7 +676,7 @@ fn build_psms_batch(
                 }
                 psm_metavalues.append(true);
             }
-            // One spectrum metavalue: the MS:1001115 scan number (as the reference writer does).
+            // One spectrum metavalue: the MS:1001115 scan number (as OpenMS does).
             {
                 let sb = spectrum_metavalues.values();
                 append_metavalue(sb, "MS:1001115", &scan_num.to_string(), "string");
@@ -1044,10 +1044,10 @@ fn build_proteins_batch(
 /// Empty `protein_groups.parquet` with the QPX protein-group schema.
 ///
 /// andes does not perform protein inference, so there are no groups to emit, but
-/// the reference QPX reader requires this bundle member to be present to read
-/// the `.idparquet` directory at all. We therefore write a schema-correct,
-/// zero-row file. Downstream protein inference / Percolator populate the
-/// actual groups.
+/// OpenMS' `PSMArrowIO::importFromParquet` requires this bundle member to be
+/// present to read the `.idparquet` directory at all (e.g. PercolatorAdapter).
+/// We therefore write a schema-correct, zero-row file. Downstream OpenMS
+/// ProteinInference / Percolator populate the actual groups.
 fn build_protein_groups_batch() -> RecordBatch {
     // struct<name: utf8, values: list<inner>> — the QPX metavalue container
     let data_struct = |inner: DataType| -> DataType {

@@ -8,8 +8,8 @@
 # TASKS_TSV           tasks.tsv from ms2_select.py (row N = array index N)
 # OUT_DIR             shard root; the task writes OUT_DIR/<dataset>/part-<N>.parquet (+ .json)
 # SCRATCH_DIR         node-local scratch for the converted mzML (deleted per run)
-# CONVERTER_COMMAND_PREFIX how to run the raw-to-mzML converter, e.g.
-#                     "singularity exec --bind DATA_ROOT IMAGE.sif CONVERTER"
+# CONVERTER_COMMAND_PREFIX how to run ThermoRawFileParser, e.g.
+#                     "singularity exec --bind DATA_ROOT IMAGE.sif ThermoRawFileParser.sh"
 # A task whose runs all succeeded is skipped on resubmission; a task with a failed run writes
 # no part and exits 1, so re-sending the same array retries it.
 set -euo pipefail

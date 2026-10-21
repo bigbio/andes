@@ -934,7 +934,7 @@ PIN's name without its extension, so per-run searches into one directory keep on
 
 `--output-parquet <DIR>` writes a **QPX 1.0** bundle (`psms.parquet`, `proteins.parquet`,
 `protein_groups.parquet`, `search_params.parquet`, and with `--tmt` or `--lfq`
-`quantms.feature.parquet`) matching the reference QPX schema, for
+`quantms.feature.parquet`) matching the OpenMS QPX schema, for
 [quantms](https://github.com/bigbio/quantms). `psms.parquet` carries the peptidoform,
 modifications, charge, m/z, `is_decoy`, scan/rt, proteins, the spectrum arrays, `score`
 (`andes:RawScore`) and the other features in `additional_scores`. PEP and q-value are null

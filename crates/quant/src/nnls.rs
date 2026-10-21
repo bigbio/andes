@@ -2,8 +2,9 @@
 //!
 //! Solves `min ‖A·x − b‖₂` subject to `x ≥ 0` for the small dense systems the
 //! isobaric impurity correction needs (one reporter channel per unknown, at
-//! most 18). The same solver the reference isobaric implementation
-//! uses, so corrected channel intensities agree with it for the same matrix.
+//! most 18). The same solver OpenMS's `IsobaricIsotopeCorrector` uses
+//! (`NonNegativeLeastSquaresSolver`), so corrected channel intensities agree
+//! with IsobaricAnalyzer / IsobaricWorkflow for the same matrix.
 
 /// Solve `min ‖A·x − b‖` with `x ≥ 0`. `a` is row-major `m × n`.
 ///

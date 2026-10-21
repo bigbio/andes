@@ -71,7 +71,7 @@ pub struct GlycoConfig {
     /// floor and the PIN site tag.
     pub core: GlycanCore,
     /// Minimum trimannosyl-core Y ions required to emit a glyco PSM. 0 = no requirement
-    /// (previous behaviour). The field standard is 2.
+    /// (previous behaviour). The field standard is 2 (pGlyco3, O-Pair).
     pub min_core_y: u32,
     /// Diagnostic: restrict scoring to the scan numbers listed in this file, one per
     /// line. `None` scores every spectrum.
@@ -759,7 +759,7 @@ impl GlycoCtxOwned {
 
 /// Charge-expansion knob (P0 — precursor-mass mis-partitioning / charge blind spot).
 ///
-/// R7 (data-grounded, 523-scan the reference engine-truth gap analysis): the dominant glyco
+/// R7 (data-grounded, 523-scan MSFragger-truth gap analysis): the dominant glyco
 /// generation loss is that large-backbone / high-charge true glycopeptides are
 /// NEVER enumerated — z5 → 100% absent, backbone >2200 Da → 84% absent — because
 /// the driver derives the backbone from `precursor_neutral = (mz − PROTON)·z − H2O`,

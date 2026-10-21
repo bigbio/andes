@@ -24,7 +24,7 @@ declare -A WANT=(
   [astral]='LFQ_Astral_DDA_15min_50ng_Condition_A_REP1\.raw'   # 1 file, 2.58 GB
   [tmt]='a05058\.raw'                                          # 1 file, 0.54 GB
   [ups1]='UPS1_5000amol_R1\.raw'                               # 1 file, 1.70 GB
-  [glyco-mouse]='MouseLiver-Z-T-[1-5]\.raw'                    # 5 fractions, 12.6 GB (deep tier); engine L liver set
+  [glyco-mouse]='MouseLiver-Z-T-[1-5]\.raw'                    # 5 fractions, 12.6 GB (deep tier); pGlyco2 liver set
   [phospho]='20151014_QEp6_NaKr_SA_totalliver_control2_phospho\.raw'   # 1 file, 3.72 GB; single-shot TiO2, NOT the _SDBRPS_FR* fractions
 )
 

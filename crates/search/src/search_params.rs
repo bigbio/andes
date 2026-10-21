@@ -112,7 +112,7 @@ pub struct SearchParams {
     /// Learned file-wide ppm shift applied to observed neutral masses in the
     /// main pass. Stays 0.0 until the pre-pass calibrator runs.
     pub precursor_mass_shift_ppm: f64,
-    /// Full-isolation-window chimeric search (the reference engine-DDA+ style). Default false.
+    /// Full-isolation-window chimeric search (MSFragger DDA+ style). Default false.
     pub chimeric: bool,
     /// Fallback isolation half-width (Da) used when the mzML lacks
     /// `<isolationWindow>` offsets. Only consulted when `chimeric` is true.

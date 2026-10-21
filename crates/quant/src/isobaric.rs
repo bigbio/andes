@@ -1,15 +1,15 @@
 //! Isobaric reporter-ion quantification: plex tables, extraction and
 //! isotope-impurity correction.
 //!
-//! Reporter m/z values are the ones the reference isobaric implementation
-//! carries (TMT 6/10/11/16/18/32/35, iTRAQ 4/8). Extraction takes the most
-//! intense centroid within a tolerance of each reporter (the reference
-//! implementation takes the nearest). Impurity correction reads the vendor lot
-//! sheet in the quantms text form (one line per channel, `-2/-1/+1/+2`
-//! percentages, eight columns for TMTpro 16/18) and solves the observed =
-//! M · true system by non-negative least squares, as the reference does. The
-//! deuterated TMTpro 32/35-plex kits have no correction: the reference always
-//! applies the identity for them.
+//! Reporter m/z values are the ones OpenMS's `IsobaricQuantitationMethod`
+//! subclasses carry (TMT 6/10/11/16/18/32/35, iTRAQ 4/8). Extraction takes the
+//! most intense centroid within a tolerance of each reporter (Sage's rule;
+//! OpenMS takes the nearest within `reporter_mass_shift`). Impurity correction
+//! reads the vendor lot sheet in the OpenMS text form (one line per channel,
+//! `-2/-1/+1/+2` percentages, eight columns for TMTpro 16/18) and solves the
+//! observed = M · true system by non-negative least squares, as
+//! `IsobaricIsotopeCorrector` does. The deuterated TMTpro 32/35-plex kits have
+//! no correction: OpenMS always applies the identity for them.
 
 use model::scan::NoiseProfile;
 use model::Tolerance;
@@ -354,8 +354,8 @@ impl Plex {
     /// Number of impurity columns per channel in the vendor sheet: four
     /// (`-2/-1/+1/+2`) for TMT ≤ 11-plex and iTRAQ, eight for TMTpro 16/18
     /// (`-2C13/-N15-C13/-C13/-N15/+N15/+C13/+N15+C13/+2C13`). `None` for
-    /// TMTpro 32/35-plex, which have no impurity correction (the reference
-    /// implementation ignores a sheet for them and always applies the identity).
+    /// TMTpro 32/35-plex, which have no impurity correction (OpenMS ignores a
+    /// sheet for them and always applies the identity).
     pub fn correction_columns(&self) -> Option<usize> {
         match self {
             Plex::Tmt6 | Plex::Tmt10 | Plex::Tmt11 | Plex::Itraq4 | Plex::Itraq8 => Some(4),

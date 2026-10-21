@@ -97,7 +97,7 @@ impl DecoyStrategy {
 /// This does NOT affect the standard (non-glyco) search path, which has no
 /// sequon gate. It also does not affect a benchmark run under
 /// `--decoy-strategy none` (externally supplied target+decoy FASTA, e.g. the
-/// the reference engine-matched comparison fixture) — this caveat only applies when
+/// MSFragger-matched comparison fixture) — this caveat only applies when
 /// andes generates its OWN reverse decoys for a `--glyco` run.
 ///
 /// Not fixed in this pass: a sequon-preserving decoy generator (e.g. a

@@ -1,4 +1,4 @@
-# engine A 4.2
+# MSFragger 4.2
 database_name = $BENCH/tmt-data/PXD007683_reviewed.td.fasta
 num_threads = 8
 

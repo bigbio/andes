@@ -260,9 +260,21 @@ pub fn percolator_args_with_threads(extra: &[String], threads: usize) -> Vec<Str
     args
 }
 
+/// Target-decoy competition (`-Y`): Percolator keeps the best PSM of each
+/// spectrum (scan and precursor mass) and estimates q-values from the winners,
+/// instead of choosing a mode from the data. Every benchmark and calibration
+/// figure of andes was measured this way. Added unless the user's arguments
+/// already ask for it.
+fn tdc_flag(extra_args: &[String]) -> Option<String> {
+    let set = extra_args
+        .iter()
+        .any(|a| a == "-Y" || a == "--post-processing-tdc");
+    (!set).then(|| "-Y".to_string())
+}
+
 /// Build the argument vector for a NATIVE Percolator invocation (binary path
 /// case). Mirrors `run_percolator_docker.sh`: `--seed 42`, results/decoy/weights,
-/// `--only-psms`, then any user `extra_args`, then the PIN path last.
+/// `--only-psms`, `-Y`, then any user `extra_args`, then the PIN path last.
 fn native_args(pin: &Path, out: &ResultPaths, extra_args: &[String]) -> Vec<String> {
     let mut args = vec![
         "--seed".to_string(),
@@ -275,6 +287,7 @@ fn native_args(pin: &Path, out: &ResultPaths, extra_args: &[String]) -> Vec<Stri
         out.weights.to_string_lossy().into_owned(),
         "--only-psms".to_string(),
     ];
+    args.extend(tdc_flag(extra_args));
     args.extend(extra_args.iter().cloned());
     args.push(pin.to_string_lossy().into_owned());
     args
@@ -327,6 +340,7 @@ fn docker_args(
         in_out(&out.weights),
         "--only-psms".to_string(),
     ];
+    args.extend(tdc_flag(extra_args));
     args.extend(extra_args.iter().cloned());
     args.push(format!("/pin/{pin_name}"));
     Ok(args)
@@ -839,6 +853,13 @@ mod tests {
         assert_eq!(args[0], "--seed");
         assert_eq!(args[1], "42");
         assert!(args.contains(&"--only-psms".to_string()));
+        assert_eq!(args.iter().filter(|a| *a == "-Y").count(), 1);
+        // A user -Y (either spelling) is not repeated.
+        for user in ["-Y", "--post-processing-tdc"] {
+            let args = native_args(Path::new("/tmp/d/x.pin"), &out, &[user.into()]);
+            assert!(!args.iter().any(|a| a == "-Y" && user != "-Y"));
+            assert_eq!(args.iter().filter(|a| *a == user).count(), 1);
+        }
         // extra args precede the PIN (which is last).
         assert_eq!(args.last().unwrap(), "/tmp/d/x.pin");
         let fdr_pos = args.iter().position(|a| a == "--testFDR").unwrap();
@@ -865,6 +886,7 @@ mod tests {
         assert!(args.contains(&pin_mount));
         assert!(args.contains(&DEFAULT_PERCOLATOR_IMAGE.to_string()));
         assert_eq!(args.last().unwrap(), "/pin/run.pin");
+        assert!(args.contains(&"-Y".to_string()));
         // result paths rewritten under /out
         assert!(args
             .iter()

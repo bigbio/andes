@@ -11,9 +11,12 @@
 //! peptide is identified does not depend on which residue carries the
 //! modification. Only the site claim gets a q-value.
 //!
-//! Real unannotated sites exist, so some knockoff sites are really modified;
-//! counting them as false makes the estimate err towards rejecting true
-//! claims, never towards accepting false ones.
+//! Real unannotated sites exist, so some knockoff sites are really modified,
+//! which makes the estimate reject some true claims. In the other direction,
+//! a knockoff site lies in another peptide, so the estimate measures whether
+//! a residue carries the modification (occupancy), not which one it carries:
+//! the right site with a near-isobaric wrong modification passes it. The
+//! site posteriors give each accepted site its identity for that.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -190,8 +193,11 @@ pub fn site_claims(
         if mods.is_empty() {
             continue;
         }
-        let mut real: Vec<(Key, (usize, u32, u64), bool)> = Vec::new();
-        let mut knock: Vec<(Key, f64, bool)> = Vec::new();
+        // Each with the modification's offset in the peptide: (stratum, site,
+        // tested, offset) and (stratum, weight, restricted, offset).
+        type RealPlacement = (Key, (usize, u32, u64), bool, usize);
+        let mut real: Vec<RealPlacement> = Vec::new();
+        let mut knock: Vec<(Key, f64, bool, usize)> = Vec::new();
         for acc in psm.proteins.split(';') {
             let Some(&i) = by_acc.get(acc) else {
                 continue;
@@ -222,16 +228,19 @@ pub fn site_claims(
                             .unwrap_or(c.mass_delta.to_bits());
                         let k = per_site.get(&(i, of, real_bits)).copied().unwrap_or(1);
                         let restricted = restricted.iter().any(|&m| same(m, mass));
-                        knock.push((key, 1.0 / k as f64, restricted));
+                        knock.push((key, 1.0 / k as f64, restricted, at));
                     }
                     None => {
                         let site = (i, pos, c.mass_delta.to_bits());
-                        real.push((key, site, per_site.contains_key(&site)));
+                        real.push((key, site, per_site.contains_key(&site), at));
                     }
                 }
             }
         }
-        if let Some(&(key, weight, _)) = knock.first() {
+        // A placement that is a knockoff site in one protein and a real claim
+        // in another (a paralog annotated differently) supports that claim.
+        knock.retain(|k| !real.iter().any(|r| r.3 == k.3 && r.0 .0 == k.0 .0));
+        if let Some(&(key, weight, _, _)) = knock.first() {
             by_key
                 .entry(key)
                 .or_default()
@@ -240,7 +249,7 @@ pub fn site_claims(
                 knockoff_rows.insert(id.clone());
             }
         } else {
-            for (key, site, tested) in real {
+            for (key, site, tested, _) in real {
                 by_key.entry(key).or_default().push((
                     rank(psm),
                     id.clone(),
@@ -283,13 +292,17 @@ pub fn site_claims(
             knockoff_weighted: 0.0,
             accepted: 0,
         };
+        // A PSM counts once per stratum on the claim side, however many
+        // proteins hold its claim (a peptide shared across genes), as a
+        // knockoff PSM does on the knockoff side.
+        let (mut seen_claim, mut seen_tested) = (HashSet::new(), HashSet::new());
         for (_, id, part) in &parts {
             if targets[id].q_value <= fdr {
                 match part {
                     Part::Knockoff { weight } => count.knockoff_weighted += weight,
                     Part::Claim { tested, .. } => {
-                        count.claims += 1;
-                        count.tested += *tested as usize;
+                        count.claims += seen_claim.insert(id.as_str()) as usize;
+                        count.tested += (*tested && seen_tested.insert(id.as_str())) as usize;
                     }
                 }
             }
@@ -301,12 +314,16 @@ pub fn site_claims(
         });
         let mut fdp = Vec::with_capacity(parts.len());
         let (mut w, mut t) = (0.0f64, 0usize);
+        let mut counted = HashSet::new();
         for (_, id, part) in &parts {
-            // Only PSMs that pass the PSM cutoff count, on both sides.
+            // Only PSMs that pass the PSM cutoff count, on both sides; a PSM
+            // counts once however many proteins hold its claim.
             if targets[id].q_value <= fdr {
                 match part {
                     Part::Knockoff { weight } => w += weight,
-                    Part::Claim { tested, .. } => t += *tested as usize,
+                    Part::Claim { tested, .. } => {
+                        t += (*tested && counted.insert(id.as_str())) as usize
+                    }
                 }
             }
             fdp.push(((1.0 / k_max as f64 + w) / t.max(1) as f64).min(1.0));
@@ -501,33 +518,35 @@ fn primary(accession: &str) -> &str {
 /// Write the site table: one row per accepted site claim.
 pub fn write_sites_tsv(path: &std::path::Path, rows: &[SiteRow]) -> std::io::Result<()> {
     use std::io::Write;
-    let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
-    writeln!(
-        w,
-        "family\taccession\tposition\tresidue\tmodification_mass\tprior_tier\tpsms\tbest_psm\tsite_q\tconfidence\toccupancy\tidentity\tidentity_alternatives\tidentity_spectra"
-    )?;
-    let opt = |v: Option<f64>| v.map_or_else(|| "NA".to_string(), |v| format!("{v:.4}"));
-    for r in rows {
+    crate::atomic::write_atomic(path, |path| {
+        let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
         writeln!(
             w,
-            "{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{:.2}",
-            r.family,
-            r.accession,
-            r.position,
-            r.residue,
-            r.mass_delta,
-            r.tier,
-            r.psms,
-            r.best_psm,
-            r.site_q,
-            1.0 - r.site_q,
-            opt(r.occupancy),
-            opt(r.identity),
-            r.alternatives,
-            r.identity_spectra
+            "family\taccession\tposition\tresidue\tmodification_mass\tprior_tier\tpsms\tbest_psm\tsite_q\tconfidence\toccupancy\tidentity\tidentity_alternatives\tidentity_spectra"
         )?;
-    }
-    w.flush()
+        let opt = |v: Option<f64>| v.map_or_else(|| "NA".to_string(), |v| format!("{v:.4}"));
+        for r in rows {
+            writeln!(
+                w,
+                "{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{:.2}",
+                r.family,
+                r.accession,
+                r.position,
+                r.residue,
+                r.mass_delta,
+                r.tier,
+                r.psms,
+                r.best_psm,
+                r.site_q,
+                1.0 - r.site_q,
+                opt(r.occupancy),
+                opt(r.identity),
+                r.alternatives,
+                r.identity_spectra
+            )?;
+        }
+        w.flush()
+    })
 }
 
 #[cfg(test)]
@@ -554,6 +573,20 @@ mod tests {
     /// Spans `<X>GGGSPGGGK` with a different first residue each; the S at 4
     /// is an annotated phospho site, the S at 14 and 24 its knockoffs.
     fn index() -> SearchIndex {
+        SearchIndex::from_target_db(
+            &ProteinDb {
+                proteins: vec![protein(
+                    "sp|P1|A",
+                    &[(4, None), (14, Some(4)), (24, Some(4))],
+                )],
+            },
+            "XXX",
+        )
+    }
+
+    /// A protein of the [`index`] sequence with phospho claims at the given
+    /// positions, each a real claim or a knockoff of another.
+    fn protein(accession: &str, claims: &[(u32, Option<u32>)]) -> Protein {
         let seq: Vec<u8> = b"ACDEF"
             .iter()
             .flat_map(|&x| {
@@ -567,28 +600,21 @@ mod tests {
             mass_delta: PHOSPHO,
             anchor: SiteAnchor::Residue,
         };
-        let claim = |p: u32, of: Option<u32>| SiteClaim {
+        let claim = |&(p, of): &(u32, Option<u32>)| SiteClaim {
             position: p,
             mass_delta: PHOSPHO,
             tier: PriorTier::Curated,
             knockoff_of: of,
         };
-        let target = ProteinDb {
-            proteins: vec![Protein {
-                accession: "sp|P1|A".into(),
-                description: String::new(),
-                sequence: seq,
-                annotation: Some(Arc::new(
-                    ProteinAnnotation::new(vec![site(4), site(14), site(24)], None)
-                        .with_site_claims(vec![
-                            claim(4, None),
-                            claim(14, Some(4)),
-                            claim(24, Some(4)),
-                        ]),
-                )),
-            }],
-        };
-        SearchIndex::from_target_db(&target, "XXX")
+        Protein {
+            accession: accession.into(),
+            description: String::new(),
+            sequence: seq,
+            annotation: Some(Arc::new(
+                ProteinAnnotation::new(claims.iter().map(|c| site(c.0)).collect(), None)
+                    .with_site_claims(claims.iter().map(claim).collect()),
+            )),
+        }
     }
 
     fn psm(id: &str, score: f64, peptide: &str) -> (String, PercolatorPsm) {
@@ -686,5 +712,51 @@ mod tests {
         assert!(out.knockoff_rows.is_empty());
         assert_eq!(t["k1"].q_value, 0.001);
         assert_eq!(out.rows.len(), 1, "the site claim is still controlled");
+    }
+
+    #[test]
+    fn a_psm_shared_across_genes_counts_once() {
+        // P2 is a second gene with the same sequence and claims: each claim
+        // PSM names both, and still counts once against the knockoffs.
+        let idx = SearchIndex::from_target_db(
+            &ProteinDb {
+                proteins: vec![
+                    protein("sp|P1|A", &[(4, None), (14, Some(4)), (24, Some(4))]),
+                    protein("sp|P2|B", &[(4, None), (14, Some(4)), (24, Some(4))]),
+                ],
+            },
+            "XXX",
+        );
+        let mut t = rows();
+        for p in t.values_mut() {
+            p.proteins = "sp|P1|A;sp|P2|B".into();
+        }
+        let out = site_claims(&mut t, &idx, 0.01, 0.05, &[PHOSPHO], None);
+        assert_eq!(out.rows.len(), 2);
+        for r in &out.rows {
+            assert!((r.site_q - 0.02).abs() < 1e-9, "{}", r.site_q);
+        }
+        assert_eq!(out.counts[0].claims, 60);
+    }
+
+    #[test]
+    fn a_paralogs_real_claim_wins_over_a_knockoff_site() {
+        // Position 14 is a knockoff site of P1 but a real claim of P2: the
+        // PSM placing phospho there supports P2's claim and stays reported.
+        let idx = SearchIndex::from_target_db(
+            &ProteinDb {
+                proteins: vec![
+                    protein("sp|P1|A", &[(4, None), (14, Some(4)), (24, Some(4))]),
+                    protein("sp|P2|B", &[(14, None)]),
+                ],
+            },
+            "XXX",
+        );
+        let mut t = rows();
+        t.get_mut("k1").unwrap().proteins = "sp|P1|A;sp|P2|B".into();
+        let out = site_claims(&mut t, &idx, 0.01, 0.05, &[PHOSPHO], None);
+        assert!(!out.knockoff_rows.contains("k1"));
+        assert_eq!(t["k1"].q_value, 0.001);
+        assert!(out.knockoff_rows.contains("k2"));
     }
 }

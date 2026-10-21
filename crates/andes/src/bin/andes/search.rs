@@ -655,7 +655,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         _ => {}
     }
     // C1: parameter-free path only (no explicit --mods). When the protocol
-    // resolves to TMT/iTRAQ, inject the tag as a fixed mod on K + peptide
+    // resolves to TMT/iTRAQ, or `--tmt` names the kit, inject the tag as a fixed mod on K + peptide
     // N-term so labeled peptides match their precursor mass — otherwise the
     // reporter filter engages but every labeled candidate is +tag Da off and
     // misses. The kit comes from `label` when known, else the protocol's
@@ -675,6 +675,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             (model::protocol::Protocol::ITRAQ | model::protocol::Protocol::ITRAQPhospho, _) => {
                 Some(input::IsobaricLabel::Itraq.tag())
             }
+            // `--tmt PLEX` names the kit whatever the protocol (e.g. phospho).
+            (_, Some(l)) if cli.tmt.is_some() => Some(l.tag()),
             _ => None,
         };
         if let Some((name, mass)) = tag {
@@ -2345,8 +2347,21 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         // Knockoff variants: the knockoff PSMs accepted per substitution class
         // estimate the false real variant PSMs, and give them a q-value too.
-        let outcome = output::apply_knockoff_fdr(map, &pin_index, proteoform_fdr);
+        let outcome =
+            output::apply_knockoff_fdr(map, &pin_index, proteoform_fdr, cli.knockoffs > 0);
         knockoff_rows = outcome.knockoff_rows;
+        let untested: usize = outcome
+            .counts
+            .iter()
+            .map(|c| c.real_before - c.tested_before)
+            .sum();
+        if untested > 0 {
+            eprintln!(
+                "Warning: {untested} variant PSMs at q <= {proteoform_fdr} have no knockoff \
+                 (the enzyme or the variant kind leaves no position for one) and are not \
+                 accepted; --knockoffs 0 leaves variants to the class FDR alone"
+            );
+        }
         if !outcome.counts.is_empty() {
             let line: Vec<String> = outcome
                 .counts
@@ -2583,6 +2598,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &run_ends,
             rescore_map.as_ref(),
             rescore_decoys.as_ref(),
+            &knockoff_rows,
         ) {
             Ok(()) => eprintln!("Wrote QPX bundle: {}", parquet_dir.display()),
             // Finding 3.9: failure to write an explicitly-requested output is a
@@ -2790,6 +2806,13 @@ fn log_claims(source: &str, stats: &input::AnnotationLoadStats) {
         eprintln!(
             "{source}: {} single-residue variants with no position for a knockoff",
             stats.variants_without_knockoff
+        );
+    }
+    if stats.knockoffs_dropped > 0 {
+        eprintln!(
+            "{source}: {} earlier knockoff entries dropped, within the knockoff distance of a \
+             variant these files list",
+            stats.knockoffs_dropped
         );
     }
 }

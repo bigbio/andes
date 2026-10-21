@@ -334,6 +334,10 @@ fn sequon(seq: &[u8], i: usize) -> bool {
     seq[i] == b'N' && i + 2 < seq.len() && seq[i + 1] != b'P' && matches!(seq[i + 2], b'S' | b'T')
 }
 
+/// Least distance, in residues, between a knockoff position and any listed
+/// variant position.
+pub(crate) const KNOCKOFF_MIN_DISTANCE: usize = 10;
+
 /// Knockoff positions for a substitution of residue `p` of `seq`: positions
 /// `q` holding the same residue, whose next residue matches (the same residue
 /// when the site is N, Q, K or R or either next residue is P or G, else the
@@ -366,7 +370,9 @@ pub(crate) fn knockoff_positions(
             seq[q] == o
                 && next_ok(q)
                 && sequon(seq, q) == sequon(seq, p)
-                && listed.iter().all(|&r| r.abs_diff(q) >= 10)
+                && listed
+                    .iter()
+                    .all(|&r| r.abs_diff(q) >= KNOCKOFF_MIN_DISTANCE)
                 && {
                     let (qa, qb) = enzymatic_span(seq, q, ko.enzyme);
                     qa != pa && (qb - qa).abs_diff(pb - pa) <= 3 && (6..=50).contains(&(qb - qa))

@@ -95,18 +95,20 @@ pub fn write_tsv(
     spec_file_name: &str,
     is_mgf: bool,
 ) -> io::Result<()> {
-    let file = std::fs::File::create(output_path)?;
-    let mut writer = BufWriter::new(file);
-    write_tsv_to(
-        &mut writer,
-        spectra,
-        queues,
-        candidates,
-        params,
-        search_index,
-        spec_file_name,
-        is_mgf,
-    )
+    crate::atomic::write_atomic(output_path, |path| {
+        let mut writer = BufWriter::new(std::fs::File::create(path)?);
+        write_tsv_to(
+            &mut writer,
+            spectra,
+            queues,
+            candidates,
+            params,
+            search_index,
+            spec_file_name,
+            is_mgf,
+        )?;
+        writer.flush()
+    })
 }
 
 /// Write all PSMs to an arbitrary writer — useful for testing without temp

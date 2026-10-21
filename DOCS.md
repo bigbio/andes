@@ -273,7 +273,7 @@ q-value above (`evidence` `specific`), or of its best shared PSM when it has no 
 weighs the same as deamidation, methylation or oxidation, and whether the canonical counterpart
 peptide (the substitution reverted) was identified: decoys cannot measure that error, so these
 rows are candidates rather than claims. With `--lfq` or `--tmt`, `quantity_<run or channel>` is
-the summed abundance of the member's specific peptides.
+the summed abundance of the member's specific peptides (`NA` where none was measured).
 
 `--decoy-strategy shuffle` is refused when the database holds isoform or mature-chain entries:
 shuffled decoys do not keep the peptides those entries share with their canonical entry.
@@ -407,8 +407,11 @@ Placements on knockoff sites are never reported for a `sites=annotated` mod, bec
 only for the estimate. For an unrestricted mod, which may sit anywhere anyway, they stay ordinary
 PSMs.
 
-Some knockoff sites are really modified, because annotation is incomplete. Counting them as false
-makes the estimate err towards rejecting true site claims, never towards accepting false ones.
+Some knockoff sites are really modified, because annotation is incomplete, which makes the
+estimate reject some true site claims. It does not err only that way: see the next paragraph. A
+PSM whose peptide several genes hold counts once in its stratum, as a knockoff PSM does, and a
+placement that is a knockoff site in one protein but an annotated site in another (a paralog
+annotated differently) supports that claim.
 
 **Experimental.** The knockoff sites control whether a residue is modified, not which
 modification it carries: on synthetic peptides whose lysines each carry one known modification, a
@@ -927,8 +930,9 @@ PIN's name without its extension, so per-run searches into one directory keep on
 
 ### 3e. QPX `.idparquet` bundle (`--output-parquet`)
 
-`--output-parquet <DIR>` writes a **QPX 1.0** bundle (`psms.parquet`,
-`proteins.parquet`, `search_params.parquet`) matching the reference QPX schema, for
+`--output-parquet <DIR>` writes a **QPX 1.0** bundle (`psms.parquet`, `proteins.parquet`,
+`protein_groups.parquet`, `search_params.parquet`, and with `--tmt` or `--lfq`
+`quantms.feature.parquet`) matching the reference QPX schema, for
 [quantms](https://github.com/bigbio/quantms). `psms.parquet` carries the peptidoform,
 modifications, charge, m/z, `is_decoy`, scan/rt, proteins, the spectrum arrays, `score`
 (`andes:RawScore`) and the other features in `additional_scores`. PEP and q-value are null
@@ -936,8 +940,10 @@ until rescoring; `protein_groups.parquet` is empty (protein groups are in
 `<stem>.protein_groups.tsv`, [§1](#protein-groups-and-protein-fdr)). With `--rescore`, every target row must join a
 Percolator result, except where target-decoy competition (`-Y`, which andes always passes)
 kept another PSM of its scan/`ExpMass` group: those target rows are left out of the bundle, as
-they are out of Percolator's output. `--rescore-native` competes in the same groups, with the
-same result for the bundle.
+they are out of Percolator's output; so are the decoys that lost that competition, and knockoff
+PSMs, which are never reported. `--rescore-native` competes in the same groups, with the same
+result for the bundle. In the match-between-runs feature parquet (`andes quant finalize`),
+`posterior_error_probability` is null on every row: a row is a precursor in a run, not a PSM.
 
 ```bash
 andes --spectrum spectra.mzML --database db.fasta \
@@ -962,7 +968,7 @@ major version marks an incompatible layout, a new minor version only adds column
 | `<stem>.protein_groups.tsv` (`--rescore`/`--rescore-native`) | one per target protein group, best score first | `protein_group lead accessions families peptides unique_peptides razor_peptides psms best_score protein_q subsumed` ([protein groups](#protein-groups-and-protein-fdr)) |
 | `<stem>.proteoforms.tsv` (`--rescore`/`--rescore-native` with UniProt isoform, variant or chain entries) | one per family member with a target PSM at q ≤ `--fdr` (a specific one for isoform, variant and chain entries) | `family member kind feature confidence q_value evidence specific_peptides shared_peptides psms best_psm alternative_explanation source prior_tier`, then `quantity_<run or channel>` with `--lfq`/`--tmt` (§1a, proteoform table) |
 | `<stem>.lfq.parquet` | one per feature per run (all target features, with their q-value) | `filename peptide charge proteins scannr spec_id psm_q_value calc_mz rt_anchor rt_apex rt_start rt_stop n_scans area apex_intensity isotope_areas cosine n_isotopes score decoy_score feature_q_value accepted`; `isotope_areas` is a list (monoisotope first); `accepted` is feature q ≤ `--lfq-feature-fdr` and cosine ≥ `--lfq-min-cosine`. The per-run wide view is the `accepted` rows pivoted on (`peptide`, `charge`) × `filename` over `area` (the highest `score` if a run has two). Metadata `andes.lfq.runs` (input stems, newline-joined, including runs without features), `andes.lfq.feature_fdr`, `andes.lfq.min_cosine` |
-| `<stem>.mbr.parquet` (`--mbr`, `andes quant finalize -o <stem>`) | one per (precursor, run) identified in or transferred into the run, every evidence type | `precursor_key run evidence_type quantity quantity_se quantity_normalized transfer_q quant_q apex_rt_s library_q`; `quantity_normalized` is `quantity` with the run's level and RT-local offset removed (§10, null when the run is not normalised); `evidence_type` is `identified` (the run has a target PSM of the precursor at PSM q ≤ `--quant-fdr` and, with `--pep`, PEP ≤ `--pep`), `identified_below_threshold` (identified, but `quant_q` above `--quant-feature-fdr` or missing; quantity kept, in this table only), `transfer_ms2` (transfer q ≤ `--mbr-fdr`, and an MS2 scan of the run matches the precursor's library spectrum: at least 4 fragments at a spectral angle of at least 0.6), `transfer_ms1` (transfer q ≤ `--mbr-fdr`, without that MS2 support) or `below_threshold` (quantity kept, as censored; in this table only); `quant_q` is the quality q-value of the row's MS1 feature against its decoys (the identified-row estimate for identified rows, equal to `transfer_q` for transfers); `transfer_q`, `quant_q` and `library_q` are internal quant-quality values, not identification FDR; text columns are strings, the others float64, null for missing values. Precursors that fail the library entry gate have no rows |
+| `<stem>.mbr.parquet` (`--mbr`, `andes quant finalize -o <stem>`) | one per (precursor, run) identified in or transferred into the run, every evidence type | `precursor_key run evidence_type quantity quantity_se quantity_normalized transfer_q quant_q apex_rt_s library_q`; `quantity_normalized` is `quantity` with the run's level and RT-local offset removed (§10, null when the run is not normalised); `evidence_type` is `identified` (the run has a target PSM of the precursor at PSM q ≤ `--quant-fdr` and, with `--pep`, PEP ≤ `--pep`), `identified_below_threshold` (identified, but `quant_q` above `--quant-feature-fdr` or missing; quantity kept, in this table only), `transfer_ms2` (transfer q ≤ `--mbr-fdr`, and an MS2 scan of the run matches the precursor's library spectrum: at least 4 fragments at a spectral angle of at least 0.6), `transfer_ms1` (transfer q ≤ `--mbr-fdr`, without that MS2 support) or `below_threshold` (quantity kept, as censored; in this table only); `quant_q` is the quality q-value of the row's MS1 feature against its decoys (the identified-row estimate for identified rows, equal to `transfer_q` for transfers); `transfer_q`, `quant_q` and `library_q` are internal quant-quality values, not identification FDR; text columns are strings, the others float64, null for missing values, including the quantity of a row whose MS1 fit found no signal (its intensity list in the feature parquet is empty). Precursors that fail the library entry gate have no rows |
 | `<stem>.mbr_validation.parquet` | one | counts are uint64, thresholds and rates float64 (null when undefined): pseudo-transfer validation (identified pairs re-measured as transfers: acceptance rate `pseudo_acceptance_*`, wrong-peak rate) and accepted transfer counts for the pooled and per-decoy-family estimates, at q ≤ 0.01 (`_q01`) and at `--mbr-fdr` (`_at_threshold`); then `--quant-feature-fdr` (null when off) and the identified rows: all, with a `quant_q`, at `quant_q` ≤ 0.01, and `identified_below_threshold`; then the MS2 evidence of the transfer rows: per hypothesis (`ms2_target_*`, `ms2_mass_decoy_*`, `ms2_rt_decoy_*`) and for the pseudo-transfers (`ms2_pseudo_*`) the rows with MS2 evidence (`_rows`) and those an MS2 scan supports (`_supported`), and the accepted transfers reported as `transfer_ms2`; then, at q ≤ 0.01 and at `--mbr-fdr`, the transfers the wrong-peak decoys alone would accept (`accepted_wrong_peak_only_*`) and the accepted decoy transfers per family (`accepted_mass_decoys_*`, `accepted_rt_decoys_*`, `accepted_identity_decoys_*`); then the target and identity-decoy library entries, the decoy transfers with a q-value per family, and the transfer targets not transferred because their entry's best donor PSM is above q 0.001 (`donor_gated`; counts the extracted rows only, so 0 when extract skipped those pairs, the default) |
 | `<dir>/quantms.feature.parquet` | one per feature (LFQ) or quantified PSM (isobaric) | the QPX feature view (`intensities` as `[{label, intensity}]` with `LFQ` or `TMT126`-style labels; `additional_intensities` with the raw/apex/isotope values; purity, cosine, q-values in `additional_scores`; `psm_ids` pointing at `psms.parquet` rows) |
 
@@ -1294,7 +1300,8 @@ single input run's MS1 scans still need to fit in memory while it is processed.
 * **Quantification gate.** A PSM passes the gate (`quant_gate_passed` in `tmt.parquet`) only if its precursor purity is at least
   `--tmt-min-purity` (0.7), its Percolator PEP is at most `--tmt-max-pep` (0.05) and its summed
   reporter signal-to-noise is at least `--tmt-min-sn` (off). A PSM without the value a criterion
-  needs (no MS1 or isolation window for purity, no `--rescore` for PEP, no noise for S/N) is not
+  needs (no MS1 or isolation window for purity, no `--rescore` or `--rescore-native` for PEP, no
+  noise for S/N) is not
   held to that criterion. The gate only chooses which PSMs are quantified: every PSM stays in the
   identification output (PIN, TSV, `psms.parquet`), and `tmt.parquet` and the quantms feature
   parquet keep every quantified PSM with `quant_weight` 0 for the gated ones. The log counts the PSMs each criterion

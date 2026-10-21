@@ -635,14 +635,20 @@ fn separate_searches_join_on_run_and_spec_id() {
     );
     // The default `--quant-feature-fdr off` keeps identified rows whose MS1
     // feature fails its decoys (peptide 6 has no MS1 signal) as `identified`.
+    // With no signal its quantity is missing (NA), not 0.
     let (header, rows) = read_mbr(&sep.join("out.mbr.parquet"));
     let ev = header.iter().position(|h| h == "evidence_type").unwrap();
+    let qty = header.iter().position(|h| h == "quantity").unwrap();
     for key in ["DAFLGSFLYEYSR/2", "DAFLGSFLYEYSR/3"] {
         let r1 = rows
             .get(&(key.to_string(), "mbr_run1".to_string()))
             .unwrap_or_else(|| panic!("{key} in run 1"));
         assert_eq!(r1[ev], "identified", "{key}: {r1:?}");
+        assert_ne!(r1[qty], "0", "{key}: {r1:?}");
     }
+    assert!(rows
+        .values()
+        .all(|r| r[qty] == "NA" || r[qty].parse::<f64>().unwrap() > 0.0));
     assert!(rows.values().all(|r| r[ev] != "identified_below_threshold"));
 }
 

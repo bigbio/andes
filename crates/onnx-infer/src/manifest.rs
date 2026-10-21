@@ -48,13 +48,15 @@ where
             Value::Null | Value::String(_) => Ok(None),
             Value::Number(n) => {
                 if let Some(size) = n.as_u64() {
-                    usize::try_from(size).map(Some).map_err(|_| {
-                        D::Error::custom(format!("shape axis {size} is too large"))
-                    })
+                    usize::try_from(size)
+                        .map(Some)
+                        .map_err(|_| D::Error::custom(format!("shape axis {size} is too large")))
                 } else if n.as_i64().is_some_and(|i| i < 0) {
                     Ok(None)
                 } else {
-                    Err(D::Error::custom(format!("shape axis {n} is not an integer")))
+                    Err(D::Error::custom(format!(
+                        "shape axis {n} is not an integer"
+                    )))
                 }
             }
             other => Err(D::Error::custom(format!(

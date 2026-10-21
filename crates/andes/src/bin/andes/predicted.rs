@@ -361,37 +361,25 @@ impl Predictors {
             blocks.push((cols, flags));
         }
 
-        // A predictor that scored no row (e.g. no retention times in the input)
-        // would only add constant columns: leave it out.
-        let mut names: Vec<String> = Vec::new();
-        let mut values: Vec<Vec<f64>> = Vec::new();
-        let mut flag_names: Vec<String> = Vec::new();
-        let mut flag_values: Vec<Vec<f64>> = Vec::new();
-        let mut name_iter = new_cols.iter();
-        for (src, (cols, flags)) in self.sources.iter().zip(blocks) {
-            let width = cols.len();
-            let src_names: Vec<String> = name_iter.by_ref().take(width).cloned().collect();
+        // Every configured predictor adds its columns, also when it scored no
+        // row (e.g. no retention times in the input; its columns are then 0 and
+        // its missing flag 1). The columns follow the --predict configuration
+        // only, so the PINs of separately searched runs share one header.
+        for (src, (_, flags)) in self.sources.iter().zip(&blocks) {
             if n > 0 && flags.iter().all(|&m| m != 0.0) {
                 eprintln!(
-                    "WARN: --predict: {} scored no PIN row; its columns are left out of the PIN",
+                    "WARN: --predict: {} scored no PIN row; its columns are constant",
                     src.pred.prefix()
                 );
-                continue;
             }
-            names.extend(src_names);
+        }
+        let mut values: Vec<Vec<f64>> = Vec::new();
+        let mut flag_values: Vec<Vec<f64>> = Vec::new();
+        for (cols, flags) in blocks {
             values.extend(cols);
-            flag_names.push(format!("{}_missing", src.pred.prefix()));
             flag_values.push(flags);
         }
-        names.extend(flag_names);
         values.extend(flag_values);
-        let new_cols = names;
-        if new_cols.is_empty() {
-            for line in &report {
-                eprintln!("Predict: {line}");
-            }
-            return Ok(());
-        }
 
         write_pin(pin, &table, &new_cols, &values)?;
         for line in &report {
@@ -1069,12 +1057,24 @@ mod tests {
         // A second pass refuses to add the same columns again.
         assert!(preds.add_to_pin(&pin, &spectra, &[spectra.len()]).is_err());
 
-        // Without retention times no row is scored and the PIN is left as is.
+        // Without retention times no row is scored: the header is the same,
+        // the columns are 0 and every row is flagged missing.
         std::fs::write(&pin, &text).unwrap();
         for s in &mut spectra {
             s.rt_seconds = None;
         }
         preds.add_to_pin(&pin, &spectra, &[spectra.len()]).unwrap();
-        assert_eq!(std::fs::read_to_string(&pin).unwrap(), text);
+        let out = std::fs::read_to_string(&pin).unwrap();
+        let mut lines = out.lines();
+        assert_eq!(
+            lines.next().unwrap(),
+            "SpecId\tLabel\tScanNr\tRawScore\tcharge2\tandesrt_rt_diff\tandesrt_predicted_rt\t\
+             andesrt_missing\tPeptide\tProteins"
+        );
+        let rows: Vec<Vec<&str>> = lines.map(|l| l.split('\t').collect()).collect();
+        assert_eq!(rows.len(), 60);
+        for r in &rows {
+            assert_eq!((r[5], r[6], r[7]), ("0", "0", "1"));
+        }
     }
 }

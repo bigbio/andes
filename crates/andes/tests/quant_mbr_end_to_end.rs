@@ -418,15 +418,14 @@ fn split_by_run(merged: &Path, out_dir: &Path, kind: &str) -> Vec<String> {
     let mut per_run: HashMap<&str, String> =
         RUNS.iter().map(|r| (*r, format!("{header}\n"))).collect();
     for l in lines {
-        // The prefix is the input's file name without its last extension.
-        let (prefix, rest) = l
-            .split_once('/')
-            .expect("multi-input SpecId has a file prefix");
+        // The prefix is the input's file name without its last extension; a
+        // separate search of the same input writes the same SpecId.
+        let (prefix, _) = l.split_once('/').expect("SpecId has a file prefix");
         let stem = prefix.split('.').next().unwrap();
         per_run
             .get_mut(stem)
             .unwrap_or_else(|| panic!("SpecId prefix {prefix:?}"))
-            .push_str(&format!("{rest}\n"));
+            .push_str(&format!("{l}\n"));
     }
     RUNS.iter()
         .map(|r| {
@@ -463,7 +462,8 @@ fn separate_searches_join_on_run_and_spec_id() {
     run_andes(&args.iter().map(String::as_str).collect::<Vec<_>>());
 
     // Each run searched on its own into one quant directory, with its own
-    // Percolator result. The runs share scan titles, so SpecIds collide.
+    // Percolator result. The runs share scan titles; the file stem in front of
+    // every SpecId keeps them apart.
     let sep = tmp.path().join("sep");
     let q = sep.join("q");
     std::fs::create_dir_all(&sep).unwrap();
@@ -498,25 +498,42 @@ fn separate_searches_join_on_run_and_spec_id() {
             .collect()
     };
 
-    // One merged pair cannot be joined: the shared SpecId and runs are named.
-    let out = andes(&[
+    // One merged pair over every run joins: what one Percolator run over the
+    // concatenated PINs of separate searches gives.
+    let merged = |kind: &str| -> PathBuf {
+        let path = sep.join(format!("merged.{kind}.psms.txt"));
+        let mut text = String::new();
+        for (i, r) in RUNS.iter().enumerate() {
+            let part = std::fs::read_to_string(sep.join(format!("{r}.percolator.{kind}.psms.txt")))
+                .unwrap();
+            let mut lines = part.lines();
+            let header = lines.next().unwrap();
+            if i == 0 {
+                text.push_str(header);
+                text.push('\n');
+            }
+            for l in lines {
+                text.push_str(l);
+                text.push('\n');
+            }
+        }
+        std::fs::write(&path, text).unwrap();
+        path
+    };
+    let (merged_t, merged_d) = (merged("target"), merged("decoy"));
+    run_andes(&[
         "quant",
         "library",
         "--quant-dir",
         s(&q),
         "--psms",
-        s(&sep.join("mbr_run1.percolator.target.psms.txt")),
+        s(&merged_t),
         "--decoy-psms",
-        s(&sep.join("mbr_run1.percolator.decoy.psms.txt")),
+        s(&merged_d),
     ]);
-    assert!(!out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        err.contains("SpecId") && err.contains("mbr_run1") && err.contains("per-run"),
-        "{err}"
-    );
+    assert!(q.join("library.parquet").is_file());
 
-    // Swapped per-run files join on SpecId but disagree on the peptides.
+    // Swapped per-run files hold the other run's SpecIds, so nothing joins.
     let mut swapped: Vec<String> = ["quant", "library", "--quant-dir", s(&q), "--psms"]
         .map(String::from)
         .to_vec();
@@ -532,7 +549,9 @@ fn separate_searches_join_on_run_and_spec_id() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("run mbr_run1") && err.contains("mbr_run2.percolator.target.psms.txt"),
+        err.contains("run mbr_run1")
+            && err.contains("mbr_run2.percolator.target.psms.txt")
+            && err.contains("has a SpecId of this run"),
         "{err}"
     );
 

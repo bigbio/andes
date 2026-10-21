@@ -197,6 +197,22 @@
 //! below the top moves those statistics and, through them, some winners. The
 //! calibration outcome line is unchanged.
 //!
+//! REGENERATED 2026-10-21 when every SpecId began to carry its input's file
+//! stem (`test.mgf/`, `astral_pxd070049_slice.mzML/`) and the charge one-hot
+//! columns began to follow `--charge` only, a charge outside it setting the
+//! nearest edge column. Against the previous binary's PIN for the same command
+//! line, with the stem put in front of each SpecId and each row's charge
+//! clamped to 2..5: every row identical. The E. coli PINs lose `charge6`; its
+//! rows set `charge5`:
+//!
+//! | case | rows | rows moved from `charge6` to `charge5` |
+//! |---|---|---|
+//! | E. coli default mods (and precursor-cal auto) | 75,391 | 41 |
+//! | E. coli fixed mods only | 77,450 | 44 |
+//! | E. coli one variable mod | 75,525 | 42 |
+//!
+//! The slice goldens carry no charge outside 2..5; only their SpecIds change.
+//!
 //! To regenerate after an intentional change, run the case's command line (see
 //! `run`), then either digest the PIN with `identity_digest` (E. coli) or write
 //! its header and sorted rows, gzipped, over the case's golden PIN (slices).
@@ -379,14 +395,14 @@ fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
 /// One E. coli case: (rows, `identity_digest` FNV-1a 64, calibration outcome line).
 type Golden = (usize, u64, Option<&'static str>);
 
-const ECOLI_DEFAULT_MODS: Golden = (75_391, 0x6b4b_4b2d_ba66_310c, None);
-const ECOLI_FIXED_MODS_ONLY: Golden = (77_450, 0xa195_7197_1336_3432, None);
-const ECOLI_ONE_VARIABLE_MOD: Golden = (75_525, 0x0ab3_c8a4_c85f_a662, None);
+const ECOLI_DEFAULT_MODS: Golden = (75_391, 0x4e5f_d1da_e444_1613, None);
+const ECOLI_FIXED_MODS_ONLY: Golden = (77_450, 0x56f1_9904_b0aa_12dd, None);
+const ECOLI_ONE_VARIABLE_MOD: Golden = (75_525, 0x1902_4c36_5bc3_677f, None);
 /// The pre-pass scores but the sample is too small to calibrate, so the PIN
 /// equals the calibration-off one.
 const ECOLI_PRECURSOR_CAL_AUTO: Golden = (
     75_391,
-    0x6b4b_4b2d_ba66_310c,
+    0x4e5f_d1da_e444_1613,
     Some("Precursor mass calibration skipped (insufficient confident PSMs: 492 with PSMs, 55 below RawScore floor, 0 failed |residual|>50ppm"),
 );
 

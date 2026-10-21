@@ -18,7 +18,8 @@
 //! The rest are constant only because of what this fixture is: an MGF (so no
 //! retention time and no linked MS1), searched with a low-resolution model (where
 //! `EdgeScore` is documented as returning 0), with `--refine` off and no charge-5
-//! precursors. Those are expected and are listed so the structural three stand out.
+//! precursors, and with no retention time the default `andesrt_*` predictor
+//! columns are constant too. Those are expected and are listed so the structural three stand out.
 use std::collections::BTreeSet;
 use std::process::Command;
 
@@ -88,6 +89,12 @@ fn standard_pin_constant_column_set_is_pinned() {
         "DeltaRT",
         "AbsDeltaRT",
         "DeltaRTNorm",
+        // The default `--predict rt` columns: an MGF has no retention times, so
+        // no row is scored (0, missing flag 1), but the columns stay so every
+        // PIN of a search configuration has one header.
+        "andesrt_rt_diff",
+        "andesrt_predicted_rt",
+        "andesrt_missing",
         // Provenance: constant on a FASTA search.
         "IsVariant",
         "IsIsoform",

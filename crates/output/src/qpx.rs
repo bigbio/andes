@@ -626,7 +626,11 @@ fn build_psms_batch(
                 None => rt.append_null(),
             }
             ion_mobility.append_null();
-            spectrum_reference.append_value(spectrum_ref(spec, scan_num));
+            spectrum_reference.append_value(spectrum_ref(
+                spec,
+                scan_num,
+                reference_files[spec_idx],
+            ));
             // Headline score = the rank/RawScore the PIN emits (psm.score, the
             // ranking signal; rounded in the PIN, kept full-precision here).
             score.append_value(psm.score as f64);
@@ -870,14 +874,22 @@ fn append_protein_accessions(
     builder.append(true);
 }
 
-/// QPX-style `spectrum_reference` native id; `spec.title` if non-empty,
-/// else a `scan=N` placeholder.
-fn spectrum_ref(spec: &Spectrum, scan: i32) -> String {
+/// QPX-style `spectrum_reference` native id: `spec.title` without the
+/// `<stem>/` SpecId prefix of its input file, or a `scan=N` placeholder when
+/// the title is empty.
+fn spectrum_ref(spec: &Spectrum, scan: i32, reference_file: &str) -> String {
     if spec.title.is_empty() {
-        format!("scan={scan}")
-    } else {
-        spec.title.clone()
+        return format!("scan={scan}");
     }
+    let stem = std::path::Path::new(reference_file)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    spec.title
+        .strip_prefix(stem)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .unwrap_or(&spec.title)
+        .to_string()
 }
 
 fn append_metavalue(sb: &mut StructBuilder, name: &str, value: &str, value_type: &str) {

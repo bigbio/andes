@@ -37,8 +37,9 @@ use crate::row_context::RowContext;
 use search::glyco_search::{FullGlycoPsm, GlycoSpectrumResult};
 use search::precursor_mono::MonoCorrection;
 
-/// `--precursor-mono` columns, appended after `IsobaricRTMargin` and only when
-/// the run carried MS1 envelope corrections (the flag off keeps the schema).
+/// `--precursor-mono` columns, appended after `IsobaricRTMargin` whenever the
+/// correction ran (`--glyco`, `--precursor-mono auto`, mzML or `.raw` input),
+/// also when it fitted no spectrum; a spectrum without a fit writes 0s.
 /// `MonoShift`: isotopes subtracted from the recorded precursor before the
 /// search (0 = as recorded); `MonoFit`: cosine of the observed MS1 envelope
 /// against the glycopeptide isotope model at the SEARCHED precursor;
@@ -167,8 +168,8 @@ fn write_glyco_header<W: Write>(
     // of truth (`glyco_col_kept`) and cannot drift positionally.
     cols.retain(|c| glyco_col_kept(c));
     if mono {
-        // Present only under `--precursor-mono` (never structurally dead there:
-        // MonoFit varies on every row).
+        // Present whenever the `--precursor-mono` correction ran; MonoFit varies
+        // on every fitted row.
         let at = cols.len() - 2; // before Peptide/Proteins
         for (i, c) in GLYCO_PIN_MONO_COLS.iter().enumerate() {
             cols.insert(at + i, c.to_string());

@@ -767,14 +767,15 @@ residues and their multiset of modification masses (the same peptide with a modi
 another site), only the best-ranked row is written; a decoy never collapses into a target, and the
 kept row's `Proteins` lists the proteins of the rows collapsed into it. The TSV and QPX outputs
 carry the same rows. Rank is assigned after the collapse. The `chargeN`
-one-hots follow `--charge`; the default 2–5 gives the 66 columns below. Do not confuse
+one-hots follow `--charge` only, never the data, so separately searched runs share one header;
+the default 2–5 gives the 66 columns below. Do not confuse
 **`RankScore`** (col 7, orders candidates; historically `RawScore`) with **`RawScore`** (col 62,
 the fused strong score Percolator weights most; historically `StrongScore`; it also ranks under
 `--score strong`).
 
 | # | Column | Type | Range | Description |
 |---|---|---|---|---|
-| 1 | `SpecId` | string | — | `{specID}_{scan}_{rank}`; multi-row scans add `_{rowIdx}`. |
+| 1 | `SpecId` | string | — | `{stem}/{specID}_{scan}_{rank}`, where `{stem}` is the input file name without its extension; multi-row scans add `_{rowIdx}`. The stem keeps SpecIds unique when the PINs of separately searched runs are pooled. |
 | 2 | `Label` | int | {−1, +1} | `+1` target, `−1` decoy (by source protein). |
 | 3 | `ScanNr` | int | ≥0 | MS2 scan number. |
 | 4 | `ExpMass` | float | >0 | Experimental neutral precursor mass (Da). |
@@ -785,7 +786,7 @@ the fused strong score Percolator weights most; historically `StrongScore`; it a
 | 9 | `peplen` | int | ≥6 | Residue count **+ 2** (flanks). |
 | 10 | `dm` | float | signed | Precursor mass error (Da) after isotope correction. |
 | 11 | `absdm` | float | ≥0 | `\|dm\|`. |
-| 12–15 | `charge2`…`charge5` | 0/1 | one-hot | One-hot precursor charge. |
+| 12–15 | `charge2`…`charge5` | 0/1 | one-hot | One-hot precursor charge. A declared charge outside `--charge` sets the nearest edge column (a 6+ sets `charge5`). |
 | 16 | `enzN` | 0/1 | one-hot | N-terminus fits the enzyme rule. |
 | 17 | `enzC` | 0/1 | one-hot | C-terminus fits the enzyme rule. |
 | 18 | `enzInt` | int | ≥0 | Internal cleavage sites. |
@@ -863,7 +864,9 @@ every row, targets and decoys alike, and its columns are inserted before `Peptid
 | `<p>_predicted_rt` | float | Calibrated predicted RT (min). |
 | `<p>_missing` | 0/1 | 1 when the predictor could not score the row (a modification or length the model does not encode, no observed RT, no calibration); the row's other columns of that predictor hold the median over scored rows. |
 
-A predictor that scores no row (e.g. an input without retention times) adds no columns.
+The columns follow `--predict` only, never the data, so the PINs of separately searched runs
+share one header. A predictor that scores no row (e.g. an input without retention times) still
+adds its columns, with 0 and `<p>_missing` 1 on every row.
 `--glyco` writes its own `.glyco.pin` without predicted features.
 andes-rt encodes modifications by elemental composition (35 Unimod entries); AlphaPeptDeep
 encodes the modifications its `peptdeep_mods.json` lists; DeepLC encodes CAM, oxidation, acetyl,
@@ -1155,7 +1158,7 @@ defaults are validated; most knobs are hidden.
 | `--glyco-glycan-gdb <FILE>` | — | `.gdb` glycan database (canonical-string trees, the format of the bundled databases); structure (core- vs antenna-fucose) is kept. Wins over `--glyco-species`. |
 | `--glyco-species <NAME>` | — | Bundled database: `human`, `mouse`, `mouse-large`, `high-mannose`. One of the two is required. |
 | `--glyco-core <n\|o>` | `n` | Glycan core: `n` = N-glycan (N-X-S/T sequon gate, trimannosyl core), `o` = O-glycan (any S/T gate, single GalNAc core). An `o` run needs an O-glycan `.gdb`. |
-| `--precursor-mono` | `auto` | Correct each precursor to the monoisotope its MS1 envelope supports (mzML or `.raw`): tests "recorded = M+k", k = 0..6, and moves down k−1 isotopes when k > 0 clearly wins. On the engine L mouse-liver reference (PXD005553) 88 of 3,824 scans were recorded exactly +4 high (issue #64). Fitted spectra are searched with a `0..1` isotope window instead of `0..2`. Adds `MonoShift`/`MonoFit`/`MonoFitGain`/`MonoSNR`. An explicit `--isotope-error` is honoured; without MS1 output is byte-identical to `off`. Under `--glyco` the isotope-error window defaults to 0..=2 (dropping −1 measured +81 backbone-correct @1%). |
+| `--precursor-mono` | `auto` | Correct each precursor to the monoisotope its MS1 envelope supports (mzML or `.raw`): tests "recorded = M+k", k = 0..6, and moves down k−1 isotopes when k > 0 clearly wins. On the engine L mouse-liver reference (PXD005553) 88 of 3,824 scans were recorded exactly +4 high (issue #64). Fitted spectra are searched with a `0..1` isotope window instead of `0..2`. Adds `MonoShift`/`MonoFit`/`MonoFitGain`/`MonoSNR`. An explicit `--isotope-error` is honoured; without MS1 the search is as with `off` and the Mono columns are 0. The Mono columns follow the flag and the input format only (mzML or `.raw` under `--glyco`), so separately searched runs share one PIN header. Under `--glyco` the isotope-error window defaults to 0..=2 (dropping −1 measured +81 backbone-correct @1%). |
 | `--glyco-max-peaks` | 0 (no cap) | Peaks the **generation** stage considers; 300–500 helps very dense scans. |
 | `--glyco-retrieval-tol-ppm` | tol-ppm on high-res, the model's Da window on low-res | Retrieval window only; 20 ppm on high-res measured 6.9x faster at no identification cost. |
 | `--glyco-y-max-charge` | 3 | Maximum glycan-Y fragment charge. |
@@ -1405,10 +1408,10 @@ andes quant finalize --quant-dir q/ -o experiment [--mbr-fdr 0.01] [--quant-feat
 
 PSMs are joined to the run tables on (run, SpecId). Percolator results come either per run
 (`--psms <stem>=<file>` and `--decoy-psms <stem>=<file>` for every run) or as one merged pair
-of files (`--psms <file> --decoy-psms <file>`, e.g. Percolator over the PIN of one
-multi-input search, whose SpecIds carry the file name). Separately searched runs usually share
-SpecIds (the scan titles); a merged pair over such runs is rejected, naming the SpecId and the
-runs, because it cannot say which run a score belongs to. Where possible, prefer one
+of files (`--psms <file> --decoy-psms <file>`, e.g. Percolator over the concatenated PINs of
+all runs). Every SpecId starts with its input's file stem, so SpecIds of separately searched
+runs do not collide. Two inputs with the same stem do, and a merged pair over them is
+rejected, naming the SpecId and the runs. Where possible, prefer one
 Percolator run over the PINs of all runs (one merged pair, or split per run) to a separate
 Percolator run per input: the library ranks each precursor by its best score across runs, and
 scores from separately trained Percolator models are not on one scale.

@@ -626,9 +626,10 @@ pub(crate) fn build_and_write_library(
             }
             (None, None) => unreachable!("one score source"),
         };
-        let (mut run_joined, mut run_mismatched) = (0usize, 0usize);
+        let (mut run_rows, mut run_joined, mut run_mismatched) = (0usize, 0usize, 0usize);
         for batch in open(r, &JOIN_COLUMNS)? {
             for row in batch? {
+                run_rows += 1;
                 let id = *id_of.get(row.precursor_key.as_str()).ok_or_else(|| {
                     format!(
                         "{}: precursor {:?} changed between two reads of the table",
@@ -671,6 +672,16 @@ pub(crate) fn build_and_write_library(
                     donors.add(&p, &row.spec_id);
                 }
             }
+        }
+        // Per-run results whose SpecIds all belong to another run (every SpecId
+        // starts with its run's file stem) would join nothing and pass silently.
+        if per_run.is_some() && run_joined == 0 && run_rows > 0 && !set.psms.is_empty() {
+            return Err(format!(
+                "run {}: none of the {} rescored PSMs in {} has a SpecId of this run; are these the rescoring results of this run?",
+                stems[r],
+                set.psms.len(),
+                set.source
+            ));
         }
         if run_mismatched as f64 > MAX_JOIN_MISMATCH * run_joined as f64 {
             return Err(format!(

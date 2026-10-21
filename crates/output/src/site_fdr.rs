@@ -516,33 +516,35 @@ fn primary(accession: &str) -> &str {
 /// Write the site table: one row per accepted site claim.
 pub fn write_sites_tsv(path: &std::path::Path, rows: &[SiteRow]) -> std::io::Result<()> {
     use std::io::Write;
-    let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
-    writeln!(
-        w,
-        "family\taccession\tposition\tresidue\tmodification_mass\tprior_tier\tpsms\tbest_psm\tsite_q\tconfidence\toccupancy\tidentity\tidentity_alternatives\tidentity_spectra"
-    )?;
-    let opt = |v: Option<f64>| v.map_or_else(|| "NA".to_string(), |v| format!("{v:.4}"));
-    for r in rows {
+    crate::atomic::write_atomic(path, |path| {
+        let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
         writeln!(
             w,
-            "{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{:.2}",
-            r.family,
-            r.accession,
-            r.position,
-            r.residue,
-            r.mass_delta,
-            r.tier,
-            r.psms,
-            r.best_psm,
-            r.site_q,
-            1.0 - r.site_q,
-            opt(r.occupancy),
-            opt(r.identity),
-            r.alternatives,
-            r.identity_spectra
+            "family\taccession\tposition\tresidue\tmodification_mass\tprior_tier\tpsms\tbest_psm\tsite_q\tconfidence\toccupancy\tidentity\tidentity_alternatives\tidentity_spectra"
         )?;
-    }
-    w.flush()
+        let opt = |v: Option<f64>| v.map_or_else(|| "NA".to_string(), |v| format!("{v:.4}"));
+        for r in rows {
+            writeln!(
+                w,
+                "{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{:.2}",
+                r.family,
+                r.accession,
+                r.position,
+                r.residue,
+                r.mass_delta,
+                r.tier,
+                r.psms,
+                r.best_psm,
+                r.site_q,
+                1.0 - r.site_q,
+                opt(r.occupancy),
+                opt(r.identity),
+                r.alternatives,
+                r.identity_spectra
+            )?;
+        }
+        w.flush()
+    })
 }
 
 #[cfg(test)]

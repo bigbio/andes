@@ -510,29 +510,31 @@ pub fn infer_protein_groups(
 /// Write the protein-group table, best score first.
 pub fn write_protein_groups_tsv(path: &std::path::Path, inf: &Inference) -> std::io::Result<()> {
     use std::io::Write;
-    let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
-    writeln!(
-        w,
-        "protein_group\tlead\taccessions\tfamilies\tpeptides\tunique_peptides\trazor_peptides\tpsms\tbest_score\tprotein_q\tsubsumed"
-    )?;
-    for g in &inf.groups {
+    crate::atomic::write_atomic(path, |path| {
+        let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
         writeln!(
             w,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.6}\t{}\t{}",
-            g.id,
-            g.lead,
-            g.accessions.join(";"),
-            g.families.join(";"),
-            g.peptides,
-            g.unique,
-            g.razor,
-            g.psms,
-            g.score,
-            g.q_value,
-            g.subsumed.join(";")
+            "protein_group\tlead\taccessions\tfamilies\tpeptides\tunique_peptides\trazor_peptides\tpsms\tbest_score\tprotein_q\tsubsumed"
         )?;
-    }
-    w.flush()
+        for g in &inf.groups {
+            writeln!(
+                w,
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.6}\t{}\t{}",
+                g.id,
+                g.lead,
+                g.accessions.join(";"),
+                g.families.join(";"),
+                g.peptides,
+                g.unique,
+                g.razor,
+                g.psms,
+                g.score,
+                g.q_value,
+                g.subsumed.join(";")
+            )?;
+        }
+        w.flush()
+    })
 }
 
 #[cfg(test)]

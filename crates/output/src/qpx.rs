@@ -213,19 +213,21 @@ fn write_parquet_batches(
         qpx_metadata(file_type),
     ));
     let props = WriterProperties::builder().build();
-    let file = std::fs::File::create(path)?;
-    let mut writer =
-        ArrowWriter::try_new(file, schema_with_meta.clone(), Some(props)).map_err(to_io)?;
-    for batch in batches {
-        let batch = batch?;
-        let batch = RecordBatch::try_new(schema_with_meta.clone(), batch.columns().to_vec())
-            .map_err(to_io)?;
-        writer.write(&batch).map_err(to_io)?;
-        // Also bound the writer's buffered row group, not only Arrow arrays.
-        writer.flush().map_err(to_io)?;
-    }
-    writer.close().map_err(to_io)?;
-    Ok(())
+    crate::atomic::write_atomic(path, |path| {
+        let file = std::fs::File::create(path)?;
+        let mut writer =
+            ArrowWriter::try_new(file, schema_with_meta.clone(), Some(props)).map_err(to_io)?;
+        for batch in batches {
+            let batch = batch?;
+            let batch = RecordBatch::try_new(schema_with_meta.clone(), batch.columns().to_vec())
+                .map_err(to_io)?;
+            writer.write(&batch).map_err(to_io)?;
+            // Also bound the writer's buffered row group, not only Arrow arrays.
+            writer.flush().map_err(to_io)?;
+        }
+        writer.close().map_err(to_io)?;
+        Ok(())
+    })
 }
 
 /// Build the QPX schema-metadata map for a file of the given `file_type`.

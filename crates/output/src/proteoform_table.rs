@@ -263,44 +263,46 @@ pub fn write_proteoform_tsv(
     quant_columns: &[String],
 ) -> std::io::Result<()> {
     use std::io::Write;
-    let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
-    write!(
-        w,
-        "family\tmember\tkind\tfeature\tconfidence\tq_value\tevidence\tspecific_peptides\tshared_peptides\tpsms\tbest_psm\talternative_explanation\tsource\tprior_tier"
-    )?;
-    for c in quant_columns {
-        write!(w, "\tquantity_{c}")?;
-    }
-    writeln!(w)?;
-    for r in rows {
+    crate::atomic::write_atomic(path, |path| {
+        let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
         write!(
             w,
-            "{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            r.family,
-            r.member,
-            r.kind.name(),
-            r.feature,
-            r.confidence(),
-            r.q_value,
-            r.evidence,
-            r.specific_peptides,
-            r.shared_peptides,
-            r.psms,
-            r.best_psm,
-            r.alternative,
-            r.source,
-            r.tier
+            "family\tmember\tkind\tfeature\tconfidence\tq_value\tevidence\tspecific_peptides\tshared_peptides\tpsms\tbest_psm\talternative_explanation\tsource\tprior_tier"
         )?;
-        for v in &r.quantity {
-            if v.is_finite() {
-                write!(w, "\t{v}")?;
-            } else {
-                write!(w, "\tNA")?;
-            }
+        for c in quant_columns {
+            write!(w, "\tquantity_{c}")?;
         }
         writeln!(w)?;
-    }
-    w.flush()
+        for r in rows {
+            write!(
+                w,
+                "{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                r.family,
+                r.member,
+                r.kind.name(),
+                r.feature,
+                r.confidence(),
+                r.q_value,
+                r.evidence,
+                r.specific_peptides,
+                r.shared_peptides,
+                r.psms,
+                r.best_psm,
+                r.alternative,
+                r.source,
+                r.tier
+            )?;
+            for v in &r.quantity {
+                if v.is_finite() {
+                    write!(w, "\t{v}")?;
+                } else {
+                    write!(w, "\tNA")?;
+                }
+            }
+            writeln!(w)?;
+        }
+        w.flush()
+    })
 }
 
 #[cfg(test)]

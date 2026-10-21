@@ -274,20 +274,22 @@ pub fn write_pg_parquet(
     let props = WriterProperties::builder()
         .set_compression(Compression::SNAPPY)
         .build();
-    let file = std::fs::File::create(path)?;
-    let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-    let rows: Vec<&ProteinGroup> = inf.groups.iter().chain(&inf.decoy_groups).collect();
-    for chunk in rows.chunks(4096) {
-        let batch = build_batch(&schema, chunk, runs, run_level)?;
-        writer
-            .write(&batch)
+    crate::atomic::write_atomic(path, |path| {
+        let file = std::fs::File::create(path)?;
+        let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))
             .map_err(|e| std::io::Error::other(e.to_string()))?;
-    }
-    writer
-        .close()
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-    Ok(())
+        let rows: Vec<&ProteinGroup> = inf.groups.iter().chain(&inf.decoy_groups).collect();
+        for chunk in rows.chunks(4096) {
+            let batch = build_batch(&schema, chunk, runs, run_level)?;
+            writer
+                .write(&batch)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        writer
+            .close()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        Ok(())
+    })
 }
 
 #[cfg(test)]

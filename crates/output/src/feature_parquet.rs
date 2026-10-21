@@ -741,18 +741,21 @@ fn write_feature_chunk(
 /// QPX readers key on (`file_type = feature_file`).
 pub fn write_feature_parquet(path: &Path, records: &[FeatureRecord]) -> std::io::Result<()> {
     let mbr = has_mbr(records);
-    let (mut writer, schema) = open_feature_writer(path, mbr)?;
-    for chunk in records.chunks(FEATURE_CHUNK) {
-        write_feature_chunk(&mut writer, &schema, chunk, mbr)?;
-    }
-    writer
-        .close()
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-    Ok(())
+    crate::atomic::write_atomic(path, |path| {
+        let (mut writer, schema) = open_feature_writer(path, mbr)?;
+        for chunk in records.chunks(FEATURE_CHUNK) {
+            write_feature_chunk(&mut writer, &schema, chunk, mbr)?;
+        }
+        writer
+            .close()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        Ok(())
+    })
 }
 
 /// [`write_feature_parquet`] over records given in pieces, in the same row
-/// groups. The match-between-runs columns are written when the first
+/// groups, written to `<path>.partial` and renamed to `path` by
+/// [`FeatureParquetWriter::finish`]. The match-between-runs columns are written when the first
 /// row group has them, or always with [`FeatureParquetWriter::new_mbr`]; with
 /// no records at all the file is [`write_feature_parquet`]'s of none, with
 /// those columns for `new_mbr`.
@@ -795,7 +798,7 @@ impl FeatureParquetWriter {
     fn write(&mut self, chunk: &[FeatureRecord]) -> std::io::Result<()> {
         if self.open.is_none() {
             let mbr = self.mbr || has_mbr(chunk);
-            let (w, s) = open_feature_writer(&self.path, mbr)?;
+            let (w, s) = open_feature_writer(&crate::atomic::partial(&self.path), mbr)?;
             self.open = Some((w, s, mbr));
         }
         let (w, s, mbr) = self.open.as_mut().expect("opened above");
@@ -805,10 +808,12 @@ impl FeatureParquetWriter {
     pub fn finish(mut self) -> std::io::Result<()> {
         let rest = std::mem::take(&mut self.buf);
         if self.open.is_none() && rest.is_empty() {
-            let (w, _) = open_feature_writer(&self.path, self.mbr)?;
-            w.close()
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
-            return Ok(());
+            return crate::atomic::write_atomic(&self.path, |path| {
+                let (w, _) = open_feature_writer(path, self.mbr)?;
+                w.close()
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                Ok(())
+            });
         }
         if !rest.is_empty() {
             self.write(&rest)?;
@@ -816,7 +821,7 @@ impl FeatureParquetWriter {
         let (w, _, _) = self.open.take().expect("written above");
         w.close()
             .map_err(|e| std::io::Error::other(e.to_string()))?;
-        Ok(())
+        std::fs::rename(crate::atomic::partial(&self.path), &self.path)
     }
 }
 

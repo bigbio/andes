@@ -525,7 +525,7 @@ when a pipeline (e.g. quantms) owns rescoring. `--fdr`/`--pep` alone are ignored
 | `--rescore-native` | flag | *(off)* | *(advanced)* Built-in GBDT rescorer (3-fold CV folded by spectrum); non-production fallback. |
 | `--fdr` | fraction | `0.01` | q-value threshold applied by a rescoring run. With UniProt isoform, variant or chain entries, a PSM must also pass it within its class (§1a, provenance). |
 | `--proteoform-fdr` | fraction | max(`--fdr`, 0.05) | q-value threshold for proteoform claims: variant-class PSMs (every protein a UniProt variant entry) in the filtered TSV, the proteoform table and quantification; every other PSM keeps `--fdr`. |
-| `--protein-fdr` | fraction | *(off)* | Protein-group q-value cutoff: the filtered TSV keeps only PSMs whose peptide counts for a group at or below it, and the proteoform table only families of such groups. `<stem>.protein_groups.tsv` is written either way ([protein groups](#protein-groups-and-protein-fdr)). |
+| `--protein-fdr` | fraction | *(off)* | Protein-group q-value cutoff: the filtered TSV keeps only PSMs whose peptide counts for a group at or below it, and the proteoform table only families of such groups. `<stem>.protein_groups.tsv` is written either way ([protein groups](#protein-groups-and-protein-fdr)). With `--mbr --output-parquet`, the QPX pg and feature views keep the groups at or below it, 0.01 unless given. |
 | `--pep` | fraction | *(off)* | *(advanced)* PEP threshold, ANDed with `--fdr` (and with `--quant-fdr` for quantification targets and `--mbr` donors). |
 | `--percolator-bin` / `--percolator-docker` / `--percolator-image` / `--percolator-args` | — | auto | *(advanced)* Backend: `--percolator-bin`, else `$PATH`, else Docker; `--percolator-args` passes flags through. Percolator runs with target-decoy competition (`-Y`: the best PSM of each spectrum competes, and q-values come from the winners), as every andes benchmark was measured, and with `--num-threads` set to `--threads` unless `--percolator-args` sets it: about twice as fast as its default of three threads on a 16-core node, with the same result (the PSM count can differ by about 0.2% between thread counts). `--subset-max-train <N>` trains on N PSMs and is 5–10 times faster, but on an entrapment benchmark it raised the true FDP at q ≤ 0.01 from 1.00% to 1.09–1.16%, so it is not the default. |
 | `--keep-pin` | bool | `true` | *(advanced)* With `--rescore`/`--rescore-native` and no `--output-pin`: `true` writes the PIN (and Percolator's result files) as `<base>.pin`, where `<base>` is `--output-tsv`, else `--output-parquet`, else `./andes`; `false` uses a temporary PIN deleted at exit. An explicit `--output-pin` is always kept. |
@@ -596,8 +596,11 @@ andes inference \
   are the search's. Knockoff entries are evidence for no protein.
 - The class and knockoff q-values are applied as in a search; `--fdr` and `--proteoform-fdr` set
   the PSM cutoffs for the counts.
+- `--protein-fdr` (default 0.01) is the protein q-value cut: `pg.parquet` keeps the target groups
+  and the decoy groups at or below it, so the decoys show the FDR at the cut. `--protein-fdr 1`
+  keeps every group.
 - `pg.parquet`: one row per target group and per decoy group that won its family's competition
-  (`is_decoy`), with `pg_accessions`, `anchor_protein`, `grouped_runs` (`--runs`, else one name
+  (`is_decoy`), at or below the cut, with `pg_accessions`, `anchor_protein`, `grouped_runs` (`--runs`, else one name
   per `--psms` file), `global_qvalue` (the protein q-value), `pg_qvalue` (only for one run),
   `peptides` (peptides per accession), `peptide_counts`, the best peptide score in
   `additional_scores` and families, PSMs, razor peptides and subsumed families in `cv_params`.
@@ -1403,8 +1406,26 @@ andes quant extract  --quant-dir q/ --run a [--lfq-tol 10ppm]
 andes quant extract  --quant-dir q/ --run b [--lfq-tol 10ppm]
 # once
 andes quant finalize --quant-dir q/ -o experiment [--mbr-fdr 0.01] [--quant-feature-fdr off] \
-      [--output-parquet dir]
+      [--output-parquet dir --database db.fasta --psms all.target.psms --decoy-psms all.decoy.psms \
+       [--protein-fdr 0.01]]
 ```
+
+With `--output-parquet`, finalize writes the QPX views of the experiment and needs the protein
+database and the Percolator results of every run (`--database`, `--psms`, `--decoy-psms` and
+the database options, as [`andes inference`](#several-runs-andes-inference)). It infers the
+protein groups once over every run's PSMs, then:
+
+- `quantms.pg.parquet` holds the groups at or below `--protein-fdr` (default 0.01), with the
+  decoy groups at the cut, and `feature_counts` (features of the group's unique peptides, and
+  all). `contaminant` is true for groups with a `CONTAMINANT_` accession.
+- Each row of `quantms.feature.parquet` carries its peptide's group: `pg_accessions` (the group's
+  accessions), `anchor_protein` (its lead), `unique` (false for a peptide another group also
+  contains, assigned to this one as razor) and `pg_global_qvalue`. Features whose peptide counts
+  for no group at or below the cut are left out (they stay in `<stem>.mbr.parquet`).
+- Only identifications are protein evidence: transfers quantify precursors identified in other
+  runs and never add a group.
+
+Protein quantities are left to the downstream roll-up, which reads the two views.
 
 PSMs are joined to the run tables on (run, SpecId). Percolator results come either per run
 (`--psms <stem>=<file>` and `--decoy-psms <stem>=<file>` for every run) or as one merged pair
@@ -1660,7 +1681,9 @@ after every search output is written and the search state is freed, one run's MS
 `quantms.feature.parquet` holds the match-between-runs rows (identified, `transfer_ms2` and `transfer_ms1`)
 and replaces the per-run `--lfq` feature rows, which stay in `<stem>.lfq.parquet`;
 below-threshold transfers and precursors that fail the library
-entry gate are not in it (§3f).
+entry gate are not in it (§3f). With `--rescore`, the search's protein groups give each feature
+its group and `quantms.pg.parquet` holds the groups at `--protein-fdr` (0.01 unless given), as
+`quant finalize --output-parquet` does.
 
 The stage path and the in-process run use the same code on the same files. With `--rescore`
 (Percolator) they give identical `<stem>.mbr.parquet` and `<stem>.mbr_validation.parquet` rows

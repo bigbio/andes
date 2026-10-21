@@ -19,7 +19,7 @@
 //! A decoy accession `<prefix>_<accession>` is the decoy of `<accession>`'s
 //! family, so pairs are named, not guessed.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use model::{EntryKind, Protein};
 use search::SearchIndex;
@@ -62,6 +62,9 @@ pub struct Inference {
     /// Each target peptide (bare sequence) and the index into `groups` it
     /// counts for.
     pub peptide_group: HashMap<String, usize>,
+    /// The target peptides that other kept groups also contain: each counts
+    /// for its group as a razor peptide, not a unique one.
+    pub shared_peptides: HashSet<String>,
     /// Decoy groups that won their family's competition, with the q-value at
     /// their score; their peptide counts include every assigned peptide.
     pub decoy_groups: Vec<ProteinGroup>,
@@ -81,6 +84,39 @@ impl Inference {
         self.peptide_group
             .get(&bare_sequence(&psm.peptide))
             .map(|&g| &self.groups[g])
+    }
+}
+
+/// Where a peptide's quantified features go under a protein q-value cut.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GroupAt<'a> {
+    /// The group the peptide counts for, at or below the cut; `unique` is
+    /// false for a peptide another group also contains (razor).
+    Group {
+        group: &'a ProteinGroup,
+        unique: bool,
+    },
+    /// The peptide counts for no target group.
+    NoGroup,
+    /// The peptide's group is above the cut.
+    AboveCut,
+}
+
+impl Inference {
+    /// The group of the target peptide `sequence` (bare residues) at protein
+    /// q-value `max_q`.
+    pub fn group_at(&self, sequence: &str, max_q: f64) -> GroupAt<'_> {
+        let Some(&i) = self.peptide_group.get(sequence) else {
+            return GroupAt::NoGroup;
+        };
+        let group = &self.groups[i];
+        if group.q_value > max_q {
+            return GroupAt::AboveCut;
+        }
+        GroupAt::Group {
+            group,
+            unique: !self.shared_peptides.contains(sequence),
+        }
     }
 }
 
@@ -461,6 +497,11 @@ pub fn infer_protein_groups(
             }
         })
         .collect();
+    let shared_peptides = target
+        .groups
+        .iter()
+        .flat_map(|g| g.shared.iter().map(|&p| target.peptides[p].clone()))
+        .collect();
     let peptide_group = pep_owner
         .into_iter()
         .map(|(p, g)| (target.peptides[p].clone(), new_index[g]))
@@ -503,6 +544,7 @@ pub fn infer_protein_groups(
     Inference {
         groups,
         peptide_group,
+        shared_peptides,
         decoy_groups,
     }
 }
@@ -597,6 +639,22 @@ mod tests {
         let e = &inf.groups[2];
         assert_eq!((e.peptides, e.unique, e.razor, e.score), (1, 1, 0, 0.5));
         assert_eq!(inf.group_of(&targets["5"]).unwrap().families, vec!["D"]);
+        // Only FFFK is shared between kept groups (C is subsumed).
+        assert_eq!(inf.shared_peptides, ["FFFK".to_string()].into());
+        match inf.group_at("FFFK", 0.01) {
+            GroupAt::Group { group, unique } => {
+                assert_eq!(
+                    (group.families.as_slice(), unique),
+                    (&["D".to_string()][..], false)
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            inf.group_at("EEEK", 0.01),
+            GroupAt::Group { unique: true, .. }
+        ));
+        assert_eq!(inf.group_at("WWWK", 0.01), GroupAt::NoGroup);
         // No decoys: every group has q = 0.
         assert!(inf.groups.iter().all(|g| g.q_value == 0.0));
         // A peptide whose PSM fails its cutoff still places the group but is

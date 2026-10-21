@@ -717,7 +717,9 @@ pub(crate) struct SearchArgs {
     /// per protein family) are written either way; with this cutoff the
     /// filtered TSV keeps only PSMs whose peptide counts for a group at or
     /// below it, and the proteoform table only families of such groups.
-    /// Default: no protein filter.
+    /// Default: no protein filter. With `--mbr` and `--output-parquet`, the
+    /// QPX pg and feature views keep the groups at or below it, 0.01 unless
+    /// given.
     #[arg(long = "protein-fdr", value_parser = parse_unit_fraction)]
     pub(crate) protein_fdr: Option<f64>,
 
@@ -972,6 +974,23 @@ pub(crate) struct InferenceArgs {
     #[arg(long, value_name = "FILE")]
     pub(crate) database: PathBuf,
 
+    #[command(flatten)]
+    pub(crate) proteins: ProteinArgs,
+
+    /// Run names for the groups' `grouped_runs`. Default: one per `--psms`
+    /// file, named after the file.
+    #[arg(long = "runs", value_name = "NAME", num_args = 1..)]
+    pub(crate) runs: Vec<String>,
+
+    /// Output prefix: writes `<PREFIX>.pg.parquet` (the QPX protein-group view).
+    #[arg(short = 'o', long = "output", value_name = "PREFIX")]
+    pub(crate) output: PathBuf,
+}
+
+/// How protein inference reads the database and which PSMs count as evidence:
+/// the search's database options and the PSM cutoffs.
+#[derive(Args, Debug, Clone)]
+pub(crate) struct ProteinArgs {
     #[arg(long = "uniprot-variants")]
     pub(crate) uniprot_variants: bool,
     #[arg(long = "uniprot-isoforms")]
@@ -1004,14 +1023,12 @@ pub(crate) struct InferenceArgs {
     #[arg(long = "proteoform-fdr", value_parser = parse_unit_fraction)]
     pub(crate) proteoform_fdr: Option<f64>,
 
-    /// Run names for the groups' `grouped_runs`. Default: one per `--psms`
-    /// file, named after the file.
-    #[arg(long = "runs", value_name = "NAME", num_args = 1..)]
-    pub(crate) runs: Vec<String>,
-
-    /// Output prefix: writes `<PREFIX>.pg.parquet` (the QPX protein-group view).
-    #[arg(short = 'o', long = "output", value_name = "PREFIX")]
-    pub(crate) output: PathBuf,
+    /// Protein q-value cutoff: the pg view keeps the target and decoy groups
+    /// at or below it (the decoys show the FDR at the cut), and `quant
+    /// finalize`'s feature view the features of those target groups. 1 keeps
+    /// every group. Default 0.01.
+    #[arg(long = "protein-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
+    pub(crate) protein_fdr: f64,
 }
 
 /// `andes quant`: the match-between-runs stages over a quant directory
@@ -1029,7 +1046,7 @@ pub(crate) enum QuantCommand {
     /// Transfer q-values and the match-between-runs tables from every run's
     /// extract table. Writes `<base>.mbr.parquet` and
     /// `<base>.mbr_validation.parquet`.
-    Finalize(QuantFinalizeArgs),
+    Finalize(Box<QuantFinalizeArgs>),
 }
 
 impl QuantCommand {
@@ -1155,9 +1172,29 @@ pub(crate) struct QuantFinalizeArgs {
     #[arg(long = "quant-feature-fdr", default_value = "off", value_parser = parse_fraction_or_off)]
     pub(crate) quant_feature_fdr: FractionOrOff,
 
-    /// Also write the rows as `quantms.feature.parquet` into this directory.
-    #[arg(long = "output-parquet", value_name = "DIR")]
+    /// Also write the QPX views into this directory: the protein groups of
+    /// every run's PSMs as `quantms.pg.parquet`, and the features of the
+    /// groups at `--protein-fdr` as `quantms.feature.parquet`, each with its
+    /// group. Needs `--database`, `--psms` and `--decoy-psms`.
+    #[arg(long = "output-parquet", value_name = "DIR", requires_all = ["database", "inference_psms", "inference_decoy_psms"])]
     pub(crate) output_parquet: Option<PathBuf>,
+
+    /// The protein database the PSMs were searched against, with the
+    /// search's database options (as `andes inference`).
+    #[arg(long, value_name = "FILE")]
+    pub(crate) database: Option<PathBuf>,
+
+    /// Percolator target PSM results of every run (as `andes inference`):
+    /// one file from one Percolator run over all the runs, or one per run.
+    #[arg(id = "inference_psms", long = "psms", value_name = "TSV", num_args = 1..)]
+    pub(crate) psms: Vec<PathBuf>,
+
+    /// Percolator decoy PSM results of the same Percolator run(s).
+    #[arg(id = "inference_decoy_psms", long = "decoy-psms", value_name = "TSV", num_args = 1..)]
+    pub(crate) decoy_psms: Vec<PathBuf>,
+
+    #[command(flatten)]
+    pub(crate) proteins: ProteinArgs,
 
     /// Advanced: training rows per transfer or identified-quality
     /// classifier. Above it the classifier is trained on the rows of a

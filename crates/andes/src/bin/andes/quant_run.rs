@@ -915,6 +915,7 @@ fn base_record(id: &QuantId, proteins: Vec<ProteinPos>, feature_id: i64) -> Feat
         rt_stop: None,
         psm_ids: vec![id.psm_index],
         mbr: None,
+        group: None,
     }
 }
 
@@ -1278,6 +1279,7 @@ pub(crate) fn run_quant(
     cutoffs: Option<&output::Cutoffs>,
     report_base: &Path,
     parquet_dir: Option<&Path>,
+    groups: Option<&crate::quant_cmd::ProteinGroups<'_>>,
 ) -> Result<output::QuantSummary, String> {
     let s = &collector.settings;
     // Per-peptide quantities for the proteoform table.
@@ -1728,6 +1730,19 @@ pub(crate) fn run_quant(
     let quantified = s.plex.is_some() || s.lfq || !records.is_empty();
     if let (Some(pdir), true) = (parquet_dir, quantified) {
         std::fs::create_dir_all(pdir).map_err(|e| format!("create {}: {e}", pdir.display()))?;
+        // With protein groups, each feature carries its group and features
+        // without one at the cut are left out.
+        let mut tally = crate::quant_cmd::GroupTally::default();
+        if let Some(pg) = groups {
+            records.retain_mut(|r| match tally.assign(pg, &r.sequence) {
+                Some((proteins, group)) => {
+                    r.proteins = proteins;
+                    r.group = Some(group);
+                    true
+                }
+                None => false,
+            });
+        }
         let path = pdir.join("quantms.feature.parquet");
         output::write_feature_parquet(&path, &records)
             .map_err(|e| format!("write {}: {e}", path.display()))?;
@@ -1736,6 +1751,12 @@ pub(crate) fn run_quant(
             path.display(),
             records.len()
         );
+        if let Some(pg) = groups {
+            let mut runs: Vec<String> = records.iter().map(|r| r.run_file_name.clone()).collect();
+            runs.sort();
+            runs.dedup();
+            tally.write_pg(pdir, pg, &runs)?;
+        }
     }
     eprintln!("[PHASE quant: {:.2}s]", t0.elapsed().as_secs_f64());
     Ok(summary)

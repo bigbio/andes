@@ -24,14 +24,17 @@ use std::path::{Path, PathBuf};
 
 use model::Tolerance;
 use output::extract_table::{read_extract_tags, write_extract_table_tagged};
-use output::feature_parquet::{FeatureRecord, MbrColumns};
+use output::feature_parquet::{FeatureGroup, FeatureRecord, MbrColumns};
 use output::library_table::{
     library_fingerprint, read_library, write_library, StoredLibrary, FINGERPRINT_KEY,
 };
 use output::mbr_out::EvidenceType;
 use output::ms2_table::read_ms2_table;
 use output::run_quant_table::{open_run_quant_table, read_run_quant_mods};
-use output::{FeatureParquetWriter, ModRecord, PercolatorPsm, ProteinPosition};
+use output::{
+    FeatureCounts, FeatureParquetWriter, GroupAt, Inference, ModRecord, PercolatorPsm,
+    ProteinPosition,
+};
 use quant::align::AlignParams;
 use quant::evidence::EvidenceParams;
 use quant::library::{Library, LibraryBuilder, PrecursorMeta, PsmIn};
@@ -1248,13 +1251,112 @@ fn parse_peptidoform(peptidoform: &str) -> (String, Vec<ModRecord>) {
     (seq, mods)
 }
 
+/// The protein groups of the QPX views: the inference over every run's PSMs
+/// and the protein q-value cut.
+pub(crate) struct ProteinGroups<'a> {
+    pub inf: &'a Inference,
+    pub max_q: f64,
+}
+
+/// What the feature writers did with the features of the protein groups.
+#[derive(Default)]
+pub(crate) struct GroupTally {
+    /// By group id, the features written.
+    pub counts: HashMap<usize, FeatureCounts>,
+    /// Features whose peptide counts for no target group.
+    pub no_group: usize,
+    /// Features whose group is above the protein q-value cut.
+    pub above_cut: usize,
+}
+
+impl GroupTally {
+    /// The group accessions and the group of a feature of the peptide
+    /// `sequence`, counted; `None` (counted) when it has no group at the cut.
+    pub(crate) fn assign(
+        &mut self,
+        pg: &ProteinGroups<'_>,
+        sequence: &str,
+    ) -> Option<(Vec<ProteinPosition>, FeatureGroup)> {
+        match pg.inf.group_at(sequence, pg.max_q) {
+            GroupAt::Group { group, unique } => {
+                let c = self.counts.entry(group.id).or_default();
+                c.total += 1;
+                c.unique += unique as usize;
+                Some((
+                    group
+                        .accessions
+                        .iter()
+                        .map(|a| (a.clone(), None, None, None, None))
+                        .collect(),
+                    FeatureGroup {
+                        anchor: group.lead.clone(),
+                        unique,
+                        global_q: group.q_value,
+                    },
+                ))
+            }
+            GroupAt::NoGroup => {
+                self.no_group += 1;
+                None
+            }
+            GroupAt::AboveCut => {
+                self.above_cut += 1;
+                None
+            }
+        }
+    }
+
+    /// Writes `quantms.pg.parquet` into `dir`: the groups of `pg` at its cut,
+    /// with the features counted here, over `runs`.
+    pub(crate) fn write_pg(
+        &self,
+        dir: &Path,
+        pg: &ProteinGroups<'_>,
+        runs: &[String],
+    ) -> Result<(), String> {
+        let path = dir.join("quantms.pg.parquet");
+        output::write_pg_parquet(
+            &path,
+            pg.inf,
+            runs,
+            runs.len() == 1,
+            pg.max_q,
+            Some(&self.counts),
+        )
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+        let kept = pg.inf.groups.iter().filter(|g| g.q_value <= pg.max_q);
+        let decoys = pg
+            .inf
+            .decoy_groups
+            .iter()
+            .filter(|g| g.q_value <= pg.max_q)
+            .count();
+        eprintln!(
+            "[proteins] wrote {} ({} target groups at protein q<={} over {} run(s), {} with features; {} decoy groups at the cut); features left out: {} of peptides in no protein group, {} of groups above the cut",
+            path.display(),
+            kept.count(),
+            pg.max_q,
+            runs.len(),
+            self.counts.len(),
+            decoys,
+            self.no_group,
+            self.above_cut
+        );
+        Ok(())
+    }
+}
+
 /// The QPX feature rows of the MBR table: every row except the
 /// below-threshold transfers and identified rows, which stay in
-/// `<base>.mbr.parquet` only. Feature ids continue from `last_id`.
+/// `<base>.mbr.parquet` only. With `groups`, each row carries its peptide's
+/// protein group, and rows whose peptide has no group at or below the cut
+/// are left out (counted in `tally`). Feature ids continue from `last_id`.
 fn feature_records(
     stored: &StoredLibrary,
     features: &[MbrFeature],
     last_id: &mut i64,
+    groups: Option<&ProteinGroups<'_>>,
+    tally: &mut GroupTally,
 ) -> Vec<FeatureRecord> {
     features
         .iter()
@@ -1264,18 +1366,27 @@ fn feature_records(
                 EvidenceType::BelowThreshold | EvidenceType::IdentifiedBelowThreshold
             )
         })
-        .map(|f| {
-            *last_id += 1;
+        .filter_map(|f| {
             let m = &stored.library.meta[f.precursor as usize];
             let peptidoform = split_key(&m.key).to_string();
             let (sequence, modifications) = parse_peptidoform(&peptidoform);
+            let (proteins, group): (Vec<ProteinPosition>, _) = match groups {
+                Some(pg) => {
+                    let (proteins, group) = tally.assign(pg, &sequence)?;
+                    (proteins, Some(group))
+                }
+                None => (
+                    stored.proteins[f.precursor as usize]
+                        .split(';')
+                        .filter(|a| !a.is_empty())
+                        .map(|a| (a.to_string(), None, None, None, None))
+                        .collect(),
+                    None,
+                ),
+            };
+            *last_id += 1;
             let run = stored.runs[f.run as usize].clone();
-            let proteins: Vec<ProteinPosition> = stored.proteins[f.precursor as usize]
-                .split(';')
-                .filter(|a| !a.is_empty())
-                .map(|a| (a.to_string(), None, None, None, None))
-                .collect();
-            FeatureRecord {
+            Some(FeatureRecord {
                 feature_id: *last_id,
                 sequence,
                 peptidoform,
@@ -1308,7 +1419,8 @@ fn feature_records(
                     quant_q: f.quant_q,
                     quantity_se: f.quantity_se,
                 }),
-            }
+                group,
+            })
         })
         .collect()
 }
@@ -1316,7 +1428,8 @@ fn feature_records(
 /// Transfer FDR, identified quality q-values and the MBR outputs over the
 /// extract rows of `source` ([`finalize_stream`] within `limits`); with
 /// `parquet_dir`, also `<parquet_dir>/quantms.feature.parquet`, written as the
-/// rows come.
+/// rows come, and with `groups` the features' protein groups and
+/// `<parquet_dir>/quantms.pg.parquet`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn finalize_and_write(
     stored: &StoredLibrary,
@@ -1327,6 +1440,7 @@ pub(crate) fn finalize_and_write(
     limits: FinalizeLimits,
     base: &Path,
     parquet_dir: Option<&Path>,
+    groups: Option<&ProteinGroups<'_>>,
 ) -> Result<(), String> {
     let (table, validation) = mbr_paths(base);
     let mut feature_out = match parquet_dir {
@@ -1345,9 +1459,10 @@ pub(crate) fn finalize_and_write(
         mbr_path: &table,
         validation_path: &validation,
     };
+    let mut tally = GroupTally::default();
     let summary = finalize_stream(&stored.runs, &stored.library, source, &params, &mut |f| {
         if let Some((w, path, last_id)) = feature_out.as_mut() {
-            w.push(feature_records(stored, &f, last_id))
+            w.push(feature_records(stored, &f, last_id, groups, &mut tally))
                 .map_err(|e| format!("write {}: {e}", path.display()))?;
         }
         Ok(())
@@ -1365,6 +1480,9 @@ pub(crate) fn finalize_and_write(
             "[mbr] wrote {} ({n} feature rows with evidence type; below-threshold transfers and identified rows are in the mbr.parquet only)",
             path.display(),
         );
+    }
+    if let (Some(dir), Some(pg)) = (parquet_dir, groups) {
+        tally.write_pg(dir, pg, &stored.runs)?;
     }
     Ok(())
 }
@@ -1384,6 +1502,7 @@ pub(crate) fn run_in_process(
     quant_feature_fdr: Option<f64>,
     base: &Path,
     parquet_dir: Option<&Path>,
+    groups: Option<&ProteinGroups<'_>>,
 ) -> Result<(), String> {
     let t0 = std::time::Instant::now();
     let stems = library_runs(dir, stems)?;
@@ -1423,6 +1542,7 @@ pub(crate) fn run_in_process(
         FinalizeLimits::default(),
         base,
         parquet_dir,
+        groups,
     )?;
     eprintln!("[PHASE mbr: {:.2}s]", t0.elapsed().as_secs_f64());
     Ok(())
@@ -1515,6 +1635,17 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
         max_held_scores: a.max_held_scores,
         temp_dir: a.temp_dir,
     };
+    let inf = match (&a.output_parquet, &a.database) {
+        (Some(_), Some(database)) => Some(
+            crate::inference_cmd::infer_from_files(database, &a.proteins, &a.psms, &a.decoy_psms)
+                .map_err(|e| e.to_string())?,
+        ),
+        _ => None,
+    };
+    let groups = inf.as_ref().map(|inf| ProteinGroups {
+        inf,
+        max_q: a.proteins.protein_fdr,
+    });
     finalize_and_write(
         &stored,
         &ExtractFiles(paths),
@@ -1524,6 +1655,7 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
         limits,
         &a.output,
         a.output_parquet.as_deref(),
+        groups.as_ref(),
     )
 }
 
@@ -1538,7 +1670,7 @@ pub(crate) fn run_quant_command(cmd: QuantCommand) -> Result<(), Box<dyn std::er
     match cmd {
         QuantCommand::Library(a) => run_library(a),
         QuantCommand::Extract(a) => run_extract(a),
-        QuantCommand::Finalize(a) => run_finalize(a),
+        QuantCommand::Finalize(a) => run_finalize(*a),
     }
     .map_err(Into::into)
 }
@@ -1773,7 +1905,7 @@ mod tests {
             feature(1, 0, EvidenceType::TransferMs1, Some(0.004)),
             feature(1, 1, EvidenceType::IdentifiedBelowThreshold, None),
         ];
-        let records = feature_records(&stored, &features, &mut 0);
+        let records = feature_records(&stored, &features, &mut 0, None, &mut GroupTally::default());
         let got: Vec<(i64, &str, &str)> = records
             .iter()
             .map(|r| {
@@ -1795,6 +1927,59 @@ mod tests {
             .map(|r| r.mbr.as_ref().unwrap().quant_q)
             .collect();
         assert_eq!(quant_q, [Some(0.003), Some(0.004)]);
+        assert_eq!(records[0].proteins[0].0, "P1");
+        assert!(records[0].group.is_none());
+
+        // With protein groups: PEPTIDEK's group passes the cut, PEPTMIDEK's
+        // does not.
+        let group = |id: usize, lead: &str, q: f64| output::ProteinGroup {
+            id,
+            lead: lead.into(),
+            families: vec![lead.into()],
+            accessions: vec![lead.into(), format!("{lead}-2")],
+            peptides: 1,
+            unique: 0,
+            razor: 1,
+            psms: 1,
+            score: 3.0,
+            q_value: q,
+            subsumed: Vec::new(),
+            peptides_per_accession: Vec::new(),
+            is_decoy: false,
+        };
+        let inf = Inference {
+            groups: vec![group(1, "Q1", 0.0), group(2, "Q2", 0.05)],
+            peptide_group: [("PEPTIDEK".into(), 0), ("PEPTMIDEK".into(), 1)].into(),
+            shared_peptides: ["PEPTIDEK".to_string()].into(),
+            decoy_groups: Vec::new(),
+        };
+        let groups = ProteinGroups {
+            inf: &inf,
+            max_q: 0.01,
+        };
+        let mut tally = GroupTally::default();
+        let records = feature_records(&stored, &features, &mut 0, Some(&groups), &mut tally);
+        assert_eq!(records.len(), 1);
+        let r = &records[0];
+        assert_eq!(r.feature_id, 1);
+        let accs: Vec<&str> = r.proteins.iter().map(|p| p.0.as_str()).collect();
+        assert_eq!(accs, ["Q1", "Q1-2"]);
+        assert_eq!(
+            r.group,
+            Some(FeatureGroup {
+                anchor: "Q1".into(),
+                unique: false,
+                global_q: 0.0
+            })
+        );
+        assert_eq!(
+            tally.counts[&1],
+            FeatureCounts {
+                unique: 0,
+                total: 1
+            }
+        );
+        assert_eq!((tally.no_group, tally.above_cut), (0, 1));
     }
 
     /// 200 target PSMs of distinct peptides in run `a`, scored by a rescoring

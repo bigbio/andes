@@ -365,26 +365,36 @@ pub fn select_nearest_for<'a>(
     //    while `etd_highres_tryp` sat unused in the store.
     //
     //    Only fires where step 5 would otherwise return the standard base, so no
-    //    selection that already resolved can change. The candidate set is sorted
-    //    by model_id so the choice is deterministic across runs and platforms.
+    //    selection that already resolved can change. Among the same-activation
+    //    models the pick is, in order: one whose labelling (TMT/iTRAQ or none)
+    //    agrees with the key's, so an unlabelled query never gets a labelled
+    //    model while an unlabelled one exists (and the reverse); one whose
+    //    experiment_class equals the key's; one with the key's enzyme; the
+    //    smallest model_id, so the choice is deterministic.
+    if let Some(pick) = entries
+        .iter()
+        .filter(|e| e.activation == key.activation)
+        .min_by(|a, b| {
+            relaxed_instrument_rank(a, key)
+                .cmp(&relaxed_instrument_rank(b, key))
+                .then_with(|| a.model_id.cmp(&b.model_id))
+        })
     {
-        let mut same_activation: Vec<&SelectionEntry> = entries
-            .iter()
-            .filter(|e| e.activation == key.activation)
-            .collect();
-        if !same_activation.is_empty() {
-            same_activation.sort_by(|a, b| a.model_id.cmp(&b.model_id));
-            // Prefer one that also matches the enzyme, else take the first by id.
-            let pick = same_activation
-                .iter()
-                .find(|e| e.enzyme == key.enzyme)
-                .or_else(|| same_activation.first())
-                .unwrap();
-            return (pick.model_id.as_str(), true);
-        }
+        return (pick.model_id.as_str(), true);
     }
     // 5. Standard base — guaranteed present in the bundled store.
     (standard_id, true)
+}
+
+/// Preference of a same-activation model when [`select_nearest_for`] relaxes
+/// the instrument (step 4); lower is better: labelling agreement, then exact
+/// experiment_class, then enzyme.
+fn relaxed_instrument_rank(e: &SelectionEntry, key: &SelectionKey) -> (bool, bool, bool) {
+    (
+        contains_labeling_tag(&e.experiment_class) != contains_labeling_tag(&key.experiment_class),
+        e.experiment_class != key.experiment_class,
+        e.enzyme != key.enzyme,
+    )
 }
 
 /// Store instrument names in the same fragment-resolution class as
@@ -438,6 +448,45 @@ mod tests {
             "an ETD query must not land on a b/y model"
         );
         assert!(substituted, "an inexact match must still warn");
+    }
+
+    /// Step 4 (instrument relaxed, activation kept) must not hand an unlabelled
+    /// query a TMT model because its id sorts first, and prefers the key's
+    /// experiment_class.
+    #[test]
+    fn instrument_relaxation_keeps_the_labelling_and_class() {
+        let entries = vec![
+            e("etd_a_tmt", "ETD", "QExactive", "Trypsin", &["tmt"]),
+            e("etd_b_phospho", "ETD", "QExactive", "Trypsin", &["phospho"]),
+            e("etd_c", "ETD", "QExactive", "LysC", &[]),
+            e("hcd_qexactive_tryp", "HCD", "QExactive", "Trypsin", &[]),
+        ];
+        let pick = |ec: &[&str]| {
+            select_nearest(&entries, &key("ETD", "LowRes", "Trypsin", ec), fam, "hcd_qexactive_tryp")
+        };
+        assert_eq!(pick(&[]), ("etd_c", true), "unlabelled, standard class first");
+        assert_eq!(pick(&["phospho"]), ("etd_b_phospho", true));
+        assert_eq!(pick(&["tmt"]), ("etd_a_tmt", true), "a labelled query keeps its label");
+
+        // Only a labelled model of this activation: still preferred to crossing
+        // the activation.
+        let only_tmt = vec![
+            e("etd_a_tmt", "ETD", "QExactive", "Trypsin", &["tmt"]),
+            e("hcd_qexactive_tryp", "HCD", "QExactive", "Trypsin", &[]),
+        ];
+        let k = key("ETD", "LowRes", "Trypsin", &[]);
+        assert_eq!(
+            select_nearest(&only_tmt, &k, fam, "hcd_qexactive_tryp"),
+            ("etd_a_tmt", true)
+        );
+
+        // With the class equal, the key's enzyme wins over the id order.
+        let enz = vec![
+            e("etd_a", "ETD", "QExactive", "LysC", &[]),
+            e("etd_b", "ETD", "QExactive", "Trypsin", &[]),
+        ];
+        let k = key("ETD", "LowRes", "Trypsin", &[]);
+        assert_eq!(select_nearest(&enz, &k, fam, "x"), ("etd_b", true));
     }
 
     #[test]

@@ -2126,7 +2126,11 @@ pub(crate) fn compute_psm_features_with_edge(
     } else {
         0.0
     };
-    // Isolation-window efficiency is not available → emit 0.0.
+    // Isolation-window efficiency (the precursor's share of the ion current in
+    // its isolation window) needs the MS1 scan around each precursor. The
+    // standard search streams MS2 only (MS1 is read under `--chimeric` and
+    // `--precursor-mono`), so the column is a constant 0.0 for every PSM and
+    // carries no information to the rescorer.
     let isolation_window_efficiency = 0.0_f32;
 
     // ── Top-7 mass-error statistics ───────────────────────────────────────────

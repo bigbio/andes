@@ -31,6 +31,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import onnx
 import torch
 from torch import nn
 
@@ -73,6 +74,30 @@ class SingleHead(nn.Module):
         dense = torch.cat([x_global, x_one_hot.sum(dim=1)], dim=1)
         trunk = enc.net(torch.cat([enc.norm(dense), pooled], dim=1))
         return (self.proj(trunk) @ self.emb) * self.scale + self.shift
+
+
+def graph_io(onnx_path: Path):
+    """Inputs and outputs of the exported graph as manifest tensor specs.
+
+    Each shape is the one the graph declares: a fixed axis as its size, a
+    dynamic (symbolic or unknown) axis as None. A tensor without a declared
+    shape gets no "shape" entry. andes checks these against the loaded graph.
+    """
+    graph = onnx.load(str(onnx_path)).graph
+    initializers = {t.name for t in graph.initializer}
+
+    def spec(value):
+        out = {"name": value.name}
+        tensor = value.type.tensor_type
+        if tensor.HasField("shape"):
+            out["shape"] = [
+                d.dim_value if d.HasField("dim_value") else None
+                for d in tensor.shape.dim
+            ]
+        return out
+
+    inputs = [spec(v) for v in graph.input if v.name not in initializers]
+    return inputs, [spec(v) for v in graph.output]
 
 
 def main():
@@ -121,17 +146,14 @@ def main():
     o = sess.run(None, {"x_atom": x_atom.numpy(), "x_global": x_global.numpy(), "x_one_hot": x_hc.numpy()})[0]
     err_ort = float(np.abs(o - ref.numpy()).max())
     print(f"onnxruntime vs model forward: max |d| = {err_ort:.3g} min")
+    inputs, outputs = graph_io(onnx_path)
     manifest = {
         "id": "deeplc_rt",
         "description": f"DeepLC {deeplc.__version__} multitask_flexcnn_model, head {a.task} (minutes)",
         "onnx": onnx_path.name,
         "task": "retention_time",
-        "inputs": [
-            {"name": "x_atom", "shape": [None, L, 6]},
-            {"name": "x_global", "shape": [None, 67]},
-            {"name": "x_one_hot", "shape": [None, L, 20]},
-        ],
-        "outputs": [{"name": "rt", "shape": [None]}],
+        "inputs": inputs,
+        "outputs": outputs,
         "provenance": {
             "origin": f"deeplc {deeplc.__version__} package_data/models/{Path(DEFAULT_MODEL).name}",
             "license": "Apache-2.0",

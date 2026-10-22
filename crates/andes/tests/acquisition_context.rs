@@ -90,3 +90,23 @@ fn metadataless_ion_trap_mgf_stays_low_resolution() {
     assert!(acq.contains("low-resolution MS2"), "{acq}");
     assert!(banner_line(&err, "model ").contains("cid_lowres_tryp"));
 }
+
+/// Without an override a high-resolution run measures its fragment error
+/// before scoring. This fixture has too few confident PSMs, so the PIN
+/// features keep the 20 ppm class default and say so.
+#[test]
+fn high_res_run_measures_or_reports_its_fragment_error() {
+    let err = run(
+        "test-fixtures/orbitrap_lumos_120.mzML.gz",
+        "test-fixtures/BSA.fasta",
+        &[],
+    );
+    let line = err
+        .lines()
+        .find(|l| l.starts_with("Fragment error:"))
+        .unwrap_or_else(|| panic!("no measurement line:\n{err}"));
+    assert!(
+        line.contains("not measured") && line.contains("Ppm(20.0)"),
+        "{line}"
+    );
+}

@@ -59,10 +59,13 @@ pub struct RankScorer {
     /// Highest observed rank the model distinguishes; ranks beyond this are
     /// clamped down to it before indexing.
     max_rank: u32,
-    /// Optional CLI override for the fragment-matching tolerance (MGF input).
-    /// `None` ⇒ derive from the model's instrument resolution class (the
-    /// historical 20 ppm high-res / 0.5 Da low-res default).
+    /// CLI override for the fragment-matching tolerance (`--fragment-tol-*`).
+    /// `None` ⇒ derive from the resolution class (20 ppm high-res / 0.5 Da
+    /// low-res) and, for the PIN features, from the measured fragment error.
     fragment_tol_override: Option<model::tolerance::Tolerance>,
+    /// The run's measured fragment mass error (see
+    /// [`RankScorer::set_fragment_error`]).
+    fragment_error: crate::scoring::fragment_error::SharedFragmentError,
     /// Resolution class of the acquisition being searched (see
     /// [`RankScorer::set_acquisition_high_res`]).
     acquisition_high_res: Option<bool>,
@@ -213,6 +216,7 @@ impl RankScorer {
             max_rank: param.max_rank as u32,
             fragment_tol_override: None,
             acquisition_high_res: None,
+            fragment_error: crate::scoring::fragment_error::SharedFragmentError::new(),
         }
     }
 
@@ -254,9 +258,7 @@ impl RankScorer {
         &self.param
     }
 
-    /// Set (or clear) the CLI fragment-tolerance override. Used by the search
-    /// binary for metadata-less (MGF) input; metadata-bearing input leaves it
-    /// `None` so behavior is byte-identical to auto-detection.
+    /// Set (or clear) the CLI fragment-tolerance override (`--fragment-tol-*`).
     pub fn set_fragment_tol_override(&mut self, tol: Option<model::tolerance::Tolerance>) {
         self.fragment_tol_override = tol;
     }
@@ -289,6 +291,51 @@ impl RankScorer {
                 Tolerance::Da(0.5)
             }
         })
+    }
+
+    /// Set (or clear) the run's measured fragment mass error. Takes `&self` so
+    /// the search can set it between input files while the scorer is shared;
+    /// it must not change while a chunk is being scored.
+    pub fn set_fragment_error(&self, m: Option<crate::scoring::FragmentErrorModel>) {
+        self.fragment_error.set(m);
+    }
+
+    /// The run's measured fragment mass error, when one was set.
+    pub fn fragment_error(&self) -> Option<crate::scoring::FragmentErrorModel> {
+        self.fragment_error.get()
+    }
+
+    /// Fragment tolerance of the PIN match features (match counts, ion-current
+    /// ratios, error statistics, the ppm-Gaussian and chance-match terms): the
+    /// CLI override when set, else the tolerance derived from the measured
+    /// fragment error on high-resolution data, else
+    /// [`Self::feature_match_tolerance`]. Features fed to the trained
+    /// fragment-intensity and rich-ion models keep
+    /// [`Self::feature_match_tolerance`], the window they were trained at.
+    pub fn pin_match_tolerance(&self) -> model::tolerance::Tolerance {
+        if let Some(t) = self.fragment_tol_override {
+            return t;
+        }
+        match self.fragment_error.get() {
+            Some(m) if self.acquisition_is_high_res() => {
+                model::tolerance::Tolerance::Ppm(m.feature_tolerance_ppm())
+            }
+            _ => self.feature_match_tolerance(),
+        }
+    }
+
+    /// Centre and width (ppm) of the ppm-Gaussian tight-match term: the
+    /// measured offset and 1.5 times the measured spread, else 0 and 7 ppm.
+    pub fn ppm_gaussian(&self) -> (f64, f64) {
+        match self.fragment_error.get() {
+            Some(m) if self.fragment_tol_override.is_none() && self.acquisition_is_high_res() => {
+                (m.offset_ppm, m.gaussian_sigma_ppm())
+            }
+            _ => (
+                0.0,
+                crate::scoring::fragment_error::DEFAULT_GAUSSIAN_SIGMA_PPM,
+            ),
+        }
     }
 
     /// LLR for a matched ion observed at intensity `rank` (1-based; rank 1 is
@@ -468,6 +515,37 @@ mod tests {
         // The CLI override still wins.
         lo_model.set_fragment_tol_override(Some(Tolerance::Ppm(7.0)));
         assert_eq!(lo_model.feature_match_tolerance(), Tolerance::Ppm(7.0));
+    }
+
+    /// A measured error sets the PIN tolerance and the ppm-Gaussian on
+    /// high-res data only; the model-feature tolerance stays at the class
+    /// default and the CLI override wins over both.
+    #[test]
+    fn measured_error_sets_pin_tolerance_on_high_res_only() {
+        use crate::scoring::FragmentErrorModel;
+        use model::tolerance::Tolerance;
+        let hi = RankScorer::new(&tiny_param());
+        assert_eq!(hi.pin_match_tolerance(), Tolerance::Ppm(20.0));
+        assert_eq!(hi.ppm_gaussian(), (0.0, 7.0));
+        hi.set_fragment_error(Some(FragmentErrorModel::new(-2.5, 1.6, 100, 100)));
+        let Tolerance::Ppm(t) = hi.pin_match_tolerance() else {
+            panic!("ppm expected");
+        };
+        assert!((t - 8.9).abs() < 1e-9, "{t}");
+        assert_eq!(hi.feature_match_tolerance(), Tolerance::Ppm(20.0));
+        let (c, s) = hi.ppm_gaussian();
+        assert!((c + 2.5).abs() < 1e-12 && (s - 2.4).abs() < 1e-9);
+        let lo = RankScorer::new(&low_res_param());
+        lo.set_fragment_error(Some(FragmentErrorModel::new(-2.5, 1.6, 100, 100)));
+        assert_eq!(lo.pin_match_tolerance(), Tolerance::Da(0.5));
+        assert_eq!(lo.ppm_gaussian(), (0.0, 7.0));
+        let mut ov = RankScorer::new(&tiny_param());
+        ov.set_fragment_error(Some(FragmentErrorModel::new(-2.5, 1.6, 100, 100)));
+        ov.set_fragment_tol_override(Some(Tolerance::Ppm(15.0)));
+        assert_eq!(ov.pin_match_tolerance(), Tolerance::Ppm(15.0));
+        assert_eq!(ov.ppm_gaussian(), (0.0, 7.0));
+        hi.set_fragment_error(None);
+        assert_eq!(hi.pin_match_tolerance(), Tolerance::Ppm(20.0));
     }
 
     #[test]

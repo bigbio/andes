@@ -153,7 +153,9 @@ fn score_mass_ordered(
     t_search_start: std::time::Instant,
     keep_peaks: bool,
     mut quant: Option<&mut QuantCollector>,
+    measurer: &mut FragmentErrorMeasurer,
 ) {
+    measurer.measure(prepared, pending.iter(), Some(span_da));
     pending.sort_by(|a, b| index_order_mass(a).total_cmp(&index_order_mass(b)));
     eprintln!(
         "fragment-index: {} spectra sorted by precursor mass, chunks of <= {} spectra and <= {:.0} Da",
@@ -180,6 +182,84 @@ fn score_mass_ordered(
             all_spectra.push(spec);
         }
         report_search_progress(all_spectra.len(), t_search_start);
+    }
+}
+
+/// Measures each input file's fragment mass error once, before its spectra
+/// are scored, and installs it on the scorer (see
+/// [`search::fragment_error`]). Active on high-resolution acquisitions without
+/// a `--fragment-tol-*` override.
+struct FragmentErrorMeasurer {
+    enabled: bool,
+    done: bool,
+}
+
+impl FragmentErrorMeasurer {
+    /// Forget the previous file's measurement.
+    fn start_file(&mut self, prepared: &PreparedSearch) {
+        self.done = false;
+        if self.enabled {
+            prepared.scorer.set_fragment_error(None);
+        }
+    }
+
+    /// Measure on `spectra` (a whole file, or its first chunk) unless this
+    /// file was measured already. Scores up to
+    /// [`search::fragment_error::SAMPLE_SPECTRA`] spectra around the median
+    /// precursor mass, in fragment-index slices when the index is on.
+    fn measure<'s>(
+        &mut self,
+        prepared: &PreparedSearch,
+        spectra: impl Iterator<Item = &'s Spectrum>,
+        index_span_da: Option<f64>,
+    ) {
+        if !self.enabled || self.done {
+            return;
+        }
+        self.done = true;
+        let t = std::time::Instant::now();
+        let mut refs: Vec<&Spectrum> = spectra.filter(|s| s.peaks.len() >= 10).collect();
+        refs.sort_by(|a, b| index_order_mass(a).total_cmp(&index_order_mass(b)));
+        let n = search::fragment_error::SAMPLE_SPECTRA.min(refs.len());
+        let lo = (refs.len() / 2).saturating_sub(n / 2);
+        let sample: Vec<Spectrum> = refs[lo..lo + n].iter().map(|s| (*s).clone()).collect();
+        drop(refs);
+        let mut queues: Vec<TopNQueue> = Vec::with_capacity(sample.len());
+        match index_span_da {
+            Some(span_da) => {
+                let mut start = 0;
+                while start < sample.len() {
+                    let take = index_chunk_len(&sample[start..], index_order_mass, span_da);
+                    queues.extend(prepared.run_chunk(&sample[start..start + take], start));
+                    start += take;
+                }
+            }
+            None => queues.extend(prepared.run_chunk(&sample, 0)),
+        }
+        match search::fragment_error::measure_on_queues(prepared, &sample, &queues) {
+            Ok(m) => {
+                prepared.scorer.set_fragment_error(Some(m));
+                eprintln!(
+                    "Fragment error: offset {:+.2} ppm, spread {:.2} ppm from {} ions of {} PSMs \
+                     at 1% q in {} sampled spectra -> PIN feature tolerance {:.1} ppm, \
+                     ppm-Gaussian centre {:+.2} width {:.2} ppm ({:.1}s)",
+                    m.offset_ppm,
+                    m.sigma_ppm,
+                    m.ions,
+                    m.psms,
+                    sample.len(),
+                    m.feature_tolerance_ppm(),
+                    m.offset_ppm,
+                    m.gaussian_sigma_ppm(),
+                    t.elapsed().as_secs_f64()
+                );
+            }
+            Err(why) => eprintln!(
+                "Fragment error: not measured ({why}); the PIN features keep {:?} ({:.1}s)",
+                prepared.scorer.feature_match_tolerance(),
+                t.elapsed().as_secs_f64()
+            ),
+        }
     }
 }
 
@@ -1443,10 +1523,17 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         (None, _) => None,
     };
 
+    // The per-run fragment mass error (high-res acquisitions without an
+    // explicit `--fragment-tol-*`; the glyco driver keeps its own tolerances).
+    let mut measurer = FragmentErrorMeasurer {
+        enabled: acquisition.high_res && frag_tol_override.is_none() && !cli.glyco,
+        done: false,
+    };
     for (file_idx, input_path) in spectrum_paths.iter().enumerate() {
         if bench_mode && all_spectra.len() >= bench_cap {
             break;
         }
+        measurer.start_file(&prepared);
         let remaining_cap = if bench_mode {
             bench_cap.saturating_sub(all_spectra.len())
         } else {
@@ -1595,6 +1682,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
                 let offset = all_spectra.len();
+                measurer.measure(&prepared, chunk_spectra.iter(), None);
                 if chimeric_active {
                     let mut queues = prepared.run_chunk(&chunk_spectra, offset);
                     search::match_engine::run_pass2_coisolation(
@@ -1632,8 +1720,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 report_search_progress(all_spectra.len(), t_search_start);
             }
             if index_ordered {
-                pending.sort_by(|a, b| index_order_mass(&a.0).total_cmp(&index_order_mass(&b.0)));
                 let span_da = index_chunk_span_da(cli.fragment_index_slice_da);
+                measurer.measure(&prepared, pending.iter().map(|e| &e.0), Some(span_da));
+                pending.sort_by(|a, b| index_order_mass(&a.0).total_cmp(&index_order_mass(&b.0)));
                 eprintln!(
                     "fragment-index: {} spectra sorted by precursor mass, chunks of <= {} spectra and <= {:.0} Da",
                     pending.len(),
@@ -1729,6 +1818,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 t_search_start,
                 keep_peaks,
                 quant.as_mut(),
+                &mut measurer,
             );
             ParseStats {
                 error_count: errors.len(),
@@ -1844,6 +1934,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 // Skip the scoring (parsing + peak retention below still run); ~16%
                 // faster on glyco. Non-glyco path is unchanged.
                 if !cli.glyco {
+                    measurer.measure(&prepared, chunk.iter(), None);
                     let offset = all_spectra.len();
                     let queues = prepared.run_chunk(&chunk, offset);
                     all_queues.extend(queues);
@@ -1872,6 +1963,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     t_search_start,
                     keep_peaks,
                     quant.as_mut(),
+                    &mut measurer,
                 );
             }
 

@@ -34,7 +34,8 @@
 //! only sequon is N18-R|T): `@N?` -> `@N18`.
 //!
 //! REGENERATED 2026-10-22 when decoys became peptide-level (`--decoy-strategy`
-//! default `shuffle`): 120 -> 120 rows, decoy winners 3 -> 9; the candidate-pool
+//! default `shuffle`; regenerated on top of the glycan-topology change): 120 -> 120 rows,
+//! decoy winners 3 -> 10; the candidate-pool
 //! columns move with the new decoy candidates.
 //!
 //! WHY THIS EXISTS. Until this file was added, the ONLY golden in the repo covered

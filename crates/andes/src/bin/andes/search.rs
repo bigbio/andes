@@ -217,6 +217,18 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.spectrum.is_empty() {
         return Err("no --spectrum inputs".into());
     }
+    // Configure the global Rayon worker pool BEFORE anything runs on it: the
+    // acquisition sample of a `.d` opens the timsTOF reader, which runs on the
+    // global pool and would otherwise create it at the default size.
+    // `build_global()` panics if called twice; guard with `OnceLock` so repeated
+    // CLI invocations within a single test process don't blow up.
+    static POOL_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    POOL_INIT.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(cli.threads)
+            .build_global()
+            .expect("build_global");
+    });
     let mut cli = cli;
     if cli.top_n == 0 {
         return Err("--top-n must be at least 1".into());
@@ -943,17 +955,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     };
-    // Configure the global Rayon worker pool BEFORE anything runs on it
-    // (PreparedSearch, the chunks).
-    // `build_global()` panics if called twice; guard with `OnceLock` so repeated
-    // CLI invocations within a single test process don't blow up.
-    static POOL_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    POOL_INIT.get_or_init(|| {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(cli.threads)
-            .build_global()
-            .expect("build_global");
-    });
     // Every search retrieves its candidates from the out-of-core base-peptide
     // index; the glyco driver materialises its own sequon-only table from it.
     // The retrieval strategy is chosen by `retrieval_choice` and reported once;

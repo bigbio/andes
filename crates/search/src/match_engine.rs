@@ -1371,7 +1371,7 @@ impl<'a> PreparedSearch<'a> {
                         .zip(crate::site_evidence::spectrum_evidence(
                             &spec.peaks,
                             &rows,
-                            fragment_tolerance_da,
+                            scorer.pin_match_tolerance(),
                         ))
                         .collect();
                     drop(rows);

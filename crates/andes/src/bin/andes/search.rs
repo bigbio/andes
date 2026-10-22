@@ -1292,7 +1292,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("Using {} worker threads", cli.threads);
 
-    // Fragment tolerance of 0.5 Da is the canonical low-res HCD default.
+    // `PreparedSearch::fragment_tolerance_da`: the Da window of the glyco
+    // peptide-first fragment index on low-res data (high-res data uses the
+    // ppm retrieval window). Node scoring takes the argument but does not
+    // read it, and site evidence uses the scorer's PIN tolerance.
     let fragment_tol_da = 0.5_f64;
 
     let bench_cap = if cli.max_spectra > 0 {

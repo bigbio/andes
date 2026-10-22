@@ -114,27 +114,13 @@ impl GlycanComp {
         let core_h = hex.min(3);
         // Chain residues after the reducing-end HexNAc, in biosynthetic order.
         let mut chain: Vec<u8> = Vec::with_capacity((hexnac + hex + fuc + neuac + neugc) as usize);
-        for _ in 1..core_hn {
-            chain.push(b'N'); // second chitobiose GlcNAc
-        }
-        for _ in 0..core_h {
-            chain.push(b'H'); // trimannosyl core
-        }
-        for _ in core_hn..hexnac {
-            chain.push(b'N'); // remaining HexNAc (antenna)
-        }
-        for _ in core_h..hex {
-            chain.push(b'H'); // remaining Hex (antenna)
-        }
-        for _ in core_fuc..fuc {
-            chain.push(b'F'); // antenna Fuc (core Fuc is already a root child)
-        }
-        for _ in 0..neuac {
-            chain.push(b'A');
-        }
-        for _ in 0..neugc {
-            chain.push(b'G');
-        }
+        chain.extend(std::iter::repeat_n(b'N', core_hn.saturating_sub(1) as usize)); // second chitobiose GlcNAc
+        chain.extend(std::iter::repeat_n(b'H', core_h as usize)); // trimannosyl core
+        chain.extend(std::iter::repeat_n(b'N', (hexnac - core_hn) as usize)); // remaining HexNAc (antenna)
+        chain.extend(std::iter::repeat_n(b'H', (hex - core_h) as usize)); // remaining Hex (antenna)
+        chain.extend(std::iter::repeat_n(b'F', (fuc - core_fuc) as usize)); // antenna Fuc (core Fuc is already a root child)
+        chain.extend(std::iter::repeat_n(b'A', neuac as usize));
+        chain.extend(std::iter::repeat_n(b'G', neugc as usize));
 
         let mut s = String::from("(N");
         if core_fuc > 0 {
@@ -309,7 +295,7 @@ impl GlycanTree {
         out.push('(');
         out.push(self.sym as char);
         let mut kids: Vec<&GlycanTree> = self.children.iter().collect();
-        kids.sort_by(|a, b| a.canonical().cmp(&b.canonical()));
+        kids.sort_by_key(|a| a.canonical());
         for k in kids {
             k.write_canonical(out);
         }
@@ -575,6 +561,7 @@ fn finish_glycan_list(mut out: Vec<GlycanComp>) -> Result<Vec<GlycanComp>, GdbLo
 /// - the `m` (6-deoxy) marker in the sugar-type token marks fucose (`F`);
 /// - the `h` (hexose) marker marks hexose (`H`);
 /// - any *other* `*` substituent (sulfate, phosphate, …) is unsupported.
+///
 /// The `A`-prefix check comes first because the sialic codes also carry `*NCC` /
 /// `*NCCO`; the `*NCC` check comes before the sugar-type fall-through because a
 /// HexNAc code is `a…h…_2*NCC`, not a plain hexose.

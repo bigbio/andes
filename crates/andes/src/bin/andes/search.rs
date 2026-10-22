@@ -826,15 +826,17 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Feature tolerances and the fragment-index vote mode follow the
     // acquisition, not the model's instrument.
     scorer.set_acquisition_high_res(Some(acquisition.high_res));
-    // Fragment-tol override applies to metadata-less (MGF) input only. For
-    // mzML/.raw/.d the analyzer is auto-detected, so the override is ignored.
+    // An explicit `--fragment-tol-*` sets the feature tolerance on every input
+    // format, detected analyzer or not, and replaces the per-run measurement.
     let frag_tol_override = cli_fragment_tol_override(cli.fragment_tol_ppm, cli.fragment_tol_da);
-    if frag_tol_override.is_some() {
+    if let Some(t) = frag_tol_override {
         if instrument_was_detected {
-            eprintln!("WARN: --fragment-tol-* ignored — instrument auto-detected from metadata (use --fragment-tol-ppm/-da with MGF input only)");
-        } else {
-            scorer.set_fragment_tol_override(frag_tol_override);
+            eprintln!(
+                "--fragment-tol-* {t:?} overrides the feature tolerance of the detected {} analyzer",
+                acquisition.analyzer.map_or("", |i| i.name())
+            );
         }
+        scorer.set_fragment_tol_override(frag_tol_override);
     }
     eprintln!(
         "[PHASE param_and_scorer: {:.2}s]",

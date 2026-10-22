@@ -91,6 +91,24 @@ fn metadataless_ion_trap_mgf_stays_low_resolution() {
     assert!(banner_line(&err, "model ").contains("cid_lowres_tryp"));
 }
 
+/// On an mzML whose analyzer is detected, an explicit `--fragment-tol-ppm`
+/// sets the feature tolerance (it used to be ignored with a warning) and
+/// replaces the per-run fragment-error measurement.
+#[test]
+fn explicit_fragment_tol_is_honoured_on_detected_input() {
+    let err = run(
+        "test-fixtures/orbitrap_lumos_120.mzML.gz",
+        "test-fixtures/BSA.fasta",
+        &["--fragment-tol-ppm", "10"],
+    );
+    assert!(
+        err.contains("overrides the feature tolerance of the detected"),
+        "{err}"
+    );
+    assert!(!err.contains("--fragment-tol-* ignored"), "{err}");
+    assert!(!err.contains("Fragment error:"), "{err}");
+}
+
 /// Without an override a high-resolution run measures its fragment error
 /// before scoring. This fixture has too few confident PSMs, so the PIN
 /// features keep the 20 ppm class default and say so.

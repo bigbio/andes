@@ -390,15 +390,16 @@ pub(crate) struct SearchArgs {
     #[arg(long, hide = true, default_value = "auto", value_parser = parse_protocol)]
     pub(crate) protocol: Protocol,
 
-    /// Fragment-matching tolerance in ppm for **MGF input only** (high-resolution
-    /// MS/MS). Has no effect on mzML/.raw/.d (analyzer auto-detected). Mutually
-    /// exclusive with `--fragment-tol-da`.
+    /// Fragment-matching tolerance in ppm (high-resolution MS/MS) of the PIN
+    /// features, on any input format; it replaces the per-run measurement. On
+    /// MGF it also selects the high-res model class. Mutually exclusive with
+    /// `--fragment-tol-da`.
     #[arg(long = "fragment-tol-ppm", hide = true, conflicts_with = "fragment_tol_da", value_parser = parse_positive_tol)]
     pub(crate) fragment_tol_ppm: Option<f64>,
 
-    /// Fragment-matching tolerance in Da for **MGF input only** (low-resolution
-    /// ion-trap MS/MS). Has no effect on mzML/.raw/.d. Mutually exclusive with
-    /// `--fragment-tol-ppm`.
+    /// Fragment-matching tolerance in Da (low-resolution ion-trap MS/MS) of the
+    /// PIN features, on any input format. On MGF it also selects the low-res
+    /// model class. Mutually exclusive with `--fragment-tol-ppm`.
     #[arg(long = "fragment-tol-da", hide = true, conflicts_with = "fragment_tol_ppm", value_parser = parse_positive_tol)]
     pub(crate) fragment_tol_da: Option<f64>,
 

@@ -146,6 +146,28 @@ impl Ms1RunIndex {
         Some((self.scans.first()?.rt, self.scans.last()?.rt))
     }
 
+    /// Median spacing in seconds between consecutive scans of the same FAIMS
+    /// compensation voltage (all scans when there is none): the time between
+    /// two MS1 points of one precursor. The upper of the two middle gaps for
+    /// an even count, as `output::ms1_table::read_ms1_scan_spacing` reads
+    /// it. `None` with fewer than two scans of any voltage.
+    pub fn median_scan_spacing(&self) -> Option<f64> {
+        let mut last: HashMap<Option<u32>, f64> = HashMap::new();
+        let mut gaps: Vec<f64> = Vec::new();
+        for s in &self.scans {
+            if let Some(prev) = last.insert(s.faims_cv.map(f32::to_bits), s.rt) {
+                if s.rt > prev {
+                    gaps.push(s.rt - prev);
+                }
+            }
+        }
+        if gaps.is_empty() {
+            return None;
+        }
+        let mid = gaps.len() / 2;
+        Some(*gaps.select_nth_unstable_by(mid, f64::total_cmp).1)
+    }
+
     /// Indices of the scans with `rt_lo <= rt <= rt_hi`.
     pub fn scan_window(&self, rt_lo: f64, rt_hi: f64) -> std::ops::Range<usize> {
         let a = self.scans.partition_point(|s| s.rt < rt_lo);
@@ -417,6 +439,34 @@ mod tests {
         let rts: Vec<f64> = (0..split[0].1.len()).map(|i| split[0].1.rt(i)).collect();
         assert_eq!(rts, vec![1.0, 3.0, 5.0]);
         assert_eq!(split[1].1.position_of("scan=8"), Some(1));
+    }
+
+    #[test]
+    fn scan_spacing_is_per_faims_voltage() {
+        let scan = |rt: f64, cv: Option<f32>| Ms1Scan {
+            rt,
+            faims_cv: cv,
+            ..Ms1Scan::default()
+        };
+        // Alternating voltages every second: 2 s between scans of one voltage.
+        let alternating: Vec<Ms1Scan> = (0..8)
+            .map(|i| scan(i as f64, Some(if i % 2 == 0 { -40.0 } else { -60.0 })))
+            .collect();
+        assert_eq!(
+            Ms1RunIndex::new(alternating).median_scan_spacing(),
+            Some(2.0)
+        );
+        let plain = vec![
+            scan(0.0, None),
+            scan(1.0, None),
+            scan(2.5, None),
+            scan(4.0, None),
+        ];
+        assert_eq!(Ms1RunIndex::new(plain).median_scan_spacing(), Some(1.5));
+        assert_eq!(
+            Ms1RunIndex::new(vec![scan(3.0, None)]).median_scan_spacing(),
+            None
+        );
     }
 
     #[test]

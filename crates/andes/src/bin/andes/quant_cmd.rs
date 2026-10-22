@@ -61,6 +61,9 @@ const TOL_KEY: &str = "andes.extract.tol_ppm";
 /// Extract table metadata key of the transfer selection (absent when every
 /// transfer pair was measured).
 const SELECTION_KEY: &str = "andes.extract.transfer_selection";
+/// Extract table tag: the run's MS1 scan spacing and elution-width scale
+/// ([`crate::quant_mbr::RunScales::describe`]).
+const RUN_SCALES_KEY: &str = "andes.extract.run_scales";
 /// Isotopes per precursor envelope in the run tables and the library.
 const ENVELOPE_LEN: usize = 4;
 
@@ -1109,7 +1112,7 @@ impl DonorPsms {
 
 fn log_extract(stem: &str, rows: usize, c: &ExtractCounts) {
     eprintln!(
-        "[mbr] extract {stem}: {rows} rows{}; skipped: {} entries at a FAIMS voltage the run lacks, {} identified pairs with a non-finite best PSM RT, {} identified pairs without a prediction from other runs (no pseudo-transfer), {} transfers without a prediction, {} pseudo-transfers and {} transfers whose donor runs are all in other alignment components, {} transfers left out by the transfer selection; width prior from {} fits{}",
+        "[mbr] extract {stem}: {rows} rows{}; skipped: {} entries at a FAIMS voltage the run lacks, {} identified pairs with a non-finite best PSM RT, {} identified pairs without a prediction from other runs (no pseudo-transfer), {} transfers without a prediction, {} pseudo-transfers and {} transfers whose donor runs are all in other alignment components, {} transfers left out by the transfer selection; MS1 scan spacing {}, width scale {:.3} s ({} fits, {} rounds{}); width prior from {} fits{}",
         if c.unaligned {
             " (unaligned run: identified rows only)"
         } else {
@@ -1122,9 +1125,20 @@ fn log_extract(stem: &str, rows: usize, c: &ExtractCounts) {
         c.pseudo_other_component,
         c.other_component,
         c.not_selected,
+        c.scales
+            .spacing_s
+            .map_or_else(|| "unknown".to_string(), |s| format!("{s:.3} s")),
+        c.scales.width_s,
+        c.scales.width_fits,
+        c.scales.rounds,
+        if c.scales.fallback {
+            "; too few fits: the seed width is used"
+        } else {
+            ""
+        },
         c.width_fits,
         if c.width_prior_fallback {
-            " (too few: the default width is used)"
+            " (too few: the width scale is used)"
         } else {
             ""
         }
@@ -1198,6 +1212,7 @@ pub(crate) fn extract_and_write(
     let mut tags = vec![
         (FINGERPRINT_KEY.to_string(), fingerprint.to_string()),
         (TOL_KEY.to_string(), ep.tol_ppm.to_string()),
+        (RUN_SCALES_KEY.to_string(), ex.counts.scales.describe()),
     ];
     if !selection.is_off() {
         let aligned = stored.library.alignment.maps.iter().flatten().count();
@@ -1624,6 +1639,9 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
                 ));
             }
             _ => {}
+        }
+        if let Some(scales) = get(RUN_SCALES_KEY) {
+            eprintln!("[mbr] run {stem}: {scales}");
         }
         paths.push(path);
     }

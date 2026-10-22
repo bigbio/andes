@@ -1540,6 +1540,17 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
   precursor whose voltage the FAIMS run lacks is not measured there and is counted in the log;
   it is never fitted on another voltage or on the mixed series. Precursors without a voltage,
   and every precursor in a run without FAIMS, are fitted on the whole run.
+  The time scales of the fit come from each run's own MS1, before any row is fitted: the
+  median spacing of its MS1 scans (of one FAIMS voltage) is the floor of every RT prior width,
+  and the run's elution-width scale is the median fitted width of up to 500 identified pairs
+  spread over the library (width free over 0.5–2 times the current scale, re-estimated until a
+  round moves it by less than 10 %, starting from 6 s; 6 s when fewer than 20 fits are usable).
+  The width prior along the gradient is then fitted on every identified pair around that scale,
+  and an identified pair's apex is searched within three of the run's elution widths at its RT
+  (at least three scan spacings) of its PSM. Narrow-peak instruments are thus not held to a
+  wide fixed width, and a larger neighbouring peak of the same m/z a few widths away is not
+  taken for the identified one. The extract log and the table's `andes.extract.run_scales` tag
+  record the scan spacing and the width scale of each run; `quant finalize` logs them.
   Transfer pre-selection (advanced, `--mbr-preselect`, default `true`): before any fit,
   extract skips the transfers of an entry whose best donor PSM is above q 0.001, which finalize
   never transfers (on a six-run benchmark 19 % of the transfer fits; the reported rows are

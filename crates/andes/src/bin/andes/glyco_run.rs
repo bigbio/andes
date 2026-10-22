@@ -6,6 +6,25 @@ use crate::cli::Cli;
 use model::Spectrum;
 use search::{PreparedSearch, SearchIndex, SearchParams};
 
+/// Default of `--glyco-tol-ppm`, the Orbitrap MS2 window the glyco defaults
+/// were validated at.
+const DEFAULT_GLYCO_TOL_PPM: f64 = 20.0;
+/// Glyco fragment tolerance on low-resolution (ion-trap) MS2: about 0.5 Da at
+/// m/z 1000, the b/y window of the low-res models. Not benchmarked: no
+/// ion-trap glyco set is in the benchmark suite.
+const LOW_RES_GLYCO_TOL_PPM: f64 = 500.0;
+
+/// The glyco fragment tolerance (ppm) of the run: the configured value when
+/// it was set explicitly or the acquisition is high resolution, else the
+/// low-resolution window (20 ppm never matches a 0.3-0.5 Da ion-trap peak).
+fn glyco_fragment_tol_ppm(configured: f64, explicit: bool, acquisition_high_res: bool) -> f64 {
+    if explicit || acquisition_high_res {
+        configured
+    } else {
+        LOW_RES_GLYCO_TOL_PPM
+    }
+}
+
 /// Glyco mode: run glyco scoring over ALL accumulated spectra and write a
 /// separate `.glyco.pin`. Candidates come from a sequon-only table materialised
 /// from the out-of-core index of `prepared`. The standard PIN is skipped by the
@@ -91,11 +110,21 @@ pub(crate) fn run_glyco(
         glycan_list.len(),
         source_desc
     );
-    let glyco_tol_ppm = cli.glyco_tol_ppm;
+    let glyco_tol_ppm = glyco_fragment_tol_ppm(
+        cli.glyco_tol_ppm,
+        crate::arg_present("--glyco-tol-ppm") || cli.glyco_tol_ppm != DEFAULT_GLYCO_TOL_PPM,
+        acquisition_high_res,
+    );
+    if glyco_tol_ppm != cli.glyco_tol_ppm {
+        eprintln!(
+            "glyco fragment tolerance: {glyco_tol_ppm} ppm for low-resolution MS2 \
+             (--glyco-tol-ppm sets it)"
+        );
+    }
     // Finite and > 0 is enforced by clap (`parse_positive_tol`) for the flag and
     // by the config validation (`config::apply`) for `glyco.tol_ppm`, so NaN and
     // non-positive values never reach here.
-    if glyco_tol_ppm < 20.0 {
+    if glyco_tol_ppm < DEFAULT_GLYCO_TOL_PPM {
         eprintln!(
             "warning: --glyco-tol-ppm {glyco_tol_ppm} is tighter than the 20 ppm the \
              glyco defaults were validated at; oxonium, core-Y and c/z matching may \
@@ -241,4 +270,21 @@ pub(crate) fn run_glyco(
         t_total.elapsed().as_secs_f64()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod glyco_tol_tests {
+    use super::*;
+
+    #[test]
+    fn low_res_acquisition_widens_the_default_glyco_tolerance_only() {
+        assert_eq!(glyco_fragment_tol_ppm(20.0, false, true), 20.0);
+        assert_eq!(
+            glyco_fragment_tol_ppm(20.0, false, false),
+            LOW_RES_GLYCO_TOL_PPM
+        );
+        // An explicit value wins on either class.
+        assert_eq!(glyco_fragment_tol_ppm(20.0, true, false), 20.0);
+        assert_eq!(glyco_fragment_tol_ppm(30.0, true, true), 30.0);
+    }
 }

@@ -50,10 +50,11 @@ pub struct BackboneCandidate {
 /// `peaks` must be sorted by m/z ascending.
 /// `norm_sqrt` is the sqrt-compressed base-peak-normalised intensity array
 /// (parallel to `peaks`).
-fn complement_score(peaks: &[(f64, f32)], norm_sqrt: &[f64], bb: f64) -> f64 {
+fn complement_score(peaks: &[(f64, f32)], norm_sqrt: &[f64], bb: f64, tol_ppm: f64) -> f64 {
     let target = bb + BY_COMPLEMENT_OFFSET;
-    // tolerance: ±20 ppm of the target sum, floor 0.02 Da
-    let tol = (target * 20e-6).max(0.02);
+    // tolerance: ±tol_ppm (the glyco fragment tolerance) of the target sum,
+    // floor 0.02 Da
+    let tol = (target * (tol_ppm / 1e6)).max(0.02);
 
     let n = peaks.len();
     if n < 2 {
@@ -327,7 +328,7 @@ pub fn solve_backbone_min(
                 return None;
             }
             let bb = mass_sum / v as f64;
-            let cscore = complement_score(sp, sn, bb);
+            let cscore = complement_score(sp, sn, bb, tol_ppm);
             if core_y_hits >= 2 || cscore > 0.0 {
                 Some(BackboneCandidate {
                     backbone_mass: bb,
@@ -910,6 +911,19 @@ mod tests {
     /// Brute-force reference for `complement_score`, mirroring the pre-optimisation
     /// binary-search form. The two-pointer sweep must match it exactly (same pairs,
     /// same order ⇒ bit-identical f64 sum).
+    /// The complement-pair window follows the glyco fragment tolerance: a pair
+    /// 0.1 Da off its target sum is outside 20 ppm (0.02 Da floor) and inside
+    /// an ion-trap-sized window.
+    #[test]
+    fn complement_score_window_follows_the_tolerance() {
+        let bb = 1500.0;
+        let target = bb + BY_COMPLEMENT_OFFSET;
+        let peaks = vec![(300.0, 100.0), (target - 300.0 + 0.1, 100.0)];
+        let norm: Vec<f64> = peaks.iter().map(|&(_, it)| (it as f64).sqrt()).collect();
+        assert_eq!(complement_score(&peaks, &norm, bb, 20.0), 0.0);
+        assert!(complement_score(&peaks, &norm, bb, 500.0) > 0.0);
+    }
+
     #[test]
     fn complement_score_two_pointer_matches_bruteforce() {
         use super::{complement_score, BY_COMPLEMENT_OFFSET};
@@ -970,7 +984,7 @@ mod tests {
                 }
                 peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
                 let norm: Vec<f64> = peaks.iter().map(|&(_, it)| (it as f64).sqrt()).collect();
-                let got = complement_score(&peaks, &norm, bb);
+                let got = complement_score(&peaks, &norm, bb, 20.0);
                 let want = reference(&peaks, &norm, bb);
                 assert_eq!(
                     got.to_bits(),

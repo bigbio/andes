@@ -626,10 +626,12 @@ pub(crate) struct SearchArgs {
 
     /// Fragment tolerance (ppm) for the glyco-specific matching: oxonium ions,
     /// the core-Y ladder, backbone mass search, and c/z. Default 20 ppm, which
-    /// suits Orbitrap MS2. **Raise this for low-resolution (ion-trap) MS2** —
-    /// at 20 ppm a 0.3-0.5 Da ion-trap peak never matches, so the oxonium gate
-    /// never fires and glyco IDs collapse to near zero. This is separate from
-    /// `--fragment-tol-ppm`, which the scoring model owns.
+    /// suits Orbitrap MS2; on a low-resolution (ion-trap) acquisition the
+    /// default becomes 500 ppm (about 0.5 Da at m/z 1000), since a 0.3-0.5 Da
+    /// ion-trap peak never matches at 20 ppm. An explicit value is used on
+    /// either class. This is separate from `--fragment-tol-ppm`, which the
+    /// scoring model owns. Glycan-by-subtraction precursor matching uses
+    /// `--precursor-tol`.
     #[arg(long = "glyco-tol-ppm", hide = true, default_value_t = 20.0f64, value_parser = parse_positive_tol)]
     pub(crate) glyco_tol_ppm: f64,
 

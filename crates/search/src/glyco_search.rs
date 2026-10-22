@@ -36,7 +36,7 @@ use andes_glyco::backbone::{
     core_y_intensity, count_core_y_hits, glycan_y_hit_frac, glycan_y_intensity,
     partial_glycan_by_intensity, y0y1_anchor_intensity, SpectrumStats,
 };
-use andes_glyco::glycan_db::GlycanComp;
+use andes_glyco::glycan_db::{GlycanComp, DENOVO_TOPOLOGY_ID};
 use andes_glyco::glycan_first::{search_glycans, Glycan, GlycanConfig, GlycanCore, GlycanIonIndex};
 use andes_glyco::glyco_psm::{
     glyco_gp_fused_score_iso, GlycoPsmKey, GLYCO_GP_CZ_DEFAULT, GLYCO_GP_H_DEFAULT,
@@ -132,9 +132,10 @@ use crate::match_engine::{compute_psm_features, PreparedSearch};
 use crate::psm::PsmFeatures;
 use crate::psm::PsmMatch;
 
-/// Composite winner key `(candidate_slot, hexnac, hex, fuc, neuac, neugc)` — the
-/// (peptide, glycan-composition) identity used to collapse to one PSM per scan.
-type GlycanWinnerKey = (u32, u8, u8, u8, u8, u8);
+/// Composite winner key `(candidate_slot, topology_id)` — the (peptide,
+/// glycan-topology) identity used to collapse to one PSM per scan. De-novo
+/// candidates (no DB tree) share the `DENOVO_TOPOLOGY_ID` sentinel.
+type GlycanWinnerKey = (u32, u64);
 
 use scoring_crate::scoring::{
     candidate_rank_entropy, cz_hyperscore_psm, cz_matched_intensity_frac, cz_structure_features,
@@ -1410,8 +1411,8 @@ fn score_spectrum_glyco(
             }
 
             let gl_key = match &bb_hit.glycan {
-                Some(g) => (cand_slot as u32, g.hexnac, g.hex, g.fuc, g.neuac, g.neugc),
-                None => (cand_slot as u32, 255, 255, 255, 255, 255),
+                Some(g) => (cand_slot as u32, g.topology_id),
+                None => (cand_slot as u32, DENOVO_TOPOLOGY_ID),
             };
 
             // On ETD, score the rank/edge model against a peptide clone carrying the intact glycan on its
@@ -1642,8 +1643,7 @@ fn score_spectrum_glyco(
         // y_peaks/y_stats = the scored spectrum.
         match &bb.glycan {
             Some(g) => {
-                glycan_y_intensity(y_peaks, y_stats, bbn, g, tol_ppm, max_frag_charge, ctx.core)
-                    as f32
+                glycan_y_intensity(y_peaks, y_stats, bbn, g, tol_ppm, max_frag_charge) as f32
             }
             None => {
                 core_y_intensity(y_peaks, y_stats, bbn, tol_ppm, max_frag_charge, ctx.core) as f32
@@ -2075,7 +2075,6 @@ fn score_spectrum_glyco(
                     g,
                     tol_ppm,
                     max_frag_charge,
-                    ctx.core,
                 ) as f32,
                 None => core_y_intensity(
                     y_peaks,
@@ -2107,7 +2106,6 @@ fn score_spectrum_glyco(
                     tol_ppm,
                     max_frag_charge,
                     None,
-                    ctx.core,
                 ) as f32,
                 None => 0.0,
             },
@@ -2373,19 +2371,8 @@ mod tests {
     #[test]
     fn o_glycan_hex_gate_drops_hex_without_evidence() {
         use super::{hex_gate_passes, GlycanComp, GlycanCore};
-        let hex_glycan = GlycanComp {
-            hexnac: 1,
-            hex: 1,
-            fuc: 0,
-            neuac: 0,
-            neugc: 0,
-            core_fuc: 0,
-            mass: 0.0,
-        };
-        let no_hex = GlycanComp {
-            hex: 0,
-            ..hex_glycan.clone()
-        };
+        let hex_glycan = GlycanComp::from_counts(1, 1, 0, 0, 0, 0);
+        let no_hex = GlycanComp::from_counts(1, 0, 0, 0, 0, 0);
         // N-glycan: Hex is in the trimannosyl core, never gated.
         assert!(hex_gate_passes(
             GlycanCore::NGlycan,
@@ -2579,15 +2566,7 @@ mod tests {
         use andes_glyco::hybrid::hybrid_candidates_with_isotope;
 
         let true_backbone_residue = 1500.0_f64;
-        let glycan = GlycanComp {
-            hexnac: 2,
-            hex: 3,
-            fuc: 0,
-            neuac: 0,
-            neugc: 0,
-            core_fuc: 0,
-            mass: 2.0 * andes_glyco::glycan_mass::HEXNAC + 3.0 * andes_glyco::glycan_mass::HEX,
-        };
+        let glycan = GlycanComp::from_counts(2, 3, 0, 0, 0, 0);
         let true_precursor_neutral = true_backbone_residue + glycan.mass;
 
         // Instrument reports the M+1 isotope peak as the precursor.

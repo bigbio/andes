@@ -63,6 +63,9 @@ pub struct RankScorer {
     /// `None` ⇒ derive from the model's instrument resolution class (the
     /// historical 20 ppm high-res / 0.5 Da low-res default).
     fragment_tol_override: Option<model::tolerance::Tolerance>,
+    /// Resolution class of the acquisition being searched (see
+    /// [`RankScorer::set_acquisition_high_res`]).
+    acquisition_high_res: Option<bool>,
 }
 
 /// Documented smoothing floor for the rank-LLR computation (finding 3.2).
@@ -209,6 +212,7 @@ impl RankScorer {
             partition_loss_ion_logs,
             max_rank: param.max_rank as u32,
             fragment_tol_override: None,
+            acquisition_high_res: None,
         }
     }
 
@@ -257,14 +261,29 @@ impl RankScorer {
         self.fragment_tol_override = tol;
     }
 
+    /// Set the resolution class of the acquisition being searched. The search
+    /// binary sets it from the run's acquisition context, which can differ from
+    /// the model's instrument (high-res ETD or CID is routed to a low-res
+    /// model). `None` falls back to the model's instrument, as training does.
+    pub fn set_acquisition_high_res(&mut self, high_res: Option<bool>) {
+        self.acquisition_high_res = high_res;
+    }
+
+    /// Whether the fragment spectra are high resolution: the acquisition's
+    /// class when set, else the model's instrument class.
+    pub fn acquisition_is_high_res(&self) -> bool {
+        self.acquisition_high_res
+            .unwrap_or_else(|| self.param.data_type.instrument.is_high_resolution())
+    }
+
     /// Effective fragment-matching tolerance for Percolator-feature and
     /// peak-match counting. Returns the CLI override when set, else the
-    /// instrument-derived default: 20 ppm for high-resolution analyzers
+    /// resolution-class default: 20 ppm for high-resolution fragments
     /// (Kim et al., Nat Commun 5:5277, 2014), 0.5 Da for ion-trap low-res.
     pub fn feature_match_tolerance(&self) -> model::tolerance::Tolerance {
         use model::tolerance::Tolerance;
         self.fragment_tol_override.unwrap_or_else(|| {
-            if self.param.data_type.instrument.is_high_resolution() {
+            if self.acquisition_is_high_res() {
                 Tolerance::Ppm(20.0)
             } else {
                 Tolerance::Da(0.5)
@@ -429,6 +448,26 @@ mod tests {
         // low_res_param() uses LowRes → 0.5 Da
         let lo = RankScorer::new(&low_res_param());
         assert_eq!(lo.feature_match_tolerance(), Tolerance::Da(0.5));
+    }
+
+    /// The acquisition's class wins over the model's instrument: high-res ETD
+    /// served by a low-res model matches features at 20 ppm, and low-res data
+    /// served by a high-res model at 0.5 Da.
+    #[test]
+    fn feature_match_tolerance_follows_the_acquisition() {
+        use model::tolerance::Tolerance;
+        let mut lo_model = RankScorer::new(&low_res_param());
+        lo_model.set_acquisition_high_res(Some(true));
+        assert!(lo_model.acquisition_is_high_res());
+        assert_eq!(lo_model.feature_match_tolerance(), Tolerance::Ppm(20.0));
+        let mut hi_model = RankScorer::new(&tiny_param());
+        hi_model.set_acquisition_high_res(Some(false));
+        assert_eq!(hi_model.feature_match_tolerance(), Tolerance::Da(0.5));
+        hi_model.set_acquisition_high_res(None);
+        assert_eq!(hi_model.feature_match_tolerance(), Tolerance::Ppm(20.0));
+        // The CLI override still wins.
+        lo_model.set_fragment_tol_override(Some(Tolerance::Ppm(7.0)));
+        assert_eq!(lo_model.feature_match_tolerance(), Tolerance::Ppm(7.0));
     }
 
     #[test]

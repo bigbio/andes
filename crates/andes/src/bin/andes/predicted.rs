@@ -33,6 +33,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
+use crate::acquisition::Acquisition;
 use model::{InstrumentType, Spectrum};
 use onnx_infer::predictors::calibration::RtCalibration;
 use onnx_infer::predictors::form::{parse_peptide, Form, Mass};
@@ -100,7 +101,15 @@ impl Predictors {
     /// Load the predictors `cli.predict` names. `None` when it names none.
     /// A requested third-party model whose files are missing, or an ONNX
     /// engine this build lacks, is an error here, before the search runs.
-    pub(crate) fn from_cli(cli: &Cli, instrument: InstrumentType) -> Result<Option<Self>, String> {
+    /// The predictor's instrument and NCE, and the fragment tolerance of the
+    /// MS2 features, come from the acquisition; `model_instrument` is the
+    /// fallback instrument when the file records no analyzer.
+    pub(crate) fn from_cli(
+        cli: &Cli,
+        acquisition: &Acquisition,
+        model_instrument: InstrumentType,
+    ) -> Result<Option<Self>, String> {
+        let instrument = acquisition.predictor_instrument(model_instrument);
         let Some(want) = requested(&cli.predict)? else {
             return Ok(None);
         };
@@ -144,10 +153,13 @@ impl Predictors {
         }
         if has(PredictFeature::Ms2) || has(PredictFeature::PeptDeepRt) {
             let dir = dir.as_deref().expect("checked above");
-            let nce = cli.predictor_nce.unwrap_or(match instrument {
-                InstrumentType::QExactive => 28.0,
-                _ => 30.0,
-            });
+            let nce = cli
+                .predictor_nce
+                .or_else(|| acquisition.predictor_nce().map(|v| v as f32))
+                .unwrap_or(match instrument {
+                    InstrumentType::QExactive => 28.0,
+                    _ => 30.0,
+                });
             let inst = cli
                 .predictor_instrument
                 .clone()
@@ -194,7 +206,7 @@ impl Predictors {
                 .sessions()
                 .map_err(|e| format!("--predict {}: {e}", s.pred.prefix()))?;
         }
-        let high_res = instrument.is_high_resolution();
+        let high_res = acquisition.high_res;
         let tol = match (cli.fragment_tol_ppm, cli.fragment_tol_da) {
             (Some(p), _) => FragmentTolerance::Ppm(p),
             (None, Some(d)) => FragmentTolerance::Da(d),

@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::cli::Cli;
-use model::{activation::ActivationMethod, InstrumentType, Spectrum};
+use model::Spectrum;
 use search::{PreparedSearch, SearchIndex, SearchParams};
 
 /// Glyco mode: run glyco scoring over ALL accumulated spectra and write a
@@ -19,7 +19,8 @@ pub(crate) fn run_glyco(
     idx: &SearchIndex,
     output_pin_path: &Path,
     spectrum_paths: &[PathBuf],
-    detected_activation_instrument: Option<(ActivationMethod, Option<InstrumentType>)>,
+    // The acquisition's fragment resolution class (`crate::acquisition`).
+    acquisition_high_res: bool,
     // `--precursor-mono`: per-spectrum MS1 envelope corrections, aligned with
     // `spectra` (`Some` only when the flag is active; the PIN then carries the
     // Mono* columns). `None` keeps the PIN byte-identical.
@@ -112,13 +113,7 @@ pub(crate) fn run_glyco(
     // selected scoring model: model routing deliberately sends some high-res CID
     // and ETD acquisitions to a low-res model (`build_selection_key`), and the
     // scoring window that routing chooses is not the retrieval window the index
-    // should use. Detected analyzer metadata decides; metadata-less input falls
-    // back to the `--fragment-tol-*` unit, the same rule the model resolver uses.
-    // An explicit --glyco-retrieval-tol-ppm overrides either way.
-    let acquisition_high_res = match detected_activation_instrument.and_then(|(_, i)| i) {
-        Some(i) => i.is_high_resolution(),
-        None => cli.fragment_tol_ppm.is_some(),
-    };
+    // should use. An explicit --glyco-retrieval-tol-ppm overrides either way.
     let retrieval_ppm: Option<f64> = cli
         .glyco_retrieval_tol_ppm
         .or_else(|| acquisition_high_res.then_some(glyco_tol_ppm));
@@ -162,7 +157,8 @@ pub(crate) fn run_glyco(
         hcd_pair: cli.glyco_hcd_pair && spectrum_paths.len() == 1,
     };
     let t_table = std::time::Instant::now();
-    let table = search::glyco_search::GlycoCandidates::from_out_of_core(prepared, cli.glyco_core.into());
+    let table =
+        search::glyco_search::GlycoCandidates::from_out_of_core(prepared, cli.glyco_core.into());
     eprintln!(
         "[glyco] candidate table: {} {}-bearing candidates from the out-of-core index \
          ({} base peptides) [{:.2}s]",

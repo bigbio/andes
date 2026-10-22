@@ -6,6 +6,7 @@ use std::sync::mpsc::sync_channel;
 use std::sync::Arc;
 use std::thread;
 
+use crate::acquisition::Acquisition;
 use crate::cli::{
     Cli, EnzymeSpecificity, EthcdActivationFlag, FragmentIndexFlag, Fragmentation,
     PrecursorMonoFlag, Protocol, ScoreFlag,
@@ -22,8 +23,8 @@ use crate::rescore;
 use crate::spectra::{
     add_mzml_skipped, detect_dominant_activation, detect_instrument_type_for_path,
     detect_isobaric_sampled, input_format_flags, merge_parse_stats, ms3_carries_reporters,
-    prefix_spectrum_titles, run_precursor_calibration, send_chunks, title_prefix_for,
-    tolerance_ppm_display, ParseStats,
+    prefix_spectrum_titles, run_precursor_calibration, sample_ms2_meta, sample_spectra,
+    send_chunks, title_prefix_for, tolerance_ppm_display, ParseStats,
 };
 use crate::{arg_present, report_search_progress, EXPLICIT_MISSED_CLEAVAGES};
 use input::{MgfReader, Ms1Link, MzMLReader};
@@ -475,6 +476,38 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .map(|(_, inst)| inst.is_some())
         .unwrap_or(false);
 
+    // The acquisition context, carried separately from the model chosen below.
+    // Without analyzer metadata and without a `--fragment-tol-*` unit, the
+    // fragment resolution is read from the peaks of the first spectra.
+    let peak_evidence = if !instrument_was_detected
+        && cli.fragment_tol_ppm.is_none()
+        && cli.fragment_tol_da.is_none()
+    {
+        let ev = sample_spectra(&spectrum_path, is_mzml, is_mgf, is_raw, cli.ms_level as u32)
+            .map(|sample| input::infer_fragment_resolution(&sample));
+        if let Some(e) = &ev {
+            eprintln!(
+                "Acquisition: no analyzer metadata; fragment resolution from the peaks: {} -> {}",
+                e.describe(),
+                match e.high_res {
+                    Some(true) => "high resolution (HCD high-res model)",
+                    Some(false) => "low resolution",
+                    None => "undecided",
+                }
+            );
+        }
+        ev
+    } else {
+        None
+    };
+    let acquisition = Acquisition::resolve(
+        detected_activation_instrument,
+        cli.fragment_tol_ppm,
+        cli.fragment_tol_da,
+        peak_evidence,
+        sample_ms2_meta(&spectrum_path, is_mzml, is_raw, is_d),
+    );
+
     let t_phase = std::time::Instant::now();
     // The block also returns the (activation, instrument) it routed on and the
     // chosen model id, so the resolved-parameter banner can report what was
@@ -522,12 +555,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     cli.fragmentation,
                     cli.fragment_tol_ppm,
                     cli.fragment_tol_da,
+                    acquisition.inferred_high_res(),
                 ),
                 None => resolve_metadataless_selection(
                     None,
                     cli.fragmentation,
                     cli.fragment_tol_ppm,
                     cli.fragment_tol_da,
+                    acquisition.inferred_high_res(),
                 ),
             };
 
@@ -617,7 +652,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             is_mgf,
             is_raw,
             cli.ms_level as u32,
-            param.data_type.instrument.is_high_resolution(),
+            acquisition.high_res,
         )
     };
     let label: Option<input::IsobaricLabel> = match (cli.tmt, cli.protocol) {
@@ -696,6 +731,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let mut scorer = RankScorer::new(&param);
+    // Feature tolerances and the fragment-index vote mode follow the
+    // acquisition, not the model's instrument.
+    scorer.set_acquisition_high_res(Some(acquisition.high_res));
     // Fragment-tol override applies to metadata-less (MGF) input only. For
     // mzML/.raw/.d the analyzer is auto-detected, so the override is ignored.
     let frag_tol_override = cli_fragment_tol_override(cli.fragment_tol_ppm, cli.fragment_tol_da);
@@ -895,10 +933,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         ScoreFlag::Strong => search::ScoreMode::Strong,
         // Auto: strong re-ranking pays on high-res (sharp fragment peaks → the
         // intensity / rich-ion GBDTs separate target/decoy); on low-res it
-        // collapses the candidate pool → use rank. Keyed off the resolved
-        // model's instrument resolution.
+        // collapses the candidate pool → use rank. Keyed off the acquisition's
+        // resolution class.
         ScoreFlag::Auto => {
-            if param.data_type.instrument.is_high_resolution() {
+            if acquisition.high_res {
                 search::ScoreMode::Strong
             } else {
                 search::ScoreMode::Rank
@@ -1098,18 +1136,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         routed_activation.name(),
         param.data_type.activation.name()
     );
-    let instrument_source = if instrument_was_detected {
-        "detected"
-    } else if cli.fragment_tol_ppm.is_some() || cli.fragment_tol_da.is_some() {
-        "from --fragment-tol-*"
-    } else {
-        "default"
-    };
+    let instrument_source = acquisition.resolution_source.tag();
     eprintln!(
         "  instrument     : {} [{instrument_source}] (model trained on {})",
         routed_instrument.map_or("LowRes", |i| i.name()),
         param.data_type.instrument.name()
     );
+    eprintln!("  acquisition    : {}", acquisition.describe());
     eprintln!("  protocol       : {:?}", param.data_type.protocol);
     if extra_enzymes.is_empty() {
         eprintln!(
@@ -1281,7 +1314,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // MS1 scans (purity, label-free chromatograms) and MS3 scans (SPS-MS3
     // reporters) are captured by the readers next to the MS2 stream and handed
     // to the collector per file. Quantification itself runs after rescoring.
-    let high_res = param.data_type.instrument.is_high_resolution();
+    let high_res = acquisition.high_res;
     // Without --tmt-level, SPS-MS3 reporters are read from the MS3 when the
     // low-resolution MS2 cannot separate the plex's channels.
     let tmt_level = match (cli.tmt_level, cli.tmt) {
@@ -1345,7 +1378,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let predictors = if cli.glyco {
         None
     } else {
-        crate::predicted::Predictors::from_cli(&cli, param.data_type.instrument)?
+        crate::predicted::Predictors::from_cli(&cli, &acquisition, param.data_type.instrument)?
     };
     if let Some(p) = &predictors {
         eprintln!("Predict: {}", p.describe());
@@ -2044,7 +2077,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &idx,
             &output_pin_path,
             spectrum_paths,
-            detected_activation_instrument,
+            acquisition.high_res,
             mono_for_pin,
             glyco_isotope_override,
             t_total,
@@ -2074,11 +2107,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // the refine config/tier (set them in the `--refine-config` YAML).
         let cfg = base_cfg;
 
-        // High-res signal: the resolved model's instrument class. High-res
-        // instruments fragment-match in ppm (20 ppm vs 0.5 Da ion-trap), which is
-        // exactly the regime where the near-isobaric refinement deltas (e.g.
+        // High-res signal: the acquisition's resolution class. High-res
+        // fragments match in ppm (20 ppm vs 0.5 Da ion-trap), which is exactly
+        // the regime where the near-isobaric refinement deltas (e.g.
         // deamidation +0.984 vs a C13 isotope error) are resolvable.
-        let high_res = param.data_type.instrument.is_high_resolution();
+        let high_res = acquisition.high_res;
 
         // `high_res_only` comes from the refine config/tier (set it in the
         // `--refine-config` YAML; the former CLI overrides were removed).

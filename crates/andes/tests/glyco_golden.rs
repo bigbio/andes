@@ -203,16 +203,16 @@ fn glyco_pin_matches_golden_after_sort() {
         .arg("--glyco")
         .arg("--glyco-tol-ppm")
         .arg("20")
-        // NOTE ON COVERAGE. This resolves to `cid_lowres_tryp`, so the golden guards the
-        // LOW-RES glyco path: column set, row count, oxonium gating, backbone generation,
-        // the fused selector and the collapse. It does NOT guard the high-res
-        // match window (the model's `mme`) that commit 539a3857 changed -- and an MGF
-        // fixture CANNOT: reaching a high-res model needs --fragment-tol-ppm, which
-        // calls `set_fragment_tol_override` and replaces `mme`. Guarding it requires an mzML fixture,
-        // where the analyzer is auto-detected and the override is ignored. Verified by
-        // experiment, not assumed.
+        // NOTE ON COVERAGE. `--fragment-tol-da 0.5` pins the LOW-RES class (the
+        // fixture's peaks are Orbitrap peaks, which the metadata-less resolution
+        // inference would otherwise read as high resolution), so this resolves to
+        // `cid_lowres_tryp` and the golden guards the LOW-RES glyco path: column set,
+        // row count, oxonium gating, backbone generation, the fused selector and the
+        // collapse. The high-res path is guarded by `glyco_golden_highres.rs`.
         .arg("--fragmentation")
         .arg("HCD")
+        .arg("--fragment-tol-da")
+        .arg("0.5")
         // The glycan source is a committed, NeuGc-free fixture .gdb (header `H,N,A,F`).
         // `--glyco` no longer has a built-in enumerator or a `--glyco-taxon` species knob,
         // so the human behaviour is pinned by the .gdb's own NeuGc-free content rather

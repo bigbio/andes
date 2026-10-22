@@ -158,7 +158,7 @@ def main(argv=None):
               f"sample protein, counted as target)")
         print(f"    T/E = {r:.3f}  ->  FDP = (hits/total) x {1 + r:.3f}")
     print("run andes on the output as on any database; with --glyco use "
-          "--decoy-strategy sequon-reverse")
+          "--decoy-strategy sequon")
     return 0
 
 

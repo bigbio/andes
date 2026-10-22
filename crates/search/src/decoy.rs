@@ -109,18 +109,22 @@ impl Proteases {
 /// documentation), or the whole sequence for a non-specific search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DecoyStrategy {
-    /// Reverse each segment's movable residues (the pseudo-reversed peptide:
-    /// `PEPTIDEK` → `EDITPEPK`). Default.
-    #[default]
-    Reverse,
     /// Shuffle each segment's movable residues with a shuffle seeded by the
-    /// segment's residues and the decoy seed.
+    /// segment's residues and the decoy seed. Default.
+    #[default]
     Shuffle,
-    /// [`Self::Reverse`], then swaps among the movable residues that raise
+    /// Reverse each segment's movable residues (the pseudo-reversed peptide:
+    /// `PEPTIDEK` → `EDITPEPK`). A pseudo-reversed peptide ending in K shares
+    /// c/z fragments with its target wherever the target has I or L: the
+    /// decoy's z ion i+1 carries the target's first i residues plus the K,
+    /// which weighs as much as the target's c ion i+1 when residue i+1 is I or
+    /// L (K + H2O − NH3 − NH2 = 113.060 Da, L = 113.084 Da). On ETD spectra
+    /// such decoys score on the target's own spectrum.
+    Reverse,
+    /// [`Self::Shuffle`], then swaps among the movable residues that raise
     /// the segment's N-X-S/T sequon count toward (never above) the target
     /// segment's, so the glyco sequon gate admits decoys at the target rate.
-    /// Reversal alone turns N-X-S/T into S/T-X-N and leaves fewer sequons.
-    SequonReverse,
+    Sequon,
     /// Generate no decoys: the search database is the input FASTA verbatim. For
     /// inputs that already contain decoys (accessions carrying the decoy prefix)
     /// or when FDR is computed externally downstream.
@@ -133,7 +137,7 @@ impl DecoyStrategy {
         match s.trim().to_ascii_lowercase().as_str() {
             "reverse" | "rev" => Some(Self::Reverse),
             "shuffle" | "shuf" => Some(Self::Shuffle),
-            "sequon-reverse" | "sequon" | "sequon_reverse" => Some(Self::SequonReverse),
+            "sequon" => Some(Self::Sequon),
             "none" | "off" => Some(Self::None),
             _ => None,
         }
@@ -228,7 +232,7 @@ fn whole_sequence_decoys(
         .map(|(i, p)| {
             let n = p.sequence.len() as u32;
             let source: Vec<u32> = match strategy {
-                DecoyStrategy::Shuffle => {
+                DecoyStrategy::Shuffle | DecoyStrategy::Sequon => {
                     // Per-protein stream: the seed mixed with the index, so
                     // identical sequences do not shuffle alike.
                     let mut source: Vec<u32> = (0..n).collect();
@@ -236,11 +240,9 @@ fn whole_sequence_decoys(
                         &mut source,
                         seed ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
                     );
-                    source
-                }
-                DecoyStrategy::SequonReverse => {
-                    let mut source: Vec<u32> = (0..n).rev().collect();
-                    restore_sequons(&p.sequence, &mut source, &vec![true; n as usize]);
+                    if strategy == DecoyStrategy::Sequon {
+                        restore_sequons(&p.sequence, &mut source, &vec![true; n as usize]);
+                    }
                     source
                 }
                 _ => (0..n).rev().collect(),
@@ -313,7 +315,7 @@ fn segment_permutation(
     }
     let draw = |k: u64| -> Vec<u32> {
         let mut order = free.clone();
-        if k == 0 && strategy != DecoyStrategy::Shuffle {
+        if k == 0 && strategy == DecoyStrategy::Reverse {
             order.reverse();
         } else {
             shuffle_in_place(&mut order, segment_seed(seed, seg, lead_met, k));
@@ -322,7 +324,7 @@ fn segment_permutation(
         for (&at, &from) in free.iter().zip(&order) {
             local[at as usize] = from;
         }
-        if strategy == DecoyStrategy::SequonReverse {
+        if strategy == DecoyStrategy::Sequon {
             restore_sequons(seg, &mut local, &movable);
         }
         local
@@ -836,7 +838,7 @@ mod tests {
         for strategy in [
             DecoyStrategy::Reverse,
             DecoyStrategy::Shuffle,
-            DecoyStrategy::SequonReverse,
+            DecoyStrategy::Sequon,
         ] {
             let d = decoys(&db, strategy, &Proteases::default());
             let seg = d[0][5..13].to_vec();
@@ -941,7 +943,7 @@ mod tests {
             for strategy in [
                 DecoyStrategy::Reverse,
                 DecoyStrategy::Shuffle,
-                DecoyStrategy::SequonReverse,
+                DecoyStrategy::Sequon,
             ] {
                 let d = decoys(&db, strategy, proteases);
                 let mut changed = 0usize;
@@ -1038,50 +1040,46 @@ mod tests {
     }
 
     #[test]
-    fn whole_sequence_sequon_reverse_is_a_permutation_and_recovers_sequons() {
-        let db = make_db(&[("P1", b"NISCDENLTKRSTNVTAAK")]);
+    fn whole_sequence_sequon_shuffle_is_a_permutation_and_recovers_sequons() {
+        let db = make_db(&[("P1", b"NISCDENLTKRSTNVTAAKNGSLLNPTVRQ")]);
         let orig = &db.proteins[0].sequence;
-        let d = &decoys(
-            &db,
-            DecoyStrategy::SequonReverse,
-            &enzyme(Enzyme::NonSpecific),
-        )[0];
+        let non_specific = enzyme(Enzyme::NonSpecific);
+        let d = &decoys(&db, DecoyStrategy::Sequon, &non_specific)[0];
+        let plain = &decoys(&db, DecoyStrategy::Shuffle, &non_specific)[0];
         let (mut a, mut b) = (orig.clone(), d.clone());
         a.sort_unstable();
         b.sort_unstable();
         assert_eq!(a, b, "composition preserved");
-        let plain: Vec<u8> = orig.iter().rev().copied().collect();
         let (t, s, p) = (
             count_sequon_starts(orig),
             count_sequon_starts(d),
-            count_sequon_starts(&plain),
+            count_sequon_starts(plain),
         );
-        assert!(s <= t, "no overshoot ({s} <= {t})");
-        assert!(s >= p, "at least plain reversal ({s} >= {p})");
+        assert!(s <= t.max(p), "no overshoot ({s} <= {t})");
+        assert!(s >= p, "at least the plain shuffle ({s} >= {p})");
     }
 
     #[test]
-    fn peptide_level_sequon_reverse_keeps_segment_sequon_counts_within_target() {
+    fn peptide_level_sequon_shuffle_raises_the_sequon_count() {
         let db = random_db(200);
         let p = Proteases::default();
-        let plain = reversed(&db);
-        let sequon = decoys(&db, DecoyStrategy::SequonReverse, &p);
-        let (mut t, mut r, mut s) = (0, 0, 0);
-        for ((target, rev), seq) in db.proteins.iter().zip(&plain).zip(&sequon) {
-            let cuts = compute_cleavage_positions(&target.sequence, p.primary, &p.extra);
-            for w in cuts.windows(2) {
-                let (a, b) = (w[0] as usize, w[1] as usize);
-                let (ct, cs) = (
-                    count_sequon_starts(&target.sequence[a..b]),
-                    count_sequon_starts(&seq[a..b]),
-                );
-                assert!(cs <= ct.max(count_sequon_starts(&rev[a..b])));
-                t += ct;
-                r += count_sequon_starts(&rev[a..b]);
-                s += cs;
-            }
-        }
-        assert!(s > r, "target {t}, reverse {r}, sequon-reverse {s}");
+        let plain = decoys(&db, DecoyStrategy::Shuffle, &p);
+        let sequon = decoys(&db, DecoyStrategy::Sequon, &p);
+        let count = |seqs: &[Vec<u8>]| -> usize {
+            db.proteins
+                .iter()
+                .zip(seqs)
+                .map(|(target, s)| {
+                    let cuts = compute_cleavage_positions(&target.sequence, p.primary, &p.extra);
+                    cuts.windows(2)
+                        .map(|w| count_sequon_starts(&s[w[0] as usize..w[1] as usize]))
+                        .sum::<usize>()
+                })
+                .sum()
+        };
+        let targets: Vec<Vec<u8>> = db.proteins.iter().map(|p| p.sequence.clone()).collect();
+        let (t, r, s) = (count(&targets), count(&plain), count(&sequon));
+        assert!(s > r, "target {t}, shuffle {r}, sequon {s}");
     }
 
     #[test]
@@ -1144,6 +1142,7 @@ mod tests {
         );
         assert_eq!(DecoyStrategy::from_name("NONE"), Some(DecoyStrategy::None));
         assert_eq!(DecoyStrategy::from_name("bogus"), None);
-        assert_eq!(DecoyStrategy::default(), DecoyStrategy::Reverse);
+        assert_eq!(DecoyStrategy::from_name("sequon"), Some(DecoyStrategy::Sequon));
+        assert_eq!(DecoyStrategy::default(), DecoyStrategy::Shuffle);
     }
 }

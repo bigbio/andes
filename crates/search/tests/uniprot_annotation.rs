@@ -153,7 +153,7 @@ fn decoys_carry_the_sites_on_the_same_residues() {
     for strategy in [
         DecoyStrategy::Reverse,
         DecoyStrategy::Shuffle,
-        DecoyStrategy::SequonReverse,
+        DecoyStrategy::Sequon,
     ] {
         let idx = SearchIndex::from_target_db_with_strategy(&target, "XXX", None, strategy, 7);
         let n = target.len();
@@ -196,7 +196,8 @@ fn decoys_carry_the_sites_on_the_same_residues() {
     }
     // Pseudo-reversal mirrors each site within its tryptic peptide (AGSPEK,
     // SDSPAK, VNSTQR with K/R in place): S2/S13/T20 → 2/13/18.
-    let idx = SearchIndex::from_target_db(&target, "XXX");
+    let idx =
+        SearchIndex::from_target_db_with_strategy(&target, "XXX", None, DecoyStrategy::Reverse, 7);
     let decoy = &idx.db.proteins[target.len()];
     assert_eq!(decoy.accession, "XXX_sp|P00001|ONE_HUMAN");
     let pos: Vec<u32> = decoy.mod_sites().iter().map(|s| s.position).collect();
@@ -373,7 +374,7 @@ fn decoys_keep_terminal_sites_at_their_terminus() {
     for strategy in [
         DecoyStrategy::Reverse,
         DecoyStrategy::Shuffle,
-        DecoyStrategy::SequonReverse,
+        DecoyStrategy::Sequon,
     ] {
         let idx = SearchIndex::from_target_db_with_strategy(&target, "XXX", None, strategy, 7);
         // The decoy keeps the initiator Met and the acetylated S after it.
@@ -821,7 +822,7 @@ fn residue_specific_terminal_mods_get_decoys() {
     for strategy in [
         DecoyStrategy::Reverse,
         DecoyStrategy::Shuffle,
-        DecoyStrategy::SequonReverse,
+        DecoyStrategy::Sequon,
     ] {
         // The Q and its site stay at the decoy's N-terminus. Following the
         // residue alone, or moving the site alone onto another residue,
@@ -840,7 +841,7 @@ fn residue_specific_terminal_mods_get_decoys() {
             assert_eq!(modified(forms) * 2, n_terminal, "{strategy:?} {side}");
         }
         assert!(modified(&forms[0].0) > 0, "{strategy:?}");
-        if strategy != DecoyStrategy::Shuffle {
+        if strategy == DecoyStrategy::Reverse {
             // How many N-terminal spans a shuffled decoy has is chance.
             assert!(modified(&forms[0].1) > 0, "{strategy:?}: no modified decoy");
         }
@@ -928,7 +929,7 @@ fn chain_decoys_keep_the_terminal_spans() {
         for strategy in [
             DecoyStrategy::Reverse,
             DecoyStrategy::Shuffle,
-            DecoyStrategy::SequonReverse,
+            DecoyStrategy::Sequon,
         ] {
             let forms = target_and_decoy_forms(&target, &p, strategy);
             for &i in &chains {
@@ -1063,7 +1064,7 @@ fn variant_peptides_carry_a_change_not_just_its_neighbourhood() {
     for strategy in [
         DecoyStrategy::Reverse,
         DecoyStrategy::Shuffle,
-        DecoyStrategy::SequonReverse,
+        DecoyStrategy::Sequon,
     ] {
         let idx = SearchIndex::from_target_db_with_strategy(&target, "XXX", None, strategy, 7);
         let widths = |p: &Protein| -> Vec<u32> {
@@ -1091,7 +1092,7 @@ fn origins_follow_entries_onto_decoys() {
     for strategy in [
         DecoyStrategy::Reverse,
         DecoyStrategy::Shuffle,
-        DecoyStrategy::SequonReverse,
+        DecoyStrategy::Sequon,
     ] {
         let idx = SearchIndex::from_target_db_with_strategy(&target, "XXX", None, strategy, 7);
         let n = target.len();
@@ -1108,8 +1109,8 @@ fn origins_follow_entries_onto_decoys() {
 #[test]
 fn origin_alone_leaves_the_reverse_decoy_unchanged() {
     // Isoforms now always carry an annotation (their origin). Without a chain
-    // or a protein-terminal site, the reverse decoy is the one the same
-    // sequence gets without an annotation.
+    // or a protein-terminal site, the decoy is the one the same sequence gets
+    // without an annotation.
     let target = processed_db();
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let plain = SearchIndex::from_target_db(

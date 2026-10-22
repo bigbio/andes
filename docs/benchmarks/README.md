@@ -69,7 +69,7 @@ depositors' MaxQuant identifications (PEP ≤ 0.01, 23,563 scans) andes covers 8
 same-scan backbone agreement. Phosphosite localisation is **not** scored.
 
 **Glyco.** Mouse liver glycoproteome data (PXD005553), against mouse proteins plus a shuffled entrapment with
-`--glyco --glyco-species mouse --decoy-strategy sequon-reverse`. Two published reference
+`--glyco --glyco-species mouse --decoy-strategy sequon`. Two published reference
 identification sets for the same spectra ship in [`glyco/truth/`](glyco/truth/): pGlyco2 (the
 depositors') and MSFragger-Glyco (a later reanalysis, PXD031032). "Confirmed" is the share of a
 reference's spectra that andes identifies with the same peptide.
@@ -273,10 +273,10 @@ GLYCO=1 ./build_databases.sh "$DATA"
 ./fetch_spectra.sh "$DATA" glyco-mouse        # 5 fractions, 12.6 GB; the quick tier needs only T-1
 cd ..                                         # docs/benchmarks
 DB="$DATA"/databases/mouse_entrap.fasta
-# --decoy-strategy sequon-reverse is required: plain reversal lets decoys pass the sequon gate.
+# --decoy-strategy sequon is required: other generated decoys carry fewer sequons than their targets.
 for f in MouseLiver-Z-T-1 MouseLiver-Z-T-2 MouseLiver-Z-T-3 MouseLiver-Z-T-4 MouseLiver-Z-T-5; do
   andes --spectrum "$DATA"/glyco-mouse/$f.raw --database "$DB" \
-        --glyco --glyco-species mouse --decoy-strategy sequon-reverse \
+        --glyco --glyco-species mouse --decoy-strategy sequon \
         --threads 8 --output-pin $f.pin                      # writes $f.glyco.pin
 done
 python3 glyco/pool_pins.py MouseLiver-Z-T-*.glyco.pin > pooled.pin   # pool BEFORE Percolator

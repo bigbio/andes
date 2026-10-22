@@ -344,7 +344,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let decoy_strategy =
         search::decoy::DecoyStrategy::from_name(&cli.decoy_strategy).ok_or_else(|| {
             format!(
-                "unknown --decoy-strategy '{}' (expected reverse/shuffle/sequon-reverse/none)",
+                "unknown --decoy-strategy '{}' (expected shuffle/reverse/sequon/none)",
                 cli.decoy_strategy
             )
         })?;
@@ -1018,18 +1018,18 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // decoy search space is systematically different and the glyco FDR is
         // ANTI-CONSERVATIVE (q-values users should not trust). Trustworthy glyco FDR
         // needs an EXTERNAL target+decoy FASTA consumed with `--decoy-strategy none`.
-        // `sequon-reverse` was added precisely to preserve N-X-S/T sequon density, so
-        // it does NOT trip this warning; only the sequon-depleting strategies do.
-        if !cli.decoy_strategy.eq_ignore_ascii_case("none")
-            && !cli.decoy_strategy.eq_ignore_ascii_case("sequon-reverse")
-            && !cli.decoy_strategy.eq_ignore_ascii_case("sequon")
-        {
+        // `sequon` restores the N-X-S/T sequon density, so it does NOT trip this
+        // warning; only the sequon-depleting strategies do.
+        if !matches!(
+            decoy_strategy,
+            search::decoy::DecoyStrategy::None | search::decoy::DecoyStrategy::Sequon
+        ) {
             eprintln!(
                 "WARN: --glyco with --decoy-strategy {ds} GENERATES decoys ({ds} of the \
                  target proteome), which does NOT preserve N-X-S/T sequon density that \
                  glyco scoring gates on — the resulting .glyco.pin FDR is \
                  ANTI-CONSERVATIVE and its q-values should NOT be trusted. Use \
-                 `--decoy-strategy sequon-reverse`, or supply an EXTERNAL target+decoy \
+                 `--decoy-strategy sequon`, or supply an EXTERNAL target+decoy \
                  FASTA with `--decoy-strategy none --decoy-prefix <PREFIX>`.",
                 ds = cli.decoy_strategy
             );

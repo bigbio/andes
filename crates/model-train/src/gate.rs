@@ -86,7 +86,7 @@ pub fn evaluate_candidate(
         &target_db,
         BOOTSTRAP_DECOY_PREFIX,
         None,
-        DecoyStrategy::Reverse,
+        DecoyStrategy::default(),
         DEFAULT_DECOY_SEED,
         &Proteases::of(search_params),
     );

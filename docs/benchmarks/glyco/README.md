@@ -36,7 +36,7 @@ python3 build_entrap.py mouse.fasta yeast.fasta mouse_entrap.fasta
 # so this produces frac1.glyco.pin ... frac6.glyco.pin alongside the peptide PINs.
 for f in 1 2 3 4 5 6; do
   andes --spectrum Frac${f}.mzML --database mouse_entrap.fasta \
-        --decoy-strategy sequon-reverse --glyco \
+        --decoy-strategy sequon --glyco \
         --output-pin frac${f}.pin
 done
 

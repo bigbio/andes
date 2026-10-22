@@ -35,10 +35,10 @@ with open(OUT, "w") as out:
         # TARGET only. Do NOT write a plain-reversed decoy here: reversal maps an
         # N-X-S/T sequon to S/T-X-N, so reversed decoys clear the glyco sequon gate
         # at a lower rate than targets and the q-values come out anti-conservative —
-        # the exact defect `--decoy-strategy sequon-reverse` exists to fix. Let andes
+        # the exact defect `--decoy-strategy sequon` exists to fix. Let andes
         # generate the decoys for the whole database with that strategy instead.
         out.write(f">ENTRAP_{ident}\n{seq}\n")
         n_e += 1
 print(f"mouse entries (target+decoy): {n_m}")
 print(f"entrapment proteins (targets): {n_e}")
-print("run andes with --decoy-strategy sequon-reverse to generate decoys for this database")
+print("run andes with --decoy-strategy sequon to generate decoys for this database")

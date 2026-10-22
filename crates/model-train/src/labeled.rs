@@ -4,7 +4,7 @@
 //! # Algorithm
 //!
 //! 1. Load the FASTA target database and build a [`SearchIndex`] (targets +
-//!    pseudo-reversed decoys), reusing the same construction as the production binary.
+//!    peptide-level decoys), reusing the same construction as the production binary.
 //! 2. Run the full search with the seed `RankScorer` via
 //!    [`match_spectra_out_of_core`] — the out-of-core path with fragment-ion
 //!    retrieval that `andes search` takes. No search or scoring logic is
@@ -90,7 +90,7 @@ pub struct LabeledMatch {
 // ---------------------------------------------------------------------------
 
 /// Run a seed search over `spectra` against the FASTA `database`, generate
-/// pseudo-reversed decoys automatically, compute target-decoy competition FDR over
+/// peptide-level decoys automatically, compute target-decoy competition FDR over
 /// the best PSM per spectrum, and return the TARGET PSMs whose q-value ≤
 /// `train_fdr`.
 ///
@@ -119,7 +119,7 @@ pub fn bootstrap_labels(
     search_params: &SearchParams,
     train_fdr: f64,
 ) -> Result<Vec<LabeledMatch>, TrainError> {
-    // ── 1. Load FASTA + build SearchIndex (target + pseudo-reversed decoys) ─────────
+    // ── 1. Load FASTA + build SearchIndex (target + peptide-level decoys) ─────────
     let file = File::open(database)?;
     let target_db = FastaReader::load_all(BufReader::new(file))
         .map_err(|e| TrainError::Other(format!("FASTA parse error: {e}")))?;
@@ -127,7 +127,7 @@ pub fn bootstrap_labels(
         &target_db,
         BOOTSTRAP_DECOY_PREFIX,
         None,
-        DecoyStrategy::Reverse,
+        DecoyStrategy::default(),
         DEFAULT_DECOY_SEED,
         &Proteases::of(search_params),
     );

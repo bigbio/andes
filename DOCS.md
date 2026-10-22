@@ -144,7 +144,7 @@ search uses the segments: its fully specific peptides keep their composition.
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--decoy-strategy` | enum | `reverse` | `reverse` (pseudo-reverse each segment: `PEPTIDEK` → `EDITPEPK`), `shuffle` (seeded shuffle of each segment), `sequon-reverse`, or `none`. **Use `sequon-reverse` with `--glyco`**: reversal turns N-X-S/T into S/T-X-N and makes glyco q-values anti-conservative; `sequon-reverse` restores each segment's sequon count. |
+| `--decoy-strategy` | enum | `shuffle` | `shuffle` (seeded shuffle of each segment), `reverse` (pseudo-reverse each segment: `PEPTIDEK` → `EDITPEPK`), `sequon`, or `none`. **Use `sequon` with `--glyco`**: a permutation leaves fewer N-X-S/T sequons than the target, which makes glyco q-values anti-conservative; `sequon` shuffles and then restores each segment's sequon count. `reverse` is not the default because a pseudo-reversed peptide ending in K shares c/z ions with its target at every I/L (the decoy's z ion i+1 and the target's c ion i+1 differ by 0.024 Da), so on ETD spectra the decoy scores on its target's spectrum. |
 | `--decoy-prefix` | string | `XXX_` | Accession prefix marking a decoy. |
 | `--decoy-suffix` | string | *(off)* | Decoy accession suffix (quantms `_rev` convention). |
 | `--decoy-seed` | u64 | fixed | *(advanced)* Seed of the decoy shuffles (`shuffle`, and the redraw of a segment whose decoy reads as a target). |

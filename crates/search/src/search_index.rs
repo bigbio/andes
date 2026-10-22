@@ -35,15 +35,15 @@ impl SearchIndex {
         is_decoy_accession_affix(accession, &self.decoy_prefix, self.decoy_suffix.as_deref())
     }
 
-    /// Pipeline: target ProteinDb → pseudo-reversed decoys (fully specific
+    /// Pipeline: target ProteinDb → peptide-level decoys (fully specific
     /// trypsin segments) → concat target+decoy. Convenience wrapper for the
-    /// default (Reverse) strategy.
+    /// default (Shuffle) strategy.
     pub fn from_target_db(target: &ProteinDb, decoy_prefix: &str) -> Self {
         Self::from_target_db_with_strategy(
             target,
             decoy_prefix,
             None,
-            DecoyStrategy::Reverse,
+            DecoyStrategy::default(),
             DEFAULT_DECOY_SEED,
         )
     }
@@ -244,7 +244,13 @@ mod tests {
                 annotation: None,
             }],
         };
-        let idx = SearchIndex::from_target_db(&target, "XXX");
+        let idx = SearchIndex::from_target_db_with_strategy(
+            &target,
+            "XXX",
+            None,
+            DecoyStrategy::Reverse,
+            DEFAULT_DECOY_SEED,
+        );
         assert_eq!(idx.db.proteins[0].accession, "P1");
         assert_eq!(idx.db.proteins[1].accession, "XXX_P1");
         assert_eq!(idx.db.proteins[1].sequence, b"EDITPEPK");
@@ -310,8 +316,9 @@ mod tests {
 
     #[test]
     fn peptide_has_target_match_misses_when_only_in_decoy() {
-        // The decoy of MABCDEFGHIK is MIHGFEDCBAK (initiator Met and K stay).
-        // A peptide in the decoy but not the target should return false.
+        // The pseudo-reversed decoy of MABCDEFGHIK is MIHGFEDCBAK (initiator
+        // Met and K stay). A peptide in the decoy but not the target should
+        // return false.
         let target = ProteinDb {
             proteins: vec![Protein {
                 accession: "P1".into(),
@@ -320,7 +327,13 @@ mod tests {
                 annotation: None,
             }],
         };
-        let idx = SearchIndex::from_target_db(&target, "XXX");
+        let idx = SearchIndex::from_target_db_with_strategy(
+            &target,
+            "XXX",
+            None,
+            DecoyStrategy::Reverse,
+            DEFAULT_DECOY_SEED,
+        );
         // "IHGFE" appears only in the decoy sequence, not in the target.
         assert_eq!(idx.db.proteins[1].sequence, b"MIHGFEDCBAK");
         assert!(

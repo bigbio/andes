@@ -1,6 +1,12 @@
 # Cross-engine glycopeptide comparison — MouseLiver-Z-T-1
 
-Date: 2026-09-11 · dataset: PXD031032 (reanalysis of PXD005553)
+Date: 2026-10-21 · dataset: PXD031032 (reanalysis of PXD005553)
+
+*Re-run 2026-10-21 after andes's Y-ion generation was aligned with GlycoDecipher's
+single-glycosidic-bond-cleavage convention and the glycan tree topology was retained
+(`pGlyco-N-Mouse.gdb`, 6,660 topology trees instead of 1,833 compositions). The five
+reference-engine inputs are unchanged from the 2026-09-11 run, so every engine-to-engine
+Jaccard below is byte-identical to that run — only the `andes` column moved.*
 
 andes is compared against five published engines on the same raw file
 `MouseLiver-Z-T-1.raw` (mouse liver N-glycoproteomics). Every engine is
@@ -16,7 +22,7 @@ result files are the ones deposited in PXD031032 and PXD005553.
 
 | Engine | Result file | Filter |
 |---|---|---|
-| andes | `<stem>.glyco.pin` + native-rescore `.psms` | q ≤ 0.01, seed 42, full glycan list (the `--glyco` default since 2026-10-07; `--glyco-full-glycan-db` before), bundled mouse `.gdb` (1833 comps) |
+| andes | `<stem>.glyco.pin` + native-rescore `.psms` | q ≤ 0.01, seed 42, single-cleavage Y-ions, topology-retained `pGlyco-N-Mouse.gdb` (6,660 trees) |
 | Byonic | result workbook (`.xlsx`), PXD031032 | Score ≥ 300 |
 | Glyco-Decipher | GPSM text export, PXD031032 | PeptideFDR ≤ 0.01 |
 | StrucGP | result workbook (`.xlsx`), PXD031032 | all rows |
@@ -27,45 +33,75 @@ result files are the ones deposited in PXD031032 and PXD005553.
 
 | Engine | glycopeptides | PSM rows | proteins |
 |---|---|---|---|
-| andes | 2868 | 6913 | 479 (459 excl. entrapment) |
+| **andes** | **2842** | 6874 | 449 (474 incl. entrapment) |
 | Byonic | 2509 | 5997 | 401 |
 | MSFragger-Glyco | 2507 | 6229 | 422 |
 | Glyco-Decipher | 2301 | 5947 | 388 |
 | StrucGP | 1789 | 3803 | 430 |
 | pGlyco2 | 1761 | 3995 | 340 |
 
-⚠ **The andes row still counts entrapment hits.** 24 of its 6,913 accepted rows map to
+⚠ **The andes headline excludes entrapment hits.** 31 of its 6,905 accepted rows map to
 entrapment proteins, which cannot be present in the sample and are therefore known-false.
 No other engine here searched an entrapment database, so andes is the only row carrying
-them. The corrected glycopeptide count is between 2,844 and 2,868 — at most 24 pairs lower,
-and still above Byonic's 2,509. `compare_engines.py` now excludes
-entrapment from the headline and prints the inclusive figure on a second line; this table
-will be exact on the next run of the script.
+them. `compare_engines.py` excludes entrapment from the headline count (2,842) and prints
+the inclusive figure (2,869) on a second line; the ranking against Byonic (2,509) does
+not change either way.
 
-24 entrapment rows in 6,913 is, separately, a reasonable error floor: it is the measured
+31 entrapment rows in 6,905 is, separately, a reasonable error floor: it is the measured
 cost of the 1% threshold, not a red flag.
 
 ## Pairwise overlap on (peptide, glycan composition)
 
 | | Glyco-Decipher | StrucGP | Byonic | pGlyco2 | MSFragger-Glyco | andes |
 |---|---|---|---|---|---|---|
-| Glyco-Decipher | — | 0.372 | 0.538 | 0.378 | 0.527 | 0.545 |
-| StrucGP | | — | 0.335 | 0.272 | 0.313 | 0.326 |
-| Byonic | | | — | 0.352 | 0.551 | 0.551 |
-| pGlyco2 | | | | — | 0.314 | 0.322 |
-| MSFragger-Glyco | | | | | — | 0.558 |
+| Glyco-Decipher | — | 0.372 | 0.538 | 0.378 | 0.527 | **0.538** |
+| StrucGP | | — | 0.335 | 0.272 | 0.313 | 0.323 |
+| Byonic | | | — | 0.352 | 0.551 | **0.541** |
+| pGlyco2 | | | | — | 0.314 | 0.320 |
+| MSFragger-Glyco | | | | | — | **0.550** |
 
-Shared counts: andes–MSFragger-Glyco 1924, andes–Byonic 1911, andes–Glyco-Decipher
-1823, andes–StrucGP 1145, andes–pGlyco2 1128. Protein-level: andes shares
-371 / 366 / 357 / 327 / 274 with MSFragger-Glyco / Glyco-Decipher / Byonic / pGlyco2 / StrucGP respectively.
+Shared counts: andes–MSFragger-Glyco 1898, andes–Byonic 1878, andes–Glyco-Decipher
+1799, andes–StrucGP 1130, andes–pGlyco2 1117. Protein-level: andes shares
+375 / 357 / 362 / 273 / 324 with MSFragger-Glyco / Byonic / Glyco-Decipher / StrucGP / pGlyco2 respectively.
 
-**Read:** andes reports 2868 glycopeptides (entrapment included), and its highest
-agreement is with MSFragger-Glyco (0.558) and Byonic (0.551), followed closely
-by Glyco-Decipher (0.545) — it covers 1924 of MSFragger-Glyco's 2507 (77%), 1911 of
-Byonic's 2509 (76%) and 1823 of Glyco-Decipher's 2301 (79%). pGlyco2 (2017)
-and StrucGP have the lowest pairwise overlaps on every row (0.27–0.38), including
-with each other; this may reflect their smaller glycan databases and different scoring rather
-than an andes-specific difference. Each engine's filter is its own convention (see below).
+**Read:** andes identifies the most glycopeptides (2842), and its highest
+agreement is with MSFragger-Glyco (0.550) and Byonic (0.541), followed closely
+by Glyco-Decipher (0.538) — it covers 1898 of MSFragger-Glyco's 2507 (76%), 1878 of
+Byonic's 2509 (75%) and 1799 of Glyco-Decipher's 2301 (78%). pGlyco2 and StrucGP
+are the outliers at the low end on every row (0.27–0.38), consistent
+with their smaller glycan databases and older scoring, not an andes-specific
+divergence.
+
+## Peptidoform agreement — pooled 5 fractions
+
+The set-level table above is single-fraction `MouseLiver-Z-T-1`, because only that
+fraction's result files for Glyco-Decipher/StrucGP/Byonic are on disk. MSFragger-Glyco and pGlyco2 have full
+5-fraction references committed under `truth/`, so against those two the comparison is
+pooled (all five fractions → one Percolator run), and it is scan-matched and
+peptidoform-level: a "glycopeptidoform" is the distinct `(backbone, glycan composition)`
+pair, and the agreement figure is the share of spectra *both* engines identified where they
+call the **same backbone and the same glycan composition**.
+
+| (pooled, 1% FDR) | pGlyco2 | MSFragger-Glyco |
+|---|---:|---:|
+| reference glycopeptidoforms | 2,286 | 1,785 |
+| andes glycopeptidoforms | 4,723 | 4,723 |
+| co-identified scans | 15,937 | 13,122 |
+| **same-scan peptidoform** | **98.0%** | **96.1%** |
+| same-scan backbone | 99.6% | 99.9% |
+| peptide agreement (backbones found anywhere) | 94.0% | 95.3% |
+
+The 2.0% (pGlyco2) / 3.9% (MSFragger-Glyco) of co-identified scans that disagree on the
+peptidoform are backbone-correct but glycan-composition differences — the same defect class
+the 2026-09-11 note flagged. Peptide-level agreement (94–95% of the reference's backbones
+also found by andes) is high, and where both engines identify a scan the backbone agrees
+99.6–99.9% of the time; the glycan composition is the residual disagreement.
+
+The corresponding stage-decomposition on the same pooled run (`score_vs_truth.py`, bare
+backbone match, no glycan) attributes every reference spectrum to one bucket: **pGlyco2**
+CONFIRMED 88.9% / WRONG_TARGET_WON 4.9% / DECOY_WON 6.0% / NOT_EMITTED 0.1% · **MSFragger-Glyco**
+CONFIRMED 89.7% / WRONG_TARGET_WON 4.6% / DECOY_WON 5.7% / NOT_EMITTED 0.0%. Selection
+loss (wrong target + decoy) is 10.9% (pGlyco2) / 10.3% (MSFragger-Glyco).
 
 ## Timing — A/B against `main`
 
@@ -134,9 +170,10 @@ recorded here rather than left for someone to rediscover.
   The peptide-level Expectation ≤ 0.01 is the FDR proxy — the file has no glycan
   q-value and no decoys. The Hex+NeuAc ↔ Fuc+NeuGc isobar (0.27 mDa) is resolved
   to the nearer mass; 3.1% of MSFragger-Glyco rows sit on that isobar.
-- andes uses the bundled mouse `.gdb` (1833 compositions). Byonic searched a wider
-  glycan space (its 698 distinct compositions include antenna variants), so exact
-  composition matches are the conservative subset.
+- andes uses the topology-retained `pGlyco-N-Mouse.gdb` (6,660 distinct trees, 2,325
+  compositions observed at 1% FDR). Byonic searched a wider glycan space (its 698
+  distinct compositions include antenna variants), so exact composition matches are the
+  conservative subset.
 - pGlyco2 encodes the glycosylated Asn as `J` in its peptide column
   (`VSQVLHEGGHJVTK` → `…HNVTK`); the script maps `J→N`.
 - Byonic peptide cells carry flanking residues **and** decimal masses

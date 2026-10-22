@@ -276,23 +276,17 @@ impl GlycanCore {
     }
 }
 
-/// Generate every Y-complementary ion of one glycan, structure-aware.
+/// Generate every Y-complementary ion of one glycan from its tree topology.
 ///
-/// A Y ion is a fragment that stays on the peptide and always contains the
-/// reducing end. The naive analogue "every residue sub-composition" over-generates
-/// physically impossible fragments (trimming a core mannose while keeping an
-/// antenna, or splitting the core). We instead respect the core:
-///
-///   1. **Antenna losses** — every sub-composition of the antenna residues
-///      (`full − core − core_fucose`). The remaining Y ion is `core + (antenna −
-///      lost)` and is a *core* ion only when `lost` is the whole antenna (remaining
-///      == the full core, the outermost rung).
-///   2. **Core ladder** — the antenna fully removed, then core residues trimmed in
-///      the fixed Yₘₐₓ→…→Y1 order; each rung's `full − rung` complement is flagged
-///      `is_core`.
-///   3. **Y0** — the bare peptide (`full` complement), never `is_core`.
-///
-/// The empty loss (mass 0 = the intact precursor) is skipped.
+/// A Y ion stays on the peptide and always contains the reducing-end residue; each
+/// one is produced by a SINGLE glycosidic-bond cleavage (the GlycoDecipher /
+/// GlycoWorkbench B/Y convention — one Y per bond, O(n), not the combinatorial
+/// multi-cleavage set). The ion stored here is the Y-COMPLEMENT — the glycan mass
+/// that was LOST (the observed ion is `peptide + (full − lost)`). For each
+/// single-cleavage retained mass we emit `lost = full − retained`, flagging
+/// `is_core` when the retained mass is at most the trimannosyl/GalNAc core (the
+/// core-ladder rungs). The intact precursor (lost ≈ 0) is skipped; Y0 (the bare
+/// peptide, everything lost) is appended last.
 fn generate_y_ions(glycan: &Glycan, core: GlycanCore) -> Vec<GlycanIon> {
     let c = &glycan.composition;
     let (core_hn, core_h) = core.core_composition();
@@ -300,75 +294,29 @@ fn generate_y_ions(glycan: &Glycan, core: GlycanCore) -> Vec<GlycanIon> {
     // structural fact from the glycan (recorded by the .gdb loader) instead of
     // guessing "first Fuc is core"; the guess is wrong for antenna/Lewis fucose.
     let core_fuc: u8 = if core.core_fucose() { c.core_fuc.min(1) } else { 0 };
+    let core_mass = core_hn as f64 * HEXNAC + core_h as f64 * HEX + core_fuc as f64 * FUC;
 
-    let ant_hn = c.hexnac.saturating_sub(core_hn);
-    let ant_h = c.hex.saturating_sub(core_h);
-    let ant_f = c.fuc.saturating_sub(core_fuc);
-    let ant_a = c.neuac;
-    let ant_g = c.neugc;
-
-    let full_mass = c.mass;
-    let gid = glycan.id;
-
-    let cap = (ant_hn as usize + 1)
-        * (ant_h as usize + 1)
-        * (ant_f as usize + 1)
-        * (ant_a as usize + 1)
-        * (ant_g as usize + 1);
-    let mut ions = Vec::with_capacity(cap + core.core_y_ladder().len());
-
-    // 1. Antenna losses (non-empty sub-compositions of the antenna).
-    for lh in 0..=ant_h {
-        for lhn in 0..=ant_hn {
-            for lf in 0..=ant_f {
-                for la in 0..=ant_a {
-                    for lg in 0..=ant_g {
-                        if lh == 0 && lhn == 0 && lf == 0 && la == 0 && lg == 0 {
-                            continue; // empty loss = intact precursor
-                        }
-                        let lost = lh as f64 * HEX
-                            + lhn as f64 * HEXNAC
-                            + lf as f64 * FUC
-                            + la as f64 * NEUAC
-                            + lg as f64 * NEUGC;
-                        // Remaining = core + core_fuc + (antenna − lost). It is a core
-                        // ion only when the whole antenna is lost (remaining == full core).
-                        let is_core = lh == ant_h
-                            && lhn == ant_hn
-                            && lf == ant_f
-                            && la == ant_a
-                            && lg == ant_g;
-                        ions.push(GlycanIon {
-                            glycan_id: gid,
-                            mass: lost,
-                            is_core,
-                        });
-                    }
-                }
-            }
+    let retained = c.tree.y_ion_retained_masses();
+    let mut ions = Vec::with_capacity(retained.len() + 1);
+    for r in retained {
+        let lost = c.mass - r;
+        // The intact precursor (r == full mass) is not a fragment ion; its lost
+        // mass is 0 up to float noise. A real lost mass is ≥ one residue (~146 Da),
+        // so 1e-6 cleanly separates the two.
+        if lost <= 1e-6 {
+            continue;
         }
-    }
-
-    // 2. Core ladder below the full core (Yₘₐₓ−1 … Y1), antenna already removed.
-    for &(hn, h) in core.core_y_ladder() {
-        if (hn, h) == (core_hn, core_h) {
-            continue; // full core already emitted as "whole antenna lost" above
-        }
-        if hn > c.hexnac || h > c.hex {
-            continue; // rung unreachable from a truncated composition
-        }
-        let lost = full_mass - (hn as f64 * HEXNAC + h as f64 * HEX + core_fuc as f64 * FUC);
         ions.push(GlycanIon {
-            glycan_id: gid,
+            glycan_id: glycan.id,
             mass: lost,
-            is_core: true,
+            is_core: r <= core_mass + 1e-6,
         });
     }
 
-    // 3. Y0: the bare peptide (everything lost).
+    // Y0: the bare peptide (everything lost).
     ions.push(GlycanIon {
-        glycan_id: gid,
-        mass: full_mass,
+        glycan_id: glycan.id,
+        mass: c.mass,
         is_core: false,
     });
 
@@ -710,22 +658,9 @@ mod tests {
         neugc: u8,
         core_fuc: u8,
     ) -> Glycan {
-        let mass = hex as f64 * HEX
-            + hexnac as f64 * HEXNAC
-            + fuc as f64 * FUC
-            + neuac as f64 * NEUAC
-            + neugc as f64 * NEUGC;
         Glycan {
             id,
-            composition: GlycanComp {
-                hexnac,
-                hex,
-                fuc,
-                neuac,
-                neugc,
-                core_fuc,
-                mass,
-            },
+            composition: GlycanComp::from_counts(hexnac, hex, fuc, neuac, neugc, core_fuc),
         }
     }
 
@@ -831,12 +766,13 @@ mod tests {
 
     #[test]
     fn generate_y_ions_is_structure_aware_not_full_power_set() {
-        // Hex5HexNAc4: the full power set would be 6·5 = 30 sub-compositions; the
-        // structure-aware ladder emits 13 (8 antenna + 4 core rungs + Y0), and no
-        // ion trims the core while keeping an antenna residue.
+        // Hex5HexNAc4: the full power set would be (4+1)·(5+1) = 30 sub-compositions;
+        // the topology-derived ladder (a linear biosynthetic chain) emits 9 (8
+        // single-cleavage complements + Y0), and no ion trims the core
+        // while keeping an antenna residue.
         let g = glycan(0, 5, 4, 0, 0, 0);
         let ions = generate_y_ions(&g, GlycanCore::NGlycan);
-        assert_eq!(ions.len(), 13);
+        assert_eq!(ions.len(), 9);
         // Every non-core ion (except Y0, the full loss) must leave the whole core
         // intact on the peptide.
         for ion in &ions {
@@ -870,20 +806,30 @@ mod tests {
     }
 
     #[test]
-    fn n_glycan_core_fucose_pins_fuc_to_core_ions() {
-        // Man3Fuc (Hex3HexNAc2Fuc1): the single Fuc is core-fucose, retained on
-        // every core rung, so there are no antenna ions — only Y4..Y1 (+Fuc) and Y0.
+    fn n_glycan_core_fucose_is_a_separate_branch_of_the_reducing_end() {
+        // Man3Fuc (Hex3HexNAc2Fuc1) with core_fuc = 1: the Fuc is a direct child
+        // of the reducing-end GlcNAc, so topologically it can be lost on its own
+        // (a real Y-ion: cleave the GlcNAc-Fuc bond) AND kept on every other
+        // reducing-end fragment. Single-glycosidic-bond-cleavage Y-ions: the linear
+        // chain `(N(F)(N(H(H(H)))))` has 5 bonds → 5 lost masses (F alone, H, 2H,
+        // 3H, N+3H) + Y0 = 6 ions.
         let g = glycan_core_fuc(0, 3, 2, 1, 0, 0);
         let ions = generate_y_ions(&g, GlycanCore::NGlycan);
-        assert_eq!(ions.len(), 5);
-        // Y1 complement (remaining = HexNAc + Fuc) = 3Hex + 1HexNAc, is_core.
+        assert_eq!(ions.len(), 6);
+        // The core fuc is lost alone: complement = FUC (retained = the trimannosyl
+        // core), a topology-correct ion the old pinned ladder never emitted.
+        assert!(
+            ions.iter().any(|i| (i.mass - FUC).abs() < 1e-6),
+            "core Fuc must be losable alone (separate branch)"
+        );
+        // The Y1+fuc core rung (remaining = HexNAc + Fuc, complement = 3Hex +
+        // 1HexNAc) is still present and flagged core.
         let y1 = ions
             .iter()
             .find(|i| (i.mass - (3.0 * HEX + HEXNAC)).abs() < 1e-6)
             .expect("Y1+Fuc complement present");
         assert!(y1.is_core);
-        // The only non-core ion is Y0 (everything lost); the fucose is core-fucose
-        // and never appears as an antenna loss.
+        // This is a pure-core glycan, so every non-Y0 ion is a core rung.
         for ion in &ions {
             if !ion.is_core {
                 assert!((ion.mass - g.composition.mass).abs() < 1e-6, "only Y0 is non-core");

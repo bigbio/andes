@@ -310,15 +310,7 @@ mod tests {
     }
 
     fn glycan(hexnac: u8, hex: u8, fuc: u8, neuac: u8, neugc: u8) -> GlycanComp {
-        GlycanComp {
-            hexnac,
-            hex,
-            fuc,
-            neuac,
-            neugc,
-            core_fuc: 0,
-            mass: 0.0,
-        }
+        GlycanComp::from_counts(hexnac, hex, fuc, neuac, neugc, 0)
     }
 
     fn key(glycan: Option<GlycanComp>) -> GlycoPsmKey {

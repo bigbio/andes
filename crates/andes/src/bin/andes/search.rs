@@ -344,15 +344,25 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let decoy_strategy =
         search::decoy::DecoyStrategy::from_name(&cli.decoy_strategy).ok_or_else(|| {
             format!(
-                "unknown --decoy-strategy '{}' (expected reverse/shuffle/sequon-reverse/none)",
+                "unknown --decoy-strategy '{}' (expected shuffle/reverse/sequon/none)",
                 cli.decoy_strategy
             )
         })?;
+    let proteases = search::decoy::Proteases {
+        primary: search_enzyme,
+        extra: extra_enzymes.clone(),
+        num_tolerable_termini: match cli.enzyme_specificity {
+            EnzymeSpecificity::Fully => 2,
+            EnzymeSpecificity::Semi => 1,
+            EnzymeSpecificity::NonSpecific => 0,
+        },
+    };
     // Isoform and chain entries share most peptides with their canonical
-    // entry. A shuffled decoy is permuted per entry, so the decoys share none,
-    // and the provenance columns (and the decoy search space) would differ
-    // between targets and decoys.
+    // entry. A non-specific search shuffles each entry's whole sequence on its
+    // own, so the decoys share none, and the provenance columns (and the
+    // decoy search space) would differ between targets and decoys.
     if decoy_strategy == search::decoy::DecoyStrategy::Shuffle
+        && proteases.is_non_specific()
         && target_db.proteins.iter().any(|p| {
             matches!(
                 p.entry_kind(),
@@ -362,9 +372,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err(
             "--decoy-strategy shuffle cannot search isoform or mature-chain entries \
-                    (--uniprot-isoforms, --uniprot-chains): shuffled decoys do not keep the \
-                    peptides these entries share with their canonical entry. Use \
-                    --decoy-strategy reverse."
+                    (--uniprot-isoforms, --uniprot-chains) non-specifically: shuffled \
+                    whole-sequence decoys do not keep the peptides these entries share with \
+                    their canonical entry. Use --decoy-strategy reverse."
                 .into(),
         );
     }
@@ -375,10 +385,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         cli.decoy_suffix.as_deref(),
         decoy_strategy,
         cli.decoy_seed,
-        &search::decoy::Proteases {
-            primary: search_enzyme,
-            extra: extra_enzymes.clone(),
-        },
+        &proteases,
     );
     eprintln!(
         "[PHASE search_index_build: {:.2}s]",
@@ -813,11 +820,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     params.top_n_psms_per_spectrum = cli.top_n;
     params.enzyme = search_enzyme;
     params.extra_enzymes = extra_enzymes.clone();
-    params.num_tolerable_termini = match cli.enzyme_specificity {
-        EnzymeSpecificity::Fully => 2,
-        EnzymeSpecificity::Semi => 1,
-        EnzymeSpecificity::NonSpecific => 0,
-    };
+    params.num_tolerable_termini = proteases.num_tolerable_termini;
     // Glycopeptides frequently carry >=2 missed cleavages (the glycan sterically
     // protects the nearby cleavage site), so the general default of 1 silently
     // drops ~6% of true glycopeptides from the digest — concentrated at high
@@ -1015,18 +1018,18 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // decoy search space is systematically different and the glyco FDR is
         // ANTI-CONSERVATIVE (q-values users should not trust). Trustworthy glyco FDR
         // needs an EXTERNAL target+decoy FASTA consumed with `--decoy-strategy none`.
-        // `sequon-reverse` was added precisely to preserve N-X-S/T sequon density, so
-        // it does NOT trip this warning; only the sequon-depleting strategies do.
-        if !cli.decoy_strategy.eq_ignore_ascii_case("none")
-            && !cli.decoy_strategy.eq_ignore_ascii_case("sequon-reverse")
-            && !cli.decoy_strategy.eq_ignore_ascii_case("sequon")
-        {
+        // `sequon` restores the N-X-S/T sequon density, so it does NOT trip this
+        // warning; only the sequon-depleting strategies do.
+        if !matches!(
+            decoy_strategy,
+            search::decoy::DecoyStrategy::None | search::decoy::DecoyStrategy::Sequon
+        ) {
             eprintln!(
                 "WARN: --glyco with --decoy-strategy {ds} GENERATES decoys ({ds} of the \
                  target proteome), which does NOT preserve N-X-S/T sequon density that \
                  glyco scoring gates on — the resulting .glyco.pin FDR is \
                  ANTI-CONSERVATIVE and its q-values should NOT be trusted. Use \
-                 `--decoy-strategy sequon-reverse`, or supply an EXTERNAL target+decoy \
+                 `--decoy-strategy sequon`, or supply an EXTERNAL target+decoy \
                  FASTA with `--decoy-strategy none --decoy-prefix <PREFIX>`.",
                 ds = cli.decoy_strategy
             );

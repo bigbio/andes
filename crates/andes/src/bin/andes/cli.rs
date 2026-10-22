@@ -243,19 +243,25 @@ pub(crate) struct SearchArgs {
     #[arg(long = "decoy-suffix")]
     pub(crate) decoy_suffix: Option<String>,
 
-    /// How to generate decoys: `reverse` (default; reverse each sequence),
-    /// `shuffle` (seeded reproducible shuffle), `sequon-reverse` (reverse but
-    /// restore each N-X-S/T sequon at its mirrored position — RECOMMENDED with
-    /// `--glyco`: plain reversal maps N-X-S/T to S/T-X-N, so reversed decoys reach
-    /// the glyco sequon gate at a lower rate than targets and the resulting
-    /// q-values are anti-conservative), or `none` (no decoys — for a FASTA that
-    /// already contains decoys, or external FDR). `none` with a target-only FASTA
+    /// How to generate decoys. Decoys are peptide-level: each segment between
+    /// two cleavage sites is permuted with its cleavage residues, its
+    /// cleavage-side terminal residue and an initiator Met in place, so every
+    /// enzymatic peptide has a decoy of the same composition and C-terminal
+    /// residue (a non-specific search permutes whole sequences). `shuffle`
+    /// (default; seeded shuffle of each segment), `reverse` (pseudo-reverse
+    /// each segment; on ETD spectra a pseudo-reversed K-terminal decoy shares
+    /// c/z ions with its target at every I/L), `sequon` (shuffle, then restore
+    /// the segment's N-X-S/T sequon count; RECOMMENDED with `--glyco`: a
+    /// permutation leaves fewer sequons than the target, so decoys reach the
+    /// glyco sequon gate at a lower rate than targets and the resulting
+    /// q-values are anti-conservative), or `none` (no decoys — for a FASTA that already
+    /// contains decoys, or external FDR). `none` with a target-only FASTA
     /// leaves the search without decoys (FDR can't be estimated) and warns.
-    #[arg(long = "decoy-strategy", default_value = "reverse")]
+    #[arg(long = "decoy-strategy", default_value = "shuffle")]
     pub(crate) decoy_strategy: String,
 
-    /// Seed for `--decoy-strategy shuffle` (reproducible decoys). Ignored by
-    /// reverse/none.
+    /// Seed of the decoy shuffles (`shuffle`, `sequon`, and the redraw of a
+    /// segment whose decoy reads as a target peptide).
     #[arg(long = "decoy-seed", hide = true, default_value_t = search::decoy::DEFAULT_DECOY_SEED)]
     pub(crate) decoy_seed: u64,
 

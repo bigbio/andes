@@ -127,12 +127,27 @@ Opt-in modes, each switched on by one parent flag.
 For a pre-built target+decoy FASTA, use `--decoy-strategy none` with `--decoy-prefix` or
 `--decoy-suffix`.
 
+Decoys are peptide-level. Each target protein is cut into the segments between the cleavage
+sites of the search's proteases (`--enzyme`, all of them for a multi-protease digest), and each
+segment is permuted with three kinds of residue in place: the residues that make a cut (K and R
+for trypsin), the residue on its cleavage side (its last residue, or its first for AspN and LysN)
+and an initiator Met. Every enzymatic peptide, missed cleavages included, thus has a decoy at the
+same position with the same composition, mass, length, C-terminal residue, missed cleavages and
+modification sites (a phospho decoy has as many S/T/Y as its target), the way a wrong peptide of
+the same digest looks. A segment's decoy depends only on its residues, so a peptide shared by
+several proteins has one decoy. A segment whose decoy reads as any target segment (I and L
+equal: a palindrome, or a permutation that spells another protein's peptide) is redrawn by a
+seeded shuffle; a segment too short to change stays, and such a decoy peptide is counted as a
+target. A non-specific search (`--enzyme nonspecific`, or `--enzyme-specificity non-specific`,
+as for HLA peptides) has no segments; its decoys permute each whole sequence. A semi-specific
+search uses the segments: its fully specific peptides keep their composition.
+
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--decoy-strategy` | enum | `reverse` | `reverse`, `shuffle`, `sequon-reverse`, or `none`. **Use `sequon-reverse` with `--glyco`**: plain reversal turns N-X-S/T into S/T-X-N and makes glyco q-values anti-conservative. |
+| `--decoy-strategy` | enum | `shuffle` | `shuffle` (seeded shuffle of each segment), `reverse` (pseudo-reverse each segment: `PEPTIDEK` → `EDITPEPK`), `sequon`, or `none`. **Use `sequon` with `--glyco`**: a permutation leaves fewer N-X-S/T sequons than the target, which makes glyco q-values anti-conservative; `sequon` shuffles and then restores each segment's sequon count. `reverse` is not the default because a pseudo-reversed peptide ending in K shares c/z ions with its target at every I/L (the decoy's z ion i+1 and the target's c ion i+1 differ by 0.024 Da), so on ETD spectra the decoy scores on its target's spectrum. |
 | `--decoy-prefix` | string | `XXX_` | Accession prefix marking a decoy. |
 | `--decoy-suffix` | string | *(off)* | Decoy accession suffix (quantms `_rev` convention). |
-| `--decoy-seed` | u64 | fixed | *(advanced)* RNG seed for `shuffle` decoys. |
+| `--decoy-seed` | u64 | fixed | *(advanced)* Seed of the decoy shuffles (`shuffle`, and the redraw of a segment whose decoy reads as a target). |
 
 ### UniProt XML databases
 
@@ -224,22 +239,19 @@ it at its protein terminus (an N-acetylation or pyro-Glu of residue 1, an N-acet
 residue 2 after the initiator Met, a C-terminal amidation), the decoy is built with that residue,
 and the initiator Met before it, at its own terminus. A residue-specific protein-terminal mod
 restricted to annotated sites (pyro-Glu on Q) thus has decoy competition. A variant part maps to
-its mirror image under `reverse`, and under `sequon-reverse` unless a sequon swap moved one of
-its residues. Otherwise, as under `shuffle`, it maps to a part of the same length at the image of
-its first residue, moved back from the end if needed. Variant entries thus get decoy twins with
-the same kind of variant parts, and the target and decoy search spaces grow together. An
-isoform's decoy is built like any protein's. A chain's decoy is permuted only within the cleavage
-segments of the search enzyme(s): residues that make a cut stay in place, and the others are
-reversed (or shuffled) within their segment, a pseudo-reverse. The decoy chain has the target
-chain's cut sites, so each terminal peptide of the target has a decoy peptide of the same length
-and mass. A plain reverse would move the cut sites, and could leave a chain with no admissible
-decoy peptide at all.
+its image when that is contiguous (a part between two fixed residues of a segment, under
+`reverse`). Otherwise it maps to a part of the same length at the image of its first residue,
+moved back from the end if needed. Variant entries thus get decoy twins with the same kind of
+variant parts, and the target and decoy search spaces grow together. An isoform's decoy is
+built like any protein's, so it shares the decoy peptides of the segments it shares with its
+canonical entry. A chain is cut into segments like any protein, from its own new termini, so
+each terminal peptide of the target chain has a decoy peptide of the same length and mass.
 
 **Provenance columns.** Each PIN row says which kinds of entry its peptide comes from:
 `IsVariant`, `IsIsoform`, `IsChain` are 1 when any protein of the peptide is such an entry, also
 when the canonical entry has the same peptide. (Counting a shared peptide as canonical would set
-the flags on decoys more often than on targets, because decoy entries do not keep the peptides
-their targets share, and Percolator would learn the label.) A peptide is specific evidence for an
+the flags on decoys more often than on targets, because decoy entries do not always keep the
+peptides their targets share, and Percolator would learn the label.) A peptide is specific evidence for an
 alternative sequence only when its `Proteins` column names no canonical entry. `RefCompetitor`
 is 1 when a canonical candidate with another peptidoform was scored for the spectrum, and
 `DeltaRefScore` is a flagged row's score minus the best such candidate's: how much better the
@@ -275,8 +287,9 @@ peptide (the substitution reverted) was identified: decoys cannot measure that e
 rows are candidates rather than claims. With `--lfq` or `--tmt`, `quantity_<run or channel>` is
 the summed abundance of the member's specific peptides (`NA` where none was measured).
 
-`--decoy-strategy shuffle` is refused when the database holds isoform or mature-chain entries:
-shuffled decoys do not keep the peptides those entries share with their canonical entry.
+`--decoy-strategy shuffle` is refused for a non-specific search when the database holds isoform
+or mature-chain entries: shuffled whole-sequence decoys do not keep the peptides those entries
+share with their canonical entry.
 
 With `--uniprot-variants`, restricting an artefact mod (deamidation, oxidation, carbamylation,
 methylation) to annotated sites removes the canonical explanation that competes with a variant
@@ -1527,6 +1540,17 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
   precursor whose voltage the FAIMS run lacks is not measured there and is counted in the log;
   it is never fitted on another voltage or on the mixed series. Precursors without a voltage,
   and every precursor in a run without FAIMS, are fitted on the whole run.
+  The time scales of the fit come from each run's own MS1, before any row is fitted: the
+  median spacing of its MS1 scans (of one FAIMS voltage) is the floor of every RT prior width,
+  and the run's elution-width scale is the median fitted width of up to 500 identified pairs
+  spread over the library (width free over 0.5–2 times the current scale, re-estimated until a
+  round moves it by less than 10 %, starting from 6 s; 6 s when fewer than 20 fits are usable).
+  The width prior along the gradient is then fitted on every identified pair around that scale,
+  and an identified pair's apex is searched within three of the run's elution widths at its RT
+  (at least three scan spacings) of its PSM. Narrow-peak instruments are thus not held to a
+  wide fixed width, and a larger neighbouring peak of the same m/z a few widths away is not
+  taken for the identified one. The extract log and the table's `andes.extract.run_scales` tag
+  record the scan spacing and the width scale of each run; `quant finalize` logs them.
   Transfer pre-selection (advanced, `--mbr-preselect`, default `true`): before any fit,
   extract skips the transfers of an entry whose best donor PSM is above q 0.001, which finalize
   never transfers (on a six-run benchmark 19 % of the transfer fits; the reported rows are

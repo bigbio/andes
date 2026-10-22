@@ -33,6 +33,11 @@
 //! column moved, on 2 rows (scans 24129 and 24902, R.GTAGNALMDGASQLMGENR.T, whose
 //! only sequon is N18-R|T): `@N?` -> `@N18`.
 //!
+//! REGENERATED 2026-10-22 when decoys became peptide-level (`--decoy-strategy`
+//! default `shuffle`; regenerated on top of the glycan-topology change): 120 -> 120 rows,
+//! decoy winners 3 -> 10; the candidate-pool
+//! columns move with the new decoy candidates.
+//!
 //! WHY THIS EXISTS. Until this file was added, the ONLY golden in the repo covered
 //! the standard peptide path (`precursor_cal_bit_identical.rs`). Nothing pinned glyco
 //! output, and a commit labelled `fix(train)` consequently changed SERVE-TIME glyco

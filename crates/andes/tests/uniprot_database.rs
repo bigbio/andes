@@ -97,8 +97,9 @@ fn annotated_site_mods_and_variants_run_end_to_end() {
     // Every PIN row names either the canonical entry or the variant entry.
     let pin_text = std::fs::read_to_string(&pin).unwrap();
     assert!(pin_text.lines().skip(1).all(|l| l.contains("P02769")));
-    // Provenance columns: a row is non-reference only when every protein it
-    // names is a variant or chain entry; only those carry a DeltaRefScore. The
+    // Provenance columns: a row is flagged when any protein it names is a
+    // variant or chain entry (a decoy peptide the canonical and the chain
+    // decoys share names both); only flagged rows carry a DeltaRefScore. The
     // canonical BSA entry competes in most spectra.
     let header: Vec<&str> = pin_text.lines().next().unwrap().split('\t').collect();
     let col = |name: &str| header.iter().position(|h| *h == name).unwrap();
@@ -120,7 +121,7 @@ fn annotated_site_mods_and_variants_run_end_to_end() {
         let named = &r[prot..];
         let alternative = named
             .iter()
-            .all(|a| a.contains("_VAR_") || a.contains("_PRO_"));
+            .any(|a| a.contains("_VAR_") || a.contains("_PRO_"));
         let flagged = r[var] == "1" || r[chain] == "1";
         assert_eq!(flagged, alternative, "{named:?}");
         assert_eq!(r[iso], "0");
@@ -192,7 +193,7 @@ fn restricted_artefact_mods_warn_only_with_variants() {
 }
 
 #[test]
-fn shuffle_decoys_are_refused_with_isoforms_or_chains() {
+fn shuffle_decoys_are_refused_with_isoforms_or_chains_when_non_specific() {
     let dir = tempfile::tempdir().unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_andes"))
         .arg("--spectrum")
@@ -203,6 +204,7 @@ fn shuffle_decoys_are_refused_with_isoforms_or_chains() {
         .arg(dir.path().join("x.pin"))
         .args(["--decoy-strategy", "shuffle", "--uniprot-chains"])
         .args(["--uniprot-evidence", "curated"])
+        .args(["--enzyme-specificity", "non-specific"])
         .output()
         .expect("run andes");
     assert!(!out.status.success());

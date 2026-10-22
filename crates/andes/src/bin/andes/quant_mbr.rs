@@ -10,7 +10,8 @@
 //!
 //! * identified in the run (a donor run: a target PSM at PSM q-value within
 //!   the library's donor threshold): an `Identified` target fit with the
-//!   prior centred on the best donor PSM's RT and `s = max(w_prior, 6 s)`,
+//!   prior centred on the best donor PSM's RT and `s = max(w_prior(t), dt)`
+//!   (the run's own elution width there, floored at its MS1 scan spacing),
 //!   with its decoy probes ([`quant::decoys::probes`], same prior), plus a
 //!   `PseudoTransfer` target fit with the alignment prior computed without
 //!   this run's own observation;
@@ -26,18 +27,34 @@
 //! An entry without a voltage, or any entry in a run without FAIMS, is fitted
 //! on the whole run; an entry whose voltage the FAIMS run lacks gets no rows
 //! there and is counted (never fitted on another voltage's series or on the
-//! mixed series). Only one copy of the run's MS1 is held at a time: the whole run
-//! serves the width-prior fits of the whole-run entries; the scans are then
-//! moved into one series per voltage for the voltage entries' width-prior
-//! fits and rows; the split is dropped and the MS1 table read again for the
-//! whole-run entries' rows. A run with at most one voltage is never split.
+//! mixed series). Only one copy of the run's MS1 is held at a time: the scans
+//! of a FAIMS run are moved into one series per voltage for the voltage
+//! entries' width scale, width-prior fits and rows; the split is dropped and
+//! the MS1 table read again for the whole-run entries' rows, which use the
+//! same width prior. A run with at most one voltage is never split.
 //!
-//! Width prior: the identified pairs are first fitted with the width free on
-//! `{0.5, 0.7, 1, 1.4, 2} * w0` (`w0 = 6 s`, `s = 6 s`); `w_prior(t)` is the
-//! fitted width through 20 equal-count bins of fitted apex RT (median per bin,
-//! then a running median of 3 over the bins), interpolated linearly between
-//! the bin medians and held constant beyond them. With fewer than 20 usable
-//! fits, `w_prior = w0` everywhere.
+//! Run scales: every elution-time scale of the fits is derived from the run's
+//! own MS1 before any row is fitted (the extract log and the
+//! `andes.extract.run_scales` tag record them):
+//!
+//! * `dt`, the median spacing of the run's MS1 scans of one FAIMS voltage:
+//!   the floor of every RT prior width `s` and of the width scale;
+//! * `w_run`, the width scale: up to 500 identified pairs, spread evenly
+//!   over the library (identity decoys left out), are fitted with the width
+//!   free on `{0.5, 0.7, 1, 1.4, 2} * w` with `s = max(w, dt)`, and `w` becomes
+//!   the median fitted width of the usable fits (positive amplitude, LLR at
+//!   least 25), floored at `dt`. The rounds start at `w = 6 s` and stop when a
+//!   round moves `w` by less than 10 % (at most 6 rounds), so the result is
+//!   the run's own width, wherever it starts. With fewer than 20 usable fits
+//!   in a round, `w_run = max(6 s, dt)`.
+//!
+//! Width prior: the identified pairs (of the voltage series in a FAIMS run)
+//! are fitted with the width free on `{0.5, 0.7, 1, 1.4, 2} * w_run` and
+//! `s = max(w_run, dt)`; `w_prior(t)` is the fitted width through 20
+//! equal-count bins of fitted apex RT (median per bin, then a running median
+//! of 3 over the bins), interpolated linearly between the bin medians and held
+//! constant beyond them. With fewer than 20 usable fits, `w_prior = w_run`
+//! everywhere.
 //!
 //! Finalize: the transfer targets and decoys of every run go to the
 //! cross-validated transfer FDR of [`crate::transfer_fdr`] (features
@@ -84,7 +101,9 @@ use std::path::{Path, PathBuf};
 use output::ms1_table::read_ms1_table;
 use quant::align::RunMap;
 use quant::decoys::{probes, Hypothesis, Probe, PEPTIDE_MASS_SLOPE};
-use quant::evidence::{fit_many, Evidence, EvidenceParams, FitJob, WIDTH_GRID};
+use quant::evidence::{
+    fit_many, fit_on_grid, Evidence, EvidenceParams, FitJob, FitScratch, WIDTH_GRID,
+};
 use quant::library::{Library, LibraryEntry};
 use quant::ms1_index::Ms1RunIndex;
 use quant::ms2::{elution_window, LibrarySpectrum, Ms2RunIndex};
@@ -94,13 +113,19 @@ use crate::transfer_fdr::{IDENTIFIED_FEATURES, TRANSFER_FEATURES};
 
 pub(crate) use output::extract_table::{ExtractRole as Role, ExtractRow};
 
-/// Default elution half-width `w0`, seconds.
-const DEFAULT_W0_S: f64 = 6.0;
-/// Floor of the RT uncertainty of an identified pair (apex vs trigger
-/// offset), seconds.
-const IDENTIFIED_MIN_S: f64 = 6.0;
-/// Width grid of the width-prior fits, as multiples of `w0`.
+/// Elution width, seconds, at which the run's width-scale rounds start, and
+/// the width scale of a run with too few usable identified fits.
+const SEED_WIDTH_S: f64 = 6.0;
+/// Width grid of the width-scale and width-prior fits, as multiples of the
+/// current width scale.
 const WIDTH_PRIOR_GRID: [f64; 5] = [0.5, 0.7, 1.0, 1.4, 2.0];
+/// Most identified pairs fitted per round of the width-scale estimate.
+const SCALE_PAIRS: usize = 500;
+/// Most rounds of the width-scale estimate.
+const SCALE_MAX_ROUNDS: usize = 6;
+/// The width-scale estimate stops once a round changes it by less than this
+/// ratio.
+const SCALE_CONVERGED: f64 = 1.1;
 /// Equal-count RT bins of the width prior; also the fewest usable fits.
 const WIDTH_PRIOR_BINS: usize = 20;
 /// Smallest log-likelihood ratio of an identified fit that enters the width
@@ -133,8 +158,48 @@ pub(crate) struct ExtractCounts {
     pub not_selected: usize,
     /// Identified fits that set the run's width prior.
     pub width_fits: usize,
-    /// Fewer than the needed identified fits: the width prior is the default.
+    /// Fewer than the needed identified fits: the width prior is the run's
+    /// width scale everywhere.
     pub width_prior_fallback: bool,
+    /// The run's MS1 scan spacing and width scale.
+    pub scales: RunScales,
+}
+
+/// The elution-time scales of one run, derived from its MS1 before any row is
+/// fitted (see the module docs).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct RunScales {
+    /// Median spacing of the MS1 scans of one FAIMS voltage, seconds; `None`
+    /// with fewer than two scans of any voltage.
+    pub spacing_s: Option<f64>,
+    /// Width scale `w_run`, seconds.
+    pub width_s: f64,
+    /// Usable fits of the last width-scale round.
+    pub width_fits: usize,
+    /// Width-scale rounds run.
+    pub rounds: usize,
+    /// Too few usable fits: `width_s` is [`SEED_WIDTH_S`] (floored at the
+    /// spacing).
+    pub fallback: bool,
+}
+
+impl RunScales {
+    /// Floor of the RT prior width `s` and of the width scale, seconds: the
+    /// scan spacing (0 when unknown).
+    fn floor_s(&self) -> f64 {
+        self.spacing_s.unwrap_or(0.0)
+    }
+
+    /// The `andes.extract.run_scales` tag value.
+    pub(crate) fn describe(&self) -> String {
+        let spacing = self
+            .spacing_s
+            .map_or_else(|| "unknown".to_string(), |s| format!("{s:.4}"));
+        format!(
+            "ms1_spacing_s={spacing};width_scale_s={:.4};width_scale_fits={};width_scale_rounds={};width_scale_fallback={}",
+            self.width_s, self.width_fits, self.rounds, self.fallback
+        )
+    }
 }
 
 impl ExtractCounts {
@@ -327,19 +392,30 @@ fn entry_groups(voltages: &[f32], entries: &[LibraryEntry]) -> Vec<Group> {
         .collect()
 }
 
-/// `w_prior(t)` as `(RT, width)` knots; empty means [`DEFAULT_W0_S`].
+/// `w_prior(t)` as `(RT, width)` knots, or the run's width scale when there
+/// are none; with the floor of an identified pair's RT prior width.
 #[derive(Debug, Clone, PartialEq)]
 struct WidthPrior {
     knots: Vec<(f64, f64)>,
+    /// `w_prior` without knots, seconds.
+    default_s: f64,
+    /// Floor of an identified pair's `s`, seconds.
+    floor_s: f64,
 }
 
 impl WidthPrior {
-    /// From fitted `(apex RT, width)` pairs; the default with fewer than
-    /// [`WIDTH_PRIOR_BINS`] of them.
-    fn from_fits(mut fits: Vec<(f64, f64)>) -> Self {
+    /// From fitted `(apex RT, width)` pairs; the run's width scale everywhere
+    /// with fewer than [`WIDTH_PRIOR_BINS`] of them.
+    fn from_fits(mut fits: Vec<(f64, f64)>, scales: &RunScales) -> Self {
         let n = fits.len();
+        let default_s = scales.width_s;
+        let floor_s = scales.floor_s();
         if n < WIDTH_PRIOR_BINS {
-            return Self { knots: Vec::new() };
+            return Self {
+                knots: Vec::new(),
+                default_s,
+                floor_s,
+            };
         }
         fits.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
         let mut ts = Vec::with_capacity(WIDTH_PRIOR_BINS);
@@ -360,6 +436,8 @@ impl WidthPrior {
             .collect();
         Self {
             knots: ts.into_iter().zip(smoothed).collect(),
+            default_s,
+            floor_s,
         }
     }
 
@@ -371,7 +449,7 @@ impl WidthPrior {
     fn at(&self, t: f64) -> f64 {
         let k = &self.knots;
         let Some((first, last)) = k.first().zip(k.last()) else {
-            return DEFAULT_W0_S;
+            return self.default_s;
         };
         if t.is_nan() || t <= first.0 {
             return first.1;
@@ -386,6 +464,14 @@ impl WidthPrior {
         } else {
             y0
         }
+    }
+}
+
+impl WidthPrior {
+    /// RT prior width `s` of an identified pair whose PSM is at `t`: the
+    /// elution width there, floored at the scan spacing.
+    fn identified_s(&self, t: f64) -> f64 {
+        self.at(t).max(self.floor_s)
     }
 }
 
@@ -430,9 +516,111 @@ fn fit_on_series(
     out
 }
 
+/// The entries among `ids` that the run identified at a finite RT, identity
+/// decoys left out, with that RT.
+fn identified_targets(ids: &[usize], run: u16, lib: &Library) -> Vec<(usize, f64)> {
+    ids.iter()
+        .filter_map(|&i| {
+            let e = &lib.entries[i];
+            if e.identity_decoy {
+                return None;
+            }
+            let rt = identified_rt(e, run).filter(|rt| rt.is_finite())?;
+            Some((i, rt))
+        })
+        .collect()
+}
+
+/// The width-free fit job of an identified pair: prior centred on its PSM RT
+/// `rt` with width `s`, widths [`WIDTH_PRIOR_GRID`] times `scale`.
+fn width_job(lib: &Library, i: usize, rt: f64, scale: f64, s: f64) -> FitJob<'_> {
+    let meta = &lib.meta[lib.entries[i].precursor as usize];
+    FitJob {
+        probe: Probe {
+            kind: Hypothesis::Target,
+            mz: meta.mz,
+            t_hat: rt,
+            s,
+            w_prior: scale,
+        },
+        charge: meta.charge.max(1),
+        envelope: &meta.envelope,
+        widths: &WIDTH_PRIOR_GRID,
+    }
+}
+
+/// Whether a width-free fit enters the width scale and the width prior.
+fn usable_width_fit(ev: &Evidence) -> bool {
+    ev.amplitude > 0.0 && ev.llr >= WIDTH_FIT_MIN_LLR
+}
+
+/// The run's width scale (see the module docs) from the identified pairs
+/// among the entries `ids`, each fitted on `series[series_of(id)]`, with
+/// `spacing_s` the run's MS1 scan spacing. Each round fits at most
+/// [`SCALE_PAIRS`] pairs, every k-th of the identified ones in library
+/// order, one at a time ([`fit_on_grid`] gives the result [`fit_many`]
+/// would, without its sweep over the whole run).
+fn width_scale<F>(
+    ids: &[usize],
+    run: u16,
+    lib: &Library,
+    ep: &EvidenceParams,
+    series: &[&Ms1RunIndex],
+    series_of: F,
+    spacing_s: Option<f64>,
+) -> RunScales
+where
+    F: Fn(usize) -> usize + Sync,
+{
+    let floor = spacing_s.unwrap_or(0.0);
+    let all = identified_targets(ids, run, lib);
+    let stride = all.len().div_ceil(SCALE_PAIRS).max(1);
+    let pilot: Vec<(usize, f64)> = all.into_iter().step_by(stride).collect();
+    let mut out = RunScales {
+        spacing_s,
+        width_s: SEED_WIDTH_S.max(floor),
+        ..RunScales::default()
+    };
+    while out.rounds < SCALE_MAX_ROUNDS {
+        let w = out.width_s;
+        let widths: Vec<f64> = pilot
+            .par_iter()
+            .map_init(FitScratch::default, |scratch, &(i, rt)| {
+                let job = width_job(lib, i, rt, w, w.max(floor));
+                fit_on_grid(
+                    series[series_of(i)],
+                    &job.probe,
+                    job.charge,
+                    job.envelope,
+                    ep,
+                    job.widths,
+                    scratch,
+                )
+            })
+            .flatten()
+            .filter(usable_width_fit)
+            .map(|ev| ev.w)
+            .collect();
+        out.rounds += 1;
+        out.width_fits = widths.len();
+        if widths.len() < WIDTH_PRIOR_BINS {
+            out.width_s = SEED_WIDTH_S.max(floor);
+            out.fallback = true;
+            return out;
+        }
+        let next = median(widths).max(floor);
+        out.width_s = next;
+        if (next / w).max(w / next) < SCALE_CONVERGED {
+            break;
+        }
+    }
+    out
+}
+
 /// The usable width-free fits `(t0, w)` of the identified pairs among the
 /// entries `ids` (identity decoys left out), each fitted on
-/// `series[series_of(id)]`.
+/// `series[series_of(id)]` with widths [`WIDTH_PRIOR_GRID`] times the run's
+/// width scale and `s = max(w_run, dt)`.
 fn width_fits<F>(
     ids: &[usize],
     run: u16,
@@ -440,39 +628,20 @@ fn width_fits<F>(
     ep: &EvidenceParams,
     series: &[&Ms1RunIndex],
     series_of: F,
+    scales: &RunScales,
 ) -> Vec<(f64, f64)>
 where
     F: Fn(usize) -> usize,
 {
-    let jobs: Vec<(usize, FitJob)> = ids
-        .iter()
-        .filter_map(|&i| {
-            let e = &lib.entries[i];
-            if e.identity_decoy {
-                return None;
-            }
-            let rt = identified_rt(e, run).filter(|rt| rt.is_finite())?;
-            let meta = &lib.meta[e.precursor as usize];
-            let probe = Probe {
-                kind: Hypothesis::Target,
-                mz: meta.mz,
-                t_hat: rt,
-                s: DEFAULT_W0_S.max(IDENTIFIED_MIN_S),
-                w_prior: DEFAULT_W0_S,
-            };
-            let job = FitJob {
-                probe,
-                charge: meta.charge.max(1),
-                envelope: &meta.envelope,
-                widths: &WIDTH_PRIOR_GRID,
-            };
-            Some((series_of(i), job))
-        })
+    let (w, s) = (scales.width_s, scales.width_s.max(scales.floor_s()));
+    let jobs: Vec<(usize, FitJob)> = identified_targets(ids, run, lib)
+        .into_iter()
+        .map(|(i, rt)| (series_of(i), width_job(lib, i, rt, w, s)))
         .collect();
     fit_on_series(series, &jobs, ep)
         .into_iter()
         .flatten()
-        .filter(|ev| ev.amplitude > 0.0 && ev.llr >= WIDTH_FIT_MIN_LLR)
+        .filter(usable_width_fit)
         .map(|ev| (ev.t0, ev.w))
         .collect()
 }
@@ -578,7 +747,7 @@ fn entry_rows(
         Some(rt) if !rt.is_finite() => counts.nonfinite_best_rt += 1,
         Some(rt) => {
             let w = wp.at(rt);
-            let s = w.max(IDENTIFIED_MIN_S);
+            let s = wp.identified_s(rt);
             for probe in probes(e.precursor, run, meta.mz, charge, rt, s, w, run_rt()) {
                 rows.push(row(probe.kind, Role::Identified, &probe, donors));
             }
@@ -671,6 +840,7 @@ pub(crate) fn extract_run(
     let n = lib.entries.len();
     let ms1 = load()?;
     let held = Held::new();
+    let spacing = ms1.median_scan_spacing();
     let groups = entry_groups(&ms1.faims_voltages(), &lib.entries);
     let whole_ids: Vec<usize> = (0..n).filter(|&i| groups[i] == Group::Whole).collect();
     let cv_ids: Vec<usize> = (0..n)
@@ -678,18 +848,19 @@ pub(crate) fn extract_run(
         .collect();
     let foreign = groups.iter().filter(|&&g| g == Group::Foreign).count();
     let mut slots: Vec<Option<EntryRows>> = (0..n).map(|_| None).collect();
-    let finish = |slots, width_fits: usize, wp: &WidthPrior| {
+    let finish = |slots, width_fits: usize, wp: &WidthPrior, scales: RunScales| {
         let mut out = assemble(slots, width_fits, wp.is_default());
         out.counts.unaligned = !aligned;
         out.counts.foreign_cv = foreign;
+        out.counts.scales = scales;
         out
     };
 
-    let mut fits = width_fits(&whole_ids, run, lib, ep, &[&ms1], |_| 0);
-    let width_fit_count;
     if cv_ids.is_empty() {
-        width_fit_count = fits.len();
-        let wp = WidthPrior::from_fits(fits);
+        let scales = width_scale(&whole_ids, run, lib, ep, &[&ms1], |_| 0, spacing);
+        let fits = width_fits(&whole_ids, run, lib, ep, &[&ms1], |_| 0, &scales);
+        let width_fit_count = fits.len();
+        let wp = WidthPrior::from_fits(fits, &scales);
         rows_into(
             &mut slots,
             &whole_ids,
@@ -704,7 +875,7 @@ pub(crate) fn extract_run(
         );
         drop(ms1);
         drop(held);
-        return Ok(finish(slots, width_fit_count, &wp));
+        return Ok(finish(slots, width_fit_count, &wp, scales));
     }
 
     drop(held);
@@ -715,9 +886,10 @@ pub(crate) fn extract_run(
         Group::Series(k) => k,
         g => unreachable!("entry {i} is fitted on {g:?}"),
     };
-    fits.extend(width_fits(&cv_ids, run, lib, ep, &series, series_of));
-    width_fit_count = fits.len();
-    let wp = WidthPrior::from_fits(fits);
+    let scales = width_scale(&cv_ids, run, lib, ep, &series, series_of, spacing);
+    let fits = width_fits(&cv_ids, run, lib, ep, &series, series_of, &scales);
+    let width_fit_count = fits.len();
+    let wp = WidthPrior::from_fits(fits, &scales);
     rows_into(
         &mut slots, &cv_ids, run, aligned, lib, &gate, &wp, ep, &series, series_of,
     );
@@ -741,7 +913,7 @@ pub(crate) fn extract_run(
             |_| 0,
         );
     }
-    Ok(finish(slots, width_fit_count, &wp))
+    Ok(finish(slots, width_fit_count, &wp, scales))
 }
 
 /// MS2 evidence of one run's transfer and pseudo-transfer rows, by role and
@@ -1174,10 +1346,29 @@ mod tests {
     /// scans at `FAIMS_CVS[p % 2]`.
     /// Precursors in `silent` give no signal in `run`.
     fn run_scans(run: u16, faims: bool, silent: &dyn Fn(u32) -> bool) -> Vec<Ms1Scan> {
+        run_scans_shaped(run, faims, silent, WIDTH, 1.0, 0.0)
+    }
+
+    /// Seconds between a precursor's apex and its echo in
+    /// [`run_scans_shaped`].
+    const ECHO_AFTER: f64 = 19.0;
+
+    /// [`run_scans`] with elution width `width`, one scan every `step`
+    /// seconds, and, when `echo > 0`, a second peak of every precursor's
+    /// pattern [`ECHO_AFTER`] seconds after its apex at `echo` times its
+    /// amplitude (another species at the same m/z).
+    fn run_scans_shaped(
+        run: u16,
+        faims: bool,
+        silent: &dyn Fn(u32) -> bool,
+        width: f64,
+        step: f64,
+        echo: f64,
+    ) -> Vec<Ms1Scan> {
         let mut rng = Lcg(17 + run as u64);
-        (0..1300)
+        (0..(1300.0 / step) as usize)
             .map(|k| {
-                let t = k as f64;
+                let t = k as f64 * step;
                 let cv = faims.then_some(FAIMS_CVS[k % 2]);
                 let mut peaks = Vec::new();
                 for _ in 0..40 {
@@ -1188,7 +1379,8 @@ mod tests {
                 }
                 for p in 0..N_PREC {
                     let elutes = !silent(p) && cv.is_none_or(|cv| cv == FAIMS_CVS[p as usize % 2]);
-                    let g = (-(t - apex(p, run)).powi(2) / (2.0 * WIDTH * WIDTH)).exp();
+                    let profile = |c: f64| (-(t - c).powi(2) / (2.0 * width * width)).exp();
+                    let g = profile(apex(p, run)) + echo * profile(apex(p, run) + ECHO_AFTER);
                     for (i, &e) in ENVELOPE.iter().enumerate() {
                         let signal = if elutes {
                             AMPLITUDE * e as f64 * g
@@ -1373,7 +1565,12 @@ mod tests {
     fn identified_decoys_are_the_transfer_probes_at_the_identified_prior() {
         let fx = fixture(false);
         let ms1 = Ms1RunIndex::new(run_scans(1, false, &|_| false));
-        let wp = WidthPrior::from_fits(Vec::new());
+        let scales = RunScales {
+            spacing_s: ms1.median_scan_spacing(),
+            width_s: WIDTH,
+            ..RunScales::default()
+        };
+        let wp = WidthPrior::from_fits(Vec::new(), &scales);
         let entry = fx.lib.entries.iter().find(|e| e.precursor == 4).unwrap();
         let off = PairGate::new(&TransferSelection::OFF, &fx.lib);
         let (rows, _) = entry_rows(entry, 1, true, &fx.lib, &off, &ms1, &wp);
@@ -1391,7 +1588,7 @@ mod tests {
             mz_of(4),
             CHARGE,
             rt,
-            w.max(IDENTIFIED_MIN_S),
+            w.max(1.0),
             w,
             ms1.rt_range().unwrap(),
         );
@@ -1796,6 +1993,86 @@ mod tests {
                 "w_prior {w_prior}: {e:?}"
             );
         }
+    }
+
+    #[test]
+    fn run_scales_come_from_the_run() {
+        let fx = fixture(false);
+        let out = extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
+        let sc = out.counts.scales;
+        assert_eq!(sc.spacing_s, Some(1.0));
+        assert!(!sc.fallback, "{sc:?}");
+        assert!(sc.width_fits >= 20, "{sc:?}");
+        assert!((sc.width_s / WIDTH - 1.0).abs() < 0.1, "{sc:?}");
+        assert!(
+            sc.describe().contains("ms1_spacing_s=1.0000;"),
+            "{}",
+            sc.describe()
+        );
+    }
+
+    /// Run 1 of [`fixture`] with narrow peaks sampled every 0.25 s, and a
+    /// same-m/z peak five times larger [`ECHO_AFTER`] seconds after each
+    /// apex, written next to the fixture's tables.
+    fn narrow_run(fx: &Fixture, width: f64) -> PathBuf {
+        let path = fx._dir.path().join("narrow.ms1.parquet");
+        let index = Ms1RunIndex::new(run_scans_shaped(1, false, &|_| false, width, 0.25, 5.0));
+        write_ms1_table(&path, "run1", &index).unwrap();
+        path
+    }
+
+    #[test]
+    fn narrow_peaks_set_a_narrow_width_scale() {
+        // The rounds start at 6 s; the run's peaks are 1 s wide.
+        let fx = fixture(false);
+        let path = narrow_run(&fx, 1.0);
+        let out = extract_all(1, &path, &fx.lib, &params()).unwrap();
+        let sc = out.counts.scales;
+        assert_eq!(sc.spacing_s, Some(0.25));
+        assert!(!sc.fallback && sc.rounds > 1, "{sc:?}");
+        assert!((sc.width_s - 1.0).abs() < 0.1, "{sc:?}");
+        for r in out.rows.iter().filter(|r| is_identified_target(r)) {
+            let e = r.evidence.as_ref().unwrap();
+            let w_prior = e.w / e.width_ratio;
+            assert!(
+                (w_prior - 1.0).abs() < 0.15,
+                "precursor {}: {e:?}",
+                r.precursor
+            );
+        }
+    }
+
+    #[test]
+    fn identified_fit_stays_on_its_own_peak() {
+        // The PSM is 2 s after a 1 s wide apex; a peak five times larger
+        // elutes 17 s after the PSM, inside a fixed 18 s search. The
+        // identified search spans three run widths around the PSM, so the
+        // fit stays on the identified peak.
+        let fx = fixture(false);
+        let path = narrow_run(&fx, 1.0);
+        let out = extract_all(1, &path, &fx.lib, &params()).unwrap();
+        let mut n = 0;
+        for r in out.rows.iter().filter(|r| is_identified_target(r)) {
+            let e = r.evidence.as_ref().unwrap();
+            assert!(
+                (e.t0 - apex(r.precursor, 1)).abs() <= 0.5,
+                "precursor {}: {e:?}",
+                r.precursor
+            );
+            n += 1;
+        }
+        assert!(n >= 30, "{n}");
+    }
+
+    #[test]
+    fn too_few_identified_fits_fall_back_to_the_seed_width() {
+        // Every identified pair of run 1 is silent: no usable fit.
+        let fx = fixture_with(false, &|_| true, &|_| false);
+        let out = extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
+        let sc = out.counts.scales;
+        assert!(sc.fallback, "{sc:?}");
+        assert_eq!((sc.rounds, sc.width_s), (1, SEED_WIDTH_S));
+        assert!(out.counts.width_prior_fallback);
     }
 
     #[test]

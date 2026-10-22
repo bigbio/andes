@@ -87,6 +87,10 @@
 //!     --output-pin <tmp>/out.pin
 //!   cp <tmp>/out.glyco.pin test-fixtures/parity/goldens/glyco_highres.pin
 //!
+//! REGENERATED 2026-10-22 when decoys became peptide-level: 120 rows, decoy
+//! winners 1 -> 1; the candidate-pool columns move with the new decoy
+//! candidates.
+//!
 //! COMBINED 2026-10-14 (review branch: glyco and candidate-generation changes
 //! together). Against each parent golden the only differences are the other
 //! branch's changes: the boundary-sequon `@N18` tag on 2 peptides and the

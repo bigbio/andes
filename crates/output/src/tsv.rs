@@ -74,7 +74,7 @@ pub(crate) fn modifications_field(peptide: &Peptide) -> String {
 ///
 /// `search_index` is used to resolve protein accessions from
 /// `psm.candidate.protein_index`.  Decoy accessions already carry the prefix
-/// (set by `target_plus_decoy`) — no prefix arithmetic is needed here.
+/// (set by `search::decoy::decoy_db`) — no prefix arithmetic is needed here.
 ///
 /// `spec_file_name` is the bare filename (e.g. `"test.mgf"`) written in the
 /// `#SpecFile` column.

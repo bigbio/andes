@@ -454,7 +454,7 @@ reported at `--proteoform-fdr 0.05`.
 ```bash
 andes --spectrum sample.mzML \
       --database proteins.fasta \
-      --decoy-strategy sequon-reverse \
+      --decoy-strategy sequon \
       --glyco --glyco-species human \
       --output-pin results.pin
 ```
@@ -463,7 +463,8 @@ andes --spectrum sample.mzML \
   `mouse-large`, `high-mannose`) or your own `.gdb` with `--glyco-glycan-gdb`.
 - Output is only `results.glyco.pin`; `--output-tsv`, `--output-parquet`, `--rescore` and
   `--refine` are rejected. Run Percolator on it with `--trainFDR 0.05`.
-- Use `--decoy-strategy sequon-reverse`; plain reversal makes q-values anti-conservative.
+- Use `--decoy-strategy sequon`; the other generated decoys carry fewer sequons than their targets,
+  which makes q-values anti-conservative.
 - Search each fraction separately, concatenate the `.glyco.pin` files (one header) and run
   Percolator once: one fraction has too few decoys for a stable 1%.
 - HCD/CID and ETD/EThcD/AI-ETD are supported; c/z fragments localize the glycosite. The site is

@@ -574,19 +574,19 @@ fn variants_in_repeats_add_no_canonical_peptides() {
             "variant peptide {v} reads canonical"
         );
     }
-    // Reversal mirrors these regions exactly.
+    // The decoys carry regions of the same shape (the stretch a span must
+    // hold), inside the protein.
     let n = target.len();
     for i in [1, 2] {
         let len = target.proteins[i].len() as u32;
         let t = target.proteins[i].variant_region().unwrap();
         let d = idx.db.proteins[n + i].variant_region().unwrap();
         assert_eq!(
-            d,
-            model::VariantRegion {
-                start: len - t.end,
-                end: len - t.start
-            }
+            i64::from(d.start) - i64::from(d.end),
+            i64::from(t.start) - i64::from(t.end),
+            "{t:?} -> {d:?}"
         );
+        assert!(d.start.max(d.end) <= len, "{d:?}");
     }
 }
 

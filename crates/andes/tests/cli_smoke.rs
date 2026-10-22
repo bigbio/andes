@@ -612,7 +612,10 @@ fn pin_peptides(pin: &std::path::Path) -> Vec<String> {
         return Vec::new();
     };
     let header: Vec<&str> = header.split('\t').collect();
-    let col = header.iter().position(|c| *c == "Peptide").expect("Peptide");
+    let col = header
+        .iter()
+        .position(|c| *c == "Peptide")
+        .expect("Peptide");
     let label = header.iter().position(|c| *c == "Label").expect("Label");
     lines
         .map(|row| row.split('\t').collect::<Vec<_>>())

@@ -1142,7 +1142,10 @@ mod tests {
         );
         assert_eq!(DecoyStrategy::from_name("NONE"), Some(DecoyStrategy::None));
         assert_eq!(DecoyStrategy::from_name("bogus"), None);
-        assert_eq!(DecoyStrategy::from_name("sequon"), Some(DecoyStrategy::Sequon));
+        assert_eq!(
+            DecoyStrategy::from_name("sequon"),
+            Some(DecoyStrategy::Sequon)
+        );
         assert_eq!(DecoyStrategy::default(), DecoyStrategy::Shuffle);
     }
 }

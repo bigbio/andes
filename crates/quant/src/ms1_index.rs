@@ -452,10 +452,21 @@ mod tests {
         let alternating: Vec<Ms1Scan> = (0..8)
             .map(|i| scan(i as f64, Some(if i % 2 == 0 { -40.0 } else { -60.0 })))
             .collect();
-        assert_eq!(Ms1RunIndex::new(alternating).median_scan_spacing(), Some(2.0));
-        let plain = vec![scan(0.0, None), scan(1.0, None), scan(2.5, None), scan(4.0, None)];
+        assert_eq!(
+            Ms1RunIndex::new(alternating).median_scan_spacing(),
+            Some(2.0)
+        );
+        let plain = vec![
+            scan(0.0, None),
+            scan(1.0, None),
+            scan(2.5, None),
+            scan(4.0, None),
+        ];
         assert_eq!(Ms1RunIndex::new(plain).median_scan_spacing(), Some(1.5));
-        assert_eq!(Ms1RunIndex::new(vec![scan(3.0, None)]).median_scan_spacing(), None);
+        assert_eq!(
+            Ms1RunIndex::new(vec![scan(3.0, None)]).median_scan_spacing(),
+            None
+        );
     }
 
     #[test]

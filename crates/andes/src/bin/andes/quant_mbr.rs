@@ -39,7 +39,7 @@
 //!
 //! * `dt`, the median spacing of the run's MS1 scans of one FAIMS voltage:
 //!   the floor of every RT prior width `s` and of the width scale;
-//! * `w_run`, the width scale: up to 2,000 identified pairs, spread evenly
+//! * `w_run`, the width scale: up to 500 identified pairs, spread evenly
 //!   over the library (identity decoys left out), are fitted with the width
 //!   free on `{0.5, 0.7, 1, 1.4, 2} * w` with `s = max(w, dt)`, and `w` becomes
 //!   the median fitted width of the usable fits (positive amplitude, LLR at
@@ -120,7 +120,7 @@ const SEED_WIDTH_S: f64 = 6.0;
 /// current width scale.
 const WIDTH_PRIOR_GRID: [f64; 5] = [0.5, 0.7, 1.0, 1.4, 2.0];
 /// Most identified pairs fitted per round of the width-scale estimate.
-const SCALE_PAIRS: usize = 2000;
+const SCALE_PAIRS: usize = 500;
 /// Most rounds of the width-scale estimate.
 const SCALE_MAX_ROUNDS: usize = 6;
 /// The width-scale estimate stops once a round changes it by less than this
@@ -1351,7 +1351,7 @@ mod tests {
 
     /// Seconds between a precursor's apex and its echo in
     /// [`run_scans_shaped`].
-    const ECHO_AFTER: f64 = 10.0;
+    const ECHO_AFTER: f64 = 19.0;
 
     /// [`run_scans`] with elution width `width`, one scan every `step`
     /// seconds, and, when `echo > 0`, a second peak of every precursor's
@@ -2004,7 +2004,11 @@ mod tests {
         assert!(!sc.fallback, "{sc:?}");
         assert!(sc.width_fits >= 20, "{sc:?}");
         assert!((sc.width_s / WIDTH - 1.0).abs() < 0.1, "{sc:?}");
-        assert!(sc.describe().contains("ms1_spacing_s=1.0000;"), "{}", sc.describe());
+        assert!(
+            sc.describe().contains("ms1_spacing_s=1.0000;"),
+            "{}",
+            sc.describe()
+        );
     }
 
     /// Run 1 of [`fixture`] with narrow peaks sampled every 0.25 s, and a
@@ -2030,15 +2034,20 @@ mod tests {
         for r in out.rows.iter().filter(|r| is_identified_target(r)) {
             let e = r.evidence.as_ref().unwrap();
             let w_prior = e.w / e.width_ratio;
-            assert!((w_prior - 1.0).abs() < 0.15, "precursor {}: {e:?}", r.precursor);
+            assert!(
+                (w_prior - 1.0).abs() < 0.15,
+                "precursor {}: {e:?}",
+                r.precursor
+            );
         }
     }
 
     #[test]
     fn identified_fit_stays_on_its_own_peak() {
         // The PSM is 2 s after a 1 s wide apex; a peak five times larger
-        // elutes 8 s after the PSM. The identified search spans three run
-        // widths around the PSM, so the fit stays on the identified peak.
+        // elutes 17 s after the PSM, inside a fixed 18 s search. The
+        // identified search spans three run widths around the PSM, so the
+        // fit stays on the identified peak.
         let fx = fixture(false);
         let path = narrow_run(&fx, 1.0);
         let out = extract_all(1, &path, &fx.lib, &params()).unwrap();

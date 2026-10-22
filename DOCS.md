@@ -1529,7 +1529,7 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
   and every precursor in a run without FAIMS, are fitted on the whole run.
   The time scales of the fit come from each run's own MS1, before any row is fitted: the
   median spacing of its MS1 scans (of one FAIMS voltage) is the floor of every RT prior width,
-  and the run's elution-width scale is the median fitted width of up to 2,000 identified pairs
+  and the run's elution-width scale is the median fitted width of up to 500 identified pairs
   spread over the library (width free over 0.5–2 times the current scale, re-estimated until a
   round moves it by less than 10 %, starting from 6 s; 6 s when fewer than 20 fits are usable).
   The width prior along the gradient is then fitted on every identified pair around that scale,

@@ -192,7 +192,7 @@ fn restricted_artefact_mods_warn_only_with_variants() {
 }
 
 #[test]
-fn shuffle_decoys_are_refused_with_isoforms_or_chains() {
+fn shuffle_decoys_are_refused_with_isoforms_or_chains_when_non_specific() {
     let dir = tempfile::tempdir().unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_andes"))
         .arg("--spectrum")
@@ -203,6 +203,7 @@ fn shuffle_decoys_are_refused_with_isoforms_or_chains() {
         .arg(dir.path().join("x.pin"))
         .args(["--decoy-strategy", "shuffle", "--uniprot-chains"])
         .args(["--uniprot-evidence", "curated"])
+        .args(["--enzyme-specificity", "non-specific"])
         .output()
         .expect("run andes");
     assert!(!out.status.success());

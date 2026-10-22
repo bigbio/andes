@@ -40,7 +40,6 @@ use std::sync::Arc;
 
 use model::enzyme::Enzyme;
 use model::protein::{ModSite, Protein, ProteinAnnotation, ProteinDb, SiteAnchor, VariantRegion};
-use rayon::prelude::*;
 
 use crate::candidate_gen::{compute_cleavage_positions, has_met_cleaved_walk};
 use crate::search_params::SearchParams;
@@ -195,6 +194,8 @@ fn decoy_protein(p: &Protein, prefix: &str, source: Vec<u32>, proteases: &Protea
     }
 }
 
+/// Runs on the calling thread: the search configures the global thread pool
+/// after it has built the database.
 fn peptide_level_decoys(
     target: &ProteinDb,
     prefix: &str,
@@ -205,7 +206,7 @@ fn peptide_level_decoys(
     let segments = TargetSegments::new(target, proteases);
     target
         .proteins
-        .par_iter()
+        .iter()
         .map(|p| {
             let source = peptide_level_permutation(p, strategy, seed, proteases, &segments);
             decoy_protein(p, prefix, source, proteases)
@@ -222,7 +223,7 @@ fn whole_sequence_decoys(
 ) -> Vec<Protein> {
     target
         .proteins
-        .par_iter()
+        .iter()
         .enumerate()
         .map(|(i, p)| {
             let n = p.sequence.len() as u32;
@@ -264,7 +265,14 @@ fn peptide_level_permutation(
     let cuts = compute_cleavage_positions(seq, proteases.primary, &proteases.extra);
     for w in cuts.windows(2) {
         let (a, b) = (w[0] as usize, w[1] as usize);
-        let local = segment_permutation(&seq[a..b], met && a == 0, strategy, seed, proteases, targets);
+        let local = segment_permutation(
+            &seq[a..b],
+            met && a == 0,
+            strategy,
+            seed,
+            proteases,
+            targets,
+        );
         for (k, from) in local.into_iter().enumerate() {
             source[a + k] = a as u32 + from;
         }
@@ -291,7 +299,11 @@ fn segment_permutation(
     if m == 0 {
         return identity;
     }
-    let anchor = if proteases.primary.is_n_term() { 0 } else { m - 1 };
+    let anchor = if proteases.primary.is_n_term() {
+        0
+    } else {
+        m - 1
+    };
     let movable: Vec<bool> = (0..m)
         .map(|i| i != anchor && !(lead_met && i == 0) && !proteases.makes_cut(seg[i]))
         .collect();
@@ -334,8 +346,8 @@ impl TargetSegments {
     fn new(db: &ProteinDb, proteases: &Proteases) -> Self {
         let mut hashes: Vec<u64> = db
             .proteins
-            .par_iter()
-            .flat_map_iter(|p| {
+            .iter()
+            .flat_map(|p| {
                 let seq = &p.sequence;
                 let met = has_met_cleaved_walk(p);
                 let cuts = compute_cleavage_positions(seq, proteases.primary, &proteases.extra);
@@ -350,7 +362,7 @@ impl TargetSegments {
                 out
             })
             .collect();
-        hashes.par_sort_unstable();
+        hashes.sort_unstable();
         hashes.dedup();
         Self(hashes)
     }
@@ -602,7 +614,6 @@ fn map_region(v: VariantRegion, image: &[u32]) -> VariantRegion {
     }
 }
 
-
 /// Count N-X-S/T sequon start positions (X ≠ P) in a residue slice.
 fn count_sequon_starts(s: &[u8]) -> usize {
     (0..s.len().saturating_sub(2))
@@ -635,7 +646,11 @@ fn restore_sequons(orig: &[u8], source: &mut [u32], movable: &[bool]) {
     let mut i = 0usize;
     while cur < target && i + 2 < n {
         // A window that is one S/T away from being a sequon: N, X≠P, non-S/T.
-        if movable[i + 2] && r[i] == b'N' && r[i + 1] != b'P' && r[i + 2] != b'S' && r[i + 2] != b'T'
+        if movable[i + 2]
+            && r[i] == b'N'
+            && r[i + 1] != b'P'
+            && r[i + 2] != b'S'
+            && r[i + 2] != b'T'
         {
             // Donor: a later movable S/T that is not the third residue of a
             // sequon (moving it would break that sequon, a net-zero swap).
@@ -729,7 +744,6 @@ pub fn is_decoy_accession_affix(accession: &str, prefix: &str, suffix: Option<&s
     accession.starts_with(&decoy_accession_needle(prefix))
         || suffix.is_some_and(|s| !s.is_empty() && accession.ends_with(s))
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -860,10 +874,18 @@ mod tests {
         let targets: Vec<Vec<u8>> = db
             .proteins
             .iter()
-            .map(|p| p.sequence.iter().map(|&r| if r == b'I' { b'L' } else { r }).collect())
+            .map(|p| {
+                p.sequence
+                    .iter()
+                    .map(|&r| if r == b'I' { b'L' } else { r })
+                    .collect()
+            })
             .collect();
         for (t, s) in db.proteins.iter().zip(&d) {
-            let folded: Vec<u8> = s.iter().map(|&r| if r == b'I' { b'L' } else { r }).collect();
+            let folded: Vec<u8> = s
+                .iter()
+                .map(|&r| if r == b'I' { b'L' } else { r })
+                .collect();
             assert!(!targets.contains(&folded), "{}", String::from_utf8_lossy(s));
             let (mut a, mut b) = (t.sequence.clone(), s.clone());
             a.sort_unstable();
@@ -925,7 +947,11 @@ mod tests {
                 let mut changed = 0usize;
                 let mut segments = 0usize;
                 for (t, s) in db.proteins.iter().zip(&d) {
-                    let cuts = compute_cleavage_positions(&t.sequence, proteases.primary, &proteases.extra);
+                    let cuts = compute_cleavage_positions(
+                        &t.sequence,
+                        proteases.primary,
+                        &proteases.extra,
+                    );
                     assert_eq!(
                         cuts,
                         compute_cleavage_positions(s, proteases.primary, &proteases.extra),
@@ -934,7 +960,11 @@ mod tests {
                     for w in cuts.windows(2) {
                         let (a, b) = (w[0] as usize, w[1] as usize);
                         let (mut x, mut y) = (t.sequence[a..b].to_vec(), s[a..b].to_vec());
-                        let anchor = if proteases.primary.is_n_term() { a } else { b - 1 };
+                        let anchor = if proteases.primary.is_n_term() {
+                            a
+                        } else {
+                            b - 1
+                        };
                         assert_eq!(t.sequence[anchor], s[anchor], "{proteases:?} {strategy:?}");
                         segments += 1;
                         changed += usize::from(x != y);
@@ -947,7 +977,10 @@ mod tests {
                     }
                 }
                 // Short segments cannot change; most others do.
-                assert!(changed * 2 > segments, "{proteases:?} {strategy:?} {changed}/{segments}");
+                assert!(
+                    changed * 2 > segments,
+                    "{proteases:?} {strategy:?} {changed}/{segments}"
+                );
             }
         }
     }
@@ -958,7 +991,13 @@ mod tests {
         let p = Proteases::default();
         let a = decoy_db(&db, "XXX", DecoyStrategy::Shuffle, DEFAULT_DECOY_SEED, &p);
         let b = decoy_db(&db, "XXX", DecoyStrategy::Shuffle, DEFAULT_DECOY_SEED, &p);
-        let c = decoy_db(&db, "XXX", DecoyStrategy::Shuffle, DEFAULT_DECOY_SEED + 1, &p);
+        let c = decoy_db(
+            &db,
+            "XXX",
+            DecoyStrategy::Shuffle,
+            DEFAULT_DECOY_SEED + 1,
+            &p,
+        );
         let seqs = |d: &ProteinDb| -> Vec<Vec<u8>> {
             d.proteins.iter().map(|p| p.sequence.clone()).collect()
         };
@@ -975,7 +1014,13 @@ mod tests {
         let mut db = make_db(&[("P1", b"AB")]);
         db.proteins[0].description = "Some description".into();
         for prefix in ["XXX", "XXX_", ""] {
-            let d = decoy_db(&db, prefix, DecoyStrategy::Reverse, 0, &Proteases::default());
+            let d = decoy_db(
+                &db,
+                prefix,
+                DecoyStrategy::Reverse,
+                0,
+                &Proteases::default(),
+            );
             assert_eq!(d.proteins[0].accession, "XXX_P1");
             assert_eq!(d.proteins[0].description, "Some description");
         }
@@ -996,7 +1041,11 @@ mod tests {
     fn whole_sequence_sequon_reverse_is_a_permutation_and_recovers_sequons() {
         let db = make_db(&[("P1", b"NISCDENLTKRSTNVTAAK")]);
         let orig = &db.proteins[0].sequence;
-        let d = &decoys(&db, DecoyStrategy::SequonReverse, &enzyme(Enzyme::NonSpecific))[0];
+        let d = &decoys(
+            &db,
+            DecoyStrategy::SequonReverse,
+            &enzyme(Enzyme::NonSpecific),
+        )[0];
         let (mut a, mut b) = (orig.clone(), d.clone());
         a.sort_unstable();
         b.sort_unstable();

@@ -194,12 +194,13 @@ fn decoys_carry_the_sites_on_the_same_residues() {
             }
         }
     }
-    // Reversal mirrors exactly: S2/S13/T20 of a 23-mer → 20/9/2.
+    // Pseudo-reversal mirrors each site within its tryptic peptide (AGSPEK,
+    // SDSPAK, VNSTQR with K/R in place): S2/S13/T20 → 2/13/18.
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let decoy = &idx.db.proteins[target.len()];
     assert_eq!(decoy.accession, "XXX_sp|P00001|ONE_HUMAN");
     let pos: Vec<u32> = decoy.mod_sites().iter().map(|s| s.position).collect();
-    assert_eq!(pos, [2, 9, 20]);
+    assert_eq!(pos, [2, 13, 18]);
 }
 
 #[test]
@@ -770,8 +771,7 @@ fn target_and_decoy_forms(
     p: &SearchParams,
     strategy: DecoyStrategy,
 ) -> Vec<(Vec<Candidate>, Vec<Candidate>)> {
-    let idx =
-        SearchIndex::from_target_db_for(target, "XXX", None, strategy, 7, &Proteases::of(p));
+    let idx = SearchIndex::from_target_db_for(target, "XXX", None, strategy, 7, &Proteases::of(p));
     let cands: Vec<Candidate> = enumerate_candidates(&idx, p, "XXX").collect();
     let n = target.len();
     (0..n)
@@ -966,7 +966,13 @@ fn shuffled_variant_parts_keep_their_width() {
         proteins: vec![protein(VariantRegion { start: 4, end: 7 })],
     };
     let shuffled = |db: &ProteinDb, seed: u64| {
-        decoy_db(db, "XXX", DecoyStrategy::Shuffle, seed, &Proteases::default())
+        decoy_db(
+            db,
+            "XXX",
+            DecoyStrategy::Shuffle,
+            seed,
+            &Proteases::default(),
+        )
     };
     let decoy = &shuffled(&db, 2).proteins[0];
     let v = decoy.variant_parts()[0];

@@ -55,7 +55,10 @@ fn tryp_pig_bov_pseudo_reverses_every_tryptic_peptide() {
             pseudo_reversed += usize::from(b[lead..b.len() - 1] == want[..]);
         }
     }
-    assert!(pseudo_reversed * 10 > segments * 9, "{pseudo_reversed}/{segments}");
+    assert!(
+        pseudo_reversed * 10 > segments * 9,
+        "{pseudo_reversed}/{segments}"
+    );
 }
 
 #[test]

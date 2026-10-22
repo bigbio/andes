@@ -263,6 +263,15 @@ impl FragmentErrorMeasurer {
     }
 }
 
+/// The windowed peak filter setting of the search. The isobaric filter (100 Da
+/// windows, top 20) trims the dense tails of ion-trap CID-MS2; on high-res
+/// HCD-MS2 TMT it measured neutral (TKO hrMS2: 13,390 PSMs off vs 13,387 on),
+/// and on high-res label-free Astral data the same filter lost ~14% of PSMs,
+/// so a high-res acquisition turns it off. An explicit `--peak-filter` wins.
+fn isobaric_peak_filter(explicit: Option<(f64, usize)>, high_res: bool) -> Option<(f64, usize)> {
+    explicit.or(high_res.then_some((0.0, 0)))
+}
+
 /// Resolve the PIN path and the durable report base (the filtered q-value
 /// TSV and `<stem>.statistics.log` are named from it).
 ///
@@ -765,7 +774,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Protocol::Auto => match label {
             Some(l @ (input::IsobaricLabel::Tmt | input::IsobaricLabel::TmtPro)) => {
                 eprintln!(
-                    "Protocol resolver: {} {l:?} → engaging isobaric windowed peak filter",
+                    "Protocol resolver: {} {l:?} → isobaric protocol (windowed peak filter on low-res MS2)",
                     if cli.tmt.is_some() {
                         "--tmt"
                     } else {
@@ -776,7 +785,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
             Some(l @ (input::IsobaricLabel::Itraq | input::IsobaricLabel::Itraq8)) => {
                 eprintln!(
-                    "Protocol resolver: {} {l:?} → engaging isobaric windowed peak filter",
+                    "Protocol resolver: {} {l:?} → isobaric protocol (windowed peak filter on low-res MS2)",
                     if cli.tmt.is_some() {
                         "--tmt"
                     } else {
@@ -984,6 +993,20 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             Some((w, k))
         }
     };
+    let peak_filter = isobaric_peak_filter(peak_filter, acquisition.high_res);
+    if acquisition.high_res
+        && cli.peak_filter.is_none()
+        && matches!(
+            param.data_type.protocol,
+            model::protocol::Protocol::TMT
+                | model::protocol::Protocol::ITRAQ
+                | model::protocol::Protocol::ITRAQPhospho
+        )
+    {
+        eprintln!(
+            "isobaric windowed peak filter: off (high-resolution MS2; --peak-filter WINDOW:K turns it on)"
+        );
+    }
     scoring_crate::scoring::init_scoring_settings(scoring_crate::scoring::ScoringSettings {
         peak_filter,
     });
@@ -3363,5 +3386,27 @@ mod filtered_tsv_tests {
         assert!(text.starts_with("PSMId\tq-value\t"));
         assert!(text.contains("run/scan=1_1_1\t0.001\t0.01\tK.PEPTIDEK.A\tP1\tNA\tNA"));
         assert!(!output::ms1_table::partial_path(&path).exists());
+    }
+}
+
+#[cfg(test)]
+mod isobaric_peak_filter_tests {
+    use super::isobaric_peak_filter;
+
+    #[test]
+    fn high_res_turns_the_isobaric_filter_off_unless_set() {
+        // Low-res: left unset, so the protocol engages the 100 Da / top-20 filter.
+        assert_eq!(isobaric_peak_filter(None, false), None);
+        // High-res: a zero window disables it.
+        assert_eq!(isobaric_peak_filter(None, true), Some((0.0, 0)));
+        // An explicit --peak-filter wins on either class.
+        assert_eq!(
+            isobaric_peak_filter(Some((100.0, 20)), true),
+            Some((100.0, 20))
+        );
+        assert_eq!(
+            isobaric_peak_filter(Some((50.0, 10)), false),
+            Some((50.0, 10))
+        );
     }
 }

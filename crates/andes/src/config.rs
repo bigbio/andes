@@ -215,6 +215,8 @@ pub struct GlycoCfg {
     pub hcd_pair: Option<bool>,
     /// External `.gdb` glycan database, as `--glyco-glycan-gdb`.
     pub glycan_gdb: Option<PathBuf>,
+    /// WURCS 2.0 glycan database CSV, as `--glyco-glycan-wurcs`.
+    pub glycan_wurcs: Option<PathBuf>,
     /// Bundled species database, as `--glyco-species`.
     pub species: Option<String>,
     pub min_core_y: Option<u32>,
@@ -573,19 +575,28 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set!("glyco_max_peaks", glyco_max_peaks, cfg.glyco.max_peaks);
     set!("debug_glyco", debug_glyco, cfg.glyco.debug);
     set!("glyco_hcd_pair", glyco_hcd_pair, cfg.glyco.hcd_pair);
-    // The glycan database is one choice made in one place: when either flag is
+    // The glycan database is one choice made in one place: when any flag is
     // on the command line, the config's choice is ignored entirely, so the CLI
     // never ends up combined with a config value it overrides.
-    if !cli_set(m, "glyco_glycan_gdb") && !cli_set(m, "glyco_species") {
-        if cfg.glyco.glycan_gdb.is_some() && cfg.glyco.species.is_some() {
+    if !cli_set(m, "glyco_glycan_gdb")
+        && !cli_set(m, "glyco_glycan_wurcs")
+        && !cli_set(m, "glyco_species")
+    {
+        let n_sources = usize::from(cfg.glyco.glycan_gdb.is_some())
+            + usize::from(cfg.glyco.glycan_wurcs.is_some())
+            + usize::from(cfg.glyco.species.is_some());
+        if n_sources > 1 {
             return Err(
-                "config: `glyco.glycan_gdb` and `glyco.species` are mutually exclusive — set \
-                 only one"
+                "config: `glyco.glycan_gdb`, `glyco.glycan_wurcs` and `glyco.species` are \
+                 mutually exclusive — set only one"
                     .to_string(),
             );
         }
         if let Some(p) = cfg.glyco.glycan_gdb {
             args.glyco_glycan_gdb = Some(p);
+        }
+        if let Some(p) = cfg.glyco.glycan_wurcs {
+            args.glyco_glycan_wurcs = Some(p);
         }
         if let Some(s) = cfg.glyco.species {
             args.glyco_species = Some(
@@ -694,11 +705,15 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
 /// cannot check because a value may come from the config file. Runs for every
 /// search, with or without `--config`.
 pub fn check_resolved(args: &SearchArgs) -> Result<(), String> {
-    if args.glyco && args.glyco_glycan_gdb.is_none() && args.glyco_species.is_none() {
+    if args.glyco
+        && args.glyco_glycan_gdb.is_none()
+        && args.glyco_glycan_wurcs.is_none()
+        && args.glyco_species.is_none()
+    {
         return Err(
-            "--glyco requires --glyco-glycan-gdb or --glyco-species (config: \
-             `glyco.glycan_gdb` or `glyco.species`): supply a `.gdb` glycan database or a \
-             bundled species"
+            "--glyco requires --glyco-glycan-gdb, --glyco-glycan-wurcs or --glyco-species \
+             (config: `glyco.glycan_gdb`, `glyco.glycan_wurcs` or `glyco.species`): supply a \
+             `.gdb` glycan database, a WURCS 2.0 CSV, or a bundled species"
                 .to_string(),
         );
     }
@@ -1183,8 +1198,23 @@ glyco:
         assert!(check_resolved(&a).is_ok());
         assert!(check_resolved(&applied("{}", &[]).unwrap()).is_ok());
 
-        // Both sources in the config is ambiguous.
+        // The WURCS CSV source satisfies the requirement like the other two.
+        let a = applied(
+            "glyco:\n  glycan_wurcs: w.csv\n",
+            &["--glyco"],
+        )
+        .unwrap();
+        assert_eq!(a.glyco_glycan_wurcs.as_deref(), Some(std::path::Path::new("w.csv")));
+        assert!(check_resolved(&a).is_ok());
+        let a = applied("{}", &["--glyco-glycan-wurcs", "w.csv"]).unwrap();
+        assert_eq!(a.glyco_glycan_wurcs.as_deref(), Some(std::path::Path::new("w.csv")));
+
+        // Two sources in the config is ambiguous.
         let both = "glyco:\n  enabled: true\n  glycan_gdb: g.gdb\n  species: human\n";
+        assert!(applied(both, &[])
+            .unwrap_err()
+            .contains("mutually exclusive"));
+        let both = "glyco:\n  enabled: true\n  glycan_gdb: g.gdb\n  glycan_wurcs: w.csv\n";
         assert!(applied(both, &[])
             .unwrap_err()
             .contains("mutually exclusive"));

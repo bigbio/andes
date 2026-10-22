@@ -131,7 +131,7 @@ pub(crate) fn parse_predictor_backend(s: &str) -> Result<PredictorBackend, Strin
 #[derive(Args, Debug)]
 #[command(group(
     clap::ArgGroup::new("glycan_db")
-        .args(["glyco_glycan_gdb", "glyco_species"])
+        .args(["glyco_glycan_gdb", "glyco_glycan_wurcs", "glyco_species"])
         .multiple(false)
         .required(false),
 ))]
@@ -571,13 +571,23 @@ pub(crate) struct SearchArgs {
     /// Load an external `.gdb` glycan database: the glycan-first search
     /// space. Each canonical string is parsed with its tree structure preserved
     /// (core- vs antenna-fucose), and the file's NeuGc content is used as-is (no
-    /// species filtering). Takes precedence over `--glyco-species`.
+    /// species filtering). Mutually exclusive with `--glyco-glycan-wurcs` and
+    /// `--glyco-species`.
     #[arg(long = "glyco-glycan-gdb")]
     pub(crate) glyco_glycan_gdb: Option<PathBuf>,
 
+    /// Load a WURCS 2.0 glycan database CSV (GlycanID, Mass, GlycanComposition,
+    /// StructureInformation) as the glycan-first search space. Each
+    /// `StructureInformation` is a WURCS 2.0 string reduced to the same
+    /// five-symbol tree as a `.gdb` line (anomericity/ring/substituents dropped);
+    /// the Mass and composition columns are ignored and re-derived from the tree.
+    /// Mutually exclusive with `--glyco-glycan-gdb` and `--glyco-species`.
+    #[arg(long = "glyco-glycan-wurcs", value_name = "FILE")]
+    pub(crate) glyco_glycan_wurcs: Option<PathBuf>,
+
     /// Select a bundled species-specific N-glycan database instead of an external
-    /// `--glyco-glycan-gdb` file. `--glyco` requires one of the two; an explicit
-    /// `--glyco-glycan-gdb` wins. Databases and their attribution:
+    /// `--glyco-glycan-gdb` file or `--glyco-glycan-wurcs` CSV. `--glyco` requires
+    /// one of the three. Databases and their attribution:
     /// `crates/andes-glyco/glycan-db/`.
     #[arg(long = "glyco-species", value_enum)]
     pub(crate) glyco_species: Option<GlycoSpeciesFlag>,

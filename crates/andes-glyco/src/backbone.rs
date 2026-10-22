@@ -593,45 +593,21 @@ pub fn partial_glycan_by_intensity(
     score
 }
 
-/// Composition-specific glycan Y-ladder intensity match.
+/// Glycan Y-ladder intensity match, driven by the glycan's actual tree topology.
 ///
-/// Unlike [`core_y_intensity`] (the glycan-INDEPENDENT trimannosyl core, shared
-/// by every N-glycan), this walks the ASSIGNED composition's Y-ion ladder — Y0
-/// then each cumulative partial-glycan mass in biosynthetic-ish order (chitobiose
-/// core → trimannose → remaining antennae → fucose → sialic acids) — and sums the
-/// base-peak-normalised intensity of the matched ions. Because the intermediate
-/// Y-ions depend on the composition, a wrong (decoy) glycan of the SAME total
-/// mass produces a DIFFERENT ladder and scores lower. That difference is what
-/// lets a glycan-axis decoy discriminate on the glycan axis (2D FDR).
+/// A Y ion stays on the peptide and contains the reducing-end residue; each one is
+/// produced by a SINGLE glycosidic-bond cleavage (the GlycoDecipher / GlycoWorkbench
+/// B/Y convention — one Y per bond, O(n), not the combinatorial multi-cleavage set).
+/// This walks that topology-derived ladder — Y0 (the bare backbone) then each
+/// single-cleavage retained mass in ascending order up to the intact glycan — and
+/// sums the base-peak-normalised intensity of the matched ions. Because the
+/// intermediate Y-ions depend on the tree, a wrong (decoy) glycan — even one of the
+/// SAME total mass — produces a DIFFERENT ladder and scores lower; same-composition
+/// isomers with different topologies (e.g. bisecting vs antenna GlcNAc) now also
+/// score differently. That difference is what lets a glycan-axis decoy discriminate
+/// on the glycan axis (2D FDR).
 ///
 /// `bb_neutral` is the NEUTRAL peptide backbone (Y0 = bb_neutral + PROTON).
-/// Cumulative monosaccharide additions for a composition, in canonical
-/// biosynthetic-ish order (chitobiose core → trimannose → remaining antennae →
-/// fucose → sialic acids). Shared by [`glycan_y_intensity`] and its decoy so the
-/// target and decoy ladders walk the SAME add order — the decoy's discrimination
-/// relies on starting from an identical target ladder before shifting the interior.
-fn glycan_cumulative_adds(comp: &crate::glycan_db::GlycanComp, core: GlycanCore) -> Vec<f64> {
-    use crate::glycan_mass::{FUC, HEX, HEXNAC, NEUAC, NEUGC};
-    // Core split is core-type dependent: N keeps the trimannosyl chitobiose
-    // (min(2) HexNAc + min(3) Hex); O keeps only the reducing-end GalNAc
-    // (min(1) HexNAc), everything else is antenna.
-    let (core_hn, core_h) = core.core_composition();
-    let core_hexnac = comp.hexnac.min(core_hn);
-    let core_hex = comp.hex.min(core_h);
-    let mut adds: Vec<f64> = Vec::new();
-    adds.extend(std::iter::repeat_n(HEXNAC, core_hexnac as usize));
-    adds.extend(std::iter::repeat_n(HEX, core_hex as usize));
-    adds.extend(std::iter::repeat_n(
-        HEXNAC,
-        (comp.hexnac - core_hexnac) as usize,
-    ));
-    adds.extend(std::iter::repeat_n(HEX, (comp.hex - core_hex) as usize));
-    adds.extend(std::iter::repeat_n(FUC, comp.fuc as usize));
-    adds.extend(std::iter::repeat_n(NEUAC, comp.neuac as usize));
-    adds.extend(std::iter::repeat_n(NEUGC, comp.neugc as usize));
-    adds
-}
-
 pub fn glycan_y_intensity(
     peaks: &[(f64, f32)],
     stats: &SpectrumStats,
@@ -639,10 +615,10 @@ pub fn glycan_y_intensity(
     comp: &crate::glycan_db::GlycanComp,
     tol_ppm: f64,
     max_charge: u8,
-    core: GlycanCore,
 ) -> f64 {
-    // Cumulative monosaccharide additions in a canonical order (composition-specific).
-    let adds = glycan_cumulative_adds(comp, core);
+    // Single-glycosidic-bond-cleavage retained masses in ascending order (Y1..
+    // intact glycan), from the glycan's tree topology.
+    let retained = comp.y_ion_retained_masses();
 
     // Match at charges 1..=max_charge (multiply-charged Y-ions), by NEUTRAL mass.
     let match_int = |neutral: f64| -> f64 {
@@ -650,22 +626,21 @@ pub fn glycan_y_intensity(
     };
 
     let mut score = match_int(bb_neutral); // Y0 (bare backbone), neutral = bb_neutral
-    let mut cum = 0.0;
     let mut n_rungs = 1usize; // Y0
-    for m in adds {
-        cum += m;
-        score += match_int(bb_neutral + cum);
+    for r in &retained {
+        score += match_int(bb_neutral + r);
         n_rungs += 1;
     }
-    // Round-7 (audit F2): this is an UNNORMALISED sum over `1 + Σ(monosaccharides)`
-    // rungs — 6 for the trimannosyl core, up to 23 for a large composition. So
-    // E[score | noise] grows with glycan SIZE, and the term structurally rewards
-    // assigning a bigger glycan. That is the mechanism behind the measured K·ladder
-    // inversion (76.5 on wrong winners vs 53.1 on correct) and the "oversized
-    // glycan" failure signature; round-2 suppressed the symptom by cutting K 50→10
-    // but the estimator is still biased. Dividing by the rung count makes it a mean
-    // matched intensity per predicted rung, comparable across compositions — and
-    // across the de-novo branch, which always has exactly 6 rungs.
+    // Round-7 (audit F2): this is an UNNORMALISED sum over `1 + #single-cleavage
+    // retained masses` rungs — 5 for the trimannosyl core (the 2N+H rung is a
+    // two-cleavage fragment), more for branched topologies, up to ~O(n) for a large
+    // composition. So E[score | noise] grows with glycan SIZE, and the term
+    // structurally rewards assigning a bigger glycan. That is the mechanism behind
+    // the measured K·ladder inversion (76.5 on wrong winners vs 53.1 on correct) and
+    // the "oversized glycan" failure signature; round-2 suppressed the symptom by
+    // cutting K 50→10 but the estimator is still biased. Dividing by the rung count
+    // makes it a mean matched intensity per predicted rung, comparable across
+    // compositions — and across the de-novo branch, which always has exactly 6 rungs.
     ladder_norm_scale(score, n_rungs)
 }
 
@@ -738,10 +713,9 @@ pub fn glycan_y_intensity_decoy(
     tol_ppm: f64,
     max_charge: u8,
     seed: u64,
-    core: GlycanCore,
 ) -> f64 {
-    // Same canonical cumulative-adds order as glycan_y_intensity (shared helper).
-    let adds = glycan_cumulative_adds(comp, core);
+    // Same topology-derived retained masses as glycan_y_intensity.
+    let retained = comp.y_ion_retained_masses();
 
     // EXCHANGEABLE null: match with the IDENTICAL routine and charge search as the
     // target ladder ([`best_frag_intensity`], NEUTRAL mass, charges 1..=max_charge),
@@ -756,18 +730,17 @@ pub fn glycan_y_intensity_decoy(
 
     // Y0 (bare backbone) is always kept — identical to the target ladder's Y0.
     let mut score = match_int(bb_neutral);
-    let mut cum = 0.0;
-    let last = adds.len().saturating_sub(1);
-    // `ai` is the add index. Kept (unshifted, identical to the target ladder):
-    // ai==0 → Y1 (innermost HexNAc core anchor); ai==last → the top rung, which
-    // is bb + FULL glycan mass = the precursor. Because the decoy is
-    // mass-preserving (same total composition mass), its top rung sits at the SAME
+    let last = retained.len().saturating_sub(1);
+    // `ai` is the retained-mass index (ascending, so ai==0 is the innermost
+    // HexNAc and ai==last is the intact glycan). Kept (unshifted, identical to the
+    // target ladder): ai==0 → Y1 (innermost HexNAc core anchor); ai==last → the
+    // top rung, which is bb + FULL glycan mass = the precursor. Because the decoy
+    // is mass-preserving (same total mass), its top rung sits at the SAME
     // precursor mass as the target's, so it MUST be kept — shifting it would make
     // the decoy miss a peak it should match, biasing the target−decoy gap. Only
     // the true interior rungs Y2..Y_{n-1} (ai in 1..last) are shifted, so the gap
     // reflects interior glycan-Y evidence alone.
-    for (ai, m) in adds.iter().enumerate() {
-        cum += m;
+    for (ai, &r) in retained.iter().enumerate() {
         let shift = if ai == 0 || ai == last {
             0.0 // keep Y1 (core anchor) and the top rung (= precursor mass)
         } else {
@@ -775,18 +748,18 @@ pub fn glycan_y_intensity_decoy(
             let h = splitmix64(seed ^ (ai as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
             1.0 + (h % 29_000) as f64 / 1000.0
         };
-        score += match_int(bb_neutral + cum + shift);
+        score += match_int(bb_neutral + r + shift);
     }
     // Same normalisation as the target ladder — see `ladder_norm_scale`.
-    ladder_norm_scale(score, 1 + adds.len())
+    ladder_norm_scale(score, 1 + retained.len())
 }
 
-/// Fraction of a composition's Y-ladder rungs (Y0 + each cumulative add) that are
-/// MATCHED in the spectrum — a scale-free COMPLETENESS measure complementary to the
-/// intensity-weighted [`glycan_y_intensity`]: two compositions of the same total
-/// mass share Y0/Y1 and the top rung but differ on the interior, so a WRONG
-/// composition matches fewer of its own rungs even when its summed intensity looks
-/// similar. `decoy_seed = Some(seed)` corrupts the interior rungs exactly as
+/// Fraction of a composition's Y-ladder rungs (Y0 + each single-cleavage retained
+/// mass) that are MATCHED in the spectrum — a scale-free COMPLETENESS measure
+/// complementary to the intensity-weighted [`glycan_y_intensity`]: two compositions
+/// of the same total mass share Y0/Y1 and the top rung but differ on the interior, so
+/// a WRONG composition matches fewer of its own rungs even when its summed intensity
+/// looks similar. `decoy_seed = Some(seed)` corrupts the interior rungs exactly as
 /// [`glycan_y_intensity_decoy`] does (same shift, Y0/Y1/top kept), giving an
 /// exchangeable decoy counterpart so the feature can be emitted symmetrically for
 /// glycan-decoy PIN rows. Returns hits/total in `[0, 1]`.
@@ -799,18 +772,15 @@ pub fn glycan_y_hit_frac(
     tol_ppm: f64,
     max_charge: u8,
     decoy_seed: Option<u64>,
-    core: GlycanCore,
 ) -> f64 {
-    let adds = glycan_cumulative_adds(comp, core);
+    let retained = comp.y_ion_retained_masses();
     let hit = |neutral: f64| -> bool {
         best_frag_intensity(peaks, stats.sorted, neutral, tol_ppm, max_charge) > 0.0
     };
-    let total = adds.len() + 1; // Y0 + one rung per cumulative add
+    let total = retained.len() + 1; // Y0 + one rung per retained subtree mass
     let mut hits = usize::from(hit(bb_neutral)); // Y0
-    let last = adds.len().saturating_sub(1);
-    let mut cum = 0.0;
-    for (ai, m) in adds.iter().enumerate() {
-        cum += m;
+    let last = retained.len().saturating_sub(1);
+    for (ai, &r) in retained.iter().enumerate() {
         // Decoy: shift interior rungs only (keep Y1 = ai 0 and the top rung = ai last).
         let shift = match decoy_seed {
             Some(seed) if ai != 0 && ai != last => {
@@ -819,7 +789,7 @@ pub fn glycan_y_hit_frac(
             }
             _ => 0.0,
         };
-        if hit(bb_neutral + cum + shift) {
+        if hit(bb_neutral + r + shift) {
             hits += 1;
         }
     }
@@ -1110,15 +1080,7 @@ mod tests {
         let bb = 1500.0_f64; // neutral backbone
 
         // True composition HexNAc2Hex3 (trimannosyl core).
-        let truth = GlycanComp {
-            hexnac: 2,
-            hex: 3,
-            fuc: 0,
-            neuac: 0,
-            neugc: 0,
-            core_fuc: 0,
-            mass: 2.0 * HEXNAC + 3.0 * HEX,
-        };
+        let truth = GlycanComp::from_tree_str("(N(N(H(H)(H))))").unwrap();
         // Build the spectrum from the TRUE composition's Y-ladder.
         let mut cum = 0.0;
         let mut peaks: Vec<(f64, f32)> = vec![(bb + proton, 1000.0)]; // Y0
@@ -1134,18 +1096,10 @@ mod tests {
         // HexNAc3Hex2Fuc? keep same mass by construction is hard; instead use a
         // composition whose intermediate Y-ions differ (Hex-first is not built,
         // but HexNAc5 has different steps). Use HexNAc1Hex4 (~same count, diff steps).
-        let decoy = GlycanComp {
-            hexnac: 1,
-            hex: 4,
-            fuc: 0,
-            neuac: 0,
-            neugc: 0,
-            core_fuc: 0,
-            mass: 1.0 * HEXNAC + 4.0 * HEX,
-        };
+        let decoy = GlycanComp::from_tree_str("(N(H(H)(H)(H)))").unwrap();
 
-        let s_true = glycan_y_intensity(&peaks, &stats, bb, &truth, 20.0, 3, GlycanCore::NGlycan);
-        let s_decoy = glycan_y_intensity(&peaks, &stats, bb, &decoy, 20.0, 3, GlycanCore::NGlycan);
+        let s_true = glycan_y_intensity(&peaks, &stats, bb, &truth, 20.0, 3);
+        let s_decoy = glycan_y_intensity(&peaks, &stats, bb, &decoy, 20.0, 3);
         assert!(
             s_true > s_decoy,
             "true composition Y-ladder ({s_true}) must beat the decoy ({s_decoy})"
@@ -1200,15 +1154,7 @@ mod tests {
         use crate::glycan_mass::{HEX, HEXNAC};
         let proton = PROTON;
         let bb = 1500.0_f64;
-        let truth = GlycanComp {
-            hexnac: 2,
-            hex: 3,
-            fuc: 0,
-            neuac: 0,
-            neugc: 0,
-            core_fuc: 0,
-            mass: 2.0 * HEXNAC + 3.0 * HEX,
-        };
+        let truth = GlycanComp::from_tree_str("(N(N(H(H)(H))))").unwrap();
         // Spectrum built from the TRUE composition's full Y-ladder.
         let mut cum = 0.0;
         let mut peaks: Vec<(f64, f32)> = vec![(bb + proton, 1000.0)]; // Y0
@@ -1219,7 +1165,7 @@ mod tests {
         peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         let stats = SpectrumStats::new(&peaks);
 
-        let s_true = glycan_y_intensity(&peaks, &stats, bb, &truth, 20.0, 3, GlycanCore::NGlycan);
+        let s_true = glycan_y_intensity(&peaks, &stats, bb, &truth, 20.0, 3);
         let s_decoy = glycan_y_intensity_decoy(
             &peaks,
             &stats,
@@ -1228,7 +1174,6 @@ mod tests {
             20.0,
             3,
             12345,
-            GlycanCore::NGlycan,
         );
         assert!(
             s_decoy < s_true,
@@ -1245,7 +1190,6 @@ mod tests {
             20.0,
             3,
             12345,
-            GlycanCore::NGlycan,
         );
         assert!(
             (s_decoy - s_decoy2).abs() < 1e-12,
@@ -1264,15 +1208,7 @@ mod tests {
         use crate::glycan_db::GlycanComp;
         use crate::glycan_mass::{HEX, HEXNAC};
         let bb = 3200.0_f64; // large backbone → anchors observed at z=2
-        let truth = GlycanComp {
-            hexnac: 2,
-            hex: 3,
-            fuc: 0,
-            neuac: 0,
-            neugc: 0,
-            core_fuc: 0,
-            mass: 2.0 * HEXNAC + 3.0 * HEX,
-        };
+        let truth = GlycanComp::from_tree_str("(N(N(H(H)(H))))").unwrap();
         // Build the ladder as DOUBLY-charged ions only: m/z = (neutral + 2·PROTON)/2.
         let mz2 = |neutral: f64| (neutral + 2.0 * PROTON) / 2.0;
         let mut cum = 0.0;
@@ -1285,7 +1221,7 @@ mod tests {
         let stats = SpectrumStats::new(&peaks);
 
         // Target sees the z=2 ladder.
-        let s_true = glycan_y_intensity(&peaks, &stats, bb, &truth, 20.0, 3, GlycanCore::NGlycan);
+        let s_true = glycan_y_intensity(&peaks, &stats, bb, &truth, 20.0, 3);
         assert!(s_true > 0.0, "target must match the z=2 ladder");
         // Fixed decoy keeps Y0 (z=2) + Y1 (z=2) → strictly positive. The OLD +1-only
         // decoy would have scored 0.0 here (the bug this test guards against).
@@ -1297,7 +1233,6 @@ mod tests {
             20.0,
             3,
             777,
-            GlycanCore::NGlycan,
         );
         assert!(
             s_decoy > 0.0,
@@ -1317,7 +1252,6 @@ mod tests {
             20.0,
             1,
             777,
-            GlycanCore::NGlycan,
         );
         assert!(
             s_decoy_z1 == 0.0,
@@ -1335,15 +1269,7 @@ mod tests {
         use crate::glycan_db::GlycanComp;
         use crate::glycan_mass::{HEX, HEXNAC};
         let bb = 1500.0_f64;
-        let truth = GlycanComp {
-            hexnac: 2,
-            hex: 3,
-            fuc: 0,
-            neuac: 0,
-            neugc: 0,
-            core_fuc: 0,
-            mass: 2.0 * HEXNAC + 3.0 * HEX,
-        };
+        let truth = GlycanComp::from_tree_str("(N(N(H(H)(H))))").unwrap();
         let full = 2.0 * HEXNAC + 3.0 * HEX; // total glycan mass = last cumulative add
         let hexnac = HEXNAC;
         // Only Y0 (bb), Y1 (bb + HexNAc) and the TOP rung (bb + full) are present.
@@ -1354,9 +1280,9 @@ mod tests {
         ];
         peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         let stats = SpectrumStats::new(&peaks);
-        let s_true = glycan_y_intensity(&peaks, &stats, bb, &truth, 20.0, 3, GlycanCore::NGlycan);
+        let s_true = glycan_y_intensity(&peaks, &stats, bb, &truth, 20.0, 3);
         let s_decoy =
-            glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 3, 42, GlycanCore::NGlycan);
+            glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 3, 42);
         assert!(
             (s_true - s_decoy).abs() < 1e-12,
             "target ({s_true}) and decoy ({s_decoy}) must match when only kept rungs are present"
@@ -1413,16 +1339,10 @@ mod tests {
         use crate::glycan_db::GlycanComp;
         use crate::glycan_mass::{HEX, HEXNAC};
         let bb = 1500.0_f64;
-        let g = GlycanComp {
-            hexnac: 2,
-            hex: 3,
-            fuc: 0,
-            neuac: 0,
-            neugc: 0,
-            core_fuc: 0,
-            mass: 2.0 * HEXNAC + 3.0 * HEX,
-        };
-        // Full ladder present (Y0 + all 5 cumulative adds).
+        let g = GlycanComp::from_tree_str("(N(N(H(H)(H))))").unwrap();
+        // Full ladder present (Y0 + every cumulative add through the intact glycan;
+        // the 2N+H peak is supererogatory — it is a two-cleavage fragment and is not
+        // part of the single-cleavage retained set).
         let mut full: Vec<(f64, f32)> = vec![(bb + PROTON, 1000.0)];
         let mut cum = 0.0;
         for m in [HEXNAC, HEXNAC, HEX, HEX, HEX] {
@@ -1432,17 +1352,18 @@ mod tests {
         full.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         let sf = SpectrumStats::new(&full);
         assert!(
-            (glycan_y_hit_frac(&full, &sf, bb, &g, 20.0, 3, None, GlycanCore::NGlycan) - 1.0).abs()
+            (glycan_y_hit_frac(&full, &sf, bb, &g, 20.0, 3, None) - 1.0).abs()
                 < 1e-9,
             "full ladder → 1.0"
         );
-        // Only Y0 present → 1/6.
+        // Only Y0 present → 1/5 (the single-cleavage core ladder has 4 retained
+        // rungs: N, 2N, 2N+2H, 2N+3H — the 2N+H rung needs two cleavages).
         let p0 = vec![(bb + PROTON, 1000.0)];
         let s0 = SpectrumStats::new(&p0);
-        let f0 = glycan_y_hit_frac(&p0, &s0, bb, &g, 20.0, 3, None, GlycanCore::NGlycan);
-        assert!((f0 - 1.0 / 6.0).abs() < 1e-9, "Y0 only → 1/6, got {f0}");
+        let f0 = glycan_y_hit_frac(&p0, &s0, bb, &g, 20.0, 3, None);
+        assert!((f0 - 1.0 / 5.0).abs() < 1e-9, "Y0 only → 1/5, got {f0}");
         // Decoy shifts interior rungs → fewer of ITS rungs match the true ladder.
-        let dec = glycan_y_hit_frac(&full, &sf, bb, &g, 20.0, 3, Some(123), GlycanCore::NGlycan);
+        let dec = glycan_y_hit_frac(&full, &sf, bb, &g, 20.0, 3, Some(123));
         assert!(
             dec < 1.0,
             "decoy ladder must miss shifted interior rungs, got {dec}"
@@ -1687,36 +1608,6 @@ mod tests {
             (out[0].backbone_mass - true_bb).abs() < 0.05,
             "expected true backbone first, got {}",
             out[0].backbone_mass
-        );
-    }
-
-    #[test]
-    fn o_glycan_cumulative_adds_use_single_galnac_core() {
-        use crate::glycan_mass::{HEX, HEXNAC, NEUAC};
-        let mk = |hexnac: u8, hex: u8, neuac: u8| crate::glycan_db::GlycanComp {
-            hexnac,
-            hex,
-            fuc: 0,
-            neuac,
-            neugc: 0,
-            core_fuc: 0,
-            mass: 0.0,
-        };
-        // core-1 = Gal-GalNAc (Hex1HexNAc1): the reducing-end GalNAc is the core, the
-        // Hex is antenna.
-        assert_eq!(
-            glycan_cumulative_adds(&mk(1, 1, 0), GlycanCore::OGlycan),
-            vec![HEXNAC, HEX]
-        );
-        // sialyl-Tn = NeuAc-GalNAc (HexNAc1NeuAc1): the NeuAc is antenna.
-        assert_eq!(
-            glycan_cumulative_adds(&mk(1, 0, 1), GlycanCore::OGlycan),
-            vec![HEXNAC, NEUAC]
-        );
-        // N-glycan keeps the trimannosyl core: HexNAc2Hex3 is all core (no antenna).
-        assert_eq!(
-            glycan_cumulative_adds(&mk(2, 3, 0), GlycanCore::NGlycan),
-            vec![HEXNAC, HEXNAC, HEX, HEX, HEX]
         );
     }
 

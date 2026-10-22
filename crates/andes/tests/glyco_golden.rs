@@ -1,5 +1,32 @@
 //! Golden test for the `--glyco` path.
 //!
+//! REGENERATED 2026-10-21 (single-cleavage Y-ions) when Y-ion generation was aligned
+//! with GlycoDecipher's B/Y convention: ONE Y ion per glycosidic bond (O(n)),
+//! replacing the combinatorial root-containing-subtree set that over-generated
+//! multi-cleavage fragments for branched glycans. Verified before copying: header
+//! identical, 120 -> 120 rows, 3 winner flips — all three on the SAME peptide
+//! (THRB_HUMAN R.SRYPHKPEINSTTHPGADLQENFCR.N@N10), where a core-fucosylated
+//! di-fucose glycan `(N(F)(N(H(H(N(F)(H)))(H(N(H))))))` re-ranks onto a mono-
+//! sialylated isomer `(N(N(H(H(N(A)(H)))(H(N(H))))))`. Same peptide/protein, so the
+//! flips are glycan-annotation changes, not peptide-identity changes. `YLadderScore`
+//! moved on 119 rows, `YHitFrac` on 116, `GlycanMass`/`SialicConsistency` on the 3
+//! flipped rows, and `DeltaRT`/`AbsDeltaRT`/`DeltaRTNorm` on all 120 (winner flips
+//! shift the per-run RT-calibration anchors). The candidate-pool columns (`RawScore`,
+//! `TailorScore`, `CandidateRankEntropy`, `ListwiseScoreGap`, `DeltaRankScore`) are
+//! unchanged, so the peptide candidate pool is untouched — only the glycan axis moved.
+//!
+//! REGENERATED 2026-10-21 when the glycan tree topology was retained and Y-ions
+//! derived from it (previously the .gdb tree was dropped and fragment generation
+//! collapsed to composition counts + one core-fucose bit). Verified before copying:
+//! header identical, 120 -> 120 rows, 1 winner flip. The Peptide column gained the
+//! canonical tree suffix on all 120 rows (same composition, now topology-tagged).
+//! `YLadderScore`/`YHitFrac` moved on 105 rows and `DeltaRT`/`AbsDeltaRT`/`DeltaRTNorm`
+//! on all 120 (the single winner flip shifts the per-run RT-calibration anchors).
+//! The one winner flip is scan 15797, VTNC_HUMAN -> YEDW_ECOLI: a weak winner
+//! re-ranked onto the E. coli background (CoreYHits 5 -> 1), the same signature the
+//! 2026-09-09 structure-aware Y-ion change produced. Both glycans are branched DB
+//! trees whose topology-derived ladder replaces the old composition-pinned ladder.
+//!
 //! REGENERATED 2026-10-14 when the glycosite tag began counting the boundary
 //! sequon (an N-X-S/T completed by the residue after the peptide). Verified before
 //! copying: header identical, 120 -> 120 rows, 0 winner changes; only the Peptide

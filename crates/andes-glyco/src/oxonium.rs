@@ -145,7 +145,6 @@ mod tests {
     /// non-sialylated glycan (neuac=0) is penalized on the SAME spectrum.
     #[test]
     fn sialic_consistency_discriminates_by_composition() {
-        use crate::glycan_mass::{HEX, HEXNAC, NEUAC};
         // Spectrum carries strong NeuAc oxonium (274.092, 292.103).
         let peaks = vec![
             (500.0, 100.0),
@@ -153,24 +152,8 @@ mod tests {
             (292.1027, 35.0),
             (204.087, 20.0),
         ];
-        let sialylated = GlycanComp {
-            hexnac: 4,
-            hex: 5,
-            fuc: 0,
-            neuac: 2,
-            neugc: 0,
-            core_fuc: 0,
-            mass: 4.0 * HEXNAC + 5.0 * HEX + 2.0 * NEUAC,
-        };
-        let no_sialic = GlycanComp {
-            hexnac: 4,
-            hex: 5,
-            fuc: 0,
-            neuac: 0,
-            neugc: 0,
-            core_fuc: 0,
-            mass: 4.0 * HEXNAC + 5.0 * HEX,
-        };
+        let sialylated = GlycanComp::from_counts(4, 5, 0, 2, 0, 0);
+        let no_sialic = GlycanComp::from_counts(4, 5, 0, 0, 0, 0);
         let s = sialic_consistency(&peaks, &sialylated, 20.0);
         let n = sialic_consistency(&peaks, &no_sialic, 20.0);
         assert!(

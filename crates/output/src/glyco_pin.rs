@@ -430,8 +430,8 @@ fn glycan_tag_with_site(
         },
     };
     format!(
-        "[HexNAc{}Hex{}Fuc{}NeuAc{}NeuGc{}{}]",
-        g.hexnac, g.hex, g.fuc, g.neuac, g.neugc, site
+        "[HexNAc{}Hex{}Fuc{}NeuAc{}NeuGc{}{} {}]",
+        g.hexnac, g.hex, g.fuc, g.neuac, g.neugc, site, g.tree.canonical()
     )
 }
 
@@ -806,15 +806,7 @@ mod tests {
 
     fn make_key(is_db: bool, glycan_mass: f64) -> GlycoPsmKey {
         let glycan = if is_db {
-            Some(GlycanComp {
-                hexnac: 4,
-                hex: 5,
-                fuc: 1,
-                neuac: 2,
-                neugc: 0,
-                core_fuc: 0,
-                mass: glycan_mass,
-            })
+            Some(GlycanComp::from_counts(4, 5, 1, 2, 0, 0))
         } else {
             None
         };
@@ -841,33 +833,30 @@ mod tests {
 
     #[test]
     fn glycan_tag_reports_an_unambiguous_glycosite_and_refuses_an_ambiguous_one() {
-        let g = GlycanComp {
-            hexnac: 2,
-            hex: 5,
-            fuc: 0,
-            neuac: 0,
-            neugc: 0,
-            core_fuc: 0,
-            mass: 0.0,
-        };
+        let g = GlycanComp::from_counts(2, 5, 0, 0, 0, 0);
         // exactly one N-X-S/T: the site is a fact about the sequence.
-        assert!(glycan_tag_with_site(&g, b"AANLTK", b'A', GlycanCore::NGlycan).ends_with("@N3]"));
+        assert!(glycan_tag_with_site(&g, b"AANLTK", b'A', GlycanCore::NGlycan).contains("@N3 "));
         // the sequon may sit at the very start; positions are 1-based.
-        assert!(glycan_tag_with_site(&g, b"NLTAAK", b'A', GlycanCore::NGlycan).ends_with("@N1]"));
+        assert!(glycan_tag_with_site(&g, b"NLTAAK", b'A', GlycanCore::NGlycan).contains("@N1 "));
         // two sequons: andes does not localize by default, so it must not pick.
         assert!(
-            glycan_tag_with_site(&g, b"ANLTANCSK", b'A', GlycanCore::NGlycan).ends_with("@N?]")
+            glycan_tag_with_site(&g, b"ANLTANCSK", b'A', GlycanCore::NGlycan).contains("@N? ")
         );
         // no sequon at all is also "not a site andes assigned".
-        assert!(glycan_tag_with_site(&g, b"AAAAK", b'A', GlycanCore::NGlycan).ends_with("@N?]"));
+        assert!(glycan_tag_with_site(&g, b"AAAAK", b'A', GlycanCore::NGlycan).contains("@N? "));
         // a boundary sequon (…N-K | S-…) is the peptide's only glycosite.
-        assert!(glycan_tag_with_site(&g, b"AAANK", b'S', GlycanCore::NGlycan).ends_with("@N4]"));
+        assert!(glycan_tag_with_site(&g, b"AAANK", b'S', GlycanCore::NGlycan).contains("@N4 "));
         // an internal sequon plus a boundary one is two sites, not one.
-        assert!(glycan_tag_with_site(&g, b"ANLTANK", b'T', GlycanCore::NGlycan).ends_with("@N?]"));
-        // the composition itself is unchanged by the site suffix.
+        assert!(glycan_tag_with_site(&g, b"ANLTANK", b'T', GlycanCore::NGlycan).contains("@N? "));
+        // the composition itself is unchanged by the site suffix, and the canonical
+        // tree is appended so topology-distinct isomers stay distinct Peptide tags.
         assert!(
             glycan_tag_with_site(&g, b"AANLTK", b'A', GlycanCore::NGlycan)
                 .starts_with("[HexNAc2Hex5Fuc0NeuAc0NeuGc0")
+        );
+        assert!(
+            glycan_tag_with_site(&g, b"AANLTK", b'A', GlycanCore::NGlycan)
+                .ends_with("(N(N(H(H(H(H(H)))))))]")
         );
     }
 
@@ -1092,15 +1081,7 @@ mod tests {
         let psm = make_minimal_psm(0, 10.0);
         let glycan_key = GlycoPsmKey {
             spectrum_idx: 0,
-            glycan: Some(GlycanComp {
-                hexnac: 2,
-                hex: 3,
-                fuc: 0,
-                neuac: 0,
-                neugc: 0,
-                core_fuc: 0,
-                mass: glycan_mass,
-            }),
+            glycan: Some(GlycanComp::from_counts(2, 3, 0, 0, 0, 0)),
             glycan_source: Source::Db,
             oxonium_summed_frac: 0.2,
             n_core_oxonium_ions: 2,
@@ -1325,15 +1306,7 @@ mod tests {
         let spectra = vec![make_glyco_spectrum(precursor_mz)];
 
         let mut key = make_key(true, glycan_mass);
-        key.glycan = Some(GlycanComp {
-            hexnac: 2,
-            hex: 3,
-            fuc: 0,
-            neuac: 0,
-            neugc: 0,
-            core_fuc: 0,
-            mass: glycan_mass,
-        });
+        key.glycan = Some(GlycanComp::from_counts(2, 3, 0, 0, 0, 0));
         // Distinctive values on columns near the redesign block, so a header/writer
         // ORDER drift (not just a count drift) is caught: the value must appear
         // under its own header name.

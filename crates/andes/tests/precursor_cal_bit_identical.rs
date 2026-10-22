@@ -1,3 +1,6 @@
+//! REGENERATED 2026-10-22: decoys became peptide-level. 354 -> 366 rows: the
+//! 183 target rows stay, decoy rows 171 -> 183.
+//!
 //! REGENERATED 2026-10-19: exact `rank_score` ties are settled by the PSM total
 //! order (peptide content) instead of arrival order. Same rows; on 6 spectra the
 //! two rows tied at the top swap rank, so the SpecId suffix and the Label

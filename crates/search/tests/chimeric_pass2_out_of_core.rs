@@ -8,7 +8,8 @@
 //!
 //!  * `DAFLGSFLYEYSR` — an ordinary target secondary;
 //!  * protein-N-term-acetylated `VDLLAGEK` — a COLLISION DECOY: it is the
-//!    N-terminal peptide of a reversed decoy protein, its bare sequence is also
+//!    N-terminal peptide of a decoy protein the database supplies (generated
+//!    decoys avoid spelling a target peptide), its bare sequence is also
 //!    an internal target peptide, and the target twin has no acetylated form, so
 //!    the twin lies 42 Da outside the secondary's window. Pass 2 must relabel
 //!    it as target (the global relabel), not only when the twin happens to be
@@ -127,9 +128,10 @@ fn acetyl() -> Modification {
     }
 }
 
-/// Target proteins. `P2` reversed starts with `VDLLAGEK|R...`, so the decoy
-/// protein's N-terminal peptide is `VDLLAGEK`, which `P1` also contains
-/// internally (never at a protein N-terminus).
+/// Target proteins and the decoy of `P2`, its reversal `VDLLAGEK|R...`, given
+/// in the database (`--decoy-strategy none`): the decoy protein's N-terminal
+/// peptide is `VDLLAGEK`, which `P1` also contains internally (never at a
+/// protein N-terminus).
 fn fixture() -> (SearchIndex, SearchParams) {
     let target = ProteinDb {
         proteins: vec![
@@ -145,9 +147,21 @@ fn fixture() -> (SearchIndex, SearchParams) {
                 sequence: b"MPSTRKEGALLDV".to_vec(),
                 annotation: None,
             },
+            Protein {
+                accession: "XXX_P2".into(),
+                description: "".into(),
+                sequence: b"VDLLAGEKRTSPM".to_vec(),
+                annotation: None,
+            },
         ],
     };
-    let idx = SearchIndex::from_target_db(&target, "XXX");
+    let idx = SearchIndex::from_target_db_with_strategy(
+        &target,
+        "XXX",
+        None,
+        search::decoy::DecoyStrategy::None,
+        0,
+    );
     let aa_set = AminoAcidSetBuilder::new_standard()
         .add_variable_mod(acetyl())
         .build()

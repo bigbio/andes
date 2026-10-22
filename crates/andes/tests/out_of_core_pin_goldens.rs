@@ -213,6 +213,22 @@
 //!
 //! The slice goldens carry no charge outside 2..5; only their SpecIds change.
 //!
+//! REGENERATED 2026-10-22 when decoys became peptide-level (each cleavage
+//! segment shuffled with its cleavage residues in place). Targets and their
+//! scoring are unchanged; the decoy candidates, and through the pool
+//! statistics some winners, move:
+//!
+//! | case | rows | target rows | decoy rows |
+//! |---|---|---|---|
+//! | E. coli default mods (and precursor-cal auto) | 75,391 -> 75,028 | — | — |
+//! | E. coli fixed mods only | 77,450 -> 77,496 | — | — |
+//! | E. coli one variable mod | 75,525 -> 75,570 | — | — |
+//! | `--chimeric` slice | 1,717 -> 1,718 | 881 -> 827 | 836 -> 891 |
+//! | `--refine` slice | 1,589 -> 1,580 | 805 -> 760 | 784 -> 820 |
+//!
+//! The pre-pass outcome line reads 489 spectra with PSMs (was 492) and 63
+//! below the RawScore floor (was 55).
+//!
 //! To regenerate after an intentional change, run the case's command line (see
 //! `run`), then either digest the PIN with `identity_digest` (E. coli) or write
 //! its header and sorted rows, gzipped, over the case's golden PIN (slices).
@@ -395,15 +411,15 @@ fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
 /// One E. coli case: (rows, `identity_digest` FNV-1a 64, calibration outcome line).
 type Golden = (usize, u64, Option<&'static str>);
 
-const ECOLI_DEFAULT_MODS: Golden = (75_391, 0x4e5f_d1da_e444_1613, None);
-const ECOLI_FIXED_MODS_ONLY: Golden = (77_450, 0x56f1_9904_b0aa_12dd, None);
-const ECOLI_ONE_VARIABLE_MOD: Golden = (75_525, 0x1902_4c36_5bc3_677f, None);
+const ECOLI_DEFAULT_MODS: Golden = (75_028, 0x1332_8c54_13de_0d31, None);
+const ECOLI_FIXED_MODS_ONLY: Golden = (77_496, 0x4863_fd3a_f8e3_8059, None);
+const ECOLI_ONE_VARIABLE_MOD: Golden = (75_570, 0xcab0_4a83_68c2_66d0, None);
 /// The pre-pass scores but the sample is too small to calibrate, so the PIN
 /// equals the calibration-off one.
 const ECOLI_PRECURSOR_CAL_AUTO: Golden = (
-    75_391,
-    0x4e5f_d1da_e444_1613,
-    Some("Precursor mass calibration skipped (insufficient confident PSMs: 492 with PSMs, 55 below RawScore floor, 0 failed |residual|>50ppm"),
+    75_028,
+    0x1332_8c54_13de_0d31,
+    Some("Precursor mass calibration skipped (insufficient confident PSMs: 489 with PSMs, 63 below RawScore floor, 0 failed |residual|>50ppm"),
 );
 
 fn assert_ecoli_golden(label: &str, mods: Option<&str>, precursor_cal: &str, golden: Golden) {

@@ -604,31 +604,36 @@ fn etd_cz_only_mgf() -> String {
     mgf
 }
 
-/// The PIN `Peptide` of the first (rank-1) row, if any.
-fn rank1_peptide(pin: &std::path::Path) -> Option<String> {
+/// Each PIN row's `Label:Peptide`.
+fn pin_peptides(pin: &std::path::Path) -> Vec<String> {
     let text = std::fs::read_to_string(pin).expect("read PIN");
     let mut lines = text.lines();
-    let header: Vec<&str> = lines.next()?.split('\t').collect();
-    let col = header.iter().position(|c| *c == "Peptide")?;
-    let label = header.iter().position(|c| *c == "Label")?;
+    let Some(header) = lines.next() else {
+        return Vec::new();
+    };
+    let header: Vec<&str> = header.split('\t').collect();
+    let col = header.iter().position(|c| *c == "Peptide").expect("Peptide");
+    let label = header.iter().position(|c| *c == "Label").expect("Label");
     lines
-        .next()
         .map(|row| row.split('\t').collect::<Vec<_>>())
         .map(|f| format!("{}:{}", f[label], f[col]))
+        .collect()
 }
 
 /// Low-resolution ETD under the default candidate index: the fragment-ion index
 /// holds only b/y ions, so a spectrum explained by c/z ions alone must not be
-/// retrieved through it. The ETD search keeps enumeration and returns the
-/// target at rank 1.
+/// retrieved through it. The ETD search keeps enumeration and scores the
+/// target. (Its peptide-level decoy has the same mass and also competes; on
+/// this synthetic spectrum of equal-intensity c/z peaks it can outrank the
+/// target, so the test asks for the target row, not for rank 1.)
 #[test]
 fn lowres_etd_cz_only_spectrum_is_identified_under_the_default_index() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mgf = dir.path().join("etd.mgf");
     let fasta = dir.path().join("etd.fasta");
     std::fs::write(&mgf, etd_cz_only_mgf()).unwrap();
-    // The peptide is the whole protein, so its reversed decoy has no tryptic
-    // peptide of the same mass and the target is the only candidate.
+    // The peptide is the whole protein: the target and its decoy are the only
+    // candidates.
     std::fs::write(&fasta, format!(">sp|ETD1|ETD1_TEST\n{ETD_PEPTIDE}\n")).unwrap();
     for extra in [&[][..], &["--fragment-index", "off"][..]] {
         let pin = dir.path().join(format!("etd{}.pin", extra.len()));
@@ -648,11 +653,11 @@ fn lowres_etd_cz_only_spectrum_is_identified_under_the_default_index() {
             "andes {extra:?} failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let top = rank1_peptide(&pin);
+        let rows = pin_peptides(&pin);
         assert!(
-            top.as_deref()
-                .is_some_and(|p| p.starts_with("1:") && p.contains(ETD_PEPTIDE)),
-            "{extra:?}: expected target {ETD_PEPTIDE} at rank 1, got {top:?}\n{}",
+            rows.iter()
+                .any(|p| p.starts_with("1:") && p.contains(ETD_PEPTIDE)),
+            "{extra:?}: expected a target row of {ETD_PEPTIDE}, got {rows:?}\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
     }

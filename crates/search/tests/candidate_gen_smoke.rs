@@ -89,12 +89,12 @@ fn no_cleavage_enzyme_emits_full_protein_only() {
     p.max_missed_cleavages = 0;
     p.max_variable_mods_per_peptide = 0;
     let candidates: Vec<_> = enumerate_candidates(&idx, &p, "XXX").collect();
-    // Protein starts with M, so Met-cleaved pass also runs.
-    // Standard pass: target "MKWVTFISLLR" (len=11, offset=0) + decoy "RLLSIFTFVKM" (len=11, offset=0).
-    // Met-cleaved pass (target only, since decoy "RLLSIFTFVKM" starts with R):
-    //   sub_seq "KWVTFISLLR" (len=10) → 1 candidate at offset=1.
-    // Total: 3 (2 standard + 1 met-cleaved target).
-    assert_eq!(candidates.len(), 3);
+    // Protein starts with M, so Met-cleaved pass also runs, on the target and
+    // on its decoy, which keeps the initiator Met (and the K and R).
+    // Standard pass: target "MKWVTFISLLR" (len=11, offset=0) + its decoy.
+    // Met-cleaved pass: "KWVTFISLLR" and the decoy's (len=10) at offset=1.
+    // Total: 4.
+    assert_eq!(candidates.len(), 4);
     let target_candidates: Vec<_> = candidates.iter().filter(|c| !c.is_decoy).collect();
     assert_eq!(target_candidates.len(), 2);
     // Standard target: full protein at offset 0, length 11.

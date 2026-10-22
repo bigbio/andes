@@ -29,8 +29,24 @@ use scoring_crate::param_model::{FragmentOffsetFrequency, IonType, Partition, Sp
 use scoring_crate::scoring::fragment_ions::predict_by_ions;
 use scoring_crate::{Param, RankScorer};
 use search::candidate_gen::{enumerate_candidates, Candidate};
+use search::decoy::DecoyStrategy;
 use search::psm::TopNQueue;
 use search::{PreparedSearch, SearchIndex, SearchParams};
+
+/// The search index of `target` plus its whole-protein reversed decoys, given
+/// in the database (`--decoy-strategy none`). The PSM goldens below were
+/// recorded on that database; the fixtures test the candidate paths, not the
+/// decoy construction.
+fn with_reversed_decoys(target: &ProteinDb) -> SearchIndex {
+    let mut db = target.clone();
+    db.proteins.extend(target.proteins.iter().map(|p| Protein {
+        accession: format!("XXX_{}", p.accession),
+        description: p.description.clone(),
+        sequence: p.sequence.iter().rev().copied().collect(),
+        annotation: None,
+    }));
+    SearchIndex::from_target_db_with_strategy(&db, "XXX", None, DecoyStrategy::None, 0)
+}
 
 /// Realistic-enough scorer so candidates score on placed b/y peaks.
 fn make_scorer(tol_da: f64) -> RankScorer {
@@ -162,7 +178,7 @@ fn small_search_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
             },
         ],
     };
-    let idx = SearchIndex::from_target_db(&target, "XXX");
+    let idx = with_reversed_decoys(&target);
 
     let ox_m = Modification {
         name: "Oxidation".to_string(),
@@ -227,7 +243,7 @@ fn asymmetric_cam_only_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
             annotation: None,
         }],
     };
-    let idx = SearchIndex::from_target_db(&target, "XXX");
+    let idx = with_reversed_decoys(&target);
 
     // Fixed carbamidomethyl on C (cam_only): NOT a variable mod.
     let cam = Modification {
@@ -310,7 +326,7 @@ fn asymmetric_cam_only_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
 }
 
 /// A palindromic protein: its tryptic peptide `MAEK` reverses to ITSELF, so the
-/// reverse decoy's bare sequence equals a real target's — a collision decoy that
+/// reversed decoy's bare sequence equals a real target's — a collision decoy that
 /// must be relabelled as target using the GLOBAL target set.
 fn palindrome_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
     // Protein "MAEKKEAM" is a palindrome (reverse == itself), so its tryptic
@@ -323,7 +339,7 @@ fn palindrome_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
             annotation: None,
         }],
     };
-    let idx = SearchIndex::from_target_db(&target, "XXX");
+    let idx = with_reversed_decoys(&target);
 
     let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
     let mut params = SearchParams::default_tryptic(aa_set);

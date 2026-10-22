@@ -94,6 +94,98 @@ class SharedRules(unittest.TestCase):
         self.assertIn("T/E = 2.667", out)
 
 
+class ShuffledEntrap(unittest.TestCase):
+    """build_shuffled_entrap.py: the peptide-level shuffle."""
+
+    script = os.path.join(BENCH, "build_shuffled_entrap.py")
+    targets = [
+        (">sp|P00001|A_HUMAN", "MSDEQWLAGHKTPEFNMLCRGGYSTNDEPWVKAHMSEQK"),
+        (">sp|P00002|B_HUMAN", "MPEDNVWQYTRSAHGFLEKTPEFNMLCRDWQHNEPSGAMYLK"),
+        (">sp|P00003|C_YEAST", "MKRPAGWDYENSTLFKPMNWEHQRPDSAGLTVK"),
+    ]
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, BENCH)
+        import build_shuffled_entrap as bse
+        cls.bse = bse
+
+    def write(self, entries):
+        path = os.path.join(tempfile.mkdtemp(), "t.fasta")
+        with open(path, "w") as fh:
+            fh.write("".join(f"{h}\n{s}\n" for h, s in entries))
+        return path
+
+    def build(self, entries, *flags):
+        src = self.write(entries)
+        out = src + ".out.fasta"
+        log = run([sys.executable, "-I", self.script, src, out, *flags])
+        with open(out) as fh:
+            text = fh.read()
+        db = list(ec.read_fasta(out))
+        return db[:len(entries)], db[len(entries):], text, log
+
+    def test_cterm_composition_and_cleavage_sites(self):
+        for flags, rule in (((), False), (("--proline-rule",), True)):
+            tgt, ent, _, _ = self.build(self.targets, "--seed", "7", *flags)
+            self.assertEqual(tgt, self.targets)
+            self.assertEqual(len(ent), len(tgt))
+            for (th, ts), (eh, es) in zip(tgt, ent):
+                self.assertIn("ENTRAP_", eh)
+                self.assertNotIn("ENTRAP_", th)
+                tp, ep = self.bse.cleave(ts, rule), self.bse.cleave(es, rule)
+                # Same cleavage sites, so the same peptide boundaries.
+                self.assertEqual([len(p) for p in tp], [len(p) for p in ep])
+                for a, b in zip(tp, ep):
+                    self.assertEqual(a[-1], b[-1], (a, b))
+                    self.assertEqual(sorted(a), sorted(b), (a, b))
+                    if rule:
+                        for i, c in enumerate(a):
+                            if c in "KRP":
+                                self.assertEqual(b[i], c, (a, b))
+                self.assertNotEqual(ts, es)
+
+    def test_no_target_collisions_il_folded(self):
+        # LAVK's free residues have six orders; five are targets, so the only allowed
+        # shuffle of all five is VALK.
+        five = ["LAVK", "LVAK", "ALVK", "AVLK", "VLAK"]
+        entries = [(f">sp|Q{i}|P{i}_HUMAN", p) for i, p in enumerate(five)]
+        _, ent, _, log = self.build(entries)
+        self.assertEqual({s for _, s in ent}, {"VALK"})
+        self.assertIn("after 100 draws 0", log)
+        # VAIK folds to VALK: now no shuffle avoids a target, and that is reported.
+        _, _, _, log = self.build(entries + [(">sp|Q9|P9_HUMAN", "VAIK")])
+        self.assertIn("after 100 draws 6", log)
+
+    def test_identical_peptides_shuffled_alike(self):
+        tgt, ent, _, _ = self.build(self.targets)
+        # TPEFNMLCR is peptide 1 of A and peptide 2 of B.
+        a = self.bse.cleave(ent[0][1])[1]
+        b = self.bse.cleave(ent[1][1])[2]
+        self.assertEqual(self.bse.cleave(tgt[0][1])[1], "TPEFNMLCR")
+        self.assertEqual(self.bse.cleave(tgt[1][1])[2], "TPEFNMLCR")
+        self.assertEqual(a, b)
+        self.assertNotEqual(a, "TPEFNMLCR")
+
+    def test_deterministic(self):
+        _, _, one, _ = self.build(self.targets, "--seed", "3")
+        _, _, two, _ = self.build(self.targets, "--seed", "3")
+        _, _, other, _ = self.build(self.targets, "--seed", "4")
+        self.assertEqual(one, two)
+        self.assertNotEqual(one, other)
+
+    def test_reports_measured_te(self):
+        _, _, _, log = self.build(self.targets)
+        self.assertRegex(log, r"T/E = \d+\.\d{3}")
+        self.assertNotIn("2.0 (it is exactly 1:1)", log)
+
+    def test_rejects_entrapment_input(self):
+        src = self.write(self.targets + [(">sp|ENTRAP_X|ENTRAP_X", "AAAK")])
+        r = subprocess.run([sys.executable, "-I", self.script, src, src + ".o"],
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+
+
 class EvalEntrap(unittest.TestCase):
     script = os.path.join(BENCH, "glyco", "eval_entrap.py")
 

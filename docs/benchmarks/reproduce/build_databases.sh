@@ -59,21 +59,19 @@ echo "==> entrapment scaling factor (needed to compute a true FDP)"
 # cleavage, 6..50 residues), I/L folded. Entrapment peptides found in a sample protein are
 # counted as target, matching how run.sh counts hits (../entrap_common.py).
 python3 "$(dirname "$0")/../entrap_common.py" te "$DB/yeast_entrap.fasta"
-# ---------------------------------------------------------------- glyco databases
-# These were MISSING: the glyco recipe referenced mouse_entrap.fasta, which no script in
-# this repository produced. An independent reproduction therefore had to invent one, built
-# a foreign-proteome entrapment instead of the 1:1 shuffled design the published numbers
-# used, and came out ~21% high. Both halves of that are now buildable here.
+# ---------------------------------------------------------------- mouse databases
+# The phospho and glyco benchmarks search mouse reviewed proteins plus a peptide-level shuffled
+# entrapment of them (../build_shuffled_entrap.py: each tryptic peptide shuffled with its
+# C-terminal residue fixed). The script prints the T/E of the database it wrote; use that
+# number, not 1:1.
 if [ "${GLYCO:-0}" = "1" ]; then
-  echo "==> glyco: mouse target proteome"
+  echo "==> mouse target proteome"
   get UP000000589 "$DB/mouse.fasta" "mouse (reviewed)"
-  echo "==> glyco: 1:1 SHUFFLED entrapment (the design behind the published numbers)"
-  python3 "$(dirname "$0")/../glyco/build_shuffled_entrap.py" \
-          "$DB/mouse.fasta" "$DB/mouse_entrap.fasta" 1
+  echo "==> mouse + peptide-level shuffled entrapment"
+  python3 "$(dirname "$0")/../build_shuffled_entrap.py" \
+          "$DB/mouse.fasta" "$DB/mouse_entrap.fasta" --seed 1
   report "$DB/mouse_entrap.fasta"
-  echo "    NOTE: 1:1 by construction, so the FDP correction factor is exactly 2.0."
-  echo "    Do NOT substitute a foreign proteome here without re-deriving that factor."
 fi
 
 echo "done. Databases in $DB"
-[ "${GLYCO:-0}" = "1" ] || echo "(re-run with GLYCO=1 to also build the glyco mouse database)"
+[ "${GLYCO:-0}" = "1" ] || echo "(re-run with GLYCO=1 to also build the phospho and glyco mouse database)"

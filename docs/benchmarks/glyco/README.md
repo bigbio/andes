@@ -11,7 +11,6 @@ The scripts behind every glyco number in this repository. None computes FDR; Per
 | `eval_yield.py` | Yield at 1% q with no reference. |
 | `compare_preperc.py` | Pre-Percolator RawScore AUC and the "2× rule" (`FDR = 2D/(D+T)`). |
 | `build_entrap.py` | Appends a foreign proteome as **targets**. |
-| `build_shuffled_entrap.py` | Builds the 1:1 shuffled-self entrapment database the benchmark tiers use. |
 | `eval_entrap.py` | Entrapment hits past the q-value cut, as an FDP. |
 | `score_vs_truth.py`, `agreement.py`, `make_truth.py` | Score against `truth/`, peptidoform agreement, build references. |
 | `compare_engines.py` | Cross-engine overlap on `MouseLiver-Z-T-1` (PXD031032); writes `cross_engine_pxd031032.md`. |
@@ -53,7 +52,8 @@ python3 eval_entrap.py pooled.pin out.psms             # false-discovery proport
 ```
 
 `--glyco` also needs `--glyco-species` or `--glyco-glycan-gdb`. The benchmark tiers use the
-shuffled-self database; see [`../README.md`](../README.md#3-how-to-reproduce).
+peptide-level shuffled database of [`../build_shuffled_entrap.py`](../build_shuffled_entrap.py);
+see [`../README.md`](../README.md#3-how-to-reproduce).
 
 ## Reading `eval_honest.py`
 

@@ -570,12 +570,14 @@ entrapment entry; true FDP = entrapment groups / accepted × (1 + target : entra
 
 | Run | PSMs at 1% | Groups at protein q ≤ 0.01 | True FDP | At q ≤ 0.05 | True FDP |
 |---|---|---|---|---|---|
-| Astral, shuffled entrapment (1 : 1) | 42,605 | 4,332 | 1.3% | 4,929 | 5.6% |
+| Astral, whole-protein shuffled entrapment (1 : 1 proteins) | 42,605 | 4,332 | 1.3% | 4,929 | 5.6% |
 | UPS1 in yeast, E. coli entrapment (1.49 : 1) | 16,147 | 852 | 5.0% | 924 | 8.1% |
 
 The UPS1 entrapment proteins at 1% are led by EF-Tu (36 PSMs), DnaK and ornithine
 carbamoyltransferase: proteins that co-purify with recombinant proteins expressed in E. coli,
-so most are likely present, and the shuffled-entrapment run is the better measure. Taking only
+so most are likely present, and the shuffled-entrapment run is the better measure. Re-measured
+on three peptide-level shuffled entrapments (native rescorer, `0629cd8`), the Astral groups at
+protein q ≤ 0.01 read 0.7–1.1% and at 0.05 5.6–6.7%. Taking only
 the best row of each spectrum, or only rows at PSM q ≤ 0.01, gives 1.1–1.4% at 1% on Astral:
 within the entrapment's counting noise.
 
@@ -1467,7 +1469,7 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
   and scores all of them; about a third of the CPU time. On the ProteoBench HF-X runs it
   moved PSMs at q 0.01 per run by -0.1 to +0.2 % and the precursors quantified in at least
   three runs by +0.4 % (transfer q 0.01; median |ε| 0.162 and CV 0.119 before and after,
-  E. coli |ε| 0.273 to 0.274). With a shuffled entrapment database the PSM entrapment FDP
+  E. coli |ε| 0.273 to 0.274). With a whole-protein shuffled entrapment database the PSM entrapment FDP
   went from 0.97 % to 1.01 %, entrapment-only quantified precursors (at least three runs) from
   0.24 % to 0.23 %, and entrapment rows among about 70,000 accepted transfers from 88 to 107.
   100,000 cost about 0.5 % of the quantified precursors.
@@ -1571,11 +1573,18 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
   best donor PSM has a PSM q-value above 0.001 is not transferred (by default extract does not
   measure its transfers, so they have no rows; with `quant extract --mbr-preselect false` they
   are `below_threshold` without a q-value; its identified rows are unchanged): a single marginal
-  donor PSM is the commonest false donor. On a public LFQ benchmark (six runs, 1:1 shuffled
-  entrapment) the identity-decoy estimate of the false-donor share of accepted transfers was
-  0.25 % at transfer q 0.01 where the entrapment gave 0.24 %, and 0.40 % against 0.39 % at
-  0.05; the transfers of entrapment donors fell from 728 to 88 at 0.01 (48 before the
-  peak-shape features), with 62.8k precursors quantified in at least 3 runs (67.6k, and
+  donor PSM is the commonest false donor. On a public LFQ benchmark (six runs, peptide-level
+  shuffled entrapment, Percolator seeds 42, 1 and 2) the identity-decoy estimate of the
+  false-donor share of accepted transfers was 0.28–0.31 % at transfer q 0.01 where the
+  entrapment gave 0.30–0.38 %, and 0.44–0.45 % against 0.52–0.58 % at 0.05: it tracks the
+  false-donor share but is not an upper bound. With a reviewed *Arabidopsis* entrapment the
+  entrapment gave 0.24–0.30 % and 0.46–0.54 %. On 500 runs (PXD042233, peptide-level shuffled
+  entrapment, one seed) the entrapment gave 0.40 % at transfer q 0.05 against an estimate of
+  0.26 % (5.07 million accepted transfers); at 0.01 both are near zero (3 and 2 of 240,000
+  transfers). The identity term alone can therefore read low; the transfer q-value it is part
+  of also carries the wrong-peak term, which is more than ten times larger at 0.05. On the earlier whole-protein shuffled
+  entrapment, the identity decoys and the donor gate (#172) cut the transfers of entrapment
+  donors from 728 to 88 at 0.01 (48 before the peak-shape features), with 62.8k precursors quantified in at least 3 runs (67.6k, and
   54.9k before the peak-shape features).
   The validation file and the finalize log count the decoys accepted per family (mass shift,
   RT shift, identity) and the transfers the wrong-peak decoys alone would accept. The

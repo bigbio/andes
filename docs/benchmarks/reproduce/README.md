@@ -84,5 +84,6 @@ explains the spectrum as well as the sample does and counts as target ("I/L resc
 rule is a substring test, independent of the enzyme; `T/E` counts entrapment peptides the
 same way. Both scripts take it from [`../entrap_common.py`](../entrap_common.py), as do the
 glyco evaluators. Of the standard databases only
-UPS1 has an entrapment component; the glyco mouse database is 1:1 by construction (factor
-exactly 2).
+UPS1 has an entrapment component. The phospho and glyco mouse database (`GLYCO=1`) is a
+peptide-level shuffle built by [`../build_shuffled_entrap.py`](../build_shuffled_entrap.py),
+which prints its T/E; it is close to 1 but not exactly 1.

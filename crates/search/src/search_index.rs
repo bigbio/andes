@@ -35,8 +35,9 @@ impl SearchIndex {
         is_decoy_accession_affix(accession, &self.decoy_prefix, self.decoy_suffix.as_deref())
     }
 
-    /// Pipeline: target ProteinDb → reversed decoys → concat target+decoy.
-    /// Convenience wrapper for the default (Reverse) strategy.
+    /// Pipeline: target ProteinDb → pseudo-reversed decoys (fully specific
+    /// trypsin segments) → concat target+decoy. Convenience wrapper for the
+    /// default (Reverse) strategy.
     pub fn from_target_db(target: &ProteinDb, decoy_prefix: &str) -> Self {
         Self::from_target_db_with_strategy(
             target,
@@ -47,9 +48,9 @@ impl SearchIndex {
         )
     }
 
-    /// Build the search index for a given decoy `strategy`. `seed` is only used
-    /// by [`DecoyStrategy::Shuffle`]. The combined db is target+decoy for
-    /// Reverse/Shuffle and the input verbatim for None.
+    /// Build the search index for a given decoy `strategy`, with decoys for a
+    /// fully specific trypsin search. `seed` drives the shuffles. The combined
+    /// db is target+decoy, or the input verbatim for None.
     pub fn from_target_db_with_strategy(
         target: &ProteinDb,
         decoy_prefix: &str,
@@ -67,9 +68,8 @@ impl SearchIndex {
         )
     }
 
-    /// [`Self::from_target_db_with_strategy`] for a search with `proteases`:
-    /// the decoys of UniProt mature-chain entries keep the cleavage sites
-    /// these make (FASTA databases do not depend on them).
+    /// [`Self::from_target_db_with_strategy`] for a search with `proteases`,
+    /// whose cleavage segments the decoys permute within.
     pub fn from_target_db_for(
         target: &ProteinDb,
         decoy_prefix: &str,
@@ -131,7 +131,7 @@ impl SearchIndex {
     /// Target proteins occupy `[0, target_count)` and their accessions are the
     /// raw FASTA accessions.  Decoy proteins occupy `[target_count, 2 *
     /// target_count)` and their accessions already carry the decoy prefix (set
-    /// by [`target_plus_decoy`]).  Returns `None` when `idx` is out of range.
+    /// by [`crate::decoy::decoy_db`]).  Returns `None` when `idx` is out of range.
     pub fn protein_at(&self, idx: usize) -> Option<&model::protein::Protein> {
         self.db.proteins.get(idx)
     }
@@ -240,14 +240,14 @@ mod tests {
             proteins: vec![Protein {
                 accession: "P1".into(),
                 description: "".into(),
-                sequence: b"AB".to_vec(),
+                sequence: b"PEPTIDEK".to_vec(),
                 annotation: None,
             }],
         };
         let idx = SearchIndex::from_target_db(&target, "XXX");
         assert_eq!(idx.db.proteins[0].accession, "P1");
         assert_eq!(idx.db.proteins[1].accession, "XXX_P1");
-        assert_eq!(idx.db.proteins[1].sequence, b"BA");
+        assert_eq!(idx.db.proteins[1].sequence, b"EDITPEPK");
     }
 
     #[test]
@@ -310,7 +310,7 @@ mod tests {
 
     #[test]
     fn peptide_has_target_match_misses_when_only_in_decoy() {
-        // The decoy of MABCDEFGHIK is KIHLGFEDCBAM (reversed).
+        // The decoy of MABCDEFGHIK is MIHGFEDCBAK (initiator Met and K stay).
         // A peptide in the decoy but not the target should return false.
         let target = ProteinDb {
             proteins: vec![Protein {
@@ -321,10 +321,11 @@ mod tests {
             }],
         };
         let idx = SearchIndex::from_target_db(&target, "XXX");
-        // "KIHLG" appears only in the reversed (decoy) sequence, not in the target.
+        // "IHGFE" appears only in the decoy sequence, not in the target.
+        assert_eq!(idx.db.proteins[1].sequence, b"MIHGFEDCBAK");
         assert!(
-            !idx.peptide_has_target_match(b"KIHLG"),
-            "KIHLG is only in the decoy sequence and should not match any target protein"
+            !idx.peptide_has_target_match(b"IHGFE"),
+            "IHGFE is only in the decoy sequence and should not match any target protein"
         );
     }
 

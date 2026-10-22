@@ -1832,7 +1832,7 @@ mod tests {
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
         // SearchIndex has 1 target (idx 0) + 1 decoy (idx 1). Decoy accession
-        // is set to "XXX_sp|P02769|ALBU_BOVIN" by target_plus_decoy.
+        // is set to "XXX_sp|P02769|ALBU_BOVIN" by decoy_db.
         let psm = make_psm(0, 10.0, 10.0, 0, 2);
 
         let mut queue = TopNQueue::new(10);

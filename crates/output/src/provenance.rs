@@ -39,11 +39,12 @@ fn set_features(psm: &mut PsmMatch, candidates: &[Candidate], idx: &SearchIndex)
     let rounded = psm.score.round();
     let peptide = &candidates[psm.primary_candidate_idx() as usize].peptide;
     // A flag is set when ANY protein of the peptide is of that kind, shared
-    // with a Reference entry or not. Decoy generators do not keep a decoy
-    // peptide shared with the decoy canonical (shuffle permutes each entry on
-    // its own; a chain decoy is pseudo-reversed, its canonical fully
-    // reversed), so "shared means reference" would set flags on decoys more
-    // often than on targets, and Percolator would learn the label.
+    // with a Reference entry or not. Decoy generators do not always keep a
+    // decoy peptide shared with the decoy canonical (a non-specific search
+    // permutes each entry's whole sequence on its own; a chain's new terminus
+    // starts a segment its canonical does not have), so "shared means
+    // reference" would set flags on decoys more often than on targets, and
+    // Percolator would learn the label.
     let f = &mut psm.features;
     f.is_variant = variant as u32;
     f.is_isoform = isoform as u32;

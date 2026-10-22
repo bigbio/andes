@@ -139,7 +139,7 @@ fn enumerate_protein(
 /// Whether `protein` gets the Met-cleaved walk: it starts with M, has more
 /// than one residue, and is not a mature chain.
 #[inline]
-fn has_met_cleaved_walk(protein: &Protein) -> bool {
+pub(crate) fn has_met_cleaved_walk(protein: &Protein) -> bool {
     let seq = &protein.sequence;
     seq.len() > 1 && seq[0] == b'M' && protein.chain_ends().is_none()
 }
@@ -1676,7 +1676,7 @@ mod tests {
     #[test]
     fn decoy_membership_requires_underscore_delimiter() {
         use crate::decoy::is_decoy_accession;
-        // Decoys are built as "<prefix>_<orig>" (reverse_db/shuffle_db), so
+        // Decoys are built as "<prefix>_<orig>" (decoy_db), so
         // membership requires the "_" delimiter, and candidate generation MUST
         // use the SAME needle as SearchIndex (they share decoy_accession_needle)
         // so they cannot diverge. A target accession that merely starts with the

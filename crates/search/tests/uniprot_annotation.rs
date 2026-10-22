@@ -16,7 +16,7 @@ use search::candidate_gen::{
     lazy_candidates_for_precursor, Candidate, FormWalkTables,
 };
 use search::candidate_index::MmapCandidateIndex;
-use search::decoy::{shuffle_db, DecoyStrategy, Proteases};
+use search::decoy::{decoy_db, DecoyStrategy, Proteases};
 use search::{enumerate_candidates, SearchIndex, SearchParams};
 
 /// P1 (tryptic peptides AGSPEK | TLSYR | SDSPAK | VNSTQR, 0-based S2, S8, S11,
@@ -770,11 +770,8 @@ fn target_and_decoy_forms(
     p: &SearchParams,
     strategy: DecoyStrategy,
 ) -> Vec<(Vec<Candidate>, Vec<Candidate>)> {
-    let proteases = Proteases {
-        primary: p.enzyme,
-        extra: p.extra_enzymes.clone(),
-    };
-    let idx = SearchIndex::from_target_db_for(target, "XXX", None, strategy, 7, &proteases);
+    let idx =
+        SearchIndex::from_target_db_for(target, "XXX", None, strategy, 7, &Proteases::of(p));
     let cands: Vec<Candidate> = enumerate_candidates(&idx, p, "XXX").collect();
     let n = target.len();
     (0..n)
@@ -968,7 +965,10 @@ fn shuffled_variant_parts_keep_their_width() {
     let db = ProteinDb {
         proteins: vec![protein(VariantRegion { start: 4, end: 7 })],
     };
-    let decoy = &shuffle_db(&db, "XXX", 2).proteins[0];
+    let shuffled = |db: &ProteinDb, seed: u64| {
+        decoy_db(db, "XXX", DecoyStrategy::Shuffle, seed, &Proteases::default())
+    };
+    let decoy = &shuffled(&db, 2).proteins[0];
     let v = decoy.variant_parts()[0];
     assert_eq!((v.end - v.start, v.end <= 17), (3, true), "{v:?}");
     // Every seed and region shape: the part keeps its width and stays inside.
@@ -983,7 +983,7 @@ fn shuffled_variant_parts_keep_their_width() {
             let db = ProteinDb {
                 proteins: vec![protein(region)],
             };
-            let d = shuffle_db(&db, "XXX", seed).proteins[0].variant_parts()[0];
+            let d = shuffled(&db, seed).proteins[0].variant_parts()[0];
             if region.start < region.end {
                 assert_eq!(
                     d.end - d.start,
@@ -1102,9 +1102,23 @@ fn origins_follow_entries_onto_decoys() {
 #[test]
 fn origin_alone_leaves_the_reverse_decoy_unchanged() {
     // Isoforms now always carry an annotation (their origin). Without a chain
-    // or a protein-terminal site, the reverse decoy is still the plain reversal.
+    // or a protein-terminal site, the reverse decoy is the one the same
+    // sequence gets without an annotation.
     let target = processed_db();
     let idx = SearchIndex::from_target_db(&target, "XXX");
+    let plain = SearchIndex::from_target_db(
+        &ProteinDb {
+            proteins: target
+                .proteins
+                .iter()
+                .map(|p| Protein {
+                    annotation: None,
+                    ..p.clone()
+                })
+                .collect(),
+        },
+        "XXX",
+    );
     let n = target.len();
     let mut checked = 0;
     for (i, p) in target.proteins.iter().enumerate() {
@@ -1115,8 +1129,9 @@ fn origin_alone_leaves_the_reverse_decoy_unchanged() {
         if p.chain_ends().is_some() || terminal_site {
             continue;
         }
-        let want: Vec<u8> = p.sequence.iter().rev().copied().collect();
-        assert_eq!(idx.db.proteins[n + i].sequence, want, "{}", p.accession);
+        let want = &plain.db.proteins[n + i].sequence;
+        assert_ne!(want, &p.sequence, "{}", p.accession);
+        assert_eq!(&idx.db.proteins[n + i].sequence, want, "{}", p.accession);
         checked += 1;
     }
     assert!(target.proteins[4].mod_sites().is_empty() || checked >= 1);

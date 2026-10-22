@@ -31,7 +31,7 @@ use model::protein::ProteinDb;
 use scoring_crate::RankScorer;
 
 use crate::candidate_gen::Candidate;
-use crate::decoy::{build_search_db, DecoyStrategy};
+use crate::decoy::{build_search_db, whole_sequence_decoy_db, DecoyStrategy};
 use crate::match_engine::PreparedSearch;
 use crate::psm::TopNQueue;
 use crate::refine_config::RefineConfig;
@@ -332,7 +332,7 @@ pub fn build_peptide_anchored_index(
 
 /// Target + decoy DB for the peptide-anchored Pass-2 index, with each decoy keeping
 /// its target's FIRST and LAST residue in place and reversing (or shuffling) only the
-/// interior.
+/// interior, as one sequence ([`whole_sequence_decoy_db`]).
 ///
 /// Every mini-protein here is a single peptide, so a whole-sequence decoy breaks the
 /// target/decoy pairing that competition relies on. Reversing `PEPKTIDEK` gives
@@ -359,15 +359,13 @@ fn anchored_target_plus_decoy(
             })
             .collect(),
     };
-    let built = build_search_db(&interiors, decoy_prefix, decoy_strategy, seed);
-    let n = minidb.proteins.len();
+    let built = whole_sequence_decoy_db(&interiors, decoy_prefix, decoy_strategy, seed);
     let mut proteins = minidb.proteins.clone();
     proteins.extend(
         built
             .proteins
             .into_iter()
-            .skip(n)
-            .zip(minidb.proteins.iter().cycle())
+            .zip(minidb.proteins.iter())
             .map(|(mut d, t)| {
                 let seq = &t.sequence;
                 if seq.len() >= 2 {

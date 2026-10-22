@@ -17,6 +17,7 @@ use std::path::Path;
 use input::FastaReader;
 use model::spectrum::Spectrum;
 use scoring_crate::scoring::rank_scorer::RankScorer;
+use search::decoy::{DecoyStrategy, Proteases, DEFAULT_DECOY_SEED};
 use search::{match_spectra_out_of_core, SearchIndex, SearchParams};
 
 use crate::labeled::BOOTSTRAP_DECOY_PREFIX;
@@ -81,7 +82,14 @@ pub fn evaluate_candidate(
     let file = File::open(database)?;
     let target_db = FastaReader::load_all(BufReader::new(file))
         .map_err(|e| TrainError::Other(format!("FASTA parse error: {e}")))?;
-    let idx = SearchIndex::from_target_db(&target_db, BOOTSTRAP_DECOY_PREFIX);
+    let idx = SearchIndex::from_target_db_for(
+        &target_db,
+        BOOTSTRAP_DECOY_PREFIX,
+        None,
+        DecoyStrategy::Reverse,
+        DEFAULT_DECOY_SEED,
+        &Proteases::of(search_params),
+    );
 
     let current_count = count_target_psms(spectra, &idx, search_params, current, fdr)?;
     let candidate_count = count_target_psms(spectra, &idx, search_params, candidate, fdr)?;

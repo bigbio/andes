@@ -48,7 +48,7 @@ impl RowContext {
 /// Resolve a protein accession from the `SearchIndex` for a given `Candidate`.
 ///
 /// The combined target+decoy `ProteinDb` inside `search_index` already carries
-/// decoy prefixes on decoy accessions (set by `target_plus_decoy`), so no
+/// decoy prefixes on decoy accessions (set by `search::decoy::decoy_db`), so no
 /// prefix arithmetic is needed here. Falls back to `"PROT_{idx}"` if the
 /// index is out of range.
 pub(crate) fn resolve_accession(cand: &Candidate, search_index: &SearchIndex) -> String {

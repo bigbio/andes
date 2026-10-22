@@ -1048,6 +1048,17 @@ an Orbitrap HCD model). Feature tolerances, the fragment-index vote mode, `--sco
 `--refine` high-res gate, isobaric-label detection, `--tmt-level` auto and the `--predict`
 instrument and NCE follow the acquisition class.
 
+**Per-run fragment tolerance.** On a high-resolution acquisition without `--fragment-tol-*`,
+each input file's fragment mass error is measured before it is scored: up to 3,000 spectra around
+the median precursor mass are searched, the rank-1 targets at 1% target-decoy q have their seven
+most intense b/y ions re-matched within 50 ppm, and the median and robust spread of those errors
+are logged (`Fragment error: ...`). The PIN match features (match counts, ion-current ratios,
+error statistics, chance-match and mass-competition terms) then use `|offset| + 4 x spread`,
+clamped to 5-40 ppm, and the ppm-Gaussian term is centred on the offset with a width of
+1.5 x spread. The features fed to the trained fragment-intensity and rich-ion models, the
+fragment index and the quantification keep the 20 ppm class window. `--fragment-tol-ppm` /
+`--fragment-tol-da` replace the measurement on any input format.
+
 ### Activation CV mapping (mzML `<activation>` cvParam accession → method)
 
 | CV accession | Name (PSI-MS) | andes method | Notes |

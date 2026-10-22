@@ -323,7 +323,6 @@ mod isotope_penalty_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::glycan_mass::{HEX, HEXNAC};
 
     #[test]
     fn collapse_cmp_default_ranks_by_rank_score_then_ladder() {
@@ -426,15 +425,7 @@ mod tests {
 
     #[test]
     fn glyco_psm_key_with_real_glycan_has_correct_mass() {
-        let glycan = GlycanComp {
-            hexnac: 2,
-            hex: 3,
-            fuc: 0,
-            neuac: 0,
-            neugc: 0,
-            core_fuc: 0,
-            mass: 2.0 * HEXNAC + 3.0 * HEX,
-        };
+        let glycan = GlycanComp::from_counts(2, 3, 0, 0, 0, 0);
         let expected_mass = glycan.mass;
         let key = GlycoPsmKey {
             spectrum_idx: 7,

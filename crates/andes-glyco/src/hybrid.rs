@@ -108,7 +108,8 @@ pub fn db_branch(
                         .then(x.hex.cmp(&y.hex))
                         .then(x.fuc.cmp(&y.fuc))
                         .then(x.neuac.cmp(&y.neuac))
-                        .then(x.neugc.cmp(&y.neugc)),
+                        .then(x.neugc.cmp(&y.neugc))
+                        .then(x.topology_id.cmp(&y.topology_id)),
                     _ => std::cmp::Ordering::Equal,
                 }
             })

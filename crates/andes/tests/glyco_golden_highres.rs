@@ -1,5 +1,27 @@
 //! HIGH-RES glyco serve-path golden.
 //!
+//! REGENERATED 2026-10-21 (single-cleavage Y-ions) when Y-ion generation was aligned
+//! with GlycoDecipher's B/Y convention: ONE Y ion per glycosidic bond (O(n)),
+//! replacing the combinatorial root-containing-subtree set that over-generated
+//! multi-cleavage fragments for branched glycans. Verified before copying: header
+//! identical, 120 -> 120 rows, 4 winner flips — all same-peptide glycan-annotation
+//! changes: three on THRB_HUMAN R.SRYPHKPEINSTTHPGADLQENFCR.N@N10 (core-fucosylated
+//! di-fucose `(N(F)(N(H(H(N(F)(H)))(H(N(H))))))` -> mono-sialylated
+//! `(N(N(H(H(N(A)(H)))(H(N(H))))))`) and one on VTNC_HUMAN
+//! K.NNATVHEQVGGPSLTSDLQAQSK.G@N2 (core-fucosylated di-sialylated -> tri-sialylated
+//! `(N(N(H(H(N(A)(H))(N(A)(H)))(H(N(A)(H))))))`). `YLadderScore` moved on 119 rows,
+//! `YHitFrac` on 116, `GlycanMass` on the 4 flipped rows, and `DeltaRT`/`AbsDeltaRT`/
+//! `DeltaRTNorm` on all 120 (winner flips shift the per-run RT-calibration anchors).
+//! No SpecId/protein changes; the peptide candidate pool is untouched.
+//!
+//! REGENERATED 2026-10-21 when the glycan tree topology was retained and Y-ions
+//! derived from it. Verified before copying: header identical, 120 -> 120 rows,
+//! 0 winner flips. The Peptide column gained the canonical tree suffix on all 120
+//! rows; `YLadderScore`/`YHitFrac` moved on 104 rows and the per-spectrum competition
+//! statistics (`CandidateRankEntropy` on 20, `RawScore` on 13, `TailorScore` and
+//! `ListwiseScoreGap` on 1 each) moved as the candidate pool changed; SpecIds and
+//! proteins unchanged.
+//!
 //! REGENERATED 2026-10-14 when the glycosite tag began counting the boundary
 //! sequon (an N-X-S/T completed by the residue after the peptide). Verified before
 //! copying: header identical, 120 -> 120 rows, 0 winner changes; only the Peptide

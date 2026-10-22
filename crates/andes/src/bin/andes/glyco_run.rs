@@ -40,30 +40,38 @@ pub(crate) fn run_glyco(
     });
     andes_glyco::backbone::init_y_max_charge(cli.glyco_y_max_charge);
 
-    // The glycan-first search space comes from one of two sources: an explicit
-    // `.gdb` file (`--glyco-glycan-gdb`, takes precedence) or a bundled
-    // species-specific database (`--glyco-species`). Trees are parsed with
-    // structure preserved (core- vs antenna-fucose) and NeuGc content is used
-    // as-is. The composition enumerator and its NeuGc/taxon tuning are gone.
+    // The glycan-first search space comes from one of three sources: an explicit
+    // `.gdb` file (`--glyco-glycan-gdb`), a WURCS 2.0 CSV
+    // (`--glyco-glycan-wurcs`), or a bundled species-specific database
+    // (`--glyco-species`). Trees are parsed with structure preserved (core- vs
+    // antenna-fucose) and NeuGc content is used as-is. The composition enumerator
+    // and its NeuGc/taxon tuning are gone.
     let (glycan_list, source_desc) = match (
         cli.glyco_glycan_gdb.as_ref(),
+        cli.glyco_glycan_wurcs.as_ref(),
         cli.glyco_species.as_ref(),
     ) {
-        (Some(path), _) => {
+        (Some(path), _, _) => {
             let content = std::fs::read_to_string(path)
                 .map_err(|e| format!("--glyco-glycan-gdb {}: {e}", path.display()))?;
             let list = andes_glyco::glycan_db::load_glycan_gdb(&content)?;
             (list, format!("{} (file)", path.display()))
         }
-        (None, Some(species)) => {
+        (None, Some(path), _) => {
+            let content = std::fs::read_to_string(path)
+                .map_err(|e| format!("--glyco-glycan-wurcs {}: {e}", path.display()))?;
+            let list = andes_glyco::glycan_db::load_glycan_wurcs_csv(&content)?;
+            (list, format!("{} (WURCS)", path.display()))
+        }
+        (None, None, Some(species)) => {
             let list = andes_glyco::glycan_db::load_species_glycan_db(species.key())?;
             (list, format!("--glyco-species {}", species.key()))
         }
-        (None, None) => {
+        (None, None, None) => {
             return Err(
-                "--glyco requires --glyco-glycan-gdb or --glyco-species: the built-in \
-                 composition enumerator was removed; supply a `.gdb` glycan database or a bundled \
-                 species"
+                "--glyco requires --glyco-glycan-gdb, --glyco-glycan-wurcs or --glyco-species: \
+                 the built-in composition enumerator was removed; supply a `.gdb` glycan \
+                 database, a WURCS 2.0 CSV, or a bundled species"
                     .into(),
             );
         }

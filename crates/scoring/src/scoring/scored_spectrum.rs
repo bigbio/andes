@@ -331,8 +331,10 @@ impl<'a> ScoredSpectrum<'a> {
         //
         // Gating: auto-ON for isobaric protocols (validated +~3.5% PSMs@1% on
         // PXD007683 TMT a05058; ~neutral on LFQ; OFF for everything else because
-        // it regresses high-res Astral ~14%). `--peak-filter WINDOW:K` overrides
-        // the window/K; a window of 0 force-disables.
+        // it regresses high-res Astral ~14%). The search sets a window of 0 on
+        // high-resolution acquisitions, where it measured neutral on HCD-MS2
+        // TMT. `--peak-filter WINDOW:K` overrides the window/K; a window of 0
+        // force-disables.
         let window_kk: Option<(f64, usize)> = match peak_filter_env() {
             PeakFilterEnv::Disabled => None,
             PeakFilterEnv::Override(w, k) => Some((*w, *k)),

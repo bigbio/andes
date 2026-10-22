@@ -131,6 +131,25 @@ impl TimsTofReader {
         self.len == 0
     }
 
+    /// Collision energy (eV) and isolation width of the first `n` MS2 spectra.
+    /// The `.d` records no FAIMS voltage.
+    pub fn sample_ms2_meta(&self, n: usize) -> crate::Ms2MetaSample {
+        let mut out = crate::Ms2MetaSample::default();
+        for i in 0..self.len.min(n) {
+            let Ok(raw) = self.reader.get(i) else {
+                continue;
+            };
+            out.n_ms2 += 1;
+            if raw.collision_energy.is_finite() && raw.collision_energy > 0.0 {
+                out.collision_energies.push(raw.collision_energy);
+            }
+            if raw.isolation_width.is_finite() && raw.isolation_width > 0.0 {
+                out.isolation_widths.push(raw.isolation_width);
+            }
+        }
+        out
+    }
+
     /// Convert one `timsrust` spectrum to a [`Spectrum`], or `None` if the scan
     /// has no usable DDA precursor m/z — matching the mzML/Thermo readers, which
     /// skip precursor-less MS2 rather than forwarding a `precursor_mz = 0.0`

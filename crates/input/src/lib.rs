@@ -1,6 +1,7 @@
 //! Input readers: MGF, mzML, FASTA, UniProt XML, and (optional) Thermo `.raw` /
 //! Bruker timsTOF `.d`.
 
+pub mod acq_meta;
 pub mod annotation;
 pub mod annotations_file;
 pub mod database;
@@ -16,6 +17,9 @@ pub mod timstof;
 pub mod uniprot;
 mod uniprot_ptm;
 
+pub use acq_meta::{
+    infer_fragment_resolution, sample_mzml_ms2_meta, Ms2MetaSample, ResolutionEvidence,
+};
 pub use annotation::{
     add_site_knockoffs, build_entry, knockoff_annotations, KnockoffOptions, SiteKnockoffStats,
 };

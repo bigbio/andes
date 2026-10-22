@@ -12,6 +12,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+#[path = "andes/acquisition.rs"]
+mod acquisition;
 #[path = "andes/cli.rs"]
 mod cli;
 #[path = "../config.rs"]

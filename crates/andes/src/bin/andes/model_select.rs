@@ -269,22 +269,29 @@ pub(crate) fn warn_if_universal_protease_combo(
 
 /// Resolve (activation, instrument) for model selection on metadata-less input
 /// (MGF, or mzML/.raw with no analyzer metadata). Resolution class comes from
-/// the `--fragment-tol-*` unit; activation from an explicit `--fragmentation`,
-/// else the detected method, else the class-consistent default (the same
-/// precedence as a fully detected input). When nothing
-/// disambiguates, defaults to CID / LowRes (→ `cid_lowres_tryp`) + a warning.
+/// the `--fragment-tol-*` unit, else from `inferred_high_res` (the class read
+/// from the peaks, see `input::infer_fragment_resolution`); activation from an
+/// explicit `--fragmentation`, else the detected method, else the
+/// class-consistent default (the same precedence as a fully detected input).
+/// When nothing disambiguates, defaults to CID / LowRes (→ `cid_lowres_tryp`)
+/// + a warning.
 pub(crate) fn resolve_metadataless_selection(
     detected_activation: Option<ActivationMethod>,
     fragmentation: Fragmentation,
     fragment_tol_ppm: Option<f64>,
     fragment_tol_da: Option<f64>,
+    inferred_high_res: Option<bool>,
 ) -> (ActivationMethod, Option<InstrumentType>) {
     let instrument: Option<InstrumentType> = if fragment_tol_ppm.is_some() {
         Some(InstrumentType::QExactive)
     } else if fragment_tol_da.is_some() {
         Some(InstrumentType::LowRes)
     } else {
-        None
+        match inferred_high_res {
+            Some(true) => Some(InstrumentType::QExactive),
+            Some(false) => Some(InstrumentType::LowRes),
+            None => None,
+        }
     };
     let explicit = cli_fragmentation_to_activation_opt(fragmentation);
     // Class-consistent default when neither detection nor `--fragmentation`
@@ -307,9 +314,9 @@ pub(crate) fn resolve_metadataless_selection(
     let activation = explicit.or(detected_activation).unwrap_or(class_default);
     if detected_activation.is_none() && explicit.is_none() && instrument.is_none() {
         eprintln!(
-            "WARN: MGF input with no --fragmentation/--fragment-tol; assuming \
-             CID / low-res / 0.5 Da. Pass --fragmentation and --fragment-tol-ppm/-da \
-             to override."
+            "WARN: no analyzer metadata, no --fragmentation/--fragment-tol, and the peaks \
+             do not settle the fragment resolution; assuming CID / low-res / 0.5 Da. Pass \
+             --fragmentation and --fragment-tol-ppm/-da to override."
         );
     }
     (activation, instrument)
@@ -539,11 +546,13 @@ mod param_resolver_tests {
             Fragmentation::Etd,
             None,
             None,
+            None,
         );
         assert_eq!((act, inst), (ActivationMethod::ETD, None));
         let (act, _) = resolve_metadataless_selection(
             Some(ActivationMethod::HCD),
             Fragmentation::Auto,
+            None,
             None,
             None,
         );
@@ -714,7 +723,8 @@ mod param_resolver_tests {
     fn metadataless_no_flags_default_selects_cid_lowres() {
         let store = ModelStore::open(&bundled_store_path()).expect("bundled store");
         let entries = store.selection_entries();
-        let (act, inst) = resolve_metadataless_selection(None, Fragmentation::Auto, None, None);
+        let (act, inst) =
+            resolve_metadataless_selection(None, Fragmentation::Auto, None, None, None);
         let c = choose_model(
             &entries,
             act,
@@ -726,6 +736,32 @@ mod param_resolver_tests {
             (c.model_id.as_str(), c.substituted),
             ("cid_lowres_tryp", false)
         );
+    }
+
+    /// Metadata-less input whose peaks read as high resolution selects the
+    /// high-res HCD model; a low-resolution call keeps the low-res b/y model.
+    /// The `--fragment-tol-*` unit still wins over the inferred class.
+    #[test]
+    fn metadataless_peak_inference_drives_the_resolution_class() {
+        let store = ModelStore::open(&bundled_store_path()).expect("bundled store");
+        let entries = store.selection_entries();
+        let pick = |high: Option<bool>, ppm: Option<f64>, da: Option<f64>| {
+            let (act, inst) =
+                resolve_metadataless_selection(None, Fragmentation::Auto, ppm, da, high);
+            choose_model(
+                &entries,
+                act,
+                inst,
+                Protocol::Auto,
+                model::enzyme::Enzyme::Trypsin,
+            )
+            .model_id
+        };
+        assert_eq!(pick(Some(true), None, None), "hcd_qexactive_tryp");
+        assert_eq!(pick(Some(false), None, None), "cid_lowres_tryp");
+        assert_eq!(pick(None, None, None), "cid_lowres_tryp");
+        assert_eq!(pick(Some(true), None, Some(0.5)), "cid_lowres_tryp");
+        assert_eq!(pick(Some(false), Some(20.0), None), "hcd_qexactive_tryp");
     }
 
     use crate::cli::{

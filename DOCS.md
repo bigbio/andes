@@ -1032,9 +1032,32 @@ With `--fragmentation auto`, andes takes the dominant `<activation>` cvParam ove
 MS2 spectra of an mzML (mixed methods warn) and the dominant analyser (none → `low-res`).
 `.raw` carries both in vendor metadata (HCD on an Orbitrap → `hcd_qexactive_tryp`); `.d`
 (timsTOF, beam-type CID) routes to the high-res HCD model `hcd_qexactive_tryp` (or its protocol
-variant) with a 20 ppm feature tolerance, as in §1. **MGF** has none: andes assumes CID / low-res / 0.5 Da (`cid_lowres_tryp`)
-and warns; `--fragment-tol-ppm` implies a high-res instrument, `--fragment-tol-da` a low-res
-one. `--protocol` applies on top.
+variant) with a 20 ppm feature tolerance, as in §1. **MGF** has none: andes counts 13C isotope
+pairs (1.00335/z apart within 10 ppm) among the most intense peaks of the first 1,000 spectra and
+compares the count with control spacings 0.07-0.21 Da away. An enrichment of at least 4x reads as
+high resolution (HCD high-res model, 20 ppm features), below 1.8x as low resolution; in between,
+or with fewer than 5,000 peaks, andes assumes CID / low-res / 0.5 Da (`cid_lowres_tryp`) and
+warns. `--fragment-tol-ppm` implies a high-res instrument and `--fragment-tol-da` a low-res one,
+whatever the peaks show. `--protocol` applies on top.
+
+The resolution class found here (from the metadata, the flag or the peaks) is the run's
+*acquisition* class, printed on the `acquisition` line of the resolved-parameter banner with the
+recorded collision energy, isolation width and FAIMS voltages. It is kept apart from the selected
+model, which routing may substitute (high-res ETD, CID and UVPD use low-res models; TOF runs use
+an Orbitrap HCD model). Feature tolerances, the fragment-index vote mode, `--score auto`, the
+`--refine` high-res gate, isobaric-label detection, `--tmt-level` auto and the `--predict`
+instrument and NCE follow the acquisition class.
+
+**Per-run fragment tolerance.** On a high-resolution acquisition without `--fragment-tol-*`,
+each input file's fragment mass error is measured before it is scored: up to 3,000 spectra around
+the median precursor mass are searched, the rank-1 targets at 1% target-decoy q have their seven
+most intense b/y ions re-matched within 50 ppm, and the median and robust spread of those errors
+are logged (`Fragment error: ...`). The PIN match features (match counts, ion-current ratios,
+error statistics, chance-match and mass-competition terms) then use `|offset| + 4 x spread`,
+clamped to 5-40 ppm, and the ppm-Gaussian term is centred on the offset with a width of
+1.5 x spread. The features fed to the trained fragment-intensity and rich-ion models, the
+fragment index and the quantification keep the 20 ppm class window. `--fragment-tol-ppm` /
+`--fragment-tol-da` replace the measurement on any input format.
 
 ### Activation CV mapping (mzML `<activation>` cvParam accession → method)
 

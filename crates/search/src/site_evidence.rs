@@ -17,6 +17,7 @@
 use model::mass::{H2O, PROTON};
 use model::modification::Modification;
 use model::peptide::Peptide;
+use model::tolerance::Tolerance;
 
 /// One declared signature of a row's modification and whether the spectrum
 /// shows it.
@@ -66,8 +67,9 @@ fn fragment_mzs(peptide: &Peptide, charge: u8) -> Vec<f64> {
     out
 }
 
-/// Whether a peak lies within `tol` Da of `mz`. `peaks` is sorted by m/z.
-fn present(peaks: &[(f64, f32)], mz: f64, tol: f64) -> bool {
+/// Whether a peak lies within `tol` of `mz`. `peaks` is sorted by m/z.
+fn present(peaks: &[(f64, f32)], mz: f64, tol: Tolerance) -> bool {
+    let tol = tol.as_da(mz);
     let i = peaks.partition_point(|p| p.0 < mz - tol);
     i < peaks.len() && peaks[i].0 <= mz + tol
 }
@@ -88,11 +90,15 @@ pub struct Row<'a> {
 }
 
 /// The evidence of every row of one spectrum; all `None` when no row carries
-/// a variable modification. `tol` is the fragment tolerance in Da.
+/// a variable modification. `tol` is the run's fragment tolerance (ppm on
+/// high-resolution data), so near-isobaric ions such as the acetyl-lysine
+/// immonium ion (126.091), TMT126 (126.128) and the HexNAc oxonium fragment
+/// (126.055) are told apart; an ion is unique when no other form has one
+/// within twice that tolerance.
 pub fn spectrum_evidence(
     peaks: &[(f64, f32)],
     rows: &[Row<'_>],
-    tol: f64,
+    tol: Tolerance,
 ) -> Vec<Option<Box<SiteEvidence>>> {
     let variable = |p: &Peptide| p.residues.iter().any(|a| a.mod_.is_some_and(|m| !m.fixed));
     if !rows.iter().any(|r| variable(r.peptide)) {
@@ -126,7 +132,7 @@ pub fn spectrum_evidence(
             for &mz in own {
                 let h = present(peaks, mz, tol);
                 hit += h as usize;
-                if !near(&others, mz, 2.0 * tol) {
+                if !near(&others, mz, 2.0 * tol.as_da(mz)) {
                     if h {
                         unique_hit = unique_hit.saturating_add(1);
                     } else {
@@ -171,7 +177,13 @@ pub fn spectrum_evidence(
 
 /// A neutral loss from the precursor (any charge up to the row's) or from a
 /// singly charged b or y ion that holds residue `at`.
-fn loss_present(peaks: &[(f64, f32)], row: &Row<'_>, at: usize, losses: &[f64], tol: f64) -> bool {
+fn loss_present(
+    peaks: &[(f64, f32)],
+    row: &Row<'_>,
+    at: usize,
+    losses: &[f64],
+    tol: Tolerance,
+) -> bool {
     let masses: Vec<f64> = row
         .peptide
         .residues
@@ -250,7 +262,7 @@ mod tests {
                 precursor_mass: mass,
             },
         ];
-        let ev = spectrum_evidence(&peaks, &rows, 0.01);
+        let ev = spectrum_evidence(&peaks, &rows, Tolerance::Da(0.01));
         let (ea, et) = (ev[0].as_ref().unwrap(), ev[1].as_ref().unwrap());
         assert_eq!(ea.marks[0].diagnostic, Some(true));
         assert_eq!(ea.marks[0].loss, None);
@@ -263,7 +275,7 @@ mod tests {
 
         // The precursor minus trimethylamine marks the loss.
         let peaks = vec![((mass - 59.0735 + 2.0 * PROTON) / 2.0, 1.0)];
-        let ev = spectrum_evidence(&peaks, &rows, 0.01);
+        let ev = spectrum_evidence(&peaks, &rows, Tolerance::Da(0.01));
         assert_eq!(ev[1].as_ref().unwrap().marks[0].loss, Some(true));
     }
 
@@ -283,6 +295,46 @@ mod tests {
             charge: 2,
             precursor_mass: p.mass(),
         }];
-        assert!(spectrum_evidence(&[], &rows, 0.01)[0].is_none());
+        assert!(spectrum_evidence(&[], &rows, Tolerance::Da(0.01))[0].is_none());
+    }
+
+    /// At 0.5 Da the TMT126 reporter (126.128) counts as the acetyl-lysine
+    /// immonium ion (126.091) and the near-isobaric acetyl / trimethyl forms
+    /// share every ion; at 20 ppm neither happens.
+    #[test]
+    fn a_ppm_tolerance_separates_near_isobaric_ions() {
+        let ac = line("42.010565,K,opt,any,Acetyl,diagnostic=126.0913");
+        let me3 = line("42.04695,K,opt,any,Trimethyl");
+        let a = peptide(b"PEPKTIDER", 3, ac);
+        let t = peptide(b"PEPKTIDER", 3, me3);
+        let b4: f64 = a.residues[..4]
+            .iter()
+            .map(|x| x.mass + x.mod_.map_or(0.0, |m| m.mass_delta))
+            .sum::<f64>()
+            + PROTON;
+        let peaks = vec![(126.1277, 1.0), (b4, 1.0)];
+        let rows = [
+            Row {
+                peptide: &a,
+                is_decoy: false,
+                charge: 2,
+                precursor_mass: a.mass(),
+            },
+            Row {
+                peptide: &t,
+                is_decoy: false,
+                charge: 2,
+                precursor_mass: t.mass(),
+            },
+        ];
+        let wide = spectrum_evidence(&peaks, &rows, Tolerance::Da(0.5));
+        let w = wide[0].as_ref().unwrap();
+        assert_eq!(w.marks[0].diagnostic, Some(true));
+        assert_eq!((w.unique_hit, w.unique_miss), (0, 0));
+        let tight = spectrum_evidence(&peaks, &rows, Tolerance::Ppm(20.0));
+        let (ta, tt) = (tight[0].as_ref().unwrap(), tight[1].as_ref().unwrap());
+        assert_eq!(ta.marks[0].diagnostic, Some(false));
+        assert_eq!((ta.unique_hit, tt.unique_hit), (1, 0));
+        assert!(ta.unique_miss >= 4);
     }
 }

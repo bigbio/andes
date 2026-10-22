@@ -1,11 +1,13 @@
 //! Rank-based PSM scoring using the loaded Param model.
 
+pub mod fragment_error;
 pub mod fragment_ions;
 pub mod psm_score;
 pub mod rank_scorer;
 pub mod scored_spectrum;
 pub mod strong_score;
 
+pub use fragment_error::FragmentErrorModel;
 pub use fragment_ions::{predict_by_ions, predict_cz_ions, PredictedIon};
 pub use psm_score::{
     cz_hyperscore_psm, cz_matched_intensity_frac, cz_structure_features, edge_scoring_enabled,

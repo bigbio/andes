@@ -321,8 +321,37 @@ pub(crate) fn ms3_carries_reporters(path: &Path, is_mzml: bool, is_raw: bool) ->
     found
 }
 
+/// Collision energy, isolation width and FAIMS CV of the first MS2 scans of an
+/// mzML, Thermo `.raw` or Bruker `.d`. Empty for MGF and for a file that cannot
+/// be read.
+pub(crate) fn sample_ms2_meta(
+    path: &Path,
+    is_mzml: bool,
+    is_raw: bool,
+    is_d: bool,
+) -> input::Ms2MetaSample {
+    const SAMPLE_N: usize = 1000;
+    if is_mzml {
+        return input::open_buf_maybe_gz(path)
+            .map(|r| input::sample_mzml_ms2_meta(r, SAMPLE_N))
+            .unwrap_or_default();
+    }
+    #[cfg(feature = "thermo")]
+    if is_raw {
+        return input::thermo::sample_ms2_meta(path, SAMPLE_N).unwrap_or_default();
+    }
+    #[cfg(feature = "timstof")]
+    if is_d {
+        return input::TimsTofReader::open(path)
+            .map(|r| r.sample_ms2_meta(SAMPLE_N))
+            .unwrap_or_default();
+    }
+    let _ = (is_raw, is_d);
+    input::Ms2MetaSample::default()
+}
+
 /// The first spectra at `ms_level` of an mzML, MGF or Thermo `.raw`.
-fn sample_spectra(
+pub(crate) fn sample_spectra(
     path: &Path,
     is_mzml: bool,
     is_mgf: bool,

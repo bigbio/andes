@@ -890,6 +890,13 @@ fn hex_gate_passes(core: GlycanCore, glycan: Option<&GlycanComp>, hex_evidence: 
     core != GlycanCore::OGlycan || glycan.is_none_or(|g| g.hex == 0) || hex_evidence
 }
 
+/// Half-width (Da) of the search's precursor tolerance at `mass`: the wider of
+/// its two sides.
+fn precursor_window_da(params: &crate::search_params::SearchParams, mass: f64) -> f64 {
+    let t = &params.precursor_tolerance;
+    t.left.as_da(mass).max(t.right.as_da(mass))
+}
+
 /// Indices of the candidates whose residue mass is within `tol_da` of
 /// `bb_residue` (plus a 1e-6 Da slack; the caller re-checks exactly), ordered by
 /// (nominal residue mass, index), which is the nominal-bucket walk's order.
@@ -1180,8 +1187,10 @@ fn score_spectrum_glyco(
                     }
                     // Tolerance is set by the PRECURSOR mass error (the
                     // measured quantity), not the smaller glycan mass
-                    // (CodeRabbit): glycan = precursor − (exact) peptide.
-                    let tol = (precursor_neutral * tol_ppm * 1e-6_f64).max(0.02);
+                    // (CodeRabbit): glycan = precursor − (exact) peptide, so it
+                    // is the search's precursor tolerance, not the glyco
+                    // fragment tolerance.
+                    let tol = precursor_window_da(params, precursor_neutral).max(0.02);
                     if let Some(g) =
                         nearest_glycan_mass(glycan_sorted, glycan_list, glycan_mass, tol)
                     {
@@ -2358,6 +2367,20 @@ mod glycan_source_tests {
 
 #[cfg(test)]
 mod tests {
+    /// Glycan-by-subtraction matches at the precursor tolerance, the wider of
+    /// its two sides, whatever the glyco fragment tolerance is.
+    #[test]
+    fn glycan_subtraction_uses_the_precursor_tolerance() {
+        use model::tolerance::{PrecursorTolerance, Tolerance};
+        let aa = model::AminoAcidSetBuilder::new_standard().build().unwrap();
+        let mut params = crate::search_params::SearchParams::default_tryptic(aa);
+        params.precursor_tolerance = PrecursorTolerance::symmetric(Tolerance::Ppm(10.0));
+        assert!((super::precursor_window_da(&params, 3000.0) - 0.03).abs() < 1e-12);
+        params.precursor_tolerance =
+            PrecursorTolerance::asymmetric(Tolerance::Ppm(5.0), Tolerance::Da(0.05));
+        assert!((super::precursor_window_da(&params, 3000.0) - 0.05).abs() < 1e-12);
+    }
+
     #[test]
     fn o_glycan_floor_admits_a_light_tn_precursor() {
         use super::{min_glycan_floor, GlycanCore};

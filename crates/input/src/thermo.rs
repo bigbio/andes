@@ -666,6 +666,44 @@ pub fn detect_activation_instrument<P: AsRef<Path>>(
     Some((activation, instrument))
 }
 
+/// Read collision energy, isolation width and FAIMS CV from the first `n` MS2
+/// scans of a `.raw`. `None` when the file cannot be opened.
+pub fn sample_ms2_meta<P: AsRef<Path>>(path: P, n: usize) -> Option<crate::Ms2MetaSample> {
+    let reader = RawFileReader::open(path.as_ref()).ok()?;
+    let mut out = crate::Ms2MetaSample::default();
+    for i in 0..reader.len() {
+        if out.n_ms2 >= n {
+            break;
+        }
+        let Some(raw) = reader.get(i) else {
+            continue;
+        };
+        if raw.ms_level() != 2 {
+            continue;
+        }
+        out.n_ms2 += 1;
+        if let Some(p) = raw.precursor() {
+            let ce = p.activation().collision_energy();
+            if ce.is_finite() && ce > 0.0 {
+                out.collision_energies.push(ce);
+            }
+            let w = p.isolation_window();
+            let (lo, up) = full_width_isolation_bounds(
+                w.lower(),
+                w.upper(),
+                isolation_width_trailer(&reader, raw.index(), raw.ms_level()),
+            );
+            if up > lo && lo > 0.0 {
+                out.isolation_widths.push(up - lo);
+            }
+        }
+        if let Some(cv) = faims_cv(&raw) {
+            out.faims_cvs.push(cv);
+        }
+    }
+    Some(out)
+}
+
 impl Iterator for ThermoRawReader {
     type Item = Result<Spectrum, ThermoParseError>;
 

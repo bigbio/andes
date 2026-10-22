@@ -718,6 +718,16 @@ impl<'a> PreparedSearch<'a> {
         }
     }
 
+    /// Whether the candidate at GLOBAL index `global_idx` is a decoy (same
+    /// lookup as [`Self::candidate_peptide`]).
+    pub fn candidate_is_decoy(&self, global_idx: u32) -> bool {
+        let accum = self.mmap_accum.lock().unwrap();
+        match accum.candidates.get(global_idx as usize) {
+            Some(c) => c.is_decoy,
+            None => self.candidates[global_idx as usize].is_decoy,
+        }
+    }
+
     fn run_chunk_inner(
         &self,
         spectra: &[Spectrum],
@@ -1361,7 +1371,7 @@ impl<'a> PreparedSearch<'a> {
                         .zip(crate::site_evidence::spectrum_evidence(
                             &spec.peaks,
                             &rows,
-                            fragment_tolerance_da,
+                            scorer.pin_match_tolerance(),
                         ))
                         .collect();
                     drop(rows);
@@ -1891,16 +1901,24 @@ pub(crate) fn compute_psm_features_with_edge(
     let mut matched_ions: SmallVec<[(f32, f64, f64, bool); 96]> = SmallVec::new();
     let mut matched_ion_ranks: SmallVec<[u32; 96]> = SmallVec::new();
 
-    // Percolator feature counting uses a hardcoded fragment tolerance, NOT
-    // param.mme (Kim et al., Nat Commun 5:5277, 2014). High-res instruments
-    // (HighRes / TOF / QExactive) get 20 ppm; low-res LTQ gets 0.5 Da.
-    // The param.mme value (0.5 Da for the hcd_qexactive_tryp model) is the
-    // coarser binning tolerance used by the rank-distribution tables —
-    // appropriate for node-score lookup but ~50× too wide for feature
-    // counting at m/z 500.
-    let feat_tol = scorer.feature_match_tolerance();
+    // Percolator feature counting uses a fragment tolerance of its own, NOT
+    // param.mme (Kim et al., Nat Commun 5:5277, 2014): on high-res data the
+    // tolerance derived from the run's measured fragment error (20 ppm before
+    // a measurement), 0.5 Da on low-res data. The param.mme value (0.5 Da for
+    // the hcd_qexactive_tryp model) is the coarser binning tolerance used by
+    // the rank-distribution tables — appropriate for node-score lookup but
+    // ~50× too wide for feature counting at m/z 500.
+    let feat_tol = scorer.pin_match_tolerance();
     let feature_tol_is_ppm = matches!(feat_tol, model::tolerance::Tolerance::Ppm(_));
     let feature_tol = feat_tol.raw_value(); // numeric value in the unit (ppm or Da)
+
+    // The trained fragment-intensity and rich-ion models (and the mod-site
+    // features beside them) match at the window they were trained at: the
+    // class default, not the measured tolerance. Serving them at the measured
+    // window lost PSMs on Astral and phospho in an A/B against this split.
+    let model_tol = scorer.feature_match_tolerance();
+    let model_tol_is_ppm = matches!(model_tol, model::tolerance::Tolerance::Ppm(_));
+    let model_tol = model_tol.raw_value();
 
     // Neutral-loss masses (charge-1 fragment partners at −H2O / −NH3).
     const H2O_LOSS_DA: f64 = 18.0106;
@@ -2126,7 +2144,11 @@ pub(crate) fn compute_psm_features_with_edge(
     } else {
         0.0
     };
-    // Isolation-window efficiency is not available → emit 0.0.
+    // Isolation-window efficiency (the precursor's share of the ion current in
+    // its isolation window) needs the MS1 scan around each precursor. The
+    // standard search streams MS2 only (MS1 is read under `--chimeric` and
+    // `--precursor-mono`), so the column is a constant 0.0 for every PSM and
+    // carries no information to the rescorer.
     let isolation_window_efficiency = 0.0_f32;
 
     // ── Top-7 mass-error statistics ───────────────────────────────────────────
@@ -2167,19 +2189,21 @@ pub(crate) fn compute_psm_features_with_edge(
     let (mean_rel_error_top7, stdev_rel_error_top7) = mean_and_pop_stdev(&rel_ppm_errors);
 
     // ── Strong-score Stage-1: ppm-Gaussian "tight-match evidence" ─────────────
-    // Σ exp(-½ (ppmᵢ/σ)²) over ALL matched ions (not just top-7), σ = 7 ppm.
-    // Each ion contributes ~1 when matched within a few ppm and ~0 near the
-    // tolerance edge, so the sum rewards PSMs whose fragments cluster tightly in
-    // mass accuracy — the high-res signal the intensity-rank model throws away.
-    // For low-res spectra every ppm error is large, so the term is ~0 for all
-    // candidates and Percolator simply learns a near-zero weight (harmless).
-    const PPM_SIGMA: f64 = 7.0;
+    // Σ exp(-½ ((ppmᵢ - c)/σ)²) over ALL matched ions (not just top-7): c and σ
+    // are the run's measured fragment offset and 1.5 × its spread on high-res
+    // data, 0 and 7 ppm otherwise. Each ion contributes ~1 when matched near
+    // the run's error centre and ~0 near the tolerance edge, so the sum rewards
+    // PSMs whose fragments cluster tightly in mass accuracy — the high-res
+    // signal the intensity-rank model throws away. For low-res spectra every
+    // ppm error is large, so the term is ~0 for all candidates and Percolator
+    // simply learns a near-zero weight (harmless).
+    let (ppm_centre, ppm_sigma) = scorer.ppm_gaussian();
     let ppm_gaussian_score: f32 = matched_ions
         .iter()
         .filter(|&&(_, _, pred, _)| pred > 0.0)
         .map(|&(_, obs, pred, _)| {
-            let ppm = (obs - pred) / pred * 1e6;
-            (-0.5 * (ppm / PPM_SIGMA) * (ppm / PPM_SIGMA)).exp()
+            let z = ((obs - pred) / pred * 1e6 - ppm_centre) / ppm_sigma;
+            (-0.5 * z * z).exp()
         })
         .sum::<f64>() as f32;
 
@@ -2296,8 +2320,8 @@ pub(crate) fn compute_psm_features_with_edge(
         scored_spec,
         peptide,
         charge,
-        feature_tol,
-        feature_tol_is_ppm,
+        model_tol,
+        model_tol_is_ppm,
         frag_pred_slice,
     );
 
@@ -2313,8 +2337,8 @@ pub(crate) fn compute_psm_features_with_edge(
                 scored_spec,
                 peptide,
                 charge,
-                feature_tol,
-                feature_tol_is_ppm,
+                model_tol,
+                model_tol_is_ppm,
                 frag_pred_slice,
             );
             // Decoy-aware rich-ion LLR (additive PIN feature; 0.0 when no rich-ion model).
@@ -2323,13 +2347,13 @@ pub(crate) fn compute_psm_features_with_edge(
                 scored_spec,
                 peptide,
                 charge,
-                feature_tol,
-                feature_tol_is_ppm,
+                model_tol,
+                model_tol_is_ppm,
             );
             // Mod-localization site-determining-ion features (additive PIN columns; all
-            // 0.0 for an unmodified peptide). Uses the SAME feature tolerance as the
+            // 0.0 for an unmodified peptide). Uses the SAME tolerance as the
             // RichIonLLR / ion-feature path above (train/serve parity).
-            let m = mod_site_features(peptide, scored_spec, feature_tol, feature_tol_is_ppm);
+            let m = mod_site_features(peptide, scored_spec, model_tol, model_tol_is_ppm);
             (e, c, t, r, m)
         } else {
             (0.0, 0.0, 0.0, 0.0, Default::default())

@@ -6,6 +6,7 @@ use std::sync::mpsc::sync_channel;
 use std::sync::Arc;
 use std::thread;
 
+use crate::acquisition::Acquisition;
 use crate::cli::{
     Cli, EnzymeSpecificity, EthcdActivationFlag, FragmentIndexFlag, Fragmentation,
     PrecursorMonoFlag, Protocol, ScoreFlag,
@@ -22,8 +23,8 @@ use crate::rescore;
 use crate::spectra::{
     add_mzml_skipped, detect_dominant_activation, detect_instrument_type_for_path,
     detect_isobaric_sampled, input_format_flags, merge_parse_stats, ms3_carries_reporters,
-    prefix_spectrum_titles, run_precursor_calibration, send_chunks, title_prefix_for,
-    tolerance_ppm_display, ParseStats,
+    prefix_spectrum_titles, run_precursor_calibration, sample_ms2_meta, sample_spectra,
+    send_chunks, title_prefix_for, tolerance_ppm_display, ParseStats,
 };
 use crate::{arg_present, report_search_progress, EXPLICIT_MISSED_CLEAVAGES};
 use input::{MgfReader, Ms1Link, MzMLReader};
@@ -152,7 +153,9 @@ fn score_mass_ordered(
     t_search_start: std::time::Instant,
     keep_peaks: bool,
     mut quant: Option<&mut QuantCollector>,
+    measurer: &mut FragmentErrorMeasurer,
 ) {
+    measurer.measure(prepared, pending.iter(), Some(span_da));
     pending.sort_by(|a, b| index_order_mass(a).total_cmp(&index_order_mass(b)));
     eprintln!(
         "fragment-index: {} spectra sorted by precursor mass, chunks of <= {} spectra and <= {:.0} Da",
@@ -179,6 +182,84 @@ fn score_mass_ordered(
             all_spectra.push(spec);
         }
         report_search_progress(all_spectra.len(), t_search_start);
+    }
+}
+
+/// Measures each input file's fragment mass error once, before its spectra
+/// are scored, and installs it on the scorer (see
+/// [`search::fragment_error`]). Active on high-resolution acquisitions without
+/// a `--fragment-tol-*` override.
+struct FragmentErrorMeasurer {
+    enabled: bool,
+    done: bool,
+}
+
+impl FragmentErrorMeasurer {
+    /// Forget the previous file's measurement.
+    fn start_file(&mut self, prepared: &PreparedSearch) {
+        self.done = false;
+        if self.enabled {
+            prepared.scorer.set_fragment_error(None);
+        }
+    }
+
+    /// Measure on `spectra` (a whole file, or its first chunk) unless this
+    /// file was measured already. Scores up to
+    /// [`search::fragment_error::SAMPLE_SPECTRA`] spectra around the median
+    /// precursor mass, in fragment-index slices when the index is on.
+    fn measure<'s>(
+        &mut self,
+        prepared: &PreparedSearch,
+        spectra: impl Iterator<Item = &'s Spectrum>,
+        index_span_da: Option<f64>,
+    ) {
+        if !self.enabled || self.done {
+            return;
+        }
+        self.done = true;
+        let t = std::time::Instant::now();
+        let mut refs: Vec<&Spectrum> = spectra.filter(|s| s.peaks.len() >= 10).collect();
+        refs.sort_by(|a, b| index_order_mass(a).total_cmp(&index_order_mass(b)));
+        let n = search::fragment_error::SAMPLE_SPECTRA.min(refs.len());
+        let lo = (refs.len() / 2).saturating_sub(n / 2);
+        let sample: Vec<Spectrum> = refs[lo..lo + n].iter().map(|s| (*s).clone()).collect();
+        drop(refs);
+        let mut queues: Vec<TopNQueue> = Vec::with_capacity(sample.len());
+        match index_span_da {
+            Some(span_da) => {
+                let mut start = 0;
+                while start < sample.len() {
+                    let take = index_chunk_len(&sample[start..], index_order_mass, span_da);
+                    queues.extend(prepared.run_chunk(&sample[start..start + take], start));
+                    start += take;
+                }
+            }
+            None => queues.extend(prepared.run_chunk(&sample, 0)),
+        }
+        match search::fragment_error::measure_on_queues(prepared, &sample, &queues) {
+            Ok(m) => {
+                prepared.scorer.set_fragment_error(Some(m));
+                eprintln!(
+                    "Fragment error: offset {:+.2} ppm, spread {:.2} ppm from {} ions of {} PSMs \
+                     at 1% q in {} sampled spectra -> PIN feature tolerance {:.1} ppm, \
+                     ppm-Gaussian centre {:+.2} width {:.2} ppm ({:.1}s)",
+                    m.offset_ppm,
+                    m.sigma_ppm,
+                    m.ions,
+                    m.psms,
+                    sample.len(),
+                    m.feature_tolerance_ppm(),
+                    m.offset_ppm,
+                    m.gaussian_sigma_ppm(),
+                    t.elapsed().as_secs_f64()
+                );
+            }
+            Err(why) => eprintln!(
+                "Fragment error: not measured ({why}); the PIN features keep {:?} ({:.1}s)",
+                prepared.scorer.feature_match_tolerance(),
+                t.elapsed().as_secs_f64()
+            ),
+        }
     }
 }
 
@@ -216,6 +297,18 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.spectrum.is_empty() {
         return Err("no --spectrum inputs".into());
     }
+    // Configure the global Rayon worker pool BEFORE anything runs on it: the
+    // acquisition sample of a `.d` opens the timsTOF reader, which runs on the
+    // global pool and would otherwise create it at the default size.
+    // `build_global()` panics if called twice; guard with `OnceLock` so repeated
+    // CLI invocations within a single test process don't blow up.
+    static POOL_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    POOL_INIT.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(cli.threads)
+            .build_global()
+            .expect("build_global");
+    });
     let mut cli = cli;
     if cli.top_n == 0 {
         return Err("--top-n must be at least 1".into());
@@ -475,6 +568,38 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .map(|(_, inst)| inst.is_some())
         .unwrap_or(false);
 
+    // The acquisition context, carried separately from the model chosen below.
+    // Without analyzer metadata and without a `--fragment-tol-*` unit, the
+    // fragment resolution is read from the peaks of the first spectra.
+    let peak_evidence = if !instrument_was_detected
+        && cli.fragment_tol_ppm.is_none()
+        && cli.fragment_tol_da.is_none()
+    {
+        let ev = sample_spectra(&spectrum_path, is_mzml, is_mgf, is_raw, cli.ms_level as u32)
+            .map(|sample| input::infer_fragment_resolution(&sample));
+        if let Some(e) = &ev {
+            eprintln!(
+                "Acquisition: no analyzer metadata; fragment resolution from the peaks: {} -> {}",
+                e.describe(),
+                match e.high_res {
+                    Some(true) => "high resolution (HCD high-res model)",
+                    Some(false) => "low resolution",
+                    None => "undecided",
+                }
+            );
+        }
+        ev
+    } else {
+        None
+    };
+    let acquisition = Acquisition::resolve(
+        detected_activation_instrument,
+        cli.fragment_tol_ppm,
+        cli.fragment_tol_da,
+        peak_evidence,
+        sample_ms2_meta(&spectrum_path, is_mzml, is_raw, is_d),
+    );
+
     let t_phase = std::time::Instant::now();
     // The block also returns the (activation, instrument) it routed on and the
     // chosen model id, so the resolved-parameter banner can report what was
@@ -522,12 +647,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     cli.fragmentation,
                     cli.fragment_tol_ppm,
                     cli.fragment_tol_da,
+                    acquisition.inferred_high_res(),
                 ),
                 None => resolve_metadataless_selection(
                     None,
                     cli.fragmentation,
                     cli.fragment_tol_ppm,
                     cli.fragment_tol_da,
+                    acquisition.inferred_high_res(),
                 ),
             };
 
@@ -617,7 +744,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             is_mgf,
             is_raw,
             cli.ms_level as u32,
-            param.data_type.instrument.is_high_resolution(),
+            acquisition.high_res,
         )
     };
     let label: Option<input::IsobaricLabel> = match (cli.tmt, cli.protocol) {
@@ -696,15 +823,20 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let mut scorer = RankScorer::new(&param);
-    // Fragment-tol override applies to metadata-less (MGF) input only. For
-    // mzML/.raw/.d the analyzer is auto-detected, so the override is ignored.
+    // Feature tolerances and the fragment-index vote mode follow the
+    // acquisition, not the model's instrument.
+    scorer.set_acquisition_high_res(Some(acquisition.high_res));
+    // An explicit `--fragment-tol-*` sets the feature tolerance on every input
+    // format, detected analyzer or not, and replaces the per-run measurement.
     let frag_tol_override = cli_fragment_tol_override(cli.fragment_tol_ppm, cli.fragment_tol_da);
-    if frag_tol_override.is_some() {
+    if let Some(t) = frag_tol_override {
         if instrument_was_detected {
-            eprintln!("WARN: --fragment-tol-* ignored — instrument auto-detected from metadata (use --fragment-tol-ppm/-da with MGF input only)");
-        } else {
-            scorer.set_fragment_tol_override(frag_tol_override);
+            eprintln!(
+                "--fragment-tol-* {t:?} overrides the feature tolerance of the detected {} analyzer",
+                acquisition.analyzer.map_or("", |i| i.name())
+            );
         }
+        scorer.set_fragment_tol_override(frag_tol_override);
     }
     eprintln!(
         "[PHASE param_and_scorer: {:.2}s]",
@@ -895,27 +1027,16 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         ScoreFlag::Strong => search::ScoreMode::Strong,
         // Auto: strong re-ranking pays on high-res (sharp fragment peaks → the
         // intensity / rich-ion GBDTs separate target/decoy); on low-res it
-        // collapses the candidate pool → use rank. Keyed off the resolved
-        // model's instrument resolution.
+        // collapses the candidate pool → use rank. Keyed off the acquisition's
+        // resolution class.
         ScoreFlag::Auto => {
-            if param.data_type.instrument.is_high_resolution() {
+            if acquisition.high_res {
                 search::ScoreMode::Strong
             } else {
                 search::ScoreMode::Rank
             }
         }
     };
-    // Configure the global Rayon worker pool BEFORE anything runs on it
-    // (PreparedSearch, the chunks).
-    // `build_global()` panics if called twice; guard with `OnceLock` so repeated
-    // CLI invocations within a single test process don't blow up.
-    static POOL_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    POOL_INIT.get_or_init(|| {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(cli.threads)
-            .build_global()
-            .expect("build_global");
-    });
     // Every search retrieves its candidates from the out-of-core base-peptide
     // index; the glyco driver materialises its own sequon-only table from it.
     // The retrieval strategy is chosen by `retrieval_choice` and reported once;
@@ -1098,18 +1219,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         routed_activation.name(),
         param.data_type.activation.name()
     );
-    let instrument_source = if instrument_was_detected {
-        "detected"
-    } else if cli.fragment_tol_ppm.is_some() || cli.fragment_tol_da.is_some() {
-        "from --fragment-tol-*"
-    } else {
-        "default"
-    };
+    let instrument_source = acquisition.resolution_source.tag();
     eprintln!(
         "  instrument     : {} [{instrument_source}] (model trained on {})",
         routed_instrument.map_or("LowRes", |i| i.name()),
         param.data_type.instrument.name()
     );
+    eprintln!("  acquisition    : {}", acquisition.describe());
     eprintln!("  protocol       : {:?}", param.data_type.protocol);
     if extra_enzymes.is_empty() {
         eprintln!(
@@ -1176,7 +1292,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("Using {} worker threads", cli.threads);
 
-    // Fragment tolerance of 0.5 Da is the canonical low-res HCD default.
+    // `PreparedSearch::fragment_tolerance_da`: the Da window of the glyco
+    // peptide-first fragment index on low-res data (high-res data uses the
+    // ppm retrieval window). Node scoring takes the argument but does not
+    // read it, and site evidence uses the scorer's PIN tolerance.
     let fragment_tol_da = 0.5_f64;
 
     let bench_cap = if cli.max_spectra > 0 {
@@ -1281,7 +1400,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // MS1 scans (purity, label-free chromatograms) and MS3 scans (SPS-MS3
     // reporters) are captured by the readers next to the MS2 stream and handed
     // to the collector per file. Quantification itself runs after rescoring.
-    let high_res = param.data_type.instrument.is_high_resolution();
+    let high_res = acquisition.high_res;
     // Without --tmt-level, SPS-MS3 reporters are read from the MS3 when the
     // low-resolution MS2 cannot separate the plex's channels.
     let tmt_level = match (cli.tmt_level, cli.tmt) {
@@ -1345,7 +1464,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let predictors = if cli.glyco {
         None
     } else {
-        crate::predicted::Predictors::from_cli(&cli, param.data_type.instrument)?
+        crate::predicted::Predictors::from_cli(&cli, &acquisition, param.data_type.instrument)?
     };
     if let Some(p) = &predictors {
         eprintln!("Predict: {}", p.describe());
@@ -1409,10 +1528,17 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         (None, _) => None,
     };
 
+    // The per-run fragment mass error (high-res acquisitions without an
+    // explicit `--fragment-tol-*`; the glyco driver keeps its own tolerances).
+    let mut measurer = FragmentErrorMeasurer {
+        enabled: acquisition.high_res && frag_tol_override.is_none() && !cli.glyco,
+        done: false,
+    };
     for (file_idx, input_path) in spectrum_paths.iter().enumerate() {
         if bench_mode && all_spectra.len() >= bench_cap {
             break;
         }
+        measurer.start_file(&prepared);
         let remaining_cap = if bench_mode {
             bench_cap.saturating_sub(all_spectra.len())
         } else {
@@ -1561,6 +1687,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
                 let offset = all_spectra.len();
+                measurer.measure(&prepared, chunk_spectra.iter(), None);
                 if chimeric_active {
                     let mut queues = prepared.run_chunk(&chunk_spectra, offset);
                     search::match_engine::run_pass2_coisolation(
@@ -1598,8 +1725,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 report_search_progress(all_spectra.len(), t_search_start);
             }
             if index_ordered {
-                pending.sort_by(|a, b| index_order_mass(&a.0).total_cmp(&index_order_mass(&b.0)));
                 let span_da = index_chunk_span_da(cli.fragment_index_slice_da);
+                measurer.measure(&prepared, pending.iter().map(|e| &e.0), Some(span_da));
+                pending.sort_by(|a, b| index_order_mass(&a.0).total_cmp(&index_order_mass(&b.0)));
                 eprintln!(
                     "fragment-index: {} spectra sorted by precursor mass, chunks of <= {} spectra and <= {:.0} Da",
                     pending.len(),
@@ -1695,6 +1823,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 t_search_start,
                 keep_peaks,
                 quant.as_mut(),
+                &mut measurer,
             );
             ParseStats {
                 error_count: errors.len(),
@@ -1810,6 +1939,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 // Skip the scoring (parsing + peak retention below still run); ~16%
                 // faster on glyco. Non-glyco path is unchanged.
                 if !cli.glyco {
+                    measurer.measure(&prepared, chunk.iter(), None);
                     let offset = all_spectra.len();
                     let queues = prepared.run_chunk(&chunk, offset);
                     all_queues.extend(queues);
@@ -1838,6 +1968,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     t_search_start,
                     keep_peaks,
                     quant.as_mut(),
+                    &mut measurer,
                 );
             }
 
@@ -2044,7 +2175,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &idx,
             &output_pin_path,
             spectrum_paths,
-            detected_activation_instrument,
+            acquisition.high_res,
             mono_for_pin,
             glyco_isotope_override,
             t_total,
@@ -2074,11 +2205,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // the refine config/tier (set them in the `--refine-config` YAML).
         let cfg = base_cfg;
 
-        // High-res signal: the resolved model's instrument class. High-res
-        // instruments fragment-match in ppm (20 ppm vs 0.5 Da ion-trap), which is
-        // exactly the regime where the near-isobaric refinement deltas (e.g.
+        // High-res signal: the acquisition's resolution class. High-res
+        // fragments match in ppm (20 ppm vs 0.5 Da ion-trap), which is exactly
+        // the regime where the near-isobaric refinement deltas (e.g.
         // deamidation +0.984 vs a C13 isotope error) are resolvable.
-        let high_res = param.data_type.instrument.is_high_resolution();
+        let high_res = acquisition.high_res;
 
         // `high_res_only` comes from the refine config/tier (set it in the
         // `--refine-config` YAML; the former CLI overrides were removed).

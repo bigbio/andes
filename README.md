@@ -137,9 +137,11 @@ This runs a tryptic search with no configuration: for mzML, `.raw` and `.d` the 
 from the file metadata, and the precursor tolerance defaults to `20ppm`. Feed `out.pin` to
 Percolator for q-values.
 
-> **MGF has no instrument metadata.** Pass `--fragmentation <CID\|ETD\|HCD\|UVPD>` plus
-> `--fragment-tol-ppm` or `--fragment-tol-da`; otherwise andes assumes CID / low-res / 0.5 Da
-> and warns.
+> **MGF has no instrument metadata.** andes reads the fragment resolution from the peaks of the
+> first 1,000 spectra (13C isotope pairs at 1.00335/z within 10 ppm, compared with chance) and
+> selects the high-res HCD model when they show high resolution. When the peaks do not decide it
+> assumes CID / low-res / 0.5 Da and warns. `--fragmentation <CID\|ETD\|HCD\|UVPD>` and
+> `--fragment-tol-ppm` / `--fragment-tol-da` override the inference.
 
 Each PIN row is one PSM. `RankScore` orders candidates within a spectrum; `RawScore` is the
 score Percolator weights most. All 66 columns are in [`DOCS.md` §3a](DOCS.md#3a-pin-columns).

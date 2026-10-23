@@ -11,8 +11,12 @@
 //! and `alignment.parquet` (library).
 //!
 //! Run index: the position of the run's stem in the sorted stem list.
-//! Precursor id: the position of its key in the sorted union of every run's
-//! precursor keys. The rescorer's PSM score, PSM q-value and PEP
+//! Precursor: a positional-isomer class of the run tables' precursor keys
+//! (residues, modification masses and charge, [`model::IsomerClass`]), so the
+//! site forms of one peptide that win in different spectra or runs are one
+//! precursor; its key is the `<peptidoform>/<charge>` of the site form of its
+//! best PSM. Precursor id: the position of its class in the sorted union of
+//! every run's classes. The rescorer's PSM score, PSM q-value and PEP
 //! (Percolator's `score`, `q-value` and `posterior_error_prob` columns, or the
 //! native rescorer's) are joined to the run tables on (run, SpecId). Library
 //! confidence ranks precursors by the score; the q-value, and the PEP when
@@ -492,23 +496,6 @@ fn envelope_of(v: &[f32]) -> Result<[f32; ENVELOPE_LEN], usize> {
     v.try_into().map_err(|_| v.len())
 }
 
-/// Builds the library over the run tables of `stems` (sorted, as from
-/// [`library_runs`]) with the rescorer's scores joined on (run, SpecId), and
-/// writes it to `dir`. `max_q` is the entry gate, `donor_q` the PSM q-value
-/// and `donor_pep` the optional PSM PEP cap of the donor PSMs. A PSM whose
-/// rescoring result names another peptide or target/decoy label is skipped.
-///
-/// The run tables are read twice, one run and one record batch at a time:
-/// first the precursor keys and their metadata (the union of keys numbers the
-/// precursors), then the PSMs, joined to their run's scores and folded into
-/// per-precursor aggregates ([`quant::library::LibraryBuilder`] and the
-/// donor scans). Memory follows the precursors and their donor runs, plus one
-/// run's scores; with merged scores, the one score set (48 bytes per PSM: a
-/// SpecId is held as its 128-bit hash, see [`ScoreSet`]) and, before it is
-/// read, every SpecId's hash and first run, to name a SpecId shared by two
-/// runs. The Percolator files are read one line at a time. Merged scores are
-/// loaded after the tables' SpecIds are checked, so that a SpecId shared by
-/// two runs fails with the runs named.
 /// Alignment settings with each run's residual-width floor: half the median
 /// spacing of its MS1 scans of one FAIMS voltage, read from
 /// `<stem>.ms1.parquet`. A run without a readable table, or with fewer than two
@@ -553,62 +540,29 @@ fn log_floor_hits(library: &Library, ap: &AlignParams, stems: &[String]) {
     }
 }
 
-/// The positional-isomer class of a precursor key (`<peptidoform>/<charge>`):
-/// its residues, its sorted modification tokens and its charge. Two keys of
-/// one class are the same peptide with the same modifications on other sites.
-fn isomer_class(key: &str) -> String {
-    let (peptidoform, charge) = key.rsplit_once('/').unwrap_or((key, ""));
-    let mut residues = String::new();
-    let mut mods: Vec<&str> = Vec::new();
-    let mut rest = peptidoform;
-    while let Some(c) = rest.chars().next() {
-        if c == '[' {
-            let end = rest.find(']').map_or(rest.len(), |i| i + 1);
-            mods.push(&rest[..end]);
-            rest = &rest[end..];
-        } else {
-            residues.push(c);
-            rest = &rest[c.len_utf8()..];
-        }
-    }
-    mods.sort_unstable();
-    format!("{residues}|{}/{charge}", mods.concat())
-}
-
-/// Log the library's positional-isomer classes with more than one site form
-/// (target entries) and how far apart the forms' consensus RTs are: forms
-/// that co-elute are one MS1 signal measured twice, forms that do not are
-/// different analytes.
-fn log_isomer_classes(library: &Library) {
-    let mut classes: HashMap<String, Vec<f64>> = HashMap::new();
-    for e in library.entries.iter().filter(|e| !e.identity_decoy) {
-        let key = &library.meta[e.precursor as usize].key;
-        classes.entry(isomer_class(key)).or_default().push(e.consensus_rt);
-    }
-    let multi: Vec<&Vec<f64>> = classes.values().filter(|v| v.len() > 1).collect();
-    // Bins of the RT gap between the closest two forms of a class, seconds.
-    let edges = [10.0, 30.0, 120.0];
-    let mut bins = [0usize; 4];
-    for rts in &multi {
-        let mut t: Vec<f64> = rts.iter().copied().filter(|x| x.is_finite()).collect();
-        t.sort_by(f64::total_cmp);
-        let Some(gap) = t.windows(2).map(|w| w[1] - w[0]).min_by(f64::total_cmp) else {
-            continue;
-        };
-        bins[edges.iter().position(|&e| gap < e).unwrap_or(3)] += 1;
-    }
-    eprintln!(
-        "[mbr] positional isomers: {} of {} target classes have several site forms ({} entries); closest forms' consensus RT gap <10 s {}, 10-30 s {}, 30-120 s {}, >=120 s {}",
-        multi.len(),
-        classes.len(),
-        multi.iter().map(|v| v.len()).sum::<usize>(),
-        bins[0],
-        bins[1],
-        bins[2],
-        bins[3]
-    );
-}
-
+/// Builds the library over the run tables of `stems` (sorted, as from
+/// [`library_runs`]) with the rescorer's scores joined on (run, SpecId), and
+/// writes it to `dir`. `max_q` is the entry gate, `donor_q` the PSM q-value
+/// and `donor_pep` the optional PSM PEP cap of the donor PSMs. A PSM whose
+/// rescoring result names another positional-isomer class (residues or
+/// modification masses) or target/decoy label is skipped.
+///
+/// A precursor is a positional-isomer class with a charge: the precursor keys
+/// of its site forms join it. Its key is the site form of its best PSM: a donor
+/// PSM when it has one, then the highest score, earliest RT and lowest run, as
+/// [`DonorPsms`] picks the PSM whose scan gives the library spectrum.
+///
+/// The run tables are read twice, one run and one record batch at a time:
+/// first the precursor keys and their metadata (the union of their classes
+/// numbers the precursors), then the PSMs, joined to their run's scores and folded into
+/// per-precursor aggregates ([`quant::library::LibraryBuilder`] and the
+/// donor scans). Memory follows the precursors and their donor runs, plus one
+/// run's scores; with merged scores, the one score set (48 bytes per PSM: a
+/// SpecId is held as its 128-bit hash, see [`ScoreSet`]) and, before it is
+/// read, every SpecId's hash and first run, to name a SpecId shared by two
+/// runs. The Percolator files are read one line at a time. Merged scores are
+/// loaded after the tables' SpecIds are checked, so that a SpecId shared by
+/// two runs fails with the runs named.
 pub(crate) fn build_and_write_library(
     dir: &Path,
     stems: &[String],
@@ -714,13 +668,39 @@ pub(crate) fn build_and_write_library(
         }
         ScoreLoader::PerRun(load) => (None, Some(load)),
     };
-    // Dense precursor ids over the sorted union of keys; the first target row
-    // of a key (else its first row) gives its metadata. A decoy row whose key
-    // is also a target's is dropped: a precursor is all-target or all-decoy.
-    let mut meta = Vec::with_capacity(keys.len());
-    let mut proteins = Vec::with_capacity(keys.len());
-    let mut target_key = Vec::with_capacity(keys.len());
-    for (key, m) in std::mem::take(&mut keys) {
+    // Every run's modification masses by name, to read a peptidoform's class.
+    let mut mod_masses: HashMap<String, f64> = HashMap::new();
+    for p in &paths {
+        mod_masses.extend(read_run_quant_mods(p)?);
+    }
+    let resolve = |tag: &str| {
+        mod_masses
+            .get(tag)
+            .copied()
+            .or_else(|| bundled_unimod_mass(tag))
+    };
+    // The precursor keys of each positional-isomer class and charge.
+    let site_keys: Vec<(String, KeyMeta)> = std::mem::take(&mut keys).into_iter().collect();
+    let mut classes: BTreeMap<(IsomerClass, u8), Vec<u32>> = BTreeMap::new();
+    for (i, (key, m)) in site_keys.iter().enumerate() {
+        let class = IsomerClass::parse(split_key(key), resolve)
+            .map_err(|e| format!("{}: precursor {key:?}: {e}", paths[m.run].display()))?;
+        classes.entry((class, m.charge)).or_default().push(i as u32);
+    }
+    // Dense precursor ids over the sorted classes; the first target row of
+    // the class's first site form with one (else of its first site form) gives
+    // its metadata. A decoy row of a class that also has target rows is
+    // dropped: a precursor is all-target or all-decoy.
+    let mut meta = Vec::with_capacity(classes.len());
+    let mut proteins = Vec::with_capacity(classes.len());
+    let mut target_key = Vec::with_capacity(classes.len());
+    let mut forms: Vec<Vec<u32>> = Vec::with_capacity(classes.len());
+    for (_, sites) in std::mem::take(&mut classes) {
+        let first = *sites
+            .iter()
+            .find(|&&i| site_keys[i as usize].1.has_target)
+            .unwrap_or(&sites[0]);
+        let (key, m) = &site_keys[first as usize];
         let envelope = m.envelope.map_err(|len| {
             format!(
                 "{}: precursor {key:?} has an envelope of {len} isotopes, expected {ENVELOPE_LEN}",
@@ -728,28 +708,34 @@ pub(crate) fn build_and_write_library(
             )
         })?;
         meta.push(PrecursorMeta {
-            key,
+            key: key.clone(),
             mz: m.mz,
             charge: m.charge,
             envelope,
         });
-        proteins.push(m.proteins);
+        proteins.push(m.proteins.clone());
         target_key.push(m.has_target);
+        forms.push(sites);
     }
-    let id_of: HashMap<&str, u32> = meta
+    // Precursor key -> (precursor id, site form index in `site_keys`).
+    let site_keys_ref = &site_keys;
+    let id_of: HashMap<&str, (u32, u32)> = forms
         .iter()
         .enumerate()
-        .map(|(i, m)| (m.key.as_str(), i as u32))
+        .flat_map(|(id, sites)| {
+            sites
+                .iter()
+                .map(move |&i| (site_keys_ref[i as usize].0.as_str(), (id as u32, i)))
+        })
         .collect();
     // Pass 2: the PSMs, joined to their run's scores.
     let mut builder = LibraryBuilder::new(meta.len(), stems.len(), donor_q, donor_pep);
     let mut donors = DonorPsms::new(meta.len());
+    let mut best = vec![None::<BestForm>; meta.len()];
     let (mut unscored_t, mut unscored_d, mut shadowed, mut mismatched) = (0usize, 0, 0, 0);
     let (mut n_psms, mut donor_psms, mut n_joined) = (0usize, 0usize, 0usize);
     let mut class = IsomerClass::default();
     for r in 0..stems.len() {
-        let mods = read_run_quant_mods(&paths[r])?;
-        let resolve = |tag: &str| mods.get(tag).copied().or_else(|| bundled_unimod_mass(tag));
         let own;
         let set = match (&merged_scores, &per_run) {
             (Some(m), _) => m,
@@ -763,7 +749,7 @@ pub(crate) fn build_and_write_library(
         for batch in open(r, &JOIN_COLUMNS)? {
             for row in batch? {
                 run_rows += 1;
-                let id = *id_of.get(row.precursor_key.as_str()).ok_or_else(|| {
+                let (id, site) = *id_of.get(row.precursor_key.as_str()).ok_or_else(|| {
                     format!(
                         "{}: precursor {:?} changed between two reads of the table",
                         paths[r].display(),
@@ -804,6 +790,17 @@ pub(crate) fn build_and_write_library(
                 let donor = builder.is_donor(&p);
                 donor_psms += usize::from(donor && !p.is_decoy);
                 builder.add(&p);
+                let form = BestForm {
+                    donor,
+                    score: p.score,
+                    rt: p.rt,
+                    run: p.run,
+                    site,
+                };
+                let slot = &mut best[id as usize];
+                if slot.as_ref().is_none_or(|b| form.beats(b)) {
+                    *slot = Some(form);
+                }
                 if donor {
                     donors.add(&p, &row.spec_id);
                 }
@@ -836,6 +833,23 @@ pub(crate) fn build_and_write_library(
     }
     drop(id_of);
     drop(merged_scores);
+    // Each precursor's key: the site form of its best PSM.
+    let (mut multi, mut n_forms) = (0usize, 0usize);
+    for (id, b) in best.iter().enumerate() {
+        if let Some(b) = b {
+            meta[id].key = site_keys[b.site as usize].0.clone();
+        }
+        if target_key[id] {
+            n_forms += forms[id].len();
+            multi += usize::from(forms[id].len() > 1);
+        }
+    }
+    drop(forms);
+    drop(site_keys);
+    eprintln!(
+        "[mbr] positional isomers: {} target precursors hold {n_forms} site forms; {multi} precursors join several site forms and are keyed by the site form of their best PSM",
+        target_key.iter().filter(|&&t| t).count()
+    );
     let donor_gate = match donor_pep {
         Some(c) => format!("PSM q<={donor_q} and PEP<={c}"),
         None => format!("PSM q<={donor_q}"),
@@ -843,7 +857,6 @@ pub(crate) fn build_and_write_library(
     let ap = align_params(dir, stems);
     let library = builder.finish(meta, max_q, &ap);
     log_floor_hits(&library, &ap, stems);
-    log_isomer_classes(&library);
     let (spectra, donor_scans, sc) = donors.finish(dir, stems, &library)?;
     eprintln!(
         "[mbr] library: join check: {mismatched} of {n_joined} PSMs joined on SpecId ({:.4}%) disagree with the rescoring result on the peptide's residues, modification masses or target/decoy label (a run fails above {}%)",
@@ -971,6 +984,30 @@ fn scan_of(by_key: &HashMap<&str, usize>, spec_id: &str) -> Option<usize> {
         }
     }
     None
+}
+
+/// The best PSM of a precursor so far and its site form, which keys it: a
+/// donor PSM beats any other PSM, then the higher score, earlier RT and lower
+/// run, as [`DonorPsms`] picks the best donor.
+#[derive(Clone, Copy)]
+struct BestForm {
+    donor: bool,
+    score: f64,
+    rt: f64,
+    run: u16,
+    /// Index of the site form's precursor key.
+    site: u32,
+}
+
+impl BestForm {
+    fn beats(&self, other: &Self) -> bool {
+        if self.donor != other.donor {
+            return self.donor;
+        }
+        self.score > other.score
+            || (self.score == other.score
+                && (self.rt.total_cmp(&other.rt).then(self.run.cmp(&other.run))).is_lt())
+    }
 }
 
 /// The donor PSMs of every precursor as the library's spectra need them,
@@ -2263,16 +2300,112 @@ mod tests {
         );
     }
 
+    /// Runs `a`, `b` and `c` share 150 peptides (the alignment anchors); one
+    /// phosphopeptide wins as its S-form in `a` and `c` and as its T-form in
+    /// `b`, where it scores best.
     #[test]
-    fn isomer_class_ignores_the_modification_sites() {
-        let s = isomer_class("PEPS[UNIMOD:21]TK/2");
-        assert_eq!(s, isomer_class("PEPST[UNIMOD:21]K/2"));
-        assert_ne!(s, isomer_class("PEPS[UNIMOD:21]TK/3"), "charge differs");
-        assert_ne!(s, isomer_class("PEPSTK/2"), "modifications differ");
+    fn site_forms_of_one_peptide_are_one_precursor() {
+        use output::run_quant_table::{write_run_quant_table, RunPsmRow};
+        let dir = tempfile::tempdir().unwrap();
+        let s_form = "PEPS[UNIMOD:21]TIDEK";
+        let t_form = "PEPST[UNIMOD:21]IDEK";
+        let row = |spec_id: String, peptidoform: &str, rt_s: f64| RunPsmRow {
+            spec_id,
+            rt_s,
+            precursor_key: format!("{peptidoform}/2"),
+            peptidoform: peptidoform.to_string(),
+            charge: 2,
+            mz: 520.0,
+            is_decoy: false,
+            search_score: 10.0,
+            faims_cv: None,
+            envelope: vec![0.55, 0.3, 0.1, 0.05],
+            proteins: "P1".into(),
+        };
+        let mut scores = HashMap::new();
+        let stems: Vec<String> = ["a", "b", "c"].map(String::from).to_vec();
+        for (r, stem) in stems.iter().enumerate() {
+            let shift = 5.0 * r as f64;
+            let mut rows: Vec<RunPsmRow> = (0..150)
+                .map(|i| {
+                    row(
+                        format!("{stem}{i}_{i}_1"),
+                        &open_peptide(i),
+                        100.0 + 10.0 * i as f64 + shift,
+                    )
+                })
+                .collect();
+            let (form, score) = match r {
+                1 => (t_form, 600.0),
+                _ => (s_form, 500.0 - 100.0 * r as f64),
+            };
+            rows.push(row(format!("{stem}p_900_1"), form, 900.0 + shift));
+            for (i, x) in rows.iter().enumerate() {
+                let pin = x.peptidoform.replace("[UNIMOD:21]", "+79.96633");
+                let score = if i == 150 { score } else { 100.0 + x.rt_s };
+                scores.insert(
+                    x.spec_id.clone(),
+                    PercolatorPsm {
+                        psm_id: x.spec_id.clone(),
+                        q_value: 0.001,
+                        pep: 0.001,
+                        score: Some(score),
+                        peptide: format!("K.{pin}.A"),
+                        proteins: "P1".into(),
+                    },
+                );
+            }
+            write_run_quant_table(
+                &artifact(dir.path(), stem, TABLE_SUFFIX),
+                stem,
+                &rows,
+                &[("UNIMOD:21".to_string(), 79.966331)],
+            )
+            .unwrap();
+            output::ms2_table::write_ms2_table(
+                &artifact(dir.path(), stem, MS2_SUFFIX),
+                &output::ms2_table::Ms2Table {
+                    run: stem.clone(),
+                    fragment_tol: Tolerance::Ppm(20.0),
+                    top_peaks: 100,
+                    scans: Vec::new(),
+                },
+            )
+            .unwrap();
+        }
+        let set = rescore_scores(&scores, &HashMap::new(), "t.tsv").unwrap();
+        let stored = build_and_write_library(
+            dir.path(),
+            &stems,
+            ScoreLoader::Merged(Box::new(move |_| Ok(set))),
+            0.01,
+            0.01,
+            None,
+        )
+        .unwrap();
+        let lib = &stored.library;
+        assert_eq!(lib.meta.len(), 151, "150 peptides and one phosphopeptide");
+        let phospho: Vec<usize> = (0..lib.meta.len())
+            .filter(|&id| lib.meta[id].key.contains("UNIMOD:21"))
+            .collect();
+        assert_eq!(phospho.len(), 1, "one precursor for both site forms");
+        let id = phospho[0];
         assert_eq!(
-            isomer_class("M[UNIMOD:35]PEM[+15.99492]K/2"),
-            isomer_class("M[+15.99492]PEM[UNIMOD:35]K/2")
+            lib.meta[id].key,
+            format!("{t_form}/2"),
+            "keyed by its best PSM"
         );
+        let entries: Vec<&quant::library::LibraryEntry> = lib
+            .entries
+            .iter()
+            .filter(|e| e.precursor as usize == id)
+            .collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].donors, vec![0, 1, 2], "a donor in every run");
+        let key_of = |id: usize| lib.meta[id].key.clone();
+        let read = read_library(dir.path()).unwrap();
+        assert_eq!(read.library.meta.len(), 151);
+        assert_eq!(read.library.meta[id].key, key_of(id));
     }
 
     #[test]

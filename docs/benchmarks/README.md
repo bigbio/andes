@@ -10,26 +10,38 @@ leaderboard. Section 2 gives the date and the andes commit behind each row.
 
 ## 1. Summary
 
-**Identification** (PSMs at Percolator `q ≤ 0.01` unless stated; 8 threads, one host):
+All andes rows: `2051616b` (origin/main, 2026-10-23), default settings plus the dataset's mods,
+Percolator 3.7.1 `-Y`, seeds 42, 1 and 2. Comparison rows keep the date they were measured.
+
+**Identification** (PSMs at Percolator `q ≤ 0.01`, 8 threads):
 
 | benchmark | dataset | andes | comparison | true FDP at nominal 1% | andes wall |
 |---|---|---:|---|---|---:|
-| Standard, high-res | Astral HCD LFQ, PXD070049 (1 file) | 47,080 PSMs | Comet 2025.01 31,435 (217 s) | 0.89–1.04% | 160 s |
-| TMT-labelled, low-res | a05058, PXD007683 (1 file, ion-trap CID) | 12,347 PSMs | Comet 2025.01 10,504 (77 s) | not measurable | 28 s |
-| Low-res LFQ | UPS1, PXD001819 (1 file, ion-trap CID) | 15,848 PSMs | Comet 2025.01 14,734 (42 s); Java MS-GF+ v20240326 15,904 | 2.3–2.5% (above nominal; 2026-10-20, see below) | 18 s |
-| Phospho-enriched | mouse liver, PXD007653 (1 file, Q Exactive) | 37,190 PSMs, ~26,800 phospho-bearing | Comet 2025.01 33,984 at 1.77% FDP (1,096 s; whole-protein shuffle) | 0.94–1.08% | 637 s |
-| Glyco, quick tier | mouse liver, PXD005553 (1 fraction) | 6,922–6,959 glycoPSMs | 89.0% of pGlyco2's and 89.6% of MSFragger-Glyco's identifications confirmed | 0.45–1.45% | 6 min |
-| Glyco, deep tier | mouse liver, PXD005553 (5 fractions) | 31,666 ± 9 glycoPSMs | 78.9% (pGlyco2) and 88.0% (MSFragger-Glyco) confirmed | 1.11% ± 0.03 (whole-protein shuffle) | 23–29 min per fraction, 16 threads |
+| Standard, high-res | Astral HCD LFQ, PXD070049 (1 file) | 52,169–52,437 PSMs, 31,147–31,238 peptides | Comet 2025.01 31,435 PSMs, 217 s (2026-10-05) | 0.89–1.08% (peptide-level shuffle); 0.99–1.05% (*Arabidopsis*) | 114–117 s |
+| TMT-labelled, low-res | a05058, PXD007683 (1 file, ion-trap CID) | 13,443–13,516 PSMs | Comet 2025.01 10,504, 77 s (2026-10-05) | 0.67–0.76% (peptide-level); 0.83–1.05% (*Arabidopsis*) | 40–47 s |
+| TMT-labelled, high-res | TKO hrMS2 TMTpro, PXD017803 (1 file) | 6,628–6,686 PSMs (entrapment database) | — | 0.98–1.31% (peptide-level) | 4 s † |
+| Low-res LFQ | UPS1, PXD001819 (1 file, ion-trap CID) | 16,049–16,242 PSMs | Comet 2025.01 14,734, 42 s (2026-10-05); Java MS-GF+ v20240326 15,904 (earlier session) | 2.07–2.19% (natural *E. coli*); 0.91–0.98% (peptide-level) | 30–48 s |
+| Phospho-enriched | mouse liver, PXD007653 (1 file, Q Exactive) | 38,596–38,629 PSMs, 27,693–27,724 phospho-bearing | Comet 2025.01 33,984 at 1.77% FDP, 1,096 s (2026-10-06; whole-protein shuffle) | 0.80–0.99% (peptide-level); 1.22–1.36% (*Arabidopsis*) | 337 s |
+| timsTOF DDA-PASEF | plasma, PXD053748 (2 files) | 14,336–14,393 and 17,491–17,550 PSMs | — | 0.62–0.90% (peptide-level); 0.78–1.14% (natural yeast) | 43–51 s † |
+| timsTOF DDA-PASEF | astrocytes, PXD064202 (2 files) | 34,210–34,249 and 55,590–55,609 PSMs | — | 0.98–1.03% (peptide-level); 1.29–1.55% (natural yeast) | 43–64 s † |
+| Glyco, quick tier | mouse liver, PXD005553 (1 fraction) | 6,992–7,072 glycoPSMs | 88.2–88.4% of pGlyco2's and 89.3–89.7% of MSFragger-Glyco's identifications confirmed | 0.61–1.35% (peptide-level) | 5.8–6.6 min † |
+| Glyco, deep tier | mouse liver, PXD005553 (5 fractions) | 31,666 ± 9 glycoPSMs (2026-09-05) | 78.9% (pGlyco2) and 88.0% (MSFragger-Glyco) confirmed | 1.11% ± 0.03 (whole-protein shuffle) | 23–29 min per fraction, 16 threads |
 
-**Quantification:**
+† On a cluster node (8 threads); the other walls are on the benchmark VM (8 cores), the host the
+Comet times come from. Wall times compare only within one host.
 
-| benchmark | dataset | andes | comparison | error control | andes cost |
+**Quantification** (andes defaults, 2026-10-23 at `2051616b`):
+
+| benchmark | dataset | andes | comparison (leaderboard snapshot 2026-07-16) | error control | andes cost |
 |---|---|---|---|---|---|
-| Label-free, match between runs (ProteoBench "Quant LFQ DDA ion QExactive") | PXD028735, 6 runs, Q Exactive HF-X, human/yeast/E. coli mix | 65,391 precursors in ≥ 3 runs; median \|ε\| 0.164, CV 0.120 (defaults, transfer q 0.01, 2026-10-21) | median \|ε\| 0.190 (FragPipe 23.0); CV 0.120 (i2MassChroQ 1.2.0, no MBR); most precursors 81,933 (Sage 0.15.0-beta.2, median \|ε\| 0.388, transferred values not error-controlled) | PSM FDP 0.93–0.95%; entrapment-only quantified precursors 0.26% | 6.3k CPU-s for 6 runs |
-| Label-free, match between runs (ProteoBench "Quant LFQ DDA ion Astral") | PXD070049, 6 runs, Astral, human/yeast/E. coli mix | 33,876 precursors in ≥ 3 runs; median \|ε\| 0.186, CV 0.096 (defaults, transfer q 0.01, 2026-10-21) | median \|ε\| 0.123 (DIA-NN 2.6.0, 16,363 precursors); CV 0.070 (Sage 0.14.6); most precursors 93,237 (DIA-NN 2.6.0, median \|ε\| 0.277) | not measured | 5.4k CPU-s for 6 runs |
-| TMT reporter ions | yeast triple knockout, TMTpro 16-plex, PXD017803 | knockout-channel interference 0.127 (SPS-MS3), 0.040 at purity ≥ 0.9 | 0.139 with OpenMS precursor purity at ≥ 0.9 | — | — |
+| Label-free, match between runs (ProteoBench "Quant LFQ DDA ion QExactive") | PXD028735, 6 runs, Q Exactive HF-X, human/yeast/E. coli mix | 65,012 precursors in ≥ 3 runs; median \|ε\| 0.163, CV 0.118 (transfer q 0.01) | median \|ε\| 0.190 (FragPipe 23.0); CV 0.120 (i2MassChroQ 1.2.0, no MBR); most precursors 81,933 (Sage 0.15.0-beta.2, median \|ε\| 0.388, transferred values not error-controlled) | PSM FDP 0.83–0.85%; entrapment-only quantified precursors 0.20–0.22% | 6.9k CPU-s for 6 runs |
+| Label-free, match between runs (ProteoBench "Quant LFQ DDA ion Astral") | PXD070049, 6 runs, Astral, human/yeast/E. coli mix | 37,352 precursors in ≥ 3 runs; median \|ε\| 0.193, CV 0.113 (transfer q 0.01) | median \|ε\| 0.123 (DIA-NN 2.6.0, 16,363 precursors); CV 0.070 (Sage 0.14.6); most precursors 93,237 (DIA-NN 2.6.0, median \|ε\| 0.277) | not measured | 6.4k CPU-s for 6 runs |
+| TMT reporter ions | yeast triple knockout, TMTpro 16-plex, PXD017803 | knockout-channel interference 0.064 (SPS-MS3), 0.023 (RTS-MS3), 0.182 (hrMS2) | 0.139 with OpenMS precursor purity ≥ 0.9 (SPS-MS3, 2026-10-10) | — | — |
+| TMT reporter ions | human + yeast TMT11, PXD007683 (11 fractions, SPS-MS3) | yeast A/C log2 ratio 1.591 (expected 1.585), protein MAE 0.212 | — | — | 9.6 min, 17.5 GB, 16 threads |
+| Large study, match between runs | PXD042233, 500 runs (Q Exactive HF/HF-X, Exploris 480) | 243,895 precursors in ≥ 3 runs, 9,208 protein groups (transfer q 0.01) | — | PSM, precursor and protein q ≤ 0.01 | 146 CPU-h end to end (§2) |
 
-**Opt-in modes** (Astral, PSMs / distinct peptides, Percolator seeds 42, 1 and 2):
+**Opt-in modes** (Astral, PSMs / distinct peptides, Percolator seeds 42, 1 and 2; measured
+2026-10-05 to 2026-10-13 on earlier builds and not re-measured at `2051616b`):
 
 | mode | andes | without the mode |
 |---|---|---|
@@ -38,47 +50,81 @@ leaderboard. Section 2 gives the date and the andes commit behind each row.
 
 ## 2. The benchmarks
 
+**Where and how.** Every andes number on this page was measured on 2026-10-23 at `2051616b`
+unless a row says otherwise. PSM counts, wall time, CPU time and peak memory of the four standard
+sets (Astral, TMT a05058, UPS1, phospho) come from the benchmark VM (8 cores, 8 threads,
+`/usr/bin/time`, two runs except phospho), on the plain databases the Comet rows used. The true
+FDP of every set and all other rows come from a cluster node (8 threads), with each target
+database extended by an entrapment component: three peptide-level shuffled realisations
+(`build_shuffled_entrap.py` seeds 1, 2 and 3) for Astral, phospho and glyco, one realisation for
+UPS1, TMT, TKO and timsTOF, plus a foreign (reviewed *Arabidopsis*) or natural entrapment where
+one was used before. Percolator 3.7.1 `-Y --num-threads 8`, seeds 42, 1 and 2. "At a true FDP
+of 1%" is the deepest score-sorted list whose entrapment-estimated FDP stays at or below 1%.
+
 **Standard, high-res (Astral).** One 15-minute DDA run of the ProteoBench human/yeast/E. coli
-sample against the 31,889-entry HYE FASTA, measured 2026-10-07 at `40774aca`. The true FDP comes
-from the same database plus a peptide-level shuffled entrapment (`build_shuffled_entrap.py`, T/E
-1.075), re-measured 2026-10-21 at `0629cd8` over three database realisations and Percolator seeds
-42, 1 and 2 (see "Entrapment design" below). Comet 2025.01 was run on the same host
-with matched parameters and the same Percolator rescoring.
+sample against the 31,889-entry HYE FASTA. 52,169–52,437 PSMs and 31,147–31,238 peptides at
+`q ≤ 0.01`. With the peptide-level entrapment (T/E 1.075) the nominal 1% reads 0.89–1.08% true
+FDP over nine database × seed combinations, and andes keeps 47,267–47,977 PSMs and
+28,141–28,857 peptides at a true FDP of 1%; with the *Arabidopsis* entrapment (T/E 2.228),
+0.99–1.05% and 49,965–50,185 PSMs. 114–117 s wall, 569–636 CPU-s, 4.8 GB. Comet 2025.01 was run
+on the same VM with matched parameters and the same Percolator rescoring on 2026-10-05.
 
 **TMT-labelled, low-res.** One ion-trap CID run of a TMT 10-plex sample against human + yeast
-reviewed proteins (26,483 sequences), measured 2026-10-10 at `6a61f61`. The database has no
-entrapment component, so only Percolator's own q-value is available.
+reviewed proteins (26,483 sequences): 13,443–13,516 PSMs and 11,852–11,922 peptides at
+`q ≤ 0.01`; 40–47 s, 200–216 CPU-s, 1.7 GB. With a peptide-level entrapment (T/E 1.073) the
+nominal 1% is 0.67–0.76% true FDP (13,325–13,371 PSMs at a true FDP of 1%); with *Arabidopsis*
+(T/E 2.021), 0.83–1.05% (13,161–13,388).
+
+**TMT-labelled, high-res (TKO hrMS2).** `Fig2_m23142_hrMS2` of PXD017803 (TMTpro, Orbitrap
+MS2), `--protocol TMT`, against reviewed yeast + cRAP with a peptide-level entrapment (T/E 1.039):
+6,628–6,686 PSMs at `q ≤ 0.01`, 0.98–1.31% true FDP, 6,607–6,662 PSMs at a true FDP of 1%.
 
 **Low-res LFQ (UPS1).** One run of the UPS1 standard in yeast, searched against yeast plus an
-E. coli entrapment proteome (PSM count 2026-10-10, `6a61f61`). Error re-measured 2026-10-20 at
-`8c587fd` from the mzML file, Percolator seeds 42, 1 and 2: 16,446–16,491 PSMs at `q ≤ 0.01`,
-and the nominal 1% is **2.30–2.50% true FDP** (T/E 2.351); at a true FDP of 1% andes keeps
-14,142–14,420 PSMs. Ten or eleven accepted PSMs map only to entrapment proteins but match a
-yeast sequence once I is folded to L; they count as target. Without that rule the same runs
-read 2.49–2.67% and 13,754–13,854. This is the regime where Java MS-GF+ (v20240326) is
-strongest; on the 2026-10-10 count andes trails it by 56 PSMs.
+E. coli entrapment proteome: 16,049–16,242 PSMs and 4,123–4,183 peptides at `q ≤ 0.01`;
+30–48 s, 162–166 CPU-s, 1.3 GB. Against the natural *E. coli* entrapment (T/E 2.351) the
+nominal 1% is **2.07–2.19% true FDP**, and andes keeps 14,457–14,605 PSMs at a true FDP of 1%.
+With a peptide-level shuffle of the same targets instead (T/E 1.039) it reads 0.91–0.98%
+(16,199–16,206 PSMs at 1%). The two entrapments disagree on this low-res set; the natural one is
+the established reference here. Java MS-GF+ (v20240326, earlier session, not re-run) reported
+15,904 PSMs on this file.
 
 **Phospho-enriched.** One single-shot EasyPhos mouse liver file
-(`20151014_QEp6_NaKr_SA_totalliver_control2_phospho.raw`), not in any model's training data,
-against mouse reviewed proteins plus a shuffled entrapment, 80 Da index slices, 2026-10-07 at
-`40774aca`. andes reports 37,190 PSMs, Comet 2025.01 33,984 at 1.77% true FDP (measured on the
-earlier whole-protein shuffle). andes's true FDP, re-measured 2026-10-21 at `0629cd8` on a
-peptide-level shuffle (T/E 1.061; three realisations, Percolator seeds 42, 1 and 2), is
-0.94–1.08%. Against the
-depositors' MaxQuant identifications (PEP ≤ 0.01, 23,563 scans) andes covers 82.4%, with 95.3%
-same-scan backbone agreement. Phosphosite localisation is **not** scored.
+(`20151014_QEp6_NaKr_SA_totalliver_control2_phospho.raw`, as mzML), not in any model's
+training data, 80 Da index slices. Against mouse reviewed proteins plus the whole-protein shuffled
+entrapment that the Comet row used: 38,596–38,629 PSMs (27,693–27,724 phospho-bearing) and
+20,422–20,461 peptides, 337 s, 2,160 CPU-s, 7.9 GB. Comet 2025.01 reported 33,984 at 1.77% true
+FDP on 2026-10-06 (on the whole-protein shuffle, which can read low). andes's true FDP on three
+peptide-level shuffles (T/E 1.061) is 0.80–0.99%, with 38,604–38,843 PSMs at a true FDP of 1%;
+on *Arabidopsis* (T/E 1.403), 1.22–1.36% and 38,298–38,412. Phosphosite localisation is
+**not** scored. Against the depositors' MaxQuant identifications (PEP ≤ 0.01, 23,563 scans)
+andes covered 82.4% with 95.3% same-scan backbone agreement on 2026-10-07 (`40774aca`); not
+re-measured.
 
-**Glyco.** Mouse liver glycoproteome data (PXD005553), against mouse proteins plus a shuffled entrapment with
-`--glyco --glyco-species mouse --decoy-strategy sequon`. Two published reference
+**timsTOF DDA-PASEF.** Native `.d` input, 20 ppm precursor tolerance, 2 missed cleavages,
+`--top-n 1`, 80 Da index slices, Carbamidomethyl C fixed, Oxidation M and protein N-terminal
+Acetyl variable, against reviewed human proteins with a reviewed yeast entrapment proteome
+(natural, T/E 3.845) or a peptide-level shuffle of the human targets (T/E 1.064).
+
+| run | PSMs at `q ≤ 0.01` (peptide-level) | true FDP | PSMs at a true FDP of 1% | natural yeast: PSMs / true FDP / at 1% |
+|---|---:|---:|---:|---|
+| PXD053748 `..._4363` (plasma, 30 min) | 14,336–14,393 | 0.62–0.63% | 14,772–14,877 | 14,923–14,959 / 0.94–1.14% / 14,788–15,033 |
+| PXD053748 `..._4367` (plasma, 50 min) | 17,491–17,550 | 0.87–0.90% | 17,644–17,660 | 18,081–18,136 / 0.78–0.91% / 18,379–18,434 |
+| PXD064202 `..._2442` (astrocytes) | 34,210–34,249 | 0.98–1.02% | 34,216–34,222 | 35,105–35,150 / 1.53–1.55% / 33,744–33,959 |
+| PXD064202 `..._2403` (astrocytes) | 55,590–55,609 | 0.98–1.03% | 55,561–55,655 | 56,801–56,836 / 1.29–1.32% / 56,028–56,088 |
+
+On the astrocyte runs the natural yeast entrapment reads above nominal (1.29–1.55%) where the
+peptide-level shuffle reads 0.98–1.03%. 43–64 s per run, 2.8–3.9 GB.
+
+**Glyco.** Mouse liver glycoproteome data (PXD005553), against mouse proteins plus an entrapment,
+with `--glyco --glyco-species mouse --decoy-strategy sequon`. Two published reference
 identification sets for the same spectra ship in [`glyco/truth/`](glyco/truth/): pGlyco2 (the
 depositors') and MSFragger-Glyco (a later reanalysis, PXD031032). "Confirmed" is the share of a
 reference's spectra that andes identifies with the same peptide.
-- *Quick tier:* the `MouseLiver-Z-T-1` fraction as converted mzML, measured 2026-10-07; the
-  range is over three Percolator seeds; 19.9 GB peak memory. Reading the `.raw` natively, as
-  the commands below do, can give somewhat different counts. The true FDP was re-measured
-  2026-10-21 at `0629cd8` on three peptide-level shuffled databases (Percolator seeds 42, 1 and
-  2): 0.92–0.96%, 0.45–0.57% and 1.13–1.45%. Each run has only 15–49 entrapment hits, so the
-  spread between databases is counting noise, not a property of the database design.
+- *Quick tier:* the `MouseLiver-Z-T-1` fraction as converted mzML, three peptide-level shuffled
+  databases × Percolator seeds 42, 1 and 2: 6,992–7,072 glycoPSMs at 1%, true FDP 0.61–1.35%,
+  pGlyco2 88.2–88.4% and MSFragger-Glyco 89.3–89.7% confirmed; 5.8–6.6 min and 5.4–5.6 GB on 8
+  threads. Each run has only 20–45 entrapment hits, so the spread is mostly counting noise.
+  Reading the `.raw` natively, as the commands below do, can give somewhat different counts.
 - *Deep tier:* all five fractions, pooled before Percolator, five seeds. Measured 2026-09-05 at
   `14818d3e` on an older, smaller glycan list and converted mzML; not re-measured since.
 - The open problem is selection, not generation: almost every reference spectrum produces a
@@ -90,45 +136,42 @@ reference's spectra that andes identifies with the same peptide.
   the human, yeast and E. coli ratios between conditions A and B are known: QExactive
   (`LFQ_Orbitrap_DDA_Condition_{A,B}_Sample_Alpha_0{1,2,3}`, PXD028735, Q Exactive HF-X) and
   Astral (`LFQ_Astral_DDA_15min_50ng_Condition_{A,B}_REP{1,2,3}`, PXD070049). Measured
-  2026-10-21 at `a27a72c` on a cluster node (8 threads per run), andes defaults throughout
-  (§3), Percolator 3.7.1, one seed. Scored with the official `proteobench` package 0.18.6
-  ("Custom" format, converted by [`proteobench/andes_to_proteobench.py`](proteobench/)).
+  2026-10-23 at `2051616b` on a cluster node (8 threads per run), andes defaults throughout
+  (§3, `--predict rt`), Percolator 3.7.1 through `--rescore` (seed 42). Scored with the official
+  `proteobench` package 0.18.6 ("Custom" format, converted by
+  [`proteobench/andes_to_proteobench.py`](proteobench/)).
 - *Which quantity is scored:* `quantity_normalized` of the MBR table, which removes each run's
   loading level and its drift along the gradient, unless the table says raw. The raw `quantity`
   is what andes hands to quantms.
 - *Results* at a minimum of 3 runs; precursors / median |ε| / E. coli |ε| / CV:
 
-  | module, `--predict` | transfer q ≤ 0.01, normalised | raw quantity | transfer q ≤ 0.05, normalised | identified only, normalised |
+  | module | transfer q ≤ 0.01, normalised | raw quantity | transfer q ≤ 0.05, normalised | identified only, normalised |
   |---|---|---|---|---|
-  | QExactive, `none` | 62,651 / 0.163 / 0.274 / 0.119 | 0.226 / 0.319 / 0.246 | 68,315 / 0.175 / 0.436 / 0.133 | 50,500 / 0.154 / 0.197 / 0.105 |
-  | QExactive, `rt` (default) | **65,391 / 0.164 / 0.278 / 0.120** | 0.228 / 0.330 / 0.246 | 71,649 / 0.177 / 0.439 / 0.134 | 52,110 / 0.154 / 0.198 / 0.107 |
-  | QExactive, `rt,ms2` | 67,906 / 0.165 / 0.285 / 0.121 | 0.229 / 0.331 / 0.247 | 74,464 / 0.179 / 0.450 / 0.136 | 53,182 / 0.155 / 0.199 / 0.107 |
-  | QExactive, `ms2,peptdeep-rt,deeplc-rt` | **68,077 / 0.165 / 0.276 / 0.121** | 0.229 / 0.322 / 0.247 | 74,776 / 0.179 / 0.445 / 0.136 | 53,289 / 0.155 / 0.203 / 0.107 |
-  | Astral, `none` | 31,622 / 0.183 / 0.294 / 0.093 | 0.212 / 0.272 / 0.094 | 35,717 / 0.206 / 0.426 / 0.110 | 25,707 / 0.175 / 0.291 / 0.079 |
-  | Astral, `rt` (default) | **33,876 / 0.186 / 0.296 / 0.096** | 0.215 / 0.278 / 0.097 | 37,991 / 0.210 / 0.424 / 0.112 | 26,604 / 0.176 / 0.308 / 0.079 |
-  | Astral, `rt,ms2` | **34,413 / 0.185 / 0.314 / 0.095** | 0.214 / 0.289 / 0.097 | 38,985 / 0.210 / 0.427 / 0.113 | 26,822 / 0.177 / 0.311 / 0.079 |
-  | Astral, `ms2,peptdeep-rt,deeplc-rt` | 33,987 / 0.184 / 0.316 / 0.094 | 0.213 / 0.282 / 0.096 | 38,892 / 0.210 / 0.442 / 0.113 | 26,853 / 0.176 / 0.310 / 0.079 |
+  | QExactive | **65,012 / 0.163 / 0.275 / 0.118** | 0.228 / 0.323 / 0.246 | 71,243 / 0.176 / 0.442 / 0.132 | 52,037 / 0.154 / 0.189 / 0.105 |
+  | Astral | **37,352 / 0.193 / 0.258 / 0.113** | 0.213 / 0.256 / 0.115 | 42,656 / 0.211 / 0.343 / 0.130 | 30,759 / 0.194 / 0.243 / 0.103 |
 
-  With the default, at least 1 / 6 runs: QExactive 79,707 / 40,628, Astral 44,667 / 21,185.
-  `ms2`, `peptdeep-rt` and `deeplc-rt` load the AlphaPeptDeep and DeepLC models
-  (`--predictor-models`, ONNX Runtime backend); `rt` is andes's built-in model.
-- *By abundance* (default, transfer q 0.01, normalised; quartiles of each module's own mean
-  intensity, |ε| / E. coli |ε| / CV): QExactive Q1 0.292 / 0.511 / 0.201, Q2 0.176 / 0.278 / 0.131,
-  Q3 0.140 / 0.238 / 0.106, Q4 0.117 / 0.155 / 0.079; Astral Q1 0.320 / 0.411 / 0.174, Q2 0.210 /
-  0.282 / 0.119, Q3 0.165 / 0.273 / 0.086, Q4 0.116 / 0.257 / 0.054.
-- *Cost* (default, six runs, CPU seconds): QExactive search with prediction and Percolator 5.2k,
-  library under 10, extract 0.7k, finalize 0.4k per transfer threshold; Astral 5.1k, under 10,
-  0.1k and 0.2k. Each search takes about 3 minutes of wall time, each extract under 20 seconds,
-  finalize about a minute. Prediction alone costs 0.4k CPU seconds for six runs with `rt`, 4.2–4.3k
-  with `rt,ms2` and 8.3–8.9k with `ms2,peptdeep-rt,deeplc-rt`.
+  At least 1 / 6 runs (transfer q 0.01): QExactive 79,126 / 40,258, Astral 47,774 / 22,033.
+  The opt-in `--predict` settings `rt,ms2` and `ms2,peptdeep-rt,deeplc-rt` (AlphaPeptDeep and
+  DeepLC models, `--predictor-models`, ONNX Runtime backend) were measured on 2026-10-21 at
+  `a27a72c`, before the extraction change of #240: on QExactive 67,906 and 68,077 precursors
+  against 65,391 for the default on that build, on Astral 34,413 and 33,987 against 33,876.
+- *By abundance* (transfer q 0.01, normalised; quartiles of each module's own mean intensity,
+  |ε| / E. coli |ε| / CV): QExactive Q1 0.292 / 0.535 / 0.198, Q2 0.175 / 0.273 / 0.130,
+  Q3 0.140 / 0.200 / 0.104, Q4 0.117 / 0.164 / 0.078; Astral Q1 0.317 / 0.415 / 0.191, Q2 0.217 /
+  0.320 / 0.136, Q3 0.164 / 0.219 / 0.103, Q4 0.135 / 0.185 / 0.070.
+- *Cost* (six runs, CPU seconds): QExactive search with prediction and Percolator 5.8k, library
+  under 10, extract 0.8k, finalize 0.4k per transfer threshold; Astral 6.1k, under 10, under 0.1k
+  and 0.2k. Each search takes 3–4 minutes of wall time, each extract under 20 seconds (QExactive)
+  or about 2 seconds (Astral), finalize under a minute.
 - *Error control* is measured on the QExactive runs with the HYE database plus a peptide-level
-  shuffled entrapment (T/E 1.075), 2026-10-21 at `0629cd8` (before this measurement), Percolator
-  seeds 42, 1 and 2. PSM FDP at q 0.01 is 0.93–0.95%; precursors quantified in at least 3 runs
-  at transfer q 0.01 are 0.26% entrapment-only. Of the accepted transfers, the entrapment
-  measures a false-donor share of 0.30–0.38% at transfer q 0.01 and 0.52–0.58% at 0.05; the
-  identity-decoy estimate is 0.28–0.31% and 0.44–0.45%. The estimate tracks the false-donor
-  share to within about 25% but is not an upper bound. The wrong-peak part has no entrapment
-  check.
+  shuffled entrapment (T/E 1.075), andes defaults, Percolator 3.7.1 `-Y` seeds 42, 1 and 2
+  outside andes. PSM FDP at q 0.01 is 0.83–0.85%; precursors quantified in at least 3 runs at
+  transfer q 0.01 are 0.20–0.22% entrapment-only (0.26–0.30% at 0.05). Of the accepted
+  transfers, the entrapment measures a false-donor share of 0.24–0.33% at transfer q 0.01 and
+  0.37–0.49% at 0.05; the identity-decoy estimate is 0.33–0.34% and 0.45–0.47%. The estimate is
+  at or above the measured share at 0.01 in all three seeds and below it at 0.05 in one (0.45%
+  against 0.49%), so it tracks the false-donor share but is not an upper bound. The wrong-peak
+  part has no entrapment check.
 
 **Comparison with the ProteoBench leaderboard.** Public results of both modules
 (`Results_quant_ion_DDA` and `Results_quant_ion_DDA_Astral`, both last updated 2026-07-16; read
@@ -143,10 +186,9 @@ on 2026-10-21).
 
 | tool (submission) | MBR | precursors | median \|ε\| | E. coli \|ε\| | CV | error control on transferred values |
 |---|---|---:|---:|---:|---:|---|
-| andes, default | yes | 65,391 | 0.164 | 0.278 | 0.120 | PSM q ≤ 0.01; transfer q ≤ 0.01 (decoy-estimated wrong peaks and wrong donors) |
-| andes, `--predict ms2,peptdeep-rt,deeplc-rt` | yes | 68,077 | 0.165 | 0.276 | 0.121 | as above |
-| andes, default, transfer q ≤ 0.05 | yes | 71,649 | 0.177 | 0.439 | 0.134 | transfer q ≤ 0.05 |
-| andes, default, raw quantity | yes | 65,391 | 0.228 | 0.330 | 0.246 | as the default |
+| andes, default (2026-10-23) | yes | 65,012 | 0.163 | 0.275 | 0.118 | PSM q ≤ 0.01; transfer q ≤ 0.01 (decoy-estimated wrong peaks and wrong donors) |
+| andes, default, transfer q ≤ 0.05 | yes | 71,243 | 0.176 | 0.442 | 0.132 | transfer q ≤ 0.05 |
+| andes, default, raw quantity | yes | 65,012 | 0.228 | 0.323 | 0.246 | as the default |
 | FragPipe 23.0, most precursors | yes | 63,701 | 0.200 | 0.306 | 0.156 | identifications 1%; transfers at IonQuant MBR ion FDR 0.01 (submitted workflow) |
 | FragPipe 23.0, lowest \|ε\| | yes | 54,374 | 0.190 | 0.257 | 0.154 | as above |
 | MaxQuant 1.5.3.30, most precursors | yes | 44,299 | 0.210 | 0.386 | 0.219 | PSM and protein 1%; transfers not checked |
@@ -165,40 +207,39 @@ on 2026-10-21).
 | quantms (OpenMS ProteomicsLFQ), our run (2026-10-17, its default) | no | 34,677 | 0.210 | 0.401 | 0.225 | no transfers |
 | quantms (OpenMS ProteomicsLFQ), our run, its feature-linking MBR | yes | 39,257 | 0.221 | 0.563 | 0.234 | feature-quality score; no transfer error rate |
 
-andes's rows use its own normalisation (`quantity_normalized`: median |ε| 0.164, CV 0.120). Its
+andes's rows use its own normalisation (`quantity_normalized`: median |ε| 0.163, CV 0.118). Its
 raw quantity reads |ε| 0.228 and CV 0.246, less accurate than most submissions; normalisation
 differs between tools, so the |ε| column does not compare extraction alone. Among the
 submissions, FragPipe 23.0 reaches median |ε| 0.190 at 54,374 precursors, and i2MassChroQ 1.2.0
 a CV of 0.120 without match between runs. Six submissions report more precursors than andes
-(Sage, i2MassChroQ's four largest and PEAKS 13), at a median |ε| of 0.214–0.388. The two quantms runs marked "our run" are ours (2026-10-17, its
-development version, raw intensities).
+(Sage, i2MassChroQ's four largest and PEAKS 13), at a median |ε| of 0.214–0.388. The two quantms
+runs marked "our run" are ours (2026-10-17, its development version, raw intensities).
 
 *On the precursors andes shares* (default, transfer q 0.01; the submission's values | andes raw
 | andes normalised, median |ε| / E. coli |ε| / CV):
 
 | submission | shared | submission | andes raw | andes normalised | only in the submission |
 |---|---:|---|---|---|---|
-| FragPipe 23.0, most precursors | 52,066 | 0.190 / 0.273 / 0.156 | 0.211 / 0.283 / 0.241 | 0.147 / 0.225 / 0.110 | 11,635 at 0.264 / 0.801 |
-| FragPipe 23.0, lowest \|ε\| | 48,958 | 0.188 / 0.239 / 0.155 | 0.206 / 0.272 / 0.241 | 0.143 / 0.207 / 0.109 | 5,416 at 0.213 / 0.517 |
-| i2MassChroQ 1.0.16, most precursors | 51,309 | 0.208 / 0.348 / 0.125 | 0.213 / 0.304 / 0.244 | 0.153 / 0.255 / 0.114 | 23,388 at 0.265 / 0.950 |
-| i2MassChroQ 1.2.4, 57,787 precursors | 50,217 | 0.203 / 0.349 / 0.123 | 0.214 / 0.305 / 0.243 | 0.152 / 0.256 / 0.113 | 7,570 at 0.269 / 0.850 |
-| Sage 0.15.0-beta.2, our reproduction | 55,486 | 0.311 / 0.627 / 0.322 | 0.220 / 0.312 / 0.246 | 0.158 / 0.257 / 0.117 | 24,871 at 0.688 / 1.370 |
+| FragPipe 23.0, most precursors | 51,940 | 0.190 / 0.273 / 0.155 | 0.211 / 0.280 / 0.241 | 0.147 / 0.216 / 0.109 | 11,761 at 0.266 / 0.725 |
+| FragPipe 23.0, lowest \|ε\| | 48,916 | 0.187 / 0.243 / 0.155 | 0.207 / 0.269 / 0.241 | 0.144 / 0.204 / 0.108 | 5,458 at 0.214 / 0.490 |
+| i2MassChroQ 1.0.16, most precursors | 51,156 | 0.208 / 0.353 / 0.125 | 0.214 / 0.300 / 0.243 | 0.153 / 0.245 / 0.113 | 23,541 at 0.266 / 0.935 |
+| i2MassChroQ 1.2.4, 57,787 precursors | 50,058 | 0.202 / 0.352 / 0.123 | 0.214 / 0.302 / 0.243 | 0.152 / 0.246 / 0.112 | 7,729 at 0.270 / 0.835 |
+| Sage 0.15.0-beta.2, our reproduction | 55,218 | 0.311 / 0.628 / 0.321 | 0.220 / 0.303 / 0.245 | 0.158 / 0.254 / 0.116 | 25,139 at 0.685 / 1.349 |
 
-Sage's per-submission table was not retrievable, so its row uses a reproduction: the same
-Sage version on the same six mzML files with the submission's stated parameters and per-charge
-output gives 80,357 precursors at |ε| 0.388, E. coli 0.878 and CV 0.394 (submission: 81,933,
-0.388, 0.877, 0.393). Of its 24,871 precursors that andes does not report, 13,852 are charge
-states that Sage never identified and 19,183 are above its own peak q-value of 0.01, which it
-reports but does not apply.
+Sage's per-submission table was not retrievable, so its row uses a reproduction (2026-10-21): the
+same Sage version on the same six mzML files with the submission's stated parameters and
+per-charge output gives 80,357 precursors at |ε| 0.388, E. coli 0.878 and CV 0.394 (submission:
+81,933, 0.388, 0.877, 0.393). Most of its precursors that andes does not report are charge
+states that Sage never identified or are above its own peak q-value of 0.01, which it reports but
+does not apply.
 
 *Astral:*
 
 | tool (submission) | MBR | precursors | median \|ε\| | E. coli \|ε\| | CV | error control on transferred values |
 |---|---|---:|---:|---:|---:|---|
-| andes, default | yes | 33,876 | 0.186 | 0.296 | 0.096 | PSM q ≤ 0.01; transfer q ≤ 0.01 (decoy-estimated) |
-| andes, `--predict rt,ms2` | yes | 34,413 | 0.185 | 0.314 | 0.095 | as above |
-| andes, default, transfer q ≤ 0.05 | yes | 37,991 | 0.210 | 0.424 | 0.112 | transfer q ≤ 0.05 |
-| andes, default, raw quantity | yes | 33,876 | 0.215 | 0.278 | 0.097 | as the default |
+| andes, default (2026-10-23) | yes | 37,352 | 0.193 | 0.258 | 0.113 | PSM q ≤ 0.01; transfer q ≤ 0.01 (decoy-estimated) |
+| andes, default, transfer q ≤ 0.05 | yes | 42,656 | 0.211 | 0.343 | 0.130 | transfer q ≤ 0.05 |
+| andes, default, raw quantity | yes | 37,352 | 0.213 | 0.256 | 0.115 | as the default |
 | FragPipe 23.0, most precursors | yes | 39,057 | 0.212 | 0.250 | 0.127 | identifications 1%; transfers not checked |
 | FragPipe 22.1-build02, lowest \|ε\| | yes | 29,105 | 0.181 | 0.405 | 0.078 | as above |
 | MaxQuant 2.6.7.0 | yes | 20,283 | 0.160 | 0.158 | 0.092 | PSM and protein 1%; transfers within a condition only (submission comment), not checked |
@@ -208,24 +249,65 @@ reports but does not apply.
 | DIA-NN 2.6.0, most precursors | yes | 93,237 | 0.277 | 0.691 | 0.159 | run and global precursor q ≤ 0.01 (submission comment) |
 | DIA-NN 2.6.0, lowest \|ε\| | yes | 16,363 | 0.123 | 0.168 | 0.079 | as above, plus MS1-level q ≤ 0.01 |
 
-On Astral, MaxQuant 2.6.7.0 (20,283 precursors, median |ε| 0.160) and Sage 0.14.6 (30,319, 0.167,
-CV 0.070) report fewer precursors than andes (33,876, 0.186) at a lower median |ε|; FragPipe 23.0
-(39,057, 0.212) and i2MassChroQ 1.2.6 (36,469, 0.197) report more; DIA-NN 2.6.0 reports 93,237 at
-0.277, and its 16,363-precursor submission has the lowest median |ε| (0.123). andes's CV (0.096)
-is above most submissions. Normalisation changes little here (raw |ε| 0.215, CV 0.097). Shared-precursor comparisons need
-the per-submission tables, which could not be retrieved; they are not given.
+On Astral, MaxQuant 2.6.7.0 (20,283 precursors, median |ε| 0.160), Sage 0.14.6 (30,319, 0.167,
+CV 0.070) and i2MassChroQ 1.2.6 (36,469, 0.197, CV 0.095) report fewer precursors than andes
+(37,352, 0.193) and FragPipe 23.0 more (39,057, 0.212); DIA-NN 2.6.0 reports 93,237 at 0.277, and
+its 16,363-precursor submission has the lowest median |ε| (0.123). andes's CV (0.113) is above
+most submissions. Normalisation changes little here (raw |ε| 0.213, CV 0.115). Shared-precursor
+comparisons need the per-submission tables, which could not be retrieved; they are not given.
 
-**TMT quantification (yeast triple knockout).**
-- *Data and measurement:* the hrMS2 and SPS-MS3 runs of PXD017803 (TMTpro 16-plex). Three
-  knocked-out proteins must read near zero in their own channels, so the median ratio of
-  knockout to non-knockout channel intensity measures interference (lower is better). Measured
-  2026-10-10 on the reporter-ion code merged as `0a458a2`; not re-measured since.
+**TMT quantification.**
+- *Data and measurement:* PXD017803 (yeast triple knockout, TMTpro 16-plex; two files each of
+  hrMS2, SPS-MS3 and RTS-MS3) and PXD007683 (human + yeast TMT11 with known yeast ratios, 11
+  SPS-MS3 fractions, ion-trap CID MS2), as mzML, with the kit impurity sheet. andes defaults,
+  including the quantification gate (precursor purity ≥ 0.7 and Percolator PEP ≤ 0.05;
+  §10 of DOCS.md), `--rescore`, 16 threads; measured 2026-10-23 at `2051616b`.
 - *Extraction:* reporter extraction and impurity correction match OpenMS IsobaricAnalyzer
   exactly on the same scans.
-- *Results:* after correction the ratio is 0.210 on hrMS2 and 0.127 on SPS-MS3. Keeping PSMs
-  whose precursor isolation purity is ≥ 0.9 (3,487 PSMs) brings SPS-MS3 to 0.040; OpenMS precursor
-  purity at the same threshold gives 0.139. Few knockout PSMs stand behind this
-  comparison, so read it as a direction.
+- *Knockout interference* (median ratio of knockout to non-knockout channel intensity over the
+  PSMs of the three knocked-out proteins, lower is better; hrMS2 only scans whose window starts
+  below 126 Th):
+
+  | acquisition | PSMs at 1% | PSMs quantified (gate passed) | interference | without the gate | purity ≥ 0.9 |
+  |---|---:|---:|---:|---:|---:|
+  | SPS-MS3 | 9,816 | 8,626 | 0.064 | 0.128 | 0.032 |
+  | RTS-MS3 | 14,307 | 10,605 | 0.023 | 0.033 | 0.015 |
+  | hrMS2 | 13,464 | 3,618 | 0.182 | 0.185 | 0.134 |
+
+  Few knockout PSMs stand behind each value (36–91), so read them as a direction. OpenMS
+  precursor purity at ≥ 0.9 gave 0.139 on SPS-MS3 (2026-10-10). On hrMS2 only 3,618 of the
+  13,464 PSMs have a reporter scan whose range covers the reporter ions.
+  `--tmt-unmix` on hrMS2 sets the median knockout ratio to 0.000 at a background CV of 0.124
+  (0.080 without).
+- *Known ratios (PXD007683):* 149,133 rank-1 target PSMs at 1% over the 11 fractions, 128,177 quantified;
+  yeast log2 A/C 1.591 (expected 1.585), A/B 1.192, B/C 0.396, with protein-level MAE 0.212,
+  0.228 and 0.215 (without the gate: A/C 1.464, MAE 0.271). 9.6 minutes and 17.5 GB in one
+  process.
+
+**Large study (PXD042233, 500 runs).** Label-free DDA from Q Exactive HF, HF-X and Exploris 480,
+`.raw` read natively, human reviewed proteins + contaminants, 5 ppm, 2 missed cleavages,
+`--top-n 1`, Carbamidomethyl C fixed, Oxidation M and protein N-terminal Acetyl variable. Each
+run is searched as its own job (8 threads, `--quant-dir`); the per-run PINs share one header
+(it depends only on the command line) and are concatenated into one Percolator run (16 threads,
+`--subset-max-train 1000000`); then `quant library`, `quant extract` per run (8 threads) and
+`quant finalize` (16 threads). Measured 2026-10-23 at `2051616b` on cluster nodes.
+
+| stage | wall | CPU | peak memory |
+|---|---|---:|---:|
+| search, 500 jobs | 0.7 min per run (at most 1.0) | 19.5 h | 3.6 GB |
+| PIN concatenation (53.1 million rows) | 17 s | — | — |
+| Percolator | 12.9 min | 0.7 h | 26.0 GB |
+| `quant library` | 6.6 min | 0.1 h | 5.6 GB |
+| `quant extract`, 500 jobs | 2.1 min per run (two runs 45 and 72 min) | 121.5 h | 12.7 GB (median 4.7) |
+| `quant finalize`, transfer q 0.01, with the QPX views and protein inference | 25.8 min | 4.1 h | 45.2 GB |
+| `quant finalize`, transfer q 0.05, without QPX views | 18.0 min | 3.9 h | 11.7 GB |
+
+Outputs: 30.6 million PSMs at `q ≤ 0.01`. At transfer q 0.01, 194,370 accepted transfers
+(175,087 `transfer_ms1`, 19,283 `transfer_ms2`) and 294,362 / 243,895 / 127,315 precursors
+quantified in at least 1 / 3 / 50 runs (identified only: 294,362 / 243,730 / 126,741); 9,208
+protein groups at protein q ≤ 0.01. At transfer q 0.05, 4,622,956 accepted transfers and
+294,362 / 250,847 / 141,734 precursors. Extract is 83% of the CPU, and most of its transfer fits
+are rejected (121 million `below_threshold` rows at q 0.01).
 
 ## 3. How to reproduce
 
@@ -263,8 +345,8 @@ docker run --rm -v "$PWD":/r quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2 
 
 Count rows at `q-value ≤ 0.01` and their entrapment hits with `python3 ../entrap_common.py count
 phospho.t.psms "$DATA"/databases/mouse_entrap.fasta 0.01` (FDP = hits / PSMs × (1 + T/E), with the
-T/E that `build_databases.sh` printed), and peptides carrying `79.96`. Expect about 11 minutes on 8 threads.
-The slice width is pinned because it sets peak memory (13.7 GB at 80 Da).
+T/E that `build_databases.sh` printed), and peptides carrying `79.96`. Expect about 6 minutes on 8 threads
+(337 s on the benchmark VM). The slice width is pinned because it sets peak memory (7.9 GB at 80 Da).
 
 ### Glyco (commands; scripts in [`glyco/`](glyco/))
 
@@ -291,7 +373,7 @@ done
 
 For the quick tier, search `MouseLiver-Z-T-1` alone, run Percolator on its `.glyco.pin` without
 pooling, and pass `--run MouseLiver-Z-T-1` to `score_vs_truth.py` (a single-file run writes
-SpecIds without a file name). About 6 minutes and 20 GB on 8 threads. Pool the deep tier's
+SpecIds without a file name). About 6 minutes and 6 GB on 8 threads. Pool the deep tier's
 fractions: one fraction alone has too few glyco decoys for a stable 1% threshold.
 
 ### Label-free quantification, ProteoBench (commands; converter tested)
@@ -338,8 +420,8 @@ in one process, with one Percolator over all runs; it was not the configuration 
 
 The PXD017803 files `Fig2_m23142_hrMS2.raw` and `Fig2_m23145_SPSms3.raw`, reviewed yeast
 proteins, and a mods file with Carbamidomethyl C and TMTpro (304.20715) on K and the peptide
-N-terminus as fixed modifications, plus Oxidation M as variable. The measured run read mzML
-converted from these files, with 6 threads:
+N-terminus as fixed modifications, plus Oxidation M as variable. The measured runs read mzML
+converted from these files (both files of each acquisition in one process), with 16 threads:
 
 ```bash
 andes --spectrum Fig2_m23142_hrMS2.raw  --database yeast.fasta --mods mods_tmtpro.txt \
@@ -393,21 +475,24 @@ with `purity ≥ 0.9`.
 
 ## 5. Known gaps
 
-- **Label-free quantification rests on two datasets and one Percolator seed**, and its best
-  scores use andes's own normalisation (`quantity_normalized`; the raw `quantity` is the quantms
-  contract). On Astral andes is mid-table, and its match-between-runs entrapment error is
-  measured on QExactive only (2026-10-17, an earlier build). The leaderboard was scored by
-  `proteobench` 0.17.0 and andes by 0.18.6; several engines' transfer error control could not
-  be checked. The TMT figures are from 2026-10-10.
-- **Only some identification sets measure error.** TMT has no entrapment component. UPS1's
-  entrapment is not 1:1, and its nominal 1% is 2.3–2.5% true FDP.
-- **Not re-measured on the peptide-level entrapment:** the glyco deep tier, the compared
-  phospho FDP, and the `--chimeric` and `--refine` FDPs in the opt-in table.
+- **Label-free quantification rests on two datasets and one Percolator seed** (three for the
+  error control), and its best scores use andes's own normalisation (`quantity_normalized`; the
+  raw `quantity` is the quantms contract). On Astral andes's CV (0.113) is above most
+  submissions, and its match-between-runs entrapment error is measured on QExactive only. The
+  leaderboard was scored by `proteobench` 0.17.0 and andes by 0.18.6; several engines' transfer
+  error control could not be checked.
+- **Entrapment designs can disagree.** On UPS1 the natural *E. coli* entrapment reads the
+  nominal 1% as 2.07–2.19% and a peptide-level shuffle as 0.91–0.98%; on the timsTOF astrocyte
+  runs natural yeast reads 1.29–1.55% and the shuffle 0.98–1.03%. The 500-run study has no
+  entrapment in this measurement.
+- **Not re-measured at `2051616b`:** the glyco deep tier, the compared phospho FDP (Comet), the
+  `--chimeric` and `--refine` opt-in table, the non-default `--predict` settings and the
+  phospho agreement with MaxQuant.
 - **Single files.** Phospho is one file, peptide-level only; `--refine` is measured on Astral
   only.
 - **Glyco composition on fucose-rich tissue.** On heart and lung the backbone agrees with
   pGlyco2 94–99% of the time but the composition only 68–78% (97% on liver).
-- **Not benchmarked:** iTRAQ, timsTOF `.d`, phosphosite localisation. Java MS-GF+ was
+- **Not benchmarked:** iTRAQ, phosphosite localisation, timsTOF quantification. Java MS-GF+ was
   not re-run under the current defaults; its counts are historical.
 
 ## Layout

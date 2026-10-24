@@ -64,6 +64,11 @@ With several `--spectra`, each run is searched and labelled on its own (its own 
 q-values) and only its labelled spectra stay in memory. Each run becomes one source in the
 ledger, named by its file stem, so it can be removed or reweighted later (§5).
 
+A trained model keeps the seed's fragment-intensity and rich-ion GBDTs (the search scores both on every
+PSM; without them a model identifies 5-8% fewer PSMs at true FDP 1% on high-resolution data).
+`andes train-intensity-gbdt --in <parquet> --out-store models.parquet --model-id <id>` and
+`andes train-rich-ion-llr` (same flags) replace them with ones fitted on your flats.
+
 Keep the seed's fragment tolerance unless you are comparing tolerances. Training rebuilds
 fragment m/z from nominal masses, so a ppm window marks most fragments as missing.
 

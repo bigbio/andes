@@ -72,6 +72,12 @@ fn train_writes_model_and_search_uses_it() {
         !param.partitions.is_empty(),
         "trained param should have at least one partition"
     );
+    // The seed's fragment-intensity and rich-ion GBDTs come along: the search
+    // scores them on every PSM.
+    assert!(
+        param.frag_intensity_model.is_some() && param.rich_ion_model.is_some(),
+        "a trained model keeps the seed's fragment-intensity and rich-ion models"
+    );
 
     // ── Step 3: run search using the trained model ────────────────────────────
     let search_status = Command::new(env!("CARGO_BIN_EXE_andes"))

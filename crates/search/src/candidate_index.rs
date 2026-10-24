@@ -1190,7 +1190,7 @@ mod tests {
         let path = index_cache_path(&idx, &params);
         assert_eq!(
             path.file_name().and_then(|n| n.to_str()),
-            Some("andes-candidx-PLACEHOLDER.bin")
+            Some("andes-candidx-db3e57f5c212f6468961501684c9872b.bin")
         );
     }
 }

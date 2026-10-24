@@ -709,23 +709,27 @@ fn qpx_join_reads_competition_groups_per_input() {
         header.iter().position(|c| *c == "SpecId").unwrap(),
         header.iter().position(|c| *c == "FileName").unwrap(),
     );
-    assert_eq!(file_col, header.iter().position(|c| *c == "CalcMass").unwrap() + 1);
+    assert_eq!(
+        file_col,
+        header.iter().position(|c| *c == "CalcMass").unwrap() + 1
+    );
     let mut files = HashSet::new();
     for line in pin_text.lines().skip(1) {
         let f: Vec<&str> = line.split('\t').collect();
         assert_eq!(f[file_col], output::spec_id_run(f[id_col]));
         files.insert(f[file_col].to_string());
     }
-    assert_eq!(files, HashSet::from(["run_a".to_string(), "run_b".to_string()]));
+    assert_eq!(
+        files,
+        HashSet::from(["run_a".to_string(), "run_b".to_string()])
+    );
     let (targets, decoys, removed) = competition_result(&pin);
     assert!(
         removed > 0,
         "the fixture must have groups with several rows"
     );
 
-    let write = |dir: &Path,
-                 targets: &HashMap<String, PercolatorPsm>,
-                 decoys: &HashSet<String>| {
+    let write = |dir: &Path, targets: &HashMap<String, PercolatorPsm>, decoys: &HashSet<String>| {
         output::write_qpx(
             dir,
             &two_inputs,

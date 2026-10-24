@@ -694,6 +694,43 @@ glyco:
 
 ---
 
+## 1c. Splitting a search across cluster tasks
+
+One `andes search` run takes one parameter set. Files that need different settings (mods,
+tolerances, TMT against label-free) are separate runs, and the files of one settings group can
+go into one run (`--spectrum` repeated) or into several tasks of an array.
+
+**What each task pays again.** Before the first spectrum a task reads the database (0.1 s),
+builds the decoys and the `SearchIndex` (1 s), builds or opens the base-peptide index (2 s
+cold, 0.4 s cached) and loads the model (0.3–3 s); these are the times for databases of 26–32k
+proteins with 8 threads. The fragment-ion index is built per spectrum chunk from that chunk's
+spectra and cannot be shared between tasks; on a phospho search it is about two thirds of the
+run. Other per-run fixed work, such as the retention-time anchor fit of `--predict rt`, also
+repeats per task. Running the files of a group in one task pays this once, at the cost of a
+longer critical path and a peak memory that grows with the number of files in the task (the
+spectra of all its files are held until the PIN is written).
+
+**The index cache.** The base-peptide index is cached as `andes-candidx-<key>.bin` in the system
+temp directory (`TMPDIR`). The key is a SHA-256 over the database content, digestion, fixed
+modifications and decoy settings, the cache format version and the andes version, so it is the
+same on every node and toolchain and a file written by another andes version is never reused.
+Where `TMPDIR` is node-local, every task builds its own file. Point `TMPDIR` of the tasks at a
+shared directory and the file is built once: tasks that find the file missing take
+`<file>.lock`, one builds, the others wait and open the result. A lock whose modification time
+has not changed for 60 s (a builder that died) is taken over. A directory that cannot be
+written is skipped and the index is built in memory. A shared directory can also be copied to
+node-local storage before the search; the file is a plain mmap-able file and is read-only
+after the build.
+
+**Combining the tasks.** The PINs of tasks with the same settings have the same header and can be
+concatenated (the header once); `SpecId` carries the run name, so rows do not collide. Run
+Percolator once per settings group, not across groups with different search spaces: the
+`chargeN` columns follow the charge range, glyco PINs have another schema, and one Percolator over
+groups with different search spaces controls the FDR only overall. Combine groups at the
+peptide, protein or quantification level.
+
+---
+
 ## 2. Mods.txt format
 
 The Java MS-GF+ format (`crates/model/src/modification.rs`). Each line has five fields:

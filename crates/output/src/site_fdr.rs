@@ -253,8 +253,8 @@ pub fn site_claims(
             };
             let seq = &proteins[i].sequence;
             // Every occurrence of the peptide in the protein places its mods.
-            for (start, &(at, mass)) in occurrences(seq, &residues)
-                .flat_map(|start| mods.iter().map(move |m| (start, m)))
+            for (start, &(at, mass)) in
+                occurrences(seq, &residues).flat_map(|start| mods.iter().map(move |m| (start, m)))
             {
                 let pos = (start + at) as u32;
                 let Some(c) = claims_of(i)
@@ -405,9 +405,7 @@ pub fn site_claims(
             let tier = claims_of(site.0)
                 .iter()
                 .find(|c| {
-                    c.knockoff_of.is_none()
-                        && c.position == site.1
-                        && canon(c.mass_delta) == site.2
+                    c.knockoff_of.is_none() && c.position == site.1 && canon(c.mass_delta) == site.2
                 })
                 .map_or(PriorTier::Catalogue, |c| c.tier);
             let e = best

@@ -672,7 +672,13 @@ mod tests {
     #[test]
     fn report_order_is_q_then_pep_then_id_whatever_the_map_order() {
         let rows: Vec<PercolatorPsm> = (0..300)
-            .map(|i| psm(&format!("run/scan={i}"), (i % 3) as f64 * 0.001, (i % 5) as f64 * 0.01))
+            .map(|i| {
+                psm(
+                    &format!("run/scan={i}"),
+                    (i % 3) as f64 * 0.001,
+                    (i % 5) as f64 * 0.01,
+                )
+            })
             .collect();
         let sorted_ids = |map: &HashMap<String, PercolatorPsm>| -> Vec<String> {
             let mut v: Vec<&PercolatorPsm> = map.values().collect();
@@ -684,8 +690,11 @@ mod tests {
         let want = sorted_ids(&first);
         // Each map has its own random hasher, so each iterates in its own order.
         for _ in 0..8 {
-            let m: HashMap<String, PercolatorPsm> =
-                rows.iter().rev().map(|p| (p.psm_id.clone(), p.clone())).collect();
+            let m: HashMap<String, PercolatorPsm> = rows
+                .iter()
+                .rev()
+                .map(|p| (p.psm_id.clone(), p.clone()))
+                .collect();
             assert_eq!(sorted_ids(&m), want);
         }
         let by_key: Vec<_> = want.iter().map(|id| &first[id]).collect();

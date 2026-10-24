@@ -266,7 +266,11 @@ fn filtered_tsv_and_the_other_text_outputs_are_reproducible() {
     // The ties are real: more than one accepted row, all at the same q-value,
     // listed in `psm_id` order.
     let filtered = String::from_utf8(
-        ta.iter().find(|(n, _)| n == "s.q0p01.tsv").unwrap().1.clone(),
+        ta.iter()
+            .find(|(n, _)| n == "s.q0p01.tsv")
+            .unwrap()
+            .1
+            .clone(),
     )
     .unwrap();
     let ids: Vec<&str> = filtered

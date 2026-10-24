@@ -121,3 +121,10 @@ generic model. `--model-store <path>` uses another store; `--model <id>` forces 
   `ANDES_TRAIN_BENCH=<dir>` trains a model and asserts its 1% FDR yield ≥ the bundled fallback
   on held-out spectra.
 - Judge FDR with an entrapment or held-out set, not raw counts.
+
+## 8. Models trained elsewhere
+
+Tree ensembles from other libraries fit the existing GBDT slots of the store, and neural
+predictors go through the ONNX path of `--predict`. What exists, what is missing and the traps
+(regime, training-corpus overlap, serve window, licence, merge gate) are in
+[`docs/PORTING_MODELS.md`](docs/PORTING_MODELS.md).

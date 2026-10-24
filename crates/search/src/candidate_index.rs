@@ -18,18 +18,18 @@
 //!
 //! ## Build-once cache
 //!
-//! [`index_cache_path`] derives a stable file path under the system temp dir from
-//! a content-addressed key: the FASTA content (all target accessions + sequences),
-//! the enzyme, missed cleavages, length bounds, and decoy prefix.  Callers may
+//! [`index_cache_path`] derives a stable file path under the system temp dir from a
+//! content-addressed key: the cache format and andes version, the database content
+//! (all accessions + sequences), the enzyme, missed cleavages, length bounds, and decoy prefix.  Callers may
 //! pass this path to `prepare_mmap` (via [`MmapCandidateIndex::open_or_build`]);
 //! when the file already exists at the key path the build step is skipped entirely
 //! and the existing file is re-opened.  This makes repeated searches over the same
 //! database pay the build cost only once.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+
+use sha2::{Digest, Sha256};
 
 use crate::candidate_gen::enumerate_candidates;
 use crate::search_index::SearchIndex;
@@ -226,25 +226,58 @@ pub fn build_base_peptide_index<W: Write>(
     Ok(n)
 }
 
+/// Streaming SHA-256 over an explicit, platform-independent encoding of the
+/// cache-key inputs: integers as fixed-width little endian, byte strings
+/// length-prefixed. Nothing here depends on `std::hash`, whose output Rust does
+/// not guarantee across releases or targets.
+struct KeyHasher(Sha256);
+
+impl KeyHasher {
+    fn u64(&mut self, v: u64) {
+        self.0.update(v.to_le_bytes());
+    }
+
+    fn bytes(&mut self, b: &[u8]) {
+        self.u64(b.len() as u64);
+        self.0.update(b);
+    }
+
+    fn str(&mut self, s: &str) {
+        self.bytes(s.as_bytes());
+    }
+
+    /// First 128 bits of the digest, as 32 hex characters.
+    fn finish_hex(self) -> String {
+        use std::fmt::Write;
+        let digest = self.0.finalize();
+        let mut out = String::with_capacity(32);
+        for b in &digest[..16] {
+            let _ = write!(out, "{b:02x}");
+        }
+        out
+    }
+}
+
 /// Derive a stable, content-addressed cache path for the base-peptide index.
 ///
-/// The path is placed in the system temp directory and named
-/// `andes-candidx-<hex16>.bin`, where `<hex16>` is a 16-character hex string
-/// derived by hashing:
+/// The path is placed in the system temp directory and named `andes-candidx-<hex32>.bin`,
+/// where `<hex32>` is the first 128 bits of a SHA-256 over:
 ///
-/// 1. Every **target** protein's accession and sequence (in iteration order from
-///    [`SearchIndex::iter_target_proteins`]), a variant entry's variant
-///    region and a mature-chain entry's new termini.  Decoy sequences are derived from targets deterministically, so
-///    they need not be hashed separately.
-/// 2. The search parameters that affect which base peptides are produced:
-///    `enzyme`, `extra_enzymes`, `max_missed_cleavages`, `min_length`,
-///    `max_length`, `num_tolerable_termini`, `require_nxst_sequon` and
-///    `decoy_prefix`.
+/// 1. The cache format: [`INDEX_FORMAT_VERSION`], [`CANDIDATE_SET_REVISION`] and
+///    the andes version, so a file written by another build is never reused.
+/// 2. Every protein's accession and sequence (targets and decoys, in database
+///    order), a variant entry's variant region and a mature-chain entry's new
+///    termini. Decoys are hashed directly, which captures the decoy strategy
+///    and shuffle seed.
+/// 3. The decoy prefix and suffix, the fixed modifications (location-aware
+///    fingerprint) and the search parameters that affect which base peptides
+///    are produced: `enzyme`, `extra_enzymes`, `max_missed_cleavages`,
+///    `min_length`, `max_length`, `num_tolerable_termini` and
+///    `require_nxst_sequon`.
 ///
-/// The hash uses Rust's stable [`DefaultHasher`].  It is **not** a
-/// cryptographic hash — collisions are possible (though extremely unlikely in
-/// practice).  The intent is cache correctness for a single machine / session,
-/// not cross-machine portability.
+/// The key is the same on every machine and toolchain for the same inputs, so
+/// a cache directory on a shared filesystem can serve several nodes. It is a
+/// truncated hash, not a security boundary.
 ///
 /// # When to pass this path to `PreparedSearch::prepare_mmap`
 ///
@@ -253,28 +286,29 @@ pub fn build_base_peptide_index<W: Write>(
 /// and re-opens it directly.  The first call builds and caches; every
 /// subsequent call with the same parameters opens the cached file.
 pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams) -> PathBuf {
-    let mut h = DefaultHasher::new();
+    let mut h = KeyHasher(Sha256::new());
 
-    // The candidate-set revision: which spans the digest emits and which
-    // base mass each carries, so an index built by an earlier rule is rebuilt.
-    CANDIDATE_SET_REVISION.hash(&mut h);
+    h.u64(u64::from(INDEX_FORMAT_VERSION));
+    h.u64(u64::from(CANDIDATE_SET_REVISION));
+    h.str(env!("CARGO_PKG_VERSION"));
 
-    // Hash ALL protein content (targets AND decoys): accession + sequence bytes.
-    // Hashing the decoy sequences directly (not just `decoy_prefix`) captures the
-    // decoy strategy and shuffle seed — a prefix-only key would let a
-    // reverse-vs-shuffle (or reseeded shuffle) run silently reuse a stale decoy
-    // index and corrupt FDR.
     for protein in &idx.db.proteins {
-        protein.accession.hash(&mut h);
-        protein.sequence.hash(&mut h);
+        h.str(&protein.accession);
+        h.bytes(protein.sequence.as_ref());
         // A variant entry only yields the spans covering its variant, so the
         // region shapes the records too (absent for every FASTA protein).
-        for v in protein.variant_parts() {
-            (v.start, v.end).hash(&mut h);
+        let variants = protein.variant_parts();
+        h.u64(variants.len() as u64);
+        for v in variants {
+            h.u64(u64::from(v.start));
+            h.u64(u64::from(v.end));
         }
         // Likewise a mature-chain entry yields only its new-terminus spans.
-        if let Some(c) = protein.chain_ends() {
-            (c.n_term, c.c_term).hash(&mut h);
+        match protein.chain_ends() {
+            Some(c) => {
+                h.u64(1 + u64::from(c.n_term) + 2 * u64::from(c.c_term));
+            }
+            None => h.u64(0),
         }
     }
     // The affix test decides each record's IS_DECOY flag (`SearchIndex::
@@ -283,11 +317,13 @@ pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams) -> PathBuf {
     // `--decoy-suffix` to an external target/decoy FASTA rebuilds the index
     // rather than reusing one whose suffixed decoys are flagged as targets. An
     // empty suffix matches nothing and keys like no suffix.
-    idx.decoy_prefix.hash(&mut h);
-    idx.decoy_suffix
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .hash(&mut h);
+    h.str(&idx.decoy_prefix);
+    h.str(
+        idx.decoy_suffix
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(""),
+    );
 
     // Hash the FIXED modifications. Base-peptide masses fold fixed mods in (e.g.
     // Carbamidomethyl-C), so two runs with the same FASTA/enzyme/lengths but a
@@ -299,28 +335,31 @@ pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams) -> PathBuf {
     // collide and reuse a stale index. (Variable mods are applied lazily at serve
     // time and do NOT affect the cached base index, so they are excluded.) The
     // fingerprint is already sorted + deduped → deterministic key.
-    for (res, loc_rank, delta_bits) in params.aa_set.fixed_mod_fingerprint() {
-        res.hash(&mut h);
-        loc_rank.hash(&mut h);
-        delta_bits.hash(&mut h);
+    let fixed = params.aa_set.fixed_mod_fingerprint();
+    h.u64(fixed.len() as u64);
+    for (res, loc_rank, delta_bits) in fixed {
+        h.u64(u64::from(res));
+        h.u64(u64::from(loc_rank));
+        h.u64(delta_bits);
     }
 
-    // Hash all search params that affect base-peptide enumeration.
-    // `enzyme` and `Enzyme` must impl `Hash` — confirmed by the model crate.
-    params.enzyme.hash(&mut h);
+    // Every search parameter that affects base-peptide enumeration. Enzymes are
+    // keyed by name: the key already carries the andes version, so a renamed
+    // variant cannot meet an older file.
+    h.str(&format!("{:?}", params.enzyme));
+    h.u64(params.extra_enzymes.len() as u64);
     for extra in &params.extra_enzymes {
-        extra.hash(&mut h);
+        h.str(&format!("{extra:?}"));
     }
-    params.max_missed_cleavages.hash(&mut h);
-    params.min_length.hash(&mut h);
-    params.max_length.hash(&mut h);
-    params.num_tolerable_termini.hash(&mut h);
+    h.u64(u64::from(params.max_missed_cleavages));
+    h.u64(u64::from(params.min_length));
+    h.u64(u64::from(params.max_length));
+    h.u64(u64::from(params.num_tolerable_termini));
     // `--glyco-index-sequon-only` drops every span without a sequon from the
     // index; such an index must never be reused by a search that needs them.
-    params.require_nxst_sequon.hash(&mut h);
+    h.u64(u64::from(params.require_nxst_sequon));
 
-    let digest = h.finish();
-    std::env::temp_dir().join(format!("andes-candidx-{digest:016x}.bin"))
+    std::env::temp_dir().join(format!("andes-candidx-{}.bin", h.finish_hex()))
 }
 
 /// Memory-mapped reader for the flat binary candidate index produced by
@@ -1135,6 +1174,23 @@ mod tests {
         assert_eq!(
             path_a, path_b,
             "cache paths must be identical for identical params"
+        );
+    }
+
+    /// The key is a fixed function of its inputs: this pins the file name for
+    /// the toy database, so a change to the key encoding (which would orphan
+    /// every shared cache) is a deliberate edit of this value, and the name is
+    /// the same on every toolchain and target.
+    #[test]
+    fn index_cache_key_is_pinned() {
+        let idx = make_toy_index();
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.min_length = 4;
+        let path = index_cache_path(&idx, &params);
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("andes-candidx-db3e57f5c212f6468961501684c9872b.bin")
         );
     }
 }

@@ -213,6 +213,71 @@ fn staged_search(dir: &Path, perc: &Path) -> PathBuf {
     q
 }
 
+/// The text outputs of a run directory (the PIN, the Percolator result files
+/// and every `.tsv`), by file name and content. Parquet files carry a creation
+/// time and a UUID, so they are not compared here.
+fn text_outputs(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut v: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.is_file())
+        .filter(|p| {
+            matches!(
+                p.extension().and_then(|e| e.to_str()),
+                Some("tsv" | "pin" | "txt")
+            )
+        })
+        .map(|p| {
+            (
+                p.file_name().unwrap().to_string_lossy().into_owned(),
+                std::fs::read(&p).unwrap(),
+            )
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// Two identical runs write byte-identical text outputs. The stand-in
+/// Percolator gives every target the same q-value and PEP, so the filtered
+/// table's row order is decided by the tie-break alone, not by the iteration
+/// order of the result map.
+#[test]
+fn filtered_tsv_and_the_other_text_outputs_are_reproducible() {
+    let tmp = tempfile::tempdir().unwrap();
+    let perc = fake_percolator(tmp.path());
+    let a = tmp.path().join("a");
+    let b = tmp.path().join("b");
+    staged_search(&a, &perc);
+    staged_search(&b, &perc);
+    let (ta, tb) = (text_outputs(&a), text_outputs(&b));
+    let names: Vec<&str> = ta.iter().map(|(n, _)| n.as_str()).collect();
+    assert!(
+        names.contains(&"s.q0p01.tsv"),
+        "the filtered table is written: {names:?}"
+    );
+    assert_eq!(
+        names,
+        tb.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>()
+    );
+    for ((name, x), (_, y)) in ta.iter().zip(&tb) {
+        assert!(x == y, "{name} differs between two identical runs");
+    }
+    // The ties are real: more than one accepted row, all at the same q-value,
+    // listed in `psm_id` order.
+    let filtered = String::from_utf8(
+        ta.iter().find(|(n, _)| n == "s.q0p01.tsv").unwrap().1.clone(),
+    )
+    .unwrap();
+    let ids: Vec<&str> = filtered
+        .lines()
+        .skip(1)
+        .map(|l| l.split('\t').next().unwrap())
+        .collect();
+    assert!(ids.len() > 8, "{} rows", ids.len());
+    assert!(ids.windows(2).all(|w| w[0] < w[1]), "{ids:?}");
+}
+
 /// `--mbr-fdr` of the transfer test. The fixture's transfer folds hold about
 /// 30 targets each, so with the K-decoy estimate's `+1` correction no transfer
 /// q-value can fall below about `1 / (2 * 30)`.

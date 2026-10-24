@@ -2728,11 +2728,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             })
             .map(|(_, p)| p)
             .collect();
-        accepted.sort_by(|a, b| {
-            a.q_value
-                .partial_cmp(&b.q_value)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        accepted.sort_by(|a, b| a.report_cmp(b));
         let mut pep_note = pep_cap
             .map(|t| format!(" and PEP<={t}"))
             .unwrap_or_default();
@@ -3181,7 +3177,7 @@ fn release_at_exit(candidates: Vec<search::candidate_gen::Candidate>) {
 }
 
 /// Write the FDR-filtered rescore TSV: one row per accepted target PSM (already
-/// filtered to q ≤ fdr and sorted by q ascending). Columns: the Percolator join
+/// filtered to q ≤ fdr and sorted by [`output::PercolatorPsm::report_cmp`]). Columns: the Percolator join
 /// key (`PSMId`, == PIN SpecId), `q-value`, `posterior_error_probability`,
 /// `peptide`, `proteinIds`.
 pub(crate) fn write_filtered_tsv(

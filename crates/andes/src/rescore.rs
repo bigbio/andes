@@ -864,7 +864,10 @@ mod tests {
     fn spectrum_key_drops_scan_rank_and_row() {
         assert_eq!(keys(&[("run/index=101_101_1", 101)]), ["run/index=101"]);
         assert_eq!(
-            keys(&[("run/index=101_101_1_0", 101), ("run/index=101_101_2_1", 101)]),
+            keys(&[
+                ("run/index=101_101_1_0", 101),
+                ("run/index=101_101_2_1", 101)
+            ]),
             ["run/index=101", "run/index=101"]
         );
         assert_eq!(

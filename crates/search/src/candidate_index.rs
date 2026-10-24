@@ -362,6 +362,107 @@ pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams) -> PathBuf {
     std::env::temp_dir().join(format!("andes-candidx-{}.bin", h.finish_hex()))
 }
 
+/// Lock file next to a cache file: `<cache file>.lock`.
+fn lock_path_for(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".lock");
+    PathBuf::from(name)
+}
+
+/// How often the holder of a [`BuildLock`] refreshes the lock file's
+/// modification time.
+const LOCK_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(5);
+/// A lock whose modification time a waiter has seen unchanged for this long is
+/// taken to belong to a dead builder.
+const LOCK_STALE: std::time::Duration =
+    std::time::Duration::from_secs(if cfg!(test) { 2 } else { 60 });
+/// How often a waiter looks at the cache file and the lock.
+const LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Held by the one process that is building a cache file. The file is created
+/// exclusively, a thread refreshes its modification time while the build runs
+/// (so waiters can tell a live build from a dead one without comparing clocks
+/// across machines), and dropping the lock removes it.
+struct BuildLock {
+    path: PathBuf,
+    /// Dropping the sender stops the heartbeat thread.
+    stop: Option<std::sync::mpsc::Sender<()>>,
+    beat: Option<std::thread::JoinHandle<()>>,
+}
+
+impl BuildLock {
+    /// `Ok(None)` when another process holds the lock.
+    fn try_acquire(path: &Path) -> io::Result<Option<Self>> {
+        let file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let (stop, rx) = std::sync::mpsc::channel::<()>();
+        let beat = std::thread::spawn(move || {
+            while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                rx.recv_timeout(LOCK_HEARTBEAT)
+            {
+                let _ = file.set_modified(std::time::SystemTime::now());
+            }
+        });
+        Ok(Some(Self {
+            path: path.to_path_buf(),
+            stop: Some(stop),
+            beat: Some(beat),
+        }))
+    }
+}
+
+impl Drop for BuildLock {
+    fn drop(&mut self) {
+        drop(self.stop.take());
+        if let Some(beat) = self.beat.take() {
+            let _ = beat.join();
+        }
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Wait while another process builds `path`. Returns the opened index once the
+/// cache file is usable, or `None` when the lock has gone away (the builder
+/// finished or failed without leaving a usable file) or has not changed for
+/// [`LOCK_STALE`] (the builder died; its lock is removed).
+fn wait_for_builder(path: &Path, lock_path: &Path) -> Option<MmapCandidateIndex> {
+    eprintln!(
+        "candidate-index: another process is building {}; waiting for it",
+        path.display()
+    );
+    let mut seen_mtime = None;
+    let mut seen_at = std::time::Instant::now();
+    loop {
+        if let Ok(mmap_index) = MmapCandidateIndex::open(path) {
+            return Some(mmap_index);
+        }
+        let mtime = match std::fs::metadata(lock_path) {
+            Ok(m) => m.modified().ok(),
+            Err(_) => return None,
+        };
+        if mtime != seen_mtime {
+            seen_mtime = mtime;
+            seen_at = std::time::Instant::now();
+        } else if seen_at.elapsed() > LOCK_STALE {
+            eprintln!(
+                "candidate-index: the lock {} has not been refreshed for {} s; taking over",
+                lock_path.display(),
+                LOCK_STALE.as_secs()
+            );
+            let _ = std::fs::remove_file(lock_path);
+            return None;
+        }
+        std::thread::sleep(LOCK_POLL);
+    }
+}
+
 /// Memory-mapped reader for the flat binary candidate index produced by
 /// [`build_base_peptide_index`].
 ///
@@ -504,6 +605,31 @@ impl MmapCandidateIndex {
         // The temp file lives in the same directory as `path` so the rename is
         // always within the same filesystem (avoiding cross-device link errors).
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        // One builder per cache file: the process that finds the file missing
+        // takes `<path>.lock` and builds; every other process waits for the
+        // file instead of repeating the build and the write. A lock that cannot
+        // be created for a reason other than "already held" (read-only
+        // directory) is skipped, and the build below falls back to memory.
+        let lock_path = lock_path_for(path);
+        let _lock = loop {
+            match BuildLock::try_acquire(&lock_path) {
+                Ok(Some(lock)) => break Some(lock),
+                Ok(None) => {
+                    if let Some(mmap_index) = wait_for_builder(path, &lock_path) {
+                        return Ok((mmap_index, false));
+                    }
+                    // The lock went away without a usable file (the builder
+                    // failed or died): take over.
+                }
+                Err(_) => break None,
+            }
+        };
+        // A holder may have finished between the open above and the lock.
+        if _lock.is_some() {
+            if let Ok(mmap_index) = Self::open(path) {
+                return Ok((mmap_index, false));
+            }
+        }
         // Unique temp name per call: PID alone collides when several searches (or
         // tests) build distinct indexes concurrently in the SAME directory (e.g.
         // multiple `NamedTempFile`s under `/tmp`), racing on one tmp path and
@@ -1192,5 +1318,77 @@ mod tests {
             path.file_name().and_then(|n| n.to_str()),
             Some("andes-candidx-db3e57f5c212f6468961501684c9872b.bin")
         );
+    }
+
+    fn toy_params() -> SearchParams {
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.min_length = 3;
+        params
+    }
+
+    /// Several processes starting together on a cold cache: exactly one builds,
+    /// the others open its file.
+    #[test]
+    fn concurrent_open_or_build_builds_once() {
+        let idx = make_toy_index();
+        let params = toy_params();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.bin");
+        let built: Vec<bool> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..6)
+                .map(|_| {
+                    s.spawn(|| {
+                        MmapCandidateIndex::open_or_build(&path, &idx, &params, "XXX")
+                            .unwrap()
+                            .1
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(built.iter().filter(|b| **b).count(), 1, "{built:?}");
+        assert!(!lock_path_for(&path).exists(), "lock must be released");
+    }
+
+    /// A task that finds the lock held waits, and opens the finished file.
+    #[test]
+    fn waiter_opens_the_file_the_lock_holder_builds() {
+        let idx = make_toy_index();
+        let params = toy_params();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.bin");
+        let lock = BuildLock::try_acquire(&lock_path_for(&path))
+            .unwrap()
+            .expect("lock is free");
+        std::thread::scope(|s| {
+            let waiter = s.spawn(|| {
+                MmapCandidateIndex::open_or_build(&path, &idx, &params, "XXX").unwrap()
+            });
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            assert!(!waiter.is_finished(), "waiter must not build while locked");
+            let mut f = std::fs::File::create(&path).unwrap();
+            build_base_peptide_index(&idx, &params, "XXX", &mut f).unwrap();
+            drop(f);
+            drop(lock);
+            let (mi, was_built) = waiter.join().unwrap();
+            assert!(!was_built, "waiter must reuse the holder's file");
+            assert!(!mi.is_empty());
+        });
+    }
+
+    /// A lock nobody refreshes (dead builder) is taken over.
+    #[test]
+    fn stale_lock_is_taken_over() {
+        let idx = make_toy_index();
+        let params = toy_params();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.bin");
+        std::fs::File::create(lock_path_for(&path)).unwrap();
+        let (mi, was_built) =
+            MmapCandidateIndex::open_or_build(&path, &idx, &params, "XXX").unwrap();
+        assert!(was_built);
+        assert!(!mi.is_empty());
+        assert!(!lock_path_for(&path).exists());
     }
 }

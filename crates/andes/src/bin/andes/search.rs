@@ -1357,6 +1357,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // reopens the same cached file the pre-pass built.
     let index_path = index_cache_path(&idx, &params);
     if params.precursor_cal_mode != PrecursorCalMode::Off {
+        let t_cal = std::time::Instant::now();
         let mut cal_prepared = PreparedSearch::prepare_mmap(
             &idx,
             &params,
@@ -1375,6 +1376,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &mut cal_prepared,
         )?;
         drop(cal_prepared);
+        eprintln!(
+            "[PHASE calibration_prepass: {:.2}s] (includes opening or building the candidate index)",
+            t_cal.elapsed().as_secs_f64()
+        );
         params.precursor_mass_shift_ppm =
             apply_shift_for_mode(params.precursor_cal_mode, cal_stats);
         let tol_before = params.precursor_tolerance;
@@ -1402,6 +1407,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Content-addressed cache path, so repeated searches over the same FASTA +
     // params (and the calibration pre-pass just above) share one on-disk index
     // without rebuilding.
+    let t_index = std::time::Instant::now();
     let mut prepared = PreparedSearch::prepare_mmap(
         &idx,
         &params,
@@ -1411,6 +1417,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         &index_path,
     )
     .map_err(|e| format!("build out-of-core candidate index: {e}"))?;
+    eprintln!(
+        "[PHASE candidate_index_open: {:.2}s]",
+        t_index.elapsed().as_secs_f64()
+    );
     eprintln!(
         "PreparedSearch: out-of-core candidate-index: mmap \
          (base peptides resolved lazily per spectrum)"
@@ -2055,6 +2065,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         spectrum_path.display(),
         CHUNK_SIZE,
         t_phase.elapsed().as_secs_f64()
+    );
+    eprintln!(
+        "[PHASE chunk_candidate_prep: {:.2}s] (part of stream_search: fragment-index build or record expansion, summed over chunks)",
+        prepared.chunk_prep_seconds()
     );
     if bench_mode {
         eprintln!("Bench mode: capped at {} spectra", cli.max_spectra);

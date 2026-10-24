@@ -101,6 +101,12 @@ pub(crate) struct TrainFromSearchArgs {
     #[arg(long = "out-store")]
     pub(crate) out_store: PathBuf,
 
+    /// Directory of the candidate-index cache of the seed searches, created if
+    /// missing. Default: the directory of `--out-store`. A directory that
+    /// cannot be written is an error.
+    #[arg(long = "index-cache-dir", value_name = "DIR")]
+    pub(crate) index_cache_dir: Option<PathBuf>,
+
     /// Model ID written into the store. Default: `trained_<instrument>_<protocol>`.
     #[arg(long = "model-id")]
     pub(crate) model_id: Option<String>,
@@ -738,6 +744,7 @@ pub(crate) fn run_train_from_search(
                 &seed_scorer,
                 &search_params,
                 args.train_fdr,
+                &crate::cli::index_cache_dir(args.index_cache_dir.as_deref(), &args.out_store),
             )
             .map_err(|e| format!("bootstrap_labels: {e}"))?
         };
@@ -1586,6 +1593,7 @@ pub(crate) fn run_train_update(
             &current_scorer,
             &search_params,
             args.train_fdr,
+            &crate::cli::index_cache_dir(args.index_cache_dir.as_deref(), &args.out_store),
         )
         .map_err(|e| format!("bootstrap_labels: {e}"))?;
         eprintln!("train update: {} confident labels", labels.len());
@@ -1678,6 +1686,7 @@ pub(crate) fn run_train_update(
             &candidate_scorer,
             &search_params,
             args.train_fdr,
+            &crate::cli::index_cache_dir(args.index_cache_dir.as_deref(), &args.out_store),
         )
         .map_err(|e| format!("evaluate_candidate: {e}"))?;
 

@@ -1,6 +1,6 @@
 //! Command-line argument definitions and value parsers for the search subcommand.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
 use model::Tolerance;
@@ -304,6 +304,14 @@ pub(crate) struct SearchArgs {
     /// a phospho search).
     #[arg(long = "fragment-index-slice-da", hide = true)]
     pub(crate) fragment_index_slice_da: Option<f64>,
+
+    /// Directory of the candidate-index cache (`andes-candidx-<key>.bin`),
+    /// created if missing. Default: the directory of the output files. Pass a
+    /// shared directory to build the index once for several tasks, or a
+    /// node-local one for a cache per node. A directory that cannot be written
+    /// is an error.
+    #[arg(long = "index-cache-dir", value_name = "DIR")]
+    pub(crate) index_cache_dir: Option<PathBuf>,
 
     /// Precursor mass tolerance as `VALUE+unit`. Accepts ppm (e.g. `20ppm`,
     /// high-res) or Da (e.g. `0.02da`/`0.02Da`, low-res precursor selection).
@@ -1572,6 +1580,19 @@ pub(crate) fn parse_positive_tol(s: &str) -> Result<f64, String> {
     Ok(v)
 }
 
+/// The candidate-index cache directory: `--index-cache-dir` when given, else
+/// the directory of `output` (the output prefix or file), so the default does
+/// not depend on the environment.
+pub(crate) fn index_cache_dir(flag: Option<&Path>, output: &Path) -> PathBuf {
+    match flag {
+        Some(dir) => dir.to_path_buf(),
+        None => match output.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => PathBuf::from("."),
+        },
+    }
+}
+
 /// Parse `--precursor-cal` value. Accepts auto|on|off.
 pub(crate) fn parse_precursor_cal(s: &str) -> Result<PrecursorCalMode, String> {
     match s.to_ascii_lowercase().as_str() {
@@ -1761,5 +1782,35 @@ mod mbr_fdr_default_tests {
     fn mbr_fdr_explicit_value_overrides_default() {
         let s = SearchWrap::try_parse_from(["andes", "--mbr-fdr", "0.05"]).unwrap();
         assert_eq!(s.args.mbr_fdr, 0.05);
+    }
+}
+
+#[cfg(test)]
+mod index_cache_dir_tests {
+    use super::*;
+
+    #[test]
+    fn the_flag_wins() {
+        assert_eq!(
+            index_cache_dir(Some(Path::new("/shared")), Path::new("out/run.pin")),
+            PathBuf::from("/shared")
+        );
+    }
+
+    #[test]
+    fn the_default_is_the_output_directory() {
+        assert_eq!(
+            index_cache_dir(None, Path::new("results/run.pin")),
+            PathBuf::from("results")
+        );
+        assert_eq!(
+            index_cache_dir(None, Path::new("/data/out/run")),
+            PathBuf::from("/data/out")
+        );
+    }
+
+    #[test]
+    fn a_bare_output_name_means_the_working_directory() {
+        assert_eq!(index_cache_dir(None, Path::new("run.pin")), PathBuf::from("."));
     }
 }

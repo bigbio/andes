@@ -360,8 +360,17 @@ fn acceptance_gate_same_model_is_accepted() {
     let search_params = SearchParams::default_tryptic(aa);
 
     // Same scorer for both current and candidate → counts should be equal.
-    let delta = evaluate_candidate(&spectra, &bsa_fasta, &scorer, &scorer, &search_params, 0.5)
-        .expect("evaluate_candidate must succeed");
+    let cache_dir = tempfile::tempdir().expect("cache dir");
+    let delta = evaluate_candidate(
+        &spectra,
+        &bsa_fasta,
+        &scorer,
+        &scorer,
+        &search_params,
+        0.5,
+        cache_dir.path(),
+    )
+    .expect("evaluate_candidate must succeed");
 
     assert_eq!(
         delta.current_count, delta.candidate_count,

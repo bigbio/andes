@@ -333,7 +333,7 @@ impl<'a> PreparedSearch<'a> {
     /// Opens the mass-sorted base-peptide index cached at `index_path`, building
     /// it (via
     /// [`build_base_peptide_index`](crate::candidate_index::build_base_peptide_index))
-    /// on a cache miss, or in memory when the cache cannot be written.
+    /// on a cache miss; a cache file that cannot be written is an error.
     /// `self.candidates` starts empty and is grown lazily during the scan so the
     /// PIN/TSV writers resolve `candidate_idxs` against a real candidate slice.
     ///
@@ -349,12 +349,7 @@ impl<'a> PreparedSearch<'a> {
     ) -> std::io::Result<Self> {
         let (mmap_index, was_built) =
             MmapCandidateIndex::open_or_build(index_path, idx, params, decoy_prefix)?;
-        if mmap_index.is_in_memory() {
-            eprintln!(
-                "candidate-index: built {} records in memory (not cached)",
-                mmap_index.len()
-            );
-        } else if was_built {
+        if was_built {
             eprintln!(
                 "candidate-index: built and cached {} records → {}",
                 mmap_index.len(),
@@ -1428,9 +1423,9 @@ pub const OUT_OF_CORE_SLICE_DA: f64 = 80.0;
 ///
 /// Returns one queue per input spectrum, in input order (`spectrum_idx` is the
 /// input position), and the candidates the queues reference. The candidate
-/// index is cached under the system temp directory and reused by later calls
-/// with the same database and parameters, or built in memory when the cache
-/// cannot be written.
+/// index is cached in `cache_dir` (created if missing) and reused by later
+/// calls with the same database and parameters; an unwritable `cache_dir` is an
+/// error.
 pub fn match_spectra_out_of_core(
     spectra: &[Spectrum],
     idx: &SearchIndex,
@@ -1438,10 +1433,11 @@ pub fn match_spectra_out_of_core(
     scorer: &RankScorer,
     fragment_tolerance_da: f64,
     decoy_prefix: &str,
+    cache_dir: &std::path::Path,
 ) -> std::io::Result<(Vec<TopNQueue>, Vec<Candidate>)> {
     let mut params = params.clone();
     params.fragment_index_top_k = crate::search_params::FRAGMENT_INDEX_TOP_K;
-    let cache = crate::candidate_index::index_cache_path(idx, &params);
+    let cache = crate::candidate_index::index_cache_path(idx, &params, cache_dir);
     let mut prepared = PreparedSearch::prepare_mmap(
         idx,
         &params,

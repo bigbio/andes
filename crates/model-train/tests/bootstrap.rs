@@ -94,6 +94,7 @@ fn load_bsa_spectra() -> Vec<model::Spectrum> {
 /// on the small BSA fixture.
 #[test]
 fn bootstrap_labels_bsa_smoke() {
+    let cache = tempfile::tempdir().expect("cache dir");
     let spectra = load_bsa_spectra();
     assert!(
         !spectra.is_empty(),
@@ -105,7 +106,7 @@ fn bootstrap_labels_bsa_smoke() {
     let params = SearchParams::default_tryptic(bsa_aa_set());
     let train_fdr = 0.5_f64;
 
-    let result = bootstrap_labels(&spectra, &db_path, &scorer, &params, train_fdr);
+    let result = bootstrap_labels(&spectra, &db_path, &scorer, &params, train_fdr, cache.path());
     assert!(
         result.is_ok(),
         "bootstrap_labels must succeed: {:?}",
@@ -132,7 +133,7 @@ fn bootstrap_labels_bsa_smoke() {
     }
 
     // Determinism: running twice must produce the same count.
-    let result2 = bootstrap_labels(&spectra, &db_path, &scorer, &params, train_fdr)
+    let result2 = bootstrap_labels(&spectra, &db_path, &scorer, &params, train_fdr, cache.path())
         .expect("second bootstrap_labels run must succeed");
     assert_eq!(
         matches.len(),
@@ -154,13 +155,14 @@ fn bootstrap_labels_bsa_smoke() {
 /// Every confidence value must still be <= 0.05.
 #[test]
 fn bootstrap_labels_bsa_strict_fdr() {
+    let cache = tempfile::tempdir().expect("cache dir");
     let spectra = load_bsa_spectra();
     let scorer = load_hcd_scorer();
     let db_path = fixture("test-fixtures/BSA.fasta");
     let params = SearchParams::default_tryptic(bsa_aa_set());
     let train_fdr = 0.05_f64;
 
-    let matches = bootstrap_labels(&spectra, &db_path, &scorer, &params, train_fdr)
+    let matches = bootstrap_labels(&spectra, &db_path, &scorer, &params, train_fdr, cache.path())
         .expect("bootstrap_labels must succeed at strict FDR");
 
     for m in &matches {
@@ -182,15 +184,16 @@ fn bootstrap_labels_bsa_strict_fdr() {
 /// FDR monotonicity: lenient FDR must produce at least as many matches as strict.
 #[test]
 fn bootstrap_labels_bsa_lenient_ge_strict() {
+    let cache = tempfile::tempdir().expect("cache dir");
     let spectra = load_bsa_spectra();
     let scorer = load_hcd_scorer();
     let db_path = fixture("test-fixtures/BSA.fasta");
     let params = SearchParams::default_tryptic(bsa_aa_set());
 
     let lenient =
-        bootstrap_labels(&spectra, &db_path, &scorer, &params, 0.5).expect("lenient bootstrap");
+        bootstrap_labels(&spectra, &db_path, &scorer, &params, 0.5, cache.path()).expect("lenient bootstrap");
     let strict =
-        bootstrap_labels(&spectra, &db_path, &scorer, &params, 0.05).expect("strict bootstrap");
+        bootstrap_labels(&spectra, &db_path, &scorer, &params, 0.05, cache.path()).expect("strict bootstrap");
 
     assert!(
         lenient.len() >= strict.len(),

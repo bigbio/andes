@@ -82,7 +82,7 @@ the file; use `--model-store` plus `--model` for an unbundled model.
 | `--precursor-cal` | enum | `off` | `off`, `auto`, `on`. A pre-pass learns a ppm shift from confident PSMs and tightens the precursor tolerance; `auto` skips it on small samples. Off by default: on the benchmark sets the pre-pass took 9–17% of the run and never fired, and where it fired (UPS1, larger sample) the tightened window lost 7.6% of PSMs. Skipped (with a warning) on `.raw` and `.d`. | Java `-precursorCal auto\|on\|off` |
 
 **Candidate retrieval is automatic.** andes builds the candidate
-index out-of-core (cached as `andes-candidx-<hash>.bin` in the system temp directory, ~150–250 MB
+index out-of-core (cached as `andes-candidx-<hash>.bin` in `--index-cache-dir` (default: the directory of the output files), ~90–250 MB
 on the benchmark databases, reused by later runs on the same database and settings) and retrieves
 the 100 candidates whose singly-charged b/y ions best match each spectrum (at least 3 matched).
 On Astral this gave +22.2% PSMs over full-window enumeration at an equal true FDP of 1.00%; on
@@ -104,6 +104,7 @@ its choice; `--fragment-index off` scores every candidate in each precursor wind
 |---|---|---|---|---|
 | `--threads` | usize | logical CPU count | Worker threads. | Java `-thread N` |
 | `--ms-level` | u8 | `2` | MS level to search in mzML. `.raw`/`.d`, MGF and `--chimeric` always search MS2. | — |
+| `--index-cache-dir` | dir | output directory | Directory of the candidate-index cache (`andes-candidx-<key>.bin`), created if missing; config key `search.index_cache_dir`. A shared directory builds the index once for several tasks, a node-local one gives a cache per node. A directory that cannot be written is an error. | — |
 | `--max-spectra` | usize | `0` | Bench mode: first N MS2 spectra only (`0` = all); skips TSV output. | — |
 
 ### Output
@@ -710,17 +711,17 @@ repeats per task. Running the files of a group in one task pays this once, at th
 longer critical path and a peak memory that grows with the number of files in the task (the
 spectra of all its files are held until the PIN is written).
 
-**The index cache.** The base-peptide index is cached as `andes-candidx-<key>.bin` in the system
-temp directory (`TMPDIR`). The key is a SHA-256 over the database content, digestion, fixed
-modifications and decoy settings, the cache format version and the andes version, so it is the
-same on every node and toolchain and a file written by another andes version is never reused.
-Where `TMPDIR` is node-local, every task builds its own file. Point `TMPDIR` of the tasks at a
-shared directory and the file is built once: tasks that find the file missing take
-`<file>.lock`, one builds, the others wait and open the result. A lock whose modification time
-has not changed for 60 s (a builder that died) is taken over. A directory that cannot be
-written is skipped and the index is built in memory. A shared directory can also be copied to
-node-local storage before the search; the file is a plain mmap-able file and is read-only
-after the build.
+**The index cache.** The base-peptide index is cached as `andes-candidx-<key>.bin` in
+`--index-cache-dir`, by default the directory of the output files; the directory is created if
+missing and a directory that cannot be written is an error. The key is a SHA-256 over the
+database content, digestion, fixed modifications and decoy settings, the cache format version
+and the andes version, so it is the same on every node and toolchain and a file written by
+another andes version is never reused. With a node-local directory every task builds its own
+file. Pass the same shared directory to all tasks and the file is built once: tasks that find
+the file missing take `<file>.lock`, one builds, the others wait and open the result. A lock
+whose modification time has not changed for 60 s (a builder that died) is taken over. A
+prebuilt shared file can also be copied to node-local storage and used through a node-local
+`--index-cache-dir`; the file is a plain mmap-able file and is read-only after the build.
 
 **Combining the tasks.** The PINs of tasks with the same settings have the same header and can be
 concatenated (the header once); `SpecId` carries the run name, so rows do not collide. Run

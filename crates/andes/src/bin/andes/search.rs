@@ -1355,7 +1355,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Calibration pre-pass on the out-of-core index. The index is
     // content-addressed and precursor-tolerance independent, so the main pass
     // reopens the same cached file the pre-pass built.
-    let index_path = index_cache_path(&idx, &params);
+    let cache_dir = crate::cli::index_cache_dir(cli.index_cache_dir.as_deref(), &report_base);
+    let index_path = index_cache_path(&idx, &params, &cache_dir);
     if params.precursor_cal_mode != PrecursorCalMode::Off {
         let t_cal = std::time::Instant::now();
         let mut cal_prepared = PreparedSearch::prepare_mmap(

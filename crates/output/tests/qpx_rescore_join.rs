@@ -96,8 +96,17 @@ fn run_bsa_search() -> (
         .filter_map(|r| r.ok())
         .collect();
 
-    let (queues, candidates) =
-        match_spectra_out_of_core(&spectra, &idx, &params, &scorer, 0.5, "XXX_").expect("search");
+    let cache_dir = tempfile::tempdir().expect("cache dir");
+    let (queues, candidates) = match_spectra_out_of_core(
+        &spectra,
+        &idx,
+        &params,
+        &scorer,
+        0.5,
+        "XXX_",
+        cache_dir.path(),
+    )
+    .expect("search");
     (spectra, queues, candidates, idx, params)
 }
 

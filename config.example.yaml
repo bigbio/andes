@@ -36,6 +36,7 @@ search:
   # top_n: 10                    # advanced
   # fragment_index: auto         # advanced: auto | on | off (off = per-spectrum enumeration)
   # fragment_index_slice_da: 80  # advanced: precursor-mass width of one index slice (Da)
+  # index_cache_dir: cache        # candidate-index cache directory (default: the output directory)
 
 # ── Scoring / model / runtime ───────────────────────────────────────────────
 scoring:

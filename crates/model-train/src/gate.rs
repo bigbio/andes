@@ -70,6 +70,7 @@ impl YieldDelta {
 /// * `candidate`     — the proposed replacement model.
 /// * `search_params` — search parameters (enzyme, mods, tolerances, …).
 /// * `fdr`           — q-value threshold for counting accepted PSMs.
+/// * `cache_dir`     — directory of the candidate-index cache (created if missing).
 pub fn evaluate_candidate(
     spectra: &[Spectrum],
     database: &Path,
@@ -77,6 +78,7 @@ pub fn evaluate_candidate(
     candidate: &RankScorer,
     search_params: &SearchParams,
     fdr: f64,
+    cache_dir: &Path,
 ) -> Result<YieldDelta, TrainError> {
     // Build the SearchIndex once (shared between both searches).
     let file = File::open(database)?;
@@ -91,8 +93,8 @@ pub fn evaluate_candidate(
         &Proteases::of(search_params),
     );
 
-    let current_count = count_target_psms(spectra, &idx, search_params, current, fdr)?;
-    let candidate_count = count_target_psms(spectra, &idx, search_params, candidate, fdr)?;
+    let current_count = count_target_psms(spectra, &idx, search_params, current, fdr, cache_dir)?;
+    let candidate_count = count_target_psms(spectra, &idx, search_params, candidate, fdr, cache_dir)?;
 
     Ok(YieldDelta {
         current_count,
@@ -115,6 +117,7 @@ pub(crate) fn count_target_psms(
     search_params: &SearchParams,
     scorer: &RankScorer,
     fdr: f64,
+    cache_dir: &Path,
 ) -> Result<usize, TrainError> {
     // Step 2: run the search on the out-of-core path with fragment-ion
     // retrieval, the path `andes search` takes. Both models of a comparison go
@@ -126,6 +129,7 @@ pub(crate) fn count_target_psms(
         scorer,
         FRAGMENT_TOL_DA,
         BOOTSTRAP_DECOY_PREFIX,
+        cache_dir,
     )?;
 
     // Step 3: collect best PSM per spectrum.

@@ -18,7 +18,7 @@
 //!
 //! ## Build-once cache
 //!
-//! [`index_cache_path`] derives a stable file path under the system temp dir from a
+//! [`index_cache_path`] derives a stable file path in a caller-chosen cache directory from a
 //! content-addressed key: the cache format and andes version, the database content
 //! (all accessions + sequences), the enzyme, missed cleavages, length bounds, and decoy prefix.  Callers may
 //! pass this path to `prepare_mmap` (via [`MmapCandidateIndex::open_or_build`]);
@@ -260,7 +260,7 @@ impl KeyHasher {
 
 /// Derive a stable, content-addressed cache path for the base-peptide index.
 ///
-/// The path is placed in the system temp directory and named `andes-candidx-<hex32>.bin`,
+/// The path is placed in `cache_dir` and named `andes-candidx-<hex32>.bin`,
 /// where `<hex32>` is the first 128 bits of a SHA-256 over:
 ///
 /// 1. The cache format: [`INDEX_FORMAT_VERSION`], [`CANDIDATE_SET_REVISION`] and
@@ -285,7 +285,7 @@ impl KeyHasher {
 /// skips the (potentially slow) build step when the cache file already exists
 /// and re-opens it directly.  The first call builds and caches; every
 /// subsequent call with the same parameters opens the cached file.
-pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams) -> PathBuf {
+pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams, cache_dir: &Path) -> PathBuf {
     let mut h = KeyHasher(Sha256::new());
 
     h.u64(u64::from(INDEX_FORMAT_VERSION));
@@ -359,7 +359,20 @@ pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams) -> PathBuf {
     // index; such an index must never be reused by a search that needs them.
     h.u64(u64::from(params.require_nxst_sequon));
 
-    std::env::temp_dir().join(format!("andes-candidx-{}.bin", h.finish_hex()))
+    cache_dir.join(format!("andes-candidx-{}.bin", h.finish_hex()))
+}
+
+/// The error for a cache directory that cannot be created or written; names
+/// the flag that chooses the directory.
+fn cache_write_error(dir: &Path, e: io::Error) -> io::Error {
+    io::Error::new(
+        e.kind(),
+        format!(
+            "cannot write the candidate-index cache in {} ({e}); pass --index-cache-dir with a \
+             writable directory",
+            dir.display()
+        ),
+    )
 }
 
 /// Lock file next to a cache file: `<cache file>.lock`.
@@ -605,15 +618,14 @@ impl MmapCandidateIndex {
         // The temp file lives in the same directory as `path` so the rename is
         // always within the same filesystem (avoiding cross-device link errors).
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent).map_err(|e| cache_write_error(parent, e))?;
         // One builder per cache file: the process that finds the file missing
         // takes `<path>.lock` and builds; every other process waits for the
-        // file instead of repeating the build and the write. A lock that cannot
-        // be created for a reason other than "already held" (read-only
-        // directory) is skipped, and the build below falls back to memory.
+        // file instead of repeating the build and the write.
         let lock_path = lock_path_for(path);
         let _lock = loop {
             match BuildLock::try_acquire(&lock_path) {
-                Ok(Some(lock)) => break Some(lock),
+                Ok(Some(lock)) => break lock,
                 Ok(None) => {
                     if let Some(mmap_index) = wait_for_builder(path, &lock_path) {
                         return Ok((mmap_index, false));
@@ -621,20 +633,18 @@ impl MmapCandidateIndex {
                     // The lock went away without a usable file (the builder
                     // failed or died): take over.
                 }
-                Err(_) => break None,
+                Err(e) => return Err(cache_write_error(parent, e)),
             }
         };
         // A holder may have finished between the open above and the lock.
-        if _lock.is_some() {
-            if let Ok(mmap_index) = Self::open(path) {
-                return Ok((mmap_index, false));
-            }
+        if let Ok(mmap_index) = Self::open(path) {
+            return Ok((mmap_index, false));
         }
         // Unique temp name per call: PID alone collides when several searches (or
-        // tests) build distinct indexes concurrently in the SAME directory (e.g.
-        // multiple `NamedTempFile`s under `/tmp`), racing on one tmp path and
-        // corrupting each other's partial writes. Append a process-global atomic
-        // counter so concurrent builds never share a tmp file.
+        // tests) build distinct indexes concurrently in the SAME directory,
+        // racing on one tmp path and corrupting each other's partial writes.
+        // Append a process-global atomic counter so concurrent builds never
+        // share a tmp file.
         static BUILD_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = BUILD_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let tmp_path = parent.join(format!(
@@ -642,20 +652,7 @@ impl MmapCandidateIndex {
             std::process::id(),
             seq,
         ));
-        // A cache directory that cannot be written (read-only temp dir, full
-        // disk, permissions) does not stop the search: the same index is built
-        // in memory instead.
-        let file = match std::fs::File::create(&tmp_path) {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!(
-                    "candidate-index: cannot write the cache in {} ({e}); building it in memory \
-                     (set TMPDIR to a writable directory to cache it across runs)",
-                    parent.display()
-                );
-                return Ok((Self::build_in_memory(idx, params, decoy_prefix)?, true));
-            }
-        };
+        let file = std::fs::File::create(&tmp_path).map_err(|e| cache_write_error(parent, e))?;
         let written = {
             use std::io::{BufWriter, Write};
             let mut bw = BufWriter::new(file);
@@ -663,12 +660,7 @@ impl MmapCandidateIndex {
         };
         if let Err(e) = written.and_then(|()| std::fs::rename(&tmp_path, path)) {
             let _ = std::fs::remove_file(&tmp_path);
-            eprintln!(
-                "candidate-index: cannot write the cache in {} ({e}); building it in memory \
-                 (set TMPDIR to a writable directory to cache it across runs)",
-                parent.display()
-            );
-            return Ok((Self::build_in_memory(idx, params, decoy_prefix)?, true));
+            return Err(cache_write_error(parent, e));
         }
 
         let mmap_index = Self::open(path)?;
@@ -1062,37 +1054,57 @@ mod tests {
     // Build-once cache: `open_or_build` / `index_cache_path`
     // -----------------------------------------------------------------------
 
-    /// `open_or_build` reuses the existing file on the second call (cache hit).
-    ///
-    /// Strategy: call `open_or_build` with an explicit temp path twice with
-    /// the same inputs.  The first call must report `was_built = true`; the
-    /// second must report `was_built = false` and must return a record set that
-    /// is byte-identical to the first call's result.  The file's modification
-    /// time must not change on the second call (proving the builder was not
-    /// re-invoked).
-    /// A cache path that cannot be written does not fail the search: the index
-    /// is built in memory, with the same records the cache file would hold.
+    /// A cache directory that cannot be created or written is an error that
+    /// names the flag; nothing falls back to another directory or to memory.
     #[test]
-    fn unwritable_cache_falls_back_to_an_identical_in_memory_index() {
+    fn unwritable_cache_dir_is_an_error_naming_the_flag() {
         let idx = make_toy_index();
         let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
         let mut params = SearchParams::default_tryptic(aa_set);
         params.min_length = 3;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let on_disk = dir.path().join("cache.idx");
-        let (file_idx, _) = MmapCandidateIndex::open_or_build(&on_disk, &idx, &params, "XXX")
-            .expect("build to a writable directory");
-        assert!(!file_idx.is_in_memory());
+        // The cache directory is a regular file, so it cannot be created.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+        let path = blocker.join("sub").join("cache.idx");
+        let err = match MmapCandidateIndex::open_or_build(&path, &idx, &params, "XXX") {
+            Ok(_) => panic!("an unwritable cache directory must fail"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("--index-cache-dir"),
+            "error must name the flag: {err}"
+        );
+        assert!(!path.exists());
+    }
 
-        // The parent directory does not exist, so the cache cannot be created.
-        let unwritable = dir.path().join("missing").join("cache.idx");
-        let (mem_idx, built) = MmapCandidateIndex::open_or_build(&unwritable, &idx, &params, "XXX")
-            .expect("an unwritable cache must not fail");
-        assert!(built);
-        assert!(mem_idx.is_in_memory());
-        assert!(!unwritable.exists());
-        assert_eq!(file_idx.records(), mem_idx.records());
+    /// A missing cache directory is created.
+    #[test]
+    fn missing_cache_dir_is_created() {
+        let idx = make_toy_index();
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.min_length = 3;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache_dir = dir.path().join("a").join("b");
+        let path = index_cache_path(&idx, &params, &cache_dir);
+        let (mi, built) = MmapCandidateIndex::open_or_build(&path, &idx, &params, "XXX").unwrap();
+        assert!(built && !mi.is_in_memory());
+        assert!(path.is_file());
+    }
+
+    /// The cache file is named inside the directory that was passed.
+    #[test]
+    fn index_cache_path_is_in_the_given_dir() {
+        let idx = make_toy_index();
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let params = SearchParams::default_tryptic(aa_set);
+        let a = index_cache_path(&idx, &params, Path::new("/one"));
+        let b = index_cache_path(&idx, &params, Path::new("/two"));
+        assert_eq!(a.parent(), Some(Path::new("/one")));
+        assert_eq!(b.parent(), Some(Path::new("/two")));
+        assert_eq!(a.file_name(), b.file_name());
     }
 
     #[test]
@@ -1194,8 +1206,8 @@ mod tests {
         let mut params_b = SearchParams::default_tryptic(aa_set_b);
         params_b.min_length = 6; // different min_length
 
-        let path_a = index_cache_path(&idx, &params_a);
-        let path_b = index_cache_path(&idx, &params_b);
+        let path_a = index_cache_path(&idx, &params_a, Path::new("cache"));
+        let path_b = index_cache_path(&idx, &params_b, Path::new("cache"));
 
         assert_ne!(
             path_a,
@@ -1223,8 +1235,8 @@ mod tests {
         );
         p_cam.min_length = 3;
         assert_ne!(
-            index_cache_path(&idx, &p_nomod),
-            index_cache_path(&idx, &p_cam),
+            index_cache_path(&idx, &p_nomod, Path::new("cache")),
+            index_cache_path(&idx, &p_cam, Path::new("cache")),
             "cache key must differ when the fixed-mod set differs"
         );
     }
@@ -1262,8 +1274,8 @@ mod tests {
         params.min_length = 3;
         params.require_nxst_sequon = true;
 
-        let plain_path = index_cache_path(&plain, &params);
-        let suffixed_path = index_cache_path(&suffixed, &params);
+        let plain_path = index_cache_path(&plain, &params, Path::new("cache"));
+        let suffixed_path = index_cache_path(&suffixed, &params, Path::new("cache"));
         let _ = std::fs::remove_file(&plain_path);
         let _ = std::fs::remove_file(&suffixed_path);
         let (first, _) = MmapCandidateIndex::open_or_build(&plain_path, &plain, &params, "XXX")
@@ -1294,8 +1306,8 @@ mod tests {
         let mut params_b = SearchParams::default_tryptic(aa_set_b);
         params_b.min_length = 4; // same
 
-        let path_a = index_cache_path(&idx, &params_a);
-        let path_b = index_cache_path(&idx, &params_b);
+        let path_a = index_cache_path(&idx, &params_a, Path::new("cache"));
+        let path_b = index_cache_path(&idx, &params_b, Path::new("cache"));
 
         assert_eq!(
             path_a, path_b,
@@ -1313,7 +1325,7 @@ mod tests {
         let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
         let mut params = SearchParams::default_tryptic(aa_set);
         params.min_length = 4;
-        let path = index_cache_path(&idx, &params);
+        let path = index_cache_path(&idx, &params, Path::new("cache"));
         assert_eq!(
             path.file_name().and_then(|n| n.to_str()),
             Some("andes-candidx-db3e57f5c212f6468961501684c9872b.bin")

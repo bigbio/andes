@@ -364,7 +364,11 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         fragment_index_slice_da,
         cfg.search.fragment_index_slice_da
     );
-    set_opt!("index_cache_dir", index_cache_dir, cfg.search.index_cache_dir);
+    set_opt!(
+        "index_cache_dir",
+        index_cache_dir,
+        cfg.search.index_cache_dir
+    );
 
     // ── scoring ──
     set_parsed!(

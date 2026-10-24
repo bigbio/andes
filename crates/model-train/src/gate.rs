@@ -94,7 +94,8 @@ pub fn evaluate_candidate(
     );
 
     let current_count = count_target_psms(spectra, &idx, search_params, current, fdr, cache_dir)?;
-    let candidate_count = count_target_psms(spectra, &idx, search_params, candidate, fdr, cache_dir)?;
+    let candidate_count =
+        count_target_psms(spectra, &idx, search_params, candidate, fdr, cache_dir)?;
 
     Ok(YieldDelta {
         current_count,

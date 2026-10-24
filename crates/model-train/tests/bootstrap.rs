@@ -106,7 +106,14 @@ fn bootstrap_labels_bsa_smoke() {
     let params = SearchParams::default_tryptic(bsa_aa_set());
     let train_fdr = 0.5_f64;
 
-    let result = bootstrap_labels(&spectra, &db_path, &scorer, &params, train_fdr, cache.path());
+    let result = bootstrap_labels(
+        &spectra,
+        &db_path,
+        &scorer,
+        &params,
+        train_fdr,
+        cache.path(),
+    );
     assert!(
         result.is_ok(),
         "bootstrap_labels must succeed: {:?}",
@@ -133,8 +140,15 @@ fn bootstrap_labels_bsa_smoke() {
     }
 
     // Determinism: running twice must produce the same count.
-    let result2 = bootstrap_labels(&spectra, &db_path, &scorer, &params, train_fdr, cache.path())
-        .expect("second bootstrap_labels run must succeed");
+    let result2 = bootstrap_labels(
+        &spectra,
+        &db_path,
+        &scorer,
+        &params,
+        train_fdr,
+        cache.path(),
+    )
+    .expect("second bootstrap_labels run must succeed");
     assert_eq!(
         matches.len(),
         result2.len(),
@@ -162,8 +176,15 @@ fn bootstrap_labels_bsa_strict_fdr() {
     let params = SearchParams::default_tryptic(bsa_aa_set());
     let train_fdr = 0.05_f64;
 
-    let matches = bootstrap_labels(&spectra, &db_path, &scorer, &params, train_fdr, cache.path())
-        .expect("bootstrap_labels must succeed at strict FDR");
+    let matches = bootstrap_labels(
+        &spectra,
+        &db_path,
+        &scorer,
+        &params,
+        train_fdr,
+        cache.path(),
+    )
+    .expect("bootstrap_labels must succeed at strict FDR");
 
     for m in &matches {
         assert!(
@@ -190,10 +211,10 @@ fn bootstrap_labels_bsa_lenient_ge_strict() {
     let db_path = fixture("test-fixtures/BSA.fasta");
     let params = SearchParams::default_tryptic(bsa_aa_set());
 
-    let lenient =
-        bootstrap_labels(&spectra, &db_path, &scorer, &params, 0.5, cache.path()).expect("lenient bootstrap");
-    let strict =
-        bootstrap_labels(&spectra, &db_path, &scorer, &params, 0.05, cache.path()).expect("strict bootstrap");
+    let lenient = bootstrap_labels(&spectra, &db_path, &scorer, &params, 0.5, cache.path())
+        .expect("lenient bootstrap");
+    let strict = bootstrap_labels(&spectra, &db_path, &scorer, &params, 0.05, cache.path())
+        .expect("strict bootstrap");
 
     assert!(
         lenient.len() >= strict.len(),

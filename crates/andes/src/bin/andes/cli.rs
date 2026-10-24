@@ -1811,6 +1811,9 @@ mod index_cache_dir_tests {
 
     #[test]
     fn a_bare_output_name_means_the_working_directory() {
-        assert_eq!(index_cache_dir(None, Path::new("run.pin")), PathBuf::from("."));
+        assert_eq!(
+            index_cache_dir(None, Path::new("run.pin")),
+            PathBuf::from(".")
+        );
     }
 }

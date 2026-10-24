@@ -600,7 +600,10 @@ fn competition_result_by(
 /// precursor, as the top-N chimeric search does: one competition group with two
 /// rows. The alternative is a different target peptide, so the writers'
 /// positional-isomer collapse keeps both rows.
-fn add_runner_up(queues: &mut [search::psm::TopNQueue], candidates: &[search::candidate_gen::Candidate]) {
+fn add_runner_up(
+    queues: &mut [search::psm::TopNQueue],
+    candidates: &[search::candidate_gen::Candidate],
+) {
     for q in queues.iter_mut() {
         if let Some(top) = q.peek_top().cloned() {
             let residues = |c: &search::candidate_gen::Candidate| -> Vec<u8> {
@@ -707,7 +710,10 @@ fn qpx_join_reads_competition_groups_per_input() {
     output::write_pin(&pin, &two_inputs, &two_queues, &candidates, &params, &idx).unwrap();
     let pin_rows = pin_spec_ids(&pin).len();
     let (targets, decoys, removed) = competition_result_by(&pin, true);
-    assert!(removed > 0, "the fixture must have groups with several rows");
+    assert!(
+        removed > 0,
+        "the fixture must have groups with several rows"
+    );
 
     let write = |dir: &Path, competition: output::Competition| {
         output::write_qpx(
@@ -728,8 +734,11 @@ fn qpx_join_reads_competition_groups_per_input() {
         )
     };
     // Read across the inputs, the two winners of a group look like a drifted join.
-    let err = write(&tmp.path().join("across.idparquet"), output::Competition::AcrossInputs)
-        .unwrap_err();
+    let err = write(
+        &tmp.path().join("across.idparquet"),
+        output::Competition::AcrossInputs,
+    )
+    .unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
 
     let qdir = tmp.path().join("per_input.idparquet");

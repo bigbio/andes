@@ -537,11 +537,7 @@ fn rescore_rows(
             rows.push(RescoreRow {
                 spec_id,
                 is_decoy: cand.is_decoy,
-                group: (
-                    run,
-                    scan_num,
-                    exp_mass_text(precursor_mz, psm.charge_used),
-                ),
+                group: (run, scan_num, exp_mass_text(precursor_mz, psm.charge_used)),
             });
         }
     }

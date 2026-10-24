@@ -857,10 +857,8 @@ impl<'a> PreparedSearch<'a> {
                 (Some(cache), None)
             }
         };
-        self.chunk_prep_nanos.fetch_add(
-            t_chunk_prep.elapsed().as_nanos() as u64,
-            Ordering::Relaxed,
-        );
+        self.chunk_prep_nanos
+            .fetch_add(t_chunk_prep.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
         // Parallel per-spectrum search. All inputs above are `&` immutable; the
         // closure owns its TopNQueue, scored_per_charge cache, and per-bin GF state.

@@ -361,6 +361,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut _mbr_tmp: Option<tempfile::TempDir> = None;
     if cli.mbr {
         check_mbr_args(&cli)?;
+        // Before the scratch directory exists: a rejected run writes nothing.
+        crate::quant_run::check_unique_stems(&cli.spectrum)?;
         if cli.quant_dir.is_none() {
             let dir = scratch_tempdir("andes-quant-", &scratch_dir)?;
             cli.quant_dir = Some(dir.path().to_path_buf());
@@ -3405,7 +3407,8 @@ mod rescore_pin_destination_tests {
         )
         .unwrap();
         assert_eq!(pin, PathBuf::from("q.pin"));
-        let (pin, base) = rescore_pin_destination(None, None, None, true, Path::new("."), &mut tmp).unwrap();
+        let (pin, base) =
+            rescore_pin_destination(None, None, None, true, Path::new("."), &mut tmp).unwrap();
         assert_eq!(pin, PathBuf::from("andes.pin"));
         assert_eq!(base, PathBuf::from("andes.pin"));
         assert!(tmp.is_none());

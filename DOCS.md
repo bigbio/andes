@@ -1133,6 +1133,7 @@ CI runs the whole workspace suite with no skips; the out-of-core PIN goldens
 `--model-store <path> --model <id>`. Incremental updates (`--update --add` /
 `--remove-source` / `--reweight` / `--decay`) pass a held-out acceptance gate. `andes train
 --in <parquet>` trains from externally labelled PSMs instead. See **[`TRAIN.md`](TRAIN.md)**.
+Models trained outside andes (tree ensembles, ONNX predictors): **[`docs/PORTING_MODELS.md`](docs/PORTING_MODELS.md)**.
 
 ---
 

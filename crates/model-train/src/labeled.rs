@@ -43,6 +43,7 @@ use model::peptide::Peptide;
 use model::spectrum::Spectrum;
 use scoring_crate::scoring::rank_scorer::RankScorer;
 use search::decoy::{DecoyStrategy, Proteases, DEFAULT_DECOY_SEED};
+use search::psm::PsmMatch;
 use search::{match_spectra_out_of_core, SearchIndex, SearchParams};
 
 use crate::TrainError;
@@ -146,13 +147,13 @@ pub fn bootstrap_labels(
     )?;
 
     // ── 3. Collect best PSM per spectrum ──────────────────────────────────────
-    // Each TopNQueue is already sorted best-first by `rank_score`. We take
-    // the single best entry per spectrum.
+    // Each TopNQueue is ordered best-first by `rank_score`. We take the single
+    // best entry per spectrum and rank it by its `tdc_score`.
     struct BestPsm {
         spectrum_index: usize,
         peptide: Peptide,
         charge: u8,
-        rank_score: f32,
+        score: f32,
         is_decoy: bool,
     }
 
@@ -169,68 +170,14 @@ pub fn bootstrap_labels(
                 spectrum_index: spec_idx,
                 peptide: cand.peptide.clone(),
                 charge: psm.charge_used,
-                rank_score: psm.rank_score,
+                score: tdc_score(psm),
                 is_decoy: cand.is_decoy,
             });
         }
     }
 
-    // ── 4. Sort by rank_score DESCENDING (best/most-confident first) ──────────
-    // Tie-break by is_decoy ascending (target before decoy) for stability.
-    best_psms.sort_by(|a, b| {
-        let av = if a.rank_score.is_nan() {
-            f32::NEG_INFINITY
-        } else {
-            a.rank_score
-        };
-        let bv = if b.rank_score.is_nan() {
-            f32::NEG_INFINITY
-        } else {
-            b.rank_score
-        };
-        bv.partial_cmp(&av)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.is_decoy.cmp(&b.is_decoy))
-    });
-
-    // ── 5. Compute running q-values via TDC ──────────────────────────────────
-    // Walk from best to worst, accumulating target/decoy counts.
-    // q-value at position i = running_decoys / max(running_targets, 1); no `+1`
-    // on the decoys, deliberately, as in Percolator's PSM q-values.
-    let n = best_psms.len();
-    let mut raw_q = vec![1.0_f64; n];
-    let mut n_targets = 0u64;
-    let mut n_decoys = 0u64;
-    for (i, psm) in best_psms.iter().enumerate() {
-        if psm.is_decoy {
-            n_decoys += 1;
-        } else {
-            n_targets += 1;
-        }
-        raw_q[i] = n_decoys as f64 / n_targets.max(1) as f64;
-    }
-
-    // ── 6. Monotone q-value: propagate minimum from the bottom ────────────────
-    // Scan from worst (end) to best (start), ensuring q[i] <= q[i+1].
-    let mut mono_q = raw_q;
-    let mut min_q = 1.0_f64;
-    for q in mono_q.iter_mut().rev() {
-        if *q < min_q {
-            min_q = *q;
-        }
-        *q = min_q;
-    }
-
-    // ── 6b. Conservative tie handling for equal `rank_score` buckets ──────────
-    // Raw `rank_score` (RawScore) is coarse, so ties are common. The sort above
-    // is not guaranteed to order target-vs-decoy within a tie favourably, and
-    // target-before-decoy ordering would deflate the running decoy ratio inside
-    // the bucket, accepting a target at the requested FDR even when a tied decoy
-    // should fail it. Assign every PSM in an equal-`rank_score` bucket the WORST
-    // (max) q-value seen anywhere in that bucket so the whole bucket passes or
-    // fails together (pessimistic). `best_psms` is sorted by `rank_score`
-    // descending, so equal scores are contiguous.
-    assign_bucket_worst_q(&best_psms, &mut mono_q, |p| p.rank_score);
+    // ── 4-6. Target-decoy q-values, best score first ──────────────────────────
+    let mono_q = tdc_q_values(&mut best_psms, |p| p.score, |p| p.is_decoy);
 
     // ── 7. Collect accepted TARGET PSMs ──────────────────────────────────────
     let mut labels: Vec<LabeledMatch> = Vec::new();
@@ -248,6 +195,66 @@ pub fn bootstrap_labels(
     Ok(labels)
 }
 
+/// The score a spectrum's best PSM is ranked by in the target-decoy walk: the
+/// `node + cleavage` score, the one the PIN carries as `RankScore`. Not
+/// `rank_score`, which orders the top-N queue and adds the edge score: on dense
+/// high-resolution spectra a long peptide's edge score runs to hundreds and
+/// puts spurious hits, decoys among them, above the real identifications, so
+/// almost no target passes the q-value cut.
+pub(crate) fn tdc_score(psm: &PsmMatch) -> f32 {
+    psm.score
+}
+
+/// Target-decoy q-values over the best PSM per spectrum. Sorts `psms` by
+/// score descending (a NaN score last, a target before a decoy on equal
+/// scores) and returns the q-value of each, in that order.
+///
+/// The running q-value at a position is decoys / max(targets, 1) over the PSMs
+/// at or above it (no `+1` on the decoys, as in Percolator's PSM q-values),
+/// made monotone from the bottom. Raw scores are coarse integers, so ties are
+/// common, and every PSM in an equal-score bucket takes the bucket's WORST
+/// q-value, so a tied decoy fails the whole bucket instead of a favourable
+/// within-tie order accepting a tied target.
+///
+/// Shared by [`bootstrap_labels`] and [`crate::gate::count_target_psms`].
+pub(crate) fn tdc_q_values<T>(
+    psms: &mut [T],
+    score_of: impl Fn(&T) -> f32,
+    is_decoy: impl Fn(&T) -> bool,
+) -> Vec<f64> {
+    let key = |p: &T| {
+        let s = score_of(p);
+        if s.is_nan() {
+            f32::NEG_INFINITY
+        } else {
+            s
+        }
+    };
+    psms.sort_by(|a, b| {
+        key(b)
+            .partial_cmp(&key(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| is_decoy(a).cmp(&is_decoy(b)))
+    });
+    let mut q = vec![1.0_f64; psms.len()];
+    let (mut n_targets, mut n_decoys) = (0u64, 0u64);
+    for (qi, p) in q.iter_mut().zip(psms.iter()) {
+        if is_decoy(p) {
+            n_decoys += 1;
+        } else {
+            n_targets += 1;
+        }
+        *qi = n_decoys as f64 / n_targets.max(1) as f64;
+    }
+    let mut min_q = 1.0_f64;
+    for qi in q.iter_mut().rev() {
+        min_q = min_q.min(*qi);
+        *qi = min_q;
+    }
+    assign_bucket_worst_q(psms, &mut q, score_of);
+    q
+}
+
 /// Make q-values conservative across equal-`rank_score` ties.
 ///
 /// `psms` MUST be sorted by `rank_score` descending (equal scores contiguous),
@@ -257,7 +264,7 @@ pub fn bootstrap_labels(
 /// favourable within-tie ordering (e.g. target-before-decoy) from accepting a
 /// target at a given FDR when a tied decoy should make the whole bucket fail.
 ///
-/// Shared by [`bootstrap_labels`] and [`crate::gate::count_target_psms`].
+/// Used by [`tdc_q_values`].
 pub(crate) fn assign_bucket_worst_q<T>(psms: &[T], q: &mut [f64], score_of: impl Fn(&T) -> f32) {
     debug_assert_eq!(psms.len(), q.len());
     let mut start = 0usize;
@@ -300,45 +307,9 @@ mod tests {
         is_decoy: bool,
     }
 
-    /// Reproduce Steps 4-6b of the FDR computation on a fixture and return the
-    /// per-PSM q-values plus the number of accepted targets at `fdr`.
+    /// Per-PSM q-values (best score first) plus the number of accepted targets at `fdr`.
     fn fdr(mut psms: Vec<P>, fdr: f64) -> (Vec<f64>, usize) {
-        // Step 4: target-before-decoy tie-break (the original, "optimistic"
-        // ordering) — the conservative bucket pass must neutralise its bias.
-        psms.sort_by(|a, b| {
-            let av = if a.rank_score.is_nan() {
-                f32::NEG_INFINITY
-            } else {
-                a.rank_score
-            };
-            let bv = if b.rank_score.is_nan() {
-                f32::NEG_INFINITY
-            } else {
-                b.rank_score
-            };
-            bv.partial_cmp(&av)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.is_decoy.cmp(&b.is_decoy))
-        });
-        let n = psms.len();
-        let mut q = vec![1.0_f64; n];
-        let (mut t, mut d) = (0u64, 0u64);
-        for (i, p) in psms.iter().enumerate() {
-            if p.is_decoy {
-                d += 1
-            } else {
-                t += 1
-            }
-            q[i] = d as f64 / t.max(1) as f64;
-        }
-        let mut min_q = 1.0;
-        for qi in q.iter_mut().rev() {
-            if *qi < min_q {
-                min_q = *qi;
-            }
-            *qi = min_q;
-        }
-        assign_bucket_worst_q(&psms, &mut q, |p| p.rank_score);
+        let q = tdc_q_values(&mut psms, |p| p.rank_score, |p| p.is_decoy);
         let accepted = psms
             .iter()
             .zip(q.iter())
@@ -401,5 +372,57 @@ mod tests {
         let (q, accepted) = fdr(psms, 0.01);
         assert_eq!(accepted, 2, "both distinct-score targets pass at 1% FDR");
         assert!(q[0] <= 0.01 && q[1] <= 0.01);
+    }
+
+    /// A PSM as the top-N queue holds it: `rank_score` is `score` plus the edge score.
+    fn queued(score: f32, edge: i32) -> PsmMatch {
+        PsmMatch {
+            spectrum_idx: 0,
+            candidate_idxs: vec![0],
+            charge_used: 2,
+            mass_error_ppm: 0.0,
+            score,
+            rank_score: score + edge as f32,
+            edge_score: edge,
+            activation_method: None,
+            features: Default::default(),
+            isotope_offset: 0,
+            precursor_mz_override: None,
+            site_evidence: None,
+            tie_key: 0,
+        }
+    }
+
+    /// The walk ranks by the PIN `RankScore` (`score`), not by the edge-inflated
+    /// queue key. Long peptides on dense high-resolution spectra get edge scores
+    /// in the hundreds: ranked by `rank_score`, three decoys with a huge edge sit
+    /// above every target and no target passes 1% (`train-from-search` found 0
+    /// labels on such timsTOF runs); ranked by `score`, all 200 targets pass.
+    #[test]
+    fn edge_inflated_decoys_do_not_outrank_targets() {
+        let mut hits: Vec<(PsmMatch, bool)> = Vec::new();
+        for i in 0..200 {
+            hits.push((queued(40.0 + (i % 50) as f32, 0), false));
+        }
+        for i in 0..3 {
+            hits.push((queued(15.0 + i as f32, 300), true));
+        }
+        for i in 0..60 {
+            hits.push((queued(10.0 + (i % 20) as f32 * 0.5, 0), true));
+        }
+        let accepted = |score_of: fn(&PsmMatch) -> f32| {
+            let mut v = hits.clone();
+            let q = tdc_q_values(&mut v, |h| score_of(&h.0), |h| h.1);
+            v.iter()
+                .zip(q.iter())
+                .filter(|(h, &qi)| !h.1 && qi <= 0.01)
+                .count()
+        };
+        assert_eq!(
+            accepted(|p| p.rank_score),
+            0,
+            "the edge key buries the targets"
+        );
+        assert_eq!(accepted(tdc_score), 200);
     }
 }

@@ -130,7 +130,7 @@ pub(crate) fn count_target_psms(
 
     // Step 3: collect best PSM per spectrum.
     struct BestPsm {
-        rank_score: f32,
+        score: f32,
         is_decoy: bool,
     }
 
@@ -143,59 +143,15 @@ pub(crate) fn count_target_psms(
             let cand_idx = psm.primary_candidate_idx() as usize;
             let cand = &candidates[cand_idx];
             best_psms.push(BestPsm {
-                rank_score: psm.rank_score,
+                score: crate::labeled::tdc_score(psm),
                 is_decoy: cand.is_decoy,
             });
         }
     }
 
-    // Step 4: sort by rank_score DESCENDING (highest RawScore = most confident
-    // first), now that the generating function / SpecEValue is removed.
-    best_psms.sort_by(|a, b| {
-        let av = if a.rank_score.is_nan() {
-            f32::NEG_INFINITY
-        } else {
-            a.rank_score
-        };
-        let bv = if b.rank_score.is_nan() {
-            f32::NEG_INFINITY
-        } else {
-            b.rank_score
-        };
-        bv.partial_cmp(&av)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.is_decoy.cmp(&b.is_decoy))
-    });
-
-    // Step 5: running TDC q-values.
-    let n = best_psms.len();
-    let mut raw_q = vec![1.0_f64; n];
-    let mut n_targets = 0u64;
-    let mut n_decoys = 0u64;
-    for (i, psm) in best_psms.iter().enumerate() {
-        if psm.is_decoy {
-            n_decoys += 1;
-        } else {
-            n_targets += 1;
-        }
-        raw_q[i] = n_decoys as f64 / n_targets.max(1) as f64;
-    }
-
-    // Step 6: monotone q-values.
-    let mut mono_q = raw_q;
-    let mut min_q = 1.0_f64;
-    for q in mono_q.iter_mut().rev() {
-        if *q < min_q {
-            min_q = *q;
-        }
-        *q = min_q;
-    }
-
-    // Step 6b: conservative tie handling — give every PSM in an equal-`rank_score`
-    // bucket the WORST q in that bucket so a tied decoy fails the whole bucket
-    // rather than letting target-before-decoy ordering accept a tied target.
-    // Must match `bootstrap_labels` exactly so the gate and the label path agree.
-    crate::labeled::assign_bucket_worst_q(&best_psms, &mut mono_q, |p| p.rank_score);
+    // Steps 4-6: target-decoy q-values, the walk `bootstrap_labels` uses, so the gate and
+    // the label path agree.
+    let mono_q = crate::labeled::tdc_q_values(&mut best_psms, |p| p.score, |p| p.is_decoy);
 
     // Step 7: count accepted targets.
     let count = best_psms

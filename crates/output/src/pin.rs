@@ -116,6 +116,14 @@ pub fn format_spec_id(
     }
 }
 
+/// The input file a row's `SpecId` names: the `<stem>/` prefix every search puts
+/// on spectrum titles (empty when the `SpecId` has none, e.g. a PIN written by
+/// another tool). Scan numbers repeat across the inputs of one search, so a
+/// rescorer that competes per input keys its groups on this.
+pub fn spec_id_run(spec_id: &str) -> &str {
+    spec_id.split_once('/').map_or("", |(run, _)| run)
+}
+
 /// The `SpecId` of every row the PIN writes for one spectrum, with the row's
 /// isotope offset and site evidence. Rows are emitted as [`write_pin`] emits
 /// them (isomers collapsed, ranked by score).

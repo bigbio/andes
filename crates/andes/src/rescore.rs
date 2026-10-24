@@ -35,7 +35,7 @@
 
 use std::collections::HashMap;
 
-use output::PercolatorPsm;
+use output::{spec_id_run as run_of, PercolatorPsm};
 use rayon::prelude::*;
 use search::tdc::{qvalues, ScoredLabel};
 
@@ -215,13 +215,6 @@ fn spectrum_key(spec_id: &str, scan: u32) -> &str {
         .map(|(i, _)| i)
         .find(|&i| numbers(&spec_id[i + sep.len()..]))
         .map_or(spec_id, |i| &spec_id[..i])
-}
-
-/// The input file a row's SpecId names: the `<stem>/` prefix every search puts
-/// on spectrum titles (empty when the SpecId has none, e.g. a PIN written by
-/// another tool, where ScanNr and ExpMass alone form the group).
-fn run_of(spec_id: &str) -> &str {
-    spec_id.split_once('/').map_or("", |(run, _)| run)
 }
 
 fn fnv1a(s: &str) -> u64 {

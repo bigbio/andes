@@ -55,6 +55,7 @@ use search::search_params::SearchParams;
 use crate::percolator::PercolatorPsm;
 use crate::pin::{
     exp_mass_text, feature_value_type, format_feature_value, format_spec_id, psm_feature_values,
+    spec_id_run,
 };
 use crate::row_context::{emitted_rows, resolve_accession};
 
@@ -87,7 +88,8 @@ const CREATOR: &str = "andes";
 /// identical to the pre-rescore output (PEP null, no q-value entry). The join key
 /// is reconstructed via [`crate::pin::format_spec_id`] so it matches the PIN's
 /// `SpecId` exactly. Rows whose SpecId is in `excluded` (knockoff PSMs, never
-/// reported) are left out of the bundle.
+/// reported) are left out of the bundle. `competition` is the scope of the
+/// rescorer's target-decoy competition groups (used with `rescore_decoys`).
 #[allow(clippy::too_many_arguments)]
 pub fn write_qpx(
     out_dir: &Path,
@@ -102,6 +104,7 @@ pub fn write_qpx(
     run_ends: &[usize],
     rescore: Option<&HashMap<String, PercolatorPsm>>,
     rescore_decoys: Option<&HashSet<String>>,
+    competition: Competition,
     excluded: &HashSet<String>,
 ) -> std::io::Result<()> {
     if run_ends.len() != primary_ms_run_paths.len()
@@ -127,7 +130,7 @@ pub fn write_qpx(
     // rescore is off, keeping that path identical.
     let mut competed_away = match rescore {
         Some(m) => audit_rescore_join(
-            &rescore_rows(spectra, queues, candidates),
+            &rescore_rows(spectra, queues, candidates, competition),
             m,
             rescore_decoys,
         )?,
@@ -404,14 +407,25 @@ fn psms_schema() -> Arc<Schema> {
 
 // ── psms.parquet builder ──────────────────────────────────────────────────────
 
+/// The scope of the rescorer's target-decoy competition groups.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Competition {
+    /// Rows of every input with the same `ScanNr` and `ExpMass` text compete.
+    AcrossInputs,
+    /// Rows compete only within their own input: scan numbers repeat across
+    /// the inputs of one search, so the same `ScanNr` and `ExpMass` text in two
+    /// inputs are two spectra (the native rescorer).
+    PerInput,
+}
+
 /// One emitted PSM row as the Percolator join sees it.
 struct RescoreRow {
     /// The PIN `SpecId` (Percolator's `PSMId`).
     spec_id: String,
     is_decoy: bool,
-    /// Percolator's target-decoy competition group: the PIN `ScanNr` and the
-    /// `ExpMass` text.
-    group: (i32, String),
+    /// The target-decoy competition group: the input file (empty when the
+    /// competition spans inputs), the PIN `ScanNr` and the `ExpMass` text.
+    group: (String, i32, String),
 }
 
 /// Validate the Percolator (`--rescore`) join and return the rows, target and
@@ -423,8 +437,8 @@ struct RescoreRow {
 /// would otherwise be written with a null q-value). Decoys are exempt.
 ///
 /// One exception: with target-decoy competition (`-Y`), Percolator keeps one
-/// PSM per scan/`ExpMass` group and writes it to the target or the decoy result
-/// file; the other rows of the group appear in neither. When the decoy results
+/// PSM per scan/`ExpMass` group (per input file, for [`Competition::PerInput`])
+/// and writes it to the target or the decoy result file; the other rows of the group appear in neither. When the decoy results
 /// are given, a missing target row is accepted as competed away iff exactly one
 /// row of its group is present in the target or decoy results (the group's
 /// winner). A group with no result, or with several (no competition there),
@@ -440,7 +454,7 @@ fn audit_rescore_join(
     let present = |r: &RescoreRow| {
         rescore.contains_key(&r.spec_id) || decoys.is_some_and(|d| d.contains(&r.spec_id))
     };
-    let mut winners: HashMap<&(i32, String), usize> = HashMap::new();
+    let mut winners: HashMap<&(String, i32, String), usize> = HashMap::new();
     if decoys.is_some() {
         for r in rows.iter().filter(|r| present(r)) {
             *winners.entry(&r.group).or_insert(0) += 1;
@@ -493,6 +507,7 @@ fn rescore_rows(
     spectra: &[Spectrum],
     queues: &[TopNQueue],
     candidates: &[Candidate],
+    competition: Competition,
 ) -> Vec<RescoreRow> {
     let mut rows = Vec::new();
     for (spec_idx, queue) in queues.iter().enumerate() {
@@ -514,10 +529,19 @@ fn rescore_rows(
         for (hit, psm) in psms.iter().enumerate() {
             let cand = &candidates[psm.primary_candidate_idx() as usize];
             let precursor_mz = psm.precursor_mz_override.unwrap_or(spec.precursor_mz);
+            let spec_id = format_spec_id(&spec_id_str, scan_num, ranks[hit], hit, multi_row);
+            let run = match competition {
+                Competition::AcrossInputs => String::new(),
+                Competition::PerInput => spec_id_run(&spec_id).to_string(),
+            };
             rows.push(RescoreRow {
-                spec_id: format_spec_id(&spec_id_str, scan_num, ranks[hit], hit, multi_row),
+                spec_id,
                 is_decoy: cand.is_decoy,
-                group: (scan_num, exp_mass_text(precursor_mz, psm.charge_used)),
+                group: (
+                    run,
+                    scan_num,
+                    exp_mass_text(precursor_mz, psm.charge_used),
+                ),
             });
         }
     }
@@ -1199,7 +1223,7 @@ mod rescore_join_tests {
         RescoreRow {
             spec_id: id.to_string(),
             is_decoy,
-            group: (scan, exp_mass.to_string()),
+            group: (String::new(), scan, exp_mass.to_string()),
         }
     }
 
@@ -1214,6 +1238,41 @@ mod rescore_join_tests {
         // Decoy results do not excuse a target whose group has no result at all.
         let err = audit_rescore_join(&emitted, &map, Some(&HashSet::new())).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    /// Rows of two inputs sharing a scan number and `ExpMass` text: each input's
+    /// group has its own winner, so the groups are read per input.
+    #[test]
+    fn rescore_join_reads_groups_per_input() {
+        let in_run = |run: &str, id: &str, is_decoy: bool| RescoreRow {
+            spec_id: format!("{run}/{id}"),
+            is_decoy,
+            group: (run.to_string(), 7, "900.25".to_string()),
+        };
+        let emitted = vec![
+            in_run("a", "s7_7_1", false),
+            in_run("a", "s7_7_2", false),
+            in_run("b", "s7_7_1", true),
+            in_run("b", "s7_7_2", false),
+        ];
+        let mut map = HashMap::new();
+        map.insert("a/s7_7_1".to_string(), psm("a/s7_7_1"));
+        let decoys: HashSet<String> = ["b/s7_7_1".to_string()].into();
+        let away = audit_rescore_join(&emitted, &map, Some(&decoys)).unwrap();
+        let mut away: Vec<&str> = away.iter().map(String::as_str).collect();
+        away.sort();
+        assert_eq!(away, ["a/s7_7_2", "b/s7_7_2"]);
+
+        // The same rows read as one group: two winners, so no competition there.
+        let merged: Vec<RescoreRow> = emitted
+            .iter()
+            .map(|r| RescoreRow {
+                spec_id: r.spec_id.clone(),
+                is_decoy: r.is_decoy,
+                group: (String::new(), 7, "900.25".to_string()),
+            })
+            .collect();
+        assert!(audit_rescore_join(&merged, &map, Some(&decoys)).is_err());
     }
 
     #[test]

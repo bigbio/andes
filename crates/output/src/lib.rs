@@ -23,13 +23,13 @@ pub mod tsv;
 pub use tsv::{write_tsv, write_tsv_to};
 
 pub mod pin;
-pub use pin::{emitted_row_evidence, format_spec_id, write_pin, write_pin_to};
+pub use pin::{emitted_row_evidence, format_spec_id, spec_id_run, write_pin, write_pin_to};
 
 pub mod stats;
 pub use stats::{write_statistics_log, RunStatistics};
 
 pub mod qpx;
-pub use qpx::write_qpx;
+pub use qpx::{write_qpx, Competition};
 
 pub mod rt_wiring;
 pub use rt_wiring::populate_rt_features;

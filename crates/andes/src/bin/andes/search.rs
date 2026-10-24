@@ -2432,6 +2432,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `-Y`, and the native rescorer) they let the QPX join tell a target that
     // lost its scan/ExpMass group from one whose join drifted.
     let mut rescore_decoys: Option<std::collections::HashSet<String>> = None;
+    // Where the rescorer's competition groups end: Percolator's span the inputs, the
+    // native rescorer competes within each input.
+    let mut rescore_competition = output::Competition::AcrossInputs;
     // The rescorer's decoy PSMs with their scores, for FDR within each class.
     let mut rescore_decoy_psms: std::collections::HashMap<String, output::PercolatorPsm> =
         std::collections::HashMap::new();
@@ -2491,6 +2494,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // Like Percolator with -Y: the winning decoys tell the QPX join
             // which target rows lost their scan/ExpMass group.
             rescore_decoys = Some(all.decoys.keys().cloned().collect());
+            rescore_competition = output::Competition::PerInput;
             rescore_decoy_psms = all.decoys;
             if cli.mbr {
                 mbr_source = "the native rescoring result".to_string();
@@ -2801,6 +2805,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &run_ends,
             rescore_map.as_ref(),
             rescore_decoys.as_ref(),
+            rescore_competition,
             &knockoff_rows,
         ) {
             Ok(()) => eprintln!("Wrote QPX bundle: {}", parquet_dir.display()),

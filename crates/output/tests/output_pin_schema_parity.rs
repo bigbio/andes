@@ -183,8 +183,17 @@ fn rust_pin_rows_have_at_least_header_column_count() {
         .filter_map(|r| r.ok())
         .collect();
 
-    let (queues, candidates) =
-        match_spectra_out_of_core(&spectra, &idx, &params, &scorer, 0.5, "XXX_").expect("search");
+    let cache_dir = tempfile::tempdir().expect("cache dir");
+    let (queues, candidates) = match_spectra_out_of_core(
+        &spectra,
+        &idx,
+        &params,
+        &scorer,
+        0.5,
+        "XXX_",
+        cache_dir.path(),
+    )
+    .expect("search");
 
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let rust_pin_path = tmp_dir.path().join("bsa.pin");

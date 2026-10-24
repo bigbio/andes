@@ -82,7 +82,7 @@ the file; use `--model-store` plus `--model` for an unbundled model.
 | `--precursor-cal` | enum | `off` | `off`, `auto`, `on`. A pre-pass learns a ppm shift from confident PSMs and tightens the precursor tolerance; `auto` skips it on small samples. Off by default: on the benchmark sets the pre-pass took 9–17% of the run and never fired, and where it fired (UPS1, larger sample) the tightened window lost 7.6% of PSMs. Skipped (with a warning) on `.raw` and `.d`. | Java `-precursorCal auto\|on\|off` |
 
 **Candidate retrieval is automatic.** andes builds the candidate
-index out-of-core (cached as `andes-candidx-<hash>.bin` in the system temp directory, ~150–250 MB
+index out-of-core (cached as `andes-candidx-<hash>.bin` in `--index-cache-dir` (default: the directory of the output files), ~90–250 MB
 on the benchmark databases, reused by later runs on the same database and settings) and retrieves
 the 100 candidates whose singly-charged b/y ions best match each spectrum (at least 3 matched).
 On Astral this gave +22.2% PSMs over full-window enumeration at an equal true FDP of 1.00%; on
@@ -104,6 +104,7 @@ its choice; `--fragment-index off` scores every candidate in each precursor wind
 |---|---|---|---|---|
 | `--threads` | usize | logical CPU count | Worker threads. | Java `-thread N` |
 | `--ms-level` | u8 | `2` | MS level to search in mzML. `.raw`/`.d`, MGF and `--chimeric` always search MS2. | — |
+| `--index-cache-dir` | dir | output directory | Directory of the candidate-index cache (`andes-candidx-<key>.bin`), created if missing; config key `search.index_cache_dir`. A shared directory builds the index once for several tasks, a node-local one gives a cache per node. A directory that cannot be written is an error. | — |
 | `--max-spectra` | usize | `0` | Bench mode: first N MS2 spectra only (`0` = all); skips TSV output. | — |
 
 ### Output
@@ -691,6 +692,43 @@ search:
 glyco:
   enabled: true
 ```
+
+---
+
+## 1c. Splitting a search across cluster tasks
+
+One `andes search` run takes one parameter set. Files that need different settings (mods,
+tolerances, TMT against label-free) are separate runs, and the files of one settings group can
+go into one run (`--spectrum` repeated) or into several tasks of an array.
+
+**What each task pays again.** Before the first spectrum a task reads the database (0.1 s),
+builds the decoys and the `SearchIndex` (1 s), builds or opens the base-peptide index (2 s
+cold, 0.4 s cached) and loads the model (0.3–3 s); these are the times for databases of 26–32k
+proteins with 8 threads. The fragment-ion index is built per spectrum chunk from that chunk's
+spectra and cannot be shared between tasks; on a phospho search it is about two thirds of the
+run. Other per-run fixed work, such as the retention-time anchor fit of `--predict rt`, also
+repeats per task. Running the files of a group in one task pays this once, at the cost of a
+longer critical path and a peak memory that grows with the number of files in the task (the
+spectra of all its files are held until the PIN is written).
+
+**The index cache.** The base-peptide index is cached as `andes-candidx-<key>.bin` in
+`--index-cache-dir`, by default the directory of the output files; the directory is created if
+missing and a directory that cannot be written is an error. The key is a SHA-256 over the
+database content, digestion, fixed modifications and decoy settings, the cache format version
+and the andes version, so it is the same on every node and toolchain and a file written by
+another andes version is never reused. With a node-local directory every task builds its own
+file. Pass the same shared directory to all tasks and the file is built once: tasks that find
+the file missing take `<file>.lock`, one builds, the others wait and open the result. A lock
+whose modification time has not changed for 60 s (a builder that died) is taken over. A
+prebuilt shared file can also be copied to node-local storage and used through a node-local
+`--index-cache-dir`; the file is a plain mmap-able file and is read-only after the build.
+
+**Combining the tasks.** The PINs of tasks with the same settings have the same header and can be
+concatenated (the header once); `SpecId` carries the run name, so rows do not collide. Run
+Percolator once per settings group, not across groups with different search spaces: the
+`chargeN` columns follow the charge range, glyco PINs have another schema, and one Percolator over
+groups with different search spaces controls the FDR only overall. Combine groups at the
+peptide, protein or quantification level.
 
 ---
 

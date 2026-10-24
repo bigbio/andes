@@ -193,16 +193,15 @@ fn enumerate_protein_from_offset(
     // The Met-cleaved walk emits only spans that start at the new N-terminus.
     let n_term_only = seq_offset > 0;
 
-    // For ntt=0 (non-specific) with a non-NonSpecific enzyme, enumerate all
-    // valid-length spans without any cleavage constraint. This produces the
-    // same set as Enzyme::NonSpecific with ntt=2 (modulo missed-cleavage
-    // filtering — for ntt=0 we skip that since there are no "cleavage sites"
-    // to count between arbitrary span endpoints).
-    //
-    // Note: Enzyme::NonSpecific itself falls through to the normal cleavage-
-    // position loop below (which returns all positions 0..=n), preserving the
-    // existing missed-cleavage semantics that the NonSpecific tests exercise.
-    if ntt == 0 && !matches!(params.enzyme, Enzyme::NonSpecific) {
+    // A non-specific digest (ntt=0, or `Enzyme::NonSpecific` as the primary or an
+    // extra protease) emits every valid-length span. The missed-cleavage cap does
+    // not apply: every position is a cleavage site, so a span of length L has
+    // L - 1 internal sites and the cap would only act as a second length limit
+    // (with the default cap of 1 and `min_length` 8 it removed every candidate).
+    if ntt == 0
+        || params.enzyme == Enzyme::NonSpecific
+        || params.extra_enzymes.contains(&Enzyme::NonSpecific)
+    {
         let ctx = EmitCtx {
             sub_seq,
             seq,
@@ -419,8 +418,7 @@ fn emit_span(ctx: &EmitCtx<'_>, start: u32, end: u32, out: &mut Vec<Candidate>) 
 }
 
 /// Enumerate all valid-length spans starting in `starts` without cleavage
-/// constraints (ntt=0 path). Invoked when `num_tolerable_termini = 0` with a
-/// non-NonSpecific enzyme.
+/// constraints or a missed-cleavage cap (non-specific digest).
 fn enumerate_all_spans(ctx: &EmitCtx<'_>, starts: std::ops::Range<u32>, n: u32) -> Vec<Candidate> {
     let mut out = Vec::new();
     for start in starts {

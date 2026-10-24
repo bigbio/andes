@@ -126,27 +126,47 @@ fn nonspecific_enzyme_emits_every_length_valid_span() {
     p.enzyme = Enzyme::NonSpecific;
     p.min_length = 3;
     p.max_length = 6;
-    p.max_missed_cleavages = 0;
     p.max_variable_mods_per_peptide = 0;
-    let candidates: Vec<_> = enumerate_candidates(&idx, &p, "XXX").collect();
-    let _target_candidates: Vec<_> = candidates.iter().filter(|c| !c.is_decoy).collect();
-    // For NonSpecific, every cleavage position can pair. With seq length 6
-    // and missed=0, only ADJACENT cleavage positions form candidates.
-    // Cleavage positions = [0, 1, 2, 3, 4, 5, 6]; adjacent spans have length 1.
-    // None match length range 3-6, so 0 candidates with missed=0.
-    // Wait — that's wrong. Re-read the spec: missed cleavages means count
-    // of cleavage positions strictly between start and end. For NonSpecific
-    // every position is cleavable, so a length-3 span (start, start+3) has
-    // 2 internal cleavage positions, requiring missed_cleavages >= 2.
-    //
-    // So with missed=0 and NonSpecific, no length>1 spans are valid.
-    // Re-do: change params to missed=5 (high enough to allow any).
-    p.max_missed_cleavages = 5;
-    let candidates: Vec<_> = enumerate_candidates(&idx, &p, "XXX").collect();
-    let target_candidates: Vec<_> = candidates.iter().filter(|c| !c.is_decoy).collect();
-    // length 3: 4 starts; length 4: 3; length 5: 2; length 6: 1; total 10.
-    assert_eq!(target_candidates.len(), 10);
+    // The missed-cleavage cap is meaningless for a non-specific digest: the result
+    // is the same for a cap of 0 (a length-3 span has 2 internal sites), the
+    // default 1 and a cap larger than any span.
+    for missed in [0, 1, 5] {
+        p.max_missed_cleavages = missed;
+        let candidates: Vec<_> = enumerate_candidates(&idx, &p, "XXX").collect();
+        let target_candidates: Vec<_> = candidates.iter().filter(|c| !c.is_decoy).collect();
+        // length 3: 4 starts; length 4: 3; length 5: 2; length 6: 1; total 10.
+        assert_eq!(target_candidates.len(), 10, "max_missed_cleavages {missed}");
+    }
 }
+
+/// A non-specific protease among several makes the whole digest non-specific, so
+/// the cap is ignored there too.
+#[test]
+fn nonspecific_extra_enzyme_ignores_missed_cleavage_cap() {
+    let idx = make_index(b"AAAAAAAAAAAA");
+    let mut p = params(8, 11, 1);
+    p.enzyme = Enzyme::Trypsin;
+    p.extra_enzymes = vec![Enzyme::NonSpecific];
+    let n = enumerate_candidates(&idx, &p, "XXX").filter(|c| !c.is_decoy).count();
+    // 12 residues, lengths 8..=11: 5 + 4 + 3 + 2 starts.
+    assert_eq!(n, 14);
+}
+
+/// The HLA-I configuration (`--enzyme nonspecific --min-length 8 --max-length 11`)
+/// with the default missed-cleavage cap of 1 builds candidates.
+#[test]
+fn nonspecific_default_missed_cap_builds_candidates() {
+    let idx = make_index(b"AAAAAAAAAAAAAAAAAAAA");
+    let mut p = SearchParams::default_tryptic(aa_set());
+    p.enzyme = Enzyme::NonSpecific;
+    p.min_length = 8;
+    p.max_length = 11;
+    p.max_variable_mods_per_peptide = 0;
+    assert_eq!(p.max_missed_cleavages, 1);
+    let n = enumerate_candidates(&idx, &p, "XXX").filter(|c| !c.is_decoy).count();
+    assert!(n > 0, "no candidates for a non-specific digest");
+}
+
 
 #[test]
 fn missed_cleavages_increase_candidate_count() {
@@ -885,17 +905,12 @@ fn ntt_0_emits_all_spans() {
     );
 }
 
-/// ntt=0 with Trypsin should produce the same candidates as Enzyme::NonSpecific
-/// with ntt=2 — WHEN missed_cleavages is set high enough to allow all spans.
-///
-/// Note: NonSpecific with ntt=2 routes through the cleavage-position loop where
-/// every position is a cleavage site, so missed_cleavages acts as a filter.
-/// For the spans to match, set missed_cleavages >= max_length so all spans pass.
+/// ntt=0 with Trypsin produces the same candidates as Enzyme::NonSpecific with
+/// ntt=2: both are non-specific digests and neither applies the missed-cleavage cap.
 #[test]
 fn ntt_0_trypsin_matches_nonspecific_high_missed() {
     // Use a protein with no K/R (so trypsin has only [0, n] as cleavage positions).
-    // With ntt=0 + Trypsin, we emit all (start, end) pairs — no missed-cleavage filter.
-    // With NonSpecific + ntt=2 + high missed_cleavages, we also emit all pairs.
+    // Both emit all (start, end) pairs, with no missed-cleavage filter.
     let seq = b"AAAAAAAAAAAA"; // 12 residues, no K/R
     let idx = make_index(seq);
 
@@ -915,12 +930,6 @@ fn ntt_0_trypsin_matches_nonspecific_high_missed() {
         .count();
 
     // Both should emit all valid-length spans (start in 0..=9, lengths 3..=8).
-    // The NonSpecific path counts internal cleavage positions as missed, but with
-    // high missed budget all pass. The ntt=0 path has no cleavage constraint at all.
-    // For a protein with no K/R, Trypsin has cleavage positions [0, 12].
-    // ntt=0 + Trypsin: all (start, end) pairs, no filter.
-    // NonSpecific: every position is cleavage, missed = end - start - 1.
-    //   With missed_cleavages=10 and max_length=8: max missed = 7 → all length-8 spans pass.
     // Both should yield: sum of (n - len + 1) for len in 3..=8 = 10+9+8+7+6+5 = 45.
     assert_eq!(
         ntt0_count, 45,

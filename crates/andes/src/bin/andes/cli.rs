@@ -343,7 +343,9 @@ pub(crate) struct SearchArgs {
     #[arg(long, default_value = "trypsin")]
     pub(crate) enzyme: String,
 
-    /// Maximum number of missed cleavages per peptide.
+    /// Maximum number of missed cleavages per peptide. Not applied to a
+    /// non-specific digest (`--enzyme nonspecific` or `--enzyme-specificity
+    /// non-specific`), where every position is a cleavage site.
     #[arg(long, hide = true, default_value = "1")]
     pub(crate) max_missed_cleavages: u32,
 

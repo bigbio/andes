@@ -45,7 +45,7 @@ Native `.raw`/`.d` search MS2 only (MS3 reporter scans are filtered at load).
 | `--enzyme` | enum | `trypsin` | `trypsin`, `chymotrypsin`, `lysc`, `aspn`, `gluc`, `lysn`, `argc`, `alphalp`, `nocleavage`, `nonspecific` (alias `elastase`). A comma list (`gluc,trypsin`) uses every enzyme listed. | Java `-e` |
 | `--charge` | `MIN..MAX` | `2..5` | Charges tried when the spectrum has none. | *(no direct Java flag; set via param file in Java)* |
 | `--enzyme-specificity` | enum | `fully` | Tolerable termini: `fully` (Java `-ntt 2`), `semi` (`-ntt 1`), `non-specific` (`-ntt 0`). | Java `-ntt` |
-| `--max-missed-cleavages` | u32 | `1` | Missed cleavages per peptide. | Java `-maxMissedCleavages 1` |
+| `--max-missed-cleavages` | u32 | `1` | Missed cleavages per peptide. Not applied to a non-specific digest (`--enzyme nonspecific`, `--enzyme-specificity non-specific`), where every position is a cleavage site. | Java `-maxMissedCleavages 1` |
 | `--min-length` | u32 | `6` | Minimum peptide length. | Java `-minLength 6` |
 | `--max-length` | u32 | `50` | Maximum peptide length. | Java `-maxLength 40` |
 | `--top-n` | u32 | `10` | PSMs kept per spectrum (before positional isomers are collapsed in the output, see §3a). | Java `-n 10` |

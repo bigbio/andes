@@ -1,5 +1,5 @@
 //! Private scratch storage for a run's MS1 scans, as an MS1 table
-//! (`output::ms1_table`) in a temporary file. No run stays resident while
+//! (`output::ms1_table`) in a temporary file under `--temp-dir`. No run stays resident while
 //! Percolator trains; quantification loads one run at a time, and the
 //! `--quant-dir` artifact `<stem>.ms1.parquet` is a copy of this file.
 use std::path::Path;
@@ -13,13 +13,15 @@ pub(crate) struct Ms1Cache {
 }
 
 impl Ms1Cache {
-    /// Writes `index` of run `run` to a new temporary MS1 table.
-    pub(super) fn store(index: &Ms1RunIndex, run: &str) -> Result<Self, String> {
+    /// Writes `index` of run `run` to a new temporary MS1 table in `dir`
+    /// (created if missing).
+    pub(super) fn store(index: &Ms1RunIndex, run: &str, dir: &Path) -> Result<Self, String> {
+        crate::cli::ensure_scratch_dir(dir)?;
         let file = tempfile::Builder::new()
             .prefix("andes-ms1-")
             .suffix(".ms1.parquet")
-            .tempfile()
-            .map_err(|e| e.to_string())?;
+            .tempfile_in(dir)
+            .map_err(|e| crate::cli::scratch_dir_error(dir, &e))?;
         write_ms1(file.as_file(), run, index)
             .map_err(|e| format!("{}: {e}", file.path().display()))?;
         Ok(Self { file })
@@ -87,8 +89,10 @@ mod tests {
     #[test]
     fn lossless_repeatable_round_trip_and_cleanup() {
         let idx = index();
-        let cache = Ms1Cache::store(&idx, "run").unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let cache = Ms1Cache::store(&idx, "run", scratch.path()).unwrap();
         let path = cache.file.path().to_owned();
+        assert_eq!(path.parent(), Some(scratch.path()));
         for _ in 0..2 {
             assert_same(&cache.load().unwrap(), &idx);
         }
@@ -98,9 +102,10 @@ mod tests {
 
     #[test]
     fn empty_and_truncated_caches() {
-        let empty = Ms1Cache::store(&Ms1RunIndex::default(), "e").unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let empty = Ms1Cache::store(&Ms1RunIndex::default(), "e", scratch.path()).unwrap();
         assert!(empty.load().unwrap().is_empty());
-        let cache = Ms1Cache::store(&index(), "run").unwrap();
+        let cache = Ms1Cache::store(&index(), "run", scratch.path()).unwrap();
         cache.file.as_file().set_len(25).unwrap();
         let e = cache.load().unwrap_err();
         assert!(e.contains(".ms1.parquet"), "{e}");
@@ -111,7 +116,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("run.ms1.parquet");
         let idx = index();
-        let cache = Ms1Cache::store(&idx, "run").unwrap();
+        let cache = Ms1Cache::store(&idx, "run", dir.path()).unwrap();
         cache.persist(&path).unwrap();
         assert!(!partial_path(&path).exists());
         assert_eq!(
@@ -122,5 +127,17 @@ mod tests {
         let bad = dir.path().join("missing").join("x.ms1.parquet");
         let e = cache.persist(&bad).unwrap_err();
         assert!(e.contains("x.ms1.parquet"), "{e}");
+    }
+
+    /// A scratch directory that cannot be created is an error naming the flag.
+    #[test]
+    fn unwritable_scratch_dir_is_an_error_naming_the_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+        let e = Ms1Cache::store(&index(), "run", &blocker.join("sub"))
+            .err()
+            .expect("must fail");
+        assert!(e.contains("--temp-dir"), "{e}");
     }
 }

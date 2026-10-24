@@ -58,6 +58,7 @@ pub struct IoCfg {
     pub output_pin: Option<PathBuf>,
     pub output_tsv: Option<PathBuf>,
     pub output_parquet: Option<PathBuf>,
+    pub temp_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -313,6 +314,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set_opt!("output_pin", output_pin, cfg.io.output_pin);
     set_opt!("output_tsv", output_tsv, cfg.io.output_tsv);
     set_opt!("output_parquet", output_parquet, cfg.io.output_parquet);
+    set_opt!("temp_dir", temp_dir, cfg.io.temp_dir);
 
     // ── search ──
     set_parsed!(
@@ -1039,6 +1041,16 @@ glyco:
         let a = applied(yaml, &["--index-cache-dir", "from_cli"]).unwrap();
         assert_eq!(a.index_cache_dir, Some(PathBuf::from("from_cli")));
         assert_eq!(applied("{}", &[]).unwrap().index_cache_dir, None);
+
+        let yaml = "io:\n  temp_dir: scratch\n";
+        assert_eq!(
+            applied(yaml, &[]).unwrap().temp_dir,
+            Some(PathBuf::from("scratch"))
+        );
+        assert_eq!(
+            applied(yaml, &["--temp-dir", "cli"]).unwrap().temp_dir,
+            Some(PathBuf::from("cli"))
+        );
     }
 
     /// The shipped `config.example.yaml` must parse against the current schema, so

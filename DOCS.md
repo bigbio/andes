@@ -104,6 +104,7 @@ its choice; `--fragment-index off` scores every candidate in each precursor wind
 |---|---|---|---|---|
 | `--threads` | usize | logical CPU count | Worker threads. | Java `-thread N` |
 | `--ms-level` | u8 | `2` | MS level to search in mzML. `.raw`/`.d`, MGF and `--chimeric` always search MS2. | — |
+| `--temp-dir` | dir | output directory | Directory of the run's private temporary files (MS1 scans between searching and quantification, the `--mbr` directory without `--quant-dir`, the PIN of `--keep-pin false`); created if missing, emptied at exit; config key `io.temp_dir`. An unwritable directory is an error. | — |
 | `--index-cache-dir` | dir | output directory | Directory of the candidate-index cache (`andes-candidx-<key>.bin`), created if missing; config key `search.index_cache_dir`. A shared directory builds the index once for several tasks, a node-local one gives a cache per node. A directory that cannot be written is an error. | — |
 | `--max-spectra` | usize | `0` | Bench mode: first N MS2 spectra only (`0` = all); skips TSV output. | — |
 
@@ -545,7 +546,7 @@ when a pipeline (e.g. quantms) owns rescoring. `--fdr`/`--pep` alone are ignored
 | `--protein-fdr` | fraction | *(off)* | Protein-group q-value cutoff: the filtered TSV keeps only PSMs whose peptide counts for a group at or below it, and the proteoform table only families of such groups. `<stem>.protein_groups.tsv` is written either way ([protein groups](#protein-groups-and-protein-fdr)). With `--mbr --output-parquet`, the QPX pg and feature views keep the groups at or below it, 0.01 unless given. |
 | `--pep` | fraction | *(off)* | *(advanced)* PEP threshold, ANDed with `--fdr` (and with `--quant-fdr` for quantification targets and `--mbr` donors). |
 | `--percolator-bin` / `--percolator-docker` / `--percolator-image` / `--percolator-args` | — | auto | *(advanced)* Backend: `--percolator-bin`, else `$PATH`, else Docker; `--percolator-args` passes flags through. Percolator runs with target-decoy competition (`-Y`: the best PSM of each spectrum competes, and q-values come from the winners), as every andes benchmark was measured, and with `--num-threads` set to `--threads` unless `--percolator-args` sets it: about twice as fast as its default of three threads on a 16-core node, with the same result (the PSM count can differ by about 0.2% between thread counts). `--subset-max-train <N>` trains on N PSMs and is 5–10 times faster, but on an entrapment benchmark it raised the true FDP at q ≤ 0.01 from 1.00% to 1.09–1.16%, so it is not the default. |
-| `--keep-pin` | bool | `true` | *(advanced)* With `--rescore`/`--rescore-native` and no `--output-pin`: `true` writes the PIN (and Percolator's result files) as `<base>.pin`, where `<base>` is `--output-tsv`, else `--output-parquet`, else `./andes`; `false` uses a temporary PIN deleted at exit. An explicit `--output-pin` is always kept. |
+| `--keep-pin` | bool | `true` | *(advanced)* With `--rescore`/`--rescore-native` and no `--output-pin`: `true` writes the PIN (and Percolator's result files) as `<base>.pin`, where `<base>` is `--output-tsv`, else `--output-parquet`, else `./andes`; `false` uses a temporary PIN in `--temp-dir`, deleted at exit. An explicit `--output-pin` is always kept. |
 | `--predict` | list | `rt` | Predicted-spectrum and retention-time features added to the PIN (§3a, predicted features): `rt` (bundled andes-rt model), `ms2` (AlphaPeptDeep fragment intensities), `peptdeep-rt`, `deeplc-rt`, comma-separated, or `none`. They are Percolator features; andes computes no FDR from them. |
 | `--predictor-models` | dir | *(none)* | Directory with the exported AlphaPeptDeep (`peptdeep_mods.json`, `peptdeep_{ms2,rt}_dynamic.{json,onnx}`) and DeepLC (`deeplc_rt.{json,onnx}`) models that `ms2`, `peptdeep-rt` and `deeplc-rt` load. A requested model that is missing stops the run before the search. |
 | `--predictor-backend` | `tract`\|`ort` | `tract` | *(advanced)* ONNX engine for those models: tract (pure Rust, built in) or ONNX Runtime (a build with `--features ort`; the runtime library is found through `ORT_DYLIB_PATH`). |
@@ -1328,7 +1329,8 @@ MS1 scans are stored losslessly in private temporary files after each input run 
 searched, then loaded one run at a time for quantification and precursor purity.
 They do not remain in memory while Percolator runs. Scratch space is approximately
 12 bytes per centroid plus scan headers; files are removed when the run exits
-normally or returns an error. Set `TMPDIR` to choose the scratch directory. A
+normally or returns an error. `--temp-dir` chooses the scratch directory (default: the
+directory of the output files). A
 single input run's MS1 scans still need to fit in memory while it is processed.
 
 ### Isobaric reporter ions (`--tmt <plex>`)
@@ -1785,11 +1787,11 @@ version. With `--output-parquet`, the protein inference over the 30.6 million PS
 takes finalize to 25.8 minutes at 45.2 GB.
 
 `--mbr` without `--quant-dir` writes the per-run artifacts to a temporary directory (under
-`TMPDIR`): each run's `<stem>.ms1.parquet` (about 5–6 bytes per centroid; about 200 MB for an
+`--temp-dir`, by default next to the output): each run's `<stem>.ms1.parquet` (about 5–6 bytes per centroid; about 200 MB for an
 Orbitrap run with 38 million MS1 centroids) and `<stem>.ms2.parquet` (at most 100 centroids
 per MS2 scan) plus its tables. For large runs pass
 `--quant-dir` on a disk with room. Any search that quantifies also keeps a temporary copy of
-each run's MS1 table under `TMPDIR` until quantification ends. In-process, the stages run
+each run's MS1 table under `--temp-dir` until quantification ends. In-process, the stages run
 after every search output is written and the search state is freed, one run's MS1 at a time.
 
 `--mbr` is label-free only and is refused with `--tmt`. With `--mbr --output-parquet`,

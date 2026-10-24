@@ -313,6 +313,14 @@ pub(crate) struct SearchArgs {
     #[arg(long = "index-cache-dir", value_name = "DIR")]
     pub(crate) index_cache_dir: Option<PathBuf>,
 
+    /// Directory of the run's private temporary files, created if missing and
+    /// emptied at exit: the MS1 scans kept between searching and
+    /// quantification, the directory of `--mbr` without `--quant-dir`, and the
+    /// PIN of `--rescore` with `--keep-pin false`. Default: the directory of the
+    /// output files. A directory that cannot be written is an error.
+    #[arg(long = "temp-dir", value_name = "DIR")]
+    pub(crate) temp_dir: Option<PathBuf>,
+
     /// Precursor mass tolerance as `VALUE+unit`. Accepts ppm (e.g. `20ppm`,
     /// high-res) or Da (e.g. `0.02da`/`0.02Da`, low-res precursor selection).
     /// Default `20ppm`.
@@ -1580,10 +1588,10 @@ pub(crate) fn parse_positive_tol(s: &str) -> Result<f64, String> {
     Ok(v)
 }
 
-/// The candidate-index cache directory: `--index-cache-dir` when given, else
-/// the directory of `output` (the output prefix or file), so the default does
+/// A directory option (`--index-cache-dir`, `--temp-dir`): the flag when given,
+/// else the directory of `output` (the output prefix or file), so the default does
 /// not depend on the environment.
-pub(crate) fn index_cache_dir(flag: Option<&Path>, output: &Path) -> PathBuf {
+pub(crate) fn dir_or_output_dir(flag: Option<&Path>, output: &Path) -> PathBuf {
     match flag {
         Some(dir) => dir.to_path_buf(),
         None => match output.parent() {
@@ -1591,6 +1599,19 @@ pub(crate) fn index_cache_dir(flag: Option<&Path>, output: &Path) -> PathBuf {
             _ => PathBuf::from("."),
         },
     }
+}
+
+/// Creates the scratch directory `dir`; an error names `--temp-dir`.
+pub(crate) fn ensure_scratch_dir(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| scratch_dir_error(dir, &e))
+}
+
+/// The error for a scratch directory that cannot be created or written.
+pub(crate) fn scratch_dir_error(dir: &Path, e: &dyn std::fmt::Display) -> String {
+    format!(
+        "cannot create temporary files in {} ({e}); pass --temp-dir with a writable directory",
+        dir.display()
+    )
 }
 
 /// Parse `--precursor-cal` value. Accepts auto|on|off.
@@ -1786,13 +1807,13 @@ mod mbr_fdr_default_tests {
 }
 
 #[cfg(test)]
-mod index_cache_dir_tests {
+mod dir_or_output_dir_tests {
     use super::*;
 
     #[test]
     fn the_flag_wins() {
         assert_eq!(
-            index_cache_dir(Some(Path::new("/shared")), Path::new("out/run.pin")),
+            dir_or_output_dir(Some(Path::new("/shared")), Path::new("out/run.pin")),
             PathBuf::from("/shared")
         );
     }
@@ -1800,11 +1821,11 @@ mod index_cache_dir_tests {
     #[test]
     fn the_default_is_the_output_directory() {
         assert_eq!(
-            index_cache_dir(None, Path::new("results/run.pin")),
+            dir_or_output_dir(None, Path::new("results/run.pin")),
             PathBuf::from("results")
         );
         assert_eq!(
-            index_cache_dir(None, Path::new("/data/out/run")),
+            dir_or_output_dir(None, Path::new("/data/out/run")),
             PathBuf::from("/data/out")
         );
     }
@@ -1812,7 +1833,7 @@ mod index_cache_dir_tests {
     #[test]
     fn a_bare_output_name_means_the_working_directory() {
         assert_eq!(
-            index_cache_dir(None, Path::new("run.pin")),
+            dir_or_output_dir(None, Path::new("run.pin")),
             PathBuf::from(".")
         );
     }

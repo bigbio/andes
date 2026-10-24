@@ -744,7 +744,7 @@ pub(crate) fn run_train_from_search(
                 &seed_scorer,
                 &search_params,
                 args.train_fdr,
-                &crate::cli::index_cache_dir(args.index_cache_dir.as_deref(), &args.out_store),
+                &crate::cli::dir_or_output_dir(args.index_cache_dir.as_deref(), &args.out_store),
             )
             .map_err(|e| format!("bootstrap_labels: {e}"))?
         };
@@ -1593,7 +1593,7 @@ pub(crate) fn run_train_update(
             &current_scorer,
             &search_params,
             args.train_fdr,
-            &crate::cli::index_cache_dir(args.index_cache_dir.as_deref(), &args.out_store),
+            &crate::cli::dir_or_output_dir(args.index_cache_dir.as_deref(), &args.out_store),
         )
         .map_err(|e| format!("bootstrap_labels: {e}"))?;
         eprintln!("train update: {} confident labels", labels.len());
@@ -1686,7 +1686,7 @@ pub(crate) fn run_train_update(
             &candidate_scorer,
             &search_params,
             args.train_fdr,
-            &crate::cli::index_cache_dir(args.index_cache_dir.as_deref(), &args.out_store),
+            &crate::cli::dir_or_output_dir(args.index_cache_dir.as_deref(), &args.out_store),
         )
         .map_err(|e| format!("evaluate_candidate: {e}"))?;
 

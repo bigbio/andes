@@ -348,7 +348,9 @@ impl<'a> PreparedSearch<'a> {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!(
-                    "the digest built no candidate peptides (enzyme {}, extra enzymes {},                      length {}..{}, max missed cleavages {}, termini {}); check --enzyme,                      --min-length, --max-length, --max-missed-cleavages and the database",
+                    "the digest built no candidate peptides (enzyme {}, extra enzymes {}, \
+                     length {}..{}, max missed cleavages {}, termini {}); check --enzyme, \
+                     --min-length, --max-length, --max-missed-cleavages and the database",
                     params.enzyme.name(),
                     params.extra_enzymes.len(),
                     params.min_length,

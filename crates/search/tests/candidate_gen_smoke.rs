@@ -147,7 +147,9 @@ fn nonspecific_extra_enzyme_ignores_missed_cleavage_cap() {
     let mut p = params(8, 11, 1);
     p.enzyme = Enzyme::Trypsin;
     p.extra_enzymes = vec![Enzyme::NonSpecific];
-    let n = enumerate_candidates(&idx, &p, "XXX").filter(|c| !c.is_decoy).count();
+    let n = enumerate_candidates(&idx, &p, "XXX")
+        .filter(|c| !c.is_decoy)
+        .count();
     // 12 residues, lengths 8..=11: 5 + 4 + 3 + 2 starts.
     assert_eq!(n, 14);
 }
@@ -163,10 +165,11 @@ fn nonspecific_default_missed_cap_builds_candidates() {
     p.max_length = 11;
     p.max_variable_mods_per_peptide = 0;
     assert_eq!(p.max_missed_cleavages, 1);
-    let n = enumerate_candidates(&idx, &p, "XXX").filter(|c| !c.is_decoy).count();
+    let n = enumerate_candidates(&idx, &p, "XXX")
+        .filter(|c| !c.is_decoy)
+        .count();
     assert!(n > 0, "no candidates for a non-specific digest");
 }
-
 
 #[test]
 fn missed_cleavages_increase_candidate_count() {

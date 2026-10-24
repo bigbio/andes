@@ -1362,9 +1362,8 @@ mod tests {
             .unwrap()
             .expect("lock is free");
         std::thread::scope(|s| {
-            let waiter = s.spawn(|| {
-                MmapCandidateIndex::open_or_build(&path, &idx, &params, "XXX").unwrap()
-            });
+            let waiter =
+                s.spawn(|| MmapCandidateIndex::open_or_build(&path, &idx, &params, "XXX").unwrap());
             std::thread::sleep(std::time::Duration::from_millis(600));
             assert!(!waiter.is_finished(), "waiter must not build while locked");
             let mut f = std::fs::File::create(&path).unwrap();

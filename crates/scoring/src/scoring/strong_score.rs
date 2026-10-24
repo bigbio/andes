@@ -717,7 +717,9 @@ mod tests {
         let m = GbdtPeakModel {
             packed: Default::default(),
             n_features: crate::frag_features::N_FRAG_FEATURES as u32,
-            feature_names: crate::gbdt_eval::indexed_feature_names(crate::frag_features::N_FRAG_FEATURES as u32),
+            feature_names: crate::gbdt_eval::indexed_feature_names(
+                crate::frag_features::N_FRAG_FEATURES as u32,
+            ),
             apply_sigmoid: false,
             trees: vec![Tree {
                 feature: vec![-1], // single leaf node

@@ -250,7 +250,10 @@ mod tests {
     fn feature_names_follow_the_index_constants() {
         assert_eq!(FRAG_FEATURE_NAMES[FEAT_ION_TYPE], "ion_type");
         assert_eq!(FRAG_FEATURE_NAMES[FEAT_NCE], "nce");
-        assert_eq!(FRAG_FEATURE_NAMES[FEAT_NEAREST_MOD_DIST], "nearest_mod_dist");
+        assert_eq!(
+            FRAG_FEATURE_NAMES[FEAT_NEAREST_MOD_DIST],
+            "nearest_mod_dist"
+        );
         assert_eq!(FRAG_FEATURE_NAMES[FEAT_FRAG_CHARGE], "frag_charge");
         let mut sorted = FRAG_FEATURE_NAMES.to_vec();
         sorted.sort_unstable();

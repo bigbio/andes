@@ -208,11 +208,20 @@ mod tests {
 
     #[test]
     fn feature_names_extend_the_fragment_names() {
-        assert_eq!(&ION_FEATURE_NAMES[..N_FRAG_FEATURES], &FRAG_FEATURE_NAMES[..]);
+        assert_eq!(
+            &ION_FEATURE_NAMES[..N_FRAG_FEATURES],
+            &FRAG_FEATURE_NAMES[..]
+        );
         assert_eq!(ION_FEATURE_NAMES[FEAT_ION_RANK], "ion_rank");
         assert_eq!(ION_FEATURE_NAMES[FEAT_MASS_ERR_PPM], "mass_err_ppm");
-        assert_eq!(ION_FEATURE_NAMES[FEAT_COMPLEMENT_PRESENT], "complement_present");
-        assert_eq!(ION_FEATURE_NAMES[FEAT_COMPLEMENT_PPM_DELTA], "complement_ppm_delta");
+        assert_eq!(
+            ION_FEATURE_NAMES[FEAT_COMPLEMENT_PRESENT],
+            "complement_present"
+        );
+        assert_eq!(
+            ION_FEATURE_NAMES[FEAT_COMPLEMENT_PPM_DELTA],
+            "complement_ppm_delta"
+        );
         assert!(ION_FEATURE_NAMES.iter().all(|n| !n.is_empty()));
     }
 

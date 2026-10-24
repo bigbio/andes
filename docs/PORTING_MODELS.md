@@ -23,12 +23,14 @@ A null blob is legal, and a store written before a column existed reads as `None
 (`read.rs`, optional column reads), so adding a model kind does not break older stores.
 
 `GbdtPeakModel::from_bytes` (`crates/scoring/src/gbdt_eval.rs`) decodes the blob. Layout
-(little endian): magic `AGBD`, `u32` version (1), `u32 n_features`, `u32 flags`
+(little endian): magic `AGBD`, `u32` version (2), `u32 n_features`, `u32 flags`
 (bit 0: apply sigmoid to the tree sum), `u32 n_trees`; per tree `u32 n_nodes` followed by the
 arrays `feature` (i32, -1 marks a leaf), `threshold` (f32), `left` (i32), `right` (i32),
 `value` (f32, leaf output) and `default_left` (u8, 1 sends NaN left); then the calibration
-footer `u32 n_iso`, `iso_x` and `iso_y` (f32, empty means identity). `to_bytes` writes the same
-layout, so the format round-trips. Decoding validates each tree: all arrays share one length,
+footer `u32 n_iso`, `iso_x` and `iso_y` (f32, empty means identity); then the feature names
+`u32 n_names` (must equal `n_features`) and per name a `u32` byte length and UTF-8 bytes. Nothing
+may follow the names. `to_bytes` writes the same layout, so the format round-trips. Version 1
+blobs (no names) are rejected. Decoding validates each tree: all arrays share one length,
 and every internal node's children are in range and have a larger index than the node
 (pre-order layout).
 
@@ -66,24 +68,24 @@ these details right, none of which the decoder can detect:
 
 ### The feature contract
 
-`validate_n_features` (`gbdt_eval.rs`) is called when a store row is loaded
-(`read.rs`) and checks the blob's declared feature count against the extractor for the slot:
-`peak_features::N_FEATURES` (18), `frag_features::N_FRAG_FEATURES` (19),
-`ion_features::N_ION_FEATURES` (23). It checks nothing else. An ensemble whose features are
-in a different order loads cleanly and scores meaningless values, with finite output and no
-error. The order is defined only in source: `peak_features::FEATURE_NAMES` lists the 18 peak
-features, and the other two extractors document theirs in `frag_features.rs` and
-`ion_features.rs`.
+The blob carries the ordered names of its features (`GbdtPeakModel::feature_names`; index `i`
+is the feature the tree splits call `i`). `validate_features` (`gbdt_eval.rs`) is called when a
+store row is loaded (`read.rs`) and compares them, position by position, with the extractor
+for the slot:
 
-Remaining work, not done here: carry the ordered feature names with the blob and assert them
-against the extractor's names at load. That needs (1) a format extension, for example an
-optional names trailer after the calibration footer, which the decoder would read and
-`to_bytes` write only when present, so bundled blobs stay byte-identical; (2) the name lists
-for the fragment and rich-ion extractors, which do not exist as arrays; (3) the new field on
-`GbdtPeakModel`, which is constructed literally at about twenty sites including the trainer;
-and (4) the Python AGBD parser in `export_agbd_to_onnx.py`, which rejects bytes after the
-footer. Until then the converter's own test must pin the feature order, for example by
-scoring a fixture and comparing against the source library's predictions.
+| Slot | Names | Count |
+|---|---|---|
+| `gbdt_model` | `peak_features::FEATURE_NAMES` | 18 |
+| `frag_intensity_model` | `frag_features::FRAG_FEATURE_NAMES` | 19 |
+| `rich_ion_model` | `ion_features::ION_FEATURE_NAMES` | 23 (the 19 fragment names, then `ion_rank`, `mass_err_ppm`, `complement_present`, `complement_ppm_delta`) |
+
+A different count is reported as such; otherwise the error names the first differing position,
+the name the extractor produces and the name the blob has. An ensemble whose features are in
+a different order therefore fails at load. Names are required: the trainer writes them from the
+dataset it was given (`Dataset::feature_names`), and every bundled blob carries them. A
+converter must write the extractor's names in the extractor's order; the contract checks the
+labels, not what a feature means, so the fixture score comparison below is still the check that
+a ported model computes the same function.
 
 A golden test on a fixture, pinning the ported model's output, belongs with any importer.
 
@@ -94,7 +96,7 @@ Path A plus a nullable column and the plumbing that follows it:
 
 - the column in `store/schema.rs`, and a `None` default in the reader for stores without it
   (follow `rich_ion_model_bytes`: `read.rs` optional column read, `ManifestRow` field, decode
-  and `validate_n_features` against the new extractor);
+  and `validate_features` against the new extractor's name array);
 - a field on `scoring::Param` (`param_model.rs`);
 - the writers, which carry one blob per model per column (`store/write.rs`, `store/update.rs`);
 - the scoring code that consumes the model, and its feature extractor with a fixed feature

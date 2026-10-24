@@ -8,7 +8,7 @@
 //! The target `y` is `ln(obs_intensity / base_peak)`, the log-relative-intensity
 //! space the strong-score `intensity_signal` exponentiates back to linear.
 
-use scoring_crate::frag_features::{extract_frag_features, N_FRAG_FEATURES};
+use scoring_crate::frag_features::{extract_frag_features, FRAG_FEATURE_NAMES, N_FRAG_FEATURES};
 use scoring_crate::scoring::fragment_ions::predict_by_ions;
 use scoring_crate::scoring::scored_spectrum::ScoredSpectrum;
 use scoring_crate::RankScorer;
@@ -90,6 +90,7 @@ pub fn build_frag_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> Regressio
         y,
         groups,
         n_features,
+        feature_names: FRAG_FEATURE_NAMES.iter().map(|n| n.to_string()).collect(),
     }
 }
 

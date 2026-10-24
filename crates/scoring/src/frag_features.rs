@@ -32,6 +32,30 @@ pub const FEAT_NEAREST_MOD_DIST: usize = 17;
 pub const FEAT_FRAG_CHARGE: usize = 18;
 pub const N_FRAG_FEATURES: usize = 19;
 
+/// Ordered feature names; index == the `FEAT_*` constant above. The blob of a
+/// fragment-intensity model carries these and they are checked at load.
+pub const FRAG_FEATURE_NAMES: [&str; N_FRAG_FEATURES] = [
+    "ion_type",
+    "precursor_charge",
+    "nflank",
+    "cflank",
+    "proline_flank",
+    "pos_frac",
+    "pep_len",
+    "nflank_mod",
+    "cflank_mod",
+    "nce",
+    "n_basic",
+    "proton_mobility",
+    "basic_nflank",
+    "basic_cflank",
+    "hydro_nflank",
+    "hydro_cflank",
+    "total_mods",
+    "nearest_mod_dist",
+    "frag_charge",
+];
+
 /// Resolve the (N-side index, C-side index) of the two residues flanking
 /// the cleavage site for a b/y ion at 1-based `position` in a peptide of
 /// length `n`. Returns `None` for terminal/degenerate positions.
@@ -220,6 +244,18 @@ mod tests {
         };
         r[pos1 - 1] = r[pos1 - 1].clone().with_mod(m);
         Peptide::new(r, b'K', b'R')
+    }
+
+    #[test]
+    fn feature_names_follow_the_index_constants() {
+        assert_eq!(FRAG_FEATURE_NAMES[FEAT_ION_TYPE], "ion_type");
+        assert_eq!(FRAG_FEATURE_NAMES[FEAT_NCE], "nce");
+        assert_eq!(FRAG_FEATURE_NAMES[FEAT_NEAREST_MOD_DIST], "nearest_mod_dist");
+        assert_eq!(FRAG_FEATURE_NAMES[FEAT_FRAG_CHARGE], "frag_charge");
+        let mut sorted = FRAG_FEATURE_NAMES.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), N_FRAG_FEATURES, "names are distinct");
     }
 
     #[test]

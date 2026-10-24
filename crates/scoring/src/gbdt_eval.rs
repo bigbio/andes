@@ -1,6 +1,6 @@
 //! Hand-rolled struct-of-arrays GBDT evaluator (zero native deps).
 //!
-//! Decodes the `AGBD` v1 blob (produced offline by `training/gbdt/transcode.py`
+//! Decodes the `AGBD` v2 blob (produced offline by `training/gbdt/transcode.py`
 //! from a LightGBM binary classifier + scikit-learn IsotonicRegression) and
 //! evaluates it on a peptide-AGNOSTIC per-peak feature vector
 //! (`crate::peak_features`). Output is `log(s/(1-s))`, the additive LLR term the
@@ -13,8 +13,11 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use thiserror::Error;
 
 const MAGIC: &[u8; 4] = b"AGBD";
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 const FLAG_SIGMOID: u32 = 1;
+/// Upper bounds on the feature-name trailer, checked before allocating.
+const MAX_FEATURES: u32 = 100_000;
+const MAX_NAME_LEN: u32 = 1024;
 /// Clamp for the calibrated probability before taking the logit, so the LLR
 /// term stays finite (a degenerate 0 or 1 would give ±inf).
 const PROB_EPS: f32 = 1e-6;
@@ -34,6 +37,13 @@ pub enum GbdtError {
         kind: &'static str,
         expected: u32,
         got: u32,
+    },
+    #[error("GBDT feature-contract violation for {kind} model: feature {position} is named '{got}' in the blob but the evaluator extracts '{expected}'")]
+    FeatureNameMismatch {
+        kind: &'static str,
+        position: usize,
+        expected: String,
+        got: String,
     },
 }
 
@@ -135,6 +145,10 @@ impl Tree {
 #[derive(Debug, Clone)]
 pub struct GbdtPeakModel {
     pub n_features: u32,
+    /// Ordered feature names, one per feature (`feature_names.len() == n_features`);
+    /// index `i` is the feature the tree splits call `i`. Written in the blob's
+    /// trailer and checked against the extractor by [`Self::validate_features`].
+    pub feature_names: Vec<String>,
     pub apply_sigmoid: bool,
     pub trees: Vec<Tree>,
     pub iso_x: Vec<f32>,
@@ -144,10 +158,16 @@ pub struct GbdtPeakModel {
     pub packed: std::sync::OnceLock<PackedTrees>,
 }
 
+/// Placeholder names `f0..f{n-1}` for a model that is not bound to an extractor.
+pub fn indexed_feature_names(n: u32) -> Vec<String> {
+    (0..n).map(|i| format!("f{i}")).collect()
+}
+
 /// Equality is over the model itself, not whether its evaluation cache is built.
 impl PartialEq for GbdtPeakModel {
     fn eq(&self, other: &Self) -> bool {
         self.n_features == other.n_features
+            && self.feature_names == other.feature_names
             && self.apply_sigmoid == other.apply_sigmoid
             && self.trees == other.trees
             && self.iso_x == other.iso_x
@@ -398,9 +418,36 @@ impl GbdtPeakModel {
         let n_iso = checked_count(c.read_u32::<LittleEndian>()?, "n_iso", 10_000_000)?;
         let iso_x = read_f32_vec(&mut c, n_iso)?;
         let iso_y = read_f32_vec(&mut c, n_iso)?;
+        let n_names = c.read_u32::<LittleEndian>()?;
+        if n_names != n_features {
+            return Err(GbdtError::Malformed(format!(
+                "{n_names} feature names for {n_features} features"
+            )));
+        }
+        let n_names = checked_count(n_names, "feature name", MAX_FEATURES)?;
+        let mut feature_names = Vec::with_capacity(n_names);
+        for _ in 0..n_names {
+            let len = checked_count(
+                c.read_u32::<LittleEndian>()?,
+                "feature name length",
+                MAX_NAME_LEN,
+            )?;
+            let mut raw = vec![0u8; len];
+            c.read_exact(&mut raw)?;
+            feature_names.push(String::from_utf8(raw).map_err(|_| {
+                GbdtError::Malformed("feature name is not valid UTF-8".to_string())
+            })?);
+        }
+        if c.position() != bytes.len() as u64 {
+            return Err(GbdtError::Malformed(format!(
+                "{} trailing bytes after the feature names",
+                bytes.len() as u64 - c.position()
+            )));
+        }
         Ok(Self {
             packed: Default::default(),
             n_features,
+            feature_names,
             apply_sigmoid,
             trees,
             iso_x,
@@ -431,30 +478,48 @@ impl GbdtPeakModel {
             .unwrap();
         write_f32_vec(&mut b, &self.iso_x);
         write_f32_vec(&mut b, &self.iso_y);
+        b.write_u32::<LittleEndian>(self.feature_names.len() as u32)
+            .unwrap();
+        for name in &self.feature_names {
+            b.write_u32::<LittleEndian>(name.len() as u32).unwrap();
+            b.extend_from_slice(name.as_bytes());
+        }
         b
     }
 
-    /// Enforce the feature-count contract: the blob's declared `n_features`
-    /// must exactly equal the number of features the in-process extractor for
-    /// this model role produces. A skewed/wrong-slot blob otherwise scores
-    /// plausibly — `eval` reads missing feature slots as `NaN` and silently
-    /// descends `default_left`, yielding a finite but meaningless score with no
-    /// error. Call this once at load (see `model-train`'s store reader) so a
-    /// schema-mismatched model is rejected up front instead of mis-scoring.
+    /// Enforce the feature contract: the blob's ordered feature names must equal
+    /// the names of the in-process extractor for this model role, position by
+    /// position. A skewed or reordered blob otherwise scores plausibly: `eval`
+    /// reads a missing feature slot as `NaN` and a permuted feature as a
+    /// different quantity, yielding a finite but meaningless score with no
+    /// error. Call this once at load (see `model-train`'s store reader).
     ///
-    /// `kind` is a short role label used only in the error message
-    /// (`"peak"`, `"frag-intensity"`, `"rich-ion"`).
-    pub fn validate_n_features(
+    /// A count difference is reported as [`GbdtError::FeatureCountMismatch`],
+    /// otherwise the first differing position as
+    /// [`GbdtError::FeatureNameMismatch`]. `kind` is a short role label used
+    /// only in the error message (`"peak"`, `"frag-intensity"`, `"rich-ion"`).
+    pub fn validate_features(
         &self,
-        expected: usize,
+        expected: &[&str],
         kind: &'static str,
     ) -> Result<(), GbdtError> {
-        if self.n_features as usize != expected {
+        if self.n_features as usize != expected.len() || self.feature_names.len() != expected.len()
+        {
             return Err(GbdtError::FeatureCountMismatch {
                 kind,
-                expected: expected as u32,
+                expected: expected.len() as u32,
                 got: self.n_features,
             });
+        }
+        for (position, (want, got)) in expected.iter().zip(&self.feature_names).enumerate() {
+            if want != got {
+                return Err(GbdtError::FeatureNameMismatch {
+                    kind,
+                    position,
+                    expected: (*want).to_string(),
+                    got: got.clone(),
+                });
+            }
         }
         Ok(())
     }
@@ -608,6 +673,7 @@ mod tests {
         GbdtPeakModel {
             packed: Default::default(),
             n_features: 1,
+            feature_names: indexed_feature_names(1),
             apply_sigmoid: true,
             trees: vec![Tree {
                 feature: vec![0, -1, -1],
@@ -645,6 +711,7 @@ mod tests {
         let m = GbdtPeakModel {
             packed: Default::default(),
             n_features: 3,
+            feature_names: indexed_feature_names(3),
             apply_sigmoid: false,
             trees: vec![mk(0, 0.5, 1, -2.0, 1), mk(2, 1e-3, 0, 0.5, 0), leaf_only],
             iso_x: vec![],
@@ -767,28 +834,115 @@ mod tests {
         );
     }
 
+    fn named(names: &[&str]) -> GbdtPeakModel {
+        let mut m = toy_model();
+        m.n_features = names.len() as u32;
+        m.feature_names = names.iter().map(|n| n.to_string()).collect();
+        m
+    }
+
     #[test]
-    fn validate_n_features_enforces_exact_count() {
-        // toy_model declares n_features = 1.
-        let m = toy_model();
-        // Exact match passes.
-        assert!(m.validate_n_features(1, "peak").is_ok());
-        // Any other count is rejected (a wrong-slot / schema-skewed blob).
+    fn validate_features_accepts_the_same_names_in_the_same_order() {
+        let m = named(&["a", "b", "c"]);
+        assert!(m.validate_features(&["a", "b", "c"], "peak").is_ok());
+    }
+
+    #[test]
+    fn validate_features_rejects_a_count_difference() {
+        let m = named(&["a", "b", "c"]);
         assert!(matches!(
-            m.validate_n_features(18, "peak"),
+            m.validate_features(&["a", "b"], "peak"),
             Err(GbdtError::FeatureCountMismatch {
                 kind: "peak",
-                expected: 18,
-                got: 1
+                expected: 2,
+                got: 3
             })
         ));
         assert!(matches!(
-            m.validate_n_features(0, "rich-ion"),
+            m.validate_features(&[], "rich-ion"),
             Err(GbdtError::FeatureCountMismatch {
                 expected: 0,
-                got: 1,
+                got: 3,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn validate_features_names_the_first_differing_position() {
+        // Positions 1 and 2 are swapped; the first one is reported.
+        let m = named(&["a", "c", "b"]);
+        match m.validate_features(&["a", "b", "c"], "frag-intensity") {
+            Err(GbdtError::FeatureNameMismatch {
+                kind,
+                position,
+                expected,
+                got,
+            }) => {
+                assert_eq!(kind, "frag-intensity");
+                assert_eq!(position, 1);
+                assert_eq!(expected, "b");
+                assert_eq!(got, "c");
+            }
+            other => panic!("expected a name mismatch, got {other:?}"),
+        }
+        let msg = m
+            .validate_features(&["a", "b", "c"], "frag-intensity")
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("feature 1") && msg.contains("'c'") && msg.contains("'b'"));
+    }
+
+    #[test]
+    fn feature_names_round_trip_through_the_blob() {
+        let m = named(&["log_intensity", "mz", "mass_defect"]);
+        let back = GbdtPeakModel::from_bytes(&m.to_bytes()).expect("round trip");
+        assert_eq!(back.feature_names, m.feature_names);
+        assert_eq!(back, m);
+        assert_eq!(back.to_bytes(), m.to_bytes());
+    }
+
+    #[test]
+    fn blob_without_the_name_trailer_is_rejected() {
+        let m = toy_model();
+        let mut bytes = m.to_bytes();
+        // Drop the trailer (u32 count + one length-prefixed name): the blob now
+        // ends after the calibration footer, as a version-1 blob would.
+        let trailer = 4 + 4 + m.feature_names[0].len();
+        bytes.truncate(bytes.len() - trailer);
+        assert!(matches!(
+            GbdtPeakModel::from_bytes(&bytes),
+            Err(GbdtError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn name_count_must_equal_feature_count() {
+        let mut m = toy_model();
+        m.feature_names.push("extra".to_string());
+        assert!(matches!(
+            GbdtPeakModel::from_bytes(&m.to_bytes()),
+            Err(GbdtError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn trailing_bytes_after_the_names_are_rejected() {
+        let mut bytes = toy_model().to_bytes();
+        bytes.push(0);
+        assert!(matches!(
+            GbdtPeakModel::from_bytes(&bytes),
+            Err(GbdtError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn previous_format_version_is_rejected() {
+        let mut bytes = toy_model().to_bytes();
+        bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
+        assert!(matches!(
+            GbdtPeakModel::from_bytes(&bytes),
+            Err(GbdtError::BadVersion(1))
         ));
     }
 
@@ -798,6 +952,7 @@ mod tests {
         let bad = GbdtPeakModel {
             packed: Default::default(),
             n_features: 1,
+            feature_names: indexed_feature_names(1),
             apply_sigmoid: true,
             trees: vec![Tree {
                 feature: vec![0, -1], // node 0 internal, node 1 leaf

@@ -3388,6 +3388,7 @@ mod tests {
         let gbdt = GbdtPeakModel {
             packed: Default::default(),
             n_features: 1,
+            feature_names: crate::gbdt_eval::indexed_feature_names(1),
             apply_sigmoid: true,
             trees: vec![Tree {
                 feature: vec![-1], // leaf — no split needed

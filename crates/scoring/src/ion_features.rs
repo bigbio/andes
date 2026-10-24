@@ -2,7 +2,7 @@
 //! Single source of truth for train + serve (mirrors frag_features.rs). The
 //! chemistry block is reused verbatim from frag_features; the appended block
 //! encodes complement coherence + this ion's own match quality.
-use crate::frag_features::{extract_frag_features, N_FRAG_FEATURES};
+use crate::frag_features::{extract_frag_features, FRAG_FEATURE_NAMES, N_FRAG_FEATURES};
 use crate::scoring::fragment_ions::{predict_by_ions, IonKind};
 use crate::scoring::ScoredSpectrum;
 use model::peptide::Peptide;
@@ -12,6 +12,23 @@ pub const FEAT_MASS_ERR_PPM: usize = N_FRAG_FEATURES + 1;
 pub const FEAT_COMPLEMENT_PRESENT: usize = N_FRAG_FEATURES + 2;
 pub const FEAT_COMPLEMENT_PPM_DELTA: usize = N_FRAG_FEATURES + 3;
 pub const N_ION_FEATURES: usize = N_FRAG_FEATURES + 4;
+
+/// Ordered feature names; index == the `FEAT_*` constants above. The first
+/// [`N_FRAG_FEATURES`] are [`FRAG_FEATURE_NAMES`]. The blob of a rich-ion model
+/// carries these and they are checked at load.
+pub const ION_FEATURE_NAMES: [&str; N_ION_FEATURES] = {
+    let mut names = [""; N_ION_FEATURES];
+    let mut i = 0;
+    while i < N_FRAG_FEATURES {
+        names[i] = FRAG_FEATURE_NAMES[i];
+        i += 1;
+    }
+    names[FEAT_ION_RANK] = "ion_rank";
+    names[FEAT_MASS_ERR_PPM] = "mass_err_ppm";
+    names[FEAT_COMPLEMENT_PRESENT] = "complement_present";
+    names[FEAT_COMPLEMENT_PPM_DELTA] = "complement_ppm_delta";
+    names
+};
 pub const COMPLEMENT_PPM_SENTINEL: f32 = 1000.0;
 
 /// Signed ppm of an observed peak m/z `obs` relative to a theoretical m/z `theo`.
@@ -187,6 +204,16 @@ mod tests {
             .find(|i| i.kind == kind && i.position == position && i.charge == charge)
             .unwrap_or_else(|| panic!("ion {kind:?} {position} z{charge} not predicted"))
             .mz
+    }
+
+    #[test]
+    fn feature_names_extend_the_fragment_names() {
+        assert_eq!(&ION_FEATURE_NAMES[..N_FRAG_FEATURES], &FRAG_FEATURE_NAMES[..]);
+        assert_eq!(ION_FEATURE_NAMES[FEAT_ION_RANK], "ion_rank");
+        assert_eq!(ION_FEATURE_NAMES[FEAT_MASS_ERR_PPM], "mass_err_ppm");
+        assert_eq!(ION_FEATURE_NAMES[FEAT_COMPLEMENT_PRESENT], "complement_present");
+        assert_eq!(ION_FEATURE_NAMES[FEAT_COMPLEMENT_PPM_DELTA], "complement_ppm_delta");
+        assert!(ION_FEATURE_NAMES.iter().all(|n| !n.is_empty()));
     }
 
     #[test]

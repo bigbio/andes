@@ -164,8 +164,8 @@ fn fixture_tasks_cover_rescoring_and_tree_ensemble() {
 
     let agbd = fixtures().join("peak_gbdt.agbd");
     let bytes = fs::read(&agbd).unwrap();
-    assert!(bytes.starts_with(b"AGBD"), "peak_gbdt.agbd must be AGBD v1");
-    assert_eq!(&bytes[4..8], &1u32.to_le_bytes());
+    assert!(bytes.starts_with(b"AGBD"), "peak_gbdt.agbd must be an AGBD blob");
+    assert_eq!(&bytes[4..8], &2u32.to_le_bytes());
 }
 
 /// Placeholder gate for a future PeptDeep ONNX drop under `models/peptdeep/`.

@@ -30,17 +30,18 @@ FIX = ROOT / "fixtures"
 
 
 def write_agbd(path: Path, nfeat: int, flags: int, trees: list, iso_x=(), iso_y=()) -> None:
-    """Write AGBD v1 exactly as `GbdtPeakModel::to_bytes` does.
+    """Write AGBD v2 exactly as `GbdtPeakModel::to_bytes` does.
 
-    The blob ends with the calibration footer: `u32 n_iso`, then `n_iso` f32
-    `iso_x` values and `n_iso` f32 `iso_y` values. `n_iso = 0` is an
-    uncalibrated model.
+    After the trees comes the calibration footer: `u32 n_iso`, then `n_iso` f32
+    `iso_x` values and `n_iso` f32 `iso_y` values (`n_iso = 0` is an
+    uncalibrated model). The blob ends with the feature names `f0..f{nfeat-1}`:
+    `u32 count`, then per name a `u32` byte length and the UTF-8 bytes.
     """
     if len(iso_x) != len(iso_y):
         raise ValueError("iso_x and iso_y must have the same length")
     buf = bytearray()
     buf += b"AGBD"
-    buf += struct.pack("<IIII", 1, nfeat, flags, len(trees))
+    buf += struct.pack("<IIII", 2, nfeat, flags, len(trees))
     for t in trees:
         n = len(t["feature"])
         buf += struct.pack("<I", n)
@@ -53,6 +54,10 @@ def write_agbd(path: Path, nfeat: int, flags: int, trees: list, iso_x=(), iso_y=
     buf += struct.pack("<I", len(iso_x))
     buf += struct.pack(f"<{len(iso_x)}f", *iso_x)
     buf += struct.pack(f"<{len(iso_y)}f", *iso_y)
+    buf += struct.pack("<I", nfeat)
+    for i in range(nfeat):
+        name = f"f{i}".encode()
+        buf += struct.pack("<I", len(name)) + name
     path.write_bytes(buf)
 
 

@@ -10,7 +10,7 @@
 //! and serve features match by construction.
 
 use model::peptide::Peptide;
-use scoring_crate::ion_features::{extract_ion_features, N_ION_FEATURES};
+use scoring_crate::ion_features::{extract_ion_features, ION_FEATURE_NAMES, N_ION_FEATURES};
 use scoring_crate::scoring::fragment_ions::predict_by_ions;
 use scoring_crate::scoring::scored_spectrum::ScoredSpectrum;
 use scoring_crate::RankScorer;
@@ -87,6 +87,7 @@ pub fn build_ion_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> Dataset {
         y,
         groups,
         n_features,
+        feature_names: ION_FEATURE_NAMES.iter().map(|n| n.to_string()).collect(),
     }
 }
 

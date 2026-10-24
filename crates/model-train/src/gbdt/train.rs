@@ -39,6 +39,8 @@ pub struct Dataset {
     pub y: Vec<u8>,
     pub groups: Vec<u32>,
     pub n_features: usize,
+    /// Ordered feature names, one per column of `x`; written into the model.
+    pub feature_names: Vec<String>,
 }
 
 /// Hyper-parameters for gradient boosting.
@@ -278,6 +280,12 @@ fn shuffle_indices(indices: &mut [usize], rng: &mut u64) {
 pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakModel, TrainError> {
     let n_rows = ds.y.len();
     let nf = ds.n_features;
+    if ds.feature_names.len() != nf {
+        return Err(TrainError::Other(format!(
+            "{} feature names for {nf} features",
+            ds.feature_names.len()
+        )));
+    }
 
     // --- Hard gate: degenerate input (finding 3.6) -----------------------------
     // Previously these returned a deployable-looking empty model. Now they fail
@@ -285,6 +293,7 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
     let empty_classifier = || GbdtPeakModel {
         packed: Default::default(),
         n_features: nf as u32,
+        feature_names: ds.feature_names.clone(),
         apply_sigmoid: true,
         trees: vec![],
         iso_x: vec![],
@@ -627,6 +636,7 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
             move || GbdtPeakModel {
                 packed: Default::default(),
                 n_features: nf as u32,
+                feature_names: ds.feature_names.clone(),
                 apply_sigmoid: true,
                 trees: trees_for_fallback,
                 iso_x: vec![],
@@ -651,6 +661,7 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
     Ok(GbdtPeakModel {
         packed: Default::default(),
         n_features: nf as u32,
+        feature_names: ds.feature_names.clone(),
         apply_sigmoid: true,
         trees,
         iso_x,
@@ -670,6 +681,8 @@ pub struct RegressionDataset {
     pub y: Vec<f32>,
     pub groups: Vec<u32>,
     pub n_features: usize,
+    /// Ordered feature names, one per column of `x`; written into the model.
+    pub feature_names: Vec<String>,
 }
 
 /// Pearson correlation `r` and coefficient of determination `R² = 1 − SS_res/SS_tot`.
@@ -748,10 +761,17 @@ pub fn train_gbdt_regression(
 ) -> Result<GbdtPeakModel, TrainError> {
     let n_rows = ds.y.len();
     let nf = ds.n_features;
+    if ds.feature_names.len() != nf {
+        return Err(TrainError::Other(format!(
+            "{} feature names for {nf} features",
+            ds.feature_names.len()
+        )));
+    }
 
     let empty_regressor = || GbdtPeakModel {
         packed: Default::default(),
         n_features: nf as u32,
+        feature_names: ds.feature_names.clone(),
         apply_sigmoid: false,
         trees: vec![],
         iso_x: vec![],
@@ -943,6 +963,7 @@ pub fn train_gbdt_regression(
             move || GbdtPeakModel {
                 packed: Default::default(),
                 n_features: nf as u32,
+                feature_names: ds.feature_names.clone(),
                 apply_sigmoid: false,
                 trees: trees_for_fallback,
                 iso_x: vec![],
@@ -955,6 +976,7 @@ pub fn train_gbdt_regression(
     Ok(GbdtPeakModel {
         packed: Default::default(),
         n_features: nf as u32,
+        feature_names: ds.feature_names.clone(),
         apply_sigmoid: false,
         trees,
         iso_x: vec![],
@@ -1015,6 +1037,7 @@ mod tests {
             y,
             groups,
             n_features: nf,
+            feature_names: scoring_crate::gbdt_eval::indexed_feature_names(nf as u32),
         }
     }
 
@@ -1059,6 +1082,7 @@ mod tests {
             y: vec![0u8; 10],
             groups: (0..10).collect(),
             n_features: 3,
+            feature_names: scoring_crate::gbdt_eval::indexed_feature_names(3),
         };
         let m = train_gbdt(&ds, &TrainParams::default(), 1);
         assert!(matches!(m, Err(TrainError::QualityGate(_))), "got {m:?}");
@@ -1079,6 +1103,7 @@ mod tests {
             y,
             groups: (0..n as u32).collect(),
             n_features: 3,
+            feature_names: scoring_crate::gbdt_eval::indexed_feature_names(3),
         };
         let m = train_gbdt(&ds, &TrainParams::default(), 7);
         assert!(
@@ -1096,6 +1121,7 @@ mod tests {
             y: vec![0u8; 10],
             groups: (0..10).collect(),
             n_features: 3,
+            feature_names: scoring_crate::gbdt_eval::indexed_feature_names(3),
         };
         let p = TrainParams {
             allow_degenerate: true,
@@ -1137,6 +1163,7 @@ mod tests {
             y,
             groups: g,
             n_features: nf,
+            feature_names: scoring_crate::gbdt_eval::indexed_feature_names(nf as u32),
         };
         let p = TrainParams::default();
         let model = train_gbdt_regression(&ds, &p, 42).expect("linear target passes gate");

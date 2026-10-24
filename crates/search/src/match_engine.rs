@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::{smallvec, SmallVec};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::candidate_gen::{
     base_record_key, base_records_for_nominal_window, distinct_base_records_for_nominal_window,
@@ -67,6 +67,11 @@ pub struct PreparedSearch<'a> {
     /// one stable global index. Drained into `self.candidates` by
     /// [`Self::sync_materialized_candidates`].
     mmap_accum: Mutex<MmapAccumulator>,
+    /// Wall time (ns) spent preparing the per-chunk candidate structures in
+    /// [`Self::run_chunk`]: the fragment-ion index build, or the record-cache
+    /// expansion when no fragment index is used. Summed over chunks; reported
+    /// by [`Self::chunk_prep_seconds`].
+    chunk_prep_nanos: AtomicU64,
     /// `params.aa_set` with the search enzyme registered for cleavage
     /// scoring. Cheap to clone, but we keep one shared copy here.
     pub aa_set_for_scoring: AminoAcidSet,
@@ -414,11 +419,19 @@ impl<'a> PreparedSearch<'a> {
             candidates: Vec::new(),
             mmap_index,
             mmap_accum: Mutex::new(MmapAccumulator::default()),
+            chunk_prep_nanos: AtomicU64::new(0),
             aa_set_for_scoring,
             ms1_link: None,
             target_bare_seqs,
             candidate_filter: None,
         }
+    }
+
+    /// Wall seconds spent so far preparing per-chunk candidate structures (the
+    /// fragment-ion index build, or the record-cache expansion), summed over
+    /// every [`Self::run_chunk`] call.
+    pub fn chunk_prep_seconds(&self) -> f64 {
+        self.chunk_prep_nanos.load(Ordering::Relaxed) as f64 * 1e-9
     }
 
     /// Drain the scan accumulator into `self.candidates` so downstream
@@ -751,6 +764,7 @@ impl<'a> PreparedSearch<'a> {
         // admitted after the budget is spent are dropped and expanded on
         // demand, and which ones land in the cache under parallel contention
         // is not deterministic.
+        let t_chunk_prep = std::time::Instant::now();
         let (record_cache, frag_index): (Option<MmapRecordCache>, Option<ChunkFragmentIndex>) = {
             let mi = &self.mmap_index;
             let mut windows: Vec<(i32, i32)> = spectra
@@ -843,6 +857,10 @@ impl<'a> PreparedSearch<'a> {
                 (Some(cache), None)
             }
         };
+        self.chunk_prep_nanos.fetch_add(
+            t_chunk_prep.elapsed().as_nanos() as u64,
+            Ordering::Relaxed,
+        );
 
         // Parallel per-spectrum search. All inputs above are `&` immutable; the
         // closure owns its TopNQueue, scored_per_charge cache, and per-bin GF state.

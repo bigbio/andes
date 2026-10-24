@@ -1047,8 +1047,7 @@ mod tests {
         let pin = "SpecId\tLabel\tScanNr\tExpMass\tCalcMass\tFileName\tf1\tPeptide\tProteins\n\
                    a/s_1_1\t1\t1\t500.1\t500.1\ta\t0.5\tK.P.K\tP1\n";
         assert_eq!(parse_pin(pin).unwrap().n_features, 1);
-        let only_masses =
-            "SpecId\tLabel\tScanNr\tExpMass\tCalcMass\tFileName\tPeptide\tProteins\n";
+        let only_masses = "SpecId\tLabel\tScanNr\tExpMass\tCalcMass\tFileName\tPeptide\tProteins\n";
         assert!(parse_pin(only_masses).is_err());
     }
 

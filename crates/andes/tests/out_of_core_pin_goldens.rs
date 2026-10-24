@@ -213,6 +213,11 @@
 //!
 //! The slice goldens carry no charge outside 2..5; only their SpecIds change.
 //!
+//! RECOMPUTED 2026-10-24 when the PIN gained the `FileName` column (after
+//! `CalcMass`): every row count is unchanged and the digests moved only by the
+//! new column (the input stem, constant on these single-input searches); the slice
+//! goldens had the column inserted into every row.
+//!
 //! REGENERATED 2026-10-22 when decoys became peptide-level (each cleavage
 //! segment shuffled with its cleavage residues in place). Targets and their
 //! scoring are unchanged; the decoy candidates, and through the pool
@@ -411,14 +416,14 @@ fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
 /// One E. coli case: (rows, `identity_digest` FNV-1a 64, calibration outcome line).
 type Golden = (usize, u64, Option<&'static str>);
 
-const ECOLI_DEFAULT_MODS: Golden = (75_028, 0x1332_8c54_13de_0d31, None);
-const ECOLI_FIXED_MODS_ONLY: Golden = (77_496, 0x4863_fd3a_f8e3_8059, None);
-const ECOLI_ONE_VARIABLE_MOD: Golden = (75_570, 0xcab0_4a83_68c2_66d0, None);
+const ECOLI_DEFAULT_MODS: Golden = (75_028, 0x4a4d_5147_a772_074d, None);
+const ECOLI_FIXED_MODS_ONLY: Golden = (77_496, 0x918c_aaf8_2d4c_bc43, None);
+const ECOLI_ONE_VARIABLE_MOD: Golden = (75_570, 0x5cf5_aadd_2c2e_beca, None);
 /// The pre-pass scores but the sample is too small to calibrate, so the PIN
 /// equals the calibration-off one.
 const ECOLI_PRECURSOR_CAL_AUTO: Golden = (
     75_028,
-    0x1332_8c54_13de_0d31,
+    0x4a4d_5147_a772_074d,
     Some("Precursor mass calibration skipped (insufficient confident PSMs: 489 with PSMs, 63 below RawScore floor, 0 failed |residual|>50ppm"),
 );
 

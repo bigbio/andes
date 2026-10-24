@@ -842,7 +842,7 @@ the fused strong score Percolator weights most; historically `StrongScore`; it a
 | 3 | `ScanNr` | int | ≥0 | MS2 scan number. |
 | 4 | `ExpMass` | float | >0 | Experimental neutral precursor mass (Da). |
 | 5 | `CalcMass` | float | >0 | Theoretical neutral peptide mass (Da). |
-| 6 | `FileName` | string | — | The input file of the spectrum: the `SpecId` stem. Percolator's target-decoy competition (`-Y`) keeps one PSM per `FileName`, `ScanNr` and `ExpMass`, so PSMs of different runs never compete when the PINs of separately searched runs are pooled by concatenation. |
+| 6 | `FileName` | string | — | The input file of the spectrum: the `SpecId` stem. Percolator's target-decoy competition (`-Y`) keeps one PSM per `FileName`, `ScanNr` and `ExpMass`, so PSMs of different runs never compete when the PINs of separately searched runs are pooled by concatenation. Percolator then writes a `filename` column after `PSMId` in its result files; readers take columns by header name. |
 | 7 | `mass` | float | >0 | Duplicate of `ExpMass`. |
 | 8 | `RankScore` | int | unbounded | **Rank-LLR ranking score**. |
 | 9 | `isotope_error` | int | [−1, 2] | Winning ¹³C isotope offset. |

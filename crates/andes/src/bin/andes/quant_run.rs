@@ -804,14 +804,7 @@ fn modifications_of(cand: &Candidate) -> Vec<ModRecord> {
         .residues
         .iter()
         .enumerate()
-        .filter_map(|(i, aa)| {
-            aa.mod_.as_ref().map(|m| ModRecord {
-                name: m.name.clone(),
-                accession: m.accession.clone().filter(|a| !a.is_empty()),
-                position: i as i32 + 1,
-                amino_acid: aa.residue as char,
-            })
-        })
+        .filter_map(|(i, aa)| ModRecord::of_residue(i, cand.peptide.residues.len(), aa))
         .collect()
 }
 

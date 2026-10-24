@@ -146,7 +146,7 @@ mod tests {
         // place observed peaks at the m/z of the first two b/y ions, plus a junk peak
         let mut peaks: Vec<(f64, f32)> = ions.iter().take(2).map(|i| (i.mz, 1000.0_f32)).collect();
         peaks.push((50.0, 10.0)); // junk + ensures >=... peaks
-        peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
         let spec = spectrum(peaks, 500.0, 2);
         let row = PsmRow {
             spectrum: &spec,

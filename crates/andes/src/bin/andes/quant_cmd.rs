@@ -1259,7 +1259,7 @@ fn parse_peptidoform(peptidoform: &str) -> (String, Vec<ModRecord>) {
                 accession: tag.starts_with("UNIMOD:").then(|| tag.clone()),
                 name: tag,
                 position: seq.chars().count() as i32,
-                amino_acid: aa,
+                amino_acid: Some(aa),
             });
         }
     }
@@ -1709,7 +1709,7 @@ mod tests {
                 mods[0].amino_acid,
                 mods[0].accession.as_deref()
             ),
-            (2, 'C', Some("UNIMOD:4"))
+            (2, Some('C'), Some("UNIMOD:4"))
         );
         assert_eq!((mods[1].position, mods[1].accession.clone()), (4, None));
         assert_eq!(split_key("LC[UNIMOD:4]AK/3"), "LC[UNIMOD:4]AK");

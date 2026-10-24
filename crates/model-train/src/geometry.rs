@@ -80,13 +80,14 @@ fn z_offset_bits() -> u32 {
 /// approximately equal number of training PSMs. The first bound is the minimum
 /// mass (tier 0 catches everything at or above it under the floor lookup).
 /// Consecutive duplicate bounds are collapsed, so a highly-degenerate mass
-/// distribution can yield fewer than `n_tiers` tiers.
+/// distribution can yield fewer than `n_tiers` tiers. Non-finite masses are
+/// ignored.
 pub fn derive_mass_tiers(masses: &[f32], n_tiers: usize) -> Vec<f32> {
-    if masses.is_empty() || n_tiers == 0 {
+    let mut sorted: Vec<f32> = masses.iter().copied().filter(|m| m.is_finite()).collect();
+    if sorted.is_empty() || n_tiers == 0 {
         return Vec::new();
     }
-    let mut sorted: Vec<f32> = masses.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).expect("parent masses must be finite"));
+    sorted.sort_by(f32::total_cmp);
     let n = sorted.len();
     let mut tiers: Vec<f32> = Vec::with_capacity(n_tiers);
     for k in 0..n_tiers {
@@ -547,6 +548,13 @@ mod tests {
         let masses = vec![100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0, 800.0];
         let tiers = derive_mass_tiers(&masses, 4);
         assert_eq!(tiers, vec![100.0, 300.0, 500.0, 700.0]);
+    }
+
+    #[test]
+    fn non_finite_parent_masses_are_ignored() {
+        let masses = vec![300.0, f32::NAN, 100.0, f32::INFINITY, 200.0, 400.0];
+        assert_eq!(derive_mass_tiers(&masses, 2), vec![100.0, 300.0]);
+        assert!(derive_mass_tiers(&[f32::NAN], 2).is_empty());
     }
 
     #[test]

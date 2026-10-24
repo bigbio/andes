@@ -229,7 +229,7 @@ impl GlycanTree {
     pub fn parse(s: &str) -> Result<GlycanTree, GdbLoadError> {
         let bytes = s.as_bytes();
         let mut pos = 0usize;
-        let tree = parse_node(bytes, &mut pos, 1, 1)?;
+        let tree = parse_node(bytes, &mut pos, 1, 1)?.check_counts(1)?;
         if pos < bytes.len() {
             return Err(GdbLoadError::MalformedTree {
                 line: 1,
@@ -276,11 +276,31 @@ impl GlycanTree {
         m
     }
 
-    /// Tally `[H, N, F, A, G]` counts over this subtree.
+    /// Tally `[H, N, F, A, G]` counts over this subtree, each saturating at
+    /// 255. The loaders reject trees with more (see [`GlycanTree::checked_counts`]).
     pub fn counts(&self) -> [u8; 5] {
         let mut counts = [0u8; 5];
         tally(self, &mut counts);
         counts
+    }
+
+    /// The `[H, N, F, A, G]` counts, or `None` when a residue occurs more than
+    /// 255 times in the subtree.
+    pub fn checked_counts(&self) -> Option<[u8; 5]> {
+        let mut counts = [0u8; 5];
+        tally(self, &mut counts).then_some(counts)
+    }
+
+    /// `tree` itself, or [`GdbLoadError::MalformedTree`] on `line` when a
+    /// residue occurs more than 255 times.
+    fn check_counts(self, line: usize) -> Result<GlycanTree, GdbLoadError> {
+        match self.checked_counts() {
+            Some(_) => Ok(self),
+            None => Err(GdbLoadError::MalformedTree {
+                line,
+                reason: "more than 255 residues of one kind",
+            }),
+        }
     }
 
     /// Canonical serialization `(sym child*)` with children sorted by their
@@ -434,14 +454,20 @@ fn parse_node(
     }
 }
 
-/// Sum every residue of a subtree into `counts`.
-fn tally(node: &GlycanTree, counts: &mut [u8; 5]) {
+/// Sum every residue of a subtree into `counts`; `false` when a count reached
+/// its limit (it stays at 255).
+fn tally(node: &GlycanTree, counts: &mut [u8; 5]) -> bool {
+    let mut fits = true;
     if let Some(i) = symbol_index(node.sym) {
-        counts[i] += 1;
+        match counts[i].checked_add(1) {
+            Some(n) => counts[i] = n,
+            None => fits = false,
+        }
     }
     for c in &node.children {
-        tally(c, counts);
+        fits &= tally(c, counts);
     }
+    fits
 }
 
 /// Parse one glycan tree starting at `*pos`. `GlycanComp::from_tree` recovers the
@@ -452,7 +478,7 @@ fn parse_glycan_at(
     pos: &mut usize,
     line_no: usize,
 ) -> Result<GlycanComp, GdbLoadError> {
-    let root = parse_node(bytes, pos, line_no, 0)?;
+    let root = parse_node(bytes, pos, line_no, 0)?.check_counts(line_no)?;
     Ok(GlycanComp::from_tree(root))
 }
 
@@ -836,7 +862,7 @@ fn wurcs_to_tree(wurcs: &str, line: usize) -> Result<GlycanTree, GdbLoadError> {
         });
     }
 
-    Ok(build_wurcs_node(root, &children, &residues, &atom_res))
+    build_wurcs_node(root, &children, &residues, &atom_res).check_counts(line)
 }
 
 /// Recursively build a `GlycanTree` from a WURCS parent→children adjacency,
@@ -954,6 +980,30 @@ pub fn load_species_glycan_db(species: &str) -> Result<Vec<GlycanComp>, GdbLoadE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_residue_count_past_255_is_rejected() {
+        let wide = |n: usize| format!("(N{})", "(H)".repeat(n));
+        let ok = GlycanTree::parse(&wide(255)).unwrap();
+        assert_eq!(ok.counts()[0], 255);
+        assert_eq!(ok.checked_counts().map(|c| c[0]), Some(255));
+        for n in [256, 300] {
+            let err = GlycanTree::parse(&wide(n)).unwrap_err();
+            assert!(
+                matches!(err, GdbLoadError::MalformedTree { line: 1, .. }),
+                "{err:?}"
+            );
+            let gdb = format!("H,N,A,G,F\n(N(F))\n{}\n", wide(n));
+            let err = load_glycan_gdb(&gdb).unwrap_err();
+            assert!(
+                matches!(err, GdbLoadError::MalformedTree { line: 3, .. }),
+                "{err:?}"
+            );
+        }
+        // The count also holds across branches.
+        let split = format!("(N(N{})(N{}))", "(H)".repeat(128), "(H)".repeat(128));
+        assert!(GlycanTree::parse(&split).is_err());
+    }
 
     fn load_one(s: &str) -> GlycanComp {
         let content = format!("H,N,A,G,F\n{s}\n");

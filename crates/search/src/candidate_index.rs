@@ -1274,10 +1274,9 @@ mod tests {
         params.min_length = 3;
         params.require_nxst_sequon = true;
 
-        let plain_path = index_cache_path(&plain, &params, Path::new("cache"));
-        let suffixed_path = index_cache_path(&suffixed, &params, Path::new("cache"));
-        let _ = std::fs::remove_file(&plain_path);
-        let _ = std::fs::remove_file(&suffixed_path);
+        let dir = tempfile::tempdir().unwrap();
+        let plain_path = index_cache_path(&plain, &params, dir.path());
+        let suffixed_path = index_cache_path(&suffixed, &params, dir.path());
         let (first, _) = MmapCandidateIndex::open_or_build(&plain_path, &plain, &params, "XXX")
             .expect("build the suffix-less index");
         assert!(first.records().iter().all(|r| !r.is_decoy()));
@@ -1285,8 +1284,6 @@ mod tests {
             MmapCandidateIndex::open_or_build(&suffixed_path, &suffixed, &params, "XXX")
                 .expect("open the suffixed index");
         let decoys = second.records().iter().filter(|r| r.is_decoy()).count();
-        let _ = std::fs::remove_file(&plain_path);
-        let _ = std::fs::remove_file(&suffixed_path);
         assert_eq!(decoys, 1, "ASNVTR from P1_rev is the one sequon decoy");
         assert_ne!(
             plain_path, suffixed_path,

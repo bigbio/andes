@@ -469,9 +469,13 @@ fn build_batch(records: &[FeatureRecord], mbr: bool) -> std::io::Result<RecordBa
                 pb.field_builder::<Int32Builder>(0)
                     .unwrap()
                     .append_value(m.position);
-                pb.field_builder::<StringBuilder>(1)
-                    .unwrap()
-                    .append_value(m.amino_acid.to_string());
+                match m.amino_acid {
+                    Some(aa) => pb
+                        .field_builder::<StringBuilder>(1)
+                        .unwrap()
+                        .append_value(aa.to_string()),
+                    None => pb.field_builder::<StringBuilder>(1).unwrap().append_null(),
+                }
                 // scores: null (andes does not localize)
                 pb.field_builder::<ListBuilder<StructBuilder>>(2)
                     .unwrap()
@@ -863,7 +867,7 @@ mod tests {
                 name: "TMT10plex".into(),
                 accession: Some("UNIMOD:737".into()),
                 position: 8,
-                amino_acid: 'K',
+                amino_acid: Some('K'),
             }],
             charge: 2,
             pep: Some(0.01),

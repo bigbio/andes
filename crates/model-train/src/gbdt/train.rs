@@ -164,7 +164,7 @@ fn auc(scores: &[f32], labels: &[u8]) -> f64 {
         return 0.5;
     }
     let mut idx: Vec<usize> = (0..n).collect();
-    idx.sort_by(|&a, &b| scores[a].partial_cmp(&scores[b]).unwrap());
+    idx.sort_by(|&a, &b| scores[a].total_cmp(&scores[b]));
     let mut ranks = vec![0.0f64; n];
     let mut i = 0;
     while i < n {
@@ -224,7 +224,7 @@ fn grouped_neg_auc(scores: &[f32], labels: &[u8], groups: &[u32]) -> Option<f32>
 fn compute_bin_uppers(col: &[f32], n_bins: usize) -> Vec<f32> {
     debug_assert!(n_bins <= 256, "n_bins must fit in u8");
     let mut sorted: Vec<f32> = col.iter().copied().filter(|v| v.is_finite()).collect();
-    sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted.sort_unstable_by(f32::total_cmp);
     if sorted.is_empty() {
         return vec![0.0];
     }
@@ -651,7 +651,7 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         .zip(val_y.iter())
         .map(|(&r, &y)| (sigmoid(r), y as f32))
         .collect();
-    cal_pairs.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    cal_pairs.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
 
     let sorted_p: Vec<f32> = cal_pairs.iter().map(|&(p, _)| p).collect();
     let sorted_y: Vec<f32> = cal_pairs.iter().map(|&(_, y)| y).collect();
@@ -991,6 +991,14 @@ pub fn train_gbdt_regression(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nan_scores_do_not_panic_the_sorts() {
+        let auc_nan = auc(&[f32::NAN, 0.5, 0.2, 0.9], &[1, 0, 1, 0]);
+        assert!((0.0..=1.0).contains(&auc_nan));
+        let edges = compute_bin_uppers(&[0.3, f32::NAN, 0.1, f32::INFINITY, 0.2], 4);
+        assert_eq!(edges, vec![0.1, 0.2, 0.3]);
+    }
 
     #[test]
     fn auc_perfect_reversed_tied_and_empty() {

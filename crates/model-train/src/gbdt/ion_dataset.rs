@@ -118,7 +118,7 @@ mod tests {
     }
 
     fn spectrum(mut peaks: Vec<(f64, f32)>, mz: f64, z: i32) -> Spectrum {
-        peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
         Spectrum {
             title: "test".to_string(),
             precursor_mz: mz,

@@ -789,7 +789,7 @@ fn append_modifications(builder: &mut ListBuilder<StructBuilder>, cand: &Candida
             .append_value(&m.name);
         sb.field_builder::<StringBuilder>(1)
             .unwrap()
-            .append_value(m.accession.as_deref().unwrap_or(""));
+            .append_option(m.accession.as_deref().filter(|a| !a.is_empty()));
         // positions: list<struct<position: string, scores: double>>
         let pos_list = sb.field_builder::<ListBuilder<StructBuilder>>(2).unwrap();
         let psb = pos_list.values();
@@ -1316,5 +1316,45 @@ mod rescore_join_tests {
             row("s1_3_2", false, 1, "1000.5"),
         ];
         assert!(audit_rescore_join(&three, &both, Some(&decoys)).is_err());
+    }
+
+    #[test]
+    fn a_modification_without_an_accession_is_null() {
+        use arrow::array::{Array, ListArray, StructArray};
+        use model::amino_acid::AminoAcid;
+        use model::modification::{leak_mod, ModLocation, Modification, ResidueSpec};
+        let m = leak_mod(Modification {
+            name: "Custom".into(),
+            mass_delta: 14.0,
+            residue: ResidueSpec::Specific(b'K'),
+            location: ModLocation::Anywhere,
+            fixed: false,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+            annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
+        });
+        let residues = vec![
+            AminoAcid::standard(b'P').unwrap(),
+            AminoAcid::standard(b'K').unwrap().with_mod(m),
+        ];
+        let cand = Candidate {
+            peptide: model::peptide::Peptide::new(residues, b'K', b'R'),
+            protein_index: 0,
+            start_offset_in_protein: 0,
+            is_decoy: false,
+            is_protein_n_term: false,
+            is_protein_c_term: false,
+        };
+        let mut b = list_struct_builder(modification_fields());
+        append_modifications(&mut b, &cand);
+        b.append(true);
+        let list: ListArray = b.finish();
+        let structs = list.value(0);
+        let structs = structs.as_any().downcast_ref::<StructArray>().unwrap();
+        assert_eq!(structs.len(), 1);
+        assert!(structs.column(1).is_null(0));
     }
 }

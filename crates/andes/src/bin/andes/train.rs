@@ -30,6 +30,16 @@ use model_train::{
 use scoring_crate::{Param, RankScorer};
 use search::SearchParams;
 
+/// A freshly estimated model carries rank tables only. Give it the seed's
+/// fragment-intensity and rich-ion GBDTs: the search scores those features on
+/// every PSM, and a model without them loses 5-8% of the PSMs at true FDP 1% on
+/// high-resolution data (`andes train-intensity-gbdt` and
+/// `andes train-rich-ion-llr` replace them with ones fitted on the corpus).
+fn inherit_seed_gbdts(trained: &mut Param, seed: &Param) {
+    trained.frag_intensity_model = seed.frag_intensity_model.clone();
+    trained.rich_ion_model = seed.rich_ion_model.clone();
+}
+
 /// Training arguments for `andes train-from-search`.
 #[derive(Args, Debug)]
 pub(crate) struct TrainFromSearchArgs {
@@ -821,6 +831,7 @@ pub(crate) fn run_train_from_search(
     let cfg = EstimatorConfig::default();
     let estimator = Estimator::new(cfg);
     let mut trained_param = estimator.estimate(&stats, &template);
+    inherit_seed_gbdts(&mut trained_param, &seed_param);
     // The instrument is a selection-key column: without this the model would
     // keep the seed's instrument and searches on `--instrument` data would
     // never select it.
@@ -1358,6 +1369,7 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
     };
 
     let mut trained_param = estimator.estimate_with_prior(&stats, &template, prior_param.as_ref());
+    inherit_seed_gbdts(&mut trained_param, &seed_param);
     let n_partitions = trained_param.partitions.len();
     eprintln!("train: trained model has {n_partitions} partitions");
 

@@ -29,7 +29,7 @@ pub mod stats;
 pub use stats::{write_statistics_log, RunStatistics};
 
 pub mod qpx;
-pub use qpx::{write_qpx, Competition};
+pub use qpx::write_qpx;
 
 pub mod rt_wiring;
 pub use rt_wiring::populate_rt_features;

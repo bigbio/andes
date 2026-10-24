@@ -9,9 +9,10 @@
 //!
 //! METHOD (the Percolator algorithm, `-Y` semantics):
 //!
-//! * **Competition groups.** Rows sharing `ScanNr` and the `ExpMass` text form
-//!   one group, the same groups Percolator's target-decoy competition (`-Y`)
-//!   uses. Each group reports one PSM: its best-scoring row, target or decoy.
+//! * **Competition groups.** Rows sharing the input file, `ScanNr` and the
+//!   `ExpMass` text form one group, the same groups Percolator's target-decoy
+//!   competition (`-Y`) uses with the PIN `FileName` column. Each group
+//!   reports one PSM: its best-scoring row, target or decoy.
 //!   q-values are computed over these winners only, so a spectrum never
 //!   contributes several rows at one precursor mass.
 //! * **Cross-validation.** Rows are folded by spectrum (3 folds); every row is
@@ -29,9 +30,10 @@
 //! * **PEP.** Isotonic fit of the decoy share among winners against the final
 //!   score: PEP = decoys / targets at that score, capped at 1.
 //!
-//! `ExpMass` and `CalcMass` are not features (as in Percolator). The output
-//! maps match `output::run_percolator` with `-Y`: winning targets, and the
-//! winning decoys separately; rows that lost their group are in neither.
+//! `ExpMass`, `CalcMass` and `FileName` are not features (as in Percolator).
+//! The output maps match `output::run_percolator` with `-Y`: winning targets,
+//! and the winning decoys separately; rows that lost their group are in
+//! neither.
 
 use std::collections::HashMap;
 
@@ -51,7 +53,7 @@ const L2_C: f64 = 0.1;
 /// score it has (the initial single feature when no round could be trained).
 const MIN_TRAIN_CLASS: usize = 10;
 /// PIN columns between `ScanNr` and `Peptide` that are not features.
-const NON_FEATURES: [&str; 2] = ["ExpMass", "CalcMass"];
+const NON_FEATURES: [&str; 3] = ["ExpMass", "CalcMass", "FileName"];
 const PROB_EPS: f64 = 1e-6;
 /// Rows per partial sum in the logistic fit.
 const CHUNK: usize = 4096;
@@ -78,7 +80,7 @@ struct PinData {
 /// Parse a Percolator PIN. Layout:
 /// `SpecId \t Label \t ScanNr \t <numeric features…> \t Peptide \t Proteins…`.
 /// Feature columns = everything strictly between `ScanNr` and `Peptide`,
-/// except `ExpMass` and `CalcMass`.
+/// except `ExpMass`, `CalcMass` and `FileName`.
 fn parse_pin(text: &str) -> Result<PinData, String> {
     let mut lines = text.lines();
     let header = lines.next().ok_or("empty PIN")?;
@@ -1041,11 +1043,12 @@ mod tests {
     }
 
     #[test]
-    fn exp_mass_and_calc_mass_are_not_features() {
-        let pin = "SpecId\tLabel\tScanNr\tExpMass\tCalcMass\tf1\tPeptide\tProteins\n\
-                   a_1_1\t1\t1\t500.1\t500.1\t0.5\tK.P.K\tP1\n";
+    fn mass_and_file_name_columns_are_not_features() {
+        let pin = "SpecId\tLabel\tScanNr\tExpMass\tCalcMass\tFileName\tf1\tPeptide\tProteins\n\
+                   a/s_1_1\t1\t1\t500.1\t500.1\ta\t0.5\tK.P.K\tP1\n";
         assert_eq!(parse_pin(pin).unwrap().n_features, 1);
-        let only_masses = "SpecId\tLabel\tScanNr\tExpMass\tCalcMass\tPeptide\tProteins\n";
+        let only_masses =
+            "SpecId\tLabel\tScanNr\tExpMass\tCalcMass\tFileName\tPeptide\tProteins\n";
         assert!(parse_pin(only_masses).is_err());
     }
 

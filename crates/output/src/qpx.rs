@@ -104,7 +104,6 @@ pub fn write_qpx(
     run_ends: &[usize],
     rescore: Option<&HashMap<String, PercolatorPsm>>,
     rescore_decoys: Option<&HashSet<String>>,
-    competition: Competition,
     excluded: &HashSet<String>,
 ) -> std::io::Result<()> {
     if run_ends.len() != primary_ms_run_paths.len()
@@ -130,7 +129,7 @@ pub fn write_qpx(
     // rescore is off, keeping that path identical.
     let mut competed_away = match rescore {
         Some(m) => audit_rescore_join(
-            &rescore_rows(spectra, queues, candidates, competition),
+            &rescore_rows(spectra, queues, candidates),
             m,
             rescore_decoys,
         )?,
@@ -407,24 +406,16 @@ fn psms_schema() -> Arc<Schema> {
 
 // ── psms.parquet builder ──────────────────────────────────────────────────────
 
-/// The scope of the rescorer's target-decoy competition groups.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Competition {
-    /// Rows of every input with the same `ScanNr` and `ExpMass` text compete.
-    AcrossInputs,
-    /// Rows compete only within their own input: scan numbers repeat across
-    /// the inputs of one search, so the same `ScanNr` and `ExpMass` text in two
-    /// inputs are two spectra (the native rescorer).
-    PerInput,
-}
-
 /// One emitted PSM row as the Percolator join sees it.
 struct RescoreRow {
     /// The PIN `SpecId` (Percolator's `PSMId`).
     spec_id: String,
     is_decoy: bool,
-    /// The target-decoy competition group: the input file (empty when the
-    /// competition spans inputs), the PIN `ScanNr` and the `ExpMass` text.
+    /// The target-decoy competition group: the input file, the PIN `ScanNr`
+    /// and the `ExpMass` text. Scan numbers repeat across the inputs of one
+    /// search, so the same `ScanNr` and `ExpMass` text in two inputs are two
+    /// spectra; both rescorers compete within each input (Percolator through
+    /// the PIN `FileName` column).
     group: (String, i32, String),
 }
 
@@ -437,8 +428,8 @@ struct RescoreRow {
 /// would otherwise be written with a null q-value). Decoys are exempt.
 ///
 /// One exception: with target-decoy competition (`-Y`), Percolator keeps one
-/// PSM per scan/`ExpMass` group (per input file, for [`Competition::PerInput`])
-/// and writes it to the target or the decoy result file; the other rows of the group appear in neither. When the decoy results
+/// PSM per input file, scan and `ExpMass` group and writes it to the target or
+/// the decoy result file; the other rows of the group appear in neither. When the decoy results
 /// are given, a missing target row is accepted as competed away iff exactly one
 /// row of its group is present in the target or decoy results (the group's
 /// winner). A group with no result, or with several (no competition there),
@@ -507,7 +498,6 @@ fn rescore_rows(
     spectra: &[Spectrum],
     queues: &[TopNQueue],
     candidates: &[Candidate],
-    competition: Competition,
 ) -> Vec<RescoreRow> {
     let mut rows = Vec::new();
     for (spec_idx, queue) in queues.iter().enumerate() {
@@ -530,10 +520,7 @@ fn rescore_rows(
             let cand = &candidates[psm.primary_candidate_idx() as usize];
             let precursor_mz = psm.precursor_mz_override.unwrap_or(spec.precursor_mz);
             let spec_id = format_spec_id(&spec_id_str, scan_num, ranks[hit], hit, multi_row);
-            let run = match competition {
-                Competition::AcrossInputs => String::new(),
-                Competition::PerInput => spec_id_run(&spec_id).to_string(),
-            };
+            let run = spec_id_run(&spec_id).to_string();
             rows.push(RescoreRow {
                 spec_id,
                 is_decoy: cand.is_decoy,

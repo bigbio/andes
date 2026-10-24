@@ -830,8 +830,8 @@ another site), only the best-ranked row is written; a decoy never collapses into
 kept row's `Proteins` lists the proteins of the rows collapsed into it. The TSV and QPX outputs
 carry the same rows. Rank is assigned after the collapse. The `chargeN`
 one-hots follow `--charge` only, never the data, so separately searched runs share one header;
-the default 2–5 gives the 66 columns below. Do not confuse
-**`RankScore`** (col 7, orders candidates; historically `RawScore`) with **`RawScore`** (col 62,
+the default 2–5 gives the columns below. Do not confuse
+**`RankScore`** (col 8, orders candidates; historically `RawScore`) with **`RawScore`** (col 63,
 the fused strong score Percolator weights most; historically `StrongScore`; it also ranks under
 `--score strong`).
 
@@ -842,73 +842,74 @@ the fused strong score Percolator weights most; historically `StrongScore`; it a
 | 3 | `ScanNr` | int | ≥0 | MS2 scan number. |
 | 4 | `ExpMass` | float | >0 | Experimental neutral precursor mass (Da). |
 | 5 | `CalcMass` | float | >0 | Theoretical neutral peptide mass (Da). |
-| 6 | `mass` | float | >0 | Duplicate of `ExpMass`. |
-| 7 | `RankScore` | int | unbounded | **Rank-LLR ranking score**. |
-| 8 | `isotope_error` | int | [−1, 2] | Winning ¹³C isotope offset. |
-| 9 | `peplen` | int | ≥6 | Residue count **+ 2** (flanks). |
-| 10 | `dm` | float | signed | Precursor mass error (Da) after isotope correction. |
-| 11 | `absdm` | float | ≥0 | `\|dm\|`. |
-| 12–15 | `charge2`…`charge5` | 0/1 | one-hot | One-hot precursor charge. A declared charge outside `--charge` sets the nearest edge column (a 6+ sets `charge5`). |
-| 16 | `enzN` | 0/1 | one-hot | N-terminus fits the enzyme rule. |
-| 17 | `enzC` | 0/1 | one-hot | C-terminus fits the enzyme rule. |
-| 18 | `enzInt` | int | ≥0 | Internal cleavage sites. |
-| 19 | `NumMatchedMainIons` | int | [0, peplen−1] | Matched charge-1 b/y fragment positions. |
-| 20 | `longest_b` | int | [0, peplen−1] | Longest contiguous matched b-ion run. |
-| 21 | `longest_y` | int | [0, peplen−1] | Longest contiguous matched y-ion run. |
-| 22 | `longest_y_pct` | float | [0, 1] | `longest_y / peplen`. |
-| 23 | `ExplainedIonCurrentRatio` | float | [0, 1] | Matched b+y intensity / total MS2 ion current. |
-| 24 | `NTermIonCurrentRatio` | float | [0, 1] | Matched b-ion intensity / total MS2 ion current. |
-| 25 | `CTermIonCurrentRatio` | float | [0, 1] | Matched y-ion intensity / total MS2 ion current. |
-| 26 | `MS2IonCurrent` | float | ≥0 | Sum of all MS2 peak intensities (not log-scaled). |
-| 27 | `IsolationWindowEfficiency` | float | 0.0 | Always `0.0`. |
-| 28 | `MeanErrorTop7` | float | ≥0 | Mean absolute ppm error, top-7 matched ions. |
-| 29 | `StdevErrorTop7` | float | ≥0 | Population stdev of absolute ppm errors (top-7). |
-| 30 | `MeanRelErrorTop7` | float | signed | Mean signed ppm error (top-7). |
-| 31 | `StdevRelErrorTop7` | float | ≥0 | Population stdev of signed ppm errors (top-7). |
-| 32 | `matchedIonRatio` | float | [0, 1] | `NumMatchedMainIons / peplen`. |
-| 33 | `EdgeScore` | int | unbounded | Per-bond edge-score sum (ion-existence + error); additive. |
-| 34 | `PrecursorIsotopeKL` | float | ≥0 | Precursor envelope KL vs averagine. **Always 0.0** (kept for positional consumers). |
-| 35 | `PrecursorSNR` | float | ≥0 | Precursor SNR from the MS1 envelope. **0.0 unless `--chimeric`.** |
-| 36 | `DeltaRankScore` | float | ≥0 | `RankScore(best) − RankScore(2nd-best distinct peptide)`; rank-1 row only, else 0.0. |
-| 37 | `TailorScore` | float | ≥0 | `RankScore ÷` spectrum's top-1% quantile; cross-spectrum comparability. |
-| 38 | `PpmGaussianScore` | float | ≥0 | `Σ exp(−½(ppm/7)²)` over matched ions. |
-| 39 | `NeutralLossIonCount` | int | ≥0 | Matched b/y ions with −H₂O/−NH₃ partner peaks. |
-| 40 | `LongestComplementaryLadder` | int | [0, peplen−1] | Longest run of bonds where both bᵢ and y₍ₙ₋ᵢ₎ matched. |
-| 41 | `ComplementaryIonBalance` | float | ≥0 | `Σ 1/(1+\|rankᵦ−rankᵧ\|)` over complementary bonds. |
-| 42 | `MeanMatchedIntensityRank` | float | ≥1 | Mean intensity rank of matched ions (1 = most intense). |
-| 43 | `DoublyChargedMatchedIonCount` | int | ≥0 | Matched charge-2 b/y ions. |
-| 44 | `UniqueMatchFraction` | float | [0, 1] | Within-peptide peak-explanation uniqueness. |
-| 45 | `ChanceMatchSurprise` | float | ≥0 | `Σ max(0, −ln(ρ·Δ))`: improbability of chance matches. |
-| 46 | `IntensitySignal` | float | [0, 1] | Predicted vs observed intensity cosine. **0.0 without an intensity model.** |
-| 47 | `FragPredExplained` | float | [0, 1] | `Σ(matched·pred)/Σpred`. **0.0 without a frag-intensity model.** |
-| 48 | `FragPredChanceLLR` | float | ≥0 | `Σ matched·pred·max(0,−ln p_chance)`. **0.0 without a frag-intensity model.** |
-| 49 | `FragTopKObserved` | float | [0, 1] | Top-K predicted-most-intense ions observed. **0.0 without a frag-intensity model.** |
-| 50 | `RichIonLLR` | float | unbounded | Decoy-aware per-annotated-ion LLR sum. **0.0 without a rich-ion model.** |
-| 51 | `IsRefinement` | 0/1 | one-hot | 1 for a Pass-2 refinement PSM. **0 without `--refine`.** |
-| 52 | `NumMods` | int | ≥0 | Variable modifications on the peptide. |
-| 53 | `RefinementModClass` | int | [0, 99] | Mod-class id for subgroup-FDR grouping. **0 without `--refine`.** |
-| 54 | `ModSiteShiftedMatched` | int | ≥0 | Matched mass-shifted b/y ions. **0 for unmodified peptides.** |
-| 55 | `ModSiteShiftedFrac` | float | [0, 1] | Matched shifted ÷ total shifted ions. |
-| 56 | `ModSiteIntensFrac` | float | [0, 1] | Shifted-ion intensity ÷ all matched-ion intensity. |
-| 57 | `ModSiteLocalized` | 0/1 | one-hot | 1 if a bracketing ion pair localizes the mod. |
-| 58 | `ModSiteDetCount` | int | ≥0 | Site-determining (bracketing) ions over all sites. |
-| 59 | `MassCompetitionEvidence` | float | ≥0 | `Σ 1/(1+ambiguity+ρ)`, alternative-mass competition. |
-| 60 | `CandidateRankEntropy` | float | ≥0 | Softmax entropy of the retained top-K scores. |
-| 61 | `ListwiseScoreGap` | float | signed | Top-1 − top-2 `RankScore` in the retained queue. |
-| 62 | `RawScore` | float | unbounded | **Fused strong score** `signal − null`; the primary feature. |
-| 63 | `RawScoreCal` | float | signed | Per-spectrum z-scored `RawScore`. |
-| 64 | `RankScoreFloat` | float | unbounded | Unrounded `RankScore` (continuous split-sum). |
-| 65 | `DeltaRT` | float | signed | Observed − predicted retention time (min); 0 without RT. |
-| 66 | `AbsDeltaRT` | float | ≥0 | `|DeltaRT|`. |
-| 67 | `DeltaRTNorm` | float | signed | `DeltaRT` divided by the run's gradient span. |
-| 68 | `IsVariant` | 0/1 | — | A protein of the peptide is a UniProt natural-variant entry (§1a, provenance). |
-| 69 | `IsIsoform` | 0/1 | — | A protein of the peptide is an isoform entry. |
-| 70 | `IsChain` | 0/1 | — | A protein of the peptide is a mature-chain entry. |
-| 71 | `RefCompetitor` | 0/1 | — | A canonical (or FASTA) candidate with another peptidoform was scored for the spectrum. |
-| 72 | `DeltaRefScore` | float | signed | Flagged rows: `RankScore` minus that best canonical candidate's; 0 otherwise. |
-| 73 | `IsotopeMimic` | 0/1 | — | The precursor fits better when isotope-like deltas (deamidation, N→D, Q→E) are read as isotope steps. |
-| 74 | `Peptide` | string | — | `pre.SEQUENCE.post` with `+mass` mod annotations. |
-| 75 | `Proteins` | string | — | Protein accession(s), tab-separated; decoys carry `--decoy-prefix`. A UniProt variant entry names its change (`sp\|P04637_VAR_005851_D7H\|P53_HUMAN`), an isoform its id (`sp\|P04637-2\|P53_HUMAN`), a mature chain its feature id (`sp\|P02769_PRO_0000001058\|ALBU_BOVIN`). |
+| 6 | `FileName` | string | — | The input file of the spectrum: the `SpecId` stem. Percolator's target-decoy competition (`-Y`) keeps one PSM per `FileName`, `ScanNr` and `ExpMass`, so PSMs of different runs never compete when the PINs of separately searched runs are pooled by concatenation. |
+| 7 | `mass` | float | >0 | Duplicate of `ExpMass`. |
+| 8 | `RankScore` | int | unbounded | **Rank-LLR ranking score**. |
+| 9 | `isotope_error` | int | [−1, 2] | Winning ¹³C isotope offset. |
+| 10 | `peplen` | int | ≥6 | Residue count **+ 2** (flanks). |
+| 11 | `dm` | float | signed | Precursor mass error (Da) after isotope correction. |
+| 12 | `absdm` | float | ≥0 | `\|dm\|`. |
+| 13–16 | `charge2`…`charge5` | 0/1 | one-hot | One-hot precursor charge. A declared charge outside `--charge` sets the nearest edge column (a 6+ sets `charge5`). |
+| 17 | `enzN` | 0/1 | one-hot | N-terminus fits the enzyme rule. |
+| 18 | `enzC` | 0/1 | one-hot | C-terminus fits the enzyme rule. |
+| 19 | `enzInt` | int | ≥0 | Internal cleavage sites. |
+| 20 | `NumMatchedMainIons` | int | [0, peplen−1] | Matched charge-1 b/y fragment positions. |
+| 21 | `longest_b` | int | [0, peplen−1] | Longest contiguous matched b-ion run. |
+| 22 | `longest_y` | int | [0, peplen−1] | Longest contiguous matched y-ion run. |
+| 23 | `longest_y_pct` | float | [0, 1] | `longest_y / peplen`. |
+| 24 | `ExplainedIonCurrentRatio` | float | [0, 1] | Matched b+y intensity / total MS2 ion current. |
+| 25 | `NTermIonCurrentRatio` | float | [0, 1] | Matched b-ion intensity / total MS2 ion current. |
+| 26 | `CTermIonCurrentRatio` | float | [0, 1] | Matched y-ion intensity / total MS2 ion current. |
+| 27 | `MS2IonCurrent` | float | ≥0 | Sum of all MS2 peak intensities (not log-scaled). |
+| 28 | `IsolationWindowEfficiency` | float | 0.0 | Always `0.0`. |
+| 29 | `MeanErrorTop7` | float | ≥0 | Mean absolute ppm error, top-7 matched ions. |
+| 30 | `StdevErrorTop7` | float | ≥0 | Population stdev of absolute ppm errors (top-7). |
+| 31 | `MeanRelErrorTop7` | float | signed | Mean signed ppm error (top-7). |
+| 32 | `StdevRelErrorTop7` | float | ≥0 | Population stdev of signed ppm errors (top-7). |
+| 33 | `matchedIonRatio` | float | [0, 1] | `NumMatchedMainIons / peplen`. |
+| 34 | `EdgeScore` | int | unbounded | Per-bond edge-score sum (ion-existence + error); additive. |
+| 35 | `PrecursorIsotopeKL` | float | ≥0 | Precursor envelope KL vs averagine. **Always 0.0** (kept for positional consumers). |
+| 36 | `PrecursorSNR` | float | ≥0 | Precursor SNR from the MS1 envelope. **0.0 unless `--chimeric`.** |
+| 37 | `DeltaRankScore` | float | ≥0 | `RankScore(best) − RankScore(2nd-best distinct peptide)`; rank-1 row only, else 0.0. |
+| 38 | `TailorScore` | float | ≥0 | `RankScore ÷` spectrum's top-1% quantile; cross-spectrum comparability. |
+| 39 | `PpmGaussianScore` | float | ≥0 | `Σ exp(−½(ppm/7)²)` over matched ions. |
+| 40 | `NeutralLossIonCount` | int | ≥0 | Matched b/y ions with −H₂O/−NH₃ partner peaks. |
+| 41 | `LongestComplementaryLadder` | int | [0, peplen−1] | Longest run of bonds where both bᵢ and y₍ₙ₋ᵢ₎ matched. |
+| 42 | `ComplementaryIonBalance` | float | ≥0 | `Σ 1/(1+\|rankᵦ−rankᵧ\|)` over complementary bonds. |
+| 43 | `MeanMatchedIntensityRank` | float | ≥1 | Mean intensity rank of matched ions (1 = most intense). |
+| 44 | `DoublyChargedMatchedIonCount` | int | ≥0 | Matched charge-2 b/y ions. |
+| 45 | `UniqueMatchFraction` | float | [0, 1] | Within-peptide peak-explanation uniqueness. |
+| 46 | `ChanceMatchSurprise` | float | ≥0 | `Σ max(0, −ln(ρ·Δ))`: improbability of chance matches. |
+| 47 | `IntensitySignal` | float | [0, 1] | Predicted vs observed intensity cosine. **0.0 without an intensity model.** |
+| 48 | `FragPredExplained` | float | [0, 1] | `Σ(matched·pred)/Σpred`. **0.0 without a frag-intensity model.** |
+| 49 | `FragPredChanceLLR` | float | ≥0 | `Σ matched·pred·max(0,−ln p_chance)`. **0.0 without a frag-intensity model.** |
+| 50 | `FragTopKObserved` | float | [0, 1] | Top-K predicted-most-intense ions observed. **0.0 without a frag-intensity model.** |
+| 51 | `RichIonLLR` | float | unbounded | Decoy-aware per-annotated-ion LLR sum. **0.0 without a rich-ion model.** |
+| 52 | `IsRefinement` | 0/1 | one-hot | 1 for a Pass-2 refinement PSM. **0 without `--refine`.** |
+| 53 | `NumMods` | int | ≥0 | Variable modifications on the peptide. |
+| 54 | `RefinementModClass` | int | [0, 99] | Mod-class id for subgroup-FDR grouping. **0 without `--refine`.** |
+| 55 | `ModSiteShiftedMatched` | int | ≥0 | Matched mass-shifted b/y ions. **0 for unmodified peptides.** |
+| 56 | `ModSiteShiftedFrac` | float | [0, 1] | Matched shifted ÷ total shifted ions. |
+| 57 | `ModSiteIntensFrac` | float | [0, 1] | Shifted-ion intensity ÷ all matched-ion intensity. |
+| 58 | `ModSiteLocalized` | 0/1 | one-hot | 1 if a bracketing ion pair localizes the mod. |
+| 59 | `ModSiteDetCount` | int | ≥0 | Site-determining (bracketing) ions over all sites. |
+| 60 | `MassCompetitionEvidence` | float | ≥0 | `Σ 1/(1+ambiguity+ρ)`, alternative-mass competition. |
+| 61 | `CandidateRankEntropy` | float | ≥0 | Softmax entropy of the retained top-K scores. |
+| 62 | `ListwiseScoreGap` | float | signed | Top-1 − top-2 `RankScore` in the retained queue. |
+| 63 | `RawScore` | float | unbounded | **Fused strong score** `signal − null`; the primary feature. |
+| 64 | `RawScoreCal` | float | signed | Per-spectrum z-scored `RawScore`. |
+| 65 | `RankScoreFloat` | float | unbounded | Unrounded `RankScore` (continuous split-sum). |
+| 66 | `DeltaRT` | float | signed | Observed − predicted retention time (min); 0 without RT. |
+| 67 | `AbsDeltaRT` | float | ≥0 | `|DeltaRT|`. |
+| 68 | `DeltaRTNorm` | float | signed | `DeltaRT` divided by the run's gradient span. |
+| 69 | `IsVariant` | 0/1 | — | A protein of the peptide is a UniProt natural-variant entry (§1a, provenance). |
+| 70 | `IsIsoform` | 0/1 | — | A protein of the peptide is an isoform entry. |
+| 71 | `IsChain` | 0/1 | — | A protein of the peptide is a mature-chain entry. |
+| 72 | `RefCompetitor` | 0/1 | — | A canonical (or FASTA) candidate with another peptidoform was scored for the spectrum. |
+| 73 | `DeltaRefScore` | float | signed | Flagged rows: `RankScore` minus that best canonical candidate's; 0 otherwise. |
+| 74 | `IsotopeMimic` | 0/1 | — | The precursor fits better when isotope-like deltas (deamidation, N→D, Q→E) are read as isotope steps. |
+| 75 | `Peptide` | string | — | `pre.SEQUENCE.post` with `+mass` mod annotations. |
+| 76 | `Proteins` | string | — | Protein accession(s), tab-separated; decoys carry `--decoy-prefix`. A UniProt variant entry names its change (`sp\|P04637_VAR_005851_D7H\|P53_HUMAN`), an isoform its id (`sp\|P04637-2\|P53_HUMAN`), a mature chain its feature id (`sp\|P02769_PRO_0000001058\|ALBU_BOVIN`). |
 
 Columns marked **0.0 unless/without** stay in the header and are zero when their condition
 does not hold.
@@ -995,10 +996,11 @@ modifications, charge, m/z, `is_decoy`, scan/rt, proteins, the spectrum arrays, 
 until rescoring; `protein_groups.parquet` is empty (protein groups are in
 `<stem>.protein_groups.tsv`, [§1](#protein-groups-and-protein-fdr)). With `--rescore`, every target row must join a
 Percolator result, except where target-decoy competition (`-Y`, which andes always passes)
-kept another PSM of its scan/`ExpMass` group: those target rows are left out of the bundle, as
+kept another PSM of its input file, scan and `ExpMass` group: those target rows are left out of the bundle, as
 they are out of Percolator's output; so are the decoys that lost that competition, and knockoff
 PSMs, which are never reported. `--rescore-native` competes in the same groups, with the same
-result for the bundle. In the match-between-runs feature parquet (`andes quant finalize`),
+result for the bundle. Scan numbers repeat across inputs, so the groups are per input: Percolator reads
+the input from the PIN `FileName` column. In the match-between-runs feature parquet (`andes quant finalize`),
 `posterior_error_probability` is null on every row: a row is a precursor in a run, not a PSM.
 
 ```bash

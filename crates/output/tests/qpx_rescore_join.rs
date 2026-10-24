@@ -210,7 +210,6 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         &[spectra.len()],
         Some(&map),
         None,
-        output::Competition::AcrossInputs,
         &std::collections::HashSet::new(),
     )
     .unwrap();
@@ -256,7 +255,6 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         &[spectra.len()],
         Some(&map),
         None,
-        output::Competition::AcrossInputs,
         &excluded,
     )
     .unwrap();
@@ -280,7 +278,6 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         &[spectra.len()],
         None,
         None,
-        output::Competition::AcrossInputs,
         &std::collections::HashSet::new(),
     )
     .unwrap();
@@ -348,7 +345,6 @@ fn batched_psms_preserve_global_indices_order_and_rescore_join() {
         &[repeated_spectra.len()],
         Some(&map),
         None,
-        output::Competition::AcrossInputs,
         &std::collections::HashSet::new(),
     )
     .unwrap();
@@ -411,7 +407,6 @@ fn multi_input_rows_carry_their_own_reference_file() {
         &[1000, 1025],
         None,
         None,
-        output::Competition::AcrossInputs,
         &std::collections::HashSet::new(),
     )
     .unwrap();
@@ -462,7 +457,6 @@ fn multi_input_rows_carry_their_own_reference_file() {
         &[1000, 1024],
         None,
         None,
-        output::Competition::AcrossInputs,
         &std::collections::HashSet::new(),
     )
     .unwrap_err();
@@ -488,7 +482,6 @@ fn dropped_peaks_write_null_peak_lists() {
             &[spectra.len()],
             None,
             None,
-            output::Competition::AcrossInputs,
             &std::collections::HashSet::new(),
         )
         .unwrap();
@@ -529,15 +522,15 @@ fn dropped_peaks_write_null_peak_lists() {
     );
 }
 
-/// Percolator `-Y` result for a PIN: per (ScanNr, ExpMass) group only the
+/// Percolator `-Y` result for a PIN: per (input file, ScanNr, ExpMass) group only the
 /// highest-scoring row survives, in the target file (a target) or the decoy file
 /// (a decoy). Returns (target map, decoy SpecIds, number of target rows removed).
 fn competition_result(pin_path: &Path) -> (HashMap<String, PercolatorPsm>, HashSet<String>, usize) {
-    competition_result_by(pin_path, false)
+    competition_result_by(pin_path, true)
 }
 
-/// [`competition_result`] with the groups kept per input file when `per_input`
-/// (the native rescorer's competition) instead of across the inputs.
+/// [`competition_result`] with the groups kept per input file when `per_input`,
+/// or pooled across the inputs (Percolator without a `FileName` column).
 fn competition_result_by(
     pin_path: &Path,
     per_input: bool,
@@ -661,7 +654,6 @@ fn qpx_join_accepts_targets_removed_by_target_decoy_competition() {
             &[spectra.len()],
             Some(&targets),
             decoys,
-            output::Competition::AcrossInputs,
             &std::collections::HashSet::new(),
         )
     };
@@ -709,13 +701,15 @@ fn qpx_join_reads_competition_groups_per_input() {
     let pin = tmp.path().join("two.pin");
     output::write_pin(&pin, &two_inputs, &two_queues, &candidates, &params, &idx).unwrap();
     let pin_rows = pin_spec_ids(&pin).len();
-    let (targets, decoys, removed) = competition_result_by(&pin, true);
+    let (targets, decoys, removed) = competition_result(&pin);
     assert!(
         removed > 0,
         "the fixture must have groups with several rows"
     );
 
-    let write = |dir: &Path, competition: output::Competition| {
+    let write = |dir: &Path,
+                 targets: &HashMap<String, PercolatorPsm>,
+                 decoys: &HashSet<String>| {
         output::write_qpx(
             dir,
             &two_inputs,
@@ -727,23 +721,26 @@ fn qpx_join_reads_competition_groups_per_input() {
             "test_run",
             &paths,
             &run_ends,
-            Some(&targets),
-            Some(&decoys),
-            competition,
+            Some(targets),
+            Some(decoys),
             &HashSet::new(),
         )
     };
-    // Read across the inputs, the two winners of a group look like a drifted join.
-    let err = write(
-        &tmp.path().join("across.idparquet"),
-        output::Competition::AcrossInputs,
-    )
-    .unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-
     let qdir = tmp.path().join("per_input.idparquet");
-    write(&qdir, output::Competition::PerInput).unwrap();
+    write(&qdir, &targets, &decoys).unwrap();
     let peps = read_pep_column(&qdir.join("psms.parquet"));
     assert_eq!(peps.len(), pin_rows - removed);
     assert_eq!(peps.iter().filter(|p| p.is_some()).count(), targets.len());
+
+    // A rescorer that competes across the inputs (a Percolator that ignores the
+    // PIN `FileName` column) leaves one input's rows of a shared scan and mass
+    // without a result: the join reports it instead of writing null q-values.
+    let (pooled_targets, pooled_decoys, _) = competition_result_by(&pin, false);
+    let err = write(
+        &tmp.path().join("pooled.idparquet"),
+        &pooled_targets,
+        &pooled_decoys,
+    )
+    .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
 }

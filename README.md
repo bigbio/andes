@@ -139,7 +139,7 @@ Percolator for q-values.
 > `--fragment-tol-ppm` / `--fragment-tol-da` override the inference.
 
 Each PIN row is one PSM. `RankScore` orders candidates within a spectrum; `RawScore` is the
-score Percolator weights most. All 66 columns are in [`DOCS.md` §3a](DOCS.md#3a-pin-columns).
+score Percolator weights most. All columns are in [`DOCS.md` §3a](DOCS.md#3a-pin-columns).
 The final tolerances and a per-modification PSM tally go to stderr and `<stem>.statistics.log`
 ([`DOCS.md` §3d](DOCS.md#3d-run-summary-stemstatisticslog)).
 

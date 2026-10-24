@@ -8,7 +8,7 @@
 //! # Column order
 //!
 //! ```text
-//! SpecId  Label  ScanNr  ExpMass  CalcMass  mass  RawScore  DeNovoScore
+//! SpecId  Label  ScanNr  ExpMass  CalcMass  FileName  mass  RawScore  DeNovoScore
 //! lnSpecEValue  lnEValue  isotope_error  peplen  dm  absdm
 //! charge<min>  charge<min+1>  ...  charge<max>   (the --charge range; a PSM
 //!                                                 charge outside it sets the
@@ -51,6 +51,12 @@
 //!
 //! * **CalcMass**: `peptide.mass()` already includes H2O — neutral mass is
 //!   computed directly from the peptide.
+//!
+//! * **FileName**: the input file the spectrum came from (the `<stem>/` prefix
+//!   of `SpecId`). Percolator's target-decoy competition (`-Y`) keeps one PSM
+//!   per file, `ScanNr` and `ExpMass`; scan numbers repeat across inputs, so
+//!   without this column PSMs of different runs that share a `ScanNr` and an
+//!   `ExpMass` would compete when per-run PINs are pooled by concatenation.
 //!
 //! ## Feature columns
 //!
@@ -470,6 +476,7 @@ fn write_header<W: Write>(writer: &mut W, min_charge: u8, max_charge: u8) -> io:
         "ScanNr".to_string(),
         "ExpMass".to_string(),
         "CalcMass".to_string(),
+        "FileName".to_string(),
         "mass".to_string(),
         // RankScore = the rank-LLR ranking score (formerly "RawScore"; value is
         // `psm.score`). Renamed so the headline/primary column is "RawScore"
@@ -782,7 +789,7 @@ fn write_psm_row<W: Write>(
     write_mass(writer, exp_mass)?;
     writer.write_all(b"\t")?;
     write_mass(writer, calc_mass)?;
-    writer.write_all(b"\t")?;
+    write!(writer, "\t{}\t", spec_id_run(&ctx.spec_id))?;
     write_double(writer, mass)?;
     // RawScore is the sole score column (GF-derived DeNovoScore / lnSpecEValue /
     // lnEValue are no longer emitted).
@@ -1216,6 +1223,7 @@ mod tests {
             "ScanNr",
             "ExpMass",
             "CalcMass",
+            "FileName",
             "mass",
             "RankScore",
             "isotope_error",

@@ -701,6 +701,22 @@ fn qpx_join_reads_competition_groups_per_input() {
     let pin = tmp.path().join("two.pin");
     output::write_pin(&pin, &two_inputs, &two_queues, &candidates, &params, &idx).unwrap();
     let pin_rows = pin_spec_ids(&pin).len();
+    // Percolator's competition groups are per input through the FileName
+    // column: every row names the input its SpecId stem names.
+    let pin_text = std::fs::read_to_string(&pin).unwrap();
+    let header: Vec<&str> = pin_text.lines().next().unwrap().split('\t').collect();
+    let (id_col, file_col) = (
+        header.iter().position(|c| *c == "SpecId").unwrap(),
+        header.iter().position(|c| *c == "FileName").unwrap(),
+    );
+    assert_eq!(file_col, header.iter().position(|c| *c == "CalcMass").unwrap() + 1);
+    let mut files = HashSet::new();
+    for line in pin_text.lines().skip(1) {
+        let f: Vec<&str> = line.split('\t').collect();
+        assert_eq!(f[file_col], output::spec_id_run(f[id_col]));
+        files.insert(f[file_col].to_string());
+    }
+    assert_eq!(files, HashSet::from(["run_a".to_string(), "run_b".to_string()]));
     let (targets, decoys, removed) = competition_result(&pin);
     assert!(
         removed > 0,

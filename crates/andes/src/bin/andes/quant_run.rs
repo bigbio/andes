@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use model::mass::{ISOTOPE, PROTON};
 use model::scan::{Ms1Scan, ProductScan, ScanContext};
 use model::spectrum::Spectrum;
-use model::Tolerance;
+use model::{IsomerClass, Tolerance};
 use output::feature_parquet::FeatureRecord;
 use output::ms2_table::{write_ms2_table, Ms2Table};
 use output::run_quant_table::{write_run_quant_table, RunPsmRow};
@@ -1557,23 +1557,29 @@ pub(crate) fn run_quant(
     // ── Label-free ────────────────────────────────────────────────────────────
     if s.lfq {
         let n_iso = s.lfq_params.n_isotopes;
-        // Best PSM per (run, peptidoform, charge): lowest q, then highest score.
-        let mut best: HashMap<(usize, String, u8), usize> = HashMap::new();
+        // A precursor is a positional-isomer class with a charge: the site
+        // forms of one peptide measure one MS1 signal. Best PSM per (run,
+        // precursor), and over every run, whose site form the precursor's
+        // rows report: lowest q, then highest score.
+        let better = |h: &Hit<'_>, other: &Hit<'_>| match (h.q_value, other.q_value) {
+            (Some(a), Some(b)) if a != b => a < b,
+            _ => h.psm.rank_score > other.psm.rank_score,
+        };
+        type Precursor = (IsomerClass, u8, bool);
+        let mut best: HashMap<(usize, Precursor), usize> = HashMap::new();
+        let mut form: HashMap<Precursor, usize> = HashMap::new();
         for (i, h) in hits.iter().enumerate() {
-            let key = (h.run_idx, peptidoform_of(h.cand), h.psm.charge_used);
-            match best.get(&key) {
-                Some(&j) => {
-                    let other = &hits[j];
-                    let better = match (h.q_value, other.q_value) {
-                        (Some(a), Some(b)) if a != b => a < b,
-                        _ => h.psm.rank_score > other.psm.rank_score,
-                    };
-                    if better {
-                        best.insert(key, i);
-                    }
-                }
-                None => {
-                    best.insert(key, i);
+            let precursor = (
+                IsomerClass::of_peptide(&h.cand.peptide),
+                h.psm.charge_used,
+                h.cand.is_decoy,
+            );
+            for slot in [
+                best.entry((h.run_idx, precursor.clone())).or_insert(i),
+                form.entry(precursor).or_insert(i),
+            ] {
+                if better(h, &hits[*slot]) {
+                    *slot = i;
                 }
             }
         }
@@ -1589,7 +1595,10 @@ pub(crate) fn run_quant(
             let groups = faims_groups(ms1);
             let (mut no_series, mut no_rt) = (0usize, 0usize);
             let mut targets: Vec<(usize, usize, LfqTarget)> = Vec::new();
-            for (_, &hi) in best.iter().filter(|((r, _, _), _)| *r == run_idx) {
+            // Hit index -> the hit whose site form its row reports.
+            let mut form_of: HashMap<usize, usize> = HashMap::new();
+            for ((_, precursor), &hi) in best.iter().filter(|((r, _), _)| *r == run_idx) {
+                form_of.insert(hi, form[precursor]);
                 let h = &hits[hi];
                 let spec = &spectra[h.spec_idx];
                 let Some(group) = group_of(&groups, run, spec) else {
@@ -1613,8 +1622,12 @@ pub(crate) fn run_quant(
                 n_found += 1;
                 let hit = &hits[hi];
                 let spec = &spectra[hit.spec_idx];
+                let mut id = quant_id(hit, run, spec, candidates, index);
+                let shown = hits[form_of[&hi]].cand;
+                id.peptidoform = peptidoform_of(shown);
+                id.modifications = modifications_of(shown);
                 all_rows.push(LfqRow {
-                    id: quant_id(hit, run, spec, candidates, index),
+                    id,
                     score: feature_score(&feature, params.rt_window_s, max_apex),
                     feature_q_value: qvals[k],
                     decoy_score: decoy

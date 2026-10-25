@@ -8,18 +8,12 @@
 
 use crate::candidate_gen::Candidate;
 use crate::psm::PsmMatch;
-
-/// A modification mass delta in units of 1e-5 Da, the precision of the PIN
-/// `Peptide` column.
-#[inline]
-fn mod_delta_units(mass_delta: f64) -> i64 {
-    (mass_delta * 100_000.0).round() as i64
-}
+use model::IsomerClass;
 
 /// Identity of a PSM up to the placement of its modifications: the precursor it
-/// was matched at, its charge, its target/decoy side, its residues, and the
-/// sorted multiset of its modification mass deltas (terminal mods included,
-/// since they are carried on the terminal residue). Two PSMs with equal keys are
+/// was matched at, its charge, its target/decoy side, and its [`IsomerClass`]
+/// (residues and the sorted multiset of its modification mass deltas,
+/// terminal mods included, since they are carried on the terminal residue). Two PSMs with equal keys are
 /// positional isomers — the same peptide with the same modifications on
 /// different sites.
 ///
@@ -30,8 +24,7 @@ pub struct IsomerKey {
     precursor_mz_bits: u64,
     charge: u8,
     is_decoy: bool,
-    residues: Vec<u8>,
-    mod_deltas: Vec<i64>,
+    class: IsomerClass,
 }
 
 impl IsomerKey {
@@ -39,14 +32,6 @@ impl IsomerKey {
     /// precursor m/z `spectrum_precursor_mz`. A chimeric secondary is keyed at
     /// its own precursor (`precursor_mz_override`).
     pub fn new(spectrum_precursor_mz: f64, psm: &PsmMatch, cand: &Candidate) -> Self {
-        let residues = cand.peptide.residues.iter().map(|aa| aa.residue).collect();
-        let mut mod_deltas: Vec<i64> = cand
-            .peptide
-            .residues
-            .iter()
-            .filter_map(|aa| aa.mod_.map(|m| mod_delta_units(m.mass_delta)))
-            .collect();
-        mod_deltas.sort_unstable();
         Self {
             precursor_mz_bits: psm
                 .precursor_mz_override
@@ -54,8 +39,7 @@ impl IsomerKey {
                 .to_bits(),
             charge: psm.charge_used,
             is_decoy: cand.is_decoy,
-            residues,
-            mod_deltas,
+            class: IsomerClass::of_peptide(&cand.peptide),
         }
     }
 }

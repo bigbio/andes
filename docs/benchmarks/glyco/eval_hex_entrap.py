@@ -55,13 +55,14 @@ with open(pin) as fh:
 total = hex_pos = 0
 fuc_pos = neugc_pos = 0
 comps = {}
+QI = open(psms).readline().rstrip("\n").split("\t").index("q-value")  # Percolator column order varies (filename column)
 with open(psms) as fh:
     for ln in fh:
         f = ln.rstrip("\n").split("\t")
         if f[0] == "PSMId" or len(f) < 3:
             continue
         try:
-            if float(f[2]) > 0.01:
+            if float(f[QI]) > 0.01:
                 continue
         except ValueError:
             continue

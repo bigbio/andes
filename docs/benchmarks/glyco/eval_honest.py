@@ -70,12 +70,13 @@ denom = sum(per_frac[fr] for fr in searched)
 seq_ok, mass_only, wrong_on_truth, off_truth = set(), set(), set(), 0
 ntgt = 0
 by_charge_ok = defaultdict(set)
+QI = open(psms).readline().rstrip("\n").split("\t").index("q-value")  # Percolator column order varies (filename column)
 for ln in open(psms):
     f = ln.rstrip("\n").split("\t")
     if f[0] == "PSMId" or len(f) < 3:
         continue
     try:
-        if float(f[2]) > 0.01:
+        if float(f[QI]) > 0.01:
             continue
     except ValueError:
         continue

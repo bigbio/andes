@@ -171,13 +171,14 @@ sample = SampleSequences(fasta) if fasta is not None else None
 
 n_entrap = n_sample = n_il = 0
 per_charge = defaultdict(lambda: [0, 0])
+QI = open(psms).readline().rstrip("\n").split("\t").index("q-value")  # Percolator column order varies (filename column)
 with open(psms) as fh:
     for line in fh:
         f = line.rstrip("\n").split("\t")
         if f[0] == "PSMId" or len(f) < 3:
             continue
         try:
-            if float(f[2]) > qmax:
+            if float(f[QI]) > qmax:
                 continue
         except ValueError:
             continue

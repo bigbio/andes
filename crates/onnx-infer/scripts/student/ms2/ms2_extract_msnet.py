@@ -202,7 +202,7 @@ def main():
                         st["unmapped"] += 1
                         continue
                     seq, mods = parsed
-                    if not fits(seq, mods, z, float(d[c_mz][i]), a.prec_tol_ppm):
+                    if d[c_mz][i] is None or not fits(seq, mods, z, float(d[c_mz][i]), a.prec_tol_ppm):
                         st["precursor_mismatch"] += 1
                         continue
                     act, analyser, nce, inst = conditions(d["cv_params"][i])

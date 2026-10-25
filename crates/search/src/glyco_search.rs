@@ -758,58 +758,21 @@ impl GlycoCtxOwned {
     }
 }
 
-/// Charge-expansion knob (P0 — precursor-mass mis-partitioning / charge blind spot).
+/// Charge states to enumerate for a glyco spectrum: the reported charge alone, or
+/// the configured `charge_range` when the spectrum carries no (or a non-positive)
+/// charge. The enumerated backbone is `(mz − PROTON)·z − H2O`, so the charge
+/// chosen here fixes the whole backbone set for the spectrum.
 ///
-/// R7 (data-grounded, 523-scan MSFragger-truth gap analysis): the dominant glyco
-/// generation loss is that large-backbone / high-charge true glycopeptides are
-/// NEVER enumerated — z5 → 100% absent, backbone >2200 Da → 84% absent — because
-/// the driver derives the backbone from `precursor_neutral = (mz − PROTON)·z − H2O`,
-/// which is LINEAR in the charge `z`, and trusts a single reported charge (or a
-/// `2..=3` fallback). If the reported/available charge is smaller than the true
-/// charge, the whole enumerated backbone set is shifted too LOW and the leftover
-/// precursor mass is absorbed by an OVERSIZED glycan — exactly the R7 signature
-/// (winner backbone −688 Da median, oversized glycan). This is the same class of
-/// defect as the "charge-1-only blind spot" in the standard search.
-/// Derive the charge states to enumerate for a glyco spectrum.
-///
-/// - `expand == 0` (default): EXACT legacy behavior — trust the reported charge as
-///   the only charge, else fall back to `charge_range`.
-/// - `expand == N ≥ 1`: widen the set UPWARD by `N`. For a reported charge `z`, try
-///   `{z, z+1, …, z+N}`; for a charge-missing spectrum, try `charge_range` with its
-///   upper bound raised by `N`. This lets a true higher charge (and thus the true
-///   large backbone) be enumerated even when the acquisition under-called the charge.
-///
-/// Returns a total-ordered, deduped `Vec<u8>` (no HashMap in the output path) so the
-/// enumerated candidate set is deterministic — a non-deterministic order here would
-/// make the truncated/kept subset irreproducible (this codebase had a 40% FDR swing
-/// from a non-deterministic sort). Charges saturate at `u8::MAX` and 0 is never
-/// emitted.
+/// Returns a sorted, deduped `Vec<u8>` (no HashMap in the output path) so the
+/// enumerated candidate set is deterministic; 0 is never emitted.
 fn glyco_charges_to_try(
     spec_charge: Option<i32>,
     charge_range: &std::ops::RangeInclusive<u8>,
-    expand: u8,
 ) -> Vec<u8> {
     let mut out: Vec<u8> = match spec_charge {
-        Some(z) if z > 0 => {
-            let z = z as u8;
-            // Instrument charge mis-calls put the true backbone mass off the grid
-            // (concentrated at z4-z6). When `expand > 0`, also try one charge BELOW
-            // (over-call) in addition to `expand` above (under-call). expand=0 =
-            // exact legacy set (single reported charge).
-            let lo = if expand > 0 {
-                z.saturating_sub(1).max(1)
-            } else {
-                z
-            };
-            (lo..=z.saturating_add(expand)).collect()
-        }
-        _ => {
-            let hi = charge_range.end().saturating_add(expand);
-            (*charge_range.start()..=hi).collect()
-        }
+        Some(z) if z > 0 => vec![z as u8],
+        _ => (*charge_range.start()..=*charge_range.end()).collect(),
     };
-    // Total-order sort + dedup: deterministic, no repeated charge (saturation at
-    // u8::MAX can collapse the top of the expansion window into duplicates).
     out.sort_unstable();
     out.dedup();
     out.retain(|&z| z > 0);
@@ -954,7 +917,6 @@ fn score_spectrum_glyco(
     // collisional component), so they enumerate the full glycan-database split
     // lattice even when the oxonium gate did not fire (see `glycan_source`).
     // Backbones are enumerated at the reported precursor charge only.
-    let charge_expand: u8 = 0;
     // c/z truncation gate (AXIS 4), ETD only: the Phase-1 backbone truncation
     // keeps the top-k backbones by b/y rank (AXIS 1) and glycan-Y count (AXIS 2),
     // and on ETD/AI-ETD scans ALSO the top-k by glycosite-spanning c/z evidence,
@@ -1063,11 +1025,9 @@ fn score_spectrum_glyco(
     // Oxonium evidence for the whole spectrum (charge-independent).
     let ox_ev = oxonium_gate(gen_peaks, OXONIUM_GATE_MIN_FRAC, tol_ppm);
 
-    // Determine which charges to try. With `charge_expand` = 0 this is the
-    // reported charge alone (or the configured range when none is reported).
-    // See `glyco_charges_to_try`.
-    let charges_to_try: Vec<u8> =
-        glyco_charges_to_try(spec.precursor_charge, &params.charge_range, charge_expand);
+    // Determine which charges to try: the reported charge alone (or the
+    // configured range when none is reported). See `glyco_charges_to_try`.
+    let charges_to_try: Vec<u8> = glyco_charges_to_try(spec.precursor_charge, &params.charge_range);
     // Max fragment charge for Y-ladder matching: a fragment cannot exceed
     // the precursor charge, and glyco Y-ions are frequently 2+/3+ (matched
     // up to +3 inside the Y functions). Default 3 when the precursor charge
@@ -2648,74 +2608,17 @@ mod tests {
         );
     }
 
-    /// P0 (charge blind spot): with the expansion knob OFF (default), a spectrum
-    /// carrying a reported charge is tried at EXACTLY that charge — the byte-for-byte
-    /// legacy behavior that preserves the 253/97 baseline. Charge-missing spectra
-    /// fall back to `charge_range` unchanged.
+    /// A spectrum carrying a reported charge is tried at exactly that charge;
+    /// charge-missing spectra fall back to `charge_range`.
     #[test]
-    fn charges_to_try_default_is_legacy_single_charge() {
+    fn charges_to_try_is_the_reported_charge_or_the_range() {
         let range = 2u8..=3u8;
-        // Reported charge → only that charge (expand=0).
-        assert_eq!(glyco_charges_to_try(Some(5), &range, 0), vec![5]);
-        assert_eq!(glyco_charges_to_try(Some(2), &range, 0), vec![2]);
-        // Charge-missing → the configured range, unchanged.
-        assert_eq!(glyco_charges_to_try(None, &range, 0), vec![2, 3]);
-        // Zero / negative reported charge → treated as missing → range.
-        assert_eq!(glyco_charges_to_try(Some(0), &range, 0), vec![2, 3]);
-        assert_eq!(glyco_charges_to_try(Some(-1), &range, 0), vec![2, 3]);
-    }
-
-    /// P0 (charge blind spot, R7: z5 = 100% absent): the true glycopeptide charge is
-    /// frequently HIGHER than the acquisition-reported charge (large glycopeptides at
-    /// high m/z are under-called). Because the enumerated backbone is
-    /// `(mz − PROTON)·z − H2O` (LINEAR in z), a too-small reported z shifts the whole
-    /// backbone set too low and the true large backbone is never enumerated.
-    ///
-    /// With `expand = N`, the tried charge set must widen UPWARD so a
-    /// spectrum reported as z4 also tries z5 (and higher), letting the true higher
-    /// charge — and thus the true large backbone — be enumerated. The result must be
-    /// deterministic (sorted, deduped, total-ordered) with no HashMap in the path.
-    #[test]
-    fn charges_to_try_expands_upward_to_reach_true_higher_charge() {
-        let range = 2u8..=3u8;
-
-        // A z4-reported spectrum whose TRUE charge is z5 (under-call) OR z3
-        // (over-call): expand=1 tries z±1 = [3,4,5].
-        let got = glyco_charges_to_try(Some(4), &range, 1);
-        assert_eq!(
-            got,
-            vec![3, 4, 5],
-            "expand=1 on reported z4 must try z3..z5"
-        );
-        assert!(
-            got.contains(&5),
-            "the true higher charge (z5) must be enumerated"
-        );
-
-        // Larger expansion window: one below (z-1) + `expand` above; sorted/deduped.
-        assert_eq!(
-            glyco_charges_to_try(Some(3), &range, 3),
-            vec![2, 3, 4, 5, 6]
-        );
-
-        // Charge-missing: the fallback range is widened UP by N so z4/z5 become
-        // reachable when the acquisition assigned no charge at all.
-        assert_eq!(glyco_charges_to_try(None, &range, 2), vec![2, 3, 4, 5]);
-
-        // Determinism / saturation edge: near u8::MAX the window collapses to a
-        // single deduped, ordered charge (no panic, no duplicates, no zero).
-        let hi = glyco_charges_to_try(Some(255), &range, 3);
-        assert_eq!(
-            hi,
-            vec![254, 255],
-            "saturation dedups the upward window; z-1 kept"
-        );
-        for w in hi.windows(2) {
-            assert!(
-                w[0] < w[1],
-                "output must be strictly increasing (sorted + deduped)"
-            );
-        }
+        assert_eq!(glyco_charges_to_try(Some(5), &range), vec![5]);
+        assert_eq!(glyco_charges_to_try(Some(2), &range), vec![2]);
+        assert_eq!(glyco_charges_to_try(None, &range), vec![2, 3]);
+        // Zero / negative reported charge is treated as missing.
+        assert_eq!(glyco_charges_to_try(Some(0), &range), vec![2, 3]);
+        assert_eq!(glyco_charges_to_try(Some(-1), &range), vec![2, 3]);
     }
 
     /// P0.1 (Codex #2): `dedup_backbone_hits` must NOT merge two de-novo hits

@@ -2,6 +2,11 @@ use crate::glycan_db::GlycanComp;
 use crate::glycan_first::PPM_FLOOR_DA;
 use crate::glycan_mass::CORE_OXONIUM_MZ;
 
+/// Absolute floor (Da) on the ppm window of the core-oxonium and sialic-oxonium
+/// matchers (wider than [`PPM_FLOOR_DA`], which the other diagnostic-ion
+/// matchers use).
+const OXONIUM_TOL_FLOOR_DA: f64 = 0.01;
+
 /// Neu5Ac (NeuAc / sialic) oxonium ions: 274.0921 (Neu5Ac−H2O), 292.1027 (Neu5Ac).
 pub const NEUAC_OXONIUM_MZ: [f64; 2] = [274.09211, 292.10267];
 /// Neu5Gc (NeuGc) oxonium ions: 290.0870 (−H2O), 308.0976.
@@ -28,7 +33,7 @@ pub fn sialic_consistency(peaks: &[(f64, f32)], comp: &GlycanComp, tol_ppm: f64)
     let best_match = |ions: &[f64]| -> f32 {
         let mut acc = 0.0f32;
         for &mz in ions {
-            let tol = (mz * tol_ppm / 1e6).max(0.01);
+            let tol = (mz * tol_ppm / 1e6).max(OXONIUM_TOL_FLOOR_DA);
             let mut best = 0.0f32;
             for &(pmz, pi) in peaks {
                 if (pmz - mz).abs() <= tol && pi > best {
@@ -86,7 +91,7 @@ pub fn oxonium_gate(peaks: &[(f64, f32)], min_frac: f32, tol_ppm: f64) -> Oxoniu
     let mut summed = 0.0f32;
     let mut n = 0u8;
     for &mz in CORE_OXONIUM_MZ.iter() {
-        let tol = (mz * tol_ppm / 1e6).max(0.01);
+        let tol = (mz * tol_ppm / 1e6).max(OXONIUM_TOL_FLOOR_DA);
         // best matching peak for this oxonium m/z
         let mut best = 0.0f32;
         for &(pmz, pi) in peaks {

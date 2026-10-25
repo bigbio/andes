@@ -23,8 +23,8 @@ use crate::rescore;
 use crate::spectra::{
     add_mzml_skipped, detect_dominant_activation, detect_instrument_type_for_path,
     detect_isobaric_sampled, input_format_flags, merge_parse_stats, ms3_carries_reporters,
-    prefix_spectrum_titles, run_precursor_calibration, sample_ms2_meta, sample_spectra,
-    send_chunks, title_prefix_for, tolerance_ppm_display, ParseStats,
+    prefix_spectrum_titles, require_spectra, run_precursor_calibration, sample_ms2_meta,
+    sample_spectra, send_chunks, title_prefix_for, tolerance_ppm_display, ParseStats,
 };
 use crate::{arg_present, report_search_progress, EXPLICIT_MISSED_CLEAVAGES};
 use input::{MgfReader, Ms1Link, MzMLReader};
@@ -241,15 +241,15 @@ impl FragmentErrorMeasurer {
                 prepared.scorer.set_fragment_error(Some(m));
                 eprintln!(
                     "Fragment error: offset {:+.2} ppm, spread {:.2} ppm from {} ions of {} PSMs \
-                     at 1% q in {} sampled spectra -> PIN feature tolerance {:.1} ppm, \
-                     ppm-Gaussian centre {:+.2} width {:.2} ppm ({:.1}s)",
+                     at 1% q in {} sampled spectra -> fragment peaks recentred by {:+.2} ppm, \
+                     PIN feature tolerance {:.1} ppm, ppm-Gaussian width {:.2} ppm ({:.1}s)",
                     m.offset_ppm,
                     m.sigma_ppm,
                     m.ions,
                     m.psms,
                     sample.len(),
+                    prepared.scorer.fragment_recentre_ppm(),
                     m.feature_tolerance_ppm(),
-                    m.offset_ppm,
                     m.gaussian_sigma_ppm(),
                     t.elapsed().as_secs_f64()
                 );
@@ -580,6 +580,20 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // warning would also fire there under the wrong policy and suppress the
     // correct message for the rest of the run.
     input::mzml::init_ethcd_as_etd(cli.ethcd_activation == EthcdActivationFlag::Etd);
+
+    // A `.raw` that cannot be opened (no .NET runtime, unreadable file) fails
+    // here. The metadata samplers below treat an unreadable file as "no
+    // metadata", so a failure left to them would run the search on the default
+    // low-resolution acquisition and only report the error after it.
+    if is_raw {
+        #[cfg(feature = "thermo")]
+        input::ThermoRawReader::open(&spectrum_path).map_err(|e| e.to_string())?;
+        #[cfg(not(feature = "thermo"))]
+        return Err("this andes build has no Thermo .raw support; rebuild with \
+                    `--features thermo` (and run with the .NET 8 runtime installed). \
+                    mzML/MGF inputs work without it."
+            .into());
+    }
 
     // Detect (activation, instrument) from the input for auto-routing.
     // mzML peeks the file; Thermo `.raw` reads vendor metadata; Bruker `.d`
@@ -1642,6 +1656,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .into());
         }
 
+        let spectra_before = all_spectra.len();
         let mut run_scans = RunScans::default();
         let file_stats = if ms1_input {
             let (tx, rx) = sync_channel::<(Vec<Spectrum>, Ms1Link)>(2);
@@ -2049,6 +2064,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 Err(_) => return Err("parser thread panicked".into()),
             }
         };
+        require_spectra(
+            input_path,
+            if ms1_input { 2 } else { cli.ms_level },
+            all_spectra.len() - spectra_before,
+        )?;
         merge_parse_stats(&mut parse_stats, file_stats);
         if let Some(q) = quant.as_mut() {
             q.finish_file(

@@ -1093,12 +1093,15 @@ instrument and NCE follow the acquisition class.
 each input file's fragment mass error is measured before it is scored: up to 3,000 spectra around
 the median precursor mass are searched, the rank-1 targets at 1% target-decoy q have their seven
 most intense b/y ions re-matched within 50 ppm, and the median and robust spread of those errors
-are logged (`Fragment error: ...`). The PIN match features (match counts, ion-current ratios,
-error statistics, chance-match and mass-competition terms) then use `|offset| + 4 x spread`,
-clamped to 5-40 ppm, and the ppm-Gaussian term is centred on the offset with a width of
-1.5 x spread. The features fed to the trained fragment-intensity and rich-ion models, the
-fragment index and the quantification keep the 20 ppm class window. `--fragment-tol-ppm` /
-`--fragment-tol-da` replace the measurement on any input format.
+are logged (`Fragment error: ...`). The file's fragment peaks are then scored at their
+offset-corrected m/z (a copy; the spectra written to the quantification and the outputs are not
+changed), so the fragment-index retrieval, the rank scoring and every feature see peaks centred
+on zero. The PIN match features (match counts, ion-current ratios, error statistics,
+chance-match and mass-competition terms) use `4 x spread`, clamped to 5-40 ppm, and the
+ppm-Gaussian term has a width of 1.5 x spread. The features fed to the trained
+fragment-intensity and rich-ion models and the fragment index keep the 20 ppm class window,
+now around the corrected peaks. `--fragment-tol-ppm` / `--fragment-tol-da` replace the
+measurement (no correction) on any input format.
 
 ### Activation CV mapping (mzML `<activation>` cvParam accession → method)
 

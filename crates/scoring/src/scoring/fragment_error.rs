@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Spreads added to the offset for the PIN feature tolerance.
+/// Spreads in the PIN feature tolerance.
 pub const TOL_SIGMAS: f64 = 4.0;
 /// Narrowest derived feature tolerance (ppm).
 pub const MIN_FEATURE_TOL_PPM: f64 = 5.0;
@@ -39,11 +39,10 @@ impl FragmentErrorModel {
         }
     }
 
-    /// Symmetric feature tolerance covering the error distribution:
-    /// `|offset| + 4 sigma`, clamped to 5-40 ppm.
+    /// Symmetric feature tolerance around the recentred peaks:
+    /// `4 sigma`, clamped to 5-40 ppm.
     pub fn feature_tolerance_ppm(&self) -> f64 {
-        (self.offset_ppm.abs() + TOL_SIGMAS * self.sigma_ppm)
-            .clamp(MIN_FEATURE_TOL_PPM, MAX_FEATURE_TOL_PPM)
+        (TOL_SIGMAS * self.sigma_ppm).clamp(MIN_FEATURE_TOL_PPM, MAX_FEATURE_TOL_PPM)
     }
 
     /// Width of the ppm-Gaussian term.
@@ -94,10 +93,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tolerance_covers_offset_and_four_spreads_within_bounds() {
+    fn tolerance_is_four_spreads_within_bounds() {
         // Astral-like: -2.5 ppm, spread 1.6 ppm.
         let astral = FragmentErrorModel::new(-2.5, 1.6, 5000, 800);
-        assert!((astral.feature_tolerance_ppm() - 8.9).abs() < 1e-9);
+        assert!((astral.feature_tolerance_ppm() - 6.4).abs() < 1e-9);
         assert!((astral.gaussian_sigma_ppm() - 2.4).abs() < 1e-9);
         // Very tight data is floored, very loose data capped.
         assert_eq!(
@@ -105,7 +104,7 @@ mod tests {
             MIN_FEATURE_TOL_PPM
         );
         assert_eq!(
-            FragmentErrorModel::new(12.0, 9.0, 1, 1).feature_tolerance_ppm(),
+            FragmentErrorModel::new(0.0, 11.0, 1, 1).feature_tolerance_ppm(),
             MAX_FEATURE_TOL_PPM
         );
         assert_eq!(

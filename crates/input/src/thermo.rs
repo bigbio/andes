@@ -24,11 +24,25 @@ use crate::{Ms1Link, Spectrum};
 /// Error opening a Thermo `.raw` file.
 #[derive(Debug, thiserror::Error)]
 pub enum ThermoParseError {
-    #[error("failed to open Thermo .raw '{path}': {source}")]
+    #[error("failed to open Thermo .raw '{path}': {source}{}", runtime_hint(.source))]
     Open {
         path: String,
         source: std::io::Error,
     },
+}
+
+/// Appended to an open failure that is not a missing or malformed file: the
+/// RawFileReader needs the .NET 8 runtime, and its hosting layer reports a
+/// missing runtime only as a generic error ("One of the dependent libraries
+/// is missing").
+fn runtime_hint(source: &std::io::Error) -> &'static str {
+    match source.kind() {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidData => "",
+        _ => {
+            " (opening a .raw needs the .NET 8 runtime: install it, or set DOTNET_ROOT \
+              to its directory)"
+        }
+    }
 }
 
 /// Reader over a Thermo `.raw`, yielding [`Spectrum`] values.
@@ -778,6 +792,32 @@ impl Iterator for ThermoRawReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_failure_names_the_file_and_the_runtime_only_when_it_may_be_missing() {
+        let host = ThermoParseError::Open {
+            path: "run.raw".into(),
+            source: std::io::Error::other("One of the dependent libraries is missing."),
+        }
+        .to_string();
+        assert!(host.contains("'run.raw'"), "{host}");
+        assert!(host.contains("DOTNET_ROOT"), "{host}");
+
+        for kind in [
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::InvalidData,
+        ] {
+            let file = ThermoParseError::Open {
+                path: "run.raw".into(),
+                source: std::io::Error::new(kind, "bad file"),
+            }
+            .to_string();
+            assert!(
+                file.contains("'run.raw'") && !file.contains("DOTNET_ROOT"),
+                "{file}"
+            );
+        }
+    }
 
     #[test]
     fn master_scan_links_to_the_native_id_of_that_scan() {

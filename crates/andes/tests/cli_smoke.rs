@@ -687,16 +687,16 @@ fn top_n_zero_is_rejected() {
 }
 
 #[test]
-fn predict_ms2_without_a_model_directory_fails_before_the_search() {
+fn predict_peptdeep_ms2_without_a_model_directory_fails_before_the_search() {
     let dir = tempfile::tempdir().expect("tempdir");
     let pin = dir.path().join("out.pin");
     let out = base_cmd("test-fixtures/test.mgf.gz", "test-fixtures/BSA.fasta", &pin)
-        .args(["--predict", "rt,ms2"])
+        .args(["--predict", "rt,peptdeep-ms2"])
         .output()
         .expect("run andes");
     assert!(
         !out.status.success(),
-        "--predict ms2 without models must fail"
+        "--predict peptdeep-ms2 without models must fail"
     );
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("--predictor-models"), "{err}");

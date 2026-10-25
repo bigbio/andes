@@ -118,6 +118,41 @@ impl Acquisition {
             .then_some(nce)
     }
 
+    /// The activation name andes-ms2 is conditioned on: the dissociation and
+    /// the MS2 analyser (`HCD-FTMS`, `HCD-ASTMS`, `CID-ITMS`...). Without a
+    /// recorded activation, high-resolution runs are HCD and low-resolution
+    /// runs CID. Time-of-flight runs and activations outside the model's
+    /// vocabulary are "unknown".
+    pub(crate) fn ms2_activation(&self) -> &'static str {
+        if self.is_tof() {
+            return "unknown";
+        }
+        let dissociation = match self.activation {
+            Some(ActivationMethod::HCD) => "HCD",
+            Some(ActivationMethod::CID) => "CID",
+            Some(_) => return "unknown",
+            None if self.high_res => "HCD",
+            None => "CID",
+        };
+        match (dissociation, self.analyzer, self.high_res) {
+            ("HCD", Some(InstrumentType::OrbitrapAstral), _) => "HCD-ASTMS",
+            ("HCD", _, true) => "HCD-FTMS",
+            ("HCD", _, false) => "HCD-ITMS",
+            ("CID", _, true) => "CID-FTMS",
+            _ => "CID-ITMS",
+        }
+    }
+
+    /// The instrument name andes-ms2 maps to its instrument family; empty
+    /// (unknown family) for instruments the model has no family for.
+    pub(crate) fn ms2_instrument(&self) -> &'static str {
+        match self.analyzer {
+            Some(InstrumentType::QExactive) => "Q Exactive",
+            Some(InstrumentType::OrbitrapAstral) => "Orbitrap Astral",
+            _ => "",
+        }
+    }
+
     /// The instrument a predictor should be told: the analyzer in the
     /// metadata, else the model's.
     pub(crate) fn predictor_instrument(&self, model_instrument: InstrumentType) -> InstrumentType {

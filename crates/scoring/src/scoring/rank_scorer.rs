@@ -324,12 +324,26 @@ impl RankScorer {
         }
     }
 
-    /// Centre and width (ppm) of the ppm-Gaussian tight-match term: the
-    /// measured offset and 1.5 times the measured spread, else 0 and 7 ppm.
+    /// Median signed fragment error (ppm) the search removes from a run's
+    /// fragment peaks before scoring them: the measured offset on
+    /// high-resolution data without a CLI tolerance override, else 0. A
+    /// peak observed at `mz` is scored at `mz / (1 + offset * 1e-6)`.
+    pub fn fragment_recentre_ppm(&self) -> f64 {
+        match self.fragment_error.get() {
+            Some(m) if self.fragment_tol_override.is_none() && self.acquisition_is_high_res() => {
+                m.offset_ppm
+            }
+            _ => 0.0,
+        }
+    }
+
+    /// Centre and width (ppm) of the ppm-Gaussian tight-match term, on peaks
+    /// already recentred by [`Self::fragment_recentre_ppm`]: centre 0 and 1.5
+    /// times the measured spread, else 0 and 7 ppm.
     pub fn ppm_gaussian(&self) -> (f64, f64) {
         match self.fragment_error.get() {
             Some(m) if self.fragment_tol_override.is_none() && self.acquisition_is_high_res() => {
-                (m.offset_ppm, m.gaussian_sigma_ppm())
+                (0.0, m.gaussian_sigma_ppm())
             }
             _ => (
                 0.0,
@@ -534,17 +548,21 @@ mod tests {
         assert!((t - 8.9).abs() < 1e-9, "{t}");
         assert_eq!(hi.feature_match_tolerance(), Tolerance::Ppm(20.0));
         let (c, s) = hi.ppm_gaussian();
-        assert!((c + 2.5).abs() < 1e-12 && (s - 2.4).abs() < 1e-9);
+        assert!(c == 0.0 && (s - 2.4).abs() < 1e-9);
+        assert_eq!(hi.fragment_recentre_ppm(), -2.5);
         let lo = RankScorer::new(&low_res_param());
         lo.set_fragment_error(Some(FragmentErrorModel::new(-2.5, 1.6, 100, 100)));
         assert_eq!(lo.pin_match_tolerance(), Tolerance::Da(0.5));
         assert_eq!(lo.ppm_gaussian(), (0.0, 7.0));
+        assert_eq!(lo.fragment_recentre_ppm(), 0.0);
         let mut ov = RankScorer::new(&tiny_param());
         ov.set_fragment_error(Some(FragmentErrorModel::new(-2.5, 1.6, 100, 100)));
         ov.set_fragment_tol_override(Some(Tolerance::Ppm(15.0)));
         assert_eq!(ov.pin_match_tolerance(), Tolerance::Ppm(15.0));
         assert_eq!(ov.ppm_gaussian(), (0.0, 7.0));
+        assert_eq!(ov.fragment_recentre_ppm(), 0.0);
         hi.set_fragment_error(None);
+        assert_eq!(hi.fragment_recentre_ppm(), 0.0);
         assert_eq!(hi.pin_match_tolerance(), Tolerance::Ppm(20.0));
     }
 

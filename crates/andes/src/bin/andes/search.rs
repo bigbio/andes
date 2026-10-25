@@ -241,15 +241,15 @@ impl FragmentErrorMeasurer {
                 prepared.scorer.set_fragment_error(Some(m));
                 eprintln!(
                     "Fragment error: offset {:+.2} ppm, spread {:.2} ppm from {} ions of {} PSMs \
-                     at 1% q in {} sampled spectra -> PIN feature tolerance {:.1} ppm, \
-                     ppm-Gaussian centre {:+.2} width {:.2} ppm ({:.1}s)",
+                     at 1% q in {} sampled spectra -> fragment peaks recentred by {:+.2} ppm, \
+                     PIN feature tolerance {:.1} ppm, ppm-Gaussian width {:.2} ppm ({:.1}s)",
                     m.offset_ppm,
                     m.sigma_ppm,
                     m.ions,
                     m.psms,
                     sample.len(),
+                    prepared.scorer.fragment_recentre_ppm(),
                     m.feature_tolerance_ppm(),
-                    m.offset_ppm,
                     m.gaussian_sigma_ppm(),
                     t.elapsed().as_secs_f64()
                 );

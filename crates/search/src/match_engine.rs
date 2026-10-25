@@ -49,6 +49,29 @@ use scoring_crate::scoring::{
 /// [`PreparedSearch::with_candidate_filter`].
 pub type CandidateFilter = Box<dyn Fn(&Candidate) -> bool + Send + Sync>;
 
+/// `spectra` with every fragment peak moved by `-offset_ppm` (a peak observed at
+/// `mz` is scored at `mz / (1 + offset * 1e-6)`), or `None` when the offset is
+/// zero. The copy carries the run's measured fragment error out of retrieval,
+/// scoring and the PIN features; the caller's spectra stay as read.
+pub(crate) fn recentred_spectra(spectra: &[Spectrum], offset_ppm: f64) -> Option<Vec<Spectrum>> {
+    if offset_ppm == 0.0 || !offset_ppm.is_finite() {
+        return None;
+    }
+    let scale = 1.0 / (1.0 + offset_ppm * 1e-6);
+    Some(
+        spectra
+            .iter()
+            .map(|s| {
+                let mut c = s.clone();
+                for p in &mut c.peaks {
+                    p.0 *= scale;
+                }
+                c
+            })
+            .collect(),
+    )
+}
+
 pub struct PreparedSearch<'a> {
     pub idx: &'a SearchIndex,
     pub params: &'a SearchParams,
@@ -514,6 +537,14 @@ impl<'a> PreparedSearch<'a> {
         spectrum_idx_offset: usize,
         params: &SearchParams,
     ) -> Vec<TopNQueue> {
+        let shifted;
+        let spectra = match recentred_spectra(spectra, self.scorer.fragment_recentre_ppm()) {
+            Some(v) => {
+                shifted = v;
+                &shifted[..]
+            }
+            None => spectra,
+        };
         let has_charge = |s: &Spectrum| s.precursor_charge.is_some_and(|z| z > 0);
         if params.fragment_index_top_k == 0
             || params.charge_range.clone().count() < 2
@@ -1561,6 +1592,14 @@ pub fn run_pass2_coisolation(
     if !params.chimeric {
         return;
     }
+    let shifted;
+    let spectra = match recentred_spectra(spectra, prepared.scorer.fragment_recentre_ppm()) {
+        Some(v) => {
+            shifted = v;
+            &shifted[..]
+        }
+        None => spectra,
+    };
 
     // (A) Co-isolated precursors and the primary peptide of every scan Pass 1
     // identified.
@@ -2741,6 +2780,22 @@ mod feature_tests {
             isolation_upper_offset: None,
             isolation_target_mz: None,
         }
+    }
+
+    #[test]
+    fn recentred_spectra_removes_the_measured_offset() {
+        let spec = make_spectrum(vec![(300.0, 1.0), (1000.0, 2.0)]);
+        assert!(recentred_spectra(std::slice::from_ref(&spec), 0.0).is_none());
+        // Peaks observed 8 ppm low come back at their theoretical m/z.
+        let theo = [300.0, 1000.0];
+        let low = make_spectrum(theo.iter().map(|m| (m * (1.0 - 8e-6), 1.0)).collect());
+        let c = recentred_spectra(std::slice::from_ref(&low), -8.0).unwrap();
+        for (p, t) in c[0].peaks.iter().zip(theo) {
+            assert!((p.0 - t).abs() / t < 1e-9, "{} vs {t}", p.0);
+        }
+        // The input is untouched and peak order is kept.
+        assert_eq!(low.peaks[0].0, 300.0 * (1.0 - 8e-6));
+        assert!(c[0].peaks.windows(2).all(|w| w[0].0 < w[1].0));
     }
 
     // ── Test: empty spectrum → all new features are 0 ───────────────────────

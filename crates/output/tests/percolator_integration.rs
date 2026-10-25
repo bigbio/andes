@@ -10,7 +10,10 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use output::{resolve_backend, run_percolator, PercolatorBackend, DEFAULT_PERCOLATOR_IMAGE};
+use output::{
+    percolator_args_with_threads, resolve_backend, run_percolator, run_percolator_with_decoys,
+    PercolatorBackend, DEFAULT_PERCOLATOR_IMAGE,
+};
 
 /// Resolve a backend for the test, honoring `$ANDES_TEST_PERCOLATOR_BIN` first.
 /// Returns `None` (→ skip) when nothing is available.
@@ -94,5 +97,93 @@ fn percolator_end_to_end_or_skip() {
     assert!(
         map.keys().any(|k| k.starts_with("tt_")),
         "expected a target PSM (tt_*) in the results"
+    );
+}
+
+/// Two runs' PINs pooled by concatenation, every target sharing its `ScanNr`
+/// and `ExpMass` with the other run's target. Percolator's target-decoy
+/// competition (`-Y`) keeps one PSM per file, scan and `ExpMass`: with the
+/// `FileName` column both runs' PSMs survive; without it the rows of the
+/// better-scoring run wins each group and the other run's row is dropped.
+fn write_pooled_pin(path: &std::path::Path, with_file_name: bool) {
+    let mut w = std::fs::File::create(path).unwrap();
+    let file_col = if with_file_name { "\tFileName" } else { "" };
+    writeln!(
+        w,
+        "SpecId\tLabel\tScanNr\tExpMass{file_col}\tRawScore\tdm\tPeptide\tProteins"
+    )
+    .unwrap();
+    for (run, offset) in [("run_a", 0), ("run_b", 7)] {
+        let file = if with_file_name {
+            format!("\t{run}")
+        } else {
+            String::new()
+        };
+        for i in 0..60 {
+            // Same scan and mass in both runs; the score differs slightly.
+            writeln!(
+                w,
+                "{run}/t_{i}_1\t1\t{i}\t{mass}{file}\t{score}\t0.001\tR.PEPTIDEK.A\tsp|T{i}",
+                mass = 1000.0 + 0.5 * i as f64,
+                score = 40 + i + offset
+            )
+            .unwrap();
+        }
+        for i in 0..60 {
+            writeln!(
+                w,
+                "{run}/d_{i}_1\t-1\t{scan}\t{mass}{file}\t{score}\t0.9\tR.EDITPEPK.A\tXXX_D{i}",
+                scan = 1000 + i,
+                mass = 2000.0 + 0.5 * i as f64 + offset as f64,
+                score = 1 + (i % 3)
+            )
+            .unwrap();
+        }
+    }
+}
+
+#[test]
+fn pooled_runs_compete_per_file_or_skip() {
+    let Some(backend) = test_backend() else {
+        eprintln!(
+            "SKIP pooled_runs_compete_per_file_or_skip: no Percolator backend \
+             (set $ANDES_TEST_PERCOLATOR_BIN, put `percolator` on PATH, or provide docker)."
+        );
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let args = percolator_args_with_threads(&[], 1);
+    let winners = |with_file_name: bool| -> Option<(usize, usize)> {
+        let pin = tmp.path().join(format!("pooled_{with_file_name}.pin"));
+        write_pooled_pin(&pin, with_file_name);
+        match run_percolator_with_decoys(&backend, &pin, &args) {
+            Ok((targets, decoys)) => {
+                let count = |run: &str| {
+                    targets
+                        .keys()
+                        .chain(decoys.iter())
+                        .filter(|k| k.starts_with(&format!("{run}/t_")))
+                        .count()
+                };
+                Some((count("run_a"), count("run_b")))
+            }
+            Err(e) => {
+                eprintln!("SKIP pooled_runs_compete_per_file_or_skip: run failed: {e}");
+                None
+            }
+        }
+    };
+    let (Some(without), Some(with)) = (winners(false), winners(true)) else {
+        return;
+    };
+    assert_eq!(
+        with,
+        (60, 60),
+        "with FileName every run's 60 colliding targets must be reported"
+    );
+    assert_eq!(
+        without.0 + without.1,
+        60,
+        "without FileName the two runs' rows share 60 groups and one row of each wins: {without:?}"
     );
 }

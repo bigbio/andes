@@ -332,6 +332,7 @@ mod tests {
         let model = GbdtPeakModel {
             packed: Default::default(),
             n_features: 1,
+            feature_names: scoring_crate::gbdt_eval::indexed_feature_names(1),
             apply_sigmoid: false,
             trees: vec![tree],
             iso_x: vec![],

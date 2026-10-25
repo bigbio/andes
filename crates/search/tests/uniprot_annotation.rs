@@ -507,11 +507,12 @@ fn index_cache_key_tells_variant_entries_apart() {
         Some(VariantRegion { start: 3, end: 4 }),
     )));
     let p = params(false);
-    let a = index_cache_path(&SearchIndex::from_target_db(&plain, "XXX"), &p);
-    let b = index_cache_path(&SearchIndex::from_target_db(&variant, "XXX"), &p);
+    let dir = std::path::Path::new("cache");
+    let a = index_cache_path(&SearchIndex::from_target_db(&plain, "XXX"), &p, dir);
+    let b = index_cache_path(&SearchIndex::from_target_db(&variant, "XXX"), &p, dir);
     assert_ne!(a, b);
     // Annotated sites alone do not change which base records exist.
-    let again = index_cache_path(&SearchIndex::from_target_db(&plain, "XXX"), &p);
+    let again = index_cache_path(&SearchIndex::from_target_db(&plain, "XXX"), &p, dir);
     assert_eq!(a, again);
 }
 

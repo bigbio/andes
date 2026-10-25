@@ -256,6 +256,10 @@ fn gbdt_blob_roundtrips_through_store() {
         packed: Default::default(),
         // Must match the peak-feature contract (finding 3.1) to load.
         n_features: scoring_crate::peak_features::N_FEATURES as u32,
+        feature_names: scoring_crate::peak_features::FEATURE_NAMES
+            .iter()
+            .map(|n| n.to_string())
+            .collect(),
         apply_sigmoid: true,
         trees: vec![Tree {
             feature: vec![0, -1, -1],
@@ -358,6 +362,10 @@ fn multi_model_write_preserves_blobs_and_sources() {
         packed: Default::default(),
         // Must match the peak-feature contract (finding 3.1) to load.
         n_features: scoring_crate::peak_features::N_FEATURES as u32,
+        feature_names: scoring_crate::peak_features::FEATURE_NAMES
+            .iter()
+            .map(|n| n.to_string())
+            .collect(),
         apply_sigmoid: true,
         trees: vec![Tree {
             feature: vec![0, -1, -1],
@@ -456,6 +464,10 @@ fn frag_intensity_model_roundtrips_through_store() {
         packed: Default::default(),
         // Must match the frag-intensity feature contract (finding 3.1) to load.
         n_features: scoring_crate::frag_features::N_FRAG_FEATURES as u32,
+        feature_names: scoring_crate::frag_features::FRAG_FEATURE_NAMES
+            .iter()
+            .map(|n| n.to_string())
+            .collect(),
         apply_sigmoid: false,
         trees: vec![Tree {
             feature: vec![-1],
@@ -518,6 +530,10 @@ fn rich_ion_model_round_trips_through_store() {
         packed: Default::default(),
         // Must match the rich-ion feature contract (finding 3.1) to load.
         n_features: scoring_crate::ion_features::N_ION_FEATURES as u32,
+        feature_names: scoring_crate::ion_features::ION_FEATURE_NAMES
+            .iter()
+            .map(|n| n.to_string())
+            .collect(),
         apply_sigmoid: false,
         trees: vec![Tree {
             feature: vec![-1],

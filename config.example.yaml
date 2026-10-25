@@ -18,6 +18,7 @@ io:
   # uniprot_evidence: experimental  # UniProt XML: experimental | curated | any (variants, sites, chains)
   output_pin: out.pin            # Percolator PIN (required unless rescoring in-process)
   # output_tsv: out.tsv          # optional human-readable PSM table
+  # temp_dir: tmp                # run-private temporary files (default: the output directory)
   # output_parquet: out.idparquet
 
 # ── Core search ─────────────────────────────────────────────────────────────
@@ -36,6 +37,7 @@ search:
   # top_n: 10                    # advanced
   # fragment_index: auto         # advanced: auto | on | off (off = per-spectrum enumeration)
   # fragment_index_slice_da: 80  # advanced: precursor-mass width of one index slice (Da)
+  # index_cache_dir: cache        # candidate-index cache directory (default: the output directory)
 
 # ── Scoring / model / runtime ───────────────────────────────────────────────
 scoring:

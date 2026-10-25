@@ -360,8 +360,17 @@ fn acceptance_gate_same_model_is_accepted() {
     let search_params = SearchParams::default_tryptic(aa);
 
     // Same scorer for both current and candidate → counts should be equal.
-    let delta = evaluate_candidate(&spectra, &bsa_fasta, &scorer, &scorer, &search_params, 0.5)
-        .expect("evaluate_candidate must succeed");
+    let cache_dir = tempfile::tempdir().expect("cache dir");
+    let delta = evaluate_candidate(
+        &spectra,
+        &bsa_fasta,
+        &scorer,
+        &scorer,
+        &search_params,
+        0.5,
+        cache_dir.path(),
+    )
+    .expect("evaluate_candidate must succeed");
 
     assert_eq!(
         delta.current_count, delta.candidate_count,
@@ -529,6 +538,7 @@ fn attach_to_model_keeps_existing_model_content() {
     assert!(stored.trees.len() > 1);
     let replacement = std::sync::Arc::new(scoring_crate::gbdt_eval::GbdtPeakModel {
         n_features: stored.n_features,
+        feature_names: stored.feature_names.clone(),
         apply_sigmoid: stored.apply_sigmoid,
         trees: stored.trees[..stored.trees.len() - 1].to_vec(),
         iso_x: stored.iso_x.clone(),

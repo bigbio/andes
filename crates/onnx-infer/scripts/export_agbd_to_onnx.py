@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export an andes AGBD v1 GBDT blob to ONNX TreeEnsembleRegressor.
+"""Export an andes AGBD v2 GBDT blob to ONNX TreeEnsembleRegressor.
 
 The native AGBD evaluator in `scoring::gbdt_eval` remains the in-search hot path.
 This export is for interoperability with quantms-rescoring / ort, and
@@ -33,28 +33,30 @@ FLAG_SIGMOID = 1
 
 # Same bound as `scoring::gbdt_eval` applies to the calibration count.
 MAX_ISO = 10_000_000
+MAX_NAME_LEN = 1024
 
 
 def parse_agbd(blob: bytes):
-    """(n_features, flags, trees) of an AGBD v1 blob; see `parse_agbd_full`."""
-    nfeat, flags, trees, _, _ = parse_agbd_full(blob)
+    """(n_features, flags, trees) of an AGBD v2 blob; see `parse_agbd_full`."""
+    nfeat, flags, trees, _, _, _ = parse_agbd_full(blob)
     return nfeat, flags, trees
 
 
 def parse_agbd_full(blob: bytes):
-    """(n_features, flags, trees, iso_x, iso_y) of an AGBD v1 blob.
+    """(n_features, flags, trees, iso_x, iso_y, feature_names) of an AGBD v2 blob.
 
-    The layout is the one `GbdtPeakModel::to_bytes` writes: header, trees, then
-    the calibration footer (`u32 n_iso`, `n_iso` f32 `iso_x`, `n_iso` f32
-    `iso_y`; `n_iso = 0` when uncalibrated). Anything after the footer is an
-    error.
+    The layout is the one `GbdtPeakModel::to_bytes` writes: header, trees, the
+    calibration footer (`u32 n_iso`, `n_iso` f32 `iso_x`, `n_iso` f32 `iso_y`;
+    `n_iso = 0` when uncalibrated), then the feature names (`u32 n_names`, equal
+    to `n_features`, then per name a `u32` byte length and UTF-8 bytes).
+    Anything after the names is an error.
     """
     c = io.BytesIO(blob)
     magic = _read_exact(c, 4, "magic")
     if magic != b"AGBD":
         raise ValueError(f"bad magic {magic!r}")
     ver, nfeat, flags, ntree = struct.unpack("<IIII", _read_exact(c, 16, "header"))
-    if ver != 1:
+    if ver != 2:
         raise ValueError(f"unsupported AGBD version {ver}")
     trees = []
     for t in range(ntree):
@@ -80,12 +82,22 @@ def parse_agbd_full(blob: bytes):
         raise ValueError(f"AGBD calibration count {n_iso} exceeds {MAX_ISO}")
     iso_x = list(struct.unpack(f"<{n_iso}f", _read_exact(c, 4 * n_iso, "calibration iso_x")))
     iso_y = list(struct.unpack(f"<{n_iso}f", _read_exact(c, 4 * n_iso, "calibration iso_y")))
+    n_names = struct.unpack("<I", _read_exact(c, 4, "feature name count"))[0]
+    if n_names != nfeat:
+        raise ValueError(f"malformed AGBD blob: {n_names} feature names for {nfeat} features")
+    names = []
+    for i in range(n_names):
+        n = struct.unpack("<I", _read_exact(c, 4, f"feature {i} name length"))[0]
+        if n > MAX_NAME_LEN:
+            raise ValueError(f"AGBD feature name length {n} exceeds {MAX_NAME_LEN}")
+        names.append(_read_exact(c, n, f"feature {i} name").decode("utf-8"))
     trailing = len(blob) - c.tell()
     if trailing:
         raise ValueError(
-            f"AGBD blob has {trailing} trailing bytes after {ntree} trees and {n_iso} calibration points"
+            f"AGBD blob has {trailing} trailing bytes after {ntree} trees, {n_iso} calibration points "
+            f"and {n_names} feature names"
         )
-    return nfeat, flags, trees, iso_x, iso_y
+    return nfeat, flags, trees, iso_x, iso_y, names
 
 
 def trees_to_onnx(nfeat: int, trees: list, input_name: str = "features", output_name: str = "score"):
@@ -177,7 +189,7 @@ def main():
     args = ap.parse_args()
 
     blob = args.agbd.read_bytes()
-    nfeat, flags, trees, iso_x, iso_y = parse_agbd_full(blob)
+    nfeat, flags, trees, iso_x, iso_y, names = parse_agbd_full(blob)
     model = trees_to_onnx(nfeat, trees)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     save(model, args.out)
@@ -195,13 +207,14 @@ def main():
         "outputs": [{"name": "score", "shape": [None, 1]}],
         "task": "tree_ensemble",
         "provenance": {
-            "origin": "andes AGBD v1",
+            "origin": "andes AGBD v2",
             "license": "Apache-2.0",
             "notes": f"flags={flags}; output is the raw tree sum (no sigmoid or "
             f"calibration); prefer native AGBD in-search",
         },
         "extras": {
             "n_features": nfeat,
+            "feature_names": names,
             "n_trees": len(trees),
             "agbd_flags": flags,
             "agbd_n_iso": len(iso_x),

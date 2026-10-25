@@ -174,12 +174,14 @@ fn trained_model_yield_not_worse_than_fallback() {
     let train_fdr = 0.01_f64;
 
     eprintln!("running bootstrap_labels (train_fdr={train_fdr})");
+    let cache_dir = tempfile::tempdir().expect("cache dir");
     let labels = bootstrap_labels(
         &train_spectra,
         &db_fasta,
         &seed_scorer,
         &search_params,
         train_fdr,
+        cache_dir.path(),
     )
     .expect("bootstrap_labels must succeed");
     eprintln!("  {} confident labels at {} FDR", labels.len(), train_fdr);
@@ -225,6 +227,7 @@ fn trained_model_yield_not_worse_than_fallback() {
         &trained_scorer, // candidate (trained)
         &search_params,
         0.01_f64,
+        cache_dir.path(),
     )
     .expect("evaluate_candidate must succeed");
 

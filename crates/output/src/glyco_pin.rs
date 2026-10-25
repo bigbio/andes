@@ -61,6 +61,7 @@ fn write_glyco_header<W: Write>(
         "ScanNr".to_string(),
         "ExpMass".to_string(),
         "CalcMass".to_string(),
+        "FileName".to_string(),
         "mass".to_string(),
         "RankScore".to_string(),
         "isotope_error".to_string(),
@@ -231,11 +232,12 @@ fn write_glyco_psm_row<W: Write>(
     let dm = adjusted_exp_mz - theo_mz;
     let absdm = dm.abs();
 
-    // SpecId, Label, ScanNr, ExpMass, CalcMass, mass
+    // SpecId, Label, ScanNr, ExpMass, CalcMass, FileName, mass
     write!(writer, "{}\t{}\t{}\t", spec_id, label, scan)?;
     write_mass(writer, exp_mass)?;
     writer.write_all(b"\t")?;
     write_mass(writer, calc_mass)?;
+    write!(writer, "\t{}", crate::pin::spec_id_run(&ctx.spec_id))?;
     if glyco_col_kept("mass") {
         writer.write_all(b"\t")?;
         write_double(writer, mass)?;

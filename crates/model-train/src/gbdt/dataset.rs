@@ -12,7 +12,9 @@ use crate::gbdt::labels::label_peaks;
 use crate::gbdt::train::Dataset;
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;
-use scoring_crate::peak_features::{extract_peak_features, PeakFeatureCtx, N_FEATURES};
+use scoring_crate::peak_features::{
+    extract_peak_features, PeakFeatureCtx, FEATURE_NAMES, N_FEATURES,
+};
 use scoring_crate::scoring::scored_spectrum::ScoredSpectrum;
 use scoring_crate::RankScorer;
 
@@ -115,6 +117,7 @@ pub fn build_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> Dataset {
         y,
         groups,
         n_features,
+        feature_names: FEATURE_NAMES.iter().map(|n| n.to_string()).collect(),
     }
 }
 

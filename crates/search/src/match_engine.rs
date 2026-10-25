@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::{smallvec, SmallVec};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::candidate_gen::{
     base_record_key, base_records_for_nominal_window, distinct_base_records_for_nominal_window,
@@ -67,6 +67,11 @@ pub struct PreparedSearch<'a> {
     /// one stable global index. Drained into `self.candidates` by
     /// [`Self::sync_materialized_candidates`].
     mmap_accum: Mutex<MmapAccumulator>,
+    /// Wall time (ns) spent preparing the per-chunk candidate structures in
+    /// [`Self::run_chunk`]: the fragment-ion index build, or the record-cache
+    /// expansion when no fragment index is used. Summed over chunks; reported
+    /// by [`Self::chunk_prep_seconds`].
+    chunk_prep_nanos: AtomicU64,
     /// `params.aa_set` with the search enzyme registered for cleavage
     /// scoring. Cheap to clone, but we keep one shared copy here.
     pub aa_set_for_scoring: AminoAcidSet,
@@ -328,7 +333,7 @@ impl<'a> PreparedSearch<'a> {
     /// Opens the mass-sorted base-peptide index cached at `index_path`, building
     /// it (via
     /// [`build_base_peptide_index`](crate::candidate_index::build_base_peptide_index))
-    /// on a cache miss, or in memory when the cache cannot be written.
+    /// on a cache miss; a cache file that cannot be written is an error.
     /// `self.candidates` starts empty and is grown lazily during the scan so the
     /// PIN/TSV writers resolve `candidate_idxs` against a real candidate slice.
     ///
@@ -344,12 +349,7 @@ impl<'a> PreparedSearch<'a> {
     ) -> std::io::Result<Self> {
         let (mmap_index, was_built) =
             MmapCandidateIndex::open_or_build(index_path, idx, params, decoy_prefix)?;
-        if mmap_index.is_in_memory() {
-            eprintln!(
-                "candidate-index: built {} records in memory (not cached)",
-                mmap_index.len()
-            );
-        } else if was_built {
+        if was_built {
             eprintln!(
                 "candidate-index: built and cached {} records → {}",
                 mmap_index.len(),
@@ -414,11 +414,19 @@ impl<'a> PreparedSearch<'a> {
             candidates: Vec::new(),
             mmap_index,
             mmap_accum: Mutex::new(MmapAccumulator::default()),
+            chunk_prep_nanos: AtomicU64::new(0),
             aa_set_for_scoring,
             ms1_link: None,
             target_bare_seqs,
             candidate_filter: None,
         }
+    }
+
+    /// Wall seconds spent so far preparing per-chunk candidate structures (the
+    /// fragment-ion index build, or the record-cache expansion), summed over
+    /// every [`Self::run_chunk`] call.
+    pub fn chunk_prep_seconds(&self) -> f64 {
+        self.chunk_prep_nanos.load(Ordering::Relaxed) as f64 * 1e-9
     }
 
     /// Drain the scan accumulator into `self.candidates` so downstream
@@ -751,6 +759,7 @@ impl<'a> PreparedSearch<'a> {
         // admitted after the budget is spent are dropped and expanded on
         // demand, and which ones land in the cache under parallel contention
         // is not deterministic.
+        let t_chunk_prep = std::time::Instant::now();
         let (record_cache, frag_index): (Option<MmapRecordCache>, Option<ChunkFragmentIndex>) = {
             let mi = &self.mmap_index;
             let mut windows: Vec<(i32, i32)> = spectra
@@ -843,6 +852,8 @@ impl<'a> PreparedSearch<'a> {
                 (Some(cache), None)
             }
         };
+        self.chunk_prep_nanos
+            .fetch_add(t_chunk_prep.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
         // Parallel per-spectrum search. All inputs above are `&` immutable; the
         // closure owns its TopNQueue, scored_per_charge cache, and per-bin GF state.
@@ -1412,9 +1423,9 @@ pub const OUT_OF_CORE_SLICE_DA: f64 = 80.0;
 ///
 /// Returns one queue per input spectrum, in input order (`spectrum_idx` is the
 /// input position), and the candidates the queues reference. The candidate
-/// index is cached under the system temp directory and reused by later calls
-/// with the same database and parameters, or built in memory when the cache
-/// cannot be written.
+/// index is cached in `cache_dir` (created if missing) and reused by later
+/// calls with the same database and parameters; an unwritable `cache_dir` is an
+/// error.
 pub fn match_spectra_out_of_core(
     spectra: &[Spectrum],
     idx: &SearchIndex,
@@ -1422,10 +1433,11 @@ pub fn match_spectra_out_of_core(
     scorer: &RankScorer,
     fragment_tolerance_da: f64,
     decoy_prefix: &str,
+    cache_dir: &std::path::Path,
 ) -> std::io::Result<(Vec<TopNQueue>, Vec<Candidate>)> {
     let mut params = params.clone();
     params.fragment_index_top_k = crate::search_params::FRAGMENT_INDEX_TOP_K;
-    let cache = crate::candidate_index::index_cache_path(idx, &params);
+    let cache = crate::candidate_index::index_cache_path(idx, &params, cache_dir);
     let mut prepared = PreparedSearch::prepare_mmap(
         idx,
         &params,

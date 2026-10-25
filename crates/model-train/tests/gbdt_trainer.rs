@@ -32,6 +32,10 @@ fn separable_18(n: usize, seed: u64) -> Dataset {
         y,
         groups,
         n_features: NF,
+        feature_names: scoring_crate::peak_features::FEATURE_NAMES
+            .iter()
+            .map(|n| n.to_string())
+            .collect(),
     }
 }
 

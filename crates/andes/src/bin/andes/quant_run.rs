@@ -82,6 +82,9 @@ pub(crate) struct QuantSettings {
     pub fragment_tol: Option<Tolerance>,
     /// `--tmt-unmix` on high-resolution MS2 reporters.
     pub unmix: bool,
+    /// `--temp-dir` (resolved): where the MS1 scans wait between searching and
+    /// quantification.
+    pub scratch_dir: PathBuf,
 }
 
 impl QuantSettings {
@@ -219,6 +222,7 @@ impl QuantSettings {
             quant_dir: cli.quant_dir.clone(),
             fragment_tol: None,
             unmix: cli.tmt_unmix && high_res && cli.tmt.is_some(),
+            scratch_dir: cli.temp_dir.clone().unwrap_or_else(|| PathBuf::from(".")),
         }))
     }
 
@@ -466,7 +470,7 @@ impl QuantCollector {
         }
         let ms1 = ms1
             .as_ref()
-            .map(|index| Ms1Cache::store(index, &stem))
+            .map(|index| Ms1Cache::store(index, &stem, &self.settings.scratch_dir))
             .transpose()
             .map_err(|e| format!("cache MS1 scans for {stem}: {e}"))?;
         let ms2 = std::mem::take(&mut self.ms2);
@@ -800,14 +804,7 @@ fn modifications_of(cand: &Candidate) -> Vec<ModRecord> {
         .residues
         .iter()
         .enumerate()
-        .filter_map(|(i, aa)| {
-            aa.mod_.as_ref().map(|m| ModRecord {
-                name: m.name.clone(),
-                accession: m.accession.clone().filter(|a| !a.is_empty()),
-                position: i as i32 + 1,
-                amino_acid: aa.residue as char,
-            })
-        })
+        .filter_map(|(i, aa)| ModRecord::of_residue(i, cand.peptide.residues.len(), aa))
         .collect()
 }
 
@@ -1967,6 +1964,7 @@ mod tests {
             quant_dir: quant_dir.map(PathBuf::from),
             fragment_tol: Some(Tolerance::Ppm(20.0)),
             unmix: false,
+            scratch_dir: PathBuf::from("."),
         }
     }
 

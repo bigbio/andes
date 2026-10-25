@@ -807,7 +807,7 @@ fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainEr
             TrainError::Other(format!("decode gbdt_model_bytes for '{model_id}': {e}"))
         })?;
         model
-            .validate_n_features(scoring_crate::peak_features::N_FEATURES, "peak")
+            .validate_features(&scoring_crate::peak_features::FEATURE_NAMES, "peak")
             .map_err(|e| TrainError::Other(format!("gbdt_model_bytes for '{model_id}': {e}")))?;
         param.gbdt_peak_model = Some(model);
     }
@@ -820,8 +820,8 @@ fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainEr
             ))
         })?;
         model
-            .validate_n_features(
-                scoring_crate::frag_features::N_FRAG_FEATURES,
+            .validate_features(
+                &scoring_crate::frag_features::FRAG_FEATURE_NAMES,
                 "frag-intensity",
             )
             .map_err(|e| {
@@ -836,7 +836,7 @@ fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainEr
             TrainError::Other(format!("decode rich_ion_model_bytes for '{model_id}': {e}"))
         })?;
         model
-            .validate_n_features(scoring_crate::ion_features::N_ION_FEATURES, "rich-ion")
+            .validate_features(&scoring_crate::ion_features::ION_FEATURE_NAMES, "rich-ion")
             .map_err(|e| {
                 TrainError::Other(format!("rich_ion_model_bytes for '{model_id}': {e}"))
             })?;

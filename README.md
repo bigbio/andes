@@ -75,7 +75,7 @@ flowchart TD
 1. **Pick the model** from the file's activation, resolution and isobaric label (one of 17
    bundled models).
 2. **Build candidates**: digest the FASTA and generate decoys. The candidate index goes
-   out-of-core (cached in the system temp directory) so candidates can be retrieved by the
+   out-of-core (cached in `--index-cache-dir`, by default next to the output) so candidates can be retrieved by the
    fragment-ion index; on low-res data only the 150 most intense peaks of each spectrum vote.
    `--glyco` builds its own sequon-only candidate table from the same out-of-core index.
 3. **Score**: low-res by the generating-function rank score, high-res by the fused strong
@@ -139,7 +139,7 @@ Percolator for q-values.
 > `--fragment-tol-ppm` / `--fragment-tol-da` override the inference.
 
 Each PIN row is one PSM. `RankScore` orders candidates within a spectrum; `RawScore` is the
-score Percolator weights most. All 66 columns are in [`DOCS.md` §3a](DOCS.md#3a-pin-columns).
+score Percolator weights most. All columns are in [`DOCS.md` §3a](DOCS.md#3a-pin-columns).
 The final tolerances and a per-modification PSM tally go to stderr and `<stem>.statistics.log`
 ([`DOCS.md` §3d](DOCS.md#3d-run-summary-stemstatisticslog)).
 

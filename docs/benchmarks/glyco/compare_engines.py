@@ -173,10 +173,10 @@ def load_andes(pin_path, psms_path, qmax=0.01, sample=None):
     # q-values by SpecId
     q={}
     with open(psms_path) as f:
-        r=csv.reader(f,delimiter='\t'); next(r)
+        r=csv.reader(f,delimiter='\t'); qi=next(r).index('q-value')  # a `filename` column may precede it
         for line in r:
-            if len(line)<3: continue
-            if float(line[2])<=qmax: q[line[0]]=float(line[2])
+            if len(line)<=qi: continue
+            if float(line[qi])<=qmax: q[line[0]]=float(line[qi])
     # pin rows
     andes=[]
     n_entrap=0

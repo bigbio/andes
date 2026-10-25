@@ -278,24 +278,47 @@ fn isobaric_peak_filter(explicit: Option<(f64, usize)>, high_res: bool) -> Optio
 /// An explicit `--output-pin` is both. Otherwise the base is `--output-tsv`,
 /// else `--output-parquet`, else `./andes.pin`; with `keep_pin` the PIN is
 /// `<base>.pin`, without it the PIN goes into a temp dir stored in `tmp`.
+/// The output base: `--output-pin`, else `--output-tsv`, else
+/// `--output-parquet`, else `./andes.pin`. Report files and the default scratch
+/// and cache directories sit next to it.
+fn output_base(
+    output_pin: Option<&Path>,
+    output_tsv: Option<&Path>,
+    output_parquet: Option<&Path>,
+) -> PathBuf {
+    output_pin
+        .or(output_tsv)
+        .or(output_parquet)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("andes.pin"))
+}
+
+/// A temporary directory inside `scratch_dir` (created if missing), removed
+/// when dropped; an error names `--temp-dir`.
+fn scratch_tempdir(prefix: &str, scratch_dir: &Path) -> Result<tempfile::TempDir, String> {
+    crate::cli::ensure_scratch_dir(scratch_dir)?;
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(scratch_dir)
+        .map_err(|e| crate::cli::scratch_dir_error(scratch_dir, &e))
+}
+
 fn rescore_pin_destination(
     output_pin: Option<&Path>,
     output_tsv: Option<&Path>,
     output_parquet: Option<&Path>,
     keep_pin: bool,
+    scratch_dir: &Path,
     tmp: &mut Option<tempfile::TempDir>,
 ) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
-    if let Some(p) = output_pin {
-        return Ok((p.to_path_buf(), p.to_path_buf()));
+    let base = output_base(output_pin, output_tsv, output_parquet);
+    if output_pin.is_some() {
+        return Ok((base.clone(), base));
     }
-    let base: PathBuf = output_tsv
-        .or(output_parquet)
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("andes.pin"));
     if keep_pin {
         return Ok((base.with_extension("pin"), base));
     }
-    let dir = tempfile::tempdir().map_err(|e| format!("creating temp dir for rescore PIN: {e}"))?;
+    let dir = scratch_tempdir("andes-pin-", scratch_dir)?;
     let path = dir.path().join("andes.pin");
     *tmp = Some(dir);
     Ok((path, base))
@@ -322,16 +345,26 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.top_n == 0 {
         return Err("--top-n must be at least 1".into());
     }
+    // Run-private temporary files go to `--temp-dir`, by default next to the
+    // output; the quantification settings read the resolved directory.
+    let scratch_dir = crate::cli::dir_or_output_dir(
+        cli.temp_dir.as_deref(),
+        &output_base(
+            cli.output_pin.as_deref(),
+            cli.output_tsv.as_deref(),
+            cli.output_parquet.as_deref(),
+        ),
+    );
+    cli.temp_dir = Some(scratch_dir.clone());
     // `--mbr`: the per-run artifacts go to `--quant-dir`, or to a temporary
     // directory that lives until the end of the run.
     let mut _mbr_tmp: Option<tempfile::TempDir> = None;
     if cli.mbr {
         check_mbr_args(&cli)?;
+        // Before the scratch directory exists: a rejected run writes nothing.
+        crate::quant_run::check_unique_stems(&cli.spectrum)?;
         if cli.quant_dir.is_none() {
-            let dir = tempfile::Builder::new()
-                .prefix("andes-quant-")
-                .tempdir()
-                .map_err(|e| format!("creating temp dir for --mbr: {e}"))?;
+            let dir = scratch_tempdir("andes-quant-", &scratch_dir)?;
             cli.quant_dir = Some(dir.path().to_path_buf());
             _mbr_tmp = Some(dir);
         }
@@ -366,6 +399,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         cli.output_tsv.as_deref(),
         cli.output_parquet.as_deref(),
         cli.keep_pin,
+        &scratch_dir,
         &mut _rescore_tmp,
     )?;
     if spectrum_paths.len() > 1 {
@@ -1355,8 +1389,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Calibration pre-pass on the out-of-core index. The index is
     // content-addressed and precursor-tolerance independent, so the main pass
     // reopens the same cached file the pre-pass built.
-    let index_path = index_cache_path(&idx, &params);
+    let cache_dir = crate::cli::dir_or_output_dir(cli.index_cache_dir.as_deref(), &report_base);
+    let index_path = index_cache_path(&idx, &params, &cache_dir);
     if params.precursor_cal_mode != PrecursorCalMode::Off {
+        let t_cal = std::time::Instant::now();
         let mut cal_prepared = PreparedSearch::prepare_mmap(
             &idx,
             &params,
@@ -1375,6 +1411,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &mut cal_prepared,
         )?;
         drop(cal_prepared);
+        eprintln!(
+            "[PHASE calibration_prepass: {:.2}s] (includes opening or building the candidate index)",
+            t_cal.elapsed().as_secs_f64()
+        );
         params.precursor_mass_shift_ppm =
             apply_shift_for_mode(params.precursor_cal_mode, cal_stats);
         let tol_before = params.precursor_tolerance;
@@ -1402,6 +1442,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Content-addressed cache path, so repeated searches over the same FASTA +
     // params (and the calibration pre-pass just above) share one on-disk index
     // without rebuilding.
+    let t_index = std::time::Instant::now();
     let mut prepared = PreparedSearch::prepare_mmap(
         &idx,
         &params,
@@ -1411,6 +1452,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         &index_path,
     )
     .map_err(|e| format!("build out-of-core candidate index: {e}"))?;
+    eprintln!(
+        "[PHASE candidate_index_open: {:.2}s]",
+        t_index.elapsed().as_secs_f64()
+    );
     eprintln!(
         "PreparedSearch: out-of-core candidate-index: mmap \
          (base peptides resolved lazily per spectrum)"
@@ -2056,6 +2101,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         CHUNK_SIZE,
         t_phase.elapsed().as_secs_f64()
     );
+    eprintln!(
+        "[PHASE chunk_candidate_prep: {:.2}s] (part of stream_search: fragment-index build or record expansion, summed over chunks)",
+        prepared.chunk_prep_seconds()
+    );
     if bench_mode {
         eprintln!("Bench mode: capped at {} spectra", cli.max_spectra);
     }
@@ -2679,11 +2728,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             })
             .map(|(_, p)| p)
             .collect();
-        accepted.sort_by(|a, b| {
-            a.q_value
-                .partial_cmp(&b.q_value)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        accepted.sort_by(|a, b| a.report_cmp(b));
         let mut pep_note = pep_cap
             .map(|t| format!(" and PEP<={t}"))
             .unwrap_or_default();
@@ -3132,7 +3177,7 @@ fn release_at_exit(candidates: Vec<search::candidate_gen::Candidate>) {
 }
 
 /// Write the FDR-filtered rescore TSV: one row per accepted target PSM (already
-/// filtered to q ≤ fdr and sorted by q ascending). Columns: the Percolator join
+/// filtered to q ≤ fdr and sorted by [`output::PercolatorPsm::report_cmp`]). Columns: the Percolator join
 /// key (`PSMId`, == PIN SpecId), `q-value`, `posterior_error_probability`,
 /// `peptide`, `proteinIds`.
 pub(crate) fn write_filtered_tsv(
@@ -3318,9 +3363,15 @@ mod rescore_pin_destination_tests {
     #[test]
     fn explicit_output_pin_is_pin_and_base() {
         let mut tmp = None;
-        let (pin, base) =
-            rescore_pin_destination(Some(Path::new("r/x.pin")), None, None, false, &mut tmp)
-                .unwrap();
+        let (pin, base) = rescore_pin_destination(
+            Some(Path::new("r/x.pin")),
+            None,
+            None,
+            false,
+            Path::new("."),
+            &mut tmp,
+        )
+        .unwrap();
         assert_eq!(pin, PathBuf::from("r/x.pin"));
         assert_eq!(base, PathBuf::from("r/x.pin"));
         assert!(tmp.is_none());
@@ -3334,6 +3385,7 @@ mod rescore_pin_destination_tests {
             Some(Path::new("r/out.tsv")),
             Some(Path::new("r/out.idparquet")),
             true,
+            Path::new("."),
             &mut tmp,
         )
         .unwrap();
@@ -3341,25 +3393,63 @@ mod rescore_pin_destination_tests {
         assert_eq!(base, PathBuf::from("r/out.tsv"));
         assert!(tmp.is_none());
 
-        let (pin, _) =
-            rescore_pin_destination(None, None, Some(Path::new("q.idparquet")), true, &mut tmp)
-                .unwrap();
+        let (pin, _) = rescore_pin_destination(
+            None,
+            None,
+            Some(Path::new("q.idparquet")),
+            true,
+            Path::new("."),
+            &mut tmp,
+        )
+        .unwrap();
         assert_eq!(pin, PathBuf::from("q.pin"));
-        let (pin, base) = rescore_pin_destination(None, None, None, true, &mut tmp).unwrap();
+        let (pin, base) =
+            rescore_pin_destination(None, None, None, true, Path::new("."), &mut tmp).unwrap();
         assert_eq!(pin, PathBuf::from("andes.pin"));
         assert_eq!(base, PathBuf::from("andes.pin"));
         assert!(tmp.is_none());
     }
 
+    /// Without `--keep-pin` the PIN lives in a directory under the scratch
+    /// directory that was passed, never in the system temp directory.
     #[test]
-    fn no_keep_pin_uses_temp_dir() {
+    fn no_keep_pin_is_created_in_the_scratch_dir() {
+        let scratch = tempfile::tempdir().unwrap();
         let mut tmp = None;
-        let (pin, base) =
-            rescore_pin_destination(None, Some(Path::new("out.tsv")), None, false, &mut tmp)
-                .unwrap();
+        let (pin, base) = rescore_pin_destination(
+            None,
+            Some(Path::new("out.tsv")),
+            None,
+            false,
+            scratch.path(),
+            &mut tmp,
+        )
+        .unwrap();
         let dir = tmp.as_ref().expect("temp dir held").path().to_path_buf();
+        assert!(dir.starts_with(scratch.path()));
         assert!(pin.starts_with(&dir));
         assert_eq!(base, PathBuf::from("out.tsv"));
+        drop(tmp);
+        assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
+    }
+
+    /// A scratch directory that cannot be created is an error naming the flag.
+    #[test]
+    fn unwritable_scratch_dir_is_an_error_naming_the_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+        let mut tmp = None;
+        let err = rescore_pin_destination(
+            None,
+            Some(Path::new("out.tsv")),
+            None,
+            false,
+            &blocker.join("sub"),
+            &mut tmp,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--temp-dir"), "{err}");
     }
 }
 

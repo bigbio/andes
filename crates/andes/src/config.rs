@@ -58,6 +58,7 @@ pub struct IoCfg {
     pub output_pin: Option<PathBuf>,
     pub output_tsv: Option<PathBuf>,
     pub output_parquet: Option<PathBuf>,
+    pub temp_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -78,6 +79,7 @@ pub struct SearchCfg {
     /// `auto`, `on` or `off`, as `--fragment-index`.
     pub fragment_index: Option<String>,
     pub fragment_index_slice_da: Option<f64>,
+    pub index_cache_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -312,6 +314,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set_opt!("output_pin", output_pin, cfg.io.output_pin);
     set_opt!("output_tsv", output_tsv, cfg.io.output_tsv);
     set_opt!("output_parquet", output_parquet, cfg.io.output_parquet);
+    set_opt!("temp_dir", temp_dir, cfg.io.temp_dir);
 
     // ── search ──
     set_parsed!(
@@ -362,6 +365,11 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         "fragment_index_slice_da",
         fragment_index_slice_da,
         cfg.search.fragment_index_slice_da
+    );
+    set_opt!(
+        "index_cache_dir",
+        index_cache_dir,
+        cfg.search.index_cache_dir
     );
 
     // ── scoring ──
@@ -1024,6 +1032,27 @@ glyco:
         assert_eq!(a.predict, vec![PredictFeature::None]);
     }
 
+    /// `search.index_cache_dir` applies, and an explicit `--index-cache-dir` wins.
+    #[test]
+    fn index_cache_dir_key_has_cli_precedence() {
+        let yaml = "search:\n  index_cache_dir: from_config\n";
+        let a = applied(yaml, &[]).unwrap();
+        assert_eq!(a.index_cache_dir, Some(PathBuf::from("from_config")));
+        let a = applied(yaml, &["--index-cache-dir", "from_cli"]).unwrap();
+        assert_eq!(a.index_cache_dir, Some(PathBuf::from("from_cli")));
+        assert_eq!(applied("{}", &[]).unwrap().index_cache_dir, None);
+
+        let yaml = "io:\n  temp_dir: scratch\n";
+        assert_eq!(
+            applied(yaml, &[]).unwrap().temp_dir,
+            Some(PathBuf::from("scratch"))
+        );
+        assert_eq!(
+            applied(yaml, &["--temp-dir", "cli"]).unwrap().temp_dir,
+            Some(PathBuf::from("cli"))
+        );
+    }
+
     /// The shipped `config.example.yaml` must parse against the current schema, so
     /// the documented template can never drift from the accepted keys.
     #[test]
@@ -1094,7 +1123,7 @@ glyco:
     #[test]
     fn new_keys_apply_and_validate() {
         let a = applied(
-            "search:\n  fragment_index: \"off\"\n  fragment_index_slice_da: 40\n\
+            "search:\n  fragment_index: \"off\"\n  fragment_index_slice_da: 40\n  index_cache_dir: shared/cache\n\
              scoring:\n  gbdt_max_trees: 0\n  precursor_mono: \"off\"\n  ethcd_activation: etd\n  \
              peak_filter: \"100:20\"\n\
              quant:\n  lfq_gaussian_width: 12.5\n\
@@ -1106,6 +1135,7 @@ glyco:
         .unwrap();
         assert_eq!(a.fragment_index, crate::cli::FragmentIndexFlag::Off);
         assert_eq!(a.fragment_index_slice_da, Some(40.0));
+        assert_eq!(a.index_cache_dir, Some(PathBuf::from("shared/cache")));
         assert_eq!(a.gbdt_max_trees, Some(0));
         assert_eq!(a.precursor_mono, crate::cli::PrecursorMonoFlag::Off);
         assert_eq!(a.ethcd_activation, crate::cli::EthcdActivationFlag::Etd);

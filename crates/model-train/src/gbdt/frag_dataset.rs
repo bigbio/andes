@@ -8,7 +8,7 @@
 //! The target `y` is `ln(obs_intensity / base_peak)`, the log-relative-intensity
 //! space the strong-score `intensity_signal` exponentiates back to linear.
 
-use scoring_crate::frag_features::{extract_frag_features, N_FRAG_FEATURES};
+use scoring_crate::frag_features::{extract_frag_features, FRAG_FEATURE_NAMES, N_FRAG_FEATURES};
 use scoring_crate::scoring::fragment_ions::predict_by_ions;
 use scoring_crate::scoring::scored_spectrum::ScoredSpectrum;
 use scoring_crate::RankScorer;
@@ -90,6 +90,7 @@ pub fn build_frag_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> Regressio
         y,
         groups,
         n_features,
+        feature_names: FRAG_FEATURE_NAMES.iter().map(|n| n.to_string()).collect(),
     }
 }
 
@@ -145,7 +146,7 @@ mod tests {
         // place observed peaks at the m/z of the first two b/y ions, plus a junk peak
         let mut peaks: Vec<(f64, f32)> = ions.iter().take(2).map(|i| (i.mz, 1000.0_f32)).collect();
         peaks.push((50.0, 10.0)); // junk + ensures >=... peaks
-        peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
         let spec = spectrum(peaks, 500.0, 2);
         let row = PsmRow {
             spectrum: &spec,

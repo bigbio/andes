@@ -27,9 +27,35 @@ use quant::lfq::FeatureQuant;
 pub struct ModRecord {
     pub name: String,
     pub accession: Option<String>,
-    /// 1-based residue position.
+    /// 1-based residue index; 0 for a peptide N-terminal modification and
+    /// peptide length + 1 for a C-terminal one (the QPX position convention).
     pub position: i32,
-    pub amino_acid: char,
+    /// The modified residue; `None` for a terminal modification.
+    pub amino_acid: Option<char>,
+}
+
+impl ModRecord {
+    /// The record of residue `index` (0-based) of a `len`-residue peptide, or
+    /// `None` when it is unmodified. A modification declared for a peptide or
+    /// protein terminus sits on the end residue; it is reported at the
+    /// terminal position and not on the residue. One stacked record (a
+    /// terminal and a side-chain modification on the same residue, named
+    /// `a+b`) reports at the terminus whole.
+    pub fn of_residue(index: usize, len: usize, aa: &model::amino_acid::AminoAcid) -> Option<Self> {
+        use model::modification::ModLocation::{CTerm, NTerm, ProtCTerm, ProtNTerm};
+        let m = aa.mod_?;
+        let (position, amino_acid) = match m.location {
+            NTerm | ProtNTerm if index == 0 => (0, None),
+            CTerm | ProtCTerm if index + 1 == len => (len as i32 + 1, None),
+            _ => (index as i32 + 1, Some(aa.residue as char)),
+        };
+        Some(ModRecord {
+            name: m.name.clone(),
+            accession: m.accession.clone().filter(|a| !a.is_empty()),
+            position,
+            amino_acid,
+        })
+    }
 }
 
 /// Identification side of a quantified row, shared by both modules.
@@ -518,6 +544,41 @@ pub fn read_lfq_parquet(path: &Path) -> Result<ReadTable, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use model::amino_acid::AminoAcid;
+    use model::modification::{leak_mod, ModLocation, Modification, ResidueSpec};
+
+    fn modified(residue: u8, location: ModLocation, accession: Option<&str>) -> AminoAcid {
+        let m = leak_mod(Modification {
+            name: "Mod".into(),
+            mass_delta: 42.01,
+            residue: ResidueSpec::Wildcard,
+            location,
+            fixed: false,
+            accession: accession.map(String::from),
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+            annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
+        });
+        AminoAcid::standard(residue).unwrap().with_mod(m)
+    }
+
+    #[test]
+    fn terminal_modifications_use_the_terminal_positions() {
+        let at = |i, len, loc, acc| ModRecord::of_residue(i, len, &modified(b'K', loc, acc));
+        let nterm = at(0, 8, ModLocation::NTerm, Some("UNIMOD:1")).unwrap();
+        assert_eq!((nterm.position, nterm.amino_acid), (0, None));
+        let prot = at(0, 8, ModLocation::ProtNTerm, None).unwrap();
+        assert_eq!((prot.position, prot.amino_acid), (0, None));
+        let cterm = at(7, 8, ModLocation::CTerm, None).unwrap();
+        assert_eq!((cterm.position, cterm.amino_acid), (9, None));
+        let side = at(0, 8, ModLocation::Anywhere, Some("UNIMOD:21")).unwrap();
+        assert_eq!((side.position, side.amino_acid), (1, Some('K')));
+        let inner = at(3, 8, ModLocation::Anywhere, Some("")).unwrap();
+        assert_eq!((inner.position, inner.accession), (4, None));
+        assert!(ModRecord::of_residue(0, 8, &AminoAcid::standard(b'K').unwrap()).is_none());
+    }
     use crate::versioned_parquet::{column, opt};
     use arrow::array::{
         Array, BooleanArray, Float32Array, Float64Array, Int32Array, ListArray, StringArray,

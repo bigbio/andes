@@ -681,6 +681,24 @@ fn psm_result_set(queues: &[TopNQueue], candidates: &[Candidate]) -> Vec<Vec<Str
         .collect()
 }
 
+/// A digest that builds no candidates is an error, not an empty search.
+#[test]
+fn prepare_mmap_rejects_a_digest_with_no_candidates() {
+    let (_spectra, idx, mut params) = small_search_fixture();
+    params.min_length = 200;
+    params.max_length = 250;
+    let scorer = make_scorer(0.05);
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let err = match PreparedSearch::prepare_mmap(&idx, &params, &scorer, 0.05, "XXX", tmp.path()) {
+        Ok(_) => panic!("an empty candidate index must be rejected"),
+        Err(e) => e,
+    };
+    assert!(
+        err.to_string().contains("no candidate peptides"),
+        "unexpected error: {err}"
+    );
+}
+
 /// Issue #76: on spectra built from a peptide's exact b/y ions, the per-chunk
 /// fragment-ion index must give that peptide the most votes and materialise it.
 #[test]

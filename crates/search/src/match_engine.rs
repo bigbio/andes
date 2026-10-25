@@ -349,6 +349,22 @@ impl<'a> PreparedSearch<'a> {
     ) -> std::io::Result<Self> {
         let (mmap_index, was_built) =
             MmapCandidateIndex::open_or_build(index_path, idx, params, decoy_prefix)?;
+        if mmap_index.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "the digest built no candidate peptides (enzyme {}, extra enzymes {}, \
+                     length {}..{}, max missed cleavages {}, termini {}); check --enzyme, \
+                     --min-length, --max-length, --max-missed-cleavages and the database",
+                    params.enzyme.name(),
+                    params.extra_enzymes.len(),
+                    params.min_length,
+                    params.max_length,
+                    params.max_missed_cleavages,
+                    params.num_tolerable_termini,
+                ),
+            ));
+        }
         if was_built {
             eprintln!(
                 "candidate-index: built and cached {} records → {}",

@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Spreads added to the offset for the PIN feature tolerance.
+/// Spreads in the PIN feature tolerance.
 pub const TOL_SIGMAS: f64 = 4.0;
 /// Narrowest derived feature tolerance (ppm).
 pub const MIN_FEATURE_TOL_PPM: f64 = 5.0;
@@ -39,11 +39,10 @@ impl FragmentErrorModel {
         }
     }
 
-    /// Symmetric feature tolerance covering the error distribution:
-    /// `|offset| + 4 sigma`, clamped to 5-40 ppm.
+    /// Symmetric feature tolerance around the recentred peaks:
+    /// `4 sigma`, clamped to 5-40 ppm.
     pub fn feature_tolerance_ppm(&self) -> f64 {
-        (self.offset_ppm.abs() + TOL_SIGMAS * self.sigma_ppm)
-            .clamp(MIN_FEATURE_TOL_PPM, MAX_FEATURE_TOL_PPM)
+        (TOL_SIGMAS * self.sigma_ppm).clamp(MIN_FEATURE_TOL_PPM, MAX_FEATURE_TOL_PPM)
     }
 
     /// Width of the ppm-Gaussian term.

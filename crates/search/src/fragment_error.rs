@@ -222,7 +222,7 @@ mod tests {
         assert!((m.offset_ppm + 2.5).abs() < 0.15, "{m:?}");
         assert!((m.sigma_ppm - 1.6).abs() < 0.25, "{m:?}");
         assert_eq!(m.psms, 700);
-        assert!(m.feature_tolerance_ppm() > 7.0 && m.feature_tolerance_ppm() < 11.0);
+        assert!(m.feature_tolerance_ppm() > 5.0 && m.feature_tolerance_ppm() < 8.0);
     }
 
     #[test]

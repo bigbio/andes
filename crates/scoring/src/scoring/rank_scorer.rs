@@ -545,7 +545,7 @@ mod tests {
         let Tolerance::Ppm(t) = hi.pin_match_tolerance() else {
             panic!("ppm expected");
         };
-        assert!((t - 8.9).abs() < 1e-9, "{t}");
+        assert!((t - 6.4).abs() < 1e-9, "{t}");
         assert_eq!(hi.feature_match_tolerance(), Tolerance::Ppm(20.0));
         let (c, s) = hi.ppm_gaussian();
         assert!(c == 0.0 && (s - 2.4).abs() < 1e-9);

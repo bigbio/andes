@@ -119,7 +119,7 @@ impl Acquisition {
     }
 
     /// The activation name andes-ms2 is conditioned on: the dissociation and
-    /// the MS2 analyser (`HCD-FTMS`, `HCD-ASTMS`, `CID-ITMS`...). Without a
+    /// the MS2 analyser (`HCD-FTMS`, `CID-ITMS`...). Without a
     /// recorded activation, high-resolution runs are HCD and low-resolution
     /// runs CID. Time-of-flight runs and activations outside the model's
     /// vocabulary are "unknown".
@@ -135,7 +135,6 @@ impl Acquisition {
             None => "CID",
         };
         match (dissociation, self.analyzer, self.high_res) {
-            ("HCD", Some(InstrumentType::OrbitrapAstral), _) => "HCD-ASTMS",
             ("HCD", _, true) => "HCD-FTMS",
             ("HCD", _, false) => "HCD-ITMS",
             ("CID", _, true) => "CID-FTMS",
@@ -144,11 +143,13 @@ impl Acquisition {
     }
 
     /// The instrument name andes-ms2 maps to its instrument family; empty
-    /// (unknown family) for instruments the model has no family for.
+    /// (unknown family) for instruments the model has no family for. The
+    /// training spectra hold no Astral run, so an Astral run takes the
+    /// Exploris family (orbitrap HCD) and the `HCD-FTMS` activation.
     pub(crate) fn ms2_instrument(&self) -> &'static str {
         match self.analyzer {
             Some(InstrumentType::QExactive) => "Q Exactive",
-            Some(InstrumentType::OrbitrapAstral) => "Orbitrap Astral",
+            Some(InstrumentType::OrbitrapAstral) => "Orbitrap Exploris 480",
             _ => "",
         }
     }
@@ -330,5 +331,31 @@ mod tests {
         assert!(d.contains("collision energy 28.0"), "{d}");
         assert!(d.contains("isolation width 1.40 Th"), "{d}");
         assert!(d.contains("FAIMS CV -65/-45 V"), "{d}");
+    }
+
+    #[test]
+    fn ms2_conditions_follow_the_acquisition() {
+        let resolve = |act, analyzer, tol_da| {
+            Acquisition::resolve(Some((act, analyzer)), None, tol_da, None, meta(&[]))
+        };
+        // Astral: orbitrap HCD, mapped to the Exploris family (no Astral training run).
+        let astral = resolve(
+            ActivationMethod::HCD,
+            Some(InstrumentType::OrbitrapAstral),
+            None,
+        );
+        assert_eq!(astral.ms2_activation(), "HCD-FTMS");
+        assert_eq!(astral.ms2_instrument(), "Orbitrap Exploris 480");
+        let qe = resolve(ActivationMethod::HCD, Some(InstrumentType::QExactive), None);
+        assert_eq!(qe.ms2_instrument(), "Q Exactive");
+        let trap = resolve(ActivationMethod::CID, Some(InstrumentType::LowRes), None);
+        assert_eq!(trap.ms2_activation(), "CID-ITMS");
+        assert_eq!(trap.ms2_instrument(), "");
+        let tims = resolve(ActivationMethod::CID, Some(InstrumentType::TimsTOF), None);
+        assert_eq!(tims.ms2_activation(), "unknown");
+        assert_eq!(
+            resolve(ActivationMethod::ETD, Some(InstrumentType::QExactive), None).ms2_activation(),
+            "unknown"
+        );
     }
 }

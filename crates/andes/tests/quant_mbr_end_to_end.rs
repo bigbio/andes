@@ -752,11 +752,18 @@ fn library_stage_errors_name_what_is_missing() {
 
     // A Percolator file without the score column.
     let text = std::fs::read_to_string(&targets).unwrap();
+    let score_col = text
+        .lines()
+        .next()
+        .unwrap()
+        .split('\t')
+        .position(|c| c == "score")
+        .expect("score column");
     let no_score: String = text
         .lines()
         .map(|l| {
             let mut f: Vec<&str> = l.split('\t').collect();
-            f.remove(1);
+            f.remove(score_col);
             f.join("\t") + "\n"
         })
         .collect();

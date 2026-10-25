@@ -1381,7 +1381,11 @@ mod rescore_join_tests {
             })
         };
         let n_term = mk("Acetyl", ResidueSpec::Wildcard, ModLocation::NTerm);
-        let side = mk("Phospho", ResidueSpec::Specific(b'S'), ModLocation::Anywhere);
+        let side = mk(
+            "Phospho",
+            ResidueSpec::Specific(b'S'),
+            ModLocation::Anywhere,
+        );
         let c_term = mk("Amidated", ResidueSpec::Wildcard, ModLocation::CTerm);
         let residues = vec![
             AminoAcid::standard(b'A').unwrap().with_mod(n_term),
@@ -1405,16 +1409,28 @@ mod rescore_join_tests {
         let structs = structs.as_any().downcast_ref::<StructArray>().unwrap();
         let mut got = Vec::new();
         for i in 0..structs.len() {
-            let positions = structs.column(2).as_any().downcast_ref::<ListArray>().unwrap();
+            let positions = structs
+                .column(2)
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .unwrap();
             let entry = positions.value(i);
             let entry = entry.as_any().downcast_ref::<StructArray>().unwrap();
-            let pos = entry.column(0).as_any().downcast_ref::<Int32Array>().unwrap();
-            let aa = entry.column(1).as_any().downcast_ref::<StringArray>().unwrap();
-            got.push((pos.value(0), (!aa.is_null(0)).then(|| aa.value(0).to_string())));
+            let pos = entry
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+            let aa = entry
+                .column(1)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            got.push((
+                pos.value(0),
+                (!aa.is_null(0)).then(|| aa.value(0).to_string()),
+            ));
         }
-        assert_eq!(
-            got,
-            vec![(0, None), (3, Some("S".to_string())), (5, None)]
-        );
+        assert_eq!(got, vec![(0, None), (3, Some("S".to_string())), (5, None)]);
     }
 }

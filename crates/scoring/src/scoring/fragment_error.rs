@@ -93,10 +93,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tolerance_covers_offset_and_four_spreads_within_bounds() {
+    fn tolerance_is_four_spreads_within_bounds() {
         // Astral-like: -2.5 ppm, spread 1.6 ppm.
         let astral = FragmentErrorModel::new(-2.5, 1.6, 5000, 800);
-        assert!((astral.feature_tolerance_ppm() - 8.9).abs() < 1e-9);
+        assert!((astral.feature_tolerance_ppm() - 6.4).abs() < 1e-9);
         assert!((astral.gaussian_sigma_ppm() - 2.4).abs() < 1e-9);
         // Very tight data is floored, very loose data capped.
         assert_eq!(

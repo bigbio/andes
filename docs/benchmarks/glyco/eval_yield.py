@@ -25,7 +25,7 @@ for ln in open(pin):
     f = ln.rstrip("\n").split("\t")
     if hdr is None:
         hdr = f; iP = hdr.index("Peptide"); iL = hdr.index("Label")
-        iPr = len(hdr) - 1
+        iPr = iP + 1  # first protein column, right after Peptide
         continue
     try:
         if int(f[iL]) != 1: continue

@@ -27,7 +27,9 @@ const RUNS: [&str; 3] = ["mbr_run1", "mbr_run2", "mbr_run3"];
 
 const FAKE_PERCOLATOR: &str = r#"#!/bin/sh
 # Stand-in for percolator: score = the PIN's RawScore; targets and decoys go
-# to the files named by --results-psms and --decoy-results-psms.
+# to the files named by --results-psms and --decoy-results-psms. The result
+# files carry Percolator's `filename` column after PSMId, so the readers are
+# exercised on the real column order.
 while [ $# -gt 1 ]; do
   case "$1" in
     --results-psms) T="$2"; shift 2 ;;
@@ -40,14 +42,14 @@ PIN="$1"
 awk -F'\t' -v T="$T" -v D="$D" '
 NR == 1 {
   for (i = 1; i <= NF; i++) h[$i] = i
-  hdr = "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds"
+  hdr = "PSMId\tfilename\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds"
   print hdr > T
   print hdr > D
   next
 }
 {
   out = ($h["Label"] == 1) ? T : D
-  print $h["SpecId"] "\t" $h["RawScore"] "\t0.001\t0.001\t" $h["Peptide"] "\t" $h["Proteins"] > out
+  print $h["SpecId"] "\t" $h["FileName"] "\t" $h["RawScore"] "\t0.001\t0.001\t" $h["Peptide"] "\t" $h["Proteins"] > out
 }' "$PIN"
 : > "$W"
 "#;

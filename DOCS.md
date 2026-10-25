@@ -993,7 +993,7 @@ PIN's name without its extension, so per-run searches into one directory keep on
 [quantms](https://github.com/bigbio/quantms). `psms.parquet` carries the peptidoform,
 modifications, charge, m/z, `is_decoy`, scan/rt, proteins, the spectrum arrays, `score`
 (`andes:RawScore`) and the other features in `additional_scores`. PEP and q-value are null
-until rescoring; `protein_groups.parquet` is empty (protein groups are in
+until rescoring. Each modification lists its sites in the QPX layout: `position` is an int32 (the 1-based residue index, 0 for the peptide N-terminus, length + 1 for the C-terminus) and `amino_acid` the residue, null on a terminus; the feature view uses the same layout. `protein_groups.parquet` is empty (protein groups are in
 `<stem>.protein_groups.tsv`, [§1](#protein-groups-and-protein-fdr)). With `--rescore`, every target row must join a
 Percolator result, except where target-decoy competition (`-Y`, which andes always passes)
 kept another PSM of its input file, scan and `ExpMass` group: those target rows are left out of the bundle, as

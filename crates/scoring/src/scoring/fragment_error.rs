@@ -104,7 +104,7 @@ mod tests {
             MIN_FEATURE_TOL_PPM
         );
         assert_eq!(
-            FragmentErrorModel::new(12.0, 9.0, 1, 1).feature_tolerance_ppm(),
+            FragmentErrorModel::new(0.0, 11.0, 1, 1).feature_tolerance_ppm(),
             MAX_FEATURE_TOL_PPM
         );
         assert_eq!(

@@ -133,6 +133,27 @@ image's ThermoRawFileParser supports `-L` (1.4+).
 **Size.** About 4 PSMs per (peptidoform, charge) across 33 datasets is about
 10–15M spectra, around 1 KB each before zstd.
 
+### 2b. MsNet collection (peak lists already attached; no raw conversion)
+
+MsNet PSM tables carry the peak lists, so `ms2_extract_msnet.py` replaces steps 1-2 for them.
+It reads both table layouts and the three peptidoform spellings (named modifications, `[UNIMOD:n]`
+tags), takes the activation, analyser, NCE and instrument from each PSM's `cv_params`, re-annotates
+the ions from the peak list (the annotation arrays of the table are not used), and writes the same
+shards as the other extractors. Large files are sampled by random row group.
+
+```bash
+$PY $S/ms2_extract_msnet.py --dataset PXD000000 --out $BASE/ms2/shards/PXD000000 --cap 60000 FILE.parquet...
+```
+
+- Sampling: targets with PEP <= 0.01, at most 4 PSMs per (peptidoform, charge, NCE bin of 2,
+  activation) and `--cap` PSMs per dataset. Raise `--cap` for the groups the corpus lacks (ion-trap
+  CID, time-of-flight).
+- A time-of-flight run (`time-of-flight` analyser, a Bruker or timsTOF instrument) gets the
+  activation and instrument "unknown" and no NCE, which is also how `--predict ms2` addresses it.
+- The collection holds some datasets under two names (`current/` and `new/`); train on one copy.
+- Training must still exclude the benchmark accessions (see above) and the timsTOF benchmark
+  runs (PXD053748, PXD064202).
+
 ### 3. PXD009875 flats (optional quick start, one CPU job)
 
 ```bash

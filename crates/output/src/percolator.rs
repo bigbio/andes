@@ -36,6 +36,18 @@ pub struct PercolatorPsm {
     pub proteins: String,
 }
 
+impl PercolatorPsm {
+    /// Report order of PSM rows: q-value, then PEP, both ascending, then `psm_id`.
+    /// `psm_id` is unique within a run (it is the key of the result map), so the
+    /// order is total and does not depend on the iteration order of that map.
+    pub fn report_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.q_value
+            .total_cmp(&other.q_value)
+            .then_with(|| self.pep.total_cmp(&other.pep))
+            .then_with(|| self.psm_id.cmp(&other.psm_id))
+    }
+}
+
 /// How Percolator will be invoked.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PercolatorBackend {
@@ -645,6 +657,52 @@ fn read_line<R: std::io::BufRead>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn psm(id: &str, q: f64, pep: f64) -> PercolatorPsm {
+        PercolatorPsm {
+            psm_id: id.to_string(),
+            q_value: q,
+            pep,
+            score: None,
+            peptide: "K.AAK.R".to_string(),
+            proteins: "P".to_string(),
+        }
+    }
+
+    #[test]
+    fn report_order_is_q_then_pep_then_id_whatever_the_map_order() {
+        let rows: Vec<PercolatorPsm> = (0..300)
+            .map(|i| {
+                psm(
+                    &format!("run/scan={i}"),
+                    (i % 3) as f64 * 0.001,
+                    (i % 5) as f64 * 0.01,
+                )
+            })
+            .collect();
+        let sorted_ids = |map: &HashMap<String, PercolatorPsm>| -> Vec<String> {
+            let mut v: Vec<&PercolatorPsm> = map.values().collect();
+            v.sort_by(|a, b| a.report_cmp(b));
+            v.iter().map(|p| p.psm_id.clone()).collect()
+        };
+        let first: HashMap<String, PercolatorPsm> =
+            rows.iter().map(|p| (p.psm_id.clone(), p.clone())).collect();
+        let want = sorted_ids(&first);
+        // Each map has its own random hasher, so each iterates in its own order.
+        for _ in 0..8 {
+            let m: HashMap<String, PercolatorPsm> = rows
+                .iter()
+                .rev()
+                .map(|p| (p.psm_id.clone(), p.clone()))
+                .collect();
+            assert_eq!(sorted_ids(&m), want);
+        }
+        let by_key: Vec<_> = want.iter().map(|id| &first[id]).collect();
+        assert!(by_key.windows(2).all(|w| {
+            (w[0].q_value, w[0].pep, w[0].psm_id.as_str())
+                < (w[1].q_value, w[1].pep, w[1].psm_id.as_str())
+        }));
+    }
 
     #[test]
     fn percolator_gets_the_thread_count_unless_the_user_set_it() {

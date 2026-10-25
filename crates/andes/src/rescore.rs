@@ -9,9 +9,10 @@
 //!
 //! METHOD (the Percolator algorithm, `-Y` semantics):
 //!
-//! * **Competition groups.** Rows sharing `ScanNr` and the `ExpMass` text form
-//!   one group, the same groups Percolator's target-decoy competition (`-Y`)
-//!   uses. Each group reports one PSM: its best-scoring row, target or decoy.
+//! * **Competition groups.** Rows sharing the input file, `ScanNr` and the
+//!   `ExpMass` text form one group, the same groups Percolator's target-decoy
+//!   competition (`-Y`) uses with the PIN `FileName` column. Each group
+//!   reports one PSM: its best-scoring row, target or decoy.
 //!   q-values are computed over these winners only, so a spectrum never
 //!   contributes several rows at one precursor mass.
 //! * **Cross-validation.** Rows are folded by spectrum (3 folds); every row is
@@ -29,13 +30,14 @@
 //! * **PEP.** Isotonic fit of the decoy share among winners against the final
 //!   score: PEP = decoys / targets at that score, capped at 1.
 //!
-//! `ExpMass` and `CalcMass` are not features (as in Percolator). The output
-//! maps match `output::run_percolator` with `-Y`: winning targets, and the
-//! winning decoys separately; rows that lost their group are in neither.
+//! `ExpMass`, `CalcMass` and `FileName` are not features (as in Percolator).
+//! The output maps match `output::run_percolator` with `-Y`: winning targets,
+//! and the winning decoys separately; rows that lost their group are in
+//! neither.
 
 use std::collections::HashMap;
 
-use output::PercolatorPsm;
+use output::{spec_id_run as run_of, PercolatorPsm};
 use rayon::prelude::*;
 use search::tdc::{qvalues, ScoredLabel};
 
@@ -51,7 +53,7 @@ const L2_C: f64 = 0.1;
 /// score it has (the initial single feature when no round could be trained).
 const MIN_TRAIN_CLASS: usize = 10;
 /// PIN columns between `ScanNr` and `Peptide` that are not features.
-const NON_FEATURES: [&str; 2] = ["ExpMass", "CalcMass"];
+const NON_FEATURES: [&str; 3] = ["ExpMass", "CalcMass", "FileName"];
 const PROB_EPS: f64 = 1e-6;
 /// Rows per partial sum in the logistic fit.
 const CHUNK: usize = 4096;
@@ -78,7 +80,7 @@ struct PinData {
 /// Parse a Percolator PIN. Layout:
 /// `SpecId \t Label \t ScanNr \t <numeric features…> \t Peptide \t Proteins…`.
 /// Feature columns = everything strictly between `ScanNr` and `Peptide`,
-/// except `ExpMass` and `CalcMass`.
+/// except `ExpMass`, `CalcMass` and `FileName`.
 fn parse_pin(text: &str) -> Result<PinData, String> {
     let mut lines = text.lines();
     let header = lines.next().ok_or("empty PIN")?;
@@ -112,7 +114,8 @@ fn parse_pin(text: &str) -> Result<PinData, String> {
         x: Vec::new(),
         n_features,
     };
-    let mut group_ids: HashMap<String, u32> = HashMap::new();
+    let mut scans: Vec<u32> = Vec::new();
+    let mut exp_txt: Vec<Option<&str>> = Vec::new();
     for (lineno, line) in lines.enumerate() {
         if line.is_empty() {
             continue;
@@ -155,24 +158,8 @@ fn parse_pin(text: &str) -> Result<PinData, String> {
                 lineno + 2
             )
         })?;
-        let key = spectrum_key(f[id_i], scan);
-        d.spectrum_hashes.push(fnv1a(key));
-        // Without an ExpMass column the spectrum is the group. With one, the
-        // group is the input file, ScanNr and ExpMass: scan numbers repeat
-        // across the files of one search, and spectra of different files must
-        // never compete.
-        let group_key = match exp_mass_i {
-            Some(i) => format!("{}\t{scan}\t{}", run_of(f[id_i]), f[i].trim()),
-            None => format!("{key}\t{scan}"),
-        };
-        let next = group_ids.len() as u32;
-        let mut first = false;
-        let g = *group_ids.entry(group_key).or_insert_with(|| {
-            first = true;
-            next
-        });
-        d.groups.push(g);
-        d.first_in_group.push(first);
+        scans.push(scan);
+        exp_txt.push(exp_mass_i.map(|i| f[i].trim()));
         d.peptides.push(f[pep_i].to_string());
         d.proteins
             .push(f.get(pep_i + 1..).map(|s| s.join(";")).unwrap_or_default());
@@ -193,35 +180,79 @@ fn parse_pin(text: &str) -> Result<PinData, String> {
             d.x.push(v);
         }
     }
+    let keys = spectrum_keys(&d.spec_ids, &scans);
+    let mut group_ids: HashMap<String, u32> = HashMap::new();
+    for (row, key) in keys.iter().enumerate() {
+        d.spectrum_hashes.push(fnv1a(key));
+        // Without an ExpMass column the spectrum is the group. With one, the
+        // group is the input file, ScanNr and ExpMass: scan numbers repeat
+        // across the files of one search, and spectra of different files must
+        // never compete.
+        let group_key = match exp_txt[row] {
+            Some(m) => format!("{}\t{}\t{m}", run_of(&d.spec_ids[row]), scans[row]),
+            None => format!("{key}\t{}", scans[row]),
+        };
+        let next = group_ids.len() as u32;
+        let mut first = false;
+        let g = *group_ids.entry(group_key).or_insert_with(|| {
+            first = true;
+            next
+        });
+        d.groups.push(g);
+        d.first_in_group.push(first);
+    }
     Ok(d)
 }
 
-/// A row's spectrum: its SpecId (`{title}_{scan}_{rank}`, multi-row scans add
-/// `_{row}`) without that suffix, the first `_{scan}_` followed by one or two
-/// numbers and nothing else. The title, not ScanNr, identifies the spectrum:
-/// ScanNr is 0 when a native id carries no scan number, and repeats across
-/// the files of one search.
-fn spectrum_key(spec_id: &str, scan: u32) -> &str {
-    let sep = format!("_{scan}_");
-    let numbers = |s: &str| {
-        let parts: Vec<&str> = s.split('_').collect();
-        parts.len() <= 2
-            && parts
-                .iter()
-                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
-    };
-    spec_id
-        .match_indices(&sep)
-        .map(|(i, _)| i)
-        .find(|&i| numbers(&spec_id[i + sep.len()..]))
-        .map_or(spec_id, |i| &spec_id[..i])
+/// `spec_id` without its trailing `_{scan}_{rank}`, when it has that form.
+fn strip_single(spec_id: &str, scan: u32) -> Option<&str> {
+    let mut it = spec_id.rsplitn(3, '_');
+    let (rank, sc, rest) = (it.next()?, it.next()?, it.next()?);
+    (is_number(rank) && sc.parse() == Ok(scan)).then_some(rest)
 }
 
-/// The input file a row's SpecId names: the `<stem>/` prefix every search puts
-/// on spectrum titles (empty when the SpecId has none, e.g. a PIN written by
-/// another tool, where ScanNr and ExpMass alone form the group).
-fn run_of(spec_id: &str) -> &str {
-    spec_id.split_once('/').map_or("", |(run, _)| run)
+/// `spec_id` without its trailing `_{scan}_{rank}_{row}`, when it has that form.
+fn strip_multi(spec_id: &str, scan: u32) -> Option<&str> {
+    let mut it = spec_id.rsplitn(4, '_');
+    let (row, rank, sc, rest) = (it.next()?, it.next()?, it.next()?, it.next()?);
+    (is_number(row) && is_number(rank) && sc.parse() == Ok(scan)).then_some(rest)
+}
+
+fn is_number(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Each row's spectrum key: its SpecId (`{title}_{scan}_{rank}`; the rows of a
+/// multi-row scan add `_{row}`) without that suffix. The title, not ScanNr,
+/// identifies the spectrum: ScanNr is 0 when a native id carries no scan
+/// number, and repeats across the files of one search.
+///
+/// The suffix is read from the right, so a title that itself ends in
+/// `_{scan}` keeps it. A SpecId can still read both ways (`t_10_10_1` is
+/// title `t_10` with rank 1, or title `t` with rank 10 and row 1); a
+/// multi-row reading is taken only when another row of the PIN shares its
+/// key, since every multi-row scan emits at least two rows. A SpecId that
+/// fits neither form is its own key.
+fn spectrum_keys(spec_ids: &[String], scans: &[u32]) -> Vec<String> {
+    let mut multi_count: HashMap<&str, u32> = HashMap::new();
+    for (id, &scan) in spec_ids.iter().zip(scans) {
+        if let Some(k) = strip_multi(id, scan) {
+            *multi_count.entry(k).or_insert(0) += 1;
+        }
+    }
+    spec_ids
+        .iter()
+        .zip(scans)
+        .map(|(id, &scan)| {
+            let multi = strip_multi(id, scan);
+            let shared = multi.filter(|k| multi_count.get(k).copied().unwrap_or(0) > 1);
+            shared
+                .or_else(|| strip_single(id, scan))
+                .or(multi)
+                .unwrap_or(id)
+                .to_string()
+        })
+        .collect()
 }
 
 fn fnv1a(s: &str) -> u64 {
@@ -823,20 +854,65 @@ mod tests {
         assert!(confident > 50, "got {confident}");
     }
 
+    fn keys(rows: &[(&str, u32)]) -> Vec<String> {
+        let ids: Vec<String> = rows.iter().map(|r| r.0.to_string()).collect();
+        let scans: Vec<u32> = rows.iter().map(|r| r.1).collect();
+        spectrum_keys(&ids, &scans)
+    }
+
     #[test]
     fn spectrum_key_drops_scan_rank_and_row() {
-        assert_eq!(spectrum_key("run/index=101_101_1", 101), "run/index=101");
-        assert_eq!(spectrum_key("run/index=101_101_2_1", 101), "run/index=101");
+        assert_eq!(keys(&[("run/index=101_101_1", 101)]), ["run/index=101"]);
         assert_eq!(
-            spectrum_key("run/cycle=4 experiment=2_0_1", 0),
-            "run/cycle=4 experiment=2"
+            keys(&[
+                ("run/index=101_101_1_0", 101),
+                ("run/index=101_101_2_1", 101)
+            ]),
+            ["run/index=101", "run/index=101"]
+        );
+        assert_eq!(
+            keys(&[("run/cycle=4 experiment=2_0_1", 0)]),
+            ["run/cycle=4 experiment=2"]
         );
         // Rank or row equal to the scan number: every row of the spectrum
         // keeps the same key.
-        for id in ["run/x_1_1", "run/x_1_1_1", "run/x_1_2_1", "run/x_1_1_0"] {
-            assert_eq!(spectrum_key(id, 1), "run/x", "{id}");
-        }
-        assert_eq!(spectrum_key("run/t_5_3_5_1", 5), "run/t_5_3");
+        assert_eq!(keys(&[("run/x_1_1", 1)]), ["run/x"]);
+        assert_eq!(
+            keys(&[("run/x_1_1_0", 1), ("run/x_1_2_1", 1)]),
+            ["run/x", "run/x"]
+        );
+        assert_eq!(
+            keys(&[("run/x_1_1_1", 1), ("run/x_1_2_0", 1)]),
+            ["run/x", "run/x"]
+        );
+        assert_eq!(
+            keys(&[("run/t_5_3_5_1", 5), ("run/t_5_3_5_2", 5)]),
+            ["run/t_5_3", "run/t_5_3"]
+        );
+    }
+
+    #[test]
+    fn spectrum_key_keeps_a_title_ending_in_the_scan() {
+        // Single-row scan, title `file_10` at scan 10.
+        assert_eq!(keys(&[("run/file_10_10_1", 10)]), ["run/file_10"]);
+        // Multi-row scan of the same title: every row, whatever its rank and
+        // row, shares one key.
+        assert_eq!(
+            keys(&[
+                ("run/file_10_10_1_0", 10),
+                ("run/file_10_10_2_1", 10),
+                ("run/file_10_10_3_2", 10),
+            ]),
+            ["run/file_10", "run/file_10", "run/file_10"]
+        );
+        // Title `file_10_10` at scan 10, multi-row and single-row.
+        assert_eq!(
+            keys(&[("r/file_10_10_10_1_0", 10), ("r/file_10_10_10_2_1", 10)]),
+            ["r/file_10_10", "r/file_10_10"]
+        );
+        assert_eq!(keys(&[("r/file_10_10_10_1", 10)]), ["r/file_10_10"]);
+        // A SpecId in neither form is its own key.
+        assert_eq!(keys(&[("other-tool-psm-7", 3)]), ["other-tool-psm-7"]);
     }
 
     #[test]
@@ -1048,11 +1124,11 @@ mod tests {
     }
 
     #[test]
-    fn exp_mass_and_calc_mass_are_not_features() {
-        let pin = "SpecId\tLabel\tScanNr\tExpMass\tCalcMass\tf1\tPeptide\tProteins\n\
-                   a_1_1\t1\t1\t500.1\t500.1\t0.5\tK.P.K\tP1\n";
+    fn mass_and_file_name_columns_are_not_features() {
+        let pin = "SpecId\tLabel\tScanNr\tExpMass\tCalcMass\tFileName\tf1\tPeptide\tProteins\n\
+                   a/s_1_1\t1\t1\t500.1\t500.1\ta\t0.5\tK.P.K\tP1\n";
         assert_eq!(parse_pin(pin).unwrap().n_features, 1);
-        let only_masses = "SpecId\tLabel\tScanNr\tExpMass\tCalcMass\tPeptide\tProteins\n";
+        let only_masses = "SpecId\tLabel\tScanNr\tExpMass\tCalcMass\tFileName\tPeptide\tProteins\n";
         assert!(parse_pin(only_masses).is_err());
     }
 

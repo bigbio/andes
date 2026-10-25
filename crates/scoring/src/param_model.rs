@@ -863,6 +863,7 @@ mod tests {
         let model = Arc::new(GbdtPeakModel {
             packed: Default::default(),
             n_features: 1,
+            feature_names: crate::gbdt_eval::indexed_feature_names(1),
             apply_sigmoid: false,
             trees: vec![Tree {
                 feature: vec![-1],

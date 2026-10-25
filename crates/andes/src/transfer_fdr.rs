@@ -202,6 +202,7 @@ fn train_fold(
         y,
         groups,
         n_features: nf,
+        feature_names: scoring_crate::gbdt_eval::indexed_feature_names(nf as u32),
     };
     train_gbdt(
         &ds,

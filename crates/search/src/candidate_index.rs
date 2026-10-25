@@ -18,18 +18,18 @@
 //!
 //! ## Build-once cache
 //!
-//! [`index_cache_path`] derives a stable file path under the system temp dir from
-//! a content-addressed key: the FASTA content (all target accessions + sequences),
-//! the enzyme, missed cleavages, length bounds, and decoy prefix.  Callers may
+//! [`index_cache_path`] derives a stable file path in a caller-chosen cache directory from a
+//! content-addressed key: the cache format and andes version, the database content
+//! (all accessions + sequences), the enzyme, missed cleavages, length bounds, and decoy prefix.  Callers may
 //! pass this path to `prepare_mmap` (via [`MmapCandidateIndex::open_or_build`]);
 //! when the file already exists at the key path the build step is skipped entirely
 //! and the existing file is re-opened.  This makes repeated searches over the same
 //! database pay the build cost only once.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+
+use sha2::{Digest, Sha256};
 
 use crate::candidate_gen::enumerate_candidates;
 use crate::search_index::SearchIndex;
@@ -226,25 +226,58 @@ pub fn build_base_peptide_index<W: Write>(
     Ok(n)
 }
 
+/// Streaming SHA-256 over an explicit, platform-independent encoding of the
+/// cache-key inputs: integers as fixed-width little endian, byte strings
+/// length-prefixed. Nothing here depends on `std::hash`, whose output Rust does
+/// not guarantee across releases or targets.
+struct KeyHasher(Sha256);
+
+impl KeyHasher {
+    fn u64(&mut self, v: u64) {
+        self.0.update(v.to_le_bytes());
+    }
+
+    fn bytes(&mut self, b: &[u8]) {
+        self.u64(b.len() as u64);
+        self.0.update(b);
+    }
+
+    fn str(&mut self, s: &str) {
+        self.bytes(s.as_bytes());
+    }
+
+    /// First 128 bits of the digest, as 32 hex characters.
+    fn finish_hex(self) -> String {
+        use std::fmt::Write;
+        let digest = self.0.finalize();
+        let mut out = String::with_capacity(32);
+        for b in &digest[..16] {
+            let _ = write!(out, "{b:02x}");
+        }
+        out
+    }
+}
+
 /// Derive a stable, content-addressed cache path for the base-peptide index.
 ///
-/// The path is placed in the system temp directory and named
-/// `andes-candidx-<hex16>.bin`, where `<hex16>` is a 16-character hex string
-/// derived by hashing:
+/// The path is placed in `cache_dir` and named `andes-candidx-<hex32>.bin`,
+/// where `<hex32>` is the first 128 bits of a SHA-256 over:
 ///
-/// 1. Every **target** protein's accession and sequence (in iteration order from
-///    [`SearchIndex::iter_target_proteins`]), a variant entry's variant
-///    region and a mature-chain entry's new termini.  Decoy sequences are derived from targets deterministically, so
-///    they need not be hashed separately.
-/// 2. The search parameters that affect which base peptides are produced:
-///    `enzyme`, `extra_enzymes`, `max_missed_cleavages`, `min_length`,
-///    `max_length`, `num_tolerable_termini`, `require_nxst_sequon` and
-///    `decoy_prefix`.
+/// 1. The cache format: [`INDEX_FORMAT_VERSION`], [`CANDIDATE_SET_REVISION`] and
+///    the andes version, so a file written by another build is never reused.
+/// 2. Every protein's accession and sequence (targets and decoys, in database
+///    order), a variant entry's variant region and a mature-chain entry's new
+///    termini. Decoys are hashed directly, which captures the decoy strategy
+///    and shuffle seed.
+/// 3. The decoy prefix and suffix, the fixed modifications (location-aware
+///    fingerprint) and the search parameters that affect which base peptides
+///    are produced: `enzyme`, `extra_enzymes`, `max_missed_cleavages`,
+///    `min_length`, `max_length`, `num_tolerable_termini` and
+///    `require_nxst_sequon`.
 ///
-/// The hash uses Rust's stable [`DefaultHasher`].  It is **not** a
-/// cryptographic hash — collisions are possible (though extremely unlikely in
-/// practice).  The intent is cache correctness for a single machine / session,
-/// not cross-machine portability.
+/// The key is the same on every machine and toolchain for the same inputs, so
+/// a cache directory on a shared filesystem can serve several nodes. It is a
+/// truncated hash, not a security boundary.
 ///
 /// # When to pass this path to `PreparedSearch::prepare_mmap`
 ///
@@ -252,29 +285,30 @@ pub fn build_base_peptide_index<W: Write>(
 /// skips the (potentially slow) build step when the cache file already exists
 /// and re-opens it directly.  The first call builds and caches; every
 /// subsequent call with the same parameters opens the cached file.
-pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams) -> PathBuf {
-    let mut h = DefaultHasher::new();
+pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams, cache_dir: &Path) -> PathBuf {
+    let mut h = KeyHasher(Sha256::new());
 
-    // The candidate-set revision: which spans the digest emits and which
-    // base mass each carries, so an index built by an earlier rule is rebuilt.
-    CANDIDATE_SET_REVISION.hash(&mut h);
+    h.u64(u64::from(INDEX_FORMAT_VERSION));
+    h.u64(u64::from(CANDIDATE_SET_REVISION));
+    h.str(env!("CARGO_PKG_VERSION"));
 
-    // Hash ALL protein content (targets AND decoys): accession + sequence bytes.
-    // Hashing the decoy sequences directly (not just `decoy_prefix`) captures the
-    // decoy strategy and shuffle seed — a prefix-only key would let a
-    // reverse-vs-shuffle (or reseeded shuffle) run silently reuse a stale decoy
-    // index and corrupt FDR.
     for protein in &idx.db.proteins {
-        protein.accession.hash(&mut h);
-        protein.sequence.hash(&mut h);
+        h.str(&protein.accession);
+        h.bytes(protein.sequence.as_ref());
         // A variant entry only yields the spans covering its variant, so the
         // region shapes the records too (absent for every FASTA protein).
-        for v in protein.variant_parts() {
-            (v.start, v.end).hash(&mut h);
+        let variants = protein.variant_parts();
+        h.u64(variants.len() as u64);
+        for v in variants {
+            h.u64(u64::from(v.start));
+            h.u64(u64::from(v.end));
         }
         // Likewise a mature-chain entry yields only its new-terminus spans.
-        if let Some(c) = protein.chain_ends() {
-            (c.n_term, c.c_term).hash(&mut h);
+        match protein.chain_ends() {
+            Some(c) => {
+                h.u64(1 + u64::from(c.n_term) + 2 * u64::from(c.c_term));
+            }
+            None => h.u64(0),
         }
     }
     // The affix test decides each record's IS_DECOY flag (`SearchIndex::
@@ -283,11 +317,13 @@ pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams) -> PathBuf {
     // `--decoy-suffix` to an external target/decoy FASTA rebuilds the index
     // rather than reusing one whose suffixed decoys are flagged as targets. An
     // empty suffix matches nothing and keys like no suffix.
-    idx.decoy_prefix.hash(&mut h);
-    idx.decoy_suffix
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .hash(&mut h);
+    h.str(&idx.decoy_prefix);
+    h.str(
+        idx.decoy_suffix
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(""),
+    );
 
     // Hash the FIXED modifications. Base-peptide masses fold fixed mods in (e.g.
     // Carbamidomethyl-C), so two runs with the same FASTA/enzyme/lengths but a
@@ -299,28 +335,145 @@ pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams) -> PathBuf {
     // collide and reuse a stale index. (Variable mods are applied lazily at serve
     // time and do NOT affect the cached base index, so they are excluded.) The
     // fingerprint is already sorted + deduped → deterministic key.
-    for (res, loc_rank, delta_bits) in params.aa_set.fixed_mod_fingerprint() {
-        res.hash(&mut h);
-        loc_rank.hash(&mut h);
-        delta_bits.hash(&mut h);
+    let fixed = params.aa_set.fixed_mod_fingerprint();
+    h.u64(fixed.len() as u64);
+    for (res, loc_rank, delta_bits) in fixed {
+        h.u64(u64::from(res));
+        h.u64(u64::from(loc_rank));
+        h.u64(delta_bits);
     }
 
-    // Hash all search params that affect base-peptide enumeration.
-    // `enzyme` and `Enzyme` must impl `Hash` — confirmed by the model crate.
-    params.enzyme.hash(&mut h);
+    // Every search parameter that affects base-peptide enumeration. Enzymes are
+    // keyed by name: the key already carries the andes version, so a renamed
+    // variant cannot meet an older file.
+    h.str(&format!("{:?}", params.enzyme));
+    h.u64(params.extra_enzymes.len() as u64);
     for extra in &params.extra_enzymes {
-        extra.hash(&mut h);
+        h.str(&format!("{extra:?}"));
     }
-    params.max_missed_cleavages.hash(&mut h);
-    params.min_length.hash(&mut h);
-    params.max_length.hash(&mut h);
-    params.num_tolerable_termini.hash(&mut h);
+    h.u64(u64::from(params.max_missed_cleavages));
+    h.u64(u64::from(params.min_length));
+    h.u64(u64::from(params.max_length));
+    h.u64(u64::from(params.num_tolerable_termini));
     // `--glyco-index-sequon-only` drops every span without a sequon from the
     // index; such an index must never be reused by a search that needs them.
-    params.require_nxst_sequon.hash(&mut h);
+    h.u64(u64::from(params.require_nxst_sequon));
 
-    let digest = h.finish();
-    std::env::temp_dir().join(format!("andes-candidx-{digest:016x}.bin"))
+    cache_dir.join(format!("andes-candidx-{}.bin", h.finish_hex()))
+}
+
+/// The error for a cache directory that cannot be created or written; names
+/// the flag that chooses the directory.
+fn cache_write_error(dir: &Path, e: io::Error) -> io::Error {
+    io::Error::new(
+        e.kind(),
+        format!(
+            "cannot write the candidate-index cache in {} ({e}); pass --index-cache-dir with a \
+             writable directory",
+            dir.display()
+        ),
+    )
+}
+
+/// Lock file next to a cache file: `<cache file>.lock`.
+fn lock_path_for(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".lock");
+    PathBuf::from(name)
+}
+
+/// How often the holder of a [`BuildLock`] refreshes the lock file's
+/// modification time.
+const LOCK_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(5);
+/// A lock whose modification time a waiter has seen unchanged for this long is
+/// taken to belong to a dead builder.
+const LOCK_STALE: std::time::Duration =
+    std::time::Duration::from_secs(if cfg!(test) { 2 } else { 60 });
+/// How often a waiter looks at the cache file and the lock.
+const LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Held by the one process that is building a cache file. The file is created
+/// exclusively, a thread refreshes its modification time while the build runs
+/// (so waiters can tell a live build from a dead one without comparing clocks
+/// across machines), and dropping the lock removes it.
+struct BuildLock {
+    path: PathBuf,
+    /// Dropping the sender stops the heartbeat thread.
+    stop: Option<std::sync::mpsc::Sender<()>>,
+    beat: Option<std::thread::JoinHandle<()>>,
+}
+
+impl BuildLock {
+    /// `Ok(None)` when another process holds the lock.
+    fn try_acquire(path: &Path) -> io::Result<Option<Self>> {
+        let file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let (stop, rx) = std::sync::mpsc::channel::<()>();
+        let beat = std::thread::spawn(move || {
+            while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                rx.recv_timeout(LOCK_HEARTBEAT)
+            {
+                let _ = file.set_modified(std::time::SystemTime::now());
+            }
+        });
+        Ok(Some(Self {
+            path: path.to_path_buf(),
+            stop: Some(stop),
+            beat: Some(beat),
+        }))
+    }
+}
+
+impl Drop for BuildLock {
+    fn drop(&mut self) {
+        drop(self.stop.take());
+        if let Some(beat) = self.beat.take() {
+            let _ = beat.join();
+        }
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Wait while another process builds `path`. Returns the opened index once the
+/// cache file is usable, or `None` when the lock has gone away (the builder
+/// finished or failed without leaving a usable file) or has not changed for
+/// [`LOCK_STALE`] (the builder died; its lock is removed).
+fn wait_for_builder(path: &Path, lock_path: &Path) -> Option<MmapCandidateIndex> {
+    eprintln!(
+        "candidate-index: another process is building {}; waiting for it",
+        path.display()
+    );
+    let mut seen_mtime = None;
+    let mut seen_at = std::time::Instant::now();
+    loop {
+        if let Ok(mmap_index) = MmapCandidateIndex::open(path) {
+            return Some(mmap_index);
+        }
+        let mtime = match std::fs::metadata(lock_path) {
+            Ok(m) => m.modified().ok(),
+            Err(_) => return None,
+        };
+        if mtime != seen_mtime {
+            seen_mtime = mtime;
+            seen_at = std::time::Instant::now();
+        } else if seen_at.elapsed() > LOCK_STALE {
+            eprintln!(
+                "candidate-index: the lock {} has not been refreshed for {} s; taking over",
+                lock_path.display(),
+                LOCK_STALE.as_secs()
+            );
+            let _ = std::fs::remove_file(lock_path);
+            return None;
+        }
+        std::thread::sleep(LOCK_POLL);
+    }
 }
 
 /// Memory-mapped reader for the flat binary candidate index produced by
@@ -465,11 +618,33 @@ impl MmapCandidateIndex {
         // The temp file lives in the same directory as `path` so the rename is
         // always within the same filesystem (avoiding cross-device link errors).
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent).map_err(|e| cache_write_error(parent, e))?;
+        // One builder per cache file: the process that finds the file missing
+        // takes `<path>.lock` and builds; every other process waits for the
+        // file instead of repeating the build and the write.
+        let lock_path = lock_path_for(path);
+        let _lock = loop {
+            match BuildLock::try_acquire(&lock_path) {
+                Ok(Some(lock)) => break lock,
+                Ok(None) => {
+                    if let Some(mmap_index) = wait_for_builder(path, &lock_path) {
+                        return Ok((mmap_index, false));
+                    }
+                    // The lock went away without a usable file (the builder
+                    // failed or died): take over.
+                }
+                Err(e) => return Err(cache_write_error(parent, e)),
+            }
+        };
+        // A holder may have finished between the open above and the lock.
+        if let Ok(mmap_index) = Self::open(path) {
+            return Ok((mmap_index, false));
+        }
         // Unique temp name per call: PID alone collides when several searches (or
-        // tests) build distinct indexes concurrently in the SAME directory (e.g.
-        // multiple `NamedTempFile`s under `/tmp`), racing on one tmp path and
-        // corrupting each other's partial writes. Append a process-global atomic
-        // counter so concurrent builds never share a tmp file.
+        // tests) build distinct indexes concurrently in the SAME directory,
+        // racing on one tmp path and corrupting each other's partial writes.
+        // Append a process-global atomic counter so concurrent builds never
+        // share a tmp file.
         static BUILD_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = BUILD_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let tmp_path = parent.join(format!(
@@ -477,20 +652,7 @@ impl MmapCandidateIndex {
             std::process::id(),
             seq,
         ));
-        // A cache directory that cannot be written (read-only temp dir, full
-        // disk, permissions) does not stop the search: the same index is built
-        // in memory instead.
-        let file = match std::fs::File::create(&tmp_path) {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!(
-                    "candidate-index: cannot write the cache in {} ({e}); building it in memory \
-                     (set TMPDIR to a writable directory to cache it across runs)",
-                    parent.display()
-                );
-                return Ok((Self::build_in_memory(idx, params, decoy_prefix)?, true));
-            }
-        };
+        let file = std::fs::File::create(&tmp_path).map_err(|e| cache_write_error(parent, e))?;
         let written = {
             use std::io::{BufWriter, Write};
             let mut bw = BufWriter::new(file);
@@ -498,12 +660,7 @@ impl MmapCandidateIndex {
         };
         if let Err(e) = written.and_then(|()| std::fs::rename(&tmp_path, path)) {
             let _ = std::fs::remove_file(&tmp_path);
-            eprintln!(
-                "candidate-index: cannot write the cache in {} ({e}); building it in memory \
-                 (set TMPDIR to a writable directory to cache it across runs)",
-                parent.display()
-            );
-            return Ok((Self::build_in_memory(idx, params, decoy_prefix)?, true));
+            return Err(cache_write_error(parent, e));
         }
 
         let mmap_index = Self::open(path)?;
@@ -897,37 +1054,57 @@ mod tests {
     // Build-once cache: `open_or_build` / `index_cache_path`
     // -----------------------------------------------------------------------
 
-    /// `open_or_build` reuses the existing file on the second call (cache hit).
-    ///
-    /// Strategy: call `open_or_build` with an explicit temp path twice with
-    /// the same inputs.  The first call must report `was_built = true`; the
-    /// second must report `was_built = false` and must return a record set that
-    /// is byte-identical to the first call's result.  The file's modification
-    /// time must not change on the second call (proving the builder was not
-    /// re-invoked).
-    /// A cache path that cannot be written does not fail the search: the index
-    /// is built in memory, with the same records the cache file would hold.
+    /// A cache directory that cannot be created or written is an error that
+    /// names the flag; nothing falls back to another directory or to memory.
     #[test]
-    fn unwritable_cache_falls_back_to_an_identical_in_memory_index() {
+    fn unwritable_cache_dir_is_an_error_naming_the_flag() {
         let idx = make_toy_index();
         let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
         let mut params = SearchParams::default_tryptic(aa_set);
         params.min_length = 3;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let on_disk = dir.path().join("cache.idx");
-        let (file_idx, _) = MmapCandidateIndex::open_or_build(&on_disk, &idx, &params, "XXX")
-            .expect("build to a writable directory");
-        assert!(!file_idx.is_in_memory());
+        // The cache directory is a regular file, so it cannot be created.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+        let path = blocker.join("sub").join("cache.idx");
+        let err = match MmapCandidateIndex::open_or_build(&path, &idx, &params, "XXX") {
+            Ok(_) => panic!("an unwritable cache directory must fail"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("--index-cache-dir"),
+            "error must name the flag: {err}"
+        );
+        assert!(!path.exists());
+    }
 
-        // The parent directory does not exist, so the cache cannot be created.
-        let unwritable = dir.path().join("missing").join("cache.idx");
-        let (mem_idx, built) = MmapCandidateIndex::open_or_build(&unwritable, &idx, &params, "XXX")
-            .expect("an unwritable cache must not fail");
-        assert!(built);
-        assert!(mem_idx.is_in_memory());
-        assert!(!unwritable.exists());
-        assert_eq!(file_idx.records(), mem_idx.records());
+    /// A missing cache directory is created.
+    #[test]
+    fn missing_cache_dir_is_created() {
+        let idx = make_toy_index();
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.min_length = 3;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache_dir = dir.path().join("a").join("b");
+        let path = index_cache_path(&idx, &params, &cache_dir);
+        let (mi, built) = MmapCandidateIndex::open_or_build(&path, &idx, &params, "XXX").unwrap();
+        assert!(built && !mi.is_in_memory());
+        assert!(path.is_file());
+    }
+
+    /// The cache file is named inside the directory that was passed.
+    #[test]
+    fn index_cache_path_is_in_the_given_dir() {
+        let idx = make_toy_index();
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let params = SearchParams::default_tryptic(aa_set);
+        let a = index_cache_path(&idx, &params, Path::new("/one"));
+        let b = index_cache_path(&idx, &params, Path::new("/two"));
+        assert_eq!(a.parent(), Some(Path::new("/one")));
+        assert_eq!(b.parent(), Some(Path::new("/two")));
+        assert_eq!(a.file_name(), b.file_name());
     }
 
     #[test]
@@ -1029,8 +1206,8 @@ mod tests {
         let mut params_b = SearchParams::default_tryptic(aa_set_b);
         params_b.min_length = 6; // different min_length
 
-        let path_a = index_cache_path(&idx, &params_a);
-        let path_b = index_cache_path(&idx, &params_b);
+        let path_a = index_cache_path(&idx, &params_a, Path::new("cache"));
+        let path_b = index_cache_path(&idx, &params_b, Path::new("cache"));
 
         assert_ne!(
             path_a,
@@ -1058,8 +1235,8 @@ mod tests {
         );
         p_cam.min_length = 3;
         assert_ne!(
-            index_cache_path(&idx, &p_nomod),
-            index_cache_path(&idx, &p_cam),
+            index_cache_path(&idx, &p_nomod, Path::new("cache")),
+            index_cache_path(&idx, &p_cam, Path::new("cache")),
             "cache key must differ when the fixed-mod set differs"
         );
     }
@@ -1097,10 +1274,9 @@ mod tests {
         params.min_length = 3;
         params.require_nxst_sequon = true;
 
-        let plain_path = index_cache_path(&plain, &params);
-        let suffixed_path = index_cache_path(&suffixed, &params);
-        let _ = std::fs::remove_file(&plain_path);
-        let _ = std::fs::remove_file(&suffixed_path);
+        let dir = tempfile::tempdir().unwrap();
+        let plain_path = index_cache_path(&plain, &params, dir.path());
+        let suffixed_path = index_cache_path(&suffixed, &params, dir.path());
         let (first, _) = MmapCandidateIndex::open_or_build(&plain_path, &plain, &params, "XXX")
             .expect("build the suffix-less index");
         assert!(first.records().iter().all(|r| !r.is_decoy()));
@@ -1108,8 +1284,6 @@ mod tests {
             MmapCandidateIndex::open_or_build(&suffixed_path, &suffixed, &params, "XXX")
                 .expect("open the suffixed index");
         let decoys = second.records().iter().filter(|r| r.is_decoy()).count();
-        let _ = std::fs::remove_file(&plain_path);
-        let _ = std::fs::remove_file(&suffixed_path);
         assert_eq!(decoys, 1, "ASNVTR from P1_rev is the one sequon decoy");
         assert_ne!(
             plain_path, suffixed_path,
@@ -1129,12 +1303,100 @@ mod tests {
         let mut params_b = SearchParams::default_tryptic(aa_set_b);
         params_b.min_length = 4; // same
 
-        let path_a = index_cache_path(&idx, &params_a);
-        let path_b = index_cache_path(&idx, &params_b);
+        let path_a = index_cache_path(&idx, &params_a, Path::new("cache"));
+        let path_b = index_cache_path(&idx, &params_b, Path::new("cache"));
 
         assert_eq!(
             path_a, path_b,
             "cache paths must be identical for identical params"
         );
+    }
+
+    /// The key is a fixed function of its inputs: this pins the file name for
+    /// the toy database, so a change to the key encoding (which would orphan
+    /// every shared cache) is a deliberate edit of this value, and the name is
+    /// the same on every toolchain and target.
+    #[test]
+    fn index_cache_key_is_pinned() {
+        let idx = make_toy_index();
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.min_length = 4;
+        let path = index_cache_path(&idx, &params, Path::new("cache"));
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("andes-candidx-db3e57f5c212f6468961501684c9872b.bin")
+        );
+    }
+
+    fn toy_params() -> SearchParams {
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.min_length = 3;
+        params
+    }
+
+    /// Several processes starting together on a cold cache: exactly one builds,
+    /// the others open its file.
+    #[test]
+    fn concurrent_open_or_build_builds_once() {
+        let idx = make_toy_index();
+        let params = toy_params();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.bin");
+        let built: Vec<bool> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..6)
+                .map(|_| {
+                    s.spawn(|| {
+                        MmapCandidateIndex::open_or_build(&path, &idx, &params, "XXX")
+                            .unwrap()
+                            .1
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(built.iter().filter(|b| **b).count(), 1, "{built:?}");
+        assert!(!lock_path_for(&path).exists(), "lock must be released");
+    }
+
+    /// A task that finds the lock held waits, and opens the finished file.
+    #[test]
+    fn waiter_opens_the_file_the_lock_holder_builds() {
+        let idx = make_toy_index();
+        let params = toy_params();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.bin");
+        let lock = BuildLock::try_acquire(&lock_path_for(&path))
+            .unwrap()
+            .expect("lock is free");
+        std::thread::scope(|s| {
+            let waiter =
+                s.spawn(|| MmapCandidateIndex::open_or_build(&path, &idx, &params, "XXX").unwrap());
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            assert!(!waiter.is_finished(), "waiter must not build while locked");
+            let mut f = std::fs::File::create(&path).unwrap();
+            build_base_peptide_index(&idx, &params, "XXX", &mut f).unwrap();
+            drop(f);
+            drop(lock);
+            let (mi, was_built) = waiter.join().unwrap();
+            assert!(!was_built, "waiter must reuse the holder's file");
+            assert!(!mi.is_empty());
+        });
+    }
+
+    /// A lock nobody refreshes (dead builder) is taken over.
+    #[test]
+    fn stale_lock_is_taken_over() {
+        let idx = make_toy_index();
+        let params = toy_params();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.bin");
+        std::fs::File::create(lock_path_for(&path)).unwrap();
+        let (mi, was_built) =
+            MmapCandidateIndex::open_or_build(&path, &idx, &params, "XXX").unwrap();
+        assert!(was_built);
+        assert!(!mi.is_empty());
+        assert!(!lock_path_for(&path).exists());
     }
 }

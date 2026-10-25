@@ -57,7 +57,7 @@ pub fn theoretical_ion_mzs(peptide: &Peptide, z: u8) -> Vec<f64> {
             mzs.push((b - CO + (zz - 1.0) * PROTON) / zz);
         }
     }
-    mzs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    mzs.sort_by(f64::total_cmp);
     mzs
 }
 
@@ -70,7 +70,7 @@ pub fn label_peaks(peaks: &[(f64, f32)], peptides: &[&Peptide], z: u8, mme: &Tol
         .iter()
         .flat_map(|p| theoretical_ion_mzs(p, z))
         .collect();
-    theo.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    theo.sort_by(f64::total_cmp);
     peaks
         .iter()
         .map(|&(mz, _)| {

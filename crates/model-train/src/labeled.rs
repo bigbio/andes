@@ -102,6 +102,7 @@ pub struct LabeledMatch {
 /// * `seed`          — the scoring model used for the seed search.
 /// * `search_params` — search parameters (enzyme, mods, tolerances, …).
 /// * `train_fdr`     — q-value threshold for accepting a PSM as a confident label.
+/// * `cache_dir`     — directory of the candidate-index cache (created if missing).
 ///
 /// # Returns
 ///
@@ -119,6 +120,7 @@ pub fn bootstrap_labels(
     seed: &RankScorer,
     search_params: &SearchParams,
     train_fdr: f64,
+    cache_dir: &Path,
 ) -> Result<Vec<LabeledMatch>, TrainError> {
     // ── 1. Load FASTA + build SearchIndex (target + peptide-level decoys) ─────────
     let file = File::open(database)?;
@@ -144,6 +146,7 @@ pub fn bootstrap_labels(
         seed,
         FRAGMENT_TOL_DA,
         BOOTSTRAP_DECOY_PREFIX,
+        cache_dir,
     )?;
 
     // ── 3. Collect best PSM per spectrum ──────────────────────────────────────

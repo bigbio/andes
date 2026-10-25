@@ -67,7 +67,7 @@ thread spinning is off, so CPU time is not burned waiting.
 
 | Script | From → To |
 |---|---|
-| [`scripts/export_agbd_to_onnx.py`](scripts/export_agbd_to_onnx.py) | andes `AGBD` v1 → ONNX `TreeEnsembleRegressor` |
+| [`scripts/export_agbd_to_onnx.py`](scripts/export_agbd_to_onnx.py) | andes `AGBD` v2 → ONNX `TreeEnsembleRegressor` |
 | [`scripts/export_peptdeep_to_onnx.py`](scripts/export_peptdeep_to_onnx.py) | PeptDeep `.pth` → ONNX (+ manifests), quantms-rescoring-compatible names |
 | [`scripts/export_ms2pip_to_onnx.py`](scripts/export_ms2pip_to_onnx.py) | MS²PIP XGBoost → ONNX Gather tree traversal (tract and ort), or `--format ensemble` → `TreeEnsembleRegressor` (ort only, faster) |
 | [`scripts/export_deeplc_to_onnx.py`](scripts/export_deeplc_to_onnx.py) | DeepLC default PyTorch model → ONNX |

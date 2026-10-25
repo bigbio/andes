@@ -1,6 +1,6 @@
 //! Command-line argument definitions and value parsers for the search subcommand.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
 use model::Tolerance;
@@ -304,6 +304,22 @@ pub(crate) struct SearchArgs {
     /// a phospho search).
     #[arg(long = "fragment-index-slice-da", hide = true)]
     pub(crate) fragment_index_slice_da: Option<f64>,
+
+    /// Directory of the candidate-index cache (`andes-candidx-<key>.bin`),
+    /// created if missing. Default: the directory of the output files. Pass a
+    /// shared directory to build the index once for several tasks, or a
+    /// node-local one for a cache per node. A directory that cannot be written
+    /// is an error.
+    #[arg(long = "index-cache-dir", value_name = "DIR")]
+    pub(crate) index_cache_dir: Option<PathBuf>,
+
+    /// Directory of the run's private temporary files, created if missing and
+    /// emptied at exit: the MS1 scans kept between searching and
+    /// quantification, the directory of `--mbr` without `--quant-dir`, and the
+    /// PIN of `--rescore` with `--keep-pin false`. Default: the directory of the
+    /// output files. A directory that cannot be written is an error.
+    #[arg(long = "temp-dir", value_name = "DIR")]
+    pub(crate) temp_dir: Option<PathBuf>,
 
     /// Precursor mass tolerance as `VALUE+unit`. Accepts ppm (e.g. `20ppm`,
     /// high-res) or Da (e.g. `0.02da`/`0.02Da`, low-res precursor selection).
@@ -1574,6 +1590,32 @@ pub(crate) fn parse_positive_tol(s: &str) -> Result<f64, String> {
     Ok(v)
 }
 
+/// A directory option (`--index-cache-dir`, `--temp-dir`): the flag when given,
+/// else the directory of `output` (the output prefix or file), so the default does
+/// not depend on the environment.
+pub(crate) fn dir_or_output_dir(flag: Option<&Path>, output: &Path) -> PathBuf {
+    match flag {
+        Some(dir) => dir.to_path_buf(),
+        None => match output.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => PathBuf::from("."),
+        },
+    }
+}
+
+/// Creates the scratch directory `dir`; an error names `--temp-dir`.
+pub(crate) fn ensure_scratch_dir(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| scratch_dir_error(dir, &e))
+}
+
+/// The error for a scratch directory that cannot be created or written.
+pub(crate) fn scratch_dir_error(dir: &Path, e: &dyn std::fmt::Display) -> String {
+    format!(
+        "cannot create temporary files in {} ({e}); pass --temp-dir with a writable directory",
+        dir.display()
+    )
+}
+
 /// Parse `--precursor-cal` value. Accepts auto|on|off.
 pub(crate) fn parse_precursor_cal(s: &str) -> Result<PrecursorCalMode, String> {
     match s.to_ascii_lowercase().as_str() {
@@ -1763,5 +1805,38 @@ mod mbr_fdr_default_tests {
     fn mbr_fdr_explicit_value_overrides_default() {
         let s = SearchWrap::try_parse_from(["andes", "--mbr-fdr", "0.05"]).unwrap();
         assert_eq!(s.args.mbr_fdr, 0.05);
+    }
+}
+
+#[cfg(test)]
+mod dir_or_output_dir_tests {
+    use super::*;
+
+    #[test]
+    fn the_flag_wins() {
+        assert_eq!(
+            dir_or_output_dir(Some(Path::new("/shared")), Path::new("out/run.pin")),
+            PathBuf::from("/shared")
+        );
+    }
+
+    #[test]
+    fn the_default_is_the_output_directory() {
+        assert_eq!(
+            dir_or_output_dir(None, Path::new("results/run.pin")),
+            PathBuf::from("results")
+        );
+        assert_eq!(
+            dir_or_output_dir(None, Path::new("/data/out/run")),
+            PathBuf::from("/data/out")
+        );
+    }
+
+    #[test]
+    fn a_bare_output_name_means_the_working_directory() {
+        assert_eq!(
+            dir_or_output_dir(None, Path::new("run.pin")),
+            PathBuf::from(".")
+        );
     }
 }

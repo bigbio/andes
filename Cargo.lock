@@ -2637,6 +2637,7 @@ dependencies = [
  "scoring",
  "serde",
  "serde_yaml",
+ "sha2",
  "smallvec 1.15.1",
  "tempfile",
 ]

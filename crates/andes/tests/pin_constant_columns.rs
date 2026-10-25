@@ -95,6 +95,9 @@ fn standard_pin_constant_column_set_is_pinned() {
         "andesrt_rt_diff",
         "andesrt_predicted_rt",
         "andesrt_missing",
+        // The input file: one input here. It exists so Percolator's competition
+        // stays within each input when per-run PINs are pooled.
+        "FileName",
         // Provenance: constant on a FASTA search.
         "IsVariant",
         "IsIsoform",

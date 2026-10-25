@@ -6,7 +6,7 @@
   "outputs": [{ "name": "score", "shape": [null, 1] }],
   "task": "tree_ensemble",
   "provenance": {
-    "origin": "andes AGBD v1 fixture",
+    "origin": "andes AGBD v2 fixture",
     "license": "Apache-2.0",
     "notes": "Requires ai.onnx.ml (ort); native AGBD stays the in-search hot path"
   },

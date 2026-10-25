@@ -55,6 +55,7 @@ use search::search_params::SearchParams;
 use crate::percolator::PercolatorPsm;
 use crate::pin::{
     exp_mass_text, feature_value_type, format_feature_value, format_spec_id, psm_feature_values,
+    spec_id_run,
 };
 use crate::row_context::{emitted_rows, resolve_accession};
 
@@ -87,7 +88,8 @@ const CREATOR: &str = "andes";
 /// identical to the pre-rescore output (PEP null, no q-value entry). The join key
 /// is reconstructed via [`crate::pin::format_spec_id`] so it matches the PIN's
 /// `SpecId` exactly. Rows whose SpecId is in `excluded` (knockoff PSMs, never
-/// reported) are left out of the bundle.
+/// reported) are left out of the bundle. `competition` is the scope of the
+/// rescorer's target-decoy competition groups (used with `rescore_decoys`).
 #[allow(clippy::too_many_arguments)]
 pub fn write_qpx(
     out_dir: &Path,
@@ -409,9 +411,12 @@ struct RescoreRow {
     /// The PIN `SpecId` (Percolator's `PSMId`).
     spec_id: String,
     is_decoy: bool,
-    /// Percolator's target-decoy competition group: the PIN `ScanNr` and the
-    /// `ExpMass` text.
-    group: (i32, String),
+    /// The target-decoy competition group: the input file, the PIN `ScanNr`
+    /// and the `ExpMass` text. Scan numbers repeat across the inputs of one
+    /// search, so the same `ScanNr` and `ExpMass` text in two inputs are two
+    /// spectra; both rescorers compete within each input (Percolator through
+    /// the PIN `FileName` column).
+    group: (String, i32, String),
 }
 
 /// Validate the Percolator (`--rescore`) join and return the rows, target and
@@ -423,8 +428,8 @@ struct RescoreRow {
 /// would otherwise be written with a null q-value). Decoys are exempt.
 ///
 /// One exception: with target-decoy competition (`-Y`), Percolator keeps one
-/// PSM per scan/`ExpMass` group and writes it to the target or the decoy result
-/// file; the other rows of the group appear in neither. When the decoy results
+/// PSM per input file, scan and `ExpMass` group and writes it to the target or
+/// the decoy result file; the other rows of the group appear in neither. When the decoy results
 /// are given, a missing target row is accepted as competed away iff exactly one
 /// row of its group is present in the target or decoy results (the group's
 /// winner). A group with no result, or with several (no competition there),
@@ -440,7 +445,7 @@ fn audit_rescore_join(
     let present = |r: &RescoreRow| {
         rescore.contains_key(&r.spec_id) || decoys.is_some_and(|d| d.contains(&r.spec_id))
     };
-    let mut winners: HashMap<&(i32, String), usize> = HashMap::new();
+    let mut winners: HashMap<&(String, i32, String), usize> = HashMap::new();
     if decoys.is_some() {
         for r in rows.iter().filter(|r| present(r)) {
             *winners.entry(&r.group).or_insert(0) += 1;
@@ -514,10 +519,12 @@ fn rescore_rows(
         for (hit, psm) in psms.iter().enumerate() {
             let cand = &candidates[psm.primary_candidate_idx() as usize];
             let precursor_mz = psm.precursor_mz_override.unwrap_or(spec.precursor_mz);
+            let spec_id = format_spec_id(&spec_id_str, scan_num, ranks[hit], hit, multi_row);
+            let run = spec_id_run(&spec_id).to_string();
             rows.push(RescoreRow {
-                spec_id: format_spec_id(&spec_id_str, scan_num, ranks[hit], hit, multi_row),
+                spec_id,
                 is_decoy: cand.is_decoy,
-                group: (scan_num, exp_mass_text(precursor_mz, psm.charge_used)),
+                group: (run, scan_num, exp_mass_text(precursor_mz, psm.charge_used)),
             });
         }
     }
@@ -782,7 +789,7 @@ fn append_modifications(builder: &mut ListBuilder<StructBuilder>, cand: &Candida
             .append_value(&m.name);
         sb.field_builder::<StringBuilder>(1)
             .unwrap()
-            .append_value(m.accession.as_deref().unwrap_or(""));
+            .append_option(m.accession.as_deref().filter(|a| !a.is_empty()));
         // positions: list<struct<position: string, scores: double>>
         let pos_list = sb.field_builder::<ListBuilder<StructBuilder>>(2).unwrap();
         let psb = pos_list.values();
@@ -1199,7 +1206,7 @@ mod rescore_join_tests {
         RescoreRow {
             spec_id: id.to_string(),
             is_decoy,
-            group: (scan, exp_mass.to_string()),
+            group: (String::new(), scan, exp_mass.to_string()),
         }
     }
 
@@ -1214,6 +1221,41 @@ mod rescore_join_tests {
         // Decoy results do not excuse a target whose group has no result at all.
         let err = audit_rescore_join(&emitted, &map, Some(&HashSet::new())).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    /// Rows of two inputs sharing a scan number and `ExpMass` text: each input's
+    /// group has its own winner, so the groups are read per input.
+    #[test]
+    fn rescore_join_reads_groups_per_input() {
+        let in_run = |run: &str, id: &str, is_decoy: bool| RescoreRow {
+            spec_id: format!("{run}/{id}"),
+            is_decoy,
+            group: (run.to_string(), 7, "900.25".to_string()),
+        };
+        let emitted = vec![
+            in_run("a", "s7_7_1", false),
+            in_run("a", "s7_7_2", false),
+            in_run("b", "s7_7_1", true),
+            in_run("b", "s7_7_2", false),
+        ];
+        let mut map = HashMap::new();
+        map.insert("a/s7_7_1".to_string(), psm("a/s7_7_1"));
+        let decoys: HashSet<String> = ["b/s7_7_1".to_string()].into();
+        let away = audit_rescore_join(&emitted, &map, Some(&decoys)).unwrap();
+        let mut away: Vec<&str> = away.iter().map(String::as_str).collect();
+        away.sort();
+        assert_eq!(away, ["a/s7_7_2", "b/s7_7_2"]);
+
+        // The same rows read as one group: two winners, so no competition there.
+        let merged: Vec<RescoreRow> = emitted
+            .iter()
+            .map(|r| RescoreRow {
+                spec_id: r.spec_id.clone(),
+                is_decoy: r.is_decoy,
+                group: (String::new(), 7, "900.25".to_string()),
+            })
+            .collect();
+        assert!(audit_rescore_join(&merged, &map, Some(&decoys)).is_err());
     }
 
     #[test]
@@ -1274,5 +1316,45 @@ mod rescore_join_tests {
             row("s1_3_2", false, 1, "1000.5"),
         ];
         assert!(audit_rescore_join(&three, &both, Some(&decoys)).is_err());
+    }
+
+    #[test]
+    fn a_modification_without_an_accession_is_null() {
+        use arrow::array::{Array, ListArray, StructArray};
+        use model::amino_acid::AminoAcid;
+        use model::modification::{leak_mod, ModLocation, Modification, ResidueSpec};
+        let m = leak_mod(Modification {
+            name: "Custom".into(),
+            mass_delta: 14.0,
+            residue: ResidueSpec::Specific(b'K'),
+            location: ModLocation::Anywhere,
+            fixed: false,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+            annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
+        });
+        let residues = vec![
+            AminoAcid::standard(b'P').unwrap(),
+            AminoAcid::standard(b'K').unwrap().with_mod(m),
+        ];
+        let cand = Candidate {
+            peptide: model::peptide::Peptide::new(residues, b'K', b'R'),
+            protein_index: 0,
+            start_offset_in_protein: 0,
+            is_decoy: false,
+            is_protein_n_term: false,
+            is_protein_c_term: false,
+        };
+        let mut b = list_struct_builder(modification_fields());
+        append_modifications(&mut b, &cand);
+        b.append(true);
+        let list: ListArray = b.finish();
+        let structs = list.value(0);
+        let structs = structs.as_any().downcast_ref::<StructArray>().unwrap();
+        assert_eq!(structs.len(), 1);
+        assert!(structs.column(1).is_null(0));
     }
 }

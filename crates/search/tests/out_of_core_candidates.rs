@@ -821,9 +821,17 @@ fn match_spectra_out_of_core_keeps_input_order_and_finds_the_enumeration_top_hit
         masses.windows(2).any(|w| w[0] > w[1]),
         "the fixture must exercise the mass reordering"
     );
-    let (queues, cands) =
-        search::match_spectra_out_of_core(&spectra, &idx, &params, &scorer, 0.05, "XXX")
-            .expect("out-of-core search");
+    let cache_dir = tempfile::tempdir().expect("cache dir");
+    let (queues, cands) = search::match_spectra_out_of_core(
+        &spectra,
+        &idx,
+        &params,
+        &scorer,
+        0.05,
+        "XXX",
+        cache_dir.path(),
+    )
+    .expect("out-of-core search");
     let (enum_queues, enum_cands) = run_search(&idx, &params, &spectra, &scorer);
     assert_eq!(queues.len(), spectra.len());
     let top = |q: &TopNQueue| {

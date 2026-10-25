@@ -108,6 +108,50 @@ pub fn peptide_mods(peptide: &str) -> (Vec<u8>, Vec<(usize, f64)>) {
     (residues, mods)
 }
 
+/// Start of every occurrence of `pattern` in `seq`, overlapping ones included.
+fn occurrences<'a>(seq: &'a [u8], pattern: &'a [u8]) -> impl Iterator<Item = usize> + 'a {
+    let mut from = 0;
+    std::iter::from_fn(move || {
+        if pattern.is_empty() {
+            return None;
+        }
+        let start = from + memchr::memmem::find(seq.get(from..)?, pattern)?;
+        from = start + 1;
+        Some(start)
+    })
+}
+
+/// The first mass of each class of claim masses within
+/// [`model::protein::SITE_MASS_TOLERANCE`] of each other, ascending.
+fn mass_classes(proteins: &[&Protein]) -> Vec<f64> {
+    let mut masses: Vec<f64> = proteins
+        .iter()
+        .filter_map(|p| p.annotation.as_deref())
+        .flat_map(|a| a.site_claims.iter().map(|c| c.mass_delta))
+        .collect();
+    masses.sort_by(f64::total_cmp);
+    let mut reps: Vec<f64> = Vec::new();
+    for m in masses {
+        if reps
+            .last()
+            .is_none_or(|r| (m - r).abs() > model::protein::SITE_MASS_TOLERANCE)
+        {
+            reps.push(m);
+        }
+    }
+    reps
+}
+
+/// The bits of the class representative `mass` belongs to: one key for every
+/// claim mass of one modification, whatever their last bits.
+fn canonical_mass_bits(reps: &[f64], mass: f64) -> u64 {
+    reps.iter()
+        .find(|r| (mass - **r).abs() <= model::protein::SITE_MASS_TOLERANCE)
+        .copied()
+        .unwrap_or(mass)
+        .to_bits()
+}
+
 /// A real site: (protein, position, mass bits).
 type SiteKey = (usize, u32, u64);
 /// A site's best site q-value, its PSM, its PSMs at the cutoff, its tier.
@@ -167,6 +211,10 @@ pub fn site_claims(
             .expect("filtered on site claims")
             .site_claims
     };
+    // Claim masses within tolerance of each other are one modification; every
+    // key below uses the class's first mass.
+    let reps = mass_classes(&proteins);
+    let canon = |m: f64| canonical_mass_bits(&reps, m);
     // Knockoffs per real site, keyed by (protein, position, mass bits).
     let mut per_site: HashMap<(usize, u32, u64), usize> = HashMap::new();
     for i in 0..proteins.len() {
@@ -177,7 +225,7 @@ pub fn site_claims(
                 });
                 if let Some(r) = real {
                     *per_site
-                        .entry((i, r.position, r.mass_delta.to_bits()))
+                        .entry((i, r.position, canon(r.mass_delta)))
                         .or_insert(0) += 1;
                 }
             }
@@ -204,10 +252,10 @@ pub fn site_claims(
                 continue;
             };
             let seq = &proteins[i].sequence;
-            let Some(start) = memchr::memmem::find(seq, &residues) else {
-                continue;
-            };
-            for &(at, mass) in &mods {
+            // Every occurrence of the peptide in the protein places its mods.
+            for (start, &(at, mass)) in
+                occurrences(seq, &residues).flat_map(|start| mods.iter().map(move |m| (start, m)))
+            {
                 let pos = (start + at) as u32;
                 let Some(c) = claims_of(i)
                     .iter()
@@ -215,7 +263,7 @@ pub fn site_claims(
                 else {
                     continue;
                 };
-                let key = (c.mass_delta.to_bits(), seq[pos as usize], c.tier);
+                let key = (canon(c.mass_delta), seq[pos as usize], c.tier);
                 match c.knockoff_of {
                     Some(of) => {
                         let real_bits = claims_of(i)
@@ -225,14 +273,14 @@ pub fn site_claims(
                                     && r.position == of
                                     && same(r.mass_delta, c.mass_delta)
                             })
-                            .map(|r| r.mass_delta.to_bits())
-                            .unwrap_or(c.mass_delta.to_bits());
+                            .map(|r| canon(r.mass_delta))
+                            .unwrap_or(canon(c.mass_delta));
                         let k = per_site.get(&(i, of, real_bits)).copied().unwrap_or(1);
                         let restricted = restricted.iter().any(|&m| same(m, mass));
                         knock.push((key, k, restricted, at));
                     }
                     None => {
-                        let site = (i, pos, c.mass_delta.to_bits());
+                        let site = (i, pos, canon(c.mass_delta));
                         real.push((key, site, per_site.get(&site).copied(), at));
                     }
                 }
@@ -357,9 +405,7 @@ pub fn site_claims(
             let tier = claims_of(site.0)
                 .iter()
                 .find(|c| {
-                    c.knockoff_of.is_none()
-                        && c.position == site.1
-                        && c.mass_delta.to_bits() == site.2
+                    c.knockoff_of.is_none() && c.position == site.1 && canon(c.mass_delta) == site.2
                 })
                 .map_or(PriorTier::Catalogue, |c| c.tier);
             let e = best
@@ -500,17 +546,16 @@ fn site_posteriors(
             let Some(&i) = by_acc.get(acc) else {
                 continue;
             };
-            let Some(start) = memchr::memmem::find(&proteins[i].sequence, &residues) else {
-                continue;
-            };
-            let (lo, hi) = (start as u32, (start + residues.len()) as u32);
-            let from = sites[i].partition_point(|&p| p < lo);
-            for &pos in sites[i][from..].iter().take_while(|&&p| p < hi) {
-                let s = out.entry((i, pos)).or_default();
-                s.covering += w;
-                for &(at, mass) in &mods {
-                    if start as u32 + at as u32 == pos {
-                        s.mods.push((mass, w));
+            for start in occurrences(&proteins[i].sequence, &residues) {
+                let (lo, hi) = (start as u32, (start + residues.len()) as u32);
+                let from = sites[i].partition_point(|&p| p < lo);
+                for &pos in sites[i][from..].iter().take_while(|&&p| p < hi) {
+                    let s = out.entry((i, pos)).or_default();
+                    s.covering += w;
+                    for &(at, mass) in &mods {
+                        if start as u32 + at as u32 == pos {
+                            s.mods.push((mass, w));
+                        }
                     }
                 }
             }
@@ -528,6 +573,16 @@ fn primary(accession: &str) -> &str {
     }
 }
 
+/// `field` with the characters that would break the table's rows or columns
+/// (tab, line breaks) as spaces.
+fn tsv_field(field: &str) -> std::borrow::Cow<'_, str> {
+    if field.contains(['\t', '\n', '\r']) {
+        field.replace(['\t', '\n', '\r'], " ").into()
+    } else {
+        field.into()
+    }
+}
+
 /// Write the site table: one row per accepted site claim.
 pub fn write_sites_tsv(path: &std::path::Path, rows: &[SiteRow]) -> std::io::Result<()> {
     use std::io::Write;
@@ -542,19 +597,19 @@ pub fn write_sites_tsv(path: &std::path::Path, rows: &[SiteRow]) -> std::io::Res
             writeln!(
                 w,
                 "{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{:.2}",
-                r.family,
-                r.accession,
+                tsv_field(&r.family),
+                tsv_field(&r.accession),
                 r.position,
                 r.residue,
                 r.mass_delta,
                 r.tier,
                 r.psms,
-                r.best_psm,
+                tsv_field(&r.best_psm),
                 r.site_q,
                 1.0 - r.site_q,
                 opt(r.occupancy),
                 opt(r.identity),
-                r.alternatives,
+                tsv_field(&r.alternatives),
                 r.identity_spectra
             )?;
         }
@@ -811,5 +866,142 @@ mod tests {
         assert!(!out.knockoff_rows.contains("k1"));
         assert_eq!(t["k1"].q_value, 0.001);
         assert!(out.knockoff_rows.contains("k2"));
+    }
+
+    /// A protein of `chunks`, each `<X>GGGSPGGGK`, with the given claims.
+    fn protein_of(accession: &str, chunks: &[u8], claims: &[(u32, Option<u32>)]) -> Protein {
+        let mut p = protein(accession, claims);
+        p.sequence = chunks
+            .iter()
+            .flat_map(|&x| {
+                let mut s = vec![x];
+                s.extend(b"GGGSPGGGK");
+                s
+            })
+            .collect();
+        p
+    }
+
+    #[test]
+    fn a_peptide_repeated_in_one_protein_reports_every_site() {
+        // The chunk `AGGGSPGGGK` occurs twice; the S of each is a claimed site
+        // (positions 4 and 14) with two knockoff sites of its own.
+        let idx = SearchIndex::from_target_db(
+            &ProteinDb {
+                proteins: vec![protein_of(
+                    "sp|P1|A",
+                    b"AACDEF",
+                    &[
+                        (4, None),
+                        (14, None),
+                        (24, Some(4)),
+                        (34, Some(4)),
+                        (44, Some(14)),
+                        (54, Some(14)),
+                    ],
+                )],
+            },
+            "XXX",
+        );
+        let mut t = rows();
+        for (id, score, pep) in [
+            ("k3", 1.0, "K.EGGGS+79.96633PGGGK.F"),
+            ("k4", 0.5, "K.FGGGS+79.96633PGGGK.G"),
+        ] {
+            let (id, p) = psm(id, score, pep);
+            t.insert(id, p);
+        }
+        let out = site_claims(&mut t, &idx, 0.01, 0.05, &[PHOSPHO], None);
+        let sites: Vec<(u32, usize)> = out.rows.iter().map(|r| (r.position, r.psms)).collect();
+        assert_eq!(sites, [(5, 60), (15, 60)]);
+    }
+
+    #[test]
+    fn occurrences_include_overlapping_ones() {
+        assert_eq!(occurrences(b"AAAA", b"AA").collect::<Vec<_>>(), [0, 1, 2]);
+        assert_eq!(occurrences(b"PEPXPEP", b"PEP").collect::<Vec<_>>(), [0, 4]);
+        assert!(occurrences(b"PEP", b"K").next().is_none());
+        assert!(occurrences(b"PEP", b"").next().is_none());
+    }
+
+    #[test]
+    fn masses_differing_in_the_last_bits_share_one_key() {
+        let near = f64::from_bits(PHOSPHO.to_bits() + 3);
+        let acetyl = 42.010565;
+        let p = |m: f64| {
+            let mut p = protein("sp|P|A", &[(4, None)]);
+            let a = p.annotation.take().unwrap();
+            let mut claims = a.site_claims.clone();
+            claims[0].mass_delta = m;
+            p.annotation = Some(Arc::new(
+                ProteinAnnotation::new(a.mod_sites.clone(), None).with_site_claims(claims),
+            ));
+            p
+        };
+        let (a, b, c) = (p(PHOSPHO), p(near), p(acetyl));
+        let reps = mass_classes(&[&a, &b, &c]);
+        assert_eq!(reps, [acetyl, PHOSPHO]);
+        assert_eq!(
+            canonical_mass_bits(&reps, near),
+            canonical_mass_bits(&reps, PHOSPHO)
+        );
+        assert_ne!(
+            canonical_mass_bits(&reps, acetyl),
+            canonical_mass_bits(&reps, PHOSPHO)
+        );
+    }
+
+    #[test]
+    fn knockoff_claims_with_nearly_equal_masses_leave_the_result_unchanged() {
+        let make = |knock_mass: f64| {
+            let mut p = protein("sp|P1|A", &[(4, None), (14, Some(4)), (24, Some(4))]);
+            let a = p.annotation.take().unwrap();
+            let mut claims = a.site_claims.clone();
+            for c in claims.iter_mut().filter(|c| c.knockoff_of.is_some()) {
+                c.mass_delta = knock_mass;
+            }
+            p.annotation = Some(Arc::new(
+                ProteinAnnotation::new(a.mod_sites.clone(), None).with_site_claims(claims),
+            ));
+            SearchIndex::from_target_db(&ProteinDb { proteins: vec![p] }, "XXX")
+        };
+        let run = |idx: &SearchIndex| {
+            let mut t = rows();
+            site_claims(&mut t, idx, 0.01, 0.05, &[PHOSPHO], None)
+        };
+        let exact = run(&make(PHOSPHO));
+        let near = run(&make(f64::from_bits(PHOSPHO.to_bits() + 3)));
+        assert_eq!(exact.rows.len(), 1);
+        assert_eq!(exact.rows, near.rows);
+        assert_eq!(exact.counts, near.counts);
+    }
+
+    #[test]
+    fn the_site_table_escapes_tabs_and_line_breaks() {
+        let row = SiteRow {
+            family: "fam\tily".into(),
+            accession: "sp|P1|A\nB".into(),
+            position: 5,
+            residue: 'S',
+            mass_delta: PHOSPHO,
+            tier: "curated",
+            psms: 3,
+            best_psm: "run/t\r1_1_1".into(),
+            site_q: 0.01,
+            occupancy: None,
+            identity: None,
+            alternatives: String::new(),
+            identity_spectra: 0.0,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sites.tsv");
+        write_sites_tsv(&path, &[row]).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        for l in &lines {
+            assert_eq!(l.split('\t').count(), 14, "{l}");
+        }
+        assert!(lines[1].starts_with("fam ily\tsp|P1|A B\t5\tS\t"));
     }
 }

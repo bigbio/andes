@@ -159,13 +159,13 @@ def load_andes(pin_path, psms_path, qmax):
     q = {}
     with open(psms_path) as f:
         r = csv.reader(f, delimiter='\t')
-        next(r)
+        qi = next(r).index('q-value')  # a `filename` column may precede it
         for line in r:
-            if len(line) < 3:
+            if len(line) <= qi:
                 continue
             try:
-                if float(line[2]) <= qmax:
-                    q[line[0]] = float(line[2])
+                if float(line[qi]) <= qmax:
+                    q[line[0]] = float(line[qi])
             except ValueError:
                 continue
     rows = {}

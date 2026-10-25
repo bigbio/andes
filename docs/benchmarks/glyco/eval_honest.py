@@ -100,12 +100,16 @@ for ln in open(psms):
 
 ndec = 0
 if dpsms and os.path.exists(dpsms):
+    qi = 2
     for ln in open(dpsms):
         f = ln.rstrip("\n").split("\t")
-        if f[0] == "PSMId" or len(f) < 3:
+        if f[0] == "PSMId":
+            qi = f.index("q-value")  # a `filename` column may precede it
+            continue
+        if len(f) <= qi:
             continue
         try:
-            if float(f[2]) <= 0.01:
+            if float(f[qi]) <= 0.01:
                 ndec += 1
         except ValueError:
             pass
@@ -134,12 +138,16 @@ for ch in sorted(tt):
 #   C emitted, but the WRONG peptide   -> selection-limited
 #   D no PIN row at all                -> generation/gating-limited
 pass_ids = set()
+qi = 2
 for ln in open(psms):
     f = ln.rstrip("\n").split("\t")
-    if f[0] == "PSMId" or len(f) < 3:
+    if f[0] == "PSMId":
+        qi = f.index("q-value")  # a `filename` column may precede it
+        continue
+    if len(f) <= qi:
         continue
     try:
-        if float(f[2]) <= 0.01:
+        if float(f[qi]) <= 0.01:
             pass_ids.add(f[0])
     except ValueError:
         pass

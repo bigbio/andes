@@ -115,6 +115,31 @@ pub(crate) fn merge_parse_stats(acc: &mut ParseStats, part: ParseStats) {
     }
 }
 
+/// An input file that yielded no spectra at the searched MS level is an error,
+/// not an empty search: a search of zero spectra would only run on the default
+/// acquisition parameters and write an empty PIN. `found` counts the spectra
+/// the file contributed.
+pub(crate) fn require_spectra(path: &Path, ms_level: u8, found: usize) -> Result<(), String> {
+    if found > 0 {
+        return Ok(());
+    }
+    let (is_mzml, is_raw, is_d, _) = input_format_flags(path);
+    let format = if is_mzml {
+        "mzML"
+    } else if is_raw {
+        "Thermo .raw"
+    } else if is_d {
+        "Bruker .d"
+    } else {
+        "MGF"
+    };
+    Err(format!(
+        "no MS{ms_level} spectra could be read from {} ({format}): the file is empty or \
+         corrupt, or has no MS{ms_level} scans with a precursor m/z",
+        path.display()
+    ))
+}
+
 /// Producer helper: drains `reader` into fixed-size chunks of `Spectrum`
 /// and sends them through `tx`. Stops at `bench_cap` total spectra (or
 /// `usize::MAX` for unbounded). Parse errors are counted and the first few
@@ -549,6 +574,34 @@ pub(crate) fn detect_instrument_type_for_path(
     }
 
     detect_instrument_type(input::open_buf_maybe_gz(spectrum_path).ok()?)
+}
+
+#[cfg(test)]
+mod require_spectra_tests {
+    use super::require_spectra;
+    use std::path::Path;
+
+    #[test]
+    fn a_file_with_spectra_passes() {
+        assert!(require_spectra(Path::new("run.raw"), 2, 1).is_ok());
+    }
+
+    #[test]
+    fn an_empty_file_is_an_error_naming_the_file_and_format() {
+        for (file, format) in [
+            ("dir/run.raw", "Thermo .raw"),
+            ("dir/run.mzML", "mzML"),
+            ("dir/run.mzML.gz", "mzML"),
+            ("dir/run.mgf", "MGF"),
+            ("dir/run.d", "Bruker .d"),
+        ] {
+            let err = require_spectra(Path::new(file), 2, 0).unwrap_err();
+            assert!(err.contains(file) && err.contains(format), "{err}");
+            assert!(err.contains("MS2"), "{err}");
+        }
+        let err = require_spectra(Path::new("run.mzML"), 3, 0).unwrap_err();
+        assert!(err.contains("MS3"), "{err}");
+    }
 }
 
 #[cfg(test)]

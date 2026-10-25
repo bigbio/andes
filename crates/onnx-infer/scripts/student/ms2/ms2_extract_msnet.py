@@ -51,6 +51,17 @@ NAME_TO_ID.update({
     "itraq4plex": 214, "itraq8plex": 730, "phosphorylation": 21, "oxidation": 35, "acetylation": 1,
 })
 _TOKEN = re.compile(r"\[([^\]]+)\]")
+_UNIMOD_TAG = re.compile(r"^UNIMOD:(\d+)$", re.IGNORECASE)
+
+
+def mod_id(tag: str):
+    """Unimod id of a modification tag: ``UNIMOD:35`` or a name of the built-in table (None when unknown)."""
+    tag = tag.strip()
+    m = _UNIMOD_TAG.match(tag)
+    if m:
+        uid = int(m.group(1))
+        return uid if uid in UNIMOD else None
+    return NAME_TO_ID.get(tag.lower())
 
 
 def parse_named(s: str):
@@ -72,7 +83,7 @@ def parse_named(s: str):
             m = _TOKEN.match(s, i)
             if m is None or not seq:
                 return None
-            uid = NAME_TO_ID.get(m.group(1).strip().lower())
+            uid = mod_id(m.group(1))
             if uid is None:
                 return None
             mods.append((len(seq), uid))
@@ -82,7 +93,7 @@ def parse_named(s: str):
             if not tail:
                 return None
             for t in tail:
-                uid = NAME_TO_ID.get(t.strip().lower())
+                uid = mod_id(t)
                 if uid is None:
                     return None
                 mods.append((len(seq) + 1, uid))
@@ -95,7 +106,7 @@ def parse_named(s: str):
     if not seq:
         return None
     for t in n_term:
-        uid = NAME_TO_ID.get(t.strip().lower())
+        uid = mod_id(t)
         if uid is None:
             return None
         mods.append((0, uid))
@@ -125,7 +136,8 @@ def conditions(cv):
         nce = float(raw)
     except (TypeError, ValueError):
         pass
-    if "tims" in inst.lower() or analyser in ("TOF", "QTOF"):
+    if analyser in ("TOF", "QTOF", "TIME-OF-FLIGHT") or "tims" in inst.lower() or "bruker" in inst.lower():
+        analyser = "TOF"
         nce = float("nan")
     return act, analyser, nce, inst
 
@@ -206,7 +218,7 @@ def main():
                         st["precursor_mismatch"] += 1
                         continue
                     act, analyser, nce, inst = conditions(d["cv_params"][i])
-                    if act == "unknown" and analyser not in ("TOF", "QTOF"):
+                    if act == "unknown" and analyser != "TOF":
                         st["activation_unknown"] += 1
                         continue
                     key = (to_proforma(seq, mods), z, -1 if math.isnan(nce) else int(nce // 2), act)

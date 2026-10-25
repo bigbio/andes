@@ -22,6 +22,8 @@ def test_named_modifications_parse():
     assert parse_named("[Acetyl]-PEPC[Carbamidomethyl]K") == ("PEPCK", [(0, 1), (4, 4)])
     assert parse_named("PEPK-[Amidated]") == ("PEPK", [(4 + 1, 2)])
     assert parse_named("NN[Deamidated]GAGYK") == ("NNGAGYK", [(2, 7)])
+    assert parse_named("PEPC[UNIMOD:4]K[UNIMOD:259]") == ("PEPCK", [(4, 4), (5, 259)])
+    assert parse_named("PEP[UNIMOD:99999]K") is None
     assert parse_named("PEP[Mystery]K") is None
     assert parse_named("PEP[+15.9949]K") is None
 
@@ -36,6 +38,9 @@ def test_conditions_for_both_cv_layouts():
     act, an, nce, inst = conditions({"Instrument": "timsTOF Pro", "Fragmentation Method": "CID", "Collision Energy": "30",
                                      "Mass Analyzer": "TOF"})
     assert act == "unknown" and np.isnan(nce)
+    act, an, nce, inst = conditions({"Instrument": "Bruker Daltonics instrument model", "Fragmentation Method": "CID",
+                                     "Collision Energy": "36", "Mass Analyzer": "time-of-flight"})
+    assert (act, an) == ("unknown", "TOF") and np.isnan(nce)
 
 
 def spectrum(seq, mods, z):

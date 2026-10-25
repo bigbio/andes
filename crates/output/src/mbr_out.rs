@@ -6,7 +6,7 @@
 //!
 //! | column | content |
 //! |---|---|
-//! | `precursor_key` | peptidoform and charge key |
+//! | `precursor_key` | `<peptidoform>/<charge>` of the precursor, a positional-isomer class, in the site form of its best PSM |
 //! | `run` | run stem |
 //! | `evidence_type` | `identified`, `identified_below_threshold` (identified, quality q-value above the identified threshold or missing), `transfer_ms2` (transfer q-value at or below the threshold, and an MS2 scan of the run supports the transfer), `transfer_ms1` (transfer q-value at or below the threshold, without that MS2 support) or `below_threshold` |
 //! | `quantity`, `quantity_se` | fitted MS1 quantity and its standard error |

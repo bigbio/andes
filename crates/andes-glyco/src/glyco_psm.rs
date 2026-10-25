@@ -192,7 +192,8 @@ pub struct GlycoPsmKey {
     pub glycan: Option<GlycanComp>,
     /// Whether the glycan came from the database branch or the de-novo solver.
     pub glycan_source: Source,
-    /// Sum of oxonium-ion intensities as a fraction of TIC.
+    /// Sum of the best-matching core oxonium-ion intensities (each at least 1% of
+    /// the base peak) divided by the base-peak intensity; not a fraction of TIC.
     pub oxonium_summed_frac: f32,
     /// Number of distinct core oxonium ions detected (≤ total in the panel).
     pub n_core_oxonium_ions: u8,

@@ -136,7 +136,7 @@ pub(crate) fn list_type(item: DataType) -> DataType {
     DataType::List(Arc::new(Field::new("element", item, true)))
 }
 
-fn position_fields() -> Fields {
+pub(crate) fn position_fields() -> Fields {
     Fields::from(vec![
         Field::new("position", DataType::Int32, false),
         Field::new("amino_acid", DataType::Utf8, true),

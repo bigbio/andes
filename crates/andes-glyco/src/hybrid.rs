@@ -668,7 +668,7 @@ mod tests {
             peaks.push((y0_neutral + s + proton, 600.0));
         }
         // b/y complement pair so complement_score is exercised.
-        // BY_COMPLEMENT_OFFSET = H2O + 2*PROTON ~= 20.025118.
+        // b + y = neutral peptide mass (residue + H2O) + 2*PROTON.
         peaks.push((400.0, 300.0));
         peaks.push((true_backbone_residue + 20.025118 - 400.0, 300.0));
         peaks.sort_by(|a, b| a.0.total_cmp(&b.0));

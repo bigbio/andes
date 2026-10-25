@@ -25,7 +25,7 @@ for ln in open(pin):
     f = ln.rstrip("\n").split("\t")
     if hdr is None:
         hdr = f; iP = hdr.index("Peptide"); iL = hdr.index("Label")
-        iPr = len(hdr) - 1
+        iPr = iP + 1  # first protein column, right after Peptide
         continue
     try:
         if int(f[iL]) != 1: continue
@@ -37,11 +37,12 @@ for ln in open(pin):
 
 npsm = 0
 gp, comps, sites = set(), set(), set()
+QI = open(psms).readline().rstrip("\n").split("\t").index("q-value")  # Percolator column order varies (filename column)
 for ln in open(psms):
     f = ln.rstrip("\n").split("\t")
     if f[0] == "PSMId" or len(f) < 3: continue
     try:
-        if float(f[2]) > 0.01: continue
+        if float(f[QI]) > 0.01: continue
     except ValueError: continue
     r = rows.get(f[0])
     if not r: continue

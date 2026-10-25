@@ -16,6 +16,7 @@
 //! evidence (b/y), it works on weak-core-Y spectra where the core-Y selector
 //! fails.
 
+use andes_glyco::glycan_first::PPM_FLOOR_DA;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use model::peptide::Peptide;
@@ -41,9 +42,6 @@ pub struct FragmentIndex {
     bins: FxHashMap<i64, Vec<(u32, f64)>>,
 }
 
-/// Absolute floor (Da) on the ppm acceptance window, so a very light fragment is
-/// not held to a sub-millidalton tolerance no instrument delivers.
-pub const PPM_FLOOR_DA: f64 = 0.005;
 /// Upper m/z the ppm bin width is sized for; a heavier fragment still matches
 /// exactly because the distance check is per ion, only the bin neighbourhood
 /// might miss it, and b/y ions above this m/z are rare in DDA glycopeptide scans.

@@ -19,8 +19,10 @@
 //!
 //! # Column semantics (psms.parquet)
 //!
-//! The schema (column names + Arrow types) is copied verbatim from the OpenMS
-//! `QPXPSMSchema` so a downstream reader can use one code path for OpenMS-native and
+//! The schema (column names + Arrow types) follows the OpenMS
+//! `QPXPSMSchema`, with the modification `positions` in the QPX layout (an int32
+//! `position`, 0 for the N-terminus and length + 1 for the C-terminus, and the
+//! `amino_acid`), so a downstream reader can use one code path for OpenMS-native and
 //! andes output. andes sources every field it can from the same per-PSM data
 //! the PIN writer uses ([`crate::pin`]): every numeric PIN feature is a
 //! `psm_metavalues` entry (`andes:` prefix), PEP and q-value are filled from
@@ -57,6 +59,7 @@ use crate::pin::{
     exp_mass_text, feature_value_type, format_feature_value, format_spec_id, psm_feature_values,
     spec_id_run,
 };
+use crate::quant_out::ModRecord;
 use crate::row_context::{emitted_rows, resolve_accession};
 
 /// QPX format version string written into every file's schema metadata.
@@ -282,17 +285,10 @@ pub(crate) fn uuid_v4() -> String {
 
 // ── shared nested-type field definitions ──────────────────────────────────────
 
-/// `positions` inner list element: `struct<position: string, scores: double>`.
-fn position_fields() -> Fields {
-    vec![
-        Field::new("position", DataType::Utf8, true),
-        Field::new("scores", DataType::Float64, true),
-    ]
-    .into()
-}
-
 /// `modifications` element:
-/// `struct<name: string, accession: string, positions: list<position>>`.
+/// `struct<name: string, accession: string, positions: list<position>>`, with the
+/// `position` struct of the QPX modification layout (`position: int32`,
+/// `amino_acid: string`, `scores`), the one the feature view writes.
 fn modification_fields() -> Fields {
     vec![
         Field::new("name", DataType::Utf8, true),
@@ -301,7 +297,7 @@ fn modification_fields() -> Fields {
             "positions",
             DataType::List(Arc::new(Field::new(
                 "element",
-                DataType::Struct(position_fields()),
+                DataType::Struct(crate::feature_parquet::position_fields()),
                 true,
             ))),
             true,
@@ -777,27 +773,33 @@ pub fn peptidoform_string(cand: &Candidate) -> String {
 }
 
 /// Append the `modifications` list cell for one candidate: one struct per
-/// modified residue with `name`, `accession`, and a single `positions` entry
-/// (`position` = `"<residue><1-based index>"`, `scores` = null — andes does not
-/// localize).
+/// modified residue with `name`, `accession`, and a single `positions` entry in
+/// the QPX layout (`position` int32: 1-based residue index, 0 for the peptide
+/// N-terminus, length + 1 for the C-terminus; `amino_acid` null on a terminus;
+/// `scores` null, andes does not localize). The position comes from
+/// [`ModRecord::of_residue`], the feature view's helper.
 fn append_modifications(builder: &mut ListBuilder<StructBuilder>, cand: &Candidate) {
     let sb = builder.values();
+    let len = cand.peptide.residues.len();
     for (i, aa) in cand.peptide.residues.iter().enumerate() {
-        let Some(m) = aa.mod_.as_ref() else { continue };
+        let Some(m) = ModRecord::of_residue(i, len, aa) else {
+            continue;
+        };
         sb.field_builder::<StringBuilder>(0)
             .unwrap()
             .append_value(&m.name);
         sb.field_builder::<StringBuilder>(1)
             .unwrap()
-            .append_option(m.accession.as_deref().filter(|a| !a.is_empty()));
-        // positions: list<struct<position: string, scores: double>>
+            .append_option(m.accession.as_deref());
         let pos_list = sb.field_builder::<ListBuilder<StructBuilder>>(2).unwrap();
         let psb = pos_list.values();
-        let position = format!("{}.{}", aa.residue as char, i + 1);
-        psb.field_builder::<StringBuilder>(0)
+        psb.field_builder::<Int32Builder>(0)
             .unwrap()
-            .append_value(&position);
-        psb.field_builder::<Float64Builder>(1)
+            .append_value(m.position);
+        psb.field_builder::<StringBuilder>(1)
+            .unwrap()
+            .append_option(m.amino_acid.map(|c| c.to_string()));
+        psb.field_builder::<ListBuilder<StructBuilder>>(2)
             .unwrap()
             .append_null();
         psb.append(true);
@@ -1356,5 +1358,79 @@ mod rescore_join_tests {
         let structs = structs.as_any().downcast_ref::<StructArray>().unwrap();
         assert_eq!(structs.len(), 1);
         assert!(structs.column(1).is_null(0));
+    }
+
+    #[test]
+    fn modification_positions_follow_the_qpx_layout() {
+        use arrow::array::{Array, Int32Array, ListArray, StringArray, StructArray};
+        use model::amino_acid::AminoAcid;
+        use model::modification::{leak_mod, ModLocation, Modification, ResidueSpec};
+        let mk = |name: &str, residue: ResidueSpec, location: ModLocation| {
+            leak_mod(Modification {
+                name: name.into(),
+                mass_delta: 14.0,
+                residue,
+                location,
+                fixed: false,
+                accession: None,
+                neutral_losses: Vec::new(),
+                loss_class: 0,
+                annotated_site_mass: None,
+                blocks_cleavage: false,
+                diagnostic_ions: Vec::new(),
+            })
+        };
+        let n_term = mk("Acetyl", ResidueSpec::Wildcard, ModLocation::NTerm);
+        let side = mk(
+            "Phospho",
+            ResidueSpec::Specific(b'S'),
+            ModLocation::Anywhere,
+        );
+        let c_term = mk("Amidated", ResidueSpec::Wildcard, ModLocation::CTerm);
+        let residues = vec![
+            AminoAcid::standard(b'A').unwrap().with_mod(n_term),
+            AminoAcid::standard(b'P').unwrap(),
+            AminoAcid::standard(b'S').unwrap().with_mod(side),
+            AminoAcid::standard(b'K').unwrap().with_mod(c_term),
+        ];
+        let cand = Candidate {
+            peptide: model::peptide::Peptide::new(residues, b'K', b'R'),
+            protein_index: 0,
+            start_offset_in_protein: 0,
+            is_decoy: false,
+            is_protein_n_term: false,
+            is_protein_c_term: false,
+        };
+        let mut b = list_struct_builder(modification_fields());
+        append_modifications(&mut b, &cand);
+        b.append(true);
+        let list: ListArray = b.finish();
+        let structs = list.value(0);
+        let structs = structs.as_any().downcast_ref::<StructArray>().unwrap();
+        let mut got = Vec::new();
+        for i in 0..structs.len() {
+            let positions = structs
+                .column(2)
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .unwrap();
+            let entry = positions.value(i);
+            let entry = entry.as_any().downcast_ref::<StructArray>().unwrap();
+            let pos = entry
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+            let aa = entry
+                .column(1)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            got.push((
+                pos.value(0),
+                (!aa.is_null(0)).then(|| aa.value(0).to_string()),
+            ));
+        }
+        assert_eq!(got, vec![(0, None), (3, Some("S".to_string())), (5, None)]);
     }
 }

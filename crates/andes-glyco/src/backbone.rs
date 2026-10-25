@@ -14,11 +14,13 @@ fn core_y_steps(core: GlycanCore) -> &'static [f64] {
 /// Water molecule mass (monoisotopic).
 pub(crate) const H2O: f64 = 18.010565;
 
-/// Constant for b/y complement-pair sum: for a backbone of neutral mass `bb`,
-/// a singly-charged b-ion and its complementary singly-charged y-ion satisfy:
-///   b_mz + y_mz = bb + H2O + 2*PROTON
-/// so we check |p1_mz + p2_mz - (bb + BY_COMPLEMENT_OFFSET)| <= tol.
-const BY_COMPLEMENT_OFFSET: f64 = H2O + 2.0 * PROTON; // 18.010565 + 2*1.0072765 = 20.025118
+/// Constant for the b/y complement-pair sum: for a peptide of neutral mass `bb`
+/// (water included), a singly-charged b-ion and its complementary singly-charged
+/// y-ion satisfy:
+///   b_mz + y_mz = bb + 2*PROTON
+/// (the water of the neutral mass is already part of the y-ion), so we check
+/// |p1_mz + p2_mz - (bb + BY_COMPLEMENT_OFFSET)| <= tol.
+const BY_COMPLEMENT_OFFSET: f64 = 2.0 * PROTON;
 
 #[derive(Debug, Clone)]
 pub struct BackboneCandidate {
@@ -30,7 +32,8 @@ pub struct BackboneCandidate {
     pub intensity_score: f64,
     /// Complement-pair (b/y) confirmation score: sum of min(i1, i2) for peak
     /// pairs (p1_mz, p2_mz) where |p1_mz + p2_mz - (bb + BY_COMPLEMENT_OFFSET)|
-    /// ≤ max(|bb + BY_COMPLEMENT_OFFSET| * 20 ppm, 0.02). Spurious clusters have
+    /// ≤ max(|bb + BY_COMPLEMENT_OFFSET| * tol_ppm, 0.02), with `bb` the peptide
+    /// neutral mass (water included). Spurious clusters have
     /// few/no complement pairs; real backbones with b/y ladders score higher.
     pub complement_score: f64,
 }
@@ -924,6 +927,44 @@ mod tests {
         assert!(complement_score(&peaks, &norm, bb, 500.0) > 0.0);
     }
 
+    /// The b/y ions of a known peptide, built from residue masses, complement each
+    /// other at `M + 2*PROTON` where `M` is the peptide NEUTRAL mass (water
+    /// included, the convention `solve_backbone` uses for `bb`). The score of that
+    /// neutral mass must therefore see the pairs, and the residue-convention mass
+    /// (water excluded) must not.
+    #[test]
+    fn complement_score_finds_the_by_pairs_of_a_known_peptide() {
+        let proton = crate::glycan_mass::PROTON;
+        // ELVISLIVESK
+        let residues = [
+            129.042593, 113.084064, 99.068414, 113.084064, 87.032028, 113.084064, 113.084064,
+            99.068414, 129.042593, 87.032028, 128.094963,
+        ];
+        let residue_sum: f64 = residues.iter().sum();
+        let neutral = residue_sum + H2O;
+
+        let mut peaks: Vec<(f64, f32)> = Vec::new();
+        for i in 2..=6 {
+            let prefix: f64 = residues[..i].iter().sum();
+            let suffix: f64 = residues[i..].iter().sum();
+            peaks.push((prefix + proton, 500.0)); // b_i
+            peaks.push((suffix + H2O + proton, 500.0)); // y_(n-i)
+        }
+        peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let norm: Vec<f64> = peaks.iter().map(|&(_, it)| (it as f64).sqrt()).collect();
+
+        let score = complement_score(&peaks, &norm, neutral, 20.0);
+        assert!(
+            score > 0.0,
+            "the b/y pairs of the true peptide must be found, got {score}"
+        );
+        assert_eq!(
+            complement_score(&peaks, &norm, residue_sum, 20.0),
+            0.0,
+            "the water-free residue mass is not the peptide neutral mass"
+        );
+    }
+
     #[test]
     fn complement_score_two_pointer_matches_bruteforce() {
         use super::{complement_score, BY_COMPLEMENT_OFFSET};
@@ -1522,7 +1563,7 @@ mod tests {
     /// must outrank an otherwise-equal candidate WITHOUT. We build two synthetic
     /// backbones at the same precursor:
     ///  - `true_bb`: full core-Y ladder (same rung count and intensity as spurious)
-    ///    PLUS synthetic b/y fragment ion pairs that satisfy b+y ≈ bb+20.025118.
+    ///    PLUS synthetic b/y fragment ion pairs that satisfy b+y ≈ bb+2*PROTON.
     ///  - `spurious_bb`: same core-Y ladder (identical rung count and intensity)
     ///    but NO complement b/y pairs.
     ///
@@ -1556,7 +1597,7 @@ mod tests {
         // Add complement pairs only for true_bb.
         // A valid b-ion at b_mz and its complement y at y_mz = (true_bb + BY_COMPLEMENT_OFFSET) - b_mz.
         // Choose b_mz values far from the core-Y peaks to avoid confusion.
-        let comp_target = true_bb + BY_COMPLEMENT_OFFSET; // 1500 + 20.025118 = 1520.025118
+        let comp_target = true_bb + BY_COMPLEMENT_OFFSET; // 1500 + 2*PROTON
                                                           // Three b/y pairs: b at 300, 450, 600 Da → y = comp_target - b
         for &b_mz in &[300.0_f64, 450.0, 600.0] {
             let y_mz = comp_target - b_mz;

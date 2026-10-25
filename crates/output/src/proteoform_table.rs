@@ -462,7 +462,10 @@ mod tests {
         let (id, row) = psm("s4", 0.003, "VLDGSTR", "sp|P1_VAR_1_N10D|A;sp|P9|B");
         t.insert(id, row);
         let rows = proteoform_table(&t, &idx, &Cutoffs::uniform(0.01), None);
-        assert!(rows.iter().all(|r| r.kind != EntryKind::Variant), "{rows:?}");
+        assert!(
+            rows.iter().all(|r| r.kind != EntryKind::Variant),
+            "{rows:?}"
+        );
         let p9 = rows.iter().find(|r| r.member == "sp|P9|B").unwrap();
         assert_eq!(
             (p9.evidence, p9.specific_peptides, p9.shared_peptides),

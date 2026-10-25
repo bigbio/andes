@@ -145,7 +145,10 @@ fn glycan_first_retrieves_candidates_on_mouse_spectra() {
     );
     // Sanity: on a glycopeptide-filtered run the gate should fire on the large
     // majority, and a substantial fraction should retrieve candidates.
-    assert!(fired > 0, "diagnostic gate never fired — data or parser problem");
+    assert!(
+        fired > 0,
+        "diagnostic gate never fired — data or parser problem"
+    );
     assert!(
         nonempty > 0,
         "ion index retrieved nothing for every gated spectrum"

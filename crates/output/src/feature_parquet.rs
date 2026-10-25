@@ -286,7 +286,10 @@ fn qpx_fields() -> Vec<Field> {
 
 // ── builders ──────────────────────────────────────────────────────────────────
 
-pub(crate) fn struct_list(fields: Fields, children: Vec<Box<dyn ArrayBuilder>>) -> ListBuilder<StructBuilder> {
+pub(crate) fn struct_list(
+    fields: Fields,
+    children: Vec<Box<dyn ArrayBuilder>>,
+) -> ListBuilder<StructBuilder> {
     let element = Arc::new(Field::new(
         "element",
         DataType::Struct(fields.clone()),

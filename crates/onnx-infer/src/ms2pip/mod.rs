@@ -37,10 +37,18 @@ pub const LOG2_FLOOR: f32 = -9.965_784;
 
 /// Basicity, helicity, hydrophobicity and pI per residue index.
 const AA_PROPERTIES: [[u32; N_AA]; 4] = [
-    [37, 35, 59, 129, 94, 0, 210, 81, 191, 106, 101, 117, 115, 343, 49, 90, 60, 134, 104],
-    [68, 23, 33, 29, 70, 58, 41, 73, 32, 66, 38, 0, 40, 39, 44, 53, 71, 51, 55],
-    [51, 75, 25, 35, 100, 16, 3, 94, 0, 82, 12, 0, 22, 22, 21, 39, 80, 98, 70],
-    [32, 23, 0, 4, 27, 32, 48, 32, 69, 29, 26, 35, 28, 79, 29, 28, 31, 31, 28],
+    [
+        37, 35, 59, 129, 94, 0, 210, 81, 191, 106, 101, 117, 115, 343, 49, 90, 60, 134, 104,
+    ],
+    [
+        68, 23, 33, 29, 70, 58, 41, 73, 32, 66, 38, 0, 40, 39, 44, 53, 71, 51, 55,
+    ],
+    [
+        51, 75, 25, 35, 100, 16, 3, 94, 0, 82, 12, 0, 22, 22, 21, 39, 80, 98, 70,
+    ],
+    [
+        32, 23, 0, 4, 27, 32, 48, 32, 69, 29, 26, 35, 28, 79, 29, 28, 31, 31, 28,
+    ],
 ];
 
 /// MS²PIP residue index (`ACDEFGHIKMNPQRSTVWY`, L → I); `None` outside it.
@@ -130,7 +138,11 @@ pub fn compute_features(sequence: &str, charge: u8) -> Result<Vec<f32>> {
         f[0] = n as f32;
         f[1] = z as f32;
         for k in 0..5 {
-            f[2 + k] = if k == 4 { (z >= 5) as u8 as f32 } else { (z == k + 1) as u8 as f32 };
+            f[2 + k] = if k == 4 {
+                (z >= 5) as u8 as f32
+            } else {
+                (z == k + 1) as u8 as f32
+            };
         }
         for p in 0..4 {
             for q in 0..5 {
@@ -253,7 +265,10 @@ mod tests {
 
     #[test]
     fn leucine_encodes_as_isoleucine() {
-        assert_eq!(compute_features("PEPTLDE", 2).unwrap(), compute_features("PEPTIDE", 2).unwrap());
+        assert_eq!(
+            compute_features("PEPTLDE", 2).unwrap(),
+            compute_features("PEPTIDE", 2).unwrap()
+        );
     }
 
     #[test]

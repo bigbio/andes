@@ -104,7 +104,10 @@ pub fn encode(p: &DeepLcPeptide<'_>) -> Result<DeepLcFeatures> {
     let mut one_hot = vec![0f32; PADDING_LENGTH * N_RESIDUES];
     for (i, &c) in seq.iter().enumerate() {
         atom[i] = residue_composition(c).ok_or_else(|| {
-            Error::InvalidArg(format!("residue `{c}` in {:?} is not in the DeepLC alphabet", p.sequence))
+            Error::InvalidArg(format!(
+                "residue `{c}` in {:?} is not in the DeepLC alphabet",
+                p.sequence
+            ))
         })?;
         let k = RESIDUES.find(c).expect("alphabet");
         one_hot[i * N_RESIDUES + k] = 1.0;
@@ -153,7 +156,11 @@ pub fn encode(p: &DeepLcPeptide<'_>) -> Result<DeepLcFeatures> {
     x_global.extend(positional.iter().flatten().map(|&v| v as f32));
     x_global.extend(terminal.iter().flatten().map(|&v| v as f32));
     debug_assert_eq!(x_global.len(), GLOBAL_DIM);
-    Ok(DeepLcFeatures { x_atom, x_global, x_one_hot: one_hot })
+    Ok(DeepLcFeatures {
+        x_atom,
+        x_global,
+        x_one_hot: one_hot,
+    })
 }
 
 /// Batched graph inputs (`x_atom`, `x_global`, `x_one_hot`).
@@ -181,7 +188,10 @@ mod tests {
     use super::*;
 
     fn pep(s: &str) -> DeepLcPeptide<'_> {
-        DeepLcPeptide { sequence: s, mods: Vec::new() }
+        DeepLcPeptide {
+            sequence: s,
+            mods: Vec::new(),
+        }
     }
 
     #[test]
@@ -201,7 +211,10 @@ mod tests {
     #[test]
     fn terminal_mod_reaches_residue_positional_and_terminal_blocks() {
         let acetyl = [2, 2, 0, 1, 0, 0];
-        let p = DeepLcPeptide { sequence: "SAEDK", mods: vec![(0, acetyl)] };
+        let p = DeepLcPeptide {
+            sequence: "SAEDK",
+            mods: vec![(0, acetyl)],
+        };
         let f = encode(&p).unwrap();
         let base = encode(&pep("SAEDK")).unwrap();
         assert_eq!(f.x_atom[0] - base.x_atom[0], 2.0);
@@ -214,11 +227,22 @@ mod tests {
     fn short_peptide_residue_fills_both_rows() {
         // In a 4-mer, index 0 is position 0 and position −4.
         let ox = [0, 0, 0, 1, 0, 0];
-        let p = DeepLcPeptide { sequence: "MEEK", mods: vec![(1, ox)] };
+        let p = DeepLcPeptide {
+            sequence: "MEEK",
+            mods: vec![(1, ox)],
+        };
         let f = encode(&p).unwrap();
         let base = encode(&pep("MEEK")).unwrap();
-        assert_eq!(f.x_global[7 + 3] - base.x_global[7 + 3], 1.0, "row 0 (−4) O");
-        assert_eq!(f.x_global[7 + 27] - base.x_global[7 + 27], 1.0, "row 4 (0) O");
+        assert_eq!(
+            f.x_global[7 + 3] - base.x_global[7 + 3],
+            1.0,
+            "row 0 (−4) O"
+        );
+        assert_eq!(
+            f.x_global[7 + 27] - base.x_global[7 + 27],
+            1.0,
+            "row 4 (0) O"
+        );
     }
 
     #[test]

@@ -2037,14 +2037,10 @@ fn score_spectrum_glyco(
             // glycan fall back to the composition-independent core-Y
             // ladder. (Was hardcoded 0.0 = dead before Phase 1.)
             y_ladder_intensity_score: match &bb_hit.glycan {
-                Some(g) => glycan_y_intensity(
-                    y_peaks,
-                    y_stats,
-                    bb_neutral,
-                    g,
-                    tol_ppm,
-                    max_frag_charge,
-                ) as f32,
+                Some(g) => {
+                    glycan_y_intensity(y_peaks, y_stats, bb_neutral, g, tol_ppm, max_frag_charge)
+                        as f32
+                }
                 None => core_y_intensity(
                     y_peaks,
                     y_stats,

@@ -1702,6 +1702,31 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
         crate::transfer_fdr::TRAIN_SEED.store(v, std::sync::atomic::Ordering::Relaxed);
     }
     let stored = read_library(&a.quant_dir)?;
+    if a.fold_by_sequence {
+        use std::hash::{BuildHasher, Hash, Hasher};
+        let groups: Vec<u32> = stored
+            .library
+            .meta
+            .iter()
+            .map(|m| {
+                let pep = m.key.rsplit_once('/').map_or(m.key.as_str(), |(p, _)| p);
+                let mut bare = String::new();
+                let mut depth = 0;
+                for c in pep.chars() {
+                    match c {
+                        '[' => depth += 1,
+                        ']' => depth -= 1,
+                        c if depth == 0 => bare.push(c),
+                        _ => {}
+                    }
+                }
+                let mut h = rustc_hash::FxBuildHasher.build_hasher();
+                bare.replace('I', "L").hash(&mut h);
+                h.finish() as u32
+            })
+            .collect();
+        let _ = crate::transfer_fdr::GROUP_OF.set(groups);
+    }
     let fingerprint = library_fingerprint(&stored);
     let mut paths = Vec::with_capacity(stored.runs.len());
     let mut tol: Option<(String, PathBuf)> = None;

@@ -156,7 +156,13 @@ pub struct FdrCounts {
 }
 
 /// The fold of a precursor (splitmix64 of its id).
+pub static GROUP_OF: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();
+
 pub fn fold_of(precursor: u32, seed: u64) -> usize {
+    let precursor = GROUP_OF
+        .get()
+        .and_then(|g| g.get(precursor as usize).copied())
+        .unwrap_or(precursor);
     let mut z = (seed ^ (precursor as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))
         .wrapping_add(0x9e37_79b9_7f4a_7c15);
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);

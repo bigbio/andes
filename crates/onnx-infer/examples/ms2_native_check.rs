@@ -41,6 +41,7 @@ fn main() {
     let parse = |s: &str| s.split(',').map(|x| x.parse::<f32>().unwrap()).collect::<Vec<_>>();
     let mut items = Vec::new();
     let (mut abs_err, mut rel_err, mut n, mut n_unsup) = (0f32, 0f32, 0usize, 0usize);
+    let mut worst = String::new();
     let mut s = Ms2Scratch::default();
     for line in lines {
         let x: Vec<&str> = line.split('\t').collect();
@@ -59,7 +60,11 @@ fn main() {
                 assert_eq!(got.len(), want.len(), "{}: output length", x[cp]);
                 for (g, w) in got.iter().zip(&want).chain(raw.iter().zip(&want_raw)) {
                     abs_err = abs_err.max((g - w).abs());
-                    rel_err = rel_err.max((g - w).abs() / (1.0 + w.abs()));
+                    let rel = (g - w).abs() / (1.0 + w.abs());
+                    if rel > rel_err {
+                        worst = format!("{} z{} {} {} {}", x[cp], x[cz], x[cn], x[ca], x[ci]);
+                    }
+                    rel_err = rel_err.max(rel);
                 }
                 n += 1;
                 items.push((p.unwrap(), c));
@@ -71,6 +76,7 @@ fn main() {
         }
     }
     println!("PARITY n={n} unsupported(both)={n_unsup} max|rust - torch| = {abs_err:.3e} (relative {rel_err:.3e})");
+    println!("worst row: {worst}");
 
     let mean_len = items.iter().map(|(p, _)| p.sequence.len()).sum::<usize>() as f64 / items.len() as f64;
     let t = Instant::now();

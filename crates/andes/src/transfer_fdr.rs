@@ -212,7 +212,14 @@ fn train_fold(
     };
     train_gbdt(
         &ds,
-        &TrainParams::default(),
+        &{
+            let mut p = TrainParams::default();
+            let g = |a: &std::sync::atomic::AtomicU32| a.load(std::sync::atomic::Ordering::Relaxed);
+            if g(&GBDT_ES) > 0 { p.early_stop_rounds = g(&GBDT_ES); }
+            if g(&GBDT_ROUNDS) > 0 { p.n_rounds = g(&GBDT_ROUNDS); }
+            if g(&GBDT_DEPTH) > 0 { p.max_depth = g(&GBDT_DEPTH); }
+            p
+        },
         seed.wrapping_add(fold as u64 + 1),
     )
     .map_err(|e| format!("fold {fold}: {e:?}"))
@@ -260,6 +267,9 @@ pub fn train_seed(seed: u64, m: usize) -> u64 {
     member_seed(ovr(&TRAIN_SEED, seed), m)
 }
 pub static DUMP_PREFIX: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+pub static GBDT_ES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+pub static GBDT_ROUNDS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+pub static GBDT_DEPTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 pub static POOL_FOLDS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 fn q_fold(precursor: u32, seed: u64) -> usize {
     if POOL_FOLDS.load(std::sync::atomic::Ordering::Relaxed) {

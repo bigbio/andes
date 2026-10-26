@@ -1290,6 +1290,12 @@ pub(crate) struct QuantFinalizeArgs {
     pub(crate) seed: u64,
     #[arg(long = "seed-sample", hide = true)]
     pub(crate) seed_sample: Option<u64>,
+    #[arg(long = "gbdt-es", hide = true, default_value_t = 0)]
+    pub(crate) gbdt_es: u32,
+    #[arg(long = "gbdt-rounds", hide = true, default_value_t = 0)]
+    pub(crate) gbdt_rounds: u32,
+    #[arg(long = "gbdt-depth", hide = true, default_value_t = 0)]
+    pub(crate) gbdt_depth: u32,
     #[arg(long = "fold-by-sequence", hide = true)]
     pub(crate) fold_by_sequence: bool,
     #[arg(long = "dump-scores", hide = true)]

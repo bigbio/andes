@@ -7,7 +7,7 @@
 //! [`output::infer_protein_groups`] runs once over every run's PSMs: one
 //! parsimony and one picked competition, so the q-values are dataset-level.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use search::SearchIndex;
@@ -36,24 +36,60 @@ fn run_name(path: &Path) -> String {
     name
 }
 
-/// Every file's rows, keyed `<file index>:<PSMId>` so SpecIds repeated across
-/// per-run files stay distinct.
+/// Every file's rows, each under a key of its own: the row's number among all
+/// rows read, in decimal.
+///
+/// Nothing downstream reads a key's text: the FDR stages and the inference
+/// use keys only to find and to tell rows apart, and none of their results
+/// depends on the keys (each sorts by rank and breaks ties as the map
+/// iterates, which is random either way). A dataset-level PSM file has tens
+/// of millions of rows, so keying by the `PSMId` itself (and keeping it again
+/// in `psm_id`, and the whole file as one string while parsing) would cost
+/// tens of gigabytes. Files are read one line at a time; `psm_id` is left
+/// empty. A `PSMId` repeated within a file is still an error, as in
+/// [`output::parse_psm_results`], found by a 128-bit hash of each id.
 fn read_all(paths: &[PathBuf]) -> Result<HashMap<String, output::PercolatorPsm>, String> {
     let mut all = HashMap::new();
-    for (i, p) in paths.iter().enumerate() {
-        let text = std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?;
-        let rows = output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", p.display()))?;
-        for (id, mut psm) in rows {
-            let key = if paths.len() > 1 {
-                format!("{i}:{id}")
-            } else {
-                id
+    for p in paths {
+        let err = |e: &dyn std::fmt::Display| format!("{}: {e}", p.display());
+        let file = std::fs::File::open(p).map_err(|e| err(&e))?;
+        let mut reader =
+            output::PsmResultReader::new(std::io::BufReader::with_capacity(1 << 20, file))
+                .map_err(|e| err(&e))?;
+        let mut seen: HashSet<u128> = HashSet::new();
+        while let Some(row) = reader.next_row().map_err(|e| err(&e))? {
+            if !seen.insert(id_hash(row.psm_id)) {
+                return Err(err(&format!(
+                    "Percolator result has duplicate PSMId `{}` (join key must be unique)",
+                    row.psm_id
+                )));
+            }
+            let psm = output::PercolatorPsm {
+                psm_id: String::new(),
+                q_value: row.q_value,
+                pep: row.pep,
+                score: row.score,
+                peptide: row.peptide.to_string(),
+                proteins: row.proteins(),
             };
-            psm.psm_id = key.clone();
-            all.insert(key, psm);
+            all.insert(all.len().to_string(), psm);
         }
     }
+    all.shrink_to_fit();
     Ok(all)
+}
+
+/// A 128-bit hash of a PSM id: two SipHash runs with different salts, so two
+/// distinct ids of one file collide with odds near 2^-128 per pair.
+fn id_hash(id: &str) -> u128 {
+    use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher, Hash, Hasher};
+    let half = |salt: u8| {
+        let mut h = BuildHasherDefault::<DefaultHasher>::default().build_hasher();
+        salt.hash(&mut h);
+        id.hash(&mut h);
+        h.finish()
+    };
+    (u128::from(half(0)) << 64) | u128::from(half(1))
 }
 
 /// Protein groups over the rescored PSMs in `psms` and `decoy_psms` (as
@@ -158,5 +194,39 @@ mod tests {
             "a01"
         );
         assert_eq!(run_name(Path::new("b.tsv")), "b");
+    }
+
+    const HEADER: &str = "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n";
+
+    fn write(dir: &Path, name: &str, rows: &[&str]) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, format!("{HEADER}{}", rows.join("\n"))).unwrap();
+        path
+    }
+
+    #[test]
+    fn read_all_keeps_rows_of_equal_ids_in_different_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let row = "a_1_1\t2.5\t0.001\t0.0005\tR.PEPTIDEK.A\tsp|P1\tsp|P2\n";
+        let a = write(dir.path(), "a.txt", &[row]);
+        let b = write(
+            dir.path(),
+            "b.txt",
+            &[row, "b_1_1\t1.0\t0.02\t0.03\tK.OTHERK.R\tsp|P3"],
+        );
+        let all = read_all(&[a, b]).unwrap();
+        assert_eq!(all.len(), 3);
+        let first = all.values().find(|p| p.peptide == "R.PEPTIDEK.A").unwrap();
+        assert_eq!(first.proteins, "sp|P1;sp|P2");
+        assert_eq!(first.score, Some(2.5));
+    }
+
+    #[test]
+    fn read_all_rejects_a_repeated_id_within_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let row = "a_1_1\t2.5\t0.001\t0.0005\tR.PEPTIDEK.A\tsp|P1";
+        let a = write(dir.path(), "a.txt", &[row, row]);
+        let err = read_all(&[a]).unwrap_err();
+        assert!(err.contains("duplicate PSMId `a_1_1`"), "{err}");
     }
 }

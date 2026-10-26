@@ -13,8 +13,8 @@
 //! The result is within 1e-15 (relative) of the C library's `exp` on the
 //! domain the fit uses (`x <= 0`), not bit for bit the same.
 
-/// `ln 2` split in a high part with 32 trailing zero bits (so `k * LN2_HI`
-/// is exact for `|k| < 2^20`) and the remainder.
+/// `ln 2` split in a high part with 21 trailing zero bits (so `k * LN2_HI`
+/// is exact for `|k| < 2^21`) and the remainder.
 const LN2_HI: f64 = f64::from_bits(0x3fe6_2e42_fee0_0000);
 const LN2_LO: f64 = f64::from_bits(0x3dea_39ef_3579_3c76);
 const LOG2_E: f64 = std::f64::consts::LOG2_E;

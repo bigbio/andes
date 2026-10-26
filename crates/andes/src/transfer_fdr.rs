@@ -253,6 +253,7 @@ pub fn sample_seed(seed: u64, m: usize) -> u64 {
 pub fn train_seed(seed: u64, m: usize) -> u64 {
     member_seed(ovr(&TRAIN_SEED, seed), m)
 }
+pub static DUMP_PREFIX: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 pub static POOL_FOLDS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 fn q_fold(precursor: u32, seed: u64) -> usize {
     if POOL_FOLDS.load(std::sync::atomic::Ordering::Relaxed) {
@@ -671,7 +672,21 @@ impl FoldScores {
             });
             let totals = self.counts[fold];
             let mut builder = StepsBuilder::new(totals, thresholds);
-            walk_scores(streams, |c, at| builder.visit(c, at));
+            let mut dump = DUMP_PREFIX.lock().unwrap().clone().map(|p| {
+                std::io::BufWriter::new(
+                    std::fs::File::create(format!("{p}.{}.{fold}", totals.iter().sum::<usize>())).unwrap(),
+                )
+            });
+            walk_scores(streams, |c, at| {
+                if let Some(w) = dump.as_mut() {
+                    use std::io::Write;
+                    w.write_all(&c.to_le_bytes()).unwrap();
+                    for n in at {
+                        w.write_all(&(n as u32).to_le_bytes()).unwrap();
+                    }
+                }
+                builder.visit(c, at)
+            });
             let fold_steps = builder.finish();
             let with_q = if fold_steps[Estimate::Pooled as usize].is_some() {
                 totals.iter().sum()

@@ -1080,7 +1080,7 @@ impl DonorPsms {
     /// entry's best donor PSM, matched on its scan in the run's MS2 table at
     /// the table's fragment tolerance, and the `(run, RT)` of every donor PSM
     /// of the entry, sorted; empty for a precursor that is not an entry.
-    /// The MS2 tables are read one run at a time. Errors: an unreadable MS2
+    /// The MS2 tables are read by the runs in parallel. Errors: an unreadable MS2
     /// or PSM table (the message names it).
     pub(crate) fn finish(
         self,
@@ -1115,54 +1115,63 @@ impl DonorPsms {
         drop(slot);
         let mut spectra: Vec<Option<LibrarySpectrum>> = vec![None; n];
         let mut c = SpectrumCounts::default();
-        for (r, stem) in stems.iter().enumerate() {
-            let wanted: Vec<(usize, &str)> = best
-                .iter()
-                .enumerate()
-                .filter_map(|(id, b)| {
-                    b.as_ref()
-                        .filter(|(run, _)| *run as usize == r)
-                        .map(|(_, s)| (id, &**s))
-                })
-                .collect();
-            if wanted.is_empty() {
-                continue;
+        // The precursor ids whose best donor PSM is in each run, with its SpecId.
+        let mut wanted: Vec<Vec<(usize, &str)>> = vec![Vec::new(); stems.len()];
+        for (id, b) in best.iter().enumerate() {
+            if let Some((run, spec_id)) = b {
+                if let Some(w) = wanted.get_mut(*run as usize) {
+                    w.push((id, &**spec_id));
+                }
             }
-            let ms2_path = artifact(dir, stem, MS2_SUFFIX);
-            let table = read_ms2_table(&ms2_path)?;
-            if table.run != *stem {
-                return Err(format!(
-                    "{}: the table is of run {:?}, not {stem:?}",
-                    ms2_path.display(),
-                    table.run
-                ));
-            }
-            let mods = read_run_quant_mods(&artifact(dir, stem, TABLE_SUFFIX))?;
-            let by_key: HashMap<&str, usize> = table
-                .scans
-                .iter()
-                .enumerate()
-                .map(|(i, s)| (s.spec_key.as_str(), i))
-                .collect();
-            let made: Vec<(usize, Result<LibrarySpectrum, u8>)> = wanted
-                .par_iter()
-                .map(|&(id, spec_id)| {
-                    let m = &lib.meta[id];
-                    let Some(scan) = scan_of(&by_key, spec_id) else {
-                        return (id, Err(0));
-                    };
-                    let Ok(masses) = residue_masses(split_key(&m.key), &mods) else {
-                        return (id, Err(1));
-                    };
-                    let ladder = fragment_ladder(&masses, m.charge.max(1));
-                    let peaks = &table.scans[scan].peaks;
-                    (
-                        id,
-                        library_spectrum(&ladder, peaks, table.fragment_tol).ok_or(2),
-                    )
-                })
-                .collect();
-            for (id, s) in made {
+        }
+        type Made = Vec<(usize, Result<LibrarySpectrum, u8>)>;
+        // Runs in parallel, each reading its own MS2 table; the results are
+        // taken in run order, so the first error is the first run's.
+        let per_run: Vec<Result<Made, String>> = wanted
+            .par_iter()
+            .zip(stems.par_iter())
+            .map(|(wanted, stem)| {
+                if wanted.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let ms2_path = artifact(dir, stem, MS2_SUFFIX);
+                let table = read_ms2_table(&ms2_path)?;
+                if table.run != *stem {
+                    return Err(format!(
+                        "{}: the table is of run {:?}, not {stem:?}",
+                        ms2_path.display(),
+                        table.run
+                    ));
+                }
+                let mods = read_run_quant_mods(&artifact(dir, stem, TABLE_SUFFIX))?;
+                let by_key: HashMap<&str, usize> = table
+                    .scans
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| (s.spec_key.as_str(), i))
+                    .collect();
+                Ok(wanted
+                    .iter()
+                    .map(|&(id, spec_id)| {
+                        let m = &lib.meta[id];
+                        let Some(scan) = scan_of(&by_key, spec_id) else {
+                            return (id, Err(0));
+                        };
+                        let Ok(masses) = residue_masses(split_key(&m.key), &mods) else {
+                            return (id, Err(1));
+                        };
+                        let ladder = fragment_ladder(&masses, m.charge.max(1));
+                        let peaks = &table.scans[scan].peaks;
+                        (
+                            id,
+                            library_spectrum(&ladder, peaks, table.fragment_tol).ok_or(2),
+                        )
+                    })
+                    .collect())
+            })
+            .collect();
+        for made in per_run {
+            for (id, s) in made? {
                 match s {
                     Ok(s) => {
                         c.with_spectrum += 1;

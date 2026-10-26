@@ -225,6 +225,18 @@ pub struct FoldModels {
 /// The seed of bagging member `m` (its training sample and its trainer):
 /// `seed` itself for the first member, so that one member is the classifier
 /// of a single model.
+pub static SAMPLE_SEED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+pub static TRAIN_SEED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+fn ovr(a: &std::sync::atomic::AtomicU64, seed: u64) -> u64 {
+    let v = a.load(std::sync::atomic::Ordering::Relaxed);
+    if v == u64::MAX { seed } else { v }
+}
+pub fn sample_seed(seed: u64, m: usize) -> u64 {
+    member_seed(ovr(&SAMPLE_SEED, seed), m)
+}
+pub fn train_seed(seed: u64, m: usize) -> u64 {
+    member_seed(ovr(&TRAIN_SEED, seed), m)
+}
 pub fn member_seed(seed: u64, m: usize) -> u64 {
     if m == 0 {
         seed
@@ -272,7 +284,7 @@ pub fn train_bagged_folds(sets: &[&[FdrRow]], seed: u64) -> FoldModels {
         .collect();
     let fitted: Vec<Result<GbdtPeakModel, String>> = jobs
         .par_iter()
-        .map(|&(f, m)| train_fold(sets[m], &folds[m], nf, f, member_seed(seed, m)))
+        .map(|&(f, m)| train_fold(sets[m], &folds[m], nf, f, train_seed(seed, m)))
         .collect();
     let mut models: Vec<Vec<GbdtPeakModel>> = (0..N_FOLDS).map(|_| Vec::new()).collect();
     let mut errors: Vec<Vec<String>> = vec![Vec::new(); N_FOLDS];

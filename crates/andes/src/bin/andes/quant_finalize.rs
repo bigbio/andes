@@ -1461,7 +1461,7 @@ pub(crate) fn finalize_stream(
         .map(|m| {
             Mutex::new(TrainingSample::new(
                 limits.max_train_rows,
-                member_seed(seed, m),
+                crate::transfer_fdr::sample_seed(seed, m),
             ))
         })
         .collect();

@@ -1288,6 +1288,10 @@ pub(crate) struct QuantFinalizeArgs {
     /// samples. Default 42.
     #[arg(long = "seed", hide = true, default_value_t = crate::quant_cmd::MBR_SEED)]
     pub(crate) seed: u64,
+    #[arg(long = "seed-sample", hide = true)]
+    pub(crate) seed_sample: Option<u64>,
+    #[arg(long = "seed-train", hide = true)]
+    pub(crate) seed_train: Option<u64>,
 
     /// Worker threads. Default: logical CPU count.
     #[arg(long)]

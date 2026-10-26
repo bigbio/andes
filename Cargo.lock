@@ -66,6 +66,7 @@ dependencies = [
  "clap",
  "flate2",
  "input",
+ "libc",
  "model",
  "model-train",
  "num_cpus",

@@ -1680,6 +1680,17 @@ fn run_extract(a: QuantExtractArgs) -> Result<(), String> {
     .map(|_| ())
 }
 
+/// Returns the allocator's free pages to the system. glibc keeps memory freed
+/// by many small allocations (the tens of millions of PSM rows of the
+/// protein inference) in its arenas, where the process's RSS still counts it.
+fn release_free_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim only releases free heap memory; it is thread safe.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
     let stored = read_library(&a.quant_dir)?;
     let fingerprint = library_fingerprint(&stored);
@@ -1728,6 +1739,11 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
         ),
         _ => None,
     };
+    // The inference's PSM maps and database are dropped by now; hand their
+    // pages back before the finalize passes allocate their own.
+    if inf.is_some() {
+        release_free_memory();
+    }
     let groups = inf.as_ref().map(|inf| ProteinGroups {
         inf,
         max_q: a.proteins.protein_fdr,

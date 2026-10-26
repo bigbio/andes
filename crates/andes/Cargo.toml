@@ -32,6 +32,10 @@ parquet = "53"
 # `--output-pin`.
 tempfile = "3.10"
 
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+# `malloc_trim` after the protein inference of `quant finalize`.
+libc = "0.2"
+
 [features]
 default = ["tract"]
 # ONNX engine for the third-party predictors of `--predict` (AlphaPeptDeep,

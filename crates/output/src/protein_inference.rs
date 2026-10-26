@@ -310,22 +310,33 @@ pub fn infer_protein_groups(
     // Knockoff entries exist only to estimate false variant claims: their
     // peptides are evidence for no protein, on either side.
     let knockoff = |acc: &str| proteins.get(acc).is_some_and(|p| p.is_knockoff());
+    // One row per peptide: its best score and every family its rows name.
+    // Parsimony keeps exactly that of each peptide (a max and a union, so the
+    // order of the rows does not matter); folding here keeps one entry per
+    // peptide in memory instead of one per PSM.
     let rows = |map: &HashMap<String, PercolatorPsm>, decoy: bool| {
-        let mut out: Vec<(String, f64, BTreeSet<String>)> = map
-            .values()
-            .filter_map(|p| {
-                let score = p.score?;
-                let fams: BTreeSet<String> = p
-                    .proteins
-                    .split(';')
-                    .filter(|a| !a.is_empty())
-                    .map(|a| if decoy { target_of(a) } else { a.to_string() })
-                    .filter(|a| !knockoff(a))
-                    .map(|a| family_of(&a))
-                    .collect();
-                (!fams.is_empty()).then(|| (bare_sequence(&p.peptide), score, fams))
-            })
-            .collect();
+        let mut best: HashMap<String, (f64, BTreeSet<String>)> = HashMap::new();
+        for p in map.values() {
+            let Some(score) = p.score else { continue };
+            let fams: BTreeSet<String> = p
+                .proteins
+                .split(';')
+                .filter(|a| !a.is_empty())
+                .map(|a| if decoy { target_of(a) } else { a.to_string() })
+                .filter(|a| !knockoff(a))
+                .map(|a| family_of(&a))
+                .collect();
+            if fams.is_empty() {
+                continue;
+            }
+            let e = best
+                .entry(bare_sequence(&p.peptide))
+                .or_insert_with(|| (f64::NEG_INFINITY, BTreeSet::new()));
+            e.0 = e.0.max(score);
+            e.1.extend(fams);
+        }
+        let mut out: Vec<(String, f64, BTreeSet<String>)> =
+            best.into_iter().map(|(pep, (s, f))| (pep, s, f)).collect();
         out.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)));
         out
     };

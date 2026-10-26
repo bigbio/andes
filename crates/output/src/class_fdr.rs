@@ -136,8 +136,8 @@ impl Cutoffs {
     }
 }
 
-/// A class's targets (rank, PSM id) and decoy ranks.
-type ClassRows = (Vec<(f64, String)>, Vec<f64>);
+/// A class's targets (rank, position in the target map) and decoy ranks.
+type ClassRows = (Vec<(f64, usize)>, Vec<f64>);
 
 /// Fewer decoys than this in a class cannot show its null is no heavier than
 /// the pool; the class then uses its own target-decoy competition.
@@ -166,13 +166,15 @@ pub fn apply_class_fdr(
         .collect();
     // A row's rank: the rescorer's score, or (without one) its q-value inverted.
     let rank = |p: &PercolatorPsm| p.score.unwrap_or(-p.q_value);
+    // Targets by position in the map's iteration order, so the per-class
+    // tables hold no copy of the PSM ids (tens of millions at dataset scale).
     let mut by_class: HashMap<String, ClassRows> = HashMap::new();
-    for (id, p) in targets.iter() {
+    for (i, p) in targets.values().enumerate() {
         by_class
             .entry(class_of(&p.proteins, &kinds))
             .or_default()
             .0
-            .push((rank(p), id.clone()));
+            .push((rank(p), i));
     }
     for p in decoys.values() {
         by_class
@@ -190,6 +192,7 @@ pub fn apply_class_fdr(
         let ge = n - pooled.partition_point(|&x| x < s);
         (ge + 1) as f64 / (n + 1) as f64
     };
+    let mut raised = vec![f64::NEG_INFINITY; if single { 0 } else { targets.len() }];
     let mut counts = Vec::with_capacity(by_class.len());
     for (class, (ts, ds)) in by_class.iter_mut() {
         let method = if ds.len() < MIN_GUARD_DECOYS || heavier_than_pool(ds, &p_of) {
@@ -209,9 +212,7 @@ pub fn apply_class_fdr(
                 ClassMethod::ClassTdc => class_tdc_q(ts, ds),
             };
             for (t, qv) in ts.iter().zip(q) {
-                if let Some(p) = targets.get_mut(&t.1) {
-                    p.q_value = p.q_value.max(qv);
-                }
+                raised[t.1] = qv;
             }
         }
         counts.push(ClassCount {
@@ -221,6 +222,12 @@ pub fn apply_class_fdr(
             method,
             pi0,
         });
+    }
+    if !single {
+        // The map is not changed in between, so it iterates in the same order.
+        for (p, qv) in targets.values_mut().zip(raised) {
+            p.q_value = p.q_value.max(qv);
+        }
     }
     counts.sort_by(|a, b| b.targets.cmp(&a.targets).then(a.class.cmp(&b.class)));
     counts
@@ -256,7 +263,7 @@ fn storey_q(p: &[f64]) -> (Vec<f64>, f64) {
 
 /// Target-decoy q-values inside a class, q = (decoys + 1) / targets made
 /// monotone, in the order of `ts`. At equal rank a decoy counts first.
-fn class_tdc_q(ts: &[(f64, String)], ds: &[f64]) -> Vec<f64> {
+fn class_tdc_q<T>(ts: &[(f64, T)], ds: &[f64]) -> Vec<f64> {
     let mut rows: Vec<(f64, bool, usize)> = ts
         .iter()
         .enumerate()

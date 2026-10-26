@@ -76,7 +76,7 @@ use crate::quant_mbr::{
 };
 use crate::transfer_fdr::{
     member_seed, row_unit, train_bagged_folds, train_folds, Estimate, FdrCounts, FdrRow,
-    FoldModels, FoldScores, QValues, TrainingSample, IDENTITY, N_FOLDS, TRANSFER_FEATURES,
+    FoldModels, FoldScores, QValues, TrainingSample, IDENTITY, TRANSFER_FEATURES,
 };
 
 /// What one finalize did, for the caller to log.
@@ -938,18 +938,18 @@ struct ScoreStore<'d> {
     dir: &'d Path,
     cap: usize,
     scores: Mutex<FoldScores>,
-    /// Per spill, per fold, the table of each family.
-    spills: Mutex<Vec<Vec<[PathBuf; 4]>>>,
+    /// Per spill, the table of each family.
+    spills: Mutex<Vec<[PathBuf; 4]>>,
     next: AtomicUsize,
 }
 
 impl<'d> ScoreStore<'d> {
-    fn new(name: &'static str, dir: &'d Path, cap: usize, seed: u64) -> Self {
+    fn new(name: &'static str, dir: &'d Path, cap: usize) -> Self {
         Self {
             name,
             dir,
             cap,
-            scores: Mutex::new(FoldScores::new(seed)),
+            scores: Mutex::new(FoldScores::new()),
             spills: Mutex::new(Vec::new()),
             next: AtomicUsize::new(0),
         }
@@ -964,18 +964,14 @@ impl<'d> ScoreStore<'d> {
         };
         let Some(held) = held else { return Ok(()) };
         let k = self.next.fetch_add(1, Ordering::Relaxed);
-        let mut paths = Vec::with_capacity(N_FOLDS);
-        for (fold, by_family) in held.into_iter().enumerate() {
-            let mut fold_paths: [PathBuf; 4] = Default::default();
-            for (f, mut v) in by_family.into_iter().enumerate() {
-                v.par_sort_unstable_by(f32::total_cmp);
-                let p = self
-                    .dir
-                    .join(format!("scores-{}-{k:04}-{fold}-{f}.parquet", self.name));
-                write_scores(&p, &v)?;
-                fold_paths[f] = p;
-            }
-            paths.push(fold_paths);
+        let mut paths: [PathBuf; 4] = Default::default();
+        for (f, mut v) in held.into_iter().enumerate() {
+            v.par_sort_unstable_by(f32::total_cmp);
+            let p = self
+                .dir
+                .join(format!("scores-{}-{k:04}-{f}.parquet", self.name));
+            write_scores(&p, &v)?;
+            paths[f] = p;
         }
         self.spills.lock().expect("score store lock").push(paths);
         Ok(())
@@ -991,19 +987,18 @@ impl<'d> ScoreStore<'d> {
         let spills = self.spills.into_inner().expect("score store lock");
         let scores = self.scores.into_inner().expect("score store lock");
         let error = RefCell::new(None);
-        let q = scores.finish_with(failed_folds, Some(thresholds), |fold, f| {
+        let q = scores.finish_with(failed_folds, Some(thresholds), |f| {
             spills
                 .iter()
                 .map(|s| {
-                    Box::new(ScoreFile::new(&s[fold][f], &error))
-                        as Box<dyn Iterator<Item = f32> + '_>
+                    Box::new(ScoreFile::new(&s[f], &error)) as Box<dyn Iterator<Item = f32> + '_>
                 })
                 .collect()
         });
         if let Some(e) = error.into_inner() {
             return Err(e);
         }
-        for p in spills.iter().flatten().flatten() {
+        for p in spills.iter().flatten() {
             let _ = std::fs::remove_file(p);
         }
         Ok((q, spills.len()))
@@ -1571,13 +1566,13 @@ pub(crate) fn finalize_stream(
     // each run's transfer scores are also kept in a temporary table for
     // pass 5.
     let t0 = Instant::now();
-    let t_store = ScoreStore::new("transfer", dir, limits.max_held_scores, seed);
-    let i_store = ScoreStore::new("identified", dir, limits.max_held_scores, seed);
+    let t_store = ScoreStore::new("transfer", dir, limits.max_held_scores);
+    let i_store = ScoreStore::new("identified", dir, limits.max_held_scores);
     for_each_block(
         source,
         false,
         bounds,
-        |_| (FoldScores::new(seed), FoldScores::new(seed), Vec::new()),
+        |_| (FoldScores::new(), FoldScores::new(), Vec::new()),
         |(ts, is, cache), _, _, rows| {
             let ctx = BlockContext::new(rows, maps)?;
             let shapes = BlockShapes {
@@ -1594,14 +1589,11 @@ pub(crate) fn finalize_stream(
                 &t_models,
                 &i_models,
                 want,
-                |i, t, fam, s| {
-                    let p = rows[i].precursor;
-                    match t {
-                        Table::Identified => is.add(p, fam, s),
-                        _ => {
-                            ts.add(p, fam, s);
-                            block[i] = s.unwrap_or(f32::NAN);
-                        }
+                |i, t, fam, s| match t {
+                    Table::Identified => is.add(fam, s),
+                    _ => {
+                        ts.add(fam, s);
+                        block[i] = s.unwrap_or(f32::NAN);
                     }
                 },
             );
@@ -1664,7 +1656,7 @@ pub(crate) fn finalize_stream(
                     let r = &rows[i];
                     if r.kind != Hypothesis::Target
                         || !id_fdr
-                            .q(Estimate::Pooled, r.precursor, fam, s)
+                            .q(Estimate::Pooled, fam, s)
                             .is_some_and(|q| q <= VALIDATION_Q)
                     {
                         return;
@@ -1775,9 +1767,8 @@ pub(crate) fn finalize_stream(
                     scored[i] = Some((fam, s));
                 },
             );
-            let q_of = |q: &QValues, e: Estimate, i: usize| {
-                scored[i].and_then(|(fam, s)| q.q(e, rows[i].precursor, fam, s))
-            };
+            let q_of =
+                |q: &QValues, e: Estimate, i: usize| scored[i].and_then(|(fam, s)| q.q(e, fam, s));
             // A fit whose amplitude is clamped to 0 found no signal: its
             // quantity is missing, not zero, in the MBR table and the
             // feature parquet.
@@ -1838,10 +1829,7 @@ pub(crate) fn finalize_stream(
                         v.transfers += 1;
                         v.transfers_scored += usize::from(q.is_some());
                         let ok = |e: Estimate, t: f64| {
-                            usize::from(
-                                scored[i]
-                                    .is_some_and(|(fam, s)| fdr.accepts(e, r.precursor, fam, s, t)),
-                            )
+                            usize::from(scored[i].is_some_and(|(fam, s)| fdr.accepts(e, fam, s, t)))
                         };
                         for (a, &t) in [&mut v.at_q01, &mut v.at_threshold]
                             .into_iter()
@@ -1868,7 +1856,7 @@ pub(crate) fn finalize_stream(
                         (t, q, q)
                     }
                     Role::PseudoTransfer => {
-                        let q = scored[i].and_then(|(_, s)| fdr.pseudo_q(r.precursor, s));
+                        let q = scored[i].and_then(|(_, s)| fdr.pseudo_q(s));
                         v.pseudo_transfers += 1;
                         if let Some(m) = &r.ms2 {
                             v.ms2_pseudo_rows += 1;
@@ -2309,15 +2297,15 @@ mod tests {
                 )
             })
             .collect();
-        let mut one = FoldScores::new(5);
-        for &(p, f, s) in &rows {
-            one.add(p, f, s);
+        let mut one = FoldScores::new();
+        for &(_, f, s) in &rows {
+            one.add(f, s);
         }
-        let store = ScoreStore::new("t", dir.path(), 300, 5);
+        let store = ScoreStore::new("t", dir.path(), 300);
         for piece in rows.chunks(211) {
-            let mut s = FoldScores::new(5);
-            for &(p, f, sc) in piece {
-                s.add(p, f, sc);
+            let mut s = FoldScores::new();
+            for &(_, f, sc) in piece {
+                s.add(f, sc);
             }
             store.add(s).unwrap();
         }
@@ -2326,22 +2314,22 @@ mod tests {
         assert!(spills > 3, "{spills}");
         assert_eq!(a.counts, b.counts);
         assert_eq!(a.pooled_steps(), b.pooled_steps());
-        for &(p, f, s) in &rows {
+        for &(_, f, s) in &rows {
             for e in [
                 Estimate::Pooled,
                 Estimate::WrongPeak,
                 Estimate::MassOnly,
                 Estimate::RtOnly,
             ] {
-                assert_eq!(a.accepts(e, p, f, s, 0.05), b.accepts(e, p, f, s, 0.05));
+                assert_eq!(a.accepts(e, f, s, 0.05), b.accepts(e, f, s, 0.05));
             }
             assert_eq!(
-                a.q(Estimate::Pooled, p, f, s).map(f64::to_bits),
-                b.q(Estimate::Pooled, p, f, s).map(f64::to_bits)
+                a.q(Estimate::Pooled, f, s).map(f64::to_bits),
+                b.q(Estimate::Pooled, f, s).map(f64::to_bits)
             );
             assert_eq!(
-                a.pseudo_q(p, s).map(f64::to_bits),
-                b.pseudo_q(p, s).map(f64::to_bits)
+                a.pseudo_q(s).map(f64::to_bits),
+                b.pseudo_q(s).map(f64::to_bits)
             );
         }
         let left = std::fs::read_dir(dir.path()).unwrap().count();

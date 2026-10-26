@@ -2701,8 +2701,8 @@ mod finalize_tests {
         let i_models = train_folds(&i_sample.into_items(), seed);
 
         // Pass 2: every row's held-out score, into the q-value step functions.
-        let mut t_scores = FoldScores::new(seed);
-        let mut i_scores = FoldScores::new(seed);
+        let mut t_scores = FoldScores::new();
+        let mut i_scores = FoldScores::new();
         shards.for_each(|rows| {
             let shapes = DonorShapes::from_rows(rows.iter(), maps);
             let want = |t: Table| t != Table::Pseudo;
@@ -2714,12 +2714,9 @@ mod finalize_tests {
                 &t_models,
                 &i_models,
                 want,
-                |i, t, fam, s| {
-                    let p = rows[i].precursor;
-                    match t {
-                        Table::Identified => i_scores.add(p, fam, s),
-                        _ => t_scores.add(p, fam, s),
-                    }
+                |_, t, fam, s| match t {
+                    Table::Identified => i_scores.add(fam, s),
+                    _ => t_scores.add(fam, s),
                 },
             );
             Ok(())
@@ -2746,7 +2743,7 @@ mod finalize_tests {
                     let r = &rows[i];
                     if r.kind != Hypothesis::Target
                         || !id_fdr
-                            .q(Estimate::Pooled, r.precursor, fam, s)
+                            .q(Estimate::Pooled, fam, s)
                             .is_some_and(|q| q <= VALIDATION_Q)
                     {
                         return;
@@ -2827,9 +2824,8 @@ mod finalize_tests {
                     scored[i] = Some((fam, s));
                 },
             );
-            let q_of = |q: &QValues, e: Estimate, i: usize| {
-                scored[i].and_then(|(fam, s)| q.q(e, rows[i].precursor, fam, s))
-            };
+            let q_of =
+                |q: &QValues, e: Estimate, i: usize| scored[i].and_then(|(fam, s)| q.q(e, fam, s));
             // A fit whose amplitude is clamped to 0 found no signal: its
             // quantity is missing, not zero, in the MBR table and the
             // feature parquet.
@@ -2917,7 +2913,7 @@ mod finalize_tests {
                         (t, q, q)
                     }
                     Role::PseudoTransfer => {
-                        let q = scored[i].and_then(|(_, s)| fdr.pseudo_q(r.precursor, s));
+                        let q = scored[i].and_then(|(_, s)| fdr.pseudo_q(s));
                         v.pseudo_transfers += 1;
                         if let Some(m) = &r.ms2 {
                             v.ms2_pseudo_rows += 1;

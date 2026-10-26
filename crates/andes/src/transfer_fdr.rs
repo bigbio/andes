@@ -12,7 +12,9 @@
 //! one of three folds, so its targets and decoys in every run share a fold.
 //! For each fold a classifier (target = 1, decoy = 0, validation groups = the
 //! precursor) is trained on the other two folds and scores the held-out fold.
-//! Scores are the raw boosted margins and are compared within a fold only.
+//! Scores are the raw boosted margins; the three folds' models are trained alike
+//! on the same kind of rows, so their held-out margins are on one scale and the
+//! q-values pool them.
 //!
 //! Bagging: a fold's classifier can be the mean of several members, each
 //! trained on its own row set (a [`TrainingSample`] of its own seed) with its
@@ -23,16 +25,21 @@
 //! which at hundreds of runs moves the scores of the transfers near the
 //! threshold more than their evidence does.
 //!
-//! q-values, per fold: rank the fold's scored rows by score; at threshold `c`,
+//! q-values: rank all scored rows (the held-out rows of every fold) by score; at
+//! threshold `c`,
 //! `FDR(c) = (D(c) + 1) / (K * max(T(c), 1))`, capped at 1, with `D`/`T` the
-//! decoys/targets at or above `c` and `K` the fold's decoy-to-target row
-//! ratio; q is the running minimum of `FDR` from the lowest score up. The `+1`
-//! is the finite-sample correction: a target above every decoy is not given
-//! q = 0, and no target reaches q <= 0.01 unless at least `1 / (0.01 K)`
-//! targets score above every decoy. The accepted set at
-//! any threshold is the union of the folds' accepted sets, so its estimated FDR
-//! is at most the threshold. The same estimate is made with one decoy family
+//! decoys/targets at or above `c` and `K` the decoy-to-target row ratio; q is
+//! the running minimum of `FDR` from the lowest score up. The `+1` is the
+//! finite-sample correction: a target above every decoy is not given q = 0,
+//! and no target reaches q <= 0.01 unless at least `1 / (0.01 K)` targets
+//! score above every decoy. The same estimate is made with one decoy family
 //! at a time (`K` = that family's ratio).
+//!
+//! The estimate is made once over the pooled rows, not once per fold: at
+//! hundreds of runs q is nearly flat around 0.01 (a 1 % change of q moves
+//! about 8 % of the accepted transfers) and is the running minimum of a noisy
+//! curve, so the estimate needs all the decoys to keep the accepted set from
+//! varying with the seed of the folds and samples.
 //!
 //! Identity decoys (family [`IDENTITY`]): the transfers of decoy precursors
 //! that passed the library's donor rules with decoy PSMs. The mass- and
@@ -522,140 +529,116 @@ impl Steps {
     }
 }
 
-/// The held-out scores of one classifier's rows, per fold and family, kept
-/// to turn them into q-values: 4 bytes per scored row held.
+/// The held-out scores of one classifier's rows, per family, kept to turn
+/// them into q-values: 4 bytes per scored row held. The rows of every fold
+/// are pooled: one q-value estimate is made over all of them.
 ///
 /// A mergeable summary: [`FoldScores::merge`] of the scores of disjoint row
 /// sets gives the scores of their union, whatever the order, so the rows can
 /// be scored in parallel pieces. The scores held can be taken out
 /// ([`FoldScores::take_held`], to be sorted and written elsewhere) and given
 /// back to [`FoldScores::finish_with`] as ascending streams: the step
-/// functions only need each fold's scores in ascending order.
+/// functions only need the scores in ascending order.
+#[derive(Default)]
 pub struct FoldScores {
-    seed: u64,
-    scores: Vec<[Vec<f32>; 4]>,
-    /// Rows with a finite score, per fold and family, held or taken out.
-    counts: Vec<[usize; 4]>,
-    members: Vec<usize>,
+    scores: [Vec<f32>; 4],
+    /// Rows with a finite score, per family, held or taken out.
+    counts: [usize; 4],
+    members: usize,
     unscored: usize,
 }
 
 impl FoldScores {
-    pub fn new(seed: u64) -> Self {
-        Self {
-            seed,
-            scores: (0..N_FOLDS).map(|_| Default::default()).collect(),
-            counts: vec![[0; 4]; N_FOLDS],
-            members: vec![0; N_FOLDS],
-            unscored: 0,
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// One row of `precursor` and `family` with its held-out score (`None`
-    /// when its fold has no model).
-    pub fn add(&mut self, precursor: u32, family: u8, score: Option<f32>) {
-        let fold = fold_of(precursor, self.seed);
+    /// One row of `family` with its held-out score (`None` when its fold has
+    /// no model).
+    pub fn add(&mut self, family: u8, score: Option<f32>) {
         match score {
             None => self.unscored += 1,
             Some(s) => {
-                self.members[fold] += 1;
+                self.members += 1;
                 if s.is_finite() {
                     let f = family.min(3) as usize;
-                    self.scores[fold][f].push(canonical(s));
-                    self.counts[fold][f] += 1;
+                    self.scores[f].push(canonical(s));
+                    self.counts[f] += 1;
                 }
             }
         }
     }
 
-    /// Adds the rows of `other` (scored with the same seed's folds).
-    ///
-    /// # Panics
-    /// When `other` has another seed.
+    /// Adds the rows of `other`.
     pub fn merge(&mut self, other: FoldScores) {
-        assert_eq!(self.seed, other.seed, "fold scores of different seeds");
-        for (fold, by_family) in other.scores.into_iter().enumerate() {
-            for (f, v) in by_family.into_iter().enumerate() {
-                let mine = &mut self.scores[fold][f];
-                if mine.is_empty() {
-                    *mine = v;
-                } else {
-                    mine.extend(v);
-                }
-                self.counts[fold][f] += other.counts[fold][f];
+        for (f, v) in other.scores.into_iter().enumerate() {
+            let mine = &mut self.scores[f];
+            if mine.is_empty() {
+                *mine = v;
+            } else {
+                mine.extend(v);
             }
-            self.members[fold] += other.members[fold];
+            self.counts[f] += other.counts[f];
         }
+        self.members += other.members;
         self.unscored += other.unscored;
     }
 
     /// Scores held in memory.
     pub fn held(&self) -> usize {
-        self.scores.iter().flatten().map(Vec::len).sum()
+        self.scores.iter().map(Vec::len).sum()
     }
 
-    /// The scores held, per fold and family, in arrival order, taken out (the
-    /// counts stay).
-    pub fn take_held(&mut self) -> Vec<[Vec<f32>; 4]> {
-        self.scores
-            .iter_mut()
-            .map(|by_family| by_family.each_mut().map(std::mem::take))
-            .collect()
+    /// The scores held, per family, in arrival order, taken out (the counts
+    /// stay).
+    pub fn take_held(&mut self) -> [Vec<f32>; 4] {
+        self.scores.each_mut().map(std::mem::take)
     }
 
     /// The q-value step functions; `failed_folds` are the folds without a
     /// model (for the counts).
     #[cfg(test)]
     pub fn finish(self, failed_folds: &[String]) -> QValues {
-        self.finish_with(failed_folds, None, |_, _| Vec::new())
+        self.finish_with(failed_folds, None, |_| Vec::new())
     }
 
-    /// [`FoldScores::finish`] with, for each fold and family, the scores
-    /// taken out by [`FoldScores::take_held`] given back by `taken(fold,
-    /// family)` as ascending streams (any number of them). The result is the
-    /// one of every score held in memory. With `thresholds`, only the pooled
-    /// estimate keeps its whole step function; the others keep the steps
-    /// where q first reaches each threshold, which answer
-    /// [`QValues::accepts`] at those thresholds exactly (about a quarter of
-    /// the memory).
+    /// [`FoldScores::finish`] with, for each family, the scores taken out by
+    /// [`FoldScores::take_held`] given back by `taken(family)` as ascending
+    /// streams (any number of them). The result is the one of every score
+    /// held in memory. With `thresholds`, only the pooled estimate keeps its
+    /// whole step function; the others keep the steps where q first reaches
+    /// each threshold, which answer [`QValues::accepts`] at those thresholds
+    /// exactly (about a quarter of the memory).
     pub fn finish_with<'a>(
         self,
         failed_folds: &[String],
         thresholds: Option<&[f64]>,
-        mut taken: impl FnMut(usize, usize) -> Vec<Box<dyn Iterator<Item = f32> + 'a>>,
+        mut taken: impl FnMut(usize) -> Vec<Box<dyn Iterator<Item = f32> + 'a>>,
     ) -> QValues {
-        let mut steps: Vec<[Option<Steps>; 4]> = Vec::with_capacity(N_FOLDS);
-        let mut no_q = 0usize;
-        for (fold, by_family) in self.scores.into_iter().enumerate() {
-            let mut k = 0usize;
-            let streams: [SortedMerge<'a>; 4] = by_family.map(|mut v| {
-                v.sort_unstable_by(f32::total_cmp);
-                let mut runs = taken(fold, k);
-                k += 1;
-                runs.push(Box::new(v.into_iter()));
-                SortedMerge::new(runs)
-            });
-            let totals = self.counts[fold];
-            let mut builder = StepsBuilder::new(totals, thresholds);
-            walk_scores(streams, |c, at| builder.visit(c, at));
-            let fold_steps = builder.finish();
-            let with_q = if fold_steps[Estimate::Pooled as usize].is_some() {
-                totals.iter().sum()
-            } else {
-                0
-            };
-            no_q += self.members[fold] - with_q;
-            steps.push(fold_steps);
-        }
+        let mut k = 0usize;
+        let streams: [SortedMerge<'a>; 4] = self.scores.map(|mut v| {
+            v.sort_unstable_by(f32::total_cmp);
+            let mut runs = taken(k);
+            k += 1;
+            runs.push(Box::new(v.into_iter()));
+            SortedMerge::new(runs)
+        });
+        let mut builder = StepsBuilder::new(self.counts, thresholds);
+        walk_scores(streams, |c, at| builder.visit(c, at));
+        let steps = builder.finish();
+        let with_q = if steps[Estimate::Pooled as usize].is_some() {
+            self.counts.iter().sum()
+        } else {
+            0
+        };
         QValues {
-            seed: self.seed,
             steps,
             whole: ESTIMATES.map(|e| thresholds.is_none() || e == Estimate::Pooled),
             thresholds: thresholds.map(<[f64]>::to_vec).unwrap_or_default(),
             counts: FdrCounts {
                 failed_folds: failed_folds.to_vec(),
                 unscored: self.unscored,
-                no_q,
+                no_q: self.members - with_q,
             },
         }
     }
@@ -821,11 +804,10 @@ fn kdecoy_steps(by_family: &[Vec<f32>; 4], e: Estimate) -> Option<Steps> {
     [a, b, c, d].into_iter().nth(e as usize).flatten()
 }
 
-/// The q-values of one classifier's rows: per fold and [`Estimate`], a step
-/// function of the held-out score.
+/// The q-values of one classifier's rows: per [`Estimate`], a step function
+/// of the held-out score.
 pub struct QValues {
-    seed: u64,
-    steps: Vec<[Option<Steps>; 4]>,
+    steps: [Option<Steps>; 4],
     /// Per [`Estimate`], whether its step functions are whole (else they
     /// answer [`QValues::accepts`] at `thresholds` only).
     whole: [bool; 4],
@@ -836,35 +818,28 @@ pub struct QValues {
 impl QValues {
     /// Steps of every step function, held in memory (12 bytes each).
     pub fn steps(&self) -> usize {
-        self.steps
-            .iter()
-            .flatten()
-            .flatten()
-            .map(|s| s.at.len())
-            .sum()
+        self.steps.iter().flatten().map(|s| s.at.len()).sum()
     }
 
-    /// Steps of the pooled estimate's step functions.
+    /// Steps of the pooled estimate's step function.
     pub fn pooled_steps(&self) -> usize {
-        self.steps
-            .iter()
-            .filter_map(|f| f[Estimate::Pooled as usize].as_ref())
-            .map(|s| s.at.len())
-            .sum()
+        self.steps[Estimate::Pooled as usize]
+            .as_ref()
+            .map_or(0, |s| s.at.len())
     }
 
-    /// The q-value under estimate `e` of a row of `precursor` and `family`
-    /// scoring `score`; `None` when it has no score, its family takes no part
-    /// in `e`, or its fold lacks targets or decoys.
+    /// The q-value under estimate `e` of a row of `family` scoring `score`;
+    /// `None` when it has no score, its family takes no part in `e`, or the
+    /// scored rows lack targets or decoys.
     ///
     /// # Panics
     /// When the step functions of `e` were kept at thresholds only.
-    pub fn q(&self, e: Estimate, precursor: u32, family: u8, score: Option<f32>) -> Option<f64> {
+    pub fn q(&self, e: Estimate, family: u8, score: Option<f32>) -> Option<f64> {
         assert!(
             self.whole[e as usize],
             "{e:?} q-values were kept at thresholds only"
         );
-        self.step_q(e, precursor, family, score)
+        self.step_q(e, family, score)
     }
 
     /// Whether the row's q-value under `e` (see [`QValues::q`]) is at most
@@ -873,40 +848,29 @@ impl QValues {
     /// # Panics
     /// When the step functions of `e` were kept at thresholds only and `t`
     /// is not one of them.
-    pub fn accepts(
-        &self,
-        e: Estimate,
-        precursor: u32,
-        family: u8,
-        score: Option<f32>,
-        t: f64,
-    ) -> bool {
+    pub fn accepts(&self, e: Estimate, family: u8, score: Option<f32>, t: f64) -> bool {
         assert!(
             self.whole[e as usize] || self.thresholds.contains(&t),
             "{e:?} q-values were not kept at threshold {t}"
         );
-        self.step_q(e, precursor, family, score)
-            .is_some_and(|q| q <= t)
+        self.step_q(e, family, score).is_some_and(|q| q <= t)
     }
 
-    fn step_q(&self, e: Estimate, precursor: u32, family: u8, score: Option<f32>) -> Option<f64> {
+    fn step_q(&self, e: Estimate, family: u8, score: Option<f32>) -> Option<f64> {
         let s = score.filter(|s| s.is_finite())?;
         if !e.keeps(family) {
             return None;
         }
-        let steps = self.steps[fold_of(precursor, self.seed)][e as usize].as_ref()?;
-        Some(steps.of_member(s))
+        Some(self.steps[e as usize].as_ref()?.of_member(s))
     }
 
     /// The pooled q of a row outside the fit (a pseudo-transfer) scoring
-    /// `score` under its fold's model: the q of the fold's scored row with the
-    /// highest score at or below it, or of the fold's lowest row when it
-    /// scores below all of them. `None` without a score or without q-values
-    /// in the fold.
-    pub fn pseudo_q(&self, precursor: u32, score: Option<f32>) -> Option<f64> {
+    /// `score` under its fold's model: the q of the scored row with the
+    /// highest score at or below it, or of the lowest row when it scores
+    /// below all of them. `None` without a score or without q-values.
+    pub fn pseudo_q(&self, score: Option<f32>) -> Option<f64> {
         let s = score?;
-        let steps =
-            self.steps[fold_of(precursor, self.seed)][Estimate::Pooled as usize].as_ref()?;
+        let steps = self.steps[Estimate::Pooled as usize].as_ref()?;
         Some(steps.at_or_below(s))
     }
 }
@@ -933,15 +897,15 @@ pub fn transfer_fdr(rows: &[FdrRow], seed: u64) -> TransferFdr {
     let xs: Vec<&[f32]> = rows.iter().map(|r| r.x.as_slice()).collect();
     let mut scores = Vec::new();
     models.score(&precursors, &xs, &mut scores);
-    let mut fs = FoldScores::new(seed);
+    let mut fs = FoldScores::new();
     for (r, s) in rows.iter().zip(&scores) {
-        fs.add(r.precursor, r.family, *s);
+        fs.add(r.family, *s);
     }
     let q = fs.finish(&models.failed_folds);
     let each = |e: Estimate| -> Vec<Option<f64>> {
         rows.iter()
             .zip(&scores)
-            .map(|(r, s)| q.q(e, r.precursor, r.family, *s))
+            .map(|(r, s)| q.q(e, r.family, *s))
             .collect()
     };
     let result = FdrResult {
@@ -966,7 +930,7 @@ impl TransferFdr {
     pub fn pseudo_q(&self, precursor: u32, x: &[f32]) -> Option<f64> {
         let mut s = Vec::new();
         self.models.score(&[precursor], &[x], &mut s);
-        self.q.pseudo_q(precursor, s[0])
+        self.q.pseudo_q(s[0])
     }
 }
 
@@ -1215,20 +1179,17 @@ mod tests {
         let r = transfer_qvalues(&only_decoys, 1);
         assert!(r.q.iter().all(Option::is_none));
 
-        // Fold 0 holds targets only: its rows have no decoys to estimate from.
+        // The decoys of one fold are missing: the q-values pool the folds, so
+        // every row still has one.
         let seed = 5;
         let mixed: Vec<FdrRow> = rows(600, 3.0, &[1, 2], 4)
             .into_iter()
             .filter(|r| !(r.is_decoy && fold_of(r.precursor, seed) == 0))
             .collect();
         let r = transfer_fdr(&mixed, seed);
-        for (row, q) in mixed.iter().zip(&r.result.q) {
-            if fold_of(row.precursor, seed) == 0 {
-                assert!(q.is_none(), "one-class fold row got q {q:?}");
-            }
-        }
+        assert!(r.result.q.iter().all(Option::is_some));
         assert!(accepted_targets(&mixed, &r.result.q) > 200);
-        assert!(r.counts.no_q > 0);
+        assert_eq!(r.counts.no_q, 0);
     }
 
     #[test]
@@ -1241,23 +1202,18 @@ mod tests {
     }
 
     #[test]
-    fn q_values_are_monotone_in_score_within_a_fold() {
+    fn q_values_are_monotone_in_score() {
         let rows = rows(400, 1.0, &[1, 2], 8);
         let r = transfer_qvalues(&rows, 3);
-        let mut by_fold: Vec<Vec<(f32, f64)>> = vec![Vec::new(); N_FOLDS];
-        for (i, row) in rows.iter().enumerate() {
-            if let Some(q) = r.q[i] {
-                by_fold[fold_of(row.precursor, 3)].push((r.score[i], q));
-            }
+        let mut all: Vec<(f32, f64)> = (0..rows.len())
+            .filter_map(|i| r.q[i].map(|q| (r.score[i], q)))
+            .collect();
+        assert!(!all.is_empty());
+        all.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for w in all.windows(2) {
+            assert!(w[1].1 <= w[0].1, "q rises with score: {w:?}");
         }
-        for f in by_fold.iter_mut() {
-            assert!(!f.is_empty());
-            f.sort_by(|a, b| a.0.total_cmp(&b.0));
-            for w in f.windows(2) {
-                assert!(w[1].1 <= w[0].1, "q rises with score: {w:?}");
-            }
-            assert!(f.iter().all(|&(_, q)| (0.0..=1.0).contains(&q)));
-        }
+        assert!(all.iter().all(|&(_, q)| (0.0..=1.0).contains(&q)));
     }
 
     #[test]
@@ -1340,7 +1296,7 @@ mod tests {
             let all = accepted_targets(&rows, &r.q);
             eprintln!("identity: wrong-peak {wp}, combined {all} at q <= 0.01");
             assert!(wp >= 800, "{wp}");
-            // Only targets above every identity decoy of their fold remain.
+            // Only targets above every identity decoy remain.
             assert!(5 * all < wp, "{all} of {wp}");
             let at10 = rows
                 .iter()
@@ -1445,7 +1401,7 @@ mod tests {
     #[test]
     fn threshold_steps_accept_as_the_whole_ones() {
         let mut g = Normal(7);
-        let (mut whole, mut cut) = (FoldScores::new(3), FoldScores::new(3));
+        let (mut whole, mut cut) = (FoldScores::new(), FoldScores::new());
         let mut items = Vec::new();
         for i in 0..6000u32 {
             let fam = match i % 7 {
@@ -1456,26 +1412,26 @@ mod tests {
             };
             let shift = if fam == TARGET { 1.5 } else { 0.0 };
             let s = Some(((g.draw() + shift) * 8.0).round() / 8.0);
-            items.push((i % 800, fam, s));
-            whole.add(i % 800, fam, s);
-            cut.add(i % 800, fam, s);
+            items.push((fam, s));
+            whole.add(fam, s);
+            cut.add(fam, s);
         }
         let ts = [0.01, 0.05, 0.3];
         let whole = whole.finish(&[]);
-        let cut = cut.finish_with(&[], Some(&ts), |_, _| Vec::new());
+        let cut = cut.finish_with(&[], Some(&ts), |_| Vec::new());
         assert!(cut.steps() < whole.steps());
         assert_eq!(cut.pooled_steps(), whole.pooled_steps());
-        for &(p, f, s) in &items {
+        for &(f, s) in &items {
             for e in ESTIMATES {
                 for t in ts {
-                    assert_eq!(whole.accepts(e, p, f, s, t), cut.accepts(e, p, f, s, t));
+                    assert_eq!(whole.accepts(e, f, s, t), cut.accepts(e, f, s, t));
                 }
             }
             assert_eq!(
-                whole.q(Estimate::Pooled, p, f, s),
-                cut.q(Estimate::Pooled, p, f, s)
+                whole.q(Estimate::Pooled, f, s),
+                cut.q(Estimate::Pooled, f, s)
             );
-            assert_eq!(whole.pseudo_q(p, s), cut.pseudo_q(p, s));
+            assert_eq!(whole.pseudo_q(s), cut.pseudo_q(s));
         }
     }
 
@@ -1489,14 +1445,14 @@ mod tests {
         let xs: Vec<&[f32]> = rows.iter().map(|r| r.x.as_slice()).collect();
         let mut scores = Vec::new();
         models.score(&precursors, &xs, &mut scores);
-        let mut fs = FoldScores::new(seed);
+        let mut fs = FoldScores::new();
         for (r, s) in rows.iter().zip(&scores) {
-            fs.add(r.precursor, r.family, *s);
+            fs.add(r.family, *s);
         }
         let q = fs.finish(&models.failed_folds);
         rows.iter()
             .zip(&scores)
-            .map(|(r, s)| q.q(Estimate::Pooled, r.precursor, r.family, *s))
+            .map(|(r, s)| q.q(Estimate::Pooled, r.family, *s))
             .collect()
     }
 

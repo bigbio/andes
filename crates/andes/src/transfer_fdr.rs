@@ -216,10 +216,22 @@ fn train_fold(
 /// rows of the other folds and score the rows of fold `f`.
 pub struct FoldModels {
     seed: u64,
-    /// Per fold, the members that trained (empty when none did).
-    models: Vec<Vec<GbdtPeakModel>>,
+    /// Per member, per fold of the member's partition, its model (`None` when
+    /// it did not train).
+    models: Vec<Vec<Option<GbdtPeakModel>>>,
     /// One message per fold without a model.
     pub failed_folds: Vec<String>,
+}
+
+pub static MEMBER_FOLDS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The seed of the partition of bagging member `m` into folds.
+pub fn fold_seed(seed: u64, m: usize) -> u64 {
+    if m == 0 || !MEMBER_FOLDS.load(std::sync::atomic::Ordering::Relaxed) {
+        seed
+    } else {
+        sample_hash(m as u64, seed ^ 0x666f_6c64_7321_7365)
+    }
 }
 
 /// The seed of bagging member `m` (its training sample and its trainer):
@@ -229,7 +241,11 @@ pub static SAMPLE_SEED: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 pub static TRAIN_SEED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
 fn ovr(a: &std::sync::atomic::AtomicU64, seed: u64) -> u64 {
     let v = a.load(std::sync::atomic::Ordering::Relaxed);
-    if v == u64::MAX { seed } else { v }
+    if v == u64::MAX {
+        seed
+    } else {
+        v
+    }
 }
 pub fn sample_seed(seed: u64, m: usize) -> u64 {
     member_seed(ovr(&SAMPLE_SEED, seed), m)
@@ -239,7 +255,11 @@ pub fn train_seed(seed: u64, m: usize) -> u64 {
 }
 pub static POOL_FOLDS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 fn q_fold(precursor: u32, seed: u64) -> usize {
-    if POOL_FOLDS.load(std::sync::atomic::Ordering::Relaxed) { 0 } else { fold_of(precursor, seed) }
+    if POOL_FOLDS.load(std::sync::atomic::Ordering::Relaxed) {
+        0
+    } else {
+        fold_of(precursor, seed)
+    }
 }
 pub fn member_seed(seed: u64, m: usize) -> u64 {
     if m == 0 {
@@ -281,7 +301,11 @@ pub fn train_bagged_folds(sets: &[&[FdrRow]], seed: u64) -> FoldModels {
     );
     let folds: Vec<Vec<usize>> = sets
         .iter()
-        .map(|rows| rows.iter().map(|r| fold_of(r.precursor, seed)).collect())
+        .enumerate()
+        .map(|(m, rows)| {
+            let fs = fold_seed(seed, m);
+            rows.iter().map(|r| fold_of(r.precursor, fs)).collect()
+        })
         .collect();
     let jobs: Vec<(usize, usize)> = (0..N_FOLDS)
         .flat_map(|f| (0..sets.len()).map(move |m| (f, m)))
@@ -290,11 +314,13 @@ pub fn train_bagged_folds(sets: &[&[FdrRow]], seed: u64) -> FoldModels {
         .par_iter()
         .map(|&(f, m)| train_fold(sets[m], &folds[m], nf, f, train_seed(seed, m)))
         .collect();
-    let mut models: Vec<Vec<GbdtPeakModel>> = (0..N_FOLDS).map(|_| Vec::new()).collect();
+    let mut models: Vec<Vec<Option<GbdtPeakModel>>> = (0..sets.len())
+        .map(|_| (0..N_FOLDS).map(|_| None).collect())
+        .collect();
     let mut errors: Vec<Vec<String>> = vec![Vec::new(); N_FOLDS];
     for (&(f, m), fit) in jobs.iter().zip(fitted) {
         match fit {
-            Ok(model) => models[f].push(model),
+            Ok(model) => models[m][f] = Some(model),
             Err(e) if sets.len() == 1 => errors[f].push(e),
             Err(e) => errors[f].push(format!("member {m}: {e}")),
         }
@@ -304,7 +330,7 @@ pub fn train_bagged_folds(sets: &[&[FdrRow]], seed: u64) -> FoldModels {
         if e.is_empty() {
             continue;
         }
-        if models[f].is_empty() {
+        if models.iter().all(|by_fold| by_fold[f].is_none()) {
             failed_folds.push(e.join("; "));
         } else {
             eprintln!(
@@ -331,56 +357,48 @@ impl FoldModels {
     /// into `out`: `None` for a row whose fold has no model. A bagged fold
     /// scores the mean of its members' margins (summed in member order).
     pub fn score(&self, precursors: &[u32], xs: &[&[f32]], out: &mut Vec<Option<f32>>) {
+        let n = xs.len();
         out.clear();
-        out.resize(xs.len(), None);
-        for (fold, members) in self.models.iter().enumerate() {
-            if members.is_empty() {
-                continue;
+        out.resize(n, None);
+        let mut sum = vec![0.0f32; n];
+        let mut count = vec![0u32; n];
+        for (m, by_fold) in self.models.iter().enumerate() {
+            let fs = fold_seed(self.seed, m);
+            for (fold, model) in by_fold.iter().enumerate() {
+                let Some(model) = model else { continue };
+                let at: Vec<usize> = (0..n)
+                    .filter(|&i| fold_of(precursors[i], fs) == fold)
+                    .collect();
+                if at.is_empty() {
+                    continue;
+                }
+                let batch: Vec<&[f32]> = at.iter().map(|&i| xs[i]).collect();
+                let mut s = vec![0.0f32; at.len()];
+                batch
+                    .par_chunks(PREDICT_BATCH)
+                    .zip(s.par_chunks_mut(PREDICT_BATCH))
+                    .for_each(|(b, o)| model.predict_value_batch(b, o));
+                for (&i, v) in at.iter().zip(s) {
+                    sum[i] += v;
+                    count[i] += 1;
+                }
             }
-            let at: Vec<usize> = (0..xs.len())
-                .filter(|&i| fold_of(precursors[i], self.seed) == fold)
-                .collect();
-            if at.is_empty() {
-                continue;
-            }
-            let batch: Vec<&[f32]> = at.iter().map(|&i| xs[i]).collect();
-            let mut s = vec![0.0f32; at.len()];
-            batch
-                .par_chunks(PREDICT_BATCH)
-                .zip(s.par_chunks_mut(PREDICT_BATCH))
-                .for_each(|(b, o)| predict_mean(members, b, o));
-            for (&i, v) in at.iter().zip(s) {
-                out[i] = Some(v);
-            }
+        }
+        for i in 0..n {
+            out[i] = match count[i] {
+                0 => None,
+                1 => Some(sum[i]),
+                c => Some(sum[i] / c as f32),
+            };
         }
     }
 
-    /// Members per fold (the most of any fold).
+    /// Members (the most any fold of one has trained).
     pub fn members(&self) -> usize {
-        self.models.iter().map(Vec::len).max().unwrap_or(0)
-    }
-}
-
-/// The mean margin of `members` on `rows` into `out`; one member's margin
-/// as it is.
-fn predict_mean(members: &[GbdtPeakModel], rows: &[&[f32]], out: &mut [f32]) {
-    let Some((first, rest)) = members.split_first() else {
-        return;
-    };
-    first.predict_value_batch(rows, out);
-    if rest.is_empty() {
-        return;
-    }
-    let mut tmp = vec![0.0f32; out.len()];
-    for m in rest {
-        m.predict_value_batch(rows, &mut tmp);
-        for (o, v) in out.iter_mut().zip(&tmp) {
-            *o += v;
-        }
-    }
-    let n = members.len() as f32;
-    for o in out.iter_mut() {
-        *o /= n;
+        self.models
+            .iter()
+            .filter(|m| m.iter().any(Option::is_some))
+            .count()
     }
 }
 
@@ -921,8 +939,7 @@ impl QValues {
     /// in the fold.
     pub fn pseudo_q(&self, precursor: u32, score: Option<f32>) -> Option<f64> {
         let s = score?;
-        let steps =
-            self.steps[q_fold(precursor, self.seed)][Estimate::Pooled as usize].as_ref()?;
+        let steps = self.steps[q_fold(precursor, self.seed)][Estimate::Pooled as usize].as_ref()?;
         Some(steps.at_or_below(s))
     }
 }

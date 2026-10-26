@@ -1695,6 +1695,7 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
     if let Some(v) = a.seed_sample {
         crate::transfer_fdr::SAMPLE_SEED.store(v, std::sync::atomic::Ordering::Relaxed);
     }
+    crate::transfer_fdr::MEMBER_FOLDS.store(a.member_folds, std::sync::atomic::Ordering::Relaxed);
     crate::transfer_fdr::POOL_FOLDS.store(a.pool_folds, std::sync::atomic::Ordering::Relaxed);
     if let Some(v) = a.seed_train {
         crate::transfer_fdr::TRAIN_SEED.store(v, std::sync::atomic::Ordering::Relaxed);

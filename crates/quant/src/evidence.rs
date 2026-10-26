@@ -245,6 +245,51 @@ fn support(rt: &[f64], finite: bool, t0: f64, w: f64) -> std::ops::Range<usize> 
     lo..hi.max(lo)
 }
 
+/// The spacing of the grid search's apex candidates, as a share of the
+/// smallest width searched: with MS1 scans denser than that, only some scans
+/// are tried as the apex, then every scan around the best of those.
+const APEX_SPACING_OF_WIDTH: f64 = 0.5;
+
+/// The apex candidates of a grid search: every `stride`-th scan of `range`
+/// (not empty) from its first, and its last.
+#[derive(Debug, Clone)]
+struct Apexes {
+    range: std::ops::Range<usize>,
+    stride: usize,
+}
+
+impl Apexes {
+    /// The largest stride, at least 1, whose candidates are at most
+    /// [`APEX_SPACING_OF_WIDTH`] of `w_min` (the smallest width searched)
+    /// apart, by the mean spacing of the scans of `range` in `rt`.
+    fn of(rt: &[f64], range: std::ops::Range<usize>, w_min: f64) -> Self {
+        let n = range.len();
+        let mut stride = 1;
+        if n > 2 {
+            let spacing = (rt[range.end - 1] - rt[range.start]) / (n - 1) as f64;
+            let k = APEX_SPACING_OF_WIDTH * w_min / spacing;
+            if k.is_finite() && k >= 2.0 {
+                stride = (k as usize).min(n - 1);
+            }
+        }
+        Self { range, stride }
+    }
+
+    /// The candidate scans, ascending.
+    fn iter(&self) -> impl Iterator<Item = usize> + Clone + '_ {
+        let last = self.range.end - 1;
+        let tail = ((last - self.range.start) % self.stride != 0).then_some(last);
+        self.range.clone().step_by(self.stride).chain(tail)
+    }
+
+    /// The other scans of `range` less than a stride from the candidate `k`.
+    fn around(&self, k: usize) -> impl Iterator<Item = usize> + '_ {
+        let lo = k.saturating_sub(self.stride - 1).max(self.range.start);
+        let hi = (k + self.stride).min(self.range.end);
+        (lo..hi).filter(move |&j| j != k)
+    }
+}
+
 /// One cell `(t0, w)` of a grid: its support among the window's scans, the
 /// offset of its profile values in [`GridProfiles::g`], and
 /// `(sum_j g_j, sum_j g_j^2)`.
@@ -290,15 +335,17 @@ struct GridCache {
 }
 
 impl GridCache {
-    /// The profiles of the grid over `rt` (candidates `candidates`, widths
+    /// The profiles of the grid over `rt` (apexes `candidates`, widths
     /// `widths * prior.w_prior`), computed unless cached; `None` when the
-    /// grid holds more than [`GRID_CACHE_MAX_VALUES`] values.
+    /// grid holds more than [`GRID_CACHE_MAX_VALUES`] values. The apexes are
+    /// determined by the key, as they follow from `rt`, the prior and the
+    /// widths.
     fn get(
         &mut self,
         rt: &[f64],
         prior: &Prior,
         widths: &[f64],
-        candidates: std::ops::Range<usize>,
+        candidates: &Apexes,
     ) -> Option<&GridProfiles> {
         let key = [
             prior.t_hat.to_bits(),
@@ -309,9 +356,9 @@ impl GridCache {
             Some(i) => i,
             None => {
                 let finite = rt.iter().all(|t| t.is_finite());
-                let mut cells = Vec::with_capacity(candidates.len() * widths.len());
+                let mut cells = Vec::with_capacity(candidates.iter().count() * widths.len());
                 let mut values = 0;
-                for k in candidates.clone() {
+                for k in candidates.iter() {
                     for &f in widths {
                         let scans = support(rt, finite, rt[k], f * prior.w_prior);
                         values += scans.len();
@@ -338,7 +385,7 @@ impl GridCache {
                 e.widths.extend(widths.iter().map(|f| f.to_bits()));
                 e.g.clear();
                 let mut c = cells.iter_mut();
-                for k in candidates {
+                for k in candidates.iter() {
                     let t0 = rt[k];
                     for &f in widths {
                         let w = f * prior.w_prior;
@@ -996,12 +1043,13 @@ fn best_alignment(
     let (t_hat, s) = (prior.t_hat, prior.s);
     let lo = rt.partition_point(|&t| t < t_hat - 3.0 * s);
     let hi = rt.partition_point(|&t| t <= t_hat + 3.0 * s);
-    let candidates = if lo < hi {
+    let range = if lo < hi {
         lo..hi
     } else {
         let k = nearest(rt, t_hat);
         k..k + 1
     };
+    let apexes = Apexes::of(rt, range, widths[0] * prior.w_prior);
     let n = rt.len() as f64;
     // The profile log-likelihood ratio from num = sum_j z_j g_j,
     // sg = sum_j g_j and sgg = sum_j g_j^2; minus infinity for a profile
@@ -1029,13 +1077,13 @@ fn best_alignment(
         }
         llr_of(num, sg, sgg)
     };
-    // (objective, t0, index into widths)
-    let mut best = (f64::NEG_INFINITY, rt[candidates.start], usize::MAX);
-    if let Some(grid) = work.grids.get(rt, prior, widths, candidates.clone()) {
+    // (objective, scan, index into widths)
+    let penalty_at = |k: usize| (rt[k] - t_hat) * (rt[k] - t_hat) / (2.0 * s * s);
+    let mut best = (f64::NEG_INFINITY, apexes.range.start, usize::MAX);
+    if let Some(grid) = work.grids.get(rt, prior, widths, &apexes) {
         let mut cells = grid.cells.iter();
-        for k in candidates {
-            let t0 = rt[k];
-            let penalty = (t0 - t_hat) * (t0 - t_hat) / (2.0 * s * s);
+        for k in apexes.iter() {
+            let penalty = penalty_at(k);
             for i in 0..widths.len() {
                 let cell = cells.next().expect("one cell per candidate and width");
                 let g = &grid.g[cell.at..cell.at + cell.scans.len()];
@@ -1045,23 +1093,34 @@ fn best_alignment(
                 }
                 let objective = llr_of(num, cell.sg, cell.sgg) - penalty;
                 if objective > best.0 {
-                    best = (objective, t0, i);
+                    best = (objective, k, i);
                 }
             }
         }
     } else {
-        for k in candidates {
-            let t0 = rt[k];
-            let penalty = (t0 - t_hat) * (t0 - t_hat) / (2.0 * s * s);
+        for k in apexes.iter() {
+            let penalty = penalty_at(k);
             for (i, &f) in widths.iter().enumerate() {
-                let objective = llr(t0, f * prior.w_prior) - penalty;
+                let objective = llr(rt[k], f * prior.w_prior) - penalty;
                 if objective > best.0 {
-                    best = (objective, t0, i);
+                    best = (objective, k, i);
                 }
             }
         }
     }
-    let (value, t0, i) = best;
+    // The scans between the apex candidates, around the best of them, at its
+    // width.
+    if apexes.stride > 1 && best.2 != usize::MAX {
+        let f = widths[best.2];
+        for k in apexes.around(best.1) {
+            let objective = llr(rt[k], f * prior.w_prior) - penalty_at(k);
+            if objective > best.0 {
+                best = (objective, k, best.2);
+            }
+        }
+    }
+    let (value, k, i) = best;
+    let t0 = rt[k];
     if i == usize::MAX {
         return (t0, prior.w_prior);
     }
@@ -1642,6 +1701,51 @@ mod tests {
                 "s/w_prior = {ratio}"
             );
         }
+    }
+
+    #[test]
+    fn apex_candidates_are_spaced_by_the_narrowest_width() {
+        let rt = |dt: f64| (0..100).map(|k| k as f64 * dt).collect::<Vec<_>>();
+        // Scans a quarter of the narrowest width apart or wider: every scan.
+        let a = Apexes::of(&rt(1.0), 10..60, 3.5);
+        assert_eq!(a.stride, 1);
+        assert_eq!(a.iter().collect::<Vec<_>>(), (10..60).collect::<Vec<_>>());
+        // Denser scans: every 8th, then the last.
+        let a = Apexes::of(&rt(0.2), 10..60, 3.5);
+        assert_eq!(a.stride, 8);
+        let c: Vec<usize> = a.iter().collect();
+        assert_eq!(c, [10, 18, 26, 34, 42, 50, 58, 59]);
+        assert_eq!(
+            a.around(26).collect::<Vec<_>>(),
+            (19..26).chain(27..34).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            a.around(10).collect::<Vec<_>>(),
+            (11..18).collect::<Vec<_>>()
+        );
+        // A range of one or two scans, and a degenerate spacing, keep every scan.
+        assert_eq!(Apexes::of(&rt(0.2), 5..6, 3.5).stride, 1);
+        assert_eq!(Apexes::of(&rt(0.2), 5..7, 3.5).stride, 1);
+        assert_eq!(Apexes::of(&[0.0; 100], 0..50, 3.5).stride, 1);
+    }
+
+    #[test]
+    fn dense_scans_fit_the_same_peak() {
+        // Scans a twentieth of the peak width apart are searched at every
+        // k-th scan, then around the best.
+        let w = 6.0;
+        let run = synth_run(&[(MZ, 2, ENV, 300.3, w, AMP)], NOISE, 0.3);
+        let p = probe(MZ, 300.0, 8.0, w);
+        let e = fit(&run, &p, 2, &ENV, &params()).unwrap();
+        eprintln!(
+            "dense: t0 = {}, w = {}, A/A_true = {:.4}",
+            e.t0,
+            e.w,
+            e.amplitude / AMP
+        );
+        assert!((e.t0 - 300.3).abs() < 0.5, "t0 = {}", e.t0);
+        assert!((e.w / w - 1.0).abs() < 0.1, "w = {}", e.w);
+        assert!((e.amplitude / AMP - 1.0).abs() < 0.05);
     }
 
     #[test]

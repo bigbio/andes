@@ -26,8 +26,8 @@ use serde::Deserialize;
 
 use crate::deeplc::{self, DeepLcPeptide};
 use crate::error::{Error, Result};
-use crate::peptdeep::{pack_ms2_batch, pack_rt_batch, PeptDeepPeptide};
 use crate::ms2_native::{Ms2Conditions, Ms2Model, Ms2Scratch, N_BASE_ION, N_ION};
+use crate::peptdeep::{pack_ms2_batch, pack_rt_batch, PeptDeepPeptide};
 use crate::rt_native::{RtModel, Scratch};
 use crate::{BackendKind, BackendOptions, OnnxSession};
 
@@ -217,7 +217,9 @@ impl Predictor for NativeMs2 {
                 let full = self
                     .model
                     .predict_with(&f.rt_peptide(), &self.conditions(*z), &mut scratch)
-                    .ok_or_else(|| Error::Inference("andes-ms2 could not encode a peptidoform".into()))?;
+                    .ok_or_else(|| {
+                        Error::Inference("andes-ms2 could not encode a peptidoform".into())
+                    })?;
                 Ok(full
                     .chunks_exact(N_ION)
                     .flat_map(|site| site[..N_BASE_ION].to_vec())

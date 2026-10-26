@@ -114,7 +114,9 @@ pub(crate) enum PredictorBackend {
 /// Parse one `--predict` value (used by the YAML config).
 pub(crate) fn parse_predict_feature(s: &str) -> Result<PredictFeature, String> {
     <PredictFeature as ValueEnum>::from_str(s, true).map_err(|_| {
-        format!("invalid predict entry `{s}`: expected rt|ms2|peptdeep-ms2|peptdeep-rt|deeplc-rt|none")
+        format!(
+            "invalid predict entry `{s}`: expected rt|ms2|peptdeep-ms2|peptdeep-rt|deeplc-rt|none"
+        )
     })
 }
 

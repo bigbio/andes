@@ -232,3 +232,40 @@ FDP ≤ 1% (entrapment) for every arm.
 - Fragment charge stops at 2+, so z ≥ 4 precursors lose their 3+ fragments.
 - No a/c/z ions and no glycans: the composition table has none.
 - Neutral-loss channels are trained but not yet used by `rescore_pin`, whose `Ion` layout has no loss slot.
+
+## andes-ms2 v1 (the bundled weights)
+
+`resources/predictors/andes_ms2.ams2`: 362,932 parameters (`--ch 96 --dilations 1 2 4 8 1 2 --n-heads 4`),
+trained 100,000 steps at batch 512 (OneCycle, AdamW, balanced by activation) on 6.0M PSMs of 149 MsNet
+datasets extracted with `ms2_extract_msnet.py` (cap 60k PSMs per dataset, 400k for the ion-trap CID and
+time-of-flight datasets that are scarce). Training uses the sequence-hash train/val/test split of
+`ms2_common.split_of`; PXD002137 and IPX0001804002 are held out entirely. The benchmark accessions and
+PXD014502, PXD005411 are not in the training set (none is in the collection).
+
+Median spectral angle of the plain b/y 1+/2+ channels:
+
+| Set | n | median SA |
+|---|---|---|
+| test split | 297,685 | 0.851 |
+| held-out datasets | 78,230 | 0.842 |
+| test, by activation | | HCD-FTMS 0.860, HCD-ITMS 0.788, CID-ITMS 0.818, CID-FTMS 0.844, time-of-flight 0.841 |
+| test, by charge 2 / 3 / 4 / 5 / 6 | | 0.869 / 0.828 / 0.801 / 0.774 / 0.745 |
+| test, phospho / oxidation / TMT | | 0.799 / 0.837 / 0.870 |
+
+Rust parity (`ms2_native_check`, 3,699 peptidoform-condition rows): largest relative difference 2.1e-4 over
+every condition the model was trained on. The Astral instrument family has no training spectra, so
+`--predict ms2` addresses an Astral run as Exploris + `HCD-FTMS`; the untrained family differs from torch by
+up to 3e-2 and is never used.
+
+Rescoring on the audit harness (PSMs at true FDP <= 1%, three Percolator seeds, `rt,ms2` over `rt`):
+
+| Set | design | `rt` | `rt,ms2` | gain |
+|---|---|---|---|---|
+| Astral | peptide | 48,183 | 50,669 | +5.2% |
+| phospho | peptide | 38,809 | 40,443 | +4.2% |
+| TMT | peptide | 13,349 | 13,356 | +0.0% |
+| UPS1 | peptide / natural | 16,202 / 14,509 | 16,438 / 14,515 | +1.5% / +0.0% |
+| timsTOF 4363 | peptide / natural | 14,862 / 15,068 | 15,438 / 15,584 | +3.9% / +3.4% |
+| timsTOF 4367 | peptide / natural | 17,752 / 18,338 | 18,554 / 19,061 | +4.5% / +3.9% |
+| timsTOF 2442 | peptide / natural | 34,945 / 34,609 | 35,621 / 35,453 | +1.9% / +2.4% |
+| timsTOF 2403 | peptide / natural | 56,294 / 56,855 | 57,792 / 58,161 | +2.7% / +2.3% |

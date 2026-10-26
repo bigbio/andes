@@ -142,6 +142,8 @@ def main():
     p.add_argument("--init")
     p.add_argument("--fewshot-ptm", choices=["phospho", "tmt"])
     p.add_argument("--fewshot-n", type=int, default=0)
+    p.add_argument("--ch", type=int, default=64, help="channels of the CNN")
+    p.add_argument("--dilations", type=int, nargs="+", default=None, help="dilation of each block (default: rt_model.DILATIONS)")
     p.add_argument("--steps", type=int, default=40000)
     p.add_argument("--lr", type=float, default=2e-3)
     p.add_argument("--runs-per-batch", type=int, default=16)
@@ -170,7 +172,7 @@ def main():
     train, val, few = select_rows(t, a, rng)
     print(f"train rows {len(train)} val rows {len(val)}", flush=True)
 
-    model = RtCnn().to(dev)
+    model = RtCnn(ch=a.ch, **({"dilations": a.dilations} if a.dilations else {})).to(dev)
     affine = torch.nn.Embedding(n_runs, 2).to(dev)
     with torch.no_grad():
         affine.weight[:, 0] = 0.1

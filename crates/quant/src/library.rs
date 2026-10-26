@@ -92,6 +92,12 @@ pub struct PsmIn {
     pub faims_cv: Option<f32>,
 }
 
+/// Whether `p` is a donor PSM under the PSM q-value threshold `donor_q` and the
+/// optional PEP cap `donor_pep`.
+pub fn is_donor_psm(p: &PsmIn, donor_q: f64, donor_pep: Option<f64>) -> bool {
+    p.q <= donor_q && donor_pep.is_none_or(|c| p.pep <= c)
+}
+
 /// Identity of a precursor: peptidoform and charge key, monoisotopic m/z and
 /// the theoretical isotope fractions.
 #[derive(Debug, Clone, PartialEq)]
@@ -304,7 +310,7 @@ impl LibraryBuilder {
     /// Whether `p` is a donor PSM: PSM q-value and PEP within the donor
     /// thresholds.
     pub fn is_donor(&self, p: &PsmIn) -> bool {
-        p.q <= self.donor_q && self.donor_pep.is_none_or(|c| p.pep <= c)
+        is_donor_psm(p, self.donor_q, self.donor_pep)
     }
 
     /// Adds one PSM; ignored when its id or run is out of range.

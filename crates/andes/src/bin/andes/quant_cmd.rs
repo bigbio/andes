@@ -42,7 +42,7 @@ use output::{
 };
 use quant::align::AlignParams;
 use quant::evidence::EvidenceParams;
-use quant::library::{Library, LibraryBuilder, PrecursorMeta, PsmIn};
+use quant::library::{is_donor_psm, Library, LibraryBuilder, PrecursorMeta, PsmIn};
 use quant::ms2::{fragment_ladder, library_spectrum, residue_masses, LibrarySpectrum, Ms2RunIndex};
 use rayon::prelude::*;
 
@@ -348,7 +348,7 @@ pub(crate) enum ScoreLoader<'a> {
 }
 
 /// The score set of one run stem.
-pub(crate) type RunScores<'a> = Box<dyn Fn(&str) -> Result<ScoreSet, String> + 'a>;
+pub(crate) type RunScores<'a> = Box<dyn Fn(&str) -> Result<ScoreSet, String> + Sync + 'a>;
 
 /// Where the Percolator results of `quant library` come from.
 #[derive(Debug, PartialEq)]
@@ -496,6 +496,48 @@ fn envelope_of(v: &[f32]) -> Result<[f32; ENVELOPE_LEN], usize> {
     v.try_into().map_err(|_| v.len())
 }
 
+impl KeyMeta {
+    /// The metadata of `row`, a row of run `run`.
+    fn of(row: &output::run_quant_table::RunPsmRow, run: usize) -> Self {
+        Self {
+            has_target: !row.is_decoy,
+            run,
+            mz: row.mz,
+            charge: row.charge,
+            envelope: envelope_of(&row.envelope),
+            proteins: row.proteins.clone(),
+        }
+    }
+}
+
+/// Runs whose tables are read together by `quant library`, so that the rows
+/// of at most this many runs are held at a time.
+const PARALLEL_RUNS: usize = 32;
+
+/// What pass 2 of the library keeps of one run table: the PSMs that join the
+/// rescoring result and agree with it, each with its site form and, for a
+/// donor PSM, its SpecId; and the counts of the others.
+#[derive(Default)]
+struct RunJoin {
+    rows: usize,
+    joined: usize,
+    mismatched: usize,
+    unscored_t: usize,
+    unscored_d: usize,
+    shadowed: usize,
+    psms: Vec<(PsmIn, u32, Option<Box<str>>)>,
+}
+
+/// What pass 1 of the library keeps of one run table: its precursor keys
+/// (each with its first target row, else its first row), and the hash of
+/// every SpecId in row order when the scores are merged.
+#[derive(Default)]
+struct RunKeys {
+    rows: usize,
+    keys: HashMap<String, KeyMeta>,
+    spec: Vec<u128>,
+}
+
 /// Alignment settings with each run's residual-width floor: half the median
 /// spacing of its MS1 scans of one FAIMS voltage, read from
 /// `<stem>.ms1.parquet`. A run without a readable table, or with fewer than two
@@ -598,6 +640,7 @@ pub(crate) fn build_and_write_library(
         }
         Ok(batches)
     };
+    let started = std::time::Instant::now();
     let merged = matches!(scores, ScoreLoader::Merged(_));
     // Pass 1: every precursor key with its metadata row, and (merged scores
     // only) the first SpecId shared by two runs.
@@ -605,49 +648,66 @@ pub(crate) fn build_and_write_library(
     // SpecId (as its 128-bit hash, see `SpecIdKeys`) -> first run.
     let spec_keys = SpecIdKeys::default();
     let mut seen: HashMap<u128, u32, rustc_hash::FxBuildHasher> = HashMap::default();
-    let mut shared: Option<(String, usize, usize)> = None;
+    // The first SpecId shared by two runs: the first run, the second run and
+    // the row of the second run.
+    let mut shared: Option<(usize, usize, usize)> = None;
     let mut n_rows = 0usize;
-    for r in 0..stems.len() {
-        let columns: Vec<&str> = META_COLUMNS
-            .iter()
-            .copied()
-            .chain(merged.then_some("spec_id"))
-            .collect();
-        for batch in open(r, &columns)? {
-            for row in batch? {
-                n_rows += 1;
-                if merged {
-                    let other = *seen.entry(spec_keys.key(&row.spec_id)).or_insert(r as u32);
-                    if shared.is_none() && other as usize != r {
-                        shared = Some((row.spec_id.clone(), other as usize, r));
+    let columns: Vec<&str> = META_COLUMNS
+        .iter()
+        .copied()
+        .chain(merged.then_some("spec_id"))
+        .collect();
+    let all_runs: Vec<usize> = (0..stems.len()).collect();
+    for group in all_runs.chunks(PARALLEL_RUNS) {
+        // Each run's table is read in parallel and reduced to its keys (the
+        // first target row of each, else its first row) and SpecId hashes;
+        // the runs are then merged in run order, which gives the keys of a
+        // sequential read of the rows.
+        let read: Vec<Result<RunKeys, String>> = group
+            .par_iter()
+            .map(|&r| {
+                let mut run = RunKeys::default();
+                for batch in open(r, &columns)? {
+                    for row in batch? {
+                        run.rows += 1;
+                        if merged {
+                            run.spec.push(spec_keys.key(&row.spec_id));
+                        }
+                        let target = !row.is_decoy;
+                        match run.keys.get_mut(row.precursor_key.as_str()) {
+                            Some(m) => {
+                                if target && !m.has_target {
+                                    *m = KeyMeta::of(&row, r);
+                                }
+                            }
+                            None => {
+                                let meta = KeyMeta::of(&row, r);
+                                run.keys.insert(row.precursor_key, meta);
+                            }
+                        }
                     }
                 }
-                let target = !row.is_decoy;
-                match keys.get_mut(row.precursor_key.as_str()) {
-                    Some(m) => {
-                        if target && !m.has_target {
-                            *m = KeyMeta {
-                                has_target: true,
-                                run: r,
-                                mz: row.mz,
-                                charge: row.charge,
-                                envelope: envelope_of(&row.envelope),
-                                proteins: row.proteins,
-                            };
+                Ok(run)
+            })
+            .collect();
+        for (&r, run) in group.iter().zip(read) {
+            let run = run?;
+            n_rows += run.rows;
+            for (i, h) in run.spec.iter().enumerate() {
+                let other = *seen.entry(*h).or_insert(r as u32);
+                if shared.is_none() && other as usize != r {
+                    shared = Some((other as usize, r, i));
+                }
+            }
+            for (key, m) in run.keys {
+                match keys.get_mut(key.as_str()) {
+                    Some(g) => {
+                        if m.has_target && !g.has_target {
+                            *g = m;
                         }
                     }
                     None => {
-                        keys.insert(
-                            row.precursor_key,
-                            KeyMeta {
-                                has_target: target,
-                                run: r,
-                                mz: row.mz,
-                                charge: row.charge,
-                                envelope: envelope_of(&row.envelope),
-                                proteins: row.proteins,
-                            },
-                        );
+                        keys.insert(key, m);
                     }
                 }
             }
@@ -658,10 +718,14 @@ pub(crate) fn build_and_write_library(
     let (merged_scores, per_run) = match scores {
         ScoreLoader::Merged(load) => {
             let set = load(n_spec_ids)?;
-            if let Some((id, a, b)) = &shared {
+            if let Some((a, b, row)) = shared {
+                let id = open(b, &["spec_id"])?
+                    .flat_map(|batch| batch.into_iter().flatten())
+                    .nth(row)
+                    .map_or_else(String::new, |r| r.spec_id);
                 return Err(format!(
                     "SpecId {id:?} is in runs {} and {}, so one merged Percolator result cannot be joined; pass per-run results: --psms <stem>=<target.tsv> --decoy-psms <stem>=<decoy.tsv> for every run",
-                    stems[*a], stems[*b]
+                    stems[a], stems[b]
                 ));
             }
             (Some(set), None)
@@ -734,8 +798,10 @@ pub(crate) fn build_and_write_library(
     let mut best = vec![None::<BestForm>; meta.len()];
     let (mut unscored_t, mut unscored_d, mut shadowed, mut mismatched) = (0usize, 0, 0, 0);
     let (mut n_psms, mut donor_psms, mut n_joined) = (0usize, 0usize, 0usize);
-    let mut class = IsomerClass::default();
-    for r in 0..stems.len() {
+    // The runs are joined in parallel (their tables, their scores, the
+    // isomer-class check); the joined PSMs are then added in run order and
+    // row order, as a sequential read would.
+    let join = |r: usize| -> Result<RunJoin, String> {
         let own;
         let set = match (&merged_scores, &per_run) {
             (Some(m), _) => m,
@@ -745,10 +811,11 @@ pub(crate) fn build_and_write_library(
             }
             (None, None) => unreachable!("one score source"),
         };
-        let (mut run_rows, mut run_joined, mut run_mismatched) = (0usize, 0usize, 0usize);
+        let mut class = IsomerClass::default();
+        let mut run = RunJoin::default();
         for batch in open(r, &JOIN_COLUMNS)? {
             for row in batch? {
-                run_rows += 1;
+                run.rows += 1;
                 let (id, site) = *id_of.get(row.precursor_key.as_str()).ok_or_else(|| {
                     format!(
                         "{}: precursor {:?} changed between two reads of the table",
@@ -757,23 +824,23 @@ pub(crate) fn build_and_write_library(
                     )
                 })?;
                 if row.is_decoy && target_key[id as usize] {
-                    shadowed += 1;
+                    run.shadowed += 1;
                     continue;
                 }
                 let Some(&j) = set.get(&row.spec_id) else {
                     if row.is_decoy {
-                        unscored_d += 1;
+                        run.unscored_d += 1;
                     } else {
-                        unscored_t += 1;
+                        run.unscored_t += 1;
                     }
                     continue;
                 };
-                run_joined += 1;
+                run.joined += 1;
                 class
                     .parse_into(&row.peptidoform, resolve)
                     .map_err(|e| format!("{}: {e}", paths[r].display()))?;
                 if !set.agrees(&j, row.is_decoy, &class) {
-                    run_mismatched += 1;
+                    run.mismatched += 1;
                     continue;
                 }
                 let p = PsmIn {
@@ -786,8 +853,41 @@ pub(crate) fn build_and_write_library(
                     is_decoy: row.is_decoy,
                     faims_cv: row.faims_cv,
                 };
+                let donor = is_donor_psm(&p, donor_q, donor_pep);
+                run.psms
+                    .push((p, site, donor.then(|| row.spec_id.as_str().into())));
+            }
+        }
+        // Per-run results whose SpecIds all belong to another run (every SpecId
+        // starts with its run's file stem) would join nothing and pass silently.
+        if per_run.is_some() && run.joined == 0 && run.rows > 0 && !set.psms.is_empty() {
+            return Err(format!(
+                "run {}: none of the {} rescored PSMs in {} has a SpecId of this run; are these the rescoring results of this run?",
+                stems[r],
+                set.psms.len(),
+                set.source
+            ));
+        }
+        if run.mismatched as f64 > MAX_JOIN_MISMATCH * run.joined as f64 {
+            return Err(format!(
+                "run {}: {} of {} PSMs joined on SpecId disagree with {} on the peptide, its modifications or the target/decoy label; are these the rescoring results of this run?",
+                stems[r], run.mismatched, run.joined, set.source
+            ));
+        }
+        Ok(run)
+    };
+    for group in all_runs.chunks(PARALLEL_RUNS) {
+        let joined: Vec<Result<RunJoin, String>> = group.par_iter().map(|&r| join(r)).collect();
+        for run in joined {
+            let run = run?;
+            unscored_t += run.unscored_t;
+            unscored_d += run.unscored_d;
+            shadowed += run.shadowed;
+            mismatched += run.mismatched;
+            n_joined += run.joined;
+            for (p, site, spec_id) in run.psms {
                 n_psms += 1;
-                let donor = builder.is_donor(&p);
+                let donor = spec_id.is_some();
                 donor_psms += usize::from(donor && !p.is_decoy);
                 builder.add(&p);
                 let form = BestForm {
@@ -797,34 +897,17 @@ pub(crate) fn build_and_write_library(
                     run: p.run,
                     site,
                 };
-                let slot = &mut best[id as usize];
+                let slot = &mut best[p.precursor as usize];
                 if slot.as_ref().is_none_or(|b| form.beats(b)) {
                     *slot = Some(form);
                 }
-                if donor {
-                    donors.add(&p, &row.spec_id);
+                if let Some(spec_id) = spec_id {
+                    donors.add(&p, &spec_id);
                 }
             }
         }
-        // Per-run results whose SpecIds all belong to another run (every SpecId
-        // starts with its run's file stem) would join nothing and pass silently.
-        if per_run.is_some() && run_joined == 0 && run_rows > 0 && !set.psms.is_empty() {
-            return Err(format!(
-                "run {}: none of the {} rescored PSMs in {} has a SpecId of this run; are these the rescoring results of this run?",
-                stems[r],
-                set.psms.len(),
-                set.source
-            ));
-        }
-        if run_mismatched as f64 > MAX_JOIN_MISMATCH * run_joined as f64 {
-            return Err(format!(
-                "run {}: {run_mismatched} of {run_joined} PSMs joined on SpecId disagree with {} on the peptide, its modifications or the target/decoy label; are these the rescoring results of this run?",
-                stems[r], set.source
-            ));
-        }
-        mismatched += run_mismatched;
-        n_joined += run_joined;
     }
+    let joined_s = started.elapsed().as_secs_f64();
     if n_psms == 0 && n_rows > 0 {
         return Err(format!(
             "none of the {n_rows} PSMs of the run tables has a rescoring score; \
@@ -855,9 +938,16 @@ pub(crate) fn build_and_write_library(
         None => format!("PSM q<={donor_q}"),
     };
     let ap = align_params(dir, stems);
+    let aligning = std::time::Instant::now();
     let library = builder.finish(meta, max_q, &ap);
     log_floor_hits(&library, &ap, stems);
+    let align_s = aligning.elapsed().as_secs_f64();
+    let spectra_started = std::time::Instant::now();
     let (spectra, donor_scans, sc) = donors.finish(dir, stems, &library)?;
+    eprintln!(
+        "[mbr] library: run tables and scores {joined_s:.1} s, alignment {align_s:.1} s, spectra {:.1} s",
+        spectra_started.elapsed().as_secs_f64()
+    );
     eprintln!(
         "[mbr] library: join check: {mismatched} of {n_joined} PSMs joined on SpecId ({:.4}%) disagree with the rescoring result on the peptide's residues, modification masses or target/decoy label (a run fails above {}%)",
         100.0 * mismatched as f64 / n_joined.max(1) as f64,

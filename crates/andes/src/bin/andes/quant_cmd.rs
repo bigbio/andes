@@ -1697,6 +1697,7 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
     }
     crate::transfer_fdr::MEMBER_FOLDS.store(a.member_folds, std::sync::atomic::Ordering::Relaxed);
     *crate::transfer_fdr::DUMP_PREFIX.lock().unwrap() = a.dump_scores.clone();
+    crate::transfer_fdr::GBDT_LR_BITS.store(a.gbdt_lr.to_bits(), std::sync::atomic::Ordering::Relaxed);
     crate::transfer_fdr::GBDT_ES.store(a.gbdt_es, std::sync::atomic::Ordering::Relaxed);
     crate::transfer_fdr::GBDT_ROUNDS.store(a.gbdt_rounds, std::sync::atomic::Ordering::Relaxed);
     crate::transfer_fdr::GBDT_DEPTH.store(a.gbdt_depth, std::sync::atomic::Ordering::Relaxed);

@@ -1294,6 +1294,8 @@ pub(crate) struct QuantFinalizeArgs {
     pub(crate) gbdt_es: u32,
     #[arg(long = "gbdt-rounds", hide = true, default_value_t = 0)]
     pub(crate) gbdt_rounds: u32,
+    #[arg(long = "gbdt-lr", hide = true, default_value_t = 0.0)]
+    pub(crate) gbdt_lr: f32,
     #[arg(long = "gbdt-depth", hide = true, default_value_t = 0)]
     pub(crate) gbdt_depth: u32,
     #[arg(long = "fold-by-sequence", hide = true)]

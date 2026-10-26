@@ -379,7 +379,7 @@ mod simd {
     /// walk the tree.
     const BLOCK: usize = 256;
     /// Row vectors walked together, so their gathers overlap.
-    const GROUPS: usize = 4;
+    const GROUPS: usize = 8;
     /// Rows per step.
     const STEP: usize = 8 * GROUPS;
 

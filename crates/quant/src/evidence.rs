@@ -248,7 +248,7 @@ fn support(rt: &[f64], finite: bool, t0: f64, w: f64) -> std::ops::Range<usize> 
 /// The spacing of the grid search's apex candidates, as a share of the
 /// smallest width searched: with MS1 scans denser than that, only some scans
 /// are tried as the apex, then every scan around the best of those.
-const APEX_SPACING_OF_WIDTH: f64 = 0.5;
+const APEX_SPACING_OF_WIDTH: f64 = 0.25;
 
 /// The apex candidates of a grid search: every `stride`-th scan of `range`
 /// (not empty) from its first, and its last.

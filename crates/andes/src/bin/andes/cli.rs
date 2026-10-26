@@ -84,9 +84,13 @@ pub(crate) enum PredictFeature {
     /// Retention-time deviation from the bundled andes-rt model.
     #[clap(name = "rt")]
     Rt,
-    /// Spectral similarity to AlphaPeptDeep's predicted fragment intensities.
+    /// Spectral similarity to the bundled andes-ms2 model's predicted fragment
+    /// intensities.
     #[clap(name = "ms2")]
     Ms2,
+    /// Spectral similarity to AlphaPeptDeep's predicted fragment intensities.
+    #[clap(name = "peptdeep-ms2")]
+    PeptDeepMs2,
     /// Retention-time deviation from AlphaPeptDeep.
     #[clap(name = "peptdeep-rt")]
     PeptDeepRt,
@@ -110,7 +114,9 @@ pub(crate) enum PredictorBackend {
 /// Parse one `--predict` value (used by the YAML config).
 pub(crate) fn parse_predict_feature(s: &str) -> Result<PredictFeature, String> {
     <PredictFeature as ValueEnum>::from_str(s, true).map_err(|_| {
-        format!("invalid predict entry `{s}`: expected rt|ms2|peptdeep-rt|deeplc-rt|none")
+        format!(
+            "invalid predict entry `{s}`: expected rt|ms2|peptdeep-ms2|peptdeep-rt|deeplc-rt|none"
+        )
     })
 }
 

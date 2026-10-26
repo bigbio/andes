@@ -7,6 +7,7 @@
 //! silently wrong tensor.
 //!
 //! - [`NativeRt`]: the andes-rt model ([`crate::rt_native`]), plain Rust.
+//! - [`NativeMs2`]: the andes-ms2 model ([`crate::ms2_native`]), plain Rust.
 //! - [`PeptDeep`]: AlphaPeptDeep RT and MS2 graphs exported to ONNX.
 //! - [`DeepLc`]: the DeepLC RT graph exported to ONNX.
 //!
@@ -25,6 +26,7 @@ use serde::Deserialize;
 
 use crate::deeplc::{self, DeepLcPeptide};
 use crate::error::{Error, Result};
+use crate::ms2_native::{Ms2Conditions, Ms2Model, Ms2Scratch, N_BASE_ION, N_ION};
 use crate::peptdeep::{pack_ms2_batch, pack_rt_batch, PeptDeepPeptide};
 use crate::rt_native::{RtModel, Scratch};
 use crate::{BackendKind, BackendOptions, OnnxSession};
@@ -139,6 +141,91 @@ impl Predictor for NativeRt {
     }
     fn ms2(&self, _: &mut [OnnxSession], _: &[(&Form, u8)]) -> Result<Vec<Vec<f32>>> {
         Err(Error::InvalidArg("andes-rt has no MS2 model".into()))
+    }
+}
+
+// ---------------------------------------------------------------- andes-ms2
+
+/// Plain b/y 1+/2+ channels of andes-ms2, in the order of its output sites.
+const MS2_IONS: [Ion; 4] = [(true, 1), (true, 2), (false, 1), (false, 2)];
+
+/// The andes-ms2 fragment-intensity model; no ONNX graphs. Predictions are
+/// conditioned on the activation (`HCD-FTMS`, `CID-ITMS`...), the NCE and the
+/// instrument family of the acquisition.
+pub struct NativeMs2 {
+    model: Ms2Model,
+    nce: Option<f32>,
+    activation: String,
+    instrument: String,
+}
+
+impl NativeMs2 {
+    /// The model from an `AMS20001` weight buffer and the acquisition
+    /// conditions (`nce` `None` when unknown; an unlisted activation or
+    /// instrument name is "unknown").
+    pub fn from_bytes(
+        buf: &[u8],
+        nce: Option<f32>,
+        activation: &str,
+        instrument: &str,
+    ) -> Result<Self> {
+        let model = Ms2Model::from_bytes(buf)
+            .map_err(|e| Error::InvalidArg(format!("andes-ms2 weights: {e}")))?;
+        Ok(Self {
+            model,
+            nce,
+            activation: activation.to_string(),
+            instrument: instrument.to_string(),
+        })
+    }
+
+    fn conditions(&self, charge: u8) -> Ms2Conditions {
+        Ms2Conditions::new(charge, self.nce, &self.activation, &self.instrument)
+    }
+}
+
+impl Predictor for NativeMs2 {
+    fn prefix(&self) -> &str {
+        "andesms2"
+    }
+    fn ions(&self) -> &[Ion] {
+        &MS2_IONS
+    }
+    fn has_rt(&self) -> bool {
+        false
+    }
+    fn supports_rt(&self, _: &Form) -> bool {
+        false
+    }
+    fn supports_ms2(&self, f: &Form, z: u8) -> bool {
+        z > 0 && f.seq.len() >= 2 && f.rt_peptide().encode().is_some()
+    }
+    fn batch_key(&self, _: &Form) -> usize {
+        0
+    }
+    fn sessions(&self) -> Result<Vec<OnnxSession>> {
+        Ok(Vec::new())
+    }
+    fn rt(&self, _: &mut [OnnxSession], _: &[&Form]) -> Result<Vec<f32>> {
+        Err(Error::InvalidArg("andes-ms2 has no RT model".into()))
+    }
+    fn ms2(&self, _: &mut [OnnxSession], items: &[(&Form, u8)]) -> Result<Vec<Vec<f32>>> {
+        let mut scratch = Ms2Scratch::default();
+        items
+            .iter()
+            .map(|(f, z)| {
+                let full = self
+                    .model
+                    .predict_with(&f.rt_peptide(), &self.conditions(*z), &mut scratch)
+                    .ok_or_else(|| {
+                        Error::Inference("andes-ms2 could not encode a peptidoform".into())
+                    })?;
+                Ok(full
+                    .chunks_exact(N_ION)
+                    .flat_map(|site| site[..N_BASE_ION].to_vec())
+                    .collect())
+            })
+            .collect()
     }
 }
 
@@ -475,6 +562,27 @@ mod tests {
             kind: BackendKind::Tract,
             opts: BackendOptions::default(),
         }
+    }
+
+    #[test]
+    fn native_ms2_predicts_the_four_plain_channels_per_site() {
+        let buf = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/ms2_native/tiny.ams2"
+        ))
+        .unwrap();
+        let p = NativeMs2::from_bytes(&buf, Some(28.0), "HCD-FTMS", "Q Exactive").unwrap();
+        assert_eq!(p.prefix(), "andesms2");
+        assert_eq!(p.ions().len(), 4);
+        let (f, _) = form::parse_peptide("K.PEPM+15.99491TIDEK.R").unwrap();
+        assert!(p.supports_ms2(&f, 2));
+        assert!(!p.supports_ms2(&f, 0));
+        let out = p.ms2(&mut [], &[(&f, 2), (&f, 3)]).unwrap();
+        let sites = f.seq.len() - 1;
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|v| v.len() == sites * 4));
+        assert!(out.iter().flatten().all(|x| x.is_finite()));
+        assert!(p.rt(&mut [], &[&f]).is_err());
     }
 
     #[test]

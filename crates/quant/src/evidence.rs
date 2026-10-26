@@ -2013,6 +2013,10 @@ mod tests {
         assert!(missing.llr > 0.5 * intact.llr && missing.llr < 2.0 * intact.llr);
     }
 
+    fn every(range: std::ops::Range<usize>) -> Apexes {
+        Apexes { range, stride: 1 }
+    }
+
     #[test]
     fn cached_grid_profiles_are_the_direct_profiles() {
         // Narrow widths: the far scans of each candidate are outside its
@@ -2026,7 +2030,9 @@ mod tests {
             w_prior: 2.0,
         };
         let mut cache = GridCache::default();
-        let g = cache.get(&rt, &prior, &WIDTH_GRID, 150..250).unwrap();
+        let g = cache
+            .get(&rt, &prior, &WIDTH_GRID, &every(150..250))
+            .unwrap();
         assert_eq!(g.cells.len(), 100 * WIDTH_GRID.len());
         let mut cells = g.cells.iter();
         let mut outside = 0;
@@ -2054,6 +2060,26 @@ mod tests {
         }
         assert!(cells.next().is_none());
         assert!(outside > 0, "the test exercises the support");
+        // Every 4th scan and the last: one cell per candidate and width.
+        let apexes = Apexes {
+            range: 150..250,
+            stride: 4,
+        };
+        let mut cache = GridCache::default();
+        let g = cache.get(&rt, &prior, &WIDTH_GRID, &apexes).unwrap();
+        assert_eq!(g.cells.len(), 26 * WIDTH_GRID.len());
+        let mut cells = g.cells.iter();
+        for k in apexes.iter() {
+            for &f in &WIDTH_GRID {
+                let cell = cells.next().unwrap();
+                let j = cell.scans.start + (cell.scans.len() / 2);
+                let want = gaussian(rt[j], rt[k], f * prior.w_prior);
+                assert_eq!(
+                    g.g[cell.at + j - cell.scans.start].to_bits(),
+                    want.to_bits()
+                );
+            }
+        }
     }
 
     #[test]
@@ -2066,22 +2092,34 @@ mod tests {
         };
         let mut cache = GridCache::default();
         let first = cache
-            .get(&rt, &prior, &WIDTH_GRID, 9..22)
+            .get(&rt, &prior, &WIDTH_GRID, &every(9..22))
             .unwrap()
             .g
             .clone();
         assert_eq!(cache.entries.len(), 1);
-        assert_eq!(cache.get(&rt, &prior, &WIDTH_GRID, 9..22).unwrap().g, first);
+        assert_eq!(
+            cache
+                .get(&rt, &prior, &WIDTH_GRID, &every(9..22))
+                .unwrap()
+                .g,
+            first
+        );
         assert_eq!(cache.entries.len(), 1, "a hit computes nothing new");
         let wider = Prior {
             w_prior: 3.5,
             ..prior
         };
-        assert_ne!(cache.get(&rt, &wider, &WIDTH_GRID, 9..22).unwrap().g, first);
+        assert_ne!(
+            cache
+                .get(&rt, &wider, &WIDTH_GRID, &every(9..22))
+                .unwrap()
+                .g,
+            first
+        );
         let mut shifted = rt.clone();
         shifted[29] += 0.5;
-        cache.get(&shifted, &prior, &WIDTH_GRID, 9..22);
-        cache.get(&rt, &prior, &FIVE_POINT_GRID, 9..22);
+        cache.get(&shifted, &prior, &WIDTH_GRID, &every(9..22));
+        cache.get(&rt, &prior, &FIVE_POINT_GRID, &every(9..22));
         assert_eq!(cache.entries.len(), GRID_CACHE_ENTRIES);
         assert!(
             cache.entries.iter().all(|e| !e.matches(

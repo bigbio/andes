@@ -563,6 +563,27 @@ mod tests {
     }
 
     #[test]
+    fn native_ms2_predicts_the_four_plain_channels_per_site() {
+        let buf = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/ms2_native/tiny.ams2"
+        ))
+        .unwrap();
+        let p = NativeMs2::from_bytes(&buf, Some(28.0), "HCD-FTMS", "Q Exactive").unwrap();
+        assert_eq!(p.prefix(), "andesms2");
+        assert_eq!(p.ions().len(), 4);
+        let (f, _) = form::parse_peptide("K.PEPM+15.99491TIDEK.R").unwrap();
+        assert!(p.supports_ms2(&f, 2));
+        assert!(!p.supports_ms2(&f, 0));
+        let out = p.ms2(&mut [], &[(&f, 2), (&f, 3)]).unwrap();
+        let sites = f.seq.len() - 1;
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|v| v.len() == sites * 4));
+        assert!(out.iter().flatten().all(|x| x.is_finite()));
+        assert!(p.rt(&mut [], &[&f]).is_err());
+    }
+
+    #[test]
     fn missing_model_files_are_named_in_the_error() {
         let dir = tempfile::tempdir().unwrap();
         let e = PeptDeep::new(dir.path(), 30.0, "QE", engine(), false, true)

@@ -1290,6 +1290,8 @@ pub(crate) struct QuantFinalizeArgs {
     pub(crate) seed: u64,
     #[arg(long = "seed-sample", hide = true)]
     pub(crate) seed_sample: Option<u64>,
+    #[arg(long = "pool-folds", hide = true)]
+    pub(crate) pool_folds: bool,
     #[arg(long = "seed-train", hide = true)]
     pub(crate) seed_train: Option<u64>,
 

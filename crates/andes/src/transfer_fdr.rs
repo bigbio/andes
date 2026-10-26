@@ -237,6 +237,10 @@ pub fn sample_seed(seed: u64, m: usize) -> u64 {
 pub fn train_seed(seed: u64, m: usize) -> u64 {
     member_seed(ovr(&TRAIN_SEED, seed), m)
 }
+pub static POOL_FOLDS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+fn q_fold(precursor: u32, seed: u64) -> usize {
+    if POOL_FOLDS.load(std::sync::atomic::Ordering::Relaxed) { 0 } else { fold_of(precursor, seed) }
+}
 pub fn member_seed(seed: u64, m: usize) -> u64 {
     if m == 0 {
         seed
@@ -566,7 +570,7 @@ impl FoldScores {
     /// One row of `precursor` and `family` with its held-out score (`None`
     /// when its fold has no model).
     pub fn add(&mut self, precursor: u32, family: u8, score: Option<f32>) {
-        let fold = fold_of(precursor, self.seed);
+        let fold = q_fold(precursor, self.seed);
         match score {
             None => self.unscored += 1,
             Some(s) => {
@@ -906,7 +910,7 @@ impl QValues {
         if !e.keeps(family) {
             return None;
         }
-        let steps = self.steps[fold_of(precursor, self.seed)][e as usize].as_ref()?;
+        let steps = self.steps[q_fold(precursor, self.seed)][e as usize].as_ref()?;
         Some(steps.of_member(s))
     }
 
@@ -918,7 +922,7 @@ impl QValues {
     pub fn pseudo_q(&self, precursor: u32, score: Option<f32>) -> Option<f64> {
         let s = score?;
         let steps =
-            self.steps[fold_of(precursor, self.seed)][Estimate::Pooled as usize].as_ref()?;
+            self.steps[q_fold(precursor, self.seed)][Estimate::Pooled as usize].as_ref()?;
         Some(steps.at_or_below(s))
     }
 }

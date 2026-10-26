@@ -75,8 +75,9 @@ use crate::quant_mbr::{
     ShapeReference, NO_SHAPE, TRANSFER_DONOR_Q,
 };
 use crate::transfer_fdr::{
-    member_seed, row_unit, train_bagged_folds, train_folds, Estimate, FdrCounts, FdrRow,
-    FoldModels, FoldScores, QValues, TrainingSample, IDENTITY, N_FOLDS, TRANSFER_FEATURES,
+    member_seed, row_unit, train_bagged_folds, train_folds, transfer_train_params, Estimate,
+    FdrCounts, FdrRow, FoldModels, FoldScores, QValues, TrainingSample, IDENTITY, N_FOLDS,
+    TRANSFER_FEATURES,
 };
 
 /// What one finalize did, for the caller to log.
@@ -1554,7 +1555,7 @@ pub(crate) fn finalize_stream(
     let i_rows = i_sample.into_items();
     let t_refs: Vec<&[FdrRow]> = t_sets.iter().map(Vec::as_slice).collect();
     let (t_models, i_models) = rayon::join(
-        || train_bagged_folds(&t_refs, seed),
+        || train_bagged_folds(&t_refs, seed, &transfer_train_params()),
         || train_folds(&i_rows, seed),
     );
     drop(t_refs);

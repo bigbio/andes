@@ -121,8 +121,9 @@ What exists:
   axes), task, `Provenance` (origin, SPDX licence of the weights, notice, notes) and free-form
   `extras`.
 - **Wired predictors.** `--predict rt` (the bundled native andes-rt model,
-  `resources/predictors/andes_rt.artn`, no engine needed), `ms2` and `peptdeep-rt`
-  (AlphaPeptDeep graphs), `deeplc-rt` (DeepLC). The AlphaPeptDeep and DeepLC graphs are not
+  `resources/predictors/andes_rt.artn`, no engine needed), `ms2` (the bundled native andes-ms2
+  model, `resources/predictors/andes_ms2.ams2`, no engine needed), `peptdeep-ms2` and
+  `peptdeep-rt` (AlphaPeptDeep graphs), `deeplc-rt` (DeepLC). The AlphaPeptDeep and DeepLC graphs are not
   bundled: `--predictor-models <dir>` points at exported graphs and manifests
   (`predictors::PEPTDEEP_FILES`, `DEEPLC_FILE`). Exporters for those, MS2PIP and Prosit are in
   `crates/onnx-infer/scripts/`; `crates/onnx-infer/MODELS.md` records versions, licences and

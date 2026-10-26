@@ -32,7 +32,13 @@ satisfy Apache-2.0 §4's notice requirement:
 The andes-rt retention-time model weights (`resources/predictors/andes_rt.artn`)
 were trained by the andes authors on retention times from publicly available
 reanalysed proteomics datasets and are distributed under the Apache License,
-Version 2.0, with andes. The third-party predictor models that `--predict ms2`,
-`peptdeep-rt` and `deeplc-rt` load (AlphaPeptDeep, DeepLC) are not distributed
-with andes; users export or obtain them under their own terms (see
-`crates/onnx-infer/MODELS.md`).
+Version 2.0, with andes. The andes-ms2 fragment-intensity model weights
+(`resources/predictors/andes_ms2.ams2`) were trained by the andes authors on
+annotated MS/MS spectra of publicly available proteomics datasets (the MsNet
+reanalysis collection of PRIDE and partner-repository projects; the benchmark
+accessions PXD070049, PXD001819, PXD007683, PXD007653, PXD005553, PXD002047,
+PXD053748, PXD064202, PXD014502 and PXD005411 were excluded) and are distributed
+under the Apache License, Version 2.0, with andes. The third-party predictor
+models that `--predict peptdeep-ms2`, `peptdeep-rt` and `deeplc-rt` load
+(AlphaPeptDeep, DeepLC) are not distributed with andes; users export or obtain
+them under their own terms (see `crates/onnx-infer/MODELS.md`).

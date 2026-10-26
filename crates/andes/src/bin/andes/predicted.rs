@@ -6,7 +6,8 @@
 //! features; andes computes no FDR from them.
 //!
 //! - `rt`: the bundled andes-rt model ([`ANDES_RT_WEIGHTS`]).
-//! - `ms2`, `peptdeep-rt`: AlphaPeptDeep graphs exported to ONNX.
+//! - `ms2`: the bundled andes-ms2 model ([`ANDES_MS2_WEIGHTS`]).
+//! - `peptdeep-ms2`, `peptdeep-rt`: AlphaPeptDeep graphs exported to ONNX.
 //! - `deeplc-rt`: the DeepLC graph exported to ONNX.
 //!
 //! The third-party graphs are loaded from `--predictor-models`; they are not
@@ -39,7 +40,7 @@ use onnx_infer::predictors::calibration::RtCalibration;
 use onnx_infer::predictors::form::{parse_peptide, Form, Mass};
 use onnx_infer::predictors::spectral::{ms2_features, FragmentTolerance, MS2_FEATURES};
 use onnx_infer::predictors::{
-    DeepLc, Engine, NativeRt, PeptDeep, Predictor, DEEPLC_FILE, PEPTDEEP_FILES,
+    DeepLc, Engine, NativeMs2, NativeRt, PeptDeep, Predictor, DEEPLC_FILE, PEPTDEEP_FILES,
 };
 use onnx_infer::{BackendKind, BackendOptions, OnnxSession};
 use rayon::prelude::*;
@@ -52,6 +53,12 @@ use crate::cli::{Cli, PredictFeature, PredictorBackend};
 /// `crates/onnx-infer/scripts/student/NOTES.md`).
 static ANDES_RT_WEIGHTS: &[u8] =
     include_bytes!("../../../../../resources/predictors/andes_rt.artn");
+
+/// andes-ms2 v1 weights (`AMS20001`): a fragment-intensity CNN trained on
+/// annotated spectra of public reanalysed datasets (see
+/// `crates/onnx-infer/scripts/student/ms2/README.md`).
+static ANDES_MS2_WEIGHTS: &[u8] =
+    include_bytes!("../../../../../resources/predictors/andes_ms2.ams2");
 
 /// Target-decoy q-value at or below which a file's best-scoring targets anchor
 /// the RT calibration.
@@ -121,7 +128,7 @@ impl Predictors {
             },
             opts: BackendOptions::default(),
         };
-        let third_party = has(PredictFeature::Ms2)
+        let third_party = has(PredictFeature::PeptDeepMs2)
             || has(PredictFeature::PeptDeepRt)
             || has(PredictFeature::DeepLcRt);
         let dir: Option<PathBuf> = cli.predictor_models.clone();
@@ -130,11 +137,11 @@ impl Predictors {
                 "--predict {} loads exported ONNX models: pass --predictor-models DIR, a directory holding {} (AlphaPeptDeep) and/or {} \
                  (DeepLC), as written by the onnx-infer export scripts",
                 want.iter()
-                    .filter(|f| **f != PredictFeature::Rt)
-                    .map(|f| match f {
-                        PredictFeature::Ms2 => "ms2",
-                        PredictFeature::PeptDeepRt => "peptdeep-rt",
-                        _ => "deeplc-rt",
+                    .filter_map(|f| match f {
+                        PredictFeature::PeptDeepMs2 => Some("peptdeep-ms2"),
+                        PredictFeature::PeptDeepRt => Some("peptdeep-rt"),
+                        PredictFeature::DeepLcRt => Some("deeplc-rt"),
+                        _ => None,
                     })
                     .collect::<Vec<_>>()
                     .join(","),
@@ -151,7 +158,33 @@ impl Predictors {
                 ms2: false,
             });
         }
-        if has(PredictFeature::Ms2) || has(PredictFeature::PeptDeepRt) {
+        if has(PredictFeature::Ms2) {
+            let nce = cli
+                .predictor_nce
+                .map(f64::from)
+                .or_else(|| acquisition.predictor_nce())
+                .map(|v| v as f32);
+            let activation = acquisition.ms2_activation();
+            let inst = cli
+                .predictor_instrument
+                .clone()
+                .unwrap_or_else(|| acquisition.ms2_instrument().to_string());
+            eprintln!(
+                "Predict: andes-ms2 (activation {activation}, instrument {}, NCE {})",
+                if inst.is_empty() { "unknown" } else { &inst },
+                nce.map_or("unknown".to_string(), |v| v.to_string())
+            );
+            sources.push(Source {
+                pred: Box::new(
+                    NativeMs2::from_bytes(ANDES_MS2_WEIGHTS, nce, activation, &inst)
+                        .map_err(|e| e.to_string())?,
+                ),
+                sessions: Vec::new(),
+                rt: false,
+                ms2: true,
+            });
+        }
+        if has(PredictFeature::PeptDeepMs2) || has(PredictFeature::PeptDeepRt) {
             let dir = dir.as_deref().expect("checked above");
             let nce = cli
                 .predictor_nce
@@ -170,7 +203,7 @@ impl Predictors {
                 &inst,
                 engine.clone(),
                 has(PredictFeature::PeptDeepRt),
-                has(PredictFeature::Ms2),
+                has(PredictFeature::PeptDeepMs2),
             )
             .map_err(|e| format!("--predict: {e}"))?;
             eprintln!(
@@ -186,7 +219,7 @@ impl Predictors {
                 pred: Box::new(p),
                 sessions: Vec::new(),
                 rt: has(PredictFeature::PeptDeepRt),
-                ms2: has(PredictFeature::Ms2),
+                ms2: has(PredictFeature::PeptDeepMs2),
             });
         }
         if has(PredictFeature::DeepLcRt) {

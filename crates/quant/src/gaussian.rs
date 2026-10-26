@@ -15,8 +15,8 @@
 
 /// `ln 2` split in a high part with 32 trailing zero bits (so `k * LN2_HI`
 /// is exact for `|k| < 2^20`) and the remainder.
-const LN2_HI: f64 = 6.931_471_803_691_238_164_90e-1;
-const LN2_LO: f64 = 1.908_214_929_270_587_700_02e-10;
+const LN2_HI: f64 = f64::from_bits(0x3fe6_2e42_fee0_0000);
+const LN2_LO: f64 = f64::from_bits(0x3dea_39ef_3579_3c76);
 const LOG2_E: f64 = std::f64::consts::LOG2_E;
 /// `1.5 * 2^52`: adding it rounds a value below `2^51` to an integer, which
 /// then sits in the low mantissa bits.
@@ -50,13 +50,7 @@ const COEFF: [f64; 14] = [
 #[inline(always)]
 pub fn exp(x: f64) -> f64 {
     // The argument is clamped for the reduction; the ends are put back below.
-    let c = if x < UNDERFLOW {
-        UNDERFLOW
-    } else if x > OVERFLOW {
-        OVERFLOW
-    } else {
-        x
-    };
+    let c = x.clamp(UNDERFLOW, OVERFLOW);
     // k = round(c / ln 2) as an integer in the low bits of `kf`.
     let kf = c * LOG2_E + ROUND;
     let k = kf - ROUND;

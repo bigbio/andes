@@ -1,0 +1,4 @@
+.andes-hero { padding: 1.5rem 0 0.5rem; }
+.andes-hero .andes-logo { max-width: 420px; width: 100%; }
+.md-typeset img[src$=".svg"] { max-width: 100%; height: auto; }
+.md-typeset table:not([class]) { font-size: 0.72rem; }

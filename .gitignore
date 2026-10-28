@@ -117,3 +117,7 @@ docs/research/
 
 # Internal planning history lives outside this repo (workspace-root docs/archive-2026-h1/)
 docs/archive/
+
+# website build output
+website/_build/
+website/_site/

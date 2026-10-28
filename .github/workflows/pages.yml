@@ -1,0 +1,95 @@
+name: Docs site
+
+# Builds the documentation site (website/, mkdocs.yml). Pull requests build it so a broken
+# link or heading fails review; pushes to main publish it to GitHub Pages (andes.quantms.org).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - README.md
+      - DOCS.md
+      - TRAIN.md
+      - docs/benchmarks/README.md
+      - docs/assets/**
+      - website/**
+      - mkdocs.yml
+      - crates/andes/src/bin/andes/**
+      - .github/workflows/pages.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - README.md
+      - DOCS.md
+      - TRAIN.md
+      - docs/benchmarks/README.md
+      - docs/assets/**
+      - website/**
+      - mkdocs.yml
+      - crates/andes/src/bin/andes/**
+      - .github/workflows/pages.yml
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The parameters page is the binary's own --help, so it cannot drift from the code.
+      - name: Build andes (for --help)
+        run: cargo build --locked -p andes
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: website/requirements.txt
+
+      - name: Install site tooling
+        run: pip install -r website/requirements.txt
+
+      - name: Build site (strict, broken links and anchors fail)
+        env:
+          NO_MKDOCS_2_WARNING: "1"
+        run: ./website/build.sh target/debug/andes
+
+      - uses: actions/configure-pages@v5
+        if: github.event_name != 'pull_request'
+
+      - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request'
+        with:
+          path: website/_site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

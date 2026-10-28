@@ -20,6 +20,10 @@ whole-protein shuffled entrapment, the database both engines used.
 
 ## Time, CPU and memory
 
+![andes as a percentage of Comet](../figures/cost_relative.svg)
+
+The same measurements in absolute terms:
+
 ![Wall time, CPU time and peak memory](../figures/cost.svg)
 
 Wall times vary 5–15% between sessions; CPU time is steadier. Wall bars for andes are the

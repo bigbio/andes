@@ -104,6 +104,29 @@ def main(src, out_dir):
         ax.tick_params(axis="x", labelrotation=30)
     save(fig, out, "cost.svg")
 
+    # The same measurements relative to Comet (= 100%), same machine and rescoring.
+    names = [x.split("\n")[0] for x in ds]
+    panels = (("wall_s", "Wall time", True), ("cpu_s", "CPU time", True), ("peak_gb", "Peak memory", False))
+    fig, axes = plt.subplots(1, 3, figsize=(11, 3.4), sharey=True)
+    for ax, (key, title, show_x) in zip(axes, panels):
+        pct = [100 * a / c for a, c in zip(d[key]["andes"], d[key]["Comet 2025.01"])]
+        ys = range(len(names))
+        ax.barh(ys, pct, color=COLOURS["andes"], height=0.62, zorder=3)
+        ax.axvline(100, color=COLOURS["Comet 2025.01"], lw=2, zorder=4)
+        for y, p in zip(ys, pct):
+            ax.annotate(f"{p:.0f}%", (3, y), va="center", fontsize=9, color="white", fontweight="bold", zorder=5)
+            side = f"{100 / p:.1f}× faster" if show_x else (f"{100 - p:.0f}% less" if p < 100 else f"{p - 100:.0f}% more")
+            ax.annotate(side, (max(108, p + 4), y), va="center", fontsize=8.5, color=INK)
+        ax.set_xlim(0, 175)
+        ax.set_xticks([0, 50, 100])
+        ax.set_xticklabels(["0", "50%", "Comet\n100%"])
+        ax.set_title(f"{title}, andes as % of Comet", loc="left", fontsize=10, color=INK)
+        ax.grid(axis="x", color="#e6e6e6", lw=0.6, zorder=0)
+    axes[0].set_yticks(range(len(names)))
+    axes[0].set_yticklabels(names, fontsize=9)
+    axes[0].invert_yaxis()
+    save(fig, out, "cost_relative.svg")
+
     rows = d["true_fdp"]["rows"]
     fig, ax = plt.subplots(figsize=(8, 4.4))
     for i, r in enumerate(rows):

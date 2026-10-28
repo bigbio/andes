@@ -6,7 +6,7 @@ hide:
 
 <div class="andes-hero" markdown>
 
-![andes](assets/andes-logo.svg){ .andes-logo }
+# andes
 
 **The data-driven peptide search engine and quantification engine of the quantms ecosystem.**
 Spectra and a FASTA go in; Percolator-ready PSMs and, on request, protein groups and

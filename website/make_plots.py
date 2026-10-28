@@ -192,6 +192,81 @@ def main(src, out_dir):
         ax.axvline(x, color=INK, lw=1, ls="--")
     save(fig, out, "protein_fdp.svg")
 
+    g = d["glyco_pxd065680"]
+    fig, ax = plt.subplots(figsize=(8, 4))
+    rows = g["ranked"]
+    for i, r in enumerate(rows):
+        ax.barh(i, r["v"], color=COLOURS["andes"] if r["andes"] else COLOURS["Java MS-GF+ v20240326"], height=0.7)
+        ax.annotate(f'{r["v"]:,}', (r["v"], i), xytext=(4, 0), textcoords="offset points", va="center", fontsize=8, color=INK)
+    ax.set_yticks(range(len(rows)))
+    ax.set_yticklabels([r["n"] for r in rows], fontsize=9)
+    ax.invert_yaxis()
+    ax.set_xlim(0, 1450)
+    ax.set_xlabel("unique sequence + glycan composition identifications")
+    ax.set_title("Glyco benchmark PXD065680: counts (not error rates)", loc="left", fontsize=11, color=INK)
+    save(fig, out, "glyco_counts.svg")
+
+    ov = g["overlap"]
+    fig, ax = plt.subplots(figsize=(8, 3.6))
+    for i, (t, tot, sh) in enumerate(zip(ov["tools"], ov["total"], ov["shared"])):
+        ax.barh(i, sh, color=COLOURS["andes"], height=0.65)
+        ax.barh(i, tot - sh, left=sh, color=COLOURS["Java MS-GF+ v20240326"], height=0.65)
+        ax.annotate(f"{sh:,} of {tot:,} ({100 * sh / tot:.0f}%)", (tot, i), xytext=(4, 0),
+                    textcoords="offset points", va="center", fontsize=8, color=INK)
+    ax.set_yticks(range(len(ov["tools"])))
+    ax.set_yticklabels(ov["tools"], fontsize=9)
+    ax.invert_yaxis()
+    ax.set_xlim(0, 1550)
+    ax.set_xlabel("glycopeptides in each tool's list (blue: also reported by andes arm A2)")
+    ax.set_title("Overlap with each published tool", loc="left", fontsize=11, color=INK)
+    save(fig, out, "glyco_overlap.svg")
+
+    sup = g["support"]
+    fig, ax = plt.subplots(figsize=(7, 3.4))
+    labels = ["none\n(andes only)", "1 tool", "2 tools", "3 tools", "4 tools", "all 5"]
+    bars = ax.bar(labels, sup, color=[COLOURS["Comet 2025.01"]] + [COLOURS["andes"]] * 5, width=0.65)
+    for bar, v in zip(bars, sup):
+        ax.annotate(f"{v}", (bar.get_x() + bar.get_width() / 2, v), ha="center", xytext=(0, 2),
+                    textcoords="offset points", fontsize=8, color=INK)
+    ax.set_ylabel("andes A2 identifications")
+    ax.set_title("How many of the five tools also report each andes identification", loc="left", fontsize=10.5, color=INK)
+    ax.margins(y=0.15)
+    ax.tick_params(axis="x", labelsize=8)
+    save(fig, out, "glyco_support.svg")
+
+    tr = g["tiers"]
+    fig, ax = plt.subplots(figsize=(8, 3.4))
+    tier_cols = [COLOURS["andes"], "#56B4E9", COLOURS["Comet 2025.01"], "#D55E00"]
+    left = [0.0] * len(tr["sets"])
+    for key, name, col in zip(("t1", "t2", "t3", "t4"), ("Tier 1", "Tier 2", "Tier 3", "Tier 4"), tier_cols):
+        ax.barh(range(len(tr["sets"])), tr[key], left=left, color=col, height=0.65, label=name)
+        left = [a + b for a, b in zip(left, tr[key])]
+    ax.set_yticks(range(len(tr["sets"])))
+    ax.set_yticklabels(tr["sets"], fontsize=9)
+    ax.invert_yaxis()
+    ax.set_xlim(0, 100)
+    ax.set_xlabel("% of PSMs")
+    ax.set_title("Evidence tiers (Tier 1: oxonium, b/y and Y0/Y1 ions all present)", loc="left", fontsize=10.5, color=INK)
+    ax.legend(frameon=False, fontsize=8, ncol=4, loc="lower center", bbox_to_anchor=(0.5, -0.45))
+    save(fig, out, "glyco_tiers.svg")
+
+    q = d["quant_accuracy"]
+    fig, axes = plt.subplots(1, 2, figsize=(9.5, 3.8))
+    for ax, key, title in ((axes[0], "QExactive", "ProteoBench Q Exactive module"), (axes[1], "Astral", "ProteoBench Astral module")):
+        rows = q[key]
+        bars = ax.bar(range(len(rows)), [r["v"] for r in rows],
+                      color=[COLOURS["andes"] if r["andes"] else COLOURS["Java MS-GF+ v20240326"] for r in rows], width=0.6)
+        for bar, r in zip(bars, rows):
+            extra = f'\n{r["k"]:,} precursors' if r["k"] else ""
+            ax.annotate(f'{r["v"]:.3f}{extra}', (bar.get_x() + bar.get_width() / 2, r["v"]), ha="center",
+                        xytext=(0, 2), textcoords="offset points", fontsize=7.5, color=INK)
+        ax.set_xticks(range(len(rows)))
+        ax.set_xticklabels([r["n"] for r in rows], fontsize=8)
+        ax.set_title(title, loc="left", fontsize=10, color=INK)
+        ax.set_ylabel("median |ε| (lower is better)")
+        ax.margins(y=0.3)
+    save(fig, out, "quant_accuracy.svg")
+
     o = d["opt_in"]
     fig, ax = plt.subplots(figsize=(5, 3.6))
     mids = [(a + b) / 2 for a, b in zip(o["psms_lo"], o["psms_hi"])]

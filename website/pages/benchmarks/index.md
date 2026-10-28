@@ -44,6 +44,8 @@ FDP of 1% on Astral, measured on an earlier build.
 
 ## Also benchmarked
 
-Quantification (label-free with match between runs against the ProteoBench leaderboard, TMT
-reporter-ion accuracy), timsTOF DDA-PASEF, and glycopeptides are in the
-[full report](details.md#1-summary).
+- **Glycoproteomics** against five published tools on PXD065680:
+  [glyco benchmark](glyco.md).
+- **Quantification** (label-free with match between runs against the ProteoBench leaderboard, TMT
+  reporter-ion accuracy): [quantification](../quantification.md).
+- timsTOF DDA-PASEF and the mouse-liver glyco set are in the [full report](details.md#1-summary).

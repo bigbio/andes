@@ -48,6 +48,15 @@ nav:
   - Getting started:
       - Install: getting-started/install.md
       - Quick start: getting-started/quickstart.md
+  - Distinctive features:
+      - Overview: features/index.md
+      - Knockoff variant FDR: features/knockoffs.md
+      - Site claims and identity: features/sites.md
+      - Chimeric cascade: features/chimeric.md
+      - Retrieval and model choice: features/retrieval.md
+      - Protein inference: features/proteins.md
+      - Match between runs: features/mbr.md
+      - TMT interference unmixing: features/tmt-unmix.md
   - Guide:
       - How it works: how-it-works.md
       - Scoring models: models.md
@@ -59,6 +68,7 @@ nav:
   - Benchmarks:
       - Overview: benchmarks/index.md
       - Full report: benchmarks/details.md
+  - Ecosystem: ecosystem.md
   - About: about.md
 
 markdown_extensions:

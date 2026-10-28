@@ -61,6 +61,25 @@ def save(fig, out, name):
     plt.close(fig)
 
 
+def range_plot(rows, xlabel, title, xmax, ref=None, ticks=None, figsize=(8, 3), label_x=None):
+    fig, ax = plt.subplots(figsize=figsize)
+    label_x = xmax * 0.84 if label_x is None else label_x
+    for i, r in enumerate(rows):
+        ax.plot([r["lo"], r["hi"]], [i, i], color=COLOURS["andes"], lw=5, solid_capstyle="round")
+        ax.annotate(f'{r["lo"]:.2f}–{r["hi"]:.2f}%', (label_x, i), va="center", fontsize=8, color=INK)
+    if ref is not None:
+        ax.axvline(ref, color=INK, lw=1, ls="--")
+    ax.set_yticks(range(len(rows)))
+    ax.set_yticklabels([r["label"] for r in rows], fontsize=8.5)
+    ax.invert_yaxis()
+    ax.set_xlim(0, xmax)
+    if ticks:
+        ax.set_xticks(ticks)
+    ax.set_xlabel(xlabel)
+    ax.set_title(title, loc="left", fontsize=11, color=INK)
+    return fig
+
+
 def main(src, out_dir):
     d = json.loads(Path(src).read_text())
     out = Path(out_dir)
@@ -100,6 +119,78 @@ def main(src, out_dir):
     ax.set_xlabel("entrapment-estimated true FDP at Percolator q ≤ 0.01 (%)")
     ax.set_title("Does the nominal 1% hold?", loc="left", fontsize=11, color=INK)
     save(fig, out, "true_fdp.svg")
+
+    k = d["knockoff"]
+    fig, axes = plt.subplots(1, 2, figsize=(9, 3.8))
+    cols = ["#999999", "#999999", COLOURS["andes"], COLOURS["andes"]]
+    for ax, key, title, fmt in (
+        (axes[0], "true_fdp_pct", "True FDP of reported variant PSMs (%)", lambda v: f"{v:g}%"),
+        (axes[1], "variant_psms", "Variant PSMs reported", lambda v: f"{v:,}"),
+    ):
+        bars = ax.bar(range(4), k[key], color=cols, width=0.65)
+        for bar, v in zip(bars, k[key]):
+            ax.annotate(fmt(v), (bar.get_x() + bar.get_width() / 2, v), ha="center",
+                        xytext=(0, 2), textcoords="offset points", fontsize=8, color=INK)
+        ax.set_xticks(range(4))
+        ax.set_xticklabels(k["labels"], fontsize=7)
+        ax.set_title(title, loc="left", fontsize=10, color=INK)
+        ax.margins(y=0.12)
+    save(fig, out, "knockoff.svg")
+
+    t = d["tiers"]
+    fig, axes = plt.subplots(1, 2, figsize=(7, 3.2))
+    for ax, key, title, fmt in (
+        (axes[0], "carried_variants", "Carried variants found", lambda v: f"{v}"),
+        (axes[1], "true_fdp_variants_pct", "True FDP, variants (%)", lambda v: f"{v:g}%"),
+    ):
+        bars = ax.bar(t["labels"], t[key], color=[COLOURS["Java MS-GF+ v20240326"], COLOURS["andes"]], width=0.55)
+        for bar, v in zip(bars, t[key]):
+            ax.annotate(fmt(v), (bar.get_x() + bar.get_width() / 2, v), ha="center",
+                        xytext=(0, 2), textcoords="offset points", fontsize=8, color=INK)
+        ax.set_title(title, loc="left", fontsize=10, color=INK)
+        ax.margins(y=0.15)
+        ax.tick_params(axis="x", labelsize=8)
+    save(fig, out, "tiers.svg")
+
+    ti = d["tmt_interference"]
+    fig, ax = plt.subplots(figsize=(8, 3.8))
+    series = {"andes (quant gate)": COLOURS["andes"], "without the gate": COLOURS["Java MS-GF+ v20240326"],
+              "stricter purity filter (≥ 0.9)": COLOURS["Comet 2025.01"]}
+    w = 0.26
+    for i, (name, col) in enumerate(series.items()):
+        xs = [j + (i - 1) * w for j in range(3)]
+        bars = ax.bar(xs, ti[name], w * 0.92, label=name, color=col)
+        for bar, v in zip(bars, ti[name]):
+            ax.annotate(f"{v:.3f}", (bar.get_x() + bar.get_width() / 2, v), ha="center",
+                        xytext=(0, 2), textcoords="offset points", fontsize=7.5, color=INK)
+    ax.set_xticks(range(3))
+    ax.set_xticklabels(ti["acquisitions"])
+    ax.set_ylabel("knockout-channel interference (lower is better)")
+    ax.set_title("TMT reporter interference, yeast knockout (PXD017803)", loc="left", fontsize=11, color=INK)
+    ax.legend(frameon=False, fontsize=8)
+    ax.margins(y=0.15)
+    save(fig, out, "tmt_interference.svg")
+
+    r = d["retrieval"]
+    fig, axes = plt.subplots(1, 2, figsize=(8, 3.4))
+    for ax, lab, b, a in zip(axes, r["labels"], r["before"], r["after"]):
+        bars = ax.bar([r["before_label"].split(" / ")[axes.tolist().index(ax)], r["after_label"].split(" / ")[axes.tolist().index(ax)]],
+                      [b, a], color=[COLOURS["Java MS-GF+ v20240326"], COLOURS["andes"]], width=0.55)
+        for bar, v in zip(bars, (b, a)):
+            ax.annotate(f"{v:g}", (bar.get_x() + bar.get_width() / 2, v), ha="center",
+                        xytext=(0, 2), textcoords="offset points", fontsize=8, color=INK)
+        ax.set_title(lab, loc="left", fontsize=10, color=INK)
+        ax.tick_params(axis="x", labelsize=7.5)
+        ax.margins(y=0.15)
+    save(fig, out, "retrieval.svg")
+
+    pf = d["protein_fdp"]["rows"]
+    fig = range_plot(pf, "entrapment-estimated true FDP of protein groups (%)", "Protein groups, Astral",
+                     8, ref=None, ticks=[0, 1, 2, 3, 4, 5, 6, 7], figsize=(7, 2.4), label_x=7.2)
+    ax = fig.axes[0]
+    for x in (1, 5):
+        ax.axvline(x, color=INK, lw=1, ls="--")
+    save(fig, out, "protein_fdp.svg")
 
     o = d["opt_in"]
     fig, ax = plt.subplots(figsize=(5, 3.6))

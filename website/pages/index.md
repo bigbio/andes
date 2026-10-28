@@ -48,6 +48,48 @@ file from its metadata.
 
 </div>
 
+## The pipeline at a glance
+
+```mermaid
+flowchart LR
+    S["Spectra<br/>mzML · .raw · .d"] --> M["Pick model<br/>per file"]
+    F["FASTA"] --> I["Out-of-core<br/>fragment index"]
+    M --> R["Retrieve and score<br/>top candidates"]
+    I --> R
+    R --> C["Optional passes<br/>chimeric · refine · glyco"]
+    C --> P["PIN"] --> PC["Percolator<br/>owns the FDR"]
+    PC --> O["PSMs · proteins · sites<br/>quantities (QPX)"]
+```
+
+## Features built around trust in a result
+
+<div class="grid cards" markdown>
+
+-   **Knockoff variant FDR**
+
+    Variant claims get a null that makes the same mistakes as the claim: 65% to 2.5% true FDP on
+    a genotyped dataset. [Read more](features/knockoffs.md)
+
+-   **Chimeric cascade**
+
+    A second peptide from the residual spectrum: 43k to 66k Astral PSMs at an equal true FDP of
+    1%. [Read more](features/chimeric.md)
+
+-   **Error-controlled match between runs**
+
+    Every transferred quantity says what supports it and carries its own q-value.
+    [Read more](features/mbr.md)
+
+-   **TMT interference unmixing**
+
+    Per-scan co-isolation estimated from MS1, with no reference channel.
+    [Read more](features/tmt-unmix.md)
+
+</div>
+
+[All distinctive features](features/index.md){ .md-button }
+[The quantms ecosystem](ecosystem.md){ .md-button }
+
 ## Identifications, measured the same way
 
 PSMs at Percolator `q ≤ 0.01` on public reference datasets, rescored identically for every

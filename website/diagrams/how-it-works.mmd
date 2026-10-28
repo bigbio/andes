@@ -1,0 +1,34 @@
+flowchart LR
+    subgraph IN["Inputs"]
+        SP["Spectra<br/>mzML · MGF · Thermo .raw · Bruker .d"]
+        FA["FASTA<br/>targets only"]
+    end
+    subgraph IDX["Prepared once"]
+        DG["Digest and<br/>generate decoys"] --> FI["Out-of-core<br/>fragment-ion index"]
+    end
+    subgraph PER["For every spectrum"]
+        MO["1 · Pick the model<br/>activation, resolution,<br/>isobaric label"] --> RT["2 · Retrieve<br/>fragment ions vote<br/>top 100 candidates"]
+        RT --> SC["3 · Score<br/>rank score (low-res)<br/>fused strong score (high-res)<br/>plus GBDT intensity features"]
+        SC --> OP["4 · Optional passes<br/>--chimeric second peptide<br/>--refine secondary mods"]
+    end
+    GL["--glyco<br/>sequon-only candidates<br/>and glycan composition"]
+    subgraph OUT["Results"]
+        PIN["PIN<br/>one row per PSM"] --> PE["Percolator<br/>owns the FDR"]
+        PE --> PS["PSMs at q ≤ 0.01"]
+        PS --> PR["Protein groups<br/>picked target-decoy"]
+        PS --> QU["Quantities<br/>--tmt · --lfq · --mbr"]
+    end
+    SP --> MO
+    FA --> DG
+    FI --> RT
+    FI -.-> GL
+    OP --> PIN
+    GL --> PIN
+    classDef input fill:#e8f1fa,stroke:#0072B2,color:#1b1b1b
+    classDef step fill:#ffffff,stroke:#0072B2,color:#1b1b1b
+    classDef opt fill:#fdf3e1,stroke:#E69F00,color:#1b1b1b
+    classDef out fill:#e6f4ea,stroke:#2e7d32,color:#1b1b1b
+    class SP,FA input
+    class DG,FI,MO,RT,SC step
+    class OP,GL opt
+    class PIN,PE,PS,PR,QU out

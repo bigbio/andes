@@ -148,7 +148,14 @@ def main(out_dir, help_dir):
             if len(heads) > 1:
                 parts.append(f"## {h}\n")
             parts.append(body + "\n")
-        pages[rel] = anchor_headings(fix_links("\n".join(parts), Path(rel).parent))
+        page = "\n".join(parts)
+        if rel == "how-it-works.md":
+            # the README's flowchart is a GitHub-sized sketch; the site gets the detailed one
+            detailed = (SITE / "diagrams" / "how-it-works.mmd").read_text(encoding="utf-8")
+            page, n = re.subn(r"```mermaid\n.*?\n```", lambda _: f"```mermaid\n{detailed}```", page, count=1, flags=re.S)
+            if n != 1:
+                sys.exit("README 'How it works' has no mermaid block to replace")
+        pages[rel] = anchor_headings(fix_links(page, Path(rel).parent))
 
     # Full reference and training guide: whole files, with their own H1.
     for src, rel in (("DOCS.md", "reference.md"), ("TRAIN.md", "training.md"), ("docs/benchmarks/README.md", "benchmarks/details.md")):

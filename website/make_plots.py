@@ -56,8 +56,8 @@ def grouped(ax, data, datasets, ylabel, fmt, log=False):
 
 
 def save(fig, out, name):
-    fig.tight_layout()
-    fig.savefig(out / name, format="svg", transparent=True)
+    fig.tight_layout(pad=0.4)
+    fig.savefig(out / name, format="svg", transparent=True, bbox_inches="tight", pad_inches=0.05)
     plt.close(fig)
 
 

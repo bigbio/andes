@@ -251,20 +251,18 @@ def main(src, out_dir):
     save(fig, out, "glyco_tiers.svg")
 
     q = d["quant_accuracy"]
-    fig, axes = plt.subplots(1, 2, figsize=(9.5, 3.8))
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
     for ax, key, title in ((axes[0], "QExactive", "ProteoBench Q Exactive module"), (axes[1], "Astral", "ProteoBench Astral module")):
-        rows = q[key]
-        bars = ax.bar(range(len(rows)), [r["v"] for r in rows],
-                      color=[COLOURS["andes"] if r["andes"] else COLOURS["Java MS-GF+ v20240326"] for r in rows], width=0.6)
-        for bar, r in zip(bars, rows):
-            extra = f'\n{r["k"]:,} precursors' if r["k"] else ""
-            ax.annotate(f'{r["v"]:.3f}{extra}', (bar.get_x() + bar.get_width() / 2, r["v"]), ha="center",
-                        xytext=(0, 2), textcoords="offset points", fontsize=7.5, color=INK)
-        ax.set_xticks(range(len(rows)))
-        ax.set_xticklabels([r["n"] for r in rows], fontsize=8)
-        ax.set_title(title, loc="left", fontsize=10, color=INK)
+        for name, k, v, is_andes in q[key]:
+            ax.scatter(k / 1000, v, s=70 if is_andes else 36, zorder=3,
+                       color=COLOURS["andes"] if is_andes else COLOURS["Java MS-GF+ v20240326"])
+            ax.annotate(name, (k / 1000, v), xytext=(5, 4), textcoords="offset points", fontsize=7,
+                        color=COLOURS["andes"] if is_andes else INK, fontweight="bold" if is_andes else "normal")
+        ax.set_xlabel("precursors quantified in ≥ 3 runs (thousands)")
         ax.set_ylabel("median |ε| (lower is better)")
-        ax.margins(y=0.3)
+        ax.set_title(title, loc="left", fontsize=10, color=INK)
+        ax.margins(x=0.18, y=0.12)
+        ax.grid(color="#dddddd", lw=0.5, zorder=0)
     save(fig, out, "quant_accuracy.svg")
 
     o = d["opt_in"]

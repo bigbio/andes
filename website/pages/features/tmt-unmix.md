@@ -37,5 +37,6 @@ non-knockout channel intensity for PSMs of the three knocked-out proteins; the t
 Unmixing applies to high-resolution MS2 reporters only. SPS-MS3 reporters are not modelled.
 
 ```bash
-andes --spectrum tmt.mzML --database proteins.fasta --tmt --tmt-unmix --rescore
+andes --spectrum tmt.mzML --database proteins.fasta --mods tmt10_mods.txt \
+  --rescore --tmt tmt10 --tmt-unmix --output-parquet run.idparquet
 ```

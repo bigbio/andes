@@ -8,76 +8,141 @@ hide:
 
 # andes
 
-**The data-driven peptide search engine and quantification engine of the quantms ecosystem.**
-Spectra and a FASTA go in; Percolator-ready PSMs and, on request, protein groups and
-label-free or TMT quantities come out. The scoring model is chosen per file from its metadata.
+**Peptide search and quantification for DDA proteomics.** Give it spectra and a FASTA; it picks the
+scoring model from your files, leaves the FDR to Percolator, and can quantify TMT and label-free
+data in the same run.
 
-[Get started](getting-started/install.md){ .md-button .md-button--primary }
+[Install](getting-started/install.md){ .md-button .md-button--primary }
 [Benchmarks](benchmarks/index.md){ .md-button }
 [Parameters](parameters.md){ .md-button }
 
 </div>
 
-## What it does
+## Try it
+
+=== "Search"
+
+    ```bash
+    andes --spectrum spectra.mzML --database proteins.fasta \
+          --rescore --output-pin out.pin
+    ```
+
+    mzML, MGF, Thermo `.raw` and Bruker `.d` work as they are. The model, tolerances and decoys
+    are chosen for you; `--rescore` adds q-values.
+
+=== "TMT"
+
+    ```bash
+    andes --spectrum tmt_run.mzML --database human.fasta --mods tmt10_mods.txt \
+          --rescore --tmt tmt10 --output-parquet run.idparquet
+    ```
+
+    Reporter ions with impurity correction and a precision gate, from the same run as the search.
+
+=== "Label-free + MBR"
+
+    ```bash
+    andes --spectrum run1.mzML --spectrum run2.mzML --database human.fasta \
+          --rescore --lfq --mbr
+    ```
+
+    MS1 quantities, and transfers into runs without an identification, each with its own q-value.
+
+=== "Variants"
+
+    ```bash
+    andes --spectrum spectra.mzML --database uniprot_sprot_human.xml.gz \
+          --uniprot-variants --rescore --output-pin out.pin
+    ```
+
+    Variant claims are checked against [knockoffs](features/knockoffs.md): 65% to 2.5% true FDP
+    on a genotyped dataset.
+
+=== "Second peptide"
+
+    ```bash
+    andes --spectrum sample.raw --database proteins.fasta --chimeric --rescore
+    ```
+
+    A [second peptide per spectrum](features/chimeric.md) from the residual spectrum.
+
+=== "Glyco"
+
+    ```bash
+    andes --spectrum sample.mzML --database proteins.fasta --decoy-strategy sequon \
+          --glyco --glyco-species human --output-pin results.pin
+    ```
+
+    Intact N-glycopeptides from one MS2 scan; [benchmark](benchmarks/glyco.md).
+
+Install with `cargo install --git https://github.com/bigbio/andes --bin andes`, or take a
+[release archive](https://github.com/bigbio/andes/releases) for Linux, macOS or Windows.
+
+## In numbers
 
 <div class="grid cards" markdown>
 
--   **Reads your files as they are**
+-   **52,169** PSMs on Astral
 
-    mzML, MGF, native Thermo `.raw` and Bruker timsTOF `.d`. One of 17 bundled scoring models
-    is picked from the file's activation, resolution and isobaric label.
-    [How it works](how-it-works.md)
+    Percolator q ≤ 0.01, 114–117 s on 8 threads, 4.8 GB. Comet 2025.01 on the same machine:
+    31,435 PSMs, 217 s, 8.1 GB.
 
--   **Leaves the FDR to Percolator**
+-   **0.89–1.08%** true FDP at a nominal 1%
 
-    andes computes no production FDR. It writes the PIN, and Percolator, run by you or by
-    `--rescore`, decides what passes `q ≤ 0.01`.
-    [Quick start](getting-started/quickstart.md)
+    Entrapment-estimated on Astral with a peptide-level shuffle. Error rates are measured on every
+    benchmark, not assumed. [Error control](benchmarks/index.md#error-control-does-the-nominal-1-hold)
 
--   **Optional modes**
+-   **65,012** precursors quantified
 
-    Co-isolated peptides (`--chimeric`), secondary modifications (`--refine`), and intact
-    N-glycopeptides (`--glyco`).
-    [Modes](modes.md)
-
--   **Quantification built in**
-
-    TMT/iTRAQ reporter ions (`--tmt`) and label-free MS1 features with match between runs
-    (`--lfq`), from the same run as the search.
+    In at least 3 runs of the ProteoBench Q Exactive module, median |ε| 0.163.
     [Quantification](quantification.md)
+
+-   **17** bundled scoring models
+
+    Chosen per file from activation, resolution and isobaric label, trained on public PRIDE data.
+    [Models](models.md)
 
 </div>
 
-## The pipeline at a glance
+## How it works
 
 ```mermaid
 flowchart LR
-    S["Spectra<br/>mzML · .raw · .d"] --> M["Pick model<br/>per file"]
+    S["Spectra"] --> M["Pick model<br/>per file"]
     F["FASTA"] --> I["Out-of-core<br/>fragment index"]
     M --> R["Retrieve and score<br/>top candidates"]
     I --> R
-    R --> C["Optional passes<br/>chimeric · refine · glyco"]
+    R --> C["Optional<br/>chimeric · refine · glyco"]
     C --> P["PIN"] --> PC["Percolator<br/>owns the FDR"]
-    PC --> O["PSMs · proteins · sites<br/>quantities (QPX)"]
+    PC --> O["PSMs · proteins · sites"]
+    O --> Q["Quantities<br/>TMT · LFQ · MBR"]
 ```
 
-## Features built around trust in a result
+[The detailed diagram](how-it-works.md) shows the index, the retrieval step and every optional pass.
+
+## Speed and memory
+
+Same machine, same rescoring, 8 threads. Phospho is the one set where andes uses more memory.
+
+![Wall time, CPU time and peak memory](figures/cost.svg)
+
+## What is distinctive
 
 <div class="grid cards" markdown>
 
 -   **Knockoff variant FDR**
 
-    Variant claims get a null that makes the same mistakes as the claim: 65% to 2.5% true FDP on
-    a genotyped dataset. [Read more](features/knockoffs.md)
+    A null for variant claims that makes the same mistakes as the claim.
+    [Read more](features/knockoffs.md)
 
--   **Chimeric cascade**
+-   **Site claims and identity**
 
-    A second peptide from the residual spectrum: 43k to 66k Astral PSMs at an equal true FDP of
-    1%. [Read more](features/chimeric.md)
+    Occupancy and which modification, from competing explanations of each spectrum.
+    [Read more](features/sites.md)
 
 -   **Error-controlled match between runs**
 
-    Every transferred quantity says what supports it and carries its own q-value.
+    Every transferred quantity says what supports it.
     [Read more](features/mbr.md)
 
 -   **TMT interference unmixing**
@@ -88,52 +153,5 @@ flowchart LR
 </div>
 
 [All distinctive features](features/index.md){ .md-button }
+[Glyco benchmark](benchmarks/glyco.md){ .md-button }
 [The quantms ecosystem](ecosystem.md){ .md-button }
-
-## Identifications, measured the same way
-
-PSMs at Percolator `q ≤ 0.01` on public reference datasets, rescored identically for every
-engine on the same 8-core machine. The conditions, dates and commits behind each bar are on the
-[benchmarks page](benchmarks/index.md).
-
-![PSMs at q ≤ 0.01 for andes, Comet and Java MS-GF+](figures/psms.svg)
-
-## CPU time and memory
-
-Same machine, same rescoring, 8 threads. Wall time, CPU time and peak memory for andes and Comet
-on four datasets; phospho is the one set where andes uses more memory.
-
-![Wall time, CPU time and peak memory](figures/cost.svg)
-
-Details and conditions: [benchmarks](benchmarks/index.md#time-cpu-and-memory).
-
-## Search and quantification
-
-andes quantifies as it searches. Label-free runs get MS1 features and match between runs where every
-transferred value carries its evidence type and its own q-value; TMT runs get impurity-corrected
-reporter ions with a precision gate.
-
-![Median absolute ratio error on two ProteoBench modules](figures/quant_accuracy.svg)
-
-On the Astral module another tool has the lower median error; the
-[quantification page](quantification.md) shows both modules with their conditions.
-
-## Glycoproteomics
-
-Intact N-glycopeptide search (`--glyco`) is benchmarked against five published tools on PXD065680,
-with entrapment error estimates for andes.
-
-![Glyco counts on PXD065680](figures/glyco_counts.svg)
-
-These are counts, not error rates; andes's entrapment FDP is 1.04–1.50% at a nominal 1%. See the
-[glyco benchmark](benchmarks/glyco.md) for the overlap, evidence tiers and every deviation from the
-paper's protocol.
-
-## Install
-
-```bash
-cargo install --git https://github.com/bigbio/andes --bin andes
-```
-
-Release archives for Linux, macOS and Windows are on the
-[releases page](https://github.com/bigbio/andes/releases). Details: [Install](getting-started/install.md).

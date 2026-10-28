@@ -28,22 +28,26 @@ flowchart TD
 ## Label-free accuracy on ProteoBench
 
 Median |ε| is the median absolute error of the measured log-ratio against the known mixture
-ratio (lower is better). Counts are precursors quantified in at least 3 runs where the
-leaderboard gives them. andes rows are defaults at transfer q 0.01 (2026-10-23, `2051616b`);
-the other rows are the public leaderboard snapshot of 2026-07-16.
+ratio (lower is better); the x axis is the number of precursors quantified in at least 3 runs. Each
+point is one leaderboard submission (public snapshot of 2026-07-16); andes is the default
+setting at transfer q 0.01 (2026-10-23, `2051616b`).
 
-![Median absolute ratio error on two ProteoBench modules](figures/quant_accuracy.svg)
+![Precursors quantified against median ratio error, every submission on two ProteoBench modules](figures/quant_accuracy.svg)
 
 Read the figure with its conditions:
 
-- **Q Exactive module** (PXD028735, 6 runs, human/yeast/*E. coli*): andes reports 65,012
-  precursors in at least 3 runs with CV 0.118. The leaderboard row with the most precursors
-  (Sage 0.15.0-beta.2, 81,933) has a higher median error, and its transferred values are not
-  error-controlled.
-- **Astral module** (PXD070049, 6 runs): DIA-NN 2.6.0 has a lower median error than andes (0.123
-  against 0.193) at 16,363 precursors; its most-precursors setting has 93,237 at 0.277.
-- Error control: PSM FDP 0.83–0.85% and entrapment-only quantified precursors 0.20–0.22% on the Q
-  Exactive set. Not measured on the Astral set.
+- **Q Exactive module** (PXD028735, 6 runs, human/yeast/*E. coli*): andes quantifies 65,012
+  precursors at median |ε| 0.163 and CV 0.118. The listed submissions with the most precursors
+  have a higher median error: i2MassChroQ 1.0.16 (74,697, 0.222) and Sage 0.15.0-beta.2 (81,933,
+  0.388, transferred values not error-controlled).
+- **Astral module** (PXD070049, 6 runs): several submissions have a lower median error than
+  andes's 0.193, mostly at fewer precursors: DIA-NN 2.6.0 (16,363, 0.123), MaxQuant 2.6.7
+  (20,283, 0.160), Sage 0.14.6 (30,319, 0.167) and FragPipe 22.1 (29,105, 0.181). andes's CV (0.113)
+  is above most submissions.
+- Error control on transferred values differs between submissions; the
+  [benchmark report](benchmarks/details.md#2-the-benchmarks) lists what each one checks.
+- andes error control: PSM FDP 0.83–0.85% and entrapment-only quantified precursors 0.20–0.22% on
+  the Q Exactive set; not measured on Astral.
 
 Cost: 6.9k CPU-seconds for the 6 Q Exactive runs, 6.4k for the 6 Astral runs.
 

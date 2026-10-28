@@ -1,4 +1,20 @@
-.andes-hero { padding: 1.5rem 0 0.5rem; }
-.andes-hero .andes-logo { max-width: 420px; width: 100%; }
+/* Use the screen: Material's defaults leave wide margins and tall gaps. */
+.md-grid { max-width: 80rem; }
+.md-content__inner { margin: 0 0.8rem 0.6rem; padding-top: 0; }
+.md-typeset h1 { margin: 0 0 0.6em; }
+.md-typeset h2 { margin: 1.4em 0 0.5em; }
+.md-typeset h3 { margin: 1.2em 0 0.4em; }
+.md-typeset p, .md-typeset ul, .md-typeset ol, .md-typeset pre, .md-typeset table:not([class]) { margin-top: 0.5em; margin-bottom: 0.5em; }
+.md-typeset .admonition, .md-typeset details { margin: 0.9em 0; }
+.md-typeset .grid.cards > ul { gap: 0.5rem; margin: 0.6em 0; }
+.md-typeset .grid.cards > ul > li { padding: 0.6rem 0.8rem; margin: 0; }
+.md-typeset .grid.cards p { margin: 0.3em 0; }
+.md-typeset .mermaid { margin: 0.6em 0; text-align: center; }
+.md-typeset p > img[src$=".svg"] { display: block; margin: 0.4em auto; max-height: 26rem; }
 .md-typeset img[src$=".svg"] { max-width: 100%; height: auto; }
 .md-typeset table:not([class]) { font-size: 0.72rem; }
+.md-typeset hr { margin: 1em 0; }
+.andes-hero { padding: 0; }
+.andes-hero h1 { margin: 0 0 0.3em; font-size: 2.2rem; }
+.andes-hero p { margin: 0.3em 0; }
+.md-typeset .md-button { margin: 0.2em 0.3em 0.2em 0; }

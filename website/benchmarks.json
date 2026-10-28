@@ -232,5 +232,166 @@
     "hi": 6.7
    }
   ]
+ },
+ "glyco_pxd065680": {
+  "_note": "PXD065680 / JPST003908, HCD F03 file; andes main @ 24cec490, Percolator 3.7.1, 2026-10-28. Paper: Sakaue et al., J Proteome Res 2026, doi 10.1021/acs.jproteome.6c00345 (counts from the accepted manuscript; each tool's own FDR rule). Source: internal glyco benchmark artifact.",
+  "ranked": [
+   {
+    "n": "andes arm N",
+    "v": 1260,
+    "andes": true
+   },
+   {
+    "n": "Byonic",
+    "v": 1244,
+    "andes": false
+   },
+   {
+    "n": "andes arm A",
+    "v": 1225,
+    "andes": true
+   },
+   {
+    "n": "andes arm A2",
+    "v": 1174,
+    "andes": true
+   },
+   {
+    "n": "andes arm B",
+    "v": 1141,
+    "andes": true
+   },
+   {
+    "n": "Glyco-Decipher",
+    "v": 1072,
+    "andes": false
+   },
+   {
+    "n": "MSFragger-Glyco",
+    "v": 1000,
+    "andes": false
+   },
+   {
+    "n": "pGlyco3",
+    "v": 861,
+    "andes": false
+   },
+   {
+    "n": "GRable",
+    "v": 717,
+    "andes": false
+   }
+  ],
+  "overlap": {
+   "tools": [
+    "Byonic",
+    "Glyco-Decipher",
+    "MSFragger-Glyco",
+    "pGlyco3",
+    "GRable"
+   ],
+   "total": [
+    1200,
+    1070,
+    871,
+    858,
+    717
+   ],
+   "shared": [
+    934,
+    767,
+    760,
+    778,
+    492
+   ]
+  },
+  "support": [
+   102,
+   123,
+   143,
+   200,
+   308,
+   298
+  ],
+  "tiers": {
+   "sets": [
+    "Paper (Table S5)",
+    "andes A",
+    "andes A2",
+    "andes N",
+    "andes B"
+   ],
+   "t1": [
+    88.6,
+    97.9,
+    98.1,
+    98.4,
+    97.1
+   ],
+   "t2": [
+    10.3,
+    2.0,
+    1.9,
+    1.6,
+    2.9
+   ],
+   "t3": [
+    0.8,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "t4": [
+    0.4,
+    0.1,
+    0.0,
+    0.0,
+    0.0
+   ]
+  }
+ },
+ "quant_accuracy": {
+  "_note": "ProteoBench leaderboard snapshot 2026-07-16; andes 2026-10-23 at 2051616b, defaults, transfer q 0.01. docs/benchmarks/README.md section 1. median |eps| (lower is better), precursors quantified in >= 3 runs where known.",
+  "QExactive": [
+   {
+    "n": "andes",
+    "v": 0.163,
+    "k": 65012,
+    "andes": true
+   },
+   {
+    "n": "FragPipe 23.0",
+    "v": 0.19,
+    "k": null,
+    "andes": false
+   },
+   {
+    "n": "Sage 0.15.0-beta.2",
+    "v": 0.388,
+    "k": 81933,
+    "andes": false
+   }
+  ],
+  "Astral": [
+   {
+    "n": "andes",
+    "v": 0.193,
+    "k": 37352,
+    "andes": true
+   },
+   {
+    "n": "DIA-NN 2.6.0",
+    "v": 0.123,
+    "k": 16363,
+    "andes": false
+   },
+   {
+    "n": "DIA-NN 2.6.0\n(most precursors)",
+    "v": 0.277,
+    "k": 93237,
+    "andes": false
+   }
+  ]
  }
 }

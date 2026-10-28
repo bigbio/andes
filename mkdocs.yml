@@ -62,11 +62,13 @@ nav:
       - Scoring models: models.md
       - Optional modes: modes.md
       - Training your own model: training.md
+  - Quantification: quantification.md
   - Reference:
       - Command-line parameters: parameters.md
       - Full reference: reference.md
   - Benchmarks:
       - Overview: benchmarks/index.md
+      - Glycoproteomics (PXD065680): benchmarks/glyco.md
       - Full report: benchmarks/details.md
   - Ecosystem: ecosystem.md
   - About: about.md

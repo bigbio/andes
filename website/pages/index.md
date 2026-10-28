@@ -8,9 +8,9 @@ hide:
 
 ![andes](assets/andes-logo.svg){ .andes-logo }
 
-**The data-driven peptide search engine of the quantms ecosystem.**
-Spectra and a FASTA go in; a Percolator-ready PIN comes out. The scoring model is chosen per
-file from its metadata.
+**The data-driven peptide search engine and quantification engine of the quantms ecosystem.**
+Spectra and a FASTA go in; Percolator-ready PSMs and, on request, protein groups and
+label-free or TMT quantities come out. The scoring model is chosen per file from its metadata.
 
 [Get started](getting-started/install.md){ .md-button .md-button--primary }
 [Benchmarks](benchmarks/index.md){ .md-button }
@@ -43,8 +43,8 @@ file from its metadata.
 -   **Quantification built in**
 
     TMT/iTRAQ reporter ions (`--tmt`) and label-free MS1 features with match between runs
-    (`--lfq`).
-    [Reference §10](reference.md#10-quantification)
+    (`--lfq`), from the same run as the search.
+    [Quantification](quantification.md)
 
 </div>
 
@@ -97,6 +97,37 @@ engine on the same 8-core machine. The conditions, dates and commits behind each
 [benchmarks page](benchmarks/index.md).
 
 ![PSMs at q ≤ 0.01 for andes, Comet and Java MS-GF+](figures/psms.svg)
+
+## CPU time and memory
+
+Same machine, same rescoring, 8 threads. Wall time, CPU time and peak memory for andes and Comet
+on four datasets; phospho is the one set where andes uses more memory.
+
+![Wall time, CPU time and peak memory](figures/cost.svg)
+
+Details and conditions: [benchmarks](benchmarks/index.md#time-cpu-and-memory).
+
+## Search and quantification
+
+andes quantifies as it searches. Label-free runs get MS1 features and match between runs where every
+transferred value carries its evidence type and its own q-value; TMT runs get impurity-corrected
+reporter ions with a precision gate.
+
+![Median absolute ratio error on two ProteoBench modules](figures/quant_accuracy.svg)
+
+On the Astral module another tool has the lower median error; the
+[quantification page](quantification.md) shows both modules with their conditions.
+
+## Glycoproteomics
+
+Intact N-glycopeptide search (`--glyco`) is benchmarked against five published tools on PXD065680,
+with entrapment error estimates for andes.
+
+![Glyco counts on PXD065680](figures/glyco_counts.svg)
+
+These are counts, not error rates; andes's entrapment FDP is 1.04–1.50% at a nominal 1%. See the
+[glyco benchmark](benchmarks/glyco.md) for the overlap, evidence tiers and every deviation from the
+paper's protocol.
 
 ## Install
 

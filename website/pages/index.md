@@ -122,9 +122,11 @@ flowchart LR
 
 ## Speed and memory
 
-Same machine, same rescoring, 8 threads. Phospho is the one set where andes uses more memory.
+andes against Comet 2025.01 on the same machine, same rescoring, 8 threads. Bars show andes as a
+share of Comet's wall time, CPU time and peak memory, so shorter is cheaper. Phospho is the one set
+where andes uses more memory.
 
-![Wall time, CPU time and peak memory](figures/cost.svg)
+![andes wall time, CPU time and peak memory as a percentage of Comet](figures/cost_relative.svg)
 
 ## What is distinctive
 

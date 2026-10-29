@@ -38,7 +38,8 @@ use model::scan::{Ms1Scan, ScanContext};
 
 use crate::timstof_ms1::{
     centroid_profile, fit_calibration, match_precursors, mode_offset_ppm, sum_over_mobility,
-    CalibrationFit, MzCalibration, NARROW_WINDOW_PPM, WIDE_WINDOW_PPM,
+    CalibrationFit, FrameConditions, MzCalibration, MIN_REFINE_WINDOW_PPM, NARROW_WINDOW_PPM,
+    REFINE_ROUNDS, REFINE_SIGMAS, WIDE_WINDOW_PPM,
 };
 use crate::{Ms1Link, Spectrum};
 
@@ -189,12 +190,12 @@ fn frame_centroids(frame: &timsrust::Frame) -> Vec<crate::timstof_ms1::TofCentro
 fn to_peaks(
     centroids: &[crate::timstof_ms1::TofCentroid],
     calibration: &MzCalibration,
-    t: [f64; 2],
+    frame: FrameConditions,
 ) -> Vec<(f64, f32)> {
     let mut peaks: Vec<(f64, f32)> = centroids
         .iter()
         .map(|c| {
-            let cond = crate::timstof_ms1::conditions(t, c.intensity);
+            let cond = crate::timstof_ms1::conditions(frame, c.intensity);
             (calibration.mz(c.tof, cond), c.intensity as f32)
         })
         .filter(|&(mz, i)| mz.is_finite() && mz > 0.0 && i.is_finite() && i > 0.0)
@@ -281,21 +282,27 @@ impl Ms1Frames {
             .collect();
         let stride = (with_precursors.len() / CALIBRATION_FRAMES).max(1);
         let sample: Vec<usize> = with_precursors.into_iter().step_by(stride).collect();
-        let decoded: Vec<(usize, Vec<crate::timstof_ms1::TofCentroid>)> = sample
+        type Decoded = (usize, FrameConditions, Vec<crate::timstof_ms1::TofCentroid>);
+        let decoded: Vec<Decoded> = sample
             .par_iter()
             .filter_map(|&k| {
+                let id = self.ids[k];
                 let frame = self.frames.get(self.positions[k]).ok()?;
-                Some((self.ids[k], frame_centroids(&frame)))
+                let cond = FrameConditions {
+                    t: self.temperature(id),
+                    rt_s: frame.rt_in_seconds,
+                };
+                Some((id, cond, frame_centroids(&frame)))
             })
             .collect();
-        let pass = |offset: f64, window: f64| {
+        let pass = |calibration: &MzCalibration, offset: f64, window: f64| {
             let mut points = Vec::new();
-            for (id, centroids) in &decoded {
+            for (id, cond, centroids) in &decoded {
                 match_precursors(
                     centroids,
                     &peaks[id],
-                    self.temperature(*id),
-                    base,
+                    *cond,
+                    calibration,
                     offset,
                     window,
                     &mut points,
@@ -303,9 +310,17 @@ impl Ms1Frames {
             }
             points
         };
-        let wide = pass(0.0, WIDE_WINDOW_PPM);
+        let wide = pass(base, 0.0, WIDE_WINDOW_PPM);
         let offset = mode_offset_ppm(&wide, base)?;
-        fit_calibration(&pass(offset, NARROW_WINDOW_PPM), base)
+        let mut fit = fit_calibration(&pass(base, offset, NARROW_WINDOW_PPM), base)?;
+        for _ in 0..REFINE_ROUNDS {
+            let window = (REFINE_SIGMAS * fit.sigma_ppm).max(MIN_REFINE_WINDOW_PPM);
+            match fit_calibration(&pass(&fit.calibration, 0.0, window), base) {
+                Some(next) => fit = next,
+                None => break,
+            }
+        }
+        Some(fit)
     }
 
     /// Decode the next batch of MS1 frames in parallel.
@@ -324,7 +339,10 @@ impl Ms1Frames {
                         to_peaks(
                             &frame_centroids(&frame),
                             &self.calibration,
-                            self.temperature(id),
+                            FrameConditions {
+                                t: self.temperature(id),
+                                rt_s: frame.rt_in_seconds,
+                            },
                         ),
                     ),
                     // A frame that cannot be decoded is kept as an empty scan

@@ -193,7 +193,10 @@ fn to_peaks(
 ) -> Vec<(f64, f32)> {
     let mut peaks: Vec<(f64, f32)> = centroids
         .iter()
-        .map(|c| (calibration.mz(c.tof, t), c.intensity as f32))
+        .map(|c| {
+            let cond = crate::timstof_ms1::conditions(t, c.intensity);
+            (calibration.mz(c.tof, cond), c.intensity as f32)
+        })
         .filter(|&(mz, i)| mz.is_finite() && mz > 0.0 && i.is_finite() && i > 0.0)
         .collect();
     if peaks.windows(2).any(|w| w[0].0 > w[1].0) {

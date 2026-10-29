@@ -164,9 +164,23 @@ fn centroid_run(run: &[(u32, u64)], out: &mut Vec<TofCentroid>) {
     }
 }
 
+/// Conditions a centroid's m/z depends on besides its TOF index: the two
+/// frame temperatures (`T1`, `T2`) and the natural log of the centroid's
+/// summed intensity. Intense peaks sit at a slightly later TOF than weak ones
+/// of the same m/z (several ppm across the intensity range of a run), which
+/// the vendor conversion corrects and the TOF polynomial alone cannot.
+pub(crate) type Conditions = [f64; 3];
+
+/// The conditions of a centroid of `intensity` in a frame recorded at
+/// temperatures `t`.
+pub(crate) fn conditions(t: [f64; 2], intensity: f64) -> Conditions {
+    [t[0], t[1], intensity.max(1.0).ln()]
+}
+
 /// TOF → m/z conversion: `sqrt(m/z)` as a polynomial in the scaled TOF index
-/// plus temperature terms. With all temperature coefficients zero it is the
-/// acquisition-range model (`sqrt(m/z) = a + b * tof`).
+/// plus a linear term in each of the [`Conditions`]. With all condition
+/// coefficients zero it is the acquisition-range model
+/// (`sqrt(m/z) = a + b * tof`).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct MzCalibration {
     /// TOF indices are divided by this before the polynomial (numerical
@@ -174,9 +188,9 @@ pub(crate) struct MzCalibration {
     scale: f64,
     /// Coefficients of `1, x, x^2, x^3` (x = tof / scale).
     poly: [f64; 4],
-    /// Coefficients of `T1 - t1_ref` and `T2 - t2_ref`.
-    temp: [f64; 2],
-    t_ref: [f64; 2],
+    /// Coefficients of the conditions, each centred on `c_ref`.
+    cond: [f64; 3],
+    c_ref: Conditions,
 }
 
 impl MzCalibration {
@@ -185,19 +199,17 @@ impl MzCalibration {
         Self {
             scale,
             poly: [intercept, slope * scale, 0.0, 0.0],
-            temp: [0.0; 2],
-            t_ref: [0.0; 2],
+            cond: [0.0; 3],
+            c_ref: [0.0; 3],
         }
     }
 
-    /// m/z of a (fractional) TOF index in a frame recorded at temperatures `t`.
-    pub fn mz(&self, tof: f64, t: [f64; 2]) -> f64 {
+    /// m/z of a (fractional) TOF index under conditions `c`.
+    pub fn mz(&self, tof: f64, c: Conditions) -> f64 {
         let x = tof / self.scale;
         let p = &self.poly;
-        let root = p[0]
-            + x * (p[1] + x * (p[2] + x * p[3]))
-            + self.temp[0] * (t[0] - self.t_ref[0])
-            + self.temp[1] * (t[1] - self.t_ref[1]);
+        let terms: f64 = (0..3).map(|k| self.cond[k] * (c[k] - self.c_ref[k])).sum();
+        let root = p[0] + x * (p[1] + x * (p[2] + x * p[3])) + terms;
         root * root
     }
 
@@ -216,8 +228,8 @@ pub(crate) struct CalibrationPoint {
     pub tof: f64,
     /// Vendor-calibrated monoisotopic m/z of the precursor.
     pub mz: f64,
-    /// Parent frame temperatures.
-    pub t: [f64; 2],
+    /// Parent frame temperatures and the centroid's log intensity.
+    pub t: Conditions,
 }
 
 /// Matching window (ppm) of the first pass, which finds the run's offset
@@ -250,7 +262,7 @@ pub(crate) fn match_precursors(
             continue;
         }
         // The window in the TOF domain; the base model is monotonic in TOF,
-        // and the temperature terms of `base` are zero.
+        // and the condition terms of `base` are zero.
         let at = |ppm: f64| base.linear_tof(mz * (1.0 + ppm * 1e-6));
         let (lo, hi) = (at(offset_ppm - window_ppm), at(offset_ppm + window_ppm));
         let i = centroids.partition_point(|c| c.tof < lo);
@@ -259,7 +271,11 @@ pub(crate) fn match_precursors(
             .iter()
             .max_by(|a, b| a.intensity.total_cmp(&b.intensity));
         if let Some(c) = best {
-            out.push(CalibrationPoint { tof: c.tof, mz, t });
+            out.push(CalibrationPoint {
+                tof: c.tof,
+                mz,
+                t: conditions(t, c.intensity),
+            });
         }
     }
 }
@@ -338,9 +354,9 @@ fn solve(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
     x.iter().all(|v| v.is_finite()).then_some(x)
 }
 
-/// Spread (standard deviation) below which a temperature is treated as
+/// Spread (standard deviation) below which a condition is treated as
 /// constant over the run and gets no term.
-const MIN_TEMPERATURE_SPREAD: f64 = 1e-3;
+const MIN_CONDITION_SPREAD: f64 = 1e-3;
 
 /// Summary of a calibration fit.
 #[derive(Debug, Clone, PartialEq)]
@@ -376,7 +392,7 @@ pub(crate) fn fit_calibration(
     }
     let scale = base.scale;
     let mean_t = |k: usize| points.iter().map(|p| p.t[k]).sum::<f64>() / points.len() as f64;
-    let t_ref = [mean_t(0), mean_t(1)];
+    let t_ref = [mean_t(0), mean_t(1), mean_t(2)];
     let spread = |k: usize| {
         (points
             .iter()
@@ -385,14 +401,11 @@ pub(crate) fn fit_calibration(
             / points.len() as f64)
             .sqrt()
     };
-    let use_temp = [
-        spread(0) > MIN_TEMPERATURE_SPREAD,
-        spread(1) > MIN_TEMPERATURE_SPREAD,
-    ];
+    let use_temp = [0, 1, 2].map(|k| spread(k) > MIN_CONDITION_SPREAD);
     let features = |p: &CalibrationPoint| -> Vec<f64> {
         let x = p.tof / scale;
         let mut f = vec![1.0, x, x * x, x * x * x];
-        for k in 0..2 {
+        for k in 0..3 {
             if use_temp[k] {
                 f.push(p.t[k] - t_ref[k]);
             }
@@ -430,7 +443,7 @@ pub(crate) fn fit_calibration(
             }
         }
         let coef = solve(ata, atb)?;
-        let mut temp = [0.0; 2];
+        let mut temp = [0.0; 3];
         let mut k = 4;
         for (t, &on) in temp.iter_mut().zip(&use_temp) {
             if on {
@@ -441,8 +454,8 @@ pub(crate) fn fit_calibration(
         let calibration = MzCalibration {
             scale,
             poly: [coef[0], coef[1], coef[2], coef[3]],
-            temp,
-            t_ref,
+            cond: temp,
+            c_ref: t_ref,
         };
         let ppm: Vec<f64> = points
             .iter()
@@ -565,10 +578,13 @@ mod tests {
     }
 
     /// A synthetic instrument: the vendor calibration is a cubic with a
-    /// temperature term; the acquisition-range model is linear and off.
-    fn truth(tof: f64, t: [f64; 2]) -> f64 {
+    /// temperature and an intensity term; the acquisition-range model is
+    /// linear and off.
+    fn truth(tof: f64, t: Conditions) -> f64 {
         let x = tof / 400_000.0;
-        let root = 10.0 + 31.0 * x + 0.02 * x * x - 0.01 * x * x * x + 2e-4 * (t[1] - 27.0);
+        let root = 10.0 + 31.0 * x + 0.02 * x * x - 0.01 * x * x * x
+            + 2e-4 * (t[1] - 27.0)
+            + 4e-5 * (t[2] - 5.0);
         root * root
     }
 
@@ -578,7 +594,11 @@ mod tests {
         let mut points = Vec::new();
         for i in 0..2000 {
             let tof = 20_000.0 + (i as f64) * 180.0;
-            let t = [25.7, 27.0 + 0.3 * ((i % 7) as f64 / 6.0)];
+            let t = [
+                25.7,
+                27.0 + 0.3 * ((i % 7) as f64 / 6.0),
+                3.0 + 0.5 * (i % 11) as f64,
+            ];
             points.push(CalibrationPoint {
                 tof,
                 mz: truth(tof, t),
@@ -589,7 +609,10 @@ mod tests {
         assert!(fit.sigma_ppm < 0.01, "{fit:?}");
         assert!(fit.median_ppm.abs() < 0.01, "{fit:?}");
         assert!(fit.base_sigma_ppm > fit.sigma_ppm);
-        for &(tof, t) in &[(50_000.0, [25.7, 27.1]), (300_000.0, [25.7, 27.25])] {
+        for &(tof, t) in &[
+            (50_000.0, [25.7, 27.1, 4.0]),
+            (300_000.0, [25.7, 27.25, 7.5]),
+        ] {
             let ppm = (fit.calibration.mz(tof, t) - truth(tof, t)) / truth(tof, t) * 1e6;
             assert!(ppm.abs() < 0.01, "{ppm}");
         }
@@ -601,7 +624,7 @@ mod tests {
         let mut points: Vec<CalibrationPoint> = (0..1000)
             .map(|i| {
                 let tof = 20_000.0 + (i as f64) * 350.0;
-                let t = [25.7, 27.0];
+                let t = [25.7, 27.0, 5.0];
                 CalibrationPoint {
                     tof,
                     mz: truth(tof, t),
@@ -625,7 +648,7 @@ mod tests {
             CalibrationPoint {
                 tof: 1.0,
                 mz: 100.0,
-                t: [0.0; 2]
+                t: [0.0; 3]
             };
             MIN_CALIBRATION_POINTS - 1
         ];
@@ -636,7 +659,7 @@ mod tests {
     fn matching_picks_the_most_intense_centroid_inside_the_window() {
         let base = MzCalibration::linear(10.0, 31.0 / 400_000.0, 400_000.0);
         let t = [0.0; 2];
-        let target = base.mz(100_000.0, t);
+        let target = base.mz(100_000.0, [0.0; 3]);
         let c = |tof: f64, intensity: f64| TofCentroid { tof, intensity };
         // Nearest (100_000.4) is weak; the intense one 1 bin away is the peak.
         let centroids = vec![
@@ -659,7 +682,7 @@ mod tests {
     fn the_offset_is_the_mode_not_the_median() {
         // 300 pairs at +8 ppm, 700 spread uniformly over -150..150 ppm.
         let base = MzCalibration::linear(10.0, 31.0 / 400_000.0, 400_000.0);
-        let t = [0.0; 2];
+        let t = [0.0; 3];
         let mut points = Vec::new();
         for i in 0..1000 {
             let tof = 50_000.0 + i as f64 * 200.0;

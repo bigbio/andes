@@ -324,6 +324,47 @@ fn rescore_pin_destination(
     Ok((path, base))
 }
 
+/// Replace each archived `.d` among `inputs` (`.d.zip`, `.d.tar`,
+/// `.d.tar.gz`, `.d.tgz`, `.d.gz`) by its run folder, unpacked into a
+/// temporary directory inside `scratch_dir` that lives as long as the
+/// returned guard. `None` when no input is an archive.
+fn unpack_d_archives(
+    inputs: &mut [PathBuf],
+    scratch_dir: &Path,
+) -> Result<Option<tempfile::TempDir>, Box<dyn std::error::Error>> {
+    if !inputs.iter().any(|p| crate::spectra::is_d_archive(p)) {
+        return Ok(None);
+    }
+    #[cfg(feature = "timstof")]
+    {
+        let dir = scratch_tempdir("andes-d-", scratch_dir)?;
+        for p in inputs
+            .iter_mut()
+            .filter(|p| crate::spectra::is_d_archive(p))
+        {
+            let t = std::time::Instant::now();
+            let run = input::unpack_d_archive(p, dir.path())?;
+            eprintln!(
+                "Bruker .d archive {}: unpacked to {} ({:.1}s)",
+                p.display(),
+                run.display(),
+                t.elapsed().as_secs_f64()
+            );
+            *p = run;
+        }
+        Ok(Some(dir))
+    }
+    #[cfg(not(feature = "timstof"))]
+    {
+        let _ = scratch_dir;
+        Err(
+            "this andes build has no Bruker .d (timsTOF) support; rebuild with \
+             `--features timstof` to read archived .d inputs"
+                .into(),
+        )
+    }
+}
+
 pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // These three were validated as Some(..) by main() before calling run().
     if cli.spectrum.is_empty() {
@@ -356,6 +397,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         ),
     );
     cli.temp_dir = Some(scratch_dir.clone());
+    // Archived Bruker `.d` inputs are unpacked into the scratch directory for
+    // the run (removed at exit) and searched as `.d` folders.
+    let _d_archives = unpack_d_archives(&mut cli.spectrum, &scratch_dir)?;
     // `--mbr`: the per-run artifacts go to `--quant-dir`, or to a temporary
     // directory that lives until the end of the run.
     let mut _mbr_tmp: Option<tempfile::TempDir> = None;

@@ -21,6 +21,10 @@ timsrust = { version = "0.4.2", optional = true }
 # parallel MS1 frame decoding; both already in timsrust's dependency tree.
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 rayon = { version = "1.10", optional = true }
+# Archived `.d` folders (`.d.zip`, `.d.tar`, `.d.tar.gz`); zip 64 and Deflate64
+# cover archives of multi-GB runs.
+zip = { version = "6", default-features = false, features = ["deflate-flate2", "deflate64"], optional = true }
+tar = { version = "0.4", optional = true }
 
 [dev-dependencies]
 tempfile = "3.10"
@@ -36,4 +40,4 @@ thermo = ["dep:thermorawfilereader"]
 # bundling — a `.d` is read natively (TDF SQLite + binary blob). Default builds
 # stay pure and read mzML/MGF only; the optional dep tree only compiles under
 # this feature.
-timstof = ["dep:timsrust", "dep:rusqlite", "dep:rayon"]
+timstof = ["dep:timsrust", "dep:rusqlite", "dep:rayon", "dep:zip", "dep:tar"]

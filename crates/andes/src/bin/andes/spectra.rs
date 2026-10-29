@@ -47,6 +47,18 @@ pub(crate) fn spectrum_ext_lower(path: &std::path::Path) -> Option<String> {
         .map(|e| e.to_ascii_lowercase())
 }
 
+/// Whether `path` names an archived Bruker `.d` folder (`X.d.zip`,
+/// `X.d.tar`, `X.d.tar.gz`, `X.d.tgz`, `X.d.gz`; case-insensitive).
+pub(crate) fn is_d_archive(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    [".d.zip", ".d.tar", ".d.tar.gz", ".d.tgz", ".d.gz"]
+        .iter()
+        .any(|s| lower.len() > s.len() && lower.ends_with(s))
+}
+
 pub(crate) fn input_format_flags(path: &Path) -> (bool, bool, bool, bool) {
     // Strip a trailing `.gz` so the format is detected from the underlying
     // extension (`spectra.mzML.gz` → mzML, `spectra.mgf.gz` → MGF). `.raw`/`.d`
@@ -69,7 +81,7 @@ pub(crate) fn input_format_flags(path: &Path) -> (bool, bool, bool, bool) {
         .map(|s| s.to_lowercase());
     let is_mzml = matches!(ext.as_deref(), Some("mzml"));
     let is_raw = matches!(ext.as_deref(), Some("raw"));
-    let is_d = matches!(ext.as_deref(), Some("d"));
+    let is_d = matches!(ext.as_deref(), Some("d")) || is_d_archive(path);
     let is_mgf = !is_mzml && !is_raw && !is_d;
     (is_mzml, is_raw, is_d, is_mgf)
 }

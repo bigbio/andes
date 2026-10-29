@@ -18,6 +18,8 @@ pub mod timstof;
 pub mod timstof_archive;
 #[cfg(feature = "timstof")]
 mod timstof_ms1;
+#[cfg(feature = "timstof")]
+mod timstof_ms2;
 pub mod uniprot;
 mod uniprot_ptm;
 

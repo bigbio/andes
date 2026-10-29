@@ -9,10 +9,11 @@
 //! Built only under `--features timstof`. mzML/MGF reading never pulls in
 //! `timsrust`.
 //!
-//! Scope: DDA-PASEF. `timsrust`'s [`SpectrumReader`] groups the PASEF frames
-//! into centroided MS2 fragment spectra, each carrying the DDA precursor it was
-//! selected from (m/z, charge, retention time, parent MS1 frame and ion
-//! mobility). On request the reader also yields the run's MS1 survey frames,
+//! Scope: DDA-PASEF. Each precursor of the run becomes one centroided MS2
+//! fragment spectrum, summed over all its PASEF selections and converted to
+//! m/z with the run's calibration (see [`crate::timstof_ms2`]); it carries the
+//! precursor's m/z, charge, retention time, parent MS1 frame and ion mobility.
+//! MS2 spectra are built in parallel batches. On request the reader also yields the run's MS1 survey frames,
 //! summed over ion mobility and centroided (see [`crate::timstof_ms1`]), with
 //! the same capture interface as the mzML and Thermo readers: every MS1 scan
 //! for quantification ([`TimsTofReader::with_run_ms1_capture`]), the
@@ -28,10 +29,8 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
-use timsrust::converters::ConvertableDomain;
-use timsrust::readers::{
-    FrameReader, FrameReaderError, MetadataReader, SpectrumReader, SpectrumReaderError,
-};
+use timsrust::converters::{ConvertableDomain, Scan2ImConverter};
+use timsrust::readers::{FrameReader, FrameReaderError, MetadataReader};
 use timsrust::MSLevel;
 
 use model::scan::{Ms1Scan, ScanContext};
@@ -41,6 +40,9 @@ use crate::timstof_ms1::{
     CalibrationFit, FrameConditions, MzCalibration, MIN_REFINE_WINDOW_PPM, NARROW_WINDOW_PPM,
     REFINE_ROUNDS, REFINE_SIGMAS, WIDE_WINDOW_PPM,
 };
+use crate::timstof_ms2::{
+    ms2_peaks, push_scans, read_frame_rows, read_pasef_precursors, FrameRow, PasefPrecursor,
+};
 use crate::{Ms1Link, Spectrum};
 
 /// Error opening or reading a Bruker timsTOF `.d` directory.
@@ -49,7 +51,7 @@ pub enum TimsTofParseError {
     #[error("failed to open Bruker .d '{path}': {source}{hint}")]
     Open {
         path: String,
-        source: Box<SpectrumReaderError>,
+        source: Box<FrameReaderError>,
         /// Extra guidance for a known unsupported layout (empty otherwise).
         hint: &'static str,
     },
@@ -58,11 +60,8 @@ pub enum TimsTofParseError {
          '{nested}' inside it has one; pass that folder"
     )]
     Nested { path: String, nested: String },
-    #[error("failed to read spectrum {index} from Bruker .d: {source}")]
-    Read {
-        index: usize,
-        source: Box<SpectrumReaderError>,
-    },
+    #[error("failed to read the MS2 frames of precursor {precursor} from Bruker .d: {message}")]
+    Read { precursor: usize, message: String },
     #[error("failed to open the MS1 frames of Bruker .d '{path}': {source}")]
     Frames {
         path: String,
@@ -396,25 +395,239 @@ fn ms1_native_id(frame_id: usize) -> String {
     format!("frame={frame_id}")
 }
 
+/// Precursors whose MS2 spectra are built per parallel batch.
+const MS2_BATCH: usize = 1024;
+
+/// The PASEF MS2 side of a `.d`: the precursors with their selections and the
+/// frames they were fragmented in.
+struct Ms2Source {
+    frames: FrameReader,
+    /// Frame id → position in `frames`.
+    positions: HashMap<usize, usize>,
+    rows: HashMap<usize, FrameRow>,
+    precursors: Vec<PasefPrecursor>,
+    im: Scan2ImConverter,
+}
+
+impl Ms2Source {
+    fn open(dir: &Path) -> Result<Self, TimsTofParseError> {
+        let open_err = |source: FrameReaderError| {
+            let hint = open_error_hint(&source.to_string());
+            TimsTofParseError::Open {
+                path: dir.display().to_string(),
+                source: Box::new(source),
+                hint,
+            }
+        };
+        let frames = FrameReader::new(dir).map_err(open_err)?;
+        let metadata = MetadataReader::new(dir).map_err(|e| open_err(e.into()))?;
+        let tables_err = |source| TimsTofParseError::Tables {
+            path: dir.display().to_string(),
+            source,
+        };
+        let conn = rusqlite::Connection::open_with_flags(
+            dir.join("analysis.tdf"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(tables_err)?;
+        let precursors = read_pasef_precursors(&conn).map_err(tables_err)?;
+        let rows = read_frame_rows(&conn).map_err(tables_err)?;
+        let mut positions = HashMap::with_capacity(frames.len());
+        for pos in 0..frames.len() {
+            let f = frames
+                .get_frame_without_coordinates(pos)
+                .map_err(open_err)?;
+            positions.insert(f.index, pos);
+        }
+        Ok(Self {
+            frames,
+            positions,
+            rows,
+            precursors,
+            im: metadata.im_converter,
+        })
+    }
+
+    /// Build the MS2 spectra of `precursors[range]`: the frames they need are
+    /// decoded once each, in parallel, then the spectra are assembled in
+    /// parallel. Precursors without a usable m/z yield nothing.
+    fn build(
+        &self,
+        range: std::ops::Range<usize>,
+        calibration: &MzCalibration,
+    ) -> Vec<Result<Ms2Item, TimsTofParseError>> {
+        let batch = &self.precursors[range];
+        let mut needed: Vec<usize> = batch
+            .iter()
+            .flat_map(|p| p.selections.iter().map(|s| s.frame_id))
+            .filter(|id| self.rows.get(id).is_none_or(|r| r.num_peaks > 0))
+            .collect();
+        needed.sort_unstable();
+        needed.dedup();
+        let decoded: HashMap<usize, Result<timsrust::Frame, String>> = needed
+            .par_iter()
+            .map(|&id| {
+                let frame = match self.positions.get(&id) {
+                    Some(&pos) => self.frames.get(pos).map_err(|e| e.to_string()),
+                    None => Err(format!("frame {id} is not in the frame table")),
+                };
+                (id, frame)
+            })
+            .collect();
+        batch
+            .par_iter()
+            .filter_map(|p| self.assemble(p, &decoded, calibration))
+            .collect()
+    }
+
+    /// One precursor's spectrum from its decoded frames (see
+    /// [`crate::timstof_ms2`]).
+    fn assemble(
+        &self,
+        p: &PasefPrecursor,
+        decoded: &HashMap<usize, Result<timsrust::Frame, String>>,
+        calibration: &MzCalibration,
+    ) -> Option<Result<Ms2Item, TimsTofParseError>> {
+        let mut tof = Vec::new();
+        let mut intensity = Vec::new();
+        let mut n_frames = 0usize;
+        let (mut t, mut rt) = ([0.0f64; 2], 0.0f64);
+        let mut error: Option<String> = None;
+        for s in &p.selections {
+            let Some(result) = decoded.get(&s.frame_id) else {
+                // A frame recorded with no peaks contributes nothing.
+                continue;
+            };
+            match result {
+                Ok(frame) => {
+                    push_scans(
+                        &frame.scan_offsets,
+                        &frame.tof_indices,
+                        &frame.intensities,
+                        s.scan_begin,
+                        s.scan_end,
+                        &mut tof,
+                        &mut intensity,
+                    );
+                    let row = self.rows.get(&s.frame_id);
+                    let ft = row.map_or([0.0; 2], |r| r.t);
+                    t[0] += ft[0];
+                    t[1] += ft[1];
+                    rt += frame.rt_in_seconds;
+                    n_frames += 1;
+                }
+                Err(message) => {
+                    error.get_or_insert_with(|| message.clone());
+                }
+            }
+        }
+        if n_frames == 0 {
+            if let Some(message) = error {
+                return Some(Err(TimsTofParseError::Read {
+                    precursor: p.id,
+                    message,
+                }));
+            }
+        }
+        let parent_rt = p
+            .parent
+            .and_then(|id| self.rows.get(&id))
+            .map(|r| r.time)
+            .filter(|t| t.is_finite());
+        let peaks = if n_frames > 0 {
+            let n = n_frames as f64;
+            let cond = FrameConditions {
+                t: [t[0] / n, t[1] / n],
+                rt_s: rt / n,
+            };
+            ms2_peaks(&tof, &intensity, calibration, cond, n_frames)
+        } else {
+            Vec::new()
+        };
+        let rt_seconds = parent_rt.or_else(|| {
+            p.selections
+                .first()
+                .and_then(|s| self.rows.get(&s.frame_id))
+                .map(|r| r.time)
+        });
+        let spec = to_spectrum(p, rt_seconds, peaks)?;
+        let im = p.scan_number.map_or(f64::NAN, |s| self.im.convert(s));
+        Some(Ok((spec, p.parent, im)))
+    }
+}
+
+/// The [`Spectrum`] of a precursor, or `None` without a positive precursor m/z
+/// (the mzML and Thermo readers skip such scans too).
+// `!(mz > 0.0)` deliberately rejects NaN as well as 0 / negative m/z — the
+// same precursor-sanity idiom the Thermo reader uses.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
+fn to_spectrum(
+    p: &PasefPrecursor,
+    rt_seconds: Option<f64>,
+    peaks: Vec<(f64, f32)>,
+) -> Option<Spectrum> {
+    if !(p.mz > 0.0) {
+        return None;
+    }
+    let scan_number = i32::try_from(p.id).ok()?;
+    // 0 (or an absurd value) means "unknown"; the engine then sweeps the
+    // configured charge range.
+    let precursor_charge = p.charge.and_then(model::spectrum::known_precursor_charge);
+    let precursor_intensity = p
+        .intensity
+        .filter(|i| i.is_finite() && *i > 0.0)
+        .map(|i| i as f32);
+    // The quadrupole isolation window is recorded as a centre m/z and a total
+    // width; the model stores symmetric lower / upper offsets.
+    let (isolation_lower_offset, isolation_upper_offset) = if p.isolation_width > 0.0 {
+        let half = p.isolation_width / 2.0;
+        (Some(half), Some(half))
+    } else {
+        (None, None)
+    };
+    Some(Spectrum {
+        // The precursor id identifies the spectrum within the `.d` and becomes
+        // the PIN `SpecID` / scan number.
+        title: format!("scan={scan_number}"),
+        precursor_mz: p.mz,
+        precursor_intensity,
+        precursor_charge,
+        // Retention time of the parent MS1 frame, in seconds.
+        rt_seconds,
+        scan: Some(scan_number),
+        peaks,
+        // timsTOF DDA-PASEF is CID/HCD-style beam-type fragmentation; the
+        // `.d` does not record a discrete activation cvParam the resolver
+        // keys on, so this stays `None` and the param resolver uses its
+        // default (or an explicit `--fragmentation`/`--instrument`).
+        activation_method: None,
+        isolation_lower_offset,
+        isolation_upper_offset,
+        isolation_target_mz: None,
+    })
+}
+
 /// Reader over a Bruker timsTOF `.d` directory, yielding [`Spectrum`] values.
 ///
-/// `timsrust`'s [`SpectrumReader`] exposes a flat, index-addressed list of
-/// centroided MS2 spectra (`len` / `get`), so this reader iterates by index and
-/// owns the underlying handle without a self-referential borrow — matching the
-/// `ThermoRawReader` structure. Every emitted spectrum is MS2 by construction
-/// (the reader only produces fragment spectra), so there is no MS-level filter.
+/// Every emitted spectrum is a PASEF MS2 fragment spectrum, one per precursor
+/// in precursor-id order, so there is no MS-level filter. MS1 survey frames
+/// are read alongside on request.
 pub struct TimsTofReader {
-    reader: SpectrumReader,
+    ms2: Ms2Source,
     dir: PathBuf,
+    /// Next precursor (index into the precursor list) to build.
     next: usize,
-    len: usize,
+    /// Built MS2 not yet handed out.
+    ready: VecDeque<Result<Ms2Item, TimsTofParseError>>,
+    /// The run's TOF → m/z calibration, fitted on the first MS2 request.
+    calibration: Option<MzCalibration>,
     /// Quantification capture (see the mzML reader): every MS1 frame of the
     /// run, and the acquisition context of every emitted MS2.
     capture_run_ms1: bool,
     run_ms1: Vec<Ms1Scan>,
     capture_scan_context: bool,
     scan_contexts: Vec<ScanContext>,
-    /// Opened on the first MS1 request.
+    /// Opened on the first MS1 or MS2 request.
     ms1: Option<Ms1Frames>,
 }
 
@@ -429,20 +642,13 @@ impl TimsTofReader {
                 nested: nested.display().to_string(),
             });
         }
-        let reader = SpectrumReader::new(p).map_err(|source| {
-            let hint = open_error_hint(&source.to_string());
-            TimsTofParseError::Open {
-                path: p.display().to_string(),
-                source: Box::new(source),
-                hint,
-            }
-        })?;
-        let len = reader.len();
+        let ms2 = Ms2Source::open(p)?;
         Ok(Self {
-            reader,
+            ms2,
             dir: p.to_path_buf(),
             next: 0,
-            len,
+            ready: VecDeque::new(),
+            calibration: None,
             capture_run_ms1: false,
             run_ms1: Vec::new(),
             capture_scan_context: false,
@@ -474,14 +680,14 @@ impl TimsTofReader {
         std::mem::take(&mut self.scan_contexts)
     }
 
-    /// Number of MS2 spectra in the `.d`.
+    /// Number of MS2 spectra in the `.d` (precursors with a PASEF selection).
     pub fn len(&self) -> usize {
-        self.len
+        self.ms2.precursors.len()
     }
 
     /// Whether the `.d` has no spectra.
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.ms2.precursors.is_empty()
     }
 
     fn ms1_frames(&mut self) -> Result<&mut Ms1Frames, TimsTofParseError> {
@@ -491,29 +697,33 @@ impl TimsTofReader {
         Ok(self.ms1.as_mut().expect("just opened"))
     }
 
-    /// The next convertible MS2 with its parent MS1 frame id and precursor
-    /// ion mobility, or `None` at the end of the run.
+    /// The next MS2 with its parent MS1 frame id and precursor ion mobility,
+    /// or `None` at the end of the run. The m/z calibration is fitted on the
+    /// first call (from the MS1 frames, see [`Ms1Frames::open`]).
     fn next_ms2(&mut self) -> Option<Result<Ms2Item, TimsTofParseError>> {
-        while self.next < self.len {
-            let i = self.next;
-            self.next += 1;
-            match self.reader.get(i) {
-                Ok(raw) => {
-                    if let Some(spec) = Self::convert(&raw) {
-                        let parent = raw.precursor.as_ref().map(|p| p.frame_index);
-                        let im = raw.precursor.as_ref().map_or(f64::NAN, |p| p.im);
-                        return Some(Ok((spec, parent, im)));
+        loop {
+            if let Some(item) = self.ready.pop_front() {
+                return Some(item);
+            }
+            let total = self.ms2.precursors.len();
+            if self.next >= total {
+                return None;
+            }
+            if self.calibration.is_none() {
+                match self.ms1_frames() {
+                    Ok(ms1) => self.calibration = Some(ms1.calibration.clone()),
+                    Err(e) => {
+                        self.next = total;
+                        return Some(Err(e));
                     }
                 }
-                Err(source) => {
-                    return Some(Err(TimsTofParseError::Read {
-                        index: i,
-                        source: Box::new(source),
-                    }))
-                }
             }
+            let end = (self.next + MS2_BATCH).min(total);
+            let calibration = self.calibration.as_ref().expect("set above");
+            let built = self.ms2.build(self.next..end, calibration);
+            self.ready.extend(built);
+            self.next = end;
         }
-        None
     }
 
     /// Record the context of an emitted MS2 when context capture is on.
@@ -638,113 +848,17 @@ impl TimsTofReader {
     /// The `.d` records no FAIMS voltage.
     pub fn sample_ms2_meta(&self, n: usize) -> crate::Ms2MetaSample {
         let mut out = crate::Ms2MetaSample::default();
-        for i in 0..self.len.min(n) {
-            let Ok(raw) = self.reader.get(i) else {
-                continue;
-            };
+        for p in self.ms2.precursors.iter().take(n) {
             out.n_ms2 += 1;
-            if raw.collision_energy.is_finite() && raw.collision_energy > 0.0 {
-                out.collision_energies.push(raw.collision_energy);
+            if p.collision_energy.is_finite() && p.collision_energy > 0.0 {
+                out.collision_energies.push(p.collision_energy);
             }
-            if raw.isolation_width.is_finite() && raw.isolation_width > 0.0 {
-                out.isolation_widths.push(raw.isolation_width);
+            if p.isolation_width.is_finite() && p.isolation_width > 0.0 {
+                out.isolation_widths.push(p.isolation_width);
             }
         }
         out
     }
-
-    /// Convert one `timsrust` spectrum to a [`Spectrum`], or `None` if the scan
-    /// has no usable DDA precursor m/z — matching the mzML/Thermo readers, which
-    /// skip precursor-less MS2 rather than forwarding a `precursor_mz = 0.0`
-    /// spectrum that would search against a nonsense mass window.
-    // `!(mz > 0.0)` deliberately rejects NaN as well as 0 / negative m/z — the
-    // same precursor-sanity idiom the Thermo reader uses.
-    #[allow(clippy::neg_cmp_op_on_partial_ord)]
-    fn convert(raw: &timsrust::Spectrum) -> Option<Spectrum> {
-        // The 0-based `timsrust` index becomes a 1-based scan number, matching
-        // the convention the mzML/Thermo readers use for `SCANS=`/scan.
-        let scan_number = raw.index as i32 + 1;
-
-        // A DDA precursor with a positive m/z is required to search an MS2.
-        let precursor = raw.precursor.as_ref()?;
-        let precursor_mz = precursor.mz;
-        if !(precursor_mz > 0.0) {
-            return None;
-        }
-
-        // 0 (or an absurd value) means "unknown"; let the engine sweep the
-        // configured charge range instead of trusting a bogus state.
-        let precursor_charge = precursor
-            .charge
-            .and_then(|z| i64::try_from(z).ok())
-            .and_then(model::spectrum::known_precursor_charge);
-
-        let precursor_intensity =
-            precursor
-                .intensity
-                .and_then(|i| if i > 0.0 { Some(i as f32) } else { None });
-
-        // The quadrupole isolation window is reported as a center m/z + total
-        // width. Convert to the symmetric lower/upper offsets the model stores
-        // (mirroring how the mzML reader records `isolation window lower/upper
-        // offset`). Only `--chimeric` consumes these, and chimeric on `.d` runs
-        // as a normal search, but they are filled in for completeness when the
-        // width is positive.
-        let (isolation_lower_offset, isolation_upper_offset) = if raw.isolation_width > 0.0 {
-            let half = raw.isolation_width / 2.0;
-            (Some(half), Some(half))
-        } else {
-            (None, None)
-        };
-
-        Some(Spectrum {
-            // The 1-based scan index uniquely identifies the spectrum within the
-            // `.d` and becomes the PIN `SpecID` column.
-            title: format!("scan={scan_number}"),
-            precursor_mz,
-            precursor_intensity,
-            precursor_charge,
-            // `timsrust` retention time is in SECONDS; the model stores
-            // seconds, so it is carried as-is (RT seconds → minutes downstream).
-            rt_seconds: Some(precursor.rt),
-            scan: Some(scan_number),
-            peaks: extract_peaks(raw),
-            // timsTOF DDA-PASEF is CID/HCD-style beam-type fragmentation; the
-            // `.d` does not record a discrete activation cvParam the resolver
-            // keys on, so leave this `None` and let the param resolver use its
-            // default (or an explicit `--fragmentation`/`--instrument`).
-            activation_method: None,
-            isolation_lower_offset,
-            isolation_upper_offset,
-            isolation_target_mz: None,
-        })
-    }
-}
-
-/// Extract centroided peaks `(m/z, intensity)` from a `timsrust` spectrum,
-/// ascending by m/z. `timsrust` stores parallel `mz_values` / `intensities`
-/// vectors of `f64`; intensity is narrowed to `f32` to match the model.
-///
-/// Downstream consumers require m/z-ascending peaks (the scorer and chimeric
-/// co-isolation detection binary-search the list). `timsrust` returns peaks
-/// sorted by m/z, so the list is only re-sorted if an inversion is present.
-///
-/// The two arrays are paired only over their overlapping prefix, so a malformed
-/// length mismatch can't read past either vector, and non-finite or
-/// non-positive-m/z / negative-intensity points are dropped before they can
-/// reach the scorer.
-fn extract_peaks(raw: &timsrust::Spectrum) -> Vec<(f64, f32)> {
-    let n = raw.mz_values.len().min(raw.intensities.len());
-    let mut peaks: Vec<(f64, f32)> = (0..n)
-        .map(|i| (raw.mz_values[i], raw.intensities[i] as f32))
-        .filter(|&(mz, intensity)| {
-            mz.is_finite() && mz > 0.0 && intensity.is_finite() && intensity >= 0.0
-        })
-        .collect();
-    if peaks.windows(2).any(|w| w[0].0 > w[1].0) {
-        peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    }
-    peaks
 }
 
 impl Iterator for TimsTofReader {
@@ -781,7 +895,7 @@ impl Iterator for TimsTofReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use timsrust::Precursor;
+    use crate::timstof_ms2::Selection;
 
     #[test]
     fn compression_type_1_gets_a_conversion_hint() {
@@ -808,119 +922,57 @@ mod tests {
         );
     }
 
-    /// Build a minimal `timsrust::Spectrum` for the conversion tests.
-    fn spectrum(
-        index: usize,
-        precursor: Option<Precursor>,
-        isolation_width: f64,
-        mz_values: Vec<f64>,
-        intensities: Vec<f64>,
-    ) -> timsrust::Spectrum {
-        timsrust::Spectrum {
-            mz_values,
-            intensities,
-            precursor,
-            index,
-            isolation_width,
-            ..Default::default()
+    fn precursor(id: usize, mz: f64, charge: Option<i64>, width: f64) -> PasefPrecursor {
+        PasefPrecursor {
+            id,
+            mz,
+            charge,
+            intensity: Some(5000.0),
+            parent: Some(7),
+            scan_number: Some(700.0),
+            isolation_width: width,
+            collision_energy: 28.0,
+            selections: vec![Selection {
+                frame_id: 8,
+                scan_begin: 690,
+                scan_end: 715,
+            }],
         }
     }
 
     #[test]
-    fn convert_maps_precursor_and_peaks() {
-        let precursor = Precursor {
-            mz: 654.32,
-            rt: 1800.0, // seconds
-            charge: Some(2),
-            intensity: Some(5000.0),
-            ..Default::default()
-        };
-        let raw = spectrum(
-            41,
-            Some(precursor),
-            2.0,
-            vec![100.0, 200.5, 300.0],
-            vec![10.0, 20.0, 30.0],
-        );
-
-        let spec = TimsTofReader::convert(&raw).expect("convertible spectrum");
-        // 0-based index becomes a 1-based scan number.
+    fn to_spectrum_maps_precursor_and_peaks() {
+        let p = precursor(42, 654.32, Some(2), 2.0);
+        let peaks = vec![(100.0, 10.0_f32), (200.5, 20.0_f32)];
+        let spec = to_spectrum(&p, Some(1800.0), peaks.clone()).expect("convertible");
+        // The precursor id is the scan number.
         assert_eq!(spec.scan, Some(42));
         assert_eq!(spec.title, "scan=42");
         assert_eq!(spec.precursor_mz, 654.32);
         assert_eq!(spec.precursor_charge, Some(2));
         assert_eq!(spec.precursor_intensity, Some(5000.0));
-        // RT is carried through in seconds (NOT divided by 60).
+        // RT is carried in seconds.
         assert_eq!(spec.rt_seconds, Some(1800.0));
         // Symmetric offsets are half the total isolation width.
         assert_eq!(spec.isolation_lower_offset, Some(1.0));
         assert_eq!(spec.isolation_upper_offset, Some(1.0));
-        assert_eq!(
-            spec.peaks,
-            vec![(100.0, 10.0_f32), (200.5, 20.0_f32), (300.0, 30.0_f32)]
-        );
+        assert_eq!(spec.peaks, peaks);
     }
 
     #[test]
-    fn convert_skips_precursorless_spectrum() {
-        let raw = spectrum(0, None, 2.0, vec![100.0], vec![1.0]);
-        assert!(TimsTofReader::convert(&raw).is_none());
+    fn to_spectrum_skips_a_nonpositive_precursor_mz() {
+        assert!(to_spectrum(&precursor(1, 0.0, Some(2), 2.0), None, Vec::new()).is_none());
+        assert!(to_spectrum(&precursor(1, f64::NAN, Some(2), 2.0), None, Vec::new()).is_none());
     }
 
     #[test]
-    fn convert_skips_nonpositive_precursor_mz() {
-        let precursor = Precursor {
-            mz: 0.0,
-            ..Default::default()
-        };
-        let raw = spectrum(0, Some(precursor), 2.0, vec![100.0], vec![1.0]);
-        assert!(TimsTofReader::convert(&raw).is_none());
-    }
-
-    #[test]
-    fn convert_treats_zero_charge_as_unknown() {
-        let precursor = Precursor {
-            mz: 500.0,
-            charge: Some(0),
-            ..Default::default()
-        };
-        let raw = spectrum(0, Some(precursor), 0.0, vec![100.0], vec![1.0]);
-        let spec = TimsTofReader::convert(&raw).expect("positive m/z is convertible");
+    fn to_spectrum_treats_zero_or_missing_charge_as_unknown() {
+        let spec = to_spectrum(&precursor(1, 500.0, Some(0), 0.0), None, Vec::new()).unwrap();
         assert_eq!(spec.precursor_charge, None);
         // A non-positive isolation width yields no offsets.
         assert_eq!(spec.isolation_lower_offset, None);
         assert_eq!(spec.isolation_upper_offset, None);
-    }
-
-    #[test]
-    fn extract_peaks_sorts_unordered_input() {
-        let raw = spectrum(0, None, 0.0, vec![300.0, 100.0, 200.0], vec![3.0, 1.0, 2.0]);
-        let peaks = extract_peaks(&raw);
-        assert_eq!(
-            peaks,
-            vec![(100.0, 1.0_f32), (200.0, 2.0_f32), (300.0, 3.0_f32)]
-        );
-    }
-
-    #[test]
-    fn extract_peaks_drops_nonfinite_and_nonpositive() {
-        let raw = spectrum(
-            0,
-            None,
-            0.0,
-            vec![100.0, f64::NAN, 0.0, 200.0, f64::INFINITY, 300.0],
-            vec![1.0, 5.0, 5.0, f64::NAN, 5.0, -1.0],
-        );
-        // Drops: NaN m/z, 0.0 m/z, +inf m/z, NaN intensity, negative intensity.
-        let peaks = extract_peaks(&raw);
-        assert_eq!(peaks, vec![(100.0, 1.0_f32)]);
-    }
-
-    #[test]
-    fn extract_peaks_pairs_only_overlapping_prefix() {
-        // A malformed length mismatch must not read past the shorter vector.
-        let raw = spectrum(0, None, 0.0, vec![100.0, 200.0, 300.0], vec![1.0, 2.0]);
-        let peaks = extract_peaks(&raw);
-        assert_eq!(peaks, vec![(100.0, 1.0_f32), (200.0, 2.0_f32)]);
+        let spec = to_spectrum(&precursor(1, 500.0, None, 2.0), None, Vec::new()).unwrap();
+        assert_eq!(spec.precursor_charge, None);
     }
 }

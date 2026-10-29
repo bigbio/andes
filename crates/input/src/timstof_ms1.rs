@@ -17,9 +17,10 @@
 //! those m/z values to the centroids of their parent MS1 frames and fits
 //! `sqrt(m/z)` as a cubic in the TOF index plus a linear term in each of the
 //! two frame temperatures the TDF records (`Frames.T1`, `Frames.T2`), which is
-//! what the vendor calibration compensates for. Pairs are matched in two
-//! passes (a wide window to find the run's offset, a narrow one around it)
-//! and the fit is refined by discarding residuals beyond four robust
+//! what the vendor calibration compensates for. Each vendor m/z is paired
+//! with the most intense centroid in a window, in two passes: a wide window
+//! whose pairs give the run's offset as the mode of their offsets, then a
+//! narrow window around that offset. The fit is refined by discarding residuals beyond four robust
 //! standard deviations.
 
 /// A centroid in the TOF domain: intensity-weighted TOF index, summed
@@ -227,9 +228,11 @@ pub(crate) const MIN_CALIBRATION_POINTS: usize = 200;
 /// refit.
 const OUTLIER_SIGMAS: f64 = 4.0;
 
-/// Pair each vendor m/z of a frame with the nearest centroid within
-/// `offset_ppm ± window_ppm` (positions under the linear model `base`).
-/// `centroids` are sorted by TOF.
+/// Pair each vendor m/z of a frame with the most intense centroid within
+/// `offset_ppm ± window_ppm` (positions under the linear model `base`). The
+/// vendor m/z is that of the precursor's largest isotope peak, so among the
+/// centroids near it the most intense is its counterpart; the nearest one is
+/// as often a neighbouring peak. `centroids` are sorted by TOF.
 pub(crate) fn match_precursors(
     centroids: &[TofCentroid],
     vendor_mz: &[f64],
@@ -243,20 +246,56 @@ pub(crate) fn match_precursors(
         if !(mz.is_finite() && mz > 0.0) {
             continue;
         }
-        let tof = base.linear_tof(mz);
-        let i = centroids.partition_point(|c| c.tof < tof);
-        let mut best: Option<(f64, f64)> = None; // (|ppm - offset|, tof)
-        for c in centroids[i.saturating_sub(3)..(i + 3).min(centroids.len())].iter() {
-            let ppm = (base.mz(c.tof, t) - mz) / mz * 1e6;
-            let d = (ppm - offset_ppm).abs();
-            if d <= window_ppm && best.is_none_or(|b| d < b.0) {
-                best = Some((d, c.tof));
-            }
-        }
-        if let Some((_, tof)) = best {
-            out.push(CalibrationPoint { tof, mz, t });
+        // The window in the TOF domain; the base model is monotonic in TOF,
+        // and the temperature terms of `base` are zero.
+        let at = |ppm: f64| base.linear_tof(mz * (1.0 + ppm * 1e-6));
+        let (lo, hi) = (at(offset_ppm - window_ppm), at(offset_ppm + window_ppm));
+        let i = centroids.partition_point(|c| c.tof < lo);
+        let j = centroids.partition_point(|c| c.tof <= hi);
+        let best = centroids[i..j.max(i)]
+            .iter()
+            .max_by(|a, b| a.intensity.total_cmp(&b.intensity));
+        if let Some(c) = best {
+            out.push(CalibrationPoint { tof: c.tof, mz, t });
         }
     }
+}
+
+/// Width (ppm) of the offset histogram bins of [`mode_offset_ppm`].
+const OFFSET_BIN_PPM: f64 = 1.0;
+
+/// The run's offset (ppm) of the linear model from the vendor m/z: the mode
+/// of the matched pairs' offsets (histogram of [`OFFSET_BIN_PPM`] bins,
+/// smoothed over three bins). Correct pairs pile up at the offset while pairs
+/// with a neighbouring peak spread over the whole window, so the mode finds
+/// the offset where a median would be pulled toward the window centre.
+pub(crate) fn mode_offset_ppm(points: &[CalibrationPoint], base: &MzCalibration) -> Option<f64> {
+    if points.is_empty() {
+        return None;
+    }
+    let half = (WIDE_WINDOW_PPM / OFFSET_BIN_PPM).ceil() as i64;
+    let mut hist = vec![0.0f64; (2 * half + 1) as usize];
+    for p in points {
+        let ppm = (base.mz(p.tof, p.t) - p.mz) / p.mz * 1e6;
+        let k = (ppm / OFFSET_BIN_PPM).round() as i64 + half;
+        if let Some(h) = usize::try_from(k).ok().and_then(|k| hist.get_mut(k)) {
+            *h += 1.0;
+        }
+    }
+    let smooth = |k: usize| {
+        hist[k.saturating_sub(1)..(k + 2).min(hist.len())]
+            .iter()
+            .sum::<f64>()
+    };
+    let k = (0..hist.len()).max_by(|&a, &b| smooth(a).total_cmp(&smooth(b)))?;
+    // Refine within the peak: the mean offset of the pairs within one bin.
+    let centre = (k as i64 - half) as f64 * OFFSET_BIN_PPM;
+    let near: Vec<f64> = points
+        .iter()
+        .map(|p| (base.mz(p.tof, p.t) - p.mz) / p.mz * 1e6)
+        .filter(|ppm| (ppm - centre).abs() <= 1.5 * OFFSET_BIN_PPM)
+        .collect();
+    Some(near.iter().sum::<f64>() / near.len().max(1) as f64)
 }
 
 /// Median of `v` (reorders it); `None` when empty.
@@ -267,15 +306,6 @@ fn median(v: &mut [f64]) -> Option<f64> {
     let mid = v.len() / 2;
     let (_, m, _) = v.select_nth_unstable_by(mid, f64::total_cmp);
     Some(*m)
-}
-
-/// The run's median offset (ppm) of matched pairs from the linear model.
-pub(crate) fn median_offset_ppm(points: &[CalibrationPoint], base: &MzCalibration) -> Option<f64> {
-    let mut ppm: Vec<f64> = points
-        .iter()
-        .map(|p| (base.mz(p.tof, p.t) - p.mz) / p.mz * 1e6)
-        .collect();
-    median(&mut ppm)
 }
 
 /// Least-squares solution of `a x = b` for a small dense symmetric system
@@ -600,31 +630,49 @@ mod tests {
     }
 
     #[test]
-    fn matching_picks_the_nearest_centroid_inside_the_window() {
+    fn matching_picks_the_most_intense_centroid_inside_the_window() {
         let base = MzCalibration::linear(10.0, 31.0 / 400_000.0, 400_000.0);
         let t = [0.0; 2];
         let target = base.mz(100_000.0, t);
+        let c = |tof: f64, intensity: f64| TofCentroid { tof, intensity };
+        // Nearest (100_000.4) is weak; the intense one 1 bin away is the peak.
         let centroids = vec![
-            TofCentroid {
-                tof: 99_990.0,
-                intensity: 1.0,
-            },
-            TofCentroid {
-                tof: 100_000.4,
-                intensity: 1.0,
-            },
-            TofCentroid {
-                tof: 100_020.0,
-                intensity: 1.0,
-            },
+            c(99_990.0, 50.0),
+            c(100_000.4, 1.0),
+            c(100_001.0, 20.0),
+            c(100_200.0, 99.0),
         ];
         let mut out = Vec::new();
         match_precursors(&centroids, &[target], t, &base, 0.0, 20.0, &mut out);
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].tof, 100_000.4);
+        assert_eq!(out[0].tof, 100_001.0);
         out.clear();
         // Nothing within 0.001 ppm of an offset of +500 ppm.
         match_precursors(&centroids, &[target], t, &base, 500.0, 0.001, &mut out);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn the_offset_is_the_mode_not_the_median() {
+        // 300 pairs at +8 ppm, 700 spread uniformly over -150..150 ppm.
+        let base = MzCalibration::linear(10.0, 31.0 / 400_000.0, 400_000.0);
+        let t = [0.0; 2];
+        let mut points = Vec::new();
+        for i in 0..1000 {
+            let tof = 50_000.0 + i as f64 * 200.0;
+            let m = base.mz(tof, t);
+            let ppm = if i < 300 {
+                8.0
+            } else {
+                -150.0 + 300.0 * ((i * 37 % 700) as f64 / 700.0)
+            };
+            points.push(CalibrationPoint {
+                tof,
+                mz: m / (1.0 + ppm * 1e-6),
+                t,
+            });
+        }
+        let off = mode_offset_ppm(&points, &base).unwrap();
+        assert!((off - 8.0).abs() < 0.2, "{off}");
     }
 }

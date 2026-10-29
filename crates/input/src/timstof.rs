@@ -37,7 +37,7 @@ use timsrust::MSLevel;
 use model::scan::{Ms1Scan, ScanContext};
 
 use crate::timstof_ms1::{
-    centroid_profile, fit_calibration, match_precursors, median_offset_ppm, sum_over_mobility,
+    centroid_profile, fit_calibration, match_precursors, mode_offset_ppm, sum_over_mobility,
     CalibrationFit, MzCalibration, NARROW_WINDOW_PPM, WIDE_WINDOW_PPM,
 };
 use crate::{Ms1Link, Spectrum};
@@ -293,7 +293,7 @@ impl Ms1Frames {
             points
         };
         let wide = pass(0.0, WIDE_WINDOW_PPM);
-        let offset = median_offset_ppm(&wide, base)?;
+        let offset = mode_offset_ppm(&wide, base)?;
         fit_calibration(&pass(offset, NARROW_WINDOW_PPM), base)
     }
 

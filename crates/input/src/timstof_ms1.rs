@@ -5,8 +5,9 @@
 //! A TIMS MS1 frame holds one TOF spectrum per mobility scan. Quantification
 //! and the MS1-linked search paths read survey scans as one centroid list per
 //! retention time, so each frame is summed over its scans (per TOF index),
-//! split into peaks at the valleys of the summed profile, and each peak is
-//! reported at its intensity-weighted TOF position.
+//! split into peaks at the valleys of the lightly smoothed summed profile,
+//! and each peak is reported at the intensity-weighted TOF position of its
+//! half-height core.
 //!
 //! The TOF → m/z conversion that `timsrust` derives from the acquisition
 //! range (`sqrt(m/z)` linear in the TOF index) is an approximation of the
@@ -50,16 +51,31 @@ pub(crate) fn sum_over_mobility(tof: &[u32], intensity: &[u32]) -> Vec<(u32, u64
 /// index between two recorded ones is a zero-count bin inside the peak.
 const MAX_TOF_GAP: u32 = 2;
 
-/// Two maxima separated by a valley deeper than this fraction of the lower
-/// maximum are two peaks; a shallower dip is noise on one peak.
+/// Two maxima of the smoothed profile separated by a valley deeper than this
+/// fraction of the lower maximum are two peaks; a shallower dip is noise on
+/// one peak.
 const VALLEY_SPLIT_FRACTION: f64 = 0.5;
 
+/// Binomial smoothing kernel (standard deviation one TOF bin). An MS1 peak
+/// spans several TOF bins (its full width at half maximum is 3 to 6 bins over
+/// the m/z range), while the counts of a summed frame fluctuate from bin to
+/// bin; peaks are found on the smoothed profile so that this noise does not
+/// split one peak into several.
+const SMOOTHING: [f64; 5] = [1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0];
+
+/// The part of a peak its position is taken from: the points whose smoothed
+/// intensity is at least this fraction of the peak's smoothed maximum (the
+/// half-height core, where the shape is symmetric and the tails of
+/// neighbouring peaks weigh least).
+const CORE_FRACTION: f64 = 0.5;
+
 /// Centroid a summed TOF profile (sorted by TOF index). Runs of points no
-/// more than [`MAX_TOF_GAP`] apart are split at their local minima, and
-/// neighbouring segments are merged again when the valley between them is
-/// shallower than [`VALLEY_SPLIT_FRACTION`] of the lower segment maximum.
-/// Each peak is reported at its intensity-weighted TOF index with its summed
-/// intensity.
+/// more than [`MAX_TOF_GAP`] apart are laid out on a dense TOF grid, smoothed
+/// with [`SMOOTHING`], and split at the minima of the smoothed profile;
+/// neighbouring segments are merged again when the smoothed valley between
+/// them is shallower than [`VALLEY_SPLIT_FRACTION`] of the lower segment
+/// maximum. Each peak is reported at the intensity-weighted TOF index of its
+/// core (see [`CORE_FRACTION`]) with the summed intensity of the whole peak.
 pub(crate) fn centroid_profile(profile: &[(u32, u64)]) -> Vec<TofCentroid> {
     let mut out = Vec::new();
     let mut start = 0;
@@ -74,71 +90,73 @@ pub(crate) fn centroid_profile(profile: &[(u32, u64)]) -> Vec<TofCentroid> {
     out
 }
 
-/// One peak segment: its maximum and its intensity and TOF-weighted sums.
-#[derive(Debug, Clone, Copy)]
-struct Segment {
-    max: f64,
-    sum: f64,
-    weighted: f64,
-}
-
-impl Segment {
-    fn of(points: &[(u32, u64)]) -> Self {
-        let mut s = Self {
-            max: 0.0,
-            sum: 0.0,
-            weighted: 0.0,
-        };
-        for &(t, i) in points {
-            let i = i as f64;
-            s.max = s.max.max(i);
-            s.sum += i;
-            s.weighted += i * f64::from(t);
-        }
-        s
-    }
-
-    fn merge(self, other: Self) -> Self {
-        Self {
-            max: self.max.max(other.max),
-            sum: self.sum + other.sum,
-            weighted: self.weighted + other.weighted,
-        }
-    }
-}
-
-/// Centroid one run of contiguous points (see [`centroid_profile`]).
+/// Centroid one run of points no more than [`MAX_TOF_GAP`] apart (see
+/// [`centroid_profile`]).
 fn centroid_run(run: &[(u32, u64)], out: &mut Vec<TofCentroid>) {
-    // Split at every strict local minimum; the minimum opens the right
-    // segment, and its intensity is the valley in front of that segment.
-    let mut segments: Vec<(Segment, f64)> = Vec::new();
-    let mut seg_start = 0;
+    let first = run[0].0;
+    let n = (run[run.len() - 1].0 - first) as usize + 1;
+    let mut raw = vec![0.0f64; n];
+    for &(t, i) in run {
+        raw[(t - first) as usize] = i as f64;
+    }
+    let half = SMOOTHING.len() / 2;
+    let smooth: Vec<f64> = (0..n)
+        .map(|i| {
+            SMOOTHING
+                .iter()
+                .enumerate()
+                .filter_map(|(k, w)| {
+                    let j = (i + k).checked_sub(half)?;
+                    raw.get(j).map(|v| v * w)
+                })
+                .sum()
+        })
+        .collect();
+    // Segments [lo, hi) split at the strict minima of the smoothed profile,
+    // each with its smoothed maximum and the smoothed valley in front of it.
+    let mut segments: Vec<(usize, usize, f64, f64)> = Vec::new();
+    let mut lo = 0;
     let mut valley = 0.0;
-    for i in 1..run.len().saturating_sub(1) {
-        let (prev, cur, next) = (run[i - 1].1, run[i].1, run[i + 1].1);
-        if cur < prev && cur <= next {
-            segments.push((Segment::of(&run[seg_start..i]), valley));
-            seg_start = i;
-            valley = cur as f64;
+    for i in 1..n.saturating_sub(1) {
+        if smooth[i] < smooth[i - 1] && smooth[i] <= smooth[i + 1] {
+            let max = smooth[lo..i].iter().copied().fold(0.0, f64::max);
+            segments.push((lo, i, max, valley));
+            lo = i;
+            valley = smooth[i];
         }
     }
-    segments.push((Segment::of(&run[seg_start..]), valley));
-    let mut merged: Vec<Segment> = Vec::with_capacity(segments.len());
-    for (seg, valley) in segments {
+    let max = smooth[lo..].iter().copied().fold(0.0, f64::max);
+    segments.push((lo, n, max, valley));
+    let mut merged: Vec<(usize, usize, f64)> = Vec::with_capacity(segments.len());
+    for (lo, hi, max, valley) in segments {
         match merged.last_mut() {
-            Some(last) if valley >= VALLEY_SPLIT_FRACTION * last.max.min(seg.max) => {
-                *last = last.merge(seg);
+            Some(last) if valley >= VALLEY_SPLIT_FRACTION * last.2.min(max) => {
+                last.1 = hi;
+                last.2 = last.2.max(max);
             }
-            _ => merged.push(seg),
+            _ => merged.push((lo, hi, max)),
         }
     }
-    for seg in merged {
-        if seg.sum > 0.0 {
-            out.push(TofCentroid {
-                tof: seg.weighted / seg.sum,
-                intensity: seg.sum,
-            });
+    for (lo, hi, max) in merged {
+        let total: f64 = raw[lo..hi].iter().sum();
+        if total <= 0.0 {
+            continue;
         }
+        let (mut w, mut wt) = (0.0, 0.0);
+        for i in lo..hi {
+            if smooth[i] >= CORE_FRACTION * max {
+                w += raw[i];
+                wt += raw[i] * (first as f64 + i as f64);
+            }
+        }
+        if w <= 0.0 {
+            w = total;
+            wt = (lo..hi).map(|i| raw[i] * (first as f64 + i as f64)).sum();
+        }
+        out.push(TofCentroid {
+            tof: wt / w,
+            intensity: total,
+        });
     }
 }
 
@@ -444,14 +462,65 @@ mod tests {
         assert_eq!(c[0].intensity, 13.0);
     }
 
+    /// A Gaussian peak of `height` at TOF `centre` (standard deviation
+    /// `sigma` bins) over `lo..hi`, with a deterministic count jitter of
+    /// `jitter` (fraction of the value, alternating sign).
+    fn gaussian(
+        lo: u32,
+        hi: u32,
+        centre: f64,
+        sigma: f64,
+        height: f64,
+        jitter: f64,
+    ) -> Vec<(u32, u64)> {
+        (lo..hi)
+            .map(|t| {
+                let x = (t as f64 - centre) / sigma;
+                let sign = if t % 2 == 0 { 1.0 } else { -1.0 };
+                let v = height * (-0.5 * x * x).exp() * (1.0 + sign * jitter);
+                (t, v.round() as u64)
+            })
+            .filter(|p| p.1 > 0)
+            .collect()
+    }
+
+    fn add(a: &[(u32, u64)], b: &[(u32, u64)]) -> Vec<(u32, u64)> {
+        let mut m = std::collections::BTreeMap::new();
+        for &(t, i) in a.iter().chain(b) {
+            *m.entry(t).or_insert(0) += i;
+        }
+        m.into_iter().collect()
+    }
+
     #[test]
-    fn a_deep_valley_splits_and_a_shallow_dip_does_not() {
-        // Two maxima (10, 8) with a valley of 1: two peaks.
-        let deep = vec![(1, 2), (2, 10), (3, 1), (4, 8), (5, 2)];
-        assert_eq!(centroid_profile(&deep).len(), 2);
-        // A dip to 9 between 10 and 10: one peak.
-        let shallow = vec![(1, 2), (2, 10), (3, 9), (4, 10), (5, 2)];
-        assert_eq!(centroid_profile(&shallow).len(), 1);
+    fn bin_to_bin_noise_does_not_split_one_peak() {
+        // A 2-bin sigma peak with 30 % alternating count noise: one centroid
+        // within a quarter bin (about 1 ppm) of the true centre.
+        let p = gaussian(990, 1011, 1000.3, 2.0, 40.0, 0.3);
+        let c = centroid_profile(&p);
+        assert_eq!(c.len(), 1, "{c:?}");
+        assert!((c[0].tof - 1000.3).abs() < 0.25, "{c:?}");
+    }
+
+    #[test]
+    fn resolved_peaks_split_and_an_unresolved_shoulder_does_not() {
+        // Two peaks 10 bins apart (5 sigma): two centroids at their centres.
+        let p = add(
+            &gaussian(990, 1011, 1000.0, 2.0, 100.0, 0.0),
+            &gaussian(1000, 1021, 1010.0, 2.0, 60.0, 0.0),
+        );
+        let c = centroid_profile(&p);
+        assert_eq!(c.len(), 2, "{c:?}");
+        assert!(
+            (c[0].tof - 1000.0).abs() < 0.2 && (c[1].tof - 1010.0).abs() < 0.2,
+            "{c:?}"
+        );
+        // 3 bins apart: one peak.
+        let q = add(
+            &gaussian(990, 1011, 1000.0, 2.0, 100.0, 0.0),
+            &gaussian(993, 1014, 1003.0, 2.0, 60.0, 0.0),
+        );
+        assert_eq!(centroid_profile(&q).len(), 1);
     }
 
     #[test]

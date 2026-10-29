@@ -1248,6 +1248,7 @@ impl<R: BufRead> MzMLReader<R> {
                                     scan_window: sb.scan_window_lower.zip(sb.scan_window_upper),
                                     faims_cv: sb.faims_cv,
                                     noise,
+                                    ion_mobility: None,
                                 });
                                 if let Some(s) = self.finish_spectrum(sb)? {
                                     if let Some(c) = context {
@@ -3838,6 +3839,7 @@ mod tests {
                 scan_window: Some((148.0, 1866.0)),
                 faims_cv: Some(-45.0),
                 noise: None,
+                ion_mobility: None,
             }]
         );
         // Off by default.

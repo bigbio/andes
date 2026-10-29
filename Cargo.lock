@@ -1448,6 +1448,8 @@ dependencies = [
  "model",
  "parquet",
  "quick-xml",
+ "rayon",
+ "rusqlite",
  "tempfile",
  "thermorawfilereader",
  "thiserror 2.0.18",

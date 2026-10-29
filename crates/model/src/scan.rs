@@ -61,6 +61,9 @@ pub struct ScanContext {
     /// Noise level in the reporter-ion region of the MS2, when the source
     /// records it and noise capture is on (reporter signal-to-noise at MS2).
     pub noise: Option<NoiseProfile>,
+    /// Inverse reduced ion mobility (1/K0, V·s/cm²) of the precursor, when
+    /// the source records it (Bruker timsTOF `.d`).
+    pub ion_mobility: Option<f32>,
 }
 
 /// Upper end of the m/z range a [`NoiseProfile`] keeps: every isobaric

@@ -926,21 +926,17 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let iso_default = if cli.glyco { (0, 2) } else { (-1, 2) };
     let (iso_min, iso_max) = cli.isotope_error.unwrap_or(iso_default);
     params.isotope_error_range = iso_min..=iso_max;
-    // Pass 2 co-isolation requires MS1 scans, captured by the mzML and Thermo
-    // `.raw` readers. MGF (no MS1) and the Bruker `.d` reader (DDA MS2 only;
-    // chimeric on `.d` is out of scope) make `--chimeric` inert, so keep
-    // `params.chimeric` FALSE to turn the ENTIRE chimeric path off (Pass 2, PIN
-    // column/SpecId gates, top-N forcing) — the run is then identical to a normal search.
-    let chimeric_active = cli.chimeric && (is_mzml || is_raw);
-    if cli.chimeric && !(is_mzml || is_raw) {
+    // Pass 2 co-isolation requires MS1 scans, captured by the mzML, Thermo
+    // `.raw` and Bruker `.d` readers. MGF (no MS1) makes `--chimeric` inert, so
+    // keep `params.chimeric` FALSE to turn the ENTIRE chimeric path off (Pass 2,
+    // PIN column/SpecId gates, top-N forcing) — the run is then identical to a
+    // normal search.
+    let has_ms1 = is_mzml || is_raw || is_d;
+    let chimeric_active = cli.chimeric && has_ms1;
+    if cli.chimeric && !has_ms1 {
         eprintln!(
-            "WARN: --chimeric requires MS1 data (mzML or Thermo .raw); the input is {} \
-             so the co-isolation cascade is disabled and the search runs normally.",
-            if is_d {
-                "Bruker .d (DDA MS2 only),"
-            } else {
-                "MGF,"
-            }
+            "WARN: --chimeric requires MS1 data (mzML, Thermo .raw or Bruker .d); the input \
+             is MGF, so the co-isolation cascade is disabled and the search runs normally."
         );
     }
     // The cascade pairs MS2 with its preceding MS1 — it is MS2-only by
@@ -969,16 +965,17 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     // `--precursor-mono auto`: MS1 isotope-envelope precursor correction. Glyco
     // only (the standard path's -1..2 sweep and PIN are untouched), and it needs
-    // MS1, so mzML or Thermo `.raw`; anywhere else it is inert and says so. When
+    // MS1, so mzML, Thermo `.raw` or Bruker `.d`; anywhere else it is inert and
+    // says so. When
     // active the input is streamed with its MS1 link exactly like `--chimeric`
     // and each chunk's precursors are corrected BEFORE they reach the search.
-    let mono_active =
-        cli.precursor_mono == PrecursorMonoFlag::Auto && cli.glyco && (is_mzml || is_raw);
+    let mono_active = cli.precursor_mono == PrecursorMonoFlag::Auto && cli.glyco && has_ms1;
     // `auto` is the default and the correction is glyco-only, so a search
     // without --glyco is not told about it; a glyco search without MS1 is.
     if cli.precursor_mono == PrecursorMonoFlag::Auto && cli.glyco && !mono_active {
         eprintln!(
-            "WARN: --precursor-mono auto needs an input with MS1 (mzML or Thermo .raw); \
+            "WARN: --precursor-mono auto needs an input with MS1 (mzML, Thermo .raw or \
+             Bruker .d); \
              {} has none — precursors are left as recorded.",
             spectrum_path.display()
         );
@@ -1388,13 +1385,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // The precursor-calibration pre-pass currently reads only mzML/MGF. For a
-    // Thermo `.raw` or Bruker `.d` it would be misread as MGF, so skip
-    // calibration and warn (native-format calibration support is a follow-up).
-    if (is_raw || is_d) && params.precursor_cal_mode != PrecursorCalMode::Off {
-        let fmt = if is_raw { "Thermo .raw" } else { "Bruker .d" };
+    // The precursor-calibration pre-pass reads mzML, MGF and Bruker `.d`. A
+    // Thermo `.raw` would be misread as MGF, so skip calibration and warn.
+    if is_raw && params.precursor_cal_mode != PrecursorCalMode::Off {
         eprintln!(
-            "WARN: --precursor-cal is not yet supported for {fmt} input; \
+            "WARN: --precursor-cal is not yet supported for Thermo .raw input; \
              proceeding without calibration."
         );
         params.precursor_cal_mode = PrecursorCalMode::Off;
@@ -1517,9 +1512,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 "--lfq, --quant-dir and --tmt-level 3 need MS1/MS3 scans; MGF input carries MS2 only".into(),
             );
         }
-        if is_d && (s.needs_ms1_series() || s.needs_ms3()) {
+        if is_d && s.needs_ms3() {
             return Err(
-                "--lfq, --quant-dir and --tmt-level 3 are not yet supported for Bruker .d input"
+                "--tmt-level 3 reads reporter ions from MS3 scans, and a Bruker .d has none \
+                 (a TDF records MS1 and PASEF MS2 frames only); quantify the reporters from \
+                 the MS2 (--tmt-level 2)"
                     .into(),
             );
         }
@@ -1643,9 +1640,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        if ms1_input && !(file_is_mzml || file_is_raw) {
+        if ms1_input && !(file_is_mzml || file_is_raw || file_is_d) {
             return Err(format!(
-                "{} only supports mzML/.raw inputs, got {}",
+                "{} only supports mzML/.raw/.d inputs, got {}",
                 if chimeric_active {
                     "--chimeric"
                 } else {
@@ -1694,6 +1691,30 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         contexts: reader.take_scan_contexts(),
                     };
                     Ok((errc, errs, scans))
+                } else if file_is_d {
+                    #[cfg(feature = "timstof")]
+                    {
+                        let mut reader = input::TimsTofReader::open(&spectrum_path)
+                            .map_err(|e| format!("open Bruker .d: {e}"))?
+                            .with_run_ms1_capture(capture_ms1)
+                            .with_scan_context_capture(capture_context);
+                        let (errc, errs) =
+                            reader.read_with_ms1_chunked(CHUNK_SIZE, cap, |chunk, link| {
+                                let _ = tx.send((chunk, link));
+                            });
+                        let scans = RunScans {
+                            ms1: reader.take_run_ms1(),
+                            ms3: Vec::new(),
+                            contexts: reader.take_scan_contexts(),
+                        };
+                        Ok((errc, errs, scans))
+                    }
+                    #[cfg(not(feature = "timstof"))]
+                    {
+                        Err("this andes build has no Bruker .d (timsTOF) support; \
+                             rebuild with `--features timstof`."
+                            .to_string())
+                    }
                 } else {
                     #[cfg(feature = "thermo")]
                     {
@@ -1969,12 +1990,18 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     } else if file_is_d {
                         #[cfg(feature = "timstof")]
                         {
-                            let reader = input::TimsTofReader::open(&spectrum_path)
-                                .map_err(|e| format!("open Bruker .d: {e}"))?;
-                            Ok((
-                                send_chunks(reader, CHUNK_SIZE, remaining_cap, tx),
-                                RunScans::default(),
-                            ))
+                            let mut reader = input::TimsTofReader::open(&spectrum_path)
+                                .map_err(|e| format!("open Bruker .d: {e}"))?
+                                .with_run_ms1_capture(capture_ms1)
+                                .with_scan_context_capture(capture_context);
+                            let stats =
+                                send_chunks(reader.by_ref(), CHUNK_SIZE, remaining_cap, tx);
+                            let scans = RunScans {
+                                ms1: reader.take_run_ms1(),
+                                ms3: Vec::new(),
+                                contexts: reader.take_scan_contexts(),
+                            };
+                            Ok((stats, scans))
                         }
                         #[cfg(not(feature = "timstof"))]
                         {

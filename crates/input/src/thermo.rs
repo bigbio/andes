@@ -332,6 +332,7 @@ impl ThermoRawReader {
                             scan_window: scan_window(&raw),
                             faims_cv: faims_cv(&raw),
                             noise: self.noise_of(i),
+                            ion_mobility: None,
                         });
                     }
                     chunk.push(spec);
@@ -778,6 +779,7 @@ impl Iterator for ThermoRawReader {
                             scan_window: scan_window(&raw),
                             faims_cv: faims_cv(&raw),
                             noise: self.noise_of(i),
+                            ion_mobility: None,
                         });
                     }
                     return Some(Ok(spec));

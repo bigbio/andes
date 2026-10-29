@@ -14,6 +14,8 @@ pub mod peff;
 pub mod thermo;
 #[cfg(feature = "timstof")]
 pub mod timstof;
+#[cfg(feature = "timstof")]
+mod timstof_ms1;
 pub mod uniprot;
 mod uniprot_ptm;
 

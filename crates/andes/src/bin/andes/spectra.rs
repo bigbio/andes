@@ -210,7 +210,15 @@ pub(crate) fn scan_spectrum_metadata(
     bench_cap: usize,
 ) -> Result<Vec<SpectrumMeta>, Box<dyn std::error::Error>> {
     let mut out = Vec::new();
-    if is_mzml {
+    if input_format_flags(path).2 {
+        for spec in open_d_ms2(path)?.take(bench_cap) {
+            let spec = spec?;
+            out.push(SpectrumMeta {
+                precursor_charge: spec.precursor_charge,
+                num_peaks: spec.peaks.len(),
+            });
+        }
+    } else if is_mzml {
         let reader = MzMLReader::new(input::open_buf_maybe_gz(path)?)
             .with_ms_level_range(ms_level, ms_level);
         for result in reader {
@@ -239,6 +247,26 @@ pub(crate) fn scan_spectrum_metadata(
     Ok(out)
 }
 
+/// The MS2 spectra of a Bruker `.d`, in the order the search reads them.
+type SpectrumIter = Box<dyn Iterator<Item = Result<Spectrum, Box<dyn std::error::Error>>>>;
+
+fn open_d_ms2(path: &Path) -> Result<SpectrumIter, Box<dyn std::error::Error>> {
+    #[cfg(feature = "timstof")]
+    {
+        let reader = input::TimsTofReader::open(path)?;
+        Ok(Box::new(reader.map(|r| r.map_err(|e| e.into()))))
+    }
+    #[cfg(not(feature = "timstof"))]
+    {
+        Err(format!(
+            "this andes build has no Bruker .d (timsTOF) support; rebuild with \
+             `--features timstof`: {}",
+            path.display()
+        )
+        .into())
+    }
+}
+
 pub(crate) fn build_spec_keys_from_metadata(
     meta: &[SpectrumMeta],
     charge_range: std::ops::RangeInclusive<u8>,
@@ -264,7 +292,17 @@ pub(crate) fn load_spectra_by_index(
     if indices.is_empty() {
         return Ok(loaded);
     }
-    if is_mzml {
+    if input_format_flags(path).2 {
+        for (idx, spec) in open_d_ms2(path)?.enumerate().take(bench_cap) {
+            if !indices.contains(&idx) {
+                continue;
+            }
+            loaded.insert(idx, spec?);
+            if loaded.len() == indices.len() {
+                break;
+            }
+        }
+    } else if is_mzml {
         let reader = MzMLReader::new(input::open_buf_maybe_gz(path)?)
             .with_ms_level_range(ms_level, ms_level);
         for (idx, result) in reader.enumerate() {
@@ -305,7 +343,7 @@ pub(crate) fn load_spectra_by_index(
 /// An SPS-MS3 run carries its reporters in the MS3 scans, not the (ion-trap)
 /// MS2 it searches, so when an MS2 sample shows no label the MS3 scans of an
 /// mzML or `.raw` are sampled too (high-res: SPS-MS3 reporters are read in the
-/// Orbitrap). Returns `None` for `.d` input and for label-free data.
+/// Orbitrap). Returns `None` for label-free data.
 pub(crate) fn detect_isobaric_sampled(
     path: &Path,
     is_mzml: bool,
@@ -375,7 +413,8 @@ pub(crate) fn sample_ms2_meta(
     input::Ms2MetaSample::default()
 }
 
-/// The first spectra at `ms_level` of an mzML, MGF or Thermo `.raw`.
+/// The first spectra at `ms_level` of an mzML, MGF, Thermo `.raw` or Bruker
+/// `.d` (MS2 only; a `.d` has no other level with a precursor).
 pub(crate) fn sample_spectra(
     path: &Path,
     is_mzml: bool,
@@ -398,6 +437,18 @@ pub(crate) fn sample_spectra(
             return Some(reader.filter_map(Result::ok).take(SAMPLE_N).collect());
         }
         #[cfg(not(feature = "thermo"))]
+        return None;
+    }
+    if input_format_flags(path).2 {
+        #[cfg(feature = "timstof")]
+        {
+            if ms_level != 2 {
+                return None;
+            }
+            let reader = input::TimsTofReader::open(path).ok()?;
+            return Some(reader.filter_map(Result::ok).take(SAMPLE_N).collect());
+        }
+        #[cfg(not(feature = "timstof"))]
         return None;
     }
     if !(is_mzml || is_mgf) {

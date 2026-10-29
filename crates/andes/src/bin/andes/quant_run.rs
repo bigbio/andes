@@ -1797,6 +1797,7 @@ mod tests {
             scan_window: None,
             faims_cv: cv,
             noise: None,
+            ion_mobility: None,
         }
     }
 

@@ -131,7 +131,9 @@ struct Ms1Frames {
 /// The `Frames` temperatures and the vendor precursor peaks of a `.d`.
 struct TdfTables {
     temperatures: HashMap<usize, [f64; 2]>,
-    /// Parent frame id → `LargestPeakMz` of its precursors.
+    /// Parent frame id → monoisotopic m/z of its precursors
+    /// (`MonoisotopicMz`, else `LargestPeakMz` when the monoisotopic peak was
+    /// not determined).
     precursor_peaks: HashMap<usize, Vec<f64>>,
 }
 
@@ -157,12 +159,18 @@ fn read_tables(dir: &Path) -> Result<TdfTables, rusqlite::Error> {
         }
     }
     let mut precursor_peaks: HashMap<usize, Vec<f64>> = HashMap::new();
-    let mut stmt = conn.prepare("SELECT Parent, LargestPeakMz FROM Precursors")?;
+    let mut stmt = conn.prepare("SELECT Parent, MonoisotopicMz, LargestPeakMz FROM Precursors")?;
     let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<f64>>(1)?))
+        Ok((
+            r.get::<_, Option<i64>>(0)?,
+            r.get::<_, Option<f64>>(1)?,
+            r.get::<_, Option<f64>>(2)?,
+        ))
     })?;
     for row in rows {
-        if let (Some(parent), Some(mz)) = row? {
+        let (parent, mono, largest) = row?;
+        let mz = mono.filter(|m| m.is_finite() && *m > 0.0).or(largest);
+        if let (Some(parent), Some(mz)) = (parent, mz) {
             precursor_peaks.entry(parent as usize).or_default().push(mz);
         }
     }

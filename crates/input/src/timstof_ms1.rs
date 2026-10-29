@@ -12,8 +12,11 @@
 //! The TOF → m/z conversion that `timsrust` derives from the acquisition
 //! range (`sqrt(m/z)` linear in the TOF index) is an approximation of the
 //! vendor calibration. The acquisition software records, for every PASEF
-//! precursor, the m/z of its largest isotope peak (`Precursors.LargestPeakMz`)
-//! computed with the full instrument calibration. [`fit_calibration`] matches
+//! precursor, its monoisotopic m/z (`Precursors.MonoisotopicMz`) computed with
+//! the full instrument calibration; it agrees with the theoretical m/z of
+//! identified precursors to about 1 ppm, while the m/z of the largest isotope
+//! peak recorded beside it (`LargestPeakMz`, used only when the monoisotopic
+//! peak was not determined) sits several ppm off. [`fit_calibration`] matches
 //! those m/z values to the centroids of their parent MS1 frames and fits
 //! `sqrt(m/z)` as a cubic in the TOF index plus a linear term in each of the
 //! two frame temperatures the TDF records (`Frames.T1`, `Frames.T2`), which is
@@ -211,7 +214,7 @@ impl MzCalibration {
 pub(crate) struct CalibrationPoint {
     /// Centroid TOF index in the parent MS1 frame.
     pub tof: f64,
-    /// Vendor-calibrated m/z of the precursor's largest peak.
+    /// Vendor-calibrated monoisotopic m/z of the precursor.
     pub mz: f64,
     /// Parent frame temperatures.
     pub t: [f64; 2],
@@ -229,10 +232,10 @@ pub(crate) const MIN_CALIBRATION_POINTS: usize = 200;
 const OUTLIER_SIGMAS: f64 = 4.0;
 
 /// Pair each vendor m/z of a frame with the most intense centroid within
-/// `offset_ppm ± window_ppm` (positions under the linear model `base`). The
-/// vendor m/z is that of the precursor's largest isotope peak, so among the
-/// centroids near it the most intense is its counterpart; the nearest one is
-/// as often a neighbouring peak. `centroids` are sorted by TOF.
+/// `offset_ppm ± window_ppm` (positions under the linear model `base`). A
+/// selected precursor is among the most intense ions of its frame, so among
+/// the centroids near its m/z the most intense is its counterpart; the
+/// nearest one is as often a neighbouring peak. `centroids` are sorted by TOF.
 pub(crate) fn match_precursors(
     centroids: &[TofCentroid],
     vendor_mz: &[f64],

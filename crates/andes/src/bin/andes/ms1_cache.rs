@@ -63,6 +63,7 @@ mod tests {
                 peaks: vec![(600.123456789, 1234.5678), (700.0, -0.0)],
                 id: "scan=2".into(),
                 faims_cv: Some(-45.0),
+                mobility: Vec::new(),
             },
             Ms1Scan {
                 rt: 1.0,

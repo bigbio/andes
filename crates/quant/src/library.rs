@@ -90,6 +90,8 @@ pub struct PsmIn {
     pub pep: f64,
     pub is_decoy: bool,
     pub faims_cv: Option<f32>,
+    /// Precursor 1/K0 of the PSM's spectrum, when the source records it.
+    pub ion_mobility: Option<f32>,
 }
 
 /// Identity of a precursor: peptidoform and charge key, monoisotopic m/z and
@@ -134,6 +136,9 @@ pub struct LibraryEntry {
     /// Most frequent FAIMS compensation voltage among its donor PSMs; the
     /// smallest value wins a tie; `None` when no donor PSM has one.
     pub faims_cv: Option<f32>,
+    /// Median precursor 1/K0 of its donor PSMs that record one (the mean of
+    /// the middle two for an even count); `None` when none does.
+    pub ion_mobility: Option<f32>,
     /// Donor runs, ascending.
     pub donors: Vec<u16>,
     /// Per donor run (ascending), the RT of its best-scoring donor PSM
@@ -228,7 +233,8 @@ impl Donor {
 /// arrive in ascending order: `current` is the best donor PSM of the latest
 /// run; each earlier run left its best donor PSM's `(run, RT)` in `best_rt`
 /// and was folded into `best`, the precursor's best donor PSM over those
-/// runs. `cvs` counts each FAIMS voltage over all its donor PSMs.
+/// runs. `cvs` counts each FAIMS voltage over all its donor PSMs; `k0s`
+/// holds the precursor 1/K0 of every donor PSM that records one.
 #[derive(Debug, Clone)]
 struct DonorRuns {
     current: Donor,
@@ -237,6 +243,7 @@ struct DonorRuns {
     first_is_decoy: bool,
     best_rt: Vec<(u16, f64)>,
     cvs: Vec<(f32, u32)>,
+    k0s: Vec<f32>,
 }
 
 impl DonorRuns {
@@ -247,6 +254,7 @@ impl DonorRuns {
             first_is_decoy: false,
             best_rt: Vec::new(),
             cvs: Vec::new(),
+            k0s: Vec::new(),
         }
     }
 
@@ -266,6 +274,21 @@ impl DonorRuns {
 
 /// No donor slot.
 const NO_SLOT: u32 = u32::MAX;
+
+/// Median of `v` (reordered), the mean of the middle two for an even count;
+/// `None` when empty.
+fn median_f32(v: &mut [f32]) -> Option<f32> {
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(f32::total_cmp);
+    let n = v.len();
+    Some(if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        0.5 * (v[n / 2 - 1] + v[n / 2])
+    })
+}
 
 /// [`build_library`] over a stream of PSMs: [`LibraryBuilder::add`] takes
 /// them one at a time and keeps, per precursor, its best score and, per
@@ -360,6 +383,9 @@ impl LibraryBuilder {
                 d
             }
         };
+        if let Some(k0) = p.ion_mobility.filter(|v| v.is_finite()) {
+            d.k0s.push(k0);
+        }
         if let Some(cv) = p.faims_cv {
             // Voltages equal under `==` count together, under the smallest.
             match d.cvs.iter_mut().find(|c| c.0 == cv) {
@@ -430,6 +456,7 @@ impl LibraryBuilder {
                     faims_cv = Some(cv);
                 }
             }
+            let ion_mobility = median_f32(&mut d.k0s);
             let b = d.best.expect("an entry has a donor PSM");
             entries.push(LibraryEntry {
                 precursor: id,
@@ -442,6 +469,7 @@ impl LibraryBuilder {
                 },
                 consensus_rt: f64::NAN,
                 faims_cv,
+                ion_mobility,
                 donors: donor_runs,
                 best_rt,
             });
@@ -500,6 +528,7 @@ mod tests {
             pep: 0.0,
             is_decoy,
             faims_cv: None,
+            ion_mobility: None,
         }
     }
 
@@ -668,6 +697,7 @@ mod tests {
     fn faims_cv_is_majority_of_donor_ids() {
         let cv = |run, rt, c: Option<f32>| PsmIn {
             faims_cv: c,
+            ion_mobility: None,
             ..psm(run, 0, rt, 50.0, false)
         };
         let mut psms: Vec<PsmIn> = base(vec![])
@@ -1012,6 +1042,11 @@ mod tests {
                 a = b;
             }
 
+            let mut k0s: Vec<f32> = group
+                .iter()
+                .filter_map(|p| p.ion_mobility.filter(|v| v.is_finite()))
+                .collect();
+            let ion_mobility = median_f32(&mut k0s);
             entries.push(LibraryEntry {
                 precursor: id,
                 identity_decoy,
@@ -1025,6 +1060,7 @@ mod tests {
                     .expect("an entry has a donor PSM"),
                 consensus_rt: f64::NAN,
                 faims_cv,
+                ion_mobility,
                 donors,
                 best_rt,
             });
@@ -1089,6 +1125,7 @@ mod tests {
                     2 => Some(0.0),
                     _ => Some(-45.0),
                 },
+                ion_mobility: None,
             });
         }
         // Interleaved runs (build_library adds them in run order), and runs

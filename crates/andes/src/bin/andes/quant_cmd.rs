@@ -470,13 +470,14 @@ const META_COLUMNS: [&str; 6] = [
     "proteins",
 ];
 /// The columns of a run table that join its PSMs to the rescoring result.
-const JOIN_COLUMNS: [&str; 6] = [
+const JOIN_COLUMNS: [&str; 7] = [
     "spec_id",
     "precursor_key",
     "peptidoform",
     "is_decoy",
     "rt_s",
     "faims_cv",
+    "ion_mobility",
 ];
 
 /// A precursor key's metadata row: the key's first target row, else its first
@@ -785,6 +786,7 @@ pub(crate) fn build_and_write_library(
                     pep: j.pep,
                     is_decoy: row.is_decoy,
                     faims_cv: row.faims_cv,
+                    ion_mobility: row.ion_mobility,
                 };
                 n_psms += 1;
                 let donor = builder.is_donor(&p);
@@ -2128,6 +2130,7 @@ mod tests {
                 faims_cv: None,
                 envelope: vec![0.55, 0.3, 0.1, 0.05],
                 proteins: "P1".into(),
+                ion_mobility: None,
             })
             .collect();
         write_run_quant_table(&artifact(dir, "a", TABLE_SUFFIX), "a", &rows, &[]).unwrap();
@@ -2337,6 +2340,7 @@ mod tests {
             faims_cv: None,
             envelope: vec![0.55, 0.3, 0.1, 0.05],
             proteins: "P1".into(),
+            ion_mobility: None,
         };
         let mut scores = HashMap::new();
         let stems: Vec<String> = ["a", "b", "c"].map(String::from).to_vec();

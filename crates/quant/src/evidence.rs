@@ -73,7 +73,7 @@
 use model::mass::ISOTOPE;
 
 use crate::decoys::Probe;
-use crate::ms1_index::Ms1RunIndex;
+use crate::ms1_index::{slice_value, MobilityGate, Ms1RunIndex};
 
 /// Isotopes the envelope carries (M+0 to M+3).
 pub const MAX_ISOTOPES: usize = 4;
@@ -450,6 +450,23 @@ pub fn fit_on_grid(
     widths: &[f64],
     scratch: &mut FitScratch,
 ) -> Option<Evidence> {
+    fit_on_grid_gated(ms1, probe, charge, envelope, p, widths, None, scratch)
+}
+
+/// [`fit_on_grid`] with every trace (isotopes and M-1) read within the
+/// mobility `gate` on mobility-resolved scans (see
+/// [`crate::ms1_index::slice_value`]).
+#[allow(clippy::too_many_arguments)]
+pub fn fit_on_grid_gated(
+    ms1: &Ms1RunIndex,
+    probe: &Probe,
+    charge: u8,
+    envelope: &[f32; 4],
+    p: &EvidenceParams,
+    widths: &[f64],
+    gate: Option<MobilityGate>,
+    scratch: &mut FitScratch,
+) -> Option<Evidence> {
     debug_assert!(charge > 0, "charge must be positive");
     debug_assert!(!widths.is_empty(), "width grid must not be empty");
     let prior = Prior::of(probe);
@@ -467,6 +484,7 @@ pub fn fit_on_grid(
         charge.max(1),
         n_iso,
         p.tol_ppm,
+        gate,
         scratch,
     );
     let FitScratch {
@@ -505,7 +523,9 @@ fn detection_limit(ms1: &Ms1RunIndex, scans: std::ops::Range<usize>, buf: &mut V
 }
 
 /// Fill the scratch traces over `scans`: RT, the isotope traces 0..`n_iso`,
-/// the M-1 trace and the isotope-0 centroid m/z (0.0 when none).
+/// the M-1 trace and the isotope-0 centroid m/z (0.0 when none). With a
+/// mobility `gate` on a mobility-resolved run, every trace is read within it.
+#[allow(clippy::too_many_arguments)]
 fn traces(
     ms1: &Ms1RunIndex,
     scans: std::ops::Range<usize>,
@@ -513,11 +533,31 @@ fn traces(
     charge: u8,
     n_iso: usize,
     tol_ppm: f64,
+    gate: Option<MobilityGate>,
     out: &mut FitScratch,
 ) {
     let slices = target_slices(mu, charge, n_iso, tol_ppm);
     out.rt.clear();
     out.rt.extend(scans.clone().map(|j| ms1.rt(j)));
+    if gate.is_some() {
+        out.mz0.clear();
+        out.y[0].clear();
+        let (lo, hi) = slices[0];
+        for j in scans.clone() {
+            let (mz, inten) = ms1.slice_in(j, lo, hi, gate);
+            out.mz0.push(mz);
+            out.y[0].push(inten);
+        }
+        for (i, &(lo, hi)) in slices.iter().enumerate().take(n_iso).skip(1) {
+            out.y[i].clear();
+            out.y[i].extend(scans.clone().map(|j| ms1.slice_in(j, lo, hi, gate).1));
+        }
+        let (lo, hi) = slices[n_iso];
+        out.m1.clear();
+        out.m1
+            .extend(scans.map(|j| ms1.slice_in(j, lo, hi, gate).1));
+        return;
+    }
     let (lo, hi) = slices[0];
     out.mz0.clear();
     out.y[0].clear();
@@ -564,6 +604,9 @@ pub struct FitJob<'a> {
     pub envelope: &'a [f32; 4],
     /// Width grid, multiples of `w_prior` (not empty).
     pub widths: &'a [f64],
+    /// Mobility window every trace is read within on a mobility-resolved run
+    /// (see [`crate::ms1_index::slice_value`]); `None` reads whole slices.
+    pub mobility: Option<MobilityGate>,
 }
 
 /// [`fit_on_grid`] for every job, in job order, with the same result for each
@@ -575,8 +618,8 @@ pub struct FitJob<'a> {
 /// first window start to its last window end; a job becomes active at its
 /// first scan, and at every scan the m/z-ascending centroids are merge-joined
 /// with the active jobs' trace slices sorted by their lower bound, keeping
-/// per slice the most intense centroid as [`Ms1RunIndex::max_in`] and
-/// [`Ms1RunIndex::apex_centroid`] do. A job is fitted by [`fit_traces`] as
+/// per slice the value of [`crate::ms1_index::slice_value`] within the job's
+/// mobility window, as [`Ms1RunIndex::slice_in`] gives it. A job is fitted by [`fit_traces`] as
 /// soon as its window closes and its buffers are reused, so memory follows
 /// the active jobs. Every job is extracted and fitted by one sweep from its
 /// own traces only, so the cut does not change any result. A job whose slices
@@ -627,13 +670,14 @@ pub fn fit_many(ms1: &Ms1RunIndex, jobs: &[FitJob], p: &EvidenceParams) -> Vec<O
         .par_iter()
         .map_init(FitScratch::default, |scratch, &k| {
             let job = &jobs[k];
-            let e = fit_on_grid(
+            let e = fit_on_grid_gated(
                 ms1,
                 &job.probe,
                 job.charge,
                 job.envelope,
                 p,
                 job.widths,
+                job.mobility,
                 scratch,
             );
             (k, e)
@@ -678,6 +722,8 @@ struct Slice {
     slot: usize,
     /// Isotope `0..n_iso`, or `n_iso` for M-1.
     trace: usize,
+    /// The job's mobility window.
+    gate: Option<MobilityGate>,
 }
 
 /// Trace buffers of one active job.
@@ -736,12 +782,14 @@ fn sweep(
             b.mz0.clear();
             closed[slot] = false;
             let w = &planned[next];
+            let gate = jobs[w.job].mobility;
             for (trace, &(lo, hi)) in w.slices[..=n_iso].iter().enumerate() {
                 incoming.push(Slice {
                     lo,
                     hi,
                     slot,
                     trace,
+                    gate,
                 });
             }
             closing.push(Reverse((w.scans.end, slot)));
@@ -766,6 +814,7 @@ fn sweep(
         }
 
         let peaks = ms1.peaks(j);
+        let mobility = ms1.mobility(j);
         let mut start = 0;
         for s in &active {
             if ascending {
@@ -775,16 +824,7 @@ fn sweep(
             } else {
                 start = peaks.partition_point(|&(mz, _)| mz < s.lo);
             }
-            let (mut best_mz, mut best) = (0.0f64, 0.0f32);
-            for &(mz, inten) in &peaks[start..] {
-                if mz > s.hi {
-                    break;
-                }
-                if inten > best {
-                    best = inten;
-                    best_mz = mz;
-                }
-            }
+            let (best_mz, best) = slice_value(peaks, mobility, start, s.hi, s.gate);
             let b = &mut slots[s.slot];
             if s.trace == 0 {
                 b.mz0.push(best_mz);
@@ -2257,6 +2297,7 @@ mod tests {
                 charge,
                 envelope: &envelopes[k % envelopes.len()],
                 widths: grids[(k / 3) % 2],
+                mobility: None,
             })
             .collect();
         let narrow = EvidenceParams {
@@ -2326,6 +2367,7 @@ mod tests {
                 } else {
                     &FIVE_POINT_GRID[..]
                 },
+                mobility: None,
             })
             .collect();
         for n_isotopes in 1..=MAX_ISOTOPES {
@@ -2376,6 +2418,7 @@ mod tests {
                     charge: f.1,
                     envelope: &ENV,
                     widths: &WIDTH_GRID,
+                    mobility: None,
                 }
             })
             .collect();
@@ -2476,5 +2519,119 @@ mod tests {
             start.elapsed().as_secs_f64()
         );
         assert_eq!(fitted, probes.len());
+    }
+
+    /// A target at 1/K0 0.90 and an interferer five times as intense at the
+    /// same m/z (0.15 ppm apart) and retention time but 1/K0 1.05, each with
+    /// its own background centroids, merged into mobility-resolved scans.
+    fn coeluting_by_mobility() -> (Vec<Ms1Scan>, Vec<Ms1Scan>) {
+        let target: Feature = (MZ, 2, ENV, 300.0, 6.0, AMP);
+        let other: Feature = (MZ + 1e-4, 2, ENV, 300.0, 6.0, 5.0 * AMP);
+        let a = synth_scans(&[target], NOISE, 1.0, 11);
+        let b = synth_scans(&[other], NOISE, 1.0, 12);
+        assert_eq!(a.len(), b.len());
+        let resolved = a
+            .iter()
+            .zip(&b)
+            .map(|(x, y)| {
+                let mut rows: Vec<(f64, f32, f32)> = x
+                    .peaks
+                    .iter()
+                    .map(|p| (p.0, p.1, 0.90))
+                    .chain(y.peaks.iter().map(|p| (p.0, p.1, 1.05)))
+                    .collect();
+                rows.sort_by(|p, q| p.0.total_cmp(&q.0));
+                Ms1Scan {
+                    rt: x.rt,
+                    peaks: rows.iter().map(|r| (r.0, r.1)).collect(),
+                    mobility: rows.iter().map(|r| r.2).collect(),
+                    ..Ms1Scan::default()
+                }
+            })
+            .collect();
+        (a, resolved)
+    }
+
+    #[test]
+    fn a_mobility_gate_keeps_a_coeluting_interferer_out_of_the_traces() {
+        let (alone, resolved) = coeluting_by_mobility();
+        let alone = Ms1RunIndex::new(alone);
+        let run = Ms1RunIndex::new(resolved);
+        let pr = probe(MZ, 300.0, 6.0, 6.0);
+        let p = params();
+        let gate = MobilityGate { lo: 0.88, hi: 0.92 };
+        let mut scratch = FitScratch::default();
+        let gated = fit_on_grid_gated(
+            &run,
+            &pr,
+            2,
+            &ENV,
+            &p,
+            &WIDTH_GRID,
+            Some(gate),
+            &mut scratch,
+        )
+        .unwrap();
+        let ungated = fit_on_grid(&run, &pr, 2, &ENV, &p, &WIDTH_GRID, &mut scratch).unwrap();
+        let reference = fit_on_grid(&alone, &pr, 2, &ENV, &p, &WIDTH_GRID, &mut scratch).unwrap();
+        // Within the gate the traces are the target's own: the fit agrees
+        // with the target measured alone.
+        assert!(
+            (gated.amplitude / reference.amplitude - 1.0).abs() < 0.03,
+            "{gated:?} {reference:?}"
+        );
+        assert!((gated.amplitude / AMP - 1.0).abs() < 0.05, "{gated:?}");
+        // Without a gate the slice sums both ions.
+        assert!(ungated.amplitude > 5.0 * AMP, "{ungated:?}");
+        // The one-sweep extraction gives the same result per job.
+        let jobs = [
+            FitJob {
+                probe: pr,
+                charge: 2,
+                envelope: &ENV,
+                widths: &WIDTH_GRID,
+                mobility: Some(gate),
+            },
+            FitJob {
+                probe: pr,
+                charge: 2,
+                envelope: &ENV,
+                widths: &WIDTH_GRID,
+                mobility: None,
+            },
+        ];
+        let swept = fit_many(&run, &jobs, &p);
+        assert_eq!(swept[0].as_ref(), Some(&gated));
+        assert_eq!(swept[1].as_ref(), Some(&ungated));
+    }
+
+    #[test]
+    fn a_mobility_gate_is_ignored_on_a_run_without_mobility() {
+        let (alone, _) = coeluting_by_mobility();
+        let run = Ms1RunIndex::new(alone);
+        let pr = probe(MZ, 300.0, 6.0, 6.0);
+        let p = params();
+        let gate = MobilityGate { lo: 0.0, hi: 0.1 };
+        let mut scratch = FitScratch::default();
+        let gated = fit_on_grid_gated(
+            &run,
+            &pr,
+            2,
+            &ENV,
+            &p,
+            &WIDTH_GRID,
+            Some(gate),
+            &mut scratch,
+        );
+        let plain = fit_on_grid(&run, &pr, 2, &ENV, &p, &WIDTH_GRID, &mut scratch);
+        assert_eq!(gated, plain);
+        let job = FitJob {
+            probe: pr,
+            charge: 2,
+            envelope: &ENV,
+            widths: &WIDTH_GRID,
+            mobility: Some(gate),
+        };
+        assert_eq!(fit_many(&run, &[job], &p)[0], plain);
     }
 }

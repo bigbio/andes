@@ -5,7 +5,9 @@
 //!
 //! Columns: `native_id` (empty when the source has none), `rt_s`, `faims_cv`
 //! (null without FAIMS), and the scan's m/z-sorted centroids as two lists of
-//! equal length, `mz` and `intensity`. The values are stored bit for bit, so a
+//! equal length, `mz` and `intensity`, and, for a run whose survey scans are
+//! resolved by ion mobility, a last column `mobility` (the 1/K0 of each
+//! centroid; schema 1.1). The values are stored bit for bit, so a
 //! round trip rebuilds the same index. The key-value metadata carries the
 //! schema version (`andes.ms1.schema`; a reader rejects another major) and the
 //! run stem (`andes.ms1.run`). A row group holds a bounded number of scans, so
@@ -34,39 +36,59 @@ pub const MS1_SCHEMA_MAJOR: u32 = 1;
 
 const SCHEMA_KEY: &str = "andes.ms1.schema";
 const SCHEMA_VERSION: &str = "1.0";
+/// Schema version of a table with the `mobility` column.
+const SCHEMA_VERSION_MOBILITY: &str = "1.1";
 /// Metadata key of the run stem.
 pub const RUN_KEY: &str = "andes.ms1.run";
 /// Scans per row group / record batch.
 const SCANS_PER_GROUP: usize = 256;
 
-const COLUMNS: [&str; 5] = ["native_id", "rt_s", "faims_cv", "mz", "intensity"];
+const COLUMNS: [&str; 6] = [
+    "native_id",
+    "rt_s",
+    "faims_cv",
+    "mz",
+    "intensity",
+    "mobility",
+];
 
 fn item(data_type: DataType) -> FieldRef {
     Arc::new(Field::new("item", data_type, false))
 }
 
-fn schema() -> Schema {
-    Schema::new(vec![
+fn schema(with_mobility: bool) -> Schema {
+    let mut fields = vec![
         Field::new(COLUMNS[0], DataType::Utf8, false),
         Field::new(COLUMNS[1], DataType::Float64, false),
         Field::new(COLUMNS[2], DataType::Float32, true),
         Field::new(COLUMNS[3], DataType::List(item(DataType::Float64)), false),
         Field::new(COLUMNS[4], DataType::List(item(DataType::Float32)), false),
-    ])
+    ];
+    if with_mobility {
+        fields.push(Field::new(
+            COLUMNS[5],
+            DataType::List(item(DataType::Float32)),
+            false,
+        ));
+    }
+    Schema::new(fields)
 }
 
 /// ZSTD, no dictionaries (scan ids and centroid values rarely repeat), and
 /// byte-stream-split floats, which compress better than plain ones.
-fn properties(version: &str, run: &str) -> WriterProperties {
+fn properties(version: &str, run: &str, with_mobility: bool) -> WriterProperties {
     let list_values =
         |name: &str| ColumnPath::new(vec![name.to_string(), "list".into(), "item".into()]);
-    WriterProperties::builder()
+    let mut b = WriterProperties::builder()
         .set_compression(Compression::ZSTD(ZstdLevel::default()))
         .set_dictionary_enabled(false)
         .set_column_encoding(ColumnPath::from(COLUMNS[1]), Encoding::BYTE_STREAM_SPLIT)
         .set_column_encoding(list_values(COLUMNS[3]), Encoding::BYTE_STREAM_SPLIT)
-        .set_column_encoding(list_values(COLUMNS[4]), Encoding::BYTE_STREAM_SPLIT)
-        .set_max_row_group_size(SCANS_PER_GROUP)
+        .set_column_encoding(list_values(COLUMNS[4]), Encoding::BYTE_STREAM_SPLIT);
+    if with_mobility {
+        b = b.set_column_encoding(list_values(COLUMNS[5]), Encoding::BYTE_STREAM_SPLIT);
+    }
+    b.set_max_row_group_size(SCANS_PER_GROUP)
         .set_key_value_metadata(Some(vec![
             KeyValue::new(SCHEMA_KEY.to_string(), version.to_string()),
             KeyValue::new(RUN_KEY.to_string(), run.to_string()),
@@ -98,15 +120,33 @@ fn batch(
     let intensity = Float32Array::from_iter_values(peaks().map(|p| p.1));
     let mz = ListArray::try_new(item(DataType::Float64), offs.clone(), Arc::new(mz), None)
         .map_err(|e| e.to_string())?;
-    let intensity = ListArray::try_new(item(DataType::Float32), offs, Arc::new(intensity), None)
-        .map_err(|e| e.to_string())?;
-    let cols: Vec<ArrayRef> = vec![
+    let intensity = ListArray::try_new(
+        item(DataType::Float32),
+        offs.clone(),
+        Arc::new(intensity),
+        None,
+    )
+    .map_err(|e| e.to_string())?;
+    let mut cols: Vec<ArrayRef> = vec![
         Arc::new(ids),
         Arc::new(rts),
         Arc::new(cvs),
         Arc::new(mz),
         Arc::new(intensity),
     ];
+    if schema.fields().len() == COLUMNS.len() {
+        // A scan without mobility (none of its own) stores an empty list.
+        let k0_offs = offsets(scans.clone().map(|i| index.mobility(i).len()))?;
+        let k0 = Float32Array::from_iter_values(
+            scans
+                .clone()
+                .flat_map(|i| index.mobility(i).iter().copied()),
+        );
+        cols.push(Arc::new(
+            ListArray::try_new(item(DataType::Float32), k0_offs, Arc::new(k0), None)
+                .map_err(|e| e.to_string())?,
+        ));
+    }
     RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
 }
 
@@ -116,9 +156,19 @@ fn write_with_version<W: Write + Send>(
     index: &Ms1RunIndex,
     version: &str,
 ) -> Result<(), String> {
-    let schema = Arc::new(schema());
-    let mut writer = ArrowWriter::try_new(out, schema.clone(), Some(properties(version, run)))
-        .map_err(|e| e.to_string())?;
+    let with_mobility = index.has_mobility();
+    let version = if with_mobility && version == SCHEMA_VERSION {
+        SCHEMA_VERSION_MOBILITY
+    } else {
+        version
+    };
+    let schema = Arc::new(schema(with_mobility));
+    let mut writer = ArrowWriter::try_new(
+        out,
+        schema.clone(),
+        Some(properties(version, run, with_mobility)),
+    )
+    .map_err(|e| e.to_string())?;
     let mut start = 0;
     while start < index.len() {
         let end = (start + SCANS_PER_GROUP).min(index.len());
@@ -194,9 +244,10 @@ fn list<T: 'static + Array>(b: &RecordBatch, i: usize) -> Result<(&T, &[i32]), S
 }
 
 fn decode(b: &RecordBatch, scans: &mut Vec<Ms1Scan>) -> Result<(), String> {
-    if b.num_columns() != COLUMNS.len() {
+    if b.num_columns() != COLUMNS.len() && b.num_columns() + 1 != COLUMNS.len() {
         return Err(format!(
-            "expected {} columns, found {}",
+            "expected {} or {} columns, found {}",
+            COLUMNS.len() - 1,
             COLUMNS.len(),
             b.num_columns()
         ));
@@ -217,6 +268,9 @@ fn decode(b: &RecordBatch, scans: &mut Vec<Ms1Scan>) -> Result<(), String> {
     }
     let (mz, mz_off) = list::<Float64Array>(b, 3)?;
     let (intensity, int_off) = list::<Float32Array>(b, 4)?;
+    let k0 = (b.num_columns() == COLUMNS.len())
+        .then(|| list::<Float32Array>(b, 5))
+        .transpose()?;
     let (mz, intensity) = (mz.values(), intensity.values());
     for i in 0..b.num_rows() {
         let (lo, hi) = (mz_off[i] as usize, mz_off[i + 1] as usize);
@@ -229,6 +283,21 @@ fn decode(b: &RecordBatch, scans: &mut Vec<Ms1Scan>) -> Result<(), String> {
                 ihi - ilo
             ));
         }
+        let mobility = match k0 {
+            Some((values, off)) => {
+                let (klo, khi) = (off[i] as usize, off[i + 1] as usize);
+                if khi - klo != 0 && khi - klo != hi - lo {
+                    return Err(format!(
+                        "scan {:?}: {} m/z values but {} mobilities",
+                        ids.value(i),
+                        hi - lo,
+                        khi - klo
+                    ));
+                }
+                values.values()[klo..khi].to_vec()
+            }
+            None => Vec::new(),
+        };
         scans.push(Ms1Scan {
             rt: rts.value(i),
             peaks: mz[lo..hi]
@@ -238,6 +307,7 @@ fn decode(b: &RecordBatch, scans: &mut Vec<Ms1Scan>) -> Result<(), String> {
                 .collect(),
             id: ids.value(i).to_string(),
             faims_cv: cvs.is_valid(i).then(|| cvs.value(i)),
+            mobility,
         });
     }
     Ok(())
@@ -339,6 +409,7 @@ mod tests {
             peaks,
             id: id.into(),
             faims_cv,
+            mobility: Vec::new(),
         }
     }
 
@@ -362,6 +433,8 @@ mod tests {
                 a.detection_limit(i).to_bits(),
                 b.detection_limit(i).to_bits()
             );
+            let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(a.mobility(i)), bits(b.mobility(i)));
         }
     }
 
@@ -421,6 +494,43 @@ mod tests {
         assert_eq!(back.scan(1).id, "scan=9");
         // Reading again gives the same index.
         assert_same(&read_ms1_table(&p).unwrap(), &idx);
+    }
+
+    #[test]
+    fn mobility_round_trips_and_is_written_only_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut scans = vec![
+            scan(
+                1.0,
+                vec![(500.0, 2.0), (500.0, 3.0), (600.0, 1.0)],
+                "frame=1",
+                None,
+            ),
+            // A scan without centroids in a mobility-resolved run.
+            scan(2.0, vec![], "frame=3", None),
+        ];
+        scans[0].mobility = vec![0.91, 1.02, 0.85];
+        let idx = Ms1RunIndex::new(scans);
+        assert!(idx.has_mobility());
+        let p = dir.path().join("tims.ms1.parquet");
+        write_ms1_table(&p, "tims", &idx).unwrap();
+        let back = read_ms1_table(&p).unwrap();
+        assert_same(&back, &idx);
+        assert_eq!(back.mobility(0), &[0.91f32, 1.02, 0.85]);
+        assert!(back.mobility(1).is_empty());
+        let columns = |p: &Path| {
+            let file = File::open(p).unwrap();
+            ParquetRecordBatchReaderBuilder::try_new(file)
+                .unwrap()
+                .schema()
+                .fields()
+                .len()
+        };
+        assert_eq!(columns(&p), 6);
+        // A run without mobility keeps the five-column layout.
+        let q = dir.path().join("plain.ms1.parquet");
+        write_ms1_table(&q, "plain", &index()).unwrap();
+        assert_eq!(columns(&q), 5);
     }
 
     #[test]
@@ -522,8 +632,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("c.ms1.parquet");
         let idx = index();
-        let good = batch(&Arc::new(schema()), &idx, 0..idx.len()).unwrap();
-        let mut fields: Vec<Field> = schema()
+        let good = batch(&Arc::new(schema(false)), &idx, 0..idx.len()).unwrap();
+        let mut fields: Vec<Field> = schema(false)
             .fields()
             .iter()
             .map(|f| f.as_ref().clone())
@@ -534,7 +644,7 @@ mod tests {
         let mut w = ArrowWriter::try_new(
             File::create(&p).unwrap(),
             renamed,
-            Some(properties("1.0", "c")),
+            Some(properties("1.0", "c", false)),
         )
         .unwrap();
         w.write(&b).unwrap();

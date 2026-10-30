@@ -1712,6 +1712,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // per-chunk co-isolation link).
             let capture_ms1 = quant.as_ref().is_some_and(|q| q.settings.needs_ms1());
             let capture_context = quant.is_some();
+            #[cfg(feature = "timstof")]
+            let ms1_mobility = cli.ms1_mobility;
             let capture_noise = quant.as_ref().is_some_and(|q| q.settings.plex.is_some());
             type Ms1Parsed = (usize, Vec<String>, RunScans);
             let parser_handle = thread::spawn(move || -> Result<Ms1Parsed, String> {
@@ -1741,6 +1743,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         let mut reader = input::TimsTofReader::open(&spectrum_path)
                             .map_err(|e| format!("open Bruker .d: {e}"))?
                             .with_run_ms1_capture(capture_ms1)
+                            .with_ms1_mobility(ms1_mobility)
                             .with_scan_context_capture(capture_context);
                         let (errc, errs) =
                             reader.read_with_ms1_chunked(CHUNK_SIZE, cap, |chunk, link| {
@@ -1983,6 +1986,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let capture_ms1 = quant.as_ref().is_some_and(|q| q.settings.needs_ms1());
             let capture_ms3 = quant.as_ref().is_some_and(|q| q.settings.needs_ms3());
             let capture_context = quant.is_some();
+            #[cfg(feature = "timstof")]
+            let ms1_mobility = cli.ms1_mobility;
             let capture_noise = quant.as_ref().is_some_and(|q| q.settings.plex.is_some());
             let parser_handle = thread::spawn(
                 move || -> Result<(ParseStats, RunScans), Box<dyn std::error::Error + Send + Sync>> {
@@ -2037,6 +2042,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             let mut reader = input::TimsTofReader::open(&spectrum_path)
                                 .map_err(|e| format!("open Bruker .d: {e}"))?
                                 .with_run_ms1_capture(capture_ms1)
+                                .with_ms1_mobility(ms1_mobility)
                                 .with_scan_context_capture(capture_context);
                             let stats =
                                 send_chunks(reader.by_ref(), CHUNK_SIZE, remaining_cap, tx);

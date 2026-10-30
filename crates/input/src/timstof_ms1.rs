@@ -22,9 +22,10 @@
 //! two frame temperatures the TDF records (`Frames.T1`, `Frames.T2`), which is
 //! what the vendor calibration compensates for. Each vendor m/z is paired
 //! with the most intense centroid in a window, in two passes: a wide window
-//! whose pairs give the run's offset as the mode of their offsets, then a
-//! narrow window around that offset. The fit is refined by discarding residuals beyond four robust
-//! standard deviations.
+//! whose pairs give the offset of the acquisition-range model as the mode of
+//! their offsets, per m/z range (the offset changes by tens of ppm between
+//! low and high m/z), then a narrow window around that offset curve. The fit
+//! is refined by discarding residuals beyond four robust standard deviations.
 
 /// A centroid in the TOF domain: intensity-weighted TOF index, summed
 /// intensity.
@@ -263,7 +264,7 @@ pub(crate) fn match_precursors(
     vendor_mz: &[f64],
     frame: FrameConditions,
     calibration: &MzCalibration,
-    offset_ppm: f64,
+    offset: &OffsetCurve,
     window_ppm: f64,
     out: &mut Vec<CalibrationPoint>,
 ) {
@@ -272,6 +273,7 @@ pub(crate) fn match_precursors(
         if !(mz.is_finite() && mz > 0.0) {
             continue;
         }
+        let offset_ppm = offset.at(mz);
         let reach = (offset_ppm.abs() + window_ppm + MATCH_MARGIN_PPM) * 1e-6;
         let i = centroids.partition_point(|c| calibration.mz(c.tof, nominal) < mz * (1.0 - reach));
         let j = centroids.partition_point(|c| calibration.mz(c.tof, nominal) <= mz * (1.0 + reach));
@@ -336,6 +338,60 @@ pub(crate) fn mode_offset_ppm(points: &[CalibrationPoint], base: &MzCalibration)
         .filter(|ppm| (ppm - centre).abs() <= 1.5 * OFFSET_BIN_PPM)
         .collect();
     Some(near.iter().sum::<f64>() / near.len().max(1) as f64)
+}
+
+/// Offset (ppm) of a calibration from the vendor m/z as a function of m/z:
+/// linear between knots `(m/z, ppm)`, constant beyond the first and last.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct OffsetCurve {
+    knots: Vec<(f64, f64)>,
+}
+
+impl OffsetCurve {
+    pub fn constant(ppm: f64) -> Self {
+        Self {
+            knots: vec![(0.0, ppm)],
+        }
+    }
+
+    pub fn at(&self, mz: f64) -> f64 {
+        let k = &self.knots;
+        let i = k.partition_point(|&(x, _)| x <= mz);
+        if i == 0 {
+            return k[0].1;
+        }
+        if i == k.len() {
+            return k[k.len() - 1].1;
+        }
+        let ((x0, y0), (x1, y1)) = (k[i - 1], k[i]);
+        y0 + (y1 - y0) * (mz - x0) / (x1 - x0)
+    }
+}
+
+/// Pairs per m/z range of [`offset_curve`], and the most ranges.
+const OFFSET_RANGE_POINTS: usize = 400;
+const OFFSET_MAX_RANGES: usize = 10;
+
+/// The offset of `base` from the vendor m/z as a function of m/z: the pairs
+/// of the wide matching pass are split by vendor m/z into ranges of equal
+/// count (about [`OFFSET_RANGE_POINTS`] each, at most [`OFFSET_MAX_RANGES`]),
+/// and each range contributes a knot at its median m/z with its
+/// [`mode_offset_ppm`]. `None` without pairs.
+pub(crate) fn offset_curve(
+    points: &[CalibrationPoint],
+    base: &MzCalibration,
+) -> Option<OffsetCurve> {
+    let mut sorted = points.to_vec();
+    sorted.sort_by(|a, b| a.mz.total_cmp(&b.mz));
+    let ranges = (sorted.len() / OFFSET_RANGE_POINTS).clamp(1, OFFSET_MAX_RANGES);
+    let mut knots = Vec::with_capacity(ranges);
+    for r in 0..ranges {
+        let part = &sorted[r * sorted.len() / ranges..(r + 1) * sorted.len() / ranges];
+        if let Some(ppm) = mode_offset_ppm(part, base) {
+            knots.push((part[part.len() / 2].mz, ppm));
+        }
+    }
+    (!knots.is_empty()).then_some(OffsetCurve { knots })
 }
 
 /// Median of `v` (reorders it); `None` when empty.
@@ -697,12 +753,28 @@ mod tests {
             c(100_200.0, 99.0),
         ];
         let mut out = Vec::new();
-        match_precursors(&centroids, &[target], t, &base, 0.0, 20.0, &mut out);
+        match_precursors(
+            &centroids,
+            &[target],
+            t,
+            &base,
+            &OffsetCurve::constant(0.0),
+            20.0,
+            &mut out,
+        );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].tof, 100_001.0);
         out.clear();
         // Nothing within 0.001 ppm of an offset of +500 ppm.
-        match_precursors(&centroids, &[target], t, &base, 500.0, 0.001, &mut out);
+        match_precursors(
+            &centroids,
+            &[target],
+            t,
+            &base,
+            &OffsetCurve::constant(500.0),
+            0.001,
+            &mut out,
+        );
         assert!(out.is_empty());
     }
 
@@ -728,5 +800,35 @@ mod tests {
         }
         let off = mode_offset_ppm(&points, &base).unwrap();
         assert!((off - 8.0).abs() < 0.2, "{off}");
+    }
+
+    #[test]
+    fn the_offset_curve_follows_an_offset_that_changes_with_mz() {
+        // The offset falls linearly from +80 ppm at the low end to 0 at the
+        // high end; a quarter of the pairs are wrong neighbours.
+        let base = MzCalibration::linear(10.0, 31.0 / 400_000.0, 400_000.0);
+        let t = [0.0; 5];
+        let (lo, hi) = (base.mz(10_000.0, t), base.mz(390_000.0, t));
+        let truth = |m: f64| 80.0 * (hi - m) / (hi - lo);
+        let mut points = Vec::new();
+        for i in 0..4000 {
+            let tof = 10_000.0 + i as f64 * 95.0;
+            let m = base.mz(tof, t);
+            let ppm = if i % 4 == 3 {
+                -150.0 + 300.0 * ((i * 37 % 1000) as f64 / 1000.0)
+            } else {
+                truth(m)
+            };
+            points.push(CalibrationPoint {
+                tof,
+                mz: m / (1.0 + ppm * 1e-6),
+                t,
+            });
+        }
+        let curve = offset_curve(&points, &base).unwrap();
+        for m in [lo + 0.2 * (hi - lo), 0.5 * (lo + hi), lo + 0.8 * (hi - lo)] {
+            assert!((curve.at(m) - truth(m)).abs() < 3.0, "{m}: {}", curve.at(m));
+        }
+        assert_eq!(OffsetCurve::constant(4.0).at(123.0), 4.0);
     }
 }

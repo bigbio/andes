@@ -36,9 +36,9 @@ use timsrust::MSLevel;
 use model::scan::{Ms1Scan, ScanContext};
 
 use crate::timstof_ms1::{
-    centroid_profile, fit_calibration, match_precursors, mode_offset_ppm, sum_over_mobility,
-    CalibrationFit, FrameConditions, MzCalibration, MIN_REFINE_WINDOW_PPM, NARROW_WINDOW_PPM,
-    REFINE_ROUNDS, REFINE_SIGMAS, WIDE_WINDOW_PPM,
+    centroid_profile, fit_calibration, match_precursors, offset_curve, sum_over_mobility,
+    CalibrationFit, FrameConditions, MzCalibration, OffsetCurve, MIN_REFINE_WINDOW_PPM,
+    NARROW_WINDOW_PPM, REFINE_ROUNDS, REFINE_SIGMAS, WIDE_WINDOW_PPM,
 };
 use crate::timstof_ms2::{
     ms2_peaks, push_scans, read_frame_rows, read_pasef_precursors, FrameRow, PasefPrecursor,
@@ -294,7 +294,7 @@ impl Ms1Frames {
                 Some((id, cond, frame_centroids(&frame)))
             })
             .collect();
-        let pass = |calibration: &MzCalibration, offset: f64, window: f64| {
+        let pass = |calibration: &MzCalibration, offset: &OffsetCurve, window: f64| {
             let mut points = Vec::new();
             for (id, cond, centroids) in &decoded {
                 match_precursors(
@@ -309,12 +309,15 @@ impl Ms1Frames {
             }
             points
         };
-        let wide = pass(base, 0.0, WIDE_WINDOW_PPM);
-        let offset = mode_offset_ppm(&wide, base)?;
-        let mut fit = fit_calibration(&pass(base, offset, NARROW_WINDOW_PPM), base)?;
+        let wide = pass(base, &OffsetCurve::constant(0.0), WIDE_WINDOW_PPM);
+        let offset = offset_curve(&wide, base)?;
+        let mut fit = fit_calibration(&pass(base, &offset, NARROW_WINDOW_PPM), base)?;
         for _ in 0..REFINE_ROUNDS {
             let window = (REFINE_SIGMAS * fit.sigma_ppm).max(MIN_REFINE_WINDOW_PPM);
-            match fit_calibration(&pass(&fit.calibration, 0.0, window), base) {
+            match fit_calibration(
+                &pass(&fit.calibration, &OffsetCurve::constant(0.0), window),
+                base,
+            ) {
                 Some(next) => fit = next,
                 None => break,
             }

@@ -202,9 +202,9 @@ const MOBILITY_SMOOTHING_SCANS: f64 = 3.0;
 const MOBILITY_GAP_SCANS: u32 = 9;
 
 /// Fewest points (TOF index and scan pairs) a mobility component needs to
-/// be a centroid of its own; a smaller one is noise and adds its intensity to
-/// the nearest component (by scan) without moving its position. A TOF peak
-/// without such a component stays one centroid.
+/// be a centroid; a smaller one is the scattered counts a TOF index collects
+/// over the frame's mobility range and is left out. A TOF peak without such
+/// a component has no mobility-resolved centroid.
 const MIN_COMPONENT_POINTS: usize = 4;
 
 /// The centroids of one frame: summed over mobility (as [`centroid_profile`]
@@ -216,12 +216,11 @@ const MIN_COMPONENT_POINTS: usize = 4;
 /// cut where two points are more than [`MOBILITY_GAP_SCANS`] apart, smoothed
 /// with a Gaussian of [`MOBILITY_SMOOTHING_SCANS`] and split at its minima;
 /// neighbouring parts are merged again when the valley between them is
-/// shallower than [`VALLEY_SPLIT_FRACTION`] of the lower maximum, and parts
-/// with fewer than [`MIN_COMPONENT_POINTS`] points join the nearest part.
-/// Each component is reported at the intensity-weighted TOF index of its own
-/// half-height core (as [`centroid_profile`] places a peak) and the
-/// intensity-weighted scan of its points, with its summed intensity. The
-/// components of a peak sum to the peak's intensity.
+/// shallower than [`VALLEY_SPLIT_FRACTION`] of the lower maximum; parts with
+/// fewer than [`MIN_COMPONENT_POINTS`] points are left out. Each component is
+/// reported at the intensity-weighted TOF index of its own half-height core
+/// (as [`centroid_profile`] places a peak) and the intensity-weighted scan of
+/// its points, with its summed intensity.
 pub(crate) fn centroid_frame(
     scan_offsets: &[usize],
     tof: &[u32],
@@ -269,8 +268,7 @@ struct Component {
     lo: u32,
     hi: u32,
     points: usize,
-    /// Intensity of its own points, and that plus the noise parts it took in.
-    own: f64,
+    /// Summed intensity of its points.
     total: f64,
     /// Smoothed maximum and the smoothed valley in front of it.
     max: f64,
@@ -318,54 +316,16 @@ fn split_by_mobility(pts: &mut [(u32, u32, u32)], out: &mut Vec<MobilityCentroid
             {
                 last.hi = c.hi;
                 last.points += c.points;
-                last.own += c.own;
                 last.total += c.total;
                 last.max = last.max.max(c.max);
             }
             _ => merged.push(c),
         }
     }
-    // Noise parts join the nearest component that stands on its own.
-    let standing: Vec<usize> = (0..merged.len())
-        .filter(|&k| merged[k].points >= MIN_COMPONENT_POINTS)
-        .collect();
-    if standing.is_empty() {
-        let lo = merged.first().map_or(0, |c| c.lo);
-        let hi = merged.last().map_or(0, |c| c.hi);
-        emit(pts, lo, hi, out, None);
-        return;
-    }
-    let mut extra = vec![0.0f64; merged.len()];
-    for k in 0..merged.len() {
-        if merged[k].points >= MIN_COMPONENT_POINTS {
-            continue;
-        }
-        let centre = 0.5 * (merged[k].lo + merged[k].hi) as f64;
-        let near = standing
-            .iter()
-            .copied()
-            .min_by(|&a, &b| {
-                let da = scan_distance(&merged[a], centre);
-                let db = scan_distance(&merged[b], centre);
-                da.total_cmp(&db)
-            })
-            .expect("one standing component");
-        extra[near] += merged[k].total;
-    }
-    for &k in &standing {
-        let c = &merged[k];
-        emit(pts, c.lo, c.hi, out, Some(c.total + extra[k]));
-    }
-}
-
-/// Distance in scans from `centre` to the scan range of `c`.
-fn scan_distance(c: &Component, centre: f64) -> f64 {
-    if centre < c.lo as f64 {
-        c.lo as f64 - centre
-    } else if centre > c.hi as f64 {
-        centre - c.hi as f64
-    } else {
-        0.0
+    // Parts with too few points are the scattered counts every TOF index
+    // collects over the frame's mobility range; they are left out.
+    for c in merged.iter().filter(|c| c.points >= MIN_COMPONENT_POINTS) {
+        emit(pts, c.lo, c.hi, out);
     }
 }
 
@@ -405,7 +365,6 @@ fn mobility_run(run: &[(u32, f64, usize)], kernel: &[f64], half: i64, parts: &mu
             lo: first + a as u32,
             hi: first + b as u32,
             points,
-            own,
             total: own,
             max,
             valley,
@@ -424,14 +383,8 @@ fn mobility_run(run: &[(u32, f64, usize)], kernel: &[f64], half: i64, parts: &mu
 /// Report the points of `pts` (sorted by scan) with scans in `[lo, hi]` as
 /// one centroid: its TOF position from the half-height core of its own TOF
 /// profile (smoothed as in [`centroid_profile`]), its intensity-weighted
-/// scan, and `total` (its own summed intensity when `None`).
-fn emit(
-    pts: &[(u32, u32, u32)],
-    lo: u32,
-    hi: u32,
-    out: &mut Vec<MobilityCentroid>,
-    total: Option<f64>,
-) {
+/// scan and its summed intensity.
+fn emit(pts: &[(u32, u32, u32)], lo: u32, hi: u32, out: &mut Vec<MobilityCentroid>) {
     let a = pts.partition_point(|p| p.1 < lo);
     let b = pts.partition_point(|p| p.1 <= hi);
     let own = &pts[a..b];
@@ -485,7 +438,7 @@ fn emit(
     }
     out.push(MobilityCentroid {
         tof: wt / w,
-        intensity: total.unwrap_or(sum),
+        intensity: sum,
         scan: sum_scan / sum,
     });
 }
@@ -981,14 +934,14 @@ mod tests {
         assert!((resolved[0].tof - 1000.0).abs() < 0.3, "{resolved:?}");
         assert!((resolved[1].tof - 1000.4).abs() < 0.3, "{resolved:?}");
         let total: f64 = resolved.iter().map(|c| c.intensity).sum();
-        assert_eq!(total, summed[0].intensity);
+        assert!(total <= summed[0].intensity && total > 0.99 * summed[0].intensity);
         assert!(resolved[1].intensity > 3.0 * resolved[0].intensity);
     }
 
     #[test]
     fn scattered_counts_do_not_make_components_of_their_own() {
         // One ion plus isolated single counts far from it in mobility: one
-        // component, which keeps the peak's whole intensity and its scan.
+        // component at the ion's scan, without the scattered counts.
         let mut noise = Vec::new();
         for s in [20u32, 80, 150, 450, 520] {
             noise.push((1000u32, s, 1u32));
@@ -998,17 +951,17 @@ mod tests {
         let (summed, resolved) = centroid_frame(&off, &tof, &inten, true);
         assert_eq!(summed.len(), 1);
         assert_eq!(resolved.len(), 1, "{resolved:?}");
-        assert_eq!(resolved[0].intensity, summed[0].intensity);
+        assert_eq!(resolved[0].intensity, summed[0].intensity - 5.0);
         assert!((resolved[0].scan - 300.0).abs() < 1.0, "{resolved:?}");
-        // A peak of scattered counts only stays one centroid.
+        // A peak of scattered counts only has no resolved centroid.
         let sparse: Vec<(u32, u32, u32)> = [10u32, 90, 200, 333]
             .iter()
             .map(|&s| (2000u32, s, 1u32))
             .collect();
         let (off, tof, inten) = frame(600, sparse);
         let (summed, resolved) = centroid_frame(&off, &tof, &inten, true);
-        assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].intensity, summed[0].intensity);
+        assert_eq!(summed.len(), 1);
+        assert!(resolved.is_empty(), "{resolved:?}");
     }
 
     #[test]

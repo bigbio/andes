@@ -950,15 +950,6 @@ pub(crate) struct SearchArgs {
     #[arg(long = "quant-dir", value_name = "DIR")]
     pub(crate) quant_dir: Option<PathBuf>,
 
-    /// Bruker `.d`: resolve the captured MS1 scans by ion mobility. Each MS1
-    /// centroid summed over mobility is split into its ion-mobility
-    /// components, each with its 1/K0, and quantification reads each
-    /// precursor's MS1 traces within a mobility window around its donor
-    /// PSMs' 1/K0 (window learned per run). The search itself reads the
-    /// centroids summed over mobility. No effect on other inputs.
-    #[arg(long = "ms1-mobility", hide = true)]
-    pub(crate) ms1_mobility: bool,
-
     /// Match-between-runs label-free quantification across the inputs (two or
     /// more; needs `--lfq` and `--rescore` or `--rescore-native`). After the
     /// per-run quantification, builds the precursor library, aligns retention

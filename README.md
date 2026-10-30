@@ -503,8 +503,10 @@ cargo build --release -p andes --features timstof
 andes --spectrum sample.d --database human.fasta --output-pin out.pin
 ```
 
-Scope: DDA-PASEF. The MS1 survey frames are read too (summed over ion mobility, centroided,
-and m/z-calibrated per run against the instrument's precursor records), so `--lfq`,
+Scope: DDA-PASEF. Each precursor gives one MS2 spectrum, summed over all its PASEF
+selections, centroided and converted to m/z with the run's calibration. The MS1 survey frames
+are read too (summed over ion mobility, centroided, and m/z-calibrated per run against the
+instrument's precursor records), so `--lfq`,
 `--quant-dir`, `--mbr`, `--chimeric` and `--precursor-cal` run on `.d` input; ion mobility is
 recorded per precursor but not scored. A TDF holds no MS3 scans, so `--tmt-level 3` is an
 error (reporters are read from the MS2). Runs written with the frame compression of early

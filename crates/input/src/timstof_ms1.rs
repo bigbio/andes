@@ -82,6 +82,15 @@ const CORE_FRACTION: f64 = 0.5;
 /// maximum. Each peak is reported at the intensity-weighted TOF index of its
 /// core (see [`CORE_FRACTION`]) with the summed intensity of the whole peak.
 pub(crate) fn centroid_profile(profile: &[(u32, u64)]) -> Vec<TofCentroid> {
+    centroid_profile_with_bounds(profile, None)
+}
+
+/// [`centroid_profile`], also recording in `bounds` the first and last TOF
+/// index of each peak (parallel to the result).
+pub(crate) fn centroid_profile_with_bounds(
+    profile: &[(u32, u64)],
+    mut bounds: Option<&mut Vec<(u32, u32)>>,
+) -> Vec<TofCentroid> {
     let mut out = Vec::new();
     let mut start = 0;
     while start < profile.len() {
@@ -89,7 +98,7 @@ pub(crate) fn centroid_profile(profile: &[(u32, u64)]) -> Vec<TofCentroid> {
         while end < profile.len() && profile[end].0 - profile[end - 1].0 <= MAX_TOF_GAP {
             end += 1;
         }
-        centroid_run(&profile[start..end], &mut out);
+        centroid_run(&profile[start..end], &mut out, bounds.as_deref_mut());
         start = end;
     }
     out
@@ -97,7 +106,11 @@ pub(crate) fn centroid_profile(profile: &[(u32, u64)]) -> Vec<TofCentroid> {
 
 /// Centroid one run of points no more than [`MAX_TOF_GAP`] apart (see
 /// [`centroid_profile`]).
-fn centroid_run(run: &[(u32, u64)], out: &mut Vec<TofCentroid>) {
+fn centroid_run(
+    run: &[(u32, u64)],
+    out: &mut Vec<TofCentroid>,
+    mut bounds: Option<&mut Vec<(u32, u32)>>,
+) {
     let first = run[0].0;
     let n = (run[run.len() - 1].0 - first) as usize + 1;
     let mut raw = vec![0.0f64; n];
@@ -162,7 +175,273 @@ fn centroid_run(run: &[(u32, u64)], out: &mut Vec<TofCentroid>) {
             tof: wt / w,
             intensity: total,
         });
+        if let Some(b) = bounds.as_deref_mut() {
+            b.push((first + lo as u32, first + hi as u32 - 1));
+        }
     }
+}
+
+/// A centroid resolved by ion mobility: intensity-weighted TOF index of its
+/// half-height core, summed intensity, and intensity-weighted mobility scan
+/// index.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MobilityCentroid {
+    pub tof: f64,
+    pub intensity: f64,
+    pub scan: f64,
+}
+
+/// Standard deviation (mobility scans) of the Gaussian kernel the mobility
+/// profile of a TOF peak is smoothed with before it is split. A peptide ion
+/// spans tens of mobility scans (full width at half maximum about 0.015 to
+/// 0.03 V·s/cm², 15 to 30 scans), while the counts of one TOF peak are spread
+/// thinly over those scans.
+const MOBILITY_SMOOTHING_SCANS: f64 = 3.0;
+
+/// Points of one TOF peak further apart than this many scans belong to
+/// different mobility runs (the smoothed profile between them is zero).
+const MOBILITY_GAP_SCANS: u32 = 9;
+
+/// Fewest points (TOF index and scan pairs) a mobility component needs to
+/// be a centroid; a smaller one is the scattered counts a TOF index collects
+/// over the frame's mobility range and is left out. A TOF peak without such
+/// a component has no mobility-resolved centroid.
+const MIN_COMPONENT_POINTS: usize = 4;
+
+/// The centroids of one frame: summed over mobility (as [`centroid_profile`]
+/// of [`sum_over_mobility`]) and, when `resolve`, each summed peak split into
+/// its ion-mobility components (empty otherwise).
+///
+/// `scan_offsets[s]..scan_offsets[s + 1]` are the points of mobility scan
+/// `s`. A summed peak's points are grouped by scan into a mobility profile,
+/// cut where two points are more than [`MOBILITY_GAP_SCANS`] apart, smoothed
+/// with a Gaussian of [`MOBILITY_SMOOTHING_SCANS`] and split at its minima;
+/// neighbouring parts are merged again when the valley between them is
+/// shallower than [`VALLEY_SPLIT_FRACTION`] of the lower maximum; parts with
+/// fewer than [`MIN_COMPONENT_POINTS`] points are left out. Each component is
+/// reported at the intensity-weighted TOF index of its own half-height core
+/// (as [`centroid_profile`] places a peak) and the intensity-weighted scan of
+/// its points, with its summed intensity.
+pub(crate) fn centroid_frame(
+    scan_offsets: &[usize],
+    tof: &[u32],
+    intensity: &[u32],
+    resolve: bool,
+) -> (Vec<TofCentroid>, Vec<MobilityCentroid>) {
+    let summed_profile = sum_over_mobility(tof, intensity);
+    if !resolve {
+        return (centroid_profile(&summed_profile), Vec::new());
+    }
+    let mut bounds = Vec::new();
+    let summed = centroid_profile_with_bounds(&summed_profile, Some(&mut bounds));
+    let n = tof.len().min(intensity.len());
+    // (tof, scan, intensity) of every point, by TOF index.
+    let mut points: Vec<(u32, u32, u32)> = Vec::with_capacity(n);
+    for s in 0..scan_offsets.len().saturating_sub(1) {
+        let (a, b) = (scan_offsets[s].min(n), scan_offsets[s + 1].min(n));
+        for i in a..b {
+            points.push((tof[i], s as u32, intensity[i]));
+        }
+    }
+    points.sort_unstable_by_key(|p| (p.0, p.1));
+    let mut out = Vec::with_capacity(summed.len());
+    let mut at = 0;
+    let mut buf = Vec::new();
+    for &(lo, hi) in &bounds {
+        while at < points.len() && points[at].0 < lo {
+            at += 1;
+        }
+        let start = at;
+        while at < points.len() && points[at].0 <= hi {
+            at += 1;
+        }
+        buf.clear();
+        buf.extend_from_slice(&points[start..at]);
+        split_by_mobility(&mut buf, &mut out);
+    }
+    (summed, out)
+}
+
+/// One mobility component of a TOF peak while it is built.
+#[derive(Debug, Clone)]
+struct Component {
+    /// Scan range `[lo, hi]` of its own points.
+    lo: u32,
+    hi: u32,
+    points: usize,
+    /// Summed intensity of its points.
+    total: f64,
+    /// Smoothed maximum and the smoothed valley in front of it.
+    max: f64,
+    valley: f64,
+}
+
+/// Split the points of one TOF peak (`(tof, scan, intensity)`, any order) by
+/// ion mobility; see [`centroid_frame`].
+fn split_by_mobility(pts: &mut [(u32, u32, u32)], out: &mut Vec<MobilityCentroid>) {
+    if pts.is_empty() {
+        return;
+    }
+    pts.sort_unstable_by_key(|p| (p.1, p.0));
+    // Per-scan intensity of the peak.
+    let mut by_scan: Vec<(u32, f64, usize)> = Vec::new();
+    for &(_, s, i) in pts.iter() {
+        match by_scan.last_mut() {
+            Some(last) if last.0 == s => {
+                last.1 += i as f64;
+                last.2 += 1;
+            }
+            _ => by_scan.push((s, i as f64, 1)),
+        }
+    }
+    let half = (3.0 * MOBILITY_SMOOTHING_SCANS).ceil() as i64;
+    let kernel: Vec<f64> = (-half..=half)
+        .map(|d| (-0.5 * (d as f64 / MOBILITY_SMOOTHING_SCANS).powi(2)).exp())
+        .collect();
+    let mut parts: Vec<Component> = Vec::new();
+    let mut start = 0;
+    while start < by_scan.len() {
+        let mut end = start + 1;
+        while end < by_scan.len() && by_scan[end].0 - by_scan[end - 1].0 <= MOBILITY_GAP_SCANS {
+            end += 1;
+        }
+        mobility_run(&by_scan[start..end], &kernel, half, &mut parts);
+        start = end;
+    }
+    // Merge across a shallow valley.
+    let mut merged: Vec<Component> = Vec::with_capacity(parts.len());
+    for c in parts {
+        match merged.last_mut() {
+            Some(last)
+                if c.valley > 0.0 && c.valley >= VALLEY_SPLIT_FRACTION * last.max.min(c.max) =>
+            {
+                last.hi = c.hi;
+                last.points += c.points;
+                last.total += c.total;
+                last.max = last.max.max(c.max);
+            }
+            _ => merged.push(c),
+        }
+    }
+    // Parts with too few points are the scattered counts every TOF index
+    // collects over the frame's mobility range; they are left out.
+    for c in merged.iter().filter(|c| c.points >= MIN_COMPONENT_POINTS) {
+        emit(pts, c.lo, c.hi, out);
+    }
+}
+
+/// Split one run of per-scan intensities (scans no more than
+/// [`MOBILITY_GAP_SCANS`] apart) at the minima of its smoothed profile.
+fn mobility_run(run: &[(u32, f64, usize)], kernel: &[f64], half: i64, parts: &mut Vec<Component>) {
+    let first = run[0].0;
+    let n = (run[run.len() - 1].0 - first) as usize + 1;
+    let mut raw = vec![0.0f64; n];
+    let mut count = vec![0usize; n];
+    for &(s, i, c) in run {
+        raw[(s - first) as usize] = i;
+        count[(s - first) as usize] = c;
+    }
+    let smooth: Vec<f64> = (0..n as i64)
+        .map(|i| {
+            kernel
+                .iter()
+                .enumerate()
+                .filter_map(|(k, w)| {
+                    let j = i + k as i64 - half;
+                    (0..n as i64).contains(&j).then(|| raw[j as usize] * w)
+                })
+                .sum()
+        })
+        .collect();
+    let mut lo = 0;
+    let mut valley = 0.0;
+    let push = |lo: usize, hi: usize, valley: f64, parts: &mut Vec<Component>| {
+        let own: f64 = raw[lo..hi].iter().sum();
+        let points: usize = count[lo..hi].iter().sum();
+        let max = smooth[lo..hi].iter().copied().fold(0.0, f64::max);
+        // The scan range of its points (zero bins at the ends left out).
+        let a = (lo..hi).find(|&k| count[k] > 0).unwrap_or(lo);
+        let b = (lo..hi).rev().find(|&k| count[k] > 0).unwrap_or(hi - 1);
+        parts.push(Component {
+            lo: first + a as u32,
+            hi: first + b as u32,
+            points,
+            total: own,
+            max,
+            valley,
+        });
+    };
+    for i in 1..n.saturating_sub(1) {
+        if smooth[i] < smooth[i - 1] && smooth[i] <= smooth[i + 1] {
+            push(lo, i, valley, parts);
+            lo = i;
+            valley = smooth[i];
+        }
+    }
+    push(lo, n, valley, parts);
+}
+
+/// Report the points of `pts` (sorted by scan) with scans in `[lo, hi]` as
+/// one centroid: its TOF position from the half-height core of its own TOF
+/// profile (smoothed as in [`centroid_profile`]), its intensity-weighted
+/// scan and its summed intensity.
+fn emit(pts: &[(u32, u32, u32)], lo: u32, hi: u32, out: &mut Vec<MobilityCentroid>) {
+    let a = pts.partition_point(|p| p.1 < lo);
+    let b = pts.partition_point(|p| p.1 <= hi);
+    let own = &pts[a..b];
+    if own.is_empty() {
+        return;
+    }
+    let (mut sum, mut sum_scan) = (0.0f64, 0.0f64);
+    let (mut tmin, mut tmax) = (u32::MAX, 0u32);
+    for &(t, s, i) in own {
+        sum += i as f64;
+        sum_scan += i as f64 * s as f64;
+        tmin = tmin.min(t);
+        tmax = tmax.max(t);
+    }
+    if sum <= 0.0 {
+        return;
+    }
+    let width = (tmax - tmin) as usize + 1;
+    let mut raw = vec![0.0f64; width];
+    for &(t, _, i) in own {
+        raw[(t - tmin) as usize] += i as f64;
+    }
+    let half = SMOOTHING.len() / 2;
+    let smooth: Vec<f64> = (0..width)
+        .map(|i| {
+            SMOOTHING
+                .iter()
+                .enumerate()
+                .filter_map(|(k, w)| {
+                    let j = (i + k).checked_sub(half)?;
+                    raw.get(j).map(|v| v * w)
+                })
+                .sum()
+        })
+        .collect();
+    let max = smooth.iter().copied().fold(0.0, f64::max);
+    let (mut w, mut wt) = (0.0, 0.0);
+    for (i, &r) in raw.iter().enumerate() {
+        if smooth[i] >= CORE_FRACTION * max {
+            w += r;
+            wt += r * (tmin as f64 + i as f64);
+        }
+    }
+    if w <= 0.0 {
+        w = sum;
+        wt = raw
+            .iter()
+            .enumerate()
+            .map(|(i, r)| r * (tmin as f64 + i as f64))
+            .sum();
+    }
+    out.push(MobilityCentroid {
+        tof: wt / w,
+        intensity: sum,
+        scan: sum_scan / sum,
+    });
 }
 
 /// What the m/z of a frame's centroids depends on besides the TOF index and
@@ -644,6 +923,101 @@ mod tests {
             &gaussian(993, 1014, 1003.0, 2.0, 60.0, 0.0),
         );
         assert_eq!(centroid_profile(&q).len(), 1);
+    }
+
+    /// A frame of `n_scans` mobility scans from `(tof, scan, count)` points.
+    fn frame(n_scans: usize, mut pts: Vec<(u32, u32, u32)>) -> (Vec<usize>, Vec<u32>, Vec<u32>) {
+        pts.sort_by_key(|p| (p.1, p.0));
+        let mut offsets = vec![0usize];
+        let (mut tof, mut inten) = (Vec::new(), Vec::new());
+        let mut k = 0;
+        for s in 0..n_scans as u32 {
+            while k < pts.len() && pts[k].1 == s {
+                tof.push(pts[k].0);
+                inten.push(pts[k].2);
+                k += 1;
+            }
+            offsets.push(tof.len());
+        }
+        (offsets, tof, inten)
+    }
+
+    /// An ion: Gaussian in TOF (sd 1.5 bins) around `tof` and in mobility
+    /// (sd 8 scans) around `scan`, `height` counts at its apex.
+    fn ion(tof: f64, scan: f64, height: f64) -> Vec<(u32, u32, u32)> {
+        let mut out = Vec::new();
+        for s in (scan as i64 - 30)..(scan as i64 + 30) {
+            for t in (tof as i64 - 6)..(tof as i64 + 7) {
+                let ds = (s as f64 - scan) / 8.0;
+                let dt = (t as f64 - tof) / 1.5;
+                let v = (height * (-0.5 * (ds * ds + dt * dt)).exp()).round() as u32;
+                if v > 0 {
+                    out.push((t as u32, s as u32, v));
+                }
+            }
+        }
+        out
+    }
+
+    fn merge(parts: &[Vec<(u32, u32, u32)>]) -> Vec<(u32, u32, u32)> {
+        let mut m = std::collections::BTreeMap::new();
+        for &(t, s, i) in parts.iter().flatten() {
+            *m.entry((t, s)).or_insert(0) += i;
+        }
+        m.into_iter().map(|((t, s), i)| (t, s, i)).collect()
+    }
+
+    #[test]
+    fn without_resolution_the_frame_is_summed_over_mobility() {
+        let (off, tof, inten) = frame(600, merge(&[ion(1000.0, 300.0, 50.0)]));
+        let (summed, resolved) = centroid_frame(&off, &tof, &inten, false);
+        assert_eq!(summed, centroid_profile(&sum_over_mobility(&tof, &inten)));
+        assert!(resolved.is_empty());
+    }
+
+    #[test]
+    fn ions_at_one_tof_are_split_by_mobility() {
+        // Same TOF position, 40 scans (5 sd) apart in mobility: one summed
+        // centroid, two mobility components at their own scans.
+        let pts = merge(&[ion(1000.0, 300.0, 20.0), ion(1000.4, 340.0, 80.0)]);
+        let (off, tof, inten) = frame(600, pts);
+        let (summed, resolved) = centroid_frame(&off, &tof, &inten, true);
+        assert_eq!(summed, centroid_profile(&sum_over_mobility(&tof, &inten)));
+        assert_eq!(summed.len(), 1, "{summed:?}");
+        assert_eq!(resolved.len(), 2, "{resolved:?}");
+        assert!((resolved[0].scan - 300.0).abs() < 1.5, "{resolved:?}");
+        assert!((resolved[1].scan - 340.0).abs() < 1.5, "{resolved:?}");
+        assert!((resolved[0].tof - 1000.0).abs() < 0.3, "{resolved:?}");
+        assert!((resolved[1].tof - 1000.4).abs() < 0.3, "{resolved:?}");
+        let total: f64 = resolved.iter().map(|c| c.intensity).sum();
+        assert!(total <= summed[0].intensity && total > 0.99 * summed[0].intensity);
+        assert!(resolved[1].intensity > 3.0 * resolved[0].intensity);
+    }
+
+    #[test]
+    fn scattered_counts_do_not_make_components_of_their_own() {
+        // One ion plus isolated single counts far from it in mobility: one
+        // component at the ion's scan, without the scattered counts.
+        let mut noise = Vec::new();
+        for s in [20u32, 80, 150, 450, 520] {
+            noise.push((1000u32, s, 1u32));
+        }
+        let pts = merge(&[ion(1000.0, 300.0, 30.0), noise]);
+        let (off, tof, inten) = frame(600, pts);
+        let (summed, resolved) = centroid_frame(&off, &tof, &inten, true);
+        assert_eq!(summed.len(), 1);
+        assert_eq!(resolved.len(), 1, "{resolved:?}");
+        assert_eq!(resolved[0].intensity, summed[0].intensity - 5.0);
+        assert!((resolved[0].scan - 300.0).abs() < 1.0, "{resolved:?}");
+        // A peak of scattered counts only has no resolved centroid.
+        let sparse: Vec<(u32, u32, u32)> = [10u32, 90, 200, 333]
+            .iter()
+            .map(|&s| (2000u32, s, 1u32))
+            .collect();
+        let (off, tof, inten) = frame(600, sparse);
+        let (summed, resolved) = centroid_frame(&off, &tof, &inten, true);
+        assert_eq!(summed.len(), 1);
+        assert!(resolved.is_empty(), "{resolved:?}");
     }
 
     #[test]

@@ -30,6 +30,9 @@ const SCHEMA_KEY: &str = "andes.run_quant.schema";
 const RUN_KEY: &str = "andes.run_quant.run";
 const MODS_KEY: &str = "andes.run_quant.mods";
 const SCHEMA_VERSION: &str = "1.1";
+/// Schema version of a table with the `ion_mobility` column, which is
+/// written only when some PSM records a precursor 1/K0.
+const SCHEMA_VERSION_MOBILITY: &str = "1.2";
 /// Rows per Parquet row group / record batch.
 const BATCH_ROWS: usize = 65_536;
 
@@ -54,10 +57,13 @@ pub struct RunPsmRow {
     pub envelope: Vec<f32>,
     /// `;`-joined accessions.
     pub proteins: String,
+    /// Precursor 1/K0 of the spectrum, when the source records it (Bruker
+    /// timsTOF `.d`).
+    pub ion_mobility: Option<f32>,
 }
 
-fn schema() -> Schema {
-    Schema::new(vec![
+fn schema(with_mobility: bool) -> Schema {
+    let mut fields = vec![
         Field::new("spec_id", DataType::Utf8, false),
         Field::new("rt_s", DataType::Float64, false),
         Field::new("precursor_key", DataType::Utf8, false),
@@ -73,10 +79,18 @@ fn schema() -> Schema {
             false,
         ),
         Field::new("proteins", DataType::Utf8, false),
-    ])
+    ];
+    if with_mobility {
+        fields.push(Field::new("ion_mobility", DataType::Float32, true));
+    }
+    Schema::new(fields)
 }
 
-fn batch(schema: &Arc<Schema>, rows: &[RunPsmRow]) -> Result<RecordBatch, String> {
+fn batch(
+    schema: &Arc<Schema>,
+    rows: &[RunPsmRow],
+    with_mobility: bool,
+) -> Result<RecordBatch, String> {
     let mut spec_id = StringBuilder::new();
     let mut rt_s = Float64Builder::new();
     let mut key = StringBuilder::new();
@@ -88,6 +102,7 @@ fn batch(schema: &Arc<Schema>, rows: &[RunPsmRow]) -> Result<RecordBatch, String
     let mut cv = Float32Builder::new();
     let mut env = ListBuilder::new(Float32Builder::new());
     let mut prot = StringBuilder::new();
+    let mut k0 = Float32Builder::new();
     for r in rows {
         spec_id.append_value(&r.spec_id);
         rt_s.append_value(r.rt_s);
@@ -101,8 +116,9 @@ fn batch(schema: &Arc<Schema>, rows: &[RunPsmRow]) -> Result<RecordBatch, String
         env.values().append_slice(&r.envelope);
         env.append(true);
         prot.append_value(&r.proteins);
+        k0.append_option(r.ion_mobility);
     }
-    let cols: Vec<ArrayRef> = vec![
+    let mut cols: Vec<ArrayRef> = vec![
         Arc::new(spec_id.finish()),
         Arc::new(rt_s.finish()),
         Arc::new(key.finish()),
@@ -115,6 +131,9 @@ fn batch(schema: &Arc<Schema>, rows: &[RunPsmRow]) -> Result<RecordBatch, String
         Arc::new(env.finish()),
         Arc::new(prot.finish()),
     ];
+    if with_mobility {
+        cols.push(Arc::new(k0.finish()));
+    }
     RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
 }
 
@@ -137,7 +156,13 @@ fn write_versioned(
     version: &str,
 ) -> Result<(), String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
-    let schema = Arc::new(schema());
+    let with_mobility = rows.iter().any(|r| r.ion_mobility.is_some());
+    let version = if with_mobility && version == SCHEMA_VERSION {
+        SCHEMA_VERSION_MOBILITY
+    } else {
+        version
+    };
+    let schema = Arc::new(schema(with_mobility));
     let props = WriterProperties::builder()
         .set_compression(Compression::ZSTD(ZstdLevel::default()))
         .set_max_row_group_size(BATCH_ROWS)
@@ -156,7 +181,7 @@ fn write_versioned(
         let mut writer =
             ArrowWriter::try_new(file, schema.clone(), Some(props)).map_err(|e| io(&e))?;
         for chunk in rows.chunks(BATCH_ROWS) {
-            let b = batch(&schema, chunk).map_err(|e| io(&e))?;
+            let b = batch(&schema, chunk, with_mobility).map_err(|e| io(&e))?;
             writer.write(&b).map_err(|e| io(&e))?;
         }
         writer.close().map_err(|e| io(&e))?;
@@ -224,8 +249,10 @@ fn column<'a, T: 'static>(b: &'a RecordBatch, i: usize, path: &Path) -> Result<&
     })
 }
 
-/// The columns of a per-run PSM table, in file order.
-pub const RUN_QUANT_COLUMNS: [&str; 11] = [
+/// The columns of a per-run PSM table, in file order. The last,
+/// `ion_mobility`, is present only in tables where some PSM records a
+/// precursor 1/K0; a table without it reads `None`.
+pub const RUN_QUANT_COLUMNS: [&str; 12] = [
     "spec_id",
     "rt_s",
     "precursor_key",
@@ -237,6 +264,7 @@ pub const RUN_QUANT_COLUMNS: [&str; 11] = [
     "faims_cv",
     "envelope",
     "proteins",
+    "ion_mobility",
 ];
 
 /// A per-run PSM table opened for reading one record batch at a time, with
@@ -245,7 +273,7 @@ pub const RUN_QUANT_COLUMNS: [&str; 11] = [
 pub struct RunQuantBatches {
     path: std::path::PathBuf,
     run: String,
-    wanted: [bool; 11],
+    wanted: [bool; 12],
     reader: parquet::arrow::arrow_reader::ParquetRecordBatchReader,
 }
 
@@ -284,15 +312,16 @@ pub fn open_run_quant_table(path: &Path, columns: &[&str]) -> Result<RunQuantBat
     }
     let run = get(RUN_KEY).ok_or_else(|| err(&format!("missing metadata key {RUN_KEY}")))?;
     let fields = builder.schema().fields().clone();
-    if fields.len() != RUN_QUANT_COLUMNS.len() {
+    if fields.len() + 1 != RUN_QUANT_COLUMNS.len() && fields.len() != RUN_QUANT_COLUMNS.len() {
         return Err(err(&format!(
-            "expected {} columns, found {}",
+            "expected {} or {} columns, found {}",
+            RUN_QUANT_COLUMNS.len() - 1,
             RUN_QUANT_COLUMNS.len(),
             fields.len()
         )));
     }
-    let mut wanted = [false; 11];
-    for (i, name) in RUN_QUANT_COLUMNS.iter().enumerate() {
+    let mut wanted = [false; 12];
+    for (i, name) in RUN_QUANT_COLUMNS.iter().enumerate().take(fields.len()) {
         if fields[i].name() != name {
             return Err(err(&format!(
                 "column {:?} where {name:?} was expected",
@@ -328,7 +357,7 @@ impl RunQuantBatches {
         let path = self.path.as_path();
         let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
         // Projected batches hold the wanted columns in file order.
-        let mut at = [usize::MAX; 11];
+        let mut at = [usize::MAX; 12];
         let mut k = 0;
         for (i, w) in self.wanted.iter().enumerate() {
             if *w {
@@ -370,6 +399,9 @@ impl RunQuantBatches {
         let env = col(9)
             .map(|c| column::<ListArray>(b, c, path))
             .transpose()?;
+        let k0 = col(11)
+            .map(|c| column::<Float32Array>(b, c, path))
+            .transpose()?;
         let text =
             |a: Option<&StringArray>, i: usize| a.map_or(String::new(), |a| a.value(i).to_string());
         let mut rows = Vec::with_capacity(b.num_rows());
@@ -397,6 +429,7 @@ impl RunQuantBatches {
                 faims_cv: cv.and_then(|a| (!a.is_null(i)).then(|| a.value(i))),
                 envelope,
                 proteins: text(prot, i),
+                ion_mobility: k0.and_then(|a| (!a.is_null(i)).then(|| a.value(i))),
             });
         }
         Ok(rows)
@@ -444,6 +477,7 @@ mod tests {
             faims_cv: if i % 2 == 0 { Some(-45.0) } else { None },
             envelope: vec![0.6, 0.3, 0.08, 0.02],
             proteins: "P1;P2".into(),
+            ion_mobility: None,
         }
     }
 
@@ -463,6 +497,7 @@ mod tests {
             faims_cv: Some(-45.0),
             envelope: vec![0.6, 0.3, 0.08, 0.02],
             proteins: "P1;P2".into(),
+            ion_mobility: None,
         }];
         let mods = [
             ("UNIMOD:4".to_string(), 57.021464),
@@ -521,6 +556,7 @@ mod tests {
                 faims_cv: r.faims_cv,
                 envelope: Vec::new(),
                 proteins: String::new(),
+                ion_mobility: None,
             })
             .collect();
         assert_eq!(got, want);

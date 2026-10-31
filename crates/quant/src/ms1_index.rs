@@ -11,6 +11,67 @@ use std::collections::HashMap;
 use model::mass::ISOTOPE;
 pub use model::scan::Ms1Scan;
 
+/// A window of inverse reduced ion mobility (1/K0, V·s/cm²), inclusive.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MobilityGate {
+    pub lo: f32,
+    pub hi: f32,
+}
+
+impl MobilityGate {
+    pub fn contains(&self, k0: f32) -> bool {
+        k0 >= self.lo && k0 <= self.hi
+    }
+}
+
+/// The value of the m/z slice of a scan whose centroids `peaks[start..]`
+/// begin at its lower bound and end at the last centroid with m/z at most
+/// `hi`: `(m/z of the most intense qualifying centroid, value)`, `(0.0,
+/// 0.0)` when none qualifies; only positive intensities count (a NaN never
+/// does) and the lowest m/z wins a tie.
+///
+/// Without `mobility` (empty) the value is the most intense centroid's
+/// intensity and `gate` is ignored. With `mobility` (parallel to `peaks`) the
+/// centroids of the slice are the ion-mobility components of the
+/// time-of-flight peak(s) at that m/z, and the value is the summed intensity
+/// of those whose 1/K0 lies in `gate` (all of them without a gate).
+pub fn slice_value(
+    peaks: &[(f64, f32)],
+    mobility: &[f32],
+    start: usize,
+    hi: f64,
+    gate: Option<MobilityGate>,
+) -> (f64, f32) {
+    let (mut best_mz, mut best) = (0.0f64, 0.0f32);
+    if mobility.is_empty() {
+        for &(mz, inten) in &peaks[start.min(peaks.len())..] {
+            if mz > hi {
+                break;
+            }
+            if inten > best {
+                best = inten;
+                best_mz = mz;
+            }
+        }
+        return (best_mz, best);
+    }
+    let mut sum = 0.0f32;
+    for (k, &(mz, inten)) in peaks.iter().enumerate().skip(start) {
+        if mz > hi {
+            break;
+        }
+        if inten.is_nan() || inten <= 0.0 || gate.is_some_and(|g| !g.contains(mobility[k])) {
+            continue;
+        }
+        sum += inten;
+        if inten > best {
+            best = inten;
+            best_mz = mz;
+        }
+    }
+    (best_mz, sum)
+}
+
 /// All MS1 scans of one run in RT order.
 #[derive(Debug, Default)]
 pub struct Ms1RunIndex {
@@ -47,8 +108,23 @@ impl Ms1RunIndex {
         scans.retain(|s| s.rt.is_finite());
         for s in scans.iter_mut() {
             if !s.peaks.windows(2).all(|w| w[0].0 <= w[1].0) {
-                s.peaks
-                    .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                if s.mobility.len() == s.peaks.len() {
+                    let mut order: Vec<usize> = (0..s.peaks.len()).collect();
+                    order.sort_by(|&a, &b| {
+                        s.peaks[a]
+                            .0
+                            .partial_cmp(&s.peaks[b].0)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    s.peaks = order.iter().map(|&k| s.peaks[k]).collect();
+                    s.mobility = order.iter().map(|&k| s.mobility[k]).collect();
+                } else {
+                    s.peaks
+                        .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                }
+            }
+            if s.mobility.len() != s.peaks.len() {
+                s.mobility.clear();
             }
         }
         scans.sort_by(|a, b| a.rt.partial_cmp(&b.rt).unwrap_or(std::cmp::Ordering::Equal));
@@ -137,6 +213,17 @@ impl Ms1RunIndex {
         &self.scans[idx].peaks
     }
 
+    /// The 1/K0 of each centroid of scan `idx` (parallel to
+    /// [`Self::peaks`]); empty when the scan is not mobility-resolved.
+    pub fn mobility(&self, idx: usize) -> &[f32] {
+        &self.scans[idx].mobility
+    }
+
+    /// Whether any scan is mobility-resolved (see [`Ms1Scan::mobility`]).
+    pub fn has_mobility(&self) -> bool {
+        self.scans.iter().any(|s| !s.mobility.is_empty())
+    }
+
     /// Detection limit of scan `idx`: the 5th percentile (nearest rank) of its
     /// centroid intensities, 1.0 when it has none. Computed once when the
     /// index is built.
@@ -200,10 +287,16 @@ impl Ms1RunIndex {
         i.checked_sub(1)
     }
 
-    /// Most intense centroid in `[lo, hi]` of scan `idx`, 0.0 when none.
+    /// Most intense centroid in `[lo, hi]` of scan `idx`, 0.0 when none. On a
+    /// mobility-resolved scan, the summed intensity of the centroids in
+    /// `[lo, hi]` (see [`slice_value`]).
     pub fn max_in(&self, idx: usize, lo: f64, hi: f64) -> f32 {
-        let peaks = &self.scans[idx].peaks;
+        let s = &self.scans[idx];
+        let peaks = &s.peaks;
         let start = peaks.partition_point(|&(mz, _)| mz < lo);
+        if !s.mobility.is_empty() {
+            return slice_value(peaks, &s.mobility, start, hi, None).1;
+        }
         let mut best = 0.0f32;
         for &(mz, inten) in &peaks[start..] {
             if mz > hi {
@@ -216,13 +309,29 @@ impl Ms1RunIndex {
         best
     }
 
+    /// The value of the m/z slice `[lo, hi]` of scan `idx` within the
+    /// mobility `gate` (see [`slice_value`]): `(m/z of the most intense
+    /// centroid, value)`, `(0.0, 0.0)` when none qualifies. A scan that is
+    /// not mobility-resolved ignores the gate and gives
+    /// [`Self::apex_centroid`].
+    pub fn slice_in(&self, idx: usize, lo: f64, hi: f64, gate: Option<MobilityGate>) -> (f64, f32) {
+        let s = &self.scans[idx];
+        let start = s.peaks.partition_point(|&(mz, _)| mz < lo);
+        slice_value(&s.peaks, &s.mobility, start, hi, gate)
+    }
+
     /// The most intense centroid in `[lo, hi]` of scan `idx`, as (m/z,
     /// intensity), with the semantics of [`Self::max_in`]: only positive
     /// intensities count (a NaN never does) and the lowest m/z wins a tie.
     /// `None` when no centroid qualifies.
     pub fn apex_centroid(&self, idx: usize, lo: f64, hi: f64) -> Option<(f64, f32)> {
-        let peaks = &self.scans[idx].peaks;
+        let s = &self.scans[idx];
+        let peaks = &s.peaks;
         let start = peaks.partition_point(|&(mz, _)| mz < lo);
+        if !s.mobility.is_empty() {
+            let (mz, v) = slice_value(peaks, &s.mobility, start, hi, None);
+            return (v > 0.0).then_some((mz, v));
+        }
         let mut best: Option<(f64, f32)> = None;
         for &(mz, inten) in &peaks[start..] {
             if mz > hi {
@@ -445,6 +554,7 @@ mod tests {
                 peaks: vec![(500.0, i as f32)],
                 id: format!("scan={}", 10 - i),
                 faims_cv: Some(if i % 2 == 0 { -40.0 } else { -60.0 }),
+                mobility: Vec::new(),
             })
             .collect();
         let idx = Ms1RunIndex::new(scans);

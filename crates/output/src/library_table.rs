@@ -83,8 +83,10 @@ fn list(item: DataType) -> DataType {
     DataType::List(Arc::new(Field::new("item", item, true)))
 }
 
-fn library_schema() -> Schema {
-    Schema::new(vec![
+/// The precursor table's columns; `ion_mobility` (an entry's median donor
+/// precursor 1/K0) is the last and is present only when some entry has one.
+fn library_schema(with_mobility: bool) -> Schema {
+    let mut fields = vec![
         Field::new("key", DataType::Utf8, false),
         Field::new("mz", DataType::Float64, false),
         Field::new("charge", DataType::UInt8, false),
@@ -104,7 +106,11 @@ fn library_schema() -> Schema {
         Field::new("frag_ion", list(DataType::Utf8), false),
         Field::new("donor_scan_run", list(DataType::UInt16), false),
         Field::new("donor_scan_rt", list(DataType::Float64), false),
-    ])
+    ];
+    if with_mobility {
+        fields.push(Field::new("ion_mobility", DataType::Float32, true));
+    }
+    Schema::new(fields)
 }
 
 fn alignment_schema() -> Schema {
@@ -244,6 +250,9 @@ pub fn library_fingerprint(lib: &StoredLibrary) -> String {
         h.f64(e.donor_psm.q);
         h.f64(e.donor_psm.pep);
         h.u64(e.faims_cv.map_or(u64::MAX, |v| v.to_bits() as u64));
+        if let Some(k0) = e.ion_mobility {
+            h.u64(k0.to_bits() as u64);
+        }
         h.u64(e.donors.len() as u64);
         e.donors.iter().for_each(|&d| h.u64(d as u64));
         for &(r, t) in &e.best_rt {
@@ -285,6 +294,7 @@ fn library_batch(
     let mut frag_ion = ListBuilder::new(StringBuilder::new());
     let mut scan_run = ListBuilder::new(UInt16Builder::new());
     let mut scan_rt = ListBuilder::new(Float64Builder::new());
+    let mut k0 = Float32Builder::new();
     for id in ids {
         let m = &lib.library.meta[id];
         key.append_value(&m.key);
@@ -300,6 +310,7 @@ fn library_batch(
         d_q.append_option(e.map(|e| e.donor_psm.q));
         d_pep.append_option(e.map(|e| e.donor_psm.pep));
         cv.append_option(e.and_then(|e| e.faims_cv));
+        k0.append_option(e.and_then(|e| e.ion_mobility));
         if let Some(e) = e {
             donors.values().append_slice(&e.donors);
             for &(r, t) in &e.best_rt {
@@ -325,7 +336,7 @@ fn library_batch(
         scan_run.append(true);
         scan_rt.append(true);
     }
-    let cols: Vec<ArrayRef> = vec![
+    let mut cols: Vec<ArrayRef> = vec![
         Arc::new(key.finish()),
         Arc::new(mz.finish()),
         Arc::new(charge.finish()),
@@ -346,6 +357,9 @@ fn library_batch(
         Arc::new(scan_run.finish()),
         Arc::new(scan_rt.finish()),
     ];
+    if schema.fields().len() > cols.len() {
+        cols.push(Arc::new(k0.finish()));
+    }
     RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
 }
 
@@ -526,7 +540,8 @@ fn write_versioned(dir: &Path, lib: &StoredLibrary, version: &str) -> Result<(),
         std::iter::once(batch),
     )?;
 
-    let lib_schema = Arc::new(library_schema());
+    let with_mobility = lib.library.entries.iter().any(|e| e.ion_mobility.is_some());
+    let lib_schema = Arc::new(library_schema(with_mobility));
     let chunks = (0..n.div_ceil(BATCH_ROWS)).map(|c| c * BATCH_ROWS..((c + 1) * BATCH_ROWS).min(n));
     write_parquet(
         &lib_path,
@@ -570,11 +585,12 @@ fn open(
     path: &Path,
     key: &str,
     what: &str,
-    expected: &Schema,
+    expected: &[Schema],
 ) -> Result<
     (
         parquet::arrow::arrow_reader::ParquetRecordBatchReader,
         Vec<KeyValue>,
+        usize,
     ),
     String,
 > {
@@ -609,19 +625,18 @@ fn open(
             .map(|f| (f.name().clone(), f.data_type().clone()))
             .collect()
     };
-    if names(got) != names(expected) {
+    let Some(layout) = expected.iter().position(|e| names(got) == names(e)) else {
         return Err(err(&format!(
             "columns {:?} differ from the expected {:?}",
             got.fields().iter().map(|f| f.name()).collect::<Vec<_>>(),
             expected
-                .fields()
-                .iter()
-                .map(|f| f.name())
-                .collect::<Vec<_>>()
+                .last()
+                .map(|e| e.fields().iter().map(|f| f.name()).collect::<Vec<_>>())
+                .unwrap_or_default()
         )));
-    }
+    };
     let reader = builder.build().map_err(|e| err(&e))?;
-    Ok((reader, meta))
+    Ok((reader, meta, layout))
 }
 
 fn column<'a, T: 'static>(b: &'a RecordBatch, i: usize, path: &Path) -> Result<&'a T, String> {
@@ -671,7 +686,13 @@ pub fn read_library(dir: &Path) -> Result<StoredLibrary, String> {
     let lerr = |e: &dyn std::fmt::Display| format!("{}: {e}", lib_path.display());
     let aerr = |e: &dyn std::fmt::Display| format!("{}: {e}", align_path.display());
 
-    let (reader, meta) = open(&lib_path, LIBRARY_KEY, "library", &library_schema())?;
+    let (reader, meta, layout) = open(
+        &lib_path,
+        LIBRARY_KEY,
+        "library",
+        &[library_schema(false), library_schema(true)],
+    )?;
+    let with_mobility = layout == 1;
     let get = |key: &str| {
         meta.iter()
             .find(|kv| kv.key == key)
@@ -726,6 +747,9 @@ pub fn read_library(dir: &Path) -> Result<StoredLibrary, String> {
         let frag_ion = column::<ListArray>(&b, 16, &lib_path)?;
         let scan_run = column::<ListArray>(&b, 17, &lib_path)?;
         let scan_rt = column::<ListArray>(&b, 18, &lib_path)?;
+        let k0 = with_mobility
+            .then(|| column::<Float32Array>(&b, 19, &lib_path))
+            .transpose()?;
         for i in 0..b.num_rows() {
             let id = meta_rows.len();
             let mzs = f64s(frag_mz, i, &lib_path)?;
@@ -810,6 +834,7 @@ pub fn read_library(dir: &Path) -> Result<StoredLibrary, String> {
                 },
                 consensus_rt: f64::NAN,
                 faims_cv: (!cv.is_null(i)).then(|| cv.value(i)),
+                ion_mobility: k0.and_then(|a| (!a.is_null(i)).then(|| a.value(i))),
                 donors: u16s(donors, i, &lib_path)?,
                 best_rt: runs_b.into_iter().zip(rts_b).collect(),
             });
@@ -817,7 +842,12 @@ pub fn read_library(dir: &Path) -> Result<StoredLibrary, String> {
     }
     let n = meta_rows.len();
 
-    let (reader, _) = open(&align_path, ALIGNMENT_KEY, "alignment", &alignment_schema())?;
+    let (reader, _, _) = open(
+        &align_path,
+        ALIGNMENT_KEY,
+        "alignment",
+        &[alignment_schema()],
+    )?;
     let mut run_states: Vec<RunAlignment> = Vec::new();
     for b in reader {
         let b = b.map_err(|e| aerr(&e))?;
@@ -992,6 +1022,7 @@ mod tests {
                     pep: 1e-3 * r as f64,
                     is_decoy: decoy,
                     faims_cv: (p % 3 == 0).then_some(-45.0),
+                    ion_mobility: None,
                 });
             }
         }

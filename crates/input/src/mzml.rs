@@ -1187,6 +1187,7 @@ impl<R: BufRead> MzMLReader<R> {
                                         peaks,
                                         id: sb.id.clone(),
                                         faims_cv: sb.faims_cv,
+                                        mobility: Vec::new(),
                                     });
                                     if !emits_ms1 && !self.capture_ms1 {
                                         continue;

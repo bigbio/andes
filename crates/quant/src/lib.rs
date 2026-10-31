@@ -34,6 +34,7 @@ pub mod formula;
 pub mod isobaric;
 pub mod lfq;
 pub mod library;
+pub mod mobility;
 pub mod ms1_index;
 pub mod ms2;
 pub mod nnls;
@@ -45,5 +46,5 @@ pub mod xic;
 
 pub use isobaric::{extract_reporters, Channel, CorrectionMatrix, Plex};
 pub use lfq::{FeatureQuant, LfqParams, LfqTarget};
-pub use ms1_index::{Ms1RunIndex, Ms1Scan};
+pub use ms1_index::{MobilityGate, Ms1RunIndex, Ms1Scan};
 pub use purity::precursor_purity;

@@ -102,10 +102,11 @@ use output::ms1_table::read_ms1_table;
 use quant::align::RunMap;
 use quant::decoys::{probes, Hypothesis, Probe, PEPTIDE_MASS_SLOPE};
 use quant::evidence::{
-    fit_many, fit_on_grid, Evidence, EvidenceParams, FitJob, FitScratch, WIDTH_GRID,
+    fit_many, fit_on_grid_gated, Evidence, EvidenceParams, FitJob, FitScratch, WIDTH_GRID,
 };
 use quant::library::{Library, LibraryEntry};
-use quant::ms1_index::Ms1RunIndex;
+use quant::mobility::{MobilityObservation, RunMobility};
+use quant::ms1_index::{MobilityGate, Ms1RunIndex};
 use quant::ms2::{elution_window, LibrarySpectrum, Ms2RunIndex};
 use rayon::prelude::*;
 
@@ -181,6 +182,9 @@ pub(crate) struct RunScales {
     /// Too few usable fits: `width_s` is [`SEED_WIDTH_S`] (floored at the
     /// spacing).
     pub fallback: bool,
+    /// The run's learned ion-mobility scale, on a mobility-resolved run with
+    /// enough identified precursors that have a library mobility.
+    pub mobility: Option<RunMobility>,
 }
 
 impl RunScales {
@@ -195,10 +199,17 @@ impl RunScales {
         let spacing = self
             .spacing_s
             .map_or_else(|| "unknown".to_string(), |s| format!("{s:.4}"));
-        format!(
+        let mut out = format!(
             "ms1_spacing_s={spacing};width_scale_s={:.4};width_scale_fits={};width_scale_rounds={};width_scale_fallback={}",
             self.width_s, self.width_fits, self.rounds, self.fallback
-        )
+        );
+        if let Some(m) = &self.mobility {
+            out.push_str(&format!(
+                ";mobility_offset={:.5};mobility_sd={:.5};mobility_pairs={}",
+                m.offset, m.sigma, m.pairs
+            ));
+        }
+        out
     }
 }
 
@@ -533,7 +544,14 @@ fn identified_targets(ids: &[usize], run: u16, lib: &Library) -> Vec<(usize, f64
 
 /// The width-free fit job of an identified pair: prior centred on its PSM RT
 /// `rt` with width `s`, widths [`WIDTH_PRIOR_GRID`] times `scale`.
-fn width_job(lib: &Library, i: usize, rt: f64, scale: f64, s: f64) -> FitJob<'_> {
+fn width_job(
+    lib: &Library,
+    i: usize,
+    rt: f64,
+    scale: f64,
+    s: f64,
+    mobility: Option<MobilityGate>,
+) -> FitJob<'_> {
     let meta = &lib.meta[lib.entries[i].precursor as usize];
     FitJob {
         probe: Probe {
@@ -546,6 +564,7 @@ fn width_job(lib: &Library, i: usize, rt: f64, scale: f64, s: f64) -> FitJob<'_>
         charge: meta.charge.max(1),
         envelope: &meta.envelope,
         widths: &WIDTH_PRIOR_GRID,
+        mobility,
     }
 }
 
@@ -558,8 +577,9 @@ fn usable_width_fit(ev: &Evidence) -> bool {
 /// among the entries `ids`, each fitted on `series[series_of(id)]`, with
 /// `spacing_s` the run's MS1 scan spacing. Each round fits at most
 /// [`SCALE_PAIRS`] pairs, every k-th of the identified ones in library
-/// order, one at a time ([`fit_on_grid`] gives the result [`fit_many`]
+/// order, one at a time ([`fit_on_grid_gated`] gives the result [`fit_many`]
 /// would, without its sweep over the whole run).
+#[allow(clippy::too_many_arguments)]
 fn width_scale<F>(
     ids: &[usize],
     run: u16,
@@ -568,6 +588,7 @@ fn width_scale<F>(
     series: &[&Ms1RunIndex],
     series_of: F,
     spacing_s: Option<f64>,
+    gates: &[Option<MobilityGate>],
 ) -> RunScales
 where
     F: Fn(usize) -> usize + Sync,
@@ -586,14 +607,15 @@ where
         let widths: Vec<f64> = pilot
             .par_iter()
             .map_init(FitScratch::default, |scratch, &(i, rt)| {
-                let job = width_job(lib, i, rt, w, w.max(floor));
-                fit_on_grid(
+                let job = width_job(lib, i, rt, w, w.max(floor), gates[i]);
+                fit_on_grid_gated(
                     series[series_of(i)],
                     &job.probe,
                     job.charge,
                     job.envelope,
                     ep,
                     job.widths,
+                    job.mobility,
                     scratch,
                 )
             })
@@ -621,6 +643,7 @@ where
 /// entries `ids` (identity decoys left out), each fitted on
 /// `series[series_of(id)]` with widths [`WIDTH_PRIOR_GRID`] times the run's
 /// width scale and `s = max(w_run, dt)`.
+#[allow(clippy::too_many_arguments)]
 fn width_fits<F>(
     ids: &[usize],
     run: u16,
@@ -629,6 +652,7 @@ fn width_fits<F>(
     series: &[&Ms1RunIndex],
     series_of: F,
     scales: &RunScales,
+    gates: &[Option<MobilityGate>],
 ) -> Vec<(f64, f64)>
 where
     F: Fn(usize) -> usize,
@@ -636,7 +660,7 @@ where
     let (w, s) = (scales.width_s, scales.width_s.max(scales.floor_s()));
     let jobs: Vec<(usize, FitJob)> = identified_targets(ids, run, lib)
         .into_iter()
-        .map(|(i, rt)| (series_of(i), width_job(lib, i, rt, w, s)))
+        .map(|(i, rt)| (series_of(i), width_job(lib, i, rt, w, s, gates[i])))
         .collect();
     fit_on_series(series, &jobs, ep)
         .into_iter()
@@ -662,6 +686,7 @@ fn rows_into<F>(
     ep: &EvidenceParams,
     series: &[&Ms1RunIndex],
     series_of: F,
+    gates: &[Option<MobilityGate>],
 ) where
     F: Fn(usize) -> usize + Sync,
 {
@@ -681,6 +706,7 @@ fn rows_into<F>(
                 charge: meta.charge.max(1),
                 envelope: &meta.envelope,
                 widths: &WIDTH_GRID,
+                mobility: gates[i],
             };
             jobs.push((series_of(i), job));
         }
@@ -799,6 +825,43 @@ fn entry_rows(
     (rows, counts)
 }
 
+/// Most identified precursors the run's mobility scale is learned from.
+const MOBILITY_PAIRS: usize = 2000;
+
+/// The run's learned ion-mobility scale ([`quant::mobility::learn`]) from up
+/// to [`MOBILITY_PAIRS`] of its identified target entries with a library
+/// mobility, spread evenly over the library, each searched within
+/// [`SEED_WIDTH_S`] of its best PSM's retention time; `None` on a run that
+/// is not mobility-resolved.
+fn run_mobility(
+    run: u16,
+    lib: &Library,
+    ep: &EvidenceParams,
+    ms1: &Ms1RunIndex,
+) -> Option<RunMobility> {
+    if !ms1.has_mobility() {
+        return None;
+    }
+    let ids: Vec<usize> = (0..lib.entries.len())
+        .filter(|&i| lib.entries[i].ion_mobility.is_some())
+        .collect();
+    let all = identified_targets(&ids, run, lib);
+    let stride = all.len().div_ceil(MOBILITY_PAIRS).max(1);
+    let obs: Vec<MobilityObservation> = all
+        .into_iter()
+        .step_by(stride)
+        .filter_map(|(i, rt)| {
+            let e = &lib.entries[i];
+            Some(MobilityObservation {
+                mz: lib.meta[e.precursor as usize].mz,
+                rt,
+                k0: e.ion_mobility?,
+            })
+        })
+        .collect();
+    quant::mobility::learn(ms1, &obs, ep.tol_ppm, SEED_WIDTH_S)
+}
+
 /// Measures every library precursor in run `run` from its MS1 table: its
 /// identified pairs, and the transfers that `selection` keeps.
 ///
@@ -841,6 +904,12 @@ pub(crate) fn extract_run(
     let ms1 = load()?;
     let held = Held::new();
     let spacing = ms1.median_scan_spacing();
+    let mobility = run_mobility(run, lib, ep, &ms1);
+    let gates: Vec<Option<MobilityGate>> = lib
+        .entries
+        .iter()
+        .map(|e| mobility.and_then(|m| e.ion_mobility.map(|k0| m.gate(k0))))
+        .collect();
     let groups = entry_groups(&ms1.faims_voltages(), &lib.entries);
     let whole_ids: Vec<usize> = (0..n).filter(|&i| groups[i] == Group::Whole).collect();
     let cv_ids: Vec<usize> = (0..n)
@@ -857,8 +926,9 @@ pub(crate) fn extract_run(
     };
 
     if cv_ids.is_empty() {
-        let scales = width_scale(&whole_ids, run, lib, ep, &[&ms1], |_| 0, spacing);
-        let fits = width_fits(&whole_ids, run, lib, ep, &[&ms1], |_| 0, &scales);
+        let mut scales = width_scale(&whole_ids, run, lib, ep, &[&ms1], |_| 0, spacing, &gates);
+        scales.mobility = mobility;
+        let fits = width_fits(&whole_ids, run, lib, ep, &[&ms1], |_| 0, &scales, &gates);
         let width_fit_count = fits.len();
         let wp = WidthPrior::from_fits(fits, &scales);
         rows_into(
@@ -872,6 +942,7 @@ pub(crate) fn extract_run(
             ep,
             &[&ms1],
             |_| 0,
+            &gates,
         );
         drop(ms1);
         drop(held);
@@ -886,12 +957,13 @@ pub(crate) fn extract_run(
         Group::Series(k) => k,
         g => unreachable!("entry {i} is fitted on {g:?}"),
     };
-    let scales = width_scale(&cv_ids, run, lib, ep, &series, series_of, spacing);
-    let fits = width_fits(&cv_ids, run, lib, ep, &series, series_of, &scales);
+    let mut scales = width_scale(&cv_ids, run, lib, ep, &series, series_of, spacing, &gates);
+    scales.mobility = mobility;
+    let fits = width_fits(&cv_ids, run, lib, ep, &series, series_of, &scales, &gates);
     let width_fit_count = fits.len();
     let wp = WidthPrior::from_fits(fits, &scales);
     rows_into(
-        &mut slots, &cv_ids, run, aligned, lib, &gate, &wp, ep, &series, series_of,
+        &mut slots, &cv_ids, run, aligned, lib, &gate, &wp, ep, &series, series_of, &gates,
     );
     drop(series);
     drop(split);
@@ -911,6 +983,7 @@ pub(crate) fn extract_run(
             ep,
             &[&ms1],
             |_| 0,
+            &gates,
         );
     }
     Ok(finish(slots, width_fit_count, &wp, scales))
@@ -1461,6 +1534,7 @@ mod tests {
                 pep: 0.0,
                 is_decoy: decoy(p),
                 faims_cv: (faims && run == 1).then_some(FAIMS_CVS[p as usize % 2]),
+                ion_mobility: None,
             })
         };
         for p in 0..BOTH {
@@ -1811,6 +1885,7 @@ mod tests {
                 pep: 0.0,
                 is_decoy: false,
                 faims_cv: None,
+                ion_mobility: None,
             })
         };
         for p in 0..120 {
@@ -2389,6 +2464,7 @@ mod finalize_tests {
                 },
                 consensus_rt: f64::NAN,
                 faims_cv: None,
+                ion_mobility: None,
                 donors: vec![0],
                 best_rt: vec![(0, 100.0 + p as f64)],
             })
@@ -2589,6 +2665,7 @@ mod finalize_tests {
                 pep: 0.0001,
                 is_decoy: false,
                 faims_cv: None,
+                ion_mobility: None,
             })
             .collect();
         build_library(

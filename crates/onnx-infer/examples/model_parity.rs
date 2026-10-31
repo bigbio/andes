@@ -19,7 +19,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use onnx_infer::{BackendOptions, OnnxSession, ms2pip};
+use onnx_infer::{ms2pip, BackendOptions, OnnxSession};
 
 struct Args {
     model: String,
@@ -29,7 +29,12 @@ struct Args {
 
 fn parse_args() -> Args {
     let v: Vec<String> = std::env::args().skip(1).collect();
-    let opt = |k: &str| v.iter().position(|a| a == k).and_then(|i| v.get(i + 1)).cloned();
+    let opt = |k: &str| {
+        v.iter()
+            .position(|a| a == k)
+            .and_then(|i| v.get(i + 1))
+            .cloned()
+    };
     let get = |k: &str| opt(k).unwrap_or_else(|| panic!("missing {k}"));
     let backend = models::parse_backend(opt("--backend").as_deref().unwrap_or("tract"));
     models::set_backend(backend, BackendOptions::default());
@@ -42,7 +47,10 @@ fn parse_args() -> Args {
 }
 
 fn floats(s: &str) -> Vec<f32> {
-    s.split(',').filter(|x| !x.is_empty()).map(|x| x.parse().expect("float")).collect()
+    s.split(',')
+        .filter(|x| !x.is_empty())
+        .map(|x| x.parse().expect("float"))
+        .collect()
 }
 
 #[derive(Default)]
@@ -76,11 +84,17 @@ fn ms2pip_parity(a: &Args) {
     let mut by_model: BTreeMap<String, Vec<Vec<&str>>> = BTreeMap::new();
     for l in lines {
         let x: Vec<&str> = l.split('\t').collect();
-        by_model.entry(x[col("model")].to_string()).or_default().push(x);
+        by_model
+            .entry(x[col("model")].to_string())
+            .or_default()
+            .push(x);
     }
     for (model, rows) in by_model {
         if !a.models.join(format!("ms2pip_{model}_b.json")).is_file() {
-            println!("SKIP ms2pip {model}: no ms2pip_{model}_b.json in {}", a.models.display());
+            println!(
+                "SKIP ms2pip {model}: no ms2pip_{model}_b.json in {}",
+                a.models.display()
+            );
             continue;
         }
         let mut sb = load(&a.models, &format!("ms2pip_{model}_b"));
@@ -116,8 +130,9 @@ fn ms2pip_parity(a: &Args) {
 }
 
 fn peptdeep_parity(a: &Args) {
-    use models::{PeptDeep, Predictor, parse_peptide};
-    let pred = PeptDeep::new(&a.models, 30.0, "Lumos", models::engine(), true, true).expect("PeptDeep");
+    use models::{parse_peptide, PeptDeep, Predictor};
+    let pred =
+        PeptDeep::new(&a.models, 30.0, "Lumos", models::engine(), true, true).expect("PeptDeep");
     let mut s = pred.sessions().expect("PeptDeep sessions");
     let text = fs::read_to_string(&a.reference).expect("reference TSV");
     let mut lines = text.lines();
@@ -138,14 +153,23 @@ fn peptdeep_parity(a: &Args) {
             .collect();
         let names = x[col("mods")].split(';').filter(|s| !s.is_empty());
         let sites = x[col("mod_sites")].split(';').filter(|s| !s.is_empty());
-        let mut want: Vec<(String, String)> = names.zip(sites).map(|(n, s)| (n.into(), s.into())).collect();
+        let mut want: Vec<(String, String)> = names
+            .zip(sites)
+            .map(|(n, s)| (n.into(), s.into()))
+            .collect();
         let mut got_sorted = got.clone();
         got_sorted.sort();
         want.sort();
         assert_eq!(form.seq, seq, "{andes}");
-        assert_eq!(got_sorted, want, "{andes}: parsed mods differ from peptdeep's");
+        assert_eq!(
+            got_sorted, want,
+            "{andes}: parsed mods differ from peptdeep's"
+        );
         let z: u8 = x[col("charge")].parse().unwrap();
-        rt.add(pred.rt(&mut s, &[&form]).unwrap()[0], x[col("rt_peptdeep")].parse().unwrap());
+        rt.add(
+            pred.rt(&mut s, &[&form]).unwrap()[0],
+            x[col("rt_peptdeep")].parse().unwrap(),
+        );
         let m = &pred.ms2(&mut s, &[(&form, z)]).unwrap()[0];
         let r = floats(x[col("ms2_peptdeep")]);
         for site in 0..seq.len() - 1 {
@@ -161,7 +185,7 @@ fn peptdeep_parity(a: &Args) {
 }
 
 fn deeplc_parity(a: &Args) {
-    use models::{DeepLc, Predictor, parse_peptide};
+    use models::{parse_peptide, DeepLc, Predictor};
     let pred = DeepLc::new(&a.models, models::engine()).expect("DeepLC");
     let mut s = pred.sessions().expect("DeepLC session");
     let text = fs::read_to_string(&a.reference).expect("reference TSV");
@@ -172,9 +196,14 @@ fn deeplc_parity(a: &Args) {
     let mut n = 0;
     for l in lines {
         let x: Vec<&str> = l.split('\t').collect();
-        let (form, _) = parse_peptide(x[col("andes")]).unwrap_or_else(|| panic!("parse {}", x[col("andes")]));
+        let (form, _) =
+            parse_peptide(x[col("andes")]).unwrap_or_else(|| panic!("parse {}", x[col("andes")]));
         let f = onnx_infer::deeplc::encode(&DeepLc::peptide(&form)).unwrap();
-        for (k, got) in [("x_atom", &f.x_atom), ("x_global", &f.x_global), ("x_one_hot", &f.x_one_hot)] {
+        for (k, got) in [
+            ("x_atom", &f.x_atom),
+            ("x_global", &f.x_global),
+            ("x_one_hot", &f.x_one_hot),
+        ] {
             let want = floats(x[col(k)]);
             assert_eq!(got.len(), want.len(), "{k} length");
             for (i, (g, w)) in got.iter().zip(&want).enumerate() {
@@ -187,7 +216,10 @@ fn deeplc_parity(a: &Args) {
         let r = pred.rt(&mut s, &[&form]).unwrap()[0];
         let w: f32 = x[col("rt_deeplc")].parse().unwrap();
         rt.add(r, w);
-        println!("{:60} onnx-infer {r:12.4} deeplc {w:12.4}", x[col("proforma")]);
+        println!(
+            "{:60} onnx-infer {r:12.4} deeplc {w:12.4}",
+            x[col("proforma")]
+        );
         n += 1;
     }
     println!(
@@ -197,19 +229,27 @@ fn deeplc_parity(a: &Args) {
 }
 
 fn prosit_parity(a: &Args) {
-    use models::{Predictor, Prosit, parse_peptide};
+    use models::{parse_peptide, Predictor, Prosit};
     let text = fs::read_to_string(&a.reference).expect("reference TSV");
     let mut lines = text.lines();
     let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
     let col = |n: &str| header.iter().position(|h| *h == n).unwrap();
-    let mut s = Prosit { dir: a.models.clone(), nce: 30.0 }.sessions().unwrap();
+    let mut s = Prosit {
+        dir: a.models.clone(),
+        nce: 30.0,
+    }
+    .sessions()
+    .unwrap();
     let (mut int, mut irt) = (Dev::default(), Dev::default());
     let mut n = 0;
     for l in lines {
         let x: Vec<&str> = l.split('\t').collect();
         let (form, _) = parse_peptide(x[col("andes")]).unwrap();
         let z: u8 = x[col("charge")].parse().unwrap();
-        let pred = Prosit { dir: a.models.clone(), nce: x[col("nce")].parse().unwrap() };
+        let pred = Prosit {
+            dir: a.models.clone(),
+            nce: x[col("nce")].parse().unwrap(),
+        };
         let got = &pred.ms2(&mut s, &[(&form, z)]).unwrap()[0];
         // Koina: 29 positions x (y+1..3, b+1..3), max-normalised, -1 = impossible.
         let koina = floats(x[col("intensities_koina")]);

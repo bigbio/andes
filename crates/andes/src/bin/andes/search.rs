@@ -3629,6 +3629,9 @@ mod d_archive_tests {
         assert!(check_distinct_d_archive_runs(&ok).is_ok());
         let dup: Vec<PathBuf> = ["x/run.d.zip", "y/run.d.tar"].map(PathBuf::from).to_vec();
         let err = check_distinct_d_archive_runs(&dup).unwrap_err();
-        assert!(err.contains("x/run.d.zip") && err.contains("y/run.d.tar"), "{err}");
+        assert!(
+            err.contains("x/run.d.zip") && err.contains("y/run.d.tar"),
+            "{err}"
+        );
     }
 }

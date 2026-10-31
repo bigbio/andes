@@ -1229,15 +1229,17 @@ glyco:
         assert!(check_resolved(&applied("{}", &[]).unwrap()).is_ok());
 
         // The WURCS CSV source satisfies the requirement like the other two.
-        let a = applied(
-            "glyco:\n  glycan_wurcs: w.csv\n",
-            &["--glyco"],
-        )
-        .unwrap();
-        assert_eq!(a.glyco_glycan_wurcs.as_deref(), Some(std::path::Path::new("w.csv")));
+        let a = applied("glyco:\n  glycan_wurcs: w.csv\n", &["--glyco"]).unwrap();
+        assert_eq!(
+            a.glyco_glycan_wurcs.as_deref(),
+            Some(std::path::Path::new("w.csv"))
+        );
         assert!(check_resolved(&a).is_ok());
         let a = applied("{}", &["--glyco-glycan-wurcs", "w.csv"]).unwrap();
-        assert_eq!(a.glyco_glycan_wurcs.as_deref(), Some(std::path::Path::new("w.csv")));
+        assert_eq!(
+            a.glyco_glycan_wurcs.as_deref(),
+            Some(std::path::Path::new("w.csv"))
+        );
 
         // Two sources in the config is ambiguous.
         let both = "glyco:\n  enabled: true\n  glycan_gdb: g.gdb\n  species: human\n";

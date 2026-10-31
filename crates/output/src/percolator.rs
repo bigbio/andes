@@ -264,7 +264,10 @@ impl ResultPaths {
 /// cross-validation fold and by default uses three threads; on more cores it
 /// runs about twice as fast with the same result (measured on a 1M-row PIN).
 pub fn percolator_args_with_threads(extra: &[String], threads: usize) -> Vec<String> {
-    if extra.iter().any(|a| a == "--num-threads" || a.starts_with("--num-threads=")) {
+    if extra
+        .iter()
+        .any(|a| a == "--num-threads" || a.starts_with("--num-threads="))
+    {
         return extra.to_vec();
     }
     let mut args = vec!["--num-threads".to_string(), threads.max(1).to_string()];

@@ -127,6 +127,14 @@ pub(crate) fn merge_parse_stats(acc: &mut ParseStats, part: ParseStats) {
     }
 }
 
+/// `msg` followed by the first read error the parser recorded, when there is one.
+pub(crate) fn with_first_read_error(msg: String, first_errors: &[String]) -> String {
+    match first_errors.first() {
+        Some(e) => format!("{msg} First read error: {e}"),
+        None => msg,
+    }
+}
+
 /// An input file that yielded no spectra at the searched MS level is an error,
 /// not an empty search: a search of zero spectra would only run on the default
 /// acquisition parameters and write an empty PIN. `found` counts the spectra
@@ -224,7 +232,8 @@ pub(crate) fn scan_spectrum_metadata(
     let mut out = Vec::new();
     if input_format_flags(path).2 {
         for spec in open_d_ms2(path)?.take(bench_cap) {
-            let spec = spec?;
+            // Unreadable spectra are skipped, as in the search reader.
+            let Ok(spec) = spec else { continue };
             out.push(SpectrumMeta {
                 precursor_charge: spec.precursor_charge,
                 num_peaks: spec.peaks.len(),
@@ -641,7 +650,14 @@ pub(crate) fn detect_instrument_type_for_path(
 
 #[cfg(test)]
 mod require_spectra_tests {
-    use super::require_spectra;
+    use super::{require_spectra, with_first_read_error};
+
+    #[test]
+    fn the_first_read_error_is_appended() {
+        assert_eq!(with_first_read_error("none.".into(), &[]), "none.");
+        let m = with_first_read_error("none.".into(), &["bad table".into(), "x".into()]);
+        assert_eq!(m, "none. First read error: bad table");
+    }
     use std::path::Path;
 
     #[test]

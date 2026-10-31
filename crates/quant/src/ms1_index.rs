@@ -42,6 +42,9 @@ fn scan_detection_limit(peaks: &[(f64, f32)], buf: &mut Vec<f32>) -> f32 {
 impl Ms1RunIndex {
     /// Build from scans in any order; peaks are sorted by m/z if needed.
     pub fn new(mut scans: Vec<Ms1Scan>) -> Self {
+        // A scan without a finite retention time has no place in the RT order
+        // (and breaks the sort comparator and the binary searches).
+        scans.retain(|s| s.rt.is_finite());
         for s in scans.iter_mut() {
             if !s.peaks.windows(2).all(|w| w[0].0 <= w[1].0) {
                 s.peaks
@@ -293,6 +296,21 @@ mod tests {
             })
             .collect();
         Ms1RunIndex::new(scans)
+    }
+
+    #[test]
+    fn scans_without_a_finite_retention_time_are_dropped() {
+        let scans = [1.0, f64::NAN, 3.0, f64::INFINITY, 2.0]
+            .iter()
+            .map(|&rt| Ms1Scan {
+                rt,
+                ..Ms1Scan::default()
+            })
+            .collect();
+        let idx = Ms1RunIndex::new(scans);
+        assert_eq!(idx.len(), 3);
+        let rts: Vec<f64> = (0..idx.len()).map(|i| idx.scan(i).rt).collect();
+        assert_eq!(rts, vec![1.0, 2.0, 3.0]);
     }
 
     #[test]

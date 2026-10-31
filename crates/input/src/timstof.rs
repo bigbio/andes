@@ -559,6 +559,8 @@ impl TimsTofReader {
         let mut ms2_to_ms1: Vec<Option<usize>> = Vec::new();
         // (frame id, index into `ms1_peaks`) of the latest MS1 reached.
         let mut current: Option<(usize, usize)> = None;
+        // Whether an MS2 of the chunk linked to `current`.
+        let mut current_linked = false;
         let mut emitted = 0usize;
         while emitted < cap {
             let (spec, parent, im) = match self.next_ms2() {
@@ -584,8 +586,18 @@ impl TimsTofReader {
                     } else {
                         scan.peaks
                     };
-                    ms1_peaks.push(peaks);
-                    current = Some((id, ms1_peaks.len() - 1));
+                    // A frame no MS2 linked to is replaced, not kept.
+                    match current {
+                        Some((_, idx)) if !current_linked => {
+                            ms1_peaks[idx] = peaks;
+                            current = Some((id, idx));
+                        }
+                        _ => {
+                            ms1_peaks.push(peaks);
+                            current = Some((id, ms1_peaks.len() - 1));
+                        }
+                    }
+                    current_linked = false;
                 });
             }
             self.record_context(&spec, parent, im);
@@ -593,6 +605,7 @@ impl TimsTofReader {
                 (Some(p), Some((id, idx))) if id == p => Some(idx),
                 _ => None,
             };
+            current_linked |= link.is_some();
             chunk.push(spec);
             ms2_to_ms1.push(link);
             emitted += 1;
@@ -609,6 +622,7 @@ impl TimsTofReader {
                     ms1_peaks.push(peaks);
                     (id, 0)
                 });
+                current_linked = false;
             }
         }
         if !chunk.is_empty() {

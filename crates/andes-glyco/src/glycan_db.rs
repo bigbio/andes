@@ -114,7 +114,10 @@ impl GlycanComp {
         let core_h = hex.min(3);
         // Chain residues after the reducing-end HexNAc, in biosynthetic order.
         let mut chain: Vec<u8> = Vec::with_capacity((hexnac + hex + fuc + neuac + neugc) as usize);
-        chain.extend(std::iter::repeat_n(b'N', core_hn.saturating_sub(1) as usize)); // second chitobiose GlcNAc
+        chain.extend(std::iter::repeat_n(
+            b'N',
+            core_hn.saturating_sub(1) as usize,
+        )); // second chitobiose GlcNAc
         chain.extend(std::iter::repeat_n(b'H', core_h as usize)); // trimannosyl core
         chain.extend(std::iter::repeat_n(b'N', (hexnac - core_hn) as usize)); // remaining HexNAc (antenna)
         chain.extend(std::iter::repeat_n(b'H', (hex - core_h) as usize)); // remaining Hex (antenna)
@@ -189,7 +192,10 @@ impl std::fmt::Display for GdbLoadError {
                 write!(f, "glycan .gdb contains no glycan trees (header-only?)")
             }
             GdbLoadError::UnknownSymbol { line, symbol } => {
-                write!(f, "glycan .gdb line {line}: unknown monosaccharide symbol {symbol:?}")
+                write!(
+                    f,
+                    "glycan .gdb line {line}: unknown monosaccharide symbol {symbol:?}"
+                )
             }
             GdbLoadError::MalformedTree { line, reason } => {
                 write!(f, "glycan .gdb line {line}: malformed tree ({reason})")
@@ -201,10 +207,16 @@ impl std::fmt::Display for GdbLoadError {
                  database"
             ),
             GdbLoadError::MalformedWurcs { line, reason } => {
-                write!(f, "glycan WURCS line {line}: malformed structure ({reason})")
+                write!(
+                    f,
+                    "glycan WURCS line {line}: malformed structure ({reason})"
+                )
             }
             GdbLoadError::UnknownWurcsResidue { line, code } => {
-                write!(f, "glycan WURCS line {line}: unsupported residue code {code:?}")
+                write!(
+                    f,
+                    "glycan WURCS line {line}: unsupported residue code {code:?}"
+                )
             }
             GdbLoadError::UnknownSpecies { species } => {
                 write!(f, "unknown --glyco-species {species:?}")
@@ -502,8 +514,7 @@ pub fn load_glycan_gdb(content: &str) -> Result<Vec<GlycanComp>, GdbLoadError> {
     let mut lines = content.lines();
     let _header = lines.next().ok_or(GdbLoadError::Empty)?;
     let mut out: Vec<GlycanComp> = Vec::new();
-    let mut seen: std::collections::HashSet<Arc<GlycanTree>> =
-        std::collections::HashSet::new();
+    let mut seen: std::collections::HashSet<Arc<GlycanTree>> = std::collections::HashSet::new();
     for (i, raw) in lines.enumerate() {
         let line = raw.trim();
         if line.is_empty() {
@@ -697,22 +708,27 @@ fn wurcs_to_tree(wurcs: &str, line: usize) -> Result<GlycanTree, GdbLoadError> {
     })?;
     // The residue block is `[code][code]…[code]`: its closing bracket is the LAST
     // `]` before the backbone (residue codes themselves contain no brackets).
-    let close = after_counts[open..].rfind(']').ok_or(GdbLoadError::MalformedWurcs {
-        line,
-        reason: "missing ']' after the residue block",
-    })?;
-    let close = open + close;
-    let residue_block = &after_counts[open + 1..close];
-    let after_res = after_counts[close + 1..]
-        .strip_prefix('/')
+    let close = after_counts[open..]
+        .rfind(']')
         .ok_or(GdbLoadError::MalformedWurcs {
             line,
-            reason: "missing '/' after the residue block",
+            reason: "missing ']' after the residue block",
         })?;
-    let (backbone, linkages) = after_res.split_once('/').ok_or(GdbLoadError::MalformedWurcs {
-        line,
-        reason: "missing '/' before the linkage block",
-    })?;
+    let close = open + close;
+    let residue_block = &after_counts[open + 1..close];
+    let after_res =
+        after_counts[close + 1..]
+            .strip_prefix('/')
+            .ok_or(GdbLoadError::MalformedWurcs {
+                line,
+                reason: "missing '/' after the residue block",
+            })?;
+    let (backbone, linkages) = after_res
+        .split_once('/')
+        .ok_or(GdbLoadError::MalformedWurcs {
+            line,
+            reason: "missing '/' before the linkage block",
+        })?;
 
     // Residue codes -> symbols.
     let residues: Vec<u8> = residue_block
@@ -728,16 +744,16 @@ fn wurcs_to_tree(wurcs: &str, line: usize) -> Result<GlycanTree, GdbLoadError> {
     // Backbone: one 1-based residue-type index per atom (a, b, c, …).
     let mut atom_res: Vec<usize> = Vec::new();
     for tok in backbone.split('-') {
-        let idx = tok.parse::<usize>().map_err(|_| GdbLoadError::MalformedWurcs {
-            line,
-            reason: "non-numeric residue index in the backbone",
-        })?;
-        let idx = idx
-            .checked_sub(1)
-            .ok_or(GdbLoadError::MalformedWurcs {
+        let idx = tok
+            .parse::<usize>()
+            .map_err(|_| GdbLoadError::MalformedWurcs {
                 line,
-                reason: "zero residue index in the backbone",
+                reason: "non-numeric residue index in the backbone",
             })?;
+        let idx = idx.checked_sub(1).ok_or(GdbLoadError::MalformedWurcs {
+            line,
+            reason: "zero residue index in the backbone",
+        })?;
         if idx >= residues.len() {
             return Err(GdbLoadError::MalformedWurcs {
                 line,
@@ -879,7 +895,10 @@ fn build_wurcs_node(
         .map(|&c| build_wurcs_node(c, children, residues, atom_res))
         .collect();
     kids.sort_by_cached_key(|k| k.canonical());
-    GlycanTree { sym, children: kids }
+    GlycanTree {
+        sym,
+        children: kids,
+    }
 }
 
 /// Split one CSV line into fields, honouring double-quoted fields (RFC 4180
@@ -932,8 +951,7 @@ pub fn load_glycan_wurcs_csv(content: &str) -> Result<Vec<GlycanComp>, GdbLoadEr
         .position(|h| h.trim() == "StructureInformation")
         .unwrap_or(header_fields.len().saturating_sub(1));
     let mut out: Vec<GlycanComp> = Vec::new();
-    let mut seen: std::collections::HashSet<Arc<GlycanTree>> =
-        std::collections::HashSet::new();
+    let mut seen: std::collections::HashSet<Arc<GlycanTree>> = std::collections::HashSet::new();
     for (i, raw) in lines.enumerate() {
         let line = raw.trim();
         if line.is_empty() {
@@ -941,12 +959,10 @@ pub fn load_glycan_wurcs_csv(content: &str) -> Result<Vec<GlycanComp>, GdbLoadEr
         }
         let line_no = i + 2; // header is line 1
         let fields = split_csv_line(line);
-        let wurcs = fields
-            .get(wurcs_col)
-            .ok_or(GdbLoadError::MalformedWurcs {
-                line: line_no,
-                reason: "missing StructureInformation column",
-            })?;
+        let wurcs = fields.get(wurcs_col).ok_or(GdbLoadError::MalformedWurcs {
+            line: line_no,
+            reason: "missing StructureInformation column",
+        })?;
         let tree = wurcs_to_tree(wurcs, line_no)?;
         let comp = GlycanComp::from_tree(tree);
         if seen.insert(comp.tree.clone()) {
@@ -1117,12 +1133,7 @@ mod tests {
 
     #[test]
     fn bundled_species_databases_load() {
-        for sp in [
-            "human",
-            "mouse",
-            "mouse-large",
-            "high-mannose",
-        ] {
+        for sp in ["human", "mouse", "mouse-large", "high-mannose"] {
             let list = load_species_glycan_db(sp).unwrap();
             assert!(!list.is_empty(), "{sp}: empty glycan list");
         }
@@ -1239,9 +1250,7 @@ mod tests {
     fn wurcs_core_fucose_is_direct_child_of_root() {
         // HexNAc + Fuc, linked through the fucose anomeric carbon: Fuc sits
         // directly on the reducing-end HexNAc, so it is a core fucose.
-        let t = wurcs(
-            "WURCS=2.0/2,2,1/[a2122h-1x_1-5_2*NCC/3=O][a1221m-1x_1-5]/1-2/a?-b1",
-        );
+        let t = wurcs("WURCS=2.0/2,2,1/[a2122h-1x_1-5_2*NCC/3=O][a1221m-1x_1-5]/1-2/a?-b1");
         assert_eq!(t.canonical(), "(N(F))");
         let g = GlycanComp::from_tree(t);
         assert_eq!((g.hexnac, g.hex, g.fuc, g.core_fuc), (1, 0, 1, 1));
@@ -1360,17 +1369,13 @@ mod tests {
             "WURCS=2.0/1,1,0/[a2122h-1x_1-5_2*NCC/3=O][s2122h-1x_1-5_6*OSO/3=O]/1-2/a?-b1",
         )
         .unwrap_err();
-        assert!(matches!(
-            err,
-            GdbLoadError::UnknownWurcsResidue { .. }
-        ));
+        assert!(matches!(err, GdbLoadError::UnknownWurcsResidue { .. }));
     }
 
     #[test]
     fn wurcs_malformed_is_rejected() {
         assert!(GlycanTree::from_wurcs("not a wurcs").is_err());
-        assert!(GlycanTree::from_wurcs("WURCS=2.0/1,1,0/[a2122h-1x_1-5_2*NCC/3=O]/1/")
-            .is_ok());
+        assert!(GlycanTree::from_wurcs("WURCS=2.0/1,1,0/[a2122h-1x_1-5_2*NCC/3=O]/1/").is_ok());
     }
 
     #[test]

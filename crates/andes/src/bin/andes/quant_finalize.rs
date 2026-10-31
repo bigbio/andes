@@ -550,15 +550,6 @@ impl ShapeReference for BlockShapes<'_> {
     }
 }
 
-/// No shape reference: only for rows that do not use it (identified rows).
-struct NoShapes;
-
-impl ShapeReference for NoShapes {
-    fn features(&self, _: &ExtractRow, _: &[Option<RunMap>]) -> [f64; 3] {
-        NO_SHAPE
-    }
-}
-
 /// The classifier a row belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Table {

@@ -22,8 +22,8 @@ use model_train::{
     labeled::bootstrap_labels,
     store::{
         commit_update, ensure_single_file_store, update_add, update_decay, update_remove,
-        update_reweight, write_all_models_with_sources_and_gbdt_pub, write_all_models_with_sources_pub,
-        SourceLedger,
+        update_reweight, write_all_models_with_sources_and_gbdt_pub,
+        write_all_models_with_sources_pub, SourceLedger,
     },
     ModelStore,
 };

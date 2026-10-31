@@ -435,8 +435,8 @@ mod simd {
         let stride = _mm256_set1_epi32(n_pad);
         let mut idx = [_mm256_setzero_si256(); GROUPS];
         let mut row = [_mm256_setzero_si256(); GROUPS];
-        for g in 0..GROUPS {
-            row[g] = _mm256_add_epi32(_mm256_set1_epi32((row0 + 8 * g) as i32), lane);
+        for (g, r) in row.iter_mut().enumerate() {
+            *r = _mm256_add_epi32(_mm256_set1_epi32((row0 + 8 * g) as i32), lane);
         }
         for _ in 0..p.depth {
             for g in 0..GROUPS {
@@ -461,9 +461,8 @@ mod simd {
             }
         }
         let first_leaf = _mm256_set1_epi32(p.nodes.len() as i32);
-        for g in 0..GROUPS {
-            let leaf =
-                _mm256_i32gather_ps::<4>(p.leaves.as_ptr(), _mm256_sub_epi32(idx[g], first_leaf));
+        for (g, &i) in idx.iter().enumerate() {
+            let leaf = _mm256_i32gather_ps::<4>(p.leaves.as_ptr(), _mm256_sub_epi32(i, first_leaf));
             let a = acc.add(row0 + 8 * g);
             _mm256_storeu_ps(a, _mm256_add_ps(_mm256_loadu_ps(a), leaf));
         }

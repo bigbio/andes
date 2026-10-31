@@ -433,7 +433,13 @@ fn glycan_tag_with_site(
     };
     format!(
         "[HexNAc{}Hex{}Fuc{}NeuAc{}NeuGc{}{} {}]",
-        g.hexnac, g.hex, g.fuc, g.neuac, g.neugc, site, g.tree.canonical()
+        g.hexnac,
+        g.hex,
+        g.fuc,
+        g.neuac,
+        g.neugc,
+        site,
+        g.tree.canonical()
     )
 }
 
@@ -841,9 +847,7 @@ mod tests {
         // the sequon may sit at the very start; positions are 1-based.
         assert!(glycan_tag_with_site(&g, b"NLTAAK", b'A', GlycanCore::NGlycan).contains("@N1 "));
         // two sequons: andes does not localize by default, so it must not pick.
-        assert!(
-            glycan_tag_with_site(&g, b"ANLTANCSK", b'A', GlycanCore::NGlycan).contains("@N? ")
-        );
+        assert!(glycan_tag_with_site(&g, b"ANLTANCSK", b'A', GlycanCore::NGlycan).contains("@N? "));
         // no sequon at all is also "not a site andes assigned".
         assert!(glycan_tag_with_site(&g, b"AAAAK", b'A', GlycanCore::NGlycan).contains("@N? "));
         // a boundary sequon (…N-K | S-…) is the peptide's only glycosite.

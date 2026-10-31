@@ -514,8 +514,7 @@ impl AminoAcidSetBuilder {
         // N-term Acetyl). At a protein terminus the protein-terminal fixed mods
         // replace the peptide-terminal ones, and the variable mods of both
         // locations apply.
-        let mut stacked: FxHashMap<(u8, Vec<usize>), &'static Modification> =
-            FxHashMap::default();
+        let mut stacked: FxHashMap<(u8, Vec<usize>), &'static Modification> = FxHashMap::default();
         let mut forms = vec![FormList::default(); FORM_TABLE_LEN];
         for &r in STANDARD_RESIDUES {
             let std_aa = AminoAcid::standard(r).expect("STANDARD_RESIDUES has only valid residues");
@@ -542,15 +541,16 @@ impl AminoAcidSetBuilder {
                     for (n_mods, n_slots) in &n_choices {
                         for (c_mods, c_slots) in &c_choices {
                             for (s_mods, s_slots) in &side {
-                                let parts: Vec<&'static Modification> = s_mods
-                                    .iter()
-                                    .chain(n_mods)
-                                    .chain(c_mods)
-                                    .copied()
-                                    .collect();
+                                let parts: Vec<&'static Modification> =
+                                    s_mods.iter().chain(n_mods).chain(c_mods).copied().collect();
                                 // One `annotated_site_mass` holds one site mass, so a
                                 // form cannot require two annotated sites at once.
-                                if parts.iter().filter(|m| m.annotated_site_mass.is_some()).count() > 1 {
+                                if parts
+                                    .iter()
+                                    .filter(|m| m.annotated_site_mass.is_some())
+                                    .count()
+                                    > 1
+                                {
                                     continue;
                                 }
                                 let slots = s_slots + n_slots + c_slots;
@@ -576,14 +576,17 @@ impl AminoAcidSetBuilder {
                                 // Equality ignores `annotated_site_mass`: an
                                 // unrestricted form replaces an equal restricted one,
                                 // since it applies wherever that one would.
-                                let restricted =
-                                    |a: &AminoAcid| a.mod_.is_some_and(|m| m.annotated_site_mass.is_some());
+                                let restricted = |a: &AminoAcid| {
+                                    a.mod_.is_some_and(|m| m.annotated_site_mass.is_some())
+                                };
                                 match list.variants.iter().position(|u| *u == aa) {
                                     None => {
                                         list.variants.push(aa);
                                         list.slots.push(slots);
                                     }
-                                    Some(i) if restricted(&list.variants[i]) && !restricted(&aa) => {
+                                    Some(i)
+                                        if restricted(&list.variants[i]) && !restricted(&aa) =>
+                                    {
                                         list.variants[i] = aa;
                                         list.slots[i] = slots;
                                     }
@@ -683,7 +686,8 @@ fn site_choices(
     variable_mods: &[&'static Modification],
     locations: &[ModLocation],
 ) -> Vec<(Vec<&'static Modification>, u8)> {
-    let at = |m: &&&'static Modification| locations.contains(&m.location) && m.applies_to(r, m.location);
+    let at =
+        |m: &&&'static Modification| locations.contains(&m.location) && m.applies_to(r, m.location);
     let mut fixed: Vec<&'static Modification> = fixed_mods.iter().filter(at).copied().collect();
     // Fold several fixed mods on one site in a declaration-order-independent order.
     fixed.sort_by(|a, b| {
@@ -716,7 +720,11 @@ fn terminal_choices(
             let protein_fixed = fixed_mods
                 .iter()
                 .any(|m| m.location == protein_loc && m.applies_to(r, protein_loc));
-            let fixed_loc = if protein_fixed { protein_loc } else { peptide_loc };
+            let fixed_loc = if protein_fixed {
+                protein_loc
+            } else {
+                peptide_loc
+            };
             let mut out = site_choices(r, fixed_mods, &[], &[fixed_loc]);
             out.extend(
                 site_choices(r, &[], variable_mods, &[peptide_loc, protein_loc])
@@ -1422,9 +1430,15 @@ mod tests {
         // Interior K carries its side-chain tag only; an N-terminal K carries
         // both the side-chain and the N-terminal tag.
         assert_eq!(form_deltas(&set, b'K', no, no), vec![(tmt, 0)]);
-        assert_eq!(form_deltas(&set, b'K', pep, no), vec![(r4(2.0 * 229.162932), 0)]);
+        assert_eq!(
+            form_deltas(&set, b'K', pep, no),
+            vec![(r4(2.0 * 229.162932), 0)]
+        );
         // An N-terminal C keeps CAM under the N-terminal tag.
-        assert_eq!(form_deltas(&set, b'C', pep, no), vec![(r4(57.021464 + 229.162932), 0)]);
+        assert_eq!(
+            form_deltas(&set, b'C', pep, no),
+            vec![(r4(57.021464 + 229.162932), 0)]
+        );
         // An N-terminal M is tried tagged and tagged + oxidised.
         assert_eq!(
             form_deltas(&set, b'M', pep, no),
@@ -1446,7 +1460,10 @@ mod tests {
             vec![(r4(229.162932 + 42.010565), 1), (r4(2.0 * 229.162932), 0)]
         );
         // A C-terminus has no mods here: a one-residue peptide matches its N-term.
-        assert_eq!(form_deltas(&set, b'K', pep, pep), form_deltas(&set, b'K', pep, no));
+        assert_eq!(
+            form_deltas(&set, b'K', pep, pep),
+            form_deltas(&set, b'K', pep, no)
+        );
         // The first form of every list carries no variable mod.
         for (_, slots) in set.form_lists() {
             assert_eq!(slots[0], 0);

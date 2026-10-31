@@ -57,7 +57,6 @@ pub fn aa_set() -> model::AminoAcidSet {
         .unwrap()
 }
 
-
 /// Strip Percolator flanking (`X.PEPTIDE.Y`) and mod-mass tokens like
 /// `+57.021` / `-18.0` from a `.pin`-format peptide string. Returns the
 /// residue-only sequence in uppercase.

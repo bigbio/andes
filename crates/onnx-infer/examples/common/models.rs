@@ -15,9 +15,9 @@ use std::sync::OnceLock;
 use onnx_infer::ms2_native::{Ms2Conditions, Ms2Model, Ms2Scratch, N_BASE_ION, N_ION};
 use onnx_infer::prosit::{self, PrositPeptide, ResidueState};
 use onnx_infer::rt_native::RtPeptide;
-use onnx_infer::{BackendKind, BackendOptions, OnnxSession, Result, ms2pip};
+use onnx_infer::{ms2pip, BackendKind, BackendOptions, OnnxSession, Result};
 
-pub use onnx_infer::predictors::form::{Form, Mass, Mod, parse_peptide};
+pub use onnx_infer::predictors::form::{parse_peptide, Form, Mass, Mod};
 pub use onnx_infer::predictors::spectral::Ion;
 pub use onnx_infer::predictors::{DeepLc, Engine, PeptDeep, Predictor};
 
@@ -45,11 +45,16 @@ pub fn backend() -> &'static (BackendKind, BackendOptions) {
 /// The engine set by [`set_backend`], for the library predictors.
 pub fn engine() -> Engine {
     let (kind, opts) = backend();
-    Engine { kind: *kind, opts: opts.clone() }
+    Engine {
+        kind: *kind,
+        opts: opts.clone(),
+    }
 }
 
 pub fn load(models: &Path, manifest: &str) -> OnnxSession {
-    engine().load(models, manifest).unwrap_or_else(|e| panic!("load {manifest}: {e}"))
+    engine()
+        .load(models, manifest)
+        .unwrap_or_else(|e| panic!("load {manifest}: {e}"))
 }
 
 // ---------------------------------------------------------------- MS²PIP
@@ -124,9 +129,19 @@ pub struct AndesMs2 {
 impl AndesMs2 {
     /// `path` is the `AMS20001` weight file, or a directory holding `andes_ms2.ams2`.
     pub fn new(path: &Path, nce: Option<f32>, activation: &str, instrument: &str) -> Self {
-        let file = if path.is_dir() { path.join("andes_ms2.ams2") } else { path.to_path_buf() };
-        let model = Ms2Model::load(&file).unwrap_or_else(|e| panic!("load {}: {e}", file.display()));
-        Self { model, nce, activation: activation.into(), instrument: instrument.into() }
+        let file = if path.is_dir() {
+            path.join("andes_ms2.ams2")
+        } else {
+            path.to_path_buf()
+        };
+        let model =
+            Ms2Model::load(&file).unwrap_or_else(|e| panic!("load {}: {e}", file.display()));
+        Self {
+            model,
+            nce,
+            activation: activation.into(),
+            instrument: instrument.into(),
+        }
     }
 
     /// The [`RtPeptide`] the form was parsed from (see [`parse_peptide`]).
@@ -173,7 +188,9 @@ impl Predictor for AndesMs2 {
                     .model
                     .predict_with(&Self::peptide(f), &self.conditions(*z), &mut scratch)
                     .expect("supports_ms2 checked the encoding");
-                full.chunks_exact(N_ION).flat_map(|site| site[..N_BASE_ION].to_vec()).collect()
+                full.chunks_exact(N_ION)
+                    .flat_map(|site| site[..N_BASE_ION].to_vec())
+                    .collect()
             })
             .collect())
     }
@@ -186,7 +203,14 @@ pub struct Prosit {
     pub nce: f32,
 }
 
-const PROSIT_IONS: [Ion; 6] = [(true, 1), (true, 2), (true, 3), (false, 1), (false, 2), (false, 3)];
+const PROSIT_IONS: [Ion; 6] = [
+    (true, 1),
+    (true, 2),
+    (true, 3),
+    (false, 1),
+    (false, 2),
+    (false, 3),
+];
 
 impl Prosit {
     /// `None` when the peptidoform carries anything but CAM-C / oxidised M.
@@ -199,7 +223,10 @@ impl Prosit {
                 _ => return None,
             };
         }
-        let p = PrositPeptide { sequence: &f.seq, states };
+        let p = PrositPeptide {
+            sequence: &f.seq,
+            states,
+        };
         prosit::encode_sequence(p.sequence, &p.states).ok()?;
         Some(p)
     }
@@ -225,15 +252,26 @@ impl Predictor for Prosit {
         0
     }
     fn sessions(&self) -> Result<Vec<OnnxSession>> {
-        Ok(vec![load(&self.dir, "prosit_irt.json"), load(&self.dir, "prosit_intensity_hcd.json")])
+        Ok(vec![
+            load(&self.dir, "prosit_irt.json"),
+            load(&self.dir, "prosit_intensity_hcd.json"),
+        ])
     }
     fn rt(&self, s: &mut [OnnxSession], forms: &[&Form]) -> Result<Vec<f32>> {
-        let peps: Vec<PrositPeptide<'_>> = forms.iter().map(|f| Self::peptide(f).unwrap()).collect();
+        let peps: Vec<PrositPeptide<'_>> =
+            forms.iter().map(|f| Self::peptide(f).unwrap()).collect();
         let input = prosit::pack_irt_batch(&peps).unwrap();
-        Ok(s[0].run(std::slice::from_ref(&input)).expect("prosit irt")[0].data.clone())
+        Ok(
+            s[0].run(std::slice::from_ref(&input)).expect("prosit irt")[0]
+                .data
+                .clone(),
+        )
     }
     fn ms2(&self, s: &mut [OnnxSession], items: &[(&Form, u8)]) -> Result<Vec<Vec<f32>>> {
-        let peps: Vec<PrositPeptide<'_>> = items.iter().map(|(f, _)| Self::peptide(f).unwrap()).collect();
+        let peps: Vec<PrositPeptide<'_>> = items
+            .iter()
+            .map(|(f, _)| Self::peptide(f).unwrap())
+            .collect();
         let charges: Vec<u8> = items.iter().map(|(_, z)| *z).collect();
         let inputs = prosit::pack_intensity_batch(&peps, &charges, self.nce).unwrap();
         let out = &s[1].run(&inputs).expect("prosit intensity")[0];
@@ -247,4 +285,3 @@ impl Predictor for Prosit {
             .collect())
     }
 }
-

@@ -1221,15 +1221,7 @@ mod tests {
         let stats = SpectrumStats::new(&peaks);
 
         let s_true = glycan_y_intensity(&peaks, &stats, bb, &truth, 20.0, 3);
-        let s_decoy = glycan_y_intensity_decoy(
-            &peaks,
-            &stats,
-            bb,
-            &truth,
-            20.0,
-            3,
-            12345,
-        );
+        let s_decoy = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 3, 12345);
         assert!(
             s_decoy < s_true,
             "decoy ladder ({s_decoy}) must score below the target ({s_true})"
@@ -1237,15 +1229,7 @@ mod tests {
         // Decoy still retains Y0 + Y1 (bb + first HexNAc), so it is > 0 but small.
         assert!(s_decoy > 0.0, "decoy keeps Y0/Y1 anchor, should be > 0");
         // Determinism: same seed → identical score.
-        let s_decoy2 = glycan_y_intensity_decoy(
-            &peaks,
-            &stats,
-            bb,
-            &truth,
-            20.0,
-            3,
-            12345,
-        );
+        let s_decoy2 = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 3, 12345);
         assert!(
             (s_decoy - s_decoy2).abs() < 1e-12,
             "decoy must be deterministic"
@@ -1280,15 +1264,7 @@ mod tests {
         assert!(s_true > 0.0, "target must match the z=2 ladder");
         // Fixed decoy keeps Y0 (z=2) + Y1 (z=2) → strictly positive. The OLD +1-only
         // decoy would have scored 0.0 here (the bug this test guards against).
-        let s_decoy = glycan_y_intensity_decoy(
-            &peaks,
-            &stats,
-            bb,
-            &truth,
-            20.0,
-            3,
-            777,
-        );
+        let s_decoy = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 3, 777);
         assert!(
             s_decoy > 0.0,
             "decoy must match multi-charge Y0/Y1 anchors (exchangeable null); got {s_decoy}"
@@ -1299,15 +1275,7 @@ mod tests {
         );
         // With max_charge=1 the z=2-only anchors vanish for BOTH → both ~0 (proves the
         // matcher, not a coincidence, drives the score).
-        let s_decoy_z1 = glycan_y_intensity_decoy(
-            &peaks,
-            &stats,
-            bb,
-            &truth,
-            20.0,
-            1,
-            777,
-        );
+        let s_decoy_z1 = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 1, 777);
         assert!(
             s_decoy_z1 == 0.0,
             "z=1 matcher cannot see z=2 anchors; got {s_decoy_z1}"
@@ -1336,8 +1304,7 @@ mod tests {
         peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         let stats = SpectrumStats::new(&peaks);
         let s_true = glycan_y_intensity(&peaks, &stats, bb, &truth, 20.0, 3);
-        let s_decoy =
-            glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 3, 42);
+        let s_decoy = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 3, 42);
         assert!(
             (s_true - s_decoy).abs() < 1e-12,
             "target ({s_true}) and decoy ({s_decoy}) must match when only kept rungs are present"
@@ -1407,8 +1374,7 @@ mod tests {
         full.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         let sf = SpectrumStats::new(&full);
         assert!(
-            (glycan_y_hit_frac(&full, &sf, bb, &g, 20.0, 3, None) - 1.0).abs()
-                < 1e-9,
+            (glycan_y_hit_frac(&full, &sf, bb, &g, 20.0, 3, None) - 1.0).abs() < 1e-9,
             "full ladder → 1.0"
         );
         // Only Y0 present → 1/5 (the single-cleavage core ladder has 4 retained

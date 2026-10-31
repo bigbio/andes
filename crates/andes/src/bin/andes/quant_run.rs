@@ -384,6 +384,18 @@ impl QuantCollector {
                 path.display()
             ));
         }
+        // A Bruker run always has MS1 frames: none captured means the MS1 table
+        // could not be read, not that the run has no survey scans.
+        if self.settings.needs_ms1()
+            && scans.ms1.is_empty()
+            && crate::spectra::input_format_flags(path).2
+        {
+            return Err(format!(
+                "no MS1 frames could be read from {}; the run's MS1 data is needed for \
+                 quantification",
+                path.display()
+            ));
+        }
         let ms1 = if self.settings.needs_ms1() && !scans.ms1.is_empty() {
             Some(Ms1RunIndex::new(scans.ms1))
         } else {

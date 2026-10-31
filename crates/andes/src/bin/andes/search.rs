@@ -324,6 +324,26 @@ fn rescore_pin_destination(
     Ok((path, base))
 }
 
+/// Archives that unpack to the same run folder (`run.d.zip` and `run.d.tar`)
+/// would collide in the scratch directory: refuse them before any is unpacked.
+#[cfg(feature = "timstof")]
+fn check_distinct_d_archive_runs(inputs: &[PathBuf]) -> Result<(), String> {
+    let mut seen: std::collections::HashMap<String, &PathBuf> = std::collections::HashMap::new();
+    for p in inputs {
+        let Some((_, run)) = input::d_archive_kind(p) else {
+            continue;
+        };
+        if let Some(first) = seen.insert(run.clone(), p) {
+            return Err(format!(
+                "the archives {} and {} both hold run '{run}'; give each run one archive",
+                first.display(),
+                p.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Replace each archived `.d` among `inputs` (`.d.zip`, `.d.tar`,
 /// `.d.tar.gz`, `.d.tgz`, `.d.gz`) by its run folder, unpacked into a
 /// temporary directory inside `scratch_dir` that lives as long as the
@@ -337,6 +357,7 @@ fn unpack_d_archives(
     }
     #[cfg(feature = "timstof")]
     {
+        check_distinct_d_archive_runs(inputs)?;
         let dir = scratch_tempdir("andes-d-", scratch_dir)?;
         for p in inputs
             .iter_mut()
@@ -399,6 +420,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     cli.temp_dir = Some(scratch_dir.clone());
     // Archived Bruker `.d` inputs are unpacked into the scratch directory for
     // the run (removed at exit) and searched as `.d` folders.
+    // QPX records the inputs as given; the unpacked run folders are removed on exit.
+    let original_spectrum_paths = cli.spectrum.clone();
     let _d_archives = unpack_d_archives(&mut cli.spectrum, &scratch_dir)?;
     // `--mbr`: the per-run artifacts go to `--quant-dir`, or to a temporary
     // directory that lives until the end of the run.
@@ -2139,7 +2162,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             input_path,
             if ms1_input { 2 } else { cli.ms_level },
             all_spectra.len() - spectra_before,
-        )?;
+        )
+        .map_err(|e| crate::spectra::with_first_read_error(e, &file_stats.first_errors))?;
         merge_parse_stats(&mut parse_stats, file_stats);
         if let Some(q) = quant.as_mut() {
             q.finish_file(
@@ -2875,7 +2899,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "andes_run".to_string());
-        let primary_paths: Vec<String> = spectrum_paths
+        let primary_paths: Vec<String> = original_spectrum_paths
             .iter()
             .map(|p| p.display().to_string())
             .collect();
@@ -3589,5 +3613,20 @@ mod isobaric_peak_filter_tests {
             isobaric_peak_filter(Some((50.0, 10)), false),
             Some((50.0, 10))
         );
+    }
+}
+
+#[cfg(all(test, feature = "timstof"))]
+mod d_archive_tests {
+    use super::check_distinct_d_archive_runs;
+    use std::path::PathBuf;
+
+    #[test]
+    fn archives_of_one_run_name_are_refused_before_unpacking() {
+        let ok: Vec<PathBuf> = ["a.d.zip", "b.d.tar", "c.mzML"].map(PathBuf::from).to_vec();
+        assert!(check_distinct_d_archive_runs(&ok).is_ok());
+        let dup: Vec<PathBuf> = ["x/run.d.zip", "y/run.d.tar"].map(PathBuf::from).to_vec();
+        let err = check_distinct_d_archive_runs(&dup).unwrap_err();
+        assert!(err.contains("x/run.d.zip") && err.contains("y/run.d.tar"), "{err}");
     }
 }

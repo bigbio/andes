@@ -196,6 +196,8 @@ pub struct PackedTrees {
     /// The same trees in [`PerfectTree`] layout for the batched walk; `None` for a
     /// tree deeper than [`PERFECT_MAX_DEPTH`], which keeps the node walk.
     perfect: Vec<Option<PerfectTree>>,
+    /// One more than the largest feature index any tree splits on (1 when none).
+    n_features: usize,
 }
 
 impl PackedTrees {
@@ -226,9 +228,17 @@ impl PackedTrees {
             })
             .collect();
         let perfect = packed.iter().map(|t| PerfectTree::from_packed(t)).collect();
+        let n_features = packed
+            .iter()
+            .flat_map(|t| t.iter())
+            .filter(|n| n.feature >= 0)
+            .map(|n| n.feature as usize + 1)
+            .max()
+            .unwrap_or(1);
         PackedTrees {
             trees: packed,
             perfect,
+            n_features,
         }
     }
 }
@@ -243,6 +253,7 @@ const PERFECT_LANES: usize = 4;
 /// One internal node of a [`PerfectTree`]: the split threshold and the feature
 /// index, whose high bit ([`DEFAULT_LEFT_BIT`]) sends a NaN value left.
 #[derive(Debug, Clone, Copy)]
+#[repr(C)]
 struct PerfectNode {
     threshold: f32,
     feature: u32,
@@ -349,6 +360,112 @@ impl PerfectTree {
             for (o, k) in out[start..].iter_mut().zip(idx) {
                 *o += self.leaves[(k - first_leaf) as usize];
             }
+        }
+    }
+}
+
+/// The batched walk of [`PerfectTree`]s on AVX2: eight rows per vector, the
+/// node and feature loads as gathers. The rows of a block are copied into a
+/// feature-major table first, so a feature value of a row is one gather of
+/// `feature * rows + row`. Every row still adds its leaf value to its sum in
+/// tree order, so the sums are bit-identical to the scalar walk.
+#[cfg(target_arch = "x86_64")]
+mod simd {
+    use super::{eval_packed, PackedTrees, PerfectTree, DEFAULT_LEFT_BIT};
+    use std::arch::x86_64::*;
+
+    /// Rows per block: the block's feature table (about 17 KB for 17
+    /// features) and one tree stay in the L1 cache while the block's rows
+    /// walk the tree.
+    const BLOCK: usize = 256;
+    /// Row vectors walked together, so their gathers overlap.
+    const GROUPS: usize = 4;
+    /// Rows per step.
+    const STEP: usize = 8 * GROUPS;
+
+    /// Adds every tree's value for every row to `out` (zeros on entry), in
+    /// tree order.
+    ///
+    /// # Safety
+    /// The CPU must support AVX2.
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn add_all(packed: &PackedTrees, rows: &[&[f32]], out: &mut [f32]) {
+        let nf = packed.n_features;
+        let mut table: Vec<f32> = Vec::new();
+        let mut acc = [0.0f32; BLOCK];
+        for (rows, out) in rows.chunks(BLOCK).zip(out.chunks_mut(BLOCK)) {
+            let n = rows.len();
+            let n_pad = n.div_ceil(STEP) * STEP;
+            table.clear();
+            table.resize(nf * n_pad, f32::NAN);
+            for f in 0..nf {
+                let col = &mut table[f * n_pad..f * n_pad + n_pad];
+                for (r, c) in col.iter_mut().enumerate() {
+                    *c = rows[r.min(n - 1)].get(f).copied().unwrap_or(f32::NAN);
+                }
+            }
+            acc[..n_pad].fill(0.0);
+            for (t, perfect) in packed.trees.iter().zip(&packed.perfect) {
+                match perfect {
+                    Some(p) => {
+                        for row0 in (0..n_pad).step_by(STEP) {
+                            walk(p, table.as_ptr(), n_pad as i32, row0, acc.as_mut_ptr());
+                        }
+                    }
+                    None => {
+                        for (a, x) in acc.iter_mut().zip(rows) {
+                            *a += eval_packed(t, x);
+                        }
+                    }
+                }
+            }
+            out.copy_from_slice(&acc[..n]);
+        }
+    }
+
+    /// Walks rows `row0..row0 + STEP` of the feature table `xs` (`n_pad` rows
+    /// per feature) down `p` and adds the leaf values to `acc[row0..]`.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn walk(p: &PerfectTree, xs: *const f32, n_pad: i32, row0: usize, acc: *mut f32) {
+        let nodes = p.nodes.as_ptr() as *const i32;
+        let lane = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+        let two = _mm256_set1_epi32(2);
+        let all_but_sign = _mm256_set1_epi32(!(DEFAULT_LEFT_BIT as i32));
+        let stride = _mm256_set1_epi32(n_pad);
+        let mut idx = [_mm256_setzero_si256(); GROUPS];
+        let mut row = [_mm256_setzero_si256(); GROUPS];
+        for g in 0..GROUPS {
+            row[g] = _mm256_add_epi32(_mm256_set1_epi32((row0 + 8 * g) as i32), lane);
+        }
+        for _ in 0..p.depth {
+            for g in 0..GROUPS {
+                // A node is `{ threshold: f32, feature: u32 }`: 8 bytes.
+                let threshold = _mm256_i32gather_ps::<8>(nodes as *const f32, idx[g]);
+                let feature = _mm256_i32gather_epi32::<8>(nodes.add(1), idx[g]);
+                let at = _mm256_add_epi32(
+                    _mm256_mullo_epi32(_mm256_and_si256(feature, all_but_sign), stride),
+                    row[g],
+                );
+                let v = _mm256_i32gather_ps::<4>(xs, at);
+                let le = _mm256_cmp_ps::<_CMP_LE_OQ>(v, threshold);
+                let nan = _mm256_cmp_ps::<_CMP_UNORD_Q>(v, v);
+                let nan_left =
+                    _mm256_and_ps(nan, _mm256_castsi256_ps(_mm256_srai_epi32::<31>(feature)));
+                let left = _mm256_castps_si256(_mm256_or_ps(le, nan_left));
+                // 2 * idx + 2 - 1 for a left child (the mask is -1), 2 * idx + 2 otherwise.
+                idx[g] = _mm256_add_epi32(
+                    _mm256_add_epi32(idx[g], idx[g]),
+                    _mm256_add_epi32(two, left),
+                );
+            }
+        }
+        let first_leaf = _mm256_set1_epi32(p.nodes.len() as i32);
+        for g in 0..GROUPS {
+            let leaf =
+                _mm256_i32gather_ps::<4>(p.leaves.as_ptr(), _mm256_sub_epi32(idx[g], first_leaf));
+            let a = acc.add(row0 + 8 * g);
+            _mm256_storeu_ps(a, _mm256_add_ps(_mm256_loadu_ps(a), leaf));
         }
     }
 }
@@ -560,6 +677,12 @@ impl GbdtPeakModel {
         );
         out.fill(0.0);
         let packed = self.packed();
+        #[cfg(target_arch = "x86_64")]
+        if !rows.is_empty() && std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: the CPU supports AVX2, as just detected.
+            unsafe { simd::add_all(packed, rows, out) };
+            return;
+        }
         for (t, perfect) in packed.trees.iter().zip(&packed.perfect) {
             match perfect {
                 Some(p) => p.add_to(rows, out),
@@ -766,6 +889,150 @@ mod tests {
         let mut fresh = m.clone();
         fresh.packed = Default::default();
         assert_eq!(m, fresh);
+    }
+
+    /// A random tree of depth up to `depth` over `nf` features, as the
+    /// trainer would write it: leaves may sit above the bottom level.
+    fn random_tree(rng: &mut u64, depth: u32, nf: i32) -> Tree {
+        let mut next = |m: u64| {
+            *rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (*rng >> 33) % m
+        };
+        let mut t = Tree {
+            feature: vec![],
+            threshold: vec![],
+            left: vec![],
+            right: vec![],
+            value: vec![],
+            default_left: vec![],
+        };
+        fn grow(
+            t: &mut Tree,
+            next: &mut dyn FnMut(u64) -> u64,
+            level: u32,
+            depth: u32,
+            nf: i32,
+        ) -> i32 {
+            let at = t.feature.len() as i32;
+            let leaf = level == depth || (level > 0 && next(4) == 0);
+            t.feature
+                .push(if leaf { -1 } else { next(nf as u64) as i32 });
+            t.threshold.push((next(2000) as f32 - 1000.0) / 500.0);
+            t.left.push(-1);
+            t.right.push(-1);
+            t.value.push((next(2001) as f32 - 1000.0) / 7.0 + 0.001);
+            t.default_left.push(next(2) as u8);
+            if !leaf {
+                let l = grow(t, next, level + 1, depth, nf);
+                let r = grow(t, next, level + 1, depth, nf);
+                t.left[at as usize] = l;
+                t.right[at as usize] = r;
+            }
+            at
+        }
+        grow(&mut t, &mut next, 0, depth, nf);
+        t
+    }
+
+    #[test]
+    fn simd_batches_equal_the_tree_walk_bit_for_bit() {
+        let mut rng = 12345u64;
+        let nf = 17;
+        let mut trees: Vec<Tree> = (0..120)
+            .map(|i| random_tree(&mut rng, 1 + (i % 8) as u32, nf))
+            .collect();
+        // A tree deeper than the perfect-tree limit keeps the node walk.
+        trees.push(random_tree(&mut rng, 14, nf));
+        trees.push(random_tree(&mut rng, 6, nf));
+        let m = GbdtPeakModel {
+            packed: Default::default(),
+            n_features: nf as u32,
+            feature_names: indexed_feature_names(nf as u32),
+            apply_sigmoid: false,
+            trees,
+            iso_x: vec![],
+            iso_y: vec![],
+        };
+        let mut next = move || {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (rng >> 33) as f32 / (1u64 << 31) as f32
+        };
+        // Row counts around the block (256) and step (16) sizes; some rows are
+        // short or hold NaNs.
+        for n in [1usize, 7, 8, 15, 16, 17, 255, 256, 257, 700] {
+            let rows: Vec<Vec<f32>> = (0..n)
+                .map(|i| {
+                    let len = if i % 11 == 3 { 5 } else { nf as usize };
+                    (0..len)
+                        .map(|_| {
+                            let v = next();
+                            if v < 0.05 {
+                                f32::NAN
+                            } else {
+                                v * 6.0 - 3.0
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            let refs: Vec<&[f32]> = rows.iter().map(|r| r.as_slice()).collect();
+            let mut out = vec![0.0f32; n];
+            m.predict_value_batch(&refs, &mut out);
+            for (x, o) in rows.iter().zip(&out) {
+                let want = m.trees.iter().fold(0.0f32, |a, t| a + t.eval(x));
+                assert_eq!(o.to_bits(), want.to_bits(), "n = {n}, row {x:?}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "timing"]
+    fn timing_of_the_batched_walk() {
+        let mut rng = 99u64;
+        let nf = 17;
+        let trees: Vec<Tree> = (0..300).map(|_| random_tree(&mut rng, 6, nf)).collect();
+        let m = GbdtPeakModel {
+            packed: Default::default(),
+            n_features: nf as u32,
+            feature_names: indexed_feature_names(nf as u32),
+            apply_sigmoid: false,
+            trees,
+            iso_x: vec![],
+            iso_y: vec![],
+        };
+        let rows: Vec<Vec<f32>> = (0..4096)
+            .map(|i| {
+                (0..nf)
+                    .map(|f| ((i * 31 + f * 17) % 997) as f32 / 150.0 - 3.0)
+                    .collect()
+            })
+            .collect();
+        let refs: Vec<&[f32]> = rows.iter().map(|r| r.as_slice()).collect();
+        let mut out = vec![0.0f32; refs.len()];
+        let reps = 20;
+        let t = std::time::Instant::now();
+        for _ in 0..reps {
+            m.predict_value_batch(&refs, &mut out);
+            std::hint::black_box(&out);
+        }
+        let batched = t.elapsed().as_secs_f64() / (reps * refs.len()) as f64 * 1e9;
+        let t = std::time::Instant::now();
+        for _ in 0..reps {
+            let packed = m.packed();
+            out.fill(0.0);
+            for p in packed.perfect.iter().flatten() {
+                p.add_to(&refs, &mut out);
+            }
+            std::hint::black_box(&out);
+        }
+        let scalar = t.elapsed().as_secs_f64() / (reps * refs.len()) as f64 * 1e9;
+        eprintln!(
+            "300 trees: batched walk {batched:.0} ns/row, scalar lane walk {scalar:.0} ns/row"
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! memory-map, so an archive is unpacked into a directory the caller chooses
 //! (the run's temporary directory), its run folder is located (the folder
 //! holding `analysis.tdf` and `analysis.tdf_bin`, at the archive root or
-//! nested inside it), and that folder is moved to `<dir>/<X>.d` so the run
+//! nested up to eight folders deep), and that folder is moved to `<dir>/<X>.d` so the run
 //! keeps the archive's name.
 
 use std::fs::File;
@@ -26,9 +26,11 @@ pub enum DArchiveError {
     },
     #[error(
         "the archive '{path}' holds no Bruker .d run folder (no folder with analysis.tdf \
-         and analysis.tdf_bin)"
+         and analysis.tdf_bin within eight folder levels)"
     )]
     NoRun { path: String },
+    #[error("the archive '{path}' holds a symbolic link ('{entry}'); links are not unpacked")]
+    Symlink { path: String, entry: String },
     #[error("the archive '{path}' holds {count} Bruker .d run folders; archive one run per file")]
     SeveralRuns { path: String, count: usize },
 }
@@ -89,7 +91,7 @@ pub fn unpack_d_archive(archive: &Path, dir: &Path) -> Result<PathBuf, DArchiveE
             zip.extract(&staging)
                 .map_err(|e| corrupt(format!("zip entry could not be extracted ({e})")))?;
         }
-        DArchiveKind::Tar => unpack_tar(BufReader::new(file), &staging).map_err(corrupt)?,
+        DArchiveKind::Tar => unpack_tar(BufReader::new(file), &staging, archive)?,
         DArchiveKind::TarGz => {
             let mut file = file;
             let mut magic = [0u8; 2];
@@ -99,7 +101,7 @@ pub fn unpack_d_archive(archive: &Path, dir: &Path) -> Result<PathBuf, DArchiveE
             }
             file.seek(SeekFrom::Start(0)).map_err(|e| io(&staging, e))?;
             let decoder = flate2::read::MultiGzDecoder::new(BufReader::new(file));
-            unpack_tar(decoder, &staging).map_err(corrupt)?;
+            unpack_tar(decoder, &staging, archive)?;
         }
     }
     let mut runs = Vec::new();
@@ -123,17 +125,33 @@ pub fn unpack_d_archive(archive: &Path, dir: &Path) -> Result<PathBuf, DArchiveE
     Ok(target)
 }
 
-/// Unpack a tar stream into `dir` (entries that would land outside `dir` are
-/// refused by the tar reader).
-fn unpack_tar<R: Read>(reader: R, dir: &Path) -> Result<(), String> {
-    let mut archive = tar::Archive::new(reader);
-    archive
-        .unpack(dir)
-        .map_err(|e| format!("not a readable tar archive ({e})"))
+/// Unpack a tar stream into `dir`. Entries that would land outside `dir` are
+/// refused, and so are symbolic links: a link could point outside `dir` and
+/// the run-folder search follows links.
+fn unpack_tar<R: Read>(reader: R, dir: &Path, archive: &Path) -> Result<(), DArchiveError> {
+    let corrupt = |e: std::io::Error| DArchiveError::Corrupt {
+        path: archive.display().to_string(),
+        message: format!("not a readable tar archive ({e})"),
+    };
+    let mut tar = tar::Archive::new(reader);
+    for entry in tar.entries().map_err(corrupt)? {
+        let mut entry = entry.map_err(corrupt)?;
+        if entry.header().entry_type().is_symlink() {
+            return Err(DArchiveError::Symlink {
+                path: archive.display().to_string(),
+                entry: entry
+                    .path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+            });
+        }
+        entry.unpack_in(dir).map_err(corrupt)?;
+    }
+    Ok(())
 }
 
 /// Deepest nesting searched for the run folder below the unpack root.
-const MAX_DEPTH: usize = 4;
+const MAX_DEPTH: usize = 8;
 
 /// Whether `dir` is a TDF run folder.
 fn is_run_folder(dir: &Path) -> bool {
@@ -287,6 +305,26 @@ mod tests {
         w.write_all(b"hello").unwrap();
         let (_t, r) = unpack("empty.d.zip", &w.finish().unwrap().into_inner());
         assert!(matches!(r, Err(DArchiveError::NoRun { .. })), "{r:?}");
+    }
+
+    #[test]
+    fn a_symbolic_link_entry_is_refused() {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        header.set_mode(0o777);
+        builder
+            .append_link(&mut header, "r.d/analysis.tdf", "/etc/passwd")
+            .unwrap();
+        let (_t, r) = unpack("link.d.tar", &builder.into_inner().unwrap());
+        assert!(matches!(r, Err(DArchiveError::Symlink { .. })), "{r:?}");
+    }
+
+    #[test]
+    fn a_run_folder_nested_eight_levels_is_found() {
+        let (_t, r) = unpack("deep.d.zip", &zip_bytes("a/b/c/d/e/f/g/h/"));
+        assert_run(&r, "deep");
     }
 
     #[test]

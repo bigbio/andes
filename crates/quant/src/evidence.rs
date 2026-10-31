@@ -73,6 +73,7 @@
 use model::mass::ISOTOPE;
 
 use crate::decoys::Probe;
+use crate::gaussian;
 use crate::ms1_index::Ms1RunIndex;
 
 /// Isotopes the envelope carries (M+0 to M+3).
@@ -391,10 +392,9 @@ impl GridCache {
                         let w = f * prior.w_prior;
                         let cell = c.next().expect("one cell per candidate and width");
                         cell.at = e.g.len();
+                        gaussian::extend(&mut e.g, &rt[cell.scans.clone()], t0, w);
                         let (mut sg, mut sgg) = (0.0, 0.0);
-                        for &t in &rt[cell.scans.clone()] {
-                            let g = gaussian(t, t0, w);
-                            e.g.push(g);
+                        for &g in &e.g[cell.at..] {
                             sg += g;
                             sgg += g * g;
                         }
@@ -941,7 +941,7 @@ fn profile(
     g: &mut Vec<f64>,
 ) -> (f64, [f64; MAX_ISOTOPES]) {
     g.clear();
-    g.extend(rt.iter().map(|&t| gaussian(t, t0, w)));
+    gaussian::extend(g, rt, t0, w);
     let gbar = g.iter().sum::<f64>() / g.len() as f64;
     let sgg = g
         .iter()
@@ -964,11 +964,6 @@ fn normalised(envelope: &[f32; 4]) -> [f64; MAX_ISOTOPES] {
         return [1.0, 0.0, 0.0, 0.0];
     }
     e.map(|v| v / sum)
-}
-
-fn gaussian(t: f64, t0: f64, w: f64) -> f64 {
-    let d = (t - t0) / w;
-    (-0.5 * d * d).exp()
 }
 
 /// `sum_j (y_j - ybar) g_j`, which equals `sum_j (y_j - ybar) (g_j - gbar)`
@@ -1067,14 +1062,8 @@ fn best_alignment(
     // support.
     let finite = rt.iter().all(|t| t.is_finite());
     let llr = |t0: f64, w: f64| {
-        let (mut num, mut sg, mut sgg) = (0.0, 0.0, 0.0);
         let on = support(rt, finite, t0, w);
-        for (&t, &zj) in rt[on.clone()].iter().zip(&z[on]) {
-            let g = gaussian(t, t0, w);
-            num += zj * g;
-            sg += g;
-            sgg += g * g;
-        }
+        let (num, sg, sgg) = gaussian::sums(&rt[on.clone()], &z[on], t0, w);
         llr_of(num, sg, sgg)
     };
     // (objective, scan, index into widths)
@@ -2041,7 +2030,7 @@ mod tests {
                 let cell = cells.next().unwrap();
                 let (mut want_sg, mut want_sgg) = (0.0, 0.0);
                 for (j, &t) in rt.iter().enumerate() {
-                    let want = gaussian(t, rt[k], f * prior.w_prior);
+                    let want = gaussian::gaussian(t, rt[k], f * prior.w_prior);
                     if cell.scans.contains(&j) {
                         let got = g.g[cell.at + j - cell.scans.start];
                         assert_eq!(got.to_bits(), want.to_bits());
@@ -2073,7 +2062,7 @@ mod tests {
             for &f in &WIDTH_GRID {
                 let cell = cells.next().unwrap();
                 let j = cell.scans.start + (cell.scans.len() / 2);
-                let want = gaussian(rt[j], rt[k], f * prior.w_prior);
+                let want = gaussian::gaussian(rt[j], rt[k], f * prior.w_prior);
                 assert_eq!(
                     g.g[cell.at + j - cell.scans.start].to_bits(),
                     want.to_bits()

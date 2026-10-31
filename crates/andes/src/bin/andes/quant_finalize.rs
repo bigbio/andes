@@ -75,8 +75,9 @@ use crate::quant_mbr::{
     ShapeReference, NO_SHAPE, TRANSFER_DONOR_Q,
 };
 use crate::transfer_fdr::{
-    member_seed, row_unit, train_bagged_folds, train_folds, Estimate, FdrCounts, FdrRow,
-    FoldModels, FoldScores, QValues, TrainingSample, IDENTITY, N_FOLDS, TRANSFER_FEATURES,
+    member_seed, row_unit, train_bagged_folds, train_folds, transfer_train_params, Estimate,
+    FdrCounts, FdrRow, FoldModels, FoldScores, QValues, TrainingSample, IDENTITY, N_FOLDS,
+    TRANSFER_FEATURES,
 };
 
 /// What one finalize did, for the caller to log.
@@ -846,12 +847,18 @@ fn write_scores(path: &Path, scores: &[f32]) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether `r` is a transfer row (target or decoy) of the classifier.
-fn is_transfer(idx: &EntryIndex<'_>, r: &ExtractRow) -> bool {
-    matches!(idx.table(r), Some((Table::Transfer, _)))
+/// Whether `r` is a row whose held-out score pass 3 keeps for the later
+/// passes: a transfer row (target or decoy) or an identified row.
+fn is_cached(idx: &EntryIndex<'_>, r: &ExtractRow) -> bool {
+    matches!(idx.table(r), Some((Table::Transfer | Table::Identified, _)))
 }
 
-/// The temporary table of the held-out transfer scores of table `chunk`.
+/// The cached value of an identified row that has features but no score (its
+/// fold has no model). A transfer row without features or without a score,
+/// and an identified row without features, cache NaN.
+const NO_SCORE: f32 = f32::INFINITY;
+
+/// The temporary table of the held-out scores of the transfer and identified rows of table `chunk`.
 fn cached_scores_path(dir: &Path, chunk: usize) -> PathBuf {
     dir.join(format!("transfer-scores-{chunk:06}.parquet"))
 }
@@ -1554,7 +1561,7 @@ pub(crate) fn finalize_stream(
     let i_rows = i_sample.into_items();
     let t_refs: Vec<&[FdrRow]> = t_sets.iter().map(Vec::as_slice).collect();
     let (t_models, i_models) = rayon::join(
-        || train_bagged_folds(&t_refs, seed),
+        || train_bagged_folds(&t_refs, seed, &transfer_train_params()),
         || train_folds(&i_rows, seed),
     );
     drop(t_refs);
@@ -1597,7 +1604,10 @@ pub(crate) fn finalize_stream(
                 |i, t, fam, s| {
                     let p = rows[i].precursor;
                     match t {
-                        Table::Identified => is.add(p, fam, s),
+                        Table::Identified => {
+                            is.add(p, fam, s);
+                            block[i] = s.unwrap_or(NO_SCORE);
+                        }
                         _ => {
                             ts.add(p, fam, s);
                             block[i] = s.unwrap_or(f32::NAN);
@@ -1608,7 +1618,7 @@ pub(crate) fn finalize_stream(
             cache.extend(
                 rows.iter()
                     .zip(block)
-                    .filter(|(r, _)| is_transfer(&idx, r))
+                    .filter(|(r, _)| is_cached(&idx, r))
                     .map(|(_, s)| s),
             );
             Ok(())
@@ -1640,7 +1650,8 @@ pub(crate) fn finalize_stream(
         id_fdr.pooled_steps()
     );
 
-    // Pass 4: the reference cells of the run normalisation.
+    // Pass 4: the reference cells of the run normalisation, from the
+    // identified rows' scores of pass 3.
     let t0 = Instant::now();
     let cells: Mutex<TrainingSample<Key, NormCell>> =
         Mutex::new(TrainingSample::new(limits.max_norm_cells, seed));
@@ -1648,51 +1659,57 @@ pub(crate) fn finalize_stream(
         source,
         false,
         bounds,
-        |_| (),
-        |_, chunk, first, rows| {
+        |_| (None::<Vec<f32>>, 0usize),
+        |(cache, at), chunk, first, rows| {
+            if cache.is_none() {
+                *cache = Some(read_cached_scores(&cached_scores_path(dir, chunk))?);
+            }
+            let cache = cache.as_deref().unwrap_or_default();
             let mut local = Vec::new();
-            let want = |t: Table| t == Table::Identified;
-            for_each_scored(
-                rows,
-                &idx,
-                &NoShapes,
-                maps,
-                &t_models,
-                &i_models,
-                want,
-                |i, _, fam, s| {
-                    let r = &rows[i];
-                    if r.kind != Hypothesis::Target
-                        || !id_fdr
-                            .q(Estimate::Pooled, r.precursor, fam, s)
-                            .is_some_and(|q| q <= VALIDATION_Q)
-                    {
-                        return;
-                    }
-                    let Some(e) = r.evidence.as_ref() else { return };
-                    let w_c = summaries.get(&r.precursor).and_then(|s| s.w_c);
-                    let q = reported_quantity(e, r.run, w_c, maps).0;
-                    if q > 0.0 && q.is_finite() {
-                        local.push((
-                            (chunk as u32, first + i as u64),
-                            u64::from(r.precursor),
-                            NormCell {
-                                precursor: r.precursor,
-                                run: r.run,
-                                log2_quantity: q.log2(),
-                                rt: e.t0,
-                            },
-                        ));
-                    }
-                },
-            );
+            for (i, r) in rows.iter().enumerate() {
+                let Some((t @ (Table::Transfer | Table::Identified), fam)) = idx.table(r) else {
+                    continue;
+                };
+                let s = *cache.get(*at).ok_or_else(|| {
+                    format!("{}: fewer cached scores than rows", source.name(chunk))
+                })?;
+                *at += 1;
+                if t != Table::Identified || s.is_nan() {
+                    continue;
+                }
+                let s = (s != NO_SCORE).then_some(s);
+                if r.kind != Hypothesis::Target
+                    || !id_fdr
+                        .q(Estimate::Pooled, r.precursor, fam, s)
+                        .is_some_and(|q| q <= VALIDATION_Q)
+                {
+                    continue;
+                }
+                let Some(e) = r.evidence.as_ref() else {
+                    continue;
+                };
+                let w_c = summaries.get(&r.precursor).and_then(|s| s.w_c);
+                let q = reported_quantity(e, r.run, w_c, maps).0;
+                if q > 0.0 && q.is_finite() {
+                    local.push((
+                        (chunk as u32, first + i as u64),
+                        u64::from(r.precursor),
+                        NormCell {
+                            precursor: r.precursor,
+                            run: r.run,
+                            log2_quantity: q.log2(),
+                            rt: e.t0,
+                        },
+                    ));
+                }
+            }
             let mut c = cells.lock().expect("normalisation cells lock");
             for (k, u, cell) in local {
                 c.push(k, u, cell);
             }
             Ok(())
         },
-        |_, ()| Ok(()),
+        |_, _| Ok(()),
     )?;
     let cells = cells.into_inner().expect("normalisation cells lock");
     let (seen, kept, share) = cells.stats();
@@ -1710,7 +1727,10 @@ pub(crate) fn finalize_stream(
     );
 
     // Pass 5: per run, the output rows into a temporary table, and the
-    // validation counts.
+    // validation counts. The transfer and identified rows' scores are those
+    // of pass 3 (a transfer row without features or without a fold model,
+    // and an identified row without features, has none); the pseudo-transfer
+    // rows are scored here.
     let t0 = Instant::now();
     let accepted = |q: Option<f64>| q.is_some_and(|q| q <= mbr_fdr);
     // Decoy transfer rows with a q-value, and their acceptance, by family:
@@ -1743,24 +1763,20 @@ pub(crate) fn finalize_stream(
                 own: &ctx.own,
             };
             let v = &mut out.validation;
-            // Per row with a score: its family and held-out score. The
-            // transfer rows' scores are those of pass 3 (a row without
-            // features or without a fold model has none); the other rows
-            // are scored here.
+            // Per row with a score: its family and held-out score.
             let mut scored: Vec<Option<(u8, Option<f32>)>> = vec![None; rows.len()];
             for (i, r) in rows.iter().enumerate() {
-                let Some((Table::Transfer, fam)) = idx.table(r) else {
+                let Some((t @ (Table::Transfer | Table::Identified), fam)) = idx.table(r) else {
                     continue;
                 };
                 let s = *cache.get(*at).ok_or_else(|| {
-                    format!(
-                        "{}: fewer cached transfer scores than rows",
-                        source.name(chunk)
-                    )
+                    format!("{}: fewer cached scores than rows", source.name(chunk))
                 })?;
                 *at += 1;
                 if s.is_finite() {
                     scored[i] = Some((fam, Some(s)));
+                } else if t == Table::Identified && s == NO_SCORE {
+                    scored[i] = Some((fam, None));
                 }
             }
             for_each_scored(
@@ -1770,7 +1786,7 @@ pub(crate) fn finalize_stream(
                 maps,
                 &t_models,
                 &i_models,
-                |t: Table| t != Table::Transfer,
+                |t: Table| t == Table::Pseudo,
                 |i, _, fam, s| {
                     scored[i] = Some((fam, s));
                 },

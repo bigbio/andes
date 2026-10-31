@@ -31,6 +31,7 @@ pub mod align;
 pub mod decoys;
 pub mod evidence;
 pub mod formula;
+pub mod gaussian;
 pub mod isobaric;
 pub mod lfq;
 pub mod library;

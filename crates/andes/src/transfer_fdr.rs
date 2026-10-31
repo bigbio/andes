@@ -178,6 +178,7 @@ fn train_fold(
     nf: usize,
     fold: usize,
     seed: u64,
+    params: &TrainParams,
 ) -> Result<GbdtPeakModel, String> {
     let mut x = Vec::new();
     let mut y = Vec::new();
@@ -204,12 +205,8 @@ fn train_fold(
         n_features: nf,
         feature_names: scoring_crate::gbdt_eval::indexed_feature_names(nf as u32),
     };
-    train_gbdt(
-        &ds,
-        &TrainParams::default(),
-        seed.wrapping_add(fold as u64 + 1),
-    )
-    .map_err(|e| format!("fold {fold}: {e:?}"))
+    train_gbdt(&ds, params, seed.wrapping_add(fold as u64 + 1))
+        .map_err(|e| format!("fold {fold}: {e:?}"))
 }
 
 /// The fold models of one classifier: fold `f`'s members are trained on the
@@ -239,11 +236,29 @@ pub fn member_seed(seed: u64, m: usize) -> u64 {
 /// # Panics
 /// When the rows do not all have the same number of features.
 pub fn train_folds(rows: &[FdrRow], seed: u64) -> FoldModels {
-    train_bagged_folds(&[rows], seed)
+    train_bagged_folds(&[rows], seed, &TrainParams::default())
 }
 
-/// Trains the fold models of a bagged classifier: member `m` is trained on
-/// `sets[m]` with the trainer seed of [`member_seed`]`(seed, m)`; the folds
+/// Boosting settings of the transfer classifier: the trainer's defaults with
+/// a learning rate of [`TRANSFER_LEARNING_RATE`].
+pub fn transfer_train_params() -> TrainParams {
+    TrainParams {
+        learning_rate: TRANSFER_LEARNING_RATE,
+        ..TrainParams::default()
+    }
+}
+
+/// Learning rate of the transfer classifier's 300 boosting rounds. At the
+/// trainer's default of 0.05 the rounds end before the validation loss does:
+/// at 500 runs the held-out scores separate targets from decoys less well
+/// than the same trees at 0.3 (the transfers accepted at q 0.01 rise by 60 %
+/// at the same estimated FDR, and a lone model's count by 3x), and the
+/// classifier is the less stable the less it has converged.
+pub const TRANSFER_LEARNING_RATE: f32 = 0.3;
+
+/// Trains the fold models of a bagged classifier with boosting settings
+/// `params`: member `m` is trained on `sets[m]` with the trainer seed of
+/// [`member_seed`]`(seed, m)`; the folds
 /// are those of `seed` for every member. A fold whose members all fail has
 /// no model; a fold with some members left averages those (the others are
 /// logged).
@@ -251,7 +266,7 @@ pub fn train_folds(rows: &[FdrRow], seed: u64) -> FoldModels {
 /// # Panics
 /// When `sets` is empty or the rows do not all have the same number of
 /// features.
-pub fn train_bagged_folds(sets: &[&[FdrRow]], seed: u64) -> FoldModels {
+pub fn train_bagged_folds(sets: &[&[FdrRow]], seed: u64, params: &TrainParams) -> FoldModels {
     assert!(!sets.is_empty(), "a classifier needs at least one member");
     let nf = sets
         .iter()
@@ -272,7 +287,7 @@ pub fn train_bagged_folds(sets: &[&[FdrRow]], seed: u64) -> FoldModels {
         .collect();
     let fitted: Vec<Result<GbdtPeakModel, String>> = jobs
         .par_iter()
-        .map(|&(f, m)| train_fold(sets[m], &folds[m], nf, f, member_seed(seed, m)))
+        .map(|&(f, m)| train_fold(sets[m], &folds[m], nf, f, member_seed(seed, m), params))
         .collect();
     let mut models: Vec<Vec<GbdtPeakModel>> = (0..N_FOLDS).map(|_| Vec::new()).collect();
     let mut errors: Vec<Vec<String>> = vec![Vec::new(); N_FOLDS];
@@ -1483,7 +1498,7 @@ mod tests {
     /// each trained on all the rows.
     fn bagged_q(rows: &[FdrRow], members: usize, seed: u64) -> Vec<Option<f64>> {
         let sets: Vec<&[FdrRow]> = (0..members).map(|_| rows).collect();
-        let models = train_bagged_folds(&sets, seed);
+        let models = train_bagged_folds(&sets, seed, &TrainParams::default());
         assert_eq!(models.members(), members);
         let precursors: Vec<u32> = rows.iter().map(|r| r.precursor).collect();
         let xs: Vec<&[f32]> = rows.iter().map(|r| r.x.as_slice()).collect();
@@ -1510,7 +1525,7 @@ mod tests {
     fn bagged_scores_are_the_mean_of_the_members() {
         let rows = rows(300, 1.0, &[1, 2], 29);
         let sets: Vec<&[FdrRow]> = vec![&rows; 3];
-        let bagged = train_bagged_folds(&sets, 4);
+        let bagged = train_bagged_folds(&sets, 4, &TrainParams::default());
         let xs: Vec<&[f32]> = rows.iter().map(|r| r.x.as_slice()).collect();
         let precursors: Vec<u32> = rows.iter().map(|r| r.precursor).collect();
         let mut got = Vec::new();
@@ -1651,5 +1666,40 @@ mod tests {
             all.push(i, r.precursor as u64, r.clone());
         }
         assert_eq!(all.into_items(), rows);
+    }
+
+    #[test]
+    fn the_transfer_classifier_differs_from_the_default_trainer_in_its_learning_rate() {
+        let (t, d) = (transfer_train_params(), TrainParams::default());
+        assert_eq!(t.learning_rate, TRANSFER_LEARNING_RATE);
+        assert!(t.learning_rate > d.learning_rate);
+        assert_eq!(
+            (t.n_rounds, t.max_depth, t.n_bins, t.early_stop_rounds),
+            (d.n_rounds, d.max_depth, d.n_bins, d.early_stop_rounds)
+        );
+        // The classifier trains and separates a clear mixture at this rate.
+        let rows = rows(400, 3.0, &[1, 2], 31);
+        let sets: Vec<&[FdrRow]> = vec![&rows];
+        let models = train_bagged_folds(&sets, 3, &t);
+        assert!(models.failed_folds.is_empty());
+        let precursors: Vec<u32> = rows.iter().map(|r| r.precursor).collect();
+        let xs: Vec<&[f32]> = rows.iter().map(|r| r.x.as_slice()).collect();
+        let mut scores = Vec::new();
+        models.score(&precursors, &xs, &mut scores);
+        let mean = |decoy: bool| {
+            let v: Vec<f32> = rows
+                .iter()
+                .zip(&scores)
+                .filter(|(r, _)| r.is_decoy == decoy)
+                .filter_map(|(_, s)| *s)
+                .collect();
+            v.iter().sum::<f32>() / v.len() as f32
+        };
+        assert!(
+            mean(false) > mean(true) + 1.0,
+            "{} {}",
+            mean(false),
+            mean(true)
+        );
     }
 }

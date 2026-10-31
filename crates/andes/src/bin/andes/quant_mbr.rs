@@ -2195,7 +2195,8 @@ mod finalize_tests {
         FinalizeLimits, FinalizeParams, FinalizeSummary, MbrFeature, Table, SCORE_CHUNK,
     };
     use crate::transfer_fdr::{
-        row_unit, train_folds, Estimate, FdrRow, FoldScores, QValues, TrainingSample,
+        row_unit, train_bagged_folds, train_folds, transfer_train_params, Estimate, FdrRow,
+        FoldScores, QValues, TrainingSample,
     };
 
     const N: u32 = 900;
@@ -2697,7 +2698,8 @@ mod finalize_tests {
             }
             Ok(())
         })?;
-        let t_models = train_folds(&t_sample.into_items(), seed);
+        let t_models =
+            train_bagged_folds(&[&t_sample.into_items()], seed, &transfer_train_params());
         let i_models = train_folds(&i_sample.into_items(), seed);
 
         // Pass 2: every row's held-out score, into the q-value step functions.

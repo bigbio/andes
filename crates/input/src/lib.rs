@@ -14,6 +14,12 @@ pub mod peff;
 pub mod thermo;
 #[cfg(feature = "timstof")]
 pub mod timstof;
+#[cfg(feature = "timstof")]
+pub mod timstof_archive;
+#[cfg(feature = "timstof")]
+mod timstof_ms1;
+#[cfg(feature = "timstof")]
+mod timstof_ms2;
 pub mod uniprot;
 mod uniprot_ptm;
 
@@ -37,6 +43,8 @@ pub use peff::{load_peff, PeffError, PeffLoadStats};
 pub use thermo::{ThermoParseError, ThermoRawReader};
 #[cfg(feature = "timstof")]
 pub use timstof::{TimsTofParseError, TimsTofReader};
+#[cfg(feature = "timstof")]
+pub use timstof_archive::{d_archive_kind, unpack_d_archive, DArchiveError, DArchiveKind};
 pub use uniprot::{
     load_uniprot_xml, EvidenceLevel, UniProtLoadStats, UniProtOptions, UniProtParseError,
     UniProtXmlReader,

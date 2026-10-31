@@ -47,6 +47,18 @@ pub(crate) fn spectrum_ext_lower(path: &std::path::Path) -> Option<String> {
         .map(|e| e.to_ascii_lowercase())
 }
 
+/// Whether `path` names an archived Bruker `.d` folder (`X.d.zip`,
+/// `X.d.tar`, `X.d.tar.gz`, `X.d.tgz`, `X.d.gz`; case-insensitive).
+pub(crate) fn is_d_archive(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    [".d.zip", ".d.tar", ".d.tar.gz", ".d.tgz", ".d.gz"]
+        .iter()
+        .any(|s| lower.len() > s.len() && lower.ends_with(s))
+}
+
 pub(crate) fn input_format_flags(path: &Path) -> (bool, bool, bool, bool) {
     // Strip a trailing `.gz` so the format is detected from the underlying
     // extension (`spectra.mzML.gz` → mzML, `spectra.mgf.gz` → MGF). `.raw`/`.d`
@@ -69,7 +81,7 @@ pub(crate) fn input_format_flags(path: &Path) -> (bool, bool, bool, bool) {
         .map(|s| s.to_lowercase());
     let is_mzml = matches!(ext.as_deref(), Some("mzml"));
     let is_raw = matches!(ext.as_deref(), Some("raw"));
-    let is_d = matches!(ext.as_deref(), Some("d"));
+    let is_d = matches!(ext.as_deref(), Some("d")) || is_d_archive(path);
     let is_mgf = !is_mzml && !is_raw && !is_d;
     (is_mzml, is_raw, is_d, is_mgf)
 }
@@ -112,6 +124,14 @@ pub(crate) fn merge_parse_stats(acc: &mut ParseStats, part: ParseStats) {
         if acc.first_errors.len() < 10 {
             acc.first_errors.push(e);
         }
+    }
+}
+
+/// `msg` followed by the first read error the parser recorded, when there is one.
+pub(crate) fn with_first_read_error(msg: String, first_errors: &[String]) -> String {
+    match first_errors.first() {
+        Some(e) => format!("{msg} First read error: {e}"),
+        None => msg,
     }
 }
 
@@ -210,7 +230,16 @@ pub(crate) fn scan_spectrum_metadata(
     bench_cap: usize,
 ) -> Result<Vec<SpectrumMeta>, Box<dyn std::error::Error>> {
     let mut out = Vec::new();
-    if is_mzml {
+    if input_format_flags(path).2 {
+        for spec in open_d_ms2(path)?.take(bench_cap) {
+            // Unreadable spectra are skipped, as in the search reader.
+            let Ok(spec) = spec else { continue };
+            out.push(SpectrumMeta {
+                precursor_charge: spec.precursor_charge,
+                num_peaks: spec.peaks.len(),
+            });
+        }
+    } else if is_mzml {
         let reader = MzMLReader::new(input::open_buf_maybe_gz(path)?)
             .with_ms_level_range(ms_level, ms_level);
         for result in reader {
@@ -239,6 +268,26 @@ pub(crate) fn scan_spectrum_metadata(
     Ok(out)
 }
 
+/// The MS2 spectra of a Bruker `.d`, in the order the search reads them.
+type SpectrumIter = Box<dyn Iterator<Item = Result<Spectrum, Box<dyn std::error::Error>>>>;
+
+fn open_d_ms2(path: &Path) -> Result<SpectrumIter, Box<dyn std::error::Error>> {
+    #[cfg(feature = "timstof")]
+    {
+        let reader = input::TimsTofReader::open(path)?;
+        Ok(Box::new(reader.map(|r| r.map_err(|e| e.into()))))
+    }
+    #[cfg(not(feature = "timstof"))]
+    {
+        Err(format!(
+            "this andes build has no Bruker .d (timsTOF) support; rebuild with \
+             `--features timstof`: {}",
+            path.display()
+        )
+        .into())
+    }
+}
+
 pub(crate) fn build_spec_keys_from_metadata(
     meta: &[SpectrumMeta],
     charge_range: std::ops::RangeInclusive<u8>,
@@ -264,7 +313,17 @@ pub(crate) fn load_spectra_by_index(
     if indices.is_empty() {
         return Ok(loaded);
     }
-    if is_mzml {
+    if input_format_flags(path).2 {
+        for (idx, spec) in open_d_ms2(path)?.enumerate().take(bench_cap) {
+            if !indices.contains(&idx) {
+                continue;
+            }
+            loaded.insert(idx, spec?);
+            if loaded.len() == indices.len() {
+                break;
+            }
+        }
+    } else if is_mzml {
         let reader = MzMLReader::new(input::open_buf_maybe_gz(path)?)
             .with_ms_level_range(ms_level, ms_level);
         for (idx, result) in reader.enumerate() {
@@ -305,7 +364,7 @@ pub(crate) fn load_spectra_by_index(
 /// An SPS-MS3 run carries its reporters in the MS3 scans, not the (ion-trap)
 /// MS2 it searches, so when an MS2 sample shows no label the MS3 scans of an
 /// mzML or `.raw` are sampled too (high-res: SPS-MS3 reporters are read in the
-/// Orbitrap). Returns `None` for `.d` input and for label-free data.
+/// Orbitrap). Returns `None` for label-free data.
 pub(crate) fn detect_isobaric_sampled(
     path: &Path,
     is_mzml: bool,
@@ -375,7 +434,8 @@ pub(crate) fn sample_ms2_meta(
     input::Ms2MetaSample::default()
 }
 
-/// The first spectra at `ms_level` of an mzML, MGF or Thermo `.raw`.
+/// The first spectra at `ms_level` of an mzML, MGF, Thermo `.raw` or Bruker
+/// `.d` (MS2 only; a `.d` has no other level with a precursor).
 pub(crate) fn sample_spectra(
     path: &Path,
     is_mzml: bool,
@@ -398,6 +458,18 @@ pub(crate) fn sample_spectra(
             return Some(reader.filter_map(Result::ok).take(SAMPLE_N).collect());
         }
         #[cfg(not(feature = "thermo"))]
+        return None;
+    }
+    if input_format_flags(path).2 {
+        #[cfg(feature = "timstof")]
+        {
+            if ms_level != 2 {
+                return None;
+            }
+            let reader = input::TimsTofReader::open(path).ok()?;
+            return Some(reader.filter_map(Result::ok).take(SAMPLE_N).collect());
+        }
+        #[cfg(not(feature = "timstof"))]
         return None;
     }
     if !(is_mzml || is_mgf) {
@@ -578,7 +650,14 @@ pub(crate) fn detect_instrument_type_for_path(
 
 #[cfg(test)]
 mod require_spectra_tests {
-    use super::require_spectra;
+    use super::{require_spectra, with_first_read_error};
+
+    #[test]
+    fn the_first_read_error_is_appended() {
+        assert_eq!(with_first_read_error("none.".into(), &[]), "none.");
+        let m = with_first_read_error("none.".into(), &["bad table".into(), "x".into()]);
+        assert_eq!(m, "none. First read error: bad table");
+    }
     use std::path::Path;
 
     #[test]

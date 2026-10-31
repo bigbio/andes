@@ -1448,10 +1448,14 @@ dependencies = [
  "model",
  "parquet",
  "quick-xml",
+ "rayon",
+ "rusqlite",
+ "tar",
  "tempfile",
  "thermorawfilereader",
  "thiserror 2.0.18",
  "timsrust",
+ "zip",
 ]
 
 [[package]]

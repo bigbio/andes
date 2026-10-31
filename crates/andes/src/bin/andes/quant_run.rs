@@ -384,6 +384,18 @@ impl QuantCollector {
                 path.display()
             ));
         }
+        // A Bruker run always has MS1 frames: none captured means the MS1 table
+        // could not be read, not that the run has no survey scans.
+        if self.settings.needs_ms1()
+            && scans.ms1.is_empty()
+            && crate::spectra::input_format_flags(path).2
+        {
+            return Err(format!(
+                "no MS1 frames could be read from {}; the run's MS1 data is needed for \
+                 quantification",
+                path.display()
+            ));
+        }
         let ms1 = if self.settings.needs_ms1() && !scans.ms1.is_empty() {
             Some(Ms1RunIndex::new(scans.ms1))
         } else {
@@ -1223,6 +1235,7 @@ fn write_run_artifacts(
             }
             let z = hit.psm.charge_used.max(1);
             let peptidoform = peptidoform_of(hit.cand);
+            let context = run.contexts.get(native_id(run, &spec.title));
             rows.push(RunPsmRow {
                 spec_id: hit.spec_id.clone(),
                 rt_s,
@@ -1232,16 +1245,14 @@ fn write_run_artifacts(
                 mz: hit.cand.peptide.mass() / z as f64 + PROTON,
                 is_decoy: hit.cand.is_decoy,
                 search_score: hit.psm.features.strong_score,
-                faims_cv: run
-                    .contexts
-                    .get(native_id(run, &spec.title))
-                    .and_then(|c| c.faims_cv),
+                faims_cv: context.and_then(|c| c.faims_cv),
                 envelope: envelope_of(hit.cand, TABLE_ENVELOPE_ISOTOPES),
                 proteins: proteins_of(&hit.psm, candidates, index)
                     .into_iter()
                     .map(|(a, ..)| a)
                     .collect::<Vec<_>>()
                     .join(";"),
+                ion_mobility: context.and_then(|c| c.ion_mobility),
             });
         }
         let table_path = quant_dir.join(format!("{}.quant.parquet", run.stem));
@@ -1785,6 +1796,7 @@ mod tests {
                     peaks: Vec::new(),
                     id: format!("scan={}", i + 1),
                     faims_cv: Some(if i % 2 == 0 { -40.0 } else { -60.0 }),
+                    mobility: Vec::new(),
                 })
                 .collect(),
         )
@@ -1797,6 +1809,7 @@ mod tests {
             scan_window: None,
             faims_cv: cv,
             noise: None,
+            ion_mobility: None,
         }
     }
 

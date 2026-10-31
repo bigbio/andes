@@ -626,8 +626,8 @@ pub(crate) struct SearchArgs {
     pub(crate) glyco_core: GlycoCoreFlag,
 
     /// Correct each precursor to its monoisotopic peak from the preceding MS1
-    /// isotope envelope BEFORE searching (`--glyco`; needs MS1, so mzML or Thermo
-    /// `.raw`). `auto` fits the observed envelope at the reported charge against a
+    /// isotope envelope BEFORE searching (`--glyco`; needs MS1, so mzML, Thermo
+    /// `.raw` or Bruker `.d`). `auto` fits the observed envelope at the reported charge against a
     /// glycopeptide isotope model under the hypotheses "the recorded precursor is
     /// the M+k peak", k = 0..6, and moves the precursor down when a k > 0 clearly
     /// wins; every spectrum whose envelope was fitted is then searched with a
@@ -851,7 +851,7 @@ pub(crate) struct SearchArgs {
 
     /// MS level the reporter ions are read from: 2 (the identified MS2) or 3
     /// (the SPS-MS3 scan whose precursor references that MS2; mzML and Thermo
-    /// `.raw`). Default: 3 when the MS2 is low-resolution, cannot separate the
+    /// `.raw`; a Bruker `.d` has no MS3 scans). Default: 3 when the MS2 is low-resolution, cannot separate the
     /// plex's channels and the MS3 scans carry reporters (SPS-MS3); else 2.
     #[arg(long = "tmt-level")]
     pub(crate) tmt_level: Option<u8>,
@@ -909,7 +909,8 @@ pub(crate) struct SearchArgs {
     /// chromatograms are extracted around each identified peptidoform's
     /// retention time and integrated. Writes `<stem>.lfq.parquet` and, with
     /// `--output-parquet`, the QPX
-    /// `quantms.feature.parquet`. mzML and Thermo `.raw` input.
+    /// `quantms.feature.parquet`. mzML, Thermo `.raw` and Bruker `.d` input (a
+    /// `.d`'s MS1 frames are summed over ion mobility).
     #[arg(long = "lfq", default_value_t = false)]
     pub(crate) lfq: bool,
 
@@ -944,8 +945,8 @@ pub(crate) struct SearchArgs {
     /// each input file `<stem>.ms1.parquet` (its MS1 scans, all FAIMS voltages) and
     /// `<stem>.quant.parquet` (every rank-1 PSM, targets and decoys, with no
     /// FDR filter; under `--chimeric` also the best PSM of each co-isolated
-    /// precursor). Implies MS1 capture; same inputs as `--lfq` (mzML or
-    /// Thermo `.raw`; not with MGF, `.d` or `--glyco`).
+    /// precursor). Implies MS1 capture; same inputs as `--lfq` (mzML, Thermo
+    /// `.raw` or Bruker `.d`; not with MGF or `--glyco`).
     #[arg(long = "quant-dir", value_name = "DIR")]
     pub(crate) quant_dir: Option<PathBuf>,
 

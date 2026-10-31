@@ -305,6 +305,7 @@ impl ThermoRawReader {
                             peaks: peaks.clone(),
                             id: raw.native_id(),
                             faims_cv: faims_cv(&raw),
+                            mobility: Vec::new(),
                         });
                     }
                     ms1_peaks.push(peaks);
@@ -332,6 +333,7 @@ impl ThermoRawReader {
                             scan_window: scan_window(&raw),
                             faims_cv: faims_cv(&raw),
                             noise: self.noise_of(i),
+                            ion_mobility: None,
                         });
                     }
                     chunk.push(spec);
@@ -736,6 +738,7 @@ impl Iterator for ThermoRawReader {
                     peaks: extract_peaks(&raw),
                     id: raw.native_id(),
                     faims_cv: faims_cv(&raw),
+                    mobility: Vec::new(),
                 });
             }
             if level >= 3 && self.capture_product_scans {
@@ -778,6 +781,7 @@ impl Iterator for ThermoRawReader {
                             scan_window: scan_window(&raw),
                             faims_cv: faims_cv(&raw),
                             noise: self.noise_of(i),
+                            ion_mobility: None,
                         });
                     }
                     return Some(Ok(spec));

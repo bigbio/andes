@@ -37,9 +37,9 @@ use timsrust::MSLevel;
 use model::scan::{Ms1Scan, ScanContext};
 
 use crate::timstof_ms1::{
-    centroid_profile, fit_calibration, match_precursors, mode_offset_ppm, sum_over_mobility,
-    CalibrationFit, FrameConditions, MzCalibration, MIN_REFINE_WINDOW_PPM, NARROW_WINDOW_PPM,
-    REFINE_ROUNDS, REFINE_SIGMAS, WIDE_WINDOW_PPM,
+    centroid_frame, centroid_profile, fit_calibration, match_precursors, mode_offset_ppm,
+    sum_over_mobility, CalibrationFit, FrameConditions, MobilityCentroid, MzCalibration,
+    MIN_REFINE_WINDOW_PPM, NARROW_WINDOW_PPM, REFINE_ROUNDS, REFINE_SIGMAS, WIDE_WINDOW_PPM,
 };
 use crate::{Ms1Link, Spectrum};
 
@@ -123,10 +123,24 @@ struct Ms1Frames {
     /// Frame id → `(T1, T2)` temperatures.
     temperatures: HashMap<usize, [f64; 2]>,
     calibration: MzCalibration,
+    /// Mobility scan index → 1/K0.
+    im: timsrust::converters::Scan2ImConverter,
+    /// Resolve each frame's centroids by ion mobility (see
+    /// [`TimsTofReader::with_ms1_mobility`]).
+    resolve: bool,
     /// Next entry of `positions` to decode.
     cursor: usize,
-    /// Decoded frames not yet handed out: frame id and scan.
-    ready: VecDeque<(usize, Ms1Scan)>,
+    /// Decoded frames not yet handed out.
+    ready: VecDeque<DecodedMs1>,
+}
+
+/// One decoded MS1 frame: its frame id, the scan quantification captures
+/// and, for a mobility-resolved scan, the frame's centroids summed over
+/// mobility (what the MS1-linked search paths read).
+struct DecodedMs1 {
+    id: usize,
+    scan: Ms1Scan,
+    summed: Option<Vec<(f64, f32)>>,
 }
 
 /// The `Frames` temperatures and the vendor precursor peaks of a `.d`.
@@ -206,8 +220,39 @@ fn to_peaks(
     peaks
 }
 
+/// Mobility-resolved centroids converted to `(m/z, intensity)` and 1/K0,
+/// m/z ascending.
+fn to_resolved_peaks(
+    centroids: &[MobilityCentroid],
+    calibration: &MzCalibration,
+    im: &timsrust::converters::Scan2ImConverter,
+    frame: FrameConditions,
+) -> (Vec<(f64, f32)>, Vec<f32>) {
+    let mut rows: Vec<(f64, f32, f32)> = centroids
+        .iter()
+        .map(|c| {
+            let cond = crate::timstof_ms1::conditions(frame, c.intensity);
+            (
+                calibration.mz(c.tof, cond),
+                c.intensity as f32,
+                im.convert(c.scan) as f32,
+            )
+        })
+        .filter(|&(mz, i, k0)| {
+            mz.is_finite() && mz > 0.0 && i.is_finite() && i > 0.0 && k0.is_finite()
+        })
+        .collect();
+    if rows.windows(2).any(|w| w[0].0 > w[1].0) {
+        rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+    }
+    (
+        rows.iter().map(|r| (r.0, r.1)).collect(),
+        rows.iter().map(|r| r.2).collect(),
+    )
+}
+
 impl Ms1Frames {
-    fn open(dir: &Path) -> Result<Self, TimsTofParseError> {
+    fn open(dir: &Path, resolve: bool) -> Result<Self, TimsTofParseError> {
         let frames_err = |source| TimsTofParseError::Frames {
             path: dir.display().to_string(),
             source: Box::new(source),
@@ -241,6 +286,8 @@ impl Ms1Frames {
             ids,
             temperatures: tables.temperatures,
             calibration: base.clone(),
+            im: metadata.im_converter,
+            resolve,
             cursor: 0,
             ready: VecDeque::new(),
         };
@@ -330,21 +377,30 @@ impl Ms1Frames {
             .map(|k| (self.positions[k], self.ids[k]))
             .collect();
         self.cursor = end;
-        let decoded: Vec<(usize, Ms1Scan)> = batch
+        let decoded: Vec<DecodedMs1> = batch
             .par_iter()
             .map(|&(pos, id)| {
-                let (rt, peaks) = match self.frames.get(pos) {
-                    Ok(frame) => (
-                        frame.rt_in_seconds,
-                        to_peaks(
-                            &frame_centroids(&frame),
-                            &self.calibration,
-                            FrameConditions {
-                                t: self.temperature(id),
-                                rt_s: frame.rt_in_seconds,
-                            },
-                        ),
-                    ),
+                let (rt, peaks, mobility, summed) = match self.frames.get(pos) {
+                    Ok(frame) => {
+                        let cond = FrameConditions {
+                            t: self.temperature(id),
+                            rt_s: frame.rt_in_seconds,
+                        };
+                        let (summed, resolved) = centroid_frame(
+                            &frame.scan_offsets,
+                            &frame.tof_indices,
+                            &frame.intensities,
+                            self.resolve,
+                        );
+                        let summed = to_peaks(&summed, &self.calibration, cond);
+                        if self.resolve {
+                            let (peaks, mobility) =
+                                to_resolved_peaks(&resolved, &self.calibration, &self.im, cond);
+                            (frame.rt_in_seconds, peaks, mobility, Some(summed))
+                        } else {
+                            (frame.rt_in_seconds, summed, Vec::new(), None)
+                        }
+                    }
                     // A frame that cannot be decoded is kept as an empty scan
                     // so the survey series keeps its time points.
                     Err(_) => (
@@ -353,32 +409,35 @@ impl Ms1Frames {
                             .map(|f| f.rt_in_seconds)
                             .unwrap_or(f64::NAN),
                         Vec::new(),
+                        Vec::new(),
+                        self.resolve.then(Vec::new),
                     ),
                 };
-                (
+                DecodedMs1 {
                     id,
-                    Ms1Scan {
+                    scan: Ms1Scan {
                         rt,
                         peaks,
                         id: ms1_native_id(id),
                         faims_cv: None,
+                        mobility,
                     },
-                )
+                    summed,
+                }
             })
             .collect();
         self.ready.extend(decoded);
     }
 
     /// Hand the decoded MS1 frames with an id up to `frame_id` (all remaining
-    /// frames for `None`) to `sink` with their frame id, in file order.
-    fn take_up_to(&mut self, frame_id: Option<usize>, mut sink: impl FnMut(usize, Ms1Scan)) {
+    /// frames for `None`) to `sink`, in file order.
+    fn take_up_to(&mut self, frame_id: Option<usize>, mut sink: impl FnMut(DecodedMs1)) {
         loop {
-            while let Some((id, _)) = self.ready.front() {
-                if frame_id.is_some_and(|limit| *id > limit) {
+            while let Some(d) = self.ready.front() {
+                if frame_id.is_some_and(|limit| d.id > limit) {
                     return;
                 }
-                let (id, scan) = self.ready.pop_front().expect("front exists");
-                sink(id, scan);
+                sink(self.ready.pop_front().expect("front exists"));
             }
             if self.cursor >= self.positions.len() {
                 return;
@@ -416,6 +475,8 @@ pub struct TimsTofReader {
     scan_contexts: Vec<ScanContext>,
     /// Opened on the first MS1 request.
     ms1: Option<Ms1Frames>,
+    /// Captured MS1 scans are resolved by ion mobility.
+    ms1_mobility: bool,
 }
 
 impl TimsTofReader {
@@ -448,6 +509,7 @@ impl TimsTofReader {
             capture_scan_context: false,
             scan_contexts: Vec::new(),
             ms1: None,
+            ms1_mobility: false,
         })
     }
 
@@ -456,6 +518,16 @@ impl TimsTofReader {
     /// [`Self::take_run_ms1`] once the stream is exhausted.
     pub fn with_run_ms1_capture(mut self, capture: bool) -> Self {
         self.capture_run_ms1 = capture;
+        self
+    }
+
+    /// Resolve the captured MS1 scans by ion mobility: each centroid summed
+    /// over mobility is split into its ion-mobility components, each with its
+    /// 1/K0 ([`Ms1Scan::mobility`]); see [`crate::timstof_ms1`]. The
+    /// MS1-linked search paths keep reading the centroids summed over
+    /// mobility.
+    pub fn with_ms1_mobility(mut self, resolve: bool) -> Self {
+        self.ms1_mobility = resolve;
         self
     }
 
@@ -486,7 +558,10 @@ impl TimsTofReader {
 
     fn ms1_frames(&mut self) -> Result<&mut Ms1Frames, TimsTofParseError> {
         if self.ms1.is_none() {
-            self.ms1 = Some(Ms1Frames::open(&self.dir)?);
+            self.ms1 = Some(Ms1Frames::open(
+                &self.dir,
+                self.ms1_mobility && self.capture_run_ms1,
+            )?);
         }
         Ok(self.ms1.as_mut().expect("just opened"))
     }
@@ -578,23 +653,28 @@ impl TimsTofReader {
                 let keep = self.capture_run_ms1;
                 let run_ms1 = &mut self.run_ms1;
                 let ms1 = self.ms1.as_mut().expect("opened above");
-                ms1.take_up_to(Some(p), |id, scan| {
-                    let peaks = if keep {
-                        let peaks = scan.peaks.clone();
-                        run_ms1.push(scan);
-                        peaks
-                    } else {
-                        scan.peaks
+                ms1.take_up_to(Some(p), |d| {
+                    let peaks = match (keep, d.summed) {
+                        (true, Some(summed)) => {
+                            run_ms1.push(d.scan);
+                            summed
+                        }
+                        (true, None) => {
+                            let peaks = d.scan.peaks.clone();
+                            run_ms1.push(d.scan);
+                            peaks
+                        }
+                        (false, summed) => summed.unwrap_or(d.scan.peaks),
                     };
                     // A frame no MS2 linked to is replaced, not kept.
                     match current {
                         Some((_, idx)) if !current_linked => {
                             ms1_peaks[idx] = peaks;
-                            current = Some((id, idx));
+                            current = Some((d.id, idx));
                         }
                         _ => {
                             ms1_peaks.push(peaks);
-                            current = Some((id, ms1_peaks.len() - 1));
+                            current = Some((d.id, ms1_peaks.len() - 1));
                         }
                     }
                     current_linked = false;
@@ -644,7 +724,7 @@ impl TimsTofReader {
     fn flush_ms1(&mut self) {
         let run_ms1 = &mut self.run_ms1;
         if let Some(ms1) = self.ms1.as_mut() {
-            ms1.take_up_to(None, |_, scan| run_ms1.push(scan));
+            ms1.take_up_to(None, |d| run_ms1.push(d.scan));
         }
     }
 
@@ -775,7 +855,7 @@ impl Iterator for TimsTofReader {
                     if let Some(p) = parent {
                         let run_ms1 = &mut self.run_ms1;
                         let ms1 = self.ms1.as_mut().expect("opened above");
-                        ms1.take_up_to(Some(p), |_, scan| run_ms1.push(scan));
+                        ms1.take_up_to(Some(p), |d| run_ms1.push(d.scan));
                     }
                 }
                 self.record_context(&spec, parent, im);

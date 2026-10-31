@@ -20,6 +20,12 @@ pub struct Ms1Scan {
     /// scans at different voltages sample different ion populations and are
     /// not one chromatographic series.
     pub faims_cv: Option<f32>,
+    /// Inverse reduced ion mobility (1/K0, V·s/cm²) of each centroid, parallel
+    /// to `peaks`, when the source resolves the survey scan by ion mobility
+    /// (Bruker timsTOF `.d` read with mobility-resolved MS1); empty otherwise.
+    /// A mobility-resolved scan may hold several centroids at one m/z: the
+    /// ion-mobility components of one time-of-flight peak.
+    pub mobility: Vec<f32>,
 }
 
 /// An MS3 (or higher) product scan kept for reporter-ion quantification.

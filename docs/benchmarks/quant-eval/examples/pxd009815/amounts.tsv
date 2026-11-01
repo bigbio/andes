@@ -1,0 +1,3 @@
+species	condition	amount
+UPS	*	=condition
+YEAST	*	1

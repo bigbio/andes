@@ -46,9 +46,6 @@ fn train_writes_model_and_search_uses_it() {
         // train-fdr is needed than the old SpecEValue path required.
         .arg("--train-fdr")
         .arg("0.9")
-        // The fixture yields confident labels with one missed cleavage at most.
-        .arg("--max-missed-cleavages")
-        .arg("1")
         .arg("--model-id")
         .arg("bsa_test")
         .status()
@@ -149,9 +146,6 @@ fn train_from_several_runs_records_one_source_per_run() {
         .arg(&store_path)
         .arg("--train-fdr")
         .arg("0.9")
-        // The fixture yields confident labels with one missed cleavage at most.
-        .arg("--max-missed-cleavages")
-        .arg("1")
         .arg("--fragment-tol-da")
         .arg("0.5")
         .arg("--instrument")

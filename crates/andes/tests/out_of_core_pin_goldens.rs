@@ -395,6 +395,8 @@ fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
         // The goldens pin the search's own columns; predicted features are
         // covered by their own tests.
         .args(["--predict", "none"])
+        // The goldens were recorded with one missed cleavage at most.
+        .args(["--max-missed-cleavages", "1"])
         .arg("--output-pin")
         .arg(out)
         .output()

@@ -384,7 +384,7 @@ documentation (`ProteoBenchFASTA_MixedSpecies_HYE.fasta`, 31,889 entries).
 - *Astral:* `LFQ_Astral_DDA_15min_50ng_Condition_{A,B}_REP{1,2,3}.raw` of PXD070049 (about 15 GB).
 
 The measured runs read mzML peak-picked from these files. `R` is each run's stem. Every flag not
-shown is the andes default (20 ppm precursor tolerance, one missed cleavage, Carbamidomethyl C
+shown is the andes default (20 ppm precursor tolerance, `--max-missed-cleavages 1`, Carbamidomethyl C
 fixed, Oxidation M and protein N-terminal Acetyl variable, `--predict rt`).
 
 ```bash

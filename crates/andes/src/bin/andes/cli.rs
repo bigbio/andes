@@ -368,7 +368,7 @@ pub(crate) struct SearchArgs {
     /// Maximum number of missed cleavages per peptide. Not applied to a
     /// non-specific digest (`--enzyme nonspecific` or `--enzyme-specificity
     /// non-specific`), where every position is a cleavage site.
-    #[arg(long, hide = true, default_value = "1")]
+    #[arg(long, hide = true, default_value = "2")]
     pub(crate) max_missed_cleavages: u32,
 
     /// Minimum number of peaks an MS2 spectrum must have to be scored; spectra

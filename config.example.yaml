@@ -28,7 +28,7 @@ search:
   isotope_error: "-1..2"
   enzyme: trypsin                # trypsin | lysc | gluc | ... | nonspecific | gluc,trypsin
   enzyme_specificity: fully      # fully | semi | non-specific
-  max_missed_cleavages: 1
+  max_missed_cleavages: 2
   min_length: 6
   max_length: 50
   mods: mods.txt                 # Java-format mods.txt (TMT/iTRAQ/phospho/etc.)

@@ -75,9 +75,9 @@ use crate::quant_mbr::{
     ShapeReference, NO_SHAPE, TRANSFER_DONOR_Q,
 };
 use crate::transfer_fdr::{
-    member_seed, row_unit, sample_hash, train_bagged_folds, train_folds, transfer_train_params,
-    Estimate, FdrCounts, FdrRow, FoldModels, FoldScores, QValues, TrainingSample, IDENTITY,
-    N_FOLDS, TRANSFER_FEATURES,
+    member_seed, pack_family, row_unit, sample_hash, stratum_of, train_bagged_folds, train_folds,
+    transfer_strata, transfer_train_params, Estimate, FdrCounts, FdrRow, FoldModels, FoldScores,
+    QValues, TrainingSample, IDENTITY, TRANSFER_FEATURES,
 };
 
 /// What one finalize did, for the caller to log.
@@ -559,6 +559,10 @@ pub(crate) enum Table {
     Pseudo,
 }
 
+/// Most similar runs whose identifications make a precursor's presence
+/// prior ([`EntryIndex::presence_prior`]), at most [`NEIGHBOUR_RUNS`].
+pub(crate) const PRIOR_NEIGHBOURS: usize = 20;
+
 /// Runs compared with a transfer's run for the `neighbour_donor_rate`
 /// feature: its most similar runs, at most this many.
 pub(crate) const NEIGHBOUR_RUNS: usize = 50;
@@ -585,6 +589,40 @@ impl<'a> EntryIndex<'a> {
         Self {
             entry_of,
             neighbours: run_neighbours(lib, runs, NEIGHBOUR_RUNS),
+        }
+    }
+
+    /// The prior that the row's precursor is present in its run: the share
+    /// of the run's [`PRIOR_NEIGHBOURS`] most similar runs that identified
+    /// it. 0 without an entry or neighbours; the row's own run is never a
+    /// neighbour. A precursor identified nowhere near this run has a prior of
+    /// 0, however often it was identified in runs unlike it.
+    pub(crate) fn presence_prior(&self, r: &ExtractRow) -> f64 {
+        let (Some(Some(e)), Some(nn)) = (
+            self.entry_of.get(r.precursor as usize),
+            self.neighbours.get(r.run as usize),
+        ) else {
+            return 0.0;
+        };
+        let nn = &nn[..nn.len().min(PRIOR_NEIGHBOURS)];
+        if nn.is_empty() {
+            return 0.0;
+        }
+        let hits = nn
+            .iter()
+            .filter(|n| e.donors.binary_search(n).is_ok())
+            .count();
+        hits as f64 / nn.len() as f64
+    }
+
+    /// `family` of a row of table `t` with its prior stratum
+    /// ([`pack_family`]); the stratum is 0 outside the transfer tables.
+    pub(crate) fn packed(&self, r: &ExtractRow, t: Table, family: u8) -> u8 {
+        match t {
+            Table::Transfer | Table::Pseudo => {
+                pack_family(family, stratum_of(self.presence_prior(r)))
+            }
+            Table::Identified => family,
         }
     }
 
@@ -747,7 +785,7 @@ pub(crate) fn for_each_scored(
         }
         for ((i, t, fam, x), s) in feats.iter().zip(scores) {
             if x.is_some() {
-                f(base + i, *t, *fam, s);
+                f(base + i, *t, idx.packed(&chunk[*i], *t, *fam), s);
             }
         }
     }
@@ -936,18 +974,18 @@ struct ScoreStore<'d> {
     dir: &'d Path,
     cap: usize,
     scores: Mutex<FoldScores>,
-    /// Per spill, per fold, the table of each family.
+    /// Per spill, per group (fold and stratum), the table of each family.
     spills: Mutex<Vec<Vec<[PathBuf; 4]>>>,
     next: AtomicUsize,
 }
 
 impl<'d> ScoreStore<'d> {
-    fn new(name: &'static str, dir: &'d Path, cap: usize, seed: u64) -> Self {
+    fn new(name: &'static str, dir: &'d Path, cap: usize, seed: u64, strata: usize) -> Self {
         Self {
             name,
             dir,
             cap,
-            scores: Mutex::new(FoldScores::new(seed)),
+            scores: Mutex::new(FoldScores::with_strata(seed, strata)),
             spills: Mutex::new(Vec::new()),
             next: AtomicUsize::new(0),
         }
@@ -962,7 +1000,7 @@ impl<'d> ScoreStore<'d> {
         };
         let Some(held) = held else { return Ok(()) };
         let k = self.next.fetch_add(1, Ordering::Relaxed);
-        let mut paths = Vec::with_capacity(N_FOLDS);
+        let mut paths = Vec::with_capacity(held.len());
         for (fold, by_family) in held.into_iter().enumerate() {
             let mut fold_paths: [PathBuf; 4] = Default::default();
             for (f, mut v) in by_family.into_iter().enumerate() {
@@ -1734,13 +1772,20 @@ pub(crate) fn finalize_stream(
     let t0 = Instant::now();
     let w_stride = (w_seen.into_inner() / WRONG_CALIBRATION_ROWS + 1) as u64;
     let w_held: Mutex<Vec<(f32, bool)>> = Mutex::new(Vec::new());
-    let t_store = ScoreStore::new("transfer", dir, limits.max_held_scores, seed);
-    let i_store = ScoreStore::new("identified", dir, limits.max_held_scores, seed);
+    let strata = transfer_strata();
+    let t_store = ScoreStore::new("transfer", dir, limits.max_held_scores, seed, strata);
+    let i_store = ScoreStore::new("identified", dir, limits.max_held_scores, seed, 1);
     for_each_block(
         source,
         false,
         bounds,
-        |_| (FoldScores::new(seed), FoldScores::new(seed), Vec::new()),
+        |_| {
+            (
+                FoldScores::with_strata(seed, strata),
+                FoldScores::new(seed),
+                Vec::new(),
+            )
+        },
         |(ts, is, cache), _, _, rows| {
             let ctx = BlockContext::new(rows, maps)?;
             let shapes = BlockShapes {
@@ -1964,6 +2009,7 @@ pub(crate) fn finalize_stream(
                     format!("{}: fewer cached scores than rows", source.name(chunk))
                 })?;
                 *at += 1;
+                let fam = idx.packed(r, t, fam);
                 if s.is_finite() {
                     scored[i] = Some((fam, Some(s)));
                 } else if t == Table::Identified && s == NO_SCORE {
@@ -2103,7 +2149,7 @@ pub(crate) fn finalize_stream(
                         (t, q, q)
                     }
                     Role::PseudoTransfer => {
-                        let q = scored[i].and_then(|(_, s)| fdr.pseudo_q(r.precursor, s));
+                        let q = scored[i].and_then(|(fam, s)| fdr.pseudo_q(r.precursor, fam, s));
                         v.pseudo_transfers += 1;
                         if let Some(m) = &r.ms2 {
                             v.ms2_pseudo_rows += 1;
@@ -2555,12 +2601,19 @@ mod tests {
 
     #[test]
     fn spilled_scores_give_the_in_memory_q_values() {
+        spilled_scores_match(1);
+        spilled_scores_match(3);
+    }
+
+    /// Spilled and in-memory scores give one set of q-values, with `strata`
+    /// prior strata.
+    fn spilled_scores_match(strata: usize) {
         let dir = tempfile::tempdir().unwrap();
         let mut g = Lcg(17);
         let rows: Vec<(u32, u8, Option<f32>)> = (0..5000u32)
             .map(|i| {
-                let fam = (g.below(4)) as u8;
-                let s = (g.below(41) as f32 - 20.0) / 4.0 + if fam == 0 { 1.0 } else { 0.0 };
+                let fam = g.below(4) as u8 | ((g.below(strata as u64) as u8) << 4);
+                let s = (g.below(41) as f32 - 20.0) / 4.0 + if fam & 0x0F == 0 { 1.0 } else { 0.0 };
                 (
                     i % 700,
                     fam,
@@ -2568,13 +2621,13 @@ mod tests {
                 )
             })
             .collect();
-        let mut one = FoldScores::new(5);
+        let mut one = FoldScores::with_strata(5, strata);
         for &(p, f, s) in &rows {
             one.add(p, f, s);
         }
-        let store = ScoreStore::new("t", dir.path(), 300, 5);
+        let store = ScoreStore::new("t", dir.path(), 300, 5, strata);
         for piece in rows.chunks(211) {
-            let mut s = FoldScores::new(5);
+            let mut s = FoldScores::with_strata(5, strata);
             for &(p, f, sc) in piece {
                 s.add(p, f, sc);
             }
@@ -2599,8 +2652,8 @@ mod tests {
                 b.q(Estimate::Pooled, p, f, s).map(f64::to_bits)
             );
             assert_eq!(
-                a.pseudo_q(p, s).map(f64::to_bits),
-                b.pseudo_q(p, s).map(f64::to_bits)
+                a.pseudo_q(p, f, s).map(f64::to_bits),
+                b.pseudo_q(p, f, s).map(f64::to_bits)
             );
         }
         let left = std::fs::read_dir(dir.path()).unwrap().count();

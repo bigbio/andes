@@ -57,6 +57,22 @@
 //! decoy counts for more targets, rather than the missing decoys being counted
 //! as absent false hits; this errs on the conservative side.
 //!
+//! Prior strata: a transfer row also belongs to one of [`STRATA`] strata of
+//! the prior that its precursor is present in its run (how often the runs
+//! most like this one identified it; computed by the caller). A target and its decoys share their
+//! (precursor, run) and so their stratum, which makes the decoys of a stratum
+//! its own null: the pooled estimate cannot know that a precursor identified
+//! nowhere else is far more likely absent than one identified in most runs.
+//! The pooled q-value of a stratified classifier is then the stratum-local
+//! K-decoy estimate with [`STRATUM_PRIOR_TARGETS`] pseudo-targets at the
+//! fold's pooled q-value of the same score,
+//! `FDR_s(c) = ((D_s(c) + 1) / K + D_id,s(c) + k q_fold(c)) / (T_s(c) + k)`
+//! (`k` = [`STRATUM_PRIOR_TARGETS`], `K` the fold's decoy-to-target ratio),
+//! again as the running minimum from the lowest score up: a stratum with few
+//! rows takes the pooled estimate, one with many its own. The other
+//! estimates stay pooled over the strata. The stratum travels in the high
+//! nibble of the family byte ([`pack_family`]).
+//!
 //! A row gets no score when its fold's training set is single-class or fails
 //! the trainer's quality gate, and no q-value when it has no score or its fold
 //! (restricted to the estimate's families) lacks targets or decoys.
@@ -107,6 +123,37 @@ pub const IDENTIFIED_FEATURES: &[&str] = &[
     "n_isotopes_used",
     "log10_amplitude_snr",
 ];
+
+/// Prior strata of the transfer classifier's pooled q-values.
+pub const STRATA: usize = 5;
+/// Pseudo-targets at the fold's pooled q-value in each stratum's estimate.
+pub const STRATUM_PRIOR_TARGETS: f64 = 200.0;
+/// Edges of the prior strata: a prior of 0 is stratum 0, one in
+/// `(EDGES[i-1], EDGES[i]]` stratum `i`, above the last edge the last stratum.
+pub const STRATUM_EDGES: [f64; STRATA - 1] = [0.0, 0.05, 0.2, 0.5];
+
+/// The strata of the transfer classifier's q-values.
+pub const fn transfer_strata() -> usize {
+    STRATA
+}
+
+/// The stratum of a prior of presence in `[0, 1]`; 0 when it is not finite.
+pub fn stratum_of(prior: f64) -> u8 {
+    if !prior.is_finite() {
+        return 0;
+    }
+    STRATUM_EDGES.iter().filter(|&&e| prior > e).count() as u8
+}
+
+/// A family with its stratum in the high nibble.
+pub const fn pack_family(family: u8, stratum: u8) -> u8 {
+    (family & 0x0F) | (stratum << 4)
+}
+
+/// The family and the stratum of a packed family.
+pub const fn unpack_family(packed: u8) -> (u8, usize) {
+    (packed & 0x0F, (packed >> 4) as usize)
+}
 
 /// [`FdrRow::family`] of a target.
 pub const TARGET: u8 = 0;
@@ -548,8 +595,10 @@ impl Steps {
 /// functions only need each fold's scores in ascending order.
 pub struct FoldScores {
     seed: u64,
+    strata: usize,
+    /// Per group (`fold * strata + stratum`) and family.
     scores: Vec<[Vec<f32>; 4]>,
-    /// Rows with a finite score, per fold and family, held or taken out.
+    /// Rows with a finite score, per group and family, held or taken out.
     counts: Vec<[usize; 4]>,
     members: Vec<usize>,
     unscored: usize,
@@ -557,27 +606,36 @@ pub struct FoldScores {
 
 impl FoldScores {
     pub fn new(seed: u64) -> Self {
+        Self::with_strata(seed, 1)
+    }
+
+    /// Scores kept per prior stratum (`strata` of them, at least 1).
+    pub fn with_strata(seed: u64, strata: usize) -> Self {
+        let groups = N_FOLDS * strata.max(1);
         Self {
             seed,
-            scores: (0..N_FOLDS).map(|_| Default::default()).collect(),
-            counts: vec![[0; 4]; N_FOLDS],
-            members: vec![0; N_FOLDS],
+            strata: strata.max(1),
+            scores: (0..groups).map(|_| Default::default()).collect(),
+            counts: vec![[0; 4]; groups],
+            members: vec![0; groups],
             unscored: 0,
         }
     }
 
-    /// One row of `precursor` and `family` with its held-out score (`None`
-    /// when its fold has no model).
+    /// One row of `precursor` and `family` (packed with its stratum, see
+    /// [`pack_family`]) with its held-out score (`None` when its fold has no
+    /// model).
     pub fn add(&mut self, precursor: u32, family: u8, score: Option<f32>) {
-        let fold = fold_of(precursor, self.seed);
+        let (family, stratum) = unpack_family(family);
+        let group = fold_of(precursor, self.seed) * self.strata + stratum.min(self.strata - 1);
         match score {
             None => self.unscored += 1,
             Some(s) => {
-                self.members[fold] += 1;
+                self.members[group] += 1;
                 if s.is_finite() {
                     let f = family.min(3) as usize;
-                    self.scores[fold][f].push(canonical(s));
-                    self.counts[fold][f] += 1;
+                    self.scores[group][f].push(canonical(s));
+                    self.counts[group][f] += 1;
                 }
             }
         }
@@ -589,6 +647,7 @@ impl FoldScores {
     /// When `other` has another seed.
     pub fn merge(&mut self, other: FoldScores) {
         assert_eq!(self.seed, other.seed, "fold scores of different seeds");
+        assert_eq!(self.strata, other.strata, "fold scores of different strata");
         for (fold, by_family) in other.scores.into_iter().enumerate() {
             for (f, v) in by_family.into_iter().enumerate() {
                 let mine = &mut self.scores[fold][f];
@@ -634,23 +693,35 @@ impl FoldScores {
     /// [`QValues::accepts`] at those thresholds exactly (about a quarter of
     /// the memory).
     pub fn finish_with<'a>(
-        self,
+        mut self,
         failed_folds: &[String],
         thresholds: Option<&[f64]>,
         mut taken: impl FnMut(usize, usize) -> Vec<Box<dyn Iterator<Item = f32> + 'a>>,
     ) -> QValues {
+        let strata = self.strata;
         let mut steps: Vec<[Option<Steps>; 4]> = Vec::with_capacity(N_FOLDS);
+        let mut stratum_steps: Vec<Vec<Option<Steps>>> = Vec::new();
         let mut no_q = 0usize;
-        for (fold, by_family) in self.scores.into_iter().enumerate() {
-            let mut k = 0usize;
-            let streams: [SortedMerge<'a>; 4] = by_family.map(|mut v| {
-                v.sort_unstable_by(f32::total_cmp);
-                let mut runs = taken(fold, k);
-                k += 1;
-                runs.push(Box::new(v.into_iter()));
+        for v in self.scores.iter_mut().flatten() {
+            v.sort_unstable_by(f32::total_cmp);
+        }
+        for fold in 0..N_FOLDS {
+            let groups = fold * strata..(fold + 1) * strata;
+            let mut totals = [0usize; 4];
+            for g in groups.clone() {
+                for (t, c) in totals.iter_mut().zip(self.counts[g]) {
+                    *t += c;
+                }
+            }
+            // The fold's rows of all its strata, as one set.
+            let streams: [SortedMerge<'_>; 4] = std::array::from_fn(|f| {
+                let mut runs: Vec<Box<dyn Iterator<Item = f32> + '_>> = Vec::new();
+                for g in groups.clone() {
+                    runs.extend(taken(g, f));
+                    runs.push(Box::new(self.scores[g][f].iter().copied()));
+                }
                 SortedMerge::new(runs)
             });
-            let totals = self.counts[fold];
             let mut builder = StepsBuilder::new(totals, thresholds);
             walk_scores(streams, |c, at| builder.visit(c, at));
             let fold_steps = builder.finish();
@@ -659,12 +730,38 @@ impl FoldScores {
             } else {
                 0
             };
-            no_q += self.members[fold] - with_q;
+            no_q += groups.clone().map(|g| self.members[g]).sum::<usize>() - with_q;
+            if strata > 1 {
+                let mut per_stratum: Vec<Option<Steps>> = Vec::with_capacity(strata);
+                for g in groups {
+                    let local = self.counts[g];
+                    let walk = fold_steps[Estimate::Pooled as usize]
+                        .as_ref()
+                        .filter(|_| local[TARGET as usize] > 0);
+                    let Some(global) = walk else {
+                        per_stratum.push(None);
+                        continue;
+                    };
+                    let k = (totals[MASS_SHIFT as usize] + totals[RT_SHIFT as usize]).max(1) as f64
+                        / totals[TARGET as usize].max(1) as f64;
+                    let mut w = StratumWalk::new(k, local, global);
+                    let streams: [SortedMerge<'_>; 4] = std::array::from_fn(|f| {
+                        let mut runs: Vec<Box<dyn Iterator<Item = f32> + '_>> = taken(g, f);
+                        runs.push(Box::new(self.scores[g][f].iter().copied()));
+                        SortedMerge::new(runs)
+                    });
+                    walk_scores(streams, |c, at| w.visit(c, at));
+                    per_stratum.push(w.finish());
+                }
+                stratum_steps.push(per_stratum);
+            }
             steps.push(fold_steps);
         }
         QValues {
             seed: self.seed,
+            strata,
             steps,
+            stratum_steps,
             whole: ESTIMATES.map(|e| thresholds.is_none() || e == Estimate::Pooled),
             thresholds: thresholds.map(<[f64]>::to_vec).unwrap_or_default(),
             counts: FdrCounts {
@@ -673,6 +770,60 @@ impl FoldScores {
                 no_q,
             },
         }
+    }
+}
+
+/// The walk up one stratum's scores that gives its pooled step function
+/// (see the module's prior strata).
+struct StratumWalk<'g> {
+    k: f64,
+    /// Targets, wrong-peak decoys and identity decoys of the stratum at or
+    /// above the current score.
+    t: usize,
+    d: usize,
+    d_id: usize,
+    global: &'g Steps,
+    running: f64,
+    steps: Steps,
+}
+
+impl<'g> StratumWalk<'g> {
+    /// `k` is the fold's decoy-to-target ratio, `local` the stratum's finite
+    /// scores per family, `global` the fold's pooled step function.
+    fn new(k: f64, local: [usize; 4], global: &'g Steps) -> Self {
+        Self {
+            k,
+            t: local[TARGET as usize],
+            d: local[MASS_SHIFT as usize] + local[RT_SHIFT as usize],
+            d_id: local[IDENTITY as usize],
+            global,
+            running: 1.0,
+            steps: Steps::default(),
+        }
+    }
+
+    fn visit(&mut self, c: f32, at: [usize; 4]) {
+        if at.iter().all(|&n| n == 0) {
+            return;
+        }
+        let kappa = STRATUM_PRIOR_TARGETS;
+        let local =
+            ((self.d + 1) as f64 / self.k + self.d_id as f64 + kappa * self.global.at_or_below(c))
+                / (self.t as f64 + kappa).max(1.0);
+        let v = local.min(1.0);
+        if v < self.running || self.steps.at.is_empty() {
+            self.running = self.running.min(v);
+            self.steps.at.push(c);
+            self.steps.q.push(self.running);
+        }
+        self.t -= at[TARGET as usize];
+        self.d -= at[MASS_SHIFT as usize] + at[RT_SHIFT as usize];
+        self.d_id -= at[IDENTITY as usize];
+    }
+
+    /// The step function; `None` when the stratum has no score.
+    fn finish(self) -> Option<Steps> {
+        (!self.steps.at.is_empty()).then_some(self.steps)
     }
 }
 
@@ -840,7 +991,11 @@ fn kdecoy_steps(by_family: &[Vec<f32>; 4], e: Estimate) -> Option<Steps> {
 /// function of the held-out score.
 pub struct QValues {
     seed: u64,
+    strata: usize,
     steps: Vec<[Option<Steps>; 4]>,
+    /// Per fold and stratum, the pooled step function of the stratum; empty
+    /// without strata.
+    stratum_steps: Vec<Vec<Option<Steps>>>,
     /// Per [`Estimate`], whether its step functions are whole (else they
     /// answer [`QValues::accepts`] at `thresholds` only).
     whole: [bool; 4],
@@ -906,11 +1061,26 @@ impl QValues {
 
     fn step_q(&self, e: Estimate, precursor: u32, family: u8, score: Option<f32>) -> Option<f64> {
         let s = score.filter(|s| s.is_finite())?;
+        let (family, stratum) = unpack_family(family);
         if !e.keeps(family) {
             return None;
         }
-        let steps = self.steps[fold_of(precursor, self.seed)][e as usize].as_ref()?;
+        let fold = fold_of(precursor, self.seed);
+        if e == Estimate::Pooled {
+            if let Some(Some(steps)) = self.stratum_steps_of(fold, stratum) {
+                return Some(steps.of_member(canonical(s)));
+            }
+        }
+        let steps = self.steps[fold][e as usize].as_ref()?;
         Some(steps.of_member(s))
+    }
+
+    /// The pooled step function of a stratum of `fold`, if the classifier is
+    /// stratified.
+    fn stratum_steps_of(&self, fold: usize, stratum: usize) -> Option<&Option<Steps>> {
+        self.stratum_steps
+            .get(fold)
+            .and_then(|v| v.get(stratum.min(self.strata - 1)))
     }
 
     /// The pooled q of a row outside the fit (a pseudo-transfer) scoring
@@ -918,10 +1088,13 @@ impl QValues {
     /// highest score at or below it, or of the fold's lowest row when it
     /// scores below all of them. `None` without a score or without q-values
     /// in the fold.
-    pub fn pseudo_q(&self, precursor: u32, score: Option<f32>) -> Option<f64> {
+    pub fn pseudo_q(&self, precursor: u32, family: u8, score: Option<f32>) -> Option<f64> {
         let s = score?;
-        let steps =
-            self.steps[fold_of(precursor, self.seed)][Estimate::Pooled as usize].as_ref()?;
+        let fold = fold_of(precursor, self.seed);
+        if let Some(Some(steps)) = self.stratum_steps_of(fold, unpack_family(family).1) {
+            return Some(steps.at_or_below(s));
+        }
+        let steps = self.steps[fold][Estimate::Pooled as usize].as_ref()?;
         Some(steps.at_or_below(s))
     }
 }
@@ -981,7 +1154,7 @@ impl TransferFdr {
     pub fn pseudo_q(&self, precursor: u32, x: &[f32]) -> Option<f64> {
         let mut s = Vec::new();
         self.models.score(&[precursor], &[x], &mut s);
-        self.q.pseudo_q(precursor, s[0])
+        self.q.pseudo_q(precursor, 0, s[0])
     }
 }
 
@@ -1490,7 +1663,7 @@ mod tests {
                 whole.q(Estimate::Pooled, p, f, s),
                 cut.q(Estimate::Pooled, p, f, s)
             );
-            assert_eq!(whole.pseudo_q(p, s), cut.pseudo_q(p, s));
+            assert_eq!(whole.pseudo_q(p, 0, s), cut.pseudo_q(p, 0, s));
         }
     }
 
@@ -1701,5 +1874,58 @@ mod tests {
             mean(false),
             mean(true)
         );
+    }
+
+    /// Two strata with the same score distribution of targets but a decoy
+    /// rate ten times higher in the second: the pooled estimate cannot tell
+    /// them apart, the stratified one does.
+    fn two_strata_scores(strata: usize) -> FoldScores {
+        let mut g = Normal(77);
+        let mut fs = FoldScores::with_strata(9, strata);
+        for p in 0..30_000u32 {
+            let stratum = (p % 2) as u8;
+            let packed = |family: u8| pack_family(family, stratum);
+            fs.add(p, packed(TARGET), Some(g.draw() + 2.5));
+            // Stratum 0: decoys score like noise; stratum 1: a tenth of
+            // them score like targets.
+            for f in [MASS_SHIFT, RT_SHIFT] {
+                let hit = stratum == 1 && g.unit() < 0.05;
+                fs.add(p, packed(f), Some(g.draw() + if hit { 2.5 } else { 0.0 }));
+            }
+        }
+        fs
+    }
+
+    #[test]
+    fn strata_calibrate_each_stratum_on_its_own_decoys() {
+        let pooled = two_strata_scores(1).finish(&[]);
+        let strat = two_strata_scores(STRATA).finish(&[]);
+        let at = |q: &QValues, stratum: u8, s: f32| {
+            q.q(
+                Estimate::Pooled,
+                (stratum as u32) + 2 * 3,
+                pack_family(TARGET, stratum),
+                Some(s),
+            )
+        };
+        // A precursor id fixes the fold: use ids of each stratum's parity.
+        let (a, b) = (at(&strat, 0, 2.0).unwrap(), at(&strat, 1, 2.0).unwrap());
+        assert!(b > 2.0 * a, "stratum 0 q {a}, stratum 1 q {b}");
+        // The pooled estimate gives both strata one q at a score.
+        let p0 = at(&pooled, 0, 2.0).unwrap();
+        let p1 = at(&pooled, 1, 2.0).unwrap();
+        assert!((p0 - p1).abs() < 0.2 * p0.max(p1) + 1e-9, "{p0} {p1}");
+        assert!(a < p0 && b > p0, "{a} < {p0} < {b}");
+    }
+
+    #[test]
+    fn prior_strata_follow_the_edges() {
+        assert_eq!(stratum_of(0.0), 0);
+        assert_eq!(stratum_of(0.01), 1);
+        assert_eq!(stratum_of(0.05), 1);
+        assert_eq!(stratum_of(0.3), 3);
+        assert_eq!(stratum_of(1.0), 4);
+        assert_eq!(stratum_of(f64::NAN), 0);
+        assert_eq!(unpack_family(pack_family(IDENTITY, 4)), (IDENTITY, 4));
     }
 }

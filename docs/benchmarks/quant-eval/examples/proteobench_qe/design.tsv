@@ -1,7 +1,7 @@
 run	condition
-Condition_A_Sample_1	A
-Condition_A_Sample_2	A
-Condition_A_Sample_3	A
-Condition_B_Sample_1	B
-Condition_B_Sample_2	B
-Condition_B_Sample_3	B
+LFQ_Orbitrap_DDA_Condition_A_Sample_Alpha_01	A
+LFQ_Orbitrap_DDA_Condition_A_Sample_Alpha_02	A
+LFQ_Orbitrap_DDA_Condition_A_Sample_Alpha_03	A
+LFQ_Orbitrap_DDA_Condition_B_Sample_Alpha_01	B
+LFQ_Orbitrap_DDA_Condition_B_Sample_Alpha_02	B
+LFQ_Orbitrap_DDA_Condition_B_Sample_Alpha_03	B

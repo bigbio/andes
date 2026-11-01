@@ -1,7 +1,7 @@
 run	condition
-Condition_A_Sample_1	A
-Condition_A_Sample_2	A
-Condition_A_Sample_3	A
-Condition_B_Sample_1	B
-Condition_B_Sample_2	B
-Condition_B_Sample_3	B
+LFQ_Astral_DDA_15min_50ng_Condition_A_REP1	A
+LFQ_Astral_DDA_15min_50ng_Condition_A_REP2	A
+LFQ_Astral_DDA_15min_50ng_Condition_A_REP3	A
+LFQ_Astral_DDA_15min_50ng_Condition_B_REP1	B
+LFQ_Astral_DDA_15min_50ng_Condition_B_REP2	B
+LFQ_Astral_DDA_15min_50ng_Condition_B_REP3	B

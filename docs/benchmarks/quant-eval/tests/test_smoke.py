@@ -70,6 +70,11 @@ class Smoke(unittest.TestCase):
         p = np.array([0.1, 0.3, 0.5])
         tr = pd.DataFrame({"run": "r", "quant_q": np.cumsum(p) / np.arange(1, 4)})
         self.assertTrue(np.allclose(readers.recover_p(tr).values, p))
+        # rows in any order: p must stay attached to its own row
+        p2 = np.array([0.05, 0.2, 0.9])
+        tr2 = pd.concat([tr.assign(p=p), pd.DataFrame({"run": "r2", "quant_q": np.cumsum(p2) / np.arange(1, 4), "p": p2})])
+        tr2 = tr2.sample(frac=1, random_state=3).reset_index(drop=True)
+        self.assertTrue(np.allclose(readers.recover_p(tr2).values, tr2.p.values))
 
     def test_downstream(self):
         with tempfile.TemporaryDirectory() as tmp:

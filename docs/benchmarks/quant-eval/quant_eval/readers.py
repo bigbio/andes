@@ -125,13 +125,15 @@ def read_fragpipe(path, runs):
 
 def recover_p(tr):
     """Per-quantity error probability p recovered from quant_q = running mean of p over a run's accepted transfers sorted by p.
-    tr: transfer rows with run and quant_q. p_i = i * q_i - (i - 1) * q_(i-1) within a run."""
+    tr: transfer rows with run and quant_q (unique index). p_i = i * q_i - (i - 1) * q_(i-1) within a run.
+    The result is indexed like `tr` (input order), not in the sorted order used internally."""
+    order = tr.index
     tr = tr.sort_values(["run", "quant_q"], kind="stable")
     i = tr.groupby("run").cumcount().values + 1
     qq = tr.quant_q.values
     prev = np.r_[0.0, qq[:-1]]
     prev[i == 1] = 0.0
-    return pd.Series(np.clip(i * qq - (i - 1) * prev, 0.0, 1.0), index=tr.index)
+    return pd.Series(np.clip(i * qq - (i - 1) * prev, 0.0, 1.0), index=tr.index).reindex(order)
 
 
 def read_andes(path, runs, rule="default", hard_cut=0.01):

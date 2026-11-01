@@ -2275,8 +2275,8 @@ mod finalize_tests {
         MbrFeature, Table, WrongCalibration, SCORE_CHUNK,
     };
     use crate::transfer_fdr::{
-        row_unit, train_bagged_folds, train_folds, transfer_train_params, Estimate, FdrRow,
-        FoldScores, QValues, TrainingSample,
+        row_unit, train_bagged_folds, train_folds, transfer_strata, transfer_train_params,
+        Estimate, FdrRow, FoldScores, QValues, TrainingSample,
     };
 
     const N: u32 = 900;
@@ -2830,7 +2830,7 @@ mod finalize_tests {
         let wrong_cal = WrongCalibration::fit(w_held);
 
         // Pass 2: every row's held-out score, into the q-value step functions.
-        let mut t_scores = FoldScores::new(seed);
+        let mut t_scores = FoldScores::with_strata(seed, transfer_strata());
         let mut i_scores = FoldScores::new(seed);
         shards.for_each(|rows| {
             let shapes = DonorShapes::from_rows(rows.iter(), maps);
@@ -3072,7 +3072,7 @@ mod finalize_tests {
                         (t, q, q)
                     }
                     Role::PseudoTransfer => {
-                        let q = scored[i].and_then(|(_, s)| fdr.pseudo_q(r.precursor, s));
+                        let q = scored[i].and_then(|(fam, s)| fdr.pseudo_q(r.precursor, fam, s));
                         v.pseudo_transfers += 1;
                         if let Some(m) = &r.ms2 {
                             v.ms2_pseudo_rows += 1;

@@ -10,9 +10,15 @@ Verdict rule for counts and errors: `equal` when |margin| <= max(3 % of the tool
 tolerance is 10 % for FP and absence counts); otherwise
 `better` / `worse` by the metric direction (lower is better for FP, FDP, error and SD). FDP rows use an absolute band of 2
 points. The DE summary table uses the TP / FDP rule: better = TP >= 0.98 x tool TP and FDP lower by > 2 points, or
-TP > 1.03 x tool TP and FDP not higher by > 2 points; worse = the mirror; else equal."""
+TP > 1.03 x tool TP and FDP not higher by > 2 points; worse = the mirror; else equal.
+
+DE rows use the intersection BH family (proteins tested by every shared arm; BH recomputed on that set) as the headline; the family
+table gives own / intersection / union. True positives at matched pooled FDP (1 / 5 / 10 %) and per-pair AUC come from the ranked
+p-value list. Absence (blank runs, species absent from runs) has its own table; it is not part of the DE or detection rows."""
 import argparse
 import json
+
+import numpy as np
 
 
 def g(d, *ks):
@@ -69,6 +75,13 @@ class Section:
         self.FP = next((n for n, k in roles.items() if k["kind"] == "fragpipe"), None)
         self.views = [n for n, k in roles.items() if k["kind"] == "andes" and n != self.C]
         self.rows = []
+        self.fam = "inter" if "inter" in (g(self.A.get(self.C), "de_family") or {}) else "own"
+
+    def dv(self, arm, key):
+        """DE count of an arm in the family used for the headline rows."""
+        if arm is None or arm not in self.A:
+            return None
+        return g(self.A[arm], "de", key) if self.fam == "own" else g(self.A[arm], "de_family", self.fam, key)
 
     def val(self, arm, *ks):
         return g(self.A.get(arm), *ks) if arm else None
@@ -109,6 +122,14 @@ class Section:
                 self.r3(f"L={L}: UPS proteins quantified in >= 2 of {nrep} reps", ("ups_strat", L, "ups_proteins_quant_ge2reps"))
                 self.row(f"L={L}: UPS precursors detected", *[tot(x, "ups_precursors_ident", "ups_precursors_transfer_only") for x in (C, self.MQ, self.FP)])
                 self.r3(f"L={L}: UPS precursors identified", ("ups_strat", L, "ups_precursors_ident"))
+        if g(A[C], "ups_design"):
+            ud = A[C]["ups_design"]
+            ref0 = next(iter(ud.values()))["reference_levels_from"]
+            self.head(f"2b UPS1 precursor detection, design-consistent (own reference = median over levels >= {ref0}; run offsets from the null-species precursors; "
+                      f"precursors without a reference row not scored; within 2x = |log2 error| <= 1, within 3x <= 1.58)")
+            for L in r["levels"]:
+                for lab, key in (("detected, any row", "any"), ("design-consistent, within 2x", "t1.0"), ("design-consistent, within 3x", "t1.58")):
+                    self.row(f"L={L}: UPS precursors {lab}", *[g(A.get(x), "ups_design", L, key) for x in (C, self.MQ, self.FP)])
         for refn, tab in (r.get("hye_det") or {}).items():
             self.head(f"2 detection by species and intensity quartile (share of reference-arm precursors found; reference = {refn}; Q1 = lowest)")
             for s, arms in tab.items():
@@ -144,28 +165,34 @@ class Section:
                     self.row(f"replicate SD (log2, median) {lvl}, {q}", g(x, C, q, "med_sd"), g(x, self.MQ, q, "med_sd"), g(x, self.FP, q, "med_sd"), hi=False, nd=3)
                 self.row(f"replicate CV % (median) {lvl}, all", g(x, C, "all", "med_cv_pct"), g(x, self.MQ, "all", "med_cv_pct"), g(x, self.FP, "all", "med_cv_pct"), hi=False, nd=1)
         if "de" in A[C]:
-            self.head("4 DE (BH 5 %, per level pair, summed; FDP = FP / (TP + FP) %)")
+            fam = self.fam
+            famtxt = {"inter": f"intersection family, {r['families']['intersection']:,} proteins tested by every shared arm; BH recomputed on it",
+                      "own": "own family, each arm tests its own proteins"}[fam]
+            self.head(f"4 DE (BH 5 %, per level pair, summed; {famtxt}; FDP = FP / (TP + FP) %)")
             for lab, arm in [("andes", C)] + [(v, v) for v in self.views]:
                 for cut, tp, fp in (("no cut", "TP", "FP"), ("FC >= 0.5", "TP5", "FP5")):
-                    a_tp, a_fp = g(A[arm], "de", tp), g(A[arm], "de", fp)
-                    self.row(f"DE TP, {cut}, {lab}", a_tp, self.val(self.MQ, "de", tp), self.val(self.FP, "de", tp))
-                    self.row(f"DE FP, {cut}, {lab}", a_fp, self.val(self.MQ, "de", fp), self.val(self.FP, "de", fp), hi=False, tol=0.10)
+                    self.row(f"DE TP, {cut}, {lab}", self.dv(arm, tp), self.dv(self.MQ, tp), self.dv(self.FP, tp))
+                    self.row(f"DE FP, {cut}, {lab}", self.dv(arm, fp), self.dv(self.MQ, fp), self.dv(self.FP, fp), hi=False, tol=0.10)
 
                     def fdp(t):
-                        if t is None or t not in A:
-                            return None
-                        x, y = g(A[t], "de", tp), g(A[t], "de", fp)
-                        return 100 * y / max(x + y, 1)
+                        x, y = self.dv(t, tp), self.dv(t, fp)
+                        return None if x is None else 100 * y / max(x + y, 1)
                     self.row(f"DE FDP %, {cut}, {lab}", fdp(arm), fdp(self.MQ), fdp(self.FP), hi=False, nd=1, abs_tol=2.0, pct=False)
             if "UPS" in classes:
                 lowl = set(r["levels"][:3])
-                self.head("UPS pairs (FC >= 0.5; lower level among the 3 lowest levels vs the rest; summed over pairs)")
+                sfx = "" if fam == "own" else "_" + fam
+                self.head(f"UPS pairs (FC >= 0.5, {fam} family; lower level among the 3 lowest levels vs the rest; summed over pairs)")
                 for lab, arm in [("andes", C)] + [(v, v) for v in self.views]:
                     for grp, test in (("lowest-3-level pairs", lambda p: p["lo"] in lowl), ("other pairs", lambda p: p["lo"] not in lowl)):
-                        s_ = lambda t, k: None if (t is None or t not in A) else sum(p[k] for p in A[t]["pairs"] if test(p))
+                        s_ = lambda t, k: None if (t is None or t not in A) else sum(p[k + sfx] for p in A[t]["pairs"] if test(p))
                         self.row(f"{lab}: TP in {grp}", s_(arm, "TP5"), s_(self.MQ, "TP5"), s_(self.FP, "TP5"))
                         self.row(f"{lab}: FP in {grp}", s_(arm, "FP5"), s_(self.MQ, "FP5"), s_(self.FP, "FP5"), hi=False, tol=0.10)
-        self.head("5 Absence")
+        return self.rows
+
+    def absence_rows(self):
+        """Absence table rows: rows that should not exist (blank runs, species absent from runs, UPS transfers below detection)."""
+        A, C, r = self.A, self.C, self.r
+        self.rows = []
         for arm in [C] + self.views:
             b = g(r.get("absence", {}), arm, "blank")
             if b:
@@ -192,14 +219,100 @@ def de_summary(res):
     out = ["| arm | TP / FP (FDP %) | TP / FP FC>=0.5 | " + " | ".join(f"vs {n} (no cut / FC)" for n, _ in tools) + " |",
            "|---" * (3 + len(tools)) + "|"]
     for n, k in res["arm_roles"].items():
-        de = g(A[n], "de")
+        de = g(A[n], "de_family", "inter") or g(A[n], "de")
         if not de:
             continue
         vs = []
         for t, _ in tools:
-            b = g(A.get(t), "de")
+            b = g(A.get(t), "de_family", "inter") or g(A.get(t), "de")
             vs.append("-" if (not b or t == n) else de_verdict(de["TP"], de["FP"], b["TP"], b["FP"]) + "/" + de_verdict(de["TP5"], de["FP5"], b["TP5"], b["FP5"]))
         out.append(f"| {n} | {de['TP']} / {de['FP']} ({100 * de['FP'] / max(de['TP'] + de['FP'], 1):.1f}) | {de['TP5']} / {de['FP5']} | " + " | ".join(vs) + " |")
+    return out
+
+
+def family_table(res):
+    """DE counts (no cut / FC >= 0.5) of every arm in the own, intersection and union BH families."""
+    A = res["arms"]
+    if not A.get(res["primary"], {}).get("de_family"):
+        return []
+    F = res["families"]
+    out = [f"Family sizes (proteins tested per pair, summed): intersection {F['intersection']:,} proteins and union {F['union']:,} proteins of arms {', '.join(F['arms'])}; "
+           "own = " + ", ".join(f"{n} {v:,}" for n, v in F["own"].items()) + " proteins.", "",
+           "| arm | own TP / FP (FDP %) | intersection TP / FP (FDP %) | union TP / FP (FDP %) | own FC>=0.5 | intersection FC>=0.5 | union FC>=0.5 |", "|---" * 7 + "|"]
+    for n in res["arm_roles"]:
+        f = g(A[n], "de_family")
+        if not f:
+            continue
+        c = lambda k, a="TP", b="FP": f"{f[k][a]:,} / {f[k][b]:,} ({100 * f[k][b] / max(f[k][a] + f[k][b], 1):.1f})"
+        c5 = lambda k: f"{f[k]['TP5']:,} / {f[k]['FP5']:,}"
+        out.append(f"| {n} | {c('own')} | {c('inter')} | {c('union')} | {c5('own')} | {c5('inter')} | {c5('union')} |")
+    return out
+
+
+def fdp_table(res):
+    """True positives at matched pooled FDP and per-pair AUC (changed vs null species), intersection family (headline) and own."""
+    A, C = res["arms"], res["primary"]
+    if not A.get(C, {}).get("de_family"):
+        return []
+    roles = res["arm_roles"]
+    MQ = next((n for n, k in roles.items() if k["kind"] == "maxquant"), None)
+    FP = next((n for n, k in roles.items() if k["kind"] == "fragpipe"), None)
+    out = ["| arm | TP at FDP 1 % (inter / own) | 5 % | 10 % | mean per-pair AUC (inter / own) | lowest pair AUC (inter) |", "|---" * 6 + "|"]
+    for n in roles:
+        f = g(A[n], "de_family")
+        if not f:
+            continue
+        tpc = lambda lv: f"{f['inter']['tp_at_fdp'][lv]:,} / {f['own']['tp_at_fdp'][lv]:,}"
+        au = lambda k: "n/a" if f[k]["auc_mean"] is None else f"{f[k]['auc_mean']:.3f}"
+        lo = "n/a" if f["inter"]["auc_min"] is None else f"{f['inter']['auc_min']:.3f}"
+        out.append(f"| {n} | {tpc('1')} | {tpc('5')} | {tpc('10')} | {au('inter')} / {au('own')} | {lo} |")
+    out += ["", "TP at matched FDP, intersection family: margin and verdict of andes (first andes arm) against each tool (equal within max(3 %, 2)):", "",
+            "| level | andes | MaxQuant | FragPipe | margin vs MQ | margin vs FP | verdict |", "|---|---|---|---|---|---|---|"]
+    for lv in ("1", "5", "10"):
+        a, m, p = (g(A.get(x), "de_family", "inter", "tp_at_fdp", lv) for x in (C, MQ, FP))
+        v = lambda t: verdict(a, t, True, 0.03, 2.0)
+        out.append(f"| FDP {lv} % | {fmt(a)} | {fmt(m)} | {fmt(p)} | {margin(a, m)} | {margin(a, p)} | MQ {v(m)} / FP {v(p)} |")
+    return out
+
+
+def auc_pairs_table(res):
+    """Per-pair AUC (intersection family) for pairs of adjacent levels, and the share of pairs below 0.9, 0.95."""
+    A, C = res["arms"], res["primary"]
+    if not A.get(C, {}).get("pairs") or "auc_inter" not in A[C]["pairs"][0]:
+        return []
+    arms = [n for n in res["arm_roles"] if A[n].get("pairs")]
+    lv = res.get("levels") or []
+    out = ["| pair (lower / higher level) | " + " | ".join(arms) + " |", "|---" * (len(arms) + 1) + "|"]
+    ix = {l: i for i, l in enumerate(lv)}
+    for k, p in enumerate(A[C]["pairs"]):
+        if ix.get(p["hi"], -9) - ix.get(p["lo"], 0) == 1 or len(lv) <= 3:
+            vals = []
+            for n in arms:
+                q = A[n]["pairs"][k]
+                vals.append("n/a" if q.get("auc_inter") is None else f"{q['auc_inter']:.3f}")
+            out.append(f"| {p['lo']} / {p['hi']} | " + " | ".join(vals) + " |")
+    out.append("| **share of pairs with AUC < 0.9 / < 0.95** | " + " | ".join(
+        "{} / {}".format(*[f"{100 * np.mean([q['auc_inter'] < t for q in A[n]['pairs'] if q.get('auc_inter') is not None]):.0f} %" for t in (0.9, 0.95)])
+        for n in arms) + " |")
+    return out
+
+
+def rt_table(res):
+    """DE with and without the RT-local normalisation, intersection family of each variant."""
+    A = res["arms"]
+    if not any("rtlocal" in a for a in A.values()):
+        return []
+    F = res["rtlocal_families"]
+    out = [f"RT-local family: intersection {F['intersection']:,} proteins (arms {', '.join(F['arms'])}); RT proxy for {F['rt_keys']:,} precursor keys from the andes apex RT.", "",
+           "| arm | normalisation | TP / FP (FDP %) | TP / FP FC>=0.5 | TP at FDP 5 % | TP at FDP 10 % | mean per-pair AUC |", "|---" * 7 + "|"]
+    for n in res["arm_roles"]:
+        pair = (("global median (default)", g(A[n], "de_family", "inter")), ("RT-local", g(A[n], "rtlocal", "de_family", "inter")))
+        for lab, f in pair:
+            if not f:
+                continue
+            au = "n/a" if f["auc_mean"] is None else f"{f['auc_mean']:.3f}"
+            out.append(f"| {n} | {lab} | {f['TP']:,} / {f['FP']:,} ({100 * f['FP'] / max(f['TP'] + f['FP'], 1):.1f}) | {f['TP5']:,} / {f['FP5']:,} | "
+                       f"{f['tp_at_fdp']['5']:,} | {f['tp_at_fdp']['10']:,} | {au} |")
     return out
 
 
@@ -217,7 +330,17 @@ def main(argv=None):
         out += hdr + Section(r).build() + [""]
         ds = de_summary(r)
         if ds:
-            out += ["### DE summary (TP / FDP verdict rule)", ""] + ds + [""]
+            out += ["### DE summary (TP / FDP verdict rule; intersection family)", ""] + ds + [""]
+        for title, tab in (("DE by BH family (own / intersection / union)", family_table(r)),
+                           ("True positives at matched FDP and per-pair AUC", fdp_table(r)),
+                           ("Per-pair AUC (changed vs null species, intersection family), adjacent levels", auc_pairs_table(r)),
+                           ("DE with and without RT-local normalisation (same step for every arm)", rt_table(r))):
+            if tab:
+                out += [f"### {title}", ""] + tab + [""]
+        ab = Section(r)
+        rows = ab.absence_rows()
+        if rows:
+            out += ["### Absence (rows that should not exist; lower is better)", "", *hdr, *rows, ""]
     print("\n".join(out))
 
 

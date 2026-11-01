@@ -100,6 +100,8 @@ fn precursor_cal_off_pin_tsv_match_golden_after_sort() {
         // No --precursor-cal flag → default 'off'. The golden pins the search's
         // own columns; predicted features are covered by their own tests.
         .args(["--predict", "none"])
+        // The golden was recorded with one missed cleavage at most.
+        .args(["--max-missed-cleavages", "1"])
         .status()
         .expect("run andes");
     assert!(status.success(), "andes exited {status}");

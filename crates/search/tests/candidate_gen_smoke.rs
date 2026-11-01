@@ -155,7 +155,7 @@ fn nonspecific_extra_enzyme_ignores_missed_cleavage_cap() {
 }
 
 /// The HLA-I configuration (`--enzyme nonspecific --min-length 8 --max-length 11`)
-/// with the default missed-cleavage cap of 2 builds candidates.
+/// with the default missed-cleavage cap of 1 builds candidates.
 #[test]
 fn nonspecific_default_missed_cap_builds_candidates() {
     let idx = make_index(b"AAAAAAAAAAAAAAAAAAAA");
@@ -164,7 +164,7 @@ fn nonspecific_default_missed_cap_builds_candidates() {
     p.min_length = 8;
     p.max_length = 11;
     p.max_variable_mods_per_peptide = 0;
-    assert_eq!(p.max_missed_cleavages, 2);
+    assert_eq!(p.max_missed_cleavages, 1);
     let n = enumerate_candidates(&idx, &p, "XXX")
         .filter(|c| !c.is_decoy)
         .count();

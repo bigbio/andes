@@ -149,7 +149,7 @@ impl SearchParams {
     /// Defaults for a standard tryptic search (Kim et al., Nat Commun 5:5277, 2014):
     /// - enzyme: Trypsin
     /// - length: 6-50
-    /// - missed cleavages: 2
+    /// - missed cleavages: 1
     /// - variable mods per peptide: 3
     /// - precursor tolerance: 20 ppm symmetric
     /// - charge range: 2..=3
@@ -164,7 +164,7 @@ impl SearchParams {
             extra_enzymes: Vec::new(),
             min_length: 6,
             max_length: 50,
-            max_missed_cleavages: 2,
+            max_missed_cleavages: 1,
             max_variable_mods_per_peptide: 3,
             precursor_tolerance: PrecursorTolerance::symmetric(Tolerance::Ppm(20.0)),
             charge_range: 2..=3,
@@ -232,7 +232,7 @@ mod tests {
         assert_eq!(params.enzyme, Enzyme::Trypsin);
         assert_eq!(params.min_length, 6);
         assert_eq!(params.max_length, 50);
-        assert_eq!(params.max_missed_cleavages, 2);
+        assert_eq!(params.max_missed_cleavages, 1);
         assert_eq!(params.max_variable_mods_per_peptide, 3);
         assert_eq!(*params.charge_range.start(), 2);
         assert_eq!(*params.charge_range.end(), 3);

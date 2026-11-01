@@ -167,3 +167,13 @@ def read_andes(path, runs, rule="default", hard_cut=0.01):
         out["p"] = np.nan
         out = G.tagged(out, tag)
     return out
+
+
+def read_andes_rt(path, runs):
+    """Retention-time proxy of each precursor key: median apex RT (`apex_rt_s`) over the identified rows of an andes finalize table
+    (library_q <= 0.01). One proxy for every arm of the RT-local normalisation; keys without an andes row have none."""
+    m = pd.read_parquet(path, columns=["precursor_key", "run", "evidence_type", "apex_rt_s", "library_q"])
+    m = m[m.evidence_type.str.startswith("identified") & (m.library_q <= IDQ) & np.isfinite(m.apex_rt_s)]
+    m = remap_runs(m, runs)
+    m["key"] = [norm_key(k) for k in m.precursor_key.values]
+    return m.groupby("key").apex_rt_s.median()

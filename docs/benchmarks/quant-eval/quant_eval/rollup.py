@@ -23,6 +23,30 @@ def normalise(d, runs):
     return d, flag, int(len(full))
 
 
+def normalise_rt_local(d, runs, rt_of, win=401):
+    """Optional RT-local run normalisation, the same function for every arm (replaces `normalise`; design-free, no species).
+    Reference precursors = those quantified in >= 90 % of runs; their residual to their own median over runs is smoothed per run
+    along the precursor retention time (`rt_of`: key -> RT, one proxy for all arms) with a running median over `win` cells, and
+    subtracted from every row of that run by interpolation at the row's RT. Rows whose key has no RT get the run's median shift."""
+    d = d.assign(lq=np.log2(d.quantity.values))
+    nr = d.groupby("key").run.nunique()
+    ref = nr.index[nr >= 0.9 * len(runs)]
+    mk = d[d.key.isin(ref)].groupby("key").lq.median()
+    d["rt"] = d.key.map(rt_of)
+    d["res"] = d.lq - d.key.map(mk)
+    sm = pd.Series(0.0, index=d.index)
+    for _, g in d.groupby("run"):
+        x = g[g.key.isin(ref) & g.rt.notna() & g.res.notna()].sort_values("rt")
+        if len(x) < 50:
+            sm[g.index] = float(g.res.median()) if g.res.notna().any() else 0.0
+            continue
+        sx = x.res.rolling(win, center=True, min_periods=win // 4).median().bfill().ffill()
+        sm[g.index] = np.where(g.rt.notna(), np.interp(g.rt.fillna(x.rt.median()).values, x.rt.values, sx.values),
+                               float(x.res.median()))
+    d["n"] = d.lq.values - sm.values
+    return d.drop(columns=["rt", "res"]), "rtlocal", int(len(ref))
+
+
 def median_polish(M, iters=10):
     """M: precursors x runs (NaN allowed). Returns the protein value per run, NaN where a run has no value."""
     X = M.copy()

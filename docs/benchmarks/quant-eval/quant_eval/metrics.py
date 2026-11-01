@@ -95,6 +95,43 @@ def ups_by_level(raw, P, design, sp, prot, prot_sp):
     return out
 
 
+def design_detection(raw, design, sp, thresholds=(1.0, 1.58), ref_skip=3):
+    """Design-consistent UPS1 detection per level, next to raw detection (any row of the precursor at the level).
+    Per arm: run offsets = per-run median of log2 over the null-species precursors present in >= 90 % of runs; each UPS precursor
+    gets its own reference from the levels above the `ref_skip` lowest ones (median over those rows of log2 - log2 level); a row is
+    design-consistent when |log2 - (reference + log2 level)| <= t. Precursors without a reference row are not scored.
+    thresholds: log2 ratio limits (1.0 = within 2x, 1.58 = within 3x). Returns {level: {"any", "t<thr>", "ident", "cells", ...}}."""
+    if "UPS" not in design.classes or design.null is None or len(design.levels) <= ref_skip + 1:
+        return {}
+    T = raw[["key", "run", "quantity", "is_transfer"]].copy()
+    T = T[T.quantity > 0]
+    T["lq"] = np.log2(T.quantity)
+    T["sp"] = T.key.map(sp)
+    ny = T[T.sp == design.null].groupby("key").run.nunique()
+    full = ny.index[ny >= 0.9 * len(design.runs)]
+    med = T[T.key.isin(full)].groupby("run").lq.median()
+    if len(med) == 0:
+        return {}
+    T["n"] = T.lq - T.run.map(med) + med.median()
+    U = T[T.sp == "UPS"].copy()
+    U["lev"] = U.run.map(lambda r: float(design.cond[r]) if r in design.cond else np.nan)
+    U = U[np.isfinite(U.lev)]
+    ref_levels = {float(x) for x in design.levels[ref_skip:]}
+    hi = U[U.lev.isin(ref_levels)]
+    a = (hi.n - np.log2(hi.lev)).groupby(hi.key).median()
+    U = U[U.key.isin(a.index)].copy()
+    U["err"] = U.n - (U.key.map(a) + np.log2(U.lev))
+    out = {}
+    for L in design.levels:
+        u = U[U.lev == float(L)]
+        o = {"any": int(u.key.nunique()), "ident": int(u[~u.is_transfer].key.nunique()), "cells": int(len(u)),
+             "reference_levels_from": str(design.levels[ref_skip])}
+        for t in thresholds:
+            o[f"t{t}"] = int(u[u.err.abs() <= t].key.nunique())
+        out[str(L)] = o
+    return out
+
+
 def absence(raw, design, sp):
     """Rows that should not exist: every row in blank runs, and rows of a species in the runs where it is absent."""
     o = {}

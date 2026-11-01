@@ -27,7 +27,7 @@ from . import runguard as G
 from .de import de_all
 from .design import Design
 from .fasta import map_precursors
-from .rollup import learn_weights, normalise, rollup
+from .rollup import learn_weights, normalise, normalise_rt_local, rollup
 
 
 def parse_args(argv=None):
@@ -42,6 +42,8 @@ def parse_args(argv=None):
     ap.add_argument("--andes", action="append", default=[], metavar="NAME:RULE:PATH")
     ap.add_argument("--maxquant", action="append", default=[], metavar="NAME:PATH")
     ap.add_argument("--fragpipe", action="append", default=[], metavar="NAME:PATH")
+    ap.add_argument("--rt-local", action="store_true",
+                    help="also run DE after the RT-local run normalisation (same function for every arm; RT proxy = the first andes arm's apex RT)")
     ap.add_argument("--hard-cut", type=float, default=0.01, help="quant_q limit of the hard-cut rule")
     ap.add_argument("--out", required=True)
     return ap.parse_args(argv)
@@ -109,13 +111,44 @@ def evaluate(a):
             Pm = rollup(d, prot, runs)
             P = Pm[cntp.reindex(Pm.index).fillna(0).values >= 2]
             PM[n] = (P, d)
-            o["de"], o["pairs"], o["prot_err"] = de_all(P, design, prot_sp, classes)
             o["acc_own_sp"] = M.accuracy(d, design, sp, shared, True)
             o["acc_shared_sp"] = M.accuracy(d, design, sp, shared, False)
             if "UPS" in classes:
                 o["ups_strat"] = M.ups_by_level(raw, P, design, sp, prot, prot_sp)
+                o["ups_design"] = M.design_detection(raw, design, sp)
         RES["arms"][n] = o
         print(n, {k: o[k] for k in ("rows", "precursors", "proteins_ge2")}, round(time.time() - t0), "s", file=sys.stderr)
+
+    if design.has_de:
+        # DE after every arm's protein table exists: the shared arms define the intersection / union BH families
+        fam_arms = [n for n in shared_arms if n in PM]
+        inter = set.intersection(*[set(PM[n][0].index) for n in fam_arms])
+        union = set().union(*[set(PM[n][0].index) for n in fam_arms])
+        RES["families"] = {"arms": fam_arms, "intersection": len(inter), "union": len(union),
+                           "own": {n: int(len(PM[n][0])) for n in PM}}
+        for n, (P, _) in PM.items():
+            o = RES["arms"][n]
+            o["de"], o["pairs"], o["prot_err"], o["de_family"] = de_all(P, design, prot_sp, classes, inter, union)
+
+    if design.has_de and a.rt_local:
+        first = next(s for s in a.andes).split(":", 2)[2]
+        rt_of = R.read_andes_rt(first, runs)
+        PR = {}
+        for n, raw in tabs.items():
+            d, _, nref = normalise_rt_local(raw, runs, rt_of)
+            if kinds[n].get("rule") == "weights":
+                d, _ = learn_weights(d, prot, runs)
+            cntp = raw.groupby(raw.key.map(prot)).key.nunique()
+            Pm = rollup(d, prot, runs)
+            PR[n] = Pm[cntp.reindex(Pm.index).fillna(0).values >= 2]
+        fam_arms = [n for n in shared_arms if n in PR]
+        inter = set.intersection(*[set(PR[n].index) for n in fam_arms])
+        union = set().union(*[set(PR[n].index) for n in fam_arms])
+        RES["rtlocal_families"] = {"arms": fam_arms, "intersection": len(inter), "union": len(union), "rt_keys": int(len(rt_of))}
+        for n, P in PR.items():
+            de, _, _, fam = de_all(P, design, prot_sp, classes, inter, union)
+            RES["arms"][n]["rtlocal"] = {"de": de, "de_family": fam, "proteins": int(len(P))}
+        print("rt-local done", round(time.time() - t0), "s", file=sys.stderr)
 
     if design.has_de:
         ref_names = [n for n in shared_arms if n in PM]

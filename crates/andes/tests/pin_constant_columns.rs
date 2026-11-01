@@ -17,8 +17,9 @@
 //!   IsolationWindowEfficiency, PrecursorIsotopeKL, PrecursorSNR
 //! The rest are constant only because of what this fixture is: an MGF (so no
 //! retention time and no linked MS1), searched with a low-resolution model (where
-//! `EdgeScore` is documented as returning 0), with `--refine` off, and with no retention time the default
-//! `andesrt_*` predictor columns are constant too. Those are expected and are listed so the structural three stand out.
+//! `EdgeScore` is documented as returning 0), with `--refine` off, and with no retention time the
+//! default `andesrt_*` predictor columns are constant too. Those are expected and are listed
+//! so the structural three stand out.
 use std::collections::BTreeSet;
 use std::process::Command;
 

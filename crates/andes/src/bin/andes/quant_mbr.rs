@@ -65,7 +65,11 @@
 //! by [`identified_features`]): their prior is centred on the PSM's RT, so
 //! their feature distribution is not the transfers', and the transfer
 //! q-values stay what they are without them. Each identified target gets the
-//! quality q-value `quant_q`; a transfer's `quant_q` is its `transfer_q`.
+//! quality q-value `quant_q`; an accepted transfer's `quant_q` is the running
+//! mean, over its run's accepted transfers in ascending probability of a wrong
+//! measurement, of that probability (a model trained on the pseudo-transfers:
+//! see `quant_finalize`), and a transfer below the threshold keeps its
+//! `transfer_q`.
 //! With a quality threshold, an identified row above it (or without a
 //! q-value) is `identified_below_threshold`. Each
 //! pseudo-transfer is scored by the model of its precursor's fold, which never
@@ -2266,8 +2270,9 @@ mod finalize_tests {
 
     use super::*;
     use crate::quant_finalize::{
-        finalize, finalize_stream, for_each_scored, table_features, EntryIndex, ExtractRuns,
-        FinalizeLimits, FinalizeParams, FinalizeSummary, MbrFeature, Table, SCORE_CHUNK,
+        finalize, finalize_stream, for_each_scored, pseudo_example, table_features, wrong_features,
+        BlockContext, EntryIndex, ExtractRuns, FinalizeLimits, FinalizeParams, FinalizeSummary,
+        MbrFeature, Table, WrongCalibration, SCORE_CHUNK,
     };
     use crate::transfer_fdr::{
         row_unit, train_bagged_folds, train_folds, transfer_train_params, Estimate, FdrRow,
@@ -2778,6 +2783,51 @@ mod finalize_tests {
         let t_models =
             train_bagged_folds(&[&t_sample.into_items()], seed, &transfer_train_params());
         let i_models = train_folds(&i_sample.into_items(), seed);
+        // The wrong-peak model: the pseudo-transfers judged against the
+        // identified fit of the same cell, and its calibration on held-out
+        // margins.
+        let mut w_sample: TrainingSample<u64> = TrainingSample::new(usize::MAX, seed);
+        let mut w_seq = 0u64;
+        shards.for_each(|rows| {
+            let ctx = BlockContext::new(rows, maps)?;
+            for r in rows {
+                w_seq += 1;
+                if let Some((y, x)) = pseudo_example(r, &ctx, &idx) {
+                    w_sample.push(
+                        w_seq,
+                        row_unit(r.precursor, r.run),
+                        FdrRow {
+                            precursor: r.precursor,
+                            is_decoy: y,
+                            family: 0,
+                            x,
+                        },
+                    );
+                }
+            }
+            Ok(())
+        })?;
+        let w_models = train_folds(&w_sample.into_items(), seed);
+        let mut w_held: Vec<(f32, bool)> = Vec::new();
+        shards.for_each(|rows| {
+            let ctx = BlockContext::new(rows, maps)?;
+            let ex: Vec<(bool, Vec<f32>, u32)> = rows
+                .iter()
+                .filter_map(|r| pseudo_example(r, &ctx, &idx).map(|(y, x)| (y, x, r.precursor)))
+                .collect();
+            let precursors: Vec<u32> = ex.iter().map(|e| e.2).collect();
+            let xs: Vec<&[f32]> = ex.iter().map(|e| e.1.as_slice()).collect();
+            let mut margins = Vec::new();
+            w_models.score(&precursors, &xs, &mut margins);
+            w_held.extend(
+                margins
+                    .iter()
+                    .zip(&ex)
+                    .filter_map(|(m, e)| m.map(|m| (m, e.0))),
+            );
+            Ok(())
+        })?;
+        let wrong_cal = WrongCalibration::fit(w_held);
 
         // Pass 2: every row's held-out score, into the q-value step functions.
         let mut t_scores = FoldScores::new(seed);
@@ -2919,6 +2969,32 @@ mod finalize_tests {
                     .map(|e| reported_quantity(e, r.run, w_c.get(&r.precursor).copied(), maps))
             };
             let mut out: Vec<(u32, u16, MbrRow<'_>, Option<f64>)> = Vec::new();
+            // Probability that a transfer's measurement is wrong (1 without
+            // features, a fold model or a calibration).
+            let mut p_wrong: Vec<f64> = vec![1.0; rows.len()];
+            {
+                let at: Vec<usize> = (0..rows.len())
+                    .filter(|&i| {
+                        rows[i].role == Role::Transfer
+                            && matches!(idx.table(&rows[i]), Some((Table::Transfer, 0)))
+                    })
+                    .collect();
+                let xs: Vec<Option<Vec<f32>>> = at
+                    .iter()
+                    .map(|&i| rows[i].evidence.as_ref().and_then(wrong_features))
+                    .collect();
+                let ok: Vec<usize> = (0..at.len()).filter(|&k| xs[k].is_some()).collect();
+                let precursors: Vec<u32> = ok.iter().map(|&k| rows[at[k]].precursor).collect();
+                let x_refs: Vec<&[f32]> = ok.iter().map(|&k| xs[k].as_deref().unwrap()).collect();
+                let mut margins = Vec::new();
+                w_models.score(&precursors, &x_refs, &mut margins);
+                for (&k, m) in ok.iter().zip(margins) {
+                    if let (Some(m), Some(c)) = (m, &wrong_cal) {
+                        p_wrong[at[k]] = c.at(m);
+                    }
+                }
+            }
+            let mut wrongs: Vec<(usize, f64)> = Vec::new();
             for (i, r) in rows.iter().enumerate() {
                 if idx.is_identity(r.precursor) {
                     // Never reported: only the identity-decoy family's counts.
@@ -3024,6 +3100,9 @@ mod finalize_tests {
                         continue;
                     }
                 };
+                if r.role == Role::Transfer {
+                    wrongs.push((out.len(), p_wrong[i]));
+                }
                 out.push((
                     r.precursor,
                     r.run,
@@ -3041,6 +3120,26 @@ mod finalize_tests {
                     },
                     e.map(|e| e.mass_err_ppm),
                 ));
+            }
+            // quant_q of an accepted transfer: the running mean, over its
+            // run's accepted transfers in ascending probability of a wrong
+            // measurement, of that probability.
+            let mut by_run: HashMap<u16, Vec<(f64, usize)>> = HashMap::new();
+            for &(k, p) in &wrongs {
+                if matches!(
+                    out[k].2.evidence_type,
+                    EvidenceType::TransferMs2 | EvidenceType::TransferMs1
+                ) {
+                    by_run.entry(out[k].1).or_default().push((p, k));
+                }
+            }
+            for pool in by_run.values_mut() {
+                pool.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+                let mut sum = 0.0;
+                for (n, &(p, k)) in pool.iter().enumerate() {
+                    sum += p;
+                    out[k].2.quant_q = Some(sum / (n + 1) as f64);
+                }
             }
             out.sort_by_key(|&(p, run, ..)| (p, run));
             let mut features = Vec::with_capacity(out.len());
@@ -3574,9 +3673,15 @@ mod finalize_tests {
         );
         assert_eq!(v.identified_below_threshold, 0);
         assert_eq!(s.identified_no_features, 0);
-        // A transfer's quant_q is its transfer_q.
+        // A transfer below the threshold keeps its transfer_q as quant_q; an
+        // accepted one has the running mean of its run's wrong-peak
+        // probabilities.
         for f in s.features.iter().filter(|f| f.run == 1) {
-            assert_eq!(f.quant_q, f.transfer_q);
+            if f.evidence_type == EvidenceType::BelowThreshold {
+                assert_eq!(f.quant_q, f.transfer_q);
+            } else {
+                assert!(f.quant_q.is_some_and(|q| (0.0..=1.0).contains(&q)));
+            }
         }
     }
 

@@ -12,7 +12,7 @@
 //! | `quantity`, `quantity_se` | fitted MS1 quantity and its standard error |
 //! | `quantity_normalized` | `quantity` with the run's normalisation offset at the row's apex RT removed (a level per run and an RT-local term fitted across runs); null when the run is not normalised. `quantity` stays the raw measurement |
 //! | `transfer_q` | internal transfer quant-quality q-value (not an identification FDR); null for identified rows |
-//! | `quant_q` | internal quality q-value of the row's MS1 feature against its decoys (not an identification FDR): the identified-row estimate for identified rows, `transfer_q` for transfers |
+//! | `quant_q` | internal quality q-value of the row's MS1 feature against its decoys (not an identification FDR): the identified-row estimate for identified rows; for an accepted transfer the running mean, over the run's accepted transfers in ascending probability of a wrong measurement, of that probability; `transfer_q` for a transfer below the threshold |
 //! | `apex_rt_s` | fitted apex, seconds |
 //! | `library_q` | internal library entry gate (not an identification FDR) |
 //!

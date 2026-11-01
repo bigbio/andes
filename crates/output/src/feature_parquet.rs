@@ -13,7 +13,7 @@
 //! `transfer_q` (the internal transfer
 //! quant-quality q-value, not an identification FDR), `quant_q` (the internal
 //! quality q-value of the row's MS1 feature: the identified-row estimate, or
-//! `transfer_q` for a transfer) and `quantity_se`.
+//! for a transfer the running mean of its probability of a wrong measurement) and `quantity_se`.
 //! Otherwise the file has exactly the QPX columns.
 
 use std::path::Path;

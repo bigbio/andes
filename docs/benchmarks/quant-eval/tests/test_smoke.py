@@ -72,19 +72,16 @@ def ups_design(tmp):
 
 
 class Fixes(unittest.TestCase):
-    def test_family_helpers(self):
-        # BH on a restricted family differs from BH on the full one; padding adds p = 1 tests and keeps the counts
+    def test_union_view(self):
+        # padding adds p = 1 tests, keeps the species and never lowers a q value of the original proteins
         T = pd.DataFrame({"sp": ["UPS"] * 4 + ["YEAST"] * 4, "fc": 1.0, "p": [1e-6, 1e-4, 1e-3, 0.5, 0.9, 0.04, 0.6, 0.8],
                           "ex": [1.0] * 4 + [0.0] * 4}, index=[f"P{i}" for i in range(8)])
         T["q"] = DE.bh(T.p.values)
-        inter = DE.family_view(T, {f"P{i}" for i in range(6)}, {}, "inter")
-        self.assertEqual(len(inter), 6)
-        self.assertTrue((inter.q.values >= T.q.values[:6] - 1e-12).all() or (inter.q.values <= T.q.values[:6] + 1e-12).all())
-        uni = DE.family_view(T, {f"P{i}" for i in range(8)} | {"X1", "X2"}, {"X1": "UPS", "X2": "YEAST"}, "union")
+        uni = DE.union_view(T, {f"P{i}" for i in range(8)} | {"X1", "X2"}, {"X1": "UPS", "X2": "YEAST"})
         self.assertEqual(len(uni), 10)
         self.assertEqual(float(uni.loc["X1", "p"]), 1.0)
-        self.assertLess(uni.q.loc["P0"], T.q.loc["P0"] + 1.0)
-        self.assertGreaterEqual(uni.q.loc["P0"], T.q.loc["P0"] - 1e-12)   # a larger family never lowers a q value
+        self.assertEqual(uni.loc["X1", "sp"], "UPS")
+        self.assertTrue((uni.q.loc[T.index].values >= T.q.values - 1e-12).all())
 
     def test_matched_fdp_and_auc(self):
         sp = ["UPS"] * 10 + ["YEAST"] * 10

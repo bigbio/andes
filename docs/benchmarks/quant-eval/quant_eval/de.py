@@ -6,8 +6,10 @@ sign; FP = significant protein of the null species. Counts are given without a f
 
 Protein families. The BH family of a pair is the set of proteins tested in it. Three families are scored:
   own    the proteins the arm itself tests (what each tool reports; family sizes differ between tools)
-  inter  only proteins tested (>= 2 precursors) in every shared arm; BH is recomputed on that set, identical for all arms
-  union  proteins tested in any shared arm; an arm that does not test a protein contributes it with p = 1
+  inter  only proteins tested (>= 2 precursors) in every shared arm; the whole test (variance prior and BH) is run on that set,
+         identical for all arms
+  union  proteins tested in any shared arm; the prior is fitted on the arm's own proteins, an arm that does not test a protein
+         contributes it with p = 1 to BH
 The intersection family is the headline. Each family also gets the true positives at matched pooled FDP (sweep of the ranked p
 values over all pairs, null-species hits counted as false) and the per-pair AUC of changed-vs-null species by p value."""
 import numpy as np
@@ -20,7 +22,7 @@ FC_CUT = 0.5
 
 
 def de_table(P, r1, r2, prot_sp, expected_of):
-    """P: protein x run log2. Returns per protein: species, observed log2FC (r2 - r1), p, BH q (own family), expected log2FC."""
+    """P: protein x run log2. Returns per protein: species, observed log2FC (r2 - r1), p, BH q over the proteins of P, expected log2FC."""
     A = P[r1].values
     B = P[r2].values
     n1 = np.isfinite(A).sum(1)
@@ -103,14 +105,11 @@ def tp_at_fdp(Ts, null, levels=FDP_LEVELS):
     return tp, fp
 
 
-def family_view(T, fam, prot_sp, how):
-    """T of one pair restricted (inter) or padded (union) to the family fam; BH is recomputed on the resulting set."""
-    if how == "inter":
-        T = T[T.index.isin(fam)].copy()
-    else:
-        miss = [p for p in fam if p not in T.index]
-        pad = pd.DataFrame({"sp": [prot_sp.get(p) for p in miss], "fc": np.nan, "p": 1.0, "q": 1.0, "ex": np.nan}, index=miss)
-        T = pd.concat([T, pad])
+def union_view(T, fam, prot_sp):
+    """T of one pair padded to the union family fam (missing proteins enter with p = 1); BH is recomputed on the resulting set."""
+    miss = [p for p in fam if p not in T.index]
+    pad = pd.DataFrame({"sp": [prot_sp.get(p) for p in miss], "fc": np.nan, "p": 1.0, "q": 1.0, "ex": np.nan}, index=miss)
+    T = pd.concat([T, pad])
     T["q"] = bh(T.p.values)
     return T
 
@@ -118,13 +117,15 @@ def family_view(T, fam, prot_sp, how):
 def de_all(P, design, prot_sp, classes, fam_inter=None, fam_union=None):
     """Every condition pair (lo < hi) with >= 2 replicates on each side.
     Returns (totals of the own family, per-pair rows, log2FC error summaries by group|species, family summaries).
-    fam_inter / fam_union: protein sets of the shared arms (see module doc); without them only the own family is scored."""
+    fam_inter / fam_union: protein sets of the shared arms (see module doc); without them only the own family is scored.
+    The per-pair rows and the totals are the own family; `de_family` holds all families."""
     runs = list(P.columns)
     cond = {r: design.cond[r] for r in runs if r in design.cond}
     levels = design.levels
     null = design.null
     tot = {k: 0 for k in ("TP", "TPs", "FP", "TP5", "TPs5", "FP5", "tested")}
     pairs, coll = [], {}
+    P_inter = P[P.index.isin(fam_inter)] if fam_inter is not None else None
     fams = {"own": []}
     if fam_inter is not None:
         fams["inter"] = []
@@ -149,9 +150,9 @@ def de_all(P, design, prot_sp, classes, fam_inter=None, fam_union=None):
             row["n_chg_tested"] = int(chg.sum())
             views = {"own": T}
             if fam_inter is not None:
-                views["inter"] = family_view(T, fam_inter, prot_sp, "inter")
+                views["inter"] = de_table(P_inter, r1, r2, prot_sp, lambda s, lo=lo, hi=hi: design.expected_fc(s, lo, hi))
             if fam_union is not None:
-                views["union"] = family_view(T, fam_union, prot_sp, "union")
+                views["union"] = union_view(T, fam_union, prot_sp)
             for f, V in views.items():
                 fams[f].append(V)
                 cf = _count(V, null)

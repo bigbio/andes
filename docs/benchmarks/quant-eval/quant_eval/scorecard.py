@@ -12,7 +12,7 @@ tolerance is 10 % for FP and absence counts); otherwise
 points. The DE summary table uses the TP / FDP rule: better = TP >= 0.98 x tool TP and FDP lower by > 2 points, or
 TP > 1.03 x tool TP and FDP not higher by > 2 points; worse = the mirror; else equal.
 
-DE rows use the intersection BH family (proteins tested by every shared arm; BH recomputed on that set) as the headline; the family
+DE rows use the intersection BH family (proteins tested by every shared arm; variance prior and BH on that set) as the headline; the family
 table gives own / intersection / union. True positives at matched pooled FDP (1 / 5 / 10 %) and per-pair AUC come from the ranked
 p-value list. Absence (blank runs, species absent from runs) has its own table; it is not part of the DE or detection rows."""
 import argparse
@@ -166,7 +166,7 @@ class Section:
                 self.row(f"replicate CV % (median) {lvl}, all", g(x, C, "all", "med_cv_pct"), g(x, self.MQ, "all", "med_cv_pct"), g(x, self.FP, "all", "med_cv_pct"), hi=False, nd=1)
         if "de" in A[C]:
             fam = self.fam
-            famtxt = {"inter": f"intersection family, {r['families']['intersection']:,} proteins tested by every shared arm; BH recomputed on it",
+            famtxt = {"inter": f"intersection family, {r['families']['intersection']:,} proteins tested by every shared arm; variance prior and BH on that set",
                       "own": "own family, each arm tests its own proteins"}[fam]
             self.head(f"4 DE (BH 5 %, per level pair, summed; {famtxt}; FDP = FP / (TP + FP) %)")
             for lab, arm in [("andes", C)] + [(v, v) for v in self.views]:

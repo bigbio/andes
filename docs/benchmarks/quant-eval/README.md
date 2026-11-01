@@ -42,11 +42,21 @@ MaxQuant and FragPipe rows are used as the tools report them (their own match-be
 3. `de.py`, `stats.py`: moderated t (empirical Bayes variance prior), Benjamini-Hochberg 5 % per condition pair, true positive
    = significant protein of a species whose amount changes, with the observed sign equal to the expected sign counted
    separately; false positive = significant protein of the null species; counts with and without `|log2FC| >= 0.5`.
+   Three BH families are scored, because the number of tested proteins differs between tools and changes the BH threshold:
+   `own` (each arm's own proteins), `inter` (proteins tested by every shared arm; the whole test, variance prior and BH, is run on that set;
+   the headline of the scorecard) and `union` (prior fitted on the arm's own proteins; an arm that does not test a protein contributes it with p = 1 to BH). For each family: true positives
+   at matched pooled FDP (1, 5, 10 %: the ranked p values of all pairs are swept, hits in the null species count as false) and
+   the per-pair AUC of changed versus null species by p value.
 4. `metrics.py`: precursor accuracy (leave-one-condition-out log2 error, share with abs(error) > 1, on cells every shared arm
    quantifies and on each arm's own rows, by species and by UPS1 level); counts of precursors, peptides and proteins
    (identified and transfer-only); UPS1 detection and quantification per level; matched-intensity replicate SD at protein and
-   precursor level; detection by species and intensity quartile; absence (rows in blank runs, rows of a species in runs where
-   it is absent).
+   precursor level; detection by species and intensity quartile; design-consistent UPS1 detection (a precursor counts at a
+   level when one of its rows is within 2x / 3x of its own reference, the median over the levels above the three lowest of
+   log2 intensity minus log2 level, after run offsets from the null-species precursors; raw detection is shown next to it);
+   absence (rows in blank runs, rows of a species in runs where it is absent), reported in its own table.
+   `rollup.normalise_rt_local` is an optional replacement of the run normalisation (`--rt-local` adds a second DE pass): the
+   run shift is smoothed along retention time with a running median over 401 reference precursors, the same function and the
+   same RT proxy (median andes apex RT per precursor key) for every arm; keys without an RT get the run's median shift.
 5. `downstream.py`: runs everything for one dataset and writes one JSON; `scorecard.py`: markdown tables from the JSONs.
 
 Not included: the masked wrong-peak measurement, which needs masked search and finalize runs of andes.
@@ -72,6 +82,9 @@ python3 -m quant_eval.downstream --name DS --design design.tsv --amounts amounts
 python3 -m quant_eval.scorecard --results DS1.json DS2.json > scorecard.md
 ```
 
+Add `--rt-local` to the first command to also score DE after the RT-local normalisation. Absence-only datasets (single-cell blank
+run, species absent from runs) need no `--amounts`; see `examples/sc` and `examples/p14`.
+
 `examples/<dataset>/run.sh` holds the full command of each example. Needs Python 3 with numpy, pandas, scipy and pyarrow.
 Smoke test on synthetic data (seconds): `python3 tests/test_smoke.py`.
 
@@ -83,6 +96,7 @@ the tool), verdict per tool.
 - Counts and errors: `equal` when the margin is within max(3 % of the tool value, 2 units for integer counts); 10 % for FP and
   absence counts; otherwise `better` or `worse` by the metric direction (lower is better for FP, FDP, error and SD).
 - FDP rows (FP / (TP + FP)): absolute band of 2 points.
+- DE rows and the summary use the intersection family; matched-FDP rows use `equal` within max(3 %, 2).
 - DE summary table (TP and FDP of every andes arm against each tool): better = TP >= 0.98 x tool TP and FDP lower by more than
   2 points, or TP > 1.03 x tool TP and FDP not higher by more than 2 points; worse = the mirror; else equal.
 

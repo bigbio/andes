@@ -4,17 +4,20 @@ key (andes key form), run (design run name), quantity (RAW, no normalisation of 
   andes     finalize parquet: `quantity` (raw), `quant_q`, `transfer_q`, `library_q`, `evidence_type`
   MaxQuant  evidence.txt `Intensity`, summed over the evidence rows of a precursor x run; reverse and contaminants removed
   FragPipe  IonQuant combined_ion.tsv `<run> Intensity`, from a run with IonQuant normalisation off (`--normalization 0`)
+  FlashLFQ  QuantifiedPeaks.tsv `Peak intensity` (one row per chromatographic peak; the most intense peak per precursor x run)
 """
+import collections
 import csv
 import math
 import os
+import re
 import sys
 
 import numpy as np
 import pandas as pd
 
 from . import runguard as G
-from .keys import fragpipe_key, maxquant_key, norm_key
+from .keys import flashlfq_key, fragpipe_key, maxquant_key, norm_key
 
 IDQ = 0.01          # library_q limit applied to every andes row
 TRANSFER_Q = 0.01   # transfer_q limit of the `default` rule
@@ -121,6 +124,66 @@ def read_fragpipe(path, runs):
     print(f"fragpipe {path}: runs {len(found)} unmapped-modification ions dropped {bad}", file=sys.stderr)
     d = pd.DataFrame([(k, x, q, t) for (k, x), (q, t) in rows.items()], columns=["key", "run", "quantity", "is_transfer"])
     return _finish(remap_runs(d, runs), G.run_tag("fragpipe-ionquant-norm0", path))
+
+
+# FlashLFQ (mzLib) QuantifiedPeaks.tsv. Required columns; `Peak Detection Type` MBR / MBR_IsoTrack rows are transfers, every
+# other type (MSMS, MSMSAmbiguousPeakfinding, IsoTrack_Ambiguous) is identified. Optional: `Decoy Peptide` and `Random RT`
+# (True rows are FlashLFQ's decoys and are dropped) and an MBR q-value column (header matched case-, space- and dash-free).
+FLASHLFQ_COLS = ("File Name", "Full Sequence", "Precursor Charge", "Peak intensity", "Peak Detection Type")
+FLASHLFQ_Q_COLS = ("PIP Q-Value", "MBR Q-Value", "PIP-ECHO Q-Value")
+
+
+def _bare_col(c):
+    return re.sub(r"[^a-z0-9]", "", c.lower())
+
+
+def read_flashlfq(path, runs, mbr_q=None):
+    """FlashLFQ QuantifiedPeaks.tsv -> rows. Decoy-peptide and random-RT (MBR decoy) peaks are dropped; with mbr_q, transfers
+    whose MBR q-value is above mbr_q are dropped (transfers without a q value are kept). Several peaks of one precursor x run:
+    the most intense is kept with its transfer flag (FlashLFQ's own peptide table and the FragPipe reader do the same)."""
+    r, cols = _read_tsv(path)
+    for c in FLASHLFQ_COLS:
+        if c not in cols:
+            raise SystemExit(f"{path}: missing column {c!r}")
+    qcol = next((c for c in cols if _bare_col(c) in {_bare_col(x) for x in FLASHLFQ_Q_COLS}), None)
+    if mbr_q is not None and qcol is None:
+        raise SystemExit(f"{path}: --flashlfq-mbr-q needs an MBR q-value column, one of {FLASHLFQ_Q_COLS}")
+    rows = {}
+    drop = collections.Counter()
+    types = collections.Counter((row["Peak Detection Type"] or "").strip() for row in r)
+    for row in r:
+        if (row.get("Decoy Peptide") or "").strip().lower() == "true":
+            drop["decoy_peptide"] += 1
+            continue
+        if (row.get("Random RT") or "").strip().lower() == "true":
+            drop["random_rt"] += 1
+            continue
+        seq = (row["Full Sequence"] or "").strip()
+        if "|" in seq:
+            drop["ambiguous_sequence"] += 1
+            continue
+        q = _fnum(row["Peak intensity"])
+        if not (q > 0):
+            drop["no_intensity"] += 1
+            continue
+        t = (row["Peak Detection Type"] or "").strip().upper().startswith("MBR")
+        if t and mbr_q is not None and _fnum(row[qcol]) > mbr_q:
+            drop["mbr_q_above"] += 1
+            continue
+        try:
+            key = flashlfq_key(seq, int(float(row["Precursor Charge"])))
+        except ValueError:
+            drop["unmapped_mod_or_charge"] += 1
+            continue
+        o = rows.get((key, row["File Name"]))
+        if o is not None:
+            drop["duplicate_peak_dropped"] += 1
+        if o is None or o[0] < q:
+            rows[(key, row["File Name"])] = (q, t)
+    print(f"flashlfq {path}: detection types {dict(types)} q column {qcol!r} precursor x run {len(rows)} dropped {dict(drop)}",
+          file=sys.stderr)
+    d = pd.DataFrame([(k, x, q, t) for (k, x), (q, t) in rows.items()], columns=["key", "run", "quantity", "is_transfer"])
+    return _finish(remap_runs(d, runs), G.run_tag(f"flashlfq-quantifiedpeaks:mbr_q={mbr_q}", path))
 
 
 def recover_p(tr):

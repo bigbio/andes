@@ -5,7 +5,10 @@
   3. scorecard fixes: same-family BH, TP at matched FDP, per-pair AUC, design-consistent detection, absence table, RT-local
      normalisation (unit tests on small synthetic inputs);
   4. the whole downstream (andes finalize parquet + MaxQuant evidence, design and amounts files) finds the changing species
-     (sign-aware TP > 0), no false positive in the null species, and a small precursor error.
+     (sign-aware TP > 0), no false positive in the null species, and a small precursor error;
+  5. false-transfer rate and its f_S scaling on a design with an absent species; blank carry-over with an `order` column (and
+     the unchanged counts plus a note without it); the FlashLFQ QuantifiedPeaks reader (keys, transfers, decoys, MBR q cut,
+     duplicate peaks); an absence-only downstream run with andes, MaxQuant and FlashLFQ arms through the scorecard.
 
     python3 tests/test_smoke.py
 """
@@ -23,7 +26,8 @@ import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from quant_eval import de as DE  # noqa: E402
-from quant_eval import downstream, metrics, readers, rollup, scorecard  # noqa: E402
+from quant_eval import downstream, keys, metrics, readers, rollup, scorecard  # noqa: E402
+from quant_eval.fasta import map_precursors  # noqa: E402
 from quant_eval.design import Design  # noqa: E402
 from quant_eval import runguard as G  # noqa: E402
 
@@ -156,6 +160,174 @@ class Fixes(unittest.TestCase):
         rows = sec.absence_rows()
         self.assertTrue(any("blank-run rows" in r for r in rows))
         self.assertFalse(any("blank-run" in r for r in scorecard.Section(res).build()))   # not mixed into the main table
+
+
+FLQ_HEADER = ("File Name\tBase Sequence\tFull Sequence\tProtein Group\tOrganism\tPeptide Monoisotopic Mass\tMS2 Retention Time\t"
+              "Precursor Charge\tTheoretical MZ\tPeak intensity\tPeak RT Start\tPeak RT Apex\tPeak RT End\tPeak FWHM\tPeak FWHM Status\t"
+              "Peak MZ\tPeak Charge\tNum Charge States Observed\tPeak Detection Type\tPIP Q-Value\tPIP PEP\tPSMs Mapped\t"
+              "Base Sequences Mapped\tFull Sequences Mapped\tPeak Split Valley RT\tPeak Apex Mass Error (ppm)\tDecoy Peptide\tRandom RT")
+
+
+def write_flashlfq(path, rows):
+    """rows: (file, full sequence, charge, intensity, detection type, PIP q, decoy, random RT) -> QuantifiedPeaks.tsv (mzLib header)."""
+    cols = FLQ_HEADER.split("\t")
+    with open(path, "w") as f:
+        f.write(FLQ_HEADER + "\n")
+        for fn, seq, z, q, t, pq, dec, rrt in rows:
+            v = dict.fromkeys(cols, "")
+            v.update({"File Name": fn, "Full Sequence": seq, "Base Sequence": seq, "Precursor Charge": str(z), "Peak intensity": str(q),
+                      "Peak Detection Type": t, "PIP Q-Value": pq, "Decoy Peptide": dec, "Random RT": rrt})
+            f.write("\t".join(v[c] for c in cols) + "\n")
+
+
+class Truth(unittest.TestCase):
+    """False-transfer rate (absent species), blank carry-over (design `order`), FlashLFQ reader."""
+
+    def test_false_transfer_rate_and_scaling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(f"{tmp}/d.tsv", "w") as f:
+                f.write("run\tabsent_species\nH1\tYEAST\nH2\tYEAST\nM1\t\nM2\t\n")
+            design = Design(f"{tmp}/d.tsv")
+        H = [f"H{i}" for i in range(8)]
+        rows = [(k, "M1", False) for k in H + ["Y0", "Y1"]]           # 10 transfer-eligible precursors, 2 of them YEAST: f = 0.2
+        rows += [(k, "H2", True) for k in H] + [("T0", "H1", True)]   # 9 HUMAN transfers in the runs without YEAST (T0: transfer only)
+        rows += [("Y0", "H1", True), ("Y1", "H1", False), ("Y1", "M2", True)]   # 1 visible false transfer, 1 identified YEAST row
+        raw = pd.DataFrame(rows, columns=["key", "run", "is_transfer"]).assign(quantity=1.0)
+        sp = pd.Series({**{k: "HUMAN" for k in H + ["T0"]}, "Y0": "YEAST", "Y1": "YEAST"})
+        x = metrics.false_transfer(raw, design, sp)["YEAST"]
+        self.assertEqual((x["transferred_s_rows"], x["transferred_rows"], x["identified_s_rows"]), (1, 10, 1))
+        self.assertEqual((x["eligible_precursors"], x["eligible_s_precursors"]), (10, 2))
+        self.assertAlmostEqual(x["visible_rate"], 0.1)
+        self.assertAlmostEqual(x["f_s"], 0.2)
+        self.assertAlmostEqual(x["scaled_rate"], 0.5)
+        o = metrics.absence(raw, design, sp)
+        self.assertEqual(o["absent_species"]["YEAST"]["transferred"], 1)          # existing count unchanged
+        self.assertEqual(o["false_transfer"]["YEAST"], x)
+        none = metrics.false_transfer(raw[~raw.is_transfer], design, sp)["YEAST"]
+        self.assertIsNone(none["visible_rate"])
+        self.assertIsNone(none["scaled_rate"])
+
+    def test_blank_carry_over_with_order(self):
+        rows = [("a", "S1"), ("b", "S1"), ("c", "S1"), ("a", "B1"), ("b", "B1"), ("x", "B1"),
+                ("d", "S2"), ("d", "B2"), ("a", "B2"), ("d", "B3"), ("y", "B3")]
+        raw = pd.DataFrame(rows, columns=["key", "run"]).assign(quantity=1.0, is_transfer=lambda d: d.key.isin(["x", "y"]))
+        sp = pd.Series(dict.fromkeys("abcdxy", "HUMAN"))
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(f"{tmp}/d.tsv", "w") as f:
+                f.write("run\tblank\torder\nS1\t\t1\nB1\ttrue\t2\nS2\t\t3\nB2\ttrue\t4\nB3\ttrue\t5\n")
+            design = Design(f"{tmp}/d.tsv")
+            with open(f"{tmp}/n.tsv", "w") as f:
+                f.write("run\tblank\nS1\t\nB1\ttrue\nS2\t\nB2\ttrue\nB3\ttrue\n")
+            plain = Design(f"{tmp}/n.tsv")
+        self.assertEqual([design.run_before(r) for r in ("S1", "B1", "B3")], [None, "S1", "B2"])
+        b = metrics.absence(raw, design, sp)["blank"]
+        self.assertEqual((b["blank_rows"], b["carry_over"], b["blank_rows_excl_carry_over"]), (7, 4, 3))
+        self.assertEqual(b["blank_transferred_excl_carry_over"], 2)
+        self.assertEqual({k: (v["previous_run"], v["carry_over"]) for k, v in b["carry_over_by_blank"].items()},
+                         {"B1": ("S1", 2), "B2": ("S2", 1), "B3": ("B2", 1)})   # B3 follows a blank: carry-over chains through B2
+        p = metrics.absence(raw, plain, sp)["blank"]
+        self.assertIsNone(p["carry_over"])
+        self.assertIn("no 'order' column", p["carry_over_note"])
+        self.assertEqual({k: p[k] for k in ("blank_rows", "blank_transferred", "blank_precursors")}, {k: b[k] for k in ("blank_rows", "blank_transferred", "blank_precursors")})
+        res = {"arms": {"andes": {}}, "arm_roles": {"andes": {"kind": "andes", "rule": "default"}}, "primary": "andes", "classes": [],
+               "absence": {"andes": {"blank": b}}}
+        self.assertTrue(any("carry-over excluded" in r for r in scorecard.Section(res).absence_rows()))
+        self.assertIn("| andes | 3 | 7 | 4 | 3 | 2 |", "\n".join(scorecard.carry_over_table(res)))
+        res["absence"]["andes"]["blank"] = p
+        self.assertIn("not computed", scorecard.carry_over_table(res)[0])
+
+    def test_flashlfq_reader(self):
+        acm = "[Common Biological:Acetylation on X]M[Common Variable:Oxidation on M]PEC[Common Fixed:Carbamidomethyl on C]K"
+        k1 = keys.andes_key("[UNIMOD:1]M[UNIMOD:35]PEC[UNIMOD:4]K/2")
+        self.assertEqual(keys.flashlfq_key(acm, 2), k1)
+        self.assertEqual(keys.flashlfq_key("PEPTIDEK-[+15.9949]", 2), "PEPTIDEK[+15.99491]/2")   # C-terminal tag on the last residue
+        with self.assertRaises(ValueError):
+            keys.flashlfq_key("PEPS[Common Biological:Phosphorylation on S]IDEK", 2)
+        rows = [("run-a", acm, 2, 1000, "MSMS", "", "False", "False"),
+                ("Run_B", acm, 2, 500, "MBR", "0.001", "False", "False"),
+                ("run-a", "PEPTIDEK", 2, 300, "MSMS", "", "False", "False"),
+                ("run-a", "PEPTIDEK", 2, 900, "MSMS", "", "False", "False"),             # second peak of the same precursor x run
+                ("Run_B", "PEPTIDEK", 2, 100, "MBR", "0.2", "False", "False"),           # above an MBR q limit of 0.05
+                ("Run_B", "PEPTIDEK", 3, 100, "MBR", "0.001", "False", "True"),          # random-RT decoy peak
+                ("run-a", "DECOYK", 2, 100, "MSMS", "", "True", "False"),                # decoy peptide
+                ("run-a", "PEPS[Common Biological:Phosphorylation on S]IDEK", 2, 100, "MSMS", "", "False", "False"),
+                ("run-a", "PEPTIDEK|PEPTLDEK", 2, 100, "MSMSAmbiguousPeakfinding", "", "False", "False"),
+                ("run-a", "ZEROK", 2, 0, "MSMS", "", "False", "False"),
+                ("Run_B", "ISOK", 2, 50, "MBR_IsoTrack", "", "False", "False"),          # transfer without a q value: kept
+                ("other", "PEPTIDEK", 2, 100, "MSMS", "", "False", "False")]             # run not in the design
+        with tempfile.TemporaryDirectory() as tmp:
+            write_flashlfq(f"{tmp}/QuantifiedPeaks.tsv", rows)
+            d = readers.read_flashlfq(f"{tmp}/QuantifiedPeaks.tsv", ["RUN_A", "RUN_B"])
+            dq = readers.read_flashlfq(f"{tmp}/QuantifiedPeaks.tsv", ["RUN_A", "RUN_B"], mbr_q=0.05)
+            with open(f"{tmp}/bad.tsv", "w") as f:
+                f.write("File Name\tFull Sequence\tPrecursor Charge\tPeak intensity\n")
+            with self.assertRaises(SystemExit):
+                readers.read_flashlfq(f"{tmp}/bad.tsv", ["RUN_A"])
+            with open(f"{tmp}/noq.tsv", "w") as f:
+                f.write("File Name\tFull Sequence\tPrecursor Charge\tPeak intensity\tPeak Detection Type\nrun-a\tPEPTIDEK\t2\t5\tMSMS\n")
+            self.assertEqual(len(readers.read_flashlfq(f"{tmp}/noq.tsv", ["RUN_A"])), 1)
+            with self.assertRaises(SystemExit):
+                readers.read_flashlfq(f"{tmp}/noq.tsv", ["RUN_A"], mbr_q=0.05)
+        got = {(k, r): (q, t) for k, r, q, t in zip(d.key, d.run, d.quantity, d.is_transfer)}
+        self.assertEqual(got, {(k1, "RUN_A"): (1000.0, False), (k1, "RUN_B"): (500.0, True), ("PEPTIDEK/2", "RUN_A"): (900.0, False),
+                               ("PEPTIDEK/2", "RUN_B"): (100.0, True), ("ISOK/2", "RUN_B"): (50.0, True)})
+        self.assertEqual(set(zip(dq.key, dq.run)), set(got) - {("PEPTIDEK/2", "RUN_B")})
+        self.assertTrue(G.tag_of(d).startswith("flashlfq-quantifiedpeaks:mbr_q=None:"))
+        self.assertNotEqual(G.tag_of(d), G.tag_of(dq))
+        self.assertEqual(list(d.columns), ["key", "run", "quantity", "is_transfer", "library_q", "tq", "thr", "run_tag"])
+
+    def test_downstream_absence_with_flashlfq(self):
+        """Absence-only dataset: andes (default rule) + MaxQuant + FlashLFQ; YEAST absent from A runs, one blank after B_1."""
+        with tempfile.TemporaryDirectory() as tmp:
+            make_dataset(tmp)
+            peps = sorted(set(k.split("/")[0] for k in pd.read_parquet(f"{tmp}/final.parquet").precursor_key))
+            spm = map_precursors([p + "/2" for p in peps], f"{tmp}/db.fasta", ("HUMAN", "YEAST"))[0]
+            Hs = [k[:-2] for k in spm.index if spm[k] == "HUMAN"]
+            Ys = [k[:-2] for k in spm.index if spm[k] == "YEAST"]
+            # (peptide, run, transfer, transfer_q): HUMAN 0-59 and YEAST 0-19 identified in B runs, HUMAN 0-59 in A runs;
+            # transfers into A_1: YEAST 0-1 (q 0.001), YEAST 2-3 (q 0.5), HUMAN 60-67 (q 0.001, identified in B_1);
+            # blank after B_1: HUMAN 0-4 (carry-over) and HUMAN 70 (not in B_1)
+            ev = [(p, r, False, 0.0) for p in Hs[:60] for r in ("A_1", "A_2", "A_3", "B_1", "B_2")]
+            ev += [(p, r, False, 0.0) for p in Ys[:20] for r in ("B_1", "B_2")] + [(p, "B_1", False, 0.0) for p in Hs[60:68]]
+            ev += [(p, "A_1", True, 0.001) for p in Ys[:2] + Hs[60:68]] + [(p, "A_1", True, 0.5) for p in Ys[2:4]]
+            ev += [(p, "BLANK", False, 0.0) for p in Hs[:5] + [Hs[70]]]
+            pd.DataFrame({"precursor_key": [p + "/2" for p, *_ in ev], "run": [e[1] for e in ev],
+                          "evidence_type": ["transfer_mbr" if e[2] else "identified_ms2" for e in ev], "quantity": 1e6,
+                          "quant_q": [e[3] for e in ev], "transfer_q": [e[3] for e in ev], "library_q": 0.0}).to_parquet(f"{tmp}/abs.parquet")
+            with open(f"{tmp}/evidence_abs.txt", "w") as f:
+                f.write("Modified sequence\tCharge\tRaw file\tType\tIntensity\tReverse\tPotential contaminant\n")
+                f.writelines(f"_{p}_\t2\t{r}\t{'MULTI-MATCH' if t else 'MULTI-MSMS'}\t1000000\t\t\n" for p, r, t, _ in ev)
+            write_flashlfq(f"{tmp}/QuantifiedPeaks.tsv", [(r, p, 2, 1e6, "MBR" if t else "MSMS", ("0.2" if q > 0.1 else "0.001") if t else "",
+                                                           "False", "False") for p, r, t, q in ev])
+            with open(f"{tmp}/design_abs.tsv", "w") as f:
+                f.write("run\tblank\tabsent_species\torder\nB_1\t\t\t1\nBLANK\ttrue\t\t2\nA_1\t\tYEAST\t3\nA_2\t\tYEAST\t4\nA_3\t\tYEAST\t5\nB_2\t\t\t6\n")
+            out = f"{tmp}/abs.json"
+            downstream.main(["--name", "absence", "--design", f"{tmp}/design_abs.tsv", "--fasta", f"{tmp}/db.fasta", "--classes", "HUMAN,YEAST",
+                             "--andes", f"andes:default:{tmp}/abs.parquet", "--maxquant", f"MQ:{tmp}/evidence_abs.txt",
+                             "--flashlfq", f"FLQ:{tmp}/QuantifiedPeaks.tsv", "--flashlfq-mbr-q", "0.05", "--out", out])
+            with open(out) as f:
+                res = json.load(f)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                scorecard.main(["--results", out])
+        AB = res["absence"]
+        self.assertEqual(res["arm_roles"]["FLQ"], {"kind": "flashlfq", "mbr_q": 0.05})
+        f_s = 20 / 89                                       # eligible: HUMAN 0-67 and 70 (69), YEAST 0-19 (20)
+        for arm, key, n_s, n in (("andes", "false_transfer", 2, 10), ("andes", "false_transfer_all", 4, 12),
+                                 ("MQ", "false_transfer", 4, 12), ("FLQ", "false_transfer", 2, 10)):
+            x = AB[arm][key]["YEAST"]
+            self.assertEqual((x["transferred_s_rows"], x["transferred_rows"], x["identified_s_rows"]), (n_s, n, 0), (arm, key))
+            self.assertAlmostEqual(x["f_s"], f_s, msg=arm)
+            self.assertAlmostEqual(x["scaled_rate"], n_s / n / f_s, msg=arm)
+        for arm in ("andes", "MQ", "FLQ"):
+            b = AB[arm]["blank"]
+            self.assertEqual((b["blank_rows"], b["carry_over"], b["blank_rows_excl_carry_over"]), (6, 5, 1), arm)
+            self.assertEqual(b["carry_over_by_blank"]["BLANK"]["previous_run"], "B_1")
+        md = buf.getvalue()
+        for text in ("False-transfer rate per arm", "| FLQ | MBR q <= 0.05 | YEAST | 3 | 2 | 10 | 0 | 20.00 | 22.47 | 89.00 |",
+                     "| andes | rule all (every finalize transfer) | YEAST | 3 | 4 | 12 |", "carry-over excluded [andes]",
+                     "false-transfer rate, scaled % (visible / f_YEAST) [andes]", "| FLQ | 1 | 6 | 5 | 1 | 0 | BLANK after B_1 |"):
+            self.assertIn(text, md)
 
 
 class Smoke(unittest.TestCase):

@@ -2,16 +2,21 @@
 """One downstream pipeline, identical for every arm, on RAW precursor x run tables (one per arm).
 
   python -m quant_eval.downstream --name DS --design design.tsv [--amounts amounts.tsv] --fasta db.fasta --classes A,B --null A \
-      --andes NAME:RULE:finalize.parquet ... --maxquant NAME:evidence.txt --fragpipe NAME:combined_ion.tsv --out DS.json
+      --andes NAME:RULE:finalize.parquet ... --maxquant NAME:evidence.txt --fragpipe NAME:combined_ion.tsv \
+      [--flashlfq NAME:QuantifiedPeaks.tsv [--flashlfq-mbr-q Q]] --out DS.json
 
 Arms (the only arm-specific step is the row rule of the reader, see readers.py):
   --andes NAME:RULE:PATH   RULE in default | all | hard-cut | weights; `weights` is the precision-weight view (V)
   --maxquant NAME:PATH     evidence.txt Intensity;  --fragpipe NAME:PATH   combined_ion.tsv with IonQuant normalisation off
+  --flashlfq NAME:PATH     QuantifiedPeaks.tsv Peak intensity (e.g. FlashLFQ with PIP-ECHO as a reference arm)
 Every arm table carries one run tag and no duplicated (key, run); no column of one arm is joined to another arm's table.
 
 Normalisation and roll-up: rollup.py. DE: de.py (moderated t, BH 5 % per pair, sign-aware TP, with and without |log2FC| >= 0.5).
 Precursor accuracy: leave-one-condition-out error, share |err| > 1, on the cells every shared arm quantifies ('shared') and on
-the arm's own rows ('own'). Shared arms = the first andes arm and the tool arms."""
+the arm's own rows ('own'). Shared arms = the first andes arm and the tool arms (MaxQuant, FragPipe, FlashLFQ).
+Absence (metrics.absence): blank rows (split into carry-over and the rest when design.tsv has `order`), rows of absent species,
+and the false-transfer rate per absent species; for andes arms the rate is also given on every transfer of the finalize output
+(rule `all`) next to the arm's own rows."""
 import argparse
 import json
 import sys
@@ -42,6 +47,9 @@ def parse_args(argv=None):
     ap.add_argument("--andes", action="append", default=[], metavar="NAME:RULE:PATH")
     ap.add_argument("--maxquant", action="append", default=[], metavar="NAME:PATH")
     ap.add_argument("--fragpipe", action="append", default=[], metavar="NAME:PATH")
+    ap.add_argument("--flashlfq", action="append", default=[], metavar="NAME:PATH", help="FlashLFQ QuantifiedPeaks.tsv")
+    ap.add_argument("--flashlfq-mbr-q", type=float, default=None,
+                    help="drop FlashLFQ transfers whose MBR q-value ('PIP Q-Value' or 'MBR Q-Value') is above this; default: keep all")
     ap.add_argument("--rt-local", action="store_true",
                     help="also run DE after the RT-local run normalisation (same function for every arm; RT proxy = the first andes arm's apex RT)")
     ap.add_argument("--hard-cut", type=float, default=0.01, help="quant_q limit of the hard-cut rule")
@@ -63,12 +71,30 @@ def load_arms(a, runs):
         name, path = spec.split(":", 1)
         tabs[name] = R.read_fragpipe(path, runs)
         kinds[name] = {"kind": "fragpipe"}
+    for spec in a.flashlfq:
+        name, path = spec.split(":", 1)
+        tabs[name] = R.read_flashlfq(path, runs, a.flashlfq_mbr_q)
+        kinds[name] = {"kind": "flashlfq", "mbr_q": a.flashlfq_mbr_q}
     if not tabs:
         raise SystemExit("no arm given")
     for k, d in tabs.items():
         G.tag_of(d)
         assert not d.duplicated(["key", "run"]).any(), k
     return tabs, kinds
+
+
+def load_all_transfers(a, design):
+    """andes arms on every transfer of the finalize output (rule `all`), for the false-transfer rate next to the arm's own rows;
+    read only when the design has absent species, and not for rules `all` / `weights` (their rows are already every transfer).
+    Each table keeps its own run tag and is never joined to an arm table."""
+    if not design.absent:
+        return {}
+    out = {}
+    for spec in a.andes:
+        name, rule, path = spec.split(":", 2)
+        if rule not in ("all", "weights"):
+            out[name] = R.read_andes(path, design.runs, "all")
+    return out
 
 
 def evaluate(a):
@@ -81,11 +107,13 @@ def evaluate(a):
     print(a.name, "arms", {k: (len(v), G.tag_of(v)) for k, v in tabs.items()}, file=sys.stderr)
 
     allkeys = sorted(set().union(*[set(v.key) for v in tabs.values()]))
+    alltr = load_all_transfers(a, design)
+    spkeys = sorted(set(allkeys).union(*[set(v.key) for v in alltr.values()]))   # species also for the rule-`all` transfers
     if a.fasta:
-        sp, prot, ent_sp = map_precursors(allkeys, a.fasta, classes)
-        prot_sp = {p: ent_sp.get(p) for p in prot.dropna().unique()}
+        sp, prot, ent_sp = map_precursors(spkeys, a.fasta, classes)
+        prot_sp = {p: ent_sp.get(p) for p in prot.reindex(allkeys).dropna().unique()}
     else:
-        sp = pd.Series("NONE", index=allkeys)
+        sp = pd.Series("NONE", index=spkeys)
         prot = pd.Series(np.nan, index=allkeys, dtype=object)
         prot_sp = {}
 
@@ -158,6 +186,8 @@ def evaluate(a):
             RES["hye_det"] = M.detection_by_quartile(tabs, PM, refs, sp, classes,
                                                      all_rows_refs=[n for n in refs if kinds[n]["kind"] != "andes"])
     RES["absence"] = {n: M.absence(raw, design, sp) for n, raw in tabs.items()}
+    for n, raw in alltr.items():
+        RES["absence"][n]["false_transfer_all"] = M.false_transfer(raw, design, sp)
     RES["elapsed_s"] = time.time() - t0
     return RES
 

@@ -14,7 +14,9 @@ TP > 1.03 x tool TP and FDP not higher by > 2 points; worse = the mirror; else e
 
 DE rows use the intersection BH family (proteins tested by every shared arm; variance prior and BH on that set) as the headline; the family
 table gives own / intersection / union. True positives at matched pooled FDP (1 / 5 / 10 %) and per-pair AUC come from the ranked
-p-value list. Absence (blank runs, species absent from runs) has its own table; it is not part of the DE or detection rows."""
+p-value list. Absence (blank runs, species absent from runs) has its own table; it is not part of the DE or detection rows.
+The absence table adds, when computed, the blank rows without carry-over (design column `order`) and the false-transfer rate
+(visible and scaled, see metrics.false_transfer); two per-arm tables (every arm, FlashLFQ included) give the counts behind them."""
 import argparse
 import json
 
@@ -198,16 +200,69 @@ class Section:
             if b:
                 self.row(f"blank-run rows ({b['blank_runs']} runs) [{arm}]", b["blank_rows"], g(r["absence"], self.MQ, "blank", "blank_rows"), g(r["absence"], self.FP, "blank", "blank_rows"), hi=False, tol=0.10)
                 self.row(f"blank-run rows transferred [{arm}]", b["blank_transferred"], g(r["absence"], self.MQ, "blank", "blank_transferred"), g(r["absence"], self.FP, "blank", "blank_transferred"), hi=False, tol=0.10)
+                if b.get("carry_over") is not None:
+                    gb = lambda t, k: g(r["absence"], t, "blank", k)
+                    self.row(f"blank-run rows, carry-over excluded [{arm}]", b["blank_rows_excl_carry_over"], gb(self.MQ, "blank_rows_excl_carry_over"), gb(self.FP, "blank_rows_excl_carry_over"), hi=False, tol=0.10)
             for s, x in (g(r.get("absence", {}), arm, "absent_species") or {}).items():
                 gs = lambda t, k: g(r["absence"], t, "absent_species", s, k)
                 self.row(f"{s} rows in the {x['absent_runs']} runs without {s} [{arm}]", x["rows"], gs(self.MQ, "rows"), gs(self.FP, "rows"), hi=False, tol=0.10)
                 self.row(f"  of which transferred [{arm}]", x["transferred"], gs(self.MQ, "transferred"), gs(self.FP, "transferred"), hi=False, tol=0.10)
+                if g(r["absence"], arm, "false_transfer", s):
+                    fr = lambda t, k: (lambda v: None if v is None else 100 * v)(g(r["absence"], t, "false_transfer", s, k))
+                    for lab, k in ((f"visible % ({s} transfers / all transfers in those runs)", "visible_rate"), (f"scaled % (visible / f_{s})", "scaled_rate")):
+                        self.row(f"  false-transfer rate, {lab} [{arm}]", fr(arm, k), fr(self.MQ, k), fr(self.FP, k), hi=False, tol=0.10, nd=2, pct=False)
         if "ups_strat" in A[C]:
             lv = r["levels"][:3]
             low = lambda t, key: None if (t is None or t not in A) else sum(A[t]["ups_strat"][L][key] for L in lv)
             self.row(f"UPS transferred rows at the 3 lowest levels ({', '.join(lv)})", *[low(x, "ups_rows_transferred") for x in (C, self.MQ, self.FP)], hi=False, tol=0.10)
             self.row("  of which the precursor has no identified row at that level", *[low(x, "ups_transfer_rows_without_ident_at_level") for x in (C, self.MQ, self.FP)], hi=False, tol=0.10)
         return self.rows
+
+
+def _pc(v):
+    return "n/a" if v is None else f"{100 * v:.2f}"
+
+
+def false_transfer_table(res):
+    """False-transfer rate of every arm per absent species: visible = transferred rows of S / all transferred rows in the runs
+    without S; f_S = share of S among the arm's transfer-eligible (identified in any run) precursors; scaled = visible / f_S.
+    andes arms: the arm's rule rows and every transfer of the finalize output (rule `all`)."""
+    AB = res.get("absence") or {}
+    out = []
+    for n, k in res["arm_roles"].items():
+        if k["kind"] == "andes":
+            views = ((f"rule {k.get('rule')}", "false_transfer"), ("rule all (every finalize transfer)", "false_transfer_all"))
+        else:
+            views = (("as reported" if k.get("mbr_q") is None else f"MBR q <= {k['mbr_q']}", "false_transfer"),)
+        for lab, key in views:
+            for s, x in (g(AB, n, key) or {}).items():
+                out.append(f"| {n} | {lab} | {s} | {x['absent_runs']} | {x['transferred_s_rows']:,} | {x['transferred_rows']:,} | "
+                           f"{x['identified_s_rows']:,} | {_pc(x['visible_rate'])} | {_pc(x['f_s'])} | {_pc(x['scaled_rate'])} |")
+    if not out:
+        return []
+    return ["| arm | rows | absent species S | runs without S | transferred S rows | all transferred rows | identified S rows | "
+            "visible % | f_S % | scaled % |", "|---" * 10 + "|"] + out
+
+
+def carry_over_table(res):
+    """Blank rows of every arm: raw, carry-over (precursor quantified by the arm in the run acquired just before the blank) and
+    carry-over excluded; a note when the design has no `order` column."""
+    AB = res.get("absence") or {}
+    out, note = [], None
+    for n in res["arm_roles"]:
+        b = g(AB, n, "blank")
+        if not b:
+            continue
+        if b.get("carry_over") is None:
+            note = b.get("carry_over_note") or note
+            continue
+        prev = ", ".join(f"{x} after {y['previous_run']}" for x, y in b["carry_over_by_blank"].items())
+        out.append(f"| {n} | {b['blank_runs']} | {b['blank_rows']:,} | {b['carry_over']:,} | {b['blank_rows_excl_carry_over']:,} | "
+                   f"{b['blank_transferred_excl_carry_over']:,} | {prev} |")
+    if out:
+        return ["| arm | blank runs | blank rows (raw) | carry-over rows | carry-over excluded | transferred, carry-over excluded | blank after run |",
+                "|---" * 7 + "|"] + out
+    return [f"Blank carry-over {note}; the blank-run rows above are raw counts."] if note else []
 
 
 def de_summary(res):
@@ -341,6 +396,10 @@ def main(argv=None):
         rows = ab.absence_rows()
         if rows:
             out += ["### Absence (rows that should not exist; lower is better)", "", *hdr, *rows, ""]
+        for title, tab in (("False-transfer rate per arm (runs where a species is absent; PIP-ECHO style)", false_transfer_table(r)),
+                           ("Blank runs: carry-over from the run acquired before each blank", carry_over_table(r))):
+            if tab:
+                out += [f"### {title}", ""] + tab + [""]
     print("\n".join(out))
 
 

@@ -125,6 +125,64 @@ def maxquant_key(modseq, charge, fixed_cam=True):
     return fmt_key(seq, deltas, charge)
 
 
+# FlashLFQ QuantifiedPeaks 'Full Sequence' in mzLib (MetaMorpheus) notation: each modification in brackets after its residue,
+# "[Type:Name on Target]"; an N-terminal modification stands before residue 1, a C-terminal one after "-" at the end, e.g.
+# "[Common Biological:Acetylation on X]M[Common Variable:Oxidation on M]PEC[Common Fixed:Carbamidomethyl on C]K".
+# Fixed modifications are printed (no implicit Carbamidomethyl). Numeric tags ("[+15.9949]"), UNIMOD accessions and bare names
+# are accepted as well.
+_MZLIB_NAMES = {"carbamidomethyl": "Carbamidomethyl", "carbamidomethylation": "Carbamidomethyl", "oxidation": "Oxidation",
+                "acetyl": "Acetyl", "acetylation": "Acetyl"}
+
+
+def _mzlib_mod(tag):
+    """One bracket tag -> modification names. UniProt protein N-terminal acetylations (N-acetylserine, ...) count as Acetyl."""
+    t = tag.strip()
+    if t in UNIMOD:
+        return [UNIMOD[t]]
+    if t in MASS:
+        return [t]
+    if ":" in t:
+        n = t.split(":", 1)[1].rsplit(" on ", 1)[0].strip().lower()
+        if n in _MZLIB_NAMES:
+            return [_MZLIB_NAMES[n]]
+        if n.startswith("n-acetyl"):
+            return ["Acetyl"]
+        raise ValueError(f"unmapped mzLib modification {tag!r}")
+    try:
+        return names_of_delta(float(t))
+    except ValueError:
+        raise ValueError(f"unmapped mzLib modification {tag!r}")
+
+
+def flashlfq_key(fullseq, charge):
+    s = fullseq.strip()
+    seq, deltas, i, pos = [], {}, -1, 0
+    while pos < len(s):
+        c = s[pos]
+        if c == "[":
+            depth, j = 0, pos
+            while j < len(s):  # balanced brackets: UniProt names may contain "[...]"
+                depth += {"[": 1, "]": -1}.get(s[j], 0)
+                if depth == 0:
+                    break
+                j += 1
+            if j == len(s):
+                raise ValueError(f"unbalanced bracket in {fullseq!r}")
+            deltas.setdefault(max(i, 0), []).extend(_mzlib_mod(s[pos + 1:j]))
+            pos = j + 1
+        elif c == "-":  # separator before a C-terminal modification
+            pos += 1
+        elif "A" <= c <= "Z":
+            seq.append(c)
+            i += 1
+            pos += 1
+        else:
+            raise ValueError(f"cannot read FlashLFQ sequence {fullseq!r}")
+    if not seq:
+        raise ValueError(f"empty FlashLFQ sequence (charge {charge})")
+    return fmt_key("".join(seq), deltas, charge)
+
+
 def bare(k):
     """Bare sequence of an andes key (modification tags and charge removed)."""
     return re.sub(r"\[[^\]]*\]", "", k.rsplit("/", 1)[0]).replace("-", "")

@@ -133,13 +133,15 @@ def design_detection(raw, design, sp, thresholds=(1.0, 1.58), ref_skip=3):
 
 
 def absence(raw, design, sp):
-    """Rows that should not exist: every row in blank runs, and rows of a species in the runs where it is absent."""
+    """Rows that should not exist: every row in blank runs, and rows of a species in the runs where it is absent. Adds the
+    blank carry-over split (`carry_over`) and the false-transfer rate per absent species (`false_transfer`)."""
     o = {}
     if design.blank:
         b = raw[raw.run.isin(design.blank)]
         nb = raw[~raw.run.isin(design.blank)]
         o["blank"] = {"blank_runs": len(design.blank), "blank_rows": int(len(b)), "blank_transferred": int(b.is_transfer.sum()),
                       "blank_precursors": int(b.key.nunique()), "other_rows": int(len(nb)), "other_precursors": int(nb.key.nunique())}
+        o["blank"].update(carry_over(raw, design))
     for s in sorted(set(design.absent.values())):
         runs_s = {r for r, v in design.absent.items() if v == s}
         h = raw[raw.run.isin(runs_s)]
@@ -147,6 +149,55 @@ def absence(raw, design, sp):
         o.setdefault("absent_species", {})[s] = {"absent_runs": len(runs_s), "rows": int((spk == s).sum()),
                                                   "transferred": int(((spk == s) & h.is_transfer).sum()),
                                                   "other_species_rows": int((spk != s).sum())}
+    if design.absent:
+        o["false_transfer"] = false_transfer(raw, design, sp)
+    return o
+
+
+def carry_over(raw, design):
+    """Blank rows explained by carry-over. For each blank run b, carry-over = the rows of b whose precursor the same arm quantifies
+    (any row) in the run acquired immediately before b (design column `order`; the predecessor may itself be a blank). Returns
+    the totals over the blank runs (raw, carry-over, carry-over excluded, and the transferred rows among the excluded ones) and
+    the split per blank. Without an `order` column nothing is computed and `carry_over` is None with a note."""
+    if not design.order:
+        return {"carry_over": None, "carry_over_note": "not computed: design.tsv has no 'order' column"}
+    per, co, ex_tr = {}, 0, 0
+    for b in sorted(design.blank):
+        prev = design.run_before(b)
+        rows = raw[raw.run == b]
+        hit = rows.key.isin(set(raw.key[raw.run == prev])).values if prev else np.zeros(len(rows), bool)
+        per[b] = {"previous_run": prev, "rows": int(len(rows)), "carry_over": int(hit.sum())}
+        co += int(hit.sum())
+        ex_tr += int((rows.is_transfer.values.astype(bool) & ~hit).sum())
+    n = int(raw.run.isin(design.blank).sum())
+    return {"carry_over": co, "blank_rows_excl_carry_over": n - co, "blank_transferred_excl_carry_over": ex_tr,
+            "carry_over_by_blank": per}
+
+
+def false_transfer(raw, design, sp):
+    """False-transfer rate per absent species S (PIP-ECHO style; Solivais et al., J Proteome Res 2025, 24:4437). In the runs where
+    the design says S is absent, every transferred row of S is a visible false transfer:
+        visible = transferred S rows / all transferred rows (all species) in those runs.
+    Wrong transfers onto precursors of the present species are invisible. Assuming false transfers land on species in proportion
+    to the donor library composition, the visible ones are a share f_S of all false transfers:
+        f_S = S precursors / all precursors among the transfer-eligible precursors (the arm's precursors with at least one
+              identified, i.e. non-transfer, row in any run; from the arm's own table),
+        scaled = visible / f_S (not capped; a value above 1 means the assumption does not hold).
+    Transfers are the reader's is_transfer rows. Rates are None when undefined (no transfer, f_S = 0)."""
+    elig = pd.Series(sorted(set(raw.key[~raw.is_transfer.values.astype(bool)])), dtype=object).map(sp)
+    o = {}
+    for s in sorted(set(design.absent.values())):
+        runs_s = {r for r, v in design.absent.items() if v == s}
+        h = raw[raw.run.isin(runs_s)]
+        is_s = (h.key.map(sp) == s).values
+        tr = h.is_transfer.values.astype(bool)
+        n_tr, n_tr_s = int(tr.sum()), int((tr & is_s).sum())
+        n_el_s = int((elig == s).sum())
+        vis = n_tr_s / n_tr if n_tr else None
+        f = n_el_s / len(elig) if len(elig) else None
+        o[s] = {"absent_runs": len(runs_s), "transferred_s_rows": n_tr_s, "transferred_rows": n_tr,
+                "identified_s_rows": int((~tr & is_s).sum()), "eligible_precursors": int(len(elig)), "eligible_s_precursors": n_el_s,
+                "visible_rate": vis, "f_s": f, "scaled_rate": (vis / f) if (vis is not None and f) else None}
     return o
 
 

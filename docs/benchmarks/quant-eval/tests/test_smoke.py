@@ -202,9 +202,10 @@ class Rates(unittest.TestCase):
         self.assertEqual([c["transfers"] for c in cur], [1, 4, 6])             # blank-run transfer never counts
         self.assertEqual([c["YEAST"]["false"] for c in cur], [0, 0, 1])
         self.assertAlmostEqual(cur[2]["YEAST"]["rate"], 0.25)
-        self.assertEqual(rates.matched_depth(cur, "YEAST", 0.10), (0.003, 4))   # loosest threshold with rate <= 10 %
-        self.assertEqual(rates.matched_depth(cur, "YEAST", 0.25), (0.01, 6))
-        self.assertIsNone(rates.matched_depth(rates.depth_curve(d, design, self.SP, "tq", grid=[0.0001]), "YEAST", 0.5))   # nothing kept: no rate, no match
+        self.assertEqual(rates.matched_depth(cur, "YEAST", 0.10, min_n=0), (0.003, 4))   # loosest threshold with rate <= 10 %
+        self.assertEqual(rates.matched_depth(cur, "YEAST", 0.25, min_n=0), (0.01, 6))
+        self.assertIsNone(rates.matched_depth(cur, "YEAST", 0.25))                                                     # fewer than 1000 absent-run transfers: no match
+        self.assertIsNone(rates.matched_depth(rates.depth_curve(d, design, self.SP, "tq", grid=[0.0001]), "YEAST", 0.5, min_n=0))   # nothing kept: no rate, no match
 
     def test_scorecard_tables(self):
         from quant_eval import rates

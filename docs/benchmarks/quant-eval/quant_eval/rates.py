@@ -80,12 +80,13 @@ def depth_curve(raw, design, sp, col, grid=GRID):
     return out
 
 
-def matched_depth(curve, species, rate):
+def matched_depth(curve, species, rate, min_n=1000):
     """Most transferred rows of the curve among the thresholds whose false-transfer rate is <= rate (a step on the grid, no interpolation);
-    on equal rows the smallest threshold. Returns (threshold, transfers) or None when every threshold has a rate above `rate` or no rate."""
+    on equal rows the smallest threshold. Thresholds with fewer than `min_n` transferred rows in the absent runs are skipped (their rate is
+    noise). Returns (threshold, transfers) or None when no such threshold has a rate <= `rate`."""
     best = None
     for p in curve:
         r = p[species]["rate"]
-        if r == r and r <= rate and (best is None or p["transfers"] > best[1]):
+        if p[species]["transfers_in_absent_runs"] >= min_n and r == r and r <= rate and (best is None or p["transfers"] > best[1]):
             best = (p["threshold"], p["transfers"])
     return best

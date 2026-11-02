@@ -2271,9 +2271,9 @@ mod finalize_tests {
     use super::*;
     use crate::quant_finalize::{
         finalize, finalize_stream, for_each_scored, pseudo_example, shared_peak_wrong,
-        shared_peaks, table_features, wrong_features, BlockContext, EntryIndex, ExtractRuns,
-        FinalizeLimits, FinalizeOptions, FinalizeParams, FinalizeSummary, MbrFeature, Table,
-        WrongCalibration, SCORE_CHUNK,
+        shared_peaks, table_features, with_false_transfers, wrong_features, BlockContext,
+        EntryIndex, ExtractRuns, FinalizeLimits, FinalizeOptions, FinalizeParams, FinalizeSummary,
+        MbrFeature, Table, WrongCalibration, SCORE_CHUNK,
     };
     use crate::quant_lookalike::{usable_fit, Lookalikes};
     use crate::transfer_fdr::{
@@ -3000,6 +3000,9 @@ mod finalize_tests {
                     }
                 }
             }
+            if options.absence_in_quant_q {
+                with_false_transfers(&mut p_wrong, rows, &idx, &scored, &fdr);
+            }
             let mut wrongs: Vec<(usize, f64)> = Vec::new();
             let shared = shared_peaks(rows, &idx, &look, &|q, run| {
                 identified.get(&(q, run)).and_then(|e| usable_fit(e))
@@ -3199,6 +3202,7 @@ mod finalize_tests {
         FinalizeOptions {
             lookalike_ppm: 2500.0,
             shared_peak_ms2: true,
+            absence_in_quant_q: true,
         }
     }
 
@@ -3385,9 +3389,14 @@ mod finalize_tests {
         let dir = tempfile::tempdir().unwrap();
         let lib = library_with_entries();
         let runs = extract_with_lookalike_ids();
+        // The look-alike settings alone.
         let reported = FinalizeOptions {
-            shared_peak_ms2: false,
-            ..opted_in()
+            lookalike_ppm: opted_in().lookalike_ppm,
+            ..FinalizeOptions::default()
+        };
+        let need_ms2 = FinalizeOptions {
+            shared_peak_ms2: true,
+            ..reported.clone()
         };
         let (s0, f0) = stream(
             &lib,
@@ -3407,7 +3416,7 @@ mod finalize_tests {
             &dir.path().join("ms2"),
             0.05,
             None,
-            &opted_in(),
+            &need_ms2,
         );
         // The same rows and transfer q-values; the look-alike is reported
         // either way.
@@ -3459,7 +3468,7 @@ mod finalize_tests {
         };
         assert!(at_01(&f1) < at_01(&f0), "{} {}", at_01(&f1), at_01(&f0));
         // The map-reduce output is the reference's.
-        for (name, options) in [("report", &reported), ("ms2", &opted_in())] {
+        for (name, options) in [("report", &reported), ("ms2", &need_ms2)] {
             let (m1, v1) = mbr_paths(&dir.path().join(format!("{name}-ref")));
             let want = reference(&stems(), &lib, &runs, 0.05, None, 3, options, &m1, &v1).unwrap();
             let (m2, v2) = mbr_paths(&dir.path().join(name));
@@ -3468,6 +3477,77 @@ mod finalize_tests {
             let got = if name == "report" { &f0 } else { &f1 };
             assert_eq!(&want.features, got);
         }
+    }
+
+    #[test]
+    fn false_transfers_in_quant_q_never_lower_it_and_keep_the_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = library_with_entries();
+        let runs = extract();
+        let off = FinalizeOptions::default();
+        let on = FinalizeOptions {
+            absence_in_quant_q: true,
+            ..FinalizeOptions::default()
+        };
+        let run = |name: &str, o: &FinalizeOptions| {
+            stream(
+                &lib,
+                &runs,
+                unlimited(),
+                50,
+                &dir.path().join(name),
+                0.05,
+                None,
+                o,
+            )
+        };
+        let ((s0, f0), (s1, f1)) = (run("off", &off), run("on", &on));
+        assert_eq!(s0.validation, s1.validation);
+        let same = |f: &MbrFeature| {
+            (
+                f.precursor,
+                f.run,
+                f.evidence_type,
+                f.transfer_q,
+                f.quantity,
+            )
+        };
+        assert_eq!(
+            f0.iter().map(same).collect::<Vec<_>>(),
+            f1.iter().map(same).collect::<Vec<_>>()
+        );
+        let accepted = |f: &&MbrFeature| {
+            matches!(
+                f.evidence_type,
+                EvidenceType::TransferMs1 | EvidenceType::TransferMs2
+            )
+        };
+        let at = |f: &[MbrFeature], t: f64| {
+            f.iter()
+                .filter(accepted)
+                .filter(|f| f.quant_q.is_some_and(|q| q <= t))
+                .count()
+        };
+        assert!(f1.iter().filter(accepted).count() > 0);
+        // Every probability is at least the model's, so the running means of
+        // the sorted probabilities are too: never more rows at a level.
+        for t in [0.001, 0.01, 0.05, 0.2] {
+            assert!(
+                at(&f1, t) <= at(&f0, t),
+                "{t}: {} {}",
+                at(&f1, t),
+                at(&f0, t)
+            );
+        }
+        let mean = |f: &[MbrFeature]| {
+            let v: Vec<f64> = f
+                .iter()
+                .filter(accepted)
+                .filter_map(|f| f.quant_q)
+                .collect();
+            v.iter().sum::<f64>() / v.len() as f64
+        };
+        assert!(mean(&f1) > mean(&f0), "{} {}", mean(&f1), mean(&f0));
     }
 
     #[test]

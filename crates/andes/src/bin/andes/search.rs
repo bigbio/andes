@@ -3084,6 +3084,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         cli.quant_feature_fdr.0,
         crate::quant_finalize::FinalizeOptions {
             shared_peak_ms2: cli.mbr_shared_peak_ms2,
+            absence_in_quant_q: cli.mbr_quant_q_absence,
             ..Default::default()
         },
         &report_base.with_extension(""),

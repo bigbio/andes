@@ -995,6 +995,15 @@ pub(crate) struct SearchArgs {
     #[arg(long = "mbr-shared-peak-ms2", default_value_t = false, action = clap::ArgAction::Set)]
     pub(crate) mbr_shared_peak_ms2: bool,
 
+    /// Experimental (issue #299): an accepted transfer's `quant_q` also
+    /// counts the chance that it is a false transfer (a wrong peak or a
+    /// precursor absent from the run): its probability of a wrong
+    /// measurement becomes `p_false + (1 - p_false) p_wrong`, with `p_false`
+    /// the local FDR of the transfer q-value's estimate at its score in its
+    /// prior stratum. Rows and `transfer_q` are unchanged. Default false.
+    #[arg(long = "mbr-quant-q-absence", default_value_t = false, action = clap::ArgAction::Set)]
+    pub(crate) mbr_quant_q_absence: bool,
+
     /// PSM q-value threshold for quantification targets when rescoring runs.
     /// Default: the `--fdr` value (0.01).
     #[arg(long = "quant-fdr", hide = true, value_parser = parse_unit_fraction)]
@@ -1236,6 +1245,15 @@ pub(crate) struct QuantFinalizeArgs {
     /// so its `quant_q` rises; the row is kept. Default false.
     #[arg(long = "mbr-shared-peak-ms2", default_value_t = false, action = clap::ArgAction::Set)]
     pub(crate) mbr_shared_peak_ms2: bool,
+
+    /// Experimental (issue #299): an accepted transfer's `quant_q` also
+    /// counts the chance that it is a false transfer (a wrong peak or a
+    /// precursor absent from the run): its probability of a wrong
+    /// measurement becomes `p_false + (1 - p_false) p_wrong`, with `p_false`
+    /// the local FDR of the transfer q-value's estimate at its score in its
+    /// prior stratum. Rows and `transfer_q` are unchanged. Default false.
+    #[arg(long = "mbr-quant-q-absence", default_value_t = false, action = clap::ArgAction::Set)]
+    pub(crate) mbr_quant_q_absence: bool,
 
     /// Also write the QPX views into this directory: the protein groups of
     /// every run's PSMs as `quantms.pg.parquet`, and the features of the

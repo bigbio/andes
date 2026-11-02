@@ -1494,6 +1494,12 @@ pub(crate) struct FinalizeOptions {
     /// MS2 scan that supports it and tells the two apart, gets a probability
     /// of a wrong measurement of 1 (its `quant_q` rises; the row is kept).
     pub shared_peak_ms2: bool,
+    /// An accepted transfer's probability of a wrong measurement also
+    /// counts the chance that it is a false transfer:
+    /// `p_false + (1 - p_false) p_wrong`, with `p_false` the local FDR of
+    /// the transfer FDR at its score in its prior stratum
+    /// ([`QValues::local_fdr`]) and `p_wrong` the pseudo-transfer model's.
+    pub absence_in_quant_q: bool,
 }
 
 impl Default for FinalizeOptions {
@@ -1501,6 +1507,7 @@ impl Default for FinalizeOptions {
         Self {
             lookalike_ppm: quant::evidence::EvidenceParams::default().tol_ppm,
             shared_peak_ms2: false,
+            absence_in_quant_q: false,
         }
     }
 }
@@ -1648,6 +1655,34 @@ pub(crate) fn shared_peaks(
             look.shared(r.precursor, r.run, e.t0, fit)
         })
         .collect()
+}
+
+/// [`FinalizeOptions::absence_in_quant_q`]: the probability of a wrong
+/// measurement `p` of each transfer target of a target entry with a score
+/// becomes `p_false + (1 - p_false) p`, with `p_false` the transfer FDR's
+/// local FDR at its score ([`QValues::local_fdr`]): the chance that it is a
+/// false transfer (a wrong peak or a false donor; a precursor absent from
+/// the run is one), which the pseudo-transfers, always of a present
+/// precursor, cannot teach the wrong-measurement model. A wrong peak is
+/// counted by both, so the sum errs on the conservative side. `scored[i]`
+/// is row `i`'s packed family and held-out score.
+pub(crate) fn with_false_transfers(
+    p_wrong: &mut [f64],
+    rows: &[ExtractRow],
+    idx: &EntryIndex<'_>,
+    scored: &[Option<(u8, Option<f32>)>],
+    fdr: &QValues,
+) {
+    for (i, r) in rows.iter().enumerate() {
+        if r.role != Role::Transfer || !matches!(idx.table(r), Some((Table::Transfer, 0))) {
+            continue;
+        }
+        let Some(p_false) = scored[i].and_then(|(fam, s)| fdr.local_fdr(r.precursor, fam, s))
+        else {
+            continue;
+        };
+        p_wrong[i] = p_false + (1.0 - p_false) * p_wrong[i];
+    }
 }
 
 /// Counts a transfer target `r` that lies on look-alike `shared`'s peak in
@@ -2072,13 +2107,14 @@ pub(crate) fn finalize_stream(
     );
     let ((fdr, t_spills), (id_fdr, i_spills)) = (t_done?, i_done?);
     eprintln!(
-        "[mbr] finalize: held-out scores {:.1} s, step functions {:.1} s ({} and {} steps, {} and {} pooled; {t_spills} and {i_spills} score spills)",
+        "[mbr] finalize: held-out scores {:.1} s, step functions {:.1} s ({} and {} steps, {} and {} pooled, {} local FDR blocks; {t_spills} and {i_spills} score spills)",
         (t1 - t0).as_secs_f64(),
         secs(t1),
         fdr.steps(),
         id_fdr.steps(),
         fdr.pooled_steps(),
-        id_fdr.pooled_steps()
+        id_fdr.pooled_steps(),
+        fdr.local_blocks()
     );
 
     // Pass 4: the reference cells of the run normalisation, from the
@@ -2263,6 +2299,9 @@ pub(crate) fn finalize_stream(
                         p_wrong[at[k]] = c.at(m);
                     }
                 }
+            }
+            if options.absence_in_quant_q {
+                with_false_transfers(&mut p_wrong, rows, &idx, &scored, &fdr);
             }
             let shared = shared_peaks(rows, &idx, &look, &|q, run| {
                 look_fits.get(&(q, run)).copied()

@@ -658,6 +658,7 @@ See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model)
 | `--mbr-library-fdr` | 0..1 | `0.01` | Internal library entry gate (precursor-level), not a reported identification FDR: best-PSM-per-precursor target/decoy q-value over the rescored PSM scores of all runs. |
 | `--mbr-fdr` | 0..1 | `0.01` | *(advanced)* Transfer quality q-value: transfers at or below it are `transfer_ms2` (an MS2 scan of the run supports them) or `transfer_ms1`. An internal quant-quality q-value, not an identification FDR. It counts both wrong peaks and the transfers of false donor identifications (identity decoys, §10). On the ProteoBench QExactive module (2026-10-23, defaults), `0.05` adds about 6k precursors quantified in at least 3 runs to 0.01 (65.0k to 71.2k) at an accuracy cost (median \|eps\| 0.163 to 0.176, E. coli 0.28 to 0.44, CV 0.118 to 0.132); in an earlier measurement the wrong-peak rate rose from 1.7% to 2.7%. Use `0.05` for a deeper, less accurate set. |
 | `--quant-feature-fdr` | 0..1 or `off` | `off` | Identified-row quality q-value (`quant_q`): with a value, an identified row whose MS1 feature has a `quant_q` above it (or none) is `identified_below_threshold` and left out of `quantms.feature.parquet` (§10); `off` reports every identified row and keeps `quant_q` as an annotation. An internal quant-quality q-value, not an identification FDR. |
+| `--mbr-quant-q-absence` | bool | `false` | *(experimental, issue #299)* An accepted transfer's `quant_q` also counts the chance that it is a false transfer (a wrong peak, or a false donor or absent precursor): its probability of a wrong measurement becomes `p_false + (1 − p_false) · p_wrong`, with `p_false` the local FDR of the transfer FDR at its score in its prior stratum (§10). No row is dropped and no `transfer_q` changes. Also on `andes quant finalize`. |
 | `--mbr-shared-peak-ms2` | bool | `false` | *(experimental, issue #299)* An accepted transfer whose apex lies on the identified peak of a look-alike precursor (`shared_peak_with`, §10) needs an MS2 scan that supports it and tells the two apart (not an I/L swap); without one its probability of a wrong measurement is 1, so its `quant_q` rises. No row is dropped and no `transfer_q` changes. Also on `andes quant finalize`. |
 
 With `--output-parquet`, both modules add `quantms.feature.parquet` (the QPX feature view) to the bundle.
@@ -1508,7 +1509,8 @@ andes quant library  --quant-dir q/ [--quant-fdr 0.01] [--pep 0.05] \
 andes quant extract  --quant-dir q/ --run a [--lfq-tol 10ppm]
 andes quant extract  --quant-dir q/ --run b [--lfq-tol 10ppm]
 # once
-andes quant finalize --quant-dir q/ -o experiment [--mbr-fdr 0.01] [--quant-feature-fdr off] [--mbr-shared-peak-ms2 false] \
+andes quant finalize --quant-dir q/ -o experiment [--mbr-fdr 0.01] [--quant-feature-fdr off] \
+      [--mbr-shared-peak-ms2 false] [--mbr-quant-q-absence false] \
       [--output-parquet dir --database db.fasta --psms all.target.psms --decoy-psms all.decoy.psms \
        [--protein-fdr 0.01]]
 ```
@@ -1739,7 +1741,19 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
   sees it. With `--mbr-shared-peak-ms2`, an accepted shared transfer without an MS2 scan that
   supports it gets a wrong-measurement probability of 1; an MS2 match does not count when the two
   sequences differ only by I/L, which give the same fragments. The validation table counts the
-  shared transfers, and the pseudo-transfers the rule flags although their precursor is present. Pseudo-transfers give an acceptance rate and the wrong-peak rate, which decoys cannot
+  shared transfers, and the pseudo-transfers the rule flags although their precursor is present.
+  Absent precursors in `quant_q`: the pseudo-transfers always measure a present precursor, so the
+  wrong-measurement model never sees a transfer of an absent one, and once a transfer passes
+  `transfer_q` its `quant_q` says nothing about whether the precursor is there. With
+  `--mbr-quant-q-absence` the probability of a wrong measurement becomes
+  `p_false + (1 − p_false) · p_wrong`, where `p_false` is the local FDR of the transfer FDR at the
+  transfer's score: the probability that a transfer scoring that is a false one, where the q-value is
+  the rate among everything scoring at least that. In a fold it is the expected false rows
+  `D / K + D_id` over the targets per block of adjacent scores, pooled into a non-increasing
+  function of the score (pool-adjacent-violators); in a prior stratum, the drops of the stratum's
+  expected false targets `FDR_s(c) · T_s(c)` between adjacent scores, so it follows the stratum's
+  shrunk q-value estimate and a precursor no similar run identified gets its stratum's higher rate.
+  A wrong peak is counted by both terms, so the combination errs on the conservative side. Pseudo-transfers give an acceptance rate and the wrong-peak rate, which decoys cannot
   see. The acceptance rate is optimistic as a transfer sensitivity: a pseudo-transfer's
   predicted apex leaves the run's own observation out of the consensus RT, but the run's
   alignment map was fitted with that observation as one of its anchors.

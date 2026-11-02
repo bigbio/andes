@@ -620,6 +620,85 @@ impl Steps {
     }
 }
 
+/// A local FDR (the probability that a row scoring `s` is a false transfer)
+/// as a non-increasing step function of the score: blocks of adjacent
+/// distinct scores, pooled by pool-adjacent-violators, each with its lowest
+/// score, its expected false rows `(D / K + D_id)` and its targets `T`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LocalFdr {
+    lo: Vec<f32>,
+    false_rows: Vec<f64>,
+    targets: Vec<f64>,
+}
+
+impl LocalFdr {
+    /// Adds the rows of the next distinct score `c` (ascending): `false_rows`
+    /// expected false and `targets` targets; merges blocks while the
+    /// estimate would rise with the score.
+    fn push(&mut self, c: f32, false_rows: f64, targets: f64) {
+        if false_rows <= 0.0 && targets <= 0.0 {
+            return;
+        }
+        self.lo.push(c);
+        self.false_rows.push(false_rows);
+        self.targets.push(targets);
+        while self.lo.len() > 1 {
+            let n = self.lo.len();
+            // Block n-2 below block n-1 in rate: a violation (cross-multiplied,
+            // so a block without targets has an infinite rate).
+            let (e0, t0) = (self.false_rows[n - 2], self.targets[n - 2]);
+            let (e1, t1) = (self.false_rows[n - 1], self.targets[n - 1]);
+            if e0 * t1 >= e1 * t0 {
+                break;
+            }
+            self.false_rows[n - 2] = e0 + e1;
+            self.targets[n - 2] = t0 + t1;
+            self.lo.pop();
+            self.false_rows.pop();
+            self.targets.pop();
+        }
+    }
+
+    /// The block of score `s`: the one with the highest lowest score at or
+    /// below `s` (the first below every block). `None` without blocks.
+    fn block(&self, s: f32) -> Option<(f64, f64)> {
+        if self.lo.is_empty() {
+            return None;
+        }
+        let k = self.lo.partition_point(|&a| a <= s).max(1) - 1;
+        Some((self.false_rows[k], self.targets[k]))
+    }
+
+    /// The local FDR at `s`, capped at 1 (1 for a block without targets).
+    pub(crate) fn at(&self, s: f32) -> Option<f64> {
+        self.block(s).map(|(e, t)| rate(e, t))
+    }
+
+    /// Blocks held.
+    pub(crate) fn blocks(&self) -> usize {
+        self.lo.len()
+    }
+}
+
+/// `e / t` capped at 1; 1 without targets.
+fn rate(e: f64, t: f64) -> f64 {
+    if t > 0.0 {
+        (e / t).min(1.0)
+    } else {
+        1.0
+    }
+}
+
+/// The expected false rows and targets among `at` (rows per family at one
+/// score) under the pooled estimate with decoy-to-target ratio `k`.
+fn pooled_counts(at: [usize; 4], k: f64) -> (f64, f64) {
+    let d = (at[MASS_SHIFT as usize] + at[RT_SHIFT as usize]) as f64;
+    (
+        d / k + at[IDENTITY as usize] as f64,
+        at[TARGET as usize] as f64,
+    )
+}
+
 /// The held-out scores of one classifier's rows, per fold and family, kept
 /// to turn them into q-values: 4 bytes per scored row held.
 ///
@@ -737,6 +816,8 @@ impl FoldScores {
         let strata = self.strata;
         let mut steps: Vec<[Option<Steps>; 4]> = Vec::with_capacity(N_FOLDS);
         let mut stratum_steps: Vec<Vec<Option<Steps>>> = Vec::new();
+        let mut local: Vec<LocalFdr> = Vec::with_capacity(N_FOLDS);
+        let mut stratum_local: Vec<Vec<Option<LocalFdr>>> = Vec::new();
         let mut no_q = 0usize;
         for v in self.scores.iter_mut().flatten() {
             v.sort_unstable_by(f32::total_cmp);
@@ -759,11 +840,17 @@ impl FoldScores {
                 SortedMerge::new(runs)
             });
             let mut builder = StepsBuilder::new(totals, thresholds);
+            let fold_k = (totals[MASS_SHIFT as usize] + totals[RT_SHIFT as usize]).max(1) as f64
+                / totals[TARGET as usize].max(1) as f64;
+            let mut fold_local = LocalFdr::default();
             walk_scores(streams, |c, at| {
                 builder.visit(c, at);
+                let (e, t) = pooled_counts(at, fold_k);
+                fold_local.push(c, e, t);
                 true
             });
             let fold_steps = builder.finish();
+            local.push(fold_local);
             let with_q = if fold_steps[Estimate::Pooled as usize].is_some() {
                 totals.iter().sum()
             } else {
@@ -813,14 +900,16 @@ impl FoldScores {
                     kappa = stratum_kappa(&counts, k);
                 }
                 eprintln!("[mbr] transfer q-values, fold {fold}: {strata} strata, shrinkage {kappa:.1} pseudo-targets");
+                let mut per_stratum_local: Vec<Option<LocalFdr>> = Vec::with_capacity(strata);
                 for g in groups {
-                    let local = self.counts[g];
-                    let walk = global.filter(|_| local[TARGET as usize] > 0 && kappa.is_finite());
+                    let counts = self.counts[g];
+                    let walk = global.filter(|_| counts[TARGET as usize] > 0 && kappa.is_finite());
                     let Some(global) = walk else {
                         per_stratum.push(None);
+                        per_stratum_local.push(None);
                         continue;
                     };
-                    let mut w = StratumWalk::new(k, local, global, kappa);
+                    let mut w = StratumWalk::new(k, counts, global, kappa);
                     let streams: [SortedMerge<'_>; 4] = std::array::from_fn(|f| {
                         let mut runs: Vec<Box<dyn Iterator<Item = f32> + '_>> = taken(g, f);
                         runs.push(Box::new(self.scores[g][f].iter().copied()));
@@ -830,9 +919,12 @@ impl FoldScores {
                         w.visit(c, at);
                         true
                     });
-                    per_stratum.push(w.finish());
+                    let (stratum_steps_g, stratum_lfdr) = w.finish();
+                    per_stratum.push(stratum_steps_g);
+                    per_stratum_local.push(Some(stratum_lfdr));
                 }
                 stratum_steps.push(per_stratum);
+                stratum_local.push(per_stratum_local);
             }
             steps.push(fold_steps);
         }
@@ -841,6 +933,8 @@ impl FoldScores {
             strata,
             steps,
             stratum_steps,
+            local,
+            stratum_local,
             whole: ESTIMATES.map(|e| thresholds.is_none() || e == Estimate::Pooled),
             thresholds: thresholds.map(<[f64]>::to_vec).unwrap_or_default(),
             counts: FdrCounts {
@@ -865,6 +959,11 @@ struct StratumWalk<'g> {
     kappa: f64,
     running: f64,
     steps: Steps,
+    /// The stratum's local FDR, from the drops of its expected false
+    /// targets `E(c) = FDR_s(c) T_s(c)` between adjacent scores.
+    lfdr: LocalFdr,
+    /// The previous score with its `E` and its targets.
+    pending: Option<(f32, f64, f64)>,
 }
 
 impl<'g> StratumWalk<'g> {
@@ -880,6 +979,8 @@ impl<'g> StratumWalk<'g> {
             kappa,
             running: 1.0,
             steps: Steps::default(),
+            lfdr: LocalFdr::default(),
+            pending: None,
         }
     }
 
@@ -897,14 +998,25 @@ impl<'g> StratumWalk<'g> {
             self.steps.at.push(c);
             self.steps.q.push(self.running);
         }
+        // E falls as the score rises (fewer targets and decoys above it, a
+        // lower pooled q), so the drops are the false targets of each score.
+        let e = local * self.t as f64;
+        if let Some((pc, pe, pt)) = self.pending {
+            self.lfdr.push(pc, (pe - e).max(0.0), pt);
+        }
+        self.pending = Some((c, e, at[TARGET as usize] as f64));
         self.t -= at[TARGET as usize];
         self.d -= at[MASS_SHIFT as usize] + at[RT_SHIFT as usize];
         self.d_id -= at[IDENTITY as usize];
     }
 
-    /// The step function; `None` when the stratum has no score.
-    fn finish(self) -> Option<Steps> {
-        (!self.steps.at.is_empty()).then_some(self.steps)
+    /// The step function, `None` when the stratum has no score, and the
+    /// local FDR.
+    fn finish(mut self) -> (Option<Steps>, LocalFdr) {
+        if let Some((pc, pe, pt)) = self.pending.take() {
+            self.lfdr.push(pc, pe.max(0.0), pt);
+        }
+        ((!self.steps.at.is_empty()).then_some(self.steps), self.lfdr)
     }
 }
 
@@ -1085,6 +1197,10 @@ pub struct QValues {
     /// Per fold and stratum, the pooled step function of the stratum; empty
     /// without strata.
     stratum_steps: Vec<Vec<Option<Steps>>>,
+    /// Per fold, the local FDR of the pooled estimate.
+    local: Vec<LocalFdr>,
+    /// Per fold and stratum, the stratum's local FDR; empty without strata.
+    stratum_local: Vec<Vec<Option<LocalFdr>>>,
     /// Per [`Estimate`], whether its step functions are whole (else they
     /// answer [`QValues::accepts`] at `thresholds` only).
     whole: [bool; 4],
@@ -1185,6 +1301,43 @@ impl QValues {
         }
         let steps = self.steps[fold][Estimate::Pooled as usize].as_ref()?;
         Some(steps.at_or_below(s))
+    }
+
+    /// The local FDR of the pooled estimate at a row of `precursor` and
+    /// `family` (packed with its stratum) scoring `score`: the probability
+    /// that a transfer scoring that is a false one (a wrong peak or a false
+    /// donor), where the q-value is the error rate of everything scoring at
+    /// least that. Without strata, the fold's expected false rows
+    /// `D / K + D_id` over its targets, per block of adjacent scores pooled
+    /// to a non-increasing function of the score. In a prior stratum, the
+    /// same over the drops of the stratum's expected false targets
+    /// `E(c) = FDR_s(c) T_s(c)` between adjacent scores, with `FDR_s` the
+    /// shrunk stratum estimate of the q-values (before their running
+    /// minimum), so a small stratum takes the fold's rate. `None` without a
+    /// finite score or a fold estimate.
+    pub fn local_fdr(&self, precursor: u32, family: u8, score: Option<f32>) -> Option<f64> {
+        let s = canonical(score.filter(|s| s.is_finite())?);
+        let fold = fold_of(precursor, self.seed);
+        let stratum = unpack_family(family).1.min(self.strata - 1);
+        let in_stratum = self
+            .stratum_local
+            .get(fold)
+            .and_then(|v| v.get(stratum))
+            .and_then(Option::as_ref)
+            .and_then(|l| l.at(s));
+        in_stratum.or_else(|| self.local.get(fold)?.at(s))
+    }
+
+    /// Blocks of the local FDR step functions, held in memory.
+    pub fn local_blocks(&self) -> usize {
+        self.local.iter().map(LocalFdr::blocks).sum::<usize>()
+            + self
+                .stratum_local
+                .iter()
+                .flatten()
+                .flatten()
+                .map(LocalFdr::blocks)
+                .sum::<usize>()
     }
 }
 
@@ -2005,6 +2158,62 @@ mod tests {
         let p1 = at(&pooled, 1, 2.0).unwrap();
         assert!((p0 - p1).abs() < 0.2 * p0.max(p1) + 1e-9, "{p0} {p1}");
         assert!(a < p0 && b > p0, "{a} < {p0} < {b}");
+    }
+
+    #[test]
+    fn local_fdr_pools_adjacent_violators_into_a_non_increasing_step_function() {
+        let mut l = LocalFdr::default();
+        // Ascending scores: decoys only, then a mix, then targets only.
+        l.push(1.0, 2.0, 0.0);
+        l.push(2.0, 1.0, 1.0);
+        l.push(3.0, 0.0, 4.0);
+        assert_eq!(l.blocks(), 3);
+        assert_eq!(l.at(0.5), Some(1.0));
+        assert_eq!(l.at(1.5), Some(1.0));
+        assert_eq!(l.at(2.0), Some(1.0));
+        assert_eq!(l.at(9.0), Some(0.0));
+        // A rate that rises with the score is pooled with the block below.
+        let mut l = LocalFdr::default();
+        l.push(1.0, 0.0, 2.0);
+        l.push(2.0, 1.0, 1.0);
+        assert_eq!(l.blocks(), 1);
+        assert_eq!(l.at(1.5), Some(1.0 / 3.0));
+        assert_eq!(LocalFdr::default().at(1.0), None);
+    }
+
+    #[test]
+    fn local_fdr_falls_with_the_score_and_follows_each_strata_decoys() {
+        let strat = two_strata_scores(5).finish(&[]);
+        let pooled = two_strata_scores(1).finish(&[]);
+        let lfdr = |q: &QValues, stratum: u8, s: f32| {
+            q.local_fdr(
+                (stratum as u32) + 2 * 3,
+                pack_family(TARGET, stratum),
+                Some(s),
+            )
+            .unwrap()
+        };
+        for q in [&strat, &pooled] {
+            for stratum in [0u8, 1] {
+                let v: Vec<f64> = (-20..60)
+                    .map(|k| lfdr(q, stratum, k as f32 * 0.1))
+                    .collect();
+                assert!(v.iter().all(|p| (0.0..=1.0).contains(p)), "{v:?}");
+                assert!(v.windows(2).all(|w| w[1] <= w[0] + 1e-12), "{v:?}");
+                assert!(v[0] > 0.5 && *v.last().unwrap() < 0.05, "{v:?}");
+            }
+        }
+        // Stratum 1's decoys score like targets more often: a higher local
+        // FDR at the same score than stratum 0, the pooled estimate between.
+        let (a, b) = (lfdr(&strat, 0, 2.5), lfdr(&strat, 1, 2.5));
+        let p = lfdr(&pooled, 0, 2.5);
+        assert!(b > 2.0 * a, "stratum 0 {a}, stratum 1 {b}");
+        assert!(a < p && p < b, "{a} < {p} < {b}");
+        assert_eq!(strat.local_fdr(1, pack_family(TARGET, 0), None), None);
+        assert_eq!(
+            strat.local_fdr(1, pack_family(TARGET, 0), Some(f32::NAN)),
+            None
+        );
     }
 
     #[test]

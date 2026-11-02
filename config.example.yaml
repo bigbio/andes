@@ -119,3 +119,4 @@ quant:
   # mbr_fdr: 0.01                # transfer quality q-value for transfer_ms1 (internal, not an identification FDR)
   # quant_feature_fdr: off       # identified-row quality q-value; above it: identified_below_threshold (internal); off (default) reports all
   # mbr_shared_peak_ms2: false   # experimental: accepted transfers on a look-alike's identified peak need MS2 support, else quant_q rises
+  # mbr_quant_q_absence: false   # experimental: quant_q of a transfer also counts the local FDR of its transfer score (false or absent transfers)

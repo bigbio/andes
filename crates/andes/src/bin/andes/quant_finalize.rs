@@ -76,8 +76,8 @@ use crate::quant_mbr::{
 };
 use crate::transfer_fdr::{
     member_seed, pack_family, row_unit, sample_hash, stratum_of, train_bagged_folds, train_folds,
-    transfer_strata, transfer_train_params, Estimate, FdrCounts, FdrRow, FoldModels, FoldScores,
-    QValues, TrainingSample, IDENTITY, TRANSFER_FEATURES,
+    transfer_train_params, Estimate, FdrCounts, FdrRow, FoldModels, FoldScores, QValues,
+    TrainingSample, IDENTITY, MAX_STRATA, TRANSFER_FEATURES,
 };
 
 /// What one finalize did, for the caller to log.
@@ -562,6 +562,8 @@ pub(crate) enum Table {
 /// Most similar runs whose identifications make a precursor's presence
 /// prior ([`EntryIndex::presence_prior`]), at most [`NEIGHBOUR_RUNS`].
 pub(crate) const PRIOR_NEIGHBOURS: usize = 20;
+/// Library entries the strata are cut from, at most (a stride over them).
+const PRIOR_SAMPLE: usize = 20_000;
 
 /// Runs compared with a transfer's run for the `neighbour_donor_rate`
 /// feature: its most similar runs, at most this many.
@@ -575,6 +577,8 @@ pub(crate) struct EntryIndex<'a> {
     /// donor sets are most similar to its own (Jaccard index, ties by run
     /// index).
     neighbours: Vec<Vec<u16>>,
+    /// Ascending edges of the prior strata ([`strata_edges`]).
+    edges: Vec<f64>,
 }
 
 impl<'a> EntryIndex<'a> {
@@ -586,10 +590,18 @@ impl<'a> EntryIndex<'a> {
                 *slot = Some(e);
             }
         }
+        let neighbours = run_neighbours(lib, runs, NEIGHBOUR_RUNS);
+        let edges = strata_edges(&entry_of, &neighbours, runs, PRIOR_NEIGHBOURS);
         Self {
             entry_of,
-            neighbours: run_neighbours(lib, runs, NEIGHBOUR_RUNS),
+            neighbours,
+            edges,
         }
+    }
+
+    /// Number of prior strata.
+    pub(crate) fn strata(&self) -> usize {
+        self.edges.len() + 1
     }
 
     /// The prior that the row's precursor is present in its run: the share
@@ -620,7 +632,7 @@ impl<'a> EntryIndex<'a> {
     pub(crate) fn packed(&self, r: &ExtractRow, t: Table, family: u8) -> u8 {
         match t {
             Table::Transfer | Table::Pseudo => {
-                pack_family(family, stratum_of(self.presence_prior(r)))
+                pack_family(family, stratum_of(self.presence_prior(r), &self.edges))
             }
             Table::Identified => family,
         }
@@ -674,6 +686,81 @@ impl<'a> EntryIndex<'a> {
         };
         Some((t, if identity { IDENTITY } else { family(r.kind) }))
     }
+}
+
+/// The ascending edges of the prior strata, learned from the library alone:
+/// cut from the prior ([`EntryIndex::presence_prior`] with `k` neighbours)
+/// of the (precursor, run) pairs without an identification, so that each of
+/// at most [`MAX_STRATA`] strata holds about an equal share of them, as far
+/// as the discrete prior allows. A target and its decoys share their pair,
+/// so these are equal decoy counts. Taken over a stride of at most
+/// [`PRIOR_SAMPLE`] entries.
+pub(crate) fn strata_edges(
+    entry_of: &[Option<&LibraryEntry>],
+    neighbours: &[Vec<u16>],
+    runs: usize,
+    k: usize,
+) -> Vec<f64> {
+    let entries: Vec<&LibraryEntry> = entry_of
+        .iter()
+        .flatten()
+        .copied()
+        .filter(|e| !e.identity_decoy)
+        .collect();
+    // The neighbours every run has, at most `k`: the prior is hits / m.
+    let m = neighbours.iter().map(Vec::len).min().unwrap_or(0).min(k);
+    if m == 0 {
+        return Vec::new();
+    }
+    let stride = entries.len().div_ceil(PRIOR_SAMPLE).max(1);
+    // Per number of neighbours identifying the pair: how many pairs.
+    let hist = entries
+        .iter()
+        .step_by(stride)
+        .par_bridge()
+        .fold(
+            || vec![0u64; m + 1],
+            |mut h, e| {
+                for (r, nn) in neighbours.iter().enumerate().take(runs) {
+                    if e.donors.binary_search(&(r as u16)).is_ok() || nn.is_empty() {
+                        continue;
+                    }
+                    let nn = &nn[..m];
+                    let hits = nn
+                        .iter()
+                        .filter(|n| e.donors.binary_search(n).is_ok())
+                        .count();
+                    h[hits] += 1;
+                }
+                h
+            },
+        )
+        .reduce(
+            || vec![0u64; m + 1],
+            |mut a, b| {
+                a.iter_mut().zip(b).for_each(|(x, y)| *x += y);
+                a
+            },
+        );
+    let total: u64 = hist.iter().sum();
+    let mut edges = Vec::new();
+    if total > 0 {
+        let share = total as f64 / MAX_STRATA as f64;
+        let mut open = 0.0;
+        for (i, &c) in hist.iter().enumerate().take(m) {
+            open += c as f64;
+            if open >= share && edges.len() + 1 < MAX_STRATA {
+                edges.push(i as f64 / m as f64);
+                open = 0.0;
+            }
+        }
+        // A last stratum below one share merges into the one before it.
+        if open + (hist[m] as f64) < share && !edges.is_empty() {
+            edges.pop();
+        }
+    }
+    eprintln!("[mbr] presence prior strata edges {edges:?}");
+    edges
 }
 
 /// Per run of `runs`, the `k` other runs most similar to it, most similar
@@ -1772,7 +1859,7 @@ pub(crate) fn finalize_stream(
     let t0 = Instant::now();
     let w_stride = (w_seen.into_inner() / WRONG_CALIBRATION_ROWS + 1) as u64;
     let w_held: Mutex<Vec<(f32, bool)>> = Mutex::new(Vec::new());
-    let strata = transfer_strata();
+    let strata = idx.strata();
     let t_store = ScoreStore::new("transfer", dir, limits.max_held_scores, seed, strata);
     let i_store = ScoreStore::new("identified", dir, limits.max_held_scores, seed, 1);
     for_each_block(
@@ -2486,6 +2573,50 @@ fn log_summary(
 
 #[cfg(test)]
 mod tests {
+    /// Two clusters of runs, entries identified in all runs of one cluster:
+    /// the strata are cut from the prior of the pairs without an
+    /// identification, with ascending edges.
+    #[test]
+    fn strata_edges_are_ascending_and_bounded() {
+        use quant::library::{DonorPsm, LibraryEntry};
+        let psm = DonorPsm {
+            score: 1.0,
+            q: 0.001,
+            pep: 0.001,
+        };
+        let entries: Vec<LibraryEntry> = (0..400u32)
+            .map(|p| LibraryEntry {
+                precursor: p,
+                identity_decoy: false,
+                q: 0.001,
+                donor_psm: psm,
+                consensus_rt: 10.0,
+                faims_cv: None,
+                ion_mobility: None,
+                // Cluster 0 (runs 0-5) or 1 (runs 6-11); a few misses.
+                donors: (0..6u16)
+                    .map(|r| r + 6 * (p % 2) as u16)
+                    .filter(|r| (u32::from(*r) + p) % 7 != 0)
+                    .collect(),
+                best_rt: Vec::new(),
+            })
+            .collect();
+        let entry_of: Vec<Option<&LibraryEntry>> = entries.iter().map(Some).collect();
+        let neighbours: Vec<Vec<u16>> = (0..12u16)
+            .map(|r| {
+                let c = r / 6;
+                let mut n: Vec<u16> = (6 * c..6 * c + 6).filter(|&x| x != r).collect();
+                n.extend((0..12u16).filter(|x| x / 6 != c));
+                n
+            })
+            .collect();
+        let edges = strata_edges(&entry_of, &neighbours, 12, 5);
+        assert!(!edges.is_empty());
+        assert!(edges.iter().all(|&e| (0.0..1.0).contains(&e)), "{edges:?}");
+        assert!(edges.windows(2).all(|w| w[0] < w[1]), "{edges:?}");
+        assert!(edges.len() < MAX_STRATA);
+    }
+
     use super::*;
 
     struct Lcg(u64);

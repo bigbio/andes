@@ -1353,6 +1353,14 @@ pub(crate) fn mbr_paths(base: &Path) -> (PathBuf, PathBuf) {
     (with(".mbr.parquet"), with(".mbr_validation.parquet"))
 }
 
+/// `<base>.mbr_validation_runs.parquet`: the transfer counts per run and
+/// prior stratum.
+pub(crate) fn mbr_runs_path(base: &Path) -> PathBuf {
+    let mut s = base.as_os_str().to_owned();
+    s.push(".mbr_validation_runs.parquet");
+    PathBuf::from(s)
+}
+
 /// Concatenates the per-entry rows in library order and sums the counts.
 fn assemble(slots: Vec<Option<EntryRows>>, width_fits: usize, fallback: bool) -> RunExtract {
     let mut counts = ExtractCounts {
@@ -2261,8 +2269,8 @@ mod tests {
 #[cfg(test)]
 mod finalize_tests {
     use output::mbr_out::{
-        write_mbr_validation, Accepted, EvidenceType, MbrParquetWriter, MbrRow, MbrValidation,
-        VALIDATION_Q,
+        write_mbr_runs, write_mbr_validation, Accepted, EvidenceType, MbrParquetWriter, MbrRow,
+        MbrValidation, VALIDATION_Q,
     };
     use quant::align::AlignParams;
     use quant::library::{build_library, PrecursorMeta, PsmIn};
@@ -2270,10 +2278,10 @@ mod finalize_tests {
 
     use super::*;
     use crate::quant_finalize::{
-        finalize, finalize_stream, for_each_scored, pseudo_example, shared_peak_wrong,
-        shared_peaks, table_features, with_false_transfers, wrong_features, BlockContext,
-        EntryIndex, ExtractRuns, FinalizeLimits, FinalizeOptions, FinalizeParams, FinalizeSummary,
-        MbrFeature, Table, WrongCalibration, SCORE_CHUNK,
+        count_cell, finalize, finalize_stream, for_each_scored, pseudo_example, run_rows,
+        shared_peak_wrong, shared_peaks, table_features, with_false_transfers, wrong_features,
+        BlockContext, EntryIndex, ExtractRuns, FinalizeLimits, FinalizeOptions, FinalizeParams,
+        FinalizeSummary, MbrFeature, RunCells, Table, WrongCalibration, SCORE_CHUNK,
     };
     use crate::quant_lookalike::{usable_fit, Lookalikes};
     use crate::transfer_fdr::{
@@ -2713,6 +2721,8 @@ mod finalize_tests {
         mbr_path: &Path,
         validation_path: &Path,
     ) -> Result<FinalizeSummary, String> {
+        let runs_path = validation_path.with_extension("runs.parquet");
+        let mut run_cells = RunCells::new();
         let mut all_features = Vec::new();
         let on_features = &mut |f: Vec<MbrFeature>| -> Result<(), String> {
             all_features.extend(f);
@@ -3008,6 +3018,11 @@ mod finalize_tests {
                 identified.get(&(q, run)).and_then(|e| usable_fit(e))
             });
             for (i, r) in rows.iter().enumerate() {
+                if matches!(idx.table(r), Some((Table::Transfer, _))) {
+                    let q = q_of(&fdr, Estimate::Pooled, i);
+                    let sh = shared[i].is_some();
+                    count_cell(&mut run_cells, rows, i, &scored, q, &fdr, sh, &thresholds);
+                }
                 if idx.is_identity(r.precursor) {
                     // Never reported: only the identity-decoy family's counts.
                     if (r.role, r.kind) == (Role::Transfer, Hypothesis::Target) {
@@ -3188,6 +3203,7 @@ mod finalize_tests {
         v.at_threshold = at_threshold;
         writer.finish()?;
         write_mbr_validation(validation_path, &v)?;
+        write_mbr_runs(&runs_path, &run_rows(run_cells, stems, &idx))?;
         summary.validation = v;
         summary.fdr = fdr.counts;
         summary.identified_fdr = id_fdr.counts;
@@ -3229,6 +3245,7 @@ mod finalize_tests {
         options: &FinalizeOptions,
     ) -> (FinalizeSummary, Vec<MbrFeature>) {
         let (mbr, val) = mbr_paths(base);
+        let runs_file = val.with_extension("runs.parquet");
         let params = FinalizeParams {
             mbr_fdr,
             quant_feature_fdr,
@@ -3237,6 +3254,7 @@ mod finalize_tests {
             options: options.clone(),
             mbr_path: &mbr,
             validation_path: &val,
+            runs_path: Some(&runs_file),
         };
         let source = ExtractRuns { runs, batch_rows };
         let mut features = Vec::new();
@@ -3330,6 +3348,12 @@ mod finalize_tests {
                     assert_eq!(
                         std::fs::read(&v1).unwrap(),
                         std::fs::read(&v2).unwrap(),
+                        "{what}"
+                    );
+                    let runs = |v: &Path| v.with_extension("runs.parquet");
+                    assert_eq!(
+                        std::fs::read(runs(&v1)).unwrap(),
+                        std::fs::read(runs(&v2)).unwrap(),
                         "{what}"
                     );
                     assert_eq!(features, want.features, "{what}");
@@ -3548,6 +3572,45 @@ mod finalize_tests {
             v.iter().sum::<f64>() / v.len() as f64
         };
         assert!(mean(&f1) > mean(&f0), "{} {}", mean(&f1), mean(&f0));
+    }
+
+    #[test]
+    fn the_per_run_table_adds_up_to_the_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = library_with_entries();
+        let base = dir.path().join("x");
+        let (s, _) = stream(
+            &lib,
+            &extract_with_lookalike_ids(),
+            unlimited(),
+            50,
+            &base,
+            0.05,
+            None,
+            &opted_in(),
+        );
+        let (_, val) = mbr_paths(&base);
+        let rows = output::mbr_out::read_mbr_runs(&val.with_extension("runs.parquet")).unwrap();
+        assert!(!rows.is_empty());
+        let v = &s.validation;
+        let sum = |f: &dyn Fn(&output::mbr_out::RunStratumCounts) -> usize| {
+            rows.iter().map(|r| f(&r.2)).sum::<usize>()
+        };
+        assert_eq!(sum(&|c| c.transfers), v.transfers_scored);
+        assert_eq!(sum(&|c| c.accepted[0]), v.at_q01.pooled);
+        assert_eq!(sum(&|c| c.accepted[1]), v.at_threshold.pooled);
+        for f in 0..3 {
+            assert_eq!(sum(&|c| c.decoys[f]), v.decoy_transfers[f], "{f}");
+            assert_eq!(sum(&|c| c.accepted_decoys[1][f]), v.at_threshold.decoys[f]);
+        }
+        assert_eq!(sum(&|c| c.shared_peak_accepted), v.shared_peak_accepted);
+        // Only transfers into run "b"; strata within their prior ranges.
+        assert!(rows.iter().all(|r| r.0 == "b"));
+        for (_, _, c) in &rows {
+            assert!(c.prior_lo <= c.prior_hi && (0.0..=1.0).contains(&c.prior_hi));
+            let e = c.expected_false[1];
+            assert!(e >= 0.0 && e <= c.accepted[1] as f64, "{c:?}");
+        }
     }
 
     #[test]

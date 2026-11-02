@@ -39,6 +39,12 @@
 //! supports that tells the two apart, and the pseudo-transfers on a
 //! look-alike's peak.
 //!
+//! `<base>.mbr_validation_runs.parquet` ([`write_mbr_runs`]): the transfer
+//! counts per (run, prior stratum), with the stratum's range of the prior,
+//! the K-decoy rate and the mean local FDR of each cell's accepted
+//! transfers, at q <= 0.01 and at the threshold; the cells add up to the
+//! counts of the validation table.
+//!
 //! Counts are uint64, thresholds and rates float64 (null when undefined).
 //! It is a separate file because its one row of run-level counts shares no
 //! column with the per-(precursor, run) rows.
@@ -71,6 +77,13 @@ const VALIDATION_TABLE: TableVersion = TableVersion {
     version: "1.1",
     major: 1,
     what: "MBR validation table",
+};
+
+const RUNS_TABLE: TableVersion = TableVersion {
+    key: "andes.mbr_validation_runs.schema",
+    version: "1.0",
+    major: 1,
+    what: "MBR per-run validation table",
 };
 
 /// Why a quantity is reported for a (precursor, run).
@@ -772,6 +785,215 @@ pub fn read_mbr_validation(path: &Path) -> Result<Vec<(String, ValidationCell)>,
     Ok(out)
 }
 
+/// The transfer counts of one (run, prior stratum) of
+/// `<base>.mbr_validation_runs.parquet`. Index `[0]` of a pair is at
+/// q <= [`VALIDATION_Q`], `[1]` at the run's transfer q-value threshold;
+/// decoy families are mass shift, RT shift, identity decoy.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RunStratumCounts {
+    /// The stratum's range of the prior of presence: above `prior_lo` (from
+    /// it, for the first stratum) up to `prior_hi`.
+    pub prior_lo: f64,
+    pub prior_hi: f64,
+    /// Transfer targets with a q-value.
+    pub transfers: usize,
+    /// Decoy transfer rows with a q-value, per family.
+    pub decoys: [usize; 3],
+    /// Accepted transfer targets.
+    pub accepted: [usize; 2],
+    /// Accepted decoy transfer rows, per family.
+    pub accepted_decoys: [[usize; 3]; 2],
+    /// Sum of the local FDR over the accepted transfer targets: their
+    /// expected false transfers.
+    pub expected_false: [f64; 2],
+    /// Accepted transfer targets on a look-alike's identified peak (at the
+    /// threshold).
+    pub shared_peak_accepted: usize,
+}
+
+impl RunStratumCounts {
+    /// Adds the counts of `o` (of disjoint rows); the prior range stays.
+    pub fn add(&mut self, o: &RunStratumCounts) {
+        self.transfers += o.transfers;
+        add_counts(&mut self.decoys, &o.decoys);
+        add_counts(&mut self.accepted, &o.accepted);
+        for (a, b) in self.accepted_decoys.iter_mut().zip(&o.accepted_decoys) {
+            add_counts(a, b);
+        }
+        for (a, b) in self.expected_false.iter_mut().zip(&o.expected_false) {
+            *a += b;
+        }
+        self.shared_peak_accepted += o.shared_peak_accepted;
+    }
+
+    /// The wrong-peak decoys per target of this cell (a target and its
+    /// decoys share their run and stratum).
+    pub fn decoy_ratio(&self) -> Option<f64> {
+        ratio(self.decoys[0] + self.decoys[1], self.transfers)
+    }
+
+    /// The K-decoy rate of the cell's accepted transfers at threshold `i`
+    /// (0: q 0.01, 1: the run's threshold):
+    /// `((D_mass + D_rt) / K + D_identity) / T`, `K` the cell's
+    /// [`RunStratumCounts::decoy_ratio`]. Noisy for a small cell; the sum
+    /// over cells of the numerators and of `T` gives a coarser one.
+    pub fn decoy_rate(&self, i: usize) -> Option<f64> {
+        let k = self.decoy_ratio().filter(|k| *k > 0.0)?;
+        let d = &self.accepted_decoys[i];
+        let t = self.accepted[i];
+        (t > 0).then(|| ((d[0] + d[1]) as f64 / k + d[2] as f64) / t as f64)
+    }
+
+    /// The local-FDR rate of the cell's accepted transfers at threshold `i`.
+    pub fn model_rate(&self, i: usize) -> Option<f64> {
+        let t = self.accepted[i];
+        (t > 0).then(|| self.expected_false[i] / t as f64)
+    }
+}
+
+/// The columns of `<base>.mbr_validation_runs.parquet`, in order.
+pub const RUNS_COLUMNS: [&str; 23] = [
+    "run",
+    "prior_stratum",
+    "prior_lo",
+    "prior_hi",
+    "transfers",
+    "mass_decoys",
+    "rt_decoys",
+    "identity_decoys",
+    "decoy_ratio",
+    "accepted_q01",
+    "accepted_mass_decoys_q01",
+    "accepted_rt_decoys_q01",
+    "accepted_identity_decoys_q01",
+    "decoy_rate_q01",
+    "expected_false_q01",
+    "model_rate_q01",
+    "accepted_at_threshold",
+    "accepted_mass_decoys_at_threshold",
+    "accepted_rt_decoys_at_threshold",
+    "accepted_identity_decoys_at_threshold",
+    "decoy_rate_at_threshold",
+    "expected_false_at_threshold",
+    "model_rate_at_threshold",
+];
+
+/// The column after [`RUNS_COLUMNS`]: accepted shared-peak transfers.
+const RUNS_SHARED: &str = "shared_peak_accepted_at_threshold";
+
+/// Writes `<base>.mbr_validation_runs.parquet`: one row per (run, prior
+/// stratum) in the order given, with [`RUNS_COLUMNS`] and the accepted
+/// transfers on a look-alike's peak. Counts are uint64, the prior range,
+/// ratios, expected false transfers and rates float64 (null when
+/// undefined).
+pub fn write_mbr_runs(path: &Path, rows: &[(&str, u8, RunStratumCounts)]) -> Result<(), String> {
+    let mut fields = vec![
+        Field::new("run", DataType::Utf8, false),
+        Field::new("prior_stratum", DataType::UInt64, false),
+    ];
+    let float = |n: &str| Field::new(n, DataType::Float64, true);
+    let count = |n: &str| Field::new(n, DataType::UInt64, false);
+    for &n in &RUNS_COLUMNS[2..] {
+        let is_float = n.starts_with("prior_")
+            || n.ends_with("ratio")
+            || n.contains("_rate_")
+            || n.starts_with("expected_false");
+        fields.push(if is_float { float(n) } else { count(n) });
+    }
+    fields.push(count(RUNS_SHARED));
+    let schema = Arc::new(Schema::new(fields));
+    let run: Vec<&str> = rows.iter().map(|r| r.0).collect();
+    let mut cols: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from(run)),
+        Arc::new(UInt64Array::from(
+            rows.iter().map(|r| u64::from(r.1)).collect::<Vec<_>>(),
+        )),
+    ];
+    let f = |g: &dyn Fn(&RunStratumCounts) -> Option<f64>| -> ArrayRef {
+        Arc::new(Float64Array::from(
+            rows.iter()
+                .map(|r| g(&r.2).filter(|v| v.is_finite()))
+                .collect::<Vec<_>>(),
+        ))
+    };
+    let n = |g: &dyn Fn(&RunStratumCounts) -> usize| -> ArrayRef {
+        Arc::new(UInt64Array::from(
+            rows.iter().map(|r| g(&r.2) as u64).collect::<Vec<_>>(),
+        ))
+    };
+    cols.push(f(&|c| Some(c.prior_lo)));
+    cols.push(f(&|c| Some(c.prior_hi)));
+    cols.push(n(&|c| c.transfers));
+    for k in 0..3 {
+        cols.push(n(&|c| c.decoys[k]));
+    }
+    cols.push(f(&|c| c.decoy_ratio()));
+    for i in 0..2 {
+        cols.push(n(&|c| c.accepted[i]));
+        for k in 0..3 {
+            cols.push(n(&|c| c.accepted_decoys[i][k]));
+        }
+        cols.push(f(&|c| c.decoy_rate(i)));
+        cols.push(f(&|c| Some(c.expected_false[i])));
+        cols.push(f(&|c| c.model_rate(i)));
+    }
+    cols.push(n(&|c| c.shared_peak_accepted));
+    let batch = RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string());
+    write_table(path, &RUNS_TABLE, RUNS_TABLE.version, schema, [batch], &[])
+}
+
+/// Reads `<base>.mbr_validation_runs.parquet` back: per row, the run, the
+/// stratum and the counts. Rejects another major schema version; every
+/// error names the file.
+pub fn read_mbr_runs(path: &Path) -> Result<Vec<(String, u8, RunStratumCounts)>, String> {
+    let t = read_table(path, &RUNS_TABLE)?;
+    let mut out = Vec::new();
+    for b in &t.batches {
+        let run = column::<StringArray>(b, "run", path)?;
+        let n = |name: &str| column::<UInt64Array>(b, name, path);
+        let f = |name: &str| column::<Float64Array>(b, name, path);
+        let stratum = n("prior_stratum")?;
+        let (lo, hi) = (f("prior_lo")?, f("prior_hi")?);
+        let transfers = n("transfers")?;
+        let decoys = [n("mass_decoys")?, n("rt_decoys")?, n("identity_decoys")?];
+        let at = |suffix: &str| -> Result<_, String> {
+            Ok((
+                n(&format!("accepted_{suffix}"))?,
+                [
+                    n(&format!("accepted_mass_decoys_{suffix}"))?,
+                    n(&format!("accepted_rt_decoys_{suffix}"))?,
+                    n(&format!("accepted_identity_decoys_{suffix}"))?,
+                ],
+                f(&format!("expected_false_{suffix}"))?,
+            ))
+        };
+        let (a0, ad0, e0) = at("q01")?;
+        let (a1, ad1, e1) = at("at_threshold")?;
+        let shared = n(RUNS_SHARED)?;
+        for i in 0..b.num_rows() {
+            let v = |a: &UInt64Array| a.value(i) as usize;
+            out.push((
+                run.value(i).to_string(),
+                stratum.value(i) as u8,
+                RunStratumCounts {
+                    prior_lo: opt(lo, i).unwrap_or(f64::NAN),
+                    prior_hi: opt(hi, i).unwrap_or(f64::NAN),
+                    transfers: v(transfers),
+                    decoys: decoys.map(v),
+                    accepted: [v(a0), v(a1)],
+                    accepted_decoys: [ad0.map(v), ad1.map(v)],
+                    expected_false: [
+                        opt(e0, i).unwrap_or(f64::NAN),
+                        opt(e1, i).unwrap_or(f64::NAN),
+                    ],
+                    shared_peak_accepted: v(shared),
+                },
+            ));
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -985,6 +1207,57 @@ mod tests {
         assert_eq!(get("shared_peak_accepted_at_threshold"), Count(6));
         assert_eq!(get("shared_peak_accepted_ms2_at_threshold"), Count(1));
         assert_eq!(get("shared_peak_pseudo"), Count(2));
+    }
+
+    #[test]
+    fn runs_table_round_trips_with_its_rates() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.mbr_validation_runs.parquet");
+        let a = RunStratumCounts {
+            prior_lo: 0.0,
+            prior_hi: 0.05,
+            transfers: 100,
+            decoys: [100, 100, 3],
+            accepted: [40, 50],
+            accepted_decoys: [[1, 1, 0], [2, 2, 1]],
+            expected_false: [0.5, 1.25],
+            shared_peak_accepted: 4,
+        };
+        let empty = RunStratumCounts {
+            prior_lo: 0.05,
+            prior_hi: 1.0,
+            ..RunStratumCounts::default()
+        };
+        let rows = vec![("a", 0u8, a.clone()), ("a", 1u8, empty.clone())];
+        write_mbr_runs(&p, &rows).unwrap();
+        let back = read_mbr_runs(&p).unwrap();
+        assert_eq!(
+            back,
+            vec![
+                ("a".to_string(), 0u8, a.clone()),
+                ("a".to_string(), 1u8, empty.clone())
+            ]
+        );
+        // K = 2 decoys per target: (2 / 2 + 0) / 40 at q 0.01, (4 / 2 + 1) / 50.
+        assert_eq!(a.decoy_ratio(), Some(2.0));
+        assert_eq!(a.decoy_rate(0), Some(1.0 / 40.0));
+        assert_eq!(a.decoy_rate(1), Some(3.0 / 50.0));
+        assert_eq!(a.model_rate(1), Some(1.25 / 50.0));
+        assert_eq!((empty.decoy_rate(0), empty.model_rate(0)), (None, None));
+        let t = read_table(&p, &RUNS_TABLE).unwrap();
+        let names: Vec<String> = t.batches[0]
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
+        let mut want: Vec<&str> = RUNS_COLUMNS.to_vec();
+        want.push(RUNS_SHARED);
+        assert_eq!(names, want);
+        let mut sum = a.clone();
+        sum.add(&a);
+        assert_eq!((sum.transfers, sum.accepted_decoys[1][2]), (200, 2));
+        assert_eq!(sum.expected_false, [1.0, 2.5]);
     }
 
     #[test]

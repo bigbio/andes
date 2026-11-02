@@ -39,7 +39,7 @@
 //! thread, not the number of runs.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -54,8 +54,8 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use output::extract_table::ExtractTableReader;
 use output::mbr_out::{
-    write_mbr_validation, Accepted, EvidenceType, MbrParquetWriter, MbrRow, MbrValidation,
-    VALIDATION_Q,
+    write_mbr_runs, write_mbr_validation, Accepted, EvidenceType, MbrParquetWriter, MbrRow,
+    MbrValidation, RunStratumCounts, VALIDATION_Q,
 };
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use parquet::arrow::ArrowWriter;
@@ -77,8 +77,8 @@ use crate::quant_mbr::{
 };
 use crate::transfer_fdr::{
     member_seed, pack_family, row_unit, sample_hash, stratum_of, train_bagged_folds, train_folds,
-    transfer_train_params, Estimate, FdrCounts, FdrRow, FoldModels, FoldScores, QValues,
-    TrainingSample, IDENTITY, MAX_STRATA, TRANSFER_FEATURES,
+    transfer_train_params, unpack_family, Estimate, FdrCounts, FdrRow, FoldModels, FoldScores,
+    QValues, TrainingSample, IDENTITY, MAX_STRATA, TRANSFER_FEATURES,
 };
 
 /// What one finalize did, for the caller to log.
@@ -608,6 +608,14 @@ impl<'a> EntryIndex<'a> {
     /// Number of prior strata.
     pub(crate) fn strata(&self) -> usize {
         self.edges.len() + 1
+    }
+
+    /// The range of the prior of stratum `s`: above the lower edge (from 0
+    /// for the first stratum) up to the upper one (1 for the last).
+    pub(crate) fn stratum_range(&self, s: usize) -> (f64, f64) {
+        let lo = if s == 0 { 0.0 } else { self.edges[s - 1] };
+        let hi = self.edges.get(s).copied().unwrap_or(1.0);
+        (lo, hi)
     }
 
     /// The prior that the row's precursor is present in its run: the share
@@ -1454,6 +1462,7 @@ pub(crate) fn finalize(
         options: FinalizeOptions::default(),
         mbr_path,
         validation_path,
+        runs_path: None,
     };
     let source = ExtractRuns {
         runs,
@@ -1480,6 +1489,8 @@ pub(crate) struct FinalizeParams<'a> {
     pub options: FinalizeOptions,
     pub mbr_path: &'a Path,
     pub validation_path: &'a Path,
+    /// `<base>.mbr_validation_runs.parquet`, when written.
+    pub runs_path: Option<&'a Path>,
 }
 
 /// Settings of finalize beyond the thresholds. The defaults report the
@@ -1717,6 +1728,67 @@ struct RunOutput {
     /// wrong measurement.
     wrong: Vec<(usize, f64)>,
     validation: MbrValidation,
+    cells: RunCells,
+}
+
+/// The transfer counts per (run, prior stratum).
+pub(crate) type RunCells = BTreeMap<(u16, u8), RunStratumCounts>;
+
+/// Counts row `i` of `rows`, a row of the transfer classifier with its
+/// pooled q-value `q` (rows without one are not counted), in its (run,
+/// stratum) cell of `cells`; `scored[i]` holds its packed family and score,
+/// `shared` whether it lies on a look-alike's peak, `thresholds` the two
+/// validation thresholds.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn count_cell(
+    cells: &mut RunCells,
+    rows: &[ExtractRow],
+    i: usize,
+    scored: &[Option<(u8, Option<f32>)>],
+    q: Option<f64>,
+    fdr: &QValues,
+    shared: bool,
+    thresholds: &[f64; 2],
+) {
+    let (r, Some(q), Some((fam, s))) = (&rows[i], q, scored[i]) else {
+        return;
+    };
+    let (family, stratum) = unpack_family(fam);
+    let c = cells.entry((r.run, stratum as u8)).or_default();
+    let ok = |t: f64| q <= t;
+    if family == 0 {
+        c.transfers += 1;
+        let lfdr = fdr.local_fdr(r.precursor, fam, s).unwrap_or(f64::NAN);
+        for (k, &t) in thresholds.iter().enumerate() {
+            if ok(t) {
+                c.accepted[k] += 1;
+                c.expected_false[k] += lfdr;
+            }
+        }
+        c.shared_peak_accepted += usize::from(shared && ok(thresholds[1]));
+    } else {
+        let f = (family as usize).min(3) - 1;
+        c.decoys[f] += 1;
+        for (k, &t) in thresholds.iter().enumerate() {
+            c.accepted_decoys[k][f] += usize::from(ok(t));
+        }
+    }
+}
+
+/// The rows of `<base>.mbr_validation_runs.parquet` from the cells, in
+/// (run, stratum) order, with each stratum's prior range.
+pub(crate) fn run_rows<'s>(
+    cells: RunCells,
+    stems: &'s [String],
+    idx: &EntryIndex<'_>,
+) -> Vec<(&'s str, u8, RunStratumCounts)> {
+    cells
+        .into_iter()
+        .map(|((run, stratum), mut c)| {
+            (c.prior_lo, c.prior_hi) = idx.stratum_range(stratum as usize);
+            (stems[run as usize].as_str(), stratum, c)
+        })
+        .collect()
 }
 
 /// Seconds since `t`, for the pass log.
@@ -2214,6 +2286,8 @@ pub(crate) fn finalize_stream(
     };
     let parts: Mutex<Vec<(usize, PathBuf)>> = Mutex::new(Vec::new());
     let totals: Mutex<MbrValidation> = Mutex::new(MbrValidation::default());
+    // Per table, its (run, stratum) cells, merged in table order at the end.
+    let table_cells: Mutex<Vec<(usize, RunCells)>> = Mutex::new(Vec::new());
     for_each_block(
         source,
         false,
@@ -2307,6 +2381,11 @@ pub(crate) fn finalize_stream(
                 look_fits.get(&(q, run)).copied()
             });
             for (i, r) in rows.iter().enumerate() {
+                if matches!(idx.table(r), Some((Table::Transfer, _))) {
+                    let q = q_of(&fdr, Estimate::Pooled, i);
+                    let sh = shared[i].is_some();
+                    count_cell(&mut out.cells, rows, i, &scored, q, &fdr, sh, &thresholds);
+                }
                 if idx.is_identity(r.precursor) {
                     // Never reported: only the identity-decoy family's counts.
                     if (r.role, r.kind) == (Role::Transfer, Hypothesis::Target) {
@@ -2454,6 +2533,10 @@ pub(crate) fn finalize_stream(
                 .lock()
                 .expect("validation lock")
                 .add_counts(&out.validation);
+            table_cells
+                .lock()
+                .expect("cells lock")
+                .push((chunk, std::mem::take(&mut out.cells)));
             if out.rows.is_empty() {
                 return Ok(());
             }
@@ -2508,6 +2591,17 @@ pub(crate) fn finalize_stream(
         ..MbrValidation::default()
     };
     v.add_counts(&totals.into_inner().expect("validation lock"));
+    let mut table_cells = table_cells.into_inner().expect("cells lock");
+    table_cells.sort_unstable_by_key(|(chunk, _)| *chunk);
+    let mut cells = RunCells::new();
+    for (_, t) in table_cells {
+        for (k, c) in t {
+            cells.entry(k).or_default().add(&c);
+        }
+    }
+    if let Some(path) = params.runs_path {
+        write_mbr_runs(path, &run_rows(cells, stems, &idx))?;
+    }
     let mut parts = parts.into_inner().expect("parts lock");
     parts.sort_unstable();
     let paths: Vec<PathBuf> = parts.into_iter().map(|(_, p)| p).collect();

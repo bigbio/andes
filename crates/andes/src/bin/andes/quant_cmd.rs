@@ -52,7 +52,8 @@ use crate::quant_finalize::{
     MbrFeature,
 };
 use crate::quant_mbr::{
-    attach_ms2, extract_run, mbr_paths, ExtractCounts, ExtractRow, Ms2Counts, TransferSelection,
+    attach_ms2, extract_run, mbr_paths, mbr_runs_path, ExtractCounts, ExtractRow, Ms2Counts,
+    TransferSelection,
 };
 
 /// Seed of the transfer FDR's folds and models, in every path.
@@ -1629,6 +1630,7 @@ pub(crate) fn finalize_and_write(
     groups: Option<&ProteinGroups<'_>>,
 ) -> Result<(), String> {
     let (table, validation) = mbr_paths(base);
+    let runs = mbr_runs_path(base);
     let mut feature_out = match parquet_dir {
         Some(dir) => {
             std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
@@ -1645,6 +1647,7 @@ pub(crate) fn finalize_and_write(
         options,
         mbr_path: &table,
         validation_path: &validation,
+        runs_path: Some(&runs),
     };
     let mut tally = GroupTally::default();
     let summary = finalize_stream(&stored.runs, &stored.library, source, &params, &mut |f| {

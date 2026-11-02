@@ -954,7 +954,8 @@ pub(crate) struct SearchArgs {
     /// more; needs `--lfq` and `--rescore` or `--rescore-native`). After the
     /// per-run quantification, builds the precursor library, aligns retention
     /// times across runs, measures every library precursor in every run and
-    /// writes `<base>.mbr.parquet` and `<base>.mbr_validation.parquet` (with
+    /// writes `<base>.mbr.parquet`, `<base>.mbr_validation.parquet` and
+    /// `<base>.mbr_validation_runs.parquet` (with
     /// `--output-parquet`, `quantms.feature.parquet` holds these rows instead
     /// of the per-run features, without the below-threshold transfers). Uses
     /// `--quant-dir` for the per-run artifacts, or a temporary directory that
@@ -1109,8 +1110,9 @@ pub(crate) enum QuantCommand {
     /// `<stem>.extract.parquet`.
     Extract(QuantExtractArgs),
     /// Transfer q-values and the match-between-runs tables from every run's
-    /// extract table. Writes `<base>.mbr.parquet` and
-    /// `<base>.mbr_validation.parquet`.
+    /// extract table. Writes `<base>.mbr.parquet`,
+    /// `<base>.mbr_validation.parquet` and
+    /// `<base>.mbr_validation_runs.parquet`.
     Finalize(Box<QuantFinalizeArgs>),
 }
 
@@ -1217,8 +1219,9 @@ pub(crate) struct QuantFinalizeArgs {
     #[arg(long = "quant-dir", value_name = "DIR")]
     pub(crate) quant_dir: PathBuf,
 
-    /// Output base: writes `<base>.mbr.parquet` and
-    /// `<base>.mbr_validation.parquet`.
+    /// Output base: writes `<base>.mbr.parquet`,
+    /// `<base>.mbr_validation.parquet` and
+    /// `<base>.mbr_validation_runs.parquet`.
     #[arg(short = 'o', long = "output", value_name = "BASE")]
     pub(crate) output: PathBuf,
 

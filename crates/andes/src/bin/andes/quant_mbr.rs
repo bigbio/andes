@@ -1129,6 +1129,30 @@ pub(crate) fn reported_quantity(
     }
 }
 
+/// `(quantity, quantity_se)` of the fixed-apex amplitude of evidence `e`
+/// ([`Evidence::amplitude_fixed`]) in run `run`, at the width of
+/// [`reported_quantity`] (the consensus width carried into the run), or at
+/// the prior width of the fit (`w / width_ratio`) without one. Not clamped:
+/// negative when the trace at the predicted apex is below its background.
+/// `None` for a fit without the value (an extract table of schema 4.0).
+pub(crate) fn fixed_quantity(
+    e: &Evidence,
+    run: u16,
+    w_c: Option<f64>,
+    maps: &[Option<RunMap>],
+) -> Option<(f64, f64)> {
+    if !(e.amplitude_fixed.is_finite() && e.amplitude_fixed_se.is_finite()) {
+        return None;
+    }
+    let w = match w_c.zip(local_slope(maps, run, e.t0)) {
+        Some((w_c, slope)) => w_c * slope,
+        None => e.w / e.width_ratio,
+    };
+    let area = w * (2.0 * std::f64::consts::PI).sqrt();
+    area.is_finite()
+        .then_some((e.amplitude_fixed * area, e.amplitude_fixed_se * area))
+}
+
 /// Floor of `amplitude_se` in the amplitude signal-to-noise feature.
 const MIN_AMPLITUDE_SE: f64 = 1e-12;
 
@@ -2346,6 +2370,13 @@ mod finalize_tests {
             w: 4.0,
             iso_heights: [0.55, 0.3, 0.11, 0.04].map(|v| v * amplitude),
             tailing: 0.0,
+            // No draw here: the other values keep their random sequence.
+            amplitude_fixed: if present {
+                0.98 * amplitude
+            } else {
+                amplitude - 1e3
+            },
+            amplitude_fixed_se: 1e4,
         }
     }
 
@@ -3049,6 +3080,9 @@ mod finalize_tests {
                 }
                 let e = r.evidence.as_ref();
                 let quantity = reported(r);
+                let fixed = e
+                    .filter(|_| r.role == Role::Transfer)
+                    .and_then(|e| fixed_quantity(e, r.run, w_c.get(&r.precursor).copied(), maps));
                 let quantity_normalized = quantity
                     .zip(e)
                     .and_then(|((q, _), e)| norm.normalize(r.run, r.precursor, e.t0, q));
@@ -3151,6 +3185,8 @@ mod finalize_tests {
                         apex_rt_s: e.map(|e| e.t0),
                         library_q: r.library_q,
                         shared_peak_with: shared[i].map(|q| lib.meta[q as usize].key.as_str()),
+                        quantity_fixed: fixed.map(|q| q.0),
+                        quantity_fixed_se: fixed.map(|q| q.1),
                     },
                     e.map(|e| e.mass_err_ppm),
                     shared[i],
@@ -3572,6 +3608,54 @@ mod finalize_tests {
             v.iter().sum::<f64>() / v.len() as f64
         };
         assert!(mean(&f1) > mean(&f0), "{} {}", mean(&f1), mean(&f0));
+    }
+
+    #[test]
+    fn transfers_report_the_fixed_apex_quantity() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = library_with_entries();
+        let base = dir.path().join("x");
+        stream(
+            &lib,
+            &extract(),
+            unlimited(),
+            50,
+            &base,
+            0.05,
+            None,
+            &FinalizeOptions::default(),
+        );
+        let (mbr, _) = mbr_paths(&base);
+        let rows = output::mbr_out::read_mbr_parquet(&mbr).unwrap();
+        let transfer = |r: &&output::mbr_out::MbrRecord| !r.evidence_type.starts_with("identified");
+        assert!(rows
+            .iter()
+            .filter(|r| !transfer(r))
+            .all(|r| r.quantity_fixed.is_none()));
+        let transfers: Vec<_> = rows.iter().filter(transfer).collect();
+        assert!(transfers
+            .iter()
+            .all(|r| r.quantity_fixed.is_some() == r.quantity.is_some() || r.quantity.is_none()));
+        // Absent transfers (odd precursors): a positive free quantity, a
+        // fixed one that is often negative.
+        let negative = transfers
+            .iter()
+            .filter(|r| r.quantity.is_some_and(|q| q > 0.0) && r.quantity_fixed.unwrap() < 0.0)
+            .count();
+        assert!(negative > 0);
+        // Present ones (even): the fixed quantity follows the free one.
+        for r in &transfers {
+            let p: u32 = r.precursor_key[3..r.precursor_key.len() - 2]
+                .parse()
+                .unwrap();
+            if p % 2 == 0 && p != 0 {
+                // The fixture's quantity is 10 A; the fixed one is at the
+                // prior width w / width_ratio (about 4 s), so near 0.98 A
+                // sqrt(2 pi) 4.
+                let (q, f) = (r.quantity.unwrap(), r.quantity_fixed.unwrap());
+                assert!(f > 0.0 && (f / q - 1.0).abs() < 0.5, "{r:?}");
+            }
+        }
     }
 
     #[test]

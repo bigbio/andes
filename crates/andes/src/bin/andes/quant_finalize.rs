@@ -71,9 +71,9 @@ use rayon::prelude::*;
 
 use crate::quant_lookalike::{usable_fit, Lookalikes, LOOKALIKE_RT_S};
 use crate::quant_mbr::{
-    consensus_scale_width, cosine, donor_fit, family, identified_features, iso_profile,
-    local_slope, median, reported_quantity, transfer_features, DonorFit, ExtractRow, Role,
-    ShapeReference, NO_SHAPE, TRANSFER_DONOR_Q,
+    consensus_scale_width, cosine, donor_fit, family, fixed_quantity, identified_features,
+    iso_profile, local_slope, median, reported_quantity, transfer_features, DonorFit, ExtractRow,
+    Role, ShapeReference, NO_SHAPE, TRANSFER_DONOR_Q,
 };
 use crate::transfer_fdr::{
     member_seed, pack_family, row_unit, sample_hash, stratum_of, train_bagged_folds, train_folds,
@@ -1163,6 +1163,8 @@ struct OutRow {
     library_q: f64,
     mass_err_ppm: Option<f64>,
     shared_peak_with: Option<u32>,
+    quantity_fixed: Option<f64>,
+    quantity_fixed_se: Option<f64>,
 }
 
 impl OutRow {
@@ -1224,6 +1226,8 @@ fn out_schema() -> Arc<Schema> {
     );
     fields.push(Field::new("library_q", DataType::Float64, false));
     fields.push(Field::new("mass_err_ppm", DataType::Float64, true));
+    fields.push(Field::new("quantity_fixed", DataType::Float64, true));
+    fields.push(Field::new("quantity_fixed_se", DataType::Float64, true));
     fields.push(Field::new("shared_peak_with", DataType::UInt32, true));
     Arc::new(Schema::new(fields))
 }
@@ -1258,7 +1262,7 @@ impl OutWriter {
             let mut precursor = UInt32Builder::with_capacity(c.len());
             let mut run = UInt16Builder::with_capacity(c.len());
             let mut ev = UInt8Builder::with_capacity(c.len());
-            let mut values: Vec<Float64Builder> = (0..OUT_VALUES.len() + 2)
+            let mut values: Vec<Float64Builder> = (0..OUT_VALUES.len() + 4)
                 .map(|_| Float64Builder::with_capacity(c.len()))
                 .collect();
             let mut shared = UInt32Builder::with_capacity(c.len());
@@ -1276,6 +1280,8 @@ impl OutWriter {
                     r.apex_rt_s,
                     Some(r.library_q),
                     r.mass_err_ppm,
+                    r.quantity_fixed,
+                    r.quantity_fixed_se,
                 ];
                 for (b, x) in values.iter_mut().zip(v) {
                     b.append_option(x);
@@ -1334,7 +1340,7 @@ impl OutReader {
 
     fn decode(&self, b: &RecordBatch) -> Result<Vec<OutRow>, String> {
         let path = self.path.as_path();
-        let n_floats = OUT_VALUES.len() + 2;
+        let n_floats = OUT_VALUES.len() + 4;
         if b.num_columns() != n_floats + 4 {
             return Err(format!(
                 "{}: {} columns where {} were expected",
@@ -1368,6 +1374,8 @@ impl OutReader {
                     apex_rt_s: opt(5, i),
                     library_q: values[6].value(i),
                     mass_err_ppm: opt(7, i),
+                    quantity_fixed: opt(8, i),
+                    quantity_fixed_se: opt(9, i),
                     shared_peak_with: (!shared.is_null(i)).then(|| shared.value(i)),
                 })
             })
@@ -2412,6 +2420,11 @@ pub(crate) fn finalize_stream(
                 }
                 let e = r.evidence.as_ref();
                 let quantity = reported(r);
+                // The fixed-apex quantity of a transfer.
+                let fixed = e.filter(|_| r.role == Role::Transfer).and_then(|e| {
+                    let w_c = summaries.get(&r.precursor).and_then(|s| s.w_c);
+                    fixed_quantity(e, r.run, w_c, maps)
+                });
                 let quantity_normalized = quantity
                     .zip(e)
                     .and_then(|((q, _), e)| norm.normalize(r.run, r.precursor, e.t0, q));
@@ -2518,6 +2531,8 @@ pub(crate) fn finalize_stream(
                     library_q: r.library_q,
                     mass_err_ppm: e.map(|e| e.mass_err_ppm),
                     shared_peak_with: shared[i],
+                    quantity_fixed: fixed.map(|q| q.0),
+                    quantity_fixed_se: fixed.map(|q| q.1),
                 });
             }
             Ok(())
@@ -2678,6 +2693,8 @@ fn write_merged(
                         shared_peak_with: r
                             .shared_peak_with
                             .map(|q| lib.meta[q as usize].key.as_str()),
+                        quantity_fixed: r.quantity_fixed,
+                        quantity_fixed_se: r.quantity_fixed_se,
                     })?;
                 }
                 n += rows.len();
@@ -2934,6 +2951,8 @@ mod tests {
             library_q: 1e-3,
             mass_err_ppm: Some(-1.25),
             shared_peak_with: (precursor % 3 == 0).then_some(precursor + 1),
+            quantity_fixed: (run == 1).then_some(-2.5),
+            quantity_fixed_se: (run == 1).then_some(0.5),
         }
     }
 

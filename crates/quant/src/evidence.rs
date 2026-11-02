@@ -173,6 +173,15 @@ pub struct Evidence {
     /// and profile. Positive when the peak tails after the apex; 0 when
     /// `A = 0`.
     pub tailing: f64,
+    /// The amplitude with the apex fixed at the prior's centre `t_hat` and
+    /// the width at `w_prior`, over the final isotope set, not clamped at
+    /// 0: `num / den` of the weighted least squares for that one profile.
+    /// On a present precursor it follows [`Evidence::amplitude`]; on an
+    /// absent one it averages 0, where the free fit takes the largest bump
+    /// near `t_hat` and so biases faint values upwards.
+    pub amplitude_fixed: f64,
+    /// `1 / sqrt(den)` of [`Evidence::amplitude_fixed`].
+    pub amplitude_fixed_se: f64,
 }
 
 /// The RT prior of a probe, with the floors of [`fit`] applied.
@@ -219,6 +228,8 @@ pub struct Workspace {
     sort: Vec<f32>,
     z: Vec<f64>,
     g: Vec<f64>,
+    /// The profile of [`Evidence::amplitude_fixed`].
+    g_fixed: Vec<f64>,
     grids: GridCache,
 }
 
@@ -964,9 +975,39 @@ fn fit_traces_on_grid(
     }
     let g = &work.g;
     let m1_proj = project(m1, mean(m1), g);
-    features(
+    let mut e = features(
         rt, traces, mz0, mu, prior, &pi, &sigma, &proj, sgg, m1_proj, mask, t0, w, g,
-    )
+    );
+    (e.amplitude_fixed, e.amplitude_fixed_se) = fixed_amplitude(
+        rt,
+        traces,
+        &ybar,
+        &pi,
+        &sigma,
+        mask,
+        prior,
+        &mut work.g_fixed,
+    );
+    e
+}
+
+/// [`Evidence::amplitude_fixed`] and its standard error: the joint
+/// amplitude of the isotopes in `mask` for the one profile at
+/// `(t_hat, w_prior)`, not clamped.
+#[allow(clippy::too_many_arguments)]
+fn fixed_amplitude(
+    rt: &[f64],
+    traces: &[&[f32]],
+    ybar: &[f64; MAX_ISOTOPES],
+    pi: &[f64; MAX_ISOTOPES],
+    sigma: &[f64; MAX_ISOTOPES],
+    mask: u8,
+    prior: &Prior,
+    g: &mut Vec<f64>,
+) -> (f64, f64) {
+    let (sgg, proj) = profile(rt, traces, ybar, prior.t_hat, prior.w_prior, g);
+    let (num, den) = num_den(&proj, sgg, pi, sigma, mask);
+    (num / den, 1.0 / den.sqrt())
 }
 
 /// Fills `g` with the profile at `(t0, w)` over `rt` and returns
@@ -1391,6 +1432,8 @@ fn features(
         w,
         iso_heights,
         tailing,
+        amplitude_fixed: 0.0,
+        amplitude_fixed_se: 0.0,
     }
 }
 
@@ -1569,6 +1612,8 @@ mod tests {
             ("mass_err_ppm", e.mass_err_ppm),
             ("t0", e.t0),
             ("w", e.w),
+            ("amplitude_fixed", e.amplitude_fixed),
+            ("amplitude_fixed_se", e.amplitude_fixed_se),
         ] {
             assert!(v.is_finite(), "{name} = {v} is not finite");
         }
@@ -1799,6 +1844,39 @@ mod tests {
         assert_finite(&e);
         assert!(e.llr < NULL_LLR_BOUND);
         assert!(e.amplitude < 0.05 * AMP);
+    }
+
+    #[test]
+    fn fixed_amplitude_follows_a_present_peak_and_averages_zero_on_an_absent_one() {
+        // Present, apex at the prior's centre: the fixed and free amplitudes agree.
+        let run = synth_run(&[(MZ, 2, ENV, 300.0, 5.0, AMP)], NOISE, 1.0);
+        let e = fit(&run, &probe(MZ, 300.0, 6.0, 5.0), 2, &ENV, &params()).unwrap();
+        assert_finite(&e);
+        assert!((e.amplitude_fixed / AMP - 1.0).abs() < 0.05, "{e:?}");
+        assert!(e.amplitude_fixed_se > 0.0);
+        // Absent, over noise seeds: the free amplitude is never negative and
+        // picks the largest bump, the fixed one scatters around 0.
+        let (mut free, mut fixed, mut z2) = (0.0, 0.0, 0.0);
+        let n = 40;
+        for seed in 0..n {
+            let scans = synth_scans(&[(MZ, 2, ENV, 300.0, 5.0, 0.0)], NOISE, 1.0, 100 + seed);
+            let run = Ms1RunIndex::new(scans);
+            let e = fit(&run, &probe(MZ, 300.0, 6.0, 5.0), 2, &ENV, &params()).unwrap();
+            assert_finite(&e);
+            assert!(e.amplitude >= 0.0);
+            free += e.amplitude / e.amplitude_se;
+            fixed += e.amplitude_fixed / e.amplitude_fixed_se;
+            z2 += (e.amplitude_fixed / e.amplitude_fixed_se).powi(2);
+        }
+        let (free, fixed) = (free / n as f64, fixed / n as f64);
+        let sd = (z2 / n as f64 - fixed * fixed).sqrt();
+        eprintln!("absent: mean z free {free:.2}, fixed {fixed:.2} (sd {sd:.2})");
+        // The mean of n z-scores of sd `sd` is within 4 standard errors of 0.
+        assert!(
+            fixed.abs() < 4.0 * sd / (n as f64).sqrt() + 0.1,
+            "{fixed} {sd}"
+        );
+        assert!(free > fixed + 0.5, "free {free}, fixed {fixed}");
     }
 
     #[test]

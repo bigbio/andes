@@ -13,7 +13,9 @@
 //! `ms2_n_matched`, `ms2_angle`, `ms2_explained`; null for identified rows
 //! and rows without a fit); a schema-2 table is rejected. Schema 4 added
 //! the per-isotope heights `iso_h0`..`iso_h3` and the `tailing` of the fit;
-//! a schema-3 table is rejected.
+//! a schema-3 table is rejected. Schema 4.1 adds, after the MS2 columns,
+//! [`OPTIONAL_EVIDENCE`]: the fixed-apex amplitude and its standard error;
+//! they are read by name, so a schema-4.0 table reads with them NaN.
 //! The evidence columns are null when the fit was not possible.
 //! `n_donor_runs` counts the aligned runs with a PSM of the precursor, this
 //! run included for an identified row and excluded otherwise: the runs that
@@ -44,7 +46,7 @@ use quant::ms2::{Ms2Evidence, ScanMatch};
 pub const EXTRACT_SCHEMA_MAJOR: u32 = 4;
 
 const SCHEMA_KEY: &str = "andes.extract.schema";
-const SCHEMA_VERSION: &str = "4.0";
+const SCHEMA_VERSION: &str = "4.1";
 /// Rows per Parquet row group / record batch.
 const BATCH_ROWS: usize = 65_536;
 
@@ -128,7 +130,16 @@ fn f64_fields(e: &Evidence) -> [f64; 18] {
 const N_KEY_COLUMNS: usize = 7;
 /// The MS2 evidence columns, after the fit evidence.
 const MS2_COLUMNS: [&str; 4] = ["ms2_n_scans", "ms2_n_matched", "ms2_angle", "ms2_explained"];
-const N_COLUMNS: usize = N_KEY_COLUMNS + F64_EVIDENCE.len() + 2 + MS2_COLUMNS.len();
+/// The columns of a schema-4.0 table.
+const N_CORE_COLUMNS: usize = N_KEY_COLUMNS + F64_EVIDENCE.len() + 2 + MS2_COLUMNS.len();
+/// Evidence columns after the MS2 columns (schema 4.1), float64, read by
+/// name: NaN in the evidence of a table without them.
+pub const OPTIONAL_EVIDENCE: [&str; 2] = ["amplitude_fixed", "amplitude_fixed_se"];
+const N_COLUMNS: usize = N_CORE_COLUMNS + OPTIONAL_EVIDENCE.len();
+
+fn optional_fields(e: &Evidence) -> [f64; OPTIONAL_EVIDENCE.len()] {
+    [e.amplitude_fixed, e.amplitude_fixed_se]
+}
 
 fn schema() -> Schema {
     let mut fields = vec![
@@ -151,6 +162,11 @@ fn schema() -> Schema {
     fields.push(Field::new(MS2_COLUMNS[1], DataType::UInt8, true));
     fields.push(Field::new(MS2_COLUMNS[2], DataType::Float32, true));
     fields.push(Field::new(MS2_COLUMNS[3], DataType::Float32, true));
+    fields.extend(
+        OPTIONAL_EVIDENCE
+            .iter()
+            .map(|n| Field::new(*n, DataType::Float64, true)),
+    );
     Schema::new(fields)
 }
 
@@ -206,7 +222,15 @@ fn batch(schema: &Arc<Schema>, rows: &[ExtractRow]) -> Result<RecordBatch, Strin
     let mut ms2_matched = UInt8Builder::new();
     let mut ms2_angle = Float32Builder::new();
     let mut ms2_explained = Float32Builder::new();
+    let mut extra: Vec<Float64Builder> = OPTIONAL_EVIDENCE
+        .iter()
+        .map(|_| Float64Builder::new())
+        .collect();
     for r in rows {
+        let values = r.evidence.as_ref().map(optional_fields);
+        for (k, b) in extra.iter_mut().enumerate() {
+            b.append_option(values.map(|v| v[k]));
+        }
         ms2_scans.append_option(r.ms2.map(|m| m.n_scans));
         ms2_matched.append_option(r.ms2.map(|m| m.best.n_matched));
         ms2_angle.append_option(r.ms2.map(|m| m.best.angle));
@@ -252,6 +276,7 @@ fn batch(schema: &Arc<Schema>, rows: &[ExtractRow]) -> Result<RecordBatch, Strin
     cols.push(Arc::new(ms2_matched.finish()));
     cols.push(Arc::new(ms2_angle.finish()));
     cols.push(Arc::new(ms2_explained.finish()));
+    cols.extend(extra.iter_mut().map(|b| Arc::new(b.finish()) as ArrayRef));
     RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
 }
 
@@ -633,6 +658,8 @@ fn decode_fit_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, Str
                 w: v(2),
                 iso_heights: [v(3), v(4), v(5), v(6)],
                 tailing: v(7),
+                amplitude_fixed: f64::NAN,
+                amplitude_fixed_se: f64::NAN,
             }
         });
         rows.push(ExtractRow {
@@ -653,14 +680,15 @@ fn decode_fit_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, Str
 fn decode_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let mut rows = Vec::with_capacity(b.num_rows());
-    if b.num_columns() != N_COLUMNS {
+    if !(N_CORE_COLUMNS..=N_COLUMNS).contains(&b.num_columns()) {
         return Err(err(&format!(
-            "expected {N_COLUMNS} columns, found {}",
+            "expected {N_CORE_COLUMNS} to {N_COLUMNS} columns, found {}",
             b.num_columns()
         )));
     }
     let expected = schema();
-    for (got, want) in b.schema().fields().iter().zip(expected.fields()) {
+    let core = &expected.fields()[..N_CORE_COLUMNS];
+    for (got, want) in b.schema().fields().iter().zip(core) {
         if got.name() != want.name() {
             return Err(err(&format!(
                 "column {:?} where {:?} was expected",
@@ -686,6 +714,18 @@ fn decode_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, String>
     let ms2_matched = column::<UInt8Array>(b, after + 3, path)?;
     let ms2_angle = column::<Float32Array>(b, after + 4, path)?;
     let ms2_explained = column::<Float32Array>(b, after + 5, path)?;
+    let extra: Vec<Option<&Float64Array>> = OPTIONAL_EVIDENCE
+        .iter()
+        .map(|n| match b.schema().index_of(n) {
+            Ok(k) => column::<Float64Array>(b, k, path).map(Some),
+            Err(_) => Ok(None),
+        })
+        .collect::<Result<_, _>>()?;
+    let extra_value = |k: usize, i: usize| {
+        extra[k]
+            .filter(|a| !a.is_null(i))
+            .map_or(f64::NAN, |a| a.value(i))
+    };
 
     for i in 0..b.num_rows() {
         let kind = decode_kind(kind.value(i), shift.value(i)).ok_or_else(|| {
@@ -719,6 +759,8 @@ fn decode_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, String>
                 w: v(12),
                 iso_heights: [v(13), v(14), v(15), v(16)],
                 tailing: v(17),
+                amplitude_fixed: extra_value(0, i),
+                amplitude_fixed_se: extra_value(1, i),
             })
         };
         let ms2 = if ms2_scans.is_null(i) {
@@ -774,6 +816,8 @@ mod tests {
             w: 4.2,
             iso_heights: [5.0 + f, 3.0, 1.0, -0.5],
             tailing: 0.1 * f,
+            amplitude_fixed: -2e3 + f,
+            amplitude_fixed_se: 15.0,
         }
     }
 
@@ -920,6 +964,42 @@ mod tests {
             e.contains("r.extract.parquet") && e.contains("rolle"),
             "{e}"
         );
+    }
+
+    #[test]
+    fn a_schema_4_0_table_reads_with_nan_optional_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("old.extract.parquet");
+        let rows = rows();
+        let full = batch(&Arc::new(schema()), &rows).unwrap();
+        let old = full
+            .project(&(0..N_CORE_COLUMNS).collect::<Vec<_>>())
+            .unwrap();
+        let props = WriterProperties::builder()
+            .set_key_value_metadata(Some(vec![KeyValue::new(
+                SCHEMA_KEY.to_string(),
+                "4.0".to_string(),
+            )]))
+            .build();
+        let file = File::create(&p).unwrap();
+        let mut w = ArrowWriter::try_new(file, old.schema(), Some(props)).unwrap();
+        w.write(&old).unwrap();
+        w.close().unwrap();
+        let back = read_extract_table(&p).unwrap();
+        assert_eq!(back.len(), rows.len());
+        let blank = |r: &ExtractRow| {
+            let mut r = r.clone();
+            if let Some(e) = r.evidence.as_mut() {
+                (e.amplitude_fixed, e.amplitude_fixed_se) = (0.0, 0.0);
+            }
+            r
+        };
+        for (got, want) in back.iter().zip(&rows) {
+            if let Some(e) = &got.evidence {
+                assert!(e.amplitude_fixed.is_nan() && e.amplitude_fixed_se.is_nan());
+            }
+            assert_eq!(blank(got), blank(want));
+        }
     }
 
     #[test]

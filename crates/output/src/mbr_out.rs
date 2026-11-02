@@ -16,6 +16,7 @@
 //! | `apex_rt_s` | fitted apex, seconds |
 //! | `library_q` | internal library entry gate (not an identification FDR) |
 //! | `shared_peak_with` | for a transfer, the key of a look-alike precursor (m/z within the extract tolerance) identified in the run whose identified peak the transfer's apex lies on (within its identified width); null otherwise. Such a transfer may measure the look-alike rather than its own precursor (schema 1.1) |
+//! | `quantity_fixed`, `quantity_fixed_se` | for a transfer, the quantity with the apex fixed at the predicted RT and the width at the prior's (the same width as `quantity`), not clamped at 0, and its standard error: near 0 on average when the precursor is absent, where `quantity` takes the largest bump near the prediction; null for identified rows and for an extract of schema 4.0 (schema 1.1) |
 //!
 //! The text columns are UTF-8, the others float64; missing or
 //! non-finite values are null (`library_q` is never null). A
@@ -127,9 +128,13 @@ pub struct MbrRow<'a> {
     /// The key of the look-alike precursor whose identified peak this
     /// transfer lies on.
     pub shared_peak_with: Option<&'a str>,
+    /// A transfer's quantity with the apex fixed at its predicted RT, not
+    /// clamped, and its standard error.
+    pub quantity_fixed: Option<f64>,
+    pub quantity_fixed_se: Option<f64>,
 }
 
-pub const MBR_COLUMNS: [&str; 11] = [
+pub const MBR_COLUMNS: [&str; 13] = [
     "precursor_key",
     "run",
     "evidence_type",
@@ -141,6 +146,8 @@ pub const MBR_COLUMNS: [&str; 11] = [
     "apex_rt_s",
     "library_q",
     "shared_peak_with",
+    "quantity_fixed",
+    "quantity_fixed_se",
 ];
 
 /// The default transfer q-value threshold, at which the validation is
@@ -524,6 +531,8 @@ fn mbr_schema() -> Schema {
         f("apex_rt_s"),
         Field::new("library_q", DataType::Float64, false),
         Field::new("shared_peak_with", DataType::Utf8, true),
+        f("quantity_fixed"),
+        f("quantity_fixed_se"),
     ])
 }
 
@@ -535,6 +544,7 @@ struct MbrColumnsBuilder {
     floats: Vec<Float64Builder>,
     library_q: Float64Builder,
     shared: StringBuilder,
+    fixed: [Float64Builder; 2],
     rows: usize,
 }
 
@@ -547,6 +557,7 @@ impl MbrColumnsBuilder {
             floats: (0..6).map(|_| Float64Builder::new()).collect(),
             library_q: Float64Builder::new(),
             shared: StringBuilder::new(),
+            fixed: [Float64Builder::new(), Float64Builder::new()],
             rows: 0,
         }
     }
@@ -568,6 +579,13 @@ impl MbrColumnsBuilder {
         }
         self.library_q.append_value(r.library_q);
         self.shared.append_option(r.shared_peak_with);
+        for (b, v) in self
+            .fixed
+            .iter_mut()
+            .zip([r.quantity_fixed, r.quantity_fixed_se])
+        {
+            b.append_option(v.filter(|v| v.is_finite()));
+        }
         self.rows += 1;
     }
 
@@ -586,6 +604,11 @@ impl MbrColumnsBuilder {
         );
         cols.push(Arc::new(self.library_q.finish()));
         cols.push(Arc::new(self.shared.finish()));
+        cols.extend(
+            self.fixed
+                .iter_mut()
+                .map(|b| Arc::new(b.finish()) as ArrayRef),
+        );
         RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
     }
 }
@@ -675,6 +698,9 @@ pub struct MbrRecord {
     pub library_q: f64,
     /// `None` also for a schema-1.0 file, which has no such column.
     pub shared_peak_with: Option<String>,
+    /// `None` also for a schema-1.0 file.
+    pub quantity_fixed: Option<f64>,
+    pub quantity_fixed_se: Option<f64>,
 }
 
 /// Reads `<base>.mbr.parquet`, in file order. Rejects another major schema
@@ -701,6 +727,14 @@ pub fn read_mbr_parquet(path: &Path) -> Result<Vec<MbrRecord>, String> {
             Ok(_) => Some(text("shared_peak_with")?),
             Err(_) => None,
         };
+        let optional_float = |name: &str| match b.schema().index_of(name) {
+            Ok(_) => float(name).map(Some),
+            Err(_) => Ok(None),
+        };
+        let (fq, fse) = (
+            optional_float("quantity_fixed")?,
+            optional_float("quantity_fixed_se")?,
+        );
         for i in 0..b.num_rows() {
             out.push(MbrRecord {
                 precursor_key: key.value(i).to_string(),
@@ -716,6 +750,8 @@ pub fn read_mbr_parquet(path: &Path) -> Result<Vec<MbrRecord>, String> {
                 shared_peak_with: shared
                     .filter(|c| !c.is_null(i))
                     .map(|c| c.value(i).to_string()),
+                quantity_fixed: fq.and_then(|c| opt(c, i)),
+                quantity_fixed_se: fse.and_then(|c| opt(c, i)),
             });
         }
     }
@@ -1045,6 +1081,8 @@ mod tests {
                 apex_rt_s: Some(612.25),
                 library_q: 0.001,
                 shared_peak_with: None,
+                quantity_fixed: None,
+                quantity_fixed_se: None,
             },
             MbrRow {
                 precursor_key: "PEPTIDEK/2",
@@ -1058,6 +1096,8 @@ mod tests {
                 apex_rt_s: None,
                 library_q: 0.001,
                 shared_peak_with: Some("PEPTLDEK/2"),
+                quantity_fixed: Some(-1.5e3),
+                quantity_fixed_se: Some(2e3),
             },
         ]
     }
@@ -1083,6 +1123,8 @@ mod tests {
                 apex_rt_s: r.apex_rt_s,
                 library_q: r.library_q,
                 shared_peak_with: r.shared_peak_with.map(String::from),
+                quantity_fixed: r.quantity_fixed,
+                quantity_fixed_se: r.quantity_fixed_se,
             })
             .collect();
         assert_eq!(back, want);
@@ -1268,7 +1310,10 @@ mod tests {
         let old = Arc::new(Schema::new(
             new.fields()
                 .iter()
-                .filter(|f| f.name() != "shared_peak_with")
+                .filter(|f| {
+                    !["shared_peak_with", "quantity_fixed", "quantity_fixed_se"]
+                        .contains(&f.name().as_str())
+                })
                 .cloned()
                 .collect::<Vec<_>>(),
         ));
@@ -1280,6 +1325,8 @@ mod tests {
         write_table(&p, &MBR_TABLE, "1.0", old, [b], &[]).unwrap();
         let back = read_mbr_parquet(&p).unwrap();
         assert_eq!(back.len(), 2);
-        assert!(back.iter().all(|r| r.shared_peak_with.is_none()));
+        assert!(back
+            .iter()
+            .all(|r| r.shared_peak_with.is_none() && r.quantity_fixed.is_none()));
     }
 }

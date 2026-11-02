@@ -79,7 +79,7 @@
 
 use std::io::{self, BufWriter, Write};
 
-use crate::percolator_enz::{count_internal_enzymatic_any, is_enzymatic_boundary_any};
+use crate::percolator_enz::enzyme_features;
 use crate::row_context::{emitted_rows, RowContext};
 use model::mass::{ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
@@ -811,15 +811,10 @@ fn write_psm_row<W: Write>(
     // between peptide[last] and protein-post; enzInt = count of internal
     // positions consistent with the enzyme. Per-rule semantics in
     // crate::percolator_enz.
-    let residues: Vec<u8> = cand.peptide.residues.iter().map(|aa| aa.residue).collect();
-    let first = residues.first().copied().unwrap_or(b'-');
-    let last = residues.last().copied().unwrap_or(b'-');
     // A multi-protease digest (`--enzyme a,b`) counts a boundary any of its
-    // enzymes cleaves.
-    let extra = &params.extra_enzymes;
-    let enz_n: u8 = is_enzymatic_boundary_any(cand.peptide.pre, first, params.enzyme, extra) as u8;
-    let enz_c: u8 = is_enzymatic_boundary_any(last, cand.peptide.post, params.enzyme, extra) as u8;
-    let enz_int = count_internal_enzymatic_any(&residues, params.enzyme, extra);
+    // enzymes cleaves; a protein N-terminal peptide, Met-clipped included,
+    // has enzN = 1.
+    let (enz_n, enz_c, enz_int) = enzyme_features(cand, params.enzyme, &params.extra_enzymes);
     write!(writer, "\t{}\t{}\t{}", enz_n, enz_c, enz_int)?;
 
     // Fragment/error/strong-score feature block — written from the SHARED
@@ -1476,6 +1471,65 @@ mod tests {
         };
         assert_eq!(enz(Vec::new()), ["1", "0", "1"]);
         assert_eq!(enz(vec![model::enzyme::Enzyme::GluC]), ["1", "1", "2"]);
+    }
+
+    #[test]
+    fn pin_enz_n_is_one_for_met_clipped_targets_and_decoys() {
+        // The digest of a target and its generated decoy: the decoy keeps the
+        // initiator Met, so both get the Met-cleaved walk. Every protein
+        // N-terminal peptide, Met-clipped (`pre = 'M'`) or not, has enzN = 1;
+        // the K|P site (PLLSEAVQK) keeps enzN = 0.
+        let target = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P1".to_string(),
+                description: String::new(),
+                sequence: b"MASLVTEGLKPLLSEAVQKWEDNGKSSLLR".to_vec(),
+                annotation: None,
+            }],
+        };
+        let idx = SearchIndex::from_target_db(&target, "XXX_");
+        let params = make_params(2..=3);
+        let cands: Vec<Candidate> =
+            search::candidate_gen::enumerate_candidates(&idx, &params, &idx.decoy_prefix).collect();
+        let met_clipped = |decoy: bool| {
+            cands
+                .iter()
+                .filter(|c| {
+                    c.is_decoy == decoy && c.is_protein_n_term && c.start_offset_in_protein == 1
+                })
+                .count()
+        };
+        assert!(met_clipped(false) > 0 && met_clipped(true) > 0);
+
+        let spectra: Vec<Spectrum> = (0..cands.len())
+            .map(|i| make_spectrum(&format!("Scan {i}"), i as i32, 500.0))
+            .collect();
+        let queues: Vec<TopNQueue> = (0..cands.len())
+            .map(|i| {
+                let mut q = TopNQueue::new(10);
+                q.push(make_psm(i, 10.0, 10.0, i as u32, 2));
+                q
+            })
+            .collect();
+        let mut buf = Vec::<u8>::new();
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
+        let cols = parse_header(&buf);
+        let enz_n = cols.iter().position(|c| c == "enzN").unwrap();
+        let peptide = cols.iter().position(|c| c == "Peptide").unwrap();
+        let rows = parse_rows(&buf);
+        assert_eq!(rows.len(), cands.len());
+        for (row, cand) in rows.iter().zip(&cands) {
+            assert_eq!(row[peptide], cand.peptide.to_string());
+            let want = if cand.is_protein_n_term {
+                "1"
+            } else if cand.peptide.residues[0].residue == b'P' {
+                "0"
+            } else {
+                "1"
+            };
+            assert_eq!(row[enz_n], want, "{}", row[peptide]);
+        }
+        assert!(rows.iter().any(|r| r[peptide] == "K.PLLSEAVQK.W"));
     }
 
     #[test]

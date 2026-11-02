@@ -13,11 +13,15 @@
 //!   uses `_` for the protein N-terminal boundary and `-` for the protein
 //!   C-terminal boundary, so both bytes are normalised to the same "boundary"
 //!   semantics here.
+//! - A protein N-terminal peptide starts at a terminus even when the
+//!   initiator Met was removed: [`enzyme_features`] reads its `M` flank as a
+//!   protein boundary (OpenMS PercolatorInfile, OpenMS/OpenMS#10740).
 //! - Unknown / non-builtin enzymes return `true` for any boundary —
 //!   matching OpenMS's default "else" branch and Percolator's
 //!   unspecific-cleavage semantics.
 
 use model::enzyme::Enzyme;
+use search::candidate_gen::Candidate;
 
 #[inline]
 fn is_protein_boundary(c: u8) -> bool {
@@ -50,7 +54,7 @@ pub(crate) fn is_enzymatic_boundary(n: u8, c: u8, enzyme: Enzyme) -> bool {
 /// [`is_enzymatic_boundary`] for a digest of `primary` plus the `extra`
 /// enzymes of a multi-protease `--enzyme a,b,...`: the boundary is enzymatic
 /// when ANY of them cleaves it.
-pub(crate) fn is_enzymatic_boundary_any(n: u8, c: u8, primary: Enzyme, extra: &[Enzyme]) -> bool {
+fn is_enzymatic_boundary_any(n: u8, c: u8, primary: Enzyme, extra: &[Enzyme]) -> bool {
     std::iter::once(&primary)
         .chain(extra)
         .any(|&e| is_enzymatic_boundary(n, c, e))
@@ -62,15 +66,40 @@ pub(crate) fn is_enzymatic_boundary_any(n: u8, c: u8, primary: Enzyme, extra: &[
 /// For an empty / single-residue peptide returns `0` (no internal
 /// boundaries to evaluate). For an "unknown" enzyme (universal-true
 /// branch above) this returns `len - 1`.
-pub(crate) fn count_internal_enzymatic_any(
-    residues: &[u8],
-    primary: Enzyme,
-    extra: &[Enzyme],
-) -> i32 {
+fn count_internal_enzymatic_any(residues: &[u8], primary: Enzyme, extra: &[Enzyme]) -> i32 {
     residues
         .windows(2)
         .filter(|w| is_enzymatic_boundary_any(w[0], w[1], primary, extra))
         .count() as i32
+}
+
+/// The `enzN`, `enzC` and `enzInt` PIN features of `cand` under a digest of
+/// `primary` plus the `extra` enzymes.
+///
+/// `enzN` is the boundary between the residue before the peptide and its
+/// first residue. A protein N-terminal peptide starts at a terminus: at the
+/// protein's own start `pre` is `_` already, and after the initiator Met was
+/// removed `pre` is that `M`, which no cleavage rule accepts. Both count as
+/// enzymatic, as in the search's own cleavage credit
+/// (`search::match_engine::enzyme_cleavage_credit`). Decoys get the same
+/// Met-cleaved walk as targets, so this changes both alike.
+pub(crate) fn enzyme_features(
+    cand: &Candidate,
+    primary: Enzyme,
+    extra: &[Enzyme],
+) -> (u8, u8, i32) {
+    let residues: Vec<u8> = cand.peptide.residues.iter().map(|aa| aa.residue).collect();
+    let first = residues.first().copied().unwrap_or(b'-');
+    let last = residues.last().copied().unwrap_or(b'-');
+    let pre = if cand.is_protein_n_term {
+        b'_'
+    } else {
+        cand.peptide.pre
+    };
+    let enz_n = is_enzymatic_boundary_any(pre, first, primary, extra) as u8;
+    let enz_c = is_enzymatic_boundary_any(last, cand.peptide.post, primary, extra) as u8;
+    let enz_int = count_internal_enzymatic_any(&residues, primary, extra);
+    (enz_n, enz_c, enz_int)
 }
 
 #[cfg(test)]
@@ -173,6 +202,47 @@ mod tests {
             count_internal_enzymatic_any(b"ABCDE", Enzyme::NonSpecific, &[]),
             4
         );
+    }
+
+    fn candidate(seq: &[u8], pre: u8, post: u8, n_term: bool, decoy: bool) -> Candidate {
+        use model::amino_acid::AminoAcid;
+        use model::peptide::Peptide;
+        let residues = seq
+            .iter()
+            .map(|&r| AminoAcid::standard(r).unwrap())
+            .collect();
+        Candidate {
+            peptide: Peptide::new(residues, pre, post),
+            protein_index: 0,
+            start_offset_in_protein: usize::from(pre != b'_'),
+            is_decoy: decoy,
+            is_protein_n_term: n_term,
+            is_protein_c_term: post == b'-',
+        }
+    }
+
+    #[test]
+    fn met_clipped_protein_n_term_peptide_starts_at_a_terminus() {
+        // M.ASLVTEGLK.P after initiator-Met removal: M|A is no trypsin site,
+        // but the peptide starts at the protein's N-terminus. Target and
+        // decoy alike.
+        for decoy in [false, true] {
+            let met_clipped = candidate(b"ASLVTEGLK", b'M', b'P', true, decoy);
+            assert_eq!(
+                enzyme_features(&met_clipped, Enzyme::Trypsin, &[]),
+                (1, 0, 0),
+                "decoy={decoy}"
+            );
+        }
+        // The same span after an internal M is not at a terminus.
+        let internal = candidate(b"ASLVTEGLK", b'M', b'P', false, false);
+        assert_eq!(enzyme_features(&internal, Enzyme::Trypsin, &[]), (0, 0, 0));
+        // At the protein's own start `pre` is `_` either way.
+        let at_start = candidate(b"MASLVTEGLK", b'_', b'P', true, false);
+        assert_eq!(enzyme_features(&at_start, Enzyme::Trypsin, &[]).0, 1);
+        // An N-terminal cleaver (Lys-N cuts before K) never cuts M|A either.
+        let lysn = candidate(b"ASLVTEGL", b'M', b'K', true, false);
+        assert_eq!(enzyme_features(&lysn, Enzyme::LysN, &[]), (1, 1, 0));
     }
 
     #[test]

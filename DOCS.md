@@ -917,7 +917,11 @@ does not hold.
 `enzN`, `enzC` and `enzInt` use the OpenMS PercolatorInfile rules, in which trypsin, Lys-C,
 Arg-C, Glu-C and chymotrypsin do not cleave before P. The digest does cleave there, so a peptide
 that starts or ends at such a site (K|P or R|P for trypsin) has `enzN` or `enzC` 0, and `enzInt`
-does not count these sites.
+does not count these sites. The mismatch is deliberate. Trypsin cleaves K|P and R|P poorly, so a
+0 there is evidence against the peptide; and in a fully specific search, which is the default,
+the digest's own rule would set `enzN` and `enzC` to 1 on every row. With the digest's rule for
+these three columns, Percolator kept 0.7–1.2% fewer PSMs on the Astral benchmark and 6% fewer at
+a true FDP of 1% on UPS1, whose true FDP also rose 0.17 points (#305).
 
 **Predicted features (`--predict`).** After the PIN is written, each requested predictor scores
 every row, targets and decoys alike, and its columns are inserted before `Peptide`

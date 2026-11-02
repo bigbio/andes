@@ -16,6 +16,11 @@
 //! - A protein N-terminal peptide starts at a terminus even when the
 //!   initiator Met was removed: [`enzyme_features`] reads its `M` flank as a
 //!   protein boundary (OpenMS PercolatorInfile, OpenMS/OpenMS#10740).
+//! - The rules keep the proline clause (no cleavage before P for trypsin,
+//!   Lys-C, Arg-C, Glu-C and chymotrypsin), although the digest has none.
+//!   This is deliberate: with the digest's rule, `enzN` and `enzC` are 1 on
+//!   every row of a fully specific search, and the benchmarks lose
+//!   identifications (DOCS.md, PIN columns).
 //! - Unknown / non-builtin enzymes return `true` for any boundary —
 //!   matching OpenMS's default "else" branch and Percolator's
 //!   unspecific-cleavage semantics.

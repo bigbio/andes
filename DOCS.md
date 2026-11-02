@@ -1868,6 +1868,25 @@ rates stand out from the others (a run where many library precursors are absent,
 single-species run among mixtures) shows there, and the summed rows give a per-run estimate
 that the pooled one hides.
 
+**Library entry gate (experiment, issue #299).** About half of the MaxQuant-only UPS1 cells at the
+lowest spike levels of PXD009740 are precursors missing from the library. With identity decoys
+in `transfer_q`, the entry gate `--mbr-library-fdr` is a second cut on the same false-donor
+error, so a looser gate lets `transfer_q` decide. The default stays 0.01 until it is measured.
+To test 0.05, build the library twice and compare on the same extract settings:
+
+```
+andes quant library --quant-dir q01/ --mbr-library-fdr 0.01 ...   # as usual
+andes quant library --quant-dir q05/ --mbr-library-fdr 0.05 ...
+# extract every run in both directories, then
+andes quant finalize --quant-dir q01/ -o gate01
+andes quant finalize --quant-dir q05/ -o gate05
+```
+
+and check, in `gate05.mbr_validation_runs.parquet` against `gate01`, that the accepted identity
+decoys (`accepted_identity_decoys_*`) and the cell rates stay low in the low-prior strata (where
+false donors are), and in the evaluation (`docs/benchmarks/quant-eval`) that the absence rows and
+the false-transfer rate do not rise while low-level depth does.
+
 **Known limits (memory).** The library stage holds every run's rank-1 PSMs (targets and
 decoys) with their joined scores at once, so its memory grows with the total PSM count across
 runs, about 0.5-0.7 KB per rank-1 PSM (around 100 GB for 1,000 long runs). Finalize holds

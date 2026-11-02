@@ -176,6 +176,7 @@ pub struct QuantCfg {
     pub mbr_fdr: Option<f64>,
     /// A number in `(0, 1]` or `off`, as `--quant-feature-fdr`.
     pub quant_feature_fdr: Option<NumberOrString>,
+    pub mbr_shared_peak_ms2: Option<bool>,
 }
 
 /// A YAML scalar written as a number or as a string (e.g. `0.05` or `off`),
@@ -574,6 +575,11 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         quant_feature_fdr,
         cfg.quant.quant_feature_fdr.map(|v| v.text()),
         parse_quant_feature_fdr
+    );
+    set!(
+        "mbr_shared_peak_ms2",
+        mbr_shared_peak_ms2,
+        cfg.quant.mbr_shared_peak_ms2
     );
 
     // ── glyco ──

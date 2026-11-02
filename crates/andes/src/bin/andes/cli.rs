@@ -986,6 +986,15 @@ pub(crate) struct SearchArgs {
     #[arg(long = "quant-feature-fdr", default_value = "off", value_parser = parse_fraction_or_off)]
     pub(crate) quant_feature_fdr: FractionOrOff,
 
+    /// Experimental (issue #299): a transfer whose apex lies on the
+    /// identified peak of a look-alike precursor (m/z within the MS1
+    /// tolerance, identified in the run; reported in `shared_peak_with`)
+    /// needs an MS2 scan that supports it and tells the two apart (not an
+    /// I/L swap). Without one, its probability of a wrong measurement is 1,
+    /// so its `quant_q` rises; the row is kept. Default false.
+    #[arg(long = "mbr-shared-peak-ms2", default_value_t = false, action = clap::ArgAction::Set)]
+    pub(crate) mbr_shared_peak_ms2: bool,
+
     /// PSM q-value threshold for quantification targets when rescoring runs.
     /// Default: the `--fdr` value (0.01).
     #[arg(long = "quant-fdr", hide = true, value_parser = parse_unit_fraction)]
@@ -1218,6 +1227,15 @@ pub(crate) struct QuantFinalizeArgs {
     /// and keeps `quant_q` as an annotation.
     #[arg(long = "quant-feature-fdr", default_value = "off", value_parser = parse_fraction_or_off)]
     pub(crate) quant_feature_fdr: FractionOrOff,
+
+    /// Experimental (issue #299): a transfer whose apex lies on the
+    /// identified peak of a look-alike precursor (m/z within the MS1
+    /// tolerance, identified in the run; reported in `shared_peak_with`)
+    /// needs an MS2 scan that supports it and tells the two apart (not an
+    /// I/L swap). Without one, its probability of a wrong measurement is 1,
+    /// so its `quant_q` rises; the row is kept. Default false.
+    #[arg(long = "mbr-shared-peak-ms2", default_value_t = false, action = clap::ArgAction::Set)]
+    pub(crate) mbr_shared_peak_ms2: bool,
 
     /// Also write the QPX views into this directory: the protein groups of
     /// every run's PSMs as `quantms.pg.parquet`, and the features of the

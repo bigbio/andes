@@ -32,6 +32,10 @@ flowchart TD
   transfer, the running mean of its probability of a wrong measurement (a model trained on the
   pseudo-transfers), so `quant_q <= 0.01` keeps accepted transfers whose estimated rate of wrong measurements is at most 1%.
   Rows are never dropped; filtering on `quant_q` is the user's choice.
+- **`shared_peak_with`**: for a transfer whose apex lies on the identified peak of a look-alike
+  precursor in the same run (m/z within the MS1 tolerance), that precursor's key. The shift decoys
+  cannot model such a transfer; with `--mbr-shared-peak-ms2` it needs MS2 support that tells the two
+  apart, or its `quant_q` rises (experimental).
 - A validation table (`<stem>.mbr_validation.parquet`) reports the pseudo-transfer acceptance and
   wrong-peak rates, so the error control is auditable.
 

@@ -15,8 +15,9 @@
 //! | `quant_q` | internal quality q-value of the row's MS1 feature against its decoys (not an identification FDR): the identified-row estimate for identified rows; for an accepted transfer the running mean, over the run's accepted transfers in ascending probability of a wrong measurement, of that probability; `transfer_q` for a transfer below the threshold |
 //! | `apex_rt_s` | fitted apex, seconds |
 //! | `library_q` | internal library entry gate (not an identification FDR) |
+//! | `shared_peak_with` | for a transfer, the key of a look-alike precursor (m/z within the extract tolerance) identified in the run whose identified peak the transfer's apex lies on (within its identified width); null otherwise. Such a transfer may measure the look-alike rather than its own precursor (schema 1.1) |
 //!
-//! The three text columns are UTF-8, the others float64; missing or
+//! The text columns are UTF-8, the others float64; missing or
 //! non-finite values are null (`library_q` is never null). A
 //! `below_threshold` or `identified_below_threshold` row keeps its quantity
 //! so a downstream tool can treat it as censored rather than missing.
@@ -32,7 +33,11 @@
 //! MS2 evidence of the transfer rows: per hypothesis (target, mass-shift
 //! decoy, RT-shift decoy) the rows with MS2 evidence and how many of them an
 //! MS2 scan supports, the pseudo-transfers likewise, and the accepted
-//! transfers reported as `transfer_ms2`.
+//! transfers reported as `transfer_ms2`; then (schema 1.1) the transfer
+//! targets whose apex lies on a look-alike's identified peak, how many of
+//! them are accepted at the threshold and how many of those an MS2 scan
+//! supports that tells the two apart, and the pseudo-transfers on a
+//! look-alike's peak.
 //!
 //! Counts are uint64, thresholds and rates float64 (null when undefined).
 //! It is a separate file because its one row of run-level counts shares no
@@ -46,7 +51,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, Float64Array, Float64Builder, StringArray, StringBuilder, UInt64Array,
+    Array, ArrayRef, Float64Array, Float64Builder, StringArray, StringBuilder, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
@@ -57,13 +62,13 @@ use crate::versioned_parquet::{
 
 const MBR_TABLE: TableVersion = TableVersion {
     key: "andes.mbr.schema",
-    version: "1.0",
+    version: "1.1",
     major: 1,
     what: "MBR table",
 };
 const VALIDATION_TABLE: TableVersion = TableVersion {
     key: "andes.mbr_validation.schema",
-    version: "1.0",
+    version: "1.1",
     major: 1,
     what: "MBR validation table",
 };
@@ -106,9 +111,12 @@ pub struct MbrRow<'a> {
     pub quant_q: Option<f64>,
     pub apex_rt_s: Option<f64>,
     pub library_q: f64,
+    /// The key of the look-alike precursor whose identified peak this
+    /// transfer lies on.
+    pub shared_peak_with: Option<&'a str>,
 }
 
-pub const MBR_COLUMNS: [&str; 10] = [
+pub const MBR_COLUMNS: [&str; 11] = [
     "precursor_key",
     "run",
     "evidence_type",
@@ -119,6 +127,7 @@ pub const MBR_COLUMNS: [&str; 10] = [
     "quant_q",
     "apex_rt_s",
     "library_q",
+    "shared_peak_with",
 ];
 
 /// The default transfer q-value threshold, at which the validation is
@@ -200,6 +209,16 @@ pub struct MbrValidation {
     /// Transfer targets not transferred because their best donor PSM is
     /// above the transfer donor q-value.
     pub donor_gated: usize,
+    /// Transfer targets whose apex lies on the identified peak of a
+    /// look-alike precursor in the run.
+    pub shared_peak_transfers: usize,
+    /// Of those, accepted at `q_threshold`.
+    pub shared_peak_accepted: usize,
+    /// Of those, with an MS2 scan that supports the transfer and tells it
+    /// apart from the look-alike (not an I/L swap).
+    pub shared_peak_accepted_ms2: usize,
+    /// Pseudo-transfers (identified, so present) on a look-alike's peak.
+    pub shared_peak_pseudo: usize,
 }
 
 fn add_counts<const N: usize>(a: &mut [usize; N], b: &[usize; N]) {
@@ -260,6 +279,10 @@ impl MbrValidation {
             identity_entries: _,
             decoy_transfers,
             donor_gated,
+            shared_peak_transfers,
+            shared_peak_accepted,
+            shared_peak_accepted_ms2,
+            shared_peak_pseudo,
         } = o;
         self.pseudo_transfers += pseudo_transfers;
         self.pseudo_scored += pseudo_scored;
@@ -280,6 +303,10 @@ impl MbrValidation {
         self.transfer_ms2 += transfer_ms2;
         add_counts(&mut self.decoy_transfers, decoy_transfers);
         self.donor_gated += donor_gated;
+        self.shared_peak_transfers += shared_peak_transfers;
+        self.shared_peak_accepted += shared_peak_accepted;
+        self.shared_peak_accepted_ms2 += shared_peak_accepted_ms2;
+        self.shared_peak_pseudo += shared_peak_pseudo;
     }
 }
 
@@ -358,6 +385,10 @@ pub fn validation_columns() -> Vec<String> {
             "rt_decoy_transfers",
             "identity_decoy_transfers",
             "donor_gated",
+            "shared_peak_transfers",
+            "shared_peak_accepted_at_threshold",
+            "shared_peak_accepted_ms2_at_threshold",
+            "shared_peak_pseudo",
         ]
         .iter()
         .map(|s| s.to_string()),
@@ -446,6 +477,10 @@ impl MbrValidation {
             n(self.decoy_transfers[1]),
             n(self.decoy_transfers[2]),
             n(self.donor_gated),
+            n(self.shared_peak_transfers),
+            n(self.shared_peak_accepted),
+            n(self.shared_peak_accepted_ms2),
+            n(self.shared_peak_pseudo),
         ]);
         c.iter()
             .map(|v| match *v {
@@ -475,6 +510,7 @@ fn mbr_schema() -> Schema {
         f("quant_q"),
         f("apex_rt_s"),
         Field::new("library_q", DataType::Float64, false),
+        Field::new("shared_peak_with", DataType::Utf8, true),
     ])
 }
 
@@ -485,6 +521,7 @@ struct MbrColumnsBuilder {
     ev: StringBuilder,
     floats: Vec<Float64Builder>,
     library_q: Float64Builder,
+    shared: StringBuilder,
     rows: usize,
 }
 
@@ -496,6 +533,7 @@ impl MbrColumnsBuilder {
             ev: StringBuilder::new(),
             floats: (0..6).map(|_| Float64Builder::new()).collect(),
             library_q: Float64Builder::new(),
+            shared: StringBuilder::new(),
             rows: 0,
         }
     }
@@ -516,6 +554,7 @@ impl MbrColumnsBuilder {
             b.append_option(v.filter(|v| v.is_finite()));
         }
         self.library_q.append_value(r.library_q);
+        self.shared.append_option(r.shared_peak_with);
         self.rows += 1;
     }
 
@@ -533,6 +572,7 @@ impl MbrColumnsBuilder {
                 .map(|b| Arc::new(b.finish()) as ArrayRef),
         );
         cols.push(Arc::new(self.library_q.finish()));
+        cols.push(Arc::new(self.shared.finish()));
         RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
     }
 }
@@ -620,6 +660,8 @@ pub struct MbrRecord {
     pub quant_q: Option<f64>,
     pub apex_rt_s: Option<f64>,
     pub library_q: f64,
+    /// `None` also for a schema-1.0 file, which has no such column.
+    pub shared_peak_with: Option<String>,
 }
 
 /// Reads `<base>.mbr.parquet`, in file order. Rejects another major schema
@@ -642,6 +684,10 @@ pub fn read_mbr_parquet(path: &Path) -> Result<Vec<MbrRecord>, String> {
         .map(float);
         let (q, se, norm, tq, qq, rt) = (q?, se?, norm?, tq?, qq?, rt?);
         let lib = float("library_q")?;
+        let shared = match b.schema().index_of("shared_peak_with") {
+            Ok(_) => Some(text("shared_peak_with")?),
+            Err(_) => None,
+        };
         for i in 0..b.num_rows() {
             out.push(MbrRecord {
                 precursor_key: key.value(i).to_string(),
@@ -654,6 +700,9 @@ pub fn read_mbr_parquet(path: &Path) -> Result<Vec<MbrRecord>, String> {
                 quant_q: opt(qq, i),
                 apex_rt_s: opt(rt, i),
                 library_q: lib.value(i),
+                shared_peak_with: shared
+                    .filter(|c| !c.is_null(i))
+                    .map(|c| c.value(i).to_string()),
             });
         }
     }
@@ -773,6 +822,7 @@ mod tests {
                 quant_q: Some(0.003),
                 apex_rt_s: Some(612.25),
                 library_q: 0.001,
+                shared_peak_with: None,
             },
             MbrRow {
                 precursor_key: "PEPTIDEK/2",
@@ -785,6 +835,7 @@ mod tests {
                 quant_q: Some(0.2),
                 apex_rt_s: None,
                 library_q: 0.001,
+                shared_peak_with: Some("PEPTLDEK/2"),
             },
         ]
     }
@@ -809,6 +860,7 @@ mod tests {
                 quant_q: r.quant_q,
                 apex_rt_s: r.apex_rt_s,
                 library_q: r.library_q,
+                shared_peak_with: r.shared_peak_with.map(String::from),
             })
             .collect();
         assert_eq!(back, want);
@@ -822,7 +874,7 @@ mod tests {
             .map(|f| f.name().clone())
             .collect();
         assert_eq!(names, MBR_COLUMNS);
-        assert_eq!(t.meta.get(MBR_TABLE.key).map(String::as_str), Some("1.0"));
+        assert_eq!(t.meta.get(MBR_TABLE.key).map(String::as_str), Some("1.1"));
         // An empty table is still a valid file.
         write_mbr_parquet(&p, &[]).unwrap();
         assert!(read_mbr_parquet(&p).unwrap().is_empty());
@@ -891,6 +943,10 @@ mod tests {
             identity_entries: 2,
             decoy_transfers: [95, 85, 7],
             donor_gated: 3,
+            shared_peak_transfers: 12,
+            shared_peak_accepted: 6,
+            shared_peak_accepted_ms2: 1,
+            shared_peak_pseudo: 2,
         };
         write_mbr_validation(&p, &v).unwrap();
         let cells = read_mbr_validation(&p).unwrap();
@@ -925,5 +981,32 @@ mod tests {
         assert_eq!(get("identity_entries"), Count(2));
         assert_eq!(get("identity_decoy_transfers"), Count(7));
         assert_eq!(get("donor_gated"), Count(3));
+        assert_eq!(get("shared_peak_transfers"), Count(12));
+        assert_eq!(get("shared_peak_accepted_at_threshold"), Count(6));
+        assert_eq!(get("shared_peak_accepted_ms2_at_threshold"), Count(1));
+        assert_eq!(get("shared_peak_pseudo"), Count(2));
+    }
+
+    #[test]
+    fn a_schema_1_0_mbr_table_reads_without_shared_peaks() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("old.mbr.parquet");
+        let new = mbr_schema();
+        let old = Arc::new(Schema::new(
+            new.fields()
+                .iter()
+                .filter(|f| f.name() != "shared_peak_with")
+                .cloned()
+                .collect::<Vec<_>>(),
+        ));
+        let full = mbr_batch(&Arc::new(new), &rows()).unwrap();
+        let cols: Vec<ArrayRef> = (0..old.fields().len())
+            .map(|i| full.column(i).clone())
+            .collect();
+        let b = RecordBatch::try_new(old.clone(), cols).map_err(|e| e.to_string());
+        write_table(&p, &MBR_TABLE, "1.0", old, [b], &[]).unwrap();
+        let back = read_mbr_parquet(&p).unwrap();
+        assert_eq!(back.len(), 2);
+        assert!(back.iter().all(|r| r.shared_peak_with.is_none()));
     }
 }

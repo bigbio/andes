@@ -2270,10 +2270,12 @@ mod finalize_tests {
 
     use super::*;
     use crate::quant_finalize::{
-        finalize, finalize_stream, for_each_scored, pseudo_example, table_features, wrong_features,
-        BlockContext, EntryIndex, ExtractRuns, FinalizeLimits, FinalizeParams, FinalizeSummary,
-        MbrFeature, Table, WrongCalibration, SCORE_CHUNK,
+        finalize, finalize_stream, for_each_scored, pseudo_example, shared_peak_wrong,
+        shared_peaks, table_features, wrong_features, BlockContext, EntryIndex, ExtractRuns,
+        FinalizeLimits, FinalizeOptions, FinalizeParams, FinalizeSummary, MbrFeature, Table,
+        WrongCalibration, SCORE_CHUNK,
     };
+    use crate::quant_lookalike::{usable_fit, Lookalikes};
     use crate::transfer_fdr::{
         row_unit, train_bagged_folds, train_folds, transfer_train_params, Estimate, FdrRow,
         FoldScores, QValues, TrainingSample,
@@ -2707,6 +2709,7 @@ mod finalize_tests {
         mbr_fdr: f64,
         quant_feature_fdr: Option<f64>,
         seed: u64,
+        options: &FinalizeOptions,
         mbr_path: &Path,
         validation_path: &Path,
     ) -> Result<FinalizeSummary, String> {
@@ -2727,6 +2730,7 @@ mod finalize_tests {
         }
         let maps = &lib.alignment.maps;
         let idx = EntryIndex::new(lib, stems.len());
+        let look = Lookalikes::new(lib, options.lookalike_ppm);
         let all: Vec<ExtractRow> = runs.concat();
         let shards = One(&all);
         let mut summary = FinalizeSummary::default();
@@ -2968,7 +2972,9 @@ mod finalize_tests {
                     .filter(|e| e.amplitude > 0.0)
                     .map(|e| reported_quantity(e, r.run, w_c.get(&r.precursor).copied(), maps))
             };
-            let mut out: Vec<(u32, u16, MbrRow<'_>, Option<f64>)> = Vec::new();
+            // Per output row: precursor, run, row, mass error, shared peak.
+            type RefRow<'a> = (u32, u16, MbrRow<'a>, Option<f64>, Option<u32>);
+            let mut out: Vec<RefRow<'_>> = Vec::new();
             // Probability that a transfer's measurement is wrong (1 without
             // features, a fold model or a calibration).
             let mut p_wrong: Vec<f64> = vec![1.0; rows.len()];
@@ -2995,6 +3001,9 @@ mod finalize_tests {
                 }
             }
             let mut wrongs: Vec<(usize, f64)> = Vec::new();
+            let shared = shared_peaks(rows, &idx, &look, &|q, run| {
+                identified.get(&(q, run)).and_then(|e| usable_fit(e))
+            });
             for (i, r) in rows.iter().enumerate() {
                 if idx.is_identity(r.precursor) {
                     // Never reported: only the identity-decoy family's counts.
@@ -3069,11 +3078,17 @@ mod finalize_tests {
                             (true, false) => EvidenceType::TransferMs1,
                             (false, _) => EvidenceType::BelowThreshold,
                         };
+                        if let Some(p) =
+                            shared_peak_wrong(&mut v, &look, options, r, shared[i], accepted(q))
+                        {
+                            p_wrong[i] = p;
+                        }
                         (t, q, q)
                     }
                     Role::PseudoTransfer => {
                         let q = scored[i].and_then(|(fam, s)| fdr.pseudo_q(r.precursor, fam, s));
                         v.pseudo_transfers += 1;
+                        v.shared_peak_pseudo += usize::from(shared[i].is_some());
                         if let Some(m) = &r.ms2 {
                             v.ms2_pseudo_rows += 1;
                             v.ms2_pseudo_supported += usize::from(m.supports());
@@ -3117,8 +3132,10 @@ mod finalize_tests {
                         quant_q,
                         apex_rt_s: e.map(|e| e.t0),
                         library_q: r.library_q,
+                        shared_peak_with: shared[i].map(|q| lib.meta[q as usize].key.as_str()),
                     },
                     e.map(|e| e.mass_err_ppm),
+                    shared[i],
                 ));
             }
             // quant_q of an accepted transfer: the running mean, over its
@@ -3143,7 +3160,7 @@ mod finalize_tests {
             }
             out.sort_by_key(|&(p, run, ..)| (p, run));
             let mut features = Vec::with_capacity(out.len());
-            for (p, run, r, mass_err) in &out {
+            for (p, run, r, mass_err, shared) in &out {
                 writer.push(r)?;
                 features.push(MbrFeature {
                     precursor: *p,
@@ -3157,6 +3174,7 @@ mod finalize_tests {
                     apex_rt_s: r.apex_rt_s,
                     library_q: r.library_q,
                     mass_err_ppm: *mass_err,
+                    shared_peak_with: *shared,
                 });
             }
             summary.rows_written += out.len();
@@ -3172,6 +3190,16 @@ mod finalize_tests {
         summary.identified_fdr = id_fdr.counts;
         summary.features = all_features;
         Ok(summary)
+    }
+
+    /// Every opt-in setting of finalize, with a look-alike tolerance wide
+    /// enough (2,500 ppm) for neighbouring test precursors (1 m/z apart) to
+    /// be look-alikes.
+    fn opted_in() -> FinalizeOptions {
+        FinalizeOptions {
+            lookalike_ppm: 2500.0,
+            shared_peak_ms2: true,
+        }
     }
 
     fn unlimited() -> FinalizeLimits {
@@ -3194,6 +3222,7 @@ mod finalize_tests {
         base: &Path,
         mbr_fdr: f64,
         quant_feature_fdr: Option<f64>,
+        options: &FinalizeOptions,
     ) -> (FinalizeSummary, Vec<MbrFeature>) {
         let (mbr, val) = mbr_paths(base);
         let params = FinalizeParams {
@@ -3201,6 +3230,7 @@ mod finalize_tests {
             quant_feature_fdr,
             seed: 3,
             limits,
+            options: options.clone(),
             mbr_path: &mbr,
             validation_path: &val,
         };
@@ -3224,8 +3254,16 @@ mod finalize_tests {
             ("plain", extract()),
             ("decoys", extract_with_identified_decoys()),
         ] {
-            for (mbr_fdr, quant_feature_fdr) in [(0.01, None), (0.05, Some(0.01))] {
-                let (m1, v1) = mbr_paths(&dir.path().join(format!("{name}-{mbr_fdr}-ref")));
+            let options = [
+                ("default", FinalizeOptions::default()),
+                ("opt-in", opted_in()),
+            ];
+            for (mbr_fdr, quant_feature_fdr, (opt, options)) in [
+                (0.01, None, options[0].clone()),
+                (0.05, Some(0.01), options[0].clone()),
+                (0.01, None, options[1].clone()),
+            ] {
+                let (m1, v1) = mbr_paths(&dir.path().join(format!("{name}-{mbr_fdr}-{opt}-ref")));
                 let want = reference(
                     &stems(),
                     &lib,
@@ -3233,11 +3271,18 @@ mod finalize_tests {
                     mbr_fdr,
                     quant_feature_fdr,
                     3,
+                    &options,
                     &m1,
                     &v1,
                 )
                 .unwrap();
                 assert!(want.rows_written > 0 && want.validation.transfers_scored > 0);
+                if opt == "opt-in" {
+                    assert!(
+                        want.validation.shared_peak_pseudo > 0,
+                        "the opt-in arm exercises the look-alikes"
+                    );
+                }
                 let arms = [
                     ("one", usize::MAX, unlimited()),
                     ("batches", 7, unlimited()),
@@ -3260,7 +3305,7 @@ mod finalize_tests {
                     ),
                 ];
                 for (arm, batch_rows, limits) in arms {
-                    let base = dir.path().join(format!("{name}-{mbr_fdr}-{arm}"));
+                    let base = dir.path().join(format!("{name}-{mbr_fdr}-{opt}-{arm}"));
                     let (s, features) = stream(
                         &lib,
                         &runs,
@@ -3269,9 +3314,10 @@ mod finalize_tests {
                         &base,
                         mbr_fdr,
                         quant_feature_fdr,
+                        &options,
                     );
                     let (m2, v2) = mbr_paths(&base);
-                    let what = format!("{name} {mbr_fdr} {arm}");
+                    let what = format!("{name} {mbr_fdr} {opt} {arm}");
                     assert_eq!(
                         std::fs::read(&m1).unwrap(),
                         std::fs::read(&m2).unwrap(),
@@ -3312,6 +3358,118 @@ mod finalize_tests {
         }
     }
 
+    /// [`extract`] where run 1 also identifies precursor `p + 1` of every
+    /// `p` divisible by 4, half a second after `p`'s apex: the transfers of
+    /// `p` (and of `p + 2`) lie on that look-alike's peak.
+    fn extract_with_lookalike_ids() -> Vec<Vec<ExtractRow>> {
+        let mut runs = extract();
+        let mut g = Rng(11);
+        let ids: Vec<u32> = (0..N).filter(|p| p % 4 == 0).map(|p| p + 1).collect();
+        runs[1].retain(|r| !ids.contains(&r.precursor));
+        for &q in &ids {
+            let t0 = 100.0 + (q - 1) as f64 + 0.5;
+            runs[1].push(row(
+                q,
+                1,
+                Hypothesis::Target,
+                Role::Identified,
+                Some(evidence(&mut g, true, t0)),
+            ));
+        }
+        runs[1].sort_by_key(|r| r.precursor);
+        runs
+    }
+
+    #[test]
+    fn transfers_on_a_look_alikes_peak_are_reported_and_need_ms2_when_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = library_with_entries();
+        let runs = extract_with_lookalike_ids();
+        let reported = FinalizeOptions {
+            shared_peak_ms2: false,
+            ..opted_in()
+        };
+        let (s0, f0) = stream(
+            &lib,
+            &runs,
+            unlimited(),
+            50,
+            &dir.path().join("report"),
+            0.05,
+            None,
+            &reported,
+        );
+        let (s1, f1) = stream(
+            &lib,
+            &runs,
+            unlimited(),
+            50,
+            &dir.path().join("ms2"),
+            0.05,
+            None,
+            &opted_in(),
+        );
+        // The same rows and transfer q-values; the look-alike is reported
+        // either way.
+        let keys = |f: &[MbrFeature]| {
+            f.iter()
+                .map(|f| (f.precursor, f.run, f.transfer_q, f.shared_peak_with))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(keys(&f0), keys(&f1));
+        let accepted = |f: &MbrFeature| {
+            matches!(
+                f.evidence_type,
+                EvidenceType::TransferMs1 | EvidenceType::TransferMs2
+            )
+        };
+        let shared: Vec<&MbrFeature> = f0
+            .iter()
+            .filter(|f| f.run == 1 && f.shared_peak_with.is_some())
+            .collect();
+        assert!(!shared.is_empty());
+        for f in &shared {
+            let q = f.shared_peak_with.unwrap();
+            // The identified look-alikes sit 0.5 s after p's apex (p = q - 1)
+            // and 1.5 s before p + 2's; the widths are 4 s.
+            assert!(q.abs_diff(f.precursor) <= 2, "{q} {}", f.precursor);
+        }
+        assert_eq!(s0.validation.shared_peak_transfers, shared.len());
+        let n_acc = shared.iter().filter(|f| accepted(f)).count();
+        assert!(n_acc > 0);
+        assert_eq!(s0.validation.shared_peak_accepted, n_acc);
+        assert_eq!(s0.validation, s1.validation);
+        // Without MS2 support, the accepted shared transfers get the
+        // highest probabilities, so the highest quant_q of their run.
+        let worst_clean = f1
+            .iter()
+            .filter(|f| accepted(f) && f.shared_peak_with.is_none())
+            .filter_map(|f| f.quant_q)
+            .fold(f64::NEG_INFINITY, f64::max);
+        for f in f1
+            .iter()
+            .filter(|f| accepted(f) && f.shared_peak_with.is_some())
+        {
+            assert!(f.quant_q.unwrap() >= worst_clean, "{f:?}");
+        }
+        let at_01 = |f: &[MbrFeature]| {
+            f.iter()
+                .filter(|f| accepted(f) && f.quant_q.is_some_and(|q| q <= 0.01))
+                .count()
+        };
+        assert!(at_01(&f1) < at_01(&f0), "{} {}", at_01(&f1), at_01(&f0));
+        // The map-reduce output is the reference's.
+        for (name, options) in [("report", &reported), ("ms2", &opted_in())] {
+            let (m1, v1) = mbr_paths(&dir.path().join(format!("{name}-ref")));
+            let want = reference(&stems(), &lib, &runs, 0.05, None, 3, options, &m1, &v1).unwrap();
+            let (m2, v2) = mbr_paths(&dir.path().join(name));
+            assert_eq!(std::fs::read(&m1).unwrap(), std::fs::read(&m2).unwrap());
+            assert_eq!(std::fs::read(&v1).unwrap(), std::fs::read(&v2).unwrap());
+            let got = if name == "report" { &f0 } else { &f1 };
+            assert_eq!(&want.features, got);
+        }
+    }
+
     #[test]
     fn sampled_training_reports_every_row() {
         let dir = tempfile::tempdir().unwrap();
@@ -3332,6 +3490,7 @@ mod finalize_tests {
             &dir.path().join("sampled"),
             0.01,
             None,
+            &FinalizeOptions::default(),
         );
         assert_eq!(s.rows_written, one.rows_written);
         assert_eq!(s.validation.transfers, one.validation.transfers);
@@ -3359,7 +3518,16 @@ mod finalize_tests {
                 ..unlimited()
             };
             let base = dir.path().join(name);
-            let (s, features) = stream(&lib, &runs, limits, batch_rows, &base, 0.05, None);
+            let (s, features) = stream(
+                &lib,
+                &runs,
+                limits,
+                batch_rows,
+                &base,
+                0.05,
+                None,
+                &FinalizeOptions::default(),
+            );
             let (m, v) = mbr_paths(&base);
             (
                 s,

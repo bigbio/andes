@@ -34,6 +34,8 @@ mod predicted;
 mod quant_cmd;
 #[path = "andes/quant_finalize.rs"]
 mod quant_finalize;
+#[path = "andes/quant_lookalike.rs"]
+mod quant_lookalike;
 #[path = "andes/quant_mbr.rs"]
 mod quant_mbr;
 #[path = "andes/quant_run.rs"]

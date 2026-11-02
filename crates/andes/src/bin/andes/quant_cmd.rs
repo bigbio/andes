@@ -48,7 +48,8 @@ use rayon::prelude::*;
 
 use crate::cli::{QuantCommand, QuantExtractArgs, QuantFinalizeArgs, QuantLibraryArgs};
 use crate::quant_finalize::{
-    finalize_stream, ExtractFiles, ExtractSource, FinalizeLimits, FinalizeParams, MbrFeature,
+    finalize_stream, ExtractFiles, ExtractSource, FinalizeLimits, FinalizeOptions, FinalizeParams,
+    MbrFeature,
 };
 use crate::quant_mbr::{
     attach_ms2, extract_run, mbr_paths, ExtractCounts, ExtractRow, Ms2Counts, TransferSelection,
@@ -1622,6 +1623,7 @@ pub(crate) fn finalize_and_write(
     quant_feature_fdr: Option<f64>,
     seed: u64,
     limits: FinalizeLimits,
+    options: FinalizeOptions,
     base: &Path,
     parquet_dir: Option<&Path>,
     groups: Option<&ProteinGroups<'_>>,
@@ -1640,6 +1642,7 @@ pub(crate) fn finalize_and_write(
         quant_feature_fdr,
         seed,
         limits,
+        options,
         mbr_path: &table,
         validation_path: &validation,
     };
@@ -1684,6 +1687,7 @@ pub(crate) fn run_in_process(
     donor_pep: Option<f64>,
     mbr_fdr: f64,
     quant_feature_fdr: Option<f64>,
+    options: FinalizeOptions,
     base: &Path,
     parquet_dir: Option<&Path>,
     groups: Option<&ProteinGroups<'_>>,
@@ -1724,6 +1728,10 @@ pub(crate) fn run_in_process(
         quant_feature_fdr,
         MBR_SEED,
         FinalizeLimits::default(),
+        FinalizeOptions {
+            lookalike_ppm: ep.tol_ppm,
+            ..options
+        },
         base,
         parquet_dir,
         groups,
@@ -1825,6 +1833,16 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
         }
         paths.push(path);
     }
+    let lookalike_ppm = match &tol {
+        Some((t, p)) => t
+            .parse::<f64>()
+            .map_err(|_| format!("{}: {TOL_KEY} {t:?} is not a number", p.display()))?,
+        None => FinalizeOptions::default().lookalike_ppm,
+    };
+    let options = FinalizeOptions {
+        lookalike_ppm,
+        shared_peak_ms2: a.mbr_shared_peak_ms2,
+    };
     let limits = FinalizeLimits {
         max_train_rows: a.max_train_rows,
         transfer_models: a.transfer_models,
@@ -1856,6 +1874,7 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
         a.quant_feature_fdr.0,
         a.seed,
         limits,
+        options,
         &a.output,
         a.output_parquet.as_deref(),
         groups.as_ref(),
@@ -2114,6 +2133,7 @@ mod tests {
             apex_rt_s: Some(100.0),
             library_q: 0.001,
             mass_err_ppm: Some(0.5),
+            shared_peak_with: None,
         };
         let features = [
             feature(0, 0, EvidenceType::Identified, None),

@@ -69,6 +69,7 @@ use quant::library::{Library, LibraryEntry};
 use quant::normalize::{fit as fit_normalization, NormCell, NormParams};
 use rayon::prelude::*;
 
+use crate::quant_lookalike::{usable_fit, Lookalikes, LOOKALIKE_RT_S};
 use crate::quant_mbr::{
     consensus_scale_width, cosine, donor_fit, family, identified_features, iso_profile,
     local_slope, median, reported_quantity, transfer_features, DonorFit, ExtractRow, Role,
@@ -114,6 +115,8 @@ pub(crate) struct MbrFeature {
     pub library_q: f64,
     /// Intensity-weighted isotope-0 mass error of the fit, ppm.
     pub mass_err_ppm: Option<f64>,
+    /// The look-alike precursor whose identified peak a transfer lies on.
+    pub shared_peak_with: Option<u32>,
 }
 
 /// Limits of finalize: memory follows the library and these limits rather
@@ -478,6 +481,9 @@ struct PrecursorSummary {
 }
 
 type Summaries = HashMap<u32, PrecursorSummary>;
+
+/// The identified `(t0, w)` of the look-alikes, per (precursor, run).
+pub(crate) type LookalikeFits = HashMap<(u32, u16), (f64, f64)>;
 
 /// The summaries of the precursors of `items` (precursor, width on the
 /// consensus scale, donor fit), in any order.
@@ -1148,6 +1154,7 @@ struct OutRow {
     apex_rt_s: Option<f64>,
     library_q: f64,
     mass_err_ppm: Option<f64>,
+    shared_peak_with: Option<u32>,
 }
 
 impl OutRow {
@@ -1164,6 +1171,7 @@ impl OutRow {
             apex_rt_s: self.apex_rt_s,
             library_q: self.library_q,
             mass_err_ppm: self.mass_err_ppm,
+            shared_peak_with: self.shared_peak_with,
         }
     }
 }
@@ -1208,6 +1216,7 @@ fn out_schema() -> Arc<Schema> {
     );
     fields.push(Field::new("library_q", DataType::Float64, false));
     fields.push(Field::new("mass_err_ppm", DataType::Float64, true));
+    fields.push(Field::new("shared_peak_with", DataType::UInt32, true));
     Arc::new(Schema::new(fields))
 }
 
@@ -1244,7 +1253,9 @@ impl OutWriter {
             let mut values: Vec<Float64Builder> = (0..OUT_VALUES.len() + 2)
                 .map(|_| Float64Builder::with_capacity(c.len()))
                 .collect();
+            let mut shared = UInt32Builder::with_capacity(c.len());
             for r in c {
+                shared.append_option(r.shared_peak_with);
                 precursor.append_value(r.precursor);
                 run.append_value(r.run);
                 ev.append_value(evidence_code(r.evidence_type));
@@ -1268,6 +1279,7 @@ impl OutWriter {
                 Arc::new(ev.finish()),
             ];
             cols.extend(values.iter_mut().map(|b| Arc::new(b.finish()) as ArrayRef));
+            cols.push(Arc::new(shared.finish()));
             let b = RecordBatch::try_new(self.schema.clone(), cols).map_err(|e| err(&e))?;
             self.writer.write(&b).map_err(|e| err(&e))?;
         }
@@ -1314,20 +1326,22 @@ impl OutReader {
 
     fn decode(&self, b: &RecordBatch) -> Result<Vec<OutRow>, String> {
         let path = self.path.as_path();
-        if b.num_columns() != OUT_VALUES.len() + 5 {
+        let n_floats = OUT_VALUES.len() + 2;
+        if b.num_columns() != n_floats + 4 {
             return Err(format!(
                 "{}: {} columns where {} were expected",
                 path.display(),
                 b.num_columns(),
-                OUT_VALUES.len() + 5
+                n_floats + 4
             ));
         }
         let precursor = column::<UInt32Array>(b, 0, path)?;
         let run = column::<UInt16Array>(b, 1, path)?;
         let ev = column::<UInt8Array>(b, 2, path)?;
-        let values: Vec<&Float64Array> = (3..b.num_columns())
+        let values: Vec<&Float64Array> = (3..3 + n_floats)
             .map(|i| column::<Float64Array>(b, i, path))
             .collect::<Result<_, _>>()?;
+        let shared = column::<UInt32Array>(b, 3 + n_floats, path)?;
         let opt = |k: usize, i: usize| (!values[k].is_null(i)).then(|| values[k].value(i));
         (0..b.num_rows())
             .map(|i| {
@@ -1346,6 +1360,7 @@ impl OutReader {
                     apex_rt_s: opt(5, i),
                     library_q: values[6].value(i),
                     mass_err_ppm: opt(7, i),
+                    shared_peak_with: (!shared.is_null(i)).then(|| shared.value(i)),
                 })
             })
             .collect()
@@ -1436,6 +1451,7 @@ pub(crate) fn finalize(
             max_held_scores: usize::MAX,
             temp_dir: None,
         },
+        options: FinalizeOptions::default(),
         mbr_path,
         validation_path,
     };
@@ -1461,8 +1477,32 @@ pub(crate) struct FinalizeParams<'a> {
     /// Seed of the folds, the models and the samples.
     pub seed: u64,
     pub limits: FinalizeLimits,
+    pub options: FinalizeOptions,
     pub mbr_path: &'a Path,
     pub validation_path: &'a Path,
+}
+
+/// Settings of finalize beyond the thresholds. The defaults report the
+/// added columns and counts and change no value of the earlier outputs.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct FinalizeOptions {
+    /// The extract's MS1 m/z tolerance, ppm: two target entries within it
+    /// (and [`crate::quant_lookalike::LOOKALIKE_RT_S`] of consensus RT) are
+    /// look-alikes, whose shared peaks are reported (`shared_peak_with`).
+    pub lookalike_ppm: f64,
+    /// An accepted transfer on a look-alike's identified peak, without an
+    /// MS2 scan that supports it and tells the two apart, gets a probability
+    /// of a wrong measurement of 1 (its `quant_q` rises; the row is kept).
+    pub shared_peak_ms2: bool,
+}
+
+impl Default for FinalizeOptions {
+    fn default() -> Self {
+        Self {
+            lookalike_ppm: quant::evidence::EvidenceParams::default().tol_ppm,
+            shared_peak_ms2: false,
+        }
+    }
 }
 
 /// Number of features of the wrong-peak model.
@@ -1586,6 +1626,54 @@ pub(crate) fn pseudo_example(
     Some((wrong_label(e, id)?, wrong_features(e)?))
 }
 
+/// Per row of `rows`, the look-alike whose identified peak it lies on
+/// ([`Lookalikes::shared`]): for the transfer and pseudo-transfer targets of
+/// target entries with a fitted peak, `None` for every other row. `fit(q,
+/// run)` is the look-alike's identified `(t0, w)`.
+pub(crate) fn shared_peaks(
+    rows: &[ExtractRow],
+    idx: &EntryIndex<'_>,
+    look: &Lookalikes,
+    fit: &dyn Fn(u32, u16) -> Option<(f64, f64)>,
+) -> Vec<Option<u32>> {
+    rows.iter()
+        .map(|r| {
+            let candidate = matches!(r.role, Role::Transfer | Role::PseudoTransfer)
+                && r.kind == Hypothesis::Target
+                && !idx.is_identity(r.precursor);
+            let e = r
+                .evidence
+                .as_ref()
+                .filter(|e| candidate && e.amplitude > 0.0)?;
+            look.shared(r.precursor, r.run, e.t0, fit)
+        })
+        .collect()
+}
+
+/// Counts a transfer target `r` that lies on look-alike `shared`'s peak in
+/// `v`, and returns its probability of a wrong measurement when
+/// [`FinalizeOptions::shared_peak_ms2`] overrides it: 1 for an accepted
+/// transfer without an MS2 scan that supports it and tells it apart from
+/// the look-alike.
+pub(crate) fn shared_peak_wrong(
+    v: &mut MbrValidation,
+    look: &Lookalikes,
+    options: &FinalizeOptions,
+    r: &ExtractRow,
+    shared: Option<u32>,
+    accepted: bool,
+) -> Option<f64> {
+    let q = shared?;
+    v.shared_peak_transfers += 1;
+    if !accepted {
+        return None;
+    }
+    v.shared_peak_accepted += 1;
+    let told = r.ms2.is_some_and(|m| m.supports()) && look.ms2_tells_apart(r.precursor, q);
+    v.shared_peak_accepted_ms2 += usize::from(told);
+    (options.shared_peak_ms2 && !told).then_some(1.0)
+}
+
 /// The output rows and validation counts of one run.
 #[derive(Default)]
 struct RunOutput {
@@ -1634,6 +1722,8 @@ pub(crate) fn finalize_stream(
     }
     let maps = &lib.alignment.maps;
     let idx = EntryIndex::new(lib, stems.len());
+    let options = &params.options;
+    let look = Lookalikes::new(lib, options.lookalike_ppm);
     let bounds = Bounds {
         runs: stems.len(),
         precursors: lib.meta.len(),
@@ -1658,25 +1748,33 @@ pub(crate) fn finalize_stream(
     let upper: usize = lib.entries.iter().map(|e| e.donors.len()).sum();
     let groups = upper.div_ceil(limits.max_donor_fits.max(1)).max(1);
     let mut all_summaries = Summaries::new();
+    // The identified fits of the look-alikes, per (precursor, run).
+    let look_fits: Mutex<LookalikeFits> = Mutex::new(LookalikeFits::new());
     for g in 0..groups {
         let items = Mutex::new(Vec::new());
         for_each_block(
             source,
             true,
             bounds,
-            |_| Vec::new(),
-            |local, _, _, rows| {
+            |_| (Vec::new(), Vec::new()),
+            |(local, fits), _, _, rows| {
                 for r in rows.iter().filter(|r| r.precursor as usize % groups == g) {
                     let w = consensus_scale_width(r, maps);
                     let f = donor_fit(r, maps);
                     if w.is_some() || f.is_some() {
                         local.push((r.precursor, w, f));
                     }
+                    if look.wants(r.precursor) {
+                        if let Some(fit) = r.evidence.as_ref().and_then(usable_fit) {
+                            fits.push(((r.precursor, r.run), fit));
+                        }
+                    }
                 }
                 Ok(())
             },
-            |_, local| {
+            |_, (local, fits)| {
                 items.lock().expect("summary lock").push(local);
+                look_fits.lock().expect("look-alike lock").extend(fits);
                 Ok(())
             },
         )?;
@@ -1697,6 +1795,16 @@ pub(crate) fn finalize_stream(
         secs(t0)
     );
     let summaries = &all_summaries;
+    let look_fits = look_fits.into_inner().expect("look-alike lock");
+    if look.len() > 0 {
+        eprintln!(
+            "[mbr] look-alikes: {} target precursors within {} ppm and {} s of another, {} identified fits",
+            look.len(),
+            options.lookalike_ppm,
+            LOOKALIKE_RT_S,
+            look_fits.len()
+        );
+    }
 
     // Pass 2: the training rows of both classifiers (one sample per member
     // of the transfer classifier), keyed by table and row so that they enter
@@ -2156,6 +2264,9 @@ pub(crate) fn finalize_stream(
                     }
                 }
             }
+            let shared = shared_peaks(rows, &idx, &look, &|q, run| {
+                look_fits.get(&(q, run)).copied()
+            });
             for (i, r) in rows.iter().enumerate() {
                 if idx.is_identity(r.precursor) {
                     // Never reported: only the identity-decoy family's counts.
@@ -2233,11 +2344,17 @@ pub(crate) fn finalize_stream(
                             (true, false) => EvidenceType::TransferMs1,
                             (false, _) => EvidenceType::BelowThreshold,
                         };
+                        if let Some(p) =
+                            shared_peak_wrong(v, &look, options, r, shared[i], accepted(q))
+                        {
+                            p_wrong[i] = p;
+                        }
                         (t, q, q)
                     }
                     Role::PseudoTransfer => {
                         let q = scored[i].and_then(|(fam, s)| fdr.pseudo_q(r.precursor, fam, s));
                         v.pseudo_transfers += 1;
+                        v.shared_peak_pseudo += usize::from(shared[i].is_some());
                         if let Some(m) = &r.ms2 {
                             v.ms2_pseudo_rows += 1;
                             v.ms2_pseudo_supported += usize::from(m.supports());
@@ -2282,6 +2399,7 @@ pub(crate) fn finalize_stream(
                     apex_rt_s: e.map(|e| e.t0),
                     library_q: r.library_q,
                     mass_err_ppm: e.map(|e| e.mass_err_ppm),
+                    shared_peak_with: shared[i],
                 });
             }
             Ok(())
@@ -2424,6 +2542,9 @@ fn write_merged(
                         quant_q: r.quant_q,
                         apex_rt_s: r.apex_rt_s,
                         library_q: r.library_q,
+                        shared_peak_with: r
+                            .shared_peak_with
+                            .map(|q| lib.meta[q as usize].key.as_str()),
                     })?;
                 }
                 n += rows.len();
@@ -2679,6 +2800,7 @@ mod tests {
             apex_rt_s: Some(f64::INFINITY),
             library_q: 1e-3,
             mass_err_ppm: Some(-1.25),
+            shared_peak_with: (precursor % 3 == 0).then_some(precursor + 1),
         }
     }
 

@@ -3082,6 +3082,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         donor_pep,
         cli.mbr_fdr,
         cli.quant_feature_fdr.0,
+        crate::quant_finalize::FinalizeOptions {
+            shared_peak_ms2: cli.mbr_shared_peak_ms2,
+            ..Default::default()
+        },
         &report_base.with_extension(""),
         cli.output_parquet.as_deref(),
         qpx_groups.as_ref(),

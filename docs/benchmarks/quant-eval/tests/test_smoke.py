@@ -154,8 +154,105 @@ class Fixes(unittest.TestCase):
                "absence": {"andes": o}, "classes": []}
         sec = scorecard.Section(res)
         rows = sec.absence_rows()
-        self.assertTrue(any("blank-run rows" in r for r in rows))
-        self.assertFalse(any("blank-run" in r for r in scorecard.Section(res).build()))   # not mixed into the main table
+        self.assertFalse(any("blank-run" in r for r in rows))                              # carry-over is not part of the absence score
+        self.assertTrue(any("blank-run rows" in r for r in scorecard.Section(res).carry_over_rows()))
+        self.assertFalse(any("blank-run" in r for r in scorecard.Section(res).build()))   # nor mixed into the main table
+
+
+def p14_design(tmp):
+    """Six runs: H1-H3 contain no YEAST (absent_species), M1-M2 contain it, BLANK is a blank run."""
+    with open(f"{tmp}/d.tsv", "w") as f:
+        f.write("run\tabsent_species\tblank\nH1\tYEAST\t\nH2\tYEAST\t\nH3\tYEAST\t\nM1\t\t\nM2\t\t\nBLANK\t\ttrue\n")
+    return Design(f"{tmp}/d.tsv", None, None, ("HUMAN", "YEAST"))
+
+
+class Rates(unittest.TestCase):
+    SP = pd.Series({"h1": "HUMAN", "h2": "HUMAN", "h3": "HUMAN", "y1": "YEAST", "y2": "YEAST"})
+
+    def table(self):
+        rows = [  # key, run, is_transfer, tq, thr
+            ("h1", "H1", True, 0.001, 0.002), ("h2", "H1", True, 0.004, 0.02), ("h3", "H2", True, 0.002, 0.001), ("y1", "H2", True, 0.008, 0.03),
+            ("h1", "H3", False, 0.0, 0.0), ("y2", "H3", False, 0.0, 0.0),                               # identified rows: not transfers
+            ("y1", "M1", True, 0.003, 0.004), ("y2", "M2", True, 0.002, 0.001), ("h1", "M1", False, 0.0, 0.0),
+            ("y2", "BLANK", True, 0.001, 0.001), ("h2", "BLANK", False, 0.0, 0.0)]
+        d = pd.DataFrame(rows, columns=["key", "run", "is_transfer", "tq", "thr"])
+        d["quantity"] = 1.0
+        return d
+
+    def test_false_transfer_rates(self):
+        from quant_eval import rates
+        with tempfile.TemporaryDirectory() as tmp:
+            design = p14_design(tmp)
+        o = rates.false_transfer_rates(self.table(), design, self.SP)["YEAST"]
+        self.assertEqual((o["transfers_in_absent_runs"], o["false_transfers"]), (4, 1))
+        self.assertAlmostEqual(o["rate"], 0.25)
+        self.assertEqual(o["genuine_transfers_of_species"], 2)
+        self.assertAlmostEqual(o["yeast_ratio"], 0.5)
+        self.assertEqual(o["identified_in_absent_runs"], 1)                      # y2 identified in H3: reported, not a transfer
+        self.assertAlmostEqual(o["species_share_identified"], 0.5)             # identified keys outside the blank run: h1, y2
+        self.assertEqual(o["transfers_all_runs"], 6)                              # the blank-run transfer is carry-over, not counted
+        self.assertEqual(rates.carry_over(self.table(), design, self.SP), {"blank_runs": 1, "rows": 2, "transferred": 1, "precursors": 2})
+
+    def test_depth_curve_and_matched_depth(self):
+        from quant_eval import rates
+        with tempfile.TemporaryDirectory() as tmp:
+            design = p14_design(tmp)
+        d = self.table()
+        cur = rates.depth_curve(d, design, self.SP, "tq", grid=[0.001, 0.003, 0.01])
+        self.assertEqual([c["transfers"] for c in cur], [1, 4, 6])             # blank-run transfer never counts
+        self.assertEqual([c["YEAST"]["false"] for c in cur], [0, 0, 1])
+        self.assertAlmostEqual(cur[2]["YEAST"]["rate"], 0.25)
+        self.assertEqual(rates.matched_depth(cur, "YEAST", 0.10), (0.003, 4))   # loosest threshold with rate <= 10 %
+        self.assertEqual(rates.matched_depth(cur, "YEAST", 0.25), (0.01, 6))
+        self.assertIsNone(rates.matched_depth(rates.depth_curve(d, design, self.SP, "tq", grid=[0.0001]), "YEAST", 0.5))   # nothing kept: no rate, no match
+
+    def test_scorecard_tables(self):
+        from quant_eval import rates
+        with tempfile.TemporaryDirectory() as tmp:
+            design = p14_design(tmp)
+        d = self.table()
+        res = {"rates": {"V": rates.false_transfer_rates(d, design, self.SP), "FP": rates.false_transfer_rates(d.iloc[:7], design, self.SP)},
+               "depth_curves": {"V": {k: rates.depth_curve(d, design, self.SP, c) for k, c in (("transfer_q", "tq"), ("quant_q", "thr"))}}}
+        rt = "\n".join(scorecard.rates_table(res))
+        self.assertIn("| V | 4 | 1 | 25.00 |", rt)
+        dt = "\n".join(scorecard.depth_table(res))
+        self.assertIn("| FP |", dt)
+        self.assertNotIn("| V |", dt)
+
+
+class FlashReader(unittest.TestCase):
+    def test_read_flashlfq(self):
+        hdr = ["File Name", "Full Sequence", "Precursor Charge", "Peak intensity", "Peak Detection Type", "PIP Q-Value", "Decoy Peptide", "Random RT"]
+        rows = [["r_1", "PEPTIDEK", "2", "100", "MSMS", "", "False", "False"], ["r_1", "AAAAK", "2", "50", "MBR", "0.004", "False", "False"],
+                ["r_2", "AAAAK", "2", "60", "MBR", "0.03", "False", "False"], ["r_2", "AAAAK", "3", "40", "MBR", "0.001", "True", "False"],
+                ["r_2", "CCCCK", "2", "30", "MBR", "0.002", "False", "True"], ["r_2", "PEPTIDEK", "2", "0", "MSMS", "", "False", "False"]]
+        with tempfile.TemporaryDirectory() as tmp:
+            p = f"{tmp}/QuantifiedPeaks.tsv"
+            with open(p, "w") as f:
+                f.write("\t".join(hdr) + "\n" + "".join("\t".join(r) + "\n" for r in rows))
+            d = readers.read_flashlfq(p, ["r_1", "r_2"])
+            d1 = readers.read_flashlfq(p, ["r_1", "r_2"], pip_q=0.01)
+        self.assertEqual(sorted(zip(d.key, d.run, d.is_transfer)), [("AAAAK/2", "r_1", True), ("AAAAK/2", "r_2", True), ("PEPTIDEK/2", "r_1", False)])
+        self.assertEqual(sorted(d.loc[d.is_transfer, "tq"]), [0.004, 0.03])                      # PIP q-value kept for transfers; decoy / random-RT / zero rows dropped
+        self.assertEqual(sorted(d1.key + d1.run), ["AAAAK/2r_1", "PEPTIDEK/2r_1"])               # pip_q = 0.01 drops the 0.03 peak
+        self.assertTrue((d.loc[~d.is_transfer, "tq"] == 0).all())
+
+
+class LibraryGate(unittest.TestCase):
+    def test_library_q_limit_per_arm(self):
+        d = pd.DataFrame({"precursor_key": ["AAAAK/2", "CCCCK/2"], "run": ["r_1", "r_1"], "evidence_type": ["identified_ms2", "identified_ms2"],
+                          "quantity": [1.0, 2.0], "quant_q": [0.0, 0.0], "transfer_q": [0.0, 0.0], "library_q": [0.004, 0.03]})
+        with tempfile.TemporaryDirectory() as tmp:
+            p = f"{tmp}/f.parquet"
+            d.to_parquet(p)
+            a = readers.read_andes(p, ["r_1"], "default")
+            b = readers.read_andes(p, ["r_1"], "default", library_q=0.05)
+            args = downstream.parse_args(["--name", "x", "--design", "d", "--andes", f"wide:default@0.05:{p}", "--out", "o"])
+            tabs, kinds = downstream.load_arms(args, ["r_1"])
+        self.assertEqual(list(a.key), ["AAAAK/2"])
+        self.assertEqual(sorted(b.key), ["AAAAK/2", "CCCCK/2"])
+        self.assertEqual(len(tabs["wide"]), 2)
+        self.assertEqual(kinds["wide"], {"kind": "andes", "rule": "default", "library_q": 0.05})
 
 
 class Smoke(unittest.TestCase):

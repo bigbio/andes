@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 
 from . import metrics as M
+from . import rates as RT
 from . import readers as R
 from . import runguard as G
 from .de import de_all
@@ -39,9 +40,12 @@ def parse_args(argv=None):
     ap.add_argument("--classes", default="", help="comma-separated species classes (HUMAN, YEAST, ECOLI, UPS)")
     ap.add_argument("--null", help="species whose amount does not change (false positives are its significant proteins)")
     ap.add_argument("--low-max", type=float, default=500.0, help="UPS pairs whose lower level is <= this count as low-level pairs")
-    ap.add_argument("--andes", action="append", default=[], metavar="NAME:RULE:PATH")
+    ap.add_argument("--andes", action="append", default=[], metavar="NAME:RULE[@LIBQ]:PATH",
+                    help="RULE in default | all | hard-cut | weights; @LIBQ sets the library_q limit of the arm (default 0.01), e.g. weights@0.05")
     ap.add_argument("--maxquant", action="append", default=[], metavar="NAME:PATH")
     ap.add_argument("--fragpipe", action="append", default=[], metavar="NAME:PATH")
+    ap.add_argument("--flashlfq", action="append", default=[], metavar="NAME:PEAKS[:PIPQ]",
+                    help="FlashLFQ QuantifiedPeaks.tsv (PIP-ECHO MBR FDR); optional PIPQ keeps MBR peaks with PIP q-value <= PIPQ")
     ap.add_argument("--rt-local", action="store_true",
                     help="also run DE after the RT-local run normalisation (same function for every arm; RT proxy = the first andes arm's apex RT)")
     ap.add_argument("--hard-cut", type=float, default=0.01, help="quant_q limit of the hard-cut rule")
@@ -53,8 +57,9 @@ def load_arms(a, runs):
     tabs, kinds = {}, {}
     for spec in a.andes:
         name, rule, path = spec.split(":", 2)
-        tabs[name] = R.read_andes(path, runs, rule, a.hard_cut)
-        kinds[name] = {"kind": "andes", "rule": rule}
+        rule, _, lq = rule.partition("@")
+        tabs[name] = R.read_andes(path, runs, rule, a.hard_cut, float(lq) if lq else R.IDQ)
+        kinds[name] = {"kind": "andes", "rule": rule, "library_q": float(lq) if lq else R.IDQ}
     for spec in a.maxquant:
         name, path = spec.split(":", 1)
         tabs[name] = R.read_maxquant(path, runs)
@@ -63,6 +68,12 @@ def load_arms(a, runs):
         name, path = spec.split(":", 1)
         tabs[name] = R.read_fragpipe(path, runs)
         kinds[name] = {"kind": "fragpipe"}
+    for spec in a.flashlfq:
+        parts = spec.split(":")
+        name, path = parts[0], parts[1]
+        pq = float(parts[2]) if len(parts) > 2 else None
+        tabs[name] = R.read_flashlfq(path, runs, pq)
+        kinds[name] = {"kind": "flashlfq", "pip_q": pq}
     if not tabs:
         raise SystemExit("no arm given")
     for k, d in tabs.items():
@@ -158,6 +169,13 @@ def evaluate(a):
             RES["hye_det"] = M.detection_by_quartile(tabs, PM, refs, sp, classes,
                                                      all_rows_refs=[n for n in refs if kinds[n]["kind"] != "andes"])
     RES["absence"] = {n: M.absence(raw, design, sp) for n, raw in tabs.items()}
+    if design.absent:
+        # truth-measured false-transfer rates (rates.py); blank-run carry-over is reported apart from the absence score
+        RES["rates"] = {n: RT.false_transfer_rates(raw, design, sp) for n, raw in tabs.items()}
+        RES["depth_curves"] = {n: {"transfer_q": RT.depth_curve(raw, design, sp, "tq"), "quant_q": RT.depth_curve(raw, design, sp, "thr")}
+                               for n, raw in tabs.items() if kinds[n].get("rule") in ("all", "weights") or kinds[n]["kind"] == "flashlfq"}
+    if design.blank:
+        RES["carry_over"] = {n: RT.carry_over(raw, design, sp) for n, raw in tabs.items()}
     RES["elapsed_s"] = time.time() - t0
     return RES
 

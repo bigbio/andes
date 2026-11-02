@@ -49,8 +49,9 @@ def remap_runs(d, runs):
 def _finish(d, tag):
     d = d[(d.quantity > 0) & np.isfinite(d.quantity)].drop_duplicates(["key", "run"]).copy()
     d["library_q"] = 0.0
-    d["tq"] = 0.0
-    d["thr"] = 0.0
+    # a tool that reports a per-transfer q-value (FlashLFQ: PIP q-value) passes it as the column pq
+    d["tq"] = d["pq"].values if "pq" in d.columns else 0.0
+    d["thr"] = d["tq"].values
     return G.tagged(d[["key", "run", "quantity", "is_transfer", "library_q", "tq", "thr"]], tag)
 
 
@@ -123,6 +124,43 @@ def read_fragpipe(path, runs):
     return _finish(remap_runs(d, runs), G.run_tag("fragpipe-ionquant-norm0", path))
 
 
+def read_flashlfq(path, runs, pip_q=None):
+    """FlashLFQ (PIP-ECHO MBR FDR) `QuantifiedPeaks.tsv` -> rows of one precursor key x run.
+    Key = `Full Sequence` + `/` + `Precursor Charge` (the identification charge of the peak); the file's `Full Sequence` is the andes key form
+    when the identifications were written from andes search tables. Decoy-peptide and random-RT peaks are dropped. `Peak Detection Type`
+    MBR = transfer; its `PIP Q-Value` is kept in tq / thr (0 for MS/MS peaks); `pip_q` drops MBR peaks above that PIP q-value.
+    FlashLFQ sums the charge states of a peptide into one peak intensity unless it is run with charge-specific quantification."""
+    r, cols = _read_tsv(path)
+    for c in ("File Name", "Full Sequence", "Precursor Charge", "Peak intensity", "Peak Detection Type"):
+        if c not in cols:
+            raise SystemExit(f"{path}: missing column {c!r}")
+    rows, drop = {}, {"decoy": 0, "random_rt": 0, "no_intensity": 0, "above_pip_q": 0}
+    for row in r:
+        if (row.get("Decoy Peptide") or "").strip().lower() == "true":
+            drop["decoy"] += 1
+            continue
+        if (row.get("Random RT") or "").strip().lower() == "true":
+            drop["random_rt"] += 1
+            continue
+        q = _fnum(row["Peak intensity"])
+        if not (q > 0):
+            drop["no_intensity"] += 1
+            continue
+        is_tr = row["Peak Detection Type"].strip().upper() == "MBR"
+        pq = _fnum(row.get("PIP Q-Value")) if is_tr else 0.0
+        if is_tr and pip_q is not None and not (pq <= pip_q):
+            drop["above_pip_q"] += 1
+            continue
+        key = norm_key(row["Full Sequence"] + "/" + str(int(float(row["Precursor Charge"]))))
+        k = (key, row["File Name"])
+        o = rows.get(k)
+        if o is None or o[0] < q:
+            rows[k] = (q, is_tr, pq if pq == pq else 0.0)
+    print(f"flashlfq {path}: rows {len(rows)} dropped {drop}", file=sys.stderr)
+    d = pd.DataFrame([(k, rn, v[0], v[1], v[2]) for (k, rn), v in rows.items()], columns=["key", "run", "quantity", "is_transfer", "pq"])
+    return _finish(remap_runs(d, runs), G.run_tag("flashlfq-quantified-peaks", path))
+
+
 def recover_p(tr):
     """Per-quantity error probability p recovered from quant_q = running mean of p over a run's accepted transfers sorted by p.
     tr: transfer rows with run and quant_q (unique index). p_i = i * q_i - (i - 1) * q_(i-1) within a run.
@@ -136,13 +174,14 @@ def recover_p(tr):
     return pd.Series(np.clip(i * qq - (i - 1) * prev, 0.0, 1.0), index=tr.index).reindex(order)
 
 
-def read_andes(path, runs, rule="default", hard_cut=0.01):
+def read_andes(path, runs, rule="default", hard_cut=0.01, library_q=IDQ):
     """andes finalize table -> rows of one view.
       default    identified rows + transfers with transfer_q <= 0.01
       all        identified rows + every transfer the finalize output carries
       hard-cut   identified rows + transfers with quant_q <= hard_cut
       weights    as `all`, plus the column p (recovered error probability of each transfer) for the precision-weight view
-    Rows need library_q <= 0.01 and a positive finite quantity; below-threshold rows are dropped."""
+    Rows need library_q <= `library_q` (default 0.01; a run with a looser library entry gate passes its own limit) and a positive
+    finite quantity; below-threshold rows are dropped."""
     if rule not in ANDES_RULES:
         raise SystemExit(f"andes rule {rule!r} not in {ANDES_RULES}")
     m = pd.read_parquet(path, columns=["precursor_key", "run", "evidence_type", "quantity", "quant_q", "transfer_q", "library_q"])
@@ -153,7 +192,7 @@ def read_andes(path, runs, rule="default", hard_cut=0.01):
     m = remap_runs(m.drop_duplicates(["key", "run"]), runs)
     m["thr"] = m.quant_q
     m["tq"] = np.where(m.is_transfer, m.transfer_q, 0.0)
-    m = m[m.library_q <= IDQ]
+    m = m[m.library_q <= library_q]
     if rule == "default":
         m = m[(~m.is_transfer) | (m.tq <= TRANSFER_Q)]
     elif rule == "hard-cut":

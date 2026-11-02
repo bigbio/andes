@@ -190,14 +190,11 @@ class Section:
         return self.rows
 
     def absence_rows(self):
-        """Absence table rows: rows that should not exist (blank runs, species absent from runs, UPS transfers below detection)."""
+        """Absence table rows: rows that should not exist (species absent from runs, UPS transfers below detection). Blank-run carry-over is
+        not part of this score; see carry_over_rows."""
         A, C, r = self.A, self.C, self.r
         self.rows = []
         for arm in [C] + self.views:
-            b = g(r.get("absence", {}), arm, "blank")
-            if b:
-                self.row(f"blank-run rows ({b['blank_runs']} runs) [{arm}]", b["blank_rows"], g(r["absence"], self.MQ, "blank", "blank_rows"), g(r["absence"], self.FP, "blank", "blank_rows"), hi=False, tol=0.10)
-                self.row(f"blank-run rows transferred [{arm}]", b["blank_transferred"], g(r["absence"], self.MQ, "blank", "blank_transferred"), g(r["absence"], self.FP, "blank", "blank_transferred"), hi=False, tol=0.10)
             for s, x in (g(r.get("absence", {}), arm, "absent_species") or {}).items():
                 gs = lambda t, k: g(r["absence"], t, "absent_species", s, k)
                 self.row(f"{s} rows in the {x['absent_runs']} runs without {s} [{arm}]", x["rows"], gs(self.MQ, "rows"), gs(self.FP, "rows"), hi=False, tol=0.10)
@@ -208,6 +205,67 @@ class Section:
             self.row(f"UPS transferred rows at the 3 lowest levels ({', '.join(lv)})", *[low(x, "ups_rows_transferred") for x in (C, self.MQ, self.FP)], hi=False, tol=0.10)
             self.row("  of which the precursor has no identified row at that level", *[low(x, "ups_transfer_rows_without_ident_at_level") for x in (C, self.MQ, self.FP)], hi=False, tol=0.10)
         return self.rows
+
+
+    def carry_over_rows(self):
+        """Blank-run rows (carry-over from the previous injection): reported apart from the absence score."""
+        r, C = self.r, self.C
+        self.rows = []
+        for arm in [C] + self.views:
+            b = g(r.get("absence", {}), arm, "blank")
+            if b:
+                self.row(f"blank-run rows ({b['blank_runs']} runs) [{arm}]", b["blank_rows"], g(r["absence"], self.MQ, "blank", "blank_rows"), g(r["absence"], self.FP, "blank", "blank_rows"), hi=False, tol=0.10)
+                self.row(f"blank-run rows transferred [{arm}]", b["blank_transferred"], g(r["absence"], self.MQ, "blank", "blank_transferred"), g(r["absence"], self.FP, "blank", "blank_transferred"), hi=False, tol=0.10)
+        return self.rows
+
+
+def rates_table(res):
+    """Truth-measured false-transfer rates (rates.py): foreign-species transfers in the runs that lack the species, over all transfers there."""
+    R = res.get("rates")
+    if not R:
+        return []
+    out = []
+    for s in sorted({s for v in R.values() for s in v}):
+        out += [f"Absent species {s} (runs without {s}); rate = {s} transferred rows / all transferred rows in those runs; ratio = {s} transferred rows in those runs / "
+                f"{s} transferred rows in the runs that contain it; scaled = rate / {s} share of the identified precursors (extension, not a measured rate).", "",
+                f"| arm | transferred rows in runs without {s} | of which {s} | rate % | ratio % | scaled rate % | {s} share of identified precursors % | identified {s} rows in those runs | transferred rows, all runs |",
+                "|---|---|---|---|---|---|---|---|---|"]
+        for n, v in R.items():
+            o = v.get(s)
+            if not o:
+                continue
+            f = lambda x, nd=2: "-" if x != x else f"{100 * x:.{nd}f}"
+            out.append(f"| {n} | {o['transfers_in_absent_runs']:,} | {o['false_transfers']:,} | {f(o['rate'])} | {f(o['yeast_ratio'])} | {f(o['rate_scaled'])} | "
+                       f"{f(o['species_share_identified'], 1)} | {o['identified_in_absent_runs']:,} | {o['transfers_all_runs']:,} |")
+        out.append("")
+    return out
+
+
+def depth_table(res, curve_arm=None):
+    """Transferred rows of an andes arm at the false-transfer rate each tool shows (conservative step on the threshold grid)."""
+    from . import rates as RT
+    R, C = res.get("rates"), res.get("depth_curves")
+    if not R or not C:
+        return []
+    curve_arm = curve_arm or next(iter(C))
+    out = []
+    for s in sorted({s for v in R.values() for s in v}):
+        out += [f"Depth at a matched false-transfer rate ({s}): transferred rows (all non-blank runs) of `{curve_arm}` at the loosest threshold whose rate is <= the tool's rate; "
+                "thresholds on the grid of rates.py (no interpolation). `-` = the arm's rate is above the tool's at every threshold of the grid.", "",
+                "| reference | its rate % | its transferred rows | " + curve_arm + " by transfer_q: threshold / rows | by quant_q: threshold / rows | rows ratio (transfer_q) | rows ratio (quant_q) |",
+                "|---|---|---|---|---|---|---|"]
+        for n, v in R.items():
+            o = v.get(s)
+            if not o or n == curve_arm or o["rate"] != o["rate"]:
+                continue
+            cells, ratios = [], []
+            for key in ("transfer_q", "quant_q"):
+                m = RT.matched_depth(C[curve_arm][key], s, o["rate"])
+                cells.append("-" if m is None else f"{m[0]:g} / {m[1]:,}")
+                ratios.append("-" if (m is None or not o["transfers_all_runs"]) else f"{m[1] / o['transfers_all_runs']:.2f}")
+            out.append(f"| {n} | {100 * o['rate']:.2f} | {o['transfers_all_runs']:,} | {cells[0]} | {cells[1]} | {ratios[0]} | {ratios[1]} |")
+        out.append("")
+    return out
 
 
 def de_summary(res):
@@ -341,6 +399,15 @@ def main(argv=None):
         rows = ab.absence_rows()
         if rows:
             out += ["### Absence (rows that should not exist; lower is better)", "", *hdr, *rows, ""]
+        rt = rates_table(r)
+        if rt:
+            out += ["### False-transfer rates (truth: foreign species in runs that lack it)", ""] + rt
+        dt = depth_table(r)
+        if dt:
+            out += ["### Depth at a matched false-transfer rate", ""] + dt
+        co = Section(r).carry_over_rows()
+        if co:
+            out += ["### Blank-run carry-over (reported separately; not part of the absence score)", "", *hdr, *co, ""]
     print("\n".join(out))
 
 

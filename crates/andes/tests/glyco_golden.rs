@@ -38,6 +38,13 @@
 //! decoy winners 3 -> 10; the candidate-pool
 //! columns move with the new decoy candidates.
 //!
+//! REGENERATED 2026-11-02 when `enzN` began counting a Met-clipped protein
+//! N-terminal peptide as starting at a terminus (bigbio/andes#293). Only `enzN`
+//! moved, 0 -> 1, on the 2 rows of the Met-clipped decoy YGHO_ECOLI peptide
+//! `M.LWYQMMLLNIVSNQTM+15.99491GPVR.N` (scans 12256 and 12340, the latter with
+//! the protein N-terminal Acetyl); with `enzN` set back to 0 on them the PIN
+//! reproduces the previous golden row for row.
+//!
 //! WHY THIS EXISTS. Until this file was added, the ONLY golden in the repo covered
 //! the standard peptide path (`precursor_cal_bit_identical.rs`). Nothing pinned glyco
 //! output, and a commit labelled `fix(train)` consequently changed SERVE-TIME glyco
@@ -59,7 +66,7 @@
 //! ./target/release/andes \
 //!   --spectrum test-fixtures/glyco_fixture.mgf.gz \
 //!   --database test-fixtures/glyco_fixture.fasta \
-//!   --glyco --glyco-tol-ppm 20 --fragmentation HCD \
+//!   --glyco --glyco-tol-ppm 20 --fragmentation HCD --fragment-tol-da 0.5 \
 //!   --glyco-glycan-gdb test-fixtures/glyco_fixture.gdb \
 //!   --output-pin /tmp/g.pin
 //! cp /tmp/g.glyco.pin test-fixtures/parity/goldens/glyco.pin

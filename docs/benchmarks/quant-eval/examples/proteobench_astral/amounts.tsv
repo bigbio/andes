@@ -1,0 +1,6 @@
+species	condition	amount
+HUMAN	*	1
+YEAST	A	2
+YEAST	B	1
+ECOLI	A	0.25
+ECOLI	B	1

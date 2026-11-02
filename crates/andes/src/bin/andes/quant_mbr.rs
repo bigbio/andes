@@ -2302,10 +2302,11 @@ mod finalize_tests {
 
     use super::*;
     use crate::quant_finalize::{
-        count_cell, finalize, finalize_stream, for_each_scored, pseudo_example, run_rows,
-        shared_peak_wrong, shared_peaks, table_features, with_false_transfers, wrong_features,
-        BlockContext, EntryIndex, ExtractRuns, FinalizeLimits, FinalizeOptions, FinalizeParams,
-        FinalizeSummary, MbrFeature, RunCells, Table, WrongCalibration, SCORE_CHUNK,
+        count_cell, finalize, finalize_stream, fit_snr, for_each_scored, pseudo_example,
+        row_quantity, run_rows, shared_peak_wrong, shared_peaks, snr_medians, table_features,
+        with_false_transfers, wrong_features, BlockContext, EntryIndex, ExtractRuns,
+        FinalizeLimits, FinalizeOptions, FinalizeParams, FinalizeSummary, MbrFeature, RunCells,
+        Table, WrongCalibration, SCORE_CHUNK,
     };
     use crate::quant_lookalike::{usable_fit, Lookalikes};
     use crate::transfer_fdr::{
@@ -2377,6 +2378,9 @@ mod finalize_tests {
                 amplitude - 1e3
             },
             amplitude_fixed_se: 1e4,
+            // Ten per cent above the template area: a tailing peak.
+            trace_area: amplitude * 11.0,
+            trace_area_se: 1e5,
         }
     }
 
@@ -2773,6 +2777,23 @@ mod finalize_tests {
         let idx = EntryIndex::new(lib, stems.len());
         let look = Lookalikes::new(lib, options.lookalike_ppm);
         let all: Vec<ExtractRow> = runs.concat();
+        // With a trace threshold: the median identified SNR per precursor.
+        let bright = snr_medians(
+            all.iter()
+                .filter(|r| (r.role, r.kind) == (Role::Identified, Hypothesis::Target))
+                .filter_map(|r| {
+                    r.evidence
+                        .as_ref()
+                        .and_then(fit_snr)
+                        .map(|s| (r.precursor, s))
+                })
+                .collect(),
+        );
+        let is_bright = |p: u32| {
+            options
+                .trace_snr
+                .is_some_and(|t| bright.get(&p).is_some_and(|&s| s >= t))
+        };
         let shards = One(&all);
         let mut summary = FinalizeSummary::default();
 
@@ -2926,7 +2947,9 @@ mod finalize_tests {
                         return;
                     }
                     let Some(e) = r.evidence.as_ref() else { return };
-                    let q = reported_quantity(e, r.run, w_c.get(&r.precursor).copied(), maps).0;
+                    let w = w_c.get(&r.precursor).copied();
+                    let q = row_quantity(e, r.run, w, is_bright(r.precursor), maps)
+                        .map_or(0.0, |q| q.0);
                     if q > 0.0 && q.is_finite() {
                         cell_seq += 1;
                         cells.push(
@@ -3008,10 +3031,10 @@ mod finalize_tests {
             // quantity is missing, not zero, in the MBR table and the
             // feature parquet.
             let reported = |r: &ExtractRow| {
-                r.evidence
-                    .as_ref()
-                    .filter(|e| e.amplitude > 0.0)
-                    .map(|e| reported_quantity(e, r.run, w_c.get(&r.precursor).copied(), maps))
+                r.evidence.as_ref().and_then(|e| {
+                    let w = w_c.get(&r.precursor).copied();
+                    row_quantity(e, r.run, w, is_bright(r.precursor), maps)
+                })
             };
             // Per output row: precursor, run, row, mass error, shared peak.
             type RefRow<'a> = (u32, u16, MbrRow<'a>, Option<f64>, Option<u32>);
@@ -3255,6 +3278,7 @@ mod finalize_tests {
             lookalike_ppm: 2500.0,
             shared_peak_ms2: true,
             absence_in_quant_q: true,
+            trace_snr: Some(50.0),
         }
     }
 
@@ -3656,6 +3680,46 @@ mod finalize_tests {
                 assert!(f > 0.0 && (f / q - 1.0).abs() < 0.5, "{r:?}");
             }
         }
+    }
+
+    #[test]
+    fn bright_precursors_report_the_trace_sum() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = library_with_entries();
+        let run = |name: &str, trace_snr: Option<f64>| {
+            stream(
+                &lib,
+                &extract(),
+                unlimited(),
+                50,
+                &dir.path().join(name),
+                0.05,
+                None,
+                &FinalizeOptions {
+                    trace_snr,
+                    ..FinalizeOptions::default()
+                },
+            )
+            .1
+        };
+        // Every identified fit of the fixture has SNR 100.
+        let template = run("template", None);
+        assert_eq!(run("above", Some(150.0)), template);
+        let trace = run("trace", Some(50.0));
+        assert_eq!(trace.len(), template.len());
+        let mut changed = 0;
+        for (t, g) in trace.iter().zip(&template) {
+            assert_eq!(
+                (t.precursor, t.run, t.evidence_type),
+                (g.precursor, g.run, g.evidence_type)
+            );
+            // The fixture's trace sum is 11 A, its template quantity 10 A.
+            if let (Some(a), Some(b)) = (t.quantity, g.quantity) {
+                assert!((a / b - 1.1).abs() < 1e-9, "{t:?} {g:?}");
+                changed += 1;
+            }
+        }
+        assert!(changed > 0);
     }
 
     #[test]

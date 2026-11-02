@@ -659,6 +659,7 @@ See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model)
 | `--mbr-fdr` | 0..1 | `0.01` | *(advanced)* Transfer quality q-value: transfers at or below it are `transfer_ms2` (an MS2 scan of the run supports them) or `transfer_ms1`. An internal quant-quality q-value, not an identification FDR. It counts both wrong peaks and the transfers of false donor identifications (identity decoys, §10). On the ProteoBench QExactive module (2026-10-23, defaults), `0.05` adds about 6k precursors quantified in at least 3 runs to 0.01 (65.0k to 71.2k) at an accuracy cost (median \|eps\| 0.163 to 0.176, E. coli 0.28 to 0.44, CV 0.118 to 0.132); in an earlier measurement the wrong-peak rate rose from 1.7% to 2.7%. Use `0.05` for a deeper, less accurate set. |
 | `--quant-feature-fdr` | 0..1 or `off` | `off` | Identified-row quality q-value (`quant_q`): with a value, an identified row whose MS1 feature has a `quant_q` above it (or none) is `identified_below_threshold` and left out of `quantms.feature.parquet` (§10); `off` reports every identified row and keeps `quant_q` as an annotation. An internal quant-quality q-value, not an identification FDR. |
 | `--mbr-quant-q-absence` | bool | `false` | *(experimental, issue #299)* An accepted transfer's `quant_q` also counts the chance that it is a false transfer (a wrong peak, or a false donor or absent precursor): its probability of a wrong measurement becomes `p_false + (1 − p_false) · p_wrong`, with `p_false` the local FDR of the transfer FDR at its score in its prior stratum (§10). No row is dropped and no `transfer_q` changes. Also on `andes quant finalize`. |
+| `--mbr-trace-quantity-snr` | number or `off` | `off` | *(experimental, issue #299)* The quantity of every row of a precursor whose median identified amplitude signal-to-noise (`A / amplitude_se`) is at least this is the trace sum of its fit (`trace_area`, §10) instead of the template area. Per precursor, so its runs share one estimator. No default threshold until benchmarked. Also on `andes quant finalize`. |
 | `--mbr-shared-peak-ms2` | bool | `false` | *(experimental, issue #299)* An accepted transfer whose apex lies on the identified peak of a look-alike precursor (`shared_peak_with`, §10) needs an MS2 scan that supports it and tells the two apart (not an I/L swap); without one its probability of a wrong measurement is 1, so its `quant_q` rises. No row is dropped and no `transfer_q` changes. Also on `andes quant finalize`. |
 
 With `--output-parquet`, both modules add `quantms.feature.parquet` (the QPX feature view) to the bundle.
@@ -1052,8 +1053,8 @@ pseudo-transfer rows (`ms2_n_scans`, `ms2_n_matched`, `ms2_angle`, `ms2_explaine
 schema 4 the per-isotope heights (`iso_h0` to `iso_h3`) and `tailing` of every fit; an older
 extract table is rejected (run `andes quant extract` again). Schema 4.1 adds, after the MS2
 columns, the fixed-apex amplitude and its standard error (`amplitude_fixed`,
-`amplitude_fixed_se`, §10); they are read by name, so a schema-4.0 table still reads, without
-them. `library.parquet` is at schema 4:
+`amplitude_fixed_se`) and the trace sum of the fit and its standard error (`trace_area`,
+`trace_area_se`, §10); they are read by name, so a schema-4.0 table still reads, without them. `library.parquet` is at schema 4:
 schema 3 added each entry's fragment spectrum (`frag_mz`, `frag_intensity`, `frag_ion` such as
 `y7` or `b5^2`) and its donor PSMs' runs and RTs (`donor_scan_run`, `donor_scan_rt`), and
 schema 4 the identity-decoy flag (`identity_decoy`) and the best donor PSM's score, q-value
@@ -1514,7 +1515,7 @@ andes quant extract  --quant-dir q/ --run a [--lfq-tol 10ppm]
 andes quant extract  --quant-dir q/ --run b [--lfq-tol 10ppm]
 # once
 andes quant finalize --quant-dir q/ -o experiment [--mbr-fdr 0.01] [--quant-feature-fdr off] \
-      [--mbr-shared-peak-ms2 false] [--mbr-quant-q-absence false] \
+      [--mbr-shared-peak-ms2 false] [--mbr-quant-q-absence false] [--mbr-trace-quantity-snr off] \
       [--output-parquet dir --database db.fasta --psms all.target.psms --decoy-psms all.decoy.psms \
        [--protein-fdr 0.01]]
 ```
@@ -1771,6 +1772,17 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
   Finalize reports it for transfers as `quantity_fixed` at the width of `quantity`: it follows
   `quantity` when the precursor is there and averages 0 when it is not, so a downstream tool can
   use it, or treat low transfer values as censored.
+* **Trace sum for bright peaks.** At high signal the noise is small and the template's shape
+  (tailing, a width other than the consensus one) limits the precision of `A · w · √(2π)`. The
+  extract (schema 4.1) also records the observed area of every fit, `trace_area`: over the scans
+  within three widths of the fitted apex, the trapezoid integral of each isotope trace of the
+  fit minus its background (the median of the trace over the window's other scans), summed and
+  divided by those isotopes' share of the envelope, with a standard error from the traces'
+  noise. With `--mbr-trace-quantity-snr X`, every row of a precursor whose median identified
+  `A / amplitude_se` is at least `X` reports `trace_area` (null when not positive) instead of the
+  template area, as MaxQuant and IonQuant integrate observed signal; the choice is per precursor
+  so all of its runs share one estimator, and the run normalisation uses the same quantities.
+  Fainter precursors keep the template fit.
 * **Reported quantity.** The extract fit gives each (precursor, run) an apex amplitude `A`
   and an elution width `w`; `A · w · √(2π)` is the area under the fitted profile. Fitting the
   width separately in each run lets one precursor's area jump between runs with the width

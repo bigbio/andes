@@ -120,3 +120,4 @@ quant:
   # quant_feature_fdr: off       # identified-row quality q-value; above it: identified_below_threshold (internal); off (default) reports all
   # mbr_shared_peak_ms2: false   # experimental: accepted transfers on a look-alike's identified peak need MS2 support, else quant_q rises
   # mbr_quant_q_absence: false   # experimental: quant_q of a transfer also counts the local FDR of its transfer score (false or absent transfers)
+  # mbr_trace_quantity_snr: off  # experimental: precursors at or above this median identified SNR report the trace sum instead of the template area

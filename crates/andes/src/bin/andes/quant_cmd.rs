@@ -1846,6 +1846,7 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
         lookalike_ppm,
         shared_peak_ms2: a.mbr_shared_peak_ms2,
         absence_in_quant_q: a.mbr_quant_q_absence,
+        trace_snr: a.mbr_trace_quantity_snr.0,
     };
     let limits = FinalizeLimits {
         max_train_rows: a.max_train_rows,

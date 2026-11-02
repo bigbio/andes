@@ -178,6 +178,8 @@ pub struct QuantCfg {
     pub quant_feature_fdr: Option<NumberOrString>,
     pub mbr_shared_peak_ms2: Option<bool>,
     pub mbr_quant_q_absence: Option<bool>,
+    /// A number above 0 or `off`, as `--mbr-trace-quantity-snr`.
+    pub mbr_trace_quantity_snr: Option<NumberOrString>,
 }
 
 /// A YAML scalar written as a number or as a string (e.g. `0.05` or `off`),
@@ -187,6 +189,12 @@ pub struct QuantCfg {
 pub enum NumberOrString {
     Number(f64),
     String(String),
+}
+
+/// `mbr_trace_quantity_snr` through the CLI validator, the error naming
+/// the key.
+fn parse_trace_snr(s: &str) -> Result<crate::cli::PositiveOrOff, String> {
+    crate::cli::parse_positive_or_off(s).map_err(|e| format!("mbr_trace_quantity_snr: {e}"))
 }
 
 /// `quant_feature_fdr` through the CLI validator, the error naming the key.
@@ -586,6 +594,12 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         "mbr_quant_q_absence",
         mbr_quant_q_absence,
         cfg.quant.mbr_quant_q_absence
+    );
+    set_parsed!(
+        "mbr_trace_quantity_snr",
+        mbr_trace_quantity_snr,
+        cfg.quant.mbr_trace_quantity_snr.map(|v| v.text()),
+        parse_trace_snr
     );
 
     // ── glyco ──

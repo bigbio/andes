@@ -182,7 +182,25 @@ pub struct Evidence {
     pub amplitude_fixed: f64,
     /// `1 / sqrt(den)` of [`Evidence::amplitude_fixed`].
     pub amplitude_fixed_se: f64,
+    /// The observed area of the peak: over the scans within
+    /// [`TRACE_REACH`] widths of the final apex, the trapezoid integral of
+    /// each isotope trace of the final fit minus its background (the median
+    /// of the trace over the window's other scans; with fewer than 3 of
+    /// them, the template's `b_i = ybar_i - A pi_i gbar`), summed over those
+    /// isotopes and divided
+    /// by their share of the envelope, so on the scale of
+    /// [`Evidence::quantity`] (the whole envelope). It follows the trace
+    /// where the Gaussian template does not (tailing, a width other than the
+    /// template's); 0 with fewer than 2 scans in reach.
+    pub trace_area: f64,
+    /// The standard error of [`Evidence::trace_area`] from the traces'
+    /// noise `sigma_i` (the background's own uncertainty left out).
+    pub trace_area_se: f64,
 }
+
+/// Widths around the apex over which [`Evidence::trace_area`] integrates
+/// (99.7 % of a Gaussian's area).
+pub const TRACE_REACH: f64 = 3.0;
 
 /// The RT prior of a probe, with the floors of [`fit`] applied.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -978,6 +996,17 @@ fn fit_traces_on_grid(
     let mut e = features(
         rt, traces, mz0, mu, prior, &pi, &sigma, &proj, sgg, m1_proj, mask, t0, w, g,
     );
+    (e.trace_area, e.trace_area_se) = trace_area(
+        rt,
+        traces,
+        &ybar,
+        &pi,
+        &sigma,
+        mask,
+        e.amplitude,
+        (g, t0, w),
+        &mut work.sort,
+    );
     (e.amplitude_fixed, e.amplitude_fixed_se) = fixed_amplitude(
         rt,
         traces,
@@ -989,6 +1018,60 @@ fn fit_traces_on_grid(
         &mut work.g_fixed,
     );
     e
+}
+
+/// [`Evidence::trace_area`] and its standard error, for the fit of
+/// amplitude `amplitude` and profile `g` at `(t0, w)` over the isotopes in
+/// `mask`; `outside` is a work buffer.
+#[allow(clippy::too_many_arguments)]
+fn trace_area(
+    rt: &[f64],
+    traces: &[&[f32]],
+    ybar: &[f64; MAX_ISOTOPES],
+    pi: &[f64; MAX_ISOTOPES],
+    sigma: &[f64; MAX_ISOTOPES],
+    mask: u8,
+    amplitude: f64,
+    (g, t0, w): (&[f64], f64, f64),
+    outside: &mut Vec<f32>,
+) -> (f64, f64) {
+    let lo = rt.partition_point(|&t| t < t0 - TRACE_REACH * w);
+    let hi = rt.partition_point(|&t| t <= t0 + TRACE_REACH * w);
+    let share: f64 = (0..traces.len())
+        .filter(|&i| mask & (1 << i) != 0)
+        .map(|i| pi[i])
+        .sum();
+    if hi < lo + 2 || share <= 0.0 || g.is_empty() {
+        return (0.0, 0.0);
+    }
+    let gbar = g.iter().sum::<f64>() / g.len() as f64;
+    // Trapezoid weights of the scans lo..hi.
+    let weight = |j: usize| {
+        let before = if j > lo { rt[j] - rt[j - 1] } else { 0.0 };
+        let after = if j + 1 < hi { rt[j + 1] - rt[j] } else { 0.0 };
+        0.5 * (before + after)
+    };
+    let w2: f64 = (lo..hi).map(|j| weight(j) * weight(j)).sum();
+    let (mut area, mut var) = (0.0, 0.0);
+    for i in (0..traces.len()).filter(|&i| mask & (1 << i) != 0 && pi[i] > 0.0) {
+        // The background: the median of the trace outside the integral,
+        // where the template's own background would take in any signal it
+        // does not model (a tail); the template's with fewer than 3 scans
+        // there.
+        outside.clear();
+        outside.extend(traces[i][..lo].iter().chain(&traces[i][hi..]));
+        let b = if outside.len() >= 3 {
+            outside.sort_unstable_by(f32::total_cmp);
+            median_sorted(outside)
+        } else {
+            ybar[i] - amplitude * pi[i] * gbar
+        };
+        area += (lo..hi)
+            .map(|j| weight(j) * (traces[i][j] as f64 - b))
+            .sum::<f64>();
+        var += sigma[i] * sigma[i] * w2;
+    }
+    (area / share, var.sqrt() / share)
 }
 
 /// [`Evidence::amplitude_fixed`] and its standard error: the joint
@@ -1434,6 +1517,8 @@ fn features(
         tailing,
         amplitude_fixed: 0.0,
         amplitude_fixed_se: 0.0,
+        trace_area: 0.0,
+        trace_area_se: 0.0,
     }
 }
 
@@ -1614,6 +1699,8 @@ mod tests {
             ("w", e.w),
             ("amplitude_fixed", e.amplitude_fixed),
             ("amplitude_fixed_se", e.amplitude_fixed_se),
+            ("trace_area", e.trace_area),
+            ("trace_area_se", e.trace_area_se),
         ] {
             assert!(v.is_finite(), "{name} = {v} is not finite");
         }
@@ -1877,6 +1964,46 @@ mod tests {
             "{fixed} {sd}"
         );
         assert!(free > fixed + 0.5, "free {free}, fixed {fixed}");
+    }
+
+    #[test]
+    fn trace_area_follows_the_observed_peak_shape() {
+        let sqrt_2pi = (2.0 * std::f64::consts::PI).sqrt();
+        // A Gaussian peak: the trace sum and the template area agree.
+        let run = synth_run(&[(MZ, 2, ENV, 300.0, 5.0, AMP)], NOISE, 1.0);
+        let e = fit(&run, &probe(MZ, 300.0, 6.0, 5.0), 2, &ENV, &params()).unwrap();
+        assert_finite(&e);
+        let truth = AMP * 5.0 * sqrt_2pi;
+        assert!((e.trace_area / truth - 1.0).abs() < 0.05, "{e:?}");
+        assert!((e.quantity / truth - 1.0).abs() < 0.05, "{e:?}");
+        assert!(e.trace_area_se > 0.0 && e.trace_area_se < 0.05 * truth);
+        // A tailing peak: a second, later component at the same m/z. The
+        // trace takes the most intense centroid of a scan, so the observed
+        // signal is the larger of the two components, not their sum. The
+        // template misses the tail; the trace sum keeps it.
+        let tail = [
+            (MZ, 2, ENV, 300.0, 5.0, AMP),
+            (MZ, 2, ENV, 309.0, 5.0, 0.4 * AMP),
+        ];
+        let run = synth_run(&tail, NOISE, 1.0);
+        let e = fit(&run, &probe(MZ, 300.0, 6.0, 5.0), 2, &ENV, &params()).unwrap();
+        let g = |t: f64, apex: f64| (-(t - apex) * (t - apex) / 50.0).exp();
+        let (lo, hi) = (e.t0 - TRACE_REACH * e.w, e.t0 + TRACE_REACH * e.w);
+        let observed: f64 = (0..600)
+            .map(|k| k as f64)
+            .filter(|t| (lo..=hi).contains(t))
+            .map(|t| AMP * g(t, 300.0).max(0.4 * g(t, 309.0)))
+            .sum();
+        let (trace, template) = (e.trace_area / observed, e.quantity / observed);
+        eprintln!(
+            "tailing peak: trace {trace:.3}, template {template:.3} of the observed area (t0 {:.1}, w {:.2})",
+            e.t0, e.w
+        );
+        assert!((trace - 1.0).abs() < 0.05, "{trace}");
+        assert!(
+            (trace - 1.0).abs() < (template - 1.0).abs(),
+            "{trace} {template}"
+        );
     }
 
     #[test]

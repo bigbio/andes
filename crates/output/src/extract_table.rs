@@ -14,7 +14,8 @@
 //! and rows without a fit); a schema-2 table is rejected. Schema 4 added
 //! the per-isotope heights `iso_h0`..`iso_h3` and the `tailing` of the fit;
 //! a schema-3 table is rejected. Schema 4.1 adds, after the MS2 columns,
-//! [`OPTIONAL_EVIDENCE`]: the fixed-apex amplitude and its standard error;
+//! [`OPTIONAL_EVIDENCE`]: the fixed-apex amplitude, the trace sum and their
+//! standard errors;
 //! they are read by name, so a schema-4.0 table reads with them NaN.
 //! The evidence columns are null when the fit was not possible.
 //! `n_donor_runs` counts the aligned runs with a PSM of the precursor, this
@@ -134,11 +135,21 @@ const MS2_COLUMNS: [&str; 4] = ["ms2_n_scans", "ms2_n_matched", "ms2_angle", "ms
 const N_CORE_COLUMNS: usize = N_KEY_COLUMNS + F64_EVIDENCE.len() + 2 + MS2_COLUMNS.len();
 /// Evidence columns after the MS2 columns (schema 4.1), float64, read by
 /// name: NaN in the evidence of a table without them.
-pub const OPTIONAL_EVIDENCE: [&str; 2] = ["amplitude_fixed", "amplitude_fixed_se"];
+pub const OPTIONAL_EVIDENCE: [&str; 4] = [
+    "amplitude_fixed",
+    "amplitude_fixed_se",
+    "trace_area",
+    "trace_area_se",
+];
 const N_COLUMNS: usize = N_CORE_COLUMNS + OPTIONAL_EVIDENCE.len();
 
 fn optional_fields(e: &Evidence) -> [f64; OPTIONAL_EVIDENCE.len()] {
-    [e.amplitude_fixed, e.amplitude_fixed_se]
+    [
+        e.amplitude_fixed,
+        e.amplitude_fixed_se,
+        e.trace_area,
+        e.trace_area_se,
+    ]
 }
 
 fn schema() -> Schema {
@@ -502,7 +513,7 @@ pub struct ExtractTableReader {
 }
 
 /// The evidence columns of [`ExtractTableReader::open_identified_fits`].
-const FIT_EVIDENCE: [&str; 8] = [
+const FIT_EVIDENCE: [&str; 9] = [
     "amplitude",
     "t0",
     "w",
@@ -511,6 +522,7 @@ const FIT_EVIDENCE: [&str; 8] = [
     "iso_h2",
     "iso_h3",
     "tailing",
+    "amplitude_se",
 ];
 
 impl ExtractTableReader {
@@ -521,7 +533,8 @@ impl ExtractTableReader {
 
     /// Opens `path` to read its identified target rows only, with the
     /// columns of their peak shape: the keys, and of the evidence the
-    /// amplitude, apex, width, isotope heights and tailing. The other
+    /// amplitude and its standard error, apex, width, isotope heights and
+    /// tailing. The other
     /// evidence values are NaN (counts 0) and the MS2 evidence is `None`.
     pub fn open_identified_fits(path: &Path, batch_rows: usize) -> Result<Self, String> {
         Self::open_with(path, batch_rows, true)
@@ -642,7 +655,7 @@ fn decode_fit_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, Str
             let v = |k: usize| ev[k].value(i);
             Evidence {
                 amplitude: v(0),
-                amplitude_se: f64::NAN,
+                amplitude_se: v(8),
                 quantity: f64::NAN,
                 quantity_se: f64::NAN,
                 llr: f64::NAN,
@@ -660,6 +673,8 @@ fn decode_fit_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, Str
                 tailing: v(7),
                 amplitude_fixed: f64::NAN,
                 amplitude_fixed_se: f64::NAN,
+                trace_area: f64::NAN,
+                trace_area_se: f64::NAN,
             }
         });
         rows.push(ExtractRow {
@@ -761,6 +776,8 @@ fn decode_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, String>
                 tailing: v(17),
                 amplitude_fixed: extra_value(0, i),
                 amplitude_fixed_se: extra_value(1, i),
+                trace_area: extra_value(2, i),
+                trace_area_se: extra_value(3, i),
             })
         };
         let ms2 = if ms2_scans.is_null(i) {
@@ -818,6 +835,8 @@ mod tests {
             tailing: 0.1 * f,
             amplitude_fixed: -2e3 + f,
             amplitude_fixed_se: 15.0,
+            trace_area: 1.1e6 + f,
+            trace_area_se: 2e3,
         }
     }
 
@@ -991,6 +1010,7 @@ mod tests {
             let mut r = r.clone();
             if let Some(e) = r.evidence.as_mut() {
                 (e.amplitude_fixed, e.amplitude_fixed_se) = (0.0, 0.0);
+                (e.trace_area, e.trace_area_se) = (0.0, 0.0);
             }
             r
         };

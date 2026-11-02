@@ -1005,6 +1005,16 @@ pub(crate) struct SearchArgs {
     #[arg(long = "mbr-quant-q-absence", default_value_t = false, action = clap::ArgAction::Set)]
     pub(crate) mbr_quant_q_absence: bool,
 
+    /// Experimental (issue #299): the quantity of every row of a precursor
+    /// whose median identified amplitude signal-to-noise is at least this is
+    /// the background-subtracted sum of its isotope traces over the fitted
+    /// peak (three widths each side) instead of the Gaussian template's area:
+    /// for bright peaks, where the template's shape (tailing, run-to-run
+    /// width) rather than the noise limits the precision. A number above 0,
+    /// or `off` (the default).
+    #[arg(long = "mbr-trace-quantity-snr", default_value = "off", value_parser = parse_positive_or_off)]
+    pub(crate) mbr_trace_quantity_snr: PositiveOrOff,
+
     /// PSM q-value threshold for quantification targets when rescoring runs.
     /// Default: the `--fdr` value (0.01).
     #[arg(long = "quant-fdr", hide = true, value_parser = parse_unit_fraction)]
@@ -1257,6 +1267,16 @@ pub(crate) struct QuantFinalizeArgs {
     /// prior stratum. Rows and `transfer_q` are unchanged. Default false.
     #[arg(long = "mbr-quant-q-absence", default_value_t = false, action = clap::ArgAction::Set)]
     pub(crate) mbr_quant_q_absence: bool,
+
+    /// Experimental (issue #299): the quantity of every row of a precursor
+    /// whose median identified amplitude signal-to-noise is at least this is
+    /// the background-subtracted sum of its isotope traces over the fitted
+    /// peak (three widths each side) instead of the Gaussian template's area:
+    /// for bright peaks, where the template's shape (tailing, run-to-run
+    /// width) rather than the noise limits the precision. A number above 0,
+    /// or `off` (the default).
+    #[arg(long = "mbr-trace-quantity-snr", default_value = "off", value_parser = parse_positive_or_off)]
+    pub(crate) mbr_trace_quantity_snr: PositiveOrOff,
 
     /// Also write the QPX views into this directory: the protein groups of
     /// every run's PSMs as `quantms.pg.parquet`, and the features of the
@@ -1571,6 +1591,23 @@ pub(crate) fn parse_precursor_tol(s: &str) -> Result<Tolerance, String> {
 /// A threshold in `(0, 1]`, or `off` (`None`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct FractionOrOff(pub(crate) Option<f64>);
+
+/// A positive number, or `off` (`None`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PositiveOrOff(pub(crate) Option<f64>);
+
+/// `off`, or a finite number above 0.
+pub(crate) fn parse_positive_or_off(s: &str) -> Result<PositiveOrOff, String> {
+    if s.trim().eq_ignore_ascii_case("off") {
+        return Ok(PositiveOrOff(None));
+    }
+    match s.trim().parse::<f64>() {
+        Ok(v) if v.is_finite() && v > 0.0 => Ok(PositiveOrOff(Some(v))),
+        _ => Err(format!(
+            "invalid value `{s}`: must be a number above 0, or `off`"
+        )),
+    }
+}
 
 /// `off`, or a number in `(0, 1]`.
 pub(crate) fn parse_fraction_or_off(s: &str) -> Result<FractionOrOff, String> {

@@ -39,6 +39,10 @@ flowchart TD
 - With `--mbr-quant-q-absence` (experimental), an accepted transfer's `quant_q` also counts the
   local FDR of its transfer score in its prior stratum, the chance that the precursor is not there
   at all, which the pseudo-transfer model cannot learn.
+- `quantity_fixed`: for a transfer, the quantity with the apex fixed at the predicted RT, not
+  clamped at 0, so it averages 0 when the precursor is absent rather than picking up the largest
+  noise bump. With `--mbr-trace-quantity-snr` (experimental), bright precursors report the summed
+  isotope traces instead of the Gaussian template's area.
 - A validation table (`<stem>.mbr_validation.parquet`) reports the pseudo-transfer acceptance and
   wrong-peak rates, so the error control is auditable.
 

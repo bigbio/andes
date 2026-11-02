@@ -1519,6 +1519,11 @@ pub(crate) struct FinalizeOptions {
     /// the transfer FDR at its score in its prior stratum
     /// ([`QValues::local_fdr`]) and `p_wrong` the pseudo-transfer model's.
     pub absence_in_quant_q: bool,
+    /// The quantity of every row of a precursor whose median identified
+    /// amplitude signal-to-noise (`A / amplitude_se`) is at least this is
+    /// the trace sum of its fit ([`quant::evidence::Evidence::trace_area`])
+    /// instead of the template area; `None` keeps the template everywhere.
+    pub trace_snr: Option<f64>,
 }
 
 impl Default for FinalizeOptions {
@@ -1527,6 +1532,7 @@ impl Default for FinalizeOptions {
             lookalike_ppm: quant::evidence::EvidenceParams::default().tol_ppm,
             shared_peak_ms2: false,
             absence_in_quant_q: false,
+            trace_snr: None,
         }
     }
 }
@@ -1650,6 +1656,40 @@ pub(crate) fn pseudo_example(
     let e = r.evidence.as_ref()?;
     let id = ctx.identified.get(&(r.precursor, r.run))?;
     Some((wrong_label(e, id)?, wrong_features(e)?))
+}
+
+/// The amplitude signal-to-noise of an identified fit, `A / amplitude_se`;
+/// `None` without a positive amplitude and standard error.
+pub(crate) fn fit_snr(e: &Evidence) -> Option<f64> {
+    let snr = e.amplitude / e.amplitude_se;
+    (e.amplitude > 0.0 && e.amplitude_se > 0.0 && snr.is_finite()).then_some(snr)
+}
+
+/// Per precursor, the median of its `(precursor, snr)` items.
+pub(crate) fn snr_medians(mut items: Vec<(u32, f64)>) -> HashMap<u32, f64> {
+    items.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    items
+        .chunk_by(|a, b| a.0 == b.0)
+        .map(|g| (g[0].0, median(g.iter().map(|it| it.1).collect())))
+        .collect()
+}
+
+/// `(quantity, quantity_se)` of evidence `e` of a row in run `run`: for a
+/// `bright` precursor ([`FinalizeOptions::trace_snr`]) the trace sum and its
+/// standard error, `None` when not positive (a fit without the value, of a
+/// schema-4.0 extract, takes the template's); otherwise
+/// [`reported_quantity`], `None` when the fit's amplitude is 0 (no signal).
+pub(crate) fn row_quantity(
+    e: &Evidence,
+    run: u16,
+    w_c: Option<f64>,
+    bright: bool,
+    maps: &[Option<RunMap>],
+) -> Option<(f64, f64)> {
+    if bright && e.trace_area.is_finite() {
+        return (e.trace_area > 0.0).then_some((e.trace_area, e.trace_area_se));
+    }
+    (e.amplitude > 0.0).then(|| reported_quantity(e, run, w_c, maps))
 }
 
 /// Per row of `rows`, the look-alike whose identified peak it lies on
@@ -1865,19 +1905,27 @@ pub(crate) fn finalize_stream(
     let mut all_summaries = Summaries::new();
     // The identified fits of the look-alikes, per (precursor, run).
     let look_fits: Mutex<LookalikeFits> = Mutex::new(LookalikeFits::new());
+    // With a trace threshold: the median identified SNR per precursor.
+    let group_snrs: Mutex<Vec<(u32, f64)>> = Mutex::new(Vec::new());
+    let mut bright: HashMap<u32, f64> = HashMap::new();
     for g in 0..groups {
         let items = Mutex::new(Vec::new());
         for_each_block(
             source,
             true,
             bounds,
-            |_| (Vec::new(), Vec::new()),
-            |(local, fits), _, _, rows| {
+            |_| (Vec::new(), Vec::new(), Vec::new()),
+            |(local, fits, snrs), _, _, rows| {
                 for r in rows.iter().filter(|r| r.precursor as usize % groups == g) {
                     let w = consensus_scale_width(r, maps);
                     let f = donor_fit(r, maps);
                     if w.is_some() || f.is_some() {
                         local.push((r.precursor, w, f));
+                    }
+                    if options.trace_snr.is_some() {
+                        if let Some(snr) = r.evidence.as_ref().and_then(fit_snr) {
+                            snrs.push((r.precursor, snr));
+                        }
                     }
                     if look.wants(r.precursor) {
                         if let Some(fit) = r.evidence.as_ref().and_then(usable_fit) {
@@ -1887,12 +1935,16 @@ pub(crate) fn finalize_stream(
                 }
                 Ok(())
             },
-            |_, (local, fits)| {
+            |_, (local, fits, snrs)| {
                 items.lock().expect("summary lock").push(local);
                 look_fits.lock().expect("look-alike lock").extend(fits);
+                group_snrs.lock().expect("snr lock").extend(snrs);
                 Ok(())
             },
         )?;
+        bright.extend(snr_medians(std::mem::take(
+            &mut *group_snrs.lock().expect("snr lock"),
+        )));
         // One allocation of the exact size, the run vectors freed as they go.
         let mut runs: Vec<Vec<_>> = items.into_inner().expect("summary lock");
         let mut all = Vec::with_capacity(runs.iter().map(Vec::len).sum());
@@ -1911,6 +1963,18 @@ pub(crate) fn finalize_stream(
     );
     let summaries = &all_summaries;
     let look_fits = look_fits.into_inner().expect("look-alike lock");
+    if let Some(t) = options.trace_snr {
+        eprintln!(
+            "[mbr] trace quantity: {} of {} precursors with a median identified SNR of at least {t}",
+            bright.values().filter(|&&s| s >= t).count(),
+            bright.len()
+        );
+    }
+    let is_bright = |p: u32| {
+        options
+            .trace_snr
+            .is_some_and(|t| bright.get(&p).is_some_and(|&s| s >= t))
+    };
     if look.len() > 0 {
         eprintln!(
             "[mbr] look-alikes: {} target precursors within {} ppm and {} s of another, {} identified fits",
@@ -2236,7 +2300,8 @@ pub(crate) fn finalize_stream(
                     continue;
                 };
                 let w_c = summaries.get(&r.precursor).and_then(|s| s.w_c);
-                let q = reported_quantity(e, r.run, w_c, maps).0;
+                let q =
+                    row_quantity(e, r.run, w_c, is_bright(r.precursor), maps).map_or(0.0, |q| q.0);
                 if q > 0.0 && q.is_finite() {
                     local.push((
                         (chunk as u32, first + i as u64),
@@ -2351,8 +2416,7 @@ pub(crate) fn finalize_stream(
                 let w_c = summaries.get(&r.precursor).and_then(|s| s.w_c);
                 r.evidence
                     .as_ref()
-                    .filter(|e| e.amplitude > 0.0)
-                    .map(|e| reported_quantity(e, r.run, w_c, maps))
+                    .and_then(|e| row_quantity(e, r.run, w_c, is_bright(r.precursor), maps))
             };
             // Probability that a transfer's measurement is wrong (1 without
             // features, a fold model or a calibration).

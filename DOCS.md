@@ -1673,12 +1673,15 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
   decoys are negatives of the classifier like the other decoys, held out by the same folds;
   only their target probe takes part (their mass- and RT-shift probes do not). The pooled
   q-value is also stratified by a prior of presence: the share of the run's 20 most similar
-  runs (Jaccard index of their donor sets) that identified the precursor, in five strata (0,
-  up to 0.05, 0.2, 0.5, above). A target and its decoys share their (precursor, run) and so
-  their stratum, which makes the decoys of a stratum its own null; a stratum's q-value is its
-  local K-decoy estimate with 200 pseudo-targets at the fold's pooled q-value of the same score,
-  so a small stratum takes the pooled estimate. A precursor identified in no similar run is held to the
-  local rate of such precursors, which the pooled estimate hides (PXD014415, yeast peptides
+  runs (Jaccard index of their donor sets) that identified the precursor, in strata whose edges
+  are cut from the library so that each holds about an equal share of the (precursor, run) pairs
+  without an identification, hence of the decoys (at most 16; 9 on the 50-run PXD014415). A target and
+  its decoys share their (precursor, run) and so their stratum, which makes the decoys of a stratum
+  its own null; a stratum's q-value is its local K-decoy estimate with kappa pseudo-targets at the
+  fold's pooled q-value of the same score, kappa estimated per fold from the spread of the strata's
+  decoy-implied false rates at the 1% level beyond what the decoy counts alone give (empirical Bayes;
+  mostly 100 to 1,000 on the benchmark sets), so a small stratum takes the pooled estimate. A precursor
+  identified in no similar run is held to the local rate of such precursors, which the pooled estimate hides (PXD014415, yeast peptides
   in the 20 human-only runs, transfers at transfer q 0.01: 2,360 before, 1,118 after; UPS1
   transfers into the lowest spike levels of PXD009740 and PXD009815: 726 and 662 before, 1,062
   and 699 after; 2026-11-01, one seed). An entry whose

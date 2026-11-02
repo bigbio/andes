@@ -57,17 +57,18 @@
 //! decoy counts for more targets, rather than the missing decoys being counted
 //! as absent false hits; this errs on the conservative side.
 //!
-//! Prior strata: a transfer row also belongs to one of [`STRATA`] strata of
+//! Prior strata: a transfer row also belongs to one of at most [`MAX_STRATA`] strata of
 //! the prior that its precursor is present in its run (how often the runs
 //! most like this one identified it; computed by the caller). A target and its decoys share their
 //! (precursor, run) and so their stratum, which makes the decoys of a stratum
 //! its own null: the pooled estimate cannot know that a precursor identified
 //! nowhere else is far more likely absent than one identified in most runs.
 //! The pooled q-value of a stratified classifier is then the stratum-local
-//! K-decoy estimate with [`STRATUM_PRIOR_TARGETS`] pseudo-targets at the
-//! fold's pooled q-value of the same score,
-//! `FDR_s(c) = ((D_s(c) + 1) / K + D_id,s(c) + k q_fold(c)) / (T_s(c) + k)`
-//! (`k` = [`STRATUM_PRIOR_TARGETS`], `K` the fold's decoy-to-target ratio),
+//! K-decoy estimate with `kappa` pseudo-targets at the fold's pooled q-value
+//! of the same score,
+//! `FDR_s(c) = ((D_s(c) + 1) / K + D_id,s(c) + kappa q_fold(c)) / (T_s(c) + kappa)`
+//! (`K` the fold's decoy-to-target ratio), where `kappa` is estimated from
+//! the between-stratum spread of the false rate ([`stratum_kappa`]),
 //! again as the running minimum from the lowest score up: a stratum with few
 //! rows takes the pooled estimate, one with many its own. The other
 //! estimates stay pooled over the strata. The stratum travels in the high
@@ -124,25 +125,60 @@ pub const IDENTIFIED_FEATURES: &[&str] = &[
     "log10_amplitude_snr",
 ];
 
-/// Prior strata of the transfer classifier's pooled q-values.
-pub const STRATA: usize = 5;
-/// Pseudo-targets at the fold's pooled q-value in each stratum's estimate.
-pub const STRATUM_PRIOR_TARGETS: f64 = 200.0;
-/// Edges of the prior strata: a prior of 0 is stratum 0, one in
-/// `(EDGES[i-1], EDGES[i]]` stratum `i`, above the last edge the last stratum.
-pub const STRATUM_EDGES: [f64; STRATA - 1] = [0.0, 0.05, 0.2, 0.5];
-
-/// The strata of the transfer classifier's q-values.
-pub const fn transfer_strata() -> usize {
-    STRATA
-}
-
-/// The stratum of a prior of presence in `[0, 1]`; 0 when it is not finite.
-pub fn stratum_of(prior: f64) -> u8 {
+/// Most prior strata of a transfer classifier (the stratum travels in the
+/// high nibble of the family byte, [`pack_family`]).
+pub const MAX_STRATA: usize = 16;
+/// The q-value level at which the between-stratum variance of the false
+/// rate is measured to set the shrinkage ([`stratum_kappa`]); a fold that
+/// never reaches it is measured at its lowest q.
+pub const EB_LEVEL: f64 = 0.01;
+/// The stratum of a prior of presence in `[0, 1]` given the ascending
+/// `edges` of the strata (a prior of at most `edges[0]` is stratum 0, one in
+/// `(edges[i-1], edges[i]]` stratum `i`, above the last edge the last
+/// stratum); 0 when it is not finite.
+pub fn stratum_of(prior: f64, edges: &[f64]) -> u8 {
     if !prior.is_finite() {
         return 0;
     }
-    STRATUM_EDGES.iter().filter(|&&e| prior > e).count() as u8
+    edges.iter().filter(|&&e| prior > e).count() as u8
+}
+
+/// The shrinkage of the strata's local false-rate estimates towards the
+/// fold's pooled one, in pseudo-targets, by empirical Bayes. `strata` holds
+/// for each stratum the targets `n` and the decoy-implied false hits `x`
+/// accepted at the operating level, `k` the decoy-to-target ratio. The rate
+/// `x / n` of a stratum varies around the pooled rate `p` with
+/// `p / (k n)` from the decoy counts alone; the variance beyond that, as a
+/// share `rho` of the total, is the between-stratum spread (method of
+/// moments), and a stratum of `n` targets weighs the pooled rate by
+/// `kappa / (n + kappa)`, `kappa = (1 - rho) / rho`. Infinite (no
+/// stratification) when the strata do not differ beyond the decoy noise.
+pub fn stratum_kappa(strata: &[(f64, f64)], k: f64) -> f64 {
+    let live: Vec<&(f64, f64)> = strata.iter().filter(|(n, _)| *n > 0.0).collect();
+    let s = live.len() as f64;
+    let n_tot: f64 = live.iter().map(|(n, _)| n).sum();
+    let x_tot: f64 = live.iter().map(|(_, x)| x).sum();
+    if live.len() < 2 || x_tot <= 0.0 || k <= 0.0 {
+        return f64::INFINITY;
+    }
+    let p = x_tot / n_tot;
+    let v0 = p / k;
+    let z: f64 = live
+        .iter()
+        .map(|(n, x)| n * (x / n - p).powi(2))
+        .sum::<f64>()
+        / v0;
+    let sq: f64 = live.iter().map(|(n, _)| n * n).sum::<f64>() / n_tot;
+    let denom = n_tot - sq - (s - 1.0);
+    if denom <= 0.0 {
+        return f64::INFINITY;
+    }
+    let rho = (z - (s - 1.0)) / denom;
+    if rho <= 0.0 {
+        f64::INFINITY
+    } else {
+        ((1.0 - rho) / rho).max(0.0)
+    }
 }
 
 /// A family with its stratum in the high nibble.
@@ -723,7 +759,10 @@ impl FoldScores {
                 SortedMerge::new(runs)
             });
             let mut builder = StepsBuilder::new(totals, thresholds);
-            walk_scores(streams, |c, at| builder.visit(c, at));
+            walk_scores(streams, |c, at| {
+                builder.visit(c, at);
+                true
+            });
             let fold_steps = builder.finish();
             let with_q = if fold_steps[Estimate::Pooled as usize].is_some() {
                 totals.iter().sum()
@@ -733,24 +772,64 @@ impl FoldScores {
             no_q += groups.clone().map(|g| self.members[g]).sum::<usize>() - with_q;
             if strata > 1 {
                 let mut per_stratum: Vec<Option<Steps>> = Vec::with_capacity(strata);
+                let k = (totals[MASS_SHIFT as usize] + totals[RT_SHIFT as usize]).max(1) as f64
+                    / totals[TARGET as usize].max(1) as f64;
+                let global = fold_steps[Estimate::Pooled as usize].as_ref();
+                let mut kappa = f64::INFINITY;
+                if let Some(c_op) = global.and_then(|g| {
+                    // The first score at the level, or the lowest q the fold
+                    // reaches when it never gets there.
+                    g.at.iter()
+                        .zip(&g.q)
+                        .find(|(_, &q)| q <= EB_LEVEL)
+                        .or_else(|| g.at.iter().zip(&g.q).next_back())
+                        .map(|(a, _)| *a)
+                }) {
+                    let mut counts = Vec::with_capacity(strata);
+                    for g in groups.clone() {
+                        let local = self.counts[g];
+                        let streams: [SortedMerge<'_>; 4] = std::array::from_fn(|f| {
+                            let mut runs: Vec<Box<dyn Iterator<Item = f32> + '_>> = taken(g, f);
+                            runs.push(Box::new(self.scores[g][f].iter().copied()));
+                            SortedMerge::new(runs)
+                        });
+                        let mut below = [0usize; 4];
+                        walk_scores(streams, |c, at| {
+                            if c >= c_op {
+                                return false;
+                            }
+                            for (b, a) in below.iter_mut().zip(at) {
+                                *b += a;
+                            }
+                            true
+                        });
+                        let n = (local[TARGET as usize] - below[TARGET as usize]) as f64;
+                        let d = (local[MASS_SHIFT as usize] + local[RT_SHIFT as usize]
+                            - below[MASS_SHIFT as usize]
+                            - below[RT_SHIFT as usize]) as f64;
+                        let d_id = (local[IDENTITY as usize] - below[IDENTITY as usize]) as f64;
+                        counts.push((n, d / k + d_id));
+                    }
+                    kappa = stratum_kappa(&counts, k);
+                }
+                eprintln!("[mbr] transfer q-values, fold {fold}: {strata} strata, shrinkage {kappa:.1} pseudo-targets");
                 for g in groups {
                     let local = self.counts[g];
-                    let walk = fold_steps[Estimate::Pooled as usize]
-                        .as_ref()
-                        .filter(|_| local[TARGET as usize] > 0);
+                    let walk = global.filter(|_| local[TARGET as usize] > 0 && kappa.is_finite());
                     let Some(global) = walk else {
                         per_stratum.push(None);
                         continue;
                     };
-                    let k = (totals[MASS_SHIFT as usize] + totals[RT_SHIFT as usize]).max(1) as f64
-                        / totals[TARGET as usize].max(1) as f64;
-                    let mut w = StratumWalk::new(k, local, global);
+                    let mut w = StratumWalk::new(k, local, global, kappa);
                     let streams: [SortedMerge<'_>; 4] = std::array::from_fn(|f| {
                         let mut runs: Vec<Box<dyn Iterator<Item = f32> + '_>> = taken(g, f);
                         runs.push(Box::new(self.scores[g][f].iter().copied()));
                         SortedMerge::new(runs)
                     });
-                    walk_scores(streams, |c, at| w.visit(c, at));
+                    walk_scores(streams, |c, at| {
+                        w.visit(c, at);
+                        true
+                    });
                     per_stratum.push(w.finish());
                 }
                 stratum_steps.push(per_stratum);
@@ -783,6 +862,7 @@ struct StratumWalk<'g> {
     d: usize,
     d_id: usize,
     global: &'g Steps,
+    kappa: f64,
     running: f64,
     steps: Steps,
 }
@@ -790,13 +870,14 @@ struct StratumWalk<'g> {
 impl<'g> StratumWalk<'g> {
     /// `k` is the fold's decoy-to-target ratio, `local` the stratum's finite
     /// scores per family, `global` the fold's pooled step function.
-    fn new(k: f64, local: [usize; 4], global: &'g Steps) -> Self {
+    fn new(k: f64, local: [usize; 4], global: &'g Steps, kappa: f64) -> Self {
         Self {
             k,
             t: local[TARGET as usize],
             d: local[MASS_SHIFT as usize] + local[RT_SHIFT as usize],
             d_id: local[IDENTITY as usize],
             global,
+            kappa,
             running: 1.0,
             steps: Steps::default(),
         }
@@ -806,7 +887,7 @@ impl<'g> StratumWalk<'g> {
         if at.iter().all(|&n| n == 0) {
             return;
         }
-        let kappa = STRATUM_PRIOR_TARGETS;
+        let kappa = self.kappa;
         let local =
             ((self.d + 1) as f64 / self.k + self.d_id as f64 + kappa * self.global.at_or_below(c))
                 / (self.t as f64 + kappa).max(1.0);
@@ -859,8 +940,11 @@ impl<'a> SortedMerge<'a> {
 
 /// Calls `visit(c, at)` for each distinct score `c` of the four families'
 /// ascending streams, lowest first, with `at[f]` the scores of family `f`
-/// equal to `c`.
-fn walk_scores(mut by_family: [SortedMerge<'_>; 4], mut visit: impl FnMut(f32, [usize; 4])) {
+/// equal to `c`. Stops when `visit` returns `false`.
+fn walk_scores(
+    mut by_family: [SortedMerge<'_>; 4],
+    mut visit: impl FnMut(f32, [usize; 4]) -> bool,
+) {
     loop {
         let low = by_family
             .iter()
@@ -871,7 +955,9 @@ fn walk_scores(mut by_family: [SortedMerge<'_>; 4], mut visit: impl FnMut(f32, [
         for (n, s) in at.iter_mut().zip(&mut by_family) {
             *n = s.take_equal(c);
         }
-        visit(c, at);
+        if !visit(c, at) {
+            break;
+        }
     }
 }
 
@@ -982,7 +1068,10 @@ fn kdecoy_steps(by_family: &[Vec<f32>; 4], e: Estimate) -> Option<Steps> {
             Box::new(by_family[f].iter().copied()) as Box<dyn Iterator<Item = f32>>
         ])
     });
-    walk_scores(streams, |c, at| builder.visit(c, at));
+    walk_scores(streams, |c, at| {
+        builder.visit(c, at);
+        true
+    });
     let [a, b, c, d] = builder.finish();
     [a, b, c, d].into_iter().nth(e as usize).flatten()
 }
@@ -1899,7 +1988,7 @@ mod tests {
     #[test]
     fn strata_calibrate_each_stratum_on_its_own_decoys() {
         let pooled = two_strata_scores(1).finish(&[]);
-        let strat = two_strata_scores(STRATA).finish(&[]);
+        let strat = two_strata_scores(5).finish(&[]);
         let at = |q: &QValues, stratum: u8, s: f32| {
             q.q(
                 Estimate::Pooled,
@@ -1920,12 +2009,24 @@ mod tests {
 
     #[test]
     fn prior_strata_follow_the_edges() {
-        assert_eq!(stratum_of(0.0), 0);
-        assert_eq!(stratum_of(0.01), 1);
-        assert_eq!(stratum_of(0.05), 1);
-        assert_eq!(stratum_of(0.3), 3);
-        assert_eq!(stratum_of(1.0), 4);
-        assert_eq!(stratum_of(f64::NAN), 0);
+        let e = [0.0, 0.05, 0.2, 0.5];
+        assert_eq!(stratum_of(0.0, &e), 0);
+        assert_eq!(stratum_of(0.01, &e), 1);
+        assert_eq!(stratum_of(0.05, &e), 1);
+        assert_eq!(stratum_of(0.3, &e), 3);
+        assert_eq!(stratum_of(1.0, &e), 4);
+        assert_eq!(stratum_of(f64::NAN, &e), 0);
         assert_eq!(unpack_family(pack_family(IDENTITY, 4)), (IDENTITY, 4));
+    }
+
+    #[test]
+    fn shrinkage_follows_the_between_stratum_spread() {
+        // Strata that differ far beyond the decoy noise: little shrinkage.
+        let apart = [(5000.0, 5.0), (5000.0, 100.0), (5000.0, 400.0)];
+        assert!(stratum_kappa(&apart, 1.0) < 50.0);
+        // Strata alike within the noise: none.
+        let alike = [(5000.0, 52.0), (5000.0, 48.0), (5000.0, 50.0)];
+        assert!(stratum_kappa(&alike, 1.0).is_infinite());
+        assert!(stratum_kappa(&[(100.0, 1.0)], 1.0).is_infinite());
     }
 }

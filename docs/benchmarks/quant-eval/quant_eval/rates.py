@@ -12,7 +12,7 @@ model of the tool. Rates, per absent species s, with R_abs the runs without s an
 Blank-run carry-over is reported by `carry_over` and is not part of the absence score: a transfer decoy method cannot see it.
 
 `depth_curve` sweeps a quality column of the transfers (transfer_q or quant_q) and returns the false-transfer rate and the number of
-transferred rows kept at each threshold; `matched_depth` reads the depth of a curve at a given rate.
+transferred rows kept at each threshold; `matched_depth` reads the depth of a curve at a given rate (the most transferred rows among the thresholds not above that rate).
 """
 import numpy as np
 
@@ -81,11 +81,11 @@ def depth_curve(raw, design, sp, col, grid=GRID):
 
 
 def matched_depth(curve, species, rate):
-    """Transferred rows of the curve at the largest threshold whose false-transfer rate is <= rate (conservative step, no interpolation).
-    Returns (threshold, transfers) or None when even the smallest threshold is above the rate."""
+    """Most transferred rows of the curve among the thresholds whose false-transfer rate is <= rate (a step on the grid, no interpolation);
+    on equal rows the smallest threshold. Returns (threshold, transfers) or None when every threshold has a rate above `rate` or no rate."""
     best = None
     for p in curve:
         r = p[species]["rate"]
-        if r == r and r <= rate:
+        if r == r and r <= rate and (best is None or p["transfers"] > best[1]):
             best = (p["threshold"], p["transfers"])
     return best

@@ -250,7 +250,7 @@ def depth_table(res, curve_arm=None):
     curve_arm = curve_arm or next(iter(C))
     out = []
     for s in sorted({s for v in R.values() for s in v}):
-        out += [f"Depth at a matched false-transfer rate ({s}): transferred rows (all non-blank runs) of `{curve_arm}` at the loosest threshold whose rate is <= the tool's rate; "
+        out += [f"Depth at a matched false-transfer rate ({s}): transferred rows (all non-blank runs) of `{curve_arm}` at the threshold with the most rows among those whose rate is <= the tool's rate; "
                 "thresholds on the grid of rates.py (no interpolation). `-` = the arm's rate is above the tool's at every threshold of the grid.", "",
                 "| reference | its rate % | its transferred rows | " + curve_arm + " by transfer_q: threshold / rows | by quant_q: threshold / rows | rows ratio (transfer_q) | rows ratio (quant_q) |",
                 "|---|---|---|---|---|---|---|"]

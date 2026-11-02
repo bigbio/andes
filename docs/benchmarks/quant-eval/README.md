@@ -61,7 +61,7 @@ MaxQuant and FragPipe rows are used as the tools report them (their own match-be
    to the absent species' transferred rows in the runs that contain it (IonQuant-style); a rate scaled by the species' share of
    the identified precursors (an extension, not a measured rate); identified rows of the species in those runs. `depth_curve`
    sweeps `transfer_q` and `quant_q` of the andes transfers and `PIP Q-Value` of FlashLFQ, and the scorecard reads the number of
-   transferred rows of an andes arm at the loosest threshold whose rate is not above a reference tool's rate (depth at a matched
+   transferred rows of an andes arm at the threshold with the most rows among those whose rate is not above a reference tool's rate (depth at a matched
    truth-measured false-transfer rate; rows beyond the finalize `--mbr-fdr` limit do not exist, so the curve stops there).
    `rollup.normalise_rt_local` is an optional replacement of the run normalisation (`--rt-local` adds a second DE pass): the
    run shift is smoothed along retention time with a running median over 401 reference precursors, the same function and the

@@ -25,8 +25,12 @@ flowchart TD
 - **`identified`**: the run has its own confident PSM.
 - **`transfer_ms2`**: transferred, and an MS2 scan in this run supports it.
 - **`transfer_ms1`**: any other accepted transfer.
-- **`transfer_q`** / **`quant_q`**: an internal quant-quality q-value that counts both wrong
-  peaks and false donors; it is not an identification FDR.
+- **`transfer_q`**: an internal quant-quality q-value that counts both wrong peaks and false
+  donors; it is not an identification FDR.
+- **`quant_q`**: for an identified row, the quality q-value of its MS1 feature; for an accepted
+  transfer, the running mean of its probability of a wrong measurement (a model trained on the
+  pseudo-transfers), so `quant_q <= 0.01` keeps accepted transfers whose estimated rate of wrong measurements is at most 1%.
+  Rows are never dropped; filtering on `quant_q` is the user's choice.
 - A validation table (`<stem>.mbr_validation.parquet`) reports the pseudo-transfer acceptance and
   wrong-peak rates, so the error control is auditable.
 

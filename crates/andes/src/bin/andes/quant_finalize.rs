@@ -75,9 +75,9 @@ use crate::quant_mbr::{
     ShapeReference, NO_SHAPE, TRANSFER_DONOR_Q,
 };
 use crate::transfer_fdr::{
-    member_seed, row_unit, train_bagged_folds, train_folds, transfer_train_params, Estimate,
-    FdrCounts, FdrRow, FoldModels, FoldScores, QValues, TrainingSample, IDENTITY, N_FOLDS,
-    TRANSFER_FEATURES,
+    member_seed, row_unit, sample_hash, train_bagged_folds, train_folds, transfer_train_params,
+    Estimate, FdrCounts, FdrRow, FoldModels, FoldScores, QValues, TrainingSample, IDENTITY,
+    N_FOLDS, TRANSFER_FEATURES,
 };
 
 /// What one finalize did, for the caller to log.
@@ -356,7 +356,7 @@ fn for_each_block<S>(
 
 /// Per (precursor, run) of a block: the identified target's evidence and
 /// donor fit.
-struct BlockContext<'a> {
+pub(crate) struct BlockContext<'a> {
     identified: HashMap<(u32, u16), &'a Evidence>,
     own: HashMap<(u32, u16), DonorFit>,
 }
@@ -364,7 +364,7 @@ struct BlockContext<'a> {
 impl<'a> BlockContext<'a> {
     /// Errors on two identified targets with evidence of one (precursor,
     /// run).
-    fn new(rows: &'a [ExtractRow], maps: &[Option<RunMap>]) -> Result<Self, String> {
+    pub(crate) fn new(rows: &'a [ExtractRow], maps: &[Option<RunMap>]) -> Result<Self, String> {
         let mut identified = HashMap::new();
         let mut own = HashMap::new();
         for r in rows {
@@ -1340,10 +1340,134 @@ pub(crate) struct FinalizeParams<'a> {
     pub validation_path: &'a Path,
 }
 
+/// Number of features of the wrong-peak model.
+const WRONG_FEATURES: usize = 11;
+/// Wrong-peak training and calibration rows kept at most (calibration pairs
+/// are thinned by whole units above it).
+const WRONG_CALIBRATION_ROWS: usize = 4_000_000;
+
+/// Features of the wrong-peak model: the fit evidence only (no donor count,
+/// library value or MS2 evidence), `None` with a non-finite value or no
+/// positive quantity.
+pub(crate) fn wrong_features(e: &Evidence) -> Option<Vec<f32>> {
+    if e.quantity.is_nan() || e.quantity <= 0.0 {
+        return None;
+    }
+    let x = [
+        e.llr,
+        e.rt_z.abs(),
+        e.width_ratio.max(1e-3).ln().abs(),
+        e.envelope_cos,
+        e.coherence,
+        e.m1_ratio,
+        e.mass_err_ppm.abs(),
+        e.n_points as f64,
+        (e.amplitude / e.amplitude_se.max(1e-9) + 1.0).log10(),
+        (e.quantity_se / e.quantity).max(1e-6).ln(),
+        e.quantity.max(1e-3).log2(),
+    ];
+    debug_assert_eq!(x.len(), WRONG_FEATURES);
+    let x: Vec<f32> = x.iter().map(|&v| v as f32).collect();
+    x.iter().all(|v| v.is_finite()).then_some(x)
+}
+
+/// Whether a pseudo-transfer's measurement is wrong against the same cell's
+/// identified fit: the apex is further than the identified width from the
+/// identified apex, or the quantity is off by more than a factor of 2.
+fn wrong_label(pseudo: &Evidence, id: &Evidence) -> Option<bool> {
+    let ok = pseudo.t0.is_finite()
+        && id.t0.is_finite()
+        && id.w.is_finite()
+        && pseudo.quantity > 0.0
+        && id.quantity > 0.0;
+    ok.then(|| {
+        (pseudo.t0 - id.t0).abs() > id.w || (pseudo.quantity / id.quantity).log2().abs() > 1.0
+    })
+}
+
+/// A non-increasing step function of the classifier margin: the isotonic
+/// estimate of the probability that a measurement is wrong.
+pub(crate) struct WrongCalibration {
+    /// Lowest margin of each block, ascending.
+    lo: Vec<f32>,
+    /// Probability of each block, non-increasing.
+    p: Vec<f64>,
+}
+
+impl WrongCalibration {
+    /// Pool-adjacent-violators fit on `(margin, wrong)` pairs; tied margins
+    /// are one point. `None` without pairs.
+    pub(crate) fn fit(mut pairs: Vec<(f32, bool)>) -> Option<Self> {
+        if pairs.is_empty() {
+            return None;
+        }
+        pairs.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        // Distinct margins, descending: (margin, wrong count, rows).
+        let mut pts: Vec<(f32, f64, f64)> = Vec::new();
+        for &(s, w) in pairs.iter().rev() {
+            match pts.last_mut() {
+                Some(l) if l.0 == s => {
+                    l.1 += f64::from(u8::from(w));
+                    l.2 += 1.0;
+                }
+                _ => pts.push((s, f64::from(u8::from(w)), 1.0)),
+            }
+        }
+        // Blocks with non-decreasing mean as the margin descends.
+        let mut blocks: Vec<(f32, f64, f64)> = Vec::new();
+        for pt in pts {
+            blocks.push(pt);
+            while blocks.len() > 1 {
+                let n = blocks.len();
+                let (a, b) = (blocks[n - 2], blocks[n - 1]);
+                if a.1 / a.2 <= b.1 / b.2 {
+                    break;
+                }
+                blocks.truncate(n - 2);
+                blocks.push((b.0, a.1 + b.1, a.2 + b.2));
+            }
+        }
+        blocks.reverse();
+        Some(Self {
+            lo: blocks.iter().map(|b| b.0).collect(),
+            p: blocks.iter().map(|b| b.1 / b.2).collect(),
+        })
+    }
+
+    /// The probability at margin `s`: that of the block of the nearest
+    /// margin at or below `s` (the highest one below every margin seen).
+    pub(crate) fn at(&self, s: f32) -> f64 {
+        let k = self.lo.partition_point(|&b| b <= s);
+        self.p[k.saturating_sub(1)]
+    }
+}
+
+/// A pseudo-transfer target's wrong-peak label and features; `None` for any
+/// other row, an identity decoy's row, or a row without an identified fit of
+/// the same cell.
+pub(crate) fn pseudo_example(
+    r: &ExtractRow,
+    ctx: &BlockContext<'_>,
+    idx: &EntryIndex<'_>,
+) -> Option<(bool, Vec<f32>)> {
+    if r.role != Role::PseudoTransfer
+        || r.kind != Hypothesis::Target
+        || idx.is_identity(r.precursor)
+    {
+        return None;
+    }
+    let e = r.evidence.as_ref()?;
+    let id = ctx.identified.get(&(r.precursor, r.run))?;
+    Some((wrong_label(e, id)?, wrong_features(e)?))
+}
+
 /// The output rows and validation counts of one run.
 #[derive(Default)]
 struct RunOutput {
     rows: Vec<OutRow>,
+    /// Per transfer row: its index in `rows` and its probability of being a
+    /// wrong measurement.
+    wrong: Vec<(usize, f64)>,
     validation: MbrValidation,
 }
 
@@ -1465,6 +1589,9 @@ pub(crate) fn finalize_stream(
         .collect();
     let i_sample: Mutex<TrainingSample<Key>> =
         Mutex::new(TrainingSample::new(limits.max_train_rows, seed));
+    let w_sample: Mutex<TrainingSample<Key>> =
+        Mutex::new(TrainingSample::new(limits.max_train_rows, seed));
+    let w_seen = AtomicUsize::new(0);
     let no_features = AtomicUsize::new(0);
     let identified_no_features = AtomicUsize::new(0);
     let rows_read = AtomicUsize::new(0);
@@ -1521,6 +1648,30 @@ pub(crate) fn finalize_stream(
             for (k, u, row) in i_rows {
                 s.push(k, u, row);
             }
+            drop(s);
+            // The wrong-peak model learns from the pseudo-transfers: each
+            // judged against the identified fit of the same cell.
+            let mut w_rows = Vec::new();
+            for (i, r) in rows.iter().enumerate() {
+                let Some((y, x)) = pseudo_example(r, &ctx, &idx) else {
+                    continue;
+                };
+                w_rows.push((
+                    (chunk as u32, first + i as u64),
+                    row_unit(r.precursor, r.run),
+                    FdrRow {
+                        precursor: r.precursor,
+                        is_decoy: y,
+                        family: 0,
+                        x,
+                    },
+                ));
+            }
+            w_seen.fetch_add(w_rows.len(), Ordering::Relaxed);
+            let mut s = w_sample.lock().expect("training sample lock");
+            for (k, u, row) in w_rows {
+                s.push(k, u, row);
+            }
             Ok(())
         },
         |_, ()| Ok(()),
@@ -1550,6 +1701,10 @@ pub(crate) fn finalize_stream(
         .map(TrainingSample::into_items)
         .collect();
     let i_rows = i_sample.into_items();
+    let w_rows = w_sample
+        .into_inner()
+        .expect("training sample lock")
+        .into_items();
     let t_refs: Vec<&[FdrRow]> = t_sets.iter().map(Vec::as_slice).collect();
     let (t_models, i_models) = rayon::join(
         || train_bagged_folds(&t_refs, seed, &transfer_train_params()),
@@ -1557,6 +1712,14 @@ pub(crate) fn finalize_stream(
     );
     drop(t_refs);
     drop((t_sets, i_rows));
+    let w_models = train_folds(&w_rows, seed);
+    eprintln!(
+        "[mbr] wrong-peak model: {} pseudo-transfers ({:.1} % wrong against the identified fit), {} failed folds",
+        w_rows.len(),
+        100.0 * w_rows.iter().filter(|r| r.is_decoy).count() as f64 / w_rows.len().max(1) as f64,
+        w_models.failed_folds.len()
+    );
+    drop(w_rows);
     eprintln!(
         "[mbr] finalize: training rows of {} extract rows {:.1} s, fold models {:.1} s ({} transfer classifier members per fold)",
         rows_read.into_inner(),
@@ -1569,6 +1732,8 @@ pub(crate) fn finalize_stream(
     // each run's transfer scores are also kept in a temporary table for
     // pass 5.
     let t0 = Instant::now();
+    let w_stride = (w_seen.into_inner() / WRONG_CALIBRATION_ROWS + 1) as u64;
+    let w_held: Mutex<Vec<(f32, bool)>> = Mutex::new(Vec::new());
     let t_store = ScoreStore::new("transfer", dir, limits.max_held_scores, seed);
     let i_store = ScoreStore::new("identified", dir, limits.max_held_scores, seed);
     for_each_block(
@@ -1612,6 +1777,30 @@ pub(crate) fn finalize_stream(
                     .filter(|(r, _)| is_cached(&idx, r))
                     .map(|(_, s)| s),
             );
+            // Held-out margins of the pseudo-transfers, for the calibration
+            // of the wrong-peak model (whole units thinned above the cap).
+            let mut labels = Vec::new();
+            let mut xs = Vec::new();
+            let mut precursors = Vec::new();
+            for r in rows {
+                if sample_hash(row_unit(r.precursor, r.run), seed) % w_stride != 0 {
+                    continue;
+                }
+                if let Some((y, x)) = pseudo_example(r, &ctx, &idx) {
+                    labels.push(y);
+                    xs.push(x);
+                    precursors.push(r.precursor);
+                }
+            }
+            let x_refs: Vec<&[f32]> = xs.iter().map(Vec::as_slice).collect();
+            let mut margins = Vec::new();
+            w_models.score(&precursors, &x_refs, &mut margins);
+            w_held.lock().expect("wrong-peak calibration lock").extend(
+                margins
+                    .iter()
+                    .zip(&labels)
+                    .filter_map(|(m, &y)| m.map(|m| (m, y))),
+            );
             Ok(())
         },
         |chunk, (ts, is, cache)| {
@@ -1621,6 +1810,17 @@ pub(crate) fn finalize_stream(
             i_store.add(is)
         },
     )?;
+    let wrong_cal =
+        WrongCalibration::fit(w_held.into_inner().expect("wrong-peak calibration lock"));
+    match &wrong_cal {
+        Some(c) => eprintln!(
+            "[mbr] wrong-peak calibration: {} blocks, probability {:.4} at the best margin, {:.4} at the worst",
+            c.p.len(),
+            c.p.last().copied().unwrap_or(f64::NAN),
+            c.p.first().copied().unwrap_or(f64::NAN)
+        ),
+        None => eprintln!("[mbr] wrong-peak calibration: no pseudo-transfers; every transfer's quant_q is 1"),
+    }
     // The validation thresholds, VALIDATION_Q then mbr_fdr: the transfer
     // estimates other than the pooled one are only counted at them, and
     // the identified rows use the pooled estimate only.
@@ -1795,6 +1995,34 @@ pub(crate) fn finalize_stream(
                     .filter(|e| e.amplitude > 0.0)
                     .map(|e| reported_quantity(e, r.run, w_c, maps))
             };
+            // Probability that a transfer's measurement is wrong (1 without
+            // features, a fold model or a calibration).
+            let mut p_wrong: Vec<f64> = vec![1.0; rows.len()];
+            {
+                let at: Vec<usize> = (0..rows.len())
+                    .filter(|&i| {
+                        rows[i].role == Role::Transfer
+                            && matches!(idx.table(&rows[i]), Some((Table::Transfer, 0)))
+                    })
+                    .collect();
+                let xs: Vec<Option<Vec<f32>>> = at
+                    .iter()
+                    .map(|&i| rows[i].evidence.as_ref().and_then(wrong_features))
+                    .collect();
+                let ok: Vec<usize> = (0..at.len()).filter(|&k| xs[k].is_some()).collect();
+                let precursors: Vec<u32> = ok.iter().map(|&k| rows[at[k]].precursor).collect();
+                let x_refs: Vec<&[f32]> = ok
+                    .iter()
+                    .map(|&k| xs[k].as_deref().expect("filtered on features"))
+                    .collect();
+                let mut margins = Vec::new();
+                w_models.score(&precursors, &x_refs, &mut margins);
+                for (&k, m) in ok.iter().zip(margins) {
+                    if let (Some(m), Some(c)) = (m, &wrong_cal) {
+                        p_wrong[at[k]] = c.at(m);
+                    }
+                }
+            }
             for (i, r) in rows.iter().enumerate() {
                 if idx.is_identity(r.precursor) {
                     // Never reported: only the identity-decoy family's counts.
@@ -1906,6 +2134,9 @@ pub(crate) fn finalize_stream(
                         continue;
                     }
                 };
+                if r.role == Role::Transfer {
+                    out.wrong.push((out.rows.len(), p_wrong[i]));
+                }
                 out.rows.push(OutRow {
                     precursor: r.precursor,
                     run: r.run,
@@ -1935,6 +2166,27 @@ pub(crate) fn finalize_stream(
                 .add_counts(&out.validation);
             if out.rows.is_empty() {
                 return Ok(());
+            }
+            // quant_q of an accepted transfer: the running mean, over the
+            // run's accepted transfers in ascending probability of a wrong
+            // measurement, of that probability (every row is kept; a
+            // transfer below the threshold keeps its transfer_q).
+            let mut pool: Vec<(f64, usize)> = out
+                .wrong
+                .iter()
+                .filter(|&&(i, _)| {
+                    matches!(
+                        out.rows[i].evidence_type,
+                        EvidenceType::TransferMs2 | EvidenceType::TransferMs1
+                    )
+                })
+                .map(|&(i, p)| (p, i))
+                .collect();
+            pool.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            let mut sum = 0.0;
+            for (k, &(p, i)) in pool.iter().enumerate() {
+                sum += p;
+                out.rows[i].quant_q = Some(sum / (k + 1) as f64);
             }
             out.rows.sort_unstable_by_key(|r| (r.precursor, r.run));
             if let Some(w) = out
@@ -2353,5 +2605,27 @@ mod tests {
         }
         let left = std::fs::read_dir(dir.path()).unwrap().count();
         assert_eq!(left, 0, "spilled score tables are removed");
+    }
+
+    #[test]
+    fn wrong_calibration_is_a_non_increasing_step_function_of_the_margin() {
+        let mut g = Lcg(5);
+        let pairs: Vec<(f32, bool)> = (0..4000)
+            .map(|_| {
+                let s = g.below(2000) as f32 / 100.0 - 10.0;
+                let p = 1.0 / (1.0 + f64::from(s).exp());
+                (s, (g.below(1000) as f64) / 1000.0 < p)
+            })
+            .collect();
+        let c = WrongCalibration::fit(pairs).unwrap();
+        assert!(c.p.windows(2).all(|w| w[0] >= w[1]));
+        assert!(c.lo.windows(2).all(|w| w[0] < w[1]));
+        assert!(c.at(-100.0) >= c.at(0.0) && c.at(0.0) >= c.at(100.0));
+        assert!(c.at(100.0) < 0.05 && c.at(-100.0) > 0.8);
+        assert!(WrongCalibration::fit(Vec::new()).is_none());
+        // Tied margins are one point: the share of wrong ones.
+        let c = WrongCalibration::fit(vec![(1.0, true), (1.0, false), (1.0, false), (1.0, false)])
+            .unwrap();
+        assert_eq!(c.p, vec![0.25]);
     }
 }

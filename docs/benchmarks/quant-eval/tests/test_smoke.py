@@ -330,6 +330,42 @@ class Truth(unittest.TestCase):
             self.assertIn(text, md)
 
 
+class AndesColumns(unittest.TestCase):
+    """The rules that read andes finalize schema 1.1 columns."""
+
+    def test_fixed_and_no_shared_rules(self):
+        from quant_eval.readers import read_andes
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = ["A_1", "A_2"]
+            rows = pd.DataFrame({
+                "precursor_key": ["AAAK/2", "AAAK/2", "CCCK/2", "CCCK/2", "DDDK/2"],
+                "run": ["A_1", "A_2", "A_1", "A_2", "A_2"],
+                "evidence_type": ["identified", "transfer_ms1", "identified", "transfer_ms1", "transfer_ms1"],
+                "quantity": [1e6, 2e6, 1e6, 3e6, 4e6],
+                "quant_q": [0.0, 0.001, 0.0, 0.002, 0.003],
+                "transfer_q": [np.nan, 0.001, np.nan, 0.002, 0.003],
+                "library_q": 0.0,
+                "shared_peak_with": [None, None, None, "AAAK/2", None],
+                "quantity_fixed": [np.nan, 1.5e6, np.nan, -2e5, 3.9e6],
+            })
+            p = f"{tmp}/final.parquet"
+            rows.to_parquet(p)
+            q = lambda t: {(k, r): v for k, r, v in zip(t.key, t.run, t.quantity)}
+            d = q(read_andes(p, runs, "default"))
+            f = q(read_andes(p, runs, "fixed"))
+            n = q(read_andes(p, runs, "no-shared"))
+            assert len(d) == 5
+            # Identified rows keep their quantity; a non-positive fixed value is missing.
+            assert len(f) == 4 and min(f.values()) > 0
+            assert sorted(f.values()) == [1e6, 1e6, 1.5e6, 3.9e6]
+            # The shared transfer is left out.
+            assert len(n) == 4 and 3e6 not in n.values()
+            # An older table without the columns is refused with a message.
+            rows.drop(columns=["shared_peak_with", "quantity_fixed"]).to_parquet(p)
+            with self.assertRaises(SystemExit):
+                read_andes(p, runs, "fixed")
+
+
 class Smoke(unittest.TestCase):
     def test_guard(self):
         a = G.tagged(pd.DataFrame({"k": [1, 2], "x": [1.0, 2.0]}), "A:1")

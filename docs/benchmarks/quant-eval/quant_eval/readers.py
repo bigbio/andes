@@ -15,13 +15,16 @@ import sys
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
 from . import runguard as G
 from .keys import flashlfq_key, fragpipe_key, maxquant_key, norm_key
 
 IDQ = 0.01          # library_q limit applied to every andes row
 TRANSFER_Q = 0.01   # transfer_q limit of the `default` rule
-ANDES_RULES = ("default", "all", "hard-cut", "weights")
+ANDES_RULES = ("default", "all", "hard-cut", "weights", "fixed", "no-shared")
+# Columns of andes finalize schema 1.1 that a rule needs (an older table lacks them).
+_ANDES_RULE_COLUMNS = {"fixed": ["quantity_fixed"], "no-shared": ["shared_peak_with"]}
 
 
 def _fnum(x):
@@ -205,11 +208,23 @@ def read_andes(path, runs, rule="default", hard_cut=0.01):
       all        identified rows + every transfer the finalize output carries
       hard-cut   identified rows + transfers with quant_q <= hard_cut
       weights    as `all`, plus the column p (recovered error probability of each transfer) for the precision-weight view
-    Rows need library_q <= 0.01 and a positive finite quantity; below-threshold rows are dropped."""
+      fixed      rows of `default`, a transfer's quantity replaced by its fixed-apex `quantity_fixed` (missing when not positive)
+      no-shared  rows of `default` without the transfers on a look-alike's identified peak (`shared_peak_with` set)
+    Rows need library_q <= 0.01 and a positive finite quantity; below-threshold rows are dropped. `fixed` and `no-shared`
+    need a finalize table of schema 1.1 (the columns `quantity_fixed` and `shared_peak_with`)."""
     if rule not in ANDES_RULES:
         raise SystemExit(f"andes rule {rule!r} not in {ANDES_RULES}")
-    m = pd.read_parquet(path, columns=["precursor_key", "run", "evidence_type", "quantity", "quant_q", "transfer_q", "library_q"])
+    cols = ["precursor_key", "run", "evidence_type", "quantity", "quant_q", "transfer_q", "library_q"]
+    extra = _ANDES_RULE_COLUMNS.get(rule, [])
+    have = set(pq.read_schema(path).names)
+    missing = [c for c in extra if c not in have]
+    if missing:
+        raise SystemExit(f"{path}: andes rule {rule!r} needs the column(s) {missing} (andes finalize schema 1.1)")
+    m = pd.read_parquet(path, columns=cols + extra)
     tag = G.run_tag(f"andes-finalize:{rule}", path)
+    if rule == "fixed":
+        tr = ~m.evidence_type.str.startswith("identified")
+        m["quantity"] = np.where(tr, m.quantity_fixed.astype(float), m.quantity)
     m = m[np.isfinite(m.quantity) & (m.quantity > 0) & (m.evidence_type != "below_threshold")].copy()
     m["key"] = [norm_key(k) for k in m.precursor_key.values]
     m["is_transfer"] = ~m.evidence_type.str.startswith("identified")
@@ -217,8 +232,10 @@ def read_andes(path, runs, rule="default", hard_cut=0.01):
     m["thr"] = m.quant_q
     m["tq"] = np.where(m.is_transfer, m.transfer_q, 0.0)
     m = m[m.library_q <= IDQ]
-    if rule == "default":
+    if rule in ("default", "fixed"):
         m = m[(~m.is_transfer) | (m.tq <= TRANSFER_Q)]
+    elif rule == "no-shared":
+        m = m[(~m.is_transfer) | ((m.tq <= TRANSFER_Q) & m.shared_peak_with.isna())]
     elif rule == "hard-cut":
         m = m[(~m.is_transfer) | (m.quant_q <= hard_cut)]
     out = m[["key", "run", "quantity", "is_transfer", "library_q", "tq", "thr"]].copy()

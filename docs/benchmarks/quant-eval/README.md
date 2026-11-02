@@ -30,6 +30,8 @@ andes row rules (`--andes NAME:RULE:PATH`), all with `library_q <= 0.01` and no 
 | `all` | identified rows + every transfer the finalize output carries |
 | `hard-cut` | identified rows + transfers with `quant_q <= --hard-cut` (default 0.01) |
 | `weights` | rows of `all`, with the per-transfer error probability recovered from `quant_q` (running mean of p over a run's transfers sorted by p); the roll-up then uses learned precision weights (the "V" view) |
+| `fixed` | rows of `default`, each transfer's quantity replaced by its fixed-apex `quantity_fixed` (andes finalize schema 1.1; a non-positive value is missing) |
+| `no-shared` | rows of `default` without the transfers on a look-alike's identified peak (`shared_peak_with` set; schema 1.1) |
 
 MaxQuant and FragPipe rows are used as the tools report them (their own match-between-runs rows included).
 

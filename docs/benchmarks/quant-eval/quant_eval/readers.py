@@ -127,20 +127,23 @@ def read_fragpipe(path, runs):
 def read_flashlfq(path, runs, pip_q=None):
     """FlashLFQ (PIP-ECHO MBR FDR) `QuantifiedPeaks.tsv` -> rows of one precursor key x run.
     Key = `Full Sequence` + `/` + `Precursor Charge` (the identification charge of the peak); the file's `Full Sequence` is the andes key form
-    when the identifications were written from andes search tables. Decoy-peptide and random-RT peaks are dropped. `Peak Detection Type`
+    when the identifications were written from andes search tables. Decoy-peptide, random-RT and ambiguous (several sequences, `|`) peaks are dropped. `Peak Detection Type`
     MBR = transfer; its `PIP Q-Value` is kept in tq / thr (0 for MS/MS peaks); `pip_q` drops MBR peaks above that PIP q-value.
     FlashLFQ sums the charge states of a peptide into one peak intensity unless it is run with charge-specific quantification."""
     r, cols = _read_tsv(path)
     for c in ("File Name", "Full Sequence", "Precursor Charge", "Peak intensity", "Peak Detection Type"):
         if c not in cols:
             raise SystemExit(f"{path}: missing column {c!r}")
-    rows, drop = {}, {"decoy": 0, "random_rt": 0, "no_intensity": 0, "above_pip_q": 0}
+    rows, drop = {}, {"decoy": 0, "random_rt": 0, "ambiguous": 0, "no_intensity": 0, "above_pip_q": 0}
     for row in r:
         if (row.get("Decoy Peptide") or "").strip().lower() == "true":
             drop["decoy"] += 1
             continue
         if (row.get("Random RT") or "").strip().lower() == "true":
             drop["random_rt"] += 1
+            continue
+        if "|" in row["Full Sequence"]:      # one peak mapped to several sequences: no single precursor
+            drop["ambiguous"] += 1
             continue
         q = _fnum(row["Peak intensity"])
         if not (q > 0):

@@ -14,6 +14,7 @@ tables.
 | andes | `quant finalize` parquet | `quantity` (raw) | quality columns `quant_q`, `transfer_q`, `library_q`, and `evidence_type` of the same file; `quantity_normalized` is not used |
 | MaxQuant | `evidence.txt` | `Intensity`, summed over the evidence rows of a precursor x run | reverse and contaminants removed; the LFQ columns are not used |
 | FragPipe | IonQuant `combined_ion.tsv` | `<run> Intensity` | IonQuant must be run with normalisation off (`--normalization 0`); rows with `Match Type` MBR are transfers |
+| FlashLFQ (PIP-ECHO) | `QuantifiedPeaks.tsv` (`--flashlfq NAME:PEAKS[:PIPQ]`) | `Peak intensity` | key = `Full Sequence` + `/` + `Precursor Charge`, so the identifications given to FlashLFQ must carry andes-form full sequences; `Peak Detection Type` MBR = transfer, its `PIP Q-Value` is kept (`PIPQ` keeps transfers up to that value); decoy-peptide and random-RT peaks are dropped. FlashLFQ sums the charge states of a peptide into one intensity unless run charge-specific |
 
 Tool modified sequences are mapped to the andes key form (`PEPTIDE[+mass]/charge`); only Carbamidomethyl, Oxidation and Acetyl
 are mapped, other modifications are dropped and counted. Run names of the tools are matched to the run names of `design.tsv`
@@ -21,7 +22,7 @@ are mapped, other modifications are dropped and counted. Run names of the tools 
 joins refuse tables with different tags, duplicates of (precursor, run) are refused, and no column of one arm is joined to
 another arm's table.
 
-andes row rules (`--andes NAME:RULE:PATH`), all with `library_q <= 0.01` and no below-threshold rows:
+andes row rules (`--andes NAME:RULE[@LIBQ]:PATH`), all with `library_q <= 0.01` (`@LIBQ` sets another limit for that arm, for runs with a different library entry gate, e.g. `weights@0.05`) and no below-threshold rows:
 
 | rule | rows |
 |---|---|
@@ -53,7 +54,15 @@ MaxQuant and FragPipe rows are used as the tools report them (their own match-be
    precursor level; detection by species and intensity quartile; design-consistent UPS1 detection (a precursor counts at a
    level when one of its rows is within 2x / 3x of its own reference, the median over the levels above the three lowest of
    log2 intensity minus log2 level, after run offsets from the null-species precursors; raw detection is shown next to it);
-   absence (rows in blank runs, rows of a species in runs where it is absent), reported in its own table.
+   absence (rows of a species in runs where it is absent), reported in its own table; rows in blank runs are carry-over and
+   are reported in a separate table, not as part of the absence score.
+   `rates.py`: truth-measured false-transfer rates for a species that is absent from some runs (PXD014415: yeast in the 20
+   human-only runs): rate = transferred rows of the absent species / all transferred rows in those runs; the ratio of those rows
+   to the absent species' transferred rows in the runs that contain it (IonQuant-style); a rate scaled by the species' share of
+   the identified precursors (an extension, not a measured rate); identified rows of the species in those runs. `depth_curve`
+   sweeps `transfer_q` and `quant_q` of the andes transfers and `PIP Q-Value` of FlashLFQ, and the scorecard reads the number of
+   transferred rows of an andes arm at the loosest threshold whose rate is not above a reference tool's rate (depth at a matched
+   truth-measured false-transfer rate; rows beyond the finalize `--mbr-fdr` limit do not exist, so the curve stops there).
    `rollup.normalise_rt_local` is an optional replacement of the run normalisation (`--rt-local` adds a second DE pass): the
    run shift is smoothed along retention time with a running median over 401 reference precursors, the same function and the
    same RT proxy (median andes apex RT per precursor key) for every arm; keys without an RT get the run's median shift.

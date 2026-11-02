@@ -14,7 +14,7 @@ TP > 1.03 x tool TP and FDP not higher by > 2 points; worse = the mirror; else e
 
 DE rows use the intersection BH family (proteins tested by every shared arm; variance prior and BH on that set) as the headline; the family
 table gives own / intersection / union. True positives at matched pooled FDP (1 / 5 / 10 %) and per-pair AUC come from the ranked
-p-value list. Absence (blank runs, species absent from runs) has its own table; it is not part of the DE or detection rows."""
+p-value list. Absence (species absent from runs), the false-transfer rates and blank-run carry-over have their own tables; they are not part of the DE or detection rows."""
 import argparse
 import json
 

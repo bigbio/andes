@@ -225,7 +225,7 @@ class FlashReader(unittest.TestCase):
         hdr = ["File Name", "Full Sequence", "Precursor Charge", "Peak intensity", "Peak Detection Type", "PIP Q-Value", "Decoy Peptide", "Random RT"]
         rows = [["r_1", "PEPTIDEK", "2", "100", "MSMS", "", "False", "False"], ["r_1", "AAAAK", "2", "50", "MBR", "0.004", "False", "False"],
                 ["r_2", "AAAAK", "2", "60", "MBR", "0.03", "False", "False"], ["r_2", "AAAAK", "3", "40", "MBR", "0.001", "True", "False"],
-                ["r_2", "CCCCK", "2", "30", "MBR", "0.002", "False", "True"], ["r_2", "PEPTIDEK", "2", "0", "MSMS", "", "False", "False"]]
+                ["r_2", "CCCCK", "2", "30", "MBR", "0.002", "False", "True"], ["r_2", "PEPTIDEK", "2", "0", "MSMS", "", "False", "False"], ["r_2", "AAAAK|CCCCK", "2", "90", "MSMS", "", "False", "False"]]
         with tempfile.TemporaryDirectory() as tmp:
             p = f"{tmp}/QuantifiedPeaks.tsv"
             with open(p, "w") as f:
@@ -233,7 +233,7 @@ class FlashReader(unittest.TestCase):
             d = readers.read_flashlfq(p, ["r_1", "r_2"])
             d1 = readers.read_flashlfq(p, ["r_1", "r_2"], pip_q=0.01)
         self.assertEqual(sorted(zip(d.key, d.run, d.is_transfer)), [("AAAAK/2", "r_1", True), ("AAAAK/2", "r_2", True), ("PEPTIDEK/2", "r_1", False)])
-        self.assertEqual(sorted(d.loc[d.is_transfer, "tq"]), [0.004, 0.03])                      # PIP q-value kept for transfers; decoy / random-RT / zero rows dropped
+        self.assertEqual(sorted(d.loc[d.is_transfer, "tq"]), [0.004, 0.03])                      # PIP q-value kept for transfers; decoy / random-RT / ambiguous / zero rows dropped
         self.assertEqual(sorted(d1.key + d1.run), ["AAAAK/2r_1", "PEPTIDEK/2r_1"])               # pip_q = 0.01 drops the 0.03 peak
         self.assertTrue((d.loc[~d.is_transfer, "tq"] == 0).all())
 

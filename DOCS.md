@@ -850,8 +850,8 @@ the fused strong score Percolator weights most; historically `StrongScore`; it a
 | 11 | `dm` | float | signed | Precursor mass error (Da) after isotope correction. |
 | 12 | `absdm` | float | ≥0 | `\|dm\|`. |
 | 13–16 | `charge2`…`charge5` | 0/1 | one-hot | One-hot precursor charge. A declared charge outside `--charge` sets the nearest edge column (a 6+ sets `charge5`). |
-| 17 | `enzN` | 0/1 | one-hot | N-terminus fits the enzyme rule. |
-| 18 | `enzC` | 0/1 | one-hot | C-terminus fits the enzyme rule. |
+| 17 | `enzN` | 0/1 | one-hot | N-terminus fits the enzyme rule. A protein N-terminus fits, also where the initiator Met was removed. |
+| 18 | `enzC` | 0/1 | one-hot | C-terminus fits the enzyme rule. A protein C-terminus fits. |
 | 19 | `enzInt` | int | ≥0 | Internal cleavage sites. |
 | 20 | `NumMatchedMainIons` | int | [0, peplen−1] | Matched charge-1 b/y fragment positions. |
 | 21 | `longest_b` | int | [0, peplen−1] | Longest contiguous matched b-ion run. |
@@ -913,6 +913,15 @@ the fused strong score Percolator weights most; historically `StrongScore`; it a
 
 Columns marked **0.0 unless/without** stay in the header and are zero when their condition
 does not hold.
+
+`enzN`, `enzC` and `enzInt` use the OpenMS PercolatorInfile rules, in which trypsin, Lys-C,
+Arg-C, Glu-C and chymotrypsin do not cleave before P. The digest does cleave there, so a peptide
+that starts or ends at such a site (K|P or R|P for trypsin) has `enzN` or `enzC` 0, and `enzInt`
+does not count these sites. The mismatch is deliberate. Trypsin cleaves K|P and R|P poorly, so a
+0 there is evidence against the peptide; and in a fully specific search, which is the default,
+the digest's own rule would set `enzN` and `enzC` to 1 on every row. With the digest's rule for
+these three columns, Percolator kept 0.7–1.2% fewer PSMs on the Astral benchmark and 6% fewer at
+a true FDP of 1% on UPS1, whose true FDP also rose 0.17 points (#305).
 
 **Predicted features (`--predict`).** After the PIN is written, each requested predictor scores
 every row, targets and decoys alike, and its columns are inserted before `Peptide`

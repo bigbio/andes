@@ -31,7 +31,7 @@ use andes_glyco::glyco_psm::{
 };
 use andes_glyco::hybrid::Source;
 
-use crate::percolator_enz::{count_internal_enzymatic_any, is_enzymatic_boundary_any};
+use crate::percolator_enz::enzyme_features;
 use crate::pin::{psm_feature_values, FeatureFmt};
 use crate::row_context::RowContext;
 use search::glyco_search::{FullGlycoPsm, GlycoSpectrumResult};
@@ -265,14 +265,8 @@ fn write_glyco_psm_row<W: Write>(
     };
     writer.write_all(&[b'\t', charge_hi])?;
 
-    // enzN, enzC, enzInt
-    let residues: Vec<u8> = cand.peptide.residues.iter().map(|aa| aa.residue).collect();
-    let first = residues.first().copied().unwrap_or(b'-');
-    let last = residues.last().copied().unwrap_or(b'-');
-    let extra = &params.extra_enzymes;
-    let enz_n: u8 = is_enzymatic_boundary_any(cand.peptide.pre, first, params.enzyme, extra) as u8;
-    let enz_c: u8 = is_enzymatic_boundary_any(last, cand.peptide.post, params.enzyme, extra) as u8;
-    let enz_int = count_internal_enzymatic_any(&residues, params.enzyme, extra);
+    // enzN, enzC, enzInt (the standard PIN's rule, see `crate::percolator_enz`)
+    let (enz_n, enz_c, enz_int) = enzyme_features(cand, params.enzyme, &params.extra_enzymes);
     write!(writer, "\t{}\t{}\t{}", enz_n, enz_c, enz_int)?;
 
     // Standard feature block (reuse psm_feature_values; skip RankScore + isotope_error
@@ -394,6 +388,7 @@ fn write_glyco_psm_row<W: Write>(
     //
     // Target and glycan-decoy rows are tagged identically, so this is symmetric
     // on the FDR axis; and PSM-level q-values do not depend on the Peptide string.
+    let residues: Vec<u8> = cand.peptide.residues.iter().map(|aa| aa.residue).collect();
     let glycan_tag = match &key.glycan {
         Some(g) => glycan_tag_with_site(g, &residues, cand.peptide.post, core),
         None => String::new(),

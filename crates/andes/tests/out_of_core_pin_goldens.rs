@@ -234,6 +234,22 @@
 //! The pre-pass outcome line reads 489 spectra with PSMs (was 492) and 63
 //! below the RawScore floor (was 55).
 //!
+//! REGENERATED 2026-11-02 when `enzN` began counting a Met-clipped protein
+//! N-terminal peptide (`M.` flank, initiator Met removed) as starting at a
+//! terminus (bigbio/andes#293). Only `enzN` moved, 0 -> 1, on every row whose
+//! Peptide starts with `M.`; under a fully specific digest those are exactly
+//! the Met-clipped rows. With `enzN` set back to 0 on them, each new PIN
+//! reproduces its previous golden (slices row for row, E. coli digests equal).
+//! The calibration outcome line is unchanged.
+//!
+//! | case | rows | enzN 0 -> 1 (targets / decoys) |
+//! |---|---|---|
+//! | E. coli default mods (and precursor-cal auto) | 75,028 | 3,502 (1,802 / 1,700) |
+//! | E. coli fixed mods only | 77,496 | 1,945 (953 / 992) |
+//! | E. coli one variable mod | 75,570 | 1,699 (859 / 840) |
+//! | `--chimeric` slice | 1,718 | 57 (32 / 25) |
+//! | `--refine` slice | 1,580 | 44 (27 / 17) |
+//!
 //! To regenerate after an intentional change, run the case's command line (see
 //! `run`), then either digest the PIN with `identity_digest` (E. coli) or write
 //! its header and sorted rows, gzipped, over the case's golden PIN (slices).
@@ -418,14 +434,14 @@ fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
 /// One E. coli case: (rows, `identity_digest` FNV-1a 64, calibration outcome line).
 type Golden = (usize, u64, Option<&'static str>);
 
-const ECOLI_DEFAULT_MODS: Golden = (75_028, 0x4a4d_5147_a772_074d, None);
-const ECOLI_FIXED_MODS_ONLY: Golden = (77_496, 0x918c_aaf8_2d4c_bc43, None);
-const ECOLI_ONE_VARIABLE_MOD: Golden = (75_570, 0x5cf5_aadd_2c2e_beca, None);
+const ECOLI_DEFAULT_MODS: Golden = (75_028, 0xab5c_24eb_42d7_e8ed, None);
+const ECOLI_FIXED_MODS_ONLY: Golden = (77_496, 0x8818_856c_6cdd_53f6, None);
+const ECOLI_ONE_VARIABLE_MOD: Golden = (75_570, 0x2377_5262_d954_ae9f, None);
 /// The pre-pass scores but the sample is too small to calibrate, so the PIN
 /// equals the calibration-off one.
 const ECOLI_PRECURSOR_CAL_AUTO: Golden = (
     75_028,
-    0x4a4d_5147_a772_074d,
+    0xab5c_24eb_42d7_e8ed,
     Some("Precursor mass calibration skipped (insufficient confident PSMs: 489 with PSMs, 63 below RawScore floor, 0 failed |residual|>50ppm"),
 );
 

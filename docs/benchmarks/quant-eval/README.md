@@ -71,6 +71,14 @@ MaxQuant and FragPipe rows are used as the tools report them (their own match-be
    species whose amount is constant by design, e.g. yeast in the UPS1 sets, human in the HYE mixes), the same step for every
    arm, then the same roll-up and DE. It uses the design, so it is an evaluation view; the default (all-species) normalisation
    stays the headline of the scorecard.
+   `--rollup` picks the protein roll-up, the same for every arm (default `median-polish`). `celltype` removes, before the
+   polish, a per-precursor offset of the transferred cells from the identified cells, measured inside the conditions where the
+   precursor has both kinds and shrunk to a global offset (empirical Bayes; every scale learned from the arm's own rows);
+   `balance` re-weights the transferred cells per (protein, condition) so that their share of the cell weight equals the
+   protein's pooled share; `celltype+balance` does both; `censored` treats the transferred cells as right-censored at their
+   value (EM inside the polish, E[y | y <= x] with the identified cells' learned residual SD). None is the default: on PXD009740, PXD009815 and ProteoBench QE /
+   Astral they did not improve or hold the truth score of every tool (cell type: more null-species calls; balance: fewer true
+   positives at matched FDP; censored: see the round-41A report).
 5. `downstream.py`: runs everything for one dataset and writes one JSON; `scorecard.py`: markdown tables from the JSONs.
 
 Not included: the masked wrong-peak measurement, which needs masked search and finalize runs of andes.

@@ -319,6 +319,72 @@ class BiasAndNullViews(unittest.TestCase):
         self.assertEqual(nref, 100)
 
 
+class RollupArms(unittest.TestCase):
+    @staticmethod
+    def _cells(seed=6, off=-0.5):
+        # 2 conditions x 3 runs; precursors transferred in some runs read `off` low (selection), the truth is equal levels
+        rng = np.random.default_rng(seed)
+        runs = ["A_1", "A_2", "A_3", "B_1", "B_2", "B_3"]
+        cond = {r: r[0] for r in runs}
+        rows = []
+        for p in range(60):
+            for k in range(4):
+                base = rng.normal(20, 1)
+                for r in runs:
+                    tr = (k + int(r[-1])) % 3 == 0 or (r[0] == "B" and k == 0)
+                    rows.append((f"P{p}K{k}", r, base + rng.normal(0, 0.05) + (off if tr else 0.0), tr, f"prot{p}"))
+        d = pd.DataFrame(rows, columns=["key", "run", "n", "is_transfer", "prot"])
+        return d, d.drop_duplicates("key").set_index("key").prot, runs, cond
+
+    def test_celltype_offset_is_learned_and_removed(self):
+        d, prot, runs, cond = self._cells()
+        off, info = rollup.celltype_offsets(d, cond)
+        self.assertAlmostEqual(info["delta0"], -0.5, delta=0.05)
+        self.assertTrue(np.allclose(off.values, -0.5, atol=0.1))
+        P0 = rollup.rollup(d, prot, runs)
+        P1 = rollup.rollup(rollup.apply_celltype(d, off), prot, runs)
+        fc = lambda P: (P[["B_1", "B_2", "B_3"]].mean(1) - P[["A_1", "A_2", "A_3"]].mean(1)).abs().median()
+        self.assertLess(fc(P1), fc(P0))
+        self.assertLess(fc(P1), 0.05)
+        raw = d.assign(quantity=np.exp2(d.n))
+        adj = rollup.adjust_raw(raw, off)
+        t = raw.is_transfer.values
+        self.assertTrue(np.allclose(np.log2(adj.quantity.values[t]) - raw.n.values[t], -off.reindex(raw.key[t]).values))
+        self.assertTrue(np.allclose(adj.quantity.values[~t], raw.quantity.values[~t]))
+
+    def test_no_offset_without_transfer_bias(self):
+        d, _, _, cond = self._cells(off=0.0)
+        off, info = rollup.celltype_offsets(d, cond)
+        self.assertLess(abs(info["delta0"]), 0.02)
+        self.assertTrue(np.all(np.abs(off.values) < 0.05))
+
+    def test_censored_rollup(self):
+        d, prot, runs, cond = self._cells(off=0.0)
+        sig = rollup.identified_sigma(d, prot, runs)
+        self.assertAlmostEqual(sig, 0.05, delta=0.02)
+        P0 = rollup.rollup(d, prot, runs)
+        P1 = rollup.rollup(d, prot, runs, sig)
+        P2 = rollup.rollup(d.assign(is_transfer=False), prot, runs, sig)
+        self.assertTrue(np.allclose(P2.values, P0.values))                  # no transfer: same as median polish
+        self.assertLess((P1.values - P0.values).mean(), 0.0)                 # censored-low cells pull the protein down
+        self.assertLess(np.abs(P1.values - P0.values).max(), 4 * sig)
+
+    def test_balance_equalises_transfer_share(self):
+        d, prot, runs, cond = self._cells()
+        b = rollup.balance_weights(d, prot, cond)
+        b["p"] = b.key.map(prot)
+        b["c"] = b.run.map(cond)
+        b["wt"] = np.where(b.is_transfer, b.w, 0.0)
+        s_pc = b.groupby(["p", "c"]).wt.sum() / b.groupby(["p", "c"]).w.sum()
+        s_p = b.groupby("p").wt.sum() / b.groupby("p").w.sum()
+        u = d.assign(p=d.key.map(prot), c=d.run.map(cond))
+        s0 = u.groupby(["p", "c"]).is_transfer.mean()
+        self.assertGreater(s0.groupby(level=0).agg(lambda v: v.max() - v.min()).max(), 0.05)   # shares differ before
+        dev = (s_pc - s_p.reindex(s_pc.index.get_level_values(0)).values).abs()
+        self.assertLess(dev.max(), 1e-9)                                                       # equal after
+        self.assertTrue(np.allclose(b.w.values[~b.is_transfer.values], 1.0))
+
+
 class Smoke(unittest.TestCase):
     def test_guard(self):
         a = G.tagged(pd.DataFrame({"k": [1, 2], "x": [1.0, 2.0]}), "A:1")
@@ -377,6 +443,29 @@ class Smoke(unittest.TestCase):
             nn = res["arms"][arm]["nullnorm"]
             self.assertEqual(nn["reference_precursors"], 450, arm)   # 150 human proteins x 3 precursors
             self.assertGreaterEqual(nn["de"]["TPs"], 15, arm)
+        self.assertEqual(res["rollup"], "median-polish")
+
+    def test_downstream_rollup_arms(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            make_dataset(tmp)
+            for how in ("celltype", "balance", "celltype+balance", "censored"):
+                out = f"{tmp}/res_{how}.json"
+                downstream.main(["--name", "synthetic", "--design", f"{tmp}/design.tsv", "--amounts", f"{tmp}/amounts.tsv",
+                                 "--fasta", f"{tmp}/db.fasta", "--classes", "HUMAN,YEAST", "--null", "HUMAN",
+                                 "--andes", f"andes:default:{tmp}/final.parquet", "--andes", f"andes_V:weights:{tmp}/final.parquet",
+                                 "--maxquant", f"MQ:{tmp}/evidence.txt", "--norm-null", "--rollup", how, "--out", out])
+                with open(out) as f:
+                    res = json.load(f)
+                self.assertEqual(res["rollup"], how)
+                for arm in ("andes", "andes_V", "MQ"):
+                    de = res["arms"][arm]["de"]
+                    self.assertGreaterEqual(de["TPs"], 15, (how, arm))
+                    self.assertLessEqual(de["FP"], 3, (how, arm))
+                    self.assertGreaterEqual(res["arms"][arm]["nullnorm"]["de"]["TPs"], 15, (how, arm))
+                    if "celltype" in how:
+                        self.assertIn("delta0", res["arms"][arm]["celltype"])
+                    if how == "censored":
+                        self.assertGreater(res["arms"][arm]["censor_sigma"], 0)
 
 
 if __name__ == "__main__":

@@ -29,7 +29,8 @@ from . import runguard as G
 from .de import de_all
 from .design import Design
 from .fasta import map_precursors
-from .rollup import learn_weights, normalise, normalise_rt_local, rollup
+from .rollup import (ROLLUPS, adjust_raw, apply_celltype, balance_weights, celltype_offsets, identified_sigma, learn_weights,
+                     normalise, normalise_rt_local, rollup)
 
 
 def parse_args(argv=None):
@@ -51,6 +52,10 @@ def parse_args(argv=None):
                     help="also run DE after the RT-local run normalisation (same function for every arm; RT proxy = the first andes arm's apex RT)")
     ap.add_argument("--norm-null", action="store_true",
                     help="also run DE with run factors from the null species only (the species known constant; same step for every arm)")
+    ap.add_argument("--rollup", default="median-polish", choices=ROLLUPS,
+                    help="protein roll-up, the same for every arm: median-polish (default); celltype = per-precursor offset of the "
+                         "transferred cells, learned inside conditions and shrunk to a global offset, removed first; balance = "
+                         "transfers re-weighted per (protein, condition) to the protein's pooled transfer share; or both; censored = transferred cells treated as right-censored at their value (EM with the identified cells' learned residual SD)")
     ap.add_argument("--hard-cut", type=float, default=0.01, help="quant_q limit of the hard-cut rule")
     ap.add_argument("--out", required=True)
     return ap.parse_args(argv)
@@ -59,6 +64,22 @@ def parse_args(argv=None):
 def is_weighted(kind):
     """Arms whose roll-up uses learned precision weights (the V views)."""
     return kind.get("rule") in ("weights", "weights-bias")
+
+
+def prepare(d, kind, how, prot, cond_of, runs):
+    """Normalised rows of one arm -> rows the roll-up takes (learned weights for V views, then the --rollup arm).
+    Returns (rows, cell-type offsets or None, summary dict)."""
+    info, off = {}, None
+    if "celltype" in how:
+        off, info["celltype"] = celltype_offsets(d, cond_of)
+        d = apply_celltype(d, off)
+    if is_weighted(kind):
+        d, info["weight_variance_by_class"] = learn_weights(d, prot, runs)
+    if "balance" in how:
+        d = balance_weights(d, prot, cond_of)
+    if how == "censored":
+        info["censor_sigma"] = round(identified_sigma(d, prot, runs), 5)
+    return d, off, info
 
 
 def load_arms(a, runs):
@@ -115,7 +136,7 @@ def evaluate(a):
     shared = set.intersection(*[cells(tabs[n]) for n in shared_arms])
     print("rows", {n: len(r) for n, r in tabs.items()}, "shared cells", len(shared), file=sys.stderr)
 
-    RES = {"dataset": a.name, "runs": len(runs), "arms": {}, "arm_roles": kinds, "primary": primary, "shared_arms": shared_arms,
+    RES = {"dataset": a.name, "rollup": a.rollup, "runs": len(runs), "arms": {}, "arm_roles": kinds, "primary": primary, "shared_arms": shared_arms,
            "shared_cells": len(shared), "tags": {n: G.tag_of(r) for n, r in tabs.items()}, "classes": list(classes)}
     if design.has_de:
         RES["levels"] = [str(x) for x in design.levels]
@@ -124,17 +145,17 @@ def evaluate(a):
         o = M.basic_counts(raw, prot, sp, prot_sp, classes)
         if design.has_de:
             d, flag, nfull = normalise(raw, runs)
-            if is_weighted(kinds[n]):
-                d, o["weight_variance_by_class"] = learn_weights(d, prot, runs)
+            d, off, info = prepare(d, kinds[n], a.rollup, prot, design.cond, runs)
+            o.update(info)
             cntp = raw.groupby(raw.key.map(prot)).key.nunique()
-            Pm = rollup(d, prot, runs)
+            Pm = rollup(d, prot, runs, info.get("censor_sigma"))
             P = Pm[cntp.reindex(Pm.index).fillna(0).values >= 2]
             PM[n] = (P, d)
             o["acc_own_sp"] = M.accuracy(d, design, sp, shared, True)
             o["acc_shared_sp"] = M.accuracy(d, design, sp, shared, False)
             if "UPS" in classes:
                 o["ups_strat"] = M.ups_by_level(raw, P, design, sp, prot, prot_sp)
-                o["ups_design"] = M.design_detection(raw, design, sp)
+                o["ups_design"] = M.design_detection(raw if off is None else adjust_raw(raw, off), design, sp)
         RES["arms"][n] = o
         print(n, {k: o[k] for k in ("rows", "precursors", "proteins_ge2")}, round(time.time() - t0), "s", file=sys.stderr)
 
@@ -154,10 +175,9 @@ def evaluate(a):
         PA = {}
         for n, raw in tabs.items():
             d, _, nref = norm(raw)
-            if is_weighted(kinds[n]):
-                d, _ = learn_weights(d, prot, runs)
+            d, _, info = prepare(d, kinds[n], a.rollup, prot, design.cond, runs)
             cntp = raw.groupby(raw.key.map(prot)).key.nunique()
-            Pm = rollup(d, prot, runs)
+            Pm = rollup(d, prot, runs, info.get("censor_sigma"))
             PA[n] = (Pm[cntp.reindex(Pm.index).fillna(0).values >= 2], nref)
         fam_arms = [n for n in shared_arms if n in PA]
         inter = set.intersection(*[set(PA[n][0].index) for n in fam_arms])

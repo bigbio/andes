@@ -123,8 +123,53 @@ def weighted_polish(M, Wt, iters=10):
     return out
 
 
-def rollup(d, prot_of, runs):
-    """d: rows with key, run, n (and optionally w). Returns a protein x run DataFrame (weighted polish when any w != 1)."""
+def _polish(M, Wt, weighted):
+    return weighted_polish(M, Wt) if weighted else median_polish(M)
+
+
+def censored_polish(M, Wt, T, sigma, weighted, iters=3):
+    """Missing-not-at-random roll-up: transferred cells (mask T) are treated as right-censored at their observed value (the true
+    value of a cell that was not identified is taken to be at most what was read). EM: polish, fitted value mu = row effect +
+    protein value, then each transferred cell is replaced by E[y | y <= x] = mu - sigma phi(z) / Phi(z), z = (x - mu) / sigma;
+    sigma = the arm's learned residual SD of identified cells."""
+    from scipy.stats import norm
+    X = M.copy()
+    for _ in range(iters):
+        out = _polish(X, Wt, weighted)
+        re_ = np.nanmedian(X - out[None, :], axis=1)
+        mu = re_[:, None] + out[None, :]
+        z = (M - mu) / sigma
+        lam = np.exp(norm.logpdf(z) - norm.logcdf(z))
+        X = np.where(T & np.isfinite(M), mu - sigma * lam, M)
+    return _polish(X, Wt, weighted)
+
+
+def identified_sigma(d, prot_of, runs):
+    """Robust SD of the protein median-polish residual of identified cells (proteins with >= 3 precursors), scaled by the
+    two-way residual degrees of freedom of each protein's precursor x run table."""
+    d = d.assign(pr=d.key.map(prot_of))
+    ri = {r: i for i, r in enumerate(runs)}
+    res = []
+    for _, g in d.dropna(subset=["pr"]).groupby("pr"):
+        keys = sorted(g.key.unique())
+        if len(keys) < 3:
+            continue
+        ki = {k: i for i, k in enumerate(keys)}
+        M = np.full((len(keys), len(runs)), np.nan)
+        rr = np.array([ki[k] for k in g.key.values])
+        cc = np.array([ri[r] for r in g.run.values])
+        M[rr, cc] = g.n.values
+        nk, nc = M.shape[0], int(np.isfinite(M).any(0).sum())
+        if nc < 2:
+            continue
+        R = _polish_residual(M)[rr, cc] * np.sqrt(nk * nc / ((nk - 1.0) * (nc - 1.0)))   # residual degrees of freedom
+        res.append(R[~g.is_transfer.values])
+    return float(np.sqrt(_robust_var(np.concatenate(res)))) if res else 1.0
+
+
+def rollup(d, prot_of, runs, censor_sigma=None):
+    """d: rows with key, run, n (and optionally w). Returns a protein x run DataFrame (weighted polish when any w != 1).
+    censor_sigma: when given, transferred cells are treated as right-censored (censored_polish) with this SD."""
     d = d.assign(p=d.key.map(prot_of)).dropna(subset=["p"])
     weighted = "w" in d.columns and (d.w.values != 1.0).any()
     out = {}
@@ -138,12 +183,17 @@ def rollup(d, prot_of, runs):
         M[rr, cc] = g.n.values
         if len(keys) < 2:
             out[p] = M[0]
-        elif weighted:
+            continue
+        Wt = None
+        if weighted:
             Wt = np.zeros(M.shape)
             Wt[rr, cc] = g.w.values
-            out[p] = weighted_polish(M, Wt)
+        if censor_sigma is not None and g.is_transfer.any():
+            T = np.zeros(M.shape, bool)
+            T[rr, cc] = g.is_transfer.values
+            out[p] = censored_polish(M, Wt, T, censor_sigma, weighted)
         else:
-            out[p] = median_polish(M)
+            out[p] = _polish(M, Wt, weighted)
     return pd.DataFrame.from_dict(out, orient="index", columns=runs)
 
 
@@ -199,3 +249,101 @@ def learn_weights(d, prot_of, runs):
                 w[k] = np.clip(v0 / np.maximum(v * rel, 1e-6), 0.05, 1.0)
             d["w"] = w
     return d, {int(c): round(float(v), 4) for c, v in var.items()}
+
+
+ROLLUPS = ("median-polish", "celltype", "balance", "celltype+balance", "censored")
+
+
+def _robust_var(x):
+    x = np.asarray(x, float)
+    x = x[np.isfinite(x)]
+    return float((1.4826 * np.median(np.abs(x - np.median(x)))) ** 2) if len(x) else np.nan
+
+
+def celltype_offsets(d, cond_of):
+    """Cell-type effect (selection of transfers): per precursor, the offset of its transferred cells from its identified cells,
+    measured inside the conditions where the precursor has both kinds of cell, shrunk to a learned global offset.
+
+    For precursor k and condition c with both kinds: diff = mean(n | transfer) - mean(n | identified), weight h = 1 / (1/n_T + 1/n_I).
+    delta_k = sum(h diff) / H_k, sampling variance v_k = s2 / H_k, s2 = robust within-(precursor, condition, cell type) variance.
+    Global offset delta0 = median of delta_k; between-precursor variance tau2 = max(0, robust var(delta_k) - median(v_k)).
+    Offset_k = delta0 + tau2 / (tau2 + v_k) * (delta_k - delta0); precursors without a condition holding both kinds get delta0.
+    Every scale is learned from the arm's own rows; no truth. d: normalised rows with key, run, n, is_transfer.
+    Returns (offset per key of every transferred precursor, summary dict)."""
+    x = d[["key", "run", "n", "is_transfer"]].copy()
+    x["c"] = x.run.map(cond_of)
+    x = x[x.c.notna() & np.isfinite(x.n.values)]
+    tkeys = pd.Index(x.key[x.is_transfer].unique())
+    info = {"transfer_precursors": int(len(tkeys))}
+    if len(tkeys) == 0:
+        return pd.Series(dtype=float), dict(info, delta0=0.0, tau2=0.0, s2=None, paired_precursors=0)
+    grp = x.groupby(["key", "c", "is_transfer"]).n
+    mu = grp.transform("mean")
+    sz = grp.transform("size")
+    ok = sz.values >= 2
+    res = (x.n.values - mu.values)[ok] * np.sqrt(sz.values[ok] / (sz.values[ok] - 1.0))
+    s2 = _robust_var(res)
+    g = grp.agg(["mean", "size"]).unstack("is_transfer")
+    if (True not in g["mean"].columns) or (False not in g["mean"].columns):
+        return pd.Series(0.0, index=tkeys), dict(info, delta0=0.0, tau2=0.0, s2=s2, paired_precursors=0)
+    mt, mi = g["mean"][True], g["mean"][False]
+    nt, ni = g["size"][True], g["size"][False]
+    both = mt.notna() & mi.notna()
+    diff = (mt - mi)[both]
+    h = (1.0 / (1.0 / nt[both] + 1.0 / ni[both]))
+    kk = diff.index.get_level_values(0)
+    H = h.groupby(kk).sum()
+    dk = (h * diff).groupby(kk).sum() / H
+    vk = s2 / H
+    delta0 = float(np.median(dk.values)) if len(dk) else 0.0
+    tau2 = max(0.0, _robust_var(dk.values) - float(np.median(vk.values))) if len(dk) > 1 else 0.0
+    shrink = tau2 / (tau2 + vk) if tau2 > 0 else vk * 0.0
+    off = pd.Series(delta0, index=tkeys)
+    est = delta0 + shrink * (dk - delta0)
+    off.loc[est.index.intersection(tkeys)] = est.reindex(est.index.intersection(tkeys)).values
+    info.update(delta0=round(delta0, 4), tau2=round(float(tau2), 5), s2=round(float(s2), 5), paired_precursors=int(len(dk)),
+                median_shrink=round(float(np.median(shrink.values)), 4) if len(dk) else None,
+                offset_q10_q50_q90=[round(float(v), 4) for v in np.quantile(off.values, [0.1, 0.5, 0.9])])
+    return off, info
+
+
+def apply_celltype(d, off):
+    """Remove the per-precursor cell-type offset from the transferred cells (column n; quantity when n is absent)."""
+    d = d.copy()
+    t = d.is_transfer.values
+    o = d.key.map(off).fillna(0.0).values
+    if "n" in d.columns:
+        d.loc[t, "n"] = d.n.values[t] - o[t]
+    if "lq" in d.columns:
+        d.loc[t, "lq"] = d.lq.values[t] - o[t]
+    return d
+
+
+def adjust_raw(raw, off):
+    """The same offset on a raw table (quantity / 2**offset for transferred cells), for row-level metrics of the arm."""
+    raw = raw.copy()
+    t = raw.is_transfer.values
+    o = raw.key.map(off).fillna(0.0).values
+    raw.loc[t, "quantity"] = raw.quantity.values[t] * np.exp2(-o[t])
+    return raw
+
+
+def balance_weights(d, prot_of, cond_of):
+    """Within-condition balance: per (protein, condition) the transferred cells are re-weighted so that their share of the
+    cell weight equals the protein's share pooled over all conditions (existing weights w, e.g. the learned precision of V,
+    are the starting point). A condition that holds only one kind of cell is left as it is. Returns d with column w."""
+    d = d.copy()
+    w = d.w.values.astype(float) if "w" in d.columns else np.ones(len(d))
+    p = d.key.map(prot_of)
+    c = d.run.map(cond_of)
+    t = d.is_transfer.values
+    x = pd.DataFrame({"p": p.values, "c": c.values, "w": w, "wt": np.where(t, w, 0.0)})
+    sp = x.groupby("p").wt.sum() / x.groupby("p").w.sum()
+    spc = x.groupby(["p", "c"]).wt.sum() / x.groupby(["p", "c"]).w.sum()
+    s_p = p.map(sp).values.astype(float)
+    s_pc = spc.reindex(pd.MultiIndex.from_arrays([p.values, c.values])).values.astype(float)
+    ok = t & np.isfinite(s_p) & np.isfinite(s_pc) & (s_pc > 0) & (s_pc < 1) & (s_p > 0) & (s_p < 1)
+    a = np.ones(len(d))
+    a[ok] = s_p[ok] * (1 - s_pc[ok]) / (s_pc[ok] * (1 - s_p[ok]))
+    d["w"] = w * a
+    return d

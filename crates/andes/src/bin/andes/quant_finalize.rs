@@ -749,8 +749,9 @@ pub(crate) fn strata_edges(
 
 /// The strata edges cut from `hist`, the pair counts per number of
 /// neighbour hits `0..=m` (the prior is hits / m): each stratum closes once
-/// it holds a share `total / MAX_STRATA`, with at most `MAX_STRATA - 1`
-/// edges, so at most [`MAX_STRATA`] strata.
+/// it holds a share `total / MAX_STRATA`; an edge is added only while there
+/// are fewer than `MAX_STRATA - 1`, so at most `MAX_STRATA - 1` edges and
+/// [`MAX_STRATA`] strata.
 fn edges_of_hist(hist: &[u64]) -> Vec<f64> {
     let m = hist.len().saturating_sub(1);
     let total: u64 = hist.iter().sum();
@@ -760,7 +761,7 @@ fn edges_of_hist(hist: &[u64]) -> Vec<f64> {
         let mut open = 0.0;
         for (i, &c) in hist.iter().enumerate().take(m) {
             open += c as f64;
-            if open >= share && edges.len() < MAX_STRATA - 1 {
+            if open >= share && edges.len() + 1 < MAX_STRATA {
                 edges.push(i as f64 / m as f64);
                 open = 0.0;
             }
@@ -2645,7 +2646,8 @@ mod tests {
         assert!(edges.len() < MAX_STRATA);
     }
 
-    /// An even histogram fills every one of the `MAX_STRATA` strata.
+    /// An even histogram fills every one of the `MAX_STRATA` strata, and the
+    /// last one survives packing into the family byte.
     #[test]
     fn an_even_prior_histogram_gives_max_strata() {
         let edges = edges_of_hist(&[1; 32]);

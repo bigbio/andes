@@ -1144,8 +1144,8 @@ measurement (no correction) on any input format.
 
 ### Bundled model store (`resources/models/`)
 
-17 models in `resources/models/protocol=<Automatic|TMT|Phosphorylation|iTRAQ>/models.parquet`
-(9 / 3 / 4 / 1 models), listed in [`README.md`](README.md#supported-models). If detection
+18 models in `resources/models/protocol=<Automatic|TMT|Phosphorylation|iTRAQ>/models.parquet`
+(10 / 3 / 4 / 1 models), listed in [`README.md`](README.md#supported-models). If detection
 fails, andes falls back to `hcd_qexactive_tryp` or the closest regime and names it in the run
 summary.
 

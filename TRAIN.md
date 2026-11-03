@@ -10,7 +10,7 @@
 ## 1. What a scoring model is, and when to train one
 
 A scoring model holds, per `(charge, parent-mass, fragment-segment)` partition, the
-intensity-rank and mass-error statistics of fragment ions. andes ships 17 models in
+intensity-rank and mass-error statistics of fragment ions. andes ships 18 models in
 `resources/models/`, which is also the default seed source. Train your own when your
 **instrument** (e.g. Astral, timsTOF) or **experiment class** (TMT/iTRAQ, phospho,
 immunopeptidomics, glyco …) is not well covered.

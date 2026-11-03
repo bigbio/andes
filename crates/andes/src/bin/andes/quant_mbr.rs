@@ -98,8 +98,8 @@
 //! signal-to-noise `A / amplitude_se` of their identified target fits,
 //! report the extract's template-free `trace_quantity` and
 //! `trace_quantity_se` in every run instead (a row whose trace area is not
-//! positive keeps the template quantity). The choice is per precursor, so a
-//! precursor's runs are measured alike. `quant_q` and the transfer q-values
+//! positive keeps the template quantity, decided per row). The choice is per
+//! precursor, so a precursor's runs are measured alike apart from such rows. `quant_q` and the transfer q-values
 //! do not use the reported quantity and are unchanged.
 //!
 //! Normalised quantity: `quantity_normalized` is the reported quantity with
@@ -3549,6 +3549,10 @@ mod finalize_tests {
         for r in runs[0].iter_mut().filter(|r| r.role == Role::Identified) {
             let e = r.evidence.as_mut().unwrap();
             e.amplitude_se = e.amplitude / (10.0 + r.precursor as f64);
+            if r.precursor == 0 {
+                // A non-positive trace area keeps the template quantity.
+                e.trace_quantity = 0.0;
+            }
         }
         let dir = tempfile::tempdir().unwrap();
         // The same rows from memory and from extract tables on disk: finalize
@@ -3618,6 +3622,16 @@ mod finalize_tests {
                 };
                 let e = target[&key];
                 assert_ne!(q, e.trace_quantity);
+                if e.trace_quantity <= 0.0 {
+                    for f in [a, h] {
+                        assert_eq!(
+                            (f.quantity, f.quantity_se),
+                            (o.quantity, o.quantity_se),
+                            "{name} {key:?}"
+                        );
+                    }
+                    continue;
+                }
                 // Every precursor has an identified fit: share 1 traces them all.
                 assert_eq!(
                     (a.quantity, a.quantity_se),

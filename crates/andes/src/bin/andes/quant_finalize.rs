@@ -2116,7 +2116,9 @@ pub(crate) fn finalize_stream(
                 {
                     continue;
                 }
-                let Some(e) = r.evidence.as_ref() else {
+                // A fit without signal reports no quantity (see the outputs
+                // below), so it is no reference cell either.
+                let Some(e) = r.evidence.as_ref().filter(|e| e.amplitude > 0.0) else {
                     continue;
                 };
                 let s = summaries.get(&r.precursor);

@@ -707,7 +707,11 @@ fn decode_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, String>
         })?;
         let role = decode_role(role.value(i))
             .ok_or_else(|| err(&format!("unknown role code {}", role.value(i))))?;
-        let evidence = if ev[0].is_null(i) {
+        let null_evidence = ev.iter().filter(|c| c.is_null(i)).count();
+        if null_evidence != 0 && null_evidence != ev.len() {
+            return Err(err(&"corrupt row: partial evidence"));
+        }
+        let evidence = if null_evidence == ev.len() {
             None
         } else {
             let v = |k: usize| ev[k].value(i);
@@ -960,6 +964,44 @@ mod tests {
         let e = read_extract_table(&p).unwrap_err();
         assert!(
             e.contains("k.extract.parquet") && e.contains("corrupt"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn a_row_with_partial_evidence_is_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.extract.parquet");
+        let rows = rows();
+        assert!(rows[0].evidence.is_some());
+        let schema = Arc::new(schema());
+        let mut cols = batch(&schema, &rows).unwrap().columns().to_vec();
+        // Null `trace_quantity` on the first row, the other evidence present.
+        let at = schema.index_of("trace_quantity").unwrap();
+        let old = cols[at].as_any().downcast_ref::<Float64Array>().unwrap();
+        let mut b = Float64Builder::new();
+        for i in 0..old.len() {
+            if i == 0 || old.is_null(i) {
+                b.append_null();
+            } else {
+                b.append_value(old.value(i));
+            }
+        }
+        cols[at] = Arc::new(b.finish());
+        let props = WriterProperties::builder()
+            .set_key_value_metadata(Some(vec![KeyValue::new(
+                SCHEMA_KEY.to_string(),
+                SCHEMA_VERSION.to_string(),
+            )]))
+            .build();
+        let mut w =
+            ArrowWriter::try_new(File::create(&p).unwrap(), schema.clone(), Some(props)).unwrap();
+        w.write(&RecordBatch::try_new(schema, cols).unwrap())
+            .unwrap();
+        w.close().unwrap();
+        let e = read_extract_table(&p).unwrap_err();
+        assert!(
+            e.contains("t.extract.parquet") && e.contains("partial evidence"),
             "{e}"
         );
     }

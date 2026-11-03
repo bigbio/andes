@@ -2894,7 +2894,7 @@ mod tests {
         );
         let base = 7.0 / 3.0 - 4.0 * 2.0 / 3.0;
         assert!((q - 10.0 * (0.5 * (5.0 - base) + 0.5 * (1.0 - base))).abs() < 1e-9);
-        assert!(se > 0.0);
+        assert!((se - (50.0 + 100.0 / 3.0f64).sqrt()).abs() < 1e-9, "{se}");
     }
 
     #[test]
@@ -2940,6 +2940,36 @@ mod tests {
             &mut sort,
         );
         assert!((q - 400.0).abs() < 1e-9, "{q}");
+    }
+
+    #[test]
+    fn trace_baseline_pools_agreeing_sides_with_different_medians() {
+        let rt: Vec<f64> = (0..25).map(f64::from).collect();
+        let mut y = vec![10.0f32; 25];
+        for v in &mut y[10..15] {
+            *v = 101.0;
+        }
+        for v in &mut y[15..] {
+            *v = 11.0;
+        }
+        let traces: [&[f32]; 1] = [&y];
+        let (pi, sigma) = ([1.0, 0.0, 0.0, 0.0], [1.0; MAX_ISOTOPES]);
+        let g = vec![0.0; 25];
+        let mut sort = Vec::new();
+        let (q, _) = trace_area(
+            &rt,
+            &traces,
+            &pi,
+            &sigma,
+            0b1,
+            0.0,
+            (10.0, 14.0),
+            &g,
+            &mut sort,
+        );
+        // Medians 10 and 11 differ by less than 3 SE (about 1.68): the pooled
+        // median 10.5 applies (the lower side alone would give 364).
+        assert!((q - 362.0).abs() < 1e-9, "{q}");
     }
 
     #[test]

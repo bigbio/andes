@@ -13,7 +13,9 @@
 //! `ms2_n_matched`, `ms2_angle`, `ms2_explained`; null for identified rows
 //! and rows without a fit); a schema-2 table is rejected. Schema 4 added
 //! the per-isotope heights `iso_h0`..`iso_h3` and the `tailing` of the fit;
-//! a schema-3 table is rejected.
+//! a schema-3 table is rejected. Schema 5 added the template-free trace area
+//! `trace_quantity` and its `trace_quantity_se`; a schema-4 table is
+//! rejected.
 //! The evidence columns are null when the fit was not possible.
 //! `n_donor_runs` counts the aligned runs with a PSM of the precursor, this
 //! run included for an identified row and excluded otherwise: the runs that
@@ -41,10 +43,10 @@ use quant::evidence::Evidence;
 use quant::ms2::{Ms2Evidence, ScanMatch};
 
 /// Major version of the table layout. A reader rejects any other major.
-pub const EXTRACT_SCHEMA_MAJOR: u32 = 4;
+pub const EXTRACT_SCHEMA_MAJOR: u32 = 5;
 
 const SCHEMA_KEY: &str = "andes.extract.schema";
-const SCHEMA_VERSION: &str = "4.0";
+const SCHEMA_VERSION: &str = "5.0";
 /// Rows per Parquet row group / record batch.
 const BATCH_ROWS: usize = 65_536;
 
@@ -80,7 +82,7 @@ pub struct ExtractRow {
     pub ms2: Option<Ms2Evidence>,
 }
 
-const F64_EVIDENCE: [&str; 18] = [
+const F64_EVIDENCE: [&str; 20] = [
     "amplitude",
     "amplitude_se",
     "quantity",
@@ -99,9 +101,11 @@ const F64_EVIDENCE: [&str; 18] = [
     "iso_h2",
     "iso_h3",
     "tailing",
+    "trace_quantity",
+    "trace_quantity_se",
 ];
 
-fn f64_fields(e: &Evidence) -> [f64; 18] {
+fn f64_fields(e: &Evidence) -> [f64; 20] {
     [
         e.amplitude,
         e.amplitude_se,
@@ -121,6 +125,8 @@ fn f64_fields(e: &Evidence) -> [f64; 18] {
         e.iso_heights[2],
         e.iso_heights[3],
         e.tailing,
+        e.trace_quantity,
+        e.trace_quantity_se,
     ]
 }
 
@@ -633,6 +639,8 @@ fn decode_fit_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, Str
                 w: v(2),
                 iso_heights: [v(3), v(4), v(5), v(6)],
                 tailing: v(7),
+                trace_quantity: f64::NAN,
+                trace_quantity_se: f64::NAN,
             }
         });
         rows.push(ExtractRow {
@@ -719,6 +727,8 @@ fn decode_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, String>
                 w: v(12),
                 iso_heights: [v(13), v(14), v(15), v(16)],
                 tailing: v(17),
+                trace_quantity: v(18),
+                trace_quantity_se: v(19),
             })
         };
         let ms2 = if ms2_scans.is_null(i) {
@@ -774,6 +784,8 @@ mod tests {
             w: 4.2,
             iso_heights: [5.0 + f, 3.0, 1.0, -0.5],
             tailing: 0.1 * f,
+            trace_quantity: 1.3e6 - f,
+            trace_quantity_se: 175.0,
         }
     }
 
@@ -867,7 +879,7 @@ mod tests {
     fn extract_table_rejects_unknown_major_version() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("b.extract.parquet");
-        for version in ["5.0", "3.0"] {
+        for version in ["6.0", "4.0"] {
             write_with_schema_version(&p, &rows(), version).unwrap();
             let e = read_extract_table(&p).unwrap_err();
             assert!(

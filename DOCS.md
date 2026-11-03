@@ -1063,9 +1063,10 @@ Files in the quant directory (`--quant-dir`), all Parquet: per run `<stem>.ms1.p
 `<stem>.ms2.parquet` and `<stem>.quant.parquet` (search), `<stem>.extract.parquet` (extract);
 once `library.parquet` and `alignment.parquet` (library). Each file carries a schema version
 (`andes.<table>.schema`); a reader rejects another major version and names the file.
-`<stem>.extract.parquet` is at schema 4: schema 3 added the MS2 evidence of the transfer and
-pseudo-transfer rows (`ms2_n_scans`, `ms2_n_matched`, `ms2_angle`, `ms2_explained`) and
-schema 4 the per-isotope heights (`iso_h0` to `iso_h3`) and `tailing` of every fit; an older
+`<stem>.extract.parquet` is at schema 5: schema 3 added the MS2 evidence of the transfer and
+pseudo-transfer rows (`ms2_n_scans`, `ms2_n_matched`, `ms2_angle`, `ms2_explained`),
+schema 4 the per-isotope heights (`iso_h0` to `iso_h3`) and `tailing` of every fit, and
+schema 5 the template-free trace area (`trace_quantity`, `trace_quantity_se`, §10); an older
 extract table is rejected (run `andes quant extract` again). `library.parquet` is at schema 4:
 schema 3 added each entry's fragment spectrum (`frag_mz`, `frag_intensity`, `frag_ion` such as
 `y7` or `b5^2`) and its donor PSMs' runs and RTs (`donor_scan_run`, `donor_scan_rt`), and
@@ -1761,6 +1762,16 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
   `w_p`. A precursor without such an identified fit, and every row of an unaligned run,
   reports its own per-run area. `<stem>.extract.parquet` keeps the per-run `quantity` and
   `quantity_se` (`A · w · √(2π)`) for provenance.
+* **Trace area (experimental).** `<stem>.extract.parquet` also keeps a template-free area,
+  `trace_quantity`: each isotope trace of the fit, minus its baseline (the median of the trace
+  outside the integration range), integrated over `t0 ± 3 · max(w, w_prior)` by the trapezoid
+  rule, the isotopes combined with the fit's weights. For a Gaussian peak it equals
+  `A · w · √(2π)`; for a tailing or otherwise non-Gaussian peak it follows the measured trace.
+  `andes quant finalize --quant-trace-fraction F` (hidden, default 0 = off) reports it instead
+  of `A · w_p · √(2π)` for the brightest share `F` of the precursors, ranked by the median
+  `A / amplitude_se` of their identified fits, in every run of such a precursor (a row whose
+  trace area is not positive keeps the template area); finalize logs the signal-to-noise cut.
+  `quant_q` and the transfer q-values do not depend on it.
 * **Normalised quantity.** `<stem>.mbr.parquet` also reports `quantity_normalized`: the reported
   quantity divided by `2^o`, where `o` is the run's log2 offset at the row's apex RT. The
   offsets are fitted across runs on the identified rows with `quant_q ≤ 0.01` of precursors

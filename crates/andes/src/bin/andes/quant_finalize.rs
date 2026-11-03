@@ -475,17 +475,27 @@ struct PrecursorSummary {
     /// The consensus width `w_c`.
     w_c: Option<f64>,
     shape: Option<ShapeSummary>,
+    /// The median amplitude signal-to-noise of the identified target fits,
+    /// read only with [`FinalizeParams::trace_fraction`].
+    snr: Option<f64>,
+    /// Whether the precursor reports its trace areas (see
+    /// [`crate::quant_mbr`], "Trace area").
+    trace: bool,
 }
 
 type Summaries = HashMap<u32, PrecursorSummary>;
 
-/// The summaries of the precursors of `items` (precursor, width on the
-/// consensus scale, donor fit), in any order.
-fn summarise(mut items: Vec<(u32, Option<f64>, Option<DonorFit>)>) -> Summaries {
+/// One identified row's part of its precursor's summary: precursor, width
+/// on the consensus scale, donor fit and amplitude signal-to-noise.
+type SummaryItem = (u32, Option<f64>, Option<DonorFit>, Option<f64>);
+
+/// The summaries of the precursors of `items`, in any order.
+fn summarise(mut items: Vec<SummaryItem>) -> Summaries {
     items.sort_unstable_by_key(|it| it.0);
     let mut out = Summaries::new();
     for g in items.chunk_by(|a, b| a.0 == b.0) {
         let widths: Vec<f64> = g.iter().filter_map(|it| it.1).collect();
+        let snrs: Vec<f64> = g.iter().filter_map(|it| it.3).collect();
         let fits: Vec<&DonorFit> = g.iter().filter_map(|it| it.2.as_ref()).collect();
         let window = |value: &dyn Fn(&DonorFit) -> f64| {
             let mut v: Vec<f64> = fits.iter().map(|f| value(f)).collect();
@@ -502,10 +512,53 @@ fn summarise(mut items: Vec<(u32, Option<f64>, Option<DonorFit>)>) -> Summaries 
             PrecursorSummary {
                 w_c: (!widths.is_empty()).then(|| median(widths)),
                 shape,
+                snr: (!snrs.is_empty()).then(|| median(snrs)),
+                trace: false,
             },
         );
     }
     out
+}
+
+/// `A / amplitude_se` of an identified target row's fit; `None` for any
+/// other row, or without a positive amplitude and a finite positive
+/// standard error.
+fn identified_snr(r: &ExtractRow) -> Option<f64> {
+    if (r.role, r.kind) != (Role::Identified, Hypothesis::Target) {
+        return None;
+    }
+    let e = r.evidence.as_ref()?;
+    (e.amplitude > 0.0 && e.amplitude_se > 0.0 && e.amplitude_se.is_finite())
+        .then(|| e.amplitude / e.amplitude_se)
+        .filter(|v| v.is_finite())
+}
+
+/// Mark the brightest share `fraction` (in `(0, 1]`) of the precursors with
+/// a signal-to-noise, by that median, to report their trace areas: those at
+/// or above the value of rank `ceil(fraction n)` from the top. Logs the cut
+/// and the distribution it was taken from.
+fn mark_trace_precursors(summaries: &mut Summaries, fraction: f64) {
+    let mut snrs: Vec<f64> = summaries.values().filter_map(|s| s.snr).collect();
+    if snrs.is_empty() {
+        eprintln!("[mbr] finalize: trace area for 0 precursors (no identified fit with a signal-to-noise)");
+        return;
+    }
+    snrs.sort_unstable_by(f64::total_cmp);
+    let n = snrs.len();
+    let k = ((fraction * n as f64).ceil() as usize).clamp(1, n);
+    let cut = snrs[n - k];
+    let mut marked = 0usize;
+    for s in summaries.values_mut() {
+        s.trace = s.snr.is_some_and(|v| v >= cut);
+        marked += usize::from(s.trace);
+    }
+    let at = |q: f64| snrs[((q * (n - 1) as f64).round() as usize).min(n - 1)];
+    eprintln!(
+        "[mbr] finalize: trace area for {marked} of {n} precursors with an identified fit (share {fraction}): median amplitude signal-to-noise >= {cut:.1}; distribution p50 {:.1}, p90 {:.1}, p99 {:.1}",
+        at(0.5),
+        at(0.9),
+        at(0.99)
+    );
 }
 
 /// The shape reference of the rows of one block: the precursors' summaries
@@ -1449,6 +1502,7 @@ pub(crate) fn finalize(
         },
         mbr_path,
         validation_path,
+        trace_fraction: 0.0,
     };
     let source = ExtractRuns {
         runs,
@@ -1474,6 +1528,10 @@ pub(crate) struct FinalizeParams<'a> {
     pub limits: FinalizeLimits,
     pub mbr_path: &'a Path,
     pub validation_path: &'a Path,
+    /// Share, in `[0, 1]`, of the precursors with an identified fit that
+    /// report their trace areas, the brightest by median amplitude
+    /// signal-to-noise (see [`crate::quant_mbr`], "Trace area"); 0 is off.
+    pub trace_fraction: f64,
 }
 
 /// Number of features of the wrong-peak model.
@@ -1666,6 +1724,12 @@ pub(crate) fn finalize_stream(
             "identified quality q-value threshold {t} is outside (0, 1]"
         ));
     }
+    let trace_fraction = params.trace_fraction;
+    if !(0.0..=1.0).contains(&trace_fraction) {
+        return Err(format!(
+            "trace-area precursor share {trace_fraction} is outside [0, 1]"
+        ));
+    }
     let maps = &lib.alignment.maps;
     let idx = EntryIndex::new(lib, stems.len());
     let bounds = Bounds {
@@ -1703,8 +1767,9 @@ pub(crate) fn finalize_stream(
                 for r in rows.iter().filter(|r| r.precursor as usize % groups == g) {
                     let w = consensus_scale_width(r, maps);
                     let f = donor_fit(r, maps);
-                    if w.is_some() || f.is_some() {
-                        local.push((r.precursor, w, f));
+                    let snr = (trace_fraction > 0.0).then(|| identified_snr(r)).flatten();
+                    if w.is_some() || f.is_some() || snr.is_some() {
+                        local.push((r.precursor, w, f, snr));
                     }
                 }
                 Ok(())
@@ -1721,6 +1786,9 @@ pub(crate) fn finalize_stream(
             all.extend(v);
         }
         all_summaries.extend(summarise(all));
+    }
+    if trace_fraction > 0.0 {
+        mark_trace_precursors(&mut all_summaries, trace_fraction);
     }
     eprintln!(
         "[mbr] finalize: {} extract tables, {} threads, temporary tables in {}; donor summaries of {} precursors in {groups} pass(es), {:.1} s",
@@ -2045,8 +2113,9 @@ pub(crate) fn finalize_stream(
                 let Some(e) = r.evidence.as_ref() else {
                     continue;
                 };
-                let w_c = summaries.get(&r.precursor).and_then(|s| s.w_c);
-                let q = reported_quantity(e, r.run, w_c, maps).0;
+                let s = summaries.get(&r.precursor);
+                let (w_c, trace) = (s.and_then(|s| s.w_c), s.is_some_and(|s| s.trace));
+                let q = reported_quantity(e, r.run, w_c, trace, maps).0;
                 if q > 0.0 && q.is_finite() {
                     local.push((
                         (chunk as u32, first + i as u64),
@@ -2156,11 +2225,12 @@ pub(crate) fn finalize_stream(
             // quantity is missing, not zero, in the MBR table and the
             // feature parquet.
             let reported = |r: &ExtractRow| {
-                let w_c = summaries.get(&r.precursor).and_then(|s| s.w_c);
+                let s = summaries.get(&r.precursor);
+                let (w_c, trace) = (s.and_then(|s| s.w_c), s.is_some_and(|s| s.trace));
                 r.evidence
                     .as_ref()
                     .filter(|e| e.amplitude > 0.0)
-                    .map(|e| reported_quantity(e, r.run, w_c, maps))
+                    .map(|e| reported_quantity(e, r.run, w_c, trace, maps))
             };
             // Probability that a transfer's measurement is wrong (1 without
             // features, a fold model or a calibration).
@@ -2602,6 +2672,51 @@ fn log_summary(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_brightest_share_of_precursors_reports_trace_areas() {
+        use super::{mark_trace_precursors, PrecursorSummary, Summaries};
+        let summaries = |snrs: &[Option<f64>]| -> Summaries {
+            snrs.iter()
+                .enumerate()
+                .map(|(p, &snr)| {
+                    (
+                        p as u32,
+                        PrecursorSummary {
+                            snr,
+                            ..PrecursorSummary::default()
+                        },
+                    )
+                })
+                .collect()
+        };
+        let marked = |s: &Summaries| {
+            let mut v: Vec<u32> = s.iter().filter(|(_, s)| s.trace).map(|(p, _)| *p).collect();
+            v.sort_unstable();
+            v
+        };
+        // Signal-to-noise 1..=10 for precursors 0..10, none for precursor 10.
+        let mut snrs: Vec<Option<f64>> = (1..=10).map(|v| Some(v as f64)).collect();
+        snrs.push(None);
+        let mut s = summaries(&snrs);
+        mark_trace_precursors(&mut s, 0.3);
+        assert_eq!(marked(&s), vec![7, 8, 9]);
+        // ceil(0.25 * 10) = 3 as well; a tie at the cut is kept.
+        snrs[6] = Some(8.0);
+        let mut s = summaries(&snrs);
+        mark_trace_precursors(&mut s, 0.25);
+        assert_eq!(marked(&s), vec![6, 7, 8, 9]);
+        let mut s = summaries(&snrs);
+        mark_trace_precursors(&mut s, 1.0);
+        assert_eq!(marked(&s), (0..10).collect::<Vec<u32>>());
+        // A small share still marks the brightest one.
+        let mut s = summaries(&snrs);
+        mark_trace_precursors(&mut s, 1e-9);
+        assert_eq!(marked(&s), vec![9]);
+        let mut s = summaries(&[None, None]);
+        mark_trace_precursors(&mut s, 1.0);
+        assert!(marked(&s).is_empty());
+    }
+
     /// Two clusters of runs, entries identified in all runs of one cluster:
     /// the strata are cut from the prior of the pairs without an
     /// identification, with ascending edges.

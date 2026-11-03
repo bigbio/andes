@@ -897,6 +897,22 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         },
         _ => {}
     }
+    // The model was chosen for `--protocol auto` before the reporter ions were
+    // read, so a labelled run is scored with the label-free model: a route to a
+    // cell the model was not trained on, warned like the others.
+    if cli.protocol == Protocol::Auto && cli.model_id_override.is_none() {
+        if let Some(l) = label {
+            let protocol = match l {
+                input::IsobaricLabel::Tmt | input::IsobaricLabel::TmtPro => "TMT",
+                input::IsobaricLabel::Itraq | input::IsobaricLabel::Itraq8 => "iTRAQ",
+            };
+            eprintln!(
+                "WARN: model routing: the run carries {l:?} reporter ions but --protocol is \
+                 auto, so it is scored with '{resolved_model_id}', trained on label-free \
+                 data. Pass --protocol {protocol} to score it with the {protocol} model."
+            );
+        }
+    }
     // C1: parameter-free path only (no explicit --mods). When the protocol
     // resolves to TMT/iTRAQ, or `--tmt` names the kit, inject the tag as a fixed mod on K + peptide
     // N-term so labeled peptides match their precursor mass — otherwise the

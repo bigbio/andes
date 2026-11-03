@@ -610,7 +610,7 @@ mod tests {
         let Tolerance::Da(w) = hi.node_score_window() else {
             panic!("Da expected");
         };
-        assert!((w - 0.17).abs() < 1e-12, "{w}");
+        assert!((w - 0.25).abs() < 1e-12, "{w}");
         hi.set_fragment_error(Some(
             FragmentErrorModel::new(0.0, 1.0, 100, 100).with_node_error_da(0.0, 0.3),
         ));

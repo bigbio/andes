@@ -4,6 +4,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Spreads in the PIN feature tolerance.
 pub const TOL_SIGMAS: f64 = 4.0;
+/// Spreads of the nominal-reference error in the node-score window. The
+/// window has to hold nearly every real fragment's nominal-mass rounding
+/// error, whose tail grows with fragment mass. Measured at entrapment FDP 1%
+/// on five high-resolution sets, fixed windows of 0.15-0.25 Da are the
+/// plateau where none loses PSMs, and the runs' measured spreads are about
+/// 0.035-0.05 Da; six spreads places the learned window in that plateau.
+pub const NODE_WINDOW_SIGMAS: f64 = 6.0;
 /// Narrowest derived feature tolerance (ppm).
 pub const MIN_FEATURE_TOL_PPM: f64 = 5.0;
 /// Widest derived feature tolerance (ppm).
@@ -52,11 +59,11 @@ impl FragmentErrorModel {
     }
 
     /// Node-score window learned from the run: the nominal-reference error's
-    /// `|centre| + 4 spreads` (the same spread multiple as the PIN feature
-    /// tolerance), `None` without a nominal-reference measurement.
+    /// `|centre| + 6 spreads` ([`NODE_WINDOW_SIGMAS`]), `None` without a
+    /// nominal-reference measurement.
     pub fn node_window_da(&self) -> Option<f64> {
         self.node_error_da
-            .map(|(c, s)| c.abs() + TOL_SIGMAS * s)
+            .map(|(c, s)| c.abs() + NODE_WINDOW_SIGMAS * s)
             .filter(|w| w.is_finite() && *w > 0.0)
     }
 
@@ -165,7 +172,7 @@ mod tests {
             FragmentErrorModel::new(4.2, 3.0, 10, 2).with_node_error_da(-0.01, 0.04),
         ));
         let w = s.get().and_then(|m| m.node_window_da()).unwrap();
-        assert!((w - 0.17).abs() < 1e-12, "{w}");
+        assert!((w - 0.25).abs() < 1e-12, "{w}");
         s.set(None);
         assert_eq!(s.get(), None);
     }

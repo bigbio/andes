@@ -262,7 +262,8 @@ mod tests {
         let (nc, ns) = m.node_error_da.expect("nominal-reference error");
         assert!(nc.abs() < 0.011 && (ns - 0.074).abs() < 0.01, "{m:?}");
         let w = m.node_window_da().unwrap();
-        assert!((w - (nc.abs() + 4.0 * ns)).abs() < 1e-12, "{w}");
+        let six = scoring_crate::scoring::fragment_error::NODE_WINDOW_SIGMAS;
+        assert!((w - (nc.abs() + six * ns)).abs() < 1e-12, "{w}");
         assert!((m.offset_ppm + 2.5).abs() < 0.15, "{m:?}");
         assert!((m.sigma_ppm - 1.6).abs() < 0.25, "{m:?}");
         assert_eq!(m.psms, 700);

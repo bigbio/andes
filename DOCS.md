@@ -986,14 +986,14 @@ whose node scores are indexed by nominal fragment mass, so it covers the roundin
 mass and is not a matching tolerance of the acquisition. The model stores 0.5 Da; on
 high-resolution fragments (without `--fragment-tol-*`, outside `--glyco`) the run learns it from
 the confident matches of the fragment-error sample: the error of their most intense b/y ions
-against the nominal-mass reference, `|median| + 4 × robust spread`, never wider than the stored
+against the nominal-mass reference, `|median| + 6 × robust spread`, never wider than the stored
 window. The `Fragment error:` line at the start of each run prints it.
 
 ```text
 ──────── andes run summary ────────
   Final precursor tolerance : Symmetric(10.0 ppm) (calibration: Auto)
   Final fragment tolerance  : 20 ppm (retrieval and model features); 11.4 ppm (PIN match features, measured)
-  Node-score bin width      : 0.172 Da (model rank tables, nominal fragment masses)
+  Node-score bin width      : 0.231 Da (model rank tables, nominal fragment masses)
   Spectra with a match      : 48210
   Rank-1 PSMs (pre-FDR)     : 31204 target, 17006 decoy
   PTM report (rank-1 target PSMs carrying each modification):

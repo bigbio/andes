@@ -242,7 +242,8 @@ impl FragmentErrorMeasurer {
                 eprintln!(
                     "Fragment error: offset {:+.2} ppm, spread {:.2} ppm from {} ions of {} PSMs \
                      at 1% q in {} sampled spectra -> fragment peaks recentred by {:+.2} ppm, \
-                     PIN feature tolerance {:.1} ppm, ppm-Gaussian width {:.2} ppm ({:.1}s)",
+                     PIN feature tolerance {:.1} ppm, ppm-Gaussian width {:.2} ppm, \
+                     node-score window {:?} ({:.1}s)",
                     m.offset_ppm,
                     m.sigma_ppm,
                     m.ions,
@@ -251,6 +252,7 @@ impl FragmentErrorMeasurer {
                     prepared.scorer.fragment_recentre_ppm(),
                     m.feature_tolerance_ppm(),
                     m.gaussian_sigma_ppm(),
+                    prepared.scorer.node_score_window(),
                     t.elapsed().as_secs_f64()
                 );
             }
@@ -945,15 +947,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                  into the candidate set (no --mods given)"
             );
         }
-    }
-    if let Some(w) =
-        crate::model_select::served_node_score_window(&param, acquisition.high_res, cli.glyco)
-    {
-        eprintln!(
-            "Node-score window: {w:?} on high-resolution fragments (model {resolved_model_id} stores {:?})",
-            param.mme
-        );
-        param.mme = w;
     }
     let mut scorer = RankScorer::new(&param);
     // Feature tolerances and the fragment-index vote mode follow the
@@ -2883,15 +2876,16 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `<stem>.statistics.log` next to the PIN so a run's true parameters (and which
     // PTMs were identified, with PSM counts) are always recoverable.
     // The fragment line reports the tolerance fragments were matched at; the
-    // node-score window (`param.mme` as served) covers the rounding error of
-    // the nominal-mass node scores and is reported apart.
+    // node-score window (stored, or learned from the run on high-res data)
+    // covers the rounding error of the nominal-mass node scores and is
+    // reported apart.
     let run_stats = output::RunStatistics::compute(
         &queues,
         &pin_candidates,
         &params,
         &scorer.feature_match_tolerance(),
         &scorer.pin_match_tolerance(),
-        &param.mme,
+        &scorer.node_score_window(),
     );
     eprint!("{}", run_stats.render());
     // Named after the run like the other reports, so searches writing into

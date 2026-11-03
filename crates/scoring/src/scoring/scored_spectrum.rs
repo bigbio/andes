@@ -422,7 +422,7 @@ impl<'a> ScoredSpectrum<'a> {
         // parent_mass    = (precursor_mz - PROTON) * charge
         // approx_num_bins = parent_mass / (mme.raw_value() * 2)
         // prob_peak      = max(active_count, 1) / max(approx_num_bins, 1)
-        let mme_raw = param.mme.raw_value();
+        let mme_raw = scorer.node_score_window().raw_value();
         let approx_num_bins = if mme_raw > 0.0 {
             parent_mass / (mme_raw * 2.0)
         } else {
@@ -493,7 +493,7 @@ impl<'a> ScoredSpectrum<'a> {
                     charge,
                     parent_mass,
                     cache_peaks,
-                    &param.mme,
+                    &scorer.node_score_window(),
                 );
                 let feats = extract_peak_features(cache_peaks, cache_ranks, &ctx);
                 // Batched, trees-outer (see `GbdtPeakModel::predict_logit_batch`):
@@ -1283,7 +1283,7 @@ impl<'a> ScoredSpectrum<'a> {
         }
 
         let theo_mz = self.main_ion.mz(node_nominal as f64);
-        let tol_da = scorer.param().mme.as_da(theo_mz);
+        let tol_da = scorer.node_score_window().as_da(theo_mz);
         // Select the highest-intensity peak within [theo_mz - tol_da, theo_mz + tol_da].
         // Intensity-comparator selection: pick the maximum-intensity peak in the window.
         // Skip filtered peaks (ranks[i] == u32::MAX).
@@ -1717,7 +1717,8 @@ fn visit_directional_node_ion_matches<F>(
     use crate::param_model::IonType;
 
     let param = scorer.param();
-    let mme = &param.mme;
+    let node_window = scorer.node_score_window();
+    let mme = &node_window;
     let num_segs = param.num_segments as usize;
     let use_cache = !segment_partition_cache.is_empty();
     #[allow(clippy::needless_range_loop)]
@@ -1822,7 +1823,8 @@ fn visit_directional_loss_ion_matches<F>(
         return;
     }
     let param = scorer.param();
-    let mme = &param.mme;
+    let node_window = scorer.node_score_window();
+    let mme = &node_window;
     let num_segs = param.num_segments as usize;
     let use_cache = !segment_partition_cache.is_empty();
     // `seg` indexes the cache AND feeds `partition_for`/`segment_num`, so the
@@ -1979,7 +1981,8 @@ fn visit_directional_loss_ion_facts<F>(
         return;
     }
     let param = scorer.param();
-    let mme = &param.mme;
+    let node_window = scorer.node_score_window();
+    let mme = &node_window;
     let num_segs = param.num_segments as usize;
     let use_cache = !segment_partition_cache.is_empty();
     #[allow(clippy::needless_range_loop)]

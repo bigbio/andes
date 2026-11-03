@@ -27,6 +27,11 @@ pub struct FragmentErrorModel {
     pub ions: usize,
     /// Confident PSMs the ions came from.
     pub psms: usize,
+    /// Robust centre and spread (Da) of the same ions' errors against the
+    /// theoretical m/z rebuilt from their NOMINAL fragment mass, the reference
+    /// the rank-table node scores match against. It holds the nominal-mass
+    /// rounding error on top of the instrument error.
+    pub node_error_da: Option<(f64, f64)>,
 }
 
 impl FragmentErrorModel {
@@ -36,7 +41,23 @@ impl FragmentErrorModel {
             sigma_ppm,
             ions,
             psms,
+            node_error_da: None,
         }
+    }
+
+    /// The same model with the measured nominal-reference error (Da).
+    pub fn with_node_error_da(mut self, centre_da: f64, sigma_da: f64) -> Self {
+        self.node_error_da = Some((centre_da, sigma_da));
+        self
+    }
+
+    /// Node-score window learned from the run: the nominal-reference error's
+    /// `|centre| + 4 spreads` (the same spread multiple as the PIN feature
+    /// tolerance), `None` without a nominal-reference measurement.
+    pub fn node_window_da(&self) -> Option<f64> {
+        self.node_error_da
+            .map(|(c, s)| c.abs() + TOL_SIGMAS * s)
+            .filter(|w| w.is_finite() && *w > 0.0)
     }
 
     /// Symmetric feature tolerance around the recentred peaks:
@@ -57,6 +78,8 @@ impl FragmentErrorModel {
 pub(crate) struct SharedFragmentError {
     offset_bits: AtomicU64,
     sigma_bits: AtomicU64,
+    node_centre_bits: AtomicU64,
+    node_sigma_bits: AtomicU64,
 }
 
 impl SharedFragmentError {
@@ -64,19 +87,35 @@ impl SharedFragmentError {
         Self {
             offset_bits: AtomicU64::new(f64::NAN.to_bits()),
             sigma_bits: AtomicU64::new(f64::NAN.to_bits()),
+            node_centre_bits: AtomicU64::new(f64::NAN.to_bits()),
+            node_sigma_bits: AtomicU64::new(f64::NAN.to_bits()),
         }
     }
 
     pub(crate) fn set(&self, m: Option<FragmentErrorModel>) {
         let (o, s) = m.map_or((f64::NAN, f64::NAN), |m| (m.offset_ppm, m.sigma_ppm));
+        let (nc, ns) = m
+            .and_then(|m| m.node_error_da)
+            .unwrap_or((f64::NAN, f64::NAN));
         self.offset_bits.store(o.to_bits(), Ordering::Relaxed);
         self.sigma_bits.store(s.to_bits(), Ordering::Relaxed);
+        self.node_centre_bits.store(nc.to_bits(), Ordering::Relaxed);
+        self.node_sigma_bits.store(ns.to_bits(), Ordering::Relaxed);
     }
 
     pub(crate) fn get(&self) -> Option<FragmentErrorModel> {
         let o = f64::from_bits(self.offset_bits.load(Ordering::Relaxed));
         let s = f64::from_bits(self.sigma_bits.load(Ordering::Relaxed));
-        (o.is_finite() && s.is_finite()).then(|| FragmentErrorModel::new(o, s, 0, 0))
+        let nc = f64::from_bits(self.node_centre_bits.load(Ordering::Relaxed));
+        let ns = f64::from_bits(self.node_sigma_bits.load(Ordering::Relaxed));
+        (o.is_finite() && s.is_finite()).then(|| {
+            let m = FragmentErrorModel::new(o, s, 0, 0);
+            if nc.is_finite() && ns.is_finite() {
+                m.with_node_error_da(nc, ns)
+            } else {
+                m
+            }
+        })
     }
 }
 
@@ -121,6 +160,12 @@ mod tests {
         let got = s.get().unwrap();
         assert_eq!((got.offset_ppm, got.sigma_ppm), (4.2, 3.0));
         assert_eq!(s.clone().get().map(|m| m.offset_ppm), Some(4.2));
+        assert_eq!(got.node_window_da(), None);
+        s.set(Some(
+            FragmentErrorModel::new(4.2, 3.0, 10, 2).with_node_error_da(-0.01, 0.04),
+        ));
+        let w = s.get().and_then(|m| m.node_window_da()).unwrap();
+        assert!((w - 0.17).abs() < 1e-12, "{w}");
         s.set(None);
         assert_eq!(s.get(), None);
     }

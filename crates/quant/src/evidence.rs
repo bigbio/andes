@@ -539,40 +539,24 @@ fn traces(
     let slices = target_slices(mu, charge, n_iso, tol_ppm);
     out.rt.clear();
     out.rt.extend(scans.clone().map(|j| ms1.rt(j)));
-    if gate.is_some() {
-        out.mz0.clear();
-        out.y[0].clear();
-        let (lo, hi) = slices[0];
-        for j in scans.clone() {
-            let (mz, inten) = ms1.slice_in(j, lo, hi, gate);
-            out.mz0.push(mz);
-            out.y[0].push(inten);
-        }
-        for (i, &(lo, hi)) in slices.iter().enumerate().take(n_iso).skip(1) {
-            out.y[i].clear();
-            out.y[i].extend(scans.clone().map(|j| ms1.slice_in(j, lo, hi, gate).1));
-        }
-        let (lo, hi) = slices[n_iso];
-        out.m1.clear();
-        out.m1
-            .extend(scans.map(|j| ms1.slice_in(j, lo, hi, gate).1));
-        return;
-    }
-    let (lo, hi) = slices[0];
+    // Without a gate `slice_in` is `apex_centroid` (or `(0, 0)`) and its
+    // value `max_in`, on plain and mobility-resolved scans alike.
     out.mz0.clear();
     out.y[0].clear();
+    let (lo, hi) = slices[0];
     for j in scans.clone() {
-        let (mz, inten) = ms1.apex_centroid(j, lo, hi).unwrap_or((0.0, 0.0));
+        let (mz, inten) = ms1.slice_in(j, lo, hi, gate);
         out.mz0.push(mz);
         out.y[0].push(inten);
     }
     for (i, &(lo, hi)) in slices.iter().enumerate().take(n_iso).skip(1) {
         out.y[i].clear();
-        out.y[i].extend(scans.clone().map(|j| ms1.max_in(j, lo, hi)));
+        out.y[i].extend(scans.clone().map(|j| ms1.slice_in(j, lo, hi, gate).1));
     }
     let (lo, hi) = slices[n_iso];
     out.m1.clear();
-    out.m1.extend(scans.map(|j| ms1.max_in(j, lo, hi)));
+    out.m1
+        .extend(scans.map(|j| ms1.slice_in(j, lo, hi, gate).1));
 }
 
 /// Traces per probe: isotopes 0 to `n_iso - 1`, then M-1.

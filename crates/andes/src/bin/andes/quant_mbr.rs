@@ -2270,13 +2270,13 @@ mod finalize_tests {
 
     use super::*;
     use crate::quant_finalize::{
-        finalize, finalize_stream, for_each_scored, pseudo_example, table_features, wrong_features,
-        BlockContext, EntryIndex, ExtractRuns, FinalizeLimits, FinalizeParams, FinalizeSummary,
-        MbrFeature, Table, WrongCalibration, SCORE_CHUNK,
+        finalize, finalize_stream, for_each_scored, pseudo_example, running_mean_q, table_features,
+        wrong_features, BlockContext, EntryIndex, ExtractRuns, FinalizeLimits, FinalizeParams,
+        FinalizeSummary, MbrFeature, Table, WrongCalibration, SCORE_CHUNK,
     };
     use crate::transfer_fdr::{
         row_unit, train_bagged_folds, train_folds, transfer_train_params, Estimate, FdrRow,
-        FoldScores, QValues, TrainingSample,
+        FoldScores, QValues, TrainingSample, TARGET,
     };
 
     const N: u32 = 900;
@@ -2976,7 +2976,7 @@ mod finalize_tests {
                 let at: Vec<usize> = (0..rows.len())
                     .filter(|&i| {
                         rows[i].role == Role::Transfer
-                            && matches!(idx.table(&rows[i]), Some((Table::Transfer, 0)))
+                            && matches!(idx.table(&rows[i]), Some((Table::Transfer, TARGET)))
                     })
                     .collect();
                 let xs: Vec<Option<Vec<f32>>> = at
@@ -3134,12 +3134,7 @@ mod finalize_tests {
                 }
             }
             for pool in by_run.values_mut() {
-                pool.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-                let mut sum = 0.0;
-                for (n, &(p, k)) in pool.iter().enumerate() {
-                    sum += p;
-                    out[k].2.quant_q = Some(sum / (n + 1) as f64);
-                }
+                running_mean_q(pool, |k, q| out[k].2.quant_q = Some(q));
             }
             out.sort_by_key(|&(p, run, ..)| (p, run));
             let mut features = Vec::with_capacity(out.len());

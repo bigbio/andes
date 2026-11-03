@@ -77,7 +77,7 @@ use crate::quant_mbr::{
 use crate::transfer_fdr::{
     member_seed, pack_family, row_unit, sample_hash, stratum_of, train_bagged_folds, train_folds,
     transfer_train_params, Estimate, FdrCounts, FdrRow, FoldModels, FoldScores, QValues,
-    TrainingSample, IDENTITY, MAX_STRATA, TRANSFER_FEATURES,
+    TrainingSample, IDENTITY, MAX_STRATA, TARGET, TRANSFER_FEATURES,
 };
 
 /// What one finalize did, for the caller to log.
@@ -742,14 +742,25 @@ pub(crate) fn strata_edges(
                 a
             },
         );
+    let edges = edges_of_hist(&hist);
+    eprintln!("[mbr] presence prior strata edges {edges:?}");
+    edges
+}
+
+/// The strata edges cut from `hist`, the pair counts per number of
+/// neighbour hits `0..=m` (the prior is hits / m): each stratum closes once
+/// it holds a share `total / MAX_STRATA`, with at most `MAX_STRATA - 1`
+/// edges, so at most [`MAX_STRATA`] strata.
+fn edges_of_hist(hist: &[u64]) -> Vec<f64> {
+    let m = hist.len().saturating_sub(1);
     let total: u64 = hist.iter().sum();
     let mut edges = Vec::new();
-    if total > 0 {
+    if total > 0 && m > 0 {
         let share = total as f64 / MAX_STRATA as f64;
         let mut open = 0.0;
         for (i, &c) in hist.iter().enumerate().take(m) {
             open += c as f64;
-            if open >= share && edges.len() + 1 < MAX_STRATA {
+            if open >= share && edges.len() < MAX_STRATA - 1 {
                 edges.push(i as f64 / m as f64);
                 open = 0.0;
             }
@@ -759,7 +770,6 @@ pub(crate) fn strata_edges(
             edges.pop();
         }
     }
-    eprintln!("[mbr] presence prior strata edges {edges:?}");
     edges
 }
 
@@ -1472,8 +1482,10 @@ const WRONG_FEATURES: usize = 11;
 const WRONG_CALIBRATION_ROWS: usize = 4_000_000;
 
 /// Features of the wrong-peak model: the fit evidence only (no donor count,
-/// library value or MS2 evidence), `None` with a non-finite value or no
-/// positive quantity.
+/// library value or MS2 evidence), `None` with a non-finite feature or no
+/// positive quantity. The width ratio and the two standard errors are
+/// floored with `f64::max` first, which also turns a NaN among them into the
+/// floor rather than a rejection.
 pub(crate) fn wrong_features(e: &Evidence) -> Option<Vec<f32>> {
     if e.quantity.is_nan() || e.quantity <= 0.0 {
         return None;
@@ -1494,6 +1506,27 @@ pub(crate) fn wrong_features(e: &Evidence) -> Option<Vec<f32>> {
     debug_assert_eq!(x.len(), WRONG_FEATURES);
     let x: Vec<f32> = x.iter().map(|&v| v as f32).collect();
     x.iter().all(|v| v.is_finite()).then_some(x)
+}
+
+/// quant_q of each `(p_wrong, row)` in `pool`: the mean `p_wrong` of the rows
+/// at or below its own `p_wrong`. Rows with equal `p_wrong` are one step and
+/// share the mean at the end of their group, so the result does not depend on
+/// the order of the rows. `set(row, q)` receives every row once; `pool` is
+/// sorted in place.
+pub(crate) fn running_mean_q(pool: &mut [(f64, usize)], mut set: impl FnMut(usize, f64)) {
+    pool.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    let mut sum = 0.0;
+    let mut start = 0;
+    while start < pool.len() {
+        let p = pool[start].0;
+        let end = start + pool[start..].partition_point(|r| r.0.total_cmp(&p).is_eq());
+        sum += pool[start..end].iter().map(|r| r.0).sum::<f64>();
+        let q = sum / end as f64;
+        for &(_, i) in &pool[start..end] {
+            set(i, q);
+        }
+        start = end;
+    }
 }
 
 /// Whether a pseudo-transfer's measurement is wrong against the same cell's
@@ -2135,7 +2168,7 @@ pub(crate) fn finalize_stream(
                 let at: Vec<usize> = (0..rows.len())
                     .filter(|&i| {
                         rows[i].role == Role::Transfer
-                            && matches!(idx.table(&rows[i]), Some((Table::Transfer, 0)))
+                            && matches!(idx.table(&rows[i]), Some((Table::Transfer, TARGET)))
                     })
                     .collect();
                 let xs: Vec<Option<Vec<f32>>> = at
@@ -2315,12 +2348,7 @@ pub(crate) fn finalize_stream(
                 })
                 .map(|&(i, p)| (p, i))
                 .collect();
-            pool.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-            let mut sum = 0.0;
-            for (k, &(p, i)) in pool.iter().enumerate() {
-                sum += p;
-                out.rows[i].quant_q = Some(sum / (k + 1) as f64);
-            }
+            running_mean_q(&mut pool, |i, q| out.rows[i].quant_q = Some(q));
             out.rows.sort_unstable_by_key(|r| (r.precursor, r.run));
             if let Some(w) = out
                 .rows
@@ -2617,6 +2645,21 @@ mod tests {
         assert!(edges.len() < MAX_STRATA);
     }
 
+    /// An even histogram fills every one of the `MAX_STRATA` strata.
+    #[test]
+    fn an_even_prior_histogram_gives_max_strata() {
+        let edges = edges_of_hist(&[1; 32]);
+        assert_eq!(edges.len() + 1, MAX_STRATA, "{edges:?}");
+        assert!(edges.windows(2).all(|w| w[0] < w[1]), "{edges:?}");
+        // Packed and unpacked, the last stratum is still distinct.
+        let last = stratum_of(1.0, &edges);
+        assert_eq!(usize::from(last), MAX_STRATA - 1);
+        let packed = crate::transfer_fdr::unpack_family(pack_family(TARGET, last));
+        assert_eq!(packed, (TARGET, MAX_STRATA - 1));
+        assert!(edges_of_hist(&[]).is_empty());
+        assert!(edges_of_hist(&[0, 0, 0]).is_empty());
+    }
+
     use super::*;
 
     struct Lcg(u64);
@@ -2811,5 +2854,49 @@ mod tests {
         let c = WrongCalibration::fit(vec![(1.0, true), (1.0, false), (1.0, false), (1.0, false)])
             .unwrap();
         assert_eq!(c.p, vec![0.25]);
+    }
+
+    fn quant_qs(rows: &[f64]) -> Vec<f64> {
+        let mut pool: Vec<(f64, usize)> = rows.iter().copied().zip(0..).collect();
+        let mut q = vec![f64::NAN; rows.len()];
+        running_mean_q(&mut pool, |i, v| q[i] = v);
+        q
+    }
+
+    #[test]
+    fn tied_wrong_peak_probabilities_share_one_quant_q() {
+        // Groups 0.1 x1, 0.2 x3, 0.5 x2: each group gets the mean over all
+        // rows up to the end of the group.
+        let rows = [0.2, 0.5, 0.1, 0.2, 0.5, 0.2];
+        let q = quant_qs(&rows);
+        let at = |p: f64| -> Vec<f64> {
+            rows.iter()
+                .zip(&q)
+                .filter(|r| *r.0 == p)
+                .map(|r| *r.1)
+                .collect()
+        };
+        assert_eq!(at(0.1), vec![0.1]);
+        let tie = (0.1 + 3.0 * 0.2) / 4.0;
+        assert!(at(0.2).iter().all(|&v| (v - tie).abs() < 1e-12), "{q:?}");
+        let all = (0.1 + 3.0 * 0.2 + 2.0 * 0.5) / 6.0;
+        assert!(at(0.5).iter().all(|&v| (v - all).abs() < 1e-12), "{q:?}");
+        // Any permutation of the rows gives every row the same quant_q.
+        let mut g = Lcg(11);
+        let probs: Vec<f64> = (0..500)
+            .map(|_| f64::from(g.below(7) as u32) / 10.0)
+            .collect();
+        let q = quant_qs(&probs);
+        for _ in 0..5 {
+            let mut order: Vec<usize> = (0..probs.len()).collect();
+            for i in (1..order.len()).rev() {
+                order.swap(i, g.below(i as u64 + 1) as usize);
+            }
+            let permuted: Vec<f64> = order.iter().map(|&i| probs[i]).collect();
+            let qp = quant_qs(&permuted);
+            for (j, &i) in order.iter().enumerate() {
+                assert_eq!(qp[j].to_bits(), q[i].to_bits());
+            }
+        }
     }
 }

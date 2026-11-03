@@ -476,6 +476,51 @@ pub(crate) fn choose_model(
     protocol: Protocol,
     enzyme: model::enzyme::Enzyme,
 ) -> ModelChoice {
+    let choice = choose_for_protocol(entries, activation, instrument, protocol, enzyme);
+    // iTRAQ-phospho: without a model trained on that class, the ladder falls to
+    // the unlabelled base. The iTRAQ model is the closer one: the tag on every
+    // peptide N-terminus and lysine shifts and enhances the b-ion series and adds
+    // reporter and tag fragments on every spectrum, while the phosphate touches
+    // only the modified peptides (its neutral loss is scored from the
+    // modification, not from the table). TMT-phospho already resolves to the
+    // TMT model by the same preference (the labelling tag wins the subset
+    // tie-break in `select`). The iTRAQ model is taken only when it exists for
+    // this activation and instrument; otherwise the first choice stands.
+    if protocol == Protocol::ItraqPhospho
+        && class_of(entries, &choice.model_id) != Some(&choice.key.experiment_class)
+    {
+        let itraq = choose_for_protocol(entries, activation, instrument, Protocol::Itraq, enzyme);
+        if class_of(entries, &itraq.model_id).is_some_and(|c| c.contains("itraq")) {
+            return ModelChoice {
+                model_id: itraq.model_id,
+                key: choice.key,
+                substituted: true,
+            };
+        }
+    }
+    choice
+}
+
+/// The experiment class the store's `model_id` was trained on.
+fn class_of<'a>(
+    entries: &'a [SelectionEntry],
+    model_id: &str,
+) -> Option<&'a std::collections::BTreeSet<String>> {
+    entries
+        .iter()
+        .find(|e| e.model_id == model_id)
+        .map(|e| &e.experiment_class)
+}
+
+/// [`choose_model`] for one protocol: [`build_selection_key`], then
+/// [`select_nearest_for`].
+fn choose_for_protocol(
+    entries: &[SelectionEntry],
+    activation: ActivationMethod,
+    instrument: Option<InstrumentType>,
+    protocol: Protocol,
+    enzyme: model::enzyme::Enzyme,
+) -> ModelChoice {
     let key = build_selection_key(activation, instrument, protocol, enzyme);
     // A model trained for the EXACT detected instrument (e.g. a user-trained
     // OrbitrapAstral model) is hidden by the family collapse, so the detected
@@ -655,6 +700,36 @@ mod param_resolver_tests {
             );
             assert_eq!(hla.model_id, "hcd_highres_nocleavage", "{name}");
         }
+    }
+
+    /// iTRAQ-phospho with no model trained on it takes the iTRAQ model of the
+    /// same activation and instrument (and warns), not the unlabelled base;
+    /// where no iTRAQ model exists the first choice stands.
+    #[test]
+    fn itraq_phospho_takes_the_itraq_model() {
+        use model::enzyme::Enzyme;
+        let store = ModelStore::open(&bundled_store_path()).expect("bundled store");
+        let entries = store.selection_entries();
+        let pick = |act, inst, prot| choose_model(&entries, act, inst, prot, Enzyme::Trypsin);
+        for inst in [InstrumentType::QExactive, InstrumentType::HighRes] {
+            let c = pick(ActivationMethod::HCD, Some(inst), Protocol::ItraqPhospho);
+            assert_eq!(c.model_id, "hcd_qexactive_tryp_itraq", "{inst:?}");
+            assert!(c.substituted, "{inst:?}");
+        }
+        assert_eq!(
+            pick(
+                ActivationMethod::CID,
+                Some(InstrumentType::LowRes),
+                Protocol::ItraqPhospho
+            )
+            .model_id,
+            pick(
+                ActivationMethod::CID,
+                Some(InstrumentType::LowRes),
+                Protocol::Auto
+            )
+            .model_id
+        );
     }
 
     /// The bundled-store selection, as the search and training paths run it

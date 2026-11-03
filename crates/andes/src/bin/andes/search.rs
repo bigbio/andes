@@ -3459,6 +3459,7 @@ mod retrieval_choice_tests {
             ActivationMethod::CID,
             ActivationMethod::HCD,
             ActivationMethod::PQD,
+            ActivationMethod::EThcD,
         ] {
             assert!(search::fragment_index::covers_activation(a), "{a:?}");
         }

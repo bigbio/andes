@@ -57,6 +57,7 @@ andes --spectrum mydata.mzML --database mydb.fasta --output-pin out.pin \
 | `--mods` | mods.txt (same format as search) | Cam-C + Ox-M |
 | `--date` | ISO-8601 date in the source ledger | today |
 | `--fragment-tol-ppm` / `--fragment-tol-da` | replace the seed's fragment tolerance (`mme`) | the seed's |
+| `--activation` | activation of the model (`EThcD`, `ETD`, …): its selection key and ion series (EThcD: b, y, c, z•); only spectra with that activation are used | the seed's, all spectra |
 
 Use a lenient `--train-fdr` (e.g. `0.1`) on small datasets and `0.01` on full runs.
 

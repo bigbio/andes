@@ -571,9 +571,10 @@ pub(crate) struct SearchArgs {
     pub(crate) peak_filter: Option<String>,
 
     /// How to label EThcD/ETciD spectra (electron transfer with a supplemental
-    /// collisional term). `hcd` is the default and is what model routing expects, since
-    /// no EThcD model exists; `etd` labels them ETD so the c/z scoring path engages.
-    #[arg(long = "ethcd-activation", hide = true, value_enum, default_value_t = EthcdActivationFlag::Hcd)]
+    /// collisional term). `ethcd` (default) routes them to the EThcD model, which
+    /// scores b/y and c/z ions; `etd` labels them ETD (the `--glyco` c/z stack runs
+    /// on ETD spectra only).
+    #[arg(long = "ethcd-activation", hide = true, value_enum, default_value_t = EthcdActivationFlag::Ethcd)]
     pub(crate) ethcd_activation: EthcdActivationFlag,
 
     /// Diagnostic: restrict `--glyco` scoring to the scan numbers in this file, one per
@@ -1348,8 +1349,8 @@ impl GeometryArgs {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum EthcdActivationFlag {
-    /// Label EThcD/ETciD as HCD (default; matches model routing).
-    Hcd,
+    /// Label EThcD/ETciD as EThcD (default; routes to the EThcD model).
+    Ethcd,
     /// Label them ETD so the c/z scoring path engages.
     Etd,
 }

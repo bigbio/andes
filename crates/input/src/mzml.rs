@@ -67,6 +67,9 @@ const CV_SCAN_WINDOW_LOWER: &str = "MS:1000501";
 const CV_SCAN_WINDOW_UPPER: &str = "MS:1000500";
 /// `FAIMS compensation voltage`.
 const CV_FAIMS_CV: &str = "MS:1001581";
+/// Thermo filter string; its activation chain names the supplemental collision of an
+/// EThcD/ETciD scan that some converters leave out of `<activation>`.
+const CV_FILTER_STRING: &str = "MS:1000512";
 /// Older mzML files sometimes use plain m/z accession in selectedIon.
 const CV_MZ_PLAIN: &str = "MS:1000040";
 const CV_CHARGE_STATE: &str = "MS:1000041";
@@ -246,7 +249,7 @@ impl BinaryArrayCtx {
     }
 }
 
-/// Emit the EThcD→HCD routing notice at most once per process (the detection
+/// Emit the EThcD labelling notice at most once per process (the detection
 /// fires per-spectrum and would otherwise spam thousands of identical lines).
 pub(crate) fn log_ethcd_once() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -262,14 +265,11 @@ pub(crate) fn log_ethcd_once() {
             );
         } else {
             eprintln!(
-                "WARN: EThcD/ETciD detected (electron-transfer + supplemental collisional \
-                 activation) — no EThcD model exists, so these spectra are routed to the \
-                 HCD (b/y) model. IN --glyco THIS DISABLES THE WHOLE c/z STACK: c/z \
-                 generation and scoring, the c/z truncation gate, the ETD DB fallback, and \
-                 --glyco-hcd-pair all become inert. Pass --ethcd-activation etd to keep \
-                 these spectra classified as ETD (this is the reliable override; \
-                 --fragmentation selects the scoring model but does NOT restore \
-                 per-spectrum ETD routing)."
+                "INFO: EThcD/ETciD detected (electron transfer + supplemental collisional \
+                 activation); these spectra are labelled EThcD and scored with b/y and c/z \
+                 ions. IN --glyco the c/z stack (c/z generation and scoring, the c/z \
+                 truncation gate, the ETD DB fallback, --glyco-hcd-pair) runs only on ETD \
+                 spectra; pass --ethcd-activation etd to label these spectra ETD."
             );
         }
     }
@@ -378,6 +378,11 @@ struct SpectrumBuilder {
     /// Whether the current `<activation>` block carried a collisional term
     /// (HCD or CID) — the supplemental half of EThcD/ETciD.
     act_saw_collisional: bool,
+    /// Whether the scan's Thermo filter string chains an electron activation with a
+    /// collisional one in its last stage (see [`filter_has_supplemental_collision`]).
+    /// ThermoRawFileParser writes only the ETD term for the two-token filter dialect
+    /// (`391.19@etd55.49 391.19@hcd20.00`), so the filter is the only record there.
+    filter_supplemental: bool,
     /// Whether this spectrum is profile-mode (`MS:1000128`). Profile spectra are
     /// centroided in `build_peaks` so their peak-shoulders don't flood the
     /// intensity-rank scorer (common for un-centroided Orbitrap/Astral mzMLs).
@@ -861,6 +866,11 @@ impl<R: BufRead> MzMLReader<R> {
                     sb.scan_window_upper.get_or_insert(v);
                 }
             }
+            CV_FILTER_STRING if matches!(self.state, State::Scan | State::Spectrum) => {
+                if let Some(sb) = self.current.as_mut() {
+                    sb.filter_supplemental = filter_has_supplemental_collision(&cv.value);
+                }
+            }
             CV_FAIMS_CV if matches!(self.state, State::Scan | State::Spectrum) => {
                 if let (Ok(v), Some(sb)) = (cv.value.parse::<f32>(), self.current.as_mut()) {
                     sb.faims_cv.get_or_insert(v);
@@ -1273,23 +1283,18 @@ impl<R: BufRead> MzMLReader<R> {
                         }
                         b"activation" if self.state == State::Activation => {
                             // H6: if THIS block carried both an electron-transfer/capture
-                            // term and a supplemental collisional term, it is EThcD/ETciD.
-                            // No EThcD model exists, so route to HCD (b/y) rather than the
-                            // pure-ETD c/z model; the instrument fallback then picks the
-                            // resolution tier. Logged once.
+                            // term and a supplemental collisional term, it is EThcD/ETciD:
+                            // the spectrum carries c/z• AND b/y ions, labelled EThcD. A
+                            // converter that wrote only the electron term is caught by the
+                            // scan's filter string. Logged once.
                             // --ethcd-activation etd keeps EThcD/ETciD classified as ETD.
-                            // The HCD relabel silently disables the ENTIRE electron-
-                            // transfer stack for such files — glyco c/z generation and
-                            // scoring, the c/z truncation gate, the ETD DB fallback, and
-                            // `--glyco-hcd-pair` (which finds zero ETD scans and becomes
-                            // a no-op). On a genuine EThcD glyco dataset that silently
-                            // reverts a whole campaign's worth of gains with no error, so
-                            // the escape hatch and a loud warning are both required.
                             if let Some(sb) = self.current.as_mut() {
-                                if sb.act_saw_electron && sb.act_saw_collisional {
+                                if sb.act_saw_electron
+                                    && (sb.act_saw_collisional || sb.filter_supplemental)
+                                {
                                     log_ethcd_once();
                                     if !ethcd_as_etd() {
-                                        sb.activation_method = Some(ActivationMethod::HCD);
+                                        sb.activation_method = Some(ActivationMethod::EThcD);
                                     }
                                 }
                             }
@@ -1756,12 +1761,53 @@ fn read_spectra_in_pieces(
 /// instrument-detection path as a separate, one-shot pre-pass so the main
 /// streaming reader stays focused on per-spectrum data and remains
 /// peak-memory-friendly.
+/// Whether the last activation stage of a Thermo filter string chains an
+/// electron-based activation with a collisional one: EThcD/ETciD.
+///
+/// Two dialects occur. Older firmware chains the stage in one token,
+/// `784.37@etd50.00@hcd25.00`; newer firmware writes one token per activation of
+/// the same precursor, `391.19@etd55.49 391.19@hcd20.00`. The last stage is the
+/// run of trailing `@` tokens that share the last token's precursor m/z, so an
+/// MS3 (`900.00@cid35.00 450.20@etd50.00`, a different precursor) is not EThcD.
+pub fn filter_has_supplemental_collision(filter: &str) -> bool {
+    let head = filter.split('[').next().unwrap_or("");
+    let mut tokens = head.split_whitespace();
+    if !tokens.any(|t| {
+        let t = t.to_ascii_lowercase();
+        t.len() > 2 && t.starts_with("ms") && t[2..].bytes().all(|b| b.is_ascii_digit())
+    }) {
+        return false;
+    }
+    let stages: Vec<&str> = tokens.filter(|t| t.contains('@')).collect();
+    let Some(last) = stages.last() else {
+        return false;
+    };
+    let precursor = |t: &str| t.split('@').next().unwrap_or("").to_string();
+    let last_precursor = precursor(last);
+    let methods: Vec<String> = stages
+        .iter()
+        .rev()
+        .take_while(|t| precursor(t) == last_precursor)
+        .flat_map(|t| t.split('@').skip(1))
+        .map(|a| {
+            a.chars()
+                .take_while(char::is_ascii_alphabetic)
+                .collect::<String>()
+                .to_ascii_lowercase()
+        })
+        .collect();
+    let electron = methods
+        .iter()
+        .any(|m| matches!(m.as_str(), "etd" | "ecd" | "netd"));
+    let collisional = methods.iter().any(|m| matches!(m.as_str(), "hcd" | "cid"));
+    electron && collisional
+}
+
 /// How an EThcD/ETciD spectrum (electron transfer WITH a supplemental collisional term)
 /// should be labelled.
 ///
-/// Default `false` labels it HCD, which is what model routing expects since no EThcD
-/// model exists. That label is also read as "has no c/z ions", which is wrong for EThcD —
-/// see docs. `--ethcd-activation etd` flips it.
+/// Default `false` labels it `EThcD`, which routes it to the EThcD (b/y + c/z) model.
+/// `--ethcd-activation etd` labels it ETD instead.
 static ETHCD_AS_ETD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// Tripped the first time the policy is consulted. Installing after that point
@@ -1776,7 +1822,7 @@ pub fn init_ethcd_as_etd(as_etd: bool) {
     debug_assert!(
         !ETHCD_POLICY_READ.load(std::sync::atomic::Ordering::Relaxed) || !as_etd,
         "init_ethcd_as_etd(true) called after the policy was already read: every \
-         spectrum read before this point was labelled under the default (EThcD -> HCD)"
+         spectrum read before this point was labelled under the default (EThcD)"
     );
     let _ = ETHCD_AS_ETD.set(as_etd);
 }
@@ -2981,27 +3027,27 @@ mod tests {
     }
 
     #[test]
-    fn ethcd_etd_plus_hcd_routes_to_hcd() {
+    fn ethcd_etd_plus_hcd_is_labelled_ethcd() {
         // ETD (MS:1000598) + supplemental HCD (MS:1000422) in one block = EThcD.
-        // Order ETD-then-HCD: pure-ETD precedence would mis-route to ETD; the
-        // EThcD detector must override to HCD (b/y model).
+        // Order ETD-then-HCD: pure-ETD precedence would mis-label it ETD; the
+        // EThcD detector must override to EThcD.
         let spectra = collect_ok(&wrap_spectra(&spectrum_xml_with_two_activations(
             "MS:1000598",
             "MS:1000422",
         )));
         assert_eq!(spectra.len(), 1);
-        assert_eq!(spectra[0].activation_method, Some(ActivationMethod::HCD));
+        assert_eq!(spectra[0].activation_method, Some(ActivationMethod::EThcD));
     }
 
     #[test]
     fn ethcd_detection_is_order_independent() {
-        // HCD-then-ETD: same EThcD shape, reversed cvParam order → still HCD.
+        // HCD-then-ETD: same EThcD shape, reversed cvParam order → still EThcD.
         let spectra = collect_ok(&wrap_spectra(&spectrum_xml_with_two_activations(
             "MS:1000422",
             "MS:1000598",
         )));
         assert_eq!(spectra.len(), 1);
-        assert_eq!(spectra[0].activation_method, Some(ActivationMethod::HCD));
+        assert_eq!(spectra[0].activation_method, Some(ActivationMethod::EThcD));
     }
 
     #[test]
@@ -3013,7 +3059,7 @@ mod tests {
                 let spectra = collect_ok(&wrap_spectra(&spectrum_xml_with_two_activations(a, b)));
                 assert_eq!(
                     spectra[0].activation_method,
-                    Some(ActivationMethod::HCD),
+                    Some(ActivationMethod::EThcD),
                     "{a} + {b}"
                 );
             }
@@ -3021,12 +3067,63 @@ mod tests {
     }
 
     #[test]
+    fn supplemental_collision_read_from_the_filter_chain() {
+        for f in [
+            "FTMS + p NSI d Full ms2 784.37@etd50.00@hcd25.00 [120.00-2000.00]",
+            "ITMS + c NSI d Full ms2 652.10@etd100.00@cid35.00 [50.00-1315.00]",
+            "FTMS + c NSI Full ms3 900.00@cid35.00 450.20@etd50.00@hcd20.00 [100.00-1000.00]",
+            // One token per activation of the same precursor (newer firmware).
+            "FTMS + p NSI d Full ms2 391.1936@etd55.49 391.1936@hcd20.00 [100.0000-1184.0000]",
+            "FTMS + c NSI d sa Full ms2 361.9050@etd143.26@hcd28.00 [100.0000-734.0000]",
+        ] {
+            assert!(filter_has_supplemental_collision(f), "{f}");
+        }
+        for f in [
+            "FTMS + p NSI d Full ms2 784.37@etd50.00 [120.00-2000.00]",
+            "FTMS + p NSI d Full ms2 784.37@hcd28.00 [120.00-2000.00]",
+            // A collisional MS2 stage followed by an ETD MS3 stage is not EThcD.
+            "FTMS + c NSI Full ms3 900.00@cid35.00 450.20@etd50.00 [100.00-1000.00]",
+            "FTMS + c NSI Full ms3 900.00@hcd35.00 450.20@etd50.00 [100.00-1000.00]",
+            "FTMS + p NSI Full ms [350.00-1800.00]",
+            "",
+        ] {
+            assert!(!filter_has_supplemental_collision(f), "{f}");
+        }
+    }
+
+    /// ThermoRawFileParser writes only the ETD term for the two-token filter
+    /// dialect; the scan's filter string still marks the spectrum EThcD.
+    #[test]
+    fn etd_term_with_supplemental_filter_string_is_labelled_ethcd() {
+        let xml = spectrum_xml_with_activation(Some("MS:1000598")).replace(
+            "<scanList count=\"1\"><scan/></scanList>",
+            "<scanList count=\"1\"><scan><cvParam accession=\"MS:1000512\" name=\"filter string\" \
+             value=\"FTMS + p NSI d Full ms2 500.50@etd55.49 500.50@hcd20.00 [100.00-1000.00]\"/>\
+             </scan></scanList>",
+        );
+        assert!(
+            xml.contains("MS:1000512"),
+            "fixture must carry the filter string"
+        );
+        let spectra = collect_ok(&wrap_spectra(&xml));
+        assert_eq!(spectra[0].activation_method, Some(ActivationMethod::EThcD));
+        // The same ETD term with a pure-ETD filter stays ETD.
+        let xml = spectrum_xml_with_activation(Some("MS:1000598")).replace(
+            "<scanList count=\"1\"><scan/></scanList>",
+            "<scanList count=\"1\"><scan><cvParam accession=\"MS:1000512\" name=\"filter string\" \
+             value=\"FTMS + p NSI d Full ms2 500.50@etd55.49 [100.00-1000.00]\"/></scan></scanList>",
+        );
+        let spectra = collect_ok(&wrap_spectra(&xml));
+        assert_eq!(spectra[0].activation_method, Some(ActivationMethod::ETD));
+    }
+
+    #[test]
     fn combined_and_child_activation_terms() {
         for (cv, want) in [
-            ("MS:1002631", ActivationMethod::HCD), // EThcD as one term
-            ("MS:1003182", ActivationMethod::HCD), // ETciD as one term
-            ("MS:1002472", ActivationMethod::CID), // trap-type CID
-            ("MS:1002481", ActivationMethod::HCD), // higher energy beam-type CID
+            ("MS:1002631", ActivationMethod::EThcD), // EThcD as one term
+            ("MS:1003182", ActivationMethod::EThcD), // ETciD as one term
+            ("MS:1002472", ActivationMethod::CID),   // trap-type CID
+            ("MS:1002481", ActivationMethod::HCD),   // higher energy beam-type CID
             ("MS:1003246", ActivationMethod::UVPD),
         ] {
             let spectra = collect_ok(&wrap_spectra(&spectrum_xml_with_activation(Some(cv))));
@@ -3040,14 +3137,14 @@ mod tests {
     }
 
     #[test]
-    fn etcid_etd_plus_cid_routes_to_hcd() {
-        // ETciD: ETD (MS:1000598) + supplemental CID (MS:1000133) → HCD (b/y).
+    fn etcid_etd_plus_cid_is_labelled_ethcd() {
+        // ETciD: ETD (MS:1000598) + supplemental CID (MS:1000133) → EThcD.
         let spectra = collect_ok(&wrap_spectra(&spectrum_xml_with_two_activations(
             "MS:1000598",
             "MS:1000133",
         )));
         assert_eq!(spectra.len(), 1);
-        assert_eq!(spectra[0].activation_method, Some(ActivationMethod::HCD));
+        assert_eq!(spectra[0].activation_method, Some(ActivationMethod::EThcD));
     }
 
     // ── H1: profile-mode centroiding ─────────────────────────────────────────
@@ -3271,7 +3368,7 @@ mod tests {
 
     /// H6 regression: an electron term and a collisional term in SEPARATE
     /// `<activation>` blocks (here CID in precursor 1, ETD in precursor 2) is
-    /// NOT supplemental activation and must NOT be mis-detected as EThcD → HCD.
+    /// NOT supplemental activation and must NOT be mis-detected as EThcD.
     /// Per-block scoping keeps the flags from combining across blocks; the
     /// result follows the per-cvParam rules (ETD's unconditional precedence),
     /// never the false-positive HCD.
@@ -3318,10 +3415,10 @@ mod tests {
             .map(|r| r.expect("parse error"))
             .collect();
         assert_eq!(spectra.len(), 1);
-        // Must NOT be the false-positive EThcD→HCD; ETD wins per its precedence.
+        // Must NOT be the false-positive EThcD; ETD wins per its precedence.
         assert_ne!(
             spectra[0].activation_method,
-            Some(ActivationMethod::HCD),
+            Some(ActivationMethod::EThcD),
             "separate CID + ETD blocks must not be mis-detected as EThcD"
         );
         assert_eq!(spectra[0].activation_method, Some(ActivationMethod::ETD));
@@ -3330,14 +3427,14 @@ mod tests {
     /// H6: an electron-transfer term + a collisional term within a SINGLE
     /// `<activation>` block is supplemental activation (EThcD/ETciD), NOT pure
     /// ETD. Giving ETD unconditional precedence here under-scores the b/y
-    /// ions the supplemental collision produces, so the detector routes such
-    /// blocks to HCD (b/y). (CID-then-ETD order; mirror of the
+    /// ions the supplemental collision produces, so the detector labels such
+    /// blocks EThcD. (CID-then-ETD order; mirror of the
     /// ETD-then-CID `etcid_*` test → confirms order-independence.)
     #[test]
-    fn etd_plus_supplemental_collisional_routes_to_hcd() {
+    fn etd_plus_supplemental_collisional_is_labelled_ethcd() {
         let mz_b64 = encode_f64_b64(&[100.0]);
         let int_b64 = encode_f64_b64(&[1000.0]);
-        // Activation has CID first, then ETD → EThcD/ETciD → HCD.
+        // Activation has CID first, then ETD → EThcD/ETciD.
         let xml = format!(
             r#"<spectrum index="0" id="scan=1" defaultArrayLength="1">
               <cvParam accession="MS:1000511" name="ms level" value="2"/>
@@ -3365,7 +3462,7 @@ mod tests {
         );
         let spectra = collect_ok(&wrap_spectra(&xml));
         assert_eq!(spectra.len(), 1);
-        assert_eq!(spectra[0].activation_method, Some(ActivationMethod::HCD));
+        assert_eq!(spectra[0].activation_method, Some(ActivationMethod::EThcD));
     }
 
     // ── Isolation-window parsing ─────────────────────────────────────────────

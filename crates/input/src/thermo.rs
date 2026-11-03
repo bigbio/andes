@@ -524,59 +524,27 @@ fn sanitize_thermo_peaks(pairs: Vec<(f64, f32)>) -> Vec<(f64, f32)> {
 /// The activation of an MSn scan. RawFileReader reports only the primary
 /// activation of the last stage, so an EThcD/ETciD scan arrives as plain ETD
 /// (or ECD); the supplemental collision is read from the filter string's
-/// activation chain (`784.37@etd50.00@hcd25.00`) and the scan is then mapped
-/// like the combined method.
+/// activation chain (see [`crate::mzml::filter_has_supplemental_collision`])
+/// and the scan is then mapped like the combined method.
 fn scan_activation(raw: &RawSpectrum) -> Option<ActivationMethod> {
     let d = raw.precursor()?.activation().dissociation_method();
     let electron = matches!(d.0, 4 | 8 | 16);
     if electron
         && raw
             .filter_string()
-            .is_some_and(filter_has_supplemental_collision)
+            .is_some_and(crate::mzml::filter_has_supplemental_collision)
     {
         return map_dissociation(DissociationMethod::ETHCD);
     }
     map_dissociation(d)
 }
 
-/// Whether the last activation stage of a Thermo filter string chains an
-/// electron-based activation with a collisional one, e.g.
-/// `FTMS + p NSI d Full ms2 784.37@etd50.00@hcd25.00 [120.00-2000.00]`.
-fn filter_has_supplemental_collision(filter: &str) -> bool {
-    let head = filter.split('[').next().unwrap_or("");
-    let mut tokens = head.split_whitespace();
-    if !tokens.any(|t| {
-        let t = t.to_ascii_lowercase();
-        t.len() > 2 && t.starts_with("ms") && t[2..].bytes().all(|b| b.is_ascii_digit())
-    }) {
-        return false;
-    }
-    let Some(last_stage) = tokens.filter(|t| t.contains('@')).next_back() else {
-        return false;
-    };
-    let methods: Vec<String> = last_stage
-        .split('@')
-        .skip(1)
-        .map(|a| {
-            a.chars()
-                .take_while(char::is_ascii_alphabetic)
-                .collect::<String>()
-                .to_ascii_lowercase()
-        })
-        .collect();
-    let electron = methods
-        .iter()
-        .any(|m| matches!(m.as_str(), "etd" | "ecd" | "netd"));
-    let collisional = methods.iter().any(|m| matches!(m.as_str(), "hcd" | "cid"));
-    electron && collisional
-}
-
 /// Map a Thermo `DissociationMethod` to the model's [`ActivationMethod`].
 /// Pure electron-based methods (ETD/ECD/NETD) map to `ETD`. Supplemental-
-/// activation methods (ETciD/EThcD/ECciD/EChcD) are EThcD-class: the
-/// collisional supplement produces b/y ions the pure-ETD c/z model can't
-/// score, and no EThcD model exists, so they map to `HCD` (b/y) — see H6,
-/// mirrors the mzML reader's EThcD detection. Unknown methods return `None`.
+/// activation methods (ETciD/EThcD/ECciD/EChcD) map to `EThcD`: the spectrum
+/// carries the c/z• series of electron transfer and the b/y series of the
+/// collisional supplement. This mirrors the mzML reader's EThcD detection,
+/// including `--ethcd-activation etd`. Unknown methods return `None`.
 fn map_dissociation(d: DissociationMethod) -> Option<ActivationMethod> {
     match d.0 {
         1 => Some(ActivationMethod::CID),
@@ -584,19 +552,14 @@ fn map_dissociation(d: DissociationMethod) -> Option<ActivationMethod> {
         // Pure electron transfer/capture: ETD, ECD, NETD → c/z model.
         4 | 8 | 16 => Some(ActivationMethod::ETD),
         // Supplemental activation (EThcD/ETciD/EChcD/ECciD): electron + beam/
-        // resonant collision in one step → route to HCD (b/y), not pure ETD.
-        //
-        // This mirrors the mzML reader, INCLUDING its warning and its
-        // --ethcd-activation escape hatch. Previously the `.raw` path did the
-        // relabel silently and could not be overridden at all, so an EThcD
-        // glyco run on native Thermo input lost the entire c/z stack with no
-        // diagnostic — and `.raw` is the path most users take.
+        // resonant collision in one step. Labelled like the mzML reader, under
+        // the same `--ethcd-activation` policy.
         5 | 6 | 9 | 10 => {
             crate::mzml::log_ethcd_once();
             if crate::mzml::ethcd_as_etd_policy() {
                 Some(ActivationMethod::ETD)
             } else {
-                Some(ActivationMethod::HCD)
+                Some(ActivationMethod::EThcD)
             }
         }
         _ => None,
@@ -651,6 +614,7 @@ pub fn detect_activation_instrument<P: AsRef<Path>>(
             }
         }
     }
+    warn_mixed_electron_activation(&act, seen);
     // Deterministic tie-break (HashMap order is randomised per process).
     let dominant_act = act
         .into_iter()
@@ -662,6 +626,7 @@ pub fn detect_activation_instrument<P: AsRef<Path>>(
         x if x == ActivationMethod::ETD as u8 => ActivationMethod::ETD,
         x if x == ActivationMethod::PQD as u8 => ActivationMethod::PQD,
         x if x == ActivationMethod::UVPD as u8 => ActivationMethod::UVPD,
+        x if x == ActivationMethod::EThcD as u8 => ActivationMethod::EThcD,
         // dominant_act always round-trips a known ActivationMethod; a future
         // variant added to map_dissociation falls back to HCD (the common case)
         // rather than silently mislabeling it as UVPD.
@@ -680,6 +645,21 @@ pub fn detect_activation_instrument<P: AsRef<Path>>(
             _ => InstrumentType::QExactive,
         });
     Some((activation, instrument))
+}
+
+/// Warn when a run interleaves pure ETD scans with EThcD/ETciD scans (a decision-tree
+/// acquisition does this per precursor charge). One model scores the whole run, chosen
+/// by the dominant activation, so the minority scans are scored off their activation.
+fn warn_mixed_electron_activation(act: &HashMap<u8, usize>, seen: usize) {
+    let n = |m: ActivationMethod| act.get(&(m as u8)).copied().unwrap_or(0);
+    let (etd, ethcd) = (n(ActivationMethod::ETD), n(ActivationMethod::EThcD));
+    if etd > 0 && ethcd > 0 {
+        eprintln!(
+            "WARN: mixed electron activation in the first {seen} MS2 scans: EThcD/ETciD {ethcd}, \
+             ETD {etd}. The run is scored with the model of the dominant activation; \
+             pass --model or --ethcd-activation etd to choose explicitly."
+        );
+    }
 }
 
 /// Read collision energy, isolation width and FAIMS CV from the first `n` MS2
@@ -871,36 +851,15 @@ mod tests {
                 Some(ActivationMethod::ETD)
             );
         }
-        // H6: supplemental activation (ETciD=5, EThcD=6, ECciD=9, EChcD=10) →
-        // HCD (b/y), not pure ETD — the collisional supplement makes b/y ions.
+        // Supplemental activation (ETciD=5, EThcD=6, ECciD=9, EChcD=10) → EThcD:
+        // the spectrum carries both the c/z• and the b/y series.
         for v in [5u8, 6, 9, 10] {
             assert_eq!(
                 map_dissociation(DissociationMethod(v)),
-                Some(ActivationMethod::HCD)
+                Some(ActivationMethod::EThcD)
             );
         }
         assert_eq!(map_dissociation(DissociationMethod(0)), None); // Unknown
-    }
-
-    #[test]
-    fn supplemental_collision_read_from_the_filter_chain() {
-        for f in [
-            "FTMS + p NSI d Full ms2 784.37@etd50.00@hcd25.00 [120.00-2000.00]",
-            "ITMS + c NSI d Full ms2 652.10@etd100.00@cid35.00 [50.00-1315.00]",
-            "FTMS + c NSI Full ms3 900.00@cid35.00 450.20@etd50.00@hcd20.00 [100.00-1000.00]",
-        ] {
-            assert!(filter_has_supplemental_collision(f), "{f}");
-        }
-        for f in [
-            "FTMS + p NSI d Full ms2 784.37@etd50.00 [120.00-2000.00]",
-            "FTMS + p NSI d Full ms2 784.37@hcd28.00 [120.00-2000.00]",
-            // A collisional MS2 stage followed by an ETD MS3 stage is not EThcD.
-            "FTMS + c NSI Full ms3 900.00@cid35.00 450.20@etd50.00 [100.00-1000.00]",
-            "FTMS + p NSI Full ms [350.00-1800.00]",
-            "",
-        ] {
-            assert!(!filter_has_supplemental_collision(f), "{f}");
-        }
     }
 
     #[test]

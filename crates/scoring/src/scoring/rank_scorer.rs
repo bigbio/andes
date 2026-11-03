@@ -324,6 +324,28 @@ impl RankScorer {
         }
     }
 
+    /// Fragment window of the rank-table node scores. The model stores one
+    /// (`param.mme`, 0.5 Da on the shipped models); on high-resolution data
+    /// without a CLI tolerance override, a run whose nominal-reference error
+    /// was measured uses the window learned from it
+    /// ([`crate::scoring::FragmentErrorModel::node_window_da`]), never wider
+    /// than the stored one. Training scorers carry no measurement and keep the
+    /// stored window.
+    pub fn node_score_window(&self) -> model::tolerance::Tolerance {
+        use model::tolerance::Tolerance;
+        let stored = self.param.mme;
+        if self.fragment_tol_override.is_some() || !self.acquisition_is_high_res() {
+            return stored;
+        }
+        match (
+            stored,
+            self.fragment_error.get().and_then(|m| m.node_window_da()),
+        ) {
+            (Tolerance::Da(v), Some(w)) => Tolerance::Da(w.min(v)),
+            _ => stored,
+        }
+    }
+
     /// Median signed fragment error (ppm) the search removes from a run's
     /// fragment peaks before scoring them: the measured offset on
     /// high-resolution data without a CLI tolerance override, else 0. A
@@ -564,6 +586,48 @@ mod tests {
         hi.set_fragment_error(None);
         assert_eq!(hi.fragment_recentre_ppm(), 0.0);
         assert_eq!(hi.pin_match_tolerance(), Tolerance::Ppm(20.0));
+    }
+
+    /// The node-score window follows a measured nominal-reference error on
+    /// high-res data (never wider than the stored window) and keeps the stored
+    /// window without one, on low-res data, and under a CLI override.
+    #[test]
+    fn node_score_window_is_learned_on_high_res_only() {
+        use crate::scoring::FragmentErrorModel;
+        use model::tolerance::Tolerance;
+        let mut p = tiny_param();
+        p.mme = Tolerance::Da(0.5);
+        let hi = RankScorer::new(&p);
+        assert_eq!(hi.node_score_window(), Tolerance::Da(0.5));
+        hi.set_fragment_error(Some(FragmentErrorModel::new(-2.5, 1.6, 100, 100)));
+        assert_eq!(
+            hi.node_score_window(),
+            Tolerance::Da(0.5),
+            "no nominal measurement"
+        );
+        let m = FragmentErrorModel::new(-2.5, 1.6, 100, 100).with_node_error_da(0.01, 0.04);
+        hi.set_fragment_error(Some(m));
+        let Tolerance::Da(w) = hi.node_score_window() else {
+            panic!("Da expected");
+        };
+        assert!((w - 0.25).abs() < 1e-12, "{w}");
+        hi.set_fragment_error(Some(
+            FragmentErrorModel::new(0.0, 1.0, 100, 100).with_node_error_da(0.0, 0.3),
+        ));
+        assert_eq!(
+            hi.node_score_window(),
+            Tolerance::Da(0.5),
+            "capped at the stored window"
+        );
+        let mut lo_p = low_res_param();
+        lo_p.mme = Tolerance::Da(0.5);
+        let lo = RankScorer::new(&lo_p);
+        lo.set_fragment_error(Some(m));
+        assert_eq!(lo.node_score_window(), Tolerance::Da(0.5));
+        let mut ov = RankScorer::new(&p);
+        ov.set_fragment_error(Some(m));
+        ov.set_fragment_tol_override(Some(Tolerance::Ppm(15.0)));
+        assert_eq!(ov.node_score_window(), Tolerance::Da(0.5));
     }
 
     #[test]

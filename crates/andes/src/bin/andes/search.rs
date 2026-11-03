@@ -242,7 +242,8 @@ impl FragmentErrorMeasurer {
                 eprintln!(
                     "Fragment error: offset {:+.2} ppm, spread {:.2} ppm from {} ions of {} PSMs \
                      at 1% q in {} sampled spectra -> fragment peaks recentred by {:+.2} ppm, \
-                     PIN feature tolerance {:.1} ppm, ppm-Gaussian width {:.2} ppm ({:.1}s)",
+                     PIN feature tolerance {:.1} ppm, ppm-Gaussian width {:.2} ppm, \
+                     node-score window {:?} ({:.1}s)",
                     m.offset_ppm,
                     m.sigma_ppm,
                     m.ions,
@@ -251,6 +252,7 @@ impl FragmentErrorMeasurer {
                     prepared.scorer.fragment_recentre_ppm(),
                     m.feature_tolerance_ppm(),
                     m.gaussian_sigma_ppm(),
+                    prepared.scorer.node_score_window(),
                     t.elapsed().as_secs_f64()
                 );
             }
@@ -2873,7 +2875,18 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // whatever the user passed on the CLI. Emit a summary to stderr and write a
     // `<stem>.statistics.log` next to the PIN so a run's true parameters (and which
     // PTMs were identified, with PSM counts) are always recoverable.
-    let run_stats = output::RunStatistics::compute(&queues, &pin_candidates, &params, &param.mme);
+    // The fragment line reports the tolerance fragments were matched at; the
+    // node-score window (stored, or learned from the run on high-res data)
+    // covers the rounding error of the nominal-mass node scores and is
+    // reported apart.
+    let run_stats = output::RunStatistics::compute(
+        &queues,
+        &pin_candidates,
+        &params,
+        &scorer.feature_match_tolerance(),
+        &scorer.pin_match_tolerance(),
+        &scorer.node_score_window(),
+    );
     eprint!("{}", run_stats.render());
     // Named after the run like the other reports, so searches writing into
     // one directory do not overwrite each other's summary.
@@ -2912,7 +2925,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &pin_candidates,
             &params,
             &pin_index,
-            &param.mme,
+            &scorer.feature_match_tolerance(),
             &run_id,
             &primary_paths,
             &run_ends,

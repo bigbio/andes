@@ -75,8 +75,9 @@ const CREATOR: &str = "andes";
 /// written into it. `spectra`/`queues` are parallel slices (`queues[i]` holds
 /// the top-N PSMs for `spectra[i]`); `candidates` is the per-search candidate
 /// pool; `search_index` resolves protein accessions; `params`/`fragment_tol`
-/// populate `search_params.parquet` (`fragment_tol` is the resolved per-model
-/// `param.mme`). `run_id` is a stable identifier for this run, written into the
+/// populate `search_params.parquet` (`fragment_tol` is the fragment matching
+/// tolerance of the search: 20 ppm on high-res fragments, 0.5 Da on ion-trap
+/// fragments, or the `--fragment-tol-*` value). `run_id` is a stable identifier for this run, written into the
 /// `run_identifier` column of every row; it is the join key to
 /// `search_params.parquet`, whose one row lists every input. `primary_ms_run_paths`
 /// are the input spectrum file paths, and `run_ends[r]` is the exclusive end

@@ -170,10 +170,10 @@ fn primary_matched_peak_keys(
     let predicted = predict_by_ions(peptide, 1..=1);
     for p in &predicted {
         // Use the SAME tolerance the scoring phase matched the primary's peaks
-        // with (`param().mme`), NOT the PIN feature tolerance — otherwise pass-2
+        // with (`node_score_window()`), NOT the PIN feature tolerance — otherwise pass-2
         // strips a different peak set than pass-1 actually scored, leaving stray
         // primary peaks in (or pulling extra peaks out of) the residual.
-        let tol_da = scorer.param().mme.as_da(p.mz);
+        let tol_da = scorer.node_score_window().as_da(p.mz);
         let lo_mz = p.mz - tol_da;
         let hi_mz = p.mz + tol_da;
         // `spec.peaks` is m/z-sorted; binary-search the window start, scan to `hi_mz`.

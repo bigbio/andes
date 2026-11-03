@@ -3,8 +3,9 @@
 //! andes auto-resolves the scoring model, the precursor/fragment tolerances,
 //! and (with `--refine`) the modification set FROM THE DATA — so the parameters
 //! the search *ends* with are not necessarily the ones the user passed on the
-//! CLI (e.g. precursor calibration tightens the window; a high-res model carries
-//! a 20 ppm fragment tolerance even when the input named none). This module
+//! CLI (e.g. precursor calibration tightens the window; high-res fragments are
+//! matched at 20 ppm, or at the measured width, even when the input named
+//! none). This module
 //! reports those final, effective values together with a per-modification PSM
 //! count, and writes them both to stderr and to a `<stem>.statistics.log` next to the
 //! PIN output so a run's true parameters are always recoverable.
@@ -26,7 +27,14 @@ use search::search_params::SearchParams;
 pub struct RunStatistics {
     pub precursor_tolerance: String,
     pub precursor_calibration: String,
+    /// Fragment matching tolerance: candidate retrieval and the match features,
+    /// with the measured width of the PIN match features when one was used.
     pub fragment_tolerance: String,
+    /// Window of the model's rank-table node scores (`param.mme` as served).
+    /// Node scores are indexed by nominal fragment mass, so this window covers
+    /// the nominal-mass rounding error; it is not the matching tolerance of
+    /// the acquisition.
+    pub node_score_bin: String,
     pub spectra_with_match: usize,
     pub target_psms: usize,
     pub decoy_psms: usize,
@@ -37,21 +45,45 @@ pub struct RunStatistics {
 
 fn fmt_tol(t: &Tolerance) -> String {
     match t {
-        Tolerance::Ppm(v) => format!("{v} ppm"),
-        Tolerance::Da(v) => format!("{v} Da"),
+        Tolerance::Ppm(v) => format!("{} ppm", round3(*v)),
+        Tolerance::Da(v) => format!("{} Da", round3(*v)),
+    }
+}
+
+/// Three decimals at most, without trailing zeros (20 -> "20", 9.87654 -> "9.877").
+fn round3(v: f64) -> f64 {
+    (v * 1000.0).round() / 1000.0
+}
+
+/// The fragment matching tolerance line: the tolerance of retrieval and the
+/// trained match features, and the measured PIN-feature width when it differs.
+fn fmt_fragment_tolerance(matching: &Tolerance, pin_features: &Tolerance) -> String {
+    if pin_features == matching {
+        format!("{} (retrieval and match features)", fmt_tol(matching))
+    } else {
+        format!(
+            "{} (retrieval and model features); {} (PIN match features, measured)",
+            fmt_tol(matching),
+            fmt_tol(pin_features)
+        )
     }
 }
 
 impl RunStatistics {
     /// Tally the rank-1 PSM of each non-empty spectrum queue.
     ///
-    /// `fragment_tolerance` is the resolved per-model fragment tolerance
-    /// (`param.mme`); `params` carries the post-calibration precursor window.
+    /// `matching_tolerance` is the fragment tolerance of candidate retrieval and
+    /// the trained match features, `pin_feature_tolerance` the (possibly
+    /// measured) tolerance of the PIN match features, and `node_score_bin` the
+    /// model's node-score window (`param.mme`); `params` carries the
+    /// post-calibration precursor window.
     pub fn compute(
         queues: &[TopNQueue],
         candidates: &[Candidate],
         params: &SearchParams,
-        fragment_tolerance: &Tolerance,
+        matching_tolerance: &Tolerance,
+        pin_feature_tolerance: &Tolerance,
+        node_score_bin: &Tolerance,
     ) -> Self {
         let mut spectra_with_match = 0usize;
         let mut target_psms = 0usize;
@@ -99,7 +131,8 @@ impl RunStatistics {
         Self {
             precursor_tolerance: format!("{:?}", params.precursor_tolerance),
             precursor_calibration: format!("{:?}", params.precursor_cal_mode),
-            fragment_tolerance: fmt_tol(fragment_tolerance),
+            fragment_tolerance: fmt_fragment_tolerance(matching_tolerance, pin_feature_tolerance),
+            node_score_bin: fmt_tol(node_score_bin),
             spectra_with_match,
             target_psms,
             decoy_psms,
@@ -128,6 +161,10 @@ impl RunStatistics {
         s.push_str(&format!(
             "  Final fragment tolerance  : {}\n",
             self.fragment_tolerance
+        ));
+        s.push_str(&format!(
+            "  Node-score bin width      : {} (model rank tables, nominal fragment masses)\n",
+            self.node_score_bin
         ));
         s.push_str(&format!(
             "  Spectra with a match      : {}\n",
@@ -174,6 +211,7 @@ mod tests {
             precursor_tolerance: "10 ppm".to_string(),
             precursor_calibration: "Auto".to_string(),
             fragment_tolerance: "0.02 Da".to_string(),
+            node_score_bin: "0.5 Da".to_string(),
             spectra_with_match: 3,
             target_psms: 2,
             decoy_psms: 1,
@@ -191,6 +229,7 @@ mod tests {
             precursor_tolerance: "Symmetric(10.0 ppm)".to_string(),
             precursor_calibration: "Auto".to_string(),
             fragment_tolerance: "0.5 Da".to_string(),
+            node_score_bin: "0.5 Da".to_string(),
             spectra_with_match: 100,
             target_psms: 60,
             decoy_psms: 40,
@@ -209,5 +248,43 @@ mod tests {
         let cam = out.find("Carbamidomethyl").unwrap();
         let ox = out.find("Oxidation").unwrap();
         assert!(cam < ox, "PTMs should be sorted count-descending");
+    }
+
+    /// A high-res run reports the tolerance its fragments were matched at, not
+    /// the model's 0.5 Da node-score window, which gets its own line.
+    #[test]
+    fn high_res_run_reports_matching_tolerance_apart_from_node_score_bin() {
+        let params = SearchParams::default_tryptic(
+            model::aa_set::AminoAcidSetBuilder::new_standard()
+                .build()
+                .unwrap(),
+        );
+        let stats = RunStatistics::compute(
+            &[],
+            &[],
+            &params,
+            &Tolerance::Ppm(20.0),
+            &Tolerance::Ppm(9.87654),
+            &Tolerance::Da(0.5),
+        );
+        let out = stats.render();
+        assert!(out.contains(
+            "Final fragment tolerance  : 20 ppm (retrieval and model features); \
+             9.877 ppm (PIN match features, measured)"
+        ));
+        assert!(out.contains("Node-score bin width      : 0.5 Da"));
+        assert!(!out.contains("Final fragment tolerance  : 0.5 Da"));
+
+        let low = RunStatistics::compute(
+            &[],
+            &[],
+            &params,
+            &Tolerance::Da(0.5),
+            &Tolerance::Da(0.5),
+            &Tolerance::Da(0.5),
+        );
+        assert!(low
+            .render()
+            .contains("Final fragment tolerance  : 0.5 Da (retrieval and match features)"));
     }
 }

@@ -946,6 +946,15 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
+    if let Some(w) =
+        crate::model_select::served_node_score_window(&param, acquisition.high_res, cli.glyco)
+    {
+        eprintln!(
+            "Node-score window: {w:?} on high-resolution fragments (model {resolved_model_id} stores {:?})",
+            param.mme
+        );
+        param.mme = w;
+    }
     let mut scorer = RankScorer::new(&param);
     // Feature tolerances and the fragment-index vote mode follow the
     // acquisition, not the model's instrument.
@@ -2873,7 +2882,17 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // whatever the user passed on the CLI. Emit a summary to stderr and write a
     // `<stem>.statistics.log` next to the PIN so a run's true parameters (and which
     // PTMs were identified, with PSM counts) are always recoverable.
-    let run_stats = output::RunStatistics::compute(&queues, &pin_candidates, &params, &param.mme);
+    // The fragment line reports the tolerance fragments were matched at; the
+    // node-score window (`param.mme` as served) covers the rounding error of
+    // the nominal-mass node scores and is reported apart.
+    let run_stats = output::RunStatistics::compute(
+        &queues,
+        &pin_candidates,
+        &params,
+        &scorer.feature_match_tolerance(),
+        &scorer.pin_match_tolerance(),
+        &param.mme,
+    );
     eprint!("{}", run_stats.render());
     // Named after the run like the other reports, so searches writing into
     // one directory do not overwrite each other's summary.
@@ -2912,7 +2931,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &pin_candidates,
             &params,
             &pin_index,
-            &param.mme,
+            &scorer.feature_match_tolerance(),
             &run_id,
             &primary_paths,
             &run_ends,

@@ -979,11 +979,18 @@ Calibration and model choice can change the tolerances mid-run, so every search 
 printing the **final** tolerances, the pre-FDR rank-1 target/decoy split and a
 per-modification tally to stderr and to `<stem>.statistics.log` next to the PIN (`<stem>` is the
 PIN's name without its extension, so per-run searches into one directory keep one summary each).
+The fragment line is the tolerance fragments were matched at: 20 ppm on high-resolution
+fragments (and the measured width used by the PIN match features), 0.5 Da on ion-trap fragments,
+or the `--fragment-tol-*` value. The node-score bin is the window of the model's rank tables,
+whose node scores are indexed by nominal fragment mass, so it covers the rounding error of that
+mass and is not a matching tolerance of the acquisition: 0.25 Da for the label-free HCD models on
+high-resolution fragments, 0.5 Da otherwise.
 
 ```text
 ──────── andes run summary ────────
   Final precursor tolerance : Symmetric(10.0 ppm) (calibration: Auto)
-  Final fragment tolerance  : 0.5 Da
+  Final fragment tolerance  : 20 ppm (retrieval and model features); 11.4 ppm (PIN match features, measured)
+  Node-score bin width      : 0.25 Da (model rank tables, nominal fragment masses)
   Spectra with a match      : 48210
   Rank-1 PSMs (pre-FDR)     : 31204 target, 17006 decoy
   PTM report (rank-1 target PSMs carrying each modification):

@@ -389,15 +389,9 @@ pub(crate) fn build_selection_key(
             // QExactive model would match 0.5-Da peaks at 20 ppm and lose
             // ~18% of PSMs silently. No hcd_lowres model exists, so route to the
             // low-res b/y model (cid_lowres_tryp) instead — correct fragment
-            // tolerance and ion series. Pinned by the selection grid test.
-            ("HCD", "LowRes") => {
-                eprintln!(
-                    "WARN: low-res (ion-trap) HCD detected — no hcd_lowres model exists; \
-                     routing to cid_lowres_tryp (low-res b/y, 0.5-Da tolerance) rather than \
-                     the high-res QExactive model. Pass --model to override."
-                );
-                ("CID", "LowRes", true)
-            }
+            // tolerance and ion series. Pinned by the selection grid test; the
+            // run warns (see `untrained_route_warning`).
+            ("HCD", "LowRes") => ("CID", "LowRes", true),
             // TOF analyzers (QTOF, timsTOF) fragment by beam-type collisional
             // activation: the b/y chemistry of HCD, measured at high resolution.
             // Vendors label it "CID" (the timsTOF `.d` reader and Bruker mzML
@@ -416,17 +410,10 @@ pub(crate) fn build_selection_key(
 
     // 4. Build experiment_class from protocol (unless the final fallback dropped it).
     //    Protocol → experiment_class mapping matches the parquet's `protocol` column.
-    let protocol_for_store: &str = match protocol {
-        Protocol::Auto | Protocol::Standard => "Automatic",
-        Protocol::Tmt => "TMT",
-        Protocol::Phospho => "Phosphorylation",
-        Protocol::Itraq => "iTRAQ",
-        Protocol::ItraqPhospho => "iTRAQPhospho",
-    };
     let experiment_class: BTreeSet<String> = if drop_protocol {
         BTreeSet::new()
     } else {
-        store_protocol_to_experiment_class(protocol_for_store)
+        store_protocol_to_experiment_class(protocol_store_name(protocol))
     };
 
     SelectionKey {
@@ -456,8 +443,10 @@ pub(crate) struct ModelChoice {
     /// The key the store was searched with (after the family fallback and the
     /// activation/instrument normalizations of [`build_selection_key`]).
     pub(crate) key: SelectionKey,
-    /// `true` when no model matched the key and the nearest one was taken.
-    pub(crate) substituted: bool,
+    /// Set when the model was not trained on the requested cell (activation,
+    /// analyser, enzyme, labelling/enrichment): the one warning the run prints,
+    /// naming the cell and the model used. See [`untrained_route_warning`].
+    pub(crate) warning: Option<String>,
 }
 
 /// Pick the model for `(activation, instrument, protocol, enzyme)` from the
@@ -492,13 +481,122 @@ pub(crate) fn choose_model(
         let itraq = choose_for_protocol(entries, activation, instrument, Protocol::Itraq, enzyme);
         if class_of(entries, &itraq.model_id).is_some_and(|c| c.contains("itraq")) {
             return ModelChoice {
+                warning: untrained_route_warning(
+                    entries,
+                    &itraq.model_id,
+                    activation,
+                    instrument,
+                    protocol,
+                    enzyme,
+                ),
                 model_id: itraq.model_id,
                 key: choice.key,
-                substituted: true,
             };
         }
     }
-    choice
+    ModelChoice {
+        warning: untrained_route_warning(
+            entries,
+            &choice.model_id,
+            activation,
+            instrument,
+            protocol,
+            enzyme,
+        ),
+        ..choice
+    }
+}
+
+/// The fragment analyser an instrument class measures with. The selection
+/// keys keep the store's instrument names; a model trained on one Orbitrap
+/// (`QExactive`, `HighRes`) is trained for every Orbitrap, and the TOF names
+/// share one analyser too.
+fn analyser_of(instrument: &str) -> &str {
+    match instrument {
+        "LowRes" => "ion trap",
+        "QExactive" | "HighRes" => "Orbitrap",
+        "OrbitrapAstral" => "Astral",
+        "TOF" | "TimsTOF" => "TOF",
+        other => other,
+    }
+}
+
+/// `activation / analyser / enzyme / labelling` for a warning.
+fn describe_cell(
+    activation: &str,
+    analyser: &str,
+    enzyme: &str,
+    class: &std::collections::BTreeSet<String>,
+) -> String {
+    let class = if class.is_empty() {
+        "label-free".to_string()
+    } else {
+        class.iter().cloned().collect::<Vec<_>>().join("+")
+    };
+    format!("{activation} / {analyser} / {enzyme} / {class}")
+}
+
+/// The warning for a run scored with a model that was not trained on its cell:
+/// the requested (activation, analyser, enzyme, labelling/enrichment) against
+/// the cell the store records for `model_id`. `None` when they agree. Every
+/// route to another cell warns, whether the ladder substituted the nearest
+/// model, a normalization changed the activation or analyser (ion-trap HCD,
+/// Orbitrap CID, UVPD off the Orbitrap), the protocol fell to a model without
+/// it, or a deliberate route (iTRAQ-phospho to the iTRAQ model) was taken.
+pub(crate) fn untrained_route_warning(
+    entries: &[SelectionEntry],
+    model_id: &str,
+    activation: ActivationMethod,
+    instrument: Option<InstrumentType>,
+    protocol: Protocol,
+    enzyme: model::enzyme::Enzyme,
+) -> Option<String> {
+    let act = match activation {
+        ActivationMethod::PQD => ActivationMethod::CID,
+        other => other,
+    }
+    .name();
+    let analyser = analyser_of(instrument.map_or("LowRes", |i| i.name()));
+    let enzyme = routing_enzyme(enzyme).name();
+    let class = store_protocol_to_experiment_class(protocol_store_name(protocol));
+    let requested = describe_cell(act, analyser, enzyme, &class);
+    let Some(e) = entries.iter().find(|e| e.model_id == model_id) else {
+        return Some(format!(
+            "WARN: model routing: no model in the store is trained for {requested}; \
+             scoring with '{model_id}'. Scores may be mis-calibrated; pass --model to \
+             choose explicitly."
+        ));
+    };
+    let trained_analyser = analyser_of(&e.instrument);
+    if e.activation == act
+        && trained_analyser == analyser
+        && e.enzyme == enzyme
+        && e.experiment_class == class
+    {
+        return None;
+    }
+    let trained = describe_cell(
+        &e.activation,
+        trained_analyser,
+        &e.enzyme,
+        &e.experiment_class,
+    );
+    Some(format!(
+        "WARN: model routing: no model in the store is trained for {requested}; scoring \
+         with '{model_id}', trained on {trained}. Scores may be mis-calibrated; pass \
+         --model to choose explicitly."
+    ))
+}
+
+/// The store's `protocol` name for a CLI protocol.
+fn protocol_store_name(protocol: Protocol) -> &'static str {
+    match protocol {
+        Protocol::Auto | Protocol::Standard => "Automatic",
+        Protocol::Tmt => "TMT",
+        Protocol::Phospho => "Phosphorylation",
+        Protocol::Itraq => "iTRAQ",
+        Protocol::ItraqPhospho => "iTRAQPhospho",
+    }
 }
 
 /// The experiment class the store's `model_id` was trained on.
@@ -528,7 +626,7 @@ fn choose_for_protocol(
     let detected: Option<&str> = instrument
         .filter(|i| i.family_fallback() != *i)
         .map(|i| i.name());
-    let (id, substituted) = select_nearest_for(
+    let (id, _substituted) = select_nearest_for(
         entries,
         &key,
         detected,
@@ -538,7 +636,7 @@ fn choose_for_protocol(
     ModelChoice {
         model_id: id.to_string(),
         key,
-        substituted,
+        warning: None,
     }
 }
 
@@ -573,14 +671,8 @@ pub(crate) fn load_param_from_store(
     } else {
         let entries = store.selection_entries();
         let choice = choose_model(&entries, activation, instrument, protocol, enzyme);
-        if choice.substituted {
-            let key = &choice.key;
-            eprintln!(
-                "WARN: no model matched (activation={}, instrument={}, enzyme={}, class={:?}) \
-                 — using the nearest available model '{}'; scores may be mis-calibrated for \
-                 this data. Pin a model with --model if this is wrong.",
-                key.activation, key.instrument, key.enzyme, key.experiment_class, choice.model_id
-            );
+        if let Some(w) = &choice.warning {
+            eprintln!("{w}");
         }
         choice.model_id
     };
@@ -714,7 +806,7 @@ mod param_resolver_tests {
         for inst in [InstrumentType::QExactive, InstrumentType::HighRes] {
             let c = pick(ActivationMethod::HCD, Some(inst), Protocol::ItraqPhospho);
             assert_eq!(c.model_id, "hcd_qexactive_tryp_itraq", "{inst:?}");
-            assert!(c.substituted, "{inst:?}");
+            assert!(c.warning.is_some(), "{inst:?}");
         }
         assert_eq!(
             pick(
@@ -737,8 +829,8 @@ mod param_resolver_tests {
     /// and `select_nearest_for`), over every activation × detected instrument
     /// (or none) × protocol × enzyme, pinned in
     /// `test-fixtures/model_selection_grid.tsv`. One row per (activation,
-    /// instrument, enzyme), one column per protocol; `*` marks a nearest-model
-    /// substitution (the run WARNs). PQD must resolve as CID and `standard` as
+    /// instrument, enzyme), one column per protocol; `*` marks a cell the
+    /// routed model was not trained on (the run warns, `untrained_route_warning`). PQD must resolve as CID and `standard` as
     /// `auto`, so neither has its own row or column. A change to the store, the
     /// key or the ladder that moves any selection fails here with the new
     /// table; update the fixture only when every moved cell is intended.
@@ -783,7 +875,11 @@ mod param_resolver_tests {
         ];
         let cell = |a, i, p, e| {
             let c = choose_model(&entries, a, i, p, e);
-            format!("{}{}", c.model_id, if c.substituted { "*" } else { "" })
+            format!(
+                "{}{}",
+                c.model_id,
+                if c.warning.is_some() { "*" } else { "" }
+            )
         };
         let mut table = String::from("activation\tinstrument\tenzyme");
         for (name, _) in protocols {
@@ -858,7 +954,7 @@ mod param_resolver_tests {
             model::enzyme::Enzyme::Trypsin,
         );
         assert_eq!(
-            (c.model_id.as_str(), c.substituted),
+            (c.model_id.as_str(), c.warning.is_some()),
             ("cid_lowres_tryp", false)
         );
     }

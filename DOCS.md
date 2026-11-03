@@ -1762,16 +1762,23 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
   `w_p`. A precursor without such an identified fit, and every row of an unaligned run,
   reports its own per-run area. `<stem>.extract.parquet` keeps the per-run `quantity` and
   `quantity_se` (`A · w · √(2π)`) for provenance.
-* **Trace area (experimental).** `<stem>.extract.parquet` also keeps a template-free area,
-  `trace_quantity`: each isotope trace of the fit, minus its baseline (the median of the trace
-  outside the integration range), integrated over `t0 ± 3 · max(w, w_prior)` by the trapezoid
-  rule, the isotopes combined with the fit's weights. For a Gaussian peak it equals
-  `A · w · √(2π)`; for a tailing or otherwise non-Gaussian peak it follows the measured trace.
-  `andes quant finalize --quant-trace-fraction F` (hidden, default 0 = off) reports it instead
-  of `A · w_p · √(2π)` for the brightest share `F` of the precursors, ranked by the median
-  `A / amplitude_se` of their identified fits, in every run of such a precursor (a row whose
-  trace area is not positive keeps the template area); finalize logs the signal-to-noise cut.
-  `quant_q` and the transfer q-values do not depend on it.
+* **Trace area of the brightest precursors.** `<stem>.extract.parquet` also keeps a
+  template-free area, `trace_quantity`: each isotope trace of the fit, minus its baseline,
+  integrated by the trapezoid rule over `[t0 − 3w', t0 + 4w']` with `w' = max(w, w_prior)`
+  (longer after the apex, where peaks tail), the isotopes combined with the template
+  amplitude's weights `π_i / σ_i²`. The baseline is the median of the window's scans outside
+  that range; when the medians before and after it differ by more than 3 standard errors, the
+  lower one is used (the other side holds a tail or a neighbouring peak). For a Gaussian peak
+  the trace area equals `A · w · √(2π)`; for a tailing or otherwise non-Gaussian peak it
+  follows the measured trace. The brightest tenth of the precursors (`andes quant finalize
+  --quant-trace-fraction`, default 0.1; `--mbr` uses the default), ranked by the median
+  `A / amplitude_se` of their identified fits, report it instead of `A · w_p · √(2π)` in every
+  run (a row whose trace area is not positive keeps the template area), so a precursor never
+  mixes the two across runs; finalize logs the signal-to-noise cut. On six LFQ benchmarks this
+  lowered the gross errors of the brightest tenth of the identified cells by 17–43 % and the
+  replicate SD on every set, with differential-expression calls unchanged; switching every
+  precursor (`1`) made those calls worse on three of four sets. `0` reports the template area
+  everywhere. `quant_q` and the transfer q-values do not depend on it.
 * **Normalised quantity.** `<stem>.mbr.parquet` also reports `quantity_normalized`: the reported
   quantity divided by `2^o`, where `o` is the run's log2 offset at the row's apex RT. The
   offsets are fitted across runs on the identified rows with `quant_q ≤ 0.01` of precursors

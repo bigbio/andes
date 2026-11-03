@@ -1726,7 +1726,7 @@ pub(crate) fn run_in_process(
         quant_feature_fdr,
         MBR_SEED,
         FinalizeLimits::default(),
-        0.0,
+        crate::quant_finalize::DEFAULT_TRACE_FRACTION,
         base,
         parquet_dir,
         groups,

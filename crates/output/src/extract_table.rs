@@ -483,7 +483,7 @@ pub struct ExtractTableReader {
 }
 
 /// The evidence columns of [`ExtractTableReader::open_identified_fits`].
-const FIT_EVIDENCE: [&str; 8] = [
+const FIT_EVIDENCE: [&str; 9] = [
     "amplitude",
     "t0",
     "w",
@@ -492,6 +492,7 @@ const FIT_EVIDENCE: [&str; 8] = [
     "iso_h2",
     "iso_h3",
     "tailing",
+    "amplitude_se",
 ];
 
 impl ExtractTableReader {
@@ -502,7 +503,8 @@ impl ExtractTableReader {
 
     /// Opens `path` to read its identified target rows only, with the
     /// columns of their peak shape: the keys, and of the evidence the
-    /// amplitude, apex, width, isotope heights and tailing. The other
+    /// amplitude and its standard error, apex, width, isotope heights and
+    /// tailing. The other
     /// evidence values are NaN (counts 0) and the MS2 evidence is `None`.
     pub fn open_identified_fits(path: &Path, batch_rows: usize) -> Result<Self, String> {
         Self::open_with(path, batch_rows, true)
@@ -623,7 +625,7 @@ fn decode_fit_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, Str
             let v = |k: usize| ev[k].value(i);
             Evidence {
                 amplitude: v(0),
-                amplitude_se: f64::NAN,
+                amplitude_se: v(8),
                 quantity: f64::NAN,
                 quantity_se: f64::NAN,
                 llr: f64::NAN,
@@ -865,8 +867,22 @@ mod tests {
                 (None, None) => {}
                 (Some(a), Some(b)) => {
                     assert_eq!(
-                        (a.amplitude, a.t0, a.w, a.iso_heights, a.tailing),
-                        (b.amplitude, b.t0, b.w, b.iso_heights, b.tailing)
+                        (
+                            a.amplitude,
+                            a.amplitude_se,
+                            a.t0,
+                            a.w,
+                            a.iso_heights,
+                            a.tailing
+                        ),
+                        (
+                            b.amplitude,
+                            b.amplitude_se,
+                            b.t0,
+                            b.w,
+                            b.iso_heights,
+                            b.tailing
+                        )
                     );
                     assert!(a.llr.is_nan() && a.quantity.is_nan());
                 }

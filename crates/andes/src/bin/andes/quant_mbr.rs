@@ -92,8 +92,9 @@
 //! reports the extract's own `quantity` and `quantity_se`. The extract
 //! tables keep the per-run values.
 //!
-//! Trace area (opt-in, `quant finalize --quant-trace-fraction F`): the
-//! brightest share `F` of the precursors, ranked by the median amplitude
+//! Trace area (`quant finalize --quant-trace-fraction F`, default 0.1; `--mbr`
+//! uses the default): the brightest share `F` of the precursors, ranked by the
+//! median amplitude
 //! signal-to-noise `A / amplitude_se` of their identified target fits,
 //! report the extract's template-free `trace_quantity` and
 //! `trace_quantity_se` in every run instead (a row whose trace area is not
@@ -3541,6 +3542,7 @@ mod finalize_tests {
 
     #[test]
     fn trace_fraction_reports_the_trace_area_of_the_brightest_precursors() {
+        use crate::quant_finalize::{ExtractFiles, ExtractSource};
         let lib = library();
         let mut runs = extract();
         // The identified signal-to-noise rises with the precursor index.
@@ -3549,72 +3551,89 @@ mod finalize_tests {
             e.amplitude_se = e.amplitude / (10.0 + r.precursor as f64);
         }
         let dir = tempfile::tempdir().unwrap();
-        let finalize_at = |fraction: f64| {
-            let (mbr, val) = mbr_paths(&dir.path().join(format!("f{fraction}")));
-            let params = FinalizeParams {
-                mbr_fdr: 0.01,
-                quant_feature_fdr: None,
-                seed: 7,
-                limits: FinalizeLimits::default(),
-                mbr_path: &mbr,
-                validation_path: &val,
-                trace_fraction: fraction,
-            };
-            let source = ExtractRuns {
-                runs: &runs,
-                batch_rows: usize::MAX,
-            };
-            let mut features = Vec::new();
-            finalize_stream(&stems(), &lib, &source, &params, &mut |f| {
-                features.extend(f);
-                Ok(())
-            })
-            .unwrap();
-            features
+        // The same rows from memory and from extract tables on disk: finalize
+        // reads the identified fits of the tables with a reader of its own.
+        let files = ExtractFiles(
+            runs.iter()
+                .enumerate()
+                .map(|(r, rows)| {
+                    let path = dir.path().join(format!("{r}.extract.parquet"));
+                    output::extract_table::write_extract_table(&path, rows).unwrap();
+                    path
+                })
+                .collect(),
+        );
+        let memory = ExtractRuns {
+            runs: &runs,
+            batch_rows: usize::MAX,
         };
+        let sources: [(&str, &dyn ExtractSource); 2] = [("memory", &memory), ("files", &files)];
         let target: HashMap<(u32, u16), &Evidence> = runs
             .iter()
             .flatten()
             .filter(|r| r.kind == Hypothesis::Target && r.role != Role::PseudoTransfer)
             .filter_map(|r| r.evidence.as_ref().map(|e| ((r.precursor, r.run), e)))
             .collect();
-        let off = finalize_at(0.0);
-        let all = finalize_at(1.0);
-        let half = finalize_at(0.5);
-        assert_eq!(off.len(), all.len());
-        assert_eq!(off.len(), half.len());
-        let mut traced = 0;
-        for ((o, a), h) in off.iter().zip(&all).zip(&half) {
-            let key = (o.precursor, o.run);
-            assert_eq!(key, (a.precursor, a.run));
-            assert_eq!(key, (h.precursor, h.run));
-            // The q-values and the evidence type do not use the quantity.
-            for f in [a, h] {
-                assert_eq!(
-                    (f.evidence_type, f.transfer_q, f.quant_q),
-                    (o.evidence_type, o.transfer_q, o.quant_q)
-                );
-            }
-            let Some(q) = o.quantity else {
-                assert!(a.quantity.is_none() && h.quantity.is_none());
-                continue;
+        for (name, source) in sources {
+            let finalize_at = |fraction: f64| {
+                let (mbr, val) = mbr_paths(&dir.path().join(format!("{name}{fraction}")));
+                let params = FinalizeParams {
+                    mbr_fdr: 0.01,
+                    quant_feature_fdr: None,
+                    seed: 7,
+                    limits: FinalizeLimits::default(),
+                    mbr_path: &mbr,
+                    validation_path: &val,
+                    trace_fraction: fraction,
+                };
+                let mut features = Vec::new();
+                finalize_stream(&stems(), &lib, source, &params, &mut |f| {
+                    features.extend(f);
+                    Ok(())
+                })
+                .unwrap();
+                features
             };
-            let e = target[&key];
-            assert_ne!(q, e.trace_quantity);
-            // Every precursor has an identified fit: share 1 traces them all.
-            assert_eq!(
-                (a.quantity, a.quantity_se),
-                (Some(e.trace_quantity), Some(e.trace_quantity_se))
-            );
-            // Share 0.5 traces the brighter half, precursors 450 and up.
-            if o.precursor >= N / 2 {
-                assert_eq!(h.quantity, Some(e.trace_quantity));
-                traced += 1;
-            } else {
-                assert_eq!((h.quantity, h.quantity_se), (o.quantity, o.quantity_se));
+            let off = finalize_at(0.0);
+            let all = finalize_at(1.0);
+            let half = finalize_at(0.5);
+            assert_eq!(off.len(), all.len(), "{name}");
+            assert_eq!(off.len(), half.len(), "{name}");
+            let mut traced = 0;
+            for ((o, a), h) in off.iter().zip(&all).zip(&half) {
+                let key = (o.precursor, o.run);
+                assert_eq!(key, (a.precursor, a.run));
+                assert_eq!(key, (h.precursor, h.run));
+                // The q-values and the evidence type do not use the quantity.
+                for f in [a, h] {
+                    assert_eq!(
+                        (f.evidence_type, f.transfer_q, f.quant_q),
+                        (o.evidence_type, o.transfer_q, o.quant_q),
+                        "{name}"
+                    );
+                }
+                let Some(q) = o.quantity else {
+                    assert!(a.quantity.is_none() && h.quantity.is_none());
+                    continue;
+                };
+                let e = target[&key];
+                assert_ne!(q, e.trace_quantity);
+                // Every precursor has an identified fit: share 1 traces them all.
+                assert_eq!(
+                    (a.quantity, a.quantity_se),
+                    (Some(e.trace_quantity), Some(e.trace_quantity_se)),
+                    "{name} {key:?}"
+                );
+                // Share 0.5 traces the brighter half, precursors 450 and up.
+                if o.precursor >= N / 2 {
+                    assert_eq!(h.quantity, Some(e.trace_quantity), "{name} {key:?}");
+                    traced += 1;
+                } else {
+                    assert_eq!((h.quantity, h.quantity_se), (o.quantity, o.quantity_se));
+                }
             }
+            assert!(traced > 0, "{name}");
         }
-        assert!(traced > 0);
     }
 
     #[test]

@@ -16,6 +16,18 @@
 //! Detection is intentionally presence-based and tolerant in m/z so it works on
 //! both high-res MS2 (Orbitrap, reporters resolved to mDa) and low-res CID-MS2
 //! (ion trap, reporters at ~unit resolution).
+//!
+//! Presence is judged against the run's own background. The low-m/z region of
+//! a label-free ion-trap HCD run holds a peak at most nominal masses, so at the
+//! loose low-res window a 4-of-6 "TMT cluster" turns up by chance in over half
+//! of its spectra. Each rule is therefore also evaluated on the channel set
+//! shifted by whole Daltons ([`CONTROL_SHIFTS_DA`], positions where no reporter
+//! sits): their mean is the chance rate `c`, and a fraction `f` counts as
+//! `(f - c) / (1 - c)`, the share of the spectra not explained by chance. On
+//! high-res data, where `c` is about zero, this is the plain fraction. The
+//! same correction is applied per channel, and a cluster also needs as many
+//! channels above chance as a spectrum needs present, so label-free ions that
+//! sit at one or two reporter masses do not make a cluster.
 
 use model::spectrum::Spectrum;
 
@@ -71,6 +83,16 @@ const EXTRA_FRACTION: f64 = 0.5;
 const HIGH_RES_TOL: f64 = 0.01;
 const LOW_RES_TOL: f64 = 0.3;
 
+/// Whole-Dalton offsets of the control channel sets that measure the run's
+/// chance rate. At least 9 Da on either side, so a shifted set never overlaps
+/// the 8-Da span of a kit's own reporters (TMTpro 126–134, iTRAQ 8-plex
+/// 113–121); on both sides, so the local peak density is sampled above and
+/// below the reporters.
+const CONTROL_SHIFTS_DA: [i32; 24] = [
+    -20, -19, -18, -17, -16, -15, -14, -13, -12, -11, -10, -9, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+    18, 19, 20,
+];
+
 /// Minimum number of MS2 (with peaks) needed before we trust a detection.
 pub const MIN_SAMPLE: usize = 50;
 /// A channel counts as present if its peak is ≥ this fraction of the base peak.
@@ -82,9 +104,15 @@ const ITRAQ_MIN_CHANNELS: usize = 3;
 /// The run is labeled if ≥ this fraction of sampled MS2 show the cluster.
 const FRACTION_THRESHOLD: f64 = 0.30;
 
-/// Count how many of `channels` have a peak within `tol`, at or above
-/// `rel_floor × base_peak`, in `spec`.
-fn channels_present(spec: &Spectrum, channels: &[f64], rel_floor: f32, tol: f64) -> usize {
+/// Count how many of `channels`, moved by `shift` Da, have a peak within `tol`,
+/// at or above `rel_floor × base_peak`, in `spec`.
+fn channels_present_at(
+    spec: &Spectrum,
+    channels: &[f64],
+    shift: f64,
+    rel_floor: f32,
+    tol: f64,
+) -> usize {
     if spec.peaks.is_empty() {
         return 0;
     }
@@ -98,9 +126,76 @@ fn channels_present(spec: &Spectrum, channels: &[f64], rel_floor: f32, tol: f64)
         .filter(|&&c| {
             spec.peaks
                 .iter()
-                .any(|&(mz, i)| (mz - c).abs() <= tol && i >= floor)
+                .any(|&(mz, i)| (mz - (c + shift)).abs() <= tol && i >= floor)
         })
         .count()
+}
+
+fn channels_present(spec: &Spectrum, channels: &[f64], rel_floor: f32, tol: f64) -> usize {
+    channels_present_at(spec, channels, 0.0, rel_floor, tol)
+}
+
+/// The share of `obs` not explained by the chance rate `chance`:
+/// `(obs - chance) / (1 - chance)`, floored at 0.
+fn above_chance(obs: f64, chance: f64) -> f64 {
+    if chance >= 1.0 {
+        return 0.0;
+    }
+    ((obs - chance) / (1.0 - chance)).max(0.0)
+}
+
+/// Fraction of `spectra` in which at least `min` of `channels` (moved by
+/// `shift` Da) are present.
+fn fraction_showing(
+    spectra: &[&Spectrum],
+    channels: &[f64],
+    min: usize,
+    shift: f64,
+    tol: f64,
+) -> f64 {
+    if spectra.is_empty() {
+        return 0.0;
+    }
+    let n = spectra
+        .iter()
+        .filter(|s| channels_present_at(s, channels, shift, REL_FLOOR, tol) >= min)
+        .count();
+    n as f64 / spectra.len() as f64
+}
+
+/// The `min`-th highest presence rate above chance among `channels`: each
+/// channel's rate in `spectra`, corrected for the chance rate at its own
+/// [`CONTROL_SHIFTS_DA`] positions. A reporter cluster raises every channel;
+/// label-free ions that happen to sit at one or two reporter masses (an
+/// immonium or internal ion near 127 or 129) raise only those.
+fn channel_rate_above_chance(spectra: &[&Spectrum], channels: &[f64], min: usize, tol: f64) -> f64 {
+    let mut rates: Vec<f64> = channels
+        .iter()
+        .map(|c| {
+            let one = std::slice::from_ref(c);
+            let obs = fraction_showing(spectra, one, 1, 0.0, tol);
+            let chance = CONTROL_SHIFTS_DA
+                .iter()
+                .map(|&d| fraction_showing(spectra, one, 1, f64::from(d), tol))
+                .sum::<f64>()
+                / CONTROL_SHIFTS_DA.len() as f64;
+            above_chance(obs, chance)
+        })
+        .collect();
+    rates.sort_by(|a, b| b.total_cmp(a));
+    rates.get(min.saturating_sub(1)).copied().unwrap_or(0.0)
+}
+
+/// [`fraction_showing`] at the reporter positions, corrected for the chance
+/// rate measured at the [`CONTROL_SHIFTS_DA`] positions of the same spectra.
+fn fraction_above_chance(spectra: &[&Spectrum], channels: &[f64], min: usize, tol: f64) -> f64 {
+    let obs = fraction_showing(spectra, channels, min, 0.0, tol);
+    let chance = CONTROL_SHIFTS_DA
+        .iter()
+        .map(|&d| fraction_showing(spectra, channels, min, f64::from(d), tol))
+        .sum::<f64>()
+        / CONTROL_SHIFTS_DA.len() as f64;
+    above_chance(obs, chance)
 }
 
 /// Detect the isobaric label from a sample of MS2 spectra, or `None` if the run
@@ -108,6 +203,7 @@ fn channels_present(spec: &Spectrum, channels: &[f64], rel_floor: f32, tol: f64)
 /// reporter match window (tight for Orbitrap/TOF, loose for ion-trap) — pass the
 /// detected analyzer's resolution class.
 ///
+/// Every fraction is taken above the run's chance rate (see the module docs).
 /// TMT and iTRAQ reporter regions do not overlap (126–131 vs 114–117), so the
 /// stronger cluster wins when (improbably) both clear the threshold.
 pub fn detect_isobaric(spectra: &[Spectrum], high_res: bool) -> Option<IsobaricLabel> {
@@ -127,17 +223,23 @@ pub fn detect_isobaric(spectra: &[Spectrum], high_res: bool) -> Option<IsobaricL
         .filter(|s| channels_present(s, ITRAQ_CHANNELS, REL_FLOOR, tol) >= ITRAQ_MIN_CHANNELS)
         .collect();
 
-    let tmt_frac = tmt_hits.len() as f64 / n;
-    let itraq_frac = itraq_hits.len() as f64 / n;
+    // A cluster counts as far as both the spectra that show it and its
+    // weakest required channel stand above chance.
+    let cluster = |hits: usize, channels: &[f64], min: usize| {
+        if (hits as f64) < FRACTION_THRESHOLD * n {
+            return 0.0;
+        }
+        fraction_above_chance(&ms2, channels, min, tol)
+            .min(channel_rate_above_chance(&ms2, channels, min, tol))
+    };
+    let tmt_frac = cluster(tmt_hits.len(), TMT_CHANNELS, TMT_MIN_CHANNELS);
+    let itraq_frac = cluster(itraq_hits.len(), ITRAQ_CHANNELS, ITRAQ_MIN_CHANNELS);
 
     // Among the spectra that carry the core cluster, how many also carry the
-    // larger kit's extra reporters.
+    // larger kit's extra reporters, above the chance rate in those spectra.
     let shows_extra = |hits: &[&&Spectrum], extra: &[f64]| {
-        let with_extra = hits
-            .iter()
-            .filter(|s| channels_present(s, extra, REL_FLOOR, tol) >= EXTRA_MIN_CHANNELS)
-            .count();
-        with_extra as f64 >= EXTRA_FRACTION * hits.len() as f64
+        let hits: Vec<&Spectrum> = hits.iter().map(|s| **s).collect();
+        fraction_above_chance(&hits, extra, EXTRA_MIN_CHANNELS, tol) >= EXTRA_FRACTION
     };
 
     if tmt_frac >= FRACTION_THRESHOLD && tmt_frac >= itraq_frac {
@@ -281,6 +383,107 @@ mod tests {
             detect_isobaric(&run_with(TMT_CHANNELS), true),
             Some(IsobaricLabel::Tmt)
         );
+    }
+
+    /// A dense low-m/z region: a peak at each nominal mass 100–160 with
+    /// probability `p` (deterministic pseudo-random), at the +0.1 Da offset of
+    /// fragment ions, at 5% of the base peak.
+    fn dense_lowres_background(seed: u64, p: f64) -> Vec<(f64, f32)> {
+        let mut x = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let mut peaks = backbone();
+        for m in 100..=160 {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            if ((x >> 33) as f64 / (1u64 << 31) as f64) < p {
+                peaks.push((m as f64 + 0.1, 50.0));
+            }
+        }
+        peaks
+    }
+
+    /// Regression for a label-free ion-trap HCD run read as TMTpro: its
+    /// low-m/z region holds a peak at most nominal masses, so at the low-res
+    /// window the 4-of-6 cluster and the 132–134 extras appear by chance. The
+    /// chance rate at the control positions explains them away. A TMTpro run
+    /// over the same background is still detected, and a TMT 6–11 run over it
+    /// is not promoted to TMTpro.
+    #[test]
+    fn dense_lowres_label_free_is_not_tmt() {
+        let label_free: Vec<Spectrum> = (0..300)
+            .map(|i| {
+                let mut p = dense_lowres_background(i, 0.65);
+                p.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+                spec_with(p)
+            })
+            .collect();
+        let raw_hits = label_free
+            .iter()
+            .filter(|s| channels_present(s, TMT_CHANNELS, REL_FLOOR, LOW_RES_TOL) >= 4)
+            .count();
+        assert!(
+            raw_hits as f64 >= FRACTION_THRESHOLD * label_free.len() as f64,
+            "the background alone clears the raw fraction ({raw_hits})"
+        );
+        assert_eq!(detect_isobaric(&label_free, false), None);
+
+        let with = |channels: &[f64]| -> Vec<Spectrum> {
+            (0..300)
+                .map(|i| {
+                    let mut p = dense_lowres_background(i, 0.65);
+                    for &c in channels {
+                        p.push((c, 300.0));
+                    }
+                    p.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+                    spec_with(p)
+                })
+                .collect()
+        };
+        let tmtpro: Vec<f64> = TMT_CHANNELS.iter().chain(TMTPRO_EXTRA).copied().collect();
+        assert_eq!(
+            detect_isobaric(&with(&tmtpro), false),
+            Some(IsobaricLabel::TmtPro)
+        );
+        assert_eq!(
+            detect_isobaric(&with(TMT_CHANNELS), false),
+            Some(IsobaricLabel::Tmt)
+        );
+    }
+
+    /// The shape of the measured false positive: over a dense background,
+    /// label-free ions at two reporter masses (nominal 127 and 129) lift the
+    /// 4-of-6 cluster above the chance rate of the control positions. Two
+    /// channels above chance are not a cluster.
+    #[test]
+    fn two_label_free_ions_at_reporter_masses_are_not_tmt() {
+        let run: Vec<Spectrum> = (0..400)
+            .map(|i| {
+                let mut p = dense_lowres_background(i, 0.5);
+                if i % 10 != 0 {
+                    p.push((127.09, 80.0));
+                    p.push((129.10, 80.0));
+                }
+                p.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+                spec_with(p)
+            })
+            .collect();
+        let refs: Vec<&Spectrum> = run.iter().collect();
+        assert!(
+            fraction_above_chance(&refs, TMT_CHANNELS, TMT_MIN_CHANNELS, LOW_RES_TOL)
+                >= FRACTION_THRESHOLD,
+            "the spectrum-level rule alone clears the threshold"
+        );
+        assert_eq!(detect_isobaric(&run, false), None);
+    }
+
+    #[test]
+    fn above_chance_is_the_unexplained_share() {
+        assert_eq!(above_chance(0.8, 0.0), 0.8);
+        assert!((above_chance(0.65, 0.6) - 0.125).abs() < 1e-12);
+        assert_eq!(above_chance(0.5, 0.6), 0.0);
+        assert_eq!(above_chance(1.0, 1.0), 0.0);
     }
 
     #[test]

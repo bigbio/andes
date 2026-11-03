@@ -3,20 +3,25 @@
 normalise  per-run median of log2 quantity over the precursors the arm quantifies in ALL runs (>= 90 % of runs if fewer than
            200 such precursors); no truth, all species.
 rollup     Tukey median polish per protein over precursors x runs; only proteins with >= 2 precursors are tested later.
-Precision-weight view: transfers carry a learned weight (learn_weights), the polish uses weighted row / column medians."""
+Precision-weight view: transfers carry a learned weight (learn_weights), the polish uses weighted row / column medians.
+Null-species view: normalise(..., ref_keys=keys of the species whose amount is constant) takes the run factors from that species
+only (an evaluation view that uses the design; applied to every arm the same way)."""
 import numpy as np
 import pandas as pd
 
 
-def normalise(d, runs):
-    """d: rows with quantity. Adds lq (log2) and n (run-centred log2). Returns (table, fallback flag, number of precursors used)."""
+def normalise(d, runs, ref_keys=None):
+    """d: rows with quantity. Adds lq (log2) and n (run-centred log2). Returns (table, fallback flag, number of precursors used).
+    ref_keys: optional set of keys the run medians are taken from (the null-species view passes the keys of the species whose
+    amount is the same in every run); default = every key."""
     d = d.assign(lq=np.log2(d.quantity.values))
-    flag = None
-    nr = d.groupby("key").run.nunique()
+    flag = None if ref_keys is None else "null"
+    src = d if ref_keys is None else d[d.key.isin(ref_keys)]
+    nr = src.groupby("key").run.nunique()
     full = nr.index[nr == len(runs)]
     if len(full) < 200:
         full = nr.index[nr >= 0.9 * len(runs)]
-        flag = "fb90"
+        flag = "fb90" if ref_keys is None else "null-fb90"
     med = d[d.key.isin(full)].groupby("run").lq.median().reindex(runs)
     med = med.fillna(med.median())
     d["n"] = d.lq.values - d.run.map(med).values + float(med.median())
@@ -180,4 +185,17 @@ def learn_weights(d, prot_of, runs):
     v0 = var.get(0, min(var.values()) if var else 1.0)
     wc = {c: float(np.clip(v0 / max(v, 1e-6), 0.05, 1.0)) for c, v in var.items()}
     d["w"] = [wc.get(c, 1.0) for c in cls]
+    if "se" in d.columns:
+        # per-transfer uncertainty: the class variance scaled by the row's se**2 relative to the class mean of se**2
+        s2 = d.se.values.astype(float) ** 2
+        ok_se = tr & np.isfinite(s2) & (s2 > 0)
+        if ok_se.any():
+            w = d.w.values.copy()
+            for c, v in var.items():
+                k = ok_se & (cls == c)
+                if c == 0 or not k.any():
+                    continue
+                rel = s2[k] / s2[k].mean()
+                w[k] = np.clip(v0 / np.maximum(v * rel, 1e-6), 0.05, 1.0)
+            d["w"] = w
     return d, {int(c): round(float(v), 4) for c, v in var.items()}

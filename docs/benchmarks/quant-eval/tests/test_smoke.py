@@ -3,7 +3,8 @@
   1. the lineage guard refuses a cross-run join and accepts a same-run one;
   2. the quant_q -> p recovery inverts the running mean;
   3. scorecard fixes: same-family BH, TP at matched FDP, per-pair AUC, design-consistent detection, absence table, RT-local
-     normalisation (unit tests on small synthetic inputs);
+     normalisation, the weights-bias reader, se-scaled weights and the null-species normalisation (unit tests on small
+     synthetic inputs);
   4. the whole downstream (andes finalize parquet + MaxQuant evidence, design and amounts files) finds the changing species
      (sign-aware TP > 0), no false positive in the null species, and a small precursor error.
 
@@ -256,6 +257,68 @@ class LibraryGate(unittest.TestCase):
         self.assertEqual(kinds["wide"], {"kind": "andes", "rule": "default", "library_q": 0.05})
 
 
+class BiasAndNullViews(unittest.TestCase):
+    def test_weights_bias_reader(self):
+        d = pd.DataFrame({"precursor_key": ["AAAAK/2", "CCCCK/2", "DDDDK/2"], "run": ["r_1"] * 3,
+                          "evidence_type": ["identified_ms2", "transfer_ms1", "transfer_ms1"], "quantity": [8.0, 8.0, 8.0],
+                          "quant_q": [0.0, 0.01, 0.02], "transfer_q": [0.0, 0.001, 0.001], "library_q": [0.0, 0.0, 0.0],
+                          "quantity_bias": [np.nan, -1.0, np.nan], "quantity_bias_se": [np.nan, 0.2, np.nan]})
+        with tempfile.TemporaryDirectory() as tmp:
+            p = f"{tmp}/f.parquet"
+            d.to_parquet(p)
+            b = readers.read_andes(p, ["r_1"], "weights-bias").set_index("key")
+            w = readers.read_andes(p, ["r_1"], "weights").set_index("key")
+            p2 = f"{tmp}/g.parquet"
+            d.drop(columns=["quantity_bias", "quantity_bias_se"]).to_parquet(p2)
+            nb = readers.read_andes(p2, ["r_1"], "weights-bias").set_index("key")
+        self.assertAlmostEqual(b.quantity["CCCCK/2"], 16.0)       # 8 / 2**-1
+        self.assertAlmostEqual(b.se["CCCCK/2"], 0.2)
+        self.assertAlmostEqual(b.quantity["DDDDK/2"], 8.0)        # no bias given: unchanged
+        self.assertAlmostEqual(b.quantity["AAAAK/2"], 8.0)        # identified rows never corrected
+        self.assertTrue(np.isnan(b.se["AAAAK/2"]))
+        self.assertNotIn("se", w.columns)
+        self.assertTrue(np.allclose(nb.quantity.values, w.quantity.values))
+        self.assertTrue(nb.se.isna().all())
+
+    def test_se_scales_transfer_weights(self):
+        rng = np.random.default_rng(4)
+        runs = [f"r{i}" for i in range(6)]
+        rows = []
+        for p in range(80):
+            for k in range(4):
+                for r in runs:
+                    tr = k >= 1 and r in ("r3", "r4", "r5")
+                    rows.append((f"P{p}K{k}", r, 10 + rng.normal(0, 0.1 if not tr else 0.3), tr,
+                                 rng.uniform(0, 0.05) if tr else np.nan, (0.1 if p % 2 else 0.4) if tr else np.nan, f"prot{p}"))
+        d = pd.DataFrame(rows, columns=["key", "run", "n", "is_transfer", "p", "se", "prot"])
+        prot = d.drop_duplicates("key").set_index("key").prot
+        w0, _ = rollup.learn_weights(d.drop(columns=["se"]), prot, runs)
+        w1, _ = rollup.learn_weights(d, prot, runs)
+        t = w1.is_transfer.values
+        lo = w1.w.values[t & (w1.se.values == 0.1)].mean()
+        hi = w1.w.values[t & (w1.se.values == 0.4)].mean()
+        self.assertGreater(lo, hi)
+        self.assertTrue(np.allclose(w0.w.values[~t], w1.w.values[~t]))
+
+    def test_null_species_normalisation(self):
+        # run B has a 2x loading of the changing species only; the all-species median moves, the null-species one does not
+        rng = np.random.default_rng(5)
+        rows = []
+        for i in range(300):
+            sp = "YEAST" if i < 100 else "UPS"
+            for r in ("A", "B"):
+                rows.append((f"K{i}", r, 2.0 ** (10 + rng.normal(0, 0.05) + (1.0 if sp == "UPS" and r == "B" else 0.0)), sp))
+        d = pd.DataFrame(rows, columns=["key", "run", "quantity", "sp"])
+        null_keys = set(d.key[d.sp == "YEAST"])
+        a, flag_a, _ = rollup.normalise(d, ["A", "B"])
+        b, flag_b, nref = rollup.normalise(d, ["A", "B"], null_keys)
+        off = lambda x: x[(x.sp == "YEAST") & (x.run == "B")].n.median() - x[(x.sp == "YEAST") & (x.run == "A")].n.median()
+        self.assertGreater(abs(off(a)), 0.5)
+        self.assertLess(abs(off(b)), 0.05)
+        self.assertIn(flag_b, ("null", "null-fb90"))
+        self.assertEqual(nref, 100)
+
+
 class Smoke(unittest.TestCase):
     def test_guard(self):
         a = G.tagged(pd.DataFrame({"k": [1, 2], "x": [1.0, 2.0]}), "A:1")
@@ -283,14 +346,15 @@ class Smoke(unittest.TestCase):
             downstream.main(["--name", "synthetic", "--design", f"{tmp}/design.tsv", "--amounts", f"{tmp}/amounts.tsv",
                              "--fasta", f"{tmp}/db.fasta", "--classes", "HUMAN,YEAST", "--null", "HUMAN",
                              "--andes", f"andes:default:{tmp}/final.parquet", "--andes", f"andes_V:weights:{tmp}/final.parquet",
-                             "--maxquant", f"MQ:{tmp}/evidence.txt", "--out", out])
+                             "--andes", f"andes_Vb:weights-bias:{tmp}/final.parquet",
+                             "--maxquant", f"MQ:{tmp}/evidence.txt", "--norm-null", "--out", out])
             with open(out) as f:
                 res = json.load(f)
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 scorecard.main(["--results", out])
         self.assertIn("DE TP, no cut, andes", buf.getvalue())
-        for title in ("DE by BH family", "True positives at matched FDP", "intersection family"):
+        for title in ("DE by BH family", "True positives at matched FDP", "intersection family", "null-species normalisation"):
             self.assertIn(title, buf.getvalue())
         self.assertEqual(res["families"]["intersection"], 170)
         for arm in ("andes", "MQ"):
@@ -308,6 +372,11 @@ class Smoke(unittest.TestCase):
             self.assertLess(acc["share_gt1"], 0.01, arm)
             self.assertEqual(res["arms"][arm]["proteins_ge2"], 170, arm)
         self.assertEqual(res["shared_cells"], 170 * 3 * len(RUNS))
+        self.assertEqual(res["nullnorm_families"]["null"], "HUMAN")
+        for arm in ("andes", "andes_Vb", "MQ"):
+            nn = res["arms"][arm]["nullnorm"]
+            self.assertEqual(nn["reference_precursors"], 450, arm)   # 150 human proteins x 3 precursors
+            self.assertGreaterEqual(nn["de"]["TPs"], 15, arm)
 
 
 if __name__ == "__main__":

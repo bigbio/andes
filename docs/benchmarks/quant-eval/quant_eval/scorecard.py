@@ -355,16 +355,16 @@ def auc_pairs_table(res):
     return out
 
 
-def rt_table(res):
-    """DE with and without the RT-local normalisation, intersection family of each variant."""
+def alt_norm_table(res, label, fam_key, name, intro):
+    """DE with the default and another run normalisation (`label` in each arm), intersection family of each variant."""
     A = res["arms"]
-    if not any("rtlocal" in a for a in A.values()):
+    if not any(label in a for a in A.values()):
         return []
-    F = res["rtlocal_families"]
-    out = [f"RT-local family: intersection {F['intersection']:,} proteins (arms {', '.join(F['arms'])}); RT proxy for {F['rt_keys']:,} precursor keys from the andes apex RT.", "",
+    F = res[fam_key]
+    out = [f"{intro(F)}", "",
            "| arm | normalisation | TP / FP (FDP %) | TP / FP FC>=0.5 | TP at FDP 5 % | TP at FDP 10 % | mean per-pair AUC |", "|---" * 7 + "|"]
     for n in res["arm_roles"]:
-        pair = (("global median (default)", g(A[n], "de_family", "inter")), ("RT-local", g(A[n], "rtlocal", "de_family", "inter")))
+        pair = (("global median (default)", g(A[n], "de_family", "inter")), (name, g(A[n], label, "de_family", "inter")))
         for lab, f in pair:
             if not f:
                 continue
@@ -372,6 +372,20 @@ def rt_table(res):
             out.append(f"| {n} | {lab} | {f['TP']:,} / {f['FP']:,} ({100 * f['FP'] / max(f['TP'] + f['FP'], 1):.1f}) | {f['TP5']:,} / {f['FP5']:,} | "
                        f"{f['tp_at_fdp']['5']:,} | {f['tp_at_fdp']['10']:,} | {au} |")
     return out
+
+
+def rt_table(res):
+    """DE with and without the RT-local normalisation, intersection family of each variant."""
+    return alt_norm_table(res, "rtlocal", "rtlocal_families", "RT-local", lambda F: (
+        f"RT-local family: intersection {F['intersection']:,} proteins (arms {', '.join(F['arms'])}); "
+        f"RT proxy for {F['rt_keys']:,} precursor keys from the andes apex RT."))
+
+
+def null_table(res):
+    """DE with the default run normalisation and with run factors from the null species only (the default stays the headline)."""
+    return alt_norm_table(res, "nullnorm", "nullnorm_families", f"null species ({res.get('nullnorm_families', {}).get('null')})", lambda F: (
+        f"Null-species family: intersection {F['intersection']:,} proteins (arms {', '.join(F['arms'])}); run factors from the "
+        f"{F['null']} precursors only (species known constant), the same step for every arm. Shown next to the default view, which stays the headline."))
 
 
 def main(argv=None):
@@ -392,7 +406,8 @@ def main(argv=None):
         for title, tab in (("DE by BH family (own / intersection / union)", family_table(r)),
                            ("True positives at matched FDP and per-pair AUC", fdp_table(r)),
                            ("Per-pair AUC (changed vs null species, intersection family), adjacent levels", auc_pairs_table(r)),
-                           ("DE with and without RT-local normalisation (same step for every arm)", rt_table(r))):
+                           ("DE with and without RT-local normalisation (same step for every arm)", rt_table(r)),
+                           ("DE with the default and the null-species normalisation (same step for every arm)", null_table(r))):
             if tab:
                 out += [f"### {title}", ""] + tab + [""]
         ab = Section(r)

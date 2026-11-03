@@ -30,6 +30,7 @@ andes row rules (`--andes NAME:RULE[@LIBQ]:PATH`), all with `library_q <= 0.01` 
 | `all` | identified rows + every transfer the finalize output carries |
 | `hard-cut` | identified rows + transfers with `quant_q <= --hard-cut` (default 0.01) |
 | `weights` | rows of `all`, with the per-transfer error probability recovered from `quant_q` (running mean of p over a run's transfers sorted by p); the roll-up then uses learned precision weights (the "V" view) |
+| `weights-bias` | rows of `weights`; where the table carries `quantity_bias` and `quantity_bias_se` (log2) for a transfer, its quantity is divided by `2**quantity_bias` and the learned class variance of the transfer is scaled by its `quantity_bias_se**2` relative to its class mean. A table without these columns gives the `weights` rows |
 
 MaxQuant and FragPipe rows are used as the tools report them (their own match-between-runs rows included).
 
@@ -66,6 +67,10 @@ MaxQuant and FragPipe rows are used as the tools report them (their own match-be
    `rollup.normalise_rt_local` is an optional replacement of the run normalisation (`--rt-local` adds a second DE pass): the
    run shift is smoothed along retention time with a running median over 401 reference precursors, the same function and the
    same RT proxy (median andes apex RT per precursor key) for every arm; keys without an RT get the run's median shift.
+   `--norm-null` adds a second view next to the default one: run factors from the precursors of the null species only (the
+   species whose amount is constant by design, e.g. yeast in the UPS1 sets, human in the HYE mixes), the same step for every
+   arm, then the same roll-up and DE. It uses the design, so it is an evaluation view; the default (all-species) normalisation
+   stays the headline of the scorecard.
 5. `downstream.py`: runs everything for one dataset and writes one JSON; `scorecard.py`: markdown tables from the JSONs.
 
 Not included: the masked wrong-peak measurement, which needs masked search and finalize runs of andes.

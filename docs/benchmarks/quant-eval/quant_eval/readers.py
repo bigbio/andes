@@ -12,13 +12,14 @@ import sys
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
 from . import runguard as G
 from .keys import fragpipe_key, maxquant_key, norm_key
 
 IDQ = 0.01          # library_q limit applied to every andes row
 TRANSFER_Q = 0.01   # transfer_q limit of the `default` rule
-ANDES_RULES = ("default", "all", "hard-cut", "weights")
+ANDES_RULES = ("default", "all", "hard-cut", "weights", "weights-bias")
 
 
 def _fnum(x):
@@ -183,15 +184,28 @@ def read_andes(path, runs, rule="default", hard_cut=0.01, library_q=IDQ):
       all        identified rows + every transfer the finalize output carries
       hard-cut   identified rows + transfers with quant_q <= hard_cut
       weights    as `all`, plus the column p (recovered error probability of each transfer) for the precision-weight view
+      weights-bias  as `weights`; where the table carries `quantity_bias` (log2) and `quantity_bias_se` (log2) for a transfer, its
+                 quantity is divided by 2**quantity_bias and the column se carries quantity_bias_se (the roll-up then scales the
+                 transfer's learned class variance by its relative se**2). A table without the columns gives the `weights` rows.
     Rows need library_q <= `library_q` (default 0.01; a run with a looser library entry gate passes its own limit) and a positive
     finite quantity; below-threshold rows are dropped."""
     if rule not in ANDES_RULES:
         raise SystemExit(f"andes rule {rule!r} not in {ANDES_RULES}")
-    m = pd.read_parquet(path, columns=["precursor_key", "run", "evidence_type", "quantity", "quant_q", "transfer_q", "library_q"])
+    cols = ["precursor_key", "run", "evidence_type", "quantity", "quant_q", "transfer_q", "library_q"]
+    bias_cols = ["quantity_bias", "quantity_bias_se"]
+    has_bias = rule == "weights-bias" and set(bias_cols) <= set(pq.ParquetFile(path).schema_arrow.names)
+    if rule == "weights-bias" and not has_bias:
+        print(f"andes {path}: no quantity_bias / quantity_bias_se columns; weights-bias rows = weights rows", file=sys.stderr)
+    m = pd.read_parquet(path, columns=cols + (bias_cols if has_bias else []))
     tag = G.run_tag(f"andes-finalize:{rule}", path)
     m = m[np.isfinite(m.quantity) & (m.quantity > 0) & (m.evidence_type != "below_threshold")].copy()
     m["key"] = [norm_key(k) for k in m.precursor_key.values]
     m["is_transfer"] = ~m.evidence_type.str.startswith("identified")
+    m["se"] = np.nan
+    if has_bias:
+        ok = m.is_transfer & np.isfinite(m.quantity_bias) & np.isfinite(m.quantity_bias_se) & (m.quantity_bias_se > 0)
+        m.loc[ok, "quantity"] = m.quantity[ok] * np.exp2(-m.quantity_bias[ok])
+        m.loc[ok, "se"] = m.quantity_bias_se[ok]
     m = remap_runs(m.drop_duplicates(["key", "run"]), runs)
     m["thr"] = m.quant_q
     m["tq"] = np.where(m.is_transfer, m.transfer_q, 0.0)
@@ -201,7 +215,9 @@ def read_andes(path, runs, rule="default", hard_cut=0.01, library_q=IDQ):
     elif rule == "hard-cut":
         m = m[(~m.is_transfer) | (m.quant_q <= hard_cut)]
     out = m[["key", "run", "quantity", "is_transfer", "library_q", "tq", "thr"]].copy()
-    if rule == "weights":
+    if rule == "weights-bias":
+        out["se"] = m.se.values
+    if rule in ("weights", "weights-bias"):
         tr = m[m.is_transfer]
         ptab = G.tagged(pd.DataFrame({"key": tr.key.values, "run": tr.run.values, "p": recover_p(tr).values}), tag)
         out = G.join(G.tagged(out, tag), ptab, ["key", "run"], how="left")

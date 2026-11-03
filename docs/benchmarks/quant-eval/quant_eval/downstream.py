@@ -5,7 +5,8 @@
       --andes NAME:RULE:finalize.parquet ... --maxquant NAME:evidence.txt --fragpipe NAME:combined_ion.tsv --out DS.json
 
 Arms (the only arm-specific step is the row rule of the reader, see readers.py):
-  --andes NAME:RULE:PATH   RULE in default | all | hard-cut | weights; `weights` is the precision-weight view (V)
+  --andes NAME:RULE:PATH   RULE in default | all | hard-cut | weights | weights-bias; `weights` is the precision-weight view (V),
+                           `weights-bias` the same view with the table's per-transfer bias and its se applied (readers.py)
   --maxquant NAME:PATH     evidence.txt Intensity;  --fragpipe NAME:PATH   combined_ion.tsv with IonQuant normalisation off
 Every arm table carries one run tag and no duplicated (key, run); no column of one arm is joined to another arm's table.
 
@@ -41,16 +42,23 @@ def parse_args(argv=None):
     ap.add_argument("--null", help="species whose amount does not change (false positives are its significant proteins)")
     ap.add_argument("--low-max", type=float, default=500.0, help="UPS pairs whose lower level is <= this count as low-level pairs")
     ap.add_argument("--andes", action="append", default=[], metavar="NAME:RULE[@LIBQ]:PATH",
-                    help="RULE in default | all | hard-cut | weights; @LIBQ sets the library_q limit of the arm (default 0.01), e.g. weights@0.05")
+                    help="RULE in default | all | hard-cut | weights | weights-bias; @LIBQ sets the library_q limit of the arm (default 0.01), e.g. weights@0.05")
     ap.add_argument("--maxquant", action="append", default=[], metavar="NAME:PATH")
     ap.add_argument("--fragpipe", action="append", default=[], metavar="NAME:PATH")
     ap.add_argument("--flashlfq", action="append", default=[], metavar="NAME:PEAKS[:PIPQ]",
                     help="FlashLFQ QuantifiedPeaks.tsv (PIP-ECHO MBR FDR); optional PIPQ keeps MBR peaks with PIP q-value <= PIPQ")
     ap.add_argument("--rt-local", action="store_true",
                     help="also run DE after the RT-local run normalisation (same function for every arm; RT proxy = the first andes arm's apex RT)")
+    ap.add_argument("--norm-null", action="store_true",
+                    help="also run DE with run factors from the null species only (the species known constant; same step for every arm)")
     ap.add_argument("--hard-cut", type=float, default=0.01, help="quant_q limit of the hard-cut rule")
     ap.add_argument("--out", required=True)
     return ap.parse_args(argv)
+
+
+def is_weighted(kind):
+    """Arms whose roll-up uses learned precision weights (the V views)."""
+    return kind.get("rule") in ("weights", "weights-bias")
 
 
 def load_arms(a, runs):
@@ -116,7 +124,7 @@ def evaluate(a):
         o = M.basic_counts(raw, prot, sp, prot_sp, classes)
         if design.has_de:
             d, flag, nfull = normalise(raw, runs)
-            if kinds[n].get("rule") == "weights":
+            if is_weighted(kinds[n]):
                 d, o["weight_variance_by_class"] = learn_weights(d, prot, runs)
             cntp = raw.groupby(raw.key.map(prot)).key.nunique()
             Pm = rollup(d, prot, runs)
@@ -141,25 +149,38 @@ def evaluate(a):
             o = RES["arms"][n]
             o["de"], o["pairs"], o["prot_err"], o["de_family"] = de_all(P, design, prot_sp, classes, inter, union)
 
-    if design.has_de and a.rt_local:
-        first = next(s for s in a.andes).split(":", 2)[2]
-        rt_of = R.read_andes_rt(first, runs)
-        PR = {}
+    def alt_pass(label, norm):
+        """DE of every arm after another run normalisation `norm(raw) -> (table, flag, n_ref)`; own intersection family."""
+        PA = {}
         for n, raw in tabs.items():
-            d, _, nref = normalise_rt_local(raw, runs, rt_of)
-            if kinds[n].get("rule") == "weights":
+            d, _, nref = norm(raw)
+            if is_weighted(kinds[n]):
                 d, _ = learn_weights(d, prot, runs)
             cntp = raw.groupby(raw.key.map(prot)).key.nunique()
             Pm = rollup(d, prot, runs)
-            PR[n] = Pm[cntp.reindex(Pm.index).fillna(0).values >= 2]
-        fam_arms = [n for n in shared_arms if n in PR]
-        inter = set.intersection(*[set(PR[n].index) for n in fam_arms])
-        union = set().union(*[set(PR[n].index) for n in fam_arms])
-        RES["rtlocal_families"] = {"arms": fam_arms, "intersection": len(inter), "union": len(union), "rt_keys": int(len(rt_of))}
-        for n, P in PR.items():
+            PA[n] = (Pm[cntp.reindex(Pm.index).fillna(0).values >= 2], nref)
+        fam_arms = [n for n in shared_arms if n in PA]
+        inter = set.intersection(*[set(PA[n][0].index) for n in fam_arms])
+        union = set().union(*[set(PA[n][0].index) for n in fam_arms])
+        fams = {"arms": fam_arms, "intersection": len(inter), "union": len(union)}
+        for n, (P, nref) in PA.items():
             de, _, _, fam = de_all(P, design, prot_sp, classes, inter, union)
-            RES["arms"][n]["rtlocal"] = {"de": de, "de_family": fam, "proteins": int(len(P))}
-        print("rt-local done", round(time.time() - t0), "s", file=sys.stderr)
+            RES["arms"][n][label] = {"de": de, "de_family": fam, "proteins": int(len(P)), "reference_precursors": nref}
+        print(label, "done", round(time.time() - t0), "s", file=sys.stderr)
+        return fams
+
+    if design.has_de and a.rt_local:
+        first = next(s for s in a.andes).split(":", 2)[2]
+        rt_of = R.read_andes_rt(first, runs)
+        RES["rtlocal_families"] = alt_pass("rtlocal", lambda raw: normalise_rt_local(raw, runs, rt_of))
+        RES["rtlocal_families"]["rt_keys"] = int(len(rt_of))
+
+    if design.has_de and a.norm_null:
+        null_keys = set(sp.index[sp.values == design.null]) if a.null else set()
+        if not null_keys:
+            raise SystemExit("--norm-null needs --null and a species map (--fasta)")
+        RES["nullnorm_families"] = alt_pass("nullnorm", lambda raw: normalise(raw, runs, null_keys))
+        RES["nullnorm_families"]["null"] = design.null
 
     if design.has_de:
         ref_names = [n for n in shared_arms if n in PM]
@@ -173,7 +194,7 @@ def evaluate(a):
         # truth-measured false-transfer rates (rates.py); blank-run carry-over is reported apart from the absence score
         RES["rates"] = {n: RT.false_transfer_rates(raw, design, sp) for n, raw in tabs.items()}
         RES["depth_curves"] = {n: {"transfer_q": RT.depth_curve(raw, design, sp, "tq"), "quant_q": RT.depth_curve(raw, design, sp, "thr")}
-                               for n, raw in tabs.items() if kinds[n].get("rule") in ("all", "weights") or kinds[n]["kind"] == "flashlfq"}
+                               for n, raw in tabs.items() if kinds[n].get("rule") in ("all", "weights", "weights-bias") or kinds[n]["kind"] == "flashlfq"}
     if design.blank:
         RES["carry_over"] = {n: RT.carry_over(raw, design, sp) for n, raw in tabs.items()}
     RES["elapsed_s"] = time.time() - t0

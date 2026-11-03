@@ -231,14 +231,7 @@ pub(crate) fn scan_spectrum_metadata(
 ) -> Result<Vec<SpectrumMeta>, Box<dyn std::error::Error>> {
     let mut out = Vec::new();
     if input_format_flags(path).2 {
-        for spec in open_d_ms2(path)?.take(bench_cap) {
-            // Unreadable spectra are skipped, as in the search reader.
-            let Ok(spec) = spec else { continue };
-            out.push(SpectrumMeta {
-                precursor_charge: spec.precursor_charge,
-                num_peaks: spec.peaks.len(),
-            });
-        }
+        return Ok(d_metadata(open_d_ms2(path)?, bench_cap));
     } else if is_mzml {
         let reader = MzMLReader::new(input::open_buf_maybe_gz(path)?)
             .with_ms_level_range(ms_level, ms_level);
@@ -266,6 +259,48 @@ pub(crate) fn scan_spectrum_metadata(
         }
     }
     Ok(out)
+}
+
+/// The readable spectra of `items`, numbered as the search reader counts
+/// them: an unreadable spectrum is skipped and takes no index, and
+/// `bench_cap` counts readable spectra only.
+fn readable_spectra<E>(
+    items: impl Iterator<Item = Result<Spectrum, E>>,
+    bench_cap: usize,
+) -> impl Iterator<Item = (usize, Spectrum)> {
+    items.filter_map(Result::ok).take(bench_cap).enumerate()
+}
+
+/// Metadata of the readable `.d` spectra, indexed as [`readable_spectra`].
+fn d_metadata<E>(
+    items: impl Iterator<Item = Result<Spectrum, E>>,
+    bench_cap: usize,
+) -> Vec<SpectrumMeta> {
+    readable_spectra(items, bench_cap)
+        .map(|(_, spec)| SpectrumMeta {
+            precursor_charge: spec.precursor_charge,
+            num_peaks: spec.peaks.len(),
+        })
+        .collect()
+}
+
+/// The readable `.d` spectra at `indices`, indexed as [`readable_spectra`]
+/// (the same numbering as [`d_metadata`]).
+fn d_load_by_index<E>(
+    items: impl Iterator<Item = Result<Spectrum, E>>,
+    indices: &HashSet<usize>,
+    bench_cap: usize,
+) -> HashMap<usize, Spectrum> {
+    let mut loaded = HashMap::new();
+    for (idx, spec) in readable_spectra(items, bench_cap) {
+        if indices.contains(&idx) {
+            loaded.insert(idx, spec);
+            if loaded.len() == indices.len() {
+                break;
+            }
+        }
+    }
+    loaded
 }
 
 /// The MS2 spectra of a Bruker `.d`, in the order the search reads them.
@@ -314,15 +349,7 @@ pub(crate) fn load_spectra_by_index(
         return Ok(loaded);
     }
     if input_format_flags(path).2 {
-        for (idx, spec) in open_d_ms2(path)?.enumerate().take(bench_cap) {
-            if !indices.contains(&idx) {
-                continue;
-            }
-            loaded.insert(idx, spec?);
-            if loaded.len() == indices.len() {
-                break;
-            }
-        }
+        return Ok(d_load_by_index(open_d_ms2(path)?, indices, bench_cap));
     } else if is_mzml {
         let reader = MzMLReader::new(input::open_buf_maybe_gz(path)?)
             .with_ms_level_range(ms_level, ms_level);
@@ -680,6 +707,50 @@ mod require_spectra_tests {
         }
         let err = require_spectra(Path::new("run.mzML"), 3, 0).unwrap_err();
         assert!(err.contains("MS3"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod d_index_tests {
+    use super::{d_load_by_index, d_metadata, Spectrum};
+    use std::collections::HashSet;
+
+    /// Five spectra (charge 1..=5, one peak per unit of charge) with the
+    /// second one unreadable.
+    fn items() -> impl Iterator<Item = Result<Spectrum, String>> {
+        (1..=5).map(|z| {
+            if z == 2 {
+                return Err("frame could not be decoded".to_string());
+            }
+            Ok(Spectrum {
+                precursor_charge: Some(z),
+                peaks: vec![(100.0, 1.0); z as usize],
+                ..Default::default()
+            })
+        })
+    }
+
+    #[test]
+    fn both_pre_passes_number_the_readable_spectra_alike() {
+        let meta = d_metadata(items(), usize::MAX);
+        let charges: Vec<Option<i32>> = meta.iter().map(|m| m.precursor_charge).collect();
+        assert_eq!(charges, vec![Some(1), Some(3), Some(4), Some(5)]);
+        let all: HashSet<usize> = (0..meta.len()).collect();
+        let loaded = d_load_by_index(items(), &all, usize::MAX);
+        assert_eq!(loaded.len(), meta.len());
+        for (idx, m) in meta.iter().enumerate() {
+            assert_eq!(loaded[&idx].precursor_charge, m.precursor_charge);
+            assert_eq!(loaded[&idx].peaks.len(), m.num_peaks);
+        }
+    }
+
+    #[test]
+    fn the_bench_cap_counts_readable_spectra() {
+        let meta = d_metadata(items(), 2);
+        assert_eq!(meta.len(), 2);
+        let loaded = d_load_by_index(items(), &HashSet::from([1]), 2);
+        assert_eq!(loaded[&1].precursor_charge, Some(3));
+        assert!(d_load_by_index(items(), &HashSet::from([2]), 2).is_empty());
     }
 }
 

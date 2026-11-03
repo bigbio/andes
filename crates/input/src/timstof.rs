@@ -221,7 +221,11 @@ fn to_peaks(
 }
 
 /// Mobility-resolved centroids converted to `(m/z, intensity)` and 1/K0,
-/// m/z ascending.
+/// m/z ascending. The calibration's intensity term is evaluated at each
+/// component's own intensity, although the calibration is fitted on
+/// centroids summed over mobility: a component's `sqrt(m/z)` differs from
+/// the summed centroid's by the intensity coefficient times
+/// `ln(summed / component)`, a fraction of a ppm at the term's scale.
 fn to_resolved_peaks(
     centroids: &[MobilityCentroid],
     calibration: &MzCalibration,

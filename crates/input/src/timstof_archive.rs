@@ -59,9 +59,15 @@ const SUFFIXES: [(&str, DArchiveKind); 5] = [
 pub fn d_archive_kind(path: &Path) -> Option<(DArchiveKind, String)> {
     let name = path.file_name()?.to_str()?;
     let lower = name.to_ascii_lowercase();
+    // The suffixes are ASCII and `to_ascii_lowercase` keeps every byte
+    // offset, so once `lower` ends with a suffix, cutting `name` there lands
+    // on a char boundary.
     SUFFIXES.iter().find_map(|(suffix, kind)| {
-        let run = &name[..name.len().checked_sub(suffix.len())?];
-        (lower.ends_with(suffix) && !run.is_empty()).then(|| (*kind, run.to_string()))
+        if !lower.ends_with(suffix) {
+            return None;
+        }
+        let run = name.get(..name.len() - suffix.len())?;
+        (!run.is_empty()).then(|| (*kind, run.to_string()))
     })
 }
 
@@ -88,6 +94,17 @@ pub fn unpack_d_archive(archive: &Path, dir: &Path) -> Result<PathBuf, DArchiveE
         DArchiveKind::Zip => {
             let mut zip = zip::ZipArchive::new(BufReader::new(file))
                 .map_err(|e| corrupt(format!("not a readable zip archive ({e})")))?;
+            for i in 0..zip.len() {
+                let entry = zip
+                    .by_index_raw(i)
+                    .map_err(|e| corrupt(format!("not a readable zip archive ({e})")))?;
+                if entry.is_symlink() {
+                    return Err(DArchiveError::Symlink {
+                        path: archive.display().to_string(),
+                        entry: entry.name().to_string(),
+                    });
+                }
+            }
             zip.extract(&staging)
                 .map_err(|e| corrupt(format!("zip entry could not be extracted ({e})")))?;
         }
@@ -319,6 +336,34 @@ mod tests {
             .unwrap();
         let (_t, r) = unpack("link.d.tar", &builder.into_inner().unwrap());
         assert!(matches!(r, Err(DArchiveError::Symlink { .. })), "{r:?}");
+    }
+
+    #[test]
+    fn a_symbolic_link_zip_entry_is_refused() {
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default();
+        w.start_file("r.d/analysis.tdf_bin", opts).unwrap();
+        w.write_all(b"frames").unwrap();
+        w.add_symlink("r.d/analysis.tdf", "/etc/passwd", opts)
+            .unwrap();
+        let (_t, r) = unpack("link.d.zip", &w.finish().unwrap().into_inner());
+        assert!(
+            matches!(&r, Err(DArchiveError::Symlink { entry, .. }) if entry == "r.d/analysis.tdf"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn non_ascii_names_do_not_panic() {
+        let k = |n: &str| d_archive_kind(Path::new(n));
+        assert_eq!(k("αβγ.d.zip"), Some((DArchiveKind::Zip, "αβγ".into())));
+        assert_eq!(
+            k("ÉCHαβ.D.TAR.GZ"),
+            Some((DArchiveKind::TarGz, "ÉCHαβ".into()))
+        );
+        assert_eq!(k("échantillon_β.mzML"), None);
+        assert_eq!(k("β"), None);
+        assert_eq!(k("ααααα.raw"), None);
     }
 
     #[test]

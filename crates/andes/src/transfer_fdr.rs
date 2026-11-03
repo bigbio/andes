@@ -147,12 +147,20 @@ pub fn stratum_of(prior: f64, edges: &[f64]) -> u8 {
 /// fold's pooled one, in pseudo-targets, by empirical Bayes. `strata` holds
 /// for each stratum the targets `n` and the decoy-implied false hits `x`
 /// accepted at the operating level, `k` the decoy-to-target ratio. The rate
-/// `x / n` of a stratum varies around the pooled rate `p` with
-/// `p / (k n)` from the decoy counts alone; the variance beyond that, as a
-/// share `rho` of the total, is the between-stratum spread (method of
-/// moments), and a stratum of `n` targets weighs the pooled rate by
-/// `kappa / (n + kappa)`, `kappa = (1 - rho) / rho`. Infinite (no
-/// stratification) when the strata do not differ beyond the decoy noise.
+/// `x / n` of a stratum varies around the pooled rate `p` with variance
+/// `v0 / n`, `v0 = p / k`, from the decoy counts alone, plus a
+/// between-stratum variance `tau^2`. Over the `s` strata with targets
+/// (`N` targets in all), `z = sum n (x / n - p)^2 / v0` has expectation
+/// about `(s - 1) + (N - sum n^2 / N) tau^2 / v0`. The method-of-moments
+/// ratio computed is
+/// `rho = (z - (s - 1)) / (N - sum n^2 / N - (s - 1))`, an estimate of
+/// `tau^2 / v0` (the `- (s - 1)` in the denominator makes it slightly
+/// larger, negligible for `N` much above `s`). The result is
+/// `kappa = (1 - rho) / rho = 1 / rho - 1`, at least 0: one pseudo-target
+/// less than the empirical-Bayes `v0 / tau^2`. A stratum of `n` targets
+/// weighs the pooled rate by `kappa / (n + kappa)`. Infinite (no
+/// stratification) when the strata do not differ beyond the decoy noise
+/// (`rho <= 0`).
 pub fn stratum_kappa(strata: &[(f64, f64)], k: f64) -> f64 {
     let live: Vec<&(f64, f64)> = strata.iter().filter(|(n, _)| *n > 0.0).collect();
     let s = live.len() as f64;
@@ -1157,7 +1165,7 @@ impl QValues {
         let fold = fold_of(precursor, self.seed);
         if e == Estimate::Pooled {
             if let Some(Some(steps)) = self.stratum_steps_of(fold, stratum) {
-                return Some(steps.of_member(canonical(s)));
+                return Some(steps.of_member(s));
             }
         }
         let steps = self.steps[fold][e as usize].as_ref()?;

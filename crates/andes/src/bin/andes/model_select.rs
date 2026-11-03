@@ -468,10 +468,12 @@ pub(crate) fn choose_model(
     protocol: Protocol,
     enzyme: model::enzyme::Enzyme,
 ) -> ModelChoice {
-    // EThcD: the EThcD model when the store has one for this cell's labelling
-    // (TMT/iTRAQ or none). Otherwise the run is routed as HCD, the b/y half of its
-    // spectrum: a labelled HCD model fits a TMT EThcD run better than an
-    // unlabelled EThcD one, and a store without an EThcD model keeps the HCD route.
+    // EThcD: the EThcD model when the store has one trained for this cell's enzyme and
+    // experiment class (labelling, enrichment). Otherwise the run is routed as HCD, the
+    // b/y half of its spectrum, as before the EThcD model existed: the labelled,
+    // enriched and enzyme-specific HCD models stay the choice for the cells no EThcD
+    // model was trained or measured on, and a store without an EThcD model keeps the HCD
+    // route.
     if activation == ActivationMethod::EThcD {
         let choice = choose_for_protocol(entries, activation, instrument, protocol, enzyme);
         let fits = entries
@@ -479,7 +481,8 @@ pub(crate) fn choose_model(
             .find(|e| e.model_id == choice.model_id)
             .is_some_and(|e| {
                 e.activation == ActivationMethod::EThcD.name()
-                    && labelling(&e.experiment_class) == labelling(&choice.key.experiment_class)
+                    && e.enzyme == choice.key.enzyme
+                    && e.experiment_class == choice.key.experiment_class
             });
         if !fits {
             let hcd = choose_model(entries, ActivationMethod::HCD, instrument, protocol, enzyme);
@@ -617,15 +620,6 @@ pub(crate) fn untrained_route_warning(
          with '{model_id}', trained on {trained}. Scores may be mis-calibrated; pass \
          --model to choose explicitly."
     ))
-}
-
-/// The isobaric-labelling tags of an experiment class (`tmt`, `itraq`).
-fn labelling(class: &std::collections::BTreeSet<String>) -> Vec<&str> {
-    class
-        .iter()
-        .map(String::as_str)
-        .filter(|t| matches!(*t, "tmt" | "itraq"))
-        .collect()
 }
 
 /// The store's `protocol` name for a CLI protocol.

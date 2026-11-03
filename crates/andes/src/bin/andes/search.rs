@@ -793,25 +793,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             cli.model_id_override.as_deref(),
         )?;
         eprintln!("Param model: {model_id} (from store)");
-        // E5/E12: loud-fail the silent enzyme fallback. If the user explicitly
-        // chose a non-Trypsin enzyme but no enzyme-matching model exists for the
-        // detected activation/instrument, selection backs off to a Trypsin/generic
-        // model whose cleavage prior + PIN enzymatic features are for the wrong
-        // protease. Warn unmissably (skip when --model pins the choice on purpose).
-        if cli.model_id_override.is_none() && search_enzyme != model::enzyme::Enzyme::Trypsin {
-            if let Some(selected) = p.data_type.enzyme {
-                if selected != search_enzyme {
-                    eprintln!(
-                        "WARN: --enzyme {} has no matching model for the detected \
-                         activation/instrument; fell back to '{model_id}' (enzyme {:?}). \
-                         Scores will use the wrong protease's cleavage prior + PIN features. \
-                         Train a matching model or pass --model to choose explicitly.",
-                        search_enzyme.name(),
-                        selected
-                    );
-                }
-            }
-        }
+        // A model not trained on this data's cell (a substituted enzyme,
+        // analyser, activation or protocol) was announced by one warning in
+        // `load_param_from_store`.
         (p, activation, instrument_opt, model_id)
     };
     // Optional GBDT truncation (`--gbdt-max-trees`). Applied to the loaded model
@@ -914,6 +898,22 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             None => {}
         },
         _ => {}
+    }
+    // The model was chosen for `--protocol auto` before the reporter ions were
+    // read, so a labelled run is scored with the label-free model: a route to a
+    // cell the model was not trained on, warned like the others.
+    if cli.protocol == Protocol::Auto && cli.model_id_override.is_none() {
+        if let Some(l) = label {
+            let protocol = match l {
+                input::IsobaricLabel::Tmt | input::IsobaricLabel::TmtPro => "TMT",
+                input::IsobaricLabel::Itraq | input::IsobaricLabel::Itraq8 => "iTRAQ",
+            };
+            eprintln!(
+                "WARN: model routing: the run carries {l:?} reporter ions but --protocol is \
+                 auto, so it is scored with '{resolved_model_id}', trained on label-free \
+                 data. Pass --protocol {protocol} to score it with the {protocol} model."
+            );
+        }
     }
     // C1: parameter-free path only (no explicit --mods). When the protocol
     // resolves to TMT/iTRAQ, or `--tmt` names the kit, inject the tag as a fixed mod on K + peptide

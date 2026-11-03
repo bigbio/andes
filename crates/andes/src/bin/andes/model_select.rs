@@ -389,15 +389,9 @@ pub(crate) fn build_selection_key(
             // QExactive model would match 0.5-Da peaks at 20 ppm and lose
             // ~18% of PSMs silently. No hcd_lowres model exists, so route to the
             // low-res b/y model (cid_lowres_tryp) instead — correct fragment
-            // tolerance and ion series. Pinned by the selection grid test.
-            ("HCD", "LowRes") => {
-                eprintln!(
-                    "WARN: low-res (ion-trap) HCD detected — no hcd_lowres model exists; \
-                     routing to cid_lowres_tryp (low-res b/y, 0.5-Da tolerance) rather than \
-                     the high-res QExactive model. Pass --model to override."
-                );
-                ("CID", "LowRes", true)
-            }
+            // tolerance and ion series. Pinned by the selection grid test; the
+            // run warns (see `untrained_route_warning`).
+            ("HCD", "LowRes") => ("CID", "LowRes", true),
             // TOF analyzers (QTOF, timsTOF) fragment by beam-type collisional
             // activation: the b/y chemistry of HCD, measured at high resolution.
             // Vendors label it "CID" (the timsTOF `.d` reader and Bruker mzML
@@ -416,25 +410,30 @@ pub(crate) fn build_selection_key(
 
     // 4. Build experiment_class from protocol (unless the final fallback dropped it).
     //    Protocol → experiment_class mapping matches the parquet's `protocol` column.
-    let protocol_for_store: &str = match protocol {
-        Protocol::Auto | Protocol::Standard => "Automatic",
-        Protocol::Tmt => "TMT",
-        Protocol::Phospho => "Phosphorylation",
-        Protocol::Itraq => "iTRAQ",
-        Protocol::ItraqPhospho => "iTRAQPhospho",
-    };
     let experiment_class: BTreeSet<String> = if drop_protocol {
         BTreeSet::new()
     } else {
-        store_protocol_to_experiment_class(protocol_for_store)
+        store_protocol_to_experiment_class(protocol_store_name(protocol))
     };
 
     SelectionKey {
         activation: final_act.to_string(),
         instrument: final_inst.to_string(),
         // Parquet stores the enzyme as its `Enzyme::name()` ("Trypsin", "LysC", ...).
-        enzyme: enzyme.name().to_string(),
+        enzyme: routing_enzyme(enzyme).name().to_string(),
         experiment_class,
+    }
+}
+
+/// The enzyme a digest is routed by. A non-specific digest (`--enzyme
+/// nonspecific` and its aliases `all` and `elastase`) is the immunopeptidomics
+/// and peptidomics search the no-cleavage models were trained on (their
+/// training searches were unspecific HLA ligandomes), so it selects with the
+/// `NoCleavage` key, exactly as `--enzyme nocleavage` does.
+pub(crate) fn routing_enzyme(enzyme: model::enzyme::Enzyme) -> model::enzyme::Enzyme {
+    match enzyme {
+        model::enzyme::Enzyme::NonSpecific => model::enzyme::Enzyme::NoCleavage,
+        other => other,
     }
 }
 
@@ -444,8 +443,10 @@ pub(crate) struct ModelChoice {
     /// The key the store was searched with (after the family fallback and the
     /// activation/instrument normalizations of [`build_selection_key`]).
     pub(crate) key: SelectionKey,
-    /// `true` when no model matched the key and the nearest one was taken.
-    pub(crate) substituted: bool,
+    /// Set when the model was not trained on the requested cell (activation,
+    /// analyser, enzyme, labelling/enrichment): the one warning the run prints,
+    /// naming the cell and the model used. See [`untrained_route_warning`].
+    pub(crate) warning: Option<String>,
 }
 
 /// Pick the model for `(activation, instrument, protocol, enzyme)` from the
@@ -464,6 +465,160 @@ pub(crate) fn choose_model(
     protocol: Protocol,
     enzyme: model::enzyme::Enzyme,
 ) -> ModelChoice {
+    let choice = choose_for_protocol(entries, activation, instrument, protocol, enzyme);
+    // iTRAQ-phospho: without a model trained on that class, the ladder falls to
+    // the unlabelled base. The iTRAQ model is the closer one: the tag on every
+    // peptide N-terminus and lysine shifts and enhances the b-ion series and adds
+    // reporter and tag fragments on every spectrum, while the phosphate touches
+    // only the modified peptides (its neutral loss is scored from the
+    // modification, not from the table). TMT-phospho already resolves to the
+    // TMT model by the same preference (the labelling tag wins the subset
+    // tie-break in `select`). The iTRAQ model is taken only when it exists for
+    // this activation and instrument; otherwise the first choice stands.
+    if protocol == Protocol::ItraqPhospho
+        && class_of(entries, &choice.model_id) != Some(&choice.key.experiment_class)
+    {
+        let itraq = choose_for_protocol(entries, activation, instrument, Protocol::Itraq, enzyme);
+        if class_of(entries, &itraq.model_id).is_some_and(|c| c.contains("itraq")) {
+            return ModelChoice {
+                warning: untrained_route_warning(
+                    entries,
+                    &itraq.model_id,
+                    activation,
+                    instrument,
+                    protocol,
+                    enzyme,
+                ),
+                model_id: itraq.model_id,
+                key: choice.key,
+            };
+        }
+    }
+    ModelChoice {
+        warning: untrained_route_warning(
+            entries,
+            &choice.model_id,
+            activation,
+            instrument,
+            protocol,
+            enzyme,
+        ),
+        ..choice
+    }
+}
+
+/// The fragment analyser an instrument class measures with. The selection
+/// keys keep the store's instrument names; a model trained on one Orbitrap
+/// (`QExactive`, `HighRes`) is trained for every Orbitrap, and the TOF names
+/// share one analyser too.
+fn analyser_of(instrument: &str) -> &str {
+    match instrument {
+        "LowRes" => "ion trap",
+        "QExactive" | "HighRes" => "Orbitrap",
+        "OrbitrapAstral" => "Astral",
+        "TOF" | "TimsTOF" => "TOF",
+        other => other,
+    }
+}
+
+/// `activation / analyser / enzyme / labelling` for a warning.
+fn describe_cell(
+    activation: &str,
+    analyser: &str,
+    enzyme: &str,
+    class: &std::collections::BTreeSet<String>,
+) -> String {
+    let class = if class.is_empty() {
+        "label-free".to_string()
+    } else {
+        class.iter().cloned().collect::<Vec<_>>().join("+")
+    };
+    format!("{activation} / {analyser} / {enzyme} / {class}")
+}
+
+/// The warning for a run scored with a model that was not trained on its cell:
+/// the requested (activation, analyser, enzyme, labelling/enrichment) against
+/// the cell the store records for `model_id`. `None` when they agree. Every
+/// route to another cell warns, whether the ladder substituted the nearest
+/// model, a normalization changed the activation or analyser (ion-trap HCD,
+/// Orbitrap CID, UVPD off the Orbitrap), the protocol fell to a model without
+/// it, or a deliberate route (iTRAQ-phospho to the iTRAQ model) was taken.
+pub(crate) fn untrained_route_warning(
+    entries: &[SelectionEntry],
+    model_id: &str,
+    activation: ActivationMethod,
+    instrument: Option<InstrumentType>,
+    protocol: Protocol,
+    enzyme: model::enzyme::Enzyme,
+) -> Option<String> {
+    let act = match activation {
+        ActivationMethod::PQD => ActivationMethod::CID,
+        other => other,
+    }
+    .name();
+    let analyser = analyser_of(instrument.map_or("LowRes", |i| i.name()));
+    let enzyme = routing_enzyme(enzyme).name();
+    let class = store_protocol_to_experiment_class(protocol_store_name(protocol));
+    let requested = describe_cell(act, analyser, enzyme, &class);
+    let Some(e) = entries.iter().find(|e| e.model_id == model_id) else {
+        return Some(format!(
+            "WARN: model routing: no model in the store is trained for {requested}; \
+             scoring with '{model_id}'. Scores may be mis-calibrated; pass --model to \
+             choose explicitly."
+        ));
+    };
+    let trained_analyser = analyser_of(&e.instrument);
+    if e.activation == act
+        && trained_analyser == analyser
+        && e.enzyme == enzyme
+        && e.experiment_class == class
+    {
+        return None;
+    }
+    let trained = describe_cell(
+        &e.activation,
+        trained_analyser,
+        &e.enzyme,
+        &e.experiment_class,
+    );
+    Some(format!(
+        "WARN: model routing: no model in the store is trained for {requested}; scoring \
+         with '{model_id}', trained on {trained}. Scores may be mis-calibrated; pass \
+         --model to choose explicitly."
+    ))
+}
+
+/// The store's `protocol` name for a CLI protocol.
+fn protocol_store_name(protocol: Protocol) -> &'static str {
+    match protocol {
+        Protocol::Auto | Protocol::Standard => "Automatic",
+        Protocol::Tmt => "TMT",
+        Protocol::Phospho => "Phosphorylation",
+        Protocol::Itraq => "iTRAQ",
+        Protocol::ItraqPhospho => "iTRAQPhospho",
+    }
+}
+
+/// The experiment class the store's `model_id` was trained on.
+fn class_of<'a>(
+    entries: &'a [SelectionEntry],
+    model_id: &str,
+) -> Option<&'a std::collections::BTreeSet<String>> {
+    entries
+        .iter()
+        .find(|e| e.model_id == model_id)
+        .map(|e| &e.experiment_class)
+}
+
+/// [`choose_model`] for one protocol: [`build_selection_key`], then
+/// [`select_nearest_for`].
+fn choose_for_protocol(
+    entries: &[SelectionEntry],
+    activation: ActivationMethod,
+    instrument: Option<InstrumentType>,
+    protocol: Protocol,
+    enzyme: model::enzyme::Enzyme,
+) -> ModelChoice {
     let key = build_selection_key(activation, instrument, protocol, enzyme);
     // A model trained for the EXACT detected instrument (e.g. a user-trained
     // OrbitrapAstral model) is hidden by the family collapse, so the detected
@@ -471,7 +626,7 @@ pub(crate) fn choose_model(
     let detected: Option<&str> = instrument
         .filter(|i| i.family_fallback() != *i)
         .map(|i| i.name());
-    let (id, substituted) = select_nearest_for(
+    let (id, _substituted) = select_nearest_for(
         entries,
         &key,
         detected,
@@ -481,7 +636,7 @@ pub(crate) fn choose_model(
     ModelChoice {
         model_id: id.to_string(),
         key,
-        substituted,
+        warning: None,
     }
 }
 
@@ -516,14 +671,8 @@ pub(crate) fn load_param_from_store(
     } else {
         let entries = store.selection_entries();
         let choice = choose_model(&entries, activation, instrument, protocol, enzyme);
-        if choice.substituted {
-            let key = &choice.key;
-            eprintln!(
-                "WARN: no model matched (activation={}, instrument={}, enzyme={}, class={:?}) \
-                 — using the nearest available model '{}'; scores may be mis-calibrated for \
-                 this data. Pin a model with --model if this is wrong.",
-                key.activation, key.instrument, key.enzyme, key.experiment_class, choice.model_id
-            );
+        if let Some(w) = &choice.warning {
+            eprintln!("{w}");
         }
         choice.model_id
     };
@@ -607,13 +756,81 @@ mod param_resolver_tests {
             }
         }
     }
+    /// A non-specific digest, under every name it accepts, selects exactly the
+    /// model `--enzyme nocleavage` selects: on high-res HCD that is the
+    /// no-cleavage (HLA) model, never the tryptic base.
+    #[test]
+    fn a_non_specific_digest_routes_like_nocleavage() {
+        use model::enzyme::Enzyme;
+        let store = ModelStore::open(&bundled_store_path()).expect("bundled store");
+        let entries = store.selection_entries();
+        for name in ["nonspecific", "all", "elastase"] {
+            let enzyme = Enzyme::from_name(name).expect("known enzyme name");
+            for act in [ActivationMethod::HCD, ActivationMethod::CID] {
+                for inst in [
+                    Some(InstrumentType::QExactive),
+                    Some(InstrumentType::HighRes),
+                    Some(InstrumentType::OrbitrapAstral),
+                    Some(InstrumentType::TOF),
+                    Some(InstrumentType::LowRes),
+                ] {
+                    for prot in [Protocol::Auto, Protocol::Phospho, Protocol::Tmt] {
+                        assert_eq!(
+                            choose_model(&entries, act, inst, prot, enzyme).model_id,
+                            choose_model(&entries, act, inst, prot, Enzyme::NoCleavage).model_id,
+                            "{name}/{act:?}/{inst:?}/{prot:?}"
+                        );
+                    }
+                }
+            }
+            let hla = choose_model(
+                &entries,
+                ActivationMethod::HCD,
+                Some(InstrumentType::QExactive),
+                Protocol::Auto,
+                enzyme,
+            );
+            assert_eq!(hla.model_id, "hcd_highres_nocleavage", "{name}");
+        }
+    }
+
+    /// iTRAQ-phospho with no model trained on it takes the iTRAQ model of the
+    /// same activation and instrument (and warns), not the unlabelled base;
+    /// where no iTRAQ model exists the first choice stands.
+    #[test]
+    fn itraq_phospho_takes_the_itraq_model() {
+        use model::enzyme::Enzyme;
+        let store = ModelStore::open(&bundled_store_path()).expect("bundled store");
+        let entries = store.selection_entries();
+        let pick = |act, inst, prot| choose_model(&entries, act, inst, prot, Enzyme::Trypsin);
+        for inst in [InstrumentType::QExactive, InstrumentType::HighRes] {
+            let c = pick(ActivationMethod::HCD, Some(inst), Protocol::ItraqPhospho);
+            assert_eq!(c.model_id, "hcd_qexactive_tryp_itraq", "{inst:?}");
+            assert!(c.warning.is_some(), "{inst:?}");
+        }
+        assert_eq!(
+            pick(
+                ActivationMethod::CID,
+                Some(InstrumentType::LowRes),
+                Protocol::ItraqPhospho
+            )
+            .model_id,
+            pick(
+                ActivationMethod::CID,
+                Some(InstrumentType::LowRes),
+                Protocol::Auto
+            )
+            .model_id
+        );
+    }
+
     /// The bundled-store selection, as the search and training paths run it
     /// (`choose_model`: `build_selection_key`, the detected-instrument pre-pass
     /// and `select_nearest_for`), over every activation × detected instrument
     /// (or none) × protocol × enzyme, pinned in
     /// `test-fixtures/model_selection_grid.tsv`. One row per (activation,
-    /// instrument, enzyme), one column per protocol; `*` marks a nearest-model
-    /// substitution (the run WARNs). PQD must resolve as CID and `standard` as
+    /// instrument, enzyme), one column per protocol; `*` marks a cell the
+    /// routed model was not trained on (the run warns, `untrained_route_warning`). PQD must resolve as CID and `standard` as
     /// `auto`, so neither has its own row or column. A change to the store, the
     /// key or the ladder that moves any selection fails here with the new
     /// table; update the fixture only when every moved cell is intended.
@@ -658,7 +875,11 @@ mod param_resolver_tests {
         ];
         let cell = |a, i, p, e| {
             let c = choose_model(&entries, a, i, p, e);
-            format!("{}{}", c.model_id, if c.substituted { "*" } else { "" })
+            format!(
+                "{}{}",
+                c.model_id,
+                if c.warning.is_some() { "*" } else { "" }
+            )
         };
         let mut table = String::from("activation\tinstrument\tenzyme");
         for (name, _) in protocols {
@@ -733,7 +954,7 @@ mod param_resolver_tests {
             model::enzyme::Enzyme::Trypsin,
         );
         assert_eq!(
-            (c.model_id.as_str(), c.substituted),
+            (c.model_id.as_str(), c.warning.is_some()),
             ("cid_lowres_tryp", false)
         );
     }

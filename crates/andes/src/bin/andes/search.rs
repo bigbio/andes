@@ -798,7 +798,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // protease. Warn unmissably (skip when --model pins the choice on purpose).
         if cli.model_id_override.is_none() && search_enzyme != model::enzyme::Enzyme::Trypsin {
             if let Some(selected) = p.data_type.enzyme {
-                if selected != search_enzyme {
+                if selected != crate::model_select::routing_enzyme(search_enzyme) {
                     eprintln!(
                         "WARN: --enzyme {} has no matching model for the detected \
                          activation/instrument; fell back to '{model_id}' (enzyme {:?}). \

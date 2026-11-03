@@ -433,8 +433,20 @@ pub(crate) fn build_selection_key(
         activation: final_act.to_string(),
         instrument: final_inst.to_string(),
         // Parquet stores the enzyme as its `Enzyme::name()` ("Trypsin", "LysC", ...).
-        enzyme: enzyme.name().to_string(),
+        enzyme: routing_enzyme(enzyme).name().to_string(),
         experiment_class,
+    }
+}
+
+/// The enzyme a digest is routed by. A non-specific digest (`--enzyme
+/// nonspecific` and its aliases `all` and `elastase`) is the immunopeptidomics
+/// and peptidomics search the no-cleavage models were trained on (their
+/// training searches were unspecific HLA ligandomes), so it selects with the
+/// `NoCleavage` key, exactly as `--enzyme nocleavage` does.
+pub(crate) fn routing_enzyme(enzyme: model::enzyme::Enzyme) -> model::enzyme::Enzyme {
+    match enzyme {
+        model::enzyme::Enzyme::NonSpecific => model::enzyme::Enzyme::NoCleavage,
+        other => other,
     }
 }
 
@@ -607,6 +619,44 @@ mod param_resolver_tests {
             }
         }
     }
+    /// A non-specific digest, under every name it accepts, selects exactly the
+    /// model `--enzyme nocleavage` selects: on high-res HCD that is the
+    /// no-cleavage (HLA) model, never the tryptic base.
+    #[test]
+    fn a_non_specific_digest_routes_like_nocleavage() {
+        use model::enzyme::Enzyme;
+        let store = ModelStore::open(&bundled_store_path()).expect("bundled store");
+        let entries = store.selection_entries();
+        for name in ["nonspecific", "all", "elastase"] {
+            let enzyme = Enzyme::from_name(name).expect("known enzyme name");
+            for act in [ActivationMethod::HCD, ActivationMethod::CID] {
+                for inst in [
+                    Some(InstrumentType::QExactive),
+                    Some(InstrumentType::HighRes),
+                    Some(InstrumentType::OrbitrapAstral),
+                    Some(InstrumentType::TOF),
+                    Some(InstrumentType::LowRes),
+                ] {
+                    for prot in [Protocol::Auto, Protocol::Phospho, Protocol::Tmt] {
+                        assert_eq!(
+                            choose_model(&entries, act, inst, prot, enzyme).model_id,
+                            choose_model(&entries, act, inst, prot, Enzyme::NoCleavage).model_id,
+                            "{name}/{act:?}/{inst:?}/{prot:?}"
+                        );
+                    }
+                }
+            }
+            let hla = choose_model(
+                &entries,
+                ActivationMethod::HCD,
+                Some(InstrumentType::QExactive),
+                Protocol::Auto,
+                enzyme,
+            );
+            assert_eq!(hla.model_id, "hcd_highres_nocleavage", "{name}");
+        }
+    }
+
     /// The bundled-store selection, as the search and training paths run it
     /// (`choose_model`: `build_selection_key`, the detected-instrument pre-pass
     /// and `select_nearest_for`), over every activation × detected instrument

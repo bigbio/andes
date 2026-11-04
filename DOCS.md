@@ -1923,7 +1923,7 @@ here only where the value is a fixed choice rather than a documented option.
 
 | Constant | Value | Where | Controls | Override | Basis |
 |---|---|---|---|---|---|
-| Missed cleavages | 2 | `andes/src/bin/andes/cli.rs:371` | peptides digested per protein | `--max-missed-cleavages` | Decision of 2026-10-31; 2 vs 1 within noise at +8-14% search CPU (quant_q DECISIONS, round 4) |
+| Missed cleavages | 2 | `andes/src/bin/andes/cli.rs:371` | peptides digested per protein | `--max-missed-cleavages` | 2 vs 1 missed cleavages: identifications within noise, search CPU +8-14% (internal benchmark) |
 | Peptide length | 6 to 50 | `cli.rs:380,385` | candidate peptides | `--min-length`, `--max-length` | Max 50 follows the MSFragger and Comet defaults; 40 dropped long tryptic peptides (flag comment). Min 6: no recorded evidence |
 | Variable mods per peptide | 3 | `cli.rs:390` | combinatorial candidates | `--max-mods`, `NumMods` in mods file | No recorded evidence |
 | Precursor charge range | 2..5 | `cli.rs:338` | charges tried when the spectrum has none | `--charge` | No recorded evidence |
@@ -2005,7 +2005,7 @@ here only where the value is a fixed choice rather than a documented option.
 | Presence prior | 20 neighbour runs, 20,000 library entries sampled, 50 neighbour runs for donor rate | `quant_finalize.rs:623-629` | prior strata and a feature | no | No recorded evidence |
 | Wrong-peak model | 11 features, 4,000,000 calibration rows | `quant_finalize.rs:1544,1547` | wrong-peak probability | no | No recorded evidence |
 | MS2 evidence | 12 library fragments (at least 3), ions of at least 3 residues, support needs 4 matches and angle 0.6, isolation half-width 1.0 Th, elution window +/- 1 width bounded 1 to 20 s | `quant/src/ms2.rs:22-36` | MS2 support of a transfer | no | No recorded evidence |
-| Ion mobility window | search 0.1 V s/cm2, refit beyond 4 scales dropped, gate 3 scales, at least 50 pairs, scale floor 0.001 | `quant/src/mobility.rs:23-32` | timsTOF extraction gate | scale learned per run | Gate cut the main share bad 9.64 to 5.79% on a timsTOF set (quant_q DECISIONS) |
+| Ion mobility window | search 0.1 V s/cm2, refit beyond 4 scales dropped, gate 3 scales, at least 50 pairs, scale floor 0.001 | `quant/src/mobility.rs:23-32` | timsTOF extraction gate | scale learned per run | Gate cut the main share bad 9.64 to 5.79% on a timsTOF set (internal benchmark) |
 | LFQ options | RT half-window 60 s, minimum isotope cosine 0.7, feature FDR 0.05 | `cli.rs:924,936,942` | `--lfq` feature acceptance | `--lfq-rt-window`, `--lfq-min-cosine`, `--lfq-feature-fdr` | No recorded evidence |
 | MBR FDRs | library 0.01, transfer 0.01, quant 0.01 | `cli.rs:972,978,1143` | which library entries and transfers are reported | `--mbr-library-fdr`, `--mbr-fdr`, `--quant-fdr` | Convention |
 | Purity and resolution checks | isotope tolerance 10 ppm; low-res if fewer than 0.5 of intense centroids find an isotope partner | `andes/src/bin/andes/quant_run.rs:43,50,51` | purity ladder; resolution warning | no | Orbitrap survey scans measured 0.70-0.93, ion-trap-sized errors 0.09-0.32 (code comment) |

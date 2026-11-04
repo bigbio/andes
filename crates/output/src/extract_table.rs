@@ -13,7 +13,9 @@
 //! `ms2_n_matched`, `ms2_angle`, `ms2_explained`; null for identified rows
 //! and rows without a fit); a schema-2 table is rejected. Schema 4 added
 //! the per-isotope heights `iso_h0`..`iso_h3` and the `tailing` of the fit;
-//! a schema-3 table is rejected.
+//! a schema-3 table is rejected. Schema 5 added the template-free trace area
+//! `trace_quantity` and its `trace_quantity_se`; a schema-4 table is
+//! rejected.
 //! The evidence columns are null when the fit was not possible.
 //! `n_donor_runs` counts the aligned runs with a PSM of the precursor, this
 //! run included for an identified row and excluded otherwise: the runs that
@@ -41,10 +43,10 @@ use quant::evidence::Evidence;
 use quant::ms2::{Ms2Evidence, ScanMatch};
 
 /// Major version of the table layout. A reader rejects any other major.
-pub const EXTRACT_SCHEMA_MAJOR: u32 = 4;
+pub const EXTRACT_SCHEMA_MAJOR: u32 = 5;
 
 const SCHEMA_KEY: &str = "andes.extract.schema";
-const SCHEMA_VERSION: &str = "4.0";
+const SCHEMA_VERSION: &str = "5.0";
 /// Rows per Parquet row group / record batch.
 const BATCH_ROWS: usize = 65_536;
 
@@ -80,7 +82,7 @@ pub struct ExtractRow {
     pub ms2: Option<Ms2Evidence>,
 }
 
-const F64_EVIDENCE: [&str; 18] = [
+const F64_EVIDENCE: [&str; 20] = [
     "amplitude",
     "amplitude_se",
     "quantity",
@@ -99,9 +101,11 @@ const F64_EVIDENCE: [&str; 18] = [
     "iso_h2",
     "iso_h3",
     "tailing",
+    "trace_quantity",
+    "trace_quantity_se",
 ];
 
-fn f64_fields(e: &Evidence) -> [f64; 18] {
+fn f64_fields(e: &Evidence) -> [f64; 20] {
     [
         e.amplitude,
         e.amplitude_se,
@@ -121,6 +125,8 @@ fn f64_fields(e: &Evidence) -> [f64; 18] {
         e.iso_heights[2],
         e.iso_heights[3],
         e.tailing,
+        e.trace_quantity,
+        e.trace_quantity_se,
     ]
 }
 
@@ -477,7 +483,7 @@ pub struct ExtractTableReader {
 }
 
 /// The evidence columns of [`ExtractTableReader::open_identified_fits`].
-const FIT_EVIDENCE: [&str; 8] = [
+const FIT_EVIDENCE: [&str; 9] = [
     "amplitude",
     "t0",
     "w",
@@ -486,6 +492,7 @@ const FIT_EVIDENCE: [&str; 8] = [
     "iso_h2",
     "iso_h3",
     "tailing",
+    "amplitude_se",
 ];
 
 impl ExtractTableReader {
@@ -496,7 +503,8 @@ impl ExtractTableReader {
 
     /// Opens `path` to read its identified target rows only, with the
     /// columns of their peak shape: the keys, and of the evidence the
-    /// amplitude, apex, width, isotope heights and tailing. The other
+    /// amplitude and its standard error, apex, width, isotope heights and
+    /// tailing. The other
     /// evidence values are NaN (counts 0) and the MS2 evidence is `None`.
     pub fn open_identified_fits(path: &Path, batch_rows: usize) -> Result<Self, String> {
         Self::open_with(path, batch_rows, true)
@@ -617,7 +625,7 @@ fn decode_fit_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, Str
             let v = |k: usize| ev[k].value(i);
             Evidence {
                 amplitude: v(0),
-                amplitude_se: f64::NAN,
+                amplitude_se: v(8),
                 quantity: f64::NAN,
                 quantity_se: f64::NAN,
                 llr: f64::NAN,
@@ -633,6 +641,8 @@ fn decode_fit_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, Str
                 w: v(2),
                 iso_heights: [v(3), v(4), v(5), v(6)],
                 tailing: v(7),
+                trace_quantity: f64::NAN,
+                trace_quantity_se: f64::NAN,
             }
         });
         rows.push(ExtractRow {
@@ -697,7 +707,11 @@ fn decode_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, String>
         })?;
         let role = decode_role(role.value(i))
             .ok_or_else(|| err(&format!("unknown role code {}", role.value(i))))?;
-        let evidence = if ev[0].is_null(i) {
+        let null_evidence = ev.iter().filter(|c| c.is_null(i)).count();
+        if null_evidence != 0 && null_evidence != ev.len() {
+            return Err(err(&"corrupt row: partial evidence"));
+        }
+        let evidence = if null_evidence == ev.len() {
             None
         } else {
             let v = |k: usize| ev[k].value(i);
@@ -719,6 +733,8 @@ fn decode_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, String>
                 w: v(12),
                 iso_heights: [v(13), v(14), v(15), v(16)],
                 tailing: v(17),
+                trace_quantity: v(18),
+                trace_quantity_se: v(19),
             })
         };
         let ms2 = if ms2_scans.is_null(i) {
@@ -774,6 +790,8 @@ mod tests {
             w: 4.2,
             iso_heights: [5.0 + f, 3.0, 1.0, -0.5],
             tailing: 0.1 * f,
+            trace_quantity: 1.3e6 - f,
+            trace_quantity_se: 175.0,
         }
     }
 
@@ -853,8 +871,22 @@ mod tests {
                 (None, None) => {}
                 (Some(a), Some(b)) => {
                     assert_eq!(
-                        (a.amplitude, a.t0, a.w, a.iso_heights, a.tailing),
-                        (b.amplitude, b.t0, b.w, b.iso_heights, b.tailing)
+                        (
+                            a.amplitude,
+                            a.amplitude_se,
+                            a.t0,
+                            a.w,
+                            a.iso_heights,
+                            a.tailing
+                        ),
+                        (
+                            b.amplitude,
+                            b.amplitude_se,
+                            b.t0,
+                            b.w,
+                            b.iso_heights,
+                            b.tailing
+                        )
                     );
                     assert!(a.llr.is_nan() && a.quantity.is_nan());
                 }
@@ -867,7 +899,7 @@ mod tests {
     fn extract_table_rejects_unknown_major_version() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("b.extract.parquet");
-        for version in ["5.0", "3.0"] {
+        for version in ["6.0", "4.0"] {
             write_with_schema_version(&p, &rows(), version).unwrap();
             let e = read_extract_table(&p).unwrap_err();
             assert!(
@@ -932,6 +964,44 @@ mod tests {
         let e = read_extract_table(&p).unwrap_err();
         assert!(
             e.contains("k.extract.parquet") && e.contains("corrupt"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn a_row_with_partial_evidence_is_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.extract.parquet");
+        let rows = rows();
+        assert!(rows[0].evidence.is_some());
+        let schema = Arc::new(schema());
+        let mut cols = batch(&schema, &rows).unwrap().columns().to_vec();
+        // Null `trace_quantity` on the first row, the other evidence present.
+        let at = schema.index_of("trace_quantity").unwrap();
+        let old = cols[at].as_any().downcast_ref::<Float64Array>().unwrap();
+        let mut b = Float64Builder::new();
+        for i in 0..old.len() {
+            if i == 0 || old.is_null(i) {
+                b.append_null();
+            } else {
+                b.append_value(old.value(i));
+            }
+        }
+        cols[at] = Arc::new(b.finish());
+        let props = WriterProperties::builder()
+            .set_key_value_metadata(Some(vec![KeyValue::new(
+                SCHEMA_KEY.to_string(),
+                SCHEMA_VERSION.to_string(),
+            )]))
+            .build();
+        let mut w =
+            ArrowWriter::try_new(File::create(&p).unwrap(), schema.clone(), Some(props)).unwrap();
+        w.write(&RecordBatch::try_new(schema, cols).unwrap())
+            .unwrap();
+        w.close().unwrap();
+        let e = read_extract_table(&p).unwrap_err();
+        assert!(
+            e.contains("t.extract.parquet") && e.contains("partial evidence"),
             "{e}"
         );
     }

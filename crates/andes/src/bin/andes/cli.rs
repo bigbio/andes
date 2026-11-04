@@ -1290,6 +1290,17 @@ pub(crate) struct QuantFinalizeArgs {
     #[arg(long = "seed", hide = true, default_value_t = crate::quant_cmd::MBR_SEED)]
     pub(crate) seed: u64,
 
+    /// Advanced: share, in [0, 1], of the precursors with an identified fit
+    /// that report the template-free trace area (`trace_quantity` of the
+    /// extract: the baseline-subtracted isotope traces integrated around the
+    /// apex) instead of the Gaussian amplitude times the consensus width, in
+    /// every run: the brightest by the median amplitude signal-to-noise of
+    /// their identified fits. 0 reports the template area everywhere; 1
+    /// switches every such precursor. `quant_q` and the transfer q-values
+    /// do not depend on it. Default 0.1.
+    #[arg(long = "quant-trace-fraction", hide = true, default_value_t = crate::quant_finalize::DEFAULT_TRACE_FRACTION, value_parser = parse_unit_fraction)]
+    pub(crate) quant_trace_fraction: f64,
+
     /// Worker threads. Default: logical CPU count.
     #[arg(long)]
     pub(crate) threads: Option<usize>,

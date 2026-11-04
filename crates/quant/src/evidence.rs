@@ -65,6 +65,25 @@
 //! searches per probe. Every reported value (amplitude, LLR, features) is
 //! computed at the final `(t0, w)` and isotope set.
 //!
+//! Trace area. Next to the template quantity `A w sqrt(2 pi)`, every fit
+//! reports a template-free one, `trace_quantity`: each used isotope's trace,
+//! minus its baseline, integrated by the trapezoid rule over the scans in
+//! `[t0 - 3 w', t0 + 4 w']`, `w' = max(w, w_prior)` (longer after the apex,
+//! where peaks tail), and the per-isotope areas `a_i` combined with the
+//! fit's weights into the area of the whole pattern,
+//! `sum_i pi_i a_i / sigma_i^2 / sum_i pi_i^2 / sigma_i^2` over the used
+//! isotopes (the template amplitude's estimator, applied to areas instead of
+//! heights). The baseline of a trace comes from the window's scans outside
+//! that range: the median of each side with at least 3 scans; with two such
+//! sides, the median of both pooled, unless the side medians differ by more
+//! than 3 standard errors (`sqrt(pi / 2) sigma_i / sqrt(n)` each), when the
+//! lower one is taken (the other side holds a tail or a neighbouring peak);
+//! with none, the fit's `b_i`. For a Gaussian peak the trace area equals the
+//! template quantity at the fitted width; for a tailing or otherwise
+//! non-Gaussian peak it follows the measured shape. Its standard error
+//! carries the trace noise `sigma_i` of every integrated scan and the
+//! baseline's over the integration span.
+//!
 //! The per-probe arithmetic, [`fit_traces`], takes the extracted traces as
 //! slices. [`fit_many`] extracts the traces of many probes in one RT sweep
 //! over the run and passes them to the same arithmetic, so it reproduces
@@ -96,6 +115,17 @@ const EXCLUSION_Z: f64 = 3.0;
 /// Floor, seconds, on `s` and `w_prior` (a zero or non-finite value would
 /// divide by zero in the RT prior or the elution profile).
 const MIN_SCALE_S: f64 = 1e-3;
+/// Reach of the trace area's integration range before and after the apex,
+/// in multiples of `max(w, w_prior)` (a fit narrower than the run's usual
+/// peak does not cut off its flanks); longer after it, where peaks tail.
+const TRACE_WIDTHS_BEFORE: f64 = 3.0;
+const TRACE_WIDTHS_AFTER: f64 = 4.0;
+/// Fewest window scans on one side of the integration range that give a
+/// trace's baseline from that side.
+const MIN_BASELINE_SCANS: usize = 3;
+/// Difference, in standard errors, between the two sides' baseline medians
+/// above which the lower side alone gives the baseline.
+const BASELINE_SIDE_Z: f64 = 3.0;
 
 /// Extraction settings.
 #[derive(Debug, Clone, PartialEq)]
@@ -173,6 +203,14 @@ pub struct Evidence {
     /// and profile. Positive when the peak tails after the apex; 0 when
     /// `A = 0`.
     pub tailing: f64,
+    /// The trace area of the module docs: the baseline-subtracted isotope
+    /// traces integrated over `[t0 - 3 w', t0 + 4 w']`, `w' = max(w,
+    /// w_prior)`, on the scale of `quantity` but without the Gaussian shape.
+    /// Not clamped (an absent analyte averages 0); 0 when that range holds
+    /// fewer than 2 scans.
+    pub trace_quantity: f64,
+    /// Standard error of `trace_quantity` (0 when it is 0 for want of scans).
+    pub trace_quantity_se: f64,
 }
 
 /// The RT prior of a probe, with the floors of [`fit`] applied.
@@ -949,7 +987,21 @@ fn fit_traces_on_grid(
     let g = &work.g;
     let m1_proj = project(m1, mean(m1), g);
     features(
-        rt, traces, mz0, mu, prior, &pi, &sigma, &proj, sgg, m1_proj, mask, t0, w, g,
+        rt,
+        traces,
+        mz0,
+        mu,
+        prior,
+        &pi,
+        &sigma,
+        &proj,
+        sgg,
+        m1_proj,
+        mask,
+        t0,
+        w,
+        g,
+        &mut work.sort,
     )
 }
 
@@ -1301,6 +1353,7 @@ fn features(
     t0: f64,
     w: f64,
     g: &[f64],
+    sort: &mut Vec<f32>,
 ) -> Evidence {
     let (num, den) = num_den(proj, sgg, pi, sigma, mask);
     let amplitude = (num / den).max(0.0);
@@ -1356,6 +1409,13 @@ fn features(
         *h = p / sgg;
     }
     let tailing = tailing(rt, traces[0], g, amplitude * pi[0], t0, w);
+    let reach = w.max(prior.w_prior);
+    let range = (
+        t0 - TRACE_WIDTHS_BEFORE * reach,
+        t0 + TRACE_WIDTHS_AFTER * reach,
+    );
+    let (trace_quantity, trace_quantity_se) =
+        trace_area(rt, traces, pi, sigma, mask, amplitude, range, g, sort);
 
     Evidence {
         amplitude,
@@ -1375,6 +1435,106 @@ fn features(
         w,
         iso_heights,
         tailing,
+        trace_quantity,
+        trace_quantity_se,
+    }
+}
+
+/// The trace area of the module docs and its standard error, over the scans
+/// of `rt` in `range` (from, to), with the fit's amplitude `a` and profile
+/// `g` (for the fit's background when neither side of the range has enough
+/// scans). `(0, 0)` when the range holds fewer than 2 scans.
+#[allow(clippy::too_many_arguments)]
+fn trace_area(
+    rt: &[f64],
+    traces: &[&[f32]],
+    pi: &[f64; MAX_ISOTOPES],
+    sigma: &[f64; MAX_ISOTOPES],
+    mask: u8,
+    a: f64,
+    range: (f64, f64),
+    g: &[f64],
+    sort: &mut Vec<f32>,
+) -> (f64, f64) {
+    let lo = rt.partition_point(|&t| t < range.0);
+    let hi = rt.partition_point(|&t| t <= range.1).max(lo);
+    if hi - lo < 2 {
+        return (0.0, 0.0);
+    }
+    // Trapezoid weights: half the spacing to each in-range neighbour.
+    let dt = |j: usize| {
+        let before = if j > lo { rt[j] - rt[j - 1] } else { 0.0 };
+        let after = if j + 1 < hi { rt[j + 1] - rt[j] } else { 0.0 };
+        0.5 * (before + after)
+    };
+    let span = rt[hi - 1] - rt[lo];
+    let sum_dt2: f64 = (lo..hi).map(|j| dt(j) * dt(j)).sum();
+    let (n_left, n_right) = (lo, rt.len() - hi);
+    let gbar = if g.is_empty() {
+        0.0
+    } else {
+        g.iter().sum::<f64>() / g.len() as f64
+    };
+    let (mut num, mut den, mut var) = (0.0, 0.0, 0.0);
+    for (i, trace) in traces.iter().enumerate() {
+        if mask & (1 << i) == 0 {
+            continue;
+        }
+        let s2 = sigma[i] * sigma[i];
+        // Variance of the median of n scans of noise sigma_i.
+        let median_var = |n: usize| std::f64::consts::FRAC_PI_2 * s2 / n as f64;
+        let mut side = |part: &[f32]| {
+            (part.len() >= MIN_BASELINE_SCANS).then(|| {
+                sort.clear();
+                sort.extend_from_slice(part);
+                (median_unsorted(sort), median_var(part.len()))
+            })
+        };
+        let (left, right) = (side(&trace[..lo]), side(&trace[hi..]));
+        let (base, base_var) = match (left, right) {
+            (Some(l), Some(r)) if (l.0 - r.0).abs() > BASELINE_SIDE_Z * (l.1 + r.1).sqrt() => {
+                if l.0 <= r.0 {
+                    l
+                } else {
+                    r
+                }
+            }
+            (Some(_), Some(_)) => {
+                sort.clear();
+                sort.extend_from_slice(&trace[..lo]);
+                sort.extend_from_slice(&trace[hi..]);
+                (median_unsorted(sort), median_var(n_left + n_right))
+            }
+            (Some(one), None) | (None, Some(one)) => one,
+            (None, None) => (mean(trace) - a * pi[i] * gbar, s2 / trace.len() as f64),
+        };
+        let area: f64 = (lo..hi).map(|j| dt(j) * (trace[j] as f64 - base)).sum();
+        let c = pi[i] / s2;
+        num += c * area;
+        den += c * pi[i];
+        var += c * c * (s2 * sum_dt2 + span * span * base_var);
+    }
+    if den > 0.0 {
+        (num / den, var.sqrt() / den)
+    } else {
+        (0.0, 0.0)
+    }
+}
+
+/// Median of `v` (mean of the middle two for an even length; 0 when empty),
+/// reordering it.
+fn median_unsorted(v: &mut [f32]) -> f64 {
+    let n = v.len();
+    if n == 0 {
+        return 0.0;
+    }
+    let (left, mid, _) = v.select_nth_unstable_by(n / 2, f32::total_cmp);
+    let upper = *mid as f64;
+    if n % 2 == 1 {
+        upper
+    } else {
+        let lower = left.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
+        0.5 * (lower + upper)
     }
 }
 
@@ -2606,5 +2766,216 @@ mod tests {
             mobility: Some(gate),
         };
         assert_eq!(fit_many(&run, &[job], &p)[0], plain);
+    }
+
+    #[test]
+    fn trace_area_matches_the_template_on_a_gaussian_peak() {
+        let w = 5.0;
+        let truth = AMP * w * (2.0 * std::f64::consts::PI).sqrt();
+        for (k, dt) in [0.5, 1.0, 2.0].into_iter().enumerate() {
+            let run = Ms1RunIndex::new(synth_scans(
+                &[(MZ, 2, ENV, 300.0, w, AMP)],
+                NOISE,
+                dt,
+                40 + k as u64,
+            ));
+            let e = fit(&run, &probe(MZ, 301.0, 6.0, 5.0), 2, &ENV, &params()).unwrap();
+            eprintln!(
+                "gaussian dt {dt}: trace/template = {:.4}, trace/truth = {:.4}, se/trace = {:.5}",
+                e.trace_quantity / e.quantity,
+                e.trace_quantity / truth,
+                e.trace_quantity_se / e.trace_quantity
+            );
+            assert!((e.trace_quantity / e.quantity - 1.0).abs() < 0.02);
+            assert!((e.trace_quantity / truth - 1.0).abs() < 0.03);
+            assert!(e.trace_quantity_se > 0.0 && e.trace_quantity_se < 0.02 * e.trace_quantity);
+        }
+    }
+
+    #[test]
+    fn trace_area_follows_a_tailing_peak() {
+        let apex = 300.0;
+        // A slower second component after the apex: the Gaussian template
+        // misses part of the area, the integrated traces keep it.
+        let parts = [(apex, 5.0, AMP), (apex + 9.0, 8.0, 0.35 * AMP)];
+        let run = synth_run(&parts.map(|(t, w, a)| (MZ, 2, ENV, t, w, a)), NOISE, 1.0);
+        let e = fit(&run, &probe(MZ, apex, 6.0, 5.0), 2, &ENV, &params()).unwrap();
+        // A trace keeps the most intense centroid of a scan, so the measured
+        // profile is the larger of the two components at each time.
+        let step = 1e-3;
+        let truth: f64 = (0..600_000)
+            .map(|k| {
+                let t = k as f64 * step;
+                parts
+                    .iter()
+                    .map(|&(c, w, a)| a * (-(t - c) * (t - c) / (2.0 * w * w)).exp())
+                    .fold(0.0, f64::max)
+                    * step
+            })
+            .sum();
+        eprintln!(
+            "tailing: template/truth = {:.4}, trace/truth = {:.4} (t0 {:.1}, w {:.2})",
+            e.quantity / truth,
+            e.trace_quantity / truth,
+            e.t0,
+            e.w
+        );
+        assert!((e.quantity / truth - 1.0).abs() > 0.1);
+        assert!((e.trace_quantity / truth - 1.0).abs() < 0.08);
+    }
+
+    #[test]
+    fn trace_area_of_an_absent_analyte_averages_zero() {
+        let p = probe(MZ, 300.0, 6.0, 5.0);
+        let (mut z_sum, mut z2_sum, mut template_sum) = (0.0, 0.0, 0.0);
+        let n = 60;
+        for seed in 0..n {
+            let run = Ms1RunIndex::new(synth_scans(
+                &[(MZ, 2, ENV, 300.0, 5.0, 0.0)],
+                NOISE,
+                1.0,
+                100 + seed,
+            ));
+            let e = fit(&run, &p, 2, &ENV, &params()).unwrap();
+            assert!(e.trace_quantity.is_finite() && e.trace_quantity_se > 0.0);
+            let z = e.trace_quantity / e.trace_quantity_se;
+            z_sum += z;
+            z2_sum += z * z;
+            template_sum += e.quantity / e.trace_quantity_se;
+        }
+        let mean = z_sum / n as f64;
+        let sd = (z2_sum / n as f64 - mean * mean).sqrt();
+        let template = template_sum / n as f64;
+        eprintln!(
+            "absent: trace z mean {mean:.3}, sd {sd:.3}; template in trace SEs {template:.3}"
+        );
+        // Unbiased within the scatter of 60 draws; the clamped template
+        // reads above zero.
+        assert!(mean.abs() < 0.5, "{mean}");
+        assert!((0.5..2.0).contains(&sd), "{sd}");
+        assert!(template > mean);
+    }
+
+    #[test]
+    fn trace_area_without_scans_in_range_is_zero() {
+        let rt = [0.0, 10.0, 20.0];
+        let y: [f32; 3] = [1.0, 5.0, 1.0];
+        let traces: [&[f32]; 1] = [&y];
+        let pi = [1.0, 0.0, 0.0, 0.0];
+        let sigma = [1.0; MAX_ISOTOPES];
+        let g = [0.5, 1.0, 0.5];
+        let mut sort = Vec::new();
+        assert_eq!(
+            trace_area(
+                &rt,
+                &traces,
+                &pi,
+                &sigma,
+                0b1,
+                4.0,
+                (9.0, 11.0),
+                &g,
+                &mut sort
+            ),
+            (0.0, 0.0)
+        );
+        // Two scans in range, too few outside for a median: the fit's
+        // background `mean - a * pi_0 * gbar` = 7/3 - 4 * 2/3 = -1/3.
+        let (q, se) = trace_area(
+            &rt,
+            &traces,
+            &pi,
+            &sigma,
+            0b1,
+            4.0,
+            (10.0, 20.0),
+            &g,
+            &mut sort,
+        );
+        let base = 7.0 / 3.0 - 4.0 * 2.0 / 3.0;
+        assert!((q - 10.0 * (0.5 * (5.0 - base) + 0.5 * (1.0 - base))).abs() < 1e-9);
+        assert!((se - (50.0 + 100.0 / 3.0f64).sqrt()).abs() < 1e-9, "{se}");
+    }
+
+    #[test]
+    fn trace_baseline_comes_from_the_lower_side_when_the_sides_disagree() {
+        // Ten scans of baseline 1 before the range, a tail at 50 after it.
+        let rt: Vec<f64> = (0..25).map(f64::from).collect();
+        let mut y = vec![1.0f32; 25];
+        for v in &mut y[10..15] {
+            *v = 101.0;
+        }
+        for v in &mut y[15..] {
+            *v = 50.0;
+        }
+        let traces: [&[f32]; 1] = [&y];
+        let (pi, sigma) = ([1.0, 0.0, 0.0, 0.0], [1.0; MAX_ISOTOPES]);
+        let g = vec![0.0; 25];
+        let mut sort = Vec::new();
+        let (q, _) = trace_area(
+            &rt,
+            &traces,
+            &pi,
+            &sigma,
+            0b1,
+            0.0,
+            (10.0, 14.0),
+            &g,
+            &mut sort,
+        );
+        assert!((q - 400.0).abs() < 1e-9, "{q}");
+        // Sides that agree are pooled.
+        y[15..].fill(1.0);
+        y[15] = 1.5;
+        let traces: [&[f32]; 1] = [&y];
+        let (q, _) = trace_area(
+            &rt,
+            &traces,
+            &pi,
+            &sigma,
+            0b1,
+            0.0,
+            (10.0, 14.0),
+            &g,
+            &mut sort,
+        );
+        assert!((q - 400.0).abs() < 1e-9, "{q}");
+    }
+
+    #[test]
+    fn trace_baseline_pools_agreeing_sides_with_different_medians() {
+        let rt: Vec<f64> = (0..25).map(f64::from).collect();
+        let mut y = vec![10.0f32; 25];
+        for v in &mut y[10..15] {
+            *v = 101.0;
+        }
+        for v in &mut y[15..] {
+            *v = 11.0;
+        }
+        let traces: [&[f32]; 1] = [&y];
+        let (pi, sigma) = ([1.0, 0.0, 0.0, 0.0], [1.0; MAX_ISOTOPES]);
+        let g = vec![0.0; 25];
+        let mut sort = Vec::new();
+        let (q, _) = trace_area(
+            &rt,
+            &traces,
+            &pi,
+            &sigma,
+            0b1,
+            0.0,
+            (10.0, 14.0),
+            &g,
+            &mut sort,
+        );
+        // Medians 10 and 11 differ by less than 3 SE (about 1.68): the pooled
+        // median 10.5 applies (the lower side alone would give 364).
+        assert!((q - 362.0).abs() < 1e-9, "{q}");
+    }
+
+    #[test]
+    fn median_of_an_unsorted_slice() {
+        assert_eq!(median_unsorted(&mut []), 0.0);
+        assert_eq!(median_unsorted(&mut [3.0, 1.0, 2.0]), 2.0);
+        assert_eq!(median_unsorted(&mut [4.0, 1.0, 3.0, 2.0]), 2.5);
     }
 }

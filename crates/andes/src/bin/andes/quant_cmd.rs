@@ -1622,6 +1622,7 @@ pub(crate) fn finalize_and_write(
     quant_feature_fdr: Option<f64>,
     seed: u64,
     limits: FinalizeLimits,
+    trace_fraction: f64,
     base: &Path,
     parquet_dir: Option<&Path>,
     groups: Option<&ProteinGroups<'_>>,
@@ -1642,6 +1643,7 @@ pub(crate) fn finalize_and_write(
         limits,
         mbr_path: &table,
         validation_path: &validation,
+        trace_fraction,
     };
     let mut tally = GroupTally::default();
     let summary = finalize_stream(&stored.runs, &stored.library, source, &params, &mut |f| {
@@ -1724,6 +1726,7 @@ pub(crate) fn run_in_process(
         quant_feature_fdr,
         MBR_SEED,
         FinalizeLimits::default(),
+        crate::quant_finalize::DEFAULT_TRACE_FRACTION,
         base,
         parquet_dir,
         groups,
@@ -1856,6 +1859,7 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
         a.quant_feature_fdr.0,
         a.seed,
         limits,
+        a.quant_trace_fraction,
         &a.output,
         a.output_parquet.as_deref(),
         groups.as_ref(),

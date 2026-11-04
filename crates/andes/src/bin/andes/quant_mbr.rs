@@ -92,6 +92,16 @@
 //! reports the extract's own `quantity` and `quantity_se`. The extract
 //! tables keep the per-run values.
 //!
+//! Trace area (`quant finalize --quant-trace-fraction F`, default 0.1; `--mbr`
+//! uses the default): the brightest share `F` of the precursors, ranked by the
+//! median amplitude
+//! signal-to-noise `A / amplitude_se` of their identified target fits,
+//! report the extract's template-free `trace_quantity` and
+//! `trace_quantity_se` in every run instead (a row whose trace area is not
+//! positive keeps the template quantity, decided per row). The choice is per
+//! precursor, so a precursor's runs are measured alike apart from such rows. `quant_q` and the transfer q-values
+//! do not use the reported quantity and are unchanged.
+//!
 //! Normalised quantity: `quantity_normalized` is the reported quantity with
 //! its run's offset at the row's apex RT removed ([`quant::normalize`]: a
 //! level per run and an RT-local term). The offsets are fitted on the
@@ -1111,15 +1121,20 @@ pub(crate) fn consensus_widths<'a>(
     widths.into_iter().map(|(p, w)| (p, median(w))).collect()
 }
 
-/// `(quantity, quantity_se)` of evidence `e` in run `run`: at the consensus
-/// width `w_c` carried into the run, or the extract's own values without a
-/// consensus width or in an unaligned run.
+/// `(quantity, quantity_se)` of evidence `e` in run `run`: with `trace`, its
+/// trace area when that is positive; else at the consensus width `w_c`
+/// carried into the run, or the extract's own values without a consensus
+/// width or in an unaligned run.
 pub(crate) fn reported_quantity(
     e: &Evidence,
     run: u16,
     w_c: Option<f64>,
+    trace: bool,
     maps: &[Option<RunMap>],
 ) -> (f64, f64) {
+    if trace && e.trace_quantity > 0.0 && e.trace_quantity.is_finite() {
+        return (e.trace_quantity, e.trace_quantity_se);
+    }
     match w_c.zip(local_slope(maps, run, e.t0)) {
         Some((w_c, slope)) => {
             let area = w_c * slope * (2.0 * std::f64::consts::PI).sqrt();
@@ -2336,6 +2351,8 @@ mod finalize_tests {
             w: 4.0,
             iso_heights: [0.55, 0.3, 0.11, 0.04].map(|v| v * amplitude),
             tailing: 0.0,
+            trace_quantity: amplitude * 12.5,
+            trace_quantity_se: 1.25e5,
         }
     }
 
@@ -2881,7 +2898,8 @@ mod finalize_tests {
                         return;
                     }
                     let Some(e) = r.evidence.as_ref() else { return };
-                    let q = reported_quantity(e, r.run, w_c.get(&r.precursor).copied(), maps).0;
+                    let w_c = w_c.get(&r.precursor).copied();
+                    let q = reported_quantity(e, r.run, w_c, false, maps).0;
                     if q > 0.0 && q.is_finite() {
                         cell_seq += 1;
                         cells.push(
@@ -2963,10 +2981,9 @@ mod finalize_tests {
             // quantity is missing, not zero, in the MBR table and the
             // feature parquet.
             let reported = |r: &ExtractRow| {
-                r.evidence
-                    .as_ref()
-                    .filter(|e| e.amplitude > 0.0)
-                    .map(|e| reported_quantity(e, r.run, w_c.get(&r.precursor).copied(), maps))
+                r.evidence.as_ref().filter(|e| e.amplitude > 0.0).map(|e| {
+                    reported_quantity(e, r.run, w_c.get(&r.precursor).copied(), false, maps)
+                })
             };
             let mut out: Vec<(u32, u16, MbrRow<'_>, Option<f64>)> = Vec::new();
             // Probability that a transfer's measurement is wrong (1 without
@@ -3198,6 +3215,7 @@ mod finalize_tests {
             limits,
             mbr_path: &mbr,
             validation_path: &val,
+            trace_fraction: 0.0,
         };
         let source = ExtractRuns { runs, batch_rows };
         let mut features = Vec::new();
@@ -3471,7 +3489,7 @@ mod finalize_tests {
                 .filter(|r| r.role == Role::Identified)
                 .map(|r| {
                     let e = r.evidence.as_ref().unwrap();
-                    reported_quantity(e, r.run, w_c.get(&3).copied(), &maps)
+                    reported_quantity(e, r.run, w_c.get(&3).copied(), false, &maps)
                 })
                 .collect();
             let raw: Vec<f64> = rows
@@ -3517,9 +3535,119 @@ mod finalize_tests {
         assert!(consensus_widths(&rows, &maps).is_empty());
         let e = rows[1].evidence.as_ref().unwrap();
         assert_eq!(
-            reported_quantity(e, 1, None, &maps),
+            reported_quantity(e, 1, None, false, &maps),
             (e.quantity, e.quantity_se)
         );
+    }
+
+    #[test]
+    fn trace_fraction_reports_the_trace_area_of_the_brightest_precursors() {
+        use crate::quant_finalize::{ExtractFiles, ExtractSource};
+        let lib = library();
+        let mut runs = extract();
+        // The identified signal-to-noise rises with the precursor index.
+        for r in runs[0].iter_mut().filter(|r| r.role == Role::Identified) {
+            let e = r.evidence.as_mut().unwrap();
+            e.amplitude_se = e.amplitude / (10.0 + r.precursor as f64);
+            if r.precursor == 0 {
+                // A non-positive trace area keeps the template quantity.
+                e.trace_quantity = 0.0;
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        // The same rows from memory and from extract tables on disk: finalize
+        // reads the identified fits of the tables with a reader of its own.
+        let files = ExtractFiles(
+            runs.iter()
+                .enumerate()
+                .map(|(r, rows)| {
+                    let path = dir.path().join(format!("{r}.extract.parquet"));
+                    output::extract_table::write_extract_table(&path, rows).unwrap();
+                    path
+                })
+                .collect(),
+        );
+        let memory = ExtractRuns {
+            runs: &runs,
+            batch_rows: usize::MAX,
+        };
+        let sources: [(&str, &dyn ExtractSource); 2] = [("memory", &memory), ("files", &files)];
+        let target: HashMap<(u32, u16), &Evidence> = runs
+            .iter()
+            .flatten()
+            .filter(|r| r.kind == Hypothesis::Target && r.role != Role::PseudoTransfer)
+            .filter_map(|r| r.evidence.as_ref().map(|e| ((r.precursor, r.run), e)))
+            .collect();
+        for (name, source) in sources {
+            let finalize_at = |fraction: f64| {
+                let (mbr, val) = mbr_paths(&dir.path().join(format!("{name}{fraction}")));
+                let params = FinalizeParams {
+                    mbr_fdr: 0.01,
+                    quant_feature_fdr: None,
+                    seed: 7,
+                    limits: FinalizeLimits::default(),
+                    mbr_path: &mbr,
+                    validation_path: &val,
+                    trace_fraction: fraction,
+                };
+                let mut features = Vec::new();
+                finalize_stream(&stems(), &lib, source, &params, &mut |f| {
+                    features.extend(f);
+                    Ok(())
+                })
+                .unwrap();
+                features
+            };
+            let off = finalize_at(0.0);
+            let all = finalize_at(1.0);
+            let half = finalize_at(0.5);
+            assert_eq!(off.len(), all.len(), "{name}");
+            assert_eq!(off.len(), half.len(), "{name}");
+            let mut traced = 0;
+            for ((o, a), h) in off.iter().zip(&all).zip(&half) {
+                let key = (o.precursor, o.run);
+                assert_eq!(key, (a.precursor, a.run));
+                assert_eq!(key, (h.precursor, h.run));
+                // The q-values and the evidence type do not use the quantity.
+                for f in [a, h] {
+                    assert_eq!(
+                        (f.evidence_type, f.transfer_q, f.quant_q),
+                        (o.evidence_type, o.transfer_q, o.quant_q),
+                        "{name}"
+                    );
+                }
+                let Some(q) = o.quantity else {
+                    assert!(a.quantity.is_none() && h.quantity.is_none());
+                    continue;
+                };
+                let e = target[&key];
+                assert_ne!(q, e.trace_quantity);
+                if e.trace_quantity <= 0.0 {
+                    for f in [a, h] {
+                        assert_eq!(
+                            (f.quantity, f.quantity_se),
+                            (o.quantity, o.quantity_se),
+                            "{name} {key:?}"
+                        );
+                    }
+                    continue;
+                }
+                // Every precursor has an identified fit: share 1 traces them all.
+                assert_eq!(
+                    (a.quantity, a.quantity_se),
+                    (Some(e.trace_quantity), Some(e.trace_quantity_se)),
+                    "{name} {key:?}"
+                );
+                // Share 0.5 traces the brighter half, precursors 450 and up.
+                if o.precursor >= N / 2 {
+                    assert_eq!(h.quantity, Some(e.trace_quantity), "{name} {key:?}");
+                    traced += 1;
+                } else {
+                    assert_eq!((h.quantity, h.quantity_se), (o.quantity, o.quantity_se));
+                }
+            }
+            assert!(traced > 0, "{name}");
+        }
     }
 
     #[test]

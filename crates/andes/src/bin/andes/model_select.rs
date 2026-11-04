@@ -656,6 +656,44 @@ pub(crate) fn untrained_route_warning(
     ))
 }
 
+/// The isobaric label the declared modifications carry: a mod of a label's
+/// mass (to 0.0005 Da) on K or on the peptide N-terminus, fixed or variable.
+/// `None` for a set without one.
+pub(crate) fn label_from_mods(aa: &model::AminoAcidSet) -> Option<input::IsobaricLabel> {
+    use input::IsobaricLabel::{Itraq, Itraq8, Tmt, TmtPro};
+    let on_label_site = |m: &Modification| match (m.residue, m.location) {
+        (ResidueSpec::Specific(b'K'), _) => true,
+        (ResidueSpec::Wildcard, ModLocation::NTerm | ModLocation::ProtNTerm) => true,
+        _ => false,
+    };
+    [Tmt, TmtPro, Itraq, Itraq8].into_iter().find(|label| {
+        let mass = label.tag().1;
+        aa.distinct_mods()
+            .iter()
+            .any(|m| on_label_site(m) && (m.mass_delta - mass).abs() < 5e-4)
+    })
+}
+
+/// The protocol the model is chosen for. An explicit `--protocol` stands; at
+/// `auto` a run that carries a label (named by `--tmt`, read from its
+/// reporter ions, or declared by its modifications) routes like the explicit
+/// protocol of that label, so the two spellings of one run agree on every
+/// activation.
+pub(crate) fn routing_protocol(
+    protocol: Protocol,
+    label: Option<input::IsobaricLabel>,
+) -> Protocol {
+    match (protocol, label) {
+        (Protocol::Auto, Some(input::IsobaricLabel::Tmt | input::IsobaricLabel::TmtPro)) => {
+            Protocol::Tmt
+        }
+        (Protocol::Auto, Some(input::IsobaricLabel::Itraq | input::IsobaricLabel::Itraq8)) => {
+            Protocol::Itraq
+        }
+        _ => protocol,
+    }
+}
+
 /// The store's `protocol` name for a CLI protocol.
 fn protocol_store_name(protocol: Protocol) -> &'static str {
     match protocol {
@@ -774,6 +812,112 @@ mod param_resolver_tests {
             None,
         );
         assert_eq!(act, ActivationMethod::HCD);
+    }
+
+    /// A label named by the run (`--tmt`, reporter ions or modifications)
+    /// routes exactly as the explicit `--protocol` of that label: the model
+    /// depends on the run, not on how the label was spelled. EThcD, HCD and
+    /// CID, every analyser, every enzyme.
+    #[test]
+    fn inferred_label_routes_like_the_explicit_protocol() {
+        use input::IsobaricLabel::{Itraq, Itraq8, Tmt, TmtPro};
+        let store = ModelStore::open(&bundled_store_path()).expect("bundled store");
+        let entries = store.selection_entries();
+        let labels = [
+            (Tmt, Protocol::Tmt),
+            (TmtPro, Protocol::Tmt),
+            (Itraq, Protocol::Itraq),
+            (Itraq8, Protocol::Itraq),
+        ];
+        for act in [
+            ActivationMethod::HCD,
+            ActivationMethod::CID,
+            ActivationMethod::ETD,
+            ActivationMethod::EThcD,
+        ] {
+            for inst in [
+                None,
+                Some(InstrumentType::LowRes),
+                Some(InstrumentType::HighRes),
+                Some(InstrumentType::QExactive),
+                Some(InstrumentType::OrbitrapAstral),
+            ] {
+                for enz in [
+                    model::enzyme::Enzyme::Trypsin,
+                    model::enzyme::Enzyme::NoCleavage,
+                ] {
+                    for (label, explicit) in labels {
+                        let routed = routing_protocol(Protocol::Auto, Some(label));
+                        assert_eq!(routed, explicit);
+                        let got = choose_model(&entries, act, inst, routed, enz);
+                        let want = choose_model(&entries, act, inst, explicit, enz);
+                        assert_eq!(
+                            got.model_id, want.model_id,
+                            "{act:?}/{inst:?}/{enz:?}/{label:?}"
+                        );
+                    }
+                }
+            }
+        }
+        // The case that was mis-routed: labelled Orbitrap EThcD stays on the
+        // labelled HCD route.
+        let id = choose_model(
+            &entries,
+            ActivationMethod::EThcD,
+            Some(InstrumentType::QExactive),
+            routing_protocol(Protocol::Auto, Some(Tmt)),
+            model::enzyme::Enzyme::Trypsin,
+        )
+        .model_id;
+        assert_eq!(id, "hcd_qexactive_tryp_tmt");
+        // An explicit protocol is never overridden by the label.
+        assert_eq!(
+            routing_protocol(Protocol::Phospho, Some(Tmt)),
+            Protocol::Phospho
+        );
+        assert_eq!(routing_protocol(Protocol::Auto, None), Protocol::Auto);
+    }
+
+    /// A label declared by the modifications (fixed or variable, on K or the
+    /// peptide N-terminus) is read as that label; other mods are not.
+    #[test]
+    fn label_is_read_from_the_declared_mods() {
+        use input::IsobaricLabel::{Itraq, Tmt, TmtPro};
+        let set = |lines: &[&str]| {
+            let mut b = AminoAcidSetBuilder::new_standard();
+            for l in lines {
+                let m = Modification::from_mods_txt_line(l).unwrap();
+                b = if m.fixed {
+                    b.add_fixed_mod(m)
+                } else {
+                    b.add_variable_mod(m)
+                };
+            }
+            b.build().unwrap()
+        };
+        assert_eq!(
+            label_from_mods(&set(&["229.162932,K,fix,any,TMT"])),
+            Some(Tmt)
+        );
+        assert_eq!(
+            label_from_mods(&set(&["229.162932,*,fix,N-term,TMT"])),
+            Some(Tmt)
+        );
+        assert_eq!(
+            label_from_mods(&set(&["304.207146,K,fix,any,TMTpro"])),
+            Some(TmtPro)
+        );
+        assert_eq!(
+            label_from_mods(&set(&["144.102063,K,opt,any,iTRAQ"])),
+            Some(Itraq)
+        );
+        assert_eq!(
+            label_from_mods(&set(&[
+                "57.021464,C,fix,any,Carbamidomethyl",
+                "15.994915,M,opt,any,Oxidation"
+            ])),
+            None
+        );
     }
 
     /// TOF and timsTOF runs fragment by beam-type CID, whether the input labels

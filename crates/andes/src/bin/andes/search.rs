@@ -14,8 +14,9 @@ use crate::cli::{
 use crate::glyco_run::run_glyco;
 use crate::memlimit::available_memory_budget;
 use crate::model_select::{
-    cli_fragment_tol_override, default_aa_set_with_tag, load_param_from_store, parse_enzymes,
-    resolve_metadataless_selection, warn_if_universal_protease_combo,
+    cli_fragment_tol_override, default_aa_set_with_tag, label_from_mods, load_param_from_store,
+    parse_enzymes, resolve_metadataless_selection, routing_protocol,
+    warn_if_universal_protease_combo,
 };
 use crate::mono::{correct_chunk, MonoDump, MonoStats};
 use crate::quant_run::{QuantCollector, QuantSettings, RunScans};
@@ -726,6 +727,38 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         sample_ms2_meta(&spectrum_path, is_mzml, is_raw, is_d),
     );
 
+    // The label the run carries: `--tmt <plex>` names it; otherwise it is read
+    // from the reporter ions (also under an explicit `--protocol`, so the
+    // injected tag below gets the kit's mass: TMTpro and iTRAQ 8-plex are
+    // 304.2 Da, not the 229.2 / 144.1 Da of TMT 6–11 and iTRAQ 4-plex).
+    let detect = || {
+        detect_isobaric_sampled(
+            &spectrum_path,
+            is_mzml,
+            is_mgf,
+            is_raw,
+            cli.ms_level as u32,
+            acquisition.high_res,
+        )
+    };
+    let label: Option<input::IsobaricLabel> = match (cli.tmt, cli.protocol) {
+        (Some(plex), _) => Some(isobaric_label_of_plex(plex)),
+        (None, Protocol::Auto | Protocol::Tmt | Protocol::Itraq | Protocol::ItraqPhospho) => {
+            detect()
+        }
+        (None, _) => None,
+    };
+    // Reporter ions are the evidence of the data; a label declared only by the
+    // modifications (no reporters read, e.g. an MS3 run without them in the
+    // sample) routes the same way.
+    let label = label.or_else(|| {
+        if cli.protocol == Protocol::Auto {
+            label_from_mods(&aa)
+        } else {
+            None
+        }
+    });
+    let route_protocol = routing_protocol(cli.protocol, label);
     let t_phase = std::time::Instant::now();
     // The block also returns the (activation, instrument) it routed on and the
     // chosen model id, so the resolved-parameter banner can report what was
@@ -787,7 +820,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let (model_id, p) = load_param_from_store(
             activation,
             instrument_opt,
-            cli.protocol,
+            route_protocol,
             search_enzyme,
             cli.model_store.as_deref(),
             cli.model_id_override.as_deref(),
@@ -843,27 +876,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // windowed filter engages with zero config — the same path `--protocol TMT`
     // takes today. Detection returns None for label-free data, so non-isobaric
     // runs stay byte-identical.
-    // The label the run carries: `--tmt <plex>` names it; otherwise it is read
-    // from the reporter ions (also under an explicit `--protocol`, so the
-    // injected tag below gets the kit's mass: TMTpro and iTRAQ 8-plex are
-    // 304.2 Da, not the 229.2 / 144.1 Da of TMT 6–11 and iTRAQ 4-plex).
-    let detect = || {
-        detect_isobaric_sampled(
-            &spectrum_path,
-            is_mzml,
-            is_mgf,
-            is_raw,
-            cli.ms_level as u32,
-            acquisition.high_res,
-        )
-    };
-    let label: Option<input::IsobaricLabel> = match (cli.tmt, cli.protocol) {
-        (Some(plex), _) => Some(isobaric_label_of_plex(plex)),
-        (None, Protocol::Auto | Protocol::Tmt | Protocol::Itraq | Protocol::ItraqPhospho) => {
-            detect()
-        }
-        (None, _) => None,
-    };
     match cli.protocol {
         Protocol::Tmt => param.data_type.protocol = model::protocol::Protocol::TMT,
         Protocol::Itraq => param.data_type.protocol = model::protocol::Protocol::ITRAQ,
@@ -879,7 +891,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     if cli.tmt.is_some() {
                         "--tmt"
                     } else {
-                        "auto-detected"
+                        "detected"
                     }
                 );
                 param.data_type.protocol = model::protocol::Protocol::TMT;
@@ -890,7 +902,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     if cli.tmt.is_some() {
                         "--tmt"
                     } else {
-                        "auto-detected"
+                        "detected"
                     }
                 );
                 param.data_type.protocol = model::protocol::Protocol::ITRAQ;
@@ -898,22 +910,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             None => {}
         },
         _ => {}
-    }
-    // The model was chosen for `--protocol auto` before the reporter ions were
-    // read, so a labelled run is scored with the label-free model: a route to a
-    // cell the model was not trained on, warned like the others.
-    if cli.protocol == Protocol::Auto && cli.model_id_override.is_none() {
-        if let Some(l) = label {
-            let protocol = match l {
-                input::IsobaricLabel::Tmt | input::IsobaricLabel::TmtPro => "TMT",
-                input::IsobaricLabel::Itraq | input::IsobaricLabel::Itraq8 => "iTRAQ",
-            };
-            eprintln!(
-                "WARN: model routing: the run carries {l:?} reporter ions but --protocol is \
-                 auto, so it is scored with '{resolved_model_id}', trained on label-free \
-                 data. Pass --protocol {protocol} to score it with the {protocol} model."
-            );
-        }
     }
     // C1: parameter-free path only (no explicit --mods). When the protocol
     // resolves to TMT/iTRAQ, or `--tmt` names the kit, inject the tag as a fixed mod on K + peptide

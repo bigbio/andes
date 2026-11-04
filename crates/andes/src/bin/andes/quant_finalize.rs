@@ -2712,6 +2712,11 @@ fn log_summary(
         v.transfer_ms2
     );
     eprintln!(
+        "[mbr] shared-feature classifier (probability above {}): {} accepted transfers reported as shared_feature",
+        quant::shared::Model::shipped().threshold,
+        v.shared_feature
+    );
+    eprintln!(
         "[mbr] run normalisation (quantity_normalized): {} reference precursors (identified, quant_q <= {VALIDATION_Q}, in >= 3 runs or all runs)",
         norm.precursors
     );

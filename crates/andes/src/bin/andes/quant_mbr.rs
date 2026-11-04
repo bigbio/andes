@@ -945,7 +945,9 @@ pub(crate) fn extract_run(
     let mut slots: Vec<Option<EntryRows>> = (0..n).map(|_| None).collect();
     let finish = |slots, width_fits: usize, wp: &WidthPrior, scales: RunScales| {
         let mut out = assemble(slots, width_fits, wp.is_default());
+        let t = std::time::Instant::now();
         let windows = assign_claims(&mut out.rows, lib);
+        eprintln!("[mbr] timing claims {:.3} s", t.elapsed().as_secs_f64());
         out.counts.unaligned = !aligned;
         out.counts.foreign_cv = foreign;
         out.counts.scales = scales;

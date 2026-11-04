@@ -1407,7 +1407,9 @@ pub(crate) fn extract_and_write(
         let aligned = stored.library.alignment.maps.iter().flatten().count();
         tags.push((SELECTION_KEY.to_string(), selection.describe(aligned)));
     }
+    let t = std::time::Instant::now();
     write_extract_table_tagged(&path, &ex.rows, &tags)?;
+    eprintln!("[mbr] timing write {:.3} s", t.elapsed().as_secs_f64());
     Ok(ex.rows)
 }
 

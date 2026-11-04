@@ -940,10 +940,17 @@ mod tests {
             .map(|f| f.name().clone())
             .collect();
         assert_eq!(names, MBR_COLUMNS);
-        assert_eq!(t.meta.get(MBR_TABLE.key).map(String::as_str), Some("1.1"));
+        assert_eq!(t.meta.get(MBR_TABLE.key).map(String::as_str), Some("1.2"));
         // An empty table is still a valid file.
         write_mbr_parquet(&p, &[]).unwrap();
         assert!(read_mbr_parquet(&p).unwrap().is_empty());
+    }
+
+    #[test]
+    fn shared_feature_is_a_named_transfer_type() {
+        assert_eq!(EvidenceType::SharedFeature.as_str(), "shared_feature");
+        assert!(EvidenceType::SharedFeature.is_transfer());
+        assert!(!EvidenceType::Identified.is_transfer());
     }
 
     #[test]

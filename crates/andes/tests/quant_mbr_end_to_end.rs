@@ -123,7 +123,11 @@ type MbrRows = HashMap<(String, String), Vec<String>>;
 
 /// The header and rows of an mbr.parquet.
 fn read_mbr(path: &Path) -> (Vec<String>, MbrRows) {
-    let header = output::mbr_out::MBR_COLUMNS.map(String::from).to_vec();
+    let mut header: Vec<String> = output::mbr_out::MBR_COLUMNS[..10]
+        .iter()
+        .map(|c| c.to_string())
+        .collect();
+    header.extend(["claimed_by", "claim_co_apex", "claim_n_co_apex"].map(String::from));
     let num = |v: Option<f64>| v.map_or_else(|| "NA".to_string(), |v| v.to_string());
     let rows = output::mbr_out::read_mbr_parquet(path)
         .unwrap_or_else(|e| panic!("{e}"))
@@ -140,6 +144,11 @@ fn read_mbr(path: &Path) -> (Vec<String>, MbrRows) {
                 num(r.quant_q),
                 num(r.apex_rt_s),
                 num(Some(r.library_q)),
+                r.claimed_by.clone().unwrap_or_else(|| "NA".to_string()),
+                r.claim_co_apex
+                    .map_or_else(|| "NA".to_string(), |v| v.to_string()),
+                r.claim_n_co_apex
+                    .map_or_else(|| "NA".to_string(), |v| v.to_string()),
             ];
             ((r.precursor_key, r.run), f)
         })

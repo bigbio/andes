@@ -24,10 +24,12 @@
 //!   per run and an RT-local term).
 //! * [`evidence`]: the likelihood template fit that measures one (precursor,
 //!   run) hypothesis: amplitude, quantity and the evidence statistics.
+//! * [`claims`]: same-run claims on an MS1 feature by another probed target.
 //! * [`ms2`]: empirical fragment spectra of library entries and the MS2
 //!   evidence of a transfer probe in the receiving run's MS2 scans.
 
 pub mod align;
+pub mod claims;
 pub mod decoys;
 pub mod evidence;
 pub mod formula;

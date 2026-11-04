@@ -330,6 +330,22 @@ pub fn psm_feature_values(psm: &PsmMatch, rank: u32) -> Vec<Feature> {
         ("RefCompetitor", f.ref_competitor as f64, Int),
         ("DeltaRefScore", f.delta_ref_score as f64, Double),
         ("IsotopeMimic", f.isotope_mimic as f64, Int),
+        // ── Isotope-offset class. The signed `isotope_error` column is one linear
+        // term, so Percolator cannot weight offset -1 (a precursor heavier than the
+        // spectrum's by one isotope step, which no monoisotopic pick explains) and
+        // offsets +1 and +2 (an M+1 or M+2 pick) against offset 0 independently.
+        // These two terms with `isotope_error` give every offset its own weight;
+        // Percolator learns the weights from the decoys. ──
+        (
+            "IsotopeErrorAbs",
+            f64::from(psm.isotope_offset.unsigned_abs()),
+            Int,
+        ),
+        (
+            "IsotopeErrorNeg",
+            f64::from(u8::from(psm.isotope_offset < 0)),
+            Int,
+        ),
     ]
 }
 
@@ -622,6 +638,9 @@ fn write_header<W: Write>(writer: &mut W, min_charge: u8, max_charge: u8) -> io:
         "RefCompetitor".to_string(),
         "DeltaRefScore".to_string(),
         "IsotopeMimic".to_string(),
+        // Isotope-offset class (`|isotope_error|` and its sign), see `psm_feature_values`.
+        "IsotopeErrorAbs".to_string(),
+        "IsotopeErrorNeg".to_string(),
     ]);
 
     cols.extend_from_slice(&[
@@ -1285,6 +1304,8 @@ mod tests {
             "RefCompetitor",
             "DeltaRefScore",
             "IsotopeMimic",
+            "IsotopeErrorAbs",
+            "IsotopeErrorNeg",
             "Peptide",
             "Proteins",
         ];
@@ -1345,6 +1366,63 @@ mod tests {
 
         // Label is column index 1 (SpecId=0, Label=1)
         assert_eq!(rows[0][1], "-1", "decoy PSM should have Label = -1");
+    }
+
+    /// `IsotopeErrorAbs` and `IsotopeErrorNeg` follow the PSM's isotope offset
+    /// (`isotope_error` itself stays the signed offset), so every offset of the
+    /// default range -1..=2 gets its own pair of values.
+    #[test]
+    fn pin_writes_the_isotope_offset_class_columns() {
+        let params = make_params(2..=3);
+        let spectra = vec![
+            make_spectrum("a", 1, 500.0),
+            make_spectrum("b", 2, 500.0),
+            make_spectrum("c", 3, 500.0),
+            make_spectrum("d", 4, 500.0),
+        ];
+        let queues: Vec<TopNQueue> = [-1i8, 0, 1, 2]
+            .iter()
+            .enumerate()
+            .map(|(i, &offset)| {
+                let mut psm = make_psm(i, 10.0, 10.0, 0, 2);
+                psm.isotope_offset = offset;
+                let mut q = TopNQueue::new(10);
+                q.push(psm);
+                q
+            })
+            .collect();
+        let mut buf = Vec::<u8>::new();
+        let cands = vec![make_candidate(0, false)];
+        write_pin_to(
+            &mut buf,
+            &spectra,
+            &queues,
+            &cands,
+            &params,
+            &make_empty_search_index(),
+        )
+        .unwrap();
+        let header = parse_header(&buf);
+        let col = |name: &str| header.iter().position(|h| h == name).unwrap();
+        let (iso, abs, neg) = (
+            col("isotope_error"),
+            col("IsotopeErrorAbs"),
+            col("IsotopeErrorNeg"),
+        );
+        let got: Vec<(String, String, String)> = parse_rows(&buf)
+            .into_iter()
+            .map(|r| (r[iso].clone(), r[abs].clone(), r[neg].clone()))
+            .collect();
+        let want = [
+            ("-1", "1", "1"),
+            ("0", "0", "0"),
+            ("1", "1", "0"),
+            ("2", "2", "0"),
+        ];
+        assert_eq!(got.len(), want.len());
+        for (g, w) in got.iter().zip(want) {
+            assert_eq!((g.0.as_str(), g.1.as_str(), g.2.as_str()), w);
+        }
     }
 
     #[test]

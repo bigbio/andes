@@ -250,6 +250,12 @@
 //! | `--chimeric` slice | 1,718 | 57 (32 / 25) |
 //! | `--refine` slice | 1,580 | 44 (27 / 17) |
 //!
+//! REGENERATED 2026-11-07 when two columns, `IsotopeErrorAbs` and
+//! `IsotopeErrorNeg`, were appended before `Peptide`. Both are functions of
+//! `isotope_error`, so the slice goldens were rewritten by inserting them into
+//! every row (rows and all other fields unchanged). The E. coli row counts are
+//! unchanged and their digests moved with the two integer columns.
+//!
 //! To regenerate after an intentional change, run the case's command line (see
 //! `run`), then either digest the PIN with `identity_digest` (E. coli) or write
 //! its header and sorted rows, gzipped, over the case's golden PIN (slices).
@@ -434,14 +440,14 @@ fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
 /// One E. coli case: (rows, `identity_digest` FNV-1a 64, calibration outcome line).
 type Golden = (usize, u64, Option<&'static str>);
 
-const ECOLI_DEFAULT_MODS: Golden = (75_028, 0xab5c_24eb_42d7_e8ed, None);
-const ECOLI_FIXED_MODS_ONLY: Golden = (77_496, 0x8818_856c_6cdd_53f6, None);
-const ECOLI_ONE_VARIABLE_MOD: Golden = (75_570, 0x2377_5262_d954_ae9f, None);
+const ECOLI_DEFAULT_MODS: Golden = (75_028, 0xaf02_0460_4bdd_86cb, None);
+const ECOLI_FIXED_MODS_ONLY: Golden = (77_496, 0xa181_3557_efb7_ae83, None);
+const ECOLI_ONE_VARIABLE_MOD: Golden = (75_570, 0x428b_4490_d8f0_7cbc, None);
 /// The pre-pass scores but the sample is too small to calibrate, so the PIN
 /// equals the calibration-off one.
 const ECOLI_PRECURSOR_CAL_AUTO: Golden = (
     75_028,
-    0xab5c_24eb_42d7_e8ed,
+    0xaf02_0460_4bdd_86cb,
     Some("Precursor mass calibration skipped (insufficient confident PSMs: 489 with PSMs, 63 below RawScore floor, 0 failed |residual|>50ppm"),
 );
 

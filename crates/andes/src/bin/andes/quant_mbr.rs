@@ -2307,6 +2307,11 @@ mod tests {
     }
 }
 
+/// One output row of the reference finalize: precursor, run, the table row,
+/// the fit's mass error and the row's claim.
+#[cfg(test)]
+type OutEntry<'a> = (u32, u16, MbrRow<'a>, (Option<f64>, claims::Claim));
+
 #[cfg(test)]
 mod finalize_tests {
     use output::mbr_out::{
@@ -3020,7 +3025,7 @@ mod finalize_tests {
                     reported_quantity(e, r.run, w_c.get(&r.precursor).copied(), false, maps)
                 })
             };
-            let mut out: Vec<(u32, u16, MbrRow<'_>, (Option<f64>, claims::Claim))> = Vec::new();
+            let mut out: Vec<OutEntry<'_>> = Vec::new();
             // Probability that a transfer's measurement is wrong (1 without
             // features, a fold model or a calibration).
             let mut p_wrong: Vec<f64> = vec![1.0; rows.len()];

@@ -1,3 +1,3 @@
-# placeholder (never flags)
-features: co
+# placeholder without trees (never flags): lists every feature so that the extract computes the MS2 evidence
+features: isid co min_dt n_claim n_id_co n_any_co n_tr_co n_scans scored dfrac dint fT fP n_unid n_idT n_idP n_idO A logq loglr w
 threshold: 2.0

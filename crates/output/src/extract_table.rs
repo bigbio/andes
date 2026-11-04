@@ -96,7 +96,7 @@ pub struct ExtractRow {
     pub claim: Claim,
     /// The MS2 distinguishing-ion evidence of a transfer row that has a
     /// claimant; `None` otherwise.
-    pub shared: Option<SharedEvidence>,
+    pub shared: Option<Box<SharedEvidence>>,
 }
 
 const F64_EVIDENCE: [&str; 20] = [
@@ -291,7 +291,7 @@ fn batch(schema: &Arc<Schema>, rows: &[ExtractRow]) -> Result<RecordBatch, Strin
         claim2.append_option(r.claim.others[0]);
         claim3.append_option(r.claim.others[1]);
         claim_min_dt.append_option(r.claim.min_abs_dt_s);
-        let sh = r.shared;
+        let sh = r.shared.as_deref().copied();
         let o16 = |f: fn(&SharedEvidence) -> u16| sh.as_ref().map(f);
         let o32 = |f: fn(&SharedEvidence) -> u32| sh.as_ref().map(f);
         let fns16: [fn(&SharedEvidence) -> u16; 5] = [
@@ -907,7 +907,7 @@ fn decode_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, String>
             shared: if sh16[0].is_null(i) {
                 None
             } else {
-                Some(SharedEvidence {
+                Some(Box::new(SharedEvidence {
                     n_scans: sh16[0].value(i),
                     n_unid: sh16[1].value(i),
                     n_id_target: sh16[2].value(i),
@@ -919,7 +919,7 @@ fn decode_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, String>
                     n_claimant: sh32[3].value(i),
                     int_target: sh_f[0].value(i),
                     int_claimant: sh_f[1].value(i),
-                })
+                }))
             },
             claim: Claim {
                 claimant: (!claim_precursor.is_null(i)).then(|| claim_precursor.value(i)),
@@ -1013,18 +1013,20 @@ mod tests {
                 } else {
                     Claim::default()
                 },
-                shared: (i % 3 == 1).then_some(SharedEvidence {
-                    n_scans: i as u16,
-                    n_unid: 1,
-                    n_id_target: 2,
-                    n_id_claimant: 3,
-                    n_id_other: 4,
-                    hit_target: 5 + i as u32,
-                    n_target: 40,
-                    hit_claimant: 6,
-                    n_claimant: 36,
-                    int_target: 0.5,
-                    int_claimant: 0.125,
+                shared: (i % 3 == 1).then(|| {
+                    Box::new(SharedEvidence {
+                        n_scans: i as u16,
+                        n_unid: 1,
+                        n_id_target: 2,
+                        n_id_claimant: 3,
+                        n_id_other: 4,
+                        hit_target: 5 + i as u32,
+                        n_target: 40,
+                        hit_claimant: 6,
+                        n_claimant: 36,
+                        int_target: 0.5,
+                        int_claimant: 0.125,
+                    })
                 }),
             })
             .collect()

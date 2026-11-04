@@ -2385,7 +2385,7 @@ pub(crate) fn finalize_stream(
                             && q.is_some_and(|q| {
                                 shared_feature.is_shared(&shared::Row {
                                     claim: &r.claim,
-                                    shared: r.shared.as_ref(),
+                                    shared: r.shared.as_deref(),
                                     ms2_supported: supported,
                                     transfer_q: q,
                                     llr: e.map_or(0.0, |e| e.llr),

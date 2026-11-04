@@ -661,10 +661,15 @@ pub(crate) fn untrained_route_warning(
 /// `None` for a set without one.
 pub(crate) fn label_from_mods(aa: &model::AminoAcidSet) -> Option<input::IsobaricLabel> {
     use input::IsobaricLabel::{Itraq, Itraq8, Tmt, TmtPro};
-    let on_label_site = |m: &Modification| match (m.residue, m.location) {
-        (ResidueSpec::Specific(b'K'), _) => true,
-        (ResidueSpec::Wildcard, ModLocation::NTerm | ModLocation::ProtNTerm) => true,
-        _ => false,
+    let on_label_site = |m: &Modification| {
+        matches!(
+            (m.residue, m.location),
+            (ResidueSpec::Specific(b'K'), _)
+                | (
+                    ResidueSpec::Wildcard,
+                    ModLocation::NTerm | ModLocation::ProtNTerm
+                )
+        )
     };
     [Tmt, TmtPro, Itraq, Itraq8].into_iter().find(|label| {
         let mass = label.tag().1;

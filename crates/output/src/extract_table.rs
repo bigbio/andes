@@ -18,6 +18,13 @@
 //! rejected. Schema 6 added the same-run claims of the transfer rows
 //! (`claim_*`, see `quant::claims`: the best other probed target on the same
 //! MS1 feature and the counts of claimants); a schema-5 table is rejected.
+//! Schema 7 learns the claim windows per run (the extract tag
+//! `andes.extract.run_scales` carries them), adds the second and third
+//! claimant and the smallest apex distance of the claimants
+//! (`claim_precursor2`, `claim_precursor3`, `claim_min_dt_s`) and the MS2
+//! distinguishing-ion evidence of the transfer rows that have a claimant
+//! (`shared_*`, see `quant::shared`; null for other rows); a schema-6 table is
+//! rejected.
 //! The evidence columns are null when the fit was not possible.
 //! `n_donor_runs` counts the aligned runs with a PSM of the precursor, this
 //! run included for an identified row and excluded otherwise: the runs that
@@ -44,12 +51,13 @@ use quant::claims::Claim;
 use quant::decoys::Hypothesis;
 use quant::evidence::Evidence;
 use quant::ms2::{Ms2Evidence, ScanMatch};
+use quant::shared::SharedEvidence;
 
 /// Major version of the table layout. A reader rejects any other major.
-pub const EXTRACT_SCHEMA_MAJOR: u32 = 6;
+pub const EXTRACT_SCHEMA_MAJOR: u32 = 7;
 
 const SCHEMA_KEY: &str = "andes.extract.schema";
-const SCHEMA_VERSION: &str = "6.0";
+const SCHEMA_VERSION: &str = "7.0";
 /// Rows per Parquet row group / record batch.
 const BATCH_ROWS: usize = 65_536;
 
@@ -86,6 +94,9 @@ pub struct ExtractRow {
     /// The same-run claims on the row (transfer targets with a fit; the
     /// default claim, no claimant, elsewhere).
     pub claim: Claim,
+    /// The MS2 distinguishing-ion evidence of a transfer row that has a
+    /// claimant; `None` otherwise.
+    pub shared: Option<SharedEvidence>,
 }
 
 const F64_EVIDENCE: [&str; 20] = [
@@ -142,7 +153,17 @@ const N_KEY_COLUMNS: usize = 7;
 const MS2_COLUMNS: [&str; 4] = ["ms2_n_scans", "ms2_n_matched", "ms2_angle", "ms2_explained"];
 /// The claim columns, after the MS2 evidence.
 const CLAIM_COLUMNS: usize = 7;
-const N_COLUMNS: usize = N_KEY_COLUMNS + F64_EVIDENCE.len() + 2 + MS2_COLUMNS.len() + CLAIM_COLUMNS;
+/// The columns of schema 7 after the claim columns: two further claimants,
+/// the smallest claimant apex distance, then the shared-feature evidence.
+const CLAIM_EXTRA_COLUMNS: usize = 3;
+const SHARED_COLUMNS: usize = 11;
+const N_COLUMNS: usize = N_KEY_COLUMNS
+    + F64_EVIDENCE.len()
+    + 2
+    + MS2_COLUMNS.len()
+    + CLAIM_COLUMNS
+    + CLAIM_EXTRA_COLUMNS
+    + SHARED_COLUMNS;
 
 fn schema() -> Schema {
     let mut fields = vec![
@@ -176,6 +197,28 @@ fn schema() -> Schema {
         DataType::UInt16,
         false,
     ));
+    fields.push(Field::new("claim_precursor2", DataType::UInt32, true));
+    fields.push(Field::new("claim_precursor3", DataType::UInt32, true));
+    fields.push(Field::new("claim_min_dt_s", DataType::Float32, true));
+    for n in [
+        "shared_n_scans",
+        "shared_n_unid",
+        "shared_n_id_target",
+        "shared_n_id_claimant",
+        "shared_n_id_other",
+    ] {
+        fields.push(Field::new(n, DataType::UInt16, true));
+    }
+    for n in [
+        "shared_hit_target",
+        "shared_n_target",
+        "shared_hit_claimant",
+        "shared_n_claimant",
+    ] {
+        fields.push(Field::new(n, DataType::UInt32, true));
+    }
+    fields.push(Field::new("shared_int_target", DataType::Float32, true));
+    fields.push(Field::new("shared_int_claimant", DataType::Float32, true));
     Schema::new(fields)
 }
 
@@ -238,7 +281,40 @@ fn batch(schema: &Arc<Schema>, rows: &[ExtractRow]) -> Result<RecordBatch, Strin
     let mut claim_n = UInt16Builder::new();
     let mut claim_n_co = UInt16Builder::new();
     let mut claim_n_id_co = UInt16Builder::new();
+    let mut claim2 = UInt32Builder::new();
+    let mut claim3 = UInt32Builder::new();
+    let mut claim_min_dt = Float32Builder::new();
+    let mut sh16: Vec<UInt16Builder> = (0..5).map(|_| UInt16Builder::new()).collect();
+    let mut sh32: Vec<UInt32Builder> = (0..4).map(|_| UInt32Builder::new()).collect();
+    let mut sh_f: Vec<Float32Builder> = (0..2).map(|_| Float32Builder::new()).collect();
     for r in rows {
+        claim2.append_option(r.claim.others[0]);
+        claim3.append_option(r.claim.others[1]);
+        claim_min_dt.append_option(r.claim.min_abs_dt_s);
+        let sh = r.shared;
+        let o16 = |f: fn(&SharedEvidence) -> u16| sh.as_ref().map(f);
+        let o32 = |f: fn(&SharedEvidence) -> u32| sh.as_ref().map(f);
+        let fns16: [fn(&SharedEvidence) -> u16; 5] = [
+            |e| e.n_scans,
+            |e| e.n_unid,
+            |e| e.n_id_target,
+            |e| e.n_id_claimant,
+            |e| e.n_id_other,
+        ];
+        for (b, f) in sh16.iter_mut().zip(fns16) {
+            b.append_option(o16(f));
+        }
+        let fns32: [fn(&SharedEvidence) -> u32; 4] = [
+            |e| e.hit_target,
+            |e| e.n_target,
+            |e| e.hit_claimant,
+            |e| e.n_claimant,
+        ];
+        for (b, f) in sh32.iter_mut().zip(fns32) {
+            b.append_option(o32(f));
+        }
+        sh_f[0].append_option(sh.map(|e| e.int_target));
+        sh_f[1].append_option(sh.map(|e| e.int_claimant));
         claim_precursor.append_option(r.claim.claimant);
         claim_dt.append_option(r.claim.dt_s);
         claim_identified.append_value(u8::from(r.claim.identified));
@@ -298,6 +374,12 @@ fn batch(schema: &Arc<Schema>, rows: &[ExtractRow]) -> Result<RecordBatch, Strin
     cols.push(Arc::new(claim_n.finish()));
     cols.push(Arc::new(claim_n_co.finish()));
     cols.push(Arc::new(claim_n_id_co.finish()));
+    cols.push(Arc::new(claim2.finish()));
+    cols.push(Arc::new(claim3.finish()));
+    cols.push(Arc::new(claim_min_dt.finish()));
+    cols.extend(sh16.iter_mut().map(|b| Arc::new(b.finish()) as ArrayRef));
+    cols.extend(sh32.iter_mut().map(|b| Arc::new(b.finish()) as ArrayRef));
+    cols.extend(sh_f.iter_mut().map(|b| Arc::new(b.finish()) as ArrayRef));
     RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
 }
 
@@ -695,6 +777,7 @@ fn decode_fit_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, Str
             library_q: library_q.value(i),
             ms2: None,
             claim: Claim::default(),
+            shared: None,
         });
     }
     Ok(rows)
@@ -744,6 +827,18 @@ fn decode_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, String>
     let claim_n = column::<UInt16Array>(b, after + 10, path)?;
     let claim_n_co = column::<UInt16Array>(b, after + 11, path)?;
     let claim_n_id_co = column::<UInt16Array>(b, after + 12, path)?;
+    let claim2 = column::<UInt32Array>(b, after + 13, path)?;
+    let claim3 = column::<UInt32Array>(b, after + 14, path)?;
+    let claim_min_dt = column::<Float32Array>(b, after + 15, path)?;
+    let sh16: Vec<&UInt16Array> = (0..5)
+        .map(|k| column::<UInt16Array>(b, after + 16 + k, path))
+        .collect::<Result<_, _>>()?;
+    let sh32: Vec<&UInt32Array> = (0..4)
+        .map(|k| column::<UInt32Array>(b, after + 21 + k, path))
+        .collect::<Result<_, _>>()?;
+    let sh_f: Vec<&Float32Array> = (0..2)
+        .map(|k| column::<Float32Array>(b, after + 25 + k, path))
+        .collect::<Result<_, _>>()?;
 
     for i in 0..b.num_rows() {
         let kind = decode_kind(kind.value(i), shift.value(i)).ok_or_else(|| {
@@ -809,8 +904,30 @@ fn decode_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, String>
             n_donor_runs: donors.value(i),
             library_q: library_q.value(i),
             ms2,
+            shared: if sh16[0].is_null(i) {
+                None
+            } else {
+                Some(SharedEvidence {
+                    n_scans: sh16[0].value(i),
+                    n_unid: sh16[1].value(i),
+                    n_id_target: sh16[2].value(i),
+                    n_id_claimant: sh16[3].value(i),
+                    n_id_other: sh16[4].value(i),
+                    hit_target: sh32[0].value(i),
+                    n_target: sh32[1].value(i),
+                    hit_claimant: sh32[2].value(i),
+                    n_claimant: sh32[3].value(i),
+                    int_target: sh_f[0].value(i),
+                    int_claimant: sh_f[1].value(i),
+                })
+            },
             claim: Claim {
                 claimant: (!claim_precursor.is_null(i)).then(|| claim_precursor.value(i)),
+                others: [
+                    (!claim2.is_null(i)).then(|| claim2.value(i)),
+                    (!claim3.is_null(i)).then(|| claim3.value(i)),
+                ],
+                min_abs_dt_s: (!claim_min_dt.is_null(i)).then(|| claim_min_dt.value(i)),
                 dt_s: (!claim_dt.is_null(i)).then(|| claim_dt.value(i)),
                 identified: claim_identified.value(i) != 0,
                 co_apex: claim_co_apex.value(i) != 0,
@@ -884,6 +1001,8 @@ mod tests {
                 claim: if i % 3 == 1 {
                     Claim {
                         claimant: Some(2000 + i as u32),
+                        others: [Some(3000 + i as u32), (i % 2 == 0).then_some(4000)],
+                        min_abs_dt_s: Some(0.25 * i as f32),
                         dt_s: Some(-1.5 * i as f32),
                         identified: i % 2 == 0,
                         co_apex: i % 4 == 1,
@@ -894,6 +1013,19 @@ mod tests {
                 } else {
                     Claim::default()
                 },
+                shared: (i % 3 == 1).then_some(SharedEvidence {
+                    n_scans: i as u16,
+                    n_unid: 1,
+                    n_id_target: 2,
+                    n_id_claimant: 3,
+                    n_id_other: 4,
+                    hit_target: 5 + i as u32,
+                    n_target: 40,
+                    hit_claimant: 6,
+                    n_claimant: 36,
+                    int_target: 0.5,
+                    int_claimant: 0.125,
+                }),
             })
             .collect()
     }
@@ -969,7 +1101,7 @@ mod tests {
     fn extract_table_rejects_unknown_major_version() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("b.extract.parquet");
-        for version in ["7.0", "5.0"] {
+        for version in ["8.0", "6.0"] {
             write_with_schema_version(&p, &rows(), version).unwrap();
             let e = read_extract_table(&p).unwrap_err();
             assert!(

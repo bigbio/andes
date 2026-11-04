@@ -380,6 +380,29 @@ impl Ms2RunIndex {
             .collect()
     }
 
+    /// The scans isolating `mz` with a retention time in `rt` (inclusive), at
+    /// FAIMS voltage `faims_cv` when given, in retention-time order.
+    pub fn covering(&self, mz: f64, rt: (f64, f64), faims_cv: Option<f32>) -> Vec<&Ms2Scan> {
+        let mut out = Vec::new();
+        if !(mz.is_finite() && rt.0 <= rt.1) {
+            return out;
+        }
+        let start = self.scans.partition_point(|s| s.rt < rt.0);
+        for (s, w) in self.scans[start..].iter().zip(&self.windows[start..]) {
+            if s.rt > rt.1 {
+                break;
+            }
+            if !(w.0..=w.1).contains(&mz) {
+                continue;
+            }
+            if faims_cv.is_some_and(|cv| s.faims_cv.is_some_and(|v| v != cv)) {
+                continue;
+            }
+            out.push(s);
+        }
+        out
+    }
+
     /// The best scan for `lib` among those isolating `mz` with a retention
     /// time in `rt` (inclusive), at FAIMS voltage `faims_cv` when given, and
     /// with a retention time other than those in `exclude_rt`.

@@ -25,6 +25,8 @@
 //! * [`evidence`]: the likelihood template fit that measures one (precursor,
 //!   run) hypothesis: amplitude, quantity and the evidence statistics.
 //! * [`claims`]: same-run claims on an MS1 feature by another probed target.
+//! * [`shared`]: MS2 distinguishing-ion evidence of a claimed transfer and the
+//!   shipped model that downgrades a shared feature.
 //! * [`ms2`]: empirical fragment spectra of library entries and the MS2
 //!   evidence of a transfer probe in the receiving run's MS2 scans.
 
@@ -43,6 +45,7 @@ pub mod ms2;
 pub mod nnls;
 pub mod normalize;
 pub mod purity;
+pub mod shared;
 pub mod tdc;
 pub mod unmix;
 pub mod xic;

@@ -51,7 +51,7 @@ use crate::quant_finalize::{
     finalize_stream, ExtractFiles, ExtractSource, FinalizeLimits, FinalizeParams, MbrFeature,
 };
 use crate::quant_mbr::{
-    attach_ms2, extract_run, mbr_paths, ExtractCounts, ExtractRow, Ms2Counts, TransferSelection,
+    attach_ms2, attach_shared, extract_run, mbr_paths, ExtractCounts, ExtractRow, Ms2Counts, TransferSelection,
 };
 
 /// Seed of the transfer FDR's folds and models, in every path.
@@ -1375,8 +1375,27 @@ pub(crate) fn extract_and_write(
         &index,
         tol,
     );
-    drop(index);
     log_ms2(stem, &c, t.elapsed().as_secs_f64());
+    if quant::shared::Model::shipped().needs_ms2_evidence() {
+        let t = std::time::Instant::now();
+        let mods = read_run_quant_mods(&artifact(dir, stem, TABLE_SUFFIX))?;
+        let sc = attach_shared(
+            &mut ex.rows,
+            &stored.library,
+            &stored.donor_scans,
+            &mods,
+            &index,
+            tol,
+        );
+        eprintln!(
+            "[mbr] extract {stem}: shared-feature evidence ({:.1} s): {} transfers with a claimant, {} with a covering scan, {} scored against a claimant's distinguishing ions",
+            t.elapsed().as_secs_f64(),
+            sc.claimed,
+            sc.with_scan,
+            sc.scored
+        );
+    }
+    drop(index);
     let path = artifact(dir, stem, EXTRACT_SUFFIX);
     let mut tags = vec![
         (FINGERPRINT_KEY.to_string(), fingerprint.to_string()),
@@ -1531,7 +1550,7 @@ impl GroupTally {
 }
 
 /// The QPX feature rows of the MBR table: every row except the
-/// below-threshold transfers and identified rows, which stay in
+/// below-threshold and shared-feature transfers and identified rows, which stay in
 /// `<base>.mbr.parquet` only. With `groups`, each row carries its peptide's
 /// protein group, and rows whose peptide has no group at or below the cut
 /// are left out (counted in `tally`). Feature ids continue from `last_id`.
@@ -1547,7 +1566,9 @@ fn feature_records(
         .filter(|f| {
             !matches!(
                 f.evidence_type,
-                EvidenceType::BelowThreshold | EvidenceType::IdentifiedBelowThreshold
+                EvidenceType::BelowThreshold
+                    | EvidenceType::IdentifiedBelowThreshold
+                    | EvidenceType::SharedFeature
             )
         })
         .filter_map(|f| {
@@ -2124,6 +2145,7 @@ mod tests {
             library_q: 0.001,
             mass_err_ppm: Some(0.5),
             claim: quant::claims::Claim::default(),
+            shared: None,
         };
         let mut features = [
             feature(0, 0, EvidenceType::Identified, None),

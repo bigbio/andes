@@ -108,7 +108,6 @@
 //! identified targets with `quant_q <= 0.01` and a positive quantity; a run
 //! without enough of them reports null. `quantity` stays the raw measurement.
 
-#[cfg(test)]
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -200,6 +199,9 @@ pub(crate) struct RunScales {
     /// The run's learned ion-mobility scale, on a mobility-resolved run with
     /// enough identified precursors that have a library mobility.
     pub mobility: Option<RunMobility>,
+    /// The run's learned claim windows (`None`: too few same-compound pairs,
+    /// so no claims).
+    pub claim_windows: Option<claims::Windows>,
 }
 
 impl RunScales {
@@ -223,6 +225,13 @@ impl RunScales {
                 ";mobility_offset={:.5};mobility_sd={:.5};mobility_pairs={}",
                 m.offset, m.sigma, m.pairs
             ));
+        }
+        match &self.claim_windows {
+            Some(w) => out.push_str(&format!(
+                ";claim_ppm={:.3};claim_s={:.3};claim_sd_ppm={:.4};claim_sd_s={:.4};claim_pairs={}",
+                w.ppm, w.seconds, w.sd_ppm, w.sd_s, w.pairs
+            )),
+            None => out.push_str(";claim_windows=none"),
         }
         out
     }
@@ -774,6 +783,7 @@ fn entry_rows(
             library_q: e.q,
             ms2: None,
             claim: claims::Claim::default(),
+            shared: None,
         };
         (row, *probe)
     };
@@ -935,10 +945,11 @@ pub(crate) fn extract_run(
     let mut slots: Vec<Option<EntryRows>> = (0..n).map(|_| None).collect();
     let finish = |slots, width_fits: usize, wp: &WidthPrior, scales: RunScales| {
         let mut out = assemble(slots, width_fits, wp.is_default());
-        assign_claims(&mut out.rows, lib);
+        let windows = assign_claims(&mut out.rows, lib);
         out.counts.unaligned = !aligned;
         out.counts.foreign_cv = foreign;
         out.counts.scales = scales;
+        out.counts.scales.claim_windows = windows;
         out
     };
 
@@ -1096,6 +1107,114 @@ pub(crate) fn attach_ms2(
         c.rows[role][f] += 1;
         c.with_scan[role][f] += usize::from(m.n_scans > 0);
         c.supported[role][f] += usize::from(m.supports());
+    }
+    c
+}
+
+/// What [`attach_shared`] did, for the extract log.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct SharedCounts {
+    /// Transfer rows with a claimant and a fit.
+    pub claimed: usize,
+    /// Of them: covered by at least one MS2 scan, and scored against a
+    /// claimant with distinguishing ions on both sides.
+    pub with_scan: usize,
+    pub scored: usize,
+}
+
+/// Peptidoform of a `"<peptidoform>/<charge>"` library key.
+fn peptidoform_of(key: &str) -> &str {
+    key.rsplit_once('/').map_or(key, |(p, _)| p)
+}
+
+/// Sets the MS2 distinguishing-ion evidence ([`quant::shared`]) of every
+/// transfer target row of run `run` that has a claimant and a fit: the
+/// scans of `ms2` covering its feature, identified through the donor PSMs of
+/// the run (`donor_scans`, per precursor id), against the fragment ladders
+/// of the row's precursor and its claimants (`mods` resolves modification
+/// accessions). Other rows keep `None`.
+pub(crate) fn attach_shared(
+    rows: &mut [ExtractRow],
+    lib: &Library,
+    donor_scans: &[Vec<(u16, f64)>],
+    mods: &HashMap<String, f64>,
+    ms2: &Ms2RunIndex,
+    tol: model::Tolerance,
+) -> SharedCounts {
+    use quant::ms2::fragment_ladder;
+    use quant::shared::{evidence, Ions, Query, ScanIdentity};
+    let wanted = |r: &ExtractRow| {
+        r.role == Role::Transfer
+            && r.kind == Hypothesis::Target
+            && r.evidence.is_some()
+            && r.claim.n > 0
+    };
+    let mut c = SharedCounts::default();
+    for r in rows.iter_mut() {
+        r.shared = None;
+        c.claimed += usize::from(wanted(r));
+    }
+    if c.claimed == 0 {
+        return c;
+    }
+    let run = rows[0].run;
+    let mut peptides: HashMap<&str, u32> = HashMap::new();
+    let mut intern = |p: usize| {
+        let next = peptides.len() as u32;
+        *peptides
+            .entry(peptidoform_of(&lib.meta[p].key))
+            .or_insert(next)
+    };
+    let mut identity = ScanIdentity::default();
+    for (p, scans) in donor_scans.iter().enumerate() {
+        let mut id = None;
+        for &(r, rt) in scans {
+            if r == run {
+                let id = *id.get_or_insert_with(|| intern(p));
+                identity.add(rt, id);
+            }
+        }
+    }
+    let mut ladders: HashMap<u32, Ions> = HashMap::new();
+    for r in rows.iter().filter(|r| wanted(r)) {
+        for p in std::iter::once(r.precursor).chain(r.claim.claimants()) {
+            if ladders.contains_key(&p) {
+                continue;
+            }
+            let meta = &lib.meta[p as usize];
+            let peptide = intern(p as usize);
+            let ions = match quant::ms2::residue_masses(peptidoform_of(&meta.key), mods) {
+                Ok(m) => Ions::new(peptide, &fragment_ladder(&m, meta.charge.max(1))),
+                Err(_) => Ions {
+                    peptide,
+                    mz: Vec::new(),
+                },
+            };
+            ladders.insert(p, ions);
+        }
+    }
+    let mut faims: HashMap<u32, Option<f32>> = HashMap::new();
+    for e in &lib.entries {
+        faims.insert(e.precursor, e.faims_cv);
+    }
+    rows.par_iter_mut().filter(|r| wanted(r)).for_each(|r| {
+        let e = r.evidence.as_ref().expect("wanted rows have a fit");
+        let claimants: Vec<&Ions> = r.claim.claimants().map(|p| &ladders[&p]).collect();
+        let q = Query {
+            mz: lib.meta[r.precursor as usize].mz,
+            t0: e.t0,
+            w: e.w,
+            faims: faims.get(&r.precursor).copied().flatten(),
+            target: &ladders[&r.precursor],
+            claimants: &claimants,
+        };
+        r.shared = Some(evidence(ms2, &identity, &q, tol));
+    });
+    for r in rows.iter() {
+        if let Some(s) = &r.shared {
+            c.with_scan += usize::from(s.n_scans > 0);
+            c.scored += usize::from(s.scored());
+        }
     }
     c
 }
@@ -1375,10 +1494,11 @@ pub(crate) fn mbr_paths(base: &Path) -> (PathBuf, PathBuf) {
 /// Sets the same-run claim of every fitted transfer target of `rows`: the
 /// other fitted identified or transferred targets of the run on the same MS1
 /// feature (see [`claims`]).
-fn assign_claims(rows: &mut [ExtractRow], lib: &Library) {
+fn assign_claims(rows: &mut [ExtractRow], lib: &Library) -> Option<claims::Windows> {
     let mut probes = Vec::new();
     let mut transfers = Vec::new();
     let mut at = Vec::new();
+    let mut peptides: HashMap<&str, u32> = HashMap::new();
     for (i, r) in rows.iter().enumerate() {
         if r.kind != Hypothesis::Target || !matches!(r.role, Role::Identified | Role::Transfer) {
             continue;
@@ -1389,6 +1509,10 @@ fn assign_claims(rows: &mut [ExtractRow], lib: &Library) {
             transfers.push(probes.len());
             at.push(i);
         }
+        let next = peptides.len() as u32;
+        let peptide = *peptides
+            .entry(meta.key.rsplit_once('/').map_or(meta.key.as_str(), |(p, _)| p))
+            .or_insert(next);
         probes.push(claims::Probe {
             precursor: r.precursor,
             charge: meta.charge,
@@ -1396,11 +1520,18 @@ fn assign_claims(rows: &mut [ExtractRow], lib: &Library) {
             t0: e.t0,
             w: e.w,
             identified: r.role == Role::Identified,
+            peptide,
+            mass_err_ppm: e.mass_err_ppm,
         });
     }
-    for (i, claim) in at.into_iter().zip(claims::assign(&probes, &transfers)) {
+    let windows = claims::learn_windows(&probes);
+    for (i, claim) in at
+        .into_iter()
+        .zip(claims::assign(&probes, &transfers, windows))
+    {
         rows[i].claim = claim;
     }
+    windows
 }
 
 fn assemble(slots: Vec<Option<EntryRows>>, width_fits: usize, fallback: bool) -> RunExtract {
@@ -2405,6 +2536,7 @@ mod finalize_tests {
             library_q: 0.001,
             ms2: None,
             claim: claims::Claim::default(),
+            shared: None,
         }
     }
 

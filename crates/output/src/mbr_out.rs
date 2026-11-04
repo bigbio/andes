@@ -8,14 +8,14 @@
 //! |---|---|
 //! | `precursor_key` | `<peptidoform>/<charge>` of the precursor, a positional-isomer class, in the site form of its best PSM |
 //! | `run` | run stem |
-//! | `evidence_type` | `identified`, `identified_below_threshold` (identified, quality q-value above the identified threshold or missing), `transfer_ms2` (transfer q-value at or below the threshold, and an MS2 scan of the run supports the transfer), `transfer_ms1` (transfer q-value at or below the threshold, without that MS2 support) or `below_threshold` |
+//! | `evidence_type` | `identified`, `identified_below_threshold` (identified, quality q-value above the identified threshold or missing), `transfer_ms2` (transfer q-value at or below the threshold, and an MS2 scan of the run supports the transfer), `transfer_ms1` (transfer q-value at or below the threshold, without that MS2 support), `shared_feature` (transfer q-value at or below the threshold, but the shipped classifier takes the row's MS1 feature for another compound's: a same-run claimant, MS2 evidence and the claim geometry; the quantity is kept, as for `below_threshold`) or `below_threshold` |
 //! | `quantity`, `quantity_se` | fitted MS1 quantity and its standard error |
 //! | `quantity_normalized` | `quantity` with the run's normalisation offset at the row's apex RT removed (a level per run and an RT-local term fitted across runs); null when the run is not normalised. `quantity` stays the raw measurement |
 //! | `transfer_q` | internal transfer quant-quality q-value (not an identification FDR); null for identified rows |
 //! | `quant_q` | internal quality q-value of the row's MS1 feature against its decoys (not an identification FDR): the identified-row estimate for identified rows; for an accepted transfer the running mean, over the run's accepted transfers in ascending probability of a wrong measurement, of that probability; `transfer_q` for a transfer below the threshold |
 //! | `apex_rt_s` | fitted apex, seconds |
 //! | `library_q` | internal library entry gate (not an identification FDR) |
-//! | `claimed_by` | transfer rows only: `precursor_key` of the best other target of the run on the same MS1 feature (same charge, neutral masses within 2 ppm, apexes within 60 s; the identified one first, then the nearest apex); null without a claimant and for identified rows. A statement about the run's probes: the row, its quantity and its evidence type are not changed by it |
+//! | `claimed_by` | transfer rows only: `precursor_key` of the best other target of the run on the same MS1 feature (same charge, neutral masses and apexes within the run's learned claim windows; the identified one first, then the nearest apex); null without a claimant and for identified rows. A statement about the run's probes: the row and its quantity are not changed by it (the shared-feature classifier may change the evidence type) |
 //! | `claim_dt_s` | apex of the claimant minus the row's apex, seconds |
 //! | `claim_identified`, `claim_co_apex` | the claimant is identified in the run; the apexes are closer than the sum of the two fitted widths (the two probes measure one feature, whose quantity is shared) |
 //! | `claim_n_co_apex`, `claim_n_identified_co_apex` | co-apex claimants of the row, and the identified ones among them; 0 for a transfer without any, null for identified rows |
@@ -62,13 +62,13 @@ use crate::versioned_parquet::{
 
 const MBR_TABLE: TableVersion = TableVersion {
     key: "andes.mbr.schema",
-    version: "1.1",
+    version: "1.2",
     major: 1,
     what: "MBR table",
 };
 const VALIDATION_TABLE: TableVersion = TableVersion {
     key: "andes.mbr_validation.schema",
-    version: "1.0",
+    version: "1.1",
     major: 1,
     what: "MBR validation table",
 };
@@ -83,6 +83,9 @@ pub enum EvidenceType {
     /// An accepted transfer that an MS2 scan of the run supports.
     TransferMs2,
     TransferMs1,
+    /// An accepted transfer whose MS1 feature the shared-feature classifier
+    /// ([`quant::shared`]) takes for another compound's.
+    SharedFeature,
     BelowThreshold,
 }
 
@@ -91,7 +94,10 @@ impl EvidenceType {
     pub fn is_transfer(self) -> bool {
         matches!(
             self,
-            EvidenceType::TransferMs2 | EvidenceType::TransferMs1 | EvidenceType::BelowThreshold
+            EvidenceType::TransferMs2
+                | EvidenceType::TransferMs1
+                | EvidenceType::SharedFeature
+                | EvidenceType::BelowThreshold
         )
     }
 
@@ -101,6 +107,7 @@ impl EvidenceType {
             EvidenceType::IdentifiedBelowThreshold => "identified_below_threshold",
             EvidenceType::TransferMs2 => "transfer_ms2",
             EvidenceType::TransferMs1 => "transfer_ms1",
+            EvidenceType::SharedFeature => "shared_feature",
             EvidenceType::BelowThreshold => "below_threshold",
         }
     }
@@ -233,6 +240,8 @@ pub struct MbrValidation {
     /// Transfer targets not transferred because their best donor PSM is
     /// above the transfer donor q-value.
     pub donor_gated: usize,
+    /// Accepted transfers reported as `shared_feature`.
+    pub shared_feature: usize,
 }
 
 fn add_counts<const N: usize>(a: &mut [usize; N], b: &[usize; N]) {
@@ -293,6 +302,7 @@ impl MbrValidation {
             identity_entries: _,
             decoy_transfers,
             donor_gated,
+            shared_feature,
         } = o;
         self.pseudo_transfers += pseudo_transfers;
         self.pseudo_scored += pseudo_scored;
@@ -313,6 +323,7 @@ impl MbrValidation {
         self.transfer_ms2 += transfer_ms2;
         add_counts(&mut self.decoy_transfers, decoy_transfers);
         self.donor_gated += donor_gated;
+        self.shared_feature += shared_feature;
     }
 }
 
@@ -391,6 +402,7 @@ pub fn validation_columns() -> Vec<String> {
             "rt_decoy_transfers",
             "identity_decoy_transfers",
             "donor_gated",
+            "shared_feature",
         ]
         .iter()
         .map(|s| s.to_string()),
@@ -479,6 +491,7 @@ impl MbrValidation {
             n(self.decoy_transfers[1]),
             n(self.decoy_transfers[2]),
             n(self.donor_gated),
+            n(self.shared_feature),
         ]);
         c.iter()
             .map(|v| match *v {
@@ -996,6 +1009,7 @@ mod tests {
             identity_entries: 2,
             decoy_transfers: [95, 85, 7],
             donor_gated: 3,
+            shared_feature: 6,
         };
         write_mbr_validation(&p, &v).unwrap();
         let cells = read_mbr_validation(&p).unwrap();
@@ -1030,5 +1044,6 @@ mod tests {
         assert_eq!(get("identity_entries"), Count(2));
         assert_eq!(get("identity_decoy_transfers"), Count(7));
         assert_eq!(get("donor_gated"), Count(3));
+        assert_eq!(get("shared_feature"), Count(6));
     }
 }

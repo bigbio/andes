@@ -102,6 +102,14 @@ pub(crate) struct TrainFromSearchArgs {
     #[arg(long)]
     pub(crate) instrument: Option<String>,
 
+    /// Activation of the trained model (`CID`, `HCD`, `ETD`, `EThcD`, `UVPD`, `PQD`),
+    /// part of its selection key. It also sets the ion series of the derived geometry
+    /// (EThcD: b, y, c and z•), and only spectra recorded with this activation are
+    /// searched and trained on (spectra without a recorded activation are kept).
+    /// Default: the seed model's activation, all spectra.
+    #[arg(long, conflicts_with = "seed_geometry")]
+    pub(crate) activation: Option<String>,
+
     /// Experiment-class / protocol tag (e.g. `Automatic`, `TMT`). Default: `Automatic`.
     #[arg(long, default_value = "Automatic")]
     pub(crate) protocol: String,
@@ -724,6 +732,15 @@ pub(crate) fn run_train_from_search(
     let (seed_model_id, seed_param): (String, Param) = load_seed_param(&args.seed_model)?;
     eprintln!("train: seed model = {seed_model_id}");
     let seed_scorer = RankScorer::new(&seed_param);
+    let activation: Option<ActivationMethod> = args
+        .activation
+        .as_deref()
+        .map(|a| {
+            ActivationMethod::from_name(a).ok_or_else(|| {
+                format!("unknown --activation '{a}' (expected CID/HCD/ETD/EThcD/UVPD/PQD)")
+            })
+        })
+        .transpose()?;
 
     // ── 4-5. Labels per run: external TSV (SP-B) OR a seed search (bootstrap) ──
     // Each run is labelled on its own and keeps only its labelled spectra, so
@@ -731,8 +748,17 @@ pub(crate) fn run_train_from_search(
     let mut runs: Vec<TrainRun> = Vec::with_capacity(args.spectra.len());
     for (i, spectra_path) in args.spectra.iter().enumerate() {
         eprintln!("train: loading spectra from {} ...", spectra_path.display());
-        let spectra = load_spectra_for_train(spectra_path)?;
+        let mut spectra = load_spectra_for_train(spectra_path)?;
         eprintln!("train: loaded {} spectra", spectra.len());
+        if let Some(act) = activation {
+            let n = spectra.len();
+            spectra.retain(|s| s.activation_method.is_none_or(|a| a == act));
+            eprintln!(
+                "train: kept {} of {n} spectra with activation {} (or none recorded)",
+                spectra.len(),
+                act.name()
+            );
+        }
         let labels = if let Some(labels_path) = args.labels.get(i) {
             // SP-B glyco path: labels come from an external engine's backbone IDs.
             // No seed search / database needed — the peptides are given directly.
@@ -796,7 +822,12 @@ pub(crate) fn run_train_from_search(
             .flat_map(|r| corpus_charge_masses(&r.labels))
             .collect();
         let geo_cfg = GeometryArgs::default().to_config();
-        derive_geometry(&corpus, &seed_param, &geo_cfg)
+        // The trained model's activation picks the geometry's ion series.
+        let mut base = seed_param.clone();
+        if let Some(act) = activation {
+            base.data_type.activation = act;
+        }
+        derive_geometry(&corpus, &base, &geo_cfg)
     } else {
         eprintln!("train: --seed-geometry set — reusing seed partition geometry");
         seed_param.clone()
@@ -839,6 +870,9 @@ pub(crate) fn run_train_from_search(
     let estimator = Estimator::new(cfg);
     let mut trained_param = estimator.estimate(&stats, &template);
     inherit_seed_gbdts(&mut trained_param, &seed_param);
+    if let Some(act) = activation {
+        trained_param.data_type.activation = act;
+    }
     // The instrument is a selection-key column: without this the model would
     // keep the seed's instrument and searches on `--instrument` data would
     // never select it.

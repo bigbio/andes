@@ -150,11 +150,13 @@ pub fn build_partition_skeleton(
 }
 
 /// Build the per-partition ion membership (`frag_off_table`, G6) by chemistry,
-/// not by copying a seed: for a partition of precursor charge `C`, emit b
-/// (`Prefix`) and y (`Suffix`) ions at fragment charges `1..=max(1, C-1)`,
+/// not by copying a seed: for a partition of precursor charge `C`, emit the
+/// activation's backbone ions at fragment charges `1..=max(1, C-1)`,
 /// `loss_class 0`, plus a `Noise` entry (RankScorer requires one per populated
-/// partition). Frequencies are placeholders here (refined by a later count
-/// pass); the ion *set* is what makes the geometry own-derived.
+/// partition). Collisional activation gives b (`Prefix`) and y (`Suffix`), ETD
+/// gives c and z•, and EThcD gives all four. Frequencies are placeholders here
+/// (refined by a later count pass); the ion *set* is what makes the geometry
+/// own-derived.
 pub fn build_frag_off_table(
     partitions: &[Partition],
     max_fragment_charge: i32,
@@ -162,15 +164,19 @@ pub fn build_frag_off_table(
 ) -> FxHashMap<Partition, Vec<FragmentOffsetFrequency>> {
     let mut table: FxHashMap<Partition, Vec<FragmentOffsetFrequency>> = FxHashMap::default();
     let cap = max_fragment_charge.max(1);
-    // ETD/ECD cleave N-Cα → c/z• backbone ions; collisional (HCD/CID) give b/y.
-    // The Prefix/Suffix ion type is generic (chemistry lives in `offset_bits`), so
-    // selecting the right offsets here is all that's needed for the whole trained
-    // pipeline (accumulator, estimator, RankScorer, node-DP) to model c/z.
-    let is_etd = activation == model::activation::ActivationMethod::ETD;
-    let (prefix_off, suffix_off) = if is_etd {
-        (c_offset_bits(), z_offset_bits())
-    } else {
-        (b_offset_bits(), y_offset_bits())
+    // ETD/ECD cleave N-Cα → c/z• backbone ions; collisional (HCD/CID) give b/y;
+    // EThcD carries both series in one spectrum. The Prefix/Suffix ion type is
+    // generic (chemistry lives in `offset_bits`), so selecting the right offsets
+    // here is all that's needed for the whole trained pipeline (accumulator,
+    // estimator, RankScorer, node-DP) to model c/z.
+    use model::activation::ActivationMethod;
+    let offsets: &[(u32, u32)] = match activation {
+        ActivationMethod::ETD => &[(c_offset_bits(), z_offset_bits())],
+        ActivationMethod::EThcD => &[
+            (b_offset_bits(), y_offset_bits()),
+            (c_offset_bits(), z_offset_bits()),
+        ],
+        _ => &[(b_offset_bits(), y_offset_bits())],
     };
     for &part in partitions {
         // Bound the fragment charge by both chemistry (<= precursor-1) and the
@@ -179,22 +185,24 @@ pub fn build_frag_off_table(
         let max_frag_charge = (part.charge - 1).clamp(1, cap);
         let mut frags: Vec<FragmentOffsetFrequency> = Vec::new();
         for fc in 1..=max_frag_charge {
-            frags.push(FragmentOffsetFrequency {
-                ion_type: IonType::Prefix {
-                    charge: fc,
-                    offset_bits: prefix_off,
-                    loss_class: 0,
-                },
-                frequency: 0.0,
-            });
-            frags.push(FragmentOffsetFrequency {
-                ion_type: IonType::Suffix {
-                    charge: fc,
-                    offset_bits: suffix_off,
-                    loss_class: 0,
-                },
-                frequency: 0.0,
-            });
+            for &(prefix_off, suffix_off) in offsets {
+                frags.push(FragmentOffsetFrequency {
+                    ion_type: IonType::Prefix {
+                        charge: fc,
+                        offset_bits: prefix_off,
+                        loss_class: 0,
+                    },
+                    frequency: 0.0,
+                });
+                frags.push(FragmentOffsetFrequency {
+                    ion_type: IonType::Suffix {
+                        charge: fc,
+                        offset_bits: suffix_off,
+                        loss_class: 0,
+                    },
+                    frequency: 0.0,
+                });
+            }
         }
         frags.push(FragmentOffsetFrequency {
             ion_type: IonType::Noise,
@@ -410,6 +418,57 @@ mod tests {
                 ion_charges(frags, false).iter().all(|&c| c == 1),
                 "deconv -> y charge 1 only"
             );
+        }
+    }
+
+    #[test]
+    fn derive_geometry_ethcd_models_by_and_cz_at_charge_one() {
+        // EThcD + deconvolution: b, y, c and z• ions, each at fragment charge 1
+        // (the multi-charge carve-out is for pure ETD only).
+        let mut base = base_param();
+        base.apply_deconvolution = true;
+        base.data_type.activation = ActivationMethod::EThcD;
+        let charge_masses = vec![(2, 1000.0), (4, 2500.0)];
+        let cfg = GeometryConfig {
+            num_segments: 1,
+            max_rank: 150,
+            mass_tier_occupancy: 1,
+            max_mass_tiers: 1,
+            max_fragment_charge: 3,
+        };
+        let p = derive_geometry(&charge_masses, &base, &cfg);
+        let want = [
+            (true, b_offset_bits()),
+            (false, y_offset_bits()),
+            (true, c_offset_bits()),
+            (false, z_offset_bits()),
+        ];
+        for frags in p.frag_off_table.values() {
+            let mut got: Vec<(bool, u32)> = frags
+                .iter()
+                .filter_map(|f| match f.ion_type {
+                    IonType::Prefix {
+                        charge,
+                        offset_bits,
+                        ..
+                    } => Some((true, offset_bits, charge)),
+                    IonType::Suffix {
+                        charge,
+                        offset_bits,
+                        ..
+                    } => Some((false, offset_bits, charge)),
+                    IonType::Noise => None,
+                })
+                .map(|(prefix, off, charge)| {
+                    assert_eq!(charge, 1, "deconvolved EThcD models charge-1 ions");
+                    (prefix, off)
+                })
+                .collect();
+            got.sort_unstable();
+            let mut want = want.to_vec();
+            want.sort_unstable();
+            assert_eq!(got, want);
+            assert!(frags.iter().any(|f| f.ion_type.is_noise()));
         }
     }
 

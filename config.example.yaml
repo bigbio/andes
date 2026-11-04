@@ -51,7 +51,7 @@ scoring:
   # model: hcd_qexactive_tryp    # force a specific model id
   # gbdt_max_trees: 100          # advanced: trees per GBDT ensemble (0 = all; unset = 100, all under glyco)
   # precursor_mono: auto         # auto | off: MS1 monoisotope correction (glyco)
-  # ethcd_activation: hcd        # advanced: hcd | etd label for EThcD/ETciD scans
+  # ethcd_activation: ethcd      # advanced: ethcd | etd label for EThcD/ETciD scans
   # peak_filter: "100:20"        # advanced: WINDOW_DA:PEAKS (default: on for isobaric labels)
 
 # ── Decoys & FDR strategy ───────────────────────────────────────────────────

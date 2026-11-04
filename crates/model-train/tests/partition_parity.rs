@@ -195,8 +195,8 @@ fn partitioned_store_loads_identical_to_bundled_single_file() {
         ModelStore::open(&single_path).expect("open bundled partition as single-file store");
     assert_eq!(
         single.model_ids().len(),
-        9,
-        "Automatic partition ships 9 models"
+        10,
+        "Automatic partition ships 10 models"
     );
 
     let tmp = tempfile::tempdir().expect("tempdir");

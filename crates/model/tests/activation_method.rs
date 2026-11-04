@@ -1,6 +1,6 @@
 //! Pin `ActivationMethod` variants to PSI-MS activation method terms
 //! (MS:1000133 CID, MS:1000599 ETD, MS:1000422 HCD, MS:1000598 PQD,
-//! MS:1000776 UVPD).
+//! MS:1000776 UVPD, MS:1002631 EThcD).
 
 use model::ActivationMethod;
 
@@ -12,6 +12,7 @@ fn canonical_names_resolve() {
         (ActivationMethod::HCD, "HCD"),
         (ActivationMethod::PQD, "PQD"),
         (ActivationMethod::UVPD, "UVPD"),
+        (ActivationMethod::EThcD, "EThcD"),
     ];
     for &(variant, name) in reference {
         assert_eq!(variant.name(), name);
@@ -27,6 +28,7 @@ fn no_extra_variants() {
         ActivationMethod::HCD,
         ActivationMethod::PQD,
         ActivationMethod::UVPD,
+        ActivationMethod::EThcD,
     ]
     .iter()
     .map(|m| m.name())

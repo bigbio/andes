@@ -368,15 +368,18 @@ pub(crate) fn build_selection_key(
 ) -> SelectionKey {
     use std::collections::BTreeSet;
 
-    // 1. PQD → CID for model routing.
-    let act_str: &str = match activation {
-        ActivationMethod::PQD => "CID",
-        other => other.name(),
-    };
     // 2. Apply family fallback (OrbitrapAstral → QExactive, TimsTOF → TOF).
     let inst_after_family: &str = match instrument {
         Some(i) => i.family_fallback().name(),
         None => "LowRes",
+    };
+    // 1. PQD → CID for model routing. EThcD keys its own model on an Orbitrap
+    //    read-out; read elsewhere (ion trap, TOF, undetected) it routes like HCD,
+    //    the b/y half of its spectrum, as it did before the EThcD model existed.
+    let act_str: &str = match activation {
+        ActivationMethod::PQD => "CID",
+        ActivationMethod::EThcD if !matches!(inst_after_family, "QExactive" | "HighRes") => "HCD",
+        other => other.name(),
     };
 
     // 3. Apply old-ladder (activation, instrument) normalization.
@@ -474,6 +477,37 @@ pub(crate) fn choose_model(
     protocol: Protocol,
     enzyme: model::enzyme::Enzyme,
 ) -> ModelChoice {
+    // EThcD: the EThcD model when the store has one trained for this cell's enzyme and
+    // experiment class (labelling, enrichment). Otherwise the run is routed as HCD, the
+    // b/y half of its spectrum, as before the EThcD model existed: the labelled,
+    // enriched and enzyme-specific HCD models stay the choice for the cells no EThcD
+    // model was trained or measured on, and a store without an EThcD model keeps the HCD
+    // route.
+    if activation == ActivationMethod::EThcD {
+        let choice = choose_for_protocol(entries, activation, instrument, protocol, enzyme);
+        let fits = entries
+            .iter()
+            .find(|e| e.model_id == choice.model_id)
+            .is_some_and(|e| {
+                e.activation == ActivationMethod::EThcD.name()
+                    && e.enzyme == choice.key.enzyme
+                    && e.experiment_class == choice.key.experiment_class
+            });
+        if !fits {
+            let hcd = choose_model(entries, ActivationMethod::HCD, instrument, protocol, enzyme);
+            return ModelChoice {
+                warning: untrained_route_warning(
+                    entries,
+                    &hcd.model_id,
+                    activation,
+                    instrument,
+                    protocol,
+                    enzyme,
+                ),
+                ..hcd
+            };
+        }
+    }
     let choice = choose_for_protocol(entries, activation, instrument, protocol, enzyme);
     // iTRAQ-phospho: without a model trained on that class, the ladder falls to
     // the unlabelled base. The iTRAQ model is the closer one: the tag on every
@@ -853,6 +887,7 @@ mod param_resolver_tests {
             ActivationMethod::ETD,
             ActivationMethod::HCD,
             ActivationMethod::UVPD,
+            ActivationMethod::EThcD,
         ];
         let instruments = [
             None,

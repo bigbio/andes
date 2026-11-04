@@ -271,7 +271,7 @@ andes picks a model by `(activation, instrument, enzyme, protocol)`, automatical
 
 ### Supported models
 
-All 17 models are trained by andes on public PRIDE data; the store contains no MS-GF+-derived
+All 18 models are trained by andes on public PRIDE data; the store contains no MS-GF+-derived
 model data.
 
 | `model_id` | activation / instrument / enzyme / protocol | Training data (public PRIDE) | Benchmark |
@@ -289,6 +289,7 @@ model data.
 | `cid_lowres_lysc` | CID / LowRes / LysC / Automatic | PXD000865 | ⚠ limited training data |
 | `cid_lowres_argc` | CID / LowRes / ArgC / Automatic | public PRIDE (see manifest) | ⚠ limited training data |
 | `cid_lowres_gluc` | CID / LowRes / GluC / Automatic | public PRIDE (see manifest) | ⚠ limited training data |
+| `ethcd_qexactive_tryp` | EThcD / QExactive / Trypsin / Automatic | ProteomeTools EThcD/ETciD scans (PXD004732, PXD010595) | EThcD PXD010154, PXD023835 |
 | `etd_highres_tryp` | ETD / HighRes / Trypsin / Automatic | public PRIDE (see manifest) | — |
 | `etd_highres_tryp_phosphorylation` | ETD / HighRes / Trypsin / Phosphorylation | public PRIDE (see manifest) | — |
 | `etd_lowres_tryp_phosphorylation` | ETD / LowRes / Trypsin / Phosphorylation | public PRIDE (see manifest) | — |

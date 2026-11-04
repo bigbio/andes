@@ -10,7 +10,7 @@
 ## 1. What a scoring model is, and when to train one
 
 A scoring model holds, per `(charge, parent-mass, fragment-segment)` partition, the
-intensity-rank and mass-error statistics of fragment ions. andes ships 17 models in
+intensity-rank and mass-error statistics of fragment ions. andes ships 18 models in
 `resources/models/`, which is also the default seed source. Train your own when your
 **instrument** (e.g. Astral, timsTOF) or **experiment class** (TMT/iTRAQ, phospho,
 immunopeptidomics, glyco …) is not well covered.
@@ -57,6 +57,7 @@ andes --spectrum mydata.mzML --database mydb.fasta --output-pin out.pin \
 | `--mods` | mods.txt (same format as search) | Cam-C + Ox-M |
 | `--date` | ISO-8601 date in the source ledger | today |
 | `--fragment-tol-ppm` / `--fragment-tol-da` | replace the seed's fragment tolerance (`mme`) | the seed's |
+| `--activation` | activation of the model (`EThcD`, `ETD`, …): its selection key and ion series (EThcD: b, y, c, z•); only spectra with that activation are used | the seed's, all spectra |
 
 Use a lenient `--train-fdr` (e.g. `0.1`) on small datasets and `0.01` on full runs.
 

@@ -1403,13 +1403,13 @@ mod tests {
         let path = bundled_store_path();
         let store = ModelStore::open(&path).expect("failed to open bundled model store");
         let entries = store.selection_entries();
-        // The bundle ships 17 own-trained models, one selection entry each. (Two
+        // The bundle ships 18 own-trained models, one selection entry each. (Two
         // seed-copy phospho slugs with no own training data were dropped; their
         // queries route to the nearest own model via select_nearest.)
         assert_eq!(
             entries.len(),
-            17,
-            "expected 17 selection entries, got {}",
+            18,
+            "expected 18 selection entries, got {}",
             entries.len()
         );
         let found = entries.iter().any(|e| e.model_id == "hcd_qexactive_tryp");

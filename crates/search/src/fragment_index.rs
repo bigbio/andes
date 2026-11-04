@@ -573,14 +573,18 @@ pub fn index_chunk_len<T>(rest: &[T], mass: impl Fn(&T) -> f64, span_da: f64) ->
 
 /// Whether the index's ion series covers spectra from `activation`. The index
 /// holds singly charged b/y ions only, which carry collisional activation (CID,
-/// HCD, PQD). Electron-based (ETD) and photon-based (UVPD) activation produce
-/// c/z or a/x series, so a correct candidate can match none of the indexed ions
-/// and miss the shortlist; those searches enumerate candidates instead.
+/// HCD, PQD, and the collisional supplement of EThcD). Electron-based (ETD) and
+/// photon-based (UVPD) activation produce c/z or a/x series, so a correct
+/// candidate can match none of the indexed ions and miss the shortlist; those
+/// searches enumerate candidates instead.
 pub fn covers_activation(activation: model::activation::ActivationMethod) -> bool {
     use model::activation::ActivationMethod;
     matches!(
         activation,
-        ActivationMethod::CID | ActivationMethod::HCD | ActivationMethod::PQD
+        ActivationMethod::CID
+            | ActivationMethod::HCD
+            | ActivationMethod::PQD
+            | ActivationMethod::EThcD
     )
 }
 

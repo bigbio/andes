@@ -93,7 +93,9 @@ pub struct Claim {
 impl Claim {
     /// The claimants, best first (at most three).
     pub fn claimants(&self) -> impl Iterator<Item = u32> + '_ {
-        self.claimant.into_iter().chain(self.others.iter().flatten().copied())
+        self.claimant
+            .into_iter()
+            .chain(self.others.iter().flatten().copied())
     }
 }
 
@@ -161,9 +163,8 @@ pub fn learn_windows(probes: &[Probe]) -> Option<Windows> {
     for me in probes.iter().filter(|p| p.identified && fitted(p)) {
         anchors += 1;
         let tol = me.mass * SEARCH_PPM * 1e-6;
-        let lo = order.partition_point(|&j| {
-            (probes[j].charge, probes[j].mass) < (me.charge, me.mass - tol)
-        });
+        let lo = order
+            .partition_point(|&j| (probes[j].charge, probes[j].mass) < (me.charge, me.mass - tol));
         for &j in &order[lo..] {
             let p = &probes[j];
             if p.charge != me.charge || p.mass > me.mass + tol {
@@ -254,11 +255,7 @@ pub fn assign(probes: &[Probe], rows: &[usize], windows: Option<Windows>) -> Vec
                     claim.n_identified_co_apex += u16::from(p.identified);
                 }
                 best.push((p.identified, dt.abs(), p.precursor, j));
-                best.sort_by(|a, b| {
-                    b.0.cmp(&a.0)
-                        .then(a.1.total_cmp(&b.1))
-                        .then(a.2.cmp(&b.2))
-                });
+                best.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.total_cmp(&b.1)).then(a.2.cmp(&b.2)));
                 best.truncate(3);
             }
             if let Some(&(identified, _, id, at)) = best.first() {
@@ -378,7 +375,10 @@ mod tests {
         let mut nan = probe(1, 1000.0, f64::NAN, true);
         nan.w = f64::NAN;
         let probes = [probe(0, 1000.0, 100.0, false), nan];
-        assert_eq!(assign(&probes, &[0, 1], windows()), vec![Claim::default(); 2]);
+        assert_eq!(
+            assign(&probes, &[0, 1], windows()),
+            vec![Claim::default(); 2]
+        );
     }
 
     /// Peptides seen at two charge states with a small spread of the mass
@@ -387,7 +387,9 @@ mod tests {
         let mut out = Vec::new();
         let mut state = 12345u64;
         let mut next = move || {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (state >> 11) as f64 / (1u64 << 53) as f64
         };
         for k in 0..n {
@@ -432,7 +434,9 @@ mod tests {
 
     #[test]
     fn a_run_without_pairs_has_no_windows() {
-        let probes: Vec<Probe> = (0..40).map(|i| probe(i, 1000.0 + f64::from(i), 100.0, true)).collect();
+        let probes: Vec<Probe> = (0..40)
+            .map(|i| probe(i, 1000.0 + f64::from(i), 100.0, true))
+            .collect();
         assert_eq!(learn_windows(&probes), None);
     }
 

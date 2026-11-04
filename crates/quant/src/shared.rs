@@ -190,7 +190,10 @@ pub fn evidence(
             out.n_unid += 1;
         } else if ids.contains(&target.peptide) {
             out.n_id_target += 1;
-        } else if ids.iter().any(|i| claimants.iter().any(|c| c.peptide == *i)) {
+        } else if ids
+            .iter()
+            .any(|i| claimants.iter().any(|c| c.peptide == *i))
+        {
             out.n_id_claimant += 1;
         } else {
             out.n_id_other += 1;
@@ -260,7 +263,13 @@ pub struct Row<'a> {
 pub fn feature(name: &str, row: &Row<'_>) -> Option<f64> {
     let c = row.claim;
     let e = row.shared.copied().unwrap_or_default();
-    let ratio = |h: u32, n: u32| if n == 0 { 0.0 } else { f64::from(h) / f64::from(n) };
+    let ratio = |h: u32, n: u32| {
+        if n == 0 {
+            0.0
+        } else {
+            f64::from(h) / f64::from(n)
+        }
+    };
     Some(match name {
         "isid" => f64::from(u8::from(c.identified)),
         "co" => f64::from(u8::from(c.co_apex)),
@@ -336,7 +345,12 @@ impl Model {
                         .map_err(|e| at(&e.to_string()))
                 };
                 tree.push(match f[0] {
-                    "S" => Node::Split(num(1)? as usize, num(2)?, num(3)? as usize, num(4)? as usize),
+                    "S" => Node::Split(
+                        num(1)? as usize,
+                        num(2)?,
+                        num(3)? as usize,
+                        num(4)? as usize,
+                    ),
                     "L" => Node::Leaf(num(1)?),
                     other => return Err(at(&format!("unknown node kind {other:?}"))),
                 });
@@ -378,8 +392,10 @@ impl Model {
     pub fn shipped() -> &'static Model {
         static MODEL: std::sync::OnceLock<Model> = std::sync::OnceLock::new();
         MODEL.get_or_init(|| {
-            Model::parse(include_str!("../../../resources/quant/shared_feature_model.txt"))
-                .expect("the shipped shared-feature model parses")
+            Model::parse(include_str!(
+                "../../../resources/quant/shared_feature_model.txt"
+            ))
+            .expect("the shipped shared-feature model parses")
         })
     }
 
@@ -418,7 +434,16 @@ impl Model {
         self.features.iter().any(|f| {
             matches!(
                 f.as_str(),
-                "n_scans" | "scored" | "dfrac" | "dint" | "fT" | "fP" | "n_unid" | "n_idT" | "n_idP" | "n_idO"
+                "n_scans"
+                    | "scored"
+                    | "dfrac"
+                    | "dint"
+                    | "fT"
+                    | "fP"
+                    | "n_unid"
+                    | "n_idT"
+                    | "n_idP"
+                    | "n_idO"
             )
         })
     }
@@ -427,7 +452,7 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ms2::{Ms2Scan, IonKind};
+    use crate::ms2::{IonKind, Ms2Scan};
 
     fn scan(rt: f64, peaks: &[(f32, f32)]) -> Ms2Scan {
         Ms2Scan {
@@ -459,8 +484,14 @@ mod tests {
         let claimant = Ions::new(2, &[frag(300.0), frag(450.0), frag(550.0)]);
         let tol = Tolerance::Ppm(20.0);
         // Distinguishing: target 400 and 500; claimant 450 and 550.
-        assert_eq!(distinguishing(&target.mz, &claimant.mz, tol), [400.0, 500.0]);
-        assert_eq!(distinguishing(&claimant.mz, &target.mz, tol), [450.0, 550.0]);
+        assert_eq!(
+            distinguishing(&target.mz, &claimant.mz, tol),
+            [400.0, 500.0]
+        );
+        assert_eq!(
+            distinguishing(&claimant.mz, &target.mz, tol),
+            [450.0, 550.0]
+        );
         let index = Ms2RunIndex::new(vec![
             scan(100.0, &[(300.0, 5.0), (400.0, 50.0), (500.0, 50.0)]),
             scan(101.0, &[(400.0, 100.0), (450.0, 100.0)]),
@@ -479,7 +510,10 @@ mod tests {
         };
         let e = evidence(&index, &id, &q, tol);
         assert_eq!(e.n_scans, 2);
-        assert_eq!((e.n_id_target, e.n_id_other, e.n_unid, e.n_id_claimant), (1, 1, 0, 0));
+        assert_eq!(
+            (e.n_id_target, e.n_id_other, e.n_unid, e.n_id_claimant),
+            (1, 1, 0, 0)
+        );
         assert_eq!((e.hit_target, e.n_target), (3, 4));
         assert_eq!((e.hit_claimant, e.n_claimant), (1, 4));
         assert!(e.scored());
@@ -531,8 +565,14 @@ mod tests {
         let p = m.probability(&row);
         assert!((p - 1.0 / (1.0 + (-2.5f64).exp())).abs() < 1e-12);
         assert!(m.is_shared(&row));
-        let alone = Row { claim: &Claim::default(), ..row };
-        assert!(!m.is_shared(&alone), "a transfer without a claimant is never shared");
+        let alone = Row {
+            claim: &Claim::default(),
+            ..row
+        };
+        assert!(
+            !m.is_shared(&alone),
+            "a transfer without a claimant is never shared"
+        );
         assert!((m.probability(&alone) - 1.0 / (1.0 + 1.5f64.exp())).abs() < 1e-12);
         assert_eq!(m.provenance, ["test model"]);
         assert!(!m.needs_ms2_evidence());
@@ -563,8 +603,16 @@ mod tests {
 
     #[test]
     fn malformed_models_are_rejected() {
-        assert!(Model::parse("features: co\ntree\nL 1.0\n").unwrap_err().contains("threshold"));
-        assert!(Model::parse("features: nope\nthreshold: 0.5\n").unwrap_err().contains("unknown feature"));
-        assert!(Model::parse("features: co\nthreshold: 0.5\ntree\nS 3 0.5 1 2\nL 1\nL 2\n").unwrap_err().contains("malformed"));
+        assert!(Model::parse("features: co\ntree\nL 1.0\n")
+            .unwrap_err()
+            .contains("threshold"));
+        assert!(Model::parse("features: nope\nthreshold: 0.5\n")
+            .unwrap_err()
+            .contains("unknown feature"));
+        assert!(
+            Model::parse("features: co\nthreshold: 0.5\ntree\nS 3 0.5 1 2\nL 1\nL 2\n")
+                .unwrap_err()
+                .contains("malformed")
+        );
     }
 }

@@ -51,7 +51,8 @@ use crate::quant_finalize::{
     finalize_stream, ExtractFiles, ExtractSource, FinalizeLimits, FinalizeParams, MbrFeature,
 };
 use crate::quant_mbr::{
-    attach_ms2, attach_shared, extract_run, mbr_paths, ExtractCounts, ExtractRow, Ms2Counts, TransferSelection,
+    attach_ms2, attach_shared, extract_run, mbr_paths, ExtractCounts, ExtractRow, Ms2Counts,
+    TransferSelection,
 };
 
 /// Seed of the transfer FDR's folds and models, in every path.

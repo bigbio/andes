@@ -1511,7 +1511,11 @@ fn assign_claims(rows: &mut [ExtractRow], lib: &Library) -> Option<claims::Windo
         }
         let next = peptides.len() as u32;
         let peptide = *peptides
-            .entry(meta.key.rsplit_once('/').map_or(meta.key.as_str(), |(p, _)| p))
+            .entry(
+                meta.key
+                    .rsplit_once('/')
+                    .map_or(meta.key.as_str(), |(p, _)| p),
+            )
             .or_insert(next);
         probes.push(claims::Probe {
             precursor: r.precursor,

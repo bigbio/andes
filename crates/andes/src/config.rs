@@ -174,6 +174,7 @@ pub struct QuantCfg {
     pub mbr: Option<bool>,
     pub mbr_library_fdr: Option<f64>,
     pub mbr_fdr: Option<f64>,
+    pub mbr_wrong_log2: Option<f64>,
     /// A number in `(0, 1]` or `off`, as `--quant-feature-fdr`.
     pub quant_feature_fdr: Option<NumberOrString>,
 }
@@ -569,6 +570,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         cfg.quant.mbr_library_fdr
     );
     set!("mbr_fdr", mbr_fdr, cfg.quant.mbr_fdr);
+    set!("mbr_wrong_log2", mbr_wrong_log2, cfg.quant.mbr_wrong_log2);
     set_parsed!(
         "quant_feature_fdr",
         quant_feature_fdr,
@@ -673,6 +675,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         check_unit_fraction("quant_fdr", v)?;
     }
     check_positive("lfq_rt_window", args.lfq_rt_window)?;
+    check_positive("mbr_wrong_log2", args.mbr_wrong_log2)?;
     if let Some(v) = args.lfq_gaussian_width {
         check_positive("lfq_gaussian_width", v)?;
     }

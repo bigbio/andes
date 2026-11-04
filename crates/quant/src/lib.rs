@@ -25,6 +25,8 @@
 //! * [`evidence`]: the likelihood template fit that measures one (precursor,
 //!   run) hypothesis: amplitude, quantity and the evidence statistics.
 //! * [`claims`]: same-run claims on an MS1 feature by another probed target.
+//! * [`tmt_transfer`]: the learned risk of a transferred TMT reporter value
+//!   (opt-in isobaric match-between-runs).
 //! * [`ms2`]: empirical fragment spectra of library entries and the MS2
 //!   evidence of a transfer probe in the receiving run's MS2 scans.
 
@@ -44,6 +46,7 @@ pub mod nnls;
 pub mod normalize;
 pub mod purity;
 pub mod tdc;
+pub mod tmt_transfer;
 pub mod unmix;
 pub mod xic;
 

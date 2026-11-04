@@ -117,4 +117,5 @@ quant:
   # mbr: false                   # match-between-runs across the inputs (needs lfq and rescoring, 2+ inputs)
   # mbr_library_fdr: 0.01        # internal library entry gate (precursor-level), not a reported identification FDR
   # mbr_fdr: 0.01                # transfer quality q-value for transfer_ms1 (internal, not an identification FDR)
+  # mbr_wrong_log2: 0.5          # --tmt --mbr: RMS log2 profile deviation that defines a wrong transferred value
   # quant_feature_fdr: off       # identified-row quality q-value; above it: identified_below_threshold (internal); off (default) reports all

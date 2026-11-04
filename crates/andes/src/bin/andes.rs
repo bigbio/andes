@@ -44,6 +44,8 @@ mod rescore;
 mod search;
 #[path = "andes/spectra.rs"]
 mod spectra;
+#[path = "andes/tmt_mbr.rs"]
+mod tmt_mbr;
 #[path = "andes/train.rs"]
 mod train;
 #[path = "andes/train_intensity.rs"]

@@ -2307,11 +2307,6 @@ mod tests {
     }
 }
 
-/// One output row of the reference finalize: precursor, run, the table row,
-/// the fit's mass error and the row's claim.
-#[cfg(test)]
-type OutEntry<'a> = (u32, u16, MbrRow<'a>, (Option<f64>, claims::Claim));
-
 #[cfg(test)]
 mod finalize_tests {
     use output::mbr_out::{
@@ -2323,6 +2318,10 @@ mod finalize_tests {
     use quant::normalize::{fit as fit_normalization, NormCell, NormParams};
 
     use super::*;
+
+    /// One output row of the reference finalize: precursor, run, the table row,
+    /// the fit's mass error and the row's claim.
+    type OutEntry<'a> = (u32, u16, MbrRow<'a>, (Option<f64>, claims::Claim));
     use crate::quant_finalize::{
         finalize, finalize_stream, for_each_scored, pseudo_example, running_mean_q, table_features,
         wrong_features, BlockContext, EntryIndex, ExtractRuns, FinalizeLimits, FinalizeParams,

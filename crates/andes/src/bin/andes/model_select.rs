@@ -385,12 +385,21 @@ pub(crate) fn build_selection_key(
     //    inline here.
     let (final_act, final_inst, drop_protocol): (&str, &str, bool) =
         match (act_str, inst_after_family) {
-            // H5: low-res (ion-trap) HCD. Routing this to the high-res
-            // QExactive model would match 0.5-Da peaks at 20 ppm and lose
-            // ~18% of PSMs silently. No hcd_lowres model exists, so route to the
-            // low-res b/y model (cid_lowres_tryp) instead — correct fragment
-            // tolerance and ion series. Pinned by the selection grid test; the
-            // run warns (see `untrained_route_warning`).
+            // H5: HCD read out in the ion trap. No model is trained on these
+            // spectra; the key routes to the low-res CID model of the digest
+            // (`cid_lowres_tryp` for trypsin) and the run warns (see
+            // `untrained_route_warning`). The fragment tolerance does not
+            // depend on this choice: on ion-trap fragments every bundled
+            // model scores its rank tables in the stored 0.5 Da window (only
+            // high-res runs learn a narrower one, see
+            // `RankScorer::node_score_window`), and the PIN features follow
+            // the run's acquisition class. Neither
+            // candidate is better on every dataset: against the Orbitrap HCD
+            // model (`hcd_qexactive_tryp`), PSMs at 1 % entrapment FDP were
+            // within -9 % to +7 % across four tryptic label-free ion-trap HCD
+            // datasets, two in each direction. An HCD model trained on
+            // ion-trap spectra is what would close the gap; until then the
+            // CID route stands. Pinned by the selection grid test.
             ("HCD", "LowRes") => ("CID", "LowRes", true),
             // TOF analyzers (QTOF, timsTOF) fragment by beam-type collisional
             // activation: the b/y chemistry of HCD, measured at high resolution.

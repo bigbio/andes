@@ -53,6 +53,10 @@ pub enum Mod {
     GlnPyroGlu,
     /// Glu->pyro-Glu (Unimod 27) on an N-terminal E.
     GluPyroGlu,
+    /// SILAC heavy lysine, Label:13C(6)15N(2) (Unimod 259) on K.
+    Label13C6N2,
+    /// SILAC heavy arginine, Label:13C(6)15N(4) (Unimod 267) on R.
+    Label13C6N4,
 }
 
 /// Where a modification may sit.
@@ -79,6 +83,8 @@ const MODS: &[(Mod, u32, &str, Placement)] = &[
     (Mod::Deamidated, 7, "NQ", Placement::Residue),
     (Mod::GlnPyroGlu, 28, "Q", Placement::NTermOf),
     (Mod::GluPyroGlu, 27, "E", Placement::NTermOf),
+    (Mod::Label13C6N2, 259, "K", Placement::Residue),
+    (Mod::Label13C6N4, 267, "R", Placement::Residue),
 ];
 
 impl Mod {
@@ -94,7 +100,15 @@ impl Mod {
             Mod::Deamidated => format!("Deamidated@{aa}"),
             Mod::GlnPyroGlu => "Gln->pyro-Glu@Q^Any_N-term".into(),
             Mod::GluPyroGlu => "Glu->pyro-Glu@E^Any_N-term".into(),
+            Mod::Label13C6N2 => "Label:13C(6)15N(2)@K".into(),
+            Mod::Label13C6N4 => "Label:13C(6)15N(4)@R".into(),
         }
+    }
+
+    /// A stable-isotope label: it changes the mass only, so the peptide elutes
+    /// and fragments as its light form.
+    pub fn is_isotope_label(self) -> bool {
+        matches!(self, Mod::Label13C6N2 | Mod::Label13C6N4)
     }
 
     /// Unimod accession.
@@ -132,6 +146,7 @@ impl Mod {
             Mod::Deamidated => [0, -1, -1, 1, 0, 0],
             Mod::GlnPyroGlu => [0, -3, -1, 0, 0, 0],
             Mod::GluPyroGlu => [0, -2, 0, -1, 0, 0],
+            Mod::Label13C6N2 | Mod::Label13C6N4 => [0, 0, 0, 0, 0, 0],
         }
     }
 }
@@ -151,9 +166,18 @@ impl Form {
         self.seq.as_bytes()[site.max(1) - 1] as char
     }
 
-    /// The same peptidoform as an [`RtPeptide`] (Unimod accessions by site).
+    /// The same peptidoform as an [`RtPeptide`] (Unimod accessions by site), as
+    /// the andes-rt and andes-ms2 models read it. Stable-isotope labels (SILAC
+    /// heavy K/R) are left out: a 13C/15N-labelled peptide co-elutes with its
+    /// light form and fragments like it, so the models score the light form;
+    /// the label's mass stays in [`Mass`].
     pub fn rt_peptide(&self) -> RtPeptide {
-        let mut mods: Vec<(usize, u32)> = self.mods.iter().map(|(s, m)| (*s, m.unimod())).collect();
+        let mut mods: Vec<(usize, u32)> = self
+            .mods
+            .iter()
+            .filter(|(_, m)| !m.is_isotope_label())
+            .map(|(s, m)| (*s, m.unimod()))
+            .collect();
         mods.sort_unstable();
         RtPeptide {
             sequence: self.seq.clone(),
@@ -264,6 +288,30 @@ mod tests {
         assert_eq!(f.mods[0].1.alphabase(0, 'K'), "TMT6plex@Any_N-term");
         // Acetyl on an internal K is not an N-terminal acetyl.
         assert!(parse_peptide("K.PEPK+42.01056TIDE.D").is_none());
+    }
+
+    /// SILAC heavy K/R parse with their mass, and the RT/MS2 models read the
+    /// light-equivalent peptide.
+    #[test]
+    fn silac_labels_parse_and_score_as_the_light_form() {
+        let heavy = "K.ELC+57.02146VAK+8.01420.R";
+        let (f, m) = parse_peptide(heavy).expect("heavy K parses");
+        assert_eq!(f.seq, "ELCVAK");
+        assert_eq!(
+            f.mods,
+            vec![(3, Mod::Carbamidomethyl), (6, Mod::Label13C6N2)]
+        );
+        assert!((m.res[5] - (128.094_963 + 8.014199)).abs() < 1e-6);
+        let (light, _) = parse_peptide("K.ELC+57.02146VAK.R").unwrap();
+        assert_eq!(f.rt_peptide(), light.rt_peptide());
+        assert!(f.rt_peptide().encode().is_some());
+        let (f, m) = parse_peptide("K.M+15.99491PEPTIDER+10.00827.A").expect("heavy R parses");
+        assert_eq!(f.mods, vec![(1, Mod::Oxidation), (9, Mod::Label13C6N4)]);
+        assert!((m.res[8] - (156.101_111 + 10.008269)).abs() < 1e-6);
+        let (light, _) = parse_peptide("K.M+15.99491PEPTIDER.A").unwrap();
+        assert_eq!(f.rt_peptide(), light.rt_peptide());
+        // A label on the wrong residue is not a SILAC label.
+        assert!(parse_peptide("K.PEPTIDEK+10.00827.A").is_none());
     }
 
     /// The form and andes-rt read a PIN peptide identically.

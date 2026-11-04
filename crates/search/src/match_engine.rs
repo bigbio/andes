@@ -1971,10 +1971,11 @@ pub(crate) fn compute_psm_features_with_edge(
     // Percolator feature counting uses a fragment tolerance of its own, NOT
     // param.mme (Kim et al., Nat Commun 5:5277, 2014): on high-res data the
     // tolerance derived from the run's measured fragment error (20 ppm before
-    // a measurement), 0.5 Da on low-res data. The param.mme value (0.5 Da for
-    // the hcd_qexactive_tryp model) is the coarser binning tolerance used by
-    // the rank-distribution tables — appropriate for node-score lookup but
-    // ~50× too wide for feature counting at m/z 500.
+    // a measurement), 0.5 Da on low-res data. The node-score window
+    // (`RankScorer::node_score_window`: the stored param.mme, 0.5 Da on the
+    // bundled models, or the narrower window learned per high-res run) is the
+    // coarser binning tolerance used by the rank-distribution tables —
+    // appropriate for node-score lookup but far too wide for feature counting.
     let feat_tol = scorer.pin_match_tolerance();
     let feature_tol_is_ppm = matches!(feat_tol, model::tolerance::Tolerance::Ppm(_));
     let feature_tol = feat_tol.raw_value(); // numeric value in the unit (ppm or Da)

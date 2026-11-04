@@ -326,7 +326,11 @@ pub fn select_nearest_for<'a>(
     }
     // 3. Relax the enzyme to trypsin, the enzyme of the dominant models, KEEPING
     //    the activation and instrument (the detected one first); then the same
-    //    over the resolution-class siblings.
+    //    over the resolution-class siblings. This is why a high-res HCD Lys-C
+    //    run takes `hcd_qexactive_tryp` and never `cid_lowres_lysc`, the only
+    //    Lys-C model: that one is trained on ion-trap CID. Scored with it, three
+    //    Q Exactive Lys-C datasets lost 2-5 % of PSMs at 1 % entrapment FDP
+    //    without a consistent gain in FDR calibration.
     if key.enzyme != RELAXED_ENZYME {
         let tryptic = SelectionKey {
             enzyme: RELAXED_ENZYME.to_string(),

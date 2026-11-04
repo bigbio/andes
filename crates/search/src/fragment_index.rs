@@ -128,8 +128,10 @@ impl ChunkFragmentIndex {
         mass_hi: f64,
     ) -> Self {
         // NOTE: `fragment_tol` here is `RankScorer::feature_match_tolerance()`, a
-        // CONSTANT 20 ppm on high-resolution data — not the model's `mme`, which
-        // scoring matches at and which is 0.5 Da in every bundled model. Retrieval
+        // CONSTANT 20 ppm on high-resolution data — not the node-score window the
+        // rank tables score at (`RankScorer::node_score_window`: the model's stored
+        // `mme`, 0.5 Da in every bundled model, narrowed on high-res runs to the
+        // window learned from the run's fragment error, about 0.2-0.3 Da). Retrieval
         // is therefore far tighter than scoring, in both directions, and the effect
         // on identifications has never been measured. See "Known gaps" in
         // docs/benchmarks/README.md before changing this.

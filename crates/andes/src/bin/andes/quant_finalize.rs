@@ -2929,6 +2929,7 @@ mod tests {
                 n: 2,
                 n_co_apex: 1,
                 n_identified_co_apex: u16::from(precursor % 4 == 0),
+                ..Claim::default()
             },
         }
     }

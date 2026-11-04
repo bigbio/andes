@@ -2145,7 +2145,6 @@ mod tests {
             library_q: 0.001,
             mass_err_ppm: Some(0.5),
             claim: quant::claims::Claim::default(),
-            shared: None,
         };
         let mut features = [
             feature(0, 0, EvidenceType::Identified, None),
@@ -2161,6 +2160,7 @@ mod tests {
             n: 1,
             n_co_apex: 1,
             n_identified_co_apex: 1,
+            ..quant::claims::Claim::default()
         };
         let records = feature_records(&stored, &features, &mut 0, None, &mut GroupTally::default());
         let got: Vec<(i64, &str, &str)> = records

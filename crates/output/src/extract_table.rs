@@ -15,7 +15,9 @@
 //! the per-isotope heights `iso_h0`..`iso_h3` and the `tailing` of the fit;
 //! a schema-3 table is rejected. Schema 5 added the template-free trace area
 //! `trace_quantity` and its `trace_quantity_se`; a schema-4 table is
-//! rejected.
+//! rejected. Schema 6 added the same-run claims of the transfer rows
+//! (`claim_*`, see `quant::claims`: the best other probed target on the same
+//! MS1 feature and the counts of claimants); a schema-5 table is rejected.
 //! The evidence columns are null when the fit was not possible.
 //! `n_donor_runs` counts the aligned runs with a PSM of the precursor, this
 //! run included for an identified row and excluded otherwise: the runs that
@@ -38,15 +40,16 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use parquet::format::KeyValue;
+use quant::claims::Claim;
 use quant::decoys::Hypothesis;
 use quant::evidence::Evidence;
 use quant::ms2::{Ms2Evidence, ScanMatch};
 
 /// Major version of the table layout. A reader rejects any other major.
-pub const EXTRACT_SCHEMA_MAJOR: u32 = 5;
+pub const EXTRACT_SCHEMA_MAJOR: u32 = 6;
 
 const SCHEMA_KEY: &str = "andes.extract.schema";
-const SCHEMA_VERSION: &str = "5.0";
+const SCHEMA_VERSION: &str = "6.0";
 /// Rows per Parquet row group / record batch.
 const BATCH_ROWS: usize = 65_536;
 
@@ -80,6 +83,9 @@ pub struct ExtractRow {
     /// The MS2 evidence of a transfer or pseudo-transfer row with a fit;
     /// `None` otherwise.
     pub ms2: Option<Ms2Evidence>,
+    /// The same-run claims on the row (transfer targets with a fit; the
+    /// default claim, no claimant, elsewhere).
+    pub claim: Claim,
 }
 
 const F64_EVIDENCE: [&str; 20] = [
@@ -134,7 +140,9 @@ fn f64_fields(e: &Evidence) -> [f64; 20] {
 const N_KEY_COLUMNS: usize = 7;
 /// The MS2 evidence columns, after the fit evidence.
 const MS2_COLUMNS: [&str; 4] = ["ms2_n_scans", "ms2_n_matched", "ms2_angle", "ms2_explained"];
-const N_COLUMNS: usize = N_KEY_COLUMNS + F64_EVIDENCE.len() + 2 + MS2_COLUMNS.len();
+/// The claim columns, after the MS2 evidence.
+const CLAIM_COLUMNS: usize = 7;
+const N_COLUMNS: usize = N_KEY_COLUMNS + F64_EVIDENCE.len() + 2 + MS2_COLUMNS.len() + CLAIM_COLUMNS;
 
 fn schema() -> Schema {
     let mut fields = vec![
@@ -157,6 +165,17 @@ fn schema() -> Schema {
     fields.push(Field::new(MS2_COLUMNS[1], DataType::UInt8, true));
     fields.push(Field::new(MS2_COLUMNS[2], DataType::Float32, true));
     fields.push(Field::new(MS2_COLUMNS[3], DataType::Float32, true));
+    fields.push(Field::new("claim_precursor", DataType::UInt32, true));
+    fields.push(Field::new("claim_dt_s", DataType::Float32, true));
+    fields.push(Field::new("claim_identified", DataType::UInt8, false));
+    fields.push(Field::new("claim_co_apex", DataType::UInt8, false));
+    fields.push(Field::new("claim_n", DataType::UInt16, false));
+    fields.push(Field::new("claim_n_co_apex", DataType::UInt16, false));
+    fields.push(Field::new(
+        "claim_n_identified_co_apex",
+        DataType::UInt16,
+        false,
+    ));
     Schema::new(fields)
 }
 
@@ -212,7 +231,21 @@ fn batch(schema: &Arc<Schema>, rows: &[ExtractRow]) -> Result<RecordBatch, Strin
     let mut ms2_matched = UInt8Builder::new();
     let mut ms2_angle = Float32Builder::new();
     let mut ms2_explained = Float32Builder::new();
+    let mut claim_precursor = UInt32Builder::new();
+    let mut claim_dt = Float32Builder::new();
+    let mut claim_identified = UInt8Builder::new();
+    let mut claim_co_apex = UInt8Builder::new();
+    let mut claim_n = UInt16Builder::new();
+    let mut claim_n_co = UInt16Builder::new();
+    let mut claim_n_id_co = UInt16Builder::new();
     for r in rows {
+        claim_precursor.append_option(r.claim.claimant);
+        claim_dt.append_option(r.claim.dt_s);
+        claim_identified.append_value(u8::from(r.claim.identified));
+        claim_co_apex.append_value(u8::from(r.claim.co_apex));
+        claim_n.append_value(r.claim.n);
+        claim_n_co.append_value(r.claim.n_co_apex);
+        claim_n_id_co.append_value(r.claim.n_identified_co_apex);
         ms2_scans.append_option(r.ms2.map(|m| m.n_scans));
         ms2_matched.append_option(r.ms2.map(|m| m.best.n_matched));
         ms2_angle.append_option(r.ms2.map(|m| m.best.angle));
@@ -258,6 +291,13 @@ fn batch(schema: &Arc<Schema>, rows: &[ExtractRow]) -> Result<RecordBatch, Strin
     cols.push(Arc::new(ms2_matched.finish()));
     cols.push(Arc::new(ms2_angle.finish()));
     cols.push(Arc::new(ms2_explained.finish()));
+    cols.push(Arc::new(claim_precursor.finish()));
+    cols.push(Arc::new(claim_dt.finish()));
+    cols.push(Arc::new(claim_identified.finish()));
+    cols.push(Arc::new(claim_co_apex.finish()));
+    cols.push(Arc::new(claim_n.finish()));
+    cols.push(Arc::new(claim_n_co.finish()));
+    cols.push(Arc::new(claim_n_id_co.finish()));
     RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
 }
 
@@ -654,6 +694,7 @@ fn decode_fit_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, Str
             n_donor_runs: donors.value(i),
             library_q: library_q.value(i),
             ms2: None,
+            claim: Claim::default(),
         });
     }
     Ok(rows)
@@ -696,6 +737,13 @@ fn decode_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, String>
     let ms2_matched = column::<UInt8Array>(b, after + 3, path)?;
     let ms2_angle = column::<Float32Array>(b, after + 4, path)?;
     let ms2_explained = column::<Float32Array>(b, after + 5, path)?;
+    let claim_precursor = column::<UInt32Array>(b, after + 6, path)?;
+    let claim_dt = column::<Float32Array>(b, after + 7, path)?;
+    let claim_identified = column::<UInt8Array>(b, after + 8, path)?;
+    let claim_co_apex = column::<UInt8Array>(b, after + 9, path)?;
+    let claim_n = column::<UInt16Array>(b, after + 10, path)?;
+    let claim_n_co = column::<UInt16Array>(b, after + 11, path)?;
+    let claim_n_id_co = column::<UInt16Array>(b, after + 12, path)?;
 
     for i in 0..b.num_rows() {
         let kind = decode_kind(kind.value(i), shift.value(i)).ok_or_else(|| {
@@ -761,6 +809,15 @@ fn decode_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, String>
             n_donor_runs: donors.value(i),
             library_q: library_q.value(i),
             ms2,
+            claim: Claim {
+                claimant: (!claim_precursor.is_null(i)).then(|| claim_precursor.value(i)),
+                dt_s: (!claim_dt.is_null(i)).then(|| claim_dt.value(i)),
+                identified: claim_identified.value(i) != 0,
+                co_apex: claim_co_apex.value(i) != 0,
+                n: claim_n.value(i),
+                n_co_apex: claim_n_co.value(i),
+                n_identified_co_apex: claim_n_id_co.value(i),
+            },
         });
     }
     Ok(rows)
@@ -824,6 +881,19 @@ mod tests {
                         explained: 0.5,
                     },
                 }),
+                claim: if i % 3 == 1 {
+                    Claim {
+                        claimant: Some(2000 + i as u32),
+                        dt_s: Some(-1.5 * i as f32),
+                        identified: i % 2 == 0,
+                        co_apex: i % 4 == 1,
+                        n: 3,
+                        n_co_apex: 2,
+                        n_identified_co_apex: 1,
+                    }
+                } else {
+                    Claim::default()
+                },
             })
             .collect()
     }
@@ -899,7 +969,7 @@ mod tests {
     fn extract_table_rejects_unknown_major_version() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("b.extract.parquet");
-        for version in ["6.0", "4.0"] {
+        for version in ["7.0", "5.0"] {
             write_with_schema_version(&p, &rows(), version).unwrap();
             let e = read_extract_table(&p).unwrap_err();
             assert!(

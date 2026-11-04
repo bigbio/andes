@@ -54,8 +54,8 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use output::extract_table::ExtractTableReader;
 use output::mbr_out::{
-    write_mbr_validation, Accepted, EvidenceType, MbrParquetWriter, MbrRow, MbrValidation,
-    VALIDATION_Q,
+    write_mbr_validation, Accepted, EvidenceType, MbrClaim, MbrParquetWriter, MbrRow,
+    MbrValidation, VALIDATION_Q,
 };
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use parquet::arrow::ArrowWriter;
@@ -63,6 +63,7 @@ use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use parquet::format::KeyValue;
 use quant::align::RunMap;
+use quant::claims::Claim;
 use quant::decoys::Hypothesis;
 use quant::evidence::Evidence;
 use quant::library::{Library, LibraryEntry};
@@ -114,6 +115,8 @@ pub(crate) struct MbrFeature {
     pub library_q: f64,
     /// Intensity-weighted isotope-0 mass error of the fit, ppm.
     pub mass_err_ppm: Option<f64>,
+    /// The same-run claims on a transfer row (default for other rows).
+    pub claim: Claim,
 }
 
 /// Limits of finalize: memory follows the library and these limits rather
@@ -1218,6 +1221,7 @@ struct OutRow {
     apex_rt_s: Option<f64>,
     library_q: f64,
     mass_err_ppm: Option<f64>,
+    claim: Claim,
 }
 
 impl OutRow {
@@ -1234,6 +1238,7 @@ impl OutRow {
             apex_rt_s: self.apex_rt_s,
             library_q: self.library_q,
             mass_err_ppm: self.mass_err_ppm,
+            claim: self.claim,
         }
     }
 }
@@ -1265,6 +1270,19 @@ const OUT_VALUES: [&str; 6] = [
     "apex_rt_s",
 ];
 
+/// The claim values of [`OutRow`], after the mass error: claimant
+/// precursor, apex offset, claimant identified, claimant co-apex, claimants,
+/// co-apex claimants, identified co-apex claimants.
+const OUT_CLAIM: [&str; 7] = [
+    "claimant",
+    "claim_dt_s",
+    "claim_identified",
+    "claim_co_apex",
+    "claim_n",
+    "claim_n_co_apex",
+    "claim_n_identified_co_apex",
+];
+
 fn out_schema() -> Arc<Schema> {
     let mut fields = vec![
         Field::new("precursor", DataType::UInt32, false),
@@ -1278,6 +1296,11 @@ fn out_schema() -> Arc<Schema> {
     );
     fields.push(Field::new("library_q", DataType::Float64, false));
     fields.push(Field::new("mass_err_ppm", DataType::Float64, true));
+    fields.extend(
+        OUT_CLAIM
+            .iter()
+            .map(|n| Field::new(*n, DataType::Float64, true)),
+    );
     Arc::new(Schema::new(fields))
 }
 
@@ -1311,7 +1334,7 @@ impl OutWriter {
             let mut precursor = UInt32Builder::with_capacity(c.len());
             let mut run = UInt16Builder::with_capacity(c.len());
             let mut ev = UInt8Builder::with_capacity(c.len());
-            let mut values: Vec<Float64Builder> = (0..OUT_VALUES.len() + 2)
+            let mut values: Vec<Float64Builder> = (0..OUT_VALUES.len() + 2 + OUT_CLAIM.len())
                 .map(|_| Float64Builder::with_capacity(c.len()))
                 .collect();
             for r in c {
@@ -1327,6 +1350,13 @@ impl OutWriter {
                     r.apex_rt_s,
                     Some(r.library_q),
                     r.mass_err_ppm,
+                    r.claim.claimant.map(f64::from),
+                    r.claim.dt_s.map(f64::from),
+                    Some(f64::from(u8::from(r.claim.identified))),
+                    Some(f64::from(u8::from(r.claim.co_apex))),
+                    Some(f64::from(r.claim.n)),
+                    Some(f64::from(r.claim.n_co_apex)),
+                    Some(f64::from(r.claim.n_identified_co_apex)),
                 ];
                 for (b, x) in values.iter_mut().zip(v) {
                     b.append_option(x);
@@ -1384,12 +1414,13 @@ impl OutReader {
 
     fn decode(&self, b: &RecordBatch) -> Result<Vec<OutRow>, String> {
         let path = self.path.as_path();
-        if b.num_columns() != OUT_VALUES.len() + 5 {
+        let expected = OUT_VALUES.len() + 5 + OUT_CLAIM.len();
+        if b.num_columns() != expected {
             return Err(format!(
                 "{}: {} columns where {} were expected",
                 path.display(),
                 b.num_columns(),
-                OUT_VALUES.len() + 5
+                expected
             ));
         }
         let precursor = column::<UInt32Array>(b, 0, path)?;
@@ -1416,6 +1447,15 @@ impl OutReader {
                     apex_rt_s: opt(5, i),
                     library_q: values[6].value(i),
                     mass_err_ppm: opt(7, i),
+                    claim: Claim {
+                        claimant: opt(8, i).map(|x| x as u32),
+                        dt_s: opt(9, i).map(|x| x as f32),
+                        identified: opt(10, i).is_some_and(|x| x != 0.0),
+                        co_apex: opt(11, i).is_some_and(|x| x != 0.0),
+                        n: opt(12, i).map_or(0, |x| x as u16),
+                        n_co_apex: opt(13, i).map_or(0, |x| x as u16),
+                        n_identified_co_apex: opt(14, i).map_or(0, |x| x as u16),
+                    },
                 })
             })
             .collect()
@@ -2394,6 +2434,11 @@ pub(crate) fn finalize_stream(
                     apex_rt_s: e.map(|e| e.t0),
                     library_q: r.library_q,
                     mass_err_ppm: e.map(|e| e.mass_err_ppm),
+                    claim: if r.role == Role::Transfer {
+                        r.claim
+                    } else {
+                        Claim::default()
+                    },
                 });
             }
             Ok(())
@@ -2531,6 +2576,14 @@ fn write_merged(
                         quant_q: r.quant_q,
                         apex_rt_s: r.apex_rt_s,
                         library_q: r.library_q,
+                        claim: r.evidence_type.is_transfer().then(|| MbrClaim {
+                            claimed_by: r.claim.claimant.map(|p| lib.meta[p as usize].key.as_str()),
+                            dt_s: r.claim.dt_s.map(f64::from),
+                            identified: r.claim.identified,
+                            co_apex: r.claim.co_apex,
+                            n_co_apex: u32::from(r.claim.n_co_apex),
+                            n_identified_co_apex: u32::from(r.claim.n_identified_co_apex),
+                        }),
                     })?;
                 }
                 n += rows.len();
@@ -2847,6 +2900,15 @@ mod tests {
             apex_rt_s: Some(f64::INFINITY),
             library_q: 1e-3,
             mass_err_ppm: Some(-1.25),
+            claim: Claim {
+                claimant: (precursor % 2 == 0).then_some(precursor + 1),
+                dt_s: (precursor % 2 == 0).then_some(-2.5),
+                identified: precursor % 4 == 0,
+                co_apex: precursor % 2 == 0,
+                n: 2,
+                n_co_apex: 1,
+                n_identified_co_apex: u16::from(precursor % 4 == 0),
+            },
         }
     }
 
@@ -2895,6 +2957,7 @@ mod tests {
                 .map(|v| v.map(f64::to_bits))
             };
             assert_eq!(bits(a), bits(b));
+            assert_eq!(a.claim, b.claim);
         }
     }
 

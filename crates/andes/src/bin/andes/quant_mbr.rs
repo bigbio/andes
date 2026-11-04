@@ -114,6 +114,7 @@ use std::path::{Path, PathBuf};
 
 use output::ms1_table::read_ms1_table;
 use quant::align::RunMap;
+use quant::claims;
 use quant::decoys::{probes, Hypothesis, Probe, PEPTIDE_MASS_SLOPE};
 use quant::evidence::{
     fit_many, fit_on_grid_gated, Evidence, EvidenceParams, FitJob, FitScratch, WIDTH_GRID,
@@ -772,6 +773,7 @@ fn entry_rows(
             n_donor_runs,
             library_q: e.q,
             ms2: None,
+            claim: claims::Claim::default(),
         };
         (row, *probe)
     };
@@ -933,6 +935,7 @@ pub(crate) fn extract_run(
     let mut slots: Vec<Option<EntryRows>> = (0..n).map(|_| None).collect();
     let finish = |slots, width_fits: usize, wp: &WidthPrior, scales: RunScales| {
         let mut out = assemble(slots, width_fits, wp.is_default());
+        assign_claims(&mut out.rows, lib);
         out.counts.unaligned = !aligned;
         out.counts.foreign_cv = foreign;
         out.counts.scales = scales;
@@ -1369,6 +1372,37 @@ pub(crate) fn mbr_paths(base: &Path) -> (PathBuf, PathBuf) {
 }
 
 /// Concatenates the per-entry rows in library order and sums the counts.
+/// Sets the same-run claim of every fitted transfer target of `rows`: the
+/// other fitted identified or transferred targets of the run on the same MS1
+/// feature (see [`claims`]).
+fn assign_claims(rows: &mut [ExtractRow], lib: &Library) {
+    let mut probes = Vec::new();
+    let mut transfers = Vec::new();
+    let mut at = Vec::new();
+    for (i, r) in rows.iter().enumerate() {
+        if r.kind != Hypothesis::Target || !matches!(r.role, Role::Identified | Role::Transfer) {
+            continue;
+        }
+        let Some(e) = &r.evidence else { continue };
+        let meta = &lib.meta[r.precursor as usize];
+        if r.role == Role::Transfer {
+            transfers.push(probes.len());
+            at.push(i);
+        }
+        probes.push(claims::Probe {
+            precursor: r.precursor,
+            charge: meta.charge,
+            mass: meta.mz * f64::from(meta.charge.max(1)),
+            t0: e.t0,
+            w: e.w,
+            identified: r.role == Role::Identified,
+        });
+    }
+    for (i, claim) in at.into_iter().zip(claims::assign(&probes, &transfers)) {
+        rows[i].claim = claim;
+    }
+}
+
 fn assemble(slots: Vec<Option<EntryRows>>, width_fits: usize, fallback: bool) -> RunExtract {
     let mut counts = ExtractCounts {
         width_fits,
@@ -2276,8 +2310,8 @@ mod tests {
 #[cfg(test)]
 mod finalize_tests {
     use output::mbr_out::{
-        write_mbr_validation, Accepted, EvidenceType, MbrParquetWriter, MbrRow, MbrValidation,
-        VALIDATION_Q,
+        write_mbr_validation, Accepted, EvidenceType, MbrClaim, MbrParquetWriter, MbrRow,
+        MbrValidation, VALIDATION_Q,
     };
     use quant::align::AlignParams;
     use quant::library::{build_library, PrecursorMeta, PsmIn};
@@ -2366,6 +2400,7 @@ mod finalize_tests {
             n_donor_runs: 1,
             library_q: 0.001,
             ms2: None,
+            claim: claims::Claim::default(),
         }
     }
 
@@ -2985,7 +3020,7 @@ mod finalize_tests {
                     reported_quantity(e, r.run, w_c.get(&r.precursor).copied(), false, maps)
                 })
             };
-            let mut out: Vec<(u32, u16, MbrRow<'_>, Option<f64>)> = Vec::new();
+            let mut out: Vec<(u32, u16, MbrRow<'_>, (Option<f64>, claims::Claim))> = Vec::new();
             // Probability that a transfer's measurement is wrong (1 without
             // features, a fold model or a calibration).
             let mut p_wrong: Vec<f64> = vec![1.0; rows.len()];
@@ -3134,8 +3169,23 @@ mod finalize_tests {
                         quant_q,
                         apex_rt_s: e.map(|e| e.t0),
                         library_q: r.library_q,
+                        claim: (r.role == Role::Transfer).then(|| MbrClaim {
+                            claimed_by: r.claim.claimant.map(|p| lib.meta[p as usize].key.as_str()),
+                            dt_s: r.claim.dt_s.map(f64::from),
+                            identified: r.claim.identified,
+                            co_apex: r.claim.co_apex,
+                            n_co_apex: u32::from(r.claim.n_co_apex),
+                            n_identified_co_apex: u32::from(r.claim.n_identified_co_apex),
+                        }),
                     },
-                    e.map(|e| e.mass_err_ppm),
+                    (
+                        e.map(|e| e.mass_err_ppm),
+                        if r.role == Role::Transfer {
+                            r.claim
+                        } else {
+                            claims::Claim::default()
+                        },
+                    ),
                 ));
             }
             // quant_q of an accepted transfer: the running mean, over its
@@ -3155,7 +3205,7 @@ mod finalize_tests {
             }
             out.sort_by_key(|&(p, run, ..)| (p, run));
             let mut features = Vec::with_capacity(out.len());
-            for (p, run, r, mass_err) in &out {
+            for (p, run, r, (mass_err, claim)) in &out {
                 writer.push(r)?;
                 features.push(MbrFeature {
                     precursor: *p,
@@ -3169,6 +3219,7 @@ mod finalize_tests {
                     apex_rt_s: r.apex_rt_s,
                     library_q: r.library_q,
                     mass_err_ppm: *mass_err,
+                    claim: *claim,
                 });
             }
             summary.rows_written += out.len();

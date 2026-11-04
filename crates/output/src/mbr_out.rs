@@ -15,9 +15,13 @@
 //! | `quant_q` | internal quality q-value of the row's MS1 feature against its decoys (not an identification FDR): the identified-row estimate for identified rows; for an accepted transfer the running mean, over the run's accepted transfers in ascending probability of a wrong measurement, of that probability; `transfer_q` for a transfer below the threshold |
 //! | `apex_rt_s` | fitted apex, seconds |
 //! | `library_q` | internal library entry gate (not an identification FDR) |
+//! | `claimed_by` | transfer rows only: `precursor_key` of the best other target of the run on the same MS1 feature (same charge, neutral masses within 2 ppm, apexes within 60 s; the identified one first, then the nearest apex); null without a claimant and for identified rows. A statement about the run's probes: the row, its quantity and its evidence type are not changed by it |
+//! | `claim_dt_s` | apex of the claimant minus the row's apex, seconds |
+//! | `claim_identified`, `claim_co_apex` | the claimant is identified in the run; the apexes are closer than the sum of the two fitted widths (the two probes measure one feature, whose quantity is shared) |
+//! | `claim_n_co_apex`, `claim_n_identified_co_apex` | co-apex claimants of the row, and the identified ones among them; 0 for a transfer without any, null for identified rows |
 //!
-//! The three text columns are UTF-8, the others float64; missing or
-//! non-finite values are null (`library_q` is never null). A
+//! `claimed_by` is UTF-8 too; the two flags are boolean and the two counts
+//! uint32. The other columns are float64; missing or non-finite values are null (`library_q` is never null). A
 //! `below_threshold` or `identified_below_threshold` row keeps its quantity
 //! so a downstream tool can treat it as censored rather than missing.
 //!
@@ -46,7 +50,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, Float64Array, Float64Builder, StringArray, StringBuilder, UInt64Array,
+    Array, ArrayRef, BooleanArray, BooleanBuilder, Float64Array, Float64Builder, StringArray,
+    StringBuilder, UInt32Array, UInt32Builder, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
@@ -57,7 +62,7 @@ use crate::versioned_parquet::{
 
 const MBR_TABLE: TableVersion = TableVersion {
     key: "andes.mbr.schema",
-    version: "1.0",
+    version: "1.1",
     major: 1,
     what: "MBR table",
 };
@@ -82,6 +87,14 @@ pub enum EvidenceType {
 }
 
 impl EvidenceType {
+    /// A transfer row, accepted or not.
+    pub fn is_transfer(self) -> bool {
+        matches!(
+            self,
+            EvidenceType::TransferMs2 | EvidenceType::TransferMs1 | EvidenceType::BelowThreshold
+        )
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             EvidenceType::Identified => "identified",
@@ -106,9 +119,23 @@ pub struct MbrRow<'a> {
     pub quant_q: Option<f64>,
     pub apex_rt_s: Option<f64>,
     pub library_q: f64,
+    /// The same-run claims on a transfer row; `None` for other rows.
+    pub claim: Option<MbrClaim<'a>>,
 }
 
-pub const MBR_COLUMNS: [&str; 10] = [
+/// The same-run claims on one transfer row of `<base>.mbr.parquet`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MbrClaim<'a> {
+    /// Key of the best claimant, when there is one.
+    pub claimed_by: Option<&'a str>,
+    pub dt_s: Option<f64>,
+    pub identified: bool,
+    pub co_apex: bool,
+    pub n_co_apex: u32,
+    pub n_identified_co_apex: u32,
+}
+
+pub const MBR_COLUMNS: [&str; 16] = [
     "precursor_key",
     "run",
     "evidence_type",
@@ -119,6 +146,12 @@ pub const MBR_COLUMNS: [&str; 10] = [
     "quant_q",
     "apex_rt_s",
     "library_q",
+    "claimed_by",
+    "claim_dt_s",
+    "claim_identified",
+    "claim_co_apex",
+    "claim_n_co_apex",
+    "claim_n_identified_co_apex",
 ];
 
 /// The default transfer q-value threshold, at which the validation is
@@ -475,6 +508,12 @@ fn mbr_schema() -> Schema {
         f("quant_q"),
         f("apex_rt_s"),
         Field::new("library_q", DataType::Float64, false),
+        Field::new("claimed_by", DataType::Utf8, true),
+        f("claim_dt_s"),
+        Field::new("claim_identified", DataType::Boolean, true),
+        Field::new("claim_co_apex", DataType::Boolean, true),
+        Field::new("claim_n_co_apex", DataType::UInt32, true),
+        Field::new("claim_n_identified_co_apex", DataType::UInt32, true),
     ])
 }
 
@@ -485,6 +524,12 @@ struct MbrColumnsBuilder {
     ev: StringBuilder,
     floats: Vec<Float64Builder>,
     library_q: Float64Builder,
+    claimed_by: StringBuilder,
+    claim_dt: Float64Builder,
+    claim_identified: BooleanBuilder,
+    claim_co_apex: BooleanBuilder,
+    claim_n_co: UInt32Builder,
+    claim_n_id_co: UInt32Builder,
     rows: usize,
 }
 
@@ -496,6 +541,12 @@ impl MbrColumnsBuilder {
             ev: StringBuilder::new(),
             floats: (0..6).map(|_| Float64Builder::new()).collect(),
             library_q: Float64Builder::new(),
+            claimed_by: StringBuilder::new(),
+            claim_dt: Float64Builder::new(),
+            claim_identified: BooleanBuilder::new(),
+            claim_co_apex: BooleanBuilder::new(),
+            claim_n_co: UInt32Builder::new(),
+            claim_n_id_co: UInt32Builder::new(),
             rows: 0,
         }
     }
@@ -516,6 +567,15 @@ impl MbrColumnsBuilder {
             b.append_option(v.filter(|v| v.is_finite()));
         }
         self.library_q.append_value(r.library_q);
+        let c = r.claim.as_ref();
+        self.claimed_by.append_option(c.and_then(|c| c.claimed_by));
+        self.claim_dt
+            .append_option(c.and_then(|c| c.dt_s).filter(|v| v.is_finite()));
+        self.claim_identified.append_option(c.map(|c| c.identified));
+        self.claim_co_apex.append_option(c.map(|c| c.co_apex));
+        self.claim_n_co.append_option(c.map(|c| c.n_co_apex));
+        self.claim_n_id_co
+            .append_option(c.map(|c| c.n_identified_co_apex));
         self.rows += 1;
     }
 
@@ -533,6 +593,12 @@ impl MbrColumnsBuilder {
                 .map(|b| Arc::new(b.finish()) as ArrayRef),
         );
         cols.push(Arc::new(self.library_q.finish()));
+        cols.push(Arc::new(self.claimed_by.finish()));
+        cols.push(Arc::new(self.claim_dt.finish()));
+        cols.push(Arc::new(self.claim_identified.finish()));
+        cols.push(Arc::new(self.claim_co_apex.finish()));
+        cols.push(Arc::new(self.claim_n_co.finish()));
+        cols.push(Arc::new(self.claim_n_id_co.finish()));
         RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
     }
 }
@@ -620,6 +686,11 @@ pub struct MbrRecord {
     pub quant_q: Option<f64>,
     pub apex_rt_s: Option<f64>,
     pub library_q: f64,
+    /// `claimed_by` of a transfer row; `None` without a claimant, for other
+    /// rows and in a table written before schema 1.1.
+    pub claimed_by: Option<String>,
+    pub claim_co_apex: Option<bool>,
+    pub claim_n_co_apex: Option<u32>,
 }
 
 /// Reads `<base>.mbr.parquet`, in file order. Rejects another major schema
@@ -642,6 +713,19 @@ pub fn read_mbr_parquet(path: &Path) -> Result<Vec<MbrRecord>, String> {
         .map(float);
         let (q, se, norm, tq, qq, rt) = (q?, se?, norm?, tq?, qq?, rt?);
         let lib = float("library_q")?;
+        // Tables written before schema 1.1 have no claim columns.
+        let claimed = b
+            .column_by_name("claimed_by")
+            .map(|_| text("claimed_by"))
+            .transpose()?;
+        let co_apex = b
+            .column_by_name("claim_co_apex")
+            .map(|_| column::<BooleanArray>(b, "claim_co_apex", path))
+            .transpose()?;
+        let n_co = b
+            .column_by_name("claim_n_co_apex")
+            .map(|_| column::<UInt32Array>(b, "claim_n_co_apex", path))
+            .transpose()?;
         for i in 0..b.num_rows() {
             out.push(MbrRecord {
                 precursor_key: key.value(i).to_string(),
@@ -654,6 +738,11 @@ pub fn read_mbr_parquet(path: &Path) -> Result<Vec<MbrRecord>, String> {
                 quant_q: opt(qq, i),
                 apex_rt_s: opt(rt, i),
                 library_q: lib.value(i),
+                claimed_by: claimed
+                    .filter(|c| !c.is_null(i))
+                    .map(|c| c.value(i).to_string()),
+                claim_co_apex: co_apex.filter(|c| !c.is_null(i)).map(|c| c.value(i)),
+                claim_n_co_apex: n_co.and_then(|c| opt(c, i)),
             });
         }
     }
@@ -773,6 +862,7 @@ mod tests {
                 quant_q: Some(0.003),
                 apex_rt_s: Some(612.25),
                 library_q: 0.001,
+                claim: None,
             },
             MbrRow {
                 precursor_key: "PEPTIDEK/2",
@@ -785,6 +875,14 @@ mod tests {
                 quant_q: Some(0.2),
                 apex_rt_s: None,
                 library_q: 0.001,
+                claim: Some(MbrClaim {
+                    claimed_by: Some("OTHERPEPK/2"),
+                    dt_s: Some(-1.5),
+                    identified: true,
+                    co_apex: true,
+                    n_co_apex: 2,
+                    n_identified_co_apex: 1,
+                }),
             },
         ]
     }
@@ -809,6 +907,13 @@ mod tests {
                 quant_q: r.quant_q,
                 apex_rt_s: r.apex_rt_s,
                 library_q: r.library_q,
+                claimed_by: r
+                    .claim
+                    .as_ref()
+                    .and_then(|c| c.claimed_by)
+                    .map(String::from),
+                claim_co_apex: r.claim.as_ref().map(|c| c.co_apex),
+                claim_n_co_apex: r.claim.as_ref().map(|c| c.n_co_apex),
             })
             .collect();
         assert_eq!(back, want);
@@ -822,7 +927,7 @@ mod tests {
             .map(|f| f.name().clone())
             .collect();
         assert_eq!(names, MBR_COLUMNS);
-        assert_eq!(t.meta.get(MBR_TABLE.key).map(String::as_str), Some("1.0"));
+        assert_eq!(t.meta.get(MBR_TABLE.key).map(String::as_str), Some("1.1"));
         // An empty table is still a valid file.
         write_mbr_parquet(&p, &[]).unwrap();
         assert!(read_mbr_parquet(&p).unwrap().is_empty());

@@ -1602,6 +1602,11 @@ fn feature_records(
                     transfer_q: f.transfer_q,
                     quant_q: f.quant_q,
                     quantity_se: f.quantity_se,
+                    claimed_by: f
+                        .claim
+                        .claimant
+                        .map(|c| stored.library.meta[c as usize].key.clone()),
+                    claim_co_apex: f.evidence_type.is_transfer().then_some(f.claim.co_apex),
                 }),
                 group,
             })
@@ -2118,6 +2123,7 @@ mod tests {
             apex_rt_s: Some(100.0),
             library_q: 0.001,
             mass_err_ppm: Some(0.5),
+            claim: quant::claims::Claim::default(),
         };
         let features = [
             feature(0, 0, EvidenceType::Identified, None),

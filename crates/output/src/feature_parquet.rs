@@ -7,13 +7,17 @@
 //! entry per channel (`TMT126`, `TMT127N`, ...). Normalized or protein-level
 //! values are never written here; they belong to the quantms / OpenMS layer.
 //!
-//! When any record carries match-between-runs columns ([`MbrColumns`]), four
+//! When any record carries match-between-runs columns ([`MbrColumns`]), six
 //! nullable columns follow the QPX ones: `evidence_type` (`identified`,
 //! `transfer_ms2` or `transfer_ms1`; below-threshold rows are not written),
 //! `transfer_q` (the internal transfer
 //! quant-quality q-value, not an identification FDR), `quant_q` (the internal
 //! quality q-value of the row's MS1 feature: the identified-row estimate, or
-//! for a transfer the running mean of its probability of a wrong measurement) and `quantity_se`.
+//! for a transfer the running mean of its probability of a wrong measurement), `quantity_se`,
+//! `claimed_by` (a transfer's best claimant: the `peptidoform/charge` key of
+//! the other target of the run on the same MS1 feature; null without one; the
+//! row and its intensity are unchanged) and `claim_co_apex` (the claimant's
+//! apex is within the two fitted widths, so the feature's intensity is shared).
 //! Otherwise the file has exactly the QPX columns.
 
 use std::path::Path;
@@ -109,13 +113,18 @@ pub struct MbrColumns {
     /// Internal quality q-value of the MS1 feature against its decoys.
     pub quant_q: Option<f64>,
     pub quantity_se: Option<f64>,
+    /// Key of the best other target of the run on the same MS1 feature.
+    pub claimed_by: Option<String>,
+    pub claim_co_apex: Option<bool>,
 }
 
-const MBR_FIELDS: [(&str, DataType); 4] = [
+const MBR_FIELDS: [(&str, DataType); 6] = [
     ("evidence_type", DataType::Utf8),
     ("transfer_q", DataType::Float64),
     ("quant_q", DataType::Float64),
     ("quantity_se", DataType::Float64),
+    ("claimed_by", DataType::Utf8),
+    ("claim_co_apex", DataType::Boolean),
 ];
 
 fn has_mbr(records: &[FeatureRecord]) -> bool {
@@ -415,6 +424,8 @@ fn build_batch(records: &[FeatureRecord], mbr: bool) -> std::io::Result<RecordBa
     let mut transfer_q = Float64Builder::new();
     let mut quant_q = Float64Builder::new();
     let mut quantity_se = Float64Builder::new();
+    let mut claimed_by = StringBuilder::new();
+    let mut claim_co_apex = BooleanBuilder::new();
 
     let mut feature_id = Int64Builder::new();
     let mut sequence = StringBuilder::new();
@@ -666,6 +677,8 @@ fn build_batch(records: &[FeatureRecord], mbr: bool) -> std::io::Result<RecordBa
         transfer_q.append_option(m.and_then(|m| m.transfer_q));
         quant_q.append_option(m.and_then(|m| m.quant_q));
         quantity_se.append_option(m.and_then(|m| m.quantity_se));
+        claimed_by.append_option(m.and_then(|m| m.claimed_by.as_deref()));
+        claim_co_apex.append_option(m.and_then(|m| m.claim_co_apex));
     }
 
     let mut columns: Vec<ArrayRef> = vec![
@@ -708,6 +721,8 @@ fn build_batch(records: &[FeatureRecord], mbr: bool) -> std::io::Result<RecordBa
         columns.push(Arc::new(transfer_q.finish()));
         columns.push(Arc::new(quant_q.finish()));
         columns.push(Arc::new(quantity_se.finish()));
+        columns.push(Arc::new(claimed_by.finish()));
+        columns.push(Arc::new(claim_co_apex.finish()));
     }
     RecordBatch::try_new(schema, columns).map_err(|e| std::io::Error::other(e.to_string()))
 }
@@ -1005,6 +1020,8 @@ mod tests {
             transfer_q: Some(0.004),
             quant_q: Some(0.004),
             quantity_se: Some(1.5e3),
+            claimed_by: Some("OTHERK/2".into()),
+            claim_co_apex: Some(true),
         });
         let plain = record("LFQ");
         write_feature_parquet(&p, &[transferred, plain]).unwrap();
@@ -1016,11 +1033,18 @@ mod tests {
             .iter()
             .map(|f| f.name().clone())
             .collect();
-        assert_eq!(names.len(), 37);
+        assert_eq!(names.len(), 39);
         assert_eq!(names[32], "psm_ids");
         assert_eq!(
             &names[33..],
-            ["evidence_type", "transfer_q", "quant_q", "quantity_se"]
+            [
+                "evidence_type",
+                "transfer_q",
+                "quant_q",
+                "quantity_se",
+                "claimed_by",
+                "claim_co_apex"
+            ]
         );
         let batch = builder.build().unwrap().next().unwrap().unwrap();
         let et = batch
@@ -1031,6 +1055,14 @@ mod tests {
             .unwrap();
         assert_eq!(et.value(0), "transfer_ms1");
         assert!(et.is_null(1));
+        let cb = batch
+            .column_by_name("claimed_by")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(cb.value(0), "OTHERK/2");
+        assert!(cb.is_null(1));
         let q = batch
             .column_by_name("transfer_q")
             .unwrap()

@@ -908,8 +908,10 @@ the fused strong score Percolator weights most; historically `StrongScore`; it a
 | 72 | `RefCompetitor` | 0/1 | — | A canonical (or FASTA) candidate with another peptidoform was scored for the spectrum. |
 | 73 | `DeltaRefScore` | float | signed | Flagged rows: `RankScore` minus that best canonical candidate's; 0 otherwise. |
 | 74 | `IsotopeMimic` | 0/1 | — | The precursor fits better when isotope-like deltas (deamidation, N→D, Q→E) are read as isotope steps. |
-| 75 | `Peptide` | string | — | `pre.SEQUENCE.post` with `+mass` mod annotations. |
-| 76 | `Proteins` | string | — | Protein accession(s), tab-separated; decoys carry `--decoy-prefix`. A UniProt variant entry names its change (`sp\|P04637_VAR_005851_D7H\|P53_HUMAN`), an isoform its id (`sp\|P04637-2\|P53_HUMAN`), a mature chain its feature id (`sp\|P02769_PRO_0000001058\|ALBU_BOVIN`). |
+| 75 | `IsotopeErrorAbs` | int | [0, 2] | `\|isotope_error\|`. With `isotope_error` and `IsotopeErrorNeg` it lets Percolator weight each isotope offset on its own. |
+| 76 | `IsotopeErrorNeg` | 0/1 | — | 1 when the winning isotope offset is negative (the peptide is one isotope step heavier than the spectrum's precursor). |
+| 77 | `Peptide` | string | — | `pre.SEQUENCE.post` with `+mass` mod annotations. |
+| 78 | `Proteins` | string | — | Protein accession(s), tab-separated; decoys carry `--decoy-prefix`. A UniProt variant entry names its change (`sp\|P04637_VAR_005851_D7H\|P53_HUMAN`), an isoform its id (`sp\|P04637-2\|P53_HUMAN`), a mature chain its feature id (`sp\|P02769_PRO_0000001058\|ALBU_BOVIN`). |
 
 Columns marked **0.0 unless/without** stay in the header and are zero when their condition
 does not hold.

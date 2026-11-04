@@ -1,3 +1,8 @@
+//! REGENERATED 2026-11-07: two columns, `IsotopeErrorAbs` and `IsotopeErrorNeg`,
+//! were appended to the PIN before `Peptide`. Both are functions of
+//! `isotope_error`; the golden PIN was rewritten by inserting them into every
+//! row (366 rows, all other fields unchanged). The TSV is unchanged.
+//!
 //! REGENERATED 2026-10-22: decoys became peptide-level. 354 -> 366 rows: the
 //! 183 target rows stay, decoy rows 171 -> 183.
 //!

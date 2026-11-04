@@ -460,6 +460,8 @@ fn glycan_tag_with_site(
 /// structurally 0 under the collapse (delta_rt_rank returns 0 for <2 hits).
 /// The six provenance columns are filled only by the standard search's
 /// provenance pass, which the glyco driver does not run.
+/// IsotopeErrorAbs / IsotopeErrorNeg (the isotope-offset class of the standard
+/// PIN) are not emitted: the glyco PIN was not benchmarked with them.
 const GLYCO_PIN_ALWAYS_DROP: &[&str] = &[
     "mass",
     "IsolationWindowEfficiency",
@@ -481,6 +483,8 @@ const GLYCO_PIN_ALWAYS_DROP: &[&str] = &[
     "RefCompetitor",
     "DeltaRefScore",
     "IsotopeMimic",
+    "IsotopeErrorAbs",
+    "IsotopeErrorNeg",
 ];
 
 /// Is `name` emitted? Charge one-hots are always kept.

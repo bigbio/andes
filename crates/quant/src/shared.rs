@@ -539,6 +539,29 @@ mod tests {
     }
 
     #[test]
+    fn the_shipped_model_is_well_formed() {
+        let m = Model::shipped();
+        assert!(m.threshold > 0.0 && m.threshold < 1.0, "{}", m.threshold);
+        assert!(m.trees.len() > 1);
+        assert!(m.needs_ms2_evidence());
+        assert!(m.provenance.iter().any(|l| l.contains("trained")));
+        assert!(m.provenance.iter().any(|l| l.contains("held-out")));
+        // A transfer with no claimant at all is never downgraded, whatever
+        // else the row says.
+        let row = Row {
+            claim: &Claim::default(),
+            shared: None,
+            ms2_supported: false,
+            transfer_q: 0.0001,
+            llr: 100.0,
+            width: 30.0,
+        };
+        assert!(!m.is_shared(&row));
+        let p = m.probability(&row);
+        assert!((0.0..=1.0).contains(&p));
+    }
+
+    #[test]
     fn malformed_models_are_rejected() {
         assert!(Model::parse("features: co\ntree\nL 1.0\n").unwrap_err().contains("threshold"));
         assert!(Model::parse("features: nope\nthreshold: 0.5\n").unwrap_err().contains("unknown feature"));

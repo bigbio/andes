@@ -2125,12 +2125,21 @@ mod tests {
             mass_err_ppm: Some(0.5),
             claim: quant::claims::Claim::default(),
         };
-        let features = [
+        let mut features = [
             feature(0, 0, EvidenceType::Identified, None),
             feature(0, 1, EvidenceType::BelowThreshold, Some(0.2)),
             feature(1, 0, EvidenceType::TransferMs1, Some(0.004)),
             feature(1, 1, EvidenceType::IdentifiedBelowThreshold, None),
         ];
+        features[2].claim = quant::claims::Claim {
+            claimant: Some(0),
+            dt_s: Some(0.5),
+            identified: true,
+            co_apex: true,
+            n: 1,
+            n_co_apex: 1,
+            n_identified_co_apex: 1,
+        };
         let records = feature_records(&stored, &features, &mut 0, None, &mut GroupTally::default());
         let got: Vec<(i64, &str, &str)> = records
             .iter()
@@ -2153,6 +2162,18 @@ mod tests {
             .map(|r| r.mbr.as_ref().unwrap().quant_q)
             .collect();
         assert_eq!(quant_q, [Some(0.003), Some(0.004)]);
+        let claims: Vec<(Option<&str>, Option<bool>)> = records
+            .iter()
+            .map(|r| {
+                let m = r.mbr.as_ref().unwrap();
+                (m.claimed_by.as_deref(), m.claim_co_apex)
+            })
+            .collect();
+        assert_eq!(
+            claims,
+            [(None, None), (Some("PEPTIDEK/2"), Some(true))],
+            "a transfer reports its claimant's key and co-apex flag, an identified row neither"
+        );
         assert_eq!(records[0].proteins[0].0, "P1");
         assert!(records[0].group.is_none());
 

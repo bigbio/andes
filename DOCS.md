@@ -1795,10 +1795,13 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
   fitted widths: the two probes then measure one MS1 feature, whose quantity belongs to
   both compounds (isobaric residue combinations and permutations of the library) or to the
   claimant alone (a transfer into a run without the analyte). The claim is a flag: no row, quantity,
-  evidence type or q-value changes. On benchmark designs a co-apex claimant doubles to
-  quadruples the false-transfer rate of a transfer, which the pooled decoy estimates do not
-  see; no rule that removes or down-weights the claimed rows passed the no-harm checks
-  (true low-level transfers have the same claim profile), so a downstream tool decides.
+  evidence type or q-value changes. In a known-absent benchmark (yeast peptides in runs
+  without yeast) 5.4 % of the accepted transfers with a co-apex claimant were absent against
+  0.16 % of those without a claimant,
+  which the pooled decoy estimates do not see; in a masked-analyte test 12 % of the
+  transfers with an identified co-apex claimant sat on the wrong peak against 2.3 % overall.
+  A rule that removes or down-weights the claimed rows also removed true low-level transfers
+  (they have the same claim profile), so the decision is left to the downstream tool.
 * **Normalised quantity.** `<stem>.mbr.parquet` also reports `quantity_normalized`: the reported
   quantity divided by `2^o`, where `o` is the run's log2 offset at the row's apex RT. The
   offsets are fitted across runs on the identified rows with `quant_q ≤ 0.01` of precursors

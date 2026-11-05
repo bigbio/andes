@@ -92,9 +92,9 @@ Install with `cargo install --git https://github.com/bigbio/andes --bin andes`, 
     Entrapment-estimated on Astral with a peptide-level shuffle. Error rates are measured on every
     benchmark, not assumed. [Error control](benchmarks/index.md#error-control-does-the-nominal-1-hold)
 
--   **65,012** precursors quantified
+-   **63,796** precursors quantified
 
-    In at least 3 runs of the ProteoBench Q Exactive module, median |ε| 0.163.
+    In at least 3 runs of the ProteoBench Q Exactive module, median |ε| 0.161.
     [Quantification](quantification.md)
 
 -   **17** bundled scoring models

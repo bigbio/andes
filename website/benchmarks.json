@@ -1,5 +1,5 @@
 {
- "_provenance": "Copied from README.md 'Identification benchmarks' and docs/benchmarks/README.md section 1-2. Update together with those tables. andes rows: 2051616b (2026-10-23); Comet 2025.01 (2026-10-05/06); Java MS-GF+ v20240326 (earlier session, not re-run). PSMs at Percolator q <= 0.01, 8 threads, same benchmark VM.",
+ "_provenance": "Copied from README.md 'Identification benchmarks' and docs/benchmarks/README.md section 1-2. Update together with those tables. andes rows: 2051616b (2026-10-23); Comet 2025.01 (2026-10-05/06); Java MS-GF+ v20240326 (earlier session, not re-run). PSMs at Percolator q <= 0.01, 8 threads, same benchmark VM. Quantification entries (quant_accuracy, tmt_interference): andes at 09e1c00d (quant_accuracy) and 0cfa03cc (tmt_interference), 2026-11-05.",
  "andes_commit": "2051616b",
  "andes_date": "2026-10-23",
  "datasets": [
@@ -178,26 +178,26 @@
   ]
  },
  "tmt_interference": {
-  "_note": "Knockout-channel interference, median ratio, lower is better; PXD017803, 2026-10-23 at 2051616b. docs/benchmarks/README.md TMT section. 36-91 knockout PSMs behind each value.",
+  "_note": "Knockout-channel interference, median ratio, lower is better; PXD017803, 2026-11-05 at 0cfa03cc. docs/benchmarks/README.md TMT section. 34-91 knockout PSMs behind each value.",
   "acquisitions": [
    "SPS-MS3",
    "RTS-MS3",
    "hrMS2"
   ],
   "andes (quant gate)": [
-   0.064,
-   0.023,
-   0.182
+   0.062,
+   0.027,
+   0.192
   ],
   "without the gate": [
-   0.128,
+   0.117,
    0.033,
-   0.185
+   0.202
   ],
   "stricter purity filter (≥ 0.9)": [
-   0.032,
+   0.023,
    0.015,
-   0.134
+   0.135
   ],
   "unmix_hrms2": 0.0
  },
@@ -352,12 +352,12 @@
   }
  },
  "quant_accuracy": {
-  "_note": "ProteoBench leaderboard snapshot 2026-07-16 and andes 2026-10-23 at 2051616b (defaults, transfer q 0.01). From docs/benchmarks/README.md section 2 tables. k = precursors quantified in >= 3 runs, v = median |eps| (lower is better).",
+  "_note": "ProteoBench leaderboard snapshot 2026-07-16 and andes 2026-11-05 at 09e1c00d (defaults, transfer q 0.01). From docs/benchmarks/README.md section 2 tables. k = precursors quantified in >= 3 runs, v = median |eps| (lower is better).",
   "QExactive": [
    [
     "andes",
-    65012,
-    0.163,
+    63796,
+    0.161,
     1
    ],
    [
@@ -418,8 +418,8 @@
   "Astral": [
    [
     "andes",
-    37352,
-    0.193,
+    36675,
+    0.186,
     1
    ],
    [

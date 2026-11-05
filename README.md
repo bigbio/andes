@@ -67,24 +67,33 @@ roll-up and test for all). andes defaults at `09e1c00d` (label-free) and `0cfa03
 settings and the cases where other tools do better:
 [`docs/benchmarks/`](docs/benchmarks/README.md#quantification-truth-designs-match-between-runs-on-and-off).
 
-Where andes stands: **well ahead**, **ahead**, **comparable**, **behind** or **well behind** the
-best of the other tools on that measure.
+Legend: 🟢 andes better · 🟡 similar · 🔴 andes worse · ⚪ no comparison. The last column says whether a gap can be closed downstream of andes (filtering on its quality columns, a fold-change cut, normalisation or roll-up) or needs a change in the engine, and how much the gap matters: **minor** (usable as is), **moderate** (usable with the care stated), **major** (default results are hurt badly; use the fix). No result is unusable; the one major gap is the default TMT quality gate on hrMS2. "Best other tool" is the strongest result another tool reported on the same data for that metric; percentages are andes relative to it.
 
-| measure (design) | andes | other tools | where andes stands |
-|---|---|---|---|
-| Depth: precursors and cells quantified (all eight truth sets) | 10.7k–93.6k precursors | MaxQuant 9.3k–51.6k, FragPipe 10.4k–71.4k | **well ahead** on 7 of 8 sets (+19% to +51% over the best other tool), **comparable** on PXD001819 (+3%) |
-| Accuracy, ProteoBench QExactive (median \|ε\|, 6 runs) | 0.161, 63,796 precursors | FragPipe 23.0 0.190 (leaderboard) | **ahead** |
-| Accuracy, ProteoBench Astral (median \|ε\|) | 0.186, 36,675 precursors | DIA-NN 2.6.0 0.123 (16,363 precursors; DIA) | **behind** on accuracy, **well ahead** on depth |
-| DE true positives with MBR (PXD009740 / QE / Astral) | 1,376 / 1,319 / 759 | MaxQuant 1,361 / 904 / 659; FragPipe 1,262 / 985 / 754 | **comparable** on PXD009740 and Astral, **well ahead** on QE (+34%) |
-| DE false positives with MBR, no fold-change cut (PXD009740 / QE) | 360 / 111 | MaxQuant 142 / 37 | **well behind** (2.5–3x) |
-| DE false positives with \|log2 FC\| ≥ 0.5 (PXD009740 / QE) | 256 / 16 | MaxQuant 101 / 19 | **behind** on UPS1, **comparable** on QE |
-| Faint UPS1 detected within 2x (three lowest levels; PXD009740 / PXD009815) | 502 / 24 | MaxQuant 417 / 23, FragPipe 458 / 50 | **ahead** on PXD009740, **behind** FragPipe on PXD009815 |
-| Known-absent yeast (PXD014415): false-transfer rate | 0.20% (0.08% at `quant_q ≤ 0.01`) | FragPipe 0.09% | **behind** at the default, **comparable** at `quant_q ≤ 0.01` |
-| Identified-cell accuracy: bright-decile gross error (> 2x) | 1.2–7.2% | MaxQuant 0.3–1.6%, FragPipe 0.3–3.8% | **well behind** |
-| Precision: protein CV (six sets) | 4.4–10.1% | MaxQuant 7.0–11.6%, FragPipe 4.9–13.5% | **ahead** on 3 sets (PXD009740, PXD009815, QE), **comparable** on PXD030780, **behind** FragPipe on Astral and PXD001819 |
-| TMT match between runs (hrMS2, PXD014750): excess wrong-value rate of transfers | −0.05 points (3,636 transfers) | MaxQuant isobaric MBR +1.53, SIMSI-Transfer +0.40 (more cells) | **well ahead** on accuracy, **behind** on cells transferred |
-| TMT knockout interference, hrMS2 (PXD017803) | 0.192; 0.000 with `--tmt-unmix` | MaxQuant 0.156, quantms 0.180, FragPipe 0.214 | **comparable** by default, **well ahead** with `--tmt-unmix` |
-| TMT PSMs quantified after the quality gate, hrMS2 | 3,481 | MaxQuant 9,677 | **well behind** (the default gate is strict on hrMS2) |
+| benchmark (data) | metric | andes | best other tool | result | impact · can it be fixed downstream? |
+|---|---|---:|---|---|---|
+| ProteoBench QExactive, PXD028735 (6 runs) | median \|ε\| (lower is better) | 0.161 | FragPipe 23.0: 0.190 | 🟢 15% lower error | — |
+| ProteoBench QExactive | precursors in ≥ 3 runs | 63,796 | i2MassChroQ 1.0.16: 74,697 (\|ε\| 0.222); FragPipe 23.0: 63,701 | 🟡 similar to FragPipe; fewer than submissions with higher error | — |
+| ProteoBench QExactive | CV | 0.117 | i2MassChroQ 1.2.0: 0.120 | 🟢 lowest | — |
+| ProteoBench Astral, PXD070049 (6 runs) | median \|ε\| at similar depth (36–39k) | 0.186 | i2MassChroQ 1.2.6: 0.197; FragPipe 23.0: 0.212 | 🟢 lowest at this depth | — |
+| ProteoBench Astral | median \|ε\|, any depth | 0.186 | MaxQuant 2.6.7.0: 0.160 (20,283 precursors); Sage 0.14.6: 0.167 (30,319) | 🔴 higher than tools reporting fewer precursors | **minor**, usable. Partly: a stricter transfer q trades depth for error, but identified rows alone also read 0.186, so the rest is in the engine (peak fit) |
+| ProteoBench Astral | precursors in ≥ 3 runs | 36,675 | FragPipe 23.0: 39,057 | 🟡 similar | — |
+| ProteoBench Astral | CV | 0.112 | Sage 0.14.6: 0.070 | 🔴 higher | **minor**, usable. Partly: identified rows alone give 0.100; normalisation changes little (0.113 raw) |
+| Truth designs (8 sets) | precursors quantified | 10.7k–93.6k | MaxQuant 2.7 / FragPipe 21.1 per set | 🟢 +19% to +51% on 7 sets, 🟡 +3% on PXD001819 | — |
+| Truth designs, PXD009740 / QE / Astral | DE true positives (MBR on) | 1,376 / 1,319 / 759 | MaxQuant 1,361 / FragPipe 985 / FragPipe 754 | 🟡 / 🟢 +34% / 🟡 | — |
+| Truth designs, PXD009740 / QE | DE false positives, no fold-change cut | 360 / 111 | MaxQuant 142 / 37 | 🔴 2.5–3x more | partly: a fold-change cut (\|log2 FC\| **moderate**: apply a fold-change cut. ≥ 0.5) brings QE level with MaxQuant (16 against 19); PXD009740 stays 2.5x (256 against 101) |
+| Truth designs, PXD009740 / QE | DE false positives, \|log2 FC\| ≥ 0.5 | 256 / 16 | MaxQuant 101 / 19 | 🔴 / 🟡 | **moderate** on UPS1-type designs. No for PXD009740: needs the engine (bright-cell error, transfers into low cells) |
+| Truth designs, all sets | bright identified cells off by > 2x | 1.2–7.2% | MaxQuant 0.3–1.6% | 🔴 | **moderate**, few cells, usable. Partly: quality columns let a downstream weighting down-weight them; the fix is in the engine (template misfit on fronting or tailing peaks) |
+| Truth designs, 6 sets | protein CV | 4.4–10.1% | FragPipe 4.9–13.5%, MaxQuant 7.0–11.6% | 🟢 on 3 sets, 🔴 on Astral and PXD001819 | **minor**, usable. Partly: dropping transfers or weighting by quality columns |
+| UPS1 lowest levels, PXD009740 / PXD009815 | precursors within 2x of truth | 502 / 24 | FragPipe 458 / 50 | 🟢 / 🔴 | **minor**, lowest amounts only. No: engine (faint-transfer detection) |
+| Known-absent yeast, PXD014415 | false-transfer rate | 0.20% (0.08% at `quant_q ≤ 0.01`) | FragPipe 21.1: 0.09% | 🔴 at default, 🟡 at `quant_q ≤ 0.01` | **minor**, usable. Yes: filter `quant_q ≤ 0.01` (0.08%, at fewer transfers) |
+| Blank run, PXD016921 | rows reported in the blank | 150 | FragPipe 21.1: 8 | 🔴 | **moderate** for low-input or blank-adjacent runs. No: `quant_q ≤ 0.01` still leaves 144; mostly carry-over (real ions) |
+| TMT knockout, PXD017803 SPS / RTS / hrMS2 | interference (lower is better) | 0.062 / 0.027 / 0.192 | MaxQuant 2.7: 0.054 / 0.038 / 0.156 | 🟡 / 🟢 / 🔴 (🟢 0.000 with `--tmt-unmix`) | **moderate** on hrMS2, usable with the option. Yes for hrMS2: `--tmt-unmix` (0.000) or a purity ≥ 0.9 filter (0.135) |
+| TMT knockout, hrMS2 | PSMs passing the quality gate | 3,481 | MaxQuant 2.7: 9,677 | 🔴 | **major** by default on hrMS2 (74% of PSMs not quantified). Yes: the gate is a filter on the reported purity and PEP; without it 13,474 PSMs at interference 0.202 |
+| TMT known ratios, PXD007683 | PSMs | 149,121 | MaxQuant 2.7: 97,107 | 🟢 +54% | — |
+| TMT known ratios, PXD007683 | protein ratio error (MAE A/C) | 0.213 | MaxQuant 2.7: 0.159 | 🔴 | **moderate**, usable. Partly: a stricter purity filter; the rest is extraction and roll-up |
+| TMT match between runs, PXD014750 hrMS2 | excess wrong-value rate of transfers | −0.05 points | SIMSI-Transfer 0.8: +0.40; MaxQuant isobaric MBR: +1.53 | 🟢 | — |
+| TMT match between runs | cells transferred | 3,636 | SIMSI-Transfer 0.8: 16,511 | 🔴 fewer | **minor** (opt-in mode). Yes: a looser `quant_q` keeps all 7,841 candidates at +0.40 points, the same as SIMSI-Transfer |
+| Large study, PXD042233 (500 runs) | precursors in ≥ 3 runs | 243,895 | not measured | ⚪ | — |
 
 <sub>DE: proteins with ≥ 2 precursors tested by every tool of the set, moderated t, Benjamini–Hochberg
 5%. Knockout interference rests on 26–91 knockout PSMs per value, so read it as a direction.

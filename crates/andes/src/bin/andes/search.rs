@@ -3044,6 +3044,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             inf,
             max_q: cli.protein_fdr.unwrap_or(0.01),
         });
+    let tmt_mbr_input = (cli.mbr && cli.tmt.is_some()).then(|| crate::quant_run::TmtMbrInput {
+        decoys: &mbr_decoys,
+        source: &mbr_source,
+        library_fdr: cli.mbr_library_fdr,
+        accept_q: cli.mbr_fdr,
+        wrong_log2: cli.mbr_wrong_log2,
+    });
     let quant_summary = match &quant {
         Some(q) => Some(crate::quant_run::run_quant(
             q,
@@ -3056,6 +3063,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &report_base,
             cli.output_parquet.as_deref(),
             qpx_groups.as_ref(),
+            tmt_mbr_input.as_ref(),
         )?),
         None => None,
     };
@@ -3099,7 +3107,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // `--mbr` inputs; the stages run after the last search output is
     // written and the search state is released.
-    let mbr_job = if cli.mbr {
+    let mbr_job = if cli.mbr && cli.tmt.is_none() {
         let (Some(dir), Some(map)) = (cli.quant_dir.clone(), rescore_map.as_ref()) else {
             return Err("--mbr needs --quant-dir and rescoring".into());
         };
@@ -3364,8 +3372,8 @@ fn check_mbr_args(cli: &Cli) -> Result<(), String> {
             cli.spectrum.len()
         ));
     }
-    if !cli.lfq {
-        return Err("--mbr needs --lfq".into());
+    if !cli.lfq && cli.tmt.is_none() {
+        return Err("--mbr needs --lfq (label-free) or --tmt (reporter ions)".into());
     }
     if !cli.rescore && !cli.rescore_native {
         return Err(
@@ -3374,7 +3382,21 @@ fn check_mbr_args(cli: &Cli) -> Result<(), String> {
         );
     }
     if cli.tmt.is_some() {
-        return Err("--mbr is label-free and cannot be combined with --tmt".into());
+        if cli.lfq {
+            return Err(
+                "--mbr transfers either label-free MS1 quantities (--lfq) or reporter ions \
+                 (--tmt), not both; run them separately"
+                    .into(),
+            );
+        }
+        if cli.tmt_level.is_some_and(|level| level >= 3) {
+            return Err(
+                "--mbr with --tmt needs the reporter ions in the MS2 scans and does not apply \
+                 to SPS-MS3 reporters (--tmt-level 3)"
+                    .into(),
+            );
+        }
+        return Ok(());
     }
     crate::quant_cmd::evidence_params(cli.lfq_tol)?;
     Ok(())

@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use arrow::array::{
     ArrayRef, BooleanBuilder, Float32Builder, Float64Builder, Int32Builder, ListBuilder,
-    StringBuilder, UInt32Builder, UInt8Builder,
+    StringBuilder, UInt16Builder, UInt32Builder, UInt8Builder,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
@@ -107,6 +107,45 @@ pub struct TmtRow {
     /// scan could not be modelled).
     pub interference: Option<f32>,
     pub unmixed: Option<Vec<f32>>,
+    /// Match-between-runs: the evidence of a transferred row; `None` for an
+    /// identified one.
+    pub transfer: Option<TransferInfo>,
+}
+
+/// What a transferred reporter row records about its transfer
+/// (`--tmt --mbr`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TransferInfo {
+    /// Internal quant-quality q-value of the row: the running mean, over the
+    /// run set's transfers in ascending predicted risk, of the predicted
+    /// excess error over the identified noise floor. Not an identification
+    /// FDR.
+    pub quant_q: f64,
+    /// Predicted probability that the value is wrong (identity or value).
+    pub p_wrong: f32,
+    /// The identified noise floor predicted at the same scan covariates.
+    pub noise_floor: f32,
+    /// The parts of `p_wrong`: the probability that the scan is another
+    /// peptide's (target-decoy odds of the identity model) and that the value
+    /// of a right-identity transfer is wrong.
+    pub p_identity: f32,
+    pub p_value: f32,
+    /// Fragment evidence of the donor peptide in the scan: spectral angle,
+    /// matched library fragments and explained library intensity.
+    pub angle: f32,
+    pub n_matched: u8,
+    pub explained: f32,
+    /// Retention-time residual (in predicted widths) and precursor m/z error
+    /// (ppm) against the donor.
+    pub rt_z: f32,
+    pub ppm: f32,
+    /// Donor evidence: best donor PSM q-value, donor runs, the run of the
+    /// best donor PSM and the highest channel-loading cosine between the
+    /// acceptor and a donor run (similar loading: the same plex mixture).
+    pub donor_q: f64,
+    pub n_donors: u16,
+    pub donor_run: String,
+    pub batch_cos: f32,
 }
 
 impl TmtRow {
@@ -151,6 +190,9 @@ pub const TMT_CORRECTED_KEY: &str = "andes.tmt.corrected";
 /// `tmt.parquet` metadata: whether the interference-unmixing block was
 /// written (`true` / `false`).
 pub const TMT_UNMIX_KEY: &str = "andes.tmt.unmix";
+/// `tmt.parquet` metadata, present with `--mbr`: the table holds transferred
+/// rows and the evidence columns.
+pub const TMT_MBR_KEY: &str = "andes.tmt.mbr";
 /// `lfq.parquet` metadata: the run stems in input order (newline-joined),
 /// and the feature q-value and cosine cuts of the `accepted` column.
 pub const LFQ_RUNS_KEY: &str = "andes.lfq.runs";
@@ -166,7 +208,28 @@ fn channel_prefix(plex: Plex) -> &'static str {
     }
 }
 
-fn tmt_schema(plex: Plex, corrected: bool, unmixed: bool) -> Schema {
+/// The columns `--tmt --mbr` appends to `tmt.parquet`.
+fn mbr_fields() -> Vec<Field> {
+    vec![
+        Field::new("evidence_type", DataType::Utf8, false),
+        Field::new("quant_q", DataType::Float64, true),
+        Field::new("p_wrong", DataType::Float32, true),
+        Field::new("noise_floor", DataType::Float32, true),
+        Field::new("p_identity", DataType::Float32, true),
+        Field::new("p_value", DataType::Float32, true),
+        Field::new("transfer_angle", DataType::Float32, true),
+        Field::new("transfer_matched", DataType::UInt8, true),
+        Field::new("transfer_explained", DataType::Float32, true),
+        Field::new("transfer_rt_z", DataType::Float32, true),
+        Field::new("transfer_ppm", DataType::Float32, true),
+        Field::new("donor_q", DataType::Float64, true),
+        Field::new("donor_runs", DataType::UInt16, true),
+        Field::new("donor_run", DataType::Utf8, true),
+        Field::new("donor_batch_cos", DataType::Float32, true),
+    ]
+}
+
+fn tmt_schema(plex: Plex, corrected: bool, unmixed: bool, mbr: bool) -> Schema {
     let prefix = channel_prefix(plex);
     let mut fields = vec![
         Field::new("filename", DataType::Utf8, false),
@@ -222,6 +285,9 @@ fn tmt_schema(plex: Plex, corrected: bool, unmixed: bool) -> Schema {
             ));
         }
     }
+    if mbr {
+        fields.extend(mbr_fields());
+    }
     Schema::new(fields)
 }
 
@@ -230,6 +296,7 @@ fn tmt_batch(
     n_channels: usize,
     corrected: bool,
     unmixed: bool,
+    mbr: bool,
     rows: &[TmtRow],
 ) -> Result<RecordBatch, String> {
     let mut filename = StringBuilder::new();
@@ -254,6 +321,21 @@ fn tmt_batch(
     let mut sn: Vec<Float32Builder> = (0..n_channels).map(|_| Float32Builder::new()).collect();
     let mut interference = Float32Builder::new();
     let mut unmix: Vec<Float32Builder> = (0..n_channels).map(|_| Float32Builder::new()).collect();
+    let mut evidence = StringBuilder::new();
+    let mut quant_q = Float64Builder::new();
+    let mut p_wrong = Float32Builder::new();
+    let mut floor = Float32Builder::new();
+    let mut p_identity = Float32Builder::new();
+    let mut p_value = Float32Builder::new();
+    let mut angle = Float32Builder::new();
+    let mut matched = UInt8Builder::new();
+    let mut explained = Float32Builder::new();
+    let mut rt_z = Float32Builder::new();
+    let mut ppm = Float32Builder::new();
+    let mut donor_q = Float64Builder::new();
+    let mut donor_runs = UInt16Builder::new();
+    let mut donor_run = StringBuilder::new();
+    let mut batch_cos = Float32Builder::new();
     for r in rows {
         let id = &r.id;
         if r.raw.len() != n_channels
@@ -297,6 +379,26 @@ fn tmt_batch(
         for (i, b) in unmix.iter_mut().enumerate() {
             b.append_option(r.unmixed.as_ref().map(|v| v[i]));
         }
+        let t = r.transfer.as_ref();
+        evidence.append_value(if t.is_some() {
+            "transferred"
+        } else {
+            "identified"
+        });
+        quant_q.append_option(t.map(|t| t.quant_q));
+        p_wrong.append_option(t.map(|t| t.p_wrong));
+        floor.append_option(t.map(|t| t.noise_floor));
+        p_identity.append_option(t.map(|t| t.p_identity));
+        p_value.append_option(t.map(|t| t.p_value));
+        angle.append_option(t.map(|t| t.angle));
+        matched.append_option(t.map(|t| t.n_matched));
+        explained.append_option(t.map(|t| t.explained));
+        rt_z.append_option(t.map(|t| t.rt_z));
+        ppm.append_option(t.map(|t| t.ppm));
+        donor_q.append_option(t.map(|t| t.donor_q));
+        donor_runs.append_option(t.map(|t| t.n_donors));
+        donor_run.append_option(t.map(|t| t.donor_run.as_str()));
+        batch_cos.append_option(t.map(|t| t.batch_cos));
     }
     let mut cols: Vec<ArrayRef> = vec![
         Arc::new(filename.finish()),
@@ -326,6 +428,23 @@ fn tmt_batch(
         cols.push(Arc::new(interference.finish()));
         cols.extend(unmix.iter_mut().map(|b| Arc::new(b.finish()) as ArrayRef));
     }
+    if mbr {
+        cols.push(Arc::new(evidence.finish()));
+        cols.push(Arc::new(quant_q.finish()));
+        cols.push(Arc::new(p_wrong.finish()));
+        cols.push(Arc::new(floor.finish()));
+        cols.push(Arc::new(p_identity.finish()));
+        cols.push(Arc::new(p_value.finish()));
+        cols.push(Arc::new(angle.finish()));
+        cols.push(Arc::new(matched.finish()));
+        cols.push(Arc::new(explained.finish()));
+        cols.push(Arc::new(rt_z.finish()));
+        cols.push(Arc::new(ppm.finish()));
+        cols.push(Arc::new(donor_q.finish()));
+        cols.push(Arc::new(donor_runs.finish()));
+        cols.push(Arc::new(donor_run.finish()));
+        cols.push(Arc::new(batch_cos.finish()));
+    }
     RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
 }
 
@@ -348,22 +467,60 @@ pub fn write_tmt_parquet(
     corrected: bool,
     unmixed: bool,
 ) -> Result<(), String> {
-    let schema = Arc::new(tmt_schema(plex, corrected, unmixed));
+    write_tmt(path, plex, rows, corrected, unmixed, false)
+}
+
+/// Like [`write_tmt_parquet`] for `--tmt --mbr` (schema 1.2): after the
+/// other columns, `evidence_type` (`identified` or `transferred`) and, null
+/// for identified rows, `quant_q` (the internal quant-quality q-value of the
+/// transfer, not an identification FDR), `p_wrong` and `noise_floor` (the
+/// predicted probability that the value is wrong and the identified floor at
+/// the same scan covariates), `p_identity` and `p_value` (the parts of
+/// `p_wrong`), the donor peptide's fragment evidence in the
+/// scan (`transfer_angle`, `transfer_matched`, `transfer_explained`), the
+/// retention-time residual in predicted widths (`transfer_rt_z`) and the
+/// precursor m/z error in ppm (`transfer_ppm`), and the donor evidence
+/// (`donor_q`, `donor_runs`, `donor_run`, `donor_batch_cos`). A transferred
+/// row's `peptide`, `charge` and `proteins` are the donor's, `scannr` and
+/// `spec_id` the acceptor scan's, `psm_q_value` and `psm_pep` null.
+pub fn write_tmt_parquet_mbr(
+    path: &Path,
+    plex: Plex,
+    rows: &[TmtRow],
+    corrected: bool,
+    unmixed: bool,
+) -> Result<(), String> {
+    write_tmt(path, plex, rows, corrected, unmixed, true)
+}
+
+fn write_tmt(
+    path: &Path,
+    plex: Plex,
+    rows: &[TmtRow],
+    corrected: bool,
+    unmixed: bool,
+    mbr: bool,
+) -> Result<(), String> {
+    let schema = Arc::new(tmt_schema(plex, corrected, unmixed, mbr));
     let n = plex.n_channels();
     let batches = rows
         .chunks(BATCH_ROWS)
-        .map(|c| tmt_batch(&schema, n, corrected, unmixed, c));
+        .map(|c| tmt_batch(&schema, n, corrected, unmixed, mbr, c));
+    let mut meta = vec![
+        (TMT_PLEX_KEY, plex.name().to_string()),
+        (TMT_CORRECTED_KEY, corrected.to_string()),
+        (TMT_UNMIX_KEY, unmixed.to_string()),
+    ];
+    if mbr {
+        meta.push((TMT_MBR_KEY, "true".to_string()));
+    }
     write_table(
         path,
         &TMT_TABLE,
-        TMT_TABLE.version,
+        if mbr { "1.2" } else { TMT_TABLE.version },
         schema.clone(),
         batches,
-        &[
-            (TMT_PLEX_KEY, plex.name().to_string()),
-            (TMT_CORRECTED_KEY, corrected.to_string()),
-            (TMT_UNMIX_KEY, unmixed.to_string()),
-        ],
+        &meta,
     )
 }
 
@@ -635,6 +792,7 @@ mod tests {
             quant_gate_passed: true,
             interference: None,
             unmixed: None,
+            transfer: None,
         }
     }
 
@@ -714,6 +872,47 @@ mod tests {
         short.raw.pop();
         assert!(write_tmt_parquet(&p, Plex::Itraq4, &[short], false, false).is_err());
         assert!(!dir.path().join("x.tmt.parquet.partial").exists());
+    }
+
+    #[test]
+    fn tmt_parquet_mbr_appends_evidence_columns_and_leaves_the_default_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("m.tmt.parquet");
+        let mut transferred = tmt_row();
+        transferred.id.q_value = None;
+        transferred.transfer = Some(TransferInfo {
+            quant_q: 0.004,
+            p_wrong: 0.03,
+            noise_floor: 0.02,
+            p_identity: 0.01,
+            p_value: 0.02,
+            angle: 0.7,
+            n_matched: 5,
+            explained: 0.6,
+            rt_z: 0.5,
+            ppm: -1.5,
+            donor_q: 1e-4,
+            n_donors: 3,
+            donor_run: "r1".into(),
+            batch_cos: 0.99,
+        });
+        write_tmt_parquet_mbr(&p, Plex::Itraq4, &[tmt_row(), transferred], true, false).unwrap();
+        let t = read_tmt_parquet(&p).unwrap();
+        assert_eq!(t.meta.get(TMT_MBR_KEY).map(String::as_str), Some("true"));
+        let header = names(&t);
+        assert_eq!(header.len(), 13 + 8 + 4 + 4 + 15);
+        assert_eq!(header[29], "evidence_type");
+        let b = &t.batches[0];
+        let et = column::<StringArray>(b, "evidence_type", &p).unwrap();
+        assert_eq!((et.value(0), et.value(1)), ("identified", "transferred"));
+        let q = column::<Float64Array>(b, "quant_q", &p).unwrap();
+        assert_eq!((opt(q, 0), opt(q, 1)), (None, Some(0.004)));
+        assert_eq!(f32_at(b, "donor_batch_cos", &p), [None, Some(0.99)]);
+        // The default writer is the 1.1 layout without the block.
+        write_tmt_parquet(&p, Plex::Itraq4, &[tmt_row()], true, false).unwrap();
+        let t = read_tmt_parquet(&p).unwrap();
+        assert!(!t.meta.contains_key(TMT_MBR_KEY));
+        assert_eq!(names(&t).len(), 13 + 8 + 4 + 4);
     }
 
     #[test]
@@ -848,8 +1047,8 @@ mod tests {
     fn quant_readers_reject_other_majors_and_each_others_files() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("x.parquet");
-        let schema = Arc::new(tmt_schema(Plex::Itraq4, false, false));
-        let b = tmt_batch(&schema, 4, false, false, &[tmt_row()]);
+        let schema = Arc::new(tmt_schema(Plex::Itraq4, false, false, false));
+        let b = tmt_batch(&schema, 4, false, false, false, &[tmt_row()]);
         write_table(&p, &TMT_TABLE, "2.1", schema, [b], &[]).unwrap();
         let e = read_tmt_parquet(&p).err().unwrap();
         assert!(e.contains("x.parquet") && e.contains("schema 2.1"), "{e}");

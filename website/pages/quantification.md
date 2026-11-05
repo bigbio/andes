@@ -30,35 +30,59 @@ flowchart TD
 Median |ε| is the median absolute error of the measured log-ratio against the known mixture
 ratio (lower is better); the x axis is the number of precursors quantified in at least 3 runs. Each
 point is one leaderboard submission (public snapshot of 2026-07-16); andes is the default
-setting at transfer q 0.01 (2026-10-23, `2051616b`).
+setting at transfer q 0.01 (2026-11-05, `09e1c00d`).
 
 ![Precursors quantified against median ratio error, every submission on two ProteoBench modules](figures/quant_accuracy.svg)
 
 Read the figure with its conditions:
 
-- **Q Exactive module** (PXD028735, 6 runs, human/yeast/*E. coli*): andes quantifies 65,012
-  precursors at median |ε| 0.163 and CV 0.118. The listed submissions with the most precursors
+- **Q Exactive module** (PXD028735, 6 runs, human/yeast/*E. coli*): andes quantifies 63,796
+  precursors at median |ε| 0.161 and CV 0.117 (52,166 at 0.154 and 0.105 without transfers).
+  The listed submissions with the most precursors
   have a higher median error: i2MassChroQ 1.0.16 (74,697, 0.222) and Sage 0.15.0-beta.2 (81,933,
   0.388, transferred values not error-controlled).
 - **Astral module** (PXD070049, 6 runs): several submissions have a lower median error than
-  andes's 0.193, mostly at fewer precursors: DIA-NN 2.6.0 (16,363, 0.123), MaxQuant 2.6.7
-  (20,283, 0.160), Sage 0.14.6 (30,319, 0.167) and FragPipe 22.1 (29,105, 0.181). andes's CV (0.113)
+  andes's 0.186 (36,675 precursors; 31,739 at the same 0.186 without transfers), mostly at fewer
+  precursors: DIA-NN 2.6.0 (16,363, 0.123), MaxQuant 2.6.7
+  (20,283, 0.160), Sage 0.14.6 (30,319, 0.167) and FragPipe 22.1 (29,105, 0.181). andes's CV (0.112)
   is above most submissions.
 - Error control on transferred values differs between submissions; the
   [benchmark report](benchmarks/details.md#2-the-benchmarks) lists what each one checks.
-- andes error control: PSM FDP 0.83–0.85% and entrapment-only quantified precursors 0.20–0.22% on
+- andes error control: PSM FDP 0.84–0.85% and entrapment-only quantified precursors 0.20–0.21% on
   the Q Exactive set; not measured on Astral.
 
-Cost: 6.9k CPU-seconds for the 6 Q Exactive runs, 6.4k for the 6 Astral runs.
+Cost: 6.2k CPU-seconds for the 6 Q Exactive runs, 5.9k for the 6 Astral runs.
+
+## Match between runs on and off
+
+Eight truth designs (UPS1 in yeast at several levels, human/yeast/*E. coli* mixtures, an absence
+design and a blank run) are quantified by andes, MaxQuant 2.7.0.0 and FragPipe (IonQuant, match
+between runs on, normalisation off) and read through one evaluation of the raw intensities of every
+tool (andes at `09e1c00d`, 2026-11-05). With match between runs on, andes reports 1.1 to 1.6 times
+as many cells as without it and its differential-expression true positives rise from 1,075 to
+1,376 (UPS1 in yeast, PXD009740), 1,128 to 1,319 (Q Exactive mixture) and 675 to 759 (Astral
+mixture); MaxQuant's rise from 1,054 to 1,361, 829 to 904 and 466 to 659 on the same sets. The
+false positives rise too in andes (185 to 360 on PXD009740), and MaxQuant has the lower false-positive
+counts on PXD009740 and PXD009815 (142 and 113 against andes's 360 and 163) and the lower gross
+errors on the identified cells; andes has the lower protein CV and more precursors on every set.
+On a design where yeast is absent from 20 runs, 0.20% of andes's transferred rows are yeast
+(0.08% at `quant_q ≤ 0.01`) against 0.09% for FragPipe. The tables, settings and rules are in
+the [benchmark report](benchmarks/details.md#2-the-benchmarks).
 
 ## TMT
 
 - Reporter extraction and impurity correction match OpenMS IsobaricAnalyzer exactly on the same
   scans.
 - Known ratios (PXD007683, human + yeast TMT11, 11 SPS-MS3 fractions): yeast A/C log2 ratio
-  **1.591** against the expected 1.585, protein-level MAE 0.212; 9.6 minutes and 17.5 GB on 16
-  threads.
-- Interference on a knockout design is on the [unmixing page](features/tmt-unmix.md).
+  **1.589** against the human-normalised expectation 1.688 (nominal 3:1 is 1.585), protein-level
+  MAE 0.213; MaxQuant 2.7.0.0 reads 1.700 with MAE 0.159. 9.2 minutes and 17.8 GB on 16 threads.
+- Knockout interference (PXD017803): 0.062 on SPS-MS3, 0.027 on RTS-MS3 and 0.205 on hrMS2 (PEP
+  gate off) against MaxQuant's 0.054, 0.038 and 0.156; details on the
+  [unmixing page](features/tmt-unmix.md).
+- Match between runs for reporter ions is opt-in (`--tmt --mbr`, hrMS2 only). On PXD014750 it adds
+  3,636 transfers at `quant_q ≤ 0.01` (+1.8% rows) whose wrong-value rate is 0.05 points below that
+  of the identified values (95% interval −0.56 to +0.51); MaxQuant's isobaric match between runs
+  transfers 7,499 cells at +1.53 points and SIMSI-Transfer 16,511 at +0.40.
 
 ## At scale
 

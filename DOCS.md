@@ -656,7 +656,7 @@ See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model)
 | `--quant-fdr` | 0..1 | `--fdr` | PSM q-value cut for quantification targets when `--rescore`/`--rescore-native` ran. With `--mbr`, also the PSM q-value at which a run identifies a precursor (§10). |
 | `--mbr` | flag | off | Match-between-runs across two or more inputs (§10): label-free quantification with `--lfq`, or with `--tmt` the transfer of reporter ions (high-resolution MS2 reporters only; refused for SPS-MS3 and ion-trap MS2; see *Match between runs for reporter ions*). Needs `--rescore` (or `--rescore-native`); `--lfq` and `--tmt` are not combined. The label-free form: Writes `<stem>.mbr.parquet` and `<stem>.mbr_validation.parquet`; with `--output-parquet`, `quantms.feature.parquet` holds these rows (without the below-threshold transfers) instead of the per-run features. Uses `--quant-dir`, or a temporary directory removed at exit. With `--rescore` (Percolator), same result as `andes quant library`, `extract` and `finalize` on the same Percolator results. |
 | `--mbr-library-fdr` | 0..1 | `0.01` | Internal library entry gate (precursor-level), not a reported identification FDR: best-PSM-per-precursor target/decoy q-value over the rescored PSM scores of all runs. |
-| `--mbr-fdr` | 0..1 | `0.01` | *(advanced)* Transfer quality q-value: transfers at or below it are `transfer_ms2` (an MS2 scan of the run supports them) or `transfer_ms1`. An internal quant-quality q-value, not an identification FDR. It counts both wrong peaks and the transfers of false donor identifications (identity decoys, §10). On the ProteoBench QExactive module (2026-10-23, defaults), `0.05` adds about 6k precursors quantified in at least 3 runs to 0.01 (65.0k to 71.2k) at an accuracy cost (median \|eps\| 0.163 to 0.176, E. coli 0.28 to 0.44, CV 0.118 to 0.132); in an earlier measurement the wrong-peak rate rose from 1.7% to 2.7%. Use `0.05` for a deeper, less accurate set. |
+| `--mbr-fdr` | 0..1 | `0.01` | *(advanced)* Transfer quality q-value: transfers at or below it are `transfer_ms2` (an MS2 scan of the run supports them) or `transfer_ms1`. An internal quant-quality q-value, not an identification FDR. It counts both wrong peaks and the transfers of false donor identifications (identity decoys, §10). On the ProteoBench QExactive module (2026-11-05, defaults), `0.05` adds about 7k precursors quantified in at least 3 runs to 0.01 (63.8k to 71.3k) at an accuracy cost (median \|eps\| 0.161 to 0.175, E. coli 0.26 to 0.44, CV 0.117 to 0.132); in an earlier measurement the wrong-peak rate rose from 1.7% to 2.7%. Use `0.05` for a deeper, less accurate set. |
 | `--quant-feature-fdr` | 0..1 or `off` | `off` | Identified-row quality q-value (`quant_q`): with a value, an identified row whose MS1 feature has a `quant_q` above it (or none) is `identified_below_threshold` and left out of `quantms.feature.parquet` (§10); `off` reports every identified row and keeps `quant_q` as an annotation. An internal quant-quality q-value, not an identification FDR. |
 
 With `--output-parquet`, both modules add `quantms.feature.parquet` (the QPX feature view) to the bundle.
@@ -1716,9 +1716,10 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
   measure its transfers, so they have no rows; with `quant extract --mbr-preselect false` they
   are `below_threshold` without a q-value; its identified rows are unchanged): a single marginal
   donor PSM is the commonest false donor. On a public LFQ benchmark (six runs, peptide-level
-  shuffled entrapment, Percolator seeds 42, 1 and 2; 2026-10-23, defaults) the identity-decoy
-  estimate of the false-donor share of accepted transfers was 0.33–0.34 % at transfer q 0.01
-  where the entrapment gave 0.24–0.33 %, and 0.45–0.47 % against 0.37–0.49 % at 0.05: it tracks
+  shuffled entrapment, Percolator seeds 42, 1 and 2; 2026-11-05, defaults) the identity-decoy
+  estimate of the false-donor share of accepted transfers was 0.28–0.29 % at transfer q 0.01
+  where the entrapment gave 0.22–0.26 %, and 0.42–0.47 % against 0.37–0.40 % at 0.05 (at
+  2026-10-23: 0.33–0.34 % against 0.24–0.33 %, and 0.45–0.47 % against 0.37–0.49 %): it tracks
   the false-donor share but is not an upper bound. With a reviewed *Arabidopsis* entrapment
   (2026-10-21, an earlier build) the entrapment gave 0.24–0.30 % and 0.46–0.54 %. On 500 runs
   (PXD042233, peptide-level shuffled entrapment, one seed, 2026-10-21) the entrapment gave 0.40 % at transfer q 0.05 against an estimate of

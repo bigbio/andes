@@ -239,17 +239,20 @@ downstream ([`DOCS.md` §10](DOCS.md#10-quantification)). `--lfq --mbr` adds mat
 over two or more inputs: every confident precursor is measured in every run, and transfers carry
 an internal quant-quality q-value (`<stem>.mbr.parquet`). The same stages run one at a time with
 `andes quant library|extract|finalize` over a `--quant-dir`, for pipelines that spread runs
-over machines. On the ProteoBench label-free DDA modules (six runs each; measured 2026-10-23 at
-`2051616b` with default settings), andes quantified 65,012 precursors in at least 3 runs on
-QExactive (PXD028735) at transfer q 0.01, with a median |ε| of 0.163 and a CV of 0.118 using
-`quantity_normalized` (71,243 at q 0.05; the default is 0.01; the raw quantity reads |ε| 0.228,
-CV 0.246). On the same module FragPipe 23.0 reports 63,701 at 0.200 / 0.156 and Sage
-0.15.0-beta.2 81,933 at 0.388 / 0.393, without filtering transferred quantities. On Astral
-(PXD070049) andes quantified 37,352 at |ε| 0.193 and CV 0.113; FragPipe 23.0 reports 39,057 at
-0.212 / 0.127, Sage 0.14.6 30,319 at 0.167 / 0.070 and DIA-NN 2.6.0 93,237 at 0.277 / 0.159.
-Leaderboard snapshot 2026-07-16, one andes seed. On a 500-run study (PXD042233) the per-run
-pipeline took 146 CPU hours end to end and quantified 243,895 precursors in at least 3 runs
-([benchmarks](docs/benchmarks/README.md#2-the-benchmarks)).
+over machines. On the ProteoBench label-free DDA modules (six runs each; measured 2026-11-05 at
+`09e1c00d` with default settings), andes quantified 63,796 precursors in at least 3 runs on
+QExactive (PXD028735) at transfer q 0.01, with a median |ε| of 0.161 and a CV of 0.117 using
+`quantity_normalized` (52,166 at 0.154 / 0.105 with the transfers left out; 71,299 at q 0.05; the
+default is 0.01; the raw quantity reads |ε| 0.222, CV 0.245). On the same module FragPipe 23.0
+reports 63,701 at 0.200 / 0.156 and Sage 0.15.0-beta.2 81,933 at 0.388 / 0.393, without filtering
+transferred quantities. On Astral (PXD070049) andes quantified 36,675 at |ε| 0.186 and CV 0.112
+(31,739 at 0.186 / 0.100 without transfers); FragPipe 23.0 reports 39,057 at 0.212 / 0.127, Sage
+0.14.6 30,319 at 0.167 / 0.070 and DIA-NN 2.6.0 93,237 at 0.277 / 0.159. Leaderboard snapshot
+2026-07-16, one andes seed. On a 500-run study (PXD042233, measured 2026-10-23 at `2051616b`) the
+per-run pipeline took 146 CPU hours end to end and quantified 243,895 precursors in at least 3
+runs ([benchmarks](docs/benchmarks/README.md#2-the-benchmarks)). Quantification against truth
+designs, with and without match between runs and next to MaxQuant and FragPipe, and the TMT
+comparisons are in the same report.
 
 ```bash
 andes --spectrum tmt_run.mzML --database human.fasta --mods tmt10_mods.txt \

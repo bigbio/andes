@@ -38,8 +38,9 @@ flowchart TD
 ## Measured
 
 ProteoBench "Quant LFQ DDA ion QExactive" (PXD028735, 6 runs, human/yeast/*E. coli* mix), andes
-defaults at transfer q 0.01: **65,012** precursors quantified in at least 3 runs, median |ε| 0.163,
-CV 0.118, for 6.9k CPU-seconds in total. Raising `--mbr-fdr` to 0.05 gives a deeper, less accurate set: 71.2k precursors, median |ε| 0.176 and CV 0.132. The leaderboard comparison, with the other tools' versions and what they do
+defaults at transfer q 0.01: **63,796** precursors quantified in at least 3 runs, median |ε| 0.161,
+CV 0.117, for 6.2k CPU-seconds in total (52,166 precursors, median |ε| 0.154 and CV 0.105 when the
+transfers are left out). Raising `--mbr-fdr` to 0.05 gives a deeper, less accurate set: 71.3k precursors, median |ε| 0.175 and CV 0.132. The leaderboard comparison, with the other tools' versions and what they do
 and do not control, is in the [benchmark report](../benchmarks/details.md#1-summary).
 
 ```bash

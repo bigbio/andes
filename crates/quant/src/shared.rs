@@ -464,6 +464,7 @@ mod tests {
             isolation: Some((500.0, 1.0, 1.0)),
             faims_cv: None,
             peaks: peaks.to_vec(),
+            reporters: None,
         }
     }
 

@@ -656,8 +656,9 @@ fn warn_mixed_electron_activation(act: &HashMap<u8, usize>, seen: usize) {
     if etd > 0 && ethcd > 0 {
         eprintln!(
             "WARN: mixed electron activation in the first {seen} MS2 scans: EThcD/ETciD {ethcd}, \
-             ETD {etd}. The run is scored with the model of the dominant activation; \
-             pass --model or --ethcd-activation etd to choose explicitly."
+             ETD {etd}. The run is routed by the dominant activation; ETD scans are scored \
+             with the run's model (the fragment-ion index cannot serve c/z-only spectra). \
+             Pass --model or --ethcd-activation etd to choose explicitly."
         );
     }
 }

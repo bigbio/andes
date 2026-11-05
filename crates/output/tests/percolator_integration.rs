@@ -308,7 +308,7 @@ if [ $static = 1 ]; then pep={static_pep}; [ {static_exit} -ne 0 ] && exit {stat
 printf 'PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n' > "$t"
 printf 'r/1\t3.0\t0.001\t%s\tK.AAK.R\tsp|P1\n' $pep >> "$t"
 printf 'r/2\t2.0\t0.004\t%s\tK.BBK.R\tsp|P2\n' $pep >> "$t"
-printf 'r/3\t0.1\t0.4\t1\tK.CCK.R\tsp|P3\n' >> "$t"
+printf 'r/3\t0.1\t0.4\t%s\tK.CCK.R\tsp|P3\n' $pep >> "$t"
 printf 'PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n' > "$d"
 "#,
         log = dir.join("calls.log").display(),

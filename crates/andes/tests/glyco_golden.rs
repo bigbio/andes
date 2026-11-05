@@ -212,14 +212,18 @@ fn glyco_pin_matches_golden_after_sort() {
         .arg("20")
         // NOTE ON COVERAGE. `--fragment-tol-da 0.5` pins the LOW-RES class (the
         // fixture's peaks are Orbitrap peaks, which the metadata-less resolution
-        // inference would otherwise read as high resolution), so this resolves to
-        // `cid_lowres_tryp` and the golden guards the LOW-RES glyco path: column set,
+        // inference would otherwise read as high resolution), so the golden pins
+        // `cid_lowres_tryp` and guards the LOW-RES glyco path: column set,
         // row count, oxonium gating, backbone generation, the fused selector and the
         // collapse. The high-res path is guarded by `glyco_golden_highres.rs`.
+        // `--model cid_lowres_tryp` keeps that model: ion-trap HCD otherwise routes to
+        // the ion-trap HCD model, which is trained on unenriched tryptic spectra.
         .arg("--fragmentation")
         .arg("HCD")
         .arg("--fragment-tol-da")
         .arg("0.5")
+        .arg("--model")
+        .arg("cid_lowres_tryp")
         // The glycan source is a committed, NeuGc-free fixture .gdb (header `H,N,A,F`).
         // `--glyco` no longer has a built-in enumerator or a `--glyco-taxon` species knob,
         // so the human behaviour is pinned by the .gdb's own NeuGc-free content rather

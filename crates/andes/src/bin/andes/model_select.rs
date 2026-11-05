@@ -388,21 +388,19 @@ pub(crate) fn build_selection_key(
     //    inline here.
     let (final_act, final_inst, drop_protocol): (&str, &str, bool) =
         match (act_str, inst_after_family) {
-            // H5: HCD read out in the ion trap. No model is trained on these
-            // spectra; the key routes to the low-res CID model of the digest
-            // (`cid_lowres_tryp` for trypsin) and the run warns (see
-            // `untrained_route_warning`). The fragment tolerance does not
-            // depend on this choice: on ion-trap fragments every bundled
-            // model scores its rank tables in the stored 0.5 Da window (only
-            // high-res runs learn a narrower one, see
-            // `RankScorer::node_score_window`), and the PIN features follow
-            // the run's acquisition class. Neither
-            // candidate is better on every dataset: against the Orbitrap HCD
-            // model (`hcd_qexactive_tryp`), PSMs at 1 % entrapment FDP were
-            // within -9 % to +7 % across four tryptic label-free ion-trap HCD
-            // datasets, two in each direction. An HCD model trained on
-            // ion-trap spectra is what would close the gap; until then the
-            // CID route stands. Pinned by the selection grid test.
+            // H5: HCD read out in the ion trap. A store without a model trained
+            // on these spectra routes the key to the low-res CID model of the
+            // digest (`cid_lowres_tryp` for trypsin) and the run warns (see
+            // `untrained_route_warning`); `choose_model` takes an ion-trap HCD
+            // model first when the store has one for the digest and labelling.
+            // The fragment tolerance does not depend on this choice: on ion-trap
+            // fragments every bundled model scores its rank tables in the stored
+            // 0.5 Da window (only high-res runs learn a narrower one, see
+            // `RankScorer::node_score_window`), and the PIN features follow the
+            // run's acquisition class. The Orbitrap HCD model is no substitute:
+            // against it, PSMs at 1 % entrapment FDP were within -9 % to +7 %
+            // across four tryptic label-free ion-trap HCD datasets, two in each
+            // direction.
             ("HCD", "LowRes") => ("CID", "LowRes", true),
             // TOF analyzers (QTOF, timsTOF) fragment by beam-type collisional
             // activation: the b/y chemistry of HCD, measured at high resolution.
@@ -477,6 +475,20 @@ pub(crate) fn choose_model(
     protocol: Protocol,
     enzyme: model::enzyme::Enzyme,
 ) -> ModelChoice {
+    choose_routed(entries, activation, instrument, protocol, enzyme, true)
+}
+
+/// [`choose_model`]; `ion_trap_hcd` allows the ion-trap HCD model for HCD read out in the
+/// ion trap. An EThcD run read in the ion trap routes as HCD without it: that model is
+/// trained and measured on pure HCD scans only.
+fn choose_routed(
+    entries: &[SelectionEntry],
+    activation: ActivationMethod,
+    instrument: Option<InstrumentType>,
+    protocol: Protocol,
+    enzyme: model::enzyme::Enzyme,
+    ion_trap_hcd: bool,
+) -> ModelChoice {
     // EThcD: the EThcD model when the store has one trained for this cell's enzyme and
     // experiment class (labelling, enrichment). Otherwise the run is routed as HCD, the
     // b/y half of its spectrum, as before the EThcD model existed: the labelled,
@@ -519,7 +531,14 @@ pub(crate) fn choose_model(
                     };
                 }
             }
-            let hcd = choose_model(entries, ActivationMethod::HCD, instrument, protocol, enzyme);
+            let hcd = choose_routed(
+                entries,
+                ActivationMethod::HCD,
+                instrument,
+                protocol,
+                enzyme,
+                false,
+            );
             return ModelChoice {
                 warning: untrained_route_warning(
                     entries,
@@ -530,6 +549,37 @@ pub(crate) fn choose_model(
                     enzyme,
                 ),
                 ..hcd
+            };
+        }
+    }
+    // HCD read out in the ion trap: the model trained on those spectra, when the store has
+    // one for this digest and experiment class. A cell with no such model keeps the low-res
+    // CID route of `build_selection_key`.
+    if ion_trap_hcd
+        && activation == ActivationMethod::HCD
+        && instrument == Some(InstrumentType::LowRes)
+    {
+        let enzyme_name = routing_enzyme(enzyme).name();
+        let class = store_protocol_to_experiment_class(protocol_store_name(protocol));
+        if let Some(e) = entries
+            .iter()
+            .filter(|e| {
+                e.activation == ActivationMethod::HCD.name()
+                    && e.instrument == InstrumentType::LowRes.name()
+                    && e.enzyme == enzyme_name
+                    && e.experiment_class == class
+            })
+            .min_by(|a, b| a.model_id.cmp(&b.model_id))
+        {
+            return ModelChoice {
+                model_id: e.model_id.clone(),
+                key: SelectionKey {
+                    activation: e.activation.clone(),
+                    instrument: e.instrument.clone(),
+                    enzyme: e.enzyme.clone(),
+                    experiment_class: class.clone(),
+                },
+                warning: None,
             };
         }
     }
@@ -1190,6 +1240,80 @@ mod param_resolver_tests {
                  ({} row(s) moved):\n{}\n--- full table ---\n{table}",
                 moved.len(),
                 moved.join("\n")
+            );
+        }
+    }
+
+    /// HCD read out in the ion trap takes an ion-trap HCD model of the digest and experiment
+    /// class when the store has one, and the low-res CID route otherwise.
+    #[test]
+    fn ion_trap_hcd_takes_its_own_model_only_for_its_cell() {
+        use model::enzyme::Enzyme;
+        let store = ModelStore::open(&bundled_store_path()).expect("bundled store");
+        let mut entries = store.selection_entries();
+        let entry = |id: &str, act: &str, inst: &str, enz: &str, class: &[&str]| SelectionEntry {
+            model_id: id.to_string(),
+            activation: act.to_string(),
+            instrument: inst.to_string(),
+            enzyme: enz.to_string(),
+            experiment_class: class.iter().map(|c| c.to_string()).collect(),
+        };
+        entries.retain(|e| !(e.activation == "HCD" && e.instrument == "LowRes"));
+        let lowres = Some(InstrumentType::LowRes);
+        let pick = |entries: &[SelectionEntry], act, prot, enz| {
+            choose_model(entries, act, lowres, prot, enz)
+        };
+        let before = pick(
+            &entries,
+            ActivationMethod::HCD,
+            Protocol::Auto,
+            Enzyme::Trypsin,
+        );
+        assert_eq!(before.model_id, "cid_lowres_tryp");
+        assert!(before.warning.is_some());
+
+        entries.push(entry("hcd_lowres_probe", "HCD", "LowRes", "Trypsin", &[]));
+        let hit = pick(
+            &entries,
+            ActivationMethod::HCD,
+            Protocol::Auto,
+            Enzyme::Trypsin,
+        );
+        assert_eq!(hit.model_id, "hcd_lowres_probe");
+        assert!(hit.warning.is_none());
+        let standard = pick(
+            &entries,
+            ActivationMethod::HCD,
+            Protocol::Standard,
+            Enzyme::Trypsin,
+        );
+        assert_eq!(standard.model_id, "hcd_lowres_probe");
+        // Other digests, labelling, enrichment and activations keep their routes.
+        for (act, prot, enz) in [
+            (ActivationMethod::HCD, Protocol::Auto, Enzyme::LysC),
+            (ActivationMethod::HCD, Protocol::Phospho, Enzyme::Trypsin),
+            (ActivationMethod::HCD, Protocol::Tmt, Enzyme::Trypsin),
+            (ActivationMethod::CID, Protocol::Auto, Enzyme::Trypsin),
+            (ActivationMethod::EThcD, Protocol::Auto, Enzyme::Trypsin),
+        ] {
+            assert_ne!(
+                pick(&entries, act, prot, enz).model_id,
+                "hcd_lowres_probe",
+                "{act:?}/{prot:?}/{enz:?}"
+            );
+        }
+        // An undetected analyser and the Orbitrap read-out never take it.
+        for inst in [None, Some(InstrumentType::QExactive)] {
+            assert_ne!(
+                choose_model(
+                    &entries,
+                    ActivationMethod::HCD,
+                    inst,
+                    Protocol::Auto,
+                    Enzyme::Trypsin
+                )
+                .model_id,
+                "hcd_lowres_probe"
             );
         }
     }

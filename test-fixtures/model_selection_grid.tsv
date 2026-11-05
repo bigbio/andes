@@ -149,7 +149,7 @@ HCD	none	ArgC	cid_lowres_argc*	cid_lowres_argc*	cid_lowres_argc*	cid_lowres_argc
 HCD	none	aLP	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*
 HCD	none	NoCleavage	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*
 HCD	none	NonSpecific	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*
-HCD	LowRes	Trypsin	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*
+HCD	LowRes	Trypsin	hcd_lowres_tryp	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*
 HCD	LowRes	Chymotrypsin	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*
 HCD	LowRes	LysC	cid_lowres_lysc*	cid_lowres_lysc*	cid_lowres_lysc*	cid_lowres_lysc*	cid_lowres_lysc*
 HCD	LowRes	AspN	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*

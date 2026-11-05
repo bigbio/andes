@@ -475,6 +475,20 @@ pub(crate) fn choose_model(
     protocol: Protocol,
     enzyme: model::enzyme::Enzyme,
 ) -> ModelChoice {
+    choose_routed(entries, activation, instrument, protocol, enzyme, true)
+}
+
+/// [`choose_model`]; `ion_trap_hcd` allows the ion-trap HCD model for HCD read out in the
+/// ion trap. An EThcD run read in the ion trap routes as HCD without it: that model is
+/// trained and measured on pure HCD scans only.
+fn choose_routed(
+    entries: &[SelectionEntry],
+    activation: ActivationMethod,
+    instrument: Option<InstrumentType>,
+    protocol: Protocol,
+    enzyme: model::enzyme::Enzyme,
+    ion_trap_hcd: bool,
+) -> ModelChoice {
     // EThcD: the EThcD model when the store has one trained for this cell's enzyme and
     // experiment class (labelling, enrichment). Otherwise the run is routed as HCD, the
     // b/y half of its spectrum, as before the EThcD model existed: the labelled,
@@ -517,7 +531,14 @@ pub(crate) fn choose_model(
                     };
                 }
             }
-            let hcd = choose_model(entries, ActivationMethod::HCD, instrument, protocol, enzyme);
+            let hcd = choose_routed(
+                entries,
+                ActivationMethod::HCD,
+                instrument,
+                protocol,
+                enzyme,
+                false,
+            );
             return ModelChoice {
                 warning: untrained_route_warning(
                     entries,
@@ -534,7 +555,10 @@ pub(crate) fn choose_model(
     // HCD read out in the ion trap: the model trained on those spectra, when the store has
     // one for this digest and experiment class. A cell with no such model keeps the low-res
     // CID route of `build_selection_key`.
-    if activation == ActivationMethod::HCD && instrument == Some(InstrumentType::LowRes) {
+    if ion_trap_hcd
+        && activation == ActivationMethod::HCD
+        && instrument == Some(InstrumentType::LowRes)
+    {
         let enzyme_name = routing_enzyme(enzyme).name();
         let class = store_protocol_to_experiment_class(protocol_store_name(protocol));
         if let Some(e) = entries
@@ -1239,15 +1263,30 @@ mod param_resolver_tests {
         let pick = |entries: &[SelectionEntry], act, prot, enz| {
             choose_model(entries, act, lowres, prot, enz)
         };
-        let before = pick(&entries, ActivationMethod::HCD, Protocol::Auto, Enzyme::Trypsin);
+        let before = pick(
+            &entries,
+            ActivationMethod::HCD,
+            Protocol::Auto,
+            Enzyme::Trypsin,
+        );
         assert_eq!(before.model_id, "cid_lowres_tryp");
         assert!(before.warning.is_some());
 
         entries.push(entry("hcd_lowres_probe", "HCD", "LowRes", "Trypsin", &[]));
-        let hit = pick(&entries, ActivationMethod::HCD, Protocol::Auto, Enzyme::Trypsin);
+        let hit = pick(
+            &entries,
+            ActivationMethod::HCD,
+            Protocol::Auto,
+            Enzyme::Trypsin,
+        );
         assert_eq!(hit.model_id, "hcd_lowres_probe");
         assert!(hit.warning.is_none());
-        let standard = pick(&entries, ActivationMethod::HCD, Protocol::Standard, Enzyme::Trypsin);
+        let standard = pick(
+            &entries,
+            ActivationMethod::HCD,
+            Protocol::Standard,
+            Enzyme::Trypsin,
+        );
         assert_eq!(standard.model_id, "hcd_lowres_probe");
         // Other digests, labelling, enrichment and activations keep their routes.
         for (act, prot, enz) in [
@@ -1255,6 +1294,7 @@ mod param_resolver_tests {
             (ActivationMethod::HCD, Protocol::Phospho, Enzyme::Trypsin),
             (ActivationMethod::HCD, Protocol::Tmt, Enzyme::Trypsin),
             (ActivationMethod::CID, Protocol::Auto, Enzyme::Trypsin),
+            (ActivationMethod::EThcD, Protocol::Auto, Enzyme::Trypsin),
         ] {
             assert_ne!(
                 pick(&entries, act, prot, enz).model_id,

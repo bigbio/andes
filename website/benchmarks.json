@@ -1,5 +1,5 @@
 {
- "_provenance": "Copied from README.md 'Identification benchmarks' and docs/benchmarks/README.md section 1-2. Update together with those tables. andes rows: 2051616b (2026-10-23); Comet 2025.01 (2026-10-05/06); Java MS-GF+ v20240326 (earlier session, not re-run). PSMs at Percolator q <= 0.01, 8 threads, same benchmark VM. Quantification entries (quant_accuracy, tmt_interference): andes at 09e1c00d (2026-11-05).",
+ "_provenance": "Copied from README.md 'Identification benchmarks' and docs/benchmarks/README.md section 1-2. Update together with those tables. andes rows: 2051616b (2026-10-23); Comet 2025.01 (2026-10-05/06); Java MS-GF+ v20240326 (earlier session, not re-run). PSMs at Percolator q <= 0.01, 8 threads, same benchmark VM. Quantification entries (quant_accuracy, tmt_interference): andes at 09e1c00d (quant_accuracy) and 0cfa03cc (tmt_interference), 2026-11-05.",
  "andes_commit": "2051616b",
  "andes_date": "2026-10-23",
  "datasets": [
@@ -178,7 +178,7 @@
   ]
  },
  "tmt_interference": {
-  "_note": "Knockout-channel interference, median ratio, lower is better; PXD017803, 2026-11-05 at 09e1c00d. docs/benchmarks/README.md TMT section. 40-91 knockout PSMs behind each value; the hrMS2 values are measured with the PEP gate off (--tmt-max-pep 1) because Percolator -Y reports PEP 1 for that set.",
+  "_note": "Knockout-channel interference, median ratio, lower is better; PXD017803, 2026-11-05 at 0cfa03cc. docs/benchmarks/README.md TMT section. 34-91 knockout PSMs behind each value.",
   "acquisitions": [
    "SPS-MS3",
    "RTS-MS3",
@@ -187,7 +187,7 @@
   "andes (quant gate)": [
    0.062,
    0.027,
-   0.205
+   0.192
   ],
   "without the gate": [
    0.117,
@@ -197,7 +197,7 @@
   "stricter purity filter (≥ 0.9)": [
    0.023,
    0.015,
-   0.145
+   0.135
   ],
   "unmix_hrms2": 0.0
  },

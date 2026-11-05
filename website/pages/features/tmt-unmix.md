@@ -31,10 +31,8 @@ non-knockout channel intensity for PSMs of the three knocked-out proteins; the t
   SPS-MS3 (0.117 → 0.062); MaxQuant 2.7.0.0 reads 0.054 on the same acquisition.
 - A stricter purity filter gives lower values but keeps fewer PSMs.
 - On hrMS2, `--tmt-unmix` sets the median knockout ratio to **0.000**, at a background CV of
-  0.127 (0.080 without), so unmixing trades some precision for accuracy. The hrMS2 bars are
-  measured with the PEP gate off (`--tmt-max-pep 1`); see the
-  [benchmark report](../benchmarks/details.md#2-the-benchmarks).
-- Only 40–91 knockout PSMs stand behind each value; read the bars as a direction.
+  0.123 (0.079 without), so unmixing trades some precision for accuracy.
+- Only 34–91 knockout PSMs stand behind each value; read the bars as a direction.
 
 Unmixing applies to high-resolution MS2 reporters only. SPS-MS3 reporters are not modelled.
 

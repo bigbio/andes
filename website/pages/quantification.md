@@ -76,8 +76,7 @@ the [benchmark report](benchmarks/details.md#2-the-benchmarks).
 - Known ratios (PXD007683, human + yeast TMT11, 11 SPS-MS3 fractions): yeast A/C log2 ratio
   **1.589** against the human-normalised expectation 1.688 (nominal 3:1 is 1.585), protein-level
   MAE 0.213; MaxQuant 2.7.0.0 reads 1.700 with MAE 0.159. 9.2 minutes and 17.8 GB on 16 threads.
-- Knockout interference (PXD017803): 0.062 on SPS-MS3, 0.027 on RTS-MS3 and 0.205 on hrMS2 (PEP
-  gate off) against MaxQuant's 0.054, 0.038 and 0.156; details on the
+- Knockout interference (PXD017803): 0.062 on SPS-MS3, 0.027 on RTS-MS3 and 0.192 on hrMS2 against MaxQuant's 0.054, 0.038 and 0.156; details on the
   [unmixing page](features/tmt-unmix.md).
 - Match between runs for reporter ions is opt-in (`--tmt --mbr`, hrMS2 only). On PXD014750 it adds
   3,636 transfers at `quant_q ≤ 0.01` (+1.8% rows) whose wrong-value rate is 0.05 points below that

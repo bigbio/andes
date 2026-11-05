@@ -12,8 +12,11 @@ leaderboard. Section 2 gives the date and the andes commit behind each row.
 
 Identification rows: `2051616b` (origin/main, 2026-10-23), default settings plus the dataset's mods,
 Percolator 3.7.1 `-Y`, seeds 42, 1 and 2. Quantification rows were measured again on `09e1c00d`
-(origin/main, 2026-11-05); the one exception is the 500-run study, which still carries its
-`2051616b` numbers. Comparison rows keep the date they were measured.
+(origin/main, 2026-11-05): the label-free rows (ProteoBench, truth designs) on `09e1c00d`, the
+TMT rows on `0cfa03cc` (origin/main after #320 and #321); the one exception is the 500-run study,
+which still carries its `2051616b` numbers. The later build changes only ion-trap HCD
+identification and the Percolator PEP handling, neither of which enters the label-free rows
+(Orbitrap and Astral data). Comparison rows keep the date they were measured.
 
 **Identification** (PSMs at Percolator `q ≤ 0.01`, 8 threads):
 
@@ -32,14 +35,14 @@ Percolator 3.7.1 `-Y`, seeds 42, 1 and 2. Quantification rows were measured agai
 † On a cluster node (8 threads); the other walls are on the benchmark VM (8 cores), the host the
 Comet times come from. Wall times compare only within one host.
 
-**Quantification** (andes defaults, 2026-11-05 at `09e1c00d`; the 500-run row 2026-10-23 at `2051616b`):
+**Quantification** (andes defaults, 2026-11-05: label-free rows at `09e1c00d`, TMT rows at `0cfa03cc`; the 500-run row 2026-10-23 at `2051616b`):
 
 | benchmark | dataset | andes | comparison (leaderboard snapshot 2026-07-16) | error control | andes cost |
 |---|---|---|---|---|---|
 | Label-free, match between runs (ProteoBench "Quant LFQ DDA ion QExactive") | PXD028735, 6 runs, Q Exactive HF-X, human/yeast/E. coli mix | 63,796 precursors in ≥ 3 runs; median \|ε\| 0.161, CV 0.117 (transfer q 0.01); without transfers 52,166, 0.154, 0.105 | median \|ε\| 0.190 (FragPipe 23.0); CV 0.120 (i2MassChroQ 1.2.0, no MBR); most precursors 81,933 (Sage 0.15.0-beta.2, median \|ε\| 0.388, transferred values not error-controlled) | PSM FDP 0.84–0.85%; entrapment-only quantified precursors 0.20–0.21% | 6.2k CPU-s for 6 runs |
 | Label-free, match between runs (ProteoBench "Quant LFQ DDA ion Astral") | PXD070049, 6 runs, Astral, human/yeast/E. coli mix | 36,675 precursors in ≥ 3 runs; median \|ε\| 0.186, CV 0.112 (transfer q 0.01); without transfers 31,739, 0.186, 0.100 | median \|ε\| 0.123 (DIA-NN 2.6.0, 16,363 precursors); CV 0.070 (Sage 0.14.6); most precursors 93,237 (DIA-NN 2.6.0, median \|ε\| 0.277) | not measured | 5.9k CPU-s for 6 runs |
 | Label-free, truth designs, match between runs on and off | UPS1 in yeast (PXD009740, PXD009815, PXD001819), HYE (QE, Astral, PXD030780), human + yeast (PXD014415), blank run (PXD016921) | see the truth-design suite below | MaxQuant 2.7.0.0 with and without MBR; FragPipe 21.1 / IonQuant 1.10.12 | masked wrong-peak, absence, DE false positives | see the suite |
-| TMT reporter ions | yeast triple knockout, TMTpro 16-plex, PXD017803 | knockout-channel interference 0.062 (SPS-MS3), 0.027 (RTS-MS3), 0.205 (hrMS2, PEP gate off) | MaxQuant 2.7.0.0 0.054, 0.038, 0.156; OpenMS precursor purity ≥ 0.9 0.139 (SPS-MS3, 2026-10-10) | — | — |
+| TMT reporter ions | yeast triple knockout, TMTpro 16-plex, PXD017803 | knockout-channel interference 0.062 (SPS-MS3), 0.027 (RTS-MS3), 0.192 (hrMS2) | MaxQuant 2.7.0.0 0.054, 0.038, 0.156; OpenMS precursor purity ≥ 0.9 0.139 (SPS-MS3, 2026-10-10) | — | — |
 | TMT reporter ions | human + yeast TMT11, PXD007683 (11 fractions, SPS-MS3) | yeast A/C log2 ratio 1.589 (expected 1.688 human-normalised, 1.585 nominal), protein MAE 0.213 | MaxQuant 2.7.0.0 1.700, 0.159 | — | 9.2 min, 17.8 GB, 16 threads |
 | TMT match between runs (opt-in `--tmt --mbr`, hrMS2) | PXD014750, 6 files | 3,636 transfers at `quant_q ≤ 0.01` (+1.8% rows), excess wrong-value rate −0.05 points (95% CI −0.56 to +0.51) | MaxQuant 2.7.0.0 isobaric MBR 7,499 cells, +1.53; SIMSI-Transfer 16,511 cells, +0.40 | entrapment share of accepted transfers 1.6% | same cost as without |
 | Large study, match between runs | PXD042233, 500 runs (Q Exactive HF/HF-X, Exploris 480) | 243,895 precursors in ≥ 3 runs, 9,208 protein groups (transfer q 0.01) | — | PSM, precursor and protein q ≤ 0.01 | 146 CPU-h end to end (§2) |
@@ -55,8 +58,8 @@ Comet times come from. Wall times compare only within one host.
 ## 2. The benchmarks
 
 **Where and how.** Every andes identification number on this page was measured on 2026-10-23 at
-`2051616b`, and every quantification number on 2026-11-05 at `09e1c00d` (the 500-run study
-excepted), unless a row says otherwise. PSM counts, wall time, CPU time and peak memory of the four standard
+`2051616b`, and every quantification number on 2026-11-05 at `09e1c00d` (label-free) or
+`0cfa03cc` (TMT; the 500-run study excepted), unless a row says otherwise. PSM counts, wall time, CPU time and peak memory of the four standard
 sets (Astral, TMT a05058, UPS1, phospho) come from the benchmark VM (8 cores, 8 threads,
 `/usr/bin/time`, two runs except phospho), on the plain databases the Comet rows used. The true
 FDP of every set and all other rows come from a cluster node (8 threads), with each target
@@ -501,7 +504,7 @@ are from 2026-10 and were read again unchanged.
   hrMS2, SPS-MS3 and RTS-MS3) and PXD007683 (human + yeast TMT11 with known yeast ratios, 11
   SPS-MS3 fractions, ion-trap CID MS2), as mzML, with the kit impurity sheet. andes defaults,
   including the quantification gate (precursor purity ≥ 0.7 and Percolator PEP ≤ 0.05;
-  §10 of DOCS.md), `--rescore`, 16 threads; measured 2026-11-05 at `09e1c00d`. MaxQuant 2.7.0.0
+  §10 of DOCS.md), `--rescore`, 16 threads; measured 2026-11-05 at `0cfa03cc`. MaxQuant 2.7.0.0
   is the run of 2026-10-18 on the vendor files, with the same FASTA and impurity sheet, reporter
   extraction at MS2 or MS3, 1% PSM and protein FDR; its reporter intensities are used as
   reported (`Reporter intensity corrected`). Both tools' PSM tables go through one downstream
@@ -516,23 +519,17 @@ are from 2026-10 and were read again unchanged.
   |---|---:|---:|---:|---:|---:|---|
   | SPS-MS3 | 9,806 | 8,635 | 0.062 | 0.117 | 0.023 | 6,883; 0.054 |
   | RTS-MS3 | 14,270 | 10,518 | 0.027 | 0.033 | 0.015 | 8,930; 0.038 |
-  | hrMS2 (PEP gate off, see below) | 13,474 | 4,114 | 0.205 | 0.202 | 0.145 | 9,677; 0.156 |
+  | hrMS2 | 13,474 | 3,481 | 0.192 | 0.202 | 0.135 | 9,677; 0.156 |
 
-  Few knockout PSMs stand behind each value (40–91 for andes, 26–65 for MaxQuant), so read them
+  Few knockout PSMs stand behind each value (34–91 for andes, 26–65 for MaxQuant), so read them
   as a direction; the two tools do not quantify the same PSMs, and MaxQuant reports fewer PSMs at
   its own 1% FDP on all three sets. The MaxQuant value is the lower one on SPS-MS3 and hrMS2, the
   andes value on RTS-MS3. FragPipe 21.1 reads 0.139, 0.055 and 0.214, and quantms
   (OpenMS IsobaricWorkflow, development version 96f263c) 0.072, 0.037 and 0.180 on the same three
   acquisitions. On hrMS2 only 4,502 of the 13,474 PSMs have a reporter scan whose range covers the
-  reporter ions (4,114 of them pass the purity gate with the PEP gate off).
-  `--tmt-unmix` on hrMS2 sets the median knockout ratio to 0.000 at a background CV of 0.127
-  (0.080 without).
-  *The PEP gate on hrMS2.* With the default `--tmt-max-pep 0.05` no hrMS2 PSM of this set passes
-  the gate at `09e1c00d`: Percolator 3.7.1 run with the default `-Y` reports a posterior error
-  probability of 1 for all 18,898 target PSMs of the two files (the same PIN without `-Y` gives
-  values down to 1e-24 for the best PSMs, and the SPS-MS3, RTS-MS3 and PXD014750 runs are not
-  affected). The hrMS2 row therefore uses `--tmt-max-pep 1`, which leaves the purity gate. At
-  `2051616b` the same set passed 3,618 PSMs with 0.182 (481 further PSMs failed the PEP gate).
+  reporter ions (3,481 of them pass the gate; 388 fail the purity and 633 the PEP criterion).
+  `--tmt-unmix` on hrMS2 sets the median knockout ratio to 0.000 at a background CV of 0.123
+  (0.079 without).
 - *Known ratios (PXD007683):* 149,121 rank-1 target PSMs at 1% over the 11 fractions, 128,265
   quantified; yeast log2 ratios against the human-normalised expectation:
 
@@ -565,9 +562,9 @@ are from 2026-10 and were read again unchanged.
   | MaxQuant 2.7.0.0 | off | 137,539 evidence rows | 0 | — | — | — |
   | SIMSI-Transfer 0.8.0 (MaRaCluster 1.04.1), stringency p10 | on | MaxQuant scans | 16,511 cells | 2.25% | 1.85% | +0.40 (+0.18 to +0.64) |
 
-  The andes rows come from this refresh (`--mbr` adds 3.9% rows, 1.8% at `quant_q ≤ 0.01`; PSMs through the quantification gate
+  The andes rows come from this refresh (build `0cfa03cc`; `--mbr` adds 3.9% rows, 1.8% at `quant_q ≤ 0.01`; PSMs through the quantification gate
   131,161 without it, 134,797 with it; cost
-  with the flag off 3.2k CPU-s, 7.5 minutes, 14.6 GB, with it 2.9k CPU-s, 7.4 minutes, 14.5 GB,
+  with the flag off 3.4k CPU-s, 8.0 minutes, 14.6 GB, with it 3.7k CPU-s, 8.4 minutes, 14.6 GB,
   one run each on one node type). The
   MaxQuant and SIMSI-Transfer rows are the earlier analysis of the same PXD014750 files with the
   same truth and wrong threshold (isobaric MBR as in MaxQuant ≥ 1.6.12.0: rows of type

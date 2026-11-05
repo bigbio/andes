@@ -1047,14 +1047,14 @@ major version marks an incompatible layout, a new minor version only adds column
 | `<stem>.protein_groups.tsv` (`--rescore`/`--rescore-native`) | one per target protein group, best score first | `protein_group lead accessions families peptides unique_peptides razor_peptides psms best_score protein_q subsumed` ([protein groups](#protein-groups-and-protein-fdr)) |
 | `<stem>.proteoforms.tsv` (`--rescore`/`--rescore-native` with UniProt isoform, variant or chain entries) | one per family member with a target PSM at q ≤ `--fdr` (a specific one for isoform, variant and chain entries) | `family member kind feature confidence q_value evidence specific_peptides shared_peptides psms best_psm alternative_explanation source prior_tier`, then `quantity_<run or channel>` with `--lfq`/`--tmt` (§1a, proteoform table) |
 | `<stem>.lfq.parquet` | one per feature per run (all target features, with their q-value) | `filename peptide charge proteins scannr spec_id psm_q_value calc_mz rt_anchor rt_apex rt_start rt_stop n_scans area apex_intensity isotope_areas cosine n_isotopes score decoy_score feature_q_value accepted`; `isotope_areas` is a list (monoisotope first); `accepted` is feature q ≤ `--lfq-feature-fdr` and cosine ≥ `--lfq-min-cosine`. The per-run wide view is the `accepted` rows pivoted on (`peptide`, `charge`) × `filename` over `area` (the highest `score` if a run has two). Metadata `andes.lfq.runs` (input stems, newline-joined, including runs without features), `andes.lfq.feature_fdr`, `andes.lfq.min_cosine` |
-| `<stem>.mbr.parquet` (`--mbr`, `andes quant finalize -o <stem>`) | one per (precursor, run) identified in or transferred into the run, every evidence type | `precursor_key run evidence_type quantity quantity_se quantity_normalized transfer_q quant_q apex_rt_s library_q claimed_by claim_dt_s claim_identified claim_co_apex claim_n_co_apex claim_n_identified_co_apex` (the last six: same-run claims on a transfer row, §10; null for identified rows); `quantity_normalized` is `quantity` with the run's level and RT-local offset removed (§10, null when the run is not normalised); `evidence_type` is `identified` (the run has a target PSM of the precursor at PSM q ≤ `--quant-fdr` and, with `--pep`, PEP ≤ `--pep`), `identified_below_threshold` (identified, but `quant_q` above `--quant-feature-fdr` or missing; quantity kept, in this table only), `transfer_ms2` (transfer q ≤ `--mbr-fdr`, and an MS2 scan of the run matches the precursor's library spectrum: at least 4 fragments at a spectral angle of at least 0.6), `transfer_ms1` (transfer q ≤ `--mbr-fdr`, without that MS2 support) or `below_threshold` (quantity kept, as censored; in this table only); `quant_q` is the quality q-value of the row's MS1 feature against its decoys (the identified-row estimate for identified rows; for an accepted transfer the running mean of its probability of a wrong measurement, §10; `transfer_q` for a transfer below the threshold); `transfer_q`, `quant_q` and `library_q` are internal quant-quality values, not identification FDR; text columns are strings, the others float64, null for missing values, including the quantity of a row whose MS1 fit found no signal (its intensity list in the feature parquet is empty). Precursors that fail the library entry gate have no rows |
+| `<stem>.mbr.parquet` (`--mbr`, `andes quant finalize -o <stem>`) | one per (precursor, run) identified in or transferred into the run, every evidence type | `precursor_key run evidence_type quantity quantity_se quantity_normalized transfer_q quant_q apex_rt_s library_q claimed_by claim_dt_s claim_identified claim_co_apex claim_n_co_apex claim_n_identified_co_apex` (the last six: same-run claims on a transfer row, §10; null for identified rows); `quantity_normalized` is `quantity` with the run's level and RT-local offset removed (§10, null when the run is not normalised); `evidence_type` is `identified` (the run has a target PSM of the precursor at PSM q ≤ `--quant-fdr` and, with `--pep`, PEP ≤ `--pep`), `identified_below_threshold` (identified, but `quant_q` above `--quant-feature-fdr` or missing; quantity kept, in this table only), `transfer_ms2` (transfer q ≤ `--mbr-fdr`, and an MS2 scan of the run matches the precursor's library spectrum: at least 4 fragments at a spectral angle of at least 0.6), `transfer_ms1` (transfer q ≤ `--mbr-fdr`, without that MS2 support), `shared_feature` (transfer q ≤ `--mbr-fdr`, but the shipped classifier takes the row's MS1 feature for another compound's, §10; quantity kept, in this table only) or `below_threshold` (quantity kept, as censored; in this table only); `quant_q` is the quality q-value of the row's MS1 feature against its decoys (the identified-row estimate for identified rows; for an accepted transfer the running mean of its probability of a wrong measurement, §10; `transfer_q` for a transfer below the threshold); `transfer_q`, `quant_q` and `library_q` are internal quant-quality values, not identification FDR; text columns are strings, the others float64, null for missing values, including the quantity of a row whose MS1 fit found no signal (its intensity list in the feature parquet is empty). Precursors that fail the library entry gate have no rows |
 | `<stem>.mbr_validation.parquet` | one | counts are uint64, thresholds and rates float64 (null when undefined): pseudo-transfer validation (identified pairs re-measured as transfers: acceptance rate `pseudo_acceptance_*`, wrong-peak rate) and accepted transfer counts for the pooled and per-decoy-family estimates, at q ≤ 0.01 (`_q01`) and at `--mbr-fdr` (`_at_threshold`); then `--quant-feature-fdr` (null when off) and the identified rows: all, with a `quant_q`, at `quant_q` ≤ 0.01, and `identified_below_threshold`; then the MS2 evidence of the transfer rows: per hypothesis (`ms2_target_*`, `ms2_mass_decoy_*`, `ms2_rt_decoy_*`) and for the pseudo-transfers (`ms2_pseudo_*`) the rows with MS2 evidence (`_rows`) and those an MS2 scan supports (`_supported`), and the accepted transfers reported as `transfer_ms2`; then, at q ≤ 0.01 and at `--mbr-fdr`, the transfers the wrong-peak decoys alone would accept (`accepted_wrong_peak_only_*`) and the accepted decoy transfers per family (`accepted_mass_decoys_*`, `accepted_rt_decoys_*`, `accepted_identity_decoys_*`); then the target and identity-decoy library entries, the decoy transfers with a q-value per family, and the transfer targets not transferred because their entry's best donor PSM is above q 0.001 (`donor_gated`; counts the extracted rows only, so 0 when extract skipped those pairs, the default) |
 | `<dir>/quantms.feature.parquet` | one per feature (LFQ) or quantified PSM (isobaric) | the QPX feature view (`intensities` as `[{label, intensity}]` with `LFQ` or `TMT126`-style labels; `additional_intensities` with the raw/apex/isotope values; purity, cosine, q-values in `additional_scores`; `psm_ids` pointing at `psms.parquet` rows) |
 
 With `--mbr` (or `andes quant finalize --output-parquet <dir>`), `quantms.feature.parquet` holds
 one row per `identified`, `transfer_ms2` or `transfer_ms1` row of `<stem>.mbr.parquet` instead of the per-run
 `--lfq` features, with six extra columns: `evidence_type`, `transfer_q`, `quant_q`,
-`quantity_se`, `claimed_by` and `claim_co_apex` (the same-run claims of §10). `below_threshold` transfers and `identified_below_threshold` rows are left out
+`quantity_se`, `claimed_by` and `claim_co_apex` (the same-run claims of §10). `below_threshold` and `shared_feature` transfers and `identified_below_threshold` rows are left out
 (they stay in `<stem>.mbr.parquet` with their quantity and standard error), so every LFQ intensity
 in the parquet passed the transfer q-value or, for an identified row, the identified quality
 q-value (when `--quant-feature-fdr` is set; by default every identified row is kept); precursors
@@ -1065,11 +1065,14 @@ Files in the quant directory (`--quant-dir`), all Parquet: per run `<stem>.ms1.p
 `<stem>.ms2.parquet` and `<stem>.quant.parquet` (search), `<stem>.extract.parquet` (extract);
 once `library.parquet` and `alignment.parquet` (library). Each file carries a schema version
 (`andes.<table>.schema`); a reader rejects another major version and names the file.
-`<stem>.extract.parquet` is at schema 6: schema 3 added the MS2 evidence of the transfer and
+`<stem>.extract.parquet` is at schema 7: schema 3 added the MS2 evidence of the transfer and
 pseudo-transfer rows (`ms2_n_scans`, `ms2_n_matched`, `ms2_angle`, `ms2_explained`),
 schema 4 the per-isotope heights (`iso_h0` to `iso_h3`) and `tailing` of every fit, and
 schema 5 the template-free trace area (`trace_quantity`, `trace_quantity_se`, §10), and
-schema 6 the same-run claims of the transfer rows (`claim_*`, §10); an older
+schema 6 the same-run claims of the transfer rows (`claim_*`, §10), and
+schema 7 the second and third claimant, the smallest claimant apex distance and the MS2
+distinguishing-ion evidence of the claimed transfer rows (`claim_precursor2`, `claim_precursor3`,
+`claim_min_dt_s`, `shared_*`, §10); an older
 extract table is rejected (run `andes quant extract` again). `library.parquet` is at schema 4:
 schema 3 added each entry's fragment spectrum (`frag_mz`, `frag_intensity`, `frag_ion` such as
 `y7` or `b5^2`) and its donor PSMs' runs and RTs (`donor_scan_run`, `donor_scan_rt`), and
@@ -1795,23 +1798,51 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
   precursor (`1`) made those calls worse on three of four sets. `0` reports the template area
   everywhere. `quant_q` and the transfer q-values do not depend on it.
 * **Same-run claims (shared MS1 feature).** A transfer row is *claimed* when another fitted
-  target of the same run (identified or transferred) has the same charge, a neutral mass within
-  2 ppm and an apex within 60 s. The best claimant (the identified one if any, then the nearest
-  apex) is written to the extract table (`claim_precursor`, `claim_dt_s`, `claim_identified`,
-  `claim_co_apex`, `claim_n`, `claim_n_co_apex`, `claim_n_identified_co_apex`) and reported by
-  `<stem>.mbr.parquet` (`claimed_by`, `claim_dt_s`, `claim_identified`, `claim_co_apex`,
-  `claim_n_co_apex`, `claim_n_identified_co_apex`) and `quantms.feature.parquet` (`claimed_by`,
-  `claim_co_apex`). The claim is co-apex when the two apexes are closer than the sum of the two
-  fitted widths: the two probes then measure one MS1 feature, whose quantity belongs to
-  both compounds (isobaric residue combinations and permutations of the library) or to the
-  claimant alone (a transfer into a run without the analyte). The claim is a flag: no row, quantity,
-  evidence type or q-value changes. In a known-absent benchmark (yeast peptides in runs
-  without yeast) 5.4 % of the accepted transfers with a co-apex claimant were absent against
-  0.16 % of those without a claimant,
-  which the pooled decoy estimates do not see; in a masked-analyte test 12 % of the
-  transfers with an identified co-apex claimant sat on the wrong peak against 2.3 % overall.
-  A rule that removes or down-weights the claimed rows also removed true low-level transfers
-  (they have the same claim profile), so the decision is left to the downstream tool.
+  target of the same run (identified or transferred) has the same charge, a neutral mass and an
+  apex inside the run's claim windows. The windows are learned per run: identified peptides seen
+  at two charge states are one compound measured twice, so the differences of their measured mass
+  errors and of their fitted apexes give the run's same-compound spread (robust standard
+  deviations `σ_ppm`, `σ_t`); the chance density of unrelated same-charge partners is read from the
+  outer part of the ±20 ppm × ±60 s search rectangle; a window is the contour where the
+  same-compound density `1 / (2π σ_ppm σ_t)` falls to the chance density, `L σ_ppm` ppm and `L σ_t`
+  seconds with `L² = 2 ln(f₀ / u)` (L about 4). On the benchmark runs the mass window is 2.2 to 7.4 ppm
+  and the apex window 2.3 to 11 s; a run with fewer than 30 such pairs has no claims. The windows
+  are written to the extract table's `andes.extract.run_scales` tag. The best claimant (the
+  identified one if any, then the nearest apex) and the next two are written to the extract
+  table (`claim_precursor`, `claim_precursor2`, `claim_precursor3`, `claim_dt_s`,
+  `claim_min_dt_s`, `claim_identified`, `claim_co_apex`, `claim_n`, `claim_n_co_apex`,
+  `claim_n_identified_co_apex`) and reported by `<stem>.mbr.parquet` (`claimed_by`, `claim_dt_s`,
+  `claim_identified`, `claim_co_apex`, `claim_n_co_apex`, `claim_n_identified_co_apex`) and
+  `quantms.feature.parquet` (`claimed_by`, `claim_co_apex`). The claim is co-apex when the two
+  apexes are closer than the sum of the two fitted widths: the two probes then measure
+  one MS1 feature, whose quantity belongs to both compounds (isobaric residue combinations and
+  permutations of the library) or to the claimant alone (a transfer into a run without the
+  analyte). In a known-absent benchmark (yeast peptides in runs without yeast) 5.3 % of the
+  accepted transfers with a co-apex claimant were absent against 0.16 % of those without a
+  claimant, which the pooled decoy estimates do not see.
+* **Shared-feature downgrade.** For a transfer row with a claimant, extract looks at the MS2
+  scans of the receiving run that cover its feature (within two fitted widths of the apex, the
+  probe's m/z in the isolation window): which peptide each scan was identified as (the
+  transfer's, a claimant's, another, none) and whether the fragment ions that only the transfer's
+  sequence has, and those only a claimant has, are present (the summed hits, intensity shares
+  and the best-scoring claimant; `shared_*` columns, only for claimed transfers, about 0.1 s per
+  run). `quant finalize` gives each accepted transfer with a claimant to a small
+  gradient-boosted classifier (150 trees of 4 leaves, `resources/quant/shared_feature_model.txt`,
+  compiled in, with its provenance) that reads the claim geometry, the MS2 evidence, the
+  transfer q-value, `llr` and the fitted width; a transfer whose probability of being another
+  compound's feature exceeds the model's threshold (0.7) is reported as `shared_feature` in
+  `<stem>.mbr.parquet` instead of `transfer_ms1` / `transfer_ms2`, with its quantity, `transfer_q`
+  and `quant_q` unchanged and no row of any other type changed; downstream tools leave it out
+  as they leave out `below_threshold` rows, and `quantms.feature.parquet` does not carry it. The
+  model was trained on four benchmark truth sets and one known-absent set (positives: yeast
+  transfers accepted in the 20 human-only PXD014415 runs; negatives re-weighted to the
+  positives' claimant exposure, and the accepted cells of PXD009740, PXD009815, ProteoBench QE and
+  ProteoBench Astral; the true low-level UPS1 transfers weighted 50 times), and judged
+  leave-one-dataset-out. With the windows and the evidence above, on those sets it takes about 30 %
+  fewer absent yeast transfers than tightening `transfer_q` to the same number of transfers
+  (PXD014415), with identified rows identical, no loss of UPS1 within-2x detections or of
+  differential-expression calls beyond the seed-to-seed spread, and unchanged blank-run rows.
+  Finalize logs the number of `shared_feature` rows.
 * **Normalised quantity.** `<stem>.mbr.parquet` also reports `quantity_normalized`: the reported
   quantity divided by `2^o`, where `o` is the run's log2 offset at the row's apex RT. The
   offsets are fitted across runs on the identified rows with `quant_q ≤ 0.01` of precursors

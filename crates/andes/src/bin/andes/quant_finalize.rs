@@ -68,6 +68,7 @@ use quant::decoys::Hypothesis;
 use quant::evidence::Evidence;
 use quant::library::{Library, LibraryEntry};
 use quant::normalize::{fit as fit_normalization, NormCell, NormParams};
+use quant::shared;
 use rayon::prelude::*;
 
 use crate::quant_mbr::{
@@ -1244,12 +1245,13 @@ impl OutRow {
 }
 
 /// The evidence types by their code in the temporary tables.
-const EVIDENCE_CODES: [EvidenceType; 5] = [
+const EVIDENCE_CODES: [EvidenceType; 6] = [
     EvidenceType::Identified,
     EvidenceType::IdentifiedBelowThreshold,
     EvidenceType::TransferMs2,
     EvidenceType::TransferMs1,
     EvidenceType::BelowThreshold,
+    EvidenceType::SharedFeature,
 ];
 
 fn evidence_code(e: EvidenceType) -> u8 {
@@ -1455,6 +1457,7 @@ impl OutReader {
                         n: opt(12, i).map_or(0, |x| x as u16),
                         n_co_apex: opt(13, i).map_or(0, |x| x as u16),
                         n_identified_co_apex: opt(14, i).map_or(0, |x| x as u16),
+                        ..Claim::default()
                     },
                 })
             })
@@ -2207,6 +2210,7 @@ pub(crate) fn finalize_stream(
     // rows are scored here.
     let t0 = Instant::now();
     let accepted = |q: Option<f64>| q.is_some_and(|q| q <= mbr_fdr);
+    let shared_feature = shared::Model::shipped();
     // Decoy transfer rows with a q-value, and their acceptance, by family:
     // mass shift, RT shift, identity decoy.
     let count_decoy = |v: &mut MbrValidation, q: Option<f64>, f: usize| {
@@ -2377,13 +2381,28 @@ pub(crate) fn finalize_stream(
                             v.ms2_rows[0] += 1;
                             v.ms2_supported[0] += usize::from(m.supports());
                         }
-                        let t = match (accepted(q), supported) {
-                            (true, true) => {
+                        let downgrade = accepted(q)
+                            && q.is_some_and(|q| {
+                                shared_feature.is_shared(&shared::Row {
+                                    claim: &r.claim,
+                                    shared: r.shared.as_deref(),
+                                    ms2_supported: supported,
+                                    transfer_q: q,
+                                    llr: e.map_or(0.0, |e| e.llr),
+                                    width: e.map_or(0.0, |e| e.w),
+                                })
+                            });
+                        let t = match (accepted(q), supported, downgrade) {
+                            (true, _, true) => {
+                                v.shared_feature += 1;
+                                EvidenceType::SharedFeature
+                            }
+                            (true, true, false) => {
                                 v.transfer_ms2 += 1;
                                 EvidenceType::TransferMs2
                             }
-                            (true, false) => EvidenceType::TransferMs1,
-                            (false, _) => EvidenceType::BelowThreshold,
+                            (true, false, false) => EvidenceType::TransferMs1,
+                            (false, _, _) => EvidenceType::BelowThreshold,
                         };
                         (t, q, q)
                     }
@@ -2467,7 +2486,9 @@ pub(crate) fn finalize_stream(
                 .filter(|&&(i, _)| {
                     matches!(
                         out.rows[i].evidence_type,
-                        EvidenceType::TransferMs2 | EvidenceType::TransferMs1
+                        EvidenceType::TransferMs2
+                            | EvidenceType::TransferMs1
+                            | EvidenceType::SharedFeature
                     )
                 })
                 .map(|&(i, p)| (p, i))
@@ -2691,6 +2712,11 @@ fn log_summary(
         v.transfer_ms2
     );
     eprintln!(
+        "[mbr] shared-feature classifier (probability above {}): {} accepted transfers reported as shared_feature",
+        quant::shared::Model::shipped().threshold,
+        v.shared_feature
+    );
+    eprintln!(
         "[mbr] run normalisation (quantity_normalized): {} reference precursors (identified, quant_q <= {VALIDATION_Q}, in >= 3 runs or all runs)",
         norm.precursors
     );
@@ -2908,6 +2934,7 @@ mod tests {
                 n: 2,
                 n_co_apex: 1,
                 n_identified_co_apex: u16::from(precursor % 4 == 0),
+                ..Claim::default()
             },
         }
     }

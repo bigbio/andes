@@ -74,7 +74,7 @@ best of the other tools on that measure.
 |---|---|---|---|
 | Depth: precursors and cells quantified (all eight truth sets) | 10.7k–93.6k precursors | MaxQuant 9.3k–51.6k, FragPipe 10.4k–71.4k | **well ahead** on 7 of 8 sets (+19% to +51% over the best other tool), **comparable** on PXD001819 (+3%) |
 | Accuracy, ProteoBench QExactive (median \|ε\|, 6 runs) | 0.161, 63,796 precursors | FragPipe 23.0 0.190 (leaderboard) | **ahead** |
-| Accuracy, ProteoBench Astral (median \|ε\|) | 0.186, 36,675 precursors | DIA-NN 2.6.0 0.123 (16,363 precursors; DIA) | **behind** on accuracy, **well ahead** on depth |
+| Accuracy, ProteoBench Astral (median \|ε\|, CV) | 0.186, CV 0.112, 36,675 precursors | at similar depth i2MassChroQ 0.197, FragPipe 0.212; with fewer precursors MaxQuant 0.160 (20,283), Sage 0.167 (30,319, CV 0.070) | **ahead** on error at similar depth, **comparable** on depth, **behind** on CV and against submissions with fewer precursors |
 | DE true positives with MBR (PXD009740 / QE / Astral) | 1,376 / 1,319 / 759 | MaxQuant 1,361 / 904 / 659; FragPipe 1,262 / 985 / 754 | **comparable** on PXD009740 and Astral, **well ahead** on QE (+34%) |
 | DE false positives with MBR, no fold-change cut (PXD009740 / QE) | 360 / 111 | MaxQuant 142 / 37 | **well behind** (2.5–3x) |
 | DE false positives with \|log2 FC\| ≥ 0.5 (PXD009740 / QE) | 256 / 16 | MaxQuant 101 / 19 | **behind** on UPS1, **comparable** on QE |

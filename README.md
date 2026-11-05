@@ -36,8 +36,8 @@ from an earlier session. **Error rates** (entrapment, three Percolator seeds; T/
 database): andes's nominal 1% is 0.89–1.08% true FDP on Astral (peptide-level shuffled
 entrapment), 0.67–0.76% on TMT a05058, 0.80–0.99% on phospho, and 2.07–2.19% on UPS1 against its
 natural *E. coli* entrapment (0.91–0.98% against a peptide-level shuffle). timsTOF, high-res TMT,
-glyco and quantification results:
-[`docs/benchmarks/`](docs/benchmarks/README.md).</sub>
+glyco and the full quantification results:
+[`docs/benchmarks/`](docs/benchmarks/README.md); quantification summary below.</sub>
 
 **Time, CPU and memory** (same VM, 8 threads, `/usr/bin/time`; andes 2026-10-23 at `2051616b`,
 two runs on the standard sets, one on phospho; Comet 2026-10-06, one run, same rescoring).
@@ -57,6 +57,40 @@ two runs on the standard sets, one on phospho; Comet 2026-10-06, one run, same r
 database both rows used; Comet's count read 1.77% true FDP on that design, and andes's reads
 0.80–0.99% on the peptide-level design that replaced it. Wall times vary 5–15% between sessions
 (UPS1 30 and 48 s in two runs); CPU time is steadier.</sub>
+
+## Quantification benchmarks
+
+Label-free (`--lfq --mbr`) and TMT (`--tmt`) quantification on public designs with a known answer,
+read through one evaluation for every tool (raw precursor intensities, the same normalisation,
+roll-up and test for all). andes defaults at `09e1c00d` (label-free) and `0cfa03cc` (TMT),
+2026-11-05; MaxQuant 2.7.0.0, FragPipe 21.1 / IonQuant 1.10.12 (normalisation off). Full tables,
+settings and the cases where other tools do better:
+[`docs/benchmarks/`](docs/benchmarks/README.md#quantification-truth-designs-match-between-runs-on-and-off).
+
+Where andes stands: **well ahead**, **ahead**, **comparable**, **behind** or **well behind** the
+best of the other tools on that measure.
+
+| measure (design) | andes | other tools | where andes stands |
+|---|---|---|---|
+| Depth: precursors and cells quantified (all eight truth sets) | 10.7k–93.6k precursors | MaxQuant 9.3k–51.6k, FragPipe 10.4k–71.4k | **well ahead** on 7 of 8 sets (+19% to +51% over the best other tool), **comparable** on PXD001819 (+3%) |
+| Accuracy, ProteoBench QExactive (median \|ε\|, 6 runs) | 0.161, 63,796 precursors | FragPipe 23.0 0.190 (leaderboard) | **ahead** |
+| Accuracy, ProteoBench Astral (median \|ε\|) | 0.186, 36,675 precursors | DIA-NN 2.6.0 0.123 (16,363 precursors; DIA) | **behind** on accuracy, **well ahead** on depth |
+| DE true positives with MBR (PXD009740 / QE / Astral) | 1,376 / 1,319 / 759 | MaxQuant 1,361 / 904 / 659; FragPipe 1,262 / 985 / 754 | **comparable** on PXD009740 and Astral, **well ahead** on QE (+34%) |
+| DE false positives with MBR, no fold-change cut (PXD009740 / QE) | 360 / 111 | MaxQuant 142 / 37 | **well behind** (2.5–3x) |
+| DE false positives with \|log2 FC\| ≥ 0.5 (PXD009740 / QE) | 256 / 16 | MaxQuant 101 / 19 | **behind** on UPS1, **comparable** on QE |
+| Faint UPS1 detected within 2x (three lowest levels; PXD009740 / PXD009815) | 502 / 24 | MaxQuant 417 / 23, FragPipe 458 / 50 | **ahead** on PXD009740, **behind** FragPipe on PXD009815 |
+| Known-absent yeast (PXD014415): false-transfer rate | 0.20% (0.08% at `quant_q ≤ 0.01`) | FragPipe 0.09% | **behind** at the default, **comparable** at `quant_q ≤ 0.01` |
+| Identified-cell accuracy: bright-decile gross error (> 2x) | 1.2–7.2% | MaxQuant 0.3–1.6%, FragPipe 0.3–3.8% | **well behind** |
+| Precision: protein CV (six sets) | 4.4–10.1% | MaxQuant 7.0–11.6%, FragPipe 4.9–13.5% | **ahead** on 3 sets (PXD009740, PXD009815, QE), **comparable** on PXD030780, **behind** FragPipe on Astral and PXD001819 |
+| TMT match between runs (hrMS2, PXD014750): excess wrong-value rate of transfers | −0.05 points (3,636 transfers) | MaxQuant isobaric MBR +1.53, SIMSI-Transfer +0.40 (more cells) | **well ahead** on accuracy, **behind** on cells transferred |
+| TMT knockout interference, hrMS2 (PXD017803) | 0.192; 0.000 with `--tmt-unmix` | MaxQuant 0.156, quantms 0.180, FragPipe 0.214 | **comparable** by default, **well ahead** with `--tmt-unmix` |
+| TMT PSMs quantified after the quality gate, hrMS2 | 3,481 | MaxQuant 9,677 | **well behind** (the default gate is strict on hrMS2) |
+
+<sub>DE: proteins with ≥ 2 precursors tested by every tool of the set, moderated t, Benjamini–Hochberg
+5%. Knockout interference rests on 26–91 knockout PSMs per value, so read it as a direction.
+Identifications reuse the 2026-10-31 searches. The open problems are the DE false positives on
+UPS1 designs, the gross error of bright identified cells and the false-transfer rate at the default
+threshold.</sub>
 
 ## How it works
 

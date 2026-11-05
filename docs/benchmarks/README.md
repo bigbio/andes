@@ -139,6 +139,8 @@ reference's spectra that andes identifies with the same peptide.
   candidate row, but in the deep tier about a fifth of pGlyco2's spectra lose the per-scan
   choice.
 
+### Quantification: label-free, ProteoBench
+
 **Label-free quantification with match between runs (ProteoBench).**
 - *Data and measurement:* the two ProteoBench "Quant LFQ DDA ion" modules, six runs each, where
   the human, yeast and E. coli ratios between conditions A and B are known: QExactive
@@ -185,6 +187,8 @@ reference's spectra that andes identifies with the same peptide.
   three seeds here (at `2051616b` it was below in one of six cases), so it tracks the
   false-donor share; three seeds do not make it an upper bound. The wrong-peak part has no
   entrapment check.
+
+### Quantification: ProteoBench leaderboard comparison
 
 **Comparison with the ProteoBench leaderboard.** Public results of both modules
 (`Results_quant_ion_DDA` and `Results_quant_ion_DDA_Astral`, both last updated 2026-07-16; read
@@ -272,6 +276,8 @@ CV 0.095) about as many, and FragPipe 23.0 more (39,057, 0.212); DIA-NN 2.6.0 re
 is above most submissions. Normalisation changes little here (raw |ε| 0.204, CV 0.113).
 Shared-precursor comparisons need the per-submission tables, which could not be retrieved; they
 are not given.
+
+### Quantification: truth designs, match between runs on and off
 
 **Quantification against truth designs, match between runs on and off.** Eight sets with a known
 answer, quantified by andes, MaxQuant and FragPipe and read through one evaluation
@@ -499,6 +505,8 @@ are from 2026-10 and were read again unchanged.
   206 against 111 on PXD009740. FragPipe reports the fewest rows in the blank run and a lower
   false-transfer rate on PXD014415 than andes (0.09% against 0.20%).
 
+### Quantification: TMT and TMT match between runs
+
 **TMT quantification.**
 - *Data and measurement:* PXD017803 (yeast triple knockout, TMTpro 16-plex; two files each of
   hrMS2, SPS-MS3 and RTS-MS3) and PXD007683 (human + yeast TMT11 with known yeast ratios, 11
@@ -575,6 +583,8 @@ are from 2026-10 and were read again unchanged.
   unfiltered candidates and both tools carry an excess of 0.4–1.5 points, and SIMSI-Transfer
   transfers the most cells. The entrapment share of the accepted andes transfers is 1.6% (1.7%
   of all candidates).
+
+### Quantification: large study (500 runs)
 
 **Large study (PXD042233, 500 runs).** Label-free DDA from Q Exactive HF, HF-X and Exploris 480,
 `.raw` read natively, human reviewed proteins + contaminants, 5 ppm, 2 missed cleavages,

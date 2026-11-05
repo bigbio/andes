@@ -187,3 +187,98 @@ fn pooled_runs_compete_per_file_or_skip() {
         "without FileName the two runs' rows share 60 groups and one row of each wins: {without:?}"
     );
 }
+
+/// A PIN whose best decoy scores far above every other decoy, close to the best
+/// targets. Percolator's `-Y` PEP fit can return PEP = 1 for every PSM on such
+/// input (depending on the cross-validation split) while the q-values stay
+/// valid; the runner must hand back a PEP that is below 1 for the accepted
+/// PSMs whichever way the fit goes.
+fn write_top_decoy_pin(path: &std::path::Path) {
+    let mut w = std::fs::File::create(path).unwrap();
+    writeln!(
+        w,
+        "SpecId\tLabel\tScanNr\tExpMass\tFileName\tf1\tf2\tf3\tPeptide\tProteins"
+    )
+    .unwrap();
+    // A fixed pseudo-random stream (xorshift), so the PIN is the same every run.
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut gauss = move || {
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        (0..12).map(|_| next()).sum::<f64>() - 6.0
+    };
+    for i in 0..3000 {
+        let (f1, f2, f3) = (gauss(), gauss(), gauss());
+        writeln!(
+            w,
+            "run/t_{i}\t1\t{i}\t{mass}\trun\t{a}\t{b}\t{c}\tR.PEPTIDEK.A\tsp|T{i}",
+            mass = 800.0 + 0.37 * i as f64,
+            a = f1 + 1.4,
+            b = f2 + 1.0,
+            c = f3
+        )
+        .unwrap();
+    }
+    for i in 0..3000 {
+        let (f1, f2, f3) = (gauss(), gauss(), gauss());
+        // Decoy 0 is the outlier.
+        let boost = if i == 0 { 12.0 } else { 0.0 };
+        writeln!(
+            w,
+            "run/d_{i}\t-1\t{scan}\t{mass}\trun\t{a}\t{b}\t{c}\tR.EDITPEPK.A\tXXX_D{i}",
+            scan = 10_000 + i,
+            mass = 5000.0 + 0.37 * i as f64,
+            a = f1 + boost,
+            b = f2 + boost,
+            c = f3
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn pep_of_accepted_psms_is_below_one_whatever_the_seed_or_skip() {
+    let Some(backend) = test_backend() else {
+        eprintln!(
+            "SKIP pep_of_accepted_psms_is_below_one_whatever_the_seed_or_skip: no Percolator \
+             backend (set $ANDES_TEST_PERCOLATOR_BIN, put `percolator` on PATH, or provide docker)."
+        );
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let pin = tmp.path().join("top_decoy.pin");
+    write_top_decoy_pin(&pin);
+    // The runner trains with a fixed seed, so the failure shows or not by the
+    // PIN; a later `--seed` among the extra arguments takes over and gives
+    // the same PIN several random splits.
+    for seed in 1..=8 {
+        let mut args = percolator_args_with_threads(&[], 1);
+        args.extend(["--seed".to_string(), seed.to_string()]);
+        let (targets, _) = match run_percolator_with_decoys(&backend, &pin, &args) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("SKIP pep_of_accepted_psms_is_below_one_whatever_the_seed_or_skip: {e}");
+                return;
+            }
+        };
+        assert!(
+            targets.values().any(|p| p.q_value <= 0.01),
+            "seed {seed}: the PIN must have accepted PSMs"
+        );
+        assert!(
+            !output::pep_is_degenerate(&targets),
+            "seed {seed}: every accepted PSM has PEP = 1"
+        );
+    }
+    // The repair pass leaves no scratch files next to the PIN.
+    let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains(".pep."))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}

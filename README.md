@@ -67,7 +67,7 @@ roll-up and test for all). andes defaults at `09e1c00d` (label-free) and `0cfa03
 settings and the cases where other tools do better:
 [`docs/benchmarks/`](docs/benchmarks/README.md#quantification-truth-designs-match-between-runs-on-and-off).
 
-Legend: 🟢 andes better · 🟡 similar · 🔴 andes worse · ⚪ no comparison. The last column says whether a gap can be closed downstream of andes (filtering on its quality columns, a fold-change cut, normalisation or roll-up) or needs a change in the engine, and how much the gap matters: **minor** (usable as is), **moderate** (usable with the care stated), **major** (default results are hurt badly; use the fix). No result is unusable; the one major gap is the default TMT quality gate on hrMS2. "Best other tool" is the strongest result another tool reported on the same data for that metric; percentages are andes relative to it.
+Legend: 🟢 andes better · 🟡 similar · 🔴 andes worse · ⚪ no comparison. The last column says whether a gap can be closed downstream of andes (filtering on its quality columns, a fold-change cut, normalisation or roll-up) or needs a change in the engine, and how much the gap matters: **minor** (usable as is), **moderate** (usable with the care stated), **major** (default results are hurt badly; use the fix). No result is unusable, and no gap is major. "Best other tool" is the strongest result another tool reported on the same data for that metric; percentages are andes relative to it.
 
 | benchmark (data) | metric | andes | best other tool | result | impact · can it be fixed downstream? |
 |---|---|---:|---|---|---|
@@ -88,7 +88,7 @@ Legend: 🟢 andes better · 🟡 similar · 🔴 andes worse · ⚪ no comparis
 | Known-absent yeast, PXD014415 | false-transfer rate | 0.20% (0.08% at `quant_q ≤ 0.01`) | FragPipe 21.1: 0.09% | 🔴 at default, 🟡 at `quant_q ≤ 0.01` | **minor**, usable. Yes: filter `quant_q ≤ 0.01` (0.08%, at fewer transfers) |
 | Blank run, PXD016921 | rows reported in the blank | 150 | FragPipe 21.1: 8 | 🔴 | **moderate** for low-input or blank-adjacent runs. No: `quant_q ≤ 0.01` still leaves 144; mostly carry-over (real ions) |
 | TMT knockout, PXD017803 SPS / RTS / hrMS2 | interference (lower is better) | 0.062 / 0.027 / 0.192 | MaxQuant 2.7: 0.054 / 0.038 / 0.156 | 🟡 / 🟢 / 🔴 (🟢 0.000 with `--tmt-unmix`) | **moderate** on hrMS2, usable with the option. Yes for hrMS2: `--tmt-unmix` (0.000) or a purity ≥ 0.9 filter (0.135) |
-| TMT knockout, hrMS2 | PSMs passing the quality gate | 3,481 | MaxQuant 2.7: 9,677 | 🔴 | **major** by default on hrMS2 (74% of PSMs not quantified). Yes: the gate is a filter on the reported purity and PEP; without it 13,474 PSMs at interference 0.202 |
+| TMT knockout, hrMS2 | PSMs with reporter ions evaluated (scans whose range records the reporters) | 3,278 | FragPipe 21.1: 3,038; MaxQuant 2.7: 2,241 | 🟢 | — |
 | TMT known ratios, PXD007683 | PSMs | 149,121 | MaxQuant 2.7: 97,107 | 🟢 +54% | — |
 | TMT known ratios, PXD007683 | protein ratio error (MAE A/C) | 0.213 | MaxQuant 2.7: 0.159 | 🔴 | **moderate**, usable. Partly: a stricter purity filter; the rest is extraction and roll-up |
 | TMT match between runs, PXD014750 hrMS2 | excess wrong-value rate of transfers | −0.05 points | SIMSI-Transfer 0.8: +0.40; MaxQuant isobaric MBR: +1.53 | 🟢 | — |

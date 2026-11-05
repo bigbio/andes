@@ -217,9 +217,9 @@ fn write_top_decoy_pin(path: &std::path::Path) {
             w,
             "run/t_{i}\t1\t{i}\t{mass}\trun\t{a}\t{b}\t{c}\tR.PEPTIDEK.A\tsp|T{i}",
             mass = 800.0 + 0.37 * i as f64,
-            a = f1 + 1.4,
-            b = f2 + 1.0,
-            c = f3
+            a = f1 + 3.0,
+            b = f2 + 2.0,
+            c = f3 + 1.0
         )
         .unwrap();
     }

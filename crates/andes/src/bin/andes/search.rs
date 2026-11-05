@@ -200,7 +200,7 @@ impl FragmentErrorMeasurer {
     fn start_file(&mut self, prepared: &PreparedSearch) {
         self.done = false;
         if self.enabled {
-            prepared.scorer.set_fragment_error(None);
+            prepared.set_fragment_error(None);
         }
     }
 
@@ -239,7 +239,7 @@ impl FragmentErrorMeasurer {
         }
         match search::fragment_error::measure_on_queues(prepared, &sample, &queues) {
             Ok(m) => {
-                prepared.scorer.set_fragment_error(Some(m));
+                prepared.set_fragment_error(Some(m));
                 eprintln!(
                     "Fragment error: offset {:+.2} ppm, spread {:.2} ppm from {} ions of {} PSMs \
                      at 1% q in {} sampled spectra -> fragment peaks recentred by {:+.2} ppm, \
@@ -1526,6 +1526,79 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         &index_path,
     )
     .map_err(|e| format!("build out-of-core candidate index: {e}"))?;
+    // A run that mixes MS2 activations (decision-tree or alternating HCD/EThcD,
+    // HCD/CID) is scored scan by scan: each scan with the model chosen for its own
+    // activation, by the rules of the run-level choice. An explicit `--model` or
+    // `--fragmentation` names the model for the whole run, and the glyco driver
+    // pairs its own scans, so those keep the single run-level model.
+    if cli.model_id_override.is_none()
+        && cli.fragmentation == Fragmentation::Auto
+        && !cli.glyco
+        && instrument_was_detected
+        && !resolved_model_id.is_empty()
+    {
+        let store_path = cli
+            .model_store
+            .clone()
+            .unwrap_or_else(crate::model_select::bundled_store_path);
+        let run_model_id = resolved_model_id.clone();
+        let run_analyser =
+            crate::model_select::analyser_of(param.data_type.instrument.name()).to_string();
+        let run_protocol = param.data_type.protocol;
+        let high_res = acquisition.high_res;
+        let index_on = params.fragment_index_top_k > 0;
+        let gbdt_max_trees = gbdt_k;
+        let loader: search::ScorerLoader = Box::new(move |activation: ActivationMethod| {
+            let route = match crate::model_select::load_activation_route(
+                activation,
+                routed_instrument,
+                route_protocol,
+                search_enzyme,
+                &store_path,
+                &run_model_id,
+                &run_analyser,
+            ) {
+                Ok(r) => r?,
+                Err(e) => {
+                    eprintln!(
+                        "WARN: per-scan model routing: {e}; {} scans use the run's model",
+                        activation.name()
+                    );
+                    return None;
+                }
+            };
+            let (model_id, mut p) = route;
+            // The fragment-ion index holds b/y ions only; a scan of an activation it
+            // cannot serve keeps the run's model.
+            if index_on && !search::fragment_index::covers_activation(p.data_type.activation) {
+                return None;
+            }
+            if gbdt_max_trees > 0 {
+                for slot in [&mut p.frag_intensity_model, &mut p.rich_ion_model] {
+                    if let Some(g) = slot.as_ref() {
+                        if gbdt_max_trees < g.trees.len() {
+                            let mut t = (**g).clone();
+                            t.trees.truncate(gbdt_max_trees);
+                            *slot = Some(Arc::new(t));
+                        }
+                    }
+                }
+            }
+            p.data_type.protocol = run_protocol;
+            let mut sc = RankScorer::new(&p);
+            sc.set_acquisition_high_res(Some(high_res));
+            if let Some(t) = frag_tol_override {
+                sc.set_fragment_tol_override(Some(t));
+            }
+            eprintln!(
+                "Per-scan routing: {} scans -> model {model_id} (the run is routed {})",
+                activation.name(),
+                routed_activation.name()
+            );
+            Some(sc)
+        });
+        prepared = prepared.with_per_scan_scorers(routed_activation, loader);
+    }
     eprintln!(
         "[PHASE candidate_index_open: {:.2}s]",
         t_index.elapsed().as_secs_f64()
@@ -2220,6 +2293,18 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "[PHASE chunk_candidate_prep: {:.2}s] (part of stream_search: fragment-index build or record expansion, summed over chunks)",
         prepared.chunk_prep_seconds()
     );
+    for (activation, own_model, scans) in prepared.per_scan_routes() {
+        eprintln!(
+            "Per-scan routing: {scans} {} scan scorings with {} (run routed {})",
+            activation.name(),
+            if own_model {
+                "the model of their own activation"
+            } else {
+                "the run's model"
+            },
+            routed_activation.name()
+        );
+    }
     if bench_mode {
         eprintln!("Bench mode: capped at {} spectra", cli.max_spectra);
     }

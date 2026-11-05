@@ -641,8 +641,9 @@ pub(crate) fn detect_dominant_activation(
         let dominant_count = counts[&dominant];
         eprintln!(
             "Param resolver: mixed activation methods in input ({} different methods \
-             across {} peeked MS2 spectra). Using dominant = {} ({}/{}); other methods \
-             present: {}",
+             across {} peeked MS2 spectra). The run is routed by the dominant = {} ({}/{}); \
+             each scan is scored with the model of its own activation (not with --model or \
+             --fragmentation). Other methods present: {}",
             counts.len(),
             total,
             dominant.name(),

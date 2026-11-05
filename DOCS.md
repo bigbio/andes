@@ -1104,6 +1104,16 @@ or with fewer than 5,000 peaks, andes assumes CID / low-res / 0.5 Da (`cid_lowre
 warns. `--fragment-tol-ppm` implies a high-res instrument and `--fragment-tol-da` a low-res one,
 whatever the peaks show. `--protocol` applies on top.
 
+**Mixed activation.** A run that alternates or decision-trees its MS2 activation (HCD with
+EThcD, for instance) is routed by its dominant activation, and each scan recorded with
+another activation is scored with the model that activation would have been given (same
+instrument, protocol and enzyme; one `WARN` per untrained route, and a `Per-scan routing`
+line per activation). The scan counts are logged at the end of the search. Scans of an
+activation the fragment-ion index cannot serve (ETD) stay on the run's model, and so do
+scans whose model would be trained on another analyser. An explicit `--model` or
+`--fragmentation`, and `--glyco`, keep one model for the whole run; a pure-activation run
+is unchanged.
+
 The resolution class found here (from the metadata, the flag or the peaks) is the run's
 *acquisition* class, printed on the `acquisition` line of the resolved-parameter banner with the
 recorded collision energy, isolation width and FAIMS voltages. It is kept apart from the selected

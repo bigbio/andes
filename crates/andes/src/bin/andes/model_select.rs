@@ -579,7 +579,7 @@ pub(crate) fn choose_model(
 /// keys keep the store's instrument names; a model trained on one Orbitrap
 /// (`QExactive`, `HighRes`) is trained for every Orbitrap, and the TOF names
 /// share one analyser too.
-fn analyser_of(instrument: &str) -> &str {
+pub(crate) fn analyser_of(instrument: &str) -> &str {
     match instrument {
         "LowRes" => "ion trap",
         "QExactive" | "HighRes" => "Orbitrap",
@@ -793,6 +793,44 @@ pub(crate) fn load_param_from_store(
         .map_err(|e| format!("loading model '{model_id}' from store: {e}"))?;
 
     Ok((model_id, param))
+}
+
+/// The model for the scans of a run that were recorded with `activation`, when the
+/// run itself was routed for another activation (a decision-tree or alternating
+/// acquisition). Same rules as the run-level choice ([`choose_model`] with the
+/// run's instrument, protocol and enzyme); the untrained-route warning prints
+/// once, here, because the route is built once per activation.
+///
+/// `None` keeps those scans on the run's model: the choice is the model the run
+/// already uses, or it was trained on another analyser than the run's
+/// (`run_analyser`: the scans' instrument is the run's, so a model for a
+/// different analyser cannot describe them).
+pub(crate) fn load_activation_route(
+    activation: ActivationMethod,
+    instrument: Option<InstrumentType>,
+    protocol: Protocol,
+    enzyme: model::enzyme::Enzyme,
+    store_path: &Path,
+    run_model_id: &str,
+    run_analyser: &str,
+) -> Result<Option<(String, Param)>, Box<dyn std::error::Error>> {
+    let store = ModelStore::open(store_path)
+        .map_err(|e| format!("opening model store {}: {e}", store_path.display()))?;
+    let entries = store.selection_entries();
+    let choice = choose_model(&entries, activation, instrument, protocol, enzyme);
+    if choice.model_id == run_model_id {
+        return Ok(None);
+    }
+    let param = store
+        .load_param(&choice.model_id)
+        .map_err(|e| format!("loading model '{}' from store: {e}", choice.model_id))?;
+    if analyser_of(param.data_type.instrument.name()) != run_analyser {
+        return Ok(None);
+    }
+    if let Some(w) = &choice.warning {
+        eprintln!("{w}");
+    }
+    Ok(Some((choice.model_id, param)))
 }
 
 #[cfg(test)]

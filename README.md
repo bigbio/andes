@@ -72,7 +72,7 @@ flowchart TD
     PERC --> OUT["PSMs at q ≤ 0.01"]
 ```
 
-1. **Pick the model** from the file's activation, resolution and isobaric label (one of 17
+1. **Pick the model** from the file's activation, resolution and isobaric label (one of 19
    bundled models).
 2. **Build candidates**: digest the FASTA and generate decoys. The candidate index goes
    out-of-core (cached in `--index-cache-dir`, by default next to the output) so candidates can be retrieved by the
@@ -274,7 +274,7 @@ andes picks a model by `(activation, instrument, enzyme, protocol)`, automatical
 
 ### Supported models
 
-All 18 models are trained by andes on public PRIDE data; the store contains no MS-GF+-derived
+All 19 models are trained by andes on public PRIDE data; the store contains no MS-GF+-derived
 model data.
 
 | `model_id` | activation / instrument / enzyme / protocol | Training data (public PRIDE) | Benchmark |
@@ -288,6 +288,7 @@ model data.
 | `hcd_highres_nocleavage` | HCD / HighRes / NoCleavage / Automatic | ProteomeTools (PXD009449) | — |
 | `hcd_highres_nocleavage_phosphorylation` | HCD / HighRes / NoCleavage / Phosphorylation | ProteomeTools (PXD009449) | — |
 | `cid_lowres_tryp` | CID / LowRes / Trypsin / Automatic | PXD009875 + PXD000865 | UPS1 (low-res) |
+| `hcd_lowres_tryp` | HCD / LowRes / Trypsin / Automatic | ion-trap HCD scans (ITMS, hcd) of PXD056948, PXD063913, PXD067562, PXD072063 | HCD on ion trap PXD012131, PXD033117, PXD042919, PXD023374 |
 | `cid_lowres_tryp_tmt` | CID / LowRes / Trypsin / TMT | PXD016999 + PXD014502 + PXD017092 | TMT a05058 (low-res) |
 | `cid_lowres_lysc` | CID / LowRes / LysC / Automatic | PXD000865 | ⚠ limited training data |
 | `cid_lowres_argc` | CID / LowRes / ArgC / Automatic | public PRIDE (see manifest) | ⚠ limited training data |

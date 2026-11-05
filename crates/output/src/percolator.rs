@@ -361,6 +361,64 @@ fn docker_args(
     Ok(args)
 }
 
+/// The q-value below which a PSM counts as accepted when judging whether
+/// Percolator's PEP is usable: Percolator's own selection FDR (its default).
+const ACCEPTED_Q: f64 = 0.01;
+
+/// Whether the PEP column is unusable: at least one PSM is accepted at
+/// [`ACCEPTED_Q`] and every accepted PSM has PEP = 1. A posterior error
+/// probability of 1 for each of a set whose false discovery rate is at most 1 %
+/// is a contradiction, so the PEP estimate failed. Percolator's `-Y`
+/// (target-decoy competition) PEP fit does this when a decoy scores far above
+/// every other decoy and near the best targets: the fit then returns 1 for all
+/// PSMs while the q-values stay valid. Whether it happens depends on the
+/// random cross-validation split (the seed), not on the PIN columns.
+pub fn pep_is_degenerate(targets: &HashMap<String, PercolatorPsm>) -> bool {
+    let mut accepted = 0usize;
+    for p in targets.values().filter(|p| p.q_value <= ACCEPTED_Q) {
+        if p.pep < 1.0 {
+            return false;
+        }
+        accepted += 1;
+    }
+    accepted > 0
+}
+
+/// Arguments of the PEP repair pass: the model of the main run applied as it
+/// is (`--static`, weights from that run) and the PSM-level PEP estimated by
+/// Percolator's mix-max method on all PSMs instead of the target-decoy
+/// competition winners. The scores are those of the main run; only the PEP
+/// fit differs. `pin`, the two result files and `weights` are written as the
+/// backend sees them.
+fn pep_pass_args(
+    pin: String,
+    target: String,
+    decoy: String,
+    weights: String,
+    extra_args: &[String],
+) -> Vec<String> {
+    let mut args = vec![
+        "--seed".to_string(),
+        "42".to_string(),
+        "--results-psms".to_string(),
+        target,
+        "--decoy-results-psms".to_string(),
+        decoy,
+        "--only-psms".to_string(),
+        "--static".to_string(),
+        "--init-weights".to_string(),
+        weights,
+    ];
+    args.extend(
+        extra_args
+            .iter()
+            .filter(|a| *a != "-Y" && *a != "--post-processing-tdc")
+            .cloned(),
+    );
+    args.push(pin);
+    args
+}
+
 /// `dir` as an absolute host path; the empty parent of a bare file name is
 /// the current directory.
 fn host_dir(dir: &Path) -> std::io::Result<PathBuf> {
@@ -426,13 +484,127 @@ pub fn run_percolator_with_decoys(
     }
 
     let text = std::fs::read_to_string(&out.target)?;
-    let targets = parse_psm_results(&text)?;
+    let mut targets = parse_psm_results(&text)?;
+    if pep_is_degenerate(&targets) {
+        // The main run's results are complete without the repair, so a failed
+        // repair pass is a warning, not the loss of the search.
+        if let Err(e) = repair_pep(backend, pin, &out_dir, &out, extra_args, &mut targets) {
+            eprintln!("WARN: Percolator's PEP is 1 for every accepted PSM and the mix-max re-estimate failed: {e}");
+        }
+    }
     let decoys = match std::fs::read_to_string(&out.decoy) {
         Ok(text) => parse_psm_results(&text)?.into_keys().collect(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashSet::new(),
         Err(e) => return Err(e.into()),
     };
     Ok((targets, decoys))
+}
+
+/// Replaces the PEP of `targets` when Percolator's `-Y` PEP fit failed (see
+/// [`pep_is_degenerate`]): a second, static pass with the weights of the main
+/// run estimates the PEP by the mix-max method. The q-values, scores and the
+/// set of PSMs stay those of the main run. If that PEP is degenerate too, the
+/// main run's values are kept and a warning is printed.
+fn repair_pep(
+    backend: &PercolatorBackend,
+    pin: &Path,
+    out_dir: &Path,
+    main: &ResultPaths,
+    extra_args: &[String],
+    targets: &mut HashMap<String, PercolatorPsm>,
+) -> Result<(), PercolatorError> {
+    let stem = pin
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "andes".to_string());
+    let pass = ResultPaths::new(out_dir, &format!("{stem}.pep"));
+    pass.clear_stale()?;
+    let output = match backend {
+        PercolatorBackend::Binary(bin) => Command::new(bin)
+            .args(pep_pass_args(
+                pin.to_string_lossy().into_owned(),
+                pass.target.to_string_lossy().into_owned(),
+                pass.decoy.to_string_lossy().into_owned(),
+                main.weights.to_string_lossy().into_owned(),
+                extra_args,
+            ))
+            .output()
+            .map_err(PercolatorError::Spawn)?,
+        PercolatorBackend::Docker { image } => {
+            let pin_dir = host_dir(pin.parent().unwrap_or_else(|| Path::new(".")))?;
+            let pin_name = pin
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let in_out = |p: &Path| {
+                let name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                format!("/out/{name}")
+            };
+            let mut args = vec![
+                "run".to_string(),
+                "--rm".to_string(),
+                "--platform".to_string(),
+                "linux/amd64".to_string(),
+                "-v".to_string(),
+                format!("{}:/pin:ro", pin_dir.display()),
+                "-v".to_string(),
+                format!("{}:/out", host_dir(out_dir)?.display()),
+                image.clone(),
+                "percolator".to_string(),
+            ];
+            args.extend(pep_pass_args(
+                format!("/pin/{pin_name}"),
+                in_out(&pass.target),
+                in_out(&pass.decoy),
+                in_out(&main.weights),
+                extra_args,
+            ));
+            Command::new("docker")
+                .args(args)
+                .output()
+                .map_err(PercolatorError::Spawn)?
+        }
+    };
+    let result = if output.status.success() && pass.target.exists() {
+        std::fs::read_to_string(&pass.target)
+            .map_err(PercolatorError::Io)
+            .and_then(|t| parse_psm_results(&t))
+    } else {
+        let mut log = String::from_utf8_lossy(&output.stderr).into_owned();
+        if log.trim().is_empty() {
+            log = String::from_utf8_lossy(&output.stdout).into_owned();
+        }
+        Err(PercolatorError::Run {
+            backend: backend.describe(),
+            status: output.status.to_string(),
+            log_tail: tail_lines(&log, 20),
+        })
+    };
+    // The repair files are scratch: gone whether or not the pass worked.
+    pass.clear_stale()?;
+    let repaired = result?;
+    if pep_is_degenerate(&repaired) {
+        eprintln!(
+            "WARN: Percolator's PEP is 1 for every accepted PSM, also after the mix-max \
+             re-estimate; the PEP column is not usable"
+        );
+        return Ok(());
+    }
+    let mut replaced = 0usize;
+    for (id, psm) in targets.iter_mut() {
+        if let Some(r) = repaired.get(id) {
+            psm.pep = r.pep;
+            replaced += 1;
+        }
+    }
+    eprintln!(
+        "Percolator: the target-decoy-competition PEP was 1 for every accepted PSM; PEP of {replaced} \
+         PSMs re-estimated by the mix-max method on the same model (q-values unchanged)"
+    );
+    Ok(())
 }
 
 /// The result files `run_percolator` writes for `pin`, next to it.
@@ -787,6 +959,52 @@ mod tests {
         let text = "PSMId\tq-value\tposterior_error_prob\tpeptide\tproteinIds\tscore\n\
                     a_1_1\t0.001\t0.0005\tR.PEPTIDEK.A\n";
         assert_eq!(parse_psm_results(text).unwrap()["a_1_1"].score, None);
+    }
+
+    #[test]
+    fn pep_of_one_for_every_accepted_psm_is_degenerate() {
+        let map = |rows: &[(f64, f64)]| -> HashMap<String, PercolatorPsm> {
+            rows.iter()
+                .enumerate()
+                .map(|(i, (q, pep))| (format!("r/{i}"), psm(&format!("r/{i}"), *q, *pep)))
+                .collect()
+        };
+        // All accepted PSMs at PEP 1: the fit failed.
+        assert!(pep_is_degenerate(&map(&[
+            (0.0002, 1.0),
+            (0.004, 1.0),
+            (0.2, 0.3)
+        ])));
+        // One accepted PSM below 1 is a working fit.
+        assert!(!pep_is_degenerate(&map(&[(0.0002, 1e-20), (0.004, 1.0)])));
+        // PEP 1 only outside the accepted set is the normal tail.
+        assert!(!pep_is_degenerate(&map(&[(0.001, 0.0003), (0.3, 1.0)])));
+        // Nothing accepted: nothing to judge.
+        assert!(!pep_is_degenerate(&map(&[(0.3, 1.0)])));
+        assert!(!pep_is_degenerate(&HashMap::new()));
+    }
+
+    #[test]
+    fn pep_pass_is_static_mix_max_without_tdc() {
+        let args = pep_pass_args(
+            "/p/x.pin".into(),
+            "/p/t".into(),
+            "/p/d".into(),
+            "/p/w".into(),
+            &[
+                "--num-threads".into(),
+                "4".into(),
+                "-Y".into(),
+                "--post-processing-tdc".into(),
+            ],
+        );
+        assert!(args.windows(2).any(|w| w == ["--init-weights", "/p/w"]));
+        assert!(args.contains(&"--static".to_string()));
+        assert!(!args
+            .iter()
+            .any(|a| a == "-Y" || a == "--post-processing-tdc"));
+        assert!(args.windows(2).any(|w| w == ["--num-threads", "4"]));
+        assert_eq!(args.last().unwrap(), "/p/x.pin");
     }
 
     #[test]

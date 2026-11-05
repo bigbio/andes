@@ -4494,6 +4494,7 @@ mod finalize_tests {
             isolation: Some((mz, 0.7, 0.7)),
             faims_cv: None,
             peaks: peaks.clone(),
+            reporters: None,
         };
         let index = Ms2RunIndex::new(vec![
             scan(100.0, target_mz, &donor),

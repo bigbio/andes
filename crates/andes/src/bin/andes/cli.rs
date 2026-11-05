@@ -951,8 +951,15 @@ pub(crate) struct SearchArgs {
     #[arg(long = "quant-dir", value_name = "DIR")]
     pub(crate) quant_dir: Option<PathBuf>,
 
-    /// Match-between-runs label-free quantification across the inputs (two or
-    /// more; needs `--lfq` and `--rescore` or `--rescore-native`). After the
+    /// Match-between-runs across the inputs (two or more; needs `--rescore`
+    /// or `--rescore-native`, and `--lfq` for label-free quantification or
+    /// `--tmt` for isobaric reporter ions). With `--tmt`, the reporter ions of
+    /// MS2 scans that carry no identification at an identified peptide's m/z
+    /// and aligned retention time are transferred into the runs that lack
+    /// it, each with an evidence type and an internal quant-quality q-value
+    /// (`quant_q`) in `tmt.parquet` and the QPX feature view; only
+    /// high-resolution MS2 reporters (not SPS-MS3 or ion-trap MS2) are
+    /// supported, and identified rows are unchanged. Label-free: after the
     /// per-run quantification, builds the precursor library, aligns retention
     /// times across runs, measures every library precursor in every run and
     /// writes `<base>.mbr.parquet` and `<base>.mbr_validation.parquet` (with
@@ -973,10 +980,18 @@ pub(crate) struct SearchArgs {
     pub(crate) mbr_library_fdr: f64,
 
     /// Transfer quality q-value: transfers at or below it are reported as
-    /// `transfer_ms1` in `<base>.mbr.parquet`. An internal quant-quality
-    /// q-value, not an identification FDR. Default 0.01.
+    /// `transfer_ms1` in `<base>.mbr.parquet`; with `--tmt`, transferred
+    /// reporter rows at or below it pass the quantification gate. An internal
+    /// quant-quality q-value, not an identification FDR. Default 0.01.
     #[arg(long = "mbr-fdr", hide = true, default_value = "0.01", value_parser = parse_unit_fraction)]
     pub(crate) mbr_fdr: f64,
+
+    /// With `--tmt --mbr`: the RMS log2 deviation of a transferred reporter
+    /// profile from its reference scan above which the value counts as wrong
+    /// when the transfer risk is learned. A definition of an error, not an
+    /// acceptance cut. Default 0.5.
+    #[arg(long = "mbr-wrong-log2", hide = true, default_value = "0.5", value_parser = parse_positive_tol)]
+    pub(crate) mbr_wrong_log2: f64,
 
     /// Identified-row quality q-value: an identified (precursor, run) whose
     /// MS1 feature has a quality q-value against its decoys above this (or

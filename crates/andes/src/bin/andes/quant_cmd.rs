@@ -58,9 +58,9 @@ use crate::quant_mbr::{
 /// Seed of the transfer FDR's folds and models, in every path.
 pub(crate) const MBR_SEED: u64 = 42;
 
-const TABLE_SUFFIX: &str = ".quant.parquet";
+pub(crate) const TABLE_SUFFIX: &str = ".quant.parquet";
 const MS1_SUFFIX: &str = ".ms1.parquet";
-const MS2_SUFFIX: &str = ".ms2.parquet";
+pub(crate) const MS2_SUFFIX: &str = ".ms2.parquet";
 const EXTRACT_SUFFIX: &str = ".extract.parquet";
 /// Extract-table metadata key of the template-fit m/z tolerance, ppm.
 const TOL_KEY: &str = "andes.extract.tol_ppm";
@@ -73,7 +73,7 @@ const RUN_SCALES_KEY: &str = "andes.extract.run_scales";
 /// Isotopes per precursor envelope in the run tables and the library.
 const ENVELOPE_LEN: usize = 4;
 
-fn artifact(dir: &Path, stem: &str, suffix: &str) -> PathBuf {
+pub(crate) fn artifact(dir: &Path, stem: &str, suffix: &str) -> PathBuf {
     dir.join(format!("{stem}{suffix}"))
 }
 
@@ -1068,7 +1068,7 @@ pub(crate) type EntrySpectra = (
 
 /// The MS2 table scan of a PSM SpecId (`<spec_key>_<rank>` or
 /// `<spec_key>_<rank>_<row>`).
-fn scan_of(by_key: &HashMap<&str, usize>, spec_id: &str) -> Option<usize> {
+pub(crate) fn scan_of(by_key: &HashMap<&str, usize>, spec_id: &str) -> Option<usize> {
     let mut id = spec_id;
     for _ in 0..2 {
         id = id.rsplit_once('_')?.0;
@@ -1427,13 +1427,13 @@ pub(crate) fn evidence_params(tol: Option<Tolerance>) -> Result<EvidenceParams, 
 }
 
 /// Peptidoform and charge of a `"<peptidoform>/<charge>"` key.
-fn split_key(key: &str) -> &str {
+pub(crate) fn split_key(key: &str) -> &str {
     key.rsplit_once('/').map_or(key, |(p, _)| p)
 }
 
 /// Bare sequence and modification records of a peptidoform written as
 /// residues with `[...]` tags (a UNIMOD accession or a signed mass delta).
-fn parse_peptidoform(peptidoform: &str) -> (String, Vec<ModRecord>) {
+pub(crate) fn parse_peptidoform(peptidoform: &str) -> (String, Vec<ModRecord>) {
     let mut seq = String::new();
     let mut mods = Vec::new();
     let mut chars = peptidoform.chars();
@@ -2311,6 +2311,7 @@ mod tests {
                     isolation: Some((r.mz, 0.7, 0.7)),
                     faims_cv: None,
                     peaks,
+                    reporters: None,
                 }
             })
             .collect();

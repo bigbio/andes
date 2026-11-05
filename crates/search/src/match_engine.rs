@@ -1,7 +1,7 @@
 //! Top-level integration: spectra × candidates → top-N PSMs per spectrum.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -21,6 +21,7 @@ use crate::search_index::SearchIndex;
 use crate::search_params::{ScoreMode, SearchParams};
 use input::Ms1Link;
 use model::aa_set::AminoAcidSet;
+use model::activation::ActivationMethod;
 use model::enzyme::Enzyme;
 use model::mass::{nominal_from, H2O, PROTON};
 use model::peptide::Peptide;
@@ -48,6 +49,52 @@ use scoring_crate::scoring::{
 /// Keeps or drops a candidate after retrieval; see
 /// [`PreparedSearch::with_candidate_filter`].
 pub type CandidateFilter = Box<dyn Fn(&Candidate) -> bool + Send + Sync>;
+
+/// Builds the scorer for scans of one activation that differs from the run's
+/// routed activation; `None` keeps those scans on the run's scorer (no model of
+/// their own, or the same model). See [`PreparedSearch::with_per_scan_scorers`].
+pub type ScorerLoader = Box<dyn Fn(ActivationMethod) -> Option<RankScorer> + Send + Sync>;
+
+/// The scorers of the activations a run mixes, loaded the first time a scan of
+/// that activation is searched.
+struct PerScanScorers {
+    /// The activation the run's scorer was routed for.
+    run_activation: ActivationMethod,
+    loader: ScorerLoader,
+    /// One entry per activation asked for.
+    loaded: RwLock<Vec<ActivationRoute>>,
+}
+
+/// The route of the scans of one activation.
+struct ActivationRoute {
+    activation: ActivationMethod,
+    /// The scorer of that activation; `None` keeps its scans on the run's.
+    scorer: Option<Arc<RankScorer>>,
+    /// Scans routed here so far.
+    scans: AtomicU64,
+}
+
+/// The scorer each scan of one chunk is scored with.
+pub(crate) struct ScorerSet<'a> {
+    primary: &'a RankScorer,
+    run_activation: Option<ActivationMethod>,
+    alts: Vec<(ActivationMethod, Arc<RankScorer>)>,
+}
+
+impl ScorerSet<'_> {
+    /// The scorer of `spec`: the one routed for its own activation, else the run's.
+    #[inline]
+    pub(crate) fn for_spec(&self, spec: &Spectrum) -> &RankScorer {
+        match spec.activation_method {
+            Some(a) if Some(a) != self.run_activation => self
+                .alts
+                .iter()
+                .find(|(m, _)| *m == a)
+                .map_or(self.primary, |(_, s)| &**s),
+            _ => self.primary,
+        }
+    }
+}
 
 /// `spectra` with every fragment peak moved by `-offset_ppm` (a peak observed at
 /// `mz` is scored at `mz / (1 + offset * 1e-6)`), or `None` when the offset is
@@ -116,6 +163,9 @@ pub struct PreparedSearch<'a> {
     /// Optional post-retrieval candidate filter (see
     /// [`Self::with_candidate_filter`]).
     candidate_filter: Option<CandidateFilter>,
+    /// Scorers for the scans whose activation differs from the run's; `None`
+    /// scores every scan with `scorer`.
+    per_scan: Option<PerScanScorers>,
 }
 
 /// Global candidate identity for the scan accumulator: enough to dedup a
@@ -458,6 +508,111 @@ impl<'a> PreparedSearch<'a> {
             ms1_link: None,
             target_bare_seqs,
             candidate_filter: None,
+            per_scan: None,
+        }
+    }
+
+    /// Score each scan with the model of its own activation. `run_activation` is
+    /// the activation `scorer` was routed for; a scan recorded with another
+    /// activation is scored by `loader(activation)` (built once, on first use),
+    /// or by `scorer` when the loader returns `None`. Scans without a recorded
+    /// activation use `scorer`.
+    pub fn with_per_scan_scorers(
+        mut self,
+        run_activation: ActivationMethod,
+        loader: ScorerLoader,
+    ) -> Self {
+        self.per_scan = Some(PerScanScorers {
+            run_activation,
+            loader,
+            loaded: RwLock::new(Vec::new()),
+        });
+        self
+    }
+
+    /// Install the run's measured fragment error on the run's scorer and on every
+    /// per-activation scorer built so far; scorers built later copy it.
+    pub fn set_fragment_error(&self, m: Option<scoring_crate::scoring::FragmentErrorModel>) {
+        self.scorer.set_fragment_error(m);
+        if let Some(ps) = &self.per_scan {
+            for route in ps.loaded.read().unwrap().iter() {
+                if let Some(s) = &route.scorer {
+                    s.set_fragment_error(m);
+                }
+            }
+        }
+    }
+
+    /// Per-activation routes taken so far: the activation, whether it has a
+    /// scorer of its own, and the scans routed to it.
+    pub fn per_scan_routes(&self) -> Vec<(ActivationMethod, bool, u64)> {
+        self.per_scan.as_ref().map_or_else(Vec::new, |ps| {
+            ps.loaded
+                .read()
+                .unwrap()
+                .iter()
+                .map(|r| {
+                    (
+                        r.activation,
+                        r.scorer.is_some(),
+                        r.scans.load(Ordering::Relaxed),
+                    )
+                })
+                .collect()
+        })
+    }
+
+    /// The scorer of every scan of `spectra`, building the scorer of an
+    /// activation the first time a scan of it is seen.
+    pub(crate) fn scorer_set(&self, spectra: &[Spectrum]) -> ScorerSet<'_> {
+        let Some(ps) = &self.per_scan else {
+            return ScorerSet {
+                primary: self.scorer,
+                run_activation: None,
+                alts: Vec::new(),
+            };
+        };
+        let mut seen: SmallVec<[(ActivationMethod, u64); 4]> = SmallVec::new();
+        for a in spectra.iter().filter_map(|s| s.activation_method) {
+            if a == ps.run_activation {
+                continue;
+            }
+            match seen.iter_mut().find(|(m, _)| *m == a) {
+                Some((_, n)) => *n += 1,
+                None => seen.push((a, 1)),
+            }
+        }
+        for &(a, n) in &seen {
+            let known = ps.loaded.read().unwrap().iter().any(|r| r.activation == a);
+            if !known {
+                let mut loaded = ps.loaded.write().unwrap();
+                if !loaded.iter().any(|r| r.activation == a) {
+                    let scorer = (ps.loader)(a).map(|s| {
+                        s.set_fragment_error(self.scorer.fragment_error());
+                        Arc::new(s)
+                    });
+                    loaded.push(ActivationRoute {
+                        activation: a,
+                        scorer,
+                        scans: AtomicU64::new(0),
+                    });
+                }
+            }
+            if let Some(r) = ps.loaded.read().unwrap().iter().find(|r| r.activation == a) {
+                r.scans.fetch_add(n, Ordering::Relaxed);
+            }
+        }
+        let alts = ps
+            .loaded
+            .read()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r.scorer.as_ref().map(|s| (r.activation, Arc::clone(s))))
+            .collect();
+        ScorerSet {
+            primary: self.scorer,
+            run_activation: Some(ps.run_activation),
+            alts,
         }
     }
 
@@ -789,7 +944,7 @@ impl<'a> PreparedSearch<'a> {
         spectrum_idx_offset: usize,
         params: &SearchParams,
     ) -> Vec<TopNQueue> {
-        let scorer = self.scorer;
+        let scorer_set = self.scorer_set(spectra);
         let fragment_tolerance_da = self.fragment_tolerance_da;
         let aa_set_for_scoring = &self.aa_set_for_scoring;
 
@@ -909,6 +1064,7 @@ impl<'a> PreparedSearch<'a> {
             .enumerate()
             .map(|(local_idx, spec)| {
                 let spec_idx = local_idx + spectrum_idx_offset;
+                let scorer = scorer_set.for_spec(spec);
                 let retention_cap = params.hot_loop_retention_cap();
                 let mut queue = TopNQueue::new(retention_cap);
 
@@ -1600,6 +1756,7 @@ pub fn run_pass2_coisolation(
         }
         None => spectra,
     };
+    let scorer_set = prepared.scorer_set(spectra);
 
     // (A) Co-isolated precursors and the primary peptide of every scan Pass 1
     // identified.
@@ -1642,7 +1799,7 @@ pub fn run_pass2_coisolation(
 
     // (B) Secondaries per scan, each with its winning candidate (its
     // `candidate_idxs` index a pass-local pool).
-    let found = mmap_secondaries(prepared, spectra, &scans, params);
+    let found = mmap_secondaries(prepared, &scorer_set, spectra, &scans, params);
 
     // (C) Emit. Winners are interned into the accumulator (scan order) and
     // their indices rewritten to the global ones. A winner whose peptidoform,
@@ -1711,6 +1868,7 @@ const PASS2_POOL_SPAN_NOMINAL: i32 = 32;
 /// batch a secondary lands in.
 fn mmap_secondaries(
     prepared: &PreparedSearch,
+    scorer_set: &ScorerSet<'_>,
     spectra: &[Spectrum],
     scans: &[Option<Pass2Scan>],
     params: &SearchParams,
@@ -1784,7 +1942,7 @@ fn mmap_secondaries(
                             co,
                             &pool,
                             &bucket_index,
-                            prepared.scorer,
+                            scorer_set.for_spec(&spectra[spec_idx]),
                             &prepared.aa_set_for_scoring,
                             params,
                             prepared.fragment_tolerance_da,
@@ -2537,6 +2695,109 @@ mod accumulator_tests {
         assert!(accum.index_of.is_empty());
         assert_eq!(accum.intern(cands[1].clone()), 0);
         assert_eq!(accum.candidates.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod per_scan_scorer_tests {
+    use super::*;
+    use model::{AminoAcidSetBuilder, Protein, ProteinDb};
+    use std::sync::atomic::AtomicUsize;
+
+    fn spectrum(activation: Option<ActivationMethod>) -> Spectrum {
+        Spectrum {
+            precursor_mz: 500.0,
+            peaks: vec![(200.0, 10.0)],
+            activation_method: activation,
+            ..Spectrum::default()
+        }
+    }
+
+    fn prepared_with<'a>(
+        idx: &'a SearchIndex,
+        params: &'a SearchParams,
+        scorer: &'a RankScorer,
+    ) -> PreparedSearch<'a> {
+        PreparedSearch::prepare_in_memory(idx, params, scorer, 0.02, "XXX").unwrap()
+    }
+
+    /// A scan of another activation than the run's is scored by the loader's scorer,
+    /// built once per activation; scans without an activation, of the run's activation
+    /// or of an activation the loader declines stay on the run's scorer.
+    #[test]
+    fn scans_route_by_their_own_activation() {
+        let db = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "".into(),
+                sequence: b"MKWVTFISLLRKDAFLGSFLYEYSRK".to_vec(),
+                annotation: None,
+            }],
+        };
+        let idx = SearchIndex::from_target_db(&db, "XXX");
+        let params =
+            SearchParams::default_tryptic(AminoAcidSetBuilder::new_standard().build().unwrap());
+        let scorer = crate::coisolation::tests::tiny_scorer();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&calls);
+        let prepared = prepared_with(&idx, &params, &scorer).with_per_scan_scorers(
+            ActivationMethod::HCD,
+            Box::new(move |a| {
+                seen.fetch_add(1, Ordering::Relaxed);
+                (a == ActivationMethod::EThcD).then(crate::coisolation::tests::tiny_scorer)
+            }),
+        );
+        let chunk = [
+            spectrum(Some(ActivationMethod::HCD)),
+            spectrum(Some(ActivationMethod::EThcD)),
+            spectrum(None),
+            spectrum(Some(ActivationMethod::ETD)),
+            spectrum(Some(ActivationMethod::EThcD)),
+        ];
+        let set = prepared.scorer_set(&chunk);
+        let own = |s: &Spectrum| std::ptr::eq(set.for_spec(s), &scorer);
+        assert!(own(&chunk[0]));
+        assert!(!own(&chunk[1]), "EThcD scan has its own scorer");
+        assert!(own(&chunk[2]));
+        assert!(
+            own(&chunk[3]),
+            "a declined activation keeps the run's scorer"
+        );
+        assert!(!own(&chunk[4]));
+        // A second chunk reuses the scorers built for the first.
+        let _ = prepared.scorer_set(&chunk);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        let mut routes = prepared.per_scan_routes();
+        routes.sort_by_key(|r| r.0 as u8);
+        assert_eq!(
+            routes.iter().map(|r| (r.0, r.1, r.2)).collect::<Vec<_>>(),
+            vec![
+                (ActivationMethod::ETD, false, 2),
+                (ActivationMethod::EThcD, true, 4)
+            ]
+        );
+    }
+
+    /// Without per-scan routing every scan uses the run's scorer.
+    #[test]
+    fn no_routing_keeps_the_run_scorer() {
+        let db = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "".into(),
+                sequence: b"MKWVTFISLLRKDAFLGSFLYEYSRK".to_vec(),
+                annotation: None,
+            }],
+        };
+        let idx = SearchIndex::from_target_db(&db, "XXX");
+        let params =
+            SearchParams::default_tryptic(AminoAcidSetBuilder::new_standard().build().unwrap());
+        let scorer = crate::coisolation::tests::tiny_scorer();
+        let prepared = prepared_with(&idx, &params, &scorer);
+        let chunk = [spectrum(Some(ActivationMethod::EThcD))];
+        let set = prepared.scorer_set(&chunk);
+        assert!(std::ptr::eq(set.for_spec(&chunk[0]), &scorer));
+        assert!(prepared.per_scan_routes().is_empty());
     }
 }
 

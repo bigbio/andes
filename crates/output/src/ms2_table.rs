@@ -10,6 +10,13 @@
 //! centroids sorted by m/z as two `float32` lists of equal length, `mz` and
 //! `intensity`. Rows are in retention-time order.
 //!
+//! A table written with `--tmt --mbr` adds three columns after `intensity`
+//! (schema 1.1): `reporters` (the scan's raw reporter-ion intensities in kit
+//! order, a `float32` list), `purity` (precursor isolation purity, null when
+//! the run's MS1 scans cannot give it) and `reporter_sn` (summed reporter
+//! signal-to-noise, null without recorded noise). A table without reporters
+//! is schema 1.0 and unchanged.
+//!
 //! The key-value metadata carries the schema version (`andes.ms2.schema`; a
 //! reader rejects another major), the run stem (`andes.ms2.run`), the
 //! fragment tolerance of the search (`andes.ms2.fragment_tol`, e.g. `20ppm`
@@ -34,7 +41,7 @@ use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use parquet::format::KeyValue;
 use parquet::schema::types::ColumnPath;
-use quant::ms2::Ms2Scan;
+use quant::ms2::{Ms2Scan, ScanReporters};
 
 use crate::ms1_table::partial_path;
 
@@ -48,6 +55,10 @@ const TOL_KEY: &str = "andes.ms2.fragment_tol";
 const TOP_KEY: &str = "andes.ms2.top_peaks";
 /// Scans per row group / record batch.
 const SCANS_PER_GROUP: usize = 4096;
+
+const SCHEMA_VERSION_REPORTERS: &str = "1.1";
+/// The columns of a table with reporter ions, after [`COLUMNS`].
+const REPORTER_COLUMNS: [&str; 3] = ["reporters", "purity", "reporter_sn"];
 
 const COLUMNS: [&str; 11] = [
     "native_id",
@@ -76,8 +87,8 @@ fn item(data_type: DataType) -> FieldRef {
     Arc::new(Field::new("item", data_type, false))
 }
 
-fn schema() -> Schema {
-    Schema::new(vec![
+fn schema(with_reporters: bool) -> Schema {
+    let mut fields = vec![
         Field::new(COLUMNS[0], DataType::Utf8, false),
         Field::new(COLUMNS[1], DataType::Utf8, false),
         Field::new(COLUMNS[2], DataType::Float64, false),
@@ -89,7 +100,17 @@ fn schema() -> Schema {
         Field::new(COLUMNS[8], DataType::Float32, true),
         Field::new(COLUMNS[9], DataType::List(item(DataType::Float32)), false),
         Field::new(COLUMNS[10], DataType::List(item(DataType::Float32)), false),
-    ])
+    ];
+    if with_reporters {
+        fields.push(Field::new(
+            REPORTER_COLUMNS[0],
+            DataType::List(item(DataType::Float32)),
+            false,
+        ));
+        fields.push(Field::new(REPORTER_COLUMNS[1], DataType::Float32, true));
+        fields.push(Field::new(REPORTER_COLUMNS[2], DataType::Float32, true));
+    }
+    Schema::new(fields)
 }
 
 /// `20ppm` or `0.5Da`.
@@ -134,7 +155,11 @@ fn properties(version: &str, run: &str, tol: Tolerance, top_peaks: usize) -> Wri
         .build()
 }
 
-fn batch(schema: &Arc<Schema>, scans: &[Ms2Scan]) -> Result<RecordBatch, String> {
+fn batch(
+    schema: &Arc<Schema>,
+    scans: &[Ms2Scan],
+    with_reporters: bool,
+) -> Result<RecordBatch, String> {
     let mut offs = vec![0i32];
     let mut end = 0usize;
     for s in scans {
@@ -151,7 +176,7 @@ fn batch(schema: &Arc<Schema>, scans: &[Ms2Scan]) -> Result<RecordBatch, String>
             .map(|s| s.isolation.map(|w| [w.0, w.1, w.2][k]))
             .collect()
     };
-    let cols: Vec<ArrayRef> = vec![
+    let mut cols: Vec<ArrayRef> = vec![
         Arc::new(StringArray::from_iter_values(
             scans.iter().map(|s| s.native_id.as_str()),
         )),
@@ -176,19 +201,59 @@ fn batch(schema: &Arc<Schema>, scans: &[Ms2Scan]) -> Result<RecordBatch, String>
                 .map_err(|e| e.to_string())?,
         ),
     ];
+    if with_reporters {
+        let mut roffs = vec![0i32];
+        let mut rend = 0usize;
+        for s in scans {
+            rend += s.reporters.as_ref().map_or(0, |r| r.raw.len());
+            roffs.push(i32::try_from(rend).map_err(|_| "too many reporter values")?);
+        }
+        let rvals = Float32Array::from_iter_values(
+            scans
+                .iter()
+                .flat_map(|s| s.reporters.iter().flat_map(|r| r.raw.iter().copied())),
+        );
+        cols.push(Arc::new(
+            ListArray::try_new(
+                item(DataType::Float32),
+                OffsetBuffer::new(ScalarBuffer::from(roffs)),
+                Arc::new(rvals),
+                None,
+            )
+            .map_err(|e| e.to_string())?,
+        ));
+        cols.push(Arc::new(
+            scans
+                .iter()
+                .map(|s| s.reporters.as_ref().and_then(|r| r.purity))
+                .collect::<Float32Array>(),
+        ));
+        cols.push(Arc::new(
+            scans
+                .iter()
+                .map(|s| s.reporters.as_ref().and_then(|r| r.sn_sum))
+                .collect::<Float32Array>(),
+        ));
+    }
     RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
 }
 
 fn write_with_version(path: &Path, t: &Ms2Table, version: &str) -> Result<(), String> {
     let partial = partial_path(path);
+    let with_reporters = t.scans.iter().any(|s| s.reporters.is_some());
+    let version = if with_reporters && version == SCHEMA_VERSION {
+        SCHEMA_VERSION_REPORTERS
+    } else {
+        version
+    };
     let written = (|| {
-        let schema = Arc::new(schema());
+        let schema = Arc::new(schema(with_reporters));
         let file = File::create(&partial).map_err(|e| e.to_string())?;
         let props = properties(version, &t.run, t.fragment_tol, t.top_peaks);
         let mut w =
             ArrowWriter::try_new(file, schema.clone(), Some(props)).map_err(|e| e.to_string())?;
         for chunk in t.scans.chunks(SCANS_PER_GROUP) {
-            w.write(&batch(&schema, chunk)?)
+            w.write(&batch(&schema, chunk, with_reporters)?)
                 .map_err(|e| e.to_string())?;
         }
         w.close().map_err(|e| e.to_string())?;
@@ -235,14 +300,21 @@ fn opt_f64(a: &Float64Array, i: usize) -> Option<f64> {
 }
 
 fn decode(b: &RecordBatch, out: &mut Vec<Ms2Scan>) -> Result<(), String> {
-    if b.num_columns() != COLUMNS.len() {
+    let with_reporters = b.num_columns() == COLUMNS.len() + REPORTER_COLUMNS.len();
+    if b.num_columns() != COLUMNS.len() && !with_reporters {
         return Err(format!(
-            "expected {} columns, found {}",
+            "expected {} or {} columns, found {}",
             COLUMNS.len(),
+            COLUMNS.len() + REPORTER_COLUMNS.len(),
             b.num_columns()
         ));
     }
-    for (got, want) in b.schema().fields().iter().zip(COLUMNS) {
+    for (got, want) in b
+        .schema()
+        .fields()
+        .iter()
+        .zip(COLUMNS.iter().chain(REPORTER_COLUMNS.iter()))
+    {
         if got.name() != want {
             return Err(format!(
                 "column {:?} where {want:?} was expected",
@@ -272,6 +344,25 @@ fn decode(b: &RecordBatch, out: &mut Vec<Ms2Scan>) -> Result<(), String> {
     }
     let (mz, mz_off) = f32_list(b, 9)?;
     let (int, int_off) = f32_list(b, 10)?;
+    let reporters = if with_reporters {
+        let list = column::<ListArray>(b, 11)?;
+        let values = list
+            .values()
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .ok_or_else(|| "column reporters items are not float32".to_string())?;
+        if list.null_count() != 0 || values.null_count() != 0 {
+            return Err("column reporters holds nulls".to_string());
+        }
+        Some((
+            values,
+            list.value_offsets(),
+            column::<Float32Array>(b, 12)?,
+            column::<Float32Array>(b, 13)?,
+        ))
+    } else {
+        None
+    };
     for i in 0..b.num_rows() {
         let (lo, hi) = (mz_off[i] as usize, mz_off[i + 1] as usize);
         let (ilo, ihi) = (int_off[i] as usize, int_off[i + 1] as usize);
@@ -300,6 +391,11 @@ fn decode(b: &RecordBatch, out: &mut Vec<Ms2Scan>) -> Result<(), String> {
                 .copied()
                 .zip(int.values()[ilo..ihi].iter().copied())
                 .collect(),
+            reporters: reporters.map(|(vals, off, pur, sn)| ScanReporters {
+                raw: vals.values()[off[i] as usize..off[i + 1] as usize].to_vec(),
+                purity: pur.is_valid(i).then(|| pur.value(i)),
+                sn_sum: sn.is_valid(i).then(|| sn.value(i)),
+            }),
         });
     }
     Ok(())
@@ -376,6 +472,7 @@ mod tests {
             peaks: (0..(i % 7))
                 .map(|k| (100.0 + k as f32 * 37.123_4, (k * i) as f32 + 0.5))
                 .collect(),
+            reporters: None,
         }
     }
 
@@ -410,6 +507,37 @@ mod tests {
         };
         write_ms2_table(&e, &empty).unwrap();
         assert_eq!(read_ms2_table(&e).unwrap(), empty);
+    }
+
+    #[test]
+    fn reporter_columns_round_trip_as_schema_1_1() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut t = table(9);
+        for (i, s) in t.scans.iter_mut().enumerate() {
+            s.reporters = Some(ScanReporters {
+                raw: (0..11).map(|k| (k * (i + 1)) as f32).collect(),
+                purity: (i % 2 == 0).then_some(0.5 + i as f32 / 100.0),
+                sn_sum: (i % 3 == 0).then_some(7.5),
+            });
+        }
+        let p = dir.path().join("t.ms2.parquet");
+        write_ms2_table(&p, &t).unwrap();
+        assert_eq!(read_ms2_table(&p).unwrap(), t);
+        let plain = dir.path().join("p.ms2.parquet");
+        write_ms2_table(&plain, &table(9)).unwrap();
+        let meta = ParquetRecordBatchReaderBuilder::try_new(File::open(&plain).unwrap())
+            .unwrap()
+            .metadata()
+            .file_metadata()
+            .key_value_metadata()
+            .cloned()
+            .unwrap();
+        let version = |m: &Vec<KeyValue>| {
+            m.iter()
+                .find(|kv| kv.key == SCHEMA_KEY)
+                .and_then(|kv| kv.value.clone())
+        };
+        assert_eq!(version(&meta).as_deref(), Some("1.0"));
     }
 
     #[test]
@@ -454,8 +582,8 @@ mod tests {
         // A renamed column.
         let r = dir.path().join("r.ms2.parquet");
         let t = table(4);
-        let good = batch(&Arc::new(schema()), &t.scans).unwrap();
-        let mut fields: Vec<Field> = schema()
+        let good = batch(&Arc::new(schema(false)), &t.scans, false).unwrap();
+        let mut fields: Vec<Field> = schema(false)
             .fields()
             .iter()
             .map(|f| f.as_ref().clone())

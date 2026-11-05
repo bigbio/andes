@@ -295,6 +295,19 @@ pub struct Ms2Scan {
     pub faims_cv: Option<f32>,
     /// The most intense centroids, sorted by m/z.
     pub peaks: Vec<(f32, f32)>,
+    /// Isobaric reporter ions of the scan (`--tmt` with `--mbr`); `None`
+    /// otherwise.
+    pub reporters: Option<ScanReporters>,
+}
+
+/// The reporter-ion record of one MS2 scan: the raw channel intensities in
+/// kit order, the precursor isolation purity from the surrounding MS1 scans
+/// and the summed reporter signal-to-noise (the scan records noise).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ScanReporters {
+    pub raw: Vec<f32>,
+    pub purity: Option<f32>,
+    pub sn_sum: Option<f32>,
 }
 
 impl Ms2Scan {
@@ -601,6 +614,7 @@ mod tests {
             isolation: Some((mz, 0.7, 0.7)),
             faims_cv: None,
             peaks,
+            reporters: None,
         }
     }
 

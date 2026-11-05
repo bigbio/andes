@@ -27,6 +27,8 @@
 //! * [`claims`]: same-run claims on an MS1 feature by another probed target.
 //! * [`shared`]: MS2 distinguishing-ion evidence of a claimed transfer and the
 //!   shipped model that downgrades a shared feature.
+//! * [`tmt_transfer`]: the learned risk of a transferred TMT reporter value
+//!   (opt-in isobaric match-between-runs).
 //! * [`ms2`]: empirical fragment spectra of library entries and the MS2
 //!   evidence of a transfer probe in the receiving run's MS2 scans.
 
@@ -47,6 +49,7 @@ pub mod normalize;
 pub mod purity;
 pub mod shared;
 pub mod tdc;
+pub mod tmt_transfer;
 pub mod unmix;
 pub mod xic;
 

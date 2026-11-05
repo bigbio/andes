@@ -654,7 +654,7 @@ See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model)
 | `--lfq-min-cosine` | 0..1 | `0.7` | Minimum isotope-envelope cosine for both target and decoy eligibility before feature competition. All target features remain in `lfq.parquet` (with `accepted` false when they fail a cut) and the QPX parquet. |
 | `--lfq-feature-fdr` | 0..1 | `0.05` | Feature FDR for `accepted` in `lfq.parquet`, from the target/decoy competition of each feature against its +11 Th twin. |
 | `--quant-fdr` | 0..1 | `--fdr` | PSM q-value cut for quantification targets when `--rescore`/`--rescore-native` ran. With `--mbr`, also the PSM q-value at which a run identifies a precursor (§10). |
-| `--mbr` | flag | off | Match-between-runs label-free quantification across two or more inputs (§10). Needs `--lfq` and `--rescore` (or `--rescore-native`); not with `--tmt`. Writes `<stem>.mbr.parquet` and `<stem>.mbr_validation.parquet`; with `--output-parquet`, `quantms.feature.parquet` holds these rows (without the below-threshold transfers) instead of the per-run features. Uses `--quant-dir`, or a temporary directory removed at exit. With `--rescore` (Percolator), same result as `andes quant library`, `extract` and `finalize` on the same Percolator results. |
+| `--mbr` | flag | off | Match-between-runs across two or more inputs (§10): label-free quantification with `--lfq`, or with `--tmt` the transfer of reporter ions (high-resolution MS2 reporters only; refused for SPS-MS3 and ion-trap MS2; see *Match between runs for reporter ions*). Needs `--rescore` (or `--rescore-native`); `--lfq` and `--tmt` are not combined. The label-free form: Writes `<stem>.mbr.parquet` and `<stem>.mbr_validation.parquet`; with `--output-parquet`, `quantms.feature.parquet` holds these rows (without the below-threshold transfers) instead of the per-run features. Uses `--quant-dir`, or a temporary directory removed at exit. With `--rescore` (Percolator), same result as `andes quant library`, `extract` and `finalize` on the same Percolator results. |
 | `--mbr-library-fdr` | 0..1 | `0.01` | Internal library entry gate (precursor-level), not a reported identification FDR: best-PSM-per-precursor target/decoy q-value over the rescored PSM scores of all runs. |
 | `--mbr-fdr` | 0..1 | `0.01` | *(advanced)* Transfer quality q-value: transfers at or below it are `transfer_ms2` (an MS2 scan of the run supports them) or `transfer_ms1`. An internal quant-quality q-value, not an identification FDR. It counts both wrong peaks and the transfers of false donor identifications (identity decoys, §10). On the ProteoBench QExactive module (2026-10-23, defaults), `0.05` adds about 6k precursors quantified in at least 3 runs to 0.01 (65.0k to 71.2k) at an accuracy cost (median \|eps\| 0.163 to 0.176, E. coli 0.28 to 0.44, CV 0.118 to 0.132); in an earlier measurement the wrong-peak rate rose from 1.7% to 2.7%. Use `0.05` for a deeper, less accurate set. |
 | `--quant-feature-fdr` | 0..1 or `off` | `off` | Identified-row quality q-value (`quant_q`): with a value, an identified row whose MS1 feature has a `quant_q` above it (or none) is `identified_below_threshold` and left out of `quantms.feature.parquet` (§10); `off` reports every identified row and keeps `quant_q` as an annotation. An internal quant-quality q-value, not an identification FDR. |
@@ -1106,6 +1106,16 @@ high resolution (HCD high-res model, 20 ppm features), below 1.8x as low resolut
 or with fewer than 5,000 peaks, andes assumes CID / low-res / 0.5 Da (`cid_lowres_tryp`) and
 warns. `--fragment-tol-ppm` implies a high-res instrument and `--fragment-tol-da` a low-res one,
 whatever the peaks show. `--protocol` applies on top.
+
+**Mixed activation.** A run that alternates or decision-trees its MS2 activation (HCD with
+EThcD, for instance) is routed by its dominant activation, and each scan recorded with
+another activation is scored with the model that activation would have been given (same
+instrument, protocol and enzyme; one `WARN` per untrained route, and a `Per-scan routing`
+line per activation). The scan counts are logged at the end of the search. Scans of an
+activation the fragment-ion index cannot serve (ETD) stay on the run's model, and so do
+scans whose model would be trained on another analyser. An explicit `--model` or
+`--fragmentation`, and `--glyco`, keep one model for the whole run; a pure-activation run
+is unchanged.
 
 The resolution class found here (from the metadata, the flag or the peaks) is the run's
 *acquisition* class, printed on the `acquisition` line of the resolved-parameter banner with the
@@ -1928,6 +1938,76 @@ decoys) with their joined scores at once, so its memory grows with the total PSM
 runs, about 0.5-0.7 KB per rank-1 PSM (around 100 GB for 1,000 long runs). Finalize holds
 every run's extract rows at once, and each extract loads the whole alignment. Streaming these
 stages is planned.
+
+### Match between runs for reporter ions (`--tmt --mbr`)
+
+Opt-in. Off, nothing changes: the outputs of a `--tmt` run are byte-identical to a run without the
+flag. On, a precursor identified at PSM q ≤ `--quant-fdr` in one run gets reporter values in the
+runs that lack it, from an MS2 scan that carries no identification there. Only high-resolution
+MS2 reporters qualify: the run is refused for SPS-MS3 reporters (`--tmt-level 3`, or the level
+resolved from the data) and for ion-trap MS2, whose transferred scans are not quantified reliably.
+It needs two or more inputs, `--rescore` (or `--rescore-native`) and `--tmt <plex>`, not `--lfq`;
+the per-run tables of `--quant-dir` (or a temporary directory removed at exit) are used as in the
+label-free form, and each run's `<stem>.ms2.parquet` additionally holds the raw reporter
+intensities, the precursor purity and the summed signal-to-noise of every MS2 scan (schema 1.1;
+tables of runs without `--mbr` stay 1.0).
+
+* **Candidates.** The donors are the precursors of the label-free library (same entry gate, donor
+  PSMs and joint retention-time alignment as `--lfq --mbr`). In a run that lacks a donor, a candidate
+  is an MS2 scan with no identification at q ≤ `--quant-fdr`, the donor's charge (or none
+  recorded), a selected m/z within a window of the donor's theoretical m/z and a retention time in
+  the aligned window. Both windows are learned per run from its own identified pairs: the m/z window is
+  the median error plus three robust standard deviations of the identified scans, the retention
+  window three robust standard deviations of the residuals of identified precursors predicted
+  without their own run. The candidate whose fragments match the donor's library spectrum best
+  (spectral angle) is the transfer; a scan claimed by several donors goes to the best match.
+* **Quantity.** The impurity-corrected reporter vector of the candidate scan (`--tmt-correction`),
+  as for identified PSMs. Transferred rows carry no PSM q-value.
+* **Risk and `quant_q`.** Three small ridge logistic models are fitted on the run set itself,
+  without the experimental design: an identity model (the best candidate of each attempt against the
+  best candidate for the donor's mass-shifted decoy, found with the same breadth: its odds are the
+  expected share of false candidates; the donor's own PEP is added), a value model (free sibling
+  scans of identified precursors against the identified scan of the same run; a value is wrong when its
+  reporter profile deviates by more than `0.5 × √2` RMS log2, or when its empty-channel share is above
+  the identified P99 at the same signal) and a noise floor (an identified scan against another
+  identified scan of its precursor). Covariates: reporter signal, detected channels, MS1 purity,
+  signal-to-noise, empty-channel share, fragment ion current explained by the donor peptide, charge,
+  the spectral angle, matched and explained library fragments, the retention-time and m/z residuals, donor q-value
+  and number of donor runs, and the channel-loading similarity of the donor runs to the acceptor run (runs of
+  one plex mixture load alike). The `quant_q` of a transfer is the running mean, over the transfers at least as
+  reliable, of its predicted excess error: the identity risk plus the value risk above the noise floor. It is an internal
+  quant-quality q-value, not an identification FDR. Transfers at `quant_q <= --mbr-fdr` (0.01) pass the
+  quantification gate (`quant_gate_passed` true, `quant_weight` purity²) and enter the QPX feature
+  view as `transfer_ms2`; the others stay in `tmt.parquet` with weight 0. With fewer than 100 masked
+  siblings the noise floor stands in for the value model (a WARN names it); with too few rows for another
+  model no transfer is accepted.
+* **Columns** (`tmt.parquet` schema 1.2, appended after the other columns; `andes.tmt.mbr` in the
+  metadata): `evidence_type` (`identified` or `transferred`) and, null for identified rows, `quant_q`,
+  `p_wrong`, `noise_floor`, `p_identity`, `p_value`, `transfer_angle`, `transfer_matched`,
+  `transfer_explained`, `transfer_rt_z`, `transfer_ppm`, `donor_q`, `donor_runs`, `donor_run`,
+  `donor_batch_cos`. A transferred row's `peptide`, `charge` and `proteins` are the donor's; `scannr`
+  and `spec_id` are the acceptor scan's. The QPX feature parquet gets the `evidence_type`, `transfer_q`
+  and `quant_q` columns of the label-free form for every row.
+* **Measured (2026-11-04, human + yeast database with 1:1 peptide-shuffled entrapment, Percolator q ≤ 0.01).**
+  PXD014750, six hrMS2 acquisitions (three TMT11 plexes, two injections each): 198,649 identified PSMs with
+  reporters, 7,841 transfer candidates (+3.9 %), 3,636 at `quant_q` ≤ 0.01 (+1.8 %). Truth: human-only peptides flat,
+  yeast-only peptides with the plex yeast profile when their identified PSMs in the other runs show it; wrong =
+  RMS log2 deviation above 0.5 (an evaluation threshold). Wrong rate of the accepted transfers 2.79 % against 2.84 %
+  for identified PSMs at matched species and signal (excess −0.05 points, 95 % CI −0.56 to +0.51, n = 3,267); all candidates
+  3.90 % against 3.50 % (+0.40, −0.04 to +0.89). Entrapment share of the candidates 1.7 %, of the accepted ones 1.6 %.
+  PXD046211 CBIO680 + CBIO681 (8 single-cell runs, 10 empty channels and a carrier in CBIO680): 2,864 candidates, 34 at
+  `quant_q` ≤ 0.01. The share of transfers above the identified empty-channel P99 is 2.3 % for all candidates (1.0 % for
+  identified rows) and 0 of 33 at `quant_q` ≤ 0.01; the direction of the THP1/U937 ratio of marker precursors is
+  wrong for 15.8 % of the candidates against 11.5 % for identified rows at matched batch and signal (+4.4 points,
+  +2.1 to +6.5): in low-input runs the learned risk accepts almost nothing and does not separate the remaining
+  weak scans, so single-cell transfers should not be used without the downstream check. Cost on PXD014750 (16 threads, six runs; same node type): without the flag 2,926 CPU s, 7:14 wall, 14.5 GB peak memory;
+with `--mbr` 2,935 CPU s, 7:27 wall, 14.5 GB (an earlier build of the same code measured 3,329 CPU s, 9:15; the transfer step
+takes 6-11 s and the written per-run tables the rest); on a slower node main without the flag took 6,868 CPU s, 14:26,
+so cost comparisons need one node type. Outputs without the flag are byte-identical to main (PXD014750 `--tmt`
+run, 14 files; `--lfq --mbr` on two runs, 26 files).
+* **Limits.** One acquisition design per truth; the risk is learned from replicate scans, so it prices noise relative to
+  identified scans, not an absolute error; transfers inherit donor identification errors (donor PEP is priced, a recurrent
+  false donor is not); positional isomers with different site forms are separate keys.
 
 ### Relation to other quantifiers
 

@@ -15,7 +15,7 @@ use model::mass::{ISOTOPE, PROTON};
 use model::scan::{Ms1Scan, ProductScan, ScanContext};
 use model::spectrum::Spectrum;
 use model::{IsomerClass, Tolerance};
-use output::feature_parquet::FeatureRecord;
+use output::feature_parquet::{FeatureRecord, MbrColumns};
 use output::ms2_table::{write_ms2_table, Ms2Table};
 use output::run_quant_table::{write_run_quant_table, RunPsmRow};
 use output::{LfqRow, ModRecord, PercolatorPsm, QuantId, TmtRow};
@@ -25,7 +25,7 @@ use quant::lfq::{
     competition_score, feature_score, quantify, quantify_decoy, FeatureQuant, LfqParams, LfqTarget,
 };
 use quant::ms1_index::Ms1RunIndex;
-use quant::ms2::Ms2Scan;
+use quant::ms2::{Ms2Scan, ScanReporters};
 use quant::tdc::{picked_qvalues, Pair};
 use quant::unmix::{unmix_run, window_record, ScanInput, Survey, WindowRecord};
 use rayon::prelude::*;
@@ -82,6 +82,9 @@ pub(crate) struct QuantSettings {
     pub fragment_tol: Option<Tolerance>,
     /// `--tmt-unmix` on high-resolution MS2 reporters.
     pub unmix: bool,
+    /// `--tmt --mbr`: every run's MS2 table carries the reporter ions, and the
+    /// transfers are measured after the identified rows.
+    pub tmt_mbr: bool,
     /// `--temp-dir` (resolved): where the MS1 scans wait between searching and
     /// quantification.
     pub scratch_dir: PathBuf,
@@ -144,6 +147,19 @@ impl QuantSettings {
             return Ok(None);
         }
         Self::check_args(cli)?;
+        if cli.mbr && cli.tmt.is_some() && (tmt_level >= 3 || !high_res) {
+            return Err(if tmt_level >= 3 {
+                "--mbr with --tmt transfers the reporter ions of MS2 scans and needs them in \
+                 the MS2; it does not apply to SPS-MS3 reporters (--tmt-level 3), whose \
+                 transferred MS2 scans have no MS3"
+                    .into()
+            } else {
+                "--mbr with --tmt needs high-resolution MS2 scans: this run's MS2 is \
+                 low-resolution (ion trap), whose transferred scans are not reliable enough to \
+                 quantify"
+                    .into()
+            });
+        }
         // The default follows the scan the reporters are read from. SPS-MS3
         // reporters are read in the Orbitrap even when the identifying MS2 is
         // an ion-trap scan (Fusion/Lumos SPS methods), so the MS2 resolution
@@ -222,6 +238,7 @@ impl QuantSettings {
             quant_dir: cli.quant_dir.clone(),
             fragment_tol: None,
             unmix: cli.tmt_unmix && high_res && cli.tmt.is_some(),
+            tmt_mbr: cli.mbr && cli.tmt.is_some(),
             scratch_dir: cli.temp_dir.clone().unwrap_or_else(|| PathBuf::from(".")),
         }))
     }
@@ -480,12 +497,22 @@ impl QuantCollector {
                 }
             );
         }
+        let mut ms2 = std::mem::take(&mut self.ms2);
+        if self.settings.tmt_mbr {
+            attach_reporters(
+                &self.settings,
+                &self.ms2_reporters[span.clone()],
+                &mut ms2,
+                ms1.as_ref(),
+                &contexts,
+                title_prefix,
+            )?;
+        }
         let ms1 = ms1
             .as_ref()
             .map(|index| Ms1Cache::store(index, &stem, &self.settings.scratch_dir))
             .transpose()
             .map_err(|e| format!("cache MS1 scans for {stem}: {e}"))?;
-        let ms2 = std::mem::take(&mut self.ms2);
         if let Some(dir) = &self.settings.quant_dir {
             let contexts_cv = |id: &str| contexts.get(id).and_then(|c| c.faims_cv);
             write_run_ms2(
@@ -511,6 +538,73 @@ impl QuantCollector {
     fn run_of(&self, spec_idx: usize) -> Option<usize> {
         self.runs.iter().position(|r| r.span.contains(&spec_idx))
     }
+}
+
+/// Gives each reduced MS2 scan of a run its reporter ions (`--tmt --mbr`):
+/// the raw channel intensities, the precursor isolation purity from the
+/// survey scan and the summed reporter signal-to-noise of the impurity-
+/// corrected values (when the scan records noise).
+fn attach_reporters(
+    settings: &QuantSettings,
+    reporters: &[Vec<f32>],
+    scans: &mut [Ms2Scan],
+    ms1: Option<&Ms1RunIndex>,
+    contexts: &HashMap<String, ScanContext>,
+    title_prefix: Option<&str>,
+) -> Result<(), String> {
+    let plex = settings.plex.ok_or("--mbr with --tmt needs --tmt <plex>")?;
+    if reporters.len() != scans.len() {
+        return Err(format!(
+            "internal: {} reporter vectors for {} MS2 scans of one run",
+            reporters.len(),
+            scans.len()
+        ));
+    }
+    for (scan, raw) in scans.iter_mut().zip(reporters) {
+        let id = title_prefix
+            .and_then(|p| scan.native_id.strip_prefix(p))
+            .unwrap_or(scan.native_id.as_str());
+        let context = contexts.get(id);
+        let purity = ms1.and_then(|ms1| {
+            let (target, lo, hi) = scan.isolation?;
+            let survey = survey_scan(ms1, context, scan.rt)?;
+            quant::precursor_purity(
+                ms1.peaks(survey),
+                scan.precursor_mz,
+                Some(target),
+                scan.charge,
+                lo,
+                hi,
+                PURITY_ISOTOPE_PPM,
+            )
+        });
+        let sn_sum = context
+            .and_then(|c| c.noise.as_ref())
+            .map(|n| reporter_noise(n, plex))
+            .map(|noise| {
+                let corrected = match &settings.correction {
+                    Some(m) => m.correct(raw),
+                    None => raw.clone(),
+                };
+                signal_to_noise(&corrected, &noise).iter().sum::<f32>()
+            });
+        scan.reporters = Some(ScanReporters {
+            raw: raw.clone(),
+            purity,
+            sn_sum,
+        });
+    }
+    Ok(())
+}
+
+/// What `--tmt --mbr` needs from the search besides the quantification
+/// settings: the decoy rescoring result and the transfer thresholds.
+pub(crate) struct TmtMbrInput<'a> {
+    pub decoys: &'a HashMap<String, PercolatorPsm>,
+    pub source: &'a str,
+    pub library_fdr: f64,
+    pub accept_q: f64,
+    pub wrong_log2: f64,
 }
 
 /// PSMs the isobaric quantification gate marked as failed in `tmt.parquet`
@@ -620,6 +714,7 @@ fn reduced_ms2(spec: &Spectrum) -> Ms2Scan {
         isolation,
         faims_cv: None,
         peaks,
+        reporters: None,
     }
 }
 
@@ -1288,6 +1383,7 @@ pub(crate) fn run_quant(
     report_base: &Path,
     parquet_dir: Option<&Path>,
     groups: Option<&crate::quant_cmd::ProteinGroups<'_>>,
+    mbr: Option<&TmtMbrInput<'_>>,
 ) -> Result<output::QuantSummary, String> {
     let s = &collector.settings;
     // Per-peptide quantities for the proteoform table.
@@ -1432,6 +1528,7 @@ pub(crate) fn run_quant(
                     quant_gate_passed: passes,
                     interference: None,
                     unmixed: None,
+                    transfer: None,
                 });
             }
             if s.unmix {
@@ -1473,6 +1570,81 @@ pub(crate) fn run_quant(
                 }
             }
         }
+        if s.tmt_mbr {
+            let input = mbr.ok_or("--mbr with --tmt: the rescoring result is missing")?;
+            let targets = rescore.ok_or("--mbr with --tmt needs --rescore or --rescore-native")?;
+            let quant_dir = s
+                .quant_dir
+                .as_deref()
+                .ok_or("--mbr with --tmt needs the per-run tables of --quant-dir")?;
+            let params = crate::tmt_mbr::Params {
+                plex,
+                correction: s.correction.as_ref(),
+                library_fdr: input.library_fdr,
+                donor_q: s.quant_fdr,
+                donor_pep: s.pep_cap,
+                accept_q: input.accept_q,
+                wrong_log2: input.wrong_log2,
+            };
+            let stems: Vec<String> = collector.runs.iter().map(|r| r.stem.clone()).collect();
+            let make = || crate::quant_cmd::rescore_scores(targets, input.decoys, input.source);
+            let (transfers, outcome) = crate::tmt_mbr::run(quant_dir, &stems, &make, &params)?;
+            eprintln!(
+                "quant: --mbr transferred {} reporter rows, {} at quant_q<={}{}",
+                outcome.candidates,
+                outcome.accepted,
+                input.accept_q,
+                if outcome.model_fitted {
+                    ""
+                } else {
+                    " (no risk model could be fitted: none accepted)"
+                }
+            );
+            for t in transfers {
+                let (sequence, modifications) = crate::quant_cmd::parse_peptidoform(&t.peptidoform);
+                let file_idx = collector
+                    .runs
+                    .iter()
+                    .position(|r| r.stem == t.run)
+                    .unwrap_or(0);
+                rows.push(TmtRow {
+                    id: QuantId {
+                        file_idx,
+                        run: t.run.clone(),
+                        spec_id: t.spec_key.clone(),
+                        scan: t.scan,
+                        rt_seconds: Some(t.rt),
+                        sequence,
+                        peptidoform: t.peptidoform.clone(),
+                        modifications,
+                        charge: t.charge,
+                        proteins: t.proteins.clone(),
+                        is_decoy: false,
+                        calculated_mz: t.calc_mz,
+                        observed_mz: t.precursor_mz,
+                        q_value: None,
+                        pep: None,
+                        missed_cleavages: None,
+                        psm_index: -1,
+                    },
+                    quant_scan_id: t.native_id.clone(),
+                    quant_ms_level: s.tmt_level,
+                    purity: t.purity,
+                    raw: t.raw.clone(),
+                    corrected: t.corrected.clone(),
+                    sn: None,
+                    quant_weight: if t.accepted {
+                        quant_weight(t.purity)
+                    } else {
+                        0.0
+                    },
+                    quant_gate_passed: t.accepted,
+                    interference: None,
+                    unmixed: None,
+                    transfer: Some(t.info.clone()),
+                });
+            }
+        }
         summary.columns = plex.channels().iter().map(|c| c.name.to_string()).collect();
         for r in rows.iter().filter(|r| r.quant_gate_passed) {
             for (col, &v) in r.corrected.iter().enumerate() {
@@ -1482,7 +1654,11 @@ pub(crate) fn run_quant(
             }
         }
         let tmt_path = dir.join(format!("{stem}.tmt.parquet"));
-        output::write_tmt_parquet(&tmt_path, plex, &rows, s.correction.is_some(), s.unmix)?;
+        if s.tmt_mbr {
+            output::write_tmt_parquet_mbr(&tmt_path, plex, &rows, s.correction.is_some(), s.unmix)?;
+        } else {
+            output::write_tmt_parquet(&tmt_path, plex, &rows, s.correction.is_some(), s.unmix)?;
+        }
         eprintln!(
             "quant: wrote {} ({} PSMs with reporter ions passing the quantification gate{}{}{})",
             tmt_path.display(),
@@ -1510,8 +1686,17 @@ pub(crate) fn run_quant(
             );
         }
         for r in rows.iter().filter(|_| parquet_dir.is_some()) {
-            let hit = hits_by_psm[&r.id.psm_index];
-            let proteins = proteins_of(&hit.psm, candidates, index);
+            let proteins = match &r.transfer {
+                // A transferred row passes into the QPX view only at the gate.
+                Some(_) if !r.quant_gate_passed => continue,
+                Some(_) => {
+                    r.id.proteins
+                        .iter()
+                        .map(|a| (a.clone(), None, None, None, None))
+                        .collect()
+                }
+                None => proteins_of(&hits_by_psm[&r.id.psm_index].psm, candidates, index),
+            };
             let mut rec = base_record(&r.id, proteins, next_feature_id);
             next_feature_id += 1;
             let labels: Vec<String> = plex
@@ -1561,6 +1746,44 @@ pub(crate) fn run_quant(
                 .push(("quant_scan".into(), r.quant_scan_id.clone()));
             rec.cv_params
                 .push(("quant_ms_level".into(), r.quant_ms_level.to_string()));
+            if s.tmt_mbr {
+                match &r.transfer {
+                    Some(t) => {
+                        rec.psm_ids.clear();
+                        rec.id_run_file_name = None;
+                        rec.additional_scores
+                            .push(("p_wrong".into(), f64::from(t.p_wrong), false));
+                        rec.additional_scores.push((
+                            "noise_floor".into(),
+                            f64::from(t.noise_floor),
+                            false,
+                        ));
+                        rec.additional_scores.push((
+                            "transfer_angle".into(),
+                            f64::from(t.angle),
+                            true,
+                        ));
+                        rec.additional_scores.push((
+                            "donor_batch_cos".into(),
+                            f64::from(t.batch_cos),
+                            true,
+                        ));
+                        rec.mbr = Some(MbrColumns {
+                            evidence_type: "transfer_ms2".into(),
+                            transfer_q: Some(t.quant_q),
+                            quant_q: Some(t.quant_q),
+                            quantity_se: None,
+                            ..MbrColumns::default()
+                        });
+                    }
+                    None => {
+                        rec.mbr = Some(MbrColumns {
+                            evidence_type: "identified".into(),
+                            ..MbrColumns::default()
+                        });
+                    }
+                }
+            }
             records.push(rec);
         }
     }
@@ -1990,6 +2213,7 @@ mod tests {
             quant_dir: quant_dir.map(PathBuf::from),
             fragment_tol: Some(Tolerance::Ppm(20.0)),
             unmix: false,
+            tmt_mbr: false,
             scratch_dir: PathBuf::from("."),
         }
     }
@@ -2090,6 +2314,34 @@ mod tests {
             .try_get_matches_from(argv)
             .expect("parse args");
         crate::SearchArgs::from_arg_matches(&matches).unwrap()
+    }
+
+    #[test]
+    fn tmt_mbr_is_refused_for_ms3_reporters_and_low_resolution_ms2() {
+        let from = |extra: &[&str], high_res: bool, level: u8| {
+            let mut a = vec!["--tmt", "tmt11", "--mbr", "--rescore"];
+            a.extend_from_slice(extra);
+            QuantSettings::from_cli(&search_args(&a), high_res, level)
+        };
+        // High-resolution MS2 reporters: accepted, and the settings say so.
+        let s = from(&[], true, 2).unwrap().unwrap();
+        assert!(s.tmt_mbr);
+        // SPS-MS3 reporters, resolved or explicit.
+        let e = from(&[], true, 3).unwrap_err();
+        assert!(e.contains("SPS-MS3"), "{e}");
+        let e = from(&["--tmt-level", "3"], false, 3).unwrap_err();
+        assert!(e.contains("SPS-MS3"), "{e}");
+        // Ion-trap MS2.
+        let e = from(&[], false, 2).unwrap_err();
+        assert!(e.contains("low-resolution"), "{e}");
+        // Without --mbr nothing changes for either.
+        let plain = |high_res: bool, level: u8| {
+            QuantSettings::from_cli(&search_args(&["--tmt", "tmt11"]), high_res, level)
+                .unwrap()
+                .unwrap()
+        };
+        assert!(!plain(true, 2).tmt_mbr);
+        assert!(!plain(true, 3).tmt_mbr);
     }
 
     #[test]

@@ -1171,6 +1171,43 @@ mod param_resolver_tests {
         );
     }
 
+    /// A mixed HCD/EThcD TMT run on an Orbitrap, searched non-specifically (PXD004781):
+    /// whichever activation the run is routed for, the scans of the other one get
+    /// their own model, so the run's choice only decides which of the two is the
+    /// run-level model. Each direction of the per-scan route is a model other than the
+    /// run's, on the run's analyser.
+    #[test]
+    fn mixed_tmt_run_scores_each_activation_with_its_own_model() {
+        use model::enzyme::Enzyme;
+        let store_path = bundled_store_path();
+        let store = ModelStore::open(&store_path).expect("bundled store");
+        let entries = store.selection_entries();
+        let inst = Some(InstrumentType::QExactive);
+        let run_of = |act| choose_model(&entries, act, inst, Protocol::Tmt, Enzyme::NonSpecific);
+        let hcd = run_of(ActivationMethod::HCD).model_id;
+        let ethcd = run_of(ActivationMethod::EThcD).model_id;
+        assert_eq!(hcd, "hcd_highres_nocleavage");
+        assert_eq!(ethcd, "ethcd_qexactive_tryp");
+        for (scans, run_model) in [
+            (ActivationMethod::EThcD, &hcd),
+            (ActivationMethod::HCD, &ethcd),
+        ] {
+            let route = load_activation_route(
+                scans,
+                inst,
+                Protocol::Tmt,
+                Enzyme::NonSpecific,
+                &store_path,
+                run_model,
+                "Orbitrap",
+            )
+            .expect("route")
+            .expect("the scans of the other activation get a model of their own");
+            assert_eq!(route.0, run_of(scans).model_id);
+            assert_ne!(&route.0, run_model);
+        }
+    }
+
     /// The bundled-store selection, as the search and training paths run it
     /// (`choose_model`: `build_selection_key`, the detected-instrument pre-pass
     /// and `select_nearest_for`), over every activation × detected instrument

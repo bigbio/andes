@@ -409,3 +409,136 @@ fn a_working_pep_is_not_touched() {
     let log = std::fs::read_to_string(tmp.path().join("calls.log")).unwrap();
     assert_eq!(log.lines().count(), 1);
 }
+
+/// A stand-in `percolator` for a PIN of two runs. The pooled call writes the
+/// pooled q-values (0.001 for every PSM). A `--static` call writes the q-value
+/// of the run named by the PIN it is given: run `a` 0.002, run `b` 0.5. Every
+/// call's arguments are appended to `calls.log`; the PSM ids are the PIN's
+/// `SpecId`s.
+#[cfg(unix)]
+fn write_two_run_fake(dir: &std::path::Path, fail_run_b: bool) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let script = dir.join("percolator");
+    let body = format!(
+        r#"#!/bin/sh
+echo "$@" >> "{log}"
+static=0; t=""; d=""
+for a in "$@"; do pin="$a"; done
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --static) static=1;;
+    --results-psms) t="$2"; shift;;
+    --decoy-results-psms) d="$2"; shift;;
+  esac
+  shift
+done
+printf 'PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n' > "$t"
+printf 'PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n' > "$d"
+if [ $static = 0 ]; then
+  for id in a1 a2 b1 b2 x1; do printf '%s\t1.0\t0.001\t0.01\tK.AAK.R\tsp|P1\n' $id >> "$t"; done
+  printf 'bd1\t0.5\t0.001\t0.5\tK.DDK.R\tsp|D1\n' >> "$d"
+  exit 0
+fi
+if grep -q 'run_b' "$pin"; then
+  [ {fail} = 1 ] && exit 3
+  q=0.5
+else
+  q=0.002
+fi
+tail -n +2 "$pin" | cut -f1 | while read id; do
+  case "$id" in
+    x*) ;;
+    bd*) printf '%s\t0.5\t%s\t0.5\tK.DDK.R\tsp|D1\n' $id $q >> "$d";;
+    *) printf '%s\t1.0\t%s\t0.01\tK.AAK.R\tsp|P1\n' $id $q >> "$t";;
+  esac
+done
+"#,
+        log = dir.join("calls.log").display(),
+        fail = i32::from(fail_run_b),
+    );
+    std::fs::write(&script, body).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+#[cfg(unix)]
+fn write_two_run_pin(path: &std::path::Path) {
+    std::fs::write(
+        path,
+        "SpecId\tLabel\tFileName\tRawScore\n\
+         a1\t1\trun_a\t1\n a2\t1\trun_a\t1\n\
+         b1\t1\trun_b\t1\n b2\t1\trun_b\t1\n\
+         bd1\t-1\trun_b\t1\nx1\t1\trun_a\t1\n"
+            .replace("\n ", "\n"),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn per_run_q_values_replace_the_pooled_ones_and_leave_no_scratch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pin = tmp.path().join("set.pin");
+    write_two_run_pin(&pin);
+    let backend = PercolatorBackend::Binary(write_two_run_fake(tmp.path(), false));
+    let (targets, decoys) = run_percolator_with_decoys(&backend, &pin, &[]).unwrap();
+    assert_eq!(targets["a1"].q_value, 0.002);
+    assert_eq!(targets["b2"].q_value, 0.5);
+    assert_eq!(targets["x1"].q_value, 1.0, "no verdict from the run's pass");
+    assert_eq!(targets["b1"].pep, 0.01, "the PEP stays the pooled one");
+    assert!(decoys.contains("bd1"));
+    // The result file carries the per-run q-values too.
+    let text = std::fs::read_to_string(tmp.path().join("set.percolator.target.psms.txt")).unwrap();
+    let file = output::parse_psm_results(&text).unwrap();
+    assert_eq!(file["a2"].q_value, 0.002);
+    assert_eq!(file["b1"].q_value, 0.5);
+    // One pooled call, then one static call per run with the pooled weights
+    // and target-decoy competition; one PIN per run, deleted afterwards.
+    let log = std::fs::read_to_string(tmp.path().join("calls.log")).unwrap();
+    let calls: Vec<&str> = log.lines().collect();
+    assert_eq!(calls.len(), 3, "{calls:?}");
+    let weights = tmp.path().join("set.percolator.weights.txt");
+    for c in &calls[1..] {
+        assert!(c.contains("--static") && c.contains(" -Y "), "{c}");
+        assert!(c.contains("--override"), "the pooled weights are kept: {c}");
+        assert!(c.contains(&format!("--init-weights {}", weights.display())));
+    }
+    assert!(calls[1].ends_with("set.run0.pin") && calls[2].ends_with("set.run1.pin"));
+    let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains(".run"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_run_whose_pass_fails_keeps_its_pooled_q_values() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pin = tmp.path().join("set.pin");
+    write_two_run_pin(&pin);
+    let backend = PercolatorBackend::Binary(write_two_run_fake(tmp.path(), true));
+    let (targets, _) = run_percolator_with_decoys(&backend, &pin, &[]).unwrap();
+    assert_eq!(targets["a1"].q_value, 0.002);
+    assert_eq!(targets["b1"].q_value, 0.001);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_pin_of_one_run_or_without_run_names_is_left_pooled() {
+    let tmp = tempfile::tempdir().unwrap();
+    let backend = PercolatorBackend::Binary(write_two_run_fake(tmp.path(), false));
+    for text in [
+        "SpecId\tLabel\tFileName\na1\t1\trun_a\na2\t1\trun_a\n",
+        "SpecId\tLabel\na1\t1\na2\t1\n",
+    ] {
+        let pin = tmp.path().join("one.pin");
+        std::fs::write(&pin, text).unwrap();
+        std::fs::remove_file(tmp.path().join("calls.log")).ok();
+        let (targets, _) = run_percolator_with_decoys(&backend, &pin, &[]).unwrap();
+        assert_eq!(targets["a1"].q_value, 0.001);
+        let log = std::fs::read_to_string(tmp.path().join("calls.log")).unwrap();
+        assert_eq!(log.lines().count(), 1, "{log}");
+    }
+}

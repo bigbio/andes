@@ -66,7 +66,7 @@ true positives rise from 1,068 to 1,300 (UPS1 in yeast, PXD009740), 1,007 to 1,0
 andes is ahead on the Q Exactive mixture (1,047 against 857 for MaxQuant and 946 for FragPipe) and ties on the
 others, with more false calls than MaxQuant on all of them (305 against 129 on PXD009740, 110 against 37 on
 the Q Exactive mixture). MaxQuant also has the lower gross errors on the identified cells; andes has the lower
-protein CV and more precursors on every set (its search used chimeric spectra and open modifications and
+protein CV and more precursors on every set (its search used chimeric spectra, the secondary-modification pass `--refine` and
 PSM-level FDR, the other tools a protein-level 1% FDR, so depth is not settings-matched). On a design where
 yeast is absent from 20 runs, 0.20% of andes's transferred rows are yeast (0.08% at `quant_q ≤ 0.01`) against
 0.09% for FragPipe; on yeast-enriched rows only it is 0.052% against 0.010%, and 0.052% against 0.072% when rows

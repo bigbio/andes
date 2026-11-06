@@ -379,7 +379,7 @@ are from 2026-10 and were read again unchanged.
   1.10.12 run with match between runs (ion FDR 0.01, MaxLFQ) and **normalisation off**
   (`--normalization 0`), so that its ion intensities are raw like the others; the existing runs
   were used, none with match between runs off.
-- *Search settings are not matched.* andes searched with chimeric spectra and open modifications and
+- *Search settings are not matched.* andes searched with chimeric spectra (`--chimeric`), the secondary-modification pass (`--refine`) and
   with PSM-level FDR, while MaxQuant and FragPipe applied a protein-level 1% FDR, so depth counts
   (precursors, proteins, rows) are not settings-matched. A matched-settings comparison is being run.
 - *Evaluation rules.* Every tool's table is reduced to raw precursor-by-run intensities and goes

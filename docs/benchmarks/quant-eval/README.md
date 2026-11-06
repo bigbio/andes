@@ -154,3 +154,16 @@ python3 -m quant_eval.proteobench --finalize fin.parquet --design design.tsv --f
 - `--hard-cut` accepts `hard-cut=<tau>` as an andes rule (`--andes NAME:hard-cut=0.004:finalize.parquet`).
 
 Refs #299.
+
+## Roll-up sensitivity (mokume)
+
+`rollup_sens.py` scores the protein level of every arm after several roll-ups of the same raw precursor intensities: the harness
+median polish and the quantification methods of mokume (`rollup_mokume.py`: MaxLFQ, DirectLFQ, Top3, sum, median) under the harness
+run normalisation and under mokume's own `globalMedian` normalisation. The tool's own protein intensity (MaxQuant `LFQ intensity`
+of `proteinGroups.txt`) is added as a reference row. No roll-up is implemented in the package: mokume-py must be importable
+(`pip install mokume-py directlfq`). The default of every other module is unchanged.
+
+```
+python3 -m quant_eval.rollup_sens --manifest manifest.json --dataset u9740 --seed 42 --out results/u9740_s42.json
+python3 -m quant_eval.rollup_sens_table --results results/ > rollup_sensitivity.md
+```

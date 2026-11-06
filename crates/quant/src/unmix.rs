@@ -30,6 +30,30 @@
 //! reporter profile (each channel's share of all reporter signal): the
 //! co-isolated ions are, on average, the run's average peptide.
 //!
+//! # Correction strength
+//!
+//! The subtracted share can be scaled by a strength `λ` in `[0, 1]`
+//! (`corrected = raw − λ · interference · total · profile`). `λ = 1` is the
+//! full correction. [`learn_strength`] learns `λ` per run without ground
+//! truth. A PSM's sum-normalised profile is `(1 − λe)·t + λe·b`: its protein's
+//! clean profile `t` plus the run's mean profile `b` in proportion to the
+//! estimated interference `e`. Within each protein, `t` is estimated for each
+//! PSM from the protein's other PSMs (mean profile weighted by the squared
+//! clean share `(1 − e)²`, so the clean PSMs dominate), and `λ` is the
+//! least-squares slope, through the origin, of the PSM's profile deviation
+//! `q − t` on `e (b − t)`.
+//! The slope is weighted by the reference's mass `C / (C + 1)` (`C` in units of
+//! one fully clean PSM); proteins whose profile is close to `b` carry no
+//! weight by themselves, because `b − t` is then small. Noise in the profiles
+//! is orthogonal to the regressor on average, so it does not pull the slope
+//! the way it would pull a profile-distance objective (which grows with every
+//! subtraction, as removing signal amplifies each PSM's noise). Agreement
+//! among all PSMs is not used: it would reward moving every profile to the
+//! run's mean. The reference itself holds `λē` of `b`, so the clean profile is
+//! `t = (r − λē·b) / (1 − λē)` and the slope is iterated to its fixed point.
+//! A run whose proteins give fewer than [`MIN_FIT_SCANS`] effective scans
+//! cannot teach `λ`; it keeps the full estimate (`λ = 1`).
+//!
 //! Joint non-negative least squares over scans linked by shared precursors
 //! (every identified co-isolated precursor subtracted with its own reporter
 //! profile) was measured against this and recovered less of the known
@@ -58,6 +82,8 @@ const ROBUST_ROUNDS: usize = 8;
 const N_COEF: usize = 5;
 /// Floor of the robust scale of the relative residuals.
 const MIN_MAD: f64 = 1e-6;
+/// Fixed-point rounds of the strength estimate.
+const SLOPE_ROUNDS: usize = 8;
 
 /// One quantified MS2 scan as the interference model sees it.
 #[derive(Debug, Clone, PartialEq)]
@@ -70,6 +96,9 @@ pub struct ScanInput {
     pub pic: f64,
     /// The isolation-window record, `None` without MS1 around the scan.
     pub window: Option<WindowRecord>,
+    /// The protein the PSM maps to, `None` when it maps to several. Scans of
+    /// the same protein are compared when the correction strength is learned.
+    pub protein: Option<u32>,
 }
 
 /// The MS1 view of one isolation window at the time of the MS2 scan.
@@ -349,27 +378,160 @@ pub struct Unmixed {
     pub reporters: Vec<f32>,
 }
 
-/// Fit the run's model and remove each scan's interference. Returns the
-/// model (`None` when the run cannot be fitted, and then every scan is
-/// `None`) and one entry per input scan in order.
-pub fn unmix_run(scans: &[ScanInput]) -> (Option<InterferenceModel>, Vec<Option<Unmixed>>) {
-    let none = || vec![None; scans.len()];
+/// How strongly the estimated interference is subtracted.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Strength {
+    /// The given strength in `0..=1` (1 = full correction).
+    Fixed(f64),
+    /// Learned per run by [`learn_strength`]; 1 when the run cannot teach it:
+    /// the interference estimate is fitted on the run itself, so without
+    /// evidence against it, it is kept in full.
+    Learned,
+}
+
+/// Sum-normalised profile of a scan's reporters (negative values count as 0),
+/// `None` when nothing is left.
+fn raw_shares(reporters: &[f32]) -> Option<Vec<f64>> {
+    let total = summed(reporters);
+    (total > 0.0).then(|| {
+        reporters
+            .iter()
+            .map(|&v| (v as f64).max(0.0) / total)
+            .collect()
+    })
+}
+
+/// The run's correction strength, learned from agreement within proteins
+/// (see the module documentation), in `0..=1`. `eil` is each scan's
+/// interference fraction (`None` for scans that cannot be modelled) and
+/// `profile` the run's mean reporter profile. `None` when the proteins with at
+/// least two scans hold fewer than [`MIN_FIT_SCANS`] effective scans (the
+/// squared sum of the slope's information weights over the sum of their
+/// squares) or no information.
+pub fn learn_strength(scans: &[ScanInput], eil: &[Option<f64>], profile: &[f64]) -> Option<f64> {
+    let n = profile.len();
+    let mut groups: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
+    for (i, s) in scans.iter().enumerate() {
+        if let (Some(g), Some(_)) = (s.protein, eil[i]) {
+            if s.reporters.len() == n && summed(&s.reporters) > 0.0 {
+                groups.entry(g).or_default().push(i);
+            }
+        }
+    }
+    // One entry per scan that has a reference: its profile, the reference's
+    // mean profile and interference, its own interference and the weight.
+    struct Term {
+        q: Vec<f64>,
+        r: Vec<f64>,
+        e_ref: f64,
+        e: f64,
+        w: f64,
+    }
+    let mut terms: Vec<Term> = Vec::new();
+    for members in groups.values().filter(|m| m.len() >= 2) {
+        let q: Vec<Vec<f64>> = members
+            .iter()
+            .map(|&i| raw_shares(&scans[i].reporters).unwrap_or_else(|| vec![0.0; n]))
+            .collect();
+        let e: Vec<f64> = members.iter().map(|&i| eil[i].unwrap_or(0.0)).collect();
+        let c: Vec<f64> = e.iter().map(|e| (1.0 - e).powi(2)).collect();
+        let mass: f64 = c.iter().sum();
+        let mut sum_q = vec![0.0; n];
+        for (qk, ck) in q.iter().zip(&c) {
+            for (a, &v) in sum_q.iter_mut().zip(qk) {
+                *a += ck * v;
+            }
+        }
+        let sum_e: f64 = c.iter().zip(&e).map(|(c, e)| c * e).sum();
+        for (k, qk) in q.into_iter().enumerate() {
+            let c_ref = mass - c[k];
+            if c_ref <= 0.0 {
+                continue;
+            }
+            terms.push(Term {
+                r: sum_q
+                    .iter()
+                    .zip(&qk)
+                    .map(|(&a, &v)| (a - c[k] * v) / c_ref)
+                    .collect(),
+                q: qk,
+                e_ref: (sum_e - c[k] * e[k]) / c_ref,
+                e: e[k],
+                w: c_ref / (c_ref + 1.0),
+            });
+        }
+    }
+    // The reference holds `λ · ē` of the run profile `b`, so the protein's
+    // clean profile is `(r − λ ē b) / (1 − λ ē)` and the scan's deviation from
+    // it is `λ e (b − t)`: iterate the slope to its fixed point.
+    let mut lambda = 1.0f64;
+    let mut info = (0.0f64, 0.0f64);
+    for _ in 0..SLOPE_ROUNDS {
+        let (mut num, mut den) = (0.0f64, 0.0f64);
+        info = (0.0, 0.0);
+        for t in &terms {
+            let keep = 1.0 - lambda * t.e_ref;
+            let (mut xy, mut xx) = (0.0, 0.0);
+            for ((&b, &r), &q) in profile.iter().zip(&t.r).zip(&t.q) {
+                let clean = (r - lambda * t.e_ref * b) / keep;
+                let x = t.e * (b - clean);
+                xy += x * (q - clean);
+                xx += x * x;
+            }
+            num += t.w * xy;
+            den += t.w * xx;
+            info.0 += t.w * xx;
+            info.1 += (t.w * xx) * (t.w * xx);
+        }
+        if den <= 0.0 {
+            return None;
+        }
+        lambda = (num / den).clamp(0.0, 1.0);
+    }
+    (info.0 * info.0 / info.1 >= MIN_FIT_SCANS as f64).then_some(lambda)
+}
+
+/// The result of [`unmix_run`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnmixRun {
+    /// The fitted model, `None` when the run cannot be fitted (every scan is
+    /// then `None`).
+    pub model: Option<InterferenceModel>,
+    /// The strength applied.
+    pub strength: f64,
+    /// One entry per input scan in order.
+    pub scans: Vec<Option<Unmixed>>,
+}
+
+/// Fit the run's model and remove each scan's interference at `strength`.
+pub fn unmix_run(scans: &[ScanInput], strength: Strength) -> UnmixRun {
+    let none = |model| UnmixRun {
+        model,
+        strength: 0.0,
+        scans: vec![None; scans.len()],
+    };
     let Some(model) = InterferenceModel::fit(scans) else {
-        return (None, none());
+        return none(None);
     };
     let Some(profile) = background_profile(scans) else {
-        return (None, none());
+        return none(None);
+    };
+    let eil: Vec<Option<f64>> = scans.iter().map(|s| model.interference(s)).collect();
+    let lambda = match strength {
+        Strength::Fixed(l) => l.clamp(0.0, 1.0),
+        Strength::Learned => learn_strength(scans, &eil, &profile).unwrap_or(1.0),
     };
     let out = scans
         .iter()
-        .map(|s| {
-            let eil = model.interference(s)?;
+        .zip(&eil)
+        .map(|(s, eil)| {
+            let eil = (*eil)?;
             let total = summed(&s.reporters);
             let reporters = s
                 .reporters
                 .iter()
                 .zip(&profile)
-                .map(|(&v, &p)| ((v as f64) - eil * total * p).max(0.0) as f32)
+                .map(|(&v, &p)| ((v as f64) - lambda * eil * total * p).max(0.0) as f32)
                 .collect();
             Some(Unmixed {
                 interference: eil as f32,
@@ -377,7 +539,11 @@ pub fn unmix_run(scans: &[ScanInput]) -> (Option<InterferenceModel>, Vec<Option<
             })
         })
         .collect();
-    (Some(model), out)
+    UnmixRun {
+        model: Some(model),
+        strength: lambda,
+        scans: out,
+    }
 }
 
 #[cfg(test)]
@@ -457,6 +623,7 @@ mod tests {
                         precursor: 1000.0 * f,
                         hidden,
                     }),
+                    protein: None,
                 }
             })
             .collect()
@@ -481,9 +648,9 @@ mod tests {
 
     #[test]
     fn too_few_scans_are_not_fitted() {
-        let (model, out) = unmix_run(&synthetic(MIN_FIT_SCANS - 1));
-        assert!(model.is_none());
-        assert!(out.iter().all(Option::is_none));
+        let run = unmix_run(&synthetic(MIN_FIT_SCANS - 1), Strength::Fixed(1.0));
+        assert!(run.model.is_none());
+        assert!(run.scans.iter().all(Option::is_none));
     }
 
     #[test]
@@ -492,8 +659,8 @@ mod tests {
         // whose first channel holds the precursor's own signal.
         let mut scans = synthetic(400);
         scans[0].reporters = vec![400.0, 100.0, 100.0, 100.0];
-        let (model, out) = unmix_run(&scans);
-        let model = model.unwrap();
+        let run = unmix_run(&scans, Strength::Fixed(1.0));
+        let (model, out) = (run.model.unwrap(), run.scans);
         let eil = model.interference(&scans[0]).unwrap();
         let profile = background_profile(&scans).unwrap();
         let u = out[0].as_ref().unwrap();
@@ -510,8 +677,66 @@ mod tests {
     fn scans_without_a_window_record_are_left_out() {
         let mut scans = synthetic(400);
         scans[3].window = None;
-        let (_, out) = unmix_run(&scans);
+        let out = unmix_run(&scans, Strength::Fixed(1.0)).scans;
         assert!(out[3].is_none());
         assert!(out[4].is_some());
+    }
+
+    /// 300 scans over 30 proteins with distinct true profiles. With
+    /// `share` of the estimated interference is in the reporter signal as the
+    /// flat background profile (0 = the estimates are noise).
+    fn proteins(share: f64) -> (Vec<ScanInput>, Vec<Option<f64>>, Vec<f64>) {
+        let bg = vec![0.25; 4];
+        let mut scans = Vec::new();
+        let mut eil = Vec::new();
+        for i in 0..300usize {
+            let g = i % 30;
+            let mut truth = [0.1; 4];
+            truth[g % 4] = 0.7;
+            let e = 0.05 + 0.7 * ((i * 53) % 100) as f64 / 100.0;
+            let mix = share * e;
+            let reporters = (0..4)
+                .map(|k| (1000.0 * ((1.0 - mix) * truth[k] + mix * bg[k])) as f32)
+                .collect();
+            scans.push(ScanInput {
+                charge: 2,
+                reporters,
+                pic: 1.0,
+                window: None,
+                protein: Some(g as u32),
+            });
+            eil.push(Some(e));
+        }
+        (scans, eil, bg)
+    }
+
+    #[test]
+    fn learned_strength_is_full_when_the_interference_is_real() {
+        let (scans, eil, bg) = proteins(1.0);
+        let l = learn_strength(&scans, &eil, &bg).unwrap();
+        assert!((l - 1.0).abs() < 0.02, "{l}");
+    }
+
+    #[test]
+    fn learned_strength_follows_the_share_that_is_real() {
+        let (scans, eil, bg) = proteins(0.5);
+        let l = learn_strength(&scans, &eil, &bg).unwrap();
+        assert!((l - 0.5).abs() < 0.05, "{l}");
+    }
+
+    #[test]
+    fn learned_strength_is_zero_when_the_estimates_are_noise() {
+        let (scans, eil, bg) = proteins(0.0);
+        let l = learn_strength(&scans, &eil, &bg).unwrap();
+        assert!(l < 0.05, "{l}");
+    }
+
+    #[test]
+    fn learned_strength_needs_scans_that_share_proteins() {
+        let (mut scans, eil, bg) = proteins(1.0);
+        for (i, s) in scans.iter_mut().enumerate() {
+            s.protein = Some(i as u32);
+        }
+        assert_eq!(learn_strength(&scans, &eil, &bg), None);
     }
 }

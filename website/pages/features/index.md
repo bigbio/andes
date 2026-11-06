@@ -36,4 +36,4 @@ flowchart LR
 | [Retrieval and model choice](retrieval.md) | How do you search deeply without scoring every candidate? | automatic |
 | [Protein inference](proteins.md) | Which proteins are present, at what error rate? | `--protein-fdr` |
 | [Match between runs with error control](mbr.md) | Can a transferred quantity be trusted? | `--lfq --mbr` |
-| [TMT interference unmixing](tmt-unmix.md) | How much of a reporter ion is not from the identified peptide? | `--tmt-unmix` |
+| [TMT interference unmixing](tmt-unmix.md) | How much of a reporter ion is not from the identified peptide? | `--tmt-unmix auto\|on\|off` |

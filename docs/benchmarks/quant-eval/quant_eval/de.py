@@ -1,7 +1,8 @@
 """Differential expression on the protein table: moderated t, BH 5 % per condition pair, sign-aware true positives.
 
 TP = significant protein of a species with a changing amount; TPs = TP with the sign of the observed log2FC equal to the expected
-sign; FP = significant protein of the null species. Counts are given without a fold-change cut (suffix '') and with
+sign; WS = significant protein of a changing species with the opposite sign (counted in TP, never in TPs); FP = significant protein of
+the null species. The sign-aware reading counts WS as false: TPs against FP + WS. Counts are given without a fold-change cut (suffix '') and with
 |log2FC| >= 0.5 (suffix '5').
 
 Protein families. The BH family of a pair is the set of proteins tested in it. Three families are scored:
@@ -10,7 +11,11 @@ Protein families. The BH family of a pair is the set of proteins tested in it. T
          identical for all arms
   union  proteins tested in any shared arm; the prior is fitted on the arm's own proteins, an arm that does not test a protein
          contributes it with p = 1 to BH
-The intersection family is the headline. Each family also gets the true positives at matched pooled FDP (sweep of the ranked p
+  common the proteins that can be tested in the pair in every compared arm (>= 2 finite values in both conditions): the tested
+         (protein, pair) rows are identical for the arms of the comparison; `common` = the arms with match between runs, `common_all` = every
+         shared arm. Arms outside the comparison are scored on the part of the common set they can test (`tested` says how many).
+The intersection family is a set of candidate proteins: each arm still tests only those with >= 2 finite values on both sides, so the
+tested rows differ between arms (`tested` of the family); `own` and `inter` are depth views and `common` is the like-for-like comparison. Each family also gets the true positives at matched pooled FDP (sweep of the ranked p
 values over all pairs, null-species hits counted as false) and the per-pair AUC of changed-vs-null species by p value."""
 import numpy as np
 import pandas as pd
@@ -74,6 +79,7 @@ def _count(T, null, fam_q=None):
         o["TP" + tag] = int((sig & chg).sum())
         o["TPs" + tag] = int((sig & chg & (np.sign(fc) == sgn)).sum())
         o["FP" + tag] = int((sig & nul).sum())
+        o["WS" + tag] = int((sig & chg & (sgn != 0) & (np.sign(fc) != sgn)).sum())
     return o
 
 
@@ -88,12 +94,17 @@ def auc_changed_vs_null(T, null):
     return float((r[lab].sum() - n1 * (n1 + 1) / 2) / (n1 * n0))
 
 
-def tp_at_fdp(Ts, null, levels=FDP_LEVELS):
+def tp_at_fdp(Ts, null, levels=FDP_LEVELS, signed=False):
     """True positives at matched pooled FDP: rows of all pairs (species-assigned proteins) sorted by p; the largest prefix whose
-    null-species share is <= the level. Returns {level: TP} and {level: FP in that prefix}."""
-    T = pd.concat(Ts) if len(Ts) else pd.DataFrame({"sp": [], "p": []})
+    null-species share is <= the level. Returns {level: TP} and {level: FP in that prefix}.
+    signed=True counts a changing-species row with the wrong expected sign as false (and not as a true positive)."""
+    T = pd.concat(Ts) if len(Ts) else pd.DataFrame({"sp": [], "p": [], "fc": [], "ex": []})
     T = T[T.sp.notna()].sort_values("p", kind="stable")
     nul = (T.sp == null).values
+    if signed:
+        ex = np.sign(T.ex.values.astype(float))
+        fcs = np.sign(T.fc.values.astype(float))
+        nul = nul | ((~(T.sp == null).values) & (ex != 0) & np.isfinite(ex) & (fcs != ex))
     cfp, ctp = np.cumsum(nul), np.cumsum(~nul)
     fdp = cfp / np.maximum(cfp + ctp, 1)
     tp, fp = {}, {}
@@ -114,7 +125,31 @@ def union_view(T, fam, prot_sp):
     return T
 
 
-def de_all(P, design, prot_sp, classes, fam_inter=None, fam_union=None):
+def testable(P, design):
+    """{(lo, hi): proteins testable in the pair} of one protein table: >= 2 finite values in both conditions (the rows de_table tests)."""
+    runs = list(P.columns)
+    cond = {r: design.cond[r] for r in runs if r in design.cond}
+    out = {}
+    for i, lo in enumerate(design.levels):
+        for hi in design.levels[i + 1:]:
+            r1 = [r for r in runs if cond.get(r) == lo]
+            r2 = [r for r in runs if cond.get(r) == hi]
+            if len(r1) < 2 or len(r2) < 2:
+                continue
+            ok = (np.isfinite(P[r1].values).sum(1) >= 2) & (np.isfinite(P[r2].values).sum(1) >= 2)
+            out[(lo, hi)] = set(P.index[ok])
+    return out
+
+
+def common_sets(tables, design):
+    """Per pair, the proteins testable in every protein table of `tables` (list of protein x run frames)."""
+    per = [testable(P, design) for P in tables]
+    if not per:
+        return {}
+    return {k: set.intersection(*[t.get(k, set()) for t in per]) for k in per[0]}
+
+
+def de_all(P, design, prot_sp, classes, fam_inter=None, fam_union=None, fam_common=None, fam_common_all=None):
     """Every condition pair (lo < hi) with >= 2 replicates on each side.
     Returns (totals of the own family, per-pair rows, log2FC error summaries by group|species, family summaries).
     fam_inter / fam_union: protein sets of the shared arms (see module doc); without them only the own family is scored.
@@ -123,7 +158,7 @@ def de_all(P, design, prot_sp, classes, fam_inter=None, fam_union=None):
     cond = {r: design.cond[r] for r in runs if r in design.cond}
     levels = design.levels
     null = design.null
-    tot = {k: 0 for k in ("TP", "TPs", "FP", "TP5", "TPs5", "FP5", "tested")}
+    tot = {k: 0 for k in ("TP", "TPs", "FP", "WS", "TP5", "TPs5", "FP5", "WS5", "tested")}
     pairs, coll = [], {}
     P_inter = P[P.index.isin(fam_inter)] if fam_inter is not None else None
     fams = {"own": []}
@@ -131,7 +166,11 @@ def de_all(P, design, prot_sp, classes, fam_inter=None, fam_union=None):
         fams["inter"] = []
     if fam_union is not None:
         fams["union"] = []
-    ftot = {f: {k: 0 for k in ("TP", "TPs", "FP", "TP5", "TPs5", "FP5", "tested", "tested_null")} for f in fams}
+    if fam_common is not None:
+        fams["common"] = []
+    if fam_common_all is not None:
+        fams["common_all"] = []
+    ftot = {f: {k: 0 for k in ("TP", "TPs", "FP", "WS", "TP5", "TPs5", "FP5", "WS5", "tested", "tested_null")} for f in fams}
     aucs = {f: [] for f in fams}
     for i, lo in enumerate(levels):
         for hi in levels[i + 1:]:
@@ -153,6 +192,9 @@ def de_all(P, design, prot_sp, classes, fam_inter=None, fam_union=None):
                 views["inter"] = de_table(P_inter, r1, r2, prot_sp, lambda s, lo=lo, hi=hi: design.expected_fc(s, lo, hi))
             if fam_union is not None:
                 views["union"] = union_view(T, fam_union, prot_sp)
+            for name, fc_ in (("common", fam_common), ("common_all", fam_common_all)):
+                if fc_ is not None:
+                    views[name] = de_table(P[P.index.isin(fc_.get((lo, hi), set()))], r1, r2, prot_sp, lambda s, lo=lo, hi=hi: design.expected_fc(s, lo, hi))
             for f, V in views.items():
                 fams[f].append(V)
                 cf = _count(V, null)
@@ -164,7 +206,7 @@ def de_all(P, design, prot_sp, classes, fam_inter=None, fam_union=None):
                 aucs[f].append(a)
                 row[f"auc_{f}"] = a
                 if f != "own":
-                    for k in ("TP", "FP", "TP5", "FP5"):
+                    for k in ("TP", "FP", "TP5", "FP5", "TPs", "WS"):
                         row[f"{k}_{f}"] = cf[k]
             for s in classes:
                 m = (T.sp == s).values & np.isfinite(T.ex.values)
@@ -190,7 +232,8 @@ def de_all(P, design, prot_sp, classes, fam_inter=None, fam_union=None):
     fam_out = {}
     for f, Ts in fams.items():
         tp, fp = tp_at_fdp(Ts, null)
+        tps, fps = tp_at_fdp(Ts, null, signed=True)
         av = [a for a in aucs[f] if a is not None]
-        fam_out[f] = dict(ftot[f], tp_at_fdp=tp, fp_at_fdp=fp, auc_mean=float(np.mean(av)) if av else None,
+        fam_out[f] = dict(ftot[f], tp_at_fdp=tp, fp_at_fdp=fp, tp_at_fdp_signed=tps, fp_at_fdp_signed=fps, auc_mean=float(np.mean(av)) if av else None,
                           auc_min=float(np.min(av)) if av else None, n_pairs_auc=len(av))
     return tot, pairs, comp, fam_out

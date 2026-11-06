@@ -12,6 +12,11 @@ Columns (seed `--seed`; DE also as the range over all seeds present):
   wrong-peak          masked transfers off the identified apex at the arm's quant_q cut, pooled (level B) (andes hard-cut arms)
   DE                  intersection family, BH 5 % per pair: TP / FP without a fold-change cut, with |log2FC| >= 0.5, TP at pooled FDP 10 %
 New columns (right of the legacy ones; `--legacy` prints the legacy columns only; `--detail` adds the per-level, absence-class and blank tables):
+  DE columns          inter, signed: TP with the expected sign / FP plus wrong-sign calls (wrong-sign calls in brackets), intersection family;
+                      common: the same on the family of proteins testable in every match-between-runs arm (identical tested rows), unsigned and signed;
+                      tested rows: (protein, pair) rows each arm tests in its own / the intersection / the common family. The legacy DE column is the
+                      intersection family, unsigned, on each arm's own testable rows.
+  within 2x %         dropped from the default board (it is 100 - err>1 %); `--legacy` keeps it
   L1 levels           the amol levels summed in L1 (the three lowest); a level that is also a reference level is flagged `(self-ref)`
   L1 rows / within-2x %   UPS1 rows the arm reports at those levels (precursors with a design reference) and the share within 2x
   L1 med abs err      median |log2 error| of those rows
@@ -29,6 +34,9 @@ import os
 from . import lowlevel as LL
 
 NAME = {"MQ": "MaxQuant (MBR)", "MQ_noMBR": "MaxQuant no MBR", "FP": "FragPipe", "Sage": "Sage"}
+# labels of the default board: the context arms say what they are (FlashLFQ runs per peptide, Sage has no transfer flag)
+NAME_NEW = {"Sage": "Sage (no transfer flag: MBR fills counted as identified)"}
+_STATE = {"legacy": False}
 
 
 def load(d):
@@ -66,10 +74,15 @@ def label(n, builds):
         for suf, nm in (("_V", "V"), ("_H", "H"), ("_I", "no MBR"), ("_M", "M (matched)")):
             if n == b + suf:
                 return f"andes {b} {nm}"
+    if not _STATE["legacy"]:
+        if n.startswith("FL"):
+            return f"{n} (FlashLFQ, peptide level)"
+        return NAME_NEW.get(n, NAME.get(n, n))
     return NAME.get(n, n)
 
 
-NEW_COLS = " L1 levels (amol) | L1 rows | L1 within-2x % | L1 med abs err | L1 @ matched rows | L1 @ matched rows, random | absence excl. (tr / id) | blank id / tr / carry |"
+NEW_COLS = (" L1 levels (amol) | L1 rows | L1 within-2x % | L1 med abs err | L1 @ matched rows | L1 @ matched rows, random | absence excl. (tr / id) | blank id / tr / carry |"
+            " DE inter, signed: TP / false (wrong sign) | DE common: TP / FP | DE common, signed: TP / false (wrong sign) | DE tested rows own / inter / common |")
 
 
 def plain_arms(r, builds):
@@ -79,7 +92,7 @@ def plain_arms(r, builds):
 
 def new_cells(r, n, builds, matched):
     d = g(r, "arms", n, "l1_detail") or {}
-    c = ["-"] * 8
+    c = ["-"] * 12
     if d:
         l1 = d["l1_levels"]
         c[0] = "/".join(l1) + (" (self-ref)" if d["self_reference"] else "")
@@ -100,6 +113,15 @@ def new_cells(r, n, builds, matched):
     bs = (r.get("blank_split") or {}).get(n)
     if bs:
         c[7] = f"{bs['identified']['rows']} / {bs['transferred']['rows']} / {bs['carry_over_learned']}"
+    fi, fc = g(r, "arms", n, "de_family", "inter"), g(r, "arms", n, "de_family", "common")
+    if fi and "WS" in fi:
+        c[8] = f"{fi['TPs']:,} / {fi['FP'] + fi['WS']:,} ({fi['WS']})"
+    if fc:
+        c[9] = f"{fc['TP']:,} / {fc['FP']:,}"
+        c[10] = f"{fc['TPs']:,} / {fc['FP'] + fc['WS']:,} ({fc['WS']})"
+    fo = g(r, "arms", n, "de_family", "own")
+    if fo and fi and fc:
+        c[11] = f"{fo['tested']:,} / {fi['tested']:,} / {fc['tested']:,}"
     return c
 
 
@@ -122,8 +144,10 @@ def matched_l1(r, builds):
 def build_rows(R, seed, builds, order, legacy=False):
     hdr = ("| set | arm | prec | prot | rows id / tr | err>1 % | within 2x % | bright gross % | prec.SD top | prot CV % | L1 | absence | wrong-peak % (B) | DE TP / FP | DE FC>=0.5 | TP@FDP10 | DE TP/FP range over seeds |\n"
            "|" + "---|" * 17)
+    _STATE["legacy"] = legacy
     if not legacy:
-        hdr = hdr.split("\n")[0] + NEW_COLS + "\n|" + "---|" * 25
+        h = hdr.split("\n")[0].replace(" within 2x % |", "", 1).replace("| DE TP / FP |", "| DE TP / FP (inter, unsigned, arm's own testable rows) |", 1)
+        hdr = h + NEW_COLS + "\n|" + "---|" * 28
     out = [hdr]
     for dn in order:
         if dn not in R:
@@ -165,9 +189,15 @@ def build_rows(R, seed, builds, order, legacy=False):
                 if len(tps) > 1:
                     rng = f"{min(tps):,}-{max(tps):,} / {min(fps):,}-{max(fps):,}"
             cvp = g(r, "cv", "protein", n, "all", "med_cv_pct")
+            trs = f"{a['transfer_rows']:,}"
+            if not legacy and r["arm_roles"][n]["kind"] == "sage":
+                trs = "n/a"
+            if not legacy and ab and ab.startswith("nan"):
+                ab = None
+            w2 = [] if not legacy else [fmt(acc and acc["within2x"])]   # within 2x % = 100 - err>1 %: dropped from the default board
             out.append("| " + " | ".join([
-                r["dataset"] + (f" s{sd}" if False else ""), label(n, builds), f"{a['precursors']:,}", f"{a['proteins_ge2']:,}", f"{a['ident_rows']:,} / {a['transfer_rows']:,}",
-                fmt(acc and acc["bad"]), fmt(acc and acc["within2x"]), fmt(acc and acc["bad_bright"]), fmt(acc and acc.get("rep_sd_top"), "{:.3f}"), fmt(cvp, "{:.1f}"),
+                r["dataset"] + (f" s{sd}" if False else ""), label(n, builds), f"{a['precursors']:,}", f"{a['proteins_ge2']:,}", f"{a['ident_rows']:,} / {trs}",
+                fmt(acc and acc["bad"])] + w2 + [fmt(acc and acc["bad_bright"]), fmt(acc and acc.get("rep_sd_top"), "{:.3f}"), fmt(cvp, "{:.1f}"),
                 fmt(l1, "{:,}"), ab or "-", wp, de(A, n, ("TP", "FP")), de(A, n, ("TP5", "FP5")),
                 (f"{f['tp_at_fdp']['10']:,}" if f else "-"), rng] + ([] if legacy else new_cells(r, n, builds, mt))) + " |")
     return "\n".join(out)

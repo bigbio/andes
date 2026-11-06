@@ -28,6 +28,7 @@ from . import metrics as M
 from . import rates as RT
 from . import readers as R
 from . import runguard as G
+from . import de as DE
 from .de import de_all
 from .design import Design
 from .fasta import map_precursors
@@ -177,11 +178,17 @@ def evaluate(a):
         fam_arms = [n for n in shared_arms if n in PM]
         inter = set.intersection(*[set(PM[n][0].index) for n in fam_arms])
         union = set().union(*[set(PM[n][0].index) for n in fam_arms])
+        # common-tested families: proteins testable in the pair in every compared arm; `common` over the arms with match between runs
+        # (the first andes arm and the tool arms whose name does not end in noMBR), `common_all` over every shared arm
+        mbr_arms = [n for n in fam_arms if not n.lower().replace("_", "").endswith("nombr")]
+        com = DE.common_sets([PM[n][0] for n in mbr_arms], design)
+        com_all = DE.common_sets([PM[n][0] for n in fam_arms], design)
         RES["families"] = {"arms": fam_arms, "intersection": len(inter), "union": len(union),
-                           "own": {n: int(len(PM[n][0])) for n in PM}}
+                           "own": {n: int(len(PM[n][0])) for n in PM}, "common_arms": mbr_arms,
+                           "common_rows": int(sum(len(v) for v in com.values())), "common_all_rows": int(sum(len(v) for v in com_all.values()))}
         for n, (P, _) in PM.items():
             o = RES["arms"][n]
-            o["de"], o["pairs"], o["prot_err"], o["de_family"] = de_all(P, design, prot_sp, classes, inter, union)
+            o["de"], o["pairs"], o["prot_err"], o["de_family"] = de_all(P, design, prot_sp, classes, inter, union, com, com_all)
 
     def alt_pass(label, norm):
         """DE of every arm after another run normalisation `norm(raw) -> (table, flag, n_ref)`; own intersection family."""

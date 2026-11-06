@@ -13,7 +13,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from quant_eval import absence as AB  # noqa: E402
-from quant_eval import board, lowlevel as LL, metrics  # noqa: E402
+from quant_eval import board, de as DE, lowlevel as LL, metrics  # noqa: E402
 from quant_eval.design import Design  # noqa: E402
 
 LEVELS = [1, 2, 4, 8, 16, 32]
@@ -245,6 +245,71 @@ class Absence(unittest.TestCase):
         self.assertLess(o["learned_fraction"], 1.0)
 
 
+class DEFamilies(unittest.TestCase):
+    """Sign-aware counts and the common-tested family on a small protein table: conditions A (A1..A3) and B (B1..B3)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        with open(f"{self.tmp.name}/d.tsv", "w") as f:
+            f.write("run\tcondition\n" + "".join(f"{r}\t{r[0]}\n" for r in ["A1", "A2", "A3", "B1", "B2", "B3"]))
+        with open(f"{self.tmp.name}/a.tsv", "w") as f:
+            f.write("species\tcondition\tamount\nUPS\tA\t1\nUPS\tB\t2\nYEAST\t*\t1\n")
+        self.design = Design(f"{self.tmp.name}/d.tsv", f"{self.tmp.name}/a.tsv", "YEAST", ("UPS", "YEAST"))
+        rng = np.random.default_rng(0)
+        runs = ["A1", "A2", "A3", "B1", "B2", "B3"]
+        rows, sp = {}, {}
+        for i in range(40):                 # UPS expected +1 log2: 30 with the right sign, 10 with the opposite sign (-2)
+            fc = 1.0 if i < 30 else -2.0
+            rows[f"U{i}"] = list(10 + rng.normal(0, 0.05, 3)) + list(10 + fc + rng.normal(0, 0.05, 3))
+            sp[f"U{i}"] = "UPS"
+        for i in range(60):                 # null species, one of them strongly changed
+            fc = 3.0 if i == 0 else 0.0
+            rows[f"Y{i}"] = list(12 + rng.normal(0, 0.05, 3)) + list(12 + fc + rng.normal(0, 0.05, 3))
+            sp[f"Y{i}"] = "YEAST"
+        self.P = pd.DataFrame(rows, index=runs).T
+        self.sp = sp
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_wrong_sign_calls_are_counted_apart_and_as_false(self):
+        tot, _, _, fam = DE.de_all(self.P, self.design, self.sp, ("UPS", "YEAST"))
+        self.assertEqual(tot["TP"], tot["TPs"] + tot["WS"])
+        self.assertEqual(tot["WS"], 10)
+        self.assertEqual(tot["TPs"], 30)
+        self.assertGreaterEqual(tot["FP"], 1)                            # the strongly changed null protein (and perhaps a chance call)
+        # at pooled FDP 50 % the unsigned reading keeps the wrong-sign rows as true positives, the signed one counts them as false
+        tp_u, fp_u = DE.tp_at_fdp([DE.de_table(self.P, ["A1", "A2", "A3"], ["B1", "B2", "B3"], self.sp, lambda s: 1.0 if s == "UPS" else 0.0)], "YEAST", (0.5,))
+        tp_s, fp_s = DE.tp_at_fdp([DE.de_table(self.P, ["A1", "A2", "A3"], ["B1", "B2", "B3"], self.sp, lambda s: 1.0 if s == "UPS" else 0.0)], "YEAST", (0.5,), signed=True)
+        self.assertGreater(tp_u["50"], tp_s["50"])
+        self.assertIn("tp_at_fdp_signed", fam["own"])
+
+    def test_common_family_has_identical_tested_rows(self):
+        P2 = self.P.copy()
+        P2.loc[[f"U{i}" for i in range(10)], ["B1", "B2"]] = np.nan      # arm 2 cannot test 10 proteins (one finite value on one side)
+        P2.loc[[f"U{i}" for i in range(10)], ["B3"]] = 11.0
+        P3 = self.P.copy()
+        com = DE.common_sets([self.P, P2, P3], self.design)
+        self.assertEqual(len(com[("A", "B")]), 100 - 10)
+        for P in (self.P, P2, P3):
+            tot, _, _, fam = DE.de_all(P, self.design, self.sp, ("UPS", "YEAST"), fam_common=com)
+            self.assertEqual(fam["common"]["tested"], 90)                # the same rows for every arm
+        _, _, _, own = DE.de_all(self.P, self.design, self.sp, ("UPS", "YEAST"), fam_common=com)
+        self.assertEqual(own["own"]["tested"], 100)                      # the arm's own testable rows are more
+        self.assertEqual(own["common"]["tested_null"], 60)
+
+    def test_board_columns_for_de(self):
+        _, _, _, fam = DE.de_all(self.P, self.design, self.sp, ("UPS", "YEAST"), fam_inter=set(self.P.index),
+                                 fam_common=DE.common_sets([self.P], self.design))
+        r = {"arms": {"main": {"de_family": fam}}}
+        c = board.new_cells(r, "main", ["main"], None)
+        self.assertEqual(len(c), 12)
+        fp = fam["inter"]["FP"]
+        self.assertEqual(c[8], f"30 / {fp + 10} (10)")                   # signed TP / FP + wrong-sign (wrong-sign)
+        self.assertEqual(c[9], f"40 / {fp}")
+        self.assertEqual(c[11], "100 / 100 / 100")
+
+
 class BoardColumns(unittest.TestCase):
     def test_matched_l1_and_new_cells(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -258,7 +323,7 @@ class BoardColumns(unittest.TestCase):
         self.assertLessEqual(m["main"][0], d_full["per_level"]["1"]["keys_within2x"] + d_full["per_level"]["2"]["keys_within2x"] + d_full["per_level"]["4"]["keys_within2x"])
         cells = board.new_cells(r, "main", ["main"], m)
         self.assertEqual(cells[0], "1/2/4")
-        self.assertEqual(len(cells), 8)
+        self.assertEqual(len(cells), 12)
         self.assertEqual(cells[4], f"{m['main'][0]:,}")
         self.assertEqual(board.new_cells(r, "none", ["main"], m)[0], "-")
 

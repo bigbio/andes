@@ -169,6 +169,14 @@ python3 -m quant_eval.proteobench --finalize fin.parquet --design design.tsv --f
 - Blank run: rows split into identified and transferred, and the carry-over-like rows (below a fraction of the precursor's median in the other runs,
   the fraction learned from the ordinary runs).
 
+- DE: the intersection family is a set of candidate proteins and each arm still tests only those with at least 2 finite values on both sides of a pair,
+  so the tested (protein, pair) rows differ between arms. The `common` family (proteins testable in the pair in every match-between-runs arm; `common_all`
+  over every shared arm) has identical tested rows; the board prints it next to the legacy column, with the tested-row counts. `TPs` (expected sign)
+  is the sign-aware true-positive count, `WS` the wrong-sign calls, and the sign-aware false count is FP + WS (`tp_at_fdp_signed` for the pooled-FDP reading).
+  The legacy DE column is unchanged (unsigned TP, intersection family, each arm's own testable rows) and is labelled so on the default board.
+- Board cosmetics: `within 2x %` (equal to 100 - `err>1 %`) is dropped from the default board, an empty absence rate prints `-`, FlashLFQ is labelled
+  peptide-level (charge states summed) and Sage as having no transfer flag (its MBR fills count as identified). `--legacy` prints the earlier columns and labels.
+
 Tests: `python3 tests/test_board_metrics.py`.
 
 Refs #299.

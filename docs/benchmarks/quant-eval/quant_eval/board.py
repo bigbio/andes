@@ -25,7 +25,7 @@ New columns (right of the legacy ones; `--legacy` prints the legacy columns only
                       Headline: the expected count for the same number of rows drawn at random (order-free). Second column: best rows first, which orders andes
                       by quality column and the arms without one by intensity, so the order differs per arm and is unfavourable to the latter
   absence             PXD014415: noise-removed (lower bound) rate of the species' rows in the runs without it, transfers / identified: yeast-enriched rows, and in
-                      brackets enriched + only-absent rows (no yeast-run reference). Classes come from one reference table (the andes every-row table) for every arm
+                      brackets enriched + rows without a yeast-run reference (only in the absent runs, or not in the reference table). Classes come from one reference table (the andes every-row table) for every arm
   blank id / tr / carry   single-cell set: identified and transferred rows in the blank run and the rows below the learned carry-over fraction
 Arm names: `X` transfer_q <= 0.01, `X_V` all accepted transfers with learned precision weights, `X_H` hard cut quant_q <= 0.01, `X_I` identified rows only (no match between runs), `X_M` hard cut at the
 matched true-error cut of the reference build (matched.py). Tools are context only."""
@@ -86,7 +86,7 @@ def label(n, builds):
 
 NEW_COLS = (" L1 levels (amol) | L1 rows (+ unscored) | L1 within-2x % | L1 within-2x %, unscored counted as not within | L1 med abs err |"
             " L1 @ matched rows, random rows (headline) | L1 @ matched rows, best first (order differs per arm) |"
-            " absence, noise removed (lower bound): enriched (enriched + only-absent), tr / id | blank id / tr / carry |"
+            " absence, noise removed (lower bound): enriched (enriched + no reference), tr / id | blank id / tr / carry |"
             " DE inter, signed: TP / false (wrong sign) | DE common: TP / FP | DE common, signed: TP / false (wrong sign) | DE tested rows own / inter / common |")
 N_NEW = 13
 
@@ -102,12 +102,14 @@ def rate_pct(num, den, f):
 
 
 def absence_cell(o):
-    """Noise-removed absence rate of one absent species: enriched (enriched + only-absent) for transferred / identified rows, '%'."""
+    """Noise-removed absence rate of one absent species: enriched (enriched + unresolved) for transferred / identified rows, '%'. Unresolved rows have no
+    yeast-run reference: only in the absent runs, or not in the reference table."""
     dn = o["denominators"]
     out = []
     for kind, den, f in (("transferred", dn["transferred_rows_absent_runs"], "{:.3f}"), ("identified", dn["identified_rows_absent_runs"], "{:.4f}")):
         c = o["learned"][kind]
-        out.append(f"{rate_pct(c['yeast_enriched'], den, f)} ({rate_pct(c['yeast_enriched'] + c['only_absent'], den, f)})")
+        unresolved = c["only_absent"] + c.get("not_in_reference", 0)
+        out.append(f"{rate_pct(c['yeast_enriched'], den, f)} ({rate_pct(c['yeast_enriched'] + unresolved, den, f)})")
     return f"{out[0]} / {out[1]} %"
 
 
@@ -274,7 +276,7 @@ def detail_tables(R, seed, builds, order, arms_only=None):
                            "Yeast-enriched is a lower bound of the species-specific errors.\n")
                 out.append("Learned boundary per bin of absent-run rows (n control precursors; * = fewer than 100, pooled cutoff used): "
                            + "; ".join(f"{x['n_abs_from']}+: {x['cutoff']:.2f} (n={x['n_control']:,}{'*' if x.get('pooled_fallback') else ''})" for x in ref["cutoffs"]) + "\n")
-                out.append("| arm | class source | transfers: enriched / not specific / only absent / not in reference | rate all % | rate enriched % | rate enriched + only-absent % | identified: enriched / not specific / only absent / not in reference | rate all % | rate enriched % | rate enriched + only-absent % |\n|" + "---|" * 10)
+                out.append("| arm | class source | transfers: enriched / not specific / only absent / not in reference | rate all % | rate enriched % | rate enriched + no reference % | identified: enriched / not specific / only absent / not in reference | rate all % | rate enriched % | rate enriched + no reference % |\n|" + "---|" * 10)
                 for bl in ("learned", "fixed", "own_learned", "own_fixed"):
                     for n in names:
                         o = (ac.get(n) or {}).get(sp_)
@@ -286,7 +288,7 @@ def detail_tables(R, seed, builds, order, arms_only=None):
                             c = o[bl][kind]
                             f = "{:.4f}" if kind == "identified" else "{:.3f}"
                             cells += [f"{c['yeast_enriched']:,} / {c['not_specific']:,} / {c['only_absent']:,} / {c.get('not_in_reference', 0):,}",
-                                      rate_pct(sum(c.values()), den, f), rate_pct(c["yeast_enriched"], den, f), rate_pct(c["yeast_enriched"] + c["only_absent"], den, f)]
+                                      rate_pct(sum(c.values()), den, f), rate_pct(c["yeast_enriched"], den, f), rate_pct(c["yeast_enriched"] + c["only_absent"] + c.get("not_in_reference", 0), den, f)]
                         out.append("| " + " | ".join(cells) + " |")
         bs = r.get("blank_split")
         if bs:

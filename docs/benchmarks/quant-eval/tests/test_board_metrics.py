@@ -420,7 +420,8 @@ class Reviewed(unittest.TestCase):
         c = board.new_cells(r, "main", ["main"], None)
         o = ac["YEAST"]
         den_t, den_i = o["denominators"]["transferred_rows_absent_runs"], o["denominators"]["identified_rows_absent_runs"]
-        e_t, a_t = o["learned"]["transferred"]["yeast_enriched"], o["learned"]["transferred"]["only_absent"]
+        e_t = o["learned"]["transferred"]["yeast_enriched"]
+        a_t = o["learned"]["transferred"]["only_absent"] + o["learned"]["transferred"]["not_in_reference"]
         self.assertEqual(c[7].split(" / ")[0], f"{100 * e_t / den_t:.3f} ({100 * (e_t + a_t) / den_t:.3f})")   # both readings
         self.assertTrue(c[7].endswith("%"))
         self.assertEqual(c[8], f"2 / 1 / {bl['carry_over_learned']}")      # two identified rows (H1, H2), one transferred (H0), all three carry-over level

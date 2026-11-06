@@ -10,6 +10,7 @@ here also carries what the arm reports and how accurate it is:
   median_abs_err     median |log2 error| of the rows;  median_err the signed median (positive = over-quantified)
   transfer, identified   the same statistics on the transferred rows and on the identified rows alone (A2: error of transfers)
   l1_pooled          the same statistics over the rows of all L1 levels together
+  key_correct_rows   (L1 levels) {c: number of precursors with exactly c rows within 2x}, for the order-free reading
   key_ranks, row_ranks   (L1 levels) 1-based ranks, in the arm's own quality order, at which a new precursor / a row within 2x appears
 
 Role of a level: `L1` (one of the `n_l1` lowest), `ref` (one of the levels the per-precursor references are built from, those above
@@ -18,7 +19,8 @@ the `ref_skip` lowest) or `mid`. A level that is both is reported in `self_refer
 Order of rows for the matched reading: an arm that reports a quality column (andes: identified rows first, then transfers by quant_q;
 FlashLFQ: PIP q-value) is read in that order, best first; an arm without one (MaxQuant, FragPipe) by offset-corrected intensity,
 brightest first. `matched_reading` limits every arm to the same number of rows at a level (the smallest row count among the reference arms)
-and counts what lies within 2x among those rows."""
+and counts what lies within 2x among those rows, in that order (`keys`) and for rows drawn at random (`keys_random`, expected value; an
+order-free reading, because an intensity order puts the brightest, most over-quantified rows first at the lowest levels)."""
 import bisect
 
 import numpy as np
@@ -90,6 +92,8 @@ def l1_detail(raw, design, sp, ref_skip=3, n_l1=3):
         o["identified"] = _stats(u[~u.is_transfer.astype(bool)].err.values)
         if L in l1:
             o["key_ranks"], o["row_ranks"] = ranks(order_rows(u, quality))
+            cc = u[ok].groupby("key").size().value_counts()
+            o["key_correct_rows"] = {str(int(c)): int(v) for c, v in cc.items()}
         out["per_level"][L] = o
     return out
 
@@ -99,6 +103,19 @@ def counts_at(detail_level, k):
     n = min(k, detail_level["rows"])
     return {"keys": bisect.bisect_right(detail_level["key_ranks"], k), "rows_within2x": bisect.bisect_right(detail_level["row_ranks"], k),
             "rows": n}
+
+
+def expected_keys_random(detail_level, k):
+    """Expected number of precursors with a row within 2x among `k` rows drawn at random (without replacement) from the arm's `rows` at one level:
+    a precursor with c correct rows is counted with probability 1 - C(n - c, k) / C(n, k) = 1 - prod_{i<c} (n - k - i) / (n - i). An order-free reading of the count at a row budget."""
+    n = detail_level["rows"]
+    k = min(k, n)
+    tot = 0.0
+    for c, cnt in detail_level["key_correct_rows"].items():
+        c = int(c)
+        p0 = 0.0 if n - k < c else float(np.prod([(n - k - i) / (n - i) for i in range(c)]))
+        tot += cnt * (1.0 - p0)
+    return tot
 
 
 def matched_reading(details, ref_arms, level):
@@ -114,5 +131,6 @@ def matched_reading(details, ref_arms, level):
         if pl and "key_ranks" in pl:
             c = counts_at(pl, k)
             c["share_within2x"] = c["rows_within2x"] / c["rows"] if c["rows"] else None
+            c["keys_random"] = expected_keys_random(pl, k)
             out[a] = c
     return k, out

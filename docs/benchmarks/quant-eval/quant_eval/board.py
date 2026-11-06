@@ -16,6 +16,7 @@ New columns (right of the legacy ones; `--legacy` prints the legacy columns only
   L1 rows / within-2x %   UPS1 rows the arm reports at those levels (precursors with a design reference) and the share within 2x
   L1 med abs err      median |log2 error| of those rows
   L1 @ matched rows   L1 count when every arm is limited, per level, to the smallest row count among the plain arms (andes build, MaxQuant, FragPipe), best rows first
+                      (quality column where the arm has one, intensity otherwise); the next column is the expected count for the same number of rows drawn at random
   absence excl.       PXD014415: yeast-enriched share of the transferred rows / identified rows in the human-only runs (precursors whose intensity is not yeast-specific left out)
   blank id / tr / carry   single-cell set: identified and transferred rows in the blank run and the rows below the learned carry-over fraction
 Arm names: `X` transfer_q <= 0.01, `X_V` all accepted transfers with learned precision weights, `X_H` hard cut quant_q <= 0.01, `X_I` identified rows only (no match between runs), `X_M` hard cut at the
@@ -68,7 +69,7 @@ def label(n, builds):
     return NAME.get(n, n)
 
 
-NEW_COLS = " L1 levels (amol) | L1 rows | L1 within-2x % | L1 med abs err | L1 @ matched rows | absence excl. (tr / id) | blank id / tr / carry |"
+NEW_COLS = " L1 levels (amol) | L1 rows | L1 within-2x % | L1 med abs err | L1 @ matched rows | L1 @ matched rows, random | absence excl. (tr / id) | blank id / tr / carry |"
 
 
 def plain_arms(r, builds):
@@ -78,7 +79,7 @@ def plain_arms(r, builds):
 
 def new_cells(r, n, builds, matched):
     d = g(r, "arms", n, "l1_detail") or {}
-    c = ["-"] * 7
+    c = ["-"] * 8
     if d:
         l1 = d["l1_levels"]
         c[0] = "/".join(l1) + (" (self-ref)" if d["self_reference"] else "")
@@ -87,17 +88,18 @@ def new_cells(r, n, builds, matched):
         c[2] = fmt(p["share_within2x"] and 100 * p["share_within2x"], "{:.1f}")
         c[3] = fmt(p["median_abs_err"])
         if matched is not None and n in matched:
-            c[4] = f"{matched[n]:,}"
+            c[4] = f"{matched[n][0]:,}"
+            c[5] = f"{matched[n][1]:.1f}"
     ac = (r.get("absence_classes") or {}).get(n) or {}
     for s_, o in ac.items():
         if "learned" in o:
             dn = o["denominators"]
             tr = o["learned"]["transferred"]["yeast_enriched"] / dn["transferred_rows_absent_runs"] if dn["transferred_rows_absent_runs"] else None
             idn = o["learned"]["identified"]["yeast_enriched"] / dn["identified_rows_absent_runs"] if dn["identified_rows_absent_runs"] else None
-            c[5] = f"{fmt(tr and 100 * tr, '{:.3f}')} % / {fmt(idn and 100 * idn, '{:.4f}')} %"
+            c[6] = f"{fmt(tr and 100 * tr, '{:.3f}')} % / {fmt(idn and 100 * idn, '{:.4f}')} %"
     bs = (r.get("blank_split") or {}).get(n)
     if bs:
-        c[6] = f"{bs['identified']['rows']} / {bs['transferred']['rows']} / {bs['carry_over_learned']}"
+        c[7] = f"{bs['identified']['rows']} / {bs['transferred']['rows']} / {bs['carry_over_learned']}"
     return c
 
 
@@ -108,11 +110,12 @@ def matched_l1(r, builds):
     if not det:
         return None
     ref = [n for n in plain_arms(r, builds) if n in det]
-    tot = {n: 0 for n in det}
+    tot = {n: [0, 0.0] for n in det}
     for L in next(iter(det.values()))["l1_levels"]:
         k, cs = LL.matched_reading(det, ref, L)
         for n, c in cs.items():
-            tot[n] += c["keys"]
+            tot[n][0] += c["keys"]
+            tot[n][1] += c["keys_random"]
     return tot
 
 
@@ -120,7 +123,7 @@ def build_rows(R, seed, builds, order, legacy=False):
     hdr = ("| set | arm | prec | prot | rows id / tr | err>1 % | within 2x % | bright gross % | prec.SD top | prot CV % | L1 | absence | wrong-peak % (B) | DE TP / FP | DE FC>=0.5 | TP@FDP10 | DE TP/FP range over seeds |\n"
            "|" + "---|" * 17)
     if not legacy:
-        hdr = hdr.split("\n")[0] + NEW_COLS + "\n|" + "---|" * 24
+        hdr = hdr.split("\n")[0] + NEW_COLS + "\n|" + "---|" * 25
     out = [hdr]
     for dn in order:
         if dn not in R:
@@ -191,7 +194,7 @@ def detail_tables(R, seed, builds, order, arms_only=None):
             ref = [n for n in plain_arms(r, builds) if n in det]
             out.append(f"\n### {r['dataset']}: UPS1 levels (amol), L1 = {'/'.join(d0['l1_levels'])}; references built from {'/'.join(d0['ref_levels'])}; "
                        f"self-reference: {'/'.join(d0['self_reference']) or 'none'}; row order: andes and quality-column arms by quality, others by intensity\n")
-            out.append("| level | role | arm | rows | keys within 2x | rows within 2x % | med abs err | med err | matched rows | keys @ matched | rows within 2x % @ matched |\n|" + "---|" * 11)
+            out.append("| level | role | arm | rows | keys within 2x | rows within 2x % | med abs err | med err | matched rows | keys @ matched | keys @ matched, random rows | rows within 2x % @ matched |\n|" + "---|" * 12)
             for L in d0["levels"]:
                 k, mc = LL.matched_reading(det, ref, L) if L in d0["l1_levels"] else (0, {})
                 for n in names:
@@ -201,7 +204,7 @@ def detail_tables(R, seed, builds, order, arms_only=None):
                     c = mc.get(n)
                     out.append("| " + " | ".join([L, p["role"] + (" (self-ref)" if L in d0["self_reference"] else ""), label(n, builds), f"{p['rows']:,}", f"{p['keys_within2x']:,}",
                                                   _pct(p["share_within2x"]), fmt(p["median_abs_err"]), fmt(p["median_err"], "{:+.2f}"),
-                                                  f"{k:,}" if c else "-", f"{c['keys']:,}" if c else "-", _pct(c["share_within2x"]) if c else "-"]) + " |")
+                                                  f"{k:,}" if c else "-", f"{c['keys']:,}" if c else "-", f"{c['keys_random']:.1f}" if c else "-", _pct(c["share_within2x"]) if c else "-"]) + " |")
             L0 = d0["levels"][0]
             out.append(f"\nA2 at the lowest level ({L0} amol): error of the transferred rows (log2 against the design reference), identified rows next to them\n")
             out.append("| arm | transfer rows | median err | median abs err | within 2x % | identified rows | median err | within 2x % |\n|" + "---|" * 8)

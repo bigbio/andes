@@ -116,6 +116,20 @@ class L1Detail(unittest.TestCase):
         self.assertLessEqual(out["full"]["keys"], 20)
         self.assertEqual(LL.matched_reading({"full": a}, ["nobody"], "1"), (0, {}))
 
+    def test_expected_keys_random(self):
+        # 4 rows, one precursor with 1 correct row: drawing 2 rows finds it with probability 2/4; drawing all rows always
+        lvl = {"rows": 4, "key_correct_rows": {"1": 1}}
+        self.assertAlmostEqual(LL.expected_keys_random(lvl, 2), 0.5)
+        self.assertAlmostEqual(LL.expected_keys_random(lvl, 4), 1.0)
+        # two correct rows of 4, k = 3: C(2,3) = 0 -> always found
+        self.assertAlmostEqual(LL.expected_keys_random({"rows": 4, "key_correct_rows": {"2": 3}}, 3), 3.0)
+        # k = 1 of 4 rows with c = 2: 1 - C(2,1)/C(4,1) = 0.5
+        self.assertAlmostEqual(LL.expected_keys_random({"rows": 4, "key_correct_rows": {"2": 1}}, 1), 0.5)
+        d = LL.l1_detail(self.raw, self.design, self.sp)["per_level"]["1"]
+        self.assertEqual(sum(d["key_correct_rows"].values()), d["keys_within2x"])
+        self.assertAlmostEqual(LL.expected_keys_random(d, d["rows"]), d["keys_within2x"])
+        self.assertLess(LL.expected_keys_random(d, 10), d["keys_within2x"])
+
     def test_count_only_metric_rewards_rows(self):
         """Adding wrong rows raises L1 although precision falls: the reason for the companion columns."""
         base = LL.l1_detail(self.raw, self.design, self.sp)["per_level"]["1"]
@@ -241,10 +255,11 @@ class BoardColumns(unittest.TestCase):
         r = {"arms": {"main": {"l1_detail": d_full}, "MQ": {"l1_detail": d_int}, "FP": {"l1_detail": d_int}}}
         m = board.matched_l1(r, ["main"])
         self.assertEqual(set(m), {"main", "MQ", "FP"})
-        self.assertLessEqual(m["main"], d_full["per_level"]["1"]["keys_within2x"] + d_full["per_level"]["2"]["keys_within2x"] + d_full["per_level"]["4"]["keys_within2x"])
+        self.assertLessEqual(m["main"][0], d_full["per_level"]["1"]["keys_within2x"] + d_full["per_level"]["2"]["keys_within2x"] + d_full["per_level"]["4"]["keys_within2x"])
         cells = board.new_cells(r, "main", ["main"], m)
         self.assertEqual(cells[0], "1/2/4")
-        self.assertEqual(len(cells), 7)
+        self.assertEqual(len(cells), 8)
+        self.assertEqual(cells[4], f"{m['main'][0]:,}")
         self.assertEqual(board.new_cells(r, "none", ["main"], m)[0], "-")
 
 

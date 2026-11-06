@@ -95,15 +95,16 @@ def ups_by_level(raw, P, design, sp, prot, prot_sp):
     return out
 
 
-def design_detection(raw, design, sp, thresholds=(1.0, 1.58), ref_skip=3):
-    """Design-consistent UPS1 detection per level, next to raw detection (any row of the precursor at the level).
+def ups_rows(raw, design, sp, ref_skip=3):
+    """UPS1 rows of one arm with their error against the design.
     Per arm: run offsets = per-run median of log2 over the null-species precursors present in >= 90 % of runs; each UPS precursor
-    gets its own reference from the levels above the `ref_skip` lowest ones (median over those rows of log2 - log2 level); a row is
-    design-consistent when |log2 - (reference + log2 level)| <= t. Precursors without a reference row are not scored.
-    thresholds: log2 ratio limits (1.0 = within 2x, 1.58 = within 3x). Returns {level: {"any", "t<thr>", "ident", "cells", ...}}."""
+    gets its own reference from the levels above the `ref_skip` lowest ones (median over those rows of log2 - log2 level).
+    Returns (U, unscored) or None: U has one row per scored (precursor, run) with the columns key, run, lev, n (offset-corrected
+    log2), err (n minus reference minus log2 level), is_transfer and, when the arm table has it, thr (quant_q); `unscored` counts the
+    UPS rows per level string of precursors without a reference row."""
     if "UPS" not in design.classes or design.null is None or len(design.levels) <= ref_skip + 1:
-        return {}
-    T = raw[["key", "run", "quantity", "is_transfer"]].copy()
+        return None
+    T = raw[["key", "run", "quantity", "is_transfer"] + (["thr"] if "thr" in raw.columns else [])].copy()
     T = T[T.quantity > 0]
     T["lq"] = np.log2(T.quantity)
     T["sp"] = T.key.map(sp)
@@ -111,16 +112,32 @@ def design_detection(raw, design, sp, thresholds=(1.0, 1.58), ref_skip=3):
     full = ny.index[ny >= 0.9 * len(design.runs)]
     med = T[T.key.isin(full)].groupby("run").lq.median()
     if len(med) == 0:
-        return {}
+        return None
     T["n"] = T.lq - T.run.map(med) + med.median()
     U = T[T.sp == "UPS"].copy()
+    if len(U) == 0:
+        return None
     U["lev"] = U.run.map(lambda r: float(design.cond[r]) if r in design.cond else np.nan)
     U = U[np.isfinite(U.lev)]
     ref_levels = {float(x) for x in design.levels[ref_skip:]}
     hi = U[U.lev.isin(ref_levels)]
     a = (hi.n - np.log2(hi.lev)).groupby(hi.key).median()
+    miss = U[~U.key.isin(a.index)]
+    unscored = {str(L): int((miss.lev == float(L)).sum()) for L in design.levels}
     U = U[U.key.isin(a.index)].copy()
     U["err"] = U.n - (U.key.map(a) + np.log2(U.lev))
+    return U, unscored
+
+
+def design_detection(raw, design, sp, thresholds=(1.0, 1.58), ref_skip=3):
+    """Design-consistent UPS1 detection per level, next to raw detection (any row of the precursor at the level).
+    Rows and references: `ups_rows`. A row is design-consistent when |log2 - (reference + log2 level)| <= t.
+    Precursors without a reference row are not scored.
+    thresholds: log2 ratio limits (1.0 = within 2x, 1.58 = within 3x). Returns {level: {"any", "t<thr>", "ident", "cells", ...}}."""
+    r = ups_rows(raw, design, sp, ref_skip)
+    if r is None:
+        return {}
+    U = r[0]
     out = {}
     for L in design.levels:
         u = U[U.lev == float(L)]

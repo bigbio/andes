@@ -153,6 +153,24 @@ python3 -m quant_eval.proteobench --finalize fin.parquet --design design.tsv --f
   any result flagged held-out; they never enter a gate or tuning run.
 - `--hard-cut` accepts `hard-cut=<tau>` as an andes rule (`--andes NAME:hard-cut=0.004:finalize.parquet`).
 
+## Board metrics: low-level UPS1, absence classes, blank split
+
+`board.py` keeps its legacy columns (`--legacy` prints exactly those) and adds, to their right, columns from `lowlevel.py` and `absence.py`
+(computed by `downstream.py` into the result JSON, so a rerun of the suite is needed to produce them; `--detail` adds the long tables):
+
+- L1 with its levels named (the amol levels summed, flagged when one is also a reference level, `ref_skip` = 3 lowest levels excluded from the
+  references), the UPS1 rows the arm reports at those levels, the share of them within 2x and their median |log2 error|, and the L1 count at a matched
+  number of rows (per level, every arm limited to the smallest row count among andes, MaxQuant and FragPipe, best rows first: by the arm's own quality
+  column where it has one, by intensity otherwise). The L1 count alone grows with the number of rows an arm reports; the diagnostic andes rule `every-row`
+  (all rows including the below-threshold ones) shows the count-only effect.
+- A2: error of the transferred rows (median signed and absolute error, within-2x share) at each level, identified rows next to them.
+- PXD014415: the yeast rows in the human-only runs by class of the precursor's own profile (yeast-enriched, not yeast-specific, only in absent runs),
+  with the boundary learned from the control species' spread and the fixed 2x next to it; rates with and without the not-yeast-specific class.
+- Blank run: rows split into identified and transferred, and the carry-over-like rows (below a fraction of the precursor's median in the other runs,
+  the fraction learned from the ordinary runs).
+
+Tests: `python3 tests/test_board_metrics.py`.
+
 Refs #299.
 
 ## Roll-up sensitivity (mokume)

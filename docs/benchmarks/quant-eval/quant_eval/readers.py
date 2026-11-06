@@ -19,7 +19,7 @@ from .keys import fragpipe_key, maxquant_key, norm_key
 
 IDQ = 0.01          # library_q limit applied to every andes row
 TRANSFER_Q = 0.01   # transfer_q limit of the `default` rule
-ANDES_RULES = ("default", "all", "hard-cut", "weights", "weights-bias", "ident")
+ANDES_RULES = ("default", "all", "hard-cut", "weights", "weights-bias", "ident", "every-row")
 
 
 def _fnum(x):
@@ -216,11 +216,12 @@ def read_andes(path, runs, rule="default", hard_cut=0.01, library_q=IDQ):
       all        identified rows + every transfer the finalize output carries
       hard-cut   identified rows + transfers with quant_q <= hard_cut
       weights    as `all`, plus the column p (recovered error probability of each transfer) for the precision-weight view
+      every-row  every row of the table including the below-threshold ones (a diagnostic arm: what a count-only metric gives when nothing is rejected)
       weights-bias  as `weights`; where the table carries `quantity_bias` (log2) and `quantity_bias_se` (log2) for a transfer, its
                  quantity is divided by 2**quantity_bias and the column se carries quantity_bias_se (the roll-up then scales the
                  transfer's learned class variance by its relative se**2). A table without the columns gives the `weights` rows.
     Rows need library_q <= `library_q` (default 0.01; a run with a looser library entry gate passes its own limit) and a positive
-    finite quantity; below-threshold and shared-feature rows (a transfer taken for another compound's feature) are dropped."""
+    finite quantity; below-threshold and shared-feature rows (a transfer taken for another compound's feature) are dropped (`every-row` keeps the below-threshold ones)."""
     if rule not in ANDES_RULES:
         raise SystemExit(f"andes rule {rule!r} not in {ANDES_RULES}")
     cols = ["precursor_key", "run", "evidence_type", "quantity", "quant_q", "transfer_q", "library_q"]
@@ -230,7 +231,8 @@ def read_andes(path, runs, rule="default", hard_cut=0.01, library_q=IDQ):
         print(f"andes {path}: no quantity_bias / quantity_bias_se columns; weights-bias rows = weights rows", file=sys.stderr)
     m = pd.read_parquet(path, columns=cols + (bias_cols if has_bias else []))
     tag = G.run_tag(f"andes-finalize:{rule}", path)
-    m = m[np.isfinite(m.quantity) & (m.quantity > 0) & ~m.evidence_type.isin(["below_threshold", "shared_feature"])].copy()
+    dropped = ["shared_feature"] if rule == "every-row" else ["below_threshold", "shared_feature"]
+    m = m[np.isfinite(m.quantity) & (m.quantity > 0) & ~m.evidence_type.isin(dropped)].copy()
     m["key"] = [norm_key(k) for k in m.precursor_key.values]
     m["is_transfer"] = ~m.evidence_type.str.startswith("identified")
     m["se"] = np.nan

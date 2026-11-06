@@ -22,6 +22,8 @@ import warnings
 import numpy as np
 import pandas as pd
 
+from . import absence as AB
+from . import lowlevel as LL
 from . import metrics as M
 from . import rates as RT
 from . import readers as R
@@ -164,7 +166,9 @@ def evaluate(a):
             o["acc_shared_sp"] = M.accuracy(d, design, sp, shared, False)
             if "UPS" in classes:
                 o["ups_strat"] = M.ups_by_level(raw, P, design, sp, prot, prot_sp)
-                o["ups_design"] = M.design_detection(raw if off is None else adjust_raw(raw, off), design, sp)
+                rl = raw if off is None else adjust_raw(raw, off)
+                o["ups_design"] = M.design_detection(rl, design, sp)
+                o["l1_detail"] = LL.l1_detail(rl, design, sp)
         RES["arms"][n] = o
         print(n, {k: o[k] for k in ("rows", "precursors", "proteins_ge2")}, round(time.time() - t0), "s", file=sys.stderr)
 
@@ -227,8 +231,11 @@ def evaluate(a):
         RES["rates"] = {n: RT.false_transfer_rates(raw, design, sp) for n, raw in tabs.items()}
         RES["depth_curves"] = {n: {"transfer_q": RT.depth_curve(raw, design, sp, "tq"), "quant_q": RT.depth_curve(raw, design, sp, "thr")}
                                for n, raw in tabs.items() if kinds[n].get("rule") in ("all", "weights", "weights-bias") or kinds[n]["kind"] == "flashlfq"}
+    if design.absent:
+        RES["absence_classes"] = {n: AB.absence_classes(raw, design, sp) for n, raw in tabs.items()}
     if design.blank:
         RES["carry_over"] = {n: RT.carry_over(raw, design, sp) for n, raw in tabs.items()}
+        RES["blank_split"] = {n: AB.blank_split(raw, design) for n, raw in tabs.items()}
     RES["elapsed_s"] = time.time() - t0
     return RES
 

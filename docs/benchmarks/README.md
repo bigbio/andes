@@ -40,8 +40,9 @@ Verdicts compare andes with the best other tool measured on the same data: **wel
 - Gross error of bright identified cells: well behind (1.2–7.2% against MaxQuant 0.3–1.6%).
 - False transfers into absent samples at the default threshold: behind (0.20% of transferred rows
   against FragPipe 0.09%; comparable at `quant_q ≤ 0.01`; on the classified reading behind on
-  enriched rows, 0.052% against 0.010%, and ahead when rows with no reference are counted, 0.052%
-  against 0.072%).
+  enriched rows, 0.052% against 0.010%; counting FragPipe's rows on precursors andes does not
+  report gives 0.052% against 0.072%, but that reading uses andes' own table as the reference and is
+  not neutral).
 - TMT ratio accuracy (PXD007683): behind MaxQuant (protein MAE 0.213 against 0.159) and hrMS2
   interference behind (0.192 against 0.156).
 - ProteoBench Astral: CV behind most submissions (0.112 against 0.070–0.095); median error behind
@@ -91,7 +92,7 @@ Legend: 🟢 andes better · 🟡 similar · 🔴 andes worse · ⚪ no comparis
 | Truth designs, all sets | bright identified cells off by > 2x | 1.2–7.2% | MaxQuant 0.3–1.6% | 🔴 | **moderate**, few cells, usable. Partly: quality columns let a downstream weighting down-weight them; the fix is in the engine (template misfit on fronting or tailing peaks) |
 | Truth designs, 6 sets | protein CV | 4.4–10.1% | FragPipe 4.9–13.5%, MaxQuant 7.0–11.6% | 🟢 on 3 sets, 🔴 on Astral and PXD001819 | **minor**, usable. Partly: dropping transfers or weighting by quality columns |
 | UPS1 lowest three levels, PXD009740 (170/382/859 amol) / PXD009815 (10/50/100 amol) | precursors within 2x of truth, as reported | 502 / 24 | MaxQuant 417 / 23; FragPipe 458 / 50 | 🟢 ahead of both on PXD009740 and 🔴 behind FragPipe on PXD009815 as reported; at equal rows FragPipe leads on both (458 against 437; 50 against 22) and andes leads MaxQuant on PXD009740 (437 against 341) | **minor**, lowest amounts only. No: engine (faint-transfer detection) |
-| Known-absent yeast, PXD014415 | false-transfer rate, all yeast rows (classified: enriched only 0.052%; with no-reference rows 0.052%) | 0.20% (0.08% at `quant_q ≤ 0.01`) | FragPipe 21.1: 0.09% (enriched only 0.010%; with no-reference rows 0.072%) | 🔴 at default, 🟡 at `quant_q ≤ 0.01`; classified: 🔴 on enriched rows, 🟢 with no-reference rows counted | **minor**, usable. Yes: filter `quant_q ≤ 0.01` (0.08%, at fewer transfers) |
+| Known-absent yeast, PXD014415 | false-transfer rate, all yeast rows (classified: enriched only 0.052%; with no-reference rows 0.052%) | 0.20% (0.08% at `quant_q ≤ 0.01`) | FragPipe 21.1: 0.09% (enriched only 0.010%; with no-reference rows 0.072%) | 🔴 at default, 🟡 at `quant_q ≤ 0.01`; classified: 🔴 on enriched rows (the no-reference reading uses andes' table as reference, not neutral) | **minor**, usable. Yes: filter `quant_q ≤ 0.01` (0.08%, at fewer transfers) |
 | Blank run, PXD016921 | rows reported in the blank | 150 (85 identified, 65 transferred) | MaxQuant 105 (20 / 85; MBR FDR option off); FragPipe 21.1: 8 (8 / 0) | 🔴 | **moderate** for low-input or blank-adjacent runs. No: `quant_q ≤ 0.01` still leaves 144; mostly carry-over (real ions) |
 | TMT knockout, PXD017803 SPS / RTS / hrMS2 | interference (lower is better) | 0.062 / 0.027 / 0.192 | MaxQuant 2.7: 0.054 / 0.038 / 0.156 | 🟡 / 🟢 / 🔴 (🟢 0.000 with `--tmt-unmix`) | **moderate** on hrMS2, usable with the option. Yes for hrMS2: `--tmt-unmix` (0.000) or a purity ≥ 0.9 filter (0.135) |
 | TMT knockout, hrMS2 | PSMs with reporter ions evaluated (scans whose range records the reporters) | 3,278 | FragPipe 21.1: 3,038; MaxQuant 2.7: 2,241 | 🟢 | — |

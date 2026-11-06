@@ -105,7 +105,7 @@ class L1Detail(unittest.TestCase):
     def test_matched_reading_limits_arms_to_the_same_rows(self):
         a = LL.l1_detail(self.raw, self.design, self.sp)
         b = LL.l1_detail(self.raw[self.raw.key.map(self.sp) != "UPS"].pipe(lambda x: x), self.design, self.sp)   # no UPS rows: {}
-        self.assertEqual(b, {})
+        self.assertEqual(b["l1_pooled"]["rows"], 0)                      # no UPS rows: zero counts, as in the legacy L1
         half = self.raw[~self.raw.key.isin([f"U{k}" for k in range(10, 20)] + [f"U{k}" for k in range(25, 30)])]
         h = LL.l1_detail(half, self.design, self.sp)
         k, out = LL.matched_reading({"full": a, "half": h}, ["full", "half"], "1")
@@ -303,11 +303,11 @@ class DEFamilies(unittest.TestCase):
                                  fam_common=DE.common_sets([self.P], self.design))
         r = {"arms": {"main": {"de_family": fam}}}
         c = board.new_cells(r, "main", ["main"], None)
-        self.assertEqual(len(c), 12)
+        self.assertEqual(len(c), board.N_NEW)
         fp = fam["inter"]["FP"]
-        self.assertEqual(c[8], f"30 / {fp + 10} (10)")                   # signed TP / FP + wrong-sign (wrong-sign)
-        self.assertEqual(c[9], f"40 / {fp}")
-        self.assertEqual(c[11], "100 / 100 / 100")
+        self.assertEqual(c[9], f"30 / {fp + 10} (10)")                   # signed TP / FP + wrong-sign (wrong-sign)
+        self.assertEqual(c[10], f"40 / {fp}")
+        self.assertEqual(c[12], "100 / 100 / 100")
 
 
 class BoardColumns(unittest.TestCase):
@@ -323,9 +323,143 @@ class BoardColumns(unittest.TestCase):
         self.assertLessEqual(m["main"][0], d_full["per_level"]["1"]["keys_within2x"] + d_full["per_level"]["2"]["keys_within2x"] + d_full["per_level"]["4"]["keys_within2x"])
         cells = board.new_cells(r, "main", ["main"], m)
         self.assertEqual(cells[0], "1/2/4")
-        self.assertEqual(len(cells), 12)
-        self.assertEqual(cells[4], f"{m['main'][0]:,}")
+        self.assertEqual(len(cells), board.N_NEW)
+        self.assertEqual(cells[5], f"{m['main'][1]:.1f}")                # headline: random rows
+        self.assertEqual(cells[6], f"{m['main'][0]:,}")                  # best first
         self.assertEqual(board.new_cells(r, "none", ["main"], m)[0], "-")
+
+
+class Reviewed(unittest.TestCase):
+    """Fixes of the independent review of the board metrics."""
+
+    def test_binned_cutoffs_change_the_classification(self):
+        rng = np.random.default_rng(1)
+        n_abs = np.r_[np.full(300, 1), np.full(300, 12)]
+        d = np.r_[rng.normal(0, 1.5, 300), rng.normal(0, 0.15, 300)]     # precursors seen in one absent run are noisy, in twelve are not
+        cuts = AB.learn_cutoffs(d, n_abs)
+        self.assertEqual([c[2] for c in cuts], [300, 0, 0, 300])           # n control per bin is reported
+        self.assertEqual([c[3] for c in cuts], [False, True, True, False])  # empty bins fall back to the pooled cutoff
+        self.assertGreater(AB.cutoff_for(cuts, 1), 2.0)
+        self.assertLess(AB.cutoff_for(cuts, 12), 0.6)
+        ps = pd.DataFrame({"key": ["a", "b"], "d": [1.5, 1.5], "n_abs": [1, 12], "n_pres": [20, 20]})
+        cl = AB.classify(ps, cuts)
+        self.assertEqual(list(cl), ["not_specific", "yeast_enriched"])    # the same d is enriched with twelve absent rows, not with one
+        self.assertEqual(list(AB.classify(ps, None, 1.0)), ["yeast_enriched", "yeast_enriched"])
+
+    def test_reference_classes_are_the_same_for_every_arm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            design, raw, sp = Absence().make(tmp)
+            refs = AB.reference_profiles(raw, design, sp)
+            sub = raw[~raw.key.isin(["Y3", "Y45"])]                          # an arm that does not report two precursors
+            o_full = AB.absence_classes(raw, design, sp, refs=refs)["YEAST"]
+            o_sub = AB.absence_classes(sub, design, sp, refs=refs)["YEAST"]
+            o_own = AB.absence_classes(sub, design, sp)["YEAST"]
+            extra = pd.concat([raw, pd.DataFrame({"key": ["Q1"], "run": ["H1"], "quantity": [2.0 ** 17], "is_transfer": [True]})])
+            o_x = AB.absence_classes(extra, design, pd.concat([sp, pd.Series({"Q1": "YEAST"})]), refs=refs)["YEAST"]
+        self.assertIn("own_learned", o_sub)
+        self.assertEqual(o_sub["reference"]["cutoffs"], o_full["reference"]["cutoffs"])      # cutoffs derived once, not per arm
+        enr_full = o_full["learned"]["identified"]["yeast_enriched"] + o_full["learned"]["transferred"]["yeast_enriched"]
+        enr_sub = o_sub["learned"]["identified"]["yeast_enriched"] + o_sub["learned"]["transferred"]["yeast_enriched"]
+        self.assertEqual(enr_full - enr_sub, 2)                              # Y3 lost its two rows; its class did not change for the others
+        self.assertEqual(o_x["learned"]["transferred"]["only_absent"], o_full["learned"]["transferred"]["only_absent"])
+        self.assertEqual(o_x["learned"]["transferred"]["not_in_reference"], 1)  # a precursor absent from the reference table
+        self.assertNotIn("reference", o_own)                                  # without refs the classes come from the arm's own rows
+        self.assertGreater(sum(x["n_control"] for x in o_own["cutoffs"]), 0)
+
+    def test_unscored_rows_and_survivorship(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            design = ups_design(tmp)
+            raw, sp = ups_raw()
+            junk = [(f"J{k}", r, 2.0 ** 10, True, 0.5) for k in range(50) for r in RUNS[:4]]   # only at the two lowest levels: no reference row
+            raw2 = pd.concat([raw, pd.DataFrame(junk, columns=raw.columns)])
+            sp2 = pd.concat([sp, pd.Series({f"J{k}": "UPS" for k in range(50)})])
+            a, b = LL.l1_detail(raw, design, sp), LL.l1_detail(raw2, design, sp2)
+        self.assertEqual(a["l1_pooled"]["unscored_rows"], 0)
+        self.assertEqual(b["l1_pooled"]["unscored_rows"], 200)
+        self.assertEqual(b["l1_pooled"]["rows"], a["l1_pooled"]["rows"])      # junk leaves the scored rows: the L1 count does not see it
+        self.assertEqual(b["per_level"]["1"]["keys_within2x"], a["per_level"]["1"]["keys_within2x"])
+        self.assertLess(b["l1_pooled"]["within2x_incl_unscored"], a["l1_pooled"]["within2x_incl_unscored"])
+        self.assertAlmostEqual(b["l1_pooled"]["within2x_incl_unscored"], b["l1_pooled"]["within2x"] / (b["l1_pooled"]["rows"] + 200))
+        cells = board.new_cells({"arms": {"main": {"l1_detail": b}}}, "main", ["main"], None)
+        self.assertEqual(cells[1], f"{b['l1_pooled']['rows']:,} (+200)")
+
+    def test_empty_ups_set_keeps_the_legacy_zero_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            design = ups_design(tmp)
+            raw, sp = ups_raw()
+            out = metrics.design_detection(raw[raw.key.str.startswith("Y")], design, sp)
+        self.assertEqual(out["1"]["t1.0"], 0)
+        self.assertEqual(sum(out[L]["t1.0"] for L in design.levels[:3]), 0)
+
+    def test_blank_reference_needs_two_other_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            design, raw, sp = Absence().make(tmp)
+            one = raw[raw.key == "H0"].iloc[:1]
+            only1 = pd.DataFrame({"key": ["ONE"], "run": ["M1"], "quantity": [2.0 ** 20], "is_transfer": [False]})
+            blank = pd.DataFrame({"key": ["H0", "ONE"], "run": "BLANK", "quantity": [2.0 ** 10, 2.0 ** 10], "is_transfer": [False, False]})
+            o = AB.blank_split(pd.concat([raw, only1, blank]), design)
+        self.assertEqual(o["identified"]["no_reference"], 1)               # ONE is in one other run only
+        self.assertEqual(o["identified"]["carry_over_fixed"], 1)
+
+    def test_de_counts_without_an_expected_sign(self):
+        T = pd.DataFrame({"sp": ["UPS", "UPS", "UPS", "UPS", "YEAST"], "fc": [1.0, -1.0, 1.0, 1.0, 2.0], "q": 0.001,
+                          "ex": [1.0, 1.0, 0.0, np.nan, 0.0], "p": 0.001})
+        c = DE._count(T, "YEAST")
+        self.assertEqual((c["TP"], c["TPs"], c["WS"], c["NS"], c["FP"]), (4, 1, 1, 2, 1))
+        self.assertEqual(c["TP"], c["TPs"] + c["WS"] + c["NS"])
+        tp, fp = DE.tp_at_fdp([T], "YEAST", (1.0,), signed=True)
+        self.assertEqual((tp["100"], fp["100"]), (3, 2))                   # NaN and zero expected sign are not wrong-sign; the wrong-sign row and the null row are false
+
+    def test_board_absence_and_blank_cells(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            design, raw, sp = Absence().make(tmp)
+            refs = AB.reference_profiles(raw, design, sp)
+            ac = AB.absence_classes(raw, design, sp, refs=refs)
+            bl = AB.blank_split(pd.concat([raw, pd.DataFrame({"key": ["H0", "H1", "H2"], "run": "BLANK", "quantity": [2.0 ** 20 * 0.001] * 3, "is_transfer": [True, False, False]})]), design)
+        r = {"arms": {"main": {}}, "absence_classes": {"main": ac}, "blank_split": {"main": bl}}
+        c = board.new_cells(r, "main", ["main"], None)
+        o = ac["YEAST"]
+        den_t, den_i = o["denominators"]["transferred_rows_absent_runs"], o["denominators"]["identified_rows_absent_runs"]
+        e_t, a_t = o["learned"]["transferred"]["yeast_enriched"], o["learned"]["transferred"]["only_absent"]
+        self.assertEqual(c[7].split(" / ")[0], f"{100 * e_t / den_t:.3f} ({100 * (e_t + a_t) / den_t:.3f})")   # both readings
+        self.assertTrue(c[7].endswith("%"))
+        self.assertEqual(c[8], f"2 / 1 / {bl['carry_over_learned']}")      # two identified rows (H1, H2), one transferred (H0), all three carry-over level
+        self.assertEqual(board.rate_pct(1, 0, "{:.3f}"), "-")
+        self.assertEqual(board.rate_pct(0, 10, "{:.3f}"), "0.000")
+
+    def test_legacy_board_is_byte_identical_to_the_old_board(self):
+        import importlib.util
+        import subprocess
+        here = os.path.dirname(os.path.abspath(__file__))
+        try:
+            top = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], cwd=here, stderr=subprocess.DEVNULL).decode().strip()
+            src = subprocess.check_output(["git", "show", "6c2b72c3:docs/benchmarks/quant-eval/quant_eval/board.py"], cwd=top, stderr=subprocess.DEVNULL).decode()
+        except Exception:
+            self.skipTest("the base commit is not available")
+        with tempfile.TemporaryDirectory() as tmp:
+            f = os.path.join(tmp, "old_board.py")
+            with open(f, "w") as fh:
+                fh.write(src)
+            spec = importlib.util.spec_from_file_location("old_board", f)
+            old = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(old)
+
+        def arm(l1, tr=100):
+            return {"precursors": 1000, "proteins_ge2": 100, "ident_rows": 5000, "transfer_rows": tr,
+                    "ups_design": {L: {"t1.0": v} for L, v in zip(["1", "2", "4", "8"], l1)},
+                    "de_family": {"inter": {"TP": 50, "FP": 5, "TP5": 40, "FP5": 2, "tp_at_fdp": {"10": 55}}}}
+        res = {"u": {"42": {"dataset": "SET", "suite_dataset": "u", "seed": "42", "builds": ["main"], "levels": ["1", "2", "4", "8"], "arm_roles": {"main": {"kind": "andes"}, "MQ": {"kind": "maxquant"}, "FL001": {"kind": "flashlfq"}},
+                            "arms": {"main": arm([3, 4, 5, 6]), "MQ": arm([0, 0, 0, 0], 0), "FL001": arm([1, 1, 1, 1])}, "cv": {}, "cell_accuracy": {"arms": {"main": {"bad": 2.5, "within2x": 97.5, "bad_bright": 3.0, "rep_sd_top": 0.1}}}}},
+               "p": {"42": {"dataset": "P14", "suite_dataset": "p", "seed": "42", "builds": ["main"], "arm_roles": {"main": {"kind": "andes"}},
+                            "arms": {"main": {"precursors": 10, "proteins_ge2": 5, "ident_rows": 20, "transfer_rows": 0}}, "rates": {"main": {"YEAST": {"rate": float("nan")}}}}},
+               "s": {"42": {"dataset": "SC", "suite_dataset": "s", "seed": "42", "builds": ["main"], "arm_roles": {"main": {"kind": "andes"}},
+                            "arms": {"main": {"precursors": 10, "proteins_ge2": 5, "ident_rows": 20, "transfer_rows": 3}}, "carry_over": {"main": {"rows": 23}}}}}
+        order = ["u", "p", "s"]
+        self.assertEqual(old.build_rows(res, "42", ["main"], order), board.build_rows(res, "42", ["main"], order, legacy=True))
+        self.assertIn("nan %", board.build_rows(res, "42", ["main"], order, legacy=True))
+        new = board.build_rows(res, "42", ["main"], order, legacy=False)
+        self.assertNotIn("nan %", new)
+        self.assertNotIn("within 2x %", new.split("\n")[0].replace("L1 within-2x %", ""))
 
 
 if __name__ == "__main__":

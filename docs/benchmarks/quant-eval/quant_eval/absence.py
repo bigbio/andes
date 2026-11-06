@@ -12,6 +12,11 @@ Classes of the rows of the absent species in absent runs:
   yeast_enriched    d above the boundary: intensity is higher in the runs that contain the species (a genuine species peptide, absent here)
   not_specific      d at or below the boundary: the precursor looks like a control precursor (same intensity with and without the species)
   only_absent       the precursor has no row in a run that contains the species (no reference)
+  not_in_reference  (reference table only) the precursor has no row in the reference table
+The profile and the boundary can be derived once from a reference table (`reference_profiles`, the andes every-row table) and every arm classified
+against it, so that the class of a precursor does not depend on the rows an arm reports. The enriched count is a lower bound of the errors that are
+specific to the species: the boundary is wide for a precursor seen in few absent runs, and the rows of the only-absent class cannot be judged; the
+board prints the enriched rate and the enriched + only-absent rate.
 The boundary is learned from the control species: the 1 - alpha quantile of d over its precursors, within bins of the number of
 rows the precursor has in the absent runs (d of a precursor seen in one absent run is noisier than of one seen in twenty). The fixed
 boundary of 1 log2 (2x) is reported next to it.
@@ -19,7 +24,8 @@ boundary of 1 log2 (2x) is reported next to it.
 Blank runs. Rows of a blank run split into identified and transferred. A row is carry-over-like when its raw intensity is below a
 fraction of the median intensity of the same precursor in the other (non-blank) runs; the fraction is learned from the ordinary runs: the
 `q` quantile of the ratio of a non-blank row to the median of the same precursor's rows in the other non-blank runs (a blank row below
-the level that only q of ordinary rows fall under). The fixed fraction 0.5 is reported next to it."""
+the level that only q of ordinary rows fall under). Both the learning and the classification need the precursor in at least two other runs; a
+blank row of a precursor in fewer runs is counted as `no_reference`. The fixed fraction 0.5 is reported next to it."""
 import warnings
 
 import numpy as np
@@ -31,6 +37,7 @@ EDGES = (1, 2, 5, 10)
 MIN_CONTROL = 100
 BLANK_Q = 0.05
 BLANK_FIXED = 0.5
+MIN_REF_RUNS = 2
 
 
 def profile(raw, design, sp, species, control=None):
@@ -60,8 +67,9 @@ def profile(raw, design, sp, species, control=None):
 
 
 def learn_cutoffs(d_control, n_abs_control, alpha=ALPHA, edges=EDGES, min_n=MIN_CONTROL):
-    """Boundary of d per bin of n_abs: the 1 - alpha quantile of the control's d. Returns a list of (lower edge of the bin, cutoff, n control precursors).
-    A bin with fewer than `min_n` control precursors takes the cutoff of the pooled control (None when the control is empty)."""
+    """Boundary of d per bin of n_abs: the 1 - alpha quantile of the control's d. Returns a list of (lower edge of the bin, cutoff, n control precursors,
+    pooled_fallback). A bin with fewer than `min_n` control precursors takes the cutoff of the pooled control (pooled_fallback True; the pooled
+    quantile is not conditional on the bin and is only as wide as the whole control's spread). None when the control is empty."""
     d = np.asarray(d_control, float)
     n = np.asarray(n_abs_control, float)
     ok = np.isfinite(d)
@@ -74,13 +82,14 @@ def learn_cutoffs(d_control, n_abs_control, alpha=ALPHA, edges=EDGES, min_n=MIN_
     for i, a in enumerate(lo):
         b = lo[i + 1] if i + 1 < len(lo) else np.inf
         m = (n >= a) & (n < b)
-        out.append((a, float(np.quantile(d[m], 1 - alpha)) if m.sum() >= min_n else pooled, int(m.sum())))
+        enough = int(m.sum()) >= min_n
+        out.append((a, float(np.quantile(d[m], 1 - alpha)) if enough else pooled, int(m.sum()), not enough))
     return out
 
 
 def cutoff_for(cutoffs, n_abs):
     c = cutoffs[0][1]
-    for a, v, _ in cutoffs:
+    for a, v, *_ in cutoffs:
         if n_abs >= a:
             c = v
     return c
@@ -98,13 +107,44 @@ def classify(prof_s, cutoffs=None, fixed=None):
     return cls
 
 
+CLASSES = ("yeast_enriched", "not_specific", "only_absent", "not_in_reference")
+
+
 def _class_counts(rows, cls_of):
-    c = rows.key.map(cls_of)
-    return {k: int((c == k).sum()) for k in ("yeast_enriched", "not_specific", "only_absent")}
+    """Rows per class; a key the class map does not hold (a precursor missing from the reference table) is `not_in_reference`."""
+    c = rows.key.map(cls_of).fillna("not_in_reference")
+    return {k: int((c == k).sum()) for k in CLASSES}
 
 
-def absence_classes(raw, design, sp, alpha=ALPHA, fixed=FIXED_LOG2):
-    """Per absent species: identified and transferred rows of the species in the absent runs by class, with the learned and the fixed boundary."""
+def _cutoff_rows(cuts):
+    return [{"n_abs_from": a, "cutoff": v, "n_control": n, "pooled_fallback": f} for a, v, n, f in (cuts or [])]
+
+
+def reference_profiles(ref_raw, design, sp, alpha=ALPHA, fixed=FIXED_LOG2):
+    """Class maps of every absent species from ONE reference table (the andes every-row table: every row of the finalize output): d and the learned
+    cutoffs are derived once, so the class of a precursor does not depend on which rows an arm reports. {species: {control, cutoffs, learned: {key: class}, fixed: {key: class}, ...}}."""
+    out = {}
+    for s in sorted(set(design.absent.values())):
+        prof, control = profile(ref_raw, design, sp, s)
+        if control is None:
+            continue
+        ctrl = prof[(prof.sp == control) & (prof.n_pres > 0) & (prof.n_abs > 0)]
+        cuts = learn_cutoffs(ctrl.d.values, ctrl.n_abs.values, alpha)
+        if cuts is None:
+            continue
+        ps = prof[prof.sp == s].reset_index(drop=True)
+        out[s] = {"control": control, "alpha": alpha, "fixed_log2": fixed, "control_precursors": int(len(ctrl)),
+                  "control_d_quantiles": {str(q): float(np.quantile(ctrl.d, q)) for q in (0.05, 0.5, 0.95, 0.99)},
+                  "cutoffs": cuts, "reference_rows": int(len(ref_raw)),
+                  "learned": dict(zip(ps.key, classify(ps, cuts))), "fixed": dict(zip(ps.key, classify(ps, None, fixed)))}
+    return out
+
+
+def absence_classes(raw, design, sp, alpha=ALPHA, fixed=FIXED_LOG2, refs=None):
+    """Per absent species: identified and transferred rows of the species in the absent runs by class, with the learned and the fixed boundary.
+    With `refs` (reference_profiles) the classes come from the reference table for every arm (`learned`, `fixed`) and the classes from the arm's
+    own rows are kept as `own_learned` / `own_fixed`; without it `learned` / `fixed` are the arm's own (profile and cutoffs from its rows).
+    The yeast-enriched count is a lower bound of the species-specific errors: a precursor seen in few absent runs needs a large d to be called."""
     out = {}
     for s in sorted(set(design.absent.values())):
         absent = {r for r, v in design.absent.items() if v == s}
@@ -118,13 +158,19 @@ def absence_classes(raw, design, sp, alpha=ALPHA, fixed=FIXED_LOG2):
         tr = rows.is_transfer.astype(bool)
         o = {"control": control, "alpha": alpha, "fixed_log2": fixed, "control_precursors": int(len(ctrl)),
              "control_d_quantiles": {str(q): float(np.quantile(ctrl.d, q)) for q in (0.05, 0.5, 0.95, 0.99)} if len(ctrl) else {},
-             "cutoffs": [{"n_abs_from": a, "cutoff": v, "n_control": n} for a, v, n in (cuts or [])]}
+             "cutoffs": _cutoff_rows(cuts)}
         if cuts is None:
             out[s] = o
             continue
         for name, cl in (("learned", classify(ps, cuts)), ("fixed", classify(ps, None, fixed))):
             cls_of = dict(zip(ps.key, cl))
-            o[name] = {"identified": _class_counts(rows[~tr], cls_of), "transferred": _class_counts(rows[tr], cls_of)}
+            o[("own_" + name) if refs else name] = {"identified": _class_counts(rows[~tr], cls_of), "transferred": _class_counts(rows[tr], cls_of)}
+        if refs and s in refs:
+            r = refs[s]
+            o["reference"] = {"control": r["control"], "alpha": r["alpha"], "fixed_log2": r["fixed_log2"], "control_precursors": r["control_precursors"],
+                              "control_d_quantiles": r["control_d_quantiles"], "cutoffs": _cutoff_rows(r["cutoffs"]), "reference_rows": r["reference_rows"]}
+            for name in ("learned", "fixed"):
+                o[name] = {"identified": _class_counts(rows[~tr], r[name]), "transferred": _class_counts(rows[tr], r[name])}
         # denominators: all rows (any species) of the arm in the absent runs
         allabs = raw[raw.run.isin(absent) & ~raw.run.isin(design.blank)]
         o["denominators"] = {"identified_rows_absent_runs": int((~allabs.is_transfer.astype(bool)).sum()),
@@ -157,8 +203,8 @@ def blank_split(raw, design, q=BLANK_Q, fixed=BLANK_FIXED):
     med_other = nb.groupby("key").quantity.median()
     n_other = nb.groupby("key").run.nunique()
     b = d[d.run.isin(design.blank)].copy()
-    b["ref"] = b.key.map(med_other)
     b["n_ref"] = b.key.map(n_other).fillna(0)
+    b["ref"] = b.key.map(med_other).where(b.n_ref >= MIN_REF_RUNS)       # a reference needs the precursor in at least MIN_REF_RUNS other runs (as the learning of the fraction)
     b["ratio"] = b.quantity / b.ref
     out = {"blank_runs": len(design.blank), "rows": int(len(b)), "learned_fraction": frac, "fixed_fraction": fixed, "quantile": q,
            "ordinary_rows": int(len(ratios))}

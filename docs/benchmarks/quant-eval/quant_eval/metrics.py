@@ -115,9 +115,7 @@ def ups_rows(raw, design, sp, ref_skip=3):
         return None
     T["n"] = T.lq - T.run.map(med) + med.median()
     U = T[T.sp == "UPS"].copy()
-    if len(U) == 0:
-        return None
-    U["lev"] = U.run.map(lambda r: float(design.cond[r]) if r in design.cond else np.nan)
+    U["lev"] = U.run.map(lambda r: float(design.cond[r]) if r in design.cond else np.nan).astype(float)   # an empty UPS set gives empty tables and zero counts, as before
     U = U[np.isfinite(U.lev)]
     ref_levels = {float(x) for x in design.levels[ref_skip:]}
     hi = U[U.lev.isin(ref_levels)]

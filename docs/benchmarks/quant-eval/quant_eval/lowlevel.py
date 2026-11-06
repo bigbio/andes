@@ -4,7 +4,9 @@ The L1 count of the board (`design_detection`) is the number of UPS1 precursors 
 lowest levels. It grows with the number of rows an arm reports (a wrong row has a chance of landing within 2x), so every level
 here also carries what the arm reports and how accurate it is:
 
-  rows               scored UPS1 rows of the arm at the level (precursors with a reference; `unscored_rows` are the others)
+  rows               scored UPS1 rows of the arm at the level (precursors with a reference). `unscored_rows` are the UPS1 rows of precursors without a
+                     reference row (seen only at the lowest levels): they leave the count and its denominator, so the board also prints the share
+                     within 2x with them counted as not within 2x (`within2x_incl_unscored` of `l1_pooled`)
   keys_within2x      distinct precursors with a row within 2x (the L1 count of the level)
   share_within2x     rows within 2x / rows
   median_abs_err     median |log2 error| of the rows;  median_err the signed median (positive = over-quantified)
@@ -82,6 +84,8 @@ def l1_detail(raw, design, sp, ref_skip=3, n_l1=3):
     out = {"levels": levels, "l1_levels": l1, "ref_levels": ref, "ref_skip": ref_skip, "self_reference": [x for x in l1 if x in ref],
            "order": "quality" if quality else "intensity", "per_level": {}}
     out["l1_pooled"] = _stats(U[U.lev.isin([float(x) for x in l1])].err.values)
+    out["l1_pooled"]["unscored_rows"] = int(sum(unscored.get(L, 0) for L in l1))
+    out["l1_pooled"]["within2x_incl_unscored"] = out["l1_pooled"]["within2x"] / max(out["l1_pooled"]["rows"] + out["l1_pooled"]["unscored_rows"], 1)
     for L in levels:
         u = U[U.lev == float(L)]
         ok = u.err.abs() <= WITHIN

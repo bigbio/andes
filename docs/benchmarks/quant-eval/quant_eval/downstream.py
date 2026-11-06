@@ -239,7 +239,20 @@ def evaluate(a):
         RES["depth_curves"] = {n: {"transfer_q": RT.depth_curve(raw, design, sp, "tq"), "quant_q": RT.depth_curve(raw, design, sp, "thr")}
                                for n, raw in tabs.items() if kinds[n].get("rule") in ("all", "weights", "weights-bias") or kinds[n]["kind"] == "flashlfq"}
     if design.absent:
-        RES["absence_classes"] = {n: AB.absence_classes(raw, design, sp) for n, raw in tabs.items()}
+        # classes from ONE reference table: every row of the first andes arm's finalize table (below-threshold rows included)
+        refs = None
+        first = next((s_ for s_ in a.andes), None)
+        if first and a.fasta:
+            ref_raw = R.read_andes(first.split(":", 2)[2], runs, "every-row", a.hard_cut)
+            extra = sorted(set(ref_raw.key) - set(sp.index))
+            sp_ref = sp
+            if extra:
+                sp_x, _, _ = map_precursors(extra, a.fasta, classes)
+                sp_ref = pd.concat([sp, sp_x])
+            refs = AB.reference_profiles(ref_raw, design, sp_ref)
+            RES["absence_reference"] = {"table": "andes every-row", "arm": first.split(":", 1)[0], "rows": int(len(ref_raw))}
+            del ref_raw
+        RES["absence_classes"] = {n: AB.absence_classes(raw, design, sp, refs=refs) for n, raw in tabs.items()}
     if design.blank:
         RES["carry_over"] = {n: RT.carry_over(raw, design, sp) for n, raw in tabs.items()}
         RES["blank_split"] = {n: AB.blank_split(raw, design) for n, raw in tabs.items()}

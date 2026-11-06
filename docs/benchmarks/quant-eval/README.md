@@ -160,12 +160,12 @@ python3 -m quant_eval.proteobench --finalize fin.parquet --design design.tsv --f
 
 - L1 with its levels named (the amol levels summed, flagged when one is also a reference level, `ref_skip` = 3 lowest levels excluded from the
   references), the UPS1 rows the arm reports at those levels, the share of them within 2x and their median |log2 error|, and the L1 count at a matched
-  number of rows (per level, every arm limited to the smallest row count among andes, MaxQuant and FragPipe, best rows first: by the arm's own quality
-  column where it has one, by intensity otherwise). The L1 count alone grows with the number of rows an arm reports; the diagnostic andes rule `every-row`
+  number of rows (per level, every arm limited to the smallest row count among andes, MaxQuant and FragPipe; the headline is the expected count for rows drawn at random, the best-first reading orders
+  andes by its quality column and the other arms by intensity, so its order differs per arm); the rows of precursors without a design reference are printed (+ unscored) and counted as not within 2x in a second precision column. The L1 count alone grows with the number of rows an arm reports; the diagnostic andes rule `every-row`
   (all rows including the below-threshold ones) shows the count-only effect.
 - A2: error of the transferred rows (median signed and absolute error, within-2x share) at each level, identified rows next to them.
 - PXD014415: the yeast rows in the human-only runs by class of the precursor's own profile (yeast-enriched, not yeast-specific, only in absent runs),
-  with the boundary learned from the control species' spread and the fixed 2x next to it; rates with and without the not-yeast-specific class.
+  with the boundary learned from the control species' spread (per bin of absent-run rows, the control count of each bin printed; a bin with fewer than 100 control precursors uses the pooled cutoff) and the fixed 2x next to it. Profile and cutoffs are derived once from a reference table (the andes every-row table) and every arm is classified against it; a precursor missing from the reference is `not_in_reference`. The noise-removed rate is a lower bound of the species-specific errors; the board prints the enriched rate and, in brackets, enriched + only-absent.
 - Blank run: rows split into identified and transferred, and the carry-over-like rows (below a fraction of the precursor's median in the other runs,
   the fraction learned from the ordinary runs).
 

@@ -2,7 +2,7 @@
 
 TP = significant protein of a species with a changing amount; TPs = TP with the sign of the observed log2FC equal to the expected
 sign; WS = significant protein of a changing species with the opposite sign (counted in TP, never in TPs); FP = significant protein of
-the null species. The sign-aware reading counts WS as false: TPs against FP + WS. Counts are given without a fold-change cut (suffix '') and with
+the null species. The sign-aware reading counts WS as false: TPs against FP + WS. NS (changing species, expected change zero or undefined) is in TP and in neither TPs nor WS. Counts are given without a fold-change cut (suffix '') and with
 |log2FC| >= 0.5 (suffix '5').
 
 Protein families. The BH family of a pair is the set of proteins tested in it. Three families are scored:
@@ -68,18 +68,24 @@ FDP_LEVELS = (0.01, 0.05, 0.10)
 
 
 def _count(T, null, fam_q=None):
-    """TP / TPs / FP with and without the fold-change cut from the q column of T."""
+    """TP / TPs / WS / NS / FP with and without the fold-change cut from the q column of T.
+    TP = significant protein of a changing species = TPs (expected sign observed) + WS (opposite sign) + NS (no expected sign: the expected
+    log2 change of the pair is zero or undefined, so a sign cannot be judged; neither right nor wrong)."""
     chg = (T.sp.notna() & (T.sp != null)).values
     nul = (T.sp == null).values
-    sgn = np.where(np.isfinite(T.ex.values), np.sign(T.ex.values), 1.0)
+    ex = T.ex.values.astype(float)
+    sgn = np.where(np.isfinite(ex), np.sign(ex), 0.0)
+    has_sign = sgn != 0
     fc = T.fc.values
+    fcs = np.sign(np.nan_to_num(fc))
     o = {}
     for tag, cut in (("", 0.0), ("5", FC_CUT)):
         sig = ((T.q.values <= 0.05) & (np.abs(np.nan_to_num(fc)) >= cut))
         o["TP" + tag] = int((sig & chg).sum())
-        o["TPs" + tag] = int((sig & chg & (np.sign(fc) == sgn)).sum())
+        o["TPs" + tag] = int((sig & chg & has_sign & (fcs == sgn)).sum())
         o["FP" + tag] = int((sig & nul).sum())
-        o["WS" + tag] = int((sig & chg & (sgn != 0) & (np.sign(fc) != sgn)).sum())
+        o["WS" + tag] = int((sig & chg & has_sign & (fcs != sgn)).sum())
+        o["NS" + tag] = int((sig & chg & ~has_sign).sum())
     return o
 
 
@@ -158,7 +164,7 @@ def de_all(P, design, prot_sp, classes, fam_inter=None, fam_union=None, fam_comm
     cond = {r: design.cond[r] for r in runs if r in design.cond}
     levels = design.levels
     null = design.null
-    tot = {k: 0 for k in ("TP", "TPs", "FP", "WS", "TP5", "TPs5", "FP5", "WS5", "tested")}
+    tot = {k: 0 for k in ("TP", "TPs", "FP", "WS", "NS", "TP5", "TPs5", "FP5", "WS5", "NS5", "tested")}
     pairs, coll = [], {}
     P_inter = P[P.index.isin(fam_inter)] if fam_inter is not None else None
     fams = {"own": []}
@@ -170,7 +176,7 @@ def de_all(P, design, prot_sp, classes, fam_inter=None, fam_union=None, fam_comm
         fams["common"] = []
     if fam_common_all is not None:
         fams["common_all"] = []
-    ftot = {f: {k: 0 for k in ("TP", "TPs", "FP", "WS", "TP5", "TPs5", "FP5", "WS5", "tested", "tested_null")} for f in fams}
+    ftot = {f: {k: 0 for k in ("TP", "TPs", "FP", "WS", "NS", "TP5", "TPs5", "FP5", "WS5", "NS5", "tested", "tested_null")} for f in fams}
     aucs = {f: [] for f in fams}
     for i, lo in enumerate(levels):
         for hi in levels[i + 1:]:
@@ -206,7 +212,7 @@ def de_all(P, design, prot_sp, classes, fam_inter=None, fam_union=None, fam_comm
                 aucs[f].append(a)
                 row[f"auc_{f}"] = a
                 if f != "own":
-                    for k in ("TP", "FP", "TP5", "FP5", "TPs", "WS"):
+                    for k in ("TP", "FP", "TP5", "FP5", "TPs", "WS", "NS"):
                         row[f"{k}_{f}"] = cf[k]
             for s in classes:
                 m = (T.sp == s).values & np.isfinite(T.ex.values)

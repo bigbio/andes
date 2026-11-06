@@ -299,7 +299,7 @@ EThcD	LowRes	ArgC	cid_lowres_argc*	cid_lowres_argc*	cid_lowres_argc*	cid_lowres_
 EThcD	LowRes	aLP	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*
 EThcD	LowRes	NoCleavage	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*
 EThcD	LowRes	NonSpecific	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*	cid_lowres_tryp*
-EThcD	HighRes	Trypsin	ethcd_qexactive_tryp	hcd_qexactive_tryp_phosphorylation*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_itraq*	hcd_highres_tryp_tmt*
+EThcD	HighRes	Trypsin	ethcd_qexactive_tryp	hcd_qexactive_tryp_phosphorylation*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_itraq*	ethcd_qexactive_tryp*
 EThcD	HighRes	Chymotrypsin	hcd_qexactive_tryp*	hcd_qexactive_tryp_phosphorylation*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_itraq*	hcd_highres_tryp_tmt*
 EThcD	HighRes	LysC	hcd_qexactive_tryp*	hcd_qexactive_tryp_phosphorylation*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_itraq*	hcd_highres_tryp_tmt*
 EThcD	HighRes	AspN	hcd_qexactive_tryp*	hcd_qexactive_tryp_phosphorylation*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_itraq*	hcd_highres_tryp_tmt*
@@ -307,8 +307,8 @@ EThcD	HighRes	GluC	hcd_qexactive_tryp*	hcd_qexactive_tryp_phosphorylation*	hcd_q
 EThcD	HighRes	LysN	hcd_qexactive_tryp*	hcd_qexactive_tryp_phosphorylation*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_itraq*	hcd_highres_tryp_tmt*
 EThcD	HighRes	ArgC	hcd_qexactive_tryp*	hcd_qexactive_tryp_phosphorylation*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_itraq*	hcd_highres_tryp_tmt*
 EThcD	HighRes	aLP	hcd_qexactive_tryp*	hcd_qexactive_tryp_phosphorylation*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_itraq*	hcd_highres_tryp_tmt*
-EThcD	HighRes	NoCleavage	ethcd_qexactive_tryp*	hcd_highres_nocleavage_phosphorylation*	hcd_highres_nocleavage*	hcd_highres_nocleavage*	hcd_highres_nocleavage*
-EThcD	HighRes	NonSpecific	ethcd_qexactive_tryp*	hcd_highres_nocleavage_phosphorylation*	hcd_highres_nocleavage*	hcd_highres_nocleavage*	hcd_highres_nocleavage*
+EThcD	HighRes	NoCleavage	ethcd_qexactive_tryp*	hcd_highres_nocleavage_phosphorylation*	hcd_highres_nocleavage*	hcd_highres_nocleavage*	ethcd_qexactive_tryp*
+EThcD	HighRes	NonSpecific	ethcd_qexactive_tryp*	hcd_highres_nocleavage_phosphorylation*	hcd_highres_nocleavage*	hcd_highres_nocleavage*	ethcd_qexactive_tryp*
 EThcD	TOF	Trypsin	hcd_qexactive_tryp*	hcd_qexactive_tryp_phosphorylation*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_tmt*
 EThcD	TOF	Chymotrypsin	hcd_qexactive_tryp*	hcd_qexactive_tryp_phosphorylation*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_tmt*
 EThcD	TOF	LysC	hcd_qexactive_tryp*	hcd_qexactive_tryp_phosphorylation*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_tmt*
@@ -319,7 +319,7 @@ EThcD	TOF	ArgC	hcd_qexactive_tryp*	hcd_qexactive_tryp_phosphorylation*	hcd_qexac
 EThcD	TOF	aLP	hcd_qexactive_tryp*	hcd_qexactive_tryp_phosphorylation*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_tmt*
 EThcD	TOF	NoCleavage	hcd_highres_nocleavage*	hcd_highres_nocleavage_phosphorylation*	hcd_highres_nocleavage*	hcd_highres_nocleavage*	hcd_highres_nocleavage*
 EThcD	TOF	NonSpecific	hcd_highres_nocleavage*	hcd_highres_nocleavage_phosphorylation*	hcd_highres_nocleavage*	hcd_highres_nocleavage*	hcd_highres_nocleavage*
-EThcD	QExactive	Trypsin	ethcd_qexactive_tryp	hcd_qexactive_tryp_phosphorylation*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_tmt*
+EThcD	QExactive	Trypsin	ethcd_qexactive_tryp	hcd_qexactive_tryp_phosphorylation*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_itraq*	ethcd_qexactive_tryp*
 EThcD	QExactive	Chymotrypsin	hcd_qexactive_tryp*	hcd_qexactive_tryp_phosphorylation*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_tmt*
 EThcD	QExactive	LysC	hcd_qexactive_tryp*	hcd_qexactive_tryp_phosphorylation*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_tmt*
 EThcD	QExactive	AspN	hcd_qexactive_tryp*	hcd_qexactive_tryp_phosphorylation*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_tmt*
@@ -327,9 +327,9 @@ EThcD	QExactive	GluC	hcd_qexactive_tryp*	hcd_qexactive_tryp_phosphorylation*	hcd
 EThcD	QExactive	LysN	hcd_qexactive_tryp*	hcd_qexactive_tryp_phosphorylation*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_tmt*
 EThcD	QExactive	ArgC	hcd_qexactive_tryp*	hcd_qexactive_tryp_phosphorylation*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_tmt*
 EThcD	QExactive	aLP	hcd_qexactive_tryp*	hcd_qexactive_tryp_phosphorylation*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_tmt*
-EThcD	QExactive	NoCleavage	ethcd_qexactive_tryp*	hcd_highres_nocleavage_phosphorylation*	hcd_highres_nocleavage*	hcd_highres_nocleavage*	hcd_highres_nocleavage*
-EThcD	QExactive	NonSpecific	ethcd_qexactive_tryp*	hcd_highres_nocleavage_phosphorylation*	hcd_highres_nocleavage*	hcd_highres_nocleavage*	hcd_highres_nocleavage*
-EThcD	OrbitrapAstral	Trypsin	ethcd_qexactive_tryp*	hcd_astral_tryp*	hcd_astral_tryp*	hcd_astral_tryp*	hcd_astral_tryp*
+EThcD	QExactive	NoCleavage	ethcd_qexactive_tryp*	hcd_highres_nocleavage_phosphorylation*	hcd_highres_nocleavage*	hcd_highres_nocleavage*	ethcd_qexactive_tryp*
+EThcD	QExactive	NonSpecific	ethcd_qexactive_tryp*	hcd_highres_nocleavage_phosphorylation*	hcd_highres_nocleavage*	hcd_highres_nocleavage*	ethcd_qexactive_tryp*
+EThcD	OrbitrapAstral	Trypsin	ethcd_qexactive_tryp*	hcd_astral_tryp*	hcd_astral_tryp*	hcd_astral_tryp*	ethcd_qexactive_tryp*
 EThcD	OrbitrapAstral	Chymotrypsin	hcd_astral_tryp*	hcd_astral_tryp*	hcd_astral_tryp*	hcd_astral_tryp*	hcd_astral_tryp*
 EThcD	OrbitrapAstral	LysC	hcd_astral_tryp*	hcd_astral_tryp*	hcd_astral_tryp*	hcd_astral_tryp*	hcd_astral_tryp*
 EThcD	OrbitrapAstral	AspN	hcd_astral_tryp*	hcd_astral_tryp*	hcd_astral_tryp*	hcd_astral_tryp*	hcd_astral_tryp*
@@ -337,8 +337,8 @@ EThcD	OrbitrapAstral	GluC	hcd_astral_tryp*	hcd_astral_tryp*	hcd_astral_tryp*	hcd
 EThcD	OrbitrapAstral	LysN	hcd_astral_tryp*	hcd_astral_tryp*	hcd_astral_tryp*	hcd_astral_tryp*	hcd_astral_tryp*
 EThcD	OrbitrapAstral	ArgC	hcd_astral_tryp*	hcd_astral_tryp*	hcd_astral_tryp*	hcd_astral_tryp*	hcd_astral_tryp*
 EThcD	OrbitrapAstral	aLP	hcd_astral_tryp*	hcd_astral_tryp*	hcd_astral_tryp*	hcd_astral_tryp*	hcd_astral_tryp*
-EThcD	OrbitrapAstral	NoCleavage	ethcd_qexactive_tryp*	hcd_highres_nocleavage_phosphorylation*	hcd_highres_nocleavage*	hcd_highres_nocleavage*	hcd_highres_nocleavage*
-EThcD	OrbitrapAstral	NonSpecific	ethcd_qexactive_tryp*	hcd_highres_nocleavage_phosphorylation*	hcd_highres_nocleavage*	hcd_highres_nocleavage*	hcd_highres_nocleavage*
+EThcD	OrbitrapAstral	NoCleavage	ethcd_qexactive_tryp*	hcd_highres_nocleavage_phosphorylation*	hcd_highres_nocleavage*	hcd_highres_nocleavage*	ethcd_qexactive_tryp*
+EThcD	OrbitrapAstral	NonSpecific	ethcd_qexactive_tryp*	hcd_highres_nocleavage_phosphorylation*	hcd_highres_nocleavage*	hcd_highres_nocleavage*	ethcd_qexactive_tryp*
 EThcD	TimsTOF	Trypsin	hcd_qexactive_tryp*	hcd_qexactive_tryp_phosphorylation*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_tmt*
 EThcD	TimsTOF	Chymotrypsin	hcd_qexactive_tryp*	hcd_qexactive_tryp_phosphorylation*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_tmt*
 EThcD	TimsTOF	LysC	hcd_qexactive_tryp*	hcd_qexactive_tryp_phosphorylation*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_itraq*	hcd_qexactive_tryp_tmt*

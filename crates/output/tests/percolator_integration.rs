@@ -284,7 +284,8 @@ fn pep_of_accepted_psms_is_below_one_or_skip() {
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
     // A single-run PIN keeps the main run's result file as Percolator wrote it.
-    let target = std::fs::read_to_string(tmp.path().join("run.percolator.target.psms.txt")).unwrap();
+    let target =
+        std::fs::read_to_string(tmp.path().join("run.percolator.target.psms.txt")).unwrap();
     assert_eq!(
         target,
         "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n\
@@ -353,6 +354,7 @@ printf 'PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n' > "$
 #[cfg(unix)]
 #[test]
 fn degenerate_pep_is_re_estimated_with_the_run_s_weights() {
+    let _guard = serial();
     // The first call (target-decoy competition) returns PEP = 1 for every
     // accepted PSM; the repair call must be static, take the first call's
     // weights, drop `-Y`, and its PEP replaces the failed one. q-values stay.
@@ -392,6 +394,7 @@ fn degenerate_pep_is_re_estimated_with_the_run_s_weights() {
 #[cfg(unix)]
 #[test]
 fn a_repair_that_fails_or_stays_degenerate_keeps_the_run() {
+    let _guard = serial();
     for (static_pep, static_exit) in [("1", 0), ("0.01", 3)] {
         let tmp = tempfile::tempdir().unwrap();
         let pin = tmp.path().join("run.pin");
@@ -412,6 +415,7 @@ fn a_repair_that_fails_or_stays_degenerate_keeps_the_run() {
 #[cfg(unix)]
 #[test]
 fn a_working_pep_is_not_touched() {
+    let _guard = serial();
     // A stand-in whose `-Y` output is fine: one call, no repair.
     let tmp = tempfile::tempdir().unwrap();
     let pin = tmp.path().join("run.pin");
@@ -422,6 +426,17 @@ fn a_working_pep_is_not_touched() {
     assert_eq!(targets["r/1"].pep, 0.002);
     let log = std::fs::read_to_string(tmp.path().join("calls.log")).unwrap();
     assert_eq!(log.lines().count(), 1);
+}
+
+/// The tests that write and run a stand-in `percolator` take this lock: a
+/// script that was just written can fail to execute ("text file busy") while a
+/// concurrent test forks.
+#[cfg(unix)]
+static STAND_IN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(unix)]
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    STAND_IN.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Result files as Percolator 3.7.1 writes them: a `filename` column after
@@ -507,6 +522,7 @@ fn write_five_run_pin(path: &std::path::Path) {
 #[cfg(unix)]
 #[test]
 fn per_run_q_values_replace_the_pooled_ones_and_leave_no_scratch() {
+    let _guard = serial();
     let tmp = tempfile::tempdir().unwrap();
     let pin = tmp.path().join("set.pin");
     write_five_run_pin(&pin);
@@ -573,6 +589,7 @@ fn per_run_q_values_replace_the_pooled_ones_and_leave_no_scratch() {
 #[cfg(unix)]
 #[test]
 fn a_pin_of_one_run_or_without_run_names_is_left_pooled_byte_for_byte() {
+    let _guard = serial();
     let tmp = tempfile::tempdir().unwrap();
     let backend = PercolatorBackend::Binary(write_stand_in(tmp.path()));
     for (text, run) in [
@@ -610,6 +627,7 @@ fn a_pin_of_one_run_or_without_run_names_is_left_pooled_byte_for_byte() {
 #[cfg(unix)]
 #[test]
 fn an_unreadable_pin_leaves_the_q_values_pooled() {
+    let _guard = serial();
     // A PIN that cannot be read for the per-run pass is a warning, not an
     // error: nothing changes.
     let tmp = tempfile::tempdir().unwrap();

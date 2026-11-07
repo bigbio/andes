@@ -915,7 +915,14 @@ pub fn apply_per_run_q(
                             .map_err(PercolatorError::Io)
                     } else {
                         let pass = ResultPaths::new(&out_dir, &format!("{stem}.run{}", first + i));
-                        score_run(backend, &rp.path, &out_dir, &pass, &main.weights, extra_args)
+                        score_run(
+                            backend,
+                            &rp.path,
+                            &out_dir,
+                            &pass,
+                            &main.weights,
+                            extra_args,
+                        )
                     };
                     match outcome {
                         Ok(r) => {

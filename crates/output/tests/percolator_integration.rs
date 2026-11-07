@@ -283,16 +283,6 @@ fn pep_of_accepted_psms_is_below_one_or_skip() {
         .filter(|e| e.file_name().to_string_lossy().contains(".pep."))
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
-    // A single-run PIN keeps the main run's result file as Percolator wrote it.
-    let target =
-        std::fs::read_to_string(tmp.path().join("run.percolator.target.psms.txt")).unwrap();
-    assert_eq!(
-        target,
-        "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n\
-         r/1\t3.0\t0.001\t1\tK.AAK.R\tsp|P1\n\
-         r/2\t2.0\t0.004\t1\tK.BBK.R\tsp|P2\n\
-         r/3\t0.1\t0.4\t1\tK.CCK.R\tsp|P3\n"
-    );
 }
 
 /// A stand-in `percolator` script: with `-Y` it writes `y_pep` for every PSM
@@ -389,6 +379,16 @@ fn degenerate_pep_is_re_estimated_with_the_run_s_weights() {
         .filter(|e| e.file_name().to_string_lossy().contains(".pep."))
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
+    // A single-run PIN keeps the main run's result file as Percolator wrote it.
+    let target =
+        std::fs::read_to_string(tmp.path().join("run.percolator.target.psms.txt")).unwrap();
+    assert_eq!(
+        target,
+        "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n\
+         r/1\t3.0\t0.001\t1\tK.AAK.R\tsp|P1\n\
+         r/2\t2.0\t0.004\t1\tK.BBK.R\tsp|P2\n\
+         r/3\t0.1\t0.4\t1\tK.CCK.R\tsp|P3\n"
+    );
 }
 
 #[cfg(unix)]

@@ -79,6 +79,7 @@ pub mod quant_out;
 pub use quant_out::{
     read_lfq_parquet, read_tmt_parquet, write_lfq_parquet, write_tmt_parquet,
     write_tmt_parquet_mbr, LfqRow, LfqTableMeta, ModRecord, QuantId, TmtRow, TransferInfo,
+    UnmixMeta,
 };
 
 pub mod run_quant_table;

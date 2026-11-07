@@ -87,7 +87,7 @@ Legend: 🟢 andes better · 🟡 similar · 🔴 andes worse · ⚪ no comparis
 | UPS1 lowest levels, PXD009740 / PXD009815 | precursors within 2x of truth | 502 / 24 | FragPipe 458 / 50 | 🟢 / 🔴 | **minor**, lowest amounts only. No: engine (faint-transfer detection) |
 | Known-absent yeast, PXD014415 | false-transfer rate | 0.20% (0.08% at `quant_q ≤ 0.01`) | FragPipe 21.1: 0.09% | 🔴 at default, 🟡 at `quant_q ≤ 0.01` | **minor**, usable. Yes: filter `quant_q ≤ 0.01` (0.08%, at fewer transfers) |
 | Blank run, PXD016921 | rows reported in the blank | 150 | FragPipe 21.1: 8 | 🔴 | **moderate** for low-input or blank-adjacent runs. No: `quant_q ≤ 0.01` still leaves 144; mostly carry-over (real ions) |
-| TMT knockout, PXD017803 SPS / RTS / hrMS2 | interference (lower is better) | 0.062 / 0.027 / 0.192 | MaxQuant 2.7: 0.054 / 0.038 / 0.156 | 🟡 / 🟢 / 🔴 (🟢 0.000 with `--tmt-unmix`) | **moderate** on hrMS2, usable with the option. Yes for hrMS2: `--tmt-unmix` (0.000) or a purity ≥ 0.9 filter (0.135) |
+| TMT knockout, PXD017803 SPS / RTS / hrMS2 | interference (lower is better) | 0.062 / 0.027 / 0.192 | MaxQuant 2.7: 0.054 / 0.038 / 0.156 | 🟡 / 🟢 / 🔴 (🟢 0.000 with `--tmt-unmix on`) | **moderate** on hrMS2, usable with the option. Yes for hrMS2: `--tmt-unmix on` (0.000) or a purity ≥ 0.9 filter (0.135) |
 | TMT knockout, hrMS2 | PSMs with reporter ions evaluated (scans whose range records the reporters) | 3,278 | FragPipe 21.1: 3,038; MaxQuant 2.7: 2,241 | 🟢 | — |
 | TMT known ratios, PXD007683 | PSMs | 149,121 | MaxQuant 2.7: 97,107 | 🟢 +54% | — |
 | TMT known ratios, PXD007683 | protein ratio error (MAE A/C) | 0.213 | MaxQuant 2.7: 0.159 | 🔴 | **moderate**, usable. Partly: a stricter purity filter; the rest is extraction and roll-up |

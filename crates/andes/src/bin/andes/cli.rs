@@ -40,6 +40,23 @@ pub enum Protocol {
     Standard,
 }
 
+/// `--tmt-unmix`: whether and how strongly the co-isolation interference of
+/// high-resolution MS2 reporter ions is removed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum TmtUnmix {
+    /// Remove it at a strength learned per run (a no-op without `--tmt`, and
+    /// for low-resolution MS2 or MS3 reporters).
+    #[default]
+    #[clap(name = "auto")]
+    Auto,
+    /// Write no interference estimate.
+    #[clap(name = "off")]
+    Off,
+    /// Remove all of the estimated interference.
+    #[clap(name = "on")]
+    On,
+}
+
 /// Enzymatic-cleavage enforcement at peptide span boundaries:
 /// 2=fully, 1=semi, 0=non-specific.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -902,9 +919,13 @@ pub(crate) struct SearchArgs {
     /// summed reporter signal by the precursor's, the co-isolated ions' and
     /// the sub-threshold ion current in the isolation window of the bordering
     /// MS1 scans; the interference is removed with the run's mean reporter
-    /// profile. High-resolution MS2 reporters only (`--tmt-level 2`).
-    #[arg(long = "tmt-unmix", default_value_t = false)]
-    pub(crate) tmt_unmix: bool,
+    /// profile. `on` removes all of it; `auto` scales it by a strength learned
+    /// per run (the one under which a protein's interference-heavy PSMs best
+    /// agree with its clean PSMs; recorded in the `tmt.parquet` metadata);
+    /// `off` writes nothing. `auto` and `on` apply to high-resolution MS2
+    /// reporters only (`--tmt-level 2`), and `on` needs `--tmt`.
+    #[arg(long = "tmt-unmix", value_enum, default_value = "auto")]
+    pub(crate) tmt_unmix: TmtUnmix,
 
     /// Label-free MS1 quantification of the confident precursors: isotope
     /// chromatograms are extracted around each identified peptidoform's

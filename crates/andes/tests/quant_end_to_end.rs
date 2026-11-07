@@ -232,8 +232,8 @@ fn tmt10_ms2_reporters_purity_and_correction() {
     assert!(names.contains(&"intensities".to_string()));
 }
 
-/// `--tmt-unmix` adds its block after the existing columns and leaves them
-/// unchanged; the fixture's handful of scans is too few to fit the run's
+/// `--tmt-unmix on|auto` adds its block after the existing columns and leaves
+/// them unchanged (`off` writes none); the fixture's handful of scans is too few to fit the run's
 /// interference model, so the block stays empty.
 #[test]
 fn tmt10_unmix_block_follows_the_existing_columns() {
@@ -269,18 +269,24 @@ fn tmt10_unmix_block_follows_the_existing_columns() {
         let (header, rows) = read_table(&t);
         (header, rows, unmix_key)
     };
-    let (plain_h, plain_rows, plain_key) = run("plain", &[]);
-    let (h, rows, key) = run("unmix", &["--tmt-unmix"]);
-    assert_eq!(plain_key.as_deref(), Some("false"));
-    assert_eq!(key.as_deref(), Some("true"));
-    assert!(!rows.is_empty());
-    assert_eq!(h[..plain_h.len()], plain_h[..]);
-    assert_eq!(h.len(), plain_h.len() + 1 + 10);
-    assert_eq!(h[plain_h.len()], "interference");
-    assert_eq!(h[plain_h.len() + 1], "unmix_tmt_126");
-    for (r, p) in rows.iter().zip(&plain_rows) {
-        assert_eq!(r[..p.len()], p[..]);
-        assert!(r[p.len()..].iter().all(String::is_empty), "{r:?}");
+    let (plain_h, plain_rows, plain_key) = run("plain", &["--tmt-unmix", "off"]);
+    assert_eq!(plain_key.as_deref(), Some("off"));
+    // `auto` is the default.
+    for (stem, extra, mode) in [
+        ("unmix", &["--tmt-unmix", "on"][..], "on"),
+        ("auto", &[][..], "auto"),
+    ] {
+        let (h, rows, key) = run(stem, extra);
+        assert_eq!(key.as_deref(), Some(mode));
+        assert!(!rows.is_empty());
+        assert_eq!(h[..plain_h.len()], plain_h[..]);
+        assert_eq!(h.len(), plain_h.len() + 1 + 10);
+        assert_eq!(h[plain_h.len()], "interference");
+        assert_eq!(h[plain_h.len() + 1], "unmix_tmt_126");
+        for (r, p) in rows.iter().zip(&plain_rows) {
+            assert_eq!(r[..p.len()], p[..]);
+            assert!(r[p.len()..].iter().all(String::is_empty), "{r:?}");
+        }
     }
 }
 

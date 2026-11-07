@@ -13,7 +13,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from quant_eval import absence as AB  # noqa: E402
-from quant_eval import board, de as DE, lowlevel as LL, metrics  # noqa: E402
+from quant_eval import board, de as DE, readers, suite, lowlevel as LL, metrics  # noqa: E402
 from quant_eval.design import Design  # noqa: E402
 
 LEVELS = [1, 2, 4, 8, 16, 32]
@@ -461,6 +461,89 @@ class Reviewed(unittest.TestCase):
         new = board.build_rows(res, "42", ["main"], order, legacy=False)
         self.assertNotIn("nan %", new)
         self.assertNotIn("within 2x %", new.split("\n")[0].replace("L1 within-2x %", ""))
+
+
+class MatchQ(unittest.TestCase):
+    """MaxQuant arm with the match-between-runs rows kept at Match q-value <= 0.01."""
+
+    HDR = "Modified sequence\tCharge\tRaw file\tType\tIntensity\tReverse\tPotential contaminant\tMatch q-value\n"
+
+    def evidence(self, tmp, rows, hdr=None):
+        f = os.path.join(tmp, "evidence.txt")
+        with open(f, "w") as fh:
+            fh.write(hdr or self.HDR)
+            for r in rows:
+                fh.write("\t".join(str(x) for x in r) + "\n")
+        return f
+
+    def test_filter_drops_match_rows_above_the_limit_only(self):
+        rows = [("_AAAAAK_", 2, "r1", "MULTI-MSMS", 100.0, "", "", ""),
+                ("_AAAAAK_", 2, "r2", "MULTI-MATCH", 50.0, "", "", 0.004),     # kept
+                ("_AAAAAK_", 2, "r3", "MULTI-MATCH", 40.0, "", "", 0.5),       # dropped
+                ("_CCCCCK_", 2, "r1", "MULTI-MATCH-MSMS", 30.0, "", "", 0.02),  # dropped
+                ("_DDDDDK_", 2, "r1", "MULTI-MATCH", 20.0, "", "", ""),       # no q-value: dropped
+                ("_EEEEEK_", 2, "r2", "MSMS", 10.0, "", "", "")]
+        with tempfile.TemporaryDirectory() as tmp:
+            f = self.evidence(tmp, rows)
+            runs = ["r1", "r2", "r3"]
+            full = readers.read_maxquant(f, runs)
+            q = readers.read_maxquant(f, runs, match_q=0.01)
+        self.assertEqual(len(full), 6)
+        self.assertEqual(len(q), 3)
+        self.assertEqual(int(q.is_transfer.sum()), 1)                          # only the r2 match row of AAAAAK survives
+        self.assertNotEqual(readers.G.tag_of(full), readers.G.tag_of(q))     # a different lineage tag
+        self.assertEqual(sorted(q.run), ["r1", "r2", "r2"])
+
+    def test_missing_or_empty_column_is_na(self):
+        rows = [("_AAAAAK_", 2, "r1", "MULTI-MATCH", 50.0, "", "")]
+        with tempfile.TemporaryDirectory() as tmp:
+            f = self.evidence(tmp, rows, "Modified sequence\tCharge\tRaw file\tType\tIntensity\tReverse\tPotential contaminant\n")
+            with self.assertRaises(ValueError):
+                readers.read_maxquant(f, ["r1"], match_q=0.01)
+            g = self.evidence(tmp, [("_AAAAAK_", 2, "r1", "MULTI-MATCH", 50.0, "", "", "")])
+            with self.assertRaises(ValueError):
+                readers.read_maxquant(g, ["r1"], match_q=0.01)
+            self.assertEqual(len(readers.read_maxquant(g, ["r1"])), 1)          # the as-reported arm is unchanged
+
+    def test_suite_adds_the_arm_and_the_manifest_can_override_the_table(self):
+        D = {"tools": {"maxquant": {"MQ": "a.txt"}, "fragpipe": {"FP": "f.tsv"}}}
+        a = suite.tool_args(D, "/base")
+        self.assertIn("--maxquant-matchq", a)
+        self.assertEqual(a[a.index("--maxquant-matchq") + 1], "MQ_q01:/base/a.txt:0.01")
+        D["tools"]["maxquant_matchq"] = {"MQ_q01": "/other/rerun.txt"}
+        a = suite.tool_args(D, "/base")
+        self.assertEqual(a[a.index("--maxquant-matchq") + 1], "MQ_q01:/other/rerun.txt:0.01")
+        self.assertNotIn("--maxquant-matchq", suite.tool_args({"tools": {"fragpipe": {"FP": "f.tsv"}}}, "/base"))
+
+    def test_common_q_family_changes_with_the_filtered_arm(self):
+        # the filtered arm tests fewer proteins: the family it defines is smaller than the as-reported one
+        tmp = tempfile.TemporaryDirectory()
+        t = DEFamilies()
+        t.setUp()
+        P_all = t.P
+        P_q = t.P.copy()
+        P_q.loc[[f"U{i}" for i in range(15)], ["B1", "B2", "B3"]] = np.nan
+        com = DE.common_sets([P_all, P_all], t.design)
+        com_q = DE.common_sets([P_all, P_q], t.design)
+        self.assertEqual(len(com[("A", "B")]), 100)
+        self.assertEqual(len(com_q[("A", "B")]), 85)
+        _, _, _, fam = DE.de_all(P_all, t.design, t.sp, ("UPS", "YEAST"), fam_common=com, fam_extra={"common_q": com_q})
+        self.assertEqual(fam["common"]["tested"], 100)
+        self.assertEqual(fam["common_q"]["tested"], 85)
+        t.tearDown()
+        tmp.cleanup()
+
+    def test_board_label_legacy_skip_and_column(self):
+        def arm(kind):
+            return {"precursors": 10, "proteins_ge2": 5, "ident_rows": 20, "transfer_rows": 3}
+        r = {"dataset": "SET", "suite_dataset": "u", "seed": "42", "builds": ["main"], "arm_roles": {"main": {"kind": "andes"}, "MQ": {"kind": "maxquant"}, "MQ_q01": {"kind": "maxquant_q"}},
+             "arms": {"main": arm("a"), "MQ": arm("m"), "MQ_q01": arm("q")}}
+        res = {"u": {"42": r}}
+        legacy = board.build_rows(res, "42", ["main"], ["u"], legacy=True)
+        new = board.build_rows(res, "42", ["main"], ["u"], legacy=False)
+        self.assertNotIn("match q", legacy)
+        self.assertIn("MaxQuant (MBR, match q <= 0.01)", new)
+        self.assertEqual(len(new.split("\n")[0].split("|")), len(new.split("\n")[2].split("|")))
 
 
 if __name__ == "__main__":

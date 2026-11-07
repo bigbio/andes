@@ -56,11 +56,18 @@ def _finish(d, tag):
     return G.tagged(d[["key", "run", "quantity", "is_transfer", "library_q", "tq", "thr"]], tag)
 
 
-def read_maxquant(path, runs):
+def read_maxquant(path, runs, match_q=None):
+    """MaxQuant evidence.txt -> one arm table. `match_q` (e.g. 0.01) drops the match-between-runs rows (Type MULTI-MATCH, MULTI-MATCH-MSMS) whose
+    `Match q-value` is above it or missing: MaxQuant with matchBetweenRunsFdr only fills that column and removes no row, so the as-reported table
+    carries every match row. An evidence table without the column (or with the column empty) raises ValueError with `match_q` set."""
     r, cols = _read_tsv(path)
     for c in ("Modified sequence", "Charge", "Raw file", "Type", "Intensity"):
         if c not in cols:
             raise SystemExit(f"{path}: missing column {c!r}")
+    if match_q is not None and "Match q-value" not in cols:
+        raise ValueError(f"{path}: no 'Match q-value' column")
+    if match_q is not None and not any((row.get("Match q-value") or "").strip() for row in r):
+        raise ValueError(f"{path}: 'Match q-value' is empty")
     # MULTI-MATCH evidence rows of some versions carry no 'Modified sequence': take it from 'Mod. peptide ID'
     modseq_of = {}
     if "Mod. peptide ID" in cols:
@@ -86,6 +93,9 @@ def read_maxquant(path, runs):
         if not (q > 0):
             drop["no_intensity"] += 1
             continue
+        if match_q is not None and row["Type"].strip().endswith(("MULTI-MATCH", "MULTI-MATCH-MSMS")) and not (_fnum(row.get("Match q-value")) <= match_q):
+            drop["match_q"] = drop.get("match_q", 0) + 1
+            continue
         try:
             key = maxquant_key(row["Modified sequence"], int(float(row["Charge"])))
         except ValueError:
@@ -97,7 +107,7 @@ def read_maxquant(path, runs):
             g[1] = False
     print(f"maxquant {path}: precursor x run groups {len(groups)} dropped {drop}", file=sys.stderr)
     d = pd.DataFrame([(k, rn, g[0], g[1]) for (k, rn), g in groups.items()], columns=["key", "run", "quantity", "is_transfer"])
-    return _finish(remap_runs(d, runs), G.run_tag("maxquant-evidence-Intensity", path))
+    return _finish(remap_runs(d, runs), G.run_tag("maxquant-evidence-Intensity" + ("" if match_q is None else f"-matchq{match_q}"), path))
 
 
 def read_fragpipe(path, runs):

@@ -77,6 +77,8 @@ def label(n, builds):
         for suf, nm in (("_V", "V"), ("_H", "H"), ("_I", "no MBR"), ("_M", "M (matched)")):
             if n == b + suf:
                 return f"andes {b} {nm}"
+    if n.startswith("MQ_q"):
+        return "MaxQuant (MBR, match q <= 0.01)"
     if not _STATE["legacy"]:
         if n.startswith("FL"):
             return f"{n} (FlashLFQ, peptide level)"
@@ -87,8 +89,9 @@ def label(n, builds):
 NEW_COLS = (" L1 levels (amol) | L1 rows (+ unscored) | L1 within-2x % | L1 within-2x %, unscored counted as not within | L1 med abs err |"
             " L1 @ matched rows, random rows (headline) | L1 @ matched rows, best first (order differs per arm) |"
             " absence, noise removed (lower bound): enriched (enriched + no reference), tr / id | blank id / tr / carry |"
-            " DE inter, signed: TP / false (wrong sign) | DE common: TP / FP | DE common, signed: TP / false (wrong sign) | DE tested rows own / inter / common |")
-N_NEW = 13
+            " DE inter, signed: TP / false (wrong sign) | DE common: TP / FP | DE common, signed: TP / false (wrong sign) | DE tested rows own / inter / common |"
+            " DE common-q (match-q MaxQuant in the family), signed: TP / false (wrong sign) [tested rows] |")
+N_NEW = 14
 
 
 def plain_arms(r, builds):
@@ -140,6 +143,9 @@ def new_cells(r, n, builds, matched):
     if fc:
         c[10] = f"{fc['TP']:,} / {fc['FP']:,}"
         c[11] = f"{fc['TPs']:,} / {fc['FP'] + fc['WS']:,} ({fc['WS']})"
+    fq = g(r, "arms", n, "de_family", "common_q")
+    if fq:
+        c[13] = f"{fq['TPs']:,} / {fq['FP'] + fq['WS']:,} ({fq['WS']}) [{fq['tested']:,}]"
     fo = g(r, "arms", n, "de_family", "own")
     if fo and fi and fc:
         c[12] = f"{fo['tested']:,} / {fi['tested']:,} / {fc['tested']:,}"
@@ -181,6 +187,8 @@ def build_rows(R, seed, builds, order, legacy=False):
         ca = r.get("cell_accuracy") or {}
         for n in A:
             a = A[n]
+            if legacy and r["arm_roles"][n]["kind"] == "maxquant_q":
+                continue   # the match-q MaxQuant arm is not part of the legacy board
             plain = n in builds or r["arm_roles"][n]["kind"] != "andes"
             acc = (ca.get("arms") or {}).get(n) if plain else None
             ud = a.get("ups_design") or {}
@@ -329,7 +337,10 @@ def main(argv=None):
                 r = S[a.seed if a.seed in S else sorted(S)[0]]
                 fam = r.get("families") or {}
                 if fam.get("common_arms"):
-                    print(f"\nCommon DE family of {r['dataset']}: arms {', '.join(label(x, builds) for x in fam['common_arms'])}; every other arm is scored on the part of it that it can test.")
+                    print(f"\nCommon DE family of {r['dataset']}: arms {', '.join(label(x, builds) for x in fam['common_arms'])}; every other arm is scored on the part of it that it can test."
+                          + (f" Common-q family: arms {', '.join(label(x, builds) for x in fam['common_q_arms'])}." if fam.get("common_q_arms") else ""))
+                for na, why in (r.get("na_arms") or {}).items():
+                    print(f"\n{r['dataset']}: {label(na, builds)} is n/a ({why.split(': ', 1)[-1]}).")
     if a.detail:
         print(detail_tables(R, a.seed, builds, order))
 

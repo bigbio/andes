@@ -155,7 +155,7 @@ def common_sets(tables, design):
     return {k: set.intersection(*[t.get(k, set()) for t in per]) for k in per[0]}
 
 
-def de_all(P, design, prot_sp, classes, fam_inter=None, fam_union=None, fam_common=None, fam_common_all=None):
+def de_all(P, design, prot_sp, classes, fam_inter=None, fam_union=None, fam_common=None, fam_common_all=None, fam_extra=None):
     """Every condition pair (lo < hi) with >= 2 replicates on each side.
     Returns (totals of the own family, per-pair rows, log2FC error summaries by group|species, family summaries).
     fam_inter / fam_union: protein sets of the shared arms (see module doc); without them only the own family is scored.
@@ -176,6 +176,8 @@ def de_all(P, design, prot_sp, classes, fam_inter=None, fam_union=None, fam_comm
         fams["common"] = []
     if fam_common_all is not None:
         fams["common_all"] = []
+    for name in (fam_extra or {}):
+        fams[name] = []
     ftot = {f: {k: 0 for k in ("TP", "TPs", "FP", "WS", "NS", "TP5", "TPs5", "FP5", "WS5", "NS5", "tested", "tested_null")} for f in fams}
     aucs = {f: [] for f in fams}
     for i, lo in enumerate(levels):
@@ -198,7 +200,7 @@ def de_all(P, design, prot_sp, classes, fam_inter=None, fam_union=None, fam_comm
                 views["inter"] = de_table(P_inter, r1, r2, prot_sp, lambda s, lo=lo, hi=hi: design.expected_fc(s, lo, hi))
             if fam_union is not None:
                 views["union"] = union_view(T, fam_union, prot_sp)
-            for name, fc_ in (("common", fam_common), ("common_all", fam_common_all)):
+            for name, fc_ in (("common", fam_common), ("common_all", fam_common_all), *(fam_extra or {}).items()):
                 if fc_ is not None:
                     views[name] = de_table(P[P.index.isin(fc_.get((lo, hi), set()))], r1, r2, prot_sp, lambda s, lo=lo, hi=hi: design.expected_fc(s, lo, hi))
             for f, V in views.items():

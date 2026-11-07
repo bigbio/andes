@@ -48,6 +48,9 @@ def parse_args(argv=None):
     ap.add_argument("--andes", action="append", default=[], metavar="NAME:RULE[@LIBQ]:PATH",
                     help="RULE in default | all | hard-cut | weights | weights-bias; @LIBQ sets the library_q limit of the arm (default 0.01), e.g. weights@0.05")
     ap.add_argument("--maxquant", action="append", default=[], metavar="NAME:PATH")
+    ap.add_argument("--maxquant-matchq", action="append", default=[], metavar="NAME:PATH[:Q]",
+                    help="MaxQuant evidence.txt with the match-between-runs rows kept only at Match q-value <= Q (default 0.01); a context arm that joins no shared family; "
+                         "an evidence table without a filled Match q-value column makes the arm n/a (recorded in `na_arms`)")
     ap.add_argument("--fragpipe", action="append", default=[], metavar="NAME:PATH")
     ap.add_argument("--flashlfq", action="append", default=[], metavar="NAME:PEAKS[:PIPQ]",
                     help="FlashLFQ QuantifiedPeaks.tsv (PIP-ECHO MBR FDR); optional PIPQ keeps MBR peaks with PIP q-value <= PIPQ")
@@ -88,7 +91,11 @@ def prepare(d, kind, how, prot, cond_of, runs):
     return d, off, info
 
 
+NA_ARMS = {}
+
+
 def load_arms(a, runs):
+    NA_ARMS.clear()
     tabs, kinds = {}, {}
     for spec in a.andes:
         name, rule, path = spec.split(":", 2)
@@ -101,6 +108,15 @@ def load_arms(a, runs):
         name, path = spec.split(":", 1)
         tabs[name] = R.read_maxquant(path, runs)
         kinds[name] = {"kind": "maxquant"}
+    for spec in a.maxquant_matchq:
+        parts = spec.split(":")
+        name, path, q = parts[0], parts[1], float(parts[2]) if len(parts) > 2 else 0.01
+        try:
+            tabs[name] = R.read_maxquant(path, runs, match_q=q)
+            kinds[name] = {"kind": "maxquant_q", "match_q": q}
+        except ValueError as e:
+            print(f"arm {name} n/a: {e}", file=sys.stderr)
+            NA_ARMS[name] = str(e)
     for spec in a.fragpipe:
         name, path = spec.split(":", 1)
         tabs[name] = R.read_fragpipe(path, runs)
@@ -142,7 +158,7 @@ def evaluate(a):
         prot_sp = {}
 
     primary = next(n for n, k in kinds.items() if k["kind"] == "andes") if any(k["kind"] == "andes" for k in kinds.values()) else None
-    tools = [n for n, k in kinds.items() if k["kind"] not in ("andes", "sage", "flashlfq")]   # Sage and FlashLFQ join no shared family (context arms)
+    tools = [n for n, k in kinds.items() if k["kind"] not in ("andes", "sage", "flashlfq", "maxquant_q")]   # Sage, FlashLFQ and the match-q MaxQuant arm join no shared family (context arms)
     shared_arms = ([primary] if primary else []) + tools
     cells = lambda d: set((d.key + "|" + d.run).values)
     shared = set.intersection(*[cells(tabs[n]) for n in shared_arms])
@@ -182,13 +198,19 @@ def evaluate(a):
         # (the first andes arm and the tool arms whose name does not end in noMBR), `common_all` over every shared arm
         mbr_arms = [n for n in fam_arms if not n.lower().replace("_", "").endswith("nombr")]
         com = DE.common_sets([PM[n][0] for n in mbr_arms], design)
+        # the same family with the match-q filtered MaxQuant arm in place of the as-reported one
+        q_arms = [n for n in kinds if kinds[n]["kind"] == "maxquant_q" and n in PM]
+        com_q = None
+        if q_arms:
+            q_names = [n for n in mbr_arms if kinds[n]["kind"] != "maxquant"] + q_arms
+            com_q = DE.common_sets([PM[n][0] for n in q_names], design)
         com_all = DE.common_sets([PM[n][0] for n in fam_arms], design)
         RES["families"] = {"arms": fam_arms, "intersection": len(inter), "union": len(union),
-                           "own": {n: int(len(PM[n][0])) for n in PM}, "common_arms": mbr_arms,
+                           "own": {n: int(len(PM[n][0])) for n in PM}, "common_arms": mbr_arms, **({"common_q_arms": q_names, "common_q_rows": int(sum(len(v) for v in com_q.values()))} if com_q else {}),
                            "common_rows": int(sum(len(v) for v in com.values())), "common_all_rows": int(sum(len(v) for v in com_all.values()))}
         for n, (P, _) in PM.items():
             o = RES["arms"][n]
-            o["de"], o["pairs"], o["prot_err"], o["de_family"] = de_all(P, design, prot_sp, classes, inter, union, com, com_all)
+            o["de"], o["pairs"], o["prot_err"], o["de_family"] = de_all(P, design, prot_sp, classes, inter, union, com, com_all, {"common_q": com_q} if com_q else None)
 
     def alt_pass(label, norm):
         """DE of every arm after another run normalisation `norm(raw) -> (table, flag, n_ref)`; own intersection family."""
@@ -253,6 +275,8 @@ def evaluate(a):
             RES["absence_reference"] = {"table": "andes every-row", "arm": first.split(":", 1)[0], "rows": int(len(ref_raw))}
             del ref_raw
         RES["absence_classes"] = {n: AB.absence_classes(raw, design, sp, refs=refs) for n, raw in tabs.items()}
+    if NA_ARMS:
+        RES["na_arms"] = dict(NA_ARMS)
     if design.blank:
         RES["carry_over"] = {n: RT.carry_over(raw, design, sp) for n, raw in tabs.items()}
         RES["blank_split"] = {n: AB.blank_split(raw, design) for n, raw in tabs.items()}

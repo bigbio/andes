@@ -75,6 +75,14 @@ def tool_args(D, base):
             else:
                 pth = _p(base, pth)
             a += [flag, f"{name}:{pth}"]
+    # the match-q filtered MaxQuant arm: the manifest's `maxquant_matchq` {name: evidence.txt} (an evidence table that carries a filled Match q-value),
+    # by default the evidence table of the as-reported arm `MQ`
+    tools = D.get("tools") or {}
+    mq_q = tools.get("maxquant_matchq")
+    if mq_q is None and "MQ" in tools.get("maxquant", {}):
+        mq_q = {"MQ_q01": tools["maxquant"]["MQ"]}
+    for name, pth in (mq_q or {}).items():
+        a += ["--maxquant-matchq", f"{name}:{_p(base, pth)}:0.01"]
     return a
 
 

@@ -9,7 +9,7 @@ flowchart TD
     S["Search"] --> PIN["PSMs"]
     PIN --> PC["Percolator q-values"]
     PC --> L{"Label type"}
-    L -->|"TMT / iTRAQ"| T["--tmt<br/>reporter ions per PSM<br/>impurity correction<br/>quantification gate<br/>optional --tmt-unmix"]
+    L -->|"TMT / iTRAQ"| T["--tmt<br/>reporter ions per PSM<br/>impurity correction<br/>quantification gate<br/>--tmt-unmix"]
     L -->|"label-free"| F["--lfq<br/>MS1 features per precursor<br/>isotope-envelope matching"]
     F --> M["--mbr<br/>library + RT alignment across runs<br/>transfers with their own q-values"]
     T --> O["QPX feature view<br/>(Parquet)"]

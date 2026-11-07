@@ -31,7 +31,7 @@ Verdicts compare andes with the best other tool measured on the same data: **wel
 - ProteoBench QExactive: lower median error than the best leaderboard entry (0.161 against 0.190).
 - DE true positives (common-tested family, sign-aware): ahead on QE (+22% over MaxQuant, +11% over FragPipe, with more false calls than both); tie on the UPS1 and Astral sets against MaxQuant as reported. MaxQuant 2.7 does not remove its match-between-runs rows; with its matches filtered at Match q-value ≤ 0.01 (83–94% of its transfers removed) andes is ahead on true positives on all four sets (+5% to +15%) and filtered MaxQuant has the fewest false calls on all four (andes 1.9–2.5x).
 - TMT match between runs: the transferred values are as accurate as identified ones (excess −0.05
-  points), against +1.53 (MaxQuant) and +0.40 (SIMSI-Transfer); `--tmt-unmix` removes hrMS2
+  points), against +1.53 (MaxQuant) and +0.40 (SIMSI-Transfer); `--tmt-unmix on` removes hrMS2
   interference.
 - Protein CV: ahead on 3 of 6 truth sets.
 
@@ -95,7 +95,7 @@ Legend: 🟢 andes better · 🟡 similar · 🔴 andes worse · ⚪ no comparis
 | UPS1 lowest three levels, PXD009740 (170/382/859 amol) / PXD009815 (10/50/100 amol) | precursors within 2x of truth, as reported | 502 / 24 | MaxQuant 417 / 23; FragPipe 458 / 50 | 🟢 ahead of both on PXD009740 and 🔴 behind FragPipe on PXD009815 as reported; at equal rows FragPipe leads on both (458 against 437; 50 against 22) and andes leads MaxQuant on PXD009740 (437 against 341) | **minor**, lowest amounts only. No: engine (faint-transfer detection) |
 | Known-absent yeast, PXD014415 | false-transfer rate, all yeast rows (classified: enriched only 0.052%; with no-reference rows 0.052%) | 0.20% (0.08% at `quant_q ≤ 0.01`) | FragPipe 21.1: 0.09% (enriched only 0.010%; with no-reference rows 0.072%) | 🔴 at default, 🟡 at `quant_q ≤ 0.01`; classified: 🔴 on enriched rows (the no-reference reading uses andes' table as reference, not neutral) | **minor**, usable. Yes: filter `quant_q ≤ 0.01` (0.08%, at fewer transfers) |
 | Blank run, PXD016921 | rows reported in the blank | 150 (85 identified, 65 transferred) | MaxQuant 105 (20 / 85, unfiltered matches; 29 (20 / 9) at Match q-value ≤ 0.01); FragPipe 21.1: 8 (8 / 0) | 🔴 | **moderate** for low-input or blank-adjacent runs. No: `quant_q ≤ 0.01` still leaves 144; mostly carry-over (real ions) |
-| TMT knockout, PXD017803 SPS / RTS / hrMS2 | interference (lower is better) | 0.062 / 0.027 / 0.192 | MaxQuant 2.7: 0.054 / 0.038 / 0.156 | 🟡 / 🟢 / 🔴 (🟢 0.000 with `--tmt-unmix`) | **moderate** on hrMS2, usable with the option. Yes for hrMS2: `--tmt-unmix` (0.000) or a purity ≥ 0.9 filter (0.135) |
+| TMT knockout, PXD017803 SPS / RTS / hrMS2 | interference (lower is better) | 0.062 / 0.027 / 0.192 | MaxQuant 2.7: 0.054 / 0.038 / 0.156 | 🟡 / 🟢 / 🔴 (🟢 0.000 with `--tmt-unmix on`) | **moderate** on hrMS2, usable with the option. Yes for hrMS2: `--tmt-unmix on` (0.000) or a purity ≥ 0.9 filter (0.135) |
 | TMT knockout, hrMS2 | PSMs with reporter ions evaluated (scans whose range records the reporters) | 3,278 | FragPipe 21.1: 3,038; MaxQuant 2.7: 2,241 | 🟢 | — |
 | TMT known ratios, PXD007683 | PSMs | 149,121 | MaxQuant 2.7: 97,107 | 🟢 +54% | — |
 | TMT known ratios, PXD007683 | protein ratio error (MAE A/C) | 0.213 | MaxQuant 2.7: 0.159 | 🔴 | **moderate**, usable. Partly: a stricter purity filter; the rest is extraction and roll-up |
@@ -682,14 +682,14 @@ are from 2026-10 and were read again unchanged.
   (OpenMS IsobaricWorkflow, development version 96f263c) 0.072, 0.037 and 0.180 on the same three
   acquisitions. On hrMS2 only 4,502 of the 13,474 PSMs have a reporter scan whose range covers the
   reporter ions (3,481 of them pass the gate; 388 fail the purity and 633 the PEP criterion).
-  `--tmt-unmix` on hrMS2 sets the median knockout ratio to 0.000 at a background CV of 0.123
+  `--tmt-unmix on` on hrMS2 sets the median knockout ratio to 0.000 at a background CV of 0.123
   (0.079 without).
   The MaxQuant PSM column counts all its PSMs; on hrMS2 most scans do not record the reporter
   ions, so on the PSMs that carry reporters the evaluated counts are andes 3,278, FragPipe 3,038
   and MaxQuant 2,241, and no quality gate can quantify more than the 4,502 reporter-bearing andes
   PSMs.
   Verdict: comparable to MaxQuant on SPS-MS3, 🟢 ahead on RTS-MS3, 🔴 behind on hrMS2 interference
-  by default (🟢 well ahead with `--tmt-unmix`); 🟢 most reporter-bearing PSMs quantified on hrMS2.
+  by default (🟢 well ahead with `--tmt-unmix on`); 🟢 most reporter-bearing PSMs quantified on hrMS2.
 - *Known ratios (PXD007683):* 149,121 rank-1 target PSMs at 1% over the 11 fractions, 128,265
   quantified; yeast log2 ratios against the human-normalised expectation:
 

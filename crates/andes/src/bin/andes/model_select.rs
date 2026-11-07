@@ -506,15 +506,29 @@ fn choose_routed(
                     && e.experiment_class == choice.key.experiment_class
             });
         if !fits {
-            // A non-specific digest (HLA ligands, peptidomics) has no EThcD model of its
-            // own. The tryptic EThcD model still scores the c/z and b/y series of its
-            // spectra, which the no-cleavage HCD model cannot: against the HCD route,
-            // +39 % PSMs and +30 % peptides at 1 % entrapment FDP on HLA class I EThcD
-            // runs. The run warns, as every route to a cell the model was not trained on.
-            if choice.key.enzyme == model::enzyme::Enzyme::NoCleavage.name() {
+            // Two cells have no EThcD model of their own and take the tryptic, label-free
+            // EThcD model anyway, because it scores the c/z and b/y series of their
+            // spectra, which the HCD models cannot:
+            // - a non-specific digest (HLA ligands, peptidomics): against the no-cleavage
+            //   HCD route, +39 % PSMs and +30 % peptides at 1 % entrapment FDP on HLA
+            //   class I EThcD runs;
+            // - a TMT run (iTRAQ and phospho are not measured and keep the HCD route): on
+            //   TMT10 EThcD scans of a non-tryptic plasma peptidome, +23 % PSMs and +22 %
+            //   peptides at 1 % entrapment FDP against the labelled HCD route (12 of 12
+            //   draw/seed pairs).
+            // The run warns, as every route to a cell the model was not trained on.
+            let labelled = protocol == Protocol::Tmt;
+            let nonspecific = choice.key.enzyme == model::enzyme::Enzyme::NoCleavage.name();
+            if nonspecific || labelled {
+                let class = if labelled {
+                    store_protocol_to_experiment_class(protocol_store_name(Protocol::Auto))
+                } else {
+                    choice.key.experiment_class.clone()
+                };
                 if let Some(e) = entries.iter().find(|e| {
                     e.activation == ActivationMethod::EThcD.name()
-                        && e.experiment_class == choice.key.experiment_class
+                        && e.experiment_class == class
+                        && (nonspecific || e.enzyme == choice.key.enzyme)
                         && analyser_of(&e.instrument) == analyser_of(&choice.key.instrument)
                 }) {
                     return ModelChoice {
@@ -952,8 +966,8 @@ mod param_resolver_tests {
                 }
             }
         }
-        // The case that was mis-routed: labelled Orbitrap EThcD stays on the
-        // labelled HCD route.
+        // Labelled Orbitrap EThcD takes the EThcD model (measured on TMT10 EThcD scans);
+        // the same run read in the ion trap keeps the labelled HCD route.
         let id = choose_model(
             &entries,
             ActivationMethod::EThcD,
@@ -962,7 +976,35 @@ mod param_resolver_tests {
             model::enzyme::Enzyme::Trypsin,
         )
         .model_id;
-        assert_eq!(id, "hcd_qexactive_tryp_tmt");
+        assert_eq!(id, "ethcd_qexactive_tryp");
+        let id = choose_model(
+            &entries,
+            ActivationMethod::EThcD,
+            Some(InstrumentType::QExactive),
+            Protocol::Tmt,
+            model::enzyme::Enzyme::NonSpecific,
+        )
+        .model_id;
+        assert_eq!(id, "ethcd_qexactive_tryp");
+        let id = choose_model(
+            &entries,
+            ActivationMethod::EThcD,
+            Some(InstrumentType::LowRes),
+            Protocol::Tmt,
+            model::enzyme::Enzyme::Trypsin,
+        )
+        .model_id;
+        assert_eq!(
+            id,
+            choose_model(
+                &entries,
+                ActivationMethod::HCD,
+                Some(InstrumentType::LowRes),
+                Protocol::Tmt,
+                model::enzyme::Enzyme::Trypsin,
+            )
+            .model_id
+        );
         // An explicit protocol is never overridden by the label.
         assert_eq!(
             routing_protocol(Protocol::Phospho, Some(Tmt)),
@@ -1127,6 +1169,43 @@ mod param_resolver_tests {
             )
             .model_id
         );
+    }
+
+    /// A mixed HCD/EThcD TMT run on an Orbitrap, searched non-specifically (PXD004781):
+    /// whichever activation the run is routed for, the scans of the other one get
+    /// their own model, so the run's choice only decides which of the two is the
+    /// run-level model. Each direction of the per-scan route is a model other than the
+    /// run's, on the run's analyser.
+    #[test]
+    fn mixed_tmt_run_scores_each_activation_with_its_own_model() {
+        use model::enzyme::Enzyme;
+        let store_path = bundled_store_path();
+        let store = ModelStore::open(&store_path).expect("bundled store");
+        let entries = store.selection_entries();
+        let inst = Some(InstrumentType::QExactive);
+        let run_of = |act| choose_model(&entries, act, inst, Protocol::Tmt, Enzyme::NonSpecific);
+        let hcd = run_of(ActivationMethod::HCD).model_id;
+        let ethcd = run_of(ActivationMethod::EThcD).model_id;
+        assert_eq!(hcd, "hcd_highres_nocleavage");
+        assert_eq!(ethcd, "ethcd_qexactive_tryp");
+        for (scans, run_model) in [
+            (ActivationMethod::EThcD, &hcd),
+            (ActivationMethod::HCD, &ethcd),
+        ] {
+            let route = load_activation_route(
+                scans,
+                inst,
+                Protocol::Tmt,
+                Enzyme::NonSpecific,
+                &store_path,
+                run_model,
+                "Orbitrap",
+            )
+            .expect("route")
+            .expect("the scans of the other activation get a model of their own");
+            assert_eq!(route.0, run_of(scans).model_id);
+            assert_ne!(&route.0, run_model);
+        }
     }
 
     /// The bundled-store selection, as the search and training paths run it

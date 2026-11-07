@@ -27,13 +27,13 @@ use quant::lfq::{
 use quant::ms1_index::Ms1RunIndex;
 use quant::ms2::{Ms2Scan, ScanReporters};
 use quant::tdc::{picked_qvalues, Pair};
-use quant::unmix::{unmix_run, window_record, ScanInput, Survey, WindowRecord};
+use quant::unmix::{unmix_run, window_record, ScanInput, Strength, Survey, UnmixRun, WindowRecord};
 use rayon::prelude::*;
 use search::candidate_gen::Candidate;
 use search::psm::{PsmMatch, TopNQueue};
 use search::search_index::SearchIndex;
 
-use crate::cli::Cli;
+use crate::cli::{Cli, TmtUnmix};
 
 #[path = "ms1_cache.rs"]
 mod ms1_cache;
@@ -80,8 +80,9 @@ pub(crate) struct QuantSettings {
     pub quant_dir: Option<PathBuf>,
     /// The search's fragment tolerance, recorded in each run's MS2 table.
     pub fragment_tol: Option<Tolerance>,
-    /// `--tmt-unmix` on high-resolution MS2 reporters.
-    pub unmix: bool,
+    /// `--tmt-unmix on|auto` on high-resolution MS2 reporters: the strength
+    /// the interference is removed at; `None` when nothing is removed.
+    pub unmix: Option<Strength>,
     /// `--tmt --mbr`: every run's MS2 table carries the reporter ions, and the
     /// transfers are measured after the identified rows.
     pub tmt_mbr: bool,
@@ -94,15 +95,16 @@ impl QuantSettings {
     /// The checks that need only the command line, so `run` makes them before
     /// the database is loaded and the index built; `from_cli` repeats them.
     pub(crate) fn check_args(cli: &Cli) -> Result<(), String> {
-        if cli.tmt_unmix && cli.tmt.is_none() {
-            return Err("--tmt-unmix needs --tmt <plex>".into());
+        let on = cli.tmt_unmix == TmtUnmix::On;
+        if on && cli.tmt.is_none() {
+            return Err("--tmt-unmix on needs --tmt <plex>".into());
         }
         // An explicit --tmt-level 3. When the level is resolved from the data,
         // MS3 reporters are only picked for low-resolution MS2, where unmixing
         // is skipped with a warning (`from_cli`).
-        if cli.tmt_unmix && cli.tmt_level.is_some_and(|level| level >= 3) {
+        if on && cli.tmt_level.is_some_and(|level| level >= 3) {
             return Err(
-                "--tmt-unmix models the co-isolation interference of MS2 reporter ions; it does \
+                "--tmt-unmix on models the co-isolation interference of MS2 reporter ions; it does \
                  not apply at --tmt-level 3"
                     .into(),
             );
@@ -210,9 +212,9 @@ impl QuantSettings {
         // does not describe: Velos/Elite/Fusion/Lumos high-low methods pair an
         // ion-trap MS2 with Orbitrap survey scans. Each run's MS1 is checked
         // once it is captured (`finish_file`).
-        if cli.tmt_unmix && !high_res {
+        if cli.tmt_unmix == TmtUnmix::On && !high_res {
             eprintln!(
-                "WARN: --tmt-unmix: the MS2 scans are low-resolution; interference unmixing \
+                "WARN: --tmt-unmix on: the MS2 scans are low-resolution; interference unmixing \
                  needs high-resolution MS2 reporter ions and is not applied"
             );
         }
@@ -237,7 +239,12 @@ impl QuantSettings {
             pep_cap: cli.pep,
             quant_dir: cli.quant_dir.clone(),
             fragment_tol: None,
-            unmix: cli.tmt_unmix && high_res && cli.tmt.is_some(),
+            unmix: match cli.tmt_unmix {
+                _ if !high_res || tmt_level >= 3 || cli.tmt.is_none() => None,
+                TmtUnmix::Off => None,
+                TmtUnmix::On => Some(Strength::Fixed(1.0)),
+                TmtUnmix::Auto => Some(Strength::Learned),
+            },
             tmt_mbr: cli.mbr && cli.tmt.is_some(),
             scratch_dir: cli.temp_dir.clone().unwrap_or_else(|| PathBuf::from(".")),
         }))
@@ -280,8 +287,14 @@ impl QuantSettings {
                 self.min_sn,
                 self.max_pep
             ));
-            if self.unmix {
-                parts.push("interference unmixing of the MS2 reporter ions".into());
+            if let Some(strength) = self.unmix {
+                parts.push(format!(
+                    "interference unmixing of the MS2 reporter ions ({})",
+                    match strength {
+                        Strength::Fixed(_) => "full strength",
+                        Strength::Learned => "learned strength",
+                    }
+                ));
             }
         }
         if self.lfq {
@@ -376,7 +389,7 @@ impl QuantCollector {
         if let Some(plex) = self.settings.plex {
             self.ms2_reporters
                 .push(extract_reporters(&spec.peaks, plex, self.settings.tmt_tol));
-            if self.settings.unmix {
+            if self.settings.unmix.is_some() {
                 self.ms2_pic.push(peptide_ion_current(&spec.peaks, plex));
             }
         }
@@ -943,6 +956,18 @@ fn proteins_of(psm: &PsmMatch, candidates: &[Candidate], index: &SearchIndex) ->
     out
 }
 
+/// The protein every candidate of the PSM comes from, `None` when it maps to
+/// several.
+fn sole_protein(hit: &Hit<'_>, candidates: &[Candidate]) -> Option<u32> {
+    let mut proteins = hit
+        .psm
+        .candidate_idxs
+        .iter()
+        .map(|&ci| candidates[ci as usize].protein_index);
+    let first = proteins.next()?;
+    proteins.all(|p| p == first).then_some(first as u32)
+}
+
 fn quant_id(
     hit: &Hit<'_>,
     run: &RunCapture,
@@ -1426,6 +1451,7 @@ pub(crate) fn run_quant(
         let (mut no_scan, mut out_of_range) = (0usize, 0usize);
         let mut gated = GateCounts::default();
         let mut with_noise = 0usize;
+        let mut unmix_strengths: Vec<(String, f64)> = Vec::new();
         for (run_idx, run) in collector.runs.iter().enumerate() {
             let ms1 = run
                 .ms1
@@ -1495,7 +1521,7 @@ pub(crate) fn run_quant(
                 with_noise += usize::from(sn.is_some());
                 let sn_sum = sn.as_ref().map(|v| v.iter().sum::<f32>());
                 let passes = gated.check(s, purity, sn_sum, hit.pep);
-                if s.unmix {
+                if s.unmix.is_some() {
                     let z = hit.psm.charge_used.max(1);
                     let window = ms1.as_ref().and_then(|ms1| {
                         isolation_window_record(
@@ -1514,6 +1540,7 @@ pub(crate) fn run_quant(
                             .get(hit.spec_idx)
                             .map_or(0.0, |&v| v as f64),
                         window,
+                        protein: sole_protein(hit, candidates),
                     });
                 }
                 rows.push(TmtRow {
@@ -1531,8 +1558,13 @@ pub(crate) fn run_quant(
                     transfer: None,
                 });
             }
-            if s.unmix {
-                let (model, unmixed) = unmix_run(&unmix_inputs);
+            if let Some(strength) = s.unmix {
+                let UnmixRun {
+                    model,
+                    strength: applied,
+                    scans: unmixed,
+                } = unmix_run(&unmix_inputs, strength);
+                unmix_strengths.push((run.stem.clone(), applied));
                 match &model {
                     Some(m) => {
                         let fractions: Vec<f32> =
@@ -1540,7 +1572,7 @@ pub(crate) fn run_quant(
                         eprintln!(
                             "quant: {}: interference model on {} scans (precursor yield {:.3}/{:.3}/{:.3} \
                              at charge <=2/3/>=4, co-isolated {:.3}, hidden {:.3}, R2(log) {:.2}); \
-                             {} scans unmixed, median interference {:.2}",
+                             {} scans unmixed, median interference {:.2}, strength {:.2}",
                             run.stem,
                             m.n,
                             m.precursor[0],
@@ -1550,7 +1582,8 @@ pub(crate) fn run_quant(
                             m.hidden,
                             m.r2_log,
                             fractions.len(),
-                            median_f32(&fractions)
+                            median_f32(&fractions),
+                            applied
                         );
                     }
                     None => eprintln!(
@@ -1654,10 +1687,29 @@ pub(crate) fn run_quant(
             }
         }
         let tmt_path = dir.join(format!("{stem}.tmt.parquet"));
+        let unmix = s.unmix.map(|strength| output::UnmixMeta {
+            mode: match strength {
+                Strength::Fixed(_) => "on",
+                Strength::Learned => "auto",
+            },
+            strengths: unmix_strengths.clone(),
+        });
         if s.tmt_mbr {
-            output::write_tmt_parquet_mbr(&tmt_path, plex, &rows, s.correction.is_some(), s.unmix)?;
+            output::write_tmt_parquet_mbr(
+                &tmt_path,
+                plex,
+                &rows,
+                s.correction.is_some(),
+                unmix.as_ref(),
+            )?;
         } else {
-            output::write_tmt_parquet(&tmt_path, plex, &rows, s.correction.is_some(), s.unmix)?;
+            output::write_tmt_parquet(
+                &tmt_path,
+                plex,
+                &rows,
+                s.correction.is_some(),
+                unmix.as_ref(),
+            )?;
         }
         eprintln!(
             "quant: wrote {} ({} PSMs with reporter ions passing the quantification gate{}{}{})",
@@ -2212,7 +2264,7 @@ mod tests {
             pep_cap: None,
             quant_dir: quant_dir.map(PathBuf::from),
             fragment_tol: Some(Tolerance::Ppm(20.0)),
-            unmix: false,
+            unmix: None,
             tmt_mbr: false,
             scratch_dir: PathBuf::from("."),
         }
@@ -2359,10 +2411,14 @@ mod tests {
         assert!(e.contains("needs --tmt"), "{e}");
         let e = ok(&["--tmt", "tmt10", "--tmt-level", "4"]).unwrap_err();
         assert!(e.contains("--tmt-level"), "{e}");
-        assert!(ok(&["--tmt", "tmt16", "--tmt-unmix"]).is_ok());
-        let e = ok(&["--tmt-unmix"]).unwrap_err();
+        assert!(ok(&["--tmt", "tmt16", "--tmt-unmix", "on"]).is_ok());
+        // The default (auto) does nothing without --tmt or at level 3.
+        assert!(ok(&["--tmt-unmix", "auto"]).is_ok());
+        assert!(ok(&["--tmt", "tmt16", "--tmt-level", "3"]).is_ok());
+        assert!(ok(&["--tmt-unmix", "off"]).is_ok());
+        let e = ok(&["--tmt-unmix", "on"]).unwrap_err();
         assert!(e.contains("needs --tmt"), "{e}");
-        let e = ok(&["--tmt", "tmt16", "--tmt-level", "3", "--tmt-unmix"]).unwrap_err();
+        let e = ok(&["--tmt", "tmt16", "--tmt-level", "3", "--tmt-unmix", "on"]).unwrap_err();
         assert!(e.contains("--tmt-level 3"), "{e}");
     }
 

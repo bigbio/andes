@@ -187,9 +187,23 @@ const LFQ_TABLE: TableVersion = TableVersion {
 /// applied (`true` / `false`).
 pub const TMT_PLEX_KEY: &str = "andes.tmt.plex";
 pub const TMT_CORRECTED_KEY: &str = "andes.tmt.corrected";
-/// `tmt.parquet` metadata: whether the interference-unmixing block was
-/// written (`true` / `false`).
+/// `tmt.parquet` metadata: the `--tmt-unmix` mode that produced the file
+/// (`off`, `on` or `auto`); the interference-unmixing block is present
+/// unless it is `off`.
 pub const TMT_UNMIX_KEY: &str = "andes.tmt.unmix";
+/// `tmt.parquet` metadata, present with the unmixing block: the strength in
+/// `0..=1` the interference was removed at, per run (`run=strength`, runs
+/// joined by `,`).
+pub const TMT_UNMIX_STRENGTH_KEY: &str = "andes.tmt.unmix_strength";
+
+/// The interference unmixing of a `tmt.parquet`: the mode and the strength
+/// applied to each run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnmixMeta {
+    /// `on` or `auto`.
+    pub mode: &'static str,
+    pub strengths: Vec<(String, f64)>,
+}
 /// `tmt.parquet` metadata, present with `--mbr`: the table holds transferred
 /// rows and the evidence columns.
 pub const TMT_MBR_KEY: &str = "andes.tmt.mbr";
@@ -457,7 +471,7 @@ fn tmt_batch(
 /// `raw_` block when one was, then the summed raw reporter intensity, summed
 /// signal-to-noise, roll-up weight and gate result, and a per-channel `sn_`
 /// block (null when the reporter scan carries no noise). With `unmixed`
-/// (`--tmt-unmix`), the estimated interference fraction and an `unmix_`
+/// (`--tmt-unmix on|auto`), the estimated interference fraction and an `unmix_`
 /// channel block follow (null for a scan that could not be modelled). `rt` is
 /// in seconds, `proteins` is `;`-joined.
 pub fn write_tmt_parquet(
@@ -465,7 +479,7 @@ pub fn write_tmt_parquet(
     plex: Plex,
     rows: &[TmtRow],
     corrected: bool,
-    unmixed: bool,
+    unmixed: Option<&UnmixMeta>,
 ) -> Result<(), String> {
     write_tmt(path, plex, rows, corrected, unmixed, false)
 }
@@ -488,7 +502,7 @@ pub fn write_tmt_parquet_mbr(
     plex: Plex,
     rows: &[TmtRow],
     corrected: bool,
-    unmixed: bool,
+    unmixed: Option<&UnmixMeta>,
 ) -> Result<(), String> {
     write_tmt(path, plex, rows, corrected, unmixed, true)
 }
@@ -498,9 +512,10 @@ fn write_tmt(
     plex: Plex,
     rows: &[TmtRow],
     corrected: bool,
-    unmixed: bool,
+    unmix: Option<&UnmixMeta>,
     mbr: bool,
 ) -> Result<(), String> {
+    let unmixed = unmix.is_some();
     let schema = Arc::new(tmt_schema(plex, corrected, unmixed, mbr));
     let n = plex.n_channels();
     let batches = rows
@@ -509,8 +524,16 @@ fn write_tmt(
     let mut meta = vec![
         (TMT_PLEX_KEY, plex.name().to_string()),
         (TMT_CORRECTED_KEY, corrected.to_string()),
-        (TMT_UNMIX_KEY, unmixed.to_string()),
+        (TMT_UNMIX_KEY, unmix.map_or("off", |u| u.mode).to_string()),
     ];
+    if let Some(u) = unmix {
+        let strengths: Vec<String> = u
+            .strengths
+            .iter()
+            .map(|(run, l)| format!("{run}={l:.2}"))
+            .collect();
+        meta.push((TMT_UNMIX_STRENGTH_KEY, strengths.join(",")));
+    }
     if mbr {
         meta.push((TMT_MBR_KEY, "true".to_string()));
     }
@@ -820,7 +843,7 @@ mod tests {
         gated.id.q_value = None;
         gated.quant_weight = 0.0;
         gated.quant_gate_passed = false;
-        write_tmt_parquet(&p, Plex::Itraq4, &[tmt_row(), gated], true, false).unwrap();
+        write_tmt_parquet(&p, Plex::Itraq4, &[tmt_row(), gated], true, None).unwrap();
         let t = read_tmt_parquet(&p).unwrap();
         assert_eq!(
             t.meta.get(TMT_PLEX_KEY).map(String::as_str),
@@ -863,14 +886,14 @@ mod tests {
         assert_eq!(scan.value(0), 5);
         // Without a correction matrix the channels hold the raw values and
         // there is no raw block.
-        write_tmt_parquet(&p, Plex::Itraq4, &[tmt_row()], false, false).unwrap();
+        write_tmt_parquet(&p, Plex::Itraq4, &[tmt_row()], false, None).unwrap();
         let t = read_tmt_parquet(&p).unwrap();
         assert_eq!(names(&t).len(), 13 + 4 + 4 + 4);
         assert_eq!(f32_at(&t.batches[0], "itraq_114", &p), [Some(1.0)]);
         // A row whose channel count does not match the plex is refused.
         let mut short = tmt_row();
         short.raw.pop();
-        assert!(write_tmt_parquet(&p, Plex::Itraq4, &[short], false, false).is_err());
+        assert!(write_tmt_parquet(&p, Plex::Itraq4, &[short], false, None).is_err());
         assert!(!dir.path().join("x.tmt.parquet.partial").exists());
     }
 
@@ -896,7 +919,7 @@ mod tests {
             donor_run: "r1".into(),
             batch_cos: 0.99,
         });
-        write_tmt_parquet_mbr(&p, Plex::Itraq4, &[tmt_row(), transferred], true, false).unwrap();
+        write_tmt_parquet_mbr(&p, Plex::Itraq4, &[tmt_row(), transferred], true, None).unwrap();
         let t = read_tmt_parquet(&p).unwrap();
         assert_eq!(t.meta.get(TMT_MBR_KEY).map(String::as_str), Some("true"));
         let header = names(&t);
@@ -909,7 +932,7 @@ mod tests {
         assert_eq!((opt(q, 0), opt(q, 1)), (None, Some(0.004)));
         assert_eq!(f32_at(b, "donor_batch_cos", &p), [None, Some(0.99)]);
         // The default writer is the 1.1 layout without the block.
-        write_tmt_parquet(&p, Plex::Itraq4, &[tmt_row()], true, false).unwrap();
+        write_tmt_parquet(&p, Plex::Itraq4, &[tmt_row()], true, None).unwrap();
         let t = read_tmt_parquet(&p).unwrap();
         assert!(!t.meta.contains_key(TMT_MBR_KEY));
         assert_eq!(names(&t).len(), 13 + 8 + 4 + 4);
@@ -922,11 +945,19 @@ mod tests {
         let mut modelled = tmt_row();
         modelled.interference = Some(0.25);
         modelled.unmixed = Some(vec![0.5, 1.5, 2.5, 3.5]);
-        write_tmt_parquet(&p, Plex::Itraq4, &[modelled, tmt_row()], true, true).unwrap();
+        let meta = UnmixMeta {
+            mode: "auto",
+            strengths: vec![("a".into(), 0.4), ("b".into(), 1.0)],
+        };
+        write_tmt_parquet(&p, Plex::Itraq4, &[modelled, tmt_row()], true, Some(&meta)).unwrap();
         let t = read_tmt_parquet(&p).unwrap();
-        assert_eq!(t.meta.get(TMT_UNMIX_KEY).map(String::as_str), Some("true"));
+        assert_eq!(t.meta.get(TMT_UNMIX_KEY).map(String::as_str), Some("auto"));
+        assert_eq!(
+            t.meta.get(TMT_UNMIX_STRENGTH_KEY).map(String::as_str),
+            Some("a=0.40,b=1.00")
+        );
         let header = names(&t);
-        // The columns of a run without --tmt-unmix keep their positions.
+        // The columns of a run without the unmix block keep their positions.
         assert_eq!(header.len(), 13 + 8 + 4 + 4 + 1 + 4);
         assert_eq!(header[25], "sn_itraq_114");
         assert_eq!(header[29], "interference");
@@ -937,10 +968,11 @@ mod tests {
         assert_eq!(f32_at(b, "itraq_117", &p), [Some(4.1), Some(4.1)]);
         let mut bad = tmt_row();
         bad.unmixed = Some(vec![1.0]);
-        assert!(write_tmt_parquet(&p, Plex::Itraq4, &[bad], true, true).is_err());
-        write_tmt_parquet(&p, Plex::Itraq4, &[tmt_row()], true, false).unwrap();
+        assert!(write_tmt_parquet(&p, Plex::Itraq4, &[bad], true, Some(&meta)).is_err());
+        write_tmt_parquet(&p, Plex::Itraq4, &[tmt_row()], true, None).unwrap();
         let t = read_tmt_parquet(&p).unwrap();
-        assert_eq!(t.meta.get(TMT_UNMIX_KEY).map(String::as_str), Some("false"));
+        assert_eq!(t.meta.get(TMT_UNMIX_KEY).map(String::as_str), Some("off"));
+        assert!(!t.meta.contains_key(TMT_UNMIX_STRENGTH_KEY));
         assert_eq!(names(&t).len(), 13 + 8 + 4 + 4);
     }
 

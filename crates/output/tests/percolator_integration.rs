@@ -285,15 +285,28 @@ fn pep_of_accepted_psms_is_below_one_or_skip() {
     assert!(leftovers.is_empty(), "{leftovers:?}");
 }
 
-/// A stand-in `percolator` script: with `-Y` it writes PEP = 1 for every PSM
-/// (the failed fit); with `--static` (the repair pass) it writes `mode`'s PEP.
-/// Every call's arguments are appended to `calls.log` next to the script.
+/// A stand-in `percolator` script: with `-Y` it writes `y_pep` for every PSM
+/// (1 is the failed fit); with `--static` (the repair pass) it writes
+/// `static_pep`. Every call's arguments are appended to `calls.log` next to
+/// the script.
+///
+/// The script is executable once the function returns: while another test
+/// thread forks, its child briefly holds the script's write descriptor and
+/// exec fails with `ExecutableFileBusy`, so the function runs the script with
+/// `--probe` until no such descriptor remains. No descriptor can appear after
+/// the write has closed.
 #[cfg(unix)]
-fn write_fake_percolator(dir: &std::path::Path, static_pep: &str, static_exit: i32) -> PathBuf {
+fn write_fake_percolator(
+    dir: &std::path::Path,
+    y_pep: &str,
+    static_pep: &str,
+    static_exit: i32,
+) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let script = dir.join("percolator");
     let body = format!(
         r#"#!/bin/sh
+[ "$1" = --probe ] && exit 0
 echo "$@" >> "{log}"
 static=0; t=""; d=""
 while [ $# -gt 0 ]; do
@@ -304,7 +317,7 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-if [ $static = 1 ]; then pep={static_pep}; [ {static_exit} -ne 0 ] && exit {static_exit}; else pep=1; fi
+if [ $static = 1 ]; then pep={static_pep}; [ {static_exit} -ne 0 ] && exit {static_exit}; else pep={y_pep}; fi
 printf 'PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n' > "$t"
 printf 'r/1\t3.0\t0.001\t%s\tK.AAK.R\tsp|P1\n' $pep >> "$t"
 printf 'r/2\t2.0\t0.004\t%s\tK.BBK.R\tsp|P2\n' $pep >> "$t"
@@ -315,7 +328,17 @@ printf 'PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n' > "$
     );
     std::fs::write(&script, body).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    script
+    loop {
+        match std::process::Command::new(&script).arg("--probe").status() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            status => {
+                assert!(status.unwrap().success());
+                return script;
+            }
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -327,7 +350,7 @@ fn degenerate_pep_is_re_estimated_with_the_run_s_weights() {
     let tmp = tempfile::tempdir().unwrap();
     let pin = tmp.path().join("run.pin");
     std::fs::write(&pin, "SpecId\tLabel\n").unwrap();
-    let fake = write_fake_percolator(tmp.path(), "0.01", 0);
+    let fake = write_fake_percolator(tmp.path(), "1", "0.01", 0);
     let backend = PercolatorBackend::Binary(fake);
     let (targets, _) = run_percolator_with_decoys(&backend, &pin, &[]).unwrap();
     assert!(!output::pep_is_degenerate(&targets));
@@ -359,8 +382,12 @@ fn a_repair_that_fails_or_stays_degenerate_keeps_the_run() {
         let tmp = tempfile::tempdir().unwrap();
         let pin = tmp.path().join("run.pin");
         std::fs::write(&pin, "SpecId\tLabel\n").unwrap();
-        let backend =
-            PercolatorBackend::Binary(write_fake_percolator(tmp.path(), static_pep, static_exit));
+        let backend = PercolatorBackend::Binary(write_fake_percolator(
+            tmp.path(),
+            "1",
+            static_pep,
+            static_exit,
+        ));
         let (targets, _) = run_percolator_with_decoys(&backend, &pin, &[]).unwrap();
         assert_eq!(targets.len(), 3, "{static_pep}/{static_exit}");
         assert_eq!(targets["r/1"].pep, 1.0, "the main run's values stay");
@@ -375,11 +402,7 @@ fn a_working_pep_is_not_touched() {
     let tmp = tempfile::tempdir().unwrap();
     let pin = tmp.path().join("run.pin");
     std::fs::write(&pin, "SpecId\tLabel\n").unwrap();
-    let fake = write_fake_percolator(tmp.path(), "0.01", 0);
-    let body = std::fs::read_to_string(&fake)
-        .unwrap()
-        .replace("else pep=1; fi", "else pep=0.002; fi");
-    std::fs::write(&fake, body).unwrap();
+    let fake = write_fake_percolator(tmp.path(), "0.002", "0.01", 0);
     let backend = PercolatorBackend::Binary(fake);
     let (targets, _) = run_percolator_with_decoys(&backend, &pin, &[]).unwrap();
     assert_eq!(targets["r/1"].pep, 0.002);

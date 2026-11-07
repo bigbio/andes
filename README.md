@@ -34,8 +34,9 @@ FASTA, andes `XXX_` decoys, Percolator 3.7.1 `--seed 42 -Y`, same 8-core VM, 8 t
 and 2 give andes counts within 1.2% of seed 42. **†** Java MS-GF+ was not re-run; its counts are
 from an earlier session. **Error rates** (entrapment, three Percolator seeds; T/E measured per
 database): andes's nominal 1% is 0.89–1.08% true FDP on Astral (peptide-level shuffled
-entrapment), 0.67–0.76% on TMT a05058, 0.80–0.99% on phospho, and 2.07–2.19% on UPS1 against its
-natural *E. coli* entrapment (0.91–0.98% against a peptide-level shuffle). timsTOF, high-res TMT,
+entrapment), 0.67–0.76% on TMT a05058, 0.80–0.99% on phospho, and 0.92–0.94% on UPS1 against a
+peptide-level shuffle (1.95–2.07% against the natural *E. coli* entrapment, of which about half
+sits on proteins with a close yeast homolog; re-measured on 2026-11-07 at `2ee76dd6`). timsTOF, high-res TMT,
 glyco and the full quantification results:
 [`docs/benchmarks/`](docs/benchmarks/README.md); quantification summary below.</sub>
 

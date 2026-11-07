@@ -55,8 +55,9 @@ echo "==> UPS1 entrapment database (yeast targets + E. coli entrapment)"
 report "$DB/yeast_entrap.fasta"
 
 echo "==> entrapment scaling factor (needed to compute a true FDP)"
-# T/E is a peptide-space ratio, so it uses a digest at the andes defaults (<= 1 missed
-# cleavage, 6..50 residues), I/L folded. Entrapment peptides found in a sample protein are
+# T/E is a peptide-space ratio, so it uses a digest at the andes defaults (2 missed
+# cleavages, 6..50 residues), I/L folded; append the missed-cleavage count of your search
+# if it differs. Entrapment peptides found in a sample protein are
 # counted as target, matching how run.sh counts hits (../entrap_common.py).
 python3 "$(dirname "$0")/../entrap_common.py" te "$DB/yeast_entrap.fasta"
 # ---------------------------------------------------------------- mouse databases

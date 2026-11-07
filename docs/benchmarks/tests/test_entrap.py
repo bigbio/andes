@@ -87,11 +87,14 @@ class SharedRules(unittest.TestCase):
         self.assertEqual(ec.count_percolator_psms(PSMS, 0.01, None), (5, 3, 0))
 
     def test_te_moves_sample_substrings_to_target(self):
-        # T: 6 sample peptides. E: 5 entrapment peptides, of which TLEADK and TLEADKPWQR
+        # At 1 missed cleavage T: 6 sample peptides. E: 5 entrapment peptides, of which TLEADK and TLEADKPWQR
         # occur in the folded sample protein and move to T.
-        self.assertEqual(ec.te_ratio(FASTA), (8, 3, 2))
-        out = run([sys.executable, "-I", os.path.join(BENCH, "entrap_common.py"), "te", FASTA])
+        self.assertEqual(ec.te_ratio(FASTA, 1), (8, 3, 2))
+        self.assertEqual(ec.te_ratio(FASTA), (10, 5, 2))  # andes default: 2 missed cleavages
+        out = run([sys.executable, "-I", os.path.join(BENCH, "entrap_common.py"), "te", FASTA, "1"])
         self.assertIn("T/E = 2.667", out)
+        out = run([sys.executable, "-I", os.path.join(BENCH, "entrap_common.py"), "te", FASTA])
+        self.assertIn("T/E = 2.000", out)
 
 
 class ShuffledEntrap(unittest.TestCase):

@@ -13,7 +13,7 @@ One definition of "entrapment hit", used by `reproduce/run.sh`, `reproduce/build
   Such PSMs are counted as target ("rescued").
 
 The T/E factor (`te_ratio`) sizes the entrapment correction in peptide space and therefore
-uses a digest that mirrors the andes defaults. Its entrapment half applies the same rule as
+uses a digest that mirrors the andes defaults (2 missed cleavages; pass `missed` for a search run with another value). Its entrapment half applies the same rule as
 the counting: an entrapment peptide that is a substring of a folded sample protein is moved
 to the target half, because a hit on it would be counted as target.
 
@@ -21,8 +21,9 @@ Command line (used by the shell scripts):
 
     entrap_common.py count <percolator.psms> [search.fasta] [q-threshold]
         prints "<accepted> <entrapment hits> <rescued>" for Percolator target PSMs
-    entrap_common.py te <search.fasta>
-        prints the target and entrapment peptide counts and T/E
+    entrap_common.py te <search.fasta> [missed-cleavages]
+        prints the target and entrapment peptide counts and T/E (default 2 missed cleavages,
+        the andes default; pass the value the search used)
 """
 import re
 import sys
@@ -194,21 +195,24 @@ def count_percolator_psms(psms_path, qmax=0.01, sample=None):
     return n, n_ent, n_res
 
 
-def tryptic_peptides(seq):
-    """I/L-folded tryptic peptides at the andes defaults: <= 1 missed cleavage, 6..50
-    residues, cleavage after every K/R (no proline rule)."""
+ANDES_MISSED_CLEAVAGES = 2  # `--max-missed-cleavages` default since the 2026-11 change (was 1)
+
+
+def tryptic_peptides(seq, missed=ANDES_MISSED_CLEAVAGES):
+    """I/L-folded tryptic peptides at the andes defaults: `missed` missed cleavages (default 2),
+    6..50 residues, cleavage after every K/R (no proline rule)."""
     s = fold_il(seq)
     sites = sorted(set([0] + [i + 1 for i in range(len(s) - 1) if s[i] in "KR"] + [len(s)]))
     out = set()
     for i in range(len(sites) - 1):
-        for j in range(i + 1, min(i + 3, len(sites))):
+        for j in range(i + 1, min(i + 2 + missed, len(sites))):
             p = s[sites[i]:sites[j]]
             if 6 <= len(p) <= 50:
                 out.add(p)
     return out
 
 
-def te_ratio(fasta):
+def te_ratio(fasta, missed=ANDES_MISSED_CLEAVAGES):
     """(T, E, moved): target and entrapment-only peptide counts for the FDP correction.
 
     T: folded tryptic peptides of the sample proteins. E: folded tryptic peptides of the
@@ -219,9 +223,9 @@ def te_ratio(fasta):
     for hdr, seq in read_fasta(fasta):
         cls = protein_class(hdr)
         if cls == "sample":
-            t.update(tryptic_peptides(seq))
+            t.update(tryptic_peptides(seq, missed))
         elif cls == "entrap":
-            e.update(tryptic_peptides(seq))
+            e.update(tryptic_peptides(seq, missed))
     e -= t
     moved = SampleSequences(fasta).contains_many(e)
     e -= moved
@@ -237,8 +241,8 @@ def _main(argv):
         sample = SampleSequences(fasta) if fasta else None
         print(*count_percolator_psms(psms, qmax, sample))
         return 0
-    if len(argv) == 2 and argv[0] == "te":
-        t, e, moved = te_ratio(argv[1])
+    if len(argv) in (2, 3) and argv[0] == "te":
+        t, e, moved = te_ratio(argv[1], int(argv[2]) if len(argv) == 3 else ANDES_MISSED_CLEAVAGES)
         r = t / max(e, 1)
         print(f"    target peptides {t}  entrapment-only peptides {e}"
               f"  ({moved} entrapment peptides found in a sample protein, counted as target)")

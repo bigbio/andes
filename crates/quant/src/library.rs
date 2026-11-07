@@ -84,14 +84,30 @@ pub struct PsmIn {
     pub rt: f64,
     /// The rescorer's PSM score (higher is better).
     pub score: f64,
-    /// The rescorer's PSM q-value.
+    /// The rescorer's PSM q-value: whether the PSM is a donor in its run.
     pub q: f64,
+    /// The q-value that gates a precursor's best donor PSM
+    /// ([`PsmIn::gate_q`]); NaN when it is `q`. With per-run q-values it is the
+    /// q-value of the pooled model, which depends on the PSM's score only.
+    pub q_gate: f64,
     /// The rescorer's PSM posterior error probability.
     pub pep: f64,
     pub is_decoy: bool,
     pub faims_cv: Option<f32>,
     /// Precursor 1/K0 of the PSM's spectrum, when the source records it.
     pub ion_mobility: Option<f32>,
+}
+
+impl PsmIn {
+    /// The q-value that gates the precursor's best donor PSM: [`PsmIn::q_gate`],
+    /// or `q` when there is none.
+    pub fn gate_q(&self) -> f64 {
+        if self.q_gate.is_nan() {
+            self.q
+        } else {
+            self.q_gate
+        }
+    }
 }
 
 /// Whether `p` is a donor PSM under the PSM q-value threshold `donor_q` and the
@@ -220,7 +236,7 @@ impl Donor {
         Self {
             score: p.score,
             rt: p.rt,
-            q: p.q,
+            q: p.gate_q(),
             pep: p.pep,
             run: p.run,
             is_decoy: p.is_decoy,
@@ -526,6 +542,7 @@ mod tests {
 
     fn psm(run: u16, precursor: u32, rt: f64, score: f64, is_decoy: bool) -> PsmIn {
         PsmIn {
+            q_gate: f64::NAN,
             run,
             precursor,
             rt,
@@ -609,6 +626,7 @@ mod tests {
         // Decoy 200: no PSM at the donor threshold. Decoy 201: one donor
         // PSM, but its precursor fails the entry gate (a weak best score).
         let weak = |run, precursor, rt, score| PsmIn {
+            q_gate: f64::NAN,
             q: 0.2,
             ..psm(run, precursor, rt, score, true)
         };
@@ -639,6 +657,7 @@ mod tests {
     #[test]
     fn donor_psm_is_the_best_scoring_donor_psm() {
         let with = |run, rt, score, q, pep| PsmIn {
+            q_gate: f64::NAN,
             q,
             pep,
             ..psm(run, 0, rt, score, false)
@@ -674,6 +693,59 @@ mod tests {
     }
 
     #[test]
+    fn best_donor_is_gated_by_its_pooled_q_while_donors_follow_the_run_q() {
+        // Per-run q-values decide the donors; the entry's best donor PSM
+        // carries the pooled q-value that gates it, `q` when there is none.
+        let with = |run, rt, score, q, q_gate| PsmIn {
+            q_gate,
+            q,
+            pep: 0.001,
+            ..psm(run, 0, rt, score, false)
+        };
+        let mut psms: Vec<PsmIn> = base(vec![])
+            .into_iter()
+            .filter(|p| p.precursor != 0)
+            .collect();
+        psms.extend([
+            with(0, 10.0, 50.0, 0.004, 0.0002),
+            with(1, 11.0, 70.0, 0.0005, 0.03),
+            // Its pooled q-value is good but its run q-value is not: no donor.
+            with(1, 12.0, 90.0, 0.2, 0.0001),
+        ]);
+        let lib = build_library(
+            &psms,
+            meta(200),
+            2,
+            1.0,
+            0.01,
+            None,
+            &AlignParams::default(),
+        );
+        let e0 = lib.entries.iter().find(|e| e.precursor == 0).unwrap();
+        assert_eq!(e0.donors, vec![0, 1]);
+        assert_eq!(e0.donor_psm.score, 70.0);
+        assert_eq!(e0.donor_psm.q, 0.03);
+        let psms_nan: Vec<PsmIn> = psms
+            .iter()
+            .map(|p| PsmIn {
+                q_gate: f64::NAN,
+                ..*p
+            })
+            .collect();
+        let lib = build_library(
+            &psms_nan,
+            meta(200),
+            2,
+            1.0,
+            0.01,
+            None,
+            &AlignParams::default(),
+        );
+        let e0 = lib.entries.iter().find(|e| e.precursor == 0).unwrap();
+        assert_eq!(e0.donor_psm.q, 0.0005);
+    }
+
+    #[test]
     fn entries_sorted_by_mz() {
         let mut m = meta(200);
         // Reverse the m/z order relative to ids.
@@ -702,6 +774,7 @@ mod tests {
     #[test]
     fn faims_cv_is_majority_of_donor_ids() {
         let cv = |run, rt, c: Option<f32>| PsmIn {
+            q_gate: f64::NAN,
             faims_cv: c,
             ion_mobility: None,
             ..psm(run, 0, rt, 50.0, false)
@@ -759,6 +832,7 @@ mod tests {
     #[test]
     fn donors_are_runs_with_a_psm_at_the_psm_threshold() {
         let weak = |run, precursor, rt, score| PsmIn {
+            q_gate: f64::NAN,
             q: 0.2,
             ..psm(run, precursor, rt, score, false)
         };
@@ -807,6 +881,7 @@ mod tests {
         // Precursor 0: PEP 0.5 in run 0, PEP 0.001 in run 1; precursor 1:
         // PEP 0.5 in both runs. Every PSM is at q = 0.
         let with_pep = |run, precursor, rt, pep| PsmIn {
+            q_gate: f64::NAN,
             pep,
             ..psm(run, precursor, rt, 300.0, false)
         };
@@ -1060,7 +1135,7 @@ mod tests {
                 donor_psm: best_psm
                     .map(|b| DonorPsm {
                         score: b.score,
-                        q: b.q,
+                        q: b.gate_q(),
                         pep: b.pep,
                     })
                     .expect("an entry has a donor PSM"),
@@ -1118,6 +1193,7 @@ mod tests {
                 k => (k % 25) as f64 + (precursor % 7) as f64,
             };
             psms.push(PsmIn {
+                q_gate: f64::NAN,
                 run,
                 precursor,
                 rt: 100.0 + precursor as f64 + (next() % 3) as f64 + run as f64,

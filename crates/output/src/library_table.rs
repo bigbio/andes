@@ -1009,6 +1009,7 @@ mod tests {
                     _ => t + 15.0 * (t / 600.0).sin(),
                 } + ((p * 7 + r as u32) % 5) as f64 * 0.3;
                 psms.push(PsmIn {
+                    q_gate: f64::NAN,
                     run: r,
                     precursor: p,
                     rt,

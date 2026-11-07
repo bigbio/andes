@@ -485,6 +485,12 @@ fn per_run_q_values_replace_the_pooled_ones_and_leave_no_scratch() {
     assert_eq!(targets["a1"].q_value, 0.002);
     assert_eq!(targets["b2"].q_value, 0.5);
     assert_eq!(targets["x1"].q_value, 1.0, "no verdict from the run's pass");
+    assert_eq!(
+        targets["a1"].pooled_q_value,
+        Some(0.001),
+        "the pooled q stays"
+    );
+    assert_eq!(targets["x1"].pooled_q_value, Some(0.001));
     assert_eq!(targets["b1"].pep, 0.01, "the PEP stays the pooled one");
     assert!(decoys.contains("bd1"));
     // The result file carries the per-run q-values too.
@@ -492,6 +498,12 @@ fn per_run_q_values_replace_the_pooled_ones_and_leave_no_scratch() {
     let file = output::parse_psm_results(&text).unwrap();
     assert_eq!(file["a2"].q_value, 0.002);
     assert_eq!(file["b1"].q_value, 0.5);
+    assert_eq!(file["b1"].pooled_q_value, Some(0.001));
+    assert!(text
+        .lines()
+        .next()
+        .unwrap()
+        .contains("\tpooled-q-value\tproteinIds"));
     // One pooled call, then one static call per run with the pooled weights
     // and target-decoy competition; one PIN per run, deleted afterwards.
     let log = std::fs::read_to_string(tmp.path().join("calls.log")).unwrap();

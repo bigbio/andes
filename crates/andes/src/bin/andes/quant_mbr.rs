@@ -1710,6 +1710,7 @@ mod tests {
         let mut psms = Vec::new();
         let mut psm = |p: u32, run: u16| {
             psms.push(PsmIn {
+                q_gate: f64::NAN,
                 run,
                 precursor: p,
                 rt: apex(p, run) + 2.0,
@@ -2065,6 +2066,7 @@ mod tests {
         let mut psms = Vec::new();
         let mut psm = |p: u32, run: u16| {
             psms.push(PsmIn {
+                q_gate: f64::NAN,
                 run,
                 precursor: p,
                 rt: 100.0 + 8.0 * p as f64 + if run >= 2 { 120.0 } else { 0.0 },
@@ -2855,6 +2857,7 @@ mod finalize_tests {
     fn library_with_entries() -> Library {
         let psms: Vec<PsmIn> = (0..N)
             .map(|p| PsmIn {
+                q_gate: f64::NAN,
                 run: 0,
                 precursor: p,
                 rt: 100.0 + p as f64,

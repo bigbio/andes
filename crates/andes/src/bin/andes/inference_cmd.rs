@@ -65,6 +65,7 @@ fn read_all(paths: &[PathBuf]) -> Result<HashMap<String, output::PercolatorPsm>,
                 )));
             }
             let psm = output::PercolatorPsm {
+                pooled_q_value: None,
                 psm_id: String::new(),
                 q_value: row.q_value,
                 pep: row.pep,

@@ -24,6 +24,9 @@ pub struct PercolatorPsm {
     pub psm_id: String,
     /// `q-value` column (lower is better).
     pub q_value: f64,
+    /// The q-value of the pooled model (`pooled-q-value` column) when `q_value`
+    /// is a per-run q-value ([`apply_per_run_q`]); `None` when it is the pooled one.
+    pub pooled_q_value: Option<f64>,
     /// `posterior_error_probability` column (PEP; lower is better).
     pub pep: f64,
     /// `score` column (higher is better); `None` when the file has no such
@@ -594,6 +597,9 @@ pub fn run_percolator_pooled(
     Ok(targets)
 }
 
+/// Result-file column that holds the pooled q-value of a PSM once the
+/// `q-value` column holds the per-run one.
+const POOLED_Q_COLUMN: &str = "pooled-q-value";
 /// PIN column that names the run (input file) of each PSM.
 const RUN_COLUMN: &str = "FileName";
 /// Runs whose slices of the PIN are written and scored per scan of the PIN.
@@ -677,20 +683,23 @@ fn pin_spec_ids(path: &Path) -> std::io::Result<Vec<String>> {
 }
 
 /// Replace the `q-value` column of the Percolator result file `path` by the
-/// values of `q` (keyed by `PSMId`); rows without a value keep theirs. Returns
-/// the number of rows replaced.
+/// values of `q` (keyed by `PSMId`); rows without a value keep theirs. The
+/// replaced values stay in a `pooled-q-value` column before `proteinIds`
+/// (kept as it is when the file already has one). Returns the number of rows
+/// replaced.
 fn rewrite_q_values(path: &Path, q: &HashMap<String, f64>) -> Result<usize, PercolatorError> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Err(e) => return Err(e.into()),
     };
-    let mut out = String::with_capacity(text.len());
+    let mut out = String::with_capacity(text.len() + text.len() / 16);
     let mut replaced = 0usize;
-    let mut cols: Option<(usize, usize)> = None;
+    // PSMId, q-value and proteinIds columns, and whether the pooled column is added.
+    let mut cols: Option<(usize, usize, usize, bool)> = None;
     for (n, line) in text.lines().enumerate() {
         if n == 0 {
-            let header: Vec<&str> = line.split('\t').collect();
+            let mut header: Vec<&str> = line.split('\t').collect();
             let find = |name: &'static str| {
                 header.iter().position(|c| *c == name).ok_or_else(|| {
                     PercolatorError::MissingColumn {
@@ -699,22 +708,31 @@ fn rewrite_q_values(path: &Path, q: &HashMap<String, f64>) -> Result<usize, Perc
                     }
                 })
             };
-            cols = Some((find("PSMId")?, find("q-value")?));
-            out.push_str(line);
+            let (id_col, q_col, prot_col) = (find("PSMId")?, find("q-value")?, find("proteinIds")?);
+            let add = !header.contains(&POOLED_Q_COLUMN);
+            if add {
+                header.insert(prot_col, POOLED_Q_COLUMN);
+            }
+            cols = Some((id_col, q_col, prot_col, add));
+            out.push_str(&header.join("\t"));
             out.push('\n');
             continue;
         }
-        let (id_col, q_col) = cols.expect("the header is the first line");
-        let mut fields: Vec<&str> = line.split('\t').collect();
+        let (id_col, q_col, prot_col, add) = cols.expect("the header is the first line");
+        let mut fields: Vec<String> = line.split('\t').map(str::to_string).collect();
+        let old = fields.get(q_col).cloned();
         let new = fields
             .get(id_col)
-            .and_then(|id| q.get(*id))
+            .and_then(|id| q.get(id))
             .map(|v| format!("{v:e}"));
-        if let Some(v) = &new {
+        if let Some(v) = new {
             if let Some(f) = fields.get_mut(q_col) {
                 *f = v;
                 replaced += 1;
             }
+        }
+        if add {
+            fields.insert(prot_col.min(fields.len()), old.unwrap_or_default());
         }
         out.push_str(&fields.join("\t"));
         out.push('\n');
@@ -828,6 +846,7 @@ pub fn apply_per_run_q(
     let mut replaced = 0usize;
     for (id, psm) in targets.iter_mut() {
         if let Some(&q) = target_q.get(id) {
+            psm.pooled_q_value.get_or_insert(psm.q_value);
             psm.q_value = q;
             replaced += 1;
         }
@@ -963,6 +982,7 @@ pub fn parse_psm_results(text: &str) -> Result<HashMap<String, PercolatorPsm>, P
     while let Some(row) = reader.next_row()? {
         let psm_id = row.psm_id.to_string();
         let psm = PercolatorPsm {
+            pooled_q_value: row.pooled_q,
             psm_id: psm_id.clone(),
             q_value: row.q_value,
             pep: row.pep,
@@ -984,6 +1004,8 @@ pub struct PsmResultRow<'a> {
     pub psm_id: &'a str,
     /// `q-value` column.
     pub q_value: f64,
+    /// `pooled-q-value` column; `None` when the file has none.
+    pub pooled_q: Option<f64>,
     /// `posterior_error_prob` column.
     pub pep: f64,
     /// `score` column; `None` when absent, unparseable or not finite.
@@ -1006,6 +1028,7 @@ impl PsmResultRow<'_> {
 struct ResultColumns {
     id: usize,
     q: usize,
+    pooled_q: Option<usize>,
     pep: usize,
     peptide: usize,
     proteins: usize,
@@ -1037,6 +1060,7 @@ impl ResultColumns {
         Ok(Self {
             id: find("PSMId")?,
             q: find("q-value")?,
+            pooled_q: cols.iter().position(|c| *c == POOLED_Q_COLUMN),
             pep: find_prefix("posterior_error_prob")?,
             peptide: find("peptide")?,
             proteins: find("proteinIds")?,
@@ -1058,6 +1082,11 @@ impl ResultColumns {
         // silent NaN — NaN compares false in every FDR threshold check.
         let q_value = parse_finite(fields[self.q], "q-value")?;
         let pep = parse_finite(fields[self.pep], "posterior_error_prob")?;
+        let pooled_q = self
+            .pooled_q
+            .and_then(|c| fields.get(c))
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| v.is_finite());
         // The score is optional: a missing, unparseable or non-finite value is
         // no score. Callers that rank by it reject such PSMs themselves.
         let score = self
@@ -1070,6 +1099,7 @@ impl ResultColumns {
         Ok(PsmResultRow {
             psm_id: fields[self.id],
             q_value,
+            pooled_q,
             pep,
             score,
             peptide: fields[self.peptide],
@@ -1141,6 +1171,7 @@ mod tests {
 
     fn psm(id: &str, q: f64, pep: f64) -> PercolatorPsm {
         PercolatorPsm {
+            pooled_q_value: None,
             psm_id: id.to_string(),
             q_value: q,
             pep,

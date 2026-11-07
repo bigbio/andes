@@ -386,6 +386,7 @@ mod tests {
         (
             id.into(),
             PercolatorPsm {
+                pooled_q_value: None,
                 psm_id: id.into(),
                 q_value: q,
                 pep: 0.0,

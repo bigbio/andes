@@ -341,6 +341,7 @@ mod tests {
         (
             id.to_string(),
             PercolatorPsm {
+                pooled_q_value: None,
                 psm_id: id.to_string(),
                 q_value: q,
                 pep: 0.0,

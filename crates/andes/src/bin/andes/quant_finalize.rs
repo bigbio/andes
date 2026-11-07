@@ -2848,6 +2848,54 @@ mod tests {
         assert!(edges.len() < MAX_STRATA);
     }
 
+    /// The transfer gate reads the library's best-donor q-value, which is the
+    /// pooled q-value of that PSM when the rescoring result has one: an entry
+    /// whose donor PSM is good in its run but not pooled is gated, and the
+    /// other way round.
+    #[test]
+    fn the_transfer_gate_reads_the_pooled_q_of_the_best_donor() {
+        use quant::align::AlignParams;
+        use quant::library::{build_library, PrecursorMeta, PsmIn};
+        let meta: Vec<PrecursorMeta> = (0..200)
+            .map(|i| PrecursorMeta {
+                key: format!("P{i}/2"),
+                mz: 500.0 + i as f64,
+                charge: 2,
+                envelope: [0.5, 0.3, 0.15, 0.05],
+            })
+            .collect();
+        let psms = |q: f64, q_gate: f64| -> Vec<PsmIn> {
+            (0..200u32)
+                .flat_map(|p| {
+                    (0..2u16).map(move |r| PsmIn {
+                        run: r,
+                        precursor: p,
+                        rt: 10.0 + p as f64,
+                        score: 100.0 + p as f64,
+                        q,
+                        q_gate,
+                        pep: 0.001,
+                        is_decoy: false,
+                        faims_cv: None,
+                        ion_mobility: None,
+                    })
+                })
+                .collect()
+        };
+        let ap = AlignParams::default();
+        // Per-run q passes the gate, pooled q does not.
+        let lib = build_library(&psms(0.0005, 0.005), meta.clone(), 2, 1.0, 0.01, None, &ap);
+        let idx = EntryIndex::new(&lib, 2);
+        assert!(idx.gated(0));
+        // Per-run q fails it, pooled q passes (the PSM is still a donor).
+        let lib = build_library(&psms(0.005, 0.0005), meta.clone(), 2, 1.0, 0.01, None, &ap);
+        let idx = EntryIndex::new(&lib, 2);
+        assert!(!idx.gated(0));
+        // Without a pooled q-value the gate reads the q-value.
+        let lib = build_library(&psms(0.005, f64::NAN), meta, 2, 1.0, 0.01, None, &ap);
+        assert!(EntryIndex::new(&lib, 2).gated(0));
+    }
+
     /// An even histogram fills every one of the `MAX_STRATA` strata, and the
     /// last one survives packing into the family byte.
     #[test]

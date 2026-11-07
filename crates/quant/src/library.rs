@@ -746,6 +746,40 @@ mod tests {
     }
 
     #[test]
+    fn an_identity_decoy_is_gated_like_a_target() {
+        // The same rule for a decoy PSM: its donors follow its run q-value,
+        // its best donor PSM carries the pooled q-value (`q` without one).
+        let decoy = |run, rt, score, q, q_gate| PsmIn {
+            q,
+            q_gate,
+            ..psm(run, 200, rt, score, true)
+        };
+        let pooled = base(vec![
+            decoy(0, 5.0, 1000.0, 0.3, 0.0002),
+            decoy(1, 900.0, 990.0, 0.004, 0.02),
+        ]);
+        let ap = AlignParams::default();
+        let lib = build_library(&pooled, meta(201), 2, 1.0, 0.01, None, &ap);
+        let d = lib.entries.iter().find(|e| e.precursor == 200).unwrap();
+        assert!(d.identity_decoy);
+        // The best-scoring PSM (run 0) is no donor, run 1's is: the donor
+        // PSM is the run-1 one, gated by its pooled q-value.
+        assert_eq!(d.donors, vec![1]);
+        assert_eq!(d.donor_psm.score, 990.0);
+        assert_eq!(d.donor_psm.q, 0.02);
+        let plain: Vec<PsmIn> = pooled
+            .iter()
+            .map(|p| PsmIn {
+                q_gate: f64::NAN,
+                ..*p
+            })
+            .collect();
+        let lib = build_library(&plain, meta(201), 2, 1.0, 0.01, None, &ap);
+        let d = lib.entries.iter().find(|e| e.precursor == 200).unwrap();
+        assert_eq!(d.donor_psm.q, 0.004);
+    }
+
+    #[test]
     fn entries_sorted_by_mz() {
         let mut m = meta(200);
         // Reverse the m/z order relative to ids.

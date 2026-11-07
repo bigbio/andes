@@ -388,13 +388,16 @@ pub fn pep_is_degenerate(targets: &HashMap<String, PercolatorPsm>) -> bool {
 }
 
 /// Arguments of a static Percolator pass: the model of the main run applied as
-/// it is (`--static`, weights from that run), without training. `--override`
-/// keeps Percolator from replacing those weights by a default score vector
-/// when they separate no PSM at q < 0.01, as in a run with few real PSMs.
-/// `tdc` selects
-/// target-decoy competition (`-Y`); without it the q-values and the PSM-level
-/// PEP are estimated by Percolator's mix-max method on all PSMs. `pin`, the
-/// two result files and `weights` are written as the backend sees them.
+/// it is (`--static`, weights from that run), without training.
+///
+/// With `tdc` (the per-run pass of [`apply_per_run_q`]) the pass uses
+/// target-decoy competition (`-Y`) and `--override`, which keeps Percolator
+/// from replacing the weights by a default score vector when they separate no
+/// PSM at q < 0.01, as in a run with few real PSMs. Without it (the PEP repair
+/// pass) the q-values and the PSM-level PEP are estimated by Percolator's
+/// mix-max method on all PSMs, and the arguments are those of the pass as it
+/// was before the per-run pass existed. `pin`, the two result files and
+/// `weights` are written as the backend sees them.
 fn static_pass_args(
     pin: String,
     target: String,
@@ -412,10 +415,12 @@ fn static_pass_args(
         decoy,
         "--only-psms".to_string(),
         "--static".to_string(),
-        "--override".to_string(),
-        "--init-weights".to_string(),
-        weights,
     ];
+    if tdc {
+        args.push("--override".to_string());
+    }
+    args.push("--init-weights".to_string());
+    args.push(weights);
     if tdc {
         args.extend(tdc_flag(extra_args));
         args.extend(extra_args.iter().cloned());
@@ -602,8 +607,13 @@ pub fn run_percolator_pooled(
 const POOLED_Q_COLUMN: &str = "pooled-q-value";
 /// PIN column that names the run (input file) of each PSM.
 const RUN_COLUMN: &str = "FileName";
-/// Runs whose slices of the PIN are written and scored per scan of the PIN.
+/// Runs whose scratch PINs are written during one scan of the PIN, and so
+/// are open at once: 64 BufWriters stay far below the usual limit of open
+/// files (256 or more) and a PIN of more runs is read once per 64 of them
+/// (200 runs: four scans) instead of once per run.
 const RUNS_PER_SCAN: usize = 64;
+/// PIN column of the target (1) / decoy (-1) label.
+const LABEL_COLUMN: &str = "Label";
 
 /// The distinct values of the PIN's [`RUN_COLUMN`] in order of first
 /// appearance, with the column's index; `None` when the PIN has no such
@@ -631,9 +641,22 @@ fn pin_runs(pin: &Path) -> std::io::Result<Option<(usize, Vec<String>)>> {
     Ok(Some((col, runs)))
 }
 
+/// The scratch PIN of one run: its path, and its target and decoy PSMs.
+struct RunPin {
+    path: PathBuf,
+    targets: usize,
+    decoys: usize,
+}
+
+/// Path of the scratch PIN of the run with index `i`.
+fn run_pin_path(dir: &Path, stem: &str, i: usize) -> PathBuf {
+    dir.join(format!("{stem}.run{i}.pin"))
+}
+
 /// Write the rows of `pin` of each run in `chunk` to its own PIN (the header
-/// and that run's rows), `<dir>/<stem>.run<first + i>.pin`; returns the paths
-/// in the order of `chunk`.
+/// and that run's rows), `<dir>/<stem>.run<first + i>.pin`, and count each
+/// run's targets and decoys by the [`LABEL_COLUMN`]. The caller removes the
+/// files, whether this succeeds or not.
 fn write_run_pins(
     pin: &Path,
     col: usize,
@@ -641,21 +664,26 @@ fn write_run_pins(
     first: usize,
     dir: &Path,
     stem: &str,
-) -> std::io::Result<Vec<PathBuf>> {
+) -> std::io::Result<Vec<RunPin>> {
     use std::io::{BufRead, BufReader, BufWriter, Write};
-    let paths: Vec<PathBuf> = (0..chunk.len())
-        .map(|i| dir.join(format!("{stem}.run{}.pin", first + i)))
+    let mut runs: Vec<RunPin> = (0..chunk.len())
+        .map(|i| RunPin {
+            path: run_pin_path(dir, stem, first + i),
+            targets: 0,
+            decoys: 0,
+        })
         .collect();
     let index: HashMap<&str, usize> = chunk
         .iter()
         .enumerate()
         .map(|(i, r)| (r.as_str(), i))
         .collect();
-    let mut writers = Vec::with_capacity(paths.len());
     let mut lines = BufReader::new(std::fs::File::open(pin)?).lines();
     let header = lines.next().transpose()?.unwrap_or_default();
-    for p in &paths {
-        let mut w = BufWriter::new(std::fs::File::create(p)?);
+    let label = header.split('\t').position(|c| c == LABEL_COLUMN);
+    let mut writers = Vec::with_capacity(runs.len());
+    for r in &runs {
+        let mut w = BufWriter::new(std::fs::File::create(&r.path)?);
         writeln!(w, "{header}")?;
         writers.push(w);
     }
@@ -663,12 +691,16 @@ fn write_run_pins(
         let line = line?;
         if let Some(&i) = line.split('\t').nth(col).and_then(|r| index.get(r)) {
             writeln!(writers[i], "{line}")?;
+            match label.and_then(|c| line.split('\t').nth(c)) {
+                Some("-1") => runs[i].decoys += 1,
+                _ => runs[i].targets += 1,
+            }
         }
     }
     for mut w in writers {
         w.flush()?;
     }
-    Ok(paths)
+    Ok(runs)
 }
 
 /// The `SpecId`s (first column) of the PSM rows of the PIN at `path`.
@@ -685,7 +717,8 @@ fn pin_spec_ids(path: &Path) -> std::io::Result<Vec<String>> {
 /// Replace the `q-value` column of the Percolator result file `path` by the
 /// values of `q` (keyed by `PSMId`); rows without a value keep theirs. The
 /// replaced values stay in a `pooled-q-value` column before `proteinIds`
-/// (kept as it is when the file already has one). Returns the number of rows
+/// (kept as it is when the file already has one). The file is replaced
+/// atomically: an error leaves it as it was. Returns the number of rows
 /// replaced.
 fn rewrite_q_values(path: &Path, q: &HashMap<String, f64>) -> Result<usize, PercolatorError> {
     let text = match std::fs::read_to_string(path) {
@@ -737,8 +770,63 @@ fn rewrite_q_values(path: &Path, q: &HashMap<String, f64>) -> Result<usize, Perc
         out.push_str(&fields.join("\t"));
         out.push('\n');
     }
-    std::fs::write(path, out)?;
+    crate::atomic::write_atomic(path, |tmp| std::fs::write(tmp, &out))?;
     Ok(replaced)
+}
+
+/// What the pass of one run gave: Percolator's q-values of its target and of
+/// its decoy PSMs by `PSMId`, and the `SpecId`s of all its PSMs.
+struct RunQ {
+    target: HashMap<String, f64>,
+    decoy: HashMap<String, f64>,
+    ids: Vec<String>,
+}
+
+/// The static pass on one run's scratch PIN (see [`apply_per_run_q`]).
+fn score_run(
+    backend: &PercolatorBackend,
+    run_pin: &Path,
+    out_dir: &Path,
+    pass: &ResultPaths,
+    weights: &Path,
+    extra_args: &[String],
+) -> Result<RunQ, PercolatorError> {
+    let ids = pin_spec_ids(run_pin)?;
+    pass.clear_stale()?;
+    let result = run_static_pass(backend, run_pin, out_dir, pass, weights, extra_args, true)
+        .and_then(|output| {
+            if output.status.success() && pass.target.exists() {
+                Ok(())
+            } else {
+                let mut log = String::from_utf8_lossy(&output.stderr).into_owned();
+                if log.trim().is_empty() {
+                    log = String::from_utf8_lossy(&output.stdout).into_owned();
+                }
+                Err(PercolatorError::Run {
+                    backend: backend.describe(),
+                    status: output.status.to_string(),
+                    log_tail: tail_lines(&log, 5),
+                })
+            }
+        })
+        .and_then(|()| {
+            let t = parse_psm_results(&std::fs::read_to_string(&pass.target)?)?;
+            let d = match std::fs::read_to_string(&pass.decoy) {
+                Ok(text) => parse_psm_results(&text)?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+                Err(e) => return Err(e.into()),
+            };
+            Ok((t, d))
+        });
+    // The pass results are scratch, gone whether or not the pass worked.
+    let cleared = pass.clear_stale();
+    let (t, d) = result?;
+    cleared?;
+    Ok(RunQ {
+        target: t.into_iter().map(|(id, p)| (id, p.q_value)).collect(),
+        decoy: d.into_iter().map(|(id, p)| (id, p.q_value)).collect(),
+        ids,
+    })
 }
 
 /// Per-run q-values for a PIN of several runs (a [`RUN_COLUMN`] with more
@@ -746,20 +834,41 @@ fn rewrite_q_values(path: &Path, q: &HashMap<String, f64>) -> Result<usize, Perc
 /// on its own (`--static`, the pooled weights, `-Y`) and Percolator estimates
 /// the q-values of that run's target-decoy competition. The scores and the
 /// PEP stay those of the pooled run; the `q-value` of `targets` and of both
-/// result files is replaced. A PSM that the pass of its run leaves out of both
-/// result files gets a q-value of 1. A run whose pass fails keeps the pooled
-/// q-values of its PSMs, with a warning. The run PINs are scratch, removed after use.
+/// result files is replaced, and the pooled q-value goes to the
+/// `pooled-q-value` column.
+///
+/// The scorer of the pass is the model of the pooled run's first
+/// cross-validation bin: `--init-weights` reads one row of weights, the raw
+/// weights of that bin, whereas the pooled scores are held-out scores of the
+/// three bins. On real data the two scores of a PSM correlate at r = 0.998 to
+/// 0.9998 in ordinary runs and 0.983 in a near-empty run, and the mean of the
+/// three bins' raw weights (which this function does not use) does not make
+/// them closer; the q-values are those of the pass's scores, the `score` and
+/// PEP columns those of the pooled run.
+///
+/// A PSM of a run that Percolator scored, which the pass leaves out of the
+/// run's target results (it lost the competition in the run, or has no
+/// result), gets a q-value of 1, and so do all PSMs of a run without targets
+/// or without decoys, for which no FDR can be estimated. A run whose pass
+/// fails for another reason, or whose scratch PIN cannot be written or read,
+/// keeps the pooled q-values of its PSMs, with a warning. The scratch PINs
+/// are removed in every case.
 ///
 /// Returns a one-line summary, or `None` when the PIN has one run or no
-/// [`RUN_COLUMN`] (nothing changes).
+/// [`RUN_COLUMN`], or cannot be read (nothing changes).
 pub fn apply_per_run_q(
     backend: &PercolatorBackend,
     pin: &Path,
     extra_args: &[String],
     targets: &mut HashMap<String, PercolatorPsm>,
 ) -> Result<Option<String>, PercolatorError> {
-    let Some((col, runs)) = pin_runs(pin)? else {
-        return Ok(None);
+    let (col, runs) = match pin_runs(pin) {
+        Ok(Some(x)) => x,
+        Ok(None) => return Ok(None),
+        Err(e) => {
+            eprintln!("WARN: per-run q-values skipped, the PIN cannot be read ({e}); the q-values stay pooled");
+            return Ok(None);
+        }
     };
     if runs.len() < 2 {
         return Ok(None);
@@ -772,78 +881,77 @@ pub fn apply_per_run_q(
         .unwrap_or_else(|| "andes".to_string());
     let mut target_q: HashMap<String, f64> = HashMap::new();
     let mut decoy_q: HashMap<String, f64> = HashMap::new();
-    let mut failed: Vec<String> = Vec::new();
-    // `SpecId`s of the PSMs of the runs whose pass worked.
-    let mut covered: HashSet<String> = HashSet::new();
+    let failed = std::cell::Cell::new(0usize);
+    let unscorable = std::cell::Cell::new(0usize);
+    let warn_failed = |run: &str, why: &dyn std::fmt::Display| {
+        eprintln!(
+            "WARN: Percolator per-run q-values of run {run} failed ({why}); \
+             its PSMs keep the pooled q-values"
+        );
+        failed.set(failed.get() + 1);
+    };
     for (c, chunk) in runs.chunks(RUNS_PER_SCAN).enumerate() {
         let first = c * RUNS_PER_SCAN;
-        let paths = write_run_pins(pin, col, chunk, first, &out_dir, &stem)?;
-        for (i, (run, run_pin)) in chunk.iter().zip(&paths).enumerate() {
-            let pass = ResultPaths::new(&out_dir, &format!("{stem}.run{}", first + i));
-            pass.clear_stale()?;
-            let result = run_static_pass(
-                backend,
-                run_pin,
-                &out_dir,
-                &pass,
-                &main.weights,
-                extra_args,
-                true,
-            )
-            .and_then(|output| {
-                if output.status.success() && pass.target.exists() {
-                    Ok(())
-                } else {
-                    let mut log = String::from_utf8_lossy(&output.stderr).into_owned();
-                    if log.trim().is_empty() {
-                        log = String::from_utf8_lossy(&output.stdout).into_owned();
+        let written = write_run_pins(pin, col, chunk, first, &out_dir, &stem);
+        match written {
+            Err(e) => {
+                for run in chunk {
+                    warn_failed(run, &e);
+                }
+            }
+            Ok(run_pins) => {
+                for (i, (run, rp)) in chunk.iter().zip(&run_pins).enumerate() {
+                    let outcome = if rp.targets == 0 || rp.decoys == 0 {
+                        // Percolator needs both labels to estimate an FDR.
+                        pin_spec_ids(&rp.path)
+                            .map(|ids| {
+                                unscorable.set(unscorable.get() + 1);
+                                RunQ {
+                                    target: HashMap::new(),
+                                    decoy: HashMap::new(),
+                                    ids,
+                                }
+                            })
+                            .map_err(PercolatorError::Io)
+                    } else {
+                        let pass = ResultPaths::new(&out_dir, &format!("{stem}.run{}", first + i));
+                        score_run(backend, &rp.path, &out_dir, &pass, &main.weights, extra_args)
+                    };
+                    match outcome {
+                        Ok(r) => {
+                            for id in &r.ids {
+                                target_q
+                                    .entry(id.clone())
+                                    .or_insert_with(|| r.target.get(id).copied().unwrap_or(1.0));
+                                decoy_q
+                                    .entry(id.clone())
+                                    .or_insert_with(|| r.decoy.get(id).copied().unwrap_or(1.0));
+                            }
+                        }
+                        Err(e) => warn_failed(run, &e),
                     }
-                    Err(PercolatorError::Run {
-                        backend: backend.describe(),
-                        status: output.status.to_string(),
-                        log_tail: tail_lines(&log, 5),
-                    })
-                }
-            })
-            .and_then(|()| {
-                let t = parse_psm_results(&std::fs::read_to_string(&pass.target)?)?;
-                let d = match std::fs::read_to_string(&pass.decoy) {
-                    Ok(text) => parse_psm_results(&text)?,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
-                    Err(e) => return Err(e.into()),
-                };
-                Ok((t, d))
-            });
-            // The run PIN and the pass results are scratch, gone either way.
-            pass.clear_stale()?;
-            if result.is_ok() {
-                covered.extend(pin_spec_ids(run_pin)?);
-            }
-            std::fs::remove_file(run_pin)?;
-            match result {
-                Ok((t, d)) => {
-                    target_q.extend(t.into_iter().map(|(id, p)| (id, p.q_value)));
-                    decoy_q.extend(d.into_iter().map(|(id, p)| (id, p.q_value)));
-                }
-                Err(e) => {
-                    eprintln!(
-                        "WARN: Percolator per-run q-values of run {run} failed ({e}); \
-                         its PSMs keep the pooled q-values"
-                    );
-                    failed.push(run.clone());
                 }
             }
         }
-    }
-    // A PSM of a run whose pass worked that is in neither of its result
-    // files has no verdict from Percolator: it is not accepted.
-    for id in &covered {
-        if !target_q.contains_key(id) && !decoy_q.contains_key(id) {
-            target_q.insert(id.clone(), 1.0);
-            decoy_q.insert(id.clone(), 1.0);
+        // The scratch PINs, whatever happened.
+        for i in 0..chunk.len() {
+            let _ = std::fs::remove_file(run_pin_path(&out_dir, &stem, first + i));
         }
     }
+    // The result files first: if they cannot be written they and the map
+    // stay pooled together.
     let mut replaced = 0usize;
+    let mut note = "";
+    match rewrite_q_values(&main.target, &target_q)
+        .and_then(|_| rewrite_q_values(&main.decoy, &decoy_q))
+    {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("WARN: the per-run q-values could not be written to the result files ({e}); the q-values stay pooled");
+            note = ", result files left pooled";
+            target_q.clear();
+        }
+    }
     for (id, psm) in targets.iter_mut() {
         if let Some(&q) = target_q.get(id) {
             psm.pooled_q_value.get_or_insert(psm.q_value);
@@ -851,16 +959,19 @@ pub fn apply_per_run_q(
             replaced += 1;
         }
     }
-    rewrite_q_values(&main.target, &target_q)?;
-    rewrite_q_values(&main.decoy, &decoy_q)?;
     Ok(Some(format!(
-        "Percolator: per-run q-values (pooled model applied to each of {} runs): {replaced} of {}          target PSMs re-estimated{}",
+        "Percolator: per-run q-values (pooled model applied to each of {} runs): {replaced} of {} target PSMs re-estimated{}{}{note}",
         runs.len(),
         targets.len(),
-        if failed.is_empty() {
+        if unscorable.get() == 0 {
             String::new()
         } else {
-            format!(", {} runs kept the pooled q-values", failed.len())
+            format!(", {} runs without targets or decoys got q = 1", unscorable.get())
+        },
+        if failed.get() == 0 {
+            String::new()
+        } else {
+            format!(", {} runs kept the pooled q-values", failed.get())
         }
     )))
 }

@@ -93,7 +93,7 @@ Legend: 🟢 andes better · 🟡 similar · 🔴 andes worse · ⚪ no comparis
 | Truth designs, 6 sets | protein CV | 4.4–10.1% | FragPipe 4.9–13.5%, MaxQuant 7.0–11.6% | 🟢 on 3 sets, 🔴 on Astral and PXD001819 | **minor**, usable. Partly: dropping transfers or weighting by quality columns |
 | UPS1 lowest three levels, PXD009740 (170/382/859 amol) / PXD009815 (10/50/100 amol) | precursors within 2x of truth, as reported | 502 / 24 | MaxQuant 417 / 23; FragPipe 458 / 50 | 🟢 ahead of both on PXD009740 and 🔴 behind FragPipe on PXD009815 as reported; at equal rows FragPipe leads on both (458 against 437; 50 against 22) and andes leads MaxQuant on PXD009740 (437 against 341) | **minor**, lowest amounts only. No: engine (faint-transfer detection) |
 | Known-absent yeast, PXD014415 | false-transfer rate, all yeast rows (classified: enriched only 0.052%; with no-reference rows 0.052%) | 0.20% (0.08% at `quant_q ≤ 0.01`) | FragPipe 21.1: 0.09% (enriched only 0.010%; with no-reference rows 0.072%) | 🔴 at default, 🟡 at `quant_q ≤ 0.01`; classified: 🔴 on enriched rows (the no-reference reading uses andes' table as reference, not neutral) | **minor**, usable. Yes: filter `quant_q ≤ 0.01` (0.08%, at fewer transfers) |
-| Blank run, PXD016921 | rows reported in the blank | 150 (85 identified, 65 transferred) | MaxQuant 105 (20 / 85; MBR FDR option off); FragPipe 21.1: 8 (8 / 0) | 🔴 | **moderate** for low-input or blank-adjacent runs. No: `quant_q ≤ 0.01` still leaves 144; mostly carry-over (real ions) |
+| Blank run, PXD016921 | rows reported in the blank | 150 (85 identified, 65 transferred) | MaxQuant 105 (20 / 85, unfiltered matches; 29 (20 / 9) at Match q-value ≤ 0.01); FragPipe 21.1: 8 (8 / 0) | 🔴 | **moderate** for low-input or blank-adjacent runs. No: `quant_q ≤ 0.01` still leaves 144; mostly carry-over (real ions) |
 | TMT knockout, PXD017803 SPS / RTS / hrMS2 | interference (lower is better) | 0.062 / 0.027 / 0.192 | MaxQuant 2.7: 0.054 / 0.038 / 0.156 | 🟡 / 🟢 / 🔴 (🟢 0.000 with `--tmt-unmix`) | **moderate** on hrMS2, usable with the option. Yes for hrMS2: `--tmt-unmix` (0.000) or a purity ≥ 0.9 filter (0.135) |
 | TMT knockout, hrMS2 | PSMs with reporter ions evaluated (scans whose range records the reporters) | 3,278 | FragPipe 21.1: 3,038; MaxQuant 2.7: 2,241 | 🟢 | — |
 | TMT known ratios, PXD007683 | PSMs | 149,121 | MaxQuant 2.7: 97,107 | 🟢 +54% | — |
@@ -371,7 +371,12 @@ are from 2026-10 and were read again unchanged.
   runs have match between runs on (with its FDR option for PXD009740, PXD009815, QE and Astral);
   the MBR-off run of each set is the same parameter file with only `matchBetweenRuns` (and the MBR
   FDR option) switched off, re-run on the same files. The MBR-on runs of PXD001819 and of the blank
-  run had the MBR FDR option off; their numbers are unchanged here and a re-run is in progress.
+  run had the MBR FDR option off. Re-running them with the option on changed no number: MaxQuant
+  2.7 does not remove match rows with that option, it only fills the `Match q-value` column of the
+  evidence table. The MaxQuant rows here are therefore unfiltered transfers on every set, while
+  andes' transfers are filtered at `transfer_q ≤ 0.01`. Filtering MaxQuant's matches at
+  `Match q-value ≤ 0.01` cuts PXD001819 transfers from 43,373 to 2,550 and blank-run transfers
+  from 85 to 9; a filtered MaxQuant arm is being added.
   No PXD014415 and PXD030780 MaxQuant run exists (PXD014415 has no MaxQuant column in the absence
   results below). The
   quantity is `Intensity` of the evidence table summed per precursor and run; the LFQ columns are
@@ -382,7 +387,13 @@ are from 2026-10 and were read again unchanged.
   were used, none with match between runs off.
 - *Search settings are not matched.* andes searched with chimeric spectra (`--chimeric`), the secondary-modification pass (`--refine`) and
   with PSM-level FDR, while MaxQuant and FragPipe applied a protein-level 1% FDR, so depth counts
-  (precursors, proteins, rows) are not settings-matched. A matched-settings comparison is being run.
+  (precursors, proteins, rows) are not settings-matched. With settings matched to the tools
+  (±10 ppm, isotope errors 0 to 2, no `--chimeric`, no `--refine`; seed 42) andes' precursors fall
+  by 31% on PXD009740 and PXD009815 (to 27,226 and 29,600, level with MaxQuant and FragPipe), 12%
+  on QE (81,987) and 6% on Astral (51,798). Its DE true positives do not change beyond seed spread
+  (QE 1,049, Astral 673, PXD009815 831, PXD009740 1,293). So most of the UPS-set depth lead comes
+  from the search settings, while the DE results come from the quantification. A protein-level 1%
+  filter on andes removes 0.4-1.6% of precursors.
 - *Evaluation rules.* Every tool's table is reduced to raw precursor-by-run intensities and goes
   through the same downstream steps: per-run median normalisation over the precursors quantified
   in all runs, Tukey median polish per protein over precursors and runs, proteins with at least two

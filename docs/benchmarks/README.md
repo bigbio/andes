@@ -48,8 +48,10 @@ Verdicts compare andes with the best other tool measured on the same data: **wel
 - ProteoBench Astral: CV behind most submissions (0.112 against 0.070–0.095); median error behind
   the submissions that report fewer precursors (MaxQuant 0.160 at 20,283, Sage 0.167 at 30,319).
 - Glyco recall of reference identifications: behind (79–89% of pGlyco2's).
-- Error control: UPS1 against its natural *E. coli* entrapment reads 2.07–2.19% at nominal 1%;
-  timsTOF against natural yeast up to 1.55%.
+- Error control: on a peptide-level shuffled entrapment UPS1 reads 0.92–0.94% at nominal 1% and
+  timsTOF 0.52–1.12% (above nominal on one astrocyte run, 1.12%). The natural entrapments read
+  higher (UPS1 1.95–2.07%, timsTOF up to 1.54%); about half of those hits fall on proteins with a
+  close homolog in the target proteome (see the UPS1 and timsTOF paragraphs).
 
 **Identification** (PSMs at Percolator `q ≤ 0.01`, 8 threads):
 
@@ -62,11 +64,13 @@ Legend: 🟢 andes better · 🟡 similar · 🔴 andes worse · ⚪ no comparis
 | Astral HCD | true FDP at nominal 1% | 0.89–1.08% | — | 🟢 on target | — |
 | TMT low-res, PXD007683 a05058 (ion-trap CID) | PSMs | 13,516 | Comet 2025.01: 10,504 | 🟢 +29% | — |
 | TMT high-res, PXD017803 TKO hrMS2 | PSMs | 6,628–6,686 | not measured | ⚪ | — |
-| Low-res LFQ, UPS1 PXD001819 (ion-trap CID) | PSMs | 16,225 | Java MS-GF+: 15,904 | 🟡 +2% | — |
-| Low-res LFQ, UPS1 | true FDP, natural *E. coli* entrapment | 2.07–2.19% | — | 🔴 above 1% (0.91–0.98% on a shuffled entrapment) | **moderate**, usable. No: part is shared conserved peptides in the entrapment proteome; the shuffled entrapment reads 0.91–0.98% |
+| Low-res LFQ, UPS1 PXD001819 (ion-trap CID) | PSMs (`2ee76dd6`, 2 missed cleavages; was 16,225 at `2051616b`) | 16,632–16,675 | Java MS-GF+: 15,904 | 🟡 +5% | — |
+| Low-res LFQ, UPS1 | true FDP, peptide-level shuffled entrapment (primary) | 0.92–0.94% | — | 🟢 within nominal 1% | — |
+| Low-res LFQ, UPS1 | true FDP, natural *E. coli* entrapment | 1.95–2.07% (1.01–1.06% without hits on conserved proteins) | — | 🔴 above nominal on the natural design | **moderate**, usable. No: the natural null is not clean here: 45 of 94 hits (seed 42) sit on 8 proteins with a yeast homolog at ≥ 40% identity, 32 of them on two EF-Tu peptides; the shuffle reads 0.92–0.94% |
 | Phospho, PXD007653 (Q Exactive) | PSMs | 38,623 | Comet 2025.01: 33,984 (at 1.77% true FDP) | 🟢 +14%, at 0.80–0.99% FDP | — |
 | timsTOF DDA-PASEF, PXD053748 and PXD064202 | PSMs | 14.3k–55.6k per file | not measured | ⚪ | — |
-| timsTOF DDA-PASEF | true FDP, natural yeast entrapment | 0.78–1.55% | — | 🔴 up to 1.55% on one set | **moderate**, usable. No: engine (scoring and error control on timsTOF) |
+| timsTOF DDA-PASEF | true FDP, peptide-level shuffled entrapment (primary) | 0.52–1.12% | — | 🟡 within nominal on three runs (0.52–1.01%), above on one (1.12%) | **moderate**, usable. No: engine (scoring and error control on timsTOF) |
+| timsTOF DDA-PASEF | true FDP, natural yeast entrapment | 0.86–1.54% (0.72–1.02% without hits on conserved proteins) | — | 🟡 above nominal on one astrocyte run (1.44–1.54%) | Same conserved-homolog effect as UPS1; see the timsTOF paragraph |
 | Glyco quick tier, PXD005553 | reference glycoPSMs confirmed | 88–90% | pGlyco2, MSFragger-Glyco (references) | 🔴 10–12% of reference IDs missed | **moderate**, usable. No: engine (glyco scoring) |
 | Glyco deep tier, PXD005553 | reference glycoPSMs confirmed | 79% (pGlyco2), 88% (MSFragger-Glyco) | as above | 🔴 21% of pGlyco2's missed | **moderate**, usable. No: engine (glyco scoring) |
 
@@ -116,7 +120,8 @@ Settings, error control and cost of every row: section 2.
 ## 2. The benchmarks
 
 **Where and how.** Every andes identification number on this page was measured on 2026-10-23 at
-`2051616b`, and every quantification number on 2026-11-05 at `09e1c00d` (label-free) or
+`2051616b`, except the UPS1 and timsTOF entrapment rows, which were re-measured on 2026-11-07 at
+`2ee76dd6` (see their paragraphs), and every quantification number on 2026-11-05 at `09e1c00d` (label-free) or
 `0cfa03cc` (TMT; the 500-run study excepted), unless a row says otherwise. PSM counts, wall time, CPU time and peak memory of the four standard
 sets (Astral, TMT a05058, UPS1, phospho) come from the benchmark VM (8 cores, 8 threads,
 `/usr/bin/time`, two runs except phospho), on the plain databases the Comet rows used. The true
@@ -145,14 +150,51 @@ nominal 1% is 0.67–0.76% true FDP (13,325–13,371 PSMs at a true FDP of 1%); 
 MS2), `--protocol TMT`, against reviewed yeast + cRAP with a peptide-level entrapment (T/E 1.039):
 6,628–6,686 PSMs at `q ≤ 0.01`, 0.98–1.31% true FDP, 6,607–6,662 PSMs at a true FDP of 1%.
 
-**Low-res LFQ (UPS1).** One run of the UPS1 standard in yeast, searched against yeast plus an
-E. coli entrapment proteome: 16,049–16,242 PSMs and 4,123–4,183 peptides at `q ≤ 0.01`;
-30–48 s, 162–166 CPU-s, 1.3 GB. Against the natural *E. coli* entrapment (T/E 2.351) the
-nominal 1% is **2.07–2.19% true FDP**, and andes keeps 14,457–14,605 PSMs at a true FDP of 1%.
-With a peptide-level shuffle of the same targets instead (T/E 1.039) it reads 0.91–0.98%
-(16,199–16,206 PSMs at 1%). The two entrapments disagree on this low-res set; the natural one is
-the established reference here. Java MS-GF+ (v20240326, earlier session, not re-run) reported
-15,904 PSMs on this file.
+**Low-res LFQ (UPS1).** One run of the UPS1 standard in yeast (`UPS1_5000amol_R1`), measured on
+2026-11-07 at `2ee76dd6` with the documented defaults (no extra flags; 2 missed cleavages, the
+default since #300), Percolator 3.7.1 `-Y` seeds 42, 1 and 7, entrapment evaluated with the
+all-proteins rule. Two entrapment designs, each searched as its own database:
+
+| design | T/E | PSMs at `q ≤ 0.01` | peptides | entrapment hits | true FDP at nominal 1% | PSMs at a true FDP of 1% |
+|---|---:|---:|---:|---:|---:|---:|
+| peptide-level shuffle of the yeast targets (primary) | 1.033 | 16,567–16,623 | 4,176–4,200 | 75–77 | **0.92–0.94%** | 16,617–16,733 |
+| natural *E. coli* (4,531 `ENTRAP_` proteins) | 2.451 | 16,632–16,675 | 4,116–4,227 | 94–100 | 1.95–2.07% | 14,786–15,045 |
+| natural, hits on conserved proteins removed | 2.451 (2.630 with those proteins removed from E) | same | same | 49–51 | 1.01–1.06% (1.07–1.11%) | 16,505–16,607 |
+
+Cost on 8 threads: andes 13–15 s wall, 71–79 CPU-s, 1.4 GB; Percolator (three seeds) 38–40 s
+each, about 190–200 CPU-s, 1.2 GB. Verdict on the shuffle: within nominal (0.92–0.94%). Verdict on
+the natural design: above nominal (1.95–2.07%), and that reading is not a clean calibration:
+
+- **Conserved proteins.** An `ENTRAP_` protein is called conserved when its best local alignment
+  (BLOSUM62, gap open 11, extend 1, against the yeast target proteins preselected by shared
+  4-mers) covers at least 60% of it at 40% identity or more; 269 of the 4,531 *E. coli*
+  proteins qualify (719 at 30% / 50%; 23 at 60% / 60%). The 40% / 60% cut is a conventional
+  ortholog-level threshold fixed in advance, not tuned; hit counts were not re-run at the other
+  two cuts, only T/E without those proteins (2.872 at 30% / 50%, 2.456 at 60% / 60%).
+- **Hit breakdown (seed 42, 94 hits on 41 protein groups).** 8 conserved groups hold 45 hits.
+  The largest is EF-Tu (`EFTU1`/`EFTU2`, 65% identical to yeast EF-Tu): 32 PSMs from only two
+  distinct peptides. Next are ornithine carbamoyltransferase (7 PSMs, one peptide) and enolase
+  (5 PSMs). Elsewhere a protein typically has one hit. Repeated PSMs on the same few peptides of
+  abundant, conserved proteins look like real material, not random errors. UPS1 is a recombinant
+  standard expressed in *E. coli*, so host proteins such as EF-Tu can be present in the sample
+  (the same pattern appeared in an earlier analysis, where EF-Tu and DnaK made up 40 of 100
+  hits). This is consistent with, not proof of, real *E. coli* material; the data cannot separate
+  it from a mis-assigned yeast peptide.
+- **Shared peptides.** Counting a PSM as entrapment when any of its proteins is entrapment (the
+  rule used before the shared-peptide fix) reads 3.09–3.23% on the same runs, because peptides
+  shared with a yeast protein become false hits. The docs and the evaluator count a hit only
+  when all proteins are entrapment and the I/L-folded peptide occurs in no target protein.
+- **T/E.** 2.451 is computed from the actual database with the andes digest (2 missed
+  cleavages, 6–50 residues, I/L folded, no proline rule), after moving the 2,486 entrapment
+  peptides that occur in a yeast protein to the target half. At 1 missed cleavage (the digest of
+  the earlier measurement) it is 2.351; with a proline rule 2.370 (1 missed) or 2.476 (2); at 3
+  missed cleavages 2.550. A digest giving 2.524 was not reproduced. Every FDP here uses 2.451.
+- **Old default digest.** With `--max-missed-cleavages 1` (the 2026-10-23 setting), same build:
+  16,238–16,367 PSMs, natural FDP 1.94–1.99% (T/E 2.351), shuffle 0.88–0.96% (T/E 1.039).
+
+Java MS-GF+ (v20240326, earlier session, not re-run) reported 15,904 PSMs on this file. Earlier
+measurement (`2051616b`, 1 missed cleavage, seeds 42, 1 and 2): 16,049–16,242 PSMs, natural
+2.07–2.19%, shuffle 0.91–0.98%.
 
 **Phospho-enriched.** One single-shot EasyPhos mouse liver file
 (`20151014_QEp6_NaKr_SA_totalliver_control2_phospho.raw`, as mzML), not in any model's
@@ -169,17 +211,29 @@ re-measured.
 **timsTOF DDA-PASEF.** Native `.d` input, 20 ppm precursor tolerance, 2 missed cleavages,
 `--top-n 1`, 80 Da index slices, Carbamidomethyl C fixed, Oxidation M and protein N-terminal
 Acetyl variable, against reviewed human proteins with a reviewed yeast entrapment proteome
-(natural, T/E 3.845) or a peptide-level shuffle of the human targets (T/E 1.064).
+(natural, T/E 3.784) or a peptide-level shuffle of the human targets (T/E 1.050). Measured on
+2026-11-07 at `2ee76dd6`, Percolator 3.7.1 `-Y` seeds 42, 1 and 7, all-proteins rule, T/E at
+2 missed cleavages (3.845 at 1). "Without conserved" removes hits on yeast proteins that align to
+a human protein at 40% identity or more over 60% of their length (907 of 6,733), with the same T/E.
 
-| run | PSMs at `q ≤ 0.01` (peptide-level) | true FDP | PSMs at a true FDP of 1% | natural yeast: PSMs / true FDP / at 1% |
+| run | shuffle: PSMs at `q ≤ 0.01` | shuffle: true FDP | shuffle: PSMs at a true FDP of 1% | natural yeast: PSMs / true FDP / without conserved / at 1% |
 |---|---:|---:|---:|---|
-| PXD053748 `..._4363` (plasma, 30 min) | 14,336–14,393 | 0.62–0.63% | 14,772–14,877 | 14,923–14,959 / 0.94–1.14% / 14,788–15,033 |
-| PXD053748 `..._4367` (plasma, 50 min) | 17,491–17,550 | 0.87–0.90% | 17,644–17,660 | 18,081–18,136 / 0.78–0.91% / 18,379–18,434 |
-| PXD064202 `..._2442` (astrocytes) | 34,210–34,249 | 0.98–1.02% | 34,216–34,222 | 35,105–35,150 / 1.53–1.55% / 33,744–33,959 |
-| PXD064202 `..._2403` (astrocytes) | 55,590–55,609 | 0.98–1.03% | 55,561–55,655 | 56,801–56,836 / 1.29–1.32% / 56,028–56,088 |
+| PXD053748 `..._4363` (plasma, 30 min) | 15,411–15,474 | 0.52–0.60% | 15,938–15,952 | 16,062–16,108 / 0.86–1.01% / 0.80–0.95% / 16,076–16,219 |
+| PXD053748 `..._4367` (plasma, 50 min) | 18,900–18,957 | 0.82–0.94% | 19,031–19,152 | 19,456–19,507 / 0.91–0.98% / 0.79–0.86% / 19,528–19,576 |
+| PXD064202 `..._2442` (astrocytes) | 36,052–36,125 | 0.94–1.01% | 36,047–36,178 | 36,873–36,982 / 1.44–1.54% / 0.93–1.02% / 36,040–36,071 |
+| PXD064202 `..._2403` (astrocytes) | 58,814–58,873 | 1.12% | 58,542–58,637 | 59,739–59,761 / 1.17–1.24% / 0.72–0.78% / 59,068–59,260 |
 
-On the astrocyte runs the natural yeast entrapment reads above nominal (1.29–1.55%) where the
-peptide-level shuffle reads 0.98–1.03%. 43–64 s per run, 2.8–3.9 GB.
+Verdict on the shuffle: within nominal on three runs (0.52–1.01%), above on `..._2403` (1.12%,
+all three seeds). On the natural design `..._2442` is above nominal (1.44–1.54%); removing hits
+on conserved proteins brings it to 0.93–1.02%. The conserved-protein pattern is the same as on
+UPS1: at seed 42 on `..._2442`, 14 conserved groups hold 39 of 111 hits, among them yeast Ssb1/2
+(15 PSMs from two distinct peptides, 64% identical to human HSP70), GAPDH and EF-Tu. A human
+sample cannot contain yeast proteins, so these hits are best read as near-identical human
+peptides assigned to the yeast homolog, not independent errors. The any-protein rule would
+read 9.0–9.7% on the astrocyte runs. andes 40–52 s per run, 255–321 CPU-s, 2.1–2.5 GB on the
+natural database (49–58 s, 307–371 CPU-s, 2.4–2.8 GB on the shuffle); Percolator is separate.
+Earlier measurement (`2051616b`, 1 missed cleavage on the same inputs): natural yeast
+0.78–1.55%, shuffle 0.62–1.03%.
 
 **Glyco.** Mouse liver glycoproteome data (PXD005553), against mouse proteins plus an entrapment,
 with `--glyco --glyco-species mouse --decoy-strategy sequon`. Two published reference
@@ -985,10 +1039,12 @@ with `purity ≥ 0.9`.
   leaderboard was scored by `proteobench` 0.17.0 and andes by 0.18.6; several engines' transfer
   error control could not be checked.
 - **Entrapment designs can disagree.** On UPS1 the natural *E. coli* entrapment reads the
-  nominal 1% as 2.07–2.19% and a peptide-level shuffle as 0.91–0.98%; on the timsTOF astrocyte
-  runs natural yeast reads 1.29–1.55% and the shuffle 0.98–1.03%. The 500-run study has no
+  nominal 1% as 1.95–2.07% and a peptide-level shuffle as 0.92–0.94%; on the timsTOF astrocyte
+  runs natural yeast reads 1.17–1.54% and the shuffle 0.94–1.12%. The shuffle is the primary
+  calibration reading: the natural null is contaminated by conserved homologs (and, for UPS1, by
+  possible real *E. coli* material), as the next paragraphs show. The 500-run study has no
   entrapment in this measurement.
-- **Not re-measured at `2051616b`:** the glyco deep tier, the compared phospho FDP (Comet), the
+- **Not re-measured at `2ee76dd6` or `2051616b`:** the glyco deep tier, the compared phospho FDP (Comet), the
   `--chimeric` and `--refine` opt-in table, the non-default `--predict` settings and the
   phospho agreement with MaxQuant.
 - **Single files.** Phospho is one file, peptide-level only; `--refine` is measured on Astral

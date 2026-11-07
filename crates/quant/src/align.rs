@@ -555,8 +555,9 @@ impl Alignment {
         (map.apply(t), s)
     }
 
-    /// Residual width of `run` at consensus RT `t` (0 for an unaligned run).
-    fn sigma_at(&self, run: u16, t: f64) -> f64 {
+    /// Residual width (sigma) of `run` at consensus RT `t`, the run's RT
+    /// residual scale (0 for an unaligned run).
+    pub fn sigma_at(&self, run: u16, t: f64) -> f64 {
         let Some(Some(knots)) = self.residual_sd.get(run as usize) else {
             return 0.0;
         };

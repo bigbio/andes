@@ -112,7 +112,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use output::ms1_table::read_ms1_table;
-use quant::align::RunMap;
+use quant::align::{Alignment, RunMap};
 use quant::claims;
 use quant::decoys::{probes, Hypothesis, Probe, PEPTIDE_MASS_SLOPE};
 use quant::evidence::{
@@ -1402,9 +1402,63 @@ impl ShapeReference for DonorShapes {
 /// cannot tell from a true one.
 pub(crate) const TRANSFER_DONOR_Q: f64 = 0.001;
 
+/// Donor-identity transfer features of an entry: the quality of its best
+/// donor PSM and the donor set's RT dispersion in units of the run residual
+/// scale. Constant across an entry's target and wrong-peak decoy rows (like
+/// `n_donor_runs` and `library_q`), and defined for identity decoys too
+/// (their decoy PSMs and post-fit consensus RT give the same quantities), so
+/// a decoy sees every feature the way a target does. `None` when any value
+/// is non-finite, so the row is left out of the classifier.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct DonorIdentity {
+    pub psm_q: f64,
+    pub log10_pep: f64,
+    pub rt_dispersion: f64,
+}
+
+/// `[donor_psm_q, log10_donor_pep, donor_rt_dispersion]` of `entry` under
+/// alignment `a`, or `None` when a value is non-finite.
+pub(crate) fn donor_identity(e: &LibraryEntry, a: &Alignment) -> Option<DonorIdentity> {
+    let psm_q = e.donor_psm.q;
+    // `f64::max` drops a NaN, so a NaN PEP is caught before the floor.
+    let log10_pep = if e.donor_psm.pep.is_nan() {
+        f64::NAN
+    } else {
+        e.donor_psm.pep.max(1e-12).log10()
+    };
+    let rt_dispersion = donor_rt_dispersion(e, a);
+    let d = DonorIdentity {
+        psm_q,
+        log10_pep,
+        rt_dispersion,
+    };
+    (d.psm_q.is_finite() && d.log10_pep.is_finite() && d.rt_dispersion.is_finite()).then_some(d)
+}
+
+/// `1.4826 * MAD` of `(best_rt_r - map_r(consensus_rt)) / sigma_r` over the
+/// entry's aligned donor runs, the donor RT residual on the run residual
+/// scale. 0 with fewer than two aligned donor runs (no measurable spread);
+/// unaligned donor runs do not count, as in `n_donor_runs`.
+fn donor_rt_dispersion(e: &LibraryEntry, a: &Alignment) -> f64 {
+    let mut z: Vec<f64> = Vec::new();
+    for &(run, rt) in &e.best_rt {
+        let Some(map) = a.maps.get(run as usize).and_then(|m| m.as_ref()) else {
+            continue;
+        };
+        z.push((rt - map.apply(e.consensus_rt)) / a.sigma_at(run, e.consensus_rt));
+    }
+    if z.len() < 2 {
+        return 0.0;
+    }
+    let m = median(z.clone());
+    let abs: Vec<f64> = z.into_iter().map(|v| (v - m).abs()).collect();
+    1.4826 * median(abs)
+}
+
 /// The transfer FDR features of a row, in [`TRANSFER_FEATURES`] order, with
 /// `neighbour_rate` the share of the run's most similar runs that identified
-/// the precursor ([`crate::quant_finalize::EntryIndex::neighbour_rate`]);
+/// the precursor ([`crate::quant_finalize::EntryIndex::neighbour_rate`])
+/// and `donor` the entry's donor-identity features ([`donor_identity`]);
 /// `None` without evidence or with a non-finite value. The last three
 /// compare the row's peak shape with its precursor's identified fits in the
 /// other runs ([`DonorShapes::features`]): width, tailing and isotope
@@ -1416,6 +1470,7 @@ pub(crate) const TRANSFER_DONOR_Q: f64 = 0.001;
 /// labels accepted transfers `transfer_ms2`.
 pub(crate) fn transfer_features(
     row: &ExtractRow,
+    donor: &DonorIdentity,
     shapes: &impl ShapeReference,
     maps: &[Option<RunMap>],
     neighbour_rate: f64,
@@ -1438,6 +1493,9 @@ pub(crate) fn transfer_features(
         row.n_donor_runs as f64,
         row.library_q,
         neighbour_rate,
+        donor.psm_q,
+        donor.log10_pep,
+        donor.rt_dispersion,
         shape_width,
         shape_tailing,
         shape_iso,
@@ -2764,7 +2822,8 @@ mod finalize_tests {
     fn finalize_writes_one_row_per_target_pair_with_evidence_types() {
         let dir = tempfile::tempdir().unwrap();
         let (mbr, val) = mbr_paths(&dir.path().join("x"));
-        let s = finalize(&stems(), &library(), &extract(), 0.01, None, 7, &mbr, &val).unwrap();
+        let lib = library_with(&|_| false, &confident);
+        let s = finalize(&stems(), &lib, &extract(), 0.01, None, 7, &mbr, &val).unwrap();
         let t = table(&mbr);
         assert_eq!(t[0][2], "evidence_type");
         let body = &t[1..];
@@ -2806,7 +2865,8 @@ mod finalize_tests {
     fn finalize_reports_pseudo_transfer_validation() {
         let dir = tempfile::tempdir().unwrap();
         let (mbr, val) = mbr_paths(&dir.path().join("x"));
-        let s = finalize(&stems(), &library(), &extract(), 0.01, None, 7, &mbr, &val).unwrap();
+        let lib = library_with(&|_| false, &confident);
+        let s = finalize(&stems(), &lib, &extract(), 0.01, None, 7, &mbr, &val).unwrap();
         let v = &s.validation;
         eprintln!("validation: {v:?}");
         assert_eq!(v.pseudo_transfers, N as usize);
@@ -2825,7 +2885,8 @@ mod finalize_tests {
         assert_eq!(get("accepted_pooled_q01"), &v.at_q01.pooled.to_string());
 
         // A looser threshold keeps the q <= 0.01 counts and adds its own.
-        let loose = finalize(&stems(), &library(), &extract(), 0.5, None, 7, &mbr, &val).unwrap();
+        let loose = finalize(&stems(), &library_with(&|_| false, &confident), &extract(), 0.5, None, 7, &mbr, &val)
+            .unwrap();
         let w = &loose.validation;
         assert_eq!(w.q_threshold, 0.5);
         assert_eq!(w.at_q01, v.at_q01);
@@ -4158,6 +4219,190 @@ mod finalize_tests {
         }
     }
 
+    /// Donor-identity features of a confident single-donor entry.
+    const DONOR: DonorIdentity = DonorIdentity {
+        psm_q: 1e-4,
+        log10_pep: -6.0,
+        rt_dispersion: 0.0,
+    };
+
+    /// An alignment of `sigma.len()` runs with identity maps and constant
+    /// residual width `sigma[r]` in run `r` (`None`: an unaligned run), for
+    /// `N` precursors and no observations.
+    fn aligned(sigma: &[Option<f64>]) -> quant::align::Alignment {
+        let runs = sigma
+            .iter()
+            .map(|s| quant::align::RunAlignment {
+                map: s.map(|_| {
+                    RunMap::from_parts(vec![0.0, 3000.0], vec![0.0, 3000.0], 1.0, 1.0).unwrap()
+                }),
+                residual_sd: s.map(|s| vec![(0.0, s)]),
+                anchors: 0,
+                coverage: 1.0,
+                component: s.map(|_| 0),
+                observations: Vec::new(),
+            })
+            .collect();
+        quant::align::Alignment::from_runs(runs, N as usize).unwrap()
+    }
+
+    /// A target entry of precursor `p` at consensus RT 500 s with donor PSM
+    /// `(q, pep)` and its best donor PSM at `500 + offsets[r]` in run `r`.
+    fn donor_entry(p: u32, q: f64, pep: f64, offsets: &[f64]) -> LibraryEntry {
+        LibraryEntry {
+            precursor: p,
+            identity_decoy: false,
+            q: 0.001,
+            donor_psm: quant::library::DonorPsm {
+                score: 10.0,
+                q,
+                pep,
+            },
+            consensus_rt: 500.0,
+            faims_cv: None,
+            ion_mobility: None,
+            donors: (0..offsets.len() as u16).collect(),
+            best_rt: offsets
+                .iter()
+                .enumerate()
+                .map(|(r, d)| (r as u16, 500.0 + d))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn donor_identity_is_constant_across_a_precursors_family() {
+        let mut lib = library();
+        lib.alignment = aligned(&[Some(2.0), Some(2.0), Some(2.0), Some(2.0)]);
+        let mut decoy = donor_entry(6, 5e-4, 1e-3, &[0.0, 6.0, -6.0]);
+        decoy.identity_decoy = true;
+        lib.entries = vec![donor_entry(5, 1e-4, 1e-6, &[0.0, 2.0, -2.0]), decoy];
+        let idx = EntryIndex::new(&lib, 4);
+        let mut g = Rng(4);
+        let rows = [
+            Hypothesis::Target,
+            Hypothesis::MassShiftDecoy(7),
+            Hypothesis::RtShiftDecoy,
+        ]
+        .map(|k| row(5, 3, k, Role::Transfer, Some(evidence(&mut g, true, 500.0))));
+        let target = idx.donor_identity(&rows[0]).unwrap();
+        assert!((target.psm_q - 1e-4).abs() < 1e-15, "{target:?}");
+        assert!((target.log10_pep + 6.0).abs() < 1e-12, "{target:?}");
+        assert!((target.rt_dispersion - 1.4826).abs() < 1e-12, "{target:?}");
+        for r in &rows[1..] {
+            assert_eq!(idx.donor_identity(r), Some(target));
+        }
+        // The same numbers reach the classifier, for the target and its
+        // wrong-peak decoys alike.
+        let maps = &lib.alignment.maps;
+        let feats = table_features(&rows, &idx, &DonorShapes::default(), maps, |_| true);
+        assert_eq!(feats.len(), 3);
+        let pos = |name: &str| TRANSFER_FEATURES.iter().position(|n| *n == name).unwrap();
+        for (_, t, _, x) in &feats {
+            assert_eq!(*t, Table::Transfer);
+            let x = x.as_ref().unwrap();
+            assert_eq!(x[pos("donor_psm_q")], target.psm_q as f32);
+            assert_eq!(x[pos("log10_donor_pep")], target.log10_pep as f32);
+            assert_eq!(x[pos("donor_rt_dispersion")], target.rt_dispersion as f32);
+        }
+        // An identity decoy's own (decoy) donors give its own values.
+        let ev = Some(evidence(&mut g, true, 500.0));
+        let ident = row(6, 3, Hypothesis::Target, Role::Transfer, ev);
+        let other = idx.donor_identity(&ident).unwrap();
+        assert_ne!(other, target);
+        assert!((other.psm_q - 5e-4).abs() < 1e-15, "{other:?}");
+        assert!((other.log10_pep + 3.0).abs() < 1e-12, "{other:?}");
+        assert!((other.rt_dispersion - 3.0 * 1.4826).abs() < 1e-12, "{other:?}");
+        // No entry, no donor identity (and no transfer features).
+        let ev = Some(evidence(&mut g, true, 500.0));
+        let none = row(9, 3, Hypothesis::Target, Role::Transfer, ev);
+        assert_eq!(idx.donor_identity(&none), None);
+    }
+
+    #[test]
+    fn donor_rt_dispersion_is_on_the_run_residual_scale() {
+        let unit = aligned(&[Some(1.0); 4]);
+        let wide = aligned(&[Some(2.0); 4]);
+        let disp = |offsets: &[f64], a: &quant::align::Alignment| {
+            donor_identity(&donor_entry(1, 1e-4, 1e-6, offsets), a)
+                .unwrap()
+                .rt_dispersion
+        };
+        let tight = [0.0, 1.0, -1.0, 2.0];
+        let loose = [0.0, 3.0, -3.0, 6.0];
+        // MAD of [0, 1, -1, 2] about its median 0.5 is 1.
+        assert!((disp(&tight, &unit) - 1.4826).abs() < 1e-12);
+        // More RT scatter, more dispersion.
+        assert!((disp(&loose, &unit) - 3.0 * 1.4826).abs() < 1e-12);
+        // Twice the residual width halves it.
+        assert!((disp(&loose, &wide) - 0.5 * disp(&loose, &unit)).abs() < 1e-12);
+        assert!((disp(&tight, &wide) - 0.5 * disp(&tight, &unit)).abs() < 1e-12);
+        // A constant shift of every donor is no spread.
+        assert_eq!(disp(&[5.0; 4], &unit), 0.0);
+        // Fewer than two aligned donor runs: 0.
+        assert_eq!(disp(&[], &unit), 0.0);
+        assert_eq!(disp(&[40.0], &unit), 0.0);
+        // Unaligned donor runs do not count.
+        let part = aligned(&[Some(1.0), None, None, Some(1.0)]);
+        assert!((disp(&[0.0, 50.0, -50.0, 2.0], &part) - 1.4826).abs() < 1e-12);
+        assert_eq!(disp(&[0.0, 50.0, -50.0], &part), 0.0);
+    }
+
+    #[test]
+    fn identity_decoys_share_the_dispersion_scale() {
+        let a = aligned(&[Some(1.5), Some(3.0), Some(1.5)]);
+        let offsets = [0.0, 6.0, -3.0];
+        let target = donor_entry(1, 1e-4, 1e-6, &offsets);
+        let mut decoy = donor_entry(2, 1e-4, 1e-6, &offsets);
+        decoy.identity_decoy = true;
+        let (t, d) = (
+            donor_identity(&target, &a).unwrap(),
+            donor_identity(&decoy, &a).unwrap(),
+        );
+        assert_eq!(t, d);
+        // z = [0, 2, -2]: median 0, MAD 2.
+        assert!((d.rt_dispersion - 2.0 * 1.4826).abs() < 1e-12, "{d:?}");
+    }
+
+    #[test]
+    fn donor_identity_is_none_on_a_non_finite_value() {
+        let a = aligned(&[Some(1.0); 3]);
+        let offsets = [0.0, 1.0, -1.0];
+        assert!(donor_identity(&donor_entry(1, 1e-4, 1e-6, &offsets), &a).is_some());
+        assert_eq!(
+            donor_identity(&donor_entry(1, 1e-4, f64::NAN, &offsets), &a),
+            None
+        );
+        assert_eq!(
+            donor_identity(&donor_entry(1, f64::NAN, 1e-6, &offsets), &a),
+            None
+        );
+        let mut e = donor_entry(1, 1e-4, 1e-6, &offsets);
+        e.consensus_rt = f64::NAN;
+        assert_eq!(donor_identity(&e, &a), None);
+    }
+
+    #[test]
+    fn log10_donor_pep_saturates_at_the_floor() {
+        let a = aligned(&[Some(1.0)]);
+        let pep = |p: f64| {
+            donor_identity(&donor_entry(1, 1e-4, p, &[0.0]), &a)
+                .unwrap()
+                .log10_pep
+        };
+        assert_eq!(pep(0.0), -12.0);
+        assert_eq!(pep(1e-15), -12.0);
+        assert_eq!(pep(1e-12), -12.0);
+        assert!((pep(1e-6) + 6.0).abs() < 1e-12);
+        assert_eq!(pep(1.0), 0.0);
+        let mut last = f64::NEG_INFINITY;
+        for p in [0.0, 1e-20, 1e-12, 1e-9, 1e-4, 0.01, 0.5, 1.0] {
+            let v = pep(p);
+            assert!(v.is_finite() && v >= last, "{p}: {v} after {last}");
+            last = v;
+        }
+    }
+
     #[test]
     fn transfer_features_follow_the_feature_names() {
         let mut g = Rng(1);
@@ -4170,25 +4415,28 @@ mod finalize_tests {
         );
         r.n_donor_runs = 3;
         let e = r.evidence.clone().unwrap();
-        let x = transfer_features(&r, &DonorShapes::default(), &[], 0.0).unwrap();
+        let x = transfer_features(&r, &DONOR, &DonorShapes::default(), &[], 0.0).unwrap();
         assert_eq!(x.len(), TRANSFER_FEATURES.len());
         let at = |name: &str| x[TRANSFER_FEATURES.iter().position(|n| *n == name).unwrap()];
         assert_eq!(at("abs_rt_z"), e.rt_z.abs() as f32);
         assert_eq!(at("n_isotopes_used"), 4.0);
         assert_eq!(at("n_donor_runs"), 3.0);
+        assert_eq!(at("donor_psm_q"), DONOR.psm_q as f32);
+        assert_eq!(at("log10_donor_pep"), DONOR.log10_pep as f32);
+        assert_eq!(at("donor_rt_dispersion"), DONOR.rt_dispersion as f32);
         assert_eq!(
             at("log10_amplitude_snr"),
             (1e6f64 / 1e4 + 1.0).log10() as f32
         );
         r.evidence.as_mut().unwrap().amplitude_se = 0.0;
-        assert!(transfer_features(&r, &DonorShapes::default(), &[], 0.0)
+        assert!(transfer_features(&r, &DONOR, &DonorShapes::default(), &[], 0.0)
             .unwrap()
             .iter()
             .all(|v| v.is_finite()));
         r.evidence.as_mut().unwrap().llr = f64::NAN;
-        assert!(transfer_features(&r, &DonorShapes::default(), &[], 0.0).is_none());
+        assert!(transfer_features(&r, &DONOR, &DonorShapes::default(), &[], 0.0).is_none());
         r.evidence = None;
-        assert!(transfer_features(&r, &DonorShapes::default(), &[], 0.0).is_none());
+        assert!(transfer_features(&r, &DONOR, &DonorShapes::default(), &[], 0.0).is_none());
     }
 
     use quant::ms2::Ms2Evidence;
@@ -4272,7 +4520,7 @@ mod finalize_tests {
         assert!((g[1] + 0.4).abs() < 1e-12, "{g:?}");
         assert!(g[2] < f[2] - 0.1, "{g:?}");
         // The same numbers end the transfer feature vector.
-        let x = transfer_features(&other, &shapes, &maps, 0.0).unwrap();
+        let x = transfer_features(&other, &DONOR, &shapes, &maps, 0.0).unwrap();
         let n = TRANSFER_FEATURES.len();
         assert_eq!(x.len(), n);
         assert_eq!(
@@ -4345,10 +4593,10 @@ mod finalize_tests {
             Role::Transfer,
             Some(evidence(&mut g, true, 100.0)),
         );
-        let x = transfer_features(&r, &DonorShapes::default(), &[], 0.0).unwrap();
+        let x = transfer_features(&r, &DONOR, &DonorShapes::default(), &[], 0.0).unwrap();
         r.ms2 = Some(supporting());
         assert_eq!(
-            transfer_features(&r, &DonorShapes::default(), &[], 0.0).unwrap(),
+            transfer_features(&r, &DONOR, &DonorShapes::default(), &[], 0.0).unwrap(),
             x
         );
         assert!(TRANSFER_FEATURES.iter().all(|f| !f.starts_with("ms2")));
@@ -4366,7 +4614,8 @@ mod finalize_tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let (mbr, val) = mbr_paths(&dir.path().join("x"));
-        let s = finalize(&stems(), &library(), &runs, 0.01, None, 7, &mbr, &val).unwrap();
+        let lib = library_with(&|_| false, &confident);
+        let s = finalize(&stems(), &lib, &runs, 0.01, None, 7, &mbr, &val).unwrap();
         let t = table(&mbr);
         let ms2_rows: Vec<&Vec<String>> =
             t[1..].iter().filter(|r| r[2] == "transfer_ms2").collect();

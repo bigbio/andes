@@ -73,8 +73,8 @@ use rayon::prelude::*;
 
 use crate::quant_mbr::{
     consensus_scale_width, cosine, donor_fit, family, identified_features, iso_profile,
-    local_slope, median, reported_quantity, transfer_features, DonorFit, ExtractRow, Role,
-    ShapeReference, NO_SHAPE, TRANSFER_DONOR_Q,
+    local_slope, median, reported_quantity, transfer_features, DonorFit, DonorIdentity,
+    ExtractRow, Role, ShapeReference, NO_SHAPE, TRANSFER_DONOR_Q,
 };
 use crate::transfer_fdr::{
     member_seed, pack_family, row_unit, sample_hash, stratum_of, train_bagged_folds, train_folds,
@@ -635,6 +635,7 @@ pub(crate) const NEIGHBOUR_RUNS: usize = 50;
 /// Library lookups of finalize: per precursor id, its entry; per run, its
 /// most similar runs.
 pub(crate) struct EntryIndex<'a> {
+    lib: &'a Library,
     entry_of: Vec<Option<&'a LibraryEntry>>,
     /// Per run, the [`NEIGHBOUR_RUNS`] other runs whose target entries'
     /// donor sets are most similar to its own (Jaccard index, ties by run
@@ -656,6 +657,7 @@ impl<'a> EntryIndex<'a> {
         let neighbours = run_neighbours(lib, runs, NEIGHBOUR_RUNS);
         let edges = strata_edges(&entry_of, &neighbours, runs, PRIOR_NEIGHBOURS);
         Self {
+            lib,
             entry_of,
             neighbours,
             edges,
@@ -721,6 +723,14 @@ impl<'a> EntryIndex<'a> {
             .filter(|n| e.donors.binary_search(n).is_ok())
             .count();
         hits as f64 / nn.len() as f64
+    }
+
+    /// The donor-identity features of the row's precursor's entry
+    /// ([`crate::quant_mbr::donor_identity`]); `None` without an entry or
+    /// with a non-finite value.
+    pub(crate) fn donor_identity(&self, r: &ExtractRow) -> Option<DonorIdentity> {
+        let e = self.entry_of.get(r.precursor as usize).copied().flatten()?;
+        crate::quant_mbr::donor_identity(e, &self.lib.alignment)
     }
 
     pub(crate) fn is_identity(&self, p: u32) -> bool {
@@ -898,9 +908,9 @@ pub(crate) fn table_features(
             let (t, fam) = idx.table(r).filter(|(t, _)| want(*t))?;
             let x = match t {
                 Table::Identified => identified_features(r),
-                Table::Transfer | Table::Pseudo => {
-                    transfer_features(r, shapes, maps, idx.neighbour_rate(r))
-                }
+                Table::Transfer | Table::Pseudo => idx.donor_identity(r).and_then(|donor| {
+                    transfer_features(r, &donor, shapes, maps, idx.neighbour_rate(r))
+                }),
             };
             Some((i, t, fam, x))
         })

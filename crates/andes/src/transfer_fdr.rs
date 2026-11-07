@@ -101,16 +101,20 @@ pub const TRANSFER_FEATURES: &[&str] = &[
     "n_donor_runs",
     "library_q",
     "neighbour_donor_rate",
+    "donor_psm_q",
+    "log10_donor_pep",
+    "donor_rt_dispersion",
     "shape_log_width",
     "shape_tailing_diff",
     "shape_iso_cos",
 ];
 
 /// Feature names of the identified-row quality classifier: the template-fit
-/// evidence of [`TRANSFER_FEATURES`] without `n_donor_runs`, `library_q` and
-/// `neighbour_donor_rate`, which are the same for an identified target and
-/// its decoys, and without the donor shape comparison (an identified row is
-/// itself a donor).
+/// evidence of [`TRANSFER_FEATURES`] without `n_donor_runs`, `library_q`,
+/// `neighbour_donor_rate` and the donor-identity features (`donor_psm_q`,
+/// `log10_donor_pep`, `donor_rt_dispersion`), which are the same for an
+/// identified target and its decoys, and without the donor shape comparison
+/// or donor identity (an identified row is itself a donor).
 pub const IDENTIFIED_FEATURES: &[&str] = &[
     "llr",
     "rt_z",

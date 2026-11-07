@@ -59,14 +59,18 @@ Eight truth designs (UPS1 in yeast at several levels, human/yeast/*E. coli* mixt
 design and a blank run) are quantified by andes, MaxQuant 2.7.0.0 and FragPipe (IonQuant, match
 between runs on, normalisation off) and read through one evaluation of the raw intensities of every
 tool (andes at `09e1c00d`, 2026-11-05). With match between runs on, andes reports 1.1 to 1.6 times
-as many cells as without it and its differential-expression true positives rise from 1,075 to
-1,376 (UPS1 in yeast, PXD009740), 1,128 to 1,319 (Q Exactive mixture) and 675 to 759 (Astral
-mixture); MaxQuant's rise from 1,054 to 1,361, 829 to 904 and 466 to 659 on the same sets. The
-false positives rise too in andes (185 to 360 on PXD009740), and MaxQuant has the lower false-positive
-counts on PXD009740 and PXD009815 (142 and 113 against andes's 360 and 163) and the lower gross
-errors on the identified cells; andes has the lower protein CV and more precursors on every set.
-On a design where yeast is absent from 20 runs, 0.20% of andes's transferred rows are yeast
-(0.08% at `quant_q ≤ 0.01`) against 0.09% for FragPipe. The tables, settings and rules are in
+as many cells as without it. Differential expression is scored on the proteins that andes, MaxQuant and
+FragPipe all test, with the expected sign required (wrong-sign calls count as false). On that basis andes's
+true positives rise from 1,068 to 1,300 (UPS1 in yeast, PXD009740), 1,007 to 1,047 (Q Exactive mixture) and
+640 to 685 (Astral mixture); MaxQuant's rise from 1,047 to 1,304, 824 to 857 and 465 to 650 on the same sets.
+andes is ahead on the Q Exactive mixture (1,047 against 857 for MaxQuant and 946 for FragPipe) and ties on the
+others, with more false calls than MaxQuant on all of them (305 against 129 on PXD009740, 110 against 37 on
+the Q Exactive mixture). MaxQuant also has the lower gross errors on the identified cells; andes has the lower
+protein CV and more precursors on every set (its search used chimeric spectra, the secondary-modification pass `--refine` and
+PSM-level FDR, the other tools a protein-level 1% FDR, so depth is not settings-matched; with matched settings andes' precursors fall 31% on the two UPS1 sets, to the tools' level, and 6-12% on QE and Astral, while its DE true positives do not change). On a design where
+yeast is absent from 20 runs, 0.20% of andes's transferred rows are yeast (0.08% at `quant_q ≤ 0.01`) against
+0.09% for FragPipe; on yeast-enriched rows only it is 0.052% against 0.010%, and 0.052% against 0.072% when rows
+with no reference are counted. The tables, settings and rules are in
 the [benchmark report](benchmarks/details.md#2-the-benchmarks).
 
 ## TMT

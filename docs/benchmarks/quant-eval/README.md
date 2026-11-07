@@ -43,8 +43,10 @@ MaxQuant and FragPipe rows are used as the tools report them (their own match-be
    precursors are tested. The `weights` view uses weighted medians with weights learned truth-free from the polish residual
    variance by decile of the transfer error probability.
 3. `de.py`, `stats.py`: moderated t (empirical Bayes variance prior), Benjamini-Hochberg 5 % per condition pair, true positive
-   = significant protein of a species whose amount changes, with the observed sign equal to the expected sign counted
-   separately; false positive = significant protein of the null species; counts with and without `|log2FC| >= 0.5`.
+   = significant protein of a species whose amount changes with the observed sign equal to the expected sign; a significant
+   protein of a changing species with the opposite sign is a false call (wrong sign), as is a significant protein of the null
+   species; counts with and without `|log2FC| >= 0.5`. Comparisons between tools use the common-tested family (the
+   (protein, pair) rows that every compared arm tests), so that no arm is counted on more rows than another.
    Three BH families are scored, because the number of tested proteins differs between tools and changes the BH threshold:
    `own` (each arm's own proteins), `inter` (proteins tested by every shared arm; the whole test, variance prior and BH, is run on that set;
    the headline of the scorecard) and `union` (prior fitted on the arm's own proteins; an arm that does not test a protein contributes it with p = 1 to BH). For each family: true positives

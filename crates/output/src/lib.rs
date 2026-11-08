@@ -26,7 +26,10 @@ pub mod pin;
 pub use pin::{emitted_row_evidence, format_spec_id, spec_id_run, write_pin, write_pin_to};
 
 pub mod stats;
-pub use stats::{write_statistics_log, RunStatistics};
+pub use stats::{
+    psm_facts, write_statistics_log, FixedModSpec, IdentificationSummary, PsmFacts, RunStatistics,
+    SpectraTally,
+};
 
 pub mod qpx;
 pub use qpx::write_qpx;

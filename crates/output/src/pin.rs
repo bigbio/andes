@@ -783,9 +783,7 @@ fn write_psm_row<W: Write>(
     //   adjusted_exp_mz = precursor_mz - ISOTOPE * isotope_error / charge
     //   theo_mz         = peptide.mass() / charge + PROTON  (peptide.mass() includes H2O)
     //   dm              = adjusted_exp_mz - theo_mz
-    let theo_mz = calc_mass / charge + PROTON;
-    let adjusted_exp_mz = precursor_mz - ISOTOPE * (isotope_error as f64) / charge;
-    let dm = adjusted_exp_mz - theo_mz;
+    let (dm, _) = precursor_error(precursor_mz, charge, isotope_error, calc_mass);
     let absdm = dm.abs();
 
     // matchedIonRatio: from psm.features.
@@ -876,6 +874,22 @@ fn write_psm_row<W: Write>(
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+/// The precursor error of a PSM in m/z units, and the theoretical m/z it is
+/// measured against: observed m/z corrected by the isotope error the search
+/// chose, minus the m/z of the peptide of neutral mass `calc_mass` at `charge`.
+/// The PIN's `dm` column and the identification summary's mass error are this
+/// value.
+pub(crate) fn precursor_error(
+    precursor_mz: f64,
+    charge: f64,
+    isotope_error: i32,
+    calc_mass: f64,
+) -> (f64, f64) {
+    let theo_mz = calc_mass / charge + PROTON;
+    let adjusted_exp_mz = precursor_mz - ISOTOPE * (isotope_error as f64) / charge;
+    (adjusted_exp_mz - theo_mz, theo_mz)
+}
 
 /// Write a neutral mass with six decimal places (trailing zeros trimmed).
 ///

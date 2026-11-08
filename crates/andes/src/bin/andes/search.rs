@@ -2901,6 +2901,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Filtered TSV: target PSMs whose q-value passes their cutoff. Written next
     // to the PIN as `<stem>.q<fdr>.tsv` (rescore only). One row per accepted PSM
     // with the join key + q/PEP + peptide/proteins from the Percolator result.
+    // The PSMs it holds are the identified PSMs of the identification summary.
+    let mut identified: Option<(Vec<&output::PercolatorPsm>, String)> = None;
     if let (Some(map), Some(cutoffs)) = (rescore_map.as_ref(), cutoffs.as_ref()) {
         let fdr = fdr_threshold;
         let stem = report_base
@@ -2948,6 +2950,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             ),
             Err(e) => eprintln!("WARN: could not write {}: {e}", filtered_path.display()),
         }
+        identified = Some((accepted, pep_note));
     }
 
     // ── Run summary: final tolerances + per-modification PSM tally ────────────
@@ -2968,7 +2971,61 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         &scorer.pin_match_tolerance(),
         &scorer.node_score_window(),
     );
-    eprint!("{}", run_stats.render());
+    // After rescoring, the identified PSMs get a summary of their own; it is
+    // appended to the same report.
+    let id_summary = identified.as_ref().map(|(accepted, cut_note)| {
+        let wanted: std::collections::HashSet<&str> =
+            accepted.iter().map(|p| p.psm_id.as_str()).collect();
+        let facts = output::psm_facts(
+            &spectra,
+            &queues,
+            &pin_candidates,
+            &params,
+            &run_ends,
+            &wanted,
+        );
+        let linked: Vec<output::PsmFacts> = accepted
+            .iter()
+            .filter_map(|p| facts.get(p.psm_id.as_str()).cloned())
+            .collect();
+        let cutoffs = cutoffs
+            .as_ref()
+            .expect("cutoffs exist whenever PSMs were accepted");
+        // `--mbr` moved the decoy PSMs aside above.
+        let decoys = if cli.mbr {
+            &mbr_decoys
+        } else {
+            &rescore_decoy_psms
+        };
+        let decoys_at_cut = decoys
+            .iter()
+            .filter(|(id, p)| p.q_value <= cutoffs.of(id))
+            .count();
+        let run_names: Vec<String> = spectrum_paths
+            .iter()
+            .map(|p| crate::quant_run::run_stem(p))
+            .collect();
+        output::IdentificationSummary::compute(
+            &output::SpectraTally::of(&spectra, &run_ends),
+            &run_names,
+            &linked,
+            accepted.len() - linked.len(),
+            decoys_at_cut,
+            protein_groups.as_ref().map(|inf| {
+                (
+                    fdr_threshold,
+                    inf.groups
+                        .iter()
+                        .filter(|g| g.q_value <= fdr_threshold)
+                        .count(),
+                )
+            }),
+            &format!("q ≤ {fdr_threshold}{cut_note}"),
+            &output::FixedModSpec::declared(&params),
+            params.precursor_mass_shift_ppm,
+        )
+    });
+    eprint!("{}", run_stats.render_with(id_summary.as_ref()));
     // Named after the run like the other reports, so searches writing into
     // one directory do not overwrite each other's summary.
     let stats_path = {
@@ -2979,7 +3036,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
         dir.join(format!("{stem}.statistics.log"))
     };
-    match output::write_statistics_log(&run_stats, &stats_path) {
+    match output::write_statistics_log(&run_stats, id_summary.as_ref(), &stats_path) {
         Ok(()) => eprintln!("Wrote statistics: {}", stats_path.display()),
         Err(e) => eprintln!("WARN: could not write {}: {e}", stats_path.display()),
     }

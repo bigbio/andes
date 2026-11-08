@@ -173,6 +173,8 @@ pub(crate) struct Scored {
     pub score: f64,
     /// The rescorer's PSM q-value.
     pub q: f64,
+    /// The q-value of the pooled model when `q` is a per-run q-value, else NaN.
+    pub pooled_q: f64,
     /// The rescorer's PSM posterior error probability.
     pub pep: f64,
     /// From the high bit down: [`RESIDUE_BITS`] bits of the residue hash,
@@ -240,6 +242,7 @@ impl ScoreSet {
         spec_id: &str,
         score: Option<f64>,
         q: f64,
+        pooled_q: Option<f64>,
         pep: f64,
         peptide: &str,
         is_decoy: bool,
@@ -272,7 +275,13 @@ impl ScoreSet {
             << (MOD_SET_BITS + 1))
             | (u64::from(mods) << 1)
             | u64::from(is_decoy);
-        let scored = Scored { score, q, pep, tag };
+        let scored = Scored {
+            score,
+            q,
+            pooled_q: pooled_q.unwrap_or(f64::NAN),
+            pep,
+            tag,
+        };
         match self.psms.entry(self.keys.key(spec_id)) {
             std::collections::hash_map::Entry::Occupied(o) => {
                 if o.get().is_decoy() == is_decoy {
@@ -326,7 +335,16 @@ pub(crate) fn rescore_scores(
     let mut set = ScoreSet::with_capacity(source.to_string(), targets.len() + decoys.len());
     for (map, is_decoy) in [(targets, false), (decoys, true)] {
         for (id, p) in map {
-            set.insert(source, id, p.score, p.q_value, p.pep, &p.peptide, is_decoy)?;
+            set.insert(
+                source,
+                id,
+                p.score,
+                p.q_value,
+                p.pooled_q_value,
+                p.pep,
+                &p.peptide,
+                is_decoy,
+            )?;
         }
     }
     Ok(set)
@@ -452,6 +470,7 @@ fn percolator_scores(targets: &Path, decoys: &Path, capacity: usize) -> Result<S
                 row.psm_id,
                 row.score,
                 row.q_value,
+                row.pooled_q,
                 row.pep,
                 row.peptide,
                 is_decoy,
@@ -846,6 +865,7 @@ pub(crate) fn build_and_write_library(
                     continue;
                 }
                 let p = PsmIn {
+                    q_gate: j.pooled_q,
                     run: r as u16,
                     precursor: id,
                     rt: row.rt_s,
@@ -2006,6 +2026,7 @@ mod tests {
         t.insert(
             "s1".to_string(),
             PercolatorPsm {
+                pooled_q_value: None,
                 psm_id: "s1".into(),
                 q_value: 0.0,
                 pep: 0.0,
@@ -2025,6 +2046,7 @@ mod tests {
         d.insert(
             "s2".into(),
             PercolatorPsm {
+                pooled_q_value: None,
                 psm_id: "s2".into(),
                 ..p
             },
@@ -2334,6 +2356,7 @@ mod tests {
                     format!("K.{}.A", r.peptidoform)
                 };
                 let psm = PercolatorPsm {
+                    pooled_q_value: None,
                     psm_id: r.spec_id.clone(),
                     q_value: 0.001,
                     pep,
@@ -2520,6 +2543,7 @@ mod tests {
                 scores.insert(
                     x.spec_id.clone(),
                     PercolatorPsm {
+                        pooled_q_value: None,
                         psm_id: x.spec_id.clone(),
                         q_value: 0.001,
                         pep: 0.001,
@@ -2588,6 +2612,7 @@ mod tests {
         t.insert(
             "s1".to_string(),
             PercolatorPsm {
+                pooled_q_value: None,
                 psm_id: "s1".into(),
                 q_value: 0.0,
                 pep: 0.0,

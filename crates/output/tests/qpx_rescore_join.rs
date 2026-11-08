@@ -184,6 +184,7 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         map.insert(
             sid.clone(),
             PercolatorPsm {
+                pooled_q_value: None,
                 psm_id: sid.clone(),
                 q_value: 0.001 * (i as f64 + 1.0),
                 pep: 0.0001 * (i as f64 + 1.0),
@@ -321,6 +322,7 @@ fn batched_psms_preserve_global_indices_order_and_rescore_join() {
             (
                 id.clone(),
                 PercolatorPsm {
+                    pooled_q_value: None,
                     psm_id: id.clone(),
                     q_value: 0.01,
                     pep: i as f64 / ids.len() as f64,
@@ -575,6 +577,7 @@ fn competition_result_by(
             targets.insert(
                 sid.clone(),
                 PercolatorPsm {
+                    pooled_q_value: None,
                     psm_id: sid.clone(),
                     q_value: 0.01,
                     pep: 0.01,

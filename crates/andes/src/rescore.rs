@@ -743,6 +743,7 @@ pub fn native_rescore_pin_all(pin_text: &str, seed: u64) -> Result<NativeRescore
     let mut decoys = HashMap::new();
     for (k, &i) in win.iter().enumerate() {
         let psm = PercolatorPsm {
+            pooled_q_value: None,
             psm_id: d.spec_ids[i].clone(),
             q_value: q[k],
             pep: pep[k],

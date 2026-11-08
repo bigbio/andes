@@ -1196,6 +1196,7 @@ mod rescore_join_tests {
 
     fn psm(id: &str) -> PercolatorPsm {
         PercolatorPsm {
+            pooled_q_value: None,
             psm_id: id.to_string(),
             q_value: 0.0,
             pep: 0.0,

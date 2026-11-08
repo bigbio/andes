@@ -63,9 +63,10 @@ pub use glyco_rt::populate_glyco_rt_features;
 
 pub mod percolator;
 pub use percolator::{
-    decoy_results_path, parse_psm_results, pep_is_degenerate, percolator_args_with_threads,
-    resolve_backend, run_percolator, run_percolator_with_decoys, PercolatorBackend,
-    PercolatorError, PercolatorPsm, PsmResultReader, PsmResultRow, DEFAULT_PERCOLATOR_IMAGE,
+    apply_per_run_q, decoy_results_path, parse_psm_results, pep_is_degenerate,
+    percolator_args_with_threads, resolve_backend, run_percolator, run_percolator_pooled,
+    run_percolator_with_decoys, PercolatorBackend, PercolatorError, PercolatorPsm, PsmResultReader,
+    PsmResultRow, DEFAULT_PERCOLATOR_IMAGE,
 };
 
 pub(crate) mod percolator_enz;

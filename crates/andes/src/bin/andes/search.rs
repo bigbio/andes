@@ -3698,6 +3698,7 @@ mod filtered_tsv_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("run.q0p01.tsv");
         let psm = output::PercolatorPsm {
+            pooled_q_value: None,
             psm_id: "run/scan=1_1_1".into(),
             q_value: 0.001,
             pep: 0.01,

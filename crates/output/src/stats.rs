@@ -224,12 +224,44 @@ pub struct PsmFacts {
     /// Residues only.
     pub sequence: String,
     /// Precursor error in ppm of the theoretical m/z, after the isotope
-    /// correction the search chose (the PIN's `dm` over the theoretical m/z).
+    /// correction the search chose and before any precursor calibration shift
+    /// (the PIN's `dm` over the theoretical m/z).
     pub ppm: f64,
     /// Enzymatic sites inside the peptide (the PIN's `enzInt`).
     pub missed_cleavages: u32,
-    /// Distinct modification names on the peptide, fixed ones included.
-    pub mods: Vec<String>,
+    /// Distinct variable modifications on the peptide, one entry per
+    /// modification (a residue carrying a stack of them counts each).
+    pub variable_mods: Vec<String>,
+    /// Distinct fixed modifications on the peptide, one entry per modification.
+    pub fixed_mods: Vec<String>,
+}
+
+/// A fixed modification of the search: its name and the residue it targets,
+/// `None` for one that targets any residue (a terminal label).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FixedModSpec {
+    pub name: String,
+    pub residue: Option<char>,
+}
+
+impl FixedModSpec {
+    /// The fixed modifications declared by the search's amino-acid set.
+    pub fn declared(params: &SearchParams) -> Vec<Self> {
+        use model::modification::ResidueSpec;
+        params
+            .aa_set
+            .distinct_mods()
+            .into_iter()
+            .filter(|m| m.fixed)
+            .map(|m| FixedModSpec {
+                name: m.name.clone(),
+                residue: match m.residue {
+                    ResidueSpec::Specific(r) => Some(r as char),
+                    ResidueSpec::Wildcard => None,
+                },
+            })
+            .collect()
+    }
 }
 
 /// The facts of the PSMs whose row id `wanted` accepts, keyed by row id.
@@ -249,6 +281,10 @@ pub fn psm_facts(
     use crate::qpx::{bare_sequence, peptidoform_string};
     use crate::row_context::emitted_rows;
 
+    let fixed_names: HashSet<String> = FixedModSpec::declared(params)
+        .into_iter()
+        .map(|f| f.name)
+        .collect();
     (0..queues.len())
         .into_par_iter()
         .filter(|&i| !queues[i].is_empty())
@@ -283,12 +319,22 @@ pub fn psm_facts(
                     params.enzyme,
                     &params.extra_enzymes,
                 );
-                let mods: BTreeSet<&str> = cand
+                // A residue carrying several modifications has one record named
+                // `<a>+<b>`; each part is counted on its own.
+                let (mut fixed, mut variable) = (BTreeSet::new(), BTreeSet::new());
+                for name in cand
                     .peptide
                     .residues
                     .iter()
-                    .filter_map(|aa| aa.mod_.as_ref().map(|m| m.name.as_str()))
-                    .collect();
+                    .filter_map(|aa| aa.mod_.as_ref())
+                    .flat_map(|m| m.name.split('+'))
+                {
+                    if fixed_names.contains(name) {
+                        fixed.insert(name.to_string());
+                    } else {
+                        variable.insert(name.to_string());
+                    }
+                }
                 out.push((
                     id,
                     PsmFacts {
@@ -298,7 +344,8 @@ pub fn psm_facts(
                         sequence: bare_sequence(cand),
                         ppm: dm / theo_mz * 1e6,
                         missed_cleavages: enz_int.max(0) as u32,
-                        mods: mods.into_iter().map(str::to_string).collect(),
+                        variable_mods: variable.into_iter().collect(),
+                        fixed_mods: fixed.into_iter().collect(),
                     },
                 ));
             }
@@ -383,8 +430,16 @@ pub struct IdentificationSummary {
     pub peptidoforms: usize,
     pub sequences: usize,
     pub decoys_at_cut: usize,
-    /// `(median, first quartile, third quartile)` of the precursor error, ppm.
+    /// `(median, first quartile, third quartile)` of the precursor error, ppm,
+    /// measured before precursor calibration.
     pub mass_error_ppm: Option<(f64, f64, f64)>,
+    /// The run's precursor calibration shift in ppm; 0 when none applied.
+    pub calibration_shift_ppm: f64,
+    /// The same statistics after the calibration shift; set only when a shift
+    /// applied.
+    pub mass_error_after_shift_ppm: Option<(f64, f64, f64)>,
+    /// The search's fixed modifications with the PSMs that carry each.
+    pub fixed_mods: Vec<FixedModRow>,
     /// `(missed cleavages, PSMs)`, ascending.
     pub missed_cleavages: Vec<(u32, usize)>,
     /// Rows by PSM charge; spectra are by annotated charge.
@@ -393,9 +448,22 @@ pub struct IdentificationSummary {
     pub unknown_charge_spectra: usize,
     /// Rows by run; empty for a single run.
     pub by_run: Vec<RateRow>,
-    /// `(modification, PSMs carrying it)`, count-desc then name.
+    /// `(variable modification, PSMs carrying it)`, count-desc then name.
     pub ptm_counts: Vec<(String, usize)>,
+    /// PSMs with no variable modification.
     pub unmodified_psms: usize,
+}
+
+/// One fixed modification of the search in the identified PSMs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FixedModRow {
+    pub name: String,
+    pub residue: Option<char>,
+    /// PSMs carrying it.
+    pub psms: usize,
+    /// PSMs that could carry it: those with its residue, or all of them for a
+    /// modification that targets any residue.
+    pub eligible: usize,
 }
 
 /// Quantile of ascending `sorted` by linear interpolation; NaN when empty.
@@ -442,7 +510,10 @@ impl IdentificationSummary {
     /// `run_names` are the input runs in order, `decoys_at_cut` the decoy PSMs
     /// that pass the same cut, `protein_groups` the protein-FDR cut and the
     /// number of groups at it when protein inference ran, and `cut` the
-    /// wording of the PSM cut for the title.
+    /// wording of the PSM cut for the title. `fixed` are the search's fixed
+    /// modifications and `calibration_shift_ppm` its precursor calibration
+    /// shift (0 when none).
+    #[allow(clippy::too_many_arguments)]
     pub fn compute(
         tally: &SpectraTally,
         run_names: &[String],
@@ -451,6 +522,8 @@ impl IdentificationSummary {
         decoys_at_cut: usize,
         protein_groups: Option<(f64, usize)>,
         cut: &str,
+        fixed: &[FixedModSpec],
+        calibration_shift_ppm: f64,
     ) -> Self {
         let precursors: HashSet<(&str, u8)> = facts
             .iter()
@@ -472,6 +545,17 @@ impl IdentificationSummary {
                 quantile(&ppm, 0.75),
             )
         });
+        // The calibration shift moves the observed mass by the same ppm for
+        // every PSM, so the quantiles move with it.
+        let mass_error_after_shift_ppm = mass_error_ppm
+            .filter(|_| calibration_shift_ppm != 0.0)
+            .map(|(m, q1, q3)| {
+                (
+                    m - calibration_shift_ppm,
+                    q1 - calibration_shift_ppm,
+                    q3 - calibration_shift_ppm,
+                )
+            });
 
         let mut missed: BTreeMap<u32, usize> = BTreeMap::new();
         let mut ptm: BTreeMap<&str, usize> = BTreeMap::new();
@@ -484,13 +568,28 @@ impl IdentificationSummary {
             if let Some(n) = psm_by_run.get_mut(f.run) {
                 *n += 1;
             }
-            if f.mods.is_empty() {
+            if f.variable_mods.is_empty() {
                 unmodified_psms += 1;
             }
-            for m in &f.mods {
+            for m in &f.variable_mods {
                 *ptm.entry(m.as_str()).or_insert(0) += 1;
             }
         }
+        let fixed_mods = fixed
+            .iter()
+            .map(|spec| FixedModRow {
+                name: spec.name.clone(),
+                residue: spec.residue,
+                psms: facts
+                    .iter()
+                    .filter(|f| f.fixed_mods.contains(&spec.name))
+                    .count(),
+                eligible: facts
+                    .iter()
+                    .filter(|f| spec.residue.is_none_or(|r| f.sequence.contains(r)))
+                    .count(),
+            })
+            .collect();
         let mut ptm_counts: Vec<(String, usize)> =
             ptm.into_iter().map(|(n, c)| (n.to_string(), c)).collect();
         ptm_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -555,6 +654,9 @@ impl IdentificationSummary {
             sequences: sequences.len(),
             decoys_at_cut,
             mass_error_ppm,
+            calibration_shift_ppm,
+            mass_error_after_shift_ppm,
+            fixed_mods,
             missed_cleavages: missed.into_iter().collect(),
             by_charge,
             unknown_charge_spectra: tally.unknown_charge,
@@ -566,7 +668,7 @@ impl IdentificationSummary {
 
     /// Render the section appended to the run summary.
     pub fn render(&self) -> String {
-        const LABEL_W: usize = 25;
+        const LABEL_W: usize = 27;
         let line = |label: &str, value: String| format!("  {label:<LABEL_W$}: {value}\n");
         let linked = self.psms - self.unlinked_psms;
 
@@ -598,12 +700,24 @@ impl IdentificationSummary {
         s.push_str(&line("Decoys at the cut", thousands(self.decoys_at_cut)));
         if let Some((median, q1, q3)) = self.mass_error_ppm {
             s.push_str(&line(
-                "Precursor mass error",
+                "Precursor mass error (raw)",
                 format!(
                     "median {} ppm (IQR {} … {})",
                     signed(median),
                     signed(q1),
                     signed(q3)
+                ),
+            ));
+        }
+        if let Some((median, q1, q3)) = self.mass_error_after_shift_ppm {
+            s.push_str(&line(
+                "  after calibration shift",
+                format!(
+                    "median {} ppm (IQR {} … {})  [shift {} ppm]",
+                    signed(median),
+                    signed(q1),
+                    signed(q3),
+                    signed(self.calibration_shift_ppm)
                 ),
             ));
         }
@@ -660,7 +774,21 @@ impl IdentificationSummary {
             }
         }
 
-        s.push_str("  PTMs on identified PSMs (share of identified PSMs):\n");
+        for f in &self.fixed_mods {
+            let of = f
+                .residue
+                .map_or("PSMs".to_string(), |r| format!("PSMs with a {r}"));
+            s.push_str(&format!(
+                "  Fixed: {} on {} PSMs ({} of {of})\n",
+                f.name,
+                thousands(f.psms),
+                percent(f.psms, f.eligible)
+            ));
+        }
+        s.push_str(
+            "  Variable modifications on identified PSMs (unmodified: none of them; \
+             share of identified PSMs):\n",
+        );
         let label_w = self
             .ptm_counts
             .iter()
@@ -888,7 +1016,8 @@ mod tests {
             sequence: pep.chars().filter(|c| c.is_ascii_uppercase()).collect(),
             ppm,
             missed_cleavages: missed,
-            mods: mods.iter().map(|m| m.to_string()).collect(),
+            variable_mods: mods.iter().map(|m| m.to_string()).collect(),
+            fixed_mods: Vec::new(),
         }
     }
 
@@ -916,7 +1045,17 @@ mod tests {
             fact(0, 3, "AAK", -1.0, 1, &["Carbamidomethyl"]),
             fact(0, 2, "BBR", 2.0, 0, &[]),
         ];
-        IdentificationSummary::compute(&tally, &names(1), &facts, 0, 1, Some((0.01, 5)), "q ≤ 0.01")
+        IdentificationSummary::compute(
+            &tally,
+            &names(1),
+            &facts,
+            0,
+            1,
+            Some((0.01, 5)),
+            "q ≤ 0.01",
+            &[],
+            0.0,
+        )
     }
 
     #[test]
@@ -942,13 +1081,16 @@ mod tests {
     fn single_run_render_has_no_run_table() {
         let out = single_run_summary().render();
         assert!(out.contains("andes identification summary (Percolator, q ≤ 0.01)"));
-        assert!(out.contains("  MS2 spectra searched     : 20\n"));
-        assert!(out.contains("  Identified PSMs          : 4  (20.0 % of spectra)\n"));
-        assert!(out.contains("  Precursors / peptidoforms: 3 / 2   sequences: 2\n"));
-        assert!(out.contains("  Protein groups (q ≤ 0.01): 5\n"));
-        assert!(out.contains("  Decoys at the cut        : 1\n"));
+        assert!(out.contains("  MS2 spectra searched       : 20\n"));
+        assert!(out.contains("  Identified PSMs            : 4  (20.0 % of spectra)\n"));
+        assert!(out.contains("  Precursors / peptidoforms  : 3 / 2   sequences: 2\n"));
+        assert!(out.contains("  Protein groups (q ≤ 0.01)  : 5\n"));
+        assert!(out.contains("  Decoys at the cut          : 1\n"));
+        assert!(out.contains("Precursor mass error (raw)"));
         assert!(out.contains("median +1.5 ppm (IQR +0.5 … +2.3)"));
-        assert!(out.contains("  Missed cleavages         : 0: 75.0 %  1: 25.0 %\n"));
+        assert!(!out.contains("after calibration shift"));
+        assert!(!out.contains("Fixed:"));
+        assert!(out.contains("  Missed cleavages           : 0: 75.0 %  1: 25.0 %\n"));
         assert!(out.contains("Carbamidomethyl : 3  (75.0 %)"));
         assert!(out.contains("(unmodified)    : 1  (25.0 %)"));
         assert!(!out.contains("By run"));
@@ -970,6 +1112,8 @@ mod tests {
             0,
             None,
             "q ≤ 0.01",
+            &[],
+            0.0,
         );
         assert_eq!(s.spectra, 10);
         let out = s.render();
@@ -998,6 +1142,8 @@ mod tests {
             0,
             None,
             "q ≤ 0.01",
+            &[],
+            0.0,
         );
         assert_eq!(s.by_run.iter().map(|r| r.psms).sum::<usize>(), s.psms);
         assert_eq!(s.by_run.iter().map(|r| r.spectra).sum::<usize>(), s.spectra);
@@ -1028,6 +1174,8 @@ mod tests {
             0,
             None,
             "q ≤ 0.01",
+            &[],
+            0.0,
         );
         assert!(s.by_run.iter().all(|r| r.z.is_none_or(|z| z > LOW_RATE_Z)));
         assert!(!s.render().contains("changes no result"));
@@ -1040,6 +1188,8 @@ mod tests {
             0,
             None,
             "q ≤ 0.01",
+            &[],
+            0.0,
         );
         assert!(two.by_run.iter().all(|r| r.z.is_none()));
     }
@@ -1054,11 +1204,13 @@ mod tests {
             0,
             None,
             "q ≤ 0.01",
+            &[],
+            0.0,
         );
         assert_eq!(s.psms, 0);
         assert!(s.mass_error_ppm.is_none());
         let out = s.render();
-        assert!(out.contains("Identified PSMs          : 0  (0.0 % of spectra)"));
+        assert!(out.contains("Identified PSMs            : 0  (0.0 % of spectra)"));
         assert!(!out.contains("Precursor mass error"));
         assert!(!out.contains("Missed cleavages"));
         assert!(out.contains("(unmodified)"));
@@ -1080,6 +1232,8 @@ mod tests {
             0,
             None,
             "q ≤ 0.01",
+            &[],
+            0.0,
         );
         let order: Vec<&str> = s.ptm_counts.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(order, vec!["Acetyl", "Oxidation", "Zeta"]);
@@ -1101,6 +1255,8 @@ mod tests {
             0,
             None,
             "q ≤ 0.01",
+            &[],
+            0.0,
         );
         assert_eq!(s.psms, 3);
         assert!(s
@@ -1152,6 +1308,70 @@ mod tests {
         assert!(!out.contains("PTM report"));
         assert!(out.contains("Rank-1 PSMs (pre-FDR)     : 2 target, 1 decoy"));
         assert!(out.ends_with(&summary.render()));
+    }
+
+    #[test]
+    fn fixed_modifications_are_listed_apart_and_left_out_of_the_variable_table() {
+        let mut a = fact(0, 2, "ACK", 0.0, 0, &["Oxidation"]);
+        a.fixed_mods = vec!["Carbamidomethyl".to_string()];
+        let mut b = fact(0, 2, "AAK", 0.0, 0, &[]);
+        b.fixed_mods = Vec::new();
+        let mut c = fact(0, 2, "CCK", 0.0, 0, &[]);
+        c.fixed_mods = vec!["Carbamidomethyl".to_string()];
+        let fixed = vec![FixedModSpec {
+            name: "Carbamidomethyl".to_string(),
+            residue: Some('C'),
+        }];
+        let s = IdentificationSummary::compute(
+            &tally(vec![10], 10, 0),
+            &names(1),
+            &[a, b, c],
+            0,
+            0,
+            None,
+            "q ≤ 0.01",
+            &fixed,
+            0.0,
+        );
+        assert_eq!(
+            s.fixed_mods,
+            vec![FixedModRow {
+                name: "Carbamidomethyl".to_string(),
+                residue: Some('C'),
+                psms: 2,
+                eligible: 2,
+            }]
+        );
+        assert_eq!(s.ptm_counts, vec![("Oxidation".to_string(), 1)]);
+        assert_eq!(s.unmodified_psms, 2);
+        let out = s.render();
+        assert!(out.contains("  Fixed: Carbamidomethyl on 2 PSMs (100.0 % of PSMs with a C)\n"));
+        assert!(!out.contains("Carbamidomethyl  "));
+    }
+
+    #[test]
+    fn calibration_shift_adds_the_error_after_the_shift() {
+        let facts = vec![
+            fact(0, 2, "AAK", 2.0, 0, &[]),
+            fact(0, 2, "BBK", 4.0, 0, &[]),
+        ];
+        let s = IdentificationSummary::compute(
+            &tally(vec![10], 10, 0),
+            &names(1),
+            &facts,
+            0,
+            0,
+            None,
+            "q ≤ 0.01",
+            &[],
+            3.0,
+        );
+        assert_eq!(s.mass_error_ppm.unwrap().0, 3.0);
+        assert_eq!(s.mass_error_after_shift_ppm.unwrap().0, 0.0);
+        let out = s.render();
+        assert!(out.contains("Precursor mass error (raw) : median +3.0 ppm"));
+        assert!(out.contains("after calibration shift"));
+        assert!(out.contains("median +0.0 ppm (IQR −0.5 … +0.5)  [shift +3.0 ppm]"));
     }
 
     #[test]

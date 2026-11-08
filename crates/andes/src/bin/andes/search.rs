@@ -3021,6 +3021,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 )
             }),
             &format!("q ≤ {fdr_threshold}{cut_note}"),
+            &output::FixedModSpec::declared(&params),
+            params.precursor_mass_shift_ppm,
         )
     });
     eprint!("{}", run_stats.render_with(id_summary.as_ref()));

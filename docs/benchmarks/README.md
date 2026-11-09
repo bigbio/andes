@@ -52,7 +52,7 @@ family, sign-aware, MBR on)
 | PXD009740 / PXD009815 / QE / Astral | DE true positives / false calls, MaxQuant matches filtered at q ≤ 0.01 | 1,156 / 763 / 983 / 568; 272 / 151 / 105 / 297 | 1,077 / 725 / 851 / 518; 131 / 62 / 42 / 154 | | 🟢 +5% to +15% true positives; 🔴 1.9–2.5x false calls (moderate) |
 | PXD009740 / PXD009815 / QE / Astral | precision of unchanged proteins (within-condition spread, tool ÷ andes) | 1 | 1.15 / 1.55 / 1.26 / — | 1.40 / 1.30 / 1.25 / — | 🟢 tighter than both |
 | UPS1 lowest 3 levels, PXD009740 / PXD009815 | precursors within 2x of truth | 502 / 24 | 417 / 23 | 458 / 50 | 🟢 / 🔴 2x fewer than FragPipe (minor) |
-| Truth designs, all sets | bright identified cells off by > 2x | 1.8–7.2% | 0.3–1.6% | | 🔴 4x (moderate) |
+| Truth designs, all sets | bright identified cells off by > 2x | 1.8–7.2% | 0.3–1.6% | 0.3–3.8% | 🔴 3–17x MaxQuant per set (moderate) |
 | Truth designs, 6 sets | protein CV | 4.4–10.1% | 7.0–11.6% | 4.9–13.5% | 🟢 on 3 sets, 🔴 on 2 (minor) |
 | Known-absent yeast, PXD014415 | false-transfer rate | 0.20% (0.08% at `quant_q ≤ 0.01`) | | 0.09% | 🔴 2x at default (minor) |
 | Blank run, PXD016921 | rows reported in the blank | 150 (0 after #333) | 105 (29 with matches filtered) | 8 | 🔴 at `09e1c00d`; 🟢 on current main |
@@ -144,7 +144,7 @@ session and was not re-run.
 | peptides (shuffle / natural) | 4,176–4,200 / 4,116–4,227 | — | ⚪ |
 | true FDP, peptide-level shuffle (T/E 1.033; 75–77 hits) | 0.92–0.94% | — | 🟢 on target |
 | PSMs at a true FDP of 1%, shuffle | 16,617–16,733 | — | ⚪ |
-| true FDP, natural *E. coli* (4,531 `ENTRAP_` proteins, T/E 2.451; 94–100 hits) | 1.95–2.07% | — | 🔴 above nominal, see first bullet |
+| true FDP, natural *E. coli* (4,531 `ENTRAP_` proteins, T/E 2.451; 94–100 hits) | 1.95–2.07% | — | ⚪ context, not a calibration verdict (see first bullet) |
 | PSMs at a true FDP of 1%, natural | 14,786–15,045 | — | ⚪ |
 | natural, hits on conserved proteins removed (49–51 hits) | 1.01–1.06% (1.07–1.11% with T/E 2.630); 16,505–16,607 PSMs at 1% | — | 🟡 near nominal |
 | andes wall; CPU; memory | 13–15 s; 71–79 CPU-s; 1.4 GB | — | ⚪ |
@@ -442,7 +442,7 @@ median replicate CV of matched features.
 | Astral | 1.62 / 0.69 / 1.13 | 4.39 / 0.26 / 0.66 | 0.057 / 0.072 / 0.041 | 5.8 / 7.0 / 4.9 | 6.0 / 6.9 | 🔴 accuracy; 🔴 CV vs FragPipe (minor) |
 | PXD030780 | 2.63 / — / 1.44 | 7.19 / — / 0.30 | 0.112 / — / 0.096 | 10.1 / — / 10.2 | 12.1 / — | 🔴 accuracy; 🟡 CV |
 
-- Bright-decile gross error is 1.8–7.2% for andes against 0.3–1.1% for MaxQuant (MBR on) and
+- Bright-decile gross error is 1.8–7.2% for andes against 0.3–1.6% for MaxQuant (MBR on) and
   0.3–3.8% for FragPipe; accuracy is behind on every set. Protein CV is 4.4–10.1% for andes,
   7.0–11.6% for MaxQuant and 4.9–13.5% for FragPipe. MaxQuant MBR-off values are close to its MBR-on
   ones (gross error up to 1.65%).
@@ -473,8 +473,8 @@ PXD009815, QE, Astral):
 
 Spread of unchanged proteins within a condition (tool ÷ andes; PXD009740 / PXD009815 / QE): MaxQuant
 1.15 / 1.55 / 1.26, FragPipe 1.40 / 1.30 / 1.25. True positives / false calls by minimal fold change
-(an older counting than the table above, shown for shape; e.g. PXD009740 reads 1,287 / 320 here and
-1,300 / 305 above):
+(seed 42 on main after #333, 2026-11-09; the table above is the mean over seeds at `09e1c00d`, e.g.
+PXD009740 reads 1,287 / 320 here and 1,300 / 305 above):
 
 | set | tool | all | \|log2 FC\| ≥ 0.3 | ≥ 0.5 | ≥ 1.0 |
 |---|---|---|---|---|---|
@@ -490,8 +490,8 @@ Spread of unchanged proteins within a condition (tool ÷ andes; PXD009740 / PXD0
 
 - At `|log2 FC| ≥ 0.5`, andes has 167 false calls against MaxQuant's 74 on PXD009740 (🔴 2.3x), 39
   against 36 on PXD009815 and 11 against 18 on QE; Astral was not recomputed. Still behind on
-  PXD009815 at large fold changes (21 against 6 at ≥ 1.0) and in wrong-sign calls (18 against 2 in
-  this older counting; 7 against 2 in the table above).
+  PXD009815 at large fold changes (21 against 6 at ≥ 1.0) and in wrong-sign calls (18 against 2 at
+  seed 42 after #333; 7 against 2 in the table above).
 - Why: andes's protein values are tighter, so small real shifts of "unchanged" proteins reach
   significance; the truth labels assume no change at all, which stops holding below about 1.4-fold
   (|log2 FC| 0.5). The calls are not made by transferred values: from identified cells alone the

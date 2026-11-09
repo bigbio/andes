@@ -49,8 +49,7 @@ Verdicts compare andes with the best other tool measured on the same data: **wel
   the submissions that report fewer precursors (MaxQuant 0.160 at 20,283, Sage 0.167 at 30,319).
 - Glyco recall of reference identifications: behind (79–89% of pGlyco2's).
 - Error control: on a peptide-level shuffled entrapment UPS1 reads 0.92–0.94% at nominal 1% and
-  timsTOF 0.52–1.12% on one shuffle draw (0.82–0.95% on five further draws of the 1.12% run, within
-  nominal). The natural entrapments read
+  timsTOF 0.88–0.91% (mean of six shuffle draws; single draws 0.52–1.12%), on target. The natural entrapments read
   higher (UPS1 1.95–2.07%, timsTOF up to 1.54%); about half of those hits fall on proteins with a
   close homolog in the target proteome (see the UPS1 and timsTOF paragraphs).
 
@@ -70,7 +69,7 @@ Legend: 🟢 andes better · 🟡 similar · 🔴 andes worse · ⚪ no comparis
 | Low-res LFQ, UPS1 | true FDP, natural *E. coli* entrapment (context, not a valid null here) | 1.95–2.07% (1.07–1.11% without the conserved proteins, T/E recomputed) | — | ⚪ context: not a calibration verdict; the shuffle above is the primary reading (0.92–0.94%, within nominal) | none. 45 of 94 hits (seed 42) sit on 8 *E. coli* proteins with a yeast homolog at ≥ 40% identity, 32 of them on two EF-Tu peptides. These peptides do not occur in any yeast protein, so they are either real *E. coli* protein in the recombinant UPS1 standard or yeast spectra matched to a near-identical *E. coli* peptide; neither has been shown |
 | Phospho, PXD007653 (Q Exactive) | PSMs | 38,623 | Comet 2025.01: 33,984 (at 1.77% true FDP) | 🟢 +14%, at 0.80–0.99% FDP | — |
 | timsTOF DDA-PASEF, PXD053748 and PXD064202 | PSMs | 14.3k–55.6k per file | not measured | ⚪ | — |
-| timsTOF DDA-PASEF | true FDP, peptide-level shuffled entrapment (primary) | 0.52–1.12% (one draw); 0.70–0.96% on five further draws of two runs | — | 🟢 on target: the one run above nominal on the first draw (1.12%) averages 0.91% over six draws (SD 0.11) | — |
+| timsTOF DDA-PASEF | true FDP, peptide-level shuffled entrapment (primary) | 0.88–0.91% (mean of six draws; single draws 0.52–1.12%) | not measured | 🟢 on target at nominal 1% (calibration only: no other tool run on these files) | — |
 | timsTOF DDA-PASEF | true FDP, natural yeast entrapment | 0.86–1.54% (0.72–1.02% without hits on conserved proteins) | — | 🟡 above nominal on one astrocyte run (1.44–1.54%) | Same conserved-homolog effect as UPS1; see the timsTOF paragraph |
 | Glyco quick tier, PXD005553 | reference glycoPSMs confirmed | 88–90% | pGlyco2, MSFragger-Glyco (references) | 🔴 10–12% of reference IDs missed | **moderate**, usable. No: engine (glyco scoring) |
 | Glyco deep tier, PXD005553 | reference glycoPSMs confirmed | 79% (pGlyco2), 88% (MSFragger-Glyco) | as above | 🔴 21% of pGlyco2's missed | **moderate**, usable. No: engine (glyco scoring) |

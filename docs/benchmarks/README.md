@@ -56,7 +56,8 @@ family, sign-aware, MBR on)
 | Truth designs, all sets | bright identified cells off by > 2x | 1.8–7.2% | 0.3–1.6% | 0.3–3.8% | 🔴 3–17x MaxQuant per set (moderate) |
 | Truth designs, 6 sets | protein CV | 4.4–10.1% | 7.0–11.6% | 4.9–13.5% | 🟢 on 3 sets, 🔴 on 2 (minor) |
 | Known-absent yeast, PXD014415 | false-transfer rate | 0.20% (0.08% at `quant_q ≤ 0.01`) | | 0.09% | 🔴 2x at default (minor) |
-| Blank run, PXD016921 | rows reported in the blank | 150 (0 after #333) | 105 (29 with matches filtered) | 8 | 🔴 at `09e1c00d`; 🟢 on current main |
+| Blank run, PXD016921 | rows identified in the blank | 0 on current main (85 at `09e1c00d`) | 20 | 8 | 🟢 fewest |
+| Blank run, PXD016921 | rows transferred into the blank | 0, not attempted | 85 unfiltered (9 at `Match q-value ≤ 0.01`) | 0, not scored | ⚪ not tested: andes and FragPipe make no transfer decision |
 | TMT knockout, PXD017803 hrMS2 | interference (lower is better) | 0.192 (0.000 with `--tmt-unmix on`) | 0.156 | | 🔴 default, 🟢 with the option |
 | TMT known ratios, PXD007683 | PSMs | 149,121 | 97,107 | | 🟢 +54% |
 | TMT known ratios, PXD007683 | protein ratio error | 0.213 | 0.159 | | 🔴 1.3x (moderate) |
@@ -419,7 +420,8 @@ Per-level table: [ADDITIONAL_BENCHMARKS.md](ADDITIONAL_BENCHMARKS.md#ups1-per-le
 #### Absence: false transfers and the blank run
 
 PXD014415: yeast rows among the transferred rows of the 20 human-only runs. PXD016921: rows
-reported in the blank run. Classes (definition in section 4) are enriched / not specific / only
+reported in the blank run (andes on current main, with per-run q-values). Classes (definition in
+section 4) are enriched / not specific / only
 absent / no reference.
 
 | metric | andes | MaxQuant 2.7 | FragPipe | result |
@@ -432,12 +434,31 @@ absent / no reference.
 | rate, enriched plus no-reference rows | 0.052% | — | 0.072% | 🟢 |
 | identified classes | 38 / 412 / 1 / 0 | — | 8 / 56 / 5 / 139 | ⚪ |
 | identified rate, enriched only / with no-reference | 0.0053% / 0.0055% | — | 0.0014% / 0.0270% | 🔴 / 🟢 |
-| rows in the blank run, MBR off / on | 85 / 150 (144 at `quant_q ≤ 0.01`; 0 on current main after #333) | 20 / 105 (29 with matches filtered) | 8 with MBR | 🔴 at `09e1c00d` |
-| blank run, identified / transferred, MBR on | 85 / 65 | 20 / 85 | 8 / 0 | ⚪ |
+| blank run, rows identified | 0 on current main (85 at `09e1c00d`) | 20 | 8 | 🟢 fewest |
+| blank run, transfers attempted | 0 (run not aligned) | not reported | 25 candidates | ⚪ |
+| blank run, rows transferred | 0 (65 at `09e1c00d`) | 85; 9 at `Match q-value ≤ 0.01` | 0 (scorer not trained) | ⚪ not tested |
 
 - The reading flips with the no-reference rows, which the intensity profile cannot judge, so both
   are given. A tool's precursors that andes does not report cannot be classed.
-- MaxQuant's MBR-on blank run had its MBR FDR option off; see the filtered-matches note above.
+- Blank run, identification: at `09e1c00d` andes took q-values from all six runs pooled, and 85
+  rows of the blank passed 1%. With per-run q-values (#333) none does. Most of those 85 were good
+  spectra of carry-over peptides, so the 0 means the blank has too few identifications for a
+  per-run 1% estimate, not that 85 identifications were wrong.
+- Blank run, transfers: neither zero is a tested rejection.
+  - andes aligns runs on shared identifications. The blank has none, so it is not aligned and no
+    transfer into it is attempted.
+  - FragPipe (IonQuant) found 25 candidates in the blank but needs 10 identified ions in a run to
+    train its transfer scorer. The blank has 8, so it scores nothing and writes no transfer.
+  - MaxQuant aligns on MS1 features, so the blank is aligned and every match is reported; its MBR
+    FDR option only fills the `Match q-value` column.
+- The blank is not empty. MaxQuant's matched rows read a median 1.5% of the same peptide's
+  intensity in the other runs (carry-over), so a row in the blank is not by itself a wrong value.
+- A diagnostic andes build (not released) gives the blank the average alignment of the other
+  runs. It fits 15,568 transfer targets in the blank and accepts 6 at `transfer_q ≤ 0.01`
+  (7 proteins), against 0 of 23,639 decoys; the six read a median 7% of the same precursor's
+  intensity in the other runs. The build is not used: adding the blank's rows to the pooled
+  transfer model lowers the accepted transfers of the four single-cell runs by 51–66% (815 to 296
+  in the first).
 
 #### Depth at matched true error (PXD014415)
 

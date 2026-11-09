@@ -117,8 +117,12 @@ flowchart TD
 ```
 
 1. **Pick the model** from the file's activation, resolution and isobaric label (one of 19
-   bundled models).
-2. **Build candidates**: digest the FASTA and generate decoys. The candidate index goes
+   bundled models). With several `--spectrum` inputs the model comes from the first one; an
+   input of the other fragment resolution class stops the search, any other difference in
+   analyzer or activation is reported.
+2. **Build candidates**: digest the FASTA and generate decoys. A FASTA that already holds
+   decoys (reversed records, or records named as the decoy of another record) stops the search:
+   pass targets only, or declare them with `--decoy-prefix <tag> --decoy-strategy none`. The candidate index goes
    out-of-core (cached in `--index-cache-dir`, by default next to the output) so candidates can be retrieved by the
    fragment-ion index; on low-res data only the 150 most intense peaks of each spectrum vote.
    `--glyco` builds its own sequon-only candidate table from the same out-of-core index.

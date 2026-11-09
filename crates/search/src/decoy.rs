@@ -38,6 +38,8 @@
 
 use std::sync::Arc;
 
+use rustc_hash::FxHashSet;
+
 use model::enzyme::Enzyme;
 use model::protein::{ModSite, Protein, ProteinAnnotation, ProteinDb, SiteAnchor, VariantRegion};
 
@@ -747,6 +749,163 @@ pub fn is_decoy_accession_affix(accession: &str, prefix: &str, suffix: Option<&s
         || suffix.is_some_and(|s| !s.is_empty() && accession.ends_with(s))
 }
 
+/// Tags other tools write in front of (`rev_<accession>`) or behind
+/// (`<accession>_rev`) a target accession to name its decoy.
+const FOREIGN_DECOY_TAGS: [&str; 8] = [
+    "rev", "reverse", "reversed", "decoy", "xxx", "shuffle", "shuffled", "random",
+];
+
+/// The accession left when `accession` is read as `<tag>_<rest>` or
+/// `<rest>_<tag>` for one of [`FOREIGN_DECOY_TAGS`] (case-insensitive), with
+/// any further `_` between the two dropped (`REV__<rest>`).
+///
+/// The tag must be the whole text before the first `_` (or after the last), so
+/// a UniProt accession such as `sp|P04618|REV_HV1H2` is not read as a decoy.
+fn strip_foreign_decoy_tag(accession: &str) -> Option<&str> {
+    let is_tag = |t: &str| FOREIGN_DECOY_TAGS.iter().any(|k| t.eq_ignore_ascii_case(k));
+    if let Some(i) = accession.find('_') {
+        let rest = accession[i + 1..].trim_start_matches('_');
+        if is_tag(&accession[..i]) && !rest.is_empty() {
+            return Some(rest);
+        }
+    }
+    if let Some(i) = accession.rfind('_') {
+        let rest = accession[..i].trim_end_matches('_');
+        if is_tag(&accession[i + 1..]) && !rest.is_empty() {
+            return Some(rest);
+        }
+    }
+    None
+}
+
+/// Records of a database that look like decoys of other records, whatever
+/// affix they carry. Counted before andes generates its own decoys: such
+/// records would be searched as targets, and andes' decoys added on top.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ForeignDecoys {
+    pub n_records: usize,
+    /// Records whose sequence is the exact reverse of another record's. A
+    /// sequence that reads the same both ways does not count, nor does one
+    /// short enough to meet its reverse by chance.
+    pub n_reversed: usize,
+    /// Records named as the decoy of another record of the database:
+    /// `<tag>_<accession>` or `<accession>_<tag>`.
+    pub n_named_paired: usize,
+    /// Records carrying a decoy tag whose remainder is no other record's
+    /// accession.
+    pub n_named_unpaired: usize,
+    /// One accession of each kind, for the message.
+    pub example_reversed: Option<String>,
+    pub example_named: Option<String>,
+}
+
+/// Shortest sequence whose reverse counts as evidence in a database of
+/// `n_records`: the first length at which the 20^length possible sequences
+/// outnumber the record pairs, so that a reversed pair is not expected by
+/// chance. Shorter records (signal peptides, receptor D segments of two or
+/// three residues) meet their reverse in any large database.
+fn min_reversible_len(n_records: usize) -> usize {
+    let pairs = (n_records as f64) * (n_records as f64);
+    let mut len = 1;
+    let mut sequences = 20.0_f64;
+    while sequences <= pairs {
+        sequences *= 20.0;
+        len += 1;
+    }
+    len
+}
+
+impl ForeignDecoys {
+    /// Scan `db` for reversed sequences and decoy-tagged accessions.
+    pub fn scan(db: &ProteinDb) -> Self {
+        let min_len = min_reversible_len(db.proteins.len());
+        let sequences: FxHashSet<&[u8]> = db.proteins.iter().map(|p| &p.sequence[..]).collect();
+        let accessions: FxHashSet<&str> = db.proteins.iter().map(|p| &p.accession[..]).collect();
+        let mut found = ForeignDecoys {
+            n_records: db.proteins.len(),
+            ..Default::default()
+        };
+        // The later record of a reversed pair is the better example: decoys
+        // follow their targets in a concatenated database.
+        let mut last_reversed: Option<&Protein> = None;
+        let mut reversed: Vec<u8> = Vec::new();
+        for p in &db.proteins {
+            reversed.clear();
+            reversed.extend(p.sequence.iter().rev());
+            if p.sequence.len() >= min_len
+                && reversed != p.sequence
+                && sequences.contains(&reversed[..])
+            {
+                found.n_reversed += 1;
+                last_reversed = Some(p);
+            }
+            if let Some(rest) = strip_foreign_decoy_tag(&p.accession) {
+                if accessions.contains(rest) {
+                    found.n_named_paired += 1;
+                    found.example_named = Some(p.accession.clone());
+                } else {
+                    found.n_named_unpaired += 1;
+                    found
+                        .example_named
+                        .get_or_insert_with(|| p.accession.clone());
+                }
+            }
+        }
+        found.example_reversed = last_reversed.map(|p| p.accession.clone());
+        found
+    }
+
+    /// What to do before generating decoys for this database.
+    ///
+    /// `Err` when it already is a target-decoy database: a record is named as
+    /// the decoy of another record, or at least half of the records are exact
+    /// reverses of another record (in a target-plus-reversed concatenation
+    /// every record is one; half leaves room for entries added afterwards).
+    /// `Ok(Some(_))` is a warning for weaker evidence: a few reversed records,
+    /// or decoy-tagged accessions with no matching target.
+    pub fn verdict(&self) -> Result<Option<String>, String> {
+        const FIX: &str = "andes would search them as targets and add its own decoys, which \
+                           underestimates the FDR. Pass a target-only FASTA, or declare them: \
+                           `--decoy-prefix <tag> --decoy-strategy none` (`--decoy-suffix` for a \
+                           tag written after the accession).";
+        if self.n_named_paired > 0 {
+            return Err(format!(
+                "the database already contains decoys: {} of {} records are named as the decoy \
+                 of another record (e.g. {}). {FIX}",
+                self.n_named_paired,
+                self.n_records,
+                self.example_named.as_deref().unwrap_or("?"),
+            ));
+        }
+        if self.n_reversed > 0 && 2 * self.n_reversed >= self.n_records {
+            return Err(format!(
+                "the database already contains decoys: {} of {} records are the exact reverse \
+                 of another record (e.g. {}). {FIX}",
+                self.n_reversed,
+                self.n_records,
+                self.example_reversed.as_deref().unwrap_or("?"),
+            ));
+        }
+        if self.n_reversed > 0 || self.n_named_unpaired > 0 {
+            return Ok(Some(format!(
+                "WARN: the database may contain decoys: {} of {} records are the exact reverse \
+                 of another record{}, {} carry a decoy tag in the accession{}. If they are \
+                 decoys, {FIX}",
+                self.n_reversed,
+                self.n_records,
+                self.example_reversed
+                    .as_deref()
+                    .map_or(String::new(), |a| format!(" (e.g. {a})")),
+                self.n_named_unpaired,
+                self.example_named
+                    .as_deref()
+                    .map_or(String::new(), |a| format!(" (e.g. {a})")),
+            )));
+        }
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -763,6 +922,119 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn foreign_decoy_tag_is_the_whole_first_or_last_field() {
+        assert_eq!(
+            strip_foreign_decoy_tag("rev_sp|P1|A_HUMAN"),
+            Some("sp|P1|A_HUMAN")
+        );
+        assert_eq!(strip_foreign_decoy_tag("REV__P1"), Some("P1"));
+        assert_eq!(strip_foreign_decoy_tag("DECOY_P1"), Some("P1"));
+        assert_eq!(strip_foreign_decoy_tag("P1_rev"), Some("P1"));
+        // A UniProt entry name that happens to start with REV.
+        assert_eq!(strip_foreign_decoy_tag("sp|P04618|REV_HV1H2"), None);
+        assert_eq!(strip_foreign_decoy_tag("sp|Q9UBZ9|REV1_HUMAN"), None);
+        assert_eq!(strip_foreign_decoy_tag("rev_"), None);
+        assert_eq!(strip_foreign_decoy_tag("P1"), None);
+    }
+
+    #[test]
+    fn a_target_only_database_has_no_foreign_decoys() {
+        let db = make_db(&[
+            ("sp|P1|A_HUMAN", b"MKTAYIAKQR"),
+            ("sp|P2|B_HUMAN", b"MSEQNNTEMTFQIQR"),
+            // Reads the same both ways: not the reverse of another record.
+            ("sp|P3|C_HUMAN", b"MKAKM"),
+        ]);
+        let found = ForeignDecoys::scan(&db);
+        assert_eq!(found.n_reversed, 0);
+        assert_eq!(found.n_named_paired + found.n_named_unpaired, 0);
+        assert_eq!(found.verdict(), Ok(None));
+    }
+
+    #[test]
+    fn reversed_records_under_an_unknown_name_are_an_error() {
+        let db = make_db(&[
+            ("sp|P1|A_HUMAN", b"MKTAYIAKQR"),
+            ("sp|P2|B_HUMAN", b"MSEQNNTEMTFQIQR"),
+            ("zz1", b"RQKAIYATKM"),
+            ("zz2", b"RQIQFTMETNNQESM"),
+        ]);
+        let found = ForeignDecoys::scan(&db);
+        assert_eq!(found.n_reversed, 4);
+        assert_eq!(found.n_named_paired, 0);
+        let err = found.verdict().unwrap_err();
+        assert!(
+            err.contains("4 of 4 records are the exact reverse"),
+            "{err}"
+        );
+        assert!(err.contains("e.g. zz2"), "{err}");
+    }
+
+    #[test]
+    fn short_reversed_sequences_are_not_evidence() {
+        assert_eq!(min_reversible_len(4), 1);
+        assert_eq!(min_reversible_len(20), 3);
+        assert_eq!(min_reversible_len(63_778), 8);
+        // 22 records: a two-residue record and its reverse are expected by
+        // chance, a ten-residue pair is not.
+        let filler: Vec<(String, Vec<u8>)> = (0..18u8)
+            .map(|i| (format!("p{i}"), vec![b'M', b'A' + i, b'G', b'K', b'W']))
+            .collect();
+        let mut records: Vec<(&str, &[u8])> =
+            filler.iter().map(|(a, s)| (&a[..], &s[..])).collect();
+        records.push(("d1", b"EI"));
+        records.push(("d2", b"IE"));
+        records.push(("t1", b"MKTAYIAKQR"));
+        records.push(("t2", b"MSEQNNTEMTFQIQR"));
+        assert_eq!(ForeignDecoys::scan(&make_db(&records)).n_reversed, 0);
+        *records.last_mut().unwrap() = ("t2", &b"RQKAIYATKM"[..]);
+        assert_eq!(ForeignDecoys::scan(&make_db(&records)).n_reversed, 2);
+    }
+
+    #[test]
+    fn a_record_named_as_the_decoy_of_another_is_an_error() {
+        // Shuffled, so the sequences are not reverses of each other.
+        let db = make_db(&[
+            ("sp|P1|A_HUMAN", b"MKTAYIAKQR"),
+            ("sp|P2|B_HUMAN", b"MSEQNNTEMTFQIQR"),
+            ("DECOY_sp|P1|A_HUMAN", b"MAKYTIKAQR"),
+        ]);
+        let found = ForeignDecoys::scan(&db);
+        assert_eq!(found.n_reversed, 0);
+        assert_eq!(found.n_named_paired, 1);
+        let err = found.verdict().unwrap_err();
+        assert!(
+            err.contains("1 of 3 records are named as the decoy"),
+            "{err}"
+        );
+        assert!(err.contains("DECOY_sp|P1|A_HUMAN"), "{err}");
+    }
+
+    #[test]
+    fn weaker_evidence_is_a_warning() {
+        // One chance reverse pair among many records, and one tagged accession
+        // with no matching target.
+        let db = make_db(&[
+            ("p1", b"MKTAYIAKQR"),
+            ("p2", b"AKM"),
+            ("p3", b"MKA"),
+            ("p4", b"MSEQNNTEMTFQIQR"),
+            ("p5", b"MLLPEPTIDEK"),
+            ("p6", b"MGGSSTTWWYK"),
+            ("REV_HV1H2", b"MAGRSGDSDEELLK"),
+        ]);
+        let found = ForeignDecoys::scan(&db);
+        assert_eq!(found.n_reversed, 2);
+        assert_eq!(found.n_named_unpaired, 1);
+        let warning = found.verdict().unwrap().unwrap();
+        assert!(
+            warning.starts_with("WARN: the database may contain decoys"),
+            "{warning}"
+        );
+        assert!(warning.contains("REV_HV1H2"), "{warning}");
     }
 
     fn decoys(db: &ProteinDb, strategy: DecoyStrategy, proteases: &Proteases) -> Vec<Vec<u8>> {

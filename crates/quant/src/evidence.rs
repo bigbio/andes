@@ -157,7 +157,9 @@ pub struct Evidence {
     /// the whole isotope pattern (`pi` sums to 1), above the fitted
     /// background.
     pub quantity: f64,
-    /// `amplitude_se * w * sqrt(2 pi)`.
+    /// `amplitude_se * w * sqrt(2 pi)`: the least-squares standard error of
+    /// the fitted amplitude at the fixed peak shape. It is the fit error of
+    /// the amplitude, not the cell's run-to-run uncertainty.
     pub quantity_se: f64,
     /// Profile log-likelihood ratio against "background only" at the optimum
     /// (0 when `A = 0`).

@@ -49,7 +49,7 @@ Verdicts compare andes with the best other tool measured on the same data: **wel
   the submissions that report fewer precursors (MaxQuant 0.160 at 20,283, Sage 0.167 at 30,319).
 - Glyco recall of reference identifications: behind (79–89% of pGlyco2's).
 - Error control: on a peptide-level shuffled entrapment UPS1 reads 0.92–0.94% at nominal 1% and
-  timsTOF 0.88–0.91% (mean of six shuffle draws; single draws 0.52–1.12%), on target. The natural entrapments read
+  timsTOF 0.79–0.91% (mean of six shuffle draws per run; single draws 0.52–1.12%), on target. The natural entrapments read
   higher (UPS1 1.95–2.07%, timsTOF up to 1.54%); about half of those hits fall on proteins with a
   close homolog in the target proteome (see the UPS1 and timsTOF paragraphs).
 
@@ -68,8 +68,10 @@ Legend: 🟢 andes better · 🟡 similar · 🔴 andes worse · ⚪ no comparis
 | Low-res LFQ, UPS1 | true FDP, peptide-level shuffled entrapment (primary) | 0.92–0.94% | — | 🟢 within nominal 1% | — |
 | Low-res LFQ, UPS1 | true FDP, natural *E. coli* entrapment (context, not a valid null here) | 1.95–2.07% (1.07–1.11% without the conserved proteins, T/E recomputed) | — | ⚪ context: not a calibration verdict; the shuffle above is the primary reading (0.92–0.94%, within nominal) | none. 45 of 94 hits (seed 42) sit on 8 *E. coli* proteins with a yeast homolog at ≥ 40% identity, 32 of them on two EF-Tu peptides. These peptides do not occur in any yeast protein, so they are either real *E. coli* protein in the recombinant UPS1 standard or yeast spectra matched to a near-identical *E. coli* peptide; neither has been shown |
 | Phospho, PXD007653 (Q Exactive) | PSMs | 38,623 | Comet 2025.01: 33,984 (at 1.77% true FDP) | 🟢 +14%, at 0.80–0.99% FDP | — |
-| timsTOF DDA-PASEF, PXD053748 and PXD064202 | PSMs | 14.3k–55.6k per file | not measured | ⚪ | — |
-| timsTOF DDA-PASEF | true FDP, peptide-level shuffled entrapment (primary) | 0.88–0.91% (mean of six draws; single draws 0.52–1.12%) | not measured | 🟢 on target at nominal 1% (calibration only: no other tool run on these files) | — |
+| timsTOF DDA-PASEF, PXD053748 and PXD064202 (4 runs) | PSMs at q ≤ 0.01 (shuffled-entrapment database, mean of 6 draws) | 15.6k–58.6k | Comet 2025.01: 14.1k–50.8k | 🟢 +11% to +17% | — |
+| timsTOF DDA-PASEF | PSMs at a true FDP of 1% | 15.9k–58.8k | Comet 2025.01: 14.0k–49.5k | 🟢 +14% to +21% | — |
+| timsTOF DDA-PASEF | wall time (8 threads) | 54–62 s | Comet 2025.01: 159–222 s | 🟢 about 3x faster | — |
+| timsTOF DDA-PASEF | true FDP, peptide-level shuffled entrapment (primary) | 0.79–0.91% (mean of six draws per run; single draws 0.52–1.12%) | Comet 2025.01: 1.14–1.31% | 🟢 on target; Comet above nominal on all four runs | — |
 | timsTOF DDA-PASEF | true FDP, natural yeast entrapment | 0.86–1.54% (0.72–1.02% without hits on conserved proteins) | — | 🟡 above nominal on one astrocyte run (1.44–1.54%) | Same conserved-homolog effect as UPS1; see the timsTOF paragraph |
 | Glyco quick tier, PXD005553 | reference glycoPSMs confirmed | 88–90% | pGlyco2, MSFragger-Glyco (references) | 🔴 10–12% of reference IDs missed | **moderate**, usable. No: engine (glyco scoring) |
 | Glyco deep tier, PXD005553 | reference glycoPSMs confirmed | 79% (pGlyco2), 88% (MSFragger-Glyco) | as above | 🔴 21% of pGlyco2's missed | **moderate**, usable. No: engine (glyco scoring) |
@@ -238,6 +240,35 @@ read 9.0–9.7% on the astrocyte runs. andes 40–52 s per run, 255–321 CPU-s,
 natural database (49–58 s, 307–371 CPU-s, 2.4–2.8 GB on the shuffle); Percolator is separate.
 Earlier measurement (`2051616b`, 1 missed cleavage on the same inputs): natural yeast
 0.78–1.55%, shuffle 0.62–1.03%.
+
+**Against Comet 2025.01 (timsTOF).** The four runs were also searched with Comet 2025.01 on mzML
+converted with tdf2mzml (default options): 20 ppm precursor, isotope error −1 to 3 (Comet has no
+−1 to 2 setting), 2 missed cleavages, the same modifications, `fragment_bin_tol 0.02` with offset 0
+(the convention of the other Comet rows), internal reversed decoys. Both tools searched the same
+shuffled-entrapment database for six draws (seeds 1 and 11–15), and both PINs were rescored with
+Percolator 3.7.1 `-Y` seed 42 (seed 7 moves the true FDP by at most 0.2 pp); andes build `2ee76dd6`,
+8 threads each, on 2026-11-09. Means over the six draws:
+
+| run | tool | PSMs at `q ≤ 0.01` | true FDP | PSMs at a true FDP of 1% | peptide sequences | wall | memory |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `..._4363` | andes `.d` | 15,642 | 0.79% | 15,880 | 3,910 | 55 s | 2.4 GB |
+| | Comet | 14,143 | 1.14% | 13,964 | 3,493 | 159 s | 6.2 GB |
+| `..._4367` | andes `.d` | 18,916 | 0.90% | 19,133 | 3,865 | 56 s | 2.5 GB |
+| | Comet | 16,139 | 1.15% | 15,865 | 3,396 | 176 s | 6.4 GB |
+| `..._2442` | andes `.d` | 36,092 | 0.88% | 36,279 | 14,682 | 54 s | 2.3 GB |
+| | Comet | 30,848 | 1.31% | 29,957 | 13,248 | 186 s | 6.0 GB |
+| `..._2403` | andes `.d` | 58,578 | 0.91% | 58,828 | 24,146 | 62 s | 2.7 GB |
+| | Comet | 50,814 | 1.31% | 49,517 | 22,007 | 222 s | 6.1 GB |
+
+Verdict: ahead on every run. andes reports 10.6–17.2% more PSMs at `q ≤ 0.01` and 9.7–13.8% more
+peptide sequences; its true FDP is within nominal (0.79–0.91%) while Comet's is above it on every run
+(1.14–1.31%; 23 of 24 draws above 1%), so at a true FDP of 1% the gap is 13.7–21.1%. Draw-to-draw
+SD is 0.08–0.21 pp for the FDP and about 1% of the PSM count. On the same mzML andes still reports
+8.1–15.5% more PSMs; native `.d` adds 1.2–2.6%. andes is 2.9–3.6x faster and uses 2.2–2.6x less
+memory. The tools build their decoys differently (andes permuted, Comet reversed), so part of
+Comet's excess over nominal may come from the decoys; the depth at a true FDP of 1% does not depend
+on them. Comet's settings were not tuned for PASEF data. Wall times exclude conversion (about 5–7
+min per run for tdf2mzml) and Percolator.
 
 **Glyco.** Mouse liver glycoproteome data (PXD005553), against mouse proteins plus an entrapment,
 with `--glyco --glyco-species mouse --decoy-strategy sequon`. Two published reference

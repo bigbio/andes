@@ -40,11 +40,12 @@ family, sign-aware, MBR on)
 
 | data | metric | andes | MaxQuant 2.7 | FragPipe | result |
 |---|---|---:|---:|---:|---|
-| ProteoBench QE | median \|ε\| (lower is better) | 0.161 | — | 0.190 (54k precursors; 0.200 at 63.7k) | 🟢 15% lower |
-| ProteoBench QE | precursors in ≥ 3 runs | 63,796 | — | 63,701 | 🟡 same |
-| ProteoBench QE | CV | 0.117 | — | — (best entry 0.120) | 🟢 lowest |
-| ProteoBench Astral | median \|ε\| | 0.186 | 0.160 (20k precursors) | 0.212 (39k) | 🟢 vs FragPipe; 🔴 vs MaxQuant at half the depth (minor) |
-| ProteoBench Astral | CV | 0.112 | — | — (Sage 0.070) | 🔴 1.6x (minor) |
+| ProteoBench QE | median \|ε\| (lower is better) | 0.161 | 0.210 | 0.200 | 🟢 23% / 20% lower |
+| ProteoBench QE | precursors in ≥ 3 runs | 63,796 | 44,299 | 63,701 | 🟢 +44% / 🟡 same |
+| ProteoBench QE | CV | 0.117 | 0.219 | 0.156 | 🟢 47% / 25% lower |
+| ProteoBench Astral | median \|ε\| | 0.186 | 0.160 | 0.212 | 🔴 1.16x MaxQuant at 55% of andes' depth (minor) / 🟢 12% lower |
+| ProteoBench Astral | precursors in ≥ 3 runs | 36,675 | 20,283 | 39,057 | 🟢 +81% / 🟡 6% fewer |
+| ProteoBench Astral | CV | 0.112 | 0.092 | 0.127 | 🔴 1.2x MaxQuant at 55% of andes' depth (minor) / 🟢 12% lower |
 | Truth designs, 8 sets | precursors quantified | 10.7k–93.6k | | | 🟢 +19% to +51% on 7 sets, 🟡 on 1 |
 | PXD009740 / PXD009815 / QE / Astral | DE true positives | 1,300 / 844 / 1,047 / 685 | 1,304 / 844 / 857 / 650 | 1,237 / 849 / 946 / 689 | 🟡 / 🟡 / 🟢 +22% / 🟡 |
 | PXD009740 / PXD009815 / QE / Astral | DE false calls, no fold-change cut | 305 / 153 / 110 / 296 | 129 / 92 / 37 / 210 | 302 / 301 / 43 / 389 | 🔴 1.4–3.0x MaxQuant (moderate); mostly real small shifts, see note |
@@ -62,6 +63,9 @@ family, sign-aware, MBR on)
 | TMT match between runs, PXD014750 | excess wrong-value rate of transfers | −0.05 points | +1.53 | | 🟢 (SIMSI-Transfer +0.40) |
 | TMT match between runs | cells transferred | 3,636 | | | 🔴 4.5x fewer than SIMSI-Transfer (minor, opt-in) |
 | Large study, PXD042233 (500 runs) | precursors in ≥ 3 runs | 243,895 | | | ⚪ |
+
+ProteoBench rows use the MaxQuant and FragPipe leaderboard submissions with the most precursors
+(MaxQuant 1.5.3.30 on QE, 2.6.7.0 on Astral; FragPipe 23.0); every other submission is in section 2.2.
 
 Note on DE false calls: andes' protein values are tighter than the other tools', so small real
 shifts of the "unchanged" species reach significance. On PXD009740, 296 of 320 false calls are

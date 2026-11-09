@@ -2988,41 +2988,45 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .iter()
             .filter_map(|p| facts.get(p.psm_id.as_str()).cloned())
             .collect();
-        let cutoffs = cutoffs
-            .as_ref()
-            .expect("cutoffs exist whenever PSMs were accepted");
-        // `--mbr` moved the decoy PSMs aside above.
+        // `--mbr` moved the decoy PSMs aside above. Decoys are cut like the
+        // targets: each at the cutoff of its own class, under the `--pep` cap.
         let decoys = if cli.mbr {
             &mbr_decoys
         } else {
             &rescore_decoy_psms
         };
-        let decoys_at_cut = decoys
-            .iter()
-            .filter(|(id, p)| p.q_value <= cutoffs.of(id))
-            .count();
+        let decoys_at_cut = output::Cutoffs::new(decoys, &pin_index, fdr_threshold, proteoform_fdr)
+            .count_passing(decoys, cli.pep);
         let run_names: Vec<String> = spectrum_paths
             .iter()
             .map(|p| crate::quant_run::run_stem(p))
             .collect();
+        let fixed = output::FixedModSpec::declared(&params);
         output::IdentificationSummary::compute(
             &output::SpectraTally::of(&spectra, &run_ends),
             &run_names,
             &linked,
             accepted.len() - linked.len(),
-            decoys_at_cut,
-            protein_groups.as_ref().map(|inf| {
-                (
-                    fdr_threshold,
-                    inf.groups
-                        .iter()
-                        .filter(|g| g.q_value <= fdr_threshold)
-                        .count(),
-                )
-            }),
-            &format!("q ≤ {fdr_threshold}{cut_note}"),
-            &output::FixedModSpec::declared(&params),
-            params.precursor_mass_shift_ppm,
+            &output::SummaryContext {
+                rescorer: if use_native {
+                    "native rescorer"
+                } else {
+                    "Percolator"
+                },
+                cut: &format!("q ≤ {fdr_threshold}{cut_note}"),
+                decoys_at_cut,
+                protein_groups: protein_groups.as_ref().map(|inf| {
+                    (
+                        fdr_threshold,
+                        inf.groups
+                            .iter()
+                            .filter(|g| g.q_value <= fdr_threshold)
+                            .count(),
+                    )
+                }),
+                fixed: &fixed,
+                calibration_shift_ppm: params.precursor_mass_shift_ppm,
+            },
         )
     });
     eprint!("{}", run_stats.render_with(id_summary.as_ref()));

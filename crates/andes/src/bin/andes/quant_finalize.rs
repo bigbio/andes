@@ -2216,7 +2216,6 @@ pub(crate) fn finalize_stream(
     // and an identified row without features, has none); the pseudo-transfer
     // rows are scored here.
     let t0 = Instant::now();
-    let accepted = |q: Option<f64>| q.is_some_and(|q| q <= mbr_fdr);
     let shared_feature = shared::Model::shipped();
     // Decoy transfer rows with a q-value, and their acceptance, by family:
     // mass shift, RT shift, identity decoy.

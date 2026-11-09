@@ -120,6 +120,21 @@ impl Cutoffs {
         }
     }
 
+    /// Rows of `rows` that pass their cutoff and, when `pep_cap` is set, have a
+    /// PEP at or below it: the target filter of the filtered TSV without its
+    /// knockoff and protein-group conditions, which apply to targets only.
+    /// Meant for decoy rows, whose class is read from `self`, built from the
+    /// same rows.
+    pub fn count_passing(
+        &self,
+        rows: &HashMap<String, PercolatorPsm>,
+        pep_cap: Option<f64>,
+    ) -> usize {
+        rows.iter()
+            .filter(|(id, p)| p.q_value <= self.of(id) && pep_cap.is_none_or(|t| p.pep <= t))
+            .count()
+    }
+
     /// The cutoff of row `id`.
     pub fn of(&self, id: &str) -> f64 {
         self.or(id, self.fdr)
@@ -335,6 +350,29 @@ mod tests {
             ],
         };
         SearchIndex::from_target_db(&target, "XXX")
+    }
+
+    /// Decoys are counted with the cutoff of their own class (a variant decoy
+    /// at the proteoform level) and under the `--pep` cap.
+    #[test]
+    fn count_passing_uses_the_class_cutoff_and_the_pep_cap() {
+        let idx = index();
+        let mut decoys: HashMap<String, PercolatorPsm> = [
+            psm("canon", 1.0, 0.03, "XXX_sp|P1|A"),
+            psm("variant", 1.0, 0.03, "XXX_sp|P1_VAR_1|A"),
+            psm("variant_low", 1.0, 0.004, "XXX_sp|P1_VAR_1|A"),
+            psm("canon_low", 1.0, 0.004, "XXX_sp|P1|A"),
+        ]
+        .into_iter()
+        .collect();
+        decoys.get_mut("canon_low").unwrap().pep = 0.5;
+        let cutoffs = Cutoffs::new(&decoys, &idx, 0.01, 0.05);
+        // canon fails 0.01; variant passes 0.05; both low ones pass.
+        assert_eq!(cutoffs.count_passing(&decoys, None), 3);
+        // The cap drops the decoy whose PEP is 0.5.
+        assert_eq!(cutoffs.count_passing(&decoys, Some(0.1)), 2);
+        // A uniform cutoff treats every row alike.
+        assert_eq!(Cutoffs::uniform(0.01).count_passing(&decoys, None), 2);
     }
 
     fn psm(id: &str, score: f64, q: f64, proteins: &str) -> (String, PercolatorPsm) {

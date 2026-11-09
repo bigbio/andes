@@ -34,9 +34,10 @@ Verdicts compare andes with the best other tool measured on the same data: **wel
   points), against +1.53 (MaxQuant) and +0.40 (SIMSI-Transfer); `--tmt-unmix on` removes hrMS2
   interference.
 - Protein CV: ahead on 3 of 6 truth sets.
+- Precision of unchanged proteins: ahead on PXD009740, PXD009815 and QE (within-condition spread of MaxQuant 1.15–1.55x andes', FragPipe 1.25–1.40x).
 
 🔴 **Needs work**
-- DE false calls without a fold-change cut: well behind MaxQuant on PXD009740 and QE (2.4x and 3.0x), behind on PXD009815 and Astral (1.7x and 1.4x).
+- DE false calls without a fold-change cut: well behind MaxQuant on PXD009740 and QE (2.4x and 3.0x), behind on PXD009815 and Astral (1.7x and 1.4x). Most are small shifts of the "unchanged" species that andes' tighter protein values make significant: above |log2 FC| ≥ 0.5 andes is ahead on QE and comparable on PXD009815; on PXD009740 296 of 320 come from comparisons against the highest UPS1 level, without which andes is level with MaxQuant (see *Why andes makes more false calls*).
 - Gross error of bright identified cells: well behind (1.2–7.2% against MaxQuant 0.3–1.6%).
 - False transfers into absent samples at the default threshold: behind (0.20% of transferred rows
   against FragPipe 0.09%; comparable at `quant_q ≤ 0.01`; on the classified reading behind on
@@ -94,7 +95,7 @@ Legend: 🟢 andes better · 🟡 similar · 🔴 andes worse · ⚪ no comparis
 | ProteoBench Astral | CV | 0.112 | Sage 0.14.6: 0.070 | 🔴 higher | **minor**, usable. Partly: identified rows alone give 0.100; normalisation changes little (0.113 raw) |
 | Truth designs (8 sets) | precursors quantified | 10.7k–93.6k | MaxQuant 2.7 / FragPipe 21.1 per set | 🟢 +19% to +51% on 7 sets, 🟡 +3% on PXD001819 | — |
 | Truth designs, PXD009740 / PXD009815 / QE / Astral | DE true positives (MBR on; common-tested family, sign-aware) | 1,300 / 844 / 1,047 / 685 | MaxQuant 1,304 / 844 / 857 / 650; FragPipe 1,237 / 849 / 946 / 689 | 🟡 tie / 🟡 tie / 🟢 +22% over MaxQuant, +11% over FragPipe / 🟡 tie | — |
-| Truth designs, PXD009740 / PXD009815 / QE / Astral | DE false calls, no fold-change cut (common-tested family; wrong-sign calls included) | 305 / 153 / 110 / 296 | MaxQuant 129 / 92 / 37 / 210; FragPipe 302 / 301 / 43 / 389 | 🔴 more than MaxQuant on all four (2.4x / 1.7x / 3.0x / 1.4x) | **moderate**: apply a fold-change cut. Partly: with \|log2 FC\| ≥ 0.5 (previous counting, not recomputed on the common family) QE is level with MaxQuant (16 against 19); PXD009740 stays 2.5x (256 against 101) |
+| Truth designs, PXD009740 / PXD009815 / QE / Astral | DE false calls, no fold-change cut (common-tested family; wrong-sign calls included) | 305 / 153 / 110 / 296 | MaxQuant 129 / 92 / 37 / 210; FragPipe 302 / 301 / 43 / 389 | 🔴 more than MaxQuant on all four (2.4x / 1.7x / 3.0x / 1.4x) | **moderate**: apply a fold-change cut. With \|log2 FC\| ≥ 0.5 (seed 42, common family) andes is ahead on QE (11 against 18, with 1,046 against 852 true positives), comparable on PXD009815 (39 against 36) and behind on PXD009740 (167 against 74, all but a few against its highest UPS1 level) |
 | Truth designs, PXD009740 / PXD009815 / QE / Astral | DE true positives / false calls against MaxQuant with its match rows filtered at Match q-value ≤ 0.01 (common-tested family of andes, filtered MaxQuant and FragPipe; sign-aware) | 1,156 / 272; 763 / 151; 983 / 105; 568 / 297 | MaxQuant, matches q ≤ 0.01: 1,077 / 131; 725 / 62; 851 / 42; 518 / 154. FragPipe: 1,089 / 274; 768 / 265; 905 / 41; 569 / 388 | 🟢 TP +7% / +5% / +15% / +10% over filtered MaxQuant; 🔴 false calls 2.1x / 2.4x / 2.5x / 1.9x of it | **moderate**: the filtered MaxQuant arm is the cleanest; andes' extra true positives come with more false calls |
 | Truth designs, all sets | bright identified cells off by > 2x | 1.2–7.2% | MaxQuant 0.3–1.6% | 🔴 | **moderate**, few cells, usable. Partly: quality columns let a downstream weighting down-weight them; the fix is in the engine (template misfit on fronting or tailing peaks) |
 | Truth designs, 6 sets | protein CV | 4.4–10.1% | FragPipe 4.9–13.5%, MaxQuant 7.0–11.6% | 🟢 on 3 sets, 🔴 on Astral and PXD001819 | **minor**, usable. Partly: dropping transfers or weighting by quality columns |
@@ -636,8 +637,40 @@ are from 2026-10 and were read again unchanged.
   well behind** MaxQuant on PXD009740 and QE (2.4x and 3.0x), behind on PXD009815 and Astral
   (1.7x and 1.4x); FragPipe has as many on PXD009740 (302), more on PXD009815 (301) and Astral
   (389), fewer on QE (43). Wrong-sign calls are few (0–13 per arm and set; andes 7 on PXD009815
-  against 2 for MaxQuant and FragPipe). With |log2 FC| ≥ 0.5 (previous counting) false positives
-  are comparable on QE, PXD009815 and Astral and behind on PXD009740.
+  against 2 for MaxQuant and FragPipe). With |log2 FC| ≥ 0.5 (seed 42) false calls are 11 against
+  MaxQuant 18 on QE, 39 against 36 on PXD009815 and 167 against 74 on PXD009740 (Astral not
+  recomputed).
+- *Why andes makes more false calls* (seed 42, PXD009740, PXD009815 and QE; analysis of the tables
+  above, no re-run). The protein values of the unchanged species are tighter in andes than in the
+  other tools: over every unchanged protein and pair, the within-condition spread of MaxQuant is
+  1.15–1.55x andes' and that of FragPipe 1.25–1.40x. A small shift that the other tools blur
+  becomes significant in andes. The calls are not made by transferred values: recomputed from
+  identified cells only, the called proteins keep 80–95% of their fold change, and in 78–82% of
+  them (PXD009740, PXD009815) most precursors of the protein move together across the replicates.
+  On QE 60% of the calls follow a retention-time-local intensity shift that identified precursors of
+  other unchanged proteins show as well. MaxQuant and FragPipe see the same direction on most called
+  proteins, with 0.56–0.89 of andes' fold change and 1.4–2.4x its spread, so they rarely reach
+  significance. On PXD009740, 296 of andes' 320 false calls are comparisons against the highest
+  UPS1 level (250,844 amol), where the unchanged yeast shifts in every tool's data; without that
+  level andes has 955 true positives and 24 false calls against MaxQuant's 953 and 31 (filtered
+  MaxQuant 780 and 13, FragPipe 896 and 61). Calls significant and above a minimal fold change:
+
+  | set | tool | all | \|log2 FC\| ≥ 0.3 | ≥ 0.5 | ≥ 1.0 |
+  |---|---|---|---|---|---|
+  | QE | andes | 1,049 / 113 | 1,049 / 83 | 1,046 / 11 | 476 / 0 |
+  |  | MaxQuant | 857 / 37 | 857 / 35 | 852 / 18 | 303 / 2 |
+  |  | FragPipe | 946 / 43 | 946 / 37 | 945 / 20 | 680 / 8 |
+  | PXD009740 | andes | 1,287 / 320 | 1,287 / 310 | 1,287 / 167 | 1,271 / 27 |
+  |  | MaxQuant | 1,292 / 129 | 1,292 / 128 | 1,292 / 74 | 1,238 / 25 |
+  |  | FragPipe | 1,224 / 302 | 1,224 / 302 | 1,224 / 259 | 1,220 / 86 |
+  | PXD009815 | andes | 853 / 183 | 852 / 60 | 846 / 39 | 800 / 21 |
+  |  | MaxQuant | 842 / 92 | 842 / 66 | 838 / 36 | 778 / 6 |
+  |  | FragPipe | 859 / 301 | 859 / 184 | 858 / 102 | 844 / 22 |
+
+  Entries are true positives / false calls. The truth labels assume the unchanged species does not
+  change at all; at andes' precision that assumption no longer holds for shifts below about 1.4-fold (|log2 FC| 0.5).
+  Still behind: PXD009815 at large fold changes (21 against MaxQuant 6 at ≥ 1.0) and its wrong-sign
+  calls (18 against 2).
 - *UPS1 detection at the lowest levels* (UPS1 precursors within 2x of their own reference, summed
   over the three lowest levels; PXD009740 170, 382 and 859 amol, PXD009815 10, 50 and 100 amol,
   PXD001819 50, 125 and 250 amol). Rows are the UPS1 rows at those levels, within 2x is the share of

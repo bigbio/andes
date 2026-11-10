@@ -154,8 +154,9 @@ pub struct Evidence {
     /// `1 / sqrt(den)` over the used isotopes (background profiled out).
     pub amplitude_se: f64,
     /// `A * w * sqrt(2 pi)`: the area under the fitted Gaussian profile of
-    /// the whole isotope pattern (`pi` sums to 1), above the fitted
-    /// background.
+    /// the fitted isotopes (the first `n_isotopes`, at most
+    /// [`MAX_ISOTOPES`]; `pi` sums to 1 over them), above the fitted
+    /// background. Isotopes past the last fitted one are not part of it.
     pub quantity: f64,
     /// `amplitude_se * w * sqrt(2 pi)`.
     pub quantity_se: f64,

@@ -94,13 +94,22 @@ pub(crate) fn title_prefix_for(file_stem: &str) -> Option<String> {
     Some(format!("{file_stem}/"))
 }
 
+/// Put `prefix` before every title; a spectrum without a title is named by
+/// its scan. The title is the `SpecId` of the tab-separated outputs (PIN,
+/// TSVs), so a tab or a line break in it becomes a space.
 pub(crate) fn prefix_spectrum_titles(chunk: &mut [Spectrum], prefix: &str) {
+    const SEPARATORS: [char; 3] = ['\t', '\n', '\r'];
     for spec in chunk.iter_mut() {
-        if spec.title.is_empty() {
-            spec.title = format!("{prefix}scan={}", spec.scan.unwrap_or(0));
+        let title = if spec.title.is_empty() {
+            format!("{prefix}scan={}", spec.scan.unwrap_or(0))
         } else {
-            spec.title = format!("{prefix}{}", spec.title);
-        }
+            format!("{prefix}{}", spec.title)
+        };
+        spec.title = if title.contains(SEPARATORS) {
+            title.replace(SEPARATORS, " ")
+        } else {
+            title
+        };
     }
 }
 
@@ -947,5 +956,34 @@ mod format_routing_tests {
             input_format_flags(Path::new("foo.mgf")),
             (false, false, false, true)
         );
+    }
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::prefix_spectrum_titles;
+    use model::Spectrum;
+
+    fn titled(title: &str, scan: Option<i32>) -> Spectrum {
+        Spectrum {
+            title: title.to_string(),
+            scan,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn titles_get_the_prefix_and_untitled_spectra_their_scan() {
+        let mut spectra = vec![titled("Scan 42", Some(42)), titled("", Some(7))];
+        prefix_spectrum_titles(&mut spectra, "run/");
+        assert_eq!(spectra[0].title, "run/Scan 42");
+        assert_eq!(spectra[1].title, "run/scan=7");
+    }
+
+    #[test]
+    fn column_and_row_separators_in_a_title_become_spaces() {
+        let mut spectra = vec![titled("a\tb\r\nc", Some(1))];
+        prefix_spectrum_titles(&mut spectra, "ru\tn/");
+        assert_eq!(spectra[0].title, "ru n/a b  c");
     }
 }

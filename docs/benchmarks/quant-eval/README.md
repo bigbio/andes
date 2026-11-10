@@ -131,8 +131,9 @@ One manifest drives the whole truth suite; nothing is searched or quantified by 
 runs stays with the cluster scripts of the user).
 
 ```
-python3 -m quant_eval.suite --manifest manifest.json --out results/ [--only u9740,qe] [--seeds 42,1,7]
+python3 -m quant_eval.suite --manifest manifest.json --out results/ [--only u9740,qe] [--seeds 42,1,7] [--jobs 3]
 python3 -m quant_eval.board --results results/ > scoreboard.md
+python3 -m quant_eval.compare --results results/ [--build cand] [--arm V] [--tools MQ,FP] [--seed 42] [--only ups27]
 python3 -m quant_eval.gate  --results results/ --candidate cand [--baseline main]
 python3 -m quant_eval.proteobench --finalize fin.parquet --design design.tsv --fasta hye.fasta --rule hard-cut --out-prefix sub/QE
 ```
@@ -146,6 +147,15 @@ python3 -m quant_eval.proteobench --finalize fin.parquet --design design.tsv --f
   PXD014415 false-transfer rate are not above the reference build's at its own quant_q <= 0.01 plus the reference's own seed-to-seed spread of that rate
   (max - min over the quant-model seeds of the manifest; recorded as `matched_tolerance` in the result JSON, 0 with one seed); depth, accuracy and DE are read at that cut.
 - Arms: `X` (transfer_q <= 0.01), `X_V`, `X_H`, `X_I` (identified rows only, the run without match between runs) and `X_M`; a tool's output with match between runs off is another entry of the manifest's `tools` (e.g. `"maxquant": {"MQ": ..., "MQ_noMBR": ...}`).
+- `suite --jobs N`: every (dataset, seed) pair is one unit that writes its own result JSON; with `--jobs` above 1 the units run in N worker
+  processes. The result files do not depend on `--jobs`; the progress lines of the units are interleaved on stderr.
+- `compare.py`: one short table per dataset for one andes build against the tools (default: the last build of the results, and the MaxQuant
+  and FragPipe arms with match between runs). One row per metric: depth, cell accuracy, replicate spread, protein CV, DE calls in the
+  common family and on the arm's own rows, low spike levels. Per tool its value, the difference of andes to it (relative to the tool; a
+  factor from 2x on) and a marker: `✅` andes better, `❌` worse, `≈` equal or the ranges over the quant-model seeds overlap. It reads the
+  result JSONs as `board.py` does and computes nothing new. A manifest with one build (that build as `reference_build`) and the tool
+  outputs is enough for it. The two rows on the brightest cells depend on the reference build (its quantities, with those of the tools,
+  rank the cells), so they can differ between a run with the build as reference and a run with another reference.
 - `board.py`: the one scoreboard table. `gate.py`: pass / fail per criterion of the adoption gate (identified rows, wrong-peak, UPS1
   within 2x, DE by the pairwise TP-and-FDP rule, depth at the matched cut, cost); exit status 1 on any failure.
 - `proteobench.py`: Custom-input file (and metadata JSON) for the ProteoBench DDA precursor-ion modules.
@@ -177,7 +187,7 @@ python3 -m quant_eval.proteobench --finalize fin.parquet --design design.tsv --f
 - Board cosmetics: `within 2x %` (equal to 100 - `err>1 %`) is dropped from the default board, an empty absence rate prints `-`, FlashLFQ is labelled
   peptide-level (charge states summed) and Sage as having no transfer flag (its MBR fills count as identified). `--legacy` prints the earlier columns and labels.
 
-Tests: `python3 tests/test_board_metrics.py`.
+Tests: `python3 tests/test_board_metrics.py`, `python3 tests/test_compare.py`.
 
 Refs #299.
 

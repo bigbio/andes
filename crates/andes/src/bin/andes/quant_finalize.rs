@@ -108,9 +108,16 @@ pub(crate) struct MbrFeature {
     pub run: u16,
     pub evidence_type: EvidenceType,
     pub quantity: Option<f64>,
+    /// Least-squares standard error of the fitted amplitude at the fixed
+    /// peak shape, times the area factor: the fit error, not the cell's
+    /// run-to-run uncertainty.
     pub quantity_se: Option<f64>,
     pub quantity_normalized: Option<f64>,
     pub transfer_q: Option<f64>,
+    /// For an accepted transfer, the running mean of the wrong-peak
+    /// probability of a model trained on pseudo-transfers (identified cells
+    /// re-measured blind): it sees a wrong peak, not an absent peptide or a
+    /// wrong donor identity.
     pub quant_q: Option<f64>,
     pub apex_rt_s: Option<f64>,
     pub library_q: f64,
@@ -2209,7 +2216,6 @@ pub(crate) fn finalize_stream(
     // and an identified row without features, has none); the pseudo-transfer
     // rows are scored here.
     let t0 = Instant::now();
-    let accepted = |q: Option<f64>| q.is_some_and(|q| q <= mbr_fdr);
     let shared_feature = shared::Model::shipped();
     // Decoy transfer rows with a q-value, and their acceptance, by family:
     // mass shift, RT shift, identity decoy.
@@ -2381,7 +2387,13 @@ pub(crate) fn finalize_stream(
                             v.ms2_rows[0] += 1;
                             v.ms2_supported[0] += usize::from(m.supports());
                         }
-                        let downgrade = accepted(q)
+                        // A transfer without a quantity (zero-amplitude fit)
+                        // has nothing to report and is not accepted. The
+                        // transfer FDR pool and its decoys are unchanged,
+                        // so the estimator keeps its symmetry; only the
+                        // targets it would accept shrink.
+                        let acc = transfer_accepted(q, mbr_fdr, quantity.is_some());
+                        let downgrade = acc
                             && q.is_some_and(|q| {
                                 shared_feature.is_shared(&shared::Row {
                                     claim: &r.claim,
@@ -2392,7 +2404,7 @@ pub(crate) fn finalize_stream(
                                     width: e.map_or(0.0, |e| e.w),
                                 })
                             });
-                        let t = match (accepted(q), supported, downgrade) {
+                        let t = match (acc, supported, downgrade) {
                             (true, _, true) => {
                                 v.shared_feature += 1;
                                 EvidenceType::SharedFeature
@@ -2757,8 +2769,25 @@ fn log_summary(
     }
 }
 
+/// Whether a transfer with q-value `q` is accepted at `mbr_fdr`: it passes
+/// the threshold and has a quantity (a fit with zero amplitude has none).
+fn transfer_accepted(q: Option<f64>, mbr_fdr: f64, has_quantity: bool) -> bool {
+    has_quantity && q.is_some_and(|q| q <= mbr_fdr)
+}
+
 #[cfg(test)]
 mod tests {
+    /// A transfer whose fit has zero amplitude reports no quantity and is
+    /// not accepted whatever its q-value.
+    #[test]
+    fn zero_amplitude_transfer_is_not_accepted() {
+        use super::transfer_accepted;
+        assert!(transfer_accepted(Some(0.001), 0.01, true));
+        assert!(!transfer_accepted(Some(0.001), 0.01, false));
+        assert!(!transfer_accepted(Some(0.5), 0.01, true));
+        assert!(!transfer_accepted(None, 0.01, true));
+    }
+
     #[test]
     fn the_brightest_share_of_precursors_reports_trace_areas() {
         use super::{mark_trace_precursors, PrecursorSummary, Summaries};

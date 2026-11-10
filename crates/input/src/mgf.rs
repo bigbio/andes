@@ -112,12 +112,19 @@ impl<R: BufRead> Iterator for MgfReader<R> {
                     "CHARGE" => match parse_charge(&value) {
                         // `CHARGE=0` means "unknown", as in mzML: leave it absent
                         // so the search enumerates the charge range; so does an
-                        // out-of-range value.
+                        // out-of-range value or a list of several charge states.
                         Ok(z) => {
-                            precursor_charge = model::spectrum::known_precursor_charge(i64::from(z))
+                            precursor_charge = z
+                                .and_then(|z| model::spectrum::known_precursor_charge(i64::from(z)))
                         }
-                        Err(()) => {
+                        Err(ChargeError::Malformed) => {
                             return Some(Err(MgfParseError::BadCharge {
+                                line: self.line_no,
+                                got: value,
+                            }))
+                        }
+                        Err(ChargeError::Negative) => {
+                            return Some(Err(MgfParseError::NegativeCharge {
                                 line: self.line_no,
                                 got: value,
                             }))
@@ -230,22 +237,55 @@ fn scan_from_title(title: &str) -> Option<i32> {
     (start > 0 && end >= start).then_some(start)
 }
 
-fn parse_charge(value: &str) -> Result<i32, ()> {
-    // Tolerate multi-value MGF charge strings ("2+ and 3+", "2+,3+") — common in
-    // msconvert output. Take the first token's charge rather than dropping the
-    // whole spectrum (the engine still scores it at that charge). Single values
-    // ("2+", "2") are unchanged.
-    let first = value
-        .trim()
+/// Why a `CHARGE=` value cannot be used.
+#[derive(Debug, PartialEq, Eq)]
+enum ChargeError {
+    Malformed,
+    /// A negative charge state: the search computes the precursor mass of a
+    /// protonated ion, which is wrong for a negative-ion spectrum.
+    Negative,
+}
+
+/// Parse a `CHARGE=` value: one charge state (`2+`, `2`, `+2`) or several
+/// (`2+ and 3+`, `2+,3+`), as Mascot and msconvert write when the charge was
+/// not determined.
+///
+/// `Ok(Some(z))` when the value names one charge state. `Ok(None)` when it
+/// names several different ones: the charge is then unknown, and the search
+/// enumerates its configured charge range for the spectrum.
+fn parse_charge(value: &str) -> Result<Option<i32>, ChargeError> {
+    let mut charge: Option<i32> = None;
+    let mut several = false;
+    let tokens = value
         .split(|c: char| c.is_whitespace() || c == ',')
-        .find(|t| !t.is_empty())
-        .unwrap_or("")
-        .trim();
-    let stripped = first
-        .strip_suffix('+')
-        .or_else(|| first.strip_suffix('-'))
-        .unwrap_or(first);
-    stripped.parse().map_err(|_| ())
+        .filter(|t| !t.is_empty() && !t.eq_ignore_ascii_case("and"));
+    for token in tokens {
+        let (digits, negative) = if let Some(d) = token.strip_suffix('-') {
+            (d, true)
+        } else if let Some(d) = token.strip_prefix('-') {
+            (d, true)
+        } else {
+            let d = token.strip_suffix('+').unwrap_or(token);
+            (d.strip_prefix('+').unwrap_or(d), false)
+        };
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(ChargeError::Malformed);
+        }
+        let z: i32 = digits.parse().map_err(|_| ChargeError::Malformed)?;
+        if negative && z != 0 {
+            return Err(ChargeError::Negative);
+        }
+        match charge {
+            None => charge = Some(z),
+            Some(first) if first != z => several = true,
+            Some(_) => {}
+        }
+    }
+    match charge {
+        None => Err(ChargeError::Malformed),
+        Some(_) if several => Ok(None),
+        Some(z) => Ok(Some(z)),
+    }
 }
 
 /// Parse one `mz intensity` peak line.
@@ -284,6 +324,12 @@ pub enum MgfParseError {
 
     #[error("malformed CHARGE at line {line}: {got:?}")]
     BadCharge { line: usize, got: String },
+
+    #[error(
+        "negative CHARGE at line {line}: {got:?}; negative-ion spectra are not supported \
+         (the precursor mass is computed for a protonated ion)"
+    )]
+    NegativeCharge { line: usize, got: String },
 
     #[error("malformed peak line at line {line}: expected `mz intensity`, got {got:?}")]
     BadPeak { line: usize, got: String },
@@ -326,27 +372,47 @@ mod tests {
     }
 
     #[test]
-    fn parse_charge_strips_plus() {
-        assert_eq!(parse_charge("2+").unwrap(), 2);
-        assert_eq!(parse_charge("3+").unwrap(), 3);
+    fn parse_charge_single_value_forms() {
+        assert_eq!(parse_charge("2+"), Ok(Some(2)));
+        assert_eq!(parse_charge("3+"), Ok(Some(3)));
+        assert_eq!(parse_charge("4"), Ok(Some(4)));
+        assert_eq!(parse_charge("+2"), Ok(Some(2)));
+        assert_eq!(parse_charge(" 2+ "), Ok(Some(2)));
+        assert_eq!(parse_charge("0"), Ok(Some(0)));
     }
 
     #[test]
-    fn parse_charge_strips_minus() {
-        assert_eq!(parse_charge("1-").unwrap(), 1);
+    fn parse_charge_several_states_is_unknown() {
+        assert_eq!(parse_charge("2+ and 3+"), Ok(None));
+        assert_eq!(parse_charge("2+,3+"), Ok(None));
+        assert_eq!(parse_charge("3 and 4"), Ok(None));
+        assert_eq!(parse_charge("2+, 3+ and 4+"), Ok(None));
     }
 
     #[test]
-    fn parse_charge_no_sign_ok() {
-        assert_eq!(parse_charge("4").unwrap(), 4);
+    fn parse_charge_repeated_state_is_that_state() {
+        assert_eq!(parse_charge("2+ and 2+"), Ok(Some(2)));
+        assert_eq!(parse_charge("3,3"), Ok(Some(3)));
     }
 
     #[test]
-    fn parse_charge_multi_value_takes_first() {
-        // msconvert-style ambiguous charge — must NOT drop the spectrum.
-        assert_eq!(parse_charge("2+ and 3+").unwrap(), 2);
-        assert_eq!(parse_charge("2+,3+").unwrap(), 2);
-        assert_eq!(parse_charge("3 and 4").unwrap(), 3);
+    fn parse_charge_negative_is_rejected() {
+        assert_eq!(parse_charge("1-"), Err(ChargeError::Negative));
+        assert_eq!(parse_charge("-2"), Err(ChargeError::Negative));
+        assert_eq!(parse_charge("2+ and 2-"), Err(ChargeError::Negative));
+    }
+
+    #[test]
+    fn parse_charge_malformed_is_rejected() {
+        for value in [
+            "", "and", "banana", "2+ or 3+", "+", "2++", "+-2", "2.0", "2+and3+",
+        ] {
+            assert_eq!(
+                parse_charge(value),
+                Err(ChargeError::Malformed),
+                "{value:?}"
+            );
+        }
     }
 
     fn read_all(mgf: &str) -> Vec<Spectrum> {
@@ -361,6 +427,30 @@ mod tests {
         assert_eq!(s[0].precursor_charge, None);
         let s = read_all("BEGIN IONS\nPEPMASS=500.5\nCHARGE=2+\n100 1\nEND IONS\n");
         assert_eq!(s[0].precursor_charge, Some(2));
+    }
+
+    #[test]
+    fn several_charge_states_leave_the_charge_unknown() {
+        let s = read_all("BEGIN IONS\nPEPMASS=500.5\nCHARGE=2+ and 3+\n100 1\nEND IONS\n");
+        assert_eq!(s[0].precursor_charge, None);
+    }
+
+    #[test]
+    fn negative_charge_is_an_error_naming_the_line() {
+        let mgf = "BEGIN IONS\nPEPMASS=500.5\nCHARGE=2-\n100 1\nEND IONS\n";
+        let err = MgfReader::new(std::io::Cursor::new(mgf.as_bytes()))
+            .next()
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            matches!(err, MgfParseError::NegativeCharge { line: 3, .. }),
+            "{err}"
+        );
+        assert!(
+            err.to_string()
+                .contains("negative-ion spectra are not supported"),
+            "{err}"
+        );
     }
 
     #[test]

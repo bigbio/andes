@@ -82,15 +82,15 @@
 //! fitted with the pseudo-transfer's own run observation as an anchor, and
 //! only the consensus RT leaves it out.
 //!
-//! Reported quantity: one elution width per precursor. Its consensus width
-//! `w_c` is the median, over its identified rows in aligned runs with a fit
-//! of positive amplitude, of `w_r / f_r'(f_r^-1(t0_r))`: the fitted width
-//! carried onto the consensus RT scale by the run map's local slope. A row
-//! in aligned run `r` with apex `t0` reports `A * w * sqrt(2 pi)` and
-//! `amplitude_se * w * sqrt(2 pi)` with `w = w_c * f_r'(f_r^-1(t0))`. A row
-//! of a precursor without such a fit, and every row of an unaligned run,
-//! reports the extract's own `quantity` and `quantity_se`. The extract
-//! tables keep the per-run values.
+//! Reported quantity: one relative elution width per precursor. Its relative
+//! width `k` is the median, over its identified target rows with a fit of
+//! positive amplitude, of `width_ratio`: the fitted width over the width
+//! prior `w_prior(t)` of the row's run at the row's expected RT. A row with
+//! fitted width `w` reports `A * w' * sqrt(2 pi)` and
+//! `amplitude_se * w' * sqrt(2 pi)` with `w' = k * w / width_ratio`: the
+//! relative width times the width prior of the row's own run, aligned or
+//! not. A row of a precursor without such a fit reports the extract's own
+//! `quantity` and `quantity_se`. The extract tables keep the per-run values.
 //!
 //! Whole isotope pattern: the fits use the first four isotopes of a
 //! precursor, so the values above are the area of those four. The reported
@@ -1236,39 +1236,38 @@ pub(crate) fn local_slope(maps: &[Option<RunMap>], run: u16, rt: f64) -> Option<
     (slope.is_finite() && slope > 0.0).then_some(slope)
 }
 
-/// Per precursor, the consensus width `w_c` of the module docs, from the
+/// Per precursor, the relative width `k` of the module docs, from the
 /// identified target rows among `rows`.
 #[cfg(test)]
-pub(crate) fn consensus_widths<'a>(
+pub(crate) fn relative_widths<'a>(
     rows: impl IntoIterator<Item = &'a ExtractRow>,
-    maps: &[Option<RunMap>],
 ) -> HashMap<u32, f64> {
-    let mut widths: HashMap<u32, Vec<f64>> = HashMap::new();
+    let mut ratios: HashMap<u32, Vec<f64>> = HashMap::new();
     for r in rows {
-        if let Some(w) = consensus_scale_width(r, maps) {
-            widths.entry(r.precursor).or_default().push(w);
+        if let Some(k) = relative_fit_width(r) {
+            ratios.entry(r.precursor).or_default().push(k);
         }
     }
-    widths.into_iter().map(|(p, w)| (p, median(w))).collect()
+    ratios.into_iter().map(|(p, k)| (p, median(k))).collect()
 }
 
-/// `(quantity, quantity_se)` of evidence `e` in run `run`: with `trace`, its
-/// trace area when that is positive; else at the consensus width `w_c`
-/// carried into the run, or the extract's own values without a consensus
-/// width or in an unaligned run.
+/// `(quantity, quantity_se)` of evidence `e`: with `trace`, its trace area
+/// when that is positive; else at the precursor's relative width
+/// `relative_width` times the width prior of the row's run, `w /
+/// width_ratio`; or the extract's own values without a relative width or
+/// without a finite positive width prior.
 pub(crate) fn reported_quantity(
     e: &Evidence,
-    run: u16,
-    w_c: Option<f64>,
+    relative_width: Option<f64>,
     trace: bool,
-    maps: &[Option<RunMap>],
 ) -> (f64, f64) {
     if trace && e.trace_quantity > 0.0 && e.trace_quantity.is_finite() {
         return (e.trace_quantity, e.trace_quantity_se);
     }
-    match w_c.zip(local_slope(maps, run, e.t0)) {
-        Some((w_c, slope)) => {
-            let area = w_c * slope * (2.0 * std::f64::consts::PI).sqrt();
+    let w_prior = e.w / e.width_ratio;
+    match relative_width.filter(|_| w_prior.is_finite() && w_prior > 0.0) {
+        Some(k) => {
+            let area = k * w_prior * (2.0 * std::f64::consts::PI).sqrt();
             (e.amplitude * area, e.amplitude_se * area)
         }
         None => (e.quantity, e.quantity_se),
@@ -1340,18 +1339,16 @@ pub(crate) fn donor_fit(r: &ExtractRow, maps: &[Option<RunMap>]) -> Option<Donor
     Some((r.run, e.w / slope, e.tailing, iso))
 }
 
-/// The width of an identified target row on the consensus scale, the input
-/// of the consensus width `w_c`; `None` for any other row, or without a
-/// positive amplitude, a finite positive width or the run's map.
-pub(crate) fn consensus_scale_width(r: &ExtractRow, maps: &[Option<RunMap>]) -> Option<f64> {
+/// The `width_ratio` of an identified target row, the input of the relative
+/// width `k`; `None` for any other row, or without a positive amplitude, a
+/// finite positive width or a finite positive ratio.
+pub(crate) fn relative_fit_width(r: &ExtractRow) -> Option<f64> {
     if (r.role, r.kind) != (Role::Identified, Hypothesis::Target) {
         return None;
     }
     let e = r.evidence.as_ref()?;
-    if !(e.amplitude > 0.0 && e.w.is_finite() && e.w > 0.0) {
-        return None;
-    }
-    local_slope(maps, r.run, e.t0).map(|slope| e.w / slope)
+    let fitted = e.amplitude > 0.0 && e.w.is_finite() && e.w > 0.0;
+    (fitted && e.width_ratio.is_finite() && e.width_ratio > 0.0).then_some(e.width_ratio)
 }
 
 #[cfg(test)]
@@ -3075,7 +3072,7 @@ mod finalize_tests {
         let mut cell_seq = 0u64;
         let empty_shapes = DonorShapes::default();
         shards.for_each(|rows| {
-            let w_c = consensus_widths(rows.iter(), maps);
+            let k = relative_widths(rows.iter());
             let want = |t: Table| t == Table::Identified;
             for_each_scored(
                 rows,
@@ -3095,8 +3092,7 @@ mod finalize_tests {
                         return;
                     }
                     let Some(e) = r.evidence.as_ref() else { return };
-                    let w_c = w_c.get(&r.precursor).copied();
-                    let q = reported_quantity(e, r.run, w_c, false, maps).0;
+                    let q = reported_quantity(e, k.get(&r.precursor).copied(), false).0;
                     if q > 0.0 && q.is_finite() {
                         cell_seq += 1;
                         cells.push(
@@ -3142,7 +3138,7 @@ mod finalize_tests {
         let mut writer = MbrParquetWriter::create(mbr_path)?;
         shards.for_each(|rows| {
             let shapes = DonorShapes::from_rows(rows.iter(), maps);
-            let w_c = consensus_widths(rows.iter(), maps);
+            let k = relative_widths(rows.iter());
             let mut identified: HashMap<(u32, u16), &Evidence> = HashMap::new();
             for r in rows {
                 if let (Role::Identified, Hypothesis::Target, Some(e)) =
@@ -3180,7 +3176,7 @@ mod finalize_tests {
             let reported = |r: &ExtractRow| {
                 r.evidence.as_ref().filter(|e| e.amplitude > 0.0).map(|e| {
                     whole_pattern(
-                        reported_quantity(e, r.run, w_c.get(&r.precursor).copied(), false, maps),
+                        reported_quantity(e, k.get(&r.precursor).copied(), false),
                         lib.meta[r.precursor as usize].isotope_share,
                     )
                 })
@@ -3652,33 +3648,24 @@ mod finalize_tests {
         assert!(!mbr.exists());
     }
 
-    /// Run 0 on the consensus scale, run 1 stretched by 1.25 and run 2
-    /// unaligned.
-    fn stretched_maps() -> Vec<Option<RunMap>> {
-        let map = |slope: f64| {
-            RunMap::from_parts(vec![0.0, 3000.0], vec![0.0, 3000.0 * slope], slope, slope).unwrap()
-        };
-        vec![Some(map(1.0)), Some(map(1.25)), None]
-    }
-
-    /// A precursor seen in runs 0 and 1 (and 2, unaligned) with the same
-    /// abundance: in run `r` the apex is `A0 / slope_r` and the true width
-    /// `w0 * slope_r`, and the fitted width is off by `jitter[r]`, as a
-    /// coarse width grid makes it, while the amplitude is right.
+    /// A precursor seen in three runs with the same abundance, eluting
+    /// `K_TRUE` times as wide as its run's usual peak: run `r`'s width prior
+    /// is `5 * scale_r`, the apex `A0 / scale_r`, and the fitted width is off
+    /// by `jitter[r]` while the amplitude is right.
     fn jittered_rows(p: u32, jitter: [f64; 3]) -> Vec<ExtractRow> {
         let (a0, w0) = (1e6, 5.0);
-        let slopes = [1.0, 1.25, 1.0];
+        let scales = [1.0, 1.25, 2.0];
         let mut g = Rng(p as u64 + 1);
         (0..3u16)
             .flat_map(|run| {
-                let slope = slopes[run as usize];
-                let w = w0 * slope * jitter[run as usize];
-                let amplitude = a0 / slope;
-                let mut e = evidence(&mut g, true, 500.0 * slope);
+                let scale = scales[run as usize];
+                let amplitude = a0 / scale;
+                let mut e = evidence(&mut g, true, 500.0 * scale);
                 e.amplitude = amplitude;
                 e.amplitude_se = 0.01 * amplitude;
-                e.w = w;
-                e.quantity = amplitude * w * (2.0 * std::f64::consts::PI).sqrt();
+                e.width_ratio = K_TRUE * jitter[run as usize];
+                e.w = w0 * scale * e.width_ratio;
+                e.quantity = amplitude * e.w * (2.0 * std::f64::consts::PI).sqrt();
                 e.quantity_se = 0.01 * e.quantity;
                 let identified = row(
                     p,
@@ -3693,65 +3680,66 @@ mod finalize_tests {
             .collect()
     }
 
+    /// Width of the precursor of [`jittered_rows`] over its run's width prior.
+    const K_TRUE: f64 = 1.2;
+
     #[test]
-    fn consensus_width_gives_one_quantity_across_runs() {
-        let maps = stretched_maps();
-        let truth = 1e6 * 5.0 * (2.0 * std::f64::consts::PI).sqrt();
+    fn relative_width_gives_one_quantity_across_runs() {
+        let truth = 1e6 * 5.0 * K_TRUE * (2.0 * std::f64::consts::PI).sqrt();
         for jitter in [[0.7, 1.4, 1.0], [1.4, 0.7, 1.4], [1.0, 1.0, 0.7]] {
             let rows = jittered_rows(3, jitter);
-            let w_c = consensus_widths(&rows, &maps);
+            let k = relative_widths(&rows);
             let per_run: Vec<(f64, f64)> = rows
                 .iter()
                 .filter(|r| r.role == Role::Identified)
                 .map(|r| {
                     let e = r.evidence.as_ref().unwrap();
-                    reported_quantity(e, r.run, w_c.get(&3).copied(), false, &maps)
+                    reported_quantity(e, k.get(&3).copied(), false)
                 })
                 .collect();
-            let raw: Vec<f64> = rows
-                .iter()
-                .filter(|r| r.role == Role::Identified)
-                .map(|r| r.evidence.as_ref().unwrap().quantity)
-                .collect();
-            eprintln!("jitter {jitter:?}: raw {raw:?}, consensus {per_run:?}");
-            // Runs 0 and 1 report one quantity: the jitter is gone.
-            let (q0, q1) = (per_run[0].0, per_run[1].0);
-            assert!((q0 / q1 - 1.0).abs() < 1e-12, "{per_run:?}");
-            // w_c is the median of the two aligned runs' widths.
-            let want = truth * 0.5 * (jitter[0] + jitter[1]);
-            assert!((q0 / want - 1.0).abs() < 1e-12, "{q0} vs {want}");
-            for &(q, se) in &per_run[..2] {
+            // The three runs, of different peak widths, report one quantity:
+            // the jitter is gone.
+            for &(q, se) in &per_run {
+                assert!((q / per_run[0].0 - 1.0).abs() < 1e-12, "{per_run:?}");
                 assert!((se / q - 0.01).abs() < 1e-12);
             }
-            // The unaligned run keeps the extract's own values.
-            let e2 = rows[4].evidence.as_ref().unwrap();
-            assert_eq!(per_run[2], (e2.quantity, e2.quantity_se));
+            // The relative width is the median of the three runs' ratios.
+            let mut sorted = jitter;
+            sorted.sort_by(f64::total_cmp);
+            let want = truth * sorted[1];
+            assert!((per_run[0].0 / want - 1.0).abs() < 1e-12, "{per_run:?}");
         }
-        // Raw quantities with jitter 0.7 vs 1.4 differ twofold; the
-        // consensus removes it.
+        // Raw quantities with jitter 0.7 vs 1.4 differ twofold at equal
+        // abundance; the relative width removes it.
         let rows = jittered_rows(3, [0.7, 1.4, 1.0]);
         let raw = |run: usize| rows[2 * run].evidence.as_ref().unwrap().quantity;
         assert!((raw(1) / raw(0) - 2.0).abs() < 1e-9);
     }
 
     #[test]
-    fn consensus_width_skips_unfitted_and_unaligned_rows() {
-        let maps = stretched_maps();
-        let mut rows = jittered_rows(4, [1.0, 1.0, 1.0]);
-        // Only run 0's identified fit has signal; run 2 is unaligned.
+    fn relative_width_skips_unfitted_rows() {
+        let mut rows = jittered_rows(4, [1.0, 0.7, 1.4]);
+        // Only run 0's identified fit counts: run 1's found no signal and
+        // run 2's has no width ratio.
         rows[2].evidence.as_mut().unwrap().amplitude = 0.0;
-        rows[4].evidence.as_mut().unwrap().w = 50.0;
-        let w_c = consensus_widths(&rows, &maps);
-        assert!((w_c[&4] - 5.0).abs() < 1e-12, "{w_c:?}");
-        // A precursor without an identified fit keeps its own quantity.
+        rows[4].evidence.as_mut().unwrap().width_ratio = f64::NAN;
+        let k = relative_widths(&rows);
+        assert!((k[&4] - K_TRUE).abs() < 1e-12, "{k:?}");
+        // A row without a width prior keeps the extract's own quantity.
+        let e = rows[4].evidence.as_ref().unwrap();
+        assert_eq!(
+            reported_quantity(e, Some(k[&4]), false),
+            (e.quantity, e.quantity_se)
+        );
+        // So does a precursor without an identified fit.
         let mut rows = jittered_rows(5, [1.0, 1.0, 1.0]);
         for r in rows.iter_mut().filter(|r| r.role == Role::Identified) {
             r.evidence = None;
         }
-        assert!(consensus_widths(&rows, &maps).is_empty());
+        assert!(relative_widths(&rows).is_empty());
         let e = rows[1].evidence.as_ref().unwrap();
         assert_eq!(
-            reported_quantity(e, 1, None, false, &maps),
+            reported_quantity(e, None, false),
             (e.quantity, e.quantity_se)
         );
     }
@@ -3867,19 +3855,19 @@ mod finalize_tests {
     }
 
     #[test]
-    fn finalize_reports_the_consensus_quantity() {
-        // Precursor 0 is identified in runs 0 and 1 with widths 4 and 8; with
-        // unit-slope maps each row reports its A * 6 * sqrt(2 pi).
-        let mut lib = library();
-        let unit = RunMap::from_parts(vec![0.0, 3000.0], vec![0.0, 3000.0], 1.0, 1.0).unwrap();
-        lib.alignment.maps = vec![Some(unit.clone()), Some(unit)];
+    fn finalize_reports_the_quantity_at_the_relative_width() {
+        // Precursor 0 is identified in run 0 (width prior 5) at 0.8 of the
+        // prior and in run 1 (width prior 10) at 1.2: its relative width is
+        // 1, and each row reports its A * the run's width prior * sqrt(2 pi).
+        let lib = library();
         let mut runs = extract();
         let mut g = Rng(9);
-        for (run, w) in [(0u16, 4.0), (1, 8.0)] {
+        for (run, amplitude, w, ratio) in [(0u16, 1e6, 4.0, 0.8), (1, 5e5, 12.0, 1.2)] {
             let mut e = evidence(&mut g, true, 100.0);
-            e.amplitude = 4e6 / w;
+            e.amplitude = amplitude;
             e.amplitude_se = 1e3;
             e.w = w;
+            e.width_ratio = ratio;
             e.quantity = e.amplitude * w * (2.0 * std::f64::consts::PI).sqrt();
             let rows = &mut runs[run as usize];
             rows.retain(|r| !(r.precursor == 0 && r.role != Role::PseudoTransfer));
@@ -3901,9 +3889,9 @@ mod finalize_tests {
         let a = p0.next().unwrap();
         let b = p0.next().unwrap();
         assert_eq!((a.run, b.run), (0, 1));
-        assert!((a.quantity.unwrap() / (1e6 * 6.0 * sqrt_2pi) - 1.0).abs() < 1e-12);
-        assert!((b.quantity.unwrap() / (5e5 * 6.0 * sqrt_2pi) - 1.0).abs() < 1e-12);
-        assert!((a.quantity_se.unwrap() / (1e3 * 6.0 * sqrt_2pi) - 1.0).abs() < 1e-12);
+        assert!((a.quantity.unwrap() / (1e6 * 5.0 * sqrt_2pi) - 1.0).abs() < 1e-12);
+        assert!((b.quantity.unwrap() / (5e5 * 10.0 * sqrt_2pi) - 1.0).abs() < 1e-12);
+        assert!((a.quantity_se.unwrap() / (1e3 * 5.0 * sqrt_2pi) - 1.0).abs() < 1e-12);
         // The extract rows keep their per-run quantities.
         let id0 = runs[0]
             .iter()

@@ -590,13 +590,13 @@ pub fn write_sites_tsv(path: &std::path::Path, rows: &[SiteRow]) -> std::io::Res
         let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
         writeln!(
             w,
-            "family\taccession\tposition\tresidue\tmodification_mass\tprior_tier\tpsms\tbest_psm\tsite_q\tconfidence\toccupancy\tidentity\tidentity_alternatives\tidentity_spectra"
+            "family\taccession\tposition\tresidue\tmodification_mass\tprior_tier\tpsms\tbest_psm\tsite_q\toccupancy\tidentity\tidentity_alternatives\tidentity_spectra"
         )?;
         let opt = |v: Option<f64>| v.map_or_else(|| "NA".to_string(), |v| format!("{v:.4}"));
         for r in rows {
             writeln!(
                 w,
-                "{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{:.2}",
+                "{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}",
                 tsv_field(&r.family),
                 tsv_field(&r.accession),
                 r.position,
@@ -606,7 +606,6 @@ pub fn write_sites_tsv(path: &std::path::Path, rows: &[SiteRow]) -> std::io::Res
                 r.psms,
                 tsv_field(&r.best_psm),
                 r.site_q,
-                1.0 - r.site_q,
                 opt(r.occupancy),
                 opt(r.identity),
                 tsv_field(&r.alternatives),
@@ -1001,7 +1000,7 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2);
         for l in &lines {
-            assert_eq!(l.split('\t').count(), 14, "{l}");
+            assert_eq!(l.split('\t').count(), 13, "{l}");
         }
         assert!(lines[1].starts_with("fam ily\tsp|P1|A B\t5\tS\t"));
     }

@@ -677,8 +677,8 @@ pub(crate) fn detect_instrument_type_for_path(
 }
 
 /// Dominant activation and analyzer of one input, each read from the metadata
-/// on its own: an mzML without an activation term still names its analyzer.
-/// MGF and unreadable inputs give `(None, None)`.
+/// on its own: an mzML or a `.raw` whose scans name no activation still names
+/// its analyzer. MGF and unreadable inputs give `(None, None)`.
 pub(crate) fn detect_acquisition_metadata(
     spectrum_path: &Path,
 ) -> (Option<ActivationMethod>, Option<InstrumentType>) {
@@ -691,10 +691,7 @@ pub(crate) fn detect_acquisition_metadata(
     } else if is_raw {
         #[cfg(feature = "thermo")]
         {
-            match input::thermo::detect_activation_instrument(spectrum_path, 64) {
-                Some((activation, analyzer)) => (Some(activation), analyzer),
-                None => (None, None),
-            }
+            input::thermo::detect_activation_instrument(spectrum_path, 64)
         }
         #[cfg(not(feature = "thermo"))]
         {

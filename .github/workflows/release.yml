@@ -101,9 +101,9 @@ jobs:
           # timsrust's zstd C dependency complicates the cross build.
           if [ "${{ matrix.thermo }}" = "true" ]; then
             export RUSTUP_TOOLCHAIN=stable
-            cargo build --release --target ${{ matrix.target }} -p andes --features "thermo timstof"
+            cargo build --release --locked --target ${{ matrix.target }} -p andes --features "thermo timstof"
           else
-            cargo build --release --target ${{ matrix.target }} --bin andes
+            cargo build --release --locked --target ${{ matrix.target }} --bin andes
           fi
 
       # Download the .NET 8 runtime matching the TARGET architecture (the

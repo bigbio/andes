@@ -1053,8 +1053,8 @@ pub(crate) struct InferenceArgs {
 
     /// The protein database the PSMs were searched against, with the same
     /// options as the search (`--annotations`, `--uniprot-*`, `--knockoffs`,
-    /// `--enzyme`, decoy affixes), so protein families, knockoff entries and
-    /// decoy pairs are the search's.
+    /// `--enzyme`, decoy affixes, `--mods`), so protein families, knockoff
+    /// entries, knockoff sites and decoy pairs are the search's.
     #[arg(long, value_name = "FILE")]
     pub(crate) database: PathBuf,
 
@@ -1097,6 +1097,12 @@ pub(crate) struct ProteinArgs {
     pub(crate) decoy_prefix: String,
     #[arg(long = "decoy-suffix")]
     pub(crate) decoy_suffix: Option<String>,
+
+    /// The search's `--mods` file. A PSM that places one of its
+    /// `sites=annotated` modifications on a knockoff site is counted for no
+    /// group, as in the search. Give it whenever the search had one.
+    #[arg(long = "mods", value_name = "MODFILE")]
+    pub(crate) mods: Option<PathBuf>,
 
     /// PSM q-value cutoff for the PSMs and peptides counted per group.
     #[arg(long = "fdr", default_value = "0.01", value_parser = parse_unit_fraction)]

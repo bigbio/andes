@@ -8,7 +8,7 @@
 //! cut at precursor boundaries, and the runs are processed in parallel. Each
 //! pass reads every table once:
 //!
-//! 1. donor summaries: per precursor, the consensus width `w_c` and the
+//! 1. donor summaries: per precursor, the relative width `k` and the
 //!    sorted values around the middle of its identified fits (width on the
 //!    consensus scale, tailing, isotope heights), which give the median of
 //!    every fit and of every fit but one run's: the shape features leave the
@@ -72,8 +72,8 @@ use quant::shared;
 use rayon::prelude::*;
 
 use crate::quant_mbr::{
-    consensus_scale_width, cosine, donor_fit, family, identified_features, iso_profile,
-    local_slope, median, reported_quantity, transfer_features, whole_pattern, DonorFit, ExtractRow,
+    cosine, donor_fit, family, identified_features, iso_profile, local_slope, median,
+    relative_fit_width, reported_quantity, transfer_features, whole_pattern, DonorFit, ExtractRow,
     Role, ShapeReference, NO_SHAPE, TRANSFER_DONOR_Q,
 };
 use crate::transfer_fdr::{
@@ -209,7 +209,7 @@ pub(crate) trait ExtractSource: Sync {
 
     /// [`ExtractSource::for_each_batch`] over the identified targets only,
     /// of which only the keys and the peak shape (see [`donor_fit`] and
-    /// [`consensus_scale_width`]) are read.
+    /// [`relative_fit_width`]) are read.
     fn for_each_fit_batch(
         &self,
         chunk: usize,
@@ -482,8 +482,9 @@ struct ShapeSummary {
 /// What finalize needs of a precursor's identified rows in every run.
 #[derive(Debug, Clone, Copy, Default)]
 struct PrecursorSummary {
-    /// The consensus width `w_c`.
-    w_c: Option<f64>,
+    /// The relative width `k` (see [`crate::quant_mbr`], "Reported
+    /// quantity").
+    relative_width: Option<f64>,
     shape: Option<ShapeSummary>,
     /// The median amplitude signal-to-noise of the identified target fits,
     /// read only with [`FinalizeParams::trace_fraction`].
@@ -496,7 +497,7 @@ struct PrecursorSummary {
 type Summaries = HashMap<u32, PrecursorSummary>;
 
 /// One identified row's part of its precursor's summary: precursor, width
-/// on the consensus scale, donor fit and amplitude signal-to-noise.
+/// ratio, donor fit and amplitude signal-to-noise.
 type SummaryItem = (u32, Option<f64>, Option<DonorFit>, Option<f64>);
 
 /// The summaries of the precursors of `items`, in any order.
@@ -504,7 +505,7 @@ fn summarise(mut items: Vec<SummaryItem>) -> Summaries {
     items.sort_unstable_by_key(|it| it.0);
     let mut out = Summaries::new();
     for g in items.chunk_by(|a, b| a.0 == b.0) {
-        let widths: Vec<f64> = g.iter().filter_map(|it| it.1).collect();
+        let ratios: Vec<f64> = g.iter().filter_map(|it| it.1).collect();
         let snrs: Vec<f64> = g.iter().filter_map(|it| it.3).collect();
         let fits: Vec<&DonorFit> = g.iter().filter_map(|it| it.2.as_ref()).collect();
         let window = |value: &dyn Fn(&DonorFit) -> f64| {
@@ -520,7 +521,7 @@ fn summarise(mut items: Vec<SummaryItem>) -> Summaries {
         out.insert(
             g[0].0,
             PrecursorSummary {
-                w_c: (!widths.is_empty()).then(|| median(widths)),
+                relative_width: (!ratios.is_empty()).then(|| median(ratios)),
                 shape,
                 snr: (!snrs.is_empty()).then(|| median(snrs)),
                 trace: false,
@@ -1814,11 +1815,11 @@ pub(crate) fn finalize_stream(
             |_| Vec::new(),
             |local, _, _, rows| {
                 for r in rows.iter().filter(|r| r.precursor as usize % groups == g) {
-                    let w = consensus_scale_width(r, maps);
+                    let k = relative_fit_width(r);
                     let f = donor_fit(r, maps);
                     let snr = (trace_fraction > 0.0).then(|| identified_snr(r)).flatten();
-                    if w.is_some() || f.is_some() || snr.is_some() {
-                        local.push((r.precursor, w, f, snr));
+                    if k.is_some() || f.is_some() || snr.is_some() {
+                        local.push((r.precursor, k, f, snr));
                     }
                 }
                 Ok(())
@@ -2165,8 +2166,8 @@ pub(crate) fn finalize_stream(
                     continue;
                 };
                 let s = summaries.get(&r.precursor);
-                let (w_c, trace) = (s.and_then(|s| s.w_c), s.is_some_and(|s| s.trace));
-                let q = reported_quantity(e, r.run, w_c, trace, maps).0;
+                let (k, trace) = (s.and_then(|s| s.relative_width), s.is_some_and(|s| s.trace));
+                let q = reported_quantity(e, k, trace).0;
                 if q > 0.0 && q.is_finite() {
                     local.push((
                         (chunk as u32, first + i as u64),
@@ -2278,10 +2279,10 @@ pub(crate) fn finalize_stream(
             // feature parquet.
             let reported = |r: &ExtractRow| {
                 let s = summaries.get(&r.precursor);
-                let (w_c, trace) = (s.and_then(|s| s.w_c), s.is_some_and(|s| s.trace));
+                let (k, trace) = (s.and_then(|s| s.relative_width), s.is_some_and(|s| s.trace));
                 r.evidence.as_ref().filter(|e| e.amplitude > 0.0).map(|e| {
                     whole_pattern(
-                        reported_quantity(e, r.run, w_c, trace, maps),
+                        reported_quantity(e, k, trace),
                         lib.meta[r.precursor as usize].isotope_share,
                     )
                 })

@@ -3147,7 +3147,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Proteoform table: per protein family, the canonical entry and each
-    // isoform, variant and chain entry with accepted evidence, its confidence
+    // isoform, variant and chain entry with accepted evidence, its q-value
     // and quantity. Written with rescoring when the database holds such entries.
     if let (Some(map), Some(cutoffs), true) = (
         rescore_map.as_ref(),

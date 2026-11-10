@@ -1,5 +1,5 @@
 //! The proteoform table: per protein family, the canonical entry and each
-//! isoform, variant and chain entry with accepted evidence, its confidence and
+//! isoform, variant and chain entry with accepted evidence, its q-value and
 //! its quantity.
 //!
 //! A peptide is *specific* to a member when no other entry explains it, in
@@ -7,11 +7,12 @@
 //! another family's canonical protein also contains (a paralog, or an equal
 //! sequence once I and L are taken as equal) is therefore shared: it shows the
 //! other protein as well as it shows the variant. An isoform, variant or chain
-//! entry is listed only with specific evidence. A member's confidence is
-//! `1 - q` of its best specific PSM (the class-aware q-value of
-//! [`crate::class_fdr`]), or of its best shared PSM when it has no specific one
-//! (then `evidence` is `shared`). Its quantity is the summed abundance of its
-//! specific peptides in each run or channel.
+//! entry is listed only with specific evidence. A member's q-value is that of
+//! its best specific PSM (the class-aware q-value of [`crate::class_fdr`]), or
+//! of its best shared PSM when it has no specific one (then `evidence` is
+//! `shared`): the error rate of the PSM set down to that PSM, not the
+//! probability that the member is absent. Its quantity is the summed abundance
+//! of its specific peptides in each run or channel.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -40,7 +41,7 @@ pub struct ProteoformRow {
     pub specific_peptides: usize,
     pub shared_peptides: usize,
     pub psms: usize,
-    /// `specific` or `shared`: which PSMs the confidence comes from.
+    /// `specific` or `shared`: which PSMs the q-value comes from.
     pub evidence: &'static str,
     pub best_psm: String,
     pub q_value: f64,
@@ -56,12 +57,6 @@ pub struct ProteoformRow {
     /// Summed abundance of the member's specific peptides, per quant column;
     /// NaN (written `NA`) where none was measured.
     pub quantity: Vec<f64>,
-}
-
-impl ProteoformRow {
-    pub fn confidence(&self) -> f64 {
-        1.0 - self.q_value
-    }
 }
 
 /// The residues of a Percolator peptide string (`K.PEPT+79.97IDEK.A`).
@@ -267,7 +262,7 @@ pub fn write_proteoform_tsv(
         let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
         write!(
             w,
-            "family\tmember\tkind\tfeature\tconfidence\tq_value\tevidence\tspecific_peptides\tshared_peptides\tpsms\tbest_psm\talternative_explanation\tsource\tprior_tier"
+            "family\tmember\tkind\tfeature\tq_value\tevidence\tspecific_peptides\tshared_peptides\tpsms\tbest_psm\talternative_explanation\tsource\tprior_tier"
         )?;
         for c in quant_columns {
             write!(w, "\tquantity_{c}")?;
@@ -276,12 +271,11 @@ pub fn write_proteoform_tsv(
         for r in rows {
             write!(
                 w,
-                "{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 r.family,
                 r.member,
                 r.kind.name(),
                 r.feature,
-                r.confidence(),
                 r.q_value,
                 r.evidence,
                 r.specific_peptides,
@@ -422,7 +416,7 @@ mod tests {
             (2, 1, 2)
         );
         assert_eq!((can.evidence, can.best_psm.as_str()), ("specific", "s2"));
-        assert!((can.confidence() - 0.998).abs() < 1e-12);
+        assert!((can.q_value - 0.002).abs() < 1e-12);
         let iso = m["sp|P1-2|A"];
         assert_eq!(
             (iso.specific_peptides, iso.shared_peptides, iso.psms),
@@ -516,5 +510,39 @@ mod tests {
         let iso = &m["sp|P1-2|A"].quantity;
         assert!(iso[0].is_nan(), "not measured in column 0: missing, not 0");
         assert_eq!(iso[1], 3.0);
+    }
+
+    #[test]
+    fn every_table_row_has_the_header_columns() {
+        let quant = QuantSummary {
+            columns: vec!["run1".into(), "run2".into()],
+            values: vec![("EEEK".into(), vec!["sp|P1|A".into()], 0, 10.0)],
+        };
+        let rows = proteoform_table(&targets(), &index(), &Cutoffs::uniform(0.01), Some(&quant));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proteoforms.tsv");
+        write_proteoform_tsv(&path, &rows, &quant.columns).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut lines = text.lines();
+        let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+        assert_eq!(
+            &header[..6],
+            ["family", "member", "kind", "feature", "q_value", "evidence"]
+        );
+        assert_eq!(
+            &header[header.len() - 2..],
+            ["quantity_run1", "quantity_run2"]
+        );
+        let q_value = header.iter().position(|c| *c == "q_value").unwrap();
+        let mut n = 0;
+        for line in lines {
+            let fields: Vec<&str> = line.split('\t').collect();
+            assert_eq!(fields.len(), header.len(), "{line}");
+            let q: f64 = fields[q_value].parse().unwrap();
+            assert!((0.0..=1.0).contains(&q), "{line}");
+            n += 1;
+        }
+        assert_eq!(n, rows.len());
+        assert!(n > 0);
     }
 }

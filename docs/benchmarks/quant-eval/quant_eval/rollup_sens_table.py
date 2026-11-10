@@ -51,7 +51,7 @@ def table(ds, runs):
              "|---|---|---|---|" + "---|" * len(sps) + "---|---|---|"]
     for ru in first["roll_ups"]:
         if "arms" not in first["roll_ups"][ru]:
-            lines.append(f"| {ru} | - | failed: {first['roll_ups'][ru].get('error', '')[:60]} |" + " |" * (len(sps) + 5))
+            lines.append(f"| {ru} | - | failed: {first['roll_ups'][ru].get('error', '')[:60]} |" + " |" * (len(sps) + 4))
             continue
         for arm in first["roll_ups"][ru]["arms"]:
             per = [runs[s]["roll_ups"][ru]["arms"][arm] for s in seeds if ru in runs[s]["roll_ups"] and arm in runs[s]["roll_ups"][ru].get("arms", {})]

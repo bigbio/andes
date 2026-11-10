@@ -76,7 +76,13 @@ def protein_table(t, method, runs, threads=4):
     """mokume protein quantification of the peptide table -> log2 protein x run (NaN where mokume reports none)."""
     r = quantifier(method, threads).quantify(t, protein_column="ProteinName", peptide_column="PeptideCanonical",
                                              intensity_column="NormIntensity", sample_column="SampleID")
-    col = "Intensity" if "Intensity" in r.columns else r.select_dtypes("number").columns[-1]
+    numeric = list(r.select_dtypes("number").columns)
+    if "Intensity" in r.columns:
+        col = "Intensity"
+    elif len(numeric) == 1:
+        col = numeric[0]
+    else:
+        raise ValueError(f"mokume {method}: no 'Intensity' column and {len(numeric)} numeric columns ({numeric})")
     w = r.pivot_table(index="ProteinName", columns="SampleID", values=col, aggfunc="first")
     w = w.reindex(columns=runs).astype(float)
     w = w.where(w > 0)

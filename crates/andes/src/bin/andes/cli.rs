@@ -1336,7 +1336,7 @@ pub(crate) struct QuantFinalizeArgs {
     /// Advanced: share, in [0, 1], of the precursors with an identified fit
     /// that report the template-free trace area (`trace_quantity` of the
     /// extract: the baseline-subtracted isotope traces integrated around the
-    /// apex) instead of the Gaussian amplitude times the consensus width, in
+    /// apex) instead of the Gaussian amplitude times the template width, in
     /// every run: the brightest by the median amplitude signal-to-noise of
     /// their identified fits. 0 reports the template area everywhere; 1
     /// switches every such precursor. `quant_q` and the transfer q-values

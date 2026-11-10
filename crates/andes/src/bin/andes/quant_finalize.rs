@@ -73,8 +73,8 @@ use rayon::prelude::*;
 
 use crate::quant_mbr::{
     consensus_scale_width, cosine, donor_fit, family, identified_features, iso_profile,
-    local_slope, median, reported_quantity, transfer_features, DonorFit, ExtractRow, Role,
-    ShapeReference, NO_SHAPE, TRANSFER_DONOR_Q,
+    local_slope, median, reported_quantity, transfer_features, whole_pattern, DonorFit, ExtractRow,
+    Role, ShapeReference, NO_SHAPE, TRANSFER_DONOR_Q,
 };
 use crate::transfer_fdr::{
     member_seed, pack_family, row_unit, sample_hash, stratum_of, train_bagged_folds, train_folds,
@@ -2279,10 +2279,12 @@ pub(crate) fn finalize_stream(
             let reported = |r: &ExtractRow| {
                 let s = summaries.get(&r.precursor);
                 let (w_c, trace) = (s.and_then(|s| s.w_c), s.is_some_and(|s| s.trace));
-                r.evidence
-                    .as_ref()
-                    .filter(|e| e.amplitude > 0.0)
-                    .map(|e| reported_quantity(e, r.run, w_c, trace, maps))
+                r.evidence.as_ref().filter(|e| e.amplitude > 0.0).map(|e| {
+                    whole_pattern(
+                        reported_quantity(e, r.run, w_c, trace, maps),
+                        lib.meta[r.precursor as usize].isotope_share,
+                    )
+                })
             };
             // Probability that a transfer's measurement is wrong (1 without
             // features, a fold model or a calibration).
@@ -2862,6 +2864,7 @@ mod tests {
                 mz: 500.0 + i as f64,
                 charge: 2,
                 envelope: [0.5, 0.3, 0.15, 0.05],
+                isotope_share: 1.0,
             })
             .collect();
         let psms = |q: f64, q_gate: f64| -> Vec<PsmIn> {

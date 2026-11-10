@@ -1245,11 +1245,13 @@ fn lfq_target(h: &Hit<'_>, anchor_rt: f64, n_iso: usize) -> LfqTarget {
             .iter()
             .map(|aa| (aa.residue, aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta))),
     );
+    let (envelope, isotope_share) = formula.envelope_and_share(n_iso);
     LfqTarget {
         mono_mz: h.cand.peptide.mass() / z as f64 + PROTON,
         charge: z,
         anchor_rt,
-        envelope: formula.envelope(n_iso),
+        envelope,
+        isotope_share,
     }
 }
 
@@ -1296,21 +1298,23 @@ fn competition_pairs(quantified: &[Quantified], params: &LfqParams, max_apex: f3
         .collect()
 }
 
-/// Theoretical isotope fractions of a candidate, normalised to sum 1.
-fn envelope_of(cand: &Candidate, n_iso: usize) -> Vec<f32> {
+/// Theoretical isotope fractions of a candidate's first `n_iso` isotopes,
+/// normalised to sum 1, and the share of the whole isotope pattern they hold.
+fn envelope_of(cand: &Candidate, n_iso: usize) -> (Vec<f32>, f32) {
     let formula = Formula::peptide(
         cand.peptide
             .residues
             .iter()
             .map(|aa| (aa.residue, aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta))),
     );
-    let env = formula.envelope(n_iso);
+    let (env, share) = formula.envelope_and_share(n_iso);
     let total: f64 = env.iter().sum();
-    if total > 0.0 {
+    let env = if total > 0.0 {
         env.iter().map(|v| (v / total) as f32).collect()
     } else {
         env.iter().map(|v| *v as f32).collect()
-    }
+    };
+    (env, share as f32)
 }
 
 /// Isotope peaks in the envelope of the per-run PSM table.
@@ -1356,6 +1360,7 @@ fn write_run_artifacts(
             let z = hit.psm.charge_used.max(1);
             let peptidoform = peptidoform_of(hit.cand);
             let context = run.contexts.get(native_id(run, &spec.title));
+            let (envelope, isotope_share) = envelope_of(hit.cand, TABLE_ENVELOPE_ISOTOPES);
             rows.push(RunPsmRow {
                 spec_id: hit.spec_id.clone(),
                 rt_s,
@@ -1366,12 +1371,13 @@ fn write_run_artifacts(
                 is_decoy: hit.cand.is_decoy,
                 search_score: hit.psm.features.strong_score,
                 faims_cv: context.and_then(|c| c.faims_cv),
-                envelope: envelope_of(hit.cand, TABLE_ENVELOPE_ISOTOPES),
+                envelope,
                 proteins: proteins_of(&hit.psm, candidates, index)
                     .into_iter()
                     .map(|(a, ..)| a)
                     .collect::<Vec<_>>()
                     .join(";"),
+                isotope_share,
                 ion_mobility: context.and_then(|c| c.ion_mobility),
             });
         }

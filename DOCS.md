@@ -637,8 +637,12 @@ andes inference \
 - The scores must be on one scale: give the results of one Percolator run over all the runs (one
   file, or one file per run from that run). Separate Percolator runs are not comparable.
 - Give the search's database options (`--annotations`, `--uniprot-*`, `--knockoffs`,
-  `--enzyme`, `--decoy-prefix`/`--decoy-suffix`), so families, knockoff entries and decoy pairs
-  are the search's. Knockoff entries are evidence for no protein.
+  `--enzyme`, `--decoy-prefix`/`--decoy-suffix`), so families, knockoff entries, knockoff sites
+  and decoy pairs are the search's. Knockoff entries are evidence for no protein.
+- Give the search's `--mods` file when it had one. A PSM that places one of its `sites=annotated`
+  modifications on a knockoff site is then counted for no group, as in the search
+  ([site claims](#site-claims-knockoff-sites-experimental)). Without the file those PSMs are
+  counted.
 - The class and knockoff q-values are applied as in a search; `--fdr` and `--proteoform-fdr` set
   the PSM cutoffs for the counts.
 - `--protein-fdr` (default 0.01) is the protein q-value cut: `pg.parquet` keeps the target groups
@@ -1593,8 +1597,8 @@ andes quant finalize --quant-dir q/ -o experiment [--mbr-fdr 0.01] [--quant-feat
 ```
 
 With `--output-parquet`, finalize writes the QPX views of the experiment and needs the protein
-database and the Percolator results of every run (`--database`, `--psms`, `--decoy-psms` and
-the database options, as [`andes inference`](#several-runs-andes-inference)). It infers the
+database and the Percolator results of every run (`--database`, `--psms`, `--decoy-psms`, the
+database options and `--mods`, as [`andes inference`](#several-runs-andes-inference)). It infers the
 protein groups once over every run's PSMs, then:
 
 - `quantms.pg.parquet` holds the groups at or below `--protein-fdr` (default 0.01), with the

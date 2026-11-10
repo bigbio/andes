@@ -46,13 +46,14 @@ family, sign-aware, MBR on)
 | ProteoBench Astral | median \|ε\| | 0.186 | 0.160 | 0.212 | 🔴 1.16x MaxQuant at 55% of andes' depth (minor) / 🟢 12% lower |
 | ProteoBench Astral | precursors in ≥ 3 runs | 36,675 | 20,283 | 39,057 | 🟢 +81% / 🟡 6% fewer |
 | ProteoBench Astral | CV | 0.112 | 0.092 | 0.127 | 🔴 1.2x MaxQuant at 55% of andes' depth (minor) / 🟢 12% lower |
-| Truth designs, 8 sets | precursors quantified | 10.7k–93.6k | | | 🟢 +19% to +51% on 7 sets, 🟡 on 1 |
+| Truth designs, 8 sets | precursors quantified, each tool at its own search settings | 10.7k–93.6k | | | 🟢 +19% to +51% on 7 sets, 🟡 on 1 |
+| PXD009740 / PXD009815 / QE / Astral | precursors quantified, andes at matched search settings (no `--chimeric`, no `--refine`) | 27,226 / 29,600 / 81,987 / 51,798 | 29,293 / 27,459 / 51,609 / 24,745 | 25,888 / 28,286 / 71,377 / 46,347 | 🟡 −7% / 🟡 +5% / 🟢 +15% / 🟢 +12% over the best other tool |
 | PXD009740 / PXD009815 / QE / Astral | DE true positives | 1,300 / 844 / 1,047 / 685 | 1,304 / 844 / 857 / 650 | 1,237 / 849 / 946 / 689 | 🟡 / 🟡 / 🟢 +22% / 🟡 |
 | PXD009740 / PXD009815 / QE / Astral | DE false calls, no fold-change cut | 305 / 153 / 110 / 296 | 129 / 92 / 37 / 210 | 302 / 301 / 43 / 389 | 🔴 1.4–3.0x MaxQuant (moderate); mostly real small shifts, see note |
 | PXD009740 / PXD009815 / QE | DE false calls at \|log2 FC\| ≥ 0.5 (seed 42) | 167 / 39 / 11 | 74 / 36 / 18 | 259 / 102 / 20 | 🔴 2.3x / 🟡 / 🟢 |
 | PXD009740 / PXD009815 / QE / Astral | DE true positives / false calls, MaxQuant matches filtered at q ≤ 0.01 | 1,156 / 763 / 983 / 568; 272 / 151 / 105 / 297 | 1,077 / 725 / 851 / 518; 131 / 62 / 42 / 154 | | 🟢 +5% to +15% true positives; 🔴 1.9–2.5x false calls (moderate) |
 | PXD009740 / PXD009815 / QE / Astral | precision of unchanged proteins (within-condition spread, tool ÷ andes) | 1 | 1.15 / 1.55 / 1.26 / — | 1.40 / 1.30 / 1.25 / — | 🟢 tighter than both |
-| UPS1 lowest 3 levels, PXD009740 / PXD009815 | precursors within 2x of truth | 502 / 24 | 417 / 23 | 458 / 50 | 🟢 / 🔴 2x fewer than FragPipe (minor) |
+| UPS1 lowest 3 levels, PXD009740 / PXD009815 | precursors within 2x of truth | 502 / 24 | 417 / 23 | 458 / 50 | 🟢 as reported, 🔴 at FragPipe's row count (437 against 458) / 🔴 2x fewer than FragPipe (minor) |
 | Truth designs, all sets | bright identified cells off by > 2x | 1.8–7.2% | 0.3–1.6% | 0.3–3.8% | 🔴 3–17x MaxQuant per set (moderate) |
 | Truth designs, 6 sets | protein CV | 4.4–10.1% | 7.0–11.6% | 4.9–13.5% | 🟢 on 3 sets, 🔴 on 2 (minor) |
 | Known-absent yeast, PXD014415 | false-transfer rate | 0.20% (0.08% at `quant_q ≤ 0.01`) | | 0.09% | 🔴 2x at default (minor) |
@@ -69,8 +70,9 @@ ProteoBench rows use the MaxQuant and FragPipe leaderboard submissions with the 
 (MaxQuant 1.5.3.30 on QE, 2.6.7.0 on Astral; FragPipe 23.0); every other submission is in section 2.2.
 
 Note on DE false calls: andes' protein values are tighter than the other tools', so small real
-shifts of the "unchanged" species reach significance. On PXD009740, 296 of 320 false calls are
-against its highest UPS1 level; without that level andes has 955 true positives and 24 false calls
+shifts of the "unchanged" species reach significance. On PXD009740, 296 of 320 false calls (seed
+42 on current main; 305 in the table, mean over seeds at `09e1c00d`) are against its highest UPS1
+level; without that level andes has 955 true positives and 24 false calls
 against MaxQuant's 953 and 31. Analysis in section 2.3, *Differential expression*.
 
 Settings, error control and cost of every row: section 2.
@@ -308,8 +310,9 @@ identified cells + transferred cells.
 | PXD014415 | 76,099 / 5,470 / 1,494,110 + 801,869 | — | 61,771 / 5,030 / 1,175,139 + 550,247 | 🟢 +23% |
 | blank run | 17,625 / 1,728 / 29,755 + 1,641 | 11,010 / 1,229 / 17,749 + 1,305 | 14,153 / 1,403 / 24,638 + 4,015 | 🟢 +25% |
 
-Result is the precursor gain over the best other tool; settings are not matched (first bullet
-above). With MBR off, precursor counts change by less than 0.2% for every tool and the transferred
+Result is the precursor gain over the best other tool, each tool at its own search settings (first
+bullet above). With andes at matched settings (no `--chimeric`, no `--refine`), measured on four
+sets, the gain is −7% on PXD009740, +5% on PXD009815, +15% on QE and +12% on Astral. With MBR off, precursor counts change by less than 0.2% for every tool and the transferred
 cells are 0.
 
 #### Accuracy and precision
@@ -391,12 +394,17 @@ PXD009740 reads 1,287 / 320 here and 1,300 / 305 above):
 
 #### UPS1 detection at the lowest three levels
 
-Precursors within 2x of their own high-level reference, summed over the three lowest levels
-(PXD009740 170, 382, 859 amol; PXD009815 10, 50, 100 amol; PXD001819 50, 125, 250 amol), MBR on.
-"At FragPipe's row count" is the expected number within 2x if the tool reported only as many rows as
-FragPipe, drawn at random.
+The three lowest levels of each set (PXD009740 170, 382, 859 amol; PXD009815 10, 50, 100 amol;
+PXD001819 50, 125, 250 amol), MBR on. A row is one UPS1 precursor in one run. The table has two
+units:
 
-| set | tool | within 2x | rows | rows within 2x (%) | median \|log2 err\| | at FragPipe's row count | result |
+- precursors: at each level, the distinct precursors with at least one row within 2x of their own
+  high-level reference, summed over the three levels. "At FragPipe's row count" is the expected
+  number of such precursors if the tool reported only as many rows as FragPipe, drawn at random.
+- rows: the rows at the three levels, the share of them within 2x and their median error. The
+  share is over rows, so it is not the first column divided by the second.
+
+| set | tool | precursors within 2x | rows | rows within 2x (% of rows) | median \|log2 err\| of rows | precursors within 2x at FragPipe's row count | result |
 |---|---|---:|---:|---:|---:|---:|---|
 | PXD009740 | andes | 502 | 1,600 | 60.3 | 0.84 | 436.7 | 🟢 vs MaxQuant; 🔴 vs FragPipe at equal rows (minor) |
 | | MaxQuant | 417 | 1,642 | 38.9 | 1.20 | 340.7 | |

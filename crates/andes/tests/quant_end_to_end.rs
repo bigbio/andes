@@ -525,6 +525,17 @@ fn lfq_areas_track_the_designed_intensities() {
             a > mono_area,
             "{seq}: summed area {a} must exceed the mono area {mono_area}"
         );
+        // The area is the whole pattern: the four traced isotopes over the
+        // share of it they hold, 0.979 to 0.996 for these 0.9-1.6 kDa
+        // peptides.
+        let traced: f64 = r[iso_areas]
+            .split(';')
+            .map(|v| v.parse::<f64>().unwrap())
+            .sum();
+        assert!(
+            a > traced * 1.003 && a < traced * 1.025,
+            "{seq}: area {a} vs traced isotopes {traced}"
+        );
     }
     // The table records its run and cuts; every feature on this fixture
     // passes them.
@@ -601,9 +612,19 @@ fn quant_dir_writes_ms1_and_psm_tables() {
     for r in &rows {
         assert!(pin_ids.contains(&r.spec_id), "{} not in PIN", r.spec_id);
         assert!((r.envelope.iter().sum::<f32>() - 1.0).abs() < 1e-3);
+        assert!(
+            r.isotope_share > 0.0 && r.isotope_share < 1.0,
+            "{}: isotope share {}",
+            r.precursor_key,
+            r.isotope_share
+        );
         assert_eq!(r.precursor_key, format!("{}/{}", r.peptidoform, r.charge));
         assert!(r.rt_s > 0.0);
     }
+    // HLVDEPQNLIK, C58 H96 N16 O18.
+    let p4 = rows.iter().find(|r| r.peptidoform == "HLVDEPQNLIK");
+    let share = p4.expect("peptide 4").isotope_share;
+    assert!((share - 0.988_732).abs() < 1e-5, "{share}");
 }
 
 /// The real-data slice has rank-1 decoys: `--quant-dir` alone (no `--lfq`)

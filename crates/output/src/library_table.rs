@@ -34,7 +34,7 @@ use quant::library::{DonorPsm, Library, LibraryEntry, PrecursorMeta};
 use quant::ms2::{Ion, LibraryFragment, LibrarySpectrum};
 
 /// Major version of both layouts. A reader rejects any other major.
-pub const LIBRARY_SCHEMA_MAJOR: u32 = 4;
+pub const LIBRARY_SCHEMA_MAJOR: u32 = 5;
 /// File name of the precursor table inside the quant directory.
 pub const LIBRARY_FILE: &str = "library.parquet";
 /// File name of the alignment table inside the quant directory.
@@ -50,7 +50,7 @@ const DONOR_PEP_KEY: &str = "andes.library.donor_pep";
 /// Key of [`library_fingerprint`] in `library.parquet`; extract tables copy it.
 pub const FINGERPRINT_KEY: &str = "andes.library.fingerprint";
 const ALIGNMENT_FINGERPRINT_KEY: &str = "andes.alignment.fingerprint";
-const SCHEMA_VERSION: &str = "4.0";
+const SCHEMA_VERSION: &str = "5.0";
 /// Rows per Parquet row group / record batch of the precursor table.
 const BATCH_ROWS: usize = 65_536;
 const ENVELOPE_LEN: usize = 4;
@@ -106,6 +106,7 @@ fn library_schema(with_mobility: bool) -> Schema {
         Field::new("frag_ion", list(DataType::Utf8), false),
         Field::new("donor_scan_run", list(DataType::UInt16), false),
         Field::new("donor_scan_rt", list(DataType::Float64), false),
+        Field::new("isotope_share", DataType::Float32, false),
     ];
     if with_mobility {
         fields.push(Field::new("ion_mobility", DataType::Float32, true));
@@ -217,6 +218,7 @@ pub fn library_fingerprint(lib: &StoredLibrary) -> String {
         h.f64(m.mz);
         h.u64(m.charge as u64);
         m.envelope.iter().for_each(|&v| h.u64(v.to_bits() as u64));
+        h.u64(m.isotope_share.to_bits() as u64);
         h.str(p);
     }
     h.u64(lib.spectra.len() as u64);
@@ -295,8 +297,10 @@ fn library_batch(
     let mut scan_run = ListBuilder::new(UInt16Builder::new());
     let mut scan_rt = ListBuilder::new(Float64Builder::new());
     let mut k0 = Float32Builder::new();
+    let mut share = Float32Builder::new();
     for id in ids {
         let m = &lib.library.meta[id];
+        share.append_value(m.isotope_share);
         key.append_value(&m.key);
         mz.append_value(m.mz);
         charge.append_value(m.charge);
@@ -356,6 +360,7 @@ fn library_batch(
         Arc::new(frag_ion.finish()),
         Arc::new(scan_run.finish()),
         Arc::new(scan_rt.finish()),
+        Arc::new(share.finish()),
     ];
     if schema.fields().len() > cols.len() {
         cols.push(Arc::new(k0.finish()));
@@ -506,6 +511,19 @@ fn write_versioned(dir: &Path, lib: &StoredLibrary, version: &str) -> Result<(),
         return Err(format!(
             "{}: every envelope must have {ENVELOPE_LEN} isotopes",
             lib_path.display()
+        ));
+    }
+    if let Some(m) = lib
+        .library
+        .meta
+        .iter()
+        .find(|m| !(m.isotope_share > 0.0 && m.isotope_share <= 1.0))
+    {
+        return Err(format!(
+            "{}: precursor {:?} has an isotope share of {}, outside (0, 1]",
+            lib_path.display(),
+            m.key,
+            m.isotope_share
         ));
     }
     let mut entry_of: Vec<Option<&LibraryEntry>> = vec![None; n];
@@ -747,8 +765,9 @@ pub fn read_library(dir: &Path) -> Result<StoredLibrary, String> {
         let frag_ion = column::<ListArray>(&b, 16, &lib_path)?;
         let scan_run = column::<ListArray>(&b, 17, &lib_path)?;
         let scan_rt = column::<ListArray>(&b, 18, &lib_path)?;
+        let share = column::<Float32Array>(&b, 19, &lib_path)?;
         let k0 = with_mobility
-            .then(|| column::<Float32Array>(&b, 19, &lib_path))
+            .then(|| column::<Float32Array>(&b, 20, &lib_path))
             .transpose()?;
         for i in 0..b.num_rows() {
             let id = meta_rows.len();
@@ -798,11 +817,18 @@ pub fn read_library(dir: &Path) -> Result<StoredLibrary, String> {
                     e.len()
                 ))
             })?;
+            let isotope_share = share.value(i);
+            if !(isotope_share > 0.0 && isotope_share <= 1.0) {
+                return Err(lerr(&format!(
+                    "precursor {id}: isotope share {isotope_share}, outside (0, 1]"
+                )));
+            }
             meta_rows.push(PrecursorMeta {
                 key: key.value(i).to_string(),
                 mz: mz.value(i),
                 charge: charge.value(i),
                 envelope,
+                isotope_share,
             });
             proteins.push(prot.value(i).to_string());
             if q.is_null(i) {
@@ -993,6 +1019,7 @@ mod tests {
                 mz: 400.0 + ((i * 37) % n) as f64 * 1.5,
                 charge: 2,
                 envelope: [0.55, 0.3, 0.1, 0.05],
+                isotope_share: 1.0 - (i % 7) as f32 * 0.04,
             })
             .collect();
         let mut psms = Vec::new();
@@ -1126,13 +1153,16 @@ mod tests {
     #[test]
     fn library_rejects_unknown_major_version_naming_the_file() {
         let dir = tempfile::tempdir().unwrap();
-        write_with_schema_version(dir.path(), &stored(), "2.0").unwrap();
-        let e = read_library(dir.path()).unwrap_err();
-        assert!(
-            e.contains("alignment.parquet") || e.contains("library.parquet"),
-            "{e}"
-        );
-        assert!(e.contains("2.0"), "{e}");
+        // An older layout (major 4 has no `isotope_share`) and a later one.
+        for version in ["4.0", "6.0"] {
+            write_with_schema_version(dir.path(), &stored(), version).unwrap();
+            let e = read_library(dir.path()).unwrap_err();
+            assert!(
+                e.contains("alignment.parquet") || e.contains("library.parquet"),
+                "{e}"
+            );
+            assert!(e.contains(version), "{e}");
+        }
     }
 
     #[test]
@@ -1153,6 +1183,9 @@ mod tests {
         assert_ne!(library_fingerprint(&s), library_fingerprint(&other));
         let mut other = s.clone();
         other.donor_scans[2][0].1 += 0.5;
+        assert_ne!(library_fingerprint(&s), library_fingerprint(&other));
+        let mut other = s.clone();
+        other.library.meta[3].isotope_share = 0.5;
         assert_ne!(library_fingerprint(&s), library_fingerprint(&other));
 
         // An alignment.parquet from another library is rejected by name.
@@ -1175,6 +1208,25 @@ mod tests {
             library_fingerprint(&read_library(b.path()).unwrap()),
             library_fingerprint(&moved)
         );
+    }
+
+    #[test]
+    fn isotope_share_round_trips_and_must_be_in_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = stored();
+        s.library.meta[5].isotope_share = 0.871_108_8;
+        write_library(dir.path(), &s).unwrap();
+        let back = read_library(dir.path()).unwrap();
+        for (a, b) in s.library.meta.iter().zip(&back.library.meta) {
+            assert_eq!(a.isotope_share.to_bits(), b.isotope_share.to_bits());
+        }
+        assert!(back.library.meta.iter().any(|m| m.isotope_share < 0.8));
+        for bad in [0.0f32, -0.1, 1.000_001, f32::NAN] {
+            let mut other = s.clone();
+            other.library.meta[5].isotope_share = bad;
+            let e = write_library(dir.path(), &other).unwrap_err();
+            assert!(e.contains("isotope share") && e.contains("PEP5/2"), "{e}");
+        }
     }
 
     #[test]

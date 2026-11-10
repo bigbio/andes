@@ -6,7 +6,7 @@
 //! the per-element abundance ladders (`model::isotope`).
 
 use model::amino_acid::standard_composition;
-use model::isotope::isotope_envelope_from_formula;
+use model::isotope::{isotope_envelope_and_share_from_formula, isotope_envelope_from_formula};
 
 /// Atom counts (C, H, N, O, S).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -90,6 +90,12 @@ impl Formula {
     pub fn envelope(&self, n_isotopes: usize) -> Vec<f64> {
         isotope_envelope_from_formula(self.c, self.h, self.n, self.o, self.s, n_isotopes)
     }
+
+    /// [`Self::envelope`] and the share of the whole isotope pattern that
+    /// its `n_isotopes` peaks hold (0 when `n_isotopes == 0`).
+    pub fn envelope_and_share(&self, n_isotopes: usize) -> (Vec<f64>, f64) {
+        isotope_envelope_and_share_from_formula(self.c, self.h, self.n, self.o, self.s, n_isotopes)
+    }
 }
 
 #[cfg(test)]
@@ -128,6 +134,29 @@ mod tests {
         assert_eq!(env.len(), 4);
         assert!((env.iter().sum::<f64>() - 1.0).abs() < 1e-9);
         assert!(env[0] > env[1] && env[1] > env[2]);
+    }
+
+    #[test]
+    fn share_of_the_first_four_isotopes_falls_with_mass() {
+        // Averagine peptides of 1 to 4 kDa: the first four isotopes hold
+        // nearly all of a small peptide's pattern and about three quarters
+        // of a 4 kDa one's.
+        let share = |mass: f64| Formula::averagine(mass).envelope_and_share(4).1;
+        for (mass, lo, hi) in [
+            (1000.0, 0.99, 1.0),
+            (2000.0, 0.94, 0.96),
+            (3000.0, 0.86, 0.88),
+            (4000.0, 0.73, 0.76),
+        ] {
+            let s = share(mass);
+            assert!(s > lo && s < hi, "{mass} Da: {s}");
+        }
+        let f = Formula::peptide(b"PEPTIDEK".iter().map(|&r| (r, 0.0)));
+        let (env, s) = f.envelope_and_share(4);
+        assert_eq!(env, f.envelope(4));
+        assert!(s > 0.99 && s < 1.0, "{s}");
+        // More isotopes hold more of the pattern.
+        assert!(f.envelope_and_share(5).1 > s);
     }
 
     #[test]

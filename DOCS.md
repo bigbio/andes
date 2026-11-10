@@ -1702,7 +1702,18 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
   and an identified pair's apex is searched within three of the run's elution widths at its RT
   (at least three scan spacings) of its PSM. Narrow-peak instruments are thus not held to a
   wide fixed width, and a larger neighbouring peak of the same m/z a few widths away is not
-  taken for the identified one. The extract log and the table's `andes.extract.run_scales` tag
+  taken for the identified one. A run's best PSM is not always taken on the elution peak: an
+  abundant peptide is fragmented again on its tail, minutes after the apex, and that PSM can
+  score best, so the fit near the PSM measures the tail. When the fit at the position the other
+  runs predict (the pair's pseudo-transfer) is another peak (apexes further apart than the two
+  fitted widths together) with more than twice the amplitude of a positive identified fit, the
+  identified row takes that fit; its decoys and its pseudo-transfer are unchanged, and the
+  extract log counts these pairs. An identified fit without signal, or a lower peak at the
+  predicted position, changes nothing. On 12 runs of PXD014415 (2026-11-10, six human and six
+  human + yeast runs, one rescoring over all runs) this applied to 0.75 % of the identified
+  cells; the identified cells of human precursors more than a factor of 2 from the precursor's
+  median over its identified runs fell from 1.23 % to 0.89 %, and from 1.80 % to 0.31 % in the
+  brightest tenth of the precursors. The extract log and the table's `andes.extract.run_scales` tag
   record the scan spacing and the width scale of each run; `quant finalize` logs them.
   Transfer pre-selection (advanced, `--mbr-preselect`, default `true`): before any fit,
   extract skips the transfers of an entry whose best donor PSM is above q 0.001, which finalize
@@ -2199,6 +2210,7 @@ here only where the value is a fixed choice rather than a documented option.
 | Trace integration range | 3 widths before the apex, 4 after | `evidence.rs:121,122` | area integration range | no | Longer after the apex because peaks tail (code comment) |
 | Trace baseline | at least 3 scans a side; sides differ at 3 standard errors, then the lower side alone | `evidence.rs:125,128` | baseline of each trace | no | No recorded evidence |
 | Peak boundaries | 2 half-widths at half maximum; deep valley 0.5, rise 1.5 | `quant/src/xic.rs:78-83` | LFQ peak bounds | no | 2 half-widths = 2.35 sigma, 98% of a Gaussian area (code comment); valley rule: no recorded evidence |
+| Consensus-peak factor | 2 | `quant_mbr.rs:771` | identified pairs measured at the position the other runs predict | no | The factor of the wrong-measurement label; 12 runs of PXD014415: beyond it the identified fit was off by more than 2x in 64-100% of the pairs, the predicted-position fit in 1-21% (see [§10](#10-quantification)) |
 | Transfer donor q | 0.001 | `quant_mbr.rs:1281` | library entries eligible for transfer | no | A marginal donor PSM is the commonest false donor (code comment) |
 | Transfer decoys | mass shifts -11, -7, 7, 11 nominal Da | `quant/src/decoys.rs:34` | the null for transfer q | no | Design choice; the quant_q notes record that the decoy null does not model isomer coincidences |
 | Presence prior | 20 neighbour runs, 20,000 library entries sampled, 50 neighbour runs for donor rate | `quant_finalize.rs:623-629` | prior strata and a feature | no | No recorded evidence |

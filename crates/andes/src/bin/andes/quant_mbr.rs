@@ -14,7 +14,17 @@
 //!   (the run's own elution width there, floored at its MS1 scan spacing),
 //!   with its decoy probes ([`quant::decoys::probes`], same prior), plus a
 //!   `PseudoTransfer` target fit with the alignment prior computed without
-//!   this run's own observation;
+//!   this run's own observation. The best PSM of a run is not always taken
+//!   on the elution peak: an abundant peptide is fragmented again on its
+//!   tail, minutes after the apex, and that PSM can score best. The
+//!   identified fit, which stays within three elution widths of the PSM,
+//!   then measures the tail. So when the fit at the position the other runs
+//!   predict is a different peak (apexes further apart than the two fitted
+//!   widths together) with more than [`CONSENSUS_PEAK_FACTOR`] times the
+//!   amplitude of a positive identified fit, the identified row takes that
+//!   fit ([`prefer_consensus_peak`]; counted in the extract log). An
+//!   identified fit without signal, or a lower one at the predicted
+//!   position, changes nothing;
 //! * not identified: a `Transfer` target and its decoy probes, with the
 //!   alignment prior, when the [`TransferSelection`] keeps the pair (it
 //!   decides from the library alone, before any fit, and skips the target
@@ -196,6 +206,9 @@ pub(crate) struct ExtractCounts {
     /// Unidentified pairs with a prediction that the transfer selection
     /// skips (no transfer rows).
     pub not_selected: usize,
+    /// Identified pairs measured on the peak at the position the other runs
+    /// predict instead of the one at their PSM ([`prefer_consensus_peak`]).
+    pub consensus_peak: usize,
     /// Identified fits that set the run's width prior.
     pub width_fits: usize,
     /// Fewer than the needed identified fits: the width prior is the run's
@@ -271,6 +284,7 @@ impl ExtractCounts {
         self.pseudo_other_component += o.pseudo_other_component;
         self.other_component += o.other_component;
         self.not_selected += o.not_selected;
+        self.consensus_peak += o.consensus_peak;
     }
 }
 
@@ -761,16 +775,53 @@ fn rows_into<F>(
         }
     }
     let mut evidence = fit_on_series(series, &jobs, ep).into_iter();
-    for (&i, (rows, counts)) in ids.iter().zip(planned) {
-        let rows = rows
+    for (&i, (rows, mut counts)) in ids.iter().zip(planned) {
+        let mut rows: Vec<ExtractRow> = rows
             .into_iter()
             .map(|(mut row, _)| {
                 row.evidence = evidence.next().flatten();
                 row
             })
             .collect();
+        counts.consensus_peak += usize::from(prefer_consensus_peak(&mut rows));
         slots[i] = Some((rows, counts));
     }
+}
+
+/// Amplitude of the fit at the position the other runs predict, as a
+/// multiple of the identified fit's, above which an identified pair is
+/// measured there (see the module docs). 2 is the factor beyond which two
+/// measurements of one cell count as different ([`crate::quant_finalize`],
+/// the wrong-measurement label).
+pub(crate) const CONSENSUS_PEAK_FACTOR: f64 = 2.0;
+
+/// Gives the identified target row of one entry's `rows` the fit of its
+/// pseudo-transfer row when that fit is another, larger peak: both fits have
+/// a positive amplitude, the apexes lie further apart than the sum of the
+/// two fitted widths, and the pseudo-transfer's amplitude is more than
+/// [`CONSENSUS_PEAK_FACTOR`] times the identified one. Returns whether it
+/// did. The PSM of such a pair was taken off the elution apex (mostly on the
+/// tail of an abundant peptide), where the identified fit, held near the
+/// PSM, reads a fraction of the peak the other runs measure. The decoy rows
+/// and the pseudo-transfer row keep their fits.
+fn prefer_consensus_peak(rows: &mut [ExtractRow]) -> bool {
+    let at = |role: Role| {
+        rows.iter()
+            .position(|r| r.role == role && r.kind == Hypothesis::Target)
+    };
+    let (Some(id), Some(pseudo)) = (at(Role::Identified), at(Role::PseudoTransfer)) else {
+        return false;
+    };
+    let (Some(a), Some(b)) = (&rows[id].evidence, &rows[pseudo].evidence) else {
+        return false;
+    };
+    let other_peak = (b.t0 - a.t0).abs() > a.w + b.w;
+    let larger = a.amplitude > 0.0 && b.amplitude > CONSENSUS_PEAK_FACTOR * a.amplitude;
+    if !(other_peak && larger) {
+        return false;
+    }
+    rows[id].evidence = rows[pseudo].evidence.clone();
+    true
 }
 
 /// The rows of one library entry in `run`, each with the probe to fit on
@@ -1938,6 +1989,20 @@ mod tests {
         weak_in_run1: &dyn Fn(u32) -> bool,
         decoy: &dyn Fn(u32) -> bool,
     ) -> Fixture {
+        fixture_psm_rt(faims, silent_in_run1, weak_in_run1, decoy, &|p, run| {
+            apex(p, run) + 2.0
+        })
+    }
+
+    /// [`fixture_decoys`] with the PSM of precursor `p` in run `run` at
+    /// `psm_rt(p, run)`.
+    fn fixture_psm_rt(
+        faims: bool,
+        silent_in_run1: &dyn Fn(u32) -> bool,
+        weak_in_run1: &dyn Fn(u32) -> bool,
+        decoy: &dyn Fn(u32) -> bool,
+        psm_rt: &dyn Fn(u32, u16) -> f64,
+    ) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let meta: Vec<PrecursorMeta> = (0..N_PREC)
             .map(|p| PrecursorMeta {
@@ -1954,7 +2019,7 @@ mod tests {
                 q_gate: f64::NAN,
                 run,
                 precursor: p,
-                rt: apex(p, run) + 2.0,
+                rt: psm_rt(p, run),
                 score: 10.0,
                 q: if run == 1 && weak_in_run1(p) {
                     0.2
@@ -2526,6 +2591,129 @@ mod tests {
         let index = Ms1RunIndex::new(run_scans_shaped(1, false, &|_| false, width, 0.25, 5.0));
         write_ms1_table(&path, "run1", &index).unwrap();
         path
+    }
+
+    /// Run 1 of [`fixture`] with 1 s wide peaks sampled every 0.25 s and a
+    /// same-m/z peak of `echo` times the amplitude [`ECHO_AFTER`] seconds
+    /// after each apex, written next to the fixture's tables.
+    fn echo_run(fx: &Fixture, echo: f64) -> PathBuf {
+        let path = fx._dir.path().join("echo.ms1.parquet");
+        let index = Ms1RunIndex::new(run_scans_shaped(1, false, &|_| false, 1.0, 0.25, echo));
+        write_ms1_table(&path, "run1", &index).unwrap();
+        path
+    }
+
+    /// Whether the run-1 PSM of precursor `p` sits on the echo in
+    /// [`fixture_late_psms`]: three precursors apart from each other and
+    /// from the ends of the gradient, so the run's map (30 anchors) still
+    /// follows the other PSMs.
+    fn late(p: u32) -> bool {
+        matches!(p, 8 | 15 | 22)
+    }
+
+    /// [`fixture`] where the run-1 PSMs of the [`late`] precursors were
+    /// taken [`ECHO_AFTER`] seconds after the apex (run 0's PSMs are at the
+    /// apex).
+    fn fixture_late_psms() -> Fixture {
+        fixture_psm_rt(false, &|_| false, &|_| false, &|_| false, &|p, run| {
+            let after = if run == 1 && late(p) { ECHO_AFTER } else { 0.0 };
+            apex(p, run) + 2.0 + after
+        })
+    }
+
+    #[test]
+    fn identified_pair_with_a_psm_on_the_tail_is_measured_on_the_elution_peak() {
+        // The run-1 PSMs of the late precursors sit on a peak of a twentieth
+        // of the amplitude, 19 s after the apex that run 0 predicts.
+        let fx = fixture_late_psms();
+        let path = echo_run(&fx, 0.05);
+        let out = extract_all(1, &path, &fx.lib, &params()).unwrap();
+        assert_eq!(out.counts.consensus_peak, 3);
+        for p in 0..BOTH {
+            let rows = rows_of(&out.rows, p);
+            let (id, pseudo) = (rows[0], rows[3]);
+            assert!(is_identified_target(id));
+            assert_eq!(pseudo.role, Role::PseudoTransfer);
+            let e = id.evidence.as_ref().unwrap();
+            assert!((e.t0 - apex(p, 1)).abs() <= 0.5, "precursor {p}: {e:?}");
+            assert!((e.amplitude / AMPLITUDE - 1.0).abs() < 0.1, "{p}: {e:?}");
+            if late(p) {
+                assert_eq!(id.evidence, pseudo.evidence, "precursor {p}");
+            }
+            // The decoy probes keep the fits of the PSM-centred prior.
+            for d in &rows[1..3] {
+                assert_eq!(d.role, Role::Identified);
+                assert_ne!(d.evidence, id.evidence);
+            }
+        }
+    }
+
+    #[test]
+    fn identified_pair_keeps_a_psm_peak_that_is_not_much_lower() {
+        // The same late PSMs on a peak of 0.6 times the amplitude at the
+        // predicted position: less than the factor, so the PSM's peak stays.
+        let fx = fixture_late_psms();
+        let path = echo_run(&fx, 0.6);
+        let out = extract_all(1, &path, &fx.lib, &params()).unwrap();
+        assert_eq!(out.counts.consensus_peak, 0);
+        for p in (0..BOTH).filter(|&p| late(p)) {
+            let rows = rows_of(&out.rows, p);
+            let e = rows[0].evidence.as_ref().unwrap();
+            assert!(
+                (e.t0 - apex(p, 1) - ECHO_AFTER).abs() <= 0.5,
+                "precursor {p}: {e:?}"
+            );
+            assert!((e.amplitude / (0.6 * AMPLITUDE) - 1.0).abs() < 0.1, "{e:?}");
+        }
+    }
+
+    #[test]
+    fn consensus_peak_needs_another_larger_peak_and_a_signal_at_the_psm() {
+        let fx = fixture(false);
+        let out = extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
+        let base: Vec<ExtractRow> = rows_of(&out.rows, 3).into_iter().cloned().collect();
+        let fit = base[0].evidence.clone().unwrap();
+        // Rows whose identified fit is `id` and whose pseudo-transfer fit
+        // is `pseudo`, and whether the identified row then takes the
+        // pseudo-transfer's fit.
+        let taken = |id: Option<&Evidence>, pseudo: Option<&Evidence>| {
+            let mut rows = base.clone();
+            rows[0].evidence = id.cloned();
+            rows[3].evidence = pseudo.cloned();
+            let before = rows.clone();
+            let took = prefer_consensus_peak(&mut rows);
+            if took {
+                assert_eq!(rows[0].evidence, rows[3].evidence);
+                assert_eq!(rows[1..], before[1..]);
+            } else {
+                assert_eq!(rows, before);
+            }
+            took
+        };
+        let at = |t0: f64, amplitude: f64| Evidence {
+            t0,
+            amplitude,
+            w: 4.0,
+            ..fit.clone()
+        };
+        let id = at(500.0, 1e4);
+        // Another peak (apexes more than the two widths apart), more than
+        // twice the amplitude.
+        assert!(taken(Some(&id), Some(&at(440.0, 2.1e4))));
+        assert!(taken(Some(&id), Some(&at(508.1, 1e6))));
+        // Twice the amplitude or less.
+        assert!(!taken(Some(&id), Some(&at(440.0, 2e4))));
+        assert!(!taken(Some(&id), Some(&at(440.0, 5e3))));
+        // The same peak: apexes within the two widths.
+        assert!(!taken(Some(&id), Some(&at(508.0, 1e6))));
+        assert!(!taken(Some(&id), Some(&at(500.0, 1e6))));
+        // No signal at the PSM, or a missing fit on either side.
+        assert!(!taken(Some(&at(500.0, 0.0)), Some(&at(440.0, 1e6))));
+        assert!(!taken(None, Some(&at(440.0, 1e6))));
+        assert!(!taken(Some(&id), None));
+        // Without a pseudo-transfer row there is nothing to take.
+        let mut rows = base[..3].to_vec();
+        assert!(!prefer_consensus_peak(&mut rows));
     }
 
     #[test]

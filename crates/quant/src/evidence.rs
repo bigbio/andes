@@ -70,7 +70,8 @@
 //! minus its baseline, integrated by the trapezoid rule over the scans in
 //! `[t0 - 3 w', t0 + 4 w']`, `w' = max(w, w_prior)` (longer after the apex,
 //! where peaks tail), and the per-isotope areas `a_i` combined with the
-//! fit's weights into the area of the whole pattern,
+//! fit's weights into the area of the fitted pattern (the first
+//! `n_isotopes`, as the template quantity),
 //! `sum_i pi_i a_i / sigma_i^2 / sum_i pi_i^2 / sigma_i^2` over the used
 //! isotopes (the template amplitude's estimator, applied to areas instead of
 //! heights). The baseline of a trace comes from the window's scans outside
@@ -156,7 +157,9 @@ pub struct Evidence {
     /// `A * w * sqrt(2 pi)`: the area under the fitted Gaussian profile of
     /// the fitted isotopes (the first `n_isotopes`, at most
     /// [`MAX_ISOTOPES`]; `pi` sums to 1 over them), above the fitted
-    /// background. Isotopes past the last fitted one are not part of it.
+    /// background. Isotopes past the last fitted one are not part of it:
+    /// the MBR table reports it divided by the share of the whole pattern
+    /// those isotopes hold.
     pub quantity: f64,
     /// `amplitude_se * w * sqrt(2 pi)`: the least-squares standard error of
     /// the fitted amplitude at the fixed peak shape. It is the fit error of

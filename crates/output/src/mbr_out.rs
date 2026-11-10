@@ -9,8 +9,8 @@
 //! | `precursor_key` | `<peptidoform>/<charge>` of the precursor, a positional-isomer class, in the site form of its best PSM |
 //! | `run` | run stem |
 //! | `evidence_type` | `identified`, `identified_below_threshold` (identified, quality q-value above the identified threshold or missing), `transfer_ms2` (transfer q-value at or below the threshold, and an MS2 scan of the run supports the transfer), `transfer_ms1` (transfer q-value at or below the threshold, without that MS2 support), `shared_feature` (transfer q-value at or below the threshold, but the shipped classifier takes the row's MS1 feature for another compound's: a same-run claimant, MS2 evidence and the claim geometry; the quantity is kept, as for `below_threshold`) or `below_threshold` |
-//! | `quantity`, `quantity_se` | fitted MS1 quantity and its standard error |
-//! | `quantity_normalized` | `quantity` with the run's normalisation offset at the row's apex RT removed (a level per run and an RT-local term fitted across runs); null when the run is not normalised. `quantity` stays the raw measurement |
+//! | `quantity`, `quantity_se` | fitted MS1 quantity and its standard error: the area of the precursor's whole isotope pattern. The fit measures the first four isotopes, and the result is divided by the share of the pattern they hold (from the elemental formula; 0.995 at 1 kDa, 0.949 at 2 kDa, 0.871 at 3 kDa) |
+//! | `quantity_normalized` | `quantity` with the run's normalisation offset at the row's apex RT removed (a level per run and an RT-local term fitted across runs); null when the run is not normalised. `quantity` stays the measurement without the offset |
 //! | `transfer_q` | internal transfer quant-quality q-value (not an identification FDR); null for identified rows |
 //! | `quant_q` | internal quality q-value of the row's MS1 feature against its decoys (not an identification FDR): the identified-row estimate for identified rows; for an accepted transfer the running mean, over the run's accepted transfers in ascending probability of a wrong measurement, of that probability; `transfer_q` for a transfer below the threshold |
 //! | `apex_rt_s` | fitted apex, seconds |

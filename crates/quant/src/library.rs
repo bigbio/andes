@@ -116,14 +116,18 @@ pub fn is_donor_psm(p: &PsmIn, donor_q: f64, donor_pep: Option<f64>) -> bool {
     p.q <= donor_q && donor_pep.is_none_or(|c| p.pep <= c)
 }
 
-/// Identity of a precursor: peptidoform and charge key, monoisotopic m/z and
-/// the theoretical isotope fractions.
+/// Identity of a precursor: peptidoform and charge key, monoisotopic m/z,
+/// the theoretical isotope fractions of its first four isotopes (sum 1) and
+/// the share of the whole isotope pattern those four hold.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PrecursorMeta {
     pub key: String,
     pub mz: f64,
     pub charge: u8,
     pub envelope: [f32; 4],
+    /// In (0, 1]. A quantity fitted on `envelope` is the area of those
+    /// isotopes; divided by this share it is the area of the whole pattern.
+    pub isotope_share: f32,
 }
 
 /// The best donor PSM of an entry (highest score; then earliest RT, lowest
@@ -536,6 +540,7 @@ mod tests {
                 mz: 500.0 + i as f64,
                 charge: 2,
                 envelope: [0.5, 0.3, 0.15, 0.05],
+                isotope_share: 1.0,
             })
             .collect()
     }

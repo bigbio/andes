@@ -65,18 +65,24 @@
 //! by [`identified_features`]): their prior is centred on the PSM's RT, so
 //! their feature distribution is not the transfers', and the transfer
 //! q-values stay what they are without them. Each identified target gets the
-//! quality q-value `quant_q`; an accepted transfer's `quant_q` is the running
-//! mean, over its run's accepted transfers in ascending probability of a wrong
-//! measurement, of that probability (a model trained on the pseudo-transfers:
-//! see `quant_finalize`), and a transfer below the threshold keeps its
-//! `transfer_q`.
+//! quality q-value `quant_q`. An accepted transfer gets `measurement_q`, the
+//! running mean, over its run's accepted transfers in ascending probability of
+//! a wrong measurement, of that probability (a model trained on the
+//! pseudo-transfers: see `quant_finalize`), and its `quant_q` is the larger of
+//! `transfer_q` and `measurement_q`; a transfer below the threshold keeps its
+//! `transfer_q`. `quant_q` is so the largest error estimate made for the row:
+//! a cut on it keeps a row only when each of its estimates passes the cut,
+//! and is not the error rate of the rows it keeps.
 //! With a quality threshold, an identified row above it (or without a
 //! q-value) is `identified_below_threshold`. Each
 //! pseudo-transfer is scored by the model of its precursor's fold, which never
 //! saw it, and placed against that fold's transfer scores. `<base>.mbr.parquet`
 //! gets one row per identified or transferred (precursor, run) target, and
 //! `<base>.mbr_validation.parquet` the pseudo-transfer acceptance rate, the
-//! wrong-peak rate (`|t0_pseudo - t0_identified| > w_identified`) and the
+//! wrong-peak rate (`|t0_pseudo - t0_identified| > w_identified`), the
+//! wrong-measurement rate (a wrong peak, or a fitted quantity off by more
+//! than a factor of 2 from the identified fit's; the peak alone where either
+//! fit has no positive quantity) and the
 //! accepted transfer counts of the pooled and per-family estimates. The
 //! acceptance rate is optimistic for real transfers: the alignment map was
 //! fitted with the pseudo-transfer's own run observation as an anchor, and
@@ -1281,8 +1287,16 @@ pub(crate) fn whole_pattern((quantity, se): (f64, f64), share: f32) -> (f64, f64
     (quantity / share, se / share)
 }
 
-/// Floor of `amplitude_se` in the amplitude signal-to-noise feature.
-const MIN_AMPLITUDE_SE: f64 = 1e-12;
+/// `amplitude / amplitude_se` of a fit. NaN when the standard error is not
+/// positive (zero, negative or NaN), so a row with such a fit gets no
+/// features; 0 with an infinite standard error (a fit without information).
+pub(crate) fn amplitude_snr(e: &Evidence) -> f64 {
+    if e.amplitude_se > 0.0 {
+        e.amplitude / e.amplitude_se
+    } else {
+        f64::NAN
+    }
+}
 
 /// Shape features of a row without a donor reference: no width or tailing
 /// difference, and an isotope cosine of -1 (below any real cosine).
@@ -1434,7 +1448,7 @@ pub(crate) fn transfer_features(
     neighbour_rate: f64,
 ) -> Option<Vec<f32>> {
     let e = row.evidence.as_ref()?;
-    let snr = e.amplitude / e.amplitude_se.max(MIN_AMPLITUDE_SE);
+    let snr = amplitude_snr(e);
     let [shape_width, shape_tailing, shape_iso] = shapes.features(row, maps);
     let x = [
         e.llr,
@@ -1465,7 +1479,7 @@ pub(crate) fn transfer_features(
 /// run's measurement); `None` without evidence or with a non-finite value.
 pub(crate) fn identified_features(row: &ExtractRow) -> Option<Vec<f32>> {
     let e = row.evidence.as_ref()?;
-    let snr = e.amplitude / e.amplitude_se.max(MIN_AMPLITUDE_SE);
+    let snr = amplitude_snr(e);
     let x = [
         e.llr,
         e.rt_z,
@@ -2475,9 +2489,10 @@ mod finalize_tests {
     /// the fit's mass error and the row's claim.
     type OutEntry<'a> = (u32, u16, MbrRow<'a>, (Option<f64>, claims::Claim));
     use crate::quant_finalize::{
-        finalize, finalize_stream, for_each_scored, pseudo_example, running_mean_q, table_features,
-        wrong_features, BlockContext, EntryIndex, ExtractRuns, FinalizeLimits, FinalizeParams,
-        FinalizeSummary, MbrFeature, Table, WrongCalibration, SCORE_CHUNK,
+        finalize, finalize_stream, for_each_scored, mismatch, pseudo_example, running_mean_q,
+        table_features, transfer_quant_q, wrong_features, wrong_label, BlockContext, EntryIndex,
+        ExtractRuns, FinalizeLimits, FinalizeParams, FinalizeSummary, MbrFeature, Mismatch, Table,
+        WrongCalibration, SCORE_CHUNK,
     };
     use crate::transfer_fdr::{
         row_unit, train_bagged_folds, train_folds, transfer_train_params, Estimate, FdrRow,
@@ -2658,6 +2673,7 @@ mod finalize_tests {
                 num(r.quant_q),
                 num(r.apex_rt_s),
                 num(Some(r.library_q)),
+                num(r.measurement_q),
             ]);
         }
         t
@@ -2830,6 +2846,10 @@ mod finalize_tests {
         assert_eq!(v.pseudo_transfers, N as usize);
         assert_eq!(v.wrong_peak_pairs, N as usize);
         assert_eq!(v.wrong_peak, (N / WRONG_EVERY) as usize);
+        // The fixture's quantities agree, so a wrong measurement is a wrong
+        // peak.
+        assert_eq!(v.wrong_measurement, v.wrong_peak);
+        assert_eq!(v.at_q01.wrong_measurement, v.at_q01.wrong_peak);
         assert!(v.pseudo_acceptance(&v.at_q01).unwrap() > 0.9, "{v:?}");
         assert_eq!(v.at_q01, v.at_threshold);
         assert_eq!(v.transfers, N as usize);
@@ -2839,6 +2859,7 @@ mod finalize_tests {
         assert_eq!(t.len(), 2);
         let get = |name: &str| &t[1][t[0].iter().position(|h| h == name).unwrap()];
         assert_eq!(get("wrong_peak_rate"), "0.1");
+        assert_eq!(get("wrong_measurement_rate"), "0.1");
         assert_eq!(get("transfers"), &N.to_string());
         assert_eq!(get("accepted_pooled_q01"), &v.at_q01.pooled.to_string());
 
@@ -3292,22 +3313,23 @@ mod finalize_tests {
                             v.ms2_pseudo_supported += usize::from(m.supports());
                         }
                         v.pseudo_scored += usize::from(q.is_some());
-                        let wrong = match (e, identified.get(&(r.precursor, r.run))) {
-                            (Some(p), Some(id)) => Some((p.t0 - id.t0).abs() > id.w),
-                            _ => None,
-                        };
-                        if let Some(w) = wrong {
+                        let wrong = e
+                            .zip(identified.get(&(r.precursor, r.run)))
+                            .and_then(|(p, id)| mismatch(p, id));
+                        if let Some(m) = wrong {
                             v.wrong_peak_pairs += 1;
-                            v.wrong_peak += usize::from(w);
+                            v.wrong_peak += usize::from(m.apex);
+                            v.wrong_measurement += usize::from(m.wrong());
                         }
                         for (a, &t) in at.iter_mut().zip(&thresholds) {
                             if !q.is_some_and(|q| q <= t) {
                                 continue;
                             }
                             a.pseudo += 1;
-                            if let Some(w) = wrong {
+                            if let Some(m) = wrong {
                                 a.pairs += 1;
-                                a.wrong_peak += usize::from(w);
+                                a.wrong_peak += usize::from(m.apex);
+                                a.wrong_measurement += usize::from(m.wrong());
                             }
                         }
                         continue;
@@ -3338,6 +3360,7 @@ mod finalize_tests {
                             n_co_apex: u32::from(r.claim.n_co_apex),
                             n_identified_co_apex: u32::from(r.claim.n_identified_co_apex),
                         }),
+                        measurement_q: None,
                     },
                     (
                         e.map(|e| e.mass_err_ppm),
@@ -3362,7 +3385,11 @@ mod finalize_tests {
                 }
             }
             for pool in by_run.values_mut() {
-                running_mean_q(pool, |k, q| out[k].2.quant_q = Some(q));
+                running_mean_q(pool, |k, q| {
+                    let r = &mut out[k].2;
+                    r.measurement_q = Some(q);
+                    r.quant_q = Some(transfer_quant_q(r.transfer_q, q));
+                });
             }
             out.sort_by_key(|&(p, run, ..)| (p, run));
             let mut features = Vec::with_capacity(out.len());
@@ -4001,13 +4028,27 @@ mod finalize_tests {
         assert_eq!(v.identified_below_threshold, 0);
         assert_eq!(s.identified_no_features, 0);
         // A transfer below the threshold keeps its transfer_q as quant_q; an
-        // accepted one has the running mean of its run's wrong-peak
-        // probabilities.
+        // accepted one has the larger of its transfer_q and its
+        // measurement_q, the running mean of its run's wrong-measurement
+        // probabilities. No other row has a measurement_q.
         for f in s.features.iter().filter(|f| f.run == 1) {
             if f.evidence_type == EvidenceType::BelowThreshold {
                 assert_eq!(f.quant_q, f.transfer_q);
             } else {
                 assert!(f.quant_q.is_some_and(|q| (0.0..=1.0).contains(&q)));
+                assert!(f.quant_q >= f.transfer_q, "{f:?}");
+            }
+        }
+        let rows = output::mbr_out::read_mbr_parquet(&mbr).unwrap();
+        let accepted = |t: &str| matches!(t, "transfer_ms2" | "transfer_ms1" | "shared_feature");
+        assert!(rows.iter().any(|r| accepted(r.evidence_type.as_str())));
+        for r in &rows {
+            if accepted(r.evidence_type.as_str()) {
+                let (t, m) = (r.transfer_q.unwrap(), r.measurement_q.unwrap());
+                assert!((0.0..=1.0).contains(&m), "{r:?}");
+                assert_eq!(r.quant_q, Some(t.max(m)), "{r:?}");
+            } else {
+                assert_eq!(r.measurement_q, None, "{r:?}");
             }
         }
     }
@@ -4269,15 +4310,123 @@ mod finalize_tests {
             at("log10_amplitude_snr"),
             (1e6f64 / 1e4 + 1.0).log10() as f32
         );
-        r.evidence.as_mut().unwrap().amplitude_se = 0.0;
-        assert!(transfer_features(&r, &DonorShapes::default(), &[], 0.0)
-            .unwrap()
+        // A fit without a positive standard error has no signal-to-noise
+        // ratio and gets no features; one without information has ratio 0.
+        for se in [0.0, -1.0, f64::NAN] {
+            r.evidence.as_mut().unwrap().amplitude_se = se;
+            assert!(transfer_features(&r, &DonorShapes::default(), &[], 0.0).is_none());
+            assert!(identified_features(&r).is_none());
+            assert!(amplitude_snr(r.evidence.as_ref().unwrap()).is_nan());
+        }
+        r.evidence.as_mut().unwrap().amplitude_se = f64::INFINITY;
+        let x = transfer_features(&r, &DonorShapes::default(), &[], 0.0).unwrap();
+        let snr = TRANSFER_FEATURES
             .iter()
-            .all(|v| v.is_finite()));
+            .position(|n| *n == "log10_amplitude_snr")
+            .unwrap();
+        assert_eq!(x[snr], 0.0);
+        assert!(identified_features(&r).is_some());
+        r.evidence.as_mut().unwrap().amplitude_se = 1e4;
         r.evidence.as_mut().unwrap().llr = f64::NAN;
         assert!(transfer_features(&r, &DonorShapes::default(), &[], 0.0).is_none());
         r.evidence = None;
         assert!(transfer_features(&r, &DonorShapes::default(), &[], 0.0).is_none());
+    }
+
+    #[test]
+    fn a_wrong_measurement_is_a_wrong_peak_or_a_wrong_fitted_quantity() {
+        let mut g = Rng(3);
+        let id = evidence(&mut g, true, 50.0);
+        // The same apex and amplitude, fitted 2.5 times as wide: the fitted
+        // quantities differ by the widths.
+        let mut p = id.clone();
+        p.w = 2.5 * id.w;
+        p.width_ratio = 2.5 * id.width_ratio;
+        p.quantity = 2.5 * id.quantity;
+        assert_eq!(
+            mismatch(&p, &id),
+            Some(Mismatch {
+                apex: false,
+                quantity: Some(true)
+            })
+        );
+        assert_eq!(wrong_label(&p, &id), Some(true));
+        // Within a factor of 2 the quantity agrees; the trace area is not
+        // compared.
+        p.quantity = 1.9 * id.quantity;
+        p.trace_quantity = 3.0 * id.trace_quantity;
+        assert!(!mismatch(&p, &id).unwrap().wrong());
+        assert_eq!(wrong_label(&p, &id), Some(false));
+        // An apex at the identified width is the same peak; beyond it is not.
+        p.t0 = id.t0 + id.w;
+        assert!(!mismatch(&p, &id).unwrap().apex);
+        p.t0 = id.t0 + id.w + 0.1;
+        let m = mismatch(&p, &id).unwrap();
+        assert!(m.apex && m.quantity == Some(false) && m.wrong());
+        // A fit without a quantity: the pair is judged on the apex alone and
+        // has no training label.
+        let no_quantity = |e: &Evidence| {
+            let mut e = e.clone();
+            e.amplitude = 0.0;
+            e.quantity = 0.0;
+            e
+        };
+        for (a, b) in [(no_quantity(&p), id.clone()), (p.clone(), no_quantity(&id))] {
+            let m = mismatch(&a, &b).unwrap();
+            assert!(m.apex && m.quantity.is_none() && m.wrong());
+            assert_eq!(wrong_label(&a, &b), None);
+            let mut a = a;
+            a.t0 = b.t0;
+            let m = mismatch(&a, &b).unwrap();
+            assert!(!m.apex && m.quantity.is_none() && !m.wrong());
+        }
+        // No judgement without an apex in either fit, or without the
+        // identified width.
+        let (mut a, mut b) = (p.clone(), id.clone());
+        a.t0 = f64::NAN;
+        b.t0 = f64::NAN;
+        assert_eq!(mismatch(&a, &id), None);
+        assert_eq!(mismatch(&p, &b), None);
+        let mut b = id.clone();
+        b.w = f64::NAN;
+        assert_eq!(mismatch(&p, &b), None);
+    }
+
+    #[test]
+    fn wrong_features_take_the_fitted_quantity_without_floors() {
+        let mut g = Rng(5);
+        let mut e = evidence(&mut g, true, 50.0);
+        e.quantity = 2e7;
+        e.quantity_se = 4e5;
+        let x = wrong_features(&e).unwrap();
+        assert_eq!(x.len(), 11);
+        assert_eq!(x[2], e.width_ratio.ln().abs() as f32);
+        assert_eq!(x[8], (1e6f64 / 1e4 + 1.0).log10() as f32);
+        assert_eq!(x[9], (4e5f64 / 2e7).ln() as f32);
+        assert_eq!(x[10], 2e7f64.log2() as f32);
+        let unusable: [fn(&mut Evidence); 9] = [
+            |e| e.quantity = 0.0,
+            |e| e.quantity = -1.0,
+            |e| e.quantity = f64::NAN,
+            |e| e.quantity_se = 0.0,
+            |e| e.quantity_se = -1.0,
+            |e| e.quantity_se = f64::NAN,
+            |e| e.amplitude_se = 0.0,
+            |e| e.amplitude_se = f64::NAN,
+            |e| e.width_ratio = 0.0,
+        ];
+        for (i, f) in unusable.iter().enumerate() {
+            let mut e = e.clone();
+            f(&mut e);
+            assert!(wrong_features(&e).is_none(), "{i}");
+        }
+    }
+
+    #[test]
+    fn an_accepted_transfer_has_the_larger_of_its_two_q_values() {
+        assert_eq!(transfer_quant_q(Some(0.004), 0.002), 0.004);
+        assert_eq!(transfer_quant_q(Some(0.004), 0.02), 0.02);
+        assert_eq!(transfer_quant_q(None, 0.3), 0.3);
     }
 
     use quant::ms2::Ms2Evidence;

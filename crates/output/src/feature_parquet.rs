@@ -13,7 +13,8 @@
 //! `transfer_q` (the internal transfer
 //! quant-quality q-value, not an identification FDR), `quant_q` (the internal
 //! quality q-value of the row's MS1 feature: the identified-row estimate, or
-//! for a transfer the running mean of its probability of a wrong measurement), `quantity_se`,
+//! for a transfer the larger of its `transfer_q` and the running mean of its
+//! probability of a wrong measurement), `quantity_se`,
 //! `claimed_by` (a transfer's best claimant: the `peptidoform/charge` key of
 //! the other target of the run on the same MS1 feature; null without one; the
 //! row and its intensity are unchanged) and `claim_co_apex` (the claimant's

@@ -20,7 +20,7 @@ def _rsd(x):
 
 
 def cell_accuracy(tabs, kinds, design, sp, const, primary, min_cells=4):
-    names = [n for n, k in kinds.items() if k["kind"] not in ("sage", "flashlfq")]   # context arms do not define the shared cells
+    names = [n for n, k in kinds.items() if k["kind"] not in ("sage", "flashlfq", "maxquant_q")]   # context arms do not define the shared cells
     cols = {}
     for n in names:
         t = tabs[n]

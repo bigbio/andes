@@ -2191,6 +2191,19 @@ mixtures and acquisitions, 1.18 s against 2.46 s MS1 spacing, share few strong t
 The mass-accuracy factor is what makes match between channels work on this dense MS1 (about 1,850
 centroids per scan): without it no channel reaches q 0.01.
 
+**Real data: PXD000714** (yeast mitochondria, dimethyl triplex, one fraction
+`20120524_Renvoise_Triplex_rep1F3`, converted from mzXML, against the reviewed yeast proteome):
+4,362 PSMs, 2,608 label groups, deuterium RT offsets learned at −0.64 s (Dimethyl4) and −0.97 s
+(Dimethyl8), mass-error spread 0.93 ppm; 36.5 s in all, 2.6 s for `--label`. This dense MS1
+(0.32 s spacing) keeps the decoy share near 2 % at every score, so no channel reaches
+`--label-fdr 0.01`; at 0.05, 896 / 790 / 582 channels are matched. The ratios here are biological
+(no known answer) and widely spread (IQR 1–2 log2 even between two identified channels), and a
+matched channel is by selection the weaker one, so this run shows coverage and run scales, not
+accuracy. The heavy dimethyl labels are scored by the RT and MS2 predictors as the light Dimethyl
+(and the SILAC labels as the unlabelled peptide), which `--predict` needs to score these PSMs at
+all. PXD022659 (the SILAC dilution series OpenMS used) is hosted on PanoramaPublic as vendor raw
+files and was not run.
+
 On the synthetic fixtures (`scripts/make_quant_fixtures.py --silac` / `--dimethyl`), the median
 error of the log-ratios is below 0.002 for identified, matched and transferred channels of a
 SILAC duplex, and below 0.001 for a dimethyl triplex whose deuterated channels elute 1.5 s and

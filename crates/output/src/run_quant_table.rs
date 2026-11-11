@@ -24,15 +24,15 @@ use parquet::file::properties::WriterProperties;
 use parquet::format::KeyValue;
 
 /// Major version of the table layout. A reader rejects any other major.
-pub const RUN_QUANT_SCHEMA_MAJOR: u32 = 1;
+pub const RUN_QUANT_SCHEMA_MAJOR: u32 = 2;
 
 const SCHEMA_KEY: &str = "andes.run_quant.schema";
 const RUN_KEY: &str = "andes.run_quant.run";
 const MODS_KEY: &str = "andes.run_quant.mods";
-const SCHEMA_VERSION: &str = "1.1";
+const SCHEMA_VERSION: &str = "2.0";
 /// Schema version of a table with the `ion_mobility` column, which is
 /// written only when some PSM records a precursor 1/K0.
-const SCHEMA_VERSION_MOBILITY: &str = "1.2";
+const SCHEMA_VERSION_MOBILITY: &str = "2.1";
 /// Rows per Parquet row group / record batch.
 const BATCH_ROWS: usize = 65_536;
 
@@ -57,6 +57,9 @@ pub struct RunPsmRow {
     pub envelope: Vec<f32>,
     /// `;`-joined accessions.
     pub proteins: String,
+    /// Share of the whole theoretical isotope pattern that the isotopes of
+    /// `envelope` hold, in (0, 1].
+    pub isotope_share: f32,
     /// Precursor 1/K0 of the spectrum, when the source records it (Bruker
     /// timsTOF `.d`).
     pub ion_mobility: Option<f32>,
@@ -79,6 +82,7 @@ fn schema(with_mobility: bool) -> Schema {
             false,
         ),
         Field::new("proteins", DataType::Utf8, false),
+        Field::new("isotope_share", DataType::Float32, false),
     ];
     if with_mobility {
         fields.push(Field::new("ion_mobility", DataType::Float32, true));
@@ -102,6 +106,7 @@ fn batch(
     let mut cv = Float32Builder::new();
     let mut env = ListBuilder::new(Float32Builder::new());
     let mut prot = StringBuilder::new();
+    let mut share = Float32Builder::new();
     let mut k0 = Float32Builder::new();
     for r in rows {
         spec_id.append_value(&r.spec_id);
@@ -116,6 +121,7 @@ fn batch(
         env.values().append_slice(&r.envelope);
         env.append(true);
         prot.append_value(&r.proteins);
+        share.append_value(r.isotope_share);
         k0.append_option(r.ion_mobility);
     }
     let mut cols: Vec<ArrayRef> = vec![
@@ -130,6 +136,7 @@ fn batch(
         Arc::new(cv.finish()),
         Arc::new(env.finish()),
         Arc::new(prot.finish()),
+        Arc::new(share.finish()),
     ];
     if with_mobility {
         cols.push(Arc::new(k0.finish()));
@@ -156,6 +163,15 @@ fn write_versioned(
     version: &str,
 ) -> Result<(), String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    if let Some(r) = rows
+        .iter()
+        .find(|r| !(r.isotope_share > 0.0 && r.isotope_share <= 1.0))
+    {
+        return Err(err(&format!(
+            "precursor {:?} has an isotope share of {}, outside (0, 1]",
+            r.precursor_key, r.isotope_share
+        )));
+    }
     let with_mobility = rows.iter().any(|r| r.ion_mobility.is_some());
     let version = if with_mobility && version == SCHEMA_VERSION {
         SCHEMA_VERSION_MOBILITY
@@ -251,8 +267,9 @@ fn column<'a, T: 'static>(b: &'a RecordBatch, i: usize, path: &Path) -> Result<&
 
 /// The columns of a per-run PSM table, in file order. The last,
 /// `ion_mobility`, is present only in tables where some PSM records a
-/// precursor 1/K0; a table without it reads `None`.
-pub const RUN_QUANT_COLUMNS: [&str; 12] = [
+/// precursor 1/K0; a table without it reads `None`. `isotope_share` is the
+/// share of the whole isotope pattern held by the isotopes of `envelope`.
+pub const RUN_QUANT_COLUMNS: [&str; 13] = [
     "spec_id",
     "rt_s",
     "precursor_key",
@@ -264,6 +281,7 @@ pub const RUN_QUANT_COLUMNS: [&str; 12] = [
     "faims_cv",
     "envelope",
     "proteins",
+    "isotope_share",
     "ion_mobility",
 ];
 
@@ -273,7 +291,7 @@ pub const RUN_QUANT_COLUMNS: [&str; 12] = [
 pub struct RunQuantBatches {
     path: std::path::PathBuf,
     run: String,
-    wanted: [bool; 12],
+    wanted: [bool; RUN_QUANT_COLUMNS.len()],
     reader: parquet::arrow::arrow_reader::ParquetRecordBatchReader,
 }
 
@@ -320,7 +338,7 @@ pub fn open_run_quant_table(path: &Path, columns: &[&str]) -> Result<RunQuantBat
             fields.len()
         )));
     }
-    let mut wanted = [false; 12];
+    let mut wanted = [false; RUN_QUANT_COLUMNS.len()];
     for (i, name) in RUN_QUANT_COLUMNS.iter().enumerate().take(fields.len()) {
         if fields[i].name() != name {
             return Err(err(&format!(
@@ -357,7 +375,7 @@ impl RunQuantBatches {
         let path = self.path.as_path();
         let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
         // Projected batches hold the wanted columns in file order.
-        let mut at = [usize::MAX; 12];
+        let mut at = [usize::MAX; RUN_QUANT_COLUMNS.len()];
         let mut k = 0;
         for (i, w) in self.wanted.iter().enumerate() {
             if *w {
@@ -399,7 +417,10 @@ impl RunQuantBatches {
         let env = col(9)
             .map(|c| column::<ListArray>(b, c, path))
             .transpose()?;
-        let k0 = col(11)
+        let share = col(11)
+            .map(|c| column::<Float32Array>(b, c, path))
+            .transpose()?;
+        let k0 = col(12)
             .map(|c| column::<Float32Array>(b, c, path))
             .transpose()?;
         let text =
@@ -429,6 +450,7 @@ impl RunQuantBatches {
                 faims_cv: cv.and_then(|a| (!a.is_null(i)).then(|| a.value(i))),
                 envelope,
                 proteins: text(prot, i),
+                isotope_share: share.map_or(0.0, |a| a.value(i)),
                 ion_mobility: k0.and_then(|a| (!a.is_null(i)).then(|| a.value(i))),
             });
         }
@@ -477,6 +499,7 @@ mod tests {
             faims_cv: if i % 2 == 0 { Some(-45.0) } else { None },
             envelope: vec![0.6, 0.3, 0.08, 0.02],
             proteins: "P1;P2".into(),
+            isotope_share: 0.9,
             ion_mobility: None,
         }
     }
@@ -497,6 +520,7 @@ mod tests {
             faims_cv: Some(-45.0),
             envelope: vec![0.6, 0.3, 0.08, 0.02],
             proteins: "P1;P2".into(),
+            isotope_share: 0.9,
             ion_mobility: None,
         }];
         let mods = [
@@ -513,6 +537,44 @@ mod tests {
         assert_eq!(m["UNIMOD:35"].to_bits(), 15.994915f64.to_bits());
         let bad = [("A;B".to_string(), 1.0)];
         assert!(write_run_quant_table(&p, "a", &rows, &bad).is_err());
+    }
+
+    #[test]
+    fn isotope_share_round_trips_and_must_be_in_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("s.quant.parquet");
+        let shares = [1.0f32, 0.948_998_3, 0.871_108_8, 0.5];
+        let rows: Vec<RunPsmRow> = shares
+            .iter()
+            .enumerate()
+            .map(|(i, &s)| RunPsmRow {
+                isotope_share: s,
+                ..row(i)
+            })
+            .collect();
+        write_run_quant_table(&p, "s", &rows, &[]).unwrap();
+        let back = read_run_quant_table(&p).unwrap().1;
+        for (b, s) in back.iter().zip(shares) {
+            assert_eq!(b.isotope_share.to_bits(), s.to_bits());
+        }
+        // Read alone, and left out of a projection.
+        let only: Vec<RunPsmRow> = open_run_quant_table(&p, &["isotope_share"])
+            .unwrap()
+            .flat_map(|b| b.unwrap())
+            .collect();
+        assert_eq!(only[1].isotope_share, shares[1]);
+        assert!(only[1].envelope.is_empty());
+        for bad in [0.0f32, -0.5, 1.000_001, f32::NAN, f32::INFINITY] {
+            let rows = vec![RunPsmRow {
+                isotope_share: bad,
+                ..row(0)
+            }];
+            let e = write_run_quant_table(&p, "s", &rows, &[]).unwrap_err();
+            assert!(
+                e.contains("isotope share") && e.contains("PEPTIDEK/2"),
+                "{e}"
+            );
+        }
     }
 
     #[test]
@@ -556,6 +618,7 @@ mod tests {
                 faims_cv: r.faims_cv,
                 envelope: Vec::new(),
                 proteins: String::new(),
+                isotope_share: 0.0,
                 ion_mobility: None,
             })
             .collect();
@@ -572,12 +635,15 @@ mod tests {
     fn quant_table_rejects_unknown_major_version() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("b.quant.parquet");
-        write_with_schema_version(&p, "b", &[], "2.0").unwrap();
-        let e = read_run_quant_table(&p).unwrap_err();
-        assert!(
-            e.contains("b.quant.parquet") && e.contains("schema 2.0"),
-            "{e}"
-        );
+        // The layout before `isotope_share` (major 1) and a later one.
+        for version in ["1.2", "3.0"] {
+            write_with_schema_version(&p, "b", &[], version).unwrap();
+            let e = read_run_quant_table(&p).unwrap_err();
+            assert!(
+                e.contains("b.quant.parquet") && e.contains(&format!("schema {version}")),
+                "{e}"
+            );
+        }
     }
 
     #[test]

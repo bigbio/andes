@@ -63,8 +63,28 @@ pub fn isotope_envelope_from_formula(
     s: u32,
     n_isotopes: usize,
 ) -> Vec<f64> {
+    isotope_envelope_and_share_from_formula(c, h, n, o, s, n_isotopes).0
+}
+
+/// The envelope of [`isotope_envelope_from_formula`] and the share of the
+/// whole isotope pattern that its `n_isotopes` peaks hold: the probability
+/// that a molecule is fewer than `n_isotopes` nominal mass units above the
+/// monoisotope. Every per-atom ladder sums to 1 and a peak only receives
+/// from lower peaks, so the peaks kept by the convolution are the exact
+/// fractions of the whole pattern and the share is their sum before the
+/// envelope is normalised.
+///
+/// `(empty, 0.0)` when `n_isotopes == 0`.
+pub fn isotope_envelope_and_share_from_formula(
+    c: u32,
+    h: u32,
+    n: u32,
+    o: u32,
+    s: u32,
+    n_isotopes: usize,
+) -> (Vec<f64>, f64) {
     if n_isotopes == 0 {
-        return Vec::new();
+        return (Vec::new(), 0.0);
     }
     let mut env = vec![0.0f64; n_isotopes];
     env[0] = 1.0;
@@ -92,7 +112,7 @@ pub fn isotope_envelope_from_formula(
             *v /= sum;
         }
     }
-    env
+    (env, sum)
 }
 
 /// Approximate elemental formula of an N-glycopeptide of neutral mass `mass`
@@ -142,6 +162,48 @@ pub fn glycopeptide_isotope_envelope(mass: f64, n_isotopes: usize) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn share_is_the_fraction_of_the_whole_pattern_in_the_kept_peaks() {
+        // Reference values from an untruncated convolution of the same
+        // per-atom ladders: (C, H, N, O, S), share of M..M+3, M..M+4.
+        let cases = [
+            ((5, 10, 2, 3, 0), 0.999_977_287_454, 0.999_999_081_304),
+            ((44, 70, 12, 13, 0), 0.995_235_617_258, 0.999_268_002_862),
+            ((89, 140, 24, 27, 1), 0.948_998_300_675, 0.984_894_597_691),
+            ((133, 209, 37, 40, 1), 0.871_108_790_480, 0.950_089_442_060),
+        ];
+        for ((c, h, n, o, s), share4, share5) in cases {
+            let (env4, got4) = isotope_envelope_and_share_from_formula(c, h, n, o, s, 4);
+            let (_, got5) = isotope_envelope_and_share_from_formula(c, h, n, o, s, 5);
+            assert!((got4 - share4).abs() < 1e-10, "C{c}: {got4} vs {share4}");
+            assert!((got5 - share5).abs() < 1e-10, "C{c}: {got5} vs {share5}");
+            // The envelope times the share is each peak's fraction of the
+            // whole pattern: the same peaks of a 60-isotope envelope, which
+            // holds all of it.
+            let (env60, all) = isotope_envelope_and_share_from_formula(c, h, n, o, s, 60);
+            assert!((all - 1.0).abs() < 1e-12, "C{c}: {all}");
+            for k in 0..4 {
+                assert!(
+                    (env4[k] * got4 - env60[k] * all).abs() < 1e-12,
+                    "C{c} peak {k}"
+                );
+            }
+            assert!((env4.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+            assert_eq!(env4, isotope_envelope_from_formula(c, h, n, o, s, 4));
+        }
+        // 2 kDa peptide M+1 fraction of the whole pattern, as a spot check.
+        let (env, share) = isotope_envelope_and_share_from_formula(89, 140, 24, 27, 1, 4);
+        assert!((env[1] * share - 0.333_883_045_9).abs() < 1e-9);
+        assert_eq!(
+            isotope_envelope_and_share_from_formula(1, 1, 1, 1, 1, 0),
+            (Vec::new(), 0.0)
+        );
+        assert_eq!(
+            isotope_envelope_and_share_from_formula(0, 0, 0, 0, 0, 3),
+            (vec![1.0, 0.0, 0.0], 1.0)
+        );
+    }
 
     #[test]
     fn averagine_envelope_is_normalized_and_decays_for_small_peptide() {

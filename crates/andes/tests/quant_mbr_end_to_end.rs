@@ -20,8 +20,9 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 /// Designed quantity of HLVDEPQNLIK/2 (peptide 4): mono apex 8e5 times the
 /// summed first four isotope fractions over the mono's (2.06764, a coarse
-/// isotope pattern), times sigma (4 s) times sqrt(2 pi).
-const PEPTIDE4_QUANTITY: f64 = 16_584_995.85;
+/// isotope pattern), times sigma (4 s) times sqrt(2 pi), over the share of
+/// the whole pattern that the formula gives the four isotopes (0.9887).
+const PEPTIDE4_QUANTITY: f64 = 16_584_995.85 / 0.9887;
 
 const RUNS: [&str; 3] = ["mbr_run1", "mbr_run2", "mbr_run3"];
 

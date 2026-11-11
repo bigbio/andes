@@ -92,6 +92,14 @@
 //! reports the extract's own `quantity` and `quantity_se`. The extract
 //! tables keep the per-run values.
 //!
+//! Whole isotope pattern: the fits use the first four isotopes of a
+//! precursor, so the values above are the area of those four. The reported
+//! `quantity` and `quantity_se` are these divided by the precursor's
+//! `isotope_share` (library table): the share of the whole pattern the four
+//! isotopes hold, from the same formula as the envelope. The extract tables,
+//! the fits, the model features and the normalisation offsets keep the
+//! four-isotope values.
+//!
 //! Trace area (`quant finalize --quant-trace-fraction F`, default 0.1; `--mbr`
 //! uses the default): the brightest share `F` of the precursors, ranked by the
 //! median amplitude
@@ -106,7 +114,8 @@
 //! its run's offset at the row's apex RT removed ([`quant::normalize`]: a
 //! level per run and an RT-local term). The offsets are fitted on the
 //! identified targets with `quant_q <= 0.01` and a positive quantity; a run
-//! without enough of them reports null. `quantity` stays the raw measurement.
+//! without enough of them reports null. `quantity` stays the measurement
+//! without the offset.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -1266,6 +1275,13 @@ pub(crate) fn reported_quantity(
     }
 }
 
+/// `(quantity, quantity_se)` of the whole isotope pattern, from the pair
+/// measured on the library envelope, whose isotopes hold `share` of it.
+pub(crate) fn whole_pattern((quantity, se): (f64, f64), share: f32) -> (f64, f64) {
+    let share = f64::from(share);
+    (quantity / share, se / share)
+}
+
 /// Floor of `amplitude_se` in the amplitude signal-to-noise feature.
 const MIN_AMPLITUDE_SE: f64 = 1e-12;
 
@@ -1705,6 +1721,7 @@ mod tests {
                 mz: mz_of(p),
                 charge: CHARGE,
                 envelope: ENVELOPE,
+                isotope_share: 1.0,
             })
             .collect();
         let mut psms = Vec::new();
@@ -2061,6 +2078,7 @@ mod tests {
                 mz: 400.0 + 7.3 * p as f64,
                 charge: CHARGE,
                 envelope: ENVELOPE,
+                isotope_share: 1.0,
             })
             .collect();
         let mut psms = Vec::new();
@@ -2602,6 +2620,7 @@ mod finalize_tests {
                 mz: 500.0 + p as f64,
                 charge: 2,
                 envelope: [0.55, 0.30, 0.11, 0.04],
+                isotope_share: 1.0,
             })
             .collect();
         build_library(&[], meta, 2, 0.01, 0.01, None, &AlignParams::default())
@@ -3160,7 +3179,10 @@ mod finalize_tests {
             // feature parquet.
             let reported = |r: &ExtractRow| {
                 r.evidence.as_ref().filter(|e| e.amplitude > 0.0).map(|e| {
-                    reported_quantity(e, r.run, w_c.get(&r.precursor).copied(), false, maps)
+                    whole_pattern(
+                        reported_quantity(e, r.run, w_c.get(&r.precursor).copied(), false, maps),
+                        lib.meta[r.precursor as usize].isotope_share,
+                    )
                 })
             };
             let mut out: Vec<OutEntry<'_>> = Vec::new();
@@ -4074,6 +4096,82 @@ mod finalize_tests {
         let t = table(&mbr);
         let col = |name: &str| t[0].iter().position(|h| h == name).unwrap();
         assert_eq!(col("quantity_normalized"), col("quantity_se") + 1);
+    }
+
+    #[test]
+    fn whole_pattern_divides_quantity_and_error_by_the_share() {
+        assert_eq!(whole_pattern((3.0, 0.5), 1.0), (3.0, 0.5));
+        assert_eq!(whole_pattern((3.0, 0.5), 0.5), (6.0, 1.0));
+        let share = 0.871_108_8_f32;
+        let (q, se) = whole_pattern((1e7, 2e5), share);
+        assert_eq!((q, se), (1e7 / f64::from(share), 2e5 / f64::from(share)));
+        assert!((q / 1e7 - 1.0 / 0.871_108_8).abs() < 1e-7);
+    }
+
+    #[test]
+    fn finalize_reports_whole_pattern_quantities() {
+        // The same rows against two libraries that differ only in the
+        // isotope shares: 1 everywhere, and four values by precursor.
+        let share = |p: u32| [1.0_f32, 0.948_998_3, 0.871_108_8, 0.5][p as usize % 4];
+        let mut lib = library();
+        for (p, m) in lib.meta.iter_mut().enumerate() {
+            m.isotope_share = share(p as u32);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let runs = extract_two_identified_runs(2.0);
+        let run = |name: &str, lib: &Library| {
+            let (mbr, val) = mbr_paths(&dir.path().join(name));
+            let s = finalize(&stems(), lib, &runs, 0.01, None, 7, &mbr, &val).unwrap();
+            (s.features, table(&mbr), table(&val))
+        };
+        let (four, four_table, four_validation) = run("four", &library());
+        let (whole, whole_table, whole_validation) = run("whole", &lib);
+        // The rows, their evidence types and their q-values do not use the
+        // share, nor does the validation.
+        assert_eq!(four_validation, whole_validation);
+        assert_eq!(four.len(), whole.len());
+        let (mut scaled, mut normalized) = (0, 0);
+        for (f, w) in four.iter().zip(&whole) {
+            assert_eq!((f.precursor, f.run), (w.precursor, w.run));
+            assert_eq!(
+                (f.evidence_type, f.transfer_q, f.quant_q, f.apex_rt_s),
+                (w.evidence_type, w.transfer_q, w.quant_q, w.apex_rt_s)
+            );
+            let s = f64::from(share(f.precursor));
+            assert_eq!(w.quantity, f.quantity.map(|q| q / s), "{f:?}");
+            assert_eq!(w.quantity_se, f.quantity_se.map(|q| q / s), "{f:?}");
+            assert_eq!(
+                w.quantity_normalized.is_some(),
+                f.quantity_normalized.is_some()
+            );
+            if let (Some(a), Some(b)) = (f.quantity_normalized, w.quantity_normalized) {
+                assert!((b * s / a - 1.0).abs() < 1e-12, "{f:?}");
+                normalized += 1;
+            }
+            if f.precursor % 4 == 0 {
+                // Share 1: the same bits.
+                assert_eq!(w.quantity_normalized, f.quantity_normalized);
+            } else if f.quantity.is_some() {
+                scaled += 1;
+            }
+        }
+        assert!(scaled > 300 && normalized > 300, "{scaled} {normalized}");
+        // The tables differ in the three quantity columns only.
+        assert_eq!(four_table.len(), whole_table.len());
+        let quantity_columns = ["quantity", "quantity_se", "quantity_normalized"];
+        for (a, b) in four_table.iter().zip(&whole_table) {
+            for ((name, a), b) in four_table[0].iter().zip(a).zip(b) {
+                if !quantity_columns.contains(&name.as_str()) {
+                    assert_eq!(a, b, "{name}");
+                }
+            }
+        }
+        let quantity = four_table[0].iter().position(|h| h == "quantity").unwrap();
+        assert!(four_table
+            .iter()
+            .zip(&whole_table)
+            .skip(1)
+            .any(|(a, b)| a[quantity] != b[quantity]));
     }
 
     #[test]

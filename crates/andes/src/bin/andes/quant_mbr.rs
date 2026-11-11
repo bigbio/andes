@@ -97,7 +97,8 @@
 //! `w' = k * (w / width_ratio) * (width_ratio / k)^lambda_run`: the relative
 //! width times the width prior of the row's own run, aligned or not, moved
 //! the share `lambda_run` of the way (in log scale) to the row's own fitted
-//! width `w`. `lambda_run` in `[0, 1]` is learned per run from the data,
+//! width `w`; a transfer row keeps `lambda_run = 0` ([`row_width_weight`]).
+//! `lambda_run` in `[0, 1]` is learned per run from the data,
 //! without labels ([`run_width_weights`]): the normalisation reference cells
 //! of a run take the weight that makes them agree best with the same
 //! precursors in the other runs, so a run whose peaks are really narrower or
@@ -1446,6 +1447,19 @@ pub(crate) fn describe_width_weights(weights: &[f64]) -> String {
         .map(|(s, n)| format!("{:.1}: {n}", s as f64 / f64::from(WIDTH_WEIGHT_STEPS)))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The width weight of row `r` at run width weights `weights`: its run's
+/// weight for an identified row, 0 for any other. A transfer's fitted width
+/// is not confirmed by an identification of the peak, and transfers of low
+/// abundance fit narrower peaks than their precursor's relative width, so a
+/// transfer keeps the relative width.
+pub(crate) fn row_width_weight(r: &ExtractRow, weights: &[f64]) -> f64 {
+    if r.role == Role::Identified {
+        weights.get(r.run as usize).copied().unwrap_or(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// The normalisation reference cells of `cells` (each with its
@@ -3406,7 +3420,7 @@ mod finalize_tests {
                             e,
                             k.get(&r.precursor).copied(),
                             false,
-                            weights[r.run as usize],
+                            row_width_weight(r, &weights),
                         ),
                         lib.meta[r.precursor as usize].isotope_share,
                     )
@@ -4048,6 +4062,25 @@ mod finalize_tests {
         let three: Vec<WidthCell> = width_cells(300).into_iter().filter(|c| c.run < 3).collect();
         assert_eq!(run_width_weights(&three, 4), vec![0.0; 4]);
         assert_eq!(run_width_weights(&[], 2), vec![0.0; 2]);
+    }
+
+    #[test]
+    fn only_identified_rows_take_the_run_width_weight() {
+        let rows = jittered_rows(3, [0.7, 1.4, 1.0]);
+        let weights = [0.6, 0.3, 1.0];
+        for r in &rows {
+            let want = if r.role == Role::Identified {
+                weights[r.run as usize]
+            } else {
+                0.0
+            };
+            assert_eq!(row_width_weight(r, &weights), want);
+        }
+        // A run beyond the weights keeps 0.
+        assert_eq!(row_width_weight(&rows[0], &[]), 0.0);
+        let mut transfer = rows[0].clone();
+        transfer.role = Role::Transfer;
+        assert_eq!(row_width_weight(&transfer, &weights), 0.0);
     }
 
     #[test]

@@ -1829,7 +1829,9 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
   `w_prior` is the run's width prior at the row's RT and `width_ratio = w / w_prior` (both in
   `<stem>.extract.parquet`); the precursor's relative width `k` is the median `width_ratio` of
   its identified fits with `A > 0`. At `λ = 0` a precursor has one width relative to each run's
-  peak widths; at `λ = 1` the row keeps its own fitted width. The run weight `λ`, one of
+  peak widths; at `λ = 1` the row keeps its own fitted width. Only identified rows take their run's `λ`;
+  a transfer keeps `λ = 0`: its fitted width is not confirmed by an identification, and
+  transfers of low abundance fit narrower peaks than their precursor's relative width. The run weight `λ`, one of
   `0, 0.1, …, 1`, is learned from the data without labels: it is the weight at which the run's
   normalisation reference cells agree best with the same precursors in the other runs (the
   smallest median absolute deviation of each cell from its precursor's mean over the other
@@ -1838,7 +1840,7 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
   narrow or widen against its width prior,
   for example at a much lower load, keeps that change in its quantities; a run whose width
   deviations are fit noise keeps the relative width. The finalize log lists how many runs took
-  each weight. Transfers use the same rule. A precursor without such an identified fit, and a
+  each weight. A precursor without such an identified fit, and a
   row without a width prior, reports its own per-run area. `<stem>.extract.parquet` keeps the
   per-run `quantity` and `quantity_se` (`A · w · √(2π)`) for provenance.
 * **Trace area of the brightest precursors.** `<stem>.extract.parquet` also keeps a

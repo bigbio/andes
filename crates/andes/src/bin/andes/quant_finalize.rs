@@ -73,9 +73,9 @@ use rayon::prelude::*;
 
 use crate::quant_mbr::{
     amplitude_snr, cosine, describe_width_weights, donor_fit, family, identified_features,
-    iso_profile, local_slope, median, relative_fit_width, reported_quantity, transfer_features,
-    weigh_widths, whole_pattern, width_deviation, DonorFit, ExtractRow, Role, ShapeReference,
-    NO_SHAPE, TRANSFER_DONOR_Q,
+    iso_profile, local_slope, median, relative_fit_width, reported_quantity, row_width_weight,
+    transfer_features, weigh_widths, whole_pattern, width_deviation, DonorFit, ExtractRow, Role,
+    ShapeReference, NO_SHAPE, TRANSFER_DONOR_Q,
 };
 use crate::transfer_fdr::{
     member_seed, pack_family, row_unit, sample_hash, stratum_of, train_bagged_folds, train_folds,
@@ -2336,7 +2336,7 @@ pub(crate) fn finalize_stream(
                 let (k, trace) = quantity_rule(summaries, r.precursor);
                 r.evidence.as_ref().filter(|e| e.amplitude > 0.0).map(|e| {
                     whole_pattern(
-                        reported_quantity(e, k, trace, width_weights[r.run as usize]),
+                        reported_quantity(e, k, trace, row_width_weight(r, &width_weights)),
                         lib.meta[r.precursor as usize].isotope_share,
                     )
                 })

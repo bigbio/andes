@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Scoreboard suite: one manifest -> one result JSON per (dataset, seed) -> one scoreboard (board.py).
 
-  python -m quant_eval.suite --manifest manifest.json --out results/ [--only u9740,qe] [--seeds 42,1,7]
+  python -m quant_eval.suite --manifest manifest.json --out results/ [--only u9740,qe] [--seeds 42,1,7] [--jobs 3]
   python -m quant_eval.board --results results/ > scoreboard.md
+  python -m quant_eval.compare --results results/ [--build cand]
   python -m quant_eval.gate  --results results/ --candidate cand [--baseline main]
 
 The manifest (JSON; relative paths resolve against the manifest's folder) names, per dataset, the design files, the database, the tool outputs
@@ -26,6 +27,7 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor
 
 from . import downstream as DS
 from . import masked as MK
@@ -75,6 +77,14 @@ def tool_args(D, base):
             else:
                 pth = _p(base, pth)
             a += [flag, f"{name}:{pth}"]
+    # the match-q filtered MaxQuant arm: the manifest's `maxquant_matchq` {name: evidence.txt} (an evidence table that carries a filled Match q-value),
+    # by default the evidence table of the as-reported arm `MQ`
+    tools = D.get("tools") or {}
+    mq_q = tools.get("maxquant_matchq")
+    if mq_q is None and "MQ" in tools.get("maxquant", {}):
+        mq_q = {"MQ_q01": tools["maxquant"]["MQ"]}
+    for name, pth in (mq_q or {}).items():
+        a += ["--maxquant-matchq", f"{name}:{_p(base, pth)}:0.01"]
     return a
 
 
@@ -184,6 +194,13 @@ def run_one(M, dn, seed, out, abs_curves, held_out_eval=False, tol=None):
     return RES
 
 
+def _unit(u):
+    """one (dataset, seed) evaluation; the unit a worker process runs."""
+    M, d, seed, out, abs_curves, held_out_eval, tol = u
+    print(f"== {d} seed {seed}", file=sys.stderr)
+    run_one(M, d, seed, out, abs_curves, held_out_eval, tol)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--manifest", required=True)
@@ -192,6 +209,8 @@ def main(argv=None):
     ap.add_argument("--seeds", default=",".join(SEEDS))
     ap.add_argument("--held-out-eval", action="store_true",
                     help="explicit held-out evaluation mode: only then may held-out datasets be run; their results are marked and refused by gate.py")
+    ap.add_argument("--jobs", type=int, default=1,
+                    help="worker processes; each (dataset, seed) pair is one unit and writes its own result JSON (default 1: one after the other)")
     a = ap.parse_args(argv)
     M = load_manifest(a.manifest)
     os.makedirs(a.out, exist_ok=True)
@@ -204,6 +223,7 @@ def main(argv=None):
     noise = {d: reference_noise(M, d) for d in want if M["datasets"][d].get("andes")}
     for d in want:
         noise.setdefault(d, None)
+    units = []
     for seed in a.seeds.split(","):
         abs_curves = absence_pre(M, seed, a.out)
         for d in want:
@@ -211,8 +231,13 @@ def main(argv=None):
             if not D.get("andes") and not D.get("tools"):
                 print(f"skip {d}: no inputs in the manifest", file=sys.stderr)
                 continue
-            print(f"== {d} seed {seed}", file=sys.stderr)
-            run_one(M, d, seed, a.out, abs_curves, a.held_out_eval, noise[d])
+            units.append((M, d, seed, a.out, abs_curves, a.held_out_eval, noise[d]))
+    if a.jobs > 1 and len(units) > 1:
+        with ProcessPoolExecutor(max_workers=min(a.jobs, len(units))) as ex:
+            list(ex.map(_unit, units))   # a failed unit raises here
+    else:
+        for u in units:
+            _unit(u)
 
 
 if __name__ == "__main__":

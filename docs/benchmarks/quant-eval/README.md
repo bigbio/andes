@@ -153,4 +153,43 @@ python3 -m quant_eval.proteobench --finalize fin.parquet --design design.tsv --f
   any result flagged held-out; they never enter a gate or tuning run.
 - `--hard-cut` accepts `hard-cut=<tau>` as an andes rule (`--andes NAME:hard-cut=0.004:finalize.parquet`).
 
+## Board metrics: low-level UPS1, absence classes, blank split
+
+`board.py` keeps its legacy columns (`--legacy` prints exactly those) and adds, to their right, columns from `lowlevel.py` and `absence.py`
+(computed by `downstream.py` into the result JSON, so a rerun of the suite is needed to produce them; `--detail` adds the long tables):
+
+- L1 with its levels named (the amol levels summed, flagged when one is also a reference level, `ref_skip` = 3 lowest levels excluded from the
+  references), the UPS1 rows the arm reports at those levels, the share of them within 2x and their median |log2 error|, and the L1 count at a matched
+  number of rows (per level, every arm limited to the smallest row count among andes, MaxQuant and FragPipe; the headline is the expected count for rows drawn at random, the best-first reading orders
+  andes by its quality column and the other arms by intensity, so its order differs per arm); the rows of precursors without a design reference are printed (+ unscored) and counted as not within 2x in a second precision column. The L1 count alone grows with the number of rows an arm reports; the diagnostic andes rule `every-row`
+  (all rows including the below-threshold ones) shows the count-only effect.
+- A2: error of the transferred rows (median signed and absolute error, within-2x share) at each level, identified rows next to them.
+- PXD014415: the yeast rows in the human-only runs by class of the precursor's own profile (yeast-enriched, not yeast-specific, only in absent runs),
+  with the boundary learned from the control species' spread (per bin of absent-run rows, the control count of each bin printed; a bin with fewer than 100 control precursors uses the pooled cutoff) and the fixed 2x next to it. Profile and cutoffs are derived once from a reference table (the andes every-row table) and every arm is classified against it; a precursor missing from the reference is `not_in_reference`. The noise-removed rate is a lower bound of the species-specific errors; the board prints the enriched rate and, in brackets, enriched + the rows without a yeast-run reference.
+- Blank run: rows split into identified and transferred, and the carry-over-like rows (below a fraction of the precursor's median in the other runs,
+  the fraction learned from the ordinary runs).
+
+- DE: the intersection family is a set of candidate proteins and each arm still tests only those with at least 2 finite values on both sides of a pair,
+  so the tested (protein, pair) rows differ between arms. The `common` family (proteins testable in the pair in every match-between-runs arm; `common_all`
+  over every shared arm) has identical tested rows; the board prints it next to the legacy column, with the tested-row counts. `TPs` (expected sign)
+  is the sign-aware true-positive count, `WS` the wrong-sign calls, and the sign-aware false count is FP + WS (`tp_at_fdp_signed` for the pooled-FDP reading).
+  The legacy DE column is unchanged (unsigned TP, intersection family, each arm's own testable rows) and is labelled so on the default board.
+- Board cosmetics: `within 2x %` (equal to 100 - `err>1 %`) is dropped from the default board, an empty absence rate prints `-`, FlashLFQ is labelled
+  peptide-level (charge states summed) and Sage as having no transfer flag (its MBR fills count as identified). `--legacy` prints the earlier columns and labels.
+
+Tests: `python3 tests/test_board_metrics.py`.
+
 Refs #299.
+
+## Roll-up sensitivity (mokume)
+
+`rollup_sens.py` scores the protein level of every arm after several roll-ups of the same raw precursor intensities: the harness
+median polish and the quantification methods of mokume (`rollup_mokume.py`: MaxLFQ, DirectLFQ, Top3, sum, median) under the harness
+run normalisation and under mokume's own `globalMedian` normalisation. The tool's own protein intensity (MaxQuant `LFQ intensity`
+of `proteinGroups.txt`) is added as a reference row. No roll-up is implemented in the package: mokume-py must be importable
+(`pip install mokume-py directlfq`). The default of every other module is unchanged.
+
+```
+python3 -m quant_eval.rollup_sens --manifest manifest.json --dataset u9740 --seed 42 --out results/u9740_s42.json
+python3 -m quant_eval.rollup_sens_table --results results/ > rollup_sensitivity.md
+```

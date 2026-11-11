@@ -200,22 +200,34 @@ fn rank_desc_then_idx(a: &PsmMatch, b: &PsmMatch) -> std::cmp::Ordering {
     b.cmp(a)
 }
 
-/// Calibration-adjusted neutral mass of `co` and the precursor tolerance (Da)
-/// around it that a secondary candidate must fall within.
-pub(crate) fn secondary_mass_window(co: CoIsolated, params: &SearchParams) -> (f64, f64) {
+/// Calibration-adjusted neutral mass of `co` and the precursor tolerances (Da)
+/// a secondary candidate must fall within: `left` for a peptide lighter than
+/// the observed mass, `right` for a heavier one, as in the primary search.
+pub(crate) fn secondary_mass_window(co: CoIsolated, params: &SearchParams) -> (f64, f64, f64) {
     let co_neutral =
         adjusted_observed_neutral_mass(co.neutral_mass, params.precursor_mass_shift_ppm);
-    let tol = params.precursor_tolerance.left.as_da(co_neutral).max(0.01);
-    (co_neutral, tol)
+    let left = params.precursor_tolerance.left.as_da(co_neutral).max(0.01);
+    let right = params.precursor_tolerance.right.as_da(co_neutral).max(0.01);
+    (co_neutral, left, right)
+}
+
+/// Whether a peptide of neutral mass `peptide_mass` lies in the window of
+/// [`secondary_mass_window`].
+fn in_secondary_mass_window(peptide_mass: f64, co_neutral: f64, left: f64, right: f64) -> bool {
+    let d = peptide_mass - co_neutral;
+    d >= -left && d <= right
 }
 
 /// Inclusive `nominal(peptide.mass() - H2O)` bucket range [`search_secondary`]
 /// scans for `co`: the exact-mass window of [`secondary_mass_window`] widened by
 /// one nominal unit on each side.
 pub(crate) fn secondary_nominal_window(co: CoIsolated, params: &SearchParams) -> (i32, i32) {
-    let (co_neutral, tol) = secondary_mass_window(co, params);
+    let (co_neutral, left, right) = secondary_mass_window(co, params);
     let nominal = |m: f64| nominal_from(m - H2O);
-    (nominal(co_neutral - tol) - 1, nominal(co_neutral + tol) + 1)
+    (
+        nominal(co_neutral - left) - 1,
+        nominal(co_neutral + right) + 1,
+    )
 }
 
 /// Best secondary PSM for `co` on `spec`, after removing the primary peptide's
@@ -290,7 +302,7 @@ pub(crate) fn search_secondary(
     //    shift would exclude the true secondary before GF scoring. The GF below
     //    derives its own window from `co_spec`'s raw precursor m/z and applies the
     //    shift internally, so it stays consistent.
-    let (co_neutral, tol) = secondary_mass_window(co, params);
+    let (co_neutral, tol_left, tol_right) = secondary_mass_window(co, params);
     let (lo, hi) = secondary_nominal_window(co, params);
 
     // Tailor + DeltaRawScore accumulation over this secondary's candidate score
@@ -312,7 +324,7 @@ pub(crate) fn search_secondary(
         for &ci in idxs {
             let cand = &candidates[ci];
             // Exact-mass gate (the nominal range is integer-coarse).
-            if (cand.peptide.mass() - co_neutral).abs() > tol {
+            if !in_secondary_mass_window(cand.peptide.mass(), co_neutral, tol_left, tol_right) {
                 continue;
             }
             // Don't re-emit the primary peptide as a secondary on its own scan: a
@@ -1126,5 +1138,30 @@ pub(crate) mod tests {
             "mass error must be reported on the calibrated scale (~0), got {} ppm",
             psm.mass_error_ppm
         );
+    }
+
+    #[test]
+    fn secondary_window_uses_left_for_lighter_and_right_for_heavier() {
+        use model::tolerance::{PrecursorTolerance, Tolerance};
+        let aa_set = model::AminoAcidSetBuilder::new_standard().build().unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.precursor_tolerance =
+            PrecursorTolerance::asymmetric(Tolerance::Da(0.05), Tolerance::Da(0.5));
+        let co = CoIsolated {
+            mono_mz: 600.0,
+            charge: 2,
+            neutral_mass: 1198.0,
+        };
+        let (center, left, right) = secondary_mass_window(co, &params);
+        assert_eq!((left, right), (0.05, 0.5));
+        // 0.3 Da heavier is inside the right tolerance, 0.3 Da lighter is outside the left.
+        assert!(in_secondary_mass_window(center + 0.3, center, left, right));
+        assert!(!in_secondary_mass_window(center - 0.3, center, left, right));
+        assert!(in_secondary_mass_window(center - 0.04, center, left, right));
+        assert!(!in_secondary_mass_window(center + 0.6, center, left, right));
+        // The nominal bucket range covers both sides.
+        let (lo, hi) = secondary_nominal_window(co, &params);
+        assert!(lo <= nominal_from(center - left - H2O));
+        assert!(hi >= nominal_from(center + right - H2O));
     }
 }

@@ -544,7 +544,7 @@ pub fn write_glyco_pin(
 /// The non-glyco path enforces the same one-PSM-per-scan rule
 /// (`top_n_psms_per_spectrum = 1`). `collapse=false` dumps all hits — DIAGNOSTIC
 /// ONLY, never for FDR.
-pub(crate) fn select_emitted_hits(
+pub fn select_emitted_hits(
     hits: &[FullGlycoPsm],
     collapse: bool,
     enumerated_only: bool,

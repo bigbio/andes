@@ -18,6 +18,8 @@ mod acquisition;
 mod cli;
 #[path = "../config.rs"]
 mod config;
+#[path = "andes/glyco_quant.rs"]
+mod glyco_quant;
 #[path = "andes/glyco_run.rs"]
 mod glyco_run;
 #[path = "andes/inference_cmd.rs"]

@@ -203,7 +203,7 @@ impl QuantSettings {
         };
         let lfq_params = LfqParams {
             tol: cli.lfq_tol.unwrap_or(Tolerance::Ppm(10.0)),
-            rt_window_s: cli.lfq_rt_window,
+            rt_window_s: cli.lfq_rt_window.unwrap_or(60.0),
             gaussian_width_s: cli.lfq_gaussian_width,
             min_cosine: cli.lfq_min_cosine as f32,
             ..LfqParams::default()
@@ -550,6 +550,40 @@ impl QuantCollector {
 
     fn run_of(&self, spec_idx: usize) -> Option<usize> {
         self.runs.iter().position(|r| r.span.contains(&spec_idx))
+    }
+
+    /// Every run's captured MS1 scans, for the glyco driver's label-free
+    /// quantification (`--glyco --lfq`). Runs whose MS1 was not captured (an
+    /// input the reader could not give MS1 for) are absent: the caller names
+    /// them in the count it reports.
+    pub(crate) fn run_ms1(&self) -> Vec<RunMs1<'_>> {
+        self.runs
+            .iter()
+            .filter_map(|r| {
+                r.ms1.as_ref().map(|cache| RunMs1 {
+                    stem: &r.stem,
+                    span: r.span.clone(),
+                    cache,
+                })
+            })
+            .collect()
+    }
+}
+
+/// One run's cached MS1 scans, loaded on demand. The glyco quant driver holds
+/// one run resident at a time, exactly as the peptide LFQ path does.
+pub(crate) struct RunMs1<'a> {
+    /// The run's name (its input file's stem).
+    pub(crate) stem: &'a str,
+    /// The run's slice of the global spectrum list.
+    pub(crate) span: Range<usize>,
+    cache: &'a Ms1Cache,
+}
+
+impl RunMs1<'_> {
+    /// Read the run's MS1 scans back from the cache.
+    pub(crate) fn load(&self) -> Result<Ms1RunIndex, String> {
+        self.cache.load()
     }
 }
 

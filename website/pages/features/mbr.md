@@ -28,12 +28,14 @@ flowchart TD
 - **`transfer_q`**: an internal quant-quality q-value that counts both wrong peaks and false
   donors, estimated within strata of how often the runs most like this one identified the
   precursor; it is not an identification FDR.
+- **`measurement_q`** (MBR table): for an accepted transfer, the running mean of its probability
+  of a wrong measurement (a model trained on the pseudo-transfers); empty for other rows.
 - **`quant_q`**: for an identified row, the quality q-value of its MS1 feature; for an accepted
-  transfer, the running mean of its probability of a wrong measurement (a model trained on the
-  pseudo-transfers), so `quant_q <= 0.01` keeps accepted transfers whose estimated rate of wrong measurements is at most 1%.
-  Rows are never dropped; filtering on `quant_q` is the user's choice.
-- A validation table (`<stem>.mbr_validation.parquet`) reports the pseudo-transfer acceptance and
-  wrong-peak rates, so the error control is auditable.
+  transfer, the larger of `transfer_q` and `measurement_q`. A cut such as `quant_q <= 0.01` keeps
+  a row only when every error estimate made for it is at most 1%; it is not the error rate of the
+  rows kept. Rows are never dropped; filtering on `quant_q` is the user's choice.
+- A validation table (`<stem>.mbr_validation.parquet`) reports the pseudo-transfer acceptance,
+  wrong-peak and wrong-measurement rates, so the error control is auditable.
 
 ## Measured
 

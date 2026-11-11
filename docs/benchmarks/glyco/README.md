@@ -15,6 +15,12 @@ The scripts behind every glyco number in this repository. None computes FDR; Per
 | `score_vs_truth.py`, `agreement.py`, `make_truth.py` | Score against `truth/`, peptidoform agreement, build references. |
 | `compare_engines.py` | Cross-engine overlap on `MouseLiver-Z-T-1` (PXD031032); writes `cross_engine_pxd031032.md`. |
 
+[`quant_mouse_liver/`](quant_mouse_liver/) is a complete LFQ + MBR benchmark on the five
+mouse-liver fractions: report, figures and the analysis scripts. It records one rule that
+applies to every `.glyco.lfq.tsv`: `Accepted` is a **feature/measurement** q-value, not an
+identification FDR — join `SpecId` to the Percolator `out.psms` q-value before reading the
+table as identifications.
+
 ## Two rules these scripts encode
 
 **Pool fractions before Percolator.** One fraction yields on the order of 0-2 glyco decoys, so

@@ -8,7 +8,7 @@ scoring models, with no flag needed. An uncovered regime uses the nearest model.
 ```mermaid
 flowchart LR
     F["Spectrum file<br/>mzML · .raw · .d"] --> M["Metadata<br/>activation · analyzer ·<br/>isobaric label"]
-    M --> S{{"Model store<br/>17 models trained on<br/>public PRIDE data"}}
+    M --> S{{"Model store<br/>19 models trained on<br/>public PRIDE data"}}
     S --> H["High-res HCD<br/>fused strong score"]
     S --> L["Low-res CID<br/>generating-function rank score"]
     S --> O["ETD · UVPD · TMT · iTRAQ ·<br/>phospho variants"]

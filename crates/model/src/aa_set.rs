@@ -146,6 +146,7 @@ pub struct AminoAcidSet {
     neighboring_aa_cleavage_credit: i32,
     neighboring_aa_cleavage_penalty: i32,
     has_label_channels: bool,
+    label_channels: Vec<(String, u8)>,
 }
 
 impl AminoAcidSet {
@@ -186,6 +187,12 @@ impl AminoAcidSet {
     pub fn form_labels(&self, residue: u8, n: Terminus, c: Terminus) -> Option<&[u8]> {
         let l = &self.forms[form_index(residue, n, c)].labels;
         (!l.is_empty()).then_some(l.as_slice())
+    }
+
+    /// The registered channel labels (mod name, channel), for a set built
+    /// from this one's [`Self::distinct_mods`].
+    pub fn label_channels(&self) -> &[(String, u8)] {
+        &self.label_channels
     }
 
     /// Whether channel labels were registered
@@ -786,6 +793,7 @@ impl AminoAcidSetBuilder {
             neighboring_aa_cleavage_credit: 0,
             neighboring_aa_cleavage_penalty: 0,
             has_label_channels: !self.label_channels.is_empty(),
+            label_channels: self.label_channels,
         })
     }
 }

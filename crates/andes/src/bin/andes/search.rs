@@ -433,7 +433,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         check_mbr_args(&cli)?;
         // Before the scratch directory exists: a rejected run writes nothing.
         crate::quant_run::check_unique_stems(&cli.spectrum)?;
-        if cli.quant_dir.is_none() {
+        // `--label --mbr` transfers in memory, without per-run artifacts.
+        if cli.quant_dir.is_none() && cli.label.is_none() {
             let dir = scratch_tempdir("andes-quant-", &scratch_dir)?;
             cli.quant_dir = Some(dir.path().to_path_buf());
             _mbr_tmp = Some(dir);
@@ -976,6 +977,15 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .filter_map(|m| m.annotated_site_mass)
         .collect();
+    // `--label`: the channel labels join the search as variable mods that
+    // every labelable site of a peptide carries alike.
+    let label_spec = match &cli.label {
+        Some(text) => Some(crate::quant_run::label_spec(&cli, text)?),
+        None => None,
+    };
+    if let Some(spec) = &label_spec {
+        aa = with_label_mods(&aa, spec)?;
+    }
     let mut params = SearchParams::default_tryptic(aa);
     params.precursor_tolerance = PrecursorTolerance::symmetric(cli.precursor_tol);
     // Ranges are validated (min <= max) by the clap value parsers.
@@ -1148,6 +1158,17 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     params.max_variable_mods_per_peptide = cli.max_mods;
     if let Some(n) = num_mods_from_file {
         params.max_variable_mods_per_peptide = n; // NumMods= in --mods overrides --max-mods
+    }
+    if let Some(spec) = &label_spec {
+        // The labels do not use up the other mods' allowance.
+        let extra = crate::quant_run::label_run::max_label_sites(spec, params.max_missed_cleavages);
+        params.max_variable_mods_per_peptide += extra;
+        eprintln!(
+            "--label: channels {}; label mods added to the search (up to {extra} labelled sites \
+             per peptide on top of {} other variable mods)",
+            spec.describe(),
+            params.max_variable_mods_per_peptide - extra
+        );
     }
     params.precursor_cal_mode = cli.precursor_cal;
     if let Some(n) = cli.cal_min_spec_keys {
@@ -3168,7 +3189,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // `--mbr` inputs; the stages run after the last search output is
     // written and the search state is released.
-    let mbr_job = if cli.mbr && cli.tmt.is_none() {
+    let mbr_job = if cli.mbr && cli.tmt.is_none() && cli.label.is_none() {
         let (Some(dir), Some(map)) = (cli.quant_dir.clone(), rescore_map.as_ref()) else {
             return Err("--mbr needs --quant-dir and rescoring".into());
         };
@@ -3433,8 +3454,11 @@ fn check_mbr_args(cli: &Cli) -> Result<(), String> {
             cli.spectrum.len()
         ));
     }
-    if !cli.lfq && cli.tmt.is_none() {
-        return Err("--mbr needs --lfq (label-free) or --tmt (reporter ions)".into());
+    if !cli.lfq && cli.tmt.is_none() && cli.label.is_none() {
+        return Err(
+            "--mbr needs --lfq (label-free), --tmt (reporter ions) or --label (labelled pairs)"
+                .into(),
+        );
     }
     if !cli.rescore && !cli.rescore_native {
         return Err(
@@ -3813,4 +3837,34 @@ mod d_archive_tests {
             "{err}"
         );
     }
+}
+
+/// `aa` with the `--label` channel labels added as variable mods and
+/// registered as channels. A label the `--mods` file already declares (same
+/// name, residue and location) is not added twice.
+fn with_label_mods(
+    aa: &model::AminoAcidSet,
+    spec: &quant::label::LabelSpec,
+) -> Result<model::AminoAcidSet, String> {
+    let (mods, channels) = crate::quant_run::label_run::search_label_mods(spec);
+    let declared = aa.distinct_mods();
+    let mut b = AminoAcidSetBuilder::new_standard();
+    for m in &declared {
+        if m.fixed {
+            b = b.add_fixed_mod((*m).clone());
+        } else {
+            b = b.add_variable_mod((*m).clone());
+        }
+    }
+    for m in mods {
+        let dup = declared.iter().any(|d| {
+            d.name == m.name && d.residue == m.residue && d.location == m.location && !d.fixed
+        });
+        if !dup {
+            b = b.add_variable_mod(m);
+        }
+    }
+    b.with_label_channels(channels)
+        .build()
+        .map_err(|e| format!("--label: building the amino-acid set: {e}"))
 }

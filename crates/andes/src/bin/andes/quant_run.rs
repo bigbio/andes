@@ -35,8 +35,11 @@ use search::search_index::SearchIndex;
 
 use crate::cli::{Cli, TmtUnmix};
 
+#[path = "quant_run/label_run.rs"]
+pub(crate) mod label_run;
 #[path = "ms1_cache.rs"]
 mod ms1_cache;
+pub(crate) use label_run::LabelSettings;
 use ms1_cache::Ms1Cache;
 
 /// Isotope-peak tolerance of the precursor-purity ladder (OpenMS default).
@@ -89,6 +92,8 @@ pub(crate) struct QuantSettings {
     /// `--temp-dir` (resolved): where the MS1 scans wait between searching and
     /// quantification.
     pub scratch_dir: PathBuf,
+    /// `--label`: labelled-pair quantification.
+    pub label: Option<LabelSettings>,
 }
 
 impl QuantSettings {
@@ -108,6 +113,23 @@ impl QuantSettings {
                  not apply at --tmt-level 3"
                     .into(),
             );
+        }
+        if let Some(text) = &cli.label {
+            if cli.lfq || cli.tmt.is_some() {
+                return Err(
+                    "--label quantifies labelled channels on its own; it is not combined with \
+                     --lfq or --tmt"
+                        .into(),
+                );
+            }
+            let spec = label_spec(cli, text)?;
+            if cli.label_reference == 0 || cli.label_reference > spec.len() {
+                return Err(format!(
+                    "--label-reference {} is not a channel of --label {text} (1..={})",
+                    cli.label_reference,
+                    spec.len()
+                ));
+            }
         }
         if cli.tmt.is_none() && !cli.lfq && cli.quant_dir.is_none() {
             return Ok(());
@@ -145,10 +167,16 @@ impl QuantSettings {
         high_res: bool,
         tmt_level: u8,
     ) -> Result<Option<Self>, String> {
-        if cli.tmt.is_none() && !cli.lfq && cli.quant_dir.is_none() {
+        if cli.tmt.is_none() && !cli.lfq && cli.quant_dir.is_none() && cli.label.is_none() {
             return Ok(None);
         }
         Self::check_args(cli)?;
+        if cli.label.is_some() && !high_res {
+            eprintln!(
+                "WARN: --label: the MS2 scans are low-resolution; labelled-pair quantification \
+                 assumes high-resolution (Orbitrap/TOF) MS1 scans and checks them per run"
+            );
+        }
         if cli.mbr && cli.tmt.is_some() && (tmt_level >= 3 || !high_res) {
             return Err(if tmt_level >= 3 {
                 "--mbr with --tmt transfers the reporter ions of MS2 scans and needs them in \
@@ -247,19 +275,38 @@ impl QuantSettings {
             },
             tmt_mbr: cli.mbr && cli.tmt.is_some(),
             scratch_dir: cli.temp_dir.clone().unwrap_or_else(|| PathBuf::from(".")),
+            label: match &cli.label {
+                Some(text) => {
+                    let mut spec = label_spec(cli, text)?;
+                    spec.reference = cli.label_reference - 1;
+                    Some(LabelSettings {
+                        spec,
+                        fdr: cli.label_fdr,
+                        tol_ppm: match cli.lfq_tol {
+                            Some(Tolerance::Ppm(v)) => v,
+                            Some(Tolerance::Da(_)) => {
+                                return Err("--label needs --lfq-tol in ppm".into())
+                            }
+                            None => 10.0,
+                        },
+                        mbr_fdr: cli.mbr.then_some(cli.mbr_fdr),
+                    })
+                }
+                None => None,
+            },
         }))
     }
 
     /// MS1 scans are needed for label-free quant, for the per-run MS1 table of
     /// `--quant-dir` and for the precursor purity of isobaric PSMs.
     pub(crate) fn needs_ms1(&self) -> bool {
-        self.lfq || self.plex.is_some() || self.quant_dir.is_some()
+        self.lfq || self.plex.is_some() || self.quant_dir.is_some() || self.label.is_some()
     }
 
     /// Whether the run reads MS1 scans for chromatograms rather than only for
     /// purity (`--lfq`, `--quant-dir`): the input restrictions of `--lfq` apply.
     pub(crate) fn needs_ms1_series(&self) -> bool {
-        self.lfq || self.quant_dir.is_some()
+        self.lfq || self.quant_dir.is_some() || self.label.is_some()
     }
 
     pub(crate) fn needs_ms3(&self) -> bool {
@@ -314,6 +361,9 @@ impl QuantSettings {
                 }
             ));
         }
+        if let Some(l) = &self.label {
+            parts.push(l.describe());
+        }
         if let Some(dir) = &self.quant_dir {
             parts.push(format!(
                 "per-run MS1, MS2 and PSM tables in {}",
@@ -322,6 +372,15 @@ impl QuantSettings {
         }
         parts.join("; ")
     }
+}
+
+/// The `--label` specification with the enrichments of the command line.
+pub(crate) fn label_spec(cli: &Cli, text: &str) -> Result<quant::label::LabelSpec, String> {
+    let mut spec = quant::label::LabelSpec::parse(text).map_err(|e| format!("--label: {e}"))?;
+    spec.enrichment_2h_metabolic = cli.label_2h_enrichment_silac;
+    spec.enrichment_2h_chemical = cli.label_2h_enrichment_chemical;
+    spec.enrichment_heavy = cli.label_heavy_enrichment;
+    Ok(spec)
 }
 
 /// Scans a reader captured for one input file besides the MS2 stream.
@@ -2022,8 +2081,46 @@ pub(crate) fn run_quant(
         }
     }
 
+    // ── Labelled pairs ────────────────────────────────────────────────────────
+    if let Some(ls) = &s.label {
+        let (rows, label_records) = label_run::quantify(
+            collector,
+            ls,
+            spectra,
+            &hits,
+            candidates,
+            index,
+            parquet_dir.is_some(),
+            &mut next_feature_id,
+        )?;
+        let runs: Vec<String> = collector.runs.iter().map(|r| r.stem.clone()).collect();
+        let channels: Vec<String> = ls.spec.channels.iter().map(|c| c.name.clone()).collect();
+        let path = dir.join(format!("{stem}.label.parquet"));
+        output::write_label_parquet(
+            &path,
+            &rows,
+            &output::LabelTableMeta {
+                channels: &channels,
+                reference: ls.spec.reference,
+                runs: &runs,
+            },
+        )?;
+        eprintln!(
+            "quant: wrote {} ({} channel rows)",
+            path.display(),
+            rows.len()
+        );
+        if parquet_dir.is_some() && ls.spec.channels.iter().any(|c| c.qpx_label.is_none()) {
+            eprintln!(
+                "WARN: --label: channels outside the SDRF/QPX label vocabulary (SILAC light / \
+                 medium / heavy, DIMETHYL0/4/6/8) are not written to quantms.feature.parquet"
+            );
+        }
+        records.extend(label_records);
+    }
+
     // `--quant-dir` alone quantifies nothing here: no feature file.
-    let quantified = s.plex.is_some() || s.lfq || !records.is_empty();
+    let quantified = s.plex.is_some() || s.lfq || s.label.is_some() || !records.is_empty();
     if let (Some(pdir), true) = (parquet_dir, quantified) {
         std::fs::create_dir_all(pdir).map_err(|e| format!("create {}: {e}", pdir.display()))?;
         // With protein groups, each feature carries its group and features
@@ -2268,6 +2365,7 @@ mod tests {
             unmix: None,
             tmt_mbr: false,
             scratch_dir: PathBuf::from("."),
+            label: None,
         }
     }
 

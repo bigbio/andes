@@ -81,9 +81,9 @@ pub use glyco_pin::write_glyco_pin;
 
 pub mod quant_out;
 pub use quant_out::{
-    read_lfq_parquet, read_tmt_parquet, write_lfq_parquet, write_tmt_parquet,
-    write_tmt_parquet_mbr, LfqRow, LfqTableMeta, ModRecord, QuantId, TmtRow, TransferInfo,
-    UnmixMeta,
+    read_label_parquet, read_lfq_parquet, read_tmt_parquet, write_label_parquet, write_lfq_parquet,
+    write_tmt_parquet, write_tmt_parquet_mbr, LabelRow, LabelTableMeta, LfqRow, LfqTableMeta,
+    ModRecord, QuantId, TmtRow, TransferInfo, UnmixMeta,
 };
 
 pub mod run_quant_table;

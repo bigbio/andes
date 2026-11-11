@@ -1,4 +1,5 @@
-//! Quantification tables `<stem>.tmt.parquet` and `<stem>.lfq.parquet`, and
+//! Quantification tables `<stem>.tmt.parquet`, `<stem>.lfq.parquet` and
+//! `<stem>.label.parquet`, and
 //! the record types the QPX feature parquet is written from.
 //!
 //! `tmt.parquet` has one row per PSM with reporter ions and one column per
@@ -721,6 +722,250 @@ pub fn read_lfq_parquet(path: &Path) -> Result<ReadTable, String> {
     read_table(path, &LFQ_TABLE)
 }
 
+/// One channel of one label group in one run (`label.parquet`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LabelRow {
+    /// Run stem.
+    pub run: String,
+    /// The peptide identity: the peptidoform without its channel labels.
+    pub peptide: String,
+    /// The bare sequence.
+    pub sequence: String,
+    pub charge: u8,
+    pub proteins: Vec<String>,
+    /// 1-based channel of the label specification.
+    pub channel: u8,
+    /// The channel's short name (`light`, `Lys8+Arg10`).
+    pub channel_name: String,
+    /// The SDRF/QPX label (`SILAC heavy`), when the channel has one.
+    pub label: Option<String>,
+    /// `identified`, `match_channel`, `transfer`, `below_detection` or
+    /// `not_quantifiable`.
+    pub status: String,
+    /// The channel's identifying PSM (best of the run), when identified.
+    pub spec_id: Option<String>,
+    pub psm_q_value: Option<f64>,
+    pub rt_psm: Option<f64>,
+    /// The peptidoform as searched (with this channel's labels), when the
+    /// channel is identified.
+    pub labelled_peptidoform: Option<String>,
+    /// Monoisotopic m/z of the channel.
+    pub mz: f64,
+    /// Fitted apex of the shared profile and the channel's offset from it.
+    pub rt_apex: f64,
+    pub rt_shift: f64,
+    /// Fitted Gaussian width (sigma), seconds.
+    pub width: f64,
+    pub quantity: f64,
+    pub quantity_se: f64,
+    /// `quantity + 2 · quantity_se`: the bound of a channel below detection.
+    pub quantity_upper: f64,
+    pub llr: f64,
+    pub envelope_cos: f64,
+    pub coherence: f64,
+    pub m1_ratio: f64,
+    pub mass_err_ppm: f64,
+    /// Quality q-value of a matched channel (match between channels).
+    pub channel_q_value: Option<f64>,
+    /// Log-likelihood ratio of the whole group fit.
+    pub group_llr: f64,
+    /// The group was transferred from another run (match between runs).
+    pub transfer: bool,
+    /// Transfer q-value of the group (match between runs).
+    pub transfer_q_value: Option<f64>,
+    /// `log2(channel / reference)` and its standard error, when both are
+    /// quantified.
+    pub log2_ratio: Option<f64>,
+    pub log2_ratio_se: Option<f64>,
+    /// `log2_ratio` minus the run's median log-ratio of the channel.
+    pub log2_ratio_normalized: Option<f64>,
+}
+
+const LABEL_TABLE: TableVersion = TableVersion {
+    key: "andes.label.schema",
+    version: "1.0",
+    major: 1,
+    what: "labelled-pair quantification table",
+};
+/// `label.parquet` metadata: the label specification, one channel per line
+/// (`<n>: <name>`), the reference channel (1-based) and the run stems.
+pub const LABEL_SPEC_KEY: &str = "andes.label.channels";
+pub const LABEL_REFERENCE_KEY: &str = "andes.label.reference";
+pub const LABEL_RUNS_KEY: &str = "andes.label.runs";
+
+/// What `label.parquet` records beside its rows.
+#[derive(Debug, Clone)]
+pub struct LabelTableMeta<'a> {
+    pub channels: &'a [String],
+    pub reference: usize,
+    pub runs: &'a [String],
+}
+
+fn label_schema() -> Schema {
+    let f = |n: &str, t: DataType, null: bool| Field::new(n, t, null);
+    Schema::new(vec![
+        f("filename", DataType::Utf8, false),
+        f("peptide", DataType::Utf8, false),
+        f("sequence", DataType::Utf8, false),
+        f("charge", DataType::UInt8, false),
+        f("proteins", DataType::Utf8, false),
+        f("channel", DataType::UInt8, false),
+        f("channel_name", DataType::Utf8, false),
+        f("label", DataType::Utf8, true),
+        f("status", DataType::Utf8, false),
+        f("spec_id", DataType::Utf8, true),
+        f("psm_q_value", DataType::Float64, true),
+        f("rt_psm", DataType::Float64, true),
+        f("labelled_peptidoform", DataType::Utf8, true),
+        f("mz", DataType::Float64, false),
+        f("rt_apex", DataType::Float64, false),
+        f("rt_shift", DataType::Float64, false),
+        f("width", DataType::Float64, false),
+        f("quantity", DataType::Float64, false),
+        f("quantity_se", DataType::Float64, false),
+        f("quantity_upper", DataType::Float64, false),
+        f("llr", DataType::Float64, false),
+        f("envelope_cos", DataType::Float64, false),
+        f("coherence", DataType::Float64, false),
+        f("m1_ratio", DataType::Float64, false),
+        f("mass_err_ppm", DataType::Float64, false),
+        f("channel_q_value", DataType::Float64, true),
+        f("group_llr", DataType::Float64, false),
+        f("transfer", DataType::Boolean, false),
+        f("transfer_q_value", DataType::Float64, true),
+        f("log2_ratio", DataType::Float64, true),
+        f("log2_ratio_se", DataType::Float64, true),
+        f("log2_ratio_normalized", DataType::Float64, true),
+    ])
+}
+
+fn label_batch(schema: &Arc<Schema>, rows: &[LabelRow]) -> Result<RecordBatch, String> {
+    let mut filename = StringBuilder::new();
+    let mut peptide = StringBuilder::new();
+    let mut sequence = StringBuilder::new();
+    let mut charge = UInt8Builder::new();
+    let mut proteins = StringBuilder::new();
+    let mut channel = UInt8Builder::new();
+    let mut channel_name = StringBuilder::new();
+    let mut label = StringBuilder::new();
+    let mut status = StringBuilder::new();
+    let mut spec_id = StringBuilder::new();
+    let mut psm_q = Float64Builder::new();
+    let mut rt_psm = Float64Builder::new();
+    let mut labelled = StringBuilder::new();
+    let mut f64s: Vec<Float64Builder> = (0..12).map(|_| Float64Builder::new()).collect();
+    let mut channel_q = Float64Builder::new();
+    let mut group_llr = Float64Builder::new();
+    let mut transfer = BooleanBuilder::new();
+    let mut transfer_q = Float64Builder::new();
+    let mut ratio = Float64Builder::new();
+    let mut ratio_se = Float64Builder::new();
+    let mut ratio_norm = Float64Builder::new();
+    for r in rows {
+        filename.append_value(&r.run);
+        peptide.append_value(&r.peptide);
+        sequence.append_value(&r.sequence);
+        charge.append_value(r.charge);
+        proteins.append_value(r.proteins.join(";"));
+        channel.append_value(r.channel);
+        channel_name.append_value(&r.channel_name);
+        label.append_option(r.label.as_deref());
+        status.append_value(&r.status);
+        spec_id.append_option(r.spec_id.as_deref());
+        psm_q.append_option(r.psm_q_value);
+        rt_psm.append_option(r.rt_psm);
+        labelled.append_option(r.labelled_peptidoform.as_deref());
+        for (b, v) in f64s.iter_mut().zip([
+            r.mz,
+            r.rt_apex,
+            r.rt_shift,
+            r.width,
+            r.quantity,
+            r.quantity_se,
+            r.quantity_upper,
+            r.llr,
+            r.envelope_cos,
+            r.coherence,
+            r.m1_ratio,
+            r.mass_err_ppm,
+        ]) {
+            b.append_value(v);
+        }
+        channel_q.append_option(r.channel_q_value);
+        group_llr.append_value(r.group_llr);
+        transfer.append_value(r.transfer);
+        transfer_q.append_option(r.transfer_q_value);
+        ratio.append_option(r.log2_ratio);
+        ratio_se.append_option(r.log2_ratio_se);
+        ratio_norm.append_option(r.log2_ratio_normalized);
+    }
+    let mut cols: Vec<ArrayRef> = vec![
+        Arc::new(filename.finish()),
+        Arc::new(peptide.finish()),
+        Arc::new(sequence.finish()),
+        Arc::new(charge.finish()),
+        Arc::new(proteins.finish()),
+        Arc::new(channel.finish()),
+        Arc::new(channel_name.finish()),
+        Arc::new(label.finish()),
+        Arc::new(status.finish()),
+        Arc::new(spec_id.finish()),
+        Arc::new(psm_q.finish()),
+        Arc::new(rt_psm.finish()),
+        Arc::new(labelled.finish()),
+    ];
+    for mut b in f64s {
+        cols.push(Arc::new(b.finish()));
+    }
+    cols.extend([
+        Arc::new(channel_q.finish()) as ArrayRef,
+        Arc::new(group_llr.finish()),
+        Arc::new(transfer.finish()),
+        Arc::new(transfer_q.finish()),
+        Arc::new(ratio.finish()),
+        Arc::new(ratio_se.finish()),
+        Arc::new(ratio_norm.finish()),
+    ]);
+    RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
+}
+
+/// Write `label.parquet` (long): one row per (label group, run, channel)
+/// with the channel's status, its quantity from the joint channel fit, the
+/// fit statistics and its log-ratio to the reference channel.
+pub fn write_label_parquet(
+    path: &Path,
+    rows: &[LabelRow],
+    meta: &LabelTableMeta<'_>,
+) -> Result<(), String> {
+    let schema = Arc::new(label_schema());
+    let batches = rows.chunks(BATCH_ROWS).map(|r| label_batch(&schema, r));
+    write_table(
+        path,
+        &LABEL_TABLE,
+        LABEL_TABLE.version,
+        schema.clone(),
+        batches,
+        &[
+            (
+                LABEL_SPEC_KEY,
+                meta.channels
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| format!("{}: {c}", i + 1))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            (LABEL_REFERENCE_KEY, (meta.reference + 1).to_string()),
+            (LABEL_RUNS_KEY, meta.runs.join("\n")),
+        ],
+    )
+}
+
+/// Read `label.parquet`: its record batches and key-value metadata.
+pub fn read_label_parquet(path: &Path) -> Result<ReadTable, String> {
+    read_table(path, &LABEL_TABLE)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -764,6 +1009,64 @@ mod tests {
         Array, BooleanArray, Float32Array, Float64Array, Int32Array, ListArray, StringArray,
         UInt32Array,
     };
+
+    #[test]
+    fn label_table_round_trips() {
+        let dir = std::env::temp_dir().join(format!("andes_label_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("x.label.parquet");
+        let row = LabelRow {
+            run: "r1".into(),
+            peptide: "PEPTIDEK".into(),
+            sequence: "PEPTIDEK".into(),
+            charge: 2,
+            proteins: vec!["P1".into()],
+            channel: 2,
+            channel_name: "Lys8+Arg10".into(),
+            label: Some("SILAC heavy".into()),
+            status: "match_channel".into(),
+            spec_id: None,
+            psm_q_value: None,
+            rt_psm: None,
+            labelled_peptidoform: None,
+            mz: 500.1,
+            rt_apex: 100.0,
+            rt_shift: 0.0,
+            width: 4.0,
+            quantity: 1e6,
+            quantity_se: 1e3,
+            quantity_upper: 1.002e6,
+            llr: 300.0,
+            envelope_cos: 0.99,
+            coherence: 0.95,
+            m1_ratio: 0.01,
+            mass_err_ppm: 0.5,
+            channel_q_value: Some(0.001),
+            group_llr: 900.0,
+            transfer: false,
+            transfer_q_value: None,
+            log2_ratio: Some(-1.0),
+            log2_ratio_se: Some(0.02),
+            log2_ratio_normalized: Some(-0.9),
+        };
+        let channels = vec!["light".to_string(), "Lys8+Arg10".to_string()];
+        let runs = vec!["r1".to_string()];
+        write_label_parquet(
+            &path,
+            &[row],
+            &LabelTableMeta {
+                channels: &channels,
+                reference: 0,
+                runs: &runs,
+            },
+        )
+        .unwrap();
+        let t = read_label_parquet(&path).unwrap();
+        let n: usize = t.batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(n, 1);
+        assert_eq!(t.batches[0].num_columns(), 32);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     fn id(run: &str, file_idx: usize, pep: &str, z: u8) -> QuantId {
         QuantId {

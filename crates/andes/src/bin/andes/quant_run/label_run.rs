@@ -34,9 +34,10 @@ use std::collections::HashMap;
 use model::mass::PROTON;
 use quant::formula::Formula;
 use quant::label::{
-    channel_qvalues, channel_score, classify_channel, classify_identified, classify_transferred,
-    fit_group, learn_rt_shifts, log2_ratio, mass_factor, median, ChannelEnvelope, ChannelFit,
-    ChannelStatus, ClassifyParams, FitParams, GroupFit, GroupProbe, LabelSpec, Site, FREE_WIDTHS,
+    channel_score, classify_channel, classify_identified, classify_transferred, fit_group,
+    learn_rt_shifts, log2_ratio, mass_factor, median, weighted_qvalues, ChannelEnvelope,
+    ChannelFit, ChannelStatus, ClassifyParams, FitParams, GroupFit, GroupProbe, LabelSpec, Site,
+    FREE_WIDTHS,
 };
 use quant::Ms1RunIndex;
 use rayon::prelude::*;
@@ -288,8 +289,11 @@ const MIN_WIDTH_FITS: usize = 20;
 const MAX_WIDTH_FITS: usize = 500;
 const MIN_SHIFT_PAIRS: usize = 20;
 const MIN_NORM_RATIOS: usize = 10;
-/// Decoys per target of the channel and transfer q-values.
+/// Decoys per target of the channel q-values.
 const N_DECOYS: usize = 4;
+/// Decoys per transfer: a run has fewer transfers than channels, so more
+/// decoys resolve the q-value at the cut.
+const N_TRANSFER_DECOYS: usize = 8;
 
 fn probe_of(g: &Group, t_hat: f64, s: f64, w: f64, shifts: &[f64]) -> GroupProbe {
     let mut channel_mz = g.channel_mz.clone();
@@ -440,11 +444,12 @@ fn decoy_probes(
     moved: &[usize],
     tol_ppm: f64,
     seed: u64,
+    n: usize,
 ) -> Vec<GroupProbe> {
     let z = g.charge.max(1) as f64;
     let mass = (g.channel_mz[0] - PROTON) * z;
     let min_sep = quant::label::decoy_min_sep(mass, tol_ppm);
-    quant::label::decoy_shifts(moved, &g.deltas, min_sep, seed, N_DECOYS)
+    quant::label::decoy_shifts(moved, &g.deltas, min_sep, seed, n)
         .into_iter()
         .map(|shift| {
             let mut p = probe.clone();
@@ -759,7 +764,7 @@ pub(super) fn quantify(
                     let mut decoy_scores = vec![Vec::new(); n_ch];
                     if !missing.is_empty() {
                         let seed = seed_of(&g.key, run_idx);
-                        for dp in decoy_probes(g, &probe, &missing, tol, seed) {
+                        for dp in decoy_probes(g, &probe, &missing, tol, seed, N_DECOYS) {
                             let df = fit_folded(ms1, g, &dp, &fit_params).map(|x| x.0);
                             for &c in &missing {
                                 decoy_scores[c].push(df.as_ref().map_or((0.0, 0.0), |d| {
@@ -857,7 +862,7 @@ pub(super) fn quantify(
     // group, its score against its decoys'.
     let mut channel_q: HashMap<(usize, usize), f64> = HashMap::new();
     {
-        let mut rows: Vec<(f64, bool)> = Vec::new();
+        let mut rows: Vec<(f64, f64)> = Vec::new();
         let mut at: Vec<((usize, usize), usize)> = Vec::new();
         for (fi, f) in fitted.iter().enumerate() {
             if f.transfer_q.is_some() || groups[f.gid].identity_decoy {
@@ -886,16 +891,17 @@ pub(super) fn quantify(
                 let ch = &f.fit.channels[c];
                 rows.push((
                     channel_score(ch) * mass_factor(ch.mass_err_ppm, expected, sd),
-                    false,
+                    0.0,
                 ));
+                let w = 1.0 / f.decoy_scores[c].len() as f64;
                 rows.extend(
                     f.decoy_scores[c]
                         .iter()
-                        .map(|&(d, e)| (d * mass_factor(e, expected, sd), true)),
+                        .map(|&(d, e)| (d * mass_factor(e, expected, sd), w)),
                 );
             }
         }
-        let q = channel_qvalues(&rows, N_DECOYS);
+        let q = weighted_qvalues(&rows);
         for (key, row) in at {
             channel_q.insert(key, q[row]);
         }
@@ -1143,7 +1149,12 @@ fn transfer(
             .iter()
             .max_by(|a, b| a.amplitude.total_cmp(&b.amplitude))
             .map_or(0.0, |c| c.mass_err_ppm);
-        group_score(fit) * quant::label::mass_factor(err, center, sigma)
+        // The alignment is calibrated (a real transfer's apex is within its
+        // uncertainty of the prediction, `rt_z` ~ N(0, 1)); a decoy that hits
+        // another species' envelope sits anywhere in the search window.
+        group_score(fit)
+            * quant::label::mass_factor(err, center, sigma)
+            * (-0.5 * fit.rt_z * fit.rt_z).exp()
     };
     let n_runs = collector.runs.len();
     let n_ch = groups.first().map_or(0, |g| g.channel_mz.len());
@@ -1182,7 +1193,7 @@ fn transfer(
         present[f.gid][f.run] = true;
     }
     let mut out: Vec<Fitted> = Vec::new();
-    let mut scored: Vec<(f64, bool)> = Vec::new();
+    let mut scored: Vec<(f64, f64)> = Vec::new();
     let mut target_rows: Vec<usize> = Vec::new();
     let mut identity_scores: Vec<f64> = Vec::new();
     for (run_idx, run) in collector.runs.iter().enumerate() {
@@ -1245,6 +1256,7 @@ fn transfer(
                     &all,
                     fit_params.tol_ppm,
                     seed_of(&g.key, run_idx),
+                    N_TRANSFER_DECOYS,
                 )
                 .iter()
                 .map(|d| fit_folded(ms1, g, d, fit_params).map_or(0.0, |d| score(&d.0, run_idx)))
@@ -1271,12 +1283,13 @@ fn transfer(
                 continue;
             }
             target_rows.push(scored.len());
-            scored.push((score(&f.fit, f.run), false));
-            scored.extend(d.into_iter().map(|x| (x, true)));
+            scored.push((score(&f.fit, f.run), 0.0));
+            let w = 1.0 / d.len().max(1) as f64;
+            scored.extend(d.into_iter().map(|x| (x, w)));
             out.push(f);
         }
     }
-    let q = channel_qvalues(&scored, N_DECOYS);
+    let q = weighted_qvalues(&scored);
     // The q-value of an identity-decoy transfer: that of the weakest target
     // transfer scoring at least as high (the targets' step function).
     let mut steps: Vec<(f64, f64)> = target_rows.iter().map(|&r| (scored[r].0, q[r])).collect();
@@ -1302,10 +1315,12 @@ fn transfer(
         }
     }
     eprintln!(
-        "quant: label: match between runs: {} of {} transfers at transfer q<={fdr} \
-         (identity decoys: {} of {} transferred, false-donor rate {:.4} added to the q-values)",
+        "quant: label: match between runs: {} of {} transfers at transfer q<={fdr} (lowest \
+         q {:.4}; identity decoys: {} of {} transferred, false-donor rate {:.4} added to the \
+         q-values)",
         kept.len(),
         target_rows.len(),
+        target_rows.iter().map(|&r| q[r]).fold(1.0f64, f64::min),
         accepted_identity,
         identity_scores.len(),
         identity_rate

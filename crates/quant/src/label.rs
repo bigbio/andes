@@ -1426,6 +1426,46 @@ pub fn channel_qvalues(rows: &[(f64, bool)], decoys_per_target: usize) -> Vec<f6
     q
 }
 
+/// Target/decoy q-values when targets have different numbers of decoys:
+/// `rows` are `(score, decoy_weight)`, a target with weight 0 and each of a
+/// target's `k` decoys with weight `1 / k`, so the weighted decoy count above
+/// a score estimates the false targets there. The q-value of each row, in
+/// input order, is the running minimum from the worst rank of `(D_w + w̄) /
+/// max(T, 1)` (`w̄` the mean decoy weight: the "+1" of one decoy), clamped to
+/// 1. Ties rank decoys first.
+pub fn weighted_qvalues(rows: &[(f64, f64)]) -> Vec<f64> {
+    let decoys: Vec<f64> = rows.iter().filter(|r| r.1 > 0.0).map(|r| r.1).collect();
+    let w_bar = if decoys.is_empty() {
+        1.0
+    } else {
+        decoys.iter().sum::<f64>() / decoys.len() as f64
+    };
+    let key = |s: f64| if s.is_nan() { f64::NEG_INFINITY } else { s };
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by(|&a, &b| {
+        key(rows[b].0)
+            .total_cmp(&key(rows[a].0))
+            .then((rows[b].1 > 0.0).cmp(&(rows[a].1 > 0.0)))
+    });
+    let (mut t, mut d) = (0usize, 0.0f64);
+    let mut raw = Vec::with_capacity(rows.len());
+    for &i in &order {
+        if rows[i].1 > 0.0 {
+            d += rows[i].1;
+        } else {
+            t += 1;
+        }
+        raw.push(((d + w_bar) / t.max(1) as f64).min(1.0));
+    }
+    let mut q = vec![1.0; rows.len()];
+    let mut run = 1.0f64;
+    for (r, &i) in order.iter().enumerate().rev() {
+        run = run.min(raw[r]);
+        q[i] = run;
+    }
+    q
+}
+
 /// What a channel of a group reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelStatus {
@@ -1878,6 +1918,15 @@ mod tests {
         assert!((q[0] - 0.5).abs() < 1e-12);
         let q4 = channel_qvalues(&rows, 4);
         assert!((q4[0] - 0.125).abs() < 1e-12);
+        // The weighted form with equal weights is the same estimate.
+        let w: Vec<(f64, f64)> = rows
+            .iter()
+            .map(|&(s, d)| (s, if d { 0.25 } else { 0.0 }))
+            .collect();
+        let qw = weighted_qvalues(&w);
+        for (a, b) in qw.iter().zip(&q4) {
+            assert!((a - b).abs() < 1e-12);
+        }
         assert!(q[3] >= q[0]);
         assert_eq!(q.len(), 5);
     }

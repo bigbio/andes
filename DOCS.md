@@ -2122,7 +2122,8 @@ log-ratios to the reference channel; protein-level summaries are left to quantms
 * **Match between channels.** A channel the run did not identify is measured at its exact m/z, the
   identified channels anchoring the profile. Its decoys are the same fit with the channel moved by
   four non-label mass shifts (nominal ±7…23 Da in the peptide mass-defect band, none within three
-  tolerances of any isotope of any channel); target/decoy competition of `√(2·LLR) · cosine ·
+  tolerances of any isotope of any channel; each decoy weighs 1/k for a channel with k admissible
+  shifts); target/decoy competition of `√(2·LLR) · cosine ·
   coherence · exp(−½ (Δppm / σ)²)`, pooled over runs, gives `channel_q_value`. `Δppm` is the
   channel's monoisotopic mass error against the group's identified channels', `σ` √2 times the run's
   robust spread of identified-channel mass errors: in dense MS1 about 1 % of positions at a
@@ -2137,8 +2138,10 @@ log-ratios to the reference channel; protein-level summaries are left to quantms
 * **Match between runs** (`--mbr`, two or more runs). The runs are aligned jointly (§10 *Match
   between runs*) on the fitted apexes of their identified groups. A group missing from a run is
   fitted there at its predicted apex with the alignment's uncertainty, against four whole-group
-  decoys moved by the same rule; target/decoy competition of the group score (its strongest
-  channel's score and mass-accuracy factor against the receiving run's calibration) over every run gives
+  decoys moved by the same rule (eight per transfer: a run has fewer transfers than channels);
+  target/decoy competition of the group score (its strongest channel's score, its mass-accuracy
+  factor against the receiving run's calibration, and `exp(−½ rt_z²)`, since the alignment's
+  uncertainty is calibrated and a decoy hit sits anywhere in the search window) over every run gives
   `transfer_q_value`, and transfers at `--mbr-fdr` are reported, each channel `transfer`,
   `below_detection` or `not_quantifiable`. Transfers never enter the alignment.
   *Identity decoys* count the transfers of false donor identifications, which the mass-shifted
@@ -2162,6 +2165,31 @@ log-ratios to the reference channel; protein-level summaries are left to quantms
   channel: the median of the peptide ratios (each the median of the peptide's evidence ratios over
   charges), from 2 peptides up, raw and normalised. quantms / MSstats remain the place for
   experimental designs, fractions and statistics.
+
+**Real data: PXD003327** (E. coli triple SILAC `[][Lys4,Arg6][Lys8,Arg10]`, Orbitrap; runs
+`Chris_Ecoli_1-2-4` and `Chris_Ecoli_4-1` against the E. coli proteome, defaults with
+`--rescore-native`, 4 threads, release build, 2026-11-11). In these files lysine and arginine
+peptides carry opposite designs (K: M/L and H/L near +1 and +2, R near −1 and −2 in `1-2-4`;
+mirrored in `4-1`), and the identified-in-both-channels groups show the same split, so the classes
+are read separately:
+
+| run | channel | class | identified (n, median, IQR) | matched between channels | transferred (`--mbr-fdr 0.05`) |
+|---|---|---|---|---|---|
+| 1-2-4 | M/L | K | 5, 0.81, 0.23 | 177, 0.75, 0.25 | 41, 0.78, 0.30 |
+| 1-2-4 | M/L | R | 191, −0.94, 0.15 | 210, −0.96, 0.38 | 97, −1.06, 0.51 |
+| 1-2-4 | H/L | K | 200, 1.92, 0.26 | 2, 2.66, 0.45 | 50, 1.94, 0.40 |
+| 1-2-4 | H/L | R | 40, −1.76, 0.18 | 254, −1.79, 0.23 | 80, −1.93, 0.54 |
+| 4-1 | H/L | K | 170, −1.85, 0.15 | 176, −1.90, 0.36 | 23, −1.94, 0.51 |
+| 4-1 | H/L | R | 427, 2.08, 0.20 | 21, 2.15, 0.31 | 39, 2.13, 0.41 |
+
+Matched channels and transfers agree with the identified ones to 0.1 log2 in median, at a wider
+spread. The single run (`1-2-4`) takes 21 s in all, 0.85 s of it for `--label` (940 groups, 3
+channels, 5 fits per group with the decoys); both runs with `--mbr` 39 s, 2.4 s for `--label`.
+At `--mbr-fdr 0.01` this pair transfers nothing (lowest transfer q 0.0105: two runs of different
+mixtures and acquisitions, 1.18 s against 2.46 s MS1 spacing, share few strong transfers); at 0.05,
+396 of 1,095, with 7 of 15 identity decoys accepted (false-donor rate 0.014 added to the q-values).
+The mass-accuracy factor is what makes match between channels work on this dense MS1 (about 1,850
+centroids per scan): without it no channel reaches q 0.01.
 
 On the synthetic fixtures (`scripts/make_quant_fixtures.py --silac` / `--dimethyl`), the median
 error of the log-ratios is below 0.002 for identified, matched and transferred channels of a

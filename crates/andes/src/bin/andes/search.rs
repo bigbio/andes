@@ -1718,7 +1718,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                  or add --rescore so only PSMs at q<=--fdr are quantified."
             );
         }
-        eprintln!("Quantification: {}", s.describe());
+        if !cli.glyco {
+            eprintln!("Quantification: {}", s.describe());
+        }
     }
     // `--predict`: load the predictors now so a missing model fails before the
     // search. Glyco mode writes its own `.glyco.pin` and takes none.

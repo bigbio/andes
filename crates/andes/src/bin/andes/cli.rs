@@ -957,9 +957,10 @@ pub(crate) struct SearchArgs {
     pub(crate) lfq_tol: Option<Tolerance>,
 
     /// Retention-time half-window (seconds) around the identifying PSM in
-    /// which the chromatographic peak is searched. Default 60.
-    #[arg(long = "lfq-rt-window", default_value = "60", value_parser = parse_positive_tol)]
-    pub(crate) lfq_rt_window: f64,
+    /// which the chromatographic peak is searched. Default 60 s for
+    /// `--lfq` peptides and 120 s for intact glycopeptides (`--glyco`).
+    #[arg(long = "lfq-rt-window", value_parser = parse_positive_tol)]
+    pub(crate) lfq_rt_window: Option<f64>,
 
     /// Experimental Gaussian width in seconds (eight sigma) for LFQ peak detection.
     /// Areas still use raw signal. Omit for five-scan Savitzky–Golay smoothing.

@@ -203,7 +203,7 @@ impl QuantSettings {
         };
         let lfq_params = LfqParams {
             tol: cli.lfq_tol.unwrap_or(Tolerance::Ppm(10.0)),
-            rt_window_s: cli.lfq_rt_window,
+            rt_window_s: cli.lfq_rt_window.unwrap_or(60.0),
             gaussian_width_s: cli.lfq_gaussian_width,
             min_cosine: cli.lfq_min_cosine as f32,
             ..LfqParams::default()

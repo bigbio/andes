@@ -27,8 +27,17 @@
 //!   extracted until the extracted window holds [`ISOTOPE_COVERAGE`] of the
 //!   theoretical distribution, between [`MIN_ISOTOPES`] and
 //!   [`MAX_ISOTOPES`]. Extracting a fixed four, as for peptides, would read a
-//!   truncated envelope and systematically distort both the cosine and the
-//!   area.
+//!   truncated envelope and systematically distort the cosine and the mono
+//!   share.
+//! * **The intensity is the monoisotopic peak, not the envelope sum.** As in
+//!   pGlycoQuant, `Area` is the monoisotopic XIC integrated over the peak and
+//!   divided by its theoretical share of the extracted envelope; the higher
+//!   isotopes feed only the cosine. For a 3–4 kDa glycopeptide the
+//!   monoisotope is 16–28 % of the envelope (a 3.5–6x multiplier), and the
+//!   M+1..M+n traces are the ones most exposed to co-eluting interferences,
+//!   which an envelope sum accumulates. The trade-off is that monoisotopic
+//!   noise is amplified by the same factor. The raw observed mono area is
+//!   still reported (`MonoArea`) next to the scaled `Area`.
 //! * **The search's isotope offset is honoured.** When the search matched the
 //!   precursor at M+i, the observed peak sits at `mono + i·ISOTOPE/z`; the
 //!   extraction starts there and the theoretical envelope is rotated by i.
@@ -47,7 +56,11 @@
 //! What is NOT here (yet): pGlycoQuant's FQR (a two-component GMM over a
 //! +10 Da decoy's scores). The feature q-value below is a picked target/decoy
 //! q-value against the same exchangeable twin the peptide LFQ path uses
-//! (`mono_mz + 11 Th`, no RT shift), not FQR.
+//! (`mono_mz + 11 Th`, no RT shift), not FQR. It gates **transfers** only:
+//! a transfer's sole evidence is its MS1 feature, whereas an identification
+//! is confirmed by its MS2 (the identification FDR is controlled upstream by
+//! Percolator), so for identified features the q-value is reported but never
+//! vetoes a feature that passed the cosine and mono-share gates.
 //!
 //! Outputs, next to `<base>.glyco.pin`:
 //!
@@ -107,6 +120,12 @@ const MAX_ISOTOPES: usize = 14;
 /// Isotopes the theoretical envelope is computed over before trimming. An
 /// M+3-selected precursor of a 5 kDa glycopeptide still needs its upper tail.
 const ENVELOPE_ISOTOPES: usize = 28;
+
+/// Default RT half-window around the identifying scan, s. Twice the peptide
+/// `--lfq` default: an intact glycopeptide's XIC is wider, and a HILIC anchor
+/// can sit a scan or two off the apex, so 60 s clips the peak on the late
+/// side. `--lfq-rt-window` still overrides it.
+const DEFAULT_RT_WINDOW_S: f64 = 120.0;
 
 /// How a feature was measured: from its own identifying MS2 scan, or
 /// transferred into a run that did not identify it (match-between-runs).
@@ -195,7 +214,7 @@ impl Settings {
         Self {
             params: LfqParams {
                 tol: cli.lfq_tol.unwrap_or(Tolerance::Ppm(10.0)),
-                rt_window_s: cli.lfq_rt_window,
+                rt_window_s: cli.lfq_rt_window.unwrap_or(DEFAULT_RT_WINDOW_S),
                 gaussian_width_s: cli.lfq_gaussian_width,
                 min_cosine: cli.lfq_min_cosine as f32,
                 ..LfqParams::default()
@@ -219,6 +238,17 @@ pub(crate) fn run(
     cli: &Cli,
 ) -> Result<(), String> {
     let settings = Settings::from_cli(cli);
+    eprintln!(
+        "Quantification: intact glycopeptides from MS1 (tol {}, rt window ±{} s, {MIN_ISOTOPES}-\
+         {MAX_ISOTOPES} isotopes, min cosine {}, feature FDR {}, monoisotopic intensity)",
+        match settings.params.tol {
+            Tolerance::Ppm(v) => format!("{v} ppm"),
+            Tolerance::Da(v) => format!("{v} Da"),
+        },
+        settings.params.rt_window_s,
+        settings.params.min_cosine,
+        settings.feature_fdr
+    );
     let targets = build_targets(spectra, results, candidates, index, runs, &settings);
     if targets.is_empty() {
         eprintln!(
@@ -271,12 +301,20 @@ pub(crate) fn run(
     write_feature_table(&output_path(glyco_pin_path, "lfq"), &rows, &settings)?;
     let run_names: Vec<&str> = runs.iter().map(|r| r.stem).collect();
     let kept = write_rollup_tables(glyco_pin_path, &rows, &run_names, &settings)?;
+    let count_evidence = |evidence: Evidence| {
+        rows.iter()
+            .filter(|r| r.target.evidence == evidence && accepted(r, &settings))
+            .count()
+    };
     eprintln!(
-        "[glyco-quant] quantified {} features from {} targets; {} at feature q <= {} \
-         (accepted); {} glycopeptides, {} glycoform-site spectra across {} runs",
+        "[glyco-quant] quantified {} features from {} targets; {} accepted ({} identified, \
+         quality-gated only; {} transferred at feature q <= {}); {} glycopeptides, {} \
+         glycoform-site spectra across {} runs",
         features + transfer_counts.measured,
         rows.len(),
-        rows.iter().filter(|r| accepted(r, &settings)).count(),
+        count_evidence(Evidence::Identified) + count_evidence(Evidence::Transferred),
+        count_evidence(Evidence::Identified),
+        count_evidence(Evidence::Transferred),
         settings.feature_fdr,
         kept.glycopeptides,
         kept.sites,
@@ -518,13 +556,26 @@ fn measure_run(
                 rt_window_s: t.window_s,
                 ..params.clone()
             };
-            (
-                i,
-                quantify(ms1, &lfq, &params),
-                quantify_decoy(ms1, &lfq, &params),
-            )
+            let mut feature = quantify(ms1, &lfq, &params);
+            if let Some(f) = feature.as_mut() {
+                f.area = mono_area(f, &lfq.envelope);
+            }
+            (i, feature, quantify_decoy(ms1, &lfq, &params))
         })
         .collect()
+}
+
+/// pGlycoQuant's label-free intensity: the extracted isotope at the search's
+/// offset divided by its theoretical share of the extracted envelope
+/// (`Σ_i theo_i / theo_offset`). `envelope` is normalised over the extracted
+/// isotopes, so its first element is that share; the higher isotopes enter
+/// only through the envelope cosine, so interference in an M+1..M+n trace
+/// does not move the reported quantity.
+fn mono_area(f: &FeatureQuant, envelope: &[f64]) -> f64 {
+    match (f.isotope_areas.first(), envelope.first()) {
+        (Some(&mono), Some(&share)) if share > 0.0 => mono / share,
+        _ => 0.0,
+    }
 }
 
 /// The `--lfq` parameters of one row: its own extraction window (a transfer's
@@ -598,8 +649,25 @@ fn assign_qvalues(rows: &mut [FeatureRow], settings: &Settings) {
     }
 }
 
+/// Whether a row's feature enters the quant tables.
+///
+/// A transfer has no MS2 of its own, so its only FDR control is the picked
+/// feature q against the +11 Th decoy twin. An identification does not need
+/// that gate: the peptide, composition and site are already confirmed by the
+/// MS2 evidence (Percolator controls their FDR), and the quantification
+/// quality gates that do matter are the envelope cosine (`score`, None when
+/// below `--lfq-min-cosine`) and `min_mono_share`, which reject a feature
+/// extracted on the wrong isotope. pGlycoQuant likewise never re-filters an
+/// identification on MS1 decoy evidence; the q-value is still computed and
+/// reported in `FeatureQValue` for both classes.
 fn accepted(row: &FeatureRow, settings: &Settings) -> bool {
-    row.feature.is_some() && row.q.is_some_and(|q| q <= settings.feature_fdr)
+    if row.feature.is_none() {
+        return false;
+    }
+    match row.target.evidence {
+        Evidence::Identified => row.score.is_some(),
+        Evidence::Transferred => row.q.is_some_and(|q| q <= settings.feature_fdr),
+    }
 }
 
 // ── Match-between-runs ──────────────────────────────────────────────────────
@@ -1519,7 +1587,12 @@ mod tests {
     fn measures_a_synthetic_glycopeptide_envelope() {
         let t = target(800.0, 2, 97.0);
         let index = synthetic_run(&t);
-        let part = measure_run(&index, std::slice::from_ref(&t), &[0], &LfqParams::default());
+        let part = measure_run(
+            &index,
+            std::slice::from_ref(&t),
+            &[0],
+            &LfqParams::default(),
+        );
         assert_eq!(part.len(), 1);
         let (i, feature, decoy) = &part[0];
         assert_eq!(*i, 0);
@@ -1527,8 +1600,9 @@ mod tests {
         assert!((f.apex_rt - 100.0).abs() <= 1.0, "{f:?}");
         assert!(f.cosine > 0.99, "{f:?}");
         assert!(f.n_isotopes_found >= MIN_ISOTOPES as u32, "{f:?}");
-        // Gaussian area = height · sigma · √(2π) over the summed envelope,
-        // which is normalised to 1.
+        // Mono-scaled area = mono area / mono share. With the observed
+        // isotope shares equal to theory, that is the Gaussian area of the
+        // whole envelope (height · sigma · √(2π), envelope normalised to 1).
         let expected = 1e6 * 4.0 * (2.0 * std::f64::consts::PI).sqrt();
         assert!((f.area / expected - 1.0).abs() < 0.03, "{f:?}");
         // The shifted decoy twin finds nothing in this clean run.
@@ -1546,10 +1620,64 @@ mod tests {
         f.add(Formula::glycan(8, 2, 0, 0, 0));
         t.envelope = extracted_envelope(&f.envelope(ENVELOPE_ISOTOPES), 1);
         let index = synthetic_run(&t);
-        let part = measure_run(&index, std::slice::from_ref(&t), &[0], &LfqParams::default());
+        let part = measure_run(
+            &index,
+            std::slice::from_ref(&t),
+            &[0],
+            &LfqParams::default(),
+        );
         let f = part[0].1.as_ref().expect("feature");
         assert!((f.apex_rt - 100.0).abs() <= 1.0, "{f:?}");
         assert!(f.cosine > 0.99, "{f:?}");
+    }
+
+    /// A run with only the monoisotopic trace: the higher isotope channels,
+    /// which interference and low S/N mostly affect, are absent.
+    fn synthetic_run_mono_only(t: &Target) -> quant::ms1_index::Ms1RunIndex {
+        let scans = (0..200)
+            .map(|i| {
+                let rt = i as f64;
+                let g = (-0.5 * ((rt - 100.0) / 4.0).powi(2)).exp();
+                let inten = (1e6 * t.envelope[0] * g) as f32;
+                let peaks = if inten > 1.0 {
+                    vec![(t.mono_mz, inten)]
+                } else {
+                    Vec::new()
+                };
+                model::scan::Ms1Scan {
+                    rt,
+                    peaks,
+                    ..model::scan::Ms1Scan::default()
+                }
+            })
+            .collect();
+        quant::ms1_index::Ms1RunIndex::new(scans)
+    }
+
+    #[test]
+    fn mono_intensity_survives_dropped_isotope_traces() {
+        // The point of the mono estimator: losing the M+1..M+n channels
+        // changes the cosine, not the quantity. With the envelope sum it
+        // would lose the fraction those channels carried.
+        let t = target(800.0, 2, 97.0);
+        let full = measure_run(
+            &synthetic_run(&t),
+            std::slice::from_ref(&t),
+            &[0],
+            &LfqParams::default(),
+        );
+        let mono_only = measure_run(
+            &synthetic_run_mono_only(&t),
+            std::slice::from_ref(&t),
+            &[0],
+            &LfqParams::default(),
+        );
+        let a = full[0].1.as_ref().expect("full feature").area;
+        let b = mono_only[0].1.as_ref().expect("mono-only feature").area;
+        assert!((a / b - 1.0).abs() < 0.03, "{a} vs {b}");
+        let f = mono_only[0].1.as_ref().unwrap();
+        let expected = f.isotope_areas[0] / t.envelope[0];
+        assert!((f.area / expected - 1.0).abs() < 1e-12, "{f:?}");
     }
 
     fn feature(area: f64, cosine: f32) -> FeatureQuant {
@@ -1595,8 +1723,10 @@ mod tests {
         let mut c = row(target(800.0, 3, 97.0), 50.0, 0.8, 0.002);
         c.target.scan = 3;
         c.target.charge = 3;
+        // A transfer is the class the feature q still gates.
         let mut rejected = row(target(800.0, 2, 97.0), 999.0, 0.99, 0.5);
-        rejected.target.scan = 4;
+        rejected.target.evidence = Evidence::Transferred;
+        rejected.target.scan = 0;
         let rows = vec![a, b, c, rejected];
         let kept = write_rollup_tables(&pin, &rows, &["r1"], &settings()).unwrap();
         assert_eq!(kept.glycopeptides, 1);
@@ -1636,6 +1766,29 @@ mod tests {
         assert_eq!(p.len(), 2);
         assert!((p[1][3].parse::<f64>().unwrap() - 150.0).abs() < 1e-6);
         assert!((p[1][4].parse::<f64>().unwrap() - 150.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn an_identified_feature_is_not_vetoed_by_its_decoy_q() {
+        let dir = tempfile::tempdir().unwrap();
+        let pin = dir.path().join("run.glyco.pin");
+        // q = 0.5 is above the feature FDR; the MS2 identification is the
+        // evidence, so the feature still enters the tables (pGlycoQuant never
+        // re-filters an identification on MS1 decoy evidence).
+        let identified = row(target(800.0, 2, 97.0), 100.0, 0.9, 0.5);
+        // A transfer with the same q is rejected: its feature is its only
+        // evidence, so the q gates it.
+        let mut transfer = row(target(800.0, 2, 98.0), 50.0, 0.9, 0.5);
+        transfer.target.evidence = Evidence::Transferred;
+        transfer.target.scan = 0;
+        transfer.target.spec_id = "donor_mbr_1".into();
+        let kept = write_rollup_tables(&pin, &[identified, transfer], &["r1"], &settings()).unwrap();
+        assert_eq!(kept.glycopeptides, 1);
+
+        let q = read(&dir.path().join("run.glyco.quant.tsv"));
+        let r = &q[1];
+        assert_eq!(r[7], "0", "the transfer is q-gated out: {r:?}");
+        assert!((r[10].parse::<f64>().unwrap() - 100.0).abs() < 1e-6);
     }
 
     #[test]
@@ -1802,9 +1955,13 @@ mod tests {
         }
         // Identified only in run 1: the one transfer.
         rows.push(identified_row(n, 0, "r1", 500.0, 0.01, 20.0));
-        // Identified in run 2 but rejected there: not a transfer target.
+        // Identified in run 2 but its feature failed the cosine gate (score
+        // None): not an anchor donor and not a transfer target. The decoy q
+        // alone would no longer reject an identified feature.
         rows.push(identified_row(n + 1, 0, "r1", 520.0, 0.01, 20.0));
-        rows.push(identified_row(n + 1, 1, "r2", 466.0, 0.5, 20.0));
+        let mut rejected = identified_row(n + 1, 1, "r2", 466.0, 0.5, 20.0);
+        rejected.score = None;
+        rows.push(rejected);
 
         let (transfers, counts) = build_transfers(&rows, &["r1", "r2"], &settings());
         assert_eq!(counts.maps, 2, "both runs have an RT map");

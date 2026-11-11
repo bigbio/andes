@@ -50,6 +50,10 @@ pub(crate) fn run_glyco(
     // marking those with a verified monoisotope, the only ones that take it.
     // `None` keeps the params' window everywhere.
     isotope_error_override: Option<(std::ops::RangeInclusive<i8>, Vec<bool>)>,
+    // `--glyco --lfq`: the quant collector holds each run's captured MS1 scans
+    // (and the run boundaries), the intact-glycopeptide quantification's input.
+    // `None` without `--lfq`.
+    quant: Option<&crate::quant_run::QuantCollector>,
     t_total: std::time::Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let t_glyco = std::time::Instant::now();
@@ -269,6 +273,30 @@ pub(crate) fn run_glyco(
         total_glyco_rows,
         t_total.elapsed().as_secs_f64()
     );
+
+    // ── Intact-glycopeptide label-free quantification (`--glyco --lfq`) ────
+    // Runs after the PIN so it quantifies exactly the rows the PIN emits
+    // (`select_emitted_hits`), and writes its own tables next to it.
+    if let Some(collector) = quant {
+        let runs = collector.run_ms1();
+        if runs.is_empty() {
+            return Err(
+                "--glyco --lfq: no run's MS1 scans were captured, so no intact glycopeptide \
+                 can be quantified. Label-free quantification needs input that carries MS1 \
+                 scans (mzML, Thermo .raw or Bruker .d; not MGF)"
+                    .into(),
+            );
+        }
+        crate::glyco_quant::run(
+            &glyco_pin_path,
+            spectra,
+            &glyco_results,
+            table.candidates(),
+            idx,
+            &runs,
+            cli,
+        )?;
+    }
     Ok(())
 }
 

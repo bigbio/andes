@@ -7,6 +7,7 @@
 
 use model::amino_acid::standard_composition;
 use model::isotope::isotope_envelope_from_formula;
+use model::mass::{C, H, N, O, S};
 
 /// Atom counts (C, H, N, O, S).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -44,6 +45,40 @@ impl Formula {
             o: r(3),
             s: r(4),
         }
+    }
+
+    /// The atoms a glycan contributes, from its residue counts. Residues are
+    /// POLYMERISED (one water already lost per glycosidic bond): Hex
+    /// C6H10O5, HexNAc C8H13NO5, Fuc C6H10O4, NeuAc C11H17NO8, NeuGc
+    /// C11H17NO9.
+    ///
+    /// The peptide [`Formula::peptide`] already carries its terminal water;
+    /// an attached glycan adds no further H2O. This is the exact formula the
+    /// isotope envelope needs — a glycan carries roughly twice the oxygen and
+    /// ~14 % fewer carbons per dalton than an averagine peptide, which moves
+    /// the M+1/M+2 shares enough to matter for a 3–4 kDa glycopeptide.
+    pub fn glycan(hex: u8, hexnac: u8, fuc: u8, neuac: u8, neugc: u8) -> Self {
+        let h = hex as u32;
+        let n = hexnac as u32;
+        let f = fuc as u32;
+        let a = neuac as u32;
+        let g = neugc as u32;
+        Formula {
+            c: 6 * h + 8 * n + 6 * f + 11 * a + 11 * g,
+            h: 10 * h + 13 * n + 10 * f + 17 * a + 17 * g,
+            n: n + a + g,
+            o: 5 * h + 5 * n + 4 * f + 8 * a + 9 * g,
+            s: 0,
+        }
+    }
+
+    /// Monoisotopic mass of the formula (Da).
+    pub fn monoisotopic_mass(&self) -> f64 {
+        self.c as f64 * C
+            + self.h as f64 * H
+            + self.n as f64 * N
+            + self.o as f64 * O
+            + self.s as f64 * S
     }
 
     pub fn add(&mut self, other: Formula) {
@@ -119,6 +154,40 @@ mod tests {
         assert!(tmt.c > plain.c && tmt.n > plain.n);
         let loss = Formula::peptide([(b'K', -17.0)]);
         assert!(loss.c <= plain.c);
+    }
+
+    #[test]
+    fn glycan_formula_mass_matches_the_residue_masses() {
+        // Polymerised residue masses pinned by the glyco campaign (see
+        // andes-glyco::glycan_mass) at 6 decimals.
+        let f = Formula::glycan(1, 0, 0, 0, 0);
+        assert!((f.monoisotopic_mass() - 162.052824).abs() < 5e-6, "{f:?}");
+        let f = Formula::glycan(0, 1, 0, 0, 0);
+        assert!((f.monoisotopic_mass() - 203.079373).abs() < 5e-6, "{f:?}");
+        let f = Formula::glycan(0, 0, 1, 0, 0);
+        assert!((f.monoisotopic_mass() - 146.057909).abs() < 5e-6, "{f:?}");
+        let f = Formula::glycan(0, 0, 0, 1, 0);
+        assert!((f.monoisotopic_mass() - 291.095417).abs() < 5e-6, "{f:?}");
+        let f = Formula::glycan(0, 0, 0, 0, 1);
+        assert!((f.monoisotopic_mass() - 307.090331).abs() < 5e-6, "{f:?}");
+    }
+
+    #[test]
+    fn a_glycopeptide_envelope_is_flatter_than_the_peptide_alone() {
+        // The glycan's oxygen dilutes the 13C share: the same peptide with a
+        // HexNAc2Hex8 attached must put relatively MORE weight on M+2 than
+        // the bare peptide averaged over its extra mass.
+        let bare = Formula::peptide(b"IGNTTNA".iter().map(|&r| (r, 0.0)));
+        let mut intact = bare;
+        intact.add(Formula::glycan(8, 2, 0, 0, 0));
+        let a = bare.envelope(6);
+        let b = intact.envelope(6);
+        assert!(b[1] / b[0] > a[1] / a[0]);
+        // The monoisotopic peak of a ~3 kDa glycopeptide is no longer dominant.
+        let mut big = Formula::peptide(b"IGNTTNA".iter().map(|&r| (r, 0.0)));
+        big.add(Formula::averagine(2500.0));
+        let e = big.envelope(8);
+        assert!(e[2] > 0.1 * e[0], "{e:?}");
     }
 
     #[test]

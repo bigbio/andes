@@ -1636,6 +1636,24 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => 2,
     };
+    // `--glyco-mbr` is the glyco path's own match-between-runs (RT alignment +
+    // XIC transfer inside the intact-glycopeptide tables), not the peptide
+    // `--mbr`. It needs the glyco LFQ stage to have identified features.
+    if cli.glyco_mbr {
+        if !cli.glyco {
+            return Err(
+                "--glyco-mbr applies to `--glyco --lfq` only; peptide match-between-runs is --mbr"
+                    .into(),
+            );
+        }
+        if !cli.lfq {
+            return Err(
+                "--glyco-mbr needs --lfq: match-between-runs transfers the identified intact \
+                 glycopeptides into the other runs"
+                    .into(),
+            );
+        }
+    }
     let mut quant: Option<QuantCollector> = QuantSettings::from_cli(&cli, high_res, tmt_level)?
         .map(|mut settings| {
             // Recorded in each run's MS2 table, where the library matches
@@ -1665,9 +1683,35 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         if cli.glyco {
-            return Err("--tmt/--lfq/--quant-dir are not available in --glyco mode".into());
+            // `--lfq` is the glyco driver's intact-glycopeptide MS1
+            // quantification (`<base>.glyco.lfq.tsv` and the roll-ups). The
+            // isobaric and match-between-runs machinery are not wired there.
+            if cli.mbr {
+                return Err(
+                    "--glyco does not support --mbr: match-between-runs needs the peptide \
+                     library and alignment stages, which quantify peptide precursors; the glyco \
+                     path quantifies intact glycopeptides within each run (`--glyco --lfq`)"
+                        .into(),
+                );
+            }
+            let mut unsupported: Vec<&str> = Vec::new();
+            if s.plex.is_some() {
+                unsupported.push("--tmt");
+            }
+            if cli.quant_dir.is_some() {
+                unsupported.push("--quant-dir");
+            }
+            if !unsupported.is_empty() {
+                return Err(format!(
+                    "--glyco does not support: {} (label-free quantification of intact \
+                     glycopeptides is `--glyco --lfq`; the isobaric and match-between-runs \
+                     stages are not implemented for glyco mode)",
+                    unsupported.join(", ")
+                )
+                .into());
+            }
         }
-        if !cli.rescore && !cli.rescore_native && (s.plex.is_some() || s.lfq) {
+        if !cli.glyco && !cli.rescore && !cli.rescore_native && (s.plex.is_some() || s.lfq) {
             eprintln!(
                 "WARN: --tmt/--lfq without --rescore or --rescore-native: every rank-1 target \
                  PSM is quantified; filter the tables by the q-values you compute downstream, \
@@ -2450,6 +2494,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             acquisition.high_res,
             mono_for_pin,
             glyco_isotope_override,
+            // `--glyco --lfq`: the collector holds each run's MS1 scans, the
+            // intact-glycopeptide quant driver's input. `None` without `--lfq`.
+            quant.as_ref(),
             t_total,
         )?;
         return Ok(());

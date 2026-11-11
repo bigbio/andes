@@ -564,9 +564,9 @@ pub(crate) struct SearchArgs {
     /// (glycoform shares at each site), `.glyco.protein.tsv` (summed and Top3
     /// areas) and the cross-run `.glyco.matrix.tsv` /
     /// `.glyco.protein_matrix.tsv` pivots. `--lfq-tol`, `--lfq-rt-window`,
-    /// `--lfq-min-cosine` and `--lfq-feature-fdr` apply; `--glyco-mbr`
-    /// transfers the identified glycopeptides into the runs that missed them.
-    /// The isobaric stages and the peptide `--mbr` do not.
+    /// `--lfq-min-cosine` and `--lfq-feature-fdr` apply; `--mbr` is then the
+    /// glycopeptide match-between-runs (see `--mbr`), not the peptide library
+    /// stages. The isobaric stages do not apply.
     #[arg(long = "glyco", default_value_t = false)]
     pub(crate) glyco: bool,
 
@@ -980,22 +980,6 @@ pub(crate) struct SearchArgs {
     #[arg(long = "lfq-feature-fdr", default_value = "0.05", value_parser = parse_unit_fraction)]
     pub(crate) lfq_feature_fdr: f64,
 
-    /// Match-between-runs for intact glycopeptides (`--glyco --lfq`, two or
-    /// more inputs). Each run's retention time is aligned to the first
-    /// input's with a robust piecewise-linear map (one knot per 300 anchors,
-    /// mis-pairs trimmed at 3 MAD) fitted on the glycopeptides
-    /// both identified; a map is only used when fitted on at least 50 such
-    /// glycopeptides and its robust residual is at most 45 s. Every accepted
-    /// glycopeptide is then measured in each run that did not identify it, in
-    /// a window of three residual sigmas (clamped to 10-60 s) around its
-    /// predicted apex, and the transfers are scored as their own target/decoy
-    /// competition rather than mixed with the identified features.
-    /// Transferred rows say so in the `Evidence` column of the
-    /// `.glyco.lfq.tsv` table; the roll-up tables keep their per-run area and
-    /// gain the transferred runs.
-    #[arg(long = "glyco-mbr", default_value_t = false)]
-    pub(crate) glyco_mbr: bool,
-
     /// Directory for the per-run artifacts of multi-run quantification: for
     /// each input file `<stem>.ms1.parquet` (its MS1 scans, all FAIMS voltages) and
     /// `<stem>.quant.parquet` (every rank-1 PSM, targets and decoys, with no
@@ -1024,6 +1008,20 @@ pub(crate) struct SearchArgs {
     /// `andes quant library`, `extract` and `finalize` on the same files and
     /// Percolator results; the native rescorer's scores have no file input
     /// to `quant library`.
+    ///
+    /// With `--glyco --lfq` (two or more inputs): match-between-runs for intact
+    /// glycopeptides instead: each run's retention time is aligned to the first
+    /// input's with a robust piecewise-linear map (one knot per 300 anchors,
+    /// mis-pairs trimmed at 3 MAD) fitted on the glycopeptides
+    /// both identified; a map is only used when fitted on at least 50 such
+    /// glycopeptides and its robust residual is at most 45 s. Every accepted
+    /// glycopeptide is then measured in each run that did not identify it, in
+    /// a window of three residual sigmas (clamped to 10-60 s) around its
+    /// predicted apex, and the transfers are scored as their own target/decoy
+    /// competition rather than mixed with the identified features.
+    /// Transferred rows say so in the `Evidence` column of the
+    /// `.glyco.lfq.tsv` table; the roll-up tables keep their per-run area and
+    /// gain the transferred runs.
     #[arg(long = "mbr", default_value_t = false)]
     pub(crate) mbr: bool,
 

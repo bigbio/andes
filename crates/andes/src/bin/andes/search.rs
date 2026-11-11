@@ -429,7 +429,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `--mbr`: the per-run artifacts go to `--quant-dir`, or to a temporary
     // directory that lives until the end of the run.
     let mut _mbr_tmp: Option<tempfile::TempDir> = None;
-    if cli.mbr {
+    // Under `--glyco`, `--mbr` is the glyco path's own match-between-runs
+    // inside the intact-glycopeptide tables: no per-run artifacts.
+    if cli.mbr && !cli.glyco {
         check_mbr_args(&cli)?;
         // Before the scratch directory exists: a rejected run writes nothing.
         crate::quant_run::check_unique_stems(&cli.spectrum)?;
@@ -1650,23 +1652,15 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => 2,
     };
-    // `--glyco-mbr` is the glyco path's own match-between-runs (RT alignment +
-    // XIC transfer inside the intact-glycopeptide tables), not the peptide
-    // `--mbr`. It needs the glyco LFQ stage to have identified features.
-    if cli.glyco_mbr {
-        if !cli.glyco {
-            return Err(
-                "--glyco-mbr applies to `--glyco --lfq` only; peptide match-between-runs is --mbr"
-                    .into(),
-            );
-        }
-        if !cli.lfq {
-            return Err(
-                "--glyco-mbr needs --lfq: match-between-runs transfers the identified intact \
-                 glycopeptides into the other runs"
-                    .into(),
-            );
-        }
+    // `--glyco --mbr` is the glyco path's own match-between-runs (RT
+    // alignment + XIC transfer inside the intact-glycopeptide tables), not the
+    // peptide library stages. It needs the glyco LFQ stage's features.
+    if cli.glyco && cli.mbr && !cli.lfq {
+        return Err(
+            "--glyco --mbr needs --lfq: match-between-runs transfers the identified intact \
+             glycopeptides into the other runs"
+                .into(),
+        );
     }
     let mut quant: Option<QuantCollector> = QuantSettings::from_cli(&cli, high_res, tmt_level)?
         .map(|mut settings| {
@@ -1698,16 +1692,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         if cli.glyco {
             // `--lfq` is the glyco driver's intact-glycopeptide MS1
-            // quantification (`<base>.glyco.lfq.tsv` and the roll-ups). The
-            // isobaric and match-between-runs machinery are not wired there.
-            if cli.mbr {
-                return Err(
-                    "--glyco does not support --mbr: match-between-runs needs the peptide \
-                     library and alignment stages, which quantify peptide precursors; the glyco \
-                     path quantifies intact glycopeptides within each run (`--glyco --lfq`)"
-                        .into(),
-                );
-            }
+            // quantification (`<base>.glyco.lfq.tsv` and the roll-ups), and
+            // `--mbr` its own match-between-runs; the isobaric machinery is
+            // not wired there.
             let mut unsupported: Vec<&str> = Vec::new();
             if s.plex.is_some() {
                 unsupported.push("--tmt");

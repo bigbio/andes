@@ -44,7 +44,7 @@
 //!   Otherwise a true M+1 precursor would have its monoisotope extracted from
 //!   the M−1 position and fail `min_mono_share`.
 //!
-//! Cross-run matching (`--glyco-mbr`) is deliberately simpler than the peptide
+//! Cross-run matching (`--glyco --mbr`) is deliberately simpler than the peptide
 //! `--mbr`: a robust piecewise-linear RT map per run to the first input,
 //! fitted on the glycopeptides both runs accepted (outlier-trimmed, one knot
 //! per 300 anchors), and a narrow XIC search (three map sigmas, clamped to
@@ -72,7 +72,7 @@
 //! * `<base>.glyco.quant.tsv` — per run and glycopeptide (peptide + site +
 //!   composition), summed over charge states. `NScans` counts the run's own MS2
 //!   identifications; `NTransferred` counts the features transferred in by
-//!   `--glyco-mbr` (which have no scan).
+//!   `--glyco --mbr` (which have no scan).
 //! * `<base>.glyco.site.tsv` — per run, peptide and site: the glycoform shares
 //!   (each composition's area over the site's total glyco area).
 //! * `<base>.glyco.protein.tsv` — per run and protein: the summed glycopeptide
@@ -204,7 +204,7 @@ struct Settings {
     feature_fdr: f64,
     core: GlycanCore,
     debug: bool,
-    /// `--glyco-mbr`: transfer accepted glycopeptides into runs that did not
+    /// `--glyco --mbr`: transfer accepted glycopeptides into runs that did not
     /// identify them.
     mbr: bool,
 }
@@ -222,7 +222,7 @@ impl Settings {
             feature_fdr: cli.lfq_feature_fdr,
             core: cli.glyco_core.into(),
             debug: cli.debug_glyco,
-            mbr: cli.glyco_mbr,
+            mbr: cli.mbr,
         }
     }
 }
@@ -261,7 +261,7 @@ pub(crate) fn run(
     let mut rows = feature_rows(targets, quantified, &settings);
     assign_qvalues(&mut rows, &settings);
 
-    // ── Match-between-runs (`--glyco-mbr`) ─────────────────────────────────
+    // ── Match-between-runs (`--glyco --mbr`) ─────────────────────────────────
     // Transfers are built from the accepted identified features and quantified
     // in the runs that did not identify the glycopeptide, then scored as their
     // own target/decoy competition (a transfer has a predicted RT and a
@@ -290,10 +290,10 @@ pub(crate) fn run(
                 .count()
         );
     } else if settings.mbr {
-        eprintln!("[glyco-mbr] --glyco-mbr needs two or more runs; nothing to transfer");
+        eprintln!("[glyco-mbr] --mbr needs two or more runs; nothing to transfer");
     } else if runs.len() > 1 {
         eprintln!(
-            "[glyco-mbr] match-between-runs is off; pass --glyco-mbr to transfer identified \
+            "[glyco-mbr] match-between-runs is off; pass --mbr to transfer identified \
              glycopeptides into runs that did not identify them"
         );
     }

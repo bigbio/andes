@@ -1,7 +1,7 @@
 # Glycopeptide LFQ + match-between-runs benchmark — mouse liver, 5 fractions
 
 This benchmark exercises the intact-glycopeptide quantification path
-(`andes --glyco --lfq --glyco-mbr`) on the five mouse-liver HCD fractions of
+(`andes --glyco --lfq --mbr`) on the five mouse-liver HCD fractions of
 PXD005553 (deep tier: all fractions searched together, one pooled PIN). It
 answers two questions:
 
@@ -256,7 +256,7 @@ DOTNET_ROOT=/home/daichengxin/.dotnet \
   --decoy-strategy sequon \
   --glyco --glyco-glycan-gdb /home/daichengxin/gitrepo/pro/pGlyco-N-Mouse.gdb \
   --fragmentation HCD --fragment-tol-ppm 20 \
-  --lfq --glyco-mbr --threads 112 \
+  --lfq --mbr --threads 112 \
   --output-pin /tmp/glyco_quant_bench/mouseliver5.glyco.pin
 
 # 2. pooled Percolator (OUT is the directory holding the PIN)

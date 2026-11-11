@@ -24,7 +24,7 @@ echo "provenance: andes $($BIN --version 2>&1 | head -1) | $(uname -srm) | $(npr
   --decoy-strategy sequon \
   --glyco --glyco-glycan-gdb "$GDB" \
   --fragmentation HCD --fragment-tol-ppm 20 \
-  --lfq --glyco-mbr \
+  --lfq --mbr \
   --threads 112 \
   --output-pin "$PIN" \
   > "$LOG" 2>&1

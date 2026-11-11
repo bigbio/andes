@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Glycopeptide LFQ + MBR benchmark — mouse liver, 5 fractions (deep tier).
 
-Reads the tables written by `andes --glyco --lfq --glyco-mbr` and, when a
+Reads the tables written by `andes --glyco --lfq --mbr` and, when a
 Percolator `out.psms` is supplied, gates every quantified feature on the
 IDENTIFICATION q-value of the PSM it came from.  The `Accepted` flag in the
 `.glyco.lfq.tsv` table is a feature/measurement q-value (XIC quality), NOT an

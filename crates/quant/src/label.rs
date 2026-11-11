@@ -811,7 +811,7 @@ pub struct FitParams {
 }
 
 pub const DEFAULT_WIDTHS: &[f64] = &[0.7, 1.0, 1.4];
-pub const FREE_WIDTHS: &[f64] = &[0.5, 0.7, 1.0, 1.4, 2.0];
+pub const FREE_WIDTHS: &[f64] = &[0.5, 0.6, 0.7, 0.85, 1.0, 1.2, 1.4, 1.7, 2.0];
 
 impl Default for FitParams {
     fn default() -> Self {
@@ -1372,6 +1372,17 @@ pub fn decoy_shifts(
 /// `mass` at an MS1 tolerance of `tol_ppm`: three tolerances.
 pub fn decoy_min_sep(mass: f64, tol_ppm: f64) -> f64 {
     3.0 * tol_ppm * 1e-6 * mass
+}
+
+/// The mass-accuracy factor of a measured channel: `exp(−½ (Δ / σ)²)` for a
+/// mass error `err_ppm` `Δ` away from where the channel is expected
+/// (`expected_ppm`, the run's calibration or the group's identified
+/// channels), at the run's mass-error spread `sigma_ppm`. A decoy that lands
+/// on another species' envelope sits anywhere in the tolerance window; a real
+/// channel sits where its identified channels do.
+pub fn mass_factor(err_ppm: f64, expected_ppm: f64, sigma_ppm: f64) -> f64 {
+    let d = (err_ppm - expected_ppm) / sigma_ppm.max(1e-3);
+    (-0.5 * d * d).exp()
 }
 
 /// The competition score of a channel (or a group's strongest channel):

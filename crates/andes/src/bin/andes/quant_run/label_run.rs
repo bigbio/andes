@@ -35,8 +35,8 @@ use model::mass::PROTON;
 use quant::formula::Formula;
 use quant::label::{
     channel_qvalues, channel_score, classify_channel, classify_identified, classify_transferred,
-    fit_group, learn_rt_shifts, log2_ratio, median, ChannelEnvelope, ChannelFit, ChannelStatus,
-    ClassifyParams, FitParams, GroupFit, GroupProbe, LabelSpec, Site, FREE_WIDTHS,
+    fit_group, learn_rt_shifts, log2_ratio, mass_factor, median, ChannelEnvelope, ChannelFit,
+    ChannelStatus, ClassifyParams, FitParams, GroupFit, GroupProbe, LabelSpec, Site, FREE_WIDTHS,
 };
 use quant::Ms1RunIndex;
 use rayon::prelude::*;
@@ -265,8 +265,9 @@ struct Fitted {
     fit: GroupFit,
     /// Best PSM per channel in this run (identified channels).
     ids: Vec<Option<ChannelHit>>,
-    /// Per channel, the decoy fits' scores (missing channels).
-    decoy_scores: Vec<Vec<f64>>,
+    /// Per channel, the decoy fits' scores and monoisotopic mass errors
+    /// (missing channels).
+    decoy_scores: Vec<Vec<(f64, f64)>>,
     /// Per channel, another identified peptide of the run sits on it.
     claimed: Vec<bool>,
     transfer_q: Option<f64>,
@@ -685,6 +686,8 @@ pub(super) fn quantify(
                 }
             }
         }
+        // By m/z, for the claim search.
+        claims.sort_by(|a, b| a.2.total_cmp(&b.2));
         for (si, (_, ms1)) in series.iter().enumerate() {
             let list = &by_series[si];
             if list.is_empty() {
@@ -759,9 +762,9 @@ pub(super) fn quantify(
                         for dp in decoy_probes(g, &probe, &missing, tol, seed) {
                             let df = fit_folded(ms1, g, &dp, &fit_params).map(|x| x.0);
                             for &c in &missing {
-                                decoy_scores[c].push(
-                                    df.as_ref().map_or(0.0, |d| channel_score(&d.channels[c])),
-                                );
+                                decoy_scores[c].push(df.as_ref().map_or((0.0, 0.0), |d| {
+                                    (channel_score(&d.channels[c]), d.channels[c].mass_err_ppm)
+                                }));
                             }
                         }
                     }
@@ -771,13 +774,16 @@ pub(super) fn quantify(
                                 let mz = g.channel_mz[c];
                                 let tolda = mz * tol * 1e-6;
                                 let t = fit.t0 + shifts[c];
-                                claims.iter().any(|&(csi, z, cmz, crt, cg)| {
-                                    csi == si
-                                        && z == g.charge
-                                        && cg != *gid
-                                        && (cmz - mz).abs() <= tolda
-                                        && (crt - t).abs() <= 3.0 * fit.w + dt
-                                })
+                                let lo = claims.partition_point(|c| c.2 < mz - tolda);
+                                claims[lo..].iter().take_while(|c| c.2 <= mz + tolda).any(
+                                    |&(csi, z, cmz, crt, cg)| {
+                                        csi == si
+                                            && z == g.charge
+                                            && cg != *gid
+                                            && (cmz - mz).abs() <= tolda
+                                            && (crt - t).abs() <= 3.0 * fit.w + dt
+                                    },
+                                )
                             }
                         })
                         .collect();
@@ -801,6 +807,35 @@ pub(super) fn quantify(
     }
 
     // ── Match between runs ────────────────────────────────────────────────
+    // ── Mass calibration per run: the median and robust spread of the
+    // identified channels' monoisotopic mass errors (strong fits).
+    let calib: Vec<(f64, f64)> = (0..n_runs)
+        .map(|r| {
+            let v: Vec<f64> = fitted
+                .iter()
+                .filter(|f| f.run == r && f.transfer_q.is_none())
+                .flat_map(|f| {
+                    (0..n_ch)
+                        .filter(|&c| f.ids[c].is_some() && f.fit.channels[c].llr >= MIN_WIDTH_LLR)
+                        .map(|c| f.fit.channels[c].mass_err_ppm)
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            if v.len() < MIN_WIDTH_FITS {
+                return (0.0, tol / 3.0);
+            }
+            let m = median(v.clone());
+            let mad = median(v.iter().map(|x| (x - m).abs()).collect());
+            (m, (1.4826 * mad).max(0.5))
+        })
+        .collect();
+    for (r, (m, sd)) in calib.iter().enumerate() {
+        eprintln!(
+            "quant: label: {}: mass error of the identified channels {m:+.2} ppm, spread {sd:.2} ppm",
+            collector.runs[r].stem
+        );
+    }
+
     let mut meta: Vec<(String, String)> = Vec::new();
     if let (Some(mbr_fdr), true) = (settings.mbr_fdr, n_runs >= 2) {
         let (transfers, stats) = transfer(
@@ -810,6 +845,7 @@ pub(super) fn quantify(
             &run_scales,
             &run_series_cv,
             &fit_params,
+            &calib,
             mbr_fdr,
         )?;
         fitted.extend(transfers);
@@ -832,8 +868,31 @@ pub(super) fn quantify(
                     continue;
                 }
                 at.push(((fi, c), rows.len()));
-                rows.push((channel_score(&f.fit.channels[c]), false));
-                rows.extend(f.decoy_scores[c].iter().map(|&d| (d, true)));
+                // Expected mass error: the group's identified channels'.
+                let (center, sigma) = calib[f.run];
+                let expected = {
+                    let v: Vec<f64> = (0..n_ch)
+                        .filter(|&k| f.ids[k].is_some())
+                        .map(|k| f.fit.channels[k].mass_err_ppm)
+                        .collect();
+                    if v.is_empty() {
+                        center
+                    } else {
+                        median(v)
+                    }
+                };
+                // Two channels' errors differ by √2 of one's spread.
+                let sd = sigma * std::f64::consts::SQRT_2;
+                let ch = &f.fit.channels[c];
+                rows.push((
+                    channel_score(ch) * mass_factor(ch.mass_err_ppm, expected, sd),
+                    false,
+                ));
+                rows.extend(
+                    f.decoy_scores[c]
+                        .iter()
+                        .map(|&(d, e)| (d * mass_factor(e, expected, sd), true)),
+                );
             }
         }
         let q = channel_qvalues(&rows, N_DECOYS);
@@ -1064,6 +1123,7 @@ pub(super) fn quantify(
 /// Match between runs: every group of the library (identified in some run)
 /// fitted in each run that lacks it, at its aligned apex; the transfers at
 /// the q-value cut.
+#[allow(clippy::too_many_arguments)]
 fn transfer(
     collector: &QuantCollector,
     groups: &[Group],
@@ -1071,8 +1131,20 @@ fn transfer(
     run_scales: &[Vec<Option<Scales>>],
     run_series_cv: &[Vec<Option<f32>>],
     fit_params: &FitParams,
+    calib: &[(f64, f64)],
     fdr: f64,
 ) -> Result<(Vec<Fitted>, Metadata), String> {
+    // The group score with the mass accuracy of its strongest channel
+    // against the receiving run's calibration.
+    let score = |fit: &GroupFit, run: usize| -> f64 {
+        let (center, sigma) = calib[run];
+        let err = fit
+            .channels
+            .iter()
+            .max_by(|a, b| a.amplitude.total_cmp(&b.amplitude))
+            .map_or(0.0, |c| c.mass_err_ppm);
+        group_score(fit) * quant::label::mass_factor(err, center, sigma)
+    };
     let n_runs = collector.runs.len();
     let n_ch = groups.first().map_or(0, |g| g.channel_mz.len());
     // Observations: the fitted apex (reference time) of strong identified fits.
@@ -1175,7 +1247,7 @@ fn transfer(
                     seed_of(&g.key, run_idx),
                 )
                 .iter()
-                .map(|d| fit_folded(ms1, g, d, fit_params).map_or(0.0, |d| group_score(&d.0)))
+                .map(|d| fit_folded(ms1, g, d, fit_params).map_or(0.0, |d| score(&d.0, run_idx)))
                 .collect();
                 Some((
                     Fitted {
@@ -1195,11 +1267,11 @@ fn transfer(
             .collect();
         for (f, d) in results {
             if groups[f.gid].identity_decoy {
-                identity_scores.push(group_score(&f.fit));
+                identity_scores.push(score(&f.fit, f.run));
                 continue;
             }
             target_rows.push(scored.len());
-            scored.push((group_score(&f.fit), false));
+            scored.push((score(&f.fit, f.run), false));
             scored.extend(d.into_iter().map(|x| (x, true)));
             out.push(f);
         }

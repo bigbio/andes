@@ -2123,7 +2123,12 @@ log-ratios to the reference channel; protein-level summaries are left to quantms
   identified channels anchoring the profile. Its decoys are the same fit with the channel moved by
   four non-label mass shifts (nominal ±7…23 Da in the peptide mass-defect band, none within three
   tolerances of any isotope of any channel); target/decoy competition of `√(2·LLR) · cosine ·
-  coherence`, pooled over runs, gives `channel_q_value`. A channel is `match_channel` at
+  coherence · exp(−½ (Δppm / σ)²)`, pooled over runs, gives `channel_q_value`. `Δppm` is the
+  channel's monoisotopic mass error against the group's identified channels', `σ` √2 times the run's
+  robust spread of identified-channel mass errors: in dense MS1 about 1 % of positions at a
+  non-label shift hold another peptide's co-eluting envelope, anywhere in the tolerance window,
+  while a real channel sits at its identified channel's mass error (on PXD003327 this factor takes
+  the 99th percentile decoy score from 75 to 2 and the matched channels from 0 to 1,073 at q 0.01). A channel is `match_channel` at
   `--label-fdr` with an envelope cosine of at least 0.7, no strong residual M−1, and, when weaker
   than a fifth of the identified channel, a coherence of at least 0.5 (OpenMS's co-elution check
   for weak re-quantified channels); `below_detection` without signal; `not_quantifiable` when
@@ -2132,7 +2137,8 @@ log-ratios to the reference channel; protein-level summaries are left to quantms
 * **Match between runs** (`--mbr`, two or more runs). The runs are aligned jointly (§10 *Match
   between runs*) on the fitted apexes of their identified groups. A group missing from a run is
   fitted there at its predicted apex with the alignment's uncertainty, against four whole-group
-  decoys moved by the same rule; target/decoy competition of the group score over every run gives
+  decoys moved by the same rule; target/decoy competition of the group score (its strongest
+  channel's score and mass-accuracy factor against the receiving run's calibration) over every run gives
   `transfer_q_value`, and transfers at `--mbr-fdr` are reported, each channel `transfer`,
   `below_detection` or `not_quantifiable`. Transfers never enter the alignment.
   *Identity decoys* count the transfers of false donor identifications, which the mass-shifted

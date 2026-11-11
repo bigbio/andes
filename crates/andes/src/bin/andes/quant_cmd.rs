@@ -1314,7 +1314,7 @@ impl DonorPsms {
 
 fn log_extract(stem: &str, rows: usize, c: &ExtractCounts) {
     eprintln!(
-        "[mbr] extract {stem}: {rows} rows{}; skipped: {} entries at a FAIMS voltage the run lacks, {} identified pairs with a non-finite best PSM RT, {} identified pairs without a prediction from other runs (no pseudo-transfer), {} transfers without a prediction, {} pseudo-transfers and {} transfers whose donor runs are all in other alignment components, {} transfers left out by the transfer selection; MS1 scan spacing {}, width scale {:.3} s ({} fits, {} rounds{}); width prior from {} fits{}",
+        "[mbr] extract {stem}: {rows} rows{}; skipped: {} entries at a FAIMS voltage the run lacks, {} identified pairs with a non-finite best PSM RT, {} identified pairs without a prediction from other runs (no pseudo-transfer), {} transfers without a prediction, {} pseudo-transfers and {} transfers whose donor runs are all in other alignment components, {} transfers left out by the transfer selection; {} identified pairs measured on the larger peak at the position the other runs predict; MS1 scan spacing {}, width scale {:.3} s ({} fits, {} rounds{}); width prior from {} fits{}",
         if c.unaligned {
             " (unaligned run: identified rows only)"
         } else {
@@ -1327,6 +1327,7 @@ fn log_extract(stem: &str, rows: usize, c: &ExtractCounts) {
         c.pseudo_other_component,
         c.other_component,
         c.not_selected,
+        c.consensus_peak,
         c.scales
             .spacing_s
             .map_or_else(|| "unknown".to_string(), |s| format!("{s:.3} s")),
